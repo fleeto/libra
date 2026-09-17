@@ -33,7 +33,10 @@ use url::Url;
 
 use crate::{
     command::{branch, fetch::RemoteClient, lfs_schema::LfsUploadSummary},
-    git_protocol::{ServiceType::ReceivePack, add_pkt_line_string, read_pkt_line},
+    git_protocol::{
+        PKT_LINE_PROTOCOL_ERROR_PREFIX, PktLineError, ServiceType::ReceivePack,
+        add_pkt_line_string, read_pkt_line,
+    },
     info_println,
     internal::{
         ai::automation::{VCS_EVENT_POST_PUSH, dispatch_current_repo_vcs_event_to_history},
@@ -307,6 +310,10 @@ pub enum PushError {
     #[error("remote rejected ref update for '{refname}': {reason}")]
     RemoteRefUpdateFailed { refname: String, reason: String },
 
+    /// A pkt-line failure whose detail starts with the shared protocol marker.
+    #[error("{detail}")]
+    Protocol { detail: String },
+
     #[error("network error: {0}")]
     Network(String),
 
@@ -337,6 +344,43 @@ pub enum PushError {
 
     #[error("failed to create push certificate signature: {0}")]
     PushSignFailed(String),
+}
+
+impl From<PktLineError> for PushError {
+    fn from(error: PktLineError) -> Self {
+        Self::Protocol {
+            detail: error.to_string(),
+        }
+    }
+}
+
+fn map_push_discovery_error(repo_url: &str, error: GitError) -> PushError {
+    match error {
+        GitError::UnAuthorized(_) => PushError::AuthenticationFailed {
+            url: repo_url.to_string(),
+        },
+        GitError::NetworkError(detail) if detail.starts_with(PKT_LINE_PROTOCOL_ERROR_PREFIX) => {
+            PushError::Protocol { detail }
+        }
+        GitError::NetworkError(detail) => {
+            let lower = detail.to_lowercase();
+            if lower.contains("timeout") || lower.contains("timed out") {
+                PushError::Timeout {
+                    phase: "discovery".to_string(),
+                    seconds: PUSH_CONNECT_TIMEOUT.as_secs(),
+                }
+            } else {
+                PushError::DiscoveryFailed {
+                    url: repo_url.to_string(),
+                    detail,
+                }
+            }
+        }
+        other => PushError::DiscoveryFailed {
+            url: repo_url.to_string(),
+            detail: other.to_string(),
+        },
+    }
 }
 
 impl From<PushError> for CliError {
@@ -415,6 +459,9 @@ impl From<PushError> for CliError {
             PushError::RemoteRefUpdateFailed { .. } => CliError::fatal(error.to_string())
                 .with_stable_code(StableErrorCode::NetworkProtocol)
                 .with_hint("the remote rejected the update; check branch protection rules"),
+            PushError::Protocol { .. } => CliError::fatal(error.to_string())
+                .with_stable_code(StableErrorCode::NetworkProtocol)
+                .with_hint("check the remote Git service or proxy response and retry"),
             PushError::Network(..) => CliError::fatal(error.to_string())
                 .with_stable_code(StableErrorCode::NetworkUnavailable)
                 .with_hint("check network connectivity and retry"),
@@ -872,12 +919,11 @@ pub async fn run_push(args: PushArgs, output: &OutputConfig) -> Result<PushOutpu
     // Determine transport: SSH or HTTPS
     let is_ssh = is_ssh_spec(&repo_url);
 
-    let remote_client =
-        RemoteClient::from_spec_with_remote(&repo_url, Some(&repository)).map_err(|e| {
-            PushError::InvalidRemoteUrl {
-                url: repo_url.clone(),
-                detail: e.to_string(),
-            }
+    let remote_client = RemoteClient::from_spec_with_remote(&repo_url, Some(&repository))
+        .await
+        .map_err(|e| PushError::InvalidRemoteUrl {
+            url: repo_url.clone(),
+            detail: e.to_string(),
         })?;
     let remote_client = remote_client
         .with_network_timeouts(PUSH_CONNECT_TIMEOUT, PUSH_IDLE_TIMEOUT)
@@ -892,29 +938,7 @@ pub async fn run_push(args: PushArgs, output: &OutputConfig) -> Result<PushOutpu
         phase: "discovery".to_string(),
         seconds: PUSH_CONNECT_TIMEOUT.as_secs(),
     })?
-    .map_err(|e| match e {
-        GitError::UnAuthorized(_) => PushError::AuthenticationFailed {
-            url: repo_url.clone(),
-        },
-        GitError::NetworkError(detail) => {
-            let lower = detail.to_lowercase();
-            if lower.contains("timeout") || lower.contains("timed out") {
-                PushError::Timeout {
-                    phase: "discovery".to_string(),
-                    seconds: PUSH_CONNECT_TIMEOUT.as_secs(),
-                }
-            } else {
-                PushError::DiscoveryFailed {
-                    url: repo_url.clone(),
-                    detail,
-                }
-            }
-        }
-        other => PushError::DiscoveryFailed {
-            url: repo_url.clone(),
-            detail: other.to_string(),
-        },
-    })?;
+    .map_err(|error| map_push_discovery_error(&repo_url, error))?;
 
     let local_kind = get_hash_kind();
     if discovery.hash_kind != local_kind {
@@ -2246,11 +2270,51 @@ async fn collect_tag_object_chain(
     }
 }
 
+/// Escape terminal controls before limiting each displayed remote field to
+/// 200 Unicode characters, plus an ellipsis when truncated. Never split an
+/// escape sequence or UTF-8 character; processing stops at the display limit.
+fn sanitize_remote_ref_rejection(value: &str) -> String {
+    const LIMIT: usize = 200;
+    let mut result = String::new();
+    let mut retained = 0;
+    for ch in value.chars() {
+        let escaped = if ch.is_control() {
+            ch.escape_default().to_string()
+        } else {
+            ch.to_string()
+        };
+        let width = escaped.chars().count();
+        if retained + width > LIMIT {
+            result.push('…');
+            break;
+        }
+        result.push_str(&escaped);
+        retained += width;
+    }
+    result
+}
+
 fn validate_receive_pack_response(
     mut response_data: Bytes,
     plans: &[RefUpdatePlan],
 ) -> Result<(), PushError> {
-    let (_, pkt_line) = read_pkt_line(&mut response_data);
+    // Validate framing through an actual flush before an unpack/ng rejection
+    // can return early. Bytes clones and slices share the response allocation.
+    let mut frames = response_data.clone();
+    loop {
+        if frames.is_empty() {
+            return Err(PushError::Protocol {
+                detail: format!(
+                    "{PKT_LINE_PROTOCOL_ERROR_PREFIX}missing receive-pack status flush"
+                ),
+            });
+        }
+        let (len, _) = read_pkt_line(&mut frames)?;
+        if len == 0 {
+            break;
+        }
+    }
+    let (_, pkt_line) = read_pkt_line(&mut response_data)?;
     if pkt_line != "unpack ok\n" {
         return Err(PushError::RemoteUnpackFailed);
     }
@@ -2261,7 +2325,7 @@ fn validate_receive_pack_response(
         .collect();
     let mut seen_refs = HashSet::new();
     loop {
-        let (len, pkt_line) = read_pkt_line(&mut response_data);
+        let (len, pkt_line) = read_pkt_line(&mut response_data)?;
         if len == 0 {
             break;
         }
@@ -2274,14 +2338,21 @@ fn validate_receive_pack_response(
             let (refname, reason) = rest
                 .split_once(' ')
                 .unwrap_or((rest, "remote rejected update"));
+            if !expected_refs.contains(refname) {
+                return Err(PushError::Protocol {
+                    detail: format!(
+                        "{PKT_LINE_PROTOCOL_ERROR_PREFIX}receive-pack rejected an unexpected ref"
+                    ),
+                });
+            }
             return Err(PushError::RemoteRefUpdateFailed {
-                refname: refname.to_string(),
-                reason: reason.to_string(),
+                refname: sanitize_remote_ref_rejection(refname),
+                reason: sanitize_remote_ref_rejection(reason),
             });
         }
-        return Err(PushError::Network(format!(
-            "unexpected receive-pack status line: {line}"
-        )));
+        return Err(PushError::Protocol {
+            detail: format!("{PKT_LINE_PROTOCOL_ERROR_PREFIX}unexpected receive-pack status line"),
+        });
     }
 
     for expected in expected_refs {
@@ -2540,10 +2611,16 @@ fn porcelain_ref_fields(update: &PushRefUpdate) -> (char, String) {
 
 /// Classify a transport-layer I/O error into a typed `PushError`.
 ///
-/// Transport errors that mention "timed out" (from SSH idle timeout or reqwest
-/// read_timeout) are mapped to `PushError::Timeout` with the originating phase.
-/// All other errors become `PushError::Network`.
+/// A pkt-line protocol carrier takes precedence over timeout text and keeps its
+/// fixed protocol diagnostic. Other transport errors mentioning "timed out"
+/// (from SSH idle timeout or reqwest read_timeout) become `PushError::Timeout`;
+/// remaining errors become `PushError::Network`.
 fn classify_transport_error(phase: &str, e: std::io::Error) -> PushError {
+    if crate::command::fetch::is_pkt_line_io_error(&e) {
+        return PushError::Protocol {
+            detail: e.to_string(),
+        };
+    }
     let detail = e.to_string();
     let lower = detail.to_lowercase();
     if lower.contains("timed out") || lower.contains("timeout") {
@@ -2986,8 +3063,10 @@ fn incremental_objs_from_haves(
 }
 
 fn zero_object_hash() -> ObjectHash {
-    ObjectHash::from_bytes(&vec![0u8; get_hash_kind().size()])
-        .expect("zero hash should match hash kind size")
+    match get_hash_kind() {
+        HashKind::Sha1 => ObjectHash::Sha1([0; 20]),
+        HashKind::Sha256 => ObjectHash::Sha256([0; 32]),
+    }
 }
 
 /// Check if `ancestor` is an ancestor of `descendant` using breadth-first search.
@@ -3102,6 +3181,775 @@ mod test {
     };
 
     use super::*;
+
+    #[test]
+    fn pkt_line_push_ng_reason_escaped_and_capped() {
+        assert_eq!(
+            sanitize_remote_ref_rejection("protected branch hook declined"),
+            "protected branch hook declined"
+        );
+        assert_eq!(
+            sanitize_remote_ref_rejection("a\n\r\t\0\x1b[31m\x7f\u{9b}31mz"),
+            r"a\n\r\t\u{0}\u{1b}[31m\u{7f}\u{9b}31mz"
+        );
+        for ch in (0u8..=31).chain([127, 155]).map(char::from) {
+            let actual = sanitize_remote_ref_rejection(&format!("a{ch}z"));
+            assert!(!actual.chars().any(char::is_control));
+            assert!(actual.starts_with('a') && actual.ends_with('z'));
+            assert!(actual.contains('\\'));
+        }
+        for ch in ['x', '保', '🙂'] {
+            let exact = ch.to_string().repeat(200);
+            assert_eq!(sanitize_remote_ref_rejection(&exact), exact);
+            assert_eq!(
+                sanitize_remote_ref_rejection(&format!("{exact}{ch}")),
+                format!("{exact}…")
+            );
+        }
+        // Escaping is included in the displayed character budget. A final
+        // escape sequence which cannot fit is omitted whole, then ellipsis.
+        assert_eq!(
+            sanitize_remote_ref_rejection(&format!("{}\x1bTAIL", "x".repeat(198))),
+            format!("{}…", "x".repeat(198))
+        );
+        assert_eq!(
+            sanitize_remote_ref_rejection(&format!("{}\n", "x".repeat(198))),
+            format!("{}\\n", "x".repeat(198))
+        );
+        assert_eq!(
+            sanitize_remote_ref_rejection(&format!("{}\nZ", "x".repeat(198))),
+            format!("{}\\n…", "x".repeat(198))
+        );
+        assert_eq!(sanitize_remote_ref_rejection(""), "");
+        // The direct enum construction covers both algorithms without a
+        // fallible conversion, allocation, or a production expect.
+        let previous = get_hash_kind();
+        for kind in [HashKind::Sha1, HashKind::Sha256] {
+            git_internal::hash::set_hash_kind(kind);
+            let oid = zero_object_hash();
+            assert_eq!(oid.as_ref(), vec![0u8; kind.size()]);
+            assert_eq!(oid.to_string(), "0".repeat(kind.size() * 2));
+            assert!(matches!(
+                (kind, oid),
+                (HashKind::Sha1, ObjectHash::Sha1(_)) | (HashKind::Sha256, ObjectHash::Sha256(_))
+            ));
+        }
+        git_internal::hash::set_hash_kind(previous);
+    }
+
+    #[test]
+    fn pkt_line_push_refname_validated_or_protocol() {
+        let plans = [test_ref_update_plan("refs/heads/main")];
+        for unexpected in [
+            "refs/heads/main-extra",
+            "refs/heads/other",
+            "refs/heads/REMOTE_STATUS_SECRET_7c41\x1b[31m",
+            "refs/heads/main\u{9b}",
+        ] {
+            let line = format!("ng {unexpected} {STATUS_SENTINEL}\n");
+            assert_status_protocol(
+                validate_receive_pack_response(
+                    receive_pack_response(&["unpack ok\n", &line]),
+                    &plans,
+                )
+                .unwrap_err(),
+                "receive-pack rejected an unexpected ref",
+            );
+        }
+        assert_status_protocol(
+            validate_receive_pack_response(
+                receive_pack_response(&["unpack ok\n", "ng refs/heads/main rejected\n"]),
+                &[],
+            )
+            .unwrap_err(),
+            "receive-pack rejected an unexpected ref",
+        );
+        // Synthetic local plans prove refname sanitation uses the same rule as
+        // reason sanitation even if an earlier local ref validator is bypassed.
+        for (name, rendered) in [
+            (
+                "refs/heads/a\x1b[31m\u{9b}31mb".to_string(),
+                r"refs/heads/a\u{1b}[31m\u{9b}31mb".to_string(),
+            ),
+            (
+                format!("refs/heads/{}", "保".repeat(205)),
+                format!("refs/heads/{}…", "保".repeat(189)),
+            ),
+        ] {
+            let plans = [test_ref_update_plan(&name)];
+            let line = format!("ng {name} denied\rspoof\n");
+            let error = validate_receive_pack_response(
+                receive_pack_response(&["unpack ok\n", &line]),
+                &plans,
+            )
+            .unwrap_err();
+            assert!(
+                matches!(&error, PushError::RemoteRefUpdateFailed { refname, reason } if refname == &rendered && reason == r"denied\rspoof")
+            );
+            let cli = CliError::from(error);
+            let expected = format!("remote rejected ref update for '{rendered}': denied\\rspoof");
+            assert_eq!(cli.message(), expected);
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&cli.render_json()).unwrap()["message"]
+                    .as_str(),
+                Some(expected.as_str())
+            );
+            assert!(!cli.message().chars().any(char::is_control));
+            for text in [
+                cli.render(),
+                cli.render_report(),
+                cli.render_json().to_string(),
+            ] {
+                assert!(!text.contains('\x1b') && !text.contains('\u{9b}') && !text.contains('\r'));
+            }
+        }
+        let error = validate_receive_pack_response(
+            receive_pack_response(&["unpack ok\n", "ng refs/heads/main\n"]),
+            &plans,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, PushError::RemoteRefUpdateFailed { reason, .. } if reason == "remote rejected update")
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial_test::serial(env, cwd, hash_kind)]
+    async fn pkt_line_push_ng_sentinel_human_and_json() {
+        use crate::utils::test::{ChangeDirGuard, ScopedEnvVar, setup_with_new_libra_in};
+        let _storage = ScopedEnvVar::set("LIBRA_STORAGE_TYPE", "local");
+        let repo = tempfile::tempdir().unwrap();
+        setup_with_new_libra_in(repo.path()).await;
+        let _cwd = ChangeDirGuard::new(repo.path());
+        let tracking = "refs/remotes/origin/main";
+        let oid = "1111111111111111111111111111111111111111";
+        Branch::update_branch(tracking, oid, Some("origin"))
+            .await
+            .unwrap();
+        let mut server = ReceivePackTestServer::start().await;
+        ConfigKv::set("remote.origin.url", &server.url, false)
+            .await
+            .unwrap();
+        let ordinary_hint = "the remote rejected the update; check branch protection rules";
+        let cases = [
+            ("ng refs/heads/main blocked\x1b[31m\rspoof\u{9b}31m\x7fEND\n".to_string(), r"remote rejected ref update for 'refs/heads/main': blocked\u{1b}[31m\rspoof\u{9b}31m\u{7f}END".to_string(), ordinary_hint),
+            (format!("ng refs/heads/main {}\n", "保".repeat(205)), format!("remote rejected ref update for 'refs/heads/main': {}…", "保".repeat(200)), ordinary_hint),
+            (format!("ng refs/heads/{}\x1b[31m {}\rspoof\n", STATUS_SENTINEL, STATUS_SENTINEL), format!("{PKT_LINE_PROTOCOL_ERROR_PREFIX}receive-pack rejected an unexpected ref"), STATUS_PROTOCOL_HINT),
+            ("ng refs/heads/main protected branch hook declined\n".to_string(), "remote rejected ref update for 'refs/heads/main': protected branch hook declined".to_string(), ordinary_hint),
+        ];
+        for (line, expected, hint) in cases {
+            *server.state.response.lock().unwrap() = receive_pack_response(&["unpack ok\n", &line]);
+            let before = server.state.transcript.lock().unwrap().len();
+            let args = PushArgs::try_parse_from(["push", "origin", ":refs/heads/main"]).unwrap();
+            let error = tokio::time::timeout(
+                Duration::from_secs(45),
+                execute_safe(args, &OutputConfig::default()),
+            )
+            .await
+            .expect("bounded push command")
+            .expect_err("remote rejection must fail");
+            assert_eq!(error.message(), expected);
+            assert_eq!(error.stable_code(), StableErrorCode::NetworkProtocol);
+            assert_eq!(error.exit_code(), 128);
+            assert_eq!(
+                error.hints().iter().map(|h| h.as_str()).collect::<Vec<_>>(),
+                [hint]
+            );
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&error.render_json()).unwrap()["message"]
+                    .as_str(),
+                Some(expected.as_str())
+            );
+            assert!(!expected.chars().any(char::is_control));
+            for output in [
+                error.render(),
+                error.render_report(),
+                error.render_json().to_string(),
+            ] {
+                assert!(
+                    !output.contains('\x1b')
+                        && !output.contains('\r')
+                        && !output.contains('\u{9b}')
+                        && !output.contains('\x7f')
+                );
+                assert!(!output.contains(STATUS_SENTINEL));
+            }
+            let requests = server.state.transcript.lock().unwrap()[before..].to_vec();
+            assert_eq!(requests.len(), 2);
+            assert_eq!(
+                (&requests[0].0[..], &requests[0].1[..]),
+                ("GET", "/repo/info/refs?service=git-receive-pack")
+            );
+            assert_eq!(
+                (&requests[1].0[..], &requests[1].1[..]),
+                ("POST", "/repo/git-receive-pack")
+            );
+            let mut post = Bytes::copy_from_slice(&requests[1].2);
+            let (_, command) = read_pkt_line(&mut post).unwrap();
+            assert_eq!(
+                command.as_ref(),
+                format!("{oid} {} refs/heads/main\0report-status\n", "0".repeat(40)).as_bytes()
+            );
+            assert_eq!(post, "0000");
+            let branch = Branch::find_branch_result(tracking, Some("origin"))
+                .await
+                .unwrap()
+                .expect("rejection preserves tracking ref");
+            assert_eq!(branch.commit.to_string(), oid);
+        }
+        server.stop().await;
+    }
+
+    const STATUS_SENTINEL: &str = "REMOTE_STATUS_SECRET_7c41";
+    const STATUS_PROTOCOL_HINT: &str = "check the remote Git service or proxy response and retry";
+
+    fn assert_status_protocol(error: PushError, reason: &str) {
+        let expected = format!("{PKT_LINE_PROTOCOL_ERROR_PREFIX}{reason}");
+        assert!(matches!(&error, PushError::Protocol { detail } if detail == &expected));
+        assert_eq!(error.to_string(), expected);
+        let error = CliError::from(error);
+        assert_eq!(error.stable_code(), StableErrorCode::NetworkProtocol);
+        assert_eq!(error.stable_code().as_str(), "LBR-NET-002");
+        assert_eq!(error.stable_code().exit_code().as_i32(), 128);
+        assert_eq!(
+            error
+                .hints()
+                .iter()
+                .map(|hint| hint.as_str())
+                .collect::<Vec<_>>(),
+            [STATUS_PROTOCOL_HINT]
+        );
+        for rendered in [
+            error.render(),
+            error.render_report(),
+            error.render_json().to_string(),
+        ] {
+            assert!(!rendered.contains(STATUS_SENTINEL), "{rendered}");
+        }
+    }
+
+    #[test]
+    fn pkt_line_push_status_line_is_protocol_variant() {
+        let plans = vec![test_ref_update_plan("refs/heads/main")];
+        for line in ["ready refs/heads/main\n", "ok\n", "ng\n", "\n"] {
+            let response = receive_pack_response(&["unpack ok\n", line]);
+            assert_status_protocol(
+                validate_receive_pack_response(response, &plans).unwrap_err(),
+                "unexpected receive-pack status line",
+            );
+        }
+        for statuses in [
+            &["unpack ok\n"][..],
+            &["unpack ok\n", "ok refs/heads/main\n"][..],
+            &["unpack failed\n"][..],
+            &["unpack ok\n", "ng refs/heads/main rejected\n"][..],
+        ] {
+            let response = receive_pack_response(statuses);
+            let truncated = response.slice(..response.len() - 4);
+            assert_status_protocol(
+                validate_receive_pack_response(truncated, &plans).unwrap_err(),
+                "missing receive-pack status flush",
+            );
+        }
+        assert_status_protocol(
+            validate_receive_pack_response(Bytes::new(), &plans).unwrap_err(),
+            "missing receive-pack status flush",
+        );
+        let response = receive_pack_response(&["unpack ok\n"]);
+        assert_status_protocol(
+            validate_receive_pack_response(response.slice(..response.len() - 4), &[]).unwrap_err(),
+            "missing receive-pack status flush",
+        );
+        validate_receive_pack_response(response, &[]).expect("an actual flush is accepted");
+        validate_receive_pack_response(
+            receive_pack_response(&["unpack ok\n", "ok refs/heads/main\n"]),
+            &plans,
+        )
+        .expect("complete status report remains valid");
+    }
+
+    #[test]
+    fn pkt_line_push_status_line_locked_test_updated() {
+        let plans = vec![test_ref_update_plan("refs/heads/main")];
+        let status = validate_receive_pack_response(
+            receive_pack_response(&["unpack ok\n", "ready refs/heads/main\n"]),
+            &plans,
+        )
+        .unwrap_err();
+        assert!(matches!(&status, PushError::Protocol { .. }));
+        let unpack =
+            validate_receive_pack_response(receive_pack_response(&["unpack failed\n"]), &plans)
+                .unwrap_err();
+        assert!(matches!(&unpack, PushError::RemoteUnpackFailed));
+        let rejected = validate_receive_pack_response(
+            receive_pack_response(&[
+                "unpack ok\n",
+                "ng refs/heads/main protected branch hook declined\n",
+            ]),
+            &plans,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&rejected, PushError::RemoteRefUpdateFailed { refname, reason } if refname == "refs/heads/main" && reason == "protected branch hook declined")
+        );
+        for (error, hint) in [
+            (status, STATUS_PROTOCOL_HINT),
+            (
+                unpack,
+                "the remote server failed to process the pack; retry or check server logs",
+            ),
+            (
+                rejected,
+                "the remote rejected the update; check branch protection rules",
+            ),
+        ] {
+            let error = CliError::from(error);
+            assert_eq!(error.stable_code(), StableErrorCode::NetworkProtocol);
+            assert_eq!(error.stable_code().exit_code().as_i32(), 128);
+            assert_eq!(
+                error
+                    .hints()
+                    .iter()
+                    .map(|hint| hint.as_str())
+                    .collect::<Vec<_>>(),
+                [hint]
+            );
+        }
+        assert!(
+            matches!(validate_receive_pack_response(receive_pack_response(&["unpack ok\n"]), &plans), Err(PushError::RemoteRefUpdateFailed { reason, .. }) if reason == "missing status from remote")
+        );
+    }
+
+    #[test]
+    fn pkt_line_push_status_line_zero_echo_sentinel() {
+        let plans = vec![test_ref_update_plan("refs/heads/main")];
+        for line in [
+            format!("ready {STATUS_SENTINEL}\n"),
+            format!("timeout host key verification failed {STATUS_SENTINEL}\n"),
+            format!("\u{1b}[31m{STATUS_SENTINEL}\u{1b}[0m\n"),
+        ] {
+            let response = receive_pack_response(&["unpack ok\n", &line]);
+            assert_status_protocol(
+                validate_receive_pack_response(response, &plans).unwrap_err(),
+                "unexpected receive-pack status line",
+            );
+        }
+    }
+
+    type ReceivePackTranscript = std::sync::Arc<std::sync::Mutex<Vec<(String, String, Vec<u8>)>>>;
+
+    #[derive(Clone)]
+    struct ReceivePackServerState {
+        response: std::sync::Arc<std::sync::Mutex<Bytes>>,
+        transcript: ReceivePackTranscript,
+    }
+
+    struct ReceivePackTestServer {
+        url: String,
+        state: ReceivePackServerState,
+        task: tokio::task::JoinHandle<()>,
+        shutdown: Option<tokio::sync::oneshot::Sender<()>>,
+    }
+
+    impl Drop for ReceivePackTestServer {
+        fn drop(&mut self) {
+            if let Some(shutdown) = self.shutdown.take() {
+                let _ = shutdown.send(());
+            }
+            self.task.abort();
+        }
+    }
+
+    async fn receive_pack_mock_response(
+        axum::extract::State(state): axum::extract::State<ReceivePackServerState>,
+        request: axum::http::Request<axum::body::Body>,
+    ) -> axum::response::Response {
+        use axum::{
+            body::{Body, to_bytes},
+            http::StatusCode,
+            response::Response,
+        };
+        let method = request.method().to_string();
+        let path = request.uri().path_and_query().unwrap().to_string();
+        let body = to_bytes(request.into_body(), 64 * 1024)
+            .await
+            .expect("bounded mock push body");
+        state
+            .transcript
+            .lock()
+            .unwrap()
+            .push((method.clone(), path.clone(), body.to_vec()));
+        let (content_type, response) = if method == "GET"
+            && path == "/repo/info/refs?service=git-receive-pack"
+        {
+            let mut advertisement = BytesMut::new();
+            add_pkt_line_string(
+                &mut advertisement,
+                "# service=git-receive-pack\n".to_string(),
+            );
+            advertisement.extend_from_slice(b"0000");
+            add_pkt_line_string(&mut advertisement, "1111111111111111111111111111111111111111 refs/heads/main\0report-status delete-refs object-format=sha1\n".to_string());
+            advertisement.extend_from_slice(b"0000");
+            (
+                "application/x-git-receive-pack-advertisement",
+                advertisement.freeze(),
+            )
+        } else if method == "POST" && path == "/repo/git-receive-pack" {
+            (
+                "application/x-git-receive-pack-result",
+                state.response.lock().unwrap().clone(),
+            )
+        } else {
+            return Response::builder()
+                .status(StatusCode::NOT_FOUND)
+                .body(Body::empty())
+                .unwrap();
+        };
+        Response::builder()
+            .status(StatusCode::OK)
+            .header("Content-Type", content_type)
+            .body(Body::from(response))
+            .unwrap()
+    }
+
+    impl ReceivePackTestServer {
+        async fn start() -> Self {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let state = ReceivePackServerState {
+                response: Default::default(),
+                transcript: Default::default(),
+            };
+            let app = axum::Router::new()
+                .fallback(receive_pack_mock_response)
+                .with_state(state.clone());
+            let (shutdown, request) = tokio::sync::oneshot::channel();
+            let task = tokio::spawn(async move {
+                axum::serve(listener, app)
+                    .with_graceful_shutdown(async {
+                        let _ = request.await;
+                    })
+                    .await
+                    .expect("mock push server healthy");
+            });
+            Self {
+                url: format!("http://{address}/repo/"),
+                state,
+                task,
+                shutdown: Some(shutdown),
+            }
+        }
+        async fn stop(&mut self) {
+            self.shutdown
+                .take()
+                .expect("stop once")
+                .send(())
+                .expect("mock running");
+            tokio::time::timeout(Duration::from_secs(5), &mut self.task)
+                .await
+                .expect("bounded shutdown")
+                .expect("mock shutdown succeeds");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial_test::serial(env, cwd, hash_kind)]
+    async fn pkt_line_push_malformed_receive_pack_end_to_end_lbr_net_002() {
+        use crate::utils::test::{ChangeDirGuard, ScopedEnvVar, setup_with_new_libra_in};
+        // The delete-only transaction may look up advertised haves. Select the
+        // existing local-only fallback even when live cloud env is loaded.
+        let _storage = ScopedEnvVar::set("LIBRA_STORAGE_TYPE", "local");
+        let repo = tempfile::tempdir().unwrap();
+        setup_with_new_libra_in(repo.path()).await;
+        let _cwd = ChangeDirGuard::new(repo.path());
+        let tracking = "refs/remotes/origin/main";
+        let oid = "1111111111111111111111111111111111111111";
+        Branch::update_branch(tracking, oid, Some("origin"))
+            .await
+            .unwrap();
+        let mut server = ReceivePackTestServer::start().await;
+        ConfigKv::set("remote.origin.url", &server.url, false)
+            .await
+            .unwrap();
+        let plans = vec![test_ref_update_plan("refs/heads/main")];
+        let mut cases = Vec::new();
+        for malformed in [
+            b"0".as_slice(),
+            b"00",
+            b"000",
+            b"\xff000",
+            b"zzzz",
+            b"+004",
+            b"0001",
+            b"0002",
+            b"0003",
+            b"0008abc",
+        ] {
+            for later in [false, true] {
+                let mut response = BytesMut::new();
+                if later {
+                    add_pkt_line_string(&mut response, "unpack ok\n".to_string());
+                }
+                response.extend_from_slice(malformed);
+                cases.push(response.freeze());
+            }
+        }
+        let complete = receive_pack_response(&["unpack ok\n", "ok refs/heads/main\n"]);
+        cases.push(complete.slice(..complete.len() - 4));
+        for statuses in [
+            &["unpack failed\n"][..],
+            &["unpack ok\n", "ng refs/heads/main rejected\n"][..],
+        ] {
+            let complete = receive_pack_response(statuses);
+            cases.push(complete.slice(..complete.len() - 4));
+        }
+        cases.push(Bytes::new());
+        cases.push(receive_pack_response(&[
+            "unpack ok\n",
+            &format!("ready {STATUS_SENTINEL}\n"),
+        ]));
+        for (index, response) in cases.into_iter().enumerate() {
+            let expected = CliError::from(
+                validate_receive_pack_response(response.clone(), &plans)
+                    .expect_err("malformed fixture"),
+            );
+            assert_eq!(expected.stable_code(), StableErrorCode::NetworkProtocol);
+            *server.state.response.lock().unwrap() = response;
+            let before = server.state.transcript.lock().unwrap().len();
+            let args = PushArgs::try_parse_from(["push", "origin", ":refs/heads/main"]).unwrap();
+            let error = tokio::time::timeout(
+                Duration::from_secs(45),
+                execute_safe(args, &OutputConfig::default()),
+            )
+            .await
+            .expect("push command bounded")
+            .expect_err("malformed receive-pack must fail");
+            assert_eq!(
+                error.stable_code(),
+                StableErrorCode::NetworkProtocol,
+                "case{index}: {error:?}"
+            );
+            assert_eq!(error.message(), expected.message(), "case{index}");
+            assert_eq!(error.stable_code().exit_code().as_i32(), 128);
+            assert_eq!(
+                error
+                    .hints()
+                    .iter()
+                    .map(|hint| hint.as_str())
+                    .collect::<Vec<_>>(),
+                [STATUS_PROTOCOL_HINT]
+            );
+            for rendered in [
+                error.render(),
+                error.render_report(),
+                error.render_json().to_string(),
+            ] {
+                assert!(
+                    !rendered.contains(STATUS_SENTINEL),
+                    "case{index}: {rendered}"
+                );
+            }
+            let requests = server.state.transcript.lock().unwrap()[before..].to_vec();
+            assert_eq!(requests.len(), 2, "case{index}: {requests:?}");
+            assert_eq!(
+                (&requests[0].0[..], &requests[0].1[..]),
+                ("GET", "/repo/info/refs?service=git-receive-pack")
+            );
+            assert_eq!(
+                (&requests[1].0[..], &requests[1].1[..]),
+                ("POST", "/repo/git-receive-pack")
+            );
+            let mut post = Bytes::copy_from_slice(&requests[1].2);
+            let (_, command) = read_pkt_line(&mut post).unwrap();
+            let expected_command =
+                format!("{oid} {} refs/heads/main\0report-status\n", "0".repeat(40));
+            assert_eq!(command.as_ref(), expected_command.as_bytes());
+            assert_eq!(post, "0000");
+            let branch = Branch::find_branch_result(tracking, Some("origin"))
+                .await
+                .unwrap()
+                .expect("failed response must preserve tracking ref");
+            assert_eq!(branch.commit.to_string(), oid);
+        }
+        server.stop().await;
+    }
+
+    #[test]
+    fn pkt_line_push_protocol_variant_exists() {
+        let error = PushError::from(PktLineError::TruncatedHeader);
+        assert!(
+            matches!(&error, PushError::Protocol { detail } if detail.starts_with(PKT_LINE_PROTOCOL_ERROR_PREFIX))
+        );
+        assert_eq!(
+            error.to_string(),
+            "pkt-line protocol error: incomplete four-byte header"
+        );
+    }
+
+    #[test]
+    fn pkt_line_push_discovery_marker_maps_to_protocol() {
+        // Feed the real discovery parser result through the production mapper.
+        for response in [b"".as_slice(), b"0001", b"0008abc"] {
+            let error = crate::internal::protocol::parse_discovered_references(
+                Bytes::copy_from_slice(response),
+                ReceivePack,
+            )
+            .expect_err("malformed discovery");
+            let error = map_push_discovery_error("https://example.invalid/repo", error);
+            assert!(
+                matches!(&error, PushError::Protocol { detail } if detail.starts_with(PKT_LINE_PROTOCOL_ERROR_PREFIX))
+            );
+            assert_eq!(
+                CliError::from(error).stable_code(),
+                StableErrorCode::NetworkProtocol
+            );
+        }
+        let detail = format!("{PKT_LINE_PROTOCOL_ERROR_PREFIX}timeout in malformed frame");
+        assert!(matches!(
+            map_push_discovery_error("remote", GitError::NetworkError(detail)),
+            PushError::Protocol { .. }
+        ));
+    }
+
+    #[test]
+    fn pkt_line_empty_discovery_push_tail_maps_net_002() {
+        use crate::git_protocol::PktFrameError;
+
+        for (width, cap) in [(40, "object-format=sha1"), (64, "object-format=sha256")] {
+            for (tail, expected) in [
+                (
+                    b"zzzzREMOTE_EMPTY_TAIL_SECRET".as_slice(),
+                    PktLineError::InvalidHexHeader,
+                ),
+                (
+                    b"0001REMOTE_EMPTY_TAIL_SECRET",
+                    PktLineError::InvalidFrameLength(PktFrameError::LengthBelowHeader),
+                ),
+                (
+                    b"ffffREMOTE_EMPTY_TAIL_SECRET",
+                    PktLineError::TruncatedPayload,
+                ),
+            ] {
+                let mut bytes = BytesMut::new();
+                add_pkt_line_string(&mut bytes, "# service=git-receive-pack\n".to_string());
+                bytes.extend_from_slice(b"0000");
+                add_pkt_line_string(
+                    &mut bytes,
+                    format!(
+                        "{} capabilities^{{}}\0report-status {cap}\n",
+                        "0".repeat(width)
+                    ),
+                );
+                bytes.extend_from_slice(tail);
+                let source = crate::internal::protocol::parse_discovered_references(
+                    bytes.freeze(),
+                    ReceivePack,
+                )
+                .expect_err("empty receive-pack advertisement must reject malformed tail");
+                let error = map_push_discovery_error("https://example.invalid/repo", source);
+                assert!(
+                    matches!(&error, PushError::Protocol { detail } if detail == &expected.to_string())
+                );
+                let error = CliError::from(error);
+                assert_eq!(error.stable_code(), StableErrorCode::NetworkProtocol);
+                assert_eq!(error.stable_code().exit_code().as_i32(), 128);
+                assert_eq!(
+                    error
+                        .hints()
+                        .iter()
+                        .map(|hint| hint.as_str())
+                        .collect::<Vec<_>>(),
+                    ["check the remote Git service or proxy response and retry"]
+                );
+                for rendered in [error.render(), error.render_report(), error.render_json()] {
+                    assert!(!rendered.contains("REMOTE_EMPTY_TAIL_SECRET"));
+                    assert!(!rendered.contains("zzzz"));
+                }
+                let json: serde_json::Value = serde_json::from_str(&error.render_json()).unwrap();
+                assert_eq!(json["ok"], false);
+                assert_eq!(json["error_code"], "LBR-NET-002");
+                assert_eq!(json["exit_code"], 128);
+            }
+        }
+    }
+
+    #[test]
+    fn pkt_line_push_cli_maps_protocol_to_lbr_net_002() {
+        let error = CliError::from(PushError::from(PktLineError::TruncatedPayload));
+        assert_eq!(error.stable_code(), StableErrorCode::NetworkProtocol);
+        assert_eq!(error.stable_code().as_str(), "LBR-NET-002");
+    }
+
+    #[test]
+    fn pkt_line_push_malformed_response_unit() {
+        let plans = vec![test_ref_update_plan("refs/heads/main")];
+        for malformed in [
+            b"0".as_slice(),
+            b"00",
+            b"000",
+            b"\xff000",
+            b"zzzz",
+            b"+004",
+            b"0001",
+            b"0002",
+            b"0003",
+            b"0008abc",
+        ] {
+            for later_frame in [false, true] {
+                let mut response = BytesMut::new();
+                if later_frame {
+                    add_pkt_line_string(&mut response, "unpack ok\n".to_string());
+                }
+                response.extend_from_slice(malformed);
+                let error = validate_receive_pack_response(response.freeze(), &plans)
+                    .expect_err("malformed frame must fail");
+                assert!(
+                    matches!(&error, PushError::Protocol { detail } if detail.starts_with(PKT_LINE_PROTOCOL_ERROR_PREFIX))
+                );
+                assert_eq!(
+                    CliError::from(error).stable_code(),
+                    StableErrorCode::NetworkProtocol
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn pkt_line_push_discovery_failed_regression_stays_net_001() {
+        for detail in [
+            "connection refused".to_string(),
+            format!("wrapper: {PKT_LINE_PROTOCOL_ERROR_PREFIX}malformed"),
+            format!(" {PKT_LINE_PROTOCOL_ERROR_PREFIX}malformed"),
+        ] {
+            let error = map_push_discovery_error("remote", GitError::NetworkError(detail));
+            assert!(matches!(&error, PushError::DiscoveryFailed { .. }));
+            assert_eq!(
+                CliError::from(error).stable_code(),
+                StableErrorCode::NetworkUnavailable
+            );
+        }
+        let timeout = map_push_discovery_error(
+            "remote",
+            GitError::NetworkError("operation timed out".to_string()),
+        );
+        assert!(matches!(&timeout, PushError::Timeout { .. }));
+        assert_eq!(
+            CliError::from(timeout).stable_code(),
+            StableErrorCode::NetworkUnavailable
+        );
+        assert!(matches!(
+            map_push_discovery_error("remote", GitError::UnAuthorized("denied".to_string())),
+            PushError::AuthenticationFailed { .. }
+        ));
+    }
+
+    #[test]
+    fn pkt_line_push_network_variant_regression_stays_net_001() {
+        let error = CliError::from(PushError::Network(
+            "failed to configure remote transport".to_string(),
+        ));
+        assert_eq!(error.stable_code(), StableErrorCode::NetworkUnavailable);
+    }
 
     fn save_test_blob(content: &str) -> Blob {
         let blob = Blob::from_content(content);
@@ -3874,8 +4722,8 @@ mod test {
 
         assert!(matches!(
             validate_receive_pack_response(response, &plans),
-            Err(PushError::Network(message))
-                if message == "unexpected receive-pack status line: ready refs/heads/main"
+            Err(PushError::Protocol { detail })
+                if detail == format!("{PKT_LINE_PROTOCOL_ERROR_PREFIX}unexpected receive-pack status line")
         ));
     }
 
@@ -4489,6 +5337,23 @@ old1 new1 refs/heads/main\n"
             err,
             PushError::Timeout { phase, seconds }
                 if phase == "send-pack" && seconds == PUSH_IDLE_TIMEOUT.as_secs()
+        ));
+        let marker = crate::git_protocol::PKT_LINE_PROTOCOL_ERROR_PREFIX;
+        let protocol_detail = format!("{marker}timed out fixture");
+        assert!(matches!(
+            classify_transport_error("send-pack", std::io::Error::other(protocol_detail.clone())),
+            PushError::Protocol { detail } if detail == protocol_detail
+        ));
+        assert!(matches!(
+            classify_transport_error(
+                "send-pack",
+                std::io::Error::other(format!("context: {marker}ordinary failure"))
+            ),
+            PushError::Network(_)
+        ));
+        assert!(matches!(
+            classify_transport_error("send-pack", std::io::Error::new(std::io::ErrorKind::ConnectionReset, "connection reset")),
+            PushError::Network(detail) if detail == "send-pack failed: connection reset"
         ));
     }
 

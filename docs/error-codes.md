@@ -103,7 +103,7 @@ structured report is always present.
 | `128` | `LBR-OBLITERATE-002` | `repo` | Object exists only inside a packfile; v1 cannot rewrite packs | `file obliterate` on a packed-only object (lore.md 2.5) |
 | `128` | `LBR-OBLITERATE-003` | `conflict` | Obliteration not confirmed; it is irreversible and requires --yes | `file obliterate` without `--yes` (lore.md 2.5) |
 | `128` | `LBR-NET-001` | `network` | Remote unreachable or transport unavailable | DNS, timeout, TLS, connection refused |
-| `128` | `LBR-NET-002` | `network` | Protocol, negotiation, or pack failure | packet-line, sideband, unpack/ref update protocol errors |
+| `128` | `LBR-NET-002` | `network` | Protocol, negotiation, or pack failure | detected packet-line framing / empty discovery response, sideband, unpack/ref update protocol errors, unexpected receive-pack status lines / missing status-report flush |
 | `128` | `LBR-AUTH-001` | `auth` | Missing identity, token, or credentials | missing commit identity, missing API key, missing SSH material |
 | `128` | `LBR-AUTH-002` | `auth` | Credential present but permission denied | forbidden push, insufficient scope |
 | `128` | `LBR-IO-001` | `io` | Read/open/load failure | failed to open pack, failed to read index |
@@ -483,3 +483,133 @@ They parse the final JSON stderr line and assert both:
 - machine-readable fields are stable
 
 Shared helpers live in [`tests/command/mod.rs`](../tests/command/mod.rs).
+
+### SSH advertisement framing
+
+SSH advertisement lengths `0001` through `0003`, incomplete headers (including
+zero-byte EOF), and truncated payloads return `LBR-NET-002`. The fixed protocol
+reason and marker are retained without captured SSH stdout/stderr.
+
+An incomplete required header has one host-trust exception: local SSH exit status
+255 together with a recognized host-key diagnostic in the first 64 KiB of stderr
+returns fixed host-verification guidance and `LBR-NET-001`. This classification
+does not verify the remote fingerprint. Other missing advertisements, including
+authentication failures, still use `LBR-NET-002`; an available non-zero local exit
+status adds `SSH exited with status N` and fixed connectivity, trusted-host,
+ssh-agent and repository-access guidance. Original SSH diagnostic text is hidden.
+
+After an incomplete required header, Libra allows up to 100 milliseconds to
+observe the SSH exit status, then requests termination if needed. Other read
+errors request termination immediately. The status window, direct-child reap and
+output collection share a two-second cleanup deadline. Protocol and typed
+host-trust errors take precedence over secondary cleanup warnings. Ordinary IO
+and timeout errors keep their transport classification and may include a fixed
+local cleanup warning. Termination can change the observed exit status. This
+does not promise cleanup of arbitrary descendant processes.
+
+Clone places targeted host-verification guidance in its structured hints. The
+other command boundaries retain fixed host guidance in the message and their
+existing `LBR-NET-001` network hint. Human, JSON and machine diagnostics omit raw
+captured remote stderr in either case.
+
+The `git://` discovery and object-fetch paths preserve the listed frame errors as
+`LBR-NET-002`. All asynchronous readers reject non-ASCII/non-hexadecimal headers
+with fixed protocol reasons. HTTP(S) discovery/advertisement framing is unchanged.
+
+SSH output-limit failures use `LBR-NET-001`. See the command SSH authentication
+and captured-diagnostics sections for the 64 KiB stderr retention limit, 16 MiB
+advertisement/receive-pack limits, `BatchMode=yes` and `ssh.strictHostKeyChecking`.
+
+### SSH host identity and diagnostic collection
+
+SSH host identity changes retain a distinct fixed warning: the change may
+indicate interception or legitimate key rotation. Verify the new fingerprint
+through a trusted channel before replacing an existing known_hosts entry; do not
+bypass host-key checking. Unknown and changed host keys both use LBR-NET-001,
+but their fixed messages and guidance differ.
+
+A stderr collection timeout does not by itself discard complete protocol output
+and an observed local exit status. Non-zero exit status and primary read errors
+still fail the operation. Unavailable diagnostics produce only a fixed debug
+notice, without fabricated empty-stream counts or digests. Stdout collection or
+process-wait failures retain their normal error handling.
+
+For host-key discovery failures, clone uses the fixed message and separate hints.
+Other command messages retain the fixed label `SSH host trust needs confirmation:`
+or `SSH host identity changed:` before the guidance; neither label contains remote
+stderr. Existing command-specific network hints are unchanged.
+
+### SSH limits and host-classification boundaries
+
+These fixed 16 MiB advertisement and receive-pack response limits apply only to
+Libra's SSH transport. The HTTPS and Git transports do not impose this particular
+cap. If the server provides an HTTPS endpoint, use its HTTPS remote URL when an
+SSH advertisement exceeds the cap; this does not require a read-only user to
+change the server's refs. Otherwise, ask the repository maintainer to reduce the
+advertised ref set. The streamed fetch pack remains outside this aggregate cap.
+
+Host-trust classification requires an incomplete first header with no stdout
+bytes observed, local exit 255 and a recognized retained stderr pattern. Once
+any stdout byte arrives, including a partial header, host-like stderr cannot
+select host-specific guidance. Failures after a complete advertisement retain
+fixed generic diagnostics. The pre-advertisement pattern remains a diagnostic
+heuristic, not fingerprint verification.
+
+A successful discovery whose child waits for a request normally incurs the full
+100 ms native-exit observation window, once per discovery operation. This is
+separate from the two-second direct-child cleanup budget; no benchmark or
+arbitrary-descendant cleanup guarantee is implied.
+
+### Strict pkt-line headers
+
+A pkt-line header must contain exactly four ASCII hexadecimal digits (`0`–`9`,
+`a`–`f` or `A`–`F`). Fetch streaming, `git://` advertisements and SSH advertisements
+reject leading signs such as `+004`, whitespace, non-hexadecimal text and invalid
+UTF-8. These failures return `LBR-NET-002` (exit 128), with fixed reasons that do
+not echo the header or payload. A peer that previously sent a signed or otherwise
+nonconforming header must send four hexadecimal digits before retrying.
+
+Git discovery also preserves protocol classification for lengths `0001`–`0003`,
+missing or partial required headers and truncated payloads. The same discovery
+classification reaches clone, fetch, pull, ls-remote and push. Check the remote
+Git service or proxy response. Their existing structured error fields remain;
+push retains its own protocol hint and the other commands retain theirs.
+
+Flush `0000`, empty-data `0004` and maximum-length `ffff` frames keep their existing
+meaning. Ordinary network errors and timeouts retain their existing categories.
+An empty fetch data stream before any complete pack remains a network failure;
+EOF after a completed pack keeps the existing success behavior. The SSH host-trust
+exception, captured-diagnostic limits and cleanup deadlines described above remain.
+
+## Remote push rejection messages
+
+When receive-pack reports `ng <refname> <reason>`, Libra first checks that the
+refname is one of the local refs submitted for this push. A rejection for any
+other ref fails with `LBR-NET-002` (exit 128) and the fixed reason
+`receive-pack rejected an unexpected ref`; the unrecognized name and its reason
+are not echoed. Its hint asks you to check the remote Git service or proxy.
+
+For a recognized ref, the remote rejection remains readable. Both its name and
+reason use the same sanitizer: Unicode control characters, including C0, DEL,
+and C1/CSI, become literal escape text. Each displayed field is limited to 200
+Unicode characters after escaping, plus `…` when truncated. An escape sequence
+or UTF-8 character is never split, so the visible prefix can be shorter than 200
+characters. Ordinary short rejection text is unchanged. These rules apply before
+human, JSON, and machine rendering, including the decoded JSON message.
+
+Known-ref rejection still returns `LBR-NET-002` / exit 128 with the existing branch
+protection hint. JSON keeps the existing message/hints envelope; a separate
+structured reason field is not introduced. Readable remote text is not a trusted
+local assertion. A rejected response leaves local tracking refs unchanged; it
+does not prove that the server rolled back a partial remote update. Inspect the
+remote state before retrying when the server's result is uncertain.
+
+## Empty-repository discovery framing
+
+An HTTP(S) advertisement that declares an empty repository still has all remaining
+pkt-line frames checked. A malformed header, an unsupported length 1..3, or a truncated
+payload after the zero object ID returns `LBR-NET-002` (exit 128), with a fixed
+reason that does not echo the remote bytes. It is no longer reported as a
+successful empty response. Check the remote Git service or proxy response before
+retrying. Valid empty repositories, supported SHA-1/SHA-256 advertisements,
+existing command hints and structured error fields retain their behavior.

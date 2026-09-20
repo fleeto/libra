@@ -594,6 +594,8 @@ async fn prepare_history() -> (ObjectHash, ObjectHash) {
     writeln!(f, "line2").unwrap();
 
     add::execute(AddArgs {
+        intent_to_add: false,
+        sparse: false,
         pathspec: vec!["foo.txt".into()],
         all: false,
         update: false,
@@ -629,6 +631,8 @@ async fn prepare_history() -> (ObjectHash, ObjectHash) {
     writeln!(f, "line2-modified").unwrap();
 
     add::execute(AddArgs {
+        intent_to_add: false,
+        sparse: false,
         pathspec: vec!["foo.txt".into()],
         all: false,
         update: false,
@@ -664,6 +668,8 @@ async fn prepare_history() -> (ObjectHash, ObjectHash) {
 /// resulting commit hash. Assumes a `ChangeDirGuard` is already active.
 async fn commit_foo(message: &str) -> ObjectHash {
     add::execute(AddArgs {
+        intent_to_add: false,
+        sparse: false,
         pathspec: vec!["foo.txt".into()],
         all: false,
         update: false,
@@ -759,6 +765,8 @@ async fn test_blame_empty_file_returns_empty_result() {
     // Commit an empty file.
     fs::File::create("empty.txt").unwrap();
     add::execute(AddArgs {
+        intent_to_add: false,
+        sparse: false,
         pathspec: vec!["empty.txt".into()],
         all: false,
         update: false,

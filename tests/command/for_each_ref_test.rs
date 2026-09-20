@@ -18,6 +18,8 @@ async fn setup_repo_with_commit(temp: &tempfile::TempDir) {
     writeln!(f, "hello").unwrap();
 
     add::execute(AddArgs {
+        intent_to_add: false,
+        sparse: false,
         pathspec: vec!["a.txt".into()],
         all: false,
         update: false,
@@ -253,6 +255,8 @@ async fn test_for_each_ref_merged_resolves_remote_tracking_namespace() {
     // c1 then c2 on main.
     std::fs::write("a.txt", "1\n").unwrap();
     add::execute(AddArgs {
+        intent_to_add: false,
+        sparse: false,
         pathspec: vec!["a.txt".into()],
         all: false,
         update: false,
@@ -285,6 +289,8 @@ async fn test_for_each_ref_merged_resolves_remote_tracking_namespace() {
 
     std::fs::write("a.txt", "2\n").unwrap();
     add::execute(AddArgs {
+        intent_to_add: false,
+        sparse: false,
         pathspec: vec!["a.txt".into()],
         all: false,
         update: false,
@@ -1053,6 +1059,8 @@ async fn test_for_each_ref_sort_by_committerdate() {
     // c1 on main, then branch `older` at c1.
     std::fs::write("a.txt", "1\n").unwrap();
     add::execute(AddArgs {
+        intent_to_add: false,
+        sparse: false,
         pathspec: vec!["a.txt".into()],
         all: false,
         update: false,
@@ -1088,6 +1096,8 @@ async fn test_for_each_ref_sort_by_committerdate() {
 
     std::fs::write("a.txt", "2\n").unwrap();
     add::execute(AddArgs {
+        intent_to_add: false,
+        sparse: false,
         pathspec: vec!["a.txt".into()],
         all: false,
         update: false,
@@ -1172,6 +1182,8 @@ async fn test_for_each_ref_sort_creatordate_uses_tagger_date_for_annotated_tags(
     // c1, remember its hash, and branch `bbb` at it.
     std::fs::write("a.txt", "1\n").unwrap();
     add::execute(AddArgs {
+        intent_to_add: false,
+        sparse: false,
         pathspec: vec!["a.txt".into()],
         all: false,
         update: false,
@@ -1207,6 +1219,8 @@ async fn test_for_each_ref_sort_creatordate_uses_tagger_date_for_annotated_tags(
     tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
     std::fs::write("a.txt", "2\n").unwrap();
     add::execute(AddArgs {
+        intent_to_add: false,
+        sparse: false,
         pathspec: vec!["a.txt".into()],
         all: false,
         update: false,
@@ -1296,6 +1310,8 @@ async fn test_for_each_ref_sort_peels_nested_annotated_tags() {
     // A single real commit c1; `main` and `bbb` both point at it.
     std::fs::write("a.txt", "1\n").unwrap();
     add::execute(AddArgs {
+        intent_to_add: false,
+        sparse: false,
         pathspec: vec!["a.txt".into()],
         all: false,
         update: false,
@@ -1779,6 +1795,8 @@ async fn test_for_each_ref_deref_size_errors_on_broken_tag_chain() {
 
     std::fs::write("a.txt", "1\n").unwrap();
     add::execute(AddArgs {
+        intent_to_add: false,
+        sparse: false,
         pathspec: vec!["a.txt".into()],
         all: false,
         update: false,
@@ -2776,6 +2794,8 @@ async fn test_for_each_ref_symref_atom() {
 
     std::fs::write("a.txt", "1\n").unwrap();
     add::execute(AddArgs {
+        intent_to_add: false,
+        sparse: false,
         pathspec: vec!["a.txt".into()],
         all: false,
         update: false,

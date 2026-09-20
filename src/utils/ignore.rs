@@ -491,6 +491,8 @@ mod tests {
         fs::write("tracked.txt", "tracked").unwrap();
 
         add::execute(AddArgs {
+            intent_to_add: false,
+            sparse: false,
             pathspec: vec!["tracked.txt".into()],
             all: false,
             update: false,
@@ -574,6 +576,8 @@ mod tests {
         fs::write("tracked.txt", "tracked").unwrap();
 
         add::execute(AddArgs {
+            intent_to_add: false,
+            sparse: false,
             pathspec: vec!["tracked.txt".into()],
             all: false,
             update: false,
@@ -619,6 +623,8 @@ mod tests {
         fs::write("ignored.txt", "initial").unwrap();
 
         add::execute(AddArgs {
+            intent_to_add: false,
+            sparse: false,
             pathspec: vec!["ignored.txt".into()],
             all: false,
             update: false,
@@ -711,6 +717,8 @@ mod tests {
 
         // `add --force .` must not stage anything under `.git`.
         add::execute(AddArgs {
+            intent_to_add: false,
+            sparse: false,
             pathspec: vec![".".into()],
             all: false,
             update: false,

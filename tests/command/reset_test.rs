@@ -634,6 +634,8 @@ async fn test_reset_hard_io_failure_rolls_back_index_and_keeps_head() {
 
     fs::write("base.txt", "base\n").unwrap();
     add::execute(AddArgs {
+        intent_to_add: false,
+        sparse: false,
         pathspec: vec![".libraignore".to_string(), "base.txt".to_string()],
         all: false,
         update: false,
@@ -673,6 +675,8 @@ async fn test_reset_hard_io_failure_rolls_back_index_and_keeps_head() {
 
     fs::write("tracked.txt", "tracked\n").unwrap();
     add::execute(AddArgs {
+        intent_to_add: false,
+        sparse: false,
         pathspec: vec!["tracked.txt".to_string()],
         all: false,
         update: false,
@@ -765,6 +769,8 @@ async fn setup_standard_repo(
 
     fs::write("1.txt", "content 1").unwrap();
     add::execute(AddArgs {
+        intent_to_add: false,
+        sparse: false,
         pathspec: vec!["1.txt".to_string()],
         all: false,
         update: false,
@@ -836,6 +842,8 @@ async fn setup_standard_repo(
 
     fs::write("2.txt", "content 2").unwrap();
     add::execute(AddArgs {
+        intent_to_add: false,
+        sparse: false,
         pathspec: vec!["2.txt".to_string()],
         all: false,
         update: false,
@@ -907,6 +915,8 @@ async fn setup_standard_repo(
 
     fs::write("3.txt", "content 3").unwrap();
     add::execute(AddArgs {
+        intent_to_add: false,
+        sparse: false,
         pathspec: vec!["3.txt".to_string()],
         all: false,
         update: false,
@@ -978,6 +988,8 @@ async fn setup_standard_repo(
 
     fs::write("4.txt", "content 4").unwrap();
     add::execute(AddArgs {
+        intent_to_add: false,
+        sparse: false,
         pathspec: vec!["4.txt".to_string()],
         all: false,
         update: false,
@@ -1058,6 +1070,8 @@ async fn setup_test_state() {
     fs::write("5.txt", "new line").unwrap();
 
     add::execute(AddArgs {
+        intent_to_add: false,
+        sparse: false,
         pathspec: vec!["3.txt".to_string()],
         all: false,
         update: false,
@@ -1276,6 +1290,8 @@ async fn test_reset_mixed_same_target_resets_index_without_moving_head() {
 
     fs::write("tracked.txt", "tracked\n").unwrap();
     add::execute(AddArgs {
+        intent_to_add: false,
+        sparse: false,
         pathspec: vec!["tracked.txt".to_string()],
         all: false,
         update: false,
@@ -1316,6 +1332,8 @@ async fn test_reset_mixed_same_target_resets_index_without_moving_head() {
 
     fs::write("tracked.txt", "tracked\nstaged\n").unwrap();
     add::execute(AddArgs {
+        intent_to_add: false,
+        sparse: false,
         pathspec: vec!["tracked.txt".to_string()],
         all: false,
         update: false,
@@ -1385,6 +1403,8 @@ async fn test_reset_hard_same_target_restores_worktree_and_removes_staged_additi
 
     fs::write("tracked.txt", "tracked\n").unwrap();
     add::execute(AddArgs {
+        intent_to_add: false,
+        sparse: false,
         pathspec: vec!["tracked.txt".to_string()],
         all: false,
         update: false,
@@ -1425,6 +1445,8 @@ async fn test_reset_hard_same_target_restores_worktree_and_removes_staged_additi
     fs::write("tracked.txt", "tracked\nmodified\n").unwrap();
     fs::write("new.txt", "new\n").unwrap();
     add::execute(AddArgs {
+        intent_to_add: false,
+        sparse: false,
         pathspec: vec!["new.txt".to_string()],
         all: false,
         update: false,
@@ -1499,6 +1521,8 @@ async fn test_reset_hard_removes_paths_tracked_only_by_head_tree() {
 
     fs::write("base.txt", "base\n").unwrap();
     add::execute(AddArgs {
+        intent_to_add: false,
+        sparse: false,
         pathspec: vec!["base.txt".to_string()],
         all: false,
         update: false,
@@ -1538,6 +1562,8 @@ async fn test_reset_hard_removes_paths_tracked_only_by_head_tree() {
 
     fs::write("tracked.txt", "tracked\n").unwrap();
     add::execute(AddArgs {
+        intent_to_add: false,
+        sparse: false,
         pathspec: vec!["tracked.txt".to_string()],
         all: false,
         update: false,
@@ -1739,6 +1765,8 @@ async fn test_reset_hard_skips_ignored_directories() {
 
     fs::write("file1.txt", "initial content\n").unwrap();
     add::execute(AddArgs {
+        intent_to_add: false,
+        sparse: false,
         pathspec: vec!["file1.txt".to_string()],
         all: false,
         update: false,

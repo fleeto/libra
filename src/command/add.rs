@@ -163,6 +163,13 @@ pub struct AddArgs {
     #[clap(long)]
     pub sparse: bool,
 
+    /// Record intent-to-add entries (empty blob plus the index v3
+    /// `intent_to_add` extended flag) for the matched paths without staging
+    /// content. Mirrors Git's `add -N/--intent-to-add`; the flag stays hidden
+    /// until the follow-up card lands the full write surface.
+    #[clap(short = 'N', long = "intent-to-add", hide = true)]
+    pub intent_to_add: bool,
+
     /// Interactively choose hunks to stage (`add -p`).
     #[clap(short = 'p', long = "patch")]
     pub patch: bool,
@@ -374,6 +381,10 @@ pub struct AddOutput {
     /// Reported as the sparse diagnostic and exit 1; `--sparse` opts out.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sparse_paths: Vec<String>,
+    /// Paths recorded as intent-to-add entries (empty blob plus the index v3
+    /// extended flag) by `add -N`; under `--dry-run` they are only previewed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub intent_to_add: Vec<String>,
     /// Whether this was a dry-run (no actual changes made)
     pub dry_run: bool,
 }
@@ -392,6 +403,7 @@ impl AddOutput {
             missing: Vec::new(),
             chmod_rejected: Vec::new(),
             sparse_paths: Vec::new(),
+            intent_to_add: Vec::new(),
             dry_run,
         }
     }
@@ -408,7 +420,7 @@ impl AddOutput {
     /// [`Self::ignored`] in [`check_ignored_only_error`] to detect the
     /// "everything was filtered out" failure mode.
     fn is_empty(&self) -> bool {
-        self.total_staged() == 0 && self.refreshed.is_empty()
+        self.total_staged() == 0 && self.refreshed.is_empty() && self.intent_to_add.is_empty()
     }
 
     fn wrote_index(&self) -> bool {
@@ -938,7 +950,9 @@ fn stage_resolved_path(
             for stage in 1..=3 {
                 index.remove(file, stage);
             }
-            crate::utils::index_ext::update_preserving_file_mode(index, entry, file_mode);
+            crate::utils::index_ext::update_preserving_file_mode_except_intent(
+                index, entry, file_mode,
+            );
             Ok(StagedAction::Modified)
         }
     }
@@ -1484,6 +1498,160 @@ async fn run_add_resolved(
 ///
 /// See: tests::test_add_all_flag in tests/command/add_test.rs:100;
 /// tests::test_add_force_tracks_ignored_file in tests/command/add_test.rs:319.
+/// Build the index entry `add -N` records: the empty blob, zeroed stat data
+/// (Git's smudged shape, so a later `add` re-hashes the content) and the index
+/// v3 intent-to-add extended flag.
+fn intent_to_add_entry(path: String, mode: u32) -> IndexEntry {
+    let mut entry = IndexEntry::new_from_blob(path, Blob::from_content_bytes(Vec::new()).id, 0);
+    entry.mode = mode;
+    entry.flags.intent_to_add = true;
+    entry
+}
+
+/// `add -N/--intent-to-add` (plan-20260918 WT-05): record an empty-blob entry
+/// carrying the index v3 `intent_to_add` extended flag for every matched path
+/// that is not already tracked, without staging content. Tracked paths are a
+/// successful no-op (Git's `t2203:56`), a pathspec matching nothing keeps the
+/// ordinary "did not match any files" error, and a dry-run writes nothing.
+#[allow(clippy::too_many_arguments)]
+async fn run_add_intent_to_add(
+    args: &AddArgs,
+    workdir: &Path,
+    index_path: &Path,
+    storage_path: &Path,
+    layer_scope: &crate::internal::worktree_scope::WorktreeScope,
+    pathspec_ctx: PathspecMatchContext<'_>,
+    mut index: Index,
+    file_mode: bool,
+) -> CliResult<AddOutput> {
+    let (visible_changes, ignored_changes) = if args.force {
+        status::changes_to_be_staged_split_force_with_ignore_case_and_file_mode(
+            pathspec_ctx.ignore_case,
+            file_mode,
+        )
+        .map_err(|source| AddError::Status { source })?
+    } else {
+        status::changes_to_be_staged_split_safe_with_ignore_case_and_file_mode(
+            pathspec_ctx.ignore_case,
+            file_mode,
+        )
+        .map_err(|source| AddError::Status { source })?
+    };
+
+    let validated = validate_pathspecs(
+        &args.pathspec,
+        pathspec_ctx,
+        &visible_changes,
+        &ignored_changes,
+        &index,
+        args.ignore_missing,
+        args.force,
+        false,
+        false,
+        args.sparse,
+    )?;
+
+    let mut add_output = AddOutput::empty(args.dry_run);
+    add_output.ignored = validated.ignored.clone();
+    add_output.missing = validated.missing.clone();
+    {
+        let mut sparse = validated.sparse.clone();
+        sparse.sort();
+        sparse.dedup();
+        add_output.sparse_paths = sparse;
+    }
+
+    // Only untracked paths gain an intent-to-add entry; a pathspec that also
+    // matched a tracked path is a no-op for that path (N3).
+    let mut files = filter_candidates(&visible_changes.new, &validated.pathspecs);
+    files.sort();
+    files.dedup();
+
+    // Layer never-enters-commit guard (lore.md 2.4): even a content-less entry
+    // must not name an overlay path.
+    crate::internal::layer::verify_staging_context(workdir, layer_scope)?;
+    let owned: std::collections::HashSet<String> =
+        crate::internal::layer::LayerStore::owned_path_set_strict(layer_scope)
+            .await
+            .map_err(|e| {
+                CliError::fatal(format!(
+                    "cannot verify layer-owned paths before staging: {e}"
+                ))
+                .with_stable_code(StableErrorCode::IoReadFailed)
+            })?
+            .into_iter()
+            .collect();
+    if !owned.is_empty() {
+        let blocked: Vec<String> = files
+            .iter()
+            .filter_map(|file| crate::internal::layer::normalize_key(file))
+            .filter(|key| owned.contains(key))
+            .collect();
+        if let Some(first) = blocked.first() {
+            return Err(CliError::from(AddError::LayerPath {
+                path: first.clone(),
+                count: blocked.len(),
+            }));
+        }
+    }
+
+    // The empty blob is the tree-side placeholder Git stores for an
+    // intent-to-add entry; the file's real content is deliberately not read.
+    let empty_blob = Blob::from_content_bytes(Vec::new());
+    let mut wrote_entries = false;
+    for file in &files {
+        let file_abs = workdir.join(file);
+        if util::is_sub_path(&file_abs, storage_path) {
+            continue;
+        }
+        let path_str = file.display().to_string();
+        if args.dry_run {
+            add_output.intent_to_add.push(path_str);
+            continue;
+        }
+        let metadata =
+            file_abs
+                .symlink_metadata()
+                .map_err(|source| AddError::CreateIndexEntry {
+                    path: file.clone(),
+                    source,
+                })?;
+        let mode = if metadata.file_type().is_symlink() {
+            0o120000
+        } else if file_mode && worktree_exec_bit(&metadata) {
+            0o100755
+        } else {
+            0o100644
+        };
+        empty_blob
+            .try_save()
+            .map_err(|source| AddError::ObjectSave {
+                path: file.clone(),
+                source,
+            })?;
+        crate::utils::index_ext::update_preserving_flags(
+            &mut index,
+            intent_to_add_entry(path_str.clone(), mode),
+        );
+        add_output.intent_to_add.push(path_str);
+        wrote_entries = true;
+    }
+
+    if wrote_entries {
+        index
+            .save(index_path)
+            .map_err(|source| AddError::IndexSave {
+                path: index_path.to_path_buf(),
+                source,
+            })?;
+    }
+
+    if add_output.ignored.is_empty() {
+        return Ok(add_output);
+    }
+    check_ignored_only_error(add_output)
+}
+
 pub async fn run_add(args: &AddArgs) -> CliResult<AddOutput> {
     if let Some(err) = resolved_option_conflict(args) {
         return Err(err);
@@ -1605,12 +1773,32 @@ pub async fn run_add(args: &AddArgs) -> CliResult<AddOutput> {
         .await;
     }
 
+    if args.intent_to_add {
+        return run_add_intent_to_add(
+            args,
+            &workdir,
+            &index_path,
+            &storage_path,
+            &layer_scope,
+            pathspec_ctx,
+            index,
+            file_mode,
+        )
+        .await;
+    }
+
     let (mut visible_changes, mut ignored_changes) = if args.force {
-        status::changes_to_be_staged_split_force_with_ignore_case(ignore_case)
-            .map_err(|source| AddError::Status { source })?
+        status::changes_to_be_staged_split_force_with_ignore_case_and_file_mode(
+            ignore_case,
+            file_mode,
+        )
+        .map_err(|source| AddError::Status { source })?
     } else {
-        status::changes_to_be_staged_split_safe_with_ignore_case(ignore_case)
-            .map_err(|source| AddError::Status { source })?
+        status::changes_to_be_staged_split_safe_with_ignore_case_and_file_mode(
+            ignore_case,
+            file_mode,
+        )
+        .map_err(|source| AddError::Status { source })?
     };
     if args.force {
         visible_changes.extend(ignored_changes.clone());
@@ -1812,7 +2000,7 @@ pub async fn run_add(args: &AddArgs) -> CliResult<AddOutput> {
                 }
                 continue;
             }
-            let status = check_file_status(file, &index, &workdir)?;
+            let status = check_file_status(file, &index, &workdir, file_mode)?;
             match status {
                 FileStatus::New => add_output.added.push(path_str),
                 FileStatus::Modified => add_output.modified.push(path_str),
@@ -2099,7 +2287,7 @@ fn renormalize_entry(
             path: file.to_path_buf(),
             source,
         })?;
-    crate::utils::index_ext::update_preserving_file_mode(index, entry, file_mode);
+    crate::utils::index_ext::update_preserving_file_mode_except_intent(index, entry, file_mode);
     Ok(StagedAction::Modified)
 }
 
@@ -2190,6 +2378,9 @@ fn render_dry_run(w: &mut impl Write, result: &AddOutput) -> CliResult<()> {
     for f in &result.added {
         writeln!(w, "add: {f}").map_err(write_err)?;
     }
+    for f in &result.intent_to_add {
+        writeln!(w, "add: {f}").map_err(write_err)?;
+    }
     for f in &result.modified {
         writeln!(w, "add: {f}").map_err(write_err)?;
     }
@@ -2230,13 +2421,16 @@ fn render_refresh(w: &mut impl Write, result: &AddOutput, verbose: bool) -> CliR
 fn render_normal(w: &mut impl Write, result: &AddOutput, verbose: bool) -> CliResult<()> {
     let total = result.total_staged();
 
-    if total == 0 {
+    if total == 0 && result.intent_to_add.is_empty() {
         writeln!(w, "nothing to add").map_err(write_err)?;
         return Ok(());
     }
 
     // Verbose: per-file listing
     if verbose {
+        for f in &result.intent_to_add {
+            writeln!(w, "add(intent-to-add): {f}").map_err(write_err)?;
+        }
         for f in &result.added {
             writeln!(w, "add(new): {f}").map_err(write_err)?;
         }
@@ -2246,6 +2440,11 @@ fn render_normal(w: &mut impl Write, result: &AddOutput, verbose: bool) -> CliRe
         for f in &result.removed {
             writeln!(w, "removed: {f}").map_err(write_err)?;
         }
+    }
+
+    // Intent-to-add alone has no staged content; Git stays silent here.
+    if total == 0 {
+        return Ok(());
     }
 
     // Summary line
@@ -2610,7 +2809,8 @@ async fn stage_a_file(
         return Ok(StagedAction::Unchanged);
     }
 
-    let file_status = check_file_status(file, index, workdir)?;
+    let mode_dirty = mode_only_worktree_change(index, file_str, &file_abs, file_mode);
+    let file_status = check_file_status(file, index, workdir, file_mode)?;
     match file_status {
         FileStatus::New => {
             // Stat BEFORE reading: the entry's stat must describe the
@@ -2631,7 +2831,9 @@ async fn stage_a_file(
                         path: file.to_path_buf(),
                         source,
                     })?;
-            crate::utils::index_ext::update_preserving_file_mode(index, entry, file_mode);
+            crate::utils::index_ext::update_preserving_file_mode_except_intent(
+                index, entry, file_mode,
+            );
             clear_conflict_stages(index, file_str);
             Ok(StagedAction::Added)
         }
@@ -2639,14 +2841,14 @@ async fn stage_a_file(
             let unmerged = path_has_conflict_stages(index, file_str);
             let missing_stage0 = !index.tracked(file_str, 0);
             let content_dirty = !missing_stage0 && index.is_modified(file_str, 0, workdir);
-            if unmerged || missing_stage0 || content_dirty {
+            if unmerged || missing_stage0 || content_dirty || mode_dirty {
                 let pre_read = file_abs.symlink_metadata().ok();
                 let blob =
                     gen_blob_from_file(&file_abs).map_err(|source| AddError::CreateIndexEntry {
                         path: file.to_path_buf(),
                         source,
                     })?;
-                if missing_stage0 || !index.verify_hash(file_str, 0, &blob.id) {
+                if missing_stage0 || mode_dirty || !index.verify_hash(file_str, 0, &blob.id) {
                     blob.try_save().map_err(|source| AddError::ObjectSave {
                         path: file.to_path_buf(),
                         source,
@@ -2661,7 +2863,9 @@ async fn stage_a_file(
                         path: file.to_path_buf(),
                         source,
                     })?;
-                    crate::utils::index_ext::update_preserving_file_mode(index, entry, file_mode);
+                    crate::utils::index_ext::update_preserving_file_mode_except_intent(
+                        index, entry, file_mode,
+                    );
                 }
                 clear_conflict_stages(index, file_str);
                 return Ok(StagedAction::Modified);
@@ -2694,6 +2898,45 @@ enum FileStatus {
     NotFound,
 }
 
+/// Whether a tracked regular file differs from the index only in its
+/// owner-execute bit (ADR-FM-05). Only meaningful when `core.fileMode` is
+/// enabled.
+fn mode_only_worktree_change(
+    index: &Index,
+    file_str: &str,
+    file_abs: &Path,
+    file_mode: bool,
+) -> bool {
+    if !file_mode {
+        return false;
+    }
+    let Ok(metadata) = file_abs.symlink_metadata() else {
+        return false;
+    };
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return false;
+    }
+    index.get(file_str, 0).is_some_and(|entry| {
+        entry.mode & 0o100000 == 0o100000
+            && (entry.mode & 0o111 != 0) != worktree_exec_bit(&metadata)
+    })
+}
+
+/// Owner-execute bit of a worktree file (false on platforms without POSIX
+/// permission bits).
+fn worktree_exec_bit(metadata: &std::fs::Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        false
+    }
+}
+
 /// Compute a [`FileStatus`] for `file` (relative to `workdir`) using the
 /// in-memory `index`.
 ///
@@ -2704,7 +2947,12 @@ enum FileStatus {
 ///
 /// Boundary conditions:
 /// - Returns [`AddError::InvalidPathEncoding`] when `file` is not UTF-8.
-fn check_file_status(file: &Path, index: &Index, workdir: &Path) -> Result<FileStatus, AddError> {
+fn check_file_status(
+    file: &Path,
+    index: &Index,
+    workdir: &Path,
+    file_mode: bool,
+) -> Result<FileStatus, AddError> {
     let file_str = file.to_str().ok_or_else(|| AddError::InvalidPathEncoding {
         path: file.to_path_buf(),
     })?;
@@ -2722,7 +2970,10 @@ fn check_file_status(file: &Path, index: &Index, workdir: &Path) -> Result<FileS
         } else {
             Ok(FileStatus::New)
         }
-    } else if unmerged || index.is_modified(file_str, 0, workdir) {
+    } else if unmerged
+        || index.is_modified(file_str, 0, workdir)
+        || mode_only_worktree_change(index, file_str, &file_abs, file_mode)
+    {
         Ok(FileStatus::Modified)
     } else {
         Ok(FileStatus::Unchanged)
@@ -2741,6 +2992,25 @@ fn gen_blob_from_file(path: impl AsRef<Path>) -> io::Result<Blob> {
 #[cfg(test)]
 mod test {
     use super::*;
+
+    /// WT-05: the `add -N` entry is the empty blob with zeroed stat data and
+    /// the index v3 intent-to-add extended flag set (and skip-worktree clear).
+    #[test]
+    fn intent_to_add_entry_shape() {
+        let _guard = git_internal::hash::set_hash_kind_for_test(git_internal::hash::HashKind::Sha1);
+        let entry = intent_to_add_entry("new.txt".to_string(), 0o100644);
+        assert_eq!(entry.size, 0, "intent-to-add stat data is zeroed");
+        assert_eq!(entry.mode, 0o100644);
+        assert!(entry.flags.intent_to_add, "intent-to-add flag must be set");
+        assert!(!entry.flags.skip_worktree, "skip-worktree must stay clear");
+        assert_eq!(
+            entry.hash.to_string(),
+            "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391",
+            "entry must carry the empty blob"
+        );
+        let symlink = intent_to_add_entry("link".to_string(), 0o120000);
+        assert_eq!(symlink.mode, 0o120000, "symlink mode is preserved");
+    }
 
     /// Pin the `Display` format for the static-message and direct-message
     /// variants of [`AddError`]. These strings are used as the `CliError`

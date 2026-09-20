@@ -588,6 +588,11 @@ pub(crate) enum DiffError {
     #[error("bad config value '{value}' for '{key}'")]
     InvalidDiffConfig { key: &'static str, value: String },
 
+    /// A shared configuration read failed (for example an invalid
+    /// `core.fileMode`); the message is already user-facing.
+    #[error("{0}")]
+    InvalidConfig(String),
+
     #[error("failed to read config '{key}': {detail}")]
     DiffConfigRead { key: &'static str, detail: String },
 
@@ -663,6 +668,8 @@ impl From<DiffError> for CliError {
             DiffError::InvalidDiffConfig { key, .. } => CliError::command_usage(message)
                 .with_stable_code(StableErrorCode::CliInvalidArguments)
                 .with_hint(format!("fix the offending value with 'libra config {key} <value>'")),
+            DiffError::InvalidConfig(_) => CliError::command_usage(message)
+                .with_stable_code(StableErrorCode::CliInvalidArguments),
             DiffError::DiffConfigRead { .. } => CliError::fatal(message)
                 .with_stable_code(StableErrorCode::IoReadFailed),
             DiffError::InvalidColorMoved(_) => CliError::fatal(message)
@@ -715,6 +722,7 @@ pub async fn execute_safe(args: DiffArgs, output: &OutputConfig) -> CliResult<()
     if util::require_repo().is_err() {
         return Err(CliError::from(DiffError::NotInRepo));
     }
+    crate::command::status::warn_sparse_checkout_unsupported_once().await;
     let mut args = args;
     resolve_positional_revisions(&mut args)
         .await
@@ -2361,6 +2369,11 @@ async fn run_diff(
     util::require_repo().map_err(|_| DiffError::NotInRepo)?;
     tracing::debug!("diff args: {:?}", args);
     let index = Index::load(path::index()).map_err(|e| DiffError::IndexLoad(e.to_string()))?;
+    // ADR-FM-05: whether working-tree mode differences count is controlled by
+    // core.fileMode (invalid values fail diff closed before any output).
+    let file_mode = crate::internal::config::core_file_mode()
+        .await
+        .map_err(|error| DiffError::InvalidConfig(error.to_string()))?;
 
     // `--progress=json` keeps immediate NDJSON scan events for machine
     // consumers. Gate matches the old startup print: --json output, --quiet,
@@ -2397,7 +2410,7 @@ async fn run_diff(
     // the hint mid-scan, and the SAME handle is awaited afterwards — the
     // scan runs exactly once and a huge tree is never truncated (#466,
     // cf. #372). `finish()` erases the hint when the scan completes.
-    let old_side = resolve_diff_side(&args.old, args.staged, false, &index).await?;
+    let old_side = resolve_diff_side(&args.old, args.staged, false, &index, file_mode).await?;
     let (new_side, index) = if scan_hint.enabled {
         // `Index` is not `Clone`; move it into the blocking task through an
         // `Arc` and take it back out afterwards.
@@ -2419,7 +2432,7 @@ async fn run_diff(
                     previous: get_hash_kind(),
                 };
                 set_hash_kind(hash_kind);
-                resolve_worktree_side(&index)
+                resolve_worktree_side(&index, file_mode)
             })
         };
         let side =
@@ -2442,7 +2455,7 @@ async fn run_diff(
         };
         (side, index)
     } else {
-        let side = resolve_diff_side(&args.new, args.staged, true, &index).await?;
+        let side = resolve_diff_side(&args.new, args.staged, true, &index, file_mode).await?;
         (side, index)
     };
 
@@ -3385,6 +3398,15 @@ fn get_worktree_diff_files(index: &Index) -> Result<Vec<PathBuf>, DiffError> {
     let mut files = Vec::new();
 
     for file in index.tracked_files() {
+        // ADR-SW-04 item 1: skip-worktree paths are sparse-checkout entries;
+        // their (absent or stale) worktree copy is not a diff.
+        if file
+            .to_str()
+            .and_then(|name| index.get(name, 0))
+            .is_some_and(|entry| entry.flags.skip_worktree)
+        {
+            continue;
+        }
         let absolute = util::workdir_to_absolute(&file);
         if std::fs::symlink_metadata(&absolute).is_ok() {
             files.push(file);
@@ -3401,10 +3423,16 @@ fn get_worktree_diff_files(index: &Index) -> Result<Vec<PathBuf>, DiffError> {
 fn get_index_side(
     index: &Index,
     policy: IgnorePolicy,
+    exclude_skip_worktree: bool,
 ) -> (Vec<(PathBuf, ObjectHash)>, HashMap<PathBuf, u32>) {
     let entries = index
         .tracked_entries(0)
         .into_iter()
+        // ADR-SW-04 item 1: a skip-worktree path is intentionally absent or
+        // stale in the worktree and must not appear on the index side of a
+        // WORKING-DIRECTORY diff. A staged diff (`--cached`) still shows the
+        // index content, so the caller opts in explicitly.
+        .filter(|entry| !exclude_skip_worktree || !entry.flags.skip_worktree)
         .filter(|entry| !ignore::should_ignore(&PathBuf::from(&entry.name), policy, index));
     let mut blobs = Vec::new();
     let mut modes = HashMap::new();
@@ -3435,10 +3463,27 @@ fn get_worktree_modes(files: &[PathBuf]) -> Result<HashMap<PathBuf, u32>, DiffEr
 /// (no `.await`), so it must run on the blocking pool to keep the async
 /// runtime responsive while a large tree is scanned (#372) and to let the
 /// `WorktreeScanHint` timer actually win the race on slow scans (#466).
-fn resolve_worktree_side(index: &Index) -> Result<DiffSide, DiffError> {
+fn resolve_worktree_side(index: &Index, file_mode: bool) -> Result<DiffSide, DiffError> {
     let files = get_worktree_diff_files(index)?;
     let blobs = get_files_blobs(&files, index, IgnorePolicy::Respect)?;
-    let modes = get_worktree_modes(&files)?;
+    // ADR-FM-05: with core.fileMode=false the worktree mode comparison is
+    // disabled; the index's recorded mode is used so only content (and entry
+    // type) changes surface.
+    let modes = if file_mode {
+        get_worktree_modes(&files)?
+    } else {
+        files
+            .iter()
+            .map(|path| {
+                let mode = path
+                    .to_str()
+                    .and_then(|name| index.get(name, 0))
+                    .map(|entry| entry.mode)
+                    .unwrap_or(0o100644);
+                (path.clone(), mode)
+            })
+            .collect()
+    };
     Ok(DiffSide {
         label: "working tree".to_string(),
         worktree_entries: blobs.iter().cloned().collect(),
@@ -3453,6 +3498,7 @@ async fn resolve_diff_side(
     staged: bool,
     is_new: bool,
     index: &Index,
+    file_mode: bool,
 ) -> Result<DiffSide, DiffError> {
     if let Some(source) = source {
         let (blobs, modes) = get_treeish_entries(source).await?;
@@ -3467,7 +3513,7 @@ async fn resolve_diff_side(
 
     if is_new {
         if staged {
-            let (blobs, modes) = get_index_side(index, IgnorePolicy::Respect);
+            let (blobs, modes) = get_index_side(index, IgnorePolicy::Respect, false);
             Ok(DiffSide {
                 label: "index".to_string(),
                 blobs,
@@ -3476,7 +3522,7 @@ async fn resolve_diff_side(
                 is_worktree: false,
             })
         } else {
-            resolve_worktree_side(index)
+            resolve_worktree_side(index, file_mode)
         }
     } else if staged {
         match Head::current_commit().await {
@@ -3499,7 +3545,7 @@ async fn resolve_diff_side(
             }),
         }
     } else {
-        let (blobs, modes) = get_index_side(index, IgnorePolicy::Respect);
+        let (blobs, modes) = get_index_side(index, IgnorePolicy::Respect, true);
         Ok(DiffSide {
             label: "index".to_string(),
             blobs,

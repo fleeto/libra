@@ -24,7 +24,7 @@ use git_internal::{
         types::ObjectType,
     },
 };
-use sea_orm::{ConnectionTrait, DbBackend, Statement, TransactionTrait};
+use sea_orm::{ConnectionTrait, DbBackend, Statement};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;

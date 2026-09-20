@@ -532,7 +532,6 @@ async fn test_diff_after_init() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
     let staged_file = output_dir.path().join("diff_staged_output.txt");
@@ -582,7 +581,6 @@ async fn test_basic_diff() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
 
@@ -659,7 +657,6 @@ async fn test_diff_staged() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
 
@@ -703,7 +700,6 @@ async fn test_diff_staged() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
 
@@ -773,7 +769,6 @@ async fn test_diff_between_commits() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
 
@@ -819,7 +814,6 @@ async fn test_diff_between_commits() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
 
@@ -906,7 +900,6 @@ async fn test_diff_with_pathspec() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
 
@@ -991,7 +984,6 @@ async fn test_diff_output_to_file() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
 
@@ -1071,7 +1063,6 @@ async fn test_diff_algorithms() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
 

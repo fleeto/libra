@@ -1019,7 +1019,6 @@ async fn test_worktree_add_rejects_existing_non_empty_directory() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
     exec_commit(&["-m", "initial"])
@@ -1120,7 +1119,6 @@ async fn test_worktree_add_rolls_back_link_on_restore_failure() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
     exec_commit(&["-m", "initial"])
@@ -1192,7 +1190,6 @@ async fn test_worktree_add_rolls_back_populated_files_when_state_save_fails() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
     exec_commit(&["-m", "initial"])
@@ -1400,7 +1397,6 @@ async fn test_worktree_add_does_not_reset_index() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
 
@@ -1429,7 +1425,6 @@ async fn test_worktree_add_does_not_reset_index() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
 
@@ -1485,7 +1480,6 @@ async fn test_worktree_add_populates_from_head_not_staged_index() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
     exec_commit(&["-m", "initial"])
@@ -1513,7 +1507,6 @@ async fn test_worktree_add_populates_from_head_not_staged_index() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
 

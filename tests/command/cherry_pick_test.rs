@@ -255,7 +255,6 @@ async fn test_basic_cherry_pick() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -316,7 +315,6 @@ async fn test_basic_cherry_pick() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -364,7 +362,6 @@ async fn test_basic_cherry_pick() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -523,7 +520,6 @@ async fn test_cherry_pick_with_commit() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -580,7 +576,6 @@ async fn test_cherry_pick_with_commit() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -694,7 +689,6 @@ async fn test_cherry_pick_multiple_commits() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -752,7 +746,6 @@ async fn test_cherry_pick_multiple_commits() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -795,7 +788,6 @@ async fn test_cherry_pick_multiple_commits() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -1068,7 +1060,6 @@ async fn test_cherry_pick_sha256_hash_handling() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
     commit::execute(commit::CommitArgs {
@@ -1124,7 +1115,6 @@ async fn test_cherry_pick_sha256_hash_handling() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
     commit::execute(commit::CommitArgs {

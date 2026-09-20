@@ -86,7 +86,6 @@ async fn test_commit_requires_configured_identity_in_strict_mode() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
 
@@ -272,7 +271,6 @@ async fn test_execute_commit() {
             patch: false,
             auto_advance: false,
             no_auto_advance: false,
-            sparse: false,
         };
         add::execute(args).await;
     }
@@ -376,7 +374,6 @@ async fn test_commit_with_all_flag_stages_tracked_changes() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
 
@@ -462,7 +459,6 @@ async fn test_commit_with_all_flag_records_deletions() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
 
@@ -573,7 +569,6 @@ async fn test_commit_sha256() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
 
@@ -673,7 +668,6 @@ async fn test_commit_with_custom_author() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
 
@@ -942,7 +936,6 @@ async fn test_commit_with_actual_changes() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     };
     add::execute(add_args).await;
 
@@ -1036,7 +1029,6 @@ async fn test_commit_signoff_persists_trailer() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
 
@@ -1211,7 +1203,6 @@ async fn test_commit_without_identity_fails_by_default() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
 
@@ -1304,7 +1295,6 @@ async fn test_commit_cleanup_strips_comments() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
 
@@ -1502,7 +1492,6 @@ async fn test_commit_trailer_appended() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
 
@@ -1547,7 +1536,6 @@ async fn test_commit_dry_run_does_not_create_commit() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
 
@@ -1593,7 +1581,6 @@ async fn test_commit_reuse_message() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -1626,7 +1613,6 @@ async fn test_commit_reuse_message() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -1673,7 +1659,6 @@ async fn test_commit_fixup_sets_subject() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -1704,7 +1689,6 @@ async fn test_commit_fixup_sets_subject() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {

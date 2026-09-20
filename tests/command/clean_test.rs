@@ -119,7 +119,6 @@ async fn test_clean_force_keeps_tracked_files() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
 
@@ -193,7 +192,6 @@ async fn test_clean_force_respects_ignore_rules() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
 
@@ -245,7 +243,6 @@ async fn test_clean_force_multiple_untracked_with_tracked() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
 
@@ -566,7 +563,6 @@ async fn test_clean_d_flag_keeps_dirs_with_tracked_files() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
 
@@ -620,7 +616,6 @@ async fn test_clean_x_flag_removes_ignored_files() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
 
@@ -674,7 +669,6 @@ async fn test_clean_x_flag_removes_only_ignored_files() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
 
@@ -829,7 +823,6 @@ async fn test_clean_dx_removes_ignored_directories() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
 

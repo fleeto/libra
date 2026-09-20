@@ -613,7 +613,6 @@ async fn prepare_history() -> (ObjectHash, ObjectHash) {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
 
@@ -650,7 +649,6 @@ async fn prepare_history() -> (ObjectHash, ObjectHash) {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
 
@@ -687,7 +685,6 @@ async fn commit_foo(message: &str) -> ObjectHash {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -784,7 +781,6 @@ async fn test_blame_empty_file_returns_empty_result() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {

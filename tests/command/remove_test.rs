@@ -146,7 +146,6 @@ async fn test_remove_single_file() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
 
@@ -234,7 +233,6 @@ async fn test_remove_cached() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
 
@@ -303,7 +301,6 @@ async fn test_remove_directory_recursive() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
 
@@ -404,7 +401,6 @@ async fn test_remove_directory_without_recursive() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
 
@@ -504,7 +500,6 @@ async fn test_remove_modified_file() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
 
@@ -592,7 +587,6 @@ async fn test_remove_multiple_files() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
 
@@ -660,7 +654,6 @@ async fn test_remove_dry_run() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
 
@@ -737,7 +730,6 @@ async fn test_remove_dry_run_cached() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
 
@@ -803,7 +795,6 @@ async fn test_remove_dry_run_recursive() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
 
@@ -877,7 +868,6 @@ async fn test_remove_ignore_unmatch() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
 
@@ -941,7 +931,6 @@ async fn test_remove_pathspec_from_file_newline() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
 
@@ -998,7 +987,6 @@ async fn test_remove_pathspec_from_file_nul() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
 
@@ -1055,7 +1043,6 @@ async fn test_remove_pathspec_from_file_ignore_unmatch() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
 

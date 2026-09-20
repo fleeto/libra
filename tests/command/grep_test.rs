@@ -38,7 +38,6 @@ async fn add_and_commit(message: &str, pathspec: Vec<String>) {
             patch: false,
             auto_advance: false,
             no_auto_advance: false,
-            sparse: false,
         },
         &OutputConfig::default(),
     )

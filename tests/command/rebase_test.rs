@@ -1936,7 +1936,6 @@ async fn test_basic_rebase() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -1977,7 +1976,6 @@ async fn test_basic_rebase() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -2035,7 +2033,6 @@ async fn test_basic_rebase() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -2076,7 +2073,6 @@ async fn test_basic_rebase() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -2133,7 +2129,6 @@ async fn test_basic_rebase() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -2267,7 +2262,6 @@ async fn test_rebase_preserves_untracked_files() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -2324,7 +2318,6 @@ async fn test_rebase_preserves_untracked_files() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -2381,7 +2374,6 @@ async fn test_rebase_preserves_untracked_files() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -2490,7 +2482,6 @@ async fn test_rebase_already_up_to_date() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -2531,7 +2522,6 @@ async fn test_rebase_already_up_to_date() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -2630,7 +2620,6 @@ async fn test_rebase_abort_when_no_rebase_in_progress() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -2687,7 +2676,6 @@ async fn test_rebase_abort_when_no_rebase_in_progress() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -2744,7 +2732,6 @@ async fn test_rebase_abort_when_no_rebase_in_progress() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -2898,7 +2885,6 @@ async fn test_rebase_abort_restores_branch_after_finalize_failure() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -2954,7 +2940,6 @@ async fn test_rebase_abort_restores_branch_after_finalize_failure() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -3011,7 +2996,6 @@ async fn test_rebase_abort_restores_branch_after_finalize_failure() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -3190,7 +3174,6 @@ async fn test_rebase_continue_no_rebase() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -3271,7 +3254,6 @@ async fn test_rebase_skip_no_rebase() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -3354,7 +3336,6 @@ async fn test_rebase_with_conflict_and_abort() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -3415,7 +3396,6 @@ async fn test_rebase_with_conflict_and_abort() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -3472,7 +3452,6 @@ async fn test_rebase_with_conflict_and_abort() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -3645,7 +3624,6 @@ async fn test_rebase_binary_conflict_writes_markers() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -3701,7 +3679,6 @@ async fn test_rebase_binary_conflict_writes_markers() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -3757,7 +3734,6 @@ async fn test_rebase_binary_conflict_writes_markers() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -3906,7 +3882,6 @@ async fn test_rebase_with_conflict_and_skip() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -3968,7 +3943,6 @@ async fn test_rebase_with_conflict_and_skip() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -4014,7 +3988,6 @@ async fn test_rebase_with_conflict_and_skip() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -4071,7 +4044,6 @@ async fn test_rebase_with_conflict_and_skip() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -4215,7 +4187,6 @@ async fn test_rebase_with_conflict_and_continue() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -4276,7 +4247,6 @@ async fn test_rebase_with_conflict_and_continue() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -4333,7 +4303,6 @@ async fn test_rebase_with_conflict_and_continue() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -4433,7 +4402,6 @@ async fn test_rebase_with_conflict_and_continue() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
 
@@ -4526,7 +4494,6 @@ async fn test_rebase_multiple_commits_partial_conflict() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -4584,7 +4551,6 @@ async fn test_rebase_multiple_commits_partial_conflict() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -4630,7 +4596,6 @@ async fn test_rebase_multiple_commits_partial_conflict() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -4672,7 +4637,6 @@ async fn test_rebase_multiple_commits_partial_conflict() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -4729,7 +4693,6 @@ async fn test_rebase_multiple_commits_partial_conflict() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -4890,7 +4853,6 @@ async fn test_rebase_state_persistence() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -4947,7 +4909,6 @@ async fn test_rebase_state_persistence() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -5004,7 +4965,6 @@ async fn test_rebase_state_persistence() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -5166,7 +5126,6 @@ async fn test_rebase_fast_forward_branch_behind() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -5239,7 +5198,6 @@ async fn test_rebase_fast_forward_branch_behind() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -5351,7 +5309,6 @@ async fn test_rebase_fast_forward_blocks_dirty_workdir() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -5424,7 +5381,6 @@ async fn test_rebase_fast_forward_blocks_dirty_workdir() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -5537,7 +5493,6 @@ async fn test_rebase_fast_forward_blocks_untracked_overwrite() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -5610,7 +5565,6 @@ async fn test_rebase_fast_forward_blocks_untracked_overwrite() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -5723,7 +5677,6 @@ async fn test_rebase_blocks_dirty_workdir_non_fast_forward() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -5780,7 +5733,6 @@ async fn test_rebase_blocks_dirty_workdir_non_fast_forward() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -5837,7 +5789,6 @@ async fn test_rebase_blocks_dirty_workdir_non_fast_forward() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -5957,7 +5908,6 @@ async fn test_rebase_conflict_preserves_non_conflicting_workdir() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -6015,7 +5965,6 @@ async fn test_rebase_conflict_preserves_non_conflicting_workdir() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -6072,7 +6021,6 @@ async fn test_rebase_conflict_preserves_non_conflicting_workdir() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -6210,7 +6158,6 @@ async fn test_rebase_conflict_does_not_overwrite_untracked_paths() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -6268,7 +6215,6 @@ async fn test_rebase_conflict_does_not_overwrite_untracked_paths() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -6343,7 +6289,6 @@ async fn test_rebase_conflict_does_not_overwrite_untracked_paths() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -6480,7 +6425,6 @@ async fn test_rebase_continue_requires_resolution() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -6537,7 +6481,6 @@ async fn test_rebase_continue_requires_resolution() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -6594,7 +6537,6 @@ async fn test_rebase_continue_requires_resolution() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {

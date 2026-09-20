@@ -977,7 +977,6 @@ async fn stage_targets(targets: &[String]) -> CliResult<()> {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     };
     run_add(&args).await.map(|_| ()).map_err(|error| {
         am_state_error(format!(

@@ -628,7 +628,6 @@ async fn setup_repo_with_commit_with(
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
 
@@ -831,7 +830,6 @@ async fn test_force_tag() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -1042,7 +1040,6 @@ async fn test_annotation_lines_tag() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -1108,7 +1105,6 @@ async fn test_annotation_lines_tag() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {

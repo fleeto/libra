@@ -234,7 +234,6 @@ async fn test_changes_to_be_staged() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
 
@@ -382,7 +381,6 @@ async fn test_status_porcelain() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
 
@@ -408,7 +406,6 @@ async fn test_status_porcelain() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
     file2.write_all(b"modified content").unwrap();
@@ -558,7 +555,6 @@ async fn test_status_short_format() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
 
@@ -584,7 +580,6 @@ async fn test_status_short_format() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
 
@@ -691,7 +686,6 @@ async fn test_status_porcelain_v2_basic() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
     file1.write_all(b" more").unwrap(); // unstaged modification
@@ -781,7 +775,6 @@ async fn test_status_porcelain_v2_branch_metadata_includes_upstream_counts() {
             patch: false,
             auto_advance: false,
             no_auto_advance: false,
-            sparse: false,
         },
         &libra::utils::output::OutputConfig::default(),
     )
@@ -864,7 +857,6 @@ async fn test_status_porcelain_v2_untracked_files_no() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
 
@@ -934,7 +926,6 @@ async fn test_status_porcelain_v2_untracked_files_all() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
 
@@ -996,7 +987,6 @@ async fn test_status_untracked_files_no() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
 
@@ -1233,7 +1223,6 @@ async fn test_status_untracked_files_all() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
 
@@ -1329,7 +1318,6 @@ async fn test_status_mixed_changes() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
 
@@ -1405,7 +1393,6 @@ async fn test_status_deleted_files() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
 
@@ -1486,7 +1473,6 @@ async fn test_status_with_subdirectories() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
 
@@ -1584,7 +1570,6 @@ async fn test_status_verbose_output() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
 
@@ -1650,7 +1635,6 @@ async fn test_status_short_format_with_branch() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
 
@@ -1726,7 +1710,6 @@ async fn test_status_porcelain_format_with_branch() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
 
@@ -1802,7 +1785,6 @@ async fn test_status_show_stash_with_existing_stash() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
 
@@ -1836,7 +1818,6 @@ async fn test_status_show_stash_with_existing_stash() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
 
@@ -1968,7 +1949,6 @@ async fn test_status_show_stash_without_stash() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
 
@@ -2035,7 +2015,6 @@ async fn test_status_branch_detached_head() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
 
@@ -2069,7 +2048,6 @@ async fn test_status_branch_detached_head() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
 
@@ -2152,7 +2130,6 @@ async fn test_status_porcelain_v2_file_modes_and_hashes() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
     commit::execute(create_commit_args("Initial commit")).await;
@@ -2180,7 +2157,6 @@ async fn test_status_porcelain_v2_file_modes_and_hashes() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
 
@@ -2207,7 +2183,6 @@ async fn test_status_porcelain_v2_file_modes_and_hashes() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
 
@@ -2342,7 +2317,6 @@ async fn test_status_porcelain_v2_executable_file() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
 
@@ -2418,7 +2392,6 @@ async fn test_status_porcelain_v2_deleted_file() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
     commit::execute(create_commit_args("Initial commit")).await;
@@ -2517,7 +2490,6 @@ async fn test_status_after_add() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
-        sparse: false,
     })
     .await;
 
@@ -3172,7 +3144,6 @@ async fn test_status_short_branch_reports_up_to_date_with_fully_qualified_tracki
             patch: false,
             auto_advance: false,
             no_auto_advance: false,
-            sparse: false,
         },
         &libra::utils::output::OutputConfig::default(),
     )

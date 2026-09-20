@@ -11956,7 +11956,7 @@ fn apply_incremental_renames(
         occupancy.apply(path, false, true, 1);
     }
     let occupies_marker_only = |path: &Path, occupancy: &DestinationOccupancy| {
-        !occupancy.files.get(path).is_some_and(|count| *count > 0)
+        occupancy.files.get(path).is_none_or(|count| *count == 0)
             && occupancy.markers.get(path).is_some_and(|count| *count > 0)
     };
     let conflicted_paths: HashSet<&PathBuf> = conflicts.iter().map(|(path, _)| path).collect();
@@ -13945,6 +13945,13 @@ fn ensure_no_untracked_conflicts(
         }
     }
     Ok(())
+}
+
+/// Non-Unix platforms have no symlinks: the fallback writes the link target
+/// text as a regular file (matching `checkout`).
+#[cfg(not(unix))]
+fn write_workdir_file(workdir: &Path, relative: &Path, content: &[u8]) -> Result<(), String> {
+    write_workdir_file_with_mode(workdir, relative, content, false)
 }
 
 /// Mode-aware writer: the file is created with the entry-mode permissions

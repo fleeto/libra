@@ -214,6 +214,8 @@ async fn test_changes_to_be_staged() {
     );
 
     add::execute(AddArgs {
+        intent_to_add: false,
+        sparse: false,
         pathspec: vec![String::from(".")],
         all: true,
         update: false,
@@ -359,6 +361,8 @@ async fn test_status_porcelain() {
 
     // Add one file to the staging area
     add::execute(AddArgs {
+        intent_to_add: false,
+        sparse: false,
         pathspec: vec![String::from("file1.txt")],
         all: false,
         update: false,
@@ -382,6 +386,8 @@ async fn test_status_porcelain() {
 
     // Add another file to the staging area and modify it
     add::execute(AddArgs {
+        intent_to_add: false,
+        sparse: false,
         pathspec: vec![String::from("file2.txt")],
         all: false,
         update: false,
@@ -529,6 +535,8 @@ async fn test_status_short_format() {
 
     // Add one file to the staging area
     add::execute(AddArgs {
+        intent_to_add: false,
+        sparse: false,
         pathspec: vec![String::from("file1.txt")],
         all: false,
         update: false,
@@ -552,6 +560,8 @@ async fn test_status_short_format() {
 
     // Add another file to the staging area and modify it
     add::execute(AddArgs {
+        intent_to_add: false,
+        sparse: false,
         pathspec: vec![String::from("file2.txt")],
         all: false,
         update: false,
@@ -656,6 +666,8 @@ async fn test_status_porcelain_v2_basic() {
     let mut file1 = fs::File::create("file1.txt").unwrap();
     file1.write_all(b"content").unwrap();
     add::execute(AddArgs {
+        intent_to_add: false,
+        sparse: false,
         pathspec: vec![String::from("file1.txt")],
         all: false,
         update: false,
@@ -743,6 +755,8 @@ async fn test_status_porcelain_v2_branch_metadata_includes_upstream_counts() {
     fs::write("tracked.txt", "tracked\n").unwrap();
     add::execute_safe(
         AddArgs {
+            intent_to_add: false,
+            sparse: false,
             pathspec: vec![String::from("tracked.txt")],
             all: false,
             update: false,
@@ -823,6 +837,8 @@ async fn test_status_porcelain_v2_untracked_files_no() {
     // tracked file
     fs::write("tracked.txt", "t").unwrap();
     add::execute(AddArgs {
+        intent_to_add: false,
+        sparse: false,
         pathspec: vec![String::from("tracked.txt")],
         all: false,
         update: false,
@@ -890,6 +906,8 @@ async fn test_status_porcelain_v2_untracked_files_all() {
     // tracked file
     fs::write("tracked.txt", "t").unwrap();
     add::execute(AddArgs {
+        intent_to_add: false,
+        sparse: false,
         pathspec: vec![String::from("tracked.txt")],
         all: false,
         update: false,
@@ -949,6 +967,8 @@ async fn test_status_untracked_files_no() {
     // tracked file
     fs::write("tracked.txt", "t").unwrap();
     add::execute(AddArgs {
+        intent_to_add: false,
+        sparse: false,
         pathspec: vec![String::from("tracked.txt")],
         all: false,
         update: false,
@@ -1183,6 +1203,8 @@ async fn test_status_untracked_files_all() {
     // tracked file
     fs::write("tracked.txt", "t").unwrap();
     add::execute(AddArgs {
+        intent_to_add: false,
+        sparse: false,
         pathspec: vec![String::from("tracked.txt")],
         all: false,
         update: false,
@@ -1276,6 +1298,8 @@ async fn test_status_mixed_changes() {
     file1.write_all(b"initial content").unwrap();
 
     add::execute(AddArgs {
+        intent_to_add: false,
+        sparse: false,
         pathspec: vec![String::from("staged.txt")],
         all: false,
         update: false,
@@ -1349,6 +1373,8 @@ async fn test_status_deleted_files() {
     file.write_all(b"content to delete").unwrap();
 
     add::execute(AddArgs {
+        intent_to_add: false,
+        sparse: false,
         pathspec: vec![String::from(file_path)],
         all: false,
         update: false,
@@ -1427,6 +1453,8 @@ async fn test_status_with_subdirectories() {
 
     // Stage some files
     add::execute(AddArgs {
+        intent_to_add: false,
+        sparse: false,
         pathspec: vec![String::from("root_file.txt")],
         all: false,
         update: false,
@@ -1522,6 +1550,8 @@ async fn test_status_verbose_output() {
 
     // Stage the file
     add::execute(AddArgs {
+        intent_to_add: false,
+        sparse: false,
         pathspec: vec![String::from("script.sh")],
         all: false,
         update: false,
@@ -1585,6 +1615,8 @@ async fn test_status_short_format_with_branch() {
 
     // Add one file to the staging area
     add::execute(AddArgs {
+        intent_to_add: false,
+        sparse: false,
         pathspec: vec![String::from("file1.txt")],
         all: false,
         update: false,
@@ -1658,6 +1690,8 @@ async fn test_status_porcelain_format_with_branch() {
 
     // Add one file to the staging area
     add::execute(AddArgs {
+        intent_to_add: false,
+        sparse: false,
         pathspec: vec![String::from("file1.txt")],
         all: false,
         update: false,
@@ -1731,6 +1765,8 @@ async fn test_status_show_stash_with_existing_stash() {
 
     // Add one file to the staging area
     add::execute(AddArgs {
+        intent_to_add: false,
+        sparse: false,
         pathspec: vec![String::from("file1.txt")],
         all: false,
         update: false,
@@ -1763,6 +1799,8 @@ async fn test_status_show_stash_with_existing_stash() {
     file1.write_all(b"modified content").unwrap();
 
     add::execute(AddArgs {
+        intent_to_add: false,
+        sparse: false,
         pathspec: vec![String::from("file1.txt")],
         all: false,
         update: false,
@@ -1891,6 +1929,8 @@ async fn test_status_show_stash_without_stash() {
 
     // Add one file to the staging area
     add::execute(AddArgs {
+        intent_to_add: false,
+        sparse: false,
         pathspec: vec![String::from("file1.txt")],
         all: false,
         update: false,
@@ -1955,6 +1995,8 @@ async fn test_status_branch_detached_head() {
     file1.write_all(b"initial content").unwrap();
 
     add::execute(AddArgs {
+        intent_to_add: false,
+        sparse: false,
         pathspec: vec![String::from("file1.txt")],
         all: false,
         update: false,
@@ -1986,6 +2028,8 @@ async fn test_status_branch_detached_head() {
     file2.write_all(b"second file").unwrap();
 
     add::execute(AddArgs {
+        intent_to_add: false,
+        sparse: false,
         pathspec: vec![String::from("file2.txt")],
         all: false,
         update: false,
@@ -2066,6 +2110,8 @@ async fn test_status_porcelain_v2_file_modes_and_hashes() {
     // Create and commit a file first
     fs::write("existing.txt", "existing content").unwrap();
     add::execute(AddArgs {
+        intent_to_add: false,
+        sparse: false,
         pathspec: vec![String::from("existing.txt")],
         all: false,
         update: false,
@@ -2091,6 +2137,8 @@ async fn test_status_porcelain_v2_file_modes_and_hashes() {
     // Modify the existing file
     fs::write("existing.txt", "modified content").unwrap();
     add::execute(AddArgs {
+        intent_to_add: false,
+        sparse: false,
         pathspec: vec![String::from("existing.txt")],
         all: false,
         update: false,
@@ -2115,6 +2163,8 @@ async fn test_status_porcelain_v2_file_modes_and_hashes() {
     // Create a new file (staged)
     fs::write("new_file.txt", "new content").unwrap();
     add::execute(AddArgs {
+        intent_to_add: false,
+        sparse: false,
         pathspec: vec![String::from("new_file.txt")],
         all: false,
         update: false,
@@ -2247,6 +2297,8 @@ async fn test_status_porcelain_v2_executable_file() {
 
     // Stage the executable file
     add::execute(AddArgs {
+        intent_to_add: false,
+        sparse: false,
         pathspec: vec![String::from("script.sh")],
         all: false,
         update: false,
@@ -2320,6 +2372,8 @@ async fn test_status_porcelain_v2_deleted_file() {
     // Create, stage and commit a file
     fs::write("to_delete.txt", "content").unwrap();
     add::execute(AddArgs {
+        intent_to_add: false,
+        sparse: false,
         pathspec: vec![String::from("to_delete.txt")],
         all: false,
         update: false,
@@ -2417,6 +2471,8 @@ async fn test_status_after_add() {
 
     // Add the file
     add::execute(AddArgs {
+        intent_to_add: false,
+        sparse: false,
         pathspec: vec![String::from(file_path)],
         all: false,
         update: false,
@@ -3068,6 +3124,8 @@ async fn test_status_short_branch_reports_up_to_date_with_fully_qualified_tracki
     fs::write("tracked.txt", "tracked\n").unwrap();
     add::execute_safe(
         AddArgs {
+            intent_to_add: false,
+            sparse: false,
             pathspec: vec![String::from("tracked.txt")],
             all: false,
             update: false,
@@ -3556,5 +3614,467 @@ fn test_status_reports_local_upstream() {
     assert!(
         short_out.lines().next() == Some("## alpha...main"),
         "P7 short status: {short_out}"
+    );
+}
+
+/// Set `skip_worktree` on a tracked path through the git-internal index API
+/// (the CLI entry point arrives with SW-07).
+fn mark_skip_worktree_for_status(repo: &std::path::Path, path: &str) {
+    use git_internal::{
+        hash::HashKind,
+        internal::index::{Index, IndexEntry},
+    };
+    let index_path = repo.join(".libra/index");
+    let mut index =
+        Index::load_with_hash_kind(HashKind::Sha1, &index_path).expect("load index for marking");
+    let (hash, mode, size) = {
+        let entry = index.get(path, 0).expect("tracked path");
+        (entry.hash, entry.mode, entry.size)
+    };
+    let mut entry = IndexEntry::new_from_blob(path.to_string(), hash, size);
+    entry.mode = mode;
+    entry.flags.skip_worktree = true;
+    index.update(entry);
+    index
+        .save_with_hash_kind(HashKind::Sha1, &index_path)
+        .expect("save index");
+}
+
+fn has_skip_worktree_for_status(repo: &std::path::Path, path: &str) -> bool {
+    use git_internal::{hash::HashKind, internal::index::Index};
+    Index::load_with_hash_kind(HashKind::Sha1, repo.join(".libra/index"))
+        .expect("load index")
+        .get(path, 0)
+        .is_some_and(|entry| entry.flags.skip_worktree)
+}
+
+/// Whether command output mentions the tracked path `s` as a path token (a
+/// bare `contains('s')` would also match words like "files").
+fn output_mentions_path_s(output: &str) -> bool {
+    output
+        .lines()
+        .any(|line| line.split_whitespace().last() == Some("s"))
+}
+
+/// SW-05 (M-HONOR H1–H6, plan issues/490): status/diff/add -u/commit -a respect
+/// the skip-worktree bit.
+#[test]
+fn test_status_honors_skip_worktree_matrix() {
+    let repo = tempdir().expect("tempdir");
+    let root = repo.path();
+    init_repo_via_cli(root);
+    configure_identity_via_cli(root);
+    fs::write(root.join("other"), "other\n").expect("write other");
+    fs::write(root.join("s"), "s\n").expect("write s");
+    assert_cli_success(&run_libra_command(&["add", "other", "s"], root), "stage");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "init", "--no-verify"], root),
+        "commit",
+    );
+    mark_skip_worktree_for_status(root, "s");
+
+    // H1: the skip-worktree file is deleted in the worktree.
+    fs::remove_file(root.join("s")).expect("remove s");
+    let status = run_libra_command(&["status", "--short"], root);
+    assert_cli_success(&status, "status --short");
+    let status_text = String::from_utf8_lossy(&status.stdout).to_string();
+    assert!(
+        !output_mentions_path_s(&status_text),
+        "H1 status must not report s: {status_text}"
+    );
+    let json = run_libra_command(&["--json", "status"], root);
+    assert_cli_success(&json, "status --json");
+    let parsed = parse_json_stdout(&json);
+    assert_eq!(
+        parsed["data"]["deleted"]
+            .as_array()
+            .map(Vec::len)
+            .unwrap_or(0),
+        0,
+        "H1 JSON must not report s: {parsed}"
+    );
+    let diff_names = run_libra_command(&["diff", "--name-only"], root);
+    assert_cli_success(&diff_names, "diff --name-only");
+    assert!(
+        String::from_utf8_lossy(&diff_names.stdout)
+            .trim()
+            .is_empty(),
+        "H1 diff must be empty: {}",
+        String::from_utf8_lossy(&diff_names.stdout)
+    );
+    let diff_files = run_libra_command(&["diff-files"], root);
+    assert_cli_success(&diff_files, "diff-files");
+    assert!(
+        String::from_utf8_lossy(&diff_files.stdout)
+            .trim()
+            .is_empty(),
+        "H1 diff-files must be empty: {}",
+        String::from_utf8_lossy(&diff_files.stdout)
+    );
+
+    // H2: the skip-worktree file is modified in the worktree.
+    fs::write(root.join("s"), "modified\n").expect("rewrite s");
+    let status = run_libra_command(&["status", "--short"], root);
+    let status_text = String::from_utf8_lossy(&status.stdout).to_string();
+    assert!(
+        !output_mentions_path_s(&status_text),
+        "H2 status must not report s: {status_text}"
+    );
+    let diff_names = run_libra_command(&["diff", "--name-only"], root);
+    assert!(
+        String::from_utf8_lossy(&diff_names.stdout)
+            .trim()
+            .is_empty(),
+        "H2 diff must be empty"
+    );
+
+    // H3: add -u / -A dry-run does not report the missing skip-worktree path.
+    let add_u = run_libra_command(&["add", "-u", "--dry-run"], root);
+    assert_cli_success(&add_u, "add -u --dry-run");
+    let add_u_text = String::from_utf8_lossy(&add_u.stdout).to_string();
+    assert!(
+        !output_mentions_path_s(&add_u_text),
+        "H3 add -u must not report s: {add_u_text}"
+    );
+    let add_a = run_libra_command(&["add", "-A", "--dry-run"], root);
+    assert_cli_success(&add_a, "add -A --dry-run");
+    let add_a_text = String::from_utf8_lossy(&add_a.stdout).to_string();
+    assert!(
+        !output_mentions_path_s(&add_a_text),
+        "H3 add -A must not report s: {add_a_text}"
+    );
+
+    // H4: commit -a neither deletes `s` nor clears the bit (it needs another
+    // real change to commit, since the skip-worktree deletion is not one).
+    fs::write(root.join("other"), "h4\n").expect("write other");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-a", "-m", "h4", "--no-verify"], root),
+        "H4 commit -a",
+    );
+    assert!(
+        has_skip_worktree_for_status(root, "s"),
+        "H4 the bit must survive commit -a"
+    );
+    let tracked = run_libra_command(&["ls-files"], root);
+    assert!(
+        String::from_utf8_lossy(&tracked.stdout)
+            .lines()
+            .any(|line| line.trim() == "s"),
+        "H4 commit -a must not delete s"
+    );
+
+    // H5: core.sparseCheckout=true keeps the H1 behavior and warns once.
+    assert_cli_success(
+        &run_libra_command(&["config", "set", "core.sparseCheckout", "true"], root),
+        "enable sparseCheckout",
+    );
+    fs::remove_file(root.join("s")).ok();
+    let status = run_libra_command(&["status", "--short"], root);
+    assert_cli_success(&status, "H5 status");
+    let stderr = String::from_utf8_lossy(&status.stderr).to_string();
+    assert!(
+        stderr.contains("core.sparseCheckout=true is not supported"),
+        "H5 one-time warning expected: {stderr}"
+    );
+    assert!(
+        !output_mentions_path_s(&String::from_utf8_lossy(&status.stdout)),
+        "H5 status must stay silent about s"
+    );
+
+    // H6: a repository without the bit still reports ordinary changes.
+    assert_cli_success(
+        &run_libra_command(&["config", "set", "core.sparseCheckout", "false"], root),
+        "disable sparseCheckout",
+    );
+    fs::write(root.join("shared.txt"), "shared\n").expect("write shared");
+    fs::write(root.join("plain.txt"), "plain\n").expect("write plain");
+    assert_cli_success(
+        &run_libra_command(&["add", "shared.txt", "plain.txt"], root),
+        "stage h6",
+    );
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "h6", "--no-verify"], root),
+        "commit h6",
+    );
+    fs::remove_file(root.join("shared.txt")).expect("remove shared");
+    let status = run_libra_command(&["status", "--short"], root);
+    assert!(
+        String::from_utf8_lossy(&status.stdout).contains("shared.txt"),
+        "H6 ordinary deletions are still reported: {}",
+        String::from_utf8_lossy(&status.stdout)
+    );
+}
+
+/// FM-04 (M-DET D1/D2/D6/D7, plan-20260918): mode-only worktree changes are
+/// reported like Git when `core.fileMode` is enabled and ignored when it is
+/// false; type changes stay reported either way.
+#[cfg(unix)]
+#[test]
+fn test_status_reports_mode_only_changes_matrix() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let repo = tempdir().expect("tempdir");
+    let root = repo.path();
+    init_repo_via_cli(root);
+    configure_identity_via_cli(root);
+    let plain = root.join("plain.txt");
+    let run = root.join("run.sh");
+    fs::write(&plain, "plain\n").expect("write plain");
+    fs::set_permissions(&plain, fs::Permissions::from_mode(0o644)).expect("chmod plain");
+    fs::write(&run, "#!/bin/sh\n").expect("write run");
+    fs::set_permissions(&run, fs::Permissions::from_mode(0o755)).expect("chmod run");
+    assert_cli_success(
+        &run_libra_command(&["add", "plain.txt", "run.sh"], root),
+        "add",
+    );
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "init", "--no-verify"], root),
+        "commit",
+    );
+
+    // D1: chmod 755 plain.txt (content unchanged).
+    fs::set_permissions(&plain, fs::Permissions::from_mode(0o755)).expect("chmod 755");
+    let short = run_libra_command(&["status", "--short"], root);
+    assert_cli_success(&short, "status --short");
+    assert!(
+        String::from_utf8_lossy(&short.stdout).contains(" M plain.txt"),
+        "D1 status --short: {}",
+        String::from_utf8_lossy(&short.stdout)
+    );
+    let porcelain = run_libra_command(&["status", "--porcelain=v2"], root);
+    assert!(
+        String::from_utf8_lossy(&porcelain.stdout).contains("1 .M N... 100644 100644 100755"),
+        "D1 porcelain v2 mode columns: {}",
+        String::from_utf8_lossy(&porcelain.stdout)
+    );
+    let diff = run_libra_command(&["diff"], root);
+    assert!(
+        String::from_utf8_lossy(&diff.stdout).contains("old mode 100644")
+            && String::from_utf8_lossy(&diff.stdout).contains("new mode 100755"),
+        "D1 diff mode header: {}",
+        String::from_utf8_lossy(&diff.stdout)
+    );
+
+    // D2: chmod 644 run.sh.
+    fs::set_permissions(&run, fs::Permissions::from_mode(0o644)).expect("chmod 644");
+    let short = run_libra_command(&["status", "--short"], root);
+    assert!(
+        String::from_utf8_lossy(&short.stdout).contains(" M run.sh"),
+        "D2 status --short: {}",
+        String::from_utf8_lossy(&short.stdout)
+    );
+    let diff = run_libra_command(&["diff", "--summary"], root);
+    assert!(
+        String::from_utf8_lossy(&diff.stdout).contains("mode change"),
+        "D2 --summary: {}",
+        String::from_utf8_lossy(&diff.stdout)
+    );
+
+    // D6: core.fileMode=false hides mode-only changes from status and diff.
+    assert_cli_success(
+        &run_libra_command(&["config", "set", "core.fileMode", "false"], root),
+        "disable fileMode",
+    );
+    let short = run_libra_command(&["status", "--short", "--untracked-files=no"], root);
+    assert!(
+        String::from_utf8_lossy(&short.stdout).trim().is_empty(),
+        "D6 status must be clean: {}",
+        String::from_utf8_lossy(&short.stdout)
+    );
+    let diff_names = run_libra_command(&["diff", "--name-only"], root);
+    assert!(
+        String::from_utf8_lossy(&diff_names.stdout)
+            .trim()
+            .is_empty(),
+        "D6 diff must be empty: {}",
+        String::from_utf8_lossy(&diff_names.stdout)
+    );
+
+    // D7: a file/symlink swap is still a type change with fileMode=false.
+    assert_cli_success(
+        &run_libra_command(&["config", "set", "core.fileMode", "true"], root),
+        "reenable fileMode",
+    );
+    fs::remove_file(&plain).expect("remove plain");
+    std::os::unix::fs::symlink("run.sh", &plain).expect("symlink swap");
+    let short = run_libra_command(&["status", "--short"], root);
+    assert!(
+        String::from_utf8_lossy(&short.stdout).contains("plain.txt"),
+        "D7 type change must be reported: {}",
+        String::from_utf8_lossy(&short.stdout)
+    );
+}
+
+/// WT-02 (M-RENAME M1–M6, issues/476): `status -M[<n>]` is the short form of
+/// `--find-renames[=<n>]`, and the last rename spelling on the command line
+/// wins across `-M`, `--find-renames`, `--renames`, and `--no-renames`.
+#[test]
+fn test_status_short_m_rename_threshold_matrix() {
+    let repo = tempdir().expect("tempdir");
+    let root = repo.path();
+    init_repo_via_cli(root);
+    configure_identity_via_cli(root);
+    let original: String = (1..=10).map(|i| format!("line {i}\n")).collect();
+    fs::write(root.join("r.txt"), original).expect("write r.txt");
+    assert_cli_success(&run_libra_command(&["add", "r.txt"], root), "add");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "init", "--no-verify"], root),
+        "commit",
+    );
+    // ~70% similarity: below a 90% threshold, above the 50% default.
+    let renamed: String = (1..=7)
+        .map(|i| format!("line {i}\n"))
+        .chain((1..=3).map(|i| format!("new {i}\n")))
+        .collect();
+    fs::write(root.join("r2.txt"), renamed).expect("write r2.txt");
+    fs::remove_file(root.join("r.txt")).expect("remove r.txt");
+    assert_cli_success(&run_libra_command(&["add", "-A"], root), "add -A");
+
+    let porcelain = |args: &[&str]| {
+        let out = run_libra_command(args, root);
+        assert_cli_success(&out, &format!("{args:?}"));
+        String::from_utf8_lossy(&out.stdout).to_string()
+    };
+
+    // M1: a bare `-M` detects at the default threshold.
+    let out = porcelain(&["status", "--porcelain", "-M"]);
+    assert!(out.contains("R  r.txt -> r2.txt"), "M1: {out}");
+
+    // M2: 90% is above the actual similarity, so the pair stays delete + add.
+    for args in [
+        &["status", "--porcelain", "-M90"][..],
+        &["status", "--porcelain", "-M90%"][..],
+    ] {
+        let out = porcelain(args);
+        assert!(
+            out.contains("D  r.txt") && out.contains("A  r2.txt"),
+            "M2 {args:?}: {out}"
+        );
+        assert!(!out.contains("->"), "M2 {args:?} must not detect: {out}");
+    }
+
+    // M3: 50% is below the similarity, so the rename is detected.
+    let out = porcelain(&["status", "--porcelain", "-M50%"]);
+    assert!(out.contains("R  r.txt -> r2.txt"), "M3: {out}");
+
+    // M4: the last spelling wins in argv order.
+    let out = porcelain(&["status", "--porcelain", "-M", "--no-renames"]);
+    assert!(
+        out.contains("D  r.txt") && !out.contains("->"),
+        "M4a (-M --no-renames): {out}"
+    );
+    let out = porcelain(&["status", "--porcelain", "--no-renames", "-M"]);
+    assert!(
+        out.contains("R  r.txt -> r2.txt"),
+        "M4b (--no-renames -M): {out}"
+    );
+
+    // M5: a non-numeric value is a usage error with no stdout.
+    let bad = run_libra_command(&["status", "--porcelain", "-Mabc"], root);
+    assert_eq!(
+        bad.status.code(),
+        Some(129),
+        "M5 exit: {}",
+        String::from_utf8_lossy(&bad.stderr)
+    );
+    assert!(bad.stdout.is_empty(), "M5 stdout must stay empty");
+    // Registered deviation from the M-RENAME M5 text: `-M101` parses as Git's
+    // `0.101` (10.1%) and is accepted, exactly like `libra diff -M101` and git
+    // 2.55.0 (both re-measured 2026-09-20); the matrix's "129" does not
+    // reproduce on either CLI.
+    let accepted = run_libra_command(&["status", "--porcelain", "-M101"], root);
+    assert_cli_success(&accepted, "M5 -M101");
+    assert!(
+        String::from_utf8_lossy(&accepted.stdout).contains("R  r.txt -> r2.txt"),
+        "M5 -M101 detects at 10.1%"
+    );
+
+    // M6: porcelain v2 emits the rename record with its score.
+    let out = porcelain(&["status", "--porcelain=v2", "-M"]);
+    assert!(out.contains("2 R."), "M6 record: {out}");
+    assert!(out.contains("r2.txt\tr.txt"), "M6 paths: {out}");
+}
+
+/// WT-01 (M-GUARD G1–G2, issues/476): `-uall` lists nested untracked files
+/// and collapses a nested repository to `?? inner/`.
+#[test]
+fn test_status_uall_expands_nested_untracked_matrix() {
+    let repo = create_committed_repo_via_cli();
+    let root = repo.path();
+    fs::create_dir_all(root.join("dir/sub")).expect("dir/sub");
+    fs::create_dir_all(root.join("nested")).expect("nested");
+    fs::write(root.join("dir/file"), "f\n").expect("dir/file");
+    fs::write(root.join("dir/sub/g"), "g\n").expect("dir/sub/g");
+    fs::write(root.join("nested/x"), "x\n").expect("nested/x");
+
+    let files = ["dir/file", "dir/sub/g", "nested/x"];
+    let invocations: &[&[&str]] = &[
+        &["status", "-uall"],
+        &["status", "-s", "-uall"],
+        &["status", "--untracked-files=all"],
+        &["status", "--porcelain=v2", "-uall"],
+    ];
+    for args in invocations {
+        let out = run_libra_command(args, root);
+        assert_cli_success(&out, &format!("G1 {args:?}"));
+        let text = String::from_utf8_lossy(&out.stdout).replace('\\', "/");
+        for file in files {
+            assert!(text.contains(file), "G1 {args:?} must list {file}: {text}");
+        }
+        assert!(
+            !text.lines().any(|line| {
+                let trimmed = line.trim();
+                trimmed == "?? dir/" || trimmed == "? dir/" || trimmed.ends_with("\tdir/")
+            }),
+            "G1 {args:?} must expand dir/, not collapse it: {text}"
+        );
+    }
+
+    let short = run_libra_command(&["status", "-s", "-uall"], root);
+    let short_text = String::from_utf8_lossy(&short.stdout).replace('\\', "/");
+    for file in files {
+        assert!(
+            short_text
+                .lines()
+                .any(|line| line.trim() == format!("?? {file}")),
+            "G1 -s -uall porcelain: {file} in {short_text}"
+        );
+    }
+
+    let v2 = run_libra_command(&["status", "--porcelain=v2", "-uall"], root);
+    let v2_text = String::from_utf8_lossy(&v2.stdout).replace('\\', "/");
+    for file in files {
+        assert!(
+            v2_text
+                .lines()
+                .any(|line| line.trim() == format!("? {file}")),
+            "G1 porcelain v2: {file} in {v2_text}"
+        );
+    }
+
+    // G2: a nested Libra or Git repository is reported as the directory only.
+    let inner = root.join("inner");
+    fs::create_dir_all(&inner).expect("inner");
+    fs::write(inner.join("file.txt"), "nested-libra\n").expect("inner file");
+    assert_cli_success(&run_libra_command(&["init"], &inner), "G2 inner init");
+
+    let gitnest = root.join("gitnest");
+    fs::create_dir_all(gitnest.join(".git")).expect("gitnest/.git");
+    fs::write(gitnest.join("file.txt"), "nested-git\n").expect("gitnest file");
+
+    let nested = run_libra_command(&["status", "-s", "-uall"], root);
+    assert_cli_success(&nested, "G2 -s -uall");
+    let nested_text = String::from_utf8_lossy(&nested.stdout).replace('\\', "/");
+    assert!(
+        nested_text.lines().any(|line| line.trim() == "?? inner/"),
+        "G2 must report ?? inner/: {nested_text}"
+    );
+    assert!(
+        nested_text.lines().any(|line| line.trim() == "?? gitnest/"),
+        "G2 must report ?? gitnest/: {nested_text}"
+    );
+    assert!(
+        !nested_text.contains("inner/file.txt") && !nested_text.contains("gitnest/file.txt"),
+        "G2 must not expand a nested repository: {nested_text}"
     );
 }

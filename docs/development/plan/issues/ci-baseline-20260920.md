@@ -30,7 +30,7 @@
   本地未执行其全量测试，也未完成 cargo test --all、Rustdoc、doctest 和其余定向矩阵。
 - 原 CI job 106045482918 的 22 项失败已核对：archive 2、文件模式 12、配置修复 7、
   数据库迁移 1；必须包含 db_migration_test::global_schema_repair_writes_configuration_ledger_only。
-- 汇总 PR：创建后补充链接。#505、#506、#507 保持开启，最终提交全绿后才关闭。
+- 汇总 PR：[#508](https://github.com/libra-tools/libra/pull/508)。#505、#506、#507 保持开启，最终提交全绿后才关闭。
 
 ## 线上验收与关闭门禁
 

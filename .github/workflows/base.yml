@@ -174,7 +174,11 @@ jobs:
 
       - name: Prepare isolated test home
         shell: bash
-        run: mkdir -p "$RUNNER_TEMP/libra-ci-home/.config"
+        run: |
+          mkdir -p "$RUNNER_TEMP/libra-ci-home/.config" "$RUNNER_TEMP/libra-ci-scratch"
+          chmod 700 "$RUNNER_TEMP/libra-ci-home" "$RUNNER_TEMP/libra-ci-home/.config" \
+            "$RUNNER_TEMP/libra-ci-scratch"
+          echo "LIBRA_TEST_SCRATCH_DIR=$RUNNER_TEMP/libra-ci-scratch" >> "$GITHUB_ENV"
 
       - name: Check compatibility matrix drift
         run: cargo test --test compat_matrix_alignment compatibility_matrix_matches_cli_commands -- --exact
@@ -207,6 +211,9 @@ jobs:
           LIBRA_STORAGE_SECRET_KEY: ${{ secrets.LIBRA_STORAGE_SECRET_KEY }}
         run: |
           set -euo pipefail
+          # Tests assert Git-style 0755/0644 modes and reject group/world-
+          # writable repair inputs. Self-hosted runners may use umask 0002.
+          umask 022
           # plan-20260827 NP-04 disposition ①+②: one nextest invocation runs
           # lib + bins + every default-feature integration target INCLUDING
           # command_test — one process per test dissolves the in-process cwd

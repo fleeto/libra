@@ -29,6 +29,8 @@ worktree you run them in. Stack mutations are serialized by a lock, and
 changed concurrently, the entry is kept and reported rather than deleting the
 wrong one; the successful apply is never rolled back).
 
+Worktree materialization is mode-aware (plan issues/470 FM-02): files are created with the entry mode's permission bits (`100755` -> `0777`, `100644` -> `0666`) under the process `umask`, replaced atomically through a same-directory temp file, and the index/tree entries keep the mode (`100755`/`100644`/`120000`).
+
 ## Options
 
 ### Subcommands
@@ -414,7 +416,7 @@ Libra preserves Git's `stash@{N}` reference syntax for familiarity. Users migrat
 | Include untracked | `-u` / `--include-untracked` | `-u` / `--include-untracked` | N/A |
 | No include untracked | `--no-include-untracked` (countermands `-u`) | `--no-include-untracked` | N/A |
 | Include all (ignored too) | `-a` / `--all` | `-a` / `--all` | N/A |
-| Pathspec (partial stash) | `stash push -- <pathspec>...` (file/dir paths, `.` = whole tree; not combinable with `-u`/`-a`/`-k` → `LBR-CLI-002`; no match → `LBR-CLI-003`) | `stash push [--] <pathspec>...` | N/A |
+| Pathspec (partial stash) | `stash push -- <pathspec>...` (plain names, wildcards, and `:(glob)`/`:(literal)`/`:(icase)`/`:(exclude)` match through the shared pathspec engine; `.` = whole tree; not combinable with `-u`/`-a`/`-k` → `LBR-CLI-002`; no match → `LBR-CLI-003`) | `stash push [--] <pathspec>...` | N/A |
 | Pop | `stash pop [ref]` | `stash pop [--index] [<stash>]` | N/A |
 | Apply | `stash apply [ref]` | `stash apply [--index] [<stash>]` | N/A |
 | Drop | `stash drop [ref]` | `stash drop [<stash>]` | N/A |

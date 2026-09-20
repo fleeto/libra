@@ -1106,11 +1106,12 @@ async fn test_add_pathspec_from_file_newline_stages_listed_paths() {
     fs::write("file1.txt", "one\n").unwrap();
     fs::write("file2.txt", "two\n").unwrap();
     fs::write("file3.txt", "three\n").unwrap();
-    // file1 via the file list, file3 via the CLI pathspec; file2 in neither.
+    // Only file1 is listed; file2/file3 stay unstaged. (ADR-PSF-03: a
+    // command-line pathspec cannot be combined with `--pathspec-from-file`.)
     fs::write("paths.txt", "file1.txt\n").unwrap();
 
     add::execute(AddArgs {
-        pathspec: vec![String::from("file3.txt")],
+        pathspec: vec![],
         all: false,
         update: false,
         refresh: false,
@@ -1136,11 +1137,8 @@ async fn test_add_pathspec_from_file_newline_stages_listed_paths() {
         staged("file1.txt"),
         "file1.txt (from file list) should be staged"
     );
-    assert!(
-        staged("file3.txt"),
-        "file3.txt (from CLI pathspec) should be staged"
-    );
     assert!(!staged("file2.txt"), "file2.txt should NOT be staged");
+    assert!(!staged("file3.txt"), "file3.txt should NOT be staged");
 }
 
 /// `--pathspec-from-file` with `--pathspec-file-nul` reads a NUL-separated list.
@@ -2822,5 +2820,966 @@ async fn test_add_ignored_dispatch_before_exit_one() {
     assert!(
         rows.iter().any(|row| row.rule_id == "index_summary"),
         "POST_ADD must be dispatched before the non-zero return: {rows:?}"
+    );
+}
+
+/// TC-0004 / M-MISS M1: `--dry-run --ignore-missing` classifies a non-existent
+/// but ignored pathspec as ignored (exit 1) while leaving the index untouched.
+#[test]
+fn test_add_dry_run_ignore_missing_ignored_path_tc0004() {
+    let repo = tempdir().unwrap();
+    let p = repo.path();
+    init_repo_via_cli(p);
+    configure_identity_via_cli(p);
+    fs::write(p.join(".libraignore"), "*.log\nignored-file\n").unwrap();
+    fs::write(p.join("track-this"), "base\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "track-this"], p), "stage base");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "base", "--no-verify"], p),
+        "commit base",
+    );
+    fs::write(p.join("track-this"), "modified\n").unwrap();
+
+    let out = run_libra_command(
+        &[
+            "add",
+            "-n",
+            "--ignore-missing",
+            "track-this",
+            "ignored-file",
+        ],
+        p,
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "ignored missing pathspec must exit 1: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let staged = run_libra_command(&["diff", "--cached", "--name-only"], p);
+    assert_cli_success(&staged, "list staged files");
+    assert!(
+        String::from_utf8_lossy(&staged.stdout).trim().is_empty(),
+        "dry-run must leave the index unchanged"
+    );
+}
+
+/// TC-0005 / M-MISS M1: stdout reports the addable path, stderr's ignored block
+/// lists the ignored pathspec, and no `did not match any files` skip line leaks.
+#[test]
+fn test_add_dry_run_ignore_missing_output_tc0005() {
+    let repo = tempdir().unwrap();
+    let p = repo.path();
+    init_repo_via_cli(p);
+    configure_identity_via_cli(p);
+    fs::write(p.join(".libraignore"), "*.log\nignored-file\n").unwrap();
+    fs::write(p.join("track-this"), "base\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "track-this"], p), "stage base");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "base", "--no-verify"], p),
+        "commit base",
+    );
+    fs::write(p.join("track-this"), "modified\n").unwrap();
+
+    let out = run_libra_command(
+        &[
+            "add",
+            "-n",
+            "--ignore-missing",
+            "track-this",
+            "ignored-file",
+        ],
+        p,
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("track-this"),
+        "stdout must report the addable path: {stdout}"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("the following paths are ignored"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("ignored-file"),
+        "ignored block must list the ignored pathspec: {stderr}"
+    );
+    assert!(
+        !stderr.contains("did not match any files"),
+        "a spec classified as ignored must not surface a skip line: {stderr}"
+    );
+}
+
+/// M-MISS M2/M3/M8/M9/M11: rule source (`.libraignore` vs `.gitignore`),
+/// negation (`!keep.log`), literal magic, and wildcard pathspecs each classify
+/// a non-existent pathspec the same way Git does.
+#[test]
+fn test_add_ignore_missing_rule_matrix() {
+    let setup = |ignore: &str, gitignore: &str| {
+        let repo = tempdir().unwrap();
+        let p = repo.path();
+        init_repo_via_cli(p);
+        configure_identity_via_cli(p);
+        fs::write(p.join(".libraignore"), ignore).unwrap();
+        if !gitignore.is_empty() {
+            fs::write(p.join(".gitignore"), gitignore).unwrap();
+        }
+        fs::write(p.join("track-this"), "base\n").unwrap();
+        assert_cli_success(&run_libra_command(&["add", "track-this"], p), "stage base");
+        assert_cli_success(
+            &run_libra_command(&["commit", "-m", "base", "--no-verify"], p),
+            "commit base",
+        );
+        fs::write(p.join("track-this"), "modified\n").unwrap();
+        repo
+    };
+
+    // M2: `*.log` matches a missing `x.log` -> ignored, exit 1.
+    {
+        let repo = setup("*.log\n", "");
+        let p = repo.path();
+        let out = run_libra_command(&["add", "-n", "--ignore-missing", "track-this", "x.log"], p);
+        assert_eq!(
+            out.status.code(),
+            Some(1),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(String::from_utf8_lossy(&out.stderr).contains("x.log"));
+    }
+
+    // M3: `!keep.log` negation makes the missing spec addable-or-skipped (not
+    // ignored) -> skip warning, exit 0.
+    {
+        let repo = setup("*.log\n!keep.log\n", "");
+        let p = repo.path();
+        let out = run_libra_command(
+            &["add", "-n", "--ignore-missing", "track-this", "keep.log"],
+            p,
+        );
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(String::from_utf8_lossy(&out.stderr).contains("--ignore-missing"));
+    }
+
+    // M8: `.gitignore` source also classifies a missing spec as ignored.
+    {
+        let repo = setup("", "gi.txt\n");
+        let p = repo.path();
+        let out = run_libra_command(
+            &["add", "-n", "--ignore-missing", "track-this", "gi.txt"],
+            p,
+        );
+        assert_eq!(
+            out.status.code(),
+            Some(1),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(String::from_utf8_lossy(&out.stderr).contains("gi.txt"));
+    }
+
+    // M9: `:(literal)x.log` strips magic and still matches `*.log`.
+    {
+        let repo = setup("*.log\n", "");
+        let p = repo.path();
+        let out = run_libra_command(
+            &[
+                "add",
+                "-n",
+                "--ignore-missing",
+                "track-this",
+                ":(literal)x.log",
+            ],
+            p,
+        );
+        assert_eq!(
+            out.status.code(),
+            Some(1),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(String::from_utf8_lossy(&out.stderr).contains("x.log"));
+    }
+
+    // M11: a wildcard pathspec (`ign*`) with no ignore-rule match is skipped,
+    // not ignored -> exit 0.
+    {
+        let repo = setup("*.log\n", "");
+        let p = repo.path();
+        for spec in ["ign*", ":(glob)ign*"] {
+            let out = run_libra_command(&["add", "-n", "--ignore-missing", "track-this", spec], p);
+            assert_eq!(
+                out.status.code(),
+                Some(0),
+                "{spec}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+    }
+}
+
+/// M-MISS M12/M13: `--force` skips the ignore classification; a mixed
+/// force-free batch still reports x.log/y.log as ignored while `nope` stays a
+/// skip warning.
+#[test]
+fn test_add_ignore_missing_force_and_mixed() {
+    let repo = tempdir().unwrap();
+    let p = repo.path();
+    init_repo_via_cli(p);
+    configure_identity_via_cli(p);
+    fs::write(p.join(".libraignore"), "*.log\n").unwrap();
+    fs::write(p.join("track-this"), "base\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "track-this"], p), "stage base");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "base", "--no-verify"], p),
+        "commit base",
+    );
+    fs::write(p.join("track-this"), "modified\n").unwrap();
+
+    // M12: with -f, x.log is NOT ignore-classified -> skip warning, exit 0.
+    let forced = run_libra_command(
+        &["add", "-f", "-n", "--ignore-missing", "track-this", "x.log"],
+        p,
+    );
+    assert_eq!(
+        forced.status.code(),
+        Some(0),
+        "force must skip ignore classification: {}",
+        String::from_utf8_lossy(&forced.stderr)
+    );
+
+    // M13: without -f, x.log/y.log are ignored; nope stays a skip warning.
+    let mixed = run_libra_command(
+        &[
+            "add",
+            "-n",
+            "--ignore-missing",
+            "track-this",
+            "x.log",
+            "y.log",
+            "nope",
+        ],
+        p,
+    );
+    assert_eq!(
+        mixed.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&mixed.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&mixed.stderr);
+    assert!(stderr.contains("x.log"), "{stderr}");
+    assert!(stderr.contains("y.log"), "{stderr}");
+    assert!(
+        stderr.contains("did not match any files"),
+        "un-ignored missing path keeps its skip warning: {stderr}"
+    );
+}
+
+/// M-MISS M14: only ignored missing pathspecs (nothing addable) collapse into
+/// the `LBR-ADD-001` / exit 128 contract.
+#[test]
+fn test_add_ignore_missing_only_ignored_is_add_001() {
+    let repo = tempdir().unwrap();
+    let p = repo.path();
+    init_repo_via_cli(p);
+    configure_identity_via_cli(p);
+    fs::write(p.join(".libraignore"), "*.log\n").unwrap();
+    fs::create_dir_all(p.join("sub")).unwrap();
+    fs::write(p.join("sub/.libraignore"), "local.tmp\n").unwrap();
+
+    let out = run_libra_command(
+        &["add", "-n", "--ignore-missing", "local.tmp", "../x.log"],
+        &p.join("sub"),
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(128),
+        "only-ignored must be LBR-ADD-001/128: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// CH-01 (plan-20260918): `add --chmod` refuses non-regular index entries.
+// ---------------------------------------------------------------------------
+
+/// M-CHMOD R1-R3 / TC-0008: a symlink index entry has no executable bit, so
+/// `--chmod` refuses it (exit 1, `cannot chmod` on stderr) and the index is left
+/// unchanged — dry-run and real mode alike.
+#[cfg(unix)]
+#[test]
+fn test_add_chmod_rejects_nonregular_dry_run_tc0008() {
+    use std::os::unix::fs::symlink;
+
+    let repo = tempdir().unwrap();
+    let p = repo.path();
+    init_repo_via_cli(p);
+    configure_identity_via_cli(p);
+    symlink("target", p.join("foo4")).unwrap();
+    assert_cli_success(&run_libra_command(&["add", "foo4"], p), "stage symlink");
+
+    let before = run_libra_command(&["ls-files", "-s", "foo4"], p);
+    assert_cli_success(&before, "ls-files before");
+    let before_out = String::from_utf8_lossy(&before.stdout).to_string();
+    assert!(
+        before_out.starts_with("120000"),
+        "fixture must be a symlink: {before_out}"
+    );
+
+    // R1/R2: dry-run refuses with a per-path, per-flip error and no index write.
+    for (mode_arg, flip) in [("--chmod=+x", "+x"), ("--chmod=-x", "-x")] {
+        let out = run_libra_command(&["add", mode_arg, "--dry-run", "foo4"], p);
+        assert_eq!(
+            out.status.code(),
+            Some(1),
+            "{mode_arg}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains("foo4"), "{stderr}");
+        assert!(stderr.contains(flip), "{stderr}");
+        assert!(stderr.contains("cannot chmod"), "{stderr}");
+    }
+
+    // R3: real mode refuses too and the entry stays 120000.
+    let real = run_libra_command(&["add", "--chmod=+x", "foo4"], p);
+    assert_eq!(
+        real.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&real.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&real.stderr).contains("cannot chmod +x"),
+        "{}",
+        String::from_utf8_lossy(&real.stderr)
+    );
+    let after = run_libra_command(&["ls-files", "-s", "foo4"], p);
+    assert_cli_success(&after, "ls-files after");
+    assert_eq!(
+        String::from_utf8_lossy(&after.stdout),
+        before_out,
+        "a refused entry must be unchanged"
+    );
+}
+
+/// M-CHMOD R4-R6: a refusal never blocks the regular files in the same
+/// pathspec — they still get the mode, while the symlink is reported.
+#[cfg(unix)]
+#[test]
+fn test_add_chmod_rejects_nonregular_but_updates_others() {
+    use std::os::unix::fs::symlink;
+
+    // Each row gets its own repo so an earlier mode flip cannot change a later
+    // row's expected candidate set (same convention as the M-EXIT flag matrix).
+    let setup = || {
+        let repo = tempdir().unwrap();
+        let p = repo.path();
+        init_repo_via_cli(p);
+        configure_identity_via_cli(p);
+        fs::write(p.join("reg"), "content\n").unwrap();
+        symlink("target", p.join("foo4")).unwrap();
+        fs::create_dir_all(p.join("dir")).unwrap();
+        fs::write(p.join("dir/a"), "a\n").unwrap();
+        symlink("target", p.join("dir/l")).unwrap();
+        for spec in ["reg", "foo4", "dir"] {
+            assert_cli_success(&run_libra_command(&["add", spec], p), "stage fixture");
+        }
+        repo
+    };
+
+    // R4: mixed regular + symlink in real mode.
+    {
+        let repo = setup();
+        let p = repo.path();
+        let out = run_libra_command(&["add", "--chmod=+x", "reg", "foo4"], p);
+        assert_eq!(
+            out.status.code(),
+            Some(1),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("foo4"),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let reg = run_libra_command(&["ls-files", "-s", "reg"], p);
+        assert!(
+            String::from_utf8_lossy(&reg.stdout).starts_with("100755"),
+            "reg must become executable: {}",
+            String::from_utf8_lossy(&reg.stdout)
+        );
+    }
+
+    // R5: dry-run mixed reports `reg` and refuses `foo4`.
+    {
+        let repo = setup();
+        let p = repo.path();
+        let dry = run_libra_command(&["add", "--chmod=+x", "--dry-run", "reg", "foo4"], p);
+        assert_eq!(
+            dry.status.code(),
+            Some(1),
+            "{}",
+            String::from_utf8_lossy(&dry.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&dry.stdout).contains("reg"),
+            "{}",
+            String::from_utf8_lossy(&dry.stdout)
+        );
+    }
+
+    // R6: a directory pathspec updates the regular child and refuses the symlink.
+    {
+        let repo = setup();
+        let p = repo.path();
+        let dir = run_libra_command(&["add", "--chmod=+x", "dir"], p);
+        assert_eq!(
+            dir.status.code(),
+            Some(1),
+            "{}",
+            String::from_utf8_lossy(&dir.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&dir.stderr).contains("dir/l"),
+            "{}",
+            String::from_utf8_lossy(&dir.stderr)
+        );
+        let dir_a = run_libra_command(&["ls-files", "-s", "dir/a"], p);
+        assert!(
+            String::from_utf8_lossy(&dir_a.stdout).starts_with("100755"),
+            "dir/a must become executable: {}",
+            String::from_utf8_lossy(&dir_a.stdout)
+        );
+    }
+}
+
+/// M-CHMOD R7-R8: a typechange staged in the same command is judged by the
+/// post-staging index — dry-run leaves the unindexed link alone (exit 0), the
+/// real run stages the symlink and then refuses to chmod it (exit 1).
+#[cfg(unix)]
+#[test]
+fn test_add_chmod_staged_symlink_is_rejected() {
+    use std::os::unix::fs::symlink;
+
+    // R7: untracked symlink.
+    let repo = tempdir().unwrap();
+    let p = repo.path();
+    init_repo_via_cli(p);
+    configure_identity_via_cli(p);
+    symlink("target", p.join("newlink")).unwrap();
+
+    let dry = run_libra_command(&["add", "--chmod=+x", "--dry-run", "newlink"], p);
+    assert_eq!(
+        dry.status.code(),
+        Some(0),
+        "dry-run must not judge an unindexed link: {}",
+        String::from_utf8_lossy(&dry.stderr)
+    );
+    let real = run_libra_command(&["add", "--chmod=+x", "newlink"], p);
+    assert_eq!(
+        real.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&real.stderr)
+    );
+    let entry = run_libra_command(&["ls-files", "-s", "newlink"], p);
+    assert!(
+        String::from_utf8_lossy(&entry.stdout).starts_with("120000"),
+        "newlink must be staged as a symlink: {}",
+        String::from_utf8_lossy(&entry.stdout)
+    );
+
+    // R8: tracked regular file swapped for a symlink in the worktree.
+    let repo = tempdir().unwrap();
+    let p = repo.path();
+    init_repo_via_cli(p);
+    configure_identity_via_cli(p);
+    fs::write(p.join("swap"), "regular\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "swap"], p), "stage regular");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "base", "--no-verify"], p),
+        "commit",
+    );
+    fs::remove_file(p.join("swap")).unwrap();
+    symlink("target", p.join("swap")).unwrap();
+
+    let dry = run_libra_command(&["add", "--chmod=+x", "--dry-run", "swap"], p);
+    assert_eq!(
+        dry.status.code(),
+        Some(0),
+        "dry-run typechange is silent: {}",
+        String::from_utf8_lossy(&dry.stderr)
+    );
+    let real = run_libra_command(&["add", "--chmod=+x", "swap"], p);
+    assert_eq!(
+        real.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&real.stderr)
+    );
+    let entry = run_libra_command(&["ls-files", "-s", "swap"], p);
+    assert!(
+        String::from_utf8_lossy(&entry.stdout).starts_with("120000"),
+        "swap must be staged as a symlink: {}",
+        String::from_utf8_lossy(&entry.stdout)
+    );
+}
+
+/// M-CHMOD R9: an index gitlink entry (mode 160000) is refused like a symlink.
+#[test]
+fn test_add_chmod_rejects_gitlink_entry() {
+    use git_internal::{
+        hash::ObjectHash,
+        internal::index::{Index, IndexEntry},
+    };
+
+    let repo = tempdir().unwrap();
+    let p = repo.path();
+    init_repo_via_cli(p);
+    configure_identity_via_cli(p);
+
+    let index_path = p.join(".libra/index");
+    let mut index = Index::load(&index_path).expect("load index");
+    let mut entry = IndexEntry::new_from_blob("gl".to_string(), ObjectHash::default(), 0);
+    entry.mode = 0o160000;
+    index.add(entry);
+    index.save(&index_path).expect("save index");
+
+    let before = run_libra_command(&["ls-files", "-s", "gl"], p);
+    assert!(
+        String::from_utf8_lossy(&before.stdout).starts_with("160000"),
+        "fixture must be a gitlink: {}",
+        String::from_utf8_lossy(&before.stdout)
+    );
+
+    let out = run_libra_command(&["add", "--chmod=+x", "--dry-run", "gl"], p);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("gl"), "{stderr}");
+    assert!(stderr.contains("cannot chmod +x"), "{stderr}");
+}
+
+/// M-CHMOD R10: `--ignore-errors` does not suppress the refusal,
+/// `--quiet` keeps the stderr error line, and `--exit-code-on-warning` yields 1
+/// (not 9).
+#[cfg(unix)]
+#[test]
+fn test_add_chmod_rejection_flag_matrix() {
+    use std::os::unix::fs::symlink;
+
+    let repo = tempdir().unwrap();
+    let p = repo.path();
+    init_repo_via_cli(p);
+    configure_identity_via_cli(p);
+    fs::write(p.join("reg"), "content\n").unwrap();
+    symlink("target", p.join("foo4")).unwrap();
+    for spec in ["reg", "foo4"] {
+        assert_cli_success(&run_libra_command(&["add", spec], p), "stage fixture");
+    }
+
+    let ignored = run_libra_command(&["add", "--chmod=+x", "--ignore-errors", "reg", "foo4"], p);
+    assert_eq!(
+        ignored.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&ignored.stderr)
+    );
+    let reg = run_libra_command(&["ls-files", "-s", "reg"], p);
+    assert!(String::from_utf8_lossy(&reg.stdout).starts_with("100755"));
+
+    let quiet = run_libra_command(&["add", "--chmod=+x", "--dry-run", "--quiet", "foo4"], p);
+    assert_eq!(quiet.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&quiet.stderr).contains("cannot chmod +x"),
+        "{}",
+        String::from_utf8_lossy(&quiet.stderr)
+    );
+
+    let warned = run_libra_command(
+        &[
+            "--exit-code-on-warning",
+            "add",
+            "--chmod=+x",
+            "--dry-run",
+            "foo4",
+        ],
+        p,
+    );
+    assert_eq!(
+        warned.status.code(),
+        Some(1),
+        "the refusal outranks the warning exit: {}",
+        String::from_utf8_lossy(&warned.stderr)
+    );
+}
+
+/// M-CHMOD R12: no-op and invalid-value forms keep their existing behavior.
+#[cfg(unix)]
+#[test]
+fn test_add_chmod_noop_cases_unchanged() {
+    let repo = tempdir().unwrap();
+    let p = repo.path();
+    init_repo_via_cli(p);
+    configure_identity_via_cli(p);
+    fs::write(p.join("exe"), "exe\n").unwrap();
+    fs::write(p.join("reg"), "reg\n").unwrap();
+    fs::write(p.join("gone"), "gone\n").unwrap();
+    for spec in ["exe", "reg", "gone"] {
+        assert_cli_success(&run_libra_command(&["add", spec], p), "stage fixture");
+    }
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "base", "--no-verify"], p),
+        "commit",
+    );
+
+    // Make `exe` executable, then a second `+x` is a no-op.
+    assert_cli_success(
+        &run_libra_command(&["add", "--chmod=+x", "exe"], p),
+        "set exe +x",
+    );
+    assert_cli_success(
+        &run_libra_command(&["add", "--chmod=+x", "exe"], p),
+        "already-executable no-op",
+    );
+    // `-x` against an already-100644 entry is a no-op.
+    assert_cli_success(
+        &run_libra_command(&["add", "--chmod=-x", "--dry-run", "reg"], p),
+        "clear-bit no-op",
+    );
+    // A tracked path deleted from the worktree stages its deletion, no refusal.
+    fs::remove_file(p.join("gone")).unwrap();
+    assert_cli_success(
+        &run_libra_command(&["add", "--chmod=+x", "gone"], p),
+        "deleted tracked path",
+    );
+    // An invalid value keeps the existing usage error.
+    let bogus = run_libra_command(&["add", "--chmod=bogus", "reg"], p);
+    assert_eq!(bogus.status.code(), Some(129), "invalid --chmod value");
+}
+
+/// CH-02 (plan-20260918): `add --chmod=+x` / `-x` with no pathspec is a
+/// successful no-op — exit 0, no index write, no object write, and no
+/// `chmod_rejected` in the JSON envelope. An invalid value is still a usage
+/// error.
+#[test]
+fn test_add_chmod_empty_pathspec_is_noop() {
+    fn object_file_count(root: &std::path::Path) -> usize {
+        let mut count = 0usize;
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else {
+                    count += 1;
+                }
+            }
+        }
+        count
+    }
+
+    let repo = tempdir().unwrap();
+    let p = repo.path();
+    init_repo_via_cli(p);
+    configure_identity_via_cli(p);
+    fs::write(p.join("tracked.txt"), "content\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "tracked.txt"], p), "stage base");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "base", "--no-verify"], p),
+        "commit",
+    );
+
+    // Warm up once: `commit` leaves a few objects pending in the storage
+    // batch, which the next `add` invocation flushes. Settle that before taking
+    // the baseline so the assertion isolates the no-op behavior itself.
+    assert_cli_success(
+        &run_libra_command(&["add", "--chmod=+x"], p),
+        "warm-up no-op",
+    );
+
+    let objects_root = p.join(".libra/objects");
+    let objects_before = object_file_count(&objects_root);
+    let index_before = fs::read(p.join(".libra/index")).unwrap();
+
+    for args in [
+        vec!["add", "--chmod=+x"],
+        vec!["add", "--chmod=-x"],
+        vec!["add", "--chmod=+x", "--dry-run"],
+    ] {
+        let out = run_libra_command(&args, p);
+        assert!(
+            out.status.success(),
+            "{args:?} must be a no-op success: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    assert_eq!(
+        object_file_count(&objects_root),
+        objects_before,
+        "no object writes"
+    );
+    assert_eq!(
+        fs::read(p.join(".libra/index")).unwrap(),
+        index_before,
+        "no index writes"
+    );
+
+    // JSON: ok, and no `chmod_rejected` key for a no-op.
+    let json = run_libra_command(&["--json", "add", "--chmod=+x"], p);
+    assert!(
+        json.status.success(),
+        "{}",
+        String::from_utf8_lossy(&json.stderr)
+    );
+    let parsed = parse_json_stdout(&json);
+    assert_eq!(parsed["ok"], true);
+    assert!(
+        parsed["data"].get("chmod_rejected").is_none(),
+        "no chmod_rejected for a no-op: {parsed}"
+    );
+
+    // An invalid value without a pathspec stays a usage error.
+    let bogus = run_libra_command(&["add", "--chmod=bogus"], p);
+    assert_eq!(
+        bogus.status.code(),
+        Some(129),
+        "{}",
+        String::from_utf8_lossy(&bogus.stderr)
+    );
+}
+
+/// PSF-01 (plan-20260918) / M-PSF P1/P4/P5/P10/P11: `--pathspec-from-file=-`
+/// reads stdin, the delimiter modes match Git, and every failure path stays
+/// zero-write with the documented exit code.
+#[test]
+fn test_add_pathspec_from_file_stdin_and_delimiters() {
+    let repo = tempdir().unwrap();
+    let p = repo.path();
+    init_repo_via_cli(p);
+    configure_identity_via_cli(p);
+    fs::write(p.join("a.txt"), "a\n").unwrap();
+    fs::write(p.join("b.txt"), "b\n").unwrap();
+    // A worktree file literally named `-`: stdin must win over it.
+    fs::write(p.join("-"), "b.txt\n").unwrap();
+
+    // P1: LF stdin stages a.txt and never opens the `-` file.
+    let p1 = run_libra_command_with_stdin(&["add", "--pathspec-from-file=-"], p, "a.txt\n");
+    assert!(
+        p1.status.success(),
+        "{}",
+        String::from_utf8_lossy(&p1.stderr)
+    );
+    let staged = run_libra_command(&["diff", "--cached", "--name-only"], p);
+    let staged_out = String::from_utf8_lossy(&staged.stdout).to_string();
+    assert!(staged_out.contains("a.txt"), "{staged_out}");
+    assert!(
+        !staged_out.contains("b.txt"),
+        "the `-` file must not be read: {staged_out}"
+    );
+
+    // P4: CRLF is accepted and the CR is stripped.
+    let p4 = run_libra_command_with_stdin(&["add", "--pathspec-from-file=-"], p, "b.txt\r\n");
+    assert!(
+        p4.status.success(),
+        "{}",
+        String::from_utf8_lossy(&p4.stderr)
+    );
+
+    // P5: NUL mode keeps the CR, so the whole line is one unmatched path.
+    let p5 = run_libra_command_with_stdin(
+        &["add", "--pathspec-from-file=-", "--pathspec-file-nul"],
+        p,
+        "a.txt\r\n",
+    );
+    assert_ne!(p5.status.code(), Some(0), "an unmatched CR path must fail");
+
+    // P10: an empty list falls through to the empty-pathspec usage error.
+    let p10 = run_libra_command_with_stdin(&["add", "--pathspec-from-file=-"], p, "");
+    assert_eq!(
+        p10.status.code(),
+        Some(129),
+        "{}",
+        String::from_utf8_lossy(&p10.stderr)
+    );
+
+    // P11: a missing file keeps its 128 + LBR-IO-001 contract.
+    let p11 = run_libra_command(&["add", "--pathspec-from-file=nope.list"], p);
+    assert_eq!(
+        p11.status.code(),
+        Some(128),
+        "{}",
+        String::from_utf8_lossy(&p11.stderr)
+    );
+    assert!(String::from_utf8_lossy(&p11.stderr).contains("LBR-IO-001"));
+
+    // Non-UTF-8 content is a hard 128 + LBR-IO-001, never a silent skip.
+    fs::write(p.join("bad.list"), b"\xff\xfe").unwrap();
+    let bad = run_libra_command(&["add", "--pathspec-from-file=bad.list"], p);
+    assert_eq!(
+        bad.status.code(),
+        Some(128),
+        "{}",
+        String::from_utf8_lossy(&bad.stderr)
+    );
+    assert!(String::from_utf8_lossy(&bad.stderr).contains("LBR-IO-001"));
+
+    // P3 (PSF-01 review P1-2): `-u` combined with `--pathspec-from-file`.
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "base", "--no-verify"], p),
+        "commit fixture",
+    );
+    fs::write(p.join("a.txt"), "a2\n").unwrap();
+    let p3 = run_libra_command_with_stdin(&["add", "-u", "--pathspec-from-file=-"], p, "a.txt\n");
+    assert!(
+        p3.status.success(),
+        "{}",
+        String::from_utf8_lossy(&p3.stderr)
+    );
+    let staged = run_libra_command(&["diff", "--cached", "--name-only"], p);
+    assert!(
+        String::from_utf8_lossy(&staged.stdout).contains("a.txt"),
+        "{}",
+        String::from_utf8_lossy(&staged.stdout)
+    );
+}
+
+/// PSF-02 (plan-20260918) / M-PSF P6/P7: non-NUL `--pathspec-from-file`
+/// decodes C-style quoted lines; an unterminated quote fails closed with a
+/// from-file diagnostic and zero writes.
+#[test]
+fn test_add_pathspec_from_file_cquote() {
+    let repo = tempdir().unwrap();
+    let p = repo.path();
+    init_repo_via_cli(p);
+    configure_identity_via_cli(p);
+    fs::write(p.join("qu\"ote.txt"), "q\n").unwrap();
+    fs::write(p.join("we ird.txt"), "w\n").unwrap();
+
+    // P6: C-quoted lines decode to the real file names.
+    let out = run_libra_command_with_stdin(
+        &["add", "--pathspec-from-file=-"],
+        p,
+        "\"qu\\\"ote.txt\"\n\"we ird.txt\"\n",
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let index_bytes = fs::read(p.join(".libra/index")).unwrap();
+    let staged = |needle: &[u8]| index_bytes.windows(needle.len()).any(|w| w == needle);
+    assert!(staged(b"qu\"ote.txt"), "the quoted name must be staged");
+    assert!(staged(b"we ird.txt"), "the spaced name must be staged");
+
+    // P7: an unterminated quote is 128 with a from-file diagnostic, zero writes.
+    let before = run_libra_command(&["diff", "--cached", "--name-only"], p);
+    let before_out = String::from_utf8_lossy(&before.stdout).to_string();
+    let bad = run_libra_command_with_stdin(&["add", "--pathspec-from-file=-"], p, "\"we ird.txt\n");
+    assert_eq!(
+        bad.status.code(),
+        Some(128),
+        "{}",
+        String::from_utf8_lossy(&bad.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&bad.stderr);
+    assert!(stderr.contains("badly quoted"), "{stderr}");
+    assert!(stderr.contains("--pathspec-from-file"), "{stderr}");
+    let after = run_libra_command(&["diff", "--cached", "--name-only"], p);
+    assert_eq!(
+        String::from_utf8_lossy(&after.stdout),
+        before_out,
+        "malformed quoting must write nothing"
+    );
+}
+
+/// PSF-03 (plan-20260918) / M-PSF P8/P9: `--pathspec-from-file` refuses an
+/// interactive patch mode or command-line pathspecs with 129 + `LBR-CLI-002`,
+/// before any write.
+#[test]
+fn test_add_pathspec_from_file_rejects_interactive() {
+    let repo = tempdir().unwrap();
+    let p = repo.path();
+    init_repo_via_cli(p);
+    configure_identity_via_cli(p);
+    fs::write(p.join("a.txt"), "a\n").unwrap();
+    fs::write(p.join("list.txt"), "a.txt\n").unwrap();
+
+    // `-p/--patch` is mutually exclusive.
+    let patch = run_libra_command(&["add", "--pathspec-from-file=list.txt", "-p"], p);
+    assert_eq!(
+        patch.status.code(),
+        Some(129),
+        "{}",
+        String::from_utf8_lossy(&patch.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&patch.stderr);
+    assert!(stderr.contains("cannot be used together"), "{stderr}");
+    assert!(stderr.contains("LBR-CLI-002"), "{stderr}");
+
+    // Command-line pathspecs are mutually exclusive, with Git's wording.
+    let positional = run_libra_command(&["add", "--pathspec-from-file=list.txt", "a.txt"], p);
+    assert_eq!(
+        positional.status.code(),
+        Some(129),
+        "{}",
+        String::from_utf8_lossy(&positional.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&positional.stderr);
+    assert!(
+        stderr.contains("'--pathspec-from-file' and pathspec arguments cannot be used together"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("LBR-CLI-002"), "{stderr}");
+
+    // `--edit` is unknown for `add`, so clap rejects it as a usage error (129).
+    let edit = run_libra_command(&["add", "--pathspec-from-file=list.txt", "--edit"], p);
+    assert_eq!(
+        edit.status.code(),
+        Some(129),
+        "{}",
+        String::from_utf8_lossy(&edit.stderr)
+    );
+
+    // `--interactive` keeps its own declined-flag refusal (ADR-PSF-03 item 3).
+    let interactive = run_libra_command(
+        &["add", "--pathspec-from-file=list.txt", "--interactive"],
+        p,
+    );
+    assert_eq!(
+        interactive.status.code(),
+        Some(128),
+        "the declined-interactive refusal fires first: {}",
+        String::from_utf8_lossy(&interactive.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&interactive.stderr).contains("not supported"),
+        "{}",
+        String::from_utf8_lossy(&interactive.stderr)
+    );
+
+    // Every rejected combination left the index untouched.
+    let staged = run_libra_command(&["diff", "--cached", "--name-only"], p);
+    assert!(
+        String::from_utf8_lossy(&staged.stdout).trim().is_empty(),
+        "rejected combinations must write nothing"
     );
 }

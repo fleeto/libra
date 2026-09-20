@@ -23,6 +23,8 @@ Stash 条目以特殊结构的提交对象存储在 `.libra/refs/stash` 下，�
 
 **Worktree（自 W2 起）**：stash *栈* 有意在所有 worktree 间共享——一个 worktree 推入的条目可在任何其他 worktree 中 list/apply/pop；而 `push`/`apply`/`pop` 只快照与修改你运行命令的那个 worktree。栈突变经锁串行化，`pop`/`stash branch` 只删除自己刚 apply 的那个条目（若栈被并发修改则保留条目并报告，绝不误删他人条目，也不回滚已成功的 apply）。
 
+工作树物化按条目 mode 语义执行（plan issues/470 FM-02）：文件按条目权限位创建（`100755`→`0777`、`100644`→`0666`）并受进程 `umask` 约束，经同目录临时文件原子替换；索引/树条目保留 mode（`100755`/`100644`/`120000`）。
+
 ## 选项
 
 ### 子命令
@@ -400,7 +402,7 @@ Libra 保留 Git 的 `stash@{N}` 引用语法以保持熟悉度。从 Git 迁移
 | 包含未跟踪 | `-u` / `--include-untracked` | `-u` / `--include-untracked` | N/A |
 | 不包含未跟踪 | `--no-include-untracked`（撤销 `-u`） | `--no-include-untracked` | N/A |
 | 包含全部（也含忽略文件） | `-a` / `--all` | `-a` / `--all` | N/A |
-| Pathspec（部分 stash） | `stash push -- <pathspec>...`（文件/目录路径，`.` 选整树，其余保留；不能与 `-u`/`-a`/`-k` 同用→`LBR-CLI-002`；无匹配→`LBR-CLI-003`） | `stash push [--] <pathspec>...` | N/A |
+| Pathspec（部分 stash） | `stash push -- <pathspec>...`（普通名称、通配符与 `:(glob)`/`:(literal)`/`:(icase)`/`:(exclude)` 经共享 pathspec 引擎匹配；`.` 选整树，其余保留；不能与 `-u`/`-a`/`-k` 同用→`LBR-CLI-002`；无匹配→`LBR-CLI-003`） | `stash push [--] <pathspec>...` | N/A |
 | Pop | `stash pop [ref]` | `stash pop [--index] [<stash>]` | N/A |
 | Apply | `stash apply [ref]` | `stash apply [--index] [<stash>]` | N/A |
 | Drop | `stash drop [ref]` | `stash drop [<stash>]` | N/A |

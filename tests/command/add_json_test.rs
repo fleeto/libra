@@ -505,6 +505,69 @@ fn json_partial_ignore_returns_ok_with_ignored_list() {
     );
 }
 
+/// M-MISS M15: a non-existent-but-ignored pathspec lands in `data.ignored`
+/// (not `data.missing`), and the report exits 1 like any mixed ignored add.
+#[test]
+fn json_ignore_missing_ignored_path_in_ignored_bucket() {
+    let repo = tempdir().unwrap();
+    init_repo_via_cli(repo.path());
+    configure_identity_via_cli(repo.path());
+
+    fs::write(repo.path().join(".libraignore"), "ignored-file\n").unwrap();
+    fs::write(repo.path().join("track-this"), "base\n").unwrap();
+    assert_cli_success(
+        &run_libra_command(&["add", "track-this"], repo.path()),
+        "stage base",
+    );
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "base", "--no-verify"], repo.path()),
+        "commit base",
+    );
+    fs::write(repo.path().join("track-this"), "modified\n").unwrap();
+
+    let output = run_libra_command(
+        &[
+            "--json",
+            "add",
+            "-n",
+            "--ignore-missing",
+            "track-this",
+            "ignored-file",
+        ],
+        repo.path(),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "mixed ignored missing pathspec must exit 1: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let parsed = parse_json_stdout(&output);
+    assert_eq!(parsed["ok"], true);
+    let data = &parsed["data"];
+
+    let ignored: Vec<&str> = data["ignored"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert!(
+        ignored.contains(&"ignored-file"),
+        "ignored-file should be in the ignored bucket: {parsed}"
+    );
+
+    let missing: Vec<&str> = data["missing"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+        .unwrap_or_default();
+    assert!(
+        !missing.contains(&"ignored-file"),
+        "ignored-file must not appear in missing: {parsed}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Error JSON: pathspec not matched
 // ---------------------------------------------------------------------------
@@ -621,5 +684,51 @@ fn json_mixed_ignored_emits_data_and_exits_one() {
     assert!(
         String::from_utf8_lossy(&out.stderr).trim().is_empty(),
         "JSON mode must keep stderr clean"
+    );
+}
+
+/// M-CHMOD R11 (plan-20260918 CH-01): `--json` carries `chmod_rejected` on the
+/// envelope and exits 1 without human-readable stderr lines.
+#[cfg(unix)]
+#[test]
+fn json_add_chmod_rejected_field_and_exit() {
+    use std::os::unix::fs::symlink;
+
+    let repo = tempdir().unwrap();
+    init_repo_via_cli(repo.path());
+    configure_identity_via_cli(repo.path());
+    fs::write(repo.path().join("reg"), "content\n").unwrap();
+    symlink("target", repo.path().join("foo4")).unwrap();
+    for spec in ["reg", "foo4"] {
+        assert_cli_success(
+            &run_libra_command(&["add", spec], repo.path()),
+            "stage fixture",
+        );
+    }
+
+    let output = run_libra_command(
+        &["--json", "add", "--chmod=+x", "--dry-run", "reg", "foo4"],
+        repo.path(),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let parsed = parse_json_stdout(&output);
+    assert_eq!(parsed["ok"], true);
+    let rejected = parsed["data"]["chmod_rejected"]
+        .as_array()
+        .expect("chmod_rejected array");
+    assert_eq!(rejected.len(), 1, "{parsed}");
+    assert_eq!(rejected[0]["path"], "foo4");
+    assert_eq!(rejected[0]["flip"], "+x");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("cannot chmod"),
+        "JSON mode must not print human error lines: {stderr}"
     );
 }

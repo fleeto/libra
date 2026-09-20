@@ -3470,6 +3470,7 @@ mod test {
             patch: false,
             auto_advance: false,
             no_auto_advance: false,
+            sparse: false,
         })
         .await;
         commit::execute(CommitArgs {
@@ -3548,6 +3549,7 @@ mod test {
             patch: false,
             auto_advance: false,
             no_auto_advance: false,
+            sparse: false,
         })
         .await;
         commit::execute(CommitArgs {
@@ -3597,6 +3599,7 @@ mod test {
             patch: false,
             auto_advance: false,
             no_auto_advance: false,
+            sparse: false,
         })
         .await;
         commit::execute(CommitArgs {
@@ -3649,6 +3652,7 @@ mod test {
             patch: false,
             auto_advance: false,
             no_auto_advance: false,
+            sparse: false,
         })
         .await;
         commit::execute(CommitArgs {

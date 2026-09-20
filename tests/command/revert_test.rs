@@ -149,6 +149,7 @@ async fn test_basic_revert() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
+        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -188,6 +189,7 @@ async fn test_basic_revert() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
+        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -228,6 +230,7 @@ async fn test_basic_revert() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
+        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -352,6 +355,7 @@ async fn test_revert_no_commit() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
+        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -389,6 +393,7 @@ async fn test_revert_no_commit() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
+        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -479,6 +484,7 @@ async fn test_revert_root_commit() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
+        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -578,6 +584,7 @@ async fn test_revert_root_commit_creates_empty_tree_commit() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
+        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {

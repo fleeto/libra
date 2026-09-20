@@ -829,6 +829,7 @@ async fn test_log_patch_no_pathspec() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
+        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -867,6 +868,7 @@ async fn test_log_patch_no_pathspec() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
+        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -966,6 +968,7 @@ async fn test_log_patch_with_pathspec() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
+        sparse: false,
     })
     .await;
 
@@ -1104,6 +1107,7 @@ async fn test_log_stat() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
+        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -1141,6 +1145,7 @@ async fn test_log_stat() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
+        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -1206,6 +1211,7 @@ async fn test_log_patch_with_stat_shows_diffstat_before_patch() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
+        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -1243,6 +1249,7 @@ async fn test_log_patch_with_stat_shows_diffstat_before_patch() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
+        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -1326,6 +1333,7 @@ async fn test_log_stat_with_modifications() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
+        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -1363,6 +1371,7 @@ async fn test_log_stat_with_modifications() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
+        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -1579,6 +1588,7 @@ async fn test_log_graph_simple_chain() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
+        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -1616,6 +1626,7 @@ async fn test_log_graph_simple_chain() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
+        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -1671,6 +1682,7 @@ async fn test_log_stat_and_graph_combined() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
+        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -1811,6 +1823,7 @@ async fn test_log_double_dash_disables_short_number_rewrite() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
+        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -1849,6 +1862,7 @@ async fn test_log_double_dash_disables_short_number_rewrite() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
+        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -2103,6 +2117,7 @@ async fn test_log_grep_filtering() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
+        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -2141,6 +2156,7 @@ async fn test_log_grep_filtering() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
+        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -2179,6 +2195,7 @@ async fn test_log_grep_filtering() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
+        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -2272,6 +2289,7 @@ async fn test_log_reverse_outputs_oldest_first() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
+        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -2300,6 +2318,7 @@ async fn test_log_reverse_outputs_oldest_first() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
+        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -2344,6 +2363,7 @@ async fn test_log_range_excludes_start_commit() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
+        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -2373,6 +2393,7 @@ async fn test_log_range_excludes_start_commit() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
+        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -2416,6 +2437,7 @@ async fn test_log_all_includes_branches() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
+        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -2476,6 +2498,7 @@ async fn test_log_all_includes_branches() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
+        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -2522,6 +2545,7 @@ async fn test_log_follow_detects_rename() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
+        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -2551,6 +2575,7 @@ async fn test_log_follow_detects_rename() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
+        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -2595,6 +2620,7 @@ async fn test_log_line_range_flag_accepted() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
+        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -3087,6 +3113,7 @@ async fn commit_file(path: &str, content: &str, message: &str) -> String {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
+        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {

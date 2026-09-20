@@ -226,6 +226,7 @@ async fn checkout_restore_rejects_sha1_hash_in_sha256_repo() {
             patch: false,
             auto_advance: false,
             no_auto_advance: false,
+            sparse: false,
         },
         &OutputConfig::default(),
     )
@@ -328,6 +329,7 @@ async fn test_checkout_new_branch_with_dirty_worktree_returns_error() {
             patch: false,
             auto_advance: false,
             no_auto_advance: false,
+            sparse: false,
         },
         &OutputConfig::default(),
     )
@@ -374,6 +376,7 @@ async fn test_checkout_new_branch_with_dirty_worktree_returns_error() {
             patch: false,
             auto_advance: false,
             no_auto_advance: false,
+            sparse: false,
         },
         &OutputConfig::default(),
     )
@@ -444,6 +447,7 @@ async fn test_checkout_current_branch_with_dirty_worktree_succeeds() {
             patch: false,
             auto_advance: false,
             no_auto_advance: false,
+            sparse: false,
         },
         &OutputConfig::default(),
     )
@@ -537,6 +541,7 @@ async fn test_checkout_existing_branch_with_unstaged_dirty_worktree_returns_erro
             patch: false,
             auto_advance: false,
             no_auto_advance: false,
+            sparse: false,
         },
         &OutputConfig::default(),
     )

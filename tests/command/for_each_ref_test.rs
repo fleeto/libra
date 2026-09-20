@@ -35,6 +35,7 @@ async fn setup_repo_with_commit(temp: &tempfile::TempDir) {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
+        sparse: false,
     })
     .await;
 
@@ -269,6 +270,7 @@ async fn test_for_each_ref_merged_resolves_remote_tracking_namespace() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
+        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -300,6 +302,7 @@ async fn test_for_each_ref_merged_resolves_remote_tracking_namespace() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
+        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -1067,6 +1070,7 @@ async fn test_for_each_ref_sort_by_committerdate() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
+        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -1101,6 +1105,7 @@ async fn test_for_each_ref_sort_by_committerdate() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
+        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -1184,6 +1189,7 @@ async fn test_for_each_ref_sort_creatordate_uses_tagger_date_for_annotated_tags(
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
+        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -1218,6 +1224,7 @@ async fn test_for_each_ref_sort_creatordate_uses_tagger_date_for_annotated_tags(
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
+        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -1306,6 +1313,7 @@ async fn test_for_each_ref_sort_peels_nested_annotated_tags() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
+        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -1788,6 +1796,7 @@ async fn test_for_each_ref_deref_size_errors_on_broken_tag_chain() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
+        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -2784,6 +2793,7 @@ async fn test_for_each_ref_symref_atom() {
         patch: false,
         auto_advance: false,
         no_auto_advance: false,
+        sparse: false,
     })
     .await;
     commit::execute(CommitArgs {

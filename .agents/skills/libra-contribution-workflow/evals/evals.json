@@ -3,8 +3,8 @@
   "evals": [
     {
       "id": 1,
-      "prompt": "I just opened an issue: `libra status` shows a file as clean even though I changed its executable bit on Linux. What should I do next?",
-      "expected_output": "Triage the report, identify missing reproduction or environment details, search for existing Issue/plan/card work, and recommend a next step. Do not post to or modify GitHub without explicit authorization.",
+      "prompt": "A contributor outside the project opened a new Issue: 'Make `libra agent status` easier to use.' I can't find a matching plan and the body gives no details. Help refine it through questions, then recommend a card or plan. Let me choose whether you draft comments for me to post or use `gh` on this Issue.",
+      "expected_output": "Confirm the Issue-specific Q&A mode before contacting anyone. Maintain a brief that separates known facts, assumptions, and open questions; ask only scope-changing questions. Search existing plans and dependencies, then recommend a template-compliant single card, multi-card plan, or audit/spike based on evidence. Do not label, assign, close, or post outside the explicitly chosen mode.",
       "files": []
     },
     {

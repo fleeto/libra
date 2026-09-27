@@ -374,9 +374,12 @@ src/command/fast_import.rs	split_first_separates_command_and_rest	none	none	none
 src/command/fast_import.rs	trims_crlf_and_lf	none	none	none;callees:trims_crlf_and_lf,trim_newline
 src/command/fetch.rs	apply_no_progress_forces_progress_mode_off	none	none	none;callees:apply_no_progress_forces_progress_mode_off
 src/command/fetch.rs	clean_sideband_message_strips_err_and_fatal_markers	none	none	none;callees:clean_sideband_message_strips_err_and_fatal_markers,clean_sideband_message
+src/command/fetch.rs	existing_pack_index_is_never_overwritten_by_fetch	keyed:cwd,env,hash_kind	env+cwd+hash_kind	new pack regression initializes a repository, changes cwd and sets hash kind
+src/command/fetch.rs	failed_pack_index_keeps_public_pack_until_explicit_repair	keyed:cwd,env,hash_kind	env+cwd+hash_kind	new pack regression initializes a repository, changes cwd and sets hash kind
 src/command/fetch.rs	fetch_error_display_pins_static_message_variants	none	none	none;callees:fetch_error_display_pins_static_message_variants
 src/command/fetch.rs	fetch_prune_porcelain_and_fetch_head_layout	none	none	none;callees:fetch_prune_porcelain_and_fetch_head_layout,format_fetch_porcelain,format_fetch_head
 src/command/fetch.rs	fetch_prune_porcelain_zero_oid_is_hash_kind_aware	unkeyed	none	unkeyed;callees:fetch_prune_porcelain_zero_oid_is_hash_kind_aware,format_fetch_porcelain
+src/command/fetch.rs	fetched_blake3_shallow_file_uses_discovery_kind_across_threads	keyed:cwd,env,hash_kind	env+cwd+hash_kind	new regression initializes a repository, changes cwd and sets hash kind across a Tokio thread boundary
 src/command/fetch.rs	format_fetch_head_marks_every_ref_not_for_merge	none	none	none;callees:format_fetch_head_marks_every_ref_not_for_merge,format_fetch_head
 src/command/fetch.rs	format_fetch_porcelain_layout_is_space_separated	none	none	none;callees:format_fetch_porcelain_layout_is_space_separated,format_fetch_porcelain
 src/command/fetch.rs	pack_completion_tracker_read_header_validates_magic_version_and_state	none	none	none;callees:pack_completion_tracker_read_header_validates_magic_version_and_state,read_header,read_be_u32
@@ -2910,3 +2913,18 @@ src/utils/util.rs	test_try_get_storage_path_rejects_libra_dir_with_only_objects	
 src/utils/util.rs	test_uninspectable_markers_fail_closed	none	none	none;callees:test_uninspectable_markers_fail_closed,is_valid_storage_dir
 src/utils/util.rs	test_worktree_info_file_path_is_local_for_git_layout_linked_worktree	none	none	none;callees:test_worktree_info_file_path_is_local_for_git_layout_linked_worktree
 src/utils/util.rs	test_worktree_info_file_paths_resolve_dot_libra_layouts	none	none	none;callees:test_worktree_info_file_paths_resolve_dot_libra_layouts
+src/internal/vault.rs	verification_ignores_source_with_internal_fixture	lane:cwd+env	env+cwd	lane:cwd+env (plan-20260921 VG-05 G2);env:ConfigDbFixture,setup_with_new_libra_in;cwd:ChangeDirGuard
+src/internal/vault.rs	config_remove_gpg_key_inject_failure_history	lane:cwd+env	env+cwd	lane:cwd+env (plan-20260921 VG-08);env:ConfigDbFixture,setup_with_new_libra_in;cwd:ChangeDirGuard
+src/internal/vault.rs	config_remove_gpg_key_inject_failure_delete_imported	lane:cwd+env	env+cwd	lane:cwd+env (plan-20260921 VG-08);env:ConfigDbFixture,setup_with_new_libra_in;cwd:ChangeDirGuard
+src/internal/vault.rs	config_remove_gpg_key_inject_failure_restore_pubkey	lane:cwd+env	env+cwd	lane:cwd+env (plan-20260921 VG-08);env:ConfigDbFixture,setup_with_new_libra_in;cwd:ChangeDirGuard
+src/internal/vault.rs	config_remove_gpg_key_inject_failure_source	lane:cwd+env	env+cwd	lane:cwd+env (plan-20260921 VG-08);env:ConfigDbFixture,setup_with_new_libra_in;cwd:ChangeDirGuard
+src/internal/vault.rs	generated_path_legacy_fallback_when_key_name_absent	lane:cwd+env	env+cwd	lane:cwd+env (plan-20260921 VG-04);env:ConfigDbFixture,setup_with_new_libra_in;cwd:ChangeDirGuard
+src/internal/vault.rs	history_public_keys_are_sorted_and_deduplicated	lane:cwd+env	env+cwd	lane:cwd+env (plan-20260921);env:ConfigDbFixture,setup_with_new_libra_in;cwd:ChangeDirGuard
+src/internal/vault.rs	generated_snapshot_is_written_before_overwrite	lane:cwd+env	env+cwd	lane:cwd+env (plan-20260921);env:ConfigDbFixture,setup_with_new_libra_in;cwd:ChangeDirGuard
+src/internal/vault.rs	config_generate_gpg_key_after_import_inject_failure_after_a	lane:cwd+env	env+cwd	lane:cwd+env (plan-20260921 VG-14);env:ConfigDbFixture,setup_with_new_libra_in;cwd:ChangeDirGuard
+src/internal/vault.rs	config_generate_gpg_key_after_import_inject_failure_after_b	lane:cwd+env	env+cwd	lane:cwd+env (plan-20260921 VG-14);env:ConfigDbFixture,setup_with_new_libra_in;cwd:ChangeDirGuard
+src/internal/vault.rs	config_generate_gpg_key_after_import_inject_failure_after_c	lane:cwd+env	env+cwd	lane:cwd+env (plan-20260921 VG-14);env:ConfigDbFixture,setup_with_new_libra_in;cwd:ChangeDirGuard
+src/internal/vault.rs	config_generate_gpg_key_after_import_inject_failure_after_d1	lane:cwd+env	env+cwd	lane:cwd+env (plan-20260921 VG-14);env:ConfigDbFixture,setup_with_new_libra_in;cwd:ChangeDirGuard
+src/internal/vault.rs	config_generate_gpg_key_after_import_inject_failure_after_d2	lane:cwd+env	env+cwd	lane:cwd+env (plan-20260921 VG-14);env:ConfigDbFixture,setup_with_new_libra_in;cwd:ChangeDirGuard
+src/internal/vault.rs	config_generate_gpg_key_after_import_inject_failure_after_e	lane:cwd+env	env+cwd	lane:cwd+env (plan-20260921 VG-14);env:ConfigDbFixture,setup_with_new_libra_in;cwd:ChangeDirGuard
+src/internal/vault.rs	history_public_keys_verify_replaced_key_signatures	lane:cwd+env	env+cwd	lane:cwd+env (plan-20260921 VG-05);env:ConfigDbFixture,setup_with_new_libra_in;cwd:ChangeDirGuard

@@ -16,6 +16,9 @@ libra config import [--global]
 libra config path [--global | --system]
 libra config generate-ssh-key --remote <name>
 libra config generate-gpg-key [--name <name>] [--email <email>] [--usage <usage>]
+libra config import-gpg-key [--list] [--key <fpr>] [--file <path>] [--passphrase-file <path>] [--replace]
+libra config export-gpg-key [--fingerprint] [--out <path>]
+libra config remove-gpg-key [--force]
 ```
 
 也支持 Git 兼容的标志风格（从帮助中隐藏）：
@@ -38,6 +41,20 @@ libra config --rename-section <old-name> <new-name>
 2. **Git 兼容标志风格**（隐藏）：`libra config --get key`、`libra config key value`
 
 使用 `get` 读取值时，Libra 会按优先级 local → global → system 级联查找。第一个匹配项胜出；system 库不可读时会被跳过。
+
+### `core.objectformat` 在 init 时固定
+
+仓库创建后，本地 scope 写操作不能再改 `core.objectformat`（ADR-B3-01）。
+所有变更拼写一律以 `LBR-CLI-002`（exit 129）拒绝：`set`、裸位置赋值、
+`--add`、`--unset`、`--unset-all`、`--remove-section core`、涉及 `core` 的
+`--rename-section`，以及导入的 Git config 含该键时的 `import`（变量名大小写
+不敏感，例如 `core.ObjectFormat`）。`import` 的拒绝是原子的——该次导入的其他
+键也不会落地。
+
+要用不同格式请重建仓库：`libra init --object-format <sha1|sha256>`
+（`blake3` 稍后开门）。`init` / `reinit` 仍经数据库层写入该键；本护栏只卡住
+`config` 命令表面。**global** 或 **system** scope 下的 `core.objectformat` 行
+不被仓库命令消费，也不受本护栏影响。
 
 ### 裸读 `libra config <key>`
 
@@ -382,6 +399,55 @@ libra config generate-gpg-key --name "Jane Doe" --email "jane@example.com" --usa
 libra config get vault.gpg.pubkey
 ```
 
+#### `import-gpg-key`
+
+从本机 GnuPG home 或 armored 文件导入现有 OpenPGP 签名密钥，并使用该身份进行 commit/tag/merge 签名。
+
+| 标志 | 说明 |
+|------|------|
+| `--list` | 列出 GnuPG home 中可发现的私钥后退出（零写入） |
+| `--key <fpr>` | 通过指纹/key id 选择要导入的 key（存在多个候选时必填） |
+| `--file <path>` | 从 armored 文件导入私钥，而不是 GnuPG home |
+| `--passphrase-file <path>` | 从文件读取 key 口令（非交互下受保护 key 必填） |
+| `--replace` | 替换活动 key，先将当前公钥归档到历史 |
+
+**`libra init` 已经生成并启用了一把签名 key**（`source: generated`、`vault.signing=true`），因此在默认仓库里导入自己的 key **必须带 `--replace`**；否则导入会 fail-closed 报 `LBR-CONFLICT-002`（`an active GPG key already exists; pass --replace`）。被替换的 key 的公钥会先归档，使它此前签出的签名仍可验证。
+
+```bash
+libra config import-gpg-key --list
+libra config import-gpg-key --key ABCDEF...
+libra config import-gpg-key --file my-key.asc --passphrase-file pass.txt
+```
+
+#### `export-gpg-key`
+
+导出活动 GPG 公钥。永远不会导出私钥。
+
+| 标志 | 说明 |
+|------|------|
+| `--fingerprint` | 仅打印主指纹 |
+| `--out <path>` | 原子写入 armored 公钥到文件，而不是 stdout |
+
+**拒绝机器输出旗标：** `--json`/`--machine`/`--quiet` 一律以 `LBR-CLI-002` 失败，故 `export-gpg-key` 始终输出纯 armored 文本（stdout 或 `--out`）。
+
+```bash
+libra config export-gpg-key            # armored 公钥到 stdout
+libra config export-gpg-key --fingerprint
+libra config export-gpg-key --out pubkey.asc
+```
+
+#### `remove-gpg-key`
+
+移除活动导入的 GPG key 并回退到生成的 key（绝不删除历史或生成 key 元数据）。被移除的 key 自身的公钥会**先归档**为 `vault.gpg.history.<FPR>.pubkey`，使它此前签出的签名仍可验证；因此归档面只会**新增一行**，其余不变。移除是**单个事务**：四步中任一步失败，导入的 key 会原样保持活动。
+
+归档公钥存放于 `vault.gpg.history.<FPR>.pubkey`。显式丢弃单行就是普通的 config unset —— `libra config unset vault.gpg.history.<FPR>.pubkey` 只删除该指纹的快照，其它指纹不受影响。**后果：** 被丢弃密钥签出的签名将不再被 `libra tag -v` / `libra merge --verify-signatures` 接受——这正是归档要避免的情形，故仅在这些签名已无意义时才删除该行。
+
+**移除活动 key 必须带 `--force`**：不带时命令会拒绝并点明该旗标（防误删保护）。
+
+```bash
+libra config remove-gpg-key --force
+```
+
 ### Scope 标志
 
 这些标志是全局的（适用于任意子命令）：
@@ -539,6 +605,20 @@ libra config generate-gpg-key --usage encrypt
 libra config get vault.gpg.pubkey
 libra config list --gpg-keys
 ```
+
+支持的 `--usage` 值为 `signing` 与 `encrypt`。
+
+现有 OpenPGP 密钥可以从 GnuPG home 或 armored 文件导入：
+
+```bash
+libra config import-gpg-key --list
+libra config import-gpg-key --key ABCDEF...
+libra config import-gpg-key --file my-key.asc --passphrase-file pass.txt
+libra config export-gpg-key --fingerprint
+libra config remove-gpg-key --force
+```
+
+导入的私钥加密存储（`vault.gpg.seckey_enc`）并在所有读取路径上脱敏；`config get --reveal` 会拒绝它。签名使用 `vault.gpg.signing_key_id` 记录的 key，验证使用「活动、生成、历史」公钥的固定允许列表。
 
 支持的 `--usage` 值是 `signing` 和 `encrypt`。
 

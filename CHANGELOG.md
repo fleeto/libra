@@ -1,5 +1,238 @@
 # Changelog
 
+## [Unreleased]
+
+### Cloud object-format metadata (B3-09 / B3-14; ships with REL-B3-02 / B3-17)
+
+- D1 `repositories` / `object_index` carry nullable `object_format`; backup
+  writes the repository kind; restore refuses OID-width inference.
+- Ambiguous 64-hex cloud snapshots without metadata fail closed with
+  `LBR-REPO-002` (exit 128) and a re-backup hint. Legacy all-40-hex catalogs
+  without metadata remain sha1.
+- **Minimum compatible client:** a Libra binary that includes B3-14 cloud
+  metadata consumption (REL-B3-02 / B3-17 and newer). Older clients must not
+  restore new metadata-bearing snapshots via width guessing.
+
+## [0.27.1] — 2026-09-27
+
+### AI task-run tagged commit column (B3-16)
+
+- Local SQLite migration adds nullable `ai_index_task_run.base_commit_ref`
+  (`TEXT`) for tagged `repo-commit:<kind>:<hex>` values (substrate for B3-10).
+- Forward apply is claim-first / `ADD COLUMN` idempotent; down is protected and
+  refuses when any non-NULL tagged value exists.
+- Projection rebuild snapshots `base_commit_ref` before delete and backfills by
+  `(task_id, run_id)` (GC-08).
+- **Minimum compatible client:** a Libra binary that includes this migration
+  (this release and newer). Older binaries open a post-migration repository DB
+  as `UnsupportedFuture` and refuse before SeaORM SELECT.
+
+## [0.27.0] — 2026-09-27
+
+### Local Git sha256 source reject gate (B3-12)
+
+- `libra clone` / `fetch` / `pull` refuse **local-path Git** sources with
+  `extensions.objectformat=sha256` (`LBR-CLI-002`, exit 129) before any write;
+  hint points at fresh `libra init --object-format`.
+- Unknown/corrupt local Git `objectformat` → `LBR-REPO-002` (128); unreadable
+  config → `LBR-IO-001` (128). Shared `git_repo_hash_kind` is now fail-closed
+  (no silent Sha1 default).
+- Network Git sha256 sources remain deferred (DEFER-B3-10). Libra↔Libra sha256/
+  blake3 remotes are unaffected.
+
+## [0.26.0] — 2026-09-27
+
+B3-07: protocol capability-first wire kind + Libra↔Libra blake3 negotiation.
+
+### Protocol discovery (capability-first)
+
+- Reference advertisement wire kind comes only from the `object-format` capability
+  (default `sha1`); OID width is never used to infer sha256/blake3.
+- Advertises `object-format=blake3` (and still `object-format=sha256`) when the
+  local/request kind is non-sha1; sha1 omits the capability.
+- Duplicate or conflicting `object-format` capabilities fail closed; tagged wire
+  IDs are rejected.
+- Libra↔Libra blake3 clone/fetch/push round-trips succeed; mismatch maps to
+  `LBR-REPO-003` (fetch/pull/clone/remote) or `LBR-NET-002` (push) with a
+  blake3-extension hint.
+
+## [0.25.0] — 2026-09-27
+
+REL-B3-01 family release: blake3 repository object-format open (Libra extension) with
+local-loop closes so init/reinit/Convert, local write, fsck, worker/alternates,
+pack/idx v2, verify-pack `--hash-kind`, and maintenance commit-graph skip land together.
+Config `core.objectformat` write guard shipped earlier as independent v0.24.0 (B3-11).
+
+### init / Convert / reinit object-format gates (B3-01)
+
+- Fresh `libra init --object-format blake3` is accepted and persists `core.objectformat=blake3`.
+- Convert (`--from-git-repository`) is SHA-1 Git → SHA-1 Libra only: sha256/blake3 targets and
+  sha256 Git sources fail closed with `LBR-CLI-002` before any target layout/DB write.
+- Reinit refuses a different `--object-format` with `LBR-CLI-002` (and unknown stored formats
+  with `LBR-REPO-002`) via a read-only, no-migration inspect before top-up.
+
+### hash-object / commit / format-patch blake3 local write (B3-02)
+
+- Blake3 repositories hash blobs/trees/commits with the repository kind; `hash-object -w`,
+  `commit`, and `log` round-trip 64-hex Blake3 OIDs.
+- `format-patch --base` prerequisite patch-ids use a BLAKE3 digest in blake3 repositories
+  (not the SHA-1 Git-stable combiner).
+- Worktree I/O helper `apply_hash_kind` accepts `blake3` (no longer silently folds to SHA-1).
+
+### fsck / index fingerprint blake3 (B3-03)
+
+- `fsck` verifies object hashes via `object_format::digest` for sha1/sha256/blake3
+  (removed ring `_ => SHA1` wildcard).
+- AI history cleanup index checksum validation uses the helper digest for 32-byte tails
+  under blake3 process kind.
+
+### worker / alternates / obliteration kind strings (B3-04)
+
+- Worktree I/O `apply_hash_kind` fails closed on unknown kind strings (no silent SHA-1 fallback).
+- Alternates read the base repo's `config_kv` `core.objectformat` and refuse cross-kind /
+  unknown-format borrows.
+
+### bundle / pack / idx blake3 (B3-05)
+
+- blake3 repositories write and read pack indexes as idx v2 (same as SHA-256); SHA-1 stays idx v1.
+- Pack encode/decode call sites use `PackEncoder::new_with_hash_kind` /
+  `Pack::new_with_hash_kind` with an explicit repository kind.
+- Empty packs use a BLAKE3 32-byte trailer; cross-kind `bundle unbundle` fails closed
+  with no residual pack/index writes.
+
+### verify-pack explicit hash kind (B3-06)
+
+- `verify-pack` uses the repository `core.objectformat` and never guesses sha1/sha256/blake3
+  from idx v2 layout (sha256 and blake3 share OID width).
+- Outside a repository, `--hash-kind <sha1|sha256|blake3>` is required; omitting it fails
+  with `LBR-CLI-002`.
+- blake3 repositories verify idx v2 with BLAKE3 digests.
+
+### maintenance blake3 skips commit-graph (B3-13)
+
+- blake3 repositories skip the `maintenance` `commit-graph` task (Git CGPH has no
+  blake3 `hash_version`): warn on stderr / JSON task message, leave existing
+  `objects/info/commit-graph*` untouched, and rely on object-walk `log` / `rev-list`.
+
+## [0.24.1] — 2026-09-27
+
+### SSH public-key authentication diagnostics (#577)
+
+- `clone`, `fetch`, `pull`, `push`, `ls-remote`, and online `remote` discovery
+  now report a strict SSH `Permission denied (publickey)` discovery failure as
+  `LBR-AUTH-002` (exit 128) with a fixed setup hint, instead of a misleading
+  `LBR-NET-001` or `LBR-NET-002` network/protocol error. Host-key failures keep higher priority, raw
+  SSH stderr remains hidden, and later upload-pack/receive-pack processes retain
+  their existing transfer classifications.
+- Automation should accept `LBR-AUTH-002` plus the legacy code for this failure:
+  `LBR-NET-001` for online `remote show` and `remote set-head --auto`, and
+  `LBR-NET-002` for the other listed command surfaces. Keep that compatibility
+  for at least 30 days after v0.24.1 is released and through at least the next
+  patch release, whichever is later.
+
+## [0.23.67] — 2026-09-26
+
+### remote / fetch / pull / push / credential / rerere Git alignment (issues/480)
+
+- `remote add` writes the default `+refs/heads/*:refs/remotes/<name>/*` fetch
+  refspec and supports `--mirror[=fetch|push]` (bare `--mirror` warns; a push
+  mirror writes only the `mirror=true` marker).
+- `remote rename` rewrites a repository-scoped `remote.pushDefault` and every
+  `branch.<name>.pushRemote`; a global-scoped `remote.pushDefault` is left
+  unchanged and warned about.
+- `fetch` gains `--set-upstream`, `--update-head-ok`, `--refmap=<spec>`,
+  `--atomic`, `--prune-tags`/`-P`, `--negotiation-tip`, and `--unshallow`.
+- `fetch`/`pull`/`push` accept a local path or `file://` URL as the repository
+  argument (an anonymous remote); a requested remote ref that does not exist
+  reports `couldn't find remote ref <name>`.
+- `push` supports local Libra and local Git targets, opened by path with no
+  working-directory switch, with compare-and-swap ref updates and checked-out
+  branch protection.
+- `pull` gains `--allow-unrelated-histories` (with an actionable hint when
+  refused); `rebase <upstream>` and `pull --rebase` replay unrelated histories
+  from their root instead of failing.
+- `credential` adds the Git helper `get` operation (an alias of `fill`),
+  silently ignores unknown operations, and stores credentials outside a
+  repository in a user-level encrypted store.
+- `rerere remaining` lists the tracked conflicts that are still unresolved.
+- The current repository is usable as a remote (`.` / `branch.<name>.remote=.`).
+- SSH host-key validation surfaces the actionable diagnostic for
+  clone/fetch/pull/push.
+
+### Git conversion and shallow-source fetch
+
+- `libra init --from-git-repository` now follows the source repository's advertised
+  `HEAD`, including when it points to a branch other than `main`.
+- Git, HTTPS, and SSH fetches request the `shallow` capability only when the
+  server advertises it. Fetches from an already shallow Git source retain its
+  advertised history boundaries. Reference advertisements allow at most 4,096
+  distinct shallow boundaries; upload-pack responses separately allow at most
+  4,096 distinct OIDs across `shallow` and `unshallow` lines. Larger sets fail
+  instead of processing boundaries without a limit.
+  Response boundary lines are also capped at 8,192 including duplicates; OIDs
+  are checked against the server's object format, with violations reported as
+  `LBR-NET-002`.
+- Inspecting advertised shallow-boundary commits is capped at 4 MiB of decoded
+  payload per commit, 64 MiB of decoded commit payload per fetch, and 262,144
+  parent IDs in total. Exceeding a limit aborts the fetch or clone;
+  aggregate-limit errors suggest fetching fewer refs or asking the remote owner
+  to reduce its shallow boundaries.
+- Network Git (`git://`), HTTP(S), and SSH fetches, including clone's internal
+  fetch, verify wanted objects and fetched commit-parent links against final
+  shallow boundaries before updating refs; unmarked missing parents are refused.
+  The temporary parent-edge file is capped at 1 GiB and the in-pack commit-ID
+  index at 64 MiB per fetch. Further depth-response shallow-marker checks cap
+  requested-object and tag-target inspections at 16,384. The response ancestry
+  walk separately caps distinct commits and parent edges at 262,144 each.
+  Remote type probes and inspected tags share a 256 MiB decoded object-payload
+  budget across each shallow response validation. Exceeding a limit fails
+  closed; fetch fewer refs or split the fetch. Smart HTTP additionally rechecks
+  the source's shallow advertisement after upload-pack POST.
+- Clone documentation now distinguishes local shallow-source rejection from
+  the network post-fetch `--reject-shallow` check when `--depth` is also set.
+- The unsupported `libra::internal::protocol::DiscoveryResult` embedding API
+  gains a `shallow_boundaries` field. External code constructing that struct
+  directly must initialize the new field.
+
+## [0.23.65] — 2026-09-24
+
+### GnuPG key import into the repository vault (plan-20260921)
+
+> This section records the plan-20260921 GPG family. The key-import family and
+> its management-plane commands (`export-gpg-key`, `remove-gpg-key`,
+> `list --gpg-keys`, and versioned generated-key names) ship together in this
+> one release. Upstream versions `0.23.37`–`0.23.64` were published without
+> CHANGELOG sections, so the log below is intentionally scoped to this family.
+
+- `libra config import-gpg-key [--list|--key <fpr>|--file <path>|--passphrase-file <path>|--replace]`
+  adopts an existing GnuPG secret key into the repository vault: the first
+  import enables `vault.signing` when it is unset, an explicit `false` is kept
+  with an actionable note, duplicate imports are idempotent, and replacing a
+  different active key archives the previous public key under
+  `vault.gpg.history.<FPR>.pubkey` so earlier signatures keep verifying.
+- `libra config export-gpg-key [--fingerprint|--out <path>]` exports only the
+  public half (`--out` replaces atomically; `--quiet`/`--json`/`--machine` are
+  refused) and `libra config remove-gpg-key [--force]` removes an imported key
+  as **one transaction** — a failure at any of its four steps rolls back and
+  leaves the imported key active exactly as it was. The removed key's own public
+  half is archived as `vault.gpg.history.<FPR>.pubkey` first, so signatures it
+  already made keep verifying while the archive only ever gains a row.
+- `libra config list --gpg-keys` reports each entry's usage, key type, source
+  (`imported`/`generated`), fingerprint, signing key id, import time and
+  archived-history count; secret material is never printed (`vault.gpg.seckey_enc`
+  reads back as `<REDACTED>` and `--reveal` on a vault internal key is refused).
+- Verification (`libra tag -v`, `libra merge --verify-signatures`) accepts any
+  certificate in the repository allowlist (active key, generated fallback,
+  archived history) and evaluates revocation and expiry at the **signature's
+  own creation time**; signatures made by keys the repository never imported
+  are rejected.
+- Signing fails closed with a recovery hint when neither `vault.gpg.pubkey` nor
+  `vault.gpg.generated_pubkey` is published, instead of emitting a signature
+  the repository cannot verify.
+- `libra config generate-gpg-key` uses versioned vault key names
+  (`libra-signing-<unix-ns>`) with collision retries and a staged, resumable
+  migration when an imported key is active.
+
 ## [0.23.36] — 2026-09-21
 
 ### Operation v2 cutover and baseline stabilization
@@ -148,6 +381,49 @@ Website pages were not updated (`../libra-backend` is a `.libra` checkout;
 ER-06a fail-closed).
 
 ## [Unreleased]
+
+### init / Convert / reinit object-format gates (B3-01)
+
+- Fresh `libra init --object-format blake3` is accepted and persists `core.objectformat=blake3`.
+- Convert (`--from-git-repository`) is SHA-1 Git → SHA-1 Libra only: sha256/blake3 targets and
+  sha256 Git sources fail closed with `LBR-CLI-002` before any target layout/DB write.
+- Reinit refuses a different `--object-format` with `LBR-CLI-002` (and unknown stored formats
+  with `LBR-REPO-002`) via a read-only, no-migration inspect before top-up.
+
+
+## [0.24.0] — 2026-09-27
+
+### Config: refuse local `core.objectformat` mutations (B3-11)
+
+- Local-scope `libra config` no longer changes `core.objectformat` after init
+  (`set`, positional assignment, `--add`, `--unset`, `--unset-all`,
+  `--remove-section core`, `--rename-section` involving `core`, and `import`
+  when the imported Git config carries the key). Refusal is `LBR-CLI-002`.
+- Init / reinit remain the only writers. Global/system rows for that key are
+  not consumed by repository commands.
+
+### C-gate hardening
+
+- Cloud pack writer timeout under saturated nextest hosts is 2s (was 150ms).
+- Supervised lease-test execution watchdog after ready is 30s (was 5s).
+- Concurrent DB migration fixtures use a 60s SQLite busy timeout.
+- Agent-import deadline fixtures tolerate full-suite load (5s helper delay /
+  8s wall budget).
+
+## [0.23.68] — 2026-09-26
+
+### Blake3 object-format baseline (B3-00)
+
+- Close plan-20260907 B3-00: shared `object_format` fact source and Blake3-capable
+  `git-internal` pin are accepted after a green T-1 C-gate.
+- `libra init --object-format blake3` remains closed until B3-01.
+
+### C-gate hardening
+
+- Object-index preflight warns on stderr only when a bounded replay made progress, so
+  silent Git-compatible status exits (e.g. `grep` with no matches) stay clean.
+- Subagent discovery reserves 20s for parent checkpoint persistence when the
+  discovery window is exhausted; late-child import budgets tolerate full nextest load.
 
 ### Changed: isolated agent tasks publish one main-workspace sync-back operation
 

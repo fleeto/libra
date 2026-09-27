@@ -18,6 +18,9 @@ libra config path [--global | --system]
 libra config doctor --global-schema
 libra config generate-ssh-key --remote <name>
 libra config generate-gpg-key [--name <name>] [--email <email>] [--usage <usage>]
+libra config import-gpg-key [--list] [--key <fpr>] [--file <path>] [--passphrase-file <path>] [--replace]
+libra config export-gpg-key [--fingerprint] [--out <path>]
+libra config remove-gpg-key [--force]
 ```
 
 Git-compatible flag style is also supported (hidden from help):
@@ -40,6 +43,22 @@ The command supports two invocation styles:
 2. **Git-compatible flag style** (hidden): `libra config --get key`, `libra config key value`
 
 When reading a value with `get`, Libra cascades through scopes in precedence order: local, then global, then system. The first match wins; an unreadable system database is skipped.
+
+### `core.objectformat` is fixed at init
+
+Local-scope writes cannot change `core.objectformat` after the repository is
+created (ADR-B3-01). Every mutating spelling refuses with `LBR-CLI-002`
+(exit 129): `set`, bare positional assignment, `--add`, `--unset`,
+`--unset-all`, `--remove-section core`, `--rename-section` involving `core`,
+and `import` when the imported Git config contains the key (case-insensitive
+variable match such as `core.ObjectFormat`). The refusal is atomic for
+import — no other keys from that import land.
+
+Recreate the repository with `libra init --object-format <sha1|sha256>` to
+choose a different format (`blake3` opens later). Init and reinit still write
+the key through the database layer; only the `config` command surface is
+gated. A `core.objectformat` row under **global** or **system** scope is not
+consumed by repository commands and is unchanged by this guard.
 
 ### Bare `libra config <key>`
 
@@ -465,6 +484,55 @@ libra config generate-gpg-key --name "Jane Doe" --email "jane@example.com" --usa
 libra config get vault.gpg.pubkey
 ```
 
+#### `import-gpg-key`
+
+Import an existing OpenPGP signing key from the local GnuPG home or an armored file, enabling commit/tag/merge signing with that identity.
+
+| Flag | Description |
+|------|-------------|
+| `--list` | List discoverable secret keys from the GnuPG home and exit (no writes) |
+| `--key <fpr>` | Select the key to import by fingerprint/key id (required when multiple candidates) |
+| `--file <path>` | Import a secret key from an armored file instead of the GnuPG home |
+| `--passphrase-file <path>` | Read the key passphrase from a file (required for protected keys in non-interactive use) |
+| `--replace` | Replace the active key, archiving the current public key into history first |
+
+**`libra init` already mints an active signing key** (`source: generated`, `vault.signing=true`), so adopting your own key on a default repository requires `--replace`; without it the import fails closed with `LBR-CONFLICT-002` ("an active GPG key already exists; pass `--replace`"). The replaced key's public half is archived, so signatures it already made keep verifying.
+
+```bash
+libra config import-gpg-key --list                                   # discover candidates (no writes)
+libra config import-gpg-key --key ABCDEF... --replace                # adopt one by fingerprint
+libra config import-gpg-key --file my-key.asc --passphrase-file pass.txt --replace
+```
+
+#### `export-gpg-key`
+
+Export the active GPG public key. Secrets are never exported.
+
+| Flag | Description |
+|------|-------------|
+| `--fingerprint` | Print only the primary fingerprint |
+| `--out <path>` | Write the armored public key to a file atomically instead of stdout |
+
+Secret material is never exported, and the machine-output flags are refused: `--json`, `--machine` and `--quiet` all fail with `LBR-CLI-002`, so `export-gpg-key` is always plain armored text (stdout or `--out`).
+
+```bash
+libra config export-gpg-key            # armored public key to stdout
+libra config export-gpg-key --fingerprint
+libra config export-gpg-key --out pubkey.asc
+```
+
+#### `remove-gpg-key`
+
+Remove the active imported GPG key and fall back to the generated key (never deletes history or generated-key metadata). The removed key's own public half is **archived** first, as `vault.gpg.history.<FPR>.pubkey`, so signatures it already made keep verifying; the result is therefore one extra history row and no other change to the archive. The removal runs as **one transaction**: if any of its four steps fails, the imported key stays active exactly as it was.
+
+**`--force` is required** to remove the active key: without it the command refuses and names the flag (a guard against accidental deletion).
+
+```bash
+libra config remove-gpg-key --force
+```
+
+Archived public keys live in `vault.gpg.history.<FPR>.pubkey`. Dropping one is an ordinary config unset — `libra config unset vault.gpg.history.<FPR>.pubkey` removes just that fingerprint's snapshot and leaves the other fingerprints alone. **Consequence:** signatures made by the dropped key are no longer accepted by `libra tag -v` or `libra merge --verify-signatures` — that is exactly what the archive exists to prevent, so only drop a row when those signatures no longer matter.
+
 ### Scope Flags
 
 These flags are global (apply to any subcommand):
@@ -625,6 +693,20 @@ libra config list --gpg-keys
 ```
 
 Supported `--usage` values are `signing` and `encrypt`.
+
+`libra config list --gpg-keys` reports, per entry: its usage, key type, `source` (`imported` or `generated`), fingerprint, signing key id, import time and the count of archived history keys — with secret material redacted (`vault.gpg.seckey_enc` reads back as `<REDACTED>`).
+
+Existing OpenPGP keys can be imported from the GnuPG home or an armored file:
+
+```bash
+libra config import-gpg-key --list
+libra config import-gpg-key --key ABCDEF...
+libra config import-gpg-key --file my-key.asc --passphrase-file pass.txt
+libra config export-gpg-key --fingerprint
+libra config remove-gpg-key --force
+```
+
+The imported secret key is persisted encrypted (`vault.gpg.seckey_enc`) and redacted on every read path; `config get --reveal` refuses it. Signing **fails closed** when neither `vault.gpg.pubkey` nor `vault.gpg.generated_pubkey` is published: the command errors with a recovery hint instead of emitting an unsigned commit/tag. Signing selects the key recorded in `vault.gpg.signing_key_id`, verification uses a fixed allowlist of the active, generated, and historical public keys.
 
 ## Scope
 

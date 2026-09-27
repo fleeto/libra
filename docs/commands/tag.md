@@ -35,7 +35,7 @@ Tag references are stored in the SQLite database alongside branch references, pr
 | | `--points-at` | `<object>` | List only tags pointing at the given object (peeled to its commit); implies list mode |
 | `-s` | `--sign` | | Sign the annotated tag with a vault PGP key (requires `-m`; not Git GPG-interoperable) |
 | | `--no-sign` | | Do not sign the tag, countermanding an earlier `-s`/`--sign` (last one on the command line wins). Tags are unsigned by default, so on its own this is a no-op. |
-| `-v` | `--verify` | `<name>` | Verify a tag's vault PGP signature (exit 0 good, exit 1 bad) |
+| `-v` | `--verify` | `<name>` | Verify a tag's PGP signature against the repository's configured public keys (active, generated, or historical; exit 0 good, exit 1 bad) |
 | | `--contains` | `<commit>` | List only tags whose tip has `<commit>` as an ancestor |
 | | `--no-contains` | `<commit>` | List only tags whose tip does not have `<commit>` as an ancestor |
 | | `--merged` | `<commit>` | List only tags reachable from `<commit>` |
@@ -175,6 +175,12 @@ For recovery deletes of malformed tag refs, `hash` can be `null` when the stored
 - **GPG key management is fragile**: developers frequently lose keys, let them expire, or misconfigure gpg-agent, leading to broken signing workflows. In CI/CD environments, managing GPG keyrings securely is an operational burden.
 - **Vault-based signing is the intended path**: signing keys live in Libra's vault (see `--vault` on `libra init`) so cryptographic operations are delegated to a secure key store rather than requiring each developer to maintain local GPG keys. This centralizes trust and simplifies key rotation.
 - **Not Git-interoperable**: because the armored signature is produced and checked through the vault PGP path, `libra tag -s` is *not* bit-compatible with `git tag -s`/`git tag -v`. A tag signed in Libra verifies with `libra tag -v`, not with Git's GPG verification, and vice versa.
+
+`tag -v` accepts any certificate in the repository allowlist (active key, the generated
+fallback, and archived `vault.gpg.history.<FPR>.pubkey` entries), so tags signed before a key
+rotation stay verifiable. Revocation and expiry are evaluated at the **signature's own creation
+time**: a tag signed while the key was still valid keeps verifying, while a signature made after
+the key was revoked or had expired is refused.
 
 Signing requires `-m` (clap `requires = "message"`); `-e` can then further edit that `-m` message, but `-s` does not accept `-F` or an editor-only message. `libra tag -v <name>` exits 0 for a good signature and 1 for a bad one; unsigned, non-annotated, or missing tags report a clear error.
 

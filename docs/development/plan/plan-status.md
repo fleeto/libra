@@ -10,7 +10,7 @@
 > 4. 以「计划一览」表为权威，其余小节是它的展开视图；冲突时以任务卡自身 `Lifecycle / Acceptance` 与 `plan-long.md` 的日期索引交叉核对。
 > 5. 状态快照日期见本文件头；每次更新必须把日期改到当天。
 >
-> **当前快照：** 2026-09-23（下次更新时替换）。
+> **当前快照：** 2026-09-27（本次新增 issues/577；其余行沿用原 2026-09-25 快照，未逐项复核）。
 
 ---
 
@@ -20,84 +20,152 @@
 
 | 计划 | 类别 | 状态 | 一句话进度（卡片状态） |
 |---|---|---|---|
+| [`plan-20260924.md`](plan-20260924.md) | B（Agent Capture 通用架構前置） | 已排期 | ACF-01..09 全部 `pending`；Entire `main@9c06bfb13` 對標已完成；Claude R8 字面 `VERDICT: PASS`（P0/P1/P2=0）；是 0902/0904/0905/0911 production、0916 CAP-07 與 0923 DM-05 session consumer contract 的前置 |
+| [`plan-20260925.md`](plan-20260925.md) | B（Session Capture 决策中层） | **已收口** | SCAP-02 / SCAP-01 均为 `done`/`complete`（`v0.23.55` / `fa3849e`；D 组 release+CodeQL 全绿） |
+| [`plan-20260923.md`](plan-20260923.md) | Cross-cutting (implemented CLI completion) | 已排期 | English static-first rewrite; CP-00..20 pending; CP-00 inventory precedes implementation approval; CP-06 static acceptance blocks all dynamic work; no implementation/release claimed |
 | [`plan-20260918.md`](plan-20260918.md) | 横切（`add` 命令收口） | **实施中** | OI-01..03 `done/complete`（v0.23.4/5/6）；**OI-04 `in-progress`（v0.23.7）**；OI-05..WT-07 `pending` |
 | [`plan-20260919.md`](plan-20260919.md) | 横切（global 配置迁 XDG） | 实施中 | GCX-01 `done/complete`（v0.23.1）；GCX-02/03/04 于 2026-09-22 完成实现+测试+文档，`locally-accepted`（版本 bump 与 D 组发布未执行；本轮按操作者指示未调用 Codex review） |
 | [`plan-20260920.md`](plan-20260920.md) | 横切（拆 Code/Publish/Worker） | **已收口** | RC-00..RC-36 全部 `done/complete`；完成判据全勾选；DEFER-RC-04/05/06/07 已关闭；RC-00 缝清单已并入正文附录 |
-| [`plan-20260921.md`](plan-20260921.md) | 横切（GnuPG HOME 密钥导入仓库 vault） | 已排期 | 原 `plan-20260919-gpg-import.md`；R29 双 PASS；15 卡尚未执行 |
+| [`plan-20260927.md`](plan-20260927.md) | 横切（六个大命令实现的模块拆分） | **实施中，计划评审未放行** | 13 张 CM + 9 张 FIX = 22 张独立卡；2026-09-26 用户指示六个 WIP 工作树及计划分支直接并入 `main`，代码集成不等于任务卡验收，22 卡 D 发布仍未完成；CM-01/04、FIX-CM-WT-MOVE `blocked`，CM-06/10 `in-progress`，其余 17 张 `pending`，Acceptance 均空。Cloud 顺序：LIVE-GATE → RECOVERY-AUTH → RECOVERY-CLEANUP → REPO-SCOPE → LIVE-SAFETY → CM-10 → CM-11；worktree 顺序：CM-04 → FIX-CM-WT-MOVE → CM-05 → CM-13，后者受 DEP-CM-WT-COMPAT 的 patch 兼容证明阻断。22 项 G-03 豁免尚未批准；R14 Codex/Claude 均 FAIL，R15 同版 Claude 字面 FAIL（13 项 P1）；R16 Claude 字面 FAIL（14 项 P1），R17 修订稿待同版双评审及 Claude 字面 PASS。DEP-CM-05.vars-ready 4/4 已通过；真实 Cloud L3 仅在受保护 release-SHA CI dispatch，live workflow 283278914 仍 disabled_manually，受保护环境、七项凭据迁移、独立恢复及真实 D 均未交付；本地只做 fake/mock/default C。用户已确认专用 D1/R2 标识并亲自担任 CI 外恢复私钥保管人；用户已决定 `cloud-live-write` 不设独立审批人，`genedna` 可兼任调度与具名 grant owner；受限环境、写前全值校验仍待实施。DEFER-CM-OP-01/WT-01/CLOUD-STATUS 未交付；旧版 R6/R9 PASS 仅属历史快照。 |
+| [`plan-20260921.md`](plan-20260921.md) | 横切（GnuPG HOME 密钥导入仓库 vault） | **已完成** | 原 `plan-20260919-gpg-import.md`；R29 双 PASS。**2026-09-24 收口：** 15/15 卡 `done`/`complete`（勾选 238/238）；操作者裁决 decision (ii) 家族面 + 管理面合并发布为 **`v0.23.65`**（run `35993926394` 8/8 success、CDN gate PASS、安装冒烟 PASS）；发布前合并上游 38 提交（`c71bee8`）并过门 55（fmt/clippy + nextest 8054/8054 + CI 附加段）。遗留：本仓 vault 签名未恢复（操作者裁决维持未签名发布）。 |
+| [`plan-20260926.md`](plan-20260926.md) | C（MEM-01/02 研发历程记忆 · 确定性投影） | 未启动 | 原 `plan-20260923.md`（2026-09-25 改名为 `plan-20260925.md`；2026-09-24 合并上游时因与上游 Session Capture 计划 `plan-20260925.md` 撞名，再改为 `plan-20260926.md`）。**取代 [`plan-20260819.md`](plan-20260819.md) 承担 MEM-01/02**（使用者 2026-09-23 要求在 `libra code` 拆除后独立重设计，不沿用 R30）。**13 卡**全部 `pending`：`DM-00`..`DM-09` + `DM-10`（迁移 B，自 DM-01 拆出）+ `DM-11`/`DM-12`（CLI 家族 `REL-DM-02` 的子卡与 `release` 发布点，自 DM-03 拆出）；全计划**无活动 `EX-*` 豁免**。`DM-09` 为唯一收口卡，AC 按 `DM-06` 的 go/no-go 结论分 A/B 两组；`NO-GO` 时 `DM-07`/`DM-08` 经规范性修订移入 `DEFER-DM-12`。发布周期：GO 分支 9 个、降级分支 7 个（R30 为 25 卡 / 约 25 周期）。**R04 范围收窄（使用者决策）：** 「未提交 Agent 工作按代码路径召回」实测不可实现（`agent_checkpoint.tree_oid` 是 traces 树、`ToolCallRecord.paths_written` 无生产者），已移入 `DEFER-DM-11`。**评审（findings 已改为直接记入计划正文的「Codex review log」章节，`*.review/` 目录已删除）：** Codex r01 `FAIL`（21×P1）、r02（18）、r03（9）、r04（13）、r05（8）、r06（11）、r07（12×P1/4×P2）；**`P0` 全程为 0，但七轮未收敛**。阻塞：`DEP-DM-06`（plan-20260924 拥有 `agent_session` 终态/resume 语义）阻塞 `DM-05`。**计划级评审未 PASS 前禁止开工** |
 | [`plan-20260917.md`](plan-20260917.md) | 横切（cargo-test 进程内剥落） | **已收口** | SH-00..SP-01 五卡全部 `done/complete`；SP-00 结论文档已并入正文附录 |
-| [`plan-20260916.md`](plan-20260916.md) | B（Mega agent capture-push） | 未启动 | CAP-01..07 全部 `pending`；双评审（Codex/Claude）已 PASS，尚未开工 |
+| [`plan-20260916.md`](plan-20260916.md) | B（Mega agent capture-push） | 未启动 | CAP-01..07 全部 `pending`；双评审（Codex/Claude）已 PASS；CAP-01..06 可先行，CAP-07 受 `DEP-ACF-CAP` 阻塞 |
 | [`plan-20260913.md`](plan-20260913.md) | A（LR-09 FastCDC Media） | 未启动 | FL-00..FL-07 全部 `pending`；前置 plan-20260907 未收口 |
 | [`plan-20260912.md`](plan-20260912.md) | B（memory boundary） | **已收口** | MB-01..MB-05、MB-07/08、MB-10/11 全部 `done/complete`（v0.23.37/.39/.40/.41/.42/.43/.44/.45/.46，各卡 ER-14 全量绿、D-MB-STD 远端 evidence 绿）；MB-06/09/12 墓碑 `done`（无对应子命令）；EX-MB-01/02（G-03）与 EX-MB-03（ER-07 签名）已登记；使用者 2026-09-21 双评审豁免已登记；完成判据全数勾选 |
-| [`plan-20260911.md`](plan-20260911.md) | B（pi capture / hook boundary） | 未启动 | PI-01..06 全部 `pending`；Claude Code 429 未给出 verdict，**禁止开工** |
+| [`plan-20260911.md`](plan-20260911.md) | B（pi capture / hook boundary） | 未启动 | PI-01..06 全部 `pending`；Claude Code 429 未给出 verdict且 `DEP-ACF-MIRROR` 未满足，**禁止 production 开工** |
 | [`plan-20260910.md`](plan-20260910.md) | 横切（数据库迁移作用域） | **已收口** | MIG-00..MIG-06、MIG-R01..R03 全部 `done/complete` |
-| [`plan-20260907.md`](plan-20260907.md) | 横切（BLAKE3 object format） | 未启动 | B3-00..B3-17 全部 `pending` |
+| [`plan-20260907.md`](plan-20260907.md) | 横切（BLAKE3 object format） | 执行中 | B3-00 `in-progress`（`object_format` 事实源 + Blake3 臂；pin 保持 `=0.10.2`）。下一卡 B3-11 |
 | [`plan-20260906.md`](plan-20260906.md) | 横切（安全扫描） | 未启动 | SC-01..SC-07、SC-CLOSE 全部 `pending` |
-| [`plan-20260905.md`](plan-20260905.md) | B（Claude hooks/reasoning） | 未启动 | CC-00..CC-06 全部 `pending` |
-| [`plan-20260904.md`](plan-20260904.md) | B（Codex reasoning） | 未启动 | CX-00..CX-30（35 卡）全部 `pending` |
+| [`plan-20260905.md`](plan-20260905.md) | B（Claude hooks/reasoning） | 未启动 | CC-00..CC-06 全部 `pending`；CC-00 可先行，CC-01..06 受 `DEP-ACF-MIRROR` 阻塞 |
+| [`plan-20260904.md`](plan-20260904.md) | B（Codex reasoning） | 未启动 | 6 張 RG + 29 張已定義 CX 卡（共 35 卡）全部 `pending`；CX-00/CX-12 可先行，其餘 33 張 production 卡受 `DEP-ACF-MIRROR` 阻塞（無 CX-18/CX-21） |
 | [`plan-20260903.md`](plan-20260903.md) | A（LR-05 merge） | 实施中（收尾） | MG-01..MG-21 卡片全部 `done/complete`；最终计划收口与 deferred 差异仍待完成 |
-| [`plan-20260902.md`](plan-20260902.md) | B（OpenCode artifact／memory） | 未启动 | OG-00..OG-15 全部 `pending` |
+| [`plan-20260902.md`](plan-20260902.md) | B（OpenCode artifact／memory） | 未启动 | OG-00..OG-15 全部 `pending`；OG-00/OG-04 可先行，其余 production 卡受 `DEP-ACF-MIRROR` 阻塞 |
 | [`plan-20260901.md`](plan-20260901.md) | 横切（SB-01 pkt-line fail-closed） | **已收口** | 全部卡 `done/complete`；最新 v0.22.47 |
 | [`plan-20260830.md`](plan-20260830.md) | 横切（SB-02 sandbox export） | **已收口** | SBX-01..05 `done/locally-accepted`（发布步按 DEFER-SBX-06 延后）；ER-13 收口门绿 |
 | [`plan-20260827.md`](plan-20260827.md) | 横切（SB-04 测试并行度） | **已收口** | NP-00..05 全部 `complete` |
-| [`plan-20260825.md`](plan-20260825.md) | B（Code provider / RT-01 后续） | **已收口** | TA 系列全部落地；发布面按用户 2026-08-30 豁免闭合 |
-| [`plan-20260824.md`](plan-20260824.md) | B（RT-01 延后项收口） | **已收口** | DF-01..09 全部 `done/complete`；v0.22.0 已发布 |
+| [`plan-20260825.md`](plan-20260825.md) | B（历史：Code provider / RT-01 后续）+ 横切测试 | **已收口** | **历史完成/封存**：PS 产品轴已随 plan-20260920 拆除，Code 专属 DEFER 已墓碑化；TA 测试并行度交付保持有效，`DEFER-PS-06/07` 仅可作为另立通用计划的候选 |
+| [`plan-20260824.md`](plan-20260824.md) | B（历史：RT-01 延后项收口） | **已收口** | **历史完成/封存**：DF-01..09 全部 `done/complete`、v0.22.0 已发布；其 Code 产品面与专属 DEFER 已随 plan-20260920 拆除/墓碑化 |
 | [`plan-20260822.md`](plan-20260822.md) | A（LR-02/LR-03 Operation Log v2） | 实施中（PR #503 收口） | OL-01..13、CH-01..04 `done/complete`；OL-14 **已取消**（`web/` 拆除，2026-09-20）；OL-15A `done/complete`，OL-15 `done/remote-pending`（等待 compat-offline-core） |
 | [`plan-20260821.md`](plan-20260821.md) | A（UP-01） | **已收口** | 客户端与 CI 全部落地；closeout `00bc815`；DEFER-02..06 残留 |
-| [`plan-20260819.md`](plan-20260819.md) | C（MEM-01/02 Memory） | 实施中（R30 重设计） | **R30 起点：M2-16A**；M2-16A..E/D1 与 M2-01..M2-15 全部 `pending`（M2-01 在 M2-16A 移植复核前不再为 `in-progress`）；R30 双评审 r01 兩方 `FAIL`（Codex 0×P0/11×P1、Claude 4×P0/13×P1/9×P2）、r02 兩方 `FAIL`（Codex 0×P0/7×P1、Claude 1×P0/7×P1/12×P2）、r03 兩方 `FAIL`（Codex 0×P0/9×P1/4×P2、Claude 1×P0/10×P1/13×P2）；已按 `fix-checklist-r01..r04.md` 修訂；r04 兩方 `FAIL`（Codex 0×P0/6×P1/3×P2、Claude 0×P0/2×P1/13×P2）、r05 兩方 `FAIL`（Codex 0×P0/5×P1、Claude 0×P0/3×P1/12×P2）、r06 兩方 `FAIL`（Codex 0×P0/4×P1/2×P2、Claude 0×P0/2×P1/11×P2）、r07 兩方 `FAIL`（Codex 0×P0/2×P1/5×P2、Claude 0×P0/2×P1/12×P2）、r08 兩方 `FAIL`、r09 兩方 `FAIL`、r10 兩方 `FAIL`、r11 兩方 `FAIL`、r12 兩方 `FAIL`、r13 兩方 `FAIL`、r14 兩方 `FAIL`、r15 兩方 `FAIL`、r16 兩方 `FAIL`（Codex 0×P0/6×P1/1×P2、Claude 0×P0/4×P1/5×P2）、r17 兩方 `FAIL`、r18 兩方 `FAIL`（Codex 0×P0/4×P1/2×P2、Claude 0×P0/6×P1/9×P2）、r19 兩方 `FAIL`（Codex 0×P0/2×P1/2×P2、Claude 0×P0/3×P1/7×P2）、r20 兩方 `FAIL`（Codex 0×P0/2×P1/2×P2、Claude 0×P0/2×P1/9×P2）；r21 兩方 `FAIL`（Codex 0×P0/1×P1/3×P2、Claude 0×P0/2×P1/7×P2）；r22 兩方 `FAIL`（Codex 0×P0/3×P1/2×P2、Claude 0×P0/6×P1/8×P2）；r23 兩方 `FAIL`（Codex 0×P0/2×P1/4×P2、Claude 0×P0/3×P1/5×P2）；r24 兩方 `FAIL`（Codex 0×P0/2×P1/5×P2、Claude 0×P0/3×P1/8×P2）；r25 兩方 `FAIL`（Codex 0×P0/2×P1、Claude 0×P0/4×P1/6×P2）；r26 兩方 `FAIL`（Codex 0×P0/1×P1/2×P2、Claude 0×P0/4×P1/10×P2）；r27 兩方 `FAIL`（Codex 0×P0/1×P1/1×P2、Claude 0×P0/3×P1/7×P2）；r28 兩方 `FAIL`（Codex 0×P0/2×P1/1×P2、Claude 0×P0/4×P1/3×P2）；r29 兩方 `FAIL`（Codex 0×P0/1×P1/1×P2、Claude 0×P0/1×P1/4×P2）；r30 兩方 `FAIL`（Codex 0×P0/1×P1/1×P2、Claude 0×P0/3×P1/5×P2）；r31 Codex **PASS**（0×P0/0×P1/2×P2）、Claude `FAIL`（0×P0/2×P1/5×P2）；r32 兩方 `FAIL`（Codex 0×P0/2×P1/3×P2、Claude 0×P0/2×P1/5×P2）；r33 兩方 `FAIL`（Codex 0×P0/1×P1/2×P2、Claude 0×P0/4×P1/5×P2）；r34 兩方 `FAIL`（審計 scope 格）；r35 Codex `FAIL`（協議會話隔離）/**Claude `PASS`**；r36 Codex `FAIL`（plan-status 合併行）、**Claude `PASS`**；r37 雙 PASS（見下）；PR #456 由 R30 计划承接（ADR-M2-15） |
+| [`plan-20260819.md`](plan-20260819.md) | C（MEM-01/02 Memory，R30 历史方案） | 未启动（待 DM-00 登记退役） | R30 r37 于 2026-09-22 对冻结版 sha256 `4fbaf4bd…` 取得 Codex/Claude 同版双 PASS；25 张 M2 卡仍为 `pending`，未实施。MEM-01/02 已由 [`plan-20260926.md`](plan-20260926.md) 承接，旧卡待 DM-00 正式登记退役。历轮评审结论已整理到原计划正文；旧版 PASS 不代表新计划的评审门通过。 |
 | [`plan-20260818.md`](plan-20260818.md) | B（deepseek-harness bridge） | **已收口** | LB-01..07 全部 `done/complete`；protocol v1 20-method 全实现 |
 | [`plan-20260729.md`](plan-20260729.md) | A（CT-01） | 实施中（收尾） | CT4-01 发布卡已执行（v0.21.21）；**CT3-07 `blocked`/已延后**；完成判据未全部勾选 |
-| [`plan-20260715.md`](plan-20260715.md) | B（RT-01 Code Web-only） | **已收口** | W0..W6 主线 + W5-01 家族全部合入；完成判据全勾选；DEFER-01..10 残留（部分由 plan-20260824 承接） |
+| [`plan-20260715.md`](plan-20260715.md) | B（历史：RT-01 Code Web-only） | **已收口** | **历史完成/封存**：W0..W6 + W5-01/WIO 完成证据保留；Code 产品面由 plan-20260920 拆除，DEFER-01..08 已关闭/墓碑化，DEFER-09/10 已完成关闭 |
 | [`plan-20260714.md`](plan-20260714.md) | A（UP-01、LR-01）+ 横切 | **已收口** | Part A 迁移至 plan-long；Part C W1..W4 勾选；Part D 残留由 LR 承接 |
 | [`plan-20260713.md`](plan-20260713.md) | B（LR-06/07/10 捕获前置） | **已收口** | DR-BASELINE..DR-07 全部实现并收口 |
 | [`plan-20260708.md`](plan-20260708.md) | A（LR-04/05/09 相邻基础） | **已收口** | 41 项主线全部实现；只保留历史记录，活跃残留另行排期 |
 
 ### issues/ 下的计划（Issue 驱动的 Git 对齐修复计划）
 
-`issues/` 目录每份文件对应一个 GitHub Issue，是独立的可执行计划。`477` 已收口、`486` 已关闭、`476` 执行中（用户 2026-09-20 覆盖：执行期间不调用 Codex/Claude 评审）。其余多为设计计划。状态列取值同上。
+`issues/` 目录每份文件对应一个 GitHub Issue，是独立的可执行计划。`474`/`477` 已收口、`486` 已关闭、`476` 执行中（用户 2026-09-20 覆盖：执行期间不调用 Codex/Claude 评审）。其余多为设计计划。状态列取值同上。
 
 | 计划 | Issue 主题 | 状态 | 任务卡 |
 |---|---|---|---|
 | [`issues/470.md`](issues/470.md) | 工作树物化丢失可执行位与 mode 变化检测 | 未启动 | FM-01/02/05（3 卡） |
 | [`issues/473.md`](issues/473.md) | `init` 与 Git 对齐 | 未启动 | IN-01..IN-12（12 卡） |
-| [`issues/474.md`](issues/474.md) | clone 浅克隆完整性、bundle 源、bare 与 mirror 对齐 | 实施中 | CL-01 `done`/`remote-pending`（`v0.23.47` `#510`/`5b55d98`）；CL-02 C 组 `v0.23.48`；CL-03..CL-15 A/B `locally-accepted`（未 bump） |
+| [`issues/474.md`](issues/474.md) | clone 浅克隆完整性、bundle 源、bare 与 mirror 对齐 | **已收口** | CL-01..CL-15 全 `done`/`complete`（`v0.23.47`–`v0.23.54`、`v0.23.57`–`v0.23.63`）；closeout `v0.23.64`（#569）；DEP-CL-07 完成（#474 CLOSED） |
 | [`issues/475.md`](issues/475.md) | `config` Git 兼容参数层对齐 | 未启动 | CF-01..CF-15（15 卡） |
 | [`issues/476.md`](issues/476.md) | 工作树命令族与 Git 对齐 | **实施中** | WT-02 `v0.23.29` / WT-04 `v0.23.30` / WT-08 `v0.23.31` / WT-09 `v0.23.32` / WT-10 `v0.23.33` / WT-11 `v0.23.34` / WT-01 `v0.23.35`（`done`/`remote-pending`）；WT-03 受 DEP-WT-08 阻塞；intent-to-add 已迁至 plan-20260918 |
 | [`issues/477.md`](issues/477.md) | 历史改写命令族与 Git 对齐 | **已收口** | HF-01..HF-31（31 卡）全 `done/complete`，聚合发布 v0.22.49；子 issue #495 |
 | [`issues/478.md`](issues/478.md) | log/show/diff/grep/blame/notes/reflog 命令族 | 未启动 | LG-01..LG-25（25 卡） |
 | [`issues/479.md`](issues/479.md) | plumbing 与 Git 对齐 | 未启动 | EC-01、RV-01/02、UI-01..03、DF-01、SR-01、UR-01（9 卡） |
-| [`issues/480.md`](issues/480.md) | remote/fetch/pull/push/credential/rerere 对齐 | 未启动 | HP-01..HP-16（16 卡） |
+| [`issues/480.md`](issues/480.md) | remote/fetch/pull/push/credential/rerere 对齐 | 未启动 | HP-01..HP-17（17 卡；HP-17 为 SSH 传输入口 host-key 校验，issue #560） |
 | [`issues/481.md`](issues/481.md) | 维护与杂项命令族对齐 | 未启动 | MX-01..MX-16（16 卡） |
 | [`issues/483.md`](issues/483.md) | `count-objects` 与预览命令零对象写入 | 未启动 | CO-01..CO-04（4 卡；CO-03/04 受 DEP-CO-04 / CX-30 `src/cli.rs` 串行约束） |
 | [`issues/486.md`](issues/486.md) | upstream ahead/behind 计数 | **已收口** | AB-01 `done/complete`（v0.22.31，已关闭） |
 | [`issues/487.md`](issues/487.md) | 本地 Git 转换挂死与中断恢复 | 未启动 | IG-01..IG-05（5 卡） |
 | [`issues/488.md`](issues/488.md) | `grep` 的 `--exclude-standard` 与子目录作用域 | 未启动 | GR-01/02（2 卡） |
 | [`issues/490.md`](issues/490.md) | skip-worktree 索引位与 `add` 稀疏路径诊断 | 未启动 | SW-01..SW-07（7 卡；SW-06 已迁至 plan-20260918） |
+| [`issues/496.md`](issues/496.md) | 本地路径 clone 停住（Fetching objects 0% CPU） | 未启动 | CLH-01..CLH-04（4 卡） |
+| [`issues/497.md`](issues/497.md) | 删除最后一个被跟踪文件后 commit 报 nothing to commit | 未启动 | CD-01..CD-04（4 卡） |
+| [`issues/498.md`](issues/498.md) | `tag <name> <commit>` 不接受显式目标提交 | 未启动 | TT-01..TT-04（4 卡；与 #533/#478 协调） |
+| [`issues/477b.md`](issues/477b.md) | 历史改写收口后续（#522/#523/#525/#526/#527/#533/#536；#528 并入 #495） | 未启动 | HW-01..HW-07（7 卡） |
+| [`issues/451.md`](issues/451.md) | RFC：version-aware M2 Episode memory | 未启动 | RFC-01..RFC-04（4 卡） |
+| [`issues/468.md`](issues/468.md) | Data collection and refinement | 未启动 | DC-01..DC-04（4 卡） |
+| [`issues/500.md`](issues/500.md) | Feature：Centralized Storage for Libra Statistics Data | 未启动 | CS-01..CS-04（4 卡） |
+| [`issues/577.md`](issues/577.md) | SSH 公钥认证失败误报 pkt-line 协议错误与配置文档 | **已收口** | 2026-09-27：SA-02/SA-01 均为 `done` / `complete`；PR #578 合并为 `5eb833f9`，v0.24.1 发布与 8/8 release jobs 全绿；网站 `cf@667d7da8`、Worker `c7011920` 和七个生产页验证完成；Issue #577 CLOSED |
 
 ---
 
 ## 二、未启动的计划与卡
 
-以下计划尚无任何卡开工（设计态，全部 `pending`）。按建议优先级排列，优先级依据为跨计划依赖（`DEP-*`）与产品路线（`plan-long.md`）：
+以下计划中，`plan-20260921` 已于 2026-09-24 完成并发布为 `v0.23.65`（15/15 卡 `done`/`complete`，见下表本行注）；其余计划均未进入实施/发布阶段（多数为设计态、全部 `pending`；`plan-20260919` 已收口前置卡/Phase 0，实施与发布仍未开工）。按建议优先级排列，优先级依据为跨计划依赖（`DEP-*`）与产品路线（`plan-long.md`）：
 
 | 计划 | 全部待执行卡 | 开工前置条件 |
 |---|---|---|
-| [`plan-20260904.md`](plan-20260904.md) | CX-00..CX-30（35 卡） | Phase 0：Codex `PASS`；CX-30 受 DEP-CLI-mirror 三态串行约束 |
-| [`plan-20260905.md`](plan-20260905.md) | CC-00..CC-06 | CC-02..06 依赖 plan-20260904 的 RG 卡完成 |
+| [`plan-20260924.md`](plan-20260924.md) | ACF-01..ACF-09 | Claude 字面 `VERDICT: PASS`；ACF-01 重核 Entire/Libra pin 與 shared files clean |
+| [`plan-20260926.md`](plan-20260926.md) | DM-00..DM-12（13 卡） | 计划级评审未取得字面 `VERDICT: PASS`（Codex r01–r07 均 `FAIL`，`P0` 全程为 0），**禁止开工**；另 `DEP-DM-06` 阻塞 `DM-05`（等 plan-20260924 的 `CTR-ACF-DM06-v1` 或 ACF-08 收口） |
+| [`plan-20260902.md`](plan-20260902.md) | OG-00..OG-15 | OG-00/04 以各自 review gate 為準；其余 production 卡等待 `DEP-ACF-MIRROR` |
+| [`plan-20260904.md`](plan-20260904.md) | 6 張 RG + 29 張已定義 CX 卡（共 35 卡） | CX-00/12 以原 Phase 0 gate 為準；其餘 33 張 production 卡等待 `DEP-ACF-MIRROR`；CX-30 另受 DEP-CLI-mirror |
+| [`plan-20260905.md`](plan-20260905.md) | CC-00..CC-06 | CC-00 以原 review gate 為準；CC-01..06 等待 `DEP-ACF-MIRROR`，且 reasoning 卡保留 RG 前置 |
+| [`plan-20260925.md`](plan-20260925.md) | SCAP-02、SCAP-01 | R9 对同一修订版 Codex 与 Claude 均为字面 `VERDICT: PASS` 且 P0/P1/P2 为 0。SCAP-02 的登记已在 `fba6cbc`，本卡只核对。SCAP-01 依赖该登记 |
+| [`plan-20260923.md`](plan-20260923.md) | CP-00..20 pending; expand bounded domain cards after inventory if needed | Audit handoff, required review PASS and DEP-CP-01..07; dynamic implementation requires CP-06 done/complete |
 | [`plan-20260906.md`](plan-20260906.md) | SC-01..SC-07、SC-CLOSE | — |
 | [`plan-20260907.md`](plan-20260907.md) | B3-00..B3-17 | Phase 0 冻结；是 plan-20260913 的前置 |
-| [`plan-20260911.md`](plan-20260911.md) | PI-01..PI-06 | **Claude Code 429 未出 verdict，禁止开工** |
+| [`plan-20260911.md`](plan-20260911.md) | PI-01..PI-06 | **Claude Code 429 未出 verdict且 `DEP-ACF-MIRROR` 未满足，禁止 production 开工**；只讀 pin/source 重核可先行 |
 | [`plan-20260912.md`](plan-20260912.md) | MB-01..05、MB-07/08/10/11（MB-06/09/12 已取消） | 依赖 CAP（plan-20260916）等 |
 | [`plan-20260913.md`](plan-20260913.md) | FL-00..FL-07 | **前置 plan-20260907 完整收口**（DEP-FL-04） |
-| [`plan-20260916.md`](plan-20260916.md) | CAP-01..CAP-07 | 双评审已 PASS；开工时按 ER-CAP-02 pin 重核 |
+| [`plan-20260916.md`](plan-20260916.md) | CAP-01..CAP-07 | 双评审已 PASS；CAP-01..06 按 ER-CAP-02 pin 重核，CAP-07 另等待 `DEP-ACF-CAP` |
 | [`plan-20260919.md`](plan-20260919.md) | GCX-02/03/04 | GCX-01 已 `done`（v0.23.1）；GCX-02/03/04 已实现并本地验收（2026-09-22，`locally-accepted`），发布未执行；写集与 plan-20260918 串行（DEP-GCX-02） |
-| [`plan-20260921.md`](plan-20260921.md) | VG-00..VG-14（15 卡） | R29 双 PASS；Phase 0 剩余 DEP 复核、`gpg --version` 证据、VG-00 go、ADR Accepted |
+| [`plan-20260921.md`](plan-20260921.md) | VG-00..VG-14（15 卡） | **已完成（2026-09-24）**：15/15 卡 `done`/`complete`；`v0.23.65` 已发布（decision (ii) 合并发布；REL-VG-01 证据齐备）；证据口径按操作者裁决以替代机制满足双字面 PASS 与 supervisor capture；DEP-CP-04 所述 REL-VG-01 文件保留窗口随发布结束 |
 | `issues/` 设计计划 | 见「计划一览」issues 表 | 各计划 Codex review `PASS` 前不得开工；`issues/476`/`479`/`483`/`490` 与 `plan-20260918` 写集串行（DEP-WT-09 / DEP-PL-04 / DEP-AD-06 / DEP-AD-07） |
 
 ---
 
-## 三、实施中的计划与当前卡
+## 三、实施中的计划、待退役的历史方案与当前卡
 
-按执行窗口排序；当前唯一在跑的卡见「四、当前执行指针」。
+按执行窗口排序；当前执行与并行工作树见「四、当前执行指针」。
+
+### issues/577（SSH 公钥认证拒绝诊断与设置指南）
+
+SA-02 与 SA-01 均为 `done` / `complete`。Claude I11 第二次重基最终候选审查取得
+字面 `VERDICT: PASS`（P0–P3=0）；最终 fmt、Clippy、Nextest 8208/8208、release
+build 与隔离 locked install 全绿。候选 `ea89d047` 经 PR #578 的 12/12 检查后
+squash merge 为 `5eb833f9`；v0.24.1 标签指向该提交，release workflow
+`36296462821` 的 8/8 jobs 全绿，四平台 CDN 摘要、签名稳定清单、公开安装和上一版
+固定产物均已验证。网站签名提交为 `cf@667d7da8`，活动 Worker 为 `c7011920`，
+SSH 指南与六命令生产页均为 HTTP 200。Issue #577 已关闭；完整证据见
+`evidence/issues-577/sa-01-d-gate-20260927.md`。
+
+### plan-20260927（六命令模块拆分，22 个独立切片）
+
+2026-09-25 的干净 `main` 基线上，FUSE repair 两项测试因旧版 Operation 审计查询而 2/2 失败，故按 ER-10 新增独立 FIX-CM-04。同日 CM-01 的全量 Nextest 8115 项中通过 8114 项，`op_undo_redo::doctor_recovers_a_running_publish_journal_once` 三次均失败：物理 `a.txt` 留在 `two\n` 而非预期的 `one\n`。同一二进制从 linked CWD 失败、从 main 或 `/tmp` 通过。FIX-CM-01 只修 pinned scope 并建确定性红绿回归；Operation doctor 误报、中途回滚、undo/redo/revert 入口，以及 `switch` branch-attach 与 repo-wide refs restore 跨工作树锁序竞态，均属未修的独立 P1，由仓库维护者/单一发布者以 `DEFER-CM-OP-01` 另立高优先级安全计划或 issue。若本计划任一卡的 focused/C/D 或最终全量因此变红，须按 ER-10 立依赖 FIX 或先完成独立安全修复，再重跑至绿；DEFER 不能豁免红灯。FIX-CM-01 发布后 CM-01 重基并重跑 C/D，其余卡方可进入 C/T-5；FIX-CM-04 `done/complete` 且本修订计划取得新一轮 Claude Code 字面 `VERDICT: PASS` 后，CM-04 才可解除阻塞。R6/R9 PASS 只证明各自历史修订版；R10/R11/R12/R14 的 Codex/Claude 双 FAIL 均不放行，22 项 EX 未获批准；R15 Claude FAIL；R16 Claude FAIL（14 项 P1）；R17 修订稿待新 SHA 双评审；尚无本计划卡完成 D 组发布。
+
+| 卡 | 本地状态 | 发布 |
+|---|---|---|
+| FIX-CM-01 Operation restore pinned scope | Lifecycle `pending` / Acceptance 空；只改 `src/internal/head.rs`、`src/internal/operation/restore.rs`、`tests/op_undo_redo.rs`、`tests/INDEX.md`；新 parent/child 回归在 test-only main 基线红、本卡树绿，child 从 linked cwd resolve(main)，核物理文件、heads 和状态。无网站依赖；本卡独立 `done/complete` 前其它卡不得进入 C/T-5 | 未发布 |
+| FIX-CM-08 diff 生产 panic 守卫 | Lifecycle `pending` / Acceptance 空；待 CM-07 的 `tests/INDEX.md` 发布后，注册并修复既有 `diff_production_expect_guard`，本卡独立发布后 CM-08 才可移动 diff 源码 | 未发布 |
+| FIX-CM-LIVE-GATE Cloud live 无跳过门 | Lifecycle `pending` / Acceptance 空；待 FIX-CM-01 与 CM-13 独立发布，提供无跳过脚本与纯本地 preflight；C 组按模板标准双 env/default-feature 全量，测试体 feature-off 不得静默跳过；本卡不使用真实 Cloud 资源 | 未发布 |
+| FIX-CM-CLOUD-RECOVERY-AUTH 来源认证 | Lifecycle `pending` / Acceptance 空；`AC=35/8@EX-CM-REC-AUTH-G03`、`VER=35/8`；先独立发布受保护 workflow、签名来源 verifier 和零删除探针，D 不需要真实来源 artifact；EX 未批准 | 未发布 |
+| FIX-CM-CLOUD-RECOVERY-CLEANUP 受限恢复 | Lifecycle `pending` / Acceptance 空；`AC=16/8@EX-CM-REC-CLEANUP-G03`、`VER=16/8`；依赖 AUTH 发布，补充精确 D1/R2 范围删除与同签名范围幂等重试；本卡 D 仍零真实删除；EX 未批准 | 未发布 |
+| FIX-CM-CLOUD-REPO-SCOPE 云端仓库作用域 | Lifecycle `pending` / Acceptance 空；`AC=51/8@EX-CM-CLOUD-REPO-SCOPE`、`VER=40/8`；依赖 CLEANUP 发布，以本地假端点验证 CLI/D1 ensure/R2 sink 拒绝未登记 repo/slot 和越界写；EX 未批准 | 未发布 |
+| FIX-CM-CLOUD-LIVE-SAFETY Cloud L3 写前准入 | Lifecycle `pending` / Acceptance 空；独立 `implementation`/`compensating` patch，`AC=39/8@EX-CM-CLOUD-SAFETY`、`VER=27/8@EX-CM-CLOUD-SAFETY`，EX 待新冻结 SHA 具名审批；依赖 FIX-CM-01、CM-03、CM-13、LIVE-GATE、RECOVERY-AUTH/CLEANUP、REPO-SCOPE 与 DEP-CM-05.vars-ready/recovery-ready。交付 CI-only 身份/只读探针、D1 全库加密备份与读回、全局及逐例预分配 manifest、失败关闭；自身 release-SHA 真实 D 与 `E-CM-L3-SAFETY` 必须通过且发布后才放行 CM-10。现 `premerge/postrelease=unknown`，未作真实 L3 写入 | 未发布 |
+| CM-01 merge 状态与 autostash | Lifecycle `blocked` / Acceptance 空；R6 本地 A/B 与独立 Codex review `VERDICT: PASS`（`/root/cm01_review`）仅为历史预备，R11 新 sidecar/owner guard 尚未落地；首次 C 组 Nextest 8114/8115，`op_undo_redo::doctor_recovers_a_running_publish_journal_once` 三次均失败。待 FIX-CM-01 独立发布、新版计划 PASS 与 EX-CM-01 获批后重基，完成新 A/B，再于已 bump 树重跑 C/D | 未发布 |
+| FIX-CM-04 FUSE repair v2 审计测试契约 | Lifecycle `pending` / Acceptance 空；修订计划 Claude PASS 待取得 | 未发布 |
+| CM-04 worktree registry | Lifecycle `blocked` / Acceptance 空；`AC=29/8@EX-CM-04`、`VER=18/8@EX-CM-04` 待具名批准；依赖 FIX-CM-04 与 CM-12；隔离本地试作默认 focused 291/291、FUSE lib 12/12，通过；FUSE command 8/10，两项失败已在干净 main 复现。预备证据不计验收，须等 FIX-CM-04 `done/complete` 及修订计划 Claude PASS 后重基重验 | 未发布 |
+| FIX-CM-WT-MOVE 跨设备 move 数据保全 | Lifecycle `blocked` / Acceptance 空；`AC=57/8@EX-CM-WT-MOVE`、`VER=56/8`；依赖 CM-04 与 DEP-CM-WT-COMPAT。当前 patch 兼容的旧二进制和已打开 writer 排除证明不足，不能进行 C/merge/release；若需 breaking/minor，先提交具体兼容方案请用户决定。EX 未批准 | 未发布 |
+| CM-06 status 输入、扫描与缓存 | Lifecycle `in-progress` / Acceptance 空；旧本地 A/B 与 `dirty_test` 14/14 仅为隔离预备，R11 新 owner/warning-order guard 尚未落地。待共享 INDEX 前驱发布、新版计划 PASS 与 EX-CM-06 获批后重基并重新执行正式 A/B；C/D 还须等 FIX-CM-01 发布 | 未发布 |
+| CM-10 cloud sync、metadata 与 Agent catalog | Lifecycle `in-progress` / Acceptance 空；本地 cloud 命令 9/9、源内 52/52、mock/error 7/7、`compat_serial_registry` 25/25 为隔离预备。待 CM-03、CM-13、FIX-CM-CLOUD-LIVE-SAFETY 独立发布后重基；DEP-CM-05.premerge 的 vars owner/readback 已通过，但本地/mock 首写负例未证；postrelease 本卡 release-SHA 受保护 CI dispatch、`E-CM-L3-10` 身份/备份/manifest/善后与两个完整 live target 未证，阻 D/complete。本地仅 fake/mock/default C，不执行真实 Cloud 写 | 未发布 |
+| CM-13 worktree repair/doctor 结构拆分 | Lifecycle `pending` / Acceptance 空；`AC=34/8@EX-CM-13`、`VER=24/8@EX-CM-13` 待具名批准；CM-05 独立发布后继承 FIX-CM-04 的测试基线，移动 repair/doctor 所有权并保留默认/FUSE 双路径；Operation 中途回滚行为缺陷不在本卡修复范围，既有 doctor approved-project 确认写入的分类/锁/审计缺口记 `DEFER-CM-WT-01`，未被本卡修复 | 未发布 |
+| CM-07 status 输出格式 | Lifecycle `pending` / Acceptance 空；DEP-CM-04 仅是后端 `cf` 远端 pre-SHA/页面 blob、隔离 clone、签名与权限的只读开工基线；网站 `status.en.md` 编辑、gen:docs/typecheck/build、推送及实际部署证据均由 CM-07 自身交付。网站已推送后失败采用条件化签名补偿提交（`compensating`），远端竞态或部署未证则 `remote-pending`，不得 `complete` | 未发布 |
+| CM-11 cloud restore | Lifecycle `pending` / Acceptance 空；待 CM-10 与 FIX-CM-CLOUD-LIVE-SAFETY 发布，DEP-CM-05.premerge 本地/mock 门先于合入；本卡 release-SHA 受保护 CI dispatch、独立 `E-CM-L3-11` 身份/备份/manifest/善后及两个完整 live target 属 postrelease D/complete 门，不得借 CM-10 证据。本地仅 fake/mock/default C；Cloud root 既有小型本地 status 保留，尚未 live 写或发布 | 未发布 |
+| CM-05 worktree 普通操作所有权 | Lifecycle `pending` / Acceptance 空；`AC=23/8@EX-CM-05`、`VER=12/8@EX-CM-05` 待具名批准；CM-04 与 FIX-CM-WT-MOVE 独立发布后重基 | 未发布 |
+| CM-02 merge 树裁决 | Lifecycle `pending` / Acceptance 空；待 CM-01、CM-06 独立发布，继承共享 `tests/INDEX.md` 写者顺序；正式 A/B/C/D 未验收 | 未发布 |
+| CM-03 merge facade/输出 | Lifecycle `pending` / Acceptance 空；待 CM-02、CM-01 发布及 DEP-CM-01 写集核查；同卡更新 serial 源路径与 INDEX 守卫，正式 A/B/C/D 未验收 | 未发布 |
+| CM-08 diff 比较管线 | Lifecycle `pending` / Acceptance 空；待 CM-07、FIX-CM-08 独立发布，正式 A/B/C/D 未验收 | 未发布 |
+| CM-09 diff 渲染 | Lifecycle `pending` / Acceptance 空；待 CM-08 独立发布，正式 A/B/C/D 未验收 | 未发布 |
+| CM-12 rebase 状态/replay | Lifecycle `pending` / Acceptance 空；待 CM-08、CM-09 独立发布，正式 A/B/C/D 未验收 | 未发布 |
+
+各卡发布仍按 ER-12 由单一发布者串行执行；FIX-CM-01 → CM-01，FIX-CM-04/CM-12 → CM-04 → CM-05 → CM-13，CM-07 → FIX-CM-08 → CM-08，CM-03/CM-13 → FIX-CM-LIVE-GATE → FIX-CM-CLOUD-RECOVERY-AUTH → FIX-CM-CLOUD-RECOVERY-CLEANUP → FIX-CM-CLOUD-REPO-SCOPE → FIX-CM-CLOUD-LIVE-SAFETY → CM-10 → CM-11。除 FIX-CM-01 自身外所有卡的 C/T-5 都等其独立发布 `done/complete`，须从关联工作树 cwd 实跑。`tests/INDEX.md` 全写者发布链为 FIX-CM-01 → CM-01 → CM-06 → CM-02 → CM-03 → CM-07 → FIX-CM-08 → CM-08 → CM-09 → CM-12 → CM-04 → CM-05 → CM-13 → FIX-CM-LIVE-GATE → FIX-CM-CLOUD-RECOVERY-AUTH → FIX-CM-CLOUD-RECOVERY-CLEANUP → FIX-CM-CLOUD-REPO-SCOPE → FIX-CM-CLOUD-LIVE-SAFETY → CM-10 → CM-11；共享 `tests/compat/serial_registry.rs` 另有 CM-03 → CM-10。CM-03 同卡把 INDEX 的 serial 守卫行改为无固定计数。CM-07 的 DEP-CM-04 仅核网站 `cf` 开工基线，实际 `status.en.md` 交付由本卡完成；已推送后失败走条件化 `compensating`，远端/部署不确定为 `remote-pending`。`CM-Publisher` 为本轮主 Agent（ID `/root`），负责状态、旧→新符号路径映射和发布；可委托文档代理编辑，但由发布者精确暂存与提交。`plan-status.md` 是 G-10 协调写集，允许随对应卡发布写集精确暂存，不使用 `commit -a`。Cloud 真实 L3 仅在受保护 release-SHA CI `workflow_dispatch` 写 job：先由安全卡交付 fail-closed 协议并产生独立 `E-CM-L3-SAFETY`，再由 CM-10/11 各自产生 `E-CM-L3-10/11`；本地只跑 fake/mock/default C，不凭本地 env 发真实写请求。
+
+**规则与延期门：** 本版 22 项 `EX-CM-*` G-03 数量例外在 R14 双 FAIL、R15 Claude FAIL 后均未获批准，必须分别取得新冻结 SHA 的具名 Codex reviewer 对准确分子和证据的书面同意，以及本修订版 Claude Code 字面 `VERDICT: PASS`，才对对应卡生效；此前新卡不得开工。`DEFER-CM-OP-01` 是未修的独立 P1；CM-13 之外的 `worktree doctor --adopt/--clear-approved-project` 写入被归为 ReadOnly 且无审计/写锁，另记 `DEFER-CM-WT-01`，由仓库维护者/单一发布者立行为 FIX 或安全 issue；两者均非本计划已验收能力。`DEFER-CM-CLOUD-STATUS` 仅在既有本地 status 职责增长、cloud root 再超预算或修改反复跨 sync/restore 时重做职责审计并另立卡。
+
+| Cloud L3 证据 ID | 已确认的共享只读背景 | 本卡强制门与状态 |
+|---|---|---|
+| `E-CM-L3-SAFETY`（FIX-CM-CLOUD-LIVE-SAFETY） | 用户已确认冻结 `.env.live-test` SHA256 `c8409dbd59232c9e17c970adc029564ca7d112f17a8ae25c2f56a44b5d768b6d` 的专用精确期望：D1 account `3a6c7e7927dbd254d3c78c1fc6222441`、`libra-testing` database UUID `8e067bd6-f12c-4462-a536-65f8acde59ce`，R2 同 account、bucket `libra-action`；用户最新澄清同一 account 的其它 D1 库属于其它项目，账号级 D1 建库/删库与远端整库导入均禁止。06:57 UTC 本地只读 D1 GET 200/UUID 匹配、R2 有界 ListObjectsV2 200/Name 匹配；R2 管理 API 403。后续 D1 只读 schema 清点为 25 用户表、1 SQLite 内部表、1 view、25 triggers（9 源码匹配、16 remote-existing/unmatched）、0 virtual table；16 条不得盲判安全。四个独立 repo vars 于 08:35:02 UTC 全部设置，API readback exact 4/4；live workflow id `283278914` 自 07:27 UTC `disabled_manually`，无待/运行 job。均不是本卡真实 D 证据 | `vars-ready=passed`；`premerge=unknown`（本地/mock 证明首写前 secret 对 vars、双只读探针、全库 SQL/Time Travel bookmark 的 `age` 加密 runner 外 artifact 上传读回、global/per-example 预分配 manifest、失败零写）；`postrelease=unknown`（独立受保护 environment、七项凭据迁移并移除 repo/base 默认注入、`cloud-live-recover.yml` 恢复通路与独立 custodian、实际 CI release-SHA 受保护 dispatch/精确 grant、两完整 target、写后限定清理/保留）。自身 `E-CM-L3-SAFETY` 未证，不可真实首写、D/complete 或放行 CM-10；本地 fake/mock/default C 可执行 |
+| `E-CM-L3-10`（CM-10） | 继承上述用户确认期望与历史只读背景；不得借安全卡的 release 时点证据 | 安全卡先发布；本卡重基后另证 DEP-CM-05.premerge，本卡 release-SHA CI 独立核 secret/vars、D1/R2 探针、trigger 完整 SQL/owner 基线、全库加密备份读回、global/per-example UUID manifest 与写后清理/受控保留，两个完整 live target 均真跑。`E-CM-L3-10=unknown`、postrelease=unknown，阻本卡真实写与 D/complete；本地 fake/mock/default C 可执行 |
+| `E-CM-L3-11`（CM-11） | 同一冻结精确期望与历史只读背景，不可沿用安全卡或 CM-10 写前证据 | CM-10 发布后本卡独立重证 DEP-CM-05.premerge，并在本卡 release-SHA CI 生成独立备份/身份/manifest/善后与两完整 live target 的 `E-CM-L3-11`。当前 `unknown`，真实写、D/complete 未放行；本地 fake/mock/default C 可执行 |
 
 ### 3.1 plan-20260918（add 收口）— 当前活动计划
 
@@ -125,9 +193,9 @@
 
 > 2026-09-22 说明：ER-13 全量收口门已实跑并**全绿**（`fmt --check` / `clippy -D warnings` / `cargo nextest run --all --no-fail-fast --retries 2` → 7836/7836 passed, 0 failed, 3 skipped / `cargo doc` 链接门 exit 0）；期间两轮非绿全部归因执行环境（开发机 `umask 0002`、真实用户 global 配置携带未登记 receipt、隔离 home 目录权限），已登记为 `ENV-GCX-01`，无 `FIX-*`。本轮按操作者指示**不调用 Codex review**，故计划「完成判据」中的 review 门与「所有卡 `done/complete`」两项保持未满足；版本 bump（三处版本面）与 D 组发布（tag / `gh release` / CDN）属对外不可逆动作，等待操作者显式指示。DEP-GCX-01（`../libra-backend`）与 DEP-GCX-03（`.env.test`/`.env.live-test`）在本机均不满足，前者只阻塞网站页同步。
 
-### 3.3 plan-20260819（Memory M2，R30 重设计）
+### 3.3 plan-20260819（Memory M2，R30 历史方案）
 
-2026-09-21 R30 重设计：按 0.23.x 拆除后的 main 重写架构 seam（ADR-M2-05/07/10 改写，新增 ADR-M2-12..15），整份迁到模板 v2.8（ER-08 逐卡发布 + ER-14 nextest + 版本面集合以 `compat_version_surface_sync` 为权威），新增 M2-16A..E 接口融合卡与 M2-16D1（自 M2-16D 条件性拆出），并把 PR #456 改为正向移植源（禁止 merge）。R30 双评审通过前禁止开工。整份遷到模板 v2.8（版本面集合以 `compat_version_surface_sync` 為權威；當前 `Cargo.toml`/`install.sh`/`install.ps1` 三處）。
+2026-09-21 R30 重设计：按 0.23.x 拆除后的 main 重写架构 seam（ADR-M2-05/07/10 改写，新增 ADR-M2-12..15），整份迁到模板 v2.8（ER-08 逐卡发布 + ER-14 nextest + 版本面集合以 `compat_version_surface_sync` 为权威），新增 M2-16A..E 接口融合卡与 M2-16D1（自 M2-16D 条件性拆出），并把 PR #456 改为正向移植源（禁止 merge）。R30 r37 于 2026-09-22 对冻结版 `4fbaf4bd…` 取得 Codex/Claude 同版双 PASS，但全部 M2 卡仍为 `pending`，未实施。使用者随后要求独立重设计；MEM-01/02 现由 [`plan-20260926.md`](plan-20260926.md) 承接，旧 M2 卡待该计划 DM-00 正式登记退役。本节保留 R30 历史状态，不构成当前开工许可。
 
 | 卡 | 状态 |
 |---|---|
@@ -171,9 +239,22 @@
 
 | 卡 | 状态 | 发布 |
 |---|---|---|
-| CL-01 fsck 断链检测与 shallow 豁免 | `done`/`remote-pending` | v0.23.47（#510 / `5b55d98`；`release.yml` 已触发） |
-| **CL-02 log/rev-list shallow helper** | **`in-progress`/`locally-accepted`** | **v0.23.48（C 组进行中）** |
-| CL-03..CL-15 | `in-progress`/`locally-accepted` | 未 bump |
+| CL-01 fsck 断链检测与 shallow 豁免 | `done`/`complete` | v0.23.47（#510） |
+| CL-02 log/rev-list shallow helper | `done`/`complete` | v0.23.48（#511） |
+| CL-03 其余历史遍历 | `done`/`complete` | v0.23.49（#512） |
+| CL-04 本地 Git 浅边界 | `done`/`complete` | v0.23.50（#514） |
+| CL-05 `--depth` 隐含单分支 | `done`/`complete` | v0.23.51（#516） |
+| CL-06 普通路径忽略浅化参数 | `done`/`complete` | v0.23.52（#517） |
+| CL-07 shallow Git 源克隆 | `done`/`complete` | v0.23.53（#518） |
+| CL-08 bundle create 写入 HEAD | `done`/`complete` | v0.23.54（#520） |
+| CL-09 clone 接受 bundle 源 | `done`/`complete` | v0.23.57（#561） |
+| CL-10 以 bundle 为 remote 的 fetch/pull | `done`/`complete` | v0.23.58（#562） |
+| CL-11 bare/mirror 默认目录名与 bare 布局 | `done`/`complete` | v0.23.59（#563） |
+| CL-12 clone --mirror 全命名空间 | `done`/`complete` | v0.23.60（#564） |
+| CL-13 mirror-aware fetch/prune | `done`/`complete` | v0.23.61（#565） |
+| CL-14 depth 测试 + T5 live | `done`/`complete` | v0.23.62（#567） |
+| CL-15 branch -a/-r 远程显示 | `done`/`complete` | v0.23.63（#568 / `d00366b`） |
+| Closeout proxy hygiene | `done`/`complete` | v0.23.64（#569 / `3554f1e`；DEFER-CL-ENV-*） |
 
 ### 3.6 issues/476（工作树命令族）
 
@@ -213,9 +294,11 @@ SBX-01..05 `done/locally-accepted`；**发布步按 DEFER-SBX-06 正式延后**�
 
 ## 四、当前执行指针（next action）
 
-- **当前正在执行：** `issues/474` → `CL-02`（log/rev-list shallow walk helper），`in-progress`/`locally-accepted`，版本面三处 `0.23.48`（C 组进行中）。CL-01 `v0.23.47` 已 merge + `gh release create`，D 组 `release.yml` 进行中。
-- **下一步（CL-02 D 组落地后）：** `issues/474` → `CL-03`（其余历史遍历，A/B 已落地）。
-- **并行窗口（不在本执行指针）：** `issues/476` WT-03 仍等 DEP-WT-08；`plan-20260918` 其余 add 卡、`plan-20260819` M2 仍登记为实施中，但不抢本卡的 `fsck.rs` 写集。
+- **当前正在执行：** `plan-20260907` B3-00（发布者：本会话执行该卡的 Agent）。`plan-20260925` SCAP-01 / SCAP-02 已 `done`/`complete`（`v0.23.55` / `fa3849e`，D 组全绿）。
+- **本会话已收口：** `issues/577` SA-02/SA-01 已 `done`/`complete`；PR #578、v0.24.1、8/8 release jobs、网站 `cf` 与生产页 D 证据均完成，Issue #577 CLOSED。
+- **SCAP-01 与 B3-00：** SCAP-01 已收口，`runtime.rs` 写集互斥结束；B3-00 继续在 `main` 上推进。
+- **下一步：** `issues/474` 已收口（DEP-CL-07 完成，#474 CLOSED）。B3-00 另轨。
+- **并行窗口（不在本执行指针）：** `plan-20260927` 的 CM-01 等 pinned scope FIX-CM-01，CM-06/10 有上述本地进度，所有卡 C/T-5 等 scope FIX 发布；CM-10 还等 CM-03/CM-13 共享文件、FIX-CM-LIVE-GATE 与 FIX-CM-CLOUD-LIVE-SAFETY 独立发布；真实 Cloud L3 只在受保护 release-SHA CI 写 job，DEP-CM-05 的 vars-ready 已过、premerge/postrelease 未过，live-compat workflow 当前 `disabled_manually`，由 root 满足受保护环境、凭据迁移与恢复门后重开；FIX-CM-04 待修订计划 Claude PASS，CM-04 阻塞；FIX-CM-08 与 CM-13 待开工，尚无本计划远端发布。Operation 独立 P1 交 `DEFER-CM-OP-01`，worktree approved-project 写入缺口交 `DEFER-CM-WT-01`，Cloud 小型 status 抽离交 `DEFER-CM-CLOUD-STATUS`。`issues/476` WT-03 仍等 DEP-WT-08；`plan-20260918` 其余 add 卡待推进。MEM-01/02 由 `plan-20260926` 承接，该计划评审门未过，禁止开工。
 
 ---
 
@@ -226,21 +309,23 @@ SBX-01..05 `done/locally-accepted`；**发布步按 DEFER-SBX-06 正式延后**�
 | 计划 | 入口卡 | 卡要做什么（简述） | 内部前置 | 计划级 review 门 | 外部/跨计划门控 | 可立即开工 |
 |---|---|---|---|---|---|---|
 | [`plan-20260822`](plan-20260822.md) | （PR #503 收口；OL-14 已取消、OL-15 `remote-pending`） | — | — | — | — | ⏳ 等待 compat-offline-core 远端门禁 |
-| [`plan-20260819`](plan-20260819.md) | M2-16A | #456 memory 模块正向移植到 R30 seam（审计已排除已删 Code SCC） | 无 | **未过**（r01–r37：**r37 同版雙 PASS 達成（2026-09-22，凍結 sha256 `4fbaf4bd…`）** — Codex P0/P1/P2=0、Claude P0/P1=0；實現門已開啟。殘餘 P2（不阻塞）：review log 輪次回填、`EX-M2-07` minor 重複計數（41→39）、`tests/INDEX.md` 20→22 描述刷新、未協商 minor 收斂規則 — 於 M2-16C 卡片修訂時一併處理） | **DEP-M2-ENV-01**：需已初始化 Libra checkout（`.libra/`）與 `.env.test`/`.env.live-test`；缺任一项即 `blocked` | ❌ 禁止开工（等双 PASS） |
+| [`plan-20260926`](plan-20260926.md) | DM-00 | 冻结 #456 事实基线、编制取材清单并登记 R30 退役 | 无 | **未过**（Codex r01–r07 均 `FAIL`，尚无字面 `VERDICT: PASS`） | **DEP-DM-03**：须核实 #456 的只读取材来源；**DEP-DM-05**：DM-00 登记旧计划退役 | ❌ 禁止开工（等本计划评审 PASS） |
 | [`plan-20260919`](plan-20260919.md) | GCX-02 | legacy 全局 config DB 首次使用自动迁移（锁+快照+校验+原子提交） | GCX-01（已 `done/complete`） | **本轮按操作者指示未评审** | DEP-GCX-02：与 plan-20260918 串行写 `COMPATIBILITY.md`/网站页（0918 未开工，写集 clean） | ✅ 已实现并本地验收（`locally-accepted`，未发布） |
 | [`plan-20260919`](plan-20260919.md) | GCX-04 | 用户级 hooks 文件路径对齐 XDG（macOS 只读回退，实现泛化到任何原生配置目录不同的平台） | GCX-01（已 `done`） | **本轮按操作者指示未评审** | DEP-GCX-01 不满足（本机无 `../libra-backend`），仅阻塞网站页；发布队列 GCX-02→GCX-03→GCX-04 | ✅ 已实现并本地验收（`locally-accepted`，未发布） |
-| [`plan-20260907`](plan-20260907.md) | B3-00 | pin `git-internal` 0.9.0 并引入 `object_format` 事实源 | 无 | **双评审已 PASS**（Grok R2 / Claude R40 / Codex R40） | 外部无；开工需 `cp .env.test.example .env.test` | ✅ |
 | [`plan-20260912`](plan-20260912.md) | MB-01 | 有界 mega2 tree transport 与 wire validation | 无 | **双评审已 PASS**（Codex R7 / Claude R5） | DEP-MB-01：mega2 `a1293686` tree API pin 现场重核（2026-09-21 已前推） | ✅ `done/complete`：v0.23.37（84f6bd8）；codeql + release.yml 8/8 jobs 全绿；CDN 产物 HTTP 200 |
 | [`plan-20260916`](plan-20260916.md) | CAP-01 | Agent Capture wire types、URL、uid、transport trait | 无 | **双评审已 PASS**（Codex R3 / Claude R3） | DEP-CAP-01：monoengine `2b8f365` capture HTTP pin 重核（ER-CAP-02） | ⚠️ 需重核 DEP-CAP-01 |
+| [`plan-20260924`](plan-20260924.md) | ACF-01 | Agent Capture validated ingress contract | `DEP-ACF-01`（來源/工作樹基線） | Claude R8 `VERDICT: PASS`（P0/P1/P2=0） | Entire `9c06bfb13` / Libra `c74813d` 比較 pin 與 shared files clean 須開工重核 | ⚠️ 需重核 DEP-ACF-01 |
 | [`plan-20260913`](plan-20260913.md) | FL-00 | 核实 Media 前提与热路径（audit，no-release） | 无 | 联合 review 已 PASS（U2 `VERDICT: PASS`） | DEP-FL-04：**plan-20260907 须完整收口**（未启动 → 硬门） | ❌ 阻塞（等 9/07 收口） |
 | [`plan-20260904`](plan-20260904.md) | CX-00 | codex-cli 0.152 基线探测与 ADR go/no-go | 无 | **未过**（R5 `FAIL`；Claude 亦未出 verdict） | CX-30 另受 DEP-CLI-mirror | ❌ 禁止开工 |
 | [`plan-20260905`](plan-20260905.md) | CC-00 | Claude Code 2.1.259 Hook source 契约探测 | 无 | **未过**（须 Claude `PASS`） | 无 | ❌ 禁止开工 |
 | [`plan-20260906`](plan-20260906.md) | SC-01 / SC-02（可并发） | SC-01 `base.yml` 最小权限加固；SC-02 会话入口 id 守卫 | 无 | **未定稿**（R2 PASS 已作废；R22 `FAIL`） | SC-04 受 DEP-SC-01/04/05/06；SC-07 受 DEP-SC-07 | ❌ 禁止开工 |
 | [`plan-20260902`](plan-20260902.md) | OG-00 | opencode 1.18.29 Hook/export 契约探测 | 无 | **未取得双 PASS**（Claude 限额，Codex 仍在 FAIL 循环） | 无（Phase 1 与 RG 六卡解耦） | ❌ 禁止开工 |
 | [`plan-20260911`](plan-20260911.md) | PI-01 | Repository-only `agent_kind=pi` migration | 无（DEP-PI-04 已满足：9/10 已收口） | **Claude Code 429 无 verdict，禁止开工** | DEP-PI-01/03 | ❌ 禁止开工 |
+| [`plan-20260925`](plan-20260925.md) | SCAP-01 | AgentTraces ingest 改调 `decide`。`v0.23.55` / `fa3849e` D 组全绿 | SCAP-02（登记已核对） | R9 双 `PASS` | 已收口 | `done`/`complete` |
+| [`plan-20260907`](plan-20260907.md) | B3-00 | pin `git-internal`（保持 `=0.10.2`）并引入 `object_format` 事实源 | 无 | **双评审已 PASS** | focused VER 绿；T-1 全量进行中 | `in-progress` |
 | [`issues/470`](issues/470.md) | FM-01 | 共享写入原语与 `restore` 系物化 | 无 | 尚未 Codex review | 关闭依赖 plan-20260918 FM-03/04（DEP-FM-06/07） | ❌ 禁止开工 |
 | [`issues/473`](issues/473.md) | IN-01 / IN-03 / IN-02 | 空模板自引用防护 / 存储路径前置检测 / 换格式 reinit fail-closed | 无 | 尚未 Codex review | 无 | ❌ 禁止开工 |
-| [`issues/474`](issues/474.md) | CL-02 | log/rev-list shallow walk helper | CL-01 | **R6 `PASS`** | 无 | ✅ `locally-accepted`（C 组 `v0.23.48`） |
+| [`issues/474`](issues/474.md) | — | CL-01..CL-15 + closeout + DEP-CL-07 已完成；#474 CLOSED | — | **R6 `PASS`** | 无 | ✅ **已收口** |
 | [`issues/475`](issues/475.md) | CF-02 / CF-01 | key/模式校验与退出码 / 带 value-pattern 的删除 | 无 | 尚未 Codex review | 无 | ❌ 禁止开工 |
 | [`issues/476`](issues/476.md) | WT-03 | `init` 不再创建默认 `.libraignore` | DEP-WT-08、DEP-WT-05 | 用户 2026-09-20 覆盖：执行 Agent 自审 | DEP-WT-08（ADR-WT-04 用户评审）未满足 | ❌ 阻塞 |
 | [`issues/478`](issues/478.md) | LG-01 | `log`/`rev-list` `--grep` 模式类型与匹配范围 | 无 | 尚未 Codex review | 无 | ❌ 禁止开工 |
@@ -285,12 +370,18 @@ DEFER-AD-01..16：Git advice、ignored 相对路径、`add -u --ignore-missing` 
 
 ### 5.4 其它计划
 
+- plan-20260927：`DEFER-CM-01` 暂不机械拆分 `fetch.rs`、`push.rs`、`maintenance.rs`；生产职责本身继续增长或真实任务反复跨职责修改时，先重审源码与测试归属，再另立日期计划。
+- plan-20260923: DEFER-CP-01 additional shells; DEFER-CP-02 network suggestions; DEFER-CP-03 unimplemented underlying capabilities. Existing local Libra capabilities may not be hidden by these deferrals.
+- plan-20260925：`DEFER-SCAP-01` 已按用户指示删除，ID 不再复用；`DEFER-SCAP-03` 不引入 Entire git phase；`DEFER-SCAP-04` 不改 `docs/development/tracing/agent.md`，也不向其它计划派发该文件。owner 的 SessionStart/TurnStart 豁免已经存在，本计划不改。
+
 - plan-20260830：`DEFER-SBX-06` 发布步延后（DEP-SBX-05 未就绪）。
 - plan-20260729：`DEFER-09`（CT3-07 转换轴）——已被 plan-20260825 TA-01/02 + plan-20260827 NP-00 承接关闭。
 - plan-20260819：`DEFER-M2-01..09`（含 `DEFER-M2-09`：AgentRun/session 终态适配，M2-16D 判定不可映射时启用）。
 - plan-20260822：`DEFER-01..03`（Operation Log 范围外）；`DEFER-02`（Web 图 SSE）已随 OL-14 取消关闭；`DEFER-05` 已由 PR #503 的 OL-15A 承接并关闭；OL-15 等待远端兼容门禁收口。
 - plan-20260903：`DEFER-01..12`（merge 范围外/deferred 差异）。
-- plan-20260715：`DEFER-01..10`（RT-01 收尾；部分由 plan-20260824 承接关闭）。
+- plan-20260715：历史封存；Code 专属 `DEFER-01..08` 已由 plan-20260824 交付后拆除或由 plan-20260920 直接墓碑化，`DEFER-09/10` 已完成关闭；无现行可重启项。
+- plan-20260824：历史封存；全部 Code 专属 DEFER 已由 plan-20260920 墓碑化，无现行可重启项。
+- plan-20260825：历史封存；Code 专属 `DEFER-PS-01..04` 已墓碑化；`DEFER-PS-05` 已由 plan-20260917 关闭。仅通用测试基础设施 `DEFER-PS-06/07` 保留为另立计划候选，不得用于恢复 Code。
 
 ---
 
@@ -298,10 +389,25 @@ DEFER-AD-01..16：Git advice、ignored 相对路径、`add -u --ignore-missing` 
 
 | DEP-ID | 类型 | 内容 | 现状 |
 |---|---|---|---|
+| DEP-SA-03 | Issue #577 与 plan-20260927 共享写集/发布窗口 | #577 SA-01 使用 `tests/command/mod.rs`、serial registry/nextest、版本面；与 CM/FIX 命中相同文件的实施和全部发布顺序串行，前卡推送后重基重测。SA-02 网站指南先行，其网站 `cf` 写集也须核对其它计划实际页面写集。 | **已解除（2026-09-27）**；#577 经两次主线重基、最终全量、PR #578、v0.24.1 和网站 D 门完成，SA-02/SA-01 均 `done`/`complete`。后续 CM/FIX 从已发布 main 重新核写集。 |
+| DEP-CM-01 / DEP-CM-02 / DEP-CM-03 | 命令写集、发布窗口与 Cloud L3 | 13 张 CM + 9 张 FIX，共 22 卡；开工前核实际同文件写集。FIX-CM-01 → CM-01，FIX-CM-04 → CM-04，CM-05 → CM-13，CM-07 → FIX-CM-08 → CM-08，CM-03/CM-13 → FIX-CM-LIVE-GATE → FIX-CM-CLOUD-RECOVERY-AUTH → FIX-CM-CLOUD-RECOVERY-CLEANUP → FIX-CM-CLOUD-REPO-SCOPE → FIX-CM-CLOUD-LIVE-SAFETY → CM-10 → CM-11。其它全部卡 C/T-5 等 scope FIX 独立发布。`tests/INDEX.md` 全写者按 FIX-CM-01 → CM-01 → CM-06 → CM-02 → CM-03 → CM-07 → FIX-CM-08 → CM-08 → CM-09 → CM-12 → CM-04 → CM-05 → CM-13 → FIX-CM-LIVE-GATE → FIX-CM-CLOUD-RECOVERY-AUTH → FIX-CM-CLOUD-RECOVERY-CLEANUP → FIX-CM-CLOUD-REPO-SCOPE → FIX-CM-CLOUD-LIVE-SAFETY → CM-10 → CM-11 串行发布，CM-03 → CM-10 另串行写 serial registry；`CM-Publisher` `/root` 精确暂存。真实 Cloud L3 只在受保护 release-SHA CI dispatch 写 job 执行，按安全卡/CM-10/CM-11 各自 `E-CM-L3-SAFETY/10/11` 证独立期望、D1/R2 只读、trigger 全 SQL 基线、全库加密备份 runner 外上传读回、global/逐例 manifest、限定补偿/清理。 | 生效；CM-01、CM-04 `blocked`/空，CM-06、CM-10 `in-progress`/空，其余 17 卡 `pending`/空，均未发布。用户精确期望已确认，四 vars API readback 4/4；D1 25 triggers 中 16 remote-existing/unmatched 尚待 owner 核签。DEP-CM-03 与三个 E 仍 `unknown`；本地仅 fake/mock/default C，不执行真实 D1/R2 写。 |
+| DEP-CM-04 | CM-07 网站 `cf` 开工基线 | 仅要求开工前只读核后端 VCS、远端 `cf` pre-SHA 与 `status.en.md` blob、隔离 clone、签名/DCO/普通推送配置权限和站点命令可用。网站页编辑、新源码锚点/porcelain-v2 修正、gen:docs/typecheck/build、签名推送、远端及实际部署证据，均为 CM-07 自身交付门；已推后失败按远端 post-SHA 条件化签名补偿，远端竞态/部署不确定进入 `remote-pending`。 | 开工基线未重核，网站未交付；DEP-CM-04 不要求先完成 CM-07 网站变更，避免自环；只 Git push 不算部署。 |
+| DEP-CM-05 | Cloud CI 首写与发布门 | `vars-ready`：四项非密 repo vars 最后一项由 root 于 2026-09-25 08:35:02 UTC 设置，GitHub API exact readback 4/4 与用户确认 tuple 一致；workflow id `283278914` 于 07:27 UTC 禁用、API `disabled_manually`，无待/运行 job。`premerge`：安全卡先交付、CM-10/11 各自重基复核；本地/mock 负例证首写前 secret→独立 vars 比对、D1/R2 只读、trigger/schema/lease 预检、全库 SQL/Time Travel bookmark `age` 加密 runner 外 artifact 上传读回、global/逐例 manifest、失败非零/no-skip；只阻合入，不要求 release SHA 或不可读真实 secrets。`postrelease`：先将七项 Cloud repo secrets 迁受保护 environment、移除 repo 副本与 `base.yml` 默认注入，删除 schedule；独立 `cloud-live-recover.yml` 受保护恢复入口、custodian、dry-run，root 才能 enable/API 核 active。每卡自己的 release SHA 经受保护 `workflow_dispatch` nonce/run 授权，由 `genedna` 设置并回读精确 grant、无需独立 actor 审批；job 首步用仅 Variables-read token 最长 10 分钟实时 GET，严格绑定 run/attempt/ref/SHA/nonce 后才映射 Cloud 凭据并运行真实身份/备份/manifest、两个完整 target、写后善后与 artifact 后才可 D/complete。 | `vars-ready=passed; premerge=unknown; postrelease=unknown`。七项凭据迁移、protected environment、独立恢复与真实 release-SHA CI D 尚未执行；workflow 仍 `disabled_manually`，root 是恢复 owner。当前无真实 Cloud 写；不能以旧 `skip=true`、本地结果、旧 SHA 或被过滤目标替代。 |
+| DEP-ACF-MIRROR / DEP-ACF-CAP | Agent Capture 架構前置 | 0902/0904/0905/0911 production 卡與 0916 CAP-07 必須等待 plan-20260924 ACF-09 `done/complete`；只允許各鏡像明列的 audit/source/CAP HTTP 例外先行 | 生效；ACF-01..09 全部 `pending` |
+| DEP-ACF-DM06 / DEP-DM-06 | Agent session 語義契約 | 0923 DM-05 須等待 0924 ACF-02 的 `CTR-ACF-DM06-v1` provider/CLI integration tests + consumer gate，或回落等待 ACF-08 complete 後重核 terminal、explicit CLI resume、live reactivation、import reactivation | 生效；DM-05 目前 `pending` 且不得開工，排期時仍未滿足才轉 `blocked` |
+| DEP-CP-01 / DEP-CP-07 | External prerequisites | Authorized backend cf documentation access; isolated env/nextest/five-shell validation | Unverified; block applicable acceptance, no access inferred from plan |
+| DEP-CP-02 | File exclusion | Completion CLI edits join DEP-CLI-mirror reservations | Pending per-card reservation |
+| DEP-CP-03 | Read contract | Completion config reads must not trigger plan-20260919 migration | Pending read-only API and legacy-only fixture evidence |
+| DEP-CP-04 | Release/window exclusion | Respect plan-20260921 REL-VG-01 file reservation | Verify before intersecting edits, not only before version bump |
+| DEP-CP-05 | Contract/file exclusion | issues/476/478/480 command evolution and overlapping files | Refresh actual parameters and reserve conflicting files |
+| DEP-CP-06 | Agent read contract | plan-20260819 models and identity-scoped readers | Verify before CP-13..15; does not block static stage |
 | DEP-AD-12 / DEP-CLI-mirror | 跨计划写集互斥 | `src/cli.rs` 三态串行：plan-20260918 OI-05、plan-20260904 CX-30、plan-20260912 MB-03/05、plan-20260916 CAP-07、issues/483 CO-03/04 | 生效；OI-05 开工前必须核对 |
 | DEP-GCX-02 | 跨计划写集互斥 | plan-20260919 与 plan-20260918 的 `COMPATIBILITY.md`/docs/网站页串行 | 生效 |
 | DEP-FL-04 | 跨计划前置 | plan-20260913 依赖 plan-20260907 完整收口 | plan-20260907 未启动 |
 | DEP-CC-05 | 跨计划前置 | plan-20260905 CC-02..06 依赖 plan-20260904 全部非延后卡完成 | plan-20260904 未启动 |
+| DEP-SCAP-01 | 跨计划前置 | 改变 AgentTraces ingest 的 state 字符串或 checkpoint 类别的卡，等待 plan-20260925 SCAP-01 `done`/`complete` 后改 `decide`。import 与 session stop/resume 不在此列 | SCAP-01 已 `done`/`complete`；后续采集卡可改 `decide` |
+| DEP-SCAP-03 | 跨计划写集 | OG-11、OG-05、CX-06、CX-28、CX-02、CX-07、CX-19、CX-09、CX-26、CC-02、CC-05、PI-04 在 SCAP-01 complete 前不得 in-progress | SCAP-01 已 `done`/`complete`；名单卡可开工（仍受各自计划门控） |
+| DEP-SCAP-04 | 跨计划写集互斥 | plan-20260925 SCAP-01 与 plan-20260907 B3-00 不得同时改 `runtime.rs`。SCAP-01 C 组落地后互斥放开 | SCAP-01 已收口；互斥解除 |
 | DEP-SBX-06 | 内部发布延后 | plan-20260830 SBX 发布步 | 未就绪 |
 | DEP-05 | 内部前置（已承接） | plan-20260822 v1-boundary runtime cutover（branch/sequencer/worktree repair/v1 op restore → v2 middleware）；由 OL-15A 承接，OL-15 依赖其完成 | PR #503 OL-15A 已完成 |
 | DEP-WT-09 | 跨计划前置 | issues/476 关闭依赖 plan-20260918 WT-05..07 完成 | plan-20260918 未到 WT |
@@ -314,6 +420,6 @@ DEFER-AD-01..16：Git advice、ignored 相对路径、`add -u --ignore-missing` 
 
 ## 七、完成计划清单（已收口）
 
-日期计划：`plan-20260708`、`plan-20260713`、`plan-20260714`、`plan-20260715`、`plan-20260818`、`plan-20260821`、`plan-20260824`、`plan-20260825`、`plan-20260827`、`plan-20260901`、`plan-20260910`、`plan-20260917`、`plan-20260920`。
+日期计划：`plan-20260708`、`plan-20260713`、`plan-20260714`、`plan-20260715`（历史完成、Code 产品面已拆除）、`plan-20260818`、`plan-20260821`、`plan-20260824`（历史完成、Code 产品面已拆除）、`plan-20260825`（历史完成、PS 产品轴已拆除；TA 测试轴保留历史）、`plan-20260827`、`plan-20260901`、`plan-20260910`、`plan-20260917`、`plan-20260920`。
 
 Issue 计划：`issues/477`（31 卡，v0.22.49）、`issues/486`（AB-01，v0.22.31）。各自完成判据见对应计划文件。

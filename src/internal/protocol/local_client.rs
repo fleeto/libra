@@ -1,12 +1,11 @@
 //! Local protocol client using filesystem paths to run upload-pack/receive-pack locally and stream pack data over async pipes.
 
 use std::{
-    collections::{BTreeMap, HashSet, VecDeque},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     env, fs,
     future::Future,
     io::Error as IoError,
     path::{Path, PathBuf},
-    str::FromStr,
     sync::OnceLock,
 };
 
@@ -14,7 +13,7 @@ use bytes::Bytes;
 use futures_util::stream;
 use git_internal::{
     errors::GitError,
-    hash::{HashKind, ObjectHash, get_hash_kind, set_hash_kind},
+    hash::{HashKind, ObjectHash, set_hash_kind},
     internal::{
         metadata::{EntryMeta, MetaAttached},
         object::{
@@ -37,7 +36,7 @@ use crate::{
     git_protocol::ServiceType,
     internal::{
         branch::Branch, config::ConfigKv, db::get_db_conn_instance_for_path, head::Head,
-        protocol::DiscRef, reflog, tag,
+        protocol::DiscRef, reflog, shallow::ShallowSet, tag,
     },
     utils::{
         client_storage::ClientStorage,
@@ -130,7 +129,7 @@ struct HashKindRestoreGuard {
 
 impl HashKindRestoreGuard {
     fn switch_to(hash_kind: HashKind) -> Self {
-        let previous = get_hash_kind();
+        let previous = git_internal::hash::get_hash_kind();
         set_hash_kind(hash_kind);
         Self { previous }
     }
@@ -312,17 +311,18 @@ impl LocalClient {
                         let Some(blob_hash) = note.note_hash else {
                             continue;
                         };
-                        let blob_oid = match ObjectHash::from_str(&blob_hash) {
-                            Ok(oid) => oid,
-                            Err(e) => {
-                                warnings.push(format!(
-                                    "skipped source dependency note for {}: invalid blob id \
+                        let blob_oid =
+                            match crate::internal::object_format::parse_repo_oid(&blob_hash) {
+                                Ok(oid) => oid,
+                                Err(e) => {
+                                    warnings.push(format!(
+                                        "skipped source dependency note for {}: invalid blob id \
                                      {blob_hash}: {e}",
-                                    note.annotated_object
-                                ));
-                                continue;
-                            }
-                        };
+                                        note.annotated_object
+                                    ));
+                                    continue;
+                                }
+                            };
                         let bytes = match storage.get(&blob_oid) {
                             Ok(bytes) => bytes,
                             Err(e) => {
@@ -369,21 +369,19 @@ impl LocalClient {
             .map(|entry| entry.value)
             .unwrap_or_else(|| "sha1".to_string());
 
-        match object_format.as_str() {
-            "sha1" => Ok(HashKind::Sha1),
-            "sha256" => Ok(HashKind::Sha256),
-            _ => Err(format!(
+        crate::internal::object_format::parse_config_value(&object_format).map_err(|_| {
+            format!(
                 "unsupported object format '{object_format}' in local repository '{}'",
                 db_path.display()
-            )),
-        }
+            )
+        })
     }
 
     pub async fn discovery_reference(
         &self,
         service: ServiceType,
     ) -> Result<DiscoveryResult, GitError> {
-        if service != ServiceType::UploadPack {
+        if !matches!(service, ServiceType::UploadPack | ServiceType::ReceivePack) {
             return Err(GitError::NetworkError(
                 "Unsupported service type for local protocol".to_string(),
             ));
@@ -392,7 +390,11 @@ impl LocalClient {
             RepoType::GitRepo => {
                 // In-process discovery: read the foreign Git repository's refs
                 // directly instead of spawning `git-upload-pack --advertise-refs`.
-                let hash_kind = git_repo_hash_kind(&self.repo_path);
+                // Primary reject gate for sha256/unknown/unreadable lives in
+                // `discover_remote_with_name` (FetchError); this path keeps the
+                // typed error as an `io::Error` cause for defense in depth.
+                let hash_kind = git_repo_hash_kind(&self.repo_path)
+                    .map_err(|error| GitError::IOError(IoError::other(error)))?;
                 let _hash_guard = HashKindRestoreGuard::switch_to(hash_kind);
                 let refs = read_git_repo_refs(&self.repo_path).map_err(|error| {
                     GitError::NetworkError(format!(
@@ -408,6 +410,7 @@ impl LocalClient {
                 Ok(DiscoveryResult {
                     refs,
                     capabilities,
+                    shallow_boundaries: Vec::new(),
                     hash_kind,
                 })
             }
@@ -442,6 +445,15 @@ impl LocalClient {
                     for tag in tags {
                         tag_references.extend(tag_refs(tag).await?);
                     }
+                    // Advertise object-format for non-SHA-1 repos only (sha1
+                    // remains the protocol default and stays unadvertised).
+                    let mut capabilities = Vec::new();
+                    if !matches!(repo_hash_kind, HashKind::Sha1) {
+                        capabilities.push(format!(
+                            "object-format={}",
+                            crate::internal::object_format::as_str(repo_hash_kind)
+                        ));
+                    }
                     Ok(DiscoveryResult {
                         refs: local_branches
                             .into_iter()
@@ -453,7 +465,8 @@ impl LocalClient {
                                 _ref: reflog::HEAD.to_string(),
                             }))
                             .collect::<Vec<_>>(),
-                        capabilities: vec![],
+                        capabilities,
+                        shallow_boundaries: Vec::new(),
                         hash_kind: repo_hash_kind,
                     })
                 })
@@ -475,13 +488,15 @@ impl LocalClient {
                 // repository's own object store instead of spawning
                 // `git-upload-pack --stateless-rpc`.
                 let _ = shallow; // requested-shallow negotiation is not honoured (matches LibraRepo)
-                let hash_kind = git_repo_hash_kind(&self.repo_path);
+                let hash_kind = git_repo_hash_kind(&self.repo_path).map_err(IoError::other)?;
                 // A strictly local store — never route a foreign repo's reads
                 // through cloud storage or write objects back into it.
                 let storage = ClientStorage::init_local(self.repo_path.join("objects"));
                 // Collect synchronously with the foreign hash kind active, then
                 // drop the (thread-local) guard before the async encode so it is
                 // never held across an `.await`.
+                // `want` is already scoped by fetch's single-branch / refspec
+                // plan (CL-05); this walk only truncates those tips by `--depth`.
                 let (entries, shallow) = {
                     let _hash_guard = HashKindRestoreGuard::switch_to(hash_kind);
                     collect_git_repo_entries(&storage, &self.repo_path, want, have, depth).map_err(
@@ -516,7 +531,8 @@ impl LocalClient {
                     let mut tag_entries: Vec<Entry> = Vec::new();
                     let mut commit_targets: Vec<String> = Vec::new();
                     for want_hash in want {
-                        let Ok(oid) = git_internal::hash::ObjectHash::from_str(want_hash) else {
+                        let Ok(oid) = crate::internal::object_format::parse_repo_oid(want_hash)
+                        else {
                             commit_targets.push(want_hash.clone());
                             continue;
                         };
@@ -619,18 +635,138 @@ impl LocalClient {
     }
 }
 
-/// Read `objectformat` from a foreign Git repository's `config`, defaulting to
-/// SHA-1 (the overwhelmingly common case for local Git remotes).
-fn git_repo_hash_kind(repo_path: &Path) -> HashKind {
-    if let Ok(text) = fs::read_to_string(repo_path.join("config")) {
-        for line in text.lines() {
-            let lower = line.to_ascii_lowercase();
-            if lower.contains("objectformat") && lower.contains("sha256") {
-                return HashKind::Sha256;
+/// Fail-closed discovery errors for a foreign Git repository's `config`
+/// (B3-12 / ADR-B3-01). Distinct from Convert's [`GitSourceObjectFormatError`]
+/// so clone/fetch/pull can map stable codes without folding into generic
+/// `GitError` / `LBR-NET-002`.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum GitSourceConfigError {
+    /// `objectformat` is unknown, corrupt, or set without
+    /// `core.repositoryformatversion = 1`.
+    #[error("local Git source config object format is unknown or corrupt: {detail}")]
+    UnknownOrCorrupt { detail: String },
+    /// The Git `config` file could not be read.
+    #[error("local Git source config is unreadable: {detail}")]
+    Unreadable { detail: String },
+}
+
+/// Read `objectformat` from a foreign Git repository's `config` with strict
+/// fail-closed semantics (B3-12).
+///
+/// Missing `objectformat` → [`HashKind::Sha1`]. Unknown/corrupt/unreadable
+/// values return [`GitSourceConfigError`] (never default to Sha1). Callers that
+/// must reject Git SHA-256 sources (clone/fetch/pull) check for
+/// [`HashKind::Sha256`] after a successful parse.
+pub(crate) fn git_repo_hash_kind(repo_path: &Path) -> Result<HashKind, GitSourceConfigError> {
+    read_git_source_objectformat(repo_path).map_err(|error| match error {
+        GitSourceObjectFormatError::Unreadable(detail) => {
+            GitSourceConfigError::Unreadable { detail }
+        }
+        GitSourceObjectFormatError::UnknownValue(value) => GitSourceConfigError::UnknownOrCorrupt {
+            detail: format!(
+                "source Git repository has unsupported extensions.objectformat '{value}'"
+            ),
+        },
+        GitSourceObjectFormatError::ExtensionWithoutV1 => GitSourceConfigError::UnknownOrCorrupt {
+            detail: "source Git repository sets extensions.objectformat without \
+                     core.repositoryformatversion=1"
+                .to_string(),
+        },
+        GitSourceObjectFormatError::Corrupt(detail) => {
+            GitSourceConfigError::UnknownOrCorrupt { detail }
+        }
+    })
+}
+
+/// Fail-closed Convert preflight errors for a foreign Git `config` text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GitSourceObjectFormatError {
+    /// `[extensions] objectformat` present but `repositoryformatversion` is not 1.
+    ExtensionWithoutV1,
+    /// Value is not an exact lowercase `sha1` / `sha256` (Git has no blake3).
+    UnknownValue(String),
+    /// Config text could not be interpreted as Git config for this key.
+    Corrupt(String),
+    /// The Git `config` file could not be read.
+    Unreadable(String),
+}
+
+/// Strictly parse a foreign Git `config` blob for Convert object-format preflight.
+///
+/// Rules (ADR-B3-01 / B3-01; aligned with git `read_repository_format`):
+/// - does **not** follow `include` / `includeIf`;
+/// - `[extensions] objectformat` is only meaningful when
+///   `core.repositoryformatversion = 1`; if the key is present otherwise → error;
+/// - unknown values fail closed (never default to Sha1);
+/// - missing `objectformat` → [`HashKind::Sha1`].
+pub fn parse_git_source_objectformat(
+    config_text: &str,
+) -> Result<HashKind, GitSourceObjectFormatError> {
+    let mut section = String::new();
+    let mut repo_format_version: Option<String> = None;
+    let mut object_format: Option<String> = None;
+
+    for raw in config_text.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+            continue;
+        }
+        if line.starts_with('[') && line.ends_with(']') {
+            let inner = &line[1..line.len() - 1];
+            // Strip subsection quotes: [extensions "foo"] → extensions
+            section = inner
+                .split_whitespace()
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_ascii_lowercase();
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let key = key.trim().to_ascii_lowercase();
+        let value = value.trim().trim_matches('"').to_string();
+        match (section.as_str(), key.as_str()) {
+            ("core", "repositoryformatversion") => {
+                repo_format_version = Some(value);
             }
+            ("extensions", "objectformat") => {
+                // Last value wins (Git).
+                object_format = Some(value.to_ascii_lowercase());
+            }
+            _ => {}
         }
     }
-    HashKind::Sha1
+
+    let Some(format) = object_format else {
+        return Ok(HashKind::Sha1);
+    };
+
+    let version = repo_format_version.as_deref().unwrap_or("");
+    if version != "1" {
+        return Err(GitSourceObjectFormatError::ExtensionWithoutV1);
+    }
+
+    // Git has no blake3 object format; accept only sha1/sha256 via the shared
+    // helper (eliminates independent `"sha256" =>` string arms — GC-B3-01 / B3-12).
+    let kind = crate::internal::object_format::parse_config_value(&format)
+        .map_err(|_| GitSourceObjectFormatError::UnknownValue(format.clone()))?;
+    if matches!(kind, HashKind::Blake3) {
+        return Err(GitSourceObjectFormatError::UnknownValue(format));
+    }
+    Ok(kind)
+}
+
+/// Read + strictly parse a foreign Git repository's object format for Convert.
+pub(crate) fn read_git_source_objectformat(
+    repo_path: &Path,
+) -> Result<HashKind, GitSourceObjectFormatError> {
+    let path = repo_path.join("config");
+    let text = fs::read_to_string(&path).map_err(|error| {
+        GitSourceObjectFormatError::Unreadable(format!("cannot read '{}': {error}", path.display()))
+    })?;
+    parse_git_source_objectformat(&text)
 }
 
 /// Read every ref a foreign Git repository advertises: loose `refs/**`,
@@ -718,7 +854,7 @@ fn read_git_repo_refs(repo_path: &Path) -> std::io::Result<Vec<DiscRef>> {
 /// object id, reading from a strictly local store. Returns `None` on any read
 /// failure so a malformed tag never breaks the whole advertisement.
 fn peel_tag(storage: &ClientStorage, oid: &str) -> Option<String> {
-    let mut current = ObjectHash::from_str(oid).ok()?;
+    let mut current = crate::internal::object_format::parse_repo_oid(oid).ok()?;
     for _ in 0..32 {
         match storage.get_object_type(&current) {
             Ok(ObjectType::Tag) => {
@@ -774,6 +910,10 @@ fn collect_loose_refs(
 /// by `depth`), every tree and blob they reference, and any annotated tag
 /// objects (peeled to their target commit). Reads exclusively from `storage`
 /// (the foreign `.git/objects`), never the current Libra repository.
+///
+/// Depth uses ADR-CL-02: shortest distance from any want, then one boundary
+/// pass after the union. A commit is a shallow boundary when at least one
+/// parent was not sent, or when a root sits exactly on the depth cutoff.
 fn collect_git_repo_entries(
     storage: &ClientStorage,
     repo_path: &Path,
@@ -784,15 +924,12 @@ fn collect_git_repo_entries(
     let have_set: HashSet<String> = have.iter().cloned().collect();
     let mut seen: HashSet<String> = have_set.clone();
     let mut entries: Vec<Entry> = Vec::new();
-    let mut commit_queue: VecDeque<(ObjectHash, usize)> = VecDeque::new();
-    let mut tree_roots: Vec<ObjectHash> = Vec::new();
-    // Commits whose parents are cut off by `depth` — the shallow boundary.
-    let mut shallow: Vec<String> = Vec::new();
+    let mut commit_seeds: Vec<ObjectHash> = Vec::new();
 
     // Resolve each want; peel annotated tags (emitting each tag object) down to
     // the commit they target.
     for spec in want {
-        let Ok(oid) = ObjectHash::from_str(spec) else {
+        let Ok(oid) = crate::internal::object_format::parse_repo_oid(spec) else {
             continue;
         };
         if matches!(storage.get_object_type(&oid), Ok(ObjectType::Tag)) {
@@ -807,38 +944,44 @@ fn collect_git_repo_entries(
                 match storage.get_object_type(&target) {
                     Ok(ObjectType::Tag) => current = target,
                     Ok(ObjectType::Commit) => {
-                        commit_queue.push_back((target, 0));
+                        commit_seeds.push(target);
                         break;
                     }
                     _ => break,
                 }
             }
         } else {
-            commit_queue.push_back((oid, 0));
+            commit_seeds.push(oid);
         }
     }
 
-    // Breadth-first over reachable commits.
-    while let Some((oid, distance)) = commit_queue.pop_front() {
-        if !seen.insert(oid.to_string()) {
-            continue;
-        }
-        let commit = Commit::from_bytes(&storage.get(&oid)?, oid)?;
-        tree_roots.push(commit.tree_id);
-        let parents = commit.parent_commit_ids.clone();
-        entries.push(Entry::from(commit));
-        if depth.is_none_or(|max| distance + 1 < max) {
-            for parent in parents {
-                if !seen.contains(&parent.to_string()) {
-                    commit_queue.push_back((parent, distance + 1));
-                }
-            }
-        } else {
-            // `depth` stops the walk here, so this commit is a shallow boundary
-            // (advertised even for a root commit, matching `git-upload-pack`).
-            shallow.push(oid.to_string());
-        }
+    let source_shallow = load_git_repo_shallow(repo_path)?;
+    let (included, distances, graphs) =
+        walk_git_commits_for_depth(storage, &commit_seeds, &have_set, depth, &source_shallow)?;
+
+    let mut tree_roots: Vec<ObjectHash> = Vec::new();
+    let mut included_oids: Vec<ObjectHash> = included.iter().copied().collect();
+    included_oids.sort_by_key(ToString::to_string);
+    for oid in &included_oids {
+        seen.insert(oid.to_string());
     }
+    for oid in &included_oids {
+        let graph = graphs.get(oid).ok_or_else(|| {
+            GitError::CustomError(format!("internal walk missed included commit {oid}"))
+        })?;
+        tree_roots.push(graph.tree_id);
+        let commit = Commit::from_bytes(&storage.get(oid)?, *oid)?;
+        entries.push(Entry::from(commit));
+    }
+
+    let shallow = shallow_boundaries_for_depth(
+        &included,
+        &distances,
+        &graphs,
+        &have_set,
+        depth,
+        &source_shallow,
+    );
 
     // Every tree and blob reachable from the collected commits.
     let mut tree_queue: VecDeque<ObjectHash> = tree_roots.into_iter().collect();
@@ -869,6 +1012,120 @@ fn collect_git_repo_entries(
     include_reachable_tags(storage, repo_path, &have_set, &mut seen, &mut entries)?;
 
     Ok((entries, shallow))
+}
+
+/// Graph facts needed after the shortest-distance walk.
+struct WalkedCommit {
+    parents: Vec<ObjectHash>,
+    tree_id: ObjectHash,
+}
+
+type DepthWalkResult = (
+    HashSet<ObjectHash>,
+    HashMap<ObjectHash, usize>,
+    HashMap<ObjectHash, WalkedCommit>,
+);
+
+/// Shortest distance from any want, truncated at `depth`.
+fn load_git_repo_shallow(repo_path: &Path) -> Result<ShallowSet, GitError> {
+    let hash_kind =
+        git_repo_hash_kind(repo_path).map_err(|error| GitError::IOError(IoError::other(error)))?;
+    ShallowSet::load_at_for_kind(&repo_path.join("shallow"), hash_kind).map_err(|error| {
+        GitError::CustomError(format!("source shallow metadata is corrupt: {error}"))
+    })
+}
+
+fn walk_git_commits_for_depth(
+    storage: &ClientStorage,
+    seeds: &[ObjectHash],
+    have_set: &HashSet<String>,
+    depth: Option<usize>,
+    source_shallow: &ShallowSet,
+) -> Result<DepthWalkResult, GitError> {
+    let mut distances: HashMap<ObjectHash, usize> = HashMap::new();
+    let mut graphs: HashMap<ObjectHash, WalkedCommit> = HashMap::new();
+    let mut queue: VecDeque<(ObjectHash, usize)> = VecDeque::new();
+
+    for oid in seeds {
+        if have_set.contains(&oid.to_string()) {
+            continue;
+        }
+        if depth.is_some_and(|max| max == 0) {
+            continue;
+        }
+        distances.insert(*oid, 0);
+        queue.push_back((*oid, 0));
+    }
+
+    while let Some((oid, distance)) = queue.pop_front() {
+        if distances.get(&oid).is_some_and(|&known| known < distance) {
+            continue;
+        }
+        if depth.is_some_and(|max| distance >= max) {
+            distances.remove(&oid);
+            continue;
+        }
+        let graph = match graphs.entry(oid) {
+            std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                let commit = Commit::from_bytes(&storage.get(&oid)?, oid)?;
+                entry.insert(WalkedCommit {
+                    parents: commit.parent_commit_ids.clone(),
+                    tree_id: commit.tree_id,
+                })
+            }
+        };
+        if source_shallow.is_boundary(&oid) || depth.is_some_and(|max| distance + 1 >= max) {
+            continue;
+        }
+        for parent in graph.parents.clone() {
+            if have_set.contains(&parent.to_string()) {
+                continue;
+            }
+            let next = distance + 1;
+            if distances.get(&parent).is_none_or(|&known| next < known) {
+                distances.insert(parent, next);
+                queue.push_back((parent, next));
+            }
+        }
+    }
+
+    let included: HashSet<ObjectHash> = distances.keys().copied().collect();
+    Ok((included, distances, graphs))
+}
+
+/// ADR-CL-02 boundary pass: missing parent, or a root exactly on the cutoff.
+fn shallow_boundaries_for_depth(
+    included: &HashSet<ObjectHash>,
+    distances: &HashMap<ObjectHash, usize>,
+    graphs: &HashMap<ObjectHash, WalkedCommit>,
+    have_set: &HashSet<String>,
+    depth: Option<usize>,
+    source_shallow: &ShallowSet,
+) -> Vec<String> {
+    let mut shallow: Vec<String> = match depth {
+        Some(max) => included
+            .iter()
+            .filter_map(|oid| {
+                let graph = graphs.get(oid)?;
+                let distance = *distances.get(oid)?;
+                let missing_parent = graph.parents.iter().any(|parent| {
+                    !included.contains(parent) && !have_set.contains(&parent.to_string())
+                });
+                let root_at_cutoff = graph.parents.is_empty() && distance + 1 == max;
+                (missing_parent || root_at_cutoff).then_some(oid.to_string())
+            })
+            .collect(),
+        None => Vec::new(),
+    };
+    for oid in source_shallow.oids() {
+        if included.contains(oid) {
+            shallow.push(oid.to_string());
+        }
+    }
+    shallow.sort();
+    shallow.dedup();
+    shallow
 }
 
 /// Add annotated tag objects whose peeled target is in the just-sent set.
@@ -904,7 +1161,7 @@ fn include_reachable_tags(
         if !seen.contains(target) || have_set.contains(target) || seen.contains(&r._hash) {
             continue;
         }
-        if let Ok(oid) = ObjectHash::from_str(&r._hash)
+        if let Ok(oid) = crate::internal::object_format::parse_repo_oid(&r._hash)
             && matches!(storage.get_object_type(&oid), Ok(ObjectType::Tag))
         {
             let tag = Tag::from_bytes(&storage.get(&oid)?, oid)?;
@@ -955,11 +1212,7 @@ async fn encode_pack_bytes(entries: Vec<Entry>, hash_kind: HashKind) -> Result<V
 
     let total_objects = entries.len();
     let encode_handle = tokio::spawn(async move {
-        // Set the hash kind BEFORE constructing the encoder: `PackEncoder::new`
-        // initializes the pack-trailer hasher from the thread-local, so it must
-        // see the repository's kind (not whatever this worker thread last had).
-        set_hash_kind(hash_kind);
-        let mut encoder = PackEncoder::new(total_objects, 0, stream_tx);
+        let mut encoder = PackEncoder::new_with_hash_kind(hash_kind, total_objects, 0, stream_tx);
         encoder.encode(entry_rx).await
     });
 
@@ -1539,6 +1792,246 @@ mod tests {
             fs::canonicalize(env::current_dir().unwrap()).unwrap(),
             fs::canonicalize(original_dir).unwrap(),
             "serialized local protocol operations should restore caller cwd",
+        );
+    }
+
+    /// M-BOUND topology: `c1←c2←c3`(main), `c2←dev1`(dev), tag `v1`→c1, `refs/mr/1`→c2.
+    struct Gdeep {
+        _dir: tempfile::TempDir,
+        git_dir: PathBuf,
+        c1: String,
+        c2: String,
+        c3: String,
+        dev1: String,
+    }
+
+    fn git_rev_parse(repo: &Path, spec: &str) -> String {
+        String::from_utf8(
+            run_git(Some(repo), ["rev-parse", spec])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string()
+    }
+
+    fn build_gdeep() -> Gdeep {
+        let dir = tempdir().unwrap();
+        let repo = dir.path().join("gdeep");
+        assert!(
+            run_git(None, ["init", "-b", "main", repo.to_str().unwrap()])
+                .status()
+                .unwrap()
+                .success()
+        );
+        for (k, v) in [
+            ("user.name", "Local Tester"),
+            ("user.email", "local@test"),
+            ("commit.gpgsign", "false"),
+            ("tag.gpgsign", "false"),
+        ] {
+            run_git(Some(&repo), ["config", k, v]).status().unwrap();
+        }
+        fs::write(repo.join("f.txt"), "c1\n").unwrap();
+        run_git(Some(&repo), ["add", "f.txt"]).status().unwrap();
+        assert!(
+            run_git(Some(&repo), ["commit", "-m", "c1"])
+                .status()
+                .unwrap()
+                .success()
+        );
+        let c1 = git_rev_parse(&repo, "HEAD");
+        fs::write(repo.join("f.txt"), "c2\n").unwrap();
+        run_git(Some(&repo), ["add", "f.txt"]).status().unwrap();
+        assert!(
+            run_git(Some(&repo), ["commit", "-m", "c2"])
+                .status()
+                .unwrap()
+                .success()
+        );
+        let c2 = git_rev_parse(&repo, "HEAD");
+        fs::write(repo.join("f.txt"), "c3\n").unwrap();
+        run_git(Some(&repo), ["add", "f.txt"]).status().unwrap();
+        assert!(
+            run_git(Some(&repo), ["commit", "-m", "c3"])
+                .status()
+                .unwrap()
+                .success()
+        );
+        let c3 = git_rev_parse(&repo, "HEAD");
+        assert!(
+            run_git(Some(&repo), ["checkout", "-b", "dev", &c2])
+                .status()
+                .unwrap()
+                .success()
+        );
+        fs::write(repo.join("dev.txt"), "dev1\n").unwrap();
+        run_git(Some(&repo), ["add", "dev.txt"]).status().unwrap();
+        assert!(
+            run_git(Some(&repo), ["commit", "-m", "dev1"])
+                .status()
+                .unwrap()
+                .success()
+        );
+        let dev1 = git_rev_parse(&repo, "HEAD");
+        run_git(Some(&repo), ["checkout", "main"]).status().unwrap();
+        assert!(
+            run_git(Some(&repo), ["tag", "-a", "v1", "-m", "v1", &c1])
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            run_git(Some(&repo), ["update-ref", "refs/mr/1", &c2])
+                .status()
+                .unwrap()
+                .success()
+        );
+        Gdeep {
+            git_dir: repo.join(".git"),
+            _dir: dir,
+            c1,
+            c2,
+            c3,
+            dev1,
+        }
+    }
+
+    fn collect_gdeep(
+        gdeep: &Gdeep,
+        want: &[&str],
+        depth: Option<usize>,
+    ) -> (Vec<String>, Vec<String>) {
+        let hash_kind = git_repo_hash_kind(&gdeep.git_dir).expect("gdeep fixture is sha1");
+        let _hash_guard = HashKindRestoreGuard::switch_to(hash_kind);
+        let storage = ClientStorage::init_local(gdeep.git_dir.join("objects"));
+        let wants: Vec<String> = want.iter().map(|oid| (*oid).to_string()).collect();
+        let (entries, shallow) =
+            collect_git_repo_entries(&storage, &gdeep.git_dir, &wants, &[], depth).unwrap();
+        let mut commits: Vec<String> = entries
+            .iter()
+            .filter(|entry| entry.obj_type == ObjectType::Commit)
+            .map(|entry| entry.hash.to_string())
+            .collect();
+        commits.sort();
+        (commits, shallow)
+    }
+
+    #[test]
+    fn load_git_repo_shallow_uses_source_hash_kind() {
+        let dir = tempdir().expect("tempdir");
+        let _ambient = HashKindRestoreGuard::switch_to(HashKind::Blake3);
+        for (config, kind, oid) in [
+            (
+                "[core]\nrepositoryformatversion = 0\n",
+                HashKind::Sha1,
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ),
+            // B3-12: sha256 is only meaningful under repositoryformatversion=1
+            // (fail-closed; the old substring heuristic is gone).
+            (
+                "[core]\nrepositoryformatversion = 1\n[extensions]\nobjectFormat = sha256\n",
+                HashKind::Sha256,
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            ),
+        ] {
+            fs::write(dir.path().join("config"), config).expect("write Git config");
+            fs::write(dir.path().join("shallow"), format!("{oid}\n"))
+                .expect("write Git shallow file");
+            let shallow = load_git_repo_shallow(dir.path()).expect("parse Git shallow file");
+            let hash = ObjectHash::from_hex_for_kind(kind, oid).expect("source hash");
+            assert!(shallow.is_boundary(&hash));
+            assert_eq!(
+                shallow.oids().iter().next().map(ObjectHash::kind),
+                Some(kind)
+            );
+        }
+    }
+
+    #[test]
+    fn collect_git_repo_entries_depth1_single_want_is_b1() {
+        let gdeep = build_gdeep();
+        let (commits, shallow) = collect_gdeep(&gdeep, &[&gdeep.c3], Some(1));
+        assert_eq!(shallow, vec![gdeep.c3.clone()], "B1 boundary");
+        assert_eq!(commits, vec![gdeep.c3.clone()], "B1 sends only the tip");
+    }
+
+    #[test]
+    fn collect_git_repo_entries_depth1_union_is_b2() {
+        let gdeep = build_gdeep();
+        let (commits, shallow) =
+            collect_gdeep(&gdeep, &[&gdeep.c3, &gdeep.c1, &gdeep.dev1], Some(1));
+        let mut expected_commits = vec![gdeep.c1.clone(), gdeep.c3.clone(), gdeep.dev1.clone()];
+        expected_commits.sort();
+        assert_eq!(commits, expected_commits, "B2 does not send c2");
+        assert_eq!(
+            shallow,
+            {
+                let mut expected = vec![gdeep.c1.clone(), gdeep.c3.clone(), gdeep.dev1.clone()];
+                expected.sort();
+                expected
+            },
+            "B2 boundaries"
+        );
+    }
+
+    #[test]
+    fn collect_git_repo_entries_depth2_single_want_is_b3() {
+        let gdeep = build_gdeep();
+        let (commits, shallow) = collect_gdeep(&gdeep, &[&gdeep.c3], Some(2));
+        let mut expected_commits = vec![gdeep.c2.clone(), gdeep.c3.clone()];
+        expected_commits.sort();
+        assert_eq!(commits, expected_commits, "B3 sends two commits");
+        assert_eq!(shallow, vec![gdeep.c2.clone()], "B3 boundary is c2");
+    }
+
+    #[test]
+    fn collect_git_repo_entries_root_depth1_is_b4() {
+        let gdeep = build_gdeep();
+        let (commits, shallow) = collect_gdeep(&gdeep, &[&gdeep.c1], Some(1));
+        assert_eq!(commits, vec![gdeep.c1.clone()]);
+        assert_eq!(shallow, vec![gdeep.c1.clone()], "B4 root at cutoff");
+    }
+
+    #[test]
+    fn collect_git_repo_entries_depth_past_history_is_b5() {
+        let gdeep = build_gdeep();
+        let (commits, shallow) = collect_gdeep(&gdeep, &[&gdeep.c3], Some(10));
+        let mut expected = vec![gdeep.c1.clone(), gdeep.c2.clone(), gdeep.c3.clone()];
+        expected.sort();
+        assert_eq!(commits, expected, "B5 sends full history");
+        assert!(shallow.is_empty(), "B5 writes no shallow file");
+    }
+
+    #[test]
+    fn collect_git_repo_entries_union_does_not_mark_shared_parent_shallow() {
+        let gdeep = build_gdeep();
+        // c3 at depth 2 includes c2; the tag want also includes c1. c2 is not a
+        // boundary because its parent was sent by the other want (ADR-CL-02).
+        let (_commits, shallow) = collect_gdeep(&gdeep, &[&gdeep.c3, &gdeep.c1], Some(2));
+        assert!(
+            !shallow.contains(&gdeep.c2),
+            "shared parent already sent is not a boundary: {shallow:?}"
+        );
+    }
+
+    #[test]
+    fn collect_git_repo_entries_merges_source_shallow_boundaries() {
+        let gdeep = build_gdeep();
+        fs::write(gdeep.git_dir.join("shallow"), format!("{}\n", gdeep.c2)).unwrap();
+        let (commits, shallow) = collect_gdeep(&gdeep, &[&gdeep.c3], None);
+        assert!(commits.contains(&gdeep.c3), "tip is sent");
+        assert!(commits.contains(&gdeep.c2), "shallow tip is still sent");
+        assert!(
+            !commits.contains(&gdeep.c1),
+            "walk must stop at the source shallow boundary"
+        );
+        assert_eq!(
+            shallow,
+            vec![gdeep.c2.clone()],
+            "source shallow merges into the result"
         );
     }
 }

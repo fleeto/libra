@@ -231,24 +231,23 @@ impl ConfigKv {
         value: &str,
         encrypted: bool,
     ) -> Result<()> {
-        let existing = config_kv::Entity::find()
+        // Exact-case matches first: a genuinely multi-valued key (built with
+        // `add`) refuses `set`, as before.
+        let exact = config_kv::Entity::find()
             .filter(config_kv::Column::Key.eq(key))
             .all(db)
             .await
             .context("failed to query config_kv for set")?;
-
-        if existing.len() > 1 {
+        if exact.len() > 1 {
             return Err(anyhow!(
-                "cannot set '{}': {} values exist for this key",
+                "cannot set '{}': {} values exist for this key (use `unset-all` to clear)",
                 key,
-                existing.len()
+                exact.len()
             ));
         }
-
-        if let Some(row) = existing.into_iter().next() {
-            // Inherit encryption from existing entry if not explicitly set
+        if let Some(row) = exact.into_iter().next() {
+            // Inherit encryption from the existing exact-case entry.
             let effective_encrypted = encrypted || row.encrypted != 0;
-            // Update existing row
             let mut active: config_kv::ActiveModel = row.into();
             active.value = Set(value.to_owned());
             active.encrypted = Set(if effective_encrypted { 1 } else { 0 });
@@ -256,16 +255,32 @@ impl ConfigKv {
                 .update(db)
                 .await
                 .context("failed to update config_kv")?;
-        } else {
-            // Insert new row
-            let entry = config_kv::ActiveModel {
-                key: Set(key.to_owned()),
-                value: Set(value.to_owned()),
-                encrypted: Set(if encrypted { 1 } else { 0 }),
-                ..Default::default()
-            };
-            entry.save(db).await.context("failed to insert config_kv")?;
+            return Ok(());
         }
+        // No exact-case row: Git config variable names are case-insensitive, so
+        // `set` to a different casing of the same logical key must replace the
+        // other-cased row(s) (e.g. a default `remote.<n>.fetch` written by
+        // `remote add` is superseded by `config set remote.<n>.Fetch`). SQLite
+        // `LIKE` matches ASCII case-insensitively; config keys never contain
+        // `%`/`_`.
+        let other_cased = config_kv::Entity::find()
+            .filter(config_kv::Column::Key.like(key))
+            .all(db)
+            .await
+            .context("failed to query config_kv for case-insensitive set")?;
+        let inherit_encrypted = other_cased.iter().any(|e| e.encrypted != 0);
+        for row in other_cased {
+            row.delete(db)
+                .await
+                .context("failed to remove other-cased config_kv row")?;
+        }
+        let entry = config_kv::ActiveModel {
+            key: Set(key.to_owned()),
+            value: Set(value.to_owned()),
+            encrypted: Set(if encrypted || inherit_encrypted { 1 } else { 0 }),
+            ..Default::default()
+        };
+        entry.save(db).await.context("failed to insert config_kv")?;
         Ok(())
     }
 
@@ -947,10 +962,19 @@ impl ConfigKv {
                 .context("failed to rename remote entry")?;
         }
 
-        // Update branch.*.remote values that reference the old name
+        // Update branch.*.remote and branch.*.pushRemote values that reference
+        // the old name (Git rewrites both; the pushRemote suffix is matched
+        // case-insensitively because `git config --list` lowercases it).
         let branch_entries = Self::get_by_prefix_with_conn(db, "branch.").await?;
         for be in branch_entries {
-            if be.key.ends_with(".remote") && be.value == old {
+            let is_upstream = be.key.ends_with(".remote");
+            let is_push_remote = be
+                .key
+                .strip_prefix("branch.")
+                .and_then(|k| k.rsplit_once('.'))
+                .map(|(_, var)| var.eq_ignore_ascii_case("pushRemote"))
+                .unwrap_or(false);
+            if (is_upstream || is_push_remote) && be.value == old {
                 let rows = config_kv::Entity::find()
                     .filter(config_kv::Column::Key.eq(&be.key))
                     .filter(config_kv::Column::Value.eq(old))
@@ -966,6 +990,32 @@ impl ConfigKv {
                         .context("failed to update branch remote")?;
                 }
             }
+        }
+
+        // Rewrite a repository-scoped `remote.pushDefault` that names the old
+        // remote (Git rewrites local-scope pushDefault; global/system are left
+        // for the caller to warn about).
+        let push_default_rows = config_kv::Entity::find()
+            .filter(config_kv::Column::Key.starts_with("remote."))
+            .all(db)
+            .await
+            .context("failed to query pushDefault entries for rename")?
+            .into_iter()
+            .filter(|e| {
+                e.key
+                    .strip_prefix("remote.")
+                    .map(|var| var.eq_ignore_ascii_case("pushDefault"))
+                    .unwrap_or(false)
+                    && e.value == old
+            })
+            .collect::<Vec<_>>();
+        for row in push_default_rows {
+            let mut active: config_kv::ActiveModel = row.into();
+            active.value = Set(new.to_owned());
+            active
+                .update(db)
+                .await
+                .context("failed to update remote.pushDefault")?;
         }
 
         // Cascade SSH key rename: vault.ssh.old.* → vault.ssh.new.*
@@ -2740,6 +2790,9 @@ pub fn is_vault_internal_key(key: &str) -> bool {
         || lower == "vault.unsealkey"
         || lower == "vault.roottoken"
         || lower == "vault.roottoken_enc"
+        // Imported GPG secret key (plan-20260921 ADR-VG-02): must be redacted
+        // on every read path and can never be revealed.
+        || lower == "vault.gpg.seckey_enc"
         // `libra auth` token records: unset via config would be an unaudited
         // logout outside the owner API.
         || lower.starts_with("auth.token.")
@@ -3879,5 +3932,36 @@ mod tests {
             super::resolve_core_file_mode(Some("notabool")),
             Err("bad boolean config value 'notabool' for 'core.filemode'".to_string())
         );
+    }
+}
+
+#[cfg(test)]
+mod gpg_internal_key_tests {
+    use super::is_vault_internal_key;
+
+    /// plan-20260921 ADR-VG-02: the imported GPG secret slot is an internal
+    /// credential on every read path, while the public metadata stays readable.
+    #[test]
+    fn vault_gpg_seckey_enc_is_internal_key() {
+        for key in [
+            "vault.gpg.seckey_enc",
+            "VAULT.GPG.SECKEY_ENC",
+            "Vault.Gpg.Seckey_Enc",
+        ] {
+            assert!(is_vault_internal_key(key), "{key} must be internal");
+        }
+        for key in [
+            "vault.gpg.pubkey",
+            "vault.gpg.source",
+            "vault.gpg.fingerprint",
+            "vault.gpg.signing_key_id",
+            "vault.gpg.generated_key_name",
+            "vault.gpg.generated_pubkey",
+            "vault.gpg.history.ABC.pubkey",
+            "vault.gpg.imported_at",
+            "vault.gpg.uid",
+        ] {
+            assert!(!is_vault_internal_key(key), "{key} must stay readable");
+        }
     }
 }

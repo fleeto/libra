@@ -27,6 +27,7 @@ use serde::Serialize;
 
 use crate::{
     command::{get_target_commit, load_object},
+    internal::shallow::ShallowSet,
     utils::{
         error::{CliError, CliResult, StableErrorCode},
         object_ext::TreeExt,
@@ -178,6 +179,10 @@ enum BlameError {
         detail: String,
     },
 
+    /// `.libra/shallow` could not be read or parsed (fail-closed).
+    #[error("{0}")]
+    Shallow(String),
+
     /// The requested path is not present in the tree of the target revision.
     #[error("file '{path}' not found in revision '{revision}'")]
     FileNotFound { path: String, revision: String },
@@ -200,6 +205,11 @@ impl From<BlameError> for CliError {
             BlameError::ObjectLoad { .. } => CliError::fatal(message)
                 .with_stable_code(StableErrorCode::RepoCorrupt)
                 .with_hint("the object store may be corrupted"),
+            BlameError::Shallow(_) => CliError::fatal(message)
+                .with_stable_code(StableErrorCode::RepoCorrupt)
+                .with_hint(
+                    "each line of .libra/shallow must be a full object id; remove the file if the clone is complete",
+                ),
             BlameError::FileNotFound { .. } => CliError::fatal(message)
                 .with_stable_code(StableErrorCode::CliInvalidTarget)
                 .with_hint("check the file path; use 'libra show <rev>:' to list available files"),
@@ -339,11 +349,13 @@ pub async fn execute_safe(args: BlameArgs, out_config: &OutputConfig) -> CliResu
 /// Boundary conditions:
 /// - Empty target file -> returns an empty [`BlameOutput`] without walking
 ///   history.
-/// - Failed parent loads (e.g. shallow clone boundary) are silently skipped
-///   so blame still produces a partial answer.
+/// - Shallow-boundary commits are treated as roots via [`ShallowSet`]; failed
+///   parent loads below a missing shallow file are still skipped so blame can
+///   produce a partial answer.
 /// - Bad `-L` ranges produce [`BlameError::InvalidLineRange`].
 async fn run_blame(args: &BlameArgs) -> Result<BlameOutput, BlameError> {
     util::require_repo().map_err(|_| BlameError::NotInRepo)?;
+    let shallow = ShallowSet::load().map_err(|error| BlameError::Shallow(error.to_string()))?;
 
     let commit_id = get_target_commit(&args.commit)
         .await
@@ -397,7 +409,7 @@ async fn run_blame(args: &BlameArgs) -> Result<BlameOutput, BlameError> {
             continue;
         }
 
-        for parent_id in &current_commit.parent_commit_ids {
+        for parent_id in shallow.parents_for_walk(&current_id, &current_commit.parent_commit_ids) {
             let parent_commit = match load_object::<Commit>(parent_id) {
                 Ok(obj) => obj,
                 Err(_) => continue,
@@ -552,7 +564,7 @@ fn get_file_lines(
 /// commit. NOTE: the original line number is approximated by the final line
 /// number — the blame walk does not track per-commit origin line numbers.
 fn render_blame_porcelain(result: &BlameOutput, file: &str, line_porcelain: bool) -> CliResult<()> {
-    use std::{collections::HashSet, io::Write, str::FromStr};
+    use std::{collections::HashSet, io::Write};
 
     let lines = &result.lines;
     // For each line, record the group size when it starts a new consecutive run
@@ -580,10 +592,11 @@ fn render_blame_porcelain(result: &BlameOutput, file: &str, line_porcelain: bool
         }
 
         if line_porcelain || emitted.insert(line.hash.clone()) {
-            let hash = ObjectHash::from_str(&line.hash).map_err(|_| {
-                CliError::fatal(format!("invalid blame commit hash '{}'", line.hash))
-                    .with_stable_code(StableErrorCode::RepoCorrupt)
-            })?;
+            let hash =
+                crate::internal::object_format::parse_repo_oid(&line.hash).map_err(|_| {
+                    CliError::fatal(format!("invalid blame commit hash '{}'", line.hash))
+                        .with_stable_code(StableErrorCode::RepoCorrupt)
+                })?;
             let commit = load_object::<Commit>(&hash).map_err(|e| {
                 CliError::fatal(format!("failed to load commit {}: {e}", line.hash))
                     .with_stable_code(StableErrorCode::RepoCorrupt)

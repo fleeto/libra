@@ -184,7 +184,7 @@ Libra 定位 monorepo 客户端，永不合并 submodule 内容。三路合并�
 
 `libra rebase` 与 `libra cherry-pick` 共用同一道校验与同一措辞，仅把 `merge` 换成 `rebase` / `cherry-pick`。
 
-Libra 仍未实现外部 merge strategy、`subtree`、显式 `-s octopus` 或上述列表之外的 strategy option。签名验证（`--verify-signatures`）已支持，但仅限本仓库 vault PGP key（无外部 GPG keyring）。
+Libra 仍未实现外部 merge strategy、`subtree`、显式 `-s octopus` 或上述列表之外的 strategy option。签名验证（`--verify-signatures`）已支持，但仅限本仓库 vault PGP key（无外部 GPG keyring）。 验证接受仓库允许列表中的任一证书（活动密钥、生成的回退、归档的 `vault.gpg.history.<FPR>.pubkey`），并按**签名自身的创建时刻**判定吊销与过期。
 
 ### 重命名
 
@@ -255,7 +255,7 @@ Libra 接受 `conflict`，以及 `true`/`false` 的 Git 兼容布尔拼写（包
 | `--stat` | 合并完成后显示 diffstat（合并前 HEAD 与新提交之间的变更）。Git 默认显示；Libra 默认不显示，故用 `--stat` 主动开启。与 `--no-stat`/`-n` 构成 last-wins 切换。仅人类输出。 |
 | `-n`, `--no-stat` | 合并结束时不显示 diffstat（Libra 默认）。与 `--stat` 构成 last-wins 切换。 |
 | `--no-progress` | 不显示进度条。为对齐 Git 而接受的 no-op：Libra 的 merge 从不渲染进度条。 |
-| `--verify-signatures` | 验证每个目标 tip 的 PGP 签名，任一未签名或签名无效都在变更前中止；覆盖 `merge.verifySignatures`。仅能验证本仓库 vault PGP key 所签。 |
+| `--verify-signatures` | 验证每个目标 tip 的 PGP 签名，任一未签名或签名无效都在变更前中止；覆盖 `merge.verifySignatures`。能验证本仓库曾配置过的任意公钥（活动、生成、历史）所签。 |
 | `--no-verify-signatures` | 不验证被合并提交的签名，覆盖 `merge.verifySignatures=true`；与正向标志 last-wins。 |
 | `--rerere-autoupdate`, `--no-rerere-autoupdate` | 覆盖本次 merge 的 rerere 回放暂存：正向标志会暂存回放解法，负向标志保持未暂存；最后出现的标志生效。两者均省略时继承 `rerere.autoUpdate`。rerere 按规范化 hunk 两侧识别冲突，且只会在三方回放干净时写入。显式选择会写入 merge state，因此后续 `merge --continue` 仍保持它。rerere 禁用时二者均为 no-op。 |
 | `--signoff` | 在最终 merge 消息后追加 `Signed-off-by: <committer name> <committer email>`。初始请求会由 merge state 保留给 `--continue`；已存在相同的末尾 trailer 时不重复追加。`-s` 已用于策略，因此没有 `-s` 短选项。 |

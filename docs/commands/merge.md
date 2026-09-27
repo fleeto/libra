@@ -323,7 +323,8 @@ When the corresponding CLI flag is absent, Libra reads these Git-compatible defa
 
 - `merge.ff=true|false|only` allows fast-forwarding, forces a merge commit, or rejects a non-fast-forward merge. `--ff`, `--no-ff`, and `--ff-only` override it. `only` (like `--ff-only`) rejects only a genuinely diverged single-head history; a non-up-to-date octopus never fast-forwards.
 - `merge.log=true|false|<n>` appends up to 20 (for `true`) or `<n>` target-side commit subjects to the generated merge message. `--log[=<n>]` and `--no-log` override config and are last-one-wins; bare `--log` means 20. An explicit `-m` suppresses config-only `merge.log`, while an explicit `--log` still appends the shortlog to the custom message. For a non-squash merge, the resolved message is recorded in merge state, so a merge finished later with `merge --continue` commits with the same message and shortlog. Squash records no merge state; its ordinary `libra commit` supplies the commit message.
-- `merge.verifySignatures=true|false` controls tip-signature verification; `--verify-signatures` and `--no-verify-signatures` override it. Verification runs on every resolved target before any mutation — including autostash creation — so a rejected merge writes nothing (no stash entry, no objects).
+- `merge.verifySignatures=true|false` controls tip-signature verification; `--verify-signatures` and `--no-verify-signatures` override it. Verification runs on every resolved target before any mutation — including autostash creation — so a rejected merge writes nothing (no stash entry, no objects). 
+  `--verify-signatures` accepts any certificate in the repository allowlist (the active key, the generated fallback, and archived `vault.gpg.history.<FPR>.pubkey` entries), so a tip signed before a key rotation stays verifiable, while a tip signed by a key this repository never imported is refused. Revocation and expiry are evaluated at the **signature's own creation time**: a tip signed while the key was still valid keeps verifying, while a signature made after the key was revoked or had expired is refused.
 - `commit.gpgSign=true|false` controls merge-commit signing. `-S`/`--gpg-sign` force vault signing, and `--no-gpg-sign` disables it. Without either flag, `commit.gpgSign` wins over the `vault.signing` fallback. The resolved choice is persisted for `--continue` and `--restart`; old merge state without it reuses the current default. A vault-signing failure leaves HEAD unmoved and writes no merge commit.
 - `--signoff` appends `Signed-off-by: <committer name> <committer email>` after the final merge message has been processed. The initial choice is persisted across a conflict or `--no-commit` `--continue`; a matching Git-qualifying trailer is not duplicated. Merge has no `-s` short form because `-s` selects a merge strategy. The flag is unavailable with `--abort`, `--restart`, `--squash`, or `--dry-run`, which cannot create a merge commit.
 
@@ -345,7 +346,7 @@ Libra is a monorepo client and never merges submodule content. A three-way merge
 
 `libra rebase` and `libra cherry-pick` share the same guard and the same wording, with `rebase` / `cherry-pick` in place of `merge`.
 
-Libra still does not implement external merge strategies, `subtree`, explicit `-s octopus`, or strategy options outside the values listed above. Commit signing and signature verification are limited to the local vault PGP key; external GPG keyrings and SSH signing are not supported.
+Libra still does not implement external merge strategies, `subtree`, explicit `-s octopus`, or strategy options outside the values listed above. Commit signing and signature verification are limited to the local vault PGP key; external GPG keyrings and SSH signing are not supported. Verification accepts any certificate in the repository allowlist (active key, generated fallback, archived `vault.gpg.history.<FPR>.pubkey` entries) and evaluates revocation and expiry at the **signature's own creation time**.
 
 Worktree materialization is mode-aware (plan issues/470 FM-02): files are created with the entry mode's permission bits (`100755` -> `0777`, `100644` -> `0666`) under the process `umask`, replaced atomically through a same-directory temp file, and the index/tree entries keep the mode (`100755`/`100644`/`120000`).
 
@@ -374,7 +375,7 @@ Worktree materialization is mode-aware (plan issues/470 FM-02): files are create
 | `--stat` | Show a diffstat of the merge result (the changes between the pre-merge HEAD and the new commit) after the merge completes. Git shows this by default; Libra defaults to no diffstat, so `--stat` opts in. Last-one-wins toggle with `--no-stat`/`-n`. Human output only. |
 | `-n`, `--no-stat` | Do not show a diffstat at the end of the merge (Libra's default). Last-one-wins toggle with `--stat`. |
 | `--no-progress` | Do not show a progress meter. No-op accepted for Git parity: Libra's merge never renders a progress meter. |
-| `--verify-signatures` | Verify the PGP signature on every target tip and abort before mutation if any is unsigned or bad. Overrides `merge.verifySignatures`; only signatures made by this repository's vault PGP key can be validated. |
+| `--verify-signatures` | Verify the PGP signature on every target tip and abort before mutation if any is unsigned or bad. Overrides `merge.verifySignatures`; signatures made by any public key this repository has ever configured (active, generated, or historical) are validated. |
 | `--no-verify-signatures` | Do not verify the merged commit's signature, overriding `merge.verifySignatures=true`. The inverse of `--verify-signatures`; the last one wins. |
 | `--rerere-autoupdate`, `--no-rerere-autoupdate` | Override replay staging for this merge: positive stages a replayed resolution, negative leaves it unstaged; the last supplied flag wins. Omit both to inherit `rerere.autoUpdate`. Rerere identifies a conflict from its normalized hunk sides and only writes a replay after its three-way application is clean. The explicit choice is retained in merge state so a later `merge --continue` preserves it. Both are no-ops while rerere is disabled. |
 | `--signoff` | Append `Signed-off-by: <committer name> <committer email>` after the final merge message. The initial request is retained by merge state for `--continue`; a matching final trailer is not duplicated. There is no `-s` alias because `-s` selects a strategy. |
@@ -550,7 +551,7 @@ Success output keeps the historical `files_changed` numeric field and adds merge
 | Unrelated histories | `--allow-unrelated-histories` | Supported | N/A |
 | Merge-message shortlog | `--log[=<n>]` / `--no-log` | Supported | N/A |
 | Other custom strategies/options | Not supported | Supported | N/A |
-| Verify signatures | `--verify-signatures` (vault-key PGP only) | `--verify-signatures` | N/A |
+| Verify signatures | `--verify-signatures` (repository-configured public keys) | `--verify-signatures` | N/A |
 | JSON output | `--json` / `--machine` | Not supported | N/A |
 
 ## Error Handling

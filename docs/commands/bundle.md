@@ -16,17 +16,24 @@ libra bundle unbundle <file>
 
 - `create` writes a full, non-thin bundle. Explicit revisions may be combined
   with `--all`, `--branches`, or `--tags`; at least one selector is required.
-  Annotated tag heads retain the tag-object OID and the pack includes tag target
-  closure. Output uses a private temporary file, syncs it, then renames it into
-  place.
+  `--all` and an explicit `HEAD` revision advertise a `HEAD` line (detached
+  `HEAD` points at the detached commit; attached `HEAD` stays `HEAD`, not
+  `refs/heads/<branch>`). Annotated tag heads retain the tag-object OID and the
+  pack includes tag target closure. Output uses a private temporary file, syncs
+  it, then renames it into place.
 - `verify` validates the v2 header, local prerequisites, pack version, and the
   complete pack checksum.
 - `list-heads` prints the advertised `<oid> <ref>` lines without importing.
-- `unbundle` validates prerequisites and checksum, builds the correct SHA-1 or
-  SHA-256 pack index, and installs the pack/index pair in the object store. It
-  prints the advertised heads but deliberately does **not** update refs, matching
+- `unbundle` validates prerequisites and checksum, builds the correct pack index
+  for the repository hash kind (SHA-1 → idx v1; SHA-256 and blake3 → idx v2), and
+  installs the pack/index pair in the object store. Cross-kind bundles fail closed
+  (checksum / OID width) with no residual pack or index writes. It prints the
+  advertised heads but deliberately does **not** update refs, matching
   `git bundle unbundle`. Repeated imports verify the installed pair before
   reporting success.
+- blake3 repositories are fully supported on this path: `create`/`verify`/
+  `list-heads`/`unbundle` use BLAKE3 pack trailers and idx v2. System Git cannot
+  consume blake3 bundles.
 
 Bundle input, collected raw object data, and final output are each capped at
 1 GiB. This also bounds memory before pack compression, so a highly compressible
@@ -37,8 +44,8 @@ full-history only; prerequisite/thin/incremental range creation remains deferred
 
 | Option | Description |
 |---|---|
-| `<rev>...` | Include explicit revisions as advertised heads. |
-| `--all` | Include all local branches and tags. |
+| `<rev>...` | Include explicit revisions as advertised heads. `HEAD` is advertised as `HEAD`. |
+| `--all` | Include all local branches and tags, plus a `HEAD` line. |
 | `--branches` | Include all local branches. |
 | `--tags` | Include all local tags, preserving annotated objects. |
 
@@ -75,6 +82,7 @@ git clone repository.bundle restored
 | List heads | `libra bundle list-heads <f>` | `git bundle list-heads <f>` |
 | Import objects | `libra bundle unbundle <f>` | `git bundle unbundle <f>` |
 
-Deferred surfaces are prerequisite/thin/incremental bundle creation and cloning
-from a bundle through `libra clone`. `verify` checks checksum integrity but does
+Deferred surfaces are prerequisite/thin/incremental bundle creation.
+`libra clone <bundle>` reads a Git v2 bundle (directory first, then
+`<path>.bundle`, then `<path>`). `verify` checks checksum integrity but does
 not build a temporary index to exhaustively decode every pack entry.

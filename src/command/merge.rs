@@ -22,8 +22,6 @@ use git_internal::{
         },
     },
 };
-
-
 use serde::{Deserialize, Serialize};
 
 use super::{
@@ -63,23 +61,12 @@ mod autostash;
 mod conflict;
 mod content;
 mod output;
-mod tree_merge;
-mod signing;
 mod rename_merge;
+mod signing;
 mod state;
+mod tree_merge;
 mod virtual_base;
 mod workdir;
-
-pub(crate) use conflict::*;
-pub(crate) use tree_merge::*;
-use output::*;
-pub(crate) use output::{
-    clear_squash_message, load_squash_message, merge_commit_message, merge_commit_parents,
-};
-pub(crate) use rename_merge::*;
-pub(crate) use virtual_base::*;
-pub(crate) use content::*;
-pub(crate) use workdir::*;
 
 // Preserve the existing command::merge type path for downstream callers.
 #[allow(unused_imports)]
@@ -91,9 +78,19 @@ use autostash::{
     preflight_held_autostash, prepare_merge_autostash, resolve_pending_autostash,
     resolve_pending_autostash_with, store_pending_autostash, verify_autostash_ownership,
 };
+pub(crate) use conflict::*;
+pub(crate) use content::*;
+use output::*;
+pub(crate) use output::{
+    clear_squash_message, load_squash_message, merge_commit_message, merge_commit_parents,
+};
+pub(crate) use rename_merge::*;
 pub(crate) use state::{
     MergeState, merge_in_progress, merge_state_for_pseudo_refs, merge_state_gc_oids,
 };
+pub(crate) use tree_merge::*;
+pub(crate) use virtual_base::*;
+pub(crate) use workdir::*;
 
 /// `--help` examples shown in `libra merge --help` output.
 ///
@@ -534,7 +531,6 @@ pub(crate) type MergeOutput = PullMergeSummary;
 fn is_false(value: &bool) -> bool {
     !*value
 }
-
 
 /// Git's `evaluate_result()` score: worktree/index differences plus unmerged
 /// index entries. Lower is better; a later strategy wins a tie, matching
@@ -10996,19 +10992,18 @@ mod recursive {
         internal::object::{
             blob::Blob,
             commit::Commit,
+            signature::{Signature, SignatureType},
             tree::TreeItemMode,
         },
     };
 
-    use git_internal::internal::object::signature::{Signature, SignatureType};
-
     use super::{
         ConflictStyle, GitlinkEntries, MAX_VIRTUAL_ANCESTOR_BASES, MAX_VIRTUAL_ANCESTOR_DEPTH,
-        MAX_XDIFF_SIZE, MergeTreeEntry, PullMergeError,
-        VIRTUAL_OURS_LABEL, VIRTUAL_THEIRS_LABEL, VirtualBlobs, conflict_marker_length_at_depth,
-        ensure_virtual_ancestor_depth, fold_merge_bases, merge_bases_of_folded,
-        merge_bases_of_folded_with, merge_input_exceeds_xdiff_size, merge_input_is_binary,
-        merge_virtual_items, recorded_merge_base, virtual_base_fold_order, virtual_merged_mode,
+        MAX_XDIFF_SIZE, MergeTreeEntry, PullMergeError, VIRTUAL_OURS_LABEL, VIRTUAL_THEIRS_LABEL,
+        VirtualBlobs, conflict_marker_length_at_depth, ensure_virtual_ancestor_depth,
+        fold_merge_bases, merge_bases_of_folded, merge_bases_of_folded_with,
+        merge_input_exceeds_xdiff_size, merge_input_is_binary, merge_virtual_items,
+        recorded_merge_base, virtual_base_fold_order, virtual_merged_mode,
     };
 
     fn oid(byte: u8) -> ObjectHash {

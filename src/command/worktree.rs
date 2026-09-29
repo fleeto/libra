@@ -13,10 +13,7 @@ use clap::{Parser, Subcommand};
 use serde::Serialize;
 
 use crate::{
-    internal::{
-        sequencer::WorktreeControl,
-        workspace::RepoIdentity,
-    },
+    internal::{sequencer::WorktreeControl, workspace::RepoIdentity},
     utils::{
         error::{CliError, CliResult, StableErrorCode},
         output::{OutputConfig, emit_json_data},
@@ -24,30 +21,27 @@ use crate::{
     },
 };
 
-#[path = "worktree/lock.rs"]
-mod lock;
-#[path = "worktree/registry.rs"]
-mod registry;
 #[path = "worktree/doctor.rs"]
 mod doctor;
+#[path = "worktree/lock.rs"]
+mod lock;
 #[path = "worktree/operations.rs"]
 mod operations;
+#[path = "worktree/registry.rs"]
+mod registry;
 
 pub(crate) use doctor::*;
-pub(crate) use operations::*;
-
 pub(crate) use lock::acquire_registry_lock_async;
+pub(crate) use operations::*;
 pub(crate) use registry::{
-    DETACHED_MARKER, WorktreeEntry, WorktreeEntryState, WorktreeState,
-    local_gitdir_for_scope, registry_knows_linked_worktree,
-    registry_knows_linked_worktree_in_storage,
+    DETACHED_MARKER, WorktreeEntry, WorktreeEntryState, WorktreeState, local_gitdir_for_scope,
+    registry_knows_linked_worktree, registry_knows_linked_worktree_in_storage,
 };
 #[cfg(test)]
 use registry::{REGISTRY_SCHEMA_VERSION, WorktreeStateV1};
 use registry::{
-    RegistryShape, canonicalize, ensure_main_entry, find_entry,
-    load_state, load_state_for_repair, load_state_readonly,
-    normalize_v2_ids, save_state, state_path, write_state,
+    RegistryShape, canonicalize, ensure_main_entry, find_entry, load_state, load_state_for_repair,
+    load_state_readonly, normalize_v2_ids, save_state, state_path, write_state,
 };
 
 /// `--help` examples shown in `libra worktree --help` output.
@@ -201,7 +195,7 @@ pub enum WorktreeSubcommand {
         /// Explicitly attribute one legacy unscoped capture session to this
         /// workspace. Requires a workspace id and --confirm; the default
         /// doctor command remains strictly read-only.
-             #[arg(
+        #[arg(
              long,
              value_name = "SESSION_ID",
              requires = "workspace_id",
@@ -213,7 +207,7 @@ pub enum WorktreeSubcommand {
         /// (W0 §C.4.1.1: since info files became worktree-local they apply
         /// only to main; adoption is explicit and per-worktree, never
         /// automatic). Requires --confirm.
-             #[arg(
+        #[arg(
              long,
              value_name = "WORKTREE_PATH",
              conflicts_with_all = [
@@ -225,7 +219,7 @@ pub enum WorktreeSubcommand {
         /// Delete the repository's common `.libra/info/exclude` and
         /// `info/attributes` (explicit clear for rules that should no longer
         /// apply anywhere). Requires --confirm.
-             #[arg(
+        #[arg(
              long,
              conflicts_with_all = [
                  "workspace_id", "limit", "cursor", "adopt_capture_session", "adopt_info_to",
@@ -237,7 +231,7 @@ pub enum WorktreeSubcommand {
         /// current `libra.repoid` onto the canonical repository identity
         /// (plan-20260715 W4-07). Migrations never do this; requires
         /// --confirm.
-             #[arg(
+        #[arg(
              long,
              value_name = "LEGACY_PROJECT_ID",
              conflicts_with_all = [
@@ -248,7 +242,7 @@ pub enum WorktreeSubcommand {
         adopt_approved_project: Option<String>,
         /// Delete Always approvals under a legacy (non-canonical) `project_id`
         /// without adopting them. Requires --confirm.
-             #[arg(
+        #[arg(
              long,
              value_name = "LEGACY_PROJECT_ID",
              conflicts_with_all = [
@@ -1441,8 +1435,9 @@ impl ScopeDiagnostic {
 #[cfg(unix)]
 #[cfg(all(test, unix))]
 mod tests {
-    use tempfile::tempdir;
     use std::fs;
+
+    use tempfile::tempdir;
 
     use super::*;
 

@@ -73,8 +73,9 @@ pub fn slots_dir() -> PathBuf {
 /// Load the pre-allocated writer slots, or fail closed if absent.
 pub fn load_writer_slots() -> Vec<WriterSlot> {
     let path = slots_dir().join("slots.json");
-    let data = std::fs::read_to_string(&path)
-        .unwrap_or_else(|err| panic!("failed to read {path:?}: {err}; run tests/cloud_live_prepare.sh first"));
+    let data = std::fs::read_to_string(&path).unwrap_or_else(|err| {
+        panic!("failed to read {path:?}: {err}; run tests/cloud_live_prepare.sh first")
+    });
     serde_json::from_str(&data)
         .unwrap_or_else(|err| panic!("invalid slots.json at {path:?}: {err}"))
 }
@@ -163,10 +164,7 @@ fn parse_rfc3339(s: &str) -> Option<SystemTime> {
     // YYYY-MM-DDTHH:MM:SSZ (GC-CM-15: UTC, no fractional seconds).
     let s = s.strip_suffix('Z')?;
     let dt = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S").ok()?;
-    Some(
-        SystemTime::UNIX_EPOCH
-            + Duration::from_secs(dt.and_utc().timestamp().max(0) as u64),
-    )
+    Some(SystemTime::UNIX_EPOCH + Duration::from_secs(dt.and_utc().timestamp().max(0) as u64))
 }
 
 #[cfg(test)]

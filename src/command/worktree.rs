@@ -165,6 +165,8 @@ pub enum WorktreeSubcommand {
         delete_dir: bool,
     },
     /// Unmount a FUSE task worktree mountpoint.
+    #[cfg(unix)]
+    #[clap(alias = "unmount", about = "Unmount a FUSE worktree mountpoint")]
     Umount {
         /// Filesystem path of the FUSE mountpoint or its task worktree root.
         path: String,
@@ -641,7 +643,10 @@ fn reject_bare_repository_impl(
 
 pub async fn execute_safe(args: WorktreeArgs, output: &OutputConfig) -> CliResult<()> {
     let command = args.command;
+    #[cfg(unix)]
     let needs_repo = !matches!(&command, WorktreeSubcommand::Umount { .. });
+    #[cfg(not(unix))]
+    let needs_repo = true;
     // W0 §C.11: `doctor` skips the migration-applying open below. It is a
     // read-only diagnostic, and applying migrations is a write — the one
     // command you want available on a repository you have not yet decided to
@@ -744,8 +749,6 @@ pub async fn execute_safe(args: WorktreeArgs, output: &OutputConfig) -> CliResul
             let result = umount_fuse_path(path, cleanup).map_err(WorktreeError::into_cli_error)?;
             render_umount_fuse_path(&result, output)
         }
-        #[cfg(not(unix))]
-        WorktreeSubcommand::Umount { .. } => Ok(()),
         WorktreeSubcommand::Doctor {
             workspace_id,
             limit,
@@ -1437,9 +1440,23 @@ impl ScopeDiagnostic {
 mod tests {
     use std::fs;
 
+    use clap::Parser;
     use tempfile::tempdir;
 
     use super::*;
+
+    #[test]
+    fn unmount_alias_parses_as_umount() {
+        let args = WorktreeArgs::try_parse_from(["worktree", "unmount", "/tmp/mount", "--cleanup"])
+            .expect("documented alias `unmount` must parse");
+        match args.command {
+            WorktreeSubcommand::Umount { path, cleanup } => {
+                assert_eq!(path, "/tmp/mount");
+                assert!(cleanup);
+            }
+            other => panic!("unmount alias parsed as {other:?}"),
+        }
+    }
 
     #[test]
     fn registry_parse_accepts_v2_shape() {

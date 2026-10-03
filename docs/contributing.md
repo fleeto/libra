@@ -4,7 +4,7 @@
 
 Here are some guidelines for contributing to this project:
 
-1. Report issues/bugs: If you find any issues or bugs in the project, please report them by creating an issue on the issue tracker. Describe the issue in detail and also mention the steps to reproduce it. The more details you provide, the easier it will be for me to investigate and fix the issue.
+1. Report issues/bugs: If you find any issues or bugs in the project, please report them by creating an issue on the issue tracker. Describe the issue in detail and also mention the steps to reproduce it. The more details you provide, the easier it will be for me to investigate and fix the issue. When using Codex in this repository, `libra-issue-triage` can help clarify the report and draft a copy-ready title and body. Review the draft, then create the Issue through GitHub or with `gh issue create`; Codex only submits it when you explicitly authorize that remote action.
 2. Suggest enhancements: If you have an idea to enhance or improve this project, you can suggest it by creating an issue on the issue tracker. Explain your enhancement in detail along with its use cases and benefits. I appreciate well-thought-out enhancement suggestions.
 3. Contribute code: If you want to develop and contribute code, follow these steps:
     - Familiarize yourself with the [Code of Conduct](code-of-conduct.md). libra has a strict policy against abusive, unethical, or illegal behavior.
@@ -18,6 +18,24 @@ Here are some guidelines for contributing to this project:
 5. Improve documentation: If you find any gaps in the documentation or think any part can be improved, you can make changes to files in the documentation folder and submit a PR. Ensure the documentation is up-to-date with the latest changes.
 
 Your contributions are highly appreciated. Feel free to ask any questions if you have any doubts or facing issues while contributing. The more you contribute, the more you will learn and improve your skills.
+
+## Using the contribution skills with Codex
+
+When Codex opens this repository, these project skills help move work from an initial report to an implementation. Ask in natural language or name the skill directly:
+
+- [`libra-issue-triage`](../.agents/skills/libra-issue-triage/SKILL.md): clarify a bug, feature request, documentation issue, or usage question; check facts and draft a new Issue for you to review and create.
+- [`libra-work-discovery`](../.agents/skills/libra-work-discovery/SKILL.md): check whether an Issue or described problem already exists, and report the state of related Issues, plans, and task cards.
+- [`libra-plan-task-authoring`](../.agents/skills/libra-plan-task-authoring/SKILL.md): find reusable planned work or assess and draft task cards/plans for maintainer review. A draft does not authorize implementation.
+- [`libra-contribution-execution`](../.agents/skills/libra-contribution-execution/SKILL.md): implement a selected task card after you authorize implementation; it checks readiness, runs required verification, and prepares a reviewable contribution.
+
+A common path is: clarify or draft the Issue → create it on GitHub → check for duplicates and existing plans → select or draft a task card → obtain maintainer acceptance and resolve dependencies → explicitly authorize implementation. If the Issue or card already exists, skip the earlier steps that are not needed. The skills may recommend handing work to one another, but a recommendation does not authorize a remote Issue change, plan write, or implementation.
+
+Examples:
+
+- “Help me clarify this bug report and draft an Issue I can file.”
+- “Check whether Issue #123 is already planned and what its task card status is.”
+- “Assess this request and draft a task card for maintainer review.”
+- “Implement the accepted card ABC-02; I authorize the implementation.”
 
 ## DCO & PGP
 

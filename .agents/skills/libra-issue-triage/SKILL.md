@@ -1,6 +1,6 @@
 ---
 name: libra-issue-triage
-description: Triage a Libra bug report, feature request, documentation issue, or usage question. Use to verify facts, check for duplicates, clarify scope-changing questions, and recommend a disposition. Read-only by default; do not plan task cards or implement changes unless the user asks for that next stage.
+description: Triage a Libra bug report, feature request, documentation issue, or usage question; clarify it or draft a new GitHub Issue for the user to create. Use to verify facts, check for duplicates, clarify scope-changing questions, and recommend a disposition. Read-only by default; do not create remote Issues, plan task cards, or implement changes unless the user explicitly authorizes that next stage.
 ---
 
 # Libra Issue Triage
@@ -36,6 +36,12 @@ Ask only questions that can change diagnosis, scope, acceptance, priority, or de
 
 If the user has not selected a mode, continue locally and offer draft text; do not contact the reporter. Recheck the brief against repository sources after material answers. If an existing plan covers the report, identify it and whether the Issue changes its scope or acceptance. Stop discovery when problem, affected users, intended outcome, scope boundaries, acceptance evidence, and material dependencies are clear enough for planning. State maintainer-only choices as decisions needed.
 
+## Draft a new Issue
+
+When the user wants to report a new problem or request, first clarify enough of the brief to avoid inventing behavior or acceptance criteria. Check the current repository's `.github/ISSUE_TEMPLATE/` and use a matching template if present. Check for duplicate or closely related reports and planned work; when a full cross-Issue search is needed, recommend `libra-work-discovery` before filing. If the request is still valid as a new Issue, draft a concise title and a copy-ready body from verified facts, marking unanswered details as unknown or asking only questions that would change scope or diagnosis.
+
+Return the title and body for review, then tell the user how to create it: paste them into the repository's GitHub issue form, or save the body to a file and run `gh issue create --repo OWNER/REPO --title "<title>" --body-file <file>`. Confirm the repository owner/name from user context or a verified Issue URL; do not guess it. Creating a GitHub Issue is a separate remote write: do not run this command unless the user explicitly authorizes creating that Issue. After the user creates it, ask for or use its URL/number and recommend `libra-work-discovery` to verify the new record and find the next planning handoff.
+
 ## Recommend a disposition
 
 Recommend one outcome and explain the evidence:
@@ -46,6 +52,14 @@ Recommend one outcome and explain the evidence:
 - Recommend an unsupported/duplicate disposition only when a maintainer directs that outcome; otherwise present it as a recommendation.
 
 Do not author repository plan files as part of triage. Do not begin implementation from a triage recommendation.
+
+## Handoff to other project skills
+
+- If the user mainly wants to know whether this report already exists or how planned work is progressing, recommend `libra-work-discovery`.
+- If the user wants to file a new report, draft the Issue title and body here; direct the user to create it through GitHub's web form or the shown `gh issue create` command. Do not create it remotely without explicit authorization.
+- When the report is clear enough to define scope and acceptance, but needs a plan or task card, recommend `libra-plan-task-authoring` with the Issue brief and evidence. If existing work may already cover it, route through `libra-work-discovery` first or include that check in the planning assessment.
+- Recommend `libra-contribution-execution` only after a task card has been selected, maintainer gates are satisfied, and the user explicitly authorizes implementation. A triage recommendation by itself is not implementation authorization.
+- If investigation finds an existing card, use `libra-work-discovery` to report its lifecycle, acceptance, dependencies, and readiness; do not silently convert triage into card execution.
 
 ## External actions and response
 

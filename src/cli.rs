@@ -2025,8 +2025,8 @@ async fn operation_class_for_command(
     }
     // `mega2 browser` keeps `CommandScope::ReadOnly` (it reads no repository
     // state and works outside a repository) but can create remote directories
-    // through the mega2 API once the TUI confirms. Classify the external write
-    // explicitly before the generic scope mapping.
+    // through the TUI after confirmation or through a non-interactive write
+    // flag. Classify the external write explicitly before the generic mapping.
     if matches!(command, Commands::Mega2(_)) {
         return MutationClass::ExternalOrUnknown;
     }
@@ -2068,7 +2068,24 @@ async fn operation_class_for_command(
     }
     match command {
         Commands::Config(args) if config_command_is_read_only(args) => MutationClass::ReadOnly,
-        Commands::Branch(args) if command::branch::set_upstream_is_idempotent(args).await => {
+        // ADR-BRL-01 / #574: branch list / show-current / filter queries and
+        // idempotent `-u` share `BranchMode` with `run_branch`.
+        Commands::Branch(args) if command::branch::branch_is_read_only_query(args).await => {
+            MutationClass::ReadOnly
+        }
+        // ADR-BRL-01 / #574 BRL-02: tag/remote/reflog/notes query forms share
+        // each command module's dispatch predicate. `command_scope` stays
+        // Repository.
+        Commands::Tag(args) if command::tag::tag_is_read_only_query(args) => {
+            MutationClass::ReadOnly
+        }
+        Commands::Remote(args) if command::remote::remote_is_read_only_query(args) => {
+            MutationClass::ReadOnly
+        }
+        Commands::Reflog(args) if command::reflog::reflog_is_read_only_query(args) => {
+            MutationClass::ReadOnly
+        }
+        Commands::Notes(args) if command::notes::notes_is_read_only_query(args) => {
             MutationClass::ReadOnly
         }
         Commands::Agent(args) if agent_command_is_read_only(args) => MutationClass::ReadOnly,
@@ -3864,6 +3881,335 @@ mod tests {
     use serial_test::serial;
 
     use super::*;
+
+    #[tokio::test]
+    #[serial(cwd)]
+    async fn operation_class_for_command_branch_matrix() {
+        use crate::{internal::operation::MutationClass, utils::test};
+
+        let repo = tempfile::tempdir().expect("temp repo");
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = test::ChangeDirGuard::new(repo.path());
+
+        crate::command::commit::execute(crate::command::commit::CommitArgs {
+            message: Some("base".to_string()),
+            allow_empty: true,
+            disable_pre: true,
+            no_verify: true,
+            ..Default::default()
+        })
+        .await;
+
+        let current = match crate::internal::head::Head::current().await {
+            crate::internal::head::Head::Branch(name) => name,
+            crate::internal::head::Head::Detached(_) => panic!("expected a named branch"),
+        };
+        crate::internal::config::ConfigKv::set(
+            &format!("branch.{current}.remote"),
+            "origin",
+            false,
+        )
+        .await
+        .expect("set remote");
+        crate::internal::config::ConfigKv::set(&format!("branch.{current}.merge"), "main", false)
+            .await
+            .expect("set merge");
+        crate::internal::branch::Branch::update_branch(
+            "other",
+            &{
+                crate::internal::head::Head::current_commit()
+                    .await
+                    .expect("HEAD commit")
+                    .to_string()
+            },
+            None,
+        )
+        .await
+        .expect("create other");
+
+        let cases: &[(&[&str], MutationClass)] = &[
+            (&["libra", "branch"], MutationClass::ReadOnly),
+            (&["libra", "branch", "-l"], MutationClass::ReadOnly),
+            (&["libra", "branch", "-r"], MutationClass::ReadOnly),
+            (&["libra", "branch", "-a"], MutationClass::ReadOnly),
+            (&["libra", "branch", "-v"], MutationClass::ReadOnly),
+            (
+                &["libra", "branch", "--show-current"],
+                MutationClass::ReadOnly,
+            ),
+            (
+                &["libra", "branch", "--contains", "HEAD"],
+                MutationClass::ReadOnly,
+            ),
+            (
+                &["libra", "branch", "--no-contains", "HEAD"],
+                MutationClass::ReadOnly,
+            ),
+            (
+                &["libra", "branch", "--merged", "HEAD"],
+                MutationClass::ReadOnly,
+            ),
+            (
+                &["libra", "branch", "--no-merged", "HEAD"],
+                MutationClass::ReadOnly,
+            ),
+            (
+                &["libra", "branch", "--points-at", "HEAD"],
+                MutationClass::ReadOnly,
+            ),
+            (
+                &["libra", "branch", "--sort=-committerdate"],
+                MutationClass::ReadOnly,
+            ),
+            (
+                &["libra", "branch", "--format=%(refname)"],
+                MutationClass::ReadOnly,
+            ),
+            (
+                &["libra", "branch", "--column=always"],
+                MutationClass::ReadOnly,
+            ),
+            (&["libra", "branch", "--no-column"], MutationClass::ReadOnly),
+            (
+                &["libra", "branch", "--ignore-case"],
+                MutationClass::ReadOnly,
+            ),
+            // Idempotent `-u` on current branch (already tracks origin/main).
+            (
+                &["libra", "branch", "-u", "origin/main"],
+                MutationClass::ReadOnly,
+            ),
+            // Same upstream against another branch remains a mutation (drift fix).
+            (
+                &["libra", "branch", "-u", "origin/main", "other"],
+                MutationClass::RepoMutation,
+            ),
+            (&["libra", "branch", "feature"], MutationClass::RepoMutation),
+            (
+                &["libra", "branch", "-d", "feature"],
+                MutationClass::RepoMutation,
+            ),
+            (
+                &["libra", "branch", "-D", "feature"],
+                MutationClass::RepoMutation,
+            ),
+            (
+                &["libra", "branch", "-m", "a", "b"],
+                MutationClass::RepoMutation,
+            ),
+            (
+                &["libra", "branch", "-c", "a", "b"],
+                MutationClass::RepoMutation,
+            ),
+            (
+                &["libra", "branch", "-C", "a", "b"],
+                MutationClass::RepoMutation,
+            ),
+            (
+                &["libra", "branch", "--unset-upstream"],
+                MutationClass::RepoMutation,
+            ),
+            (
+                &["libra", "branch", "--edit-description"],
+                MutationClass::RepoMutation,
+            ),
+            (
+                &["libra", "branch", "diff", "main"],
+                MutationClass::RepoMutation,
+            ),
+            (
+                &["libra", "branch", "reset", "feature", "HEAD"],
+                MutationClass::RepoMutation,
+            ),
+        ];
+
+        for (argv, expected) in cases {
+            let cli = Cli::try_parse_from(*argv).unwrap_or_else(|e| {
+                panic!("parse {:?}: {e}", argv);
+            });
+            let got = operation_class_for_command(&cli.command).await;
+            assert_eq!(got, *expected, "operation class for {argv:?}");
+        }
+    }
+
+    /// G54: parsed tag/remote/reflog/notes forms. Read-only rows are the G1–G13,
+    /// G17–G21, and G31–G41 queries; mutation rows are G15–G16, G23–G30, and
+    /// G36–G37, G43–G49. Output-equivalence gates (G14/G22/G35/G42) are the
+    /// same invocations.
+    #[tokio::test]
+    #[serial(cwd)]
+    async fn operation_class_for_command_repository_matrix() {
+        use crate::{internal::operation::MutationClass, utils::test};
+
+        let repo = tempfile::tempdir().expect("temp repo");
+        let _guard = test::ChangeDirGuard::new(repo.path());
+
+        let cases: &[(&[&str], MutationClass)] = &[
+            (&["libra", "tag"], MutationClass::ReadOnly),
+            (&["libra", "tag", "-l"], MutationClass::ReadOnly),
+            (&["libra", "tag", "-n", "1"], MutationClass::ReadOnly),
+            (
+                &["libra", "tag", "--contains", "HEAD"],
+                MutationClass::ReadOnly,
+            ),
+            (
+                &["libra", "tag", "--no-contains", "HEAD"],
+                MutationClass::ReadOnly,
+            ),
+            (
+                &["libra", "tag", "--points-at", "HEAD"],
+                MutationClass::ReadOnly,
+            ),
+            (
+                &["libra", "tag", "--merged", "HEAD"],
+                MutationClass::ReadOnly,
+            ),
+            (
+                &["libra", "tag", "--no-merged", "HEAD"],
+                MutationClass::ReadOnly,
+            ),
+            (
+                &["libra", "tag", "--sort=creatordate"],
+                MutationClass::ReadOnly,
+            ),
+            (
+                &["libra", "tag", "--column=always"],
+                MutationClass::ReadOnly,
+            ),
+            (&["libra", "tag", "--no-column"], MutationClass::ReadOnly),
+            (
+                &["libra", "tag", "--no-column", "v1.*"],
+                MutationClass::ReadOnly,
+            ),
+            (
+                &["libra", "tag", "--verify", "v1.0"],
+                MutationClass::ReadOnly,
+            ),
+            (&["libra", "tag", "v1.0"], MutationClass::RepoMutation),
+            (&["libra", "tag", "-d", "v1.0"], MutationClass::RepoMutation),
+            (&["libra", "remote", "-v"], MutationClass::ReadOnly),
+            (
+                &["libra", "remote", "get-url", "origin"],
+                MutationClass::ReadOnly,
+            ),
+            (
+                &["libra", "remote", "show", "--no-query", "origin"],
+                MutationClass::ReadOnly,
+            ),
+            (
+                &["libra", "remote", "prune", "--dry-run", "origin"],
+                MutationClass::ReadOnly,
+            ),
+            (
+                &["libra", "remote", "show", "origin"],
+                MutationClass::ReadOnly,
+            ),
+            (
+                &[
+                    "libra",
+                    "remote",
+                    "add",
+                    "origin",
+                    "https://example.invalid/repo.git",
+                ],
+                MutationClass::RepoMutation,
+            ),
+            (
+                &["libra", "remote", "remove", "origin"],
+                MutationClass::RepoMutation,
+            ),
+            (
+                &["libra", "remote", "rename", "origin", "upstream"],
+                MutationClass::RepoMutation,
+            ),
+            (
+                &[
+                    "libra",
+                    "remote",
+                    "set-url",
+                    "origin",
+                    "https://example.invalid/other.git",
+                ],
+                MutationClass::RepoMutation,
+            ),
+            (
+                &["libra", "remote", "prune", "origin"],
+                MutationClass::RepoMutation,
+            ),
+            (
+                &["libra", "remote", "set-head", "origin", "main"],
+                MutationClass::RepoMutation,
+            ),
+            (
+                &["libra", "remote", "set-branches", "origin", "main"],
+                MutationClass::RepoMutation,
+            ),
+            (&["libra", "remote", "update"], MutationClass::RepoMutation),
+            (&["libra", "reflog"], MutationClass::ReadOnly),
+            (
+                &["libra", "reflog", "show", "HEAD"],
+                MutationClass::ReadOnly,
+            ),
+            (
+                &["libra", "reflog", "exists", "HEAD"],
+                MutationClass::ReadOnly,
+            ),
+            (
+                &["libra", "reflog", "expire", "--dry-run"],
+                MutationClass::ReadOnly,
+            ),
+            (
+                &["libra", "reflog", "delete", "HEAD@{1}"],
+                MutationClass::RepoMutation,
+            ),
+            (
+                &["libra", "reflog", "expire", "--all"],
+                MutationClass::RepoMutation,
+            ),
+            (&["libra", "notes", "list"], MutationClass::ReadOnly),
+            (&["libra", "notes", "show", "HEAD"], MutationClass::ReadOnly),
+            (&["libra", "notes", "get-ref"], MutationClass::ReadOnly),
+            (
+                &["libra", "notes", "prune", "--dry-run"],
+                MutationClass::ReadOnly,
+            ),
+            (
+                &["libra", "notes", "add", "-m", "note"],
+                MutationClass::RepoMutation,
+            ),
+            (
+                &["libra", "notes", "append", "-m", "note"],
+                MutationClass::RepoMutation,
+            ),
+            (
+                &["libra", "notes", "edit", "-m", "note"],
+                MutationClass::RepoMutation,
+            ),
+            (
+                &["libra", "notes", "copy", "abc", "def"],
+                MutationClass::RepoMutation,
+            ),
+            (
+                &["libra", "notes", "remove", "HEAD"],
+                MutationClass::RepoMutation,
+            ),
+            (
+                &["libra", "notes", "merge", "refs/notes/other"],
+                MutationClass::RepoMutation,
+            ),
+            (&["libra", "notes", "prune"], MutationClass::RepoMutation),
+            // Bare `notes` is the list default in `execute_safe`.
+            (&["libra", "notes"], MutationClass::ReadOnly),
+        ];
+
+        for (argv, expected) in cases {
+            let cli = Cli::try_parse_from(*argv).unwrap_or_else(|e| {
+                panic!("parse {argv:?}: {e}");
+            });
+            let got = operation_class_for_command(&cli.command).await;
+            assert_eq!(got, *expected, "operation class for {argv:?}");
+        }
+    }
 
     /// WT-08 (ADR-WT-06): an omitted `stash` subcommand is rewritten to
     /// `stash push`; known subcommands and other commands are untouched.

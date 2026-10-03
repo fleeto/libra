@@ -1,18 +1,25 @@
 //! `libra mega2 browser` — the single public Mega2 surface (plan-20260912 MB-03).
 //!
-//! The command is a thin, read-only adapter over two already-verified layers:
+//! The command is a thin adapter over two already-verified layers; it reads
+//! by default and sends one remote write request only for a confirmed TUI
+//! action or a non-interactive write flag such as `--create-dir`:
 //! the bounded transport in [`crate::internal::protocol::mega2_tree`] (MB-01)
 //! and the resumable terminal state in [`crate::command::mega2_browser`]
 //! (MB-02). It never opens the repository database, never touches the index or
 //! object store, and never persists configuration — everything it needs comes
 //! from argv and the remote server.
 //!
-//! Two output paths share the same validated inputs:
+//! Three paths share the same validated inputs:
 //!
-//! - human/TUI: exactly the MB-02 interactive loop, which itself requires
-//!   stdin and stdout to be TTYs before altering any terminal state;
-//! - `--json`/`--machine`: exactly one MB-01 fetch whose validated listing is
-//!   rendered through the shared JSON envelope.
+//! - human/TUI (no operation flag): exactly the MB-02 interactive loop, which
+//!   itself requires stdin and stdout to be TTYs before altering any terminal
+//!   state;
+//! - non-interactive human (an operation flag such as `--list`): one request
+//!   through [`crate::command::mega2_browser::noninteractive`], printed as
+//!   sanitized plain text, with no terminal and no stdin;
+//! - `--json`/`--machine`: the same non-interactive path, rendered through the
+//!   shared JSON envelope; without an operation flag it lists PATH, exactly
+//!   like `--list`.
 
 use std::path::PathBuf;
 
@@ -20,22 +27,27 @@ use clap::{Args, Subcommand};
 use serde::Serialize;
 
 use crate::{
+    command::mega2_browser::{
+        TAG_PAGE_SIZE,
+        noninteractive::{self, Invocation, Operation},
+    },
     internal::protocol::{
         mega2_auth::resolve_token_from_process,
-        mega2_tree::{ContentType, Listing, Mega2TreeSession, normalize_path, validate_server_url},
+        mega2_tree::{ContentType, Listing, normalize_path, validate_server_url},
     },
     utils::{
         error::{CliError, CliResult, StableErrorCode},
-        output::{OutputConfig, emit_json_data},
+        output::OutputConfig,
     },
 };
 
 /// `EXAMPLES:` banner for the `mega2` parent command.
 pub const MEGA2_EXAMPLES: &str = "\
 EXAMPLES:
-    libra mega2 browser --server https://mega2.example.com        Browse the remote root in the TUI
-    libra mega2 browser --server https://mega2.example.com src    Open a rooted path directly
-    libra --json mega2 browser --server http://127.0.0.1:8080     One bounded fetch as JSON
+    libra mega2 browser --server https://mega2.example.com         Browse the remote root in the TUI
+    libra mega2 browser --server https://mega2.example.com /src    Open a rooted path directly
+    libra mega2 browser --server https://mega2.example.com --list /src  Print one level, no terminal needed
+    libra --json mega2 browser --server http://127.0.0.1:8080      One bounded fetch as JSON
     libra --machine mega2 browser --server https://mega2.example.com  Strict machine mode
 
 `mega2 browser` is Libra-only: it lists one remote directory level and has no
@@ -45,8 +57,10 @@ Git-equivalent contract. `libra ls-tree` inspects local tree objects instead.";
 pub const MEGA2_BROWSER_EXAMPLES: &str = "\
 EXAMPLES:
     libra mega2 browser --server https://mega2.example.com             Interactive browse of /
-    libra mega2 browser --server https://mega2.example.com src/pkg     Interactive browse of /src/pkg
+    libra mega2 browser --server https://mega2.example.com /src/pkg    Interactive browse of /src/pkg
     libra mega2 browser --server https://mega2.example.com --ref v1.2  List one commit or tag
+    libra mega2 browser --server https://mega2.example.com --list /src/pkg  Plain-text listing, no terminal
+    libra mega2 browser --server https://mega2.example.com --list-tags --page 2  Root tags, page 2, no terminal
     libra mega2 browser --server http://127.0.0.1:8080 --json          Exactly one fetch, JSON schema
     libra --machine mega2 browser --server https://mega2.example.com   NDJSON for automation
     libra mega2 browser --server https://mega2.example.com --token-file ~/.mega2-token  Create/delete/move with a token file
@@ -70,7 +84,7 @@ pub struct Mega2Args {
 #[derive(Subcommand, Debug)]
 pub enum Mega2Subcommand {
     #[command(
-        about = "Browse one remote directory listing (TUI by default; --json/--machine for one fetch)",
+        about = "Browse a remote Mega2 directory in a TUI, or run one non-interactive operation (--list, --json)",
         after_help = MEGA2_BROWSER_EXAMPLES
     )]
     Browser(BrowserArgs),
@@ -83,7 +97,7 @@ pub struct BrowserArgs {
     #[arg(long, value_name = "BASE-URL")]
     pub server: String,
 
-    /// Rooted directory path to list; never escapes above `/`
+    /// Rooted directory: the one to list, or the parent for a directory write (tag operations accept only `/`); never escapes above `/`
     #[arg(value_name = "PATH", default_value = "/")]
     pub path: String,
 
@@ -98,6 +112,119 @@ pub struct BrowserArgs {
     /// Write token inline (lowest precedence; visible in shell history — prefer --token-file)
     #[arg(long = "token", value_name = "TOKEN")]
     pub token: Option<String>,
+
+    #[command(flatten)]
+    pub operation: OperationArgs,
+
+    #[command(flatten)]
+    pub tag: TagArgs,
+}
+
+/// Non-interactive operations (plan-20261001 ADR-MN-01): at most one per
+/// invocation, each sending exactly one request without a terminal.
+#[derive(Args, Debug, Default)]
+#[group(id = "operation", multiple = false)]
+pub struct OperationArgs {
+    /// List PATH once and exit: one GET, plain text (or JSON with --json); no terminal needed
+    #[arg(long)]
+    pub list: bool,
+
+    /// Create directory NAME under PATH: one POST, no reload
+    #[arg(long = "create-dir", value_name = "NAME")]
+    pub create_dir: Option<String>,
+
+    /// Delete directory NAME under PATH: one POST, no confirmation, no reload
+    #[arg(long = "delete-dir", value_name = "NAME")]
+    pub delete_dir: Option<String>,
+
+    /// Move directory NAME from PATH into PARENT-PATH, keeping its name: one POST, no reload
+    #[arg(long = "move-dir", num_args = 2, value_names = ["NAME", "PARENT-PATH"])]
+    pub move_dir: Option<Vec<String>>,
+
+    /// Rename directory NAME under PATH to NEW-NAME, keeping its parent: one POST, no reload
+    #[arg(long = "rename-dir", num_args = 2, value_names = ["NAME", "NEW-NAME"])]
+    pub rename_dir: Option<Vec<String>>,
+
+    /// List one page of root tags and exit: one GET (see --page, --per-page)
+    #[arg(long = "list-tags")]
+    pub list_tags: bool,
+
+    /// Create root tag NAME: one POST (lightweight, or annotated with --message)
+    #[arg(long = "create-tag", value_name = "NAME")]
+    pub create_tag: Option<String>,
+
+    /// Delete root tag NAME: one DELETE, no confirmation
+    #[arg(long = "delete-tag", value_name = "NAME")]
+    pub delete_tag: Option<String>,
+}
+
+/// Options of the tag operations (plan-20261001 MN-05, MN-06); each is
+/// refused without its operation.
+#[derive(Args, Debug, Default)]
+pub struct TagArgs {
+    /// Tag page to list with --list-tags (1..=1000; default 1)
+    #[arg(long, value_name = "N", requires = "list_tags")]
+    pub page: Option<u64>,
+
+    /// Tags per page with --list-tags (1..=100; default 20)
+    #[arg(long = "per-page", value_name = "N", requires = "list_tags")]
+    pub per_page: Option<u64>,
+
+    /// Message of an annotated tag with --create-tag (non-empty, at most 1024 bytes, no control characters)
+    #[arg(long, value_name = "TEXT", requires = "create_tag")]
+    pub message: Option<String>,
+}
+
+impl OperationArgs {
+    /// The selected operation, if any, with the tag options it takes.
+    fn selected(&self, tag: &TagArgs) -> CliResult<Option<Operation>> {
+        if self.list {
+            return Ok(Some(Operation::List));
+        }
+        if let Some(name) = &self.create_dir {
+            return Ok(Some(Operation::CreateDir { name: name.clone() }));
+        }
+        if let Some(name) = &self.delete_dir {
+            return Ok(Some(Operation::DeleteDir { name: name.clone() }));
+        }
+        if let Some(values) = &self.move_dir {
+            let (name, to_parent) = value_pair("--move-dir", values)?;
+            return Ok(Some(Operation::MoveDir { name, to_parent }));
+        }
+        if let Some(values) = &self.rename_dir {
+            let (name, new_name) = value_pair("--rename-dir", values)?;
+            return Ok(Some(Operation::RenameDir { name, new_name }));
+        }
+        if self.list_tags {
+            // The TUI panel's defaults: page 1, TAG_PAGE_SIZE per page.
+            return Ok(Some(Operation::ListTags {
+                page: tag.page.unwrap_or(1),
+                per_page: tag.per_page.unwrap_or(TAG_PAGE_SIZE),
+            }));
+        }
+        if let Some(name) = &self.create_tag {
+            return Ok(Some(Operation::CreateTag {
+                name: name.clone(),
+                message: tag.message.clone(),
+            }));
+        }
+        if let Some(name) = &self.delete_tag {
+            return Ok(Some(Operation::DeleteTag { name: name.clone() }));
+        }
+        Ok(None)
+    }
+}
+
+/// The two values of a `num_args = 2` operation flag. clap enforces the
+/// arity, so any other count is a parser bug, reported instead of panicking.
+fn value_pair(flag: &str, values: &[String]) -> CliResult<(String, String)> {
+    match values {
+        [first, second] => Ok((first.clone(), second.clone())),
+        _ => Err(CliError::internal(format!(
+            "mega2 browser: {flag} expects 2 values, got {}",
+            values.len()
+        ))),
+    }
 }
 
 /// One validated listing entry in the documented machine schema.
@@ -107,9 +234,11 @@ struct BrowserItem<'a> {
     content_type: &'a str,
 }
 
-/// The documented `mega2 browser` machine payload.
+/// The documented `mega2 browser` list payload (`data` of the JSON envelope).
 #[derive(Serialize, Debug)]
-struct BrowserData<'a> {
+pub(crate) struct BrowserData<'a> {
+    /// Always `list` (plan-20261001 ADR-MN-03).
+    operation: &'static str,
     server: &'a str,
     #[serde(rename = "ref")]
     git_ref: Option<&'a str>,
@@ -132,13 +261,14 @@ fn content_type_name(content_type: ContentType) -> &'static str {
     }
 }
 
-fn browser_data<'a>(
+pub(crate) fn browser_data<'a>(
     server: &'a str,
     git_ref: Option<&'a str>,
     path: &'a str,
     listing: &'a Listing,
 ) -> BrowserData<'a> {
     BrowserData {
+        operation: Operation::List.name(),
         server,
         git_ref,
         path,
@@ -155,9 +285,12 @@ fn browser_data<'a>(
 
 /// # Side Effects
 ///
-/// Reads one bounded remote listing (JSON/machine mode) or drives the MB-02
-/// TUI (human mode). It never opens the repository database, object store,
-/// index or configuration; no network request carries credentials.
+/// Reads one bounded remote listing (JSON/machine mode, or human `--list`) or
+/// drives the MB-02 TUI (human mode without an operation flag). A
+/// non-interactive write flag sends exactly one remote write request. It never
+/// opens the repository database, object store, index or configuration. Read
+/// requests carry no credentials; a write request carries at most one Bearer
+/// token, taken from `--token-file` → `LIBRA_MEGA2_TOKEN` → `--token`.
 ///
 /// # Errors
 ///
@@ -177,22 +310,22 @@ async fn execute_browser(args: BrowserArgs, output: &OutputConfig) -> CliResult<
     let server = canonical_server(&url);
     let git_ref = args.git_ref.as_deref();
 
-    if output.is_json() {
-        // Machine mode is one GET and never writes: token flags are TUI-only.
-        if args.token_file.is_some() || args.token.is_some() {
-            return Err(CliError::fatal(
-                "mega2 browser: --token/--token-file are TUI-only and cannot be combined with --json/--machine",
-            )
-            .with_stable_code(StableErrorCode::CliInvalidArguments)
-            .with_hint(
-                "remove the token flags, or drop --json/--machine to create directories interactively",
-            ));
-        }
-        // One fetch, one documented payload; no TTY required.
-        let mut session = Mega2TreeSession::new(&server)?;
-        let listing = session.fetch(&path, git_ref).await?;
-        let data = browser_data(&server, git_ref, &path, &listing);
-        return emit_json_data("mega2 browser", &data, output);
+    // Non-interactive path: an operation flag, or a machine output mode
+    // without one (which lists PATH). The registry's class rules — including
+    // the refusal of token flags — run there, before the one request.
+    if let Some(operation) = args
+        .operation
+        .selected(&args.tag)?
+        .or_else(|| output.is_json().then_some(Operation::List))
+    {
+        let invocation = Invocation {
+            server: &server,
+            path: &path,
+            git_ref,
+            token_file: args.token_file.as_deref(),
+            token: args.token.as_deref(),
+        };
+        return noninteractive::execute(operation, &invocation, output).await;
     }
 
     if output.quiet {
@@ -266,5 +399,145 @@ mod tests {
         .expect("parse");
         assert_eq!(parsed.args.path, "/");
         assert_eq!(parsed.args.git_ref.as_deref(), Some("v1"));
+    }
+
+    // ---- plan-20261001 MN-02: list payload and rooted examples ----
+
+    #[test]
+    fn list_payload_carries_operation() {
+        let listing = Listing { entries: vec![] };
+        let data = browser_data("https://mega2.example.com", None, "/", &listing);
+        let json = serde_json::to_value(&data).expect("serialize");
+        assert_eq!(json["operation"], "list");
+    }
+
+    /// `mega2 browser` invocations in a help EXAMPLES block: the text before
+    /// the description column (the first run of two spaces) of each line.
+    fn help_examples(block: &str) -> Vec<String> {
+        block
+            .lines()
+            .map(|line| line.trim().split("  ").next().unwrap_or_default())
+            .filter(|command| command.starts_with("libra ") && command.contains(" mega2 browser"))
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// `mega2 browser` invocations inside the shell code fences of a Markdown
+    /// page. The bare-fence Synopsis is a grammar with placeholders, not an
+    /// example, and is skipped with every other non-shell fence.
+    fn markdown_examples(text: &str) -> Vec<String> {
+        let mut examples = Vec::new();
+        // `Some(is_shell)` while inside a fence.
+        let mut fence: Option<bool> = None;
+        for line in text.lines() {
+            let trimmed = line.trim();
+            if let Some(info) = trimmed.strip_prefix("```") {
+                fence = match fence {
+                    Some(_) => None,
+                    None => Some(matches!(info.trim(), "bash" | "sh" | "shell" | "console")),
+                };
+                continue;
+            }
+            let command = trimmed.strip_prefix("$ ").unwrap_or(trimmed);
+            if fence == Some(true)
+                && command.starts_with("libra ")
+                && command.contains(" mega2 browser")
+            {
+                examples.push(command.to_string());
+            }
+        }
+        examples
+    }
+
+    /// PATH of one `libra … mega2 browser …` argv, read through the real CLI.
+    fn example_path(argv: &[String]) -> Option<String> {
+        use clap::{CommandFactory, FromArgMatches};
+
+        let matches = crate::cli::Cli::command().try_get_matches_from(argv).ok()?;
+        let ("mega2", mega2) = matches.subcommand()? else {
+            return None;
+        };
+        let ("browser", browser) = mega2.subcommand()? else {
+            return None;
+        };
+        BrowserArgs::from_arg_matches(browser)
+            .ok()
+            .map(|args| args.path)
+    }
+
+    /// Examples that `Cli::try_parse_from` refuses or whose PATH
+    /// `normalize_path` refuses, each with the reason.
+    fn unrooted_examples(examples: &[String]) -> std::collections::BTreeSet<String> {
+        use clap::Parser;
+
+        let mut failures = std::collections::BTreeSet::new();
+        for example in examples {
+            let Some(argv) = shlex::split(example) else {
+                failures.insert(format!("{example} (unbalanced quoting)"));
+                continue;
+            };
+            if let Err(error) = crate::cli::Cli::try_parse_from(&argv) {
+                failures.insert(format!("{example} (does not parse: {})", error.kind()));
+                continue;
+            }
+            match example_path(&argv) {
+                Some(path) if normalize_path(&path).is_ok() => {}
+                Some(path) => {
+                    failures.insert(format!("{example} (PATH {path:?} is not rooted)"));
+                }
+                None => {
+                    failures.insert(format!("{example} (not a mega2 browser invocation)"));
+                }
+            }
+        }
+        failures
+    }
+
+    /// AC-5: every `mega2 browser` example in the two help banners parses and
+    /// names a rooted PATH.
+    #[test]
+    fn help_example_paths_are_rooted() {
+        let mut examples = help_examples(MEGA2_EXAMPLES);
+        examples.extend(help_examples(MEGA2_BROWSER_EXAMPLES));
+        assert!(!examples.is_empty(), "no examples found");
+        assert_eq!(
+            unrooted_examples(&examples),
+            std::collections::BTreeSet::new()
+        );
+    }
+
+    /// AC-6: the same for the EN and zh-CN command pages.
+    #[test]
+    fn doc_example_paths_are_rooted() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut examples = Vec::new();
+        for page in ["docs/commands/mega2.md", "docs/commands/zh-CN/mega2.md"] {
+            let text = std::fs::read_to_string(root.join(page))
+                .unwrap_or_else(|error| panic!("read {page}: {error}"));
+            examples.extend(markdown_examples(&text));
+        }
+        assert!(!examples.is_empty(), "no examples found");
+        assert_eq!(
+            unrooted_examples(&examples),
+            std::collections::BTreeSet::new()
+        );
+    }
+
+    /// AC-8: the same for the website page named by `LIBRA_SITE_MEGA2_DOC`.
+    /// Ignored by default and run explicitly (`--ignored`/`--include-ignored`);
+    /// an unset variable or unreadable page fails instead of skipping.
+    #[test]
+    #[ignore = "set LIBRA_SITE_MEGA2_DOC to the website mega2 page and run explicitly"]
+    fn site_example_paths_are_rooted() {
+        let page = std::env::var("LIBRA_SITE_MEGA2_DOC")
+            .expect("LIBRA_SITE_MEGA2_DOC must name the website mega2 page");
+        let text =
+            std::fs::read_to_string(&page).unwrap_or_else(|error| panic!("read {page}: {error}"));
+        let examples = markdown_examples(&text);
+        assert!(!examples.is_empty(), "no examples found in {page}");
+        assert_eq!(
+            unrooted_examples(&examples),
+            std::collections::BTreeSet::new()
+        );
     }
 }

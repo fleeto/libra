@@ -67,6 +67,64 @@ libra op log --command branch
 libra op log --command "op restore"
 ```
 
+### 只读查询形态不记录 operation
+
+部分仓库命令具有只检查状态、不修改 refs／配置的查询形态。这些形态归类为
+`ReadOnly`，**不会**追加 Operation v2 记录（因此 `op log --command <name>` 的
+`total` 不变）。
+
+不记录的 branch 查询形态：
+
+- 裸 `libra branch`（列表）
+- `libra branch -l` / `-r` / `-a`
+- `libra branch --show-current`
+- `libra branch -v` / `-vv`
+- 列表过滤：`--contains`、`--no-contains`、`--merged`、`--no-merged`、
+  `--points-at`、`--sort`、`--format`、`--column`、`--no-column`、`--ignore-case`
+- 幂等的 `libra branch -u <upstream>`：当**目标**分支已经跟踪该 upstream 时
+  （目标为给出的 `<branch>`，否则为当前 HEAD 分支）
+
+会写入的 branch 形态（创建、删除、重命名、复制、非幂等 `-u`、
+`--unset-upstream`、`--edit-description`、`branch reset` 等）仍各记录一笔
+operation。
+
+不记录的 tag 查询形态：
+
+- 裸 `libra tag` 与 `libra tag -l`
+- `-n`、`--contains`、`--no-contains`、`--points-at`、`--merged`、`--no-merged`、
+  `--sort`、`--column`、`--no-column`（含 `--no-column <pattern>`）
+- `libra tag --verify` / `-v`
+
+创建或删除标签仍各记录一笔 operation。
+
+不记录的 remote 查询形态：
+
+- `libra remote -v` 与 `libra remote show`（有无名称均可）
+- `libra remote show --no-query` 以及在线的 `libra remote show <name>`（在线形态会
+  联系远端，但不写入本地 refs 或配置）
+- `libra remote get-url`
+- `libra remote prune --dry-run`
+
+`add`、`remove`、`rename`、`set-url`、非 dry-run 的 `prune`、`set-head`、
+`set-branches` 与 `update` 仍各记录一笔 operation。
+
+不记录的 reflog 查询形态：
+
+- 裸 `libra reflog` 与 `libra reflog show`（含 `show HEAD`）
+- `libra reflog exists`
+- `libra reflog expire --dry-run`
+
+`reflog delete` 以及不带 `--dry-run` 的 `reflog expire` 仍各记录一笔 operation。
+
+不记录的 notes 查询形态：
+
+- 裸 `libra notes` 与 `libra notes list`
+- `libra notes show` 与 `libra notes get-ref`
+- `libra notes prune --dry-run`
+
+`add`、`append`、`edit`、`copy`、`remove`、`merge` 以及不带 `--dry-run` 的
+`prune` 仍各记录一笔 operation。
+
 ### `--verbose`
 
 将一个 operation 显示为包含 actor、status 和 timestamp 的多行块。

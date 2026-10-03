@@ -69,6 +69,33 @@ Unknown classifications fail closed; read-only commands and internal workers
 do not create operations. Agent shell and external VCS tools must provide
 verified before/after evidence before they can be admitted.
 
+### Branch read-only census (ADR-BRL-01 / #574)
+
+`operation_class_for_command` treats a `Commands::Branch` invocation as
+`MutationClass::ReadOnly` when `command::branch::branch_is_read_only_query`
+is true. That predicate shares `BranchMode` with `run_branch` (see
+`docs/development/commands/branch.md`): list / `--show-current` / list filters
+and an already-configured idempotent `-u` (target = `new_branch` when present,
+else HEAD) skip Operation v2 persistence. `command_scope` remains
+`Repository` — only the operation class changes (ADR-BRL-01).
+
+### Tag / remote / reflog / notes read-only census (ADR-BRL-01 / #574 BRL-02)
+
+The same rule covers four more commands. Each predicate lives in the command
+module and is the mode decision `operation_class_for_command` and dispatch
+share. `command_scope` stays `Repository`.
+
+| Command | Predicate | Read-only | Still a mutation |
+|---|---|---|---|
+| tag | `tag_is_read_only_query` | `verify`, or list mode (`tag_is_list_mode`, including `--no-column <pattern>`) | create, delete |
+| remote | `remote_is_read_only_query` | `-v` / `show` (live query and `--no-query`) / `get-url` / `prune --dry-run` | add, remove, rename, set-url, non-dry prune, set-head, set-branches, update |
+| reflog | `reflog_is_read_only_query` | bare command (`show HEAD`), `show`, `exists`, `expire --dry-run` | `delete`, `expire` without `--dry-run` |
+| notes | `notes_is_read_only_query` | bare command (`list`), `list`, `show`, `get-ref`, `prune --dry-run` | add, append, edit, copy, remove, merge, non-dry prune |
+
+`remote show <name>` without `--no-query` contacts the remote and does not
+write local refs or config (2026-10-01 audit), so it is `ReadOnly`. Uncertain
+forms stay `RepoMutation`.
+
 ### Request context and scope lease
 
 `run_with_operation` binds a fresh operation-local request slot around the whole
@@ -211,6 +238,28 @@ guarantee an atomic view under arbitrary continuous concurrent changes,
 including ABA between checks. Listing may read ignore rules, so it is not
 metadata-only. The original scan deadline does not guarantee a 30-second hard
 limit spanning all capture phases, config prewarming or arbitrary filesystem I/O.
+
+### Snapshot stat short-circuit (ADR-BRL-04 / #574 BRL-05)
+
+For tracked regular files, `WorkspaceSnapshotter` may reuse the index entry
+oid instead of submitting a worker `FileBlobHash` and instead of
+`read_stable_file` / `put_blob` during persist. Every condition below must
+hold; otherwise the path stays on the full hash path (fail-closed):
+
+- stage 0, regular-file mode (not symlink / gitlink), worktree type agrees
+- shared `utils::stat_diff` triple matches (ctime / mtime / size) and is not
+  racily clean versus the index-file mtime (`mtime < index_file_mtime`)
+- no content conversion: `core.autocrlf` is not enabled, and the path has no
+  `text` / `eol` / `filter` / `working-tree-encoding` / `ident` attribute and
+  is not LFS-tracked; if conversion cannot be proven absent, hash
+- the index oid's blob already exists in the local object store
+
+Equivalence is the same trust level as status's index stat-cache, not a
+byte-identity proof. Symlinks, gitlinks, untracked files, and any path that
+fails a condition always hash; a test seam
+(`with_stat_short_circuit(false)`) disables the optimization for A/B
+manifest checks. Non-short-circuit persist retains the
+`oid == expected_oid` safety net.
 
 Command outcome, snapshot completeness, and restore capability are separate.
 Failure may still leave operation/pre-snapshot records, but never authorizes

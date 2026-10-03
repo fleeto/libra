@@ -12,16 +12,23 @@ use libra::utils::path;
 use libra::{
     command::tag::{self, TagArgs},
     internal::{
-        branch::Branch, config::ConfigKv, db::get_db_conn_instance, model::reference,
+        branch::Branch,
+        config::ConfigKv,
+        db::{
+            get_db_conn_instance, get_db_conn_instance_for_path, reset_db_conn_instance_for_path,
+        },
+        model::reference,
         tag as internal_tag,
     },
     utils::{
         error::StableErrorCode,
         output::OutputConfig,
         test::{ChangeDirGuard, setup_with_new_libra_in},
+        util::DATABASE,
     },
 };
 use sea_orm::{ActiveModelTrait, Set};
+use serde_json::json;
 use serial_test::serial;
 use tempfile::tempdir;
 
@@ -915,6 +922,7 @@ async fn test_force_tag() {
     // Use CLI path for force update to exercise both CLI and internal logic.
     tag::execute(TagArgs {
         name: Some("v1.0".into()),
+        target: None,
         file: None,
         edit: false,
         annotate: false,
@@ -1047,6 +1055,7 @@ async fn test_delete_tag() {
 
     tag::execute(TagArgs {
         name: Some("to-delete".into()),
+        target: None,
         file: None,
         edit: false,
         annotate: false,
@@ -1125,6 +1134,7 @@ async fn test_annotation_lines_tag() {
     // Make second tag with single line annotation
     tag::execute(TagArgs {
         name: Some("v1.0.1".into()),
+        target: None,
         file: None,
         edit: false,
         annotate: false,
@@ -1190,6 +1200,7 @@ async fn test_annotation_lines_tag() {
     // Make third tag with multi line annotation
     tag::execute(TagArgs {
         name: Some("v1.0.3".into()),
+        target: None,
         file: None,
         edit: false,
         annotate: false,
@@ -2082,4 +2093,2014 @@ fn tag_column_uses_display_width_for_cjk() {
 
     // COLUMNS=20: the width-8 entry forces a single column (matching git).
     assert_eq!(tag_column_lines(p, "always", "20").len(), 4);
+}
+
+/// G55: a list-mode invocation is `ReadOnly`, but `validate_cli_args` still
+/// rejects it with LBR-CLI-002 before the operation boundary.
+#[test]
+fn tag_validate_cli_args_stable_code_unchanged_under_read_only() {
+    let repo = create_committed_repo_via_cli();
+    let cases = [
+        (
+            vec!["tag", "--column=bogus"],
+            "unsupported --column mode 'bogus'",
+        ),
+        (
+            vec!["tag", "-l", "-m", "msg"],
+            "-m/--message, -F/--file, -e/--edit, and -a/--annotate are only valid when creating a tag",
+        ),
+        (
+            vec!["tag", "--no-column", "-m", "msg", "v1"],
+            "-m/--message, -F/--file, -e/--edit, and -a/--annotate are only valid when creating a tag",
+        ),
+    ];
+
+    let before = tag_op_total(repo.path());
+    for (args, expected_message) in cases {
+        let output = run_libra_command(&args, repo.path());
+        let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+        assert_eq!(output.status.code(), Some(129), "args: {args:?}");
+        assert_eq!(report.error_code, "LBR-CLI-002", "args: {args:?}");
+        assert!(
+            stderr.contains(expected_message),
+            "expected stderr to contain '{expected_message}', got: {stderr}"
+        );
+    }
+    assert_eq!(
+        tag_op_total(repo.path()),
+        before,
+        "read-only validation failures must not record a tag operation"
+    );
+}
+
+fn tag_op_total(repo: &std::path::Path) -> u64 {
+    let output = run_libra_command(
+        &["--json", "op", "log", "-n", "5", "--command", "tag"],
+        repo,
+    );
+    assert_cli_success(&output, "op log --command tag");
+    parse_json_stdout(&output)["data"]["total"]
+        .as_u64()
+        .expect("tag op total")
+}
+
+// ---------------------------------------------------------------------------
+// issues/498 TT-05: tag list filters peel the whole tag chain and exclude
+// tree / blob endpoints (gate family G1–G26, G31–G34; G27–G29 live in
+// `src/utils/util.rs`, G30 is a zero-hit guard).
+// ---------------------------------------------------------------------------
+
+/// Object id that no fixture ever writes (F5′ points `outer` at it).
+const TAG_CHAIN_MISSING_OBJECT: &str = "0123456789abcdef0123456789abcdef01234567";
+const TAG_CHAIN_TAGGER: &str = "Test User <test@example.com> 1767225600 +0000";
+
+/// F5: `A` (`base`) ← `B` with `old` → A, `lw` → B and the annotated `ann` → B,
+/// plus refs injected straight into the tag table: `outer` → a tag object of
+/// `ann` (nested tag), `atree` / `ablob` → annotated tags of B's tree and of
+/// `file.txt`'s blob, `ttree` / `tblob` → that tree and blob directly. F5′
+/// (`broken_outer`) points `outer`'s tag object at a missing object instead.
+struct TagChainFixture {
+    repo: tempfile::TempDir,
+    a: String,
+    b: String,
+}
+
+fn write_tag_object(repo: &Path, body: &str) -> String {
+    let output =
+        run_libra_command_with_stdin(&["hash-object", "-t", "tag", "-w", "--stdin"], repo, body);
+    assert_cli_success(&output, "hash-object -t tag");
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+/// Insert `refs/tags/<name>` → `target` straight into the fixture database:
+/// the CLI never creates tags of trees, blobs or raw tag objects.
+fn inject_tag_ref(repo: &Path, name: &str, target: &str) {
+    let db_path = repo.join(".libra").join(DATABASE);
+    let runtime = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
+    runtime.block_on(async {
+        let db = get_db_conn_instance_for_path(&db_path)
+            .await
+            .expect("failed to open fixture database");
+        reference::ActiveModel {
+            name: Set(Some(ref_name(name))),
+            kind: Set(reference::ConfigKind::Tag),
+            commit: Set(Some(target.to_string())),
+            remote: Set(None),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .expect("failed to inject tag reference");
+        reset_db_conn_instance_for_path(&db_path).await;
+    });
+}
+
+fn tag_chain_fixture(broken_outer: bool) -> TagChainFixture {
+    let repo = create_committed_repo_via_cli();
+    let path = repo.path();
+    let a = tag_rev_parse(path, "HEAD");
+    assert_cli_success(&run_libra_command(&["tag", "old"], path), "tag old");
+    fs::write(path.join("file.txt"), "b\n").expect("failed to write file.txt");
+    assert_cli_success(
+        &run_libra_command(&["add", "file.txt"], path),
+        "add file.txt",
+    );
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "B", "--no-verify"], path),
+        "commit B",
+    );
+    let b = tag_rev_parse(path, "HEAD");
+    assert_cli_success(&run_libra_command(&["tag", "lw"], path), "tag lw");
+    assert_cli_success(
+        &run_libra_command(&["tag", "-m", "ann msg", "ann"], path),
+        "tag -m ann",
+    );
+    let ann = tag_rev_parse(path, "ann");
+    let tree = tag_rev_parse(path, "HEAD^{tree}");
+    let blob = tag_rev_parse(path, "HEAD:file.txt");
+    let (outer_object, outer_type) = if broken_outer {
+        (TAG_CHAIN_MISSING_OBJECT, "commit")
+    } else {
+        (ann.as_str(), "tag")
+    };
+    let outer = write_tag_object(
+        path,
+        &format!(
+            "object {outer_object}\ntype {outer_type}\ntag outer\ntagger {TAG_CHAIN_TAGGER}\n\nouter msg\n"
+        ),
+    );
+    let atree = write_tag_object(
+        path,
+        &format!("object {tree}\ntype tree\ntag atree\ntagger {TAG_CHAIN_TAGGER}\n\natree msg\n"),
+    );
+    let ablob = write_tag_object(
+        path,
+        &format!("object {blob}\ntype blob\ntag ablob\ntagger {TAG_CHAIN_TAGGER}\n\nablob msg\n"),
+    );
+    for (name, target) in [
+        ("outer", outer.as_str()),
+        ("atree", atree.as_str()),
+        ("ablob", ablob.as_str()),
+        ("ttree", tree.as_str()),
+        ("tblob", blob.as_str()),
+    ] {
+        inject_tag_ref(path, name, target);
+    }
+    TagChainFixture { repo, a, b }
+}
+
+/// Ordered `data.tags[].name` list of a `--json` / `--machine` tag envelope.
+fn tag_envelope_names(stdout: &[u8]) -> Vec<String> {
+    let text = String::from_utf8_lossy(stdout);
+    let envelope: Value = serde_json::from_str(text.trim()).expect("expected a JSON envelope");
+    envelope["data"]["tags"]
+        .as_array()
+        .expect("expected tags array")
+        .iter()
+        .map(|entry| {
+            entry["name"]
+                .as_str()
+                .expect("tag entry missing name")
+                .to_string()
+        })
+        .collect()
+}
+
+/// `(error_code, exit_code, message)` of a structured CLI error report.
+fn error_triple(stderr: &[u8]) -> (String, i32, String) {
+    let (_, report) = parse_cli_error_stderr(stderr);
+    (report.error_code, report.exit_code, report.message)
+}
+
+/// Human block of a CLI error, with the trailing newline the CLI prints.
+fn error_human(stderr: &[u8]) -> String {
+    let (human, _) = parse_cli_error_stderr(stderr);
+    format!("{human}\n")
+}
+
+fn run_tag_filter(
+    repo: &Path,
+    output_flag: Option<&str>,
+    filter: &str,
+    commit: &str,
+    env: &[(&str, &str)],
+) -> Output {
+    let mut args: Vec<&str> = output_flag.into_iter().collect();
+    args.extend(["tag", filter, commit]);
+    run_libra_command_with_env(&args, repo, env)
+}
+
+const NO_ENV: &[(&str, &str)] = &[];
+const CHAIN_READ_FAILPOINT: &[(&str, &str)] = &[("LIBRA_TEST_TAG_FAIL_CHAIN_READ", "ann")];
+
+// G1–G4: `tag --points-at <B>` on F5.
+#[test]
+fn tag_filter_points_at_chain_human() {
+    let fx = tag_chain_fixture(false);
+    let output = run_tag_filter(fx.repo.path(), None, "--points-at", &fx.b, NO_ENV);
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "ann\nlw\nouter\n");
+}
+
+#[test]
+fn tag_filter_points_at_chain_json() {
+    let fx = tag_chain_fixture(false);
+    let output = run_tag_filter(fx.repo.path(), Some("--json"), "--points-at", &fx.b, NO_ENV);
+    assert_eq!(
+        tag_envelope_names(&output.stdout),
+        vec!["ann", "lw", "outer"]
+    );
+}
+
+#[test]
+fn tag_filter_points_at_chain_machine() {
+    let fx = tag_chain_fixture(false);
+    let output = run_tag_filter(
+        fx.repo.path(),
+        Some("--machine"),
+        "--points-at",
+        &fx.b,
+        NO_ENV,
+    );
+    assert_eq!(
+        tag_envelope_names(&output.stdout),
+        vec!["ann", "lw", "outer"]
+    );
+}
+
+#[test]
+fn tag_filter_points_at_chain_exit_code() {
+    let fx = tag_chain_fixture(false);
+    let output = run_tag_filter(fx.repo.path(), None, "--points-at", &fx.b, NO_ENV);
+    assert_eq!(output.status.code(), Some(0));
+}
+
+// G5–G8: `tag --contains <B>` on F5.
+#[test]
+fn tag_filter_contains_chain_human() {
+    let fx = tag_chain_fixture(false);
+    let output = run_tag_filter(fx.repo.path(), None, "--contains", &fx.b, NO_ENV);
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "ann\nlw\nouter\n");
+}
+
+#[test]
+fn tag_filter_contains_chain_json() {
+    let fx = tag_chain_fixture(false);
+    let output = run_tag_filter(fx.repo.path(), Some("--json"), "--contains", &fx.b, NO_ENV);
+    assert_eq!(
+        tag_envelope_names(&output.stdout),
+        vec!["ann", "lw", "outer"]
+    );
+}
+
+#[test]
+fn tag_filter_contains_chain_machine() {
+    let fx = tag_chain_fixture(false);
+    let output = run_tag_filter(
+        fx.repo.path(),
+        Some("--machine"),
+        "--contains",
+        &fx.b,
+        NO_ENV,
+    );
+    assert_eq!(
+        tag_envelope_names(&output.stdout),
+        vec!["ann", "lw", "outer"]
+    );
+}
+
+#[test]
+fn tag_filter_contains_chain_exit_code() {
+    let fx = tag_chain_fixture(false);
+    let output = run_tag_filter(fx.repo.path(), None, "--contains", &fx.b, NO_ENV);
+    assert_eq!(output.status.code(), Some(0));
+}
+
+// G9–G12: `tag --no-contains <B>` on F5.
+#[test]
+fn tag_filter_no_contains_chain_human() {
+    let fx = tag_chain_fixture(false);
+    let output = run_tag_filter(fx.repo.path(), None, "--no-contains", &fx.b, NO_ENV);
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "old\n");
+}
+
+#[test]
+fn tag_filter_no_contains_chain_json() {
+    let fx = tag_chain_fixture(false);
+    let output = run_tag_filter(
+        fx.repo.path(),
+        Some("--json"),
+        "--no-contains",
+        &fx.b,
+        NO_ENV,
+    );
+    assert_eq!(tag_envelope_names(&output.stdout), vec!["old"]);
+}
+
+#[test]
+fn tag_filter_no_contains_chain_machine() {
+    let fx = tag_chain_fixture(false);
+    let output = run_tag_filter(
+        fx.repo.path(),
+        Some("--machine"),
+        "--no-contains",
+        &fx.b,
+        NO_ENV,
+    );
+    assert_eq!(tag_envelope_names(&output.stdout), vec!["old"]);
+}
+
+#[test]
+fn tag_filter_no_contains_chain_exit_code() {
+    let fx = tag_chain_fixture(false);
+    let output = run_tag_filter(fx.repo.path(), None, "--no-contains", &fx.b, NO_ENV);
+    assert_eq!(output.status.code(), Some(0));
+}
+
+// G13–G16: `tag --merged <B>` on F5.
+#[test]
+fn tag_filter_merged_chain_human() {
+    let fx = tag_chain_fixture(false);
+    let output = run_tag_filter(fx.repo.path(), None, "--merged", &fx.b, NO_ENV);
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "ann\nlw\nold\nouter\n"
+    );
+}
+
+#[test]
+fn tag_filter_merged_chain_json() {
+    let fx = tag_chain_fixture(false);
+    let output = run_tag_filter(fx.repo.path(), Some("--json"), "--merged", &fx.b, NO_ENV);
+    assert_eq!(
+        tag_envelope_names(&output.stdout),
+        vec!["ann", "lw", "old", "outer"]
+    );
+}
+
+#[test]
+fn tag_filter_merged_chain_machine() {
+    let fx = tag_chain_fixture(false);
+    let output = run_tag_filter(fx.repo.path(), Some("--machine"), "--merged", &fx.b, NO_ENV);
+    assert_eq!(
+        tag_envelope_names(&output.stdout),
+        vec!["ann", "lw", "old", "outer"]
+    );
+}
+
+#[test]
+fn tag_filter_merged_chain_exit_code() {
+    let fx = tag_chain_fixture(false);
+    let output = run_tag_filter(fx.repo.path(), None, "--merged", &fx.b, NO_ENV);
+    assert_eq!(output.status.code(), Some(0));
+}
+
+// G17–G20: `tag --no-merged <A>` on F5.
+#[test]
+fn tag_filter_no_merged_chain_human() {
+    let fx = tag_chain_fixture(false);
+    let output = run_tag_filter(fx.repo.path(), None, "--no-merged", &fx.a, NO_ENV);
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "ann\nlw\nouter\n");
+}
+
+#[test]
+fn tag_filter_no_merged_chain_json() {
+    let fx = tag_chain_fixture(false);
+    let output = run_tag_filter(fx.repo.path(), Some("--json"), "--no-merged", &fx.a, NO_ENV);
+    assert_eq!(
+        tag_envelope_names(&output.stdout),
+        vec!["ann", "lw", "outer"]
+    );
+}
+
+#[test]
+fn tag_filter_no_merged_chain_machine() {
+    let fx = tag_chain_fixture(false);
+    let output = run_tag_filter(
+        fx.repo.path(),
+        Some("--machine"),
+        "--no-merged",
+        &fx.a,
+        NO_ENV,
+    );
+    assert_eq!(
+        tag_envelope_names(&output.stdout),
+        vec!["ann", "lw", "outer"]
+    );
+}
+
+#[test]
+fn tag_filter_no_merged_chain_exit_code() {
+    let fx = tag_chain_fixture(false);
+    let output = run_tag_filter(fx.repo.path(), None, "--no-merged", &fx.a, NO_ENV);
+    assert_eq!(output.status.code(), Some(0));
+}
+
+// G21–G24: `tag --contains <B>` on F5′.
+#[test]
+fn tag_filter_broken_chain_human() {
+    let fx = tag_chain_fixture(true);
+    let output = run_tag_filter(fx.repo.path(), None, "--contains", &fx.b, NO_ENV);
+    assert_eq!(
+        error_human(&output.stderr),
+        "fatal: tag 'outer' cannot be peeled to a commit: its tag chain is broken\nError-Code: LBR-REPO-002\n\nHint: run 'libra fsck' to inspect missing objects.\n"
+    );
+}
+
+#[test]
+fn tag_filter_broken_chain_json() {
+    let fx = tag_chain_fixture(true);
+    let output = run_tag_filter(fx.repo.path(), Some("--json"), "--contains", &fx.b, NO_ENV);
+    assert_eq!(
+        error_triple(&output.stderr),
+        (
+            "LBR-REPO-002".to_string(),
+            128,
+            "tag 'outer' cannot be peeled to a commit: its tag chain is broken".to_string()
+        )
+    );
+}
+
+#[test]
+fn tag_filter_broken_chain_machine() {
+    let fx = tag_chain_fixture(true);
+    let output = run_tag_filter(
+        fx.repo.path(),
+        Some("--machine"),
+        "--contains",
+        &fx.b,
+        NO_ENV,
+    );
+    assert_eq!(
+        error_triple(&output.stderr),
+        (
+            "LBR-REPO-002".to_string(),
+            128,
+            "tag 'outer' cannot be peeled to a commit: its tag chain is broken".to_string()
+        )
+    );
+}
+
+#[test]
+fn tag_filter_broken_chain_exit_code() {
+    let fx = tag_chain_fixture(true);
+    let output = run_tag_filter(fx.repo.path(), None, "--contains", &fx.b, NO_ENV);
+    assert_eq!(output.status.code(), Some(128));
+}
+
+// G31–G34: `tag --contains <B>` on F5 with the chain-read failpoint.
+#[test]
+fn tag_filter_chain_read_failure_human() {
+    let fx = tag_chain_fixture(false);
+    let output = run_tag_filter(
+        fx.repo.path(),
+        None,
+        "--contains",
+        &fx.b,
+        CHAIN_READ_FAILPOINT,
+    );
+    assert_eq!(
+        error_human(&output.stderr),
+        "fatal: failed to read the tag chain of 'ann'\nError-Code: LBR-IO-001\n\nHint: check that the repository is readable and retry.\n"
+    );
+}
+
+#[test]
+fn tag_filter_chain_read_failure_json() {
+    let fx = tag_chain_fixture(false);
+    let output = run_tag_filter(
+        fx.repo.path(),
+        Some("--json"),
+        "--contains",
+        &fx.b,
+        CHAIN_READ_FAILPOINT,
+    );
+    assert_eq!(
+        error_triple(&output.stderr),
+        (
+            "LBR-IO-001".to_string(),
+            128,
+            "failed to read the tag chain of 'ann'".to_string()
+        )
+    );
+}
+
+#[test]
+fn tag_filter_chain_read_failure_machine() {
+    let fx = tag_chain_fixture(false);
+    let output = run_tag_filter(
+        fx.repo.path(),
+        Some("--machine"),
+        "--contains",
+        &fx.b,
+        CHAIN_READ_FAILPOINT,
+    );
+    assert_eq!(
+        error_triple(&output.stderr),
+        (
+            "LBR-IO-001".to_string(),
+            128,
+            "failed to read the tag chain of 'ann'".to_string()
+        )
+    );
+}
+
+#[test]
+fn tag_filter_chain_read_failure_exit_code() {
+    let fx = tag_chain_fixture(false);
+    let output = run_tag_filter(
+        fx.repo.path(),
+        None,
+        "--contains",
+        &fx.b,
+        CHAIN_READ_FAILPOINT,
+    );
+    assert_eq!(output.status.code(), Some(128));
+}
+
+// G25–G26: a filterless list does no deep peel and is unchanged.
+#[test]
+fn tag_list_without_filters_unchanged_with_chain_fixture() {
+    let fx = tag_chain_fixture(false);
+    let output = run_libra_command(&["tag", "-l"], fx.repo.path());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "ablob\nann\natree\nlw\nold\nouter\ntblob\nttree\n"
+    );
+}
+
+#[test]
+fn tag_list_without_filters_exit_code_with_chain_fixture() {
+    let fx = tag_chain_fixture(false);
+    let output = run_libra_command(&["tag", "-l"], fx.repo.path());
+    assert_eq!(output.status.code(), Some(0));
+}
+
+// ---------------------------------------------------------------------------
+// issues/498 TT-02: `libra tag <name> <commit>` tags an explicit target
+// (gate family G1–G108).
+// ---------------------------------------------------------------------------
+
+/// M0: a full-length object id that no F2 repository contains.
+const TAG_TARGET_MISSING_OBJECT: &str = TAG_CHAIN_MISSING_OBJECT;
+const TARGET_READ_FAILPOINT: &[(&str, &str)] = &[("LIBRA_TEST_TAG_FAIL_TARGET_READ", "1")];
+
+/// F2: `A` (`base`) ← `C` on `main` (`file.txt` = "c\n") and `A` ← `B` on
+/// `side` (`side.txt`); annotated `ann` → C; two blobs whose ids share the
+/// prefix `5978`; raw tag objects `X_tree` (→ C's tree) and `X_broken`
+/// (→ a missing commit).
+struct TagTargetFixture {
+    repo: tempfile::TempDir,
+    b: String,
+    c: String,
+    ann: String,
+    x_tree: String,
+    x_broken: String,
+}
+
+fn tag_target_fixture() -> TagTargetFixture {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    assert_cli_success(&run_libra_command(&["branch", "side"], p), "branch side");
+    assert_cli_success(&run_libra_command(&["switch", "side"], p), "switch side");
+    fs::write(p.join("side.txt"), "side\n").expect("failed to write side.txt");
+    assert_cli_success(&run_libra_command(&["add", "side.txt"], p), "add side.txt");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "B", "--no-verify"], p),
+        "commit B",
+    );
+    let b = tag_rev_parse(p, "HEAD");
+    assert_cli_success(&run_libra_command(&["switch", "main"], p), "switch main");
+    fs::write(p.join("file.txt"), "c\n").expect("failed to write file.txt");
+    assert_cli_success(&run_libra_command(&["add", "file.txt"], p), "add file.txt");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "C", "--no-verify"], p),
+        "commit C",
+    );
+    let c = tag_rev_parse(p, "HEAD");
+    assert_cli_success(
+        &run_libra_command(&["tag", "-m", "ann msg", "ann"], p),
+        "tag -m ann",
+    );
+    let ann = tag_rev_parse(p, "ann");
+    for body in ["ambiguous-16\n", "ambiguous-272\n"] {
+        let out = run_libra_command_with_stdin(&["hash-object", "-w", "--stdin"], p, body);
+        assert_cli_success(&out, "hash-object -w --stdin");
+    }
+    let tree = tag_rev_parse(p, "HEAD^{tree}");
+    let x_tree = write_tag_object(
+        p,
+        &format!("object {tree}\ntype tree\ntag xtree\ntagger {TAG_CHAIN_TAGGER}\n\nx\n"),
+    );
+    let x_broken = write_tag_object(
+        p,
+        &format!(
+            "object {TAG_TARGET_MISSING_OBJECT}\ntype commit\ntag xbroken\ntagger {TAG_CHAIN_TAGGER}\n\nx\n"
+        ),
+    );
+    TagTargetFixture {
+        repo,
+        b,
+        c,
+        ann,
+        x_tree,
+        x_broken,
+    }
+}
+
+/// GC-TT-02 tag write snapshot: every tag ref with its value, plus every tag
+/// object in the object store.
+fn tag_write_snapshot(repo: &Path) -> (String, Vec<String>) {
+    let refs = run_libra_command(&["show-ref", "--tags"], repo);
+    assert_cli_success(&refs, "show-ref --tags");
+    let objects = run_libra_command(&["cat-file", "--batch-check", "--batch-all-objects"], repo);
+    assert_cli_success(&objects, "cat-file --batch-check --batch-all-objects");
+    let tag_objects = String::from_utf8_lossy(&objects.stdout)
+        .lines()
+        .filter(|line| line.split(' ').nth(1) == Some("tag"))
+        .map(str::to_string)
+        .collect();
+    (
+        String::from_utf8_lossy(&refs.stdout).into_owned(),
+        tag_objects,
+    )
+}
+
+/// `object <id>\ntype <kind>`: the first two lines of `libra cat-file -p <name>`.
+fn tag_object_header(repo: &Path, name: &str) -> String {
+    let out = run_libra_command(&["cat-file", "-p", name], repo);
+    assert_cli_success(&out, "cat-file -p");
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .take(2)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The message of tag object `<name>`: everything after the header's blank line.
+fn tag_message_body(repo: &Path, name: &str) -> String {
+    let out = run_libra_command(&["cat-file", "-p", name], repo);
+    assert_cli_success(&out, "cat-file -p");
+    String::from_utf8_lossy(&out.stdout)
+        .split_once("\n\n")
+        .map(|(_, body)| body.to_string())
+        .unwrap_or_default()
+}
+
+/// `data` of a `--json` / `--machine` success envelope.
+fn envelope_data(stdout: &[u8]) -> Value {
+    let text = String::from_utf8_lossy(stdout);
+    let envelope: Value = serde_json::from_str(text.trim()).expect("expected a JSON envelope");
+    envelope["data"].clone()
+}
+
+/// An executable `#!/bin/sh` editor script in `dir` running `body`.
+#[cfg(unix)]
+fn write_editor_script(dir: &Path, name: &str, body: &str) -> String {
+    let path = dir.join(name);
+    fs::write(&path, format!("#!/bin/sh\n{body}")).expect("failed to write editor script");
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755))
+        .expect("failed to make the editor script executable");
+    path.to_string_lossy().into_owned()
+}
+
+// G1–G13: lightweight tags on an explicit target (#498 repro, DEFER-13 short-name
+// merge, a tag object as target, unborn HEAD, `-f`).
+#[test]
+fn tag_target_lightweight_branch_exit_code() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    let out = run_libra_command(&["tag", "vside", "side"], p);
+    assert_eq!(out.status.code(), Some(0));
+}
+
+#[test]
+fn tag_target_lightweight_branch_ref_value() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    let _out = run_libra_command(&["tag", "vside", "side"], p);
+    assert_eq!(tag_rev_parse(p, "vside"), fx.b);
+}
+
+#[test]
+fn tag_target_lightweight_create_human() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    let out = run_libra_command(&["tag", "vside", "side"], p);
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        format!("Created lightweight tag 'vside' at {}\n", &fx.b[..7])
+    );
+}
+
+#[test]
+fn tag_target_lightweight_create_json() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    let out = run_libra_command(&["--json", "tag", "vside", "side"], p);
+    assert_eq!(
+        envelope_data(&out.stdout),
+        json!({"action": "create", "name": "vside", "hash": fx.b, "tag_type": "lightweight", "message": null})
+    );
+}
+
+#[test]
+fn tag_target_lightweight_create_machine() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    let out = run_libra_command(&["--machine", "tag", "vside", "side"], p);
+    assert_eq!(
+        envelope_data(&out.stdout),
+        json!({"action": "create", "name": "vside", "hash": fx.b, "tag_type": "lightweight", "message": null})
+    );
+}
+
+#[test]
+fn tag_target_merge_short_name_exit_code() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    assert_cli_success(
+        &run_libra_command(&["tag", "vside", "side"], p),
+        "tag vside side",
+    );
+    let out = run_libra_command(&["merge", "vside"], p);
+    assert_eq!(out.status.code(), Some(0));
+}
+
+#[test]
+fn tag_target_merge_short_name_second_parent() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    assert_cli_success(
+        &run_libra_command(&["tag", "vside", "side"], p),
+        "tag vside side",
+    );
+    let _out = run_libra_command(&["merge", "vside"], p);
+    assert_eq!(tag_rev_parse(p, "HEAD^2"), fx.b);
+}
+
+#[test]
+fn tag_target_lightweight_tag_object_exit_code() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    let out = run_libra_command(&["tag", "vlw", "ann"], p);
+    assert_eq!(out.status.code(), Some(0));
+}
+
+#[test]
+fn tag_target_lightweight_tag_object_ref_value() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    let _out = run_libra_command(&["tag", "vlw", "ann"], p);
+    assert_eq!(tag_rev_parse(p, "vlw"), fx.ann);
+}
+
+#[test]
+fn tag_target_unborn_head_target_exit_code() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    assert_cli_success(
+        &run_libra_command(&["switch", "--orphan", "orphan"], p),
+        "switch --orphan orphan",
+    );
+    let out = run_libra_command(&["tag", "t", "main"], p);
+    assert_eq!(out.status.code(), Some(0));
+}
+
+#[test]
+fn tag_target_unborn_head_target_ref_value() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    assert_cli_success(
+        &run_libra_command(&["switch", "--orphan", "orphan"], p),
+        "switch --orphan orphan",
+    );
+    let _out = run_libra_command(&["tag", "t", "main"], p);
+    assert_eq!(tag_rev_parse(p, "t"), fx.c);
+}
+
+#[test]
+fn tag_target_force_lightweight_exit_code() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    assert_cli_success(&run_libra_command(&["tag", "t"], p), "tag t");
+    let out = run_libra_command(&["tag", "-f", "t", "side"], p);
+    assert_eq!(out.status.code(), Some(0));
+}
+
+#[test]
+fn tag_target_force_lightweight_ref_value() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    assert_cli_success(&run_libra_command(&["tag", "t"], p), "tag t");
+    let _out = run_libra_command(&["tag", "-f", "t", "side"], p);
+    assert_eq!(tag_rev_parse(p, "t"), fx.b);
+}
+
+// G14–G22: annotated tags on an explicit target (DEFER-13 full-ref merge, `-f`).
+#[test]
+fn tag_target_annotated_commit_exit_code() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    let out = run_libra_command(&["tag", "-m", "msg", "vann", "side"], p);
+    assert_eq!(out.status.code(), Some(0));
+}
+
+#[test]
+fn tag_target_annotated_commit_header() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    let _out = run_libra_command(&["tag", "-m", "msg", "vann", "side"], p);
+    assert_eq!(
+        tag_object_header(p, "vann"),
+        format!("object {}\ntype commit", fx.b)
+    );
+}
+
+#[test]
+fn tag_target_annotated_create_human() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    let out = run_libra_command(&["tag", "-m", "msg", "vann", "side"], p);
+    let vann = tag_rev_parse(p, "vann");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        format!("Created annotated tag 'vann' at {}\n", &vann[..7])
+    );
+}
+
+#[test]
+fn tag_target_annotated_create_json() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    let out = run_libra_command(&["--json", "tag", "-m", "msg", "vann", "side"], p);
+    let vann = tag_rev_parse(p, "vann");
+    assert_eq!(
+        envelope_data(&out.stdout),
+        json!({"action": "create", "name": "vann", "hash": vann, "tag_type": "annotated", "message": "msg"})
+    );
+}
+
+#[test]
+fn tag_target_annotated_create_machine() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    let out = run_libra_command(&["--machine", "tag", "-m", "msg", "vann", "side"], p);
+    let vann = tag_rev_parse(p, "vann");
+    assert_eq!(
+        envelope_data(&out.stdout),
+        json!({"action": "create", "name": "vann", "hash": vann, "tag_type": "annotated", "message": "msg"})
+    );
+}
+
+#[test]
+fn tag_target_merge_full_ref_exit_code() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    assert_cli_success(
+        &run_libra_command(&["tag", "-m", "msg", "vann", "side"], p),
+        "tag -m msg vann side",
+    );
+    let out = run_libra_command(&["merge", "refs/tags/vann"], p);
+    assert_eq!(out.status.code(), Some(0));
+}
+
+#[test]
+fn tag_target_merge_full_ref_second_parent() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    assert_cli_success(
+        &run_libra_command(&["tag", "-m", "msg", "vann", "side"], p),
+        "tag -m msg vann side",
+    );
+    let _out = run_libra_command(&["merge", "refs/tags/vann"], p);
+    assert_eq!(tag_rev_parse(p, "HEAD^2"), fx.b);
+}
+
+#[test]
+fn tag_target_force_annotated_exit_code() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    assert_cli_success(
+        &run_libra_command(&["tag", "-m", "msg", "vann", "side"], p),
+        "tag -m msg vann side",
+    );
+    let out = run_libra_command(&["tag", "-f", "-m", "again", "vann", "main"], p);
+    assert_eq!(out.status.code(), Some(0));
+}
+
+#[test]
+fn tag_target_force_annotated_header() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    assert_cli_success(
+        &run_libra_command(&["tag", "-m", "msg", "vann", "side"], p),
+        "tag -m msg vann side",
+    );
+    let _out = run_libra_command(&["tag", "-f", "-m", "again", "vann", "main"], p);
+    assert_eq!(
+        tag_object_header(p, "vann"),
+        format!("object {}\ntype commit", fx.c)
+    );
+}
+
+// G23–G38: nested tags, `t7004` points-at, signed and `-F` tags of a tag, editor
+// creation, and an invalid target that must not open the editor.
+/// G23 — `t5305-include-tag.sh:71`: a nested tag records the inner tag object.
+#[test]
+fn tag_target_nested_tag_exit_code() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    assert_cli_success(
+        &run_libra_command(&["tag", "-m", "inner", "inner", "HEAD"], p),
+        "tag -m inner inner HEAD",
+    );
+    let out = run_libra_command(&["tag", "-m", "outer", "outer", "inner"], p);
+    assert_eq!(out.status.code(), Some(0));
+}
+
+/// G24 — `t5305-include-tag.sh:71`: the outer tag keeps the deleted inner tag object.
+#[test]
+fn tag_target_nested_tag_create_hidden_inner_tag() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    assert_cli_success(
+        &run_libra_command(&["tag", "-m", "inner", "inner", "HEAD"], p),
+        "tag -m inner inner HEAD",
+    );
+    let inner = tag_rev_parse(p, "inner");
+    let _out = run_libra_command(&["tag", "-m", "outer", "outer", "inner"], p);
+    assert_cli_success(
+        &run_libra_command(&["tag", "-d", "inner"], p),
+        "tag -d inner",
+    );
+    assert_eq!(
+        tag_object_header(p, "outer"),
+        format!("object {inner}\ntype tag")
+    );
+}
+
+#[test]
+fn tag_target_annotated_of_lightweight_tag_exit_code() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    assert_cli_success(&run_libra_command(&["tag", "v4.0"], p), "tag v4.0");
+    let out = run_libra_command(
+        &["tag", "-m", "v4.0, annotated", "annotated-v4.0", "v4.0"],
+        p,
+    );
+    assert_eq!(out.status.code(), Some(0));
+}
+
+/// G26 — `t7004-tag.sh:1866`: `--points-at` finds an annotated tag of a lightweight-tagged commit.
+#[test]
+fn tag_target_points_at_finds_annotated_tag_of_commit() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    assert_cli_success(&run_libra_command(&["tag", "v4.0"], p), "tag v4.0");
+    let _out = run_libra_command(
+        &["tag", "-m", "v4.0, annotated", "annotated-v4.0", "v4.0"],
+        p,
+    );
+    let out = run_libra_command(&["tag", "-l", "--points-at", "v4.0", "annotated*"], p);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "annotated-v4.0\n");
+}
+
+#[test]
+fn tag_target_signed_tag_of_tag_exit_code() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    let out = run_libra_command(&["tag", "-s", "-m", "signed", "vst", "ann"], p);
+    assert_eq!(out.status.code(), Some(0));
+}
+
+#[test]
+fn tag_target_signed_tag_of_tag_header() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    let _out = run_libra_command(&["tag", "-s", "-m", "signed", "vst", "ann"], p);
+    assert_eq!(
+        tag_object_header(p, "vst"),
+        format!("object {}\ntype tag", fx.ann)
+    );
+}
+
+/// G29 — `t7004-tag.sh:1412` (vault variant): a signed tag of a tag verifies.
+#[test]
+fn tag_target_signed_tag_of_tag_verify_exit_code() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    assert_cli_success(
+        &run_libra_command(&["tag", "-s", "-m", "signed", "vst", "ann"], p),
+        "tag -s -m signed vst ann",
+    );
+    let out = run_libra_command(&["tag", "-v", "vst"], p);
+    assert_eq!(out.status.code(), Some(0));
+}
+
+#[test]
+fn tag_target_signed_tag_of_tag_verify_output() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    assert_cli_success(
+        &run_libra_command(&["tag", "-s", "-m", "signed", "vst", "ann"], p),
+        "tag -s -m signed vst ann",
+    );
+    let out = run_libra_command(&["tag", "-v", "vst"], p);
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "Good signature for tag 'vst'\n"
+    );
+}
+
+#[test]
+fn tag_target_file_message_exit_code() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    fs::write(p.join("msg.txt"), "file message\n").expect("failed to write msg.txt");
+    let out = run_libra_command(&["tag", "-F", "msg.txt", "vf", "ann"], p);
+    assert_eq!(out.status.code(), Some(0));
+}
+
+#[test]
+fn tag_target_file_message_tag_of_tag_header() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    fs::write(p.join("msg.txt"), "file message\n").expect("failed to write msg.txt");
+    let _out = run_libra_command(&["tag", "-F", "msg.txt", "vf", "ann"], p);
+    assert_eq!(
+        tag_object_header(p, "vf"),
+        format!("object {}\ntype tag", fx.ann)
+    );
+}
+
+#[test]
+fn tag_target_file_message_body() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    fs::write(p.join("msg.txt"), "file message\n").expect("failed to write msg.txt");
+    let _out = run_libra_command(&["tag", "-F", "msg.txt", "vf", "ann"], p);
+    assert_eq!(tag_message_body(p, "vf"), "file message\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn tag_target_annotate_editor_exit_code() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    let editor = write_editor_script(
+        p,
+        "write-message.sh",
+        "printf 'editor message\\n' > \"$1\"\n",
+    );
+    let out = run_libra_command_with_env(
+        &["tag", "-a", "va", "side"],
+        p,
+        &[("GIT_EDITOR", editor.as_str())],
+    );
+    assert_eq!(out.status.code(), Some(0));
+}
+
+#[cfg(unix)]
+#[test]
+fn tag_target_annotate_editor_records_target() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    let editor = write_editor_script(
+        p,
+        "write-message.sh",
+        "printf 'editor message\\n' > \"$1\"\n",
+    );
+    let _out = run_libra_command_with_env(
+        &["tag", "-a", "va", "side"],
+        p,
+        &[("GIT_EDITOR", editor.as_str())],
+    );
+    assert_eq!(
+        tag_object_header(p, "va"),
+        format!("object {}\ntype commit", fx.b)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn tag_target_invalid_target_editor_exit_code() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    let marker = p.join("editor-invoked");
+    let editor = write_editor_script(
+        p,
+        "mark-invoked.sh",
+        &format!("touch '{}'\n", marker.display()),
+    );
+    let out = run_libra_command_with_env(
+        &["tag", "-e", "vbad", TAG_TARGET_MISSING_OBJECT],
+        p,
+        &[("GIT_EDITOR", editor.as_str())],
+    );
+    assert_eq!(out.status.code(), Some(129));
+}
+
+#[cfg(unix)]
+#[test]
+fn tag_target_invalid_target_skips_editor() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    let marker = p.join("editor-invoked");
+    let editor = write_editor_script(
+        p,
+        "mark-invoked.sh",
+        &format!("touch '{}'\n", marker.display()),
+    );
+    let _out = run_libra_command_with_env(
+        &["tag", "-e", "vbad", TAG_TARGET_MISSING_OBJECT],
+        p,
+        &[("GIT_EDITOR", editor.as_str())],
+    );
+    assert!(!marker.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn tag_target_invalid_target_editor_no_writes() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    let marker = p.join("editor-invoked");
+    let editor = write_editor_script(
+        p,
+        "mark-invoked.sh",
+        &format!("touch '{}'\n", marker.display()),
+    );
+    let before = tag_write_snapshot(p);
+    let _out = run_libra_command_with_env(
+        &["tag", "-e", "vbad", TAG_TARGET_MISSING_OBJECT],
+        p,
+        &[("GIT_EDITOR", editor.as_str())],
+    );
+    assert_eq!(tag_write_snapshot(p), before);
+}
+
+// G39–G53: E1 — unknown name, ambiguous prefix, missing full-length id.
+#[test]
+fn tag_target_unknown_name_e1_human() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    let out = run_libra_command(&["tag", "t", "nope"], p);
+    assert_eq!(
+        error_human(&out.stderr),
+        format!(
+            "fatal: Failed to resolve '{x}' as a valid ref.\nError-Code: LBR-CLI-003\n\nHint: use 'libra log --oneline' to see available commits.\n",
+            x = "nope"
+        )
+    );
+}
+
+#[test]
+fn tag_target_unknown_name_e1_json() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    let out = run_libra_command(&["--json", "tag", "t", "nope"], p);
+    assert_eq!(
+        error_triple(&out.stderr),
+        (
+            "LBR-CLI-003".to_string(),
+            129,
+            format!("Failed to resolve '{x}' as a valid ref.", x = "nope")
+        )
+    );
+}
+
+#[test]
+fn tag_target_unknown_name_e1_machine() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    let out = run_libra_command(&["--machine", "tag", "t", "nope"], p);
+    assert_eq!(
+        error_triple(&out.stderr),
+        (
+            "LBR-CLI-003".to_string(),
+            129,
+            format!("Failed to resolve '{x}' as a valid ref.", x = "nope")
+        )
+    );
+}
+
+#[test]
+fn tag_target_unknown_name_e1_exit_code() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    let out = run_libra_command(&["tag", "t", "nope"], p);
+    assert_eq!(out.status.code(), Some(129));
+}
+
+#[test]
+fn tag_target_unknown_name_e1_no_writes() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    let before = tag_write_snapshot(p);
+    let _out = run_libra_command(&["tag", "t", "nope"], p);
+    assert_eq!(tag_write_snapshot(p), before);
+}
+
+#[test]
+fn tag_target_ambiguous_prefix_e1_human() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    let out = run_libra_command(&["tag", "t", "5978"], p);
+    assert_eq!(
+        error_human(&out.stderr),
+        format!(
+            "fatal: Failed to resolve '{x}' as a valid ref.\nError-Code: LBR-CLI-003\n\nHint: use 'libra log --oneline' to see available commits.\n",
+            x = "5978"
+        )
+    );
+}
+
+#[test]
+fn tag_target_ambiguous_prefix_e1_json() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    let out = run_libra_command(&["--json", "tag", "t", "5978"], p);
+    assert_eq!(
+        error_triple(&out.stderr),
+        (
+            "LBR-CLI-003".to_string(),
+            129,
+            format!("Failed to resolve '{x}' as a valid ref.", x = "5978")
+        )
+    );
+}
+
+#[test]
+fn tag_target_ambiguous_prefix_e1_machine() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    let out = run_libra_command(&["--machine", "tag", "t", "5978"], p);
+    assert_eq!(
+        error_triple(&out.stderr),
+        (
+            "LBR-CLI-003".to_string(),
+            129,
+            format!("Failed to resolve '{x}' as a valid ref.", x = "5978")
+        )
+    );
+}
+
+#[test]
+fn tag_target_ambiguous_prefix_e1_exit_code() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    let out = run_libra_command(&["tag", "t", "5978"], p);
+    assert_eq!(out.status.code(), Some(129));
+}
+
+#[test]
+fn tag_target_ambiguous_prefix_e1_no_writes() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    let before = tag_write_snapshot(p);
+    let _out = run_libra_command(&["tag", "t", "5978"], p);
+    assert_eq!(tag_write_snapshot(p), before);
+}
+
+#[test]
+fn tag_target_missing_object_e1_human() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    let out = run_libra_command(&["tag", "t", TAG_TARGET_MISSING_OBJECT], p);
+    assert_eq!(
+        error_human(&out.stderr),
+        format!(
+            "fatal: Failed to resolve '{x}' as a valid ref.\nError-Code: LBR-CLI-003\n\nHint: use 'libra log --oneline' to see available commits.\n",
+            x = TAG_TARGET_MISSING_OBJECT
+        )
+    );
+}
+
+#[test]
+fn tag_target_missing_object_e1_json() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    let out = run_libra_command(&["--json", "tag", "t", TAG_TARGET_MISSING_OBJECT], p);
+    assert_eq!(
+        error_triple(&out.stderr),
+        (
+            "LBR-CLI-003".to_string(),
+            129,
+            format!(
+                "Failed to resolve '{x}' as a valid ref.",
+                x = TAG_TARGET_MISSING_OBJECT
+            )
+        )
+    );
+}
+
+#[test]
+fn tag_target_missing_object_e1_machine() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    let out = run_libra_command(&["--machine", "tag", "t", TAG_TARGET_MISSING_OBJECT], p);
+    assert_eq!(
+        error_triple(&out.stderr),
+        (
+            "LBR-CLI-003".to_string(),
+            129,
+            format!(
+                "Failed to resolve '{x}' as a valid ref.",
+                x = TAG_TARGET_MISSING_OBJECT
+            )
+        )
+    );
+}
+
+#[test]
+fn tag_target_missing_object_e1_exit_code() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    let out = run_libra_command(&["tag", "t", TAG_TARGET_MISSING_OBJECT], p);
+    assert_eq!(out.status.code(), Some(129));
+}
+
+#[test]
+fn tag_target_missing_object_e1_no_writes() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    let before = tag_write_snapshot(p);
+    let _out = run_libra_command(&["tag", "t", TAG_TARGET_MISSING_OBJECT], p);
+    assert_eq!(tag_write_snapshot(p), before);
+}
+
+// G54–G68: E2 — blob, tree, and a tag chain ending at a tree.
+#[test]
+fn tag_target_blob_e2_human() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    let out = run_libra_command(&["tag", "t", "HEAD:file.txt"], p);
+    assert_eq!(
+        error_human(&out.stderr),
+        format!(
+            "fatal: cannot tag '{x}': it resolves to a blob object, not a commit\nError-Code: LBR-CLI-003\n\nHint: only a commit, or a tag that peels to a commit, can be tagged\n",
+            x = "HEAD:file.txt"
+        )
+    );
+}
+
+#[test]
+fn tag_target_blob_e2_json() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    let out = run_libra_command(&["--json", "tag", "t", "HEAD:file.txt"], p);
+    assert_eq!(
+        error_triple(&out.stderr),
+        (
+            "LBR-CLI-003".to_string(),
+            129,
+            format!(
+                "cannot tag '{x}': it resolves to a blob object, not a commit",
+                x = "HEAD:file.txt"
+            )
+        )
+    );
+}
+
+#[test]
+fn tag_target_blob_e2_machine() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    let out = run_libra_command(&["--machine", "tag", "t", "HEAD:file.txt"], p);
+    assert_eq!(
+        error_triple(&out.stderr),
+        (
+            "LBR-CLI-003".to_string(),
+            129,
+            format!(
+                "cannot tag '{x}': it resolves to a blob object, not a commit",
+                x = "HEAD:file.txt"
+            )
+        )
+    );
+}
+
+#[test]
+fn tag_target_blob_e2_exit_code() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    let out = run_libra_command(&["tag", "t", "HEAD:file.txt"], p);
+    assert_eq!(out.status.code(), Some(129));
+}
+
+#[test]
+fn tag_target_blob_e2_no_writes() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    let before = tag_write_snapshot(p);
+    let _out = run_libra_command(&["tag", "t", "HEAD:file.txt"], p);
+    assert_eq!(tag_write_snapshot(p), before);
+}
+
+#[test]
+fn tag_target_tree_e2_human() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    let out = run_libra_command(&["tag", "t", "HEAD^{tree}"], p);
+    assert_eq!(
+        error_human(&out.stderr),
+        format!(
+            "fatal: cannot tag '{x}': it resolves to a tree object, not a commit\nError-Code: LBR-CLI-003\n\nHint: only a commit, or a tag that peels to a commit, can be tagged\n",
+            x = "HEAD^{tree}"
+        )
+    );
+}
+
+#[test]
+fn tag_target_tree_e2_json() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    let out = run_libra_command(&["--json", "tag", "t", "HEAD^{tree}"], p);
+    assert_eq!(
+        error_triple(&out.stderr),
+        (
+            "LBR-CLI-003".to_string(),
+            129,
+            format!(
+                "cannot tag '{x}': it resolves to a tree object, not a commit",
+                x = "HEAD^{tree}"
+            )
+        )
+    );
+}
+
+#[test]
+fn tag_target_tree_e2_machine() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    let out = run_libra_command(&["--machine", "tag", "t", "HEAD^{tree}"], p);
+    assert_eq!(
+        error_triple(&out.stderr),
+        (
+            "LBR-CLI-003".to_string(),
+            129,
+            format!(
+                "cannot tag '{x}': it resolves to a tree object, not a commit",
+                x = "HEAD^{tree}"
+            )
+        )
+    );
+}
+
+#[test]
+fn tag_target_tree_e2_exit_code() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    let out = run_libra_command(&["tag", "t", "HEAD^{tree}"], p);
+    assert_eq!(out.status.code(), Some(129));
+}
+
+#[test]
+fn tag_target_tree_e2_no_writes() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    let before = tag_write_snapshot(p);
+    let _out = run_libra_command(&["tag", "t", "HEAD^{tree}"], p);
+    assert_eq!(tag_write_snapshot(p), before);
+}
+
+#[test]
+fn tag_target_tag_of_tree_e2_human() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    let out = run_libra_command(&["tag", "t", fx.x_tree.as_str()], p);
+    assert_eq!(
+        error_human(&out.stderr),
+        format!(
+            "fatal: cannot tag '{x}': it resolves to a tree object, not a commit\nError-Code: LBR-CLI-003\n\nHint: only a commit, or a tag that peels to a commit, can be tagged\n",
+            x = fx.x_tree
+        )
+    );
+}
+
+#[test]
+fn tag_target_tag_of_tree_e2_json() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    let out = run_libra_command(&["--json", "tag", "t", fx.x_tree.as_str()], p);
+    assert_eq!(
+        error_triple(&out.stderr),
+        (
+            "LBR-CLI-003".to_string(),
+            129,
+            format!(
+                "cannot tag '{x}': it resolves to a tree object, not a commit",
+                x = fx.x_tree
+            )
+        )
+    );
+}
+
+#[test]
+fn tag_target_tag_of_tree_e2_machine() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    let out = run_libra_command(&["--machine", "tag", "t", fx.x_tree.as_str()], p);
+    assert_eq!(
+        error_triple(&out.stderr),
+        (
+            "LBR-CLI-003".to_string(),
+            129,
+            format!(
+                "cannot tag '{x}': it resolves to a tree object, not a commit",
+                x = fx.x_tree
+            )
+        )
+    );
+}
+
+#[test]
+fn tag_target_tag_of_tree_e2_exit_code() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    let out = run_libra_command(&["tag", "t", fx.x_tree.as_str()], p);
+    assert_eq!(out.status.code(), Some(129));
+}
+
+#[test]
+fn tag_target_tag_of_tree_e2_no_writes() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    let before = tag_write_snapshot(p);
+    let _out = run_libra_command(&["tag", "t", fx.x_tree.as_str()], p);
+    assert_eq!(tag_write_snapshot(p), before);
+}
+
+// G69–G84: E3 — `<commit>` outside create mode, and a third positional.
+#[test]
+fn tag_target_delete_mode_extra_positional_e3_human() {
+    let dir = tempdir().expect("failed to create a non-repository directory");
+    let p = dir.path();
+    let out = run_libra_command(&["tag", "-d", "a", "b"], p);
+    assert!(error_human(&out.stderr).starts_with("error: the <commit> argument 'b' is only valid when creating a tag\nError-Code: LBR-CLI-002\n"));
+}
+
+#[test]
+fn tag_target_delete_mode_extra_positional_e3_json() {
+    let dir = tempdir().expect("failed to create a non-repository directory");
+    let p = dir.path();
+    let out = run_libra_command(&["--json", "tag", "-d", "a", "b"], p);
+    assert_eq!(
+        error_triple(&out.stderr),
+        (
+            "LBR-CLI-002".to_string(),
+            129,
+            "the <commit> argument 'b' is only valid when creating a tag".to_string()
+        )
+    );
+}
+
+#[test]
+fn tag_target_delete_mode_extra_positional_e3_machine() {
+    let dir = tempdir().expect("failed to create a non-repository directory");
+    let p = dir.path();
+    let out = run_libra_command(&["--machine", "tag", "-d", "a", "b"], p);
+    assert_eq!(
+        error_triple(&out.stderr),
+        (
+            "LBR-CLI-002".to_string(),
+            129,
+            "the <commit> argument 'b' is only valid when creating a tag".to_string()
+        )
+    );
+}
+
+#[test]
+fn tag_target_delete_mode_extra_positional_e3_exit_code() {
+    let dir = tempdir().expect("failed to create a non-repository directory");
+    let p = dir.path();
+    let out = run_libra_command(&["tag", "-d", "a", "b"], p);
+    assert_eq!(out.status.code(), Some(129));
+}
+
+#[test]
+fn tag_target_list_mode_extra_positional_e3_human() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    let out = run_libra_command(&["tag", "-l", "a", "b"], p);
+    assert!(error_human(&out.stderr).starts_with("error: the <commit> argument 'b' is only valid when creating a tag\nError-Code: LBR-CLI-002\n"));
+}
+
+#[test]
+fn tag_target_list_mode_extra_positional_e3_json() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    let out = run_libra_command(&["--json", "tag", "-l", "a", "b"], p);
+    assert_eq!(
+        error_triple(&out.stderr),
+        (
+            "LBR-CLI-002".to_string(),
+            129,
+            "the <commit> argument 'b' is only valid when creating a tag".to_string()
+        )
+    );
+}
+
+#[test]
+fn tag_target_list_mode_extra_positional_e3_machine() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    let out = run_libra_command(&["--machine", "tag", "-l", "a", "b"], p);
+    assert_eq!(
+        error_triple(&out.stderr),
+        (
+            "LBR-CLI-002".to_string(),
+            129,
+            "the <commit> argument 'b' is only valid when creating a tag".to_string()
+        )
+    );
+}
+
+#[test]
+fn tag_target_list_mode_extra_positional_e3_exit_code() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    let out = run_libra_command(&["tag", "-l", "a", "b"], p);
+    assert_eq!(out.status.code(), Some(129));
+}
+
+#[test]
+fn tag_target_verify_mode_extra_positional_e3_human() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    let out = run_libra_command(&["tag", "-v", "a", "b"], p);
+    assert!(error_human(&out.stderr).starts_with("error: the <commit> argument 'b' is only valid when creating a tag\nError-Code: LBR-CLI-002\n"));
+}
+
+#[test]
+fn tag_target_verify_mode_extra_positional_e3_json() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    let out = run_libra_command(&["--json", "tag", "-v", "a", "b"], p);
+    assert_eq!(
+        error_triple(&out.stderr),
+        (
+            "LBR-CLI-002".to_string(),
+            129,
+            "the <commit> argument 'b' is only valid when creating a tag".to_string()
+        )
+    );
+}
+
+#[test]
+fn tag_target_verify_mode_extra_positional_e3_machine() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    let out = run_libra_command(&["--machine", "tag", "-v", "a", "b"], p);
+    assert_eq!(
+        error_triple(&out.stderr),
+        (
+            "LBR-CLI-002".to_string(),
+            129,
+            "the <commit> argument 'b' is only valid when creating a tag".to_string()
+        )
+    );
+}
+
+#[test]
+fn tag_target_verify_mode_extra_positional_e3_exit_code() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    let out = run_libra_command(&["tag", "-v", "a", "b"], p);
+    assert_eq!(out.status.code(), Some(129));
+}
+
+#[test]
+fn tag_target_third_positional_e3_human() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    let out = run_libra_command(&["tag", "a", "b", "c"], p);
+    assert!(
+        error_human(&out.stderr)
+            .starts_with("error: unexpected argument 'c' found\nError-Code: LBR-CLI-002\n")
+    );
+}
+
+#[test]
+fn tag_target_third_positional_e3_json() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    let out = run_libra_command(&["--json", "tag", "a", "b", "c"], p);
+    assert_eq!(
+        error_triple(&out.stderr),
+        (
+            "LBR-CLI-002".to_string(),
+            129,
+            "unexpected argument 'c' found".to_string()
+        )
+    );
+}
+
+#[test]
+fn tag_target_third_positional_e3_machine() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    let out = run_libra_command(&["--machine", "tag", "a", "b", "c"], p);
+    assert_eq!(
+        error_triple(&out.stderr),
+        (
+            "LBR-CLI-002".to_string(),
+            129,
+            "unexpected argument 'c' found".to_string()
+        )
+    );
+}
+
+#[test]
+fn tag_target_third_positional_e3_exit_code() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    let out = run_libra_command(&["tag", "a", "b", "c"], p);
+    assert_eq!(out.status.code(), Some(129));
+}
+
+// G85–G89: E4 — `<commit>` through an unborn HEAD.
+#[test]
+fn tag_target_unborn_head_e4_human() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    assert_cli_success(
+        &run_libra_command(&["switch", "--orphan", "orphan"], p),
+        "switch --orphan orphan",
+    );
+    let out = run_libra_command(&["tag", "t", "HEAD"], p);
+    assert_eq!(error_human(&out.stderr), "fatal: Cannot create tag: HEAD does not point to a commit\nError-Code: LBR-REPO-003\n\nHint: create a commit first before tagging HEAD.\n".to_string());
+}
+
+#[test]
+fn tag_target_unborn_head_e4_json() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    assert_cli_success(
+        &run_libra_command(&["switch", "--orphan", "orphan"], p),
+        "switch --orphan orphan",
+    );
+    let out = run_libra_command(&["--json", "tag", "t", "HEAD"], p);
+    assert_eq!(
+        error_triple(&out.stderr),
+        (
+            "LBR-REPO-003".to_string(),
+            128,
+            "Cannot create tag: HEAD does not point to a commit".to_string()
+        )
+    );
+}
+
+#[test]
+fn tag_target_unborn_head_e4_machine() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    assert_cli_success(
+        &run_libra_command(&["switch", "--orphan", "orphan"], p),
+        "switch --orphan orphan",
+    );
+    let out = run_libra_command(&["--machine", "tag", "t", "HEAD"], p);
+    assert_eq!(
+        error_triple(&out.stderr),
+        (
+            "LBR-REPO-003".to_string(),
+            128,
+            "Cannot create tag: HEAD does not point to a commit".to_string()
+        )
+    );
+}
+
+#[test]
+fn tag_target_unborn_head_e4_exit_code() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    assert_cli_success(
+        &run_libra_command(&["switch", "--orphan", "orphan"], p),
+        "switch --orphan orphan",
+    );
+    let out = run_libra_command(&["tag", "t", "HEAD"], p);
+    assert_eq!(out.status.code(), Some(128));
+}
+
+#[test]
+fn tag_target_unborn_head_e4_no_writes() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    assert_cli_success(
+        &run_libra_command(&["switch", "--orphan", "orphan"], p),
+        "switch --orphan orphan",
+    );
+    let before = tag_write_snapshot(p);
+    let _out = run_libra_command(&["tag", "t", "HEAD"], p);
+    assert_eq!(tag_write_snapshot(p), before);
+}
+
+// G90–G98: E5 — corrupt tag chain, and a read failure via the failpoint.
+#[test]
+fn tag_target_corrupt_chain_e5_human() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    let out = run_libra_command(&["tag", "t", fx.x_broken.as_str()], p);
+    assert_eq!(
+        error_human(&out.stderr),
+        format!(
+            "fatal: failed to resolve '{x}': its object graph is corrupt or incomplete\nError-Code: LBR-REPO-002\n\nHint: run 'libra fsck' to inspect missing objects.\n",
+            x = fx.x_broken
+        )
+    );
+}
+
+#[test]
+fn tag_target_corrupt_chain_e5_json() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    let out = run_libra_command(&["--json", "tag", "t", fx.x_broken.as_str()], p);
+    assert_eq!(
+        error_triple(&out.stderr),
+        (
+            "LBR-REPO-002".to_string(),
+            128,
+            format!(
+                "failed to resolve '{x}': its object graph is corrupt or incomplete",
+                x = fx.x_broken
+            )
+        )
+    );
+}
+
+#[test]
+fn tag_target_corrupt_chain_e5_machine() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    let out = run_libra_command(&["--machine", "tag", "t", fx.x_broken.as_str()], p);
+    assert_eq!(
+        error_triple(&out.stderr),
+        (
+            "LBR-REPO-002".to_string(),
+            128,
+            format!(
+                "failed to resolve '{x}': its object graph is corrupt or incomplete",
+                x = fx.x_broken
+            )
+        )
+    );
+}
+
+#[test]
+fn tag_target_corrupt_chain_e5_exit_code() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    let out = run_libra_command(&["tag", "t", fx.x_broken.as_str()], p);
+    assert_eq!(out.status.code(), Some(128));
+}
+
+#[test]
+fn tag_target_corrupt_chain_e5_no_writes() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    let before = tag_write_snapshot(p);
+    let _out = run_libra_command(&["tag", "t", fx.x_broken.as_str()], p);
+    assert_eq!(tag_write_snapshot(p), before);
+}
+
+#[test]
+fn tag_target_read_failure_e5_human() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    let out = run_libra_command_with_env(&["tag", "t", "side"], p, TARGET_READ_FAILPOINT);
+    assert_eq!(error_human(&out.stderr), "fatal: failed to resolve 'side': the object store could not be read\nError-Code: LBR-IO-001\n\nHint: check that the repository is readable and retry.\n".to_string());
+}
+
+#[test]
+fn tag_target_read_failure_e5_json() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    let out = run_libra_command_with_env(&["--json", "tag", "t", "side"], p, TARGET_READ_FAILPOINT);
+    assert_eq!(
+        error_triple(&out.stderr),
+        (
+            "LBR-IO-001".to_string(),
+            128,
+            "failed to resolve 'side': the object store could not be read".to_string()
+        )
+    );
+}
+
+#[test]
+fn tag_target_read_failure_e5_machine() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    let out =
+        run_libra_command_with_env(&["--machine", "tag", "t", "side"], p, TARGET_READ_FAILPOINT);
+    assert_eq!(
+        error_triple(&out.stderr),
+        (
+            "LBR-IO-001".to_string(),
+            128,
+            "failed to resolve 'side': the object store could not be read".to_string()
+        )
+    );
+}
+
+#[test]
+fn tag_target_read_failure_e5_exit_code() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    let out = run_libra_command_with_env(&["tag", "t", "side"], p, TARGET_READ_FAILPOINT);
+    assert_eq!(out.status.code(), Some(128));
+}
+
+// G99–G108: ordering and zero-write guarantees (`-f` / `-F` with an invalid
+// target, read failure, and E3 misuse inside a repository).
+#[test]
+fn tag_target_force_invalid_target_exit_code() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    assert_cli_success(&run_libra_command(&["tag", "t"], p), "tag t");
+    let out = run_libra_command(&["tag", "-f", "t", "nope"], p);
+    assert_eq!(out.status.code(), Some(129));
+}
+
+#[test]
+fn tag_target_force_invalid_target_no_writes() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    assert_cli_success(&run_libra_command(&["tag", "t"], p), "tag t");
+    let before = tag_write_snapshot(p);
+    let _out = run_libra_command(&["tag", "-f", "t", "nope"], p);
+    assert_eq!(tag_write_snapshot(p), before);
+}
+
+#[test]
+fn tag_target_file_message_invalid_target_exit_code() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    let out = run_libra_command(&["tag", "-F", "missing.txt", "t", "nope"], p);
+    assert_eq!(out.status.code(), Some(129));
+}
+
+#[test]
+fn tag_target_file_message_invalid_target_human() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    let out = run_libra_command(&["tag", "-F", "missing.txt", "t", "nope"], p);
+    assert_eq!(
+        error_human(&out.stderr),
+        "fatal: Failed to resolve 'nope' as a valid ref.\nError-Code: LBR-CLI-003\n\nHint: use 'libra log --oneline' to see available commits.\n"
+    );
+}
+
+#[test]
+fn tag_target_file_message_invalid_target_no_writes() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    let before = tag_write_snapshot(p);
+    let _out = run_libra_command(&["tag", "-F", "missing.txt", "t", "nope"], p);
+    assert_eq!(tag_write_snapshot(p), before);
+}
+
+#[test]
+fn tag_target_read_failure_e5_no_writes() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    let before = tag_write_snapshot(p);
+    let _out = run_libra_command_with_env(&["tag", "t", "side"], p, TARGET_READ_FAILPOINT);
+    assert_eq!(tag_write_snapshot(p), before);
+}
+
+#[test]
+fn tag_target_delete_mode_extra_positional_e3_no_writes() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    assert_cli_success(&run_libra_command(&["tag", "vdel"], p), "tag vdel");
+    let before = tag_write_snapshot(p);
+    let _out = run_libra_command(&["tag", "-d", "vdel", "b"], p);
+    assert_eq!(tag_write_snapshot(p), before);
+}
+
+#[test]
+fn tag_target_list_mode_extra_positional_e3_no_writes() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    let before = tag_write_snapshot(p);
+    let _out = run_libra_command(&["tag", "-l", "a", "b"], p);
+    assert_eq!(tag_write_snapshot(p), before);
+}
+
+#[test]
+fn tag_target_verify_mode_extra_positional_e3_no_writes() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    let before = tag_write_snapshot(p);
+    let _out = run_libra_command(&["tag", "-v", "a", "b"], p);
+    assert_eq!(tag_write_snapshot(p), before);
+}
+
+#[test]
+fn tag_target_third_positional_e3_no_writes() {
+    let fx = tag_target_fixture();
+    let p = fx.repo.path();
+    let before = tag_write_snapshot(p);
+    let _out = run_libra_command(&["tag", "a", "b", "c"], p);
+    assert_eq!(tag_write_snapshot(p), before);
 }

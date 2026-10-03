@@ -14,6 +14,7 @@ use reqwest::StatusCode;
 use serde::Deserialize;
 use url::Url;
 
+use super::mega2_diag;
 use crate::utils::error::{CliError, CliResult, StableErrorCode};
 
 /// Fixed per-request deadline (connect and total request). MB-01 Performance budget.
@@ -86,8 +87,11 @@ struct WireTreeItem {
 /// Validates the user-supplied server base URL:
 /// https, or http with a loopback host; no userinfo, query or fragment.
 pub fn validate_server_url(raw: &str) -> CliResult<Url> {
-    let url = Url::parse(raw).map_err(|_| {
-        CliError::fatal(format!("invalid mega2 server URL '{raw}'"))
+    // Never echo `raw`: an unparsable value can still carry credentials
+    // (`https://user:secret@host:badport`), and the credential check below only
+    // runs on a parsed URL. `url::ParseError` renders a fixed reason without input.
+    let url = Url::parse(raw).map_err(|err| {
+        CliError::fatal(format!("invalid mega2 server URL: {err}"))
             .with_stable_code(StableErrorCode::CliInvalidTarget)
     })?;
 
@@ -311,6 +315,11 @@ impl Mega2TreeClient {
     /// One GET per listing: `{base}/api/v1/tree?path=<normalized>[&refs=<ref>]`.
     /// No Authorization header; response body bounded by [`MAX_RESPONSE_BYTES`].
     pub async fn fetch_listing(&self, path: &str, git_ref: Option<&str>) -> CliResult<Listing> {
+        mega2_diag::run(mega2_diag::TREE, self.fetch_listing_scoped(path, git_ref)).await
+    }
+
+    /// Body of [`Self::fetch_listing`]; runs inside its diagnostics scope.
+    async fn fetch_listing_scoped(&self, path: &str, git_ref: Option<&str>) -> CliResult<Listing> {
         let normalized = normalize_path(path)?;
         let mut url = self.base.join(TREE_ROUTE).map_err(|_| {
             CliError::fatal("cannot build the mega2 tree URL")
@@ -323,7 +332,7 @@ impl Mega2TreeClient {
             url.query_pairs_mut().append_pair("refs", git_ref);
         }
 
-        let response = self.http.get(url).send().await.map_err(transport_error)?;
+        let response = mega2_diag::send(self.http.get(url), transport_error).await?;
         let status = response.status();
         match status {
             StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => {
@@ -664,6 +673,25 @@ mod tests {
                 "{bad}"
             );
         }
+    }
+
+    // plan-20261001 MN-10: an unparsable URL is rejected before the credential
+    // check, so its error must not carry any part of the raw input.
+    #[test]
+    fn url_parse_error_does_not_echo_input() {
+        let raw = "https://user:MARKER@mega2.example.com:notaport";
+        let err = validate_server_url(raw).expect_err("unparsable port");
+        assert_eq!(err.stable_code(), StableErrorCode::CliInvalidTarget);
+        assert!(
+            !err.message().contains("MARKER"),
+            "message echoes input: {}",
+            err.message()
+        );
+        let json = err.render_json();
+        assert!(
+            !json.contains("MARKER"),
+            "JSON envelope echoes input: {json}"
+        );
     }
 
     // ---- path normalization (AC-3) ----

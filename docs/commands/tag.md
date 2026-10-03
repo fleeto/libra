@@ -5,7 +5,7 @@ Create, list, or delete tags.
 ## Synopsis
 
 ```
-libra tag [<name>] [-a] [-m <message> | -F <file>] [-e] [-f] [-s]
+libra tag [<name> [<commit>]] [-a] [-m <message> | -F <file>] [-e] [-f] [-s]
 libra tag -l [-n <lines>] [--points-at <object>] [--contains <commit>] [--merged <commit>] [--sort <key>] [--column[=<mode>]]
 libra tag -v <name>
 libra tag -d <name>
@@ -13,17 +13,20 @@ libra tag -d <name>
 
 ## Description
 
-`libra tag` manages lightweight and annotated tags. A lightweight tag is simply a named pointer to a commit, while an annotated tag stores a full tag object with a message, tagger identity, and timestamp.
+`libra tag` manages lightweight and annotated tags. A lightweight tag is simply a named pointer to an object (normally a commit), while an annotated tag stores a full tag object with a message, tagger identity, and timestamp.
 
-Without arguments (or with `-l`), the command lists all tags. When given a name, it creates a new tag at HEAD. Adding `-a`/`--annotate`, `-m <message>`, or `-F <file>` (reading the message from a file or stdin) creates an annotated tag instead of a lightweight one; `-a` alone opens an editor, and `-e`/`--edit` composes the message in an editor (pre-filled by `-m`/`-F` when present). Combined with `-d`/`-l`/`-v`, `-a` is a usage error. The `-f` flag allows overwriting an existing tag of the same name.
+Without arguments (or with `-l`), the command lists all tags. When given a name, it creates a new tag at HEAD, or at `<commit>` when one is given (`libra tag v1.0 HEAD~1`). `<commit>` accepts any commit-ish — a branch, a commit id, an expression such as `HEAD~2`, or another tag — and is recorded **unpeeled**, as in Git: naming an annotated tag points the new tag at that tag object — an annotated or signed tag then becomes a nested tag (a tag of a tag), while a lightweight tag simply becomes another name for that tag object. To tag the commit an annotated tag points to instead, use `<tag>^{}` (`libra tag v1.0-commit 'v1.0^{}'`). A target that resolves to a tree or a blob is refused (Libra cannot transfer tags of trees or blobs yet). When `<commit>` is given, HEAD is not read, so tagging works on an unborn branch. The target is resolved before the `-F` file is read, the editor opens, or any tag ref or tag object is written, so a bad target leaves neither behind. Adding `-a`/`--annotate`, `-m <message>`, or `-F <file>` (reading the message from a file or stdin) creates an annotated tag instead of a lightweight one; `-a` alone opens an editor, and `-e`/`--edit` composes the message in an editor (pre-filled by `-m`/`-F` when present). Combined with `-d`/`-l`/`-v`, `-a` is a usage error. The `-f` flag allows overwriting an existing tag of the same name.
 
 Tag references are stored in the SQLite database alongside branch references, providing the same transactional guarantees.
+
+List forms (`-l`, `-n`, `--contains`, `--no-contains`, `--points-at`, `--merged`, `--no-merged`, `--sort`, `--column`, `--no-column`, including `--no-column <pattern>`) and `--verify` / `-v` do not record an Operation v2 entry. Creating or deleting a tag still records one (`libra op log --command tag`).
 
 ## Options
 
 | Flag | Long | Value | Description |
 |------|------|-------|-------------|
 | | `<name>` | positional (optional) | Tag name to create, show, or delete |
+| | `<commit>` | positional (optional) | Object the new tag points at (default: HEAD): any commit-ish, recorded unpeeled — naming an annotated tag points the new tag at that tag object (use `<tag>^{}` for its commit); a target that resolves to a tree or blob is refused. Only valid when creating a tag |
 | `-l` | `--list` | | List all tags |
 | `-d` | `--delete` | | Delete the named tag |
 | `-a` | `--annotate` | | Create an annotated tag. Alone, opens an editor (empty cleaned message aborts with no ref). Combined with `-m`/`-F`/`-e` it creates an annotated tag; combined with `-d`/`-l`/`-v` it is a usage error. |
@@ -32,14 +35,14 @@ Tag references are stored in the SQLite database alongside branch references, pr
 | `-e` | `--edit` | | Open an editor to compose or edit the annotated-tag message. With `-m`/`-F` the editor is pre-filled with that message; without them it composes a new one. `-a` alone is the same editor path. Comment lines are stripped; an empty result aborts. |
 | `-f` | `--force` | | Overwrite an existing tag |
 | `-n` | `--n-lines` | `<lines>` | Number of annotation lines to display when listing (0 = names only) |
-| | `--points-at` | `<object>` | List only tags pointing at the given object (peeled to its commit); implies list mode |
+| | `--points-at` | `<object>` | List only tags pointing at the given object (peeled to its commit); implies list mode. Each tag is peeled through its whole tag chain (a tag of a tag peels to the final commit); a tag whose chain ends at a tree or blob never matches. |
 | `-s` | `--sign` | | Sign the annotated tag with a vault PGP key (requires `-m`; not Git GPG-interoperable) |
 | | `--no-sign` | | Do not sign the tag, countermanding an earlier `-s`/`--sign` (last one on the command line wins). Tags are unsigned by default, so on its own this is a no-op. |
 | `-v` | `--verify` | `<name>` | Verify a tag's PGP signature against the repository's configured public keys (active, generated, or historical; exit 0 good, exit 1 bad) |
-| | `--contains` | `<commit>` | List only tags whose tip has `<commit>` as an ancestor |
-| | `--no-contains` | `<commit>` | List only tags whose tip does not have `<commit>` as an ancestor |
-| | `--merged` | `<commit>` | List only tags reachable from `<commit>` |
-| | `--no-merged` | `<commit>` | List only tags not reachable from `<commit>` |
+| | `--contains` | `<commit>` | List only tags whose tip has `<commit>` as an ancestor. Each tag is peeled through its whole tag chain (a tag of a tag peels to the final commit); a tag whose chain ends at a tree or blob never matches. |
+| | `--no-contains` | `<commit>` | List only tags whose tip does not have `<commit>` as an ancestor. Each tag is peeled through its whole tag chain (a tag of a tag peels to the final commit); a tag whose chain ends at a tree or blob never matches. |
+| | `--merged` | `<commit>` | List only tags reachable from `<commit>`. Each tag is peeled through its whole tag chain (a tag of a tag peels to the final commit); a tag whose chain ends at a tree or blob never matches. |
+| | `--no-merged` | `<commit>` | List only tags not reachable from `<commit>`. Each tag is peeled through its whole tag chain (a tag of a tag peels to the final commit); a tag whose chain ends at a tree or blob never matches. |
 | | `--sort` | `<key>` | Sort the listing by key (`refname`, `-refname`, `creatordate`, `-creatordate` — `creatordate` is approximated by object-hash order). Overrides the `tag.sort` config default (strict local → global → system cascade; an invalid config value fails closed with `LBR-CLI-002` and an unreadable local/global config store with `LBR-IO-001`, both before any listing output — except a future-schema global store (newer than this binary), which is skipped with a one-time warning (see `LBR-CONFIG-001`); repeated config values apply only the last one of the winning scope — Git would stack them into a multi-key sort). When neither the flag nor the config is set, tags list in `refname`-ascending order (Git default). A configured `tag.sort` never turns tag creation into a listing |
 | | `--column` | `[options]` | Lay out the tag list in columns. Comma/space-separated options: enablement `always`/`auto`/`never` (bare = `always`), fill order `column` (top-to-bottom, default) / `row` (left-to-right) / `plain` (single column), and column widths `dense` (per-column) / `nodense` (uniform, default). Byte-compatible with `git tag --column`. Cannot be combined with `-n`. |
 | | `--no-column` | | Do not lay out the tag list in columns (equivalent to `--column=never`), countermanding an earlier `--column` (last one wins). Tags list one-per-line by default, so on its own this is a no-op. |
@@ -49,6 +52,12 @@ Tag references are stored in the SQLite database alongside branch references, pr
 ```bash
 # Create a lightweight tag at HEAD
 libra tag v1.0
+
+# Tag a specific commit instead of HEAD
+libra tag v1.0 HEAD~1
+
+# Annotated tag on the tip of another branch
+libra tag -m "Release v1.1" v1.1 side
 
 # Create an annotated tag with a message
 libra tag -a -m "Release v1.1" v1.1
@@ -60,6 +69,12 @@ libra log -1 --format=%B | libra tag -F - v1.1
 
 # Force-overwrite an existing tag
 libra tag -f v1.0
+
+# Move an existing tag to another commit
+libra tag -f v1.0 HEAD~1
+
+# Tag the commit an annotated tag points to, not the tag object
+libra tag v1.0-commit 'v1.0^{}'
 
 # List all tags
 libra tag -l
@@ -81,6 +96,9 @@ libra tag --json v1.0
 
 ```bash
 libra tag v1.0                        # Create a lightweight tag at HEAD
+libra tag v1.0 HEAD~1                 # Tag a specific commit instead of HEAD
+libra tag -m "Release v1.1" v1.1 side  # Annotated tag on the tip of branch side
+libra tag -f v1.0 HEAD~1              # Move an existing tag to another commit
 libra tag -a -m "Release v1.1" v1.1   # Create an annotated tag
 libra tag -m "Release v1.1" v1.1      # Create an annotated tag
 libra tag -l -n 2                     # List tags with up to 2 annotation lines
@@ -93,6 +111,7 @@ libra tag --json v1.0                 # Structured JSON output for agents
 
 - `libra tag -l`: prints the tag list, one per line; with `-n` shows annotation lines indented
 - `libra tag v1.0`: `Created lightweight tag 'v1.0' at abc1234`
+- `libra tag v1.0 HEAD~1`: `Created lightweight tag 'v1.0' at <short id of HEAD~1>`
 - `libra tag -m "msg" v1.0`: `Created annotated tag 'v1.0' at abc1234`
 - `libra tag -d v1.0`: `Deleted tag 'v1.0' (was abc1234)`
 - The default create path preserves the current human-readable output
@@ -116,6 +135,8 @@ Create a tag:
   }
 }
 ```
+
+With an explicit target (`libra tag --json v1.0 HEAD~1`) the envelope is the same: `hash` is the target object for a lightweight tag and the new tag object for an annotated one.
 
 Create an annotated tag:
 
@@ -193,6 +214,7 @@ Libra preserves Git's two-tier tag model for on-disk format compatibility. Light
 | Feature | Git | Libra | jj |
 |---------|-----|-------|----|
 | Create lightweight | `git tag <name>` | `libra tag <name>` | `jj tag create <name>` |
+| Tag a specific commit | `git tag <name> <commit>` | `libra tag <name> <commit>` (unpeeled; a tree / blob target is refused) | `jj tag set <name> -r <rev>` |
 | Create annotated | `git tag -a -m "msg" <name>` | `libra tag -a -m "msg" <name>` (or `-m` / `-F` / `-e`) | Not supported (lightweight only) |
 | Annotated message from file | `git tag -F <file> <name>` | `libra tag -F <file> <name>` (`-` for stdin) | N/A |
 | Edit message in editor | `git tag -e <name>` (with `-a`/`-m`/`-F`) | `libra tag -a <name>` or `libra tag -e <name>` (composes annotated message; pre-filled by `-m`/`-F`) | N/A |
@@ -212,6 +234,13 @@ Libra preserves Git's two-tier tag model for on-disk format compatibility. Light
 |----------|-----------|------|
 | Tag already exists | `LBR-CONFLICT-002` | "delete it first with 'libra tag -d <name>'." |
 | HEAD has no commit to tag | `LBR-REPO-003` | "create a commit first before tagging HEAD." |
+| `<commit>` cannot be resolved (unknown name, ambiguous short id, or a full id with no such object): "Failed to resolve '<commit>' as a valid ref." | `LBR-CLI-003` | "use 'libra log --oneline' to see available commits." (exit 129; Git exits 128 — with the same line for an unknown name, after listing the candidates for an ambiguous id, and later, with `cannot update ref … nonexistent object` or `bad object type.`, for a full id with no such object) |
+| `<commit>` resolves to a tree or blob: "cannot tag '<commit>': it resolves to a tree object, not a commit" (or `blob`) | `LBR-CLI-003` | "only a commit, or a tag that peels to a commit, can be tagged" (exit 129) |
+| `<commit>` combined with `-l`/`-d`/`-v` or any list-mode flag (`-n`, `--points-at`, `--contains`, `--no-contains`, `--merged`, `--no-merged`, `--sort`, `--column`, `--no-column`): "the <commit> argument '<x>' is only valid when creating a tag" | `LBR-CLI-002` | "list, delete and verify take a single tag name or pattern." (exit 129, checked before the repository is opened) |
+| A third positional argument (`libra tag a b c`): "unexpected argument 'c' found" | `LBR-CLI-002` | clap usage text (exit 129; Git says "too many arguments") |
+| `<commit>` goes through an unborn HEAD (`HEAD`, `@`, `HEAD~1`): "Cannot create tag: HEAD does not point to a commit" | `LBR-REPO-003` | "create a commit first before tagging HEAD." (exit 128, as in Git) |
+| `<commit>` cannot be read: "failed to resolve '<commit>': the object store could not be read" | `LBR-IO-001` | "check that the repository is readable and retry." (exit 128) |
+| `<commit>`'s object graph is corrupt (e.g. a tag whose target is missing): "failed to resolve '<commit>': its object graph is corrupt or incomplete" | `LBR-REPO-002` | "run 'libra fsck' to inspect missing objects." (exit 128) |
 | Tag not found (delete/show) | `LBR-CLI-003` | "use 'libra tag -l' to list available tags." |
 | Unresolvable `--points-at` object | `LBR-CLI-003` | "use 'libra log --oneline' to see available commits." |
 | Missing tag name for --delete/--message/--file/--edit/--annotate/--force | `LBR-CLI-002` | "use 'libra tag <name>' to create or update a tag" (for `--edit`: "tag name is required when using --edit"; for `--annotate`: "tag name is required when using --annotate") |
@@ -225,3 +254,5 @@ Libra preserves Git's two-tier tag model for on-disk format compatibility. Light
 | Failed to delete tag | `LBR-IO-002` | -- |
 | Failed to list tags (DB error) | `LBR-IO-001` | -- |
 | Failed to list tags (corrupt object) | `LBR-REPO-002` | -- |
+| A filtered listing (`--points-at`/`--contains`/`--no-contains`/`--merged`/`--no-merged`) meets a tag whose chain cannot be peeled (missing object or tag cycle): "tag '<name>' cannot be peeled to a commit: its tag chain is broken" | `LBR-REPO-002` | "run 'libra fsck' to inspect missing objects." |
+| A filtered listing cannot read a tag's chain: "failed to read the tag chain of '<name>'" | `LBR-IO-001` | "check that the repository is readable and retry." |

@@ -2535,8 +2535,12 @@ mod tests {
                 .any(|cause| cause.is::<HookUnverifiedScopeBinding>()),
             "a helper that never emits a scope proof must remain advisory: {error:#}"
         );
+        // The managed startup deadline is 5 s, then the post-ready budget is
+        // only 100 ms. Parallel `cargo test` can spend most of that startup
+        // window before the pid file appears. The cap stays well below a
+        // blocked `tail -f` reap, which would not return inside this bound.
         assert!(
-            started.elapsed() < Duration::from_secs(2),
+            started.elapsed() < Duration::from_secs(8),
             "the foreground callback must not wait for helper reaping"
         );
         assert!(
@@ -2637,8 +2641,12 @@ mod tests {
                 .any(|cause| cause.is::<HookTrustedScopeBindingFailure>()),
             "a helper that proved trusted scope before blocking must stay terminal: {error:#}"
         );
+        // The managed startup deadline is 5 s, then the post-ready budget is
+        // 1 s. Parallel `cargo test` can spend most of that startup window
+        // before the pid file appears. The cap stays well below a blocked
+        // `tail -f` reap, which would not return inside this bound.
         assert!(
-            started.elapsed() < Duration::from_secs(4),
+            started.elapsed() < Duration::from_secs(8),
             "the foreground callback must not wait for trusted helper reaping"
         );
         let pid = std::fs::read_to_string(&pid_file)

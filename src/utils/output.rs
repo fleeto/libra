@@ -825,7 +825,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(cwd, env)]
     fn apply_color_override_auto_clears_previous_override() {
         let _guard = ColorOverrideReset;
 

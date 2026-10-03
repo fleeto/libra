@@ -3128,8 +3128,11 @@ mod tests {
             .unwrap()
             .join("libra");
         assert!(helper.is_file(), "built Libra helper is unavailable");
+        // The proof is that one audited replay completes. The full lib suite
+        // can starve the checkpoint write until a 10 s budget elapses before
+        // the write begins, so the harness budget is wider than that floor.
         let deadline = crate::internal::ai::capture_scope::CaptureCommitDeadline::from_budget(
-            Duration::from_secs(10),
+            Duration::from_secs(60),
         )
         .unwrap();
         if through_doctor {

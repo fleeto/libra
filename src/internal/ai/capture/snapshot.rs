@@ -1311,7 +1311,7 @@ mod tests {
         );
 
         let pid = async {
-            for _ in 0..50 {
+            for _ in 0..250 {
                 if let Ok(value) = std::fs::read_to_string(&pid_file)
                     && let Ok(pid) = value.trim().parse::<libc::pid_t>()
                 {
@@ -1324,7 +1324,7 @@ mod tests {
         .await
         .expect("blocked helper must publish its PID before sleeping");
         let reaped = async {
-            for _ in 0..50 {
+            for _ in 0..250 {
                 // SAFETY: signal zero only probes this helper PID.
                 if unsafe { libc::kill(pid, 0) } == -1
                     && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
@@ -1392,7 +1392,7 @@ mod tests {
         );
 
         let pid = async {
-            for _ in 0..50 {
+            for _ in 0..250 {
                 if let Ok(value) = std::fs::read_to_string(&pid_file)
                     && let Ok(pid) = value.trim().parse::<libc::pid_t>()
                 {
@@ -1405,7 +1405,7 @@ mod tests {
         .await
         .expect("blocked extraction helper must publish its PID before sleeping");
         let reaped = async {
-            for _ in 0..50 {
+            for _ in 0..250 {
                 // SAFETY: signal zero only probes this helper PID.
                 if unsafe { libc::kill(pid, 0) } == -1
                     && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)

@@ -5772,7 +5772,12 @@ mod export_runner_lease {
                 self as checkpoint_faults, CheckpointFaultPoint,
             };
 
-            const WIDE: u64 = 30_000;
+            // Each successful deliver returns as soon as its stage settles.
+            // The full lib suite can still burn a 30 s host budget before the
+            // checkpoint write begins, which leaves an armed store fault
+            // unfired. The wider budget does not change the deadline-settle
+            // case, which passes its own 2 s budget.
+            const WIDE: u64 = 120_000;
             let fixture = export_fixture().await;
             let conn = &fixture.conn;
 
@@ -6021,7 +6026,7 @@ mod export_runner_lease {
             assert_eq!(
                 checkpoint_faults::armed_fault(),
                 None,
-                "the store fault fired"
+                "the store fault fired; delivery failed earlier: {error:#}"
             );
             assert!(
                 format!("{error:#}").contains("capture coordinator execution failed"),

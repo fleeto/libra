@@ -654,10 +654,8 @@ fn prepare_bwrap_capability_fds_for_exec(keep_fds: &[std::os::fd::RawFd]) -> std
     Ok(())
 }
 
-/// Core bounded runner: `<program> [<pre_args>…] export <session_id>` with
-/// the module's env/caps/deadline contract. `pre_args` lets the sandboxed
-/// variant prepend the bwrap arg vector while keeping ONE code path for the
-/// bounds (GC-DR-04).
+/// Bounded runner for raw fixtures and capability probes that do not require
+/// a PID namespace.
 #[cfg(any(target_os = "linux", test))]
 async fn run_bounded_exporter(
     program: &std::path::Path,
@@ -666,6 +664,51 @@ async fn run_bounded_exporter(
     limits: ExportLimits,
     deadline_at: tokio::time::Instant,
     keep_fds: PinnedFds,
+) -> Result<Vec<u8>> {
+    run_bounded_exporter_inner(
+        program,
+        pre_args,
+        session_id,
+        limits,
+        deadline_at,
+        keep_fds,
+        false,
+    )
+    .await
+}
+
+/// The trusted production bwrap path creates a PID namespace; retain a pidfd
+/// for its verified init so cancellation cannot miss `setsid()` descendants.
+#[cfg(target_os = "linux")]
+async fn run_sandboxed_bounded_exporter(
+    program: &std::path::Path,
+    pre_args: &[String],
+    session_id: &str,
+    limits: ExportLimits,
+    deadline_at: tokio::time::Instant,
+    keep_fds: PinnedFds,
+) -> Result<Vec<u8>> {
+    run_bounded_exporter_inner(
+        program,
+        pre_args,
+        session_id,
+        limits,
+        deadline_at,
+        keep_fds,
+        true,
+    )
+    .await
+}
+
+#[cfg(any(target_os = "linux", test))]
+async fn run_bounded_exporter_inner(
+    program: &std::path::Path,
+    pre_args: &[String],
+    session_id: &str,
+    limits: ExportLimits,
+    deadline_at: tokio::time::Instant,
+    keep_fds: PinnedFds,
+    capture_namespace_init_pidfd: bool,
 ) -> Result<Vec<u8>> {
     if tokio::time::Instant::now() >= deadline_at {
         bail!("OpenCode export capture deadline already elapsed; refusing export");
@@ -808,10 +851,12 @@ async fn run_bounded_exporter(
     #[cfg(not(target_os = "linux"))]
     let process_group = None;
     let mut child = ExporterCancellationGuard::new(child, process_group);
-    #[cfg(target_os = "linux")]
-    child
-        .capture_namespace_init_pidfd()
-        .context("inspect the OpenCode sandbox PID namespace")?;
+    if capture_namespace_init_pidfd {
+        #[cfg(target_os = "linux")]
+        child
+            .capture_namespace_init_pidfd()
+            .context("inspect the OpenCode sandbox PID namespace")?;
+    }
     let Some(mut stderr) = child.child_mut().and_then(|child| child.stderr.take()) else {
         let terminated = child.terminate_and_reap();
         if !terminated {
@@ -848,10 +893,12 @@ async fn run_bounded_exporter(
             } => break WaitOutcome::Exited(status),
             _ = &mut deadline => break WaitOutcome::Deadline,
             _ = size_poll.tick() => {
-                #[cfg(target_os = "linux")]
-                child
-                    .capture_namespace_init_pidfd()
-                    .context("inspect the OpenCode sandbox PID namespace")?;
+                if capture_namespace_init_pidfd {
+                    #[cfg(target_os = "linux")]
+                    child
+                        .capture_namespace_init_pidfd()
+                        .context("inspect the OpenCode sandbox PID namespace")?;
+                }
                 match stdout_file.metadata() {
                     Ok(metadata) if metadata.len() > limits.max_bytes => {
                         break WaitOutcome::OverCap(metadata.len());
@@ -1109,7 +1156,7 @@ async fn run_export_subprocess_sandboxed_with_exporter_fd(
             "OpenCode export sandbox capability probe exhausted the export deadline; refusing export"
         );
     }
-    run_bounded_exporter(
+    run_sandboxed_bounded_exporter(
         &assembled.program,
         &assembled.pre_args,
         session_id,

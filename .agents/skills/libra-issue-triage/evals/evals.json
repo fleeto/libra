@@ -18,6 +18,18 @@
       "prompt": "The reporter says pushes sometimes hang, but provided no OS, repo size, reproduction, or expected behavior. Triage it without editing files.",
       "expected_output": "Keep verified facts distinct from unknowns, ask only questions that could change diagnosis or scope, inspect relevant local evidence and existing work, and leave acceptance and priority decisions to maintainers.",
       "files": []
+    },
+    {
+      "id": 4,
+      "prompt": "The report is now clear: the CLI hangs indefinitely on a network timeout, expected behavior is a bounded timeout with an actionable error, and acceptance can be checked by a timeout regression test. No matching task card was found. What should happen next?",
+      "expected_output": "Summarize the clarified Issue brief and recommend `libra-plan-task-authoring` to check/reuse or draft a task card. Do not author the card or start implementation; explain that maintainer acceptance and explicit implementation authorization are later gates.",
+      "files": []
+    },
+    {
+      "id": 5,
+      "prompt": "I found a clear bug that is not tracked yet. Please prepare the Issue so I can file it, but don't post anything to GitHub.",
+      "expected_output": "Check for a matching Issue/template, then provide a copy-ready title and body based only on verified details. Tell the user to create it with the GitHub web form or a `gh issue create --repo OWNER/REPO --title ... --body-file ...` command; do not run a remote write. Recommend `libra-work-discovery` after the user provides the created Issue URL/number.",
+      "files": []
     }
   ]
 }

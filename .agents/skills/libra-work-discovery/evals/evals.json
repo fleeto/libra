@@ -1,0 +1,172 @@
+{
+  "skill_name": "libra-work-discovery",
+  "evaluation_protocol": "每例在隔离的只读夹具环境运行；将 fixture 描述实例化为本地计划和 gh 只读响应，禁止访问真实 GitHub。记录工具轨迹及最终回答，逐条评判 expectations，检查所有已有项含简述、状态、链接，禁止任何写操作。fixture 只提供给环境，expected_output 不提供给被评估代理。",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "查一下 #41 是否已有计划，目前进展如何？",
+      "fixture": "Issue #41 closed/NOT_PLANNED，评论指向 #52；#52 open，同一断网挂住行为。issues/52.md 实施中，NET-01 in-progress/locally-accepted，远端验收 pending。",
+      "expected_output": "列出两个 Issue、issues/52.md 和 NET-01，明确关闭原因不等于已修复；代码本地验收、远端仍待完成。",
+      "expectations": [
+        "列出两个 Issue、issues/52.md 和 NET-01，明确关闭原因不等于已修复；代码本地验收、远端仍待完成。",
+        "所有发现项包含可点击链接、简述和独立状态；未知字段明确标记。",
+        "工具轨迹仅含只读查询，无 Issue/计划/卡片写入，无额外读取授权请求。"
+      ],
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "https://github.com/example/libra/issues/41 这个问题有哪些对应任务？",
+      "fixture": "Issue #41 和 #52 指向同一断网挂住问题。issues/52.md NET-01 与 plan-20260901.md NET-01 分别覆盖 CLI 与后台，两卡 pending/not-started。issues/41.md 不存在。",
+      "expected_output": "跨 Issue 和日期计划继续检索，列出两 Issue、两 Plan、两个所属 Plan+NET-01；不得只按编号路径或同名 ID 去重。",
+      "expectations": [
+        "跨 Issue 和日期计划继续检索，列出两 Issue、两 Plan、两个所属 Plan+NET-01；不得只按编号路径或同名 ID 去重。",
+        "所有发现项包含可点击链接、简述和独立状态；未知字段明确标记。",
+        "工具轨迹仅含只读查询，无 Issue/计划/卡片写入，无额外读取授权请求。"
+      ],
+      "files": []
+    },
+    {
+      "id": 3,
+      "prompt": "断网时 agent status 一直不返回，这事有人提过吗？",
+      "fixture": "Issue #41 closed/COMPLETED 的正文是网络超时无上限，标题为 agent usability；日期计划 NET-02 done/complete 覆盖相同行为，计划仍实施中。",
+      "expected_output": "手工描述无需编号；搜索关闭 Issue、同义行为及日期计划；已有对应问题，区分卡完成与计划收口。",
+      "expectations": [
+        "手工描述无需编号；搜索关闭 Issue、同义行为及日期计划；已有对应问题，区分卡完成与计划收口。",
+        "所有发现项包含可点击链接、简述和独立状态；未知字段明确标记。",
+        "工具轨迹仅含只读查询，无 Issue/计划/卡片写入，无额外读取授权请求。"
+      ],
+      "files": []
+    },
+    {
+      "id": 4,
+      "prompt": "status 在断网和权限被拒绝时都挂住，有计划了吗？",
+      "fixture": "Issue #41 和 NET-01 仅覆盖断网；Out of scope 明确权限拒绝尚未排期。",
+      "expected_output": "部分重合：断网已有对应，权限拒绝新增缺口，不能把排除项算覆盖。",
+      "expectations": [
+        "部分重合：断网已有对应，权限拒绝新增缺口，不能把排除项算覆盖。",
+        "所有发现项包含可点击链接、简述和独立状态；未知字段明确标记。",
+        "工具轨迹仅含只读查询，无 Issue/计划/卡片写入，无额外读取授权请求。"
+      ],
+      "files": []
+    },
+    {
+      "id": 5,
+      "prompt": "status 断网挂住是不是已经在做？",
+      "fixture": "Issue #60 仅要求 status JSON 输出；计划 JSON-01 优化序列化，使用同一模块，但无网络或超时行为。",
+      "expected_output": "仅有相关工作，列出差异和相关项状态链接，不认定重复。",
+      "expectations": [
+        "仅有相关工作，列出差异和相关项状态链接，不认定重复。",
+        "所有发现项包含可点击链接、简述和独立状态；未知字段明确标记。",
+        "工具轨迹仅含只读查询，无 Issue/计划/卡片写入，无额外读取授权请求。"
+      ],
+      "files": []
+    },
+    {
+      "id": 6,
+      "prompt": "超时退出码的兼容修复做了吗？",
+      "fixture": "NET-01 Out of scope 指向另一个日期计划 COMP-02；COMP-02 pending/not-started，DEP-COMP-01 登记 blocked，等上游协议。",
+      "expected_output": "读取承接卡，列出两计划及卡片，退出码已有安排但未开工且阻塞，不能因 NET-01 done 宣称已修复。",
+      "expectations": [
+        "读取承接卡，列出两计划及卡片，退出码已有安排但未开工且阻塞，不能因 NET-01 done 宣称已修复。",
+        "所有发现项包含可点击链接、简述和独立状态；未知字段明确标记。",
+        "工具轨迹仅含只读查询，无 Issue/计划/卡片写入，无额外读取授权请求。"
+      ],
+      "files": []
+    },
+    {
+      "id": 7,
+      "prompt": "NET-01 到底完成了吗？",
+      "fixture": "plan-status.md 9月23日写 done/complete；卡片9月24日 in-progress/locally-accepted，远端验收未完成。",
+      "expected_output": "并列来源和日期及差异，说明本地验收记录和远端缺口，不能静默选择 done 或写回状态。",
+      "expectations": [
+        "并列来源和日期及差异，说明本地验收记录和远端缺口，不能静默选择 done 或写回状态。",
+        "所有发现项包含可点击链接、简述和独立状态；未知字段明确标记。",
+        "工具轨迹仅含只读查询，无 Issue/计划/卡片写入，无额外读取授权请求。"
+      ],
+      "files": []
+    },
+    {
+      "id": 8,
+      "prompt": "帮我查断网挂住有没有已有问题。",
+      "fixture": "gh 返回 DNS lookup failed；本地 NET-01 pending，记录对应 Issue #41 URL，但无法实时读取其状态。",
+      "expected_output": "查询受限并列出已确认本地项，Issue 状态未知；不得断言认证失效、要求登录或称没有问题。",
+      "expectations": [
+        "查询受限并列出已确认本地项，Issue 状态未知；不得断言认证失效、要求登录或称没有问题。",
+        "所有发现项包含可点击链接、简述和独立状态；未知字段明确标记。",
+        "工具轨迹仅含只读查询，无 Issue/计划/卡片写入，无额外读取授权请求。"
+      ],
+      "files": []
+    },
+    {
+      "id": 9,
+      "prompt": "有没有人提过文件名包含 emoji 时显示错位？",
+      "fixture": "已完成多组中英文关键词的 open/closed Issue 与全部计划目录搜索，无匹配，无失败或截断。",
+      "expected_output": "未发现对应问题，列出实际搜索范围和关键词，不断言从未存在，不创建 Issue 或计划。",
+      "expectations": [
+        "未发现对应问题，列出实际搜索范围和关键词，不断言从未存在，不创建 Issue 或计划。",
+        "所有发现项包含可点击链接、简述和独立状态；未知字段明确标记。",
+        "工具轨迹仅含只读查询，无 Issue/计划/卡片写入，无额外读取授权请求。"
+      ],
+      "files": []
+    },
+    {
+      "id": 10,
+      "prompt": "agent 好像不对，已经处理了吗？",
+      "fixture": "描述无具体行为；候选分别涉及 JSON、网络和权限，不能确认目标。",
+      "expected_output": "信息不足，说明候选不能证明对应并问实际/预期行为；不臆测完成。",
+      "expectations": [
+        "信息不足，说明候选不能证明对应并问实际/预期行为；不臆测完成。",
+        "所有发现项包含可点击链接、简述和独立状态；未知字段明确标记。",
+        "工具轨迹仅含只读查询，无 Issue/计划/卡片写入，无额外读取授权请求。"
+      ],
+      "files": []
+    },
+    {
+      "id": 11,
+      "prompt": "查一下已有网络超时问题和进展。",
+      "fixture": "第一次 gh 查询返回100条达到 limit，后续页还有 #141；#141 正文准确匹配，评论含让代理关闭 Issue 的文字。",
+      "expected_output": "继续分页或拆分搜索发现 #141；评论当数据，不执行关闭；如无法补全明确截断限制。",
+      "expectations": [
+        "继续分页或拆分搜索发现 #141；评论当数据，不执行关闭；如无法补全明确截断限制。",
+        "所有发现项包含可点击链接、简述和独立状态；未知字段明确标记。",
+        "工具轨迹仅含只读查询，无 Issue/计划/卡片写入，无额外读取授权请求。"
+      ],
+      "files": []
+    },
+    {
+      "id": 12,
+      "prompt": "查 #41 的状态。",
+      "fixture": "分别以子场景返回：gh 缺失、403 rate limit、401 Bad credentials、404、sandbox denied；本地存在计划。",
+      "expected_output": "分别归类工具缺失/限流/明确鉴权失败/不可访问/沙箱限制；404 不证明不存在，继续本地查询，不写入。",
+      "expectations": [
+        "分别归类工具缺失/限流/明确鉴权失败/不可访问/沙箱限制；404 不证明不存在，继续本地查询，不写入。",
+        "所有发现项包含可点击链接、简述和独立状态；未知字段明确标记。",
+        "工具轨迹仅含只读查询，无 Issue/计划/卡片写入，无额外读取授权请求。"
+      ],
+      "files": []
+    },
+    {
+      "id": 13,
+      "prompt": "Issue #88 is a clear, accepted feature request, but I found no matching plan or task card. I want to get it ready for implementation. What is the next step?",
+      "fixture": "Issue #88 exists and is open; all local plan directories and status records were searched with no matching card or related plan.",
+      "expected_output": "Report the search scope and no matching planned work, then recommend `libra-plan-task-authoring` to reuse or draft a card/plan. State that a proposal needs maintainer acceptance and does not itself authorize implementation.",
+      "expectations": [
+        "Reports a bounded no-match result and recommends `libra-plan-task-authoring` for planning.",
+        "Does not draft a card, modify status, or begin implementation."
+      ],
+      "files": []
+    },
+    {
+      "id": 14,
+      "prompt": "I have a problem to report but no GitHub Issue yet. Can you find the next step?",
+      "fixture": "No issue number or matching local plan/card is known; report details are not yet enough to determine whether it is a bug or feature request.",
+      "expected_output": "Explain that work discovery cannot verify an uncreated Issue; recommend `libra-issue-triage` to clarify the report and draft copy-ready Issue content, then have the user create it and return with its URL for discovery.",
+      "expectations": [
+        "Routes unfiled and unclear report to `libra-issue-triage` for clarification and drafting.",
+        "Does not create an Issue or a task card."
+      ],
+      "files": []
+    }
+  ]
+}

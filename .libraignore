@@ -27,6 +27,13 @@ target-codex-review/
 .cursor/
 .agent/
 .agents/
+# Keep the repository's work-discovery skill visible to Libra status.
+!.agents/
+!.agents/skills/
+!.agents/skills/libra-work-discovery/
+!.agents/skills/libra-work-discovery/SKILL.md
+!.agents/skills/libra-work-discovery/evals/
+!.agents/skills/libra-work-discovery/evals/evals.json
 .air/
 
 # Generated when moving Windows files to WSL

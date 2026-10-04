@@ -656,7 +656,7 @@ fn prepare_bwrap_capability_fds_for_exec(keep_fds: &[std::os::fd::RawFd]) -> std
 
 /// Bounded runner for raw fixtures and capability probes that do not require
 /// a PID namespace.
-#[cfg(any(target_os = "linux", test))]
+#[cfg(test)]
 async fn run_bounded_exporter(
     program: &std::path::Path,
     pre_args: &[String],
@@ -1171,7 +1171,7 @@ async fn run_export_subprocess_sandboxed_with_exporter_fd(
 /// `program` is the sandbox backend (trusted bwrap or `sandbox-exec`);
 /// `pre_args` is everything transform placed after it (including `--` and the
 /// fixed private exporter target). `export <sid>` is appended by
-/// [`run_bounded_exporter`].
+/// [`run_sandboxed_bounded_exporter`].
 #[cfg(target_os = "linux")]
 struct AssembledExport {
     program: PathBuf,

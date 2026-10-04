@@ -2333,3 +2333,5 @@ GitHub API 确认 PR #609 于 `2026-10-04 14:27:16 UTC` 合并，merge commit �
 PR #612 首轮 CI run `37230096807` 的 `compat-clippy` 在 Linux `-D warnings` 下发现 `linux_pidfd_supported` 从未被调用（`dead_code`）；本机 macOS 目标不编译这段 Linux-only 函数，因此此前本地 Clippy 未发现。该辅助探测函数已删除：生产路径直接尝试打开经过验证的 namespace-init pidfd，系统不支持时以带上下文的 I/O 错误失败关闭。后续 PR run 仍须确认 Clippy、Linux sandbox 与 bridge E2E 全部通过。
 
 随后 PR run `37231625328` 的 `opencode-export-linux` 在 `runner_controls_preserved` 失败：共享 bounded runner 也服务于没有 PID namespace 的 fixture exporter，却被无条件要求存在 `NSpid=1`。已把 namespace-init pidfd 捕获放到独立的 trusted-bwrap runner 入口；通用 runner 和仅测 FD bind 的 probe 不要求 namespace，而生产 OpenCode bwrap 路径仍强制验证。该 CI 门尚待新 head 复验，bridge HMAC E2E 因前置门失败未运行。本地 OpenCode exporter 模块定向测试 15/15、全目标/全特性 Clippy、格式与 workflow lint 已通过；Linux 条件分支仍以远端新 run 为准。
+
+PR #612 run `37233480909` 的 `opencode-export-linux` 已通过 Linux sandbox gates；随后 `compat-clippy` 与 bridge E2E 步骤均因 `run_bounded_exporter` 在生产 Linux library 构建中未使用而失败，bridge 测试尚未执行。该 wrapper 只供单元测试的 fixture 使用，现已限定 `cfg(test)`；生产执行继续走 `run_sandboxed_bounded_exporter` 并验证 namespace-init pidfd。下一轮 CI 须确认 Clippy 通过且 bridge E2E 真正执行成功。

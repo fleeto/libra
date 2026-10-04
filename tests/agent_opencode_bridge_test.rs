@@ -10,6 +10,9 @@
 //! DR-04b verification cases: whole-session idempotence, secret-never-
 //! persists, trusted-binary revalidation on drift, and oversize/untrusted
 //! degradation.
+//!
+//! The end-to-end cases each start a CLI, exporter and bubblewrap namespace;
+//! serialize them so shared runner load does not consume the export deadline.
 
 #![cfg(unix)]
 
@@ -142,7 +145,14 @@ impl BridgeRepo {
     }
 
     fn run(&self, args: &[&str], stdin: Option<&str>) -> Output {
+        self.run_with_log(args, stdin, None)
+    }
+
+    fn run_with_log(&self, args: &[&str], stdin: Option<&str>, log_filter: Option<&str>) -> Output {
         let mut cmd = self.command();
+        if let Some(log_filter) = log_filter {
+            cmd.env("LIBRA_LOG", log_filter);
+        }
         cmd.args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -162,13 +172,21 @@ impl BridgeRepo {
     }
 
     fn stop(&self, session_id: &str) -> Output {
+        self.stop_with_log(session_id, None)
+    }
+
+    fn stop_with_log(&self, session_id: &str, log_filter: Option<&str>) -> Output {
         let envelope = json!({
             "hook_event_name": "session.idle",
             "session_id": session_id,
             "cwd": self.repo.to_string_lossy(),
         })
         .to_string();
-        self.run(&["agent", "hooks", "opencode", "stop"], Some(&envelope))
+        self.run_with_log(
+            &["agent", "hooks", "opencode", "stop"],
+            Some(&envelope),
+            log_filter,
+        )
     }
 
     /// Make object publication fail after the checkpoint writer owns its
@@ -245,6 +263,7 @@ const EXPORT_WRONG_SESSION: &str = r#"printf '%s' '{"info":{"id":"ses_other","di
 /// export bridge and persists an import-channel checkpoint, not an export-job
 /// side effect or a file-backed source.
 #[tokio::test]
+#[serial_test::serial(opencode_export_bridge)]
 async fn opencode_historical_import_e2e_uses_trusted_export_bytes() {
     let Some(repo) = BridgeRepo::init(EXPORT_IMPORT).await else {
         return;
@@ -301,6 +320,7 @@ async fn opencode_historical_import_e2e_uses_trusted_export_bytes() {
 /// opencode_export_whole_session_idempotent: two idles over unchanged export
 /// content append exactly one checkpoint; the export job converges.
 #[tokio::test]
+#[serial_test::serial(opencode_export_bridge)]
 async fn opencode_export_whole_session_idempotent() {
     let Some(repo) = BridgeRepo::init(EXPORT_HELLO).await else {
         return;
@@ -343,11 +363,12 @@ async fn opencode_export_whole_session_idempotent() {
 /// checksum. Its successful durable path must bind that checksum to this
 /// repository before a snapshot projection reaches `agent_session` metadata.
 #[tokio::test]
+#[serial_test::serial(opencode_export_bridge)]
 async fn opencode_export_durable_snapshot_uses_repository_keyed_hmac() {
     let Some(repo) = BridgeRepo::init(EXPORT_HELLO).await else {
         return;
     };
-    let output = repo.stop("ses_hmac_snapshot");
+    let output = repo.stop_with_log("ses_hmac_snapshot", Some("debug"));
     assert!(
         output.status.success(),
         "successful export: {}",
@@ -364,9 +385,44 @@ async fn opencode_export_durable_snapshot_uses_repository_keyed_hmac() {
     let metadata_json: String = rows[0].try_get_by("metadata_json").unwrap();
     let metadata: Value =
         serde_json::from_str(&metadata_json).expect("OpenCode metadata is valid JSON");
-    let digest = metadata["transcript_snapshot"]["source"]["digest_sha256"]
-        .as_str()
-        .expect("successful OpenCode snapshot has a durable source commitment");
+    let Some(digest) = metadata["transcript_snapshot"]["source"]["digest_sha256"].as_str() else {
+        let jobs = repo
+            .query_rows(
+                "SELECT state, observed_generation, processed_generation, last_error_code \
+                 FROM agent_export_job WHERE provider_session_id = 'ses_hmac_snapshot'",
+            )
+            .await;
+        let job = jobs.first().map(|row| {
+            format!(
+                "state={:?}, observed={:?}, processed={:?}, last_error={:?}",
+                row.try_get_by::<String, _>("state"),
+                row.try_get_by::<i64, _>("observed_generation"),
+                row.try_get_by::<i64, _>("processed_generation"),
+                row.try_get_by::<Option<String>, _>("last_error_code")
+            )
+        });
+        let sessions = repo
+            .query_rows(
+                "SELECT state, sync_revision, stopped_at FROM agent_session \
+                 WHERE provider_session_id = 'ses_hmac_snapshot'",
+            )
+            .await;
+        let session = sessions.first().map(|row| {
+            format!(
+                "state={:?}, revision={:?}, stopped_at={:?}",
+                row.try_get_by::<String, _>("state"),
+                row.try_get_by::<i64, _>("sync_revision"),
+                row.try_get_by::<Option<i64>, _>("stopped_at")
+            )
+        });
+        let checkpoints = repo.checkpoints();
+        panic!(
+            "successful OpenCode snapshot has a durable source commitment; stdout: {}; metadata: {metadata_json}; job: {job:?}; session: {session:?}; checkpoints: {}; stderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            checkpoints.len(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
     assert!(
         digest.strip_prefix("source/hmac-v2/").is_some_and(|hex| {
             hex.len() == 64
@@ -386,6 +442,7 @@ async fn opencode_export_durable_snapshot_uses_repository_keyed_hmac() {
 /// OpenCode session. Identity validation must keep those bytes out of the
 /// export channel while the hook continues with its metadata-only fallback.
 #[tokio::test]
+#[serial_test::serial(opencode_export_bridge)]
 async fn opencode_export_rejects_wrong_native_session_without_export_claim() {
     let Some(repo) = BridgeRepo::init(EXPORT_WRONG_SESSION).await else {
         return;
@@ -411,6 +468,7 @@ async fn opencode_export_rejects_wrong_native_session_without_export_claim() {
 }
 
 #[tokio::test]
+#[serial_test::serial(opencode_export_bridge)]
 async fn opencode_registered_failure_releases_dirty_job_claim_and_marker() {
     let Some(repo) = BridgeRepo::init(EXPORT_HELLO).await else {
         return;
@@ -456,6 +514,7 @@ async fn opencode_registered_failure_releases_dirty_job_claim_and_marker() {
 /// opencode_export_plaintext_never_in_persist_or_logs: a secret in the
 /// export content is redacted before it reaches the traces blob.
 #[tokio::test]
+#[serial_test::serial(opencode_export_bridge)]
 async fn opencode_export_plaintext_never_in_persist_or_logs() {
     let secret = "AKIAZZZZZZZZZZZZZZZZ";
     let body = format!(
@@ -482,6 +541,7 @@ async fn opencode_export_plaintext_never_in_persist_or_logs() {
 /// binary after registration revokes trust — the next idle degrades to
 /// metadata-only capture (no content append), never an untrusted spawn.
 #[tokio::test]
+#[serial_test::serial(opencode_export_bridge)]
 async fn opencode_export_binary_trust_revalidates() {
     let Some(repo) = BridgeRepo::init(EXPORT_HELLO).await else {
         return;
@@ -522,6 +582,7 @@ async fn opencode_export_binary_trust_revalidates() {
 /// GiB disk backstop) and degrades to metadata-only — no truncated content
 /// claim, the write still succeeds.
 #[tokio::test]
+#[serial_test::serial(opencode_export_bridge)]
 async fn opencode_export_oversize_session_degrades() {
     // 32 MiB of zeros — well past the 16 MiB cap.
     let Some(repo) = BridgeRepo::init("head -c 33554432 /dev/zero").await else {
@@ -547,6 +608,7 @@ async fn opencode_export_oversize_session_degrades() {
 /// bridge must fail before it ever executes a trusted-looking exporter.
 #[cfg(target_os = "macos")]
 #[tokio::test]
+#[serial_test::serial(opencode_export_bridge)]
 async fn opencode_export_macos_is_unsupported_before_spawn() {
     use libra::internal::ai::observed_agents::opencode_export::{
         ExportLimits, run_export_subprocess_sandboxed,

@@ -454,20 +454,6 @@ fn bwrap_namespace_init_pidfd(bwrap_pid: u32) -> std::io::Result<Option<std::os:
     Ok(Some(pidfd))
 }
 
-#[cfg(target_os = "linux")]
-fn linux_pidfd_supported() -> bool {
-    let Ok(pidfd) = open_linux_pidfd(std::process::id()) else {
-        return false;
-    };
-    signal_linux_pidfd(&pidfd, 0).is_ok()
-        && std::fs::read_to_string(format!(
-            "/proc/{}/task/{}/children",
-            std::process::id(),
-            std::process::id()
-        ))
-        .is_ok()
-}
-
 /// Cancellation-safe owner for an exporter and its stderr drainer.
 ///
 /// Production OpenCode export is Linux-only: the required bwrap containment

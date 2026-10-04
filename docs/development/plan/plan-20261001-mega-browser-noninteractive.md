@@ -2329,3 +2329,5 @@ Result 只允许 `PASS` 或 `FAIL`。`FAIL` 必须列出 P0/P1 条目，并在�
 ### 合并后的 follow-up CI 状态（2026-10-04 19:45 UTC）
 
 GitHub API 确认 PR #609 于 `2026-10-04 14:27:16 UTC` 合并，merge commit 为 `622bed527950525a71405e4d1c022b9973caf36d`，合并时 PR head 为 `adb9b59880f13c34dcab56cb74b57074f6b42fb6`。修复提交 `15fc9098cf531369f8b20b9f3406989adc4fa1ce` 后推送到已合并的原分支，因此不属于该 merge commit；`.github/workflows/base.yml` 仅监听 `pull_request`，该提交没有 GitHub check runs。为让 Linux 专项门在真实修复上执行，已从 GitHub 当前 main `622bed5` 建立 `fix/opencode-exporter-cancel-ci`，并只重放后续修复差异（10 个文件），避免把已合并 PR 的历史重新带入差异。该基线上的 `cargo test --all --no-fail-fast`、`cargo clippy --all-targets --all-features -- -D warnings`、`cargo +nightly fmt --all --check`、`actionlint -ignore 'SC2086' .github/workflows/base.yml` 与差异空白检查均通过。Linux pidfd 取消回归和 OpenCode bridge HMAC E2E 尚未在此平台执行，须由后续 PR 的 `opencode-export-linux` job 验收；本地结果不代替该 Linux 门。
+
+PR #612 首轮 CI run `37230096807` 的 `compat-clippy` 在 Linux `-D warnings` 下发现 `linux_pidfd_supported` 从未被调用（`dead_code`）；本机 macOS 目标不编译这段 Linux-only 函数，因此此前本地 Clippy 未发现。该辅助探测函数已删除：生产路径直接尝试打开经过验证的 namespace-init pidfd，系统不支持时以带上下文的 I/O 错误失败关闭。后续 PR run 仍须确认 Clippy、Linux sandbox 与 bridge E2E 全部通过。

@@ -3532,7 +3532,7 @@ fn hook_capture_telemetry_redacts_session_ids_and_omits_exporter_stderr() {
             && opencode_assembly.contains("OPENCODE_SANDBOX_OUTER_CWD")
             && opencode_assembly.contains("OPENCODE_SANDBOX_EXPORTER")
             && opencode_assembly.contains("extra_ro_bind_paths: &[]")
-            && opencode_assembly.contains("insert_opencode_private_mounts")
+            && opencode_assembly.contains("insert_opencode_private_sandbox_args")
             && opencode_assembly.contains("replace_opencode_path_fd_binds")
             && !opencode_assembly.contains("binary.parent()"),
         "OpenCode must mount a sealed exporter capability at a fixed private target, never ambient HOME/XDG or the exporter parent"
@@ -3546,6 +3546,7 @@ fn hook_capture_telemetry_redacts_session_ids_and_omits_exporter_stderr() {
         opencode_session_adjustment.contains("let [separator] = separators.as_slice()")
             && opencode_session_adjustment.contains("OPENCODE_SANDBOX_EXPORTER")
             && opencode_session_adjustment.contains("expected_exporter_fd")
+            && opencode_session_adjustment.contains("\"--as-pid-1\"")
             && opencode_session_adjustment.contains("\"--unshare-net\"")
             && opencode_session_adjustment.contains("\"--share-net\"")
             && opencode_session_adjustment.contains("\"--ro-bind\"")
@@ -3570,7 +3571,9 @@ fn hook_capture_telemetry_redacts_session_ids_and_omits_exporter_stderr() {
             && sealed_exporter.contains("metadata.ino() != expected.inode")
             && sealed_exporter.contains("metadata.mtime() != expected.mtime")
             && sealed_exporter.contains("Sha256::new()")
-            && sealed_exporter.contains("tempfile::tempfile()")
+            && sealed_exporter.contains("tempfile::NamedTempFile::new()")
+            && sealed_exporter.contains(".into_temp_path()")
+            && sealed_exporter.contains("PinnedFd::with_staging_path")
             && sealed_exporter.contains(".write_all(&buffer")
             && sealed_exporter.contains("set_permissions")
             && sealed_exporter.contains("libc::O_CLOEXEC")

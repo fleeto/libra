@@ -26,15 +26,16 @@
 //!   process-wide limit would SIGXFSZ OpenCode's SQLite WAL checkpoint on
 //!   a large store (FIX-SBX-01). The whole run sits under a wall-clock
 //!   deadline (default 3 s — expiry kills the still-owned child's process
-//!   group). On Linux the outer bwrap process is detached from the invoking
+//!   group and, once captured, the bwrap namespace-init process through a
+//!   pidfd). On Linux the outer bwrap process is detached from the invoking
 //!   terminal in `pre_exec` with `setsid()`: null stdin alone does not prevent
 //!   `/dev/tty` access, and the new session also gives its PID a fresh process
 //!   group for cancellation. stderr is capped and drained solely to prevent a
 //!   blocked child;
 //!   it never appears in errors or telemetry (GC-DR-13). After the direct
-//!   child has been reaped, Libra never probes or signals its former PGID:
-//!   Linux production relies on bwrap's PID namespace to contain descendants,
-//!   avoiding a PID/PGID-reuse kill race. On Unix both core
+//!   child has been reaped, Libra never probes or signals its former PGID.
+//!   The pidfd targets the verified namespace init without PID reuse, and its
+//!   exit makes the kernel tear down escaped descendants. On Unix both core
 //!   limits are zero in the child and its descendants, and `SIGXFSZ` is set
 //!   to `SIG_IGN` so the `RLIMIT_FSIZE` write-time bound fails over-cap
 //!   writes with `EFBIG` instead of terminating the child (no core file, no
@@ -351,15 +352,133 @@ fn terminate_export_process_group(pgid: Option<u32>) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Open a stable handle to a Linux process and signal it without a PID reuse
+/// race. Bubblewrap's `--as-pid-1` command is a direct child of its monitor.
+#[cfg(target_os = "linux")]
+fn open_linux_pidfd(pid: u32) -> std::io::Result<std::os::fd::OwnedFd> {
+    use std::os::fd::FromRawFd;
+
+    // SAFETY: pidfd_open has no pointer arguments and returns a new owned fd.
+    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid as libc::pid_t, 0) };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: successful pidfd_open returns a fresh descriptor owned here.
+    Ok(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd as std::os::fd::RawFd) })
+}
+
+#[cfg(target_os = "linux")]
+fn signal_linux_pidfd(pidfd: &std::os::fd::OwnedFd, signal: libc::c_int) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+
+    // SAFETY: pidfd is open; signal 0 uses a null siginfo pointer.
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_pidfd_send_signal,
+            pidfd.as_raw_fd(),
+            signal,
+            std::ptr::null::<libc::siginfo_t>(),
+            0,
+        )
+    };
+    if result < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn terminate_linux_pidfd(pidfd: &std::os::fd::OwnedFd) -> std::io::Result<()> {
+    match signal_linux_pidfd(pidfd, libc::SIGKILL) {
+        Err(error) if error.raw_os_error() == Some(libc::ESRCH) => Ok(()),
+        result => result,
+    }
+}
+
+/// Find bwrap's direct PID-1 child and return a pidfd for cancellation.
+#[cfg(target_os = "linux")]
+fn bwrap_namespace_init_pidfd(bwrap_pid: u32) -> std::io::Result<Option<std::os::fd::OwnedFd>> {
+    let children_path = format!("/proc/{bwrap_pid}/task/{bwrap_pid}/children");
+    let children = match std::fs::read_to_string(&children_path) {
+        Ok(children) => children,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let mut children = children.split_whitespace();
+    let Some(child_pid) = children.next() else {
+        return Ok(None);
+    };
+    let child_pid = child_pid
+        .parse::<u32>()
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    if children.next().is_some() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "bwrap unexpectedly has multiple direct children",
+        ));
+    }
+
+    let child_status = match std::fs::read_to_string(format!("/proc/{child_pid}/status")) {
+        Ok(status) => status,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let parent_pid = child_status
+        .lines()
+        .find_map(|line| line.strip_prefix("PPid:")?.trim().parse::<u32>().ok());
+    let namespace_pid = child_status
+        .lines()
+        .find_map(|line| line.strip_prefix("NSpid:")?.split_whitespace().last())
+        .and_then(|pid| pid.parse::<u32>().ok());
+    if parent_pid != Some(bwrap_pid) || namespace_pid != Some(1) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "bwrap direct child is not the private PID-namespace init",
+        ));
+    }
+    let pidfd = open_linux_pidfd(child_pid)?;
+
+    // Confirm the same PID is still a direct child after opening the stable
+    // handle; if it exited during discovery, never signal a recycled PID.
+    let children = match std::fs::read_to_string(children_path) {
+        Ok(children) => children,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    if !children
+        .split_whitespace()
+        .any(|pid| pid.parse::<u32>().ok() == Some(child_pid))
+    {
+        return Ok(None);
+    }
+    Ok(Some(pidfd))
+}
+
+#[cfg(target_os = "linux")]
+fn linux_pidfd_supported() -> bool {
+    let Ok(pidfd) = open_linux_pidfd(std::process::id()) else {
+        return false;
+    };
+    signal_linux_pidfd(&pidfd, 0).is_ok()
+        && std::fs::read_to_string(format!(
+            "/proc/{}/task/{}/children",
+            std::process::id(),
+            std::process::id()
+        ))
+        .is_ok()
+}
+
 /// Cancellation-safe owner for an exporter and its stderr drainer.
 ///
 /// Production OpenCode export is Linux-only: the required bwrap containment
-/// starts in a fresh host session/process group from `pre_exec`, so outer
-/// host-deadline cancellation kills that group before the generic direct-child
-/// guard starts its detached reap.
+/// starts in a fresh host session/process group from `pre_exec`; cancellation
+/// signals the captured namespace-init pidfd and process group before the
+/// generic direct-child guard starts its detached reap.
 #[cfg(any(target_os = "linux", test))]
 struct ExporterCancellationGuard {
     process_group: Option<u32>,
+    #[cfg(target_os = "linux")]
+    namespace_init_pidfd: Option<std::os::fd::OwnedFd>,
     child: CancellationSafeChild,
 }
 
@@ -368,8 +487,22 @@ impl ExporterCancellationGuard {
     fn new(child: tokio::process::Child, process_group: Option<u32>) -> Self {
         Self {
             process_group,
+            #[cfg(target_os = "linux")]
+            namespace_init_pidfd: None,
             child: CancellationSafeChild::new(child),
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn capture_namespace_init_pidfd(&mut self) -> std::io::Result<()> {
+        if self.namespace_init_pidfd.is_some() {
+            return Ok(());
+        }
+        let Some(bwrap_pid) = self.child.child_mut().and_then(|child| child.id()) else {
+            return Ok(());
+        };
+        self.namespace_init_pidfd = bwrap_namespace_init_pidfd(bwrap_pid)?;
+        Ok(())
     }
 
     fn child_mut(&mut self) -> Option<&mut tokio::process::Child> {
@@ -384,18 +517,34 @@ impl ExporterCancellationGuard {
     /// case callers must reject output with a fixed safe error rather than
     /// claiming the exporter was killed or reaped.
     fn terminate_and_reap(&mut self) -> bool {
+        #[cfg(target_os = "linux")]
+        let namespace_result = self
+            .namespace_init_pidfd
+            .take()
+            .map(|pidfd| terminate_linux_pidfd(&pidfd))
+            .unwrap_or(Ok(()));
+        #[cfg(not(target_os = "linux"))]
+        let namespace_result: std::io::Result<()> = Ok(());
         let group_result = terminate_export_process_group(self.process_group);
         self.process_group = None;
         let child_result = self.child.terminate_and_reap_checked();
-        group_result.is_ok() && child_result.is_ok()
+        namespace_result.is_ok() && group_result.is_ok() && child_result.is_ok()
     }
 
     fn disarm_child_after_wait(&mut self) {
+        #[cfg(target_os = "linux")]
+        {
+            self.namespace_init_pidfd = None;
+        }
         self.child.disarm_child_after_wait();
     }
 
     fn finish(&mut self) {
         self.process_group = None;
+        #[cfg(target_os = "linux")]
+        {
+            self.namespace_init_pidfd = None;
+        }
         self.child.finish();
     }
 }
@@ -673,6 +822,10 @@ async fn run_bounded_exporter(
     #[cfg(not(target_os = "linux"))]
     let process_group = None;
     let mut child = ExporterCancellationGuard::new(child, process_group);
+    #[cfg(target_os = "linux")]
+    child
+        .capture_namespace_init_pidfd()
+        .context("inspect the OpenCode sandbox PID namespace")?;
     let Some(mut stderr) = child.child_mut().and_then(|child| child.stderr.take()) else {
         let terminated = child.terminate_and_reap();
         if !terminated {
@@ -709,6 +862,10 @@ async fn run_bounded_exporter(
             } => break WaitOutcome::Exited(status),
             _ = &mut deadline => break WaitOutcome::Deadline,
             _ = size_poll.tick() => {
+                #[cfg(target_os = "linux")]
+                child
+                    .capture_namespace_init_pidfd()
+                    .context("inspect the OpenCode sandbox PID namespace")?;
                 match stdout_file.metadata() {
                     Ok(metadata) if metadata.len() > limits.max_bytes => {
                         break WaitOutcome::OverCap(metadata.len());
@@ -1089,7 +1246,7 @@ fn assemble_sandboxed_export(
         )?;
 
     let mut command = env.command;
-    insert_opencode_private_mounts(&mut command, exporter_fd_number)?;
+    insert_opencode_private_sandbox_args(&mut command, exporter_fd_number)?;
     replace_opencode_path_fd_binds(&mut command, &writable_fd_binds)?;
     remove_opencode_bwrap_new_session(
         &mut command,
@@ -1110,7 +1267,8 @@ fn assemble_sandboxed_export(
 }
 
 /// Remove exactly the shared bwrap profile's startup-racy `--new-session`
-/// flag for OpenCode export only.
+/// flag for OpenCode export only. Also require the exporter to be PID 1 in its
+/// private PID namespace so its exit makes the kernel tear down descendants.
 ///
 /// This must remain a narrow post-transform adjustment rather than a change to
 /// `SandboxManager`'s generic profile: other sandbox callers may require a
@@ -1150,6 +1308,7 @@ fn remove_opencode_bwrap_new_session(
     let mut index = 1;
     let mut new_session_index = None;
     let mut unshare_all = 0;
+    let mut as_pid_1 = 0;
     let mut die_with_parent = 0;
     let mut unshare_net = 0;
     let mut proc_mount = 0;
@@ -1182,6 +1341,10 @@ fn remove_opencode_bwrap_new_session(
             }
             "--die-with-parent" => {
                 die_with_parent += 1;
+                index += 1;
+            }
+            "--as-pid-1" => {
+                as_pid_1 += 1;
                 index += 1;
             }
             "--new-session" => {
@@ -1336,6 +1499,7 @@ fn remove_opencode_bwrap_new_session(
         bail!("OpenCode export sandbox argv is missing its session control; refusing export");
     };
     if unshare_all != 1
+        || as_pid_1 != 1
         || die_with_parent != 1
         || unshare_net != 1
         || proc_mount != 1
@@ -1358,12 +1522,10 @@ fn remove_opencode_bwrap_new_session(
     Ok(())
 }
 
-/// Insert the exact private directory chain plus one sealed exporter FD bind
-/// required by the fixed exporter HOME/XDG environment. The generic bwrap
-/// builder owns `/tmp` but knows nothing about this bridge's private layout,
-/// so this narrow OpenCode-only adjustment creates no ambient host mount.
+/// Insert the PID-namespace init policy, private directory chain, and sealed
+/// exporter FD bind required by the fixed exporter HOME/XDG environment.
 #[cfg(target_os = "linux")]
-fn insert_opencode_private_mounts(command: &mut Vec<String>, exporter_fd: i32) -> Result<()> {
+fn insert_opencode_private_sandbox_args(command: &mut Vec<String>, exporter_fd: i32) -> Result<()> {
     if exporter_fd < 3 {
         bail!("OpenCode exporter capability descriptor occupied stdio; refusing export");
     }
@@ -1380,10 +1542,18 @@ fn insert_opencode_private_mounts(command: &mut Vec<String>, exporter_fd: i32) -
         .take(*separator)
         .position(|argument| argument == "--bind")
         .unwrap_or(*separator);
-    let mut private_mount_args: Vec<String> = opencode_sandbox_private_dirs()
-        .into_iter()
-        .flat_map(|path| ["--dir".to_string(), path.to_string_lossy().into_owned()])
-        .collect();
+    if command[..*separator]
+        .iter()
+        .any(|argument| argument == "--as-pid-1")
+    {
+        bail!("OpenCode export sandbox already has a PID-1 policy; refusing export");
+    }
+    let mut private_mount_args = vec!["--as-pid-1".to_string()];
+    private_mount_args.extend(
+        opencode_sandbox_private_dirs()
+            .into_iter()
+            .flat_map(|path| ["--dir".to_string(), path.to_string_lossy().into_owned()]),
+    );
     private_mount_args.extend([
         "--ro-bind-fd".to_string(),
         exporter_fd.to_string(),
@@ -1985,6 +2155,7 @@ async fn trusted_bwrap_supports_fd_mounts_until(
         .args([
             "--unshare-all",
             "--die-with-parent",
+            "--as-pid-1",
             "--ro-bind",
             "/",
             "/",
@@ -2732,22 +2903,21 @@ mod tests {
     /// is starting and after an exporter tries to escape with `setsid()`. The
     /// generic profile's `--new-session` is removed only for this route, so
     /// the host process-group kill covers bwrap's startup window; after bwrap
-    /// launches, its PID namespace plus `--die-with-parent` covers the
-    /// deliberately session-escaped writer. A short deadline is repeated to
+    /// launches, PID-1 exit plus `--die-with-parent` covers the deliberately
+    /// session-escaped writer. A short deadline is repeated to
     /// exercise both cases: each marker must either never be created or stop
     /// growing immediately after outer cancellation.
     #[cfg(target_os = "linux")]
+    #[ignore = "Linux D-group gate; requires the pinned Bubblewrap process cleanup semantics"]
     #[tokio::test]
     #[serial_test::serial(export_sandbox_env, env)]
     async fn opencode_export_sandboxed_outer_cancel_contains_setsid_writer() {
-        if !trusted_bwrap_available().await {
-            eprintln!("skipped (no trusted, usable bwrap)");
-            return;
-        }
-        let Some(setsid) = binary_on_path("setsid") else {
-            eprintln!("skipped (setsid not available)");
-            return;
-        };
+        assert!(
+            trusted_bwrap_available().await,
+            "Linux D-group requires trusted, usable bwrap for the process cancellation gate"
+        );
+        let setsid = binary_on_path("setsid")
+            .expect("Linux D-group requires setsid for the escaped-writer cancellation gate");
 
         let dir = tempfile::tempdir().expect("tempdir");
         let home = dir.path().join("home");
@@ -2785,23 +2955,73 @@ wait"#
         let settled_marker = xdg_data.join("opencode/opencode-cancel-settled.marker");
         let settled_token = xdg_data.join("opencode/opencode-cancel-settled.live");
         writer_tokens.arm(settled_token.clone());
-        let capture = tokio::time::timeout_at(
+        let mut capture = Box::pin(run_export_subprocess_sandboxed_for_test(
+            &bin, "settled", limits,
+        ));
+        let _started = tokio::select! {
+            result = &mut capture => panic!(
+                "sandboxed exporter exited before the cancellation probe: {result:?}"
+            ),
+            started = wait_for_marker_len(&settled_marker) => started
+                .expect("sandboxed setsid writer must reach its marker before cancel"),
+        };
+        let result = tokio::time::timeout_at(
             tokio::time::Instant::now() + Duration::from_millis(750),
-            run_export_subprocess_sandboxed_for_test(&bin, "settled", limits),
-        );
-        let (result, started) = tokio::join!(capture, wait_for_marker_len(&settled_marker));
+            &mut capture,
+        )
+        .await;
         assert!(
             result.is_err(),
             "the outer capture deadline must cancel a live sandboxed exporter: {result:?}"
         );
-        let before = started.expect("sandboxed setsid writer must reach its marker before cancel");
+        drop(capture);
+        let before = std::fs::metadata(&settled_marker)
+            .expect("settled marker remains inspectable after cancellation")
+            .len();
         tokio::time::sleep(Duration::from_millis(150)).await;
+        let after = std::fs::metadata(&settled_marker)
+            .expect("settled marker remains inspectable")
+            .len();
+        let mut surviving_writer_processes = Vec::new();
+        if after != before {
+            use std::os::unix::ffi::OsStrExt;
+
+            let marker_bytes = settled_marker.as_os_str().as_bytes();
+            if let Ok(entries) = std::fs::read_dir("/proc") {
+                for entry in entries.flatten() {
+                    let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
+                        continue;
+                    };
+                    let process_dir = entry.path();
+                    let command_line =
+                        std::fs::read(process_dir.join("cmdline")).unwrap_or_default();
+                    if !command_line
+                        .windows(marker_bytes.len())
+                        .any(|argument| argument == marker_bytes)
+                    {
+                        continue;
+                    }
+                    let status =
+                        std::fs::read_to_string(process_dir.join("status")).unwrap_or_default();
+                    let namespace_pids = status
+                        .lines()
+                        .find(|line| line.starts_with("NSpid:"))
+                        .unwrap_or("NSpid: unavailable");
+                    let stat =
+                        std::fs::read_to_string(process_dir.join("stat")).unwrap_or_default();
+                    let process_group = stat
+                        .rsplit_once(") ")
+                        .and_then(|(_, fields)| fields.split_whitespace().nth(2))
+                        .unwrap_or("unknown");
+                    surviving_writer_processes.push(format!(
+                        "host_pid={pid}, pgrp={process_group}, {namespace_pids}"
+                    ));
+                }
+            }
+        }
         assert_eq!(
-            std::fs::metadata(&settled_marker)
-                .expect("settled marker remains inspectable")
-                .len(),
-            before,
-            "a sandboxed writer escaped after outer cancellation"
+            after, before,
+            "a sandboxed writer escaped after outer cancellation; survivors={surviving_writer_processes:?}"
         );
         // Keep the escapee's token live through the stability observation:
         // deleting it earlier would make a surviving writer stop itself and
@@ -3630,6 +3850,13 @@ printf 'tty=detached'"#,
             1,
             "OpenCode must retain exactly one bwrap parent-death control: {args:?}"
         );
+        assert_eq!(
+            args.iter()
+                .filter(|argument| *argument == "--as-pid-1")
+                .count(),
+            1,
+            "the exporter must be PID 1 so namespace teardown contains escaped descendants: {args:?}"
+        );
         assert!(store_i < sep, "store bind must precede --");
         assert_eq!(
             args.get(sep + 1).map(String::as_str),
@@ -3670,6 +3897,7 @@ printf 'tty=detached'"#,
                 "/usr/bin/bwrap".to_string(),
                 "--unshare-all".to_string(),
                 "--die-with-parent".to_string(),
+                "--as-pid-1".to_string(),
                 "--new-session".to_string(),
                 "--unshare-net".to_string(),
                 "--proc".to_string(),
@@ -3719,6 +3947,42 @@ printf 'tty=detached'"#,
         );
         assert!(valid.iter().any(|argument| argument == "--unshare-all"));
         assert!(valid.iter().any(|argument| argument == "--die-with-parent"));
+        assert_eq!(
+            valid
+                .iter()
+                .filter(|argument| *argument == "--as-pid-1")
+                .count(),
+            1,
+            "OpenCode must be PID 1 so namespace teardown kills escaped descendants"
+        );
+
+        let mut missing_pid1 = baseline();
+        missing_pid1.retain(|argument| argument != "--as-pid-1");
+        assert!(
+            remove_opencode_bwrap_new_session(
+                &mut missing_pid1,
+                exporter,
+                std::slice::from_ref(&read_only_bind),
+                &private_dirs,
+                std::slice::from_ref(&writable_bind),
+            )
+            .is_err(),
+            "OpenCode must be PID 1 so its exit kills escaped descendants"
+        );
+
+        let mut duplicate_pid1 = baseline();
+        duplicate_pid1.insert(4, "--as-pid-1".to_string());
+        assert!(
+            remove_opencode_bwrap_new_session(
+                &mut duplicate_pid1,
+                exporter,
+                std::slice::from_ref(&read_only_bind),
+                &private_dirs,
+                std::slice::from_ref(&writable_bind),
+            )
+            .is_err(),
+            "duplicate PID-1 lifecycle options are ambiguous and must fail closed"
+        );
 
         let mut missing = baseline();
         missing.retain(|argument| argument != "--new-session");

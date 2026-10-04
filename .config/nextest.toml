@@ -55,6 +55,42 @@ filter = 'test(/(^|::)linked_service_dirty_mark_is_scoped$/)'
 test-group = 'external'
 
 [[profile.default.overrides]]
+filter = 'test(/(^|::)opencode_export_binary_trust_revalidates$/)'
+test-group = 'external'
+
+[[profile.default.overrides]]
+filter = 'test(/(^|::)opencode_export_durable_snapshot_uses_repository_keyed_hmac$/)'
+test-group = 'external'
+
+[[profile.default.overrides]]
+filter = 'test(/(^|::)opencode_export_macos_is_unsupported_before_spawn$/)'
+test-group = 'external'
+
+[[profile.default.overrides]]
+filter = 'test(/(^|::)opencode_export_oversize_session_degrades$/)'
+test-group = 'external'
+
+[[profile.default.overrides]]
+filter = 'test(/(^|::)opencode_export_plaintext_never_in_persist_or_logs$/)'
+test-group = 'external'
+
+[[profile.default.overrides]]
+filter = 'test(/(^|::)opencode_export_rejects_wrong_native_session_without_export_claim$/)'
+test-group = 'external'
+
+[[profile.default.overrides]]
+filter = 'test(/(^|::)opencode_export_whole_session_idempotent$/)'
+test-group = 'external'
+
+[[profile.default.overrides]]
+filter = 'test(/(^|::)opencode_historical_import_e2e_uses_trusted_export_bytes$/)'
+test-group = 'external'
+
+[[profile.default.overrides]]
+filter = 'test(/(^|::)opencode_registered_failure_releases_dirty_job_claim_and_marker$/)'
+test-group = 'external'
+
+[[profile.default.overrides]]
 filter = 'test(/(^|::)r2_connection_basic$/)'
 test-group = 'external'
 

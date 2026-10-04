@@ -386,7 +386,7 @@ jobs:
       - name: Install bubblewrap
         run: |
           sudo apt-get update
-          sudo apt-get install -y curl libcap-dev meson ninja-build pkg-config xz-utils
+          sudo apt-get install -y curl libcap-dev meson ninja-build pkg-config util-linux xz-utils
           version=0.13.0
           archive="/tmp/bubblewrap-${version}.tar.xz"
           curl --fail --location --silent --show-error \
@@ -412,7 +412,8 @@ jobs:
           "$LIBRA_LINUX_SANDBOX_EXE" --version
           "$LIBRA_LINUX_SANDBOX_EXE" --help | grep -F -- '--bind-fd'
           "$LIBRA_LINUX_SANDBOX_EXE" --help | grep -F -- '--ro-bind-fd'
-          "$LIBRA_LINUX_SANDBOX_EXE" --unshare-all --die-with-parent --ro-bind / / -- /bin/true
+          "$LIBRA_LINUX_SANDBOX_EXE" --help | grep -F -- '--as-pid-1'
+          "$LIBRA_LINUX_SANDBOX_EXE" --unshare-all --die-with-parent --as-pid-1 --ro-bind / / -- /bin/true
 
       - name: Run Linux export sandbox gates
         run: |
@@ -431,6 +432,7 @@ jobs:
           run_gate trusted_bwrap_rejects_user_writable
           run_gate backend_missing_degrades_metadata_only
           run_gate trusted_bwrap_exe_channel_used
+          run_gate opencode_export_sandboxed_outer_cancel_contains_setsid_writer
 
       - name: Run OpenCode export bridge e2e (must not skip)
         run: |

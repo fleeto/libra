@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.30.29] — 2026-10-05
+
+### Centralized storage plan closeout (issues/500, NO-GO)
+
+- Closed the centralized statistics storage plan (`docs/development/plan/issues/500.md`) as
+  **NO-GO**: a live storage-only trunk deployment of the pinned Mega2 confirmed the
+  `artifacts/v1` write path and the `run_usage` closed set (single blob at
+  `stats/export/v1/stats.export.v1.json`, one-time UUID `oid`, distinct `artifact_set_id`s
+  coexisting), but the read surfaces expose no independent read ACL (anonymous / cross-repo /
+  cross-team reads return 200/404 rather than 401/403) and the pin has no committed-set revoke
+  route, so CS-16/CS-19/CS-17 qualification and the CS-20 aggregate are `not-qualified`.
+- The dataset identification answer (`agent_session`) and dedup/aggregation ownership were
+  still open from the maintainers, so CS-00 recorded NO-GO instead of GO. No user-visible CLI,
+  schema or behavior change: `libra statistics push` (CS-10/11/12/13) is deferred to a future
+  CS-00b when the maintainer confirms the dataset and a deployment offers read authorization +
+  revoke.
+
 ## [0.30.28] — 2026-10-04
 
 ### Contain cancelled OpenCode exporters (plan/agent)

@@ -97,9 +97,15 @@ pub struct LsFilesArgs {
     pub short: bool,
 
     /// Prefix each path with a status tag (H=cached, R=removed/deleted,
-    /// C=modified/changed, ?=other/untracked, M=unmerged)
+    /// C=modified/changed, ?=other/untracked, M=unmerged, S=skip-worktree)
     #[clap(short = 't')]
     pub tag: bool,
+
+    /// Like `-t`: prefix each path with a status tag. Git's `-v` spells
+    /// assume-unchanged files in lowercase, which Libra does not support
+    /// (DEFER with issues/479), so `-v` output equals `-t` output.
+    #[clap(short = 'v')]
+    pub show_valid: bool,
 
     /// Show only unmerged (conflict) entries — index stages 1/2/3 — in
     /// stage-style output
@@ -136,6 +142,10 @@ pub struct FileEntry {
     mode: Option<String>,
     stage: Option<u32>,
     status: String,
+    /// Index v3 extended flag; omitted from JSON so the documented output
+    /// shape stays stable (visible through `-t`/`-v` instead).
+    #[serde(skip)]
+    pub skip_worktree: bool,
 }
 
 pub async fn execute(args: LsFilesArgs) -> CliResult<()> {
@@ -231,6 +241,8 @@ fn run_ls_files(
             || _args.stage
             || _args.short
             || _args.unmerged
+            || _args.tag
+            || _args.show_valid
     };
 
     if run_cached_block {
@@ -248,7 +260,8 @@ fn run_ls_files(
         // Computing it unconditionally made every entry stat, and every file get
         // read and hashed, which turns this command into minutes on a large or
         // remotely-backed worktree.
-        let needs_worktree_state = _args.deleted || _args.modified || _args.tag || json;
+        let needs_worktree_state =
+            _args.deleted || _args.modified || _args.tag || _args.show_valid || json;
         for stage in stages {
             for entry in index.tracked_entries(*stage) {
                 let worktree_path = workdir.join(&entry.name);
@@ -258,7 +271,14 @@ fn run_ls_files(
                 if _args.ignored && !is_excluded(&worktree_path) {
                     continue;
                 }
-                let (is_deleted, is_modified) = if needs_worktree_state {
+                let skip_worktree = entry.flags.skip_worktree;
+                // Git never consults the working tree for a skip-worktree entry:
+                // `builtin/ls-files.c` skips the -d/-m lstat via
+                // `if (ce_skip_worktree(ce)) continue;`, so the entry is never
+                // reported deleted/modified and always tags `S`.
+                let (is_deleted, is_modified) = if skip_worktree {
+                    (false, false)
+                } else if needs_worktree_state {
                     let exists = fs::symlink_metadata(&worktree_path).is_ok();
                     let modified = exists
                         && entry_modified(
@@ -295,6 +315,7 @@ fn run_ls_files(
                     mode: Some(format!("{:06o}", entry.mode)),
                     stage: Some(*stage as u32),
                     status: status.to_string(),
+                    skip_worktree,
                 });
             }
         }
@@ -345,6 +366,7 @@ fn run_ls_files(
                 mode: None,
                 stage: None,
                 status: "other".to_string(),
+                skip_worktree: false,
             });
         }
     }
@@ -527,9 +549,18 @@ fn render_output(
         } else {
             format!("{}{}", eol_col, entry.path)
         };
-        // `-t` prefixes a status tag (matching `git ls-files -t`).
-        if args.tag {
-            record = format!("{} {}", status_tag(&entry.status), record);
+        // `-t`/`-v` prefix a status tag (matching `git ls-files -t`).
+        // Unmerged wins over skip-worktree, which wins over the worktree-state
+        // tags (git's `ce_stage ? M : ce_skip_worktree ? S : H/C/R/...`).
+        if args.tag || args.show_valid {
+            let tag = if entry.stage.unwrap_or(0) > 0 {
+                'M'
+            } else if entry.skip_worktree {
+                'S'
+            } else {
+                status_tag(&entry.status)
+            };
+            record = format!("{} {}", tag, record);
         }
 
         stdout

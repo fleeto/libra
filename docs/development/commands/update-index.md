@@ -7,14 +7,14 @@
 ## 对比 Git 与兼容性
 
 - 兼容级别：`partial`。
-- 已支持：`--add`、`--remove`、`--cacheinfo <mode>,<object>,<path>`（mode ∈ 100644/100755/120000/160000；对象登记时无需已存在，与 Git 一致；后续 `write-tree`/`commit` 会校验 blob/tree 对象存在和类型），`--json`/`--machine`。
-- 未公开（延后）：裸路径 stat 刷新、`--chmod`、`--assume-unchanged`、`--skip-worktree`、`--index-info`、`--refresh` 等。`--force-remove` 已随 issues/490 SW-02 落地。
+- 已支持：`--add`、`--remove`、`--cacheinfo <mode>,<object>,<path>`（mode ∈ 100644/100755/120000/160000；对象登记时无需已存在，与 Git 一致；后续 `write-tree`/`commit` 会校验 blob/tree 对象存在和类型），`--json`/`--machine`，`--force-remove`（issues/490 SW-02），`--skip-worktree`/`--no-skip-worktree`（issues/490 SW-07）。
+- 未公开（延后）：裸路径 stat 刷新、`--chmod`、`--assume-unchanged`、`--index-info`、`--refresh` 等。
 
 ## 设计方案
 
 - 入口与分发：`src/cli.rs::Commands::UpdateIndex` → `command::update_index::execute_safe`。
-- 源码分层：`src/command/update_index.rs`：`UpdateIndexArgs`（`add`/`remove`/`cacheinfo: Vec<String>`/`paths`）、`execute`/`execute_safe`、`UpdateIndexOutput`（`--json`：`updated`/`removed`）、`parse_cacheinfo`、`resolve_within_worktree`。复用 `git_internal::Index`（`add`/`update`/`remove`/`save`）、`IndexEntry::new_from_blob`/`new_from_file`、`object_ext::BlobExt`（`from_file`/`from_lfs_file`/`save`）、`util::is_sub_path`、`lfs::is_lfs_tracked`。
-- 执行路径：`require_repo` → `Index::load` → 应用 `--cacheinfo`（`parse_cacheinfo`：splitn(3,',') 解析 mode/oid/path；mode 白名单校验；oid 经 `ObjectHash::from_str` + `HashKind::hex_len()` 长度校验；path 拒绝绝对/`..`；`new_from_blob`+设 mode；`index.update`）→ 应用位置路径（`--remove` **且**（未给 `--add` **或** 该路径已不在工作树）→ `index.remove`；否则要求已跟踪或 `--add`，`resolve_within_worktree`（`is_sub_path` 守卫）+ `symlink_metadata` 工作树存在性校验 + 读取普通文件/LFS pointer 或 symlink target bytes 写 blob + `IndexEntry::new_from_file` + `index.update`）→ `index.save`。
+- 源码分层：`src/command/update_index.rs`：`UpdateIndexArgs`（`add`/`remove`/`force_remove`/`skip_worktree`/`no_skip_worktree`/`cacheinfo: Vec<String>`/`paths`）、`execute`/`execute_safe`、`UpdateIndexOutput`（`--json`：`updated`/`removed`）、`parse_cacheinfo`、`resolve_within_worktree`。复用 `git_internal::Index`（`add`/`update`/`remove`/`save`）、`IndexEntry::new_from_blob`/`new_from_file`、`object_ext::BlobExt`（`from_file`/`from_lfs_file`/`save`）、`util::is_sub_path`、`lfs::is_lfs_tracked`、`utils::index_ext`（SW-03 helper：`update_preserving_flags`/`update_preserving_file_mode`；SW-07：`set_skip_worktree`）。
+- 执行路径：`require_repo` → `Index::load` → 应用 `--cacheinfo`（`parse_cacheinfo`：splitn(3,',') 解析 mode/oid/path；mode 白名单校验；oid 经 `ObjectHash::from_str` + `HashKind::hex_len()` 长度校验；path 拒绝绝对/`..`；`new_from_blob`+设 mode；`index.update`）→ 应用位置路径：① `--skip-worktree`/`--no-skip-worktree` 优先于 `--force-remove`（git `update_one` 先处理 mark 模式）：经 `index_ext::set_skip_worktree` 原地翻转 stage-0 条目的 `skip_worktree` 位（不读工作树、不清 `intent_to_add`），索引中不存在的路径报 `Unable to mark file <path>`（128）且不保存 index；② `--force-remove` 删除全部 stage、未知路径无操作；③ skip-worktree 条目短路 add/remove 处理（git `process_path` 的 skip-worktree 分支）：显式 `--remove` 删除条目（exit 0），其余情况为 no-op——工作树副本永不重暂存；④ 其余路径走既有 `--remove`/`--add` 分流与暂存 → `index.save`。
 - 安全：`--cacheinfo` path 与 `--add` 路径均拒绝逃出 worktree（path-traversal/绝对路径）；`--cacheinfo` 不写对象（仅注册），与 Git 一致；对象登记时不要求存在，但 `write-tree`/`commit` 的 P0-09 预检会在写 tree/commit 前 fail-closed（`LBR-REPO-002`）。
 - 底层操作对象：`.libra/index`、对象库（`--add` 写 blob）。无 refs/网络写入。
 - 输出与错误契约：human 静默 / `--json` 计数；用法错误 `command_usage`+`with_exit_code(128)`，工作树文件缺失/无效 oid 用 `CliInvalidTarget`/`RepoStateInvalid` → 128。
@@ -47,7 +47,7 @@
 
 | 类别 | 未完成项 | 当前处理 |
 |---|---|---|
-| 兼容差异项 | 裸路径 stat 刷新、`--chmod`/`--assume-unchanged`/`--skip-worktree`/`--index-info`/`--refresh` | 延后；按需补齐并同步矩阵与测试。`--force-remove` 已实现（删除全部 stage、未知路径无操作、优先于 `--add`/`--remove`；SW-02）。 |
+| 兼容差异项 | 裸路径 stat 刷新、`--chmod`/`--assume-unchanged`/`--index-info`/`--refresh` | 延后；按需补齐并同步矩阵与测试。`--force-remove` 已实现（SW-02）；`--skip-worktree`/`--no-skip-worktree` 已实现（SW-07：mark 优先于 force-remove、`Unable to mark file` 128、skip-worktree 条目短路 add/remove、位清除后索引回 v2）。 |
 
 ## 维护要求
 

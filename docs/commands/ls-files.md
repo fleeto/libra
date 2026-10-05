@@ -35,6 +35,10 @@ supported, and the shared pathspec engine also accepts `:(top)`, `:(exclude)`,
 the repository are rejected. The resolve-undo and sparse-checkout integration
 remain deferred.
 
+Skip-worktree entries (see [`update-index`](update-index.md)) are visible in
+plain, `-t`, and `-v` listings — tagged `S` — but are excluded from `-d` and
+`-m` (Git never consults the working tree for them).
+
 When stdout is piped and the downstream command exits early, `libra ls-files` exits quietly
 without printing panic/backtrace or `Broken pipe` diagnostics.
 
@@ -48,7 +52,8 @@ without printing panic/backtrace or `Broken pipe` diagnostics.
 | `--stage` | Print stage-style records, including conflict stages when present. |
 | `-s` | Short alias for stage-style output: `<mode> <object> <stage>\t<path>`. |
 | `--abbrev[=<n>]` | Abbreviate the object name to `<n>` hex digits in `-s`/`--stage` output. Bare `--abbrev` uses 7; `--abbrev=<n>` sets the length (the value requires the `=` form, so bare `--abbrev` never consumes a following pathspec). Libra truncates to a fixed length rather than computing the shortest unique prefix. |
-| `-t` | Prefix each path with a status tag: `H` (cached), `R` (removed/deleted), `C` (modified/changed), `?` (other/untracked), `M` (unmerged). Unmerged paths are not hidden; each stage 1/2/3 entry is printed as `M <path>`, matching Git's conflict visibility. |
+| `-t` | Prefix each path with a status tag: `H` (cached), `R` (removed/deleted), `C` (modified/changed), `?` (other/untracked), `M` (unmerged), `S` (skip-worktree). Unmerged paths are not hidden; each stage 1/2/3 entry is printed as `M <path>`, matching Git's conflict visibility. A skip-worktree entry always tags `S` and is never reported deleted/modified. |
+| `-v` | Like `-t`: prefix each path with a status tag. Git's `-v` spells assume-unchanged files in lowercase, which Libra does not support, so `-v` output equals `-t` output. |
 | `-u`, `--unmerged` | Show only unmerged (conflict) entries — index stages 1/2/3 — in stage-style output. |
 | `--full-name` | Accepted for Git compatibility. Libra always prints repo-root-relative paths (the `git --full-name` form), so this is a no-op. |
 | `--others`, `-o` | Show untracked working-tree files. |
@@ -166,6 +171,6 @@ entries use `null` for fields that do not apply:
 | Unmatched pathspec failure | `--error-unmatch` | `--error-unmatch` | Different model |
 | Line-ending info | `--eol` (`attr/` always empty) | `--eol` | N/A |
 | NUL output | `-z` (text mode only) | `-z` | Different model |
-| Status tags | `-t` (H/R/C/?/M) | `-t` (H/S/M/R/C/K/?) | Different model |
+| Status tags | `-t` / `-v` (H/R/C/?/M/S) | `-t` / `-v` (H/S/M/R/C/K/?) | Different model (`-v` lowercase assume-unchanged unsupported; `K`/`U` unsupported) |
 | Unmerged entries | `-u` / `--unmerged` | `-u` / `--unmerged` | Different model |
 | Root-relative paths | `--full-name` (always; no-op flag) | `--full-name` (opt-in) | Different model |

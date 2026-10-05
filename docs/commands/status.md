@@ -51,6 +51,14 @@ ignored; entry-type changes (for example a regular file replaced by a symlink)
 are always reported. An invalid `core.filemode` value fails `status` closed
 before any output.
 
+Skip-worktree entries (marked with
+[`update-index --skip-worktree`](update-index.md)) are never reported as
+deleted or modified: the working-tree copy is assumed good, matching Git's
+behavior with sparse-checkout indexes. When `core.sparseCheckout=true`, Libra
+does not evaluate sparse patterns (sparsity rules and materialization are
+deferred — see the compatibility table), so the behavior is the same as
+`false` plus a one-time warning per process.
+
 ### Display config defaults (`status.*`)
 
 When the corresponding CLI flag is absent, Libra honors these Git-compatible

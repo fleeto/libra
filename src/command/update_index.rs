@@ -32,6 +32,8 @@ EXAMPLES:
     libra update-index --add a.txt b.txt        Stage files from the working tree
     libra update-index --remove old.txt         Drop a path from the index
     libra update-index --force-remove old.txt   Drop a path even when its file is gone
+    libra update-index --skip-worktree s.txt    Mark s.txt index-only (status/diff ignore its worktree copy)
+    libra update-index --no-skip-worktree s.txt Clear the skip-worktree mark again
     libra update-index --cacheinfo 100644,<oid>,dir/f.txt
                                                  Register an entry directly from an object id
     libra --json update-index --add a.txt       Structured JSON output for agents";
@@ -62,6 +64,19 @@ pub struct UpdateIndexArgs {
     /// Removes every stage of an unmerged path. Wins over --add/--remove.
     #[clap(long = "force-remove")]
     pub force_remove: bool,
+
+    /// Mark tracked paths with the skip-worktree bit (index v3 extended
+    /// flags): status/diff then ignore the working-tree copy and no command
+    /// restages it. The index entry itself is untouched and the working tree
+    /// is never read; paths that are not in the index fail with `Unable to
+    /// mark file`. Setting the bit rewrites the index as format v3.
+    #[clap(long)]
+    pub skip_worktree: bool,
+
+    /// Clear the skip-worktree bit from tracked paths. The index returns to
+    /// format v2 once no entry carries extended flags anymore.
+    #[clap(long = "no-skip-worktree")]
+    pub no_skip_worktree: bool,
 
     /// Register an index entry directly from `<mode>,<object>,<path>` without
     /// reading the working tree (the object need not exist yet). Repeatable.
@@ -134,6 +149,23 @@ pub async fn execute_safe(args: UpdateIndexArgs, output: &OutputConfig) -> CliRe
     // Positional paths: remove, or (re)stage from the working tree.
     let workdir = util::working_dir();
     for path_str in &args.paths {
+        // `--skip-worktree`/`--no-skip-worktree` mark existing stage-0 entries
+        // without reading the working tree, and win over `--force-remove`
+        // (git's update_one handles the mark modes before the force-remove
+        // branch). A path the index does not know is git's
+        // `fatal: Unable to mark file <path>` (exit 128); nothing is saved,
+        // so earlier marks in the same invocation do not persist either.
+        if args.skip_worktree || args.no_skip_worktree {
+            if !crate::utils::index_ext::set_skip_worktree(&mut index, path_str, args.skip_worktree)
+            {
+                return Err(CliError::fatal(format!("Unable to mark file {path_str}"))
+                    .with_exit_code(128)
+                    .with_stable_code(StableErrorCode::CliInvalidTarget));
+            }
+            updated += 1;
+            continue;
+        }
+
         // `--force-remove` is unconditional and wins over `--add`/`--remove`
         // (git 2.55: `update-index --force-remove --add <present-file>`
         // removes the entry). Every stage of an unmerged path goes away.
@@ -161,6 +193,21 @@ pub async fn execute_safe(args: UpdateIndexArgs, output: &OutputConfig) -> CliRe
         // Only the combined case is re-routed here. `--remove` on its own keeps
         // its established meaning (drop the path, present or not), because that
         // is what the documented example and the existing coverage rely on.
+        //
+        // A skip-worktree entry short-circuits this whole branch first (git
+        // `process_path`): its working-tree copy is assumed good, so plain
+        // update is a no-op — the file is never restaged, present or not —
+        // and only an explicit `--remove` drops the entry.
+        if index
+            .get(path_str, 0)
+            .is_some_and(|entry| entry.flags.skip_worktree)
+        {
+            if args.remove && index.remove(path_str, 0).is_some() {
+                removed += 1;
+            }
+            continue;
+        }
+
         if args.remove {
             // `join` with an absolute argument replaces the base, which matches
             // what `resolve_within_worktree` does below, so the two agree on
@@ -355,5 +402,22 @@ mod tests {
         let plain = UpdateIndexArgs::try_parse_from(["update-index", "a.txt"])
             .expect("plain invocation parses");
         assert!(!plain.force_remove);
+    }
+
+    /// SW-07: `--skip-worktree`/`--no-skip-worktree` parse independently and
+    /// default off.
+    #[test]
+    fn skip_worktree_flags_parse_and_default_off() {
+        let args = UpdateIndexArgs::try_parse_from(["update-index", "--skip-worktree", "a.txt"])
+            .expect("--skip-worktree parses");
+        assert!(args.skip_worktree && !args.no_skip_worktree);
+
+        let args = UpdateIndexArgs::try_parse_from(["update-index", "--no-skip-worktree", "a.txt"])
+            .expect("--no-skip-worktree parses");
+        assert!(args.no_skip_worktree && !args.skip_worktree);
+
+        let plain = UpdateIndexArgs::try_parse_from(["update-index", "a.txt"])
+            .expect("plain invocation parses");
+        assert!(!plain.skip_worktree && !plain.no_skip_worktree);
     }
 }

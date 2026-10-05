@@ -28,6 +28,9 @@ Pathspec 会相对于调用命令时的当前工作目录解析，而不是强�
 `:(top)`、`:(exclude)`、`:(icase)`、`:(literal)`、`:(glob)` magic；若 pathspec
 解析到仓库外，则会报错。resolve-undo 和 sparse-checkout 集成仍未公开。
 
+skip-worktree 条目（见 [`update-index`](update-index.md)）会出现在普通、`-t` 与
+`-v` 列表中并标为 `S`，但会被 `-d` 与 `-m` 排除（Git 不会为它们读取工作树）。
+
 当 stdout 被管道连接且下游命令提前退出时，`libra ls-files` 会静默正常结束，不打印 panic/backtrace 或 `Broken pipe` 诊断。
 
 ## 选项
@@ -40,7 +43,8 @@ Pathspec 会相对于调用命令时的当前工作目录解析，而不是强�
 | `--stage` | 以 stage 样式输出记录；若存在冲突阶段也会显示。 |
 | `-s` | stage 样式输出的短别名：`<mode> <object> <stage>\t<path>`。 |
 | `--abbrev[=<n>]` | 在 `-s`/`--stage` 输出里把对象名截断为 `<n>` 位 hex。bare `--abbrev` 即 7；`--abbrev=<n>` 指定长度（取值必须用 `=` 形式，故 bare `--abbrev` 不会吞掉后续 pathspec）。Libra 定长截断而非计算最短唯一前缀。 |
-| `-t` | 在每行路径前加状态标签：`H`（cached）、`R`（removed/deleted）、`C`（modified/changed）、`?`（other/untracked）、`M`（unmerged）。未合并路径不会被隐藏；stage 1/2/3 每个条目都会按 `M <path>` 输出，与 Git 的冲突可见性一致。 |
+| `-t` | 在每行路径前加状态标签：`H`（cached）、`R`（removed/deleted）、`C`（modified/changed）、`?`（other/untracked）、`M`（unmerged）、`S`（skip-worktree）。未合并路径不会被隐藏；stage 1/2/3 每个条目都会按 `M <path>` 输出，与 Git 的冲突可见性一致。skip-worktree 条目始终标 `S`，且永远不会被报为 deleted/modified。 |
+| `-v` | 与 `-t` 相同：在每行路径前加状态标签。Git 的 `-v` 会用小写字母标记 assume-unchanged 文件，Libra 不支持该语义，因此 `-v` 输出与 `-t` 相同。 |
 | `-u`, `--unmerged` | 只列出未合并（冲突）条目——索引 stage 1/2/3——以 stage 样式输出。 |
 | `--full-name` | 为 Git 兼容而接受。Libra 始终输出仓库根相对路径（即 `git --full-name` 形式），因此该标志为 no-op。 |
 | `--others`、`-o` | 显示未跟踪的工作区文件。 |
@@ -156,6 +160,6 @@ tracked-dir/alpha.txt\0tracked-dir/bravo.txt\0
 | 未命中 pathspec 报错 | `--error-unmatch` | `--error-unmatch` | 模型不同 |
 | 行尾信息 | `--eol`（`attr/` 恒空） | `--eol` | N/A |
 | NUL 输出 | `-z`（仅文本模式） | `-z` | 模型不同 |
-| 状态标签 | `-t`（H/R/C/?/M） | `-t`（H/S/M/R/C/K/?） | 模型不同 |
+| 状态标签 | `-t` / `-v`（H/R/C/?/M/S） | `-t` / `-v`（H/S/M/R/C/K/?） | 模型不同（`-v` 的小写 assume-unchanged 不支持；`K`/`U` 不支持） |
 | 未合并条目 | `-u` / `--unmerged` | `-u` / `--unmerged` | 模型不同 |
 | 根相对路径 | `--full-name`（始终；no-op 标志） | `--full-name`（按需） | 模型不同 |

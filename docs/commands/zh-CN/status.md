@@ -22,6 +22,8 @@ libra status [OPTIONS] [pathspec]...
 
 当 `core.filemode=true`（Unix 默认）时，已跟踪普通文件的 owner-execute 位与索引不同而内容未变，属于仅 mode 变化，会在所有输出格式（short、long、porcelain v2、JSON）中被报告为修改；当 `core.filemode=false` 时忽略仅 mode 的差异，但条目类型变化（如普通文件被替换为符号链接）始终会被报告。非法的 `core.filemode` 值会在任何输出前使 `status` fail-closed。
 
+skip-worktree 条目（用 [`update-index --skip-worktree`](update-index.md) 标记）永远不会被报告为删除或修改：其工作树副本被视为完好，与 Git 对稀疏检出索引的行为一致。`core.sparseCheckout=true` 时 Libra 不评估稀疏模式（稀疏规则与物化延后——见兼容表），行为与 `false` 相同，外加每进程一次的提示警告。
+
 ### 显示相关的 config 默认值（`status.*`）
 
 未传对应 CLI 标志时，Libra 会尊重以下 Git 兼容默认值，每个键都按 local → global → system 级联读取（键不区分大小写；local/global 的加密值先解密；legacy 行同样生效；不可读或不支持的 system scope 会被跳过）：

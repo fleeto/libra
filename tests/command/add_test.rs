@@ -4352,3 +4352,153 @@ fn test_add_dot_on_clean_tree_guard() {
         String::from_utf8_lossy(&status_after.stdout)
     );
 }
+
+/// TC-0010 `setup_sparse_entry` (t3705:10-25) through the real SW-07 CLI
+/// entry points: `--force-remove` cleanup, stage, `--skip-worktree` mark,
+/// `core.sparseCheckout=false`, empty HEAD commit. Returns the staged blob
+/// OID. DEP-SW-03 substitution: the OID comes from `ls-files --stage`
+/// because `rev-parse :<path>` (issues/479 RV-01) is not implemented yet.
+fn setup_sparse_entry_tc0010(root: &std::path::Path, content: Option<&str>) -> String {
+    // Idempotent cleanup: an unknown path is a no-op (M-FREMOVE R2).
+    assert_cli_success(
+        &run_libra_command(&["update-index", "--force-remove", "sparse_entry"], root),
+        "setup: force-remove",
+    );
+    match content {
+        Some(text) => fs::write(root.join("sparse_entry"), text).expect("write sparse_entry"),
+        None => fs::write(root.join("sparse_entry"), "").expect("truncate sparse_entry"),
+    }
+    assert_cli_success(
+        &run_libra_command(&["add", "sparse_entry"], root),
+        "setup: add",
+    );
+    assert_cli_success(
+        &run_libra_command(&["update-index", "--skip-worktree", "sparse_entry"], root),
+        "setup: mark skip-worktree",
+    );
+    assert_cli_success(
+        &run_libra_command(&["config", "set", "core.sparseCheckout", "false"], root),
+        "setup: core.sparseCheckout=false",
+    );
+    assert_cli_success(
+        &run_libra_command(
+            &[
+                "commit",
+                "--allow-empty",
+                "-m",
+                "ensure sparse_entry exists at HEAD",
+                "--no-verify",
+            ],
+            root,
+        ),
+        "setup: empty commit",
+    );
+    let out = run_libra_command(&["ls-files", "--stage", "sparse_entry"], root);
+    assert_cli_success(&out, "setup: ls-files --stage");
+    String::from_utf8_lossy(&out.stdout)
+        .split_whitespace()
+        .nth(1)
+        .expect("staged blob oid")
+        .to_string()
+}
+
+/// t3705 `test_sparse_entry_unchanged`: the stage-0 record still reads
+/// `100644 <blob> 0<TAB>sparse_entry` with the skip-worktree bit set.
+fn assert_sparse_entry_unchanged(root: &std::path::Path, blob: &str) {
+    let out = run_libra_command(&["ls-files", "--stage", "sparse_entry"], root);
+    assert_cli_success(&out, "ls-files --stage");
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains(&format!("100644 {blob} 0\t")),
+        "entry unchanged: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(
+        super::skip_worktree_set(root, "sparse_entry"),
+        "the skip-worktree bit must survive"
+    );
+}
+
+/// t3705 `test_sparse_entry_unstaged`: `diff --staged -- sparse_entry` is
+/// empty.
+fn assert_sparse_entry_unstaged(root: &std::path::Path) {
+    let staged = run_libra_command(&["diff", "--staged", "--", "sparse_entry"], root);
+    assert_cli_success(&staged, "diff --staged");
+    assert!(
+        String::from_utf8_lossy(&staged.stdout).trim().is_empty(),
+        "sparse_entry must be unstaged: {}",
+        String::from_utf8_lossy(&staged.stdout)
+    );
+}
+
+/// SW-07 (M-CLI C6, plan issues/490): port of libra-testcases TC-0010 /
+/// `t3705:140-147` — `add --dry-run --ignore-missing sparse_entry` fails with
+/// the sparse diagnostic, leaves the index untouched, and the skip-worktree
+/// bit survives. DEP-SW-03 substitution registered: `ls-files --stage`
+/// provides the OID instead of `rev-parse :<path>`.
+#[test]
+fn test_add_dry_run_ignore_missing_sparse_path_tc0010() {
+    let repo = tempdir().expect("tempdir");
+    let root = repo.path();
+    init_repo_via_cli(root);
+    configure_identity_via_cli(root);
+
+    let blob = setup_sparse_entry_tc0010(root, Some("sparse content\n"));
+    fs::remove_file(root.join("sparse_entry")).expect("delete the worktree copy");
+
+    let out = run_libra_command(
+        &["add", "--dry-run", "--ignore-missing", "sparse_entry"],
+        root,
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "TC-0010 expects exit 1: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("outside of your sparse-checkout definition")
+            && stderr.contains("sparse_entry")
+            && stderr.contains("--sparse"),
+        "sparse diagnostic header, path and hint expected: {stderr}"
+    );
+    assert_sparse_entry_unstaged(root);
+    assert_sparse_entry_unchanged(root, &blob);
+}
+
+/// SW-07 (M-CLI C7, plan issues/490): t3705:46-81 — `add` and `add -A` do not
+/// remove sparse entries.
+#[test]
+fn test_t3705_add_does_not_remove_sparse_entries() {
+    let repo = tempdir().expect("tempdir");
+    let root = repo.path();
+    init_repo_via_cli(root);
+    configure_identity_via_cli(root);
+
+    // `git add does not remove sparse entries` (t3705:46-53).
+    let blob = setup_sparse_entry_tc0010(root, None);
+    fs::remove_file(root.join("sparse_entry")).expect("delete the worktree copy");
+    let out = run_libra_command(&["add", "sparse_entry"], root);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "plain add on a missing sparse entry must fail: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_sparse_entry_unstaged(root);
+    assert_sparse_entry_unchanged(root, &blob);
+
+    // `git add -A does not remove sparse entries` (t3705:55-63).
+    let blob = setup_sparse_entry_tc0010(root, None);
+    fs::remove_file(root.join("sparse_entry")).expect("delete the worktree copy");
+    fs::write(root.join(".gitignore"), "*\n!/sparse_entry\n").expect("write .gitignore");
+    let out = run_libra_command(&["add", "-A"], root);
+    assert_cli_success(&out, "add -A must succeed silently");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).trim().is_empty(),
+        "add -A must not warn: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_sparse_entry_unstaged(root);
+    assert_sparse_entry_unchanged(root, &blob);
+}

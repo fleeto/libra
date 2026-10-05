@@ -8,7 +8,7 @@
 //! (for example `read-tree` without `-m`) deliberately keep the plain
 //! [`Index::update`] / [`Index::add`], because Git clears the bits there.
 
-use git_internal::internal::index::{Index, IndexEntry};
+use git_internal::internal::index::{Flags, Index, IndexEntry};
 
 /// Which extended flags a replacement inherits from the entry it replaces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,6 +70,43 @@ pub fn update_preserving_file_mode_except_intent(
     update_preserving(index, entry, FlagPreservation::ExceptIntentToAdd);
 }
 
+/// Set or clear the `skip_worktree` bit on the stage-0 entry at `path`
+/// (ADR-SW-06, `update-index --skip-worktree`/`--no-skip-worktree`). This is
+/// an in-place flag mutation, not an entry replacement: content, mode and
+/// `intent_to_add` are left untouched, and the working tree is never read.
+/// Returns `false` when no stage-0 entry exists, so the caller can surface
+/// git's `fatal: Unable to mark file <path>` (exit 128).
+pub fn set_skip_worktree(index: &mut Index, path: &str, marked: bool) -> bool {
+    let Some(existing) = index.get(path, 0) else {
+        return false;
+    };
+    // `IndexEntry` is not `Clone`, so mirror every field explicitly. All stat
+    // data and the other flags (including `intent_to_add`) stay untouched.
+    let mut entry = IndexEntry {
+        ctime: existing.ctime.clone(),
+        mtime: existing.mtime.clone(),
+        dev: existing.dev,
+        ino: existing.ino,
+        mode: existing.mode,
+        uid: existing.uid,
+        gid: existing.gid,
+        size: existing.size,
+        hash: existing.hash,
+        flags: Flags {
+            assume_valid: existing.flags.assume_valid,
+            extended: existing.flags.extended,
+            stage: existing.flags.stage,
+            name_length: existing.flags.name_length,
+            skip_worktree: marked,
+            intent_to_add: existing.flags.intent_to_add,
+        },
+        name: existing.name.clone(),
+    };
+    entry.flags.extended = entry.flags.extended_word().is_some();
+    index.update(entry);
+    true
+}
+
 /// Carry the `skip_worktree` bit from `previous` onto the entries of `rebuilt`
 /// by path (ADR-SW-03's rebuild rule: `intent_to_add` is NOT carried — once a
 /// path has tree content it is no longer intent-to-add). Used by the
@@ -117,6 +154,39 @@ mod tests {
                 .expect("oid"),
             3,
         )
+    }
+
+    #[test]
+    fn set_skip_worktree_flips_only_that_bit_in_place() {
+        let _guard = set_hash_kind_for_test(HashKind::Sha1);
+        let mut index = Index::new();
+        let mut existing = entry("s.txt", 0x11);
+        existing.flags.intent_to_add = true;
+        index.add(existing);
+
+        // An unknown path reports failure without panicking.
+        assert!(!set_skip_worktree(&mut index, "missing.txt", true));
+
+        assert!(set_skip_worktree(&mut index, "s.txt", true));
+        let marked = index.get("s.txt", 0).expect("entry");
+        assert!(marked.flags.skip_worktree);
+        assert!(marked.flags.intent_to_add, "other flags stay untouched");
+        assert!(marked.flags.extended, "extended must track the word");
+        assert_eq!(
+            marked.hash.to_string(),
+            entry("s.txt", 0x11).hash.to_string()
+        );
+
+        assert!(set_skip_worktree(&mut index, "s.txt", false));
+        let cleared = index.get("s.txt", 0).expect("entry");
+        assert!(!cleared.flags.skip_worktree);
+        // `extended` tracks the remaining extended word — `intent_to_add` is
+        // still set here, so the entry stays extended.
+        assert_eq!(
+            cleared.flags.extended,
+            cleared.flags.extended_word().is_some(),
+            "extended must track the extended word"
+        );
     }
 
     #[test]

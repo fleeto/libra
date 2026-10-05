@@ -11,6 +11,7 @@ built purely from objects.
 libra update-index --add <path>...
 libra update-index --remove <path>...
 libra update-index --cacheinfo <mode>,<object>,<path>...
+libra update-index --skip-worktree <path>...
 ```
 
 ## Description
@@ -38,6 +39,15 @@ whether it still exists — an existing path is staged, a missing one is dropped
   `--add`, presence on disk decides per path: an existing path is staged, a missing
   one is dropped — which is how upstream setup steps use `--add --remove` in one
   call. `--remove` on its own always drops the path, whether or not it still exists.
+- `--skip-worktree <path>...` marks tracked paths with the skip-worktree bit
+  (index v3 extended flags): `status`/`diff` then ignore the working-tree copy
+  and no command restages it, so the path can stay absent or diverge locally
+  without noise. The mark is recorded in the index only — the working tree is
+  never read and the entry content is untouched. A path that is not in the
+  index fails with `Unable to mark file` (exit 128). Setting the bit rewrites
+  the index as format v3; `--no-skip-worktree` clears it again, and the index
+  returns to format v2 once no entry carries extended flags. Repositories with
+  no marked paths keep byte-identical v2 indexes.
 
 Working-tree staging returns `LBR-IO-002` if the blob or its durable cloud
 index marker cannot be written; it does not panic or save an index entry that
@@ -64,6 +74,8 @@ agent cleanup fail closed while repair remains pending. With
 | `--add` | Allow positional paths to add new (untracked) files. | `libra update-index --add a.txt` |
 | `--remove` | Remove the positional paths from the index. With `--add`, presence on disk decides per path (existing → staged, missing → removed). | `libra update-index --remove old.txt` |
 | `--force-remove` | Drop the positional paths from the index regardless of whether the working-tree file exists; paths the index does not know are a no-op, and every stage of an unmerged path is removed. Wins over `--add`/`--remove`. | `libra update-index --force-remove old.txt` |
+| `--skip-worktree` | Mark tracked paths with the skip-worktree bit (index v3): status/diff ignore the working-tree copy and it is never restaged. Untracked paths fail with exit 128. | `libra update-index --skip-worktree s.txt` |
+| `--no-skip-worktree` | Clear the skip-worktree bit again; the index returns to v2 when no extended flags remain. | `libra update-index --no-skip-worktree s.txt` |
 | `--add --remove` | Both permissions at once: stage what exists, drop what is gone. | `libra update-index --add --remove a.txt gone.txt` |
 | `--cacheinfo <mode>,<object>,<path>` | Register an entry from an object id (repeatable). | `libra update-index --cacheinfo 100644,<oid>,dir/f.txt` |
 | `--json` / `--machine` | Structured output: `{ updated: <n>, removed: <n> }`. | `libra --json update-index --add a.txt` |
@@ -74,7 +86,7 @@ agent cleanup fail closed while repair remains pending. With
 |------|---------|
 | `0` | The index was updated and saved. |
 | `9` / `LBR-WARN-001` | The local index was saved, but cloud index repair remains pending and `--exit-code-on-warning` was used. |
-| `128` | Not inside a repository, a usage error (bad `--cacheinfo`, untracked path without `--add`), or a missing working-tree file. |
+| `128` | Not inside a repository, a usage error (bad `--cacheinfo`, untracked path without `--add`), a missing working-tree file, or `--skip-worktree`/`--no-skip-worktree` on a path that is not in the index. |
 | `128` / `LBR-IO-002` | Working-tree blob or durable cloud index-marker persistence failed; fix storage permissions and retry. |
 
 ## Examples
@@ -93,6 +105,11 @@ libra write-tree   # fails with LBR-REPO-002
 libra update-index --add src/new.rs
 libra update-index --remove src/old.rs
 
+# Mark a path index-only: status/diff ignore its working-tree copy
+libra update-index --skip-worktree s.txt
+libra ls-files -v          # `S s.txt`
+libra update-index --no-skip-worktree s.txt
+
 # Stage a working-tree symlink as a 120000 link-target blob
 libra update-index --add link-to-target
 ```
@@ -104,7 +121,21 @@ libra update-index --add link-to-target
 | Stage a file | `libra update-index --add f` | `git update-index --add f` |
 | Remove a path | `libra update-index --remove f` | `git update-index --remove f` |
 | Remove a path even when the file is gone | `libra update-index --force-remove f` | `git update-index --force-remove f` |
+| Mark a path skip-worktree | `libra update-index --skip-worktree f` | `git update-index --skip-worktree f` |
 | Register by id | `libra update-index --cacheinfo m,oid,p` | `git update-index --cacheinfo m,oid,p` |
 
 Deferred (not exposed): bare-path stat refresh, `--chmod`,
-`--assume-unchanged`, `--skip-worktree`, `--index-info`, and other Git flags.
+`--assume-unchanged`, `--index-info`, and other Git flags.
+
+### Index v3 and downgrade note
+
+Marking a path with `--skip-worktree` rewrites the index in Git index format
+v3 (the extended-flags format upstream Git has used since 2006). Libra reads
+both v2 and v3. Older Libra releases (`<= 0.23.x` for the index reader) reject
+v3 indexes with an "index version is not supported" error. Before downgrading,
+clear the marks so the index returns to v2:
+
+```bash
+libra ls-files -v | grep '^S ' | cut -d' ' -f2- |
+  xargs -r libra update-index --no-skip-worktree
+```

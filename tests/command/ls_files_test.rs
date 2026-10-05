@@ -1123,3 +1123,86 @@ fn test_literal_pathspecs_disables_magic() {
         String::from_utf8_lossy(&out.stdout)
     );
 }
+
+/// SW-07 (M-CLI C4, plan issues/490): a skip-worktree entry tags `S` under
+/// `-t`/`-v`, is never reported deleted/modified, and is excluded from the
+/// `-d`/`-m` listings (git's `if (ce_skip_worktree(ce)) continue;`).
+#[test]
+fn test_ls_files_tags_skip_worktree() {
+    let repo = setup_ls_files_repo();
+    let root = repo.path();
+
+    super::mark_skip_worktree(root, "tracked.txt");
+    assert!(
+        super::skip_worktree_set(root, "tracked.txt"),
+        "precondition: the bit must be set through the index API"
+    );
+
+    // `S` wins over the worktree-state tags: even with the file deleted or
+    // modified the entry tags `S` and never lists under `-d`/`-m`.
+    let deleted = fs::rename(root.join("tracked.txt"), root.join("tracked.bak"));
+    assert!(deleted.is_ok(), "delete the worktree copy");
+    let list = run_libra_command(&["ls-files", "-t"], root);
+    assert_cli_success(&list, "-t on a marked entry");
+    assert!(
+        String::from_utf8_lossy(&list.stdout).contains("S tracked.txt"),
+        "deleted marked entry must tag S: {}",
+        String::from_utf8_lossy(&list.stdout)
+    );
+    assert!(
+        !String::from_utf8_lossy(&list.stdout).contains("R tracked.txt"),
+        "a marked entry must never tag R: {}",
+        String::from_utf8_lossy(&list.stdout)
+    );
+    let deleted_list = run_libra_command(&["ls-files", "-d"], root);
+    assert!(
+        !String::from_utf8_lossy(&deleted_list.stdout).contains("tracked.txt"),
+        "-d must not list marked entries: {}",
+        String::from_utf8_lossy(&deleted_list.stdout)
+    );
+
+    // Restore the file, modify it: same `S` rule, `-m` stays silent for it.
+    fs::rename(root.join("tracked.bak"), root.join("tracked.txt")).expect("restore");
+    fs::write(root.join("tracked.txt"), "modified\n").expect("modify");
+    let list = run_libra_command(&["ls-files", "-t"], root);
+    assert!(
+        String::from_utf8_lossy(&list.stdout).contains("S tracked.txt"),
+        "modified marked entry must tag S: {}",
+        String::from_utf8_lossy(&list.stdout)
+    );
+    let modified_list = run_libra_command(&["ls-files", "-m"], root);
+    assert!(
+        !String::from_utf8_lossy(&modified_list.stdout).contains("tracked.txt"),
+        "-m must not list marked entries: {}",
+        String::from_utf8_lossy(&modified_list.stdout)
+    );
+
+    // Ordinary entries still tag `H`, and `-v` equals `-t` output (Libra has
+    // no assume-unchanged lowercase spelling).
+    let list = run_libra_command(&["ls-files", "-t"], root);
+    assert!(
+        String::from_utf8_lossy(&list.stdout).contains("H tracked-dir/alpha.txt"),
+        "plain entries tag H: {}",
+        String::from_utf8_lossy(&list.stdout)
+    );
+    let t = run_libra_command(&["ls-files", "-t"], root);
+    let v = run_libra_command(&["ls-files", "-v"], root);
+    assert_eq!(
+        String::from_utf8_lossy(&t.stdout),
+        String::from_utf8_lossy(&v.stdout),
+        "-v must match -t while assume-unchanged is unsupported"
+    );
+
+    // The JSON shape is unchanged (the extended flag is not serialized).
+    let json = run_libra_command(&["--json", "ls-files"], root);
+    assert_cli_success(&json, "json ls-files");
+    let parsed = parse_json_stdout(&json);
+    assert!(
+        parsed["data"]
+            .as_array()
+            .expect("entries")
+            .iter()
+            .any(|e| e["path"] == "tracked.txt"),
+        "json must still list the marked entry: {parsed}"
+    );
+}

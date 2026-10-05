@@ -444,3 +444,160 @@ fn test_update_index_path_honors_core_filemode_false() {
         String::from_utf8_lossy(&out.stdout)
     );
 }
+
+/// SW-07 (M-CLI C1–C3, plan issues/490): `--skip-worktree`/`--no-skip-worktree`
+/// mark and unmark tracked paths without reading the working tree; a mark
+/// moves the index to format v3 and clearing it returns to v2; a plain
+/// `update-index` on a marked path is a no-op (the working-tree copy is never
+/// restaged); paths the index does not know fail with git's `Unable to mark
+/// file` (exit 128) and persist nothing.
+#[test]
+fn test_update_index_skip_worktree_matrix() {
+    use super::{assert_cli_success, configure_identity_via_cli, index_version};
+
+    let repo = init_repo();
+    let root = repo.path();
+    configure_identity_via_cli(root);
+    fs::write(root.join("s.txt"), "s\n").expect("write s");
+    fs::write(root.join("untracked.txt"), "u\n").expect("write untracked");
+    assert_cli_success(&run_libra_command(&["add", "s.txt"], root), "stage s");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "init", "--no-verify"], root),
+        "commit",
+    );
+    assert_eq!(index_version(root), 2, "plain repo starts at index v2");
+
+    // C1: the mark succeeds silently, keeps the working tree untouched, shows
+    // `S` through `ls-files -v`, and bumps the on-disk index to v3.
+    assert_cli_success(
+        &run_libra_command(&["update-index", "--skip-worktree", "s.txt"], root),
+        "C1 mark",
+    );
+    assert_eq!(
+        fs::read(root.join("s.txt")).expect("worktree untouched"),
+        b"s\n"
+    );
+    let list = run_libra_command(&["ls-files", "-v"], root);
+    assert_cli_success(&list, "C1 ls-files -v");
+    assert!(
+        String::from_utf8_lossy(&list.stdout).contains("S s.txt"),
+        "C1 expected `S s.txt`: {}",
+        String::from_utf8_lossy(&list.stdout)
+    );
+    assert_eq!(index_version(root), 3, "C1 the marked index must be v3");
+
+    // JSON counts a mark as an update.
+    let marked = run_libra_command(
+        &["--json", "update-index", "--skip-worktree", "s.txt"],
+        root,
+    );
+    assert_cli_success(&marked, "C1 json mark");
+    let parsed = parse_json_stdout(&marked);
+    assert_eq!(parsed["data"]["updated"], 1, "C1 updated count: {parsed}");
+
+    // A plain `update-index <path>` on a marked entry is a no-op: git assumes
+    // the working-tree copy is good, so a modified file is never restaged and
+    // the bit survives.
+    fs::write(root.join("s.txt"), "modified\n").expect("modify s");
+    let (mode, hash, size, intent, skip) =
+        super::index_entry_snapshot(root, "s.txt").expect("stage-0 entry");
+    assert!(skip, "precondition");
+    assert_cli_success(
+        &run_libra_command(&["update-index", "s.txt"], root),
+        "plain update on a marked entry",
+    );
+    assert_eq!(
+        super::index_entry_snapshot(root, "s.txt"),
+        Some((mode, hash, size, intent, true)),
+        "plain update must not restage or unmark the entry"
+    );
+
+    // C2: clearing the mark restores `H` and the index returns to v2. The
+    // working-tree copy is restored first so the ordinary worktree-state tag
+    // applies again (a modified file would tag `C`).
+    fs::write(root.join("s.txt"), "s\n").expect("restore s");
+    assert_cli_success(
+        &run_libra_command(&["update-index", "--no-skip-worktree", "s.txt"], root),
+        "C2 clear",
+    );
+    let list = run_libra_command(&["ls-files", "-v"], root);
+    assert!(
+        String::from_utf8_lossy(&list.stdout).contains("H s.txt"),
+        "C2 expected `H s.txt`: {}",
+        String::from_utf8_lossy(&list.stdout)
+    );
+    assert_eq!(index_version(root), 2, "C2 the index must return to v2");
+
+    // C3: an untracked path fails like git 2.55 (`Unable to mark file`, 128)
+    // for both spellings, and a failed mark in a multi-path invocation must
+    // not persist the earlier marks.
+    for flag in ["--skip-worktree", "--no-skip-worktree"] {
+        let out = run_libra_command(&["update-index", flag, "untracked.txt"], root);
+        assert_eq!(out.status.code(), Some(128), "{flag} untracked exits 128");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("Unable to mark file untracked.txt"),
+            "{flag} untracked message: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    let mixed = run_libra_command(
+        &["update-index", "--skip-worktree", "s.txt", "untracked.txt"],
+        root,
+    );
+    assert_eq!(mixed.status.code(), Some(128), "mixed invocation exits 128");
+    assert!(
+        !super::skip_worktree_set(root, "s.txt"),
+        "a failed invocation must not persist earlier marks"
+    );
+}
+
+/// SW-07 (M-CLI C5, plan issues/490, revised per git 2.55 `process_path`):
+/// a skip-worktree entry short-circuits the add/remove handling — an explicit
+/// `--remove` drops the entry (exit 0) while a plain update leaves it alone.
+#[test]
+fn test_update_index_remove_removes_skip_worktree_entry() {
+    use super::{assert_cli_success, configure_identity_via_cli};
+
+    let repo = init_repo();
+    let root = repo.path();
+    configure_identity_via_cli(root);
+    fs::write(root.join("s.txt"), "s\n").expect("write s");
+    assert_cli_success(&run_libra_command(&["add", "s.txt"], root), "stage s");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "init", "--no-verify"], root),
+        "commit",
+    );
+    assert_cli_success(
+        &run_libra_command(&["update-index", "--skip-worktree", "s.txt"], root),
+        "mark",
+    );
+    fs::remove_file(root.join("s.txt")).expect("remove the worktree copy");
+
+    // `--remove` on a marked entry removes it regardless of file presence
+    // (git: `allow_remove && remove_file_from_index` in the skip-worktree
+    // branch of process_path).
+    assert_cli_success(
+        &run_libra_command(&["update-index", "--remove", "s.txt"], root),
+        "C5 remove",
+    );
+    assert!(
+        super::index_entry_snapshot(root, "s.txt").is_none(),
+        "C5 the entry must be gone"
+    );
+
+    // Without `--remove` the same marked entry is kept untouched.
+    fs::write(root.join("s.txt"), "s\n").expect("rewrite s");
+    assert_cli_success(&run_libra_command(&["add", "s.txt"], root), "restage s");
+    assert_cli_success(
+        &run_libra_command(&["update-index", "--skip-worktree", "s.txt"], root),
+        "mark again",
+    );
+    assert_cli_success(
+        &run_libra_command(&["update-index", "s.txt"], root),
+        "plain update",
+    );
+    assert!(
+        super::skip_worktree_set(root, "s.txt"),
+        "a plain update must keep the marked entry"
+    );
+}

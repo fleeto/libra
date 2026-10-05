@@ -180,6 +180,8 @@ unsupported 子面。
 
 - 进展（2026-09-20，issues/490 SW-01）：`git-internal` 已升级到 `=0.10.0`，索引 **v3 扩展标志字**（`CE_SKIP_WORKTREE` / `CE_INTENT_TO_ADD`）的读取、写入（按需输出 v3，否则保持 v2 字节不变）与未知扩展位 fail-closed 已落地；Libra 的 AI history 清理解析器接受 v3 并复用依赖的扩展位解码。设置/观察入口（`update-index --skip-worktree`、`ls-files` 的 `S` 标记）与 `status`/`add` 的尊重语义仍待 490 SW-03..SW-07，`clone --sparse` / 顶层 `sparse-checkout` 保持延后。
 
+- 进展（2026-09-20，issues/490 SW-07，部分重开完成）：索引位与尊重/保留语义**已交付**：`update-index --skip-worktree`/`--no-skip-worktree`（mark 优先于 `--force-remove`；未跟踪路径 `Unable to mark file` 128；skip-worktree 条目短路 add/remove——显式 `--remove` 删除条目、其余 no-op）、`ls-files -t`/`-v` 的 `S` 标记与 `-d`/`-m` 排除、`status`/`diff`/`add -u/-A`/`commit -a` 对该位的尊重（SW-05）、暂存/历史改写命令的位保留（SW-03/04）、`add` 稀疏诊断与 `--sparse`（plan-20260918 SW-06）。**命令与物化仍延后**：`sparse-checkout` 命令、`info/sparse-checkout` 模式、cone 模式、工作树物化、`clone --sparse` 不在本进度内。设置位后索引为 v3，旧版 Libra（≤ 0.23.x 索引读取器）无法读取；降级补偿步骤见 `docs/commands/update-index.md`。
+
 - lore.md 2.2 landed the NON-declined complement: `libra sparse-view`, a strictly READ-ONLY view filter over `ls-files`/`diff` (working-tree) output that NEVER materializes or prunes the working tree, never writes skip-worktree bits, and never filters the to-be-committed set (status stays honest). The materializing `sparse-checkout` command and `clone --sparse` remain declined here.
 
 ### D15：跨命令 patch mode

@@ -109,6 +109,8 @@ libra clone --shallow-since "2 weeks ago" git@github.com:user/repo.git
 libra clone -l /path/to/source /path/to/dest
 ```
 
+大型仓库的**本地路径克隆**（数千提交 / 数十万可达对象）经由与 `repack`/`pack-objects`/`maintenance` 相同的共享 pack 编码器完成，不再停住于 “Fetching objects”（ADR-CLH-01 / issues/496）。
+
 ### `--depth <N>`
 
 创建浅克隆，将历史截断到指定提交数。`N` 必须是正整数。除非给出 `--no-single-branch`，否则隐含 `--single-branch`（对齐 `git clone`）。

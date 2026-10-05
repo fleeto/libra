@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.30.28] — 2026-10-04
+
+### Contain cancelled OpenCode exporters (plan/agent)
+
+- Cancelled OpenCode export runs are now contained through a pidfd-pinned
+  namespace-init process (`pidfd_open`/`pidfd_send_signal` on Linux), avoiding
+  a PID/PGID-reuse kill race and letting the kernel tear down escaped
+  descendants once the verified init exits. The bwrap fd-mount capability
+  probe was also fixed to bind the sealed exporter to a path under a writable
+  `/tmp` (rather than a top-level read-only path), so the sandbox gate no
+  longer mis-reports bwrap as unusable on hosts where `/tmp` must be created.
+
+### Libra plan issue #496 closeout (local-path clone)
+
+- `libra clone <local-path>` of a large repository (thousands of commits) no
+  longer deadlocks at “Fetching objects” with 0% CPU; the local-path fetch
+  path reuses the single shared `pack_writer::encode_pack_bytes` encoder
+  instead of a second in-house copy in `src/internal/protocol/local_client.rs`
+  (ADR-CLH-01 / issues/496). Regression guards and the full suite are green
+  (9522/9522 passed).
+
 ## [0.30.5] — 2026-09-28
 
 ### FastCDC effect evidence (FL-05)

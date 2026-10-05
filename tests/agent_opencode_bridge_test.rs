@@ -377,12 +377,23 @@ async fn opencode_export_durable_snapshot_uses_repository_keyed_hmac() {
 
     let rows = repo
         .query_rows(
-            "SELECT metadata_json FROM agent_session \
-             WHERE provider_session_id = 'ses_hmac_snapshot'",
+            "SELECT checkpoint.metadata_blob_oid \
+             FROM agent_checkpoint AS checkpoint \
+             JOIN agent_session AS session ON session.session_id = checkpoint.session_id \
+             WHERE session.provider_session_id = 'ses_hmac_snapshot' \
+             ORDER BY checkpoint.created_at DESC LIMIT 1",
         )
         .await;
-    assert_eq!(rows.len(), 1, "successful export must have one session row");
-    let metadata_json: String = rows[0].try_get_by("metadata_json").unwrap();
+    assert_eq!(rows.len(), 1, "successful export must have a checkpoint");
+    let metadata_blob_oid: String = rows[0].try_get_by("metadata_blob_oid").unwrap();
+    let metadata_blob = repo.run(&["cat-file", "-p", &metadata_blob_oid], None);
+    assert!(
+        metadata_blob.status.success(),
+        "checkpoint metadata blob: {}",
+        describe(&metadata_blob)
+    );
+    let metadata_json =
+        String::from_utf8(metadata_blob.stdout).expect("checkpoint metadata blob is UTF-8 JSON");
     let metadata: Value =
         serde_json::from_str(&metadata_json).expect("OpenCode metadata is valid JSON");
     let Some(digest) = metadata["transcript_snapshot"]["source"]["digest_sha256"].as_str() else {

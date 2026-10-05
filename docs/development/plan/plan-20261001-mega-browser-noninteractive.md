@@ -2311,4 +2311,27 @@ Result 只允许 `PASS` 或 `FAIL`。`FAIL` 必须列出 P0/P1 条目，并在�
 
 ### 收口条件与边界
 
-原始全量失败证据来自 head `747992b`；第一轮源码修复为 `870cbbc`，诊断修订为 `85776a5`，安装路径修订为 `828cd20`，`093c7aa` 的 Linux job 又发现缺少显式 Meson 编译，head `50a58ea` 则暴露 exporter FD 源路径解析失败。head `d907152` 的 Linux 专项 job 发现条件编译未覆盖的 wrapper 类型残留；head `534bcf8`、`e7c8162`、`cc119e6` 均通过 Linux 编译和六个沙箱门，但 bridge HMAC snapshot E2E 缺少 digest，串行运行仍复现。当前工作树保留 staging 路径、统一 Linux 类型，并针对唯一失败用例收集 job/session/checkpoint 状态；明确修复该问题并验证最新 CI 后再收口。最终须继续核对最新 head 的全部必需 CI，尤其 `compat-offline-core` 与 `opencode-export-linux`；所有必需项全绿前 PR #609 保持未合并。本次不新增版本、tag 或 release。
+原始全量失败证据来自 head `747992b`；第一轮源码修复为 `870cbbc`，诊断修订为 `85776a5`，安装路径修订为 `828cd20`，`093c7aa` 的 Linux job 又发现缺少显式 Meson 编译，head `50a58ea` 则暴露 exporter FD 源路径解析失败。head `d907152` 的 Linux 专项 job 发现条件编译未覆盖的 wrapper 类型残留；head `534bcf8`、`e7c8162`、`cc119e6` 均通过 Linux 编译和六个沙箱门，但 bridge HMAC snapshot E2E 缺少 digest，串行运行仍复现。此段记录的 PR 状态截至 2026-10-04 13:15 UTC；PR #609 后于当日 14:27 UTC squash 合并，合并 head 仍是 `adb9b59`。合并之后推送的 `15fc909` 不在该 merge commit 中，后续修复与 CI 验证转入基于当前 main 的独立分支。本次不新增版本、tag 或 release。
+
+### 2026-10-04 CI 失败复核与修复进度
+
+12:19–13:15 UTC 的 PR #609 run `37201651296` 检查 head `adb9b59880f13c34dcab56cb74b57074f6b42fb6`，`compat-offline-core` 和 `opencode-export-linux` 失败。全量 job 跑了 9523 项，9519 通过、4 项失败：
+
+| 失败项 | 根因与当前修复 | 验证状态 |
+|---|---|---|
+| `opencode_export_sandboxed_outer_cancel_contains_setsid_writer` | 日志复现 marker 从 1 增至 56 字节；仅设置 Bubblewrap `--as-pid-1` 仍不够。现已为 namespace init 打开 pidfd，取消时先向该 PID-1 发送 `SIGKILL`，再终止仍由 guard 持有的 bwrap 进程组；命名空间 init 退出后由内核清理逃逸子进程。 | 本机本轮未完成 Bubblewrap Linux 运行，需由 PR 专项 Linux job 验证；若回归失败，诊断会列出残留进程的 host PID、进程组与 `NSpid`。 |
+| `opencode_export_durable_snapshot_uses_repository_keyed_hmac` | E2E 读取的是 `agent_session.metadata_json` 生命周期回执；持久化快照与摘要在 `agent_checkpoint.metadata_blob_oid` 指向的 checkpoint `metadata.json` 中。 | 测试现改为读取真实 checkpoint blob 并验证其中的 repository-keyed HMAC；Linux bridge E2E 待推送后复核。 |
+| `hook_capture_telemetry_redacts_session_ids_and_omits_exporter_stderr` | 失败断言并非遥测泄漏：架构 guard 仍要求旧匿名 `tempfile()`，而封存实现已改为具名 staging tempfile、`TempPath` 和 `PinnedFd` 生命期。 | Guard 已同步检查具名、只读 staging 文件路径；架构 guard 定向本地测试 1/1 通过，完整 CI 待复核。 |
+| `serial_registry_matches_the_classifier` | OpenCode bridge 新增的 9 个带串行 lane 测试没有登记在 `tests/SERIAL_REGISTRY.tsv`。 | 已补齐 9 行并重新生成 `.config/nextest.toml`；external 函数过滤器从 21 增至 30，守卫计数同步更新；`compat_serial_registry` 25/25 通过。 |
+
+当前工作树保留 `/usr/bin/libra-bwrap` 可信路径、Bubblewrap 0.13.0 版本/哈希 pin、具名 FD staging 和显式 Meson 编译。修复后第二轮 `cargo test --all --no-fail-fast`、`cargo clippy --all-targets --all-features -- -D warnings`、`cargo +nightly fmt --all --check`、workflow actionlint 与差异空白检查均通过；其中 `command_test` 为 4298/4298，`compat_serial_registry` 为 25/25。架构 guard 定向测试也通过；Mac 上的 HMAC bridge 测试因缺少可信 Bubblewrap 而跳过，只证明可编译，HMAC 行为需由 Linux bridge E2E 验收。本机 Linux 专项试跑未完成；pidfd 取消回归与 bridge E2E 原计划由 PR Linux job 验收。此处 PR #609 未合并的状态仅代表 2026-10-04 13:15 UTC 核查点，后续合并与修复分支状态见下节。本次不改版本、tag 或 release。
+
+### 合并后的 follow-up CI 状态（2026-10-04 19:45 UTC）
+
+GitHub API 确认 PR #609 于 `2026-10-04 14:27:16 UTC` 合并，merge commit 为 `622bed527950525a71405e4d1c022b9973caf36d`，合并时 PR head 为 `adb9b59880f13c34dcab56cb74b57074f6b42fb6`。修复提交 `15fc9098cf531369f8b20b9f3406989adc4fa1ce` 后推送到已合并的原分支，因此不属于该 merge commit；`.github/workflows/base.yml` 仅监听 `pull_request`，该提交没有 GitHub check runs。为让 Linux 专项门在真实修复上执行，已从 GitHub 当前 main `622bed5` 建立 `fix/opencode-exporter-cancel-ci`，并只重放后续修复差异（10 个文件），避免把已合并 PR 的历史重新带入差异。该基线上的 `cargo test --all --no-fail-fast`、`cargo clippy --all-targets --all-features -- -D warnings`、`cargo +nightly fmt --all --check`、`actionlint -ignore 'SC2086' .github/workflows/base.yml` 与差异空白检查均通过。Linux pidfd 取消回归和 OpenCode bridge HMAC E2E 尚未在此平台执行，须由后续 PR 的 `opencode-export-linux` job 验收；本地结果不代替该 Linux 门。
+
+PR #612 首轮 CI run `37230096807` 的 `compat-clippy` 在 Linux `-D warnings` 下发现 `linux_pidfd_supported` 从未被调用（`dead_code`）；本机 macOS 目标不编译这段 Linux-only 函数，因此此前本地 Clippy 未发现。该辅助探测函数已删除：生产路径直接尝试打开经过验证的 namespace-init pidfd，系统不支持时以带上下文的 I/O 错误失败关闭。后续 PR run 仍须确认 Clippy、Linux sandbox 与 bridge E2E 全部通过。
+
+随后 PR run `37231625328` 的 `opencode-export-linux` 在 `runner_controls_preserved` 失败：共享 bounded runner 也服务于没有 PID namespace 的 fixture exporter，却被无条件要求存在 `NSpid=1`。已把 namespace-init pidfd 捕获放到独立的 trusted-bwrap runner 入口；通用 runner 和仅测 FD bind 的 probe 不要求 namespace，而生产 OpenCode bwrap 路径仍强制验证。该 CI 门尚待新 head 复验，bridge HMAC E2E 因前置门失败未运行。本地 OpenCode exporter 模块定向测试 15/15、全目标/全特性 Clippy、格式与 workflow lint 已通过；Linux 条件分支仍以远端新 run 为准。
+
+PR #612 run `37233480909` 的 `opencode-export-linux` 已通过 Linux sandbox gates；随后 `compat-clippy` 与 bridge E2E 步骤均因 `run_bounded_exporter` 在生产 Linux library 构建中未使用而失败，bridge 测试尚未执行。该 wrapper 只供单元测试的 fixture 使用，现已限定 `cfg(test)`；生产执行继续走 `run_sandboxed_bounded_exporter` 并验证 namespace-init pidfd。下一轮 CI 须确认 Clippy 通过且 bridge E2E 真正执行成功。

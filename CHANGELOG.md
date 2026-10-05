@@ -1,5 +1,37 @@
 # Changelog
 
+## [0.30.30] — 2026-10-06
+
+### Skip-worktree entry points (issues/490 SW-07)
+
+- `libra update-index --skip-worktree` / `--no-skip-worktree` set or clear the
+  skip-worktree bit (index v3 extended flags) on tracked paths without reading
+  the working tree; `status`/`diff` then ignore the working-tree copy and no
+  command restages it. Marks win over `--force-remove` (git `update_one`
+  order); a path that is not in the index fails with git's
+  `Unable to mark file` (exit 128); a marked entry short-circuits the
+  add/remove handling per git's `process_path` — an explicit `--remove` drops
+  the entry, anything else is a no-op (the C5 expectation was corrected
+  against git 2.55 and registered in the plan revision history).
+- `libra ls-files -t` / `-v` tag skip-worktree entries `S` and exclude them
+  from `-d`/`-m` (git's `if (ce_skip_worktree(ce)) continue;`); `-v` equals
+  `-t` while the lowercase assume-unchanged spelling stays deferred.
+- Marking rewrites the index as Git index format v3; clearing returns it to
+  v2 once no entry carries extended flags. A downgrade note in
+  `docs/commands/update-index.md` documents the compensating
+  `update-index --no-skip-worktree` step for older Libra readers.
+- TC-0010 (`t3705:10-25`, `:140-147`) and the `t3705:46-81` sparse-entry
+  guards are ported (`add_test::test_add_dry_run_ignore_missing_sparse_path_tc0010`,
+  `test_t3705_add_does_not_remove_sparse_entries`) using `ls-files --stage`
+  for the OID while `rev-parse :<path>` (issues/479 RV-01) is still pending.
+- D10 partially reopened: the skip-worktree index bit, its preservation
+  (SW-03/04) and honoring (SW-05) are delivered; the materializing
+  `sparse-checkout` command, sparsity rules, and `clone --sparse` remain
+  deferred.
+- Test infrastructure: `tests/compat-ledger/SURFACES.gen` is registered
+  executable (100755) again so `compat_ledger_schema` can run its generator
+  from a fresh checkout.
+
 ## [0.30.29] — 2026-10-05
 
 ### Centralized storage plan closeout (issues/500, NO-GO)

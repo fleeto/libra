@@ -353,17 +353,18 @@ jobs:
   # plan-20260830 SBX-03 / DEP-SBX-03: Linux-only export-bridge e2e with a
   # trusted bwrap preflight. compat-offline-core is self-hosted and does not
   # guarantee Linux+apt+bwrap, so this job is the D-group oracle
-  # (`runs-on: ubuntu-latest`, uname pin, apt install bubblewrap, named
+  # (`runs-on: ubuntu-24.04`, uname pin, pinned bubblewrap build, named
   # gates must not skip).
   opencode-export-linux:
     name: opencode-export-linux
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:
       CARGO_TERM_COLOR: always
       RUSTUP_TOOLCHAIN: stable
       CARGO_PROFILE_TEST_DEBUG: "0"
       RUST_MIN_STACK: "16777216"
+      LIBRA_LINUX_SANDBOX_EXE: /usr/bin/libra-bwrap
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
@@ -385,14 +386,34 @@ jobs:
       - name: Install bubblewrap
         run: |
           sudo apt-get update
-          sudo apt-get install -y bubblewrap
-          bwrap_path=$(command -v bwrap)
-          # GitHub-hosted Ubuntu runners may disable unprivileged user
-          # namespaces. Bubblewrap's documented setuid mode keeps this
-          # D-group probe usable without running the test suite as root.
-          sudo chmod u+s "$bwrap_path"
-          command -v bwrap
-          bwrap --version
+          sudo apt-get install -y curl libcap-dev meson ninja-build pkg-config util-linux xz-utils
+          version=0.13.0
+          archive="/tmp/bubblewrap-${version}.tar.xz"
+          curl --fail --location --silent --show-error \
+            "https://github.com/containers/bubblewrap/releases/download/v${version}/bubblewrap-${version}.tar.xz" \
+            --output "$archive"
+          echo "4734237473c0e5d695e4e9034a34e43b2dbf5164655bd13fa59ae376b2b7a765  $archive" \
+            | sha256sum --check --status
+          tar -C /tmp -xf "$archive"
+          meson setup /tmp/libra-bubblewrap-build "/tmp/bubblewrap-${version}" \
+            --prefix=/usr \
+            -Dtests=false -Dman=disabled -Dselinux=disabled \
+            -Dbash_completion=disabled -Dzsh_completion=disabled
+          meson compile -C /tmp/libra-bubblewrap-build
+          sudo install -o root -g root -m 0755 \
+            /tmp/libra-bubblewrap-build/bwrap "$LIBRA_LINUX_SANDBOX_EXE"
+          # Ubuntu 24.04 restricts unprivileged user namespaces by default.
+          # This runner is an ephemeral VM; enable the namespace mode used by
+          # modern non-setuid bubblewrap for this CI job only.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          test -x "$LIBRA_LINUX_SANDBOX_EXE"
+          test ! -w "$LIBRA_LINUX_SANDBOX_EXE"
+          stat -c '%U:%G %a %n' /usr /usr/bin "$LIBRA_LINUX_SANDBOX_EXE"
+          "$LIBRA_LINUX_SANDBOX_EXE" --version
+          "$LIBRA_LINUX_SANDBOX_EXE" --help | grep -F -- '--bind-fd'
+          "$LIBRA_LINUX_SANDBOX_EXE" --help | grep -F -- '--ro-bind-fd'
+          "$LIBRA_LINUX_SANDBOX_EXE" --help | grep -F -- '--as-pid-1'
+          "$LIBRA_LINUX_SANDBOX_EXE" --unshare-all --die-with-parent --as-pid-1 --ro-bind / / -- /bin/true
 
       - name: Run Linux export sandbox gates
         run: |
@@ -411,6 +432,7 @@ jobs:
           run_gate trusted_bwrap_rejects_user_writable
           run_gate backend_missing_degrades_metadata_only
           run_gate trusted_bwrap_exe_channel_used
+          run_gate opencode_export_sandboxed_outer_cancel_contains_setsid_writer
 
       - name: Run OpenCode export bridge e2e (must not skip)
         run: |

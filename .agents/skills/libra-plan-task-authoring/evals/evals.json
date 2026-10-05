@@ -18,6 +18,18 @@
       "prompt": "Issue triage is complete, but acceptance of a breaking change is still undecided. Make the task card ready so implementation can begin.",
       "expected_output": "Identify the compatibility decision as a maintainer gate, leave it unresolved, and do not label the card ready or authorize implementation until the decision and other gates are settled.",
       "files": []
+    },
+    {
+      "id": 4,
+      "prompt": "A user reports that `libra status` is wrong, but hasn't said what they expected or what they observed. Draft the task card anyway.",
+      "expected_output": "Explain that the problem statement is not clear enough to scope safely and recommend `libra-issue-triage` to establish actual/expected behavior and acceptance evidence before authoring a card.",
+      "files": []
+    },
+    {
+      "id": 5,
+      "prompt": "The maintainer accepted card ABC-02, its dependencies and start gates are clear, and I explicitly authorize implementing ABC-02 now.",
+      "expected_output": "Confirm that the selected card is accepted and implementation is explicitly authorized, then recommend handing the card ID, scope, write set, acceptance criteria, dependencies, and verification to `libra-contribution-execution`.",
+      "files": []
     }
   ]
 }

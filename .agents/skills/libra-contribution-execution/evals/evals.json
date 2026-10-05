@@ -4,17 +4,35 @@
     {
       "id": 1,
       "prompt": "I'm already on branch `codex/my-feature`. Please implement task card ABC-02 from the current plan; the card does not specify a branch change.",
-      "expected_output": "Inspect Libra worktree status and the task card, preserve unrelated changes, and continue on the contributor's current branch unless repository policy or a specific instruction requires a branch change. Implement only the authorized card scope and run its specified verification.",
+      "expected_output": "Inspect Libra worktree status, resolve the task card to its linked Issue, verify their scope/status and declared prerequisites, and preserve unrelated changes. Since the feature branch is clean and the card does not require a branch change, continue on it and implement only the authorized scope.",
       "files": []
     },
     {
       "id": 2,
+      "prompt": "Please implement GitHub Issue #742. The issue is closed, but the matching task card is still marked active and lists an unresolved prerequisite.",
+      "expected_output": "Resolve the Issue to its matching task card, report the conflicting Issue/card statuses and unresolved prerequisite, and recommend concrete reconciliation steps (verify acceptance, then update the card/plan if complete, or correct/reopen the Issue and keep the card blocked if work remains). Do not begin dependent implementation or silently change status.",
+      "files": []
+    },
+    {
+      "id": 3,
+      "prompt": "Please implement task card ABC-02. The worktree is dirty and I'm on `main`.",
+      "expected_output": "Warn that the current branch is main and the worktree is dirty, identify/list changed paths, preserve unrelated changes, and recommend `libra switch -c codex/ABC-02` without running it automatically. Also resolve the card's Issue and prerequisite state before editing.",
+      "files": []
+    },
+    {
+      "id": 4,
+      "prompt": "Please implement GitHub Issue #913. I can't find a task card linked to it.",
+      "expected_output": "Verify the Issue and search for its matching task card. If none exists, report that and recommend `libra-work-discovery` to check related/already planned work, then `libra-plan-task-authoring` to reuse or draft a card; do not infer task-card selection or start implementation.",
+      "files": []
+    },
+    {
+      "id": 5,
       "prompt": "While implementing the selected card, I found it needs a new migration and overlaps another active card. Go ahead and add both to this PR.",
       "expected_output": "Explain that scope and write-set/dependency changes require a maintainer decision. Do not silently expand implementation; report the evidence and ask to update/resequence the plan first.",
       "files": []
     },
     {
-      "id": 3,
+      "id": 6,
       "prompt": "The card is implemented. Push the branch and open a PR; I have authorized opening the PR but didn't mention pushing.",
       "expected_output": "Prepare the PR description and create the PR only if the authorized workflow can do so without unapproved push; otherwise explain that pushing is a separate operation requiring explicit authorization. Do not infer push authorization from PR authorization.",
       "files": []

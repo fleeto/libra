@@ -43,11 +43,87 @@ filter = 'test(/(^|::)d1_upsert_and_query$/)'
 test-group = 'external'
 
 [[profile.default.overrides]]
+filter = 'test(/(^|::)dirty_mark_rejected_in_multi_worktree_repo$/)'
+test-group = 'external'
+
+[[profile.default.overrides]]
 filter = 'test(/(^|::)fsck_heal_restores_object_from_durable_tier$/)'
 test-group = 'external'
 
 [[profile.default.overrides]]
+filter = 'test(/(^|::)linked_service_dirty_mark_is_scoped$/)'
+test-group = 'external'
+
+[[profile.default.overrides]]
+filter = 'test(/(^|::)opencode_export_binary_trust_revalidates$/)'
+test-group = 'external'
+
+[[profile.default.overrides]]
+filter = 'test(/(^|::)opencode_export_durable_snapshot_uses_repository_keyed_hmac$/)'
+test-group = 'external'
+
+[[profile.default.overrides]]
+filter = 'test(/(^|::)opencode_export_macos_is_unsupported_before_spawn$/)'
+test-group = 'external'
+
+[[profile.default.overrides]]
+filter = 'test(/(^|::)opencode_export_oversize_session_degrades$/)'
+test-group = 'external'
+
+[[profile.default.overrides]]
+filter = 'test(/(^|::)opencode_export_plaintext_never_in_persist_or_logs$/)'
+test-group = 'external'
+
+[[profile.default.overrides]]
+filter = 'test(/(^|::)opencode_export_rejects_wrong_native_session_without_export_claim$/)'
+test-group = 'external'
+
+[[profile.default.overrides]]
+filter = 'test(/(^|::)opencode_export_whole_session_idempotent$/)'
+test-group = 'external'
+
+[[profile.default.overrides]]
+filter = 'test(/(^|::)opencode_historical_import_e2e_uses_trusted_export_bytes$/)'
+test-group = 'external'
+
+[[profile.default.overrides]]
+filter = 'test(/(^|::)opencode_registered_failure_releases_dirty_job_claim_and_marker$/)'
+test-group = 'external'
+
+[[profile.default.overrides]]
 filter = 'test(/(^|::)r2_connection_basic$/)'
+test-group = 'external'
+
+[[profile.default.overrides]]
+filter = 'test(/(^|::)service_dirty_mark_requires_matching_repo_id$/)'
+test-group = 'external'
+
+[[profile.default.overrides]]
+filter = 'test(/(^|::)service_dirty_mark_scope_mismatch_rejected$/)'
+test-group = 'external'
+
+[[profile.default.overrides]]
+filter = 'test(/(^|::)service_dirty_mark_stale_epoch_rejected$/)'
+test-group = 'external'
+
+[[profile.default.overrides]]
+filter = 'test(/(^|::)service_end_to_end_events_marks_and_fault_recovery$/)'
+test-group = 'external'
+
+[[profile.default.overrides]]
+filter = 'test(/(^|::)service_marks_survive_an_externally_held_registry_lock$/)'
+test-group = 'external'
+
+[[profile.default.overrides]]
+filter = 'test(/(^|::)service_reports_identity_read_failure_as_server_error$/)'
+test-group = 'external'
+
+[[profile.default.overrides]]
+filter = 'test(/(^|::)service_restarts_over_its_own_legacy_record_in_a_linked_repository$/)'
+test-group = 'external'
+
+[[profile.default.overrides]]
+filter = 'test(/(^|::)service_startup_refuses_a_foreign_stale_control_file$/)'
 test-group = 'external'
 
 [[profile.default.overrides]]

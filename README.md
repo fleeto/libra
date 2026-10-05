@@ -190,7 +190,7 @@ cargo +nightly fmt --all
 
 For Windows builds, please see the [Windows build guide](docs/installation/windows.md) for OpenSSL setup instructions.
 
-For detailed contribution guidelines, see [docs/development/contributing.md](docs/development/contributing.md).
+For detailed contribution guidelines, see [docs/contributing.md](docs/contributing.md).
 
 ---
 

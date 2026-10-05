@@ -49,3 +49,11 @@ When advancing a card, update its plan and `plan-status.md` together as required
 Use `gh` only when the user explicitly authorizes the specific remote action, such as viewing or creating a PR or a plan-mandated release. Check availability and authentication first. Do not post Issue comments, assign or label Issues, close Issues, merge, push, tag, or publish without explicit authorization for that operation.
 
 Report evidence, proposed/existing identifiers, lifecycle and acceptance, dependencies, start gates, and maintainer decisions still needed. Briefly explain `DEP-*`, lifecycle, and acceptance when first used.
+
+## Handoff to other project skills
+
+- If the request is an unclear bug report, feature request, or documentation problem whose behavior, impact, or expected outcome is not yet established, recommend `libra-issue-triage` before drafting cards.
+- If the user wants a new GitHub Issue drafted or an Issue body clarified, recommend `libra-issue-triage`; planning may proceed with a clear brief, but record the Issue link as pending until the user creates the Issue and supplies its URL/number.
+- If the user asks whether work already exists or wants a progress report, recommend `libra-work-discovery`; use its findings to avoid duplicate plans and to ground readiness decisions.
+- When the plan/card is accepted, the user selects a specific ready card, and implementation is explicitly authorized, recommend `libra-contribution-execution` with the card ID, dependencies, write set, acceptance criteria, verification, and remaining gates. A draft or accepted plan alone does not authorize implementation.
+- If planning reveals that the underlying Issue remains unclear, return to `libra-issue-triage`; if the user only needs the updated status explained, return to `libra-work-discovery` rather than making unrequested edits.

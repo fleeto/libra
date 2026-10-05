@@ -144,8 +144,8 @@ fn git_deletes_last_tracked_file_via_git_rm_and_commit() {
     assert_success(&["git ls-tree"], &ls_tree);
     let names = String::from_utf8_lossy(&ls_tree.stdout);
     assert!(
-        !names.contains("only.txt"),
-        "git HEAD tree should no longer contain only.txt: {names}"
+        names.trim().is_empty(),
+        "git HEAD tree should be empty after deleting the last tracked file: {names}"
     );
 }
 
@@ -170,8 +170,100 @@ fn libra_deletes_last_tracked_file_via_rm_and_commit_all() {
     let ls_tree = fixture.success(&fixture.repo, &["ls-tree", "-r", "--name-only", "HEAD"]);
     let names = String::from_utf8_lossy(&ls_tree.stdout);
     assert!(
-        !names.contains("only.txt"),
-        "libra HEAD tree should no longer contain only.txt: {names}"
+        names.trim().is_empty(),
+        "libra HEAD tree should be empty after deleting the last tracked file: {names}"
+    );
+}
+
+/// Mirror the documented issue #497 path without `-a`: `libra rm` already
+/// stages the deletion, so a plain `libra commit` must produce the deletion
+/// commit too.
+#[test]
+fn libra_deletes_last_tracked_file_via_rm_and_plain_commit() {
+    let fixture = CliFixture::new();
+    fixture.init_repo();
+
+    fs::write(fixture.repo.join("only.txt"), "only\n").expect("write only.txt");
+    fixture.success(&fixture.repo, &["add", "only.txt"]);
+    fixture.success(&fixture.repo, &["commit", "--no-verify", "-m", "baseline"]);
+
+    fixture.success(&fixture.repo, &["rm", "only.txt"]);
+    fixture.success(
+        &fixture.repo,
+        &["commit", "--no-verify", "-m", "delete last"],
+    );
+
+    let ls_tree = fixture.success(&fixture.repo, &["ls-tree", "-r", "--name-only", "HEAD"]);
+    let names = String::from_utf8_lossy(&ls_tree.stdout);
+    assert!(
+        names.trim().is_empty(),
+        "libra HEAD tree should be empty after deleting the last tracked file: {names}"
+    );
+}
+
+/// `status --porcelain` and `ls-files` must agree with Git once the deletion
+/// of the last tracked file is staged: `D  only.txt` and an empty file list.
+#[test]
+fn libra_status_and_ls_files_match_git_after_staged_deletion() {
+    let fixture = CliFixture::new();
+    fixture.init_repo();
+
+    fs::write(fixture.repo.join("only.txt"), "only\n").expect("write only.txt");
+    fixture.success(&fixture.repo, &["add", "only.txt"]);
+    fixture.success(&fixture.repo, &["commit", "--no-verify", "-m", "baseline"]);
+    fixture.success(&fixture.repo, &["rm", "only.txt"]);
+
+    let status = fixture.success(&fixture.repo, &["status", "--porcelain"]);
+    let status_text = String::from_utf8_lossy(&status.stdout);
+    assert!(
+        status_text.lines().any(|line| line == "D  only.txt"),
+        "libra status --porcelain should report the staged deletion: {status_text}"
+    );
+
+    let ls_files = fixture.success(&fixture.repo, &["ls-files"]);
+    let ls_files_text = String::from_utf8_lossy(&ls_files.stdout);
+    assert!(
+        ls_files_text.trim().is_empty(),
+        "libra ls-files should be empty once the index is empty: {ls_files_text}"
+    );
+
+    // Git upstream duel: same scenario must yield the same porcelain entry and
+    // an empty `git ls-files`.
+    let temp = tempdir().expect("tempdir");
+    let git_repo = temp.path().join("git_repo");
+    fs::create_dir_all(&git_repo).expect("create git repo");
+    let git = |args: &[&str]| {
+        Command::new("git")
+            .args(args)
+            .current_dir(&git_repo)
+            .output()
+            .expect("spawn git")
+    };
+    assert_success(&["git init"], &git(&["init", "-q"]));
+    assert_success(&["git config"], &git(&["config", "user.email", "t@t.com"]));
+    assert_success(&["git config"], &git(&["config", "user.name", "t"]));
+    fs::write(git_repo.join("only.txt"), "only\n").expect("write only.txt");
+    assert_success(&["git add"], &git(&["add", "only.txt"]));
+    assert_success(&["git commit"], &git(&["commit", "-q", "-m", "baseline"]));
+    assert_success(&["git rm"], &git(&["rm", "-q", "only.txt"]));
+
+    let git_status = git(&["status", "--porcelain=v1"]);
+    assert_success(&["git status"], &git_status);
+    let git_status_text = String::from_utf8_lossy(&git_status.stdout);
+    let git_entries: Vec<&str> = git_status_text.lines().collect();
+    assert_eq!(
+        git_entries,
+        vec!["D  only.txt"],
+        "git status --porcelain=v1 should report exactly the staged deletion: {git_status_text}"
+    );
+
+    let git_ls_files = git(&["ls-files"]);
+    assert_success(&["git ls-files"], &git_ls_files);
+    assert!(
+        String::from_utf8_lossy(&git_ls_files.stdout)
+            .trim()
+            .is_empty(),
+        "git ls-files should be empty once the index is empty"
     );
 }
 
@@ -187,7 +279,9 @@ fn libra_deletes_last_tracked_file_via_add_all_and_commit() {
 
     fs::remove_file(fixture.repo.join("only.txt")).expect("remove only.txt");
     fixture.success(&fixture.repo, &["add", "-A"]);
-    // `add -A` may also pick up untracked files; the deletion must still land.
+    // `add -A` may also pick up untracked files (the init-generated
+    // `.libraignore` lands in the commit, matching `git add -A`); the
+    // deletion itself must still land, so only.txt must be gone from HEAD.
     fixture.success(
         &fixture.repo,
         &["commit", "--no-verify", "-m", "delete last"],
@@ -201,8 +295,10 @@ fn libra_deletes_last_tracked_file_via_add_all_and_commit() {
     );
 }
 
-/// A genuinely clean repository (with HEAD content and no staged changes) must
-/// still refuse to commit, matching Git's "nothing to commit".
+/// A genuinely clean repository (with HEAD content and no staged, unstaged or
+/// untracked changes) must still refuse to commit with Git's exact
+/// classification, `LBR-REPO-003`, and the documented exit-code contract
+/// (128 by default, repo-category code 3 under `LIBRA_FINE_EXIT_CODES=1`).
 #[test]
 fn libra_clean_repo_still_reports_nothing_to_commit() {
     let fixture = CliFixture::new();
@@ -216,9 +312,64 @@ fn libra_clean_repo_still_reports_nothing_to_commit() {
     // No changes staged and no untracked leftovers: must be refused.
     let output = fixture.run(&fixture.repo, &["commit", "--no-verify", "-m", "nothing"]);
     assert_failure(&["commit (clean)"], &output);
+    assert_eq!(
+        output.status.code(),
+        Some(128),
+        "clean commit must exit 128 by default"
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("nothing to commit"),
-        "clean repo should report nothing to commit: {stderr}"
+        stderr.contains("nothing to commit, working tree clean"),
+        "clean repo should report the exact Git classification: {stderr}"
+    );
+    assert!(
+        stderr.contains("LBR-REPO-003"),
+        "clean commit failure must carry the stable error code: {stderr}"
+    );
+
+    // Fine-grained exit codes: the repo category code replaces 128.
+    let fine = fixture
+        .command(&fixture.repo, &["commit", "--no-verify", "-m", "nothing"])
+        .env("LIBRA_FINE_EXIT_CODES", "1")
+        .output()
+        .expect("spawn libra with fine exit codes");
+    assert_failure(&["commit (clean, fine exit codes)"], &fine);
+    assert_eq!(
+        fine.status.code(),
+        Some(3),
+        "clean commit must exit with the repo category code under LIBRA_FINE_EXIT_CODES=1"
+    );
+}
+
+/// An unstaged filesystem deletion of a tracked file must NOT be picked up by
+/// a plain `libra commit`: staging through `libra rm` / `libra add -A` (or
+/// `commit -a`) is the prerequisite, matching Git's refusal.
+#[test]
+fn libra_unstaged_deletion_is_refused_by_plain_commit() {
+    let fixture = CliFixture::new();
+    fixture.init_repo();
+
+    fs::write(fixture.repo.join("only.txt"), "only\n").expect("write only.txt");
+    fixture.success(&fixture.repo, &["add", "only.txt", ".libraignore"]);
+    fixture.success(&fixture.repo, &["commit", "--no-verify", "-m", "baseline"]);
+
+    // Filesystem-only deletion; nothing staged.
+    fs::remove_file(fixture.repo.join("only.txt")).expect("remove only.txt");
+
+    let output = fixture.run(&fixture.repo, &["commit", "--no-verify", "-m", "unstaged"]);
+    assert_failure(&["commit (unstaged deletion)"], &output);
+    assert_eq!(
+        output.status.code(),
+        Some(128),
+        "unstaged deletion must be refused with exit 128"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("no changes added to commit"),
+        "unstaged deletion should report the unstaged classification: {stderr}"
+    );
+    assert!(
+        stderr.contains("LBR-REPO-003"),
+        "unstaged-deletion refusal must carry the stable error code: {stderr}"
     );
 }

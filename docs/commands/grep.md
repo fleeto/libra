@@ -18,6 +18,8 @@ Multiple patterns can be supplied via `-e` flags or read from files via `-f`. Wh
 
 Output can be tuned with flags to show only filenames (`-l`, `-L`), match counts per file (`-c`), line numbers (`-n`), byte offsets (`-b`), or inverted matches (`-v`). The command supports pathspec filtering to restrict the search to specific files or directories. Repository searches use the shared pathspec engine, including `:(top)`, `:(exclude)`, `:(icase)`, `:(literal)`, and `:(glob)` magic.
 
+When run from a subdirectory with no explicit pathspec, a repository-mode search (default, `--cached`, `--untracked`, or `--tree`) is scoped to the current directory, and human-readable output shows paths relative to the current directory (files above it appear with a `../` prefix) — matching Git. From the repository root, behavior is unchanged. `--full-name` restores worktree-root-relative paths; JSON output always keeps `path` worktree-root-relative. An explicit pathspec such as `:/` restores whole-tree searching from any directory.
+
 When stdout is a terminal, output is sent through a pager. In JSON mode, structured output is emitted for programmatic consumption.
 
 When stdout is piped and the downstream command exits early, `libra grep` exits quietly without
@@ -49,8 +51,9 @@ Exit codes follow Git's grep contract: matches exit 0, no selected matches exit 
 | Cached | | `--cached` | Search in the index (staging area) instead of the working tree. |
 | Untracked | | `--untracked` | In addition to tracked files, also search untracked, non-ignored files in the working tree. With `--no-exclude-standard`, ignored files are included too. Cannot be combined with `--cached` or `--tree`. |
 | No index | | `--no-index` | Search the filesystem directly (the given paths, or the current directory) without a repository or index. Works outside a repository, recurses every file including ignored ones (skipping `.git`/`.libra`), and shows paths relative to the current directory. With `--exclude-standard`, standard ignore rules are applied (see below). Cannot be combined with `--cached`, `--untracked`, or `--tree`. |
+| Full name | | `--full-name` | Show paths relative to the repository root instead of the current directory. Repository-mode searches display paths relative to the current directory by default; this restores the worktree-root-relative form. `--no-index` is unaffected. |
 | Exclude standard | | `--exclude-standard` / `--no-exclude-standard` | Select whether standard ignore rules (`.gitignore`/`.libraignore`, `info/exclude`, `core.excludesFile`) apply to filesystem searches. Only valid with `--no-index` (which by default *includes* ignored files, so `--exclude-standard` excludes them) or `--untracked` (which by default *excludes* ignored files, so `--no-exclude-standard` includes them). Using either flag for tracked contents (default / `--cached` / `--tree`) is a usage error: `--[no-]exclude-standard cannot be used for tracked contents` (exit 2; Git exits 128 — documented difference). The two flags override each other; the last one given wins (Git semantics). |
-| Max depth | | `--max-depth <DEPTH>` | Descend at most DEPTH levels of directories below each pathspec. A file directly inside the pathspec directory is depth 0; a negative value means no limit. With no pathspec, depth is measured from the worktree root (not the current directory) — `libra grep` always searches the whole worktree with worktree-relative paths, so to limit to a subdirectory, pass it as a pathspec. |
+| Max depth | | `--max-depth <DEPTH>` | Descend at most DEPTH levels of directories below each pathspec. A file directly inside the pathspec directory is depth 0; a negative value means no limit. With no pathspec, depth is measured from the current directory (a repository-mode search with no pathspec is scoped to the current directory; pass `:/` to search the whole tree). |
 | Heading | | `--heading` / `--no-heading` | Print each file name once as a heading above its matches instead of prefixing every line. `--no-heading` is the default. |
 | Break | | `--break` / `--no-break` | Print an empty line between matches from different files. `--no-break` is the default. |
 | Null | `-z` | `--null` | Output a NUL byte after the file name (and line number) instead of `:`, for machine consumption. |
@@ -269,6 +272,8 @@ HEAD~3:src/main.rs:// TODO: old code
 
 ## Structured Output (JSON)
 
+The `path` fields are worktree-root-relative for repository-mode searches (unchanged even when run from a subdirectory, where human output shows current-directory-relative paths) and current-directory-relative for `--no-index`. The result set still reflects the current-directory scope (ADR scope applies to the matched files, not just the display).
+
 ```json
 {
   "pattern": "TODO",
@@ -392,7 +397,9 @@ jj does not have a built-in grep command. Users are expected to use external too
 | Max count | `-m` / `--max-count` | `-m` / `--max-count` | N/A |
 | Only matching | `-o` / `--only-matching` | `-o` / `--only-matching` | N/A |
 | Show function | Not supported | `-p` / `--show-function` | N/A |
-| Max depth | `--max-depth <DEPTH>` | `--max-depth <DEPTH>` | Equivalent when a pathspec is given (depth is measured relative to the pathspec). With no pathspec, Libra measures depth from the worktree root rather than the current directory, because `libra grep` always searches the whole worktree with worktree-relative paths — pass the directory as a pathspec to scope it. |
+| No index | | `--no-index` | `--no-index` | N/A |
+| Full name | `--full-name` | `--full-name` | N/A |
+| Max depth | `--max-depth <DEPTH>` | `--max-depth <DEPTH>` | Equivalent when a pathspec is given (depth is measured relative to the pathspec). With no pathspec, both measure from the current directory (Libra scopes a no-pathspec repository search to the current directory) — pass `:/` to search the whole tree. |
 | Threads | Not supported | `--threads` | N/A |
 | Color | Automatic (terminal detection) | `--color` | N/A |
 | JSON output | Built-in JSON structure | Not supported | N/A |

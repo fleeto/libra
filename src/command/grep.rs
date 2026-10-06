@@ -229,6 +229,14 @@ pub struct GrepArgs {
     /// per output line (context lines are suppressed).
     #[clap(short = 'o', long = "only-matching")]
     only_matching: bool,
+
+    /// Show paths relative to the repository root instead of the current
+    /// directory. Repository-mode searches display paths relative to the
+    /// current directory by default (ADR-GR-02); this flag restores the
+    /// worktree-root-relative form. `--no-index` always shows paths relative
+    /// to the current directory and is unaffected.
+    #[clap(long = "full-name")]
+    full_name: bool,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -745,12 +753,11 @@ fn apply_max_depth(files: Vec<SearchFile>, args: &GrepArgs) -> CliResult<Vec<Sea
 fn within_max_depth(file: &Path, specs: &[PathspecDepthRoot], max_depth: usize) -> bool {
     let file_comps = path_depth_components(file);
     if specs.is_empty() {
-        // No pathspec: depth is measured from the WORKTREE ROOT. Unlike Git
-        // (which scopes a no-pathspec search to the current directory), `libra
-        // grep` always searches the whole worktree with worktree-relative
-        // paths regardless of cwd; the implicit root therefore stays the
-        // worktree root. To limit to a subdirectory, pass it as a pathspec —
-        // then depth is measured relative to that pathspec, matching Git.
+        // No pathspec AND no synthesized current-directory scope: this only
+        // happens when running from the worktree root (ADR-GR-02 synthesizes
+        // a current-directory prefix below the root), so the implicit depth
+        // root is the worktree root, which equals the current directory. To
+        // limit to a subdirectory, pass it as a pathspec.
         return file_comps.saturating_sub(1) <= max_depth;
     }
     specs.iter().any(|spec| {
@@ -1046,9 +1053,38 @@ fn tracked_files_from_index(
         .collect()
 }
 
+/// Build the effective repository-mode pathspec set (ADR-GR-02): when no
+/// positive pathspec is given, the search scopes to the current directory,
+/// matching Git. A top-anchored directory prefix for the current directory is
+/// synthesized; at the worktree root the prefix is empty (matches everything),
+/// so no spec is added and behavior is byte-for-byte unchanged. Explicit
+/// pathspecs (including `:/`, `:(top)` and `../`) always win over the scope.
+/// Pure with respect to the environment inputs, so it is unit testable.
+fn scoped_repo_pathspecs(
+    pathspec: &[String],
+    cur_dir: &Path,
+    working_dir: &Path,
+) -> CliResult<PathspecSet> {
+    let set =
+        PathspecSet::from_workdir(pathspec, cur_dir, working_dir).map_err(pathspec_error_to_cli)?;
+    if set.has_positive() {
+        return Ok(set);
+    }
+    let rel = pathdiff::diff_paths(cur_dir, working_dir).unwrap_or_default();
+    if rel.as_os_str().is_empty() {
+        return Ok(set);
+    }
+    // Append the synthesized scope to the caller's specs (which may contain
+    // exclude-only pathspecs that must be preserved) rather than replacing
+    // them.
+    let synthesized = format!(":/{}", rel.to_string_lossy().replace('\\', "/"));
+    let mut specs = pathspec.to_vec();
+    specs.push(synthesized);
+    PathspecSet::from_workdir(&specs, cur_dir, working_dir).map_err(pathspec_error_to_cli)
+}
+
 fn compile_repo_pathspecs(pathspec: &[String]) -> CliResult<PathspecSet> {
-    PathspecSet::from_workdir(pathspec, &util::cur_dir(), &util::working_dir())
-        .map_err(pathspec_error_to_cli)
+    scoped_repo_pathspecs(pathspec, &util::cur_dir(), &util::working_dir())
 }
 
 fn pathspec_error_to_cli(error: PathspecError) -> CliError {
@@ -1268,6 +1304,23 @@ fn search_in_content(
         .collect()
 }
 
+/// Human-readable display path (ADR-GR-02): repository-mode results are shown
+/// relative to the current directory (`../` for files above it) unless
+/// `--full-name` restores worktree-root-relative paths. `--no-index` results
+/// are already current-directory-relative and are never rewritten. JSON output
+/// is unaffected (ADR-GR-03: `path` stays worktree-root-relative).
+fn display_path<'a>(args: &GrepArgs, path: &'a str) -> std::borrow::Cow<'a, str> {
+    if args.no_index || args.full_name {
+        std::borrow::Cow::Borrowed(path)
+    } else {
+        std::borrow::Cow::Owned(
+            util::workdir_to_current(path)
+                .to_string_lossy()
+                .into_owned(),
+        )
+    }
+}
+
 /// Render grep output to stdout or JSON.
 fn render_grep_output(
     args: &GrepArgs,
@@ -1298,24 +1351,27 @@ fn render_grep_output(
 
     if args.files_with_matches {
         for file in result.files_with_matches.as_ref().unwrap_or(&Vec::new()) {
+            let file = display_path(args, file);
             if args.null {
                 pager.write_str(&format!("{file}\0"))?;
             } else {
-                pager.write_line(file)?;
+                pager.write_line(&file)?;
             }
         }
     } else if args.files_without_matches {
         for file in result.files_without_matches.as_ref().unwrap_or(&Vec::new()) {
+            let file = display_path(args, file);
             if args.null {
                 pager.write_str(&format!("{file}\0"))?;
             } else {
-                pager.write_line(file)?;
+                pager.write_line(&file)?;
             }
         }
     } else if args.count {
         let sep = if args.null { '\0' } else { ':' };
         for count in result.counts.as_ref().unwrap_or(&Vec::new()) {
-            pager.write_line(&format!("{}{sep}{}", count.path, count.count))?;
+            let file = display_path(args, &count.path);
+            pager.write_line(&format!("{file}{sep}{}", count.count))?;
         }
     } else {
         // Regular match output with optional highlighting and -A/-B/-C context.
@@ -1329,9 +1385,10 @@ fn render_grep_output(
         let do_break = args.break_;
         let mut prev: Option<(String, usize)> = None;
         for match_item in result.matches.as_ref().unwrap_or(&Vec::new()) {
+            let displayed = display_path(args, &match_item.path).into_owned();
             let new_file = prev
                 .as_ref()
-                .map(|(prev_path, _)| *prev_path != match_item.path)
+                .map(|(prev_path, _)| *prev_path != displayed)
                 .unwrap_or(true);
 
             if new_file {
@@ -1347,7 +1404,7 @@ fn render_grep_output(
                     }
                 }
                 if heading {
-                    pager.write_line(&match_item.path)?;
+                    pager.write_line(&displayed)?;
                 }
             } else if context_active
                 && let Some((_, prev_line)) = &prev
@@ -1378,7 +1435,7 @@ fn render_grep_output(
             let prefix = if heading {
                 String::new()
             } else {
-                format!("{}{sep}", match_item.path)
+                format!("{displayed}{sep}")
             };
             let formatted = if args.byte_offset && !match_item.is_context {
                 format!(
@@ -1393,7 +1450,7 @@ fn render_grep_output(
             };
             pager.write_line(&formatted)?;
 
-            prev = Some((match_item.path.clone(), match_item.line_number));
+            prev = Some((displayed, match_item.line_number));
         }
     }
 
@@ -1496,27 +1553,17 @@ mod tests {
 
         // Each flag alone sets its own field.
         assert!(GrepArgs::parse_from(["grep", "--exclude-standard", "pat"]).exclude_standard);
-        assert!(
-            GrepArgs::parse_from(["grep", "--no-exclude-standard", "pat"]).no_exclude_standard
-        );
+        assert!(GrepArgs::parse_from(["grep", "--no-exclude-standard", "pat"]).no_exclude_standard);
 
         // Git semantics: the last of the pair wins and resets the other field,
         // exactly like the existing `--heading`/`--no-heading` pair.
-        let excl_then_no = GrepArgs::parse_from([
-            "grep",
-            "--exclude-standard",
-            "--no-exclude-standard",
-            "pat",
-        ]);
+        let excl_then_no =
+            GrepArgs::parse_from(["grep", "--exclude-standard", "--no-exclude-standard", "pat"]);
         assert!(!excl_then_no.exclude_standard, "first flag must be reset");
         assert!(excl_then_no.no_exclude_standard, "last flag must win");
 
-        let no_then_excl = GrepArgs::parse_from([
-            "grep",
-            "--no-exclude-standard",
-            "--exclude-standard",
-            "pat",
-        ]);
+        let no_then_excl =
+            GrepArgs::parse_from(["grep", "--no-exclude-standard", "--exclude-standard", "pat"]);
         assert!(no_then_excl.exclude_standard, "last flag must win");
         assert!(
             !no_then_excl.no_exclude_standard,
@@ -1745,5 +1792,60 @@ mod tests {
             .unwrap()
             .replace_all(&colored, "");
         assert_eq!(plain, "hello world");
+    }
+
+    #[test]
+    fn test_scoped_repo_pathspecs_synthesizes_current_directory_prefix() {
+        let root = Path::new("/work/repo");
+        let sub = Path::new("/work/repo/sub");
+
+        // Empty pathspec at the root: no scope is added (matches everything).
+        let at_root = scoped_repo_pathspecs(&[], root, root).unwrap();
+        assert!(at_root.matches_path("trk"));
+        assert!(at_root.matches_path("sub/strk"));
+
+        // Empty pathspec from `sub`: only files under `sub` are matched.
+        let in_sub = scoped_repo_pathspecs(&[], sub, root).unwrap();
+        assert!(in_sub.matches_path("sub/strk"));
+        assert!(in_sub.matches_path("sub/deep/file3"));
+        assert!(
+            !in_sub.matches_path("trk"),
+            "must scope to the current directory"
+        );
+        assert!(!in_sub.matches_path("file1"));
+
+        // A positive pathspec always wins over the synthesized scope.
+        let explicit = scoped_repo_pathspecs(&[":/"].map(String::from), sub, root).unwrap();
+        assert!(
+            explicit.matches_path("trk"),
+            "explicit :/ restores the whole tree"
+        );
+        let rel = scoped_repo_pathspecs(&["../trk"].map(String::from), sub, root).unwrap();
+        assert!(rel.matches_path("trk"));
+
+        // Exclude-only pathspecs still scope to the current directory.
+        let excludes =
+            scoped_repo_pathspecs(&[":(exclude)ign.log"].map(String::from), sub, root).unwrap();
+        assert!(excludes.matches_path("sub/strk"));
+        assert!(!excludes.matches_path("sub/ign.log"));
+        assert!(
+            !excludes.matches_path("trk"),
+            "exclude-only set still scopes"
+        );
+    }
+
+    #[test]
+    fn test_display_path_passthrough_for_no_index_and_full_name() {
+        // `--no-index` and `--full-name` never rewrite the stored path.
+        let no_index = GrepArgs::parse_from(["grep", "--no-index", "--full-name", "o"]);
+        assert_eq!(display_path(&no_index, "sub/strk"), "sub/strk");
+
+        let full_name = GrepArgs::parse_from(["grep", "--full-name", "o"]);
+        assert_eq!(display_path(&full_name, "sub/strk"), "sub/strk");
+
+        // Default repository-mode display goes through the cwd-relative
+        // conversion (exercised end-to-end by the subdirectory matrix tests).
+        let plain = GrepArgs::parse_from(["grep", "o"]);
+        assert!(!plain.no_index && !plain.full_name);
     }
 }

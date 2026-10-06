@@ -18,6 +18,8 @@ libra grep -f <file> [-- <pathspec>...]
 
 输出可通过标志调整为只显示文件名（`-l`、`-L`）、每文件匹配数量（`-c`）、行号（`-n`）、字节偏移（`-b`）或反向匹配（`-v`）。命令支持 pathspec 过滤，以将搜索限制到特定文件或目录。仓库内搜索使用共享 pathspec 引擎，支持 `:(top)`、`:(exclude)`、`:(icase)`、`:(literal)`、`:(glob)` magic。
 
+从子目录执行且未给显式 pathspec 时，仓库模式搜索（默认、`--cached`、`--untracked` 或 `--tree`）限定到当前目录，人读输出路径相对当前目录（当前目录之上的文件带 `../` 前缀）——与 Git 一致。从仓库根执行行为不变。`--full-name` 恢复工作树根相对路径；JSON 输出的 `path` 始终为工作树根相对。显式 pathspec `:/` 可从任意目录恢复整树搜索。
+
 当 stdout 是终端时，输出会通过分页器发送。在 JSON 模式下，会输出适合程序消费的结构化结果。
 
 当 stdout 被管道连接且下游命令提前退出时，`libra grep` 会静默正常结束，不打印 panic/backtrace 或 `Broken pipe` 诊断。
@@ -48,8 +50,9 @@ libra grep -f <file> [-- <pathspec>...]
 | Cached | | `--cached` | 在索引（暂存区）中搜索，而不是工作树。 |
 | Untracked | | `--untracked` | 除已跟踪文件外，还搜索工作树中未跟踪、非忽略的文件。加 `--no-exclude-standard` 时也包含被忽略的文件。不能与 `--cached` 或 `--tree` 同用。 |
 | No index | | `--no-index` | 直接搜索文件系统（给定路径或当前目录），不使用仓库或索引。可在仓库外使用，递归遍历每个文件（包括被忽略的，跳过 `.git`/`.libra`），显示相对当前目录的路径。加 `--exclude-standard` 时套用标准忽略规则（见下）。不能与 `--cached`、`--untracked` 或 `--tree` 同用。 |
+| Full name | | `--full-name` | 显示相对仓库根的路径而不是相对当前目录。仓库模式搜索默认显示相对当前目录的路径；此 flag 恢复工作树根相对形式。`--no-index` 不受影响。 |
 | Exclude standard | | `--exclude-standard` / `--no-exclude-standard` | 选择文件系统搜索是否套用标准忽略规则（`.gitignore`/`.libraignore`、`info/exclude`、`core.excludesFile`）。仅对 `--no-index`（默认**包含**被忽略文件，`--exclude-standard` 时排除）或 `--untracked`（默认**排除**被忽略文件，`--no-exclude-standard` 时包含）有意义。对已跟踪内容（默认 / `--cached` / `--tree`）使用任一 flag 是用法错误：`--[no-]exclude-standard cannot be used for tracked contents`（退出码 2；Git 为 128，登记为有意差异）。两个 flag 互覆盖，后出现者生效（Git 语义）。 |
-| Max depth | | `--max-depth <DEPTH>` | 每个 pathspec 下最多下降 DEPTH 层目录。直接位于 pathspec 目录内的文件深度为 0；负值表示无限制。未给 pathspec 时从工作树根度量深度（而非当前目录）——`libra grep` 始终搜索整个工作树并使用工作树相对路径，若要限定到某子目录，请将其作为 pathspec 传入。 |
+| Max depth | | `--max-depth <DEPTH>` | 每个 pathspec 下最多下降 DEPTH 层目录。直接位于 pathspec 目录内的文件深度为 0；负值表示无限制。未给 pathspec 时从当前目录度量深度（无 pathspec 的仓库模式搜索限定到当前目录；传 `:/` 可搜索整个工作树）。 |
 
 ### 选项细节
 
@@ -264,6 +267,8 @@ HEAD~3:src/main.rs:// TODO: old code
 ```
 
 ## 结构化输出（JSON）
+
+仓库模式搜索的 `path` 字段为工作树根相对（从子目录执行也不变——此时人读输出为当前目录相对路径）；`--no-index` 为当前目录相对。结果集仍反映当前目录作用域（作用域作用于匹配的文件集，不只是显示）。
 
 ```json
 {

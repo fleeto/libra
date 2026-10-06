@@ -1,7 +1,6 @@
 //! Integration tests for the grep command.
 
-use std::fs;
-use std::path::Path;
+use std::{fs, path::Path};
 
 use libra::{
     command::{
@@ -1413,7 +1412,10 @@ async fn test_grep_exclude_standard_rejected_for_tracked_contents() {
             stderr.contains("--[no-]exclude-standard cannot be used for tracked contents"),
             "unexpected stderr for {args:?}: {stderr}"
         );
-        assert!(out.stdout.is_empty(), "no match output expected for {args:?}");
+        assert!(
+            out.stdout.is_empty(),
+            "no match output expected for {args:?}"
+        );
     }
 }
 
@@ -1436,10 +1438,7 @@ fn test_grep_no_index_exclude_standard_outside_repo() {
     fs::write(dir.join("y"), "yoo\n").expect("write y");
     fs::write(dir.join("x"), "xoo\n").expect("write x");
 
-    let out = run_libra_command(
-        &["grep", "--no-index", "--exclude-standard", "o"],
-        &dir,
-    );
+    let out = run_libra_command(&["grep", "--no-index", "--exclude-standard", "o"], &dir);
     assert_cli_success(&out, "E7 outside --no-index --exclude-standard");
     let actual: Vec<String> = String::from_utf8_lossy(&out.stdout)
         .lines()
@@ -1449,4 +1448,253 @@ fn test_grep_no_index_exclude_standard_outside_repo() {
     // `x*` must NOT leak in (x survives), proving nothing above the traversal
     // root is read.
     assert_eq!(actual, vec!["x:xoo"]);
+}
+
+/// M-SCOPE S1-S4 + S9 (ADR-GR-04): repository-mode searches (default,
+/// `--cached`, `--untracked`, `--tree`) scope to the current directory when no
+/// positive pathspec is given, and display paths relative to it; from the root
+/// everything is byte-for-byte unchanged.
+#[tokio::test]
+async fn test_grep_subdirectory_scope_matrix() {
+    let repo = tempdir().expect("repo dir");
+    gr488_fixture(repo.path()).await;
+
+    let lines = |out: &std::process::Output| -> Vec<String> {
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(|s| s.to_string())
+            .collect()
+    };
+
+    // S1: from `sub`, default and `--cached` only see files under `sub`.
+    let out = run_libra_command(&["grep", "o"], &repo.path().join("sub"));
+    assert_cli_success(&out, "S1 default from sub");
+    assert_eq!(lines(&out), vec!["strk:subtracked o"]);
+
+    let out = run_libra_command(&["grep", "--cached", "o"], &repo.path().join("sub"));
+    assert_cli_success(&out, "S1 cached from sub");
+    assert_eq!(lines(&out), vec!["strk:subtracked o"]);
+
+    // S2: from `sub`, `--untracked` sees the three files under `sub`,
+    // cwd-relative.
+    let out = run_libra_command(&["grep", "--untracked", "o"], &repo.path().join("sub"));
+    assert_cli_success(&out, "S2 untracked from sub");
+    assert_eq!(
+        lines(&out),
+        vec!["deep/file3:foo", "file2:world", "strk:subtracked o"]
+    );
+
+    // S3: from `sub/deep`, `--untracked` sees only `file3`.
+    let out = run_libra_command(&["grep", "--untracked", "o"], &repo.path().join("sub/deep"));
+    assert_cli_success(&out, "S3 untracked from sub/deep");
+    assert_eq!(lines(&out), vec!["file3:foo"]);
+
+    // S3b: from `sub/deep`, a default search has nothing in scope: exit 1,
+    // silent.
+    let out = run_libra_command(&["grep", "o"], &repo.path().join("sub/deep"));
+    assert_eq!(out.status.code(), Some(1), "no matches in scope");
+    assert!(out.stdout.is_empty());
+
+    // S4: `--tree HEAD` from `sub` only covers the current directory.
+    let out = run_libra_command(&["grep", "--tree", "HEAD", "o"], &repo.path().join("sub"));
+    assert_cli_success(&out, "S4 tree from sub");
+    assert_eq!(lines(&out), vec!["strk:subtracked o"]);
+
+    // S6: explicit pathspecs keep working and display `../` for files above
+    // the current directory.
+    let out = run_libra_command(&["grep", "o", "--", "../trk"], &repo.path().join("sub"));
+    assert_cli_success(&out, "S6 ../trk");
+    assert_eq!(lines(&out), vec!["../trk:tracked o"]);
+
+    let out = run_libra_command(&["grep", "o", "--", ":(top)trk"], &repo.path().join("sub"));
+    assert_cli_success(&out, "S6 :(top)trk");
+    assert_eq!(lines(&out), vec!["../trk:tracked o"]);
+
+    let out = run_libra_command(
+        &["grep", "--untracked", "o", "--", "../file1"],
+        &repo.path().join("sub"),
+    );
+    assert_cli_success(&out, "S6 ../file1");
+    assert_eq!(lines(&out), vec!["../file1:hello"]);
+
+    let out = run_libra_command(
+        &["grep", "--untracked", "o", "--", ":/"],
+        &repo.path().join("sub"),
+    );
+    assert_cli_success(&out, "S6 :/");
+    assert_eq!(
+        lines(&out),
+        vec![
+            "../file1:hello",
+            "deep/file3:foo",
+            "file2:world",
+            "strk:subtracked o",
+            "../trk:tracked o",
+        ]
+    );
+
+    // S9: from the root, default output is unchanged (worktree-relative).
+    let out = run_libra_command(&["grep", "-n", "o"], repo.path());
+    assert_cli_success(&out, "S9 root regression");
+    assert_eq!(
+        lines(&out),
+        vec!["sub/strk:1:subtracked o", "trk:1:tracked o"]
+    );
+}
+
+/// M-SCOPE S7 (ADR-GR-04): every human output form (`-l`, `-c`, `--heading`,
+/// `-z -l`) uses current-directory-relative paths from a subdirectory, with
+/// unchanged formats.
+#[tokio::test]
+async fn test_grep_subdirectory_output_modes_relative_paths() {
+    let repo = tempdir().expect("repo dir");
+    gr488_fixture(repo.path()).await;
+    let sub = repo.path().join("sub");
+
+    let out = run_libra_command(&["grep", "-l", "--untracked", "o"], &sub);
+    assert_cli_success(&out, "S7 -l");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "deep/file3\nfile2\nstrk\n"
+    );
+
+    let out = run_libra_command(&["grep", "-c", "--untracked", "o"], &sub);
+    assert_cli_success(&out, "S7 -c");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "deep/file3:1\nfile2:1\nstrk:1\n"
+    );
+
+    let out = run_libra_command(&["grep", "--heading", "--untracked", "o"], &sub);
+    assert_cli_success(&out, "S7 --heading");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "deep/file3\nfoo\nfile2\nworld\nstrk\nsubtracked o\n"
+    );
+
+    let out = run_libra_command(&["grep", "-z", "-l", "--untracked", "o"], &sub);
+    assert_cli_success(&out, "S7 -z -l");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "deep/file3\u{0}file2\u{0}strk\u{0}"
+    );
+
+    // -L from a subdirectory: files without a match, cwd-relative.
+    let out = run_libra_command(&["grep", "-L", "--untracked", "nomatch"], &sub);
+    assert_cli_success(&out, "S7 -L");
+    let paths: Vec<String> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(String::from)
+        .collect();
+    assert_eq!(paths, vec!["deep/file3", "file2", "strk"]);
+}
+
+/// M-SCOPE S5 (ADR-GR-04): `--full-name` restores worktree-root-relative paths.
+#[tokio::test]
+async fn test_grep_full_name() {
+    let repo = tempdir().expect("repo dir");
+    gr488_fixture(repo.path()).await;
+    let sub = repo.path().join("sub");
+
+    let out = run_libra_command(&["grep", "--full-name", "o"], &sub);
+    assert_cli_success(&out, "S5 --full-name");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "sub/strk:subtracked o\n"
+    );
+
+    let out = run_libra_command(&["grep", "--full-name", "--untracked", "o"], &sub);
+    assert_cli_success(&out, "S5 --full-name --untracked");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "sub/deep/file3:foo\nsub/file2:world\nsub/strk:subtracked o\n"
+    );
+
+    // `--full-name` also works for -l/-c forms.
+    let out = run_libra_command(&["grep", "-l", "--full-name", "--untracked", "o"], &sub);
+    assert_cli_success(&out, "S5 -l --full-name");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "sub/deep/file3\nsub/file2\nsub/strk\n"
+    );
+}
+
+/// M-SCOPE S8 (ADR-GR-04): `--max-depth` with no pathspec measures depth from
+/// the current directory once the scope is applied.
+#[tokio::test]
+async fn test_grep_max_depth_from_subdirectory() {
+    let repo = tempdir().expect("repo dir");
+    gr488_fixture(repo.path()).await;
+    let sub = repo.path().join("sub");
+
+    // Depth 0 from `sub` keeps only files directly inside `sub` (file2, strk);
+    // `deep/file3` is one level down.
+    let out = run_libra_command(&["grep", "--max-depth", "0", "--untracked", "o"], &sub);
+    assert_cli_success(&out, "S8 --max-depth 0 from sub");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "file2:world\nstrk:subtracked o\n"
+    );
+
+    // Depth 1 adds the file one directory down.
+    let out = run_libra_command(&["grep", "--max-depth", "1", "--untracked", "o"], &sub);
+    assert_cli_success(&out, "S8 --max-depth 1 from sub");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "deep/file3:foo\nfile2:world\nstrk:subtracked o\n"
+    );
+}
+
+/// M-SCOPE S10 (ADR-GR-03): JSON `path` stays worktree-root-relative even from
+/// a subdirectory, while the result set is scoped to the current directory.
+#[tokio::test]
+async fn test_grep_json_paths_stay_worktree_relative() {
+    let repo = tempdir().expect("repo dir");
+    gr488_fixture(repo.path()).await;
+    let sub = repo.path().join("sub");
+
+    let out = run_libra_command(&["--json=compact", "grep", "--untracked", "o"], &sub);
+    assert_cli_success(&out, "S10 json from sub");
+    let json = parse_json_stdout(&out);
+    let matches = json["data"]["matches"].as_array().expect("matches array");
+    assert_eq!(matches.len(), 3);
+    let paths: Vec<String> = matches
+        .iter()
+        .map(|m| m["path"].as_str().expect("path").to_string())
+        .collect();
+    assert_eq!(paths, vec!["sub/deep/file3", "sub/file2", "sub/strk"]);
+}
+
+/// M-SCOPE S11 (ADR-GR-04): port of libra-testcases TC-1596
+/// (`t/t7810-grep.sh:1288-1328` equivalent) — a fresh repository whose ignore
+/// file is `.*o*`, proving the issue's two reported flows:
+///   1. root `grep --no-index --exclude-standard o` prints `file1:hello` and
+///      `sub/file2:world` (exit 0);
+///   2. from `sub`, `grep --untracked o` prints only `file2:world` (exit 0).
+#[tokio::test]
+async fn test_grep_t7810_inside_repo_with_no_index_tc1596() {
+    let repo = tempdir().expect("repo dir");
+    test::setup_with_new_libra_in(repo.path()).await;
+    fs::write(repo.path().join(".libraignore"), ".*o*\n").expect("write ignore");
+    fs::write(repo.path().join("file1"), "hello\n").expect("write file1");
+    fs::create_dir_all(repo.path().join("sub")).expect("mkdir sub");
+    fs::write(repo.path().join("sub/file2"), "world\n").expect("write sub/file2");
+
+    // Step 1: root `--no-index --exclude-standard o` excludes the ignore file
+    // itself (matching git) and reports both files.
+    let out = run_libra_command(
+        &["grep", "--no-index", "--exclude-standard", "o"],
+        repo.path(),
+    );
+    assert_cli_success(&out, "TC-1596 step 1");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "file1:hello\nsub/file2:world\n"
+    );
+
+    // Step 2: from `sub`, `--untracked o` is scoped to the current directory
+    // and reports only `file2`.
+    let out = run_libra_command(&["grep", "--untracked", "o"], &repo.path().join("sub"));
+    assert_cli_success(&out, "TC-1596 step 2");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "file2:world\n");
 }

@@ -849,7 +849,7 @@ pub fn parse_git_source_objectformat(
     }
 
     // Git has no blake3 object format; accept only sha1/sha256 via the shared
-    // helper (eliminates independent `"sha256" =>` string arms — GC-B3-01 / B3-12).
+    // helper (eliminates independent string arms in this module — GC-B3-01 / B3-12).
     let kind = crate::internal::object_format::parse_config_value(&format)
         .map_err(|_| GitSourceObjectFormatError::UnknownValue(format.clone()))?;
     if matches!(kind, HashKind::Blake3) {

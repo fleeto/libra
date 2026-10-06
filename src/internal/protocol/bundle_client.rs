@@ -81,11 +81,8 @@ impl BundleClient {
         _service: ServiceType,
     ) -> Result<DiscoveryResult, GitError> {
         let hash_kind = hash_kind_from_heads(&self.header.heads)?;
-        let format = match hash_kind {
-            HashKind::Sha1 => "sha1",
-            HashKind::Sha256 => "sha256",
-            HashKind::Blake3 => "blake3",
-        };
+        // Single source of truth for the wire spelling (GC-B3-01 / B3-00).
+        let format = crate::internal::object_format::as_str(hash_kind);
         let refs = self
             .header
             .heads

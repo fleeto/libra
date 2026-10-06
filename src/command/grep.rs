@@ -172,6 +172,23 @@ pub struct GrepArgs {
     #[clap(long = "no-index", conflicts_with_all = ["cached", "untracked", "tree"])]
     pub no_index: bool,
 
+    /// Respect standard ignore rules (`.gitignore`/`.libraignore`, `info/exclude`
+    /// and `core.excludesFile`) while searching. Only meaningful with
+    /// `--no-index` (which by default includes ignored files) or `--untracked`
+    /// (which applies the rules by default, so this is a no-op there); using it
+    /// for tracked contents is an error. Paired with `--no-exclude-standard`;
+    /// the last one given wins (Git semantics).
+    #[clap(long = "exclude-standard", overrides_with = "no_exclude_standard")]
+    exclude_standard: bool,
+
+    /// Do not respect standard ignore rules while searching. Only meaningful with
+    /// `--no-index` (the default: ignored files are included) or `--untracked`
+    /// (which by default applies the rules, so this flag includes ignored
+    /// files); using it for tracked contents is an error. Paired with
+    /// `--exclude-standard`; the last one given wins (Git semantics).
+    #[clap(long = "no-exclude-standard", overrides_with = "exclude_standard")]
+    no_exclude_standard: bool,
+
     /// Print the file name as a heading above its matches instead of as a per-line prefix.
     /// Paired with `--no-heading`; the last one given wins (Git semantics).
     #[clap(long, overrides_with = "no_heading")]
@@ -362,6 +379,22 @@ async fn run_grep(args: &GrepArgs) -> CliResult<GrepOutput> {
                 .with_stable_code(StableErrorCode::CliInvalidArguments)
                 .with_hint("use the default regex dialect (-E) or -F for a fixed-string search"),
         );
+    }
+
+    // ADR-GR-01: `--[no-]exclude-standard` only selects ignore-rule handling
+    // for filesystem walks (`--no-index`) or untracked inclusion (`--untracked`);
+    // on tracked contents (default / `--cached` / `--tree`) Git rejects it with
+    // a dedicated fatal message, and Libra mirrors that with a usage error.
+    // `overrides_with` makes the pair last-one-wins, so at least one field is
+    // set exactly when either flag was given.
+    if (args.exclude_standard || args.no_exclude_standard) && !args.no_index && !args.untracked {
+        return Err(CliError::command_usage(
+            "--[no-]exclude-standard cannot be used for tracked contents",
+        )
+        .with_stable_code(StableErrorCode::CliInvalidArguments)
+        .with_hint(
+            "use --no-index or --untracked to search filesystem contents with --[no-]exclude-standard",
+        ));
     }
 
     let patterns = collect_patterns(args)?;
@@ -641,7 +674,9 @@ async fn get_search_files(args: &GrepArgs) -> CliResult<Vec<SearchFile>> {
 
     let files = if args.no_index {
         // Search the filesystem directly (no repository / index).
-        get_no_index_files(&args.pathspec)?
+        // `--exclude-standard` applies standard ignore rules (ADR-GR-01);
+        // the default is to include ignored files, matching Git.
+        get_no_index_files(&args.pathspec, args.exclude_standard)?
     } else if let Some(tree_ref) = &args.tree {
         // Search in a specific tree/commit
         get_tree_files(tree_ref, &args.pathspec).await?
@@ -649,8 +684,10 @@ async fn get_search_files(args: &GrepArgs) -> CliResult<Vec<SearchFile>> {
         // Search in index (staged files)
         get_index_files(&args.pathspec)?
     } else if args.untracked {
-        // Search tracked files plus untracked, non-ignored working-tree files.
-        get_working_tree_files_with_untracked(&args.pathspec)?
+        // Search tracked files plus untracked working-tree files. Untracked
+        // files respect ignore rules by default; `--no-exclude-standard`
+        // includes ignored ones (ADR-GR-01).
+        get_working_tree_files_with_untracked(&args.pathspec, !args.no_exclude_standard)?
     } else {
         // Search in working tree
         get_working_tree_files(&args.pathspec)?
@@ -770,10 +807,25 @@ fn path_depth_components(path: &Path) -> usize {
 /// --no-index`); the `.git`/`.libra` metadata directories and symlinks are skipped.
 /// Display paths are relative to the current directory; content is read from the
 /// absolute on-disk path (`read_override`).
-fn get_no_index_files(pathspec: &[String]) -> CliResult<Vec<SearchFile>> {
+/// Collect files for `--no-index`: walk the given paths (or the current directory)
+/// recursively WITHOUT a repository or index, like a plain recursive grep. Every
+/// regular file is included (ignore rules are NOT applied, matching `git grep
+/// --no-index`); the `.git`/`.libra` metadata directories and symlinks are skipped.
+/// Display paths are relative to the current directory; content is read from the
+/// absolute on-disk path (`read_override`).
+///
+/// With `apply_ignore` (from `--exclude-standard`, ADR-GR-01), standard ignore
+/// rules are honored: inside a repository the worktree root is the decision root
+/// (so root-level ignore files apply even when run from a subdirectory), while
+/// outside a repository each traversal root is its own decision root and only
+/// ignore files under it (plus `core.excludesFile`) are read — never anything
+/// above the traversal root. Ignored directories are pruned entirely.
+fn get_no_index_files(pathspec: &[String], apply_ignore: bool) -> CliResult<Vec<SearchFile>> {
     use walkdir::WalkDir;
 
     let cwd = util::cur_dir();
+    let repo_root = util::try_working_dir().ok();
+    let layers = crate::internal::layer::ExclusionSnapshot::for_request();
     let roots: Vec<PathBuf> = if pathspec.is_empty() {
         vec![cwd.clone()]
     } else {
@@ -792,10 +844,36 @@ fn get_no_index_files(pathspec: &[String]) -> CliResult<Vec<SearchFile>> {
 
     let mut files = Vec::new();
     for root in roots {
+        // ADR-GR-01 decision roots: a traversal root inside the worktree uses
+        // the worktree root (root ignore files apply from subdirectories); a
+        // root outside any worktree is its own decision root and must not read
+        // ignore files above it.
+        let decision_root = match &repo_root {
+            Some(workdir) if util::is_sub_path(&root, workdir) => workdir.clone(),
+            _ => root.clone(),
+        };
         let walker = WalkDir::new(&root).into_iter().filter_entry(|entry| {
             // Prune the repository metadata directories.
-            !(entry.file_type().is_dir()
-                && matches!(entry.file_name().to_str(), Some(".git" | ".libra")))
+            if entry.file_type().is_dir()
+                && matches!(entry.file_name().to_str(), Some(".git" | ".libra"))
+            {
+                return false;
+            }
+            // `--exclude-standard`: prune ignored directories so we never
+            // descend into (and never re-check) their contents.
+            if apply_ignore
+                && entry.file_type().is_dir()
+                && entry.depth() > 0
+                && util::check_gitignore_with_layers_as_dir(
+                    &decision_root,
+                    entry.path(),
+                    &layers,
+                    true,
+                )
+            {
+                return false;
+            }
+            true
         });
         for entry in walker {
             let entry = entry.map_err(|error| {
@@ -804,6 +882,17 @@ fn get_no_index_files(pathspec: &[String]) -> CliResult<Vec<SearchFile>> {
             })?;
             // Skip directories and symlinks; only regular files are searched.
             if !entry.file_type().is_file() {
+                continue;
+            }
+            // `--exclude-standard`: skip ignored files.
+            if apply_ignore
+                && util::check_gitignore_with_layers_as_dir(
+                    &decision_root,
+                    entry.path(),
+                    &layers,
+                    false,
+                )
+            {
                 continue;
             }
             let absolute = entry.path().to_path_buf();
@@ -820,10 +909,15 @@ fn get_no_index_files(pathspec: &[String]) -> CliResult<Vec<SearchFile>> {
     Ok(files)
 }
 
-/// Tracked working-tree files plus untracked, non-ignored files (matching
-/// `git grep --untracked`). Both kinds read from disk (`blob_hash: None`); the
+/// Tracked working-tree files plus untracked files (matching `git grep
+/// --untracked`). Untracked files respect ignore rules by default; with
+/// `apply_ignore == false` (from `--no-exclude-standard`, ADR-GR-01) ignored
+/// files are included too. Both kinds read from disk (`blob_hash: None`); the
 /// combined list is sorted by path for deterministic, Git-like output.
-fn get_working_tree_files_with_untracked(pathspec: &[String]) -> CliResult<Vec<SearchFile>> {
+fn get_working_tree_files_with_untracked(
+    pathspec: &[String],
+    apply_ignore: bool,
+) -> CliResult<Vec<SearchFile>> {
     let index = load_index()?;
     let pathspecs = compile_repo_pathspecs(pathspec)?;
 
@@ -832,8 +926,15 @@ fn get_working_tree_files_with_untracked(pathspec: &[String]) -> CliResult<Vec<S
         files.iter().map(|file| file.path.clone()).collect();
 
     // `list_workdir_files` returns non-ignored working-tree files (tracked and
-    // untracked); the ones not already tracked are the untracked, non-ignored files.
-    let worktree = util::list_workdir_files().map_err(|error| {
+    // untracked); `list_workdir_files_unfiltered` also returns ignored files
+    // (used with `--no-exclude-standard`). The ones not already tracked are the
+    // untracked files to add.
+    let worktree = if apply_ignore {
+        util::list_workdir_files()
+    } else {
+        util::list_workdir_files_unfiltered()
+    }
+    .map_err(|error| {
         CliError::fatal(format!("failed to list working tree: {error}"))
             .with_stable_code(StableErrorCode::IoReadFailed)
     })?;
@@ -1385,6 +1486,47 @@ mod tests {
         assert!(GrepArgs::parse_from(["grep", "-P", "pat"]).perl_regexp);
         assert!(GrepArgs::parse_from(["grep", "-a", "pat"]).text);
         assert!(GrepArgs::parse_from(["grep", "-I", "pat"]).no_binary);
+    }
+
+    #[test]
+    fn test_grep_args_exclude_standard_pair_is_last_one_wins() {
+        // Neither flag given: both fields default to false.
+        let none = GrepArgs::parse_from(["grep", "pat"]);
+        assert!(!none.exclude_standard && !none.no_exclude_standard);
+
+        // Each flag alone sets its own field.
+        assert!(GrepArgs::parse_from(["grep", "--exclude-standard", "pat"]).exclude_standard);
+        assert!(
+            GrepArgs::parse_from(["grep", "--no-exclude-standard", "pat"]).no_exclude_standard
+        );
+
+        // Git semantics: the last of the pair wins and resets the other field,
+        // exactly like the existing `--heading`/`--no-heading` pair.
+        let excl_then_no = GrepArgs::parse_from([
+            "grep",
+            "--exclude-standard",
+            "--no-exclude-standard",
+            "pat",
+        ]);
+        assert!(!excl_then_no.exclude_standard, "first flag must be reset");
+        assert!(excl_then_no.no_exclude_standard, "last flag must win");
+
+        let no_then_excl = GrepArgs::parse_from([
+            "grep",
+            "--no-exclude-standard",
+            "--exclude-standard",
+            "pat",
+        ]);
+        assert!(no_then_excl.exclude_standard, "last flag must win");
+        assert!(
+            !no_then_excl.no_exclude_standard,
+            "first flag must be reset"
+        );
+
+        // Either flag being given leaves at least one field set, so callers can
+        // detect "the pair was used at all" with a simple OR.
+        assert!(excl_then_no.exclude_standard || excl_then_no.no_exclude_standard);
+        assert!(no_then_excl.exclude_standard || no_then_excl.no_exclude_standard);
     }
 
     #[test]

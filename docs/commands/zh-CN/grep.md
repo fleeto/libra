@@ -46,8 +46,9 @@ libra grep -f <file> [-- <pathspec>...]
 | Pathspec | | 尾随位置参数 | 将搜索限制到匹配给定路径的文件。 |
 | Tree | | `--tree <REVISION>` | 在指定修订或提交树中搜索，而不是工作树。 |
 | Cached | | `--cached` | 在索引（暂存区）中搜索，而不是工作树。 |
-| Untracked | | `--untracked` | 除已跟踪文件外，还搜索工作树中未跟踪、非忽略的文件。不能与 `--cached` 或 `--tree` 同用。 |
-| No index | | `--no-index` | 直接搜索文件系统（给定路径或当前目录），不使用仓库或索引。可在仓库外使用，递归遍历每个文件（包括被忽略的，跳过 `.git`/`.libra`），显示相对当前目录的路径。不能与 `--cached`、`--untracked` 或 `--tree` 同用。 |
+| Untracked | | `--untracked` | 除已跟踪文件外，还搜索工作树中未跟踪、非忽略的文件。加 `--no-exclude-standard` 时也包含被忽略的文件。不能与 `--cached` 或 `--tree` 同用。 |
+| No index | | `--no-index` | 直接搜索文件系统（给定路径或当前目录），不使用仓库或索引。可在仓库外使用，递归遍历每个文件（包括被忽略的，跳过 `.git`/`.libra`），显示相对当前目录的路径。加 `--exclude-standard` 时套用标准忽略规则（见下）。不能与 `--cached`、`--untracked` 或 `--tree` 同用。 |
+| Exclude standard | | `--exclude-standard` / `--no-exclude-standard` | 选择文件系统搜索是否套用标准忽略规则（`.gitignore`/`.libraignore`、`info/exclude`、`core.excludesFile`）。仅对 `--no-index`（默认**包含**被忽略文件，`--exclude-standard` 时排除）或 `--untracked`（默认**排除**被忽略文件，`--no-exclude-standard` 时包含）有意义。对已跟踪内容（默认 / `--cached` / `--tree`）使用任一 flag 是用法错误：`--[no-]exclude-standard cannot be used for tracked contents`（退出码 2；Git 为 128，登记为有意差异）。两个 flag 互覆盖，后出现者生效（Git 语义）。 |
 | Max depth | | `--max-depth <DEPTH>` | 每个 pathspec 下最多下降 DEPTH 层目录。直接位于 pathspec 目录内的文件深度为 0；负值表示无限制。未给 pathspec 时从工作树根度量深度（而非当前目录）——`libra grep` 始终搜索整个工作树并使用工作树相对路径，若要限定到某子目录，请将其作为 pathspec 传入。 |
 
 ### 选项细节
@@ -403,5 +404,6 @@ jj 没有内置 grep 命令。用户需要使用外部工具进行文本搜索�
 | 无效正则模式 | `LBR-CLI-002`（CliInvalidArguments） | 2 |
 | 找不到修订（`--tree`） | `LBR-CLI-003`（CliInvalidTarget） | 2 |
 | 未找到匹配 | 仅状态信号 | 1 |
+| 在已跟踪内容上使用 `--[no-]exclude-standard`（默认 / `--cached` / `--tree`） | `LBR-CLI-002`（CliInvalidArguments） | 2 |
 | 无法读取文件（非致命） | 输出中的 warning，跳过文件 | 0 |
 | 无法读取模式文件（`-f`） | 带文件路径详情的错误 | 2 |

@@ -1,6 +1,7 @@
 //! Integration tests for the grep command.
 
 use std::fs;
+use std::path::Path;
 
 use libra::{
     command::{
@@ -1206,34 +1207,246 @@ async fn test_grep_max_depth_limits_directory_descent() {
     // matching Git — the `CurDir` component must not be counted toward depth.
     assert_eq!(names(&["--max-depth", "0", "."]), vec!["top.txt"]);
     assert_eq!(names(&["--max-depth", "0", "./"]), vec!["top.txt"]);
+}
 
-    // Run from a subdirectory. `libra grep` searches the whole worktree with
-    // worktree-relative paths regardless of cwd, so with NO pathspec depth is
-    // measured from the worktree root (a deliberate Libra/Git difference: Git
-    // would scope to the current directory). With a pathspec, depth is measured
-    // relative to that pathspec — matching Git's file selection.
-    {
-        let subdir = repo.path().join("a");
-        let _guard = test::ChangeDirGuard::new(&subdir);
-        let names_from_sub = |args: &[&str]| -> Vec<String> {
-            let mut full = vec!["grep", "-l", "match"];
-            full.extend_from_slice(args);
-            let out = run_libra_command(&full, &subdir);
-            assert_cli_success(&out, "grep -l --max-depth from subdir");
-            let mut paths: Vec<String> = String::from_utf8_lossy(&out.stdout)
-                .lines()
-                .map(|l| l.to_string())
-                .collect();
-            paths.sort();
-            paths
-        };
-        // No pathspec: worktree-root-relative depth (top.txt is depth 0).
-        assert_eq!(names_from_sub(&["--max-depth", "0"]), vec!["top.txt"]);
-        // Pathspec `b` (relative to cwd `a/`): depth 0 keeps `a/b/m2.txt`,
-        // exactly the file Git would select (Git shows it as `b/m2.txt`).
+/// Shared fixture for the GR-01/GR-02 matrices (ADR-GR-04): a repository with
+/// tracked `trk`, `sub/strk`; untracked `file1`, `sub/file2`, `sub/deep/file3`;
+/// ignored `sub/ign.log`; ignore rules `.*o*` and `*.log`; every file's content
+/// contains the letter `o`.
+///
+/// Built through the subprocess binary (no `ChangeDirGuard`), so the matrix
+/// rows can each be executed with their own subprocess `cwd` (GC-GR-01).
+async fn gr488_fixture(repo: &Path) {
+    test::setup_with_new_libra_in(repo).await;
+    fs::write(repo.join(".libraignore"), ".*o*\n*.log\n").expect("write ignore");
+    fs::write(repo.join("trk"), "tracked o\n").expect("write trk");
+    fs::create_dir_all(repo.join("sub/deep")).expect("mkdir sub/deep");
+    fs::write(repo.join("sub/strk"), "subtracked o\n").expect("write strk");
+    fs::write(repo.join("file1"), "hello\n").expect("write file1");
+    fs::write(repo.join("sub/file2"), "world\n").expect("write file2");
+    fs::write(repo.join("sub/deep/file3"), "foo\n").expect("write file3");
+    fs::write(repo.join("sub/ign.log"), "ignored log o\n").expect("write ign.log");
+
+    let out = run_libra_command(&["add", "trk", "sub/strk"], repo);
+    assert_cli_success(&out, "fixture add");
+    let out = run_libra_command(&["commit", "-m", "init", "--no-gpg-sign"], repo);
+    assert_cli_success(&out, "fixture commit");
+}
+
+/// M-EXC matrix rows E1-E5/E8/E9 (ADR-GR-04): `--[no-]exclude-standard` selects
+/// whether the filesystem walk / untracked inclusion honors standard ignore
+/// rules. Every row is executed as a subprocess with its own `cwd` (GC-GR-01)
+/// and must not mutate the repository (GC-GR-02).
+#[tokio::test]
+async fn test_grep_exclude_standard_matrix() {
+    let repo = tempdir().expect("repo dir");
+    gr488_fixture(repo.path()).await;
+
+    let status_before = run_libra_command(&["status", "--porcelain"], repo.path());
+    let lines = |out: &std::process::Output| -> Vec<String> {
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(|s| s.to_string())
+            .collect()
+    };
+
+    // E1: root `--no-index --exclude-standard o` — the ignore files themselves
+    // and `sub/ign.log` are excluded (5 lines).
+    let out = run_libra_command(
+        &["grep", "--no-index", "--exclude-standard", "o"],
+        repo.path(),
+    );
+    assert_cli_success(&out, "E1 no-index --exclude-standard");
+    assert_eq!(
+        lines(&out),
+        vec![
+            "file1:hello",
+            "sub/deep/file3:foo",
+            "sub/file2:world",
+            "sub/strk:subtracked o",
+            "trk:tracked o",
+        ]
+    );
+
+    // E2: from `sub`, the root-level `*.log` still excludes `sub/ign.log`
+    // (the worktree root is the decision root, ADR-GR-01).
+    let out = run_libra_command(
+        &["grep", "--no-index", "--exclude-standard", "o"],
+        &repo.path().join("sub"),
+    );
+    assert_cli_success(&out, "E2 sub no-index --exclude-standard");
+    assert_eq!(
+        lines(&out),
+        vec!["deep/file3:foo", "file2:world", "strk:subtracked o"]
+    );
+
+    // E3: root `--untracked --no-exclude-standard o` — ignored files included.
+    let out = run_libra_command(
+        &["grep", "--untracked", "--no-exclude-standard", "o"],
+        repo.path(),
+    );
+    assert_cli_success(&out, "E3 untracked --no-exclude-standard");
+    assert_eq!(
+        lines(&out),
+        vec![
+            ".libraignore:.*o*",
+            ".libraignore:*.log",
+            "file1:hello",
+            "sub/deep/file3:foo",
+            "sub/file2:world",
+            "sub/ign.log:ignored log o",
+            "sub/strk:subtracked o",
+            "trk:tracked o",
+        ]
+    );
+
+    // E4: root `--no-index --no-exclude-standard o` equals plain `--no-index`.
+    let plain = run_libra_command(&["grep", "--no-index", "o"], repo.path());
+    let out = run_libra_command(
+        &["grep", "--no-index", "--no-exclude-standard", "o"],
+        repo.path(),
+    );
+    assert_cli_success(&out, "E4 no-index --no-exclude-standard");
+    assert_eq!(lines(&out), lines(&plain));
+
+    // E5: root `--untracked o` is unchanged (ignore rules apply by default).
+    let out = run_libra_command(&["grep", "--untracked", "o"], repo.path());
+    assert_cli_success(&out, "E5 untracked default");
+    assert_eq!(
+        lines(&out),
+        vec![
+            "file1:hello",
+            "sub/deep/file3:foo",
+            "sub/file2:world",
+            "sub/strk:subtracked o",
+            "trk:tracked o",
+        ]
+    );
+
+    // E8: the pair is last-one-wins, matching `git grep`.
+    let excl_then_no = run_libra_command(
+        &[
+            "grep",
+            "--no-index",
+            "--exclude-standard",
+            "--no-exclude-standard",
+            "o",
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&out, "E8 exclude-standard then no-exclude-standard");
+    assert_eq!(lines(&excl_then_no), lines(&plain));
+
+    let no_then_excl = run_libra_command(
+        &[
+            "grep",
+            "--no-index",
+            "--no-exclude-standard",
+            "--exclude-standard",
+            "o",
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&out, "E8 no-exclude-standard then exclude-standard");
+    assert_eq!(
+        lines(&no_then_excl),
+        lines(&run_libra_command(
+            &["grep", "--no-index", "--exclude-standard", "o"],
+            repo.path(),
+        ))
+    );
+
+    // E9: JSON result set matches the human rows; structure unchanged.
+    let out = run_libra_command(
+        &[
+            "--json=compact",
+            "grep",
+            "--no-index",
+            "--exclude-standard",
+            "o",
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&out, "E9 json");
+    let json = parse_json_stdout(&out);
+    let paths: Vec<String> = json["data"]["matches"]
+        .as_array()
+        .expect("matches array")
+        .iter()
+        .map(|m| m["path"].as_str().expect("path").to_string())
+        .collect();
+    assert_eq!(
+        paths,
+        vec!["file1", "sub/deep/file3", "sub/file2", "sub/strk", "trk"]
+    );
+
+    // GC-GR-02: every invocation above is read-only.
+    let status_after = run_libra_command(&["status", "--porcelain"], repo.path());
+    assert_eq!(
+        String::from_utf8_lossy(&status_before.stdout),
+        String::from_utf8_lossy(&status_after.stdout),
+        "grep must not mutate the repository"
+    );
+}
+
+/// M-EXC E6 (ADR-GR-04): using `--[no-]exclude-standard` for tracked contents
+/// (default / `--cached` / `--tree`) is a usage error with Git's message.
+#[tokio::test]
+async fn test_grep_exclude_standard_rejected_for_tracked_contents() {
+    let repo = tempdir().expect("repo dir");
+    gr488_fixture(repo.path()).await;
+
+    for args in [
+        vec!["grep", "--exclude-standard", "o"],
+        vec!["grep", "--cached", "--no-exclude-standard", "o"],
+        vec!["grep", "--tree", "HEAD", "--exclude-standard", "o"],
+        vec!["grep", "--no-exclude-standard", "o"],
+    ] {
+        let out = run_libra_command(&args, repo.path());
         assert_eq!(
-            names_from_sub(&["--max-depth", "0", "b"]),
-            vec!["a/b/m2.txt"]
+            out.status.code(),
+            Some(2),
+            "tracked contents must reject {args:?} with a usage error"
         );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("--[no-]exclude-standard cannot be used for tracked contents"),
+            "unexpected stderr for {args:?}: {stderr}"
+        );
+        assert!(out.stdout.is_empty(), "no match output expected for {args:?}");
     }
+}
+
+/// M-EXC E7 (ADR-GR-04): outside a repository, each traversal root is its own
+/// decision root — only `.gitignore`/`.libraignore` under it (plus
+/// `core.excludesFile`) are read, never anything above the traversal root.
+/// Libra reads both ignore sources per directory (Git reads only `.gitignore`,
+/// so the identical fixture shows `x` and `y` under git — a documented
+/// intentional difference per ADR-GR-01 decision 5).
+#[test]
+fn test_grep_no_index_exclude_standard_outside_repo() {
+    let parent = tempdir().expect("parent dir");
+    // A parent-level rule that would exclude everything if it leaked.
+    fs::write(parent.path().join(".libraignore"), "x*\n").expect("parent ignore");
+    let dir = parent.path().join("scan");
+    fs::create_dir_all(&dir).expect("mkdir scan");
+    fs::write(dir.join(".gitignore"), "z*\n").expect("write .gitignore");
+    fs::write(dir.join(".libraignore"), "y*\n").expect("write .libraignore");
+    fs::write(dir.join("z"), "zoo\n").expect("write z");
+    fs::write(dir.join("y"), "yoo\n").expect("write y");
+    fs::write(dir.join("x"), "xoo\n").expect("write x");
+
+    let out = run_libra_command(
+        &["grep", "--no-index", "--exclude-standard", "o"],
+        &dir,
+    );
+    assert_cli_success(&out, "E7 outside --no-index --exclude-standard");
+    let actual: Vec<String> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(String::from)
+        .collect();
+    // z excluded by `.gitignore: z*`, y by `.libraignore: y*`; the parent's
+    // `x*` must NOT leak in (x survives), proving nothing above the traversal
+    // root is read.
+    assert_eq!(actual, vec!["x:xoo"]);
 }

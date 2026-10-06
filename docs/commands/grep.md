@@ -47,8 +47,9 @@ Exit codes follow Git's grep contract: matches exit 0, no selected matches exit 
 | Pathspec | | positional (trailing) | Restrict search to files matching the given paths. |
 | Tree | | `--tree <REVISION>` | Search in the specified revision or commit tree instead of the working tree. |
 | Cached | | `--cached` | Search in the index (staging area) instead of the working tree. |
-| Untracked | | `--untracked` | In addition to tracked files, also search untracked, non-ignored files in the working tree. Cannot be combined with `--cached` or `--tree`. |
-| No index | | `--no-index` | Search the filesystem directly (the given paths, or the current directory) without a repository or index. Works outside a repository, recurses every file including ignored ones (skipping `.git`/`.libra`), and shows paths relative to the current directory. Cannot be combined with `--cached`, `--untracked`, or `--tree`. |
+| Untracked | | `--untracked` | In addition to tracked files, also search untracked, non-ignored files in the working tree. With `--no-exclude-standard`, ignored files are included too. Cannot be combined with `--cached` or `--tree`. |
+| No index | | `--no-index` | Search the filesystem directly (the given paths, or the current directory) without a repository or index. Works outside a repository, recurses every file including ignored ones (skipping `.git`/`.libra`), and shows paths relative to the current directory. With `--exclude-standard`, standard ignore rules are applied (see below). Cannot be combined with `--cached`, `--untracked`, or `--tree`. |
+| Exclude standard | | `--exclude-standard` / `--no-exclude-standard` | Select whether standard ignore rules (`.gitignore`/`.libraignore`, `info/exclude`, `core.excludesFile`) apply to filesystem searches. Only valid with `--no-index` (which by default *includes* ignored files, so `--exclude-standard` excludes them) or `--untracked` (which by default *excludes* ignored files, so `--no-exclude-standard` includes them). Using either flag for tracked contents (default / `--cached` / `--tree`) is a usage error: `--[no-]exclude-standard cannot be used for tracked contents` (exit 2; Git exits 128 — documented difference). The two flags override each other; the last one given wins (Git semantics). |
 | Max depth | | `--max-depth <DEPTH>` | Descend at most DEPTH levels of directories below each pathspec. A file directly inside the pathspec directory is depth 0; a negative value means no limit. With no pathspec, depth is measured from the worktree root (not the current directory) — `libra grep` always searches the whole worktree with worktree-relative paths, so to limit to a subdirectory, pass it as a pathspec. |
 | Heading | | `--heading` / `--no-heading` | Print each file name once as a heading above its matches instead of prefixing every line. `--no-heading` is the default. |
 | Break | | `--break` / `--no-break` | Print an empty line between matches from different files. `--no-break` is the default. |
@@ -407,5 +408,6 @@ Note: jj does not have a built-in grep command. Users rely on external tools lik
 | Invalid regex pattern | `LBR-CLI-002` (CliInvalidArguments) | 2 |
 | Revision not found (`--tree`) | `LBR-CLI-003` (CliInvalidTarget) | 2 |
 | No matches found | Status-only signal | 1 |
+| `--[no-]exclude-standard` on tracked contents (default / `--cached` / `--tree`) | `LBR-CLI-002` (CliInvalidArguments) | 2 |
 | Failed to read file (non-fatal) | Warning in output, file skipped | 0 |
 | Failed to read pattern file (`-f`) | Error with file path details | 2 |

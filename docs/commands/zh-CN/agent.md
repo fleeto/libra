@@ -216,6 +216,13 @@ exporter 与 sandbox。
 保存 core 文件；系统日志仍可能记录信号事件。Libra 保留退出状态及有界 stderr
 诊断。该设置只作用于子程序，不修改 Libra 父程序限制或系统配置。
 
+OpenCode 默认 export 预算为30秒，export lease与插件转发超时精确联动增加15秒余量，
+即45秒。重新运行 `libra agent add opencode` 可刷新旧插件。schema v2 的
+`importable` / `export_bridge` 要求受信 exporter 和当前平台 sandbox 探测成功：
+macOS 使用 Seatbelt，Linux 保留现有受信 bwrap 探测。available 只表示这些前提满足，
+不证明 OpenCode 启动成功、会话内容导出成功或 reasoning 的可信 native 来源。
+超时仍拒绝部分输出并保持现有 metadata-only 降级，16 MiB export 上限不变。
+
 macOS 的 OpenCode 导出要求 **Required Seatbelt server/export pair**：两端都拒绝
 `process-fork`，使用私有 HOME/XDG 目录和固定摘要的二进制副本，只允许一个带认证的
 loopback 端口。取消和绝对 deadline 回收仍持有的进程组，leader 已回收后不再发送

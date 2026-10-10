@@ -27,9 +27,10 @@ use super::capture_scope::{
     authorize_final_capture_commit,
 };
 
-/// Lease length for one export run: must cover the export subprocess
-/// deadline (≤3s, GC-DR-04) plus parse/redact/claim with margin.
-const EXPORT_LEASE_MS: i64 = 30_000;
+/// Lease length is exactly deadline_ms + 15_000 (ADR-OG-04), reserving
+/// parse/redact/claim margin after the default export wall-clock budget.
+const EXPORT_LEASE_MS: i64 =
+    super::observed_agents::opencode_export::EXPORT_DEADLINE.as_millis() as i64 + 15_000;
 /// Job-row TTL: quiet jobs are scavenged after a day.
 const EXPORT_JOB_TTL_MS: i64 = 24 * 60 * 60 * 1_000;
 /// Releasing an already-owned export lease after normal capture work fails is
@@ -950,6 +951,85 @@ mod tests {
     use super::*;
     use crate::internal::db::migration::run_builtin_migrations;
 
+    #[test]
+    fn export_lease_equals_deadline_plus_margin() {
+        let deadline_ms =
+            super::super::observed_agents::opencode_export::EXPORT_DEADLINE.as_millis() as i64;
+        assert_eq!(deadline_ms, 30_000);
+        assert_eq!(EXPORT_LEASE_MS, deadline_ms + 15_000);
+        assert_eq!(EXPORT_LEASE_MS, 45_000);
+    }
+
+    #[tokio::test]
+    async fn lease_ttl_takeover_green_under_new_budget() {
+        let conn = job_db().await;
+        let scope = scope();
+        let job = ExportJobTarget::new("opencode", "budget-boundary", &scope);
+        let IdleOutcome::Runner {
+            fence_token: stale, ..
+        } = observe_idle(&conn, "opencode", "budget-boundary", &scope, "old", 1_000)
+            .await
+            .expect("first lease")
+        else {
+            panic!("first idle must own its lease")
+        };
+        let row = conn
+            .query_one_raw(Statement::from_string(
+                conn.get_database_backend(),
+                "SELECT lease_expires_at FROM agent_export_job".to_string(),
+            ))
+            .await
+            .expect("read lease")
+            .expect("lease row");
+        assert_eq!(
+            row.try_get_by::<i64, _>("lease_expires_at")
+                .expect("lease expiry"),
+            46_000
+        );
+        assert_eq!(
+            observe_idle(&conn, "opencode", "budget-boundary", &scope, "new", 45_999)
+                .await
+                .expect("pre-expiry contender"),
+            IdleOutcome::RecordedOnly,
+        );
+        let IdleOutcome::Runner {
+            fence_token: fresh,
+            target_generation,
+            ..
+        } = observe_idle(&conn, "opencode", "budget-boundary", &scope, "new", 46_000)
+            .await
+            .expect("exact expiry takeover")
+        else {
+            panic!("expired lease must permit takeover")
+        };
+        assert!(fresh > stale);
+        assert_eq!(target_generation, 3);
+        assert_eq!(
+            advance_processed(&conn, &job, "old", stale, 1, 46_001)
+                .await
+                .expect("stale advance"),
+            AdvanceOutcome::FencedOut
+        );
+        assert_eq!(
+            advance_and_release(&conn, &job, "new", fresh, 3, 46_002)
+                .await
+                .expect("fresh completion"),
+            AdvanceOutcome::Clean
+        );
+        assert_eq!(
+            scavenge_expired(&conn, 46_003)
+                .await
+                .expect("retain fresh job"),
+            0
+        );
+        assert_eq!(
+            scavenge_expired(&conn, 46_002 + EXPORT_JOB_TTL_MS + 1)
+                .await
+                .expect("scavenge expired job"),
+            1
+        );
+    }
+
     async fn job_db() -> DatabaseConnection {
         let conn = Database::connect("sqlite::memory:").await.expect("mem db");
         conn.execute_raw(Statement::from_string(
@@ -1696,7 +1776,7 @@ mod tests {
             panic!("runner expected");
         };
 
-        // Lease expires (EXPORT_LEASE_MS = 30s) → takeover at t=60s.
+        // Lease expires (EXPORT_LEASE_MS = 45s) → takeover at t=60s.
         let IdleOutcome::Runner {
             fence_token: fresh_fence,
             target_generation,

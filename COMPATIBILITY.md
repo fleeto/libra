@@ -860,3 +860,13 @@ reason that does not echo the remote bytes. It is no longer reported as a
 successful empty response. Check the remote Git service or proxy response before
 retrying. Valid empty repositories, supported SHA-1/SHA-256 advertisements,
 existing command hints and structured error fields retain their behavior.
+
+The default OpenCode export budget is 30 seconds; the export lease and plugin
+forwarding timeout derive a 15-second margin (45 seconds). Run
+`libra agent add opencode` again to refresh an older installed plugin. Schema v2
+`importable` and `export_bridge` require a trusted exporter and a successful
+platform sandbox probe: Seatbelt on macOS, the existing trusted bwrap probe on
+Linux. Availability reports those prerequisites; it does not prove that OpenCode
+boots, that a session exports successfully, or that reasoning fields have a
+trusted native origin. Timeout still rejects partial output and preserves the
+existing metadata-only fallback; the 16 MiB export cap is unchanged.

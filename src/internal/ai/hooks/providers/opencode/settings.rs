@@ -926,13 +926,14 @@ mod tests {
         fs::write(libra_dir.join("libra.db"), b"").expect("seed libra.db");
     }
 
-    /// Current template follows the existing export deadline; OG-07 will
-    /// subsequently tune the Rust value without a second JS constant.
+    /// Installed plugins derive both timeout budgets from the Rust deadline.
+    /// Reinstalling refreshes older plugin files without a second JS constant.
     #[test]
     fn plugin_timeout_matches_deadline_constant() {
         let rendered = render_opencode_plugin("'/tmp/dir with spaces/libra'").expect("render");
         let expected_ms =
             crate::internal::ai::observed_agents::opencode_export::EXPORT_DEADLINE.as_millis();
+        assert_eq!(expected_ms, 30_000);
         assert!(
             rendered.contains(&format!("const EXPORT_DEADLINE_MS = {expected_ms};")),
             "rendered plugin must pin EXPORT_DEADLINE_MS to {expected_ms} ms"

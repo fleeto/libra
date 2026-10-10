@@ -205,7 +205,7 @@ pub async fn execute_safe(args: ListArgs, output: &OutputConfig) -> CliResult<()
             let opencode_available = crate::internal::ai::observed_agents::opencode_export::trusted_opencode_binary()
                 .await
                 .is_ok()
-                && crate::internal::ai::observed_agents::opencode_export::trusted_bwrap_available()
+                && crate::internal::ai::observed_agents::opencode_export::required_export_sandbox_available()
                     .await;
             let agents = payload
                 .agents
@@ -273,6 +273,38 @@ pub async fn execute_safe(args: ListArgs, output: &OutputConfig) -> CliResult<()
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn opencode_list_v2_export_bridge_available_when_seatbelt_ready() {
+        use crate::internal::ai::observed_agents::opencode_export;
+
+        assert!(
+            opencode_export::required_export_sandbox_available().await,
+            "the real macOS Seatbelt capability probe must succeed"
+        );
+        assert!(
+            !opencode_export::trusted_bwrap_available().await,
+            "macOS availability must not depend on Linux bwrap"
+        );
+        for available in [true, false] {
+            let methods = methods_for(AgentKind::OpenCode, true, available);
+            for name in ["importable", "export_bridge"] {
+                let method = methods
+                    .iter()
+                    .find(|method| method.name == name)
+                    .expect("OpenCode method");
+                assert!(method.supported);
+                assert_eq!(method.available, available);
+                assert_eq!(method.unavailable_reason.is_none(), available);
+            }
+            let discovery = methods
+                .iter()
+                .find(|method| method.name == "transcript_discoverable")
+                .expect("discovery method");
+            assert!(!discovery.available);
+        }
+    }
 
     #[test]
     fn schema_v2_reports_file_import_unavailable_without_secure_open_support() {

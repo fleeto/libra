@@ -88,9 +88,9 @@ use crate::internal::ai::sandbox::{
 const OPENCODE_TRUST_SLUG: &str = OPENCODE_EXPORTER_SLUG;
 /// Default stdout byte cap (GC-DR-04 Bytes/export cap).
 pub const EXPORT_MAX_BYTES: u64 = 16 * 1024 * 1024;
-/// Default subprocess wall-clock deadline (GC-DR-04: ≤3 s, leaving
-/// parse/redact/claim headroom inside the hook ceiling).
-pub const EXPORT_DEADLINE: Duration = Duration::from_secs(3);
+/// Default export wall-clock budget (ADR-OG-04). The lease and installed
+/// plugin forwarding timeout derive an additional 15 seconds from this value.
+pub const EXPORT_DEADLINE: Duration = Duration::from_secs(30);
 /// Fixed exporter-private paths below the bwrap-provided tmpfs. Ambient HOME
 /// and XDG spelling must never be inherited into this namespace: the only
 /// host state OpenCode may receive is the separately pinned store descriptor.
@@ -2962,6 +2962,53 @@ fn validate_trusted_bwrap(candidate: &std::path::Path) -> Result<std::path::Path
     Ok(canonical)
 }
 
+/// Probe the platform's required export sandbox independently of exporter
+/// trust. This reports sandbox capability, not OpenCode boot, content capture,
+/// or native reasoning provenance. The actual export still assembles and
+/// enforces its complete Required profile immediately before spawning.
+pub async fn required_export_sandbox_available() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        trusted_bwrap_available().await
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use std::process::Stdio;
+
+        // Probe only fixed OS binaries with no ambient environment or payload.
+        // Forks, network and writes are denied; output cannot reach the caller.
+        let mut command = tokio::process::Command::new("/usr/bin/sandbox-exec");
+        command
+            .args([
+                "-p",
+                "(version 1)(allow default)(deny process-fork)(deny network*)(deny file-write*)",
+                "/usr/bin/true",
+            ])
+            .env_clear()
+            .current_dir("/usr")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+        let Ok(mut child) = command.spawn() else {
+            return false;
+        };
+        match tokio::time::timeout(Duration::from_millis(500), child.wait()).await {
+            Ok(Ok(status)) => status.success(),
+            Ok(Err(_)) | Err(_) => {
+                // Explicitly join the owned probe; a dropped wait is not reaping.
+                let _ = child.start_kill();
+                let _ = child.wait().await;
+                false
+            }
+        }
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        false
+    }
+}
+
 /// Whether a trusted, usable bubblewrap sandbox is available on this host:
 /// the bwrap binary passes integrity policy AND an async, bounded
 /// descriptor-native mount/consumption probe. Tests therefore gate on
@@ -3166,8 +3213,8 @@ async fn trusted_bwrap_supports_fd_mounts_until(
     }
 }
 
-/// Non-Linux hosts have no bwrap sandbox — the export capability is
-/// unavailable (fail-closed), so it is never "trusted and usable".
+/// Non-Linux hosts have no bwrap sandbox. Cross-platform export callers use
+/// `required_export_sandbox_available`, which probes Seatbelt on macOS.
 #[cfg(not(target_os = "linux"))]
 pub async fn trusted_bwrap_available() -> bool {
     false
@@ -3469,6 +3516,50 @@ mod tests {
             !rendered.contains(&other_working_dir.path().display().to_string()),
             "exporter-supplied working directory leaked: {rendered}"
         );
+    }
+
+    #[test]
+    fn default_deadline_is_30s() {
+        assert_eq!(ExportLimits::default().deadline, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn export_max_bytes_unchanged() {
+        assert_eq!(ExportLimits::default().max_bytes, 16 * 1024 * 1024);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn deadline_injection_path_regression() {
+        let root = tempfile::tempdir().expect("private deadline test root");
+        for budget in [Duration::from_millis(300), Duration::from_secs(1)] {
+            let bytes = macos_test_process(root.path(), "printf complete".into(), budget)
+                .await
+                .expect("injected budget accepts a complete bounded export");
+            assert_eq!(bytes, b"complete");
+        }
+    }
+
+    /// The contained runner refuses partial bytes at an injected deadline.
+    /// The frozen live-checkpoint oracle separately proves that an export
+    /// failure takes the existing metadata-only continuation.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn timeout_fails_closed_to_metadata_only() {
+        let root = tempfile::tempdir().expect("private timeout test root");
+        let error = macos_test_process(
+            root.path(),
+            "printf SENSITIVE_PARTIAL; while :; do :; done".into(),
+            Duration::from_millis(100),
+        )
+        .await
+        .expect_err("deadline must refuse partial export output");
+        let rendered = format!("{error:#}");
+        assert!(
+            rendered.contains("deadline"),
+            "unexpected error: {rendered}"
+        );
+        assert!(!rendered.contains("SENSITIVE_PARTIAL"));
     }
 
     #[cfg(target_os = "macos")]
@@ -4601,7 +4692,7 @@ printf 'tty=detached'"#,
     #[serial_test::serial(env)]
     async fn runner_controls_preserved() {
         assert_eq!(EXPORT_MAX_BYTES, 16 * 1024 * 1024);
-        assert_eq!(EXPORT_DEADLINE, Duration::from_secs(3));
+        assert_eq!(EXPORT_DEADLINE, Duration::from_secs(30));
 
         let dir = tempfile::tempdir().unwrap();
         let bin = fake_exporter(dir.path(), r#"printf 'ok'"#);

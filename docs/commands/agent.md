@@ -285,6 +285,16 @@ Libra retains the exporter exit status and bounded stderr diagnostics. This
 child-only setting leaves the parent Libra process and system configuration
 unchanged.
 
+The default OpenCode export budget is 30 seconds; the export lease and plugin
+forwarding timeout derive a 15-second margin (45 seconds). Run
+`libra agent add opencode` again to refresh an older installed plugin. Schema v2
+`importable` and `export_bridge` require a trusted exporter and a successful
+platform sandbox probe: Seatbelt on macOS, the existing trusted bwrap probe on
+Linux. Availability reports those prerequisites; it does not prove that OpenCode
+boots, that a session exports successfully, or that reasoning fields have a
+trusted native origin. Timeout still rejects partial output and preserves the
+existing metadata-only fallback; the 16 MiB export cap is unchanged.
+
 On macOS, OpenCode export requires a **Required Seatbelt server/export pair**.
 Both processes deny `process-fork`, use private HOME/XDG roots and a pinned
 binary copy, and communicate only on one authenticated loopback port.

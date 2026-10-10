@@ -37,6 +37,7 @@ pub mod coverage;
 pub mod derived;
 pub mod extract;
 pub(crate) mod live_capture;
+pub mod native_origin;
 pub mod opencode_export;
 pub mod preview;
 pub mod reasoning;

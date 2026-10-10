@@ -976,3 +976,20 @@ NPR01 private `packages/schema/src/native-origin.ts` SHA256 08744ded033129490139
 NPR01 private `packages/schema/test/native-origin.test.ts` SHA256 53c89d22b3402e001922b5908e3a40c84700e3ee55e3a1574b2ff15b1599fc09 mode 0o644
 NPR01 private `packages/schema/test/fixtures/native-origin-v1.json` SHA256 9bea0dd73736dfa3ce7544921ef7c7286c1adf30463b0d2d913b54f5e8e1386b mode 0o644
 NPR01 private `packages/schema/README.native-origin.md` SHA256 10dad9ae70268cf1990d175e67b87a532f5d20c80c4445a04da5922097dcbbd1 mode 0o644
+
+2026-10-11 NPR02 source开工：消费NPR01已审六criterion/六具名tests/独立vectors及actual signedmain2cfa8c7，source-onlyhandoff不提前继承FAST stage/native权限。写集仅原卡5source/fixture/docs及2plan/status；protected05不动，sourceA/issuer/nativepositive仍未实现。focused/fmt/strict/actualClaude/mainPush待。
+
+2026-10-11 NPR02 current candidate：Rust纯wire Receipt/Policy/Endpoint codec按current2.0.26 source/contract，重用coverage strict raw duplicate guard后丢弃中间值、对original bytes直接serde封闭decode，避免float normalization。rawproof8192/descriptor65536先于解析；text原UTF8/无C0/C1/nonzeroU32/closedmembers/base64padding/orderedfieldlists/URL exactspelling/两installationpath/coredescriptor同TS。production无unwrap/expect/sign/verify/I/O/nativefactory，public wire容器mutate后每canonical入口重验。fixture与NPR01 final frozenexactbytes相同 SHA9bea0dd73736dfa3ce7544921ef7c7286c1adf30463b0d2d913b54f5e8e1386b；3receipt+2policy+2endpoint独立Python→TS→Rust逐byte/SHA全部实证。
+实际focused R1六PASS0FAIL，strict R1因chunks_exact_to_as_chunks exit101 SHA8cce1cdd3c6b13b266fa224e5cf74dbb4a1554c03d518d3b2877452a4d2720b8，已正修as_chunks，无lintallow；final相关门重新实跑如下（R1不抹除）：
+focused-final exit0 SHAb6bbeb1dfa374745fc70a48425c45180b9212c84608cdcf459146b27e94b976a UTC2026-10-10T23:32:39.568966+00:00→2026-10-10T23:33:06.824839+00:00
+fmt-final exit0 SHAe3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 UTC2026-10-10T23:32:36.349152+00:00→2026-10-10T23:32:39.568629+00:00
+strict-final exit0 SHAa19373fecc5f404098eea354686dd53ee3ef43b989caf1b7abb61cd9efdd9e97 UTC2026-10-10T23:33:06.827266+00:00→2026-10-10T23:34:09.003529+00:00
+named-canonical exit0 SHA617a3a44a3f762313d405bed48658bb266d4114b5fe66873ad087b38f40f2df3 UTC2026-10-10T23:33:06.827324+00:00→2026-10-10T23:33:07.436985+00:00
+named-grammar exit0 SHA69b33933915e02bc1dbbf576bde23c7775d2de186d05f9cf440b0b056576fc34 UTC2026-10-10T23:33:07.437346+00:00→2026-10-10T23:34:09.081013+00:00
+named-raw_duplicates exit0 SHA61e538a9d6093ca5c5a28be974bed305e720436127f39e2fe6a6022a80f7c6a1 UTC2026-10-10T23:34:09.081362+00:00→2026-10-10T23:34:09.704915+00:00
+named-utf8 exit0 SHA8d11accf2707cc4803cfebfafaca905db98b57809b840d2ac53d26d4a231738c UTC2026-10-10T23:34:09.705308+00:00→2026-10-10T23:34:10.192122+00:00
+named-bounds exit0 SHA00526dcd11c50efe74be9020835d0671b9054dbbf1e85af7dd9dfb855c9a0588 UTC2026-10-10T23:34:10.192520+00:00→2026-10-10T23:34:10.675813+00:00
+named-no_authority exit0 SHA7c2fb313da638db54fded040fd0b097f3071a5b7acb313c001a482cbdb1844c8 UTC2026-10-10T23:34:10.676210+00:00→2026-10-10T23:34:11.158706+00:00
+两env均source，不输出凭据；没有modelcall/issuer/runtime/sourceA positive。NPR02 leaf codec无SQL/CLI/sharedhelper写入，不触发ER13全量；旧FAST stage full9731只其a8 source实证，不冒称newRust全量。最终NPR20 full/安全CI/四平台硬门保留。singleClaude/签名mainPush尚待，不locallyaccepted；CD待NPR20，正式whole4/61(6.56%)。当前NPR01真实signed-DCO2cfa8c7 remoteMATCH、R1pushSSH失败R2成功保留。计划card直接授权，无另建Issue/PR。
+
+2026-10-11 NPR02 source locally-accepted：actual Claude Code R1 PASS，P0=0/P1=0/P2=2/P3=4，46turns；UTC2026-10-10T23:34:41.964306+00:00→2026-10-10T23:38:33.426898+00:00；rawSHA311304107c4bf1b0adda4cfb629e0d7c8cda873ff8ee7e24850355518c33fee2。六criterion均PASS，fixture7向量/6focused/6exactnamed/fmt/alltargetsallfeatures-Dwarnings严格门已实跑绿，strictR1失败修复后final重跑0。DEFER-NPR-RUST-CODEC-01（计划外UNFIXED）：P2privatehex依赖先验证/URL双实现仅具名spellings证实，P3UTF8负例位置/1023与1026而非恰界/长URL封闭失败/receipt未列source前缀；未把P2/P3修成新的准入门。真实runner每门实际source两env，记command cargoargv而非shell前缀，runner原bytes可复核。共享coverage源码未改、rawduplicate负例实证，不虚称Claude现场hash/命令；实际Claude服务调用由审核CLI执行，0仅指OpenCode模型调用。postreview仅原卡checkbox/事实，不改变5个已审source/fixture/docsSHA，protected05保持。sourcePush是family源码交付，CD/NPR20及native来源门待；旧FASTfull不冒称newRustfull。下一NPR03 issuer安全加载与独立安装；正式whole仍4/61=6.56%。

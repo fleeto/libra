@@ -285,11 +285,14 @@ Libra retains the exporter exit status and bounded stderr diagnostics. This
 child-only setting leaves the parent Libra process and system configuration
 unchanged.
 
-On macOS, OpenCode **content export is unsupported**: Seatbelt cannot give the
-bridge cancellation-safe containment for a forking exporter, so Libra fails
-closed before it spawns `sandbox-exec` or the exporter and hook capture stays
-metadata-only. Linux uses required bubblewrap containment. To enable the
-Linux exporter, register the directory containing the verified
+On macOS, OpenCode export requires a **Required Seatbelt server/export pair**.
+Both processes deny `process-fork`, use private HOME/XDG roots and a pinned
+binary copy, and communicate only on one authenticated loopback port.
+Cancellation and the absolute deadline terminate their owned process groups;
+Libra never signals a group after reaping its leader. Trust, containment,
+readiness, output-cap or shutdown failure remains **metadata-only**, with no
+unsandboxed fallback. To enable the exporter, register the directory containing
+the verified
 `opencode` binary and then pin it: `libra agent rpc trust --dir <path>`
 followed by `libra agent rpc trust opencode`. Neither step opens the
 external-RPC surface (`agent.external_agents.enabled` stays untouched); the

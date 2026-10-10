@@ -47,10 +47,10 @@
 //! `SandboxManager::transform`. Linux: network unshared, a private tmpfs
 //! `/tmp` environment, and ONE probe-verified exception: a descriptor-pinned
 //! OpenCode data directory is bound read-write at a fixed in-sandbox path
-//! because its WAL-mode SQLite store needs write access even for reads. macOS OpenCode content export is
-//! unsupported: seatbelt cannot prove cancellation-safe containment against
-//! a forking exporter, so the bridge fails closed before spawning it and hook
-//! capture remains metadata-only. There is never an unsandboxed fallback.
+//! because its WAL-mode SQLite store needs write access even for reads. macOS uses a separate Required Seatbelt
+//! server/export pair: both deny process-fork, communicate on one authenticated
+//! loopback port, and keep their owned process groups guarded until reaped.
+//! Invalid containment, trust, readiness or shutdown refuses content. There is never an unsandboxed fallback.
 
 use std::{
     path::{Component, Path, PathBuf},
@@ -58,10 +58,16 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow, bail};
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use sha2::{Digest, Sha256};
+#[cfg(target_os = "macos")]
+use tokio::io::AsyncReadExt;
+#[cfg(target_os = "macos")]
+use url::Url;
+#[cfg(target_os = "macos")]
+use uuid::Uuid;
 
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
 use crate::internal::ai::authorized_read::{
     CancellationSafeChild, StrictBoundedRead, read_async_strictly_bounded, read_strictly_bounded,
 };
@@ -69,6 +75,11 @@ use crate::internal::ai::observed_agents::{
     TranscriptSource,
     transcript_source::ExportAuthorized,
     trust::{OPENCODE_EXPORTER_SLUG, read_trust, revalidate_trust},
+};
+#[cfg(target_os = "macos")]
+use crate::internal::ai::sandbox::{
+    CommandSpec, SandboxEnforcement, SandboxManager, SandboxPermissions, SandboxPolicy,
+    SandboxTransformRequest, SandboxType, WritableBind,
 };
 
 /// Trust-record slug for the OpenCode exporter binary (shared with the
@@ -176,7 +187,7 @@ async fn trusted_opencode_provenance_from(
     Ok(provenance)
 }
 
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
 fn valid_session_id(session_id: &str) -> bool {
     !session_id.is_empty()
         && session_id.len() <= 64
@@ -284,9 +295,13 @@ fn validate_opencode_export_identity(
         );
     }
 
-    let exported_working_dir = info
-        .get("directory")
-        .or_else(|| info.get("cwd"))
+    // The current native location is authoritative. A present malformed
+    // location must never let a stale legacy directory authorize the export.
+    let directory = match info.get("location") {
+        Some(location) => location.get("directory"),
+        None => info.get("directory").or_else(|| info.get("cwd")),
+    };
+    let exported_working_dir = directory
         .and_then(|value| value.as_str())
         .ok_or_else(|| {
             anyhow!(
@@ -1019,14 +1034,904 @@ async fn run_bounded_exporter_inner(
     Ok(out)
 }
 
+#[cfg(target_os = "macos")]
+const MACOS_EXPORT_OUTER_CWD: &str = "/usr";
+#[cfg(target_os = "macos")]
+const MACOS_EXPORT_PIPE_CAP: u64 = 4 * 1024;
+#[cfg(target_os = "macos")]
+const MACOS_EXPORT_SIZE_POLL_INTERVAL: Duration = Duration::from_millis(5);
+
+/// macOS owns only fork-denying Seatbelt children. Linux retains its
+/// independent namespace-init pidfd guard and descriptor boundary above.
+#[cfg(target_os = "macos")]
+struct MacosExportGuard {
+    child: CancellationSafeChild,
+}
+
+#[cfg(target_os = "macos")]
+impl MacosExportGuard {
+    fn new(child: tokio::process::Child) -> Self {
+        Self {
+            child: CancellationSafeChild::new_process_group(child),
+        }
+    }
+    fn child_mut(&mut self) -> Option<&mut tokio::process::Child> {
+        self.child.child_mut()
+    }
+    fn register_abort_on_cancel<T>(&mut self, task: &tokio::task::JoinHandle<T>) {
+        self.child.register_abort_on_cancel(task);
+    }
+    fn terminate_and_reap(&mut self) -> bool {
+        self.child.terminate_and_reap_checked().is_ok()
+    }
+    fn disarm_child_after_wait(&mut self) {
+        self.child.disarm_child_after_wait();
+    }
+    fn finish(&mut self) {
+        self.child.finish();
+    }
+}
+
+#[cfg(target_os = "macos")]
+struct MacosProcessEnvironment<'a> {
+    vars: &'a [(std::ffi::OsString, std::ffi::OsString)],
+    stdout_temp_dir: &'a Path,
+}
+
+/// Process-wide file-size backstop leaves room for the SQLite WAL; the
+/// export file is independently capped by the parent while running and at EOF.
+#[cfg(target_os = "macos")]
+fn macos_export_resource_limits(command: &mut tokio::process::Command, max_bytes: u64) {
+    let fsize_limit = (8_u64 * 1024 * 1024 * 1024).max(max_bytes.saturating_add(1));
+    // SAFETY: the fork-child closure uses only async-signal-safe syscalls.
+    unsafe {
+        command.pre_exec(move || {
+            let size = libc::rlimit {
+                rlim_cur: fsize_limit,
+                rlim_max: fsize_limit,
+            };
+            let core = libc::rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
+            if libc::setrlimit(libc::RLIMIT_FSIZE, &size) != 0
+                || libc::setrlimit(libc::RLIMIT_CORE, &core) != 0
+                || libc::signal(libc::SIGXFSZ, libc::SIG_IGN) == libc::SIG_ERR
+            {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+}
+
+#[cfg(target_os = "macos")]
+async fn run_macos_bounded_process(
+    program: &Path,
+    pre_args: &[String],
+    trailing_args: &[String],
+    limits: ExportLimits,
+    deadline_at: tokio::time::Instant,
+    environment: MacosProcessEnvironment<'_>,
+) -> Result<Vec<u8>> {
+    if tokio::time::Instant::now() >= deadline_at {
+        bail!("OpenCode export capture deadline already elapsed; refusing export");
+    }
+    // Probe-verified upstream hazard (opencode 1.17.x, 2026-07-14): the CLI
+    // can exit BEFORE flushing stdout into a backpressured pipe — large
+    // exports arrive truncated (~64 KiB) with a SUCCESS status. Give the
+    // child an inherited anonymous FILE as stdout instead: file writes flush
+    // synchronously (verified complete at 370 KiB+), the FD crosses the
+    // sandbox's mount namespace untouched, and the byte cap is monitored
+    // while the child runs as well as verified after exit.
+    let stdout_file = tempfile::NamedTempFile::new_in(environment.stdout_temp_dir)
+        .context("create private export stdout tempfile")?
+        .into_file();
+    let stdout_for_child = stdout_file
+        .try_clone()
+        .context("clone export stdout handle")?;
+    let mut command = tokio::process::Command::new(program);
+    // The Required Seatbelt profile denies forks; create a new session
+    // before exec so cancellation owns one unreaped process-group leader.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    macos_export_resource_limits(&mut command, limits.max_bytes);
+    command
+        .args(pre_args)
+        .args(trailing_args)
+        .env_clear()
+        .current_dir(MACOS_EXPORT_OUTER_CWD)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::from(stdout_for_child))
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    command.envs(environment.vars.iter().cloned());
+
+    // Assembly and tempfile setup are deliberately covered by the same
+    // capture deadline as trust/sealing/probing. Check again immediately
+    // before the irreversible spawn so an elapsed hook budget cannot launch
+    // an exporter that no caller is still entitled to observe.
+    if tokio::time::Instant::now() >= deadline_at {
+        bail!("OpenCode export capture deadline already elapsed; refusing export");
+    }
+    let child = command.spawn().context("spawn opencode export")?;
+    let mut child = MacosExportGuard::new(child);
+    let Some(mut stderr) = child.child_mut().and_then(|child| child.stderr.take()) else {
+        let terminated = child.terminate_and_reap();
+        if !terminated {
+            bail!("opencode export termination could not be confirmed; content skipped");
+        }
+        bail!("opencode export did not provide its required stderr pipe");
+    };
+
+    let mut stderr_reader = tokio::spawn(async move {
+        // Overflow and I/O failure must reject stdout, without echoing stderr.
+        read_async_strictly_bounded(&mut stderr, MACOS_EXPORT_PIPE_CAP).await
+    });
+    child.register_abort_on_cancel(&stderr_reader);
+
+    enum WaitOutcome {
+        Exited(std::io::Result<std::process::ExitStatus>),
+        Deadline,
+        OverCap(u64),
+        SizeReadFailed,
+    }
+
+    let deadline = tokio::time::sleep_until(deadline_at);
+    tokio::pin!(deadline);
+    let mut size_poll = tokio::time::interval(MACOS_EXPORT_SIZE_POLL_INTERVAL);
+    size_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let outcome = loop {
+        tokio::select! {
+            status = async {
+                match child.child_mut() {
+                    Some(child) => child.wait().await,
+                    None => Err(std::io::Error::other("opencode export child was unavailable")),
+                }
+            } => break WaitOutcome::Exited(status),
+            _ = &mut deadline => break WaitOutcome::Deadline,
+            _ = size_poll.tick() => {
+                match stdout_file.metadata() {
+                    Ok(metadata) if metadata.len() > limits.max_bytes => {
+                        break WaitOutcome::OverCap(metadata.len());
+                    }
+                    Ok(_) => {}
+                    Err(_) => break WaitOutcome::SizeReadFailed,
+                }
+            }
+        }
+    };
+
+    let (_stderr_bytes, status) = match outcome {
+        WaitOutcome::Exited(status) => {
+            let status = match status {
+                Ok(status) => status,
+                Err(_) => {
+                    let terminated = child.terminate_and_reap();
+                    let _ = stderr_reader.await;
+                    if !terminated {
+                        bail!(
+                            "opencode export termination could not be confirmed; content skipped"
+                        );
+                    }
+                    bail!("could not reap opencode export; content skipped");
+                }
+            };
+            // `wait` has consumed the direct child. Clear its group before
+            // any more awaits: a post-wait `kill(-pgid, 0)`/kill sequence can
+            // race PID/PGID reuse and terminate an unrelated host group.
+            // The Required macOS profile denies exporter forks before exec;
+            // the independent server remains owned by MacosSidecar.
+            child.disarm_child_after_wait();
+            let err_buf = tokio::select! {
+                result = &mut stderr_reader => {
+                    let joined = result.context("join opencode export stderr reader")?;
+                    // A failed diagnostic pipe cannot make stdout admissible.
+                    joined.context(
+                        "opencode export stderr exceeded the bounded cap; content skipped",
+                    )?
+                }
+                _ = &mut deadline => {
+                    stderr_reader.abort();
+                    let _ = stderr_reader.await;
+                    bail!(
+                        "opencode export exceeded its deadline while finishing stderr; content skipped"
+                    );
+                }
+            };
+            child.finish();
+            (err_buf, status)
+        }
+        WaitOutcome::Deadline => {
+            // Deadline: terminate and fail closed — a slow exporter must not
+            // eat the hook budget (GC-DR-04). Never claim the kill succeeded
+            // when the OS rejected it.
+            let terminated = child.terminate_and_reap();
+            let _ = stderr_reader.await;
+            if !terminated {
+                bail!("opencode export termination could not be confirmed; content skipped");
+            }
+            bail!(
+                "opencode export exceeded its {:?} deadline; content skipped this idle \
+                 (a later idle retries)",
+                limits.deadline
+            );
+        }
+        WaitOutcome::OverCap(observed) => {
+            let terminated = child.terminate_and_reap();
+            let _ = stderr_reader.await;
+            if !terminated {
+                bail!("opencode export termination could not be confirmed; content skipped");
+            }
+            bail!(
+                "opencode export exceeded the {} byte cap while running \
+                 (observed {observed} bytes); content skipped",
+                limits.max_bytes
+            );
+        }
+        WaitOutcome::SizeReadFailed => {
+            let terminated = child.terminate_and_reap();
+            let _ = stderr_reader.await;
+            if !terminated {
+                bail!("opencode export termination could not be confirmed; content skipped");
+            }
+            bail!("could not monitor OpenCode export output size; content skipped");
+        }
+    };
+
+    // Byte cap on the flushed file (GC-DR-04): over-cap errors, never a
+    // silent truncation.
+    let mut stdout_file = stdout_file;
+    use std::io::{Seek as _, SeekFrom};
+    stdout_file
+        .seek(SeekFrom::Start(0))
+        .context("rewind export output")?;
+    // Bounded read + recheck on the bytes ACTUALLY read (Codex M3 R2 P1-1):
+    // never trust a pre-measured size and never read unbounded into memory.
+    // Linux bwrap's PID namespace and macOS Seatbelt's fork denial prevent
+    // descendants from retaining these output pipes after the direct child exits.
+    // Reading at most cap+1 bytes and rejecting overflow remains a second
+    // independent defense against output growth, so content is never silently
+    // truncated. The strict reader uses a stack sentinel for the final EOF
+    // probe, so an exact-cap export cannot make its owned buffer over-reserve.
+    let out = match read_strictly_bounded(&mut stdout_file, limits.max_bytes) {
+        StrictBoundedRead::Complete(bytes) => bytes,
+        StrictBoundedRead::Oversize { .. } => {
+            bail!(
+                "opencode export exceeded the {} byte cap; refusing content",
+                limits.max_bytes
+            );
+        }
+        StrictBoundedRead::Failed { error, .. } => {
+            return Err(error).context("read export output file");
+        }
+    };
+    if !status.success() {
+        bail!("opencode export failed with a non-zero exit status; exporter diagnostics omitted");
+    }
+    Ok(out)
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy)]
+enum MacosNetworkRole {
+    Server,
+    Client,
+}
+
+#[cfg(target_os = "macos")]
+struct MacosExportEnvironment {
+    _scratch: tempfile::TempDir,
+    server_root: PathBuf,
+    client_root: PathBuf,
+    binary_dir: PathBuf,
+    store_dir: PathBuf,
+}
+
+#[cfg(target_os = "macos")]
+impl MacosExportEnvironment {
+    fn new() -> Result<Self> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let data_home = ambient_opencode_data_root().ok_or_else(|| {
+            anyhow!("OpenCode data directory is unavailable or unsafe; refusing export")
+        })?;
+        let store_dir = macos_opencode_store_directory(&data_home)?;
+        let scratch = tempfile::Builder::new()
+            .prefix("libra-opencode-export-")
+            .tempdir()
+            .context("create private OpenCode export scratch directory")?;
+        std::fs::set_permissions(scratch.path(), std::fs::Permissions::from_mode(0o700))
+            .context("restrict OpenCode export scratch directory")?;
+        let scratch_root = std::fs::canonicalize(scratch.path())
+            .context("canonicalize OpenCode export scratch directory")?;
+        let server_root = create_macos_private_directory(&scratch_root.join("server"))?;
+        let client_root = create_macos_private_directory(&scratch_root.join("client"))?;
+        let binary_dir = create_macos_private_directory(&scratch_root.join("bin"))?;
+        for root in [&server_root, &client_root] {
+            for name in ["home", "data", "config", "state", "cache", "tmp"] {
+                create_macos_private_directory(&root.join(name))?;
+            }
+            std::os::unix::fs::symlink(&store_dir, root.join("data/opencode"))
+                .context("link the exact OpenCode store into private export data root")?;
+        }
+
+        Ok(Self {
+            _scratch: scratch,
+            server_root,
+            client_root,
+            binary_dir,
+            store_dir,
+        })
+    }
+
+    fn child_environment(&self, root: &Path, password: &str) -> Vec<(String, String)> {
+        [
+            ("HOME", root.join("home")),
+            ("XDG_DATA_HOME", root.join("data")),
+            ("XDG_CONFIG_HOME", root.join("config")),
+            ("XDG_STATE_HOME", root.join("state")),
+            ("XDG_CACHE_HOME", root.join("cache")),
+            ("TMPDIR", root.join("tmp")),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.to_string(), value.to_string_lossy().into_owned()))
+        .chain([
+            ("OPENCODE_PASSWORD".to_string(), password.to_string()),
+            ("OPENCODE_DISABLE_MODELS_FETCH".to_string(), "1".to_string()),
+        ])
+        .collect()
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn create_macos_private_directory(path: &Path) -> Result<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+
+    std::fs::create_dir(path).context("create private OpenCode export directory")?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+        .context("restrict private OpenCode export directory")?;
+    std::fs::canonicalize(path).context("canonicalize private OpenCode export directory")
+}
+
+#[cfg(target_os = "macos")]
+fn macos_opencode_store_directory(data_home: &Path) -> Result<PathBuf> {
+    let canonical_data_home = std::fs::canonicalize(data_home)
+        .context("canonicalize OpenCode data root; refusing export")?;
+    if canonical_data_home != data_home {
+        bail!("OpenCode data root changed after path preflight; refusing export");
+    }
+    let store = data_home.join("opencode");
+    let metadata = std::fs::symlink_metadata(&store)
+        .context("OpenCode data store is unavailable; launch OpenCode once and retry")?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        bail!("OpenCode data store is not a real directory; refusing export");
+    }
+    let canonical_store = std::fs::canonicalize(&store)
+        .context("canonicalize OpenCode data store; refusing export")?;
+    if !canonical_store.starts_with(&canonical_data_home) {
+        bail!("OpenCode data store escaped its configured data root; refusing export");
+    }
+    Ok(canonical_store)
+}
+
+#[cfg(target_os = "macos")]
+fn macos_loopback_port() -> Result<u16> {
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0))
+        .context("reserve a local port for the isolated OpenCode export server")?;
+    let port = listener
+        .local_addr()
+        .context("read isolated OpenCode export server port")?
+        .port();
+    drop(listener);
+    Ok(port)
+}
+
+#[cfg(target_os = "macos")]
+fn macos_seatbelt_command(
+    program: &Path,
+    args: Vec<String>,
+    environment: &[(String, String)],
+    writable_root: &Path,
+    store_dir: &Path,
+    port: u16,
+    role: MacosNetworkRole,
+) -> Result<crate::internal::ai::sandbox::ExecEnv> {
+    let cwd = PathBuf::from(MACOS_EXPORT_OUTER_CWD);
+    let env = environment.iter().cloned().collect();
+    let spec = CommandSpec {
+        program: program.to_string_lossy().into_owned(),
+        args,
+        cwd: cwd.clone(),
+        env,
+        clear_env: true,
+        stdin: None,
+        timeout_ms: None,
+        sandbox_permissions: SandboxPermissions::UseDefault,
+        justification: Some("OpenCode export Required Seatbelt profile".to_string()),
+    };
+    let writable_binds = [writable_root, store_dir]
+        .into_iter()
+        .map(|path| WritableBind {
+            source: path.to_path_buf(),
+            destination: path.to_path_buf(),
+        })
+        .collect::<Vec<_>>();
+    let empty_paths = Vec::new();
+    let mut exec_env = SandboxManager::new()
+        .transform(SandboxTransformRequest {
+            spec,
+            policy: Some(&SandboxPolicy::ReadOnly),
+            sandbox_policy_cwd: &cwd,
+            linux_sandbox_exe: None,
+            use_linux_sandbox_bwrap: false,
+            enforcement: SandboxEnforcement::Required,
+            deny_read_paths: &empty_paths,
+            extra_ro_bind_paths: &empty_paths,
+            writable_binds: &writable_binds,
+            trusted_bwrap_exe: None,
+            seccomp_policy_path: None,
+        })
+        .context("assemble Required OpenCode macOS Seatbelt profile")?;
+    if exec_env.sandbox != SandboxType::MacosSeatbelt {
+        bail!("macOS OpenCode export did not receive Required Seatbelt; refusing export");
+    }
+    let command = &mut exec_env.command;
+    if command.first().map(String::as_str) != Some("/usr/bin/sandbox-exec")
+        || command.get(1).map(String::as_str) != Some("-p")
+    {
+        bail!("OpenCode Seatbelt command shape changed; refusing export");
+    }
+    // The generic builder canonicalizes writable paths again. Reject a
+    // swapped store rather than granting write access to its new target.
+    let store_path = store_dir
+        .to_str()
+        .ok_or_else(|| anyhow!("OpenCode store path is not UTF-8; refusing export"))?;
+    let expected_store_bind = format!("-DWRITABLE_BIND_1={store_path}");
+    let mut store_binds = command
+        .iter()
+        .filter(|arg| arg.starts_with("-DWRITABLE_BIND_1="));
+    if store_binds.next() != Some(&expected_store_bind) || store_binds.next().is_some() {
+        bail!("OpenCode store binding changed during Seatbelt assembly; refusing export");
+    }
+    let profile = command
+        .get_mut(2)
+        .ok_or_else(|| anyhow!("OpenCode Seatbelt profile is missing; refusing export"))?;
+    if !profile.contains("(deny default)")
+        || !profile.contains("(allow process-fork)")
+        || profile.contains("(allow network-outbound)")
+        || profile.contains("(allow network-inbound)")
+        || profile.contains("(allow network-bind)")
+    {
+        bail!("OpenCode Seatbelt base profile drifted; refusing export");
+    }
+    let port_scope = format!("localhost:{port}");
+    profile.push_str("\n; OpenCode one-shot export process boundary\n(deny process-fork (with no-report))\n(allow system-socket)\n");
+    match role {
+        MacosNetworkRole::Server => profile.push_str(&format!(
+            "(allow network-bind (local tcp \"{port_scope}\"))\n(allow network-inbound (local tcp \"{port_scope}\"))\n"
+        )),
+        MacosNetworkRole::Client => profile.push_str(&format!(
+            "(allow network-outbound (remote ip \"{port_scope}\"))\n"
+        )),
+    }
+    Ok(exec_env)
+}
+
+#[cfg(target_os = "macos")]
+async fn seal_opencode_binary_until(
+    provenance: crate::internal::ai::observed_agents::trust::Provenance,
+    destination: PathBuf,
+    deadline: tokio::time::Instant,
+) -> Result<PathBuf> {
+    match tokio::time::timeout_at(
+        deadline,
+        tokio::task::spawn_blocking(move || {
+            copy_verified_opencode_binary(&provenance, &destination)
+        }),
+    )
+    .await
+    {
+        Ok(Ok(result)) => result,
+        Ok(Err(error)) => Err(anyhow::Error::new(error).context("join OpenCode binary pin")),
+        Err(_) => bail!("OpenCode binary pin exceeded the capture deadline; refusing export"),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn copy_verified_opencode_binary(
+    provenance: &crate::internal::ai::observed_agents::trust::Provenance,
+    destination: &Path,
+) -> Result<PathBuf> {
+    use std::{
+        io::{Read as _, Write as _},
+        os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
+    };
+
+    let mut source = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(&provenance.canonical_path)
+        .context("open trusted OpenCode binary without following symlinks")?;
+    let before = source
+        .metadata()
+        .context("stat trusted OpenCode binary descriptor")?;
+    if !before.is_file()
+        || before.permissions().mode() & 0o111 == 0
+        || before.dev() != provenance.device
+        || before.ino() != provenance.inode
+        || before.mtime() != provenance.mtime
+    {
+        bail!("OpenCode binary provenance changed before sandbox pin; refusing export");
+    }
+    let reported_len = before.len();
+    let mut sealed = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(destination)
+        .context("create private OpenCode binary copy")?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 32 * 1024];
+    let mut copied = 0_u64;
+    loop {
+        let read = source
+            .read(&mut buffer)
+            .context("read trusted OpenCode binary descriptor")?;
+        if read == 0 {
+            break;
+        }
+        copied = copied.saturating_add(read as u64);
+        if copied > reported_len {
+            bail!("trusted OpenCode binary changed while pinning; refusing export");
+        }
+        hasher.update(&buffer[..read]);
+        sealed
+            .write_all(&buffer[..read])
+            .context("copy trusted OpenCode binary into private scratch")?;
+    }
+    let after = source
+        .metadata()
+        .context("restat trusted OpenCode binary descriptor")?;
+    if copied != reported_len
+        || after.dev() != before.dev()
+        || after.ino() != before.ino()
+        || after.mtime() != before.mtime()
+        || after.ctime() != before.ctime()
+        || after.ctime_nsec() != before.ctime_nsec()
+        || hex::encode(hasher.finalize()) != provenance.sha256
+    {
+        bail!("trusted OpenCode binary changed while pinning; refusing export");
+    }
+    sealed
+        .sync_all()
+        .context("sync private OpenCode binary copy")?;
+    sealed
+        .set_permissions(std::fs::Permissions::from_mode(0o500))
+        .context("make private OpenCode binary copy executable and read-only")?;
+    sealed
+        .sync_all()
+        .context("sync executable mode for private OpenCode binary copy")?;
+    Ok(destination.to_path_buf())
+}
+
+#[cfg(target_os = "macos")]
+struct MacosSidecar {
+    guard: MacosExportGuard,
+    stdin: Option<tokio::process::ChildStdin>,
+    stdout_drain: tokio::task::JoinHandle<Result<()>>,
+    stderr_drain: tokio::task::JoinHandle<Result<()>>,
+    endpoint: String,
+}
+
+#[cfg(target_os = "macos")]
+impl MacosSidecar {
+    async fn spawn(
+        exec_env: crate::internal::ai::sandbox::ExecEnv,
+        port: u16,
+        deadline: tokio::time::Instant,
+    ) -> Result<Self> {
+        if tokio::time::Instant::now() >= deadline {
+            bail!("OpenCode export capture deadline elapsed before server spawn");
+        }
+        if !exec_env.new_session {
+            bail!(
+                "isolated OpenCode server did not receive a private process group; refusing export"
+            );
+        }
+        let (mut command, _) = exec_env
+            .into_command()
+            .map_err(|_| anyhow!("build isolated OpenCode server command; refusing export"))?;
+        command
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
+        macos_export_resource_limits(&mut command, EXPORT_MAX_BYTES);
+        let child = command
+            .spawn()
+            .context("spawn isolated OpenCode export server")?;
+        let mut guard = MacosExportGuard::new(child);
+        let Some(stdin) = guard.child_mut().and_then(|child| child.stdin.take()) else {
+            let _ = guard.terminate_and_reap();
+            bail!("isolated OpenCode server did not provide its stdin lease");
+        };
+        let Some(stdout) = guard.child_mut().and_then(|child| child.stdout.take()) else {
+            let _ = guard.terminate_and_reap();
+            bail!("isolated OpenCode server did not provide its readiness pipe");
+        };
+        let Some(stderr) = guard.child_mut().and_then(|child| child.stderr.take()) else {
+            let _ = guard.terminate_and_reap();
+            bail!("isolated OpenCode server did not provide its stderr pipe");
+        };
+        let stderr_drain = tokio::spawn(drain_opencode_pipe(stderr));
+        guard.register_abort_on_cancel(&stderr_drain);
+        let mut stdout = stdout;
+        let endpoint = match read_macos_server_endpoint(&mut stdout, port, deadline).await {
+            Ok(endpoint) => endpoint,
+            Err(error) => {
+                let _ = guard.terminate_and_reap();
+                return Err(error);
+            }
+        };
+        let stdout_drain = tokio::spawn(drain_opencode_pipe(stdout));
+        guard.register_abort_on_cancel(&stdout_drain);
+        Ok(Self {
+            guard,
+            stdin: Some(stdin),
+            stdout_drain,
+            stderr_drain,
+            endpoint,
+        })
+    }
+
+    async fn shutdown(mut self, deadline: tokio::time::Instant) -> Result<()> {
+        drop(self.stdin.take());
+        let exited_before_wait = match self.guard.child_mut() {
+            Some(child) => match child.try_wait() {
+                Ok(status) => status,
+                Err(_) => {
+                    if !self.guard.terminate_and_reap() {
+                        bail!(
+                            "isolated OpenCode server termination could not be confirmed; content skipped"
+                        );
+                    }
+                    bail!("could not inspect isolated OpenCode server state; content skipped");
+                }
+            },
+            None => bail!("isolated OpenCode server ownership was lost; refusing export"),
+        };
+        let exit_status = if let Some(status) = exited_before_wait {
+            self.guard.disarm_child_after_wait();
+            Some(status)
+        } else {
+            let grace_deadline = std::cmp::min(
+                deadline,
+                tokio::time::Instant::now() + Duration::from_millis(500),
+            );
+            let wait_result = match self.guard.child_mut() {
+                Some(child) => tokio::time::timeout_at(grace_deadline, child.wait()).await,
+                None => bail!("isolated OpenCode server ownership was lost; refusing export"),
+            };
+            match wait_result {
+                Ok(Ok(status)) => {
+                    self.guard.disarm_child_after_wait();
+                    Some(status)
+                }
+                Ok(Err(_)) | Err(_) => {
+                    let status = self
+                        .guard
+                        .child_mut()
+                        .and_then(|child| child.try_wait().ok().flatten());
+                    if status.is_some() {
+                        self.guard.disarm_child_after_wait();
+                    } else if !self.guard.terminate_and_reap() {
+                        bail!(
+                            "isolated OpenCode server termination could not be confirmed; content skipped"
+                        );
+                    }
+                    status
+                }
+            }
+        };
+        drain_task_until(&mut self.stdout_drain, deadline).await?;
+        drain_task_until(&mut self.stderr_drain, deadline).await?;
+        self.guard.finish();
+        if !exit_status.is_some_and(|status| status.success()) {
+            bail!("isolated OpenCode server did not exit cleanly; content skipped");
+        }
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "macos")]
+async fn drain_opencode_pipe<R>(mut reader: R) -> Result<()>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    read_async_strictly_bounded(&mut reader, MACOS_EXPORT_PIPE_CAP)
+        .await
+        .map(|_| ())
+        .context("isolated OpenCode server output exceeded its bounded cap; content skipped")
+}
+
+#[cfg(target_os = "macos")]
+async fn drain_task_until(
+    task: &mut tokio::task::JoinHandle<Result<()>>,
+    deadline: tokio::time::Instant,
+) -> Result<()> {
+    match tokio::time::timeout_at(deadline, &mut *task).await {
+        Ok(result) => result.context("join isolated OpenCode server output reader")?,
+        Err(_) => {
+            task.abort();
+            let _ = task.await;
+            bail!("isolated OpenCode server output exceeded the capture deadline; content skipped")
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+async fn read_macos_server_endpoint<R>(
+    reader: &mut R,
+    expected_port: u16,
+    deadline: tokio::time::Instant,
+) -> Result<String>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    const MAX_READY_LINE_BYTES: usize = 4096;
+    let mut line = Vec::new();
+    let mut byte = [0_u8; 1];
+    loop {
+        let read = tokio::time::timeout_at(deadline, reader.read(&mut byte))
+            .await
+            .map_err(|_| {
+                anyhow!("isolated OpenCode server readiness exceeded the capture deadline")
+            })?
+            .context("read isolated OpenCode server readiness")?;
+        if read == 0 {
+            bail!("isolated OpenCode server exited before readiness; refusing export");
+        }
+        if byte[0] == b'\n' {
+            break;
+        }
+        if byte[0] != b'\r' {
+            line.push(byte[0]);
+        }
+        if line.len() > MAX_READY_LINE_BYTES {
+            bail!(
+                "isolated OpenCode server readiness exceeded its fixed size cap; refusing export"
+            );
+        }
+    }
+    let document: serde_json::Value = serde_json::from_slice(&line).map_err(|_| {
+        anyhow!("isolated OpenCode server returned invalid readiness; refusing export")
+    })?;
+    let address = document
+        .get("url")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| anyhow!("isolated OpenCode server omitted its endpoint; refusing export"))?;
+    let url = Url::parse(address).map_err(|_| {
+        anyhow!("isolated OpenCode server returned an invalid endpoint; refusing export")
+    })?;
+    if url.scheme() != "http"
+        || url.host_str() != Some("127.0.0.1")
+        || url.port() != Some(expected_port)
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || !matches!(url.path(), "" | "/")
+    {
+        bail!("isolated OpenCode server endpoint escaped its loopback port; refusing export");
+    }
+    Ok(url.to_string())
+}
+
+#[cfg(target_os = "macos")]
+async fn run_macos_opencode_export_until(
+    expected_binary: Option<&Path>,
+    session_id: &str,
+    limits: ExportLimits,
+    deadline: std::time::Instant,
+) -> Result<Vec<u8>> {
+    if !valid_session_id(session_id) {
+        bail!("invalid OpenCode session id (expected alnum/dash/underscore, ≤64 chars)");
+    }
+    let deadline = tokio::time::Instant::from_std(deadline);
+    if tokio::time::Instant::now() >= deadline {
+        bail!("OpenCode export capture deadline already elapsed; refusing export");
+    }
+    let provenance = tokio::time::timeout_at(deadline, trusted_opencode_provenance())
+        .await
+        .map_err(|_| {
+            anyhow!("OpenCode trust revalidation exceeded the capture deadline; refusing export")
+        })??;
+    if expected_binary.is_some_and(|binary| binary != provenance.canonical_path) {
+        bail!("OpenCode exporter provenance changed before sandbox pin; refusing export");
+    }
+
+    let password = Uuid::new_v4().to_string();
+    let environment = MacosExportEnvironment::new()?;
+    let binary_path = environment.binary_dir.join("opencode");
+    let pinned_binary = seal_opencode_binary_until(provenance, binary_path, deadline).await?;
+    let port = macos_loopback_port()?;
+
+    let server_environment = environment.child_environment(&environment.server_root, &password);
+    let server_command = macos_seatbelt_command(
+        &pinned_binary,
+        vec![
+            "serve".to_string(),
+            "--stdio".to_string(),
+            "--hostname".to_string(),
+            "127.0.0.1".to_string(),
+            "--port".to_string(),
+            port.to_string(),
+        ],
+        &server_environment,
+        &environment.server_root,
+        &environment.store_dir,
+        port,
+        MacosNetworkRole::Server,
+    )?;
+    let server = MacosSidecar::spawn(server_command, port, deadline).await?;
+
+    let client_environment = environment.child_environment(&environment.client_root, &password);
+    let client_command = macos_seatbelt_command(
+        &pinned_binary,
+        vec!["session".to_string()],
+        &client_environment,
+        &environment.client_root,
+        &environment.store_dir,
+        port,
+        MacosNetworkRole::Client,
+    )?;
+    let mut command = client_command.command;
+    if command.is_empty() {
+        let _ = server.shutdown(deadline).await;
+        bail!("macOS Seatbelt transform produced an empty OpenCode exporter command");
+    }
+    let program = PathBuf::from(command.remove(0));
+    let sandbox_environment = client_command
+        .env
+        .into_iter()
+        .map(|(key, value)| (key.into(), value.into()))
+        .collect::<Vec<_>>();
+    let trailing_args = [
+        "export".to_string(),
+        session_id.to_string(),
+        "--server".to_string(),
+        server.endpoint.clone(),
+    ];
+    let export_result = run_macos_bounded_process(
+        &program,
+        &command,
+        &trailing_args,
+        limits,
+        deadline,
+        MacosProcessEnvironment {
+            vars: &sandbox_environment,
+            stdout_temp_dir: &environment.client_root,
+        },
+    )
+    .await;
+    server.shutdown(deadline).await?;
+    export_result
+}
+
 /// Run the export under the DR-04b Linux minimal offline sandbox profile
 /// (`SandboxEnforcement::Required` semantics). Assembly is delegated to
 /// [`crate::internal::ai::sandbox::SandboxManager::transform`]; execution
 /// stays in `run_bounded_exporter` (file-backed stdout, `RLIMIT_FSIZE`,
 /// `RLIMIT_CORE=0`, process group, wall clock, 16 MiB). Linux uses trusted
-/// bwrap. macOS is explicitly unsupported because Seatbelt cannot guarantee
-/// descendant containment after an outer hook cancellation; it fails closed
-/// before spawn. No platform has a degraded unsandboxed run (GC-DR-14).
+/// bwrap. macOS uses a fork-denying Required Seatbelt server/export pair,
+/// each with a private process group and one absolute capture deadline. No platform has a degraded unsandboxed run (GC-DR-14).
 pub async fn run_export_subprocess_sandboxed(
     binary: &std::path::Path,
     session_id: &str,
@@ -1053,12 +1958,7 @@ pub async fn run_export_subprocess_sandboxed_until(
 ) -> Result<Vec<u8>> {
     #[cfg(target_os = "macos")]
     {
-        let _ = (binary, session_id, limits, deadline);
-        bail!(
-            "OpenCode transcript export is unsupported on macOS because its seatbelt \
-             backend cannot provide cancellation-safe descendant containment; refusing \
-             export (fail-closed)"
-        );
+        run_macos_opencode_export_until(Some(binary), session_id, limits, deadline).await
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
@@ -1094,12 +1994,7 @@ async fn run_trusted_export_subprocess_sandboxed_until(
 ) -> Result<Vec<u8>> {
     #[cfg(target_os = "macos")]
     {
-        let _ = (session_id, limits, deadline);
-        bail!(
-            "OpenCode transcript export is unsupported on macOS because its seatbelt \
-             backend cannot provide cancellation-safe descendant containment; refusing \
-             export (fail-closed)"
-        );
+        run_macos_opencode_export_until(None, session_id, limits, deadline).await
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
@@ -2310,7 +3205,7 @@ fn pin_opencode_store() -> Result<Option<std::os::fd::OwnedFd>> {
 /// than becoming a surprising host capability. Invalid roots simply provide
 /// no store to the exporter; it remains sandboxed and fails normally if it
 /// cannot serve the requested transcript.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn ambient_opencode_data_root() -> Option<PathBuf> {
     let configured = std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
@@ -2326,7 +3221,7 @@ fn ambient_opencode_data_root() -> Option<PathBuf> {
 /// a symlink in any ancestor would make the ambient selection ambiguous. The
 /// pinned descriptor remains the final race-resistant authority after this
 /// preflight succeeds.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn structurally_safe_host_directory(path: &Path) -> bool {
     if !path.is_absolute() || path == Path::new("/") {
         return false;
@@ -2433,6 +3328,61 @@ mod tests {
     }
 
     #[test]
+    fn opencode_export_identity_accepts_native_session_and_location_object() {
+        let working_dir = tempfile::tempdir().expect("create working directory");
+        let bytes = serde_json::to_vec(&serde_json::json!({
+            "info": {"id": "ses_expected", "location": {"directory": working_dir.path().to_string_lossy()}},
+            "messages": [],
+        }))
+        .expect("serialize current native identity");
+        validate_opencode_export_identity(&bytes, "ses_expected", working_dir.path())
+            .expect("2.0.26 native location must bind the active workspace");
+    }
+
+    #[test]
+    fn opencode_export_identity_prefers_native_location_over_legacy_directory() {
+        let working_dir = tempfile::tempdir().expect("create working directory");
+        let foreign_dir = tempfile::tempdir().expect("create foreign directory");
+        for (native, legacy, accepted) in [
+            (working_dir.path(), foreign_dir.path(), true),
+            (foreign_dir.path(), working_dir.path(), false),
+        ] {
+            let bytes = serde_json::to_vec(&serde_json::json!({
+                "info": {"id": "ses_expected", "location": {"directory": native.to_string_lossy()}, "directory": legacy.to_string_lossy()},
+                "messages": [],
+            }))
+            .expect("serialize conflicting identities");
+            let result =
+                validate_opencode_export_identity(&bytes, "ses_expected", working_dir.path());
+            assert_eq!(result.is_ok(), accepted, "native location is authoritative");
+            if let Err(error) = result {
+                assert!(!format!("{error:#}").contains(&foreign_dir.path().display().to_string()));
+            }
+        }
+    }
+
+    #[test]
+    fn opencode_export_identity_rejects_malformed_native_location_without_legacy_fallback() {
+        let working_dir = tempfile::tempdir().expect("create working directory");
+        for location in [
+            serde_json::Value::Null,
+            serde_json::json!(7),
+            serde_json::json!({}),
+            serde_json::json!({"directory": 7}),
+        ] {
+            let bytes = serde_json::to_vec(&serde_json::json!({
+                "info": {"id": "ses_expected", "location": location, "directory": working_dir.path().to_string_lossy()},
+                "messages": [],
+            }))
+            .expect("serialize malformed native identity");
+            validate_opencode_export_identity(&bytes, "ses_expected", working_dir.path())
+                .expect_err(
+                    "present invalid native location must not fall back to a legacy directory",
+                );
+        }
+    }
+
+    #[test]
     fn opencode_export_identity_rejects_missing_native_session_id() {
         let working_dir = tempfile::tempdir().expect("create working directory");
         let bytes = serde_json::to_vec(&serde_json::json!({
@@ -2507,6 +3457,100 @@ mod tests {
             !rendered.contains(&other_working_dir.path().display().to_string()),
             "exporter-supplied working directory leaked: {rendered}"
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    fn macos_test_command_parts(
+        root: &Path,
+        program: &Path,
+        args: Vec<String>,
+        role: MacosNetworkRole,
+        port: u16,
+    ) -> (
+        PathBuf,
+        Vec<String>,
+        Vec<(std::ffi::OsString, std::ffi::OsString)>,
+        PathBuf,
+    ) {
+        let root = std::fs::canonicalize(root).expect("canonicalize macOS Seatbelt test root");
+        let scratch = root.join("scratch");
+        let store = root.join("store");
+        for directory in [
+            scratch.clone(),
+            store.clone(),
+            root.join("home"),
+            root.join("config"),
+            root.join("state"),
+            root.join("cache"),
+            root.join("tmp"),
+        ] {
+            std::fs::create_dir_all(directory).expect("create macOS Seatbelt test directory");
+        }
+        let environment = [
+            ("HOME".to_string(), root.join("home").display().to_string()),
+            ("XDG_DATA_HOME".to_string(), root.display().to_string()),
+            (
+                "XDG_CONFIG_HOME".to_string(),
+                root.join("config").display().to_string(),
+            ),
+            (
+                "XDG_STATE_HOME".to_string(),
+                root.join("state").display().to_string(),
+            ),
+            (
+                "XDG_CACHE_HOME".to_string(),
+                root.join("cache").display().to_string(),
+            ),
+            ("TMPDIR".to_string(), root.join("tmp").display().to_string()),
+            ("OPENCODE_DISABLE_MODELS_FETCH".to_string(), "1".to_string()),
+        ];
+        let exec_env =
+            macos_seatbelt_command(program, args, &environment, &scratch, &store, port, role)
+                .expect("build Required Seatbelt command");
+        assert_eq!(exec_env.sandbox, SandboxType::MacosSeatbelt);
+        let sandbox_environment = exec_env
+            .env
+            .into_iter()
+            .map(|(key, value)| (key.into(), value.into()))
+            .collect();
+        let mut command = exec_env.command;
+        let program = PathBuf::from(command.remove(0));
+        (program, command, sandbox_environment, scratch)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn shell_quote_macos(path: &Path) -> String {
+        format!("'{}'", path.to_string_lossy().replace('\'', "'\"'\"'"))
+    }
+
+    #[cfg(target_os = "macos")]
+    async fn macos_test_process(
+        root: &Path,
+        script: String,
+        deadline: Duration,
+    ) -> Result<Vec<u8>> {
+        let (program, pre_args, environment, scratch) = macos_test_command_parts(
+            root,
+            Path::new("/bin/sh"),
+            vec!["-c".to_string(), script],
+            MacosNetworkRole::Client,
+            43197,
+        );
+        run_macos_bounded_process(
+            &program,
+            &pre_args,
+            &[],
+            ExportLimits {
+                max_bytes: 1024,
+                deadline,
+            },
+            tokio::time::Instant::now() + deadline,
+            MacosProcessEnvironment {
+                vars: &environment,
+                stdout_temp_dir: &scratch,
+            },
+        )
+        .await
     }
 
     /// Write an executable fake exporter script (tests never touch a real
@@ -3651,46 +4695,431 @@ printf 'tty=detached'"#,
         );
     }
 
-    /// macOS is rejected before the generic seatbelt transform or any
-    /// trusted-looking exporter can run. Seatbelt does not provide the
-    /// cancellation-safe descendant containment required for this bridge.
     #[cfg(target_os = "macos")]
-    #[tokio::test]
-    async fn macos_export_is_rejected_before_seatbelt_transform() {
-        let tmp = tempfile::tempdir().unwrap();
-        let marker = tmp.path().join("must-not-run");
-        let bin = fake_exporter(tmp.path(), &format!("touch {}", marker.display()));
-        let error = run_export_subprocess_sandboxed(&bin, "sess", ExportLimits::default())
-            .await
-            .expect_err("macOS export must be rejected before the transform");
-        let text = format!("{error:#}");
-        assert!(
-            text.contains("unsupported on macOS") && text.contains("fail-closed"),
-            "got {text}"
+    #[test]
+    fn macos_seatbelt_profiles_deny_fork_and_scope_loopback() {
+        let root = tempfile::tempdir().expect("create private Seatbelt test root");
+        let (server_program, server_args, _, _) = macos_test_command_parts(
+            root.path(),
+            Path::new("/bin/true"),
+            Vec::new(),
+            MacosNetworkRole::Server,
+            43197,
         );
-        assert!(!marker.exists(), "rejected exporter must not execute");
+        assert_eq!(server_program, Path::new("/usr/bin/sandbox-exec"));
+        assert_eq!(server_args.first().map(String::as_str), Some("-p"));
+        let server_policy = &server_args[1];
+        assert!(server_policy.contains("(deny default)"));
+        assert!(server_policy.contains("(deny process-fork (with no-report))"));
+        assert!(server_policy.contains("(allow network-bind (local tcp \"localhost:43197\"))"));
+        assert!(server_policy.contains("(allow network-inbound (local tcp \"localhost:43197\"))"));
+        assert!(!server_policy.contains("(allow network-outbound)"));
+
+        let (_client_program, client_args, _, _) = macos_test_command_parts(
+            root.path(),
+            Path::new("/bin/true"),
+            Vec::new(),
+            MacosNetworkRole::Client,
+            43197,
+        );
+        let client_policy = &client_args[1];
+        assert!(client_policy.contains("(deny process-fork (with no-report))"));
+        assert!(client_policy.contains("(allow network-outbound (remote ip \"localhost:43197\"))"));
+        assert!(!client_policy.contains("(allow network-inbound"));
+        assert!(!client_policy.contains("(allow network-bind"));
     }
 
-    /// The macOS rejection does not depend on whether the deprecated
-    /// `sandbox-exec` binary happens to be installed: it is fail-closed for
-    /// all hosts, before an exporter is spawned.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_store_rejects_replaced_data_root_after_preflight() {
+        let root = tempfile::tempdir().expect("create private store test root");
+        let root = root.path().canonicalize().expect("canonicalize test root");
+        let data = root.join("data");
+        let redirected = root.join("redirected");
+        std::fs::create_dir_all(data.join("opencode")).expect("create original store");
+        std::fs::create_dir_all(redirected.join("opencode")).expect("create unrelated store");
+        assert!(structurally_safe_host_directory(&data));
+        std::fs::rename(&data, root.join("original-data")).expect("move verified data root");
+        std::os::unix::fs::symlink(&redirected, &data).expect("replace data root with symlink");
+
+        let error = macos_opencode_store_directory(&data)
+            .expect_err("replaced data root must be refused before sandbox assembly");
+        assert!(
+            format!("{error:#}").contains("data root changed after path preflight"),
+            "unexpected data root replacement error: {error:#}"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_seatbelt_rejects_replaced_store_before_spawn() {
+        let root = tempfile::tempdir().expect("create private Seatbelt test root");
+        let root = root.path().canonicalize().expect("canonicalize test root");
+        let data = root.join("data");
+        let store = data.join("opencode");
+        let unrelated = root.join("unrelated");
+        let scratch = root.join("scratch");
+        for path in [&store, &unrelated, &scratch] {
+            std::fs::create_dir_all(path).expect("create Seatbelt test directory");
+        }
+        let verified_store = macos_opencode_store_directory(&data).expect("verify real store");
+        assert_eq!(verified_store, store);
+        std::fs::rename(&store, data.join("old-opencode")).expect("move verified store");
+        std::os::unix::fs::symlink(&unrelated, &store).expect("replace store with symlink");
+
+        let error = macos_seatbelt_command(
+            Path::new("/bin/true"),
+            Vec::new(),
+            &[],
+            &scratch,
+            &verified_store,
+            43197,
+            MacosNetworkRole::Client,
+        )
+        .expect_err("replacement must not change the Seatbelt writable target");
+        assert!(
+            format!("{error:#}").contains("store binding changed"),
+            "unexpected store replacement error: {error:#}"
+        );
+    }
+
+    /// Prove the macOS cancellation contract on the host Seatbelt backend:
+    /// process creation is refused, both explicit cancellation and the shared
+    /// absolute deadline reap the direct exporter group, and no output is
+    /// accepted from either failure path.
     #[cfg(target_os = "macos")]
     #[tokio::test]
-    async fn macos_export_remains_unsupported_with_or_without_seatbelt() {
-        let dir = tempfile::tempdir().unwrap();
-        let bin = fake_exporter(dir.path(), r#"printf 'should-not-run'"#);
-        let err = run_export_subprocess_sandboxed(&bin, "sess", ExportLimits::default())
+    async fn macos_export_cancel_contains_descendants() {
+        let root = tempfile::tempdir().expect("create private Seatbelt test root");
+        let fork_marker = root.path().join("scratch/fork-child-ran");
+        let fork_script = format!(
+            "(printf child > {}) & wait",
+            shell_quote_macos(&fork_marker)
+        );
+        let fork_error = macos_test_process(root.path(), fork_script, Duration::from_secs(2))
             .await
-            .expect_err("macOS export must fail closed");
-        let text = format!("{err:#}");
+            .expect_err("a Seatbelt exporter must not create a descendant");
         assert!(
-            text.contains("unsupported on macOS") && text.contains("fail-closed"),
-            "got {text}"
+            !format!("{fork_error:#}").contains("child"),
+            "fork rejection must not echo child payload"
         );
+        assert!(!fork_marker.exists(), "Seatbelt must refuse exporter forks");
+
+        let server_fork_marker = root.path().join("scratch/server-fork-child-ran");
+        let (program, args, environment, scratch) = macos_test_command_parts(
+            root.path(),
+            Path::new("/bin/sh"),
+            vec![
+                "-c".to_string(),
+                format!(
+                    "(printf child > {}) & wait",
+                    shell_quote_macos(&server_fork_marker)
+                ),
+            ],
+            MacosNetworkRole::Server,
+            43197,
+        );
+        run_macos_bounded_process(
+            &program,
+            &args,
+            &[],
+            ExportLimits {
+                max_bytes: 1024,
+                deadline: Duration::from_secs(2),
+            },
+            tokio::time::Instant::now() + Duration::from_secs(2),
+            MacosProcessEnvironment {
+                vars: &environment,
+                stdout_temp_dir: &scratch,
+            },
+        )
+        .await
+        .expect_err("the server Seatbelt profile must refuse descendants too");
         assert!(
-            !text.contains("unsandboxed export ran"),
-            "must not fall back to unsandboxed execution: {text}"
+            !server_fork_marker.exists(),
+            "server fork must not run a child"
         );
+
+        let pid_file = root.path().join("scratch/exporter.pid");
+        let busy_script = format!(
+            "printf '%s' \"$$\" > {}; while :; do :; done",
+            shell_quote_macos(&pid_file)
+        );
+        let (program, pre_args, environment, scratch) = macos_test_command_parts(
+            root.path(),
+            Path::new("/bin/sh"),
+            vec!["-c".to_string(), busy_script],
+            MacosNetworkRole::Client,
+            43197,
+        );
+        let task = tokio::spawn(async move {
+            run_macos_bounded_process(
+                &program,
+                &pre_args,
+                &[],
+                ExportLimits {
+                    max_bytes: 1024,
+                    deadline: Duration::from_secs(10),
+                },
+                tokio::time::Instant::now() + Duration::from_secs(10),
+                MacosProcessEnvironment {
+                    vars: &environment,
+                    stdout_temp_dir: &scratch,
+                },
+            )
+            .await
+        });
+        let mut pid = None;
+        for _ in 0..100 {
+            if let Ok(value) = std::fs::read_to_string(&pid_file)
+                && let Ok(parsed) = value.trim().parse::<libc::pid_t>()
+            {
+                pid = Some(parsed);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let pid = pid.expect("sandboxed busy exporter published its synthetic pid");
+        task.abort();
+        let _ = task.await;
+        assert!(
+            wait_for_macos_process_exit(pid).await,
+            "cancelled exporter remained alive"
+        );
+
+        let timeout_pid_file = root.path().join("scratch/timeout.pid");
+        let timeout_script = format!(
+            "printf '%s' \"$$\" > {}; while :; do :; done",
+            shell_quote_macos(&timeout_pid_file)
+        );
+        let start = std::time::Instant::now();
+        let error = macos_test_process(root.path(), timeout_script, Duration::from_millis(100))
+            .await
+            .expect_err("an elapsed export deadline must fail closed");
+        assert!(format!("{error:#}").contains("deadline"));
+        assert!(start.elapsed() < Duration::from_secs(3));
+        let timeout_pid = std::fs::read_to_string(timeout_pid_file)
+            .expect("deadline exporter wrote its synthetic pid")
+            .trim()
+            .parse::<libc::pid_t>()
+            .expect("synthetic pid is numeric");
+        assert!(
+            wait_for_macos_process_exit(timeout_pid).await,
+            "deadline exporter remained alive"
+        );
+
+        let fixture_root = root
+            .path()
+            .canonicalize()
+            .expect("canonicalize sidecar root");
+        let server_env = macos_seatbelt_command(
+            Path::new("/bin/sh"),
+            vec![
+                "-c".to_string(),
+                r#"printf '%s\n' '{"url":"http://127.0.0.1:43197/"}'; read ignored || :"#
+                    .to_string(),
+            ],
+            &[],
+            &fixture_root.join("scratch"),
+            &fixture_root.join("store"),
+            43197,
+            MacosNetworkRole::Server,
+        )
+        .expect("build isolated server command");
+        assert!(
+            server_env.new_session,
+            "Seatbelt must create a private server session"
+        );
+        let server_deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        let mut server = MacosSidecar::spawn(server_env, 43197, server_deadline)
+            .await
+            .expect("isolated server reports readiness");
+        let server_pid = server
+            .guard
+            .child_mut()
+            .and_then(|child| child.id())
+            .expect("isolated server remains owned") as libc::pid_t;
+        // SAFETY: the unreaped child PID remains owned by the sidecar guard.
+        let server_pgid = unsafe { libc::getpgid(server_pid) };
+        assert_eq!(
+            server_pgid, server_pid,
+            "server must lead its private process group"
+        );
+        // SAFETY: getpgrp reads only the caller's process-group identifier.
+        assert_ne!(server_pgid, unsafe { libc::getpgrp() });
+        server
+            .shutdown(server_deadline)
+            .await
+            .expect("reap isolated server");
+        assert!(wait_for_macos_process_exit(server_pid).await);
+
+        let failing_env = macos_seatbelt_command(
+            Path::new("/bin/sh"),
+            vec![
+                "-c".to_string(),
+                r#"printf '%s\n' '{"url":"http://127.0.0.1:43197/"}'; exit 7"#.to_string(),
+            ],
+            &[],
+            &fixture_root.join("scratch"),
+            &fixture_root.join("store"),
+            43197,
+            MacosNetworkRole::Server,
+        )
+        .expect("build failing isolated server");
+        let failure_deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        let failing_server = MacosSidecar::spawn(failing_env, 43197, failure_deadline)
+            .await
+            .expect("failing server reports readiness before exiting");
+        let failure = failing_server
+            .shutdown(failure_deadline)
+            .await
+            .expect_err("server failure after readiness must reject export content");
+        assert!(format!("{failure:#}").contains("did not exit cleanly"));
+
+        let cancel_env = macos_seatbelt_command(
+            Path::new("/bin/sh"),
+            vec![
+                "-c".to_string(),
+                r#"printf '%s\n' '{"url":"http://127.0.0.1:43197/"}'; while :; do :; done"#
+                    .to_string(),
+            ],
+            &[],
+            &fixture_root.join("scratch"),
+            &fixture_root.join("store"),
+            43197,
+            MacosNetworkRole::Server,
+        )
+        .expect("build cancellable isolated server");
+        let (pid_sender, pid_receiver) = tokio::sync::oneshot::channel();
+        let cancellation = tokio::spawn(async move {
+            let mut server = MacosSidecar::spawn(
+                cancel_env,
+                43197,
+                tokio::time::Instant::now() + Duration::from_secs(5),
+            )
+            .await
+            .expect("cancellable server reports readiness");
+            let pid = server
+                .guard
+                .child_mut()
+                .and_then(|child| child.id())
+                .expect("cancellable server remains owned") as libc::pid_t;
+            pid_sender.send(pid).expect("send cancellable server pid");
+            tokio::time::sleep(Duration::from_secs(10)).await;
+        });
+        let cancelled_pid = match tokio::time::timeout(Duration::from_secs(6), pid_receiver).await {
+            Ok(Ok(pid)) => pid,
+            _ => {
+                cancellation.abort();
+                let _ = cancellation.await;
+                panic!("isolated server did not report its pid within the deadline");
+            }
+        };
+        cancellation.abort();
+        let _ = cancellation.await;
+        assert!(
+            wait_for_macos_process_exit(cancelled_pid).await,
+            "outer cancellation left the isolated server alive"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    async fn wait_for_macos_process_exit(pid: libc::pid_t) -> bool {
+        for _ in 0..100 {
+            // SAFETY: signal zero probes one synthetic child PID and never
+            // delivers a signal to a potentially reused process group.
+            if unsafe { libc::kill(pid, 0) } == -1
+                && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+            {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        false
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn macos_export_bounds_output_and_readiness_without_payload_leaks() {
+        let root = tempfile::tempdir().expect("create private output test root");
+        let exact = macos_test_process(
+            root.path(),
+            "printf complete".into(),
+            Duration::from_secs(2),
+        )
+        .await
+        .expect("a contained successful output is accepted");
+        assert_eq!(exact, b"complete");
+        let overflow = macos_test_process(
+            root.path(),
+            "i=0; while [ \"$i\" -lt 2000 ]; do printf x; i=$((i + 1)); done".into(),
+            Duration::from_secs(2),
+        )
+        .await
+        .expect_err("stdout beyond the cap must fail rather than truncate");
+        assert!(format!("{overflow:#}").contains("byte cap"));
+        let stderr = macos_test_process(root.path(),
+            "i=0; while [ \"$i\" -lt 1000 ]; do printf SECRET >&2; i=$((i + 1)); done; printf output".into(), Duration::from_secs(2))
+            .await.expect_err("oversize stderr must reject otherwise successful stdout");
+        let rendered = format!("{stderr:#}");
+        assert!(rendered.contains("stderr"));
+        assert!(!rendered.contains("SECRET"));
+        for bytes in [
+            b"{\"url\":\"https://SECRET.invalid/\"}\n".as_slice(),
+            b"{\"url\":\"http://127.0.0.1:43198/\"}\n".as_slice(),
+            b"SECRET\n".as_slice(),
+        ] {
+            let mut reader = bytes;
+            let error = read_macos_server_endpoint(
+                &mut reader,
+                43197,
+                tokio::time::Instant::now() + Duration::from_secs(1),
+            )
+            .await
+            .expect_err("foreign or invalid readiness must fail closed");
+            assert!(!format!("{error:#}").contains("SECRET"));
+        }
+        let mut oversize = vec![b'x'; 4097];
+        oversize.push(b'\n');
+        let error = read_macos_server_endpoint(
+            &mut oversize.as_slice(),
+            43197,
+            tokio::time::Instant::now() + Duration::from_secs(1),
+        )
+        .await
+        .expect_err("readiness is bounded before JSON parsing");
+        assert!(format!("{error:#}").contains("size cap"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn macos_export_requires_trusted_binary_before_spawn() {
+        let dir = tempfile::tempdir().expect("create fake exporter directory");
+        let marker = dir.path().join("must-not-run");
+        let bin = fake_exporter(dir.path(), &format!("touch {}", marker.display()));
+        let error = run_export_subprocess_sandboxed(&bin, "sess", ExportLimits::default())
+            .await
+            .expect_err("untrusted macOS exporter must fail closed");
+        assert!(!format!("{error:#}").contains("unsandboxed export ran"));
+        assert!(!marker.exists(), "untrusted exporter must not execute");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn macos_export_refuses_elapsed_deadline_before_trust_or_spawn() {
+        let dir = tempfile::tempdir().expect("create fake exporter directory");
+        let marker = dir.path().join("must-not-run");
+        let bin = fake_exporter(dir.path(), &format!("touch {}", marker.display()));
+        let error = run_export_subprocess_sandboxed_until(
+            &bin,
+            "sess",
+            ExportLimits::default(),
+            std::time::Instant::now() - Duration::from_millis(1),
+        )
+        .await
+        .expect_err("elapsed macOS capture deadline must fail closed");
+        assert!(format!("{error:#}").contains("deadline already elapsed"));
+        assert!(!marker.exists(), "expired export must not execute");
     }
 
     /// SBX-03 D-group: a trusted, usable bwrap must be present. Missing or

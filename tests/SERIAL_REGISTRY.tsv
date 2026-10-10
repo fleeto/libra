@@ -905,7 +905,7 @@ test_fetch_ssh_resolves_host_key_policy_cascade	lane:cwd+env	uses an isolated re
 test_ssh_changed_host_key_never_prompts	lane:cwd+env	uses an isolated repository and fake SSH/keyscan environment while proving changed keys never prompt
 opencode_export_binary_trust_revalidates	lane:opencode_export_bridge	shares environment and repository state with OpenCode export bridge integration tests
 opencode_export_durable_snapshot_uses_repository_keyed_hmac	lane:opencode_export_bridge	shares environment and repository state with OpenCode export bridge integration tests
-opencode_export_macos_is_unsupported_before_spawn	lane:opencode_export_bridge	shares environment and repository state with OpenCode export bridge integration tests
+opencode_export_macos_requires_trust_before_spawn	lane:opencode_export_bridge	shares environment and repository state with OpenCode export bridge integration tests
 opencode_export_oversize_session_degrades	lane:opencode_export_bridge	shares environment and repository state with OpenCode export bridge integration tests
 opencode_export_plaintext_never_in_persist_or_logs	lane:opencode_export_bridge	shares environment and repository state with OpenCode export bridge integration tests
 opencode_export_rejects_wrong_native_session_without_export_claim	lane:opencode_export_bridge	shares environment and repository state with OpenCode export bridge integration tests

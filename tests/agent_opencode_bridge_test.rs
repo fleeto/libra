@@ -614,13 +614,11 @@ async fn opencode_export_oversize_session_degrades() {
     assert_eq!(n, 0, "oversize content must not produce an export claim");
 }
 
-/// macOS has no containment equivalent to bwrap's PID namespace for an
-/// exporter that can fork and `setsid()` away from its direct leader. The
-/// bridge must fail before it ever executes a trusted-looking exporter.
+/// The Required macOS pair must still reject a substituted exporter before spawn.
 #[cfg(target_os = "macos")]
 #[tokio::test]
 #[serial_test::serial(opencode_export_bridge)]
-async fn opencode_export_macos_is_unsupported_before_spawn() {
+async fn opencode_export_macos_requires_trust_before_spawn() {
     use libra::internal::ai::observed_agents::opencode_export::{
         ExportLimits, run_export_subprocess_sandboxed,
     };
@@ -639,7 +637,8 @@ async fn opencode_export_macos_is_unsupported_before_spawn() {
         .expect_err("macOS OpenCode export must fail closed before spawn");
     let rendered = format!("{error:#}");
     assert!(
-        rendered.contains("unsupported on macOS") && rendered.contains("fail-closed"),
+        (rendered.contains("trust") || rendered.contains("provenance"))
+            && !rendered.contains("must-not-execute"),
         "unexpected macOS rejection: {rendered}"
     );
     assert!(

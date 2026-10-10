@@ -3502,11 +3502,26 @@ fn hook_capture_telemetry_redacts_session_ids_and_omits_exporter_stderr() {
         })
         .expect("macOS OpenCode export branch exists");
     assert!(
-        macos_export.contains("unsupported on macOS")
-            && macos_export.contains("fail-closed")
+        macos_export.contains("run_macos_opencode_export_until(Some(binary)")
             && !macos_export.contains("assemble_sandboxed_export")
             && !macos_export.contains("run_bounded_exporter"),
-        "macOS OpenCode export must fail closed before assembling or spawning an exporter"
+        "macOS export must enter its separate Required containment boundary"
+    );
+    let macos_boundary = exporter_production
+        .split("fn macos_seatbelt_command(")
+        .nth(1)
+        .and_then(|entry| entry.split("/// Run the export under").next())
+        .expect("macOS containment assembly and server lifecycle exist");
+    assert!(
+        macos_boundary.contains("SandboxEnforcement::Required")
+            && macos_boundary.contains("SandboxType::MacosSeatbelt")
+            && macos_boundary.contains("(deny process-fork (with no-report))")
+            && macos_boundary.contains("localhost:{port}")
+            && macos_boundary.contains("store binding changed")
+            && macos_boundary.contains("read_macos_server_endpoint")
+            && macos_boundary.contains("did not exit cleanly")
+            && macos_boundary.contains("server.shutdown(deadline).await?"),
+        "macOS must require fork-denying Seatbelt, exact store/loopback bindings, readiness and clean shutdown"
     );
     let sandbox_runtime_path = repo_root().join("src/internal/ai/sandbox/runtime.rs");
     let sandbox_runtime =

@@ -885,3 +885,11 @@ AC3/VER4当前具名门重建；final focused133/133、fmt/strict/site各0；双
 ### 2026-10-11：OG-14 signed source普通Push main完成
 
 source `c578b69a2724f5dedc346cae63cb938c5170635b`已ordinary Push main，实际GitHub main同ref；PGP签名+DCO一次、12owned blobs MATCH，plan05原bytes未入delta。当前133focused/9705full/strict/fmt/site0与Claude R1 PASS有效，DEFER-OG-CONTAINMENT01及TEST01未修复如实保留；formalC/D阶段待、0.30.42未bump/release。基础7/13=53.85%，formal4/61=6.56%；下一OG15 current2.0.26 PREP核对，旧mac内容PASS不沿用。
+
+### 2026-10-11：OG-15当前main PREP核对并重置历史验收
+
+实际66816ada/source c578b69a已交付OG14；current2.0.26 CLI help确认serve stdio/export server/standalone形状，仅help非runtime。main两个Mac入口仍spawn前拒绝、harness禁止Mac内容分支，old2.0.24具名PASS不适用，OG15 AC/VER复位，当前Acceptance空。PREP source snapshot20paths，root仅plan05原dirty；先补native location identity实际正负门，再Mac隔离/cancel界；旧候选Linux缺main pidfd/close-range，不能whole-file覆盖。保留当前Linux源和必要安全CI，不执行Linux功能/operator。当前default3s/lease30000ms不冒称最终30s/45000ms；FIX argv/OG07各自own。Claude单审/签名main/patch阶段规则覆盖旧文字，来源A及真实内容安全前提不变；正式4/61=6.56%、基础7/13=53.85%。
+
+2026-10-11 OG15 current2.0.26 PREP WORKING：baseline main66816ada；native identity8/8与初轮Mac Seatbelt kernel6/6真实通过，新增双端fork/输出/readiness负例及final focused/fmt/strict/full/Claude审查/Push尚待。Linux runner/pidfd/close-range三个区域逐字节保留、安全CI未改，Linux功能UNRUN/user后验。FIX argv与OG15-FINAL真实内容/source一致性/stopped/doctor仍未通过；default3s/lease30000ms未提前称30s/45s。正式4/61=6.56%、基础local7/13=53.85%，未冒称OG15 member done。cf fresh owned Mac平台段同步，原段之外bytes保留、未外部发布。
+
+2026-10-11 OG15-PREP current2.0.26 phase locally-accepted：actual Claude单审PASS(0P0/1、1P2、9P3，raw423c27b35886b6891ce439db8512f20f688cdf0c2315ee0bf6cc0b5ccf0a034e)、focused115/115/0retry、strict/fmt/site0；final双env Nextest9714/9714、14slow/0flaky/3leaky/9skip、0finalfail、exit0、832.923s，log b78b6d03c10bfbf36f0c9c1d91350cabb7e438be9b6f3c9d0b113c10dc6a9cd0。nonblocking P2/P3→DEFER-OG-CONTAINMENT-01、3具名LEAK→DEFER-OG-TEST01均遗留未修，原review/失败完整保留。whole OG15 in-progress空，real Mac内容/stopped/doctor UNRUN、Linux用户后验UNRUN；准备16owned signed main source Push，正式4/61=6.56%、基础local7/13=53.85%不变，下一FIX-OG-CP01。版本0.30.42/no release/installer，protectedplan05 exact excluded、cf仅owned平台段未外部发布。

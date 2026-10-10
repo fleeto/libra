@@ -76,3 +76,56 @@ fn live_compat_workflow_is_optional_and_secret_gated() {
         );
     }
 }
+
+/// OG-15 preserves the existing safety CI while Linux operator acceptance
+/// is handed to the user. This is a source guard, not Linux runtime proof.
+#[test]
+fn opencode_export_linux_job_uses_verified_userns_bubblewrap() {
+    let base = fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".github/workflows/base.yml"),
+    )
+    .expect("read base safety workflow");
+    let job = base
+        .split("  opencode-export-linux:\n")
+        .nth(1)
+        .expect("the existing Linux safety job must remain present");
+    for required in [
+        "runs-on: ubuntu-24.04",
+        "version=0.13.0",
+        "https://github.com/containers/bubblewrap/releases/download/v${version}/bubblewrap-${version}.tar.xz",
+        "4734237473c0e5d695e4e9034a34e43b2dbf5164655bd13fa59ae376b2b7a765",
+        "sha256sum --check --status",
+        "sudo install -o root -g root -m 0755",
+        "sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0",
+        "test ! -w",
+        "--bind-fd",
+        "--ro-bind-fd",
+        "--as-pid-1",
+        "Run Linux export sandbox gates",
+        "--include-ignored",
+    ] {
+        assert!(
+            job.contains(required),
+            "Linux safety job lost required boundary: {required}"
+        );
+    }
+    assert!(
+        job.find("sha256sum --check --status")
+            .expect("digest check exists")
+            < job
+                .find("tar -C /tmp -xf")
+                .expect("archive extraction exists"),
+        "the source archive must be authenticated before extraction"
+    );
+    for forbidden in [
+        "chmod u+s",
+        "chmod 4755",
+        "apt-get install -y bubblewrap",
+        "sudo cargo test",
+    ] {
+        assert!(
+            !job.contains(forbidden),
+            "Linux safety job must not introduce {forbidden}"
+        );
+    }
+}

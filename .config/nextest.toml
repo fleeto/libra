@@ -63,7 +63,7 @@ filter = 'test(/(^|::)opencode_export_durable_snapshot_uses_repository_keyed_hma
 test-group = 'external'
 
 [[profile.default.overrides]]
-filter = 'test(/(^|::)opencode_export_macos_is_unsupported_before_spawn$/)'
+filter = 'test(/(^|::)opencode_export_macos_requires_trust_before_spawn$/)'
 test-group = 'external'
 
 [[profile.default.overrides]]

@@ -3,11 +3,13 @@
 `libra agent` is an intentionally different external-agent capture extension,
 not a Git-compatible command.
 
-OpenCode **content export is unsupported on macOS**. A forking exporter can
-escape Seatbelt's direct-child lifecycle, so Libra fails closed before it
-spawns either `sandbox-exec` or the exporter; hook capture remains
-metadata-only. Linux uses the required bwrap containment backend. See
-[`../tracing/agent.md`](../tracing/agent.md) §5 for the platform boundary.
+OpenCode export on macOS requires a **Required Seatbelt server/export pair**.
+Both deny `process-fork`, use private HOME/XDG roots and the exact pinned
+OpenCode store, and share one authenticated loopback port. The same absolute
+deadline covers trust, sealing, readiness, bounded export and clean server
+shutdown; failure remains **metadata-only**, without an unsandboxed fallback.
+The direct leader is disarmed after reap, preventing signals to a recycled PGID.
+See [`../tracing/agent.md`](../tracing/agent.md) §5 for the platform boundary.
 Linux content export is available only when the trusted system `bwrap` passes
 Libra's descriptor-native `--bind-fd`/`--ro-bind-fd` safety probe; unsupported
 or legacy bwrap is unavailable and remains metadata-only. Install or upgrade

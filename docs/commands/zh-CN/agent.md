@@ -216,7 +216,11 @@ exporter 与 sandbox。
 保存 core 文件；系统日志仍可能记录信号事件。Libra 保留退出状态及有界 stderr
 诊断。该设置只作用于子程序，不修改 Libra 父程序限制或系统配置。
 
-macOS 不支持 OpenCode 内容导出：Seatbelt 无法为可 fork 的 exporter 提供可随 hook 取消安全收束的后代进程隔离，因此 Libra 会在启动 `sandbox-exec` 或 exporter **之前** fail-closed，hook 捕获保持 metadata-only。Linux 使用 Required bubblewrap containment。启用 Linux exporter 的方式：先注册包含已核验 `opencode`
+macOS 的 OpenCode 导出要求 **Required Seatbelt server/export pair**：两端都拒绝
+`process-fork`，使用私有 HOME/XDG 目录和固定摘要的二进制副本，只允许一个带认证的
+loopback 端口。取消和绝对 deadline 回收仍持有的进程组，leader 已回收后不再发送
+组信号。信任、隔离、readiness、输出上限或退出失败时保持 **metadata-only**，没有
+未沙箱化回退。启用 exporter 的方式：先注册包含已核验 `opencode`
 二进制的目录，再固定它——`libra agent rpc trust --dir <path>`，然后
 `libra agent rpc trust opencode`。两步都不会打开 external-RPC 表面
 （`agent.external_agents.enabled` 保持不变）；二进制只从已注册受信目录解析，

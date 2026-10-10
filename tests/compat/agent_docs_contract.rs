@@ -212,71 +212,28 @@ fn agent_doc_declares_cloud_tombstone_deferred() {
 }
 
 #[test]
-fn macos_opencode_export_is_explicitly_unsupported() {
-    assert!(
-        AGENT_DOC.contains("macOS")
-            && AGENT_DOC.contains("macOS 不支持 OpenCode 内容导出")
-            && AGENT_DOC.contains("启动 `sandbox-exec` 或 exporter **之前**")
-            && AGENT_DOC.contains("metadata-only"),
-        "tracing/agent.md must disclose the macOS no-spawn, metadata-only boundary",
-    );
-    assert!(
-        AGENT_CMD_DOC_EN.contains("macOS")
-            && AGENT_CMD_DOC_EN.contains("content export is unsupported")
-            && AGENT_CMD_DOC_EN.contains("before it spawns `sandbox-exec` or the exporter")
-            && AGENT_CMD_DOC_EN.contains("metadata-only"),
-        "docs/commands/agent.md must disclose the macOS no-spawn, metadata-only boundary",
-    );
-    assert!(
-        AGENT_CMD_DOC_ZH.contains("macOS")
-            && AGENT_CMD_DOC_ZH.contains("不支持 OpenCode 内容导出")
-            && AGENT_CMD_DOC_ZH.contains("启动 `sandbox-exec` 或 exporter **之前**")
-            && AGENT_CMD_DOC_ZH.contains("metadata-only"),
-        "docs/commands/zh-CN/agent.md must disclose the macOS no-spawn, metadata-only boundary",
-    );
-    assert!(
-        AGENT_DEV_DOC.contains("macOS")
-            && AGENT_DEV_DOC.contains("content export is unsupported")
-            && AGENT_DEV_DOC.contains("before it")
-            && AGENT_DEV_DOC.contains("metadata-only"),
-        "docs/development/commands/agent.md must disclose the macOS no-spawn, metadata-only boundary",
-    );
-    assert!(
-        COMPATIBILITY_DOC.contains("macOS")
-            && COMPATIBILITY_DOC.contains("explicitly unsupported")
-            && COMPATIBILITY_DOC.contains("before spawning `sandbox-exec` or the exporter")
-            && COMPATIBILITY_DOC.contains("metadata-only"),
-        "COMPATIBILITY.md must disclose the macOS no-spawn, metadata-only boundary",
-    );
-
-    for (label, document, stale) in [
-        (
-            "docs/development/tracing/agent.md",
-            AGENT_DOC,
-            "**macOS 支持**内容捕获",
-        ),
-        (
-            "docs/commands/agent.md",
-            AGENT_CMD_DOC_EN,
-            "On macOS the sandboxed export uses seatbelt",
-        ),
-        (
-            "docs/commands/zh-CN/agent.md",
-            AGENT_CMD_DOC_ZH,
-            "macOS 经 seatbelt（`sandbox-exec`）启用内容捕获",
-        ),
-        (
-            "docs/development/commands/agent.md",
-            AGENT_DEV_DOC,
-            "OpenCode content capture on **macOS** is assembled through seatbelt",
-        ),
-        (
-            "COMPATIBILITY.md",
-            COMPATIBILITY_DOC,
-            "OpenCode export on macOS uses seatbelt",
-        ),
+fn macos_opencode_export_requires_fork_denying_seatbelt_pair() {
+    for (label, document) in [
+        ("tracing/agent.md", AGENT_DOC),
+        ("commands/agent.md", AGENT_CMD_DOC_EN),
+        ("commands/zh-CN/agent.md", AGENT_CMD_DOC_ZH),
+        ("development/commands/agent.md", AGENT_DEV_DOC),
+        ("COMPATIBILITY.md", COMPATIBILITY_DOC),
     ] {
-        assert_absent(document, label, stale);
+        assert!(
+            document.contains("Required Seatbelt server/export pair")
+                && document.contains("process-fork")
+                && document.contains("loopback")
+                && document.contains("metadata-only"),
+            "{label} must disclose required fork denial, bounded loopback and fail-closed degradation"
+        );
+        for obsolete in [
+            "content export is unsupported",
+            "不支持 OpenCode 内容导出",
+            "explicitly unsupported",
+        ] {
+            assert_absent(document, label, obsolete);
+        }
     }
 }
 

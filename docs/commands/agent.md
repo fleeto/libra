@@ -117,7 +117,7 @@ Cleanup and process exit flush all tracked sessions using one shared deadline
 per cleanup or process exit, respectively. Forwarding is best effort and fails
 open for the OpenCode host. Nonzero child exit or timeout emits only a fixed
 `forward_failed` / `forward_timeout` diagnostic, at most once per reason per plugin instance. Each child has the current export deadline plus
-15 seconds (currently 18 seconds), with `SIGKILL` at timeout. Install checks both
+15 seconds (currently 45 seconds), with `SIGKILL` at timeout. Install checks both
 plugin layouts, rejects symlinks and special files before reading, preserves
 user-owned files and rolls back its canonical update if managed duplicate
 removal fails. These checks assume stable directory names; concurrent directory

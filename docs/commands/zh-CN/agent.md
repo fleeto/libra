@@ -83,7 +83,7 @@ early text 同样使用滚动窗口。
 cleanup 与 process exit 遍历所有跟踪会话，各使用一个共享总 deadline。
 转发失败不阻断 OpenCode 宿主；非零退出/超时只输出固定的
 `forward_failed` / `forward_timeout`，每个原因在每个插件实例中最多一次，不回显错误内容。每个子进程的上限为 export deadline + 15 秒
-（当前 18 秒），超时用 `SIGKILL`。installer 预检两个目录，读取前拒绝 symlink
+（当前 45 秒），超时用 `SIGKILL`。installer 预检两个目录，读取前拒绝 symlink
 和特殊文件，保留用户文件；managed 重复副本删除失败时回滚本次 canonical
 更新。当前检查以目录命名空间稳定为前提，检查后目录移动及末次归属检查后的
 并发叶替换仍延后。`opencode --pure` / `OPENCODE_PURE=1` 关闭外部插件和

@@ -139,6 +139,93 @@ impl Default for ExportLimits {
     }
 }
 
+/// Remove only the three legacy OpenCode opaque members from ordinary
+/// reader output. Caller supplies its verified provider classification; raw
+/// authorization bypasses this helper entirely. Invalid OpenCode JSON is
+/// refused with a fixed diagnostic rather than returning sensitive bytes.
+pub(crate) fn strip_legacy_opencode_reader_bytes(bytes: &[u8]) -> Result<Vec<u8>> {
+    if bytes.is_empty() {
+        return Ok(Vec::new());
+    }
+    // The strict coverage parser rejects duplicate keys. Drop its value
+    // before decoding ordinary JSON so wide integer metadata keeps its type.
+    super::parse_canon_value(bytes).map_err(|_| {
+        anyhow!("legacy OpenCode content is invalid; use an audited raw export to inspect it")
+    })?;
+    let mut document: serde_json::Value = serde_json::from_slice(bytes).map_err(|_| {
+        anyhow!("legacy OpenCode content is invalid; use an audited raw export to inspect it")
+    })?;
+    let checkpoint_metadata = document
+        .get("agent_kind")
+        .and_then(serde_json::Value::as_str)
+        == Some("opencode");
+    if !document.is_object()
+        || (!checkpoint_metadata
+            && !document
+                .get("messages")
+                .is_some_and(serde_json::Value::is_array))
+    {
+        bail!(
+            "legacy OpenCode content has an unsupported container; use an audited raw export to inspect it"
+        );
+    }
+    fn strip_members(value: &mut serde_json::Value) -> bool {
+        let Some(object) = value.as_object_mut() else {
+            return false;
+        };
+        let mut changed = object.remove("encrypted_content").is_some();
+        if let Some(metadata) = object
+            .get_mut("metadata")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            for (provider, field) in [
+                ("openai", "reasoningEncryptedContent"),
+                ("anthropic", "signature"),
+            ] {
+                if let Some(provider) = metadata
+                    .get_mut(provider)
+                    .and_then(serde_json::Value::as_object_mut)
+                {
+                    changed |= provider.remove(field).is_some();
+                }
+            }
+        }
+        changed
+    }
+    fn strip(document: &mut serde_json::Value) -> bool {
+        // Reserved checkpoint metadata and actual reasoning parts only.
+        // Do not walk arbitrary tool inputs or user JSON by matching key names.
+        let mut changed = strip_members(document);
+        if let Some(messages) = document
+            .get_mut("messages")
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            for message in messages {
+                for container in ["parts", "content"] {
+                    if let Some(parts) = message
+                        .get_mut(container)
+                        .and_then(serde_json::Value::as_array_mut)
+                    {
+                        for part in parts {
+                            if part.get("type").and_then(serde_json::Value::as_str)
+                                == Some("reasoning")
+                            {
+                                changed |= strip_members(part);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        changed
+    }
+    if !strip(&mut document) {
+        return Ok(bytes.to_vec());
+    }
+    serde_json::to_vec(&document)
+        .context("encode ordinary OpenCode content after legacy opaque fields were removed")
+}
+
 /// Resolve the trusted OpenCode binary, revalidating its provenance
 /// (sha256/device/inode/mtime + trusted-dir containment). Fail-closed:
 /// no trust record → the capability is unavailable, with an actionable hint.
@@ -3516,6 +3603,81 @@ mod tests {
             !rendered.contains(&other_working_dir.path().display().to_string()),
             "exporter-supplied working directory leaked: {rendered}"
         );
+    }
+
+    const LEGACY_READER_FIXTURE: &[u8] = br#"{
+      "messages":[{"parts":[{"type":"reasoning","text":"keep visible","metadata":{
+        "openai":{"reasoningEncryptedContent":"OG13_OPAQUE_OPENAI","itemId":"keep-id"},
+        "anthropic":{"signature":"OG13_OPAQUE_SIGNATURE","other":"keep-other"}},
+        "encrypted_content":"OG13_OPAQUE_LEGACY"}]}],"usage":{"input":17}}
+    "#;
+
+    #[test]
+    fn opencode_legacy_reader_strips_three_ciphertext_keys() {
+        let safe = strip_legacy_opencode_reader_bytes(LEGACY_READER_FIXTURE)
+            .expect("strip legacy fixture");
+        let doc: serde_json::Value = serde_json::from_slice(&safe).expect("safe JSON");
+        let part = &doc["messages"][0]["parts"][0];
+        assert!(
+            part["metadata"]["openai"]
+                .get("reasoningEncryptedContent")
+                .is_none()
+        );
+        assert!(part["metadata"]["anthropic"].get("signature").is_none());
+        assert!(part.get("encrypted_content").is_none());
+        assert_eq!(part["text"], "keep visible");
+        assert_eq!(part["metadata"]["openai"]["itemId"], "keep-id");
+        assert_eq!(part["metadata"]["anthropic"]["other"], "keep-other");
+        assert_eq!(doc["usage"]["input"], 17);
+        let wide = br#"{"messages":[{"parts":[{"type":"reasoning","encrypted_content":"opaque"}]}],"count":18446744073709551615}"#;
+        let safe_wide = strip_legacy_opencode_reader_bytes(wide).expect("wide integer");
+        let wide_json: serde_json::Value = serde_json::from_slice(&safe_wide).expect("wide JSON");
+        assert_eq!(wide_json["count"].as_u64(), Some(u64::MAX));
+        let tool_input = br#"{"messages":[{"parts":[{"type":"tool","input":{"type":"reasoning","encrypted_content":"user data","metadata":{"anthropic":{"signature":"user field"}}}}]}]}"#;
+        assert_eq!(
+            strip_legacy_opencode_reader_bytes(tool_input).expect("tool input"),
+            tool_input,
+            "arbitrary tool/user JSON must not be changed by same-named keys"
+        );
+        let unchanged = b" {\"messages\":[],\"usage\":{\"input\":17}} ";
+        assert_eq!(
+            strip_legacy_opencode_reader_bytes(unchanged).expect("benign JSON"),
+            unchanged
+        );
+    }
+
+    #[test]
+    fn opencode_legacy_transcripts_have_zero_ciphertext_hits() {
+        let safe = strip_legacy_opencode_reader_bytes(LEGACY_READER_FIXTURE)
+            .expect("strip legacy fixture");
+        let safe = std::str::from_utf8(&safe).expect("UTF8");
+        for canary in [
+            "OG13_OPAQUE_OPENAI",
+            "OG13_OPAQUE_SIGNATURE",
+            "OG13_OPAQUE_LEGACY",
+        ] {
+            assert!(
+                std::str::from_utf8(LEGACY_READER_FIXTURE)
+                    .expect("fixture")
+                    .contains(canary)
+            );
+            assert!(!safe.contains(canary));
+        }
+    }
+
+    #[test]
+    fn opencode_legacy_invalid_json_is_refused_without_payload() {
+        for invalid in [
+            b"{\"encrypted_content\":\"OG13_SECRET".as_slice(),
+            b"{\"encrypted_content\":\"OG13_SECRET\",\"encrypted_content\":\"other\"}".as_slice(),
+            b"OG13_SECRET plain text".as_slice(),
+            br#"{"encrypted_content":"OG13_SECRET"}"#.as_slice(),
+            br#"[ {"encrypted_content":"OG13_SECRET"} ]"#.as_slice(),
+        ] {
+            let error =
+                strip_legacy_opencode_reader_bytes(invalid).expect_err("invalid ordinary JSON");
+            assert!(!format!("{error:#}").contains("OG13_SECRET"));
+        }
     }
 
     #[test]

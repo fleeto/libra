@@ -929,8 +929,54 @@ async fn export(args: super::CheckpointExportArgs, output: &OutputConfig) -> Cli
         bytes
     } else {
         // Default redacted path — no --allow-raw, no audit; just scrub.
+        let ordinary = if bytes.is_empty() {
+            bytes
+        } else {
+            // Bind the provider to this checkpoint's session catalog. The
+            // role-checked metadata may omit the kind in older checkpoints,
+            // but a present kind must agree before ordinary output is read.
+            let metadata = load_checkpoint_metadata_blob(
+                &row.checkpoint_id,
+                &row.tree_oid,
+                &row.metadata_blob_oid,
+            )?;
+            let document =
+                crate::internal::ai::observed_agents::parse_canon_value(metadata.as_bytes())
+                    .map_err(|_| checkpoint_show_store_inconsistent())?;
+            let session = conn
+                .query_one_raw(Statement::from_sql_and_values(
+                    backend,
+                    "SELECT agent_kind FROM agent_session WHERE session_id = ?",
+                    [row.session_id.as_str().into()],
+                ))
+                .await
+                .map_err(|_| checkpoint_show_store_inconsistent())?
+                .ok_or_else(checkpoint_show_store_inconsistent)?;
+            let kind = session
+                .try_get_by::<String, _>("agent_kind")
+                .map_err(|_| checkpoint_show_store_inconsistent())?;
+            if document
+                .get("agent_kind")
+                .is_some_and(|value| value.as_str() != Some(kind.as_str()))
+            {
+                return Err(checkpoint_show_store_inconsistent());
+            }
+            let kind = crate::internal::ai::observed_agents::AgentKind::from_db_str(&kind)
+                .ok_or_else(checkpoint_show_store_inconsistent)?;
+            if kind == crate::internal::ai::observed_agents::AgentKind::OpenCode {
+                if truncated {
+                    return Err(CliError::fatal(
+                        "ordinary OpenCode export exceeds the configured read cap; increase agent.max_transcript_read_bytes or use --raw --allow-raw for an audited bounded inspection",
+                    ));
+                }
+                crate::internal::ai::observed_agents::opencode_export::strip_legacy_opencode_reader_bytes(&bytes)
+                    .map_err(|_| CliError::fatal("ordinary OpenCode export is invalid or incomplete; use --raw --allow-raw for an audited inspection"))?
+            } else {
+                bytes
+            }
+        };
         let (redacted, _report) =
-            crate::internal::ai::observed_agents::Redactor::new_default().redact(&bytes);
+            crate::internal::ai::observed_agents::Redactor::new_default().redact(&ordinary);
         redacted.as_ref().to_vec()
     };
     let _ = backend; // backend used inside helpers
@@ -1151,8 +1197,8 @@ fn load_checkpoint_metadata_blob_from_storage(
             .get("entries")
             .and_then(|entries| entries.get("metadata"))
             .ok_or_else(checkpoint_show_store_inconsistent)?;
-        if binding.get("path").and_then(serde_json::Value::as_str) != Some("metadata.json")
-            || binding.get("oid").and_then(serde_json::Value::as_str) != Some(oid)
+        if binding.get("path").and_then(|value| value.as_str()) != Some("metadata.json")
+            || binding.get("oid").and_then(|value| value.as_str()) != Some(oid)
         {
             return Err(checkpoint_show_store_inconsistent());
         }
@@ -1173,8 +1219,17 @@ fn load_checkpoint_metadata_blob_from_storage(
             "metadata blob {oid} exceeds the metadata size cap; refusing (corrupt or hostile checkpoint)"
         )));
     }
-    String::from_utf8(raw)
-        .map_err(|e| CliError::fatal(format!("metadata blob {oid} is not UTF-8: {e}")))
+    let metadata = String::from_utf8(raw)
+        .map_err(|e| CliError::fatal(format!("metadata blob {oid} is not UTF-8: {e}")))?;
+    let value = crate::internal::ai::observed_agents::parse_canon_value(metadata.as_bytes())
+        .map_err(|_| checkpoint_show_store_inconsistent())?;
+    if value.get("agent_kind").and_then(|value| value.as_str()) == Some("opencode") {
+        let safe = crate::internal::ai::observed_agents::opencode_export::strip_legacy_opencode_reader_bytes(metadata.as_bytes())
+            .map_err(|_| checkpoint_show_store_inconsistent())?;
+        String::from_utf8(safe).map_err(|_| checkpoint_show_store_inconsistent())
+    } else {
+        Ok(metadata)
+    }
 }
 
 #[cfg(test)]
@@ -1688,6 +1743,45 @@ mod tests {
             // unbound metadata OID; no ordinary child or manifest is read.
             assert_eq!(reads.len(), 4);
             rg03_assert_no_artifact_body_reads(artifact);
+        }
+    }
+
+    #[test]
+    fn opencode_legacy_metadata_reader_strips_bound_fields_and_refuses_invalid_json() {
+        for bytes in [
+            br#"{"agent_kind":"opencode","metadata":{"anthropic":{"signature":"OG13_META_SIGNATURE"},"openai":{"reasoningEncryptedContent":"OG13_META_ENCRYPTED"}},"encrypted_content":"OG13_META_LEGACY","skill_events":[],"keep":17}"#.as_slice(),
+            br#"{"agent_kind":"opencode","metadata":{"anthropic":{"signature":"OG13_META_INVALID"}}"#.as_slice(),
+        ] {
+            let dir = TempDir::new().unwrap();
+            let metadata = rg03_blob(dir.path(), bytes);
+            let transcript = rg03_blob(dir.path(), b"");
+            let transcript_tree = rg03_tree(
+                dir.path(),
+                vec![TreeItem::new(TreeItemMode::Blob, transcript, "opencode.jsonl".into())],
+            );
+            let leaf = rg03_tree(
+                dir.path(),
+                vec![
+                    TreeItem::new(TreeItemMode::Blob, metadata, "metadata.json".into()),
+                    TreeItem::new(TreeItemMode::Tree, transcript_tree, "transcript".into()),
+                ],
+            );
+            let result = load_checkpoint_metadata_blob_from_storage(
+                dir.path(), RG03_CHECKPOINT_ID, &leaf.to_string(), &metadata.to_string(),
+            );
+            if bytes.ends_with(b"\"keep\":17}") {
+                let safe = result.expect("bound legacy metadata");
+                for canary in ["OG13_META_SIGNATURE", "OG13_META_ENCRYPTED", "OG13_META_LEGACY"] {
+                    assert!(!safe.contains(canary));
+                }
+                let value: serde_json::Value = serde_json::from_str(&safe).unwrap();
+                assert_eq!(value["keep"], 17);
+                assert_eq!(value["skill_events"], serde_json::json!([]));
+            } else {
+                let error = result.expect_err("invalid ordinary metadata must be refused");
+                assert!(!error.message().contains("OG13_META_INVALID"));
+                assert_eq!(error.stable_code(), StableErrorCode::AgentCheckpointStoreInconsistent);
+            }
         }
     }
 

@@ -128,6 +128,176 @@ async fn seed_checkpoint_with_secret(repo: &Path) -> String {
     checkpoint_id
 }
 
+async fn seed_og13_legacy_checkpoint(repo: &Path, transcript: &[u8]) -> String {
+    let conn = connect_repo_db(repo).await;
+    conn.execute_raw(Statement::from_sql_and_values(
+        conn.get_database_backend(),
+        "INSERT INTO agent_session (
+            session_id, agent_kind, provider_session_id, state, working_dir,
+            metadata_json, redaction_report, started_at, last_event_at, stopped_at
+         ) VALUES ('sess-x', 'opencode', 'p-x', 'stopped', '/tmp/x', '{}', '{}', 1, 2, 3)",
+        Vec::<Value>::new(),
+    ))
+    .await
+    .expect("insert session");
+
+    let repo_path = repo.join(".libra");
+    let storage = Arc::new(ClientStorage::init(repo_path.join("objects")));
+    let history =
+        HistoryManager::new_with_ref(storage, repo_path, Arc::new(conn.clone()), TRACES_BRANCH);
+    let redactor = Redactor::new_default();
+    let (redacted, _) = redactor.redact(transcript);
+    let (meta_redacted, _) = redactor.redact(br#"{"checkpoint_id":"x","agent_kind":"opencode","metadata":{"anthropic":{"signature":"OG13_META_SIGNATURE"}}}"#);
+    let (events_redacted, _) = redactor.redact(b"{}\n");
+    let (report_redacted, _) = redactor.redact(b"{}");
+    let checkpoint_id = "aabbccddeeff00112233445566778899".to_string();
+    let marker = TracesInflightMarker::new(
+        "sess-x",
+        &checkpoint_id,
+        chrono::Utc::now().timestamp_millis(),
+    );
+    write_traces_inflight_marker(&conn, &marker)
+        .await
+        .expect("register seeded checkpoint writer marker");
+    let written = history
+        .append_checkpoint_commit(CheckpointCommitParams {
+            reasoning_artifacts: &[],
+            checkpoint_id: &checkpoint_id,
+            session_id: "sess-x",
+            marker_generation: marker.generation.as_deref().expect("new marker generation"),
+            capture_scope: None,
+            agent_kind: "opencode",
+            parent_commit: None,
+            scope: CheckpointScope::Committed,
+            tool_use_id: None,
+            metadata_json: &meta_redacted,
+            transcript_redacted: &redacted,
+            lifecycle_events_jsonl: &events_redacted,
+            redaction_report_json: &report_redacted,
+            txn_extra: None,
+            deadline: None,
+        })
+        .await
+        .expect("append checkpoint");
+
+    conn.execute_raw(Statement::from_sql_and_values(
+        conn.get_database_backend(),
+        "INSERT INTO agent_checkpoint (
+            checkpoint_id, session_id, scope, parent_commit, tree_oid,
+            metadata_blob_oid, traces_commit, created_at
+         ) VALUES (?, 'sess-x', 'committed', NULL, ?, ?, ?, 100)",
+        vec![
+            Value::from(checkpoint_id.clone()),
+            Value::from(written.tree_oid.to_string()),
+            Value::from(written.metadata_blob_oid.to_string()),
+            Value::from(written.commit_hash.to_string()),
+        ],
+    ))
+    .await
+    .expect("insert checkpoint row");
+    clear_traces_inflight_marker_if_generation(
+        &conn,
+        "sess-x",
+        &checkpoint_id,
+        &written.marker_generation,
+    )
+    .await
+    .expect("retire seeded checkpoint writer marker");
+    drop(history);
+    conn.close().await.expect("close seed conn");
+    checkpoint_id
+}
+
+const OG13_LEGACY_BYTES: &[u8] = br#"{ "info":{"id":"synthetic"}, "messages":[{"parts":[{"type":"reasoning","text":"keep-visible",
+ "metadata":{"anthropic":{"signature":"OG13_CMD_SIGNATURE"},
+ "openai":{"reasoningEncryptedContent":"OG13_CMD_ENCRYPTED"}},
+ "encrypted_content":"OG13_CMD_LEGACY"}]}] }"#;
+
+#[tokio::test]
+async fn opencode_legacy_raw_read_preserves_original_bytes() {
+    let repo = tempfile::tempdir().expect("legacy repo");
+    init_repo_via_cli(repo.path());
+    let id = seed_og13_legacy_checkpoint(repo.path(), OG13_LEGACY_BYTES).await;
+    let ordinary = run_libra_command(&["agent", "checkpoint", "export", &id], repo.path());
+    assert!(
+        ordinary.status.success(),
+        "ordinary export: {}",
+        String::from_utf8_lossy(&ordinary.stderr)
+    );
+    let text = String::from_utf8(ordinary.stdout).expect("ordinary UTF8");
+    assert!(text.contains("keep-visible"));
+    for canary in [
+        "OG13_CMD_SIGNATURE",
+        "OG13_CMD_ENCRYPTED",
+        "OG13_CMD_LEGACY",
+    ] {
+        assert!(
+            !text.contains(canary),
+            "legacy opaque must not appear in default output"
+        );
+    }
+    assert!(audit_rows(repo.path()).await.is_empty());
+    let raw = run_libra_command(
+        &["agent", "checkpoint", "export", &id, "--raw", "--allow-raw"],
+        repo.path(),
+    );
+    assert!(
+        raw.status.success(),
+        "raw export: {}",
+        String::from_utf8_lossy(&raw.stderr)
+    );
+    assert_eq!(raw.stdout, OG13_LEGACY_BYTES);
+    assert_eq!(audit_rows(repo.path()).await, vec![(id.clone(), 1)]);
+    let conn = connect_repo_db(repo.path()).await;
+    conn.execute_raw(Statement::from_string(
+        conn.get_database_backend(),
+        "UPDATE agent_session SET agent_kind = 'claude_code' WHERE session_id = 'sess-x'",
+    ))
+    .await
+    .expect("seed mismatched provider catalog");
+    conn.close().await.expect("close mismatch writer");
+    let rejected = run_libra_command(&["agent", "checkpoint", "export", &id], repo.path());
+    assert!(
+        !rejected.status.success(),
+        "provider mismatch must be refused"
+    );
+    assert!(rejected.stdout.is_empty());
+    assert!(!String::from_utf8_lossy(&rejected.stderr).contains("OG13_CMD_SIGNATURE"));
+    assert_eq!(audit_rows(repo.path()).await, vec![(id, 1)]);
+}
+
+#[tokio::test]
+async fn opencode_legacy_invalid_ordinary_export_is_refused_raw_is_audited() {
+    for (original, cap) in [
+        (br#"{"messages":[{"parts":[{"type":"reasoning","encrypted_content":"OG13_INVALID_SECRET"}"#.as_slice(), None),
+        (b"{\"messages\":[]}    OG13_CAP_SUFFIX".as_slice(), Some(15usize)),
+    ] {
+        let repo = tempfile::tempdir().expect("invalid legacy repo");
+        init_repo_via_cli(repo.path());
+        let id = seed_og13_legacy_checkpoint(repo.path(), original).await;
+        if let Some(cap) = cap {
+            let config = run_libra_command(
+                &["config", "set", "agent.max_transcript_read_bytes", &cap.to_string()], repo.path(),
+            );
+            assert!(config.status.success());
+            // Even a syntactically valid JSON prefix is not a complete export.
+            assert!(serde_json::from_slice::<serde_json::Value>(&original[..cap]).is_ok());
+        }
+        let ordinary = run_libra_command(&["agent", "checkpoint", "export", &id], repo.path());
+        assert!(!ordinary.status.success());
+        assert!(ordinary.stdout.is_empty());
+        for canary in ["OG13_INVALID_SECRET", "OG13_CAP_SUFFIX"] {
+            assert!(!String::from_utf8_lossy(&ordinary.stderr).contains(canary));
+        }
+        let raw = run_libra_command(
+            &["agent", "checkpoint", "export", &id, "--raw", "--allow-raw"], repo.path(),
+        );
+        assert!(raw.status.success());
+        assert_eq!(raw.stdout, original[..cap.unwrap_or(original.len())]);
+        assert_eq!(audit_rows(repo.path()).await, vec![(id, 1)]);
+    }
+}
+
 async fn audit_rows(repo: &Path) -> Vec<(String, i64)> {
     let conn = connect_repo_db(repo).await;
     let rows = conn

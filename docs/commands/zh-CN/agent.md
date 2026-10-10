@@ -637,6 +637,17 @@ artifact 的树可达性由 RG-06 接入；受控读取及导出由 RG-03 接入
 
 Checkpoint 读取器在消费 manifest 或 metadata 正文前验证对象类型、内容寻址身份和普通角色绑定。Skill search 跳过不属于 catalog 中具名 checkpoint 的 metadata。首次 `--checkpoint` 解析以只读模式访问显式仓库 catalog；缺失或不一致时拒绝输入，不创建 run。保存输入的 resume 暂沿既有路径，由单独的恢复任务卡接入复验。默认 checkpoint show/list 摘要与 raw export 授权、审计保持原契约。每个 skill 候选独立复验：普通子树累计上限为 16 MiB，选中的 metadata blob 上限为 16 MiB；先检查具名 checkpoint 的 metadata 绑定，再遍历普通闭包。
 
+对于 legacy OpenCode checkpoint，默认 `checkpoint export` 和已绑定的 metadata
+读取器剥离 reasoning part 及预留 export/checkpoint metadata 中的
+`metadata.anthropic.signature`、`metadata.openai.reasoningEncryptedContent` 和旧键
+`encrypted_content`；保留可读 reasoning、其它 metadata、工具输入和用户 JSON。
+provider 分类以该 checkpoint 的 session catalog 为准，metadata 中存在的 kind 必须一致。
+缺少 session 绑定、metadata 不一致、重复 JSON 键、非法或不支持的 OpenCode JSON，
+以及截断的非空导出会以不含 payload 的错误拒绝；空 transcript 仍合法。
+`--raw --allow-raw` 保留原始有界字节和既有审计，`checkpoint show` 仍只输出安全摘要。
+不改写已存对象，后续修复必须保留普通输出的剥离保护；本 legacy reader 不证明
+native 来源，也不实现新 `state.*` reasoning artifact 通道。
+
 macOS本地内容门是`agent_local_capture_smoke_test`中的
 `local_capture_smoke_opencode_macos`。必须显式打开local-agent开关，固定
 OpenCode 2.0.26并选择`volcengine-agent-plan/glm-5.3-flash`，先核对临时项目，

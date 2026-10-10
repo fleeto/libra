@@ -87,40 +87,123 @@ fn local_capture_smoke_opencode() {
     smoke::run_slug("opencode");
 }
 
-/// OpenCode's A6.5 criteria remain lifecycle-only on every platform.
-/// macOS content export is rejected before spawn; this source guard keeps the
-/// smoke driver from reviving a seatbelt content-capture branch. Not live,
-/// not `#[ignore]`.
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "drives a real paid opencode session; set LIBRA_RUN_LOCAL_AGENTS=1 and run with \
+            --ignored --test-threads=1 (plan.md §0.3.6)"]
+#[serial(cwd, env, hash_kind)]
+fn local_capture_smoke_opencode_macos() {
+    check_agent_set();
+    smoke::run_slug("opencode");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn opencode_project_preflight_requires_disposable_directory() {
+    use std::{ffi::OsStr, path::Path};
+
+    assert_eq!(
+        smoke::OPENCODE_SMOKE_MODEL,
+        "volcengine-agent-plan/glm-5.3-flash"
+    );
+    let args = smoke::opencode_smoke_args();
+    assert_eq!(args.first().map(String::as_str), Some("run"));
+    assert!(args.iter().any(|arg| arg == "--standalone"));
+    assert!(!args.iter().any(|arg| arg == "--dir"));
+    assert!(
+        args.windows(2)
+            .any(|pair| { pair[0] == "--model" && pair[1] == smoke::OPENCODE_SMOKE_MODEL })
+    );
+    assert_eq!(
+        args[9..].join(" "),
+        smoke::OPENCODE_SMOKE_PROMPT,
+        "the pinned CLI must receive the exact prompt without added quotes"
+    );
+    assert!(args[9..].iter().all(|part| !part.contains(' ')));
+    let root = tempfile::tempdir().expect("create smoke fixture");
+    let repo = root.path().join("repo");
+    std::fs::create_dir(&repo).expect("create disposable project");
+    let mut command = std::process::Command::new("opencode");
+    let project = smoke::configure_opencode_project(&mut command, &repo);
+    assert_eq!(command.get_current_dir(), Some(project.as_path()));
+    assert_eq!(
+        command
+            .get_envs()
+            .find(|(key, _)| *key == OsStr::new("PWD"))
+            .and_then(|(_, value)| value),
+        Some(project.as_os_str()),
+        "the OpenCode 2.0.26 run command prefers PWD over cwd"
+    );
+    let response = serde_json::json!({ "directory": project });
+    assert!(smoke::opencode_location_matches_project(
+        &serde_json::to_vec(&response).expect("serialize location"),
+        &project
+    ));
+    let foreign = serde_json::json!({ "directory": root.path() });
+    assert!(!smoke::opencode_location_matches_project(
+        &serde_json::to_vec(&foreign).expect("serialize foreign location"),
+        &project
+    ));
+    assert!(!smoke::opencode_location_matches_project(
+        br#"{"project":{"directory":"/"}}"#,
+        &project
+    ));
+    assert!(!smoke::opencode_location_matches_project(
+        b"not JSON",
+        Path::new(&project)
+    ));
+}
+
+/// Keep Linux's original A6.5 invocation while the separate macOS gate
+/// requires content. This is a source guard, never Linux operator evidence.
 #[test]
 fn linux_a65_criteria_unchanged() {
     let harness = include_str!("harness/agent_local_capture.rs");
+    assert!(harness.contains("Linux A6.5 remains"));
     assert!(
-        harness.contains("on every\n//!   platform pin an empty transcript snapshot with `extraction.present=false`"),
-        "A6.5 must retain the lifecycle-only OpenCode snapshot contract on every platform"
-    );
-    assert!(
-        harness.contains("macOS OpenCode export is rejected before spawn"),
-        "the smoke driver must document that unsupported macOS export is rejected before spawn"
-    );
-    assert!(
-        !harness.contains("macOS seatbelt export must capture content"),
-        "the smoke driver must not revive a macOS seatbelt content-capture branch"
+        harness.contains("#[cfg(not(target_os = \"macos\"))]\n            \"opencode\" => vec![")
     );
     let smoke = include_str!("agent_local_capture_smoke_test.rs");
-    let opencode_smoke_name = ["local_capture", "smoke", "opencode"].join("_");
-    let opencode_smoke_signature = ["fn ", &opencode_smoke_name, "("].concat();
-    assert!(
-        smoke.contains(&opencode_smoke_signature),
-        "original A6.5 opencode smoke fn must remain"
+    let original = [
+        "fn ",
+        &["local_capture", "smoke", "opencode"].join("_"),
+        "(",
+    ]
+    .concat();
+    assert!(smoke.contains(&original));
+    let call = ["smoke::run_slug(", r#""opencode")"#].concat();
+    assert!(smoke.contains(&call));
+    assert!(harness.contains("assert_opencode_content_capture("));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn opencode_login_probe_timeout_is_not_success() {
+    use std::{os::unix::fs::PermissionsExt, process::Command, time::Duration};
+
+    let root = tempfile::tempdir().expect("create probe fixture");
+    let stdout = root.path().join("stdout");
+    let stderr = root.path().join("stderr");
+    let mut command = Command::new("/bin/sh");
+    command.args(["-c", "sleep 30"]);
+    let result = smoke::run_child_with_timeout(
+        command,
+        &stdout,
+        &stderr,
+        Duration::from_millis(200),
+        "synthetic login probe",
     );
-    let opencode_run_call = ["smoke::run_slug(", r#""opencode")"#].concat();
-    assert!(
-        smoke.contains(&opencode_run_call),
-        "original A6.5 opencode smoke must still call run_slug"
-    );
-    let unsupported_macos_smoke = ["fn", "local_capture_smoke_opencode_macos("].join(" ");
-    assert!(
-        !smoke.contains(&unsupported_macos_smoke),
-        "the unsupported macOS export smoke must stay absent"
-    );
+    assert!(result.timed_out);
+    assert!(!result.exit_ok);
+    assert_eq!(result.exit_code, None);
+    for path in [stdout, stderr] {
+        assert_eq!(
+            std::fs::metadata(path)
+                .expect("private probe output")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+    }
 }

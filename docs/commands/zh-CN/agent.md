@@ -629,3 +629,11 @@ artifact 的树可达性由 RG-06 接入；受控读取及导出由 RG-03 接入
 
 
 Checkpoint 读取器在消费 manifest 或 metadata 正文前验证对象类型、内容寻址身份和普通角色绑定。Skill search 跳过不属于 catalog 中具名 checkpoint 的 metadata。首次 `--checkpoint` 解析以只读模式访问显式仓库 catalog；缺失或不一致时拒绝输入，不创建 run。保存输入的 resume 暂沿既有路径，由单独的恢复任务卡接入复验。默认 checkpoint show/list 摘要与 raw export 授权、审计保持原契约。每个 skill 候选独立复验：普通子树累计上限为 16 MiB，选中的 metadata blob 上限为 16 MiB；先检查具名 checkpoint 的 metadata 绑定，再遍历普通闭包。
+
+macOS本地内容门是`agent_local_capture_smoke_test`中的
+`local_capture_smoke_opencode_macos`。必须显式打开local-agent开关，固定
+OpenCode 2.0.26并选择`volcengine-agent-plan/glm-5.3-flash`，先核对临时项目，
+再请求一次固定文件写入；断言prompt/model/tokens/files与源投影一致、文件元数据持久化、
+会话停止、doctor及卸载后数据保留。预检失败或超时记为失败，付费模型尚未调用。
+当前验收机的OpenCode私有server未报告readiness，真实内容验收延后为计划外遗留
+`DEFER-OG-OPENCODE-BOOT-01`；harness与合成测试不证明真实内容或native reasoning来源。

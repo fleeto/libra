@@ -119,3 +119,5 @@ top-level `[[test]]` entries in `Cargo.toml`.
   platform-specific differences with `cfg(unix)` / `cfg(windows)`.
 
 - `compat_object_hash_parsing_guard.rs` — B3-08 production `ObjectHash::from_str` / `parse::<ObjectHash>` / `from_bytes_infer_kind` zero-hit guard with width/thread-local allowlist.
+
+OG-15 macOS local content smoke remains ignored and requires explicit paid-session opt-in; its deterministic project/argv/timeout guards run in the local smoke target. Current OpenCode2.0.26 startup runtime is deferred under DEFER-OG-OPENCODE-BOOT-01, not a synthetic PASS. Linux operator evidence is UNRUN.

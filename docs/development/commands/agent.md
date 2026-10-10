@@ -304,3 +304,14 @@ The saved-spec proof API reserves at most 4608 saved entries, 4096 UTF-8 bytes p
 This card supplies the shared internal API. Persisted review/investigate recovery is connected by FIX-RG-SCOPED-02, and filesystem ownership is supplied by FIX-RG-SCOPED-04. Their acceptance and the final aggregation full suite remain separate requirements. Synthetic role fixtures do not establish a native producer origin or authorize OpenCode reasoning archival.
 
 The existing public `checkpoint show`/`list` summary remains a closed whitelist and does not load checkpoint payloads. The R4 metadata projection gate is preserved as a test-only helper until RG-03 enables its public metadata contract. Skill projection now passes checkpoint id, tree oid and metadata oid to the shared role proof; corrupt or unbound metadata is skipped without exposing its body. Raw export authorization and audit are unchanged.
+
+The macOS local content gate is `local_capture_smoke_opencode_macos` in
+`agent_local_capture_smoke_test`. It requires an explicit local-agent opt-in,
+pins OpenCode 2.0.26, selects `volcengine-agent-plan/glm-5.3-flash`, and checks
+the disposable project before requesting a single fixed file write. The gate
+checks captured prompt/model/tokens/files against the source projection,
+persisted file metadata, stopped sessions, doctor and uninstall retention.
+A failed or timed-out preflight is a failure, with no model request started.
+On the current acceptance machine, OpenCode's private server did not report
+readiness; real content acceptance is deferred as `DEFER-OG-OPENCODE-BOOT-01`.
+The harness and synthetic tests do not prove real content or native reasoning.

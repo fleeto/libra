@@ -31,9 +31,10 @@
 //!   under `~/.local/share/opencode` / `~/.config/opencode`); the
 //!   Libra-managed plugin is *project-local*
 //!   (`<repo>/.opencode/plugin/libra-hooks.js`), so nothing user-level is
-//!   touched. Plugin envelopes stay lifecycle-only. Checkpoints on every
-//!   platform pin an empty transcript snapshot with `extraction.present=false`
-//!   (A6.5 metadata-only); macOS OpenCode export is rejected before spawn.
+//!   touched. Plugin envelopes stay lifecycle-only. Linux A6.5 remains
+//!   lifecycle-only and is left for operator validation. macOS OG-15 additionally
+//!   requires real content from the Required Seatbelt export/server pair and
+//!   a stopped capture session, using the explicit authorized smoke model.
 //!
 //! ## Evidence discipline (plan.md §0.3.1)
 //!
@@ -85,6 +86,17 @@ const DEFAULT_TIMEOUT_SECS: u64 = 180;
 pub const SMOKE_PROMPT: &str = "Libra local agent capture smoke. Do not read secrets, do not \
      edit files, do not run shell commands. Reply exactly: libra-agent-smoke-ok.";
 
+/// macOS content smoke writes one fixed file inside the disposable project.
+#[cfg(target_os = "macos")]
+pub const OPENCODE_SMOKE_PROMPT: &str = "In the current project, create exactly one file named \
+     libra-agent-smoke.txt containing exactly this line: libra-agent-smoke-file. Do not read \
+     any other files and do not run shell commands. Reply exactly: libra-agent-smoke-ok.";
+/// Explicit user-authorized Volcano Coding Plan model; no default fallback.
+#[cfg(target_os = "macos")]
+pub const OPENCODE_SMOKE_MODEL: &str = "volcengine-agent-plan/glm-5.3-flash";
+#[cfg(target_os = "macos")]
+const OPENCODE_SMOKE_VERSION: &str = "opencode v2.0.26";
+
 /// One first-batch agent's local contract (§0.3.2/§0.3.4).
 pub struct AgentSpec {
     /// Libra CLI slug (`libra agent add <slug>`).
@@ -117,6 +129,9 @@ pub const AGENTS: &[AgentSpec] = &[
         slug: "opencode",
         binary: "opencode",
         agent_kind: "opencode",
+        #[cfg(target_os = "macos")]
+        login_args: &["auth", "list", "--standalone", "--format", "json"],
+        #[cfg(not(target_os = "macos"))]
         login_args: &["providers", "list"],
     },
 ];
@@ -327,6 +342,12 @@ impl SmokeAgent {
         let Some(version) = version else {
             return Preflight::Blocked(format!("'{} --version' failed", self.spec.binary));
         };
+        #[cfg(target_os = "macos")]
+        if self.spec.slug == "opencode" && version != OPENCODE_SMOKE_VERSION {
+            return Preflight::Blocked(format!(
+                "OpenCode version differs from the current smoke baseline {OPENCODE_SMOKE_VERSION}"
+            ));
+        }
         self.summary.insert("version".into(), json!(version));
 
         // codex: build the isolated CODEX_HOME *before* the login probe so
@@ -343,6 +364,40 @@ impl SmokeAgent {
         // exit code enter the evidence.
         let mut login = Command::new(&binary);
         login.args(self.spec.login_args).stdin(Stdio::null());
+        #[cfg(target_os = "macos")]
+        if self.spec.slug == "opencode" {
+            configure_opencode_project(&mut login, &self.repo);
+            let stdout = self.raw.join("opencode-login.stdout.json");
+            let stderr = self.raw.join("opencode-login.stderr.log");
+            let result = run_child_with_timeout(
+                login,
+                &stdout,
+                &stderr,
+                Duration::from_secs(30),
+                "opencode login preflight",
+            );
+            // Auth output may identify accounts: retain only exit facts,
+            // including on a timeout, just like the other login probes.
+            let _ = fs::remove_file(stdout);
+            let _ = fs::remove_file(stderr);
+            self.summary.insert(
+                "login".into(),
+                json!({
+                    "probe": self.spec.login_args.join(" "),
+                    "logged_in": result.exit_ok && !result.timed_out,
+                    "exit_code": result.exit_code,
+                    "timed_out": result.timed_out,
+                }),
+            );
+            if result.timed_out || !result.exit_ok {
+                return Preflight::Blocked(
+                    "OpenCode private login preflight failed or exceeded 30 seconds; no model session started"
+                        .into(),
+                );
+            }
+            self.agent_binary = Some(binary);
+            return Preflight::Ready;
+        }
         if let Some(home) = &self.codex_home {
             login.env("CODEX_HOME", home);
         }
@@ -501,12 +556,32 @@ impl SmokeAgent {
             );
         }
         self.assert_hooks_pinned();
+        #[cfg(target_os = "macos")]
+        if slug == "opencode" {
+            let binary = self.agent_binary.as_ref().expect("OpenCode preflight ran");
+            let directory = binary.parent().expect("OpenCode binary has a parent");
+            self.libra_ok(&[
+                "agent",
+                "rpc",
+                "trust",
+                "--dir",
+                &directory.to_string_lossy(),
+            ]);
+            let trusted = self.libra_json(&["--json", "agent", "rpc", "trust", "opencode"]);
+            let canonical = fs::canonicalize(binary).expect("canonicalize preflight OpenCode CLI");
+            assert_eq!(
+                trusted["data"]["path"],
+                json!(canonical.to_string_lossy().as_ref()),
+                "OpenCode exporter trust did not pin the preflight CLI"
+            );
+            self.assert_opencode_project_root();
+        }
         self.summary.insert(
             "install".into(),
             json!({
                 "installed": true,
                 "hook_commands_pinned": true,
-                "opencode_exporter_trusted": false,
+                "opencode_exporter_trusted": cfg!(target_os = "macos") && slug == "opencode",
             }),
         );
 
@@ -743,6 +818,36 @@ impl SmokeAgent {
 
     /// §0.3.4 non-interactive invocation matrix. Raw stdout/stderr land
     /// under `evidence/raw/` (0600) only.
+    #[cfg(target_os = "macos")]
+    fn assert_opencode_project_root(&mut self) {
+        self.stage("project-preflight");
+        let binary = self.agent_binary.as_ref().expect("OpenCode preflight ran");
+        let mut command = Command::new(binary);
+        let project = configure_opencode_project(&mut command, &self.repo);
+        command.args(["api", "--standalone", "get", "/api/location"]);
+        let output = self.raw.join("opencode-project-preflight.stdout.json");
+        let result = run_child_with_timeout(
+            command,
+            &output,
+            &self.raw.join("opencode-project-preflight.stderr.log"),
+            Duration::from_secs(30),
+            "opencode project preflight",
+        );
+        assert!(
+            !result.timed_out && result.exit_ok,
+            "BLOCKED (opencode): private server project preflight failed before the paid session"
+        );
+        let response = fs::read(&output).expect("read private server location response");
+        assert!(
+            opencode_location_matches_project(&response, &project),
+            "BLOCKED (opencode): private server did not resolve the disposable smoke project"
+        );
+        self.summary
+            .insert("project_preflight".into(), json!({ "matched": true }));
+    }
+
+    /// §0.3.4 non-interactive invocation matrix. Raw stdout/stderr land
+    /// under `evidence/raw/` (0600) only.
     fn drive_real_session(&self) -> ChildRun {
         let binary = self.agent_binary.clone().expect("preflight ran");
         let repo = self.repo.display().to_string();
@@ -776,6 +881,9 @@ impl SmokeAgent {
                 "0.50".into(),
                 SMOKE_PROMPT.into(),
             ],
+            #[cfg(target_os = "macos")]
+            "opencode" => opencode_smoke_args(),
+            #[cfg(not(target_os = "macos"))]
             "opencode" => vec![
                 "run".into(),
                 "--dir".into(),
@@ -791,6 +899,10 @@ impl SmokeAgent {
         };
         let mut cmd = Command::new(binary);
         cmd.args(&args).current_dir(&self.repo);
+        #[cfg(target_os = "macos")]
+        if self.spec.slug == "opencode" {
+            configure_opencode_project(&mut cmd, &self.repo);
+        }
         for (key, value) in self.extra_env() {
             cmd.env(key, value);
         }
@@ -924,6 +1036,16 @@ impl SmokeAgent {
             "{slug}: doctor must see the installed hooks: {doctor}"
         );
 
+        #[cfg(target_os = "macos")]
+        if slug == "opencode" {
+            let content = self.assert_opencode_content_capture(
+                &checkpoint_id,
+                &traces_commit,
+                &session_state,
+            );
+            self.summary
+                .insert("opencode_content_capture".into(), content);
+        }
         self.summary.insert(
             "capture".into(),
             json!({
@@ -936,6 +1058,185 @@ impl SmokeAgent {
             }),
         );
         session_id
+    }
+
+    #[cfg(target_os = "macos")]
+    fn checkpoint_metadata(&self, traces_commit: &str, checkpoint_id: &str) -> Value {
+        let Some(prefix) = checkpoint_id.get(..2) else {
+            panic!("{}: invalid checkpoint id shape", self.spec.slug);
+        };
+        let Some(rest) = checkpoint_id.get(2..) else {
+            panic!("{}: invalid checkpoint id shape", self.spec.slug);
+        };
+        let expected_path = format!("checkpoint/{prefix}/{rest}/metadata.json");
+        let tree = self.libra(&[
+            "ls-tree",
+            "-r",
+            "-z",
+            "--format",
+            "%(objectname)%x09%(path)",
+            traces_commit,
+        ]);
+        assert!(
+            tree.status.success(),
+            "{}: traces tree lookup failed",
+            self.spec.slug
+        );
+        let metadata_oid = String::from_utf8_lossy(&tree.stdout)
+            .split('\0')
+            .filter_map(|record| record.split_once('\t'))
+            .find_map(|(oid, path)| (path == expected_path).then_some(oid.to_string()))
+            .unwrap_or_else(|| panic!("{}: checkpoint metadata blob missing", self.spec.slug));
+        let blob = self.libra(&["cat-file", "-p", &metadata_oid]);
+        assert!(
+            blob.status.success(),
+            "{}: checkpoint metadata read failed",
+            self.spec.slug
+        );
+        serde_json::from_slice(&blob.stdout)
+            .unwrap_or_else(|_| panic!("{}: checkpoint metadata is invalid JSON", self.spec.slug))
+    }
+
+    #[cfg(target_os = "macos")]
+    fn opencode_checkpoint_transcript(&self, checkpoint_id: &str) -> Value {
+        let output = self.libra(&["agent", "checkpoint", "export", checkpoint_id]);
+        assert!(
+            output.status.success(),
+            "opencode: redacted checkpoint transcript could not be read"
+        );
+        serde_json::from_slice(&output.stdout)
+            .unwrap_or_else(|_| panic!("opencode: captured native transcript is invalid JSON"))
+    }
+
+    #[cfg(target_os = "macos")]
+    fn assert_opencode_content_capture(
+        &self,
+        checkpoint_id: &str,
+        traces_commit: &str,
+        session_state: &str,
+    ) -> Value {
+        assert_eq!(
+            session_state, "stopped",
+            "opencode: session did not stop after export"
+        );
+        let metadata = self.checkpoint_metadata(traces_commit, checkpoint_id);
+        let provider_session_id = metadata["provider_session_id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("opencode: checkpoint has no provider session id"));
+        let source = self.opencode_checkpoint_transcript(checkpoint_id);
+        assert_eq!(
+            source["info"]["id"],
+            json!(provider_session_id),
+            "opencode: captured transcript identity differs from its checkpoint"
+        );
+        let messages = source["messages"]
+            .as_array()
+            .unwrap_or_else(|| panic!("opencode: source export has no message array"));
+        let source_prompts = messages
+            .iter()
+            .filter(|message| message["type"] == "user")
+            .filter_map(|message| message["text"].as_str())
+            .collect::<Vec<_>>();
+        let source_assistant = messages
+            .iter()
+            .find(|message| {
+                message["type"] == "assistant"
+                    && message["model"]["id"]
+                        .as_str()
+                        .is_some_and(|id| !id.is_empty())
+            })
+            .unwrap_or_else(|| panic!("opencode: source export has no assistant model"));
+        let source_model = source_assistant["model"]["id"]
+            .as_str()
+            .expect("filtered assistant model id");
+        let source_provider = source_assistant["model"]["providerID"]
+            .as_str()
+            .unwrap_or_default();
+        assert_eq!(
+            format!("{source_provider}/{source_model}"),
+            OPENCODE_SMOKE_MODEL,
+            "opencode: source assistant did not use the requested authorized model"
+        );
+        let source_bytes = serde_json::to_vec(&source)
+            .expect("serialize OpenCode source for deterministic projection");
+        let projection =
+            libra::internal::ai::observed_agents::extract::extract_opencode(&source_bytes);
+        assert!(
+            !source_prompts.is_empty(),
+            "opencode: source has no user prompt"
+        );
+        assert_eq!(
+            projection.prompts,
+            source_prompts
+                .iter()
+                .map(|prompt| prompt.to_string())
+                .collect::<Vec<_>>(),
+            "opencode: prompt projection differs from source messages"
+        );
+        assert!(
+            projection
+                .prompts
+                .iter()
+                .any(|prompt| prompt == OPENCODE_SMOKE_PROMPT),
+            "opencode: synthetic smoke prompt is missing from the projection"
+        );
+        assert_eq!(projection.model.as_deref(), Some(source_model));
+        let usage = projection
+            .usage
+            .as_ref()
+            .unwrap_or_else(|| panic!("opencode: source token projection is absent"));
+        assert!(
+            usage.input_tokens > 0 || usage.output_tokens > 0,
+            "opencode: source token projection is zero"
+        );
+        let smoke_file = "libra-agent-smoke.txt";
+        assert!(
+            projection
+                .modified_files
+                .iter()
+                .any(|path| Path::new(path).ends_with(smoke_file)),
+            "opencode: completed source export does not project the smoke file"
+        );
+        assert!(
+            fs::read_to_string(self.repo.join(smoke_file)).is_ok_and(|contents| {
+                matches!(
+                    contents.as_str(),
+                    "libra-agent-smoke-file" | "libra-agent-smoke-file\n"
+                )
+            }),
+            "opencode: model did not create the exact file in the throwaway repo"
+        );
+
+        let extraction = &metadata["extraction"];
+        assert_eq!(extraction["present"], json!(true));
+        assert_eq!(extraction["partial"], json!(false));
+        assert_eq!(extraction["prompt_count"], json!(projection.prompts.len()));
+        assert_eq!(extraction["model"], json!(projection.model));
+        assert_eq!(
+            extraction["token_usage"],
+            serde_json::to_value(usage).expect("serialize projected usage")
+        );
+        assert!(!projection.modified_files.is_empty());
+        assert_eq!(
+            extraction["modified_files"],
+            json!(projection.modified_files),
+            "opencode: captured file projection differs from source messages"
+        );
+        let captured_text =
+            serde_json::to_string(&source).expect("serialize redacted captured transcript");
+        assert!(
+            captured_text.contains("libra-agent-smoke-ok")
+                && captured_text.contains("libra-agent-smoke-file"),
+            "opencode: captured checkpoint transcript lacks the synthetic content"
+        );
+        json!({
+            "session_stopped": true,
+            "source_matches_projection": true,
+            "prompt_nonzero": true,
+            "model_nonzero": true,
+            "tokens_nonzero": true,
+            "files_nonzero": true,
+        })
     }
 
     /// Whether `commit` is reachable from the traces tip named on the
@@ -1210,6 +1511,43 @@ fn smoke_root_for(slug: &str) -> PathBuf {
             std::env::temp_dir().join(format!("libra-agent-smoke-{slug}-{}", std::process::id()))
         }
     }
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn opencode_smoke_args() -> Vec<String> {
+    let mut args = vec![
+        "run".into(),
+        "--standalone".into(),
+        "--print-logs".into(),
+        "--format".into(),
+        "json".into(),
+        "--model".into(),
+        OPENCODE_SMOKE_MODEL.into(),
+        "--title".into(),
+        "libra-agent-smoke-opencode".into(),
+    ];
+    // OpenCode 2.0.26 quotes each argv item containing spaces when forming
+    // the user message. Separate words preserve the intended prompt bytes.
+    args.extend(OPENCODE_SMOKE_PROMPT.split_whitespace().map(str::to_owned));
+    args
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn configure_opencode_project(command: &mut Command, repo: &Path) -> PathBuf {
+    let project = fs::canonicalize(repo).expect("canonicalize disposable OpenCode smoke project");
+    command
+        .current_dir(&project)
+        .env("PWD", &project)
+        .env("OPENCODE_DISABLE_MODELS_FETCH", "1");
+    project
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn opencode_location_matches_project(response: &[u8], project: &Path) -> bool {
+    serde_json::from_slice::<Value>(response)
+        .ok()
+        .and_then(|value| value.get("directory")?.as_str().map(str::to_owned))
+        .is_some_and(|directory| Path::new(&directory) == project)
 }
 
 pub struct ChildRun {

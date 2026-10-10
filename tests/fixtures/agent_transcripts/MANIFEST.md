@@ -28,3 +28,27 @@ Editing rules:
 - Keep `claude_code.jsonl` free of `Task` tool_use blocks — introducing one
   flips `subagent_usage` to the session aggregate and marks the summary
   partial, breaking `total_token_usage_including_subagents` expectations.
+
+## OG-04 current reasoning field audit applicability
+
+opencode_pin: 2.0.26
+opencode_commit: 9b4ec5714d481559990db0a816d5dec19541a814
+
+The current field-shape contract is the plan-20260902 inline OG-04 source
+record, read together with the bounded OG-18 native-origin audit. The three
+ordinary candidate fields are reasoning `state.signature`, `state.redactedData`
+and `state.reasoningEncryptedContent`; names and string shapes do not prove
+native origin. Source A remains NO-GO for unproved opaque archive. Compaction
+`providerContext.messages` is outside the ordinary field scope.
+
+The RG-04 `reasoning/opencode.json` is an unchanged historical synthetic
+open-state / UnsupportedShape counterexample, applicable to the current pin
+only for that semantic decision. Its historical note is not a current native
+three-field sample. All four RG-04 fixtures and the embedded contract/digest
+expectations stay frozen in OG-04. OG-05 owns the later complete state matrix,
+independent canaries and production wiring; this audit does not claim them
+implemented. Current pin/commit declarations must agree with OG-00, OG-04 and
+the nested `opencode/MANIFEST.md`; drift, absence or duplication must fail
+visibly. JSON string value UTF-8 bytes define the downstream opaque candidate
+boundary, without base64 decoding, trimming or normalization. No fixture or
+synthetic label grants trusted native provenance.

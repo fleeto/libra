@@ -253,7 +253,7 @@ fn describe(out: &Output) -> String {
 
 /// A minimal valid export with one user turn (`hi` / `hello`) — normalizes
 /// to golden vector 1.
-const EXPORT_HELLO: &str = r#"printf '{"info":{"id":"%s","directory":"__REPO__"},"messages":[{"info":{"role":"user","id":"msg_u1"},"parts":[{"type":"text","text":"hi"}]},{"info":{"role":"assistant","id":"msg_a1"},"parts":[{"type":"text","text":"hello"}]}]}' "$2""#;
+const EXPORT_HELLO: &str = r#"printf '{"info":{"id":"%s","directory":"__REPO__"},"messages":[{"info":{"role":"user","id":"msg_u1"},"parts":[{"type":"text","text":"hi"}]},{"info":{"role":"assistant","id":"msg_a1"},"parts":[{"type":"text","text":"hello"}]}]}' "$3""#;
 
 const EXPORT_IMPORT: &str = r#"printf '%s' '{"info":{"id":"ses_import","directory":"__REPO__","status":"stopped","time":{"created":1784077200000,"updated":1784077260000}},"messages":[{"info":{"role":"user","id":"msg_u1","time":{"created":1784077210000}},"parts":[{"type":"text","text":"historical"}]},{"info":{"role":"assistant","id":"msg_a1","time":{"created":1784077250000}},"parts":[{"type":"text","text":"imported"}]}]}'"#;
 
@@ -529,7 +529,7 @@ async fn opencode_registered_failure_releases_dirty_job_claim_and_marker() {
 async fn opencode_export_plaintext_never_in_persist_or_logs() {
     let secret = "AKIAZZZZZZZZZZZZZZZZ";
     let body = format!(
-        r#"printf '{{"info":{{"id":"%s","directory":"__REPO__"}},"messages":[{{"info":{{"role":"user","id":"msg_u1"}},"parts":[{{"type":"text","text":"use {secret} now"}}]}}]}}' "$2""#
+        r#"printf '{{"info":{{"id":"%s","directory":"__REPO__"}},"messages":[{{"info":{{"role":"user","id":"msg_u1"}},"parts":[{{"type":"text","text":"use {secret} now"}}]}}]}}' "$3""#
     );
     let Some(repo) = BridgeRepo::init(&body).await else {
         return;

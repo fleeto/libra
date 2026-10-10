@@ -1,7 +1,7 @@
 //! OpenCode `export` subprocess bridge (plan-20260713 DR-04b, GC-DR-04).
 //!
 //! OpenCode has no on-disk transcript to read — content only exists via
-//! `opencode export <sessionID>`. This module runs that subprocess under the
+//! `opencode session export <sessionID>`. This module runs that subprocess under the
 //! capture trust model and returns the raw bytes for the seam:
 //!
 //! - **Binary trust**: the `opencode` binary must have been explicitly
@@ -9,8 +9,9 @@
 //!   device/inode/mtime); [`trusted_opencode_binary`] revalidates and fails
 //!   CLOSED (capability unavailable) on drift or absence — never a PATH
 //!   lookup, never an untrusted spawn.
-//! - **Structured argv**: `[<binary>, "export", <session-id>]` — no shell,
-//!   no `sh -c`, session id charset-validated before spawn.
+//! - **Structured argv**: `session export <session-id> --standalone` on the
+//!   generic path, or `session export <session-id> --server <endpoint>` for
+//!   the dedicated macOS server — no shell; session id validated before spawn.
 //! - **Environment**: `env_clear()` plus fixed, private in-sandbox `HOME`
 //!   and XDG roots. The parent may inspect its ambient XDG/HOME only to pin
 //!   the literal OpenCode store directory by descriptor; no ambient home or
@@ -715,6 +716,18 @@ async fn run_sandboxed_bounded_exporter(
     .await
 }
 
+/// Read the store through an independent server, so capture does not depend
+/// on an existing interactive server that may already be shutting down.
+#[cfg(any(target_os = "linux", test))]
+fn opencode_export_trailing_args(session_id: &str) -> [String; 4] {
+    [
+        "session".into(),
+        "export".into(),
+        session_id.into(),
+        "--standalone".into(),
+    ]
+}
+
 #[cfg(any(target_os = "linux", test))]
 async fn run_bounded_exporter_inner(
     program: &std::path::Path,
@@ -836,8 +849,7 @@ async fn run_bounded_exporter_inner(
     }
     command
         .args(pre_args)
-        .arg("export")
-        .arg(session_id)
+        .args(opencode_export_trailing_args(session_id))
         .env_clear()
         .current_dir(OPENCODE_SANDBOX_OUTER_CWD)
         .stdin(std::process::Stdio::null())
@@ -2065,7 +2077,7 @@ async fn run_export_subprocess_sandboxed_with_exporter_fd(
 /// Assembled Required-sandbox argv plus caller-held store fds.
 /// `program` is the sandbox backend (trusted bwrap or `sandbox-exec`);
 /// `pre_args` is everything transform placed after it (including `--` and the
-/// fixed private exporter target). `export <sid>` is appended by
+/// fixed private exporter target). `session export <sid> --standalone` is appended by
 /// [`run_sandboxed_bounded_exporter`].
 #[cfg(target_os = "linux")]
 struct AssembledExport {
@@ -3833,18 +3845,39 @@ mod tests {
         }
     }
 
-    /// opencode_export_argv_no_shell: metacharacters in a (valid-charset)
-    /// session id reach the child as ONE argv element — no shell ever
-    /// interprets them. The fake exporter prints its argv verbatim.
-    #[cfg(all(unix, not(target_os = "macos")))]
+    /// The validated session id reaches the child as one argv element.
+    /// Check the command hierarchy, exact argument count, and independent
+    /// server flag through the actual subprocess boundary on macOS too.
+    #[cfg(unix)]
     #[tokio::test]
     async fn opencode_export_argv_no_shell() {
         let dir = tempfile::tempdir().unwrap();
-        let bin = fake_exporter(dir.path(), r#"printf '%s|%s' "$1" "$2""#);
+        let bin = fake_exporter(
+            dir.path(),
+            r#"printf '%s|%s|%s|%s|%s' "$#" "$1" "$2" "$3" "$4""#,
+        );
         let out = run_export_subprocess(&bin, "sess_1-2", ExportLimits::default())
             .await
             .expect("export runs");
-        assert_eq!(String::from_utf8_lossy(&out), "export|sess_1-2");
+        assert_eq!(
+            String::from_utf8_lossy(&out),
+            "4|session|export|sess_1-2|--standalone"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn opencode_export_argv_omits_sanitize() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = fake_exporter(
+            dir.path(),
+            r#"for arg in "$@"; do [ "$arg" != --sanitize ] || exit 17; done
+printf unsanitized"#,
+        );
+        let out = run_export_subprocess(&bin, "sess_1-2", ExportLimits::default())
+            .await
+            .expect("capture must not request destructive export sanitization");
+        assert_eq!(out, b"unsanitized");
     }
 
     /// Core limits are set on the exporter child, inherited by its children,
@@ -4013,8 +4046,8 @@ mod tests {
         let bin = fake_exporter(
             &bin_dir,
             &format!(
-                r#"marker="$XDG_DATA_HOME/opencode/opencode-cancel-$2.marker"
-token="$XDG_DATA_HOME/opencode/opencode-cancel-$2.live"
+                r#"marker="$XDG_DATA_HOME/opencode/opencode-cancel-$3.marker"
+token="$XDG_DATA_HOME/opencode/opencode-cancel-$3.live"
 {setsid} /bin/sh -c 'while [ -e "$2" ]; do printf x >> "$1"; sleep 0.01; done' sh "$marker" "$token" &
 wait"#
             ),

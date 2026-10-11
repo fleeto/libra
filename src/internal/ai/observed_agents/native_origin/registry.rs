@@ -108,6 +108,15 @@ pub struct Registration {
     pub observer_executable_sha256: String,
 }
 
+/// Explicit revocation keeps every issuer tombstone. `removed` retains the
+/// existing CLI meaning: whether an exporter trust entry was removed.
+#[derive(Debug, Serialize)]
+pub struct Revocation {
+    pub removed: bool,
+    pub native_revoked: usize,
+    pub native_epoch: Option<u64>,
+}
+
 /// Minimal JSON spelling, without imposing sorted object-member order.
 /// The producer's owned-file parser requires JSON.stringify(parsed) == input;
 /// every number here is an integer and every string uses JSON's minimal
@@ -262,6 +271,113 @@ pub async fn read_with_conn<C: ConnectionTrait>(conn: &C) -> Result<Option<Regis
         decode_owned(value.as_bytes()).map_err(|_| NativeOriginError::Registry)?;
     registry.validate()?;
     Ok(Some(registry))
+}
+
+/// Current permission data for a new native capture, import or pending replay.
+/// The caller must independently measure approved executable provenance first,
+/// then use this read on its permission snapshot connection. This returns
+/// public installation data, never a native proof or an artifact capability.
+/// Historical verify-only and revoked keys never authorize a new admission.
+pub async fn active_issuer_with_conn(
+    conn: &sea_orm::DatabaseTransaction,
+    issuer: &str,
+    provenance: &trust::Provenance,
+) -> Result<Option<IssuerRecord>> {
+    let Some(registry) = read_with_conn(conn).await? else {
+        return Ok(None);
+    };
+    let Some(record) = registry
+        .issuers
+        .into_iter()
+        .find(|record| record.issuer == issuer && record.state == IssuerState::Active)
+    else {
+        return Ok(None);
+    };
+    let Some(current) = trust::read_trust_with_conn(conn, trust::OPENCODE_EXPORTER_SLUG).await?
+    else {
+        return Ok(None);
+    };
+    let dirs = trust::read_trusted_dirs_with_conn(conn).await?;
+    if current.path != Path::new(&record.producer_path)
+        || current.sha256 != record.producer_binary_digest
+        || trust::provenance_drifted(provenance, &current)
+        || !trust::path_within_trusted_dirs(&current.path, &dirs)
+    {
+        return Ok(None);
+    }
+    Ok(Some(record))
+}
+
+async fn commit_revocation(conn: &sea_orm::DatabaseTransaction) -> Result<Revocation> {
+    // Validate the bounded canonical row before any mutation. Both writes are
+    // private to the existing write-lock-first transaction owned by `revoke`.
+    let previous = read_with_conn(conn).await?;
+    let removed = trust::revoke_trust_with_conn(conn, trust::OPENCODE_EXPORTER_SLUG).await?;
+    let Some(mut registry) = previous else {
+        return Ok(Revocation {
+            removed,
+            native_revoked: 0,
+            native_epoch: None,
+        });
+    };
+    let native_revoked = registry
+        .issuers
+        .iter()
+        .filter(|record| record.state != IssuerState::Revoked)
+        .count();
+    if native_revoked > 0 {
+        for record in &mut registry.issuers {
+            record.state = IssuerState::Revoked;
+        }
+        registry.epoch = registry
+            .epoch
+            .checked_add(1)
+            .ok_or(NativeOriginError::Epoch)?;
+        registry.validate()?;
+        let value = serde_json::to_vec(&registry).context("encode native-origin revocation")?;
+        if value.len() > REGISTRY_BYTE_CAP {
+            return Err(NativeOriginError::Capacity.into());
+        }
+        let text = std::str::from_utf8(&value).context("encode native-origin revocation text")?;
+        ConfigKv::set_with_conn(conn, REGISTRY_KEY, text, false)
+            .await
+            .context("persist native-origin revocation on the same connection")?;
+    }
+    Ok(Revocation {
+        removed,
+        native_revoked,
+        native_epoch: Some(registry.epoch),
+    })
+}
+
+/// Explicit combined OpenCode untrust. Automatic provenance revalidation still
+/// removes binary trust alone; it suspends admission without revoking issuers.
+pub async fn revoke() -> Result<Revocation> {
+    let (storage, _, _) = try_get_request_paths(None)
+        .context("native-origin revocation requires a Libra repository")?;
+    let conn = db::get_db_conn_instance_for_path(&storage.join(DATABASE))
+        .await
+        .context("open repository for native-origin revocation")?;
+    let txn = tokio::time::timeout(Duration::from_secs(5), db::begin_write_transaction(&conn))
+        .await
+        .context("native-origin revocation writer is busy; retry the explicit untrust")?
+        .context("acquire native-origin revocation writer lock; retry the explicit untrust")?;
+    match commit_revocation(&txn).await {
+        Ok(result) => {
+            txn.commit().await.context(
+                "commit native-origin revocation; inspect exporter trust and registry before retrying",
+            )?;
+            Ok(result)
+        }
+        Err(primary) => {
+            if let Err(rollback) = txn.rollback().await {
+                bail!(
+                    "native-origin revocation refused: {primary}; rollback failed: {rollback}; inspect the repository before retrying"
+                );
+            }
+            Err(primary)
+        }
+    }
 }
 
 async fn commit_registration<C: ConnectionTrait>(
@@ -640,6 +756,184 @@ mod tests {
                 .unwrap()
                 .value,
             before
+        );
+    }
+
+    #[tokio::test]
+    async fn npr_10_revocation_atomicity_and_tombstones() {
+        // Synthetic prepared data checks storage mechanics only; it cannot
+        // pass public challenge enrollment or confer native-field authority.
+        let conn = storage("sqlite::memory:").await;
+        let input = prepared();
+        seed_trust(&conn, &input).await;
+        let txn = db::begin_write_transaction(&conn).await.unwrap();
+        commit_registration(&txn, &input, 0).await.unwrap();
+        txn.commit().await.unwrap();
+        let original = ConfigKv::get_with_conn(&conn, REGISTRY_KEY)
+            .await
+            .unwrap()
+            .unwrap()
+            .value;
+        let original_trust = trust::read_trust_with_conn(&conn, "opencode")
+            .await
+            .unwrap();
+        conn.execute_unprepared("CREATE TRIGGER reject_revoke BEFORE UPDATE ON config_kv WHEN NEW.key='agent.native_origin.opencode.v1' BEGIN SELECT RAISE(ABORT,'synthetic revocation fault'); END").await.unwrap();
+        let txn = db::begin_write_transaction(&conn).await.unwrap();
+        assert!(commit_revocation(&txn).await.is_err());
+        txn.rollback().await.unwrap();
+        assert_eq!(
+            trust::read_trust_with_conn(&conn, "opencode")
+                .await
+                .unwrap(),
+            original_trust
+        );
+        assert_eq!(
+            ConfigKv::get_with_conn(&conn, REGISTRY_KEY)
+                .await
+                .unwrap()
+                .unwrap()
+                .value,
+            original
+        );
+        conn.execute_unprepared("DROP TRIGGER reject_revoke")
+            .await
+            .unwrap();
+        let txn = db::begin_write_transaction(&conn).await.unwrap();
+        let result = commit_revocation(&txn).await.unwrap();
+        assert!(result.removed);
+        assert_eq!(result.native_revoked, 1);
+        assert_eq!(result.native_epoch, Some(2));
+        txn.commit().await.unwrap();
+        let tombstone = read_with_conn(&conn).await.unwrap().unwrap();
+        assert_eq!(tombstone.issuers[0].state, IssuerState::Revoked);
+        let txn = db::begin_write_transaction(&conn).await.unwrap();
+        let repeated = commit_revocation(&txn).await.unwrap();
+        assert!(!repeated.removed);
+        assert_eq!(repeated.native_revoked, 0);
+        assert_eq!(repeated.native_epoch, Some(2));
+        txn.commit().await.unwrap();
+        assert_eq!(read_with_conn(&conn).await.unwrap().unwrap(), tombstone);
+        seed_trust(&conn, &input).await;
+        let txn = db::begin_write_transaction(&conn).await.unwrap();
+        assert_eq!(
+            commit_registration(&txn, &input, 2)
+                .await
+                .unwrap_err()
+                .downcast_ref(),
+            Some(&NativeOriginError::ExistingIssuer)
+        );
+        txn.rollback().await.unwrap();
+        assert_eq!(read_with_conn(&conn).await.unwrap().unwrap(), tombstone);
+    }
+
+    #[tokio::test]
+    async fn npr_10_real_connections_linearize_both_orders() {
+        let root = tempfile::tempdir().unwrap();
+        let url = format!(
+            "sqlite:{}?mode=rwc",
+            root.path().join("lifecycle.db").display()
+        );
+        let conn = storage(&url).await;
+        let other = storage(&url).await;
+        let input = prepared();
+        seed_trust(&conn, &input).await;
+        let initial = db::begin_write_transaction(&conn).await.unwrap();
+        commit_registration(&initial, &input, 0).await.unwrap();
+        initial.commit().await.unwrap();
+        // Untrust wins first; a competing real connection cannot reuse its
+        // pre-lock snapshot. Inputs are private synthetic storage fixtures.
+        let winner = db::begin_write_transaction(&conn).await.unwrap();
+        commit_revocation(&winner).await.unwrap();
+        let (send, recv) = tokio::sync::oneshot::channel();
+        let contender = other.clone();
+        let losing_registration = tokio::spawn(async move {
+            send.send(()).unwrap();
+            let txn = db::begin_write_transaction(&contender).await.unwrap();
+            let result = commit_registration(&txn, &prepared(), 1).await;
+            txn.rollback().await.unwrap();
+            result
+        });
+        recv.await.unwrap();
+        winner.commit().await.unwrap();
+        let failure = tokio::time::timeout(Duration::from_secs(5), losing_registration)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(failure.downcast_ref(), Some(&NativeOriginError::PriorTrust));
+        assert_eq!(read_with_conn(&conn).await.unwrap().unwrap().epoch, 2);
+        // Registration wins first; queued untrust must see the new key and
+        // revoke it while preserving the earlier tombstone.
+        seed_trust(&conn, &input).await;
+        let mut fresh = prepared();
+        fresh.record.public_key = hex::encode([8u8; 32]);
+        fresh.record.issuer = hex::encode(Sha256::digest([8u8; 32]));
+        let winner = db::begin_write_transaction(&conn).await.unwrap();
+        commit_registration(&winner, &fresh, 2).await.unwrap();
+        let (send, recv) = tokio::sync::oneshot::channel();
+        let queued_revocation = tokio::spawn(async move {
+            send.send(()).unwrap();
+            let txn = db::begin_write_transaction(&other).await.unwrap();
+            let result = commit_revocation(&txn).await.unwrap();
+            txn.commit().await.unwrap();
+            result
+        });
+        recv.await.unwrap();
+        winner.commit().await.unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(5), queued_revocation)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.native_epoch, Some(4));
+        assert_eq!(result.native_revoked, 1);
+        let registry = read_with_conn(&conn).await.unwrap().unwrap();
+        assert_eq!(registry.issuers.len(), 2);
+        assert!(
+            registry
+                .issuers
+                .iter()
+                .all(|r| r.state == IssuerState::Revoked)
+        );
+        assert!(
+            trust::read_trust_with_conn(&conn, "opencode")
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn npr_10_record_ceiling_preserves_tombstones() {
+        // Pure storage grammar, not synthetic-key enrollment. The independent
+        // 64 KiB cap can bind before 128 records for the reviewed profile.
+        let base = prepared().record;
+        let mut records = Vec::new();
+        for n in 0..ISSUER_CAP {
+            let mut record = base.clone();
+            record.public_key = hex::encode([n as u8; 32]);
+            record.issuer = hex::encode(Sha256::digest([n as u8; 32]));
+            record.state = IssuerState::Revoked;
+            records.push(record);
+        }
+        let mut registry = Registry {
+            version: 1,
+            epoch: 128,
+            issuers: records,
+        };
+        registry.validate().unwrap();
+        let mut extra = base;
+        extra.public_key = hex::encode([128u8; 32]);
+        extra.issuer = hex::encode(Sha256::digest([128u8; 32]));
+        extra.state = IssuerState::Revoked;
+        registry.issuers.push(extra);
+        assert_eq!(
+            registry.validate().unwrap_err().downcast_ref(),
+            Some(&NativeOriginError::Capacity)
+        );
+        assert_eq!(
+            registry.issuers.len(),
+            129,
+            "no repair may silently remove tombstones"
         );
     }
 

@@ -158,7 +158,7 @@ OpenCode 提取对空输入、非法 JSON 和非法 export 形状显式标记
 | `rpc list` | 列出 `PATH` 上发现的 `libra-agent-*` 二进制（含 trusted/quarantined 状态）；需先开启 external-agents 开关 |
 | `rpc trust <slug>` | 信任一个已发现的二进制——记录 path + sha256 + device/inode/mtime 来源（所在目录 world-writable、或二进制不在受信目录下时拒绝——`LBR-AGENT-005`）。provider-exporter slug `opencode` 则改为固定 provider 自身的 CLI 二进制——只从已注册受信目录解析、绝不扫描 `$PATH`——供沙箱化 export bridge 使用；该形式无需 external-agents opt-in。来源 sha256 以单次流式读取计算、不设固定大小上限，因此大型单文件 provider CLI（OpenCode Bun 构建约 171 MiB）仍可受信；计算期间读出字节超过其报告大小的文件会被拒绝（`LBR-AGENT-005`） |
 | `rpc trust --dir <path>` | 注册一个受信目录（`agent.external_agents.trusted_dirs`，默认 `~/.libra/agents`）：外部二进制的 canonical path 必须位于其中之一才可被信任。路径会被 canonicalize，且必须是存在且非 world-writable 的目录 |
-| `rpc untrust <slug>` | 撤销信任；二进制回到隔离状态（始终可用，不受开关限制） |
+| `rpc untrust <slug>` | 撤销 binary trust；OpenCode 同时原子吊销 native issuer，详见下方轮换与撤销章节（始终可用，不受开关限制） |
 | `rpc invoke` | 在**已信任**的 `libra-agent-*` 二进制上调用一个 JSON-RPC 方法 |
 | `bridge --stdio` | 在 stdin/stdout 上运行仓库级 DeepSeek Harness 桥接（JSON-RPC 2.0 NDJSON）。这是 Harness 的**唯一**标准入站写入传输；它不是 `libra code --control`。stdout 每条只承载一个协议帧；诊断只写 stderr。协议 v1：20 个 method 的 allowlist、256 KiB 帧上限、64 个 in-flight 请求、默认 30 秒 deadline。20 个 method 全部已实现：`initialize` 握手；session/event ingress `session.open`、`event.append`（batch ack / 幂等 / digest conflict / 服务端脱敏）、`session.flush`、`session.close`、`evidence.append`、`provenance.append`；只读方法 `context.get`、`status.get`、`history.search`、`checkpoint.list`、`checkpoint.show` 与 `diff.get`；mutation `checkpoint.create`、`commit.create`、`checkpoint.restore` 与 `review.run`（均带 `operation_id` 幂等、actor binding 与 approval 门禁）；以及 workspace lease `workspace.claim` / `workspace.renew` / `workspace.release`（owner 从已认证的 bridge session 派生）。`diff.get` 只接受封闭的 `mode`（`worktree` / `staged` / `checkpoint`）加上经校验的仓库相对 `paths`——绝不接受自由形式的 revision 或 pathspec——并强制 `--no-ext-diff` / `--no-textconv`，使仓库配置无法转化为进程执行。`commit.create` 只提交当前 index（无 `-a`、无 pathspec、无 amend、无 author 覆盖），关联图写入 `agent_bridge_link` 而不是拼进 commit message。`checkpoint.restore` 必须携带显式 `expected_head` fence 且要求 index/worktree 干净，并且绝不移动 HEAD。`review.run` 启动只读 review 并返回 `run_id`；用同一个 `operation_id` 重放会返回该 run 的当前状态，而不会启动第二个 run。HEAD 漂移或 worktree 脏在任何写入之前以 `LBR-AGENT-038` 拒绝。ack 只表示脱敏 projection 已 durable，不代表 Harness 原始 transcript 已迁移到 Libra。不是 Git 命令。 |
 
@@ -677,3 +677,16 @@ libra agent rpc trust opencode \
 实际 producer 必须在 30 秒内成功回答一次新随机、独立 domain 的 Ed25519 challenge，stdout 上限 4096 bytes，stderr 有界捕获且失败时不回显。随后在同一写事务中重查当前 trust 和 trusted dirs、执行 expected-epoch CAS，只提交一个完整 registry 值。重复物理行、大小写 alias、encrypted/malformed/超限记录均拒绝，不自动修复。上限 64 KiB / 128 issuer；不删除吊销历史腾位置。
 
 新的独立安装 key 为 active，旧 active 转 verify-only；已有 issuer 不由登记或普通 re-trust 重新激活。登记成功仅证明安装 key/binary 关联，不代表 native 字段或归档验收通过；仍须验证 receipt 签名、当前许可、来源坐标和原字段，未知来源保持 partial。JSON 输出中的当前 Libra executable SHA256 仅用于本机 transient 审计，不进入 signed policy，也不固定为历史 Libra 构建。
+
+
+### OpenCode native-origin 轮换与撤销
+
+轮换时准备新的独立私有安装 key，以当前 epoch 显式登记；原 active issuer 转 verify-only。verify-only 和 revoked 均不能为新的 native capture/import/pending replay 授权。共享许可读取必须使用同一事务快照、独立新测 producer provenance、匹配的当前 exporter trust 与 trusted directory；返回的仍是安装数据，不是已验证 receipt 或 native artifact。
+
+`libra agent rpc untrust opencode` 在同一个有界写事务中移除 exporter trust，并永久吊销所有尚为 active/verify-only 的 issuer。保留全部墓碑和既存 artifact，external RPC 关闭时也可执行。registry 损坏/重复、容量或 epoch 失败、写入故障均拒绝，不留下部分 trust/registry 修改；先保留并核对本机 registry 再重试，不自动修复或删历史。重复成功 untrust 保持幂等，已经全吊销的 registry 不再递增 epoch。
+
+JSON 保留 `slug` 和 `removed`（后者只表示是否移除了 exporter trust），OpenCode 额外返回本次新吊销数量 `native_revoked` 和结果 `native_epoch`（不存在 registry 时为 null）；其它 slug 沿用原输出与行为。
+
+若 registry 损坏导致 combined untrust 拒绝，可用 `libra config unset agent.trust.opencode` 先暂停 exporter 访问。此命令只移除 binary trust，保留 registry 及全部墓碑；显式重新 trust 同一已审 binary 后，仍为 active 的 issuer 可恢复许可。因此须保留全部记录修复 registry，再成功执行 `libra agent rpc untrust opencode`，才完成永久 native 吊销。
+
+自动 provenance 重验发现 binary 不可读/漂移或 trusted directory 被撤回时，仍只移除 binary trust，暂停 native admission，registry 保持原字节。显式重新 trust 同一已审 build 可恢复从未被 native 吊销的 active issuer；verify-only/revoked 绝不复活。重新登记已有 issuer 仍拒绝，必须准备新独立 key。轮换/撤销不回写既存 receipt、安装 descriptor 或 immutable artifact；成功不代表 native 字段已证明，未知来源继续 partial。

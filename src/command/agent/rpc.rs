@@ -392,6 +392,32 @@ async fn trust_exporter(slug: &str, output: &OutputConfig) -> CliResult<()> {
 }
 
 async fn untrust(args: AgentRpcUntrustArgs, output: &OutputConfig) -> CliResult<()> {
+    if args.slug == crate::internal::ai::observed_agents::trust::OPENCODE_EXPORTER_SLUG {
+        let result = crate::internal::ai::observed_agents::native_origin::registry::revoke()
+            .await
+            .map_err(|e| {
+                CliError::fatal(format!(
+                    "revoke OpenCode exporter and native-origin trust: {e}"
+                ))
+                .with_stable_code(StableErrorCode::AgentProvenanceRejected)
+            })?;
+        if output.is_json() {
+            let payload = serde_json::json!({
+                "slug": args.slug,
+                "removed": result.removed,
+                "native_revoked": result.native_revoked,
+                "native_epoch": result.native_epoch,
+            });
+            return emit_json_data("agent_rpc_untrust", &payload, output);
+        }
+        if !output.quiet {
+            println!(
+                "untrust completed for provider exporter 'opencode': exporter trust removed={}, native issuers revoked={}; existing artifacts are retained",
+                result.removed, result.native_revoked,
+            );
+        }
+        return Ok(());
+    }
     let removed = revoke_trust(&args.slug)
         .await
         .map_err(|e| CliError::fatal(format!("revoke trust for '{}': {e}", args.slug)))?;

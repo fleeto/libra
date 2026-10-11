@@ -12,11 +12,15 @@ use std::{
 };
 
 use libra::internal::{
-    ai::observed_agents::{native_origin::registry::REGISTRY_KEY, trust::compute_provenance},
+    ai::observed_agents::{
+        native_origin::registry::{REGISTRY_BYTE_CAP, REGISTRY_KEY, active_issuer_with_conn},
+        trust::{self, compute_provenance},
+    },
     db::begin_write_transaction,
 };
 use sea_orm::{ConnectionTrait, Database, DatabaseConnection, DbBackend, Statement};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
 struct Fixture {
     _temp: tempfile::TempDir,
@@ -275,6 +279,477 @@ impl Fixture {
         );
         out
     }
+
+    async fn enroll(&self, name: &str) -> (PathBuf, String) {
+        let manifest = self.manifest(name);
+        let epoch = self
+            .registry()
+            .await
+            .map_or(0, |r| r["epoch"].as_u64().unwrap());
+        let out = self.registration(&manifest, epoch);
+        assert!(out.status.success(), "{}", describe(&out));
+        let installation: Value = serde_json::from_slice(&fs::read(&manifest).unwrap()).unwrap();
+        let key = hex::decode(installation["issuerPublicKey"].as_str().unwrap()).unwrap();
+        let issuer = hex::encode(Sha256::digest(key));
+        let result: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(result["data"]["issuer"], issuer);
+        (manifest, issuer)
+    }
+
+    async fn admitted(&self, issuer: &str) -> bool {
+        // This reads current permission data only. It does not verify a
+        // receipt, admit a native field, or construct an opaque artifact.
+        let measured = compute_provenance(&self.producer).unwrap();
+        let db = self.db().await;
+        let txn = begin_write_transaction(&db).await.unwrap();
+        let allowed = active_issuer_with_conn(&txn, issuer, &measured)
+            .await
+            .unwrap()
+            .is_some();
+        txn.rollback().await.unwrap();
+        allowed
+    }
+
+    fn untrust(&self) -> Value {
+        let out = self.ok(&["agent", "rpc", "untrust", "opencode", "--json"]);
+        let envelope: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(envelope["command"], "agent_rpc_untrust");
+        envelope["data"].clone()
+    }
+}
+
+#[tokio::test]
+async fn npr_10_rotation() {
+    let repo = Fixture::new();
+    repo.trust();
+    let (first_manifest, first) = repo.enroll("old").await;
+    let before = fs::read(&first_manifest).unwrap();
+    let (_, second) = repo.enroll("new").await;
+    assert_ne!(first, second);
+    let registry = repo.registry().await.unwrap();
+    assert_eq!(registry["epoch"], 2);
+    assert_eq!(registry["issuers"][0]["state"], "verify-only");
+    assert_eq!(registry["issuers"][1]["state"], "active");
+    assert_eq!(registry["issuers"][0]["issuer"], first);
+    assert_eq!(registry["issuers"][1]["issuer"], second);
+    assert_eq!(fs::read(first_manifest).unwrap(), before);
+    assert!(!repo.admitted(&first).await);
+    assert!(repo.admitted(&second).await);
+}
+
+#[tokio::test]
+async fn npr_10_new_admission() {
+    let repo = Fixture::new();
+    repo.trust();
+    let (_, first) = repo.enroll("first").await;
+    let (_, second) = repo.enroll("second").await;
+    assert!(!repo.admitted(&first).await);
+    assert!(!repo.admitted(&"0".repeat(64)).await);
+    let db = repo.db().await;
+    let measured = compute_provenance(&repo.producer).unwrap();
+    for field in 0..5 {
+        let mut stale = measured.clone();
+        match field {
+            0 => stale.sha256 = "0".repeat(64),
+            1 => stale.canonical_path = repo.root.join("different-producer"),
+            2 => stale.device += 1,
+            3 => stale.inode += 1,
+            _ => stale.mtime += 1,
+        }
+        let txn = begin_write_transaction(&db).await.unwrap();
+        assert!(
+            active_issuer_with_conn(&txn, &second, &stale)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        txn.rollback().await.unwrap();
+    }
+    assert!(repo.admitted(&second).await);
+    repo.untrust();
+    assert!(!repo.admitted(&first).await);
+    assert!(!repo.admitted(&second).await);
+}
+
+#[tokio::test]
+async fn npr_10_untrust() {
+    let repo = Fixture::new();
+    // Revocation remains available while the external RPC surface is disabled.
+    let empty = repo.untrust();
+    assert_eq!(empty["removed"], false);
+    assert_eq!(empty["native_revoked"], 0);
+    assert!(empty["native_epoch"].is_null());
+    repo.trust();
+    repo.enroll("one").await;
+    repo.enroll("two").await;
+    let local = repo.ok(&["config", "--get", REGISTRY_KEY]);
+    let inspected: Value = serde_json::from_slice(&local.stdout).unwrap();
+    assert_eq!(inspected, repo.registry().await.unwrap());
+    let data = repo.untrust();
+    assert_eq!(data["removed"], true);
+    assert_eq!(data["native_revoked"], 2);
+    assert_eq!(data["native_epoch"], 3);
+    assert!(
+        repo.rows()
+            .await
+            .iter()
+            .all(|(key, _, _)| key != "agent.trust.opencode")
+    );
+    let registry = repo.registry().await.unwrap();
+    assert_eq!(registry["issuers"].as_array().unwrap().len(), 2);
+    assert!(
+        registry["issuers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r["state"] == "revoked")
+    );
+    let repeat = repo.untrust();
+    assert_eq!(repeat["removed"], false);
+    assert_eq!(repeat["native_revoked"], 0);
+    assert_eq!(repeat["native_epoch"], 3);
+    assert_eq!(repo.registry().await.unwrap(), registry);
+}
+
+#[tokio::test]
+async fn npr_10_no_resurrection() {
+    let repo = Fixture::new();
+    repo.trust();
+    let (old_manifest, old) = repo.enroll("old").await;
+    repo.untrust();
+    let tombstone = repo.registry().await.unwrap();
+    repo.trust();
+    assert_eq!(repo.registry().await.unwrap(), tombstone);
+    assert!(!repo.admitted(&old).await);
+    repo.assert_refused_unchanged(&old_manifest, 2).await;
+    let (_, fresh) = repo.enroll("fresh").await;
+    assert_ne!(fresh, old);
+    assert!(!repo.admitted(&old).await);
+    assert!(repo.admitted(&fresh).await);
+    let registry = repo.registry().await.unwrap();
+    assert_eq!(registry["issuers"][0]["state"], "revoked");
+    assert_eq!(registry["issuers"][0]["issuer"], old);
+    assert_eq!(registry["epoch"], 3);
+}
+
+#[tokio::test]
+async fn npr_10_concurrency() {
+    let repo = Fixture::new();
+    repo.trust();
+    repo.enroll("initial").await;
+    let db = repo.db().await;
+    db.execute_unprepared(
+        "INSERT INTO config_kv(key,value,encrypted) VALUES('canary.lifecycle','preserve',0)",
+    )
+    .await
+    .unwrap();
+    let before = repo.rows().await;
+    db.execute_unprepared("CREATE TRIGGER reject_lifecycle_update BEFORE UPDATE ON config_kv WHEN NEW.key='agent.native_origin.opencode.v1' BEGIN SELECT RAISE(ABORT,'synthetic lifecycle write fault'); END").await.unwrap();
+    let out = repo.run(&["agent", "rpc", "untrust", "opencode"]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("LBR-AGENT-005"));
+    assert_eq!(
+        repo.rows().await,
+        before,
+        "native write failure must also roll back binary deletion"
+    );
+    db.execute_unprepared("DROP TRIGGER reject_lifecycle_update")
+        .await
+        .unwrap();
+    let manifest = repo.manifest("concurrent");
+    let mut register = repo.command(&[
+        "agent",
+        "rpc",
+        "trust",
+        "opencode",
+        "--native-origin-manifest",
+        manifest.to_str().unwrap(),
+        "--native-origin-expected-epoch",
+        "1",
+    ]);
+    let mut untrust = repo.command(&["agent", "rpc", "untrust", "opencode"]);
+    register
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    untrust
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let register = register.spawn().unwrap();
+    let untrust = untrust.spawn().unwrap();
+    let registration = register.wait_with_output().unwrap();
+    let revocation = untrust.wait_with_output().unwrap();
+    assert!(revocation.status.success(), "{}", describe(&revocation));
+    let registry = repo.registry().await.unwrap();
+    let entries = registry["issuers"].as_array().unwrap();
+    assert!(entries.iter().all(|r| r["state"] == "revoked"));
+    assert_eq!(
+        entries.len(),
+        if registration.status.success() { 2 } else { 1 }
+    );
+    assert_eq!(
+        registry["epoch"],
+        if registration.status.success() { 3 } else { 2 }
+    );
+    assert!(
+        repo.rows()
+            .await
+            .iter()
+            .all(|(key, _, _)| key != "agent.trust.opencode")
+    );
+    assert!(
+        repo.rows()
+            .await
+            .iter()
+            .any(|(key, value, _)| key == "canary.lifecycle" && value == "preserve")
+    );
+}
+
+#[tokio::test]
+async fn npr_10_cap() {
+    let repo = Fixture::new();
+    repo.trust();
+    repo.enroll("old").await;
+    repo.untrust();
+    repo.trust();
+    let tombstone = repo.registry().await.unwrap();
+    let db = repo.db().await;
+    db.execute_raw(Statement::from_sql_and_values(
+        DbBackend::Sqlite,
+        "UPDATE config_kv SET value=? WHERE key=?",
+        [
+            "x".repeat(REGISTRY_BYTE_CAP + 1).into(),
+            REGISTRY_KEY.into(),
+        ],
+    ))
+    .await
+    .unwrap();
+    let before = repo.rows().await;
+    let manifest = repo.manifest("cannot-fit");
+    repo.assert_refused_unchanged(&manifest, 2).await;
+    assert!(
+        !repo
+            .run(&["agent", "rpc", "untrust", "opencode"])
+            .status
+            .success()
+    );
+    assert_eq!(repo.rows().await, before);
+    db.execute_raw(Statement::from_sql_and_values(
+        DbBackend::Sqlite,
+        "UPDATE config_kv SET value=? WHERE key=?",
+        [tombstone.to_string().into(), REGISTRY_KEY.into()],
+    ))
+    .await
+    .unwrap();
+    assert_eq!(
+        repo.registry().await.unwrap(),
+        tombstone,
+        "cap refusal never deletes tombstones"
+    );
+    let restored = repo.rows().await;
+    db.execute_raw(Statement::from_sql_and_values(
+        DbBackend::Sqlite,
+        "INSERT INTO config_kv(key,value,encrypted) VALUES(?,?,0)",
+        [
+            "AGENT.NATIVE_ORIGIN.OPENCODE.V1".into(),
+            tombstone.to_string().into(),
+        ],
+    ))
+    .await
+    .unwrap();
+    let aliases = repo.rows().await;
+    assert!(
+        !repo
+            .run(&["agent", "rpc", "untrust", "opencode"])
+            .status
+            .success()
+    );
+    assert_eq!(repo.rows().await, aliases);
+    assert_eq!(aliases.len(), restored.len() + 1);
+    // Registry damage must not prevent the documented binary-only emergency
+    // quarantine. This is not permanent native revocation: retain every row.
+    repo.ok(&["config", "unset", "agent.trust.opencode"]);
+    let expected: Vec<_> = aliases
+        .into_iter()
+        .filter(|(key, _, _)| key != "agent.trust.opencode")
+        .collect();
+    assert_eq!(repo.rows().await, expected);
+}
+
+#[tokio::test]
+async fn npr_10_immutable() {
+    use git_internal::internal::object::{
+        ObjectTrait,
+        tree::{Tree, TreeItem, TreeItemMode},
+    };
+    use libra::utils::object::{read_git_object, write_git_object};
+    let repo = Fixture::new();
+    repo.trust();
+    repo.enroll("retention").await;
+    let storage = repo.repo.join(".libra");
+    // Persisted synthetic legacy artifact, not a native-field positive. Use
+    // actual content-addressed blob/tree storage and the canonical reasoning
+    // manifest/layout; keep it reachable by an isolated fixture tag.
+    let body = b"synthetic-legacy-opaque-artifact-canary";
+    let sha = hex::encode(Sha256::digest(body));
+    let artifact = write_git_object(&storage, "blob", body).unwrap();
+    let encrypted = Tree::from_tree_items(vec![TreeItem::new(
+        TreeItemMode::Blob,
+        artifact,
+        sha.clone(),
+    )])
+    .unwrap();
+    let encrypted_oid = write_git_object(&storage, "tree", &encrypted.to_data().unwrap()).unwrap();
+    let reasoning = Tree::from_tree_items(vec![TreeItem::new(
+        TreeItemMode::Tree,
+        encrypted_oid,
+        "encrypted".into(),
+    )])
+    .unwrap();
+    let reasoning_oid = write_git_object(&storage, "tree", &reasoning.to_data().unwrap()).unwrap();
+    let ordinary_metadata = write_git_object(
+        &storage,
+        "blob",
+        br#"{"checkpoint_id":"npr10-retention","agent_kind":"claude_code","created_at":0}"#,
+    )
+    .unwrap();
+    let transcript = write_git_object(
+        &storage,
+        "blob",
+        b"{\"role\":\"user\",\"content\":\"synthetic retention fixture\"}\n",
+    )
+    .unwrap();
+    let transcript_tree = Tree::from_tree_items(vec![TreeItem::new(
+        TreeItemMode::Blob,
+        transcript,
+        "claude_code.jsonl".into(),
+    )])
+    .unwrap();
+    let transcript_tree_oid =
+        write_git_object(&storage, "tree", &transcript_tree.to_data().unwrap()).unwrap();
+    let metadata = json!({"schema_version":1,"entries":{
+        "metadata":{"path":"metadata.json","oid":ordinary_metadata.to_string()},
+        "transcript":{"path":"transcript/claude_code.jsonl","oid":transcript.to_string()}},"reasoning_artifacts":[{
+        "path":format!("reasoning/encrypted/{sha}"),"oid":artifact.to_string(),"sha256":sha,"byte_len":body.len(),
+        "locator":"claude_code:msg=0/part=0/metadata=signature","provider":"claude_code","source_kind":"signature",
+        "availability":"encrypted_unavailable","decrypt_capability":"none"}]});
+    let original = serde_json::to_vec(&metadata).unwrap();
+    let manifest = write_git_object(&storage, "blob", &original).unwrap();
+    let tree = Tree::from_tree_items(vec![
+        TreeItem::new(TreeItemMode::Blob, manifest, "manifest.json".into()),
+        TreeItem::new(
+            TreeItemMode::Blob,
+            ordinary_metadata,
+            "metadata.json".into(),
+        ),
+        TreeItem::new(TreeItemMode::Tree, reasoning_oid, "reasoning".into()),
+        TreeItem::new(TreeItemMode::Tree, transcript_tree_oid, "transcript".into()),
+    ])
+    .unwrap();
+    let tree_oid = write_git_object(&storage, "tree", &tree.to_data().unwrap()).unwrap();
+    // The supported tag command requires a commit target. Wrap the persisted
+    // synthetic checkpoint tree in a commit instead of bypassing ref rules.
+    let commit_data = format!(
+        "tree {tree_oid}\nauthor NPR10 Fixture <npr10@example.invalid> 0 +0000\ncommitter NPR10 Fixture <npr10@example.invalid> 0 +0000\n\nsynthetic retention fixture\n"
+    );
+    let commit_oid = write_git_object(&storage, "commit", commit_data.as_bytes()).unwrap();
+    repo.ok(&["tag", "npr10-artifact-retention", &commit_oid.to_string()]);
+    let mut objects = Vec::new();
+    for oid in [
+        artifact,
+        manifest,
+        encrypted_oid,
+        reasoning_oid,
+        ordinary_metadata,
+        transcript,
+        transcript_tree_oid,
+        tree_oid,
+        commit_oid,
+    ] {
+        objects.push((oid, read_git_object(&storage, &oid).unwrap()));
+    }
+    let tag = repo
+        .ok(&["rev-parse", "refs/tags/npr10-artifact-retention"])
+        .stdout;
+    repo.untrust();
+    repo.trust();
+    for (oid, before) in objects {
+        assert_eq!(read_git_object(&storage, &oid).unwrap(), before);
+    }
+    assert_eq!(read_git_object(&storage, &artifact).unwrap(), body);
+    assert_eq!(read_git_object(&storage, &manifest).unwrap(), original);
+    assert_eq!(
+        repo.ok(&["rev-parse", "refs/tags/npr10-artifact-retention"])
+            .stdout,
+        tag
+    );
+}
+
+#[tokio::test]
+async fn npr_10_automatic_suspend() {
+    if std::env::var_os("LIBRA_NPR10_REVALIDATE_CHILD").is_some() {
+        // Owned test subprocess: its cwd/home belong to the parent fixture.
+        // Exercise the actual automatic revalidation owner, not a test stub.
+        let record = trust::read_trust("opencode").await.unwrap().unwrap();
+        assert!(trust::revalidate_trust("opencode", &record).await.is_err());
+        assert!(trust::read_trust("opencode").await.unwrap().is_none());
+        return;
+    }
+    let repo = Fixture::new();
+    repo.trust();
+    let (_, issuer) = repo.enroll("suspension").await;
+    let original = repo.registry().await.unwrap();
+    assert!(repo.admitted(&issuer).await);
+    for cause in ["stale-metadata", "directory-withdrawal"] {
+        let db = repo.db().await;
+        if cause == "stale-metadata" {
+            let mut record: Value = serde_json::from_str(
+                &repo
+                    .rows()
+                    .await
+                    .into_iter()
+                    .find(|(k, _, _)| k == "agent.trust.opencode")
+                    .unwrap()
+                    .1,
+            )
+            .unwrap();
+            record["mtime"] = json!(record["mtime"].as_i64().unwrap() + 1);
+            db.execute_raw(Statement::from_sql_and_values(
+                DbBackend::Sqlite,
+                "UPDATE config_kv SET value=? WHERE key='agent.trust.opencode'",
+                [record.to_string().into()],
+            ))
+            .await
+            .unwrap();
+        } else {
+            repo.ok(&["config", "set", "agent.external_agents.trusted_dirs", "[]"]);
+        }
+        let out = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "npr_10_automatic_suspend", "--nocapture"])
+            .current_dir(&repo.repo)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+            .env("HOME", &repo.home)
+            .env("LIBRA_TEST_HOME", &repo.home)
+            .env("LIBRA_TEST", "1")
+            .env("LIBRA_NPR10_REVALIDATE_CHILD", cause)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}", describe(&out));
+        assert!(!repo.admitted(&issuer).await);
+        assert_eq!(
+            repo.registry().await.unwrap(),
+            original,
+            "automatic removal must not create a permanent native tombstone"
+        );
+        repo.trust();
+        assert!(repo.admitted(&issuer).await);
+    }
+    repo.untrust();
+    repo.trust();
+    assert!(
+        !repo.admitted(&issuer).await,
+        "explicit native revocation must remain permanent"
+    );
 }
 
 #[tokio::test]

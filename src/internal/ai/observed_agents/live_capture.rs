@@ -293,7 +293,15 @@ impl LiveTranscriptExporter for OpenCodeLiveCapture {
         if exported.is_err() {
             // Bridge unavailability (untrusted binary, no sandbox) degrades
             // to a metadata-only capture; the structured reason is fixed and
-            // no exporter diagnostic is rendered.
+            // no exporter diagnostic is rendered. The rendered chain stays
+            // opt-in at debug level so a host or containment failure remains
+            // diagnosable without putting free text into hook stderr.
+            if let Err(error) = &exported {
+                tracing::debug!(
+                    error = %format!("{error:#}"),
+                    "opencode export bridge failure detail"
+                );
+            }
             tracing::warn!(
                 reason = "opencode_export_bridge_unavailable",
                 "opencode export bridge unavailable; metadata-only capture"

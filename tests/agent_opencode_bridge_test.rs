@@ -172,7 +172,10 @@ impl BridgeRepo {
     }
 
     fn stop(&self, session_id: &str) -> Output {
-        self.stop_with_log(session_id, None)
+        // Always capture debug logs: the CLI's stderr is only rendered when an
+        // assertion fails, and a D-group failure needs the export bridge's
+        // opt-in failure detail to stay diagnosable.
+        self.stop_with_log(session_id, Some("debug"))
     }
 
     fn stop_with_log(&self, session_id: &str, log_filter: Option<&str>) -> Output {

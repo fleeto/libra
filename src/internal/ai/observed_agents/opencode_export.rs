@@ -2082,6 +2082,66 @@ pub async fn run_export_subprocess_sandboxed_until(
     }
 }
 
+/// Bounded attempts for one trusted, sandboxed OpenCode export.
+///
+/// Every containment stage (trust revalidation, sealed-descriptor I/O, the
+/// bwrap capability probe, namespace/mount/spawn setup and the exporter
+/// process itself) depends on transient host resources, so a failure there is
+/// not a property of the capture content. A single retry inside the caller's
+/// one absolute deadline keeps such a hiccup from silently degrading an idle
+/// to a metadata-only capture while most of the hook budget is unspent. Each
+/// attempt re-runs the same trust revalidation, integrity probe, fixed sandbox
+/// argv, identity binding and deadline: a retry repeats work and never widens a
+/// trust or budget boundary.
+#[cfg(any(target_os = "linux", test))]
+const TRUSTED_EXPORT_ATTEMPTS: u8 = 2;
+
+/// Whether one more trusted sandbox attempt may start.
+///
+/// Bounded by [`TRUSTED_EXPORT_ATTEMPTS`] and never after the caller's absolute
+/// deadline: a retry may not borrow capture budget the hook does not have.
+#[cfg(any(target_os = "linux", test))]
+fn trusted_export_retry_permitted(attempts: u8, deadline: tokio::time::Instant) -> bool {
+    attempts < TRUSTED_EXPORT_ATTEMPTS && tokio::time::Instant::now() < deadline
+}
+
+/// Run one trusted export attempt with the module's bounded retry policy.
+///
+/// The first failure is retained only as an opt-in debug diagnostic; the
+/// caller-visible error is the last attempt's, so a retry never hides the
+/// reason the capture finally degraded.
+#[cfg(any(target_os = "linux", test))]
+async fn trusted_export_with_bounded_retry<F, Fut>(
+    deadline: tokio::time::Instant,
+    mut attempt: F,
+) -> Result<Vec<u8>>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<Vec<u8>>>,
+{
+    let mut attempts: u8 = 0;
+    loop {
+        attempts += 1;
+        match attempt().await {
+            Ok(bytes) => return Ok(bytes),
+            Err(error) => {
+                if !trusted_export_retry_permitted(attempts, deadline) {
+                    return Err(error);
+                }
+                // Only our own fixed error chain is rendered, and only when a
+                // caller opts into debug logging: exporter stderr stays inside
+                // the subprocess boundary and the hook-visible warning stays
+                // the existing fixed reason.
+                tracing::debug!(
+                    attempts,
+                    error = %format!("{error:#}"),
+                    "trusted OpenCode export attempt failed; retrying inside the same capture deadline"
+                );
+            }
+        }
+    }
+}
+
 /// The configured-trust variant used by hook capture. It starts from the
 /// persisted trust record and seals the verified bytes under the caller's
 /// absolute deadline, avoiding a preliminary path-returning trust check that
@@ -2112,9 +2172,17 @@ async fn run_trusted_export_subprocess_sandboxed_until(
         if tokio::time::Instant::now() >= deadline {
             bail!("OpenCode export capture deadline already elapsed; refusing export");
         }
-        let exporter_fd = pin_trusted_opencode_exporter_until(deadline).await?;
-        run_export_subprocess_sandboxed_with_exporter_fd(exporter_fd, session_id, limits, deadline)
+        trusted_export_with_bounded_retry(deadline, || async move {
+            let exporter_fd = pin_trusted_opencode_exporter_until(deadline).await?;
+            run_export_subprocess_sandboxed_with_exporter_fd(
+                exporter_fd,
+                session_id,
+                limits,
+                deadline,
+            )
             .await
+        })
+        .await
     }
 }
 
@@ -3688,6 +3756,112 @@ mod tests {
     #[test]
     fn export_max_bytes_unchanged() {
         assert_eq!(ExportLimits::default().max_bytes, 16 * 1024 * 1024);
+    }
+
+    /// A transient containment failure must not degrade an idle to
+    /// metadata-only capture while the hook still has budget, and the retry
+    /// must stay bounded when the failure is permanent.
+    #[tokio::test]
+    async fn trusted_export_retries_transient_failure_once_within_deadline() {
+        use std::sync::atomic::{AtomicU8, Ordering};
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        let calls = AtomicU8::new(0);
+        let calls = &calls;
+        let bytes = trusted_export_with_bounded_retry(deadline, || async move {
+            if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                Err(anyhow::anyhow!("transient containment failure"))
+            } else {
+                Ok(b"export".to_vec())
+            }
+        })
+        .await
+        .expect("a transient first failure must be retried inside the deadline");
+        assert_eq!(bytes, b"export");
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+        let permanent = AtomicU8::new(0);
+        let permanent = &permanent;
+        let error = trusted_export_with_bounded_retry(deadline, || async move {
+            permanent.fetch_add(1, Ordering::SeqCst);
+            Err(anyhow::anyhow!("permanent containment failure"))
+        })
+        .await
+        .expect_err("both attempts failing must surface the caller-visible error");
+        assert_eq!(permanent.load(Ordering::SeqCst), 2);
+        assert!(
+            format!("{error:#}").contains("permanent containment failure"),
+            "the final attempt's error must be the one returned"
+        );
+    }
+
+    /// A retry cannot start after the caller's absolute deadline elapsed: the
+    /// retry consumes the same hook budget as the first attempt, never more.
+    #[tokio::test]
+    async fn trusted_export_retry_never_starts_after_the_deadline() {
+        let elapsed = tokio::time::Instant::now();
+        assert!(!trusted_export_retry_permitted(0, elapsed));
+        assert!(trusted_export_retry_permitted(
+            1,
+            elapsed + Duration::from_secs(1)
+        ));
+        assert!(!trusted_export_retry_permitted(
+            TRUSTED_EXPORT_ATTEMPTS,
+            elapsed + Duration::from_secs(1)
+        ));
+    }
+
+    /// A transient containment failure inside a real bwrap sandbox is retried:
+    /// the first sandboxed run of the sealed exporter fails, the retry of the
+    /// same sealed bytes succeeds, and the recovered content is returned.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    #[serial_test::serial(export_sandbox_env, env)]
+    async fn trusted_export_retry_recovers_a_transient_sandbox_failure() {
+        if !trusted_bwrap_available().await {
+            return;
+        }
+        let dir = tempfile::tempdir().expect("tempdir");
+        let home = dir.path().join("home");
+        let xdg_data = dir.path().join("xdg-data");
+        let bin_dir = dir.path().join("bin");
+        std::fs::create_dir_all(&home).expect("create HOME");
+        std::fs::create_dir_all(xdg_data.join("opencode")).expect("create OpenCode store");
+        std::fs::create_dir_all(&bin_dir).expect("create fake exporter directory");
+        let _home = EnvVarGuard::set("HOME", home.to_str().expect("utf8 HOME"));
+        let _xdg_data = EnvVarGuard::set(
+            "XDG_DATA_HOME",
+            xdg_data.to_str().expect("utf8 XDG data root"),
+        );
+        // The pinned RW store is the only state that survives an attempt: its
+        // marker proves the first sandboxed run happened and failed, and the
+        // second run's payload is distinguishable from the failed one.
+        let bin = fake_exporter(
+            &bin_dir,
+            r#"counter="$XDG_DATA_HOME/opencode/attempts"
+if [ ! -e "$counter" ]; then : > "$counter"; exit 9; fi
+printf '{"info":{"id":"ses_retry","directory":"__REPO__"},"messages":[]}'"#,
+        );
+        let limits = ExportLimits {
+            max_bytes: 1024 * 1024,
+            deadline: Duration::from_secs(20),
+        };
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        let exporter = &bin;
+        let bytes = trusted_export_with_bounded_retry(deadline, || async move {
+            run_export_subprocess_sandboxed_for_test(exporter, "ses_retry", limits).await
+        })
+        .await
+        .expect("a transient sandbox failure must be retried inside the deadline");
+        assert_eq!(
+            String::from_utf8_lossy(&bytes),
+            r#"{"info":{"id":"ses_retry","directory":"__REPO__"},"messages":[]}"#,
+            "the returned bytes must come from the successful retry"
+        );
+        assert!(
+            xdg_data.join("opencode/attempts").is_file(),
+            "the first attempt must have reached the sandbox and failed"
+        );
     }
 
     #[cfg(target_os = "macos")]

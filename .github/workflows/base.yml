@@ -552,6 +552,7 @@ jobs:
           run_gate backend_missing_degrades_metadata_only
           run_gate trusted_bwrap_exe_channel_used
           run_gate opencode_export_sandboxed_outer_cancel_contains_setsid_writer
+          run_gate trusted_export_retry_recovers_a_transient_sandbox_failure
 
       - name: Run OpenCode export bridge e2e (must not skip)
         run: |

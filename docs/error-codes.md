@@ -124,7 +124,7 @@ structured report is always present.
 | `128` | `LBR-AGENT-002` | `internal` | External `libra-agent-*` agents are disabled (`agent.external_agents.enabled` defaults to `false`) | `libra agent rpc invoke` before opting in to external discovery |
 | `128` | `LBR-AGENT-003` | `internal` | External agent binary negotiated an incompatible protocol version | a `libra-agent-*` binary answers `info` with an unsupported `protocol_version` |
 | `128` | `LBR-AGENT-004` | `internal` | Method not declared in the external agent's negotiated capabilities | invoking `read_transcript` when the binary's `capabilities` omit it |
-| `128` | `LBR-AGENT-005` | `internal` | External agent binary failed provenance revalidation (untrusted, or sha256/device/inode/mtime changed since trust) | the trusted binary at `~/.libra/agents/libra-agent-foo` was replaced after `libra agent rpc trust` |
+| `128` | `LBR-AGENT-005` | `internal` | External agent binary failed provenance revalidation (untrusted, or sha256/device/inode/mtime changed since trust); explicit OpenCode native-origin registration also refuses missing/drifted exporter trust, invalid installation/build/challenge/observer binding, registry corruption, output budget or epoch conflict | the trusted binary at `~/.libra/agents/libra-agent-foo` was replaced after `libra agent rpc trust` |
 | `128` | `LBR-AGENT-006` | `internal` | External `libra-agent-*` binary tried to impersonate a built-in agent slug | a PATH binary named `libra-agent-claude-code` |
 | `128` | `LBR-AGENT-007` | `internal` | External agent IO exceeded hard caps or failed redaction; output withheld fail-closed | a binary floods stderr past the 64 KiB cap |
 | `128` | `LBR-AGENT-008` | `internal` | Hook envelope failed validation before checkpoint persistence | a provider hook posts malformed JSON to `libra agent hooks` |
@@ -672,3 +672,6 @@ reason that does not echo the remote bytes. It is no longer reported as a
 successful empty response. Check the remote Git service or proxy response before
 retrying. Valid empty repositories, supported SHA-1/SHA-256 advertisements,
 existing command hints and structured error fields retain their behavior.
+
+
+Explicit native-origin registration uses `LBR-AGENT-005` (exit 128) with a fixed actionable refusal. Keep capture partial, preserve the registry and installation, inspect the current epoch before retrying, and use a fresh reviewed private installation rather than reactivating an existing issuer. No descriptor, private key or raw child output is included in the diagnostic.

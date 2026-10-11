@@ -443,6 +443,11 @@ mod tests {
         // .claude/settings.json) written by `agent enable` — not a .libra surface
         "file_history.json", // legacy AI file-undo manifest, persisted state rather than configuration
         "redaction_report.json", // E4 checkpoint sidecar (rule-hit stats only), not configuration
+        "installation.json", // Explicit external producer public installation data, not
+                             // a .libra config layer. Native registration treats it as untrusted,
+                             // checks owned-file posture and reconstructs controlled policy, then
+                             // verifies the actual approved binary's fresh challenge before a
+                             // separate repository-local registry write. It cannot authorize paths.
     ];
 
     /// Extract config-file name literals from the PRODUCTION half of one

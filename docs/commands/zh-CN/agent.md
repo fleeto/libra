@@ -655,3 +655,25 @@ OpenCode 2.0.26并选择`volcengine-agent-plan/glm-5.3-flash`，先核对临时�
 会话停止、doctor及卸载后数据保留。预检失败或超时记为失败，付费模型尚未调用。
 当前验收机的OpenCode私有server未报告readiness，真实内容验收延后为计划外遗留
 `DEFER-OG-OPENCODE-BOOT-01`；harness与合成测试不证明真实内容或native reasoning来源。
+
+
+### 私有 native-origin issuer 登记（macOS）
+
+普通 `agent rpc trust opencode` 只固定 exporter binary，不登记 issuer，也不证明 reasoning 的 native 来源。此登记路径要求独立安装、已审查的 macOS arm64 `2.0.26-libra-native.1` 私有 producer。先用当前 Libra 可执行文件安装 OpenCode 观察器，再按该私有交付包的初始化说明准备一个新的 owned 安装目录；全局 OpenCode 保持独立。
+
+```sh
+libra agent rpc trust --dir /absolute/approved-private/bin
+libra agent rpc trust opencode
+libra agent enable --agent opencode
+libra agent rpc trust opencode \
+  --native-origin-manifest /absolute/private-installation/installation.json \
+  --native-origin-expected-epoch 0
+```
+
+两个 native 参数必须同时提供，并且只能使用字面 slug `opencode`。首次 epoch 为 0，后续显式登记使用当前仓库 registry 的 epoch；重试前在本机用 `libra config --get agent.native_origin.opencode.v1` 查看。冲突不会改写 exporter trust 或 registry；registry 含本机安装路径，保留在本机。
+
+公开 descriptor 必须是当前用户拥有的 regular、非 symlink `installation.json`，权限 0600，父目录 canonical、owned、0700，大小不超过 64 KiB，符合私有 producer 的封闭最小 JSON 格式。Libra 不读取私钥。原 exporter trust、实测 approved producer、当前 canonical Libra 路径及实际安装的 `.opencode/plugin/libra-hooks.js` 必须匹配；manifest/export 自报公钥、路径、endpoint 或 build 不建立许可。
+
+实际 producer 必须在 30 秒内成功回答一次新随机、独立 domain 的 Ed25519 challenge，stdout 上限 4096 bytes，stderr 有界捕获且失败时不回显。随后在同一写事务中重查当前 trust 和 trusted dirs、执行 expected-epoch CAS，只提交一个完整 registry 值。重复物理行、大小写 alias、encrypted/malformed/超限记录均拒绝，不自动修复。上限 64 KiB / 128 issuer；不删除吊销历史腾位置。
+
+新的独立安装 key 为 active，旧 active 转 verify-only；已有 issuer 不由登记或普通 re-trust 重新激活。登记成功仅证明安装 key/binary 关联，不代表 native 字段或归档验收通过；仍须验证 receipt 签名、当前许可、来源坐标和原字段，未知来源保持 partial。JSON 输出中的当前 Libra executable SHA256 仅用于本机 transient 审计，不进入 signed policy，也不固定为历史 Libra 构建。

@@ -24,6 +24,7 @@ use std::{
 #[cfg(unix)]
 use anyhow::anyhow;
 use anyhow::{Context, Result, bail};
+use sea_orm::ConnectionTrait;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -231,12 +232,26 @@ pub async fn read_trusted_dirs() -> Result<Vec<PathBuf>> {
     let entry = ConfigKv::get(TRUSTED_DIRS_KEY)
         .await
         .context("read agent.external_agents.trusted_dirs")?;
-    let raw: Vec<String> = match entry {
-        Some(entry) => serde_json::from_str(&entry.value)
+    Ok(decode_trusted_dirs(entry.map(|entry| entry.value)))
+}
+
+fn decode_trusted_dirs(value: Option<String>) -> Vec<PathBuf> {
+    let raw: Vec<String> = match value {
+        Some(value) => serde_json::from_str(&value)
             .unwrap_or_else(|_| DEFAULT_TRUSTED_DIRS.iter().map(|s| s.to_string()).collect()),
         None => DEFAULT_TRUSTED_DIRS.iter().map(|s| s.to_string()).collect(),
     };
-    Ok(raw.iter().map(|s| expand_tilde(s)).collect())
+    raw.iter().map(|s| expand_tilde(s)).collect()
+}
+
+/// Read on the caller's connection, including inside a writer transaction.
+/// This port preserves the existing directory grammar and fallback without
+/// acquiring another pooled connection while the caller holds a write lock.
+pub async fn read_trusted_dirs_with_conn<C: ConnectionTrait>(db: &C) -> Result<Vec<PathBuf>> {
+    let entry = ConfigKv::get_with_conn(db, TRUSTED_DIRS_KEY)
+        .await
+        .context("read agent.external_agents.trusted_dirs on registration connection")?;
+    Ok(decode_trusted_dirs(entry.map(|entry| entry.value)))
 }
 
 /// A0-08: append `path` to the trusted-directory allowlist. The path is
@@ -410,6 +425,35 @@ pub async fn read_trust(slug: &str) -> Result<Option<TrustRecord>> {
     let record: TrustRecord = serde_json::from_str(&entry.value)
         .with_context(|| format!("parse trust record for '{slug}' (corrupt config value)"))?;
     Ok(Some(record))
+}
+
+/// Read the existing trust owner on the caller's connection. Registration
+/// must use this after acquiring its writer lock, rather than a pooled read.
+pub async fn read_trust_with_conn<C: ConnectionTrait>(
+    db: &C,
+    slug: &str,
+) -> Result<Option<TrustRecord>> {
+    let Some(entry) = ConfigKv::get_with_conn(db, &trust_key(slug))
+        .await
+        .with_context(|| format!("read trust record for '{slug}' on registration connection"))?
+    else {
+        return Ok(None);
+    };
+    if entry.encrypted {
+        bail!("trust record for '{slug}' is encrypted; restore a valid exporter trust record");
+    }
+    serde_json::from_str(&entry.value)
+        .map_err(|_| anyhow::anyhow!("trust record for '{slug}' is corrupt; restore a valid exporter trust record before registration"))
+        .map(Some)
+}
+
+/// Revoke through the caller's transaction; the native lifecycle owner can
+/// atomically revoke its registry without nesting a pooled acquisition.
+pub async fn revoke_trust_with_conn<C: ConnectionTrait>(db: &C, slug: &str) -> Result<bool> {
+    ConfigKv::unset_with_conn(db, &trust_key(slug))
+        .await
+        .with_context(|| format!("remove trust record for '{slug}' on registration connection"))
+        .map(|removed| removed > 0)
 }
 
 /// Remove the trust record for `slug`. Returns whether one existed.

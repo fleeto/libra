@@ -75,6 +75,23 @@ pub struct AgentRpcTrustArgs {
     /// is canonicalized and must be an existing, non-world-writable directory.
     #[arg(long, value_name = "PATH", required_unless_present = "slug")]
     pub dir: Option<std::path::PathBuf>,
+    /// Register a native-origin issuer from an owned installation.json after
+    /// explicitly trusting the reviewed private OpenCode exporter.
+    #[arg(
+        long,
+        value_name = "PATH",
+        requires = "native_origin_expected_epoch",
+        conflicts_with = "dir"
+    )]
+    pub native_origin_manifest: Option<std::path::PathBuf>,
+    /// Expected repository issuer-registry epoch; use 0 for initial registration.
+    #[arg(
+        long,
+        value_name = "EPOCH",
+        requires = "native_origin_manifest",
+        conflicts_with = "dir"
+    )]
+    pub native_origin_expected_epoch: Option<u64>,
 }
 
 #[derive(Args, Debug)]
@@ -245,6 +262,41 @@ async fn trust(args: AgentRpcTrustArgs, output: &OutputConfig) -> CliResult<()> 
             "pass a slug to trust a binary, or --dir <path> to trust a directory",
         )
     })?;
+    if let Some(manifest) = &args.native_origin_manifest {
+        if slug != "opencode" {
+            return Err(CliError::command_usage(
+                "native-origin registration requires the literal exporter slug 'opencode'",
+            ));
+        }
+        let expected_epoch = args.native_origin_expected_epoch.ok_or_else(|| {
+            CliError::command_usage("pass --native-origin-expected-epoch with the current registry epoch (0 for initial registration)")
+        })?;
+        let registration = crate::internal::ai::observed_agents::native_origin::registry::register(
+            manifest,
+            expected_epoch,
+        )
+        .await
+        .map_err(|error| {
+            CliError::fatal(format!(
+                "cannot register OpenCode native-origin issuer: {error:#}"
+            ))
+            .with_stable_code(StableErrorCode::AgentProvenanceRejected)
+        })?;
+        if output.is_json() {
+            return emit_json_data(
+                "agent_rpc_native_origin_registration",
+                &registration,
+                output,
+            );
+        }
+        if !output.quiet {
+            println!(
+                "registered OpenCode native-origin issuer {} at epoch {}; key association verified, native field acceptance remains required",
+                registration.issuer, registration.epoch
+            );
+        }
+        return Ok(());
+    }
     // DR-04b: provider-exporter slugs pin the built-in provider's OWN CLI
     // binary for the sandboxed export bridge. This arms built-in capture,
     // not the external-RPC surface, so the `LBR-AGENT-002` opt-in does not

@@ -183,6 +183,11 @@ proc-macro2 = { version = "1", features = ["span-locations"] }
 # default test discovery only picks up *.rs directly under tests/, so each
 # compat surface file must be registered here.
 [[test]]
+name = "agent_native_origin_test"
+path = "tests/agent_native_origin_test.rs"
+required-features = ["test-live-agent"]
+
+[[test]]
 name = "compat_stash_subcommand_surface"
 path = "tests/compat/stash_subcommand_surface.rs"
 

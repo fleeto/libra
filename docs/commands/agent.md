@@ -1060,3 +1060,25 @@ A failed or timed-out preflight is a failure, with no model request started.
 On the current acceptance machine, OpenCode's private server did not report
 readiness; real content acceptance is deferred as `DEFER-OG-OPENCODE-BOOT-01`.
 The harness and synthetic tests do not prove real content or native reasoning.
+
+
+### Private native-origin issuer registration (macOS)
+
+Ordinary `agent rpc trust opencode` pins an exporter binary; it does not register an issuer or prove native reasoning. The native path requires the separately installed, reviewed `2.0.26-libra-native.1` macOS arm64 producer. Enable the OpenCode observer with the actual Libra executable, then prepare a fresh owned installation using that private bundle's initialization instructions. Global OpenCode remains independent.
+
+```sh
+libra agent rpc trust --dir /absolute/approved-private/bin
+libra agent rpc trust opencode
+libra agent enable --agent opencode
+libra agent rpc trust opencode \
+  --native-origin-manifest /absolute/private-installation/installation.json \
+  --native-origin-expected-epoch 0
+```
+
+The two native options must be supplied together and only with the literal `opencode` slug. Initial registration expects epoch 0; later registration requires the current repository registry epoch. Inspect `libra config --get agent.native_origin.opencode.v1` locally before an explicit retry. A conflict refuses without changing trust or registry. The registry includes local installation paths and should remain local.
+
+The public descriptor must be a regular, non-symlink `installation.json`, owned by the current user with mode 0600 in a canonical owned 0700 directory, at most 64 KiB and in the private producer's closed minimal JSON format. Libra does not read the private key. Existing exporter trust, actual approved producer bytes, the current canonical Libra executable path and exact installed `.opencode/plugin/libra-hooks.js` bytes must match. A descriptor or export cannot authorize its own path, public key, endpoint or build.
+
+The actual producer must successfully answer a new random, domain-separated Ed25519 challenge within 30 seconds, with at most 4096 stdout bytes and bounded captured stderr. Child output is withheld on failure. After the challenge, one write transaction rechecks current exporter trust and trusted directories, performs expected-epoch CAS, and writes one complete registry row. Duplicate rows, case aliases, encryption, malformed records and size overflow refuse without repair. Limits are 64 KiB and 128 issuer records; revoked history is never removed to make space.
+
+A new independent installation key becomes active; earlier active keys become verify-only. Existing issuer keys cannot be reactivated by registration or ordinary binary re-trust. Historical records remain immutable. Successful registration proves installation key/binary association only. Receipt signature, current issuer permission, source coordinates and original native field checks remain required before any archive admission; unknown or unproven sessions stay partial. JSON registration output includes the transient current Libra executable SHA256 for local audit; this measurement is neither a signed policy field nor a pinned historical Libra version.

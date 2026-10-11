@@ -650,7 +650,7 @@ native 来源，也不实现新 `state.*` reasoning artifact 通道。
 
 macOS本地内容门是`agent_local_capture_smoke_test`中的
 `local_capture_smoke_opencode_macos`。必须显式打开local-agent开关，固定
-OpenCode 2.0.26并选择`volcengine-agent-plan/glm-5.3-flash`，先核对临时项目，
+私有 OpenCode `2.0.26-libra-native.1`（`LIBRA_OPENCODE_NATIVE_BINARY`）并选择`volcengine-agent-plan/glm-5.3-flash`，先核对临时项目，
 再请求一次固定文件写入；断言prompt/model/tokens/files与源投影一致、文件元数据持久化、
 会话停止、doctor及卸载后数据保留。预检失败或超时记为失败，付费模型尚未调用。
 当前验收机的OpenCode私有server未报告readiness，真实内容验收延后为计划外遗留
@@ -690,3 +690,28 @@ JSON 保留 `slug` 和 `removed`（后者只表示是否移除了 exporter trust
 若 registry 损坏导致 combined untrust 拒绝，可用 `libra config unset agent.trust.opencode` 先暂停 exporter 访问。此命令只移除 binary trust，保留 registry 及全部墓碑；显式重新 trust 同一已审 binary 后，仍为 active 的 issuer 可恢复许可。因此须保留全部记录修复 registry，再成功执行 `libra agent rpc untrust opencode`，才完成永久 native 吊销。
 
 自动 provenance 重验发现 binary 不可读/漂移或 trusted directory 被撤回时，仍只移除 binary trust，暂停 native admission，registry 保持原字节。显式重新 trust 同一已审 build 可恢复从未被 native 吊销的 active issuer；verify-only/revoked 绝不复活。重新登记已有 issuer 仍拒绝，必须准备新独立 key。轮换/撤销不回写既存 receipt、安装 descriptor 或 immutable artifact；成功不代表 native 字段已证明，未知来源继续 partial。
+
+
+### 当前私有 OpenCode 验收基线（NPR-18）
+
+macOS arm64 的唯一当前验收构建是 `2.0.26-libra-native.1`，build
+`bac21cc4027896b8d1836133c347d20f`，SHA-256
+`547c36eb928da163ef61d019bad669860d519f2da0b67737c9a3920e831c9196`，
+大小 187635570 字节。官方基底是 OpenCode `2.0.26` commit
+`9b4ec5714d481559990db0a816d5dec19541a814`；这个 commit 只标识官方基底，
+定制构建另由 source、patch、lock、build-input 摘要标识。
+公开的 `native-origin-build.json` 仅包含已审构建身份，不包含安装策略、issuer 或私钥。
+
+macOS 本地采集验收前，将 `LIBRA_OPENCODE_NATIVE_BINARY` 设为独立安装的私有
+`opencode` 的绝对路径。harness 在登录或模型调用前校验已审版本、摘要和大小，
+version 与 login 预检均限制 30 秒；所有 capture/export 子进程的 PATH 首项
+使用同一个私有 binary 目录。缺少显式 opt-in 或发生漂移就失败，不能回退到全局
+OpenCode；官方全局安装和既有 observer ABI 保持独立。
+
+NPR-12 的 SOURCE_READY_GO 仅涵盖此 darwin-arm64 构建与当前 OpenAI Responses
+transport 机制。原官方 source record、event/export fixture 和合成 receipt/signature
+向量保留历史身份及原字节。Source A 仍为 UNPROVEN；确定性测试、版本、登记或
+descriptor 不能证明真实 native provider 字段，也不能放行 reasoning 归档。
+readiness 或配额失败保持 partial；唯一授权付费 smoke 模型是
+`volcengine-agent-plan/glm-5.3-flash`，不使用其它模型回退。本卡没有新增模型调用，
+Linux 本地功能验收留给使用者。

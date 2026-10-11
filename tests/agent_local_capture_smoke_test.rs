@@ -11,7 +11,7 @@
 //! idempotent remove, captured data retained). Deterministic fixtures
 //! cannot stand in for this target (plan.md A6.5 acceptance).
 //!
-//! CI-safe by construction: every test is `#[ignore]` **and** skips unless
+//! CI-safe by construction: every paid test is `#[ignore]` **and** skips unless
 //! `LIBRA_RUN_LOCAL_AGENTS=1`, so neither `cargo test --all` nor a stray
 //! `--ignored` run can start a paid session. Tests are `#[serial]` and the
 //! canonical invocation adds `--test-threads=1` (§0.3.6):
@@ -27,6 +27,9 @@
 //! child's whole **process group**), `LIBRA_KEEP_LOCAL_AGENT_SMOKE=1`
 //! (keep evidence — sensitive, never commit),
 //! `LIBRA_LOCAL_AGENT_EVIDENCE_DIR` (custom 0700 evidence root).
+//! macOS OpenCode additionally requires `LIBRA_OPENCODE_NATIVE_BINARY` to
+//! select the reviewed separate private build; PATH/global OpenCode is never
+//! a fallback. Nonignored regressions below make no model calls.
 //!
 //! A missing binary or a failed read-only login probe marks that agent's
 //! run **BLOCKED** without starting a paid session (§0 blocked rule) and
@@ -206,4 +209,67 @@ fn opencode_login_probe_timeout_is_not_success() {
             0o600
         );
     }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn opencode_private_path_is_consistent_for_all_children() {
+    use std::{ffi::OsStr, path::Path, process::Command};
+
+    let root = tempfile::tempdir().unwrap();
+    let private = root.path().join("private/bin");
+    std::fs::create_dir_all(&private).unwrap();
+    let binary = private.join("opencode");
+    std::fs::write(&binary, b"not executable; PATH resolution only").unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let child_path = smoke::opencode_child_path(&binary, OsStr::new("/usr/bin:/bin")).unwrap();
+    let entries: Vec<_> = std::env::split_paths(&child_path).collect();
+    assert_eq!(
+        entries,
+        [
+            private.clone(),
+            Path::new("/usr/bin").to_owned(),
+            Path::new("/bin").to_owned()
+        ]
+    );
+    let selected = Command::new("/usr/bin/which")
+        .arg("opencode")
+        .env("PATH", &child_path)
+        .output()
+        .unwrap();
+    assert!(selected.status.success());
+    assert_eq!(
+        String::from_utf8(selected.stdout).unwrap().trim(),
+        binary.to_str().unwrap()
+    );
+    assert!(
+        smoke::opencode_child_path(
+            Path::new("/private/colon:path/opencode"),
+            OsStr::new("/bin")
+        )
+        .is_err()
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn opencode_version_timeout_blocks_before_login_and_model() {
+    use std::{os::unix::fs::PermissionsExt, time::Duration};
+
+    let root = tempfile::tempdir().unwrap();
+    let script = root.path().join("probe");
+    let marker = root.path().join("late-marker");
+    std::fs::write(
+        &script,
+        format!("#!/bin/sh\nsleep 30\ntouch '{}'\n", marker.display()),
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let reason = smoke::opencode_version_probe(&script, root.path(), Duration::from_millis(200))
+        .unwrap_err();
+    assert!(reason.contains("no login or model session started"));
+    assert!(!marker.exists());
+    assert!(!root.path().join("opencode-version.stdout").exists());
+    assert!(!root.path().join("opencode-version.stderr").exists());
 }

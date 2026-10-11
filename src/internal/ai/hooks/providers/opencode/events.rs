@@ -6,7 +6,12 @@
 
 use crate::internal::ai::hooks::{LifecycleEventKind, ProviderHookCommand};
 
-pub const OPENCODE_PIN: &str = "2.0.26";
+/// Unique current acceptance baseline, installed separately and explicitly selected.
+pub const OPENCODE_PIN: &str = "2.0.26-libra-native.1";
+pub const OPENCODE_BUILD_ID: &str = "bac21cc4027896b8d1836133c347d20f";
+/// Frozen official ABI/source reference for historical fixtures and template bytes.
+pub const OPENCODE_OFFICIAL_BASE_PIN: &str = "2.0.26";
+/// Official base only; the custom patched tree is identified by its artifact manifest.
 pub const OPENCODE_COMMIT: &str = "9b4ec5714d481559990db0a816d5dec19541a814";
 
 /// Native terminal reasons; shutdown preserves restart continuity.

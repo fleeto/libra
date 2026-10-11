@@ -814,6 +814,31 @@ fn opencode_docs_pin_current_parser_and_legacy_alias_policy() {
 }
 
 #[test]
+fn opencode_docs_distinguish_private_acceptance_from_historical_source_and_native_proof() {
+    for (label, document) in [
+        ("tracing/agent.md", AGENT_DOC),
+        ("commands/agent.md", AGENT_CMD_DOC_EN),
+        ("commands/zh-CN/agent.md", AGENT_CMD_DOC_ZH),
+        ("COMPATIBILITY.md", COMPATIBILITY_DOC),
+    ] {
+        for required in [
+            "2.0.26-libra-native.1",
+            "bac21cc4027896b8d1836133c347d20f",
+            "547c36eb928da163ef61d019bad669860d519f2da0b67737c9a3920e831c9196",
+            "187635570",
+            "9b4ec5714d481559990db0a816d5dec19541a814",
+            "native-origin-build.json",
+            "LIBRA_OPENCODE_NATIVE_BINARY",
+            "SOURCE_READY_GO",
+            "UNPROVEN",
+            "volcengine-agent-plan/glm-5.3-flash",
+        ] {
+            assert_contains(document, label, required);
+        }
+    }
+}
+
+#[test]
 fn opencode_docs_disclose_current_template_upgrade_and_bounds() {
     for (label, doc) in [
         ("tracing/agent.md", AGENT_DOC),

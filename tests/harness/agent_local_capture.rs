@@ -95,7 +95,128 @@ pub const OPENCODE_SMOKE_PROMPT: &str = "In the current project, create exactly 
 #[cfg(target_os = "macos")]
 pub const OPENCODE_SMOKE_MODEL: &str = "volcengine-agent-plan/glm-5.3-flash";
 #[cfg(target_os = "macos")]
-const OPENCODE_SMOKE_VERSION: &str = "opencode v2.0.26";
+pub const OPENCODE_NATIVE_BINARY_ENV: &str = "LIBRA_OPENCODE_NATIVE_BINARY";
+
+/// Data-only acceptance check, never issuer registration or native archive proof.
+#[cfg(target_os = "macos")]
+pub fn opencode_acceptance_identity(version: &str, digest: &str, bytes: u64) -> Result<(), String> {
+    use libra::internal::ai::{
+        hooks::providers::opencode::events::{OPENCODE_BUILD_ID, OPENCODE_PIN},
+        observed_agents::native_origin::approved_build,
+    };
+    if version != format!("opencode v{OPENCODE_PIN}") {
+        return Err(format!(
+            "OpenCode version differs from the current private acceptance baseline {OPENCODE_PIN}; explicitly select the reviewed private installation"
+        ));
+    }
+    let build = approved_build::lookup(OPENCODE_PIN, OPENCODE_BUILD_ID, digest)
+        .map_err(|_| "OpenCode build differs from the reviewed private artifact; use its unchanged separate installation".to_string())?;
+    if bytes != build.identity().binary_bytes {
+        return Err("OpenCode binary size differs from the reviewed private artifact; use its unchanged separate installation".into());
+    }
+    Ok(())
+}
+
+/// No PATH/global fallback for current macOS acceptance. Reject drift before
+/// login or any model command; this does not enroll or activate an issuer.
+#[cfg(target_os = "macos")]
+pub fn opencode_acceptance_binary(selected: Option<&Path>) -> Result<PathBuf, String> {
+    use libra::internal::ai::{
+        hooks::providers::opencode::events::OPENCODE_PIN, observed_agents::trust,
+    };
+    let selected = selected.ok_or_else(|| {
+        format!("set {OPENCODE_NATIVE_BINARY_ENV} to the reviewed separate private opencode binary before macOS acceptance")
+    })?;
+    if !selected.is_absolute() {
+        return Err(format!(
+            "{OPENCODE_NATIVE_BINARY_ENV} must be an absolute private binary path"
+        ));
+    }
+    let canonical = selected.canonicalize().map_err(|_| {
+        "selected private OpenCode binary is missing; check the separate installation".to_string()
+    })?;
+    let meta = fs::metadata(&canonical)
+        .map_err(|_| "cannot inspect the selected private OpenCode binary".to_string())?;
+    if !meta.is_file()
+        || canonical.file_name() != Some(std::ffi::OsStr::new("opencode"))
+        || meta.permissions().mode() & 0o022 != 0
+        || meta.permissions().mode() & 0o111 == 0
+    {
+        return Err(
+            "select a protected executable named opencode in the reviewed private installation"
+                .into(),
+        );
+    }
+    opencode_child_path(&canonical, std::ffi::OsStr::new(""))?;
+    // Refuse unexpected sizes before hashing an unbounded operator-selected file.
+    let expected: serde_json::Value = serde_json::from_str(include_str!(
+        "../fixtures/agent_transcripts/opencode/native-origin-build.json"
+    ))
+    .map_err(|_| {
+        "private acceptance descriptor is invalid; repair the test baseline".to_string()
+    })?;
+    if expected["binary_bytes"].as_u64() != Some(meta.len()) {
+        return Err("OpenCode binary size differs from the reviewed private artifact; use its unchanged separate installation".into());
+    }
+    trust::ensure_parent_not_world_writable(&canonical).map_err(|_| {
+        "selected private OpenCode parent is writable; move it to a protected installation"
+            .to_string()
+    })?;
+    let measured = trust::compute_provenance(&canonical).map_err(|_| {
+        "cannot measure the selected private OpenCode binary; keep acceptance blocked".to_string()
+    })?;
+    opencode_acceptance_identity(
+        &format!("opencode v{OPENCODE_PIN}"),
+        &measured.sha256,
+        meta.len(),
+    )?;
+    Ok(measured.canonical_path)
+}
+
+/// Keep every capture/export child on the same explicit installation.
+#[cfg(target_os = "macos")]
+pub fn opencode_child_path(
+    binary: &Path,
+    inherited: &std::ffi::OsStr,
+) -> Result<std::ffi::OsString, String> {
+    let parent = binary
+        .parent()
+        .ok_or_else(|| "private OpenCode binary has no installation directory".to_string())?;
+    std::env::join_paths(std::iter::once(parent.to_owned()).chain(std::env::split_paths(inherited)))
+        .map_err(|_| "private OpenCode directory cannot be represented in PATH; use a directory without a colon".into())
+}
+
+/// A read-only version probe has the same process-group timeout as login.
+#[cfg(target_os = "macos")]
+pub fn opencode_version_probe(
+    binary: &Path,
+    raw: &Path,
+    timeout: Duration,
+) -> Result<String, String> {
+    let stdout = raw.join("opencode-version.stdout");
+    let stderr = raw.join("opencode-version.stderr");
+    let mut command = Command::new(binary);
+    command.arg("--version");
+    let result = run_child_with_timeout(
+        command,
+        &stdout,
+        &stderr,
+        timeout,
+        "opencode version preflight",
+    );
+    let version = if result.exit_ok && !result.timed_out {
+        fs::read_to_string(&stdout)
+            .ok()
+            .and_then(|text| text.lines().next().map(|line| line.trim().to_owned()))
+    } else {
+        None
+    };
+    let _ = fs::remove_file(stdout);
+    let _ = fs::remove_file(stderr);
+    version.ok_or_else(|| {
+        "private OpenCode --version failed or timed out; no login or model session started".into()
+    })
+}
 
 /// One first-batch agent's local contract (§0.3.2/§0.3.4).
 pub struct AgentSpec {
@@ -250,6 +371,8 @@ pub struct SmokeAgent {
     /// Isolated `$CODEX_HOME` (codex only).
     codex_home: Option<PathBuf>,
     agent_binary: Option<PathBuf>,
+    #[cfg(target_os = "macos")]
+    opencode_path: Option<std::ffi::OsString>,
     timeout: Duration,
     keep: bool,
     summary: serde_json::Map<String, Value>,
@@ -302,6 +425,8 @@ impl SmokeAgent {
             libra_sha256,
             codex_home: None,
             agent_binary: None,
+            #[cfg(target_os = "macos")]
+            opencode_path: None,
             timeout,
             keep,
             summary,
@@ -314,39 +439,74 @@ impl SmokeAgent {
     /// version string, login boolean + exit code).
     pub fn preflight(&mut self) -> Preflight {
         self.stage("preflight");
-        let Some(binary) = which(self.spec.binary) else {
-            return Preflight::Blocked(format!(
-                "'{}' not found on PATH (install it or drop it from {SET_ENV})",
-                self.spec.binary
-            ));
+        let binary = match self.selected_binary() {
+            Ok(binary) => binary,
+            Err(reason) => return Preflight::Blocked(reason),
         };
         self.summary.insert(
             "binary_path".into(),
             json!(normalize_home(&binary.display().to_string())),
         );
 
-        let version = Command::new(&binary)
-            .arg("--version")
-            .stdin(Stdio::null())
-            .output()
-            .ok()
-            .filter(|out| out.status.success())
-            .map(|out| {
-                String::from_utf8_lossy(&out.stdout)
-                    .lines()
-                    .next()
-                    .unwrap_or_default()
-                    .trim()
-                    .to_string()
-            });
+        #[cfg(target_os = "macos")]
+        let native_version = if self.spec.slug == "opencode" {
+            let inherited = std::env::var_os("PATH").unwrap_or_default();
+            match opencode_child_path(&binary, &inherited) {
+                Ok(path) => self.opencode_path = Some(path),
+                Err(reason) => return Preflight::Blocked(reason),
+            }
+            match opencode_version_probe(&binary, &self.raw, Duration::from_secs(30)) {
+                Ok(version) => Some(version),
+                Err(reason) => return Preflight::Blocked(reason),
+            }
+        } else {
+            None
+        };
+        #[cfg(not(target_os = "macos"))]
+        let native_version: Option<String> = None;
+        let version = native_version.or_else(|| {
+            Command::new(&binary)
+                .arg("--version")
+                .stdin(Stdio::null())
+                .output()
+                .ok()
+                .filter(|out| out.status.success())
+                .map(|out| {
+                    String::from_utf8_lossy(&out.stdout)
+                        .lines()
+                        .next()
+                        .unwrap_or_default()
+                        .trim()
+                        .to_string()
+                })
+        });
         let Some(version) = version else {
             return Preflight::Blocked(format!("'{} --version' failed", self.spec.binary));
         };
         #[cfg(target_os = "macos")]
-        if self.spec.slug == "opencode" && version != OPENCODE_SMOKE_VERSION {
-            return Preflight::Blocked(format!(
-                "OpenCode version differs from the current smoke baseline {OPENCODE_SMOKE_VERSION}"
-            ));
+        if self.spec.slug == "opencode" {
+            let meta =
+                match fs::metadata(&binary) {
+                    Ok(meta) => meta,
+                    Err(_) => return Preflight::Blocked(
+                        "selected private OpenCode binary disappeared before version validation"
+                            .into(),
+                    ),
+                };
+            let measured = match libra::internal::ai::observed_agents::trust::compute_provenance(&binary) {
+                Ok(measured) => measured,
+                Err(_) => return Preflight::Blocked("cannot remeasure private OpenCode after its version probe; no login or model session started".into()),
+            };
+            let digest = measured.sha256;
+            if let Err(reason) = opencode_acceptance_identity(&version, &digest, meta.len()) {
+                return Preflight::Blocked(reason);
+            }
+            self.summary
+                .insert("native_acceptance_binary_sha256".into(), json!(digest));
+            self.summary.insert(
+                "native_acceptance_scope".into(),
+                json!("reviewed private binary; source mechanism only, not native archive GO"),
+            );
         }
         self.summary.insert("version".into(), json!(version));
 
@@ -364,6 +524,9 @@ impl SmokeAgent {
         // exit code enter the evidence.
         let mut login = Command::new(&binary);
         login.args(self.spec.login_args).stdin(Stdio::null());
+        for (key, value) in self.extra_env() {
+            login.env(key, value);
+        }
         #[cfg(target_os = "macos")]
         if self.spec.slug == "opencode" {
             configure_opencode_project(&mut login, &self.repo);
@@ -427,6 +590,20 @@ impl SmokeAgent {
         Preflight::Ready
     }
 
+    fn selected_binary(&self) -> Result<PathBuf, String> {
+        #[cfg(target_os = "macos")]
+        if self.spec.slug == "opencode" {
+            let selected = std::env::var_os(OPENCODE_NATIVE_BINARY_ENV).map(PathBuf::from);
+            return opencode_acceptance_binary(selected.as_deref());
+        }
+        which(self.spec.binary).ok_or_else(|| {
+            format!(
+                "'{}' not found on PATH (install it or drop it from {SET_ENV})",
+                self.spec.binary
+            )
+        })
+    }
+
     /// Isolated `$CODEX_HOME`: `auth.json` copy (0600) + `config.toml`
     /// with Libra-managed `[hooks.state.*]` sections stripped. Never
     /// writes to the real `~/.codex`.
@@ -463,11 +640,18 @@ impl SmokeAgent {
     /// Extra env for every `libra` / agent child in this smoke (codex gets
     /// the isolated `CODEX_HOME` on all of them, so install, doctor and
     /// the hook processes spawned by `codex exec` agree on one home).
-    fn extra_env(&self) -> Vec<(String, String)> {
-        match &self.codex_home {
-            Some(home) => vec![("CODEX_HOME".to_string(), home.display().to_string())],
-            None => Vec::new(),
+    fn extra_env(&self) -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
+        let mut values = Vec::new();
+        if let Some(home) = &self.codex_home {
+            values.push(("CODEX_HOME".into(), home.as_os_str().to_owned()));
         }
+        #[cfg(target_os = "macos")]
+        if self.spec.slug == "opencode"
+            && let Some(path) = &self.opencode_path
+        {
+            values.push(("PATH".into(), path.clone()));
+        }
+        values
     }
 
     /// Run the pinned libra binary inside the smoke repo.

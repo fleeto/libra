@@ -2653,3 +2653,33 @@ JSON retains `slug` and `removed` (`removed` means an exporter trust row was rem
 If combined untrust refuses because the registry is damaged, suspend exporter access with `libra config unset agent.trust.opencode`. This removes binary trust only and preserves the registry, including all tombstones. A still-active issuer can regain permission after the same approved binary is explicitly retrusted. Repair the registry while preserving its records, then successfully run combined `libra agent rpc untrust opencode` for permanent native revocation.
 
 Automatic provenance revalidation after an unreadable or changed binary or withdrawal of its trusted directory still removes only exporter trust. Native admission pauses while that trust is absent or mismatched; it leaves the issuer registry unchanged. Explicitly trusting the same reviewed build again can restore an active issuer that was never explicitly revoked. Ordinary binary trust never restores a verify-only or revoked issuer. Re-registering an old issuer is refused: rotation requires a fresh independent key. Registration/revocation do not rewrite historical receipts, private installation descriptors or immutable artifacts. Successful lifecycle operations do not prove native field origin; unproven content stays partial.
+
+
+### Current private OpenCode acceptance baseline (NPR-18)
+
+The unique macOS arm64 acceptance build is `2.0.26-libra-native.1`, build
+`bac21cc4027896b8d1836133c347d20f`, SHA-256
+`547c36eb928da163ef61d019bad669860d519f2da0b67737c9a3920e831c9196`
+and 187635570 bytes. It is based on official OpenCode `2.0.26` commit
+`9b4ec5714d481559990db0a816d5dec19541a814`. That commit identifies the official
+base; the separate source, patch, lock and build-input digests identify the
+patched build. The public `native-origin-build.json` descriptor contains those
+reviewed identities and no installation policy, issuer or private key.
+
+Set `LIBRA_OPENCODE_NATIVE_BINARY` to the absolute path of that independently
+installed private `opencode` before macOS local capture acceptance. The harness
+requires the reviewed version, build digest and size before login or any model
+request, bounds the version and login probes to 30 seconds, and puts the same
+private binary directory first in each capture/export child's PATH. Missing
+opt-in or drift fails the gate; it never falls back to global OpenCode.
+The official global installation and existing observer ABI remain separate.
+
+NPR-12's SOURCE_READY_GO covers this reviewed darwin-arm64 build and the current
+OpenAI Responses transport mechanism. The existing official source record,
+event/export fixtures and synthetic receipt/signature vectors remain historical
+and unchanged. Source A is UNPROVEN: deterministic tests, a version string,
+registration and this descriptor do not prove real native provider fields or
+permit reasoning archival. Failed readiness or quota gates stay partial; the
+only authorized paid smoke model is `volcengine-agent-plan/glm-5.3-flash`, with
+no alternate-model fallback. This card makes no new model calls. Linux local
+functional acceptance remains with the operator.

@@ -6,14 +6,18 @@ use libra::internal::ai::hooks::{
     SessionHookEnvelope,
     providers::{
         opencode::events::{
-            OPENCODE_COMMIT, OPENCODE_DEPRECATED_ALIASES, OPENCODE_FILTERED_STATUSES,
-            OPENCODE_HOOK_EVENT_SPECS, OPENCODE_IDLE_STATUS, OPENCODE_LEGACY_EVENT_SPECS,
-            OPENCODE_PIN, OPENCODE_TERMINAL_INTERRUPTION_REASONS, OpenCodeForwarding,
+            OPENCODE_BUILD_ID, OPENCODE_COMMIT, OPENCODE_DEPRECATED_ALIASES,
+            OPENCODE_FILTERED_STATUSES, OPENCODE_HOOK_EVENT_SPECS, OPENCODE_IDLE_STATUS,
+            OPENCODE_LEGACY_EVENT_SPECS, OPENCODE_OFFICIAL_BASE_PIN, OPENCODE_PIN,
+            OPENCODE_TERMINAL_INTERRUPTION_REASONS, OpenCodeForwarding,
         },
         opencode_provider,
     },
 };
 use serde_json::Value;
+
+#[cfg(unix)]
+mod harness;
 
 const FIXTURE: &str = include_str!("fixtures/agent_transcripts/opencode/hook_events.json");
 const MANIFEST: &str = include_str!("fixtures/agent_transcripts/opencode/MANIFEST.md");
@@ -49,13 +53,16 @@ fn declared<'a>(text: &'a str, prefix: &str) -> Vec<&'a str> {
 fn source_record_matches_fixture_manifest() {
     let fixture: Value = serde_json::from_str(FIXTURE).expect("valid synthetic fixture");
     for document in [source_record(), MANIFEST] {
-        assert_eq!(declared(document, "opencode_pin: "), [OPENCODE_PIN]);
+        assert_eq!(
+            declared(document, "opencode_pin: "),
+            [OPENCODE_OFFICIAL_BASE_PIN]
+        );
         assert_eq!(declared(document, "opencode_commit: "), [OPENCODE_COMMIT]);
         for stale in ["1.17.13", "1.18.29"] {
             assert!(!document.contains(stale), "mixed pin {stale}");
         }
     }
-    assert_eq!(fixture["opencode_pin"], OPENCODE_PIN);
+    assert_eq!(fixture["opencode_pin"], OPENCODE_OFFICIAL_BASE_PIN);
     assert_eq!(fixture["opencode_commit"], OPENCODE_COMMIT);
     assert_eq!(fixture["payload_member"], "data");
     for (prefix, specs, forwarding) in [
@@ -233,6 +240,194 @@ fn fallback_events_are_a_subset_of_advertised_names() {
                     .expect("legacy parse")
                     .kind,
                 spec.kind.expect("kind")
+            );
+        }
+    }
+}
+
+fn native_build_descriptor() -> Value {
+    serde_json::from_str(include_str!(
+        "fixtures/agent_transcripts/opencode/native-origin-build.json"
+    ))
+    .expect("public current artifact descriptor")
+}
+
+#[test]
+fn npr_18_current_pin() {
+    use libra::internal::ai::observed_agents::native_origin::codec;
+    assert_eq!(OPENCODE_PIN, "2.0.26-libra-native.1");
+    assert_eq!(OPENCODE_PIN, codec::PRODUCER_VERSION);
+    let current = native_build_descriptor();
+    assert_eq!(current["producer_version"], OPENCODE_PIN);
+    assert_eq!(current["build_identity"], OPENCODE_BUILD_ID);
+    assert!(
+        current["source_ready_audit"]
+            .as_str()
+            .unwrap()
+            .contains("single Claude PASS")
+    );
+}
+
+#[test]
+fn npr_18_base_truth() {
+    assert_eq!(OPENCODE_OFFICIAL_BASE_PIN, "2.0.26");
+    assert_eq!(OPENCODE_COMMIT, "9b4ec5714d481559990db0a816d5dec19541a814");
+    let current = native_build_descriptor();
+    assert_eq!(current["official_base_version"], OPENCODE_OFFICIAL_BASE_PIN);
+    assert_eq!(current["official_base_commit"], OPENCODE_COMMIT);
+    assert_eq!(current["official_base_is_patched_source_commit"], false);
+    assert_ne!(current["source_archive_sha256"], OPENCODE_COMMIT);
+    assert_eq!(
+        declared(source_record(), "opencode_pin: "),
+        [OPENCODE_OFFICIAL_BASE_PIN]
+    );
+    assert_eq!(
+        declared(source_record(), "opencode_commit: "),
+        [OPENCODE_COMMIT]
+    );
+}
+
+#[test]
+fn npr_18_fixture_history() {
+    use sha2::{Digest, Sha256};
+    let frozen: &[(&str, &str)] = &[
+        (
+            include_str!("fixtures/agent_transcripts/opencode/hook_events.json"),
+            "20751ac63ef1c5e98acd262f4a7411d14d72e1bf5482d404b0ddbbbfa4edb564",
+        ),
+        (
+            include_str!("fixtures/agent_transcripts/opencode.json"),
+            "4a8003af087c5c485f611275290b34c116f314a13bb6c4a545b8c0c51cd5ce05",
+        ),
+        (
+            include_str!("fixtures/agent_transcripts/reasoning/opencode.json"),
+            "4750cff90cead1a31f79bc484bc0df180640c31946aa413b049250d2b410af8e",
+        ),
+        (
+            include_str!("fixtures/agent_transcripts/native_origin_receipt_v1.json"),
+            "9bea0dd73736dfa3ce7544921ef7c7286c1adf30463b0d2d913b54f5e8e1386b",
+        ),
+        (
+            include_str!("fixtures/agent_transcripts/native_origin_signature_v1.json"),
+            "d3589b58c490a0937cc69d84f8b124b1674151f1b142c200a95af40779dbdff1",
+        ),
+    ];
+    for (bytes, expected) in frozen {
+        assert_eq!(hex::encode(Sha256::digest(bytes.as_bytes())), *expected);
+    }
+    let fixture: Value = serde_json::from_str(FIXTURE).unwrap();
+    assert_eq!(fixture["opencode_pin"], OPENCODE_OFFICIAL_BASE_PIN);
+    assert_ne!(fixture["opencode_pin"], OPENCODE_PIN);
+    assert!(
+        MANIFEST.contains("historical official") && MANIFEST.contains("native-origin-build.json")
+    );
+}
+
+#[test]
+fn npr_18_descriptor() {
+    use libra::internal::ai::observed_agents::native_origin::approved_build;
+    let current = native_build_descriptor();
+    let build = approved_build::lookup(
+        OPENCODE_PIN,
+        OPENCODE_BUILD_ID,
+        current["binary_sha256"].as_str().unwrap(),
+    )
+    .unwrap();
+    let identity = build.identity();
+    for (key, value) in [
+        ("producer_version", identity.producer_version),
+        ("build_identity", identity.build_identity),
+        ("target", identity.target),
+        ("official_base_commit", identity.official_base_commit),
+        ("source_archive_sha256", identity.source_archive_sha256),
+        ("source_manifest_sha256", identity.source_manifest_sha256),
+        ("patch_sha256", identity.patch_sha256),
+        ("patch_manifest_sha256", identity.patch_manifest_sha256),
+        ("lock_sha256", identity.lock_sha256),
+        ("build_inputs_sha256", identity.build_inputs_sha256),
+        ("bun_version", identity.bun_version),
+        ("bun_binary_sha256", identity.bun_binary_sha256),
+        ("review_raw_sha256", identity.review_raw_sha256),
+    ] {
+        assert_eq!(current[key], value, "artifact identity {key}");
+    }
+    assert_eq!(current["binary_bytes"], identity.binary_bytes);
+    assert_eq!(current["native_GO"], false);
+    for key in [
+        "issuer",
+        "public_key",
+        "private_key",
+        "policy_digest",
+        "installation_path",
+        "libra_command_path",
+    ] {
+        assert!(
+            current.get(key).is_none(),
+            "no per-install authority or secrets in public descriptor"
+        );
+    }
+}
+
+#[test]
+fn npr_18_drift() {
+    let current = native_build_descriptor();
+    let good = current["binary_sha256"].as_str().unwrap();
+    #[cfg(target_os = "macos")]
+    {
+        use harness::agent_local_capture::opencode_acceptance_identity;
+        let version = format!("opencode v{OPENCODE_PIN}");
+        let size = current["binary_bytes"].as_u64().unwrap();
+        opencode_acceptance_identity(&version, good, size).unwrap();
+        assert!(opencode_acceptance_identity("opencode v2.0.26", good, size).is_err());
+        assert!(
+            opencode_acceptance_identity("opencode v2.0.27-libra-native.1", good, size).is_err()
+        );
+        assert!(opencode_acceptance_identity(&version, &"ff".repeat(32), size).is_err());
+        assert!(opencode_acceptance_identity(&version, good, size + 1).is_err());
+    }
+    #[cfg(not(target_os = "macos"))]
+    assert!(
+        !good.is_empty(),
+        "public descriptor only; private runtime acceptance macOS, Linux user-later"
+    );
+}
+
+#[test]
+fn npr_18_opt_in() {
+    let current = native_build_descriptor();
+    assert_eq!(current["opt_in_env"], "LIBRA_OPENCODE_NATIVE_BINARY");
+    #[cfg(target_os = "macos")]
+    {
+        use std::{os::unix::fs::PermissionsExt, path::Path};
+
+        use harness::agent_local_capture::{
+            OPENCODE_NATIVE_BINARY_ENV, opencode_acceptance_binary,
+        };
+        assert_eq!(OPENCODE_NATIVE_BINARY_ENV, current["opt_in_env"]);
+        assert!(
+            opencode_acceptance_binary(None)
+                .unwrap_err()
+                .contains(OPENCODE_NATIVE_BINARY_ENV)
+        );
+        assert!(opencode_acceptance_binary(Some(Path::new("relative/opencode"))).is_err());
+        let temp = tempfile::tempdir().unwrap();
+        let binary = temp.path().join("opencode");
+        std::fs::write(&binary, b"synthetic binary; must not be executed").unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(opencode_acceptance_binary(Some(&binary)).is_err());
+        if let Ok(actual) = std::env::var("LIBRA_NATIVE_TEST_PRODUCER") {
+            let selected = opencode_acceptance_binary(Some(Path::new(&actual))).unwrap();
+            assert_eq!(selected, std::fs::canonicalize(actual).unwrap());
+            let raw = tempfile::tempdir().unwrap();
+            let version = harness::agent_local_capture::opencode_version_probe(
+                &selected,
+                raw.path(),
+                std::time::Duration::from_secs(30),
+            )
+            .unwrap();
+            assert_eq!(version, format!("opencode v{OPENCODE_PIN}"));
+            eprintln!(
+                "NPR18 actual separate approved private binary selected/read-only measured; no model call or issuer admission"
             );
         }
     }

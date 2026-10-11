@@ -939,8 +939,8 @@ async fn clean(args: ReviewCleanArgs, output: &OutputConfig) -> CliResult<()> {
         (Some(run_id), false) => {
             // A readable, non-terminal state means the run may still be
             // live — deleting its directory under a running engine would
-            // corrupt the run wire. Unreadable state is exactly the case
-            // clean exists for, so it stays cleanable.
+            // corrupt the run wire. Unreadable state is cleanable only when
+            // the store proves a same-root own-kind terminal manifest.
             if let Ok(Some(state)) = store.load_state(run_id)
                 && !state.is_terminal()
             {
@@ -978,8 +978,8 @@ async fn clean(args: ReviewCleanArgs, output: &OutputConfig) -> CliResult<()> {
                 .map(|run| run.run_id.clone())
                 .collect();
             let removed = if running.is_empty() {
-                // Nothing live: clean_all also sweeps corrupt/foreign
-                // directories a per-run walk would miss.
+                // Nothing live: the store still qualifies every bulk candidate;
+                // foreign, corrupt and unfinished runs are never swept.
                 store
                     .clean_all()
                     .map_err(|e| map_store_error("failed to remove review run directories", e))?

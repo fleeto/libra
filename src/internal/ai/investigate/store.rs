@@ -22,16 +22,24 @@ use std::{
     fs::{self, File},
     io::{self},
     path::{Path, PathBuf},
+    sync::Arc,
+    time::{Duration, Instant},
 };
 
 use serde::{Deserialize, Serialize};
 
-use crate::internal::ai::review::store::{AGENT_FINDINGS_OTYPE, read_json_opt, utc_timestamp};
 // The run-id / reviewer-name validators and the redaction summary are
 // shared verbatim with the review store (same path-traversal guard, same
 // filesystem-safe log naming, same redaction accounting).
 pub use crate::internal::ai::review::store::{
     RedactionReportSummary, is_valid_run_id, sanitize_reviewer_name,
+};
+use crate::internal::ai::{
+    checkpoint_input::{
+        CheckpointInputIoError, RunMetadataBytes, ScopedIoBudget, cleanup_checkpoint_input,
+        open_scoped_run_root, read_run_metadata,
+    },
+    review::store::{AGENT_FINDINGS_OTYPE, read_json_opt, utc_timestamp},
 };
 
 /// `manifest.json` schema version (E8-libra manifest contract).
@@ -825,18 +833,103 @@ impl InvestigateRunStore {
         })
     }
 
-    /// Remove one run directory. `Ok(false)` when it did not exist.
+    /// Remove an own-kind terminal run. `Ok(false)` means it is absent.
+    /// Investigate callers must retain the run lock through this operation.
     pub fn clean_run(&self, run_id: &str) -> io::Result<bool> {
-        let dir = self.run_dir(run_id)?;
-        match fs::remove_dir_all(&dir) {
-            Ok(()) => Ok(true),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
-            Err(error) => Err(error),
-        }
+        self.clean_run_checked(run_id, false)
     }
 
-    /// Remove every investigate-kind run directory; returns how many were
-    /// removed. Review runs sharing the directory are left untouched.
+    fn clean_run_checked(&self, run_id: &str, bulk: bool) -> io::Result<bool> {
+        let budget = ScopedIoBudget {
+            deadline: Instant::now() + Duration::from_secs(5),
+            cancelled: Arc::new(|| false),
+        };
+        self.clean_run_with_budget(run_id, bulk, &budget)
+    }
+
+    fn clean_run_with_budget(
+        &self,
+        run_id: &str,
+        bulk: bool,
+        budget: &ScopedIoBudget,
+    ) -> io::Result<bool> {
+        let dir = self.run_dir(run_id)?;
+        let runs_root = self.runs_root();
+        let trusted_root = if runs_root.is_absolute() {
+            runs_root
+        } else {
+            std::env::current_dir()?.join(runs_root)
+        };
+        let root = match open_scoped_run_root(&trusted_root, run_id, budget) {
+            Ok(root) => root,
+            // The immutable Unix anchor reports absence as this typed refusal;
+            // Windows reports NotFound. Preserve the existing false/0 contract.
+            Err(CheckpointInputIoError::Refused {
+                reason: "a missing trusted root or run directory",
+            }) => return Ok(false),
+            Err(CheckpointInputIoError::Io { source, .. })
+                if source.kind() == io::ErrorKind::NotFound =>
+            {
+                return Ok(false);
+            }
+            Err(error) => return Err(io::Error::other(error)),
+        };
+        let mut metadata = read_run_metadata(&root, budget).map_err(io::Error::other)?;
+        if !cleanup_metadata_is_terminal(&metadata, run_id, bulk) {
+            if bulk {
+                return Ok(false);
+            }
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!(
+                    "investigate run '{run_id}' is not proven to be a finished investigate run; \
+                     keep it, inspect state.json and manifest.json, and cancel an unfinished \
+                     run with `libra investigate cancel {run_id}` before retrying"
+                ),
+            ));
+        }
+        // Public investigate clean already holds its original run lock. The
+        // direct library bulk entry acquires its own lock after lifecycle proof.
+        let _bulk_lock = if bulk {
+            match self.try_lock_run(run_id) {
+                Ok(lock) => Some(lock),
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(false),
+                Err(error) => return Err(error),
+            }
+        } else {
+            None
+        };
+        // Drop metadata bodies before taking the second bounded snapshot.
+        // The immutable helper owns all no-follow reads and input cleanup.
+        metadata.state = None;
+        metadata.manifest = None;
+        cleanup_checkpoint_input(&root, budget).map_err(io::Error::other)?;
+        let current = read_run_metadata(&root, budget).map_err(io::Error::other)?;
+        if metadata.root_identity != current.root_identity
+            || metadata.state_identity != current.state_identity
+            || metadata.manifest_identity != current.manifest_identity
+        {
+            return Err(io::Error::other(
+                "run lifecycle metadata changed during input cleanup; keep the run and inspect concurrent changes before retrying",
+            ));
+        }
+        if Instant::now() >= budget.deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "run cleanup reached its deadline; keep the run and inspect its bounded input before retrying",
+            ));
+        }
+        fs::remove_dir_all(&dir).map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!("failed to remove finished investigate run '{run_id}': {error}; inspect filesystem access before retrying"),
+            )
+        })?;
+        Ok(true)
+    }
+
+    /// Remove only readable own-kind terminal runs. Foreign, unfinished and
+    /// corrupt bulk candidates survive; removed counts successful deletions.
     pub fn clean_all(&self) -> io::Result<usize> {
         let entries = match fs::read_dir(self.runs_root()) {
             Ok(read_dir) => read_dir,
@@ -845,20 +938,74 @@ impl InvestigateRunStore {
         };
         let mut removed = 0usize;
         for entry in entries {
-            let path = entry?.path();
-            if !path.is_dir() {
+            let entry = entry?;
+            let file_type = entry.file_type()?;
+            if !file_type.is_dir() && !file_type.is_symlink() {
                 continue;
             }
-            // Only sweep investigate runs; leave review runs alone.
-            match read_json_opt::<InvestigateRunState>(&path.join("state.json")) {
-                Ok(Some(state)) if state.kind == INVESTIGATE_RUN_KIND => {
-                    fs::remove_dir_all(&path)?;
-                    removed += 1;
-                }
-                _ => continue,
+            let name = entry.file_name();
+            let Some(run_id) = name.to_str().filter(|id| is_valid_run_id(id)) else {
+                continue;
+            };
+            if self.clean_run_checked(run_id, true)? {
+                removed += 1;
             }
         }
         Ok(removed)
+    }
+}
+
+/// A parseable foreign, incomplete or nonterminal document vetoes cleanup.
+/// Only a specifically requested corrupt/missing state may use a valid
+/// same-root own-kind terminal manifest; bulk never sweeps that fallback.
+fn cleanup_metadata_is_terminal(metadata: &RunMetadataBytes, run_id: &str, bulk: bool) -> bool {
+    let state = match metadata.state.as_deref() {
+        Some(bytes) if serde_json::from_slice::<serde::de::IgnoredAny>(bytes).is_ok() => {
+            match serde_json::from_slice::<InvestigateRunState>(bytes) {
+                Ok(state) => Some(state),
+                Err(_) => return false,
+            }
+        }
+        _ => None,
+    };
+    if bulk && state.is_none() {
+        return false;
+    }
+    let manifest = match metadata.manifest.as_deref() {
+        Some(bytes) => match serde_json::from_slice::<InvestigateManifest>(bytes) {
+            Ok(manifest) => Some(manifest),
+            Err(_) => return false,
+        },
+        None => None,
+    };
+    if let Some(state) = &state
+        && (state.schema_version != INVESTIGATE_MANIFEST_SCHEMA_VERSION
+            || state.run_id != run_id
+            || state.kind != INVESTIGATE_RUN_KIND
+            || !state.is_terminal())
+    {
+        return false;
+    }
+    if let Some(manifest) = &manifest
+        && (manifest.schema_version != INVESTIGATE_MANIFEST_SCHEMA_VERSION
+            || manifest.run_id != run_id
+            || manifest.kind != INVESTIGATE_RUN_KIND)
+    {
+        return false;
+    }
+    match (state, manifest) {
+        (Some(state), Some(manifest)) => {
+            // Finalization writes terminal state before publishing the manifest.
+            // An interrupted second write leaves None, which is not a conflict
+            // with this already-proved own-kind terminal state.
+            (manifest.terminal_state.is_none() || state.terminal_state == manifest.terminal_state)
+                && state.starting_sha == manifest.starting_sha
+                && state.agents == manifest.agents
+                && state.topic == manifest.target_scope
+        }
+        (Some(_), None) => true,
+        (None, Some(manifest)) => manifest.terminal_state.is_some(),
+        (None, None) => false,
     }
 }
 
@@ -935,7 +1082,10 @@ mod tests {
 
     fn store() -> (tempfile::TempDir, InvestigateRunStore) {
         let dir = tempfile::tempdir().expect("tempdir");
-        let store = InvestigateRunStore::new(dir.path().join(".libra").join("sessions"));
+        // macOS tempdir may spell /var through a system symlink. The
+        // fixture uses its physical root; production no-follow is unchanged.
+        let physical = fs::canonicalize(dir.path()).expect("physical temp root");
+        let store = InvestigateRunStore::new(physical.join(".libra").join("sessions"));
         (dir, store)
     }
 
@@ -1247,6 +1397,12 @@ mod tests {
         store
             .create_run("run-y", "t", &["codex".into()], 4, 1, "sha")
             .expect("create");
+        assert!(store.mark_cancelled("run-y").expect("finish run-y"));
+        store
+            .create_run("keep-paused", "t", &["codex".into()], 4, 1, "sha")
+            .expect("create nonterminal survivor");
+        let paused_path = store.state_path("keep-paused").unwrap();
+        let paused_bytes = fs::read(&paused_path).unwrap();
         // A review-kind dir must survive clean_all.
         let review_dir = store.runs_root().join("keep-review");
         fs::create_dir_all(&review_dir).expect("review dir");
@@ -1256,7 +1412,276 @@ mod tests {
         )
         .expect("write");
         assert_eq!(store.clean_all().expect("clean all"), 1);
+        assert_eq!(fs::read(&paused_path).unwrap(), paused_bytes);
+        assert_eq!(store.clean_all().expect("only nonterminal survivors"), 0);
+        assert_eq!(fs::read(&paused_path).unwrap(), paused_bytes);
         assert!(review_dir.exists(), "review runs must not be swept");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fix_rg_scoped_03_cleanup_boundary() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        fn make_terminal(s: &InvestigateRunStore, id: &str) {
+            s.create_run(id, "t", &["codex".into()], 4, 1, "sha")
+                .unwrap();
+            assert!(s.mark_cancelled(id).unwrap());
+        }
+        fn readonly_input(root: &Path) -> PathBuf {
+            let input = root.join("checkpoint-input");
+            fs::create_dir_all(input.join("nested")).unwrap();
+            fs::write(input.join("nested/payload"), b"captured ordinary").unwrap();
+            fs::set_permissions(
+                input.join("nested/payload"),
+                fs::Permissions::from_mode(0o444),
+            )
+            .unwrap();
+            fs::set_permissions(input.join("nested"), fs::Permissions::from_mode(0o555)).unwrap();
+            fs::set_permissions(&input, fs::Permissions::from_mode(0o555)).unwrap();
+            input
+        }
+        let (temp, store) = store();
+        store
+            .create_run("unfinished", "t", &["codex".into()], 4, 1, "sha")
+            .unwrap();
+        let paused = store.state_path("unfinished").unwrap();
+        let bytes = fs::read(&paused).unwrap();
+        assert_eq!(
+            store.clean_run("unfinished").unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        assert_eq!(store.clean_all().unwrap(), 0);
+        assert_eq!(fs::read(&paused).unwrap(), bytes);
+
+        let other = super::super::super::review::store::ReviewRunStore::new(store.sessions_root());
+        other
+            .create_run("foreign", &["codex".into()], "sha", "scope")
+            .unwrap();
+        assert!(other.mark_cancelled("foreign").unwrap());
+        let foreign_state = fs::read(other.state_path("foreign").unwrap()).unwrap();
+        assert!(store.clean_run("foreign").is_err());
+        assert_eq!(store.clean_all().unwrap(), 0);
+        assert_eq!(
+            fs::read(other.state_path("foreign").unwrap()).unwrap(),
+            foreign_state
+        );
+
+        let outside = temp.path().join("outside");
+        fs::write(&outside, b"outside sentinel").unwrap();
+        fs::set_permissions(&outside, fs::Permissions::from_mode(0o444)).unwrap();
+        make_terminal(&store, "finished");
+        let root = store.run_dir("finished").unwrap();
+        let input = readonly_input(&root);
+        // Fixture construction only; production starts with real readonly input.
+        fs::set_permissions(input.join("nested"), fs::Permissions::from_mode(0o755)).unwrap();
+        symlink(&outside, input.join("nested/outside-link")).unwrap();
+        fs::set_permissions(input.join("nested"), fs::Permissions::from_mode(0o555)).unwrap();
+        assert!(store.clean_run("finished").unwrap());
+        assert!(!root.exists());
+        assert_eq!(fs::read(&outside).unwrap(), b"outside sentinel");
+        assert_eq!(
+            fs::metadata(&outside).unwrap().permissions().mode() & 0o777,
+            0o444
+        );
+        assert!(!store.clean_run("finished").unwrap());
+
+        make_terminal(&store, "corrupt");
+        fs::write(store.state_path("corrupt").unwrap(), b"{ broken state").unwrap();
+        let corrupt_input = readonly_input(&store.run_dir("corrupt").unwrap());
+        assert_eq!(
+            store.clean_all().unwrap(),
+            0,
+            "bulk cannot use corrupt-state fallback"
+        );
+        assert_eq!(
+            fs::metadata(&corrupt_input).unwrap().permissions().mode() & 0o777,
+            0o555
+        );
+        assert!(
+            store.clean_run("corrupt").unwrap(),
+            "specific valid terminal manifest recovery"
+        );
+
+        // Exercise the real first state-write API with the original unfinished
+        // manifest: both direct and library bulk cleanup must remain possible.
+        store
+            .create_run("state-first", "t", &["codex".into()], 4, 1, "sha")
+            .unwrap();
+        assert!(
+            store
+                .update_state("state-first", |state| {
+                    state.terminal_state = Some(InvestigateTerminalState::Cancelled);
+                })
+                .unwrap()
+        );
+        assert!(
+            store
+                .load_manifest("state-first")
+                .unwrap()
+                .unwrap()
+                .terminal_state
+                .is_none()
+        );
+        readonly_input(&store.run_dir("state-first").unwrap());
+        assert_eq!(store.clean_all().unwrap(), 1);
+        store
+            .create_run("state-first-direct", "t", &["codex".into()], 4, 1, "sha")
+            .unwrap();
+        assert!(
+            store
+                .update_state("state-first-direct", |state| {
+                    state.terminal_state = Some(InvestigateTerminalState::Cancelled);
+                })
+                .unwrap()
+        );
+        readonly_input(&store.run_dir("state-first-direct").unwrap());
+        assert!(store.clean_run("state-first-direct").unwrap());
+
+        for (id, field, value) in [
+            ("bad-kind", "kind", serde_json::json!("foreign")),
+            ("bad-id", "run_id", serde_json::json!("different-run")),
+            ("bad-schema", "schema_version", serde_json::json!(99)),
+            (
+                "bad-terminal",
+                "terminal_state",
+                serde_json::json!("quorum"),
+            ),
+        ] {
+            make_terminal(&store, id);
+            let manifest = store.manifest_path(id).unwrap();
+            let mut doc: serde_json::Value =
+                serde_json::from_slice(&fs::read(&manifest).unwrap()).unwrap();
+            doc[field] = value;
+            fs::write(&manifest, serde_json::to_vec(&doc).unwrap()).unwrap();
+            let state_before = fs::read(store.state_path(id).unwrap()).unwrap();
+            let input = readonly_input(&store.run_dir(id).unwrap());
+            assert!(store.clean_run(id).is_err());
+            assert_eq!(store.clean_all().unwrap(), 0);
+            assert_eq!(
+                fs::read(store.state_path(id).unwrap()).unwrap(),
+                state_before
+            );
+            assert_eq!(
+                fs::metadata(&input).unwrap().permissions().mode() & 0o777,
+                0o555
+            );
+            // Test teardown after the refusal has been proved, never a bypass.
+            fs::set_permissions(&input, fs::Permissions::from_mode(0o755)).unwrap();
+            fs::set_permissions(input.join("nested"), fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        make_terminal(&store, "parseable-foreign");
+        fs::write(
+            store.state_path("parseable-foreign").unwrap(),
+            br#"{"kind":"foreign"}"#,
+        )
+        .unwrap();
+        assert!(
+            store.clean_run("parseable-foreign").is_err(),
+            "valid foreign JSON cannot use the own terminal manifest"
+        );
+        assert_eq!(store.clean_all().unwrap(), 0);
+        make_terminal(&store, "deadline");
+        let root = store.run_dir("deadline").unwrap();
+        let input = readonly_input(&root);
+        let expired = ScopedIoBudget {
+            deadline: Instant::now(),
+            cancelled: Arc::new(|| false),
+        };
+        assert!(
+            store
+                .clean_run_with_budget("deadline", false, &expired)
+                .is_err()
+        );
+        assert_eq!(
+            fs::metadata(&input).unwrap().permissions().mode() & 0o777,
+            0o555
+        );
+        assert_eq!(
+            fs::read(input.join("nested/payload")).unwrap(),
+            b"captured ordinary"
+        );
+        assert!(store.clean_run("deadline").unwrap());
+        make_terminal(&store, "locked");
+        let lock = store.try_lock_run("locked").unwrap();
+        assert_eq!(store.clean_all().unwrap(), 0);
+        assert!(store.run_dir("locked").unwrap().exists());
+        drop(lock);
+        assert_eq!(store.clean_all().unwrap(), 1);
+
+        // Root, ancestor and metadata symlinks are refused before input chmod.
+        make_terminal(&store, "linked-target");
+        let target = store.run_dir("linked-target").unwrap();
+        let input = readonly_input(&target);
+        let link = store.run_dir("linked-root").unwrap();
+        symlink(&target, &link).unwrap();
+        assert!(store.clean_run("linked-root").is_err());
+        fs::remove_file(&link).unwrap();
+        let sessions_link = temp.path().join("linked-sessions");
+        symlink(store.sessions_root(), &sessions_link).unwrap();
+        let through_link = InvestigateRunStore::new(&sessions_link);
+        assert!(through_link.clean_run("linked-target").is_err());
+        fs::remove_file(&sessions_link).unwrap();
+        for name in ["state.json", "manifest.json"] {
+            let path = target.join(name);
+            let saved = fs::read(&path).unwrap();
+            fs::remove_file(&path).unwrap();
+            symlink(&outside, &path).unwrap();
+            assert!(store.clean_run("linked-target").is_err());
+            assert_eq!(
+                fs::metadata(&input).unwrap().permissions().mode() & 0o777,
+                0o555
+            );
+            fs::remove_file(&path).unwrap();
+            fs::write(&path, saved).unwrap();
+        }
+        assert!(store.clean_run("linked-target").unwrap());
+
+        make_terminal(&store, "over-metadata");
+        let root = store.run_dir("over-metadata").unwrap();
+        let input = readonly_input(&root);
+        let state_path = store.state_path("over-metadata").unwrap();
+        let state = fs::read(&state_path).unwrap();
+        File::options()
+            .write(true)
+            .open(&state_path)
+            .unwrap()
+            .set_len(64 * 1024 * 1024 + 1)
+            .unwrap();
+        assert!(store.clean_run("over-metadata").is_err());
+        assert_eq!(
+            fs::metadata(&input).unwrap().permissions().mode() & 0o777,
+            0o555
+        );
+        fs::write(&state_path, state).unwrap();
+        assert!(store.clean_run("over-metadata").unwrap());
+
+        make_terminal(&store, "over-input");
+        let root = store.run_dir("over-input").unwrap();
+        let input = root.join("checkpoint-input");
+        fs::create_dir(&input).unwrap();
+        for n in 0..4097 {
+            fs::write(input.join(format!("f-{n:04}")), b"bounded").unwrap();
+        }
+        fs::set_permissions(&input, fs::Permissions::from_mode(0o555)).unwrap();
+        assert!(store.clean_run("over-input").is_err());
+        assert_eq!(
+            fs::metadata(&input).unwrap().permissions().mode() & 0o777,
+            0o555
+        );
+        assert_eq!(fs::read_dir(&input).unwrap().count(), 4097);
+        fs::set_permissions(&input, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::remove_dir_all(&input).unwrap();
+        assert!(store.clean_run("over-input").unwrap());
+        make_terminal(&store, "bulk-finished");
+        readonly_input(&store.run_dir("bulk-finished").unwrap());
+        assert_eq!(store.clean_all().unwrap(), 1);
+        assert!(!store.run_dir("bulk-finished").unwrap().exists());
+        assert_eq!(fs::read(&outside).unwrap(), b"outside sentinel");
+        assert_eq!(
+            fs::metadata(&outside).unwrap().permissions().mode() & 0o777,
+            0o444
+        );
     }
 
     #[test]

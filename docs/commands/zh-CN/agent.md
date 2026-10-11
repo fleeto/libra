@@ -190,6 +190,10 @@ OpenCode 提取对空输入、非法 JSON 和非法 export 形状显式标记
 
 `review --checkpoint <id>` 与 `investigate start --checkpoint <id>` 只把已证明属于普通角色的 checkpoint 文件，以只读形式物化到 `<run_dir>/checkpoint-input/`。每次物化（包括 `investigate continue`）都在清理旧输入之前，按显式仓库 catalog 和 checkpoint manifest/tree 角色复验保存的 spec。受支持的无 manifest wrapped checkpoint 仍可恢复。旧 full-list spec 只有在 closed `reasoning/encrypted/<64 hex>` 条目的路径与 blob id 精确匹配 manifest 和树时才被接受；该条目被排除，不打开其 payload。改写的条目、未知路径、重复路径及普通角色不匹配均拒绝；保存的 id 若不是 blob，或字节的内容哈希不匹配该 id，也在清理之前拒绝。catalog 暂时不可用时，暂停中的 continue 保留原 state 与输入。review 设置阶段超时沿用基础设施错误，取消沿用 cancelled；设置阶段与后续每个 reviewer 的超时预算独立。有界文件操作持续检查实际调用者的取消与绝对期限，所属工作线程结束后才返回。普通 payload 仍为单文件 64 MiB、总量 256 MiB；不新增稳定错误码或保存状态字段。
 
+## Scoped run 清理
+
+`libra review clean` 与 `libra investigate clean` 只删除各自类型的已结束 run。`--run` 和 `--all` 都先核对同一 run 目录内的生命周期 metadata，再处理只读 checkpoint 输入。批量清理保留其他类型、未结束、未知和损坏的 run；`removed` 只统计实际成功删除。指定 run 的 state 损坏或缺失时，只有该 run 自身有效的终态 manifest 能证明 run id、类型及 schema，才允许清理。可解析的其他类型或未结束 state，以及互相冲突的 metadata 都拒绝。`investigate clean` 保留既有 run 锁。有界输入清理拒绝链接根目录、链接 metadata 和超限输入；失败返回可操作错误，不报告删除成功。保留 run，核对提示中的链接、限制或文件系统权限后再重试。清理启动后若 I/O 或取消中断，部分输入可能已删除；失败不表示已经回滚。已经证明属于本类型的终态 state，在先写 state 的结束流程中断、匹配的 manifest 尚无终态标记时，仍允许清理。身份、schema、共有字段或不同的非空终态值冲突继续拒绝。批量资格读取的 I/O、链接或大小限制错误会中断清理，之前已经删除的 run 不会回滚。不新增 flag、保存状态字段或稳定错误码。
+
 ## JSON 输出
 
 支持结构化输出的子命令使用全局 `--json` 和 `--machine` 信封。例如：
@@ -715,3 +719,6 @@ descriptor 不能证明真实 native provider 字段，也不能放行 reasoning
 readiness 或配额失败保持 partial；唯一授权付费 smoke 模型是
 `volcengine-agent-plan/glm-5.3-flash`，不使用其它模型回退。本卡没有新增模型调用，
 Linux 本地功能验收留给使用者。
+
+
+已证明为本类型终态的 state 在 manifest 缺失时仍可清理。review 基础设施失败可能没有 reviewer 结果行，而 manifest 仍保留请求的 reviewer；该受支持形状可以清理。无法解析的 manifest 即使伴随可证明的终态 state 也仍拒绝：保留 run，修复其元数据后再重试。

@@ -1003,3 +1003,33 @@ fn opencode_docs_disclose_extraction_failure_containment() {
         "OpenCode empty/invalid exports are partial with fixed payload-free warnings",
     );
 }
+
+#[test]
+fn scoped_run_cleanup_docs_pin_terminal_and_foreign_protection() {
+    for (label, doc) in [
+        ("commands/agent.md", AGENT_CMD_DOC_EN),
+        ("development/commands/agent.md", AGENT_DEV_DOC),
+        ("development/tracing/agent.md", AGENT_DOC),
+        ("error-codes.md", include_str!("../../docs/error-codes.md")),
+    ] {
+        assert_contains(doc, label, "terminal manifest");
+        assert_contains(doc, label, "foreign");
+        assert_contains(doc, label, "corrupt");
+    }
+    assert_contains(AGENT_CMD_DOC_EN, "EN", "removed");
+    assert_contains(AGENT_CMD_DOC_EN, "EN", "successful deletions");
+    assert_contains(
+        AGENT_CMD_DOC_EN,
+        "EN",
+        "interrupted state-first finalization",
+    );
+    assert_contains(AGENT_CMD_DOC_ZH, "ZH", "manifest 尚无终态标记");
+    assert_contains(AGENT_CMD_DOC_ZH, "ZH", "只统计实际成功删除");
+    assert_contains(AGENT_CMD_DOC_ZH, "ZH", "保留其他类型");
+    assert_contains(AGENT_CMD_DOC_ZH, "ZH", "终态 manifest");
+    assert_contains(
+        COMPATIBILITY_DOC,
+        "COMPATIBILITY",
+        "corrupt-state recovery requires a valid own terminal manifest",
+    );
+}

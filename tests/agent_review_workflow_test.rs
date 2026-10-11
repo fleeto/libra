@@ -1689,3 +1689,462 @@ async fn fix_rg_scoped_02_review_revalidation_setup_stop() {
     assert!(!findings.contains("RAN"), "{findings}");
     assert_no_leaked_workspace(&repo);
 }
+
+/// Actual synthetic binary firstpass completes with genuine 0555 scoped input.
+async fn scoped03_completed_fixture(root: &Path) -> (PathBuf, String, PathBuf) {
+    let repo = init_committed_repo(root);
+    let id = "cafe75d2-4c53-465a-b890-a9f861a50cc7";
+    let metadata = br#"{"schema_version":1,"agent_kind":"claude_code"}"#;
+    let transcript = b"{\"role\":\"user\",\"text\":\"captured turn\"}\n";
+    seed_v1_checkpoint(&repo, id, metadata, transcript).await;
+    let script = stage_fixture(&root.join("fixtures"), "reviewer-success.sh");
+    let bin = root.join("only-synthetic-bin");
+    std::fs::create_dir(&bin).unwrap();
+    let codex = bin.join("codex");
+    std::fs::copy(&script, &codex).unwrap();
+    std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!("{}:/usr/bin:/bin:/usr/sbin:/sbin", bin.display());
+    let output = run_libra(
+        &["--json", "review", "--agent", "codex", "--checkpoint", id],
+        &repo,
+        &[("PATH", &path)],
+    );
+    assert_cli_success(&output, "actual synthetic scoped firstpass");
+    let output: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(output["data"]["terminal_state"], "success");
+    let id = output["data"]["run_id"].as_str().unwrap().to_owned();
+    let run_root = repo.join(".libra/sessions/agent-runs").join(&id);
+    let input = run_root.join("checkpoint-input");
+    assert_eq!(
+        std::fs::metadata(&input).unwrap().permissions().mode() & 0o777,
+        0o555
+    );
+    assert_eq!(
+        std::fs::read(input.join("metadata.json")).unwrap(),
+        metadata
+    );
+    assert_eq!(
+        std::fs::read(input.join("transcript/claude_code")).unwrap(),
+        transcript
+    );
+    assert_no_leaked_workspace(&repo);
+    (repo, id, run_root)
+}
+
+fn scoped03_object_snapshot(repo: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+    fn collect(path: &Path, base: &Path, files: &mut Vec<(PathBuf, Vec<u8>)>) {
+        for entry in std::fs::read_dir(path).unwrap() {
+            let entry = entry.unwrap();
+            if entry.file_type().unwrap().is_dir() {
+                collect(&entry.path(), base, files);
+            } else {
+                files.push((
+                    entry.path().strip_prefix(base).unwrap().to_owned(),
+                    std::fs::read(entry.path()).unwrap(),
+                ));
+            }
+        }
+    }
+    let base = repo.join(".libra/objects");
+    let mut files = Vec::new();
+    collect(&base, &base, &mut files);
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+    files
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fix_rg_scoped_03_completed_review_clean() {
+    let temp = tempfile::tempdir().unwrap();
+    let (repo, id, root) = scoped03_completed_fixture(temp.path()).await;
+    let store = store_for(&repo);
+    store
+        .create_run("keep-own", &["codex".into()], "sha", "scope")
+        .unwrap();
+    let keep = store.state_path("keep-own").unwrap();
+    let keep_bytes = std::fs::read(&keep).unwrap();
+    let objects = scoped03_object_snapshot(&repo);
+    let catalog = std::fs::read(repo.join(".libra/libra.db")).unwrap();
+    let tracked = std::fs::read(repo.join("tracked.txt")).unwrap();
+    let output = run_libra(&["--json", "review", "clean", "--run", &id], &repo, &[]);
+    assert_cli_success(
+        &output,
+        "actual finished readonly scoped clean without chmod",
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["data"]["removed"], 1);
+    assert!(!root.exists());
+    assert_eq!(std::fs::read(&keep).unwrap(), keep_bytes);
+    assert_eq!(scoped03_object_snapshot(&repo), objects);
+    assert_eq!(
+        std::fs::read(repo.join(".libra/libra.db")).unwrap(),
+        catalog
+    );
+    assert_eq!(std::fs::read(repo.join("tracked.txt")).unwrap(), tracked);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fix_rg_scoped_03_clean_all() {
+    let temp = tempfile::tempdir().unwrap();
+    let (repo, _id, root) = scoped03_completed_fixture(temp.path()).await;
+    let store = store_for(&repo);
+    store
+        .create_run("plain-finished", &["codex".into()], "sha", "scope")
+        .unwrap();
+    assert!(store.mark_cancelled("plain-finished").unwrap());
+    store
+        .create_run("corrupt-finished", &["codex".into()], "sha", "scope")
+        .unwrap();
+    assert!(store.mark_cancelled("corrupt-finished").unwrap());
+    let corrupt = store.state_path("corrupt-finished").unwrap();
+    std::fs::write(&corrupt, b"{ not json").unwrap();
+    let unknown = store.runs_root().join("unknown-kind");
+    std::fs::create_dir(&unknown).unwrap();
+    std::fs::write(unknown.join("state.json"), br#"{"kind":"unknown"}"#).unwrap();
+    std::fs::write(unknown.join("findings.md"), b"unknown survivor").unwrap();
+    // Genuinely paused foreign investigate through the actual binary, not a
+    // hand-edited terminal flag. The isolated fake codex emits no conclusion.
+    let silent = stage_fixture(&temp.path().join("fixtures"), "investigator-silent.sh");
+    let codex = temp.path().join("only-synthetic-bin/codex");
+    std::fs::copy(&silent, &codex).unwrap();
+    std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!(
+        "{}:/usr/bin:/bin:/usr/sbin:/sbin",
+        temp.path().join("only-synthetic-bin").display()
+    );
+    let paused = run_libra(
+        &[
+            "--json",
+            "investigate",
+            "start",
+            "--topic",
+            "foreign pause",
+            "--checkpoint",
+            "cafe75d2-4c53-465a-b890-a9f861a50cc7",
+            "--agent",
+            "codex",
+            "--max-turns",
+            "4",
+            "--quorum",
+            "1",
+        ],
+        &repo,
+        &[("PATH", &path)],
+    );
+    assert_cli_success(&paused, "actual foreign investigate firstpass pause");
+    let paused: serde_json::Value = serde_json::from_slice(&paused.stdout).unwrap();
+    assert!(paused["data"]["terminal_state"].is_null());
+    assert_eq!(paused["data"]["pause_reason"], "stalled");
+    let foreign_id = paused["data"]["run_id"].as_str().unwrap().to_owned();
+    let foreign_root = repo.join(".libra/sessions/agent-runs").join(&foreign_id);
+
+    let foreign_state = std::fs::read(foreign_root.join("state.json")).unwrap();
+    let foreign_findings = std::fs::read(foreign_root.join("findings.md")).unwrap();
+    let foreign_input = foreign_root.join("checkpoint-input");
+    let foreign_input_snapshot = foreign_input.exists().then(|| {
+        (
+            std::fs::read(foreign_input.join("metadata.json")).unwrap(),
+            std::fs::metadata(&foreign_input)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+        )
+    });
+    let refused = run_libra(&["review", "clean", "--run", &foreign_id], &repo, &[]);
+    assert_eq!(refused.status.code(), Some(128));
+    assert_eq!(
+        std::fs::read(foreign_root.join("state.json")).unwrap(),
+        foreign_state
+    );
+    let objects = scoped03_object_snapshot(&repo);
+    let output = run_libra(&["--json", "review", "clean", "--all"], &repo, &[]);
+    assert_cli_success(&output, "actual clean all mixed kinds");
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        report["data"]["removed"], 2,
+        "only finished own scoped/plain runs"
+    );
+    assert!(!root.exists());
+    assert!(!store.run_dir("plain-finished").unwrap().exists());
+    assert_eq!(std::fs::read(&corrupt).unwrap(), b"{ not json");
+    assert_eq!(
+        std::fs::read(unknown.join("findings.md")).unwrap(),
+        b"unknown survivor"
+    );
+    assert_eq!(
+        std::fs::read(foreign_root.join("state.json")).unwrap(),
+        foreign_state
+    );
+    assert_eq!(
+        std::fs::read(foreign_root.join("findings.md")).unwrap(),
+        foreign_findings
+    );
+    if let Some((bytes, mode)) = foreign_input_snapshot {
+        assert_eq!(
+            std::fs::read(foreign_input.join("metadata.json")).unwrap(),
+            bytes
+        );
+        assert_eq!(
+            std::fs::metadata(&foreign_input)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            mode
+        );
+    }
+    assert_eq!(scoped03_object_snapshot(&repo), objects);
+    // Exercise the public branch that skips an own unfinished run as well.
+    store
+        .create_run("keep-own", &["codex".into()], "sha", "scope")
+        .unwrap();
+    let keep = store.state_path("keep-own").unwrap();
+    let bytes = std::fs::read(&keep).unwrap();
+    store
+        .create_run("plain-finished", &["codex".into()], "sha", "scope")
+        .unwrap();
+    assert!(store.mark_cancelled("plain-finished").unwrap());
+    let output = run_libra(&["--json", "review", "clean", "--all"], &repo, &[]);
+    assert_cli_success(&output, "clean all retains unfinished own run");
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["data"]["removed"], 1);
+    assert_eq!(report["data"]["skipped_running"], 1);
+    assert_eq!(std::fs::read(&keep).unwrap(), bytes);
+    assert_eq!(
+        std::fs::read(foreign_root.join("state.json")).unwrap(),
+        foreign_state
+    );
+}
+
+/// Ordered finalization can leave state terminal while the matching manifest
+/// still has no terminal marker. Exercise both actual --all caller branches.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fix_rg_scoped_03_interrupted_finalize_clean_all() {
+    let temp = tempfile::tempdir().unwrap();
+    let (repo, id, root) = scoped03_completed_fixture(temp.path()).await;
+    let store = store_for(&repo);
+    let mut manifest = store.load_manifest(&id).unwrap().unwrap();
+    manifest.terminal_state = None;
+    store.write_manifest(&manifest).unwrap();
+    // No own running run: review takes its direct library bulk branch.
+    let output = run_libra(&["--json", "review", "clean", "--all"], &repo, &[]);
+    assert_cli_success(
+        &output,
+        "ordered terminal-state/unfinished-manifest bulk clean",
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["data"]["removed"], 1);
+    assert_eq!(report["data"]["skipped_running"], 0);
+    assert!(
+        !root.exists(),
+        "real 0555 scoped input was removed without manual chmod"
+    );
+
+    store
+        .create_run("state-first", &["codex".into()], "sha", "scope")
+        .unwrap();
+    assert!(
+        store
+            .update_state("state-first", |state| {
+                state.terminal_state = Some(ReviewTerminalState::Cancelled);
+            })
+            .unwrap()
+    );
+    assert!(
+        store
+            .load_manifest("state-first")
+            .unwrap()
+            .unwrap()
+            .terminal_state
+            .is_none()
+    );
+    store
+        .create_run("keep-own", &["codex".into()], "sha", "scope")
+        .unwrap();
+    let keep = store.state_path("keep-own").unwrap();
+    let bytes = std::fs::read(&keep).unwrap();
+    // With an own unfinished run: review takes the filtered per-run branch.
+    let output = run_libra(&["--json", "review", "clean", "--all"], &repo, &[]);
+    assert_cli_success(
+        &output,
+        "ordered terminal-state/unfinished-manifest filtered clean",
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["data"]["removed"], 1);
+    assert_eq!(report["data"]["skipped_running"], 1);
+    assert!(!store.run_dir("state-first").unwrap().exists());
+    assert_eq!(std::fs::read(&keep).unwrap(), bytes);
+}
+
+/// Preserve every schema object and every logical table row, including audit,
+/// checkpoint/catalog and config. SQLite may checkpoint WAL/change its physical
+/// page header when the library's live connection and CLI open the same store.
+/// Hash values so a failure never prints repository metadata or credentials.
+async fn scoped03_database_logical_snapshot(repo: &Path) -> Vec<(String, String)> {
+    use sea_orm::{ConnectionTrait, Statement};
+    use sha2::{Digest, Sha256};
+    let path = repo.join(".libra/libra.db");
+    let mut options = sea_orm::ConnectOptions::new(format!("sqlite://{}?mode=ro", path.display()));
+    options.sqlx_logging(false);
+    let conn = sea_orm::Database::connect(options).await.unwrap();
+    let schema = conn.query_all_raw(Statement::from_string(conn.get_database_backend(),
+        "SELECT type, name, tbl_name, coalesce(sql, '') AS definition FROM sqlite_schema ORDER BY type, name".to_owned())).await.unwrap();
+    let mut schema_digest = Sha256::new();
+    let mut tables = Vec::new();
+    for row in schema {
+        let kind: String = row.try_get_by("type").unwrap();
+        let name: String = row.try_get_by("name").unwrap();
+        let table: String = row.try_get_by("tbl_name").unwrap();
+        let definition: String = row.try_get_by("definition").unwrap();
+        for value in [&kind, &name, &table, &definition] {
+            schema_digest.update((value.len() as u64).to_be_bytes());
+            schema_digest.update(value.as_bytes());
+        }
+        if kind == "table" {
+            tables.push(name);
+        }
+    }
+    let mut snapshot = vec![(
+        "schema".to_owned(),
+        format!("{:x}", schema_digest.finalize()),
+    )];
+    for table in tables {
+        let table_ident = format!("\"{}\"", table.replace('"', "\"\""));
+        let columns = conn
+            .query_all_raw(Statement::from_string(
+                conn.get_database_backend(),
+                format!("PRAGMA table_info({table_ident})"),
+            ))
+            .await
+            .unwrap();
+        let encoded = columns
+            .iter()
+            .map(|row| {
+                let name: String = row.try_get_by("name").unwrap();
+                let ident = format!("\"{}\"", name.replace('"', "\"\""));
+                format!("typeof({ident}) || ':' || CASE WHEN typeof({ident})='real' THEN hex(printf('%!.26g',{ident})) ELSE hex(CAST({ident} AS BLOB)) END")
+            })
+            .collect::<Vec<_>>()
+            .join(" || '|' || ");
+        let rows = conn
+            .query_all_raw(Statement::from_string(
+                conn.get_database_backend(),
+                format!("SELECT {encoded} AS encoded FROM {table_ident} ORDER BY encoded"),
+            ))
+            .await
+            .unwrap();
+        let mut digest = Sha256::new();
+        for row in rows {
+            let encoded: String = row.try_get_by("encoded").unwrap();
+            digest.update((encoded.len() as u64).to_be_bytes());
+            digest.update(encoded.as_bytes());
+        }
+        snapshot.push((table, format!("{:x}", digest.finalize())));
+    }
+    conn.close().await.unwrap();
+    snapshot.sort();
+    snapshot
+}
+
+/// Genuine setup infrastructure failure writes Error with no reviewer rows.
+/// Clean it through --run and both real review --all command branches.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fix_rg_scoped_03_infrastructure_error_clean() {
+    use libra::internal::ai::checkpoint_input::{CheckpointInputFile, CheckpointInputSpec};
+    for mode in ["run", "bulk", "filtered"] {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = init_committed_repo(temp.path());
+        let checkpoint_id = "cafe75d2-4c53-465a-b890-a9f861a50cc7";
+        let metadata = br#"{"schema_version":1,"agent_kind":"claude_code"}"#;
+        let (metadata_oid, transcript_oid) =
+            seed_v1_checkpoint(&repo, checkpoint_id, metadata, b"captured ordinary").await;
+        let store = store_for(&repo);
+        let mut request = ReviewRunRequest::new(
+            repo.clone(),
+            "list workspace",
+            format!("checkpoint:{checkpoint_id}"),
+            "0000000000000000000000000000000000000000",
+            vec![fake_reviewer(
+                "lister",
+                Path::new("/bin/sh"),
+                &["-c", "echo SCOPED03_SHOULD_NOT_RUN"],
+                Duration::from_secs(30),
+            )],
+        );
+        request.checkpoint_input = Some(CheckpointInputSpec {
+            checkpoint_id: checkpoint_id.into(),
+            files: vec![
+                CheckpointInputFile {
+                    rel_path: "metadata.json".into(),
+                    oid: metadata_oid,
+                },
+                CheckpointInputFile {
+                    rel_path: "transcript/claude_code".into(),
+                    oid: transcript_oid,
+                },
+            ],
+        });
+        request.reviewer_timeout = Duration::ZERO;
+        let outcome = run_bounded(&store, request, ReviewCancelHandle::new(), 60).await;
+        assert_eq!(outcome.terminal_state, ReviewTerminalState::Error);
+        assert!(outcome.infra_error.as_deref().unwrap().contains("deadline"));
+        assert!(!outcome.run_dir.join("checkpoint-input").exists());
+        assert!(
+            !std::fs::read_to_string(outcome.run_dir.join("findings.md"))
+                .unwrap()
+                .contains("SCOPED03_SHOULD_NOT_RUN")
+        );
+        let state = store.load_state(&outcome.run_id).unwrap().unwrap();
+        assert!(
+            state.agents.is_empty(),
+            "real infrastructure finalizer wrote no reviewer rows"
+        );
+        let manifest = store.load_manifest(&outcome.run_id).unwrap().unwrap();
+        assert_eq!(manifest.agents, ["lister"]);
+        assert_eq!(manifest.terminal_state, Some(ReviewTerminalState::Error));
+        let keep = if mode == "filtered" {
+            store
+                .create_run("keep-own", &["codex".into()], "sha", "scope")
+                .unwrap();
+            let path = store.state_path("keep-own").unwrap();
+            Some((path.clone(), std::fs::read(path).unwrap()))
+        } else {
+            None
+        };
+        let objects = scoped03_object_snapshot(&repo);
+        let catalog = scoped03_database_logical_snapshot(&repo).await;
+        let tracked = std::fs::read(repo.join("tracked.txt")).unwrap();
+        let args = if mode == "run" {
+            vec![
+                "--json",
+                "review",
+                "clean",
+                "--run",
+                outcome.run_id.as_str(),
+            ]
+        } else {
+            vec!["--json", "review", "clean", "--all"]
+        };
+        let output = run_libra(&args, &repo, &[]);
+        assert_cli_success(&output, "real empty-report infrastructure Error cleanup");
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(report["data"]["removed"], 1, "mode={mode}");
+        if mode != "run" {
+            assert_eq!(
+                report["data"]["skipped_running"],
+                if mode == "filtered" { 1 } else { 0 }
+            );
+        }
+        assert!(
+            !outcome.run_dir.exists(),
+            "Error run is genuinely removed, mode={mode}"
+        );
+        if let Some((path, bytes)) = keep {
+            assert_eq!(std::fs::read(path).unwrap(), bytes);
+        }
+        assert_eq!(scoped03_object_snapshot(&repo), objects);
+        assert_eq!(scoped03_database_logical_snapshot(&repo).await, catalog);
+        assert_eq!(std::fs::read(repo.join("tracked.txt")).unwrap(), tracked);
+        assert_no_leaked_workspace(&repo);
+    }
+}

@@ -2364,3 +2364,278 @@ async fn fix_rg_scoped_02_persisted_spec_resume_catalog_unavailable() {
         mode_before
     );
 }
+
+/// Actual synthetic binary firstpass completes with genuine 0555 scoped input.
+async fn scoped03_completed_fixture(root: &Path) -> (PathBuf, String, PathBuf) {
+    let repo = init_committed_repo(root);
+    let id = "cafe75d2-4c53-465a-b890-a9f861a50cc7";
+    let metadata = br#"{"schema_version":1,"agent_kind":"claude_code"}"#;
+    let transcript = b"{\"role\":\"user\",\"text\":\"captured turn\"}\n";
+    seed_v1_checkpoint(&repo, id, metadata, transcript).await;
+    let script = stage_fixture(&root.join("fixtures"), "investigator-conclude.sh");
+    let bin = root.join("only-synthetic-bin");
+    std::fs::create_dir(&bin).unwrap();
+    let codex = bin.join("codex");
+    std::fs::copy(&script, &codex).unwrap();
+    std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!("{}:/usr/bin:/bin:/usr/sbin:/sbin", bin.display());
+    let output = run_libra(
+        &[
+            "--json",
+            "investigate",
+            "start",
+            "--topic",
+            "captured only",
+            "--checkpoint",
+            id,
+            "--agent",
+            "codex",
+            "--max-turns",
+            "4",
+            "--quorum",
+            "1",
+        ],
+        &repo,
+        &[("PATH", &path)],
+    );
+    assert_cli_success(&output, "actual synthetic scoped firstpass");
+    let output: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(output["data"]["terminal_state"], "quorum");
+    let id = output["data"]["run_id"].as_str().unwrap().to_owned();
+    let run_root = repo.join(".libra/sessions/agent-runs").join(&id);
+    let input = run_root.join("checkpoint-input");
+    assert_eq!(
+        std::fs::metadata(&input).unwrap().permissions().mode() & 0o777,
+        0o555
+    );
+    assert_eq!(
+        std::fs::read(input.join("metadata.json")).unwrap(),
+        metadata
+    );
+    assert_eq!(
+        std::fs::read(input.join("transcript/claude_code")).unwrap(),
+        transcript
+    );
+    assert_no_leaked_workspace(&repo);
+    (repo, id, run_root)
+}
+
+fn scoped03_object_snapshot(repo: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+    fn collect(path: &Path, base: &Path, files: &mut Vec<(PathBuf, Vec<u8>)>) {
+        for entry in std::fs::read_dir(path).unwrap() {
+            let entry = entry.unwrap();
+            if entry.file_type().unwrap().is_dir() {
+                collect(&entry.path(), base, files);
+            } else {
+                files.push((
+                    entry.path().strip_prefix(base).unwrap().to_owned(),
+                    std::fs::read(entry.path()).unwrap(),
+                ));
+            }
+        }
+    }
+    let base = repo.join(".libra/objects");
+    let mut files = Vec::new();
+    collect(&base, &base, &mut files);
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+    files
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fix_rg_scoped_03_completed_investigate_clean() {
+    let temp = tempfile::tempdir().unwrap();
+    let (repo, id, root) = scoped03_completed_fixture(temp.path()).await;
+    let store = store_for(&repo);
+    store
+        .create_run("keep-own", "keep", &["codex".into()], 4, 1, "sha")
+        .unwrap();
+    let keep = store.state_path("keep-own").unwrap();
+    let keep_bytes = std::fs::read(&keep).unwrap();
+    let objects = scoped03_object_snapshot(&repo);
+    let catalog = std::fs::read(repo.join(".libra/libra.db")).unwrap();
+    let tracked = std::fs::read(repo.join("tracked.txt")).unwrap();
+    let output = run_libra(
+        &["--json", "investigate", "clean", "--run", &id],
+        &repo,
+        &[],
+    );
+    assert_cli_success(
+        &output,
+        "actual finished readonly scoped clean without chmod",
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["data"]["removed"], 1);
+    assert!(!root.exists());
+    assert_eq!(std::fs::read(&keep).unwrap(), keep_bytes);
+    assert_eq!(scoped03_object_snapshot(&repo), objects);
+    assert_eq!(
+        std::fs::read(repo.join(".libra/libra.db")).unwrap(),
+        catalog
+    );
+    assert_eq!(std::fs::read(repo.join("tracked.txt")).unwrap(), tracked);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fix_rg_scoped_03_clean_all() {
+    let temp = tempfile::tempdir().unwrap();
+    let (repo, _id, root) = scoped03_completed_fixture(temp.path()).await;
+    let store = store_for(&repo);
+    store
+        .create_run("plain-finished", "done", &["codex".into()], 4, 1, "sha")
+        .unwrap();
+    assert!(store.mark_cancelled("plain-finished").unwrap());
+    store
+        .create_run("corrupt-finished", "done", &["codex".into()], 4, 1, "sha")
+        .unwrap();
+    assert!(store.mark_cancelled("corrupt-finished").unwrap());
+    let corrupt = store.state_path("corrupt-finished").unwrap();
+    std::fs::write(&corrupt, b"{ not json").unwrap();
+    let unknown = store.runs_root().join("unknown-kind");
+    std::fs::create_dir(&unknown).unwrap();
+    std::fs::write(unknown.join("state.json"), br#"{"kind":"unknown"}"#).unwrap();
+    std::fs::write(unknown.join("findings.md"), b"unknown survivor").unwrap();
+    let other = libra::internal::ai::review::ReviewRunStore::new(store.sessions_root());
+    other
+        .create_run("foreign-unfinished", &["codex".into()], "sha", "scope")
+        .unwrap();
+    let foreign_id = "foreign-unfinished".to_owned();
+    let foreign_root = other.run_dir(&foreign_id).unwrap();
+
+    let foreign_state = std::fs::read(foreign_root.join("state.json")).unwrap();
+    let foreign_findings = std::fs::read(foreign_root.join("findings.md")).unwrap();
+    let foreign_input = foreign_root.join("checkpoint-input");
+    let foreign_input_snapshot = foreign_input.exists().then(|| {
+        (
+            std::fs::read(foreign_input.join("metadata.json")).unwrap(),
+            std::fs::metadata(&foreign_input)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+        )
+    });
+    let refused = run_libra(&["investigate", "clean", "--run", &foreign_id], &repo, &[]);
+    assert_eq!(refused.status.code(), Some(128));
+    assert_eq!(
+        std::fs::read(foreign_root.join("state.json")).unwrap(),
+        foreign_state
+    );
+    let objects = scoped03_object_snapshot(&repo);
+    let output = run_libra(&["--json", "investigate", "clean", "--all"], &repo, &[]);
+    assert_cli_success(&output, "actual clean all mixed kinds");
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        report["data"]["removed"], 2,
+        "only finished own scoped/plain runs"
+    );
+    assert!(!root.exists());
+    assert!(!store.run_dir("plain-finished").unwrap().exists());
+    assert_eq!(std::fs::read(&corrupt).unwrap(), b"{ not json");
+    assert_eq!(
+        std::fs::read(unknown.join("findings.md")).unwrap(),
+        b"unknown survivor"
+    );
+    assert_eq!(
+        std::fs::read(foreign_root.join("state.json")).unwrap(),
+        foreign_state
+    );
+    assert_eq!(
+        std::fs::read(foreign_root.join("findings.md")).unwrap(),
+        foreign_findings
+    );
+    if let Some((bytes, mode)) = foreign_input_snapshot {
+        assert_eq!(
+            std::fs::read(foreign_input.join("metadata.json")).unwrap(),
+            bytes
+        );
+        assert_eq!(
+            std::fs::metadata(&foreign_input)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            mode
+        );
+    }
+    assert_eq!(scoped03_object_snapshot(&repo), objects);
+    // Exercise the public branch that skips an own unfinished run as well.
+    store
+        .create_run("keep-own", "keep", &["codex".into()], 4, 1, "sha")
+        .unwrap();
+    let keep = store.state_path("keep-own").unwrap();
+    let bytes = std::fs::read(&keep).unwrap();
+    store
+        .create_run("plain-finished", "done", &["codex".into()], 4, 1, "sha")
+        .unwrap();
+    assert!(store.mark_cancelled("plain-finished").unwrap());
+    let output = run_libra(&["--json", "investigate", "clean", "--all"], &repo, &[]);
+    assert_cli_success(&output, "clean all retains unfinished own run");
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["data"]["removed"], 1);
+    assert_eq!(report["data"]["skipped_running"], 1);
+    assert_eq!(std::fs::read(&keep).unwrap(), bytes);
+    assert_eq!(
+        std::fs::read(foreign_root.join("state.json")).unwrap(),
+        foreign_state
+    );
+}
+
+/// Ordered finalization can leave state terminal while the matching manifest
+/// still has no terminal marker. Exercise both actual --all caller branches.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fix_rg_scoped_03_interrupted_finalize_clean_all() {
+    let temp = tempfile::tempdir().unwrap();
+    let (repo, id, root) = scoped03_completed_fixture(temp.path()).await;
+    let store = store_for(&repo);
+    let mut manifest = store.load_manifest(&id).unwrap().unwrap();
+    manifest.terminal_state = None;
+    store.write_manifest(&manifest).unwrap();
+    // No own running run: investigate uses its locked per-run sweep.
+    let output = run_libra(&["--json", "investigate", "clean", "--all"], &repo, &[]);
+    assert_cli_success(
+        &output,
+        "ordered terminal-state/unfinished-manifest bulk clean",
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["data"]["removed"], 1);
+    assert_eq!(report["data"]["skipped_running"], 0);
+    assert!(
+        !root.exists(),
+        "real 0555 scoped input was removed without manual chmod"
+    );
+
+    store
+        .create_run("state-first", "interrupted", &["codex".into()], 4, 1, "sha")
+        .unwrap();
+    assert!(
+        store
+            .update_state("state-first", |state| {
+                state.terminal_state = Some(InvestigateTerminalState::Cancelled);
+            })
+            .unwrap()
+    );
+    assert!(
+        store
+            .load_manifest("state-first")
+            .unwrap()
+            .unwrap()
+            .terminal_state
+            .is_none()
+    );
+    store
+        .create_run("keep-own", "interrupted", &["codex".into()], 4, 1, "sha")
+        .unwrap();
+    let keep = store.state_path("keep-own").unwrap();
+    let bytes = std::fs::read(&keep).unwrap();
+    // An own unfinished run is skipped by the same locked per-run sweep.
+    let output = run_libra(&["--json", "investigate", "clean", "--all"], &repo, &[]);
+    assert_cli_success(
+        &output,
+        "ordered terminal-state/unfinished-manifest filtered clean",
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["data"]["removed"], 1);
+    assert_eq!(report["data"]["skipped_running"], 1);
+    assert!(!store.run_dir("state-first").unwrap().exists());
+    assert_eq!(std::fs::read(&keep).unwrap(), bytes);
+}

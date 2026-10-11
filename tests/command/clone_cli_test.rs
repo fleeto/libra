@@ -236,6 +236,12 @@ fn create_stateful_hostkey_ssh_script(root: &Path, counter: &Path, log: &Path) -
     let text = format!(
         r#"#!/bin/sh
 set -eu
+for arg in "$@"; do
+  if [ "$arg" = "-G" ]; then
+    printf 'host fakehost\nhostname fakehost\nport 22\nuserknownhostsfile %s\n' "$HOME/.ssh/known_hosts"
+    exit 0
+  fi
+done
 count=0
 [ -f {counter} ] && count=$(cat {counter})
 printf '%s\n' "$@" >> {log}

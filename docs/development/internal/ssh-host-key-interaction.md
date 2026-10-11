@@ -53,8 +53,8 @@ fingerprint = "SHA256:" + base64_no_padding(sha256(blob))
   終端、log 或 JSON/machine 輸出。目前 capture 契約（`SSH_STDERR_LIMIT` 64 KiB、有界 digest、遇
   `Untrusted` 不得回顯）保持不退化。
 - **無盲目 keyscan 寫入：** `ssh-keyscan` 只作為「取得 host key 並計算指紋」的來源；未經使用者明確
-  接受前不寫入 `known_hosts`。接受後才把 keyscan 的該 host 行（本身即為合法 `known_hosts` 條目）
-  寫入使用者 OpenSSH 設定解析出的目的地。
+  接受前不寫入 `known_hosts`。接受後才以 `ssh -G` 解析出的有效 host token（`HostKeyAlias`，否則
+  `host` 或 `[host]:port`）把 keyscan 的 `<type> <blob>` 寫入 OpenSSH 實際使用的 known-hosts 目的地。
 - **changed key 不接受：** 只對 typed `Untrusted` 進入互動流程；`Changed` 維持既有 `LBR-NET-001`
   固定指引，沒有 accept/fingerprint/retry prompt（ADR-HKT-03）。
 
@@ -67,7 +67,7 @@ fingerprint = "SHA256:" + base64_no_padding(sha256(blob))
 | 分類 | 政策 | TTY / 輸出 | 行為 | 信任寫入 | 錯誤結果 |
 |---|---|---|---|---|---|
 | Known | 任意 | 任意 | 正常 batch transport，成功 | 無 | 成功 |
-| Unknown（Untrusted） | `ask` | human + TTY | 進入互動確認：keyscan → 指紋 prompt → 接受後寫 `known_hosts` → 以 batch transport 重試 | 接受後一條 | 成功 |
+| Unknown（Untrusted） | `ask` | human + TTY | 進入互動確認：`ssh -G` 解析有效 host/port → keyscan → 指紋 prompt → 接受後以有效 host token 寫 `known_hosts` → 以 batch transport 重試 | 接受後一條 | 成功 |
 | Unknown（Untrusted） | `ask` | human + 無 TTY 或 JSON/machine | 不進入互動，維持既有固定 `LBR-NET-001` unknown 指引 | 無 | 既有 unknown 錯誤 |
 | Unknown（Untrusted） | `yes`/`accept-new`/`no` | 任意 | 完全轉交 OpenSSH（HKT-01），不顯示 Libra prompt | 由 OpenSSH | 依 OpenSSH 政策 |
 | Unknown（Untrusted） | `ask` | human + TTY，但使用者拒絕/EOF/取消/timeout | 不寫入信任，不開始 packet-line transfer | 無 | 既有穩定 network error 契約（unknown 指引） |
@@ -78,14 +78,18 @@ fingerprint = "SHA256:" + base64_no_padding(sha256(blob))
 
 ```
 Untrusted + Eligible
-  → ssh-keyscan -t ed25519,ecdsa,rsa [-p port] host
+  → ssh -G <user@host>（本地 config dump）解析 HostName/Port/HostKeyAlias/UserKnownHostsFile
+      ├─ 無 hostname（不支援 -G）→ 回退 URL host/port 與既有 known-hosts 目的地解析
+      └─ 有 hostname → 以有效 host/port 續行
+  → ssh-keyscan -t ed25519,ecdsa,rsa [-p 有效 port] 有效 host
       ├─ 無輸出（keyscan 失敗/無 key）→ 回傳既有 unknown 指引（不寫、不阻塞）
       └─ 有輸出 → 對每個 key 計算「algorithm / SHA256:…」指紋
-          → 寫入 prompt: 「The authenticity of host '<host[:port]>' can't be established.」
+          → 寫入 prompt: 「The authenticity of host '<有效 host[:port]>' can't be established.」
               每行: 「<alg> key fingerprint is SHA256:….」  「Are you sure you want to
               continue connecting (yes/no/[fingerprint])?」
               → 讀取回答
-                  ├─ `yes`（或完整指紋，大小寫不敏感）→ 接受：把 keyscan 該 host 行寫入
+                  ├─ `yes`（或完整指紋，大小寫不敏感）→ 接受：以有效 host token（`HostKeyAlias`，
+                  │    否則 `host`／`[host]:port`）把 keyscan 的 `<type> <blob>` 寫入
                   │    known_hosts 目的地 → 回傳 Accepted → 重試 batch transport
                   ├─ `no` / 空 / EOF / 取消 → 回傳 Rejected → 維持既有 unknown 錯誤
                   └─ 其它輸入（不辨識）→ 重新提示（有界次數）
@@ -107,9 +111,13 @@ Untrusted + Eligible
 互動的判準，而非在每個操作前都做 keyscan；因此已知主機零額外 round-trip。
 
 **已知限制 / 殘餘風險（HKT-02 須覆蓋）：**
-- known_hosts 目的地（`UserKnownHostsFile`/`GlobalKnownHostsFile`）與 host 別名/`HostKeyAlias` 的
-  解析依賴 OpenSSH 版本；本卡以「預設 `~/.ssh/known_hosts` + `UserKnownHostsFile` 尊重」為最小
-  解析，`HostKeyAlias` 記為已知限制。
+- 有效 host token 與 known-hosts 目的地以 `ssh -G` 取得 OpenSSH 解析後的 `HostName`/`Port`/
+  `HostKeyAlias`/`UserKnownHostsFile`，因此 ssh_config 的 host 覆寫（例如 `Host github.com` →
+  `HostName ssh.github.com`＋`Port 443`）會以 `[ssh.github.com]:443` 而非 URL 的 `github.com`
+  寫入信任；這是修復 HKT-02 逃逸缺陷（接受後 retry 因 token 不符仍失敗）的權威來源。
+- `ssh -G` 不可用或未輸出 `hostname` 時，回退到 URL host/port 與既有 `~/.ssh/known_hosts`（或
+  ssh_config 的第一個 `UserKnownHostsFile`）解析。`GlobalKnownHostsFile`、`KnownHostsCommand` 與
+  多路徑 `UserKnownHostsFile` 的實際寫入目的地仍依 OpenSSH 版本；本卡以第一個可寫路徑為準。
 - 若 HKT-02 證明 keyscan 在既有限制下不足以安全實作，則以 DEFER-HKT-03 停止 HKT-02（見 issues/582
   ADR-HKT-01 Revisit when）。
 

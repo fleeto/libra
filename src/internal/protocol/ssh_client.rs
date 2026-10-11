@@ -469,12 +469,12 @@ fn default_write_prompt(text: &str) -> io::Result<()> {
     stderr.flush()
 }
 
-/// Best-effort resolution of the known-hosts destination for a host.
+/// Best-effort fallback resolution of the known-hosts destination.
 ///
-/// Honors the first `UserKnownHostsFile` in the matching `Host` block of the
-/// user's `~/.ssh/config`; otherwise falls back to `~/.ssh/known_hosts`.
-/// `HostKeyAlias` is a known limitation (documented in
-/// `docs/development/internal/ssh-host-key-interaction.md`).
+/// The interactive confirmation prefers the `userknownhostsfile` reported by
+/// `ssh -G`; this parser is only used when `ssh -G` is unavailable or does not
+/// report a destination. It honors the first `UserKnownHostsFile` found in
+/// `~/.ssh/config`; otherwise it falls back to `~/.ssh/known_hosts`.
 pub(crate) fn default_known_hosts_path() -> std::path::PathBuf {
     if let Some(path) = user_known_hosts_file_from_ssh_config() {
         return path;
@@ -572,10 +572,103 @@ fn ssh_keyscan_command(override_path: Option<&std::path::Path>) -> String {
     std::env::var("LIBRA_SSH_KEYSCAN_COMMAND").unwrap_or_else(|_| "ssh-keyscan".to_string())
 }
 
+/// Effective SSH connection target after `ssh_config` resolution (HKT-02).
+///
+/// OpenSSH verifies the host key against the resolved `HostName`/`Port` (for
+/// example `Host github.com` may map to `HostName ssh.github.com`,
+/// `Port 443`), not against the URL host/port. Trust entries must therefore
+/// use that same identity or the post-accept retry keeps failing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResolvedSshTarget {
+    host: String,
+    port: u16,
+    host_key_alias: Option<String>,
+    known_hosts_path: Option<std::path::PathBuf>,
+}
+
+impl ResolvedSshTarget {
+    /// The host token OpenSSH uses for `known_hosts` lookups and writes:
+    /// `HostKeyAlias` when configured, otherwise `host` on the default port or
+    /// `[host]:port` elsewhere.
+    fn known_hosts_token(&self) -> String {
+        if let Some(alias) = self
+            .host_key_alias
+            .as_deref()
+            .map(str::trim)
+            .filter(|alias| !alias.is_empty() && !alias.eq_ignore_ascii_case("none"))
+        {
+            return alias.to_string();
+        }
+        if self.port == DEFAULT_SSH_PORT {
+            return self.host.clone();
+        }
+        if self.host.starts_with('[') && self.host.ends_with(']') {
+            return format!("{}:{}", self.host, self.port);
+        }
+        format!("[{}]:{}", self.host, self.port)
+    }
+}
+
+/// Parse the subset of `ssh -G` output that determines where OpenSSH looks up
+/// and stores host keys. `ssh -G` is local-only (no network) and applies the
+/// user's `Host`/`Match`/wildcard resolution, so it is authoritative for the
+/// token OpenSSH will verify. Returns `None` when no `hostname` line is
+/// present; the caller then falls back to the URL host/port.
+fn parse_ssh_g_output(output: &str, fallback_port: u16) -> Option<ResolvedSshTarget> {
+    let mut host: Option<String> = None;
+    let mut port: Option<u16> = None;
+    let mut host_key_alias: Option<String> = None;
+    let mut known_hosts_path: Option<std::path::PathBuf> = None;
+    for raw_line in output.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Some((keyword, value)) = line.split_once(char::is_whitespace) else {
+            continue;
+        };
+        let value = value.trim();
+        if value.is_empty() {
+            continue;
+        }
+        match keyword {
+            "hostname" if host.is_none() => host = Some(value.to_string()),
+            "port" if port.is_none() => {
+                port = value.parse::<u16>().ok().filter(|port| *port > 0);
+            }
+            "hostkeyalias" if host_key_alias.is_none() => {
+                if !value.eq_ignore_ascii_case("none") {
+                    host_key_alias = Some(value.to_string());
+                }
+            }
+            "userknownhostsfile" if known_hosts_path.is_none() => {
+                if let Some(first) = value
+                    .split_whitespace()
+                    .find(|entry| !entry.eq_ignore_ascii_case("none"))
+                {
+                    let home = std::env::var_os("HOME")
+                        .or_else(|| std::env::var_os("USERPROFILE"))
+                        .map(std::path::PathBuf::from)
+                        .unwrap_or_default();
+                    known_hosts_path = Some(expand_tilde(first, &home));
+                }
+            }
+            _ => {}
+        }
+    }
+    Some(ResolvedSshTarget {
+        host: host?,
+        port: port.unwrap_or(fallback_port),
+        host_key_alias,
+        known_hosts_path,
+    })
+}
+
 /// One parsed `ssh-keyscan` line: `<hosttoken> <keytype> <base64-blob>`.
+/// The host token is intentionally discarded: trust is written under the
+/// resolved `ssh_config` identity, never under keyscan's command-line host.
 #[derive(Debug, Clone)]
 struct ParsedKeyscanHostKey {
-    host_token: String,
     key_type: String,
     blob: String,
 }
@@ -588,17 +681,13 @@ fn parse_keyscan_line(line: &str) -> Option<ParsedKeyscanHostKey> {
         return None;
     }
     let mut parts = line.split_whitespace();
-    let host_token = parts.next()?.to_string();
+    let _host_token = parts.next()?;
     let key_type = parts.next()?.to_string();
     let blob = parts.next()?.to_string();
     if blob.is_empty() {
         return None;
     }
-    Some(ParsedKeyscanHostKey {
-        host_token,
-        key_type,
-        blob,
-    })
+    Some(ParsedKeyscanHostKey { key_type, blob })
 }
 
 /// Compute the OpenSSH `SHA256:<base64>` fingerprint of a base64-encoded key
@@ -1334,19 +1423,72 @@ impl SshClient {
         Ok(())
     }
 
-    /// Fetch the host keys via `ssh-keyscan`, returning parsed entries or
-    /// `None` when keyscan fails or yields nothing (fail without writing trust).
+    /// Resolve the effective SSH connection target for this destination with
+    /// `ssh -G`, so host-key trust is written under the identity OpenSSH
+    /// actually verifies. Falls back to the URL host/port and the confirmation
+    /// destination when the binary is unavailable or does not support `-G`
+    /// (for example a test double).
+    async fn resolve_host_key_target(
+        &self,
+        confirmation: &HostKeyConfirmation,
+    ) -> ResolvedSshTarget {
+        let fallback = ResolvedSshTarget {
+            host: self.host.clone(),
+            port: self.port,
+            host_key_alias: None,
+            known_hosts_path: Some(confirmation.known_hosts_path.clone()),
+        };
+        match self.run_ssh_g().await {
+            Some(mut resolved) => {
+                if resolved.known_hosts_path.is_none() {
+                    resolved.known_hosts_path = fallback.known_hosts_path;
+                }
+                resolved
+            }
+            None => fallback,
+        }
+    }
+
+    /// Run `ssh -G` for this destination and parse the effective host-key
+    /// identity. Best-effort: spawn failure, non-zero exit or unparsable output
+    /// returns `None`.
+    async fn run_ssh_g(&self) -> Option<ResolvedSshTarget> {
+        let ssh_bin = std::env::var("LIBRA_SSH_COMMAND").unwrap_or_else(|_| "ssh".to_string());
+        let mut cmd = tokio::process::Command::new(ssh_bin);
+        cmd.arg("-G");
+        if self.port != DEFAULT_SSH_PORT {
+            cmd.arg("-p").arg(self.port.to_string());
+        }
+        cmd.arg(format!("{}@{}", self.user, self.host));
+        cmd.stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
+        let output = tokio::time::timeout(self.idle_timeout, cmd.output())
+            .await
+            .ok()?
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let text = String::from_utf8_lossy(&output.stdout);
+        parse_ssh_g_output(&text, self.port)
+    }
+
+    /// Fetch the host keys via `ssh-keyscan` for the resolved target, returning
+    /// parsed entries or `None` when keyscan fails or yields nothing (fail
+    /// without writing trust).
     async fn run_ssh_keyscan(
         &self,
         confirmation: &HostKeyConfirmation,
+        target: &ResolvedSshTarget,
     ) -> Option<Vec<ParsedKeyscanHostKey>> {
         let cmd_str = ssh_keyscan_command(confirmation.keyscan_command.as_deref());
         let mut cmd = tokio::process::Command::new(cmd_str);
         cmd.arg("-t").arg("ed25519,ecdsa,rsa");
-        if self.port != DEFAULT_SSH_PORT {
-            cmd.arg("-p").arg(self.port.to_string());
+        if target.port != DEFAULT_SSH_PORT {
+            cmd.arg("-p").arg(target.port.to_string());
         }
-        cmd.arg(&self.host);
+        cmd.arg(&target.host);
         cmd.stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
@@ -1376,7 +1518,8 @@ impl SshClient {
             Some(confirmation) => confirmation,
             None => return HostKeyDecision::Rejected,
         };
-        let entries = match self.run_ssh_keyscan(confirmation).await {
+        let target = self.resolve_host_key_target(confirmation).await;
+        let entries = match self.run_ssh_keyscan(confirmation, &target).await {
             Some(entries) => entries,
             None => return HostKeyDecision::NoHostKeys,
         };
@@ -1390,14 +1533,14 @@ impl SshClient {
             return HostKeyDecision::NoHostKeys;
         }
 
-        let host_label = if self.port == DEFAULT_SSH_PORT {
-            self.host.clone()
-        } else {
-            format!("[{}]:{}", self.host, self.port)
-        };
+        let host_label = target.known_hosts_token();
+        let known_hosts_path = target
+            .known_hosts_path
+            .clone()
+            .unwrap_or_else(|| confirmation.known_hosts_path.clone());
         let known_hosts_lines: Vec<String> = entries
             .iter()
-            .map(|entry| format!("{} {} {}", entry.host_token, entry.key_type, entry.blob))
+            .map(|entry| format!("{host_label} {} {}", entry.key_type, entry.blob))
             .collect();
 
         // Bounded re-prompt loop: an unrecognized answer re-prompts a small
@@ -1423,12 +1566,7 @@ impl SshClient {
             };
             match resolve_host_key_answer(&answer, &fingerprints) {
                 Some(true) => {
-                    if append_known_hosts_entries(
-                        &confirmation.known_hosts_path,
-                        &known_hosts_lines,
-                    )
-                    .is_err()
-                    {
+                    if append_known_hosts_entries(&known_hosts_path, &known_hosts_lines).is_err() {
                         // A failed trust write must not loop; let the original
                         // error surface so the user can fix the destination.
                         return HostKeyDecision::Rejected;
@@ -3791,10 +3929,36 @@ pub(crate) mod tests {
     ) -> std::path::PathBuf {
         use std::os::unix::fs::PermissionsExt;
         let script = root.join("interactive_ssh.sh");
+        // `ssh -G` is a local config dump; answer it before the failure counter
+        // so host-key resolution does not consume a transport attempt.
         let text = format!(
-            "#!/bin/sh\nset -eu\ncount=0\n[ -f {c} ] && count=$(cat {c})\nif [ \"$count\" -lt 1 ]; then\n  printf '%s\\n' {stderr} >&2\n  printf '%s' \"$((count+1))\" > {c}\n  exit 255\nfi\ncat {ad}\nexit 0\n",
+            "#!/bin/sh\nset -eu\nfor arg in \"$@\"; do\n  if [ \"$arg\" = \"-G\" ]; then\n    printf 'host fakehost\\nhostname fakehost\\nport 22\\n'\n    exit 0\n  fi\ndone\ncount=0\n[ -f {c} ] && count=$(cat {c})\nif [ \"$count\" -lt 1 ]; then\n  printf '%s\\n' {stderr} >&2\n  printf '%s' \"$((count+1))\" > {c}\n  exit 255\nfi\ncat {ad}\nexit 0\n",
             c = shell_single_quote(counter.to_str().unwrap()),
             stderr = shell_single_quote(fail_stderr),
+            ad = shell_single_quote(ad.to_str().unwrap()),
+        );
+        std::fs::write(&script, text).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        script
+    }
+
+    /// Fake `ssh` that reports a remapped `ssh -G` target (the
+    /// `Host github.com` → `HostName ssh.github.com`, `Port 443` case) and only
+    /// serves the transport once `known_hosts` contains the token OpenSSH
+    /// would actually verify on that resolved endpoint.
+    #[cfg(unix)]
+    fn write_resolved_target_ssh_script(
+        root: &std::path::Path,
+        ad: &std::path::Path,
+        known_hosts: &std::path::Path,
+        expected_token: &str,
+    ) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let script = root.join("resolved_target_ssh.sh");
+        let text = format!(
+            "#!/bin/sh\nset -eu\nfor arg in \"$@\"; do\n  if [ \"$arg\" = \"-G\" ]; then\n    printf 'host github.com\\nhostname ssh.github.com\\nport 443\\nuserknownhostsfile %s\\n' {kh}\n    exit 0\n  fi\ndone\nif [ -f {kh} ] && grep -Fq {token} {kh}; then\n  cat {ad}\n  exit 0\nfi\nprintf '%s\\n' 'Host key verification failed.' >&2\nexit 255\n",
+            kh = shell_single_quote(known_hosts.to_str().unwrap()),
+            token = shell_single_quote(expected_token),
             ad = shell_single_quote(ad.to_str().unwrap()),
         );
         std::fs::write(&script, text).unwrap();
@@ -4076,6 +4240,73 @@ pub(crate) mod tests {
         );
     }
 
+    /// The trust entry must use the identity OpenSSH resolves from
+    /// `ssh_config` (`Host github.com` → `HostName ssh.github.com`,
+    /// `Port 443`), not the URL host/port written by `ssh-keyscan`.
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial_test::serial(cwd, env)]
+    async fn pkt_line_client_interactive_host_key_writes_resolved_ssh_config_token() {
+        use std::sync::{Arc, Mutex};
+
+        let root = tempfile::tempdir().unwrap();
+        let ad = root.path().join("ad");
+        let known_hosts = root.path().join("known_hosts");
+        let key_base = root.path().join("id");
+        let pubfile = root.path().join("id.pub");
+        std::fs::write(&ad, b"0000").unwrap();
+
+        assert!(
+            std::process::Command::new("ssh-keygen")
+                .args(["-t", "ed25519", "-f", key_base.to_str().unwrap(), "-N", ""])
+                .status()
+                .unwrap()
+                .success(),
+            "ssh-keygen must generate a fixture key"
+        );
+        let pubtext = std::fs::read_to_string(&pubfile).unwrap();
+        let mut parts = pubtext.split_whitespace();
+        let key_type = parts.next().unwrap().to_string();
+        let blob = parts.next().unwrap().to_string();
+        let expected_token = format!("[ssh.github.com]:443 {key_type} {blob}");
+
+        let ssh_script =
+            write_resolved_target_ssh_script(root.path(), &ad, &known_hosts, &expected_token);
+        // keyscan can only report the command-line host; trust must still be
+        // written under the resolved ssh_config identity.
+        let keyscan_line = format!("github.com {key_type} {blob}");
+        let keyscan_script = write_keyscan_script(root.path(), &keyscan_line);
+
+        let prompt = Arc::new(Mutex::new(Vec::<String>::new()));
+        let (client, _ssh, _keyscan) = interactive_client(
+            &ssh_script,
+            &keyscan_script,
+            &known_hosts,
+            "yes\n",
+            prompt.clone(),
+        );
+        let result = client.discovery_reference(ServiceType::UploadPack).await;
+        assert!(
+            result.is_ok(),
+            "resolved-target accept must retry and succeed, got: {:?}",
+            result.err()
+        );
+        let content = std::fs::read_to_string(&known_hosts).expect("known_hosts written");
+        assert!(
+            content.contains(&expected_token),
+            "known_hosts must use the resolved ssh_config token, got: {content}"
+        );
+        assert!(
+            !content.lines().any(|line| line.starts_with("github.com ")),
+            "keyscan's URL-host token must not be written, got: {content}"
+        );
+        let joined = prompt.lock().unwrap().join("");
+        assert!(
+            joined.contains("[ssh.github.com]:443"),
+            "prompt must name the resolved host identity, got: {joined}"
+        );
+    }
+
     #[test]
     fn host_key_fingerprint_matches_ssh_keygen() {
         // The fingerprint format must match `ssh-keygen -E sha256 -lf` so a user
@@ -4119,5 +4350,54 @@ pub(crate) mod tests {
         assert_eq!(resolve_host_key_answer("sha256:abcdef", &fps), Some(true));
         assert_eq!(resolve_host_key_answer("abcdef", &fps), Some(true));
         assert_eq!(resolve_host_key_answer("gibberish", &fps), None);
+    }
+
+    #[test]
+    fn parse_ssh_g_output_resolves_effective_host_key_identity() {
+        let output = "\
+host github.com
+user git
+hostname ssh.github.com
+port 443
+userknownhostsfile /tmp/libra-known-hosts /tmp/libra-known-hosts2
+identityfile ~/.ssh/id_ed25519
+";
+        let target = parse_ssh_g_output(output, 22).expect("hostname must parse");
+        assert_eq!(target.host, "ssh.github.com");
+        assert_eq!(target.port, 443);
+        assert_eq!(target.host_key_alias, None);
+        assert_eq!(
+            target.known_hosts_path.as_deref(),
+            Some(std::path::Path::new("/tmp/libra-known-hosts"))
+        );
+        assert_eq!(target.known_hosts_token(), "[ssh.github.com]:443");
+    }
+
+    #[test]
+    fn parse_ssh_g_output_prefers_host_key_alias_and_ignores_none() {
+        let target = parse_ssh_g_output(
+            "hostname example.com\nport 2222\nhostkeyalias corp-alias\n",
+            22,
+        )
+        .expect("hostname must parse");
+        assert_eq!(target.known_hosts_token(), "corp-alias");
+
+        let target = parse_ssh_g_output(
+            "hostname example.com\nport 22\nhostkeyalias none\nuserknownhostsfile none\n",
+            22,
+        )
+        .expect("hostname must parse");
+        assert_eq!(target.host_key_alias, None);
+        assert_eq!(target.known_hosts_path, None);
+        assert_eq!(target.known_hosts_token(), "example.com");
+    }
+
+    #[test]
+    fn parse_ssh_g_output_requires_hostname_and_falls_back_to_url_port() {
+        assert!(parse_ssh_g_output("host github.com\nport 443\n", 22).is_none());
+        let target = parse_ssh_g_output("hostname github.com\n", 2222)
+            .expect("hostname must parse without an explicit port");
+        assert_eq!(target.port, 2222);
+        assert_eq!(target.known_hosts_token(), "[github.com]:2222");
     }
 }

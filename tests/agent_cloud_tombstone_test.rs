@@ -38,6 +38,303 @@ use sea_orm::{ConnectOptions, ConnectionTrait, Database, DatabaseConnection, Sta
 use serial_test::serial;
 use uuid::Uuid;
 
+#[cfg(feature = "test-live-cloud")]
+#[path = "helpers/reasoning_artifact.rs"]
+mod reasoning_lifecycle_fixture;
+
+/// Mandatory when selected: missing credentials fail rather than becoming a
+/// passing skip. Only synthetic ciphertext, under this test's unique repo UUID.
+#[cfg(feature = "test-live-cloud")]
+#[tokio::test]
+#[serial(cloud_live)]
+async fn reasoning_artifact_mirrors_and_erases_with_checkpoint() {
+    for name in [
+        "LIBRA_D1_ACCOUNT_ID",
+        "LIBRA_D1_API_TOKEN",
+        "LIBRA_D1_DATABASE_ID",
+        "LIBRA_STORAGE_ENDPOINT",
+        "LIBRA_STORAGE_BUCKET",
+        "LIBRA_STORAGE_ACCESS_KEY",
+        "LIBRA_STORAGE_SECRET_KEY",
+    ] {
+        assert!(
+            env_is_present(name),
+            "RG-05 live gate requires configured {name}; this is not a passing skip"
+        );
+    }
+    let repo = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let init = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .arg("init")
+        .current_dir(repo.path())
+        .env("LIBRA_TEST", "1")
+        .env("LIBRA_TEST_HOME", home.path())
+        .output()
+        .unwrap();
+    assert!(init.status.success());
+    let conn = connect_repo_db(repo.path()).await;
+    // init already owns a fresh UUID. Reuse it instead of INSERTing a second
+    // multi-value libra.repoid: writer and cloud readers must share one key.
+    let repo_id = libra::internal::config::ConfigKv::get_with_conn(&conn, "libra.repoid")
+        .await
+        .unwrap()
+        .map(|entry| entry.value)
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    assert_eq!(Uuid::parse_str(&repo_id).unwrap().to_string(), repo_id);
+    libra::internal::config::ConfigKv::set_with_conn(&conn, "libra.repoid", &repo_id, false)
+        .await
+        .unwrap();
+    assert_eq!(
+        count(
+            &conn,
+            "SELECT COUNT(*) AS n FROM config_kv WHERE key = 'libra.repoid'"
+        )
+        .await,
+        1
+    );
+    conn.close().await.unwrap();
+    let (id, sha, oid) = reasoning_lifecycle_fixture::seed(repo.path()).await;
+    let client = d1_client_from_env();
+    let store: Arc<dyn object_store::ObjectStore> = Arc::new(
+        object_store::aws::AmazonS3Builder::new()
+            .with_bucket_name(std::env::var("LIBRA_STORAGE_BUCKET").unwrap())
+            .with_region(std::env::var("LIBRA_STORAGE_REGION").unwrap_or_else(|_| "auto".into()))
+            .with_endpoint(std::env::var("LIBRA_STORAGE_ENDPOINT").unwrap())
+            .with_access_key_id(std::env::var("LIBRA_STORAGE_ACCESS_KEY").unwrap())
+            .with_secret_access_key(std::env::var("LIBRA_STORAGE_SECRET_KEY").unwrap())
+            .with_virtual_hosted_style_request(false)
+            .build()
+            .expect("build configured R2 client"),
+    );
+    let remote = libra::utils::storage::remote::RemoteStorage::new_with_prefix(
+        store.clone(),
+        repo_id.clone(),
+    );
+    use futures::FutureExt;
+    let result = std::panic::AssertUnwindSafe(reasoning_artifact_live_scenario(
+        repo.path(),
+        home.path(),
+        &client,
+        &remote,
+        &repo_id,
+        (&id, &sha, oid),
+    ))
+    .catch_unwind()
+    .await;
+    // Cleanup precedes propagating ANY scenario assertion. Delete only this
+    // owned UUID namespace; physically deleting R2 here is fixture teardown,
+    // never an implementation claim about production session erasure.
+    let cleanup = cleanup_reasoning_lifecycle_namespace(&client, store, &repo_id).await;
+    cleanup.expect("clean unique RG-05 live fixture namespace");
+    result
+        .expect("RG-05 live scenario panicked after namespace cleanup")
+        .expect("actual CLI/D1/R2 reasoning artifact lifecycle acceptance");
+}
+
+#[cfg(feature = "test-live-cloud")]
+async fn reasoning_artifact_live_scenario(
+    repo: &Path,
+    home: &Path,
+    client: &D1Client,
+    remote: &libra::utils::storage::remote::RemoteStorage,
+    repo_id: &str,
+    artifact: (&str, &str, git_internal::hash::ObjectHash),
+) -> anyhow::Result<()> {
+    let (id, sha, oid) = artifact;
+    use libra::utils::storage::Storage;
+    let cli = |args: &[&str]| -> anyhow::Result<std::process::Output> {
+        Ok(Command::new(env!("CARGO_BIN_EXE_libra"))
+            .args(args)
+            .current_dir(repo)
+            .env("LIBRA_TEST", "1")
+            .env("LIBRA_TEST_HOME", home)
+            .output()?)
+    };
+    let show = cli(&["--json", "agent", "checkpoint", "show", id])?;
+    anyhow::ensure!(show.status.success(), "synthetic artifact show failed");
+    let summary: serde_json::Value = serde_json::from_slice(&show.stdout)?;
+    anyhow::ensure!(
+        summary["data"]["reasoning_artifacts"][0]["availability"] == "encrypted_unavailable"
+    );
+    let output = repo.join("synthetic-export");
+    let export = cli(&[
+        "agent",
+        "checkpoint",
+        "export",
+        id,
+        "--reasoning-artifact",
+        sha,
+        "--allow-raw",
+        "--justification",
+        "synthetic cloud lifecycle acceptance",
+        "--output-path",
+        output
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("fixture path is not text"))?,
+    ])?;
+    anyhow::ensure!(export.status.success(), "synthetic artifact export failed");
+    anyhow::ensure!(std::fs::read(output)? == reasoning_lifecycle_fixture::SYNTHETIC_BODY);
+    let synced = cli(&["--json", "cloud", "sync"])?;
+    if !synced.status.success() {
+        let diagnostic = reasoning_lifecycle_fixture::index_diagnostics(repo).await;
+        anyhow::bail!(
+            "actual cloud sync failed: {}; safe fixture index metadata: {diagnostic}",
+            String::from_utf8_lossy(&synced.stderr)
+        );
+    }
+    anyhow::ensure!(
+        synced.status.success(),
+        "actual cloud sync failed: {}",
+        String::from_utf8_lossy(&synced.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&synced.stdout)?;
+    anyhow::ensure!(
+        report["data"]["agent_capture"]["status"] == "completed",
+        "actual capture generation did not complete"
+    );
+    let generation = client
+        .get_agent_capture_generation(repo_id)
+        .await
+        .map_err(|_| anyhow::anyhow!("RG-05 live fixture service operation failed"))?
+        .ok_or_else(|| anyhow::anyhow!("actual D1 generation is absent"))?;
+    anyhow::ensure!(generation.state == "complete");
+    let indexes = client
+        .get_object_indexes_by_oids(repo_id, &[oid.to_string()])
+        .await
+        .map_err(|_| anyhow::anyhow!("RG-05 live fixture service operation failed"))?;
+    anyhow::ensure!(
+        indexes.len() == 1
+            && indexes[0].o_type == "blob"
+            && indexes[0].o_size == reasoning_lifecycle_fixture::SYNTHETIC_BODY.len() as i64
+            && indexes[0].is_synced == 1
+    );
+    let (body, kind) = remote
+        .get_typed_bounded(
+            &oid,
+            reasoning_lifecycle_fixture::SYNTHETIC_BODY.len() as u64,
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("RG-05 live fixture service operation failed"))?;
+    anyhow::ensure!(
+        kind == git_internal::internal::object::types::ObjectType::Blob
+            && body == reasoning_lifecycle_fixture::SYNTHETIC_BODY
+    );
+    use sha2::{Digest, Sha256};
+    anyhow::ensure!(hex::encode(Sha256::digest(&body)) == sha);
+    let show = cli(&["--json", "agent", "checkpoint", "show", id])?;
+    let summary: serde_json::Value = serde_json::from_slice(&show.stdout)?;
+    anyhow::ensure!(
+        summary["data"]["reasoning_artifacts"][0]["availability"] == "encrypted_unavailable"
+    );
+    reasoning_lifecycle_fixture::erase(repo).await;
+    for args in [
+        vec![
+            "--json",
+            "agent",
+            "checkpoint",
+            "list",
+            "--session",
+            "sess-x",
+        ],
+        vec!["--json", "agent", "checkpoint", "show", id],
+        vec!["--json", "agent", "graph", "sess-x"],
+    ] {
+        let result = cli(&args)?;
+        let wire = format!(
+            "{}{}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+        anyhow::ensure!(
+            !wire.contains(sha)
+                && !wire.contains(&oid.to_string())
+                && !wire.contains("reasoning/encrypted/")
+        );
+    }
+    let erased_sync = cli(&["--json", "cloud", "sync"])?;
+    anyhow::ensure!(
+        erased_sync.status.success(),
+        "actual erase cloud sync failed: {}",
+        String::from_utf8_lossy(&erased_sync.stderr)
+    );
+    let generation = client
+        .get_agent_capture_generation(repo_id)
+        .await
+        .map_err(|_| anyhow::anyhow!("RG-05 live fixture service operation failed"))?
+        .ok_or_else(|| anyhow::anyhow!("erasure generation is absent"))?;
+    anyhow::ensure!(generation.state == "complete");
+    anyhow::ensure!(
+        client
+            .list_agent_sessions(repo_id)
+            .await
+            .map_err(|_| anyhow::anyhow!("RG-05 live fixture service operation failed"))?
+            .is_empty()
+    );
+    anyhow::ensure!(
+        client
+            .list_agent_checkpoints(repo_id)
+            .await
+            .map_err(|_| anyhow::anyhow!("RG-05 live fixture service operation failed"))?
+            .is_empty()
+    );
+    let restored = client
+        .list_agent_capture_restore_catalog_rows(repo_id, true, 100)
+        .await
+        .map_err(|_| anyhow::anyhow!("RG-05 live fixture service operation failed"))?;
+    anyhow::ensure!(
+        restored.import_tombstones.len() == 1
+            && restored.import_tombstones[0].provider_session_id == "p-x"
+    );
+    // Production physical R2 erasure is deferred; availability never becomes
+    // decrypted/plaintext and erased readers have no artifact references.
+    Ok(())
+}
+
+#[cfg(feature = "test-live-cloud")]
+async fn cleanup_reasoning_lifecycle_namespace(
+    client: &D1Client,
+    store: Arc<dyn object_store::ObjectStore>,
+    repo_id: &str,
+) -> anyhow::Result<()> {
+    use futures::TryStreamExt;
+    use object_store::ObjectStoreExt;
+    anyhow::ensure!(Uuid::parse_str(repo_id)?.to_string() == repo_id);
+    let tables: Vec<serde_json::Value> = client
+        .query(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND sql LIKE '%repo_id%'",
+            None,
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("RG-05 live fixture service operation failed"))?;
+    for table in tables {
+        let name = table["name"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("fixture cleanup table is invalid"))?;
+        anyhow::ensure!(name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_'));
+        client
+            .execute(
+                &format!("DELETE FROM \"{name}\" WHERE repo_id = ?1"),
+                Some(vec![serde_json::json!(repo_id)]),
+            )
+            .await
+            .map_err(|_| anyhow::anyhow!("RG-05 live fixture service operation failed"))?;
+    }
+    let prefix = object_store::path::Path::from(format!("{repo_id}/"));
+    let objects: Vec<_> = store
+        .list(Some(&prefix))
+        .try_collect()
+        .await
+        .map_err(|_| anyhow::anyhow!("RG-05 live fixture service operation failed"))?;
+    for object in objects {
+        anyhow::ensure!(object.location.as_ref().starts_with(&format!("{repo_id}/")));
+        store
+            .delete(&object.location)
+            .await
+            .map_err(|_| anyhow::anyhow!("RG-05 live fixture service operation failed"))?;
+    }
+    Ok(())
+}
+
 fn env_is_present(name: &str) -> bool {
     std::env::var(name).is_ok_and(|value| !value.is_empty())
 }

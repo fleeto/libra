@@ -1634,6 +1634,9 @@ fn require_consent(
     candidate_count: usize,
     deadline: Instant,
 ) -> CliResult<()> {
+    if !output.quiet {
+        eprintln!("{}", super::CIPHERTEXT_ARCHIVE_DISCLOSURE);
+    }
     if args.yes {
         return Ok(());
     }

@@ -2057,12 +2057,12 @@ fn nextest_groups_toml_matches_generator_and_registry() {
     // DEFER-NP-02 (executed 2026-09-17, user-directed): the TA-03 fail-closed
     // expansions carry only the in-process closed set {cwd, env, hash_kind},
     // so the union group holds exactly the genuinely external rows — the
-    // hand-keyed cloud_live (10 after CM-10 added the Agent catalog roundtrip),
+    // hand-keyed cloud_live (11 after RG-05 added the artifact lifecycle gate),
     // workspace_failpoints (1), long-lived service-fixture (10), and OpenCode
     // export bridge (9) tests. A count drift here means a new test was keyed
     // with an external resource (fine, but deliberate) or a fail-closed body
     // was re-widened by hand (not fine).
-    assert_eq!(toml_fns.len(), 30, "union fn member count drifted");
+    assert_eq!(toml_fns.len(), 31, "union fn member count drifted");
     // RC-23 deleted the seven Code UI matrix binaries that used to host
     // pure-global macro site rows. The external group now has no binary filters.
     assert_eq!(toml_bins.len(), 0, "site host target count drifted");

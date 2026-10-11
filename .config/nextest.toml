@@ -95,6 +95,10 @@ filter = 'test(/(^|::)r2_connection_basic$/)'
 test-group = 'external'
 
 [[profile.default.overrides]]
+filter = 'test(/(^|::)reasoning_artifact_mirrors_and_erases_with_checkpoint$/)'
+test-group = 'external'
+
+[[profile.default.overrides]]
 filter = 'test(/(^|::)service_dirty_mark_requires_matching_repo_id$/)'
 test-group = 'external'
 

@@ -249,6 +249,7 @@ const CLASS_EXPIRED_INFLIGHT_MARKER: &str = "expired_inflight_marker";
 const CLASS_CONFLICTED_COVERAGE_CLAIM: &str = "conflicted_coverage_claim";
 const CLASS_UNRESOLVED_SUBAGENT_LINK: &str = "unresolved_subagent_link";
 const CLASS_INCONSISTENT_SUBAGENT_CONTENT: &str = "inconsistent_subagent_content";
+const CLASS_INCONSISTENT_REASONING_ARTIFACT: &str = "inconsistent_reasoning_artifact";
 /// A0-06: a run manifest's `findings_oid` points at a blob missing from the
 /// object store.
 const CLASS_MISSING_FINDINGS_OBJECT: &str = "missing_findings_object";
@@ -2425,6 +2426,70 @@ async fn scan_checkpoint_store(
 
     // ---- Class 3: checkpoint objects missing from object_index ---------
     let repo_id = resolve_repo_id(conn).await;
+    // RG-05: prove artifact role closure, decoded size and complete SHA-256
+    // in the registered bounded helper. Its response carries no ciphertext.
+    // A bad declaration is manual-only: never repair indexes from its claims.
+    let artifact_specs = rows
+        .iter()
+        .filter(|row| {
+            !legacy_ids.contains(&row.checkpoint_id)
+                && !manual_checkpoint_ids.contains(&row.checkpoint_id)
+        })
+        .map(
+            |row| crate::internal::ai::history::ReasoningArtifactCheckpointSpec {
+                checkpoint_id: row.checkpoint_id.clone(),
+                tree_oid: ref_map
+                    .get(&row.checkpoint_id)
+                    .map_or_else(|| row.tree_oid.clone(), |rc| rc.root_tree.clone()),
+            },
+        )
+        .collect::<Vec<_>>();
+    let artifact_deadline = std::time::Instant::now().checked_add(Duration::from_secs(30));
+    let artifact_checks = if artifact_specs.is_empty() {
+        Some(Vec::new())
+    } else if let Some(deadline) = artifact_deadline {
+        crate::internal::ai::history::checkpoint_reasoning_artifact_proofs(
+            &repo_path,
+            &artifact_specs,
+            deadline,
+        )
+        .await
+        .ok()
+    } else {
+        None
+    };
+    if let Some(checks) = artifact_checks {
+        for check in checks {
+            let mut inconsistent = check.artifacts.is_none();
+            if let Some(artifacts) = check.artifacts {
+                for artifact in artifacts {
+                    let indexed = object_index_row_shape(conn, &artifact.oid, &repo_id).await?;
+                    if !indexed.is_some_and(|(kind, size)| {
+                        kind == "blob" && u64::try_from(size).ok() == Some(artifact.byte_len)
+                    }) {
+                        inconsistent = true;
+                        break;
+                    }
+                }
+            }
+            if inconsistent {
+                manual_checkpoint_ids.insert(check.checkpoint_id.clone());
+                findings.push(CheckpointFinding {
+                    inconsistency_type: CLASS_INCONSISTENT_REASONING_ARTIFACT.to_string(),
+                    checkpoint_id: diagnostic_checkpoint_id(&check.checkpoint_id),
+                    detail: "reasoning artifact manifest role, canonical tree, object index, decoded size or SHA-256 is inconsistent; no automatic repair was applied; inspect the checkpoint and restore trusted evidence before cloud sync".to_string(),
+                    repaired: false,
+                    manual_required: true,
+                });
+                plans.push(RepairPlan::Manual);
+            }
+        }
+    } else {
+        // Preserve doctor availability while clearly reporting incomplete
+        // coverage. Unverified rows cannot authorize later index repairs.
+        manual_checkpoint_ids.extend(artifact_specs.iter().map(|spec| spec.checkpoint_id.clone()));
+        notes.push("reasoning artifact lifecycle scan unavailable or exceeded its safety budget; these checkpoint indexes were not repaired".to_string());
+    }
     let mut validation_budget = ObjectIndexValidationBudget::new();
     for row in &rows {
         if legacy_ids.contains(&row.checkpoint_id)

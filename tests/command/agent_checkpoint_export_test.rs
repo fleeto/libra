@@ -37,7 +37,157 @@ use sha2::{Digest, Sha256};
 
 use super::{init_repo_via_cli, run_libra_command};
 
+#[path = "../helpers/reasoning_artifact.rs"]
+mod reasoning_lifecycle_fixture;
+
 const SECRET: &str = "AKIAIOSFODNN7EXAMPLE";
+
+#[tokio::test]
+async fn erased_session_hides_reasoning_refs_and_gc_prevents_export() {
+    let repo = tempfile::tempdir().unwrap();
+    init_repo_via_cli(repo.path());
+    let (id, sha, oid) = reasoning_lifecycle_fixture::seed(repo.path()).await;
+    let show = run_libra_command(&["--json", "agent", "checkpoint", "show", &id], repo.path());
+    assert!(
+        show.status.success(),
+        "{}",
+        String::from_utf8_lossy(&show.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&show.stdout).unwrap();
+    assert_eq!(
+        value["data"]["reasoning_artifacts"][0]["availability"],
+        "encrypted_unavailable"
+    );
+    let export = repo.path().join("synthetic-export");
+    let exported = run_libra_command(
+        &[
+            "agent",
+            "checkpoint",
+            "export",
+            &id,
+            "--reasoning-artifact",
+            &sha,
+            "--allow-raw",
+            "--justification",
+            "synthetic lifecycle acceptance",
+            "--output-path",
+            export.to_str().unwrap(),
+        ],
+        repo.path(),
+    );
+    assert!(
+        exported.status.success(),
+        "{}",
+        String::from_utf8_lossy(&exported.stderr)
+    );
+    assert_eq!(
+        std::fs::read(export).unwrap(),
+        reasoning_lifecycle_fixture::SYNTHETIC_BODY
+    );
+    reasoning_lifecycle_fixture::erase(repo.path()).await;
+    for args in [
+        vec![
+            "--json",
+            "agent",
+            "checkpoint",
+            "list",
+            "--session",
+            "sess-x",
+        ],
+        vec!["--json", "agent", "checkpoint", "show", &id],
+        vec!["--json", "agent", "graph", "sess-x"],
+    ] {
+        let out = run_libra_command(&args, repo.path());
+        let wire = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(!wire.contains(&sha) && !wire.contains(&oid.to_string()));
+        assert!(!wire.contains("reasoning/encrypted/"));
+        if args[3] != "show" {
+            assert!(out.status.success(), "{wire}");
+        }
+    }
+    let clean = run_libra_command(&["agent", "clean", "--gc"], repo.path());
+    assert!(
+        clean.status.success(),
+        "{}",
+        String::from_utf8_lossy(&clean.stderr)
+    );
+    run_two_gc_scans(repo.path());
+    assert!(!artifact_object_path(repo.path(), &oid.to_string()).exists());
+    let destination = repo.path().join("erased-export");
+    let denied = run_libra_command(
+        &[
+            "agent",
+            "checkpoint",
+            "export",
+            &id,
+            "--reasoning-artifact",
+            &sha,
+            "--allow-raw",
+            "--justification",
+            "synthetic lifecycle acceptance",
+            "--output-path",
+            destination.to_str().unwrap(),
+        ],
+        repo.path(),
+    );
+    assert!(!denied.status.success());
+    assert!(!destination.exists());
+}
+
+#[tokio::test]
+async fn doctor_flags_inconsistent_reasoning_artifact_digest() {
+    for damage in ["digest", "index_size", "index_type", "index_missing"] {
+        let repo = tempfile::tempdir().unwrap();
+        init_repo_via_cli(repo.path());
+        let (id, _, oid) = if damage == "digest" {
+            reasoning_lifecycle_fixture::seed_with_bad_digest(repo.path()).await
+        } else {
+            reasoning_lifecycle_fixture::seed(repo.path()).await
+        };
+        if damage != "digest" {
+            let conn = connect_repo_db(repo.path()).await;
+            let sql = match damage {
+                "index_size" => "UPDATE object_index SET o_size = o_size + 1 WHERE o_id = ?",
+                "index_type" => "UPDATE object_index SET o_type = 'tree' WHERE o_id = ?",
+                _ => "DELETE FROM object_index WHERE o_id = ?",
+            };
+            conn.execute_raw(Statement::from_sql_and_values(
+                conn.get_database_backend(),
+                sql,
+                [oid.to_string().into()],
+            ))
+            .await
+            .unwrap();
+            conn.close().await.unwrap();
+        }
+        let out = run_libra_command(&["--json", "agent", "doctor"], repo.path());
+        assert!(
+            out.status.success(),
+            "{damage}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        let findings = report["data"]["checkpoint_store"]["findings"]
+            .as_array()
+            .unwrap();
+        assert!(
+            findings.iter().any(|finding| finding["checkpoint_id"] == id
+                && finding["inconsistency_type"] == "inconsistent_reasoning_artifact"
+                && finding["manual_required"] == true
+                && finding["repaired"] == false),
+            "{damage}: {report}"
+        );
+        assert!(
+            !String::from_utf8_lossy(&out.stdout).contains(
+                std::str::from_utf8(reasoning_lifecycle_fixture::SYNTHETIC_BODY).unwrap()
+            )
+        );
+    }
+}
 
 async fn connect_repo_db(repo: &Path) -> DatabaseConnection {
     let db_path = repo.join(".libra").join("libra.db");

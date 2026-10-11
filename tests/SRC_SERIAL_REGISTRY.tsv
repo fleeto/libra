@@ -474,3 +474,8 @@ src/internal/ai/observed_agents/builtin/stable_promoted.rs	codex_rollout_discove
 src/internal/ai/observed_agents/builtin/stable_promoted.rs	codex_rollout_discovery_hardening	lane:env	uses test-local LIBRA_TEST_HOME and CODEX_HOME while hardening Codex rollout discovery
 src/internal/ai/observed_agents/builtin/stable_promoted.rs	codex_rollout_discovery_rejects_symlinked_sessions_root	lane:env	uses test-local LIBRA_TEST_HOME and CODEX_HOME while rejecting a symlinked Codex sessions root
 src/internal/ai/checkpoint_reader.rs	fix_rg_scoped_01_catalog_identity	lane:cwd+env	uses ChangeDirGuard and the real init writer to verify explicit storage catalog format and identity independently of cwd
+src/command/cloud/agent_capture.rs	remote_missing_artifact_fails_sync	lane:cwd+env	RG-05 controlled ConfigDbFixture and setup_with_new_libra_in with ChangeDirGuard; actual src classifier lane:cwd+env
+src/command/cloud/agent_capture.rs	remote_size_mismatch_fails_sync	lane:cwd+env	RG-05 controlled ConfigDbFixture and setup_with_new_libra_in with ChangeDirGuard; actual src classifier lane:cwd+env
+src/command/cloud/agent_capture.rs	remote_digest_mismatch_fails_sync	lane:cwd+env	RG-05 controlled ConfigDbFixture and setup_with_new_libra_in with ChangeDirGuard; actual src classifier lane:cwd+env
+src/command/cloud/agent_capture.rs	first_missing_artifact_is_uploaded_and_completed	lane:cwd+env	RG-05 controlled ConfigDbFixture and setup_with_new_libra_in with ChangeDirGuard; actual src classifier lane:cwd+env
+src/command/cloud/agent_capture.rs	artifact_lifecycle_helper_proves_roles_without_returning_ciphertext	lane:hash_kind	RG-05 synthetic private helper actual hash-context loop; no model or native proof; holds hash_kind lane

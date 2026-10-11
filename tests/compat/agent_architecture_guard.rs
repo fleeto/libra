@@ -329,28 +329,43 @@ fn private_capture_identity_has_no_source_opener() {
             .any(|sql| sql.contains("metadata_kv"))
     );
 
-    // ACF-15 may add only the exact cfg(test) canary module to this source.
-    // Pin the pre-existing remainder: a serializer edit requires plan review,
-    // not a quiet update of the canary or its expected snapshot. Re-pinned
-    // for the plan-20260924 R85 cloud fix (legacy-row projection, single
-    // failure emission), reviewed and recorded in that plan.
+    // RG-05 deliberately extends the formerly frozen ACF-15 serializer.
+    // Pin both production regions, including the new proof helpers; the
+    // cfg(test) canary remains excluded. Any further production edit must
+    // receive task scope review and Claude review before these pins change.
     let (_, cloud) = parse_rust_source("src/command/cloud/agent_capture.rs");
     assert!(matches!(&cloud.items[0], syn::Item::Use(item)
         if matches!(&item.tree, syn::UseTree::Path(path) if path.ident == "super")));
-    assert!(matches!(&cloud.items[1], syn::Item::Mod(item)
-        if item.ident == "tests" && has_exact_cfg_test(&item.attrs)));
-    assert!(matches!(&cloud.items[2], syn::Item::Const(item)
-        if item.ident == "AGENT_CAPTURE_LOCAL_PAGE_SIZE"));
+    assert!(
+        cloud
+            .items
+            .iter()
+            .any(|item| matches!(item, syn::Item::Mod(item)
+        if item.ident == "tests" && has_exact_cfg_test(&item.attrs)))
+    );
+    assert!(
+        cloud
+            .items
+            .iter()
+            .any(|item| matches!(item, syn::Item::Const(item)
+        if item.ident == "AGENT_CAPTURE_LOCAL_PAGE_SIZE"))
+    );
     let source =
         fs::read_to_string(repo_root().join("src/command/cloud/agent_capture.rs")).unwrap();
+    let (prefix, _) = source.split_once("\n#[cfg(test)]\nmod tests").unwrap();
+    assert_eq!(
+        hex::encode(Sha256::digest(prefix.as_bytes())),
+        "1b477e373f2554623a8e7121896e09ed5a806a2174845750b6ebf903d7b03912",
+        "RG-05 cloud proof helper edit requires scope and Claude review"
+    );
     let (_, remainder) = source
         .split_once("\nconst AGENT_CAPTURE_LOCAL_PAGE_SIZE")
         .unwrap();
     let remainder = format!("const AGENT_CAPTURE_LOCAL_PAGE_SIZE{remainder}");
     assert_eq!(
         hex::encode(Sha256::digest(remainder.as_bytes())),
-        "1d7babd3353b3f431d06accf3354b9f58bc7448645ebea95b03d224aa9040840",
-        "ACF-15 cloud edit must be test-only; serializer change requires scope review"
+        "06b56c63413da64355910602a1bfb109d1ee2a8d546832edf75276029c5ed469",
+        "RG-05 cloud serializer edit requires scope and Claude review"
     );
 }
 

@@ -483,6 +483,35 @@ enum CheckpointObjectIoOperation<'a> {
         cataloged_commits: Vec<String>,
         checkpoints: Vec<CheckpointDurabilityHelperSpec>,
     },
+    VerifyReasoningArtifacts {
+        object_format: CheckpointOpaqueObjectFormat,
+        checkpoints: Vec<ReasoningArtifactCheckpointSpec>,
+    },
+}
+
+/// Safe lifecycle evidence only. Ciphertext never crosses the helper boundary.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ReasoningArtifactCheckpointSpec {
+    pub(crate) checkpoint_id: String,
+    pub(crate) tree_oid: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ReasoningArtifactObjectProof {
+    pub(crate) oid: String,
+    pub(crate) sha256: String,
+    pub(crate) byte_len: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ReasoningArtifactCheckpointProof {
+    pub(crate) checkpoint_id: String,
+    pub(crate) tree_oid: String,
+    /// None means role/integrity could not be proved; an empty set is valid.
+    pub(crate) artifacts: Option<Vec<ReasoningArtifactObjectProof>>,
 }
 
 /// Private opaque writes carry the parent's preclaimed object algorithm.
@@ -589,6 +618,9 @@ enum CheckpointObjectIoHelperResponse {
     },
     Verified {
         oids: Vec<String>,
+    },
+    ReasoningArtifacts {
+        checkpoints: Vec<ReasoningArtifactCheckpointProof>,
     },
     Error {
         code: CheckpointObjectIoHelperError,
@@ -1300,6 +1332,22 @@ pub fn run_checkpoint_object_io_helper(input: &[u8]) -> Result<Vec<u8>> {
                             let mut oids = oids.into_iter().collect::<Vec<_>>();
                             oids.sort();
                             CheckpointObjectIoHelperResponse::Verified { oids }
+                        }
+                        Err(_) => CheckpointObjectIoHelperResponse::Error {
+                            code: CheckpointObjectIoHelperError::SnapshotNotDurable,
+                        },
+                    }
+                }
+                CheckpointObjectIoOperation::VerifyReasoningArtifacts {
+                    object_format,
+                    checkpoints,
+                } => {
+                    // This private process owns its hash context; never infer
+                    // a 64-hex repository algorithm from the identifier length.
+                    git_internal::hash::set_hash_kind(object_format.hash_kind());
+                    match verify_reasoning_artifact_checkpoints(&repo_path, &checkpoints, None) {
+                        Ok(checkpoints) => {
+                            CheckpointObjectIoHelperResponse::ReasoningArtifacts { checkpoints }
                         }
                         Err(_) => CheckpointObjectIoHelperResponse::Error {
                             code: CheckpointObjectIoHelperError::SnapshotNotDurable,
@@ -2372,7 +2420,8 @@ impl HistoryManager {
                 CheckpointObjectIoHelperResponse::Read { .. } => {
                     bail!("checkpoint object-I/O helper returned a read response for a write")
                 }
-                CheckpointObjectIoHelperResponse::Verified { .. } => {
+                CheckpointObjectIoHelperResponse::Verified { .. }
+                | CheckpointObjectIoHelperResponse::ReasoningArtifacts { .. } => {
                     bail!("checkpoint object-I/O helper returned a verify response for a write")
                 }
             }
@@ -2465,7 +2514,8 @@ impl HistoryManager {
             CheckpointObjectIoHelperResponse::Written { .. } => {
                 bail!("checkpoint object-I/O helper returned a write response for a read")
             }
-            CheckpointObjectIoHelperResponse::Verified { .. } => {
+            CheckpointObjectIoHelperResponse::Verified { .. }
+            | CheckpointObjectIoHelperResponse::ReasoningArtifacts { .. } => {
                 bail!("checkpoint object-I/O helper returned a verify response for a read")
             }
         }
@@ -6056,7 +6106,8 @@ pub(crate) async fn checkpoint_rows_snapshot_durable_oids_from_head(
             CheckpointObjectIoHelperResponse::Verified { oids } => Ok(oids.into_iter().collect()),
             CheckpointObjectIoHelperResponse::Error { code } => bail!("{}", code.user_message()),
             CheckpointObjectIoHelperResponse::Read { .. }
-            | CheckpointObjectIoHelperResponse::Written { .. } => {
+            | CheckpointObjectIoHelperResponse::Written { .. }
+            | CheckpointObjectIoHelperResponse::ReasoningArtifacts { .. } => {
                 bail!("checkpoint object-I/O helper returned a non-verify response")
             }
         };
@@ -6077,6 +6128,158 @@ fn parse_cataloged_traces_commits(commits: &[String]) -> Result<HashSet<String>>
         bail!("checkpoint catalog exceeds its durability verification limit");
     }
     Ok(commits.iter().cloned().collect())
+}
+
+/// Verify the selected immutable checkpoint trees in the registered object
+/// helper, under the caller's existing absolute deadline. Ordinary bodies are
+/// excluded; artifact bodies are bounded and discarded inside the helper.
+pub(crate) async fn checkpoint_reasoning_artifact_proofs(
+    repo_path: &Path,
+    checkpoints: &[ReasoningArtifactCheckpointSpec],
+    deadline: Instant,
+) -> Result<Vec<ReasoningArtifactCheckpointProof>> {
+    if Instant::now() >= deadline
+        || checkpoints.len() > CHECKPOINT_DURABILITY_MAX_REACHABLE_COMMITS
+        || checkpoints
+            .iter()
+            .any(|checkpoint| checkpoint.checkpoint_id.len() > 64 || checkpoint.tree_oid.len() > 64)
+    {
+        bail!("checkpoint lifecycle verification exceeds its deadline or input limits");
+    }
+    if checkpoints.is_empty() {
+        return Ok(Vec::new());
+    }
+    #[cfg(not(test))]
+    {
+        return match invoke_checkpoint_object_helper(
+            repo_path,
+            CheckpointObjectIoOperation::VerifyReasoningArtifacts {
+                object_format: CheckpointOpaqueObjectFormat::from_kind(
+                    git_internal::hash::get_hash_kind(),
+                ),
+                checkpoints: checkpoints.to_vec(),
+            },
+            deadline,
+        )
+        .await?
+        {
+            CheckpointObjectIoHelperResponse::ReasoningArtifacts { checkpoints } => Ok(checkpoints),
+            CheckpointObjectIoHelperResponse::Error { code } => bail!("{}", code.user_message()),
+            _ => bail!("checkpoint object-I/O helper returned unexpected lifecycle evidence"),
+        };
+    }
+    #[cfg(test)]
+    verify_reasoning_artifact_checkpoints(repo_path, checkpoints, Some(deadline))
+}
+
+fn verify_reasoning_artifact_checkpoints(
+    repo_path: &Path,
+    checkpoints: &[ReasoningArtifactCheckpointSpec],
+    deadline: Option<Instant>,
+) -> Result<Vec<ReasoningArtifactCheckpointProof>> {
+    if checkpoints.len() > CHECKPOINT_DURABILITY_MAX_REACHABLE_COMMITS {
+        bail!("checkpoint lifecycle evidence exceeds its checkpoint limit");
+    }
+    let mut results = Vec::with_capacity(checkpoints.len());
+    let mut artifact_count = 0usize;
+    for checkpoint in checkpoints {
+        if deadline.is_some_and(|end| Instant::now() >= end) {
+            bail!("checkpoint lifecycle verification exceeded its deadline");
+        }
+        let artifacts = verify_checkpoint_reasoning_artifacts(repo_path, checkpoint).ok();
+        artifact_count = artifact_count
+            .checked_add(artifacts.as_ref().map_or(0, Vec::len))
+            .filter(|count| *count <= CHECKPOINT_DURABILITY_MAX_OBJECTS)
+            .context("checkpoint lifecycle evidence exceeds its object limit")?;
+        results.push(ReasoningArtifactCheckpointProof {
+            checkpoint_id: checkpoint.checkpoint_id.clone(),
+            tree_oid: checkpoint.tree_oid.clone(),
+            artifacts,
+        });
+    }
+    Ok(results)
+}
+
+fn verify_checkpoint_reasoning_artifacts(
+    repo_path: &Path,
+    checkpoint: &ReasoningArtifactCheckpointSpec,
+) -> Result<Vec<ReasoningArtifactObjectProof>> {
+    use sha2::{Digest, Sha256};
+
+    use crate::internal::ai::checkpoint_reader as reader;
+
+    let root = reader::read_tree_object(repo_path, &checkpoint.tree_oid)
+        .map_err(|_| anyhow!("checkpoint artifact root is inconsistent"))?;
+    let (prefix, rest) = checkpoint_tree_path(&checkpoint.checkpoint_id)?;
+    let checkpoints = reader::subtree(repo_path, &root, "checkpoint")
+        .map_err(|_| anyhow!("checkpoint artifact directory is inconsistent"))?;
+    let prefix = reader::subtree(repo_path, &checkpoints, &prefix)
+        .map_err(|_| anyhow!("checkpoint artifact prefix is inconsistent"))?;
+    let inner = reader::subtree(repo_path, &prefix, &rest)
+        .map_err(|_| anyhow!("checkpoint artifact leaf is inconsistent"))?;
+    let artifact_oids = reader::reasoning_artifact_tree_oids(repo_path, &inner)?;
+    let Some(item) = reader::tree_entry(&inner, "manifest.json") else {
+        reader::validate_reasoning_artifact_tree(repo_path, &inner, &[])?;
+        return Ok(Vec::new());
+    };
+    reader::reject_artifact_alias(&item.id, &artifact_oids)?;
+    if item.mode != TreeItemMode::Blob {
+        bail!("checkpoint artifact manifest has an inconsistent role");
+    }
+    let (bytes, truncated) = reader::read_checkpoint_object_bounded(
+        repo_path,
+        &item.id,
+        reader::CHECKPOINT_METADATA_READ_MAX_BYTES,
+    )
+    .map_err(|_| anyhow!("checkpoint artifact manifest is inconsistent"))?;
+    if truncated {
+        bail!("checkpoint artifact manifest exceeds its byte limit");
+    }
+    let manifest: serde_json::Value = serde_json::from_slice(&bytes)
+        .map_err(|_| anyhow!("checkpoint artifact manifest is inconsistent"))?;
+    let metadata = reader::reasoning_artifact_metadata(&manifest)?;
+    reader::validate_reasoning_artifact_tree(repo_path, &inner, &metadata)?;
+    if metadata.is_empty() {
+        return Ok(Vec::new());
+    }
+    let ordinary = reader::checkpoint_plain_files(repo_path, &inner, &artifact_oids)?;
+    reader::checkpoint_plain_manifest(repo_path, &inner, &artifact_oids, &ordinary)?;
+    let mut objects: std::collections::BTreeMap<String, ReasoningArtifactObjectProof> =
+        std::collections::BTreeMap::new();
+    let mut total = 0u64;
+    for entry in metadata {
+        if let std::collections::btree_map::Entry::Vacant(slot) = objects.entry(entry.oid.clone()) {
+            let oid = crate::internal::object_format::parse_repo_oid(&entry.oid)
+                .map_err(|_| anyhow!("checkpoint artifact object id is inconsistent"))?;
+            let remaining = REASONING_ARTIFACT_TOTAL_MAX_BYTES
+                .checked_sub(total)
+                .context("checkpoint artifacts exceed their aggregate byte limit")?;
+            let (body, truncated) =
+                reader::read_checkpoint_object_bounded(repo_path, &oid, remaining)
+                    .map_err(|_| anyhow!("checkpoint artifact object is inconsistent"))?;
+            if truncated || hex::encode(Sha256::digest(&body)) != entry.sha256 {
+                bail!("checkpoint artifact digest or byte budget is inconsistent");
+            }
+            slot.insert(ReasoningArtifactObjectProof {
+                oid: entry.oid.clone(),
+                sha256: entry.sha256.clone(),
+                byte_len: body.len() as u64,
+            });
+        }
+        let proof = objects
+            .get(&entry.oid)
+            .context("checkpoint artifact lifecycle evidence is missing")?;
+        if entry.byte_len.is_some_and(|size| size != proof.byte_len) {
+            bail!("checkpoint artifact declared size is inconsistent");
+        }
+        // Charge every declaration, including deduplicated locator aliases,
+        // exactly as the capture writer does. Legacy absent sizes are measured.
+        total = total
+            .checked_add(proof.byte_len)
+            .filter(|bytes| *bytes <= REASONING_ARTIFACT_TOTAL_MAX_BYTES)
+            .context("checkpoint artifacts exceed their aggregate byte limit")?;
+    }
+    Ok(objects.into_values().collect())
 }
 
 fn checkpoint_snapshot_durable_oids_from_head(

@@ -456,6 +456,8 @@ fn enable_agents(agents: &[String], output: &OutputConfig) -> CliResult<()> {
     install_or_uninstall(agents, output, true)
 }
 
+pub(super) const CIPHERTEXT_ARCHIVE_DISCLOSURE: &str = "Provider-encrypted reasoning original bytes may be archived without decryption and mirrored to cloud storage with their checkpoint; session erasure hides the references and local GC reclaims unreachable objects. Native source proof is required; unproved fields are not archived.";
+
 fn disable_agents(agents: &[String], output: &OutputConfig) -> CliResult<()> {
     install_or_uninstall(agents, output, false)
 }
@@ -490,6 +492,9 @@ fn install_or_uninstall(agents: &[String], output: &OutputConfig, install: bool)
                 supported_slugs().join(", ")
             )));
         }
+    }
+    if install && !output.quiet {
+        eprintln!("{CIPHERTEXT_ARCHIVE_DISCLOSURE}");
     }
 
     for kind in resolved {
@@ -633,6 +638,18 @@ fn resolve_agent_kinds(agents: &[String]) -> CliResult<Vec<AgentKind>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn consent_text_discloses_ciphertext_archive() {
+        assert_eq!(
+            CIPHERTEXT_ARCHIVE_DISCLOSURE,
+            "Provider-encrypted reasoning original bytes may be archived without decryption and mirrored to cloud storage with their checkpoint; session erasure hides the references and local GC reclaims unreachable objects. Native source proof is required; unproved fields are not archived."
+        );
+        let enable = include_str!("mod.rs");
+        let import = include_str!("import.rs");
+        assert!(enable.contains("eprintln!(\"{CIPHERTEXT_ARCHIVE_DISCLOSURE}\")"));
+        assert!(import.contains("super::CIPHERTEXT_ARCHIVE_DISCLOSURE"));
+    }
 
     #[test]
     fn resolve_agent_kinds_expands_empty_to_supported_roster() {

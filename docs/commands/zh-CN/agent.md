@@ -740,3 +740,12 @@ Linux 本地功能验收留给使用者。
 
 
 已证明为本类型终态的 state 在 manifest 缺失时仍可清理。review 基础设施失败可能没有 reviewer 结果行，而 manifest 仍保留请求的 reviewer；该受支持形状可以清理。无法解析的 manifest 即使伴随可证明的终态 state 也仍拒绝：保留 run，修复其元数据后再重试。
+
+
+### Provider 已加密 reasoning 的生命周期
+
+`libra cloud sync` 在开始 generation 前校验 reasoning artifact 的 manifest role、规范树、`object_index`、解码后的 `byte_len` 与完整 SHA-256。首次缺失先正常上传/修复，上传后的读回仍失败则不能完成 generation；校验过的 checkpoint 树与 artifact 索引还必须匹配最终 fenced generation。校验不输出密文内容。
+
+会话擦除使 checkpoint list/show 和 session graph 不再暴露 artifact ref；`agent clean --gc` 与仓库 GC 按既有保留窗口回收不可达的本地 artifact。`agent doctor` 以 `inconsistent_reasoning_artifact` 和精确的规范 `checkpoint_id` 报告不一致，要求人工修复；这是只读 finding，不新增持久化 status 列。R2 物理 payload 删除仍延期；云 tombstone 删除镜像目录行并阻止正常 restore 复活。
+
+非 quiet 的 `agent enable` 和 `agent import --yes` 披露 provider 已加密 reasoning 原字节可能在不解密的情况下归档，并随 checkpoint 云镜像。合成生命周期 fixture 在可见时始终为 `encrypted_unavailable`，擦除后不再有引用；它们不证明 native 来源或 decryptor。native 来源证明要求继续保留，未获证明的 OpenCode 字段不归档。

@@ -1,7 +1,107 @@
 use super::*;
+use crate::internal::ai::history::{
+    ReasoningArtifactCheckpointProof, ReasoningArtifactCheckpointSpec,
+    ReasoningArtifactObjectProof, checkpoint_reasoning_artifact_proofs,
+};
+
+/// The exact trees whose role/digest/size checks succeeded before publication.
+/// This evidence must also match the final fenced catalog and object index.
+struct ReasoningArtifactPublicationProof {
+    checkpoints: Vec<ReasoningArtifactCheckpointProof>,
+    objects: HashMap<String, ReasoningArtifactObjectProof>,
+}
+
+impl ReasoningArtifactPublicationProof {
+    async fn establish(
+        storage: &std::path::Path,
+        checkpoints: &[AgentCheckpointV2Row],
+        deadline: std::time::Instant,
+    ) -> CloudResult<Self> {
+        let specs = checkpoints
+            .iter()
+            .map(|row| ReasoningArtifactCheckpointSpec {
+                checkpoint_id: row.checkpoint_id.clone(),
+                tree_oid: row.tree_oid.clone(),
+            })
+            .collect::<Vec<_>>();
+        let evidence = checkpoint_reasoning_artifact_proofs(storage, &specs, deadline)
+            .await
+            .map_err(|_| artifact_integrity_failure())?;
+        let mut objects = HashMap::new();
+        for proof in &evidence {
+            for artifact in proof
+                .artifacts
+                .as_ref()
+                .ok_or_else(artifact_integrity_failure)?
+            {
+                if let Some(previous) = objects.insert(artifact.oid.clone(), artifact.clone())
+                    && (previous.sha256 != artifact.sha256
+                        || previous.byte_len != artifact.byte_len)
+                {
+                    return Err(artifact_integrity_failure());
+                }
+            }
+        }
+        let result = Self {
+            checkpoints: evidence,
+            objects,
+        };
+        result.validate_catalog(checkpoints)?;
+        Ok(result)
+    }
+
+    fn validate_catalog(&self, checkpoints: &[AgentCheckpointV2Row]) -> CloudResult<()> {
+        let trees = checkpoints
+            .iter()
+            .map(|row| (row.checkpoint_id.as_str(), row.tree_oid.as_str()))
+            .collect::<HashMap<_, _>>();
+        if trees.len() != checkpoints.len()
+            || trees.len() != self.checkpoints.len()
+            || self.checkpoints.iter().any(|proof| {
+                proof.artifacts.is_none()
+                    || trees.get(proof.checkpoint_id.as_str()).copied()
+                        != Some(proof.tree_oid.as_str())
+            })
+        {
+            return Err(artifact_integrity_failure());
+        }
+        Ok(())
+    }
+
+    fn validate_indexes(&self, indexes: &[ObjectIndexRow]) -> CloudResult<()> {
+        let rows = indexes
+            .iter()
+            .map(|row| (row.o_id.as_str(), row))
+            .collect::<HashMap<_, _>>();
+        if self.objects.values().any(|proof| {
+            !rows.get(proof.oid.as_str()).is_some_and(|row| {
+                row.o_type == "blob"
+                    && row.is_synced == 1
+                    && u64::try_from(row.o_size).ok() == Some(proof.byte_len)
+            })
+        }) {
+            return Err(artifact_integrity_failure());
+        }
+        Ok(())
+    }
+}
+
+fn artifact_integrity_failure() -> CloudError {
+    CloudError::PartialTransfer(
+        "reasoning artifact role, digest, size, or object index is inconsistent; run `libra agent doctor` and repair the checkpoint before retrying cloud sync".to_string(),
+    )
+}
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    use git_internal::internal::object::{
+        ObjectTrait,
+        commit::Commit,
+        signature::{Signature, SignatureType},
+        types::ObjectType,
+    };
     use sea_orm::{ConnectionTrait, Statement};
 
     use super::*;
@@ -9,6 +109,314 @@ mod tests {
         config::ConfigKv,
         metadata::{MetadataKv, MetadataScope, MetadataValueType},
     };
+
+    #[derive(Clone, Copy)]
+    enum ArtifactFault {
+        None,
+        Missing,
+        Size,
+        Digest,
+    }
+
+    struct FaultyArtifactStorage {
+        remote: RemoteStorage,
+        artifact: ObjectHash,
+        fault: ArtifactFault,
+        written: AtomicBool,
+        artifact_writes: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl Storage for FaultyArtifactStorage {
+        async fn get(
+            &self,
+            hash: &ObjectHash,
+        ) -> Result<(Vec<u8>, ObjectType), git_internal::errors::GitError> {
+            if *hash == self.artifact && !matches!(self.fault, ArtifactFault::None) {
+                if !self.written.load(Ordering::SeqCst)
+                    || matches!(self.fault, ArtifactFault::Missing)
+                {
+                    return Err(git_internal::errors::GitError::ObjectNotFound(
+                        "fixture unavailable".into(),
+                    ));
+                }
+                let mut body =
+                    crate::internal::ai::checkpoint_reader::test_helpers::RG03_OPAQUE_BODY.to_vec();
+                match self.fault {
+                    ArtifactFault::Size => {
+                        body.pop();
+                    }
+                    ArtifactFault::Digest => {
+                        body[0] ^= 1;
+                    }
+                    _ => {}
+                }
+                return Ok((body, ObjectType::Blob));
+            }
+            self.remote.get(hash).await
+        }
+
+        async fn get_typed_bounded(
+            &self,
+            hash: &ObjectHash,
+            cap: u64,
+        ) -> Result<(Vec<u8>, ObjectType), git_internal::errors::GitError> {
+            if *hash == self.artifact && !matches!(self.fault, ArtifactFault::None) {
+                let (bytes, kind) = self.get(hash).await?;
+                if bytes.len() as u64 > cap {
+                    return Err(git_internal::errors::GitError::InvalidObjectInfo(
+                        "fixture exceeds bound".into(),
+                    ));
+                }
+                return Ok((bytes, kind));
+            }
+            self.remote.get_typed_bounded(hash, cap).await
+        }
+
+        async fn put(
+            &self,
+            hash: &ObjectHash,
+            bytes: &[u8],
+            kind: ObjectType,
+        ) -> Result<String, git_internal::errors::GitError> {
+            if *hash == self.artifact {
+                self.artifact_writes.fetch_add(1, Ordering::SeqCst);
+                self.written.store(true, Ordering::SeqCst);
+            }
+            self.remote.put(hash, bytes, kind).await
+        }
+
+        async fn exist(&self, hash: &ObjectHash) -> bool {
+            self.remote.exist(hash).await
+        }
+        async fn search(&self, prefix: &str) -> Vec<ObjectHash> {
+            self.remote.search(prefix).await
+        }
+    }
+
+    async fn artifact_sync_fixture() -> (tempfile::TempDir, sea_orm::DatabaseConnection, ObjectHash)
+    {
+        use crate::internal::ai::checkpoint_reader::{
+            read_tree_object, subtree, test_helpers::*, tree_entry,
+        };
+
+        let repo = tempfile::tempdir().unwrap();
+        crate::utils::test::setup_with_new_libra_in(repo.path()).await;
+        let _cwd = crate::utils::test::ChangeDirGuard::new(repo.path());
+        let storage = repo.path().join(".libra");
+        let conn = crate::internal::db::get_db_conn_instance().await;
+        ConfigKv::set_with_conn(&conn, "libra.repoid", "rg05-fixture", false)
+            .await
+            .unwrap();
+        let (root, artifact) = rg03_read_fixture(&storage, "valid", false);
+        let tree = read_tree_object(&storage, &root).unwrap();
+        let cp = subtree(&storage, &tree, "checkpoint").unwrap();
+        let prefix = subtree(&storage, &cp, &RG03_CHECKPOINT_ID[..2]).unwrap();
+        let inner = subtree(&storage, &prefix, &RG03_CHECKPOINT_ID[2..]).unwrap();
+        let metadata = tree_entry(&inner, "metadata.json").unwrap().id;
+        let signature = |kind| Signature::new(kind, "Libra".into(), "traces@libra".into());
+        let commit = Commit::new(
+            signature(SignatureType::Author),
+            signature(SignatureType::Committer),
+            root.parse().unwrap(),
+            vec![],
+            &format!(
+                "traces: committed checkpoint {RG03_CHECKPOINT_ID}\n\nLibra-Session: rg05-session\nLibra-Agent: claude_code\nLibra-Checkpoint-ID: {RG03_CHECKPOINT_ID}\nLibra-Scope: committed\n"
+            ),
+        );
+        let commit =
+            crate::utils::object::write_git_object(&storage, "commit", &commit.to_data().unwrap())
+                .unwrap();
+        for (sql, values) in [
+            (
+                "INSERT INTO agent_session (session_id, agent_kind, provider_session_id, state, working_dir, started_at, last_event_at, metadata_json, redaction_report) VALUES ('rg05-session', 'claude_code', 'rg05-provider', 'stopped', '/tmp/rg05-fixture', 1, 2, '{}', '{}')",
+                vec![],
+            ),
+            (
+                "INSERT INTO agent_checkpoint (checkpoint_id, session_id, scope, tree_oid, metadata_blob_oid, traces_commit, created_at) VALUES (?, 'rg05-session', 'committed', ?, ?, ?, 3)",
+                vec![
+                    RG03_CHECKPOINT_ID.into(),
+                    root.into(),
+                    metadata.to_string().into(),
+                    commit.to_string().into(),
+                ],
+            ),
+            (
+                "UPDATE reference SET `commit` = ? WHERE name = ? AND remote IS NULL",
+                vec![
+                    commit.to_string().into(),
+                    crate::internal::branch::TRACES_BRANCH.into(),
+                ],
+            ),
+        ] {
+            conn.execute_raw(Statement::from_sql_and_values(
+                conn.get_database_backend(),
+                sql,
+                values,
+            ))
+            .await
+            .unwrap();
+        }
+        // Index the complete actual fixture object graph, not fabricated OIDs.
+        for prefix in std::fs::read_dir(storage.join("objects"))
+            .unwrap()
+            .flatten()
+        {
+            let name = prefix.file_name().to_string_lossy().into_owned();
+            if name.len() != 2 || !prefix.path().is_dir() {
+                continue;
+            }
+            for file in std::fs::read_dir(prefix.path()).unwrap().flatten() {
+                let oid = format!("{name}{}", file.file_name().to_string_lossy());
+                let Ok(hash) = crate::internal::object_format::parse_repo_oid(&oid) else {
+                    continue;
+                };
+                let (kind, bytes) = crate::utils::object::read_git_object_bounded_validated(
+                    &storage,
+                    &hash,
+                    4 * 1024 * 1024,
+                )
+                .unwrap();
+                conn.execute_raw(Statement::from_sql_and_values(conn.get_database_backend(),
+                    "INSERT INTO object_index (o_id, o_type, o_size, repo_id, created_at, is_synced) VALUES (?, ?, ?, 'rg05-fixture', 1, 1)",
+                    [oid.into(), kind.into(), (bytes.len() as i64).into()])).await.unwrap();
+            }
+        }
+        (repo, conn, artifact)
+    }
+
+    async fn assert_artifact_sync_boundary(fault: ArtifactFault) {
+        let _env = crate::utils::test::ConfigDbFixture::new().unwrap();
+        let (repo, conn, artifact) = artifact_sync_fixture().await;
+        let _repo = crate::utils::test::ChangeDirGuard::new(repo.path());
+        let mock = crate::utils::d1_client::test_support::MockD1::spawn().await;
+        let client = mock.client();
+        client.ensure_object_index_table().await.unwrap();
+        let remote = FaultyArtifactStorage {
+            remote: RemoteStorage::new(Arc::new(object_store::memory::InMemory::new())),
+            artifact,
+            fault,
+            written: AtomicBool::new(false),
+            artifact_writes: AtomicUsize::new(0),
+        };
+        let result = sync_agent_capture_tables_inner(
+            &conn,
+            &client,
+            &remote,
+            "rg05-fixture",
+            &SilentCloudSyncProgress,
+        )
+        .await;
+        if matches!(fault, ArtifactFault::None) {
+            assert!(result.is_ok(), "normal first upload: {result:?}");
+            assert_eq!(
+                client
+                    .get_agent_capture_generation("rg05-fixture")
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .state,
+                "complete"
+            );
+        } else {
+            assert!(result.is_err(), "post-upload artifact corruption must fail");
+            assert!(
+                client
+                    .get_agent_capture_generation("rg05-fixture")
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "failed artifact cannot begin/complete a generation"
+            );
+        }
+        assert_eq!(
+            remote.artifact_writes.load(Ordering::SeqCst),
+            1,
+            "first missing remote object was actually uploaded before readback"
+        );
+        conn.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(cwd, env)]
+    async fn remote_missing_artifact_fails_sync() {
+        assert_artifact_sync_boundary(ArtifactFault::Missing).await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(cwd, env)]
+    async fn remote_size_mismatch_fails_sync() {
+        assert_artifact_sync_boundary(ArtifactFault::Size).await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(cwd, env)]
+    async fn remote_digest_mismatch_fails_sync() {
+        assert_artifact_sync_boundary(ArtifactFault::Digest).await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(cwd, env)]
+    async fn first_missing_artifact_is_uploaded_and_completed() {
+        assert_artifact_sync_boundary(ArtifactFault::None).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial_test::serial(hash_kind)]
+    async fn artifact_lifecycle_helper_proves_roles_without_returning_ciphertext() {
+        use std::os::unix::ffi::OsStrExt;
+
+        use base64::Engine;
+
+        use crate::internal::ai::checkpoint_reader::test_helpers::*;
+        for kind in [
+            git_internal::hash::HashKind::Sha1,
+            git_internal::hash::HashKind::Sha256,
+            git_internal::hash::HashKind::Blake3,
+        ] {
+            let _kind = git_internal::hash::set_hash_kind_for_test(kind);
+            for shape in [
+                "valid",
+                "tree_alias",
+                "manifest_alias",
+                "metadata_body_alias",
+                "unknown_reasoning",
+            ] {
+                let root = tempfile::tempdir().unwrap();
+                let (tree, _) = rg03_read_fixture(root.path(), shape, false);
+                let frame = serde_json::to_vec(&serde_json::json!({
+                    "repo_path_base64":base64::engine::general_purpose::STANDARD.encode(root.path().as_os_str().as_bytes()),
+                    "operation":{"kind":"verify_reasoning_artifacts", "object_format":crate::internal::object_format::as_str(kind),
+                        "checkpoints":[{"checkpoint_id":RG03_CHECKPOINT_ID,"tree_oid":tree}]}
+                })).unwrap();
+                let bytes =
+                    crate::internal::ai::history::run_checkpoint_object_io_helper(&frame).unwrap();
+                assert!(
+                    !String::from_utf8_lossy(&bytes)
+                        .contains(std::str::from_utf8(RG03_OPAQUE_BODY).unwrap())
+                );
+                let result: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                let artifact = &result["checkpoints"][0]["artifacts"];
+                if shape == "valid" {
+                    assert_eq!(artifact[0]["byte_len"], RG03_OPAQUE_BODY.len());
+                    assert_eq!(
+                        artifact[0]["sha256"],
+                        hex::encode(Sha256::digest(RG03_OPAQUE_BODY))
+                    );
+                } else {
+                    assert!(artifact.is_null(), "{shape}: {result}");
+                }
+            }
+        }
+        let root = tempfile::tempdir().unwrap();
+        let expired =
+            checkpoint_reasoning_artifact_proofs(root.path(), &[], std::time::Instant::now()).await;
+        assert!(
+            expired.is_err(),
+            "an expired absolute budget must refuse before helper dispatch"
+        );
+    }
 
     fn snapshot_wire_bytes(snapshot: &AgentCaptureSnapshot) -> Vec<u8> {
         let mut required_oids = snapshot.required_oids.iter().collect::<Vec<_>>();
@@ -931,11 +1339,22 @@ pub(super) async fn load_agent_capture_snapshot(
 async fn ensure_agent_capture_objects_remote(
     db_conn: &sea_orm::DatabaseConnection,
     d1_client: &D1Client,
-    r2_storage: &RemoteStorage,
+    r2_storage: &dyn Storage,
     repo_id: &str,
     required_oids: &HashSet<String>,
+    artifact_proof: &ReasoningArtifactPublicationProof,
 ) -> CloudResult<(Vec<ObjectIndexRow>, i64)> {
     let local_map = load_required_local_object_indexes(db_conn, repo_id, required_oids).await?;
+    // Local index errors are not repaired by mirroring a bad declaration to D1.
+    for proof in artifact_proof.objects.values() {
+        if !local_map.get(&proof.oid).is_some_and(|row| {
+            row.o_type == "blob"
+                && u64::try_from(row.o_size).ok() == Some(proof.byte_len)
+                && row.is_synced == 1
+        }) {
+            return Err(artifact_integrity_failure());
+        }
+    }
     let mut required = required_oids.iter().cloned().collect::<Vec<_>>();
     required.sort();
     let mut hashes = Vec::with_capacity(required.len());
@@ -999,8 +1418,23 @@ async fn ensure_agent_capture_objects_remote(
                             && remote.o_size == local.o_size
                             && remote.is_synced == 1
                     });
-                    publish_validated_agent_capture_object(local_storage, r2_storage, oid, hash)
+                    if let Some(proof) = artifact_proof.objects.get(oid.as_str()) {
+                        publish_checked_agent_capture_object(
+                            local_storage,
+                            r2_storage,
+                            hash,
+                            Some(proof),
+                        )
                         .await?;
+                    } else {
+                        publish_validated_agent_capture_object(
+                            local_storage,
+                            r2_storage,
+                            oid,
+                            hash,
+                        )
+                        .await?;
+                    }
                     if !remote_index_matches {
                         let object_format = crate::internal::object_format::as_str(
                             git_internal::hash::get_hash_kind(),
@@ -1064,23 +1498,62 @@ async fn ensure_agent_capture_objects_remote(
 /// and read back once before publication continues.
 pub(super) async fn publish_validated_agent_capture_object(
     local_storage: &LocalStorage,
-    r2_storage: &RemoteStorage,
+    r2_storage: &dyn Storage,
     _oid: &str,
     hash: &ObjectHash,
 ) -> CloudResult<()> {
-    if let Ok((remote_bytes, remote_type)) = r2_storage.get(hash).await
-        && ObjectHash::from_type_and_data(remote_type, &remote_bytes) == *hash
+    publish_checked_agent_capture_object(local_storage, r2_storage, hash, None).await
+}
+
+async fn capture_object_for_publication(
+    storage: &dyn Storage,
+    hash: &ObjectHash,
+    artifact: Option<&ReasoningArtifactObjectProof>,
+) -> Result<
+    (Vec<u8>, git_internal::internal::object::types::ObjectType),
+    git_internal::errors::GitError,
+> {
+    if let Some(proof) = artifact {
+        storage.get_typed_bounded(hash, proof.byte_len).await
+    } else {
+        storage.get(hash).await
+    }
+}
+
+fn capture_object_matches_proof(
+    hash: &ObjectHash,
+    bytes: &[u8],
+    object_type: git_internal::internal::object::types::ObjectType,
+    artifact: Option<&ReasoningArtifactObjectProof>,
+) -> bool {
+    ObjectHash::from_type_and_data_for_kind(hash.kind(), object_type, bytes).ok() == Some(*hash)
+        && artifact.is_none_or(|proof| {
+            object_type == git_internal::internal::object::types::ObjectType::Blob
+                && bytes.len() as u64 == proof.byte_len
+                && hex::encode(Sha256::digest(bytes)) == proof.sha256
+                && proof.oid == hash.to_string()
+        })
+}
+
+async fn publish_checked_agent_capture_object(
+    local_storage: &LocalStorage,
+    r2_storage: &dyn Storage,
+    hash: &ObjectHash,
+    artifact: Option<&ReasoningArtifactObjectProof>,
+) -> CloudResult<()> {
+    if let Ok((remote_bytes, remote_type)) =
+        capture_object_for_publication(r2_storage, hash, artifact).await
+        && capture_object_matches_proof(hash, &remote_bytes, remote_type, artifact)
     {
         return Ok(());
     }
-    let (bytes, object_type) = local_storage.get(hash).await.map_err(|_| {
+    let (bytes, object_type) = capture_object_for_publication(local_storage, hash, artifact).await.map_err(|_| {
         CloudError::PartialTransfer(
             "failed to read a required agent-capture object for cloud publication; retry after repairing the local object store"
                 .to_string(),
         )
     })?;
-    let local_hash = ObjectHash::from_type_and_data(object_type, &bytes);
-    if local_hash != *hash {
+    if !capture_object_matches_proof(hash, &bytes, object_type, artifact) {
         return Err(CloudError::PartialTransfer(
             "a required local agent-capture object failed content verification; retry after repairing the local object store"
                 .to_string(),
@@ -1095,14 +1568,13 @@ pub(super) async fn publish_validated_agent_capture_object(
                     .to_string(),
             )
         })?;
-    let (remote_bytes, remote_type) = r2_storage.get(hash).await.map_err(|_| {
+    let (remote_bytes, remote_type) = capture_object_for_publication(r2_storage, hash, artifact).await.map_err(|_| {
         CloudError::R2(
             "failed to read back a required agent-capture object; verify cloud storage connectivity and retry"
                 .to_string(),
         )
     })?;
-    let remote_hash = ObjectHash::from_type_and_data(remote_type, &remote_bytes);
-    if remote_hash != *hash {
+    if !capture_object_matches_proof(hash, &remote_bytes, remote_type, artifact) {
         return Err(CloudError::PartialTransfer(
             "a required remote agent-capture object failed post-upload verification; retry `libra cloud sync`"
                 .to_string(),
@@ -1113,7 +1585,7 @@ pub(super) async fn publish_validated_agent_capture_object(
 
 async fn load_full_remote_object_manifest(
     d1_client: &D1Client,
-    r2_storage: &RemoteStorage,
+    r2_storage: &dyn Storage,
     repo_id: &str,
 ) -> CloudResult<(Vec<ObjectIndexRow>, i64)> {
     let (rows, generation) = d1_client
@@ -1922,11 +2394,15 @@ pub(super) async fn sync_agent_capture_tables(
 async fn sync_agent_capture_tables_inner(
     db_conn: &sea_orm::DatabaseConnection,
     d1_client: &D1Client,
-    r2_storage: &RemoteStorage,
+    r2_storage: &dyn Storage,
     repo_id: &str,
     progress: &dyn CloudSyncProgress,
 ) -> CloudResult<AgentCaptureSyncOutcome> {
     use sea_orm::Statement;
+
+    let lifecycle_deadline = std::time::Instant::now()
+        .checked_add(AGENT_CAPTURE_CLOUD_DEADLINE)
+        .ok_or_else(artifact_integrity_failure)?;
 
     let backend = db_conn.get_database_backend();
     let session_present = db_conn
@@ -2099,6 +2575,21 @@ async fn sync_agent_capture_tables_inner(
 
     let object_manifest_scope =
         object_manifest_scope_for_remote_catalog(&snapshot.checkpoints, &effective_checkpoints);
+    let artifact_proof = if effective_checkpoints.is_empty() {
+        ReasoningArtifactPublicationProof {
+            checkpoints: Vec::new(),
+            objects: HashMap::new(),
+        }
+    } else {
+        let storage = util::try_get_storage_path(None)
+            .map_err(|error| local_agent_capture_failure("resolve artifact object store", error))?;
+        ReasoningArtifactPublicationProof::establish(
+            &storage,
+            &effective_checkpoints,
+            lifecycle_deadline,
+        )
+        .await?
+    };
     let (required_object_indexes, required_object_generation) =
         ensure_agent_capture_objects_remote(
             db_conn,
@@ -2106,6 +2597,7 @@ async fn sync_agent_capture_tables_inner(
             r2_storage,
             repo_id,
             &snapshot.required_oids,
+            &artifact_proof,
         )
         .await?;
     let (object_manifest_rows, object_index_generation) = match object_manifest_scope {
@@ -2122,6 +2614,7 @@ async fn sync_agent_capture_tables_inner(
         &object_manifest_rows,
         "projected remote",
     )?;
+    artifact_proof.validate_indexes(&object_manifest_rows)?;
     let (object_index_digest, object_index_count) =
         agent_capture_object_index_digest(&object_manifest_rows)?;
 
@@ -2384,6 +2877,8 @@ async fn sync_agent_capture_tables_inner(
         "completed remote",
     )?;
     let completed_object_manifest = agent_capture_object_index_digest(&completed_object_indexes)?;
+    artifact_proof.validate_catalog(&completed_checkpoints)?;
+    artifact_proof.validate_indexes(&completed_object_indexes)?;
     if completed_object_manifest != (object_index_digest.clone(), object_index_count)
         || completed_object_generation != object_index_generation
     {

@@ -17,6 +17,44 @@ const AGENT_DEV_DOC: &str = include_str!("../../docs/development/commands/agent.
 const COMPATIBILITY_DOC: &str = include_str!("../../COMPATIBILITY.md");
 const ERROR_CODES_DOC: &str = include_str!("../../docs/error-codes.md");
 
+#[test]
+fn reasoning_artifact_lifecycle_docs_match_current_contract() {
+    for (label, document) in [
+        ("EN", AGENT_CMD_DOC_EN),
+        ("zh-CN", AGENT_CMD_DOC_ZH),
+        ("development", AGENT_DEV_DOC),
+        ("tracing", AGENT_DOC),
+    ] {
+        for term in [
+            "manifest role",
+            "object_index",
+            "byte_len",
+            "SHA-256",
+            "fenced generation",
+            "agent clean --gc",
+            "inconsistent_reasoning_artifact",
+            "checkpoint_id",
+            "agent enable",
+            "agent import --yes",
+            "encrypted_unavailable",
+        ] {
+            assert_contains(document, label, term);
+        }
+    }
+    assert_contains(
+        AGENT_CMD_DOC_EN,
+        "EN",
+        "Physical R2 payload deletion remains deferred",
+    );
+    assert_contains(
+        AGENT_CMD_DOC_EN,
+        "EN",
+        "Native source proof remains required",
+    );
+    assert_contains(AGENT_CMD_DOC_ZH, "zh-CN", "native 来源证明要求继续保留");
+    assert_contains(AGENT_CMD_DOC_ZH, "zh-CN", "不新增持久化 status 列");
+}
+
 fn assert_contains(document: &str, label: &str, required: &str) {
     assert!(
         document.contains(required),

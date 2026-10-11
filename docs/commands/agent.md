@@ -1149,3 +1149,12 @@ permit reasoning archival. Failed readiness or quota gates stay partial; the
 only authorized paid smoke model is `volcengine-agent-plan/glm-5.3-flash`, with
 no alternate-model fallback. This card makes no new model calls. Linux local
 functional acceptance remains with the operator.
+
+
+### Provider-encrypted reasoning lifecycle
+
+`libra cloud sync` validates the reasoning artifact manifest role, canonical tree, `object_index`, decoded `byte_len`, and full SHA-256 before beginning a capture generation. A missing first upload is repaired normally; post-upload readback failure prevents completion. The validated checkpoint trees and artifact indexes must match the final fenced generation. No ciphertext is rendered by this validation.
+
+Session erasure removes artifact references from checkpoint list/show and the session graph; `agent clean --gc` and repository GC reclaim unreachable local artifacts under the existing retention windows. `agent doctor` reports `inconsistent_reasoning_artifact` with the exact canonical `checkpoint_id`; this read-only finding requires manual repair and does not create a persistent checkpoint status column. Physical R2 payload deletion remains deferred; cloud tombstones remove mirror catalog rows and prevent resurrection through normal restore.
+
+Non-quiet `agent enable` and `agent import --yes` disclose that provider-encrypted reasoning original bytes may be archived without decryption and mirrored to cloud storage with their checkpoint. Synthetic lifecycle fixtures remain `encrypted_unavailable` while visible and disappear after erasure; they prove neither native provenance nor a decryptor. Native source proof remains required; unproved OpenCode fields are not archived.

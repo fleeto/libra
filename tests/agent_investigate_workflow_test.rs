@@ -1777,7 +1777,7 @@ async fn seed_v1_checkpoint_with_closed_artifact(
     metadata: &[u8],
     transcript: &[u8],
     artifact: &[u8],
-) -> (String, String, String) {
+) -> (String, String, String, String) {
     use sea_orm::{ConnectOptions, ConnectionTrait, Database, Statement};
 
     let libra_dir = repo.join(".libra");
@@ -1790,7 +1790,22 @@ async fn seed_v1_checkpoint_with_closed_artifact(
     let artifact_oid = libra::utils::object::write_git_object(&libra_dir, "blob", artifact)
         .expect("write artifact blob")
         .to_string();
-    let artifact_name = "ab".repeat(32);
+    use sha2::{Digest, Sha256};
+    let artifact_name = format!("{:x}", Sha256::digest(artifact));
+    let manifest = serde_json::json!({"schema_version":1,
+        "entries":{"metadata":{"path":"metadata.json","oid":metadata_oid},
+            "transcript":{"path":"transcript/claude_code","oid":transcript_oid}},
+        "reasoning_artifacts":[{"path":format!("reasoning/encrypted/{artifact_name}"),"oid":artifact_oid,
+            "sha256":artifact_name,"byte_len":artifact.len(),
+            "locator":"claude_code:msg=0/part=0/metadata=signature","provider":"claude_code",
+            "source_kind":"signature","availability":"encrypted_unavailable","decrypt_capability":"none"}]});
+    let manifest_oid = libra::utils::object::write_git_object(
+        &libra_dir,
+        "blob",
+        &serde_json::to_vec(&manifest).expect("synthetic manifest"),
+    )
+    .expect("manifest blob")
+    .to_string();
     let encrypted_tree =
         write_tree_object(&libra_dir, &[("100644", &artifact_name, &artifact_oid)]);
     let reasoning_tree = write_tree_object(&libra_dir, &[("40000", "encrypted", &encrypted_tree)]);
@@ -1799,6 +1814,7 @@ async fn seed_v1_checkpoint_with_closed_artifact(
     let inner_tree = write_tree_object(
         &libra_dir,
         &[
+            ("100644", "manifest.json", &manifest_oid),
             ("100644", "metadata.json", &metadata_oid),
             ("40000", "reasoning", &reasoning_tree),
             ("40000", "transcript", &transcript_tree),
@@ -1838,7 +1854,7 @@ async fn seed_v1_checkpoint_with_closed_artifact(
     ))
     .await
     .expect("seed agent_checkpoint");
-    (metadata_oid, transcript_oid, artifact_oid)
+    (metadata_oid, transcript_oid, artifact_oid, manifest_oid)
 }
 
 /// PD-02 acceptance for `investigate`: a checkpoint-scoped run consumes
@@ -1999,14 +2015,15 @@ async fn fix_rg_scoped_02_persisted_spec_resume() {
     let metadata = br#"{"schema_version":1,"agent_kind":"claude_code"}"#;
     let transcript = b"{\"role\":\"user\",\"text\":\"captured turn\"}\n";
     let artifact = b"CLOSED-ARTIFACT-CANARY";
-    let (metadata_oid, transcript_oid, artifact_oid) = seed_v1_checkpoint_with_closed_artifact(
-        &repo,
-        checkpoint_id,
-        metadata,
-        transcript,
-        artifact,
-    )
-    .await;
+    let (metadata_oid, transcript_oid, artifact_oid, manifest_oid) =
+        seed_v1_checkpoint_with_closed_artifact(
+            &repo,
+            checkpoint_id,
+            metadata,
+            transcript,
+            artifact,
+        )
+        .await;
     let artifact_loose = repo
         .join(".libra")
         .join("objects")
@@ -2033,6 +2050,10 @@ async fn fix_rg_scoped_02_persisted_spec_resume() {
     request.checkpoint_input = Some(CheckpointInputSpec {
         checkpoint_id: checkpoint_id.to_string(),
         files: vec![
+            CheckpointInputFile {
+                rel_path: "manifest.json".into(),
+                oid: manifest_oid,
+            },
             CheckpointInputFile {
                 rel_path: "metadata.json".to_string(),
                 oid: metadata_oid,
@@ -2116,6 +2137,136 @@ async fn fix_rg_scoped_02_persisted_spec_resume() {
         !artifact_loose.exists(),
         "continue does not read the artifact"
     );
+    assert_no_leaked_workspace(&repo);
+}
+
+/// Real binary start/continue: the first pass genuinely pauses, then a legacy
+/// full-list saved spec excludes only its exact proved artifact tuple. The
+/// named codex executable is an isolated synthetic shell fixture, never an
+/// installed agent or a model. The 0555 input is not manually chmodded.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fix_rg_scoped_02_binary_legacy_full_list_resume() {
+    use sha2::{Digest, Sha256};
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = init_committed_repo(temp.path());
+    let checkpoint_id = "cafe75d2-4c53-465a-b890-a9f861a50cc7";
+    let metadata = br#"{"schema_version":1,"agent_kind":"claude_code"}"#;
+    let transcript = b"{\"role\":\"user\",\"text\":\"captured turn\"}\n";
+    let artifact = b"BINARY-CLOSED-ARTIFACT-CANARY";
+    let (_, _, artifact_oid, _) = seed_v1_checkpoint_with_closed_artifact(
+        &repo,
+        checkpoint_id,
+        metadata,
+        transcript,
+        artifact,
+    )
+    .await;
+    let artifact_path = format!("reasoning/encrypted/{:x}", Sha256::digest(artifact));
+    let loose = repo
+        .join(".libra/objects")
+        .join(&artifact_oid[..2])
+        .join(&artifact_oid[2..]);
+    std::fs::remove_file(&loose).expect("real missing-artifact-body trap");
+    let fixtures = temp.path().join("fixtures");
+    let silent = stage_fixture(&fixtures, "investigator-silent.sh");
+    let conclude = stage_fixture(&fixtures, "investigator-conclude.sh");
+    let fake_bin = temp.path().join("only-synthetic-bin");
+    std::fs::create_dir(&fake_bin).unwrap();
+    let codex = fake_bin.join("codex");
+    std::fs::copy(&silent, &codex).unwrap();
+    std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!("{}:/usr/bin:/bin:/usr/sbin:/sbin", fake_bin.display());
+    let started = run_libra(
+        &[
+            "--json",
+            "investigate",
+            "start",
+            "--topic",
+            "captured only",
+            "--checkpoint",
+            checkpoint_id,
+            "--agent",
+            "codex",
+            "--max-turns",
+            "4",
+            "--quorum",
+            "1",
+        ],
+        &repo,
+        &[("PATH", &path)],
+    );
+    assert_cli_success(&started, "actual binary first pass");
+    let started: serde_json::Value = serde_json::from_slice(&started.stdout).expect("start JSON");
+    let row = &started["data"];
+    assert!(
+        row["terminal_state"].is_null(),
+        "first pass is a real pause: {row}"
+    );
+    assert_eq!(row["pause_reason"], "stalled");
+    let run_id = row["run_id"].as_str().unwrap();
+    let run_dir = PathBuf::from(row["run_dir"].as_str().unwrap());
+    let input = run_dir.join("checkpoint-input");
+    assert_eq!(
+        std::fs::metadata(&input).unwrap().permissions().mode() & 0o777,
+        0o555
+    );
+    assert_eq!(
+        std::fs::read(input.join("metadata.json")).unwrap(),
+        metadata
+    );
+    assert_eq!(
+        std::fs::read(input.join("transcript/claude_code")).unwrap(),
+        transcript
+    );
+    assert!(!input.join("reasoning").exists());
+    let state_path = run_dir.join("state.json");
+    let mut state: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
+    assert_eq!(state["checkpoint_input"]["checkpoint_id"], checkpoint_id);
+    state["checkpoint_input"]["files"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({"rel_path":artifact_path,"oid":artifact_oid}));
+    std::fs::write(&state_path, serde_json::to_vec_pretty(&state).unwrap()).unwrap();
+    // Only the synthetic executable changes. The prior readonly input and
+    // all ordinary captured objects stay untouched before continue.
+    std::fs::copy(conclude, &codex).unwrap();
+    std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let continued = run_libra(
+        &["--json", "investigate", "continue", run_id],
+        &repo,
+        &[("PATH", &path)],
+    );
+    assert_cli_success(
+        &continued,
+        "actual binary legacy full-list continue without chmod",
+    );
+    let continued: serde_json::Value = serde_json::from_slice(&continued.stdout).unwrap();
+    assert_eq!(continued["data"]["terminal_state"], "quorum");
+    assert_eq!(
+        std::fs::metadata(&input).unwrap().permissions().mode() & 0o777,
+        0o555
+    );
+    assert_eq!(
+        std::fs::read(input.join("metadata.json")).unwrap(),
+        metadata
+    );
+    assert_eq!(
+        std::fs::read(input.join("transcript/claude_code")).unwrap(),
+        transcript
+    );
+    assert!(!input.join("reasoning").exists());
+    assert!(
+        !loose.exists(),
+        "neither binary pass opened/recreated the missing closed payload"
+    );
+    let state: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(state_path).unwrap()).unwrap();
+    assert_eq!(state["checkpoint_input"]["checkpoint_id"], checkpoint_id);
+    assert!(state["checkpoint_input"].get("root_oid").is_none());
+    let findings = std::fs::read_to_string(run_dir.join("findings.md")).unwrap();
+    assert!(!findings.contains(std::str::from_utf8(artifact).unwrap()));
     assert_no_leaked_workspace(&repo);
 }
 

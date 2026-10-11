@@ -449,7 +449,7 @@ Commands that populate `details` document their keys here.
 
 ### Scoped checkpoint resume
 
-`investigate continue` and `review --checkpoint` do not add a stable code for scoped revalidation. A paused continue whose catalog cannot be opened, queried, or closed stays the existing investigate store failure. A saved spec that does not match ordinary catalog leaves, names `reasoning/encrypted/<64 hex>`, or fails the typed blob check (not a blob, or bytes that do not hash to the saved id) ends as the existing review infrastructure error or the investigate terminal error. `LBR-IO-002` is not reused for that refusal.
+`investigate continue` and `review --checkpoint` do not add a stable code for scoped revalidation. A paused `investigate continue` whose catalog cannot be opened, queried or closed returns the existing investigate store failure without changing its saved state or input. A spec with an ordinary role mismatch, an altered or unproven closed artifact tuple, an unknown/duplicate path or a typed blob integrity failure is refused before clearing input. An exact manifest/tree artifact tuple in an old full-list spec is excluded, without a body read. Review setup deadline remains the infrastructure error; actual cancellation remains cancelled. `LBR-IO-002` is not reused for that refusal.
 
 ### `mega2 browser`
 

@@ -564,6 +564,14 @@ fn scoped_checkpoint_resume_docs_keep_ordinary_revalidation() {
             document.contains("not a blob") || document.contains("不是 blob"),
             "{label} must refuse a saved id that is not a blob"
         );
+        assert!(
+            document.to_ascii_lowercase().contains("full-list") && document.contains("manifest"),
+            "{label} must explain the proven legacy full-list exception"
+        );
+        assert!(
+            document.contains("without opening") || document.contains("不打开"),
+            "{label} must exclude closed artifact payload reads"
+        );
     }
     assert_contains(
         ERROR_CODES_DOC,

@@ -624,6 +624,7 @@ async fn drive(
     // wall-clock anchor is unusable, so the budget cannot be honored — a
     // stalled/failed run must not evade the cap by resuming with a fresh
     // full budget. Terminate as timeout rather than grant free time.
+    let budget_sampled_at = Instant::now();
     let elapsed_since_start = match elapsed_since_rfc3339(&state.started_at) {
         Some(elapsed) => elapsed,
         None => {
@@ -656,6 +657,7 @@ async fn drive(
     // Budget still available for THIS drive pass, floored at the elapsed
     // time within the pass.
     let remaining_budget = run_budget_cap.saturating_sub(elapsed_since_start);
+    let scoped_deadline = budget_sampled_at + remaining_budget;
 
     // ---- Mandatory isolated workspace (copy backend pinned). ----
     // Checkpoint scope (PD-02): the investigators' workspace is the
@@ -676,7 +678,7 @@ async fn drive(
             &storage,
             &spec,
             &run_dir,
-            Instant::now() + remaining_budget,
+            scoped_deadline,
             cancelled,
         )
         .await

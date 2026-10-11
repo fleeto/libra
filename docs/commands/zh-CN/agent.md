@@ -188,7 +188,7 @@ OpenCode 提取对空输入、非法 JSON 和非法 export 形状显式标记
 
 ## 范围化 checkpoint 的暂停恢复
 
-`review --checkpoint <id>` 与 `investigate start --checkpoint <id>` 仍把普通 checkpoint 文件以只读形式物化到 `<run_dir>/checkpoint-input/`。`investigate continue` 只有在显式仓库 catalog 的普通叶子具有相同路径和 blob id 时，才会再次写入已保存的 spec。路径 `reasoning/encrypted/<64 hex>` 不是普通输入：它不会被写入；已保存 spec 若点名该路径，会在清掉上一次输入目录之前拒绝。已保存 id 若不是 blob，或字节与该 id 的内容哈希不一致，也会在清掉该目录之前拒绝。catalog 无法打开、查询或关闭时，暂停中的 continue 返回既有存储错误，且不改变该 run 的 state 与已有输入字节。review 的设置预算为零时，按既有基础设施错误结束，且不启动 reviewer；取消则按既有 cancelled 结束。不新增稳定错误码。普通 payload 仍是单文件 64 MiB、合计 256 MiB。每次 catalog 树读取单独限制为 16 MiB，不并入上述 payload 上限。
+`review --checkpoint <id>` 与 `investigate start --checkpoint <id>` 只把已证明属于普通角色的 checkpoint 文件，以只读形式物化到 `<run_dir>/checkpoint-input/`。每次物化（包括 `investigate continue`）都在清理旧输入之前，按显式仓库 catalog 和 checkpoint manifest/tree 角色复验保存的 spec。受支持的无 manifest wrapped checkpoint 仍可恢复。旧 full-list spec 只有在 closed `reasoning/encrypted/<64 hex>` 条目的路径与 blob id 精确匹配 manifest 和树时才被接受；该条目被排除，不打开其 payload。改写的条目、未知路径、重复路径及普通角色不匹配均拒绝；保存的 id 若不是 blob，或字节的内容哈希不匹配该 id，也在清理之前拒绝。catalog 暂时不可用时，暂停中的 continue 保留原 state 与输入。review 设置阶段超时沿用基础设施错误，取消沿用 cancelled；设置阶段与后续每个 reviewer 的超时预算独立。有界文件操作持续检查实际调用者的取消与绝对期限，所属工作线程结束后才返回。普通 payload 仍为单文件 64 MiB、总量 256 MiB；不新增稳定错误码或保存状态字段。
 
 ## JSON 输出
 

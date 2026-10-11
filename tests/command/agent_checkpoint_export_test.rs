@@ -809,3 +809,440 @@ async fn seed_reasoning_artifact(repo: &Path) -> (String, String, ObjectHash) {
     conn.close().await.expect("close artifact fixture database");
     (id, sha, oid)
 }
+
+// RG-03 deterministic artifact access gates; no provider/native claim.
+fn assert_no_artifact_canary(output: &std::process::Output) {
+    for bytes in [&output.stdout, &output.stderr] {
+        assert!(
+            !bytes
+                .windows(ARTIFACT_CANARY.len())
+                .any(|window| window == ARTIFACT_CANARY)
+        );
+    }
+}
+
+async fn artifact_audit_details(repo: &Path) -> Vec<(String, i64, String, Option<String>)> {
+    let conn = connect_repo_db(repo).await;
+    let rows = conn
+        .query_all_raw(Statement::from_string(
+            conn.get_database_backend(),
+            "SELECT action, granted, scope, justification FROM agent_audit_log ORDER BY rowid"
+                .to_owned(),
+        ))
+        .await
+        .unwrap();
+    let details = rows
+        .iter()
+        .map(|row| {
+            (
+                row.try_get_by("action").unwrap(),
+                row.try_get_by("granted").unwrap(),
+                row.try_get_by("scope").unwrap(),
+                row.try_get_by("justification").unwrap(),
+            )
+        })
+        .collect();
+    conn.close().await.unwrap();
+    details
+}
+
+#[tokio::test]
+async fn default_reasoning_reads_do_not_touch_artifact_body() {
+    let repo = tempfile::tempdir().unwrap();
+    init_repo_via_cli(repo.path());
+    let (id, sha, artifact_oid) = seed_reasoning_artifact(repo.path()).await;
+    // If either ordinary public reader tries to open this actual artifact,
+    // it fails. The companion unit uses the real body-read observer for 0.
+    let oid = artifact_oid.to_string();
+    std::fs::remove_file(
+        repo.path()
+            .join(".libra/objects")
+            .join(&oid[..2])
+            .join(&oid[2..]),
+    )
+    .unwrap();
+    let show = run_libra_command(&["agent", "checkpoint", "show", &id, "--json"], repo.path());
+    assert!(
+        show.status.success(),
+        "{}",
+        String::from_utf8_lossy(&show.stderr)
+    );
+    let show_json: serde_json::Value = serde_json::from_slice(&show.stdout).unwrap();
+    assert_eq!(
+        show_json["data"]["reasoning_artifacts"],
+        json!([{
+            "provider":"claude_code", "source_kind":"signature", "locator":"claude_code:msg=0/part=0/metadata=signature",
+            "byte_len":ARTIFACT_CANARY.len(), "sha256":sha, "availability":"encrypted_unavailable", "decrypt_capability":"none"
+        }])
+    );
+    let exported = run_libra_command(&["agent", "checkpoint", "export", &id], repo.path());
+    assert!(
+        exported.status.success(),
+        "{}",
+        String::from_utf8_lossy(&exported.stderr)
+    );
+    assert!(String::from_utf8_lossy(&exported.stdout).contains("transcript with key"));
+    assert_no_artifact_canary(&show);
+    assert_no_artifact_canary(&exported);
+    assert!(artifact_audit_details(repo.path()).await.is_empty());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn authorized_reasoning_export_is_byte_exact_private_and_audited() {
+    use std::os::unix::fs::PermissionsExt;
+    let repo = tempfile::tempdir().unwrap();
+    init_repo_via_cli(repo.path());
+    let (id, sha, _) = seed_reasoning_artifact(repo.path()).await;
+    let destination = repo.path().join("opaque-output");
+    let path = destination.to_str().unwrap();
+    let output = run_libra_command(
+        &[
+            "agent",
+            "checkpoint",
+            "export",
+            &id,
+            "--reasoning-artifact",
+            &sha,
+            "--allow-raw",
+            "--justification",
+            "operator-approved recovery",
+            "-o",
+            path,
+            "--json",
+        ],
+        repo.path(),
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(std::fs::read(&destination).unwrap(), ARTIFACT_CANARY);
+    assert_eq!(
+        std::fs::metadata(destination).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert_no_artifact_canary(&output);
+    assert_eq!(
+        artifact_audit_details(repo.path()).await,
+        vec![(
+            "reasoning_artifact_export".to_owned(),
+            1,
+            "transcript".to_owned(),
+            Some("operator-approved recovery".to_owned())
+        )]
+    );
+}
+
+#[tokio::test]
+async fn rejected_reasoning_export_is_audited_before_lookup() {
+    let repo = tempfile::tempdir().unwrap();
+    init_repo_via_cli(repo.path());
+    let digest = "a".repeat(64);
+    let destination = repo.path().join("denied-output");
+    let path = destination.to_str().unwrap();
+    let cases = [
+        vec![
+            "--reasoning-artifact",
+            digest.as_str(),
+            "--justification",
+            "recovery",
+            "-o",
+            path,
+        ],
+        vec![
+            "--reasoning-artifact",
+            digest.as_str(),
+            "--allow-raw",
+            "-o",
+            path,
+        ],
+        vec![
+            "--reasoning-artifact",
+            digest.as_str(),
+            "--allow-raw",
+            "--justification",
+            "  ",
+            "-o",
+            path,
+        ],
+        vec![
+            "--reasoning-artifact",
+            digest.as_str(),
+            "--allow-raw",
+            "--justification",
+            "recovery",
+        ],
+        vec![
+            "--reasoning-artifact",
+            digest.as_str(),
+            "--allow-raw",
+            "--raw",
+            "--justification",
+            "recovery",
+            "-o",
+            path,
+        ],
+    ];
+    for flags in cases {
+        let mut args = vec!["agent", "checkpoint", "export", "missing-checkpoint"];
+        args.extend(flags);
+        let output = run_libra_command(&args, repo.path());
+        assert!(!output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("LBR-AGENT-013"), "{stderr}");
+        assert!(
+            !stderr.contains("no checkpoint"),
+            "no existence oracle: {stderr}"
+        );
+        assert_no_artifact_canary(&output);
+        assert!(!destination.exists());
+    }
+    let rows = artifact_audit_details(repo.path()).await;
+    assert_eq!(rows.len(), 5);
+    assert!(
+        rows.iter()
+            .all(|row| row.0 == "reasoning_artifact_export" && row.1 == 0)
+    );
+}
+
+#[tokio::test]
+async fn reasoning_export_audit_failure_prevents_body_read_and_output() {
+    let repo = tempfile::tempdir().unwrap();
+    init_repo_via_cli(repo.path());
+    let (id, sha, artifact) = seed_reasoning_artifact(repo.path()).await;
+    let conn = connect_repo_db(repo.path()).await;
+    conn.execute_raw(Statement::from_string(conn.get_database_backend(),"CREATE TRIGGER fail_rg03_audit BEFORE INSERT ON agent_audit_log BEGIN SELECT RAISE(ABORT, 'synthetic audit failure'); END".to_owned())).await.unwrap();
+    conn.close().await.unwrap();
+    let oid = artifact.to_string();
+    std::fs::remove_file(
+        repo.path()
+            .join(".libra/objects")
+            .join(&oid[..2])
+            .join(&oid[2..]),
+    )
+    .unwrap();
+    let destination = repo.path().join("audit-failure-output");
+    let path = destination.to_str().unwrap();
+    let output = run_libra_command(
+        &[
+            "agent",
+            "checkpoint",
+            "export",
+            &id,
+            "--reasoning-artifact",
+            &sha,
+            "--allow-raw",
+            "--justification",
+            "recovery",
+            "-o",
+            path,
+        ],
+        repo.path(),
+    );
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("append audit record"));
+    assert!(!destination.exists());
+    assert_no_artifact_canary(&output);
+    assert!(artifact_audit_details(repo.path()).await.is_empty());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn reasoning_export_output_failure_preserves_existing_file() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    let repo = tempfile::tempdir().unwrap();
+    init_repo_via_cli(repo.path());
+    let (id, sha, artifact) = seed_reasoning_artifact(repo.path()).await;
+    let oid = artifact.to_string();
+    std::fs::remove_file(
+        repo.path()
+            .join(".libra/objects")
+            .join(&oid[..2])
+            .join(&oid[2..]),
+    )
+    .unwrap();
+    let regular = repo.path().join("existing");
+    std::fs::write(&regular, b"keep existing bytes").unwrap();
+    std::fs::set_permissions(&regular, std::fs::Permissions::from_mode(0o640)).unwrap();
+    let link = repo.path().join("output-link");
+    symlink(&regular, &link).unwrap();
+    let directory = repo.path().join("existing-dir");
+    std::fs::create_dir(&directory).unwrap();
+    let missing_parent = repo.path().join("missing-dir/output");
+    for path in [&regular, &link, &directory, &missing_parent] {
+        let output = run_libra_command(
+            &[
+                "agent",
+                "checkpoint",
+                "export",
+                &id,
+                "--reasoning-artifact",
+                &sha,
+                "--allow-raw",
+                "--justification",
+                "recovery",
+                "-o",
+                path.to_str().unwrap(),
+            ],
+            repo.path(),
+        );
+        assert!(!output.status.success());
+        assert!(
+            !String::from_utf8_lossy(&output.stderr).contains("catalog row is inconsistent"),
+            "destination fails before body lookup"
+        );
+        assert_no_artifact_canary(&output);
+        assert_eq!(std::fs::read(&regular).unwrap(), b"keep existing bytes");
+        assert_eq!(
+            std::fs::metadata(&regular).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+    }
+    assert!(!missing_parent.exists());
+    let rows = artifact_audit_details(repo.path()).await;
+    assert_eq!(rows.len(), 4);
+    assert!(
+        rows.iter()
+            .all(|row| row.0 == "reasoning_artifact_export" && row.1 == 1)
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn reasoning_export_integrity_failure_never_publishes_a_file() {
+    use std::io::Write;
+
+    for shape in [
+        "missing",
+        "oid_mismatch",
+        "header_size",
+        "undeclared",
+        "foreign_checkpoint",
+    ] {
+        let repo = tempfile::tempdir().unwrap();
+        init_repo_via_cli(repo.path());
+        let (id, sha, artifact) = seed_reasoning_artifact(repo.path()).await;
+        let oid = artifact.to_string();
+        let object = repo
+            .path()
+            .join(".libra/objects")
+            .join(&oid[..2])
+            .join(&oid[2..]);
+        let mut checkpoint_id = id.clone();
+        let selector = if shape == "undeclared" {
+            "b".repeat(64)
+        } else {
+            sha
+        };
+        match shape {
+            "missing" => std::fs::remove_file(&object).unwrap(),
+            "oid_mismatch" | "header_size" => {
+                let body = if shape == "oid_mismatch" {
+                    b"different ciphertext".as_slice()
+                } else {
+                    ARTIFACT_CANARY
+                };
+                let mut encoder =
+                    flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+                write!(
+                    encoder,
+                    "blob {}\0",
+                    body.len() + usize::from(shape == "header_size")
+                )
+                .unwrap();
+                encoder.write_all(body).unwrap();
+                std::fs::write(&object, encoder.finish().unwrap()).unwrap();
+            }
+            "foreign_checkpoint" => {
+                checkpoint_id = "ccddeeff00112233445566778899aabbcc".into();
+                let conn = connect_repo_db(repo.path()).await;
+                conn.execute_raw(Statement::from_sql_and_values(conn.get_database_backend(),
+                    "INSERT INTO agent_checkpoint (checkpoint_id,session_id,scope,parent_commit,tree_oid,metadata_blob_oid,traces_commit,created_at) SELECT ?,session_id,scope,parent_commit,tree_oid,metadata_blob_oid,traces_commit,created_at FROM agent_checkpoint WHERE checkpoint_id = ?",
+                    [checkpoint_id.clone().into(), id.into()])).await.unwrap();
+                conn.close().await.unwrap();
+            }
+            _ => {}
+        }
+        let before_files = std::fs::read_dir(repo.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<std::collections::BTreeSet<_>>();
+        let destination = repo.path().join("unpublished-artifact");
+        let output = run_libra_command(
+            &[
+                "agent",
+                "checkpoint",
+                "export",
+                &checkpoint_id,
+                "--reasoning-artifact",
+                &selector,
+                "--allow-raw",
+                "--justification",
+                "operator recovery",
+                "-o",
+                destination.to_str().unwrap(),
+            ],
+            repo.path(),
+        );
+        assert!(!output.status.success(), "{shape}");
+        assert!(!destination.exists(), "{shape}: no publication");
+        let after_files = std::fs::read_dir(repo.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            before_files, after_files,
+            "{shape}: private staging removed"
+        );
+        assert_no_artifact_canary(&output);
+        let rows = artifact_audit_details(repo.path()).await;
+        assert_eq!(rows.len(), 1, "{shape}");
+        assert_eq!(
+            (rows[0].0.as_str(), rows[0].1),
+            ("reasoning_artifact_export", 1),
+            "{shape}: grant records the attempt"
+        );
+    }
+}
+
+#[cfg(not(unix))]
+#[tokio::test]
+async fn reasoning_export_without_private_permission_primitive_fails_closed() {
+    let repo = tempfile::tempdir().unwrap();
+    init_repo_via_cli(repo.path());
+    let destination = repo.path().join("unpublished-artifact");
+    let output = run_libra_command(
+        &[
+            "agent",
+            "checkpoint",
+            "export",
+            "missing-checkpoint",
+            "--reasoning-artifact",
+            &"a".repeat(64),
+            "--allow-raw",
+            "--justification",
+            "operator recovery",
+            "-o",
+            destination.to_str().unwrap(),
+        ],
+        repo.path(),
+    );
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("LBR-AGENT-013"));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("no checkpoint"));
+    assert!(!destination.exists());
+    let rows = artifact_audit_details(repo.path()).await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        (rows[0].0.as_str(), rows[0].1),
+        ("reasoning_artifact_export", 0)
+    );
+}

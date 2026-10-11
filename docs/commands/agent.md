@@ -1033,6 +1033,25 @@ uses more storage and mirror bandwidth for high-entropy ciphertext; ordinary
 objects retain default compression, and valid existing objects are reused
 without recompression.
 
+### Controlled opaque reasoning export
+
+Libra preserves provider-encrypted bytes; it neither owns nor guesses decryption keys. Readable reasoning text passes typed redaction; a provider signature authenticates provider output, redactedData represents a provider-redacted reasoning block, and reasoningEncryptedContent is opaque provider ciphertext. None of these metadata labels alone proves native origin. The existing native source requirement remains in force.
+
+`checkpoint show` keeps its fixed human-readable safe summary. `checkpoint show --json` adds `reasoning_artifacts[]` only when a checkpoint declares artifacts. Each item exposes only `provider`, `source_kind`, `locator`, `byte_len`, `sha256`, `availability`, and `decrypt_capability`; it never exposes artifact paths, object ids, arbitrary metadata or bytes. Default show, transcript export, scoped input and skill readers do not read artifact bodies. An invalid checkpoint layout or manifest fails closed without reflecting its contents. A valid catalog root whose object is not yet available keeps the legacy safe summary, omits the optional artifact array and emits a fixed content-free diagnostic; present corrupt roots still refuse. This compatibility fallback never authorizes export.
+
+```sh
+libra agent checkpoint show <checkpoint-id> --json
+libra agent checkpoint export <checkpoint-id> \
+  --reasoning-artifact <lowercase-sha256> \
+  --allow-raw --justification "operator recovery" -o <new-private-path>
+```
+
+Opaque export requires all three authorization/output options, a lowercase SHA-256 and a new destination. Do not combine it with `--raw`. Authorization is checked and an independent `reasoning_artifact_export` audit row is appended before checkpoint lookup, artifact body access or file creation. A grant records the authorized attempt; later lookup or file failure retains that audit row. Audit failure stops the operation before body access.
+
+The selected artifact must belong to the selected checkpoint. Export verifies the closed manifest/tree role, complete blob object identity/type, SHA-256 and any declared byte length. The maximum is 32 MiB; truncated prefixes are refused. Bytes bypass redaction and are never decoded, sent to stdout, used as model input or decrypted. macOS/Unix writes a 0600 temporary file beside the destination and publishes it without overwriting an existing file, symlink or directory. Missing parents are not created; failed writes remove the private temporary file. Platforms without this owner-only permission primitive refuse with `LBR-AGENT-013` and a denial audit. Windows private ACL export is deferred; default metadata and ordinary transcript readers remain available.
+
+The `ReasoningDecryptor` registry returns `None` for Codex, Claude Code and OpenCode. `decrypt_capability` stays `none` and encrypted bytes remain `encrypted_unavailable`; a future official, explicitly authorized provider capability must enforce checkpoint/provider scope. This release implements no decryptor and accesses no decryption keys.
+
 Artifact tree reachability is added by RG-06; controlled read and export
 surfaces are added by RG-03.
 

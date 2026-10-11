@@ -1033,3 +1033,55 @@ fn scoped_run_cleanup_docs_pin_terminal_and_foreign_protection() {
         "corrupt-state recovery requires a valid own terminal manifest",
     );
 }
+
+#[test]
+fn rg03_controlled_artifact_read_docs_contract() {
+    for (label, document) in [
+        ("agent EN", AGENT_CMD_DOC_EN),
+        ("agent zh", AGENT_CMD_DOC_ZH),
+        ("developer EN", AGENT_DEV_DOC),
+        ("tracing zh", AGENT_DOC),
+    ] {
+        for term in [
+            "--reasoning-artifact",
+            "reasoning_artifact_export",
+            "ReasoningDecryptor",
+            "reasoning_artifacts[]",
+            "32 MiB",
+            "0600",
+            "None",
+            "Windows",
+            "signature",
+            "redactedData",
+            "reasoningEncryptedContent",
+        ] {
+            assert_contains(document, label, term);
+        }
+    }
+    for document in [AGENT_CMD_DOC_EN, AGENT_DEV_DOC] {
+        assert_contains(
+            document,
+            "RG03 keys",
+            "it neither owns nor guesses decryption keys",
+        );
+        assert_contains(
+            document,
+            "RG03 audit order",
+            "before checkpoint lookup, artifact body access or file creation",
+        );
+        assert_contains(
+            document,
+            "RG03 complete bytes",
+            "truncated prefixes are refused",
+        );
+    }
+    for document in [AGENT_CMD_DOC_ZH, AGENT_DOC] {
+        assert_contains(document, "RG03密钥", "不拥有也不猜测解密密钥");
+        assert_contains(
+            document,
+            "RG03审计顺序",
+            "先于 checkpoint 查询、正文读取和文件创建",
+        );
+        assert_contains(document, "RG03完整字节", "截断前缀不导出");
+    }
+}

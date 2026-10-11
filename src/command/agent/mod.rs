@@ -395,6 +395,12 @@ pub struct CheckpointExportArgs {
     #[arg(long, value_name = "TEXT")]
     pub justification: Option<String>,
 
+    /// Export this opaque artifact instead of the transcript. Requires
+    /// --allow-raw, a nonempty --justification and -o; never writes bytes to
+    /// stdout and never replaces an existing destination.
+    #[arg(long, value_name = "SHA256")]
+    pub reasoning_artifact: Option<String>,
+
     /// Write the export to this file instead of stdout.
     #[arg(long, short = 'o', value_name = "PATH")]
     pub output_path: Option<String>,

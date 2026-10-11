@@ -37,6 +37,27 @@ pub enum ReasoningProvider {
     OpenCode,
 }
 
+/// A future provider's explicitly authorized, checkpoint-scoped capability.
+/// Implementations must verify that their authorization covers checkpoint_id
+/// and the ciphertext's provider. This registry currently grants none; callers
+/// must retain encrypted_unavailable rather than infer a plaintext fallback.
+/// No client key, config, environment or network discovery is performed here.
+pub trait ReasoningDecryptor: Send + Sync {
+    fn decrypt(
+        &self,
+        checkpoint_id: &str,
+        ciphertext: &OpaqueEncryptedBytes,
+    ) -> Result<ProviderVisibleText, ReasoningFieldError>;
+}
+
+/// No officially documented and authorized decryptor is implemented for any
+/// observed provider. The capability is deliberately unavailable by default.
+pub fn reasoning_decryptor(
+    _provider: ReasoningProvider,
+) -> Option<&'static dyn ReasoningDecryptor> {
+    None
+}
+
 /// Metadata tags; no source text, paths, keys or original bytes are retained.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -608,6 +629,23 @@ mod tests {
     use std::time::Instant;
 
     use super::*;
+    #[test]
+    fn decryptor_registry_is_none_for_all_providers() {
+        for provider in [
+            ReasoningProvider::Codex,
+            ReasoningProvider::ClaudeCode,
+            ReasoningProvider::OpenCode,
+        ] {
+            assert!(reasoning_decryptor(provider).is_none());
+            let state = if reasoning_decryptor(provider).is_none() {
+                ReasoningAvailability::EncryptedUnavailable
+            } else {
+                panic!("no provider decryptor is registered");
+            };
+            assert_eq!(state, ReasoningAvailability::EncryptedUnavailable);
+        }
+    }
+
     #[test]
     fn contract_serde_snapshot() {
         let statuses = [

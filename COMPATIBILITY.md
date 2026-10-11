@@ -434,8 +434,16 @@ example `session_end`) instead of the provider's native name, and lifecycle
 JSONL lines use schema version 2 with a required `identity_scheme`.
 
 Agent capture read and sync surfaces are content-free by contract:
-`agent checkpoint show` returns only a fixed safe summary; `agent checkpoint
-rewind --apply` restores working-tree files only and never truncates or
+`agent checkpoint show` retains its fixed human-readable safe summary and its
+no-artifact JSON fields; JSON show adds only a typed `reasoning_artifacts[]`
+metadata whitelist for declared artifacts, without reading artifact bodies.
+Opaque bytes require `--reasoning-artifact <sha256> --allow-raw` with a nonblank
+`--justification` and `-o` new private destination, independent
+`reasoning_artifact_export` audit first, complete identity/digest/length checks
+and a 32 MiB hard cap. macOS/Unix publishes 0600 without overwriting; platforms
+without this private permission primitive refuse with `LBR-AGENT-013`.
+The Codex/Claude Code/OpenCode `ReasoningDecryptor` registry remains `None`.
+`agent checkpoint rewind --apply` restores working-tree files only and never truncates or
 rewrites the agent's own transcript; `agent session show --extract-transcript
 --json` reports only `output_path` and `bytes` (no provider `source_path`);
 and `cloud sync --progress=json` reports agent-capture row failures as one

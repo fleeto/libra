@@ -288,6 +288,27 @@ Canonical blob bytes and Git OIDs are unchanged. High-entropy ciphertext uses
 more disk and mirror bytes; ordinary objects keep default compression, and
 valid existing objects are reused without rewriting.
 
+### Controlled opaque reasoning export
+
+Libra preserves provider-encrypted bytes; it neither owns nor guesses decryption keys. Readable reasoning text passes typed redaction; a provider signature authenticates provider output, redactedData represents a provider-redacted reasoning block, and reasoningEncryptedContent is opaque provider ciphertext. None of these metadata labels alone proves native origin. The existing native source requirement remains in force.
+
+`checkpoint show` keeps its fixed human-readable safe summary. `checkpoint show --json` adds `reasoning_artifacts[]` only when a checkpoint declares artifacts. Each item exposes only `provider`, `source_kind`, `locator`, `byte_len`, `sha256`, `availability`, and `decrypt_capability`; it never exposes artifact paths, object ids, arbitrary metadata or bytes. Default show, transcript export, scoped input and skill readers do not read artifact bodies. An invalid checkpoint layout or manifest fails closed without reflecting its contents. A valid catalog root whose object is not yet available keeps the legacy safe summary, omits the optional artifact array and emits a fixed content-free diagnostic; present corrupt roots still refuse. This compatibility fallback never authorizes export.
+
+```sh
+libra agent checkpoint show <checkpoint-id> --json
+libra agent checkpoint export <checkpoint-id> \
+  --reasoning-artifact <lowercase-sha256> \
+  --allow-raw --justification "operator recovery" -o <new-private-path>
+```
+
+Opaque export requires all three authorization/output options, a lowercase SHA-256 and a new destination. Do not combine it with `--raw`. Authorization is checked and an independent `reasoning_artifact_export` audit row is appended before checkpoint lookup, artifact body access or file creation. A grant records the authorized attempt; later lookup or file failure retains that audit row. Audit failure stops the operation before body access.
+
+The selected artifact must belong to the selected checkpoint. Export verifies the closed manifest/tree role, complete blob object identity/type, SHA-256 and any declared byte length. The maximum is 32 MiB; truncated prefixes are refused. Bytes bypass redaction and are never decoded, sent to stdout, used as model input or decrypted. macOS/Unix writes a 0600 temporary file beside the destination and publishes it without overwriting an existing file, symlink or directory. Missing parents are not created; failed writes remove the private temporary file. Platforms without this owner-only permission primitive refuse with `LBR-AGENT-013` and a denial audit. Windows private ACL export is deferred; default metadata and ordinary transcript readers remain available.
+
+The `ReasoningDecryptor` registry returns `None` for Codex, Claude Code and OpenCode. `decrypt_capability` stays `none` and encrypted bytes remain `encrypted_unavailable`; a future official, explicitly authorized provider capability must enforce checkpoint/provider scope. This release implements no decryptor and accesses no decryption keys.
+
+Implementation owners: the CLI selector, fixed audit action, metadata-only helper, separately audited complete-body verifier, private no-clobber publication and provider-scoped empty decryptor registry. Shared role/proof budgets and existing body-read observer are reused; no SQL migration or key/config/environment/network discovery.
+
 RG-06 adds artifact tree reachability; RG-03 adds controlled read and export.
 
 
@@ -303,7 +324,7 @@ The saved-spec proof API reserves at most 4608 saved entries, 4096 UTF-8 bytes p
 
 This card supplies the shared internal API. Persisted review/investigate recovery is connected by FIX-RG-SCOPED-02, and filesystem ownership is supplied by FIX-RG-SCOPED-04. Their acceptance and the final aggregation full suite remain separate requirements. Synthetic role fixtures do not establish a native producer origin or authorize OpenCode reasoning archival.
 
-The existing public `checkpoint show`/`list` summary remains a closed whitelist and does not load checkpoint payloads. The R4 metadata projection gate is preserved as a test-only helper until RG-03 enables its public metadata contract. Skill projection now passes checkpoint id, tree oid and metadata oid to the shared role proof; corrupt or unbound metadata is skipped without exposing its body. Raw export authorization and audit are unchanged.
+The ordinary `checkpoint show`/`list` summary remains a closed whitelist. RG-03 enables the optional artifact metadata projection for JSON show using bounded role proofs, without reading artifact bodies; human show and list retain their existing summaries. Skill projection now passes checkpoint id, tree oid and metadata oid to the shared role proof; corrupt or unbound metadata is skipped without exposing its body. Raw export authorization and audit are unchanged.
 
 The macOS local content gate is `local_capture_smoke_opencode_macos` in
 `agent_local_capture_smoke_test`. It requires an explicit local-agent opt-in,

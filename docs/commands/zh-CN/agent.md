@@ -636,6 +636,24 @@ availability/decrypt_capability），以 `reasoning/encrypted/<sha256>` 存储�
 canonical blob 字节和 Git OID 不变。高熵密文因此占用更多存储及镜像带宽；
 普通对象仍用默认压缩，已存在的有效对象直接复用，不重新压缩。
 
+### 受控 opaque reasoning 导出
+
+Libra 保存 provider 已加密 bytes，不拥有也不猜测解密密钥。可读 reasoning 先经过 typed redaction；signature 认证 provider 输出，redactedData 表示 provider 已遮蔽的 reasoning 块，reasoningEncryptedContent 是 opaque provider 密文。这四类边界不混用；字段名称本身不能证明 native 来源，原有来源证明门禁继续保留。
+
+`checkpoint show` 保留固定的人工可读安全摘要。`checkpoint show --json` 仅在存在已声明 artifact 时增加 `reasoning_artifacts[]`，单条仅包含 `provider`、`source_kind`、`locator`、`byte_len`、`sha256`、`availability`、`decrypt_capability`；不返回路径、对象 id、任意 metadata 或正文。默认 show、普通 transcript export、scoped input 和 skill 读端不读取 artifact body。无效 checkpoint 布局或 manifest 拒绝且不回显其内容。 catalog 根 id 合法但对象尚未到位时保留旧安全摘要、省略可选 artifact 数组并发出固定无正文诊断；已存在但损坏的根仍拒绝。此兼容分支不授权导出。
+
+```sh
+libra agent checkpoint export <checkpoint-id> \
+  --reasoning-artifact <lowercase-sha256> \
+  --allow-raw --justification "operator recovery" -o <new-private-path>
+```
+
+导出要求 `--allow-raw`、非空白 `--justification`、`-o` 新路径及小写 SHA-256，不与 `--raw` 混用。独立 action `reasoning_artifact_export` 的授权/拒绝审计必须先于 checkpoint 查询、正文读取和文件创建；grant 记录已授权的尝试，后续失败不会撤销审计，审计写入失败则立即停止。
+
+只允许导出选中 checkpoint 声明的 artifact；完整核验 manifest/tree 闭包、blob 类型/对象身份、SHA-256 与可选 byte_len。上限 32 MiB，截断前缀不导出。bytes 不经过脱敏、解码、stdout、模型上下文或解密。macOS/Unix 以目标旁的 0600 私有临时文件写完后 no-clobber 发布，已有文件/链接/目录不覆盖，不自动建父目录，失败清理临时文件。没有此 owner-only 权限原语的平台以 `LBR-AGENT-013` 和拒绝审计关闭导出；Windows 私有 ACL 导出延后，默认元数据和普通 transcript 读端仍可用。
+
+`ReasoningDecryptor` 对 Codex、Claude Code、OpenCode 均返回 `None`，`decrypt_capability=none`，密文保持 `encrypted_unavailable`。将来的 provider 官方显式授权 capability 必须核验 checkpoint/provider 范围；本卡不实现 decryptor，也不接触解密密钥。
+
 artifact 的树可达性由 RG-06 接入；受控读取及导出由 RG-03 接入。
 
 

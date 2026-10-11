@@ -146,6 +146,10 @@ impl AuditScope {
     }
 }
 
+/// Distinguishes opaque artifact access from ordinary raw transcript export.
+/// The scope remains the existing transcript lifecycle; no SQL migration.
+pub const REASONING_ARTIFACT_EXPORT_ACTION: &str = "reasoning_artifact_export";
+
 /// One append-only audit record for a raw checkpoint access/export. Field
 /// set mirrors the `agent_audit_log` schema (agent.md §Audit log 规格).
 #[derive(Debug, Clone)]

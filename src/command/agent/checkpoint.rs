@@ -70,6 +70,8 @@ struct CheckpointShowSummary {
 }
 
 #[cfg(test)]
+use crate::internal::ai::checkpoint_reader::resolve_checkpoint_input_spec_from_storage;
+#[cfg(test)]
 use crate::internal::ai::checkpoint_reader::{
     CHECKPOINT_BODY_READS, CHECKPOINT_ORDINARY_MAX_DEPTH, CHECKPOINT_ORDINARY_MAX_FILES,
     CHECKPOINT_ORDINARY_MAX_PATH_BYTES, CHECKPOINT_ORDINARY_MAX_TREES, CheckpointTraversalLimits,
@@ -77,12 +79,8 @@ use crate::internal::ai::checkpoint_reader::{
 };
 use crate::internal::ai::checkpoint_reader::{
     checkpoint_plain_files, checkpoint_plain_manifest, checkpoint_transcript_oids,
-    read_checkpoint_object_bounded, read_tree_object, reasoning_artifact_tree_oids,
-    reject_artifact_alias, subtree, tree_entry,
-};
-#[cfg(test)]
-use crate::internal::ai::checkpoint_reader::{
-    reasoning_artifact_metadata, resolve_checkpoint_input_spec_from_storage,
+    read_checkpoint_object_bounded, read_tree_object, reasoning_artifact_metadata,
+    reasoning_artifact_tree_oids, reject_artifact_alias, subtree, tree_entry,
 };
 
 impl From<crate::internal::ai::checkpoint_reader::CheckpointReaderError> for CliError {
@@ -341,7 +339,7 @@ async fn show(args: CheckpointShowArgs, output: &OutputConfig) -> CliResult<()> 
     let row = conn
         .query_one_raw(Statement::from_sql_and_values(
             backend,
-            "SELECT scope, parent_commit, created_at \
+            "SELECT scope, parent_commit, created_at, tree_oid \
              FROM agent_checkpoint WHERE checkpoint_id = ? LIMIT 1",
             [args.checkpoint_id.clone().into()],
         ))
@@ -358,6 +356,32 @@ async fn show(args: CheckpointShowArgs, output: &OutputConfig) -> CliResult<()> 
             let scope: String = row
                 .try_get_by("scope")
                 .map_err(|_| checkpoint_show_store_inconsistent())?;
+            let artifacts =
+                if output.is_json() {
+                    let tree_oid: String = row
+                        .try_get_by("tree_oid")
+                        .map_err(|_| checkpoint_show_store_inconsistent())?;
+                    let storage = util::try_get_storage_path(None)
+                        .map_err(|_| checkpoint_show_store_inconsistent())?;
+                    let entries = load_reasoning_artifact_entries_for_show(
+                        &storage,
+                        &tree_oid,
+                        &args.checkpoint_id,
+                    )?
+                    .unwrap_or_default();
+                    if entries.is_empty() {
+                        None
+                    } else {
+                        Some(serde_json::Value::Array(entries.iter().map(|entry| serde_json::json!({
+                        "provider": entry.provider, "source_kind": entry.source_kind,
+                        "locator": entry.locator, "byte_len": entry.byte_len,
+                        "sha256": entry.sha256, "availability": entry.availability,
+                        "decrypt_capability": entry.decrypt_capability,
+                    })).collect()))
+                    }
+                } else {
+                    None
+                };
             let summary = CheckpointShowSummary {
                 // The command's positional identifier is the only identity
                 // deliberately echoed by this read operation.  Do not take
@@ -370,7 +394,7 @@ async fn show(args: CheckpointShowArgs, output: &OutputConfig) -> CliResult<()> 
                 created_at,
                 parent_snapshot_recorded: parent_commit.is_some_and(|value| !value.is_empty()),
             };
-            emit_one(&summary, output)
+            emit_one(&summary, artifacts.as_ref(), output)
         }
         None => Err(CliError::fatal(format!(
             "no checkpoint matches id '{}'",
@@ -878,6 +902,9 @@ async fn export(args: super::CheckpointExportArgs, output: &OutputConfig) -> Cli
     use crate::internal::ai::observed_agents::compliance::max_transcript_read_bytes;
 
     let conn = get_db_conn_instance().await;
+    if args.reasoning_artifact.is_some() {
+        return export_reasoning_artifact(&conn, &args, output).await;
+    }
     let backend = conn.get_database_backend();
 
     // Fail-closed gate FIRST — before any checkpoint lookup. A raw request
@@ -1013,6 +1040,150 @@ async fn export(args: super::CheckpointExportArgs, output: &OutputConfig) -> Cli
     Ok(())
 }
 
+/// Opaque artifact access is authorized and audited before any lookup/body
+/// read. Publication is private and no-clobber; an audit grant authorizes the
+/// attempt, and is retained even when a later lookup or file operation fails.
+async fn export_reasoning_artifact(
+    conn: &DatabaseConnection,
+    args: &super::CheckpointExportArgs,
+    output: &OutputConfig,
+) -> CliResult<()> {
+    use std::io::Write;
+
+    use crate::internal::ai::observed_agents::compliance::REASONING_ARTIFACT_EXPORT_ACTION;
+
+    let digest = args
+        .reasoning_artifact
+        .as_deref()
+        .ok_or_else(checkpoint_show_store_inconsistent)?;
+    let destination = args.output_path.as_deref().filter(|path| !path.is_empty());
+    // This card delivers the POSIX 0600 contract. Platforms without that
+    // owner-only permission primitive refuse, rather than inherit a broad ACL.
+    let private_output_supported = cfg!(unix);
+    let authorized = private_output_supported
+        && args.allow_raw
+        && !args.raw
+        && args
+            .justification
+            .as_deref()
+            .is_some_and(|text| !text.trim().is_empty())
+        && destination.is_some()
+        && digest.len() == 64
+        && digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
+    write_export_audit_action(
+        conn,
+        &args.checkpoint_id,
+        destination,
+        args.justification.as_deref(),
+        REASONING_ARTIFACT_EXPORT_ACTION,
+        authorized,
+    )
+    .await?;
+    if !private_output_supported {
+        return Err(CliError::fatal("private opaque reasoning export is unavailable on this platform; use a supported macOS or Unix installation with owner-only file permissions")
+            .with_stable_code(StableErrorCode::AgentRawAccessDenied));
+    }
+    if !authorized {
+        return Err(CliError::fatal("opaque reasoning export requires --allow-raw, a nonempty --justification, a lowercase SHA256 and -o; do not combine it with --raw")
+            .with_stable_code(StableErrorCode::AgentRawAccessDenied)
+            .with_hint("choose a new private output path; artifact bytes are never sent to stdout"));
+    }
+    let path = Path::new(destination.ok_or_else(checkpoint_show_store_inconsistent)?);
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => {
+            return Err(CliError::fatal(
+                "reasoning export destination already exists; choose a new path (no file is overwritten)",
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => {
+            return Err(CliError::fatal(
+                "cannot inspect reasoning export destination; check directory permissions and choose a new path",
+            ));
+        }
+    }
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let mut staged = tempfile::NamedTempFile::new_in(parent)
+        .map_err(|_| CliError::fatal("cannot create private reasoning export file; check that the output directory exists and is writable"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        staged
+            .as_file()
+            .set_permissions(std::fs::Permissions::from_mode(0o600))
+            .map_err(|_| {
+                CliError::fatal(
+                    "cannot make reasoning export private; check output directory permissions",
+                )
+            })?;
+    }
+    let row = load_checkpoint_row(conn, &args.checkpoint_id).await?;
+    let storage = util::try_get_storage_path(None)
+        .map_err(|_| CliError::fatal("reasoning export requires a Libra repository"))?;
+    let bytes = load_reasoning_artifact_bytes(&storage, &row.tree_oid, &row.checkpoint_id, digest)?;
+    staged.write_all(&bytes)
+        .and_then(|()| staged.flush())
+        .and_then(|()| staged.as_file().sync_all())
+        .map_err(|_| CliError::fatal("cannot finish private reasoning export; check free space and directory permissions (no output was published)"))?;
+    staged.persist_noclobber(path)
+        .map_err(|_| CliError::fatal("cannot publish reasoning export without replacing a destination; choose a new writable path (existing files are preserved)"))?;
+    if output.is_json() {
+        emit_json_data(
+            "agent_reasoning_artifact_export",
+            &serde_json::json!({
+                "checkpoint_id": args.checkpoint_id, "sha256": digest, "bytes": bytes.len(),
+                "output_path": destination, "decrypt_capability": "none",
+            }),
+            output,
+        )?;
+    } else if !output.quiet {
+        println!(
+            "Exported {} opaque reasoning artifact byte(s) to the private output file",
+            bytes.len()
+        );
+    }
+    Ok(())
+}
+
+/// Byte verification for the single audited export caller. Ordinary show,
+/// transcript/skill/scoped readers consume only the metadata proof helper.
+fn load_reasoning_artifact_bytes(
+    storage: &Path,
+    tree_oid: &str,
+    checkpoint_id: &str,
+    digest: &str,
+) -> CliResult<Vec<u8>> {
+    use sha2::{Digest, Sha256};
+
+    use crate::internal::ai::traces::REASONING_ARTIFACT_TOTAL_MAX_BYTES;
+    let entries = load_reasoning_artifact_entries(storage, tree_oid, checkpoint_id)?;
+    let entry = entries.iter().find(|entry| entry.sha256 == digest)
+        .ok_or_else(|| CliError::fatal("the selected reasoning artifact is not declared by this checkpoint; inspect checkpoint show --json and choose its SHA256"))?;
+    if entry
+        .byte_len
+        .is_some_and(|len| len > REASONING_ARTIFACT_TOTAL_MAX_BYTES)
+    {
+        return Err(checkpoint_show_store_inconsistent());
+    }
+    let oid = crate::internal::object_format::parse_repo_oid(&entry.oid)
+        .map_err(|_| checkpoint_show_store_inconsistent())?;
+    let (bytes, truncated) =
+        read_checkpoint_object_bounded(storage, &oid, REASONING_ARTIFACT_TOTAL_MAX_BYTES)
+            .map_err(|_| checkpoint_show_store_inconsistent())?;
+    if truncated
+        || entry.byte_len.is_some_and(|len| len != bytes.len() as u64)
+        || hex::encode(Sha256::digest(&bytes)) != digest
+    {
+        return Err(checkpoint_show_store_inconsistent());
+    }
+    Ok(bytes)
+}
+
 /// Load one checkpoint catalog row or fail with an actionable message.
 async fn load_checkpoint_row(
     conn: &(impl ConnectionTrait + ?Sized),
@@ -1119,6 +1290,25 @@ async fn write_export_audit(
     justification: Option<&str>,
     granted: bool,
 ) -> Result<(), CliError> {
+    write_export_audit_action(
+        conn,
+        checkpoint_id,
+        export_path,
+        justification,
+        "raw_export",
+        granted,
+    )
+    .await
+}
+
+async fn write_export_audit_action(
+    conn: &DatabaseConnection,
+    checkpoint_id: &str,
+    export_path: Option<&str>,
+    justification: Option<&str>,
+    action: &'static str,
+    granted: bool,
+) -> Result<(), CliError> {
     use crate::internal::ai::observed_agents::compliance::{
         AuditRecord, AuditScope, write_audit_record,
     };
@@ -1136,7 +1326,7 @@ async fn write_export_audit(
         uuid::Uuid::new_v4().to_string(),
         chrono::Utc::now().to_rfc3339(),
         (user_email, user_name),
-        "raw_export",
+        action,
         checkpoint_id,
         AuditScope::Transcript,
         export_path.map(str::to_string),
@@ -1232,12 +1422,38 @@ fn load_checkpoint_metadata_blob_from_storage(
     }
 }
 
-#[cfg(test)]
-fn load_checkpoint_manifest_metadata_only(
+/// Legacy catalog summaries do not require a hydrated root object. Missing
+/// root objects with a valid repository OID omit the optional artifact proof,
+/// with a fixed diagnostic; present corrupt objects and incomplete layouts
+/// still refuse. The separately audited export never uses this fallback.
+fn load_reasoning_artifact_entries_for_show(
     storage: &Path,
     tree_oid: &str,
     checkpoint_id: &str,
-) -> Result<serde_json::Value, CliError> {
+) -> CliResult<Option<Vec<crate::internal::ai::checkpoint_reader::ReasoningArtifactMetadata>>> {
+    let oid = crate::internal::object_format::parse_repo_oid(tree_oid)
+        .map_err(|_| checkpoint_show_store_inconsistent())?
+        .to_string();
+    // INVARIANT: a parsed ObjectHash formats as ASCII hex of at least 40 bytes.
+    let path = storage.join("objects").join(&oid[..2]).join(&oid[2..]);
+    match std::fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            tracing::warn!(
+                reason = "root_object_missing",
+                "checkpoint reasoning metadata unavailable; safe summary only; run libra agent doctor"
+            );
+            Ok(None)
+        }
+        Err(_) => Err(checkpoint_show_store_inconsistent()),
+        Ok(_) => load_reasoning_artifact_entries(storage, tree_oid, checkpoint_id).map(Some),
+    }
+}
+
+fn load_reasoning_artifact_entries(
+    storage: &Path,
+    tree_oid: &str,
+    checkpoint_id: &str,
+) -> Result<Vec<crate::internal::ai::checkpoint_reader::ReasoningArtifactMetadata>, CliError> {
     let root = read_tree_object(storage, tree_oid).map_err(CliError::fatal)?;
     // A v1 catalog tree may point directly at the checkpoint leaf. Such
     // checkpoints predate artifact manifests and retain their safe summary.
@@ -1247,7 +1463,7 @@ fn load_checkpoint_manifest_metadata_only(
         && tree_entry(&root, "manifest.json").is_none()
         && tree_entry(&root, "reasoning").is_none()
     {
-        return Ok(serde_json::json!([]));
+        return Ok(Vec::new());
     }
     let checkpoint_tree = subtree(storage, &root, "checkpoint").map_err(CliError::fatal)?;
     let prefix = checkpoint_id
@@ -1258,10 +1474,23 @@ fn load_checkpoint_manifest_metadata_only(
     let artifacts = reasoning_artifact_tree_oids(storage, &inner)?;
     let ordinary = checkpoint_plain_files(storage, &inner, &artifacts)?;
     let Some(manifest) = checkpoint_plain_manifest(storage, &inner, &artifacts, &ordinary)? else {
-        return Ok(serde_json::json!([]));
+        return Ok(Vec::new());
     };
-    let metadata = reasoning_artifact_metadata(&manifest)?;
-    serde_json::to_value(metadata).map_err(|_| checkpoint_show_store_inconsistent())
+    reasoning_artifact_metadata(&manifest).map_err(Into::into)
+}
+
+#[cfg(test)]
+fn load_checkpoint_manifest_metadata_only(
+    storage: &Path,
+    tree_oid: &str,
+    checkpoint_id: &str,
+) -> Result<serde_json::Value, CliError> {
+    serde_json::to_value(load_reasoning_artifact_entries(
+        storage,
+        tree_oid,
+        checkpoint_id,
+    )?)
+    .map_err(|_| checkpoint_show_store_inconsistent())
 }
 
 fn emit_list(page: &CheckpointListPage, output: &OutputConfig) -> CliResult<()> {
@@ -1291,11 +1520,18 @@ fn emit_list(page: &CheckpointListPage, output: &OutputConfig) -> CliResult<()> 
     Ok(())
 }
 
-fn emit_one(summary: &CheckpointShowSummary, output: &OutputConfig) -> CliResult<()> {
+fn emit_one(
+    summary: &CheckpointShowSummary,
+    artifacts: Option<&serde_json::Value>,
+    output: &OutputConfig,
+) -> CliResult<()> {
     if output.is_json() {
-        let payload = serde_json::json!({
+        let mut payload = serde_json::json!({
             "checkpoint": summary,
         });
+        if let Some(artifacts) = artifacts {
+            payload["reasoning_artifacts"] = artifacts.clone();
+        }
         return emit_json_data("agent_checkpoint", &payload, output);
     }
     if output.quiet {
@@ -2111,6 +2347,313 @@ mod tests {
         ensure_ai_runtime_contract_schema(&conn).await.unwrap();
         run_builtin_migrations(&conn).await.unwrap();
         (dir, conn)
+    }
+
+    #[tokio::test]
+    async fn reasoning_artifact_audit_failure_has_zero_body_reads() {
+        let (temp, conn) = fresh_db().await;
+        conn.execute_raw(Statement::from_string(conn.get_database_backend(),
+            "CREATE TRIGGER rg03_audit_failure BEFORE INSERT ON agent_audit_log BEGIN SELECT RAISE(ABORT, 'synthetic audit failure'); END".to_owned())).await.unwrap();
+        rg03_clear_body_reads();
+        let destination = temp.path().join("unpublished-output");
+        let args = super::super::CheckpointExportArgs {
+            checkpoint_id: RG03_CHECKPOINT_ID.into(),
+            allow_raw: true,
+            raw: false,
+            justification: Some("operator recovery".into()),
+            reasoning_artifact: Some("a".repeat(64)),
+            output_path: Some(destination.to_str().unwrap().to_owned()),
+        };
+        let error = export_reasoning_artifact(&conn, &args, &OutputConfig::default())
+            .await
+            .unwrap_err();
+        assert!(error.message().contains("append audit record"));
+        CHECKPOINT_BODY_READS.with(|reads| {
+            assert!(
+                reads.borrow().is_empty(),
+                "failed audit must precede every object payload read"
+            )
+        });
+        assert!(!destination.exists());
+        conn.close().await.unwrap();
+    }
+
+    #[test]
+    fn reasoning_artifact_metadata_reads_zero_body_with_positive_control() {
+        let dir = TempDir::new().unwrap();
+        let (root, artifact) = rg03_read_fixture(dir.path(), "canonical", false);
+        rg03_clear_body_reads();
+        let entries =
+            load_reasoning_artifact_entries(dir.path(), &root, RG03_CHECKPOINT_ID).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].oid, artifact.to_string());
+        rg03_assert_no_artifact_body_reads(artifact);
+        let ordinary = load_checkpoint_transcript_bytes_from_storage(
+            dir.path(),
+            RG03_CHECKPOINT_ID,
+            &root,
+            1024,
+        )
+        .unwrap();
+        assert_eq!(ordinary.0, b"ordinary transcript");
+        rg03_assert_no_artifact_body_reads(artifact);
+        CHECKPOINT_BODY_READS.with(|reads| {
+            assert!(
+                !reads.borrow().is_empty(),
+                "observer records real permitted ordinary/proof reads"
+            )
+        });
+    }
+
+    #[test]
+    fn reasoning_artifact_show_missing_root_keeps_legacy_summary_without_body() {
+        let temp = TempDir::new().unwrap();
+        let oid = "a".repeat(40);
+        rg03_clear_body_reads();
+        assert!(
+            load_reasoning_artifact_entries_for_show(temp.path(), &oid, RG03_CHECKPOINT_ID)
+                .unwrap()
+                .is_none()
+        );
+        CHECKPOINT_BODY_READS.with(|reads| assert!(reads.borrow().is_empty()));
+        let path = temp.path().join("objects").join(&oid[..2]).join(&oid[2..]);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, b"corrupt existing object").unwrap();
+        assert!(
+            load_reasoning_artifact_entries_for_show(temp.path(), &oid, RG03_CHECKPOINT_ID)
+                .is_err()
+        );
+        CHECKPOINT_BODY_READS.with(|reads| assert!(reads.borrow().is_empty()));
+        assert!(
+            load_reasoning_artifact_bytes(temp.path(), &oid, RG03_CHECKPOINT_ID, &"b".repeat(64))
+                .is_err()
+        );
+    }
+
+    fn reasoning_export_fixture(
+        storage: &Path,
+        body: &[u8],
+        declared_sha: &str,
+        declared_len: Option<u64>,
+    ) -> (String, ObjectHash) {
+        let artifact = rg03_blob(storage, body);
+        let metadata = rg03_blob(storage, b"{}");
+        let transcript = rg03_blob(storage, b"ordinary transcript");
+        let transcript_tree = rg03_tree(
+            storage,
+            vec![TreeItem::new(
+                TreeItemMode::Blob,
+                transcript,
+                "claude_code.jsonl".into(),
+            )],
+        );
+        let encrypted = rg03_tree(
+            storage,
+            vec![TreeItem::new(
+                TreeItemMode::Blob,
+                artifact,
+                declared_sha.into(),
+            )],
+        );
+        let reasoning = rg03_tree(
+            storage,
+            vec![TreeItem::new(
+                TreeItemMode::Tree,
+                encrypted,
+                "encrypted".into(),
+            )],
+        );
+        let mut entry = serde_json::json!({
+            "path": format!("reasoning/encrypted/{declared_sha}"),
+            "oid": artifact.to_string(), "sha256": declared_sha,
+            "locator": "claude_code:msg=0/part=0/metadata=signature",
+            "provider": "claude_code", "source_kind": "signature",
+            "availability": "encrypted_unavailable", "decrypt_capability": "none"
+        });
+        if let Some(len) = declared_len {
+            entry["byte_len"] = serde_json::json!(len);
+        }
+        let manifest = rg03_blob(storage, &serde_json::to_vec(&serde_json::json!({
+            "schema_version": 1,
+            "entries": {
+                "metadata": {"path": "metadata.json", "oid": metadata.to_string()},
+                "transcript": {"path": "transcript/claude_code.jsonl", "oid": transcript.to_string()}
+            },
+            "reasoning_artifacts": [entry]
+        })).unwrap());
+        let leaf = rg03_tree(
+            storage,
+            vec![
+                TreeItem::new(TreeItemMode::Blob, metadata, "metadata.json".into()),
+                TreeItem::new(TreeItemMode::Blob, manifest, "manifest.json".into()),
+                TreeItem::new(TreeItemMode::Tree, transcript_tree, "transcript".into()),
+                TreeItem::new(TreeItemMode::Tree, reasoning, "reasoning".into()),
+            ],
+        );
+        let prefix = rg03_tree(
+            storage,
+            vec![TreeItem::new(
+                TreeItemMode::Tree,
+                leaf,
+                RG03_CHECKPOINT_ID[2..].into(),
+            )],
+        );
+        let checkpoints = rg03_tree(
+            storage,
+            vec![TreeItem::new(
+                TreeItemMode::Tree,
+                prefix,
+                RG03_CHECKPOINT_ID[..2].into(),
+            )],
+        );
+        (
+            rg03_tree(
+                storage,
+                vec![TreeItem::new(
+                    TreeItemMode::Tree,
+                    checkpoints,
+                    "checkpoint".into(),
+                )],
+            )
+            .to_string(),
+            artifact,
+        )
+    }
+
+    #[test]
+    fn reasoning_artifact_export_integrity_matrix() {
+        use std::io::Write;
+
+        use sha2::{Digest, Sha256};
+
+        let digest = hex::encode(Sha256::digest(RG03_OPAQUE_BODY));
+        for shape in [
+            "valid",
+            "legacy_size",
+            "sha_mismatch",
+            "size_mismatch",
+            "missing",
+            "oid_mismatch",
+            "wrong_type",
+            "wrong_header_size",
+            "foreign_checkpoint",
+            "undeclared_selector",
+        ] {
+            let temp = TempDir::new().unwrap();
+            let declared_sha = if shape == "sha_mismatch" {
+                "b".repeat(64)
+            } else {
+                digest.clone()
+            };
+            let declared_len = match shape {
+                "legacy_size" => None,
+                "size_mismatch" => Some(0),
+                _ => Some(RG03_OPAQUE_BODY.len() as u64),
+            };
+            let (root, artifact) = reasoning_export_fixture(
+                temp.path(),
+                RG03_OPAQUE_BODY,
+                &declared_sha,
+                declared_len,
+            );
+            let oid = artifact.to_string();
+            let object_path = temp.path().join("objects").join(&oid[..2]).join(&oid[2..]);
+            match shape {
+                "missing" => fs::remove_file(&object_path).unwrap(),
+                "oid_mismatch" | "wrong_type" => {
+                    let other = if shape == "wrong_type" {
+                        let ordinary = rg03_blob(temp.path(), b"ordinary tree entry");
+                        rg03_tree(
+                            temp.path(),
+                            vec![TreeItem::new(TreeItemMode::Blob, ordinary, "entry".into())],
+                        )
+                    } else {
+                        rg03_blob(temp.path(), b"different ciphertext")
+                    }
+                    .to_string();
+                    fs::copy(
+                        temp.path()
+                            .join("objects")
+                            .join(&other[..2])
+                            .join(&other[2..]),
+                        &object_path,
+                    )
+                    .unwrap();
+                }
+                "wrong_header_size" => {
+                    let mut encoder =
+                        flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+                    write!(encoder, "blob {}\0", RG03_OPAQUE_BODY.len() + 1).unwrap();
+                    encoder.write_all(RG03_OPAQUE_BODY).unwrap();
+                    fs::write(&object_path, encoder.finish().unwrap()).unwrap();
+                }
+                _ => {}
+            }
+            rg03_clear_body_reads();
+            let selected_checkpoint = if shape == "foreign_checkpoint" {
+                "00foreign"
+            } else {
+                RG03_CHECKPOINT_ID
+            };
+            let selector = if shape == "undeclared_selector" {
+                "c".repeat(64)
+            } else {
+                declared_sha
+            };
+            let result =
+                load_reasoning_artifact_bytes(temp.path(), &root, selected_checkpoint, &selector);
+            if matches!(shape, "valid" | "legacy_size") {
+                assert_eq!(result.unwrap(), RG03_OPAQUE_BODY, "{shape}");
+                CHECKPOINT_BODY_READS.with(|reads| assert!(reads.borrow().contains(&oid)));
+            } else {
+                let error = result.unwrap_err();
+                assert!(
+                    !error
+                        .message()
+                        .contains(std::str::from_utf8(RG03_OPAQUE_BODY).unwrap()),
+                    "{shape}: payload-free error"
+                );
+                if matches!(
+                    shape,
+                    "foreign_checkpoint" | "undeclared_selector" | "wrong_type"
+                ) {
+                    rg03_assert_no_artifact_body_reads(artifact);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn reasoning_artifact_export_enforces_actual_byte_cap_without_truncation() {
+        use sha2::{Digest, Sha256};
+
+        let cap = crate::internal::ai::traces::REASONING_ARTIFACT_TOTAL_MAX_BYTES;
+        for (extra, declared) in [(0, true), (1, true), (1, false)] {
+            let temp = TempDir::new().unwrap();
+            let body = vec![b'x'; usize::try_from(cap).unwrap() + extra];
+            let digest = hex::encode(Sha256::digest(&body));
+            let (root, artifact) = reasoning_export_fixture(
+                temp.path(),
+                &body,
+                &digest,
+                declared.then_some(body.len() as u64),
+            );
+            rg03_clear_body_reads();
+            let result =
+                load_reasoning_artifact_bytes(temp.path(), &root, RG03_CHECKPOINT_ID, &digest);
+            if extra == 0 {
+                assert_eq!(
+                    result.unwrap(),
+                    body,
+                    "exact cap is a complete verified blob"
+                );
+            } else {
+                assert!(result.is_err(), "over cap must never return a prefix");
+                if declared {
+                    rg03_assert_no_artifact_body_reads(artifact);
+                }
+            }
+        }
     }
 
     #[test]

@@ -8,6 +8,7 @@
 //! provider names and ref names.
 
 use std::{
+    collections::{BTreeMap, BTreeSet},
     fmt,
     path::{Path, PathBuf},
     time::{Duration, Instant},
@@ -21,24 +22,27 @@ use thiserror::Error;
 
 #[cfg(test)]
 use crate::internal::ai::capture::snapshot::CaptureSnapshot;
-use crate::internal::ai::{
-    capture::{
-        catalog::CaptureCatalogTerminalAttemptFence, snapshot::CaptureSnapshotProjection,
-        state::CheckpointWrite,
-    },
-    capture_scope::{CaptureCommitDeadline, CaptureScope},
-    history::{CheckpointAppendConflict, CheckpointCompanionTransactionFailed},
-    observed_agents::{
-        RedactedBytes,
-        reasoning::{
-            BoundIdentityInputRef, NativeProvenReasoning, ReasoningSourceDisposition,
-            ReasoningSourceState, VerifiedCaptureBinding, borrow_native_identity_bindings,
+use crate::internal::{
+    ai::{
+        capture::{
+            catalog::CaptureCatalogTerminalAttemptFence, snapshot::CaptureSnapshotProjection,
+            state::CheckpointWrite,
+        },
+        capture_scope::{CaptureCommitDeadline, CaptureScope},
+        history::{CheckpointAppendConflict, CheckpointCompanionTransactionFailed},
+        observed_agents::{
+            NormalizedTurn, RedactedBytes,
+            reasoning::{
+                BoundIdentityInputRef, NativeProvenReasoning, ReasoningSourceDisposition,
+                ReasoningSourceState, VerifiedCaptureBinding, borrow_native_identity_bindings,
+            },
+        },
+        traces::{
+            self, CheckpointCommitParams, CheckpointScope, TracesCommitCtx, TracesCoverageFence,
+            TracesInflightMarker, TracesTxnExtra,
         },
     },
-    traces::{
-        self, CheckpointCommitParams, CheckpointScope, TracesCommitCtx, TracesCoverageFence,
-        TracesInflightMarker, TracesTxnExtra,
-    },
+    metadata::ReasoningIdentityKind,
 };
 
 /// A completed ref/catalog CAS already has durable checkpoint state.  The
@@ -501,7 +505,19 @@ pub(crate) fn prepare_reasoning_identity_inputs<'a>(
     capture_session: &str,
     provider: &str,
 ) -> Result<Vec<BoundIdentityInputRef<'a>>, CheckpointStoreError> {
-    match &payload.reasoning {
+    prepare_reasoning_identity_inputs_from_disposition(
+        &payload.reasoning,
+        capture_session,
+        provider,
+    )
+}
+
+fn prepare_reasoning_identity_inputs_from_disposition<'a>(
+    reasoning: &'a ReasoningSourceDisposition,
+    capture_session: &str,
+    provider: &str,
+) -> Result<Vec<BoundIdentityInputRef<'a>>, CheckpointStoreError> {
+    match reasoning {
         ReasoningSourceDisposition::Ordinary => Ok(Vec::new()),
         ReasoningSourceDisposition::NativeProven(batch) => {
             let binding = validate_reasoning_capture_binding(batch, capture_session, provider)?;
@@ -517,10 +533,428 @@ pub(crate) fn prepare_reasoning_identity_inputs<'a>(
     }
 }
 
-pub(crate) fn reasoning_source_disposition(
+/// Immutable, locally authenticated comparison inputs. Construction is owned
+/// by this adapter and consumes only the sealed native metadata port above;
+/// a coverage caller cannot mint one from arbitrary bytes or a native label.
+#[derive(Clone)]
+pub(crate) struct ReasoningCoveragePlan {
+    scope: CaptureScope,
+    session_id: String,
+    storage_path: PathBuf,
+    authorized_root: PathBuf,
+    deadline: Instant,
+    turns: BTreeMap<String, ReasoningTurnIdentity>,
+}
+
+/// Read authority for an ordinary/legacy capture. This can authenticate an
+/// existing private map and look up a turn, but cannot assert a native source
+/// or manufacture a comparable Empty/Nonempty candidate.
+#[derive(Clone)]
+pub(crate) struct ReasoningIdentityReadContext {
+    scope: CaptureScope,
+    session_id: String,
+    storage_path: PathBuf,
+    authorized_root: PathBuf,
+    deadline: Instant,
+}
+
+impl ReasoningIdentityReadContext {
+    pub(crate) fn new(
+        scope: &CaptureScope,
+        session_id: &str,
+        storage_path: &Path,
+        authorized_root: &Path,
+        deadline: Instant,
+    ) -> Self {
+        Self {
+            scope: scope.clone(),
+            session_id: session_id.to_owned(),
+            storage_path: storage_path.to_path_buf(),
+            authorized_root: authorized_root.to_path_buf(),
+            deadline,
+        }
+    }
+
+    pub(crate) fn validate_for(
+        &self,
+        scope: &CaptureScope,
+        session_id: &str,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            &self.scope == scope && self.session_id == session_id,
+            "reasoning identity reader does not match the current capture; run libra agent doctor"
+        );
+        anyhow::ensure!(
+            Instant::now() < self.deadline,
+            "reasoning coverage authentication exceeded its execution deadline"
+        );
+        Ok(())
+    }
+
+    pub(crate) async fn authenticate_record<C: ConnectionTrait>(
+        &self,
+        conn: &C,
+        body: &[u8],
+        expected_mac: Option<&str>,
+    ) -> anyhow::Result<String> {
+        self.validate_for(&self.scope, &self.session_id)?;
+        super::key::authenticate_reasoning_identity_in_scope_until(
+            conn,
+            &self.scope,
+            &self.storage_path,
+            &self.authorized_root,
+            super::key::ReasoningIdentityAuthentication {
+                purpose: super::key::ReasoningIdentityMacPurpose::Record,
+                body,
+                expected_mac,
+            },
+            self.deadline,
+        )
+        .await
+    }
+
+    pub(crate) async fn turn_slot<C: ConnectionTrait>(
+        &self,
+        conn: &C,
+        logical_turn_key: &str,
+    ) -> anyhow::Result<String> {
+        self.validate_for(&self.scope, &self.session_id)?;
+        let body = reasoning_turn_slot_body(&self.scope, &self.session_id, logical_turn_key)?;
+        super::key::authenticate_reasoning_identity_in_scope_until(
+            conn,
+            &self.scope,
+            &self.storage_path,
+            &self.authorized_root,
+            super::key::ReasoningIdentityAuthentication {
+                purpose: super::key::ReasoningIdentityMacPurpose::Descriptor,
+                body: &body,
+                expected_mac: None,
+            },
+            self.deadline,
+        )
+        .await
+    }
+}
+
+fn reasoning_turn_slot_body(
+    scope: &CaptureScope,
+    session_id: &str,
+    logical_turn_key: &str,
+) -> anyhow::Result<Vec<u8>> {
+    let bytes = serde_json::to_vec(&(
+        "reasoning-turn-slot",
+        1u8,
+        &scope.repo_id,
+        session_id,
+        logical_turn_key,
+    ))
+    .context("cannot prepare reasoning coverage identity")?;
+    anyhow::ensure!(
+        bytes.len() <= traces::REASONING_ARTIFACT_MANIFEST_MAX_BYTES,
+        "reasoning coverage exceeds its safe byte limit"
+    );
+    Ok(bytes)
+}
+
+#[derive(Clone)]
+pub(crate) struct ReasoningTurnIdentity {
+    slot: String,
+    kind: ReasoningIdentityKind,
+    descriptor_mac: String,
+}
+
+impl ReasoningTurnIdentity {
+    pub(crate) fn slot(&self) -> &str {
+        &self.slot
+    }
+
+    pub(crate) fn kind(&self) -> ReasoningIdentityKind {
+        self.kind
+    }
+
+    pub(crate) fn descriptor_mac(&self) -> &str {
+        &self.descriptor_mac
+    }
+}
+
+impl ReasoningCoveragePlan {
+    pub(crate) fn read_context(&self) -> ReasoningIdentityReadContext {
+        ReasoningIdentityReadContext::new(
+            &self.scope,
+            &self.session_id,
+            &self.storage_path,
+            &self.authorized_root,
+            self.deadline,
+        )
+    }
+
+    pub(crate) fn validate_for(
+        &self,
+        scope: &CaptureScope,
+        session_id: &str,
+        turns: &[NormalizedTurn],
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            &self.scope == scope
+                && self.session_id == session_id
+                && turns
+                    .iter()
+                    .all(|turn| self.turns.contains_key(&turn.logical_turn_key)),
+            "reasoning coverage source does not match the current capture; run libra agent doctor"
+        );
+        anyhow::ensure!(
+            Instant::now() < self.deadline,
+            "reasoning coverage authentication exceeded its execution deadline"
+        );
+        Ok(())
+    }
+
+    pub(crate) fn turn(&self, key: &str) -> Option<&ReasoningTurnIdentity> {
+        self.turns.get(key)
+    }
+
+    pub(crate) async fn authenticate_record<C: ConnectionTrait>(
+        &self,
+        conn: &C,
+        body: &[u8],
+        expected_mac: Option<&str>,
+    ) -> anyhow::Result<String> {
+        super::key::authenticate_reasoning_identity_in_scope_until(
+            conn,
+            &self.scope,
+            &self.storage_path,
+            &self.authorized_root,
+            super::key::ReasoningIdentityAuthentication {
+                purpose: super::key::ReasoningIdentityMacPurpose::Record,
+                body,
+                expected_mac,
+            },
+            self.deadline,
+        )
+        .await
+    }
+}
+
+pub(crate) struct ReasoningIdentityPreparation<'a> {
+    pub(crate) conn: &'a DatabaseConnection,
+    pub(crate) scope: &'a CaptureScope,
+    pub(crate) storage_path: &'a Path,
+    pub(crate) authorized_root: &'a Path,
+    pub(crate) session_id: &'a str,
+    pub(crate) provider: &'a str,
+    pub(crate) turns: &'a [NormalizedTurn],
+    pub(crate) deadline: Instant,
+}
+
+/// Produce the same per-turn identity for live and import. Whole-export
+/// checksums, transport nonces, claim fences and checkpoint generations never
+/// enter this stable content descriptor. Those fences authenticate the later
+/// private record instead. Every budget is checked before any reservation.
+#[cfg(test)]
+pub(crate) async fn prepare_reasoning_coverage_plan(
     payload: &CheckpointRedactedPayload,
-) -> ReasoningSourceState {
-    payload.reasoning.state()
+    request: ReasoningIdentityPreparation<'_>,
+) -> anyhow::Result<Option<ReasoningCoveragePlan>> {
+    prepare_reasoning_coverage_plan_from_disposition(&payload.reasoning, request).await
+}
+
+/// Prepare the stable per-turn identity directly from the sealed disposition
+/// emitted by the authorized snapshot boundary. The payload-free typed value
+/// never crosses an ordinary serializer or metadata fallback.
+pub(crate) async fn prepare_reasoning_coverage_plan_from_disposition(
+    reasoning: &ReasoningSourceDisposition,
+    request: ReasoningIdentityPreparation<'_>,
+) -> anyhow::Result<Option<ReasoningCoveragePlan>> {
+    use sha2::{Digest, Sha256};
+
+    use super::key::{
+        ReasoningIdentityAuthentication, ReasoningIdentityMacPurpose,
+        authenticate_reasoning_identity_in_scope_until,
+    };
+
+    anyhow::ensure!(
+        Instant::now() < request.deadline,
+        "reasoning coverage authentication exceeded its execution deadline"
+    );
+    let inputs = prepare_reasoning_identity_inputs_from_disposition(
+        reasoning,
+        request.session_id,
+        request.provider,
+    )?;
+    if reasoning.state() == ReasoningSourceState::Ordinary {
+        return Ok(None);
+    }
+    let artifacts = prepare_reasoning_artifact_params_from_disposition(
+        reasoning,
+        request.session_id,
+        request.provider,
+    )?;
+    anyhow::ensure!(
+        inputs.len() == artifacts.len()
+            && inputs.len() <= traces::REASONING_ARTIFACT_MAX_ENTRIES
+            && request.turns.len() <= traces::REASONING_ARTIFACT_MAX_ENTRIES,
+        "reasoning coverage exceeds its safe entry limit"
+    );
+    let turn_keys = request
+        .turns
+        .iter()
+        .map(|turn| turn.logical_turn_key.as_str())
+        .collect::<BTreeSet<_>>();
+    anyhow::ensure!(
+        turn_keys.len() == request.turns.len()
+            && inputs
+                .iter()
+                .all(|input| turn_keys.contains(input.logical_turn())),
+        "reasoning source cannot be associated with its logical turns; run libra agent doctor"
+    );
+    let mut artifact_bytes = 0u64;
+    for artifact in artifacts {
+        artifact_bytes = artifact_bytes
+            .checked_add(artifact.bytes.len() as u64)
+            .context("reasoning coverage exceeds its safe byte limit")?;
+        anyhow::ensure!(
+            artifact_bytes <= traces::REASONING_ARTIFACT_TOTAL_MAX_BYTES,
+            "reasoning coverage exceeds its safe byte limit"
+        );
+    }
+
+    // Construct and bound every descriptor before accessing the key. Entries
+    // retain source order within each turn; an appended later turn therefore
+    // cannot change any earlier turn's stable commitment.
+    let mut descriptors = Vec::with_capacity(request.turns.len());
+    let mut descriptor_bytes = 0usize;
+    for turn in request.turns {
+        anyhow::ensure!(
+            Instant::now() < request.deadline,
+            "reasoning coverage authentication exceeded its execution deadline"
+        );
+        let entries = inputs
+            .iter()
+            .zip(artifacts)
+            .filter(|(input, _)| input.logical_turn() == turn.logical_turn_key)
+            .map(|(input, artifact)| {
+                (
+                    "native_proven",
+                    input.issuer_tag(),
+                    hex::encode(input.source_binding_sha256()),
+                    hex::encode(input.original_wire_sha256()),
+                    &artifact.locator,
+                    artifact.provider,
+                    artifact.source_kind,
+                    hex::encode(Sha256::digest(artifact.bytes.as_bytes())),
+                )
+            })
+            .collect::<Vec<_>>();
+        let kind = if entries.is_empty() {
+            ReasoningIdentityKind::Empty
+        } else {
+            ReasoningIdentityKind::Nonempty
+        };
+        let descriptor = serde_json::to_vec(&(
+            "reasoning-turn-identity",
+            1u8,
+            &request.scope.repo_id,
+            request.session_id,
+            &turn.logical_turn_key,
+            entries,
+        ))
+        .context("cannot prepare reasoning coverage identity")?;
+        let slot =
+            reasoning_turn_slot_body(request.scope, request.session_id, &turn.logical_turn_key)?;
+        descriptor_bytes = descriptor_bytes
+            .checked_add(descriptor.len())
+            .and_then(|size| size.checked_add(slot.len()))
+            .context("reasoning coverage exceeds its safe byte limit")?;
+        anyhow::ensure!(
+            descriptor_bytes <= traces::REASONING_ARTIFACT_MANIFEST_MAX_BYTES,
+            "reasoning coverage exceeds its safe byte limit"
+        );
+        descriptors.push((&turn.logical_turn_key, kind, descriptor, slot));
+    }
+    let mut turns = BTreeMap::new();
+    for (key, kind, descriptor, slot) in descriptors {
+        let authenticate = |body| ReasoningIdentityAuthentication {
+            purpose: ReasoningIdentityMacPurpose::Descriptor,
+            body,
+            expected_mac: None,
+        };
+        let descriptor_mac = authenticate_reasoning_identity_in_scope_until(
+            request.conn,
+            request.scope,
+            request.storage_path,
+            request.authorized_root,
+            authenticate(&descriptor),
+            request.deadline,
+        )
+        .await?;
+        let slot = authenticate_reasoning_identity_in_scope_until(
+            request.conn,
+            request.scope,
+            request.storage_path,
+            request.authorized_root,
+            authenticate(&slot),
+            request.deadline,
+        )
+        .await?;
+        turns.insert(
+            key.clone(),
+            ReasoningTurnIdentity {
+                slot,
+                kind,
+                descriptor_mac,
+            },
+        );
+    }
+    Ok(Some(ReasoningCoveragePlan {
+        scope: request.scope.clone(),
+        session_id: request.session_id.to_owned(),
+        storage_path: request.storage_path.to_path_buf(),
+        authorized_root: request.authorized_root.to_path_buf(),
+        deadline: request.deadline,
+        turns,
+    }))
+}
+
+#[cfg(all(test, unix))]
+pub(crate) fn reasoning_coverage_test_payload(fields: Vec<Vec<u8>>) -> CheckpointRedactedPayload {
+    use crate::internal::ai::observed_agents::reasoning::{
+        carrier_test_support as fixture, synthetic_native_preparation,
+    };
+    let snapshot = super::snapshot::carrier_test_snapshot(&fixture::NONE, b"ordinary".to_vec());
+    let metadata = serde_json::json!({ "created_at": Utc::now().timestamp() });
+    let mut payload = CheckpointRedactedPayload::from_snapshot(
+        snapshot,
+        RedactedBytes::new_unchecked(
+            serde_json::to_vec(&metadata).expect("serialize synthetic checkpoint timestamp"),
+        ),
+        RedactedBytes::new_unchecked(b"{}\n".to_vec()),
+        RedactedBytes::new_unchecked(b"{}".to_vec()),
+    )
+    .expect("synthetic ordinary snapshot");
+    let prepared = synthetic_native_preparation(
+        b"ordinary".to_vec(),
+        fixture::CAPTURE,
+        fixture::SOURCE,
+        fields,
+    );
+    payload.reasoning = ReasoningSourceDisposition::from_prepared_authorized_source(
+        prepared,
+        true,
+        traces::REASONING_ARTIFACT_TOTAL_MAX_BYTES,
+        "claude_code",
+        fixture::CAPTURE,
+        Some(fixture::SOURCE),
+    )
+    .expect("synthetic native proof validation")
+    .1;
+    payload
+}
+
+#[cfg(all(test, unix))]
+pub(crate) fn reasoning_coverage_test_disposition(
+    fields: Vec<Vec<u8>>,
+) -> ReasoningSourceDisposition {
+    reasoning_coverage_test_payload(fields).reasoning
 }
 
 fn prepare_reasoning_artifact_params<'a>(
@@ -528,10 +962,22 @@ fn prepare_reasoning_artifact_params<'a>(
     capture_session: &str,
     provider: &str,
 ) -> Result<&'a [traces::ReasoningArtifactParam], CheckpointStoreError> {
-    match reasoning_source_disposition(payload) {
+    prepare_reasoning_artifact_params_from_disposition(
+        &payload.reasoning,
+        capture_session,
+        provider,
+    )
+}
+
+fn prepare_reasoning_artifact_params_from_disposition<'a>(
+    reasoning: &'a ReasoningSourceDisposition,
+    capture_session: &str,
+    provider: &str,
+) -> Result<&'a [traces::ReasoningArtifactParam], CheckpointStoreError> {
+    match reasoning.state() {
         ReasoningSourceState::Ordinary => Ok(&[]),
         ReasoningSourceState::NativeProven => {
-            let ReasoningSourceDisposition::NativeProven(batch) = &payload.reasoning else {
+            let ReasoningSourceDisposition::NativeProven(batch) = reasoning else {
                 return Err(CheckpointStoreError::InvalidRequest {
                     field: "reasoning source preparation".to_owned(),
                 });
@@ -594,6 +1040,28 @@ impl CheckpointRedactedPayload {
         lifecycle_events_jsonl: RedactedBytes,
         redaction_report_json: RedactedBytes,
     ) -> Result<Self, CheckpointStoreError> {
+        Self::from_redacted_capture_with_reasoning(
+            transcript,
+            snapshot,
+            metadata_json,
+            lifecycle_events_jsonl,
+            redaction_report_json,
+            ReasoningSourceDisposition::Ordinary,
+        )
+    }
+
+    /// Construct a capture payload while preserving its sealed typed
+    /// reasoning disposition. Native-proven artifacts require an exact,
+    /// complete snapshot with a durable source commitment; partial or
+    /// unsupported dispositions cannot be downgraded to ordinary content.
+    pub(crate) fn from_redacted_capture_with_reasoning(
+        transcript: RedactedBytes,
+        snapshot: Option<CaptureSnapshotProjection>,
+        metadata_json: RedactedBytes,
+        lifecycle_events_jsonl: RedactedBytes,
+        redaction_report_json: RedactedBytes,
+        reasoning: ReasoningSourceDisposition,
+    ) -> Result<Self, CheckpointStoreError> {
         let snapshot = snapshot.unwrap_or(CaptureSnapshotProjection {
             completeness:
                 crate::internal::ai::capture::snapshot::CaptureSnapshotCompleteness::Partial,
@@ -627,11 +1095,19 @@ impl CheckpointRedactedPayload {
         } else {
             CheckpointPayloadProvenance::MetadataFallback
         };
+        if !reasoning.has_capture_consumer()
+            || (reasoning.state() == ReasoningSourceState::NativeProven
+                && provenance != CheckpointPayloadProvenance::ExactSnapshot)
+        {
+            return Err(CheckpointStoreError::InvalidRequest {
+                field: "reasoning source preparation".to_string(),
+            });
+        }
         Ok(Self {
             transcript,
             snapshot,
             provenance,
-            reasoning: ReasoningSourceDisposition::Ordinary,
+            reasoning,
             metadata_json,
             lifecycle_events_jsonl,
             redaction_report_json,
@@ -4077,6 +4553,38 @@ mod tests {
         let artifacts =
             prepare_reasoning_artifact_params(&payload, fixture::CAPTURE, "claude_code").unwrap();
         assert_eq!(artifacts[0].bytes.as_bytes(), fixture::CANARY);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn typed_capture_constructor_preserves_native_reasoning_disposition() {
+        use crate::internal::ai::observed_agents::reasoning::carrier_test_support as fixture;
+
+        let payload = reasoning_coverage_test_payload(vec![b"synthetic private wire".to_vec()]);
+        let mut projection = payload.snapshot.clone();
+        projection
+            .source
+            .as_mut()
+            .expect("synthetic snapshot has a source projection")
+            .digest_sha256 = Some(format!("source/hmac-v2/{}", "a".repeat(64)));
+        let rebuilt = CheckpointRedactedPayload::from_redacted_capture_with_reasoning(
+            payload.transcript,
+            Some(projection),
+            payload.metadata_json,
+            payload.lifecycle_events_jsonl,
+            payload.redaction_report_json,
+            payload.reasoning,
+        )
+        .expect("complete typed capture remains a checkpoint payload");
+
+        assert!(matches!(
+            rebuilt.reasoning.state(),
+            ReasoningSourceState::NativeProven
+        ));
+        let artifacts =
+            prepare_reasoning_artifact_params(&rebuilt, fixture::CAPTURE, "claude_code").unwrap();
+        assert_eq!(artifacts.len(), 1);
+        assert_eq!(artifacts[0].bytes.as_bytes(), b"synthetic private wire");
     }
 
     #[tokio::test]

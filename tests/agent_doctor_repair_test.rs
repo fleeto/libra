@@ -1420,6 +1420,82 @@ async fn doctor_surfaces_conflicted_coverage_claim_without_raw_identity() {
     }
 }
 
+#[tokio::test]
+async fn reasoning_identity_conflict_has_payload_free_doctor_reason() {
+    let repo = DoctorRepo::init();
+    let session = "identity-conflict-private-session";
+    repo.ingest_checkpoint(session, TRANSCRIPT);
+    repo.exec_sql(
+        "INSERT INTO agent_coverage_claim (
+            session_id, logical_turn_key, coverage_schema_version,
+            coverage_digest, completeness, revision, state, source_channel, created_at, updated_at
+         ) SELECT session_id, 'private-turn-coordinate', 1, ?, 'complete', 1,
+                  'conflicted', 'live', 1, 1 FROM agent_session WHERE provider_session_id = ?",
+        vec!["a".repeat(64).into(), session.into()],
+    )
+    .await;
+    let report = json!({
+        "matches": [], "bytes_scanned": 0, "bytes_redacted": 0,
+        "reason": "reasoning_identity_changed",
+        "descriptor_mac": "IDENTITY_PRIVATE_MAC_CANARY",
+        "source_coordinates": "IDENTITY_PRIVATE_COORDINATE_CANARY",
+        "preimage": "IDENTITY_PRIVATE_PAYLOAD_CANARY"
+    })
+    .to_string();
+    repo.exec_sql(
+        "INSERT INTO agent_coverage_conflict (
+            session_id, logical_turn_key, coverage_schema_version,
+            incumbent_revision, incumbent_digest, incumbent_checkpoint_id,
+            incoming_digest, incoming_source_channel, incoming_observed_at,
+            incoming_canonical_json, incoming_redaction_report_json
+         ) SELECT session_id, 'private-turn-coordinate', 1, 1, ?, NULL, ?, 'live', 1, '[]', ?
+           FROM agent_session WHERE provider_session_id = ?",
+        vec![
+            "a".repeat(64).into(),
+            "a".repeat(64).into(),
+            report.into(),
+            session.into(),
+        ],
+    )
+    .await;
+    for repair in [false, true] {
+        let report = repo.doctor_json(repair);
+        let identity_findings = findings(&report)
+            .into_iter()
+            .filter(|finding| finding["inconsistency_type"] == "conflicted_coverage_claim")
+            .collect::<Vec<_>>();
+        assert_eq!(identity_findings.len(), 1);
+        assert_eq!(identity_findings[0]["manual_required"], json!(true));
+        assert_eq!(identity_findings[0]["repaired"], json!(false));
+        assert!(
+            identity_findings[0]["detail"]
+                .as_str()
+                .unwrap()
+                .contains("reasoning_identity_changed")
+        );
+        let human = repo.run(&["agent", "doctor"], None);
+        assert!(human.status.success(), "{}", describe(&human));
+        let outputs = format!(
+            "{report} {} {}",
+            String::from_utf8_lossy(&human.stdout),
+            String::from_utf8_lossy(&human.stderr)
+        );
+        assert!(outputs.contains("reasoning_identity_changed"));
+        for private in [
+            session,
+            "private-turn-coordinate",
+            "IDENTITY_PRIVATE_MAC_CANARY",
+            "IDENTITY_PRIVATE_COORDINATE_CANARY",
+            "IDENTITY_PRIVATE_PAYLOAD_CANARY",
+        ] {
+            assert!(
+                !outputs.contains(private),
+                "private identity evidence leaked: {private}"
+            );
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Loose-object reading helpers (E4 tree navigation for sidecar tests)
 // ---------------------------------------------------------------------------

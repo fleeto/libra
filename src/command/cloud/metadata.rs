@@ -22,19 +22,7 @@ pub(super) async fn sync_metadata(
         .await
         .map_err(|e| CloudError::Generic(format!("Failed to fetch references: {}", e)))?;
 
-    // Sort to ensure deterministic output for hashing.
-    let mut sorted_refs = references;
-    sorted_refs.sort_by(|a, b| {
-        let a_kind = format!("{:?}", a.kind);
-        let b_kind = format!("{:?}", b.kind);
-        let a_key = (&a.name, &a.remote, a_kind);
-        let b_key = (&b.name, &b.remote, b_kind);
-        a_key.cmp(&b_key)
-    });
-
-    let json = serde_json::to_vec(&sorted_refs)
-        .map_err(|e| CloudError::Generic(format!("Failed to serialize metadata: {}", e)))?;
-
+    let (sorted_refs, json) = serialize_reference_projection(references)?;
     let current_hash = calculate_metadata_hash(&json);
 
     // Check if hash matches last sync.
@@ -62,4 +50,71 @@ pub(super) async fn sync_metadata(
     Ok(MetadataSyncOutcome::Synced {
         references: sorted_refs.len(),
     })
+}
+
+/// Keep the cloud metadata contract limited to references. Repository-private
+/// `metadata_kv` scopes never enter this projection.
+fn serialize_reference_projection(
+    references: Vec<reference::Model>,
+) -> CloudResult<(Vec<reference::Model>, Vec<u8>)> {
+    let mut sorted_refs = references;
+    sorted_refs.sort_by(|a, b| {
+        let a_kind = format!("{:?}", a.kind);
+        let b_kind = format!("{:?}", b.kind);
+        let a_key = (&a.name, &a.remote, a_kind);
+        let b_key = (&b.name, &b.remote, b_kind);
+        a_key.cmp(&b_key)
+    });
+
+    let json = serde_json::to_vec(&sorted_refs)
+        .map_err(|e| CloudError::Generic(format!("Failed to serialize metadata: {}", e)))?;
+    Ok((sorted_refs, json))
+}
+
+#[cfg(test)]
+mod tests {
+    use sea_orm::{ActiveModelTrait, ActiveValue::Set, EntityTrait};
+
+    use super::*;
+    use crate::internal::{
+        metadata::{MetadataKv, MetadataScope, MetadataValueType},
+        model::reference::ConfigKind,
+    };
+
+    #[tokio::test]
+    async fn reasoning_identity_is_not_in_cloud_projection() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn =
+            crate::internal::db::create_database(dir.path().join("libra.db").to_str().unwrap())
+                .await
+                .unwrap();
+        crate::internal::model::reference::ActiveModel {
+            name: Set(Some("refs/heads/main".to_owned())),
+            kind: Set(ConfigKind::Branch),
+            commit: Set(Some("a".repeat(40))),
+            remote: Set(None),
+            worktree_id: Set(None),
+            ..Default::default()
+        }
+        .insert(&conn)
+        .await
+        .unwrap();
+        MetadataKv::set_with_conn(
+            &conn,
+            MetadataScope::AgentReasoningIdentity,
+            "session-private-target",
+            "identity-v1",
+            "private-identity-canary",
+            MetadataValueType::Text,
+        )
+        .await
+        .unwrap();
+
+        let references = reference::Entity::find().all(&conn).await.unwrap();
+        let (_, projected) = serialize_reference_projection(references).unwrap();
+        let projection = String::from_utf8(projected).unwrap();
+        assert!(projection.contains("refs/heads/main"));
+        assert!(!projection.contains("private-identity-canary"));
+        assert!(!projection.contains("agent_reasoning_identity"));
+    }
 }

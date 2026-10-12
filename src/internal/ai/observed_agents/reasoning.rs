@@ -111,6 +111,13 @@ impl ReasoningSourceDisposition {
         matches!(self, Self::Ordinary)
     }
 
+    /// Whether the sealed source state has a downstream capture consumer.
+    /// `NativeProven` is admitted only through the typed identity/claim path;
+    /// all other nonordinary states remain fail-closed.
+    pub(crate) fn has_capture_consumer(&self) -> bool {
+        matches!(self, Self::Ordinary | Self::NativeProven(_))
+    }
+
     pub(crate) fn state(&self) -> ReasoningSourceState {
         match self {
             Self::Ordinary => ReasoningSourceState::Ordinary,

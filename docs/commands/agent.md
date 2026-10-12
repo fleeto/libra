@@ -1174,3 +1174,11 @@ Production provider capabilities remain disabled and no production native issuer
 ### Private reasoning identity and garbage collection
 
 Garbage collection excludes the reserved `agent_reasoning_identity` scope from generic metadata object-reference scanning. This applies to the entire stored value, including a damaged value containing a JSON object ID or a nested object ID; those values do not trigger object hydration. This exclusion requires no private reasoning key. Ordinary metadata object roots, private capture recovery exclusions, and capture pending parent roots retain their existing rules. Forward recovery must retain both the private rows and this exclusion while a reasoning identity writer is stopped or repaired. This guard does not create identity records, issue native provenance, or enable OpenCode reasoning archival.
+
+### Reasoning identity coverage and session limits
+
+When reasoning coverage cannot be safely compared, live capture and export fail closed with `reasoning coverage is partial; run libra agent doctor before retrying capture`. A complete-turn identity conflict is reported by doctor with the reason `reasoning_identity_changed`; it requires manual review of the authorized reasoning artifacts, and doctor does not choose a winner.
+
+The private identity map is limited to 4096 records and 1 MiB of serialized data per session. Reaching either limit stops the write and reports `private reasoning identity session map reached its safe capacity; start a new capture session`. An absent map is the legacy state: candidate-free ordinary turns retain their existing coverage behavior, and the first eligible identity-bearing turn may create the map. A malformed, oversized, unexpected, or unauthenticated map is invalid for the entire session; every turn in that session is treated as partial, even if a turn has no incoming candidate. Doctor does not repair an invalid identity map; if doctor reports no conflict finding, that does not make the partial result complete. Do not edit the private metadata scope manually.
+
+These checks compare capture identity only; they do not prove native provider origin. Unproved OpenCode reasoning remains partial and is not archived.

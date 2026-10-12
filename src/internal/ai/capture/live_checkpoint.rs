@@ -33,8 +33,9 @@ use crate::{
             },
             checkpoint::{
                 CheckpointConflictReason, CheckpointRedactedPayload, CheckpointReplayStatus,
-                CheckpointStoreError, CheckpointWriteRequest, SubagentCheckpointCommitPlan,
-                TracesCheckpointStore,
+                CheckpointStoreError, CheckpointWriteRequest, ReasoningCoveragePlan,
+                ReasoningIdentityPreparation, ReasoningIdentityReadContext,
+                SubagentCheckpointCommitPlan, TracesCheckpointStore,
             },
             coordinator::{
                 CaptureCoordinator, CaptureCoordinatorFinalizer, CaptureCoordinatorOutcome,
@@ -55,7 +56,7 @@ use crate::{
             },
         },
         capture_scope::{CaptureCommitDeadline, CaptureScope},
-        coverage_gate::ReservedTurnClaim,
+        coverage_gate::{CaptureReservationExecution, ReasoningCoverageInput, ReservedTurnClaim},
         hooks::lifecycle::{
             CanonicalEventContext, LifecycleEvent, LifecycleEventKind, LifecycleIdentityScheme,
             SessionHookEnvelope, lifecycle_event_canonical_json_with_identity,
@@ -66,6 +67,7 @@ use crate::{
                 LiveCandidateUnavailable, LiveCaptureBinding, LiveCaptureContext,
                 LiveCoverageNormalizer, LiveTranscriptExporter,
             },
+            reasoning::ReasoningSourceDisposition,
         },
     },
     utils::util,
@@ -83,6 +85,16 @@ struct CheckpointReservationCleanup<'a> {
     scope: &'a CaptureScope,
     claim_channel: &'static str,
     claim_owner: Option<&'a str>,
+}
+
+/// Claims and the optional source-derived identity plan travel together from
+/// reservation to the existing checkpoint transaction. The plan is never
+/// persisted before the claim/ref CAS companion commits.
+pub(super) struct CaptureClaimReservation {
+    owner: String,
+    now_ms: i64,
+    claims: Vec<ReservedTurnClaim>,
+    reasoning: Option<Box<ReasoningCoveragePlan>>,
 }
 
 async fn cleanup_failed_checkpoint_side_effects(
@@ -407,7 +419,7 @@ async fn acquire_live_snapshot(
         CaptureSnapshotPolicy::with_deadline(snapshot_deadline),
     )
     .await;
-    if snapshot.rejects_ordinary_source_consumer() {
+    if snapshot.rejects_capture_source_consumer() {
         return snapshot.into_checkpoint_parts();
     }
     // The helper's redacted SHA-256 is a transient preimage only. Before
@@ -496,12 +508,88 @@ enum LiveCoverageStage {
     /// this writer reserved (`None` when the source had no turns to claim).
     Proceed {
         catalog_reservation: Box<LiveCaptureReservation>,
-        live_reservation: Option<(
-            String,
-            i64,
-            Vec<crate::internal::ai::coverage_gate::ReservedTurnClaim>,
-        )>,
+        live_reservation: Option<CaptureClaimReservation>,
     },
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn reserve_reasoning_coverage(
+    conn: &sea_orm::DatabaseConnection,
+    scope: &CaptureScope,
+    repo_path: &std::path::Path,
+    session_id: &str,
+    turns: &[crate::internal::ai::observed_agents::NormalizedTurn],
+    reasoning: &ReasoningSourceDisposition,
+    provider: &str,
+    owner: &str,
+    now_ms: i64,
+    source_channel: &'static str,
+    deadline: Option<CaptureCommitDeadline>,
+) -> Result<(
+    crate::internal::ai::coverage_gate::ReasoningReservationOutcome,
+    Option<ReasoningCoveragePlan>,
+)> {
+    use crate::internal::ai::{
+        capture::checkpoint::prepare_reasoning_coverage_plan_from_disposition, coverage_gate,
+    };
+
+    let storage_path = util::try_get_storage_path(Some(repo_path.to_path_buf()))
+        .context("resolve storage for private reasoning coverage")?;
+    let reasoning_deadline = deadline
+        .map(CaptureCommitDeadline::monotonic)
+        .unwrap_or_else(|| Instant::now() + Duration::from_secs(5));
+    let reader = ReasoningIdentityReadContext::new(
+        scope,
+        session_id,
+        &storage_path,
+        repo_path,
+        reasoning_deadline,
+    );
+    let candidate = prepare_reasoning_coverage_plan_from_disposition(
+        reasoning,
+        ReasoningIdentityPreparation {
+            conn,
+            scope,
+            storage_path: &storage_path,
+            authorized_root: repo_path,
+            session_id,
+            provider,
+            turns,
+            deadline: reasoning_deadline,
+        },
+    )
+    .await?;
+    let input = match candidate.as_ref() {
+        Some(candidate) => ReasoningCoverageInput::native(candidate),
+        None => ReasoningCoverageInput::ordinary(&reader),
+    };
+    let outcome = match deadline {
+        Some(deadline) => {
+            let execution = match source_channel {
+                "live" => CaptureReservationExecution::live(deadline),
+                "export" => CaptureReservationExecution::export(deadline),
+                _ => bail!("unsupported reasoning coverage channel"),
+            };
+            coverage_gate::reserve_turn_claims_with_reasoning(
+                conn, scope, session_id, turns, owner, now_ms, execution, input,
+            )
+            .await
+        }
+        None => {
+            coverage_gate::reserve_turn_claims_with_reasoning_no_deadline(
+                conn,
+                scope,
+                session_id,
+                turns,
+                owner,
+                now_ms,
+                source_channel,
+                input,
+            )
+            .await
+        }
+    }?;
+    Ok((outcome, candidate))
 }
 
 /// DR-05c-0 live coverage gate (plan-20260713 ADR-DR-09/10) for a provider
@@ -531,6 +619,9 @@ async fn reserve_live_coverage(
     preexisting_durable_terminal: bool,
     normalize: LiveCoverageNormalizer,
     transcript_redacted: &crate::internal::ai::observed_agents::RedactedBytes,
+    reasoning: &ReasoningSourceDisposition,
+    provider: &str,
+    repo_path: &std::path::Path,
 ) -> Result<LiveCoverageStage> {
     use crate::internal::ai::coverage_gate;
 
@@ -583,6 +674,9 @@ async fn reserve_live_coverage(
         return Ok(LiveCoverageStage::Settled);
     }
     if turns.is_empty() {
+        if !reasoning.is_ordinary() {
+            bail!("reasoning source has no logical turns for identity coverage");
+        }
         return Ok(LiveCoverageStage::Proceed {
             catalog_reservation: Box::new(catalog_reservation),
             live_reservation: None,
@@ -590,32 +684,21 @@ async fn reserve_live_coverage(
     }
     let owner = format!("live:{}:{}", std::process::id(), uuid::Uuid::new_v4());
     let now_ms = Utc::now().timestamp_millis();
-    let reservation = match capture_deadline {
-        Some(deadline) => {
-            coverage_gate::reserve_live_turn_claims_until(
-                conn,
-                scope,
-                libra_session_id,
-                &turns,
-                &owner,
-                now_ms,
-                deadline,
-            )
-            .await
-        }
-        None => {
-            coverage_gate::reserve_live_turn_claims_with_capture_scope(
-                conn,
-                scope,
-                libra_session_id,
-                &turns,
-                &owner,
-                now_ms,
-            )
-            .await
-        }
-    };
-    let outcome = match reservation {
+    let reservation = reserve_reasoning_coverage(
+        conn,
+        scope,
+        repo_path,
+        libra_session_id,
+        &turns,
+        reasoning,
+        provider,
+        &owner,
+        now_ms,
+        "live",
+        capture_deadline,
+    )
+    .await;
+    let (reasoning_outcome, identity_plan) = match reservation {
         Ok(outcome) => outcome,
         Err(error) => {
             if let Some(deadline) = capture_deadline
@@ -655,6 +738,10 @@ async fn reserve_live_coverage(
             );
         }
     };
+    if reasoning_outcome.skipped_incomplete_reasoning != 0 {
+        bail!("reasoning coverage is partial; run libra agent doctor before retrying capture");
+    }
+    let outcome = reasoning_outcome.ordinary;
     // A claim transaction can finish just before its final internal
     // check while the clock expires before this writer acts on the
     // outcome. Release the still-owned plan before settling the
@@ -773,7 +860,12 @@ async fn reserve_live_coverage(
     }
     Ok(LiveCoverageStage::Proceed {
         catalog_reservation: Box::new(catalog_reservation),
-        live_reservation: Some((owner, now_ms, outcome.reserved)),
+        live_reservation: Some(CaptureClaimReservation {
+            owner,
+            now_ms,
+            claims: outcome.reserved,
+            reasoning: identity_plan.map(Box::new),
+        }),
     })
 }
 
@@ -868,7 +960,7 @@ pub(super) async fn write_committed_checkpoint<P: LiveExportLeasePort>(
         provider_session_id: &envelope.session_id,
         verified_cwd: std::path::Path::new(&envelope.cwd),
     };
-    let (live_projection, live_transcript, live_reasoning) = acquire_live_snapshot(
+    let (live_projection, live_transcript, mut live_reasoning) = acquire_live_snapshot(
         conn,
         repo_path,
         scope,
@@ -878,10 +970,20 @@ pub(super) async fn write_committed_checkpoint<P: LiveExportLeasePort>(
         &mut report_value,
     )
     .await;
-    if !live_reasoning.is_ordinary() {
+    if !live_reasoning.has_capture_consumer()
+        || (!live_reasoning.is_ordinary()
+            && (live_projection.completeness != CaptureSnapshotCompleteness::Complete
+                || live_transcript.is_none()))
+    {
         // The existing catalog reservation remains uncommitted. This happens
         // before deadline/no-op settlement or coverage-turn reservation, so
         // the wrapper retains its original Pending/NotTracked behavior.
+        return Err(SourcePreparationRejected.into());
+    }
+    if !live_reasoning.is_ordinary()
+        && binding.live_coverage_normalizer().is_none()
+        && binding.transcript_exporter().is_none()
+    {
         return Err(SourcePreparationRejected.into());
     }
     let mut transcript_is_authorized = live_transcript.is_some();
@@ -922,6 +1024,9 @@ pub(super) async fn write_committed_checkpoint<P: LiveExportLeasePort>(
                 preexisting_durable_terminal,
                 normalize,
                 &transcript_redacted,
+                &live_reasoning,
+                agent_kind,
+                repo_path,
             )
             .await?
             {
@@ -974,10 +1079,12 @@ pub(super) async fn write_committed_checkpoint<P: LiveExportLeasePort>(
                 projection,
                 transcript,
                 claims,
+                reasoning,
             } => {
                 transcript_snapshot_projection = Some(*projection);
                 transcript_is_authorized = true;
                 transcript_redacted = transcript;
+                live_reasoning = *reasoning;
                 claim_channel = "export";
                 live_reservation = Some(*claims);
                 export_runner = Some(runner);
@@ -1014,6 +1121,7 @@ pub(super) async fn write_committed_checkpoint<P: LiveExportLeasePort>(
             transcript_is_authorized,
             transcript_snapshot_projection,
             transcript_redacted,
+            reasoning: live_reasoning,
             claim_channel,
             live_reservation,
         },
@@ -1041,7 +1149,8 @@ pub(super) enum ExportStage<'a, P: LiveExportLeasePort> {
         runner: LiveExportRunner<'a, P>,
         projection: Box<CaptureSnapshotProjection>,
         transcript: RedactedBytes,
-        claims: Box<(String, i64, Vec<ReservedTurnClaim>)>,
+        claims: Box<CaptureClaimReservation>,
+        reasoning: Box<ReasoningSourceDisposition>,
     },
 }
 
@@ -1072,7 +1181,8 @@ pub(super) enum ExportStageExit {
 struct ExportedSource {
     projection: CaptureSnapshotProjection,
     transcript: RedactedBytes,
-    reserved: Vec<ReservedTurnClaim>,
+    reservation: CaptureClaimReservation,
+    reasoning: ReasoningSourceDisposition,
 }
 
 /// The lease disposition, structured `reason=` and tracing fields of each
@@ -1143,7 +1253,7 @@ pub(super) async fn run_export_stage<'a, P: LiveExportLeasePort>(
     export_lease: &'a P,
     exporter: &dyn LiveTranscriptExporter,
 ) -> Result<ExportStage<'a, P>> {
-    use crate::internal::ai::{coverage_gate, observed_agents::coverage};
+    use crate::internal::ai::observed_agents::coverage;
 
     let libra_session_id = context.libra_session_id;
     // `effective_capture_deadline` establishes an exporter's default budget
@@ -1210,7 +1320,7 @@ pub(super) async fn run_export_stage<'a, P: LiveExportLeasePort>(
             ),
             CaptureSnapshotPolicy::with_deadline(Some(export_deadline.monotonic())),
         );
-        if snapshot.rejects_ordinary_source_consumer() {
+        if snapshot.rejects_capture_source_consumer() {
             return Err(ExportStageExit::SourceRejected(SourcePreparationRejected.into()));
         }
         // Keep an incomplete source on its existing typed outcome. In
@@ -1254,16 +1364,32 @@ pub(super) async fn run_export_stage<'a, P: LiveExportLeasePort>(
                 "LBR-AGENT-005: export snapshot is incomplete; write aborted (fail-closed)"
             )));
         };
+        merge_redaction_report_into(report_value, snapshot.redaction_report());
         let mut turns = (exporter.export_coverage_normalizer())(snapshot_bytes);
         coverage::redact_turns(&mut turns);
-        let outcome = match coverage_gate::reserve_turn_claims_for_channel_with_capture_scope_until(
+        let (projection, transcript, reasoning) = snapshot.into_checkpoint_parts();
+        let Some(transcript) = transcript else {
+            return Err(ExportStageExit::SourceRejected(anyhow!(
+                "LBR-AGENT-005: complete export snapshot lost its redacted transcript"
+            )));
+        };
+        if turns.is_empty() && !reasoning.is_ordinary() {
+            return Err(ExportStageExit::CoverageFailed(anyhow!(
+                "reasoning source has no logical turns for identity coverage"
+            )));
+        }
+        let (reasoning_outcome, identity_plan) = match reserve_reasoning_coverage(
             conn,
             scope,
+            repo_path,
             libra_session_id,
             &turns,
+            &reasoning,
+            binding.agent_kind_db(),
             &owner,
             now_ms,
-            coverage_gate::CaptureReservationExecution::export(export_deadline),
+            "export",
+            Some(export_deadline),
         )
         .await
         {
@@ -1272,6 +1398,12 @@ pub(super) async fn run_export_stage<'a, P: LiveExportLeasePort>(
             // so the next idle retries.
             Err(error) => return Err(ExportStageExit::CoverageFailed(error)),
         };
+        if reasoning_outcome.skipped_incomplete_reasoning != 0 {
+            return Err(ExportStageExit::CoverageFailed(anyhow!(
+                "reasoning coverage is partial; run libra agent doctor before retrying capture"
+            )));
+        }
+        let outcome = reasoning_outcome.ordinary;
         #[cfg(test)]
         test_support::delay_after_live_coverage_reservation();
         // Codex M3 R2 P1-2: a purely in-flight skip (another writer holds
@@ -1345,20 +1477,16 @@ pub(super) async fn run_export_stage<'a, P: LiveExportLeasePort>(
                 "transcript export: terminal action has no new turns; writing strict completion checkpoint"
             );
         }
-        // The snapshot owns the only raw-source boundary; its content and
-        // report are already redacted here.
-        let projection = snapshot.safe_projection();
-        merge_redaction_report_into(report_value, snapshot.redaction_report());
-        let Some(transcript) = snapshot.try_into_ordinary()
-            .map_err(|_| ExportStageExit::SourceRejected(SourcePreparationRejected.into()))? else {
-            return Err(ExportStageExit::SourceRejected(anyhow!(
-                "LBR-AGENT-005: complete export snapshot lost its redacted transcript"
-            )));
-        };
         Ok(ExportedSource {
             projection,
             transcript,
-            reserved: outcome.reserved,
+            reservation: CaptureClaimReservation {
+                owner,
+                now_ms,
+                claims: outcome.reserved,
+                reasoning: identity_plan.map(Box::new),
+            },
+            reasoning,
         })
     }
     .await;
@@ -1366,13 +1494,15 @@ pub(super) async fn run_export_stage<'a, P: LiveExportLeasePort>(
         Ok(ExportedSource {
             projection,
             transcript,
-            reserved,
+            reservation,
+            reasoning,
         }) => Ok(ExportStage::Proceed {
             catalog_reservation: Box::new(catalog_reservation),
             runner,
             projection: Box::new(projection),
             transcript,
-            claims: Box::new((owner, now_ms, reserved)),
+            claims: Box::new(reservation),
+            reasoning: Box::new(reasoning),
         }),
         Err(exit) => {
             let (disposition, reason, log) =
@@ -1453,8 +1583,9 @@ pub(super) struct CheckpointStageInput<'a> {
     transcript_is_authorized: bool,
     transcript_snapshot_projection: Option<CaptureSnapshotProjection>,
     transcript_redacted: RedactedBytes,
+    reasoning: ReasoningSourceDisposition,
     claim_channel: &'static str,
-    live_reservation: Option<(String, i64, Vec<ReservedTurnClaim>)>,
+    live_reservation: Option<CaptureClaimReservation>,
 }
 
 /// The closed set of checkpoint-stage exits (ADR-ACF-10 classes (a)–(d)).
@@ -1617,6 +1748,7 @@ pub(super) async fn run_checkpoint_stage<P: LiveExportLeasePort>(
         transcript_is_authorized,
         transcript_snapshot_projection,
         transcript_redacted,
+        reasoning,
         claim_channel,
         live_reservation,
     } = input;
@@ -1628,7 +1760,9 @@ pub(super) async fn run_checkpoint_stage<P: LiveExportLeasePort>(
         // These exits have not committed this invocation's checkpoint, so
         // they intentionally do not record a retryable checkpoint
         // diagnostic.
-        let failure_claim_owner = live_reservation.as_ref().map(|(owner, _, _)| owner.clone());
+        let failure_claim_owner = live_reservation
+            .as_ref()
+            .map(|reservation| reservation.owner.clone());
         let mut cleanup = CheckpointReservationCleanup {
             session_id: libra_session_id,
             checkpoint_id,
@@ -1650,6 +1784,20 @@ pub(super) async fn run_checkpoint_stage<P: LiveExportLeasePort>(
                 catalog_request,
             )
             .await;
+        }
+
+        // Native reasoning is archiveable only when its authenticated
+        // per-turn identity plan travels with the claim reservation into the
+        // checkpoint transaction. Keep this invariant at the persistence
+        // boundary as well as in the source adapters: a future metadata-only
+        // caller must fail closed instead of silently dropping the identity.
+        let has_identity_plan = live_reservation
+            .as_ref()
+            .is_some_and(|reservation| reservation.reasoning.is_some());
+        if let Err(error) =
+            require_identity_plan_for_native_reasoning(&reasoning, has_identity_plan)
+        {
+            return uncommitted(conn, &cleanup, capture_deadline, None, || Err(error)).await;
         }
 
         // Build metadata.json (external schema v2 — v1 fields plus `model`;
@@ -1875,13 +2023,20 @@ pub(super) async fn run_checkpoint_stage<P: LiveExportLeasePort>(
         // INSERT into the same transaction as the traces-ref CAS. No live
         // writer may use the old ref-first/catalog-later path after
         // ADR-DR-19.
-        let (owner, claim_now_ms, claims) = live_reservation.unwrap_or_else(|| {
-            (
+        let (owner, claim_now_ms, claims, identity_plan) = match live_reservation {
+            Some(reservation) => (
+                reservation.owner,
+                reservation.now_ms,
+                reservation.claims,
+                reservation.reasoning,
+            ),
+            None => (
                 format!("live-barrier:{}", uuid::Uuid::new_v4()),
                 Utc::now().timestamp_millis(),
                 Vec::new(),
-            )
-        });
+                None,
+            ),
+        };
         let claim_plan = coverage_gate::LiveClaimCommitPlan {
             source_channel: claim_channel,
             session_id: libra_session_id.to_string(),
@@ -1910,12 +2065,13 @@ pub(super) async fn run_checkpoint_stage<P: LiveExportLeasePort>(
         // store. Every byte was already redacted above; the optional safe
         // projection makes a metadata-only compatibility fallback explicitly
         // partial rather than falsely claiming an authorized source snapshot.
-        let checkpoint_payload = match CheckpointRedactedPayload::from_redacted_capture(
+        let checkpoint_payload = match CheckpointRedactedPayload::from_redacted_capture_with_reasoning(
             transcript_redacted,
             checkpoint_snapshot_projection,
             metadata_redacted,
             lifecycle_events_redacted,
             redaction_report_redacted,
+            reasoning,
         ) {
             Ok(payload) => payload,
             Err(error) => {
@@ -2209,6 +2365,18 @@ pub(super) async fn run_checkpoint_stage<P: LiveExportLeasePort>(
         // checkpoint_id remains the stable traces/catalog identity. Keeping
         // these distinct prevents a checkpoint from being completed under an
         // unrelated event.
+        let transaction_plan = match coverage_gate::LiveCaptureClaimCommitPlan::new(
+            claim_plan,
+            identity_plan.as_deref(),
+        ) {
+            Ok(plan) => plan,
+            Err(error) => {
+                return uncommitted(conn, &cleanup, capture_deadline, None, || {
+                    Err(error.context("prepare live reasoning claim transaction companion"))
+                })
+                .await;
+            }
+        };
         let checkpoint_request = match CheckpointWriteRequest::new(
             &replay_key,
             &checkpoint_id,
@@ -2219,7 +2387,7 @@ pub(super) async fn run_checkpoint_stage<P: LiveExportLeasePort>(
             &marker_generation,
             None,
             &checkpoint_payload,
-            Some(&claim_plan),
+            Some(&transaction_plan),
             capture_deadline,
         ) {
             Ok(request) => request,
@@ -2481,6 +2649,21 @@ pub(super) async fn run_checkpoint_stage<P: LiveExportLeasePort>(
         CheckpointStageExit::Authorized => Ok(()),
         CheckpointStageExit::Expire(error) => Err(error),
     }
+}
+
+fn require_identity_plan_for_native_reasoning(
+    reasoning: &ReasoningSourceDisposition,
+    has_identity_plan: bool,
+) -> Result<()> {
+    if reasoning.state()
+        == crate::internal::ai::observed_agents::reasoning::ReasoningSourceState::NativeProven
+        && !has_identity_plan
+    {
+        bail!(
+            "native reasoning cannot be committed without authenticated per-turn identity coverage"
+        );
+    }
+    Ok(())
 }
 
 /// A0-02: materialise an independent `scope='subagent'` checkpoint at a
@@ -3061,6 +3244,230 @@ pub(crate) mod tests {
         std::fs::create_dir_all(dir.path().join("objects")).unwrap();
         (dir, conn)
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_reasoning_checkpoint_requires_authenticated_identity_plan() {
+        let native =
+            crate::internal::ai::capture::checkpoint::reasoning_coverage_test_disposition(vec![
+                b"synthetic native reasoning".to_vec(),
+            ]);
+        let error = require_identity_plan_for_native_reasoning(&native, false).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("authenticated per-turn identity")
+        );
+        assert!(require_identity_plan_for_native_reasoning(&native, true).is_ok());
+        assert!(
+            require_identity_plan_for_native_reasoning(
+                &ReasoningSourceDisposition::Ordinary,
+                false,
+            )
+            .is_ok()
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn live_and_export_reasoning_reader_preserves_all_skip_and_mixed_partial() {
+        use crate::internal::ai::{
+            coverage_gate::{ReasoningReservationOutcome, tests::ReasoningFixture},
+            observed_agents::coverage::{Completeness, NormalizedTurn},
+        };
+
+        let fixture = ReasoningFixture::new().await;
+        let incumbent = crate::internal::ai::coverage_gate::tests::turn(
+            "synthetic-turn-0",
+            "ordinary transcript turn",
+            Completeness::Complete,
+        );
+        let plan = fixture
+            .plan(
+                std::slice::from_ref(&incumbent),
+                vec![b"typed private bytes".to_vec()],
+            )
+            .await;
+        let first = fixture
+            .reserve(std::slice::from_ref(&incumbent), Some(&plan), "seed-owner")
+            .await;
+        assert_eq!(first.ordinary.reserved.len(), 1);
+        fixture
+            .commit(
+                &first.ordinary.reserved,
+                &plan,
+                "seed-owner",
+                "seed-checkpoint",
+            )
+            .await;
+        let identity_before = fixture.identity_text().await;
+        let mixed = vec![
+            incumbent.clone(),
+            NormalizedTurn {
+                logical_turn_key: "ordinary-fresh-turn".to_owned(),
+                ordinal: 1,
+                completeness: Completeness::Complete,
+                started_at: None,
+                ended_at: None,
+                records: vec![crate::internal::ai::observed_agents::SemanticRecord::User {
+                    text: "fresh ordinary turn".to_owned(),
+                }],
+            },
+        ];
+
+        for channel in ["live", "export"] {
+            let owner = format!("{channel}-all-skip");
+            let ordinary_reasoning = ReasoningSourceDisposition::Ordinary;
+            let (all_skip, _): (ReasoningReservationOutcome, Option<ReasoningCoveragePlan>) =
+                reserve_reasoning_coverage(
+                    &fixture.conn,
+                    &fixture.scope,
+                    fixture.dir.path(),
+                    fixture::CAPTURE,
+                    std::slice::from_ref(&incumbent),
+                    &ordinary_reasoning,
+                    "claude_code",
+                    &owner,
+                    2,
+                    channel,
+                    None,
+                )
+                .await
+                .unwrap();
+            assert_eq!(all_skip.skipped_incomplete_reasoning, 1, "{channel}");
+            assert_eq!(all_skip.ordinary.skipped_covered, 0, "{channel}");
+            assert!(all_skip.ordinary.reserved.is_empty(), "{channel}");
+
+            let owner = format!("{channel}-mixed");
+            let (mixed_outcome, _): (ReasoningReservationOutcome, Option<ReasoningCoveragePlan>) =
+                reserve_reasoning_coverage(
+                    &fixture.conn,
+                    &fixture.scope,
+                    fixture.dir.path(),
+                    fixture::CAPTURE,
+                    &mixed,
+                    &ordinary_reasoning,
+                    "claude_code",
+                    &owner,
+                    3,
+                    channel,
+                    None,
+                )
+                .await
+                .unwrap();
+            assert_eq!(mixed_outcome.skipped_incomplete_reasoning, 1, "{channel}");
+            assert_eq!(mixed_outcome.ordinary.skipped_covered, 0, "{channel}");
+            assert!(mixed_outcome.ordinary.reserved.is_empty(), "{channel}");
+            assert_eq!(fixture.identity_text().await, identity_before, "{channel}");
+        }
+
+        let row = fixture
+            .conn
+            .query_one_raw(Statement::from_string(
+                fixture.conn.get_database_backend(),
+                "SELECT COUNT(*) AS n FROM agent_coverage_claim".to_owned(),
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.try_get_by::<i64, _>("n").unwrap(), 1);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn live_and_export_reservations_commit_source_identity_atomically() {
+        use crate::internal::ai::{
+            capture::checkpoint::reasoning_coverage_test_disposition,
+            coverage_gate::{LiveCaptureClaimCommitPlan, LiveClaimCommitPlan},
+            observed_agents::coverage::Completeness,
+        };
+
+        for channel in ["live", "export"] {
+            let fixture = crate::internal::ai::coverage_gate::tests::ReasoningFixture::new().await;
+            let turn = crate::internal::ai::coverage_gate::tests::turn(
+                "synthetic-turn-0",
+                "ordinary transcript turn",
+                Completeness::Complete,
+            );
+            let disposition = reasoning_coverage_test_disposition(vec![
+                b"synthetic native wire for source identity".to_vec(),
+            ]);
+            let owner = format!("{channel}-identity-owner");
+            let (reserved, candidate) = reserve_reasoning_coverage(
+                &fixture.conn,
+                &fixture.scope,
+                fixture.dir.path(),
+                fixture::CAPTURE,
+                std::slice::from_ref(&turn),
+                &disposition,
+                "claude_code",
+                &owner,
+                100,
+                channel,
+                None,
+            )
+            .await
+            .unwrap();
+            assert_eq!(reserved.skipped_incomplete_reasoning, 0, "{channel}");
+            assert_eq!(reserved.ordinary.reserved.len(), 1, "{channel}");
+            let candidate = candidate.expect("native disposition yields an identity plan");
+
+            let checkpoint_id = format!("{channel}-identity-checkpoint");
+            let transaction_plan = LiveCaptureClaimCommitPlan::new(
+                LiveClaimCommitPlan {
+                    source_channel: channel,
+                    session_id: fixture::CAPTURE.to_owned(),
+                    checkpoint_id: checkpoint_id.clone(),
+                    owner: owner.clone(),
+                    parent_commit: None,
+                    created_at: 100,
+                    now_ms: 100,
+                    claims: reserved.ordinary.reserved,
+                    import_session: None,
+                    import_identity: None,
+                    capture_scope: Some(fixture.scope.clone()),
+                },
+                Some(&candidate),
+            )
+            .unwrap();
+            let txn = sea_orm::TransactionTrait::begin(&fixture.conn)
+                .await
+                .unwrap();
+            crate::internal::ai::history::TracesTxnExtra::apply(
+                &transaction_plan,
+                &txn,
+                &crate::internal::ai::history::TracesCommitCtx {
+                    commit_hash: format!("commit-{channel}"),
+                    tree_oid: "tree".to_owned(),
+                    metadata_blob_oid: "metadata".to_owned(),
+                },
+            )
+            .await
+            .unwrap();
+            txn.commit().await.unwrap();
+
+            let redelivery = reserve_reasoning_coverage(
+                &fixture.conn,
+                &fixture.scope,
+                fixture.dir.path(),
+                fixture::CAPTURE,
+                std::slice::from_ref(&turn),
+                &disposition,
+                "claude_code",
+                &format!("{channel}-redelivery"),
+                200,
+                channel,
+                None,
+            )
+            .await
+            .unwrap()
+            .0;
+            assert_eq!(redelivery.skipped_incomplete_reasoning, 0, "{channel}");
+            assert_eq!(redelivery.ordinary.skipped_covered, 1, "{channel}");
+            assert!(redelivery.ordinary.reserved.is_empty(), "{channel}");
+        }
+    }
+
     fn source_context(repo: &std::path::Path, bytes: &[u8]) -> AgentSessionCtx {
         let directory = crate::internal::ai::observed_agents::claude_session_dir(repo).unwrap();
         std::fs::create_dir_all(&directory).unwrap();
@@ -3172,34 +3579,63 @@ pub(crate) mod tests {
         command: crate::internal::ai::hooks::provider::ProviderHookCommand,
         kind: LifecycleEventKind,
     ) -> Result<()> {
+        use crate::internal::ai::capture::ingress::CaptureDeadline;
+        deliver_with_deadline(
+            conn,
+            repo,
+            session,
+            hook,
+            command,
+            kind,
+            Some(CaptureDeadline::from_budget_millis(5000)?),
+        )
+        .await
+    }
+
+    async fn deliver_without_deadline(
+        conn: &sea_orm::DatabaseConnection,
+        repo: &std::path::Path,
+        session: &str,
+        hook: &str,
+        command: crate::internal::ai::hooks::provider::ProviderHookCommand,
+        kind: LifecycleEventKind,
+    ) -> Result<()> {
+        deliver_with_deadline(conn, repo, session, hook, command, kind, None).await
+    }
+
+    async fn deliver_with_deadline(
+        conn: &sea_orm::DatabaseConnection,
+        repo: &std::path::Path,
+        session: &str,
+        hook: &str,
+        command: crate::internal::ai::hooks::provider::ProviderHookCommand,
+        kind: LifecycleEventKind,
+        deadline: Option<crate::internal::ai::capture::ingress::CaptureDeadline>,
+    ) -> Result<()> {
+        let storage_path = repo.join(crate::utils::util::ROOT_DIR);
         use crate::internal::ai::capture::ingress::{
-            CaptureDeadline, CaptureIngressBinding, CaptureIngressCommand, CaptureRuntimeScope,
+            CaptureIngressBinding, CaptureIngressCommand, CaptureRuntimeScope,
         };
         let provider = crate::internal::ai::hooks::providers::claude_provider();
         let bytes=serde_json::to_vec(&json!({"hook_event_name":hook,"session_id":session,"cwd":repo,"prompt":"ordinary prompt"})).unwrap();
-        let outcome = CaptureIngressCommand::from_payload(
-            &bytes,
-            command,
-            kind,
-            provider,
-            Some(CaptureDeadline::from_budget_millis(5000).unwrap()),
-            |_| {
+        let outcome =
+            CaptureIngressCommand::from_payload(&bytes, command, kind, provider, deadline, |_| {
                 Ok(CaptureIngressBinding::new(
                     repo.to_string_lossy().into_owned(),
                     [0xA5; 32],
-                    CaptureRuntimeScope::new(repo.to_path_buf(), repo.to_path_buf()),
+                    CaptureRuntimeScope::new(storage_path.clone(), repo.to_path_buf()),
                 ))
-            },
-        );
+            });
         crate::internal::ai::capture::test_support::ingest_agent_traces_ingress_outcome_for_test(
             outcome,
             command,
             provider,
             conn,
-            Some(repo),
+            Some(&storage_path),
         )
         .await
     }
+    #[cfg(unix)]
     async fn session_row(
         conn: &sea_orm::DatabaseConnection,
         session: &str,
@@ -3324,6 +3760,133 @@ pub(crate) mod tests {
             super::super::pending_payload::assert_reasoning_pending_seal_rejected(&payload).await;
         }
     }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn reasoning_partial_outcome_reaches_actual_live_handlers() {
+        use crate::internal::ai::hooks::provider::ProviderHookCommand;
+
+        let home = tempfile::tempdir().unwrap();
+        let _home = TestHomeScope::set(home.path());
+        let dir = tempfile::tempdir().unwrap();
+        crate::utils::test::setup_with_new_libra_in(dir.path()).await;
+        let db_path = dir
+            .path()
+            .join(crate::utils::util::ROOT_DIR)
+            .join(crate::utils::util::DATABASE);
+        let conn = sea_orm::Database::connect(format!("sqlite://{}", db_path.display()))
+            .await
+            .unwrap();
+        let repo = dir.path().canonicalize().unwrap();
+        let transcript = concat!(
+            r#"{"type":"user","uuid":"synthetic-turn-0","message":{"role":"user","content":"ordinary OG16_CANDIDATE_PRIVATE_CANARY"}}"#,
+            "\n",
+            r#"{"type":"assistant","uuid":"assistant-0","message":{"role":"assistant","content":[{"type":"text","text":"done"}]}}"#,
+            "\n",
+        );
+        source_context(&repo, transcript.as_bytes());
+
+        // First actual Stop commits a synthetic-only source identity through
+        // the live writer. The fixture does not exercise a provider archive
+        // claim or prove any real native field origin.
+        let _snapshot_helper_bypass =
+            crate::internal::ai::capture::live_pipeline::test_support::capture_live_without_deadline();
+        let _native = scoped_test_snapshot_adapter(AgentKind::ClaudeCode, &fixture::NATIVE);
+        // The lib test host has no main-registered object-I/O helper. Keep
+        // this integration on the real in-process live path without a
+        // deadline so checkpoint writes use the supported direct test route;
+        // deadline/helper behavior has separate bounded-process coverage.
+        deliver_without_deadline(
+            &conn,
+            &repo,
+            fixture::SOURCE,
+            "SessionStart",
+            ProviderHookCommand::SessionStart,
+            LifecycleEventKind::SessionStart,
+        )
+        .await
+        .unwrap_or_else(|error| panic!("synthetic live source commit failed: {error:#}"));
+        deliver_without_deadline(
+            &conn,
+            &repo,
+            fixture::SOURCE,
+            "Stop",
+            ProviderHookCommand::Stop,
+            LifecycleEventKind::TurnEnd,
+        )
+        .await
+        .unwrap_or_else(|error| panic!("synthetic live source commit failed: {error:#}"));
+
+        async fn checkpoint_count(conn: &sea_orm::DatabaseConnection) -> i64 {
+            conn.query_one_raw(Statement::from_string(
+                conn.get_database_backend(),
+                "SELECT COUNT(*) AS n FROM agent_checkpoint".to_owned(),
+            ))
+            .await
+            .unwrap()
+            .unwrap()
+            .try_get_by::<i64, _>("n")
+            .unwrap()
+        }
+        let committed_checkpoints = checkpoint_count(&conn).await;
+        assert_eq!(committed_checkpoints, 1, "live source should commit once");
+        let identity_before: String = conn
+            .query_one_raw(Statement::from_sql_and_values(
+                conn.get_database_backend(),
+                "SELECT value FROM metadata_kv WHERE scope = 'agent_reasoning_identity' AND target = ?",
+                [fixture::CAPTURE.into()],
+            ))
+            .await
+            .unwrap()
+            .unwrap()
+            .try_get_by("value")
+            .unwrap();
+
+        drop(_native);
+        let _unproven = scoped_test_snapshot_adapter(AgentKind::ClaudeCode, &fixture::STRIP);
+        let error = deliver_without_deadline(
+            &conn,
+            &repo,
+            fixture::SOURCE,
+            "SessionEnd",
+            ProviderHookCommand::SessionEnd,
+            LifecycleEventKind::SessionEnd,
+        )
+        .await
+        .expect_err("unproven repeat must not complete the terminal receipt");
+        assert!(
+            error.downcast_ref::<SourcePreparationRejected>().is_some(),
+            "actual live handler should preserve a fixed source-preparation rejection: {error:#}"
+        );
+        assert_eq!(checkpoint_count(&conn).await, committed_checkpoints);
+        let identity_after: String = conn
+            .query_one_raw(Statement::from_sql_and_values(
+                conn.get_database_backend(),
+                "SELECT value FROM metadata_kv WHERE scope = 'agent_reasoning_identity' AND target = ?",
+                [fixture::CAPTURE.into()],
+            ))
+            .await
+            .unwrap()
+            .unwrap()
+            .try_get_by("value")
+            .unwrap();
+        assert_eq!(identity_after, identity_before);
+        let (_, metadata) = session_row(&conn, fixture::SOURCE).await;
+        assert!(metadata.to_string().contains("pending"));
+        let reserved: i64 = conn
+            .query_one_raw(Statement::from_string(
+                conn.get_database_backend(),
+                "SELECT COUNT(*) AS n FROM agent_coverage_claim WHERE state LIKE 'reserved%'"
+                    .to_owned(),
+            ))
+            .await
+            .unwrap()
+            .unwrap()
+            .try_get_by("n")
+            .unwrap();
+        assert_eq!(reserved, 0, "partial must release only fresh reservations");
+    }
     #[cfg(target_os = "macos")]
     fn assert_source_descriptor_closed(path: &std::path::Path) {
         let expected = path.canonicalize().unwrap();
@@ -3383,13 +3946,21 @@ pub(crate) mod tests {
                 .await
             });
             let pid_deadline = Instant::now() + Duration::from_secs(1);
-            while !pid_file.exists() && Instant::now() < pid_deadline {
+            let mut pid_contents = String::new();
+            while Instant::now() < pid_deadline {
+                if let Ok(contents) = std::fs::read_to_string(&pid_file)
+                    && !contents.trim().is_empty()
+                {
+                    pid_contents = contents;
+                    break;
+                }
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
-            let pid: i32 = std::fs::read_to_string(&pid_file)
-                .expect("actual helper must start before the injected exit")
-                .parse()
-                .unwrap();
+            assert!(
+                !pid_contents.trim().is_empty(),
+                "actual helper must write its PID before the injected exit"
+            );
+            let pid: i32 = pid_contents.parse().expect("helper PID must be an integer");
             if failure == "cancel" {
                 capture.abort();
                 assert!(capture.await.unwrap_err().is_cancelled());

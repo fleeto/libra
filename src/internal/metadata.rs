@@ -45,6 +45,11 @@ pub const MAX_KEY_LEN: usize = 256;
 /// Maximum metadata value length in bytes (text values in v1).
 pub const MAX_VALUE_LEN: usize = 1024 * 1024;
 
+/// A reasoning identity session accumulates one slot per committed logical
+/// turn, so its bounds must not reuse a single-checkpoint artifact limit.
+pub(crate) const REASONING_IDENTITY_SESSION_MAP_MAX_ENTRIES: usize = 4096;
+pub(crate) const REASONING_IDENTITY_SESSION_MAP_MAX_BYTES: usize = MAX_VALUE_LEN;
+
 /// The metadata scope. v1 supports `Branch`; the `scope` column is TEXT so
 /// future scopes (worktree, …; revision/file metadata use trailers/side-trees
 /// per lore.md 1.10, not this table) need no table rebuild.
@@ -71,6 +76,9 @@ pub enum MetadataScope {
     AgentCapturePendingChunk,
     /// Local sensitive catalog association; never hydrate through GC/export.
     AgentCaptureSessionAlias,
+    /// Local authenticated per-turn reasoning commitments; never a generic
+    /// OID root, cloud projection, or public checkpoint metadata surface.
+    AgentReasoningIdentity,
 }
 
 impl MetadataScope {
@@ -83,7 +91,351 @@ impl MetadataScope {
             MetadataScope::AgentCaptureQuarantine => "agent_capture_quarantine",
             MetadataScope::AgentCapturePendingChunk => "agent_capture_pending_chunk",
             MetadataScope::AgentCaptureSessionAlias => "agent_capture_session_alias",
+            MetadataScope::AgentReasoningIdentity => "agent_reasoning_identity",
         }
+    }
+}
+
+/// This codec is local comparison metadata, never native-origin evidence.
+/// Only the coverage/store owner may treat a decoded record as comparable,
+/// after authenticating its MAC and current claim/workspace fences.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ReasoningIdentityKind {
+    Empty,
+    Nonempty,
+}
+
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ReasoningIdentityRecordContext {
+    pub(crate) repository_id: String,
+    pub(crate) session_id: String,
+    pub(crate) logical_turn_key: String,
+    pub(crate) coverage_schema_version: i64,
+    pub(crate) claim_revision: i64,
+    pub(crate) claim_fence_token: i64,
+    pub(crate) checkpoint_id: String,
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ReasoningIdentityRecordBody {
+    pub(crate) context: ReasoningIdentityRecordContext,
+    pub(crate) kind: ReasoningIdentityKind,
+    pub(crate) descriptor_mac: String,
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ReasoningIdentityRecord {
+    version: u8,
+    body: ReasoningIdentityRecordBody,
+    mac: String,
+}
+
+impl std::fmt::Debug for ReasoningIdentityRecord {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ReasoningIdentityRecord")
+            .field("version", &self.version)
+            .field("kind", &self.body.kind)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ReasoningIdentityRecord {
+    pub(crate) const VERSION: u8 = 1;
+
+    /// Canonical metadata bytes to authenticate with the key owner's Record
+    /// purpose. The outer version is inside the MAC; the MAC itself is not.
+    pub(crate) fn authentication_body(body: &ReasoningIdentityRecordBody) -> Result<Vec<u8>> {
+        Self::validate_body(body)?;
+        let bytes =
+            serde_json::to_vec(&(Self::VERSION, body)).map_err(|_| Self::invalid_record())?;
+        if bytes.len() > crate::internal::ai::traces::REASONING_ARTIFACT_MANIFEST_MAX_BYTES {
+            return Err(Self::invalid_record());
+        }
+        Ok(bytes)
+    }
+
+    /// Attach a computed local Record MAC. This only validates the closed
+    /// syntax; authentication remains the key/coverage owner's responsibility.
+    pub(crate) fn from_body_and_mac(
+        body: ReasoningIdentityRecordBody,
+        mac: String,
+    ) -> Result<Self> {
+        let record = Self {
+            version: Self::VERSION,
+            body,
+            mac,
+        };
+        record.validate_syntax()?;
+        Ok(record)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn decode(text: &str) -> Result<Self> {
+        if text.len() > crate::internal::ai::traces::REASONING_ARTIFACT_MANIFEST_MAX_BYTES {
+            return Err(Self::invalid_record());
+        }
+        let record: Self = serde_json::from_str(text).map_err(|_| Self::invalid_record())?;
+        record.validate_syntax()?;
+        Ok(record)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn encode(&self) -> Result<String> {
+        self.validate_syntax()?;
+        let text = serde_json::to_string(self).map_err(|_| Self::invalid_record())?;
+        if text.len() > crate::internal::ai::traces::REASONING_ARTIFACT_MANIFEST_MAX_BYTES {
+            return Err(Self::invalid_record());
+        }
+        Ok(text)
+    }
+
+    pub(crate) fn body(&self) -> &ReasoningIdentityRecordBody {
+        &self.body
+    }
+
+    pub(crate) fn mac(&self) -> &str {
+        &self.mac
+    }
+
+    pub(crate) fn validate_context(&self, expected: &ReasoningIdentityRecordContext) -> Result<()> {
+        if &self.body.context != expected {
+            return Err(anyhow::anyhow!(
+                "private reasoning identity does not match the current claim; start a new capture session"
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_syntax(&self) -> Result<()> {
+        use crate::internal::ai::capture::key::ReasoningIdentityMacPurpose;
+        if self.version != Self::VERSION
+            || !Self::valid_mac_syntax(ReasoningIdentityMacPurpose::Record, &self.mac)
+        {
+            return Err(Self::invalid_record());
+        }
+        Self::validate_body(&self.body)
+    }
+
+    fn validate_body(body: &ReasoningIdentityRecordBody) -> Result<()> {
+        use crate::internal::ai::capture::key::ReasoningIdentityMacPurpose;
+        let context = &body.context;
+        if [
+            context.repository_id.as_str(),
+            context.session_id.as_str(),
+            context.logical_turn_key.as_str(),
+            context.checkpoint_id.as_str(),
+        ]
+        .iter()
+        .any(|value| {
+            value.is_empty() || value.len() > MAX_KEY_LEN || value.chars().any(char::is_control)
+        }) || context.coverage_schema_version <= 0
+            || context.claim_revision <= 0
+            || context.claim_fence_token <= 0
+            || !Self::valid_mac_syntax(
+                ReasoningIdentityMacPurpose::Descriptor,
+                &body.descriptor_mac,
+            )
+        {
+            return Err(Self::invalid_record());
+        }
+        Ok(())
+    }
+
+    fn valid_mac_syntax(
+        purpose: crate::internal::ai::capture::key::ReasoningIdentityMacPurpose,
+        tag: &str,
+    ) -> bool {
+        tag.strip_prefix(purpose.prefix()).is_some_and(|suffix| {
+            suffix.len() == 64
+                && suffix
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+    }
+
+    fn invalid_record() -> anyhow::Error {
+        anyhow::anyhow!("private reasoning identity is invalid; start a new capture session")
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "private reasoning identity session map reached its safe capacity; start a new capture session"
+)]
+pub(crate) struct ReasoningIdentityMapCapacity;
+
+/// One authenticated, bounded session map. A missing entry is legacy only
+/// after the outer map has been authenticated; a damaged map is never empty.
+/// Keys are repository-keyed turn commitments, not provider coordinates.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ReasoningIdentitySessionMap {
+    version: u8,
+    repository_id: String,
+    session_id: String,
+    #[serde(deserialize_with = "deserialize_reasoning_identity_records")]
+    records: std::collections::BTreeMap<String, ReasoningIdentityRecord>,
+    mac: String,
+}
+
+fn deserialize_reasoning_identity_records<'de, D>(
+    deserializer: D,
+) -> std::result::Result<std::collections::BTreeMap<String, ReasoningIdentityRecord>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct UniqueRecords;
+    impl<'de> serde::de::Visitor<'de> for UniqueRecords {
+        type Value = std::collections::BTreeMap<String, ReasoningIdentityRecord>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("a bounded private reasoning identity map")
+        }
+
+        fn visit_map<A>(self, mut access: A) -> std::result::Result<Self::Value, A::Error>
+        where
+            A: serde::de::MapAccess<'de>,
+        {
+            let mut records = std::collections::BTreeMap::new();
+            while let Some((slot, record)) =
+                access.next_entry::<String, ReasoningIdentityRecord>()?
+            {
+                if records.len() >= REASONING_IDENTITY_SESSION_MAP_MAX_ENTRIES
+                    || records.insert(slot, record).is_some()
+                {
+                    return Err(serde::de::Error::custom(
+                        "invalid private reasoning identity map",
+                    ));
+                }
+            }
+            Ok(records)
+        }
+    }
+    deserializer.deserialize_map(UniqueRecords)
+}
+
+impl ReasoningIdentitySessionMap {
+    pub(crate) const KEY: &str = "identity-v1";
+
+    pub(crate) fn authentication_body(
+        repository_id: &str,
+        session_id: &str,
+        records: &std::collections::BTreeMap<String, ReasoningIdentityRecord>,
+    ) -> Result<Vec<u8>> {
+        Self::validate_records(repository_id, session_id, records)?;
+        let bytes = serde_json::to_vec(&(
+            "reasoning-identity-session-map",
+            ReasoningIdentityRecord::VERSION,
+            repository_id,
+            session_id,
+            records,
+        ))
+        .map_err(|_| ReasoningIdentityRecord::invalid_record())?;
+        Self::validate_size(bytes.len())?;
+        Ok(bytes)
+    }
+
+    pub(crate) fn from_records_and_mac(
+        repository_id: String,
+        session_id: String,
+        records: std::collections::BTreeMap<String, ReasoningIdentityRecord>,
+        mac: String,
+    ) -> Result<Self> {
+        let map = Self {
+            version: ReasoningIdentityRecord::VERSION,
+            repository_id,
+            session_id,
+            records,
+            mac,
+        };
+        map.validate_syntax()?;
+        // Check the persisted envelope as well as its authentication body.
+        map.encode()?;
+        Ok(map)
+    }
+
+    pub(crate) fn decode(text: &str) -> Result<Self> {
+        Self::validate_size(text.len())?;
+        let map: Self =
+            serde_json::from_str(text).map_err(|_| ReasoningIdentityRecord::invalid_record())?;
+        map.validate_syntax()?;
+        Ok(map)
+    }
+
+    pub(crate) fn encode(&self) -> Result<String> {
+        self.validate_syntax()?;
+        let text =
+            serde_json::to_string(self).map_err(|_| ReasoningIdentityRecord::invalid_record())?;
+        Self::validate_size(text.len())?;
+        Ok(text)
+    }
+
+    pub(crate) fn records(&self) -> &std::collections::BTreeMap<String, ReasoningIdentityRecord> {
+        &self.records
+    }
+
+    pub(crate) fn mac(&self) -> &str {
+        &self.mac
+    }
+
+    pub(crate) fn validate_owner(&self, repository_id: &str, session_id: &str) -> Result<()> {
+        if self.repository_id != repository_id || self.session_id != session_id {
+            return Err(ReasoningIdentityRecord::invalid_record());
+        }
+        Ok(())
+    }
+
+    fn validate_syntax(&self) -> Result<()> {
+        if self.version != ReasoningIdentityRecord::VERSION
+            || !ReasoningIdentityRecord::valid_mac_syntax(
+                crate::internal::ai::capture::key::ReasoningIdentityMacPurpose::Record,
+                &self.mac,
+            )
+        {
+            return Err(ReasoningIdentityRecord::invalid_record());
+        }
+        Self::validate_records(&self.repository_id, &self.session_id, &self.records)
+    }
+
+    fn validate_records(
+        repository_id: &str,
+        session_id: &str,
+        records: &std::collections::BTreeMap<String, ReasoningIdentityRecord>,
+    ) -> Result<()> {
+        if [repository_id, session_id].iter().any(|value| {
+            value.is_empty() || value.len() > MAX_KEY_LEN || value.chars().any(char::is_control)
+        }) {
+            return Err(ReasoningIdentityRecord::invalid_record());
+        }
+        if records.len() > REASONING_IDENTITY_SESSION_MAP_MAX_ENTRIES {
+            return Err(ReasoningIdentityMapCapacity.into());
+        }
+        for (slot, record) in records {
+            record.validate_syntax()?;
+            let context = &record.body.context;
+            if !ReasoningIdentityRecord::valid_mac_syntax(
+                crate::internal::ai::capture::key::ReasoningIdentityMacPurpose::Descriptor,
+                slot,
+            ) || context.repository_id != repository_id
+                || context.session_id != session_id
+                || context.logical_turn_key != *slot
+            {
+                return Err(ReasoningIdentityRecord::invalid_record());
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_size(size: usize) -> Result<()> {
+        if size > REASONING_IDENTITY_SESSION_MAP_MAX_BYTES {
+            return Err(ReasoningIdentityMapCapacity.into());
+        }
+        Ok(())
     }
 }
 
@@ -900,6 +1252,195 @@ impl MetadataKv {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn reasoning_identity_record_is_closed_and_context_bound() {
+        use crate::internal::ai::capture::key::ReasoningIdentityMacPurpose;
+        let context = ReasoningIdentityRecordContext {
+            repository_id: "synthetic-repository".to_owned(),
+            session_id: "synthetic-session".to_owned(),
+            logical_turn_key: "synthetic-turn".to_owned(),
+            coverage_schema_version: 1,
+            claim_revision: 1,
+            claim_fence_token: 2,
+            checkpoint_id: "synthetic-checkpoint".to_owned(),
+        };
+        let body = ReasoningIdentityRecordBody {
+            context: context.clone(),
+            kind: ReasoningIdentityKind::Nonempty,
+            descriptor_mac: format!(
+                "{}{}",
+                ReasoningIdentityMacPurpose::Descriptor.prefix(),
+                "a".repeat(64)
+            ),
+        };
+        let record = ReasoningIdentityRecord::from_body_and_mac(
+            body.clone(),
+            format!(
+                "{}{}",
+                ReasoningIdentityMacPurpose::Record.prefix(),
+                "b".repeat(64)
+            ),
+        )
+        .unwrap();
+        let text = record.encode().unwrap();
+        let decoded = ReasoningIdentityRecord::decode(&text).unwrap();
+        assert!(decoded.validate_context(&context).is_ok());
+        assert_eq!(decoded.body().kind, ReasoningIdentityKind::Nonempty);
+        assert_eq!(decoded.mac(), record.mac());
+        assert_eq!(
+            ReasoningIdentityRecord::authentication_body(&body).unwrap(),
+            ReasoningIdentityRecord::authentication_body(decoded.body()).unwrap()
+        );
+        for axis in 0..7 {
+            let mut wrong = context.clone();
+            match axis {
+                0 => wrong.repository_id.push_str("-wrong"),
+                1 => wrong.session_id.push_str("-wrong"),
+                2 => wrong.logical_turn_key.push_str("-wrong"),
+                3 => wrong.claim_revision += 1,
+                4 => wrong.claim_fence_token += 1,
+                5 => wrong.checkpoint_id.push_str("-wrong"),
+                _ => wrong.coverage_schema_version += 1,
+            }
+            assert!(decoded.validate_context(&wrong).is_err());
+        }
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        for axis in 0..8 {
+            let mut wrong = value.clone();
+            match axis {
+                0 => wrong["version"] = 2.into(),
+                1 => {
+                    wrong["opaque-canary-never-in-errors"] = "synthetic-private-value".into();
+                }
+                2 => {
+                    wrong["body"]["unknown"] = true.into();
+                }
+                3 => {
+                    wrong["body"]["context"]["unknown"] = false.into();
+                }
+                4 => wrong["body"]["kind"] = "unknown".into(),
+                5 => wrong["mac"] = body.descriptor_mac.clone().into(),
+                6 => wrong["body"]["descriptor_mac"] = "not-a-domain-mac".into(),
+                _ => {
+                    wrong.as_object_mut().unwrap().remove("body");
+                }
+            }
+            let error = ReasoningIdentityRecord::decode(&wrong.to_string()).unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "private reasoning identity is invalid; start a new capture session"
+            );
+        }
+        let duplicate = text.replacen("\"version\":1", "\"version\":1,\"version\":1", 1);
+        assert!(ReasoningIdentityRecord::decode(&duplicate).is_err());
+        let debug = format!("{record:?}");
+        assert!(!debug.contains("synthetic-session"));
+        assert!(!debug.contains("synthetic-turn"));
+        assert!(!debug.contains(record.mac()));
+        assert!(!debug.contains(&body.descriptor_mac));
+        assert_eq!(
+            MetadataScope::AgentReasoningIdentity.as_str(),
+            "agent_reasoning_identity"
+        );
+        let slot = format!(
+            "{}{}",
+            ReasoningIdentityMacPurpose::Descriptor.prefix(),
+            "c".repeat(64)
+        );
+        let mut slotted_body = body.clone();
+        slotted_body.context.logical_turn_key = slot.clone();
+        let slotted_record =
+            ReasoningIdentityRecord::from_body_and_mac(slotted_body, record.mac().to_owned())
+                .unwrap();
+        let records = std::collections::BTreeMap::from([(slot.clone(), slotted_record.clone())]);
+        let map = ReasoningIdentitySessionMap::from_records_and_mac(
+            context.repository_id.clone(),
+            context.session_id.clone(),
+            records,
+            record.mac().to_owned(),
+        )
+        .unwrap();
+        let encoded = map.encode().unwrap();
+        let decoded = ReasoningIdentitySessionMap::decode(&encoded).unwrap();
+        assert!(
+            decoded
+                .validate_owner(&context.repository_id, &context.session_id)
+                .is_ok()
+        );
+        assert!(
+            decoded
+                .validate_owner("another-repository", &context.session_id)
+                .is_err()
+        );
+        assert!(
+            decoded
+                .validate_owner(&context.repository_id, "another-session")
+                .is_err()
+        );
+        assert_eq!(decoded.records().len(), 1);
+        assert_eq!(decoded.mac(), map.mac());
+        let duplicate_slot = encoded.replacen(
+            "\"records\":{",
+            &format!(
+                "\"records\":{{\"{slot}\":{},",
+                slotted_record.encode().unwrap()
+            ),
+            1,
+        );
+        assert!(ReasoningIdentitySessionMap::decode(&duplicate_slot).is_err());
+        let mut value: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+        value["unknown"] = "opaque-canary-never-in-errors".into();
+        let error = ReasoningIdentitySessionMap::decode(&value.to_string())
+            .err()
+            .unwrap();
+        assert_eq!(
+            error.to_string(),
+            "private reasoning identity is invalid; start a new capture session"
+        );
+        assert!(
+            ReasoningIdentitySessionMap::decode(
+                &"x".repeat(REASONING_IDENTITY_SESSION_MAP_MAX_BYTES + 1)
+            )
+            .is_err()
+        );
+        const {
+            assert!(
+                REASONING_IDENTITY_SESSION_MAP_MAX_BYTES
+                    > crate::internal::ai::traces::REASONING_ARTIFACT_MANIFEST_MAX_BYTES
+            );
+        }
+        assert!(
+            ReasoningIdentitySessionMap::validate_size(
+                REASONING_IDENTITY_SESSION_MAP_MAX_BYTES + 1
+            )
+            .is_err_and(|error| error.is::<ReasoningIdentityMapCapacity>())
+        );
+        let mut too_many = std::collections::BTreeMap::new();
+        for ordinal in 0..=REASONING_IDENTITY_SESSION_MAP_MAX_ENTRIES {
+            let slot = format!(
+                "{}{:064x}",
+                ReasoningIdentityMacPurpose::Descriptor.prefix(),
+                ordinal
+            );
+            let mut body = body.clone();
+            body.context.logical_turn_key = slot.clone();
+            too_many.insert(
+                slot,
+                ReasoningIdentityRecord::from_body_and_mac(body, record.mac().to_owned()).unwrap(),
+            );
+        }
+        assert!(
+            ReasoningIdentitySessionMap::authentication_body(
+                &context.repository_id,
+                &context.session_id,
+                &too_many
+            )
+            .is_err_and(|error| error.is::<ReasoningIdentityMapCapacity>())
+        );
+        // These synthetic tag strings validate codec syntax only. The key
+        // owner and actual coverage/store tests must verify cryptographic MACs.
+    }
     use super::*;
 
     #[test]

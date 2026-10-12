@@ -1957,12 +1957,21 @@ async fn scan_checkpoint_store(
                 .map_err(|_| {
                     CliError::fatal("agent doctor could not decode a coverage conflict".to_string())
                 })?;
+            let identity_changed = incoming_redaction_report_json.as_deref().is_some_and(|text| {
+                text.len() <= crate::internal::ai::traces::REASONING_ARTIFACT_MANIFEST_MAX_BYTES
+                    && serde_json::from_str::<serde_json::Value>(text).ok().is_some_and(|report| {
+                        report.get("reason").and_then(serde_json::Value::as_str)
+                            == Some(crate::internal::ai::coverage_gate::REASONING_IDENTITY_CONFLICT_REASON)
+                    })
+            });
             let challenger = match (
                 incoming_digest,
                 incoming_source_channel,
                 incoming_observed_at,
                 incoming_redaction_report_json,
             ) {
+                (Some(_), Some(_), Some(_), Some(_)) if identity_changed =>
+                    "reasoning_identity_changed: reasoning identity changed; inspect the authorized reasoning artifacts and resolve manually".to_string(),
                 (Some(_), Some(_), Some(_), Some(_)) =>
                     "incoming redacted evidence and its redaction report are stored in agent_coverage_conflict".to_string(),
                 _ => "incoming evidence is missing (legacy or externally damaged conflict row)"

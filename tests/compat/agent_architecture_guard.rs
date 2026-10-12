@@ -2030,7 +2030,7 @@ fn live_coverage_reservation_propagates_deadline_and_never_acknowledges_late_ter
         top_level_function(&live_checkpoint_file, "reserve_live_coverage").span(),
     );
     for required in [
-        "coverage_gate::reserve_live_turn_claims_until(",
+        "reserve_reasoning_coverage(",
         "coverage_gate::abandon_reserved_turn_claims_with_capture_scope_until(",
         "release elapsed-deadline live coverage reservation",
         "settle_preapplied_without_checkpoint(",
@@ -2038,6 +2038,23 @@ fn live_coverage_reservation_propagates_deadline_and_never_acknowledges_late_ter
         assert!(
             coverage_stage.contains(required),
             "{} reserve_live_coverage must retain deadline-safe live coverage cleanup: {required}",
+            checkpoint_path.display()
+        );
+    }
+    let reasoning_coverage = span_source_text(
+        &live_checkpoint,
+        top_level_function(&live_checkpoint_file, "reserve_reasoning_coverage").span(),
+    );
+    for required in [
+        "coverage_gate::reserve_turn_claims_with_reasoning(",
+        "coverage_gate::reserve_turn_claims_with_reasoning_no_deadline(",
+        "CaptureReservationExecution::live(deadline)",
+        "CaptureReservationExecution::export(deadline)",
+        "Some(deadline)",
+    ] {
+        assert!(
+            reasoning_coverage.contains(required),
+            "{} reserve_reasoning_coverage must preserve identity-aware reservation and execution deadline routing: {required}",
             checkpoint_path.display()
         );
     }
@@ -4595,6 +4612,23 @@ fn coordinator_is_provider_neutral_and_runtime_is_thin() {
     let (runtime_path, runtime_file) =
         parse_rust_source("src/internal/ai/capture/live_pipeline.rs");
     let (_, checkpoint_file) = parse_rust_source("src/internal/ai/capture/live_checkpoint.rs");
+    let checkpoint_source =
+        fs::read_to_string(repo_root().join("src/internal/ai/capture/live_checkpoint.rs"))
+            .expect("read checkpoint source for the native identity persistence boundary");
+    let checkpoint_stage_start = checkpoint_source
+        .find("pub(super) async fn run_checkpoint_stage")
+        .expect("run_checkpoint_stage is present");
+    let checkpoint_stage_source = &checkpoint_source[checkpoint_stage_start..];
+    let native_identity_guard = checkpoint_stage_source
+        .find("require_identity_plan_for_native_reasoning")
+        .expect("checkpoint stage enforces native reasoning identity coverage");
+    let sealed_payload = checkpoint_stage_source
+        .find("from_redacted_capture_with_reasoning")
+        .expect("checkpoint stage constructs its sealed payload");
+    assert!(
+        native_identity_guard < sealed_payload,
+        "the checkpoint stage must reject native reasoning without its authenticated identity plan before sealing the payload"
+    );
     let mut runtime_guard = RuntimeHandoffGuard {
         coordinator_type_seen: false,
         coordinator_execution_calls: 0,
@@ -7353,7 +7387,7 @@ fn capture_foundation_downstream_plan_and_layering_contract() {
         import_path.display()
     );
     for claim_helper in [
-        "reserve_import_turn_claims_until",
+        "reserve_import_turn_claims_with_reasoning_until",
         "renew_import_turn_claim_leases_with_conn",
         "bind_import_turn_claim_attempt_with_conn",
         "abandon_reserved_turn_claims_with_conn",
@@ -9012,7 +9046,7 @@ fn reasoning_bound_identity_accessor_has_closed_adapter_caller() {
     let expected: [(&str, &[&str]); 11] = [
         (
             "borrow_native_identity_bindings",
-            &["prepare_reasoning_identity_inputs"],
+            &["prepare_reasoning_identity_inputs_from_disposition"],
         ),
         (
             "from_validated_capture_context",
@@ -9022,36 +9056,34 @@ fn reasoning_bound_identity_accessor_has_closed_adapter_caller() {
         (
             "validate_reasoning_capture_binding",
             &[
-                "prepare_reasoning_identity_inputs",
-                "prepare_reasoning_artifact_params",
+                "prepare_reasoning_identity_inputs_from_disposition",
+                "prepare_reasoning_artifact_params_from_disposition",
             ],
         ),
+        ("prepare_reasoning_identity_inputs", &[]),
         (
-            "prepare_reasoning_identity_inputs",
+            "prepare_reasoning_identity_inputs_from_disposition",
             &[
-                "reserve_live_coverage",
-                "run_export_stage",
-                "import_prepared_with_subagent_discovery",
+                "prepare_reasoning_identity_inputs",
+                "prepare_reasoning_coverage_plan_from_disposition",
             ],
         ),
         (
             "from_prepared_authorized_source",
-            &["prepare_authorized_reasoning_source"],
+            &[
+                "prepare_authorized_reasoning_source",
+                "reasoning_coverage_test_payload",
+            ],
         ),
         (
             "prepare_authorized_reasoning_source",
             &["capture_authorized_bytes"],
         ),
-        (
-            "reasoning_source_disposition",
-            &[
-                "reserve_live_coverage",
-                "run_export_stage",
-                "prepare_reasoning_artifact_params",
-            ],
-        ),
         ("helper_unsupported", &["capture_live_until"]),
-        ("artifact_params", &["prepare_reasoning_artifact_params"]),
+        (
+            "artifact_params",
+            &["prepare_reasoning_artifact_params_from_disposition"],
+        ),
         (
             "as_reasoning_source_preprocessor",
             &["prepare_authorized_reasoning_source", "capture_live_until"],
@@ -9108,8 +9140,8 @@ fn reasoning_bound_identity_accessor_has_closed_adapter_caller() {
                 "{path}::{owner} must not access {name}"
             );
         }
-        // These factories are delivered now; the upper identity adapter's
-        // three future callers are deliberately not fabricated by this card.
+        // The payload wrapper remains test-only; native identity access is
+        // confined to the disposition adapter and coverage planner.
         if name != "prepare_reasoning_identity_inputs" {
             assert!(!calls.is_empty(), "{name} has no actual closed consumer");
         }
@@ -9117,6 +9149,21 @@ fn reasoning_bound_identity_accessor_has_closed_adapter_caller() {
     let lower =
         fs::read_to_string(repo_root().join("src/internal/ai/observed_agents/reasoning.rs"))
             .unwrap();
+    let checkpoint =
+        fs::read_to_string(repo_root().join("src/internal/ai/capture/checkpoint.rs")).unwrap();
+    let checkpoint_ast = syn::parse_file(&checkpoint).unwrap();
+    let test_payload = top_level_function(&checkpoint_ast, "reasoning_coverage_test_payload");
+    assert!(
+        test_payload.attrs.iter().any(|attr| {
+            attr.path().is_ident("cfg")
+                && attr
+                    .meta
+                    .require_list()
+                    .ok()
+                    .is_some_and(|cfg| cfg.tokens.to_string().replace(' ', "") == "all(test,unix)")
+        }),
+        "reasoning_coverage_test_payload must stay test-only on Unix"
+    );
     let ast = syn::parse_file(&lower).unwrap();
     let view = ast
         .items

@@ -434,8 +434,16 @@ impl CaptureSnapshot {
 
     /// A readiness check only; ownership is still moved to the actual
     /// writer or returned by the ordinary consuming rejection.
+    #[cfg(test)]
     pub(crate) fn rejects_ordinary_source_consumer(&self) -> bool {
         !self.reasoning.is_ordinary()
+    }
+
+    /// The capture pipeline has a typed consumer for Ordinary and
+    /// NativeProven dispositions. Unknown, unmapped, and helper-unsupported
+    /// states remain unavailable to every writer.
+    pub(crate) fn rejects_capture_source_consumer(&self) -> bool {
+        !self.reasoning.has_capture_consumer()
     }
 
     pub(crate) fn into_checkpoint_parts(

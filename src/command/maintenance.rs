@@ -5802,7 +5802,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reasoning_identity_corrupt_nested_oid_never_hydrates() {
+    async fn reasoning_identity_reserved_scope_is_excluded_even_when_corrupt() {
         let fixture = ReasoningGcFixture::new().await;
         let value = serde_json::json!({"damaged": [{"nested": [fixture.private_oid.to_string()]}]})
             .to_string();

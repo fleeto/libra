@@ -31,19 +31,29 @@ use sea_orm::{ConnectionTrait, DatabaseConnection, DatabaseTransaction, Statemen
 
 #[cfg(test)]
 pub(crate) use crate::internal::ai::capture::catalog::CaptureImportSessionLifecycleState as ImportSessionLifecycleState;
-use crate::internal::ai::{
-    capture::{
-        catalog::{CaptureCatalogStore, CaptureImportSessionCommit},
-        checkpoint::CheckpointCatalogMutation,
+use crate::internal::{
+    ai::{
+        capture::{
+            catalog::{CaptureCatalogStore, CaptureImportSessionCommit},
+            checkpoint::{
+                CheckpointCatalogMutation, ReasoningCoveragePlan, ReasoningIdentityReadContext,
+                ReasoningTurnIdentity,
+            },
+        },
+        capture_scope::{
+            CaptureCommitDeadline, CaptureFinalCommitAuthorizationError, CaptureScope,
+            authorize_final_capture_commit,
+        },
+        history::{CheckpointScope, TracesCommitCtx, TracesTxnExtra},
+        observed_agents::{
+            COVERAGE_SCHEMA_VERSION, Completeness, NormalizedTurn, canonical_turn_bytes,
+            redact_turns_with_report,
+        },
     },
-    capture_scope::{
-        CaptureCommitDeadline, CaptureFinalCommitAuthorizationError, CaptureScope,
-        authorize_final_capture_commit,
-    },
-    history::{CheckpointScope, TracesCommitCtx, TracesTxnExtra},
-    observed_agents::{
-        COVERAGE_SCHEMA_VERSION, Completeness, NormalizedTurn, canonical_turn_bytes,
-        redact_turns_with_report,
+    metadata::{
+        MetadataKv, MetadataScope, MetadataValueType, ReasoningIdentityKind,
+        ReasoningIdentityRecord, ReasoningIdentityRecordBody, ReasoningIdentityRecordContext,
+        ReasoningIdentitySessionMap,
     },
 };
 
@@ -62,6 +72,8 @@ pub(crate) const ARTIFACT_RETAINED_LEASE_MS: i64 = i64::MAX;
 /// an existing owned reservation. This is recovery evidence cleanup, never an
 /// allowance to begin a new coverage reservation after the foreground budget.
 const COVERAGE_ABANDONMENT_RECOVERY_GRACE: Duration = Duration::from_millis(250);
+
+pub(crate) const REASONING_IDENTITY_CONFLICT_REASON: &str = "reasoning_identity_changed";
 
 // Batch-delay injection is useful for proving that a historical import checks
 // its total deadline between SQLite transactions. It must not be a hook
@@ -240,6 +252,208 @@ impl LiveReservationOutcome {
     pub fn is_inflight_only_skip(&self) -> bool {
         self.reserved.is_empty() && self.skipped_inflight > 0
     }
+}
+
+/// Carries partial reasoning separately from the incumbent public outcome.
+/// Legacy callers cannot discard this state and mislabel it CoveredNoop.
+#[derive(Default)]
+pub(crate) struct ReasoningReservationOutcome {
+    pub(crate) ordinary: LiveReservationOutcome,
+    pub(crate) skipped_incomplete_reasoning: usize,
+}
+
+impl ReasoningReservationOutcome {
+    fn into_ordinary(self) -> Result<LiveReservationOutcome> {
+        if self.skipped_incomplete_reasoning != 0 {
+            bail!("reasoning coverage is partial; run libra agent doctor before retrying capture");
+        }
+        Ok(self.ordinary)
+    }
+}
+
+/// A read context does not supply a comparable native candidate. Keeping
+/// those capabilities separate lets candidate-free legacy turns retain
+/// their old coverage semantics without accepting a retained native turn.
+#[derive(Clone, Default)]
+pub(crate) struct ReasoningCoverageInput<'a> {
+    candidate: Option<&'a ReasoningCoveragePlan>,
+    reader: Option<ReasoningIdentityReadContext>,
+}
+
+impl<'a> ReasoningCoverageInput<'a> {
+    pub(crate) fn native(candidate: &'a ReasoningCoveragePlan) -> Self {
+        Self {
+            candidate: Some(candidate),
+            reader: Some(candidate.read_context()),
+        }
+    }
+
+    pub(crate) fn ordinary(reader: &ReasoningIdentityReadContext) -> Self {
+        Self {
+            candidate: None,
+            reader: Some(reader.clone()),
+        }
+    }
+}
+
+enum StoredReasoningMap {
+    LegacyAbsent,
+    Invalid,
+    Verified(ReasoningIdentitySessionMap),
+}
+
+/// Read the whole private scope before interpreting absence. Authentication
+/// uses the existing key reader and happens inside the coverage writer txn.
+async fn read_reasoning_map(
+    conn: &impl ConnectionTrait,
+    scope: &CaptureScope,
+    session_id: &str,
+    reader: Option<&ReasoningIdentityReadContext>,
+) -> Result<StoredReasoningMap> {
+    let rows = conn
+        .query_all_raw(Statement::from_sql_and_values(
+            conn.get_database_backend(),
+            "SELECT key,
+                    CASE WHEN length(CAST(value AS BLOB)) <= ? THEN value ELSE NULL END AS value
+             FROM metadata_kv WHERE scope = ? AND target = ? LIMIT 2",
+            [
+                (crate::internal::metadata::REASONING_IDENTITY_SESSION_MAP_MAX_BYTES as i64)
+                    .into(),
+                MetadataScope::AgentReasoningIdentity.as_str().into(),
+                session_id.into(),
+            ],
+        ))
+        .await
+        .context("cannot read private reasoning identity; check the repository database or start a new capture session")?;
+    let Some(row) = rows.first() else {
+        return Ok(StoredReasoningMap::LegacyAbsent);
+    };
+    if rows.len() != 1 || row.try_get_by::<String, _>("key")? != ReasoningIdentitySessionMap::KEY {
+        return Ok(StoredReasoningMap::Invalid);
+    }
+    let Some(text) = row.try_get_by::<Option<String>, _>("value")? else {
+        return Ok(StoredReasoningMap::Invalid);
+    };
+    let Ok(map) = ReasoningIdentitySessionMap::decode(&text) else {
+        return Ok(StoredReasoningMap::Invalid);
+    };
+    if map.validate_owner(&scope.repo_id, session_id).is_err() {
+        return Ok(StoredReasoningMap::Invalid);
+    }
+    let Some(reader) = reader else {
+        // Older entry points lacking scoped key-read authority cannot
+        // interpret a retained map as ordinary or authenticated empty.
+        return Ok(StoredReasoningMap::Invalid);
+    };
+    let bytes = ReasoningIdentitySessionMap::authentication_body(
+        &scope.repo_id,
+        session_id,
+        map.records(),
+    )?;
+    if let Err(error) = reader
+        .authenticate_record(conn, &bytes, Some(map.mac()))
+        .await
+    {
+        if error.is::<crate::internal::ai::capture::key::ReasoningIdentityMacMismatch>() {
+            return Ok(StoredReasoningMap::Invalid);
+        }
+        return Err(error);
+    }
+    Ok(StoredReasoningMap::Verified(map))
+}
+
+enum ReasoningComparison {
+    Ordinary,
+    Same,
+    Changed,
+    Partial,
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn compare_reasoning_identity(
+    conn: &impl ConnectionTrait,
+    scope: &CaptureScope,
+    session_id: &str,
+    logical_turn_key: &str,
+    existing: &ExistingClaim,
+    incoming: Option<&ReasoningTurnIdentity>,
+    map: &StoredReasoningMap,
+    reader: Option<&ReasoningIdentityReadContext>,
+) -> Result<ReasoningComparison> {
+    let record = match map {
+        StoredReasoningMap::LegacyAbsent => None,
+        StoredReasoningMap::Invalid => return Ok(ReasoningComparison::Partial),
+        StoredReasoningMap::Verified(map) => {
+            let slot = match incoming {
+                Some(incoming) => incoming.slot().to_owned(),
+                None => {
+                    let Some(reader) = reader else {
+                        return Ok(ReasoningComparison::Partial);
+                    };
+                    reader.turn_slot(conn, logical_turn_key).await?
+                }
+            };
+            map.records().get(&slot)
+        }
+    };
+    let Some(record) = record else {
+        return Ok(
+            if incoming.is_some_and(|item| item.kind() == ReasoningIdentityKind::Nonempty)
+                && !(existing.completeness == "incomplete")
+            {
+                ReasoningComparison::Partial
+            } else {
+                ReasoningComparison::Ordinary
+            },
+        );
+    };
+    let (Some(incoming), Some(reader), Some(fence), Some(checkpoint)) = (
+        incoming,
+        reader,
+        existing.fence_token,
+        &existing.checkpoint_id,
+    ) else {
+        return Ok(ReasoningComparison::Partial);
+    };
+    let expected = ReasoningIdentityRecordContext {
+        repository_id: scope.repo_id.clone(),
+        session_id: session_id.to_owned(),
+        logical_turn_key: incoming.slot().to_owned(),
+        coverage_schema_version: COVERAGE_SCHEMA_VERSION,
+        claim_revision: existing.revision,
+        claim_fence_token: fence,
+        checkpoint_id: checkpoint.clone(),
+    };
+    if record.validate_context(&expected).is_err() {
+        return Ok(ReasoningComparison::Partial);
+    }
+    let catalog = conn.query_one_raw(Statement::from_sql_and_values(
+        conn.get_database_backend(),
+        "SELECT 1 FROM agent_checkpoint WHERE checkpoint_id = ? AND session_id = ? AND scope = 'committed' LIMIT 1",
+        [checkpoint.clone().into(), session_id.into()],
+    )).await.context("cannot verify private reasoning checkpoint association; run libra agent doctor")?;
+    if catalog.is_none() {
+        return Ok(ReasoningComparison::Partial);
+    }
+    let body = ReasoningIdentityRecord::authentication_body(record.body())?;
+    if let Err(error) = reader
+        .authenticate_record(conn, &body, Some(record.mac()))
+        .await
+    {
+        if error.is::<crate::internal::ai::capture::key::ReasoningIdentityMacMismatch>() {
+            return Ok(ReasoningComparison::Partial);
+        }
+        return Err(error);
+    }
+    Ok(
+        if record.body().kind == incoming.kind()
+            && record.body().descriptor_mac == incoming.descriptor_mac()
+        {
+            ReasoningComparison::Same
+        } else {
+            ReasoningComparison::Changed
+        },
+    )
 }
 
 struct ExistingClaim {
@@ -421,6 +635,7 @@ fn reservation_state(source_channel: &str) -> Result<&'static str> {
 
 /// Mark a committed-complete-vs-different-complete collision `conflicted`
 /// (ADR-DR-09: never silently overwrite committed complete content).
+#[allow(clippy::too_many_arguments)]
 async fn try_mark_conflicted(
     conn: &impl ConnectionTrait,
     session_id: &str,
@@ -429,17 +644,31 @@ async fn try_mark_conflicted(
     incoming_turn: &NormalizedTurn,
     incoming_source_channel: &'static str,
     now_ms: i64,
+    reasoning_changed: bool,
 ) -> Result<ConflictMarkOutcome> {
     let mut sanitized_turn = incoming_turn.clone();
     let redaction_report = redact_turns_with_report(std::slice::from_mut(&mut sanitized_turn));
     let incoming_digest = sanitized_turn.digest_hex();
-    if incoming_digest == incumbent.coverage_digest {
+    if incoming_digest == incumbent.coverage_digest && !reasoning_changed {
         return Ok(ConflictMarkOutcome::EquivalentAfterRedaction);
     }
     let incoming_canonical_json = String::from_utf8(canonical_turn_bytes(&sanitized_turn.records))
         .context("coverage conflict canonical evidence is not UTF-8")?;
-    let incoming_redaction_report_json = serde_json::to_string(&redaction_report)
-        .context("serialize coverage conflict redaction report")?;
+    let incoming_redaction_report_json = if reasoning_changed {
+        let mut report = serde_json::to_value(&redaction_report)
+            .context("serialize coverage conflict redaction report")?;
+        let object = report
+            .as_object_mut()
+            .context("coverage conflict redaction report is not an object")?;
+        object.insert(
+            "reason".to_owned(),
+            REASONING_IDENTITY_CONFLICT_REASON.into(),
+        );
+        serde_json::to_string(&report).context("serialize coverage conflict redaction report")?
+    } else {
+        serde_json::to_string(&redaction_report)
+            .context("serialize coverage conflict redaction report")?
+    };
     let result = conn
         .execute_raw(Statement::from_sql_and_values(
             conn.get_database_backend(),
@@ -447,13 +676,17 @@ async fn try_mark_conflicted(
          SET state = 'conflicted', updated_at = ?
          WHERE session_id = ? AND logical_turn_key = ?
            AND coverage_schema_version = ?
-           AND state = 'catalog_committed' AND coverage_digest = ?",
+           AND state = 'catalog_committed' AND coverage_digest = ?
+           AND revision = ? AND fence_token IS ? AND checkpoint_id IS ?",
             [
                 now_ms.into(),
                 session_id.into(),
                 logical_turn_key.into(),
                 COVERAGE_SCHEMA_VERSION.into(),
                 incumbent.coverage_digest.clone().into(),
+                incumbent.revision.into(),
+                incumbent.fence_token.into(),
+                incumbent.checkpoint_id.clone().into(),
             ],
         ))
         .await
@@ -531,6 +764,7 @@ pub async fn reserve_live_turn_claims_with_capture_scope(
 /// import, live capture must retain its one-transaction, all-or-nothing
 /// claim plan; the deadline is therefore propagated through that single
 /// transaction rather than splitting it into batches.
+#[cfg(test)]
 pub(crate) async fn reserve_live_turn_claims_until(
     conn: &DatabaseConnection,
     scope: &CaptureScope,
@@ -582,6 +816,7 @@ impl CaptureReservationExecution {
 /// preserves the `export` channel while passing the established capture pair
 /// through writer acquisition, pure reads, final authorization, and the
 /// non-cancellable commit boundary.
+#[cfg(test)]
 pub(crate) async fn reserve_turn_claims_for_channel_with_capture_scope_until(
     conn: &DatabaseConnection,
     scope: &CaptureScope,
@@ -970,6 +1205,7 @@ async fn abandon_reserved_turn_claims_with_capture_scope_inner(
     Ok(())
 }
 
+#[cfg(test)]
 pub(crate) async fn reserve_import_turn_claims_until(
     conn: &DatabaseConnection,
     scope: &CaptureScope,
@@ -979,14 +1215,47 @@ pub(crate) async fn reserve_import_turn_claims_until(
     now_ms: i64,
     deadline: CaptureCommitDeadline,
 ) -> Result<LiveReservationOutcome> {
+    reserve_import_turn_claims_with_reasoning_until(
+        conn,
+        scope,
+        session_id,
+        turns,
+        owner,
+        now_ms,
+        deadline,
+        ReasoningCoverageInput::default(),
+    )
+    .await?
+    .into_ordinary()
+}
+
+/// Keep the existing bounded import batches, while a reasoning-partial
+/// batch prevents every owned batch from reaching a checkpoint writer.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn reserve_import_turn_claims_with_reasoning_until(
+    conn: &DatabaseConnection,
+    scope: &CaptureScope,
+    session_id: &str,
+    turns: &[NormalizedTurn],
+    owner: &str,
+    now_ms: i64,
+    deadline: CaptureCommitDeadline,
+    input: ReasoningCoverageInput<'_>,
+) -> Result<ReasoningReservationOutcome> {
+    if let Some(candidate) = input.candidate {
+        candidate.validate_for(scope, session_id, turns)?;
+    }
+    if let Some(reader) = &input.reader {
+        reader.validate_for(scope, session_id)?;
+    }
     // Bound SQLite writer-lock residency and re-establish the tombstone
     // barrier between batches. Earlier batches remain explicitly owned and
     // are abandoned by the importer if a later batch reaches the deadline.
     const IMPORT_RESERVATION_BATCH_TURNS: usize = 64;
-    let mut aggregate = LiveReservationOutcome::default();
+    let mut aggregate = ReasoningReservationOutcome::default();
     for batch in turns.chunks(IMPORT_RESERVATION_BATCH_TURNS) {
         ensure_reservation_deadline(Some(deadline), "import")?;
-        let outcome = reserve_turn_claims_for_channel_inner(
+        let outcome = reserve_turn_claims_with_reasoning_inner(
             conn,
             scope,
             session_id,
@@ -995,23 +1264,47 @@ pub(crate) async fn reserve_import_turn_claims_until(
             now_ms,
             "import",
             Some(deadline),
+            input.clone(),
         )
         .await?;
         #[cfg(test)]
         if let Some(delay) = import_reservation_batch_test_delay() {
             tokio::time::sleep(delay).await;
         }
-        aggregate.reserved.extend(outcome.reserved);
-        aggregate.skipped_covered = aggregate
+        aggregate.skipped_incomplete_reasoning = aggregate
+            .skipped_incomplete_reasoning
+            .saturating_add(outcome.skipped_incomplete_reasoning);
+        aggregate
+            .ordinary
+            .reserved
+            .extend(outcome.ordinary.reserved);
+        aggregate.ordinary.skipped_covered = aggregate
+            .ordinary
             .skipped_covered
-            .saturating_add(outcome.skipped_covered);
-        aggregate.skipped_inflight = aggregate
+            .saturating_add(outcome.ordinary.skipped_covered);
+        aggregate.ordinary.skipped_inflight = aggregate
+            .ordinary
             .skipped_inflight
-            .saturating_add(outcome.skipped_inflight);
-        aggregate.skipped_retained = aggregate
+            .saturating_add(outcome.ordinary.skipped_inflight);
+        aggregate.ordinary.skipped_retained = aggregate
+            .ordinary
             .skipped_retained
-            .saturating_add(outcome.skipped_retained);
-        aggregate.conflicted = aggregate.conflicted.saturating_add(outcome.conflicted);
+            .saturating_add(outcome.ordinary.skipped_retained);
+        aggregate.ordinary.conflicted = aggregate
+            .ordinary
+            .conflicted
+            .saturating_add(outcome.ordinary.conflicted);
+        if aggregate.skipped_incomplete_reasoning != 0 {
+            if !aggregate.ordinary.reserved.is_empty() {
+                abandon_reserved_turn_claims_with_capture_scope_until(
+                    conn, scope, session_id, owner, "import", now_ms, deadline,
+                )
+                .await
+                .context("release earlier import batches after partial reasoning coverage")?;
+                aggregate.ordinary.reserved.clear();
+            }
+            return Ok(aggregate);
+        }
     }
     Ok(aggregate)
 }
@@ -1027,6 +1320,96 @@ async fn reserve_turn_claims_for_channel_inner(
     source_channel: &'static str,
     deadline: Option<CaptureCommitDeadline>,
 ) -> Result<LiveReservationOutcome> {
+    reserve_turn_claims_with_reasoning_inner(
+        conn,
+        scope,
+        session_id,
+        turns,
+        owner,
+        now_ms,
+        source_channel,
+        deadline,
+        ReasoningCoverageInput::default(),
+    )
+    .await?
+    .into_ordinary()
+}
+
+/// Shared live/export/import reservation, retaining the typed partial state.
+/// The legacy wrappers use the same transaction and reject any partial rather
+/// than silently erasing the new outcome.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn reserve_turn_claims_with_reasoning(
+    conn: &DatabaseConnection,
+    scope: &CaptureScope,
+    session_id: &str,
+    turns: &[NormalizedTurn],
+    owner: &str,
+    now_ms: i64,
+    execution: CaptureReservationExecution,
+    input: ReasoningCoverageInput<'_>,
+) -> Result<ReasoningReservationOutcome> {
+    ensure_reservation_deadline(Some(execution.deadline), execution.source_channel)?;
+    reserve_turn_claims_with_reasoning_inner(
+        conn,
+        scope,
+        session_id,
+        turns,
+        owner,
+        now_ms,
+        execution.source_channel,
+        Some(execution.deadline),
+        input,
+    )
+    .await
+}
+
+/// Shared scoped reservation for in-process callers that have no enclosing
+/// managed capture deadline. The typed partial outcome is preserved just as
+/// it is on the deadline-aware path.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn reserve_turn_claims_with_reasoning_no_deadline(
+    conn: &DatabaseConnection,
+    scope: &CaptureScope,
+    session_id: &str,
+    turns: &[NormalizedTurn],
+    owner: &str,
+    now_ms: i64,
+    source_channel: &'static str,
+    input: ReasoningCoverageInput<'_>,
+) -> Result<ReasoningReservationOutcome> {
+    reserve_turn_claims_with_reasoning_inner(
+        conn,
+        scope,
+        session_id,
+        turns,
+        owner,
+        now_ms,
+        source_channel,
+        None,
+        input,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn reserve_turn_claims_with_reasoning_inner(
+    conn: &DatabaseConnection,
+    scope: &CaptureScope,
+    session_id: &str,
+    turns: &[NormalizedTurn],
+    owner: &str,
+    now_ms: i64,
+    source_channel: &'static str,
+    deadline: Option<CaptureCommitDeadline>,
+    reasoning: ReasoningCoverageInput<'_>,
+) -> Result<ReasoningReservationOutcome> {
+    if let Some(candidate) = reasoning.candidate {
+        candidate.validate_for(scope, session_id, turns)?;
+    }
+    if let Some(reader) = &reasoning.reader {
+        reader.validate_for(scope, session_id)?;
+    }
     // ADR-DR-19: reserve the complete snapshot under one SQLite writer
     // transaction and establish the tombstone barrier before any claim
     // mutation. This closes both fresh-INSERT and re-own races with erasure.
@@ -1084,7 +1467,20 @@ async fn reserve_turn_claims_for_channel_inner(
         txn.rollback().await.ok();
         bail!("agent session was erased or is unavailable for coverage reservation");
     }
-    let mut outcome = LiveReservationOutcome::default();
+    let map = match await_reservation_precommit_read_until(
+        deadline,
+        source_channel,
+        read_reasoning_map(&txn, scope, session_id, reasoning.reader.as_ref()),
+    )
+    .await
+    {
+        Ok(map) => map,
+        Err(error) => {
+            txn.rollback().await.ok();
+            return Err(error);
+        }
+    };
+    let mut outcome = ReasoningReservationOutcome::default();
     for turn in turns {
         if let Err(error) = ensure_reservation_deadline(deadline, source_channel) {
             txn.rollback().await.ok();
@@ -1115,7 +1511,7 @@ async fn reserve_turn_claims_for_channel_inner(
                 txn.rollback().await.ok();
                 return Err(error);
             }
-            let decision = decide_and_attempt(
+            let decision = match decide_reasoning_and_attempt(
                 &txn,
                 session_id,
                 turn,
@@ -1124,32 +1520,46 @@ async fn reserve_turn_claims_for_channel_inner(
                 now_ms,
                 existing,
                 source_channel,
+                scope,
+                &map,
+                &reasoning,
             )
-            .await?;
+            .await
+            {
+                Ok(decision) => decision,
+                Err(error) => {
+                    txn.rollback().await.ok();
+                    return Err(error);
+                }
+            };
             if let Err(error) = ensure_reservation_deadline(deadline, source_channel) {
                 txn.rollback().await.ok();
                 return Err(error);
             }
             match decision {
                 AttemptOutcome::Reserved(claim) => {
-                    outcome.reserved.push(claim);
+                    outcome.ordinary.reserved.push(claim);
                     break;
                 }
                 AttemptOutcome::SkipCovered => {
-                    outcome.skipped_covered += 1;
+                    outcome.ordinary.skipped_covered += 1;
                     break;
                 }
                 AttemptOutcome::SkipInflight => {
-                    outcome.skipped_inflight += 1;
+                    outcome.ordinary.skipped_inflight += 1;
                     break;
                 }
                 AttemptOutcome::SkipRetained => {
-                    outcome.skipped_inflight += 1;
-                    outcome.skipped_retained += 1;
+                    outcome.ordinary.skipped_inflight += 1;
+                    outcome.ordinary.skipped_retained += 1;
                     break;
                 }
                 AttemptOutcome::Conflicted => {
-                    outcome.conflicted += 1;
+                    outcome.ordinary.conflicted += 1;
+                    break;
+                }
+                AttemptOutcome::SkipIncompleteReasoning => {
+                    outcome.skipped_incomplete_reasoning += 1;
                     break;
                 }
                 AttemptOutcome::LostRace if rounds < 3 => continue,
@@ -1157,7 +1567,7 @@ async fn reserve_turn_claims_for_channel_inner(
                     // Two consecutive lost races: someone very active owns
                     // this turn right now; treat as in-flight, next event
                     // will retry.
-                    outcome.skipped_inflight += 1;
+                    outcome.ordinary.skipped_inflight += 1;
                     break;
                 }
             }
@@ -1172,6 +1582,17 @@ async fn reserve_turn_claims_for_channel_inner(
     if let Err(error) = ensure_reservation_deadline(deadline, source_channel) {
         txn.rollback().await.ok();
         return Err(error);
+    }
+    if outcome.skipped_incomplete_reasoning != 0 {
+        // A mixed snapshot is not permission to publish its reserved subset.
+        // Roll back fresh reservations and conflict mutations together. The
+        // caller receives only the durable, non-mutating skip observations.
+        txn.rollback()
+            .await
+            .context("roll back partial reasoning coverage reservation")?;
+        outcome.ordinary.reserved.clear();
+        outcome.ordinary.conflicted = 0;
+        return Ok(outcome);
     }
     match authorize_final_capture_commit(Some(scope), &txn, deadline).await {
         Ok(()) => {}
@@ -1202,6 +1623,91 @@ enum AttemptOutcome {
     SkipRetained,
     Conflicted,
     LostRace,
+    SkipIncompleteReasoning,
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn decide_reasoning_and_attempt(
+    conn: &impl ConnectionTrait,
+    session_id: &str,
+    turn: &NormalizedTurn,
+    digest: &str,
+    owner: &str,
+    now_ms: i64,
+    existing: Option<ExistingClaim>,
+    source_channel: &'static str,
+    scope: &CaptureScope,
+    map: &StoredReasoningMap,
+    input: &ReasoningCoverageInput<'_>,
+) -> Result<AttemptOutcome> {
+    if let Some(incumbent) = &existing {
+        if incumbent.state == "catalog_committed" {
+            let comparison = compare_reasoning_identity(
+                conn,
+                scope,
+                session_id,
+                &turn.logical_turn_key,
+                incumbent,
+                input
+                    .candidate
+                    .and_then(|plan| plan.turn(&turn.logical_turn_key)),
+                map,
+                input.reader.as_ref(),
+            )
+            .await?;
+            match comparison {
+                ReasoningComparison::Changed | ReasoningComparison::Partial => {
+                    let changed = matches!(comparison, ReasoningComparison::Changed);
+                    if incumbent.completeness == "complete"
+                        && turn.completeness == Completeness::Complete
+                        && (changed || incumbent.coverage_digest != digest)
+                    {
+                        return Ok(
+                            match try_mark_conflicted(
+                                conn,
+                                session_id,
+                                &turn.logical_turn_key,
+                                incumbent,
+                                turn,
+                                source_channel,
+                                now_ms,
+                                changed,
+                            )
+                            .await?
+                            {
+                                ConflictMarkOutcome::Marked => AttemptOutcome::Conflicted,
+                                ConflictMarkOutcome::LostRace => AttemptOutcome::LostRace,
+                                ConflictMarkOutcome::EquivalentAfterRedaction => {
+                                    AttemptOutcome::SkipIncompleteReasoning
+                                }
+                            },
+                        );
+                    }
+                    if !changed || turn.completeness == Completeness::Incomplete {
+                        return Ok(AttemptOutcome::SkipIncompleteReasoning);
+                    }
+                    // Authenticated incomplete -> complete retains the
+                    // incumbent revision/fence upgrade below, even if changed.
+                }
+                ReasoningComparison::Ordinary | ReasoningComparison::Same => {}
+            }
+        } else if matches!(map, StoredReasoningMap::Invalid) {
+            return Ok(AttemptOutcome::SkipIncompleteReasoning);
+        }
+    } else if matches!(map, StoredReasoningMap::Invalid) {
+        return Ok(AttemptOutcome::SkipIncompleteReasoning);
+    }
+    decide_and_attempt(
+        conn,
+        session_id,
+        turn,
+        digest,
+        owner,
+        now_ms,
+        existing,
+        source_channel,
+    )
+    .await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1283,6 +1789,7 @@ async fn decide_and_attempt(
                         turn,
                         source_channel,
                         now_ms,
+                        false,
                     )
                     .await?;
                     Ok(match conflict {
@@ -1382,6 +1889,7 @@ async fn decide_and_attempt(
 /// `HistoryManager` INSIDE the ref-CAS transaction (ADR-DR-10 — ref update,
 /// catalog row, coverage revisions and claim advances all commit or all roll
 /// back together).
+#[derive(Clone)]
 pub struct LiveClaimCommitPlan {
     /// Provenance channel recorded on revisions ('live' | 'export' | 'import').
     pub source_channel: &'static str,
@@ -1401,6 +1909,201 @@ pub struct LiveClaimCommitPlan {
     /// re-check the workspace lease because object construction can outlive
     /// the earlier reservation transaction.
     pub capture_scope: Option<CaptureScope>,
+}
+
+/// Identity records are a transaction companion, never an eager metadata
+/// update. The existing ref/catalog/claim companion remains authoritative;
+/// failing either half rolls the enclosing checkpoint transaction back.
+pub(crate) struct ReasoningClaimCommitPlan {
+    ordinary: LiveClaimCommitPlan,
+    reasoning: ReasoningCoveragePlan,
+}
+
+/// One live/export checkpoint's existing claim companion with an optional
+/// sealed source-derived identity plan. Ordinary captures preserve the exact
+/// legacy companion; native-proven captures apply both through the same
+/// traces ref-CAS transaction.
+pub(crate) struct LiveCaptureClaimCommitPlan {
+    ordinary: LiveClaimCommitPlan,
+    reasoning: Option<ReasoningCoveragePlan>,
+}
+
+impl LiveCaptureClaimCommitPlan {
+    pub(crate) fn new(
+        ordinary: LiveClaimCommitPlan,
+        reasoning: Option<&ReasoningCoveragePlan>,
+    ) -> Result<Self> {
+        if let Some(reasoning) = reasoning {
+            let scope = ordinary
+                .capture_scope
+                .as_ref()
+                .context("reasoning coverage requires the current capture scope")?;
+            reasoning.validate_for(scope, &ordinary.session_id, &[])?;
+            if ordinary
+                .claims
+                .iter()
+                .any(|claim| reasoning.turn(&claim.logical_turn_key).is_none())
+            {
+                bail!(
+                    "reasoning coverage source does not match its reserved turns; run libra agent doctor"
+                );
+            }
+        }
+        Ok(Self {
+            ordinary,
+            reasoning: reasoning.cloned(),
+        })
+    }
+}
+
+#[async_trait]
+impl TracesTxnExtra for LiveCaptureClaimCommitPlan {
+    async fn apply(&self, txn: &DatabaseTransaction, ctx: &TracesCommitCtx) -> Result<()> {
+        match &self.reasoning {
+            Some(reasoning) => {
+                ReasoningClaimCommitPlan::new(self.ordinary.clone(), reasoning)?
+                    .apply(txn, ctx)
+                    .await
+            }
+            None => self.ordinary.apply(txn, ctx).await,
+        }
+    }
+}
+
+impl ReasoningClaimCommitPlan {
+    pub(crate) fn new(
+        ordinary: LiveClaimCommitPlan,
+        reasoning: &ReasoningCoveragePlan,
+    ) -> Result<Self> {
+        let scope = ordinary
+            .capture_scope
+            .as_ref()
+            .context("reasoning coverage requires the current capture scope")?;
+        reasoning.validate_for(scope, &ordinary.session_id, &[])?;
+        if ordinary
+            .claims
+            .iter()
+            .any(|claim| reasoning.turn(&claim.logical_turn_key).is_none())
+        {
+            bail!(
+                "reasoning coverage source does not match its reserved turns; run libra agent doctor"
+            );
+        }
+        Ok(Self {
+            ordinary,
+            reasoning: reasoning.clone(),
+        })
+    }
+}
+
+#[async_trait]
+impl TracesTxnExtra for ReasoningClaimCommitPlan {
+    async fn apply(&self, txn: &DatabaseTransaction, ctx: &TracesCommitCtx) -> Result<()> {
+        let scope = self
+            .ordinary
+            .capture_scope
+            .as_ref()
+            .context("reasoning coverage requires the current capture scope")?;
+        self.reasoning
+            .validate_for(scope, &self.ordinary.session_id, &[])?;
+        scope
+            .assert_workspace_fence_live(txn)
+            .await
+            .context("verify capture workspace lease before private reasoning commit")?;
+        let reader = self.reasoning.read_context();
+        let mut records =
+            match read_reasoning_map(txn, scope, &self.ordinary.session_id, Some(&reader)).await? {
+                StoredReasoningMap::LegacyAbsent => std::collections::BTreeMap::new(),
+                StoredReasoningMap::Verified(map) => map.records().clone(),
+                StoredReasoningMap::Invalid => {
+                    bail!("private reasoning identity is invalid; start a new capture session")
+                }
+            };
+        for claim in &self.ordinary.claims {
+            let current = txn
+                .query_one_raw(Statement::from_sql_and_values(
+                    txn.get_database_backend(),
+                    "SELECT 1 FROM agent_coverage_claim
+                 WHERE session_id = ? AND logical_turn_key = ? AND coverage_schema_version = ?
+                   AND state = ? AND owner = ? AND fence_token = ? AND revision = ?
+                   AND coverage_digest = ? AND completeness = ? LIMIT 1",
+                    [
+                        self.ordinary.session_id.clone().into(),
+                        claim.logical_turn_key.clone().into(),
+                        COVERAGE_SCHEMA_VERSION.into(),
+                        reservation_state(self.ordinary.source_channel)?.into(),
+                        self.ordinary.owner.clone().into(),
+                        claim.fence_token.into(),
+                        (claim.next_revision - 1).into(),
+                        claim.coverage_digest.clone().into(),
+                        claim.completeness.as_db_str().into(),
+                    ],
+                ))
+                .await
+                .context(
+                    "cannot verify private reasoning claim ownership; run libra agent doctor",
+                )?;
+            if current.is_none() {
+                bail!(
+                    "reasoning coverage ownership changed; rolling back the checkpoint transaction"
+                );
+            }
+            let identity = self.reasoning.turn(&claim.logical_turn_key)
+                .context("reasoning coverage source does not match its reserved turns; run libra agent doctor")?;
+            let body = ReasoningIdentityRecordBody {
+                context: ReasoningIdentityRecordContext {
+                    repository_id: scope.repo_id.clone(),
+                    session_id: self.ordinary.session_id.clone(),
+                    logical_turn_key: identity.slot().to_owned(),
+                    coverage_schema_version: COVERAGE_SCHEMA_VERSION,
+                    claim_revision: claim.next_revision,
+                    claim_fence_token: claim.fence_token,
+                    checkpoint_id: self.ordinary.checkpoint_id.clone(),
+                },
+                kind: identity.kind(),
+                descriptor_mac: identity.descriptor_mac().to_owned(),
+            };
+            let bytes = ReasoningIdentityRecord::authentication_body(&body)?;
+            let mac = self
+                .reasoning
+                .authenticate_record(txn, &bytes, None)
+                .await?;
+            records.insert(
+                identity.slot().to_owned(),
+                ReasoningIdentityRecord::from_body_and_mac(body, mac)?,
+            );
+        }
+        // Includes the retained map, not only this attempt's new records.
+        // These checks precede catalog/claim/ref-visible companion mutations.
+        let bytes = ReasoningIdentitySessionMap::authentication_body(
+            &scope.repo_id,
+            &self.ordinary.session_id,
+            &records,
+        )?;
+        let mac = self
+            .reasoning
+            .authenticate_record(txn, &bytes, None)
+            .await?;
+        let map = ReasoningIdentitySessionMap::from_records_and_mac(
+            scope.repo_id.clone(),
+            self.ordinary.session_id.clone(),
+            records,
+            mac,
+        )?;
+        let value = map.encode()?;
+        self.ordinary.apply(txn, ctx).await?;
+        MetadataKv::set_with_conn(
+            txn,
+            MetadataScope::AgentReasoningIdentity,
+            &self.ordinary.session_id,
+            ReasoningIdentitySessionMap::KEY,
+            &value,
+            MetadataValueType::Text,
+        )
+        .await
+        .context("cannot commit private reasoning identity; rolling back checkpoint transaction")?;
+        Ok(())
+    }
 }
 
 /// Import-job state advanced in the same transaction as ref/catalog/claims.
@@ -1598,7 +2301,8 @@ impl TracesTxnExtra for LiveClaimCommitPlan {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
+    use chrono::Utc;
     use sea_orm::Database;
 
     use super::*;
@@ -1606,6 +2310,1511 @@ mod tests {
         ai::observed_agents::SemanticRecord, config::ConfigKv,
         db::migration::run_builtin_migrations,
     };
+
+    #[cfg(unix)]
+    pub(crate) struct ReasoningFixture {
+        pub(crate) dir: tempfile::TempDir,
+        pub(crate) conn: DatabaseConnection,
+        pub(crate) scope: CaptureScope,
+    }
+
+    #[cfg(unix)]
+    impl ReasoningFixture {
+        pub(crate) async fn new() -> Self {
+            use crate::{
+                internal::ai::observed_agents::reasoning::carrier_test_support as native,
+                utils::util,
+            };
+            let dir = tempfile::tempdir().unwrap();
+            let storage = dir.path().join(util::ROOT_DIR);
+            std::fs::create_dir(&storage).unwrap();
+            let conn = crate::internal::db::create_database(
+                storage.join(util::DATABASE).to_str().unwrap(),
+            )
+            .await
+            .unwrap();
+            crate::internal::workspace::RepoIdentity::resolve_or_init(&conn)
+                .await
+                .unwrap();
+            let scope = CaptureScope::main_for_connection(&conn).await.unwrap();
+            conn.execute_raw(Statement::from_sql_and_values(conn.get_database_backend(),
+                "INSERT INTO agent_session (session_id, agent_kind, provider_session_id, state, working_dir,
+                 metadata_json, started_at, last_event_at, sync_revision, repo_id, worktree_id, scope_state)
+                 VALUES (?, 'claude_code', ?, 'active', ?, '{}', 1, 1, 1, ?, '', 'scoped')",
+                [native::CAPTURE.into(), native::SOURCE.into(), dir.path().to_string_lossy().into_owned().into(), scope.repo_id.clone().into()]
+            )).await.unwrap();
+            crate::internal::ai::capture::key::load_capture_dedup_secret_with_mutation_deadline(
+                &storage, None,
+            )
+            .unwrap();
+            Self { dir, conn, scope }
+        }
+
+        pub(crate) async fn plan(
+            &self,
+            turns: &[NormalizedTurn],
+            fields: Vec<Vec<u8>>,
+        ) -> ReasoningCoveragePlan {
+            use crate::internal::ai::{
+                capture::checkpoint::{
+                    ReasoningIdentityPreparation, prepare_reasoning_coverage_plan,
+                    reasoning_coverage_test_payload,
+                },
+                observed_agents::reasoning::carrier_test_support as native,
+            };
+            let payload = reasoning_coverage_test_payload(fields);
+            prepare_reasoning_coverage_plan(
+                &payload,
+                ReasoningIdentityPreparation {
+                    conn: &self.conn,
+                    scope: &self.scope,
+                    storage_path: &self.dir.path().join(crate::utils::util::ROOT_DIR),
+                    authorized_root: self.dir.path(),
+                    session_id: native::CAPTURE,
+                    provider: "claude_code",
+                    turns,
+                    deadline: Instant::now() + Duration::from_secs(30),
+                },
+            )
+            .await
+            .unwrap()
+            .unwrap()
+        }
+
+        pub(crate) async fn reserve(
+            &self,
+            turns: &[NormalizedTurn],
+            plan: Option<&ReasoningCoveragePlan>,
+            owner: &str,
+        ) -> ReasoningReservationOutcome {
+            use crate::internal::ai::observed_agents::reasoning::carrier_test_support as native;
+            let reader = ReasoningIdentityReadContext::new(
+                &self.scope,
+                native::CAPTURE,
+                &self.dir.path().join(crate::utils::util::ROOT_DIR),
+                self.dir.path(),
+                Instant::now() + Duration::from_secs(30),
+            );
+            let input = match plan {
+                Some(plan) => ReasoningCoverageInput::native(plan),
+                None => ReasoningCoverageInput::ordinary(&reader),
+            };
+            reserve_turn_claims_with_reasoning(
+                &self.conn,
+                &self.scope,
+                native::CAPTURE,
+                turns,
+                owner,
+                1,
+                CaptureReservationExecution::live(
+                    CaptureCommitDeadline::from_budget(Duration::from_secs(30)).unwrap(),
+                ),
+                input,
+            )
+            .await
+            .unwrap()
+        }
+
+        pub(crate) async fn commit(
+            &self,
+            claims: &[ReservedTurnClaim],
+            plan: &ReasoningCoveragePlan,
+            owner: &str,
+            checkpoint: &str,
+        ) {
+            use crate::internal::ai::observed_agents::reasoning::carrier_test_support as native;
+            let companion = ReasoningClaimCommitPlan::new(
+                LiveClaimCommitPlan {
+                    source_channel: "live",
+                    session_id: native::CAPTURE.to_owned(),
+                    checkpoint_id: checkpoint.to_owned(),
+                    owner: owner.to_owned(),
+                    parent_commit: None,
+                    created_at: 1,
+                    now_ms: 1,
+                    claims: claims.to_vec(),
+                    import_session: None,
+                    import_identity: None,
+                    capture_scope: Some(self.scope.clone()),
+                },
+                plan,
+            )
+            .unwrap();
+            let txn = sea_orm::TransactionTrait::begin(&self.conn).await.unwrap();
+            companion
+                .apply(
+                    &txn,
+                    &TracesCommitCtx {
+                        commit_hash: format!("commit-{checkpoint}"),
+                        tree_oid: "t".to_owned(),
+                        metadata_blob_oid: "m".to_owned(),
+                    },
+                )
+                .await
+                .unwrap();
+            txn.commit().await.unwrap();
+        }
+
+        pub(crate) async fn identity_text(&self) -> String {
+            use crate::internal::ai::observed_agents::reasoning::carrier_test_support as native;
+            MetadataKv::get_with_conn(
+                &self.conn,
+                MetadataScope::AgentReasoningIdentity,
+                native::CAPTURE,
+                ReasoningIdentitySessionMap::KEY,
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .value
+        }
+
+        pub(crate) async fn identity_count(&self) -> i64 {
+            scalar(
+                &self.conn,
+                "SELECT COUNT(*) AS n FROM metadata_kv WHERE scope = 'agent_reasoning_identity'",
+            )
+            .await
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reasoning_identity_commit_is_atomic_with_claim() {
+        use crate::internal::ai::{
+            capture::checkpoint::{
+                CheckpointStore, CheckpointWriteOutcome, CheckpointWriteRequest,
+                ReasoningIdentityPreparation, TracesCheckpointStore,
+                prepare_reasoning_coverage_plan, reasoning_coverage_test_payload,
+            },
+            observed_agents::reasoning::carrier_test_support as native,
+            traces::{CheckpointScope, TracesCoverageFence},
+        };
+
+        for channel in ["live", "export", "import"] {
+            let fixture = ReasoningFixture::new().await;
+            let storage = fixture.dir.path().join(crate::utils::util::ROOT_DIR);
+            let turns = vec![
+                turn("synthetic-turn-0", "ordinary", Completeness::Complete),
+                turn("ordinary-turn-1", "ordinary tail", Completeness::Complete),
+            ];
+            // Synthetic admitted bytes exercise the real store transaction;
+            // they are not a real-provider native-source acceptance result.
+            let payload = reasoning_coverage_test_payload(vec![b"atomic private wire".to_vec()]);
+            let plan = prepare_reasoning_coverage_plan(
+                &payload,
+                ReasoningIdentityPreparation {
+                    conn: &fixture.conn,
+                    scope: &fixture.scope,
+                    storage_path: &storage,
+                    authorized_root: fixture.dir.path(),
+                    session_id: native::CAPTURE,
+                    provider: "claude_code",
+                    turns: &turns,
+                    deadline: Instant::now() + Duration::from_secs(30),
+                },
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            let now = Utc::now().timestamp_millis();
+            let deadline = CaptureCommitDeadline::from_budget(Duration::from_secs(30)).unwrap();
+            let outcome = match channel {
+                "live" | "export" => {
+                    reserve_turn_claims_with_reasoning(
+                        &fixture.conn,
+                        &fixture.scope,
+                        native::CAPTURE,
+                        &turns,
+                        "atomic-owner",
+                        now,
+                        if channel == "live" {
+                            CaptureReservationExecution::live(deadline)
+                        } else {
+                            CaptureReservationExecution::export(deadline)
+                        },
+                        ReasoningCoverageInput::native(&plan),
+                    )
+                    .await
+                }
+                "import" => {
+                    reserve_import_turn_claims_with_reasoning_until(
+                        &fixture.conn,
+                        &fixture.scope,
+                        native::CAPTURE,
+                        &turns,
+                        "atomic-owner",
+                        now,
+                        deadline,
+                        ReasoningCoverageInput::native(&plan),
+                    )
+                    .await
+                }
+                _ => unreachable!("fixed atomic coverage channel matrix"),
+            }
+            .unwrap();
+            assert_eq!(outcome.skipped_incomplete_reasoning, 0);
+            assert_eq!(outcome.ordinary.reserved.len(), 2);
+            assert_eq!(
+                plan.turn("ordinary-turn-1").unwrap().kind(),
+                ReasoningIdentityKind::Empty
+            );
+            let state = reservation_state(channel).unwrap();
+            let fences = outcome
+                .ordinary
+                .reserved
+                .iter()
+                .map(|claim| TracesCoverageFence {
+                    logical_turn_key: &claim.logical_turn_key,
+                    owner: "atomic-owner",
+                    fence_token: claim.fence_token,
+                    reservation_state: state,
+                })
+                .collect::<Vec<_>>();
+
+            for (checkpoint, failure) in [
+                ("atomic-identity-failure", Some("identity")),
+                ("atomic-claim-failure", Some("claim")),
+                ("atomic-success", None),
+            ] {
+                let trigger = match failure {
+                    Some("identity") => Some(
+                        "CREATE TRIGGER reject_atomic_identity BEFORE INSERT ON metadata_kv WHEN NEW.scope = 'agent_reasoning_identity' BEGIN SELECT RAISE(ABORT, 'injected identity failure'); END",
+                    ),
+                    Some("claim") => Some(
+                        "CREATE TRIGGER reject_atomic_claim BEFORE INSERT ON agent_coverage_revision BEGIN SELECT RAISE(ABORT, 'injected claim failure'); END",
+                    ),
+                    _ => None,
+                };
+                if let Some(trigger) = trigger {
+                    fixture.conn.execute_unprepared(trigger).await.unwrap();
+                }
+                let companion = ReasoningClaimCommitPlan::new(
+                    LiveClaimCommitPlan {
+                        source_channel: channel,
+                        session_id: native::CAPTURE.to_owned(),
+                        checkpoint_id: checkpoint.to_owned(),
+                        owner: "atomic-owner".to_owned(),
+                        parent_commit: None,
+                        created_at: 1,
+                        now_ms: now,
+                        claims: outcome.ordinary.reserved.clone(),
+                        import_session: None,
+                        import_identity: None,
+                        capture_scope: Some(fixture.scope.clone()),
+                    },
+                    &plan,
+                )
+                .unwrap();
+                let store = TracesCheckpointStore::new(
+                    &fixture.conn,
+                    fixture.dir.path(),
+                    native::CAPTURE,
+                    checkpoint,
+                    &fences,
+                )
+                .unwrap()
+                .with_capture_scope(fixture.scope.clone());
+                let request = CheckpointWriteRequest::new(
+                    "atomic-replay",
+                    checkpoint,
+                    native::CAPTURE,
+                    "claude_code",
+                    None,
+                    CheckpointScope::Committed,
+                    store.marker_generation(),
+                    None,
+                    &payload,
+                    Some(&companion),
+                    None,
+                )
+                .unwrap();
+                let result = store.write(request).await;
+                if let Some(failure) = failure {
+                    assert!(result.is_err(), "{channel}/{failure}: {result:?}");
+                    for sql in [
+                        "SELECT COUNT(*) AS n FROM reference WHERE name = 'traces'",
+                        "SELECT COUNT(*) AS n FROM agent_checkpoint",
+                        "SELECT COUNT(*) AS n FROM agent_coverage_revision",
+                        "SELECT COUNT(*) AS n FROM metadata_kv WHERE scope = 'agent_reasoning_identity'",
+                    ] {
+                        assert_eq!(
+                            scalar(&fixture.conn, sql).await,
+                            0,
+                            "{channel}/{failure}: {sql}"
+                        );
+                    }
+                    for key in ["synthetic-turn-0", "ordinary-turn-1"] {
+                        assert_eq!(
+                            claim_row(&fixture.conn, key).await,
+                            (state.to_owned(), 0, Some(1))
+                        );
+                    }
+                    fixture
+                        .conn
+                        .execute_unprepared(&format!("DROP TRIGGER reject_atomic_{failure}"))
+                        .await
+                        .unwrap();
+                } else {
+                    assert!(matches!(
+                        result.unwrap(),
+                        CheckpointWriteOutcome::Written { .. }
+                    ));
+                    assert_eq!(
+                        scalar(
+                            &fixture.conn,
+                            "SELECT COUNT(*) AS n FROM reference WHERE name = 'traces'"
+                        )
+                        .await,
+                        1
+                    );
+                    assert_eq!(
+                        scalar(&fixture.conn, "SELECT COUNT(*) AS n FROM agent_checkpoint").await,
+                        1
+                    );
+                    assert_eq!(
+                        scalar(
+                            &fixture.conn,
+                            "SELECT COUNT(*) AS n FROM agent_coverage_revision"
+                        )
+                        .await,
+                        2
+                    );
+                    let map = ReasoningIdentitySessionMap::decode(&fixture.identity_text().await)
+                        .unwrap();
+                    assert_eq!(map.records().len(), 2);
+                    for key in ["synthetic-turn-0", "ordinary-turn-1"] {
+                        assert_eq!(
+                            claim_row(&fixture.conn, key).await,
+                            ("catalog_committed".to_owned(), 1, Some(1))
+                        );
+                        let expected = plan.turn(key).unwrap();
+                        let record = map.records().get(expected.slot()).unwrap();
+                        assert_eq!(record.body().kind, expected.kind());
+                        assert_eq!(record.body().context.checkpoint_id, checkpoint);
+                        assert_eq!(record.body().context.claim_revision, 1);
+                        assert_eq!(record.body().context.claim_fence_token, 1);
+                    }
+                    let repeat = fixture.reserve(&turns, Some(&plan), "later-owner").await;
+                    assert_eq!(repeat.skipped_incomplete_reasoning, 0);
+                    assert_eq!(repeat.ordinary.skipped_covered, 2);
+                    assert!(repeat.ordinary.reserved.is_empty());
+                }
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reasoning_live_then_import_uses_same_identity_and_skips_covered() {
+        use crate::internal::ai::observed_agents::{
+            coverage::Completeness, reasoning::carrier_test_support as native,
+        };
+
+        let fixture = ReasoningFixture::new().await;
+        let turns = vec![turn(
+            "synthetic-turn-0",
+            "ordinary transcript turn",
+            Completeness::Complete,
+        )];
+        let wire = b"synthetic admitted carrier bytes".to_vec();
+        let live_plan = fixture.plan(&turns, vec![wire.clone()]).await;
+        let live_identity = live_plan
+            .turn("synthetic-turn-0")
+            .expect("live plan includes its associated logical turn")
+            .descriptor_mac()
+            .to_owned();
+        let live = fixture
+            .reserve(&turns, Some(&live_plan), "live-identity-owner")
+            .await;
+        assert_eq!(live.skipped_incomplete_reasoning, 0);
+        assert_eq!(live.ordinary.reserved.len(), 1);
+        fixture
+            .commit(
+                &live.ordinary.reserved,
+                &live_plan,
+                "live-identity-owner",
+                "live-identity-checkpoint",
+            )
+            .await;
+
+        let import_plan = fixture.plan(&turns, vec![wire]).await;
+        let import_identity = import_plan
+            .turn("synthetic-turn-0")
+            .expect("import plan includes its associated logical turn")
+            .descriptor_mac();
+        assert_eq!(live_identity, import_identity);
+        assert!(
+            import_plan
+                .validate_for(
+                    &fixture.scope,
+                    native::CAPTURE,
+                    &[turn(
+                        "wrong-logical-turn",
+                        "ordinary transcript turn",
+                        Completeness::Complete,
+                    )],
+                )
+                .is_err()
+        );
+
+        let imported = reserve_import_turn_claims_with_reasoning_until(
+            &fixture.conn,
+            &fixture.scope,
+            native::CAPTURE,
+            &turns,
+            "import-redelivery-owner",
+            2,
+            CaptureCommitDeadline::from_budget(Duration::from_secs(30)).unwrap(),
+            ReasoningCoverageInput::native(&import_plan),
+        )
+        .await
+        .unwrap();
+        assert_eq!(imported.skipped_incomplete_reasoning, 0);
+        assert_eq!(imported.ordinary.skipped_covered, 1);
+        assert!(imported.ordinary.reserved.is_empty());
+
+        let changed_plan = fixture
+            .plan(&turns, vec![b"changed synthetic carrier bytes".to_vec()])
+            .await;
+        let changed = reserve_import_turn_claims_with_reasoning_until(
+            &fixture.conn,
+            &fixture.scope,
+            native::CAPTURE,
+            &turns,
+            "import-changed-owner",
+            3,
+            CaptureCommitDeadline::from_budget(Duration::from_secs(30)).unwrap(),
+            ReasoningCoverageInput::native(&changed_plan),
+        )
+        .await
+        .unwrap();
+        assert_eq!(changed.ordinary.conflicted, 1);
+        assert_eq!(changed.ordinary.skipped_covered, 0);
+        assert!(changed.ordinary.reserved.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reasoning_identity_forward_recovery_preserves_fences() {
+        use crate::internal::ai::observed_agents::reasoning::{
+            ReasoningSourceDisposition, ReasoningSourcePreprocessor, carrier_test_support as native,
+        };
+
+        let mut fixture = ReasoningFixture::new().await;
+        let turn = turn(
+            "synthetic-turn-0",
+            "ordinary transcript turn",
+            Completeness::Complete,
+        );
+        let turns = vec![turn];
+        let plan = fixture
+            .plan(
+                &turns,
+                vec![b"synthetic admitted identity before recovery".to_vec()],
+            )
+            .await;
+        let reserved = fixture
+            .reserve(&turns, Some(&plan), "recovery-source-owner")
+            .await;
+        assert_eq!(reserved.skipped_incomplete_reasoning, 0);
+        assert_eq!(reserved.ordinary.reserved.len(), 1);
+        fixture
+            .commit(
+                &reserved.ordinary.reserved,
+                &plan,
+                "recovery-source-owner",
+                "recovery-source-checkpoint",
+            )
+            .await;
+        let before_recovery = fixture.identity_text().await;
+
+        // Re-open the actual SQLite store to model process recovery after the
+        // forward-only claim/checkpoint commit. The private identity map and
+        // both claim fences must remain usable without rebuilding a key or
+        // replaying the provider artifact producer.
+        fixture.conn.close().await.unwrap();
+        let db_path = fixture
+            .dir
+            .path()
+            .join(crate::utils::util::ROOT_DIR)
+            .join(crate::utils::util::DATABASE);
+        fixture.conn = Database::connect(format!("sqlite://{}", db_path.display()))
+            .await
+            .unwrap();
+        assert_eq!(fixture.identity_text().await, before_recovery);
+        let recovered = fixture
+            .reserve(&turns, Some(&plan), "recovery-redelivery-owner")
+            .await;
+        assert_eq!(recovered.skipped_incomplete_reasoning, 0);
+        assert_eq!(recovered.ordinary.skipped_covered, 1);
+        assert!(recovered.ordinary.reserved.is_empty());
+
+        // A source that still contains the synthetic candidate is stripped by
+        // the authorized preprocessor, but has no native witness. That
+        // recovery delivery remains partial and cannot refresh either fence.
+        let preprocessor = native::Adapter(native::Mode::Strip);
+        let prepared = preprocessor
+            .prepare_authorized_source([b"safe ".as_slice(), native::CANARY].concat())
+            .unwrap();
+        let (ordinary, disposition) = ReasoningSourceDisposition::from_prepared_authorized_source(
+            prepared,
+            true,
+            crate::internal::ai::traces::REASONING_ARTIFACT_TOTAL_MAX_BYTES,
+            "claude_code",
+            native::CAPTURE,
+            Some(native::SOURCE),
+        )
+        .unwrap();
+        assert_eq!(ordinary, b"safe ");
+        assert!(!disposition.is_ordinary());
+        let without_native_proof = fixture
+            .reserve(&turns, None, "recovery-unproven-owner")
+            .await;
+        assert_eq!(without_native_proof.skipped_incomplete_reasoning, 1);
+        assert_eq!(without_native_proof.ordinary.skipped_covered, 0);
+        assert!(without_native_proof.ordinary.reserved.is_empty());
+        assert_eq!(fixture.identity_text().await, before_recovery);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reasoning_later_turn_keeps_prefix_covered() {
+        use crate::internal::ai::observed_agents::reasoning::carrier_test_support as native;
+
+        let fixture = ReasoningFixture::new().await;
+        let prefix = turn("legacy-prefix", "unchanged prefix", Completeness::Complete);
+        let initial = fixture
+            .reserve(std::slice::from_ref(&prefix), None, "legacy-owner")
+            .await;
+        commit_reserved(
+            &fixture.conn,
+            native::CAPTURE,
+            "legacy-owner",
+            &initial.ordinary.reserved[0],
+            "legacy-prefix-checkpoint",
+        )
+        .await
+        .unwrap();
+        let native_turn = turn("synthetic-turn-0", "later turn", Completeness::Complete);
+        let before_turns = vec![prefix.clone(), native_turn.clone()];
+        let before = fixture
+            .plan(&before_turns, vec![b"later private wire".to_vec()])
+            .await;
+        let appended = fixture
+            .reserve(&before_turns, Some(&before), "native-owner")
+            .await;
+        assert_eq!(appended.ordinary.skipped_covered, 1);
+        assert_eq!(appended.ordinary.reserved.len(), 1);
+        assert_eq!(
+            appended.ordinary.reserved[0].logical_turn_key,
+            "synthetic-turn-0"
+        );
+        fixture
+            .commit(
+                &appended.ordinary.reserved,
+                &before,
+                "native-owner",
+                "native-checkpoint",
+            )
+            .await;
+        let retained = fixture.identity_text().await;
+
+        let after_turns = vec![
+            prefix.clone(),
+            native_turn.clone(),
+            turn("append-turn", "new ordinary turn", Completeness::Complete),
+        ];
+        let after = fixture
+            .plan(&after_turns, vec![b"later private wire".to_vec()])
+            .await;
+        for key in ["legacy-prefix", "synthetic-turn-0"] {
+            let old = before.turn(key).unwrap();
+            let new = after.turn(key).unwrap();
+            assert_eq!(old.slot(), new.slot());
+            assert_eq!(old.kind(), new.kind());
+            assert_eq!(old.descriptor_mac(), new.descriptor_mac());
+        }
+        let comparable_prefix = fixture
+            .reserve(
+                std::slice::from_ref(&prefix),
+                Some(&after),
+                "prefix-native-reader",
+            )
+            .await;
+        assert_eq!(comparable_prefix.ordinary.skipped_covered, 1);
+        assert_eq!(comparable_prefix.skipped_incomplete_reasoning, 0);
+
+        // A whole None/v1 capture can authenticate absence for this legacy
+        // slot; it never invents a VerifiedEmpty candidate or backfills it.
+        let ordinary_prefix = fixture
+            .reserve(
+                std::slice::from_ref(&prefix),
+                None,
+                "prefix-ordinary-reader",
+            )
+            .await;
+        assert_eq!(ordinary_prefix.ordinary.skipped_covered, 1);
+        assert_eq!(ordinary_prefix.skipped_incomplete_reasoning, 0);
+        let unproven_native = fixture
+            .reserve(
+                std::slice::from_ref(&native_turn),
+                None,
+                "native-without-proof",
+            )
+            .await;
+        assert_eq!(unproven_native.skipped_incomplete_reasoning, 1);
+        assert_eq!(unproven_native.ordinary.skipped_covered, 0);
+        assert!(unproven_native.ordinary.reserved.is_empty());
+        let mixed = fixture
+            .reserve(&after_turns, None, "mixed-ordinary-reader")
+            .await;
+        assert_eq!(mixed.skipped_incomplete_reasoning, 1);
+        assert!(mixed.ordinary.reserved.is_empty());
+        assert_eq!(fixture.identity_text().await, retained);
+        let map = ReasoningIdentitySessionMap::decode(&retained).unwrap();
+        assert_eq!(map.records().len(), 1);
+        assert!(
+            !map.records()
+                .contains_key(before.turn("legacy-prefix").unwrap().slot())
+        );
+        assert_eq!(
+            scalar(
+                &fixture.conn,
+                "SELECT COUNT(*) AS n FROM agent_coverage_claim"
+            )
+            .await,
+            2
+        );
+        assert_eq!(
+            scalar(&fixture.conn, "SELECT COUNT(*) AS n FROM agent_checkpoint").await,
+            2
+        );
+        assert_eq!(
+            scalar(&fixture.conn, "SELECT COUNT(*) AS n FROM object_index").await,
+            0
+        );
+        assert_eq!(
+            claim_row(&fixture.conn, "legacy-prefix").await,
+            ("catalog_committed".to_owned(), 1, Some(1))
+        );
+
+        let storage = fixture.dir.path().join(crate::utils::util::ROOT_DIR);
+        let key_file = storage.join("private/agent-capture-dedup-v1.key");
+        std::fs::remove_file(&key_file).unwrap();
+        let reader = ReasoningIdentityReadContext::new(
+            &fixture.scope,
+            native::CAPTURE,
+            &storage,
+            fixture.dir.path(),
+            Instant::now() + Duration::from_secs(30),
+        );
+        let missing_key = reserve_turn_claims_with_reasoning(
+            &fixture.conn,
+            &fixture.scope,
+            native::CAPTURE,
+            std::slice::from_ref(&prefix),
+            "missing-key-ordinary-reader",
+            1,
+            CaptureReservationExecution::live(
+                CaptureCommitDeadline::from_budget(Duration::from_secs(30)).unwrap(),
+            ),
+            ReasoningCoverageInput::ordinary(&reader),
+        )
+        .await
+        .err()
+        .expect("ordinary identity readers cannot recreate a key");
+        assert!(format!("{missing_key:#}").contains("key is missing"));
+        assert!(!key_file.exists());
+        assert_eq!(fixture.identity_text().await, retained);
+        assert_eq!(
+            scalar(
+                &fixture.conn,
+                "SELECT COUNT(*) AS n FROM agent_coverage_claim"
+            )
+            .await,
+            2
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reasoning_empty_identity_preserves_coverage_digest() {
+        let fixture = ReasoningFixture::new().await;
+        let turn = turn(
+            "legacy-no-candidate",
+            "ordinary turn without a reasoning candidate",
+            Completeness::Complete,
+        );
+        let previous_digest =
+            crate::internal::ai::observed_agents::coverage::coverage_digest_hex(&turn.records);
+
+        let reserved = fixture
+            .reserve(std::slice::from_ref(&turn), None, "legacy-digest-owner")
+            .await;
+
+        assert_eq!(reserved.skipped_incomplete_reasoning, 0);
+        assert_eq!(reserved.ordinary.reserved.len(), 1);
+        assert_eq!(
+            reserved.ordinary.reserved[0].coverage_digest,
+            previous_digest
+        );
+        assert_eq!(turn.digest_hex(), previous_digest);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reasoning_identity_preserves_content_hash() {
+        use crate::internal::ai::traces::{
+            CHECKPOINT_CONTENT_HASH_COVERAGE, checkpoint_content_hash,
+        };
+
+        let roles = [
+            b"{\"created_at\":1}".as_slice(),
+            b"{}\n".as_slice(),
+            b"turn\n".as_slice(),
+            b"{}\n".as_slice(),
+        ];
+        assert_eq!(
+            CHECKPOINT_CONTENT_HASH_COVERAGE,
+            [
+                "metadata",
+                "lifecycle_events",
+                "transcript",
+                "redaction_report"
+            ]
+        );
+        let legacy_hash = checkpoint_content_hash(&roles);
+        assert_eq!(
+            legacy_hash,
+            "sha256:0f72448126247d21ba4d9c4fbfc3c46a62a3c2dc740dfec4ffeb69a8cb2df559"
+        );
+
+        let fixture = ReasoningFixture::new().await;
+        let turn = turn(
+            "synthetic-turn-0",
+            "ordinary turn with separate private identity",
+            Completeness::Complete,
+        );
+        let plan = fixture
+            .plan(
+                std::slice::from_ref(&turn),
+                vec![b"synthetic private identity is metadata-only".to_vec()],
+            )
+            .await;
+        let reserved = fixture
+            .reserve(
+                std::slice::from_ref(&turn),
+                Some(&plan),
+                "content-hash-owner",
+            )
+            .await;
+        fixture
+            .commit(
+                &reserved.ordinary.reserved,
+                &plan,
+                "content-hash-owner",
+                "content-hash-checkpoint",
+            )
+            .await;
+        assert!(!fixture.identity_text().await.is_empty());
+        assert_eq!(checkpoint_content_hash(&roles), legacy_hash);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reasoning_identity_is_bound_to_logical_turn() {
+        let fixture = ReasoningFixture::new().await;
+        let keyed_turn = turn(
+            "synthetic-turn-0",
+            "ordinary turn bound to its key",
+            Completeness::Complete,
+        );
+        let plan = fixture
+            .plan(
+                std::slice::from_ref(&keyed_turn),
+                vec![b"private wire".to_vec()],
+            )
+            .await;
+
+        let identity = plan.turn(&keyed_turn.logical_turn_key).unwrap();
+        let other_slot = plan
+            .read_context()
+            .turn_slot(&fixture.conn, "other-logical-turn")
+            .await
+            .unwrap();
+        assert_ne!(identity.slot(), other_slot);
+        assert!(
+            plan.validate_for(
+                &fixture.scope,
+                crate::internal::ai::observed_agents::reasoning::carrier_test_support::CAPTURE,
+                &[turn(
+                    "other-logical-turn",
+                    "ordinary turn bound to its key",
+                    Completeness::Complete
+                )]
+            )
+            .is_err(),
+            "a descriptor for one logical turn must not authenticate another key"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reasoning_identity_cannot_upgrade_native_source() {
+        let fixture = ReasoningFixture::new().await;
+        let turn = turn(
+            "synthetic-turn-0",
+            "ordinary native turn",
+            Completeness::Complete,
+        );
+        let candidate = fixture
+            .plan(
+                std::slice::from_ref(&turn),
+                vec![b"synthetic source identity".to_vec()],
+            )
+            .await;
+        let initial = fixture
+            .reserve(
+                std::slice::from_ref(&turn),
+                Some(&candidate),
+                "native-owner",
+            )
+            .await;
+        fixture
+            .commit(
+                &initial.ordinary.reserved,
+                &candidate,
+                "native-owner",
+                "native-checkpoint",
+            )
+            .await;
+        let identity_before = fixture.identity_text().await;
+
+        // A caller with only the legacy/read authority cannot manufacture a
+        // comparable native identity from an existing descriptor.
+        let unproven = fixture
+            .reserve(std::slice::from_ref(&turn), None, "unproven-redelivery")
+            .await;
+        assert_eq!(unproven.skipped_incomplete_reasoning, 1);
+        assert_eq!(unproven.ordinary.skipped_covered, 0);
+        assert!(unproven.ordinary.reserved.is_empty());
+        assert_eq!(fixture.identity_text().await, identity_before);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reasoning_identity_byte_budget_precedes_mutation() {
+        use crate::internal::ai::observed_agents::reasoning::{
+            ReasoningSourcePreprocessor,
+            carrier_test_support::{Adapter, CAPTURE, Mode, SOURCE},
+        };
+
+        let fixture = ReasoningFixture::new().await;
+        let storage = fixture.dir.path().join(crate::utils::util::ROOT_DIR);
+        let key_path = storage.join("private/agent-capture-dedup-v1.key");
+        let key_before = std::fs::read(&key_path).unwrap();
+        let prepared = Adapter(Mode::ArtifactOversize)
+            .prepare_authorized_source(b"ordinary".to_vec())
+            .unwrap();
+        let rejected = crate::internal::ai::observed_agents::reasoning::ReasoningSourceDisposition::from_prepared_authorized_source(
+            prepared,
+            true,
+            crate::internal::ai::traces::REASONING_ARTIFACT_TOTAL_MAX_BYTES,
+            "claude_code",
+            CAPTURE,
+            Some(SOURCE),
+        )
+        .err()
+        .expect("oversize native field must be rejected before identity preparation");
+        assert_eq!(
+            rejected,
+            crate::internal::ai::observed_agents::reasoning::ReasoningFieldError::SourceTooLarge
+        );
+        assert_eq!(std::fs::read(&key_path).unwrap(), key_before);
+        assert_eq!(fixture.identity_count().await, 0);
+        assert_eq!(
+            scalar(
+                &fixture.conn,
+                "SELECT COUNT(*) AS n FROM agent_coverage_claim"
+            )
+            .await,
+            0
+        );
+        assert_eq!(
+            scalar(&fixture.conn, "SELECT COUNT(*) AS n FROM agent_checkpoint").await,
+            0
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reasoning_identity_count_budget_precedes_mutation() {
+        use crate::internal::ai::observed_agents::reasoning::{
+            ReasoningSourcePreprocessor,
+            carrier_test_support::{Adapter, CAPTURE, Mode, SOURCE},
+        };
+
+        let fixture = ReasoningFixture::new().await;
+        let storage = fixture.dir.path().join(crate::utils::util::ROOT_DIR);
+        let key_path = storage.join("private/agent-capture-dedup-v1.key");
+        let key_before = std::fs::read(&key_path).unwrap();
+        let prepared = Adapter(Mode::TooMany)
+            .prepare_authorized_source(b"ordinary".to_vec())
+            .unwrap();
+        let rejected = crate::internal::ai::observed_agents::reasoning::ReasoningSourceDisposition::from_prepared_authorized_source(
+            prepared,
+            true,
+            crate::internal::ai::traces::REASONING_ARTIFACT_TOTAL_MAX_BYTES,
+            "claude_code",
+            CAPTURE,
+            Some(SOURCE),
+        )
+        .err()
+        .expect("too many native fields must be rejected before identity preparation");
+        assert_eq!(
+            rejected,
+            crate::internal::ai::observed_agents::reasoning::ReasoningFieldError::UnsupportedShape
+        );
+        assert_eq!(std::fs::read(&key_path).unwrap(), key_before);
+        assert_eq!(fixture.identity_count().await, 0);
+        assert_eq!(
+            scalar(
+                &fixture.conn,
+                "SELECT COUNT(*) AS n FROM agent_coverage_claim"
+            )
+            .await,
+            0
+        );
+        assert_eq!(
+            scalar(&fixture.conn, "SELECT COUNT(*) AS n FROM agent_checkpoint").await,
+            0
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reasoning_identity_deadline_precedes_mutation() {
+        use crate::internal::ai::{
+            capture::checkpoint::{
+                ReasoningIdentityPreparation, prepare_reasoning_coverage_plan,
+                reasoning_coverage_test_payload,
+            },
+            observed_agents::reasoning::carrier_test_support as native,
+        };
+
+        let fixture = ReasoningFixture::new().await;
+        let turns = [turn(
+            "synthetic-turn-0",
+            "ordinary turn",
+            Completeness::Complete,
+        )];
+        let payload = reasoning_coverage_test_payload(vec![b"bounded source wire".to_vec()]);
+        let expired = Instant::now() - Duration::from_secs(1);
+        let error = prepare_reasoning_coverage_plan(
+            &payload,
+            ReasoningIdentityPreparation {
+                conn: &fixture.conn,
+                scope: &fixture.scope,
+                storage_path: &fixture.dir.path().join(crate::utils::util::ROOT_DIR),
+                authorized_root: fixture.dir.path(),
+                session_id: native::CAPTURE,
+                provider: "claude_code",
+                turns: &turns,
+                deadline: expired,
+            },
+        )
+        .await
+        .err()
+        .expect("an expired preparation cannot authenticate or reserve identity");
+        assert!(error.to_string().contains("deadline"));
+        assert_eq!(fixture.identity_count().await, 0);
+        assert_eq!(
+            scalar(
+                &fixture.conn,
+                "SELECT COUNT(*) AS n FROM agent_coverage_claim"
+            )
+            .await,
+            0
+        );
+        assert_eq!(
+            scalar(&fixture.conn, "SELECT COUNT(*) AS n FROM agent_checkpoint").await,
+            0
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reasoning_same_complete_identity_skips_covered() {
+        let fixture = ReasoningFixture::new().await;
+        let turns = vec![turn(
+            "synthetic-turn-0",
+            "same ordinary text",
+            Completeness::Complete,
+        )];
+        let plan = fixture.plan(&turns, vec![b"private wire".to_vec()]).await;
+        let first = fixture.reserve(&turns, Some(&plan), "owner-one").await;
+        assert_eq!(first.ordinary.reserved.len(), 1);
+        fixture
+            .commit(&first.ordinary.reserved, &plan, "owner-one", "native-one")
+            .await;
+        let before = fixture.identity_text().await;
+        let second = fixture.reserve(&turns, Some(&plan), "owner-two").await;
+        assert_eq!(second.ordinary.skipped_covered, 1);
+        assert_eq!(second.skipped_incomplete_reasoning, 0);
+        assert!(second.ordinary.reserved.is_empty());
+        assert_eq!(fixture.identity_text().await, before);
+        assert!(!before.contains("private wire"));
+        assert!(!before.contains("synthetic-turn-0"));
+        assert_eq!(
+            scalar(&fixture.conn, "SELECT COUNT(*) AS n FROM agent_checkpoint").await,
+            1
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reasoning_changed_complete_identity_conflicts() {
+        let fixture = ReasoningFixture::new().await;
+        let turns = vec![turn(
+            "synthetic-turn-0",
+            "same ordinary text",
+            Completeness::Complete,
+        )];
+        let before = fixture
+            .plan(&turns, vec![b"first private wire".to_vec()])
+            .await;
+        let first = fixture.reserve(&turns, Some(&before), "owner-one").await;
+        fixture
+            .commit(&first.ordinary.reserved, &before, "owner-one", "native-one")
+            .await;
+        let original = fixture.identity_text().await;
+        let changed = fixture
+            .plan(&turns, vec![b"changed private wire".to_vec()])
+            .await;
+        let collision = fixture.reserve(&turns, Some(&changed), "owner-two").await;
+        assert_eq!(collision.ordinary.conflicted, 1);
+        assert_eq!(collision.ordinary.skipped_covered, 0);
+        assert!(collision.ordinary.reserved.is_empty());
+        assert_eq!(
+            claim_row(&fixture.conn, "synthetic-turn-0").await.0,
+            "conflicted"
+        );
+        assert_eq!(fixture.identity_text().await, original);
+        let row = fixture
+            .conn
+            .query_one_raw(Statement::from_string(
+                fixture.conn.get_database_backend(),
+                "SELECT incoming_redaction_report_json FROM agent_coverage_conflict".to_owned(),
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        let report: serde_json::Value = serde_json::from_str(
+            &row.try_get_by::<String, _>("incoming_redaction_report_json")
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(report["reason"], "reasoning_identity_changed");
+        assert!(!report.to_string().contains("private wire"));
+        assert_eq!(
+            scalar(&fixture.conn, "SELECT COUNT(*) AS n FROM agent_checkpoint").await,
+            1
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reasoning_incomplete_to_complete_advances_revision() {
+        let fixture = ReasoningFixture::new().await;
+        let incomplete = vec![turn(
+            "synthetic-turn-0",
+            "ordinary",
+            Completeness::Incomplete,
+        )];
+        let plan = fixture
+            .plan(&incomplete, vec![b"first wire".to_vec()])
+            .await;
+        let first = fixture.reserve(&incomplete, Some(&plan), "owner-one").await;
+        fixture
+            .commit(&first.ordinary.reserved, &plan, "owner-one", "native-one")
+            .await;
+        let complete = vec![turn("synthetic-turn-0", "ordinary", Completeness::Complete)];
+        let changed = fixture
+            .plan(&complete, vec![b"changed wire".to_vec()])
+            .await;
+        let upgrade = fixture
+            .reserve(&complete, Some(&changed), "owner-two")
+            .await;
+        assert_eq!(upgrade.ordinary.reserved.len(), 1);
+        let claim = &upgrade.ordinary.reserved[0];
+        assert_eq!(claim.next_revision, 2);
+        assert_eq!(claim.fence_token, 2);
+        assert_eq!(upgrade.skipped_incomplete_reasoning, 0);
+        fixture
+            .commit(
+                &upgrade.ordinary.reserved,
+                &changed,
+                "owner-two",
+                "native-two",
+            )
+            .await;
+        assert_eq!(
+            claim_row(&fixture.conn, "synthetic-turn-0").await,
+            ("catalog_committed".to_owned(), 2, Some(2))
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reasoning_same_incomplete_keeps_nondowngrade() {
+        let fixture = ReasoningFixture::new().await;
+        let complete = vec![turn("synthetic-turn-0", "ordinary", Completeness::Complete)];
+        let plan = fixture.plan(&complete, vec![b"same wire".to_vec()]).await;
+        let first = fixture.reserve(&complete, Some(&plan), "owner-one").await;
+        fixture
+            .commit(&first.ordinary.reserved, &plan, "owner-one", "native-one")
+            .await;
+        let incomplete = vec![turn(
+            "synthetic-turn-0",
+            "ordinary",
+            Completeness::Incomplete,
+        )];
+        let second = fixture.reserve(&incomplete, Some(&plan), "owner-two").await;
+        assert_eq!(second.ordinary.skipped_covered, 1);
+        assert_eq!(second.skipped_incomplete_reasoning, 0);
+        assert_eq!(
+            claim_row(&fixture.conn, "synthetic-turn-0").await,
+            ("catalog_committed".to_owned(), 1, Some(1))
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reasoning_changed_incomplete_cannot_claim_covered() {
+        let fixture = ReasoningFixture::new().await;
+        let complete = vec![turn("synthetic-turn-0", "ordinary", Completeness::Complete)];
+        let plan = fixture.plan(&complete, vec![b"first wire".to_vec()]).await;
+        let first = fixture.reserve(&complete, Some(&plan), "owner-one").await;
+        fixture
+            .commit(&first.ordinary.reserved, &plan, "owner-one", "native-one")
+            .await;
+        let original = fixture.identity_text().await;
+        let incomplete = vec![
+            turn("synthetic-turn-0", "ordinary", Completeness::Incomplete),
+            turn("later-fresh", "new ordinary", Completeness::Complete),
+        ];
+        let changed = fixture
+            .plan(&incomplete, vec![b"changed wire".to_vec()])
+            .await;
+        let second = fixture
+            .reserve(&incomplete, Some(&changed), "owner-two")
+            .await;
+        assert_eq!(second.skipped_incomplete_reasoning, 1);
+        assert_eq!(second.ordinary.skipped_covered, 0);
+        assert!(second.ordinary.reserved.is_empty());
+        assert_eq!(
+            scalar(
+                &fixture.conn,
+                "SELECT COUNT(*) AS n FROM agent_coverage_claim"
+            )
+            .await,
+            1
+        );
+        assert_eq!(
+            scalar(&fixture.conn, "SELECT COUNT(*) AS n FROM agent_checkpoint").await,
+            1
+        );
+        assert_eq!(fixture.identity_text().await, original);
+        assert_eq!(
+            claim_row(&fixture.conn, "synthetic-turn-0").await,
+            ("catalog_committed".to_owned(), 1, Some(1))
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reasoning_identity_compare_observes_current_fence() {
+        let fixture = ReasoningFixture::new().await;
+        let turns = vec![turn("synthetic-turn-0", "ordinary", Completeness::Complete)];
+        let plan = fixture.plan(&turns, vec![b"same wire".to_vec()]).await;
+        let first = fixture.reserve(&turns, Some(&plan), "owner-one").await;
+        fixture
+            .commit(&first.ordinary.reserved, &plan, "owner-one", "native-one")
+            .await;
+        for column in ["revision", "fence_token"] {
+            fixture
+                .conn
+                .execute_unprepared(&format!(
+                    "UPDATE agent_coverage_claim SET {column} = {column} + 1"
+                ))
+                .await
+                .unwrap();
+            let outcome = fixture.reserve(&turns, Some(&plan), "owner-two").await;
+            assert_eq!(outcome.skipped_incomplete_reasoning, 1, "{column}");
+            assert_eq!(outcome.ordinary.skipped_covered, 0);
+            fixture
+                .conn
+                .execute_unprepared(&format!(
+                    "UPDATE agent_coverage_claim SET {column} = {column} - 1"
+                ))
+                .await
+                .unwrap();
+        }
+        fixture
+            .conn
+            .execute_unprepared(
+                "UPDATE agent_coverage_claim SET checkpoint_id = 'different-generation'",
+            )
+            .await
+            .unwrap();
+        let outcome = fixture.reserve(&turns, Some(&plan), "owner-two").await;
+        assert_eq!(outcome.skipped_incomplete_reasoning, 1);
+        assert_eq!(outcome.ordinary.skipped_covered, 0);
+        fixture
+            .conn
+            .execute_unprepared("UPDATE agent_coverage_claim SET checkpoint_id = 'native-one'")
+            .await
+            .unwrap();
+        fixture
+            .conn
+            .execute_unprepared("DELETE FROM agent_checkpoint")
+            .await
+            .unwrap();
+        let retained = fixture.reserve(&turns, Some(&plan), "owner-two").await;
+        assert_eq!(retained.skipped_incomplete_reasoning, 1);
+        assert_eq!(retained.ordinary.skipped_covered, 0);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reasoning_legacy_and_invalid_identity_preserve_partial_conflict_and_no_writes() {
+        use crate::internal::ai::observed_agents::reasoning::carrier_test_support as native;
+        for (incumbent, text, expect_conflict) in [
+            (Completeness::Complete, "ordinary", false),
+            (Completeness::Complete, "different ordinary", true),
+            (Completeness::Incomplete, "ordinary", false),
+        ] {
+            let fixture = ReasoningFixture::new().await;
+            let old = vec![turn("synthetic-turn-0", "ordinary", incumbent)];
+            let reservation = fixture.reserve(&old, None, "legacy-owner").await;
+            commit_reserved(
+                &fixture.conn,
+                native::CAPTURE,
+                "legacy-owner",
+                &reservation.ordinary.reserved[0],
+                "legacy-one",
+            )
+            .await
+            .unwrap();
+            let control = fixture.reserve(&old, None, "control-owner").await;
+            assert_eq!(control.ordinary.skipped_covered, 1);
+            let turns = vec![turn("synthetic-turn-0", text, Completeness::Complete)];
+            let plan = fixture
+                .plan(&turns, vec![b"private candidate".to_vec()])
+                .await;
+            let result = fixture.reserve(&turns, Some(&plan), "new-owner").await;
+            if expect_conflict {
+                assert_eq!(result.ordinary.conflicted, 1);
+                assert_eq!(result.skipped_incomplete_reasoning, 0);
+            } else if incumbent == Completeness::Incomplete {
+                assert_eq!(result.ordinary.reserved.len(), 1);
+                assert_eq!(result.ordinary.reserved[0].next_revision, 2);
+                assert_eq!(result.ordinary.reserved[0].fence_token, 2);
+            } else {
+                assert_eq!(result.skipped_incomplete_reasoning, 1);
+                assert_eq!(result.ordinary.skipped_covered, 0);
+                assert!(result.ordinary.reserved.is_empty());
+            }
+            assert_eq!(
+                scalar(&fixture.conn, "SELECT COUNT(*) AS n FROM agent_checkpoint").await,
+                1
+            );
+            assert_eq!(
+                scalar(&fixture.conn, "SELECT COUNT(*) AS n FROM object_index").await,
+                0
+            );
+            assert_eq!(
+                scalar(
+                    &fixture.conn,
+                    "SELECT COUNT(*) AS n FROM metadata_kv WHERE scope='agent_reasoning_identity'"
+                )
+                .await,
+                0
+            );
+        }
+
+        let fixture = ReasoningFixture::new().await;
+        let turns = vec![turn("synthetic-turn-0", "ordinary", Completeness::Complete)];
+        let plan = fixture.plan(&turns, vec![b"same wire".to_vec()]).await;
+        let first = fixture.reserve(&turns, Some(&plan), "owner-one").await;
+        fixture
+            .commit(&first.ordinary.reserved, &plan, "owner-one", "native-one")
+            .await;
+        let original = fixture.identity_text().await;
+        let without_plan = fixture.reserve(&turns, None, "no-plan-owner").await;
+        assert_eq!(without_plan.skipped_incomplete_reasoning, 1);
+        assert_eq!(without_plan.ordinary.skipped_covered, 0);
+
+        for variant in 0..5 {
+            let mut value: serde_json::Value = serde_json::from_str(&original).unwrap();
+            match variant {
+                0 => value["version"] = 2.into(),
+                1 => value["unknown"] = "private payload".into(),
+                2 => value["repository_id"] = "another-repository".into(),
+                3 => value["mac"] = format!("reasoning-record/hmac-v1/{}", "0".repeat(64)).into(),
+                _ => value = "wrong shape".into(),
+            }
+            MetadataKv::set_with_conn(
+                &fixture.conn,
+                MetadataScope::AgentReasoningIdentity,
+                native::CAPTURE,
+                ReasoningIdentitySessionMap::KEY,
+                &value.to_string(),
+                MetadataValueType::Text,
+            )
+            .await
+            .unwrap();
+            let rejected = fixture.reserve(&turns, Some(&plan), "bad-map-owner").await;
+            assert_eq!(
+                rejected.skipped_incomplete_reasoning, 1,
+                "variant {variant}"
+            );
+            assert_eq!(rejected.ordinary.skipped_covered, 0);
+            assert!(rejected.ordinary.reserved.is_empty());
+            assert_eq!(fixture.identity_text().await, value.to_string());
+        }
+        // Seed an oversized legacy/corrupt value below the metadata owner API
+        // so the bounded SQL reader is tested against data that can only be
+        // present after a prior buggy writer or direct database corruption.
+        let oversized =
+            "x".repeat(crate::internal::metadata::REASONING_IDENTITY_SESSION_MAP_MAX_BYTES + 1);
+        let updated = fixture
+            .conn
+            .execute_raw(Statement::from_sql_and_values(
+                fixture.conn.get_database_backend(),
+                "UPDATE metadata_kv SET value = ? WHERE scope = ? AND target = ? AND key = ?",
+                vec![
+                    oversized.clone().into(),
+                    MetadataScope::AgentReasoningIdentity.as_str().into(),
+                    native::CAPTURE.into(),
+                    ReasoningIdentitySessionMap::KEY.into(),
+                ],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(updated.rows_affected(), 1);
+        let rejected = fixture
+            .reserve(&turns, Some(&plan), "oversized-map-owner")
+            .await;
+        assert_eq!(rejected.skipped_incomplete_reasoning, 1);
+        assert_eq!(fixture.identity_text().await, oversized);
+
+        MetadataKv::set_with_conn(
+            &fixture.conn,
+            MetadataScope::AgentReasoningIdentity,
+            native::CAPTURE,
+            ReasoningIdentitySessionMap::KEY,
+            &original,
+            MetadataValueType::Text,
+        )
+        .await
+        .unwrap();
+        let storage = fixture.dir.path().join(crate::utils::util::ROOT_DIR);
+        let key_file = storage.join("private/agent-capture-dedup-v1.key");
+        std::fs::remove_file(&key_file).unwrap();
+        let error = reserve_turn_claims_with_reasoning(
+            &fixture.conn,
+            &fixture.scope,
+            native::CAPTURE,
+            &turns,
+            "missing-key-reader",
+            1,
+            CaptureReservationExecution::live(
+                CaptureCommitDeadline::from_budget(Duration::from_secs(30)).unwrap(),
+            ),
+            ReasoningCoverageInput::native(&plan),
+        )
+        .await
+        .err()
+        .expect("a reader cannot repair its lost key");
+        assert!(format!("{error:#}").contains("key is missing"));
+        assert!(!key_file.exists());
+        assert_eq!(fixture.identity_text().await, original);
+        assert_eq!(
+            scalar(&fixture.conn, "SELECT COUNT(*) AS n FROM agent_checkpoint").await,
+            1
+        );
+        assert_eq!(
+            claim_row(&fixture.conn, "synthetic-turn-0").await,
+            ("catalog_committed".to_owned(), 1, Some(1))
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reasoning_identity_difference_survives_conflict_redaction() {
+        let fixture = ReasoningFixture::new().await;
+        let mut incoming = turn(
+            "synthetic-turn-0",
+            "key AKIAIOSFODNN7EXAMPLE",
+            Completeness::Complete,
+        );
+        let mut incumbent = incoming.clone();
+        redact_turns_with_report(std::slice::from_mut(&mut incumbent));
+        assert_ne!(incumbent.digest_hex(), incoming.digest_hex());
+        let original = fixture
+            .plan(
+                std::slice::from_ref(&incumbent),
+                vec![b"first private wire".to_vec()],
+            )
+            .await;
+        let first = fixture
+            .reserve(
+                std::slice::from_ref(&incumbent),
+                Some(&original),
+                "owner-one",
+            )
+            .await;
+        fixture
+            .commit(
+                &first.ordinary.reserved,
+                &original,
+                "owner-one",
+                "native-one",
+            )
+            .await;
+        let changed = fixture
+            .plan(
+                std::slice::from_ref(&incoming),
+                vec![b"changed private wire".to_vec()],
+            )
+            .await;
+        let result = fixture
+            .reserve(std::slice::from_ref(&incoming), Some(&changed), "owner-two")
+            .await;
+        assert_eq!(result.ordinary.conflicted, 1);
+        assert_eq!(result.ordinary.skipped_covered, 0);
+        redact_turns_with_report(std::slice::from_mut(&mut incoming));
+        assert_eq!(incoming.digest_hex(), incumbent.digest_hex());
+        let evidence = fixture
+            .conn
+            .query_one_raw(Statement::from_string(
+                fixture.conn.get_database_backend(),
+                "SELECT incoming_digest, incoming_canonical_json FROM agent_coverage_conflict"
+                    .to_owned(),
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            evidence.try_get_by::<String, _>("incoming_digest").unwrap(),
+            incumbent.digest_hex()
+        );
+        let safe: String = evidence.try_get_by("incoming_canonical_json").unwrap();
+        assert!(!safe.contains("AKIAIOSFODNN7EXAMPLE"));
+        assert!(!safe.contains("private wire"));
+    }
 
     /// Codex M3 R2 P1-2: the export path must release DIRTY (retryable) only
     /// when it reserved nothing yet turns are held in flight by another writer,
@@ -2239,7 +4448,7 @@ mod tests {
         conn
     }
 
-    fn turn(key: &str, text: &str, completeness: Completeness) -> NormalizedTurn {
+    pub(crate) fn turn(key: &str, text: &str, completeness: Completeness) -> NormalizedTurn {
         NormalizedTurn {
             logical_turn_key: key.to_string(),
             ordinal: 0,

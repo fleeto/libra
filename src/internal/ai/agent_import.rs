@@ -34,7 +34,8 @@ use super::{
         },
         checkpoint::{
             CheckpointRedactedPayload, CheckpointStore, CheckpointWriteOutcome,
-            ImportedCheckpointWriteRequest, ImportedCheckpointWriter, TracesCheckpointStore,
+            ImportedCheckpointWriteRequest, ImportedCheckpointWriter, ReasoningCoveragePlan,
+            TracesCheckpointStore,
         },
         snapshot::{
             CaptureSnapshot, CaptureSnapshotPartialReason, CaptureSnapshotPolicy,
@@ -56,7 +57,10 @@ use super::{
 use crate::{
     internal::{
         ai::{
-            coverage_gate::{self, ImportIdentityCommit, LiveClaimCommitPlan, ReservedTurnClaim},
+            coverage_gate::{
+                self, ImportIdentityCommit, LiveCaptureClaimCommitPlan, LiveClaimCommitPlan,
+                ReasoningCoverageInput, ReservedTurnClaim,
+            },
             history::{self, TracesInflightMarker},
             hooks::{
                 LifecycleEvent, LifecycleEventKind,
@@ -3443,6 +3447,28 @@ pub(crate) async fn import_prepared_with_subagent_discovery(
     deadline: CaptureCommitDeadline,
     subagent_discovery: super::subagent_content::SubagentDiscovery,
 ) -> Result<DetailedImportSummary> {
+    import_prepared_with_reasoning_identity(
+        conn,
+        storage_root,
+        request,
+        deadline,
+        subagent_discovery,
+        None,
+    )
+    .await
+}
+
+/// Parent-owned typed identity handoff for a prepared import. Keeping it
+/// outside `ImportRequest` prevents serialized helper projections from
+/// asserting native provenance.
+pub(crate) async fn import_prepared_with_reasoning_identity(
+    conn: &DatabaseConnection,
+    storage_root: &std::path::Path,
+    request: ImportRequest,
+    deadline: CaptureCommitDeadline,
+    subagent_discovery: super::subagent_content::SubagentDiscovery,
+    reasoning_identity_plan: Option<ReasoningCoveragePlan>,
+) -> Result<DetailedImportSummary> {
     let monotonic_deadline = deadline.monotonic();
     // A prepared request can cross the private preparation-helper boundary or
     // be supplied by an embedding caller. Revalidate all durable time fields
@@ -3452,6 +3478,9 @@ pub(crate) async fn import_prepared_with_subagent_discovery(
     assert_v2_durable_import_request(&request)?;
     ensure_before_deadline(monotonic_deadline)?;
     let import_scope = capture_scope_for_request_until(conn, &request, monotonic_deadline).await?;
+    if let Some(reasoning) = reasoning_identity_plan.as_ref() {
+        reasoning.validate_for(&import_scope, &request.session_id, &request.turns)?;
+    }
     let owner = format!("import:{}:{}", std::process::id(), uuid::Uuid::new_v4());
     let started_ms = Utc::now().timestamp_millis();
     let lease = acquire_identity(conn, &request, &owner, started_ms, deadline).await?;
@@ -3469,7 +3498,18 @@ pub(crate) async fn import_prepared_with_subagent_discovery(
         .iter()
         .map(|turn| (*turn).clone())
         .collect::<Vec<_>>();
-    let reservation = coverage_gate::reserve_import_turn_claims_until(
+    let reasoning_reader = super::capture::checkpoint::ReasoningIdentityReadContext::new(
+        &import_scope,
+        &request.session_id,
+        storage_root,
+        &request.working_dir,
+        monotonic_deadline,
+    );
+    let reasoning_input = match reasoning_identity_plan.as_ref() {
+        Some(reasoning) => ReasoningCoverageInput::native(reasoning),
+        None => ReasoningCoverageInput::ordinary(&reasoning_reader),
+    };
+    let reservation = coverage_gate::reserve_import_turn_claims_with_reasoning_until(
         conn,
         &import_scope,
         &request.session_id,
@@ -3477,6 +3517,7 @@ pub(crate) async fn import_prepared_with_subagent_discovery(
         &lease.owner,
         started_ms,
         deadline,
+        reasoning_input,
     )
     .await;
     let outcome = match reservation {
@@ -3495,6 +3536,42 @@ pub(crate) async fn import_prepared_with_subagent_discovery(
             return Err(error);
         }
     };
+    if outcome.skipped_incomplete_reasoning != 0 {
+        // This is an observed partial source, not an all-covered import.
+        // The reservation owner has released every earlier batch. Do not
+        // capture child sources, build parent objects or advance a cursor.
+        if let Err(error) = finalize_noop_identity(
+            conn,
+            &request,
+            &lease,
+            "partial",
+            Some("LBR-AGENT-018"),
+            Utc::now().timestamp_millis(),
+            deadline,
+        )
+        .await
+        {
+            return Err(abandon_import_attempt_after_error(
+                conn, &request, &lease, None, "partial", error, deadline,
+            )
+            .await);
+        }
+        return Ok(DetailedImportSummary::new(
+            ImportSummary {
+                session_id: request.session_id,
+                agent_kind: request.agent_kind.as_db_str().to_string(),
+                turns_seen: request.turns.len(),
+                checkpoints_written: 0,
+                skipped_covered: outcome.ordinary.skipped_covered,
+                skipped_inflight: outcome.ordinary.skipped_inflight,
+                conflicted: outcome.ordinary.conflicted,
+                partial: true,
+            },
+            0,
+            &lease,
+        ));
+    }
+    let outcome = outcome.ordinary;
     if let Err(error) = ensure_before_deadline(monotonic_deadline) {
         let error = abandon_import_attempt_after_error(
             conn, &request, &lease, None, "failed", error, deadline,
@@ -3785,13 +3862,18 @@ pub(crate) async fn import_prepared_with_subagent_discovery(
                 }),
                 capture_scope: Some(import_scope.clone()),
             };
+            let commit_plan = LiveCaptureClaimCommitPlan::new(
+                plan,
+                reasoning_identity_plan.as_ref(),
+            )
+            .context("prepare imported reasoning identity transaction companion")?;
             let checkpoint_request = ImportedCheckpointWriteRequest::new(
                 &checkpoint_id,
                 &request.session_id,
                 request.agent_kind.as_db_str(),
                 parent_commit.as_deref(),
                 &checkpoint_payload,
-                &plan,
+                &commit_plan,
                 deadline,
             )
             .map_err(|error| anyhow!("prepare imported checkpoint write request: {error}"))?;
@@ -4128,6 +4210,388 @@ mod tests {
     /// before that authorization must roll back the provisional
     /// session/identity, attempt/claim/marker, and lifecycle catalog update
     /// instead of committing a late V2-visible mutation.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn reasoning_partial_outcome_reaches_actual_import_handler() {
+        use crate::internal::{
+            ai::{
+                capture::{
+                    checkpoint::{
+                        ReasoningIdentityPreparation, prepare_reasoning_coverage_plan,
+                        reasoning_coverage_test_payload,
+                    },
+                    key::load_capture_dedup_secret_with_mutation_deadline,
+                },
+                coverage_gate::{
+                    CaptureReservationExecution, ReasoningClaimCommitPlan, ReasoningCoverageInput,
+                    reserve_turn_claims_with_reasoning,
+                },
+                history::{TracesCommitCtx, TracesTxnExtra},
+                observed_agents::{SemanticRecord, reasoning::carrier_test_support as native},
+            },
+            metadata::ReasoningIdentitySessionMap,
+        };
+
+        // Real import orchestration and SQLite transactions over synthetic
+        // admitted Claude carrier evidence; this is not a provider archive
+        // positive and never enables the OpenCode native factory.
+        for fresh_count in [0usize, 1, 65] {
+            let dir = tempfile::tempdir().unwrap();
+            let storage = dir.path().join(util::ROOT_DIR);
+            std::fs::create_dir_all(storage.join("objects")).unwrap();
+            let conn = crate::internal::db::create_database(
+                &storage.join(util::DATABASE).to_string_lossy(),
+            )
+            .await
+            .unwrap();
+            crate::internal::workspace::RepoIdentity::resolve_or_init(&conn)
+                .await
+                .unwrap();
+            let scope = CaptureScope::main_for_connection(&conn).await.unwrap();
+            conn.execute_raw(Statement::from_sql_and_values(conn.get_database_backend(),
+                "INSERT INTO agent_session (session_id, agent_kind, provider_session_id, state, working_dir,
+                 metadata_json, started_at, last_event_at, sync_revision, repo_id, worktree_id, scope_state)
+                 VALUES (?, 'claude_code', ?, 'active', ?, '{}', 1, 1, 1, ?, '', 'scoped')",
+                [native::CAPTURE.into(), native::SOURCE.into(), dir.path().to_string_lossy().into_owned().into(), scope.repo_id.clone().into()],
+            )).await.unwrap();
+            load_capture_dedup_secret_with_mutation_deadline(&storage, None).unwrap();
+            let native_turn = NormalizedTurn {
+                logical_turn_key: "synthetic-turn-0".to_owned(),
+                ordinal: 0,
+                completeness: Completeness::Complete,
+                started_at: None,
+                ended_at: None,
+                records: vec![SemanticRecord::User {
+                    text: "ordinary parent".to_owned(),
+                }],
+            };
+            let turns = vec![native_turn.clone()];
+            let payload =
+                reasoning_coverage_test_payload(vec![b"synthetic private identity".to_vec()]);
+            let deadline = commit_deadline_after(Duration::from_secs(30));
+            let plan = prepare_reasoning_coverage_plan(
+                &payload,
+                ReasoningIdentityPreparation {
+                    conn: &conn,
+                    scope: &scope,
+                    storage_path: &storage,
+                    authorized_root: dir.path(),
+                    session_id: native::CAPTURE,
+                    provider: "claude_code",
+                    turns: &turns,
+                    deadline: deadline.monotonic(),
+                },
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            let reserved = reserve_turn_claims_with_reasoning(
+                &conn,
+                &scope,
+                native::CAPTURE,
+                &turns,
+                "live-before-import",
+                1,
+                CaptureReservationExecution::live(deadline),
+                ReasoningCoverageInput::native(&plan),
+            )
+            .await
+            .unwrap();
+            let companion = ReasoningClaimCommitPlan::new(
+                LiveClaimCommitPlan {
+                    source_channel: "live",
+                    session_id: native::CAPTURE.to_owned(),
+                    checkpoint_id: "synthetic-live-checkpoint".to_owned(),
+                    owner: "live-before-import".to_owned(),
+                    parent_commit: None,
+                    created_at: 1,
+                    now_ms: 1,
+                    claims: reserved.ordinary.reserved,
+                    import_session: None,
+                    import_identity: None,
+                    capture_scope: Some(scope.clone()),
+                },
+                &plan,
+            )
+            .unwrap();
+            let txn = sea_orm::TransactionTrait::begin(&conn).await.unwrap();
+            companion
+                .apply(
+                    &txn,
+                    &TracesCommitCtx {
+                        commit_hash: "synthetic-live-commit".to_owned(),
+                        tree_oid: "t".to_owned(),
+                        metadata_blob_oid: "m".to_owned(),
+                    },
+                )
+                .await
+                .unwrap();
+            txn.commit().await.unwrap();
+            let before = MetadataKv::get_with_conn(
+                &conn,
+                MetadataScope::AgentReasoningIdentity,
+                native::CAPTURE,
+                ReasoningIdentitySessionMap::KEY,
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .value;
+
+            let mut import_turns = vec![native_turn];
+            for index in 0..fresh_count {
+                import_turns.push(NormalizedTurn {
+                    logical_turn_key: format!("a-fresh-{index:03}"),
+                    ordinal: index + 1,
+                    completeness: Completeness::Complete,
+                    started_at: None,
+                    ended_at: None,
+                    records: vec![SemanticRecord::User {
+                        text: format!("fresh {index}"),
+                    }],
+                });
+            }
+            let commitment = format!("source/hmac-v2/{}", "a".repeat(64));
+            let mut request = ImportRequest {
+                agent_kind: AgentKind::ClaudeCode,
+                provider_session_id: native::SOURCE.to_owned(),
+                session_id: native::CAPTURE.to_owned(),
+                source_kind: "file".to_owned(),
+                source_id: commitment.clone(),
+                identity_schema_version: IMPORT_IDENTITY_SCHEMA_VERSION_V2,
+                content_digest: "synthetic-import-digest".to_owned(),
+                started_at: 1,
+                ended_at: 1,
+                session_state: "active".to_owned(),
+                stopped_at: None,
+                working_dir: dir.path().to_path_buf(),
+                repository_identity: IMPORT_DURABLE_IDENTITY_NOT_RETAINED.to_owned(),
+                capture_scope: Some(scope),
+                source_fingerprint: commitment,
+                existing_session_fingerprint: None,
+                redaction_report: serde_json::json!({
+                    "pipeline": "typed_allowlist",
+                    "raw_persisted": false,
+                    "matches": [],
+                    "bytes_scanned": 0,
+                    "bytes_redacted": 0,
+                }),
+                transcript_snapshot: None,
+                turn_boundaries: BTreeMap::new(),
+                turns: import_turns,
+            };
+            let existing = load_existing_session_ownership_in_scope(
+                &conn,
+                AgentKind::ClaudeCode,
+                native::SOURCE,
+                request.capture_scope.as_ref().unwrap(),
+            )
+            .await
+            .unwrap();
+            validate_scoped_prepared_existing_session(&mut request, existing.as_ref()).unwrap();
+            let deadline = commit_deadline_after(Duration::from_secs(30));
+            let discovery = super::super::subagent_content::SubagentDiscovery::default();
+            let result = if fresh_count == 0 {
+                import_prepared_with_reasoning_identity(
+                    &conn,
+                    &storage,
+                    request,
+                    deadline,
+                    discovery,
+                    Some(plan.clone()),
+                )
+                .await
+            } else {
+                import_prepared_with_subagent_discovery(
+                    &conn, &storage, request, deadline, discovery,
+                )
+                .await
+            }
+            .unwrap();
+            assert_eq!(result.summary.partial, fresh_count != 0);
+            assert_eq!(result.summary.turns_seen, fresh_count + 1);
+            assert_eq!(result.summary.checkpoints_written, 0);
+            assert_eq!(
+                result.summary.skipped_covered,
+                usize::from(fresh_count == 0)
+            );
+            assert_eq!(result.subagent_checkpoints_written, 0);
+            let row = conn.query_one_raw(Statement::from_sql_and_values(conn.get_database_backend(),
+                "SELECT state, committed_digest, next_ordinal, owner, attempt_checkpoint_id, last_error_code
+                 FROM agent_import_identity WHERE identity_id = ?", [result.import_identity_id.into()],
+            )).await.unwrap().unwrap();
+            let expected_state = if fresh_count == 0 {
+                "committed"
+            } else {
+                "partial"
+            };
+            assert_eq!(
+                row.try_get_by::<String, _>("state").unwrap(),
+                expected_state
+            );
+            assert_eq!(
+                row.try_get_by::<Option<String>, _>("committed_digest")
+                    .unwrap(),
+                (fresh_count == 0).then(|| "synthetic-import-digest".to_owned())
+            );
+            assert_eq!(
+                row.try_get_by::<i64, _>("next_ordinal").unwrap(),
+                i64::from(fresh_count == 0)
+            );
+            assert_eq!(row.try_get_by::<Option<String>, _>("owner").unwrap(), None);
+            assert_eq!(
+                row.try_get_by::<Option<String>, _>("attempt_checkpoint_id")
+                    .unwrap(),
+                None
+            );
+            assert_eq!(
+                row.try_get_by::<Option<String>, _>("last_error_code")
+                    .unwrap(),
+                (fresh_count != 0).then(|| "LBR-AGENT-018".to_owned())
+            );
+            for (query, expected) in [
+                ("SELECT COUNT(*) AS n FROM agent_checkpoint", 1i64),
+                ("SELECT COUNT(*) AS n FROM object_index", 0),
+                (
+                    "SELECT COUNT(*) AS n FROM agent_coverage_claim WHERE state='reserved_import'",
+                    0,
+                ),
+                (
+                    "SELECT COUNT(*) AS n FROM agent_coverage_claim WHERE state='catalog_committed'",
+                    1,
+                ),
+                ("SELECT COUNT(*) AS n FROM agent_coverage_revision", 1),
+                (
+                    "SELECT COUNT(*) AS n FROM metadata_kv WHERE scope IN ('agent_traces_inflight', 'agent_capture_pending', 'agent_capture_pending_chunk')",
+                    0,
+                ),
+            ] {
+                let n = conn
+                    .query_one_raw(Statement::from_string(
+                        conn.get_database_backend(),
+                        query.to_owned(),
+                    ))
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .try_get_by::<i64, _>("n")
+                    .unwrap();
+                assert_eq!(n, expected, "fresh_count {fresh_count}: {query}");
+            }
+            let after = MetadataKv::get_with_conn(
+                &conn,
+                MetadataScope::AgentReasoningIdentity,
+                native::CAPTURE,
+                ReasoningIdentitySessionMap::KEY,
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .value;
+            assert_eq!(before, after);
+            assert!(!after.contains("synthetic private identity"));
+            assert_eq!(
+                std::fs::read_dir(storage.join("objects")).unwrap().count(),
+                0
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reasoning_import_reservation_uses_source_identity() {
+        use crate::internal::ai::{
+            capture_scope::CaptureCommitDeadline,
+            coverage_gate::{
+                LiveCaptureClaimCommitPlan, LiveClaimCommitPlan, ReasoningCoverageInput,
+                tests::{ReasoningFixture, turn},
+            },
+            history::{TracesCommitCtx, TracesTxnExtra},
+            observed_agents::coverage::Completeness,
+        };
+
+        let fixture = ReasoningFixture::new().await;
+        let turn = turn(
+            "synthetic-turn-0",
+            "ordinary transcript turn",
+            Completeness::Complete,
+        );
+        let plan = fixture
+            .plan(
+                std::slice::from_ref(&turn),
+                vec![b"synthetic native identity for import".to_vec()],
+            )
+            .await;
+        let first =
+            crate::internal::ai::coverage_gate::reserve_import_turn_claims_with_reasoning_until(
+                &fixture.conn,
+                &fixture.scope,
+                crate::internal::ai::observed_agents::reasoning::carrier_test_support::CAPTURE,
+                std::slice::from_ref(&turn),
+                "import-native-owner",
+                10,
+                CaptureCommitDeadline::from_budget(Duration::from_secs(30)).unwrap(),
+                ReasoningCoverageInput::native(&plan),
+            )
+            .await
+            .unwrap();
+        assert_eq!(first.skipped_incomplete_reasoning, 0);
+        assert_eq!(first.ordinary.reserved.len(), 1);
+
+        let checkpoint = "import-native-checkpoint";
+        let companion = LiveCaptureClaimCommitPlan::new(
+            LiveClaimCommitPlan {
+                source_channel: "import",
+                session_id:
+                    crate::internal::ai::observed_agents::reasoning::carrier_test_support::CAPTURE
+                        .to_owned(),
+                checkpoint_id: checkpoint.to_owned(),
+                owner: "import-native-owner".to_owned(),
+                parent_commit: None,
+                created_at: 10,
+                now_ms: 10,
+                claims: first.ordinary.reserved,
+                import_session: None,
+                import_identity: None,
+                capture_scope: Some(fixture.scope.clone()),
+            },
+            Some(&plan),
+        )
+        .unwrap();
+        let txn = sea_orm::TransactionTrait::begin(&fixture.conn)
+            .await
+            .unwrap();
+        TracesTxnExtra::apply(
+            &companion,
+            &txn,
+            &TracesCommitCtx {
+                commit_hash: "import-native-commit".to_owned(),
+                tree_oid: "tree".to_owned(),
+                metadata_blob_oid: "metadata".to_owned(),
+            },
+        )
+        .await
+        .unwrap();
+        txn.commit().await.unwrap();
+
+        let redelivery =
+            crate::internal::ai::coverage_gate::reserve_import_turn_claims_with_reasoning_until(
+                &fixture.conn,
+                &fixture.scope,
+                crate::internal::ai::observed_agents::reasoning::carrier_test_support::CAPTURE,
+                std::slice::from_ref(&turn),
+                "import-native-redelivery",
+                20,
+                CaptureCommitDeadline::from_budget(Duration::from_secs(30)).unwrap(),
+                ReasoningCoverageInput::native(&plan),
+            )
+            .await
+            .unwrap();
+        assert_eq!(redelivery.skipped_incomplete_reasoning, 0);
+        assert_eq!(redelivery.ordinary.skipped_covered, 1);
+        assert!(redelivery.ordinary.reserved.is_empty());
+    }
+
     #[tokio::test]
     async fn final_fence_deadline_rolls_back_import_identity_attempt_and_lifecycle_mutations() {
         let dir = tempfile::tempdir().expect("create final-fence deadline import fixture");

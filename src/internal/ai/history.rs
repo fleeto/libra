@@ -4897,6 +4897,23 @@ impl HistoryManager {
             crate::internal::ai::capture::pending::erase_session_artifacts(&txn, session_id)
                 .await
                 .context("remove private capture recovery artifacts during session erasure")?;
+        if provider_identity.is_some() {
+            // The existing local session is the deletion authority. Neither
+            // map decoding nor a private key is needed; unknown owners stay
+            // untouched. This deletion rolls back with the catalog deletion.
+            txn.execute_raw(Statement::from_sql_and_values(
+                backend,
+                "DELETE FROM metadata_kv WHERE scope = ? AND target = ?",
+                [
+                    crate::internal::metadata::MetadataScope::AgentReasoningIdentity
+                        .as_str()
+                        .into(),
+                    session_id.into(),
+                ],
+            ))
+            .await
+            .context("remove private reasoning identity during session erasure")?;
+        }
         let deleted = txn
             .execute_raw(Statement::from_sql_and_values(
                 backend,
@@ -7221,6 +7238,483 @@ mod tests {
             keyless_layout,
             "keyless erasure must not create new top-level private key storage"
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reasoning_identity_session_erasure_is_tombstone_fenced_and_atomic() {
+        use crate::internal::{
+            ai::{
+                capture::{
+                    checkpoint::{
+                        ReasoningIdentityPreparation, prepare_reasoning_coverage_plan,
+                        reasoning_coverage_test_payload,
+                    },
+                    key,
+                },
+                capture_scope::{CaptureCommitDeadline, CaptureScope},
+                coverage_gate::{
+                    CaptureReservationExecution, LiveClaimCommitPlan, ReasoningClaimCommitPlan,
+                    reserve_turn_claims_with_reasoning,
+                },
+                observed_agents::{
+                    Completeness, NormalizedTurn, SemanticRecord,
+                    reasoning::carrier_test_support as native,
+                },
+            },
+            metadata::{MetadataKv, MetadataScope, MetadataValueType},
+        };
+        let root = tempdir().unwrap();
+        let repo = root.path().join(".libra");
+        std::fs::create_dir_all(repo.join("objects")).unwrap();
+        let conn = crate::internal::db::create_database(repo.join("libra.db").to_str().unwrap())
+            .await
+            .unwrap();
+        crate::internal::workspace::RepoIdentity::resolve_or_init(&conn)
+            .await
+            .unwrap();
+        let scope = CaptureScope::resolve(&conn, root.path()).await.unwrap();
+        for (session, provider) in [
+            (native::CAPTURE, native::SOURCE),
+            ("claude__other-identity", "other-identity"),
+        ] {
+            conn.execute_raw(Statement::from_sql_and_values(conn.get_database_backend(),
+                "INSERT INTO agent_session (session_id, agent_kind, provider_session_id, state, working_dir,
+                 metadata_json, started_at, last_event_at, sync_revision, repo_id, worktree_id, scope_state)
+                 VALUES (?, 'claude_code', ?, 'active', ?, '{}', 1, 1, 1, ?, '', 'scoped')",
+                [session.into(), provider.into(), root.path().to_string_lossy().into_owned().into(), scope.repo_id.clone().into()]
+            )).await.unwrap();
+        }
+        key::load_capture_dedup_secret_with_mutation_deadline(&repo, None).unwrap();
+        let payload = reasoning_coverage_test_payload(vec![b"private wire".to_vec()]);
+        let turns = vec![NormalizedTurn {
+            logical_turn_key: "synthetic-turn-0".to_owned(),
+            ordinal: 0,
+            completeness: Completeness::Complete,
+            started_at: None,
+            ended_at: None,
+            records: vec![SemanticRecord::User {
+                text: "ordinary".to_owned(),
+            }],
+        }];
+        let deadline =
+            CaptureCommitDeadline::from_budget(std::time::Duration::from_secs(30)).unwrap();
+        let plan = prepare_reasoning_coverage_plan(
+            &payload,
+            ReasoningIdentityPreparation {
+                conn: &conn,
+                scope: &scope,
+                storage_path: &repo,
+                authorized_root: root.path(),
+                session_id: native::CAPTURE,
+                provider: "claude_code",
+                turns: &turns,
+                deadline: deadline.monotonic(),
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let reserved = reserve_turn_claims_with_reasoning(
+            &conn,
+            &scope,
+            native::CAPTURE,
+            &turns,
+            "late-identity-writer",
+            1,
+            CaptureReservationExecution::live(deadline),
+            crate::internal::ai::coverage_gate::ReasoningCoverageInput::native(&plan),
+        )
+        .await
+        .unwrap();
+        assert_eq!(reserved.ordinary.reserved.len(), 1);
+        let late = ReasoningClaimCommitPlan::new(
+            LiveClaimCommitPlan {
+                source_channel: "live",
+                session_id: native::CAPTURE.to_owned(),
+                checkpoint_id: "late-checkpoint".to_owned(),
+                owner: "late-identity-writer".to_owned(),
+                parent_commit: None,
+                created_at: 1,
+                now_ms: 1,
+                claims: reserved.ordinary.reserved,
+                import_session: None,
+                import_identity: None,
+                capture_scope: Some(scope.clone()),
+            },
+            &plan,
+        )
+        .unwrap();
+        for session in [
+            native::CAPTURE,
+            "claude__other-identity",
+            "unknown-identity-owner",
+        ] {
+            MetadataKv::set_with_conn(
+                &conn,
+                MetadataScope::AgentReasoningIdentity,
+                session,
+                "identity-v1",
+                "corrupt private identity retained for keyless deletion",
+                MetadataValueType::Text,
+            )
+            .await
+            .unwrap();
+        }
+        let key_file = repo.join("private/agent-capture-dedup-v1.key");
+        std::fs::remove_file(&key_file).unwrap();
+        let layout = || {
+            std::fs::read_dir(repo.join("private"))
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect::<HashSet<_>>()
+        };
+        let keyless_layout = layout();
+        let storage: Arc<dyn Storage + Send + Sync> =
+            Arc::new(LocalStorage::new(repo.join("objects")));
+        let history = HistoryManager::for_traces(storage, repo.clone(), Arc::new(conn.clone()));
+        conn.execute_unprepared("CREATE TRIGGER fail_identity_erase BEFORE DELETE ON agent_session BEGIN SELECT RAISE(ABORT, 'injected catalog erasure failure'); END").await.unwrap();
+        assert!(history.erase_session_local(native::CAPTURE).await.is_err());
+        assert!(
+            MetadataKv::get_with_conn(
+                &conn,
+                MetadataScope::AgentReasoningIdentity,
+                native::CAPTURE,
+                "identity-v1"
+            )
+            .await
+            .unwrap()
+            .is_some(),
+            "the preceding identity deletion must roll back with the failed catalog deletion"
+        );
+        conn.execute_unprepared("DROP TRIGGER fail_identity_erase")
+            .await
+            .unwrap();
+        assert!(
+            history
+                .erase_session_local(native::CAPTURE)
+                .await
+                .unwrap()
+                .session_deleted
+        );
+        assert!(
+            MetadataKv::get_with_conn(
+                &conn,
+                MetadataScope::AgentReasoningIdentity,
+                native::CAPTURE,
+                "identity-v1"
+            )
+            .await
+            .unwrap()
+            .is_none()
+        );
+        for session in ["claude__other-identity", "unknown-identity-owner"] {
+            assert!(
+                MetadataKv::get_with_conn(
+                    &conn,
+                    MetadataScope::AgentReasoningIdentity,
+                    session,
+                    "identity-v1"
+                )
+                .await
+                .unwrap()
+                .is_some()
+            );
+        }
+        assert!(
+            !history
+                .erase_session_local("unknown-identity-owner")
+                .await
+                .unwrap()
+                .session_deleted
+        );
+        assert!(
+            MetadataKv::get_with_conn(
+                &conn,
+                MetadataScope::AgentReasoningIdentity,
+                "unknown-identity-owner",
+                "identity-v1"
+            )
+            .await
+            .unwrap()
+            .is_some()
+        );
+        let txn = sea_orm::TransactionTrait::begin(&conn).await.unwrap();
+        assert!(
+            late.apply(
+                &txn,
+                &TracesCommitCtx {
+                    commit_hash: "late-traces-commit".to_owned(),
+                    tree_oid: "late-tree".to_owned(),
+                    metadata_blob_oid: "late-metadata".to_owned(),
+                }
+            )
+            .await
+            .is_err(),
+            "a tombstoned late writer must not recreate private identity"
+        );
+        txn.rollback().await.unwrap();
+        assert!(
+            MetadataKv::get_with_conn(
+                &conn,
+                MetadataScope::AgentReasoningIdentity,
+                native::CAPTURE,
+                "identity-v1"
+            )
+            .await
+            .unwrap()
+            .is_none()
+        );
+        assert!(!key_file.exists());
+        assert_eq!(layout(), keyless_layout);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reasoning_identity_retention_observes_valid_claims() {
+        use std::sync::Arc;
+
+        use super::HistoryManager;
+        use crate::internal::{
+            ai::{
+                coverage_gate::tests::{ReasoningFixture, turn},
+                observed_agents::coverage::Completeness,
+            },
+            metadata::{MetadataKv, MetadataScope, ReasoningIdentitySessionMap},
+        };
+
+        for prune_identity_checkpoint in [false, true] {
+            let fixture = ReasoningFixture::new().await;
+            let turn = turn(
+                "synthetic-turn-0",
+                "ordinary turn with retained identity",
+                Completeness::Complete,
+            );
+            let plan = fixture
+                .plan(
+                    std::slice::from_ref(&turn),
+                    vec![b"synthetic retained identity".to_vec()],
+                )
+                .await;
+            let reserved = fixture
+                .reserve(std::slice::from_ref(&turn), Some(&plan), "retention-owner")
+                .await;
+            fixture
+                .commit(
+                    &reserved.ordinary.reserved,
+                    &plan,
+                    "retention-owner",
+                    "retention-identity-checkpoint",
+                )
+                .await;
+            let checkpoint_oid = "a".repeat(40);
+            let metadata_oid = "b".repeat(40);
+            let commit_oid = "c".repeat(40);
+            fixture
+                .conn
+                .execute_raw(Statement::from_sql_and_values(
+                    fixture.conn.get_database_backend(),
+                    "UPDATE agent_checkpoint SET tree_oid = ?, metadata_blob_oid = ?, traces_commit = ?
+                     WHERE checkpoint_id = 'retention-identity-checkpoint'",
+                    [
+                        checkpoint_oid.clone().into(),
+                        metadata_oid.clone().into(),
+                        commit_oid.clone().into(),
+                    ],
+                ))
+                .await
+                .unwrap();
+
+            let storage_root = fixture.dir.path().join(crate::utils::util::ROOT_DIR);
+            let storage = Arc::new(crate::utils::storage::local::LocalStorage::new(
+                storage_root.join("objects"),
+            ));
+            let history =
+                HistoryManager::for_traces(storage, storage_root, Arc::new(fixture.conn.clone()));
+            let prune_id = if prune_identity_checkpoint {
+                "retention-identity-checkpoint"
+            } else {
+                fixture
+                    .conn
+                    .execute_raw(Statement::from_sql_and_values(
+                        fixture.conn.get_database_backend(),
+                        "INSERT INTO agent_checkpoint (
+                            checkpoint_id, session_id, parent_checkpoint_id, scope,
+                            parent_commit, tree_oid, metadata_blob_oid, traces_commit,
+                            tool_use_id, subagent_session_id, description, created_at
+                         ) VALUES (?, ?, NULL, 'committed', NULL, ?, ?, ?,
+                                   NULL, NULL, NULL, 2)",
+                        [
+                            "unrelated-retention-checkpoint".into(),
+                            crate::internal::ai::observed_agents::reasoning::carrier_test_support::CAPTURE
+                                .into(),
+                            checkpoint_oid.into(),
+                            metadata_oid.into(),
+                            commit_oid.into(),
+                        ],
+                    ))
+                    .await
+                    .unwrap();
+                "unrelated-retention-checkpoint"
+            };
+            let outcome = history
+                .prune_checkpoint_commits(&[prune_id.to_owned()])
+                .await
+                .unwrap();
+            assert_eq!(outcome.removed_checkpoints, 1);
+            assert!(
+                MetadataKv::get_with_conn(
+                    &fixture.conn,
+                    MetadataScope::AgentReasoningIdentity,
+                    crate::internal::ai::observed_agents::reasoning::carrier_test_support::CAPTURE,
+                    ReasoningIdentitySessionMap::KEY,
+                )
+                .await
+                .unwrap()
+                .is_some(),
+                "retention must not delete the private identity map"
+            );
+
+            let after = fixture
+                .reserve(
+                    std::slice::from_ref(&turn),
+                    Some(&plan),
+                    "retention-redelivery",
+                )
+                .await;
+            if prune_identity_checkpoint {
+                assert_eq!(after.ordinary.skipped_covered, 0);
+                assert_eq!(after.ordinary.reserved.len(), 1);
+            } else {
+                assert_eq!(after.ordinary.skipped_covered, 1);
+                assert!(after.ordinary.reserved.is_empty());
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reasoning_identity_is_absent_from_checkpoint_export() {
+        use super::CheckpointScope;
+        use crate::internal::{
+            ai::{
+                capture::checkpoint::{
+                    CheckpointStore, CheckpointWriteOutcome, CheckpointWriteRequest,
+                    TracesCheckpointStore, reasoning_coverage_test_payload,
+                },
+                coverage_gate::{
+                    LiveCaptureClaimCommitPlan, LiveClaimCommitPlan,
+                    tests::{ReasoningFixture, turn},
+                },
+                observed_agents::{
+                    coverage::Completeness, reasoning::carrier_test_support as native,
+                },
+            },
+            metadata::{MetadataKv, MetadataScope, ReasoningIdentitySessionMap},
+        };
+
+        let fixture = ReasoningFixture::new().await;
+        let storage_root = fixture.dir.path().join(crate::utils::util::ROOT_DIR);
+        let checkpoint_id = "reasoning-export-private-boundary";
+        let private_canary = b"private-identity-canary";
+        let turn = turn(
+            "synthetic-turn-0",
+            "ordinary exported turn",
+            Completeness::Complete,
+        );
+        let payload = reasoning_coverage_test_payload(vec![private_canary.to_vec()]);
+        let plan = fixture
+            .plan(std::slice::from_ref(&turn), vec![private_canary.to_vec()])
+            .await;
+        let reserved = fixture
+            .reserve(std::slice::from_ref(&turn), Some(&plan), "export-owner")
+            .await;
+        let companion = LiveCaptureClaimCommitPlan::new(
+            LiveClaimCommitPlan {
+                source_channel: "live",
+                session_id: native::CAPTURE.to_owned(),
+                checkpoint_id: checkpoint_id.to_owned(),
+                owner: "export-owner".to_owned(),
+                parent_commit: None,
+                created_at: 1,
+                now_ms: 1,
+                claims: reserved.ordinary.reserved,
+                import_session: None,
+                import_identity: None,
+                capture_scope: Some(fixture.scope.clone()),
+            },
+            Some(&plan),
+        )
+        .unwrap();
+        let store = TracesCheckpointStore::new(
+            &fixture.conn,
+            &storage_root,
+            native::CAPTURE,
+            checkpoint_id,
+            &[],
+        )
+        .unwrap()
+        .with_capture_scope(fixture.scope.clone());
+        let request = CheckpointWriteRequest::new(
+            "reasoning-export-key",
+            checkpoint_id,
+            native::CAPTURE,
+            "claude_code",
+            None,
+            CheckpointScope::Committed,
+            store.marker_generation(),
+            None,
+            &payload,
+            Some(&companion),
+            None,
+        )
+        .unwrap();
+        assert!(matches!(
+            store.write(request).await.unwrap(),
+            CheckpointWriteOutcome::Written { .. }
+        ));
+        let identity = MetadataKv::get_with_conn(
+            &fixture.conn,
+            MetadataScope::AgentReasoningIdentity,
+            native::CAPTURE,
+            ReasoningIdentitySessionMap::KEY,
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .value;
+        assert!(!identity.contains("private-identity-canary"));
+
+        let spec = crate::internal::ai::checkpoint_reader::resolve_fresh_checkpoint_input(
+            &storage_root,
+            checkpoint_id,
+        )
+        .await
+        .unwrap();
+        let output = fixture.dir.path().join("public-checkpoint-export");
+        let materialized = crate::internal::ai::checkpoint_input::materialize_checkpoint_input(
+            &storage_root,
+            &spec,
+            &output,
+        )
+        .unwrap();
+        let mut pending = vec![materialized];
+        while let Some(directory) = pending.pop() {
+            for entry in std::fs::read_dir(directory).unwrap() {
+                let entry = entry.unwrap();
+                if entry.file_type().unwrap().is_dir() {
+                    pending.push(entry.path());
+                } else {
+                    let bytes = std::fs::read(entry.path()).unwrap();
+                    assert!(
+                        !bytes
+                            .windows(private_canary.len())
+                            .any(|w| w == private_canary)
+                    );
+                    assert!(!String::from_utf8_lossy(&bytes).contains("agent_reasoning_identity"));
+                }
+            }
+        }
     }
 
     #[test]

@@ -2302,6 +2302,7 @@ impl TracesTxnExtra for LiveClaimCommitPlan {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    #[cfg(unix)]
     use chrono::Utc;
     use sea_orm::Database;
 

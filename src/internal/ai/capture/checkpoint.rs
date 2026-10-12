@@ -750,7 +750,7 @@ pub(crate) struct ReasoningIdentityPreparation<'a> {
 /// checksums, transport nonces, claim fences and checkpoint generations never
 /// enter this stable content descriptor. Those fences authenticate the later
 /// private record instead. Every budget is checked before any reservation.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) async fn prepare_reasoning_coverage_plan(
     payload: &CheckpointRedactedPayload,
     request: ReasoningIdentityPreparation<'_>,

@@ -3592,6 +3592,7 @@ pub(crate) mod tests {
         .await
     }
 
+    #[cfg(unix)]
     async fn deliver_without_deadline(
         conn: &sea_orm::DatabaseConnection,
         repo: &std::path::Path,

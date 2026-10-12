@@ -54,28 +54,61 @@ jobs:
         run: RUSTDOCFLAGS="-D rustdoc::broken_intra_doc_links" cargo doc --no-deps --all-features
 
   owner-liveness-macos:
-    # plan-20260714 W1 (§C.9): the operation claim decides whether a control
-    # action's owner is dead by proving it — boot id + PID namespace on Linux,
-    # host UUID + boot time on macOS. The macOS branch has no other coverage,
-    # and a failure there does not make claims unsafe, it makes them
-    # unreclaimable: a killed command would hold its worktree's control slot
-    # until the row is cleared by hand. These five tests are the proof that the
-    # platform-specific reads work where they run.
+    # Current OS-backed scope leases and session append-lock ABA protection.
+    # The old claim_owner_tests module was removed; a zero-test green Cargo
+    # invocation is not safety evidence. Each selected case must actually run.
     name: compat-owner-liveness-macos
     runs-on: macos-latest
-
+    timeout-minutes: 60
+    permissions:
+      contents: read
     env:
       CARGO_TERM_COLOR: always
-
+      RUSTFLAGS: "-D warnings"
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
         with:
           submodules: recursive
-
-      - name: Run the claim-owner liveness tests
-        run: cargo test --lib -- claim_owner_tests --test-threads=1
-
+          persist-credentials: false
+      - name: Run current exact macOS owner safety tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          fixtures=(
+            'internal::operation::middleware::lease_tests::same_scope_second_operation_refuses_before_callback'
+            'internal::operation::middleware::lease_tests::linked_scope_operation_runs_while_main_scope_is_held'
+            'internal::operation::middleware::lease_tests::another_process_holding_scope_lock_is_a_prompt_refusal'
+            'internal::operation::middleware::lease_tests::cancelled_scope_waiter_does_not_strand_blocking_work'
+            'internal::operation::middleware::lease_tests::cancelling_a_started_operation_releases_its_scope_lease'
+            'internal::operation::middleware::lease_tests::released_scope_lease_can_be_acquired_again'
+            'internal::operation::middleware::lease_tests::lease_open_error_preserves_resource_and_os_cause'
+            'internal::operation::middleware::lease_tests::acquiring_a_lease_does_not_append_to_existing_lock_contents'
+            'internal::operation::middleware::lease_tests::operation_scope_lock_honors_shared_group_permissions'
+            'internal::operation::middleware::lease_tests::symlink_lock_leaf_is_rejected_without_writing_its_target'
+            'internal::operation::middleware::lease_tests::symlink_info_directory_is_rejected_without_creating_external_lock'
+            'internal::operation::middleware::lease_tests::fifo_lock_leaf_is_rejected_without_waiting_for_a_reader'
+            'internal::ai::session::jsonl::tests::code_workflow_append_lock_uses_os_liveness_without_aba'
+          )
+          for fixture in "${fixtures[@]}"; do
+            log_file=$(mktemp "$RUNNER_TEMP/libra-owner-test.XXXXXX")
+            cargo test --locked --lib "$fixture" -- --exact --test-threads=1 --color never 2>&1 | tee "$log_file"
+            python3 - "$fixture" "$log_file" <<'PYTHON'
+          import pathlib
+          import re
+          import sys
+          fixture, log_file = sys.argv[1:]
+          output = pathlib.Path(log_file).read_text()
+          case = re.escape(fixture)
+          if len(re.findall(r"^test " + case + r" \.\.\. ok$", output, re.MULTILINE)) != 1:
+              raise SystemExit("macOS safety fixture did not run exactly once and pass: " + fixture)
+          summary = r"^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out;.*$"
+          if len(re.findall(summary, output, re.MULTILINE)) != 1:
+              raise SystemExit("macOS safety fixture has no valid nonzero result: " + fixture)
+          print("MACOS_SAFETY_EXACT_PASS " + fixture)
+          PYTHON
+            rm -f "$log_file"
+          done
 
   scoped-input-windows:
     # FIX-RG-SCOPED-04: execute the four active bounded/static-no-follow

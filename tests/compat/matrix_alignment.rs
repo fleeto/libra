@@ -409,3 +409,132 @@ fn compatibility_governance_roadmap_marks_current_surfaces_without_batch_status(
         );
     }
 }
+// A successful Cargo process can select zero tests. Exercise the workflow's
+// actual shell step with a private stub rather than accepting its exit alone.
+fn macos_owner_safety_step(workflow: &str) -> String {
+    let job = workflow
+        .split_once("  owner-liveness-macos:\n")
+        .expect("macOS safety job must remain registered")
+        .1
+        .split_once("\n\n  scoped-input-windows:")
+        .expect("macOS job must end before the independent Windows job")
+        .0;
+    assert!(job.contains("name: compat-owner-liveness-macos"));
+    assert!(job.contains("runs-on: macos-latest"));
+    let step = job
+        .split_once("        run: |\n")
+        .expect("bounded exact test step")
+        .1;
+    step.lines()
+        .map(|line| {
+            line.strip_prefix("          ")
+                .expect("shell step indentation")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n"
+}
+
+#[test]
+fn macos_owner_liveness_workflow_selects_current_exact_tests() {
+    let workflow = read_repo_file(".github/workflows/base.yml");
+    let step = macos_owner_safety_step(&workflow);
+    assert!(!step.contains("claim_owner_tests"));
+    let fixtures = step
+        .lines()
+        .filter_map(|line| {
+            line.trim()
+                .strip_prefix('\'')
+                .and_then(|name| name.strip_suffix('\''))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(fixtures.len(), 13);
+    assert_eq!(
+        fixtures
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        13
+    );
+    let lease_source = read_repo_file("src/internal/operation/middleware/lease_tests.rs");
+    let append_source = read_repo_file("src/internal/ai/session/jsonl.rs");
+    for fixture in fixtures {
+        let (module, name) = fixture.rsplit_once("::").expect("exact qualified case");
+        let source = match module {
+            "internal::operation::middleware::lease_tests" => &lease_source,
+            "internal::ai::session::jsonl::tests" => &append_source,
+            other => panic!("unreviewed macOS safety test module: {other}"),
+        };
+        assert!(
+            source.contains(&format!("fn {name}(")),
+            "missing real test {fixture}"
+        );
+        assert_ne!(
+            name, "supervised_lease_child",
+            "helper is not safety acceptance"
+        );
+    }
+    assert!(step.contains("set -euo pipefail"));
+    assert!(step.contains(
+        "cargo test --locked --lib \"$fixture\" -- --exact --test-threads=1 --color never"
+    ));
+}
+
+#[cfg(unix)]
+#[test]
+fn macos_owner_liveness_rejects_zero_wrong_ignored_and_failed_test_runs() {
+    use std::{os::unix::fs::PermissionsExt, process::Command};
+
+    let step = macos_owner_safety_step(&read_repo_file(".github/workflows/base.yml"));
+    let dir = tempfile::tempdir().expect("private workflow fixture");
+    let cargo = dir.path().join("cargo");
+    fs::write(&cargo, r#"#!/bin/bash
+set -eu
+fixture="$4"
+case "$CASE" in
+  zero)
+    printf 'running 0 tests\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4089 filtered out; finished in 0.00s\n'
+    exit 0 ;;
+  wrong) fixture='some_other_test' ;;
+  ignored)
+    printf 'running 1 test\ntest %s ... ignored\ntest result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 4088 filtered out; finished in 0.00s\n' "$fixture"
+    exit 0 ;;
+esac
+printf 'running 1 test\ntest %s ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4088 filtered out; finished in 0.00s\n' "$fixture"
+if [ "$CASE" = failed ]; then exit 9; fi
+"#).expect("write private Cargo stub");
+    fs::set_permissions(&cargo, fs::Permissions::from_mode(0o700)).expect("executable stub");
+    let script = dir.path().join("step.sh");
+    fs::write(&script, step).expect("workflow step fixture");
+    let path = format!(
+        "{}:{}",
+        dir.path().display(),
+        std::env::var("PATH").expect("host PATH")
+    );
+    for case in ["pass", "zero", "wrong", "ignored", "failed"] {
+        let output = Command::new("/bin/bash")
+            .arg(&script)
+            .env_clear()
+            .env("PATH", &path)
+            .env("RUNNER_TEMP", dir.path())
+            .env("CASE", case)
+            .output()
+            .expect("execute private workflow step");
+        assert_eq!(
+            output.status.success(),
+            case == "pass",
+            "workflow incorrectly accepted {case}: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        if case == "pass" {
+            assert_eq!(
+                String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .filter(|line| line.starts_with("MACOS_SAFETY_EXACT_PASS "))
+                    .count(),
+                13
+            );
+        }
+    }
+}

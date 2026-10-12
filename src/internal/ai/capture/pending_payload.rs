@@ -246,6 +246,7 @@ impl PendingPayloadProjection {
     }
 
     #[cfg(test)]
+    #[cfg(unix)]
     pub(crate) fn with_synthetic_reasoning(
         self,
         batch: &NativeProvenReasoning,

@@ -1613,4 +1613,8 @@ OG-17 closed pending reasoning v2 codec 的27 AC及19具名exact VER已在隔离
 
 ## 2026-10-13 OG-21 本机局部门及已审源码交接
 
+源码与本卡证据已在signed+DCO提交`44322f1af9fddac8894b78a971c8e9c6b19ad84c`直接Push main，`libra ls-remote origin refs/heads/main`当时核远端同SHA；该次Push后工作区剩余仅原有`plan-20260904.md`和`plan-20260905.md`未暂存改动。本卡未独立bump/tag/Release，下一卡OG-22负责唯一patch发布。
+
+后续exact-head Windows scoped-input job `115031088133` 对`44322f1`实际FAIL（测试专用`catalog.rs::persist_pending_artifact`在Windows lib-test触发dead_code）。已将该方法限定`cfg(all(test, unix))`，macOS精确测试1/1、fmt、严格Clippy与diff check通过，Claude Code聚焦复审`PASS`且P0/P1/P2均为0；签名DCO修复`b00a2274b540a30f5ac1d6383ffa4469e6528ce0`已直接Push main并核远端SHA。新Windows CI待结果；旧失败和被中止的修复前全量(exit130，未进入最终用例运行)均不计通过。正式进度不变，OG-22最终全量须在包含修复的树重跑。
+
 OG-21 的67/67 AC与33条具名exact VER在隔离最终候选逐项实际1/1 PASS（注入根仓`.env.test`后重跑33/33仍1/1）；reasoning group 141/141、architecture 54/54、docs 30/30、fmt、严格全target/全feature Clippy及binary build均PASS。根仓以manifest SHA256 `7963962eb2dca996682cf42e8babbeaf4a5a764a0e5bf98407d5fb8f9d61b4b1`独立核对15/15文件的原SHA、目标SHA、权限及review diff，按字节合入后pending 97/97、architecture 54/54、docs 30/30、fmt、严格Clippy和diff check均exit0。Claude Code实现单审原文`PASS (P0=0, P1=0)`，完整diff SHA256 `3afb80ec2e7b374e22c6c8f705091ba19a9f995931a4c786b6b5595d8196dd26`、输出JSON SHA256 `2fad2ce1f9ec2abed4b898792412a76098b0d5c0389f5ef38b0d8766f9d9af38`。五条P2按用户策略保留为`DEFER-OG21-REVIEW-P2-01..05`，不冒称已修复。网站EN已审源码在Libra backend cf `b21eb956cf138479fb0f14bd74bb290e2ddc5eb2`且远端一致，尚未部署。Source A/native archive GO仍未证明；非空正向恢复验收使用cfg(test) issuer，不属于真实OpenCode模型验收，未加入CI。OG-21当前`in-progress / locally-accepted`，须继承OG-22实际patch C/D后才计done/complete；正式进度仍**52/61 = 85.25%**，下一卡OG-22。Linux功能UNRUN，由用户后验。

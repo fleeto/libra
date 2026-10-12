@@ -155,7 +155,18 @@ Signing and authentication keys are isolated per repository.
 
 ---
 
+### Remote Mega2 browser
+
+`libra mega2 browser --server http://127.0.0.1:9000` opens a terminal with a
+directory tree on the left and read-only file content on the right. Expand
+directories with Enter/Right, select a file to preview it, and use Tab to switch
+panes. Previews highlight recognized code/configuration types; `--no-color`
+disables syntax colors. Text previews are limited to 256 KiB. No clone or local repository is
+required; `--list`/`--json` still return one directory level for scripts.
+See the [browser guide](docs/commands/mega2.md) for keys and limits.
+
 ## Supported External Agents
+
 
 Libra supports hook-based capture for Claude Code, Codex, and OpenCode. The built-in model-provider runner was removed with `libra code` in 0.23.x.
 

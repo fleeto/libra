@@ -50,8 +50,9 @@ EXAMPLES:
     libra --json mega2 browser --server http://127.0.0.1:8080      One bounded fetch as JSON
     libra --machine mega2 browser --server https://mega2.example.com  Strict machine mode
 
-`mega2 browser` is Libra-only: it lists one remote directory level and has no
-Git-equivalent contract. `libra ls-tree` inspects local tree objects instead.";
+`mega2 browser` is Libra-only: it displays a directory tree and file previews.
+Each directory fetch (including --list) returns one level. It has no Git-equivalent
+contract. `libra ls-tree` inspects local tree objects instead.";
 
 /// `EXAMPLES:` banner for `libra mega2 browser`.
 pub const MEGA2_BROWSER_EXAMPLES: &str = "\
@@ -65,10 +66,15 @@ EXAMPLES:
     libra --machine mega2 browser --server https://mega2.example.com   NDJSON for automation
     libra mega2 browser --server https://mega2.example.com --token-file ~/.mega2-token  Create/delete/move with a token file
 
-Keys (interactive mode): Up/Down or k/j select, Enter opens a directory,
-Backspace or h goes to the parent, + creates a directory, d deletes the
+Interactive mode has a directory tree on the left and file content on the right.
+Up/Down or k/j select; Enter toggles a directory or focuses file content.
+Right expands, Left/Backspace/h collapses or selects the parent.
+Tab switches panes; arrows and PageUp/PageDown scroll file content.
++ creates a directory beside the selection, d deletes the
 selected directory (after a confirmation line), m moves it, R renames it
-(same parent), r reloads, q quits.
+(same parent), r reloads the selected directory/file, q quits.
+Text previews use anonymous GET /api/v1/blob, with a 256 KiB text limit.
+Syntax colors follow the file type; --no-color disables highlighting.
 
 Write token precedence: --token-file, then LIBRA_MEGA2_TOKEN, then --token
 (warned: --token is visible in shell history). Tokens are never echoed.";
@@ -340,7 +346,14 @@ async fn execute_browser(args: BrowserArgs, output: &OutputConfig) -> CliResult<
     let (token, _source) =
         resolve_token_from_process(args.token_file.as_deref(), args.token.as_deref())?;
 
-    crate::command::mega2_browser::run(&server, &path, git_ref, token).await
+    crate::command::mega2_browser::run(
+        &server,
+        &path,
+        git_ref,
+        token,
+        output.color != crate::utils::output::ColorChoice::Never,
+    )
+    .await
 }
 
 #[cfg(test)]

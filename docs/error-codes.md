@@ -471,6 +471,13 @@ Each failure carries exactly one of `http_status` and `transport`. The values
 come only from fixed route templates and the status code; they never contain
 the response body, `err_message`, the server URL or a token.
 
+Interactive file previews use the same diagnostics with route `/api/v1/blob`.
+Preview errors remain visible in the TUI instead of ending the session:
+`LBR-NET-001` covers connection/timeout failures, `LBR-NET-002` covers invalid,
+missing or oversized wire responses, `LBR-AUTH-002` covers HTTP 401/403, and
+`LBR-UNSUPPORTED-001` covers binary content or text above the 256 KiB preview limit.
+No new non-interactive operation or JSON payload is introduced.
+
 ## Architecture
 
 The design has four layers:

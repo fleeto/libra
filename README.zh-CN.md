@@ -134,7 +134,16 @@ Libra 使用 Git 的语言。磁盘格式（objects、index、pack、pack-index�
 
 ---
 
+### 远端 Mega2 浏览器
+
+`libra mega2 browser --server http://127.0.0.1:9000` 打开左侧目录树、右侧只读文件
+内容的终端界面。Enter/右方向键展开目录，选中文件自动预览，Tab 切换左右焦点。
+预览按代码/配置文件类型进行语法高亮，`--no-color` 可关闭颜色。
+文本预览上限为 256 KiB，无需 clone 或本地仓库；脚本使用的 `--list`/`--json`
+仍只返回一层目录。按键和限制见[浏览器指南](docs/commands/zh-CN/mega2.md)。
+
 ## 支持的外部 Agent
+
 
 Libra 支持 Claude Code、Codex 和 OpenCode 的 hook 捕获。内置模型提供商执行器已随 `libra code` 在 0.23.x 版本线移除。
 

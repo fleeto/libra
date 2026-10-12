@@ -1,13 +1,18 @@
-//! plan-20260912 MB-02: human-readable directory browser TUI over the MB-01
-//! validated listing. Owns canonical current path, selection, history/cache and
-//! the terminal lifecycle; performs no prefetch and delegates every fetch to
-//! [`Mega2TreeSession`]. The [`noninteractive`] submodule runs the same
+//! Two-pane directory tree and text preview TUI over validated Mega2 responses.
+//! Owns selection, expanded branches and the terminal lifecycle; performs no
+//! prefetch. Tree requests use [`Mega2TreeSession`] and file previews use
+//! [`Mega2BlobClient`]. The [`noninteractive`] submodule runs the existing
 //! functions without a terminal: one operation flag, one request
 //! (plan-20261001 MN-02).
 
+mod config_highlight;
+pub mod explorer;
+pub mod highlight;
+pub mod layout;
 pub mod noninteractive;
 pub mod tag_panel;
 pub mod terminal;
+pub mod tree;
 
 pub use tag_panel::{TAG_PAGE_SIZE, TagEditor, TagPanel, TagPanelAction};
 
@@ -16,15 +21,19 @@ pub(crate) mod terminal_unix;
 #[cfg(windows)]
 pub(crate) mod terminal_windows;
 
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
 
 #[cfg(unix)]
 use libc::{STDIN_FILENO, STDOUT_FILENO};
 
-use self::terminal::TerminalGuard;
+use self::{
+    explorer::{Explorer, ExplorerAction},
+    terminal::TerminalGuard,
+};
 use crate::{
     internal::protocol::{
         mega2_auth::Mega2Token,
+        mega2_blob::Mega2BlobClient,
         mega2_entry::{Mega2EntryClient, validate_entry_name},
         mega2_mutate::Mega2MutateClient,
         mega2_tag::{CreateTagOptions, Mega2TagClient},
@@ -41,6 +50,11 @@ use crate::{
 pub enum Key {
     Up,
     Down,
+    Left,
+    Right,
+    Tab,
+    PageUp,
+    PageDown,
     Enter,
     Backspace,
     Home,
@@ -452,7 +466,9 @@ impl BrowserState {
                 self.running = false;
                 ActionResult::Quit
             }
-            Key::Other(_) => ActionResult::Continue,
+            Key::Other(_) | Key::Left | Key::Right | Key::Tab | Key::PageUp | Key::PageDown => {
+                ActionResult::Continue
+            }
         }
     }
 }
@@ -468,10 +484,16 @@ pub(crate) fn push_bounded(input: &mut String, ch: char) {
 pub fn parse_key(byte: u8, sequence: &[u8]) -> Key {
     match byte {
         b'\x1b' => match sequence {
-            [b'[', b'A'] => Key::Up,
-            [b'[', b'B'] => Key::Down,
+            [b'[' | b'O', b'A'] => Key::Up,
+            [b'[' | b'O', b'B'] => Key::Down,
+            [b'[' | b'O', b'C'] => Key::Right,
+            [b'[' | b'O', b'D'] => Key::Left,
+            [b'[', b'5', b'~'] => Key::PageUp,
+            [b'[', b'6', b'~'] => Key::PageDown,
             _ => Key::Other('?'),
         },
+        b'\t' => Key::Tab,
+        3 => Key::Quit,
         b'\r' | b'\n' => Key::Enter,
         127 | 8 => Key::Backspace,
         b'q' | b'Q' => Key::Quit,
@@ -496,71 +518,13 @@ pub fn sanitize(name: &str) -> String {
         .collect()
 }
 
-/// Renders one frame: header, selection list (dirs first per MB-01 ordering),
-/// status line. All untrusted strings pass through [`sanitize`].
+/// Renders an initial two-pane frame. The interactive loop retains its explorer
+/// across frames so expanded branches and the selected preview stay visible.
 pub fn render(state: &BrowserState, server: &str) -> String {
-    let mut out = String::new();
-    out.push_str("\x1b[2J\x1b[H");
-    out.push_str(&format!(
-        "mega2 browser — server: {server}  ref: {}  path: {}\r\n",
-        state.git_ref.as_deref().unwrap_or("(default)"),
-        state.path
-    ));
-    out.push_str("──────────────────────────────────────────────\r\n");
-    if let Some(panel) = state.panel.as_ref() {
-        out.push_str(&panel.render_lines());
-        return out;
+    match Explorer::new(state) {
+        Ok(view) => layout::render(&view, state, server, 100, 30),
+        Err(error) => format!("mega2 browser: {}\r\n", sanitize(error.message())),
     }
-    if state.entries.is_empty() {
-        out.push_str("(empty directory)\r\n");
-    }
-    for (idx, (name, content_type)) in state.entries.iter().enumerate() {
-        let marker = if idx == state.selection { ">" } else { " " };
-        let kind = match content_type {
-            ContentType::Directory => "dir ",
-            ContentType::File => "file",
-        };
-        out.push_str(&format!("{marker} {kind}  {}\r\n", sanitize(name)));
-    }
-    out.push_str("──────────────────────────────────────────────\r\n");
-    match state.editor.as_ref() {
-        Some(Editor::CreateDir(input)) => {
-            out.push_str(&format!("new directory: {}\r\n", sanitize(input)));
-            out.push_str("Enter create · Esc cancel\r\n");
-        }
-        Some(Editor::ConfirmDelete(name)) => {
-            out.push_str(&format!(
-                "delete '{}'? Enter/y confirm · Esc cancel\r\n",
-                sanitize(name)
-            ));
-        }
-        Some(Editor::MoveDir { name, input }) => {
-            out.push_str(&format!(
-                "move '{}' to parent: {}\r\n",
-                sanitize(name),
-                sanitize(input)
-            ));
-            out.push_str("Enter move · Esc cancel\r\n");
-        }
-        Some(Editor::RenameDir { name, input }) => {
-            out.push_str(&format!(
-                "rename '{}' to: {}\r\n",
-                sanitize(name),
-                sanitize(input)
-            ));
-            out.push_str("Enter rename · Esc cancel\r\n");
-        }
-        None => {}
-    }
-    if state.editor.is_some() {
-        out.push_str("-------------------------------\r\n");
-    }
-    let status = state.status.as_deref().unwrap_or(
-        "Up/Down select · Enter open · + new dir · d delete · m move · R rename · r reload · q quit",
-    );
-    out.push_str(&sanitize(status));
-    out.push_str("\r\n");
-    out
 }
 
 /// Requires stdin and stdout to be TTYs; refuses before any terminal change.
@@ -616,37 +580,122 @@ pub fn tty_required(stdin_tty: bool, stdout_tty: bool) -> CliResult<()> {
 }
 
 /// Reads one logical key from raw-mode stdin. A lone `Esc` (no sequence bytes
-/// within a short window) maps to [`Key::Quit`].
+/// within a short window) maps to [`Key::Cancel`].
 pub fn read_key(stdin: &mut io::Stdin) -> io::Result<Key> {
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+
+        // Do not mix `Stdin`'s buffered `Read` implementation with `poll` on
+        // its raw descriptor. A buffered first read can consume all of `ESC`
+        // `[` `B`, leaving `poll` to mistake an ordinary arrow key for Esc.
+        read_key_from_fd(stdin.as_raw_fd())
+    }
+
+    #[cfg(not(unix))]
+    {
+        read_key_from_stream(stdin)
+    }
+}
+
+#[cfg(any(not(unix), test))]
+fn read_key_from_stream(stdin: &mut impl io::Read) -> io::Result<Key> {
     let mut byte = [0u8; 1];
     stdin.read_exact(&mut byte)?;
     if byte[0] != 0x1b {
         return Ok(parse_key(byte[0], &[]));
     }
-    #[cfg(unix)]
-    {
-        use std::os::fd::AsRawFd;
-
-        let raw_fd = stdin.as_raw_fd();
-        let mut pollfd = libc::pollfd {
-            fd: raw_fd,
-            events: libc::POLLIN,
-            revents: 0,
-        };
-        // SAFETY: pollfd points to one valid descriptor entry.
-        let ready = unsafe { libc::poll(&mut pollfd, 1, 100) };
-        if ready <= 0 {
-            return Ok(Key::Cancel); // lone Esc cancels an editor / quits when idle
+    let mut seq = [0u8; 16];
+    for index in 0..seq.len() {
+        stdin.read_exact(&mut seq[index..=index])?;
+        if index == 0 && !matches!(seq[index], b'[' | b'O') {
+            return Ok(Key::Other('?'));
+        }
+        if index > 0 && (0x40..=0x7e).contains(&seq[index]) {
+            return Ok(parse_key(byte[0], &seq[..=index]));
         }
     }
-    let mut seq = [0u8; 2];
-    let n = stdin.read(&mut seq)?;
-    let mut padded = [0u8; 2];
-    padded[..n.min(2)].copy_from_slice(&seq[..n.min(2)]);
-    if n == 0 {
-        return Ok(Key::Quit);
+    Ok(Key::Other('?'))
+}
+
+#[cfg(unix)]
+fn read_key_from_fd(fd: libc::c_int) -> io::Result<Key> {
+    let byte = read_byte_from_fd(fd)?;
+    if byte != 0x1b {
+        return Ok(parse_key(byte, &[]));
     }
-    Ok(parse_key(byte[0], &padded))
+
+    // Raw terminals may deliver each byte separately (VMIN=1). Wait for
+    // each continuation byte, without blocking forever on a partial sequence.
+    let mut seq = [0u8; 16];
+    for index in 0..seq.len() {
+        if !poll_for_input(fd)? {
+            return Ok(if index == 0 {
+                Key::Cancel
+            } else {
+                Key::Other('?')
+            });
+        }
+        seq[index] = read_byte_from_fd(fd)?;
+        if index == 0 && !matches!(seq[index], b'[' | b'O') {
+            return Ok(Key::Other('?'));
+        }
+        if index > 0 && (0x40..=0x7e).contains(&seq[index]) {
+            return Ok(parse_key(byte, &seq[..=index]));
+        }
+    }
+    Ok(Key::Other('?'))
+}
+
+#[cfg(unix)]
+fn read_byte_from_fd(fd: libc::c_int) -> io::Result<u8> {
+    let mut byte = [0u8; 1];
+    loop {
+        // SAFETY: `byte` is writable for one byte. The caller keeps `fd`
+        // open for this read; libc reports invalid descriptors as errors.
+        let read = unsafe { libc::read(fd, byte.as_mut_ptr().cast(), byte.len()) };
+        if read > 0 {
+            return Ok(byte[0]);
+        }
+        if read == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "terminal input closed while reading a key",
+            ));
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
+}
+
+#[cfg(unix)]
+fn poll_for_input(fd: libc::c_int) -> io::Result<bool> {
+    use std::time::{Duration, Instant};
+
+    let deadline = Instant::now() + Duration::from_millis(100);
+    let mut pollfd = libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Ok(false);
+        }
+        let timeout_ms = remaining.as_millis().max(1) as libc::c_int;
+        // SAFETY: `pollfd` points to one valid descriptor entry.
+        let ready = unsafe { libc::poll(&mut pollfd, 1, timeout_ms) };
+        if ready >= 0 {
+            return Ok(ready > 0);
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
 }
 
 /// Runs one confirmed creation: exactly one MB-04 POST, then exactly one MB-01
@@ -755,13 +804,14 @@ async fn refresh_tag_panel(state: &mut BrowserState, client: &Mega2TagClient) {
     }
 }
 
-/// Full interactive run: TTY check → terminal guard → event loop with exactly
-/// one fetch per navigation action and no background work.
+/// Full interactive run: TTY check → terminal guard → tree/preview event loop.
+/// Fetches only explicitly expanded directories or selected files; no prefetch.
 pub async fn run(
     server: &str,
     start_path: &str,
     git_ref: Option<&str>,
     token: Option<Mega2Token>,
+    color_enabled: bool,
 ) -> CliResult<()> {
     ensure_tty()?;
     let session = Mega2TreeSession::new(server)?;
@@ -769,31 +819,108 @@ pub async fn run(
     let entry_client = Mega2EntryClient::new(server, token.clone())?;
     let mutate_client = Mega2MutateClient::new(server, token.clone())?;
     let tag_client = Mega2TagClient::new(server, token)?;
+    let blob_client = Mega2BlobClient::new(server)?;
     let mut guard = TerminalGuard::enter()?;
 
     state.fetch_current().await?;
+    let mut view = Explorer::new(&state)?;
+    view.color_enabled = color_enabled;
+    view.tree.sync_selection(&mut state);
 
-    let result = (async {
+    let result = async {
         let mut stdin = io::stdin();
         let mut stdout = io::stdout();
-        let mut out_buf: Vec<u8> = Vec::with_capacity(4096);
+        let mut last_frame = String::new();
+        let mut pending_directory: Option<(String, bool)> = None;
         while state.running {
-            out_buf.clear();
-            out_buf.extend_from_slice(render(&state, server).as_bytes());
-            stdout.write_all(&out_buf).map_err(|e| {
-                CliError::fatal(format!("mega2 browser: output write failed: {e}"))
-                    .with_stable_code(StableErrorCode::IoWriteFailed)
-            })?;
-            stdout.flush().map_err(|e| {
-                CliError::fatal(format!("mega2 browser: output flush failed: {e}"))
-                    .with_stable_code(StableErrorCode::IoWriteFailed)
-            })?;
+            let (width, height) = layout::terminal_size();
+            let frame = layout::render(&view, &state, server, width, height);
+            if frame != last_frame {
+                stdout.write_all(frame.as_bytes()).map_err(|e| {
+                    CliError::fatal(format!("mega2 browser: output write failed: {e}"))
+                        .with_stable_code(StableErrorCode::IoWriteFailed)
+                })?;
+                stdout.flush().map_err(|e| {
+                    CliError::fatal(format!("mega2 browser: output flush failed: {e}"))
+                        .with_stable_code(StableErrorCode::IoWriteFailed)
+                })?;
+                last_frame = frame;
+            }
+
+            if let Some((path, root)) = pending_directory.take() {
+                let result = async {
+                    let listing = state.session.fetch(&path, state.git_ref.as_deref()).await?;
+                    let entries = listing
+                        .entries
+                        .into_iter()
+                        .map(|entry| (entry.name, entry.content_type))
+                        .collect::<Vec<_>>();
+                    if root {
+                        let old_root = view.tree.root.clone();
+                        let mut tree = tree::DirectoryTree::new(path, &entries)?;
+                        tree.selection = tree
+                            .rows
+                            .iter()
+                            .position(|row| row.path == old_root)
+                            .unwrap_or(0);
+                        view.tree = tree;
+                    } else {
+                        view.tree.replace_children(&path, &entries)?;
+                    }
+                    Ok::<(), CliError>(())
+                }
+                .await;
+                state.status = result.err().map(|error| format!("error: {}", error.message()));
+                view.tree.sync_selection(&mut state);
+                view.refresh_preview(false);
+                continue;
+            }
+            if let Some(path) = view.pending_preview.take() {
+                let result = blob_client.fetch(&path, state.git_ref.as_deref()).await;
+                state.status = result
+                    .as_ref()
+                    .err()
+                    .map(|error| format!("error: {}", error.message()));
+                view.apply_preview(result);
+                continue;
+            }
+            #[cfg(unix)]
+            {
+                use std::os::fd::AsRawFd;
+                // A bounded idle poll also detects terminal resizes without a key.
+                if !poll_for_input(stdin.as_raw_fd()).map_err(|error| {
+                    CliError::fatal(format!("mega2 browser: input poll failed: {error}"))
+                        .with_stable_code(StableErrorCode::IoReadFailed)
+                })? {
+                    continue;
+                }
+            }
 
             let key = read_key(&mut stdin).map_err(|e| {
                 CliError::fatal(format!("mega2 browser: input read failed: {e}"))
                     .with_stable_code(StableErrorCode::IoReadFailed)
             })?;
-            let action = state.handle_key(key);
+            last_frame.clear();
+            let action = match view.handle_key(&mut state, key, layout::body_rows(height)) {
+                ExplorerAction::Core(action) => action,
+                ExplorerAction::LoadDirectory(path) => {
+                    state.status = Some("Loading directory...".into());
+                    pending_directory = Some((path, false));
+                    continue;
+                }
+                ExplorerAction::LoadRoot(path) => {
+                    state.status = Some("Loading directory...".into());
+                    pending_directory = Some((path, true));
+                    continue;
+                }
+            };
+            let mutation = matches!(
+                action,
+                ActionResult::CreateDirectory { .. }
+                    | ActionResult::DeleteDirectory { .. }
+                    | ActionResult::MoveDirectory { .. }
+            );
+            let moved_branch = matches!(&action, ActionResult::MoveDirectory { from_parent, to_parent, .. } if from_parent != to_parent);
             match action {
                 ActionResult::Quit => break,
                 ActionResult::FetchCurrent => {
@@ -861,9 +988,21 @@ pub async fn run(
                 }
                 ActionResult::Continue => {}
             }
+            if mutation && state.status.is_none() {
+                if let Err(error) = view.tree.replace_children(&state.path, &state.entries) {
+                    state.status = Some(error.message().to_string());
+                }
+                if moved_branch && state.path != view.tree.root {
+                    // The destination can be another expanded branch: refresh the
+                    // root rather than showing a stale copy at the old location.
+                    pending_directory = Some((view.tree.root.clone(), true));
+                }
+                view.tree.sync_selection(&mut state);
+                view.refresh_preview(true);
+            }
         }
         Ok::<(), CliError>(())
-    })
+    }
     .await;
 
     // Terminal restoration is mandatory on every exit path; restoration
@@ -1024,6 +1163,94 @@ mod tests {
         assert_eq!(parse_key(b'r', &[]), Key::Reload);
         assert_eq!(parse_key(b'h', &[]), Key::Home);
         assert_eq!(parse_key(b'x', &[]), Key::Other('x'));
+    }
+
+    #[test]
+    fn stream_input_consumes_page_keys_without_swallowing_the_next_key() {
+        let mut input = io::Cursor::new(b"\x1b[6~\x1b[5~\x1b[Dq");
+        for expected in [Key::PageDown, Key::PageUp, Key::Left, Key::Quit] {
+            assert_eq!(read_key_from_stream(&mut input).unwrap(), expected);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn raw_input_keeps_queued_arrow_keys_separate() {
+        use std::os::{fd::AsRawFd, unix::net::UnixStream};
+
+        let (reader, mut writer) = UnixStream::pair().expect("input stream");
+        writer.write_all(b"\x1b[B\x1b[Aq").expect("queue keys");
+        assert_eq!(
+            read_key_from_fd(reader.as_raw_fd()).expect("down"),
+            Key::Down
+        );
+        assert_eq!(read_key_from_fd(reader.as_raw_fd()).expect("up"), Key::Up);
+        assert_eq!(
+            read_key_from_fd(reader.as_raw_fd()).expect("quit"),
+            Key::Quit
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn raw_input_waits_for_fragmented_arrow_suffix() {
+        use std::os::{fd::AsRawFd, unix::net::UnixStream};
+
+        for (suffix, expected) in [(b'B', Key::Down), (b'A', Key::Up)] {
+            let (reader, mut writer) = UnixStream::pair().expect("input stream");
+            writer.write_all(b"\x1b[").expect("queue arrow prefix");
+            let sender = std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                writer.write_all(&[suffix]).expect("send arrow suffix");
+            });
+            let actual = read_key_from_fd(reader.as_raw_fd()).expect("fragmented arrow");
+            sender.join().expect("arrow sender");
+            assert_eq!(actual, expected);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn raw_input_distinguishes_lone_escape_from_incomplete_arrow() {
+        use std::os::{fd::AsRawFd, unix::net::UnixStream};
+
+        for (input, expected) in [
+            (&b"\x1b"[..], Key::Cancel),
+            (&b"\x1b["[..], Key::Other('?')),
+        ] {
+            let (reader, mut writer) = UnixStream::pair().expect("input stream");
+            writer.write_all(input).expect("queue partial key");
+            assert_eq!(
+                read_key_from_fd(reader.as_raw_fd()).expect("bounded key"),
+                expected
+            );
+            writer.write_all(b"q").expect("queue quit after timeout");
+            assert_eq!(
+                read_key_from_fd(reader.as_raw_fd()).expect("quit"),
+                Key::Quit
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn raw_input_reports_closed_stream_and_invalid_descriptor() {
+        use std::os::{fd::AsRawFd, unix::net::UnixStream};
+
+        let (reader, writer) = UnixStream::pair().expect("input stream");
+        drop(writer);
+        assert_eq!(
+            read_key_from_fd(reader.as_raw_fd())
+                .expect_err("closed input")
+                .kind(),
+            io::ErrorKind::UnexpectedEof
+        );
+        assert_eq!(
+            read_key_from_fd(-1)
+                .expect_err("invalid input")
+                .raw_os_error(),
+            Some(libc::EBADF)
+        );
     }
 
     #[test]

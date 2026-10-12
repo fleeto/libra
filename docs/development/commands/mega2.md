@@ -22,6 +22,29 @@
 
 ## 设计方案
 
+### 双栏文件浏览器（2026-10-12）
+
+交互模式在原目录操作/标签状态机外增加 `mega2_browser::explorer::Explorer`：
+`tree.rs` 保存有界的扁平目录树，按需展开、保留兄弟节点；`layout.rs` 按终端单元格
+宽度绘制左树右预览，处理中文、控制字符、滚动与尺寸变化。选中嵌套节点时将实际
+父路径映射回 `BrowserState`，既有删除确认与写入鉴权不变；内容区焦点不接受写入快捷键。
+`mega2_blob.rs` 对已挂载的 `GET /api/v1/blob` 发匿名请求，转发选中路径和 `refs`，
+消费 `{req_result, data: string|null}`，使用 `mega2_diag` 保留无秘密诊断。禁止代理和
+重定向，10 秒超时、1 MiB 响应上限、256 KiB 文本上限；失败显示提示且不退出。
+该扩展只改变交互模式，以下历史 MB/MN 非交互契约仍保持原有单次请求和 JSON schema。
+
+2026-10-13 增加文件类型语法高亮：`highlight.rs` 使用 Syntect 的内置语法，
+`config_highlight.rs` 用线性扫描实现 TOML/INI 基础词法着色（不是配置校验器）。
+不启用 Syntect 的 YAML 语法加载器，也不接受远端或本地用户提供的语法规则。
+仅解析已净化文本，按文件缓存字节区间及语义色；`layout.rs` 按单元格裁剪后才输出固定 ANSI 前景色，颜色不计入
+布局宽度且在填充前复位。全局颜色策略由命令层传入，不影响非交互输出。
+高亮输入上限 64 KiB、单行 4096 字节、32768 个区间；Syntect 解析逐行检查 1 秒工作预算
+（不是可中断的硬超时），超限或解析失败保留全文纯文本预览并显示标题提示。
+
+新增验证位于 `mega2_browser::{tree,explorer,layout,highlight,config_highlight}`、`mega2_blob` 单元测试和
+`command_test::command::mega2_browser_tui_test`：真实 PTY 覆盖方向键、目录展开/折叠、
+文件自动预览、Tab 焦点、翻页、缩放、无额外读取和终端恢复。
+
 - 入口与分发：已公开接入 `src/cli.rs::Commands::Mega2`；`command_preflight` 归类为
   `CommandPreflight::none()`（不打开仓库数据库/对象存储），`command_scope` 归类为
   `CommandScope::ReadOnly`，但 `operation_class_for_command` 在通用映射之前显式早退

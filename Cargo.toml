@@ -121,6 +121,7 @@ pulldown-cmark = "0.13.3"
 
 # Unicode handling
 unicode-width = "0.2.2"
+syntect = { version = "5.3.0", default-features = false, features = ["default-syntaxes", "regex-fancy"] }
 libvault = { version = "0.4.0", features = ["storage_sqlite"] }
 base64 = "0.22.1"
 # Imported GPG key deprotection/rebuild/sign/verify (plan-20260921 VG-02)

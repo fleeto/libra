@@ -1,12 +1,12 @@
 # `libra mega2 browser`
 
-Browse **one directory level** of a remote Mega2 repository over HTTP — either
-interactively in the terminal, or as a single machine-readable listing for
-scripts and agents.
+Browse a remote Mega2 repository over HTTP with a **directory tree on the left
+and file content on the right**. Scripts and agents can still request a single
+directory-level listing with `--list`, `--json` or `--machine`.
 
 `mega2` is a Libra-only extension. It has **no Git-equivalent contract**: it
 never clones, fetches or pushes Git objects, and it lists remote metadata rather
-than local tree objects. For local object inspection use
+and file previews rather than local tree objects. For local object inspection use
 [`libra ls-tree`](ls-tree.md).
 
 ## Synopsis
@@ -24,14 +24,17 @@ network:
 - `--server` must be `https://…`, or `http://…` only when the host is loopback
   (`127.0.0.1`, `::1`, `localhost`). Credentials (userinfo), query strings,
   fragments and a base path are rejected; the client always appends
-  `/api/v1/tree`.
+  the fixed `/api/v1/tree` and `/api/v1/blob` read routes.
 - `PATH` must be rooted (`/` by default) and may not contain `.`/`..`
   components, NUL, control characters or platform separators.
 - `--ref` selects a commit or tag to list; when omitted the server's default
   revision is used.
 
-Browsing sends exactly one anonymous `GET /api/v1/tree` per navigation or
-reload. No `Authorization` header is attached, no repository is opened (the
+Expanding or reloading a directory sends one anonymous `GET /api/v1/tree`.
+Selecting a file sends one anonymous `GET /api/v1/blob?path=…&refs=…` (the `refs`
+parameter is omitted without `--ref`). Moving among directories, collapsing
+branches, and scrolling already loaded content are local operations.
+No `Authorization` header is attached to either read route, no repository is opened (the
 command works outside a repository), and no local state — index, object store,
 database, configuration — is read or written.
 
@@ -49,23 +52,57 @@ not a TTY the command refuses immediately with a stable error and a hint to use
 `--json`; it never alters the terminal.
 
 While browsing, the terminal is switched to raw mode and driven by a bounded
-state machine with no recursion and no background prefetch:
+state machine with lazy expansion and no recursive/background prefetch. The
+left pane retains expanded branches and their siblings. Selecting a file loads
+its text in the right pane, with line numbers and independent scrolling.
+Loading, empty, missing, binary/unsupported, and oversized files have explicit
+messages; a failed preview does not exit the browser or display the previous
+file. The server must support UTF-8 text via `/api/v1/blob`. Preview text is
+limited to 256 KiB, with a 1 MiB wire-response cap and a 10-second deadline;
+no preview is saved locally. Tabs display as four spaces, terminal control and
+bidirectional-control characters are neutralized. The expanded tree is capped
+at 8192 rows, 4 MiB of stored path/name bytes and 128 child levels; collapse a
+branch to free space. Unix terminals redraw on resize; below 49 columns by 10
+rows the UI shows a resize hint.
+
+File previews detect syntax from the filename/extension (or a script's shebang).
+Rust, Python, JavaScript, C/C++, shell, JSON, YAML, Markdown, HTML/CSS and
+TOML/INI configuration files are highlighted; `.buckconfig`, `.gitconfig`,
+`.editorconfig` and `BUCK`/`BUILD` also have filename rules. Keywords, strings,
+numbers, names and comments use the terminal's own color palette. The content
+header identifies the detected syntax. Unknown types stay plain text.
+`--no-color`, `--color=never` and automatic `NO_COLOR`/`TERM=dumb` handling disable
+syntax colors; explicit `--color=always` overrides the automatic environment
+policy. Only interactive previews are colored: machine/list output is unchanged.
+Highlighting is cached per file and does not make extra requests. Text larger
+than 64 KiB after display normalization, lines over 4096 bytes, or exhausted
+highlighting work limits fall back to plain text with a header note; the 256 KiB
+text-preview limit still applies. Multiline syntax remains correct while scrolling.
 
 | Key | Action |
 |-----|--------|
-| `↑`/`↓` or `k`/`j` | Move the selection |
-| `Enter` | Open the selected directory (one fetch of the child path) |
-| `Backspace` or `h` | Go to the parent directory (never above `/`) |
+| `↑`/`↓` or `k`/`j` | Move the tree selection; in the content pane, scroll lines |
+| `Enter` | Expand/fold a directory; on a file, focus its content |
+| `→` | Expand a directory or select its first child; in content, scroll right |
+| `←`, `Backspace` or `h` | Fold a branch or select its parent; at a subtree root, load its parent (never above `/`); content `←` scrolls left |
+| `Tab` | Switch focus between directory tree and file content |
+| `PageUp` / `PageDown` | Scroll file content one screen |
 | `+` | Create a directory here (see below) |
 | `d` | Delete the selected directory (extra confirmation line; files are inert) |
 | `m` | Move the selected directory under an edited destination parent |
 | `R` | Rename the selected directory (same parent; `r` still reloads) |
 | `t` | Toggle the tag panel (see below) |
-| `r` | Reload the current listing |
+| `r` | Reload the selected directory or file; from an empty tree, reload its root |
 | `q` (or `Ctrl-C`, `Esc`) | Quit |
 
 Terminal state (raw mode and the alternate screen) is restored on every exit
 path, including errors and signals handled by the process.
+Directory mutation shortcuts apply only while the tree has focus. Their parent
+is the selected row's actual parent, including for nested rows: `+` creates a
+sibling of the selected directory, not a child inside it. Confirmed mutations
+refresh that parent branch. A cross-parent move from a nested branch also
+reloads the visible root and folds its branches, avoiding stale destination
+entries. JSON/machine schemas and their one-request behavior are unchanged.
 
 ### Machine mode (`--json` / `--machine`)
 
@@ -107,7 +144,7 @@ the forms available in this release.
 
 | Interactive key | Flag | Request |
 |-----------------|------|---------|
-| start, `Enter`, `Backspace`/`h`, `r` | `--list` (PATH is the directory; `--json` without a flag is the same) | `GET /api/v1/tree` |
+| start, expand/reload a directory, load a parent root | `--list` (PATH is the directory; `--json` without a flag is the same) | `GET /api/v1/tree` |
 | `+` | `--create-dir <NAME>` (PATH is the parent) | `POST /api/v1/create-entry` |
 | `d` | `--delete-dir <NAME>` (PATH is the parent) | `POST /api/v1/delete-entry` |
 | `m` | `--move-dir <NAME> <PARENT-PATH>` (PATH is NAME's current parent; the name is kept) | `POST /api/v1/move-entry` |
@@ -384,8 +421,8 @@ Errors:
 
 ### Creating a directory (`+`, interactive only)
 
-Press `+` to open a single-line name editor for a new subdirectory of the
-current path (at the root the parent sent is `/`). While a **file** is
+Press `+` to open a single-line name editor for a sibling of the selected
+directory (or a child of the visible root when the tree is empty). While a **file** is
 selected the editor refuses to open — selection must be a directory or an
 empty area. `Enter` validates the name with the same rules used for the wire
 (`/`, `\`, `.`, `..`, NUL and control characters are refused) and only then
@@ -414,7 +451,9 @@ all three keys, `Esc` cancels every editor without any request, and hostile
 destinations (`..`, separators, unrooted paths) are refused before the POST.
 
 Each confirmed mutation performs **one** `POST /api/v1/delete-entry` or
-`POST /api/v1/move-entry` followed by **one** listing reload. Success clears
+`POST /api/v1/move-entry` followed by **one** parent-branch listing reload.
+A cross-parent move from a nested branch adds one root reload and folds the tree.
+Success clears
 the status; failures (401/403, missing source, duplicate destination,
 timeout) keep the last safe listing and show a secret-free status line while
 the terminal stays intact. There is no multi-select and no recursion: one
@@ -499,11 +538,13 @@ never include the response body, the server URL or a token; see
 
 ## Limits and boundaries
 
-- One request per navigation/reload; no recursion, no prefetch, no background
-  task, no cache that outlives the process.
+- One request per directory expansion/reload or file selection; moving between
+  directory rows and collapsing branches sends none. No recursive prefetch,
+  background task, or cache that outlives the process.
 - Browse is read-only and anonymous. A confirmed `+` adds at most one
   `create-entry` POST plus one reload GET; `d`/`m`/`R` likewise add one
-  `delete-entry`/`move-entry` POST plus one reload GET. No recursive or
+  `delete-entry`/`move-entry` POST plus one parent reload GET (a cross-parent
+  move from a nested branch adds one root reload). No recursive or
   multi-selection operation exists in this command.
 - No configuration or credential persistence: nothing written to disk.
 

@@ -2682,7 +2682,7 @@ impl CaptureCatalogStore {
     /// Bind an authenticated complete SessionEnd snapshot to its elected
     /// receipt. Hashing happens outside the SQLite writer lock; the exact
     /// immutable binding is revalidated before the artifact transaction.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) async fn persist_pending_artifact(
         &self,
         fence: &CaptureCatalogTerminalAttemptFence,

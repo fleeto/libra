@@ -32,7 +32,7 @@ use crate::internal::ai::{
         CaptureSourceCommitmentDomain, derive_capture_source_commitment_in_scope_until,
         derive_snapshot_content_commitment_in_scope_until,
     },
-    observed_agents::reasoning::verify_import_transport,
+    observed_agents::reasoning::{ImportTransportKey, verify_import_transport},
 };
 use crate::{
     internal::{
@@ -61,8 +61,7 @@ use crate::{
                 opencode_export::{ExportLimits, authorized_trusted_sandboxed_export_until},
                 reasoning::{
                     EncodedTransportKey, ImportTransportContext, ImportTransportDto,
-                    ImportTransportKey, NativeProvenReasoning, ReasoningProvider,
-                    seal_import_transport,
+                    NativeProvenReasoning, ReasoningProvider, seal_import_transport,
                 },
                 resolve_import_transcript_source_until, resolve_session_file,
             },

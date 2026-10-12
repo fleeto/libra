@@ -139,10 +139,11 @@ pub(crate) fn terminal_persistence_failure_error(source: anyhow::Error) -> anyho
     HookTerminalPersistenceFailure { source }.into()
 }
 
+#[cfg(unix)]
+pub(crate) use crate::internal::ai::capture::key::derive_snapshot_content_commitment_in_scope_until;
 pub(crate) use crate::internal::ai::capture::key::{
     CAPTURE_UNSUPPORTED_PLATFORM_REMEDY, CaptureSourceCommitmentDomain,
     derive_capture_source_commitment_in_scope_until,
-    derive_snapshot_content_commitment_in_scope_until,
 };
 #[cfg(test)]
 use crate::internal::ai::capture::scope_binding::{

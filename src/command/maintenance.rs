@@ -3558,6 +3558,8 @@ async fn collect_registered_store_roots<C: sea_orm::ConnectionTrait>(
     // names becomes a root. `run_gc` separately DEFERS pruning only for
     // LIVE ordinary markers (TTL-clamped); cleanup_pending rows list their
     // owned OIDs exhaustively, so rooting suffices and doctor retires them.
+    // Private reasoning identity values are excluded as a whole scope below,
+    // even when damaged into JSON OIDs. GC never needs their codec or key.
     // All other rows are arbitrary user metadata: scanned leniently
     // (non-JSON legal).
     let now_ms = chrono::Utc::now().timestamp_millis();
@@ -3585,7 +3587,7 @@ async fn collect_registered_store_roots<C: sea_orm::ConnectionTrait>(
             "SELECT scope, value FROM metadata_kv WHERE scope NOT IN (
                 'agent_traces_inflight', 'agent_capture_pending',
                 'agent_capture_quarantine', 'agent_capture_pending_chunk',
-                'agent_capture_session_alias'
+                'agent_capture_session_alias', 'agent_reasoning_identity'
              )",
         ))
         .await
@@ -5635,5 +5637,272 @@ mod tests {
             calls.visit_file(ast);
         }
         calls.1
+    }
+
+    struct ReasoningGcProbeStorage {
+        blobs: std::collections::HashMap<ObjectHash, Vec<u8>>,
+        reads: std::sync::Mutex<Vec<ObjectHash>>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::utils::storage::Storage for ReasoningGcProbeStorage {
+        async fn get(
+            &self,
+            hash: &ObjectHash,
+        ) -> Result<(Vec<u8>, ObjectType), git_internal::errors::GitError> {
+            self.reads.lock().unwrap().push(*hash);
+            self.blobs
+                .get(hash)
+                .cloned()
+                .map(|bytes| (bytes, ObjectType::Blob))
+                .ok_or_else(|| git_internal::errors::GitError::ObjectNotFound(hash.to_string()))
+        }
+
+        async fn put(
+            &self,
+            _hash: &ObjectHash,
+            _data: &[u8],
+            _object_type: ObjectType,
+        ) -> Result<String, git_internal::errors::GitError> {
+            Err(git_internal::errors::GitError::InvalidObjectInfo(
+                "GC root fixture must not write object payloads".into(),
+            ))
+        }
+
+        async fn exist(&self, hash: &ObjectHash) -> bool {
+            self.blobs.contains_key(hash)
+        }
+
+        async fn search(&self, _prefix: &str) -> Vec<ObjectHash> {
+            Vec::new()
+        }
+    }
+
+    struct ReasoningGcFixture {
+        root: tempfile::TempDir,
+        conn: sea_orm::DatabaseConnection,
+        storage: ClientStorage,
+        probe: std::sync::Arc<ReasoningGcProbeStorage>,
+        ordinary_oid: ObjectHash,
+        private_oid: ObjectHash,
+    }
+
+    impl ReasoningGcFixture {
+        async fn new() -> Self {
+            use git_internal::internal::object::{ObjectTrait, blob::Blob};
+
+            let root = tempfile::tempdir().unwrap();
+            let conn = db::create_database(root.path().join("libra.db").to_str().unwrap())
+                .await
+                .unwrap();
+            crate::internal::config::ConfigKv::set_with_conn(
+                &conn,
+                "libra.repoid",
+                "og23-gc-private",
+                false,
+            )
+            .await
+            .unwrap();
+            let ordinary =
+                Blob::from_content_with_kind(HashKind::Sha1, "ordinary GC root").unwrap();
+            let private =
+                Blob::from_content_with_kind(HashKind::Sha1, "private identity OID canary")
+                    .unwrap();
+            let probe = std::sync::Arc::new(ReasoningGcProbeStorage {
+                blobs: std::collections::HashMap::from([
+                    (ordinary.id, ordinary.to_data().unwrap()),
+                    (private.id, private.to_data().unwrap()),
+                ]),
+                reads: std::sync::Mutex::new(Vec::new()),
+            });
+            let storage =
+                ClientStorage::from_test_storage(probe.clone(), root.path().join("objects"));
+            Self {
+                root,
+                conn,
+                storage,
+                probe,
+                ordinary_oid: ordinary.id,
+                private_oid: private.id,
+            }
+        }
+
+        async fn set(&self, scope: &str, key: &str, value: &str) {
+            use sea_orm::{ConnectionTrait, Statement};
+
+            self.conn.execute_raw(Statement::from_sql_and_values(
+                self.conn.get_database_backend(),
+                "INSERT INTO metadata_kv (scope, target, key, value, value_type, created_at, updated_at) \
+                 VALUES (?, 'og23-gc-private', ?, ?, 'text', '2026-10-12', '2026-10-12') \
+                 ON CONFLICT (scope, target, key) DO UPDATE SET value = excluded.value",
+                [scope.into(), key.into(), value.into()],
+            )).await.unwrap();
+        }
+
+        async fn roots(&self) -> HashSet<ObjectHash> {
+            let mut roots = HashSet::new();
+            collect_registered_store_roots(&self.conn, &self.storage, &HashSet::new(), &mut roots)
+                .await
+                .unwrap();
+            roots
+        }
+
+        fn reads(&self) -> Vec<ObjectHash> {
+            self.probe.reads.lock().unwrap().clone()
+        }
+
+        async fn assert_private_value_retained(&self, expected: &str) {
+            use sea_orm::{ConnectionTrait, Statement};
+
+            let row = self
+                .conn
+                .query_one_raw(Statement::from_sql_and_values(
+                    self.conn.get_database_backend(),
+                    "SELECT value FROM metadata_kv WHERE scope = 'agent_reasoning_identity' \
+                 AND target = 'og23-gc-private' AND key = 'identity'",
+                    [],
+                ))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(row.try_get_by::<String, _>("value").unwrap(), expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn reasoning_identity_scope_never_enters_generic_oid_walker() {
+        let fixture = ReasoningGcFixture::new().await;
+        let value = serde_json::json!({
+            "version": 1, "identity": "hmac-v1/synthetic", "source": fixture.private_oid.to_string(),
+        }).to_string();
+        fixture
+            .set("agent_reasoning_identity", "identity", &value)
+            .await;
+        assert!(fixture.roots().await.is_empty());
+        assert!(
+            fixture.reads().is_empty(),
+            "private scope must not even probe storage"
+        );
+        fixture.assert_private_value_retained(&value).await;
+    }
+
+    #[tokio::test]
+    async fn reasoning_identity_corrupt_json_oid_never_hydrates() {
+        let fixture = ReasoningGcFixture::new().await;
+        let value = serde_json::to_string(&fixture.private_oid.to_string()).unwrap();
+        fixture
+            .set("agent_reasoning_identity", "identity", &value)
+            .await;
+        assert!(fixture.roots().await.is_empty());
+        assert!(
+            fixture.reads().is_empty(),
+            "whole JSON OID must not hydrate through private scope"
+        );
+        fixture.assert_private_value_retained(&value).await;
+    }
+
+    #[tokio::test]
+    async fn reasoning_identity_corrupt_nested_oid_never_hydrates() {
+        let fixture = ReasoningGcFixture::new().await;
+        let value = serde_json::json!({"damaged": [{"nested": [fixture.private_oid.to_string()]}]})
+            .to_string();
+        fixture
+            .set("agent_reasoning_identity", "identity", &value)
+            .await;
+        assert!(fixture.roots().await.is_empty());
+        assert!(
+            fixture.reads().is_empty(),
+            "nested OID must not hydrate through private scope"
+        );
+        fixture.assert_private_value_retained(&value).await;
+    }
+
+    #[tokio::test]
+    async fn reasoning_identity_guard_preserves_other_scope_and_pending_roots() {
+        let fixture = ReasoningGcFixture::new().await;
+        let ordinary = serde_json::json!({"root": fixture.ordinary_oid.to_string()}).to_string();
+        let private = serde_json::json!({"root": fixture.private_oid.to_string()}).to_string();
+        fixture.set("branch", "ordinary", &ordinary).await;
+        fixture
+            .set("agent_reasoning_identity", "identity", &private)
+            .await;
+        fixture
+            .set("agent_capture_pending_chunk", "chunk", &private)
+            .await;
+        fixture
+            .set("agent_capture_session_alias", "alias", &private)
+            .await;
+        assert_eq!(fixture.roots().await, HashSet::from([fixture.ordinary_oid]));
+        let reads = fixture.reads();
+        assert!(
+            reads.len() >= 2 && reads.iter().all(|oid| *oid == fixture.ordinary_oid),
+            "ordinary object must be probed and traversed; no private OID read is permitted"
+        );
+        fixture.assert_private_value_retained(&private).await;
+        // The unchanged incumbent exercises actual HEAD replacement and the
+        // complete old commit/tree/blob graph retained by a pending parent.
+        // Its bounded isolated child must return its final assertion receipt.
+        // Its #[tokio::test] wrapper owns a runtime; invoke that unchanged
+        // wrapper off this async runtime rather than nesting block_on.
+        tokio::task::spawn_blocking(gc_does_not_hydrate_capture_pending_chunks)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn reasoning_identity_scope_guard_does_not_require_private_key() {
+        let fixture = ReasoningGcFixture::new().await;
+        let entries = || {
+            std::fs::read_dir(fixture.root.path())
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .filter(|name| {
+                    !["libra.db-journal", "libra.db-wal", "libra.db-shm"]
+                        .iter()
+                        .any(|sqlite| name == std::ffi::OsStr::new(sqlite))
+                })
+                .collect::<HashSet<_>>()
+        };
+        let before = entries();
+        assert_eq!(
+            before,
+            HashSet::from([std::ffi::OsString::from("libra.db")])
+        );
+        let value = serde_json::to_string(&fixture.private_oid.to_string()).unwrap();
+        fixture
+            .set("agent_reasoning_identity", "identity", &value)
+            .await;
+        assert!(fixture.roots().await.is_empty());
+        assert!(fixture.reads().is_empty());
+        assert_eq!(
+            entries(),
+            before,
+            "scope exclusion must not create key or payload files"
+        );
+        fixture.assert_private_value_retained(&value).await;
+    }
+
+    #[tokio::test]
+    async fn reasoning_identity_guard_remains_during_forward_recovery() {
+        let fixture = ReasoningGcFixture::new().await;
+        let corrupt = serde_json::to_string(&fixture.private_oid.to_string()).unwrap();
+        fixture
+            .set("agent_reasoning_identity", "identity", &corrupt)
+            .await;
+        assert!(fixture.roots().await.is_empty());
+        // Simulate a stopped writer by retaining a previously stored private
+        // row. GC must preserve its exclusion before and after forward repair.
+        let repaired = serde_json::json!({
+            "version": 1,
+            "identity": "hmac-v1/repaired",
+            "source": fixture.private_oid.to_string(),
+        })
+        .to_string();
+        fixture
+            .set("agent_reasoning_identity", "identity", &repaired)
+            .await;
+        assert!(fixture.roots().await.is_empty());
+        assert!(fixture.reads().is_empty());
+        fixture.assert_private_value_retained(&repaired).await;
     }
 }

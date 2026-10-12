@@ -760,3 +760,8 @@ sealed native carrier 将原始 opaque 字节和来源绑定证明一起移入�
 authenticated reasoning import transport 就绪前，普通导入消费者对非 ordinary carrier 返回固定来源授权错误。普通 pending codec 在 envelope 写入前拒绝非 ordinary payload；live attempt 按既有 receipt、fence 和 lease 规则保持 uncommitted。已启用 Claude deadline-FD 路线时，在解析 source 前拒绝，不回退普通捕获。已有 Pending receipt 不尝试 wrapper failure 诊断；NotTracked 仅沿用既有有界诊断尝试，不推进 sync_revision。
 
 OG-16 不启用生产 provider capability，也不准入生产 native issuer。合成正例只证明载体机制；Source A 仍为 UNPROVEN，真实 OpenCode native 归档、私有导入传输及 durable reasoning replay 仍须通过后续门。本载体不增加解密能力或 public metadata enum 值。
+
+
+### 私有 reasoning identity 与垃圾回收
+
+垃圾回收将保留的 `agent_reasoning_identity` scope 整体排除在通用 metadata 对象引用扫描之外。即使整个存储值损坏为 JSON 对象 ID，或包含嵌套对象 ID，也不会由这一路径触发对象加载。该隔离不需要私有 reasoning 密钥。其它 metadata 对象根、私有 capture 恢复 scope 的排除和 capture pending 父提交根继续遵守原有规则。前滚恢复中，停止或修复 reasoning identity writer 时必须同时保留私有记录与该隔离。这个护栏不创建 identity 记录、不签发 native 来源证明，也不启用 OpenCode reasoning 归档。

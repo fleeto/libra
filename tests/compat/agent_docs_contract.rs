@@ -1163,3 +1163,36 @@ fn authorized_reasoning_carrier_docs_preserve_partial_and_source_gates() {
         assert_contains(COMPATIBILITY_DOC, "compatibility", term);
     }
 }
+
+#[test]
+fn reasoning_identity_gc_docs_preserve_scope_and_source_boundaries() {
+    for (label, document) in [
+        ("agent EN", AGENT_CMD_DOC_EN),
+        ("developer EN", AGENT_DEV_DOC),
+        ("compatibility", COMPATIBILITY_DOC),
+    ] {
+        for term in [
+            "agent_reasoning_identity",
+            "including a damaged value containing a JSON object ID or a nested object ID",
+            "This exclusion requires no private reasoning key",
+            "capture pending parent roots retain their existing rules",
+            "retain both the private rows and this exclusion",
+            "does not create identity records, issue native provenance, or enable OpenCode reasoning archival",
+        ] {
+            assert_contains(document, label, term);
+        }
+    }
+    for (label, document) in [("agent ZH", AGENT_CMD_DOC_ZH), ("tracing", AGENT_DOC)] {
+        for term in [
+            "agent_reasoning_identity",
+            "或包含嵌套对象 ID",
+            "该隔离不需要私有 reasoning 密钥",
+            "capture pending 父提交根继续遵守原有规则",
+            "同时保留私有记录与该隔离",
+            "不创建 identity 记录、不签发 native 来源证明",
+            "也不启用 OpenCode reasoning 归档",
+        ] {
+            assert_contains(document, label, term);
+        }
+    }
+}

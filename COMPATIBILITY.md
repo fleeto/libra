@@ -950,3 +950,8 @@ functional acceptance remains with the operator.
 ### OG-16 authorized reasoning carrier
 
 The pre-redaction capability defaults to None; ordinary snapshot/live/store bytes remain compatible. Nonordinary reasoning dispositions, including zero-artifact partials, cannot become ordinary complete imports or pending envelopes. Native bytes and proof remain one sealed owner; identity views contain metadata only. Production native issuers and OpenCode archival remain disabled, Source A UNPROVEN. No new public metadata enum value, CLI option, database schema or decryption capability is added.
+
+
+### Private reasoning identity and garbage collection
+
+Garbage collection excludes the reserved `agent_reasoning_identity` scope from generic metadata object-reference scanning. This applies to the entire stored value, including a damaged value containing a JSON object ID or a nested object ID; those values do not trigger object hydration. This exclusion requires no private reasoning key. Ordinary metadata object roots, private capture recovery exclusions, and capture pending parent roots retain their existing rules. Forward recovery must retain both the private rows and this exclusion while a reasoning identity writer is stopped or repaired. This guard does not create identity records, issue native provenance, or enable OpenCode reasoning archival.

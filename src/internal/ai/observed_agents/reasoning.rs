@@ -170,6 +170,10 @@ pub(crate) struct NativeProvenReasoning {
     proofs: Vec<NativeReasoningProof>,
 }
 
+/// Shared pending source/claim key budget; capture's portable claim codec
+/// aliases this bound so an item cannot be valid only on one side.
+pub(crate) const MAX_REASONING_TURN_KEY_BYTES: usize = 512;
+
 /// A fresh, process-local import response key. It is consumed by seal or
 /// verify; the only wire copy is the explicitly redacted helper control type.
 pub(crate) struct ImportTransportKey([u8; 32]);
@@ -512,6 +516,9 @@ impl NativeProvenReasoning {
                 || artifact.provider != provider
                 || proof.source_session != self.source_session
                 || proof.logical_turn.is_empty()
+                || proof.logical_turn.len() > MAX_REASONING_TURN_KEY_BYTES
+                || proof.logical_turn.chars().any(char::is_control)
+                || artifact.bytes.is_empty()
                 || artifact.source_kind != Some(proof.field)
                 || artifact.bytes.verified_source() != (provider, proof.field)
                 || artifact.locator != locator
@@ -545,6 +552,194 @@ impl NativeProvenReasoning {
         }
         Ok(&self.artifacts)
     }
+}
+
+/// A closed pending-wire projection of a previously validated native batch.
+/// Deserializing this value never creates `NativeProvenReasoning` or opaque
+/// authority. OG-21 must authenticate the complete envelope and membership
+/// before asking this module to restore the original fixed-source proof.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PendingReasoningSourceDto {
+    capture_session: String,
+    source_session: String,
+    provider: ReasoningProvider,
+    items: Vec<ImportTransportItem>,
+}
+
+impl fmt::Debug for PendingReasoningSourceDto {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PendingReasoningSourceDto")
+            .field("item_count", &self.items.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl PendingReasoningSourceDto {
+    pub(crate) fn logical_turns(&self) -> impl Iterator<Item = &str> {
+        self.items
+            .iter()
+            .map(|item| item.proof.logical_turn.as_str())
+    }
+
+    #[allow(dead_code)] // OG-21 pairs this codec with the authenticated producer.
+    pub(crate) fn from_bound_native(
+        batch: &NativeProvenReasoning,
+        binding: &VerifiedCaptureBinding,
+    ) -> Result<Self, ReasoningFieldError> {
+        batch.validate(&binding.capture_session, binding.provider)?;
+        if batch.source_session != binding.source_session {
+            return Err(ReasoningFieldError::UnsupportedShape);
+        }
+        if batch.artifacts.len() != batch.proofs.len() {
+            return Err(ReasoningFieldError::UnsupportedShape);
+        }
+        let items = batch
+            .artifacts
+            .iter()
+            .zip(&batch.proofs)
+            .map(|(artifact, proof)| {
+                let source_kind = artifact
+                    .source_kind
+                    .ok_or(ReasoningFieldError::UnsupportedShape)?;
+                let issuer = match &proof.issuer {
+                    NativeReasoningIssuer::Unregistered => ImportTransportIssuer::Unregistered,
+                    #[cfg(test)]
+                    NativeReasoningIssuer::SyntheticOnly => ImportTransportIssuer::SyntheticOnly,
+                    #[cfg(test)]
+                    NativeReasoningIssuer::SyntheticUnknown => {
+                        ImportTransportIssuer::SyntheticUnknown
+                    }
+                };
+                Ok(ImportTransportItem {
+                    locator: artifact.locator.clone(),
+                    provider: artifact.provider,
+                    source_kind,
+                    bytes_base64: BASE64_STANDARD.encode(artifact.bytes.as_bytes()),
+                    proof: ImportTransportProof {
+                        issuer,
+                        provider: proof.provider,
+                        source_session: proof.source_session.clone(),
+                        message: proof.message,
+                        part: proof.part,
+                        field: proof.field,
+                        original_wire_sha256: proof.original_wire_sha256,
+                        logical_turn: proof.logical_turn.clone(),
+                    },
+                })
+            })
+            .collect::<Result<Vec<_>, ReasoningFieldError>>()?;
+        let projection = Self {
+            capture_session: batch.capture_session.clone(),
+            source_session: batch.source_session.clone(),
+            provider: binding.provider,
+            items,
+        };
+        projection.validate_shape()?;
+        Ok(projection)
+    }
+
+    /// Validate wire shape and exact bytes without elevating source authority.
+    /// The original fixed issuer remains mandatory on the later restore path.
+    pub(crate) fn validate_shape(&self) -> Result<(), ReasoningFieldError> {
+        use crate::internal::ai::traces::{
+            REASONING_ARTIFACT_MAX_ENTRIES, REASONING_ARTIFACT_TOTAL_MAX_BYTES,
+        };
+
+        if self.capture_session.is_empty()
+            || self.capture_session.len() > 4096
+            || self.source_session.is_empty()
+            || self.source_session.len() > 4096
+            || self.capture_session != format!("claude__{}", self.source_session)
+            || self.provider != ReasoningProvider::ClaudeCode
+            || self.items.is_empty()
+            || self.items.len() > REASONING_ARTIFACT_MAX_ENTRIES
+        {
+            return Err(ReasoningFieldError::UnsupportedShape);
+        }
+        // Reject an over-budget transport before any field is decoded. The
+        // remaining-byte check below also bounds one late field when earlier
+        // fields have already consumed most of the raw artifact budget.
+        let max_encoded =
+            max_import_transport_base64_bytes(REASONING_ARTIFACT_TOTAL_MAX_BYTES, self.items.len())
+                .map_err(|_| ReasoningFieldError::SourceTooLarge)?;
+        let encoded_total = self.items.iter().try_fold(0_u64, |sum, item| {
+            sum.checked_add(
+                u64::try_from(item.bytes_base64.len())
+                    .map_err(|_| ReasoningFieldError::SourceTooLarge)?,
+            )
+            .ok_or(ReasoningFieldError::SourceTooLarge)
+        })?;
+        if encoded_total > max_encoded {
+            return Err(ReasoningFieldError::SourceTooLarge);
+        }
+        let mut total = 0_u64;
+        let mut locators = BTreeSet::new();
+        for item in &self.items {
+            let field = match item.proof.field {
+                ReasoningSourceKind::Signature => "signature",
+                ReasoningSourceKind::RedactedThinkingData => "data",
+                _ => return Err(ReasoningFieldError::UnsupportedShape),
+            };
+            let expected_locator = format!(
+                "claude_code:msg={}/part={}/metadata={field}",
+                item.proof.message, item.proof.part
+            );
+            if item.provider != self.provider
+                || item.proof.provider != self.provider
+                || item.source_kind != item.proof.field
+                || item.proof.source_session != self.source_session
+                || item.proof.logical_turn.is_empty()
+                || item.proof.logical_turn.len() > MAX_REASONING_TURN_KEY_BYTES
+                || item.proof.logical_turn.chars().any(char::is_control)
+                || item.locator != expected_locator
+                || !locators.insert(&item.locator)
+                || !artifact_locator_is_valid(self.provider, Some(item.source_kind), &item.locator)
+            {
+                return Err(ReasoningFieldError::UnsupportedShape);
+            }
+            let remaining = REASONING_ARTIFACT_TOTAL_MAX_BYTES
+                .checked_sub(total)
+                .ok_or(ReasoningFieldError::SourceTooLarge)?;
+            let bytes = decode_pending_base64_bounded(&item.bytes_base64, remaining)?;
+            if bytes.is_empty()
+                || <[u8; 32]>::from(Sha256::digest(&bytes)) != item.proof.original_wire_sha256
+            {
+                return Err(ReasoningFieldError::UnsupportedShape);
+            }
+            total = total
+                .checked_add(bytes.len() as u64)
+                .ok_or(ReasoningFieldError::SourceTooLarge)?;
+            if total > REASONING_ARTIFACT_TOTAL_MAX_BYTES {
+                return Err(ReasoningFieldError::SourceTooLarge);
+            }
+        }
+        Ok(())
+    }
+}
+
+fn decode_pending_base64_bounded(
+    encoded: &str,
+    remaining_raw_bytes: u64,
+) -> Result<Vec<u8>, ReasoningFieldError> {
+    let max_encoded = max_import_transport_base64_bytes(remaining_raw_bytes, 1)
+        .map_err(|_| ReasoningFieldError::SourceTooLarge)?;
+    if u64::try_from(encoded.len()).map_err(|_| ReasoningFieldError::SourceTooLarge)? > max_encoded
+    {
+        return Err(ReasoningFieldError::SourceTooLarge);
+    }
+    let bytes = BASE64_STANDARD
+        .decode(encoded.as_bytes())
+        .map_err(|_| ReasoningFieldError::UnsupportedShape)?;
+    if u64::try_from(bytes.len()).map_err(|_| ReasoningFieldError::SourceTooLarge)?
+        > remaining_raw_bytes
+    {
+        return Err(ReasoningFieldError::SourceTooLarge);
+    }
+    if BASE64_STANDARD.encode(&bytes) != encoded {
+        return Err(ReasoningFieldError::UnsupportedShape);
+    }
+    Ok(bytes)
 }
 
 fn max_import_transport_base64_bytes(
@@ -1747,6 +1942,67 @@ mod tests {
             .sum::<u64>();
         assert!(actual <= allowed);
         assert!(actual > max_import_transport_base64_bytes(6, 1).expect("one field"));
+    }
+
+    #[test]
+    fn reasoning_pending_base64_rejects_over_budget_before_decode() {
+        let over_budget_and_invalid = "!".repeat(9);
+        assert!(matches!(
+            decode_pending_base64_bounded(&over_budget_and_invalid, 3),
+            Err(ReasoningFieldError::SourceTooLarge)
+        ));
+        let encoded = BASE64_STANDARD.encode(b"four");
+        assert!(matches!(
+            decode_pending_base64_bounded(&encoded, 3),
+            Err(ReasoningFieldError::SourceTooLarge)
+        ));
+        assert_eq!(decode_pending_base64_bounded(&encoded, 4).unwrap(), b"four");
+    }
+
+    #[test]
+    fn reasoning_pending_source_key_and_empty_field_are_rejected() {
+        let empty_native = synthetic_native_batch_for_turns(
+            carrier_test_support::CAPTURE,
+            carrier_test_support::SOURCE,
+            vec![(0, Vec::new())],
+        );
+        assert!(matches!(
+            VerifiedCaptureBinding::from_validated_capture_context(
+                &empty_native,
+                carrier_test_support::CAPTURE,
+                "claude_code"
+            ),
+            Err(ReasoningFieldError::UnsupportedShape)
+        ));
+        let native = synthetic_native_batch_for_turns(
+            carrier_test_support::CAPTURE,
+            carrier_test_support::SOURCE,
+            vec![(0, b"private-wire".to_vec())],
+        );
+        let binding = VerifiedCaptureBinding::from_validated_capture_context(
+            &native,
+            carrier_test_support::CAPTURE,
+            "claude_code",
+        )
+        .unwrap();
+        let mut dto = PendingReasoningSourceDto::from_bound_native(&native, &binding).unwrap();
+        dto.items[0].proof.logical_turn = "control\nkey".into();
+        assert!(matches!(
+            dto.validate_shape(),
+            Err(ReasoningFieldError::UnsupportedShape)
+        ));
+        dto.items[0].proof.logical_turn = "k".repeat(MAX_REASONING_TURN_KEY_BYTES + 1);
+        assert!(matches!(
+            dto.validate_shape(),
+            Err(ReasoningFieldError::UnsupportedShape)
+        ));
+        dto.items[0].proof.logical_turn = "synthetic-turn-0".into();
+        dto.items[0].bytes_base64.clear();
+        dto.items[0].proof.original_wire_sha256 = Sha256::digest([]).into();
+        assert!(matches!(
+            dto.validate_shape(),
+            Err(ReasoningFieldError::UnsupportedShape)
+        ));
     }
 
     #[test]

@@ -2727,6 +2727,10 @@ sealed native carrier 将原始 opaque 字节和来源绑定证明一起移入�
 生产 provider capability 仍未启用，生产 native issuer 仍未准入。合成正例只证明载体和导入传输机制；Source A 仍为 UNPROVEN，真实 native 字段接入已延期，未获证明的 OpenCode 字段不归档。durable reasoning replay 仍需通过后续门。本机制不增加解密能力或 public metadata enum 值。
 
 
+### Pending reasoning v2 codec（OG-17）
+
+私有 pending codec 现在可识别封闭的 inner payload v2，用于保存来源绑定的 reasoning 集合以及每个 turn 显式的 `verified_nonempty`／`verified_empty` identity 条目。空的 ordinary pending 仍逐字节编码为 v1；外层 header 与 envelope 保持 v1、原 MAC domain、64 MiB 编码总包、128 个 chunk 和每 chunk 512 KiB 的上限。旧 reader 对非空 v2 拒绝并保留证据。生产 writer 仍只写 v1，本版在 OG-21 将认证 reader 与 producer 配对前拒绝 v2 replay。解码后的 DTO 或完整 envelope MAC 都不证明 provider native 来源；未证字段仍为 partial，不归档。已签名的本地 v2 artifact 在封闭的来源证明 DTO 中保存 capture/source session 标识符；这些字符串不能证明 native 来源。共享 native validator 拒绝空 artifact 字节，以及超过 512 字节或包含控制字符的 logical-turn key。本版 recovery 对已签名的 v2 artifact 返回 ManualRequired 并保留原证据；请保留该 artifact，升级到支持 OG-21 v2 replay 的版本后再运行 `libra agent doctor --repair`。对于已过期的 v2 artifact，本版 repair 会将其移入 quarantine，升级后需沿人工一次性 replay 路径恢复。doctor finding 只报告通用的 manual recovery required，本版不能重放尚不支持的 v2 payload。
+
 ### 私有 reasoning identity 与垃圾回收
 
 垃圾回收将保留的 `agent_reasoning_identity` scope 整体排除在通用 metadata 对象引用扫描之外。即使整个存储值损坏为 JSON 对象 ID，或包含嵌套对象 ID，也不会由这一路径触发对象加载。该隔离不需要私有 reasoning 密钥。其它 metadata 对象根、私有 capture 恢复 scope 的排除和 capture pending 父提交根继续遵守原有规则。前滚恢复中，停止或修复 reasoning identity writer 时必须同时保留私有记录与该隔离。这个护栏不创建 identity 记录、不签发 native 来源证明，也不启用 OpenCode reasoning 归档。

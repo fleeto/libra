@@ -1,7 +1,13 @@
-//! Portable redacted payloads. Control identity is restored only in RAM from
-//! a verified private alias, never from a durable native locator or a path.
+//! Portable redacted payloads. Ordinary control identity is restored only in
+//! RAM from a verified private alias, never from a durable native locator or
+//! path. Closed v2 source proof also stores capture/source session identifiers
+//! in the signed local artifact; those strings do not confer native authority.
 
-use std::{collections::HashSet, path::Path, time::Instant};
+use std::{
+    collections::{HashMap, HashSet},
+    path::Path,
+    time::Instant,
+};
 
 use anyhow::{Result, ensure};
 use base64::{Engine, engine::general_purpose::STANDARD};
@@ -10,25 +16,41 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use uuid::Uuid;
 
-use crate::internal::ai::{
-    capture::{
-        checkpoint::{AuthenticatedPendingEnvelope, CheckpointRedactedPayload},
-        pending_identity::PreparedPendingAlias,
-        snapshot::CaptureSnapshotProjection,
+use crate::internal::{
+    ai::{
+        capture::{
+            checkpoint::{
+                AuthenticatedPendingEnvelope, CheckpointRedactedPayload, ReasoningTurnIdentity,
+            },
+            pending_identity::PreparedPendingAlias,
+            snapshot::CaptureSnapshotProjection,
+        },
+        coverage_gate::{LiveClaimCommitPlan, ReservedTurnClaim},
+        observed_agents::{
+            Completeness, MAX_REDACTION_MATCH_SAMPLES, RedactedBytes, Redactor, parse_canon_value,
+            reasoning::{
+                MAX_REASONING_TURN_KEY_BYTES, NativeProvenReasoning, PendingReasoningSourceDto,
+                VerifiedCaptureBinding,
+            },
+        },
     },
-    coverage_gate::{LiveClaimCommitPlan, ReservedTurnClaim},
-    observed_agents::{
-        Completeness, MAX_REDACTION_MATCH_SAMPLES, RedactedBytes, Redactor, parse_canon_value,
-    },
+    metadata::ReasoningIdentityKind,
 };
 
 const VERSION: u8 = 1;
+const REASONING_VERSION: u8 = 2;
 const MAX_TRANSCRIPT: usize = 24 * 1024 * 1024;
 const MAX_SIDECARS: usize = 4 * 1024 * 1024;
+const MAX_PORTABLE_CLAIMS: usize = MAX_SIDECARS / 64;
+const MAX_PORTABLE_TURN_KEY_BYTES: usize = MAX_REASONING_TURN_KEY_BYTES;
+// Keep the existing outer v1 coverage limit fixed if the inner reasoning
+// source's key bound changes in a later revision.
+const _: () = assert!(MAX_PORTABLE_TURN_KEY_BYTES == 512);
 const MAX_ENVELOPE: usize = 64 * 1024 * 1024;
 const MAX_DEPTH: usize = 64;
 const MAX_EVENTS: usize = MAX_SIDECARS / 128;
 const REMEDY: &str = "capture recovery payload cannot be trusted; run `libra agent doctor`";
+const PENDING_V2_REMEDY: &str = "capture recovery contains pending reasoning v2 that this Libra build cannot replay; keep the artifact and upgrade to a release with v2 recovery support";
 const METADATA_FIELDS: &[&str] = &[
     "schema_version",
     "checkpoint_id",
@@ -73,6 +95,43 @@ pub(crate) struct PendingPayloadProjection {
     redaction_report: String,
     metadata_mac: String,
     lifecycle_mac: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reasoning_source: Option<PendingReasoningSourceDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    identity_commit_associations: Option<Vec<PendingReasoningIdentityAssociation>>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PendingReasoningIdentityAssociation {
+    logical_turn_key: String,
+    slot: String,
+    descriptor_mac: String,
+    disposition: PendingReasoningIdentityDisposition,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum PendingReasoningIdentityDisposition {
+    VerifiedEmpty,
+    VerifiedNonempty,
+}
+
+impl PendingReasoningIdentityAssociation {
+    #[allow(dead_code)] // OG-21 wires the actual claim plan into v2 producer.
+    pub(crate) fn from_prepared_turn(key: &str, turn: &ReasoningTurnIdentity) -> Self {
+        Self {
+            logical_turn_key: key.to_owned(),
+            slot: turn.slot().to_owned(),
+            descriptor_mac: turn.descriptor_mac().to_owned(),
+            disposition: match turn.kind() {
+                ReasoningIdentityKind::Empty => PendingReasoningIdentityDisposition::VerifiedEmpty,
+                ReasoningIdentityKind::Nonempty => {
+                    PendingReasoningIdentityDisposition::VerifiedNonempty
+                }
+            },
+        }
+    }
 }
 
 impl PendingPayloadProjection {
@@ -136,6 +195,8 @@ impl PendingPayloadProjection {
             redaction_report: STANDARD.encode(payload.redaction_report_json().bytes()),
             metadata_mac: String::new(),
             lifecycle_mac: String::new(),
+            reasoning_source: None,
+            identity_commit_associations: None,
         };
         projected.validate_data()?;
         let (metadata, lifecycle) = projected.rebuild(identity)?;
@@ -163,6 +224,54 @@ impl PendingPayloadProjection {
         projected.validate()?;
         check_budget(deadline)?;
         Ok(projected)
+    }
+
+    /// Closed v2 codec entry. The only source argument is an already verified
+    /// owned native witness and per-turn prepared identities; a deserialized
+    /// DTO cannot call this constructor. OG-21 will pass the authenticated
+    /// claim plan and pair the
+    /// production v2 issuer with its reader. Until then `seal` emits v1 only.
+    #[allow(dead_code)] // Awaiting OG-21's authenticated producer/reader pair.
+    fn with_bound_reasoning(
+        self,
+        batch: &NativeProvenReasoning,
+        binding: &VerifiedCaptureBinding,
+        associations: Vec<(String, ReasoningTurnIdentity)>,
+    ) -> Result<Self> {
+        let associations = associations
+            .iter()
+            .map(|(key, turn)| PendingReasoningIdentityAssociation::from_prepared_turn(key, turn))
+            .collect();
+        self.with_reasoning_codec_parts(batch, binding, associations)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_synthetic_reasoning(
+        self,
+        batch: &NativeProvenReasoning,
+        binding: &VerifiedCaptureBinding,
+        associations: Vec<PendingReasoningIdentityAssociation>,
+    ) -> Result<Self> {
+        self.with_reasoning_codec_parts(batch, binding, associations)
+    }
+
+    fn with_reasoning_codec_parts(
+        mut self,
+        batch: &NativeProvenReasoning,
+        binding: &VerifiedCaptureBinding,
+        associations: Vec<PendingReasoningIdentityAssociation>,
+    ) -> Result<Self> {
+        ensure!(
+            self.version == VERSION && self.reasoning_source.is_none(),
+            REMEDY
+        );
+        let source =
+            PendingReasoningSourceDto::from_bound_native(batch, binding).map_err(|_| failure())?;
+        self.version = REASONING_VERSION;
+        self.reasoning_source = Some(source);
+        self.identity_commit_associations = Some(associations);
+        self.validate()?;
+        Ok(self)
     }
 
     pub(crate) fn encode(&self) -> Result<Vec<u8>> {
@@ -196,6 +305,10 @@ impl PendingPayloadProjection {
         identity: &PreparedPendingAlias,
         deadline: Instant,
     ) -> Result<CheckpointRedactedPayload> {
+        // OG-21 must restore the authenticated native proof together with
+        // ordinary payload. Silently projecting only redacted content would
+        // discard the pending reasoning collection.
+        ensure!(self.version != REASONING_VERSION, PENDING_V2_REMEDY);
         self.validate()?;
         check_budget(deadline)?;
         ensure!(
@@ -290,9 +403,54 @@ impl PendingPayloadProjection {
 
     fn validate_data(&self) -> Result<()> {
         ensure!(
-            self.version == VERSION && canonical_alias(&self.alias),
+            matches!(self.version, VERSION | REASONING_VERSION) && canonical_alias(&self.alias),
             REMEDY
         );
+        match self.version {
+            VERSION => ensure!(
+                self.reasoning_source.is_none() && self.identity_commit_associations.is_none(),
+                REMEDY
+            ),
+            REASONING_VERSION => {
+                let source = self.reasoning_source.as_ref().ok_or_else(failure)?;
+                source.validate_shape().map_err(|_| failure())?;
+                let associations = self
+                    .identity_commit_associations
+                    .as_ref()
+                    .ok_or_else(failure)?;
+                ensure!(
+                    !associations.is_empty() && associations.len() <= MAX_PORTABLE_CLAIMS,
+                    REMEDY
+                );
+                let source_turns: HashSet<&str> = source.logical_turns().collect();
+                let mut dispositions = HashMap::with_capacity(associations.len());
+                for association in associations {
+                    ensure!(
+                        !association.logical_turn_key.is_empty()
+                            && association.logical_turn_key.len() <= MAX_PORTABLE_TURN_KEY_BYTES
+                            && !association.logical_turn_key.chars().any(char::is_control)
+                            && dispositions
+                                .insert(
+                                    association.logical_turn_key.as_str(),
+                                    association.disposition,
+                                )
+                                .is_none()
+                            && valid_reasoning_identity_mac(&association.slot)
+                            && valid_reasoning_identity_mac(&association.descriptor_mac),
+                        REMEDY
+                    );
+                }
+                for (key, disposition) in dispositions {
+                    ensure!(
+                        source_turns.contains(key)
+                            == (disposition
+                                == PendingReasoningIdentityDisposition::VerifiedNonempty),
+                        REMEDY
+                    );
+                }
+            }
+            _ => return Err(failure()),
+        }
         let transcript = decoded(&self.transcript, MAX_TRANSCRIPT)?;
         ensure!(
             self.snapshot.has_durable_source_commitment()
@@ -406,12 +564,13 @@ impl PortablePendingCoverage {
             REMEDY
         );
         ensure!(
-            plan.owner.len() <= 512 && plan.claims.len() <= MAX_SIDECARS / 64,
+            plan.owner.len() <= 512 && plan.claims.len() <= MAX_PORTABLE_CLAIMS,
             REMEDY
         );
         for claim in &plan.claims {
             ensure!(
-                claim.logical_turn_key.len() <= 512 && claim.coverage_digest.len() == 64,
+                claim.logical_turn_key.len() <= MAX_PORTABLE_TURN_KEY_BYTES
+                    && claim.coverage_digest.len() == 64,
                 REMEDY
             );
         }
@@ -474,14 +633,14 @@ impl PortablePendingCoverage {
                 && self.owner.len() <= 512
                 && !self.owner.chars().any(char::is_control)
                 && self.created_at >= 0
-                && self.claims.len() <= MAX_SIDECARS / 64,
+                && self.claims.len() <= MAX_PORTABLE_CLAIMS,
             REMEDY
         );
         let mut keys = HashSet::new();
         for claim in &self.claims {
             ensure!(
                 !claim.logical_turn_key.is_empty()
-                    && claim.logical_turn_key.len() <= 512
+                    && claim.logical_turn_key.len() <= MAX_PORTABLE_TURN_KEY_BYTES
                     && !claim.logical_turn_key.chars().any(char::is_control)
                     && claim.coverage_digest.len() == 64
                     && lower_hex(&claim.coverage_digest)
@@ -549,6 +708,10 @@ fn lower_hex(s: &str) -> bool {
 fn valid_mac(s: &str) -> bool {
     s.strip_prefix("pending-envelope/hmac-v1/")
         .is_some_and(|s| s.len() == 64 && lower_hex(s))
+}
+fn valid_reasoning_identity_mac(s: &str) -> bool {
+    s.strip_prefix("reasoning-identity/hmac-v1/")
+        .is_some_and(|digest| digest.len() == 64 && lower_hex(digest))
 }
 fn valid_string(value: &Value, cap: usize) -> bool {
     value
@@ -1621,5 +1784,425 @@ mod tests {
         invalid_message(fixture.rehydrate(&swapped, &identity).await);
         let preserved_report = decoded(&projection.redaction_report, MAX_SIDECARS).unwrap();
         assert_eq!(preserved_report, payload.redaction_report_json().bytes());
+    }
+
+    fn synthetic_association(
+        key: &str,
+        disposition: PendingReasoningIdentityDisposition,
+    ) -> PendingReasoningIdentityAssociation {
+        PendingReasoningIdentityAssociation {
+            logical_turn_key: key.to_owned(),
+            slot: format!("reasoning-identity/hmac-v1/{}", "a".repeat(64)),
+            descriptor_mac: format!("reasoning-identity/hmac-v1/{}", "b".repeat(64)),
+            disposition,
+        }
+    }
+
+    async fn synthetic_v2_projection() -> (
+        Fixture,
+        PreparedPendingAlias,
+        PendingPayloadProjection,
+        PendingPayloadProjection,
+    ) {
+        use crate::internal::ai::observed_agents::reasoning::synthetic_native_batch_for_turns;
+
+        let fixture = Fixture::new().await;
+        let identity = fixture.identity("claude__native-session", None).await;
+        let payload = fixture.payload(&identity).await;
+        let v1 = fixture.seal(&payload, &identity).await;
+        let native = synthetic_native_batch_for_turns(
+            "claude__native-session",
+            "native-session",
+            vec![
+                (0, b"first-private-field".to_vec()),
+                (1, b"second-private-field".to_vec()),
+            ],
+        );
+        let binding = VerifiedCaptureBinding::from_validated_capture_context(
+            &native,
+            "claude__native-session",
+            "claude_code",
+        )
+        .unwrap();
+        let v2 = fixture
+            .seal(&payload, &identity)
+            .await
+            .with_synthetic_reasoning(
+                &native,
+                &binding,
+                vec![
+                    synthetic_association(
+                        "synthetic-turn-0",
+                        PendingReasoningIdentityDisposition::VerifiedNonempty,
+                    ),
+                    synthetic_association(
+                        "ordinary-turn",
+                        PendingReasoningIdentityDisposition::VerifiedEmpty,
+                    ),
+                    synthetic_association(
+                        "synthetic-turn-1",
+                        PendingReasoningIdentityDisposition::VerifiedNonempty,
+                    ),
+                ],
+            )
+            .unwrap();
+        (fixture, identity, v1, v2)
+    }
+
+    #[tokio::test]
+    async fn reasoning_pending_empty_v1_bytes_unchanged() {
+        let (_, _, v1, _) = synthetic_v2_projection().await;
+        let bytes = v1.encode().unwrap();
+        crate::internal::ai::capture::pending::frozen_pre_v2::decode_payload_v1(&bytes).unwrap();
+        assert!(!String::from_utf8_lossy(&bytes).contains("reasoning_source"));
+        assert!(!String::from_utf8_lossy(&bytes).contains("identity_commit_associations"));
+        assert_eq!(
+            PendingPayloadProjection::decode(&bytes)
+                .unwrap()
+                .encode()
+                .unwrap(),
+            bytes
+        );
+    }
+
+    #[tokio::test]
+    async fn reasoning_pending_legacy_v1_is_readable() {
+        let (fixture, identity, v1, _) = synthetic_v2_projection().await;
+        let bytes = v1.encode().unwrap();
+        let decoded = PendingPayloadProjection::decode(&bytes).unwrap();
+        assert_eq!(decoded.version, VERSION);
+        fixture.rehydrate(&decoded, &identity).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn reasoning_pending_v2_schema_is_closed() {
+        let (_, _, _, v2) = synthetic_v2_projection().await;
+        let bytes = v2.encode().unwrap();
+        let mut value: Value = serde_json::from_slice(&bytes).unwrap();
+        value["unknown_outer"] = Value::Bool(true);
+        assert!(serde_json::from_value::<PendingPayloadProjection>(value).is_err());
+        let mut value: Value = serde_json::from_slice(&bytes).unwrap();
+        value["reasoning_source"]["items"][0]["unknown_item"] = Value::Bool(true);
+        assert!(serde_json::from_value::<PendingPayloadProjection>(value).is_err());
+        let mut value: Value = serde_json::from_slice(&bytes).unwrap();
+        value["reasoning_source"]["unknown_source_field"] = Value::Bool(true);
+        assert!(serde_json::from_value::<PendingPayloadProjection>(value).is_err());
+        let mut value: Value = serde_json::from_slice(&bytes).unwrap();
+        value["identity_commit_associations"][0]["unknown_association_field"] = Value::Bool(true);
+        assert!(serde_json::from_value::<PendingPayloadProjection>(value).is_err());
+        let mut value: Value = serde_json::from_slice(&bytes).unwrap();
+        value["version"] = Value::from(3);
+        assert!(
+            serde_json::from_value::<PendingPayloadProjection>(value.clone())
+                .unwrap()
+                .encode()
+                .is_err()
+        );
+        value["version"] = Value::from(1);
+        assert!(
+            serde_json::from_value::<PendingPayloadProjection>(value)
+                .unwrap()
+                .encode()
+                .is_err()
+        );
+
+        let (fixture, identity, _, v2) = synthetic_v2_projection().await;
+        let mut unknown = v2;
+        unknown.version = 3;
+        let error = match fixture.rehydrate(&unknown, &identity).await {
+            Ok(_) => panic!("unknown pending payload version must be rejected"),
+            Err(error) => error,
+        };
+        assert_eq!(error.to_string(), REMEDY);
+    }
+
+    #[tokio::test]
+    async fn reasoning_pending_v2_source_record_roundtrip() {
+        let (_, _, _, v2) = synthetic_v2_projection().await;
+        let bytes = v2.encode().unwrap();
+        let decoded = PendingPayloadProjection::decode(&bytes).unwrap();
+        let original: Value = serde_json::to_value(&v2.reasoning_source).unwrap();
+        let restored: Value = serde_json::to_value(&decoded.reasoning_source).unwrap();
+        assert_eq!(original, restored);
+        assert_eq!(decoded.version, REASONING_VERSION);
+    }
+
+    #[tokio::test]
+    async fn reasoning_pending_v2_locator_roundtrip() {
+        let (_, _, _, v2) = synthetic_v2_projection().await;
+        let decoded = PendingPayloadProjection::decode(&v2.encode().unwrap()).unwrap();
+        let value = serde_json::to_value(decoded.reasoning_source).unwrap();
+        assert_eq!(
+            value["items"][0]["locator"],
+            "claude_code:msg=0/part=0/metadata=signature"
+        );
+        assert_eq!(
+            value["items"][1]["locator"],
+            "claude_code:msg=1/part=1/metadata=signature"
+        );
+    }
+
+    #[tokio::test]
+    async fn reasoning_pending_v2_digest_roundtrip() {
+        use sha2::{Digest, Sha256};
+        let (_, _, _, v2) = synthetic_v2_projection().await;
+        let decoded = PendingPayloadProjection::decode(&v2.encode().unwrap()).unwrap();
+        let value = serde_json::to_value(decoded.reasoning_source).unwrap();
+        let expected: [u8; 32] = Sha256::digest(b"first-private-field").into();
+        assert_eq!(
+            value["items"][0]["proof"]["original_wire_sha256"],
+            serde_json::json!(expected)
+        );
+    }
+
+    #[tokio::test]
+    async fn reasoning_pending_v2_payload_roundtrip() {
+        let (_, _, _, v2) = synthetic_v2_projection().await;
+        let decoded = PendingPayloadProjection::decode(&v2.encode().unwrap()).unwrap();
+        let value = serde_json::to_value(decoded.reasoning_source).unwrap();
+        let bytes = STANDARD
+            .decode(value["items"][0]["bytes_base64"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(bytes, b"first-private-field");
+    }
+
+    #[tokio::test]
+    async fn reasoning_pending_v2_order_roundtrip() {
+        let (_, _, _, v2) = synthetic_v2_projection().await;
+        let decoded = PendingPayloadProjection::decode(&v2.encode().unwrap()).unwrap();
+        let value = serde_json::to_value(decoded.reasoning_source).unwrap();
+        assert_eq!(value["items"][0]["proof"]["message"], 0);
+        assert_eq!(value["items"][1]["proof"]["message"], 1);
+        let keys: Vec<_> = decoded
+            .identity_commit_associations
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.logical_turn_key)
+            .collect();
+        assert_eq!(
+            keys,
+            ["synthetic-turn-0", "ordinary-turn", "synthetic-turn-1"]
+        );
+    }
+
+    #[tokio::test]
+    async fn reasoning_pending_v2_old_reader_fails_closed() {
+        let (fixture, identity, _, v2) = synthetic_v2_projection().await;
+        let bytes = v2.encode().unwrap();
+        assert!(
+            crate::internal::ai::capture::pending::frozen_pre_v2::decode_payload_v1(&bytes)
+                .is_err()
+        );
+        let error = match fixture.rehydrate(&v2, &identity).await {
+            Ok(_) => panic!("v2 rehydrate must remain disabled"),
+            Err(error) => error,
+        };
+        assert_eq!(error.to_string(), PENDING_V2_REMEDY);
+        assert_eq!(
+            PendingPayloadProjection::decode(&bytes)
+                .unwrap()
+                .encode()
+                .unwrap(),
+            bytes
+        );
+        crate::internal::ai::capture::pending::assert_frozen_pre_v2_route_rejects_v2().await;
+    }
+
+    #[tokio::test]
+    async fn reasoning_pending_identity_roundtrip_keeps_ordinary_claim_proof() {
+        let (_, _, v1, v2) = synthetic_v2_projection().await;
+        assert_eq!(v1.snapshot, v2.snapshot);
+        assert_eq!(v1.metadata, v2.metadata);
+        assert_eq!(v1.lifecycle, v2.lifecycle);
+        let decoded = PendingPayloadProjection::decode(&v2.encode().unwrap()).unwrap();
+        let entries = decoded.identity_commit_associations.unwrap();
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[1].logical_turn_key, "ordinary-turn");
+        assert_eq!(
+            entries[1].disposition,
+            PendingReasoningIdentityDisposition::VerifiedEmpty
+        );
+    }
+
+    #[tokio::test]
+    async fn reasoning_pending_typed_sealer_uses_authenticated_turn_identities() {
+        use crate::internal::ai::{
+            capture::checkpoint::{
+                ReasoningIdentityPreparation, prepare_reasoning_coverage_plan_from_disposition,
+            },
+            observed_agents::{
+                NormalizedTurn,
+                reasoning::{ReasoningSourceDisposition, synthetic_native_batch_for_turns},
+            },
+        };
+
+        let fixture = Fixture::new().await;
+        let identity = fixture.identity("claude__native-session", None).await;
+        let payload = fixture.payload(&identity).await;
+        let native = synthetic_native_batch_for_turns(
+            "claude__native-session",
+            "native-session",
+            vec![(0, b"private-native-source".to_vec())],
+        );
+        let disposition = ReasoningSourceDisposition::NativeProven(native);
+        let turns = ["synthetic-turn-0", "ordinary-turn"]
+            .into_iter()
+            .enumerate()
+            .map(|(ordinal, key)| NormalizedTurn {
+                logical_turn_key: key.to_owned(),
+                ordinal,
+                completeness: Completeness::Complete,
+                started_at: None,
+                ended_at: None,
+                records: Vec::new(),
+            })
+            .collect::<Vec<_>>();
+        let plan = prepare_reasoning_coverage_plan_from_disposition(
+            &disposition,
+            ReasoningIdentityPreparation {
+                conn: &fixture.conn,
+                scope: &fixture.scope,
+                storage_path: &fixture.storage,
+                authorized_root: fixture.root.path(),
+                session_id: "claude__native-session",
+                provider: "claude_code",
+                turns: &turns,
+                deadline: deadline(),
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let ReasoningSourceDisposition::NativeProven(native) = &disposition else {
+            panic!("synthetic native disposition must remain typed")
+        };
+        let binding = VerifiedCaptureBinding::from_validated_capture_context(
+            native,
+            "claude__native-session",
+            "claude_code",
+        )
+        .unwrap();
+        let projected = fixture
+            .seal(&payload, &identity)
+            .await
+            .with_bound_reasoning(
+                native,
+                &binding,
+                turns
+                    .iter()
+                    .map(|turn| {
+                        (
+                            turn.logical_turn_key.clone(),
+                            plan.turn(&turn.logical_turn_key).unwrap().clone(),
+                        )
+                    })
+                    .collect(),
+            )
+            .unwrap();
+        let decoded = PendingPayloadProjection::decode(&projected.encode().unwrap()).unwrap();
+        let associations = decoded.identity_commit_associations.unwrap();
+        assert_eq!(associations.len(), 2);
+        assert_eq!(
+            associations[0].disposition,
+            PendingReasoningIdentityDisposition::VerifiedNonempty
+        );
+        assert_eq!(
+            associations[1].disposition,
+            PendingReasoningIdentityDisposition::VerifiedEmpty
+        );
+        assert_eq!(
+            associations[0].slot,
+            plan.turn("synthetic-turn-0").unwrap().slot()
+        );
+        assert_eq!(
+            associations[1].descriptor_mac,
+            plan.turn("ordinary-turn").unwrap().descriptor_mac()
+        );
+    }
+
+    #[tokio::test]
+    async fn reasoning_pending_v2_identity_association_shape_is_unique() {
+        let (_, _, _, v2) = synthetic_v2_projection().await;
+        let valid: Value = serde_json::from_slice(&v2.encode().unwrap()).unwrap();
+        // The batch may carry a previously covered source prefix. Its
+        // authenticated membership is checked by the OG-21 reader, not by
+        // the current claim association list.
+        let mut prefix = valid.clone();
+        let mut covered = prefix["reasoning_source"]["items"][0].clone();
+        covered["locator"] = Value::from("claude_code:msg=99/part=99/metadata=signature");
+        covered["proof"]["message"] = Value::from(99);
+        covered["proof"]["part"] = Value::from(99);
+        covered["proof"]["logical_turn"] = Value::from("covered-prefix");
+        prefix["reasoning_source"]["items"]
+            .as_array_mut()
+            .unwrap()
+            .push(covered);
+        let projected: PendingPayloadProjection = serde_json::from_value(prefix).unwrap();
+        projected.encode().unwrap();
+
+        // An association claiming nonempty reasoning must have source bytes
+        // for that key, while an empty claim must not carry source bytes.
+        let mut missing_source = valid.clone();
+        missing_source["identity_commit_associations"][1]["disposition"] =
+            Value::from("verified_nonempty");
+        let projected: PendingPayloadProjection = serde_json::from_value(missing_source).unwrap();
+        assert!(projected.encode().is_err());
+        let mut false_empty = valid.clone();
+        false_empty["identity_commit_associations"][0]["disposition"] =
+            Value::from("verified_empty");
+        let projected: PendingPayloadProjection = serde_json::from_value(false_empty).unwrap();
+        assert!(projected.encode().is_err());
+
+        let mut value: Value = serde_json::from_slice(&v2.encode().unwrap()).unwrap();
+        let duplicate = value["identity_commit_associations"][0].clone();
+        value["identity_commit_associations"]
+            .as_array_mut()
+            .unwrap()
+            .push(duplicate);
+        let decoded: PendingPayloadProjection = serde_json::from_value(value).unwrap();
+        assert!(decoded.encode().is_err());
+
+        // The commit plan may contain ordinary turns beyond the source
+        // artifact count; it shares the outer coverage claim bound instead.
+        let mut value: Value = serde_json::from_slice(&v2.encode().unwrap()).unwrap();
+        let ordinary = value["identity_commit_associations"][1].clone();
+        let associations = value["identity_commit_associations"]
+            .as_array_mut()
+            .unwrap();
+        for index in 0..=crate::internal::ai::traces::REASONING_ARTIFACT_MAX_ENTRIES {
+            let mut entry = ordinary.clone();
+            entry["logical_turn_key"] = Value::from(format!("ordinary-turn-{index}"));
+            associations.push(entry);
+        }
+        assert!(associations.len() > crate::internal::ai::traces::REASONING_ARTIFACT_MAX_ENTRIES);
+        assert!(associations.len() <= MAX_PORTABLE_CLAIMS);
+        let decoded: PendingPayloadProjection = serde_json::from_value(value).unwrap();
+        decoded.encode().unwrap();
+
+        // The native source collection retains its separate 512-item bound.
+        let mut source_value: Value = serde_json::to_value(v2.reasoning_source).unwrap();
+        let items = source_value["items"].as_array_mut().unwrap();
+        let seed = items[0].clone();
+        for index in items.len()..crate::internal::ai::traces::REASONING_ARTIFACT_MAX_ENTRIES {
+            let mut item = seed.clone();
+            item["locator"] = Value::from(format!(
+                "claude_code:msg={index}/part={index}/metadata=signature"
+            ));
+            item["proof"]["message"] = Value::from(index as u64);
+            item["proof"]["part"] = Value::from(index as u64);
+            item["proof"]["logical_turn"] = Value::from(format!("synthetic-turn-{index}"));
+            items.push(item);
+        }
+        let source: PendingReasoningSourceDto =
+            serde_json::from_value(source_value.clone()).unwrap();
+        source.validate_shape().unwrap();
+        let mut overflow = seed;
+        overflow["locator"] = Value::from("claude_code:msg=512/part=512/metadata=signature");
+        overflow["proof"]["message"] = Value::from(512);
+        overflow["proof"]["part"] = Value::from(512);
+        overflow["proof"]["logical_turn"] = Value::from("synthetic-turn-512");
+        source_value["items"].as_array_mut().unwrap().push(overflow);
+        let source: PendingReasoningSourceDto = serde_json::from_value(source_value).unwrap();
+        assert!(source.validate_shape().is_err());
     }
 }

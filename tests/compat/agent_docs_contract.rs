@@ -1210,6 +1210,48 @@ fn private_reasoning_import_transport_docs_preserve_native_gate() {
 }
 
 #[test]
+fn pending_reasoning_v2_docs_keep_writer_and_native_gates() {
+    for (label, document) in [
+        ("agent EN", AGENT_CMD_DOC_EN),
+        ("developer EN", AGENT_DEV_DOC),
+        ("compatibility", COMPATIBILITY_DOC),
+    ] {
+        for term in [
+            "Pending reasoning v2 codec (OG-17)",
+            "empty ordinary pending payload still encodes byte-for-byte as v1",
+            "The outer header and envelope remain v1",
+            "64 MiB encoded envelope",
+            "production writer still emits v1",
+            "this build refuses v2 replay until OG-21",
+            "does not establish native provider origin",
+            "capture/source session identifiers",
+            "before running `libra agent doctor --repair`",
+            "moves it to quarantine",
+            "generic manual recovery required",
+        ] {
+            assert_contains(document, label, term);
+        }
+    }
+    for (label, document) in [("agent ZH", AGENT_CMD_DOC_ZH), ("tracing", AGENT_DOC)] {
+        for term in [
+            "Pending reasoning v2 codec（OG-17）",
+            "空的 ordinary pending 仍逐字节编码为 v1",
+            "外层 header 与 envelope 保持 v1",
+            "64 MiB 编码总包",
+            "生产 writer 仍只写 v1",
+            "OG-21 将认证 reader 与 producer 配对前拒绝 v2 replay",
+            "不证明 provider native 来源",
+            "capture/source session 标识符",
+            "再运行 `libra agent doctor --repair`",
+            "移入 quarantine",
+            "通用的 manual recovery required",
+        ] {
+            assert_contains(document, label, term);
+        }
+    }
+}
+
+#[test]
 fn reasoning_identity_gc_docs_preserve_scope_and_source_boundaries() {
     for (label, document) in [
         ("agent EN", AGENT_CMD_DOC_EN),

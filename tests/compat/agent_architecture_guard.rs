@@ -9563,6 +9563,190 @@ fn reasoning_import_dto_cannot_mint_opaque() {
 }
 
 #[test]
+fn reasoning_pending_dto_cannot_construct_raw_opaque() {
+    use syn::visit::Visit;
+
+    let (_, lower) = parse_rust_source("src/internal/ai/observed_agents/reasoning.rs");
+    let (_, pending) = parse_rust_source("src/internal/ai/capture/pending_payload.rs");
+    for name in [
+        "PendingReasoningSourceDto",
+        "ImportTransportItem",
+        "ImportTransportProof",
+    ] {
+        assert!(
+            top_level_struct(&lower, name)
+                .fields
+                .iter()
+                .all(|field| matches!(field.vis, syn::Visibility::Inherited)),
+            "{name} must have no public constructor fields"
+        );
+    }
+    assert!(
+        top_level_struct(&pending, "PendingReasoningIdentityAssociation")
+            .fields
+            .iter()
+            .all(|field| matches!(field.vis, syn::Visibility::Inherited))
+    );
+    fn type_is(ty: &syn::Type, name: &str) -> bool {
+        matches!(ty, syn::Type::Path(path) if path.path.is_ident(name))
+    }
+    let methods = pending
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Impl(item)
+                if matches!(item.self_ty.as_ref(), syn::Type::Path(path) if path.path.is_ident("PendingPayloadProjection")) =>
+            {
+                Some(item)
+            }
+            _ => None,
+        })
+        .flat_map(|item| &item.items)
+        .filter_map(|item| match item {
+            syn::ImplItem::Fn(method) => Some(method),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let typed_sealer = methods
+        .iter()
+        .copied()
+        .find(|method| method.sig.ident == "with_bound_reasoning")
+        .expect("typed v2 sealer exists");
+    assert!(
+        matches!(typed_sealer.vis, syn::Visibility::Inherited),
+        "OG-17 v2 sealer must remain module-private until OG-21 wires its authenticated reader"
+    );
+    let association_type = typed_sealer
+        .sig
+        .inputs
+        .iter()
+        .nth(3)
+        .and_then(|arg| match arg {
+            syn::FnArg::Typed(arg) => Some(arg.ty.as_ref()),
+            _ => None,
+        });
+    let typed_associations = association_type
+        .and_then(|ty| match ty {
+            syn::Type::Path(path) => path.path.segments.last(),
+            _ => None,
+        })
+        .and_then(|segment| match &segment.arguments {
+            syn::PathArguments::AngleBracketed(args) if segment.ident == "Vec" => args.args.first(),
+            _ => None,
+        })
+        .and_then(|arg| match arg {
+            syn::GenericArgument::Type(syn::Type::Tuple(tuple)) => Some(tuple),
+            _ => None,
+        })
+        .is_some_and(|tuple| {
+            tuple.elems.len() == 2
+                && type_is(&tuple.elems[0], "String")
+                && type_is(&tuple.elems[1], "ReasoningTurnIdentity")
+        });
+    assert!(
+        typed_associations,
+        "production v2 sealer must receive prepared typed identities, not deserialized DTOs"
+    );
+    let raw_sealer = methods
+        .iter()
+        .copied()
+        .find(|method| method.sig.ident == "with_reasoning_codec_parts")
+        .expect("raw v2 codec parts helper exists");
+    assert!(
+        matches!(raw_sealer.vis, syn::Visibility::Inherited),
+        "raw v2 codec parts helper must remain module-private"
+    );
+    #[derive(Default)]
+    struct RawCodecCalls(usize);
+    impl<'ast> Visit<'ast> for RawCodecCalls {
+        fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+            if call.method == "with_reasoning_codec_parts" {
+                self.0 += 1;
+            }
+            syn::visit::visit_expr_method_call(self, call);
+        }
+    }
+    let raw_callers = methods
+        .iter()
+        .filter_map(|method| {
+            let mut calls = RawCodecCalls::default();
+            calls.visit_block(&method.block);
+            (calls.0 != 0).then(|| method.sig.ident.to_string())
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        raw_callers,
+        BTreeSet::from([
+            "with_bound_reasoning".to_string(),
+            "with_synthetic_reasoning".to_string(),
+        ]),
+        "only typed and test-only sealers may pass raw v2 association DTOs"
+    );
+    let mut all_raw_calls = RawCodecCalls::default();
+    all_raw_calls.visit_file(&pending);
+    assert_eq!(
+        all_raw_calls.0, 2,
+        "raw v2 codec parts helper gained an unreviewed call site"
+    );
+    let synthetic_sealer = methods
+        .iter()
+        .find(|method| method.sig.ident == "with_synthetic_reasoning")
+        .expect("synthetic v2 sealer exists");
+    assert!(
+        synthetic_sealer.attrs.iter().any(|attribute| {
+            attribute.path().is_ident("cfg")
+                && attribute
+                    .parse_args::<syn::Ident>()
+                    .is_ok_and(|value| value == "test")
+        }),
+        "raw association injection must remain test-only"
+    );
+    let mut scan = ReasoningPortScan::default();
+    scan.visit_file(&pending);
+    assert!(
+        scan.constructors
+            .iter()
+            .all(|(name, _)| name != "OpaqueEncryptedBytes" && name != "NativeReasoningProof"),
+        "capture codec cannot mint raw opaque bytes or native proof"
+    );
+}
+
+#[test]
+fn reasoning_pending_pre_v2_reader_oracle_is_immutable() {
+    use sha2::{Digest, Sha256};
+
+    const EXPECTED: &str = "96d71660e8b75d61cff2dccaa59a410b90b499afd63e10c9dcc2cc678312e32c";
+    let fixture = fs::read(
+        repo_root().join("tests/fixtures/agent_transcripts/reasoning/pending_v1_decoder.rs"),
+    )
+    .expect("read frozen pre-v2 reader");
+    assert_eq!(hex::encode(Sha256::digest(&fixture)), EXPECTED);
+    let manifest =
+        fs::read_to_string(repo_root().join("tests/fixtures/agent_transcripts/MANIFEST.md"))
+            .expect("read fixture manifest");
+    assert!(manifest.contains(EXPECTED), "oracle SHA must be registered");
+}
+
+#[test]
+fn reasoning_pending_opaque_is_not_deserializable() {
+    let (_, lower) = parse_rust_source("src/internal/ai/observed_agents/reasoning.rs");
+    for name in [
+        "NativeReasoningProof",
+        "NativeProvenReasoning",
+        "OpaqueEncryptedBytes",
+    ] {
+        assert!(
+            !import_type_derives_or_implements_deserialize(&lower, name),
+            "pending DTO bytes cannot Deserialize into {name}"
+        );
+    }
+    assert!(import_type_derives_or_implements_deserialize(
+        &lower,
+        "PendingReasoningSourceDto"
+    ));
+}
+
+#[test]
 fn reasoning_import_transport_seal_consumes_native_witness() {
     let (_, lower) = parse_rust_source("src/internal/ai/observed_agents/reasoning.rs");
     let seal = top_level_function(&lower, "seal_import_transport");

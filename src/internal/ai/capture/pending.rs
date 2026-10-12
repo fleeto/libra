@@ -10,6 +10,8 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use sea_orm::{ConnectionTrait, DatabaseTransaction, Statement};
 use serde::{Deserialize, Serialize};
 
+#[cfg(test)]
+use super::snapshot;
 use crate::internal::{
     ai::{
         capture::{
@@ -33,6 +35,23 @@ const CHUNK_BYTES: usize = 512 * 1024;
 const MAX_CHUNKS: usize = 128;
 const CHUNK_TEXT_BYTES: usize = CHUNK_BYTES.div_ceil(3) * 4;
 const VERSION: u8 = 1;
+
+// Compiled pre-v2 payload/header/envelope decoder and original recovery
+// dispatch. Kept separate from the live reader so v2 cannot pass an oracle
+// accidentally updated with the production decoder.
+#[cfg(test)]
+#[allow(dead_code)]
+pub(crate) mod frozen_pre_v2 {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/agent_transcripts/reasoning/pending_v1_decoder.rs"
+    ));
+}
+
+#[cfg(all(test, unix))]
+pub(crate) async fn assert_frozen_pre_v2_route_rejects_v2() {
+    tests::assert_frozen_old_route_rejects_v2().await;
+}
 const HEADER_SCOPES: [MetadataScope; 2] = [
     MetadataScope::AgentCapturePending,
     MetadataScope::AgentCaptureQuarantine,
@@ -2895,26 +2914,28 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn replay_resolves_alias_after_vacuum_and_source_removal() {
-        replay_resolves_alias_after_vacuum_and_source_removal_inner(false, false, false).await;
+        replay_resolves_alias_after_vacuum_and_source_removal_inner(false, false, false, false)
+            .await;
     }
 
     #[cfg(unix)]
     #[tokio::test]
     async fn exhausted_artifact_allows_one_audited_replay_without_rewriting_receipt() {
-        replay_resolves_alias_after_vacuum_and_source_removal_inner(true, false, false).await;
+        replay_resolves_alias_after_vacuum_and_source_removal_inner(true, false, false, false)
+            .await;
     }
 
     #[cfg(unix)]
     #[tokio::test]
     async fn attempt_capped_artifact_allows_one_audited_replay_without_rewriting_receipt() {
-        replay_resolves_alias_after_vacuum_and_source_removal_inner(true, true, false).await;
+        replay_resolves_alias_after_vacuum_and_source_removal_inner(true, true, false, false).await;
     }
 
     #[cfg(unix)]
     #[tokio::test]
     #[serial_test::serial(cwd)]
     async fn doctor_replays_expired_authenticated_artifact_once() {
-        replay_resolves_alias_after_vacuum_and_source_removal_inner(true, false, true).await;
+        replay_resolves_alias_after_vacuum_and_source_removal_inner(true, false, true, false).await;
     }
 
     #[cfg(unix)]
@@ -2922,7 +2943,25 @@ mod tests {
         manual: bool,
         exhaust_attempts: bool,
         through_doctor: bool,
+        reasoning_v2: bool,
     ) {
+        async fn claim_snapshot(f: &Fixture) -> String {
+            f.db.query_one_raw(Statement::from_sql_and_values(
+                f.db.get_database_backend(),
+                "SELECT json_object('state',state,'revision',revision,'owner',owner,
+                    'fence_token',fence_token,'lease_expires_at',lease_expires_at,
+                    'attempt_checkpoint_id',attempt_checkpoint_id,'checkpoint_id',checkpoint_id,
+                    'traces_commit',traces_commit) AS snapshot
+                 FROM agent_coverage_claim WHERE session_id = ? AND logical_turn_key = 'turn-1'",
+                [PK.into()],
+            ))
+            .await
+            .unwrap()
+            .unwrap()
+            .try_get_by::<String, _>("snapshot")
+            .unwrap()
+        }
+
         let f = Fixture::new().await;
         let event_id = Uuid::new_v4();
         let receipt_key = format!("capture-dedup-v2:{}", "a".repeat(64));
@@ -2938,7 +2977,7 @@ mod tests {
                 crate::internal::ai::capture::state::CheckpointWrite::Committed,
             );
         let marker_generation = Uuid::new_v4().to_string();
-        let (artifact, _) = f
+        let (mut artifact, _) = f
             .artifact_with_terminal_binding(
                 None,
                 Some(TerminalArtifactBinding {
@@ -2952,9 +2991,42 @@ mod tests {
                 }),
             )
             .await;
+        if reasoning_v2 {
+            let bytes = synthetic_reasoning_v2_bytes(&artifact);
+            artifact.header.mac = f
+                .scope
+                .sign_pending_envelope_until(&f.db, &f.storage, f.root.path(), &bytes, deadline())
+                .await
+                .unwrap();
+            artifact.header.envelope_bytes = bytes.len();
+            artifact.header.chunks = bytes.len().div_ceil(CHUNK_BYTES);
+            artifact.bytes = bytes;
+        }
         let binding = artifact.binding().clone();
         let alias = artifact.identity.alias().to_owned();
         f.persist(&artifact).await;
+        let expected_v2_bytes = if reasoning_v2 {
+            let error = load_verified_payload(
+                &f.db,
+                &f.storage,
+                f.root.path(),
+                &artifact.identity,
+                &binding,
+                &artifact.header,
+                deadline(),
+            )
+            .await
+            .err()
+            .expect("signed terminal-bound v2 must fail at the current reader");
+            assert!(
+                error
+                    .to_string()
+                    .contains("pending reasoning v2 that this Libra build cannot replay")
+            );
+            Some(artifact.bytes.clone())
+        } else {
+            None
+        };
 
         let active = crate::internal::ai::capture::state::DurableCaptureState {
             phase: crate::internal::ai::capture::state::CapturePhase::Active,
@@ -3135,6 +3207,29 @@ mod tests {
             Duration::from_secs(60),
         )
         .unwrap();
+        let retained_v2 = if reasoning_v2 {
+            let header = header_for_checkpoint(&f.db, &f.scope.repo_id, &checkpoint_id)
+                .await
+                .unwrap()
+                .expect("signed v2 recovery artifact remains indexed");
+            assert!(!header.0.manual_attempted);
+            let chunks = load_chunks(&f.db, &header.0).await.unwrap();
+            assert_eq!(Some(chunks.as_slice()), expected_v2_bytes.as_deref());
+            let pending_count = f.count(MetadataScope::AgentCapturePending).await;
+            let quarantine_count = f.count(MetadataScope::AgentCaptureQuarantine).await;
+            assert_eq!(pending_count, usize::from(!manual || through_doctor));
+            assert_eq!(quarantine_count, usize::from(manual && !through_doctor));
+            Some((
+                chunks,
+                header,
+                f.count(MetadataScope::AgentCaptureSessionAlias).await,
+                claim_snapshot(&f).await,
+                pending_count,
+                quarantine_count,
+            ))
+        } else {
+            None
+        };
         if through_doctor {
             let _cwd = crate::utils::test::ChangeDirGuard::new(f.root.path());
             let report = crate::internal::ai::authorized_read::with_test_helper_program(
@@ -3156,6 +3251,65 @@ mod tests {
                         .find(|finding| finding["inconsistency_type"] == "expired_inflight_marker")
                 })
                 .expect("doctor classifies the authenticated expired finalizer");
+            if let Some((before_chunks, before_header, before_aliases, before_claim, _, _)) =
+                retained_v2.as_ref()
+            {
+                assert_eq!(expired_finding["repaired"], false);
+                assert_eq!(expired_finding["manual_required"], true);
+                let detail = expired_finding["detail"]
+                    .as_str()
+                    .expect("doctor finding has operator-facing detail");
+                assert!(detail.contains(
+                    "authenticated artifact replay was refused or failed closed; manual recovery is required"
+                ));
+                assert!(!detail.contains("OG17_PRIVATE_PENDING_V2_CANARY"));
+                let after_header = header_for_checkpoint(&f.db, &f.scope.repo_id, &checkpoint_id)
+                    .await
+                    .unwrap()
+                    .expect("doctor must retain signed v2 header");
+                assert!(
+                    after_header.0 == before_header.0,
+                    "doctor changed signed v2 header"
+                );
+                assert_eq!(after_header.1, MetadataScope::AgentCaptureQuarantine);
+                assert!(!after_header.0.manual_attempted);
+                assert_eq!(
+                    load_chunks(&f.db, &after_header.0).await.unwrap(),
+                    *before_chunks
+                );
+                assert_eq!(f.count(MetadataScope::AgentCapturePending).await, 0);
+                assert_eq!(f.count(MetadataScope::AgentCaptureQuarantine).await, 1);
+                assert_eq!(
+                    f.count(MetadataScope::AgentCaptureSessionAlias).await,
+                    *before_aliases
+                );
+                assert_eq!(&claim_snapshot(&f).await, before_claim);
+                let after_session = f
+                    .db
+                    .query_one_raw(Statement::from_sql_and_values(
+                        f.db.get_database_backend(),
+                        "SELECT metadata_json, sync_revision, state FROM agent_session WHERE session_id = ?",
+                        [PK.into()],
+                    ))
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(
+                    after_session
+                        .try_get_by::<String, _>("metadata_json")
+                        .unwrap(),
+                    before_metadata
+                );
+                assert_eq!(
+                    after_session.try_get_by::<i64, _>("sync_revision").unwrap(),
+                    before_revision
+                );
+                assert_eq!(
+                    after_session.try_get_by::<String, _>("state").unwrap(),
+                    "active"
+                );
+                return;
+            }
             assert!(
                 expired_finding["repaired"].as_bool().unwrap_or(false),
                 "doctor did not repair the expired authenticated finalizer: {expired_finding}"
@@ -3178,6 +3332,73 @@ mod tests {
             )
             .await
             .unwrap();
+            if let Some((
+                before_chunks,
+                before_header,
+                before_aliases,
+                before_claim,
+                pending_count,
+                quarantine_count,
+            )) = retained_v2
+            {
+                assert_eq!(
+                    result,
+                    crate::internal::ai::capture::recovery::ArtifactRecoveryOutcome::ManualRequired,
+                    "v2 remains closed until OG-21's authenticated reader is paired"
+                );
+                let after_header = header_for_checkpoint(&f.db, &f.scope.repo_id, &checkpoint_id)
+                    .await
+                    .unwrap()
+                    .expect("driver must retain signed v2 header");
+                assert!(
+                    after_header == before_header,
+                    "driver changed signed v2 header"
+                );
+                assert!(!after_header.0.manual_attempted);
+                assert_eq!(
+                    load_chunks(&f.db, &after_header.0).await.unwrap(),
+                    before_chunks
+                );
+                assert_eq!(
+                    f.count(MetadataScope::AgentCaptureSessionAlias).await,
+                    before_aliases
+                );
+                assert_eq!(
+                    f.count(MetadataScope::AgentCapturePending).await,
+                    pending_count
+                );
+                assert_eq!(
+                    f.count(MetadataScope::AgentCaptureQuarantine).await,
+                    quarantine_count
+                );
+                assert_eq!(claim_snapshot(&f).await, before_claim);
+                let after_session = f
+                    .db
+                    .query_one_raw(Statement::from_sql_and_values(
+                        f.db.get_database_backend(),
+                        "SELECT metadata_json, sync_revision, state FROM agent_session WHERE session_id = ?",
+                        [PK.into()],
+                    ))
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(
+                    after_session
+                        .try_get_by::<String, _>("metadata_json")
+                        .unwrap(),
+                    before_metadata,
+                    "driver must retain terminal receipt ledger"
+                );
+                assert_eq!(
+                    after_session.try_get_by::<i64, _>("sync_revision").unwrap(),
+                    before_revision
+                );
+                assert_eq!(
+                    after_session.try_get_by::<String, _>("state").unwrap(),
+                    "active"
+                );
+                return;
+            }
             assert_eq!(
                 result,
                 crate::internal::ai::capture::recovery::ArtifactRecoveryOutcome::Completed
@@ -4046,5 +4267,267 @@ mod tests {
         ] {
             assert_eq!(f.count(scope).await, 0);
         }
+    }
+
+    #[cfg(unix)]
+    fn synthetic_reasoning_v2_bytes(artifact: &SealedPendingArtifact) -> Vec<u8> {
+        use crate::internal::ai::{
+            capture::pending_payload::PendingReasoningIdentityAssociation,
+            observed_agents::reasoning::{
+                VerifiedCaptureBinding, synthetic_native_batch_for_turns,
+            },
+        };
+
+        let PendingEnvelope {
+            binding,
+            payload,
+            coverage,
+            ..
+        } = serde_json::from_slice(&artifact.bytes).unwrap();
+        let native = synthetic_native_batch_for_turns(
+            PK,
+            NATIVE,
+            vec![(0, b"OG17_PRIVATE_PENDING_V2_CANARY".to_vec())],
+        );
+        let native_binding =
+            VerifiedCaptureBinding::from_validated_capture_context(&native, PK, "claude_code")
+                .unwrap();
+        let mac = format!("reasoning-identity/hmac-v1/{}", "a".repeat(64));
+        let association: PendingReasoningIdentityAssociation =
+            serde_json::from_value(serde_json::json!({
+                "logical_turn_key": "synthetic-turn-0",
+                "slot": mac,
+                "descriptor_mac": format!("reasoning-identity/hmac-v1/{}", "b".repeat(64)),
+                "disposition": "verified_nonempty"
+            }))
+            .unwrap();
+        let payload = payload
+            .with_synthetic_reasoning(&native, &native_binding, vec![association])
+            .unwrap();
+        encode_envelope(binding, payload, coverage).unwrap()
+    }
+
+    #[cfg(unix)]
+    async fn synthetic_reasoning_v2_envelope(f: &Fixture) -> (SealedPendingArtifact, Vec<u8>) {
+        let (artifact, _) = f.artifact(None).await;
+        let bytes = synthetic_reasoning_v2_bytes(&artifact);
+        (artifact, bytes)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reasoning_pending_v2_total_bytes_are_bounded() {
+        let f = Fixture::new().await;
+        let (_, bytes) = synthetic_reasoning_v2_envelope(&f).await;
+        assert!(validate_envelope_shape(&bytes).is_ok());
+        assert!(bytes.len() <= MAX_ENVELOPE_BYTES);
+        let mut oversized = bytes;
+        oversized.resize(MAX_ENVELOPE_BYTES + 1, b' ');
+        assert!(validate_envelope_shape(&oversized).is_err());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reasoning_pending_v2_chunk_count_is_bounded() {
+        let f = Fixture::new().await;
+        let (_, bytes) = synthetic_reasoning_v2_envelope(&f).await;
+        assert!(bytes.len().div_ceil(CHUNK_BYTES) <= MAX_CHUNKS);
+        assert_eq!(MAX_ENVELOPE_BYTES.div_ceil(CHUNK_BYTES), MAX_CHUNKS);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reasoning_pending_v2_chunk_bytes_are_bounded() {
+        let f = Fixture::new().await;
+        let (_, bytes) = synthetic_reasoning_v2_envelope(&f).await;
+        let mut restored = Vec::new();
+        for chunk in bytes.chunks(CHUNK_BYTES) {
+            assert!(chunk.len() <= CHUNK_BYTES);
+            let encoded = STANDARD.encode(chunk);
+            restored.extend_from_slice(&decode_part(&encoded, CHUNK_BYTES).unwrap());
+        }
+        assert_eq!(restored, bytes);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reasoning_pending_codec_rejection_preserves_retained_evidence() {
+        let f = Fixture::new().await;
+        let (artifact, bytes) = synthetic_reasoning_v2_envelope(&f).await;
+        f.persist(&artifact).await;
+        let before = load_chunks(&f.db, &artifact.header).await.unwrap();
+        let mut malformed = bytes;
+        malformed.extend_from_slice(b"trailing bytes");
+        assert!(serde_json::from_slice::<PendingEnvelope>(&malformed).is_err());
+        assert_eq!(load_chunks(&f.db, &artifact.header).await.unwrap(), before);
+        assert_eq!(f.count(MetadataScope::AgentCapturePending).await, 1);
+        // The real terminal-bound recovery driver must also leave a signed
+        // unsupported v2 artifact, receipt and coverage claim untouched.
+        replay_resolves_alias_after_vacuum_and_source_removal_inner(false, false, false, true)
+            .await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reasoning_pending_v2_keeps_outer_v1_header_and_envelope() {
+        let f = Fixture::new().await;
+        let (mut artifact, bytes) = synthetic_reasoning_v2_envelope(&f).await;
+        let ordinary_envelope: serde_json::Value = serde_json::from_slice(&artifact.bytes).unwrap();
+        artifact.header.mac = f
+            .scope
+            .sign_pending_envelope_until(&f.db, &f.storage, f.root.path(), &bytes, deadline())
+            .await
+            .unwrap();
+        artifact.header.envelope_bytes = bytes.len();
+        artifact.header.chunks = bytes.len().div_ceil(CHUNK_BYTES);
+        artifact.bytes = bytes.clone();
+        f.persist(&artifact).await;
+        let stored_header = header_for_checkpoint(
+            &f.db,
+            &f.scope.repo_id,
+            &artifact.header.binding.checkpoint_id,
+        )
+        .await
+        .unwrap()
+        .expect("v2 artifact header must be present")
+        .0;
+        let envelope: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(stored_header.version, VERSION);
+        assert_eq!(stored_header.mac, artifact.header.mac);
+        assert_eq!(stored_header.envelope_bytes, bytes.len());
+        assert_eq!(stored_header.chunks, bytes.len().div_ceil(CHUNK_BYTES));
+        assert_eq!(envelope["version"].as_u64(), Some(VERSION as u64));
+        assert_eq!(envelope["payload"]["version"].as_u64(), Some(2));
+        assert_eq!(
+            envelope["coverage"], ordinary_envelope["coverage"],
+            "v2 payload must preserve the ordinary outer coverage proof"
+        );
+        let coverage: PortablePendingCoverage =
+            serde_json::from_value(envelope["coverage"].clone()).unwrap();
+        coverage.validate().unwrap();
+    }
+
+    #[cfg(unix)]
+    pub(crate) async fn assert_frozen_old_route_rejects_v2() {
+        let f = Fixture::new().await;
+        let (mut artifact, bytes) = synthetic_reasoning_v2_envelope(&f).await;
+        let mac = f
+            .scope
+            .sign_pending_envelope_until(&f.db, &f.storage, f.root.path(), &bytes, deadline())
+            .await
+            .unwrap();
+        artifact.header.mac = mac;
+        artifact.header.envelope_bytes = bytes.len();
+        artifact.header.chunks = bytes.len().div_ceil(CHUNK_BYTES);
+        artifact.bytes = bytes.clone();
+        f.persist(&artifact).await;
+        let stored_header = MetadataKv::get_with_conn(
+            &f.db,
+            MetadataScope::AgentCapturePending,
+            &f.scope.repo_id,
+            &artifact.header.binding.checkpoint_id,
+        )
+        .await
+        .unwrap()
+        .expect("persisted pre-v2-compatible header");
+        assert_eq!(
+            stored_header.value,
+            serde_json::to_string(&artifact.header).unwrap()
+        );
+        frozen_pre_v2::decode_header_v1(&stored_header.value).unwrap();
+        let alias = artifact.identity.alias().to_owned();
+        let identity = f.identity(Some(&alias)).await;
+        let error = frozen_pre_v2::load_verified_payload(
+            &f.db,
+            &f.storage,
+            f.root.path(),
+            &identity,
+            artifact.binding(),
+            &artifact.header,
+            deadline(),
+        )
+        .await
+        .err()
+        .expect("pre-v2 route must reject a signed v2 pending artifact");
+        assert!(
+            error
+                .to_string()
+                .contains("invalid authenticated capture recovery envelope")
+        );
+        assert_eq!(load_chunks(&f.db, &artifact.header).await.unwrap(), bytes);
+        assert_eq!(f.count(MetadataScope::AgentCapturePending).await, 1);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reasoning_pending_v2_old_recovery_route_fails_closed() {
+        assert_frozen_old_route_rejects_v2().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reasoning_pending_codec_forward_recovery_preserves_evidence() {
+        let f = Fixture::new().await;
+        let (mut artifact, bytes) = synthetic_reasoning_v2_envelope(&f).await;
+        let mac = f
+            .scope
+            .sign_pending_envelope_until(&f.db, &f.storage, f.root.path(), &bytes, deadline())
+            .await
+            .unwrap();
+        artifact.header.mac = mac;
+        artifact.header.envelope_bytes = bytes.len();
+        artifact.header.chunks = bytes.len().div_ceil(CHUNK_BYTES);
+        artifact.bytes = bytes.clone();
+        f.persist(&artifact).await;
+        let alias = artifact.identity.alias().to_owned();
+        let identity = f.identity(Some(&alias)).await;
+        let error = load_verified_payload(
+            &f.db,
+            &f.storage,
+            f.root.path(),
+            &identity,
+            artifact.binding(),
+            &artifact.header,
+            deadline(),
+        )
+        .await
+        .err()
+        .expect("v2 replay remains closed until OG-21 pairs the authenticated reader");
+        assert!(
+            error
+                .to_string()
+                .contains("pending reasoning v2 that this Libra build cannot replay")
+        );
+        assert_eq!(load_chunks(&f.db, &artifact.header).await.unwrap(), bytes);
+        assert_eq!(f.count(MetadataScope::AgentCapturePending).await, 1);
+
+        let legacy = Fixture::new().await;
+        let (artifact, _) = legacy.artifact(None).await;
+        legacy.persist(&artifact).await;
+        let alias = artifact.identity.alias().to_owned();
+        let identity = legacy.identity(Some(&alias)).await;
+        assert!(
+            load_verified_payload(
+                &legacy.db,
+                &legacy.storage,
+                legacy.root.path(),
+                &identity,
+                artifact.binding(),
+                &artifact.header,
+                deadline(),
+            )
+            .await
+            .is_ok()
+        );
+        // The quarantined manual route cannot consume its one-shot attempt
+        // before OG-21's authenticated v2 reader is available.
+        replay_resolves_alias_after_vacuum_and_source_removal_inner(true, false, false, true).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial_test::serial(cwd)]
+    async fn reasoning_pending_doctor_retains_unsupported_v2() {
+        replay_resolves_alias_after_vacuum_and_source_removal_inner(true, false, true, true).await;
     }
 }

@@ -55,3 +55,47 @@ synthetic label grants trusted native provenance.
 
 
 NPR-18 keeps the historical official `2.0.26` / `9b4ec5714d481559990db0a816d5dec19541a814` source record and all existing JSON bytes frozen. The additional `opencode/native-origin-build.json` (named `native-origin-build.json` in this directory) is the separate current public identity descriptor for the reviewed private `2.0.26-libra-native.1` darwin-arm64 artifact, build `bac21cc4027896b8d1836133c347d20f`. Its official base commit is not the patched source identity. The source-ready audit is actual single Claude PASS; Source A remains UNPROVEN, archive/native GO is false. It contains no issuer, key or per-installation policy. Neither old synthetic fixtures nor this public descriptor is real native provider proof. macOS acceptance explicitly selects `LIBRA_OPENCODE_NATIVE_BINARY`; no global fallback or Linux functional claim.
+
+## OG-17 frozen pre-v2 pending reader
+
+`reasoning/pending_v1_decoder.rs` is the compiled pre-v2 pending reader oracle,
+frozen before any v2 edits from Libra commit
+`7efcf868d49a5183e7f0851a89abebee91357155`.
+The original `src/internal/ai/capture/pending_payload.rs` SHA-256 was
+`87f2e8879831dae5fa83e3ffac3e916e23159dfb6a08f33a865bd1ae9f5d93fb`;
+the original `src/internal/ai/capture/pending.rs` SHA-256 was
+`393c9c7877c15680246a2ebcd1ce8c560ed2f61881dd0586d8f7871e7488743a`.
+The fixture SHA-256 at freeze is
+`96d71660e8b75d61cff2dccaa59a410b90b499afd63e10c9dcc2cc678312e32c`.
+The copied payload decoder/schema is production lines 1–674 (only its two
+inner doc comments became ordinary comments for `include!`). The following
+`pending.rs` source fragments from the same commit are compiled in the same
+oracle: header lines 128–164 (SHA-256
+`9435d9a6e32fc76a477cc00b5060f2f4611a8548760c9772ff8fb7663eed125a`,
+only the type name changes to `FrozenPendingHeader`), closed envelope lines
+166–173 (SHA-256
+`38cc9f32fdf2350848036f72f9691512083d768e0ab09499d12b0a6f09dc30d5`),
+capacity/depth validator lines 432–475 (SHA-256
+`8450bf919640d460469705f40b8ecf3d9b29227c57f10626d966c648948f63cd`),
+and the complete authenticated recovery dispatch lines 533–602 (SHA-256
+`84edadb81ea26c0e429fefa4d20e5075c803cc433d5efef53c0ef84013f69335`).
+It compiles through `capture::pending::frozen_pre_v2`; OG-17 VER11 and the
+named route test persist a signed v2 envelope, call this old
+`load_verified_payload` with the persisted header, and check that the old
+reader rejects it without deleting pending bytes. Its unchanged
+`load_chunks`, `PendingHeader` (the route parameter), `PendingBinding`,
+`VerifiedPendingPayload`, deadline and sidecar checks, payload-binding checks,
+and the scope/key-backed `AuthenticatedPendingEnvelope::verify` still come
+from the live implementation. The copied payload reader also calls the live
+`CaptureSnapshotProjection`, `CheckpointRedactedPayload`, `PreparedPendingAlias`,
+`Redactor`, `parse_canon_value`, `LiveClaimCommitPlan`, `ReservedTurnClaim`,
+`CaptureCatalogError` and `retryable_load_failure` APIs; their behavior is not
+frozen here. The frozen header decoder is exercised separately against the
+actual `metadata_kv` header text persisted by the signed v2 test. The oracle
+therefore pins the exact
+old payload decoder and old recovery dispatch, but is not an independent
+snapshot of the old storage, MAC or catalog implementations. OG-17's named
+route test runs the frozen dispatch against a signed v2 artifact. Do not
+regenerate this oracle from a later decoder. This is
+historical reader compatibility evidence, never native provider-origin
+evidence.

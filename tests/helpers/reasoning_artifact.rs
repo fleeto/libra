@@ -288,7 +288,7 @@ async fn index_fixture_objects(conn: &DatabaseConnection, storage: &Path) {
                 hash
             );
             conn.execute_raw(Statement::from_sql_and_values(conn.get_database_backend(),
-                "INSERT INTO object_index (o_id, o_type, o_size, repo_id, created_at, is_synced) VALUES (?, ?, ?, ?, 1, 0)",
+                "INSERT INTO object_index (o_id, o_type, o_size, repo_id, created_at, is_synced) VALUES (?, ?, ?, ?, 1, 0) ON CONFLICT(repo_id, o_id) DO NOTHING",
                 [oid.into(), kind.into(), (bytes.len() as i64).into(), repo_id.clone().into()])).await.unwrap();
         }
     }

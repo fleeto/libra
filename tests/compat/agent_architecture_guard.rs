@@ -9048,6 +9048,8 @@ fn reasoning_carrier_rejects_arbitrary_raw_constructor() {
             ("NativeReasoningProof", "verify_import_transport"),
             ("NativeProvenReasoning", "verify_import_transport"),
             ("NativeProvenReasoning", "partition_import_reasoning"),
+            ("NativeReasoningProof", "restore_pending"),
+            ("NativeProvenReasoning", "restore_pending"),
         ]),
         "only authenticated restoration and owned partitioning may construct native values"
     );
@@ -9102,7 +9104,10 @@ fn reasoning_bound_identity_accessor_has_closed_adapter_caller() {
         ),
         (
             "from_validated_capture_context",
-            &["validate_reasoning_capture_binding"],
+            &[
+                "validate_reasoning_capture_binding",
+                "from_validated_pending_context",
+            ],
         ),
         ("from_bound_item", &["borrow_native_identity_bindings"]),
         (
@@ -9119,6 +9124,7 @@ fn reasoning_bound_identity_accessor_has_closed_adapter_caller() {
             &[
                 "prepare_reasoning_identity_inputs",
                 "prepare_reasoning_coverage_plan_from_disposition",
+                "prepare_reasoning_coverage_plan_for_keys",
             ],
         ),
         (
@@ -9810,7 +9816,10 @@ fn reasoning_import_transport_has_closed_issuer() {
         .filter(|(name, _)| name == "NativeReasoningProof")
         .map(|(_, owner)| owner.as_str())
         .collect::<Vec<_>>();
-    assert_eq!(proof_constructors, ["verify_import_transport"]);
+    assert_eq!(
+        proof_constructors,
+        ["restore_pending", "verify_import_transport"]
+    );
     let rogue = reasoning_scan("fn rogue() { let _ = NativeReasoningProof { raw: 1 }; }");
     assert_eq!(
         rogue
@@ -10038,5 +10047,241 @@ fn reasoning_import_partition_has_closed_ownership_transform_callers() {
             .constructors
             .iter()
             .any(|(name, _)| name == "OpaqueEncryptedBytes")
+    );
+}
+
+#[test]
+fn reasoning_pending_seal_borrows_only_bound_native_witness() {
+    let (_, lower) = parse_rust_source("src/internal/ai/observed_agents/reasoning.rs");
+    let seal = top_level_function(&lower, "seal_pending");
+    assert!(import_type_is_borrowed_arg(
+        seal,
+        0,
+        "NativeProvenReasoning"
+    ));
+    assert!(import_type_is_borrowed_arg(
+        seal,
+        1,
+        "VerifiedPendingBinding"
+    ));
+    let binding = top_level_struct(&lower, "VerifiedPendingBinding");
+    assert!(
+        binding
+            .fields
+            .iter()
+            .all(|field| matches!(field.vis, syn::Visibility::Inherited))
+    );
+    assert_import_reference_detector_catches_rogue("seal_pending");
+    assert_eq!(
+        import_reasoning_production_references("seal_pending"),
+        BTreeSet::from([(
+            "src/internal/ai/capture/pending_payload.rs".to_owned(),
+            "with_bound_reasoning".to_owned(),
+        )]),
+    );
+}
+
+#[test]
+fn reasoning_pending_restore_requires_authenticated_witness() {
+    let (_, lower) = parse_rust_source("src/internal/ai/observed_agents/reasoning.rs");
+    let restore = top_level_function(&lower, "restore_pending");
+    assert!(import_type_is_borrowed_arg(
+        restore,
+        0,
+        "PendingReasoningSourceDto"
+    ));
+    assert!(import_type_is_owned_arg(
+        restore,
+        1,
+        "PendingIntegrityToken"
+    ));
+    assert!(import_type_is_borrowed_arg(
+        restore,
+        2,
+        "VerifiedCurrentBinding"
+    ));
+    for name in ["PendingIntegrityToken", "VerifiedCurrentBinding"] {
+        let ty = top_level_struct(&lower, name);
+        assert!(
+            ty.fields
+                .iter()
+                .all(|field| matches!(field.vis, syn::Visibility::Inherited))
+        );
+        assert!(!ty.attrs.iter().any(|attr| attr.path().is_ident("derive")));
+    }
+    assert!(!import_type_derives_or_implements_deserialize(
+        &lower,
+        "PendingIntegrityToken"
+    ));
+}
+
+#[test]
+fn reasoning_pending_restore_has_closed_issuer() {
+    use syn::visit::Visit;
+
+    let (_, lower) = parse_rust_source("src/internal/ai/observed_agents/reasoning.rs");
+    let mut scan = ReasoningPortScan::default();
+    scan.visit_file(&lower);
+    assert_eq!(
+        scan.constructors
+            .iter()
+            .filter(|(name, _)| name == "NativeReasoningProof")
+            .map(|(_, owner)| owner.as_str())
+            .collect::<Vec<_>>(),
+        ["restore_pending", "verify_import_transport"],
+    );
+    assert_eq!(
+        import_reasoning_production_references("from_authenticated_members"),
+        BTreeSet::from([(
+            "src/internal/ai/capture/key.rs".to_owned(),
+            "authenticate_pending_reasoning_members_in_scope_until".to_owned(),
+        )]),
+    );
+}
+
+#[test]
+fn reasoning_pending_restore_has_closed_callers() {
+    for (name, path, owner) in [
+        (
+            "restore_pending",
+            "src/internal/ai/capture/checkpoint.rs",
+            "restore_pending_reasoning",
+        ),
+        (
+            "seal_bound_reasoning",
+            "src/internal/ai/capture/pending.rs",
+            "seal",
+        ),
+        (
+            "from_validated_pending_context",
+            "src/internal/ai/capture/checkpoint.rs",
+            "prepare_pending_native_seal",
+        ),
+        (
+            "from_validated_current_context",
+            "src/internal/ai/capture/checkpoint.rs",
+            "prepare_current_pending_reasoning_fence",
+        ),
+    ] {
+        assert_import_reference_detector_catches_rogue(name);
+        assert_eq!(
+            import_reasoning_production_references(name),
+            BTreeSet::from([(path.to_owned(), owner.to_owned())]),
+            "{name} gained an unreviewed production caller",
+        );
+    }
+}
+
+#[test]
+fn reasoning_pending_restore_has_no_reverse_dependency() {
+    let source =
+        fs::read_to_string(repo_root().join("src/internal/ai/observed_agents/reasoning.rs"))
+            .expect("read lower reasoning source");
+    assert!(reasoning_reverse_dependencies(&source).is_empty());
+    assert!(
+        !reasoning_reverse_dependencies(
+            "fn rogue() { let _ = crate::internal::ai::capture::key::authority(); }"
+        )
+        .is_empty()
+    );
+}
+
+#[test]
+fn reasoning_pending_is_not_cloud_mirrored() {
+    let source = fs::read_to_string(repo_root().join("src/command/cloud/agent_capture.rs"))
+        .expect("read cloud capture projection");
+    let (_, ast) = parse_rust_source("src/command/cloud/agent_capture.rs");
+    let mut scan = ReasoningPortScan::default();
+    syn::visit::Visit::visit_item_fn(
+        &mut scan,
+        top_level_function(&ast, "load_agent_capture_catalog_snapshot"),
+    );
+    assert!(!scan.references.contains_key("PendingReasoningReplay"));
+    assert!(!scan.references.contains_key("load_verified_payload"));
+    assert!(source.contains("private_capture_scopes_do_not_enter_closed_snapshot"));
+    assert!(source.contains("private-only-chunk"));
+}
+
+#[test]
+fn reasoning_pending_is_not_exported() {
+    let (_, ast) = parse_rust_source("src/command/agent/checkpoint.rs");
+    for name in ["export", "export_reasoning_artifact"] {
+        let mut scan = ReasoningPortScan::default();
+        syn::visit::Visit::visit_item_fn(&mut scan, top_level_function(&ast, name));
+        for forbidden in [
+            "load_verified_payload",
+            "deferred_pending_reasoning",
+            "PendingReasoningReplay",
+        ] {
+            assert!(
+                !scan.references.contains_key(forbidden),
+                "{name} reads private pending reasoning"
+            );
+        }
+    }
+}
+
+#[test]
+fn reasoning_pending_is_not_gc_hydrated() {
+    let source = fs::read_to_string(repo_root().join("src/command/maintenance.rs"))
+        .expect("read GC root scan");
+    let start = source
+        .find("SELECT scope, value FROM metadata_kv WHERE scope NOT IN (")
+        .expect("metadata root exclusion SQL");
+    let sql = &source[start..start + 360];
+    for excluded in [
+        "'agent_capture_pending'",
+        "'agent_capture_quarantine'",
+        "'agent_capture_pending_chunk'",
+        "'agent_capture_session_alias'",
+        "'agent_reasoning_identity'",
+    ] {
+        assert!(
+            sql.contains(excluded),
+            "GC root scan lost exclusion {excluded}"
+        );
+    }
+    assert!(source.contains("gc_does_not_hydrate_capture_pending_chunks"));
+}
+
+#[test]
+fn reasoning_pending_signers_and_native_record_fillers_are_closed() {
+    for (name, path, owner) in [
+        (
+            "from_authenticated_members",
+            "src/internal/ai/capture/key.rs",
+            "authenticate_pending_reasoning_members_in_scope_until",
+        ),
+        (
+            "from_validated_pending_context",
+            "src/internal/ai/capture/checkpoint.rs",
+            "prepare_pending_native_seal",
+        ),
+        (
+            "from_validated_current_context",
+            "src/internal/ai/capture/checkpoint.rs",
+            "prepare_current_pending_reasoning_fence",
+        ),
+    ] {
+        assert_eq!(
+            import_reasoning_production_references(name),
+            BTreeSet::from([(path.to_owned(), owner.to_owned())]),
+            "{name} escaped its private caller set",
+        );
+    }
+    assert_eq!(
+        import_reasoning_production_references(
+            "authenticate_pending_reasoning_original_in_scope_until"
+        ),
+        BTreeSet::from([
+            (
+                "src/internal/ai/capture/checkpoint.rs".to_owned(),
+                "restore_pending_reasoning".to_owned()
+            ),
+            (
+                "src/internal/ai/capture/pending.rs".to_owned(),
+                "load_verified_payload".to_owned()
+            ),
+        ]),
     );
 }

@@ -16,7 +16,10 @@ use crate::internal::{
     ai::{
         capture::{
             catalog::{CaptureCatalogError, PendingSessionContext},
-            checkpoint::{AuthenticatedPendingEnvelope, CheckpointRedactedPayload},
+            checkpoint::{
+                AuthenticatedPendingEnvelope, CheckpointRedactedPayload, ReasoningCoveragePlan,
+            },
+            key,
             pending_identity::{self, PreparedPendingAlias},
             pending_payload::{PendingPayloadProjection, PortablePendingCoverage},
         },
@@ -235,6 +238,7 @@ pub(crate) struct PendingSealRequest<'a> {
     pub(crate) identity: PreparedPendingAlias,
     pub(crate) payload: &'a CheckpointRedactedPayload,
     pub(crate) coverage: &'a LiveClaimCommitPlan,
+    pub(crate) reasoning: Option<&'a ReasoningCoveragePlan>,
 }
 
 impl SealedPendingArtifact {
@@ -250,6 +254,7 @@ impl SealedPendingArtifact {
             identity,
             payload,
             coverage,
+            reasoning,
         } = request;
         check_deadline(deadline)?;
         binding.validate()?;
@@ -267,15 +272,28 @@ impl SealedPendingArtifact {
             binding.session_id == identity.alias()
                 && binding.scope == *identity.context().scope()
                 && coverage.checkpoint_id == binding.checkpoint_id
-                && coverage.parent_commit == binding.parent_commit,
+                && coverage.parent_commit == binding.parent_commit
+                && coverage.capture_scope.as_ref() == Some(&binding.scope),
             "capture recovery identity changed; retry through the provider"
         );
         let portable_coverage = PortablePendingCoverage::from_live(coverage, &identity)?;
         check_sidecar_capacity(payload, serde_json::to_vec(&portable_coverage)?.len())?;
         validate_payload_binding(payload, &binding)?;
-        let projection =
+        let projection = if let Some(reasoning) = reasoning {
+            let prepared = payload.prepare_pending_native_seal(
+                &binding.scope,
+                coverage,
+                reasoning,
+                identity.context().agent_kind(),
+            )?;
+            PendingPayloadProjection::seal_bound_reasoning(
+                conn, storage, root, payload, &identity, prepared, deadline,
+            )
+            .await?
+        } else {
             PendingPayloadProjection::seal(conn, storage, root, payload, &identity, deadline)
-                .await?;
+                .await?
+        };
         let bytes = encode_envelope(binding.clone(), projection, portable_coverage)?;
         check_deadline(deadline)?;
         let mac = binding
@@ -590,10 +608,33 @@ pub(crate) async fn load_verified_payload<C: ConnectionTrait>(
     );
     envelope.coverage.validate()?;
     let coverage_bytes = serde_json::to_vec(&envelope.coverage)?.len();
-    let payload = envelope
-        .payload
-        .rehydrate(&authentication, conn, storage, root, identity, deadline)
-        .await?;
+    let reasoning_integrity = if envelope.payload.is_reasoning_v2() {
+        Some(
+            key::authenticate_pending_reasoning_original_in_scope_until(
+                conn,
+                &expected.scope,
+                storage,
+                root,
+                &bytes,
+                &header.mac,
+                deadline,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+    let payload = if reasoning_integrity.is_some() {
+        envelope
+            .payload
+            .rehydrate_v2_deferred(&authentication, conn, storage, root, identity, deadline)
+            .await?
+    } else {
+        envelope
+            .payload
+            .rehydrate(&authentication, conn, storage, root, identity, deadline)
+            .await?
+    };
     check_sidecar_capacity(&payload, coverage_bytes)?;
     validate_payload_binding(&payload, expected)?;
     ensure!(
@@ -607,6 +648,15 @@ pub(crate) async fn load_verified_payload<C: ConnectionTrait>(
         "capture recovery source commitment changed; run `libra agent doctor`"
     );
     check_deadline(deadline)?;
+    let payload = if let Some(integrity) = reasoning_integrity {
+        payload.with_deferred_pending_reasoning(envelope.payload.into_deferred_reasoning(
+            bytes,
+            header.mac.clone(),
+            integrity,
+        )?)?
+    } else {
+        payload
+    };
     Ok(VerifiedPendingPayload {
         payload,
         coverage: envelope.coverage.into_live(
@@ -1543,7 +1593,7 @@ async fn alias_registered(txn: &DatabaseTransaction, repo_id: &str, alias: &str)
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     #[cfg(unix)]
     use std::{path::PathBuf, time::Duration};
 
@@ -1878,6 +1928,7 @@ mod tests {
                     identity,
                     payload: &payload,
                     coverage: &coverage,
+                    reasoning: None,
                 },
                 deadline(),
             )
@@ -3021,7 +3072,7 @@ mod tests {
             assert!(
                 error
                     .to_string()
-                    .contains("pending reasoning v2 that this Libra build cannot replay")
+                    .contains("capture recovery membership authentication failed")
             );
             Some(artifact.bytes.clone())
         } else {
@@ -3344,7 +3395,7 @@ mod tests {
                 assert_eq!(
                     result,
                     crate::internal::ai::capture::recovery::ArtifactRecoveryOutcome::ManualRequired,
-                    "v2 remains closed until OG-21's authenticated reader is paired"
+                    "inconsistent synthetic v2 membership remains closed"
                 );
                 let after_header = header_for_checkpoint(&f.db, &f.scope.repo_id, &checkpoint_id)
                     .await
@@ -4308,6 +4359,1061 @@ mod tests {
     }
 
     #[cfg(unix)]
+    async fn actual_native_reasoning_artifact(
+        f: &Fixture,
+    ) -> (SealedPendingArtifact, CheckpointRedactedPayload) {
+        actual_native_reasoning_artifact_with_terminal(f, None, false).await
+    }
+
+    #[cfg(unix)]
+    async fn actual_native_reasoning_artifact_with_terminal(
+        f: &Fixture,
+        terminal: Option<TerminalArtifactBinding>,
+        covered_prefix: bool,
+    ) -> (SealedPendingArtifact, CheckpointRedactedPayload) {
+        use crate::internal::ai::{
+            capture::checkpoint::{ReasoningIdentityPreparation, prepare_reasoning_coverage_plan},
+            observed_agents::{
+                NormalizedTurn, RedactedBytes,
+                reasoning::{ReasoningSourceDisposition, synthetic_native_batch_for_turns},
+            },
+        };
+
+        let (ordinary, ordinary_payload) = f.artifact_with_terminal_binding(None, terminal).await;
+        let PendingEnvelope {
+            binding,
+            coverage: portable,
+            ..
+        } = serde_json::from_slice(&ordinary.bytes).unwrap();
+        let mut coverage = portable
+            .into_live(
+                &ordinary.identity,
+                &binding.checkpoint_id,
+                binding.parent_commit.clone(),
+                1,
+            )
+            .unwrap();
+        let reserved_key = if covered_prefix {
+            "synthetic-turn-1"
+        } else {
+            "synthetic-turn-0"
+        };
+        coverage.claims[0].logical_turn_key = reserved_key.to_owned();
+        f.db.execute_raw(Statement::from_sql_and_values(
+            f.db.get_database_backend(),
+            "UPDATE agent_coverage_claim SET logical_turn_key = ? \
+             WHERE session_id = 'claude__native-session' AND logical_turn_key = 'turn-1'",
+            [reserved_key.into()],
+        ))
+        .await
+        .unwrap();
+        if covered_prefix {
+            let mut ordinary = coverage.claims[0].clone();
+            ordinary.logical_turn_key = "synthetic-turn-2".to_owned();
+            ordinary.fence_token = 2;
+            coverage.claims.push(ordinary);
+            f.db.execute_unprepared(
+                "INSERT INTO agent_coverage_claim \
+                 (session_id,logical_turn_key,coverage_schema_version,coverage_digest, \
+                 completeness,revision,state,owner,fence_token,source_channel,created_at,updated_at) \
+                 VALUES ('claude__native-session','synthetic-turn-2',1, \
+                 'dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd', \
+                 'complete',0,'reserved_live','owned-live-reservation',2,'live',1,1)",
+            )
+            .await
+            .unwrap();
+            f.db.execute_unprepared(
+                "INSERT INTO agent_coverage_claim \
+                 (session_id,logical_turn_key,coverage_schema_version,coverage_digest, \
+                 completeness,revision,state,checkpoint_id,traces_commit, \
+                 source_channel,created_at,updated_at) \
+                 VALUES ('claude__native-session','synthetic-turn-0',1, \
+                 'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee', \
+                 'complete',1,'catalog_committed','covered-prefix-checkpoint', \
+                 'covered-prefix-commit','live',1,1)",
+            )
+            .await
+            .unwrap();
+        }
+        let native = synthetic_native_batch_for_turns(
+            PK,
+            NATIVE,
+            if covered_prefix {
+                vec![
+                    (0, b"OG21_COVERED_PREFIX_NATIVE_CANARY".to_vec()),
+                    (1, b"OG21_PRIVATE_PENDING_NATIVE_CANARY".to_vec()),
+                ]
+            } else {
+                vec![(0, b"OG21_PRIVATE_PENDING_NATIVE_CANARY".to_vec())]
+            },
+        );
+        let payload = CheckpointRedactedPayload::from_redacted_capture_with_reasoning(
+            RedactedBytes::new_unchecked(ordinary_payload.transcript().bytes().to_vec()),
+            Some(ordinary_payload.snapshot().clone()),
+            RedactedBytes::new_unchecked(ordinary_payload.metadata_json().bytes().to_vec()),
+            RedactedBytes::new_unchecked(
+                ordinary_payload.lifecycle_events_jsonl().bytes().to_vec(),
+            ),
+            RedactedBytes::new_unchecked(ordinary_payload.redaction_report_json().bytes().to_vec()),
+            ReasoningSourceDisposition::NativeProven(native),
+        )
+        .unwrap();
+        let turns = (0..if covered_prefix { 3 } else { 1 })
+            .map(|ordinal| NormalizedTurn {
+                logical_turn_key: format!("synthetic-turn-{ordinal}"),
+                ordinal,
+                completeness: Completeness::Complete,
+                started_at: None,
+                ended_at: None,
+                records: Vec::new(),
+            })
+            .collect::<Vec<_>>();
+        if covered_prefix {
+            let digest = turns[1].digest_hex();
+            for claim in &mut coverage.claims {
+                claim.coverage_digest = digest.clone();
+            }
+            f.db.execute_raw(Statement::from_sql_and_values(
+                f.db.get_database_backend(),
+                "UPDATE agent_coverage_claim SET coverage_digest = ? WHERE session_id = ?",
+                [digest.into(), PK.into()],
+            ))
+            .await
+            .unwrap();
+        }
+        let identity = prepare_reasoning_coverage_plan(
+            &payload,
+            ReasoningIdentityPreparation {
+                conn: &f.db,
+                scope: &f.scope,
+                storage_path: &f.storage,
+                authorized_root: f.root.path(),
+                session_id: PK,
+                provider: "claude_code",
+                turns: &turns,
+                deadline: deadline(),
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let artifact = SealedPendingArtifact::seal(
+            &f.db,
+            &f.storage,
+            f.root.path(),
+            PendingSealRequest {
+                binding,
+                identity: ordinary.identity,
+                payload: &payload,
+                coverage: &coverage,
+                reasoning: Some(&identity),
+            },
+            deadline(),
+        )
+        .await
+        .unwrap();
+        (artifact, payload)
+    }
+
+    #[cfg(unix)]
+    struct NativeTerminalFixture {
+        f: Fixture,
+        artifact: SealedPendingArtifact,
+        source_payload: CheckpointRedactedPayload,
+        recovery: crate::internal::ai::capture::catalog::CaptureCatalogFinalizerRecovery,
+    }
+
+    #[cfg(unix)]
+    impl NativeTerminalFixture {
+        async fn new() -> Self {
+            Self::new_with_covered_prefix(false).await
+        }
+
+        async fn new_with_covered_prefix(covered_prefix: bool) -> Self {
+            use crate::internal::ai::capture::{
+                catalog::{
+                    CaptureCatalogAction, CaptureCatalogApplyRequest,
+                    CaptureCatalogFinalizeRequest, CaptureCatalogFinalizeResult,
+                    CaptureCatalogMutation, CaptureCatalogSession, CaptureCatalogStore,
+                },
+                finalizer::{
+                    CaptureFinalizeMode, CaptureFinalizePolicy, FinalizeCheckpointProgress,
+                },
+                state::{
+                    CapturePhase, CheckpointWrite, DurableCaptureState, LifecycleReducerInput,
+                    reduce_lifecycle,
+                },
+            };
+
+            let f = Fixture::new().await;
+            let event_id = Uuid::new_v4();
+            let receipt_key = format!("capture-dedup-v2:{}", "a".repeat(64));
+            let action = CaptureCatalogAction::from_ingress(
+                event_id,
+                Some(&receipt_key),
+                LifecycleEventKind::SessionEnd,
+            )
+            .unwrap();
+            let checkpoint_id =
+                crate::internal::ai::capture::checkpoint::checkpoint_id_for_capture_action(
+                    event_id,
+                    CheckpointWrite::Committed,
+                );
+            let marker_generation = Uuid::new_v4().to_string();
+            let (artifact, source_payload) = actual_native_reasoning_artifact_with_terminal(
+                &f,
+                Some(TerminalArtifactBinding {
+                    event_id,
+                    checkpoint_id: checkpoint_id.clone(),
+                    action_key: action.action_key().to_owned(),
+                    receipt_key,
+                    marker_generation: marker_generation.clone(),
+                    parent_commit: None,
+                    reserved_revision: 2,
+                }),
+                covered_prefix,
+            )
+            .await;
+            f.persist(&artifact).await;
+            let active = DurableCaptureState {
+                phase: CapturePhase::Active,
+                stopped_at: None,
+                sync_revision: 1,
+            };
+            let action_plan = reduce_lifecycle(LifecycleReducerInput {
+                current: Some(active),
+                event_kind: LifecycleEventKind::SessionEnd,
+                event_id,
+                occurred_at: 1_700_000_000,
+                deadline: None,
+            })
+            .unwrap();
+            let mutation =
+                CaptureCatalogMutation::from_reducer(Some(active), &action_plan, 1_700_000_000)
+                    .unwrap();
+            let session = CaptureCatalogSession::new(
+                PK,
+                "claude_code",
+                NATIVE,
+                f.root.path().to_string_lossy(),
+            )
+            .unwrap();
+            let apply =
+                CaptureCatalogApplyRequest::new(f.scope.clone(), session, action.clone(), mutation)
+                    .unwrap();
+            let catalog = CaptureCatalogStore::new(f.db.clone());
+            catalog.apply(&apply).await.unwrap();
+            let policy = CaptureFinalizePolicy::new(
+                None,
+                CaptureFinalizeMode::Deferrable,
+                action.action_key(),
+            )
+            .unwrap();
+            let finalizer = CaptureCatalogFinalizeRequest::from_apply(
+                &apply,
+                policy,
+                marker_generation,
+                Some(artifact.binding().source_commitment.clone()),
+                1,
+                FinalizeCheckpointProgress::NotStarted,
+            )
+            .unwrap();
+            assert!(matches!(
+                catalog.finalize(&finalizer).await.unwrap(),
+                CaptureCatalogFinalizeResult::Pending { .. }
+            ));
+            let recovery = catalog
+                .pending_finalizer_recoveries_for_doctor(2)
+                .await
+                .unwrap()
+                .recoveries
+                .into_iter()
+                .find(|recovery| recovery.checkpoint_id() == checkpoint_id)
+                .unwrap();
+            assert!(recovery.artifact_present());
+            Self {
+                f,
+                artifact,
+                source_payload,
+                recovery,
+            }
+        }
+
+        async fn claim_snapshot(&self) -> String {
+            self.f
+                .db
+                .query_one_raw(Statement::from_sql_and_values(
+                    self.f.db.get_database_backend(),
+                    "SELECT json_object('state',state,'revision',revision,'owner',owner, \
+                     'fence_token',fence_token,'attempt_checkpoint_id',attempt_checkpoint_id, \
+                     'checkpoint_id',checkpoint_id,'traces_commit',traces_commit) AS snapshot \
+                     FROM agent_coverage_claim WHERE session_id = ? AND logical_turn_key = 'synthetic-turn-0'",
+                    [PK.into()],
+                ))
+                .await
+                .unwrap()
+                .unwrap()
+                .try_get_by::<String, _>("snapshot")
+                .unwrap()
+        }
+
+        async fn pending_bytes(&self) -> Vec<u8> {
+            load_chunks(&self.f.db, &self.artifact.header)
+                .await
+                .unwrap()
+        }
+
+        async fn replay_result(
+            &self,
+        ) -> anyhow::Result<crate::internal::ai::capture::recovery::ArtifactRecoveryOutcome>
+        {
+            use crate::internal::ai::{
+                capture::recovery::{DoctorReplayRequest, replay_for_doctor},
+                capture_scope::CaptureCommitDeadline,
+            };
+            let deadline = CaptureCommitDeadline::from_budget(Duration::from_secs(60)).unwrap();
+            let executable = std::env::current_exe().unwrap();
+            let helper = executable
+                .parent()
+                .and_then(std::path::Path::parent)
+                .unwrap()
+                .join("libra");
+            assert!(helper.is_file(), "built Libra helper is unavailable");
+            crate::internal::ai::authorized_read::with_test_helper_program(
+                helper,
+                replay_for_doctor(DoctorReplayRequest {
+                    conn: &self.f.db,
+                    recovery: &self.recovery,
+                    storage: &self.f.storage,
+                    root: self.f.root.path(),
+                    repo_path: &self.f.storage,
+                    now_millis: 2,
+                    deadline,
+                    manual: false,
+                }),
+            )
+            .await
+        }
+
+        async fn replay(&self) -> crate::internal::ai::capture::recovery::ArtifactRecoveryOutcome {
+            self.replay_result().await.unwrap()
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reasoning_pending_replay_commits_original_identity_atomically() {
+        let f = NativeTerminalFixture::new().await;
+        assert_eq!(
+            f.replay().await,
+            crate::internal::ai::capture::recovery::ArtifactRecoveryOutcome::Completed,
+        );
+        assert_eq!(f.f.count(MetadataScope::AgentCapturePending).await, 0);
+        let identity = MetadataKv::get_with_conn(
+            &f.f.db,
+            MetadataScope::AgentReasoningIdentity,
+            PK,
+            crate::internal::metadata::ReasoningIdentitySessionMap::KEY,
+        )
+        .await
+        .unwrap();
+        assert!(
+            identity.is_some(),
+            "replay must commit the source-derived identity"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reasoning_pending_store_failure_preserves_pending() {
+        use crate::internal::ai::capture::checkpoint::test_support::{
+            CheckpointFaultPoint, armed_fault, fail_once_at,
+        };
+
+        let f = NativeTerminalFixture::new().await;
+        fail_once_at(CheckpointFaultPoint::AfterMarkerRegistration);
+        assert!(f.replay_result().await.is_err());
+        assert_eq!(armed_fault(), None, "fault must reach the actual store");
+        assert_eq!(f.f.count(MetadataScope::AgentCapturePending).await, 1);
+        assert_eq!(f.pending_bytes().await, f.artifact.bytes);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reasoning_pending_store_failure_preserves_claims() {
+        use crate::internal::ai::capture::checkpoint::test_support::{
+            CheckpointFaultPoint, armed_fault, fail_once_at,
+        };
+
+        let f = NativeTerminalFixture::new().await;
+        let before = f.claim_snapshot().await;
+        fail_once_at(CheckpointFaultPoint::AfterObjectWrite);
+        assert!(f.replay_result().await.is_err());
+        assert_eq!(armed_fault(), None, "fault must reach object write");
+        let after = f.claim_snapshot().await;
+        assert_eq!(after, before, "failed append must retain original claim");
+        assert_eq!(f.f.count(MetadataScope::AgentCapturePending).await, 1);
+        assert_eq!(f.pending_bytes().await, f.artifact.bytes);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reasoning_pending_replay_identity_transaction_failure_rolls_back() {
+        use crate::internal::ai::capture::checkpoint::test_support::{
+            CheckpointFaultPoint, armed_fault, fail_once_at,
+        };
+
+        let f = NativeTerminalFixture::new().await;
+        let before = f.claim_snapshot().await;
+        fail_once_at(CheckpointFaultPoint::CompanionTransaction);
+        assert!(f.replay_result().await.is_err());
+        assert_eq!(
+            armed_fault(),
+            None,
+            "fault must reach companion transaction"
+        );
+        assert_eq!(f.claim_snapshot().await, before);
+        assert_eq!(f.f.count(MetadataScope::AgentCapturePending).await, 1);
+        assert_eq!(f.pending_bytes().await, f.artifact.bytes);
+        assert!(
+            MetadataKv::get_with_conn(
+                &f.f.db,
+                MetadataScope::AgentReasoningIdentity,
+                PK,
+                crate::internal::metadata::ReasoningIdentitySessionMap::KEY,
+            )
+            .await
+            .unwrap()
+            .is_none(),
+            "identity must roll back with the failed ref transaction"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reasoning_pending_replay_is_session_end_source_free() {
+        let f = NativeTerminalFixture::new().await;
+        let source = f.f.root.path().join("provider-source.jsonl");
+        if source.exists() {
+            std::fs::remove_file(source).unwrap();
+        }
+        f.f.db.execute_unprepared("VACUUM").await.unwrap();
+        assert_eq!(
+            f.replay().await,
+            crate::internal::ai::capture::recovery::ArtifactRecoveryOutcome::Completed,
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reasoning_pending_forward_recovery_preserves_evidence() {
+        use crate::internal::ai::capture::checkpoint::test_support::{
+            CheckpointFaultPoint, armed_fault, fail_once_at,
+        };
+
+        let f = NativeTerminalFixture::new().await;
+        fail_once_at(CheckpointFaultPoint::AfterMarkerRegistration);
+        assert!(f.replay_result().await.is_err());
+        assert_eq!(armed_fault(), None);
+        assert_eq!(f.pending_bytes().await, f.artifact.bytes);
+        let catalog =
+            crate::internal::ai::capture::catalog::CaptureCatalogStore::new(f.f.db.clone());
+        let recovery = catalog
+            .pending_finalizer_recoveries_for_doctor(3)
+            .await
+            .unwrap()
+            .recoveries
+            .into_iter()
+            .find(|recovery| recovery.checkpoint_id() == f.recovery.checkpoint_id())
+            .unwrap();
+        let retry = NativeTerminalFixture { recovery, ..f };
+        assert_eq!(
+            retry.replay().await,
+            crate::internal::ai::capture::recovery::ArtifactRecoveryOutcome::Completed,
+        );
+        assert_eq!(retry.f.count(MetadataScope::AgentCapturePending).await, 0);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reasoning_pending_completion_is_atomic() {
+        let f = NativeTerminalFixture::new().await;
+        assert_eq!(f.f.count(MetadataScope::AgentCapturePending).await, 1);
+        assert_eq!(f.f.count(MetadataScope::AgentCapturePendingChunk).await, 1);
+        assert_eq!(f.f.count(MetadataScope::AgentCaptureSessionAlias).await, 1);
+        assert_eq!(
+            f.replay().await,
+            crate::internal::ai::capture::recovery::ArtifactRecoveryOutcome::Completed,
+        );
+        for scope in [
+            MetadataScope::AgentCapturePending,
+            MetadataScope::AgentCapturePendingChunk,
+            MetadataScope::AgentCaptureSessionAlias,
+        ] {
+            assert_eq!(f.f.count(scope).await, 0, "terminal cleanup must be atomic");
+        }
+        assert!(f.claim_snapshot().await.contains("catalog_committed"));
+        assert!(
+            MetadataKv::get_with_conn(
+                &f.f.db,
+                MetadataScope::AgentReasoningIdentity,
+                PK,
+                crate::internal::metadata::ReasoningIdentitySessionMap::KEY,
+            )
+            .await
+            .unwrap()
+            .is_some()
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reasoning_pending_erasure_is_atomic() {
+        let f = NativeTerminalFixture::new().await;
+        let txn = db::begin_write_transaction(&f.f.db).await.unwrap();
+        assert!(!erase_session_artifacts(&txn, PK).await.unwrap());
+        txn.rollback().await.unwrap();
+        assert_eq!(f.f.count(MetadataScope::AgentCapturePending).await, 1);
+        assert_eq!(f.pending_bytes().await, f.artifact.bytes);
+        let txn = db::begin_write_transaction(&f.f.db).await.unwrap();
+        assert!(!erase_session_artifacts(&txn, PK).await.unwrap());
+        txn.commit().await.unwrap();
+        for scope in [
+            MetadataScope::AgentCapturePending,
+            MetadataScope::AgentCapturePendingChunk,
+            MetadataScope::AgentCaptureSessionAlias,
+        ] {
+            assert_eq!(f.f.count(scope).await, 0);
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reasoning_pending_retains_current_fences() {
+        use crate::internal::ai::capture::recovery::ArtifactRecoveryOutcome;
+
+        for fence in [
+            "scope",
+            "alias",
+            "incarnation",
+            "receipt",
+            "generation",
+            "coverage",
+            "tombstone",
+        ] {
+            let f = NativeTerminalFixture::new().await;
+            let before = f.pending_bytes().await;
+            match fence {
+                "scope" => {
+                    ConfigKv::set_with_conn(&f.f.db, "libra.repoid", "different-repository", false)
+                        .await
+                        .unwrap();
+                }
+                "alias" => {
+                    f.f.db
+                        .execute_unprepared(
+                            "DELETE FROM metadata_kv WHERE scope = 'agent_capture_session_alias'",
+                        )
+                        .await
+                        .unwrap();
+                }
+                "incarnation" => {
+                    f.f.db
+                        .execute_unprepared(
+                            "UPDATE agent_session SET metadata_json = json_set(metadata_json, \
+                         '$.capture_incarnation', 'ffffffffffffffffffffffffffffffff') \
+                         WHERE session_id = 'claude__native-session'",
+                        )
+                        .await
+                        .unwrap();
+                }
+                "receipt" => {
+                    f.f.db
+                        .execute_unprepared(
+                            "UPDATE agent_session SET metadata_json = json_remove(metadata_json, \
+                         '$.capture_catalog_receipts_v1') \
+                         WHERE session_id = 'claude__native-session'",
+                        )
+                        .await
+                        .unwrap();
+                }
+                "generation" => {
+                    f.f.db
+                        .execute_unprepared(
+                            "UPDATE agent_session SET metadata_json = json_set(metadata_json, \
+                         '$.capture_catalog_receipts_v1.entries[0].finalizer.marker_generation', \
+                         'different-generation') WHERE session_id = 'claude__native-session'",
+                        )
+                        .await
+                        .unwrap();
+                }
+                "coverage" => {
+                    f.f.db
+                        .execute_unprepared(
+                            "UPDATE agent_coverage_claim SET fence_token = fence_token + 1 \
+                         WHERE session_id = 'claude__native-session'",
+                        )
+                        .await
+                        .unwrap();
+                }
+                "tombstone" => {
+                    f.f.db
+                        .execute_unprepared(
+                            "INSERT INTO agent_import_tombstone \
+                         (tombstone_id,agent_kind,provider_session_id,erased_session_id,erased_at) \
+                         VALUES ('og21-tombstone','claude_code','native-session', \
+                         'claude__native-session',1)",
+                        )
+                        .await
+                        .unwrap();
+                }
+                _ => unreachable!(),
+            }
+            let result = f.replay_result().await;
+            assert!(
+                !matches!(result, Ok(ArtifactRecoveryOutcome::Completed)),
+                "{fence} fence admitted a stale native replay"
+            );
+            assert_eq!(f.pending_bytes().await, before, "{fence} lost evidence");
+            assert!(
+                MetadataKv::get_with_conn(
+                    &f.f.db,
+                    MetadataScope::AgentReasoningIdentity,
+                    PK,
+                    crate::internal::metadata::ReasoningIdentitySessionMap::KEY,
+                )
+                .await
+                .unwrap()
+                .is_none(),
+                "{fence} wrote reasoning identity"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reasoning_authenticated_pending_rejects_inconsistent_identity_claim_associations() {
+        for invalid in ["duplicate", "missing", "orphan", "wrong_order"] {
+            let f = Fixture::new().await;
+            let (mut artifact, _) = actual_native_reasoning_artifact(&f).await;
+            let mut value: serde_json::Value = serde_json::from_slice(&artifact.bytes).unwrap();
+            if invalid == "duplicate" || invalid == "wrong_order" {
+                let mut second_claim = value["coverage"]["claims"][0].clone();
+                second_claim["logical_turn_key"] = "synthetic-turn-1".into();
+                second_claim["fence_token"] = 2.into();
+                value["coverage"]["claims"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(second_claim);
+                let mut second_association =
+                    value["payload"]["identity_commit_associations"][0].clone();
+                if invalid == "wrong_order" {
+                    second_association["logical_turn_key"] = "synthetic-turn-0".into();
+                    value["payload"]["identity_commit_associations"][0]["logical_turn_key"] =
+                        "synthetic-turn-1".into();
+                }
+                value["payload"]["identity_commit_associations"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(second_association);
+            } else if invalid == "missing" {
+                value["payload"]["identity_commit_associations"]
+                    .as_array_mut()
+                    .unwrap()
+                    .clear();
+            } else {
+                value["payload"]["identity_commit_associations"][0]["logical_turn_key"] =
+                    "orphan-turn".into();
+            }
+            let malformed: PendingEnvelope = serde_json::from_value(value).unwrap();
+            let bytes = serde_json::to_vec(&malformed).unwrap();
+            artifact.header.mac = f
+                .scope
+                .sign_pending_envelope_until(&f.db, &f.storage, f.root.path(), &bytes, deadline())
+                .await
+                .unwrap();
+            artifact.header.envelope_bytes = bytes.len();
+            artifact.header.chunks = bytes.len().div_ceil(CHUNK_BYTES);
+            artifact.bytes = bytes;
+            f.persist(&artifact).await;
+            let identity = f.identity(Some(artifact.identity.alias())).await;
+            let error = load_verified_payload(
+                &f.db,
+                &f.storage,
+                f.root.path(),
+                &identity,
+                artifact.binding(),
+                &artifact.header,
+                deadline(),
+            )
+            .await
+            .err()
+            .expect("inconsistent signed associations must fail authenticated load");
+            assert!(
+                format!("{error:#}").contains("membership"),
+                "{invalid} must fail at membership before native restoration: {error:#}"
+            );
+            assert_eq!(f.count(MetadataScope::AgentCapturePending).await, 1);
+            assert_eq!(f.count(MetadataScope::AgentReasoningIdentity).await, 0);
+        }
+    }
+
+    #[cfg(unix)]
+    pub(crate) async fn assert_pending_late_restore_requires_terminal_claim_authority() {
+        use crate::internal::ai::{
+            capture::checkpoint::{CheckpointStore, CheckpointWriteRequest, TracesCheckpointStore},
+            traces::CheckpointScope,
+        };
+
+        let f = NativeTerminalFixture::new().await;
+        let identity = f.f.identity(Some(f.artifact.identity.alias())).await;
+        let verified = load_verified_payload(
+            &f.f.db,
+            &f.f.storage,
+            f.f.root.path(),
+            &identity,
+            f.artifact.binding(),
+            &f.artifact.header,
+            deadline(),
+        )
+        .await
+        .unwrap();
+        let store = TracesCheckpointStore::new(
+            &f.f.db,
+            &f.f.storage,
+            PK,
+            &f.artifact.binding().checkpoint_id,
+            &[],
+        )
+        .unwrap();
+        let request = || {
+            CheckpointWriteRequest::new(
+                &f.artifact.binding().action_key,
+                &f.artifact.binding().checkpoint_id,
+                PK,
+                "claude_code",
+                f.artifact.binding().parent_commit.as_deref(),
+                CheckpointScope::Committed,
+                store.marker_generation(),
+                None,
+                verified.payload(),
+                None,
+                Some(
+                    crate::internal::ai::capture_scope::CaptureCommitDeadline::from_budget(
+                        Duration::from_secs(60),
+                    )
+                    .unwrap(),
+                ),
+            )
+            .unwrap()
+        };
+        assert!(
+            store.write(request()).await.is_err(),
+            "omitted pending coverage must fail before marker registration"
+        );
+        assert!(
+            MetadataKv::get_with_conn(
+                &f.f.db,
+                MetadataScope::AgentTracesInflight,
+                PK,
+                &f.artifact.binding().checkpoint_id,
+            )
+            .await
+            .unwrap()
+            .is_none()
+        );
+        assert!(
+            store
+                .write(
+                    request()
+                        .with_pending_coverage(verified.coverage(), &f.f.storage, f.f.root.path(),)
+                        .unwrap(),
+                )
+                .await
+                .is_err(),
+            "ordinary store must not mint current native authority"
+        );
+        assert_eq!(f.pending_bytes().await, f.artifact.bytes);
+        assert_eq!(
+            f.replay().await,
+            crate::internal::ai::capture::recovery::ArtifactRecoveryOutcome::Completed,
+            "catalog-elected terminal claim authority permits the same artifact"
+        );
+    }
+
+    #[cfg(unix)]
+    pub(crate) async fn assert_actual_borrowed_recovery_reauthenticates_each_attempt() {
+        use crate::internal::ai::capture::{
+            checkpoint::test_support::{CheckpointFaultPoint, armed_fault, fail_once_at},
+            recovery::ArtifactRecoveryOutcome,
+        };
+
+        let f = NativeTerminalFixture::new().await;
+        let original = f.pending_bytes().await;
+        fail_once_at(CheckpointFaultPoint::AfterMarkerRegistration);
+        assert!(f.replay_result().await.is_err());
+        assert_eq!(armed_fault(), None);
+        assert_eq!(f.pending_bytes().await, original);
+        let catalog =
+            crate::internal::ai::capture::catalog::CaptureCatalogStore::new(f.f.db.clone());
+        let recovery = catalog
+            .pending_finalizer_recoveries_for_doctor(3)
+            .await
+            .unwrap()
+            .recoveries
+            .into_iter()
+            .find(|item| item.checkpoint_id() == f.recovery.checkpoint_id())
+            .unwrap();
+        let retry = NativeTerminalFixture { recovery, ..f };
+        retry
+            .f
+            .db
+            .execute_unprepared(
+                "UPDATE agent_coverage_claim SET fence_token = fence_token + 1 \
+                 WHERE session_id = 'claude__native-session'",
+            )
+            .await
+            .unwrap();
+        let result = retry.replay_result().await;
+        assert!(
+            !matches!(result, Ok(ArtifactRecoveryOutcome::Completed)),
+            "changed current claim must reject the next borrowed recovery attempt"
+        );
+        assert_eq!(retry.pending_bytes().await, original);
+        assert!(
+            MetadataKv::get_with_conn(
+                &retry.f.db,
+                MetadataScope::AgentReasoningIdentity,
+                PK,
+                crate::internal::metadata::ReasoningIdentitySessionMap::KEY,
+            )
+            .await
+            .unwrap()
+            .is_none()
+        );
+    }
+
+    #[cfg(unix)]
+    pub(crate) async fn assert_covered_prefix_keeps_reserved_identity_subset() {
+        use crate::internal::ai::{
+            capture::checkpoint::{
+                ReasoningIdentityPreparation, ReasoningIdentityReadContext,
+                prepare_reasoning_coverage_plan, prepare_reasoning_coverage_plan_from_disposition,
+            },
+            coverage_gate::{
+                ReasoningCoverageInput, reserve_turn_claims_with_reasoning_no_deadline,
+            },
+            observed_agents::{
+                NormalizedTurn,
+                reasoning::{ReasoningSourceDisposition, synthetic_native_batch_for_turns},
+            },
+        };
+
+        let f = NativeTerminalFixture::new_with_covered_prefix(true).await;
+        let turns = (0..3)
+            .map(|ordinal| NormalizedTurn {
+                logical_turn_key: format!("synthetic-turn-{ordinal}"),
+                ordinal,
+                completeness: Completeness::Complete,
+                started_at: None,
+                ended_at: None,
+                records: Vec::new(),
+            })
+            .collect::<Vec<_>>();
+        let direct = prepare_reasoning_coverage_plan(
+            &f.source_payload,
+            ReasoningIdentityPreparation {
+                conn: &f.f.db,
+                scope: &f.f.scope,
+                storage_path: &f.f.storage,
+                authorized_root: f.f.root.path(),
+                session_id: PK,
+                provider: "claude_code",
+                turns: &turns,
+                deadline: deadline(),
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let original: serde_json::Value = serde_json::from_slice(&f.artifact.bytes).unwrap();
+        let associations = original["payload"]["identity_commit_associations"]
+            .as_array()
+            .unwrap();
+        assert_eq!(associations.len(), 2);
+        assert_eq!(associations[0]["logical_turn_key"], "synthetic-turn-1");
+        assert_eq!(associations[1]["logical_turn_key"], "synthetic-turn-2");
+        assert_eq!(associations[0]["disposition"], "verified_nonempty");
+        assert_eq!(associations[1]["disposition"], "verified_empty");
+        for (index, key) in ["synthetic-turn-1", "synthetic-turn-2"].iter().enumerate() {
+            assert_eq!(
+                associations[index]["slot"],
+                direct.turn(key).unwrap().slot()
+            );
+            assert_eq!(
+                associations[index]["descriptor_mac"],
+                direct.turn(key).unwrap().descriptor_mac()
+            );
+        }
+        let identity = f.f.identity(Some(f.artifact.identity.alias())).await;
+        let verified = load_verified_payload(
+            &f.f.db,
+            &f.f.storage,
+            f.f.root.path(),
+            &identity,
+            f.artifact.binding(),
+            &f.artifact.header,
+            deadline(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(verified.coverage().claims.len(), 2);
+        assert!(verified.payload().deferred_pending_reasoning().is_some());
+        assert_eq!(
+            f.replay().await,
+            crate::internal::ai::capture::recovery::ArtifactRecoveryOutcome::Completed,
+        );
+        let retained = MetadataKv::get_with_conn(
+            &f.f.db,
+            MetadataScope::AgentReasoningIdentity,
+            PK,
+            crate::internal::metadata::ReasoningIdentitySessionMap::KEY,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let map: serde_json::Value = serde_json::from_str(&retained.value).unwrap();
+        let records = map["records"].as_object().unwrap();
+        assert_eq!(records.len(), 2, "covered prefix must not be recommitted");
+        for (index, key) in ["synthetic-turn-1", "synthetic-turn-2"].iter().enumerate() {
+            let slot = associations[index]["slot"].as_str().unwrap();
+            let record = &records[slot];
+            assert_eq!(record["body"]["context"]["logical_turn_key"], slot);
+            assert_ne!(slot, *key, "private identity must use a keyed turn slot");
+            assert_eq!(
+                record["body"]["kind"],
+                if index == 0 { "nonempty" } else { "empty" }
+            );
+        }
+        let turn2 = &turns[2..3];
+        let reader = ReasoningIdentityReadContext::new(
+            &f.f.scope,
+            PK,
+            &f.f.storage,
+            f.f.root.path(),
+            deadline(),
+        );
+        let ordinary = reserve_turn_claims_with_reasoning_no_deadline(
+            &f.f.db,
+            &f.f.scope,
+            PK,
+            turn2,
+            "ordinary-v1-owner",
+            3,
+            "live",
+            ReasoningCoverageInput::ordinary(&reader),
+        )
+        .await
+        .unwrap();
+        assert_eq!(ordinary.skipped_incomplete_reasoning, 1);
+        assert!(ordinary.ordinary.reserved.is_empty());
+        let changed = ReasoningSourceDisposition::NativeProven(synthetic_native_batch_for_turns(
+            PK,
+            NATIVE,
+            vec![(2, b"late-candidate-after-empty".to_vec())],
+        ));
+        let candidate = prepare_reasoning_coverage_plan_from_disposition(
+            &changed,
+            ReasoningIdentityPreparation {
+                conn: &f.f.db,
+                scope: &f.f.scope,
+                storage_path: &f.f.storage,
+                authorized_root: f.f.root.path(),
+                session_id: PK,
+                provider: "claude_code",
+                turns: turn2,
+                deadline: deadline(),
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let changed = reserve_turn_claims_with_reasoning_no_deadline(
+            &f.f.db,
+            &f.f.scope,
+            PK,
+            turn2,
+            "late-candidate-owner",
+            4,
+            "live",
+            ReasoningCoverageInput::native(&candidate),
+        )
+        .await
+        .unwrap();
+        assert_eq!(changed.ordinary.conflicted, 1);
+        assert!(changed.ordinary.reserved.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reasoning_pending_producer_and_reader_activate_together() {
+        let f = Fixture::new().await;
+        let (artifact, _) = actual_native_reasoning_artifact(&f).await;
+        let encoded: serde_json::Value = serde_json::from_slice(&artifact.bytes).unwrap();
+        assert_eq!(encoded["version"], 1);
+        assert_eq!(encoded["payload"]["version"], 2);
+        f.persist(&artifact).await;
+        let identity = f.identity(Some(artifact.identity.alias())).await;
+        let verified = load_verified_payload(
+            &f.db,
+            &f.storage,
+            f.root.path(),
+            &identity,
+            artifact.binding(),
+            &artifact.header,
+            deadline(),
+        )
+        .await
+        .unwrap();
+        assert!(verified.payload().deferred_pending_reasoning().is_some());
+        assert_eq!(
+            verified.coverage().claims[0].logical_turn_key,
+            "synthetic-turn-0"
+        );
+        assert!(
+            !verified
+                .payload()
+                .transcript()
+                .bytes()
+                .windows(b"OG21_PRIVATE_PENDING_NATIVE_CANARY".len())
+                .any(|window| window == b"OG21_PRIVATE_PENDING_NATIVE_CANARY")
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reasoning_pending_original_envelope_ownership_is_bounded() {
+        let f = Fixture::new().await;
+        let (artifact, _) = actual_native_reasoning_artifact(&f).await;
+        f.persist(&artifact).await;
+        let identity = f.identity(Some(artifact.identity.alias())).await;
+        let verified = load_verified_payload(
+            &f.db,
+            &f.storage,
+            f.root.path(),
+            &identity,
+            artifact.binding(),
+            &artifact.header,
+            deadline(),
+        )
+        .await
+        .unwrap();
+        let replay = verified.payload().deferred_pending_reasoning().unwrap();
+        assert_eq!(replay.original_envelope(), artifact.bytes);
+        assert!(replay.original_envelope().len() <= MAX_ENVELOPE_BYTES);
+    }
+
+    #[cfg(unix)]
     async fn synthetic_reasoning_v2_envelope(f: &Fixture) -> (SealedPendingArtifact, Vec<u8>) {
         let (artifact, _) = f.artifact(None).await;
         let bytes = synthetic_reasoning_v2_bytes(&artifact);
@@ -4496,7 +5602,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("pending reasoning v2 that this Libra build cannot replay")
+                .contains("capture recovery membership authentication failed")
         );
         assert_eq!(load_chunks(&f.db, &artifact.header).await.unwrap(), bytes);
         assert_eq!(f.count(MetadataScope::AgentCapturePending).await, 1);

@@ -2293,10 +2293,13 @@ pub(super) async fn run_checkpoint_stage<P: LiveExportLeasePort>(
                 }
             };
             if let Err(error) = CaptureCatalogStore::new(conn.clone())
-                .persist_pending_artifact(
+                .persist_pending_artifact_with_reasoning(
                     registration_fence,
                     &checkpoint_payload,
-                    &claim_plan,
+                    crate::internal::ai::capture::catalog::PendingArtifactPlans {
+                        coverage: &claim_plan,
+                        reasoning: identity_plan.as_deref(),
+                    },
                     &storage,
                     repo_path,
                     deadline,
@@ -3887,6 +3890,214 @@ pub(crate) mod tests {
             .try_get_by("n")
             .unwrap();
         assert_eq!(reserved, 0, "partial must release only fresh reservations");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn reasoning_actual_terminal_seal_then_store_preserves_owned_carrier() {
+        use crate::internal::ai::{
+            capture::{
+                catalog::CaptureCatalogStore,
+                checkpoint::test_support::{CheckpointFaultPoint, armed_fault, fail_once_at},
+                recovery::{ArtifactRecoveryOutcome, DoctorReplayRequest, replay_for_doctor},
+            },
+            capture_scope::CaptureCommitDeadline,
+            hooks::provider::ProviderHookCommand,
+        };
+
+        for point in [
+            CheckpointFaultPoint::AfterMarkerRegistration,
+            CheckpointFaultPoint::AfterObjectWrite,
+            CheckpointFaultPoint::CompanionTransaction,
+            CheckpointFaultPoint::MarkerCleanup,
+        ] {
+            let home = tempfile::tempdir().unwrap();
+            let _home = TestHomeScope::set(home.path());
+            let dir = tempfile::tempdir().unwrap();
+            crate::utils::test::setup_with_new_libra_in(dir.path()).await;
+            let db_path = dir
+                .path()
+                .join(crate::utils::util::ROOT_DIR)
+                .join(crate::utils::util::DATABASE);
+            let conn = sea_orm::Database::connect(format!("sqlite://{}", db_path.display()))
+                .await
+                .unwrap();
+            let repo = dir.path().canonicalize().unwrap();
+            let transcript = concat!(
+                r#"{"type":"user","uuid":"synthetic-turn-0","message":{"role":"user","content":"ordinary OG21_LIVE_PRIVATE_CANARY"}}"#,
+                "\n",
+                r#"{"type":"assistant","uuid":"assistant-0","message":{"role":"assistant","content":[{"type":"text","text":"done"}]}}"#,
+                "\n",
+            );
+            source_context(&repo, transcript.as_bytes());
+            let _native = scoped_test_snapshot_adapter(AgentKind::ClaudeCode, &fixture::NATIVE);
+            let _snapshot_helper_bypass =
+            crate::internal::ai::capture::live_pipeline::test_support::capture_live_without_deadline();
+            let executable = std::env::current_exe().unwrap();
+            let helper = executable
+                .parent()
+                .and_then(std::path::Path::parent)
+                .unwrap()
+                .join("libra");
+            assert!(helper.is_file(), "built Libra helper is unavailable");
+            crate::internal::ai::authorized_read::with_test_helper_program(helper, async {
+            deliver(
+                &conn,
+                &repo,
+                fixture::SOURCE,
+                "SessionStart",
+                ProviderHookCommand::SessionStart,
+                LifecycleEventKind::SessionStart,
+            )
+            .await
+            .unwrap();
+            deliver(
+                &conn,
+                &repo,
+                fixture::SOURCE,
+                "Stop",
+                ProviderHookCommand::Stop,
+                LifecycleEventKind::TurnEnd,
+            )
+            .await
+            .unwrap();
+            let extended = concat!(
+                r#"{"type":"user","uuid":"synthetic-turn-0","message":{"role":"user","content":"ordinary OG21_LIVE_PRIVATE_CANARY"}}"#,
+                "\n",
+                r#"{"type":"assistant","uuid":"assistant-0","message":{"role":"assistant","content":[{"type":"text","text":"done"}]}}"#,
+                "\n",
+                r#"{"type":"user","uuid":"synthetic-turn-1","message":{"role":"user","content":"ordinary second turn"}}"#,
+                "\n",
+                r#"{"type":"assistant","uuid":"assistant-1","message":{"role":"assistant","content":[{"type":"text","text":"second done"}]}}"#,
+                "\n",
+            );
+            source_context(&repo, extended.as_bytes());
+            fail_once_at(point);
+            let first = deliver(
+                &conn,
+                &repo,
+                fixture::SOURCE,
+                "SessionEnd",
+                ProviderHookCommand::SessionEnd,
+                LifecycleEventKind::SessionEnd,
+            )
+            .await;
+            assert_eq!(armed_fault(), None, "{point:?}: terminal delivery must reach checkpoint store");
+            assert!(first.is_err(), "{point:?}: injected failure must not acknowledge completion");
+            let pending: i64 = conn
+                .query_one_raw(Statement::from_string(
+                    conn.get_database_backend(),
+                    "SELECT COUNT(*) AS n FROM metadata_kv WHERE scope = 'agent_capture_pending'"
+                        .to_owned(),
+                ))
+                .await
+                .unwrap()
+                .unwrap()
+                .try_get_by("n")
+                .unwrap();
+            {
+                assert_eq!(pending, 1, "{point:?}: actual terminal must retain typed pending evidence");
+                let catalog = CaptureCatalogStore::new(conn.clone());
+                let recovery = catalog
+                    .pending_finalizer_recoveries_for_doctor(chrono::Utc::now().timestamp_millis())
+                    .await
+                    .unwrap()
+                    .recoveries
+                    .into_iter()
+                    .find(|item| item.artifact_present())
+                    .unwrap();
+                let storage = repo.join(crate::utils::util::ROOT_DIR);
+                if point != CheckpointFaultPoint::MarkerCleanup {
+                    // Object-write and companion-transaction failures leave
+                    // cleanup-owned markers. Doctor repairs those before
+                    // retrying the retained terminal artifact.
+                    let history = crate::internal::ai::history::HistoryManager::for_traces(
+                        std::sync::Arc::new(crate::utils::client_storage::ClientStorage::init(
+                            storage.join("objects"),
+                        )),
+                        storage.clone(),
+                        std::sync::Arc::new(conn.clone()),
+                    );
+                    assert!(
+                        history
+                            .repair_expired_traces_inflight_marker_for_test(
+                                fixture::CAPTURE,
+                                recovery.checkpoint_id(),
+                                chrono::Utc::now().timestamp_millis(),
+                            )
+                            .await
+                            .unwrap(),
+                        "{point:?}: doctor must retire failed attempt marker"
+                    );
+                }
+                let outcome = replay_for_doctor(DoctorReplayRequest {
+                    conn: &conn,
+                    recovery: &recovery,
+                    storage: &storage,
+                    root: &repo,
+                    repo_path: &storage,
+                    now_millis: chrono::Utc::now().timestamp_millis(),
+                    deadline: CaptureCommitDeadline::from_budget(Duration::from_secs(60)).unwrap(),
+                    manual: false,
+                })
+                .await
+                .unwrap_or_else(|error| panic!("{point:?}: actual replay failed: {error:#}"));
+                assert_eq!(outcome, ArtifactRecoveryOutcome::Completed, "{point:?}");
+            }
+            let identity: i64 = conn
+                .query_one_raw(Statement::from_sql_and_values(
+                    conn.get_database_backend(),
+                    "SELECT COUNT(*) AS n FROM metadata_kv WHERE scope = 'agent_reasoning_identity' AND target = ?",
+                    [fixture::CAPTURE.into()],
+                ))
+                .await
+                .unwrap()
+                .unwrap()
+                .try_get_by("n")
+                .unwrap();
+            assert_eq!(identity, 1, "same native carrier must reach identity commit");
+            let committed_claim: i64 = conn
+                .query_one_raw(Statement::from_string(
+                    conn.get_database_backend(),
+                    "SELECT COUNT(*) AS n FROM agent_coverage_claim WHERE logical_turn_key = 'synthetic-turn-1' AND state = 'catalog_committed'".to_owned(),
+                ))
+                .await
+                .unwrap()
+                .unwrap()
+                .try_get_by("n")
+                .unwrap();
+            assert_eq!(committed_claim, 1, "{point:?}: original claim must commit once");
+            deliver(
+                &conn,
+                &repo,
+                fixture::SOURCE,
+                "SessionEnd",
+                ProviderHookCommand::SessionEnd,
+                LifecycleEventKind::SessionEnd,
+            )
+            .await
+            .unwrap();
+            let checkpoints: i64 = conn
+                .query_one_raw(Statement::from_string(
+                    conn.get_database_backend(),
+                    "SELECT COUNT(*) AS n FROM agent_checkpoint".to_owned(),
+                ))
+                .await
+                .unwrap()
+                .unwrap()
+                .try_get_by("n")
+                .unwrap();
+            assert_eq!(checkpoints, 2, "{point:?}: successful retry must not append twice");
+        })
+        .await;
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reasoning_pending_covered_prefix_keeps_reserved_identity_subset() {
+        super::super::pending::tests::assert_covered_prefix_keeps_reserved_identity_subset().await;
     }
     #[cfg(target_os = "macos")]
     fn assert_source_descriptor_closed(path: &std::path::Path) {

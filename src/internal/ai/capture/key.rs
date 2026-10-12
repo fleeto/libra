@@ -29,9 +29,13 @@ use ring::{
     hmac,
     rand::{SecureRandom, SystemRandom},
 };
+use serde::{Deserialize, Serialize};
+use serde_json::value::RawValue;
 use thiserror::Error;
 
-use crate::internal::ai::capture_scope::CaptureScope;
+use crate::internal::ai::{
+    capture_scope::CaptureScope, observed_agents::reasoning::PendingIntegrityToken,
+};
 
 /// Fixed, path-free capability result safe to render to a hook host.
 pub(crate) const CAPTURE_UNSUPPORTED_PLATFORM_REMEDY: &str = "Session Capture is unavailable on this platform because secure repository-private key initialization requires Unix descriptor-relative no-replace file APIs; run the hook on a Unix host";
@@ -243,6 +247,257 @@ pub(crate) async fn authenticate_pending_envelope_in_scope_until<C: sea_orm::Con
         .assert_capture_key_storage_binding_until(conn, storage_path, authorized_root, deadline)
         .await?;
     authenticate_pending_envelope_existing_key(&storage_path, envelope, expected_mac, deadline)
+}
+
+/// Exact members borrowed from the already decoded pending envelope. This
+/// preflight authenticates their presence in the original canonical bytes;
+/// it does not establish provider origin or create a native reasoning proof.
+pub(crate) struct PendingReasoningMembers<'a> {
+    pub(crate) binding: &'a [u8],
+    pub(crate) payload: &'a [u8],
+    pub(crate) coverage: &'a [u8],
+}
+
+pub(crate) struct PendingReasoningAuthentication<'a> {
+    pub(crate) scope: &'a CaptureScope,
+    pub(crate) storage_path: &'a Path,
+    pub(crate) authorized_root: &'a Path,
+    pub(crate) original_envelope: &'a [u8],
+    pub(crate) original_mac: &'a str,
+    pub(crate) members: PendingReasoningMembers<'a>,
+    pub(crate) deadline: Instant,
+}
+
+/// Key-local result of authenticating the original envelope and its closed
+/// members. OG-21's lower reasoning issuer will consume these digests only
+/// after its own fixed-source proof and current-catalog binding checks.
+pub(crate) struct PendingIntegrityPreflight {
+    envelope_sha256: [u8; 32],
+    payload_sha256: [u8; 32],
+    source_sha256: [u8; 32],
+    associations_sha256: [u8; 32],
+    coverage_sha256: [u8; 32],
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct PendingEnvelopeMembers<'a> {
+    version: u8,
+    #[serde(borrow)]
+    binding: &'a RawValue,
+    #[serde(borrow)]
+    payload: &'a RawValue,
+    #[serde(borrow)]
+    coverage: &'a RawValue,
+}
+
+#[derive(Deserialize)]
+struct PendingReasoningPayloadMembers<'a> {
+    version: u8,
+    #[serde(borrow)]
+    reasoning_source: &'a RawValue,
+    #[serde(borrow)]
+    identity_commit_associations: &'a RawValue,
+}
+
+#[derive(Deserialize)]
+struct PendingLogicalTurnKey {
+    logical_turn_key: String,
+}
+
+#[derive(Deserialize)]
+struct PendingCoverageClaimKeys {
+    claims: Vec<PendingLogicalTurnKey>,
+}
+
+/// Compare a serde encoding with its original bytes without allocating a
+/// second copy of a potentially 64 MiB authenticated envelope.
+struct ExactEncodingWriter<'a> {
+    original: &'a [u8],
+    offset: usize,
+}
+
+impl std::io::Write for ExactEncodingWriter<'_> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let end = self.offset.checked_add(bytes.len()).ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "encoding length overflow")
+        })?;
+        if self.original.get(self.offset..end) != Some(bytes) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "encoding differs from authenticated bytes",
+            ));
+        }
+        self.offset = end;
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn matches_exact_json_encoding(value: &impl Serialize, original: &[u8]) -> bool {
+    let mut writer = ExactEncodingWriter {
+        original,
+        offset: 0,
+    };
+    serde_json::to_writer(&mut writer, value).is_ok() && writer.offset == original.len()
+}
+
+/// Authenticate the original whole envelope with the existing private key,
+/// then prove that the caller's binding, payload and coverage are the exact
+/// canonical members of those same bytes. A header or a reserialized DTO
+/// alone never grants this result. The key is read-only and cannot be minted.
+pub(crate) async fn authenticate_pending_reasoning_members_in_scope_until<
+    C: sea_orm::ConnectionTrait,
+>(
+    conn: &C,
+    request: PendingReasoningAuthentication<'_>,
+) -> Result<PendingIntegrityToken> {
+    let PendingReasoningAuthentication {
+        scope,
+        storage_path,
+        authorized_root,
+        original_envelope,
+        original_mac,
+        members,
+        deadline,
+    } = request;
+    anyhow::ensure!(
+        original_envelope.first() == Some(&b'{'),
+        "capture recovery membership authentication failed; run libra agent doctor"
+    );
+    let storage_path = scope
+        .assert_capture_key_storage_binding_until(conn, storage_path, authorized_root, deadline)
+        .await?;
+    let preflight = authenticate_pending_reasoning_members_existing_key(
+        &storage_path,
+        original_envelope,
+        original_mac,
+        members,
+        deadline,
+    )?;
+    Ok(PendingIntegrityToken::from_authenticated_members(
+        preflight.envelope_sha256,
+        preflight.payload_sha256,
+        preflight.source_sha256,
+        preflight.associations_sha256,
+        preflight.coverage_sha256,
+    ))
+}
+
+/// Reauthenticate the original retained bytes on every replay attempt. The
+/// member slices are borrowed from that buffer; the earlier typed canonical
+/// decode and the returned digest stamp bind them to the deferred projection.
+pub(crate) async fn authenticate_pending_reasoning_original_in_scope_until<
+    C: sea_orm::ConnectionTrait,
+>(
+    conn: &C,
+    scope: &CaptureScope,
+    storage_path: &Path,
+    authorized_root: &Path,
+    original_envelope: &[u8],
+    original_mac: &str,
+    deadline: Instant,
+) -> Result<PendingIntegrityToken> {
+    let decoded: PendingEnvelopeMembers<'_> = serde_json::from_slice(original_envelope)
+        .context("capture recovery original membership is invalid; run libra agent doctor")?;
+    authenticate_pending_reasoning_members_in_scope_until(
+        conn,
+        PendingReasoningAuthentication {
+            scope,
+            storage_path,
+            authorized_root,
+            original_envelope,
+            original_mac,
+            members: PendingReasoningMembers {
+                binding: decoded.binding.get().as_bytes(),
+                payload: decoded.payload.get().as_bytes(),
+                coverage: decoded.coverage.get().as_bytes(),
+            },
+            deadline,
+        },
+    )
+    .await
+}
+
+fn authenticate_pending_reasoning_members_existing_key(
+    storage_path: &Path,
+    original_envelope: &[u8],
+    original_mac: &str,
+    members: PendingReasoningMembers<'_>,
+    deadline: Instant,
+) -> Result<PendingIntegrityPreflight> {
+    authenticate_pending_envelope_existing_key(
+        storage_path,
+        original_envelope,
+        Some(original_mac),
+        deadline,
+    )?;
+    verify_pending_reasoning_members(original_envelope, members)
+}
+
+fn verify_pending_reasoning_members(
+    original_envelope: &[u8],
+    members: PendingReasoningMembers<'_>,
+) -> Result<PendingIntegrityPreflight> {
+    const REMEDY: &str =
+        "capture recovery membership authentication failed; run libra agent doctor";
+    anyhow::ensure!(
+        !original_envelope.is_empty() && original_envelope.len() <= PENDING_ENVELOPE_MAX_BYTES,
+        REMEDY
+    );
+    let decoded: PendingEnvelopeMembers<'_> =
+        serde_json::from_slice(original_envelope).map_err(|_| anyhow!(REMEDY))?;
+    anyhow::ensure!(
+        decoded.version == 1
+            && matches_exact_json_encoding(&decoded, original_envelope)
+            && decoded.binding.get().as_bytes() == members.binding
+            && decoded.payload.get().as_bytes() == members.payload
+            && decoded.coverage.get().as_bytes() == members.coverage,
+        REMEDY
+    );
+    // Deserialize only the closed reasoning members and turn keys. All other
+    // payload fields (including a potentially large transcript) are skipped,
+    // so this check does not duplicate the already owned canonical buffer.
+    let payload: PendingReasoningPayloadMembers<'_> =
+        serde_json::from_str(decoded.payload.get()).map_err(|_| anyhow!(REMEDY))?;
+    anyhow::ensure!(
+        payload.version == 2 && payload.reasoning_source.get().starts_with('{'),
+        REMEDY
+    );
+    let associations: Vec<PendingLogicalTurnKey> =
+        serde_json::from_str(payload.identity_commit_associations.get())
+            .map_err(|_| anyhow!(REMEDY))?;
+    let coverage: PendingCoverageClaimKeys =
+        serde_json::from_str(decoded.coverage.get()).map_err(|_| anyhow!(REMEDY))?;
+    let claims = coverage.claims;
+    anyhow::ensure!(
+        !associations.is_empty() && associations.len() == claims.len(),
+        REMEDY
+    );
+    let mut seen = std::collections::HashSet::with_capacity(associations.len());
+    for (association, claim) in associations.iter().zip(claims) {
+        let key = association.logical_turn_key.as_str();
+        anyhow::ensure!(
+            !key.is_empty() && claim.logical_turn_key == key && seen.insert(key),
+            REMEDY
+        );
+    }
+    Ok(PendingIntegrityPreflight {
+        envelope_sha256: sha256_array(original_envelope),
+        payload_sha256: sha256_array(members.payload),
+        source_sha256: sha256_array(payload.reasoning_source.get().as_bytes()),
+        associations_sha256: sha256_array(payload.identity_commit_associations.get().as_bytes()),
+        coverage_sha256: sha256_array(members.coverage),
+    })
+}
+
+fn sha256_array(bytes: &[u8]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+
+    Sha256::digest(bytes).into()
 }
 
 fn authenticate_pending_envelope_existing_key(
@@ -1706,6 +1961,216 @@ mod tests {
         assert_eq!(
             CaptureSourceCommitmentDomain::SubagentSourceV2.tag(),
             b"libra-subagent-source-hmac-v2\0"
+        );
+    }
+
+    #[test]
+    fn reasoning_pending_members_require_original_mac_and_exact_claim_membership() {
+        let root = tempfile::tempdir().expect("create reasoning membership fixture");
+        let storage = root.path().join("storage");
+        fs::create_dir(&storage).expect("create storage");
+        let original_key = load_capture_dedup_secret(&storage).expect("initialize trusted key");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let binding = br#"{"checkpoint_id":"checkpoint"}"#;
+        let payload = br#"{"version":2,"reasoning_source":{"items":[1]},"identity_commit_associations":[{"logical_turn_key":"turn-1"},{"logical_turn_key":"turn-2"}]}"#;
+        let coverage =
+            br#"{"claims":[{"logical_turn_key":"turn-1"},{"logical_turn_key":"turn-2"}]}"#;
+        let envelope = format!(
+            "{{\"version\":1,\"binding\":{},\"payload\":{},\"coverage\":{}}}",
+            std::str::from_utf8(binding).expect("test binding utf8"),
+            std::str::from_utf8(payload).expect("test payload utf8"),
+            std::str::from_utf8(coverage).expect("test coverage utf8"),
+        );
+        let members = || PendingReasoningMembers {
+            binding,
+            payload,
+            coverage,
+        };
+        let mac = authenticate_pending_envelope_existing_key(
+            &storage,
+            envelope.as_bytes(),
+            None,
+            deadline,
+        )
+        .expect("sign canonical original envelope");
+        let authenticated = authenticate_pending_reasoning_members_existing_key(
+            &storage,
+            envelope.as_bytes(),
+            &mac,
+            members(),
+            deadline,
+        )
+        .expect("original members are authenticated");
+        assert_eq!(
+            authenticated.envelope_sha256,
+            sha256_array(envelope.as_bytes())
+        );
+        assert_eq!(authenticated.payload_sha256, sha256_array(payload));
+        assert_eq!(authenticated.coverage_sha256, sha256_array(coverage));
+        assert_eq!(
+            authenticated.source_sha256,
+            sha256_array(br#"{"items":[1]}"#)
+        );
+        assert_eq!(
+            authenticated.associations_sha256,
+            sha256_array(br#"[{"logical_turn_key":"turn-1"},{"logical_turn_key":"turn-2"}]"#)
+        );
+
+        let changed_payload = br#"{"version":2,"reasoning_source":{"items":[2]},"identity_commit_associations":[{"logical_turn_key":"turn-1"},{"logical_turn_key":"turn-2"}]}"#;
+        assert!(
+            authenticate_pending_reasoning_members_existing_key(
+                &storage,
+                envelope.as_bytes(),
+                &mac,
+                PendingReasoningMembers {
+                    payload: changed_payload,
+                    ..members()
+                },
+                deadline,
+            )
+            .is_err()
+        );
+        let changed_coverage =
+            br#"{"claims":[{"logical_turn_key":"turn-2"},{"logical_turn_key":"turn-1"}]}"#;
+        assert!(
+            authenticate_pending_reasoning_members_existing_key(
+                &storage,
+                envelope.as_bytes(),
+                &mac,
+                PendingReasoningMembers {
+                    coverage: changed_coverage,
+                    ..members()
+                },
+                deadline,
+            )
+            .is_err()
+        );
+        let changed_envelope = envelope.replace("checkpoint", "changed");
+        assert!(
+            authenticate_pending_reasoning_members_existing_key(
+                &storage,
+                changed_envelope.as_bytes(),
+                &mac,
+                members(),
+                deadline,
+            )
+            .is_err()
+        );
+        let changed_mac = format!("{PENDING_ENVELOPE_MAC_PREFIX}{}", "0".repeat(64));
+        assert!(
+            authenticate_pending_reasoning_members_existing_key(
+                &storage,
+                envelope.as_bytes(),
+                &changed_mac,
+                members(),
+                deadline,
+            )
+            .is_err()
+        );
+        let key_path = storage.join("private/agent-capture-dedup-v1.key");
+        fs::remove_file(&key_path).expect("simulate key loss");
+        assert!(
+            authenticate_pending_reasoning_members_existing_key(
+                &storage,
+                envelope.as_bytes(),
+                &mac,
+                members(),
+                deadline,
+            )
+            .is_err()
+        );
+        assert!(!key_path.exists());
+        assert_ne!(original_key, [0; CAPTURE_DEDUP_SECRET_BYTES]);
+    }
+
+    #[test]
+    fn reasoning_pending_replay_cannot_mint_replacement_key() {
+        let root = tempfile::tempdir().expect("create missing-key fixture");
+        let storage = root.path().join("storage");
+        fs::create_dir(&storage).expect("create storage without private key");
+        let envelope = br#"{"version":1,"binding":{},"payload":{"version":2,"reasoning_source":{},"identity_commit_associations":[{"logical_turn_key":"turn"}]},"coverage":{"claims":[{"logical_turn_key":"turn"}]}}"#;
+        let result = authenticate_pending_reasoning_members_existing_key(
+            &storage,
+            envelope,
+            "pending-envelope/hmac-v1/0000000000000000000000000000000000000000000000000000000000000000",
+            PendingReasoningMembers {
+                binding: b"{}",
+                payload: br#"{"version":2,"reasoning_source":{},"identity_commit_associations":[{"logical_turn_key":"turn"}]}"#,
+                coverage: br#"{"claims":[{"logical_turn_key":"turn"}]}"#,
+            },
+            Instant::now() + Duration::from_secs(5),
+        );
+        assert!(result.is_err());
+        assert!(!storage.join("private/agent-capture-dedup-v1.key").exists());
+        assert!(!storage.join("private").exists());
+    }
+
+    #[test]
+    fn reasoning_pending_members_reject_claim_gaps_and_noncanonical_outer() {
+        let binding = br#"{"checkpoint_id":"checkpoint"}"#;
+        let payload = br#"{"version":2,"reasoning_source":{"items":[1]},"identity_commit_associations":[{"logical_turn_key":"turn-1"},{"logical_turn_key":"turn-2"}]}"#;
+        let coverage =
+            br#"{"claims":[{"logical_turn_key":"turn-1"},{"logical_turn_key":"turn-3"}]}"#;
+        let envelope = format!(
+            "{{\"version\":1,\"binding\":{},\"payload\":{},\"coverage\":{}}}",
+            std::str::from_utf8(binding).expect("test binding utf8"),
+            std::str::from_utf8(payload).expect("test payload utf8"),
+            std::str::from_utf8(coverage).expect("test coverage utf8"),
+        );
+        let members = PendingReasoningMembers {
+            binding,
+            payload,
+            coverage,
+        };
+        assert!(verify_pending_reasoning_members(envelope.as_bytes(), members).is_err());
+        let duplicate_payload = br#"{"version":2,"reasoning_source":{"items":[1]},"identity_commit_associations":[{"logical_turn_key":"turn-1"},{"logical_turn_key":"turn-1"}]}"#;
+        let duplicate_coverage =
+            br#"{"claims":[{"logical_turn_key":"turn-1"},{"logical_turn_key":"turn-1"}]}"#;
+        let duplicate_envelope = format!(
+            "{{\"version\":1,\"binding\":{},\"payload\":{},\"coverage\":{}}}",
+            std::str::from_utf8(binding).expect("test binding utf8"),
+            std::str::from_utf8(duplicate_payload).expect("test payload utf8"),
+            std::str::from_utf8(duplicate_coverage).expect("test coverage utf8"),
+        );
+        assert!(
+            verify_pending_reasoning_members(
+                duplicate_envelope.as_bytes(),
+                PendingReasoningMembers {
+                    binding,
+                    payload: duplicate_payload,
+                    coverage: duplicate_coverage,
+                },
+            )
+            .is_err()
+        );
+        let canonical_coverage =
+            br#"{"claims":[{"logical_turn_key":"turn-1"},{"logical_turn_key":"turn-2"}]}"#;
+        let canonical = envelope.replace(
+            std::str::from_utf8(coverage).expect("test coverage utf8"),
+            std::str::from_utf8(canonical_coverage).expect("test coverage utf8"),
+        );
+        assert!(
+            verify_pending_reasoning_members(
+                canonical.as_bytes(),
+                PendingReasoningMembers {
+                    binding,
+                    payload,
+                    coverage: canonical_coverage,
+                },
+            )
+            .is_ok()
+        );
+        let with_whitespace = canonical.replacen("\"payload\":", "\"payload\": ", 1);
+        assert!(
+            verify_pending_reasoning_members(
+                with_whitespace.as_bytes(),
+                PendingReasoningMembers {
+                    binding,
+                    payload,
+                    coverage: canonical_coverage,
+                },
+            )
+            .is_err()
         );
     }
 

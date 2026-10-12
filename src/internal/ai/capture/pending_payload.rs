@@ -16,11 +16,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use uuid::Uuid;
 
+#[cfg(test)]
+#[cfg(unix)]
+use crate::internal::ai::observed_agents::reasoning::VerifiedCaptureBinding;
 use crate::internal::{
     ai::{
         capture::{
             checkpoint::{
-                AuthenticatedPendingEnvelope, CheckpointRedactedPayload, ReasoningTurnIdentity,
+                AuthenticatedPendingEnvelope, CheckpointRedactedPayload, PreparedPendingNativeSeal,
+                ReasoningCoveragePlan, ReasoningTurnIdentity,
             },
             pending_identity::PreparedPendingAlias,
             snapshot::CaptureSnapshotProjection,
@@ -29,8 +33,9 @@ use crate::internal::{
         observed_agents::{
             Completeness, MAX_REDACTION_MATCH_SAMPLES, RedactedBytes, Redactor, parse_canon_value,
             reasoning::{
-                MAX_REASONING_TURN_KEY_BYTES, NativeProvenReasoning, PendingReasoningSourceDto,
-                VerifiedCaptureBinding,
+                MAX_REASONING_TURN_KEY_BYTES, NativeProvenReasoning, PendingIntegrityStamp,
+                PendingIntegrityToken, PendingReasoningSourceDto, VerifiedPendingBinding,
+                seal_pending,
             },
         },
     },
@@ -110,6 +115,62 @@ pub(crate) struct PendingReasoningIdentityAssociation {
     disposition: PendingReasoningIdentityDisposition,
 }
 
+/// Only this value retains the original bounded canonical envelope after
+/// early rehydration. Its DTO remains untrusted until a fresh late key check,
+/// current terminal claim fence, and lower fixed-source proof validation.
+pub(crate) struct PendingReasoningReplay {
+    original_envelope: Vec<u8>,
+    original_mac: String,
+    source: PendingReasoningSourceDto,
+    associations: Vec<PendingReasoningIdentityAssociation>,
+    integrity: PendingIntegrityStamp,
+}
+
+impl PendingReasoningReplay {
+    pub(crate) fn original_envelope(&self) -> &[u8] {
+        &self.original_envelope
+    }
+
+    pub(crate) fn original_mac(&self) -> &str {
+        &self.original_mac
+    }
+
+    pub(crate) fn source(&self) -> &PendingReasoningSourceDto {
+        &self.source
+    }
+
+    pub(crate) fn matches_integrity(&self, token: &PendingIntegrityToken) -> bool {
+        token.matches_stamp(&self.integrity)
+            && serde_json::to_vec(&self.associations)
+                .is_ok_and(|encoded| token.matches_associations(&encoded))
+    }
+
+    pub(crate) fn verify_recomputed_associations(
+        &self,
+        coverage: &LiveClaimCommitPlan,
+        reasoning: &ReasoningCoveragePlan,
+    ) -> Result<()> {
+        ensure!(self.associations.len() == coverage.claims.len(), REMEDY);
+        for (association, claim) in self.associations.iter().zip(&coverage.claims) {
+            let turn = reasoning
+                .turn(&claim.logical_turn_key)
+                .ok_or_else(failure)?;
+            let expected = PendingReasoningIdentityAssociation::from_prepared_turn(
+                &claim.logical_turn_key,
+                turn,
+            );
+            ensure!(
+                association.logical_turn_key == expected.logical_turn_key
+                    && association.slot == expected.slot
+                    && association.descriptor_mac == expected.descriptor_mac
+                    && association.disposition == expected.disposition,
+                REMEDY
+            );
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum PendingReasoningIdentityDisposition {
@@ -149,6 +210,31 @@ impl PendingPayloadProjection {
         deadline: Instant,
     ) -> Result<Self> {
         payload.authorize_ordinary_pending_payload()?;
+        Self::seal_base(conn, storage, root, payload, identity, deadline).await
+    }
+
+    pub(crate) async fn seal_bound_reasoning<C: ConnectionTrait>(
+        conn: &C,
+        storage: &Path,
+        root: &Path,
+        payload: &CheckpointRedactedPayload,
+        identity: &PreparedPendingAlias,
+        prepared: PreparedPendingNativeSeal<'_>,
+        deadline: Instant,
+    ) -> Result<Self> {
+        Self::seal_base(conn, storage, root, payload, identity, deadline)
+            .await?
+            .with_bound_reasoning(prepared.batch, &prepared.binding, prepared.associations)
+    }
+
+    async fn seal_base<C: ConnectionTrait>(
+        conn: &C,
+        storage: &Path,
+        root: &Path,
+        payload: &CheckpointRedactedPayload,
+        identity: &PreparedPendingAlias,
+        deadline: Instant,
+    ) -> Result<Self> {
         ensure!(
             payload.is_exact_complete_snapshot() && payload.transcript().len() <= MAX_TRANSCRIPT,
             REMEDY
@@ -226,23 +312,21 @@ impl PendingPayloadProjection {
         Ok(projected)
     }
 
-    /// Closed v2 codec entry. The only source argument is an already verified
-    /// owned native witness and per-turn prepared identities; a deserialized
-    /// DTO cannot call this constructor. OG-21 will pass the authenticated
-    /// claim plan and pair the
-    /// production v2 issuer with its reader. Until then `seal` emits v1 only.
-    #[allow(dead_code)] // Awaiting OG-21's authenticated producer/reader pair.
+    /// Closed v2 codec entry. A deserialized DTO cannot call this constructor.
     fn with_bound_reasoning(
         self,
         batch: &NativeProvenReasoning,
-        binding: &VerifiedCaptureBinding,
+        binding: &VerifiedPendingBinding,
         associations: Vec<(String, ReasoningTurnIdentity)>,
     ) -> Result<Self> {
         let associations = associations
             .iter()
             .map(|(key, turn)| PendingReasoningIdentityAssociation::from_prepared_turn(key, turn))
             .collect();
-        self.with_reasoning_codec_parts(batch, binding, associations)
+        self.with_reasoning_codec_parts(
+            seal_pending(batch, binding).map_err(|_| failure())?,
+            associations,
+        )
     }
 
     #[cfg(test)]
@@ -253,21 +337,21 @@ impl PendingPayloadProjection {
         binding: &VerifiedCaptureBinding,
         associations: Vec<PendingReasoningIdentityAssociation>,
     ) -> Result<Self> {
-        self.with_reasoning_codec_parts(batch, binding, associations)
+        self.with_reasoning_codec_parts(
+            PendingReasoningSourceDto::from_bound_native(batch, binding).map_err(|_| failure())?,
+            associations,
+        )
     }
 
     fn with_reasoning_codec_parts(
         mut self,
-        batch: &NativeProvenReasoning,
-        binding: &VerifiedCaptureBinding,
+        source: PendingReasoningSourceDto,
         associations: Vec<PendingReasoningIdentityAssociation>,
     ) -> Result<Self> {
         ensure!(
             self.version == VERSION && self.reasoning_source.is_none(),
             REMEDY
         );
-        let source =
-            PendingReasoningSourceDto::from_bound_native(batch, binding).map_err(|_| failure())?;
         self.version = REASONING_VERSION;
         self.reasoning_source = Some(source);
         self.identity_commit_associations = Some(associations);
@@ -310,6 +394,33 @@ impl PendingPayloadProjection {
         // ordinary payload. Silently projecting only redacted content would
         // discard the pending reasoning collection.
         ensure!(self.version != REASONING_VERSION, PENDING_V2_REMEDY);
+        self.rehydrate_ordinary_components(authentication, conn, storage, root, identity, deadline)
+            .await
+    }
+
+    pub(crate) async fn rehydrate_v2_deferred<C: ConnectionTrait>(
+        &self,
+        authentication: &AuthenticatedPendingEnvelope<'_>,
+        conn: &C,
+        storage: &Path,
+        root: &Path,
+        identity: &PreparedPendingAlias,
+        deadline: Instant,
+    ) -> Result<CheckpointRedactedPayload> {
+        ensure!(self.version == REASONING_VERSION, REMEDY);
+        self.rehydrate_ordinary_components(authentication, conn, storage, root, identity, deadline)
+            .await
+    }
+
+    async fn rehydrate_ordinary_components<C: ConnectionTrait>(
+        &self,
+        authentication: &AuthenticatedPendingEnvelope<'_>,
+        conn: &C,
+        storage: &Path,
+        root: &Path,
+        identity: &PreparedPendingAlias,
+        deadline: Instant,
+    ) -> Result<CheckpointRedactedPayload> {
         self.validate()?;
         check_budget(deadline)?;
         ensure!(
@@ -353,6 +464,29 @@ impl PendingPayloadProjection {
         ensure!(payload.is_exact_complete_snapshot(), REMEDY);
         check_budget(deadline)?;
         Ok(payload)
+    }
+
+    pub(crate) fn is_reasoning_v2(&self) -> bool {
+        self.version == REASONING_VERSION
+    }
+
+    pub(crate) fn into_deferred_reasoning(
+        self,
+        original_envelope: Vec<u8>,
+        original_mac: String,
+        integrity: PendingIntegrityToken,
+    ) -> Result<PendingReasoningReplay> {
+        ensure!(
+            self.version == REASONING_VERSION && original_envelope.len() <= MAX_ENVELOPE,
+            REMEDY
+        );
+        Ok(PendingReasoningReplay {
+            original_envelope,
+            original_mac,
+            source: self.reasoning_source.ok_or_else(failure)?,
+            associations: self.identity_commit_associations.ok_or_else(failure)?,
+            integrity: integrity.into_stamp(),
+        })
     }
 
     fn rebuild(&self, identity: &PreparedPendingAlias) -> Result<(RedactedBytes, RedactedBytes)> {
@@ -1850,6 +1984,296 @@ mod tests {
         (fixture, identity, v1, v2)
     }
 
+    fn v2_original_envelope(projection: &PendingPayloadProjection) -> (Vec<u8>, Vec<u8>) {
+        let claims = projection
+            .identity_commit_associations
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|association| serde_json::json!({"logical_turn_key":association.logical_turn_key}))
+            .collect::<Vec<_>>();
+        let coverage = serde_json::to_vec(&serde_json::json!({"claims":claims})).unwrap();
+        let payload = projection.encode().unwrap();
+        let envelope = [
+            b"{\"version\":1,\"binding\":{},\"payload\":".as_slice(),
+            payload.as_slice(),
+            b",\"coverage\":".as_slice(),
+            coverage.as_slice(),
+            b"}".as_slice(),
+        ]
+        .concat();
+        (envelope, coverage)
+    }
+
+    async fn signed_v2_projection() -> (Fixture, PendingPayloadProjection, Vec<u8>, String) {
+        let (fixture, _, _, projection) = synthetic_v2_projection().await;
+        let (envelope, _) = v2_original_envelope(&projection);
+        let mac = fixture
+            .scope
+            .sign_pending_envelope_until(
+                &fixture.conn,
+                &fixture.storage,
+                fixture.root.path(),
+                &envelope,
+                deadline(),
+            )
+            .await
+            .unwrap();
+        (fixture, projection, envelope, mac)
+    }
+
+    async fn authenticate_v2(
+        fixture: &Fixture,
+        envelope: &[u8],
+        mac: &str,
+    ) -> PendingIntegrityToken {
+        key::authenticate_pending_reasoning_original_in_scope_until(
+            &fixture.conn,
+            &fixture.scope,
+            &fixture.storage,
+            fixture.root.path(),
+            envelope,
+            mac,
+            deadline(),
+        )
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn reasoning_pending_restore_requires_whole_mac() {
+        let (fixture, _, envelope, mac) = signed_v2_projection().await;
+        assert!(
+            key::authenticate_pending_reasoning_original_in_scope_until(
+                &fixture.conn,
+                &fixture.scope,
+                &fixture.storage,
+                fixture.root.path(),
+                &envelope,
+                &mac,
+                deadline(),
+            )
+            .await
+            .is_ok()
+        );
+        let mut changed = envelope.clone();
+        let pos = changed.iter().position(|byte| *byte == b'1').unwrap();
+        changed[pos] = b'2';
+        assert!(
+            key::authenticate_pending_reasoning_original_in_scope_until(
+                &fixture.conn,
+                &fixture.scope,
+                &fixture.storage,
+                fixture.root.path(),
+                &changed,
+                &mac,
+                deadline(),
+            )
+            .await
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn reasoning_pending_restore_requires_membership() {
+        let (fixture, projection, envelope, mac) = signed_v2_projection().await;
+        let payload = projection.encode().unwrap();
+        let (_, coverage) = v2_original_envelope(&projection);
+        let mut other_payload = payload.clone();
+        other_payload.push(b' ');
+        let result = key::authenticate_pending_reasoning_members_in_scope_until(
+            &fixture.conn,
+            key::PendingReasoningAuthentication {
+                scope: &fixture.scope,
+                storage_path: &fixture.storage,
+                authorized_root: fixture.root.path(),
+                original_envelope: &envelope,
+                original_mac: &mac,
+                members: key::PendingReasoningMembers {
+                    binding: b"{}",
+                    payload: &other_payload,
+                    coverage: &coverage,
+                },
+                deadline: deadline(),
+            },
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "a valid MAC cannot authenticate a foreign payload member"
+        );
+        let token = authenticate_v2(&fixture, &envelope, &mac).await;
+        let associations =
+            serde_json::to_vec(projection.identity_commit_associations.as_ref().unwrap()).unwrap();
+        assert!(token.matches_associations(&associations));
+    }
+
+    #[tokio::test]
+    async fn reasoning_pending_restore_preserves_source_record() {
+        use crate::internal::ai::observed_agents::reasoning::{
+            VerifiedCurrentBinding, restore_pending,
+        };
+        let (fixture, projection, envelope, mac) = signed_v2_projection().await;
+        let token = authenticate_v2(&fixture, &envelope, &mac).await;
+        let current = VerifiedCurrentBinding::from_validated_current_context(
+            "claude__native-session",
+            "claude_code",
+        )
+        .unwrap();
+        let native = restore_pending(
+            projection.reasoning_source.as_ref().unwrap(),
+            token,
+            &current,
+        )
+        .unwrap();
+        assert_eq!(native.transport_source_session(), "native-session");
+    }
+
+    #[tokio::test]
+    async fn reasoning_pending_restore_preserves_locator() {
+        use crate::internal::ai::observed_agents::reasoning::{
+            VerifiedCurrentBinding, restore_pending,
+        };
+        let (fixture, projection, envelope, mac) = signed_v2_projection().await;
+        let token = authenticate_v2(&fixture, &envelope, &mac).await;
+        let current = VerifiedCurrentBinding::from_validated_current_context(
+            "claude__native-session",
+            "claude_code",
+        )
+        .unwrap();
+        let native = restore_pending(
+            projection.reasoning_source.as_ref().unwrap(),
+            token,
+            &current,
+        )
+        .unwrap();
+        let binding = VerifiedCaptureBinding::from_validated_capture_context(
+            &native,
+            "claude__native-session",
+            "claude_code",
+        )
+        .unwrap();
+        let artifacts = native.artifact_params(&binding).unwrap();
+        assert_eq!(
+            artifacts[0].locator,
+            "claude_code:msg=0/part=0/metadata=signature"
+        );
+        assert_eq!(
+            artifacts[1].locator,
+            "claude_code:msg=1/part=1/metadata=signature"
+        );
+    }
+
+    #[tokio::test]
+    async fn reasoning_pending_restore_preserves_exact_bytes() {
+        use crate::internal::ai::observed_agents::reasoning::{
+            VerifiedCurrentBinding, restore_pending,
+        };
+        let (fixture, projection, envelope, mac) = signed_v2_projection().await;
+        let token = authenticate_v2(&fixture, &envelope, &mac).await;
+        let current = VerifiedCurrentBinding::from_validated_current_context(
+            "claude__native-session",
+            "claude_code",
+        )
+        .unwrap();
+        let native = restore_pending(
+            projection.reasoning_source.as_ref().unwrap(),
+            token,
+            &current,
+        )
+        .unwrap();
+        let binding = VerifiedCaptureBinding::from_validated_capture_context(
+            &native,
+            "claude__native-session",
+            "claude_code",
+        )
+        .unwrap();
+        let artifacts = native.artifact_params(&binding).unwrap();
+        assert_eq!(artifacts[0].bytes.as_bytes(), b"first-private-field");
+        assert_eq!(artifacts[1].bytes.as_bytes(), b"second-private-field");
+    }
+
+    #[tokio::test]
+    async fn reasoning_pending_cannot_upgrade_native_proof() {
+        use crate::internal::ai::observed_agents::reasoning::{
+            VerifiedCurrentBinding, restore_pending,
+        };
+        let (fixture, _, _, _) = signed_v2_projection().await;
+        let (_, _, _, good) = synthetic_v2_projection().await;
+        let mut value = serde_json::to_value(&good).unwrap();
+        value["reasoning_source"]["items"][0]["proof"]["issuer"] = Value::from("unregistered");
+        let changed: PendingPayloadProjection = serde_json::from_value(value).unwrap();
+        let (envelope, _) = v2_original_envelope(&changed);
+        let mac = fixture
+            .scope
+            .sign_pending_envelope_until(
+                &fixture.conn,
+                &fixture.storage,
+                fixture.root.path(),
+                &envelope,
+                deadline(),
+            )
+            .await
+            .unwrap();
+        let token = authenticate_v2(&fixture, &envelope, &mac).await;
+        let current = VerifiedCurrentBinding::from_validated_current_context(
+            "claude__native-session",
+            "claude_code",
+        )
+        .unwrap();
+        assert!(
+            restore_pending(changed.reasoning_source.as_ref().unwrap(), token, &current).is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn reasoning_pending_early_rehydrate_cannot_restore_opaque() {
+        let (fixture, identity, _, projection) = synthetic_v2_projection().await;
+        let (envelope, _) = v2_original_envelope(&projection);
+        let mac = fixture
+            .scope
+            .sign_pending_envelope_until(
+                &fixture.conn,
+                &fixture.storage,
+                fixture.root.path(),
+                &envelope,
+                deadline(),
+            )
+            .await
+            .unwrap();
+        let authentication = AuthenticatedPendingEnvelope::verify(
+            &fixture.conn,
+            &fixture.storage,
+            fixture.root.path(),
+            &fixture.scope,
+            &envelope,
+            &mac,
+            deadline(),
+        )
+        .await
+        .unwrap();
+        let early = projection
+            .rehydrate_v2_deferred(
+                &authentication,
+                &fixture.conn,
+                &fixture.storage,
+                fixture.root.path(),
+                &identity,
+                deadline(),
+            )
+            .await
+            .unwrap();
+        assert!(early.authorize_ordinary_pending_payload().is_ok());
+        assert!(early.deferred_pending_reasoning().is_none());
+        assert!(
+            !early
+                .transcript()
+                .bytes()
+                .windows(b"first-private-field".len())
+                .any(|window| window == b"first-private-field")
+        );
+    }
+
     #[tokio::test]
     async fn reasoning_pending_empty_v1_bytes_unchanged() {
         let (_, _, v1, _) = synthetic_v2_projection().await;
@@ -2077,7 +2501,7 @@ mod tests {
         let ReasoningSourceDisposition::NativeProven(native) = &disposition else {
             panic!("synthetic native disposition must remain typed")
         };
-        let binding = VerifiedCaptureBinding::from_validated_capture_context(
+        let binding = VerifiedPendingBinding::from_validated_pending_context(
             native,
             "claude__native-session",
             "claude_code",

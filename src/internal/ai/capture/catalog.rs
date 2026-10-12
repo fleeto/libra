@@ -1859,6 +1859,10 @@ pub(crate) enum CaptureCatalogTerminalAttemptRegistration {
 }
 
 impl CaptureCatalogTerminalAttemptFence {
+    pub(crate) fn source_commitment(&self) -> Option<&str> {
+        self.source_digest.as_deref()
+    }
+
     /// Recovery derives the native identity from the catalog capability, not
     /// operator input, an artifact alias, or a checkpoint payload sidecar.
     pub(crate) fn recovery_checkpoint_binding(
@@ -2258,6 +2262,15 @@ pub(crate) struct CaptureCatalogStore {
     // immutable SQLite half authorizes the final durable commit without
     // re-anchoring an expired invocation to a fresh wall clock.
     execution_deadline: Option<CaptureCommitDeadline>,
+}
+
+/// The ordinary reservation and optional native identity plan are one
+/// terminal artifact decision. Callers cannot accidentally pass a native
+/// plan without its corresponding ordinary claim reservation.
+pub(crate) struct PendingArtifactPlans<'a> {
+    pub(crate) coverage: &'a crate::internal::ai::coverage_gate::LiveClaimCommitPlan,
+    pub(crate) reasoning:
+        Option<&'a crate::internal::ai::capture::checkpoint::ReasoningCoveragePlan>,
 }
 
 /// An identity read from the current catalog, not a provider/source locator.
@@ -2669,11 +2682,35 @@ impl CaptureCatalogStore {
     /// Bind an authenticated complete SessionEnd snapshot to its elected
     /// receipt. Hashing happens outside the SQLite writer lock; the exact
     /// immutable binding is revalidated before the artifact transaction.
+    #[cfg(test)]
     pub(crate) async fn persist_pending_artifact(
         &self,
         fence: &CaptureCatalogTerminalAttemptFence,
         payload: &crate::internal::ai::capture::checkpoint::CheckpointRedactedPayload,
         coverage: &crate::internal::ai::coverage_gate::LiveClaimCommitPlan,
+        storage: &Path,
+        root: &Path,
+        deadline: CaptureCommitDeadline,
+    ) -> Result<(), CaptureCatalogError> {
+        self.persist_pending_artifact_with_reasoning(
+            fence,
+            payload,
+            PendingArtifactPlans {
+                coverage,
+                reasoning: None,
+            },
+            storage,
+            root,
+            deadline,
+        )
+        .await
+    }
+
+    pub(crate) async fn persist_pending_artifact_with_reasoning(
+        &self,
+        fence: &CaptureCatalogTerminalAttemptFence,
+        payload: &crate::internal::ai::capture::checkpoint::CheckpointRedactedPayload,
+        plans: PendingArtifactPlans<'_>,
         storage: &Path,
         root: &Path,
         deadline: CaptureCommitDeadline,
@@ -2689,7 +2726,7 @@ impl CaptureCatalogStore {
             &txn,
             fence,
             identity.alias(),
-            coverage.parent_commit.clone(),
+            plans.coverage.parent_commit.clone(),
         )
         .await;
         let binding =
@@ -2702,7 +2739,8 @@ impl CaptureCatalogStore {
                 binding,
                 identity,
                 payload,
-                coverage,
+                coverage: plans.coverage,
+                reasoning: plans.reasoning,
             },
             deadline.monotonic(),
         )
@@ -2714,7 +2752,7 @@ impl CaptureCatalogStore {
                 &txn,
                 fence,
                 &artifact.binding().session_id,
-                coverage.parent_commit.clone(),
+                plans.coverage.parent_commit.clone(),
             )
             .await?;
             if artifact.binding() != &current {

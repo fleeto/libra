@@ -368,6 +368,118 @@ pub(crate) struct VerifiedCaptureBinding {
     provider: ReasoningProvider,
 }
 
+/// A pending writer may borrow an already proven source only after the
+/// checkpoint adapter has matched the current source, scope and claim plan.
+/// This metadata is not a second issuer of native provider evidence.
+pub(crate) struct VerifiedPendingBinding {
+    capture: VerifiedCaptureBinding,
+}
+
+impl VerifiedPendingBinding {
+    pub(crate) fn from_validated_pending_context(
+        batch: &NativeProvenReasoning,
+        capture_session: &str,
+        provider: &str,
+    ) -> Result<Self, ReasoningFieldError> {
+        Ok(Self {
+            capture: VerifiedCaptureBinding::from_validated_capture_context(
+                batch,
+                capture_session,
+                provider,
+            )?,
+        })
+    }
+}
+
+/// The catalog and marker adapter issues this only after checking the current
+/// terminal attempt. A DTO or envelope MAC alone cannot create it.
+pub(crate) struct VerifiedCurrentBinding {
+    capture_session: String,
+    provider: ReasoningProvider,
+}
+
+impl VerifiedCurrentBinding {
+    pub(crate) fn from_validated_current_context(
+        capture_session: &str,
+        provider: &str,
+    ) -> Result<Self, ReasoningFieldError> {
+        let provider = match provider {
+            "claude_code" => ReasoningProvider::ClaudeCode,
+            "codex" => ReasoningProvider::Codex,
+            _ => return Err(ReasoningFieldError::UnsupportedShape),
+        };
+        if capture_session.is_empty() || capture_session.len() > 4096 {
+            return Err(ReasoningFieldError::UnsupportedShape);
+        }
+        Ok(Self {
+            capture_session: capture_session.to_owned(),
+            provider,
+        })
+    }
+}
+
+/// Integrity of the original private envelope and its exact members. This
+/// token has no native-source authority, cannot be cloned or serialized, and
+/// is consumed by one late restoration attempt.
+pub(crate) struct PendingIntegrityToken {
+    envelope_sha256: [u8; 32],
+    payload_sha256: [u8; 32],
+    source_sha256: [u8; 32],
+    associations_sha256: [u8; 32],
+    coverage_sha256: [u8; 32],
+}
+
+/// Retained equality data, not an authorization token. Each late attempt
+/// must reacquire the repository key and compare a fresh integrity token.
+pub(crate) struct PendingIntegrityStamp {
+    envelope_sha256: [u8; 32],
+    payload_sha256: [u8; 32],
+    source_sha256: [u8; 32],
+    associations_sha256: [u8; 32],
+    coverage_sha256: [u8; 32],
+}
+
+impl PendingIntegrityToken {
+    /// Production caller is closed to capture/key.rs by the architecture gate.
+    pub(crate) fn from_authenticated_members(
+        envelope_sha256: [u8; 32],
+        payload_sha256: [u8; 32],
+        source_sha256: [u8; 32],
+        associations_sha256: [u8; 32],
+        coverage_sha256: [u8; 32],
+    ) -> Self {
+        Self {
+            envelope_sha256,
+            payload_sha256,
+            source_sha256,
+            associations_sha256,
+            coverage_sha256,
+        }
+    }
+
+    pub(crate) fn into_stamp(self) -> PendingIntegrityStamp {
+        PendingIntegrityStamp {
+            envelope_sha256: self.envelope_sha256,
+            payload_sha256: self.payload_sha256,
+            source_sha256: self.source_sha256,
+            associations_sha256: self.associations_sha256,
+            coverage_sha256: self.coverage_sha256,
+        }
+    }
+
+    pub(crate) fn matches_stamp(&self, stamp: &PendingIntegrityStamp) -> bool {
+        self.envelope_sha256 == stamp.envelope_sha256
+            && self.payload_sha256 == stamp.payload_sha256
+            && self.source_sha256 == stamp.source_sha256
+            && self.associations_sha256 == stamp.associations_sha256
+            && self.coverage_sha256 == stamp.coverage_sha256
+    }
+
+    pub(crate) fn matches_associations(&self, canonical: &[u8]) -> bool {
+        <[u8; 32]>::from(Sha256::digest(canonical)) == self.associations_sha256
+    }
+}
+
 impl VerifiedCaptureBinding {
     pub(crate) fn from_validated_capture_context(
         batch: &NativeProvenReasoning,
@@ -467,6 +579,10 @@ impl NativeProvenReasoning {
     /// proof bytes or grant a caller authority to mint another native batch.
     pub(crate) fn transport_source_session(&self) -> &str {
         &self.source_session
+    }
+
+    pub(crate) fn pending_logical_turns(&self) -> impl Iterator<Item = &str> {
+        self.proofs.iter().map(|proof| proof.logical_turn.as_str())
     }
 
     fn validate(
@@ -715,6 +831,115 @@ impl PendingReasoningSourceDto {
             }
         }
         Ok(())
+    }
+}
+
+/// Seal only an immutable borrow of an already bound native witness. The
+/// resulting DTO remains untrusted when it is decoded on a later process.
+pub(crate) fn seal_pending(
+    native: &NativeProvenReasoning,
+    binding: &VerifiedPendingBinding,
+) -> Result<PendingReasoningSourceDto, ReasoningFieldError> {
+    PendingReasoningSourceDto::from_bound_native(native, &binding.capture)
+}
+
+struct Sha256Writer(Sha256);
+
+impl std::io::Write for Sha256Writer {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.update(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Restore only after the key owner reverified the original canonical
+/// envelope and the checkpoint adapter checked the current terminal attempt.
+/// The MAC proves integrity, while the fixed issuer validator below decides
+/// whether the original source was actually native-proven.
+pub(crate) fn restore_pending(
+    dto: &PendingReasoningSourceDto,
+    integrity: PendingIntegrityToken,
+    current: &VerifiedCurrentBinding,
+) -> Result<NativeProvenReasoning, ReasoningFieldError> {
+    let mut writer = Sha256Writer(Sha256::new());
+    serde_json::to_writer(&mut writer, dto).map_err(|_| ReasoningFieldError::UnsupportedShape)?;
+    if <[u8; 32]>::from(writer.0.finalize()) != integrity.source_sha256
+        || dto.capture_session != current.capture_session
+        || dto.provider != current.provider
+    {
+        return Err(ReasoningFieldError::UnsupportedShape);
+    }
+    dto.validate_shape()?;
+
+    use crate::internal::ai::traces::REASONING_ARTIFACT_TOTAL_MAX_BYTES;
+    let mut remaining = REASONING_ARTIFACT_TOTAL_MAX_BYTES;
+    let mut artifacts = Vec::with_capacity(dto.items.len());
+    let mut proofs = Vec::with_capacity(dto.items.len());
+    for item in &dto.items {
+        let bytes = decode_pending_base64_bounded(&item.bytes_base64, remaining)?;
+        remaining = remaining
+            .checked_sub(bytes.len() as u64)
+            .ok_or(ReasoningFieldError::SourceTooLarge)?;
+        artifacts.push(crate::internal::ai::traces::ReasoningArtifactParam {
+            locator: item.locator.clone(),
+            provider: item.provider,
+            source_kind: Some(item.source_kind),
+            availability: ReasoningAvailability::OpaqueArchived,
+            decrypt_capability: "none".to_owned(),
+            bytes: OpaqueEncryptedBytes {
+                data: bytes,
+                provider: item.provider,
+                source_kind: item.source_kind,
+            },
+        });
+        proofs.push(NativeReasoningProof {
+            issuer: match item.proof.issuer {
+                ImportTransportIssuer::Unregistered => NativeReasoningIssuer::Unregistered,
+                #[cfg(test)]
+                ImportTransportIssuer::SyntheticOnly => NativeReasoningIssuer::SyntheticOnly,
+                #[cfg(test)]
+                ImportTransportIssuer::SyntheticUnknown => NativeReasoningIssuer::SyntheticUnknown,
+            },
+            provider: item.proof.provider,
+            source_session: item.proof.source_session.clone(),
+            message: item.proof.message,
+            part: item.proof.part,
+            field: item.proof.field,
+            original_wire_sha256: item.proof.original_wire_sha256,
+            logical_turn: item.proof.logical_turn.clone(),
+        });
+    }
+    let native = NativeProvenReasoning {
+        capture_session: dto.capture_session.clone(),
+        source_session: dto.source_session.clone(),
+        artifacts,
+        proofs,
+    };
+    native.validate(&current.capture_session, current.provider)?;
+    Ok(native)
+}
+
+impl NativeProvenReasoning {
+    /// Covered historical source turns may be needed to verify the original
+    /// collection, but only this attempt's reserved claims become new objects.
+    pub(crate) fn into_pending_claim_artifacts(
+        self,
+        current: &VerifiedCurrentBinding,
+        claim_keys: &BTreeSet<String>,
+    ) -> Result<Vec<crate::internal::ai::traces::ReasoningArtifactParam>, ReasoningFieldError> {
+        self.validate(&current.capture_session, current.provider)?;
+        Ok(self
+            .artifacts
+            .into_iter()
+            .zip(self.proofs)
+            .filter_map(|(artifact, proof)| {
+                claim_keys.contains(&proof.logical_turn).then_some(artifact)
+            })
+            .collect())
     }
 }
 

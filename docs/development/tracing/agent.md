@@ -2722,14 +2722,14 @@ A proved own-kind terminal state remains cleanable when its matching manifest ha
 
 sealed native carrier 将原始 opaque 字节和来源绑定证明一起移入共享 checkpoint payload。在 object/index 写入前验证 issuer、provider、source session、message、part、field、wire SHA-256 与已授权 capture/turn 关联。metadata-only identity adapter 不暴露载荷、不签发 native 权限；Debug 不含 native 坐标或载荷。source、artifact 字节与条目数量上限保持。
 
-认证的私有导入传输将已证明 native 来源的 typed 集合从授权 descriptor helper 交给父进程。单请求密钥把 helper 响应绑定到请求、授权源、仓库 scope 和集合；父进程验证绑定并保留完整 native proof，再将 owned item 分配给已 reserve 的 turn 与共享 checkpoint store。未认证或未证明来源的非空集合固定拒绝，不把 wire DTO 当作 native 权限，也不让候选字节回到普通 transcript。空集合 preparation 的旧响应和源投影字节保持不变。普通 pending codec 仍在 envelope 写入前拒绝非 ordinary payload；live attempt 按既有 receipt、fence 和 lease 规则保持 uncommitted。已启用 Claude deadline-FD 路线时，在解析 source 前拒绝，不回退普通捕获。已有 Pending receipt 不尝试 wrapper failure 诊断；NotTracked 仅沿用既有有界诊断尝试，不推进 sync_revision。
+认证的私有导入传输将已证明 native 来源的 typed 集合从授权 descriptor helper 交给父进程。单请求密钥把 helper 响应绑定到请求、授权源、仓库 scope 和集合；父进程验证绑定并保留完整 native proof，再将 owned item 分配给已 reserve 的 turn 与共享 checkpoint store。未认证或未证明来源的非空集合固定拒绝，不把 wire DTO 当作 native 权限，也不让候选字节回到普通 transcript。空集合 preparation 的旧响应和源投影字节保持不变。pending v1 仍在 envelope 写入前拒绝非 ordinary payload；pending v2 仅接受已验证借用的 native 载体及其预备 identity plan，并沿用既有 receipt、fence 和 lease 规则。已启用 Claude deadline-FD 路线时，在解析 source 前拒绝，不回退普通捕获。已有 Pending receipt 不尝试 wrapper failure 诊断；NotTracked 仅沿用既有有界诊断尝试，不推进 sync_revision。
 
 生产 provider capability 仍未启用，生产 native issuer 仍未准入。合成正例只证明载体和导入传输机制；Source A 仍为 UNPROVEN，真实 native 字段接入已延期，未获证明的 OpenCode 字段不归档。durable reasoning replay 仍需通过后续门。本机制不增加解密能力或 public metadata enum 值。
 
 
 ### Pending reasoning v2 codec（OG-17）
 
-私有 pending codec 现在可识别封闭的 inner payload v2，用于保存来源绑定的 reasoning 集合以及每个 turn 显式的 `verified_nonempty`／`verified_empty` identity 条目。空的 ordinary pending 仍逐字节编码为 v1；外层 header 与 envelope 保持 v1、原 MAC domain、64 MiB 编码总包、128 个 chunk 和每 chunk 512 KiB 的上限。旧 reader 对非空 v2 拒绝并保留证据。生产 writer 仍只写 v1，本版在 OG-21 将认证 reader 与 producer 配对前拒绝 v2 replay。解码后的 DTO 或完整 envelope MAC 都不证明 provider native 来源；未证字段仍为 partial，不归档。已签名的本地 v2 artifact 在封闭的来源证明 DTO 中保存 capture/source session 标识符；这些字符串不能证明 native 来源。共享 native validator 拒绝空 artifact 字节，以及超过 512 字节或包含控制字符的 logical-turn key。本版 recovery 对已签名的 v2 artifact 返回 ManualRequired 并保留原证据；请保留该 artifact，升级到支持 OG-21 v2 replay 的版本后再运行 `libra agent doctor --repair`。对于已过期的 v2 artifact，本版 repair 会将其移入 quarantine，升级后需沿人工一次性 replay 路径恢复。doctor finding 只报告通用的 manual recovery required，本版不能重放尚不支持的 v2 payload。
+私有 pending codec 已把封闭 inner payload v2 与 live SessionEnd writer 和认证 reader 接通。仅在已准入 producer 提供绑定的 native-proven 集合时，writer 才封存原来源记录和各 turn 显式的 `verified_nonempty`／`verified_empty` identity。普通 pending 仍逐字节编码为 v1；外层 header/envelope 保持 v1、原 MAC domain、64 MiB 总包、128 个 chunk 与每 chunk 512 KiB 上限。旧 reader 拒绝 v2 并保留证据。新版 reader 先验证原完整 envelope MAC、canonical 成员／claim 关联和当前 catalog、claim、marker 围栏，随后 lower reasoning issuer 才复核固定的 native 来源证明。恢复仅将本次 reserved turn 的 artifact 与原稳定 identity 同 checkpoint、claim、ref 事务提交。append 失败保留 pending 和 claims；每次重试重新认证原字节及当前围栏，不重开 provider 来源，也不补造私钥。缺失或损坏的私钥／来源证据需要 doctor 诊断与人工恢复。DTO 或 envelope MAC 本身不证明 provider native 来源；未证字段继续 partial、不归档。生产 native issuer 与真实 OpenCode Source A 证据仍未放行；合成测试只验证该传输机制，不代表真实 native 归档。
 
 ### 私有 reasoning identity 与垃圾回收
 

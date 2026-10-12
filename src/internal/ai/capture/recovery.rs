@@ -15,7 +15,10 @@ use crate::internal::ai::{
             CaptureCatalogFinalizerRecovery, CaptureCatalogFinalizerRecoveryResult,
             CaptureCatalogStore, CaptureCatalogTerminalAttempt,
         },
-        checkpoint::{CheckpointStore, CheckpointWriteOutcome, TracesCheckpointStore},
+        checkpoint::{
+            CheckpointReplayStatus, CheckpointStore, CheckpointStoreError, CheckpointWriteOutcome,
+            TracesCheckpointStore,
+        },
         pending::{self, PendingHeader},
         pending_identity::{self, PendingSessionAlias, PreparedPendingAlias},
     },
@@ -198,6 +201,43 @@ pub(crate) async fn replay_for_doctor(
         Err(_) => return Ok(ArtifactRecoveryOutcome::ManualRequired),
     };
 
+    // A prior attempt may have committed the ref, checkpoint, claims and
+    // native identities but failed to retire its ordinary marker or finish
+    // the terminal receipt. Its claims are no longer reserved; asking the
+    // pending path to reserve them again would reject a valid durable commit.
+    // Classify only after authenticating the original envelope and alias,
+    // then let the existing catalog durable-replay path recheck the receipt.
+    if verified.payload().deferred_pending_reasoning().is_some() {
+        match TracesCheckpointStore::settle_committed_replay_without_write(
+            conn,
+            recovery.scope(),
+            recovery.checkpoint_id(),
+            identity.context().session_id(),
+            Some(deadline),
+        )
+        .await
+        {
+            Ok(CheckpointReplayStatus::Complete) => {
+                return complete_durable_receipt(
+                    CaptureCatalogStore::new_until(conn.clone(), deadline),
+                    recovery,
+                    now_millis,
+                )
+                .await;
+            }
+            Ok(CheckpointReplayStatus::PendingCleanup { .. })
+            | Err(CheckpointStoreError::DeadlineExceeded) => {
+                return Ok(ArtifactRecoveryOutcome::RetryLater);
+            }
+            Ok(CheckpointReplayStatus::Missing) => {}
+            Err(error) => {
+                return Err(error).context(
+                    "classify durable pending reasoning checkpoint; run `libra agent doctor`",
+                );
+            }
+        }
+    }
+
     let catalog = CaptureCatalogStore::new_until(conn.clone(), deadline);
     let terminal_fence = if manual {
         match catalog
@@ -298,6 +338,15 @@ pub(crate) async fn replay_for_doctor(
         Some(deadline),
     )
     .context("prepare authenticated capture checkpoint; run `libra agent doctor`")?;
+    let request = if verified.payload().deferred_pending_reasoning().is_some() {
+        request
+            .with_pending_coverage(verified.coverage(), storage, root)
+            .context(
+                "bind authenticated pending reasoning to current claims; run `libra agent doctor`",
+            )?
+    } else {
+        request
+    };
     let outcome = checkpoint_store
         .write(request)
         .await
@@ -385,6 +434,14 @@ async fn prepare_existing_identity(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reasoning_actual_borrowed_recovery_request_reauthenticates_each_attempt() {
+        super::super::pending::tests::assert_actual_borrowed_recovery_reauthenticates_each_attempt(
+        )
+        .await;
+    }
 
     #[test]
     fn bounded_queue_selects_defers_and_fails_closed() {

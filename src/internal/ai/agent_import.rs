@@ -3589,7 +3589,7 @@ pub(crate) async fn import_prepared_with_subagent_discovery(
 /// Parent-owned typed identity handoff for a prepared import. Keeping it
 /// outside `ImportRequest` prevents serialized helper projections from
 /// asserting native provenance.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) async fn import_prepared_with_reasoning_identity(
     conn: &DatabaseConnection,
     storage_root: &std::path::Path,

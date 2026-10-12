@@ -19,33 +19,39 @@ use sea_orm::{ConnectionTrait, DatabaseConnection, Statement};
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
 
+#[cfg(unix)]
+use crate::internal::ai::{
+    agent_import::{
+        LegacyImportMigrationRequest, import_provider_commitment, import_request_from_projection,
+        import_source_preimage, import_storage_commitment,
+        load_existing_session_ownership_in_scope, migrate_legacy_import_ownership_in_scope_until,
+        validate_scoped_prepared_existing_session,
+    },
+    authorized_read::{CancellationSafeChild, read_async_strictly_bounded},
+    hooks::runtime::{
+        CaptureSourceCommitmentDomain, derive_capture_source_commitment_in_scope_until,
+        derive_snapshot_content_commitment_in_scope_until,
+    },
+    observed_agents::reasoning::verify_import_transport,
+};
 use crate::{
     internal::{
         ai::{
             agent_import::{
                 DetailedImportSummary, IMPORT_INDEX_REPAIR_MARKER_KEY,
                 IMPORT_INDEX_REPAIR_MARKER_SCHEMA_V2, ImportError, ImportIndexRepairMarker,
-                ImportProgressError, ImportRequest, ImportSummary, LegacyImportMigrationRequest,
-                PreparedImportProjection, identity_id as import_identity_id,
-                import_prepared_with_subagent_discovery, import_provider_commitment,
-                import_request_from_projection, import_source_preimage, import_storage_commitment,
-                is_import_source_commitment_v2, load_existing_session_ownership_in_scope,
-                migrate_legacy_import_ownership_in_scope_until,
-                prepare_import_projection_with_reasoning, restore_tombstone, session_is_tombstoned,
-                validate_import_index_repair_marker, validate_scoped_prepared_existing_session,
+                ImportProgressError, ImportRequest, ImportSummary, PreparedImportProjection,
+                identity_id as import_identity_id, import_prepared_with_subagent_discovery,
+                is_import_source_commitment_v2, prepare_import_projection_with_reasoning,
+                restore_tombstone, session_is_tombstoned, validate_import_index_repair_marker,
             },
             authorized_read::{
-                CancellationSafeChild, RegisteredHelperOutput, StrictBoundedRead,
-                read_async_strictly_bounded, read_strictly_bounded, registered_helper_command,
-                run_registered_bounded_helper_until,
+                RegisteredHelperOutput, StrictBoundedRead, read_strictly_bounded,
+                registered_helper_command, run_registered_bounded_helper_until,
             },
             capture_scope::{
                 CaptureCommitDeadline, CaptureFinalCommitAuthorizationError, CaptureScope,
                 authorize_final_capture_commit,
-            },
-            hooks::runtime::{
-                CaptureSourceCommitmentDomain, derive_capture_source_commitment_in_scope_until,
-                derive_snapshot_content_commitment_in_scope_until,
             },
             observed_agents::{
                 AgentKind, AgentSessionCtx, TRANSCRIPT_READ_HARD_CAP_BYTES, TranscriptSource,
@@ -56,7 +62,7 @@ use crate::{
                 reasoning::{
                     EncodedTransportKey, ImportTransportContext, ImportTransportDto,
                     ImportTransportKey, NativeProvenReasoning, ReasoningProvider,
-                    seal_import_transport, verify_import_transport,
+                    seal_import_transport,
                 },
                 resolve_import_transcript_source_until, resolve_session_file,
             },
@@ -579,10 +585,12 @@ fn import_transport_digest(domain: &[u8], fields: &[&[u8]]) -> [u8; 32] {
     hasher.finalize().into()
 }
 
+#[cfg(unix)]
 fn import_transport_source_preimage_commitment(preimage: &[u8; 32]) -> [u8; 32] {
     import_transport_digest(b"libra/import-transport-source-preimage/v1\0", &[preimage])
 }
 
+#[cfg(unix)]
 fn import_transport_scope_digest(scope: &CaptureScope) -> Result<[u8; 32]> {
     let encoded = serde_json::to_vec(scope).map_err(|_| ImportError::AuthorizedReaderFailed)?;
     Ok(import_transport_digest(
@@ -669,6 +677,7 @@ impl PreparationImportTransportBinding {
 /// The single production parent consumer for a helper's untrusted optional
 /// typed response. The caller must invoke it before any scoped key derivation
 /// or legacy ownership migration.
+#[cfg(unix)]
 fn consume_prepared_reasoning_transport(
     key: ImportTransportKey,
     binding: &PreparationImportTransportBinding,

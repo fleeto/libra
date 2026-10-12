@@ -89,6 +89,7 @@ impl PendingPayloadProjection {
         identity: &PreparedPendingAlias,
         deadline: Instant,
     ) -> Result<Self> {
+        payload.authorize_ordinary_pending_payload()?;
         ensure!(
             payload.is_exact_complete_snapshot() && payload.transcript().len() <= MAX_TRANSCRIPT,
             REMEDY
@@ -671,9 +672,52 @@ fn validate_report(value: &Value) -> Result<()> {
     Ok(())
 }
 
+#[cfg(all(test, unix))]
+pub(crate) async fn assert_reasoning_pending_seal_rejected(payload: &CheckpointRedactedPayload) {
+    tests::assert_reasoning_seal_rejected(payload).await;
+}
+
 #[cfg(test)]
 #[cfg(unix)]
 mod tests {
+    pub(super) async fn assert_reasoning_seal_rejected(payload: &CheckpointRedactedPayload) {
+        let fixture = Fixture::new().await;
+        fixture.seed("og16-pending", "og16-pending-native").await;
+        let identity = fixture.identity("og16-pending", None).await;
+        let before = walkdir::WalkDir::new(fixture.root.path())
+            .into_iter()
+            .map(|e| e.unwrap())
+            .filter(|e| e.file_type().is_file())
+            .map(|e| e.path().to_path_buf())
+            .collect::<std::collections::BTreeSet<_>>();
+        let error = PendingPayloadProjection::seal(
+            &fixture.conn,
+            &fixture.storage,
+            fixture.root.path(),
+            payload,
+            &identity,
+            deadline(),
+        )
+        .await
+        .err()
+        .expect("ordinary V1 seal cannot encode a nonordinary carrier");
+        assert!(format!("{error:#}").contains("reasoning pending consumer"));
+        let after = walkdir::WalkDir::new(fixture.root.path())
+            .into_iter()
+            .map(|e| e.unwrap())
+            .filter(|e| e.file_type().is_file())
+            .map(|e| e.path().to_path_buf())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            before, after,
+            "rejected seal must not create any envelope or MAC file"
+        );
+        assert!(
+            payload.authorize_ordinary_pending_payload().is_err(),
+            "rejection keeps the original borrowed payload"
+        );
+    }
+
     use std::{path::PathBuf, time::Duration};
 
     use sea_orm::{DatabaseConnection, Statement};

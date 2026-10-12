@@ -3357,8 +3357,10 @@ fn hook_capture_telemetry_redacts_session_ids_and_omits_exporter_stderr() {
         "src/internal/ai/capture/live_pipeline.rs",
         Some("#[cfg(test)]\n#[path = \"live_pipeline_tests.rs\"]\nmod tests;"),
     );
-    let live_checkpoint_production =
-        production_of("src/internal/ai/capture/live_checkpoint.rs", None);
+    let live_checkpoint_production = production_of(
+        "src/internal/ai/capture/live_checkpoint.rs",
+        Some("#[cfg(test)]\npub(crate) mod tests"),
+    );
     // Positive anchors: each moved live module still carries redacted
     // session telemetry, so the scan below cannot pass by reading nothing.
     for (relative_path, production) in [
@@ -3796,10 +3798,13 @@ fn transcript_reads_only_through_snapshot_service() {
             None => source,
         }
     };
-    let live_checkpoint = production_of("src/internal/ai/capture/live_checkpoint.rs", None);
+    let live_checkpoint = production_of(
+        "src/internal/ai/capture/live_checkpoint.rs",
+        Some("#[cfg(test)]\npub(crate) mod tests"),
+    );
     for service_call in [
         "CaptureSnapshotService::capture_live_until(",
-        "CaptureSnapshotService::capture_authorized(",
+        "CaptureSnapshotService::capture_authorized_with_reasoning_context(",
     ] {
         assert!(
             live_checkpoint.contains(service_call),
@@ -3824,7 +3829,10 @@ fn transcript_reads_only_through_snapshot_service() {
             "src/internal/ai/capture/live_pipeline.rs",
             Some("#[cfg(test)]\n#[path = \"live_pipeline_tests.rs\"]\nmod tests;"),
         ),
-        ("src/internal/ai/capture/live_checkpoint.rs", None),
+        (
+            "src/internal/ai/capture/live_checkpoint.rs",
+            Some("#[cfg(test)]\npub(crate) mod tests"),
+        ),
     ];
     for (relative_path, test_module) in live_modules {
         let production = production_of(relative_path, test_module);
@@ -7423,7 +7431,7 @@ fn capture_foundation_downstream_plan_and_layering_contract() {
         .position(|event| event == "method:capture_authorized")
         .expect("historical import preparation must call the shared snapshot service");
     assert!(
-        preparation_guard.has_method("into_redacted_transcript"),
+        preparation_guard.has_method("try_into_ordinary"),
         "{}::prepare_import_request must use the redacted snapshot payload rather than raw provider bytes",
         import_path.display()
     );
@@ -8820,4 +8828,361 @@ fn capture_runtime_extraction_oracles_are_frozen() {
     };
     assert_eq!(text(reflowed), text(compact));
     assert_ne!(text(compact), text(changed));
+}
+
+/// Scan parsed Rust, skipping test-only item/impl/arm boundaries. A closed
+/// preparatory port may have no production caller yet; it may never gain an
+/// unregistered caller while later cards connect their owned stages.
+#[derive(Default)]
+struct ReasoningPortScan {
+    owner: Vec<String>,
+    events: Vec<String>,
+    references: std::collections::BTreeMap<String, Vec<String>>,
+    constructors: Vec<(String, String)>,
+}
+impl<'ast> syn::visit::Visit<'ast> for ReasoningPortScan {
+    fn visit_item(&mut self, item: &'ast syn::Item) {
+        if !has_exact_cfg_test(syn_item_attrs(item)) {
+            syn::visit::visit_item(self, item);
+        }
+    }
+    fn visit_item_fn(&mut self, item: &'ast syn::ItemFn) {
+        self.owner.push(item.sig.ident.to_string());
+        syn::visit::visit_item_fn(self, item);
+        self.owner.pop();
+    }
+    fn visit_impl_item_fn(&mut self, item: &'ast syn::ImplItemFn) {
+        if has_exact_cfg_test(&item.attrs) {
+            return;
+        }
+        self.owner.push(item.sig.ident.to_string());
+        syn::visit::visit_impl_item_fn(self, item);
+        self.owner.pop();
+    }
+    fn visit_arm(&mut self, item: &'ast syn::Arm) {
+        if !has_exact_cfg_test(&item.attrs) {
+            syn::visit::visit_arm(self, item);
+        }
+    }
+    fn visit_expr_path(&mut self, item: &'ast syn::ExprPath) {
+        if let Some(last) = item.path.segments.last() {
+            self.events.push(format!("reference:{}", last.ident));
+            self.references
+                .entry(last.ident.to_string())
+                .or_default()
+                .push(self.owner.last().cloned().unwrap_or_default());
+        }
+        syn::visit::visit_expr_path(self, item);
+    }
+    fn visit_expr_method_call(&mut self, item: &'ast syn::ExprMethodCall) {
+        self.events.push(format!("method:{}", item.method));
+        self.references
+            .entry(item.method.to_string())
+            .or_default()
+            .push(self.owner.last().cloned().unwrap_or_default());
+        syn::visit::visit_expr_method_call(self, item);
+    }
+    fn visit_expr_struct(&mut self, item: &'ast syn::ExprStruct) {
+        if let Some(last) = item.path.segments.last() {
+            self.constructors.push((
+                last.ident.to_string(),
+                self.owner.last().cloned().unwrap_or_default(),
+            ));
+        }
+        syn::visit::visit_expr_struct(self, item);
+    }
+}
+fn reasoning_scan(source: &str) -> ReasoningPortScan {
+    let ast = syn::parse_file(source).expect("parse reasoning boundary source");
+    let mut scan = ReasoningPortScan::default();
+    syn::visit::Visit::visit_file(&mut scan, &ast);
+    scan
+}
+fn sealed_reasoning_types() {
+    let ast = syn::parse_file(
+        &fs::read_to_string(repo_root().join("src/internal/ai/observed_agents/reasoning.rs"))
+            .unwrap(),
+    )
+    .unwrap();
+    for name in [
+        "PreparedReasoningSource",
+        "NativeReasoningProof",
+        "NativeProvenReasoning",
+        "VerifiedCaptureBinding",
+        "BoundIdentityInputRef",
+    ] {
+        let item = ast
+            .items
+            .iter()
+            .find_map(|item| match item {
+                syn::Item::Struct(s) if s.ident == name => Some(s),
+                _ => None,
+            })
+            .unwrap();
+        assert!(
+            item.fields
+                .iter()
+                .all(|f| matches!(f.vis, syn::Visibility::Inherited)),
+            "{name} must not expose constructor inputs"
+        );
+        assert!(
+            !item.attrs.iter().any(|a| a.path().is_ident("derive")),
+            "{name} must not derive cloning/debug/serde"
+        );
+    }
+    let mut production = ReasoningPortScan::default();
+    syn::visit::Visit::visit_file(&mut production, &ast);
+    assert!(
+        !production
+            .references
+            .contains_key("synthetic_native_preparation"),
+        "synthetic mint cannot be reachable in production"
+    );
+}
+
+#[test]
+fn reasoning_carrier_rejects_arbitrary_raw_constructor() {
+    sealed_reasoning_types();
+    let bad =
+        reasoning_scan("fn fake_provider(raw: Vec<u8>) { let _ = NativeReasoningProof { raw }; }");
+    assert!(
+        bad.constructors
+            .iter()
+            .any(|(t, _)| t == "NativeReasoningProof")
+    );
+    let test = reasoning_scan(
+        "#[cfg(test)] fn synthetic(raw: Vec<u8>) { let _ = NativeReasoningProof { raw }; }",
+    );
+    assert!(test.constructors.is_empty());
+    let reasoning =
+        fs::read_to_string(repo_root().join("src/internal/ai/observed_agents/reasoning.rs"))
+            .unwrap();
+    let scan = reasoning_scan(&reasoning);
+    assert!(
+        !scan
+            .constructors
+            .iter()
+            .any(|(t, _)| t == "NativeReasoningProof" || t == "NativeProvenReasoning"),
+        "production native issuer admission remains closed in OG-16"
+    );
+}
+
+#[test]
+fn reasoning_carrier_rejects_native_label_constructor() {
+    sealed_reasoning_types();
+    let reasoning =
+        fs::read_to_string(repo_root().join("src/internal/ai/observed_agents/reasoning.rs"))
+            .unwrap();
+    let ast = syn::parse_file(&reasoning).unwrap();
+    let issuer = ast
+        .items
+        .iter()
+        .find_map(|i| match i {
+            syn::Item::Enum(e) if e.ident == "NativeReasoningIssuer" => Some(e),
+            _ => None,
+        })
+        .unwrap();
+    let variants = issuer
+        .variants
+        .iter()
+        .filter(|v| !has_exact_cfg_test(&v.attrs))
+        .map(|v| v.ident.to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(variants, ["Unregistered"]);
+    let prepared=ast.items.iter().find_map(|i|match i {
+        syn::Item::Impl(i) if matches!(i.self_ty.as_ref(), syn::Type::Path(p) if p.path.segments.last().is_some_and(|s|s.ident=="PreparedReasoningSource"))=>Some(i),_=>None
+    }).unwrap();
+    for method in prepared.items.iter().filter_map(|i| match i {
+        syn::ImplItem::Fn(f) => Some(f),
+        _ => None,
+    }) {
+        assert!(
+            ["without_candidates", "unproven_candidates"]
+                .contains(&method.sig.ident.to_string().as_str())
+        );
+        let mut scan = ReasoningPortScan::default();
+        syn::visit::Visit::visit_block(&mut scan, &method.block);
+        assert!(!scan.references.contains_key("NativeProven"));
+    }
+}
+
+#[test]
+fn reasoning_bound_identity_accessor_has_closed_adapter_caller() {
+    sealed_reasoning_types();
+    let expected: [(&str, &[&str]); 11] = [
+        (
+            "borrow_native_identity_bindings",
+            &["prepare_reasoning_identity_inputs"],
+        ),
+        (
+            "from_validated_capture_context",
+            &["validate_reasoning_capture_binding"],
+        ),
+        ("from_bound_item", &["borrow_native_identity_bindings"]),
+        (
+            "validate_reasoning_capture_binding",
+            &[
+                "prepare_reasoning_identity_inputs",
+                "prepare_reasoning_artifact_params",
+            ],
+        ),
+        (
+            "prepare_reasoning_identity_inputs",
+            &[
+                "reserve_live_coverage",
+                "run_export_stage",
+                "import_prepared_with_subagent_discovery",
+            ],
+        ),
+        (
+            "from_prepared_authorized_source",
+            &["prepare_authorized_reasoning_source"],
+        ),
+        (
+            "prepare_authorized_reasoning_source",
+            &["capture_authorized_bytes"],
+        ),
+        (
+            "reasoning_source_disposition",
+            &[
+                "reserve_live_coverage",
+                "run_export_stage",
+                "prepare_reasoning_artifact_params",
+            ],
+        ),
+        ("helper_unsupported", &["capture_live_until"]),
+        ("artifact_params", &["prepare_reasoning_artifact_params"]),
+        (
+            "as_reasoning_source_preprocessor",
+            &["prepare_authorized_reasoning_source", "capture_live_until"],
+        ),
+    ];
+    let mut actual = std::collections::BTreeMap::<String, Vec<(String, String)>>::new();
+    for entry in walkdir::WalkDir::new(repo_root().join("src")) {
+        let entry = entry.unwrap();
+        if !entry.file_type().is_file() || entry.path().extension().is_none_or(|e| e != "rs") {
+            continue;
+        }
+        let source = fs::read_to_string(entry.path()).unwrap();
+        if !expected.iter().any(|(name, _)| source.contains(name)) {
+            continue;
+        }
+        let scan = reasoning_scan(&source);
+        for (name, owners) in scan.references {
+            if expected.iter().any(|(expected, _)| *expected == name) {
+                actual
+                    .entry(name)
+                    .or_default()
+                    .extend(owners.into_iter().map(|owner| {
+                        (
+                            entry
+                                .path()
+                                .strip_prefix(repo_root())
+                                .unwrap()
+                                .display()
+                                .to_string(),
+                            owner,
+                        )
+                    }));
+            }
+        }
+        if !entry.path().ends_with("observed_agents/reasoning.rs") {
+            assert!(
+                !scan.constructors.iter().any(|(t, _)| [
+                    "NativeReasoningProof",
+                    "NativeProvenReasoning",
+                    "VerifiedCaptureBinding",
+                    "BoundIdentityInputRef"
+                ]
+                .contains(&t.as_str())),
+                "{} cannot construct sealed reasoning authority",
+                entry.path().display()
+            );
+        }
+    }
+    for (name, owners) in expected {
+        let calls = actual.get(name).map_or(&[][..], Vec::as_slice);
+        for (path, owner) in calls {
+            assert!(
+                owners.contains(&owner.as_str()),
+                "{path}::{owner} must not access {name}"
+            );
+        }
+        // These factories are delivered now; the upper identity adapter's
+        // three future callers are deliberately not fabricated by this card.
+        if name != "prepare_reasoning_identity_inputs" {
+            assert!(!calls.is_empty(), "{name} has no actual closed consumer");
+        }
+    }
+    let lower =
+        fs::read_to_string(repo_root().join("src/internal/ai/observed_agents/reasoning.rs"))
+            .unwrap();
+    let ast = syn::parse_file(&lower).unwrap();
+    let view = ast
+        .items
+        .iter()
+        .find_map(|i| match i {
+            syn::Item::Struct(s) if s.ident == "BoundIdentityInputRef" => Some(s),
+            _ => None,
+        })
+        .unwrap();
+    let fields = view
+        .fields
+        .iter()
+        .map(|f| f.ident.as_ref().unwrap().to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        fields,
+        [
+            "original_wire_sha256",
+            "logical_turn",
+            "source_binding_sha256",
+            "issuer_tag"
+        ]
+    );
+    let snapshot =
+        fs::read_to_string(repo_root().join("src/internal/ai/capture/snapshot.rs")).unwrap();
+    let ast = syn::parse_file(&snapshot).unwrap();
+    let policy = ast
+        .items
+        .iter()
+        .find_map(|i| match i {
+            syn::Item::Struct(s) if s.ident == "CaptureSnapshotPolicy" => Some(s),
+            _ => None,
+        })
+        .unwrap();
+    assert!(
+        policy
+            .fields
+            .iter()
+            .all(|f| !f.ident.as_ref().unwrap().to_string().contains("enabled"))
+    );
+    let import = fs::read_to_string(repo_root().join("src/internal/ai/agent_import.rs")).unwrap();
+    let ast = syn::parse_file(&import).unwrap();
+    for name in ["prepare_import_request", "prepare_import_projection"] {
+        let f = top_level_function(&ast, name);
+        let mut flow = ReasoningPortScan::default();
+        syn::visit::Visit::visit_item_fn(&mut flow, f);
+        assert!(flow.references.contains_key("try_into_ordinary"));
+        assert!(!flow.references.contains_key("into_redacted_transcript"));
+        let owning = flow
+            .events
+            .iter()
+            .position(|e| e == "method:try_into_ordinary")
+            .unwrap();
+        for normalizer in [
+            "normalize_claude_transcript_until",
+            "normalize_codex_rollout_until",
+            "normalize_opencode_export_until",
+        ] {
+            assert!(
+                owning
+                    < flow
+                        .events
+                        .iter()
+                        .position(|e| e == &format!("reference:{normalizer}"))
+                        .unwrap()
+            );
+        }
+    }
 }

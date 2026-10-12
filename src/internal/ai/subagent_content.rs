@@ -200,6 +200,10 @@ impl SubagentDiscovery {
 }
 
 impl DiscoveredSubagentContent {
+    pub(crate) fn observed_kind(&self) -> Option<crate::internal::ai::observed_agents::AgentKind> {
+        crate::internal::ai::observed_agents::AgentKind::from_db_str(&self.provider_kind)
+    }
+
     /// Consume this securely discovered child source at the one boundary
     /// where parent extraction needs its content. The runtime receives only
     /// the resulting snapshot, whose transcript is already redacted; it can
@@ -207,6 +211,7 @@ impl DiscoveredSubagentContent {
     pub(crate) fn into_parent_extraction_snapshot(
         self,
         parent_session_id: &str,
+        adapter: &dyn crate::internal::ai::observed_agents::ObservedAgent,
         policy: CaptureSnapshotPolicy,
     ) -> CaptureSnapshot {
         let agent_kind = self.provider_kind.clone();
@@ -215,13 +220,15 @@ impl DiscoveredSubagentContent {
             parent_session_id,
             &self.bytes,
         );
-        CaptureSnapshotService::capture_authorized(
+        CaptureSnapshotService::capture_authorized_with_reasoning_context(
             TranscriptSource::Bytes {
                 bytes: self.bytes,
                 auth,
             },
-            &agent_kind,
-            parent_session_id,
+            adapter,
+            crate::internal::ai::capture::snapshot::AuthorizedReasoningSourceContext::parent_only_child(
+                &agent_kind, parent_session_id,
+            ),
             policy,
         )
     }

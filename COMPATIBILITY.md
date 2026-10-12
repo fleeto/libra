@@ -945,3 +945,8 @@ permit reasoning archival. Failed readiness or quota gates stay partial; the
 only authorized paid smoke model is `volcengine-agent-plan/glm-5.3-flash`, with
 no alternate-model fallback. This card makes no new model calls. Linux local
 functional acceptance remains with the operator.
+
+
+### OG-16 authorized reasoning carrier
+
+The pre-redaction capability defaults to None; ordinary snapshot/live/store bytes remain compatible. Nonordinary reasoning dispositions, including zero-artifact partials, cannot become ordinary complete imports or pending envelopes. Native bytes and proof remain one sealed owner; identity views contain metadata only. Production native issuers and OpenCode archival remain disabled, Source A UNPROVEN. No new public metadata enum value, CLI option, database schema or decryption capability is added.

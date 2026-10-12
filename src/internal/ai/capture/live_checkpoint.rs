@@ -351,6 +351,12 @@ fn retained_terminal_artifact_error() -> anyhow::Error {
 /// snapshot service alone opens, bounds and redacts it. Returns the safe
 /// projection and, for a complete source, its redacted transcript; the
 /// snapshot's redaction report is merged into `report_value` here.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "reasoning source preparation has no ready capture consumer; keep the receipt pending and retry after the consumer is available"
+)]
+pub(super) struct SourcePreparationRejected;
+
 async fn acquire_live_snapshot(
     conn: &sea_orm::DatabaseConnection,
     repo_path: &std::path::Path,
@@ -362,6 +368,7 @@ async fn acquire_live_snapshot(
 ) -> (
     CaptureSnapshotProjection,
     Option<crate::internal::ai::observed_agents::RedactedBytes>,
+    crate::internal::ai::observed_agents::reasoning::ReasoningSourceDisposition,
 ) {
     let agent_kind = binding.agent_kind_db();
     let adapter = binding.observed();
@@ -400,6 +407,9 @@ async fn acquire_live_snapshot(
         CaptureSnapshotPolicy::with_deadline(snapshot_deadline),
     )
     .await;
+    if snapshot.rejects_ordinary_source_consumer() {
+        return snapshot.into_checkpoint_parts();
+    }
     // The helper's redacted SHA-256 is a transient preimage only. Before
     // a live snapshot can reach checkpoint metadata or a terminal
     // finalizer, bind it to this repository's scoped HMAC capability.
@@ -471,7 +481,8 @@ async fn acquire_live_snapshot(
         );
     }
     merge_redaction_report_into(report_value, snapshot.redaction_report());
-    (projection, snapshot.into_redacted_transcript())
+    let (_, transcript, reasoning) = snapshot.into_checkpoint_parts();
+    (projection, transcript, reasoning)
 }
 
 /// Outcome of the DR-05c-0 live coverage stage (ADR-ACF-10, ACF-18).
@@ -857,7 +868,7 @@ pub(super) async fn write_committed_checkpoint<P: LiveExportLeasePort>(
         provider_session_id: &envelope.session_id,
         verified_cwd: std::path::Path::new(&envelope.cwd),
     };
-    let (live_projection, live_transcript) = acquire_live_snapshot(
+    let (live_projection, live_transcript, live_reasoning) = acquire_live_snapshot(
         conn,
         repo_path,
         scope,
@@ -867,6 +878,12 @@ pub(super) async fn write_committed_checkpoint<P: LiveExportLeasePort>(
         &mut report_value,
     )
     .await;
+    if !live_reasoning.is_ordinary() {
+        // The existing catalog reservation remains uncommitted. This happens
+        // before deadline/no-op settlement or coverage-turn reservation, so
+        // the wrapper retains its original Pending/NotTracked behavior.
+        return Err(SourcePreparationRejected.into());
+    }
     let mut transcript_is_authorized = live_transcript.is_some();
     let mut transcript_snapshot_projection = Some(live_projection);
     let mut transcript_redacted = live_transcript.unwrap_or_else(prompt_fallback);
@@ -1185,12 +1202,17 @@ pub(super) async fn run_export_stage<'a, P: LiveExportLeasePort>(
         // hard cap/deadline, digests the exact authorized source, then
         // returns redacted-only bytes. A partial export is a failed closed
         // checkpoint write, never an unredacted normalization fallback.
-        let mut snapshot = CaptureSnapshotService::capture_authorized(
+        let mut snapshot = CaptureSnapshotService::capture_authorized_with_reasoning_context(
             source,
-            binding.agent_kind_db(),
-            libra_session_id,
+            binding.observed(),
+            crate::internal::ai::capture::snapshot::AuthorizedReasoningSourceContext::authorized_export(
+                binding.agent_kind_db(), libra_session_id, context.provider_session_id,
+            ),
             CaptureSnapshotPolicy::with_deadline(Some(export_deadline.monotonic())),
         );
+        if snapshot.rejects_ordinary_source_consumer() {
+            return Err(ExportStageExit::SourceRejected(SourcePreparationRejected.into()));
+        }
         // Keep an incomplete source on its existing typed outcome. In
         // particular, do not replace a deadline result with a commitment
         // failure while no snapshot can reach a durable projection.
@@ -1327,7 +1349,8 @@ pub(super) async fn run_export_stage<'a, P: LiveExportLeasePort>(
         // report are already redacted here.
         let projection = snapshot.safe_projection();
         merge_redaction_report_into(report_value, snapshot.redaction_report());
-        let Some(transcript) = snapshot.into_redacted_transcript() else {
+        let Some(transcript) = snapshot.try_into_ordinary()
+            .map_err(|_| ExportStageExit::SourceRejected(SourcePreparationRejected.into()))? else {
             return Err(ExportStageExit::SourceRejected(anyhow!(
                 "LBR-AGENT-005: complete export snapshot lost its redacted transcript"
             )));
@@ -2788,12 +2811,32 @@ pub(super) fn snapshot_subagent_sources_for_extraction(
         deadline_omitted_source_count: 0,
     };
     for source in sources {
-        let snapshot = source.into_parent_extraction_snapshot(parent_session_id, policy);
+        let Some(kind) = source.observed_kind() else {
+            // Discovery tags are not native authority. Do not introduce an
+            // unknown-provider child into the parent's extraction input.
+            snapshots.projections.push(CaptureSnapshotProjection {
+                completeness:
+                    crate::internal::ai::capture::snapshot::CaptureSnapshotCompleteness::Partial,
+                partial_reason: Some(CaptureSnapshotPartialReason::SourceAuthorizationMismatch),
+                source: None,
+                transcript_redacted_bytes: 0,
+                redaction_match_count: 0,
+                redaction_bytes_scanned: 0,
+                redaction_bytes_redacted: 0,
+            });
+            snapshots.redaction_reports.push(Default::default());
+            continue;
+        };
+        let snapshot = source.into_parent_extraction_snapshot(
+            parent_session_id,
+            crate::internal::ai::observed_agents::live_capture::selected_snapshot_adapter(kind),
+            policy,
+        );
         snapshots.projections.push(snapshot.safe_projection());
         snapshots
             .redaction_reports
             .push(snapshot.redaction_report().clone());
-        if let Some(transcript) = snapshot.into_redacted_transcript() {
+        if let Ok(Some(transcript)) = snapshot.try_into_ordinary() {
             snapshots.transcripts.push(transcript);
         }
     }
@@ -2970,5 +3013,565 @@ pub(super) fn append_redaction_report_bounded(
         } else {
             *dropped_matches = dropped_matches.saturating_add(1);
         }
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use sea_orm::{ConnectionTrait, Statement};
+    use serial_test::serial;
+
+    use super::*;
+    use crate::internal::ai::observed_agents::{
+        AgentKind, AgentSessionCtx, live_capture::scoped_test_snapshot_adapter,
+        reasoning::carrier_test_support as fixture,
+    };
+
+    struct TestHomeScope(Option<std::ffi::OsString>);
+    impl TestHomeScope {
+        fn set(path: &std::path::Path) -> Self {
+            let old = std::env::var_os("LIBRA_TEST_HOME");
+            // SAFETY: callers hold the serial env lane and Drop restores it.
+            unsafe {
+                std::env::set_var("LIBRA_TEST_HOME", path);
+            }
+            Self(old)
+        }
+    }
+    impl Drop for TestHomeScope {
+        fn drop(&mut self) {
+            // SAFETY: paired with set, under the same serial env lane.
+            unsafe {
+                match &self.0 {
+                    Some(v) => std::env::set_var("LIBRA_TEST_HOME", v),
+                    None => std::env::remove_var("LIBRA_TEST_HOME"),
+                }
+            }
+        }
+    }
+    async fn live_fixture() -> (tempfile::TempDir, sea_orm::DatabaseConnection) {
+        let dir = tempfile::tempdir().unwrap();
+        let conn =
+            crate::internal::db::create_database(dir.path().join(util::DATABASE).to_str().unwrap())
+                .await
+                .unwrap();
+        crate::internal::workspace::RepoIdentity::resolve_or_init(&conn)
+            .await
+            .unwrap();
+        std::fs::create_dir_all(dir.path().join("objects")).unwrap();
+        (dir, conn)
+    }
+    fn source_context(repo: &std::path::Path, bytes: &[u8]) -> AgentSessionCtx {
+        let directory = crate::internal::ai::observed_agents::claude_session_dir(repo).unwrap();
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join(format!("{}.jsonl", fixture::SOURCE));
+        std::fs::write(&path, bytes).unwrap();
+        AgentSessionCtx {
+            session_id: fixture::CAPTURE.to_owned(),
+            provider_session_id: fixture::SOURCE.to_owned(),
+            working_dir: repo.to_path_buf(),
+            transcript_path: Some(path),
+        }
+    }
+
+    #[tokio::test]
+    #[serial(env)]
+    async fn reasoning_none_live_bytes_unchanged() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = TestHomeScope::set(home.path());
+        let (dir, conn) = live_fixture().await;
+        let repo = dir.path().canonicalize().unwrap();
+        let bytes = b"ordinary live transcript remains byte identical\n";
+        let ctx = source_context(&repo, bytes);
+        let snapshot =
+            CaptureSnapshotService::capture_live(&fixture::NONE, &ctx, Default::default());
+        assert_eq!(
+            snapshot.completeness(),
+            CaptureSnapshotCompleteness::Complete
+        );
+        assert_eq!(
+            snapshot.try_into_ordinary().unwrap().unwrap().bytes(),
+            bytes
+        );
+        let _selected = scoped_test_snapshot_adapter(AgentKind::ClaudeCode, &fixture::NONE);
+        let binding =
+            LiveCaptureBinding::resolve(crate::internal::ai::hooks::providers::claude_provider());
+        let scope = CaptureScope::main_for_connection(&conn).await.unwrap();
+        let context = LiveCaptureContext {
+            libra_session_id: fixture::CAPTURE,
+            provider_session_id: fixture::SOURCE,
+            verified_cwd: &repo,
+        };
+        let (projection, transcript, reasoning) = acquire_live_snapshot(
+            &conn,
+            &repo,
+            &scope,
+            binding,
+            &context,
+            None,
+            &mut json!({}),
+        )
+        .await;
+        assert_eq!(
+            projection.completeness,
+            CaptureSnapshotCompleteness::Complete
+        );
+        assert_eq!(transcript.unwrap().bytes(), bytes);
+        assert!(reasoning.is_ordinary());
+    }
+
+    pub(crate) async fn assert_no_deadline_reasoning_handoff() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = TestHomeScope::set(home.path());
+        let (dir, conn) = live_fixture().await;
+        let repo = dir.path().canonicalize().unwrap();
+        let bytes = [b"ordinary ".as_slice(), fixture::CANARY].concat();
+        source_context(&repo, &bytes);
+        let _selected = scoped_test_snapshot_adapter(AgentKind::ClaudeCode, &fixture::STRIP);
+        let binding =
+            LiveCaptureBinding::resolve(crate::internal::ai::hooks::providers::claude_provider());
+        let scope = CaptureScope::main_for_connection(&conn).await.unwrap();
+        let context = LiveCaptureContext {
+            libra_session_id: fixture::CAPTURE,
+            provider_session_id: fixture::SOURCE,
+            verified_cwd: &repo,
+        };
+        let (projection, transcript, reasoning) = acquire_live_snapshot(
+            &conn,
+            &repo,
+            &scope,
+            binding,
+            &context,
+            None,
+            &mut json!({}),
+        )
+        .await;
+        assert_eq!(
+            projection.partial_reason,
+            Some(CaptureSnapshotPartialReason::SourceAuthorizationMismatch)
+        );
+        assert_eq!(transcript.unwrap().bytes(), b"ordinary ");
+        assert!(!reasoning.is_ordinary());
+        assert!(
+            projection
+                .source
+                .as_ref()
+                .unwrap()
+                .digest_sha256
+                .as_ref()
+                .unwrap()
+                .starts_with("sha256:")
+        );
+    }
+
+    async fn deliver(
+        conn: &sea_orm::DatabaseConnection,
+        repo: &std::path::Path,
+        session: &str,
+        hook: &str,
+        command: crate::internal::ai::hooks::provider::ProviderHookCommand,
+        kind: LifecycleEventKind,
+    ) -> Result<()> {
+        use crate::internal::ai::capture::ingress::{
+            CaptureDeadline, CaptureIngressBinding, CaptureIngressCommand, CaptureRuntimeScope,
+        };
+        let provider = crate::internal::ai::hooks::providers::claude_provider();
+        let bytes=serde_json::to_vec(&json!({"hook_event_name":hook,"session_id":session,"cwd":repo,"prompt":"ordinary prompt"})).unwrap();
+        let outcome = CaptureIngressCommand::from_payload(
+            &bytes,
+            command,
+            kind,
+            provider,
+            Some(CaptureDeadline::from_budget_millis(5000).unwrap()),
+            |_| {
+                Ok(CaptureIngressBinding::new(
+                    repo.to_string_lossy().into_owned(),
+                    [0xA5; 32],
+                    CaptureRuntimeScope::new(repo.to_path_buf(), repo.to_path_buf()),
+                ))
+            },
+        );
+        crate::internal::ai::capture::test_support::ingest_agent_traces_ingress_outcome_for_test(
+            outcome,
+            command,
+            provider,
+            conn,
+            Some(repo),
+        )
+        .await
+    }
+    async fn session_row(
+        conn: &sea_orm::DatabaseConnection,
+        session: &str,
+    ) -> (i64, serde_json::Value) {
+        let row=conn.query_one_raw(Statement::from_sql_and_values(conn.get_database_backend(),
+            "SELECT sync_revision, metadata_json FROM agent_session WHERE provider_session_id = ?",[session.to_owned().into()])).await.unwrap().unwrap();
+        (
+            row.try_get_by("sync_revision").unwrap(),
+            serde_json::from_str(&row.try_get_by::<String, _>("metadata_json").unwrap()).unwrap(),
+        )
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial(env)]
+    async fn reasoning_unready_pending_rejection_preserves_actual_terminal_attempt() {
+        use crate::internal::ai::hooks::provider::ProviderHookCommand;
+        let home = tempfile::tempdir().unwrap();
+        let _home = TestHomeScope::set(home.path());
+        let (dir, conn) = live_fixture().await;
+        let repo = dir.path().canonicalize().unwrap();
+        let _selected = scoped_test_snapshot_adapter(AgentKind::ClaudeCode, &fixture::STRIP);
+        for (session, hook, command, kind, pending) in [
+            (
+                "og16-terminal",
+                "SessionEnd",
+                ProviderHookCommand::SessionEnd,
+                LifecycleEventKind::SessionEnd,
+                true,
+            ),
+            (
+                "og16-not-tracked",
+                "Stop",
+                ProviderHookCommand::Stop,
+                LifecycleEventKind::TurnEnd,
+                false,
+            ),
+        ] {
+            deliver(
+                &conn,
+                &repo,
+                session,
+                "SessionStart",
+                ProviderHookCommand::SessionStart,
+                LifecycleEventKind::SessionStart,
+            )
+            .await
+            .unwrap();
+            let (before, _) = session_row(&conn, session).await;
+            let error = deliver(&conn, &repo, session, hook, command, kind)
+                .await
+                .expect_err("actual writer must reject before fallback/coverage");
+            assert!(
+                error.downcast_ref::<SourcePreparationRejected>().is_some(),
+                "{error:#}"
+            );
+            let (after, metadata) = session_row(&conn, session).await;
+            assert_eq!(
+                after,
+                before + 1,
+                "only catalog reservation may advance sync_revision"
+            );
+            let rendered = metadata.to_string();
+            assert!(!rendered.contains(std::str::from_utf8(fixture::CANARY).unwrap()));
+            if pending {
+                assert!(rendered.contains("pending"));
+                assert!(
+                    !rendered.contains("checkpoint_write"),
+                    "Pending suppresses wrapper checkpoint-write diagnosis"
+                );
+            } else {
+                assert!(
+                    rendered.contains("checkpoint_write"),
+                    "NotTracked retains its bounded fixed diagnosis"
+                );
+            }
+            let n: i64 = conn
+                .query_one_raw(Statement::from_string(
+                    conn.get_database_backend(),
+                    "SELECT COUNT(*) AS n FROM agent_checkpoint".to_owned(),
+                ))
+                .await
+                .unwrap()
+                .unwrap()
+                .try_get_by("n")
+                .unwrap();
+            assert_eq!(n, 0);
+            let n: i64 = conn
+                .query_one_raw(Statement::from_string(
+                    conn.get_database_backend(),
+                    "SELECT COUNT(*) AS n FROM agent_coverage_claim".to_owned(),
+                ))
+                .await
+                .unwrap()
+                .unwrap()
+                .try_get_by("n")
+                .unwrap();
+            assert_eq!(n, 0);
+        }
+        // Exercise the real pending seal preflight for both an owning native
+        // batch and a zero-artifact partial, before envelope/MAC writes.
+        for adapter in [
+            &fixture::NATIVE,
+            &fixture::STRIP,
+            &fixture::UNMAPPED,
+            &fixture::HELPER,
+        ] {
+            let snapshot = crate::internal::ai::capture::snapshot::carrier_test_snapshot(
+                adapter,
+                fixture::CANARY.to_vec(),
+            );
+            let redacted = crate::internal::ai::observed_agents::Redactor::new_default()
+                .redact(b"{}")
+                .0;
+            let payload = CheckpointRedactedPayload::from_snapshot(
+                snapshot,
+                redacted.clone(),
+                redacted.clone(),
+                redacted,
+            )
+            .unwrap();
+            super::super::pending_payload::assert_reasoning_pending_seal_rejected(&payload).await;
+        }
+    }
+    #[cfg(target_os = "macos")]
+    fn assert_source_descriptor_closed(path: &std::path::Path) {
+        let expected = path.canonicalize().unwrap();
+        for fd in 0..4096 {
+            let mut buffer = [0_i8; libc::PATH_MAX as usize];
+            // SAFETY: F_GETPATH writes at most PATH_MAX bytes into this live
+            // writable buffer; invalid descriptors simply return an error.
+            if unsafe { libc::fcntl(fd, libc::F_GETPATH, buffer.as_mut_ptr()) } == 0 {
+                // SAFETY: successful F_GETPATH produces a NUL-terminated path.
+                let name = unsafe { std::ffi::CStr::from_ptr(buffer.as_ptr()) };
+                if let Ok(name) = name.to_str() {
+                    assert_ne!(
+                        std::path::Path::new(name),
+                        expected,
+                        "source descriptor remained open on a failure exit"
+                    );
+                }
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    async fn source_resource_failure_matrix() {
+        use std::os::unix::fs::PermissionsExt;
+        for failure in ["timeout", "cancel", "error"] {
+            let home = tempfile::tempdir().unwrap();
+            let _home = TestHomeScope::set(home.path());
+            let repo = tempfile::tempdir().unwrap();
+            let ctx = source_context(repo.path(), b"ordinary resource test");
+            let source = ctx.transcript_path.as_ref().unwrap().clone();
+            let helper = tempfile::tempdir().unwrap();
+            let pid_file = helper.path().join("helper.pid");
+            let script = helper.path().join("helper.sh");
+            let pid_path = pid_file.to_string_lossy().replace('\'', "'\\''");
+            let tail = if failure == "error" {
+                "exit 2"
+            } else {
+                "exec /bin/sleep 60"
+            };
+            std::fs::write(
+                &script,
+                format!("#!/bin/sh\nprintf '%s' \"$$\" > '{pid_path}'\n{tail}\n"),
+            )
+            .unwrap();
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let capture = tokio::spawn(async move {
+                crate::internal::ai::authorized_read::with_test_helper_program(
+                    script,
+                    CaptureSnapshotService::capture_live_until(
+                        &fixture::NONE,
+                        &ctx,
+                        CaptureSnapshotPolicy::with_deadline(Some(
+                            Instant::now() + Duration::from_secs(2),
+                        )),
+                    ),
+                )
+                .await
+            });
+            let pid_deadline = Instant::now() + Duration::from_secs(1);
+            while !pid_file.exists() && Instant::now() < pid_deadline {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            let pid: i32 = std::fs::read_to_string(&pid_file)
+                .expect("actual helper must start before the injected exit")
+                .parse()
+                .unwrap();
+            if failure == "cancel" {
+                capture.abort();
+                assert!(capture.await.unwrap_err().is_cancelled());
+            } else {
+                let snapshot = capture.await.unwrap();
+                let expected = if failure == "timeout" {
+                    CaptureSnapshotPartialReason::DeadlineExceeded
+                } else {
+                    CaptureSnapshotPartialReason::SourceReadError
+                };
+                assert_eq!(snapshot.partial_reason(), Some(expected));
+                assert!(snapshot.transcript().is_none());
+            }
+            let reap_deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                // SAFETY: signal zero only checks this known fixture PID.
+                if unsafe { libc::kill(pid, 0) } != 0 {
+                    break;
+                }
+                assert!(
+                    Instant::now() < reap_deadline,
+                    "helper process group was not reaped after {failure}"
+                );
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            assert_source_descriptor_closed(&source);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    #[serial(env)]
+    async fn reasoning_carrier_failures_release_descriptors() {
+        source_resource_failure_matrix().await;
+        let home = tempfile::tempdir().unwrap();
+        let _home = TestHomeScope::set(home.path());
+        let repo = tempfile::tempdir().unwrap();
+        let ctx = source_context(repo.path(), fixture::CANARY);
+        let source = ctx.transcript_path.as_ref().unwrap().clone();
+        // A malformed in-process preparation owns and drops its descriptor;
+        // an enabled deadline route rejects before any source FD is opened.
+        let snapshot =
+            CaptureSnapshotService::capture_live(&fixture::MALFORMED, &ctx, Default::default());
+        assert!(snapshot.try_into_ordinary().is_err());
+        assert_source_descriptor_closed(&source);
+        let snapshot = CaptureSnapshotService::capture_live_until(
+            &fixture::STRIP,
+            &ctx,
+            CaptureSnapshotPolicy::with_deadline(Some(Instant::now() + Duration::from_secs(1))),
+        )
+        .await;
+        assert!(snapshot.try_into_ordinary().is_err());
+        assert_source_descriptor_closed(&source);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    #[serial(env)]
+    async fn reasoning_carrier_failures_reap_helpers() {
+        source_resource_failure_matrix().await;
+    }
+
+    #[tokio::test]
+    #[serial(env)]
+    async fn reasoning_carrier_failures_preserve_lease_ownership() {
+        use crate::internal::ai::{
+            capture::live::{ExportJobLeaseStore, LiveExportAdmission},
+            hooks::provider::ProviderHookCommand,
+        };
+        let home = tempfile::tempdir().unwrap();
+        let _home = TestHomeScope::set(home.path());
+        let (dir, conn) = live_fixture().await;
+        let repo = dir.path().canonicalize().unwrap();
+        deliver(
+            &conn,
+            &repo,
+            fixture::SOURCE,
+            "SessionStart",
+            ProviderHookCommand::SessionStart,
+            LifecycleEventKind::SessionStart,
+        )
+        .await
+        .unwrap();
+        let scope = CaptureScope::main_for_connection(&conn).await.unwrap();
+        let bytes=serde_json::to_vec(&json!({"type":"user","uuid":"foreign-turn","message":{"role":"user","content":"foreign ordinary claim"}})).unwrap();
+        let mut turns = crate::internal::ai::observed_agents::normalize_claude_transcript(&bytes);
+        crate::internal::ai::observed_agents::coverage::redact_turns(&mut turns);
+        let held =
+            crate::internal::ai::coverage_gate::reserve_turn_claims_for_channel_with_capture_scope(
+                &conn,
+                &scope,
+                fixture::CAPTURE,
+                &turns,
+                "foreign-owner",
+                Utc::now().timestamp_millis(),
+                "live",
+            )
+            .await
+            .unwrap();
+        assert_eq!(held.reserved.len(), 1);
+        let lease = ExportJobLeaseStore::new(&conn);
+        let target = LiveExportTarget {
+            agent_kind: "claude_code",
+            provider_session_id: fixture::SOURCE,
+            scope: &scope,
+        };
+        let deadline = CaptureCommitDeadline::from_budget(Duration::from_secs(30)).unwrap();
+        let LiveExportAdmission::Runner { fence_token, .. } = lease
+            .observe_idle(
+                &target,
+                "foreign-runner",
+                Utc::now().timestamp_millis(),
+                deadline,
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("fixture owns its runner")
+        };
+        let claim = conn
+            .query_one_raw(Statement::from_string(
+                conn.get_database_backend(),
+                "SELECT owner, fence_token, state FROM agent_coverage_claim".to_owned(),
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        let before: (String, i64, String) = (
+            claim.try_get_by("owner").unwrap(),
+            claim.try_get_by("fence_token").unwrap(),
+            claim.try_get_by("state").unwrap(),
+        );
+        let _selected = scoped_test_snapshot_adapter(AgentKind::ClaudeCode, &fixture::STRIP);
+        let error = deliver(
+            &conn,
+            &repo,
+            fixture::SOURCE,
+            "SessionEnd",
+            ProviderHookCommand::SessionEnd,
+            LifecycleEventKind::SessionEnd,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.downcast_ref::<SourcePreparationRejected>().is_some());
+        let claim = conn
+            .query_one_raw(Statement::from_string(
+                conn.get_database_backend(),
+                "SELECT owner, fence_token, state FROM agent_coverage_claim".to_owned(),
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        let after: (String, i64, String) = (
+            claim.try_get_by("owner").unwrap(),
+            claim.try_get_by("fence_token").unwrap(),
+            claim.try_get_by("state").unwrap(),
+        );
+        assert_eq!(
+            before, after,
+            "unsupported source must not release a foreign/durable coverage owner"
+        );
+        let runner = conn
+            .query_one_raw(Statement::from_string(
+                conn.get_database_backend(),
+                "SELECT owner, fence_token, state FROM agent_export_job".to_owned(),
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            runner.try_get_by::<String, _>("owner").unwrap(),
+            "foreign-runner"
+        );
+        assert_eq!(
+            runner.try_get_by::<i64, _>("fence_token").unwrap(),
+            fence_token
+        );
+        assert_eq!(runner.try_get_by::<String, _>("state").unwrap(), "inflight");
+        // Cleanup uses the owner's actual fence, never a blanket release.
+        lease
+            .release_failed(&target, "foreign-runner", fence_token, deadline)
+            .await
+            .unwrap();
     }
 }

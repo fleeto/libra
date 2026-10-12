@@ -238,6 +238,14 @@ pub trait ObservedAgent: Send + Sync {
     fn as_transcript_preparer(&self) -> Option<&dyn TranscriptPreparer> {
         None
     }
+    /// Pre-redaction reasoning separation is opt-in and is deliberately
+    /// outside the public eight-boolean capability wire. Only the selected
+    /// registered adapter can enable it; a capture policy cannot do so.
+    fn as_reasoning_source_preprocessor(
+        &self,
+    ) -> Option<&dyn super::reasoning::ReasoningSourcePreprocessor> {
+        None
+    }
     /// E1 `token_calculator`.
     fn as_token_calculator(&self) -> Option<&dyn TokenCalculator> {
         None

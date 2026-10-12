@@ -16,6 +16,479 @@ use thiserror::Error;
 
 use super::transcript_source::TRANSCRIPT_READ_HARD_CAP_BYTES;
 
+/// Optional provider port at the authorized, bounded source boundary.
+/// Implementations only separate an owned buffer. They cannot open a source,
+/// access a store, or construct native authority from a provider label.
+pub trait ReasoningSourcePreprocessor: Send + Sync {
+    fn prepare_authorized_source(
+        &self,
+        source: Vec<u8>,
+    ) -> Result<PreparedReasoningSource, ReasoningFieldError>;
+}
+
+/// A separated ordinary buffer and a sealed, owning disposition. No raw
+/// accessor, serialization, cloning or content-bearing Debug is available.
+pub struct PreparedReasoningSource {
+    ordinary: Vec<u8>,
+    disposition: ReasoningSourceDisposition,
+}
+
+impl PreparedReasoningSource {
+    /// The selected, reviewed detector found no reasoning candidate.
+    pub fn without_candidates(ordinary: Vec<u8>) -> Self {
+        Self {
+            ordinary,
+            disposition: ReasoningSourceDisposition::Ordinary,
+        }
+    }
+
+    /// The detector removed candidates whose native provenance is absent.
+    /// The safe result remains nonordinary even when it has no artifact.
+    pub fn unproven_candidates(ordinary: Vec<u8>) -> Self {
+        Self {
+            ordinary,
+            disposition: ReasoningSourceDisposition::Unproven,
+        }
+    }
+}
+
+/// Payload-free state readable by the narrow capture adapters. This is an
+/// internal state, not a new public metadata enum or a native proof.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReasoningSourceState {
+    Ordinary,
+    Unproven,
+    Unmapped,
+    HelperUnsupported,
+    NativeProven,
+}
+
+/// Owned reasoning authority travels with the source, never through a DTO.
+/// Even a zero-artifact partial must not become ordinary complete content.
+pub(crate) enum ReasoningSourceDisposition {
+    Ordinary,
+    Unproven,
+    Unmapped,
+    HelperUnsupported,
+    #[allow(dead_code)] // OG-05 alone may admit a production native issuer.
+    NativeProven(NativeProvenReasoning),
+}
+
+impl ReasoningSourceDisposition {
+    pub(crate) fn from_prepared_authorized_source(
+        prepared: PreparedReasoningSource,
+        has_verified_source_mapping: bool,
+        max_source_bytes: u64,
+        provider: &str,
+        capture_session: &str,
+        source_session: Option<&str>,
+    ) -> Result<(Vec<u8>, Self), ReasoningFieldError> {
+        if prepared.ordinary.len() as u64 > max_source_bytes {
+            return Err(ReasoningFieldError::SourceTooLarge);
+        }
+        let mut disposition = prepared.disposition;
+        if !has_verified_source_mapping && !disposition.is_ordinary() {
+            disposition = Self::Unmapped;
+        } else if let Self::NativeProven(batch) = &disposition {
+            let kind = match provider {
+                "claude_code" => ReasoningProvider::ClaudeCode,
+                "codex" => ReasoningProvider::Codex,
+                _ => return Err(ReasoningFieldError::UnsupportedShape),
+            };
+            batch.validate(capture_session, kind)?;
+            if source_session != Some(batch.source_session.as_str()) {
+                return Err(ReasoningFieldError::UnsupportedShape);
+            }
+        }
+        Ok((prepared.ordinary, disposition))
+    }
+
+    pub(crate) fn helper_unsupported() -> Self {
+        Self::HelperUnsupported
+    }
+
+    pub(crate) fn is_ordinary(&self) -> bool {
+        matches!(self, Self::Ordinary)
+    }
+
+    pub(crate) fn state(&self) -> ReasoningSourceState {
+        match self {
+            Self::Ordinary => ReasoningSourceState::Ordinary,
+            Self::Unproven => ReasoningSourceState::Unproven,
+            Self::Unmapped => ReasoningSourceState::Unmapped,
+            Self::HelperUnsupported => ReasoningSourceState::HelperUnsupported,
+            Self::NativeProven(_) => ReasoningSourceState::NativeProven,
+        }
+    }
+}
+
+/// No production native issuer is admitted by this preparatory carrier card.
+/// OG-05 may add the independently verified OpenCode issuer after native GO.
+/// An opaque RG classification never constructs this sealed witness.
+#[allow(dead_code)] // Admission remains closed until OG-05 native GO.
+enum NativeReasoningIssuer {
+    Unregistered,
+    #[cfg(test)]
+    SyntheticOnly,
+    #[cfg(test)]
+    SyntheticUnknown,
+}
+
+pub(crate) struct NativeReasoningProof {
+    issuer: NativeReasoningIssuer,
+    provider: ReasoningProvider,
+    source_session: String,
+    message: u64,
+    part: u64,
+    field: ReasoningSourceKind,
+    original_wire_sha256: [u8; 32],
+    logical_turn: String,
+}
+
+/// Non-Clone batch: artifact bytes and their witnesses have exactly one owner.
+/// Its constructor remains inside this module's fixed source validator.
+pub(crate) struct NativeProvenReasoning {
+    capture_session: String,
+    source_session: String,
+    artifacts: Vec<crate::internal::ai::traces::ReasoningArtifactParam>,
+    proofs: Vec<NativeReasoningProof>,
+}
+
+/// A capture association validated by the shared checkpoint adapter. It does
+/// not mint a native witness and cannot be serialized into an IPC shortcut.
+pub(crate) struct VerifiedCaptureBinding {
+    capture_session: String,
+    source_session: String,
+    provider: ReasoningProvider,
+}
+
+impl VerifiedCaptureBinding {
+    pub(crate) fn from_validated_capture_context(
+        batch: &NativeProvenReasoning,
+        capture_session: &str,
+        provider: &str,
+    ) -> Result<Self, ReasoningFieldError> {
+        let provider = match provider {
+            "claude_code" => ReasoningProvider::ClaudeCode,
+            "codex" => ReasoningProvider::Codex,
+            _ => return Err(ReasoningFieldError::UnsupportedShape),
+        };
+        batch.validate(capture_session, provider)?;
+        Ok(Self {
+            capture_session: capture_session.to_owned(),
+            source_session: batch.source_session.clone(),
+            provider,
+        })
+    }
+}
+
+/// Metadata-only borrowed identity inputs. The native bytes are not present
+/// in this view, and no constructor or mutable accessor is exposed.
+pub(crate) struct BoundIdentityInputRef<'a> {
+    original_wire_sha256: &'a [u8; 32],
+    logical_turn: &'a str,
+    source_binding_sha256: [u8; 32],
+    issuer_tag: &'static str,
+}
+
+#[allow(dead_code)] // OG-19/20 consume this metadata-only preparatory view.
+impl<'a> BoundIdentityInputRef<'a> {
+    fn from_bound_item(proof: &'a NativeReasoningProof) -> Self {
+        let mut source_binding = Sha256::new();
+        source_binding.update(b"libra/reasoning-source-binding/v1\0");
+        for field in [
+            b"claude_code".as_slice(),
+            proof.source_session.as_bytes(),
+            &proof.message.to_le_bytes(),
+            &proof.part.to_le_bytes(),
+            match proof.field {
+                ReasoningSourceKind::Signature => b"signature".as_slice(),
+                ReasoningSourceKind::RedactedThinkingData => b"data".as_slice(),
+                _ => b"unsupported".as_slice(),
+            },
+        ] {
+            source_binding.update((field.len() as u64).to_le_bytes());
+            source_binding.update(field);
+        }
+        Self {
+            original_wire_sha256: &proof.original_wire_sha256,
+            logical_turn: &proof.logical_turn,
+            source_binding_sha256: source_binding.finalize().into(),
+            issuer_tag: match proof.issuer {
+                NativeReasoningIssuer::Unregistered => "unregistered",
+                #[cfg(test)]
+                NativeReasoningIssuer::SyntheticOnly => "synthetic-test-only-v1",
+                #[cfg(test)]
+                NativeReasoningIssuer::SyntheticUnknown => "unknown-test-only",
+            },
+        }
+    }
+
+    pub(crate) fn original_wire_sha256(&self) -> &[u8; 32] {
+        self.original_wire_sha256
+    }
+
+    pub(crate) fn logical_turn(&self) -> &str {
+        self.logical_turn
+    }
+
+    pub(crate) fn source_binding_sha256(&self) -> &[u8; 32] {
+        &self.source_binding_sha256
+    }
+
+    pub(crate) fn issuer_tag(&self) -> &'static str {
+        self.issuer_tag
+    }
+}
+
+pub(crate) fn borrow_native_identity_bindings<'a>(
+    batch: &'a NativeProvenReasoning,
+    binding: &VerifiedCaptureBinding,
+) -> Result<Vec<BoundIdentityInputRef<'a>>, ReasoningFieldError> {
+    batch.validate(&binding.capture_session, binding.provider)?;
+    if batch.source_session != binding.source_session {
+        return Err(ReasoningFieldError::UnsupportedShape);
+    }
+    Ok(batch
+        .proofs
+        .iter()
+        .map(BoundIdentityInputRef::from_bound_item)
+        .collect())
+}
+
+impl NativeProvenReasoning {
+    fn validate(
+        &self,
+        capture_session: &str,
+        provider: ReasoningProvider,
+    ) -> Result<(), ReasoningFieldError> {
+        use crate::internal::ai::traces::{
+            REASONING_ARTIFACT_MAX_ENTRIES, REASONING_ARTIFACT_TOTAL_MAX_BYTES,
+        };
+        if capture_session.is_empty()
+            || self.capture_session != capture_session
+            || self.capture_session != format!("claude__{}", self.source_session)
+            || self.source_session.is_empty()
+            || self.artifacts.is_empty()
+            || self.artifacts.len() != self.proofs.len()
+            || self.artifacts.len() > REASONING_ARTIFACT_MAX_ENTRIES
+        {
+            return Err(ReasoningFieldError::UnsupportedShape);
+        }
+        let mut total = 0_u64;
+        let mut locators = BTreeSet::new();
+        for (artifact, proof) in self.artifacts.iter().zip(&self.proofs) {
+            let issuer_registered = match proof.issuer {
+                NativeReasoningIssuer::Unregistered => false,
+                #[cfg(test)]
+                NativeReasoningIssuer::SyntheticOnly => {
+                    proof.logical_turn == format!("synthetic-turn-{}", proof.message)
+                }
+                #[cfg(test)]
+                NativeReasoningIssuer::SyntheticUnknown => false,
+            };
+            let field = match proof.field {
+                ReasoningSourceKind::Signature => "signature",
+                ReasoningSourceKind::RedactedThinkingData => "data",
+                _ => return Err(ReasoningFieldError::UnsupportedShape),
+            };
+            // OG-16's synthetic positive uses the already admitted Claude
+            // locator. No production OpenCode locator or issuer is added.
+            let locator = format!(
+                "claude_code:msg={}/part={}/metadata={field}",
+                proof.message, proof.part
+            );
+            if !issuer_registered
+                || provider != ReasoningProvider::ClaudeCode
+                || proof.provider != provider
+                || artifact.provider != provider
+                || proof.source_session != self.source_session
+                || proof.logical_turn.is_empty()
+                || artifact.source_kind != Some(proof.field)
+                || artifact.bytes.verified_source() != (provider, proof.field)
+                || artifact.locator != locator
+                || !locators.insert(&artifact.locator)
+                || !artifact_locator_is_valid(provider, Some(proof.field), &artifact.locator)
+                || artifact.availability != ReasoningAvailability::OpaqueArchived
+                || artifact.decrypt_capability != "none"
+                || proof.original_wire_sha256
+                    != <[u8; 32]>::from(Sha256::digest(artifact.bytes.as_bytes()))
+            {
+                return Err(ReasoningFieldError::UnsupportedShape);
+            }
+            total = total
+                .checked_add(artifact.bytes.len() as u64)
+                .ok_or(ReasoningFieldError::SourceTooLarge)?;
+            if total > REASONING_ARTIFACT_TOTAL_MAX_BYTES {
+                return Err(ReasoningFieldError::SourceTooLarge);
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn artifact_params<'a>(
+        &'a self,
+        binding: &VerifiedCaptureBinding,
+    ) -> Result<&'a [crate::internal::ai::traces::ReasoningArtifactParam], ReasoningFieldError>
+    {
+        self.validate(&binding.capture_session, binding.provider)?;
+        if self.source_session != binding.source_session {
+            return Err(ReasoningFieldError::UnsupportedShape);
+        }
+        Ok(&self.artifacts)
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn synthetic_native_preparation(
+    ordinary: Vec<u8>,
+    capture_session: &str,
+    source_session: &str,
+    fields: Vec<Vec<u8>>,
+) -> PreparedReasoningSource {
+    let mut artifacts = Vec::with_capacity(fields.len());
+    let mut proofs = Vec::with_capacity(fields.len());
+    for (part, data) in fields.into_iter().enumerate() {
+        let digest = Sha256::digest(&data).into();
+        artifacts.push(crate::internal::ai::traces::ReasoningArtifactParam {
+            locator: format!("claude_code:msg=0/part={part}/metadata=signature"),
+            provider: ReasoningProvider::ClaudeCode,
+            source_kind: Some(ReasoningSourceKind::Signature),
+            availability: ReasoningAvailability::OpaqueArchived,
+            decrypt_capability: "none".to_owned(),
+            bytes: OpaqueEncryptedBytes {
+                data,
+                provider: ReasoningProvider::ClaudeCode,
+                source_kind: ReasoningSourceKind::Signature,
+            },
+        });
+        proofs.push(NativeReasoningProof {
+            issuer: NativeReasoningIssuer::SyntheticOnly,
+            provider: ReasoningProvider::ClaudeCode,
+            source_session: source_session.to_owned(),
+            message: 0,
+            part: part as u64,
+            field: ReasoningSourceKind::Signature,
+            original_wire_sha256: digest,
+            logical_turn: "synthetic-turn-0".to_owned(),
+        });
+    }
+    PreparedReasoningSource {
+        ordinary,
+        disposition: ReasoningSourceDisposition::NativeProven(NativeProvenReasoning {
+            capture_session: capture_session.to_owned(),
+            source_session: source_session.to_owned(),
+            artifacts,
+            proofs,
+        }),
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod carrier_test_support {
+    use super::*;
+    use crate::internal::ai::observed_agents::{AgentKind, AgentSessionCtx, ObservedAgent};
+    pub(crate) const CANARY: &[u8] = b"OG16_CANDIDATE_PRIVATE_CANARY";
+    pub(crate) const SOURCE: &str = "og16-native-source";
+    pub(crate) const CAPTURE: &str = "claude__og16-native-source";
+    #[derive(Clone, Copy)]
+    pub(crate) enum Mode {
+        None,
+        Strip,
+        Native,
+        Malformed,
+        ArtifactOversize,
+        TooMany,
+        Unmapped,
+        Helper,
+    }
+    pub(crate) struct Adapter(pub(crate) Mode);
+    pub(crate) static NONE: Adapter = Adapter(Mode::None);
+    pub(crate) static STRIP: Adapter = Adapter(Mode::Strip);
+    pub(crate) static NATIVE: Adapter = Adapter(Mode::Native);
+    pub(crate) static MALFORMED: Adapter = Adapter(Mode::Malformed);
+    pub(crate) static OVERSIZE: Adapter = Adapter(Mode::ArtifactOversize);
+    pub(crate) static TOO_MANY: Adapter = Adapter(Mode::TooMany);
+    pub(crate) static UNMAPPED: Adapter = Adapter(Mode::Unmapped);
+    pub(crate) static HELPER: Adapter = Adapter(Mode::Helper);
+    impl ObservedAgent for Adapter {
+        fn provider_kind(&self) -> AgentKind {
+            AgentKind::ClaudeCode
+        }
+        fn provider_name(&self) -> &'static str {
+            "claude-code"
+        }
+        fn read_transcript(&self, _: &AgentSessionCtx) -> anyhow::Result<Option<Vec<u8>>> {
+            panic!("the source preparation port must not reopen a source")
+        }
+        fn protected_dirs(&self) -> &'static [&'static str] {
+            &[".claude"]
+        }
+        fn as_reasoning_source_preprocessor(&self) -> Option<&dyn ReasoningSourcePreprocessor> {
+            (!matches!(self.0, Mode::None)).then_some(self)
+        }
+    }
+    impl ReasoningSourcePreprocessor for Adapter {
+        fn prepare_authorized_source(
+            &self,
+            mut ordinary: Vec<u8>,
+        ) -> Result<PreparedReasoningSource, ReasoningFieldError> {
+            let candidate = ordinary.windows(CANARY.len()).any(|w| w == CANARY);
+            while let Some(index) = ordinary.windows(CANARY.len()).position(|w| w == CANARY) {
+                ordinary.drain(index..index + CANARY.len());
+            }
+            match self.0 {
+                Mode::None => panic!("disabled accessor must not prepare"),
+                Mode::Strip if candidate => {
+                    Ok(PreparedReasoningSource::unproven_candidates(ordinary))
+                }
+                Mode::Strip => Ok(PreparedReasoningSource::without_candidates(ordinary)),
+                Mode::Malformed => Err(ReasoningFieldError::UnsupportedShape),
+                Mode::Unmapped => Ok(PreparedReasoningSource {
+                    ordinary,
+                    disposition: ReasoningSourceDisposition::Unmapped,
+                }),
+                Mode::Helper => Ok(PreparedReasoningSource {
+                    ordinary,
+                    disposition: ReasoningSourceDisposition::HelperUnsupported,
+                }),
+                Mode::Native => Ok(synthetic_native_preparation(
+                    ordinary,
+                    CAPTURE,
+                    SOURCE,
+                    vec![CANARY.to_vec(), b"second-opaque-wire".to_vec()],
+                )),
+                Mode::ArtifactOversize => Ok(synthetic_native_preparation(
+                    ordinary,
+                    CAPTURE,
+                    SOURCE,
+                    vec![vec![
+                        b'x';
+                        crate::internal::ai::traces::REASONING_ARTIFACT_TOTAL_MAX_BYTES
+                            as usize
+                            + 1
+                    ]],
+                )),
+                Mode::TooMany => Ok(synthetic_native_preparation(
+                    ordinary,
+                    CAPTURE,
+                    SOURCE,
+                    vec![
+                        vec![b'x'];
+                        crate::internal::ai::traces::REASONING_ARTIFACT_MAX_ENTRIES + 1
+                    ],
+                )),
+            }
+        }
+    }
+    pub(crate) fn tamper_carrier_locator(disposition: &mut ReasoningSourceDisposition) {
+        let ReasoningSourceDisposition::NativeProven(batch) = disposition else {
+            panic!("synthetic native fixture")
+        };
+        batch.artifacts[0].locator = "claude_code:msg=0/part=100/metadata=signature".to_owned();
+    }
+}
+
 /// Availability describes what the source proved, not whether capture failed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -626,6 +1099,53 @@ impl fmt::Debug for OpaqueEncryptedBytes {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn native_reasoning_proof_rejects_each_bound_dimension() {
+        fn batch() -> NativeProvenReasoning {
+            let prepared = synthetic_native_preparation(
+                b"ordinary".to_vec(),
+                carrier_test_support::CAPTURE,
+                carrier_test_support::SOURCE,
+                vec![b"opaque-wire".to_vec()],
+            );
+            let ReasoningSourceDisposition::NativeProven(batch) = prepared.disposition else {
+                panic!("native fixture")
+            };
+            batch
+        }
+        let good = batch();
+        good.validate(carrier_test_support::CAPTURE, ReasoningProvider::ClaudeCode)
+            .expect("synthetic control");
+        for dimension in 0..9 {
+            let mut bad = batch();
+            match dimension {
+                0 => bad.proofs[0].issuer = NativeReasoningIssuer::SyntheticUnknown,
+                1 => bad.proofs[0].provider = ReasoningProvider::Codex,
+                2 => bad.proofs[0].source_session.push_str("wrong"),
+                3 => bad.proofs[0].message += 1,
+                4 => bad.proofs[0].part += 1,
+                5 => bad.proofs[0].field = ReasoningSourceKind::RedactedThinkingData,
+                6 => bad.proofs[0].original_wire_sha256[0] ^= 1,
+                7 => bad.proofs[0].logical_turn.push_str("wrong"),
+                8 => bad.capture_session.push_str("wrong"),
+                _ => unreachable!(),
+            }
+            assert!(
+                bad.validate(carrier_test_support::CAPTURE, ReasoningProvider::ClaudeCode)
+                    .is_err(),
+                "dimension {dimension}"
+            );
+        }
+        assert!(
+            good.validate("different-capture", ReasoningProvider::ClaudeCode)
+                .is_err()
+        );
+        assert!(
+            good.validate(carrier_test_support::CAPTURE, ReasoningProvider::OpenCode)
+                .is_err()
+        );
+    }
+
     use std::time::Instant;
 
     use super::*;

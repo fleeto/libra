@@ -749,3 +749,14 @@ Linux 本地功能验收留给使用者。
 会话擦除使 checkpoint list/show 和 session graph 不再暴露 artifact ref；`agent clean --gc` 与仓库 GC 按既有保留窗口回收不可达的本地 artifact。`agent doctor` 以 `inconsistent_reasoning_artifact` 和精确的规范 `checkpoint_id` 报告不一致，要求人工修复；这是只读 finding，不新增持久化 status 列。R2 物理 payload 删除仍延期；云 tombstone 删除镜像目录行并阻止正常 restore 复活。
 
 非 quiet 的 `agent enable` 和 `agent import --yes` 披露 provider 已加密 reasoning 原字节可能在不解密的情况下归档，并随 checkpoint 云镜像。合成生命周期 fixture 在可见时始终为 `encrypted_unavailable`，擦除后不再有引用；它们不证明 native 来源或 decryptor。native 来源证明要求继续保留，未获证明的 OpenCode 字段不归档。
+
+
+### 授权 reasoning 源载体（OG-16）
+
+已选 registered adapter 的脱敏前预处理 capability 默认为 None。它只分流已授权、受限的内存源，不重开 provider 文件，不访问 checkpoint store。未启用或没有候选时，snapshot、live 和 store 的普通字节行为保持兼容。启用后，候选载荷在普通 Redactor 之前剥离；未证明来源或未映射候选保留不含载荷的 partial，即使零 artifact 也不能转换为普通 complete。
+
+sealed native carrier 将原始 opaque 字节和来源绑定证明一起移入共享 checkpoint payload。在 object/index 写入前验证 issuer、provider、source session、message、part、field、wire SHA-256 与已授权 capture/turn 关联。metadata-only identity adapter 不暴露载荷、不签发 native 权限；Debug 不含 native 坐标或载荷。source、artifact 字节与条目数量上限保持。
+
+authenticated reasoning import transport 就绪前，普通导入消费者对非 ordinary carrier 返回固定来源授权错误。普通 pending codec 在 envelope 写入前拒绝非 ordinary payload；live attempt 按既有 receipt、fence 和 lease 规则保持 uncommitted。已启用 Claude deadline-FD 路线时，在解析 source 前拒绝，不回退普通捕获。已有 Pending receipt 不尝试 wrapper failure 诊断；NotTracked 仅沿用既有有界诊断尝试，不推进 sync_revision。
+
+OG-16 不启用生产 provider capability，也不准入生产 native issuer。合成正例只证明载体机制；Source A 仍为 UNPROVEN，真实 OpenCode native 归档、私有导入传输及 durable reasoning replay 仍须通过后续门。本载体不增加解密能力或 public metadata enum 值。

@@ -148,7 +148,7 @@ impl LiveCaptureBinding {
         Self {
             hook_name,
             kind,
-            observed: agent_for(kind),
+            observed: selected_snapshot_adapter(kind),
             live: live_capture_for(kind).unwrap_or(&NEUTRAL_LIVE_CAPTURE),
         }
     }
@@ -189,6 +189,52 @@ impl LiveCaptureBinding {
 
     pub(crate) fn transcript_exporter(self) -> Option<&'static dyn LiveTranscriptExporter> {
         self.live.transcript_exporter()
+    }
+}
+
+/// Preserve the single registered adapter selection. The scoped override is
+/// compiled only for tests, allowing the actual public/import/child callers
+/// to exercise enablement without changing any production registration.
+pub(crate) fn selected_snapshot_adapter(kind: AgentKind) -> &'static dyn ObservedAgent {
+    #[cfg(test)]
+    if let Some(adapter) = TEST_SNAPSHOT_ADAPTER.with(|slot| {
+        slot.borrow()
+            .filter(|(selected, _)| *selected == kind)
+            .map(|(_, adapter)| adapter)
+    }) {
+        return adapter;
+    }
+    agent_for(kind)
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_SNAPSHOT_ADAPTER: std::cell::RefCell<Option<(AgentKind, &'static dyn ObservedAgent)>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) struct TestSnapshotAdapterScope {
+    previous: Option<(AgentKind, &'static dyn ObservedAgent)>,
+    _same_thread: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+#[cfg(test)]
+impl Drop for TestSnapshotAdapterScope {
+    fn drop(&mut self) {
+        TEST_SNAPSHOT_ADAPTER.with(|slot| *slot.borrow_mut() = self.previous.take());
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn scoped_test_snapshot_adapter(
+    kind: AgentKind,
+    adapter: &'static dyn ObservedAgent,
+) -> TestSnapshotAdapterScope {
+    assert_eq!(adapter.provider_kind(), kind);
+    let previous = TEST_SNAPSHOT_ADAPTER.with(|slot| slot.replace(Some((kind, adapter))));
+    TestSnapshotAdapterScope {
+        previous,
+        _same_thread: Default::default(),
     }
 }
 

@@ -21,8 +21,8 @@ use crate::internal::ai::{
     observed_agents::{
         AgentKind, AgentSessionCtx, ObservedAgent, RedactedBytes, RedactionReport, Redactor,
         TRANSCRIPT_READ_HARD_CAP_BYTES, TranscriptReadError, TranscriptSource,
-        TranscriptSourceResolution, resolve_live_transcript_source_until,
-        transcript_source::InMemoryTranscriptOrigin,
+        TranscriptSourceResolution, reasoning::ReasoningSourceDisposition,
+        resolve_live_transcript_source_until, transcript_source::InMemoryTranscriptOrigin,
     },
 };
 
@@ -205,6 +205,131 @@ impl CaptureSnapshotProjection {
     }
 }
 
+/// Existing source authorization facts, not native provenance. A legacy
+/// wrapper or a parent-only child cannot supply a verified native mapping.
+/// Keep native coordinates out of Debug, metadata and helper protocols.
+pub(crate) struct AuthorizedReasoningSourceContext {
+    provider: String,
+    authorized_session: String,
+    capture_session: String,
+    provider_session: Option<String>,
+    origin: AuthorizedReasoningSourceOrigin,
+}
+
+enum AuthorizedReasoningSourceOrigin {
+    ScopeVerifiedLive,
+    AuthorizedExport,
+    VerifiedImport,
+    ParentOnlyChild,
+    LegacyOrdinary,
+}
+
+impl AuthorizedReasoningSourceContext {
+    fn live(adapter: &dyn ObservedAgent, session: &AgentSessionCtx) -> Self {
+        Self {
+            provider: adapter.provider_kind().as_db_str().to_owned(),
+            authorized_session: session.session_id.clone(),
+            capture_session: session.session_id.clone(),
+            provider_session: Some(session.provider_session_id.clone()),
+            origin: AuthorizedReasoningSourceOrigin::ScopeVerifiedLive,
+        }
+    }
+
+    pub(crate) fn authorized_export(
+        provider: &str,
+        capture_session: &str,
+        provider_session: &str,
+    ) -> Self {
+        Self {
+            provider: provider.to_owned(),
+            authorized_session: capture_session.to_owned(),
+            capture_session: capture_session.to_owned(),
+            provider_session: Some(provider_session.to_owned()),
+            origin: AuthorizedReasoningSourceOrigin::AuthorizedExport,
+        }
+    }
+
+    pub(crate) fn verified_import(
+        provider: &str,
+        authorized_session: &str,
+        capture_session: &str,
+        provider_session: &str,
+    ) -> Self {
+        Self {
+            provider: provider.to_owned(),
+            authorized_session: authorized_session.to_owned(),
+            capture_session: capture_session.to_owned(),
+            provider_session: Some(provider_session.to_owned()),
+            origin: AuthorizedReasoningSourceOrigin::VerifiedImport,
+        }
+    }
+
+    pub(crate) fn parent_only_child(provider: &str, parent_session: &str) -> Self {
+        Self::ordinary(
+            provider,
+            parent_session,
+            AuthorizedReasoningSourceOrigin::ParentOnlyChild,
+        )
+    }
+
+    fn ordinary(provider: &str, session: &str, origin: AuthorizedReasoningSourceOrigin) -> Self {
+        Self {
+            provider: provider.to_owned(),
+            authorized_session: session.to_owned(),
+            capture_session: session.to_owned(),
+            provider_session: None,
+            origin,
+        }
+    }
+
+    fn has_verified_mapping(&self) -> bool {
+        !self.capture_session.is_empty()
+            && self
+                .provider_session
+                .as_ref()
+                .is_some_and(|id| !id.is_empty())
+            && matches!(
+                self.origin,
+                AuthorizedReasoningSourceOrigin::ScopeVerifiedLive
+                    | AuthorizedReasoningSourceOrigin::AuthorizedExport
+                    | AuthorizedReasoningSourceOrigin::VerifiedImport
+            )
+    }
+}
+
+/// Called once, after source authorization and a bounded read, before Redactor.
+fn prepare_authorized_reasoning_source(
+    bytes: Vec<u8>,
+    adapter: &dyn ObservedAgent,
+    context: &AuthorizedReasoningSourceContext,
+    policy: CaptureSnapshotPolicy,
+) -> Result<(Vec<u8>, ReasoningSourceDisposition), ()> {
+    if deadline_elapsed(policy)
+        || bytes.len() as u64 > policy.max_bytes
+        || adapter.provider_kind().as_db_str() != context.provider
+    {
+        return Err(());
+    }
+    let Some(preprocessor) = adapter.as_reasoning_source_preprocessor() else {
+        return Ok((bytes, ReasoningSourceDisposition::Ordinary));
+    };
+    let prepared = preprocessor
+        .prepare_authorized_source(bytes)
+        .map_err(|_| ())?;
+    if deadline_elapsed(policy) {
+        return Err(());
+    }
+    ReasoningSourceDisposition::from_prepared_authorized_source(
+        prepared,
+        context.has_verified_mapping(),
+        policy.max_bytes,
+        &context.provider,
+        &context.capture_session,
+        context.provider_session.as_deref(),
+    )
+    .map_err(|_| ())
+}
+
 /// A captured transcript after its raw source was bounded and redacted.
 ///
 /// Raw bytes are deliberately local to [`CaptureSnapshotService`]. Consumers
@@ -217,6 +342,7 @@ pub struct CaptureSnapshot {
     source: Option<CaptureSnapshotSource>,
     transcript_redacted: Option<RedactedBytes>,
     redaction_report: RedactionReport,
+    reasoning: ReasoningSourceDisposition,
 }
 
 impl fmt::Debug for CaptureSnapshot {
@@ -254,6 +380,7 @@ impl CaptureSnapshot {
             source: Some(source),
             transcript_redacted: Some(transcript_redacted),
             redaction_report,
+            reasoning: ReasoningSourceDisposition::Ordinary,
         }
     }
 
@@ -267,6 +394,7 @@ impl CaptureSnapshot {
             source,
             transcript_redacted: None,
             redaction_report: RedactionReport::default(),
+            reasoning: ReasoningSourceDisposition::Ordinary,
         }
     }
 
@@ -291,7 +419,34 @@ impl CaptureSnapshot {
     /// is intentionally the only consuming content accessor; it cannot expose
     /// the raw source bytes that were used during capture.
     pub fn into_redacted_transcript(self) -> Option<RedactedBytes> {
-        self.transcript_redacted
+        self.try_into_ordinary().ok().flatten()
+    }
+
+    /// Ordinary-only consumers must retain ownership when typed reasoning
+    /// has no ready consumer. A zero-artifact safe partial is still rejected.
+    pub fn try_into_ordinary(self) -> Result<Option<RedactedBytes>, Box<Self>> {
+        if self.reasoning.is_ordinary() {
+            Ok(self.transcript_redacted)
+        } else {
+            Err(Box::new(self))
+        }
+    }
+
+    /// A readiness check only; ownership is still moved to the actual
+    /// writer or returned by the ordinary consuming rejection.
+    pub(crate) fn rejects_ordinary_source_consumer(&self) -> bool {
+        !self.reasoning.is_ordinary()
+    }
+
+    pub(crate) fn into_checkpoint_parts(
+        self,
+    ) -> (
+        CaptureSnapshotProjection,
+        Option<RedactedBytes>,
+        ReasoningSourceDisposition,
+    ) {
+        let projection = self.safe_projection();
+        (projection, self.transcript_redacted, self.reasoning)
     }
 
     /// Rule-hit report for the redaction pass that produced
@@ -493,12 +648,14 @@ impl CaptureSnapshotService {
             return CaptureSnapshot::partial(CaptureSnapshotPartialReason::DeadlineExceeded, None);
         }
         match resolution {
-            TranscriptSourceResolution::Authorized(source) => Self::capture_authorized(
-                source,
-                adapter.provider_kind().as_db_str(),
-                &context.session_id,
-                policy,
-            ),
+            TranscriptSourceResolution::Authorized(source) => {
+                Self::capture_authorized_with_reasoning_context(
+                    source,
+                    adapter,
+                    AuthorizedReasoningSourceContext::live(adapter, context),
+                    policy,
+                )
+            }
             TranscriptSourceResolution::Absent => {
                 CaptureSnapshot::partial(CaptureSnapshotPartialReason::SourceAbsent, None)
             }
@@ -521,13 +678,27 @@ impl CaptureSnapshotService {
         context: &AgentSessionCtx,
         policy: CaptureSnapshotPolicy,
     ) -> CaptureSnapshot {
+        // The FD helper carries only redacted ordinary bytes. Reject an
+        // enabled Claude detector before resolver/preparer/FD work, even when
+        // the old ordinary deadline path would otherwise take precedence.
+        if policy.deadline().is_some()
+            && adapter.provider_kind().as_db_str() == "claude_code"
+            && adapter.as_reasoning_source_preprocessor().is_some()
+        {
+            let mut snapshot = CaptureSnapshot::partial(
+                CaptureSnapshotPartialReason::SourceAuthorizationMismatch,
+                None,
+            );
+            snapshot.reasoning = ReasoningSourceDisposition::helper_unsupported();
+            return snapshot;
+        }
         if deadline_elapsed(policy) {
             return CaptureSnapshot::partial(CaptureSnapshotPartialReason::DeadlineExceeded, None);
         }
         let Some(deadline) = policy.deadline() else {
             return Self::capture_live(adapter, context, policy);
         };
-        if adapter.provider_kind() != AgentKind::ClaudeCode {
+        if adapter.provider_kind().as_db_str() != "claude_code" {
             return CaptureSnapshot::partial(CaptureSnapshotPartialReason::SourceReadError, None);
         }
         let source = match resolve_live_transcript_source_until(adapter, context, Some(deadline)) {
@@ -619,7 +790,37 @@ impl CaptureSnapshotService {
         libra_session_id: &str,
         policy: CaptureSnapshotPolicy,
     ) -> CaptureSnapshot {
+        let Some(kind) = AgentKind::from_db_str(agent_kind) else {
+            return CaptureSnapshot::partial(
+                CaptureSnapshotPartialReason::SourceAuthorizationMismatch,
+                None,
+            );
+        };
+        Self::capture_authorized_with_reasoning_context(
+            source,
+            crate::internal::ai::observed_agents::live_capture::selected_snapshot_adapter(kind),
+            AuthorizedReasoningSourceContext::ordinary(
+                agent_kind,
+                libra_session_id,
+                AuthorizedReasoningSourceOrigin::LegacyOrdinary,
+            ),
+            policy,
+        )
+    }
+
+    pub(crate) fn capture_authorized_with_reasoning_context(
+        source: TranscriptSource,
+        adapter: &dyn ObservedAgent,
+        context: AuthorizedReasoningSourceContext,
+        policy: CaptureSnapshotPolicy,
+    ) -> CaptureSnapshot {
         let mut source_projection = source_projection(&source);
+        if adapter.provider_kind().as_db_str() != context.provider {
+            return CaptureSnapshot::partial(
+                CaptureSnapshotPartialReason::SourceAuthorizationMismatch,
+                Some(source_projection),
+            );
+        }
         if deadline_elapsed(policy) {
             return CaptureSnapshot::partial(
                 CaptureSnapshotPartialReason::DeadlineExceeded,
@@ -647,7 +848,7 @@ impl CaptureSnapshotService {
         let bytes = match source {
             TranscriptSource::File { mut file, .. } => file.read_bounded(policy.max_bytes),
             TranscriptSource::Bytes { bytes, auth } => {
-                if auth.matches(agent_kind, libra_session_id, &bytes) {
+                if auth.matches(&context.provider, &context.authorized_session, &bytes) {
                     Ok(bytes)
                 } else {
                     return CaptureSnapshot::partial(
@@ -672,12 +873,14 @@ impl CaptureSnapshotService {
                 );
             }
         };
-        Self::capture_authorized_bytes(bytes, source_projection, policy)
+        Self::capture_authorized_bytes(bytes, source_projection, adapter, &context, policy)
     }
 
     fn capture_authorized_bytes(
         bytes: Vec<u8>,
         mut source_projection: CaptureSnapshotSource,
+        adapter: &dyn ObservedAgent,
+        context: &AuthorizedReasoningSourceContext,
         policy: CaptureSnapshotPolicy,
     ) -> CaptureSnapshot {
         // A descriptor-pinned file may change between its metadata probe and
@@ -698,6 +901,18 @@ impl CaptureSnapshotService {
             );
         }
 
+        let (bytes, reasoning) =
+            match prepare_authorized_reasoning_source(bytes, adapter, context, policy) {
+                Ok(prepared) => prepared,
+                Err(()) => {
+                    let mut snapshot = CaptureSnapshot::partial(
+                        CaptureSnapshotPartialReason::SourceAuthorizationMismatch,
+                        Some(source_projection),
+                    );
+                    snapshot.reasoning = ReasoningSourceDisposition::Unproven;
+                    return snapshot;
+                }
+            };
         // Apply the same output and two-buffer budget as the helper-backed
         // path. A redaction placeholder may expand a short secret, but an
         // unbounded expansion must become a content-free partial here rather
@@ -709,22 +924,37 @@ impl CaptureSnapshotService {
         let Some((transcript_redacted, redaction_report)) = Redactor::new_default()
             .redact_owned_bounded(bytes, max_output_bytes, max_working_set_bytes)
         else {
-            return CaptureSnapshot::partial(
+            let mut snapshot = CaptureSnapshot::partial(
                 CaptureSnapshotPartialReason::SourceReadError,
                 Some(source_projection),
             );
+            snapshot.reasoning = reasoning;
+            return snapshot;
         };
         // `source_projection` is durable metadata and is later bound into
         // finalizer receipts. Commit only the redacted representation: a raw
         // SHA-256 would let an observer test a guessed secret offline.
         source_projection.digest_sha256 = Some(digest_hex(transcript_redacted.bytes()));
         if deadline_elapsed(policy) {
-            return CaptureSnapshot::partial(
+            let mut snapshot = CaptureSnapshot::partial(
                 CaptureSnapshotPartialReason::DeadlineExceeded,
                 Some(source_projection),
             );
+            snapshot.reasoning = reasoning;
+            return snapshot;
         }
-        CaptureSnapshot::complete(source_projection, transcript_redacted, redaction_report)
+        let mut snapshot =
+            CaptureSnapshot::complete(source_projection, transcript_redacted, redaction_report);
+        if !matches!(
+            reasoning,
+            ReasoningSourceDisposition::Ordinary | ReasoningSourceDisposition::NativeProven(_)
+        ) {
+            snapshot.completeness = CaptureSnapshotCompleteness::Partial;
+            snapshot.partial_reason =
+                Some(CaptureSnapshotPartialReason::SourceAuthorizationMismatch);
+        }
+        snapshot.reasoning = reasoning;
+        snapshot
     }
 
     /// Complete a live helper result that was redacted in the registered
@@ -807,6 +1037,31 @@ fn digest_hex(bytes: &[u8]) -> String {
     // source SHA-256. New V2 metadata may retain only this explicit,
     // redacted-content form; legacy bare values remain readable elsewhere.
     format!("sha256:{}", hex::encode(Sha256::digest(bytes)))
+}
+
+#[cfg(test)]
+pub(crate) fn carrier_test_snapshot(
+    adapter: &dyn ObservedAgent,
+    bytes: Vec<u8>,
+) -> CaptureSnapshot {
+    use crate::internal::ai::observed_agents::reasoning::carrier_test_support as fixture;
+    CaptureSnapshotService::capture_authorized_with_reasoning_context(
+        TranscriptSource::Bytes {
+            auth: crate::internal::ai::observed_agents::ExportAuthorized::issue(
+                "claude_code",
+                fixture::CAPTURE,
+                &bytes,
+            ),
+            bytes,
+        },
+        adapter,
+        AuthorizedReasoningSourceContext::authorized_export(
+            "claude_code",
+            fixture::CAPTURE,
+            fixture::SOURCE,
+        ),
+        CaptureSnapshotPolicy::default(),
+    )
 }
 
 #[cfg(test)]
@@ -1035,6 +1290,12 @@ mod tests {
                 digest_sha256: None,
                 byte_len: Some(999),
             },
+            &ClaudeCodeObservedAgent::new(),
+            &AuthorizedReasoningSourceContext::ordinary(
+                "claude_code",
+                "libra-session",
+                AuthorizedReasoningSourceOrigin::LegacyOrdinary,
+            ),
             CaptureSnapshotPolicy::default(),
         );
 
@@ -1422,5 +1683,337 @@ mod tests {
             reaped,
             "blocked extraction helper was not killed and reaped"
         );
+    }
+    struct ReasoningTestAdapter {
+        enabled: bool,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl ObservedAgent for ReasoningTestAdapter {
+        fn provider_kind(&self) -> AgentKind {
+            AgentKind::ClaudeCode
+        }
+        fn provider_name(&self) -> &'static str {
+            "claude-code"
+        }
+        fn read_transcript(&self, _: &AgentSessionCtx) -> anyhow::Result<Option<Vec<u8>>> {
+            panic!("reasoning fixture must never reopen a provider source")
+        }
+        fn protected_dirs(&self) -> &'static [&'static str] {
+            &[]
+        }
+        fn as_reasoning_source_preprocessor(
+            &self,
+        ) -> Option<&dyn crate::internal::ai::observed_agents::reasoning::ReasoningSourcePreprocessor>
+        {
+            self.enabled.then_some(self)
+        }
+    }
+
+    impl crate::internal::ai::observed_agents::reasoning::ReasoningSourcePreprocessor
+        for ReasoningTestAdapter
+    {
+        fn prepare_authorized_source(
+            &self,
+            mut source: Vec<u8>,
+        ) -> Result<
+            crate::internal::ai::observed_agents::reasoning::PreparedReasoningSource,
+            crate::internal::ai::observed_agents::reasoning::ReasoningFieldError,
+        > {
+            use crate::internal::ai::observed_agents::reasoning::PreparedReasoningSource;
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let candidate = b"OG16_CANDIDATE_PRIVATE_CANARY";
+            if let Some(index) = source
+                .windows(candidate.len())
+                .position(|window| window == candidate)
+            {
+                source.drain(index..index + candidate.len());
+                Ok(PreparedReasoningSource::unproven_candidates(source))
+            } else {
+                Ok(PreparedReasoningSource::without_candidates(source))
+            }
+        }
+    }
+
+    fn reasoning_fixture_snapshot(enabled: bool, bytes: Vec<u8>) -> CaptureSnapshot {
+        let auth = ExportAuthorized::issue("claude_code", "capture-synthetic", &bytes);
+        let adapter = ReasoningTestAdapter {
+            enabled,
+            calls: Default::default(),
+        };
+        CaptureSnapshotService::capture_authorized_with_reasoning_context(
+            TranscriptSource::Bytes { bytes, auth },
+            &adapter,
+            AuthorizedReasoningSourceContext::authorized_export(
+                "claude_code",
+                "capture-synthetic",
+                "source-synthetic",
+            ),
+            CaptureSnapshotPolicy::default(),
+        )
+    }
+
+    #[test]
+    fn reasoning_none_snapshot_bytes_unchanged() {
+        let bytes = b"ordinary transcript has no candidate\n".to_vec();
+        for enabled in [false, true] {
+            let snapshot = reasoning_fixture_snapshot(enabled, bytes.clone());
+            assert_eq!(
+                snapshot.completeness(),
+                CaptureSnapshotCompleteness::Complete
+            );
+            assert_eq!(
+                snapshot
+                    .try_into_ordinary()
+                    .expect("ordinary owning conversion")
+                    .expect("transcript")
+                    .bytes(),
+                &bytes
+            );
+        }
+    }
+
+    #[test]
+    fn reasoning_candidate_removed_before_redactor() {
+        let bytes = b"ordinary OG16_CANDIDATE_PRIVATE_CANARY text".to_vec();
+        let snapshot = reasoning_fixture_snapshot(true, bytes);
+        let projection = snapshot.safe_projection();
+        assert_eq!(projection.redaction_bytes_scanned, b"ordinary  text".len());
+        assert_eq!(
+            snapshot
+                .transcript()
+                .expect("sanitized ordinary component")
+                .bytes(),
+            b"ordinary  text"
+        );
+        assert_eq!(
+            projection.partial_reason,
+            Some(CaptureSnapshotPartialReason::SourceAuthorizationMismatch)
+        );
+        let rejected = snapshot
+            .try_into_ordinary()
+            .expect_err("zero-artifact partial cannot become ordinary");
+        assert!(!format!("{rejected:?}").contains("OG16_CANDIDATE_PRIVATE_CANARY"));
+    }
+
+    #[test]
+    fn reasoning_carrier_source_bytes_are_bounded() {
+        let bytes = b"OG16_CANDIDATE_PRIVATE_CANARY".to_vec();
+        let auth = ExportAuthorized::issue("claude_code", "capture-synthetic", &bytes);
+        let adapter = ReasoningTestAdapter {
+            enabled: true,
+            calls: Default::default(),
+        };
+        let snapshot = CaptureSnapshotService::capture_authorized_with_reasoning_context(
+            TranscriptSource::Bytes { bytes, auth },
+            &adapter,
+            AuthorizedReasoningSourceContext::authorized_export(
+                "claude_code",
+                "capture-synthetic",
+                "source-synthetic",
+            ),
+            CaptureSnapshotPolicy::with_max_bytes(None, 1),
+        );
+        assert_eq!(
+            snapshot.partial_reason(),
+            Some(CaptureSnapshotPartialReason::SourceOversize)
+        );
+        assert_eq!(adapter.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(snapshot.transcript().is_none());
+    }
+
+    #[tokio::test]
+    async fn reasoning_enabled_claude_deadline_rejects_before_source_resolution() {
+        let adapter = ReasoningTestAdapter {
+            enabled: true,
+            calls: Default::default(),
+        };
+        let snapshot = CaptureSnapshotService::capture_live_until(
+            &adapter,
+            &context(None),
+            CaptureSnapshotPolicy::with_deadline(Some(Instant::now())),
+        )
+        .await;
+        assert_eq!(
+            snapshot.partial_reason(),
+            Some(CaptureSnapshotPartialReason::SourceAuthorizationMismatch)
+        );
+        assert_eq!(adapter.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(snapshot.try_into_ordinary().is_err());
+    }
+    #[test]
+    fn reasoning_visible_text_is_typed_redacted() {
+        use crate::internal::ai::observed_agents::reasoning::carrier_test_support as fixture;
+        let secret = "AKIAABCDEFGHIJKLMNOP";
+        let bytes = format!("{{\"thinking\":\"visible {secret}\"}}").into_bytes();
+        let snapshot = carrier_test_snapshot(&fixture::STRIP, bytes);
+        assert_eq!(
+            snapshot.completeness(),
+            CaptureSnapshotCompleteness::Complete
+        );
+        assert_eq!(snapshot.redaction_report().match_count(), 1);
+        let typed = snapshot.try_into_ordinary().unwrap().unwrap();
+        let value: serde_json::Value = serde_json::from_slice(typed.bytes()).unwrap();
+        assert!(value["thinking"].as_str().unwrap().starts_with("visible "));
+        assert!(!String::from_utf8_lossy(typed.bytes()).contains(secret));
+        use crate::internal::ai::observed_agents::{
+            coverage::{
+                Completeness, NormalizedTurn, SemanticRecord, redact_turns_with_report,
+                safe_turn_projection,
+            },
+            reasoning::{
+                ReasoningProvider, ReasoningSourceKind, classify_provider_visible_reasoning,
+            },
+        };
+        let (record, text) = classify_provider_visible_reasoning(
+            ReasoningProvider::ClaudeCode,
+            ReasoningSourceKind::Thinking,
+            value["thinking"].as_str().unwrap().to_owned(),
+        );
+        assert_eq!(
+            record.availability(),
+            crate::internal::ai::observed_agents::reasoning::ReasoningAvailability::ProviderVisible
+        );
+        let mut turn = NormalizedTurn {
+            logical_turn_key: "visible-turn".to_owned(),
+            ordinal: 0,
+            completeness: Completeness::Complete,
+            started_at: None,
+            ended_at: None,
+            records: vec![SemanticRecord::Reasoning {
+                provider: ReasoningProvider::ClaudeCode,
+                source_kind: Some(ReasoningSourceKind::Thinking),
+                text,
+            }],
+        };
+        let report = redact_turns_with_report(std::slice::from_mut(&mut turn));
+        assert_eq!(
+            report.match_count(),
+            0,
+            "the source snapshot already redacted the visible field"
+        );
+        let projection = safe_turn_projection("claude_code", &turn);
+        assert_eq!(projection["records"][0]["type"], "reasoning");
+        assert!(!projection.to_string().contains(secret));
+    }
+
+    #[tokio::test]
+    #[serial(env)]
+    async fn reasoning_missing_proof_preserves_partial() {
+        use crate::internal::ai::{
+            capture::live_checkpoint::{
+                attach_subagent_snapshot_metadata, snapshot_subagent_sources_for_extraction,
+            },
+            observed_agents::{
+                live_capture::scoped_test_snapshot_adapter,
+                reasoning::carrier_test_support as fixture,
+            },
+        };
+        crate::internal::ai::capture::live_checkpoint::tests::assert_no_deadline_reasoning_handoff(
+        )
+        .await;
+        let bytes = [b"ordinary ".as_slice(), fixture::CANARY].concat();
+        for adapter in [&fixture::STRIP, &fixture::MALFORMED] {
+            let snapshot = carrier_test_snapshot(adapter, bytes.clone());
+            assert_eq!(
+                snapshot.partial_reason(),
+                Some(CaptureSnapshotPartialReason::SourceAuthorizationMismatch)
+            );
+            assert!(snapshot.try_into_ordinary().is_err());
+            let _selected = scoped_test_snapshot_adapter(AgentKind::ClaudeCode, adapter);
+            let public = CaptureSnapshotService::capture_authorized(
+                TranscriptSource::Bytes {
+                    auth: ExportAuthorized::issue("claude_code", fixture::CAPTURE, &bytes),
+                    bytes: bytes.clone(),
+                },
+                "claude_code",
+                fixture::CAPTURE,
+                Default::default(),
+            );
+            assert_eq!(
+                public.partial_reason(),
+                Some(CaptureSnapshotPartialReason::SourceAuthorizationMismatch)
+            );
+            assert!(!public.reasoning.is_ordinary());
+            assert!(!matches!(
+                public.reasoning,
+                ReasoningSourceDisposition::NativeProven(_)
+            ));
+            assert!(public.try_into_ordinary().is_err());
+            let child = crate::internal::ai::subagent_content::DiscoveredSubagentContent::fixture(
+                "claude_code",
+                "synthetic-child-key",
+                &bytes,
+                None,
+            );
+            let snapshots = snapshot_subagent_sources_for_extraction(
+                vec![child],
+                fixture::CAPTURE,
+                Default::default(),
+            );
+            assert!(snapshots.transcripts.is_empty());
+            assert_eq!(snapshots.partial_source_count(), 1);
+            let mut metadata = serde_json::json!({});
+            attach_subagent_snapshot_metadata(&mut metadata, &snapshots);
+            assert_eq!(
+                metadata["subagent_snapshot"]["partial_reasons"],
+                serde_json::json!(["source_authorization_mismatch"])
+            );
+            assert_eq!(metadata["subagent_snapshot"]["partial_source_count"], 1);
+            assert_eq!(metadata["subagent_snapshot"]["complete_source_count"], 0);
+            assert!(
+                !metadata
+                    .to_string()
+                    .contains(std::str::from_utf8(fixture::CANARY).unwrap())
+            );
+        }
+        let snapshot = carrier_test_snapshot(&fixture::NONE, b"old ordinary".to_vec());
+        assert!(snapshot.try_into_ordinary().is_ok());
+        // A valid native test-only witness cannot supply a missing source
+        // association. The public legacy wrapper retains an owning partial.
+        let _selected = scoped_test_snapshot_adapter(AgentKind::ClaudeCode, &fixture::NATIVE);
+        let snapshot = CaptureSnapshotService::capture_authorized(
+            TranscriptSource::Bytes {
+                auth: ExportAuthorized::issue("claude_code", fixture::CAPTURE, &bytes),
+                bytes,
+            },
+            "claude_code",
+            fixture::CAPTURE,
+            Default::default(),
+        );
+        assert!(matches!(
+            snapshot.reasoning,
+            ReasoningSourceDisposition::Unmapped
+        ));
+        assert!(snapshot.try_into_ordinary().is_err());
+    }
+
+    #[test]
+    fn reasoning_carrier_artifact_bytes_are_bounded() {
+        use crate::internal::ai::observed_agents::reasoning::carrier_test_support as fixture;
+        let snapshot = carrier_test_snapshot(&fixture::OVERSIZE, b"ordinary".to_vec());
+        assert_eq!(
+            snapshot.partial_reason(),
+            Some(CaptureSnapshotPartialReason::SourceAuthorizationMismatch)
+        );
+        assert!(snapshot.transcript().is_none());
+        assert!(snapshot.try_into_ordinary().is_err());
+        let control = carrier_test_snapshot(&fixture::NATIVE, b"ordinary".to_vec());
+        assert!(matches!(
+            control.reasoning,
+            ReasoningSourceDisposition::NativeProven(_)
+        ));
+    }
+
+    #[test]
+    fn reasoning_carrier_artifact_count_is_bounded() {
+        use crate::internal::ai::observed_agents::reasoning::carrier_test_support as fixture;
+        let snapshot = carrier_test_snapshot(&fixture::TOO_MANY, b"ordinary".to_vec());
+        assert_eq!(
+            snapshot.partial_reason(),
+            Some(CaptureSnapshotPartialReason::SourceAuthorizationMismatch)
+        );
+        assert!(snapshot.transcript().is_none());
+        assert!(snapshot.try_into_ordinary().is_err());
     }
 }

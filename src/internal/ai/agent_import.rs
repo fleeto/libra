@@ -405,6 +405,7 @@ trait ImportSnapshotPort {
         source: TranscriptSource,
         agent_kind: &str,
         libra_session_id: &str,
+        selected_provider_session_id: &str,
         policy: CaptureSnapshotPolicy,
     ) -> CaptureSnapshot;
 }
@@ -415,9 +416,27 @@ impl ImportSnapshotPort for CaptureSnapshotService {
         source: TranscriptSource,
         agent_kind: &str,
         libra_session_id: &str,
+        selected_provider_session_id: &str,
         policy: CaptureSnapshotPolicy,
     ) -> CaptureSnapshot {
-        CaptureSnapshotService::capture_authorized(source, agent_kind, libra_session_id, policy)
+        let Some(kind) = AgentKind::from_db_str(agent_kind) else {
+            return CaptureSnapshotService::capture_authorized(
+                source,
+                agent_kind,
+                libra_session_id,
+                policy,
+            );
+        };
+        let canonical_session =
+            build_ai_session_id(capture_provider_name(kind), selected_provider_session_id);
+        CaptureSnapshotService::capture_authorized_with_reasoning_context(
+            source,
+            crate::internal::ai::observed_agents::live_capture::selected_snapshot_adapter(kind),
+            crate::internal::ai::capture::snapshot::AuthorizedReasoningSourceContext::verified_import(
+                agent_kind, libra_session_id, &canonical_session, selected_provider_session_id,
+            ),
+            policy,
+        )
     }
 }
 
@@ -443,10 +462,16 @@ impl<S: ImportSnapshotPort> ImportCaptureServices<S> {
         source: TranscriptSource,
         agent_kind: &str,
         libra_session_id: &str,
+        selected_provider_session_id: &str,
         policy: CaptureSnapshotPolicy,
     ) -> CaptureSnapshot {
-        self.snapshot
-            .capture_authorized(source, agent_kind, libra_session_id, policy)
+        self.snapshot.capture_authorized(
+            source,
+            agent_kind,
+            libra_session_id,
+            selected_provider_session_id,
+            policy,
+        )
     }
 }
 
@@ -1422,12 +1447,14 @@ pub fn prepare_import_request(
         },
         agent_kind.as_db_str(),
         &provisional_session_id,
+        selected_provider_session_id,
         CaptureSnapshotPolicy::with_deadline(Some(deadline)),
     );
     let transcript_snapshot = snapshot.safe_projection();
     let snapshot_redaction_report = snapshot.redaction_report().clone();
     let transcript = snapshot
-        .into_redacted_transcript()
+        .try_into_ordinary()
+        .map_err(|_owned_rejection| ImportError::SourceAuthorization)?
         .ok_or_else(|| snapshot_failure_for_import(&transcript_snapshot))?;
     ensure_before_deadline(deadline)?;
     let mut turns = match agent_kind {
@@ -1558,12 +1585,14 @@ pub(crate) fn prepare_import_projection(
         },
         agent_kind.as_db_str(),
         &provisional_session_id,
+        provider_session_id,
         CaptureSnapshotPolicy::with_deadline(Some(deadline)),
     );
     let transcript_snapshot = snapshot.safe_projection();
     let snapshot_redaction_report = snapshot.redaction_report().clone();
     let transcript = snapshot
-        .into_redacted_transcript()
+        .try_into_ordinary()
+        .map_err(|_owned_rejection| ImportError::SourceAuthorization)?
         .ok_or_else(|| snapshot_failure_for_import(&transcript_snapshot))?;
     ensure_before_deadline(deadline)?;
     let mut turns = match agent_kind {
@@ -7389,5 +7418,95 @@ mod tests {
             0,
             "legacy V1 request must not create import recovery metadata"
         );
+    }
+    #[tokio::test]
+    #[serial_test::serial(cwd, env)]
+    async fn reasoning_unready_import_returns_owned_rejection() {
+        use crate::internal::ai::observed_agents::{
+            live_capture::scoped_test_snapshot_adapter, reasoning::carrier_test_support as fixture,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        crate::utils::test::setup_with_new_libra_in(dir.path()).await;
+        let root = dir.path().canonicalize().unwrap();
+        let storage = root.join(".libra").canonicalize().unwrap();
+        let bytes = |content: &str| {
+            let value = serde_json::json!({"type":"user", "uuid":"user-og16", "sessionId":fixture::SOURCE,
+                "cwd":root, "message":{"role":"user","content":content}});
+            [serde_json::to_vec(&value).unwrap(), vec![b'\n']].concat()
+        };
+        for adapter in [
+            &fixture::NATIVE,
+            &fixture::STRIP,
+            &fixture::UNMAPPED,
+            &fixture::HELPER,
+        ] {
+            let snapshot = crate::internal::ai::capture::snapshot::carrier_test_snapshot(
+                adapter,
+                fixture::CANARY.to_vec(),
+            );
+            let owning = snapshot
+                .try_into_ordinary()
+                .expect_err("unready consumer must retain the carrier");
+            assert!(owning.rejects_ordinary_source_consumer());
+            let _selected = scoped_test_snapshot_adapter(AgentKind::ClaudeCode, adapter);
+            let source = bytes(std::str::from_utf8(fixture::CANARY).unwrap());
+            let error = prepare_import_request(
+                AgentKind::ClaudeCode,
+                fixture::SOURCE,
+                "claude_file",
+                "synthetic-source",
+                AuthorizedImportContent {
+                    bytes: source.clone(),
+                    provisional_session_id: fixture::CAPTURE.to_owned(),
+                },
+                ImportPreparationContext {
+                    current_repo_root: &root,
+                    current_storage_root: &storage,
+                    deadline: Instant::now() + Duration::from_secs(10),
+                },
+            )
+            .unwrap_err();
+            assert!(matches!(
+                error.downcast_ref::<ImportError>(),
+                Some(ImportError::SourceAuthorization)
+            ));
+            let error = prepare_import_projection(
+                AgentKind::ClaudeCode,
+                import_provider_commitment(fixture::SOURCE),
+                source,
+                Instant::now() + Duration::from_secs(10),
+            )
+            .unwrap_err();
+            assert!(matches!(
+                error.downcast_ref::<ImportError>(),
+                Some(ImportError::SourceAuthorization)
+            ));
+            assert!(!format!("{error:#}").contains(std::str::from_utf8(fixture::CANARY).unwrap()));
+        }
+        let _selected = scoped_test_snapshot_adapter(AgentKind::ClaudeCode, &fixture::NONE);
+        let ordinary = bytes("ordinary compatible message");
+        prepare_import_request(
+            AgentKind::ClaudeCode,
+            fixture::SOURCE,
+            "claude_file",
+            "synthetic-source",
+            AuthorizedImportContent {
+                bytes: ordinary.clone(),
+                provisional_session_id: fixture::CAPTURE.to_owned(),
+            },
+            ImportPreparationContext {
+                current_repo_root: &root,
+                current_storage_root: &storage,
+                deadline: Instant::now() + Duration::from_secs(10),
+            },
+        )
+        .expect("old ordinary import remains usable");
+        prepare_import_projection(
+            AgentKind::ClaudeCode,
+            import_provider_commitment(fixture::SOURCE),
+            ordinary,
+            Instant::now() + Duration::from_secs(10),
+        )
+        .expect("old ordinary helper projection remains usable");
     }
 }

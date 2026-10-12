@@ -8,6 +8,7 @@
 //! provider names and ref names.
 
 use std::{
+    fmt,
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
@@ -27,7 +28,13 @@ use crate::internal::ai::{
     },
     capture_scope::{CaptureCommitDeadline, CaptureScope},
     history::{CheckpointAppendConflict, CheckpointCompanionTransactionFailed},
-    observed_agents::RedactedBytes,
+    observed_agents::{
+        RedactedBytes,
+        reasoning::{
+            BoundIdentityInputRef, NativeProvenReasoning, ReasoningSourceDisposition,
+            ReasoningSourceState, VerifiedCaptureBinding, borrow_native_identity_bindings,
+        },
+    },
     traces::{
         self, CheckpointCommitParams, CheckpointScope, TracesCommitCtx, TracesCoverageFence,
         TracesInflightMarker, TracesTxnExtra,
@@ -403,7 +410,6 @@ pub(crate) fn checkpoint_id_for_capture_action(
 ///
 /// Construction consumes a complete [`CaptureSnapshot`], so a caller cannot
 /// accidentally pass arbitrary raw source bytes to the durable trace sink.
-#[derive(Debug)]
 pub struct CheckpointRedactedPayload {
     transcript: RedactedBytes,
     snapshot: CaptureSnapshotProjection,
@@ -411,6 +417,7 @@ pub struct CheckpointRedactedPayload {
     metadata_json: RedactedBytes,
     lifecycle_events_jsonl: RedactedBytes,
     redaction_report_json: RedactedBytes,
+    reasoning: ReasoningSourceDisposition,
 }
 
 /// What the redacted transcript blob represents relative to its safe source
@@ -464,6 +471,84 @@ impl<'a> AuthenticatedPendingEnvelope<'a> {
     }
 }
 
+impl fmt::Debug for CheckpointRedactedPayload {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CheckpointRedactedPayload")
+            .field("transcript_bytes", &self.transcript.len())
+            .field("complete", &self.is_exact_complete_snapshot())
+            .field("reasoning_ordinary", &self.reasoning.is_ordinary())
+            .finish_non_exhaustive()
+    }
+}
+
+fn validate_reasoning_capture_binding(
+    batch: &NativeProvenReasoning,
+    capture_session: &str,
+    provider: &str,
+) -> Result<VerifiedCaptureBinding, CheckpointStoreError> {
+    VerifiedCaptureBinding::from_validated_capture_context(batch, capture_session, provider)
+        .map_err(|_| CheckpointStoreError::InvalidRequest {
+            field: "reasoning capture binding".to_owned(),
+        })
+}
+
+/// The only lower native-identity borrower. Later coverage/import adapters
+/// consume metadata views without gaining native mint or payload authority.
+#[allow(dead_code)] // OG-19/20 consume this deliberately closed preparatory port.
+pub(crate) fn prepare_reasoning_identity_inputs<'a>(
+    payload: &'a CheckpointRedactedPayload,
+    capture_session: &str,
+    provider: &str,
+) -> Result<Vec<BoundIdentityInputRef<'a>>, CheckpointStoreError> {
+    match &payload.reasoning {
+        ReasoningSourceDisposition::Ordinary => Ok(Vec::new()),
+        ReasoningSourceDisposition::NativeProven(batch) => {
+            let binding = validate_reasoning_capture_binding(batch, capture_session, provider)?;
+            borrow_native_identity_bindings(batch, &binding).map_err(|_| {
+                CheckpointStoreError::InvalidRequest {
+                    field: "reasoning capture binding".to_owned(),
+                }
+            })
+        }
+        _ => Err(CheckpointStoreError::InvalidRequest {
+            field: "reasoning source preparation".to_owned(),
+        }),
+    }
+}
+
+pub(crate) fn reasoning_source_disposition(
+    payload: &CheckpointRedactedPayload,
+) -> ReasoningSourceState {
+    payload.reasoning.state()
+}
+
+fn prepare_reasoning_artifact_params<'a>(
+    payload: &'a CheckpointRedactedPayload,
+    capture_session: &str,
+    provider: &str,
+) -> Result<&'a [traces::ReasoningArtifactParam], CheckpointStoreError> {
+    match reasoning_source_disposition(payload) {
+        ReasoningSourceState::Ordinary => Ok(&[]),
+        ReasoningSourceState::NativeProven => {
+            let ReasoningSourceDisposition::NativeProven(batch) = &payload.reasoning else {
+                return Err(CheckpointStoreError::InvalidRequest {
+                    field: "reasoning source preparation".to_owned(),
+                });
+            };
+            let binding = validate_reasoning_capture_binding(batch, capture_session, provider)?;
+            batch
+                .artifact_params(&binding)
+                .map_err(|_| CheckpointStoreError::InvalidRequest {
+                    field: "reasoning capture binding".to_owned(),
+                })
+        }
+        _ => Err(CheckpointStoreError::InvalidRequest {
+            field: "reasoning source preparation".to_owned(),
+        }),
+    }
+}
+
 impl CheckpointRedactedPayload {
     /// Turn a complete snapshot and already-redacted sidecars into a sealed
     /// persistence payload.  Partial snapshots must be handled by the
@@ -476,18 +561,17 @@ impl CheckpointRedactedPayload {
         lifecycle_events_jsonl: RedactedBytes,
         redaction_report_json: RedactedBytes,
     ) -> Result<Self, CheckpointStoreError> {
-        let projection = snapshot.safe_projection();
-        let transcript = snapshot.into_redacted_transcript().ok_or(
-            CheckpointStoreError::IncompleteSnapshot {
-                reason: projection
-                    .partial_reason
-                    .map(|reason| format!("{reason:?}"))
-                    .unwrap_or_else(|| "missing redacted transcript".to_string()),
-            },
-        )?;
+        let (projection, transcript, reasoning) = snapshot.into_checkpoint_parts();
+        let transcript = transcript.ok_or(CheckpointStoreError::IncompleteSnapshot {
+            reason: projection
+                .partial_reason
+                .map(|reason| format!("{reason:?}"))
+                .unwrap_or_else(|| "missing redacted transcript".to_string()),
+        })?;
         Ok(Self {
             transcript,
             snapshot: projection,
+            reasoning,
             provenance: CheckpointPayloadProvenance::ExactSnapshot,
             metadata_json,
             lifecycle_events_jsonl,
@@ -547,6 +631,7 @@ impl CheckpointRedactedPayload {
             transcript,
             snapshot,
             provenance,
+            reasoning: ReasoningSourceDisposition::Ordinary,
             metadata_json,
             lifecycle_events_jsonl,
             redaction_report_json,
@@ -581,6 +666,7 @@ impl CheckpointRedactedPayload {
         Ok(Self {
             transcript,
             snapshot: source_snapshot,
+            reasoning: ReasoningSourceDisposition::Ordinary,
             provenance: CheckpointPayloadProvenance::DerivedTurnProjection,
             metadata_json,
             lifecycle_events_jsonl,
@@ -592,6 +678,18 @@ impl CheckpointRedactedPayload {
     /// transcript content.
     pub fn snapshot(&self) -> &CaptureSnapshotProjection {
         &self.snapshot
+    }
+
+    /// Pending V1 carries only ordinary redacted content. Refuse before
+    /// sealing or MAC writes; the caller still owns this immutable payload.
+    pub(crate) fn authorize_ordinary_pending_payload(&self) -> Result<(), CheckpointStoreError> {
+        if self.reasoning.is_ordinary() {
+            Ok(())
+        } else {
+            Err(CheckpointStoreError::InvalidRequest {
+                field: "reasoning pending consumer".to_owned(),
+            })
+        }
     }
 
     pub(crate) fn is_exact_complete_snapshot(&self) -> bool {
@@ -670,6 +768,7 @@ impl<'a> CheckpointWriteRequest<'a> {
                 });
             }
         }
+        prepare_reasoning_artifact_params(payload, session_id, agent_kind)?;
         Ok(Self {
             replay_key,
             checkpoint_id,
@@ -1919,9 +2018,13 @@ impl<'a> TracesCheckpointStore<'a> {
     fn append_params<'request>(
         &'request self,
         request: &'request CheckpointWriteRequest<'request>,
-    ) -> CheckpointCommitParams<'request> {
-        CheckpointCommitParams {
-            reasoning_artifacts: &[],
+    ) -> Result<CheckpointCommitParams<'request>, CheckpointStoreError> {
+        Ok(CheckpointCommitParams {
+            reasoning_artifacts: prepare_reasoning_artifact_params(
+                request.payload(),
+                request.session_id(),
+                request.agent_kind(),
+            )?,
             checkpoint_id: request.checkpoint_id(),
             session_id: request.session_id(),
             marker_generation: &self.marker_generation,
@@ -1936,7 +2039,7 @@ impl<'a> TracesCheckpointStore<'a> {
             redaction_report_json: request.payload().redaction_report_json(),
             txn_extra: request.txn_extra(),
             deadline: request.deadline(),
-        }
+        })
     }
 
     /// Classify a failed append from its typed causes alone. Display text is
@@ -2159,7 +2262,7 @@ impl CheckpointStore for TracesCheckpointStore<'_> {
         let manager = test_support::with_history_fault(manager);
         #[cfg(test)]
         let companion_fault = test_support::companion_fault(request.txn_extra());
-        let params = self.append_params(&request);
+        let params = self.append_params(&request)?;
         #[cfg(test)]
         let params = test_support::with_companion_fault(params, companion_fault.as_ref());
         let written = match manager.append_checkpoint_commit(params).await {
@@ -2316,6 +2419,7 @@ mod tests {
     use std::time::Duration;
 
     use sea_orm::{ConnectionTrait, Database, Statement};
+    use sha2::Digest;
 
     use super::*;
     use crate::internal::ai::{
@@ -2325,10 +2429,10 @@ mod tests {
 
     fn snapshot() -> CaptureSnapshot {
         let bytes = b"checkpoint secret AKIAABCDEFGHIJKLMNOP".to_vec();
-        let auth = ExportAuthorized::issue("agent", "session", &bytes);
+        let auth = ExportAuthorized::issue("claude_code", "session", &bytes);
         CaptureSnapshotService::capture_authorized(
             TranscriptSource::Bytes { bytes, auth },
-            "agent",
+            "claude_code",
             "session",
             Default::default(),
         )
@@ -3919,6 +4023,434 @@ mod tests {
         assert!(
             !rendered.contains("native-session-material"),
             "catalog mutation Debug leaked the session ID: {rendered}"
+        );
+    }
+    fn carrier_payload(
+        adapter: &dyn crate::internal::ai::observed_agents::ObservedAgent,
+    ) -> CheckpointRedactedPayload {
+        use crate::internal::ai::observed_agents::reasoning::carrier_test_support as fixture;
+        let bytes = [b"ordinary ".as_slice(), fixture::CANARY].concat();
+        CheckpointRedactedPayload::from_snapshot(
+            crate::internal::ai::capture::snapshot::carrier_test_snapshot(adapter, bytes),
+            sidecar(br#"{"created_at":1}"#),
+            sidecar(b"{}\n"),
+            sidecar(b"{}"),
+        )
+        .expect("synthetic fixture owns its sanitized component")
+    }
+
+    #[tokio::test]
+    async fn reasoning_none_store_bytes_unchanged() {
+        let fixture = store_replay_fixture().await;
+        fixture
+            .write()
+            .await
+            .expect("ordinary incumbent store path");
+        assert_eq!(fixture.checkpoint_rows().await, 1);
+        let payload = CheckpointRedactedPayload::from_snapshot(
+            snapshot(),
+            sidecar(b"{}"),
+            sidecar(b"{}\n"),
+            sidecar(b"{}"),
+        )
+        .unwrap();
+        assert_eq!(
+            payload.transcript().bytes(),
+            sidecar(b"checkpoint secret AKIAABCDEFGHIJKLMNOP").bytes()
+        );
+        assert!(
+            prepare_reasoning_artifact_params(&payload, REPLAY_SESSION, "claude_code")
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn reasoning_candidate_absent_from_ordinary_sink() {
+        use crate::internal::ai::observed_agents::reasoning::carrier_test_support as fixture;
+        let payload = carrier_payload(&fixture::NATIVE);
+        assert_eq!(payload.transcript().bytes(), b"ordinary ");
+        assert!(
+            !String::from_utf8_lossy(payload.metadata_json().bytes())
+                .contains(std::str::from_utf8(fixture::CANARY).unwrap())
+        );
+        let artifacts =
+            prepare_reasoning_artifact_params(&payload, fixture::CAPTURE, "claude_code").unwrap();
+        assert_eq!(artifacts[0].bytes.as_bytes(), fixture::CANARY);
+    }
+
+    #[tokio::test]
+    async fn typed_reasoning_live_carrier_reaches_shared_store() {
+        use crate::internal::ai::observed_agents::reasoning::carrier_test_support as native;
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().to_path_buf();
+        let conn = crate::internal::db::create_database(
+            repo.join(crate::utils::util::DATABASE).to_str().unwrap(),
+        )
+        .await
+        .unwrap();
+        crate::internal::workspace::RepoIdentity::resolve_or_init(&conn)
+            .await
+            .unwrap();
+        let scope = CaptureScope::main_for_connection(&conn).await.unwrap();
+        conn.execute_raw(Statement::from_sql_and_values(conn.get_database_backend(),
+            "INSERT INTO agent_session (session_id, agent_kind, provider_session_id, state, working_dir,
+             metadata_json, started_at, last_event_at, sync_revision, repo_id, worktree_id, scope_state)
+             VALUES (?, 'claude_code', ?, 'active', ?, '{}', 1, 1, 1, ?, '', 'scoped')",
+            [native::CAPTURE.into(), native::SOURCE.into(), repo.to_string_lossy().into_owned().into(), scope.repo_id.clone().into()])).await.unwrap();
+        let fixture = StoreReplayFixture {
+            _dir: dir,
+            repo,
+            conn,
+        };
+        let payload = carrier_payload(&native::NATIVE);
+        let store = TracesCheckpointStore::new(
+            &fixture.conn,
+            &fixture.repo,
+            native::CAPTURE,
+            REPLAY_CHECKPOINT,
+            &[],
+        )
+        .unwrap()
+        .with_capture_scope(scope);
+        let companion = CatalogCompanion(
+            CheckpointCatalogMutation::new(
+                REPLAY_CHECKPOINT,
+                native::CAPTURE,
+                CheckpointScope::Committed,
+                None,
+                1,
+            )
+            .unwrap(),
+        );
+        let request = CheckpointWriteRequest::new(
+            "og16-native-key",
+            REPLAY_CHECKPOINT,
+            native::CAPTURE,
+            "claude_code",
+            None,
+            CheckpointScope::Committed,
+            store.marker_generation(),
+            None,
+            &payload,
+            Some(&companion),
+            None,
+        )
+        .unwrap();
+        let params = store.append_params(&request).unwrap();
+        assert_eq!(params.reasoning_artifacts.len(), 2);
+        assert_eq!(
+            params.reasoning_artifacts[0].bytes.as_bytes(),
+            native::CANARY
+        );
+        assert_eq!(
+            params.reasoning_artifacts[1].bytes.as_bytes(),
+            b"second-opaque-wire"
+        );
+        assert_eq!(
+            params.reasoning_artifacts[0].locator,
+            "claude_code:msg=0/part=0/metadata=signature"
+        );
+        assert_eq!(
+            params.reasoning_artifacts[1].locator,
+            "claude_code:msg=0/part=1/metadata=signature"
+        );
+        assert!(matches!(
+            store.write(request).await.unwrap(),
+            CheckpointWriteOutcome::Written { .. }
+        ));
+        let tree_oid: String = fixture
+            .conn
+            .query_one_raw(Statement::from_sql_and_values(
+                fixture.conn.get_database_backend(),
+                "SELECT tree_oid FROM agent_checkpoint WHERE checkpoint_id = ?",
+                [REPLAY_CHECKPOINT.into()],
+            ))
+            .await
+            .unwrap()
+            .unwrap()
+            .try_get_by("tree_oid")
+            .unwrap();
+        let proofs = crate::internal::ai::history::checkpoint_reasoning_artifact_proofs(
+            &fixture.repo,
+            &[
+                crate::internal::ai::history::ReasoningArtifactCheckpointSpec {
+                    checkpoint_id: REPLAY_CHECKPOINT.to_owned(),
+                    tree_oid,
+                },
+            ],
+            Instant::now() + Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+        let artifacts = proofs[0].artifacts.as_ref().unwrap();
+        assert_eq!(artifacts.len(), 2);
+        let bytes = artifacts
+            .iter()
+            .map(|proof| {
+                let oid = proof.oid.parse().unwrap();
+                crate::utils::object::read_git_object(&fixture.repo, &oid).unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert!(bytes.contains(&native::CANARY.to_vec()));
+        assert!(bytes.contains(&b"second-opaque-wire".to_vec()));
+    }
+
+    #[test]
+    fn native_reasoning_proof_is_bound_to_actual_capture_context() {
+        use crate::internal::ai::observed_agents::reasoning::carrier_test_support as fixture;
+        let payload = carrier_payload(&fixture::NATIVE);
+        assert!(
+            prepare_reasoning_identity_inputs(&payload, "wrong-capture", "claude_code").is_err()
+        );
+        assert!(prepare_reasoning_identity_inputs(&payload, fixture::CAPTURE, "opencode").is_err());
+        let views =
+            prepare_reasoning_identity_inputs(&payload, fixture::CAPTURE, "claude_code").unwrap();
+        assert_eq!(views.len(), 2);
+        assert_eq!(views[0].logical_turn(), "synthetic-turn-0");
+        assert_eq!(views[1].logical_turn(), "synthetic-turn-0");
+        assert_eq!(views[0].issuer_tag(), "synthetic-test-only-v1");
+        assert_eq!(
+            *views[0].original_wire_sha256(),
+            <[u8; 32]>::from(sha2::Sha256::digest(fixture::CANARY))
+        );
+        assert_ne!(
+            views[0].source_binding_sha256(),
+            views[1].source_binding_sha256()
+        );
+        assert_eq!(
+            views[0].original_wire_sha256(),
+            &<[u8; 32]>::from(sha2::Sha256::digest(
+                prepare_reasoning_artifact_params(&payload, fixture::CAPTURE, "claude_code")
+                    .unwrap()[0]
+                    .bytes
+                    .as_bytes()
+            ))
+        );
+    }
+
+    #[tokio::test]
+    async fn native_reasoning_wrong_legal_locator_fails_before_writes() {
+        use crate::internal::ai::observed_agents::reasoning::carrier_test_support as native;
+        let fixture = store_replay_fixture().await;
+        let mut payload = carrier_payload(&native::NATIVE);
+        native::tamper_carrier_locator(&mut payload.reasoning);
+        assert!(
+            crate::internal::ai::observed_agents::reasoning::artifact_locator_is_valid(
+                crate::internal::ai::observed_agents::reasoning::ReasoningProvider::ClaudeCode,
+                Some(
+                    crate::internal::ai::observed_agents::reasoning::ReasoningSourceKind::Signature
+                ),
+                "claude_code:msg=0/part=100/metadata=signature"
+            )
+        );
+        let store = TracesCheckpointStore::new(
+            &fixture.conn,
+            &fixture.repo,
+            native::CAPTURE,
+            REPLAY_CHECKPOINT,
+            &[],
+        )
+        .unwrap();
+        assert!(
+            CheckpointWriteRequest::new(
+                "og16-native-key",
+                REPLAY_CHECKPOINT,
+                native::CAPTURE,
+                "claude_code",
+                None,
+                CheckpointScope::Committed,
+                store.marker_generation(),
+                None,
+                &payload,
+                None,
+                None
+            )
+            .is_err()
+        );
+        assert_eq!(fixture.checkpoint_rows().await, 0);
+        assert!(fixture.traces_head().await.is_none());
+        assert!(fixture.marker().await.is_none());
+        assert!(!fixture.repo.join("objects").exists());
+    }
+
+    #[test]
+    fn reasoning_payload_debug_hides_native_coordinates_and_bytes() {
+        use crate::internal::ai::observed_agents::reasoning::carrier_test_support as fixture;
+        let payload = carrier_payload(&fixture::NATIVE);
+        let debug = format!("{payload:?}");
+        for forbidden in [
+            fixture::CAPTURE,
+            fixture::SOURCE,
+            "synthetic-turn-0",
+            "metadata=signature",
+            std::str::from_utf8(fixture::CANARY).unwrap(),
+            "second-opaque-wire",
+        ] {
+            assert!(!debug.contains(forbidden), "Debug must be content-free");
+        }
+    }
+
+    #[tokio::test]
+    async fn reasoning_carrier_disabled_archive_keeps_safe_sinks() {
+        use crate::internal::ai::observed_agents::reasoning::carrier_test_support as native;
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().to_path_buf();
+        let conn = crate::internal::db::create_database(
+            repo.join(crate::utils::util::DATABASE).to_str().unwrap(),
+        )
+        .await
+        .unwrap();
+        crate::internal::workspace::RepoIdentity::resolve_or_init(&conn)
+            .await
+            .unwrap();
+        let scope = CaptureScope::main_for_connection(&conn).await.unwrap();
+        conn.execute_raw(Statement::from_sql_and_values(conn.get_database_backend(),
+            "INSERT INTO agent_session (session_id, agent_kind, provider_session_id, state, working_dir,
+             metadata_json, started_at, last_event_at, sync_revision, repo_id, worktree_id, scope_state)
+             VALUES (?, 'claude_code', ?, 'active', ?, '{}', 1, 1, 1, ?, '', 'scoped')",
+            [native::CAPTURE.into(), native::SOURCE.into(), repo.to_string_lossy().into_owned().into(), scope.repo_id.clone().into()])).await.unwrap();
+        let fixture = StoreReplayFixture {
+            _dir: dir,
+            repo,
+            conn,
+        };
+        let before = carrier_payload(&native::NATIVE);
+        let store = TracesCheckpointStore::new(
+            &fixture.conn,
+            &fixture.repo,
+            native::CAPTURE,
+            REPLAY_CHECKPOINT,
+            &[],
+        )
+        .unwrap()
+        .with_capture_scope(scope);
+        let companion = CatalogCompanion(
+            CheckpointCatalogMutation::new(
+                REPLAY_CHECKPOINT,
+                native::CAPTURE,
+                CheckpointScope::Committed,
+                None,
+                1,
+            )
+            .unwrap(),
+        );
+        let request = CheckpointWriteRequest::new(
+            "og16-retained-native-key",
+            REPLAY_CHECKPOINT,
+            native::CAPTURE,
+            "claude_code",
+            None,
+            CheckpointScope::Committed,
+            store.marker_generation(),
+            None,
+            &before,
+            Some(&companion),
+            None,
+        )
+        .unwrap();
+        assert!(matches!(
+            store.write(request).await.unwrap(),
+            CheckpointWriteOutcome::Written { .. }
+        ));
+        let committed = fixture.catalog_commit().await;
+        let tree_oid: String = fixture
+            .conn
+            .query_one_raw(Statement::from_sql_and_values(
+                fixture.conn.get_database_backend(),
+                "SELECT tree_oid FROM agent_checkpoint WHERE checkpoint_id = ?",
+                [REPLAY_CHECKPOINT.into()],
+            ))
+            .await
+            .unwrap()
+            .unwrap()
+            .try_get_by("tree_oid")
+            .unwrap();
+        let spec = [
+            crate::internal::ai::history::ReasoningArtifactCheckpointSpec {
+                checkpoint_id: REPLAY_CHECKPOINT.to_owned(),
+                tree_oid,
+            },
+        ];
+        let stored = crate::internal::ai::history::checkpoint_reasoning_artifact_proofs(
+            &fixture.repo,
+            &spec,
+            Instant::now() + Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+        let original = stored[0].artifacts.as_ref().unwrap();
+        assert_eq!(original.len(), 2);
+        let original_objects = original
+            .iter()
+            .map(|proof| {
+                let oid = proof.oid.parse().unwrap();
+                (
+                    proof.oid.clone(),
+                    crate::utils::object::read_git_object(&fixture.repo, &oid).unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            original_objects
+                .iter()
+                .any(|(_, bytes)| bytes.as_slice() == native::CANARY)
+        );
+        assert!(
+            original_objects
+                .iter()
+                .any(|(_, bytes)| bytes.as_slice() == b"second-opaque-wire")
+        );
+
+        // Stop admission while retaining the detector. Refusal must neither
+        // publish an ordinary fallback nor mutate the prior stored artifacts.
+        let disabled = carrier_payload(&native::STRIP);
+        assert!(disabled.authorize_ordinary_pending_payload().is_err());
+        assert_eq!(disabled.transcript().bytes(), b"ordinary ");
+        assert!(
+            prepare_reasoning_artifact_params(&disabled, native::CAPTURE, "claude_code").is_err()
+        );
+        assert!(
+            CheckpointWriteRequest::new(
+                "og16-retained-native-key",
+                REPLAY_CHECKPOINT,
+                native::CAPTURE,
+                "claude_code",
+                None,
+                CheckpointScope::Committed,
+                store.marker_generation(),
+                None,
+                &disabled,
+                Some(&companion),
+                None,
+            )
+            .is_err()
+        );
+        assert_eq!(fixture.catalog_commit().await, committed);
+        assert_eq!(fixture.checkpoint_rows().await, 1);
+        let retained = crate::internal::ai::history::checkpoint_reasoning_artifact_proofs(
+            &fixture.repo,
+            &spec,
+            Instant::now() + Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+        let retained_objects = retained[0]
+            .artifacts
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|proof| {
+                let oid = proof.oid.parse().unwrap();
+                (
+                    proof.oid.clone(),
+                    crate::utils::object::read_git_object(&fixture.repo, &oid).unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            retained_objects, original_objects,
+            "disabling admission must preserve persisted artifact OIDs and byte-exact readback"
         );
     }
 }

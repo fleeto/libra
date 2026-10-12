@@ -2714,3 +2714,14 @@ A proved own-kind terminal state remains cleanable when its matching manifest ha
 `libra cloud sync` 在 begin generation 前校验 manifest role、规范树、`object_index`、解码 `byte_len` 与完整 SHA-256；沿用上传修复，并以 bounded artifact readback 证明原字节。完成前校验凭据中的 checkpoint 树和 artifact 索引必须匹配最终 fenced generation。registered object helper 只传安全元数据，复用调用方绝对 deadline。
 
 会话擦除隐藏 artifact ref；`agent clean --gc` 与仓库 GC 回收不可达的本地对象。doctor 以只读 `inconsistent_reasoning_artifact` finding、规范 `checkpoint_id` 和 `manual_required=true` 标识不一致，不新增持久化 status 列。R2 物理 payload 删除仍延期；tombstone 清除云镜像目录行并阻止正常 restore 复活。非 quiet 的 `agent enable` 和 `agent import --yes` 披露 provider 已加密 reasoning 原字节可能不解密归档，并随 checkpoint 云镜像。合成 fixture 可见时为 `encrypted_unavailable`，擦除后无引用；不证明 native 来源、decryptor 或真实 provider 正例，OpenCode Source A 仍未获证明。
+
+
+### 授权 reasoning 源载体（OG-16）
+
+已选 registered adapter 的脱敏前预处理 capability 默认为 None。它只分流已授权、受限的内存源，不重开 provider 文件，不访问 checkpoint store。未启用或没有候选时，snapshot、live 和 store 的普通字节行为保持兼容。启用后，候选载荷在普通 Redactor 之前剥离；未证明来源或未映射候选保留不含载荷的 partial，即使零 artifact 也不能转换为普通 complete。
+
+sealed native carrier 将原始 opaque 字节和来源绑定证明一起移入共享 checkpoint payload。在 object/index 写入前验证 issuer、provider、source session、message、part、field、wire SHA-256 与已授权 capture/turn 关联。metadata-only identity adapter 不暴露载荷、不签发 native 权限；Debug 不含 native 坐标或载荷。source、artifact 字节与条目数量上限保持。
+
+authenticated reasoning import transport 就绪前，普通导入消费者对非 ordinary carrier 返回固定来源授权错误。普通 pending codec 在 envelope 写入前拒绝非 ordinary payload；live attempt 按既有 receipt、fence 和 lease 规则保持 uncommitted。已启用 Claude deadline-FD 路线时，在解析 source 前拒绝，不回退普通捕获。已有 Pending receipt 不尝试 wrapper failure 诊断；NotTracked 仅沿用既有有界诊断尝试，不推进 sync_revision。
+
+OG-16 不启用生产 provider capability，也不准入生产 native issuer。合成正例只证明载体机制；Source A 仍为 UNPROVEN，真实 OpenCode native 归档、私有导入传输及 durable reasoning replay 仍须通过后续门。本载体不增加解密能力或 public metadata enum 值。

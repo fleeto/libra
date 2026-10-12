@@ -1123,3 +1123,43 @@ fn rg03_controlled_artifact_read_docs_contract() {
         assert_contains(document, "RG03完整字节", "截断前缀不导出");
     }
 }
+
+#[test]
+fn authorized_reasoning_carrier_docs_preserve_partial_and_source_gates() {
+    for (label, document) in [
+        ("agent EN", AGENT_CMD_DOC_EN),
+        ("developer EN", AGENT_DEV_DOC),
+    ] {
+        for term in [
+            "disabled by default",
+            "partial with zero artifacts",
+            "before object or index writes",
+            "cannot expose payload bytes or mint native authority",
+            "before writing an envelope",
+            "does not advance sync_revision",
+            "Source A remains UNPROVEN",
+        ] {
+            assert_contains(document, label, term);
+        }
+    }
+    for (label, document) in [("agent ZH", AGENT_CMD_DOC_ZH), ("tracing", AGENT_DOC)] {
+        for term in [
+            "默认为 None",
+            "即使零 artifact",
+            "不暴露载荷、不签发 native 权限",
+            "envelope 写入前拒绝",
+            "不推进 sync_revision",
+            "Source A 仍为 UNPROVEN",
+        ] {
+            assert_contains(document, label, term);
+        }
+    }
+    for term in [
+        "zero-artifact partials",
+        "one sealed owner",
+        "Source A UNPROVEN",
+        "No new public metadata enum value",
+    ] {
+        assert_contains(COMPATIBILITY_DOC, "compatibility", term);
+    }
+}

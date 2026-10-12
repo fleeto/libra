@@ -1,7 +1,7 @@
 //! plan-20260713 M4 historical transcript import contract.
 
 use std::{
-    io::Write,
+    io::{Read, Write},
     path::{Path, PathBuf},
     process::{Command, Output, Stdio},
     str::FromStr,
@@ -25,6 +25,7 @@ use libra::{
 };
 use sea_orm::{ConnectionTrait, Database, Statement};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
 struct ImportRepo {
@@ -241,6 +242,391 @@ fn describe(output: &Output) -> String {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     )
+}
+
+/// Captured from the v0.30.46 descriptor helper at source commit
+/// 077e66f75a5bf4bb793b95f904c82017fa1f0e86 (before OG-20). Reproduce
+/// with that release's `libra --libra-internal-agent-import-preparation-descriptor-helper`,
+/// `LIBRA_INTERNAL_IMPORT_PREPARATION_DESCRIPTOR_CONTROL` from
+/// `empty_preparation_control`, and `empty_preparation_source` on stdin after
+/// `libra init` in `ImportRepo`. The pre-change binary returned status=ok,
+/// raw_bytes=699 in the recorded local fixture and the pinned content digest
+/// below. Only values derived from the temporary repo path and source bytes
+/// are substituted; field names, order, punctuation and fixed values are pinned.
+const LEGACY_EMPTY_PREPARATION_PROJECTION: &str = r#"{"content_digest":"284e1514b809c031303fd684e91a92715b906cb8c6619e1993a5d3dde2eb0473","started_at":1784077200,"ended_at":1784077202,"session_state":"stopped","stopped_at":1784077202,"storage_commitment":@STORAGE_COMMITMENT@,"redaction_report":{"bytes_redacted":0,"bytes_scanned":@TOTAL_SCANNED@,"matches":[],"pipeline":"typed_allowlist","raw_persisted":false,"snapshot_redaction":true},"transcript_snapshot":{"completeness":"complete","partial_reason":null,"source":{"kind":"trusted_export","identity":"not_retained:v1","digest_sha256":"sha256:@SOURCE_SHA256@","byte_len":@SOURCE_LEN@},"transcript_redacted_bytes":@SOURCE_LEN@,"redaction_match_count":0,"redaction_bytes_scanned":@SOURCE_LEN@,"redaction_bytes_redacted":0},"turn_boundaries":{"turn-1":{"started_at":1784077200,"ended_at":1784077201}},"turns":[{"logical_turn_key":"turn-1","ordinal":0,"completeness":"complete","started_at":1784077200,"ended_at":1784077201,"records":[{"kind":"user","text":"inspect the repo"},{"kind":"assistant","text":"done"}]}]}"#;
+
+const EMPTY_PREPARATION_SESSION: &str = "og20-empty-wire";
+
+fn empty_preparation_source(fixture: &ImportRepo) -> Vec<u8> {
+    let lines = [
+        json!({
+            "type": "user",
+            "uuid": "turn-1",
+            "sessionId": EMPTY_PREPARATION_SESSION,
+            "cwd": fixture.repo,
+            "timestamp": "2026-07-15T01:00:00Z",
+            "message": {"role": "user", "content": "inspect the repo"}
+        }),
+        json!({
+            "type": "assistant",
+            "uuid": "assistant-1",
+            "sessionId": EMPTY_PREPARATION_SESSION,
+            "cwd": fixture.repo,
+            "timestamp": "2026-07-15T01:00:01Z",
+            "message": {"role": "assistant", "content": [{"type": "text", "text": "done"}]}
+        }),
+        json!({
+            "type": "session_end",
+            "sessionId": EMPTY_PREPARATION_SESSION,
+            "cwd": fixture.repo,
+            "timestamp": "2026-07-15T01:00:02Z"
+        }),
+    ];
+    format!(
+        "{}\n",
+        lines
+            .iter()
+            .map(Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+    )
+    .into_bytes()
+}
+
+fn empty_preparation_control(source_len: usize) -> String {
+    // Freeze the pre-OG-20 domain and framing independently of production's
+    // private commitment builder so a changed request cannot self-confirm.
+    let mut commitment = Sha256::new();
+    commitment.update(b"libra-agent-import-provider-commitment-v2\0");
+    commitment.update((EMPTY_PREPARATION_SESSION.len() as u64).to_be_bytes());
+    commitment.update(EMPTY_PREPARATION_SESSION.as_bytes());
+    let provider_commitment: [u8; 32] = commitment.finalize().into();
+    json!({
+        "agent_kind": "claude-code",
+        "source_kind": "file",
+        "provider_commitment": provider_commitment,
+        "read_cap": source_len + 1,
+        "remaining_ms": 10_000,
+    })
+    .to_string()
+}
+
+fn run_real_empty_preparation_helper(fixture: &ImportRepo, source: &[u8]) -> Output {
+    let mut child = fixture
+        .command()
+        .arg(libra::command::agent::IMPORT_PREPARATION_DESCRIPTOR_HELPER_ARG)
+        .env(
+            libra::command::agent::IMPORT_PREPARATION_DESCRIPTOR_CONTROL_ENV,
+            empty_preparation_control(source.len()),
+        )
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn real Libra descriptor helper");
+    child
+        .stdin
+        .as_mut()
+        .expect("helper stdin")
+        .write_all(source)
+        .expect("write held descriptor bytes");
+    child
+        .wait_with_output()
+        .expect("wait for real descriptor helper")
+}
+
+fn legacy_empty_projection_bytes(fixture: &ImportRepo, source: &[u8]) -> Vec<u8> {
+    let storage = fixture
+        .repo
+        .join(".libra")
+        .canonicalize()
+        .expect("canonical fixture storage root");
+    let storage_text = storage.to_str().expect("UTF-8 fixture storage root");
+    let mut commitment = Sha256::new();
+    commitment.update(b"libra-agent-import-storage-commitment-v2\0");
+    commitment.update((storage_text.len() as u64).to_be_bytes());
+    commitment.update(storage_text.as_bytes());
+    let storage_commitment: [u8; 32] = commitment.finalize().into();
+    let storage_bytes = format!(
+        "[{}]",
+        storage_commitment
+            .iter()
+            .map(u8::to_string)
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    let source_sha256 = hex::encode(Sha256::digest(source));
+    // The pre-change typed pass scanned 26 ordinary semantic bytes in this
+    // fixture in addition to the exact authorized source byte count.
+    LEGACY_EMPTY_PREPARATION_PROJECTION
+        .replace("@STORAGE_COMMITMENT@", &storage_bytes)
+        .replace("@TOTAL_SCANNED@", &(source.len() + 26).to_string())
+        .replace("@SOURCE_SHA256@", &source_sha256)
+        .replace("@SOURCE_LEN@", &source.len().to_string())
+        .into_bytes()
+}
+
+#[test]
+fn reasoning_empty_preparation_wire_is_unchanged() {
+    let fixture = ImportRepo::init();
+    let source = empty_preparation_source(&fixture);
+    let output = run_real_empty_preparation_helper(&fixture, &source);
+    assert!(output.status.success(), "{}", describe(&output));
+    let projection = legacy_empty_projection_bytes(&fixture, &source);
+    let mut expected = b"{\"status\":\"ok\",\"projection\":".to_vec();
+    expected.extend_from_slice(&projection);
+    expected.extend_from_slice(format!(",\"raw_bytes\":{}}}", source.len()).as_bytes());
+    assert_eq!(
+        output.stdout, expected,
+        "legacy helper response bytes drifted"
+    );
+}
+
+#[test]
+fn reasoning_empty_preparation_projection_is_unchanged() {
+    let fixture = ImportRepo::init();
+    let source = empty_preparation_source(&fixture);
+    let output = run_real_empty_preparation_helper(&fixture, &source);
+    assert!(output.status.success(), "{}", describe(&output));
+    let prefix = b"{\"status\":\"ok\",\"projection\":";
+    let suffix = format!(",\"raw_bytes\":{}}}", source.len());
+    assert!(output.stdout.starts_with(prefix));
+    assert!(output.stdout.ends_with(suffix.as_bytes()));
+    let projection = &output.stdout[prefix.len()..output.stdout.len() - suffix.len()];
+    assert_eq!(
+        projection,
+        legacy_empty_projection_bytes(&fixture, &source),
+        "legacy source projection bytes drifted"
+    );
+}
+
+#[test]
+fn reasoning_private_helper_control_frame_is_bounded() {
+    let fixture = ImportRepo::init();
+    let source = empty_preparation_source(&fixture);
+    let mut control = empty_preparation_control(source.len());
+    control.extend(std::iter::repeat_n(' ', 4 * 1024 + 1 - control.len()));
+    assert_eq!(control.len(), 4 * 1024 + 1);
+    let mut child = fixture
+        .command()
+        .arg(libra::command::agent::IMPORT_PREPARATION_DESCRIPTOR_HELPER_ARG)
+        .env(
+            libra::command::agent::IMPORT_PREPARATION_DESCRIPTOR_CONTROL_ENV,
+            control,
+        )
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn real Libra descriptor helper");
+    // Hold stdin open and send no bytes: an oversized control must be rejected
+    // before the helper touches its descriptor, with no response frame.
+    let held_stdin = child.stdin.take().expect("held helper stdin");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("poll real descriptor helper") {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            child.kill().expect("stop hung real descriptor helper");
+            let _ = child.wait();
+            panic!("oversized control reached the descriptor read");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    drop(held_stdin);
+    let mut stdout = Vec::new();
+    child
+        .stdout
+        .take()
+        .expect("helper stdout")
+        .read_to_end(&mut stdout)
+        .expect("read helper stdout");
+    assert_eq!(status.code(), Some(2));
+    assert!(stdout.is_empty(), "rejected control emitted a response");
+}
+
+/// Auxiliary forward-recovery evidence for the production-disabled native
+/// path: a real pending checkpoint artifact survives both an unsupported
+/// private control version and a subsequent ordinary import attempt.
+/// A nonempty authenticated DTO cannot be injected into the production
+/// parent while no provider native issuer is registered, so this is not the
+/// full OG-20 VER18 candidate/transport acceptance gate.
+#[cfg(unix)]
+#[tokio::test]
+async fn reasoning_private_helper_old_control_preserves_pending_artifact_evidence() {
+    let fixture = ImportRepo::init();
+    let session = "og20-retained-artifact";
+    let transcript = fixture.write_discoverable_transcript(session, &fixture.repo);
+    let run_hook = |event: &str, verb: &str, budget: bool| {
+        let envelope = json!({
+            "hook_event_name": event,
+            "session_id": session,
+            "cwd": fixture.repo,
+            "transcript_path": transcript,
+            "event_id": format!("og20-{verb}-v1"),
+        })
+        .to_string();
+        let mut command = fixture.command();
+        command.args(["agent", "hooks"]);
+        if budget {
+            command.args(["--capture-budget-ms", "60000"]);
+        }
+        let mut child = command
+            .args(["claude-code", verb])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn real hook handler");
+        child
+            .stdin
+            .as_mut()
+            .expect("hook stdin")
+            .write_all(envelope.as_bytes())
+            .expect("write hook envelope");
+        child.wait_with_output().expect("wait for real hook")
+    };
+    let start = run_hook("SessionStart", "session-start", false);
+    assert!(
+        start.status.success(),
+        "session start: {}",
+        describe(&start)
+    );
+
+    // Force the real terminal hook to seal its source into the local pending
+    // namespace, then fail only the checkpoint object publication.
+    let objects = fixture.repo.join(".libra/objects");
+    let backup = fixture.repo.join(".libra/objects-og20-backup");
+    std::fs::rename(&objects, &backup).expect("move object store aside");
+    std::fs::write(&objects, b"not an object directory").expect("block object publication");
+    let terminal = run_hook("SessionEnd", "session-end", true);
+    std::fs::remove_file(&objects).expect("remove object-directory blocker");
+    std::fs::rename(&backup, &objects).expect("restore object store");
+    assert!(
+        !terminal.status.success(),
+        "checkpoint object publication must fail: {}",
+        describe(&terminal)
+    );
+
+    let evidence_query = "SELECT scope || ':' || target || ':' || key || ':' || \
+                          hex(CAST(value AS BLOB)) AS evidence FROM metadata_kv \
+                          WHERE scope IN ('agent_capture_pending', 'agent_capture_pending_chunk', \
+                          'agent_capture_quarantine') ORDER BY scope, target, key";
+    let retained = fixture.text_rows(evidence_query, "evidence").await;
+    assert!(
+        retained
+            .iter()
+            .any(|row| row.starts_with("agent_capture_pending:")),
+        "the real hook must leave an authenticated pending artifact: {} rows={retained:?}",
+        describe(&terminal)
+    );
+    assert!(
+        retained
+            .iter()
+            .any(|row| row.starts_with("agent_capture_pending_chunk:")),
+        "the pending artifact must retain its original byte chunks"
+    );
+
+    let ordinary_source = empty_preparation_source(&fixture);
+    let old_response = run_real_empty_preparation_helper(&fixture, &ordinary_source);
+    assert!(
+        old_response.status.success(),
+        "legacy empty helper response: {}",
+        describe(&old_response)
+    );
+    assert!(
+        old_response
+            .stdout
+            .starts_with(b"{\"status\":\"ok\",\"projection\":")
+    );
+    assert!(
+        !old_response
+            .stdout
+            .windows(9)
+            .any(|bytes| bytes == b"transport")
+    );
+    assert_eq!(
+        fixture.text_rows(evidence_query, "evidence").await,
+        retained
+    );
+
+    // Unsupported transport versions are rejected by the real hidden helper
+    // before its held descriptor is read or any response can be emitted.
+    let mut control: Value =
+        serde_json::from_str(&empty_preparation_control(1)).expect("closed legacy control");
+    control["transport"] = json!({
+        "version": 2,
+        "challenge": vec![0_u8; 32],
+        "source_preimage_commitment": vec![0_u8; 32],
+        "scope_digest": vec![0_u8; 32],
+        "key": vec![1_u8; 32]
+    });
+    let mut child = fixture
+        .command()
+        .arg(libra::command::agent::IMPORT_PREPARATION_DESCRIPTOR_HELPER_ARG)
+        .env(
+            libra::command::agent::IMPORT_PREPARATION_DESCRIPTOR_CONTROL_ENV,
+            control.to_string(),
+        )
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn real descriptor helper with old transport version");
+    let held_stdin = child.stdin.take().expect("held helper descriptor");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if child
+            .try_wait()
+            .expect("poll rejected transport helper")
+            .is_some()
+        {
+            break;
+        }
+        if Instant::now() >= deadline {
+            child.kill().expect("stop hung transport helper");
+            let _ = child.wait();
+            panic!("unsupported transport version reached descriptor read");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    drop(held_stdin);
+    let rejected = child
+        .wait_with_output()
+        .expect("collect rejected transport helper");
+    assert_eq!(rejected.status.code(), Some(2));
+    assert!(
+        rejected.stdout.is_empty(),
+        "rejected helper emitted a frame"
+    );
+    assert_eq!(
+        fixture.text_rows(evidence_query, "evidence").await,
+        retained
+    );
+
+    // A separate real parent import attempt cannot retire the live artifact.
+    let path = path_arg(&transcript);
+    let import = fixture.run(&[
+        "agent",
+        "import",
+        "--path",
+        &path,
+        "--agent",
+        "claude-code",
+        "--yes",
+        "--json",
+    ]);
+    assert!(
+        !import.status.success(),
+        "retained live artifact should hold its original claim: {}",
+        describe(&import)
+    );
+    assert_eq!(
+        fixture.text_rows(evidence_query, "evidence").await,
+        retained,
+        "an ordinary helper replay must preserve the original pending artifact bytes"
+    );
 }
 
 fn loose_object_file_count(root: &Path) -> usize {

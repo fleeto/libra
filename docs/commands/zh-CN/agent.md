@@ -757,9 +757,9 @@ Linux 本地功能验收留给使用者。
 
 sealed native carrier 将原始 opaque 字节和来源绑定证明一起移入共享 checkpoint payload。在 object/index 写入前验证 issuer、provider、source session、message、part、field、wire SHA-256 与已授权 capture/turn 关联。metadata-only identity adapter 不暴露载荷、不签发 native 权限；Debug 不含 native 坐标或载荷。source、artifact 字节与条目数量上限保持。
 
-authenticated reasoning import transport 就绪前，普通导入消费者对非 ordinary carrier 返回固定来源授权错误。普通 pending codec 在 envelope 写入前拒绝非 ordinary payload；live attempt 按既有 receipt、fence 和 lease 规则保持 uncommitted。已启用 Claude deadline-FD 路线时，在解析 source 前拒绝，不回退普通捕获。已有 Pending receipt 不尝试 wrapper failure 诊断；NotTracked 仅沿用既有有界诊断尝试，不推进 sync_revision。
+认证的私有导入传输将已证明 native 来源的 typed 集合从授权 descriptor helper 交给父进程。单请求密钥把 helper 响应绑定到请求、授权源、仓库 scope 和集合；父进程验证绑定并保留完整 native proof，再将 owned item 分配给已 reserve 的 turn 与共享 checkpoint store。未认证或未证明来源的非空集合固定拒绝，不把 wire DTO 当作 native 权限，也不让候选字节回到普通 transcript。空集合 preparation 的旧响应和源投影字节保持不变。普通 pending codec 仍在 envelope 写入前拒绝非 ordinary payload；live attempt 按既有 receipt、fence 和 lease 规则保持 uncommitted。已启用 Claude deadline-FD 路线时，在解析 source 前拒绝，不回退普通捕获。已有 Pending receipt 不尝试 wrapper failure 诊断；NotTracked 仅沿用既有有界诊断尝试，不推进 sync_revision。
 
-OG-16 不启用生产 provider capability，也不准入生产 native issuer。合成正例只证明载体机制；Source A 仍为 UNPROVEN，真实 OpenCode native 归档、私有导入传输及 durable reasoning replay 仍须通过后续门。本载体不增加解密能力或 public metadata enum 值。
+生产 provider capability 仍未启用，生产 native issuer 仍未准入。合成正例只证明载体和导入传输机制；Source A 仍为 UNPROVEN，真实 native 字段接入已延期，未获证明的 OpenCode 字段不归档。durable reasoning replay 仍需通过后续门。本机制不增加解密能力或 public metadata enum 值。
 
 
 ### 私有 reasoning identity 与垃圾回收

@@ -35,7 +35,8 @@ use super::{
         checkpoint::{
             CheckpointRedactedPayload, CheckpointStore, CheckpointWriteOutcome,
             ImportedCheckpointWriteRequest, ImportedCheckpointWriter, ReasoningCoveragePlan,
-            TracesCheckpointStore,
+            ReasoningIdentityPreparation, TracesCheckpointStore, partition_reasoning_for_import,
+            prepare_reasoning_coverage_plan_from_disposition,
         },
         snapshot::{
             CaptureSnapshot, CaptureSnapshotPartialReason, CaptureSnapshotPolicy,
@@ -50,8 +51,9 @@ use super::{
         AgentKind, CanonValue, Completeness, ExportAuthorized, MAX_REDACTION_MATCH_SAMPLES,
         NormalizedTurn, RedactedBytes, RedactionReport, Redactor, TRANSCRIPT_READ_HARD_CAP_BYTES,
         TranscriptSource, normalize_claude_transcript_until, normalize_codex_rollout_until,
-        normalize_opencode_export_until, parse_canon_value, redact_turns_with_report,
-        safe_turn_projection,
+        normalize_opencode_export_until, parse_canon_value,
+        reasoning::{NativeProvenReasoning, ReasoningSourceDisposition},
+        redact_turns_with_report, safe_turn_projection,
     },
 };
 use crate::{
@@ -1530,12 +1532,34 @@ pub fn prepare_import_request(
 /// returning any raw provider identity, locator, or working-directory path.
 /// The command validates the two fixed commitments and reconstructs the
 /// compatibility session fields only after its scope/root checks succeed.
+#[cfg(test)]
 pub(crate) fn prepare_import_projection(
     agent_kind: AgentKind,
     expected_provider_commitment: [u8; 32],
     bytes: Vec<u8>,
     deadline: Instant,
 ) -> Result<PreparedImportProjection> {
+    let (projection, native) = prepare_import_projection_with_reasoning(
+        agent_kind,
+        expected_provider_commitment,
+        bytes,
+        deadline,
+    )?;
+    if native.is_some() {
+        return Err(ImportError::SourceAuthorization.into());
+    }
+    Ok(projection)
+}
+
+/// The descriptor helper's typed preparation. The native batch remains an
+/// owned, non-serializable value until the private transport sealer consumes
+/// it; only the redacted projection follows the existing ordinary wire path.
+pub(crate) fn prepare_import_projection_with_reasoning(
+    agent_kind: AgentKind,
+    expected_provider_commitment: [u8; 32],
+    bytes: Vec<u8>,
+    deadline: Instant,
+) -> Result<(PreparedImportProjection, Option<NativeProvenReasoning>)> {
     let trusted_now = Utc::now().timestamp();
     ensure_before_deadline(deadline)?;
     let facts = collect_facts(agent_kind, &bytes, Some(deadline))?;
@@ -1592,12 +1616,14 @@ pub(crate) fn prepare_import_projection(
         provider_session_id,
         CaptureSnapshotPolicy::with_deadline(Some(deadline)),
     );
-    let transcript_snapshot = snapshot.safe_projection();
     let snapshot_redaction_report = snapshot.redaction_report().clone();
-    let transcript = snapshot
-        .try_into_ordinary()
-        .map_err(|_owned_rejection| ImportError::SourceAuthorization)?
-        .ok_or_else(|| snapshot_failure_for_import(&transcript_snapshot))?;
+    let (transcript_snapshot, transcript, reasoning) = snapshot.into_checkpoint_parts();
+    let native = match reasoning {
+        ReasoningSourceDisposition::Ordinary => None,
+        ReasoningSourceDisposition::NativeProven(batch) => Some(batch),
+        _ => return Err(ImportError::SourceAuthorization.into()),
+    };
+    let transcript = transcript.ok_or_else(|| snapshot_failure_for_import(&transcript_snapshot))?;
     ensure_before_deadline(deadline)?;
     let mut turns = match agent_kind {
         AgentKind::ClaudeCode => normalize_claude_transcript_until(transcript.bytes(), deadline),
@@ -1622,7 +1648,7 @@ pub(crate) fn prepare_import_projection(
     }
     let (turn_boundaries, started_at, ended_at) =
         build_import_chronology(&facts, &turns, trusted_now)?;
-    Ok(PreparedImportProjection {
+    let projection = PreparedImportProjection {
         content_digest: source_digest(&turns),
         started_at,
         ended_at,
@@ -1640,7 +1666,8 @@ pub(crate) fn prepare_import_projection(
         transcript_snapshot: Some(transcript_snapshot),
         turn_boundaries,
         turns,
-    })
+    };
+    Ok((projection, native))
 }
 
 /// Reconstruct the parent-owned compatibility fields after it has checked the
@@ -3433,7 +3460,7 @@ pub async fn import_prepared(
     } else {
         super::subagent_content::SubagentDiscovery::default()
     };
-    import_prepared_with_subagent_discovery(conn, storage_root, request, deadline, discovery)
+    import_prepared_with_subagent_discovery(conn, storage_root, request, deadline, discovery, None)
         .await
         .map(|detailed| detailed.summary)
 }
@@ -3443,17 +3470,118 @@ pub async fn import_prepared(
 pub(crate) async fn import_prepared_with_subagent_discovery(
     conn: &DatabaseConnection,
     storage_root: &std::path::Path,
-    request: ImportRequest,
+    mut request: ImportRequest,
     deadline: CaptureCommitDeadline,
     subagent_discovery: super::subagent_content::SubagentDiscovery,
+    native_reasoning: Option<NativeProvenReasoning>,
 ) -> Result<DetailedImportSummary> {
-    import_prepared_with_reasoning_identity(
+    let (reasoning_identity_plan, per_turn_native) = if let Some(native) = native_reasoning {
+        let monotonic_deadline = deadline.monotonic();
+        validate_persisted_import_timestamps(&request, Utc::now().timestamp())?;
+        assert_v2_durable_import_request(&request)?;
+        ensure_before_deadline(monotonic_deadline)?;
+        let import_scope =
+            capture_scope_for_request_until(conn, &request, monotonic_deadline).await?;
+        let expected_session = build_ai_session_id(
+            capture_provider_name(request.agent_kind),
+            &request.provider_session_id,
+        );
+        if request.session_id != expected_session {
+            return Err(ImportError::SourceAuthorization.into());
+        }
+        if !request
+            .transcript_snapshot
+            .as_ref()
+            .is_some_and(|snapshot| {
+                snapshot.completeness
+                    == super::capture::snapshot::CaptureSnapshotCompleteness::Complete
+                    && snapshot.source.is_some()
+                    && snapshot.has_durable_source_commitment()
+                    && snapshot.transcript_redacted_bytes != 0
+            })
+        {
+            return Err(ImportError::SourceAuthorization.into());
+        }
+        let turn_keys = request
+            .turns
+            .iter()
+            .map(|turn| turn.logical_turn_key.as_str())
+            .collect::<BTreeSet<_>>();
+        let ordinals = request
+            .turns
+            .iter()
+            .map(|turn| turn.ordinal)
+            .collect::<BTreeSet<_>>();
+        if turn_keys.len() != request.turns.len()
+            || ordinals.len() != request.turns.len()
+            || turn_keys.len() != request.turn_boundaries.len()
+            || request
+                .turn_boundaries
+                .keys()
+                .any(|key| !turn_keys.contains(key.as_str()))
+        {
+            return Err(ImportError::SourceAuthorization.into());
+        }
+        // The authorized helper already redacted these semantic turns and
+        // accounted for that scan in its report. Recheck the parent-owned
+        // projection before any claim mutation, but never count the same
+        // fields twice. Newly matched content means the helper response did
+        // not satisfy the prepared-source privacy contract.
+        if redact_turns_with_report(&mut request.turns).match_count() != 0 {
+            return Err(ImportError::SourceAuthorization.into());
+        }
+        request.content_digest = source_digest(&request.turns);
+
+        let reasoning = ReasoningSourceDisposition::NativeProven(native);
+        let plan = prepare_reasoning_coverage_plan_from_disposition(
+            &reasoning,
+            ReasoningIdentityPreparation {
+                conn,
+                scope: &import_scope,
+                storage_path: storage_root,
+                authorized_root: &request.working_dir,
+                session_id: &request.session_id,
+                provider: request.agent_kind.as_db_str(),
+                turns: &request.turns,
+                deadline: monotonic_deadline,
+            },
+        )
+        .await?
+        .context("native import source has no authenticated reasoning identity")?;
+        let ReasoningSourceDisposition::NativeProven(native) = reasoning else {
+            return Err(ImportError::SourceAuthorization.into());
+        };
+        let per_turn = partition_reasoning_for_import(
+            native,
+            &request.session_id,
+            request.agent_kind.as_db_str(),
+            &request.provider_session_id,
+            &request.turns,
+        )
+        .map_err(|error| anyhow!("validate native import turn association: {error}"))?;
+        for turn in &request.turns {
+            let identity = plan
+                .turn(&turn.logical_turn_key)
+                .context("native import reasoning identity is missing a normalized logical turn")?;
+            let has_native = per_turn.contains_key(&turn.logical_turn_key);
+            if (identity.kind() == crate::internal::metadata::ReasoningIdentityKind::Nonempty)
+                != has_native
+            {
+                return Err(ImportError::SourceAuthorization.into());
+            }
+        }
+        (Some(plan), per_turn)
+    } else {
+        (None, BTreeMap::new())
+    };
+    import_prepared_with_reasoning_identity_and_batches(
         conn,
         storage_root,
         request,
         deadline,
         subagent_discovery,
-        None,
+        reasoning_identity_plan,
+        per_turn_native,
     )
     .await
 }
@@ -3461,6 +3589,7 @@ pub(crate) async fn import_prepared_with_subagent_discovery(
 /// Parent-owned typed identity handoff for a prepared import. Keeping it
 /// outside `ImportRequest` prevents serialized helper projections from
 /// asserting native provenance.
+#[cfg(test)]
 pub(crate) async fn import_prepared_with_reasoning_identity(
     conn: &DatabaseConnection,
     storage_root: &std::path::Path,
@@ -3468,6 +3597,27 @@ pub(crate) async fn import_prepared_with_reasoning_identity(
     deadline: CaptureCommitDeadline,
     subagent_discovery: super::subagent_content::SubagentDiscovery,
     reasoning_identity_plan: Option<ReasoningCoveragePlan>,
+) -> Result<DetailedImportSummary> {
+    import_prepared_with_reasoning_identity_and_batches(
+        conn,
+        storage_root,
+        request,
+        deadline,
+        subagent_discovery,
+        reasoning_identity_plan,
+        BTreeMap::new(),
+    )
+    .await
+}
+
+async fn import_prepared_with_reasoning_identity_and_batches(
+    conn: &DatabaseConnection,
+    storage_root: &std::path::Path,
+    request: ImportRequest,
+    deadline: CaptureCommitDeadline,
+    subagent_discovery: super::subagent_content::SubagentDiscovery,
+    reasoning_identity_plan: Option<ReasoningCoveragePlan>,
+    mut per_turn_native: BTreeMap<String, NativeProvenReasoning>,
 ) -> Result<DetailedImportSummary> {
     let monotonic_deadline = deadline.monotonic();
     // A prepared request can cross the private preparation-helper boundary or
@@ -3572,6 +3722,15 @@ pub(crate) async fn import_prepared_with_reasoning_identity(
         ));
     }
     let outcome = outcome.ordinary;
+    // Reservation is the authority boundary for owned native bytes. Drop
+    // covered or conflicted turn batches now; only a fresh reserved claim may
+    // carry its corresponding batch to the checkpoint writer.
+    let reserved_keys = outcome
+        .reserved
+        .iter()
+        .map(|claim| claim.logical_turn_key.as_str())
+        .collect::<BTreeSet<_>>();
+    per_turn_native.retain(|key, _| reserved_keys.contains(key.as_str()));
     if let Err(error) = ensure_before_deadline(monotonic_deadline) {
         let error = abandon_import_attempt_after_error(
             conn, &request, &lease, None, "failed", error, deadline,
@@ -3827,13 +3986,34 @@ pub(crate) async fn import_prepared_with_reasoning_identity(
                 .transcript_snapshot
                 .clone()
                 .context("historical import has no complete authorized source snapshot")?;
-            let checkpoint_payload = CheckpointRedactedPayload::from_derived_turn_projection(
-                transcript,
-                source_snapshot,
-                metadata,
-                lifecycle,
-                report,
-            )
+            let turn_native = per_turn_native.remove(&turn.logical_turn_key);
+            if let Some(reasoning) = reasoning_identity_plan.as_ref() {
+                let expected_native = reasoning
+                    .turn(&turn.logical_turn_key)
+                    .context("reserved import turn has no authenticated reasoning identity")?
+                    .kind()
+                    == crate::internal::metadata::ReasoningIdentityKind::Nonempty;
+                if expected_native != turn_native.is_some() {
+                    bail!("reserved import turn has an inconsistent native reasoning batch");
+                }
+            }
+            let checkpoint_payload = match turn_native {
+                Some(native) => CheckpointRedactedPayload::from_derived_turn_projection_with_reasoning(
+                    transcript,
+                    source_snapshot,
+                    metadata,
+                    lifecycle,
+                    report,
+                    Some(native),
+                ),
+                None => CheckpointRedactedPayload::from_derived_turn_projection(
+                    transcript,
+                    source_snapshot,
+                    metadata,
+                    lifecycle,
+                    report,
+                ),
+            }
             .map_err(|error| anyhow!("prepare imported turn checkpoint payload: {error}"))?;
             // Only imports with actual child sources defer identity completion.
             // The established no-child path retains its atomic parent
@@ -4148,7 +4328,7 @@ pub async fn restore_tombstone(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn commit_deadline_after(duration: Duration) -> CaptureCommitDeadline {
@@ -4163,6 +4343,904 @@ mod tests {
             )
             .expect("test import deadline fits SQLite millis");
         CaptureCommitDeadline::from_test_pair(monotonic, sqlite_not_after_millis)
+    }
+
+    #[cfg(unix)]
+    fn native_import_test_request(
+        root: &Path,
+        scope: &CaptureScope,
+        turn_count: usize,
+    ) -> ImportRequest {
+        use crate::internal::ai::observed_agents::{
+            SemanticRecord, reasoning::carrier_test_support as native,
+        };
+
+        let commitment = format!("source/hmac-v2/{}", "b".repeat(64));
+        let mut snapshot = crate::internal::ai::capture::snapshot::carrier_test_snapshot(
+            &native::NONE,
+            b"synthetic ordinary import source".to_vec(),
+        )
+        .safe_projection();
+        assert!(snapshot.bind_source_commitment(commitment.clone()));
+        let turns = (0..turn_count)
+            .map(|ordinal| NormalizedTurn {
+                logical_turn_key: format!("synthetic-turn-{ordinal}"),
+                ordinal,
+                completeness: Completeness::Complete,
+                started_at: None,
+                ended_at: None,
+                records: vec![SemanticRecord::User {
+                    text: format!("ordinary turn {ordinal}"),
+                }],
+            })
+            .collect::<Vec<_>>();
+        let turn_boundaries = turns
+            .iter()
+            .map(|turn| {
+                (
+                    turn.logical_turn_key.clone(),
+                    TurnBoundary {
+                        started_at: 100 + turn.ordinal as i64,
+                        ended_at: 100 + turn.ordinal as i64,
+                    },
+                )
+            })
+            .collect();
+        ImportRequest {
+            agent_kind: AgentKind::ClaudeCode,
+            provider_session_id: native::SOURCE.to_owned(),
+            session_id: native::CAPTURE.to_owned(),
+            source_kind: "file".to_owned(),
+            source_id: commitment.clone(),
+            identity_schema_version: IMPORT_IDENTITY_SCHEMA_VERSION_V2,
+            content_digest: source_digest(&turns),
+            started_at: 100,
+            ended_at: 99 + turn_count as i64,
+            session_state: "stopped".to_owned(),
+            stopped_at: Some(99 + turn_count as i64),
+            working_dir: root.to_path_buf(),
+            repository_identity: IMPORT_DURABLE_IDENTITY_NOT_RETAINED.to_owned(),
+            capture_scope: Some(scope.clone()),
+            source_fingerprint: commitment,
+            existing_session_fingerprint: None,
+            redaction_report: serde_json::json!({
+                "pipeline": "typed_allowlist",
+                "raw_persisted": false,
+                "matches": [],
+                "bytes_scanned": 0,
+                "bytes_redacted": 0,
+            }),
+            transcript_snapshot: Some(snapshot),
+            turn_boundaries,
+            turns,
+        }
+    }
+
+    #[cfg(unix)]
+    async fn native_import_test_setup()
+    -> (tempfile::TempDir, DatabaseConnection, PathBuf, CaptureScope) {
+        let dir = tempfile::tempdir().expect("create native import repository");
+        crate::utils::test::setup_with_new_libra_in(dir.path()).await;
+        let root = dir
+            .path()
+            .canonicalize()
+            .expect("canonicalize native import root");
+        let storage = root
+            .join(util::ROOT_DIR)
+            .canonicalize()
+            .expect("canonicalize native import storage");
+        let conn = sea_orm::Database::connect(format!(
+            "sqlite://{}",
+            storage.join(util::DATABASE).display()
+        ))
+        .await
+        .expect("connect native import database");
+        let scope = CaptureScope::main_for_connection(&conn)
+            .await
+            .expect("resolve native import capture scope");
+        crate::internal::ai::capture::key::load_capture_dedup_secret_with_mutation_deadline(
+            &storage, None,
+        )
+        .expect("create native import authentication key");
+        (dir, conn, root, scope)
+    }
+
+    #[cfg(unix)]
+    async fn native_import_test_identity_kinds(conn: &DatabaseConnection) -> Vec<String> {
+        use crate::internal::{
+            ai::observed_agents::reasoning::carrier_test_support as native,
+            metadata::{MetadataKv, MetadataScope, ReasoningIdentitySessionMap},
+        };
+
+        let value = MetadataKv::get_with_conn(
+            conn,
+            MetadataScope::AgentReasoningIdentity,
+            native::CAPTURE,
+            ReasoningIdentitySessionMap::KEY,
+        )
+        .await
+        .expect("read private reasoning identity")
+        .expect("private reasoning identity exists")
+        .value;
+        let value: serde_json::Value =
+            serde_json::from_str(&value).expect("decode private reasoning identity envelope");
+        let mut kinds = value["records"]
+            .as_object()
+            .expect("private identity records")
+            .values()
+            .map(|record| {
+                record["body"]["kind"]
+                    .as_str()
+                    .expect("private identity kind")
+                    .to_owned()
+            })
+            .collect::<Vec<_>>();
+        kinds.sort();
+        kinds
+    }
+
+    #[cfg(unix)]
+    async fn native_import_test_count(conn: &DatabaseConnection, query: &str) -> i64 {
+        conn.query_one_raw(Statement::from_string(
+            conn.get_database_backend(),
+            query.to_owned(),
+        ))
+        .await
+        .expect("query native import state")
+        .expect("native import count row")
+        .try_get_by::<i64, _>("n")
+        .expect("decode native import count")
+    }
+
+    #[cfg(unix)]
+    async fn native_import_test_replay_request(
+        conn: &DatabaseConnection,
+        root: &Path,
+        scope: &CaptureScope,
+        turn_count: usize,
+    ) -> ImportRequest {
+        use crate::internal::ai::observed_agents::reasoning::carrier_test_support as native;
+
+        let mut request = native_import_test_request(root, scope, turn_count);
+        let existing = load_existing_session_ownership_in_scope(
+            conn,
+            AgentKind::ClaudeCode,
+            native::SOURCE,
+            scope,
+        )
+        .await
+        .expect("load replay session ownership");
+        validate_scoped_prepared_existing_session(&mut request, existing.as_ref())
+            .expect("validate replay session ownership");
+        request
+    }
+
+    #[cfg(unix)]
+    fn native_import_test_transport_context(
+        challenge: u8,
+    ) -> crate::internal::ai::observed_agents::reasoning::ImportTransportContext {
+        use crate::internal::ai::observed_agents::reasoning::{
+            ImportTransportContext, ReasoningProvider, carrier_test_support as native,
+        };
+
+        ImportTransportContext::new(
+            [challenge; 32],
+            [3; 32],
+            [4; 32],
+            [5; 32],
+            [6; 32],
+            ReasoningProvider::ClaudeCode,
+            native::CAPTURE.to_owned(),
+            native::SOURCE.to_owned(),
+        )
+        .expect("construct synthetic import transport context")
+    }
+
+    #[cfg(unix)]
+    fn native_import_test_verified_batch(
+        challenge: u8,
+        fields: Vec<(u64, Vec<u8>)>,
+    ) -> NativeProvenReasoning {
+        use crate::internal::ai::observed_agents::reasoning::{
+            ImportTransportKey, carrier_test_support as native, seal_import_transport,
+            synthetic_native_batch_for_turns, verify_import_transport,
+        };
+
+        let context = native_import_test_transport_context(challenge);
+        let parent_key = ImportTransportKey::random().expect("mint private import transport key");
+        let child_key = parent_key
+            .encode_for_helper()
+            .into_key()
+            .expect("decode helper-only import transport key");
+        let dto = seal_import_transport(
+            child_key,
+            &context,
+            synthetic_native_batch_for_turns(native::CAPTURE, native::SOURCE, fields),
+        )
+        .expect("seal synthetic native import batch");
+        verify_import_transport(parent_key, context, dto)
+            .expect("verify synthetic native import batch for parent")
+    }
+
+    #[cfg(unix)]
+    fn native_import_test_helper_program() -> PathBuf {
+        let unit_test_binary =
+            std::env::current_exe().expect("locate native import unit test binary");
+        let program = unit_test_binary
+            .parent()
+            .and_then(Path::parent)
+            .expect("locate Cargo target debug directory")
+            .join("libra");
+        assert!(
+            program.is_file(),
+            "the real Libra helper binary must be built before this focused unit test"
+        );
+        program
+    }
+
+    /// Evidence read back from the shared object store and private identity
+    /// map after the production import path consumes an owned native batch.
+    #[cfg(unix)]
+    pub(crate) struct NativeImportStoreEvidence {
+        pub(crate) artifact_bytes: Vec<u8>,
+        pub(crate) artifact_oid: String,
+        pub(crate) artifact_locator: String,
+        pub(crate) original_wire_sha256: [u8; 32],
+        pub(crate) source_binding_sha256: [u8; 32],
+        pub(crate) issuer_tag: &'static str,
+        pub(crate) logical_turn: String,
+        pub(crate) identity_kind: crate::internal::metadata::ReasoningIdentityKind,
+        pub(crate) identity_slot: String,
+        pub(crate) identity_descriptor_mac: String,
+        pub(crate) expected_descriptor_mac: String,
+        pub(crate) committed_claims: i64,
+        pub(crate) checkpoints_written: usize,
+    }
+
+    /// Let command unit tests hand their *parent-restored* native value to the
+    /// real reservation, checkpoint writer and registered Libra object helper.
+    #[cfg(unix)]
+    pub(crate) async fn import_verified_native_real_store_for_command_test(
+        native: NativeProvenReasoning,
+        expected_wire: &[u8],
+    ) -> Result<NativeImportStoreEvidence> {
+        use crate::internal::{
+            ai::{
+                checkpoint_reader as reader,
+                history::{ReasoningArtifactCheckpointSpec, checkpoint_reasoning_artifact_proofs},
+                observed_agents::reasoning::{
+                    VerifiedCaptureBinding, borrow_native_identity_bindings,
+                    carrier_test_support as native_fixture,
+                },
+            },
+            metadata::{
+                MetadataKv, MetadataScope, ReasoningIdentityKind, ReasoningIdentityRecord,
+                ReasoningIdentitySessionMap,
+            },
+        };
+
+        let binding = VerifiedCaptureBinding::from_validated_capture_context(
+            &native,
+            native_fixture::CAPTURE,
+            "claude_code",
+        )?;
+        let proof_views = borrow_native_identity_bindings(&native, &binding)?;
+        anyhow::ensure!(proof_views.len() == 1, "expected one native proof");
+        let proof = &proof_views[0];
+        let original_wire_sha256 = *proof.original_wire_sha256();
+        let source_binding_sha256 = *proof.source_binding_sha256();
+        let issuer_tag = proof.issuer_tag();
+        let logical_turn = proof.logical_turn().to_owned();
+        anyhow::ensure!(
+            logical_turn == "synthetic-turn-0",
+            "native proof belongs to another logical turn"
+        );
+        let artifact_params = native.artifact_params(&binding)?;
+        anyhow::ensure!(artifact_params.len() == 1, "expected one native artifact");
+        anyhow::ensure!(
+            artifact_params[0].bytes.as_bytes() == expected_wire,
+            "verified native bytes differ from the expected wire"
+        );
+        let expected_wire_sha256: [u8; 32] = Sha256::digest(expected_wire).into();
+        anyhow::ensure!(
+            original_wire_sha256 == expected_wire_sha256,
+            "native proof digest differs from the expected wire"
+        );
+        let expected_locator = artifact_params[0].locator.clone();
+
+        let (_dir, conn, root, scope) = native_import_test_setup().await;
+        let storage = root.join(util::ROOT_DIR);
+        let request = native_import_test_request(&root, &scope, 1);
+        let deadline = commit_deadline_after(Duration::from_secs(60));
+        let disposition = ReasoningSourceDisposition::NativeProven(native);
+        let plan = prepare_reasoning_coverage_plan_from_disposition(
+            &disposition,
+            ReasoningIdentityPreparation {
+                conn: &conn,
+                scope: &scope,
+                storage_path: &storage,
+                authorized_root: &root,
+                session_id: &request.session_id,
+                provider: request.agent_kind.as_db_str(),
+                turns: &request.turns,
+                deadline: deadline.monotonic(),
+            },
+        )
+        .await?
+        .context("native command test has no reasoning coverage plan")?;
+        let turn_identity = plan
+            .turn(&logical_turn)
+            .context("native command test has no logical-turn identity")?;
+        anyhow::ensure!(
+            turn_identity.kind() == ReasoningIdentityKind::Nonempty,
+            "native command test must produce a nonempty identity"
+        );
+        let identity_slot = turn_identity.slot().to_owned();
+        let expected_descriptor_mac = turn_identity.descriptor_mac().to_owned();
+        let ReasoningSourceDisposition::NativeProven(native) = disposition else {
+            return Err(anyhow!(
+                "native command test lost its verified reasoning batch"
+            ));
+        };
+
+        let imported = crate::internal::ai::authorized_read::with_test_helper_program(
+            native_import_test_helper_program(),
+            import_prepared_with_subagent_discovery(
+                &conn,
+                &storage,
+                request,
+                deadline,
+                super::super::subagent_content::SubagentDiscovery::default(),
+                Some(native),
+            ),
+        )
+        .await
+        .context("import parent-restored native reasoning through the real store")?;
+        anyhow::ensure!(
+            imported.summary.checkpoints_written == 1,
+            "native command test did not write exactly one checkpoint"
+        );
+
+        let checkpoints = conn
+            .query_all_raw(Statement::from_sql_and_values(
+                conn.get_database_backend(),
+                "SELECT checkpoint_id, tree_oid FROM agent_checkpoint WHERE session_id = ?",
+                [native_fixture::CAPTURE.into()],
+            ))
+            .await
+            .context("read native command test checkpoint")?;
+        anyhow::ensure!(checkpoints.len() == 1, "expected one stored checkpoint");
+        let checkpoint_id: String = checkpoints[0].try_get_by("checkpoint_id")?;
+        let tree_oid: String = checkpoints[0].try_get_by("tree_oid")?;
+        let artifact_proofs = checkpoint_reasoning_artifact_proofs(
+            &storage,
+            &[ReasoningArtifactCheckpointSpec {
+                checkpoint_id: checkpoint_id.clone(),
+                tree_oid: tree_oid.clone(),
+            }],
+            Instant::now() + Duration::from_secs(10),
+        )
+        .await
+        .context("verify committed native artifact objects")?;
+        let artifact_proof = artifact_proofs
+            .first()
+            .and_then(|checkpoint| checkpoint.artifacts.as_ref())
+            .and_then(|artifacts| (artifacts.len() == 1).then(|| &artifacts[0]))
+            .context("committed checkpoint lacks one proven native artifact")?;
+        let artifact_oid = artifact_proof.oid.clone();
+        let parsed_oid = crate::internal::object_format::parse_repo_oid(&artifact_oid)?;
+        let (artifact_bytes, truncated) = reader::read_checkpoint_object_bounded(
+            &storage,
+            &parsed_oid,
+            u64::try_from(expected_wire.len())?,
+        )?;
+        anyhow::ensure!(
+            !truncated && artifact_bytes == expected_wire,
+            "shared object store changed native ciphertext bytes"
+        );
+        anyhow::ensure!(
+            artifact_proof.sha256 == hex::encode(original_wire_sha256)
+                && artifact_proof.byte_len == expected_wire.len() as u64,
+            "artifact lifecycle proof differs from native proof bytes"
+        );
+
+        let root_tree =
+            reader::read_tree_object(&storage, &tree_oid).map_err(|error| anyhow!(error))?;
+        let checkpoint_tree =
+            reader::subtree(&storage, &root_tree, "checkpoint").map_err(|error| anyhow!(error))?;
+        let (prefix, rest) = checkpoint_id
+            .get(..2)
+            .zip(checkpoint_id.get(2..))
+            .context("stored checkpoint id has no tree path")?;
+        let prefix_tree =
+            reader::subtree(&storage, &checkpoint_tree, prefix).map_err(|error| anyhow!(error))?;
+        let leaf_tree =
+            reader::subtree(&storage, &prefix_tree, rest).map_err(|error| anyhow!(error))?;
+        let manifest_entry = reader::tree_entry(&leaf_tree, "manifest.json")
+            .context("stored checkpoint lacks its manifest")?;
+        let (manifest_bytes, truncated) = reader::read_checkpoint_object_bounded(
+            &storage,
+            &manifest_entry.id,
+            reader::CHECKPOINT_METADATA_READ_MAX_BYTES,
+        )?;
+        anyhow::ensure!(!truncated, "stored checkpoint manifest is truncated");
+        let manifest: serde_json::Value = serde_json::from_slice(&manifest_bytes)?;
+        let manifest_artifacts = reader::reasoning_artifact_metadata(&manifest)?;
+        anyhow::ensure!(
+            manifest_artifacts.len() == 1
+                && manifest_artifacts[0].locator == expected_locator
+                && manifest_artifacts[0].oid == artifact_oid
+                && manifest_artifacts[0].sha256 == artifact_proof.sha256
+                && manifest_artifacts[0].byte_len == Some(expected_wire.len() as u64),
+            "stored manifest does not bind the native locator and object"
+        );
+
+        let map_value = MetadataKv::get_with_conn(
+            &conn,
+            MetadataScope::AgentReasoningIdentity,
+            native_fixture::CAPTURE,
+            ReasoningIdentitySessionMap::KEY,
+        )
+        .await?
+        .context("stored checkpoint has no reasoning identity map")?;
+        let map = ReasoningIdentitySessionMap::decode(&map_value.value)?;
+        map.validate_owner(&scope.repo_id, native_fixture::CAPTURE)?;
+        let map_body = ReasoningIdentitySessionMap::authentication_body(
+            &scope.repo_id,
+            native_fixture::CAPTURE,
+            map.records(),
+        )?;
+        plan.authenticate_record(&conn, &map_body, Some(map.mac()))
+            .await
+            .context("authenticate stored reasoning identity map")?;
+        anyhow::ensure!(
+            map.records().len() == 1,
+            "expected one stored turn identity"
+        );
+        let record = map
+            .records()
+            .get(&identity_slot)
+            .context("stored turn identity is missing its authenticated slot")?;
+        let record_body = ReasoningIdentityRecord::authentication_body(record.body())?;
+        plan.authenticate_record(&conn, &record_body, Some(record.mac()))
+            .await
+            .context("authenticate stored reasoning identity record")?;
+        let identity_kind = record.body().kind;
+        let identity_descriptor_mac = record.body().descriptor_mac.clone();
+        anyhow::ensure!(
+            identity_kind == ReasoningIdentityKind::Nonempty
+                && identity_descriptor_mac == expected_descriptor_mac
+                && record.body().context.logical_turn_key == identity_slot
+                && record.body().context.checkpoint_id == checkpoint_id,
+            "stored reasoning identity differs from the verified native plan"
+        );
+        let committed_claims = native_import_test_count(
+            &conn,
+            "SELECT COUNT(*) AS n FROM agent_coverage_claim WHERE state='catalog_committed'",
+        )
+        .await;
+        anyhow::ensure!(
+            committed_claims == 1,
+            "native coverage claim was not committed"
+        );
+
+        Ok(NativeImportStoreEvidence {
+            artifact_bytes,
+            artifact_oid,
+            artifact_locator: manifest_artifacts[0].locator.clone(),
+            original_wire_sha256,
+            source_binding_sha256,
+            issuer_tag,
+            logical_turn,
+            identity_kind,
+            identity_slot,
+            identity_descriptor_mac,
+            expected_descriptor_mac,
+            committed_claims,
+            checkpoints_written: imported.summary.checkpoints_written,
+        })
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial_test::serial(cwd, env)]
+    async fn reasoning_real_multi_turn_import_consumes_only_reserved_batches() {
+        let (_dir, conn, root, scope) = native_import_test_setup().await;
+        let storage = root.join(util::ROOT_DIR);
+        let batch = native_import_test_verified_batch(
+            1,
+            vec![
+                (0, b"private turn zero".to_vec()),
+                (0, b"private second item in turn zero".to_vec()),
+                (2, b"private turn two".to_vec()),
+            ],
+        );
+        let imported = crate::internal::ai::authorized_read::with_test_helper_program(
+            native_import_test_helper_program(),
+            import_prepared_with_subagent_discovery(
+                &conn,
+                &storage,
+                native_import_test_request(&root, &scope, 3),
+                commit_deadline_after(Duration::from_secs(30)),
+                super::super::subagent_content::SubagentDiscovery::default(),
+                Some(batch),
+            ),
+        )
+        .await
+        .expect("write two native turns and one authenticated empty turn");
+        assert_eq!(imported.summary.checkpoints_written, 3);
+        assert_eq!(imported.summary.skipped_covered, 0);
+        let stored_session = conn
+            .query_one_raw(Statement::from_sql_and_values(
+                conn.get_database_backend(),
+                "SELECT redaction_report FROM agent_session WHERE session_id = ?",
+                [
+                    crate::internal::ai::observed_agents::reasoning::carrier_test_support::CAPTURE
+                        .into(),
+                ],
+            ))
+            .await
+            .expect("read imported session redaction report")
+            .expect("imported session exists");
+        let stored_report: serde_json::Value = serde_json::from_str(
+            &stored_session
+                .try_get_by::<String, _>("redaction_report")
+                .expect("stored redaction report"),
+        )
+        .expect("decode stored redaction report");
+        assert_eq!(
+            stored_report["import"]["bytes_scanned"], 0,
+            "parent validation must not count the helper-redacted turns twice"
+        );
+        assert_eq!(
+            native_import_test_count(&conn, "SELECT COUNT(*) AS n FROM agent_checkpoint").await,
+            3
+        );
+        assert_eq!(
+            native_import_test_identity_kinds(&conn).await,
+            ["empty", "nonempty", "nonempty"]
+        );
+        let identity_before_replay = crate::internal::metadata::MetadataKv::get_with_conn(
+            &conn,
+            crate::internal::metadata::MetadataScope::AgentReasoningIdentity,
+            crate::internal::ai::observed_agents::reasoning::carrier_test_support::CAPTURE,
+            crate::internal::metadata::ReasoningIdentitySessionMap::KEY,
+        )
+        .await
+        .expect("read identity before native replay")
+        .expect("identity before native replay")
+        .value;
+        let revisions_before_replay =
+            native_import_test_count(&conn, "SELECT COUNT(*) AS n FROM agent_coverage_revision")
+                .await;
+        let objects_before_replay =
+            native_import_test_count(&conn, "SELECT COUNT(*) AS n FROM object_index").await;
+
+        let replay = native_import_test_replay_request(&conn, &root, &scope, 3).await;
+        let replayed = crate::internal::ai::authorized_read::with_test_helper_program(
+            native_import_test_helper_program(),
+            import_prepared_with_subagent_discovery(
+                &conn,
+                &storage,
+                replay,
+                commit_deadline_after(Duration::from_secs(30)),
+                super::super::subagent_content::SubagentDiscovery::default(),
+                Some(native_import_test_verified_batch(
+                    2,
+                    vec![
+                        (0, b"private turn zero".to_vec()),
+                        (0, b"private second item in turn zero".to_vec()),
+                        (2, b"private turn two".to_vec()),
+                    ],
+                )),
+            ),
+        )
+        .await
+        .expect("replay covered native batches without writing them again");
+        assert_eq!(replayed.summary.checkpoints_written, 0);
+        assert_eq!(replayed.summary.skipped_covered, 3);
+        assert_eq!(
+            native_import_test_count(&conn, "SELECT COUNT(*) AS n FROM agent_checkpoint").await,
+            3
+        );
+        let identity_after_replay = crate::internal::metadata::MetadataKv::get_with_conn(
+            &conn,
+            crate::internal::metadata::MetadataScope::AgentReasoningIdentity,
+            crate::internal::ai::observed_agents::reasoning::carrier_test_support::CAPTURE,
+            crate::internal::metadata::ReasoningIdentitySessionMap::KEY,
+        )
+        .await
+        .expect("read identity after native replay")
+        .expect("identity after native replay")
+        .value;
+        assert_eq!(identity_after_replay, identity_before_replay);
+        assert_eq!(
+            native_import_test_count(&conn, "SELECT COUNT(*) AS n FROM agent_coverage_revision")
+                .await,
+            revisions_before_replay,
+            "skipped batches must not complete another coverage revision"
+        );
+        assert_eq!(
+            native_import_test_count(&conn, "SELECT COUNT(*) AS n FROM object_index").await,
+            objects_before_replay,
+            "skipped batches must not write another artifact object"
+        );
+
+        // A complete ordinary prefix has no private reasoning map. Appending
+        // the first candidate must not manufacture identity for that legacy
+        // covered turn, while a newly written ordinary turn gets Empty.
+        let (_prefix_dir, prefix_conn, prefix_root, prefix_scope) =
+            native_import_test_setup().await;
+        let prefix_storage = prefix_root.join(util::ROOT_DIR);
+        let mut ordinary_prefix = native_import_test_request(&prefix_root, &prefix_scope, 1);
+        ordinary_prefix.session_state = "active".to_owned();
+        ordinary_prefix.stopped_at = None;
+        let ordinary = crate::internal::ai::authorized_read::with_test_helper_program(
+            native_import_test_helper_program(),
+            import_prepared_with_subagent_discovery(
+                &prefix_conn,
+                &prefix_storage,
+                ordinary_prefix,
+                commit_deadline_after(Duration::from_secs(30)),
+                super::super::subagent_content::SubagentDiscovery::default(),
+                None,
+            ),
+        )
+        .await
+        .expect("write a complete legacy ordinary prefix");
+        assert_eq!(ordinary.summary.checkpoints_written, 1);
+        let appended = crate::internal::ai::authorized_read::with_test_helper_program(
+            native_import_test_helper_program(),
+            import_prepared_with_subagent_discovery(
+                &prefix_conn,
+                &prefix_storage,
+                native_import_test_replay_request(&prefix_conn, &prefix_root, &prefix_scope, 3)
+                    .await,
+                commit_deadline_after(Duration::from_secs(30)),
+                super::super::subagent_content::SubagentDiscovery::default(),
+                Some(native_import_test_verified_batch(
+                    3,
+                    vec![(2, b"first later private candidate".to_vec())],
+                )),
+            ),
+        )
+        .await
+        .expect("append native source without backfilling a covered ordinary prefix");
+        assert_eq!(appended.summary.checkpoints_written, 2);
+        assert_eq!(appended.summary.skipped_covered, 1);
+        assert_eq!(
+            native_import_test_identity_kinds(&prefix_conn).await,
+            ["empty", "nonempty"]
+        );
+
+        // A stale lease and marker are deliberately present: an invalid
+        // mapping must fail before acquire_identity can take over either.
+        let (_stale_dir, stale_conn, stale_root, stale_scope) = native_import_test_setup().await;
+        let stale_storage = stale_root.join(util::ROOT_DIR);
+        let stale_request = native_import_test_request(&stale_root, &stale_scope, 2);
+        let stale_identity_id = identity_id(&stale_request);
+        stale_conn
+            .execute_raw(Statement::from_sql_and_values(
+                stale_conn.get_database_backend(),
+                "INSERT INTO agent_import_identity (
+                    identity_id, agent_kind, provider_session_id, source_kind,
+                    source_id, schema_version, next_ordinal, state, owner,
+                    lease_expires_at, fence_token, created_at, updated_at,
+                    attempt_checkpoint_id, repo_id, worktree_id,
+                    workspace_id, workspace_fence, scope_state
+                 ) VALUES (?, 'claude_code', ?, 'file', ?, 2, 0, 'leased',
+                           'stale-owner', 1, 4, 1, 1, 'stale-checkpoint',
+                           ?, ?, ?, ?, 'scoped')",
+                [
+                    stale_identity_id.clone().into(),
+                    stale_request.provider_session_id.clone().into(),
+                    stale_request.source_id.clone().into(),
+                    stale_scope.repo_id.clone().into(),
+                    stale_scope.worktree_id.clone().into(),
+                    stale_scope.workspace_id.clone().into(),
+                    stale_scope.workspace_fence.into(),
+                ],
+            ))
+            .await
+            .expect("seed stale import owner");
+        let stale_marker =
+            TracesInflightMarker::new(&stale_request.session_id, "stale-checkpoint", 4);
+        history::write_traces_inflight_marker(&stale_conn, &stale_marker)
+            .await
+            .expect("seed stale import marker");
+        for (request, batch) in [
+            (
+                {
+                    let mut duplicate = native_import_test_request(&stale_root, &stale_scope, 2);
+                    duplicate.turns[1].logical_turn_key = "synthetic-turn-0".to_owned();
+                    duplicate
+                },
+                native_import_test_verified_batch(4, vec![(0, b"duplicate turn".to_vec())]),
+            ),
+            (
+                native_import_test_request(&stale_root, &stale_scope, 2),
+                native_import_test_verified_batch(5, vec![(2, b"orphan turn".to_vec())]),
+            ),
+            (
+                {
+                    let mut incomplete = native_import_test_request(&stale_root, &stale_scope, 2);
+                    incomplete.transcript_snapshot = None;
+                    incomplete
+                },
+                native_import_test_verified_batch(6, vec![(0, b"unbound source".to_vec())]),
+            ),
+            (
+                {
+                    let mut unredacted = native_import_test_request(&stale_root, &stale_scope, 2);
+                    unredacted.turns[0].records =
+                        vec![crate::internal::ai::observed_agents::SemanticRecord::User {
+                            text: "AKIAAAAAAAAAAAAAAAAA".to_owned(),
+                        }];
+                    unredacted.content_digest = source_digest(&unredacted.turns);
+                    unredacted
+                },
+                native_import_test_verified_batch(7, vec![(0, b"unredacted source".to_vec())]),
+            ),
+        ] {
+            assert!(
+                import_prepared_with_subagent_discovery(
+                    &stale_conn,
+                    &stale_storage,
+                    request,
+                    commit_deadline_after(Duration::from_secs(30)),
+                    super::super::subagent_content::SubagentDiscovery::default(),
+                    Some(batch),
+                )
+                .await
+                .is_err(),
+                "duplicate, orphan, incomplete-source, and unredacted inputs must fail before lease takeover"
+            );
+            let row = stale_conn
+                .query_one_raw(Statement::from_sql_and_values(
+                    stale_conn.get_database_backend(),
+                    "SELECT owner, fence_token, attempt_checkpoint_id
+                     FROM agent_import_identity WHERE identity_id = ?",
+                    [stale_identity_id.clone().into()],
+                ))
+                .await
+                .expect("read unchanged stale import identity")
+                .expect("stale import identity remains");
+            assert_eq!(
+                row.try_get_by::<String, _>("owner").expect("stale owner"),
+                "stale-owner"
+            );
+            assert_eq!(
+                row.try_get_by::<i64, _>("fence_token")
+                    .expect("stale fence"),
+                4
+            );
+            assert_eq!(
+                row.try_get_by::<String, _>("attempt_checkpoint_id")
+                    .expect("stale marker binding"),
+                "stale-checkpoint"
+            );
+            assert!(
+                crate::internal::metadata::MetadataKv::get_with_conn(
+                    &stale_conn,
+                    crate::internal::metadata::MetadataScope::AgentTracesInflight,
+                    &stale_request.session_id,
+                    "stale-checkpoint",
+                )
+                .await
+                .expect("read unchanged stale marker")
+                .is_some(),
+                "preflight rejection must not retire the stale marker"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial_test::serial(cwd, env)]
+    async fn reasoning_real_multi_turn_import_failure_keeps_committed_progress() {
+        use crate::internal::ai::observed_agents::reasoning::{
+            ImportTransportKey, carrier_test_support as native, seal_import_transport,
+            synthetic_native_batch_for_turns, verify_import_transport,
+        };
+
+        let (_dir, conn, root, scope) = native_import_test_setup().await;
+        let storage = root.join(util::ROOT_DIR);
+        let first = crate::internal::ai::authorized_read::with_test_helper_program(
+            native_import_test_helper_program(),
+            with_import_failpoint(
+                "after_catalog_commit",
+                import_prepared_with_subagent_discovery(
+                    &conn,
+                    &storage,
+                    native_import_test_request(&root, &scope, 2),
+                    commit_deadline_after(Duration::from_secs(30)),
+                    super::super::subagent_content::SubagentDiscovery::default(),
+                    Some(native_import_test_verified_batch(
+                        7,
+                        vec![
+                            (0, b"private turn zero".to_vec()),
+                            (1, b"private turn one".to_vec()),
+                        ],
+                    )),
+                ),
+            ),
+        )
+        .await
+        .expect_err("inject a failure after the first durable turn");
+        let progress = first
+            .downcast_ref::<ImportProgressError>()
+            .expect("durable prefix must return partial progress");
+        assert_eq!(progress.summary.checkpoints_written, 1);
+        assert_eq!(
+            native_import_test_count(&conn, "SELECT COUNT(*) AS n FROM agent_checkpoint").await,
+            1
+        );
+        assert_eq!(native_import_test_identity_kinds(&conn).await, ["nonempty"]);
+        assert_eq!(
+            native_import_test_count(
+                &conn,
+                "SELECT COUNT(*) AS n FROM agent_coverage_claim WHERE state='reserved_import'"
+            )
+            .await,
+            0,
+            "the failed owner must release its uncommitted reservation"
+        );
+
+        let old_context = native_import_test_transport_context(7);
+        let stale_key = ImportTransportKey::random().expect("mint stale transport key");
+        let stale_dto = seal_import_transport(
+            stale_key
+                .encode_for_helper()
+                .into_key()
+                .expect("decode stale helper key"),
+            &old_context,
+            synthetic_native_batch_for_turns(
+                native::CAPTURE,
+                native::SOURCE,
+                vec![(1, b"private turn one".to_vec())],
+            ),
+        )
+        .expect("seal stale synthetic frame");
+        assert!(
+            verify_import_transport(
+                ImportTransportKey::random().expect("mint retry transport key"),
+                native_import_test_transport_context(8),
+                stale_dto,
+            )
+            .is_err(),
+            "a new retry challenge and key must reject an old-context frame"
+        );
+
+        let replay = native_import_test_replay_request(&conn, &root, &scope, 2).await;
+        let completed = crate::internal::ai::authorized_read::with_test_helper_program(
+            native_import_test_helper_program(),
+            import_prepared_with_subagent_discovery(
+                &conn,
+                &storage,
+                replay,
+                commit_deadline_after(Duration::from_secs(30)),
+                super::super::subagent_content::SubagentDiscovery::default(),
+                Some(native_import_test_verified_batch(
+                    8,
+                    vec![
+                        (0, b"private turn zero".to_vec()),
+                        (1, b"private turn one".to_vec()),
+                    ],
+                )),
+            ),
+        )
+        .await
+        .expect("retry must commit only the remaining native turn");
+        assert_eq!(completed.summary.checkpoints_written, 1);
+        assert_eq!(completed.summary.skipped_covered, 1);
+        assert_eq!(
+            native_import_test_count(&conn, "SELECT COUNT(*) AS n FROM agent_checkpoint").await,
+            2
+        );
+        assert_eq!(
+            native_import_test_identity_kinds(&conn).await,
+            ["nonempty", "nonempty"]
+        );
     }
 
     #[test]
@@ -4403,7 +5481,7 @@ mod tests {
                 .await
             } else {
                 import_prepared_with_subagent_discovery(
-                    &conn, &storage, request, deadline, discovery,
+                    &conn, &storage, request, deadline, discovery, None,
                 )
                 .await
             }
@@ -7776,6 +8854,7 @@ mod tests {
             request,
             commit_deadline_after(std::time::Duration::from_secs(5)),
             super::super::subagent_content::SubagentDiscovery::default(),
+            None,
         )
         .await
         .expect_err("future request must be rejected before leasing");
@@ -7842,6 +8921,7 @@ mod tests {
             request,
             commit_deadline_after(std::time::Duration::from_secs(5)),
             super::super::subagent_content::SubagentDiscovery::default(),
+            None,
         )
         .await
         .expect_err("a newly supplied V1 request must be rejected before persistence");

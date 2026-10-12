@@ -4,8 +4,16 @@
 //! authorization. Provider adapters must establish identity from pinned source
 //! evidence; entropy and base64-like contents never prove ciphertext.
 
-use std::{collections::BTreeSet, fmt};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+};
 
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
+use ring::{
+    hmac,
+    rand::{SecureRandom, SystemRandom},
+};
 use serde::{
     Deserialize, Serialize,
     de::{self, Deserializer, MapAccess, SeqAccess, Visitor},
@@ -13,6 +21,7 @@ use serde::{
 use serde_json::value::RawValue;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
+use zeroize::Zeroize;
 
 use super::transcript_source::TRANSCRIPT_READ_HARD_CAP_BYTES;
 
@@ -161,6 +170,192 @@ pub(crate) struct NativeProvenReasoning {
     proofs: Vec<NativeReasoningProof>,
 }
 
+/// A fresh, process-local import response key. It is consumed by seal or
+/// verify; the only wire copy is the explicitly redacted helper control type.
+pub(crate) struct ImportTransportKey([u8; 32]);
+
+impl ImportTransportKey {
+    pub(crate) fn random() -> Result<Self, ReasoningTransportError> {
+        let mut bytes = [0_u8; 32];
+        if SystemRandom::new().fill(&mut bytes).is_err() || bytes == [0; 32] {
+            bytes.zeroize();
+            return Err(ReasoningTransportError::KeyUnavailable);
+        }
+        Ok(Self(bytes))
+    }
+
+    pub(crate) fn encode_for_helper(&self) -> EncodedTransportKey {
+        EncodedTransportKey(self.0)
+    }
+}
+
+impl Drop for ImportTransportKey {
+    fn drop(&mut self) {
+        self.0.zeroize();
+    }
+}
+
+/// The only serializable key representation, confined to the bounded private
+/// helper control frame. Its Debug implementation never reveals key bytes.
+#[derive(Serialize, Deserialize)]
+#[serde(transparent)]
+pub(crate) struct EncodedTransportKey([u8; 32]);
+
+impl EncodedTransportKey {
+    pub(crate) fn into_key(self) -> Result<ImportTransportKey, ReasoningTransportError> {
+        if self.0 == [0; 32] {
+            return Err(ReasoningTransportError::InvalidControl);
+        }
+        Ok(ImportTransportKey(self.0))
+    }
+}
+
+impl fmt::Debug for EncodedTransportKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("EncodedTransportKey([redacted])")
+    }
+}
+
+impl Drop for EncodedTransportKey {
+    fn drop(&mut self) {
+        self.0.zeroize();
+    }
+}
+
+/// Parent and helper independently derive these expected bindings from their
+/// authorized request and source projection. None is itself native authority.
+pub(crate) struct ImportTransportContext {
+    challenge: [u8; 32],
+    request_digest: [u8; 32],
+    source_digest: [u8; 32],
+    scope_digest: [u8; 32],
+    projection_digest: [u8; 32],
+    provider: ReasoningProvider,
+    capture_session: String,
+    source_session: String,
+}
+
+impl ImportTransportContext {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        challenge: [u8; 32],
+        request_digest: [u8; 32],
+        source_digest: [u8; 32],
+        scope_digest: [u8; 32],
+        projection_digest: [u8; 32],
+        provider: ReasoningProvider,
+        capture_session: String,
+        source_session: String,
+    ) -> Result<Self, ReasoningTransportError> {
+        if capture_session.is_empty()
+            || source_session.is_empty()
+            || capture_session.len() > 4096
+            || source_session.len() > 4096
+        {
+            return Err(ReasoningTransportError::InvalidControl);
+        }
+        Ok(Self {
+            challenge,
+            request_digest,
+            source_digest,
+            scope_digest,
+            projection_digest,
+            provider,
+            capture_session,
+            source_session,
+        })
+    }
+
+    fn digest(&self) -> [u8; 32] {
+        let mut digest = Sha256::new();
+        digest.update(b"libra/import-reasoning-context/v1\0");
+        for bytes in [
+            self.challenge.as_slice(),
+            self.request_digest.as_slice(),
+            self.source_digest.as_slice(),
+            self.scope_digest.as_slice(),
+            self.projection_digest.as_slice(),
+            match self.provider {
+                ReasoningProvider::ClaudeCode => b"claude_code".as_slice(),
+                ReasoningProvider::Codex => b"codex".as_slice(),
+                ReasoningProvider::OpenCode => b"opencode".as_slice(),
+            },
+            self.capture_session.as_bytes(),
+            self.source_session.as_bytes(),
+        ] {
+            digest.update((bytes.len() as u64).to_le_bytes());
+            digest.update(bytes);
+        }
+        digest.finalize().into()
+    }
+}
+
+#[derive(Debug, Error)]
+pub(crate) enum ReasoningTransportError {
+    #[error("cannot create a private import transport key; retry the import")]
+    KeyUnavailable,
+    #[error("invalid private import transport control; retry the import")]
+    InvalidControl,
+    #[error("private import reasoning transport was rejected; retry the import")]
+    Rejected,
+    #[error("private import native reasoning proof was rejected; retry the import")]
+    NativeProofRejected,
+}
+
+/// A closed, untrusted wire value. Only `verify_import_transport` may turn it
+/// into owned native reasoning, after authenticating its complete collection.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ImportTransportDto {
+    version: u8,
+    context_sha256: [u8; 32],
+    items: Vec<ImportTransportItem>,
+    collection_sha256: [u8; 32],
+    mac: [u8; 32],
+}
+
+impl fmt::Debug for ImportTransportDto {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ImportTransportDto")
+            .field("version", &self.version)
+            .field("item_count", &self.items.len())
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ImportTransportItem {
+    locator: String,
+    provider: ReasoningProvider,
+    source_kind: ReasoningSourceKind,
+    bytes_base64: String,
+    proof: ImportTransportProof,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ImportTransportProof {
+    issuer: ImportTransportIssuer,
+    provider: ReasoningProvider,
+    source_session: String,
+    message: u64,
+    part: u64,
+    field: ReasoningSourceKind,
+    original_wire_sha256: [u8; 32],
+    logical_turn: String,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ImportTransportIssuer {
+    Unregistered,
+    #[cfg(test)]
+    SyntheticOnly,
+    #[cfg(test)]
+    SyntheticUnknown,
+}
+
 /// A capture association validated by the shared checkpoint adapter. It does
 /// not mint a native witness and cannot be serialized into an IPC shortcut.
 pub(crate) struct VerifiedCaptureBinding {
@@ -264,6 +459,12 @@ pub(crate) fn borrow_native_identity_bindings<'a>(
 }
 
 impl NativeProvenReasoning {
+    /// Source identity for a private helper context; this does not expose
+    /// proof bytes or grant a caller authority to mint another native batch.
+    pub(crate) fn transport_source_session(&self) -> &str {
+        &self.source_session
+    }
+
     fn validate(
         &self,
         capture_session: &str,
@@ -346,6 +547,334 @@ impl NativeProvenReasoning {
     }
 }
 
+fn max_import_transport_base64_bytes(
+    raw_cap: u64,
+    item_count: usize,
+) -> Result<u64, ReasoningTransportError> {
+    if item_count == 0 {
+        return Err(ReasoningTransportError::Rejected);
+    }
+    raw_cap
+        .checked_add(2)
+        .and_then(|size| size.checked_div(3))
+        .and_then(|size| size.checked_mul(4))
+        // Base64 padding is charged for each item, not once for the whole
+        // collection. This conservative margin admits a cap-sized raw batch
+        // split among short fields while keeping the encoded total bounded.
+        .and_then(|size| size.checked_add(4 * (item_count as u64 - 1)))
+        .ok_or(ReasoningTransportError::Rejected)
+}
+
+fn import_transport_collection_digest(
+    items: &[ImportTransportItem],
+) -> Result<[u8; 32], ReasoningTransportError> {
+    use crate::internal::ai::traces::{
+        REASONING_ARTIFACT_MAX_ENTRIES, REASONING_ARTIFACT_TOTAL_MAX_BYTES,
+    };
+
+    if items.is_empty() || items.len() > REASONING_ARTIFACT_MAX_ENTRIES {
+        return Err(ReasoningTransportError::Rejected);
+    }
+    let mut encoded_bytes = 0_u64;
+    let max_base64_bytes =
+        max_import_transport_base64_bytes(REASONING_ARTIFACT_TOTAL_MAX_BYTES, items.len())?;
+    for item in items {
+        let item_bytes = u64::try_from(item.bytes_base64.len())
+            .map_err(|_| ReasoningTransportError::Rejected)?;
+        encoded_bytes = encoded_bytes
+            .checked_add(item_bytes)
+            .ok_or(ReasoningTransportError::Rejected)?;
+        if encoded_bytes > max_base64_bytes
+            || item.locator.len() > 4096
+            || item.proof.source_session.len() > 4096
+            || item.proof.logical_turn.len() > 4096
+        {
+            return Err(ReasoningTransportError::Rejected);
+        }
+    }
+    // Struct field order and array order are fixed. No map or floating-point
+    // value can introduce a second representation of this collection.
+    let canonical = serde_json::to_vec(items).map_err(|_| ReasoningTransportError::Rejected)?;
+    Ok(Sha256::digest(canonical).into())
+}
+
+fn import_transport_mac(
+    key: &ImportTransportKey,
+    context_sha256: &[u8; 32],
+    collection_sha256: &[u8; 32],
+    item_count: usize,
+) -> Result<[u8; 32], ReasoningTransportError> {
+    let count = u64::try_from(item_count).map_err(|_| ReasoningTransportError::Rejected)?;
+    let signing_key = hmac::Key::new(hmac::HMAC_SHA256, &key.0);
+    let mut mac = hmac::Context::with_key(&signing_key);
+    mac.update(b"libra/import-reasoning-transport/v1\0");
+    mac.update(context_sha256);
+    mac.update(collection_sha256);
+    mac.update(&count.to_le_bytes());
+    let tag = mac.sign();
+    tag.as_ref()
+        .try_into()
+        .map_err(|_| ReasoningTransportError::Rejected)
+}
+
+/// Seal only a fixed-source native witness. A deserialized projection or
+/// arbitrary provider/kind label cannot call this with a native batch.
+pub(crate) fn seal_import_transport(
+    key: ImportTransportKey,
+    context: &ImportTransportContext,
+    native: NativeProvenReasoning,
+) -> Result<ImportTransportDto, ReasoningTransportError> {
+    native
+        .validate(&context.capture_session, context.provider)
+        .map_err(|_| ReasoningTransportError::Rejected)?;
+    if native.source_session != context.source_session {
+        return Err(ReasoningTransportError::Rejected);
+    }
+    let items = native
+        .artifacts
+        .into_iter()
+        .zip(native.proofs)
+        .map(
+            |(artifact, proof)| -> Result<ImportTransportItem, ReasoningTransportError> {
+                let source_kind = artifact
+                    .source_kind
+                    .ok_or(ReasoningTransportError::Rejected)?;
+                Ok(ImportTransportItem {
+                    locator: artifact.locator,
+                    provider: artifact.provider,
+                    source_kind,
+                    bytes_base64: BASE64_STANDARD.encode(artifact.bytes.as_bytes()),
+                    proof: ImportTransportProof {
+                        issuer: match proof.issuer {
+                            NativeReasoningIssuer::Unregistered => {
+                                ImportTransportIssuer::Unregistered
+                            }
+                            #[cfg(test)]
+                            NativeReasoningIssuer::SyntheticOnly => {
+                                ImportTransportIssuer::SyntheticOnly
+                            }
+                            #[cfg(test)]
+                            NativeReasoningIssuer::SyntheticUnknown => {
+                                ImportTransportIssuer::SyntheticUnknown
+                            }
+                        },
+                        provider: proof.provider,
+                        source_session: proof.source_session,
+                        message: proof.message,
+                        part: proof.part,
+                        field: proof.field,
+                        original_wire_sha256: proof.original_wire_sha256,
+                        logical_turn: proof.logical_turn,
+                    },
+                })
+            },
+        )
+        .collect::<Result<Vec<_>, _>>()?;
+    let collection_sha256 = import_transport_collection_digest(&items)?;
+    let context_sha256 = context.digest();
+    let mac = import_transport_mac(&key, &context_sha256, &collection_sha256, items.len())?;
+    Ok(ImportTransportDto {
+        version: 1,
+        context_sha256,
+        items,
+        collection_sha256,
+        mac,
+    })
+}
+
+/// Test-only malformed frame with a valid transport MAC. This exercises the
+/// parent's native-proof rejection after transport authentication without
+/// introducing a production DTO-to-native issuer.
+#[cfg(test)]
+pub(crate) fn invalidate_import_transport_native_proof_for_test(
+    mut dto: ImportTransportDto,
+    child_key: ImportTransportKey,
+    context: &ImportTransportContext,
+) -> Result<ImportTransportDto, ReasoningTransportError> {
+    if dto.version != 1 || dto.context_sha256 != context.digest() {
+        return Err(ReasoningTransportError::Rejected);
+    }
+    let first = dto
+        .items
+        .first_mut()
+        .ok_or(ReasoningTransportError::Rejected)?;
+    first.proof.issuer = ImportTransportIssuer::Unregistered;
+    dto.collection_sha256 = import_transport_collection_digest(&dto.items)?;
+    dto.mac = import_transport_mac(
+        &child_key,
+        &dto.context_sha256,
+        &dto.collection_sha256,
+        dto.items.len(),
+    )?;
+    Ok(dto)
+}
+
+/// Consume the parent's one-use key before rebuilding any private native
+/// value. The MAC authenticates transport only; native authority is still
+/// checked by the fixed issuer/coordinate validator below.
+pub(crate) fn verify_import_transport(
+    key: ImportTransportKey,
+    context: ImportTransportContext,
+    dto: ImportTransportDto,
+) -> Result<NativeProvenReasoning, ReasoningTransportError> {
+    if dto.version != 1 || dto.context_sha256 != context.digest() {
+        return Err(ReasoningTransportError::Rejected);
+    }
+    let collection_sha256 = import_transport_collection_digest(&dto.items)?;
+    if dto.collection_sha256 != collection_sha256 {
+        return Err(ReasoningTransportError::Rejected);
+    }
+    let signing_key = hmac::Key::new(hmac::HMAC_SHA256, &key.0);
+    // `ring::hmac::verify` performs the tag comparison in constant time.
+    // Keep the expected tag check in the same domain rather than reflecting
+    // a helper-provided value into an error or log.
+    let mut verification_body = Vec::with_capacity(32 + 32 + 8 + 36);
+    verification_body.extend_from_slice(b"libra/import-reasoning-transport/v1\0");
+    verification_body.extend_from_slice(&dto.context_sha256);
+    verification_body.extend_from_slice(&collection_sha256);
+    verification_body.extend_from_slice(&(dto.items.len() as u64).to_le_bytes());
+    hmac::verify(&signing_key, &verification_body, &dto.mac)
+        .map_err(|_| ReasoningTransportError::Rejected)?;
+    use crate::internal::ai::traces::REASONING_ARTIFACT_TOTAL_MAX_BYTES;
+    let mut total = 0_u64;
+    let mut artifacts = Vec::with_capacity(dto.items.len());
+    let mut proofs = Vec::with_capacity(dto.items.len());
+    for item in dto.items {
+        let bytes = BASE64_STANDARD
+            .decode(item.bytes_base64.as_bytes())
+            .map_err(|_| ReasoningTransportError::Rejected)?;
+        total = total
+            .checked_add(bytes.len() as u64)
+            .ok_or(ReasoningTransportError::Rejected)?;
+        if total > REASONING_ARTIFACT_TOTAL_MAX_BYTES {
+            return Err(ReasoningTransportError::Rejected);
+        }
+        artifacts.push(crate::internal::ai::traces::ReasoningArtifactParam {
+            locator: item.locator,
+            provider: item.provider,
+            source_kind: Some(item.source_kind),
+            availability: ReasoningAvailability::OpaqueArchived,
+            decrypt_capability: "none".to_owned(),
+            bytes: OpaqueEncryptedBytes {
+                data: bytes,
+                provider: item.provider,
+                source_kind: item.source_kind,
+            },
+        });
+        proofs.push(NativeReasoningProof {
+            issuer: match item.proof.issuer {
+                ImportTransportIssuer::Unregistered => NativeReasoningIssuer::Unregistered,
+                #[cfg(test)]
+                ImportTransportIssuer::SyntheticOnly => NativeReasoningIssuer::SyntheticOnly,
+                #[cfg(test)]
+                ImportTransportIssuer::SyntheticUnknown => NativeReasoningIssuer::SyntheticUnknown,
+            },
+            provider: item.proof.provider,
+            source_session: item.proof.source_session,
+            message: item.proof.message,
+            part: item.proof.part,
+            field: item.proof.field,
+            original_wire_sha256: item.proof.original_wire_sha256,
+            logical_turn: item.proof.logical_turn,
+        });
+    }
+    let native = NativeProvenReasoning {
+        capture_session: context.capture_session.clone(),
+        source_session: context.source_session.clone(),
+        artifacts,
+        proofs,
+    };
+    native
+        .validate(&context.capture_session, context.provider)
+        .map_err(|_| ReasoningTransportError::NativeProofRejected)?;
+    Ok(native)
+}
+
+/// A verified one-to-one mapping of all native items into the authorized
+/// import turn set. The checkpoint adapter alone may construct this after it
+/// checks the durable source and canonical capture identity.
+pub(crate) struct VerifiedImportTurnMapping {
+    capture_session: String,
+    source_session: String,
+    provider: ReasoningProvider,
+    turns: BTreeSet<String>,
+}
+
+impl VerifiedImportTurnMapping {
+    pub(crate) fn from_validated_import_mapping(
+        batch: &NativeProvenReasoning,
+        capture_session: &str,
+        provider: &str,
+        source_session: &str,
+        logical_turn_keys: &[&str],
+    ) -> Result<Self, ReasoningFieldError> {
+        let provider = match provider {
+            "claude_code" => ReasoningProvider::ClaudeCode,
+            "codex" => ReasoningProvider::Codex,
+            "opencode" => ReasoningProvider::OpenCode,
+            _ => return Err(ReasoningFieldError::UnsupportedShape),
+        };
+        batch.validate(capture_session, provider)?;
+        if source_session.is_empty() || batch.source_session != source_session {
+            return Err(ReasoningFieldError::UnsupportedShape);
+        }
+        let turns = logical_turn_keys
+            .iter()
+            .map(|turn| (*turn).to_owned())
+            .collect::<BTreeSet<_>>();
+        if turns.len() != logical_turn_keys.len()
+            || turns.iter().any(String::is_empty)
+            || batch
+                .proofs
+                .iter()
+                .any(|proof| !turns.contains(&proof.logical_turn))
+        {
+            return Err(ReasoningFieldError::UnsupportedShape);
+        }
+        Ok(Self {
+            capture_session: capture_session.to_owned(),
+            source_session: source_session.to_owned(),
+            provider,
+            turns,
+        })
+    }
+}
+
+/// Move each ciphertext and its original proof into exactly one per-turn
+/// batch. No ciphertext/proof clone, native issuer, or DTO constructor exists
+/// in this ownership transform.
+pub(crate) fn partition_import_reasoning(
+    native: NativeProvenReasoning,
+    mapping: &VerifiedImportTurnMapping,
+) -> Result<BTreeMap<String, NativeProvenReasoning>, ReasoningFieldError> {
+    native.validate(&mapping.capture_session, mapping.provider)?;
+    if native.source_session != mapping.source_session
+        || native
+            .proofs
+            .iter()
+            .any(|proof| !mapping.turns.contains(&proof.logical_turn))
+    {
+        return Err(ReasoningFieldError::UnsupportedShape);
+    }
+    let mut partitioned = BTreeMap::<String, NativeProvenReasoning>::new();
+    for (artifact, proof) in native.artifacts.into_iter().zip(native.proofs) {
+        let batch = partitioned
+            .entry(proof.logical_turn.clone())
+            .or_insert_with(|| NativeProvenReasoning {
+                capture_session: mapping.capture_session.clone(),
+                source_session: mapping.source_session.clone(),
+                artifacts: Vec::new(),
+                proofs: Vec::new(),
+            });
+        batch.artifacts.push(artifact);
+        batch.proofs.push(proof);
+    }
+    for batch in partitioned.values() {
+        batch.validate(&mapping.capture_session, mapping.provider)?;
+    }
+    Ok(partitioned)
+}
+
 #[cfg(test)]
 pub(crate) fn synthetic_native_preparation(
     ordinary: Vec<u8>,
@@ -353,12 +882,31 @@ pub(crate) fn synthetic_native_preparation(
     source_session: &str,
     fields: Vec<Vec<u8>>,
 ) -> PreparedReasoningSource {
+    let fields = fields.into_iter().map(|bytes| (0, bytes)).collect();
+    PreparedReasoningSource {
+        ordinary,
+        disposition: ReasoningSourceDisposition::NativeProven(synthetic_native_batch_for_turns(
+            capture_session,
+            source_session,
+            fields,
+        )),
+    }
+}
+
+/// Test-only native proof fixture whose message coordinate selects the
+/// synthetic logical turn. Production issuers remain closed.
+#[cfg(test)]
+pub(crate) fn synthetic_native_batch_for_turns(
+    capture_session: &str,
+    source_session: &str,
+    fields: Vec<(u64, Vec<u8>)>,
+) -> NativeProvenReasoning {
     let mut artifacts = Vec::with_capacity(fields.len());
     let mut proofs = Vec::with_capacity(fields.len());
-    for (part, data) in fields.into_iter().enumerate() {
+    for (part, (message, data)) in fields.into_iter().enumerate() {
         let digest = Sha256::digest(&data).into();
         artifacts.push(crate::internal::ai::traces::ReasoningArtifactParam {
-            locator: format!("claude_code:msg=0/part={part}/metadata=signature"),
+            locator: format!("claude_code:msg={message}/part={part}/metadata=signature"),
             provider: ReasoningProvider::ClaudeCode,
             source_kind: Some(ReasoningSourceKind::Signature),
             availability: ReasoningAvailability::OpaqueArchived,
@@ -373,21 +921,18 @@ pub(crate) fn synthetic_native_preparation(
             issuer: NativeReasoningIssuer::SyntheticOnly,
             provider: ReasoningProvider::ClaudeCode,
             source_session: source_session.to_owned(),
-            message: 0,
+            message,
             part: part as u64,
             field: ReasoningSourceKind::Signature,
             original_wire_sha256: digest,
-            logical_turn: "synthetic-turn-0".to_owned(),
+            logical_turn: format!("synthetic-turn-{message}"),
         });
     }
-    PreparedReasoningSource {
-        ordinary,
-        disposition: ReasoningSourceDisposition::NativeProven(NativeProvenReasoning {
-            capture_session: capture_session.to_owned(),
-            source_session: source_session.to_owned(),
-            artifacts,
-            proofs,
-        }),
+    NativeProvenReasoning {
+        capture_session: capture_session.to_owned(),
+        source_session: source_session.to_owned(),
+        artifacts,
+        proofs,
     }
 }
 
@@ -1106,6 +1651,159 @@ impl fmt::Debug for OpaqueEncryptedBytes {
 
 #[cfg(test)]
 mod tests {
+    fn transport_context() -> ImportTransportContext {
+        ImportTransportContext::new(
+            [1; 32],
+            [2; 32],
+            [3; 32],
+            [4; 32],
+            [5; 32],
+            ReasoningProvider::ClaudeCode,
+            carrier_test_support::CAPTURE.to_owned(),
+            carrier_test_support::SOURCE.to_owned(),
+        )
+        .expect("valid synthetic context")
+    }
+
+    fn transport_native() -> NativeProvenReasoning {
+        let prepared = synthetic_native_preparation(
+            b"ordinary".to_vec(),
+            carrier_test_support::CAPTURE,
+            carrier_test_support::SOURCE,
+            vec![b"private-wire-0".to_vec(), b"private-wire-1".to_vec()],
+        );
+        let ReasoningSourceDisposition::NativeProven(native) = prepared.disposition else {
+            panic!("synthetic fixture must have a native witness")
+        };
+        native
+    }
+
+    #[test]
+    fn reasoning_transport_key_is_single_use() {
+        let parent_key = ImportTransportKey::random().expect("OS randomness");
+        let encoded = parent_key.encode_for_helper();
+        assert!(!format!("{encoded:?}").contains(&hex::encode(encoded.0)));
+        let wire = serde_json::to_vec(&encoded).expect("encode private helper control");
+        let decoded: EncodedTransportKey =
+            serde_json::from_slice(&wire).expect("decode private helper control");
+        let child_key = decoded.into_key().expect("valid helper key");
+        let context = transport_context();
+        let dto = seal_import_transport(child_key, &context, transport_native())
+            .expect("synthetic native seal");
+        let restored = verify_import_transport(parent_key, context, dto)
+            .expect("authenticated native restore");
+        assert_eq!(restored.artifacts.len(), 2);
+        assert_eq!(restored.proofs.len(), 2);
+        assert_eq!(restored.artifacts[0].bytes.as_bytes(), b"private-wire-0");
+        assert_eq!(restored.artifacts[1].bytes.as_bytes(), b"private-wire-1");
+    }
+
+    #[test]
+    fn reasoning_transport_rejects_bound_mutation_and_signed_missing_proof() {
+        let context = transport_context();
+        let dto = seal_import_transport(ImportTransportKey([7; 32]), &context, transport_native())
+            .expect("synthetic native seal");
+        let wrong_context = ImportTransportContext::new(
+            [1; 32],
+            [2; 32],
+            [9; 32],
+            [4; 32],
+            [5; 32],
+            ReasoningProvider::ClaudeCode,
+            carrier_test_support::CAPTURE.to_owned(),
+            carrier_test_support::SOURCE.to_owned(),
+        )
+        .expect("valid changed context");
+        let frame = serde_json::to_vec(&dto).expect("encode transport");
+        let copied: ImportTransportDto = serde_json::from_slice(&frame).expect("decode transport");
+        assert!(matches!(
+            verify_import_transport(ImportTransportKey([7; 32]), wrong_context, copied),
+            Err(ReasoningTransportError::Rejected)
+        ));
+
+        let missing_proof: ImportTransportDto =
+            serde_json::from_slice(&frame).expect("decode transport");
+        let missing_proof = invalidate_import_transport_native_proof_for_test(
+            missing_proof,
+            ImportTransportKey([7; 32]),
+            &context,
+        )
+        .expect("test-only malformed signed frame");
+        assert!(!missing_proof.items.is_empty());
+        assert!(matches!(
+            verify_import_transport(ImportTransportKey([7; 32]), context, missing_proof),
+            Err(ReasoningTransportError::NativeProofRejected)
+        ));
+    }
+
+    #[test]
+    fn reasoning_transport_base64_budget_accounts_for_per_item_padding() {
+        // Three fields totaling six bytes encode as 4 + 4 + 8 bytes. A
+        // whole-collection padding estimate would incorrectly allow only 8.
+        let allowed = max_import_transport_base64_bytes(6, 3).expect("bounded frame");
+        let actual = [1_usize, 1, 4]
+            .into_iter()
+            .map(|len| BASE64_STANDARD.encode(vec![0; len]).len() as u64)
+            .sum::<u64>();
+        assert!(actual <= allowed);
+        assert!(actual > max_import_transport_base64_bytes(6, 1).expect("one field"));
+    }
+
+    #[test]
+    fn reasoning_transport_error_display_is_stable() {
+        assert_eq!(
+            ReasoningTransportError::KeyUnavailable.to_string(),
+            "cannot create a private import transport key; retry the import"
+        );
+        assert_eq!(
+            ReasoningTransportError::InvalidControl.to_string(),
+            "invalid private import transport control; retry the import"
+        );
+        assert_eq!(
+            ReasoningTransportError::Rejected.to_string(),
+            "private import reasoning transport was rejected; retry the import"
+        );
+        assert_eq!(
+            ReasoningTransportError::NativeProofRejected.to_string(),
+            "private import native reasoning proof was rejected; retry the import"
+        );
+    }
+
+    #[test]
+    fn reasoning_import_partition_moves_each_existing_item_once() {
+        let native = synthetic_native_batch_for_turns(
+            carrier_test_support::CAPTURE,
+            carrier_test_support::SOURCE,
+            vec![
+                (0, b"private-wire-0".to_vec()),
+                (1, b"private-wire-1".to_vec()),
+                (0, b"private-wire-2".to_vec()),
+            ],
+        );
+        let mapping = VerifiedImportTurnMapping::from_validated_import_mapping(
+            &native,
+            carrier_test_support::CAPTURE,
+            "claude_code",
+            carrier_test_support::SOURCE,
+            &["synthetic-turn-0", "synthetic-turn-1", "ordinary-turn"],
+        )
+        .expect("authorized synthetic turn map");
+        let partitioned = partition_import_reasoning(native, &mapping).expect("valid partition");
+        assert_eq!(partitioned.len(), 2);
+        let batch = partitioned
+            .get("synthetic-turn-0")
+            .expect("candidate-bearing turn");
+        assert_eq!(batch.artifacts.len(), 2);
+        assert_eq!(batch.proofs.len(), 2);
+        assert_eq!(batch.artifacts[0].bytes.as_bytes(), b"private-wire-0");
+        assert_eq!(batch.artifacts[1].bytes.as_bytes(), b"private-wire-2");
+        let other = partitioned
+            .get("synthetic-turn-1")
+            .expect("second candidate-bearing turn");
+        assert_eq!(other.artifacts.len(), 1);
+        assert_eq!(other.artifacts[0].bytes.as_bytes(), b"private-wire-1");
+    }
+
     #[test]
     fn native_reasoning_proof_rejects_each_bound_dimension() {
         fn batch() -> NativeProvenReasoning {

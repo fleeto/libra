@@ -13,11 +13,12 @@ use std::{
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use clap::{ArgGroup, Args};
+#[cfg(unix)]
+use ring::rand::SecureRandom;
 use sea_orm::{ConnectionTrait, DatabaseConnection, Statement};
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
 
-#[cfg_attr(windows, allow(unused_imports))]
 use crate::{
     internal::{
         ai::{
@@ -29,9 +30,9 @@ use crate::{
                 import_prepared_with_subagent_discovery, import_provider_commitment,
                 import_request_from_projection, import_source_preimage, import_storage_commitment,
                 is_import_source_commitment_v2, load_existing_session_ownership_in_scope,
-                migrate_legacy_import_ownership_in_scope_until, prepare_import_projection,
-                restore_tombstone, session_is_tombstoned, validate_import_index_repair_marker,
-                validate_scoped_prepared_existing_session,
+                migrate_legacy_import_ownership_in_scope_until,
+                prepare_import_projection_with_reasoning, restore_tombstone, session_is_tombstoned,
+                validate_import_index_repair_marker, validate_scoped_prepared_existing_session,
             },
             authorized_read::{
                 CancellationSafeChild, RegisteredHelperOutput, StrictBoundedRead,
@@ -52,6 +53,11 @@ use crate::{
                 compliance::{MAX_TRANSCRIPT_READ_BYTES_KEY, max_transcript_read_bytes_setting},
                 find_codex_rollout, open_provider_directory_for_discovery,
                 opencode_export::{ExportLimits, authorized_trusted_sandboxed_export_until},
+                reasoning::{
+                    EncodedTransportKey, ImportTransportContext, ImportTransportDto,
+                    ImportTransportKey, NativeProvenReasoning, ReasoningProvider,
+                    seal_import_transport, verify_import_transport,
+                },
                 resolve_import_transcript_source_until, resolve_session_file,
             },
         },
@@ -524,6 +530,163 @@ struct PreparationDescriptorControl {
     provider_commitment: [u8; 32],
     read_cap: u64,
     remaining_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    transport: Option<PreparationImportTransportControl>,
+}
+
+/// The only new request wire frame. The source and scope values are opaque
+/// commitments, never source identifiers or repository paths. The encoded
+/// key has a redacted Debug implementation in the lower reasoning module.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PreparationImportTransportControl {
+    version: u8,
+    challenge: [u8; 32],
+    source_preimage_commitment: [u8; 32],
+    scope_digest: [u8; 32],
+    key: EncodedTransportKey,
+}
+
+impl std::fmt::Debug for PreparationImportTransportControl {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PreparationImportTransportControl")
+            .field("version", &self.version)
+            .field("challenge", &"[redacted]")
+            .field("source_preimage_commitment", &"[redacted]")
+            .field("scope_digest", &"[redacted]")
+            .field("key", &"[redacted]")
+            .finish()
+    }
+}
+
+/// Expected request bindings retained only in the parent process after the
+/// control frame has moved into the descriptor helper. None is a secret key.
+struct PreparationImportTransportBinding {
+    challenge: [u8; 32],
+    request_digest: [u8; 32],
+    source_preimage_commitment: [u8; 32],
+    scope_digest: [u8; 32],
+}
+
+fn import_transport_digest(domain: &[u8], fields: &[&[u8]]) -> [u8; 32] {
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(domain);
+    for field in fields {
+        hasher.update((field.len() as u64).to_le_bytes());
+        hasher.update(field);
+    }
+    hasher.finalize().into()
+}
+
+fn import_transport_source_preimage_commitment(preimage: &[u8; 32]) -> [u8; 32] {
+    import_transport_digest(b"libra/import-transport-source-preimage/v1\0", &[preimage])
+}
+
+fn import_transport_scope_digest(scope: &CaptureScope) -> Result<[u8; 32]> {
+    let encoded = serde_json::to_vec(scope).map_err(|_| ImportError::AuthorizedReaderFailed)?;
+    Ok(import_transport_digest(
+        b"libra/import-transport-scope/v1\0",
+        &[&encoded],
+    ))
+}
+
+impl PreparationImportTransportBinding {
+    fn from_control(control: &PreparationDescriptorControl) -> Result<Option<Self>> {
+        let Some(transport) = control.transport.as_ref() else {
+            return Ok(None);
+        };
+        if transport.version != 1 {
+            return Err(ImportError::AuthorizedReaderFailed.into());
+        }
+        let request_digest = import_transport_digest(
+            b"libra/import-transport-request/v1\0",
+            &[
+                control.agent_kind.as_bytes(),
+                control.source_kind.as_bytes(),
+                &control.provider_commitment,
+                &control.read_cap.to_le_bytes(),
+                &control.remaining_ms.to_le_bytes(),
+                &[transport.version],
+                &transport.challenge,
+                &transport.source_preimage_commitment,
+                &transport.scope_digest,
+            ],
+        );
+        Ok(Some(Self {
+            challenge: transport.challenge,
+            request_digest,
+            source_preimage_commitment: transport.source_preimage_commitment,
+            scope_digest: transport.scope_digest,
+        }))
+    }
+
+    fn context(
+        &self,
+        agent_kind: AgentKind,
+        source_session: &str,
+        projection: &PreparedImportProjection,
+    ) -> Result<ImportTransportContext> {
+        let snapshot_preimage = projection
+            .transcript_snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.redacted_digest_preimage())
+            .ok_or(ImportError::AuthorizedReaderFailed)?;
+        let source_digest = import_transport_digest(
+            b"libra/import-transport-authorized-source/v1\0",
+            &[&self.source_preimage_commitment, &snapshot_preimage],
+        );
+        let encoded_projection =
+            serde_json::to_vec(projection).map_err(|_| ImportError::AuthorizedReaderFailed)?;
+        let projection_digest = import_transport_digest(
+            b"libra/import-transport-projection/v1\0",
+            &[&encoded_projection],
+        );
+        let provider = match agent_kind {
+            AgentKind::ClaudeCode => ReasoningProvider::ClaudeCode,
+            AgentKind::Codex => ReasoningProvider::Codex,
+            AgentKind::OpenCode => ReasoningProvider::OpenCode,
+            _ => return Err(ImportError::AuthorizedReaderFailed.into()),
+        };
+        let capture_session = crate::internal::ai::hooks::runtime::build_ai_session_id(
+            provider_name(agent_kind),
+            source_session,
+        );
+        ImportTransportContext::new(
+            self.challenge,
+            self.request_digest,
+            source_digest,
+            self.scope_digest,
+            projection_digest,
+            provider,
+            capture_session,
+            source_session.to_owned(),
+        )
+        .map_err(|_| ImportError::AuthorizedReaderFailed.into())
+    }
+}
+
+/// The single production parent consumer for a helper's untrusted optional
+/// typed response. The caller must invoke it before any scoped key derivation
+/// or legacy ownership migration.
+fn consume_prepared_reasoning_transport(
+    key: ImportTransportKey,
+    binding: &PreparationImportTransportBinding,
+    agent_kind: AgentKind,
+    source_session: &str,
+    projection: &PreparedImportProjection,
+    transport_required: Option<bool>,
+    transport: Option<ImportTransportDto>,
+) -> Result<Option<NativeProvenReasoning>> {
+    let transport = match (transport_required, transport) {
+        (None, None) => return Ok(None),
+        (Some(true), Some(transport)) => transport,
+        _ => return Err(ImportError::AuthorizedReaderFailed.into()),
+    };
+    let context = binding.context(agent_kind, source_session, projection)?;
+    verify_import_transport(key, context, transport)
+        .map(Some)
+        .context(ImportError::AuthorizedReaderFailed)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -547,6 +710,10 @@ enum PreparationDescriptorHelperResponse {
     Ok {
         projection: Box<PreparedImportProjection>,
         raw_bytes: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        transport_required: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        transport: Option<ImportTransportDto>,
     },
     Error {
         error_kind: Option<PreparationImportErrorKind>,
@@ -586,7 +753,7 @@ struct ImportIdentityFence {
 }
 
 struct PreparedCandidateOutcome {
-    request: Result<ImportRequest>,
+    request: Result<(ImportRequest, Option<NativeProvenReasoning>)>,
     raw_bytes: u64,
 }
 
@@ -1795,6 +1962,10 @@ fn descriptor_preparation_control_from_environment() -> Result<PreparationDescri
         serde_json::from_str(&encoded).context("decode internal descriptor preparation control")?;
     if control.read_cap > TRANSCRIPT_READ_HARD_CAP_BYTES
         || control.remaining_ms == 0
+        || control
+            .transport
+            .as_ref()
+            .is_some_and(|transport| transport.version != 1)
         || !matches!(control.source_kind.as_str(), "file" | "export")
         || AgentKind::from_cli_slug(&control.agent_kind).is_none_or(|kind| {
             !matches!(
@@ -1837,19 +2008,47 @@ pub fn run_import_preparation_descriptor_helper_from_stdin() -> Result<Vec<u8>> 
     let outcome = if raw_bytes > control.read_cap {
         Err(ImportError::BatchInputLimit.into())
     } else {
-        prepare_import_projection(kind, control.provider_commitment, bytes, deadline)
+        prepare_import_projection_with_reasoning(kind, control.provider_commitment, bytes, deadline)
     };
     let response = match outcome {
-        Ok(projection) => PreparationDescriptorHelperResponse::Ok {
-            projection: Box::new(projection),
-            raw_bytes,
-        },
+        Ok((projection, native)) => {
+            let transport_required = native.as_ref().map(|_| true);
+            let transport = if let Some(native) = native {
+                let binding = PreparationImportTransportBinding::from_control(&control)?
+                    .ok_or(ImportError::AuthorizedReaderFailed)?;
+                let context =
+                    binding.context(kind, native.transport_source_session(), &projection)?;
+                let key = control
+                    .transport
+                    .ok_or(ImportError::AuthorizedReaderFailed)?
+                    .key
+                    .into_key()
+                    .map_err(|_| ImportError::AuthorizedReaderFailed)?;
+                Some(
+                    seal_import_transport(key, &context, native)
+                        .map_err(|_| ImportError::AuthorizedReaderFailed)?,
+                )
+            } else {
+                None
+            };
+            PreparationDescriptorHelperResponse::Ok {
+                projection: Box::new(projection),
+                raw_bytes,
+                transport_required,
+                transport,
+            }
+        }
         Err(error) => PreparationDescriptorHelperResponse::Error {
             error_kind: preparation_error_kind(&error),
             raw_bytes,
         },
     };
-    serde_json::to_vec(&response).context("encode internal descriptor preparation response")
+    let encoded =
+        serde_json::to_vec(&response).context("encode internal descriptor preparation response")?;
+    if encoded.len() as u64 > IMPORT_PREPARATION_HELPER_OUTPUT_CAP {
+        return Err(ImportError::AuthorizedReaderFailed.into());
+    }
+    Ok(encoded)
 }
 
 /// Private subprocess entry for a durable import replay's foreground
@@ -2612,13 +2811,30 @@ async fn prepare_candidate_bounded(
         if remaining_ms == 0 {
             return Err(ImportError::DeadlineExceeded.into());
         }
+        let transport_key =
+            ImportTransportKey::random().map_err(|_| ImportError::AuthorizedReaderFailed)?;
+        let mut challenge = [0_u8; 32];
+        ring::rand::SystemRandom::new()
+            .fill(&mut challenge)
+            .map_err(|_| ImportError::AuthorizedReaderFailed)?;
         let control = PreparationDescriptorControl {
             agent_kind: candidate.kind.as_cli_slug().to_string(),
             source_kind: source_kind.clone(),
             provider_commitment: import_provider_commitment(&candidate.provider_session_id),
             read_cap,
             remaining_ms,
+            transport: Some(PreparationImportTransportControl {
+                version: 1,
+                challenge,
+                source_preimage_commitment: import_transport_source_preimage_commitment(
+                    &source_preimage,
+                ),
+                scope_digest: import_transport_scope_digest(capture_scope)?,
+                key: transport_key.encode_for_helper(),
+            }),
         };
+        let transport_binding = PreparationImportTransportBinding::from_control(&control)?
+            .ok_or(ImportError::AuthorizedReaderFailed)?;
         let command = require_registered_import_helper_command(registered_helper_command(
             IMPORT_PREPARATION_DESCRIPTOR_HELPER_ARG,
         ))?;
@@ -2637,6 +2853,8 @@ async fn prepare_candidate_bounded(
             PreparationDescriptorHelperResponse::Ok {
                 projection,
                 raw_bytes,
+                transport_required,
+                transport,
             } => {
                 let mut projection = *projection;
                 if projection.storage_commitment != import_storage_commitment(storage_root)? {
@@ -2654,6 +2872,18 @@ async fn prepare_candidate_bounded(
                     .as_ref()
                     .and_then(|snapshot| snapshot.redacted_digest_preimage())
                     .ok_or(ImportError::AuthorizedReaderFailed)?;
+                // Authenticate the typed response while its helper projection
+                // still carries the transient source checksum. A failed or
+                // stale response must not reach key derivation or migration.
+                let native_reasoning = consume_prepared_reasoning_transport(
+                    transport_key,
+                    &transport_binding,
+                    candidate.kind,
+                    &candidate.provider_session_id,
+                    &projection,
+                    transport_required,
+                    transport,
+                )?;
                 await_import_precommit_read_until(
                     monotonic_deadline,
                     capture_scope.assert_workspace_fence_live(conn),
@@ -2738,7 +2968,7 @@ async fn prepare_candidate_bounded(
                 .await?;
                 validate_scoped_prepared_existing_session(&mut request, existing_session.as_ref())?;
                 Ok(PreparedCandidateOutcome {
-                    request: Ok(request),
+                    request: Ok((request, native_reasoning)),
                     raw_bytes,
                 })
             }
@@ -2952,7 +3182,7 @@ pub async fn execute_safe(args: ImportArgs, output: &OutputConfig) -> CliResult<
             if cumulative_raw_bytes > raw_byte_cap {
                 return Err(ImportError::BatchInputLimit.into());
             }
-            let request = prepared.request?;
+            let (request, native_reasoning) = prepared.request?;
             let barrier = acquire_import_index_barrier(
                 &conn,
                 &storage_root,
@@ -3005,6 +3235,7 @@ pub async fn execute_safe(args: ImportArgs, output: &OutputConfig) -> CliResult<
                 request,
                 commit_deadline,
                 subagent_discovery,
+                native_reasoning,
             )
             .await
         }
@@ -3194,7 +3425,513 @@ pub async fn execute_safe(args: ImportArgs, output: &OutputConfig) -> CliResult<
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use crate::internal::ai::{
+        capture::snapshot::{
+            CaptureSnapshotCompleteness, CaptureSnapshotProjection, CaptureSnapshotSource,
+            CaptureSnapshotSourceKind,
+        },
+        observed_agents::reasoning::{
+            ReasoningSourceDisposition, ReasoningTransportError,
+            invalidate_import_transport_native_proof_for_test, synthetic_native_preparation,
+        },
+    };
     use crate::utils::error::CliErrorKind;
+
+    #[cfg(unix)]
+    fn reasoning_transport_test_projection() -> PreparedImportProjection {
+        use crate::internal::ai::observed_agents::{Completeness, NormalizedTurn, SemanticRecord};
+
+        let turn = NormalizedTurn {
+            logical_turn_key: "synthetic-turn-0".to_owned(),
+            ordinal: 0,
+            completeness: Completeness::Complete,
+            started_at: Some(1),
+            ended_at: Some(2),
+            records: vec![SemanticRecord::User {
+                text: "ordinary synthetic import source".to_owned(),
+            }],
+        };
+        let mut content = sha2::Sha256::new();
+        content.update(turn.logical_turn_key.as_bytes());
+        content.update([0]);
+        content.update(turn.digest_hex().as_bytes());
+        content.update([0xff]);
+        PreparedImportProjection {
+            content_digest: hex::encode(content.finalize()),
+            started_at: 1,
+            ended_at: 2,
+            session_state: "stopped".to_owned(),
+            stopped_at: Some(2),
+            storage_commitment: [0x11; 32],
+            redaction_report: serde_json::json!({
+                "pipeline": "typed_allowlist",
+                "raw_persisted": false,
+                "matches": [],
+                "bytes_scanned": 0,
+                "bytes_redacted": 0
+            }),
+            transcript_snapshot: Some(CaptureSnapshotProjection {
+                completeness: CaptureSnapshotCompleteness::Complete,
+                partial_reason: None,
+                source: Some(CaptureSnapshotSource {
+                    kind: CaptureSnapshotSourceKind::TrustedExport,
+                    identity: "not_retained:v1".to_owned(),
+                    digest_sha256: Some(format!("sha256:{}", hex::encode([0x55; 32]))),
+                    byte_len: Some(8),
+                }),
+                transcript_redacted_bytes: 8,
+                redaction_match_count: 0,
+                redaction_bytes_scanned: 8,
+                redaction_bytes_redacted: 0,
+            }),
+            turn_boundaries: std::collections::BTreeMap::from([(
+                turn.logical_turn_key.clone(),
+                crate::internal::ai::agent_import::TurnBoundary {
+                    started_at: 1,
+                    ended_at: 2,
+                },
+            )]),
+            turns: vec![turn],
+        }
+    }
+
+    #[cfg(unix)]
+    fn authenticated_reasoning_transport_test_fixture() -> (
+        PreparedImportProjection,
+        PreparationImportTransportBinding,
+        ImportTransportKey,
+        ImportTransportDto,
+    ) {
+        const SOURCE: &str = "og16-native-source";
+        const CAPTURE: &str = "claude__og16-native-source";
+        let key = ImportTransportKey::random().expect("fresh test transport key");
+        let mut control = test_descriptor_control();
+        control.transport = Some(PreparationImportTransportControl {
+            version: 1,
+            challenge: [0x44; 32],
+            source_preimage_commitment: [0x22; 32],
+            scope_digest: [0x33; 32],
+            key: key.encode_for_helper(),
+        });
+        let binding = PreparationImportTransportBinding::from_control(&control)
+            .expect("closed control")
+            .expect("transport extension");
+        let helper_key = control
+            .transport
+            .expect("helper key")
+            .key
+            .into_key()
+            .expect("decode helper key");
+        let projection = reasoning_transport_test_projection();
+        let context = binding
+            .context(AgentKind::ClaudeCode, SOURCE, &projection)
+            .expect("bound context");
+        let prepared = synthetic_native_preparation(
+            Vec::new(),
+            CAPTURE,
+            SOURCE,
+            vec![b"opaque-test-artifact".to_vec()],
+        );
+        let (_, disposition) = ReasoningSourceDisposition::from_prepared_authorized_source(
+            prepared,
+            true,
+            1024,
+            "claude_code",
+            CAPTURE,
+            Some(SOURCE),
+        )
+        .expect("synthetic native fixture is source bound");
+        let ReasoningSourceDisposition::NativeProven(native) = disposition else {
+            panic!("synthetic fixture must own native reasoning");
+        };
+        let dto = seal_import_transport(helper_key, &context, native)
+            .expect("production transport sealer accepts the test-only witness");
+        let parent_projection = serde_json::from_slice(
+            &serde_json::to_vec(&projection).expect("encode helper projection"),
+        )
+        .expect("decode helper projection in the parent");
+        (parent_projection, binding, key, dto)
+    }
+
+    #[cfg(unix)]
+    async fn authenticated_reasoning_transport_real_store_evidence()
+    -> crate::internal::ai::agent_import::tests::NativeImportStoreEvidence {
+        let (projection, binding, key, dto) = authenticated_reasoning_transport_test_fixture();
+        let restored = consume_prepared_reasoning_transport(
+            key,
+            &binding,
+            AgentKind::ClaudeCode,
+            "og16-native-source",
+            &projection,
+            Some(true),
+            Some(dto),
+        )
+        .expect("production parent authenticates the closed helper response")
+        .expect("helper response contains an owned native batch");
+        crate::internal::ai::agent_import::tests::import_verified_native_real_store_for_command_test(
+            restored,
+            b"opaque-test-artifact",
+        )
+        .await
+        .expect("parent-restored witness reaches the real import reservation and shared store")
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial_test::serial(cwd, env)]
+    async fn reasoning_transport_production_consumer_accepts_authenticated_fixture() {
+        let evidence = authenticated_reasoning_transport_real_store_evidence().await;
+        assert_eq!(evidence.artifact_bytes, b"opaque-test-artifact");
+        assert!(!evidence.artifact_oid.is_empty());
+        assert_eq!(evidence.checkpoints_written, 1);
+        assert_eq!(evidence.committed_claims, 1);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial_test::serial(cwd, env)]
+    async fn reasoning_transport_identity_reaches_real_import_reservation() {
+        let evidence = authenticated_reasoning_transport_real_store_evidence().await;
+        assert_eq!(
+            evidence.identity_kind,
+            crate::internal::metadata::ReasoningIdentityKind::Nonempty
+        );
+        assert!(!evidence.identity_slot.is_empty());
+        assert_eq!(
+            evidence.identity_descriptor_mac,
+            evidence.expected_descriptor_mac
+        );
+        assert_eq!(evidence.committed_claims, 1);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial_test::serial(cwd, env)]
+    async fn reasoning_transport_preserves_bound_native_proof() {
+        let evidence = authenticated_reasoning_transport_real_store_evidence().await;
+        assert_eq!(evidence.issuer_tag, "synthetic-test-only-v1");
+        assert_eq!(evidence.logical_turn, "synthetic-turn-0");
+        assert_eq!(
+            evidence.artifact_locator,
+            "claude_code:msg=0/part=0/metadata=signature"
+        );
+        let expected_wire_sha256: [u8; 32] = sha2::Sha256::digest(b"opaque-test-artifact").into();
+        assert_eq!(evidence.original_wire_sha256, expected_wire_sha256);
+        assert_ne!(evidence.source_binding_sha256, [0; 32]);
+    }
+
+    #[cfg(unix)]
+    fn tamper_encoded_transport_context_sha256(
+        dto: ImportTransportDto,
+        index: usize,
+    ) -> ImportTransportDto {
+        let mut encoded = serde_json::to_value(dto).expect("encode production transport DTO");
+        let context = encoded["context_sha256"]
+            .as_array_mut()
+            .expect("production encoder emits a context digest");
+        let original = context[index]
+            .as_u64()
+            .expect("context digest byte is numeric");
+        context[index] = serde_json::json!((original as u8) ^ 1);
+        serde_json::from_value(encoded).expect("decode changed closed transport DTO")
+    }
+
+    #[cfg(unix)]
+    fn assert_transport_rejected_before_native_proof(error: &anyhow::Error) {
+        assert!(
+            matches!(
+                error.downcast_ref::<ImportError>(),
+                Some(ImportError::AuthorizedReaderFailed)
+            ),
+            "the command must retain its stable authorized-reader error"
+        );
+        assert!(
+            matches!(
+                error.downcast_ref::<ReasoningTransportError>(),
+                Some(ReasoningTransportError::Rejected)
+            ),
+            "context or request tamper must fail before native proof validation"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reasoning_transport_parent_rejects_request_mutation() {
+        let (projection, binding, key, dto) = authenticated_reasoning_transport_test_fixture();
+        let changed_dto = tamper_encoded_transport_context_sha256(dto, 0);
+        let error = match consume_prepared_reasoning_transport(
+            key,
+            &binding,
+            AgentKind::ClaudeCode,
+            "og16-native-source",
+            &projection,
+            Some(true),
+            Some(changed_dto),
+        ) {
+            Ok(_) => panic!("changed encoder-produced request context must be rejected"),
+            Err(error) => error,
+        };
+        assert_transport_rejected_before_native_proof(&error);
+
+        let (projection, mut binding, key, dto) = authenticated_reasoning_transport_test_fixture();
+        binding.request_digest[0] ^= 1;
+        let error = match consume_prepared_reasoning_transport(
+            key,
+            &binding,
+            AgentKind::ClaudeCode,
+            "og16-native-source",
+            &projection,
+            Some(true),
+            Some(dto),
+        ) {
+            Ok(_) => panic!("changed parent request digest must be rejected"),
+            Err(error) => error,
+        };
+        assert_transport_rejected_before_native_proof(&error);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reasoning_transport_parent_rejects_source_mutation() {
+        let (projection, binding, key, dto) = authenticated_reasoning_transport_test_fixture();
+        let changed_dto = tamper_encoded_transport_context_sha256(dto, 1);
+        let error = match consume_prepared_reasoning_transport(
+            key,
+            &binding,
+            AgentKind::ClaudeCode,
+            "og16-native-source",
+            &projection,
+            Some(true),
+            Some(changed_dto),
+        ) {
+            Ok(_) => panic!("changed encoder-produced source context must be rejected"),
+            Err(error) => error,
+        };
+        assert_transport_rejected_before_native_proof(&error);
+
+        let (projection, mut binding, key, dto) = authenticated_reasoning_transport_test_fixture();
+        binding.source_preimage_commitment[0] ^= 1;
+        let error = match consume_prepared_reasoning_transport(
+            key,
+            &binding,
+            AgentKind::ClaudeCode,
+            "og16-native-source",
+            &projection,
+            Some(true),
+            Some(dto),
+        ) {
+            Ok(_) => panic!("changed parent source commitment must be rejected"),
+            Err(error) => error,
+        };
+        assert_transport_rejected_before_native_proof(&error);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reasoning_transport_parent_rejects_payload_mutation() {
+        let (projection, binding, key, dto) = authenticated_reasoning_transport_test_fixture();
+        let mut value = serde_json::to_value(dto).expect("serialize closed transport DTO");
+        let encoded = value["items"][0]["bytes_base64"]
+            .as_str()
+            .expect("one nonempty encoded artifact");
+        value["items"][0]["bytes_base64"] = serde_json::Value::String(format!("A{encoded}"));
+        let altered = serde_json::from_value(value).expect("still a closed DTO shape");
+        assert!(
+            consume_prepared_reasoning_transport(
+                key,
+                &binding,
+                AgentKind::ClaudeCode,
+                "og16-native-source",
+                &projection,
+                Some(true),
+                Some(altered),
+            )
+            .is_err()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reasoning_transport_nonempty_missing_proof_reaches_parent_rejection() {
+        let (projection, binding, key, dto) = authenticated_reasoning_transport_test_fixture();
+        let helper_key = key
+            .encode_for_helper()
+            .into_key()
+            .expect("one test-only helper key copy");
+        let context = binding
+            .context(AgentKind::ClaudeCode, "og16-native-source", &projection)
+            .expect("bound parent context");
+        let invalid = invalidate_import_transport_native_proof_for_test(dto, helper_key, &context)
+            .expect("valid-MAC test fixture with one invalid native proof");
+        let encoded = serde_json::to_value(&invalid).expect("encode transport fixture");
+        assert_eq!(
+            encoded["items"].as_array().map(Vec::len),
+            Some(1),
+            "the proof rejection must not be vacuous on an empty collection"
+        );
+        let error = match consume_prepared_reasoning_transport(
+            key,
+            &binding,
+            AgentKind::ClaudeCode,
+            "og16-native-source",
+            &projection,
+            Some(true),
+            Some(invalid),
+        ) {
+            Ok(_) => panic!("authenticated but unproven native item must be rejected"),
+            Err(error) => error,
+        };
+        assert!(
+            matches!(
+                error.downcast_ref::<ImportError>(),
+                Some(ImportError::AuthorizedReaderFailed)
+            ),
+            "the command must retain its stable authorized-reader error"
+        );
+        assert!(
+            matches!(
+                error.downcast_ref::<ReasoningTransportError>(),
+                Some(ReasoningTransportError::NativeProofRejected)
+            ),
+            "authenticated nonempty transport must reach native proof rejection"
+        );
+
+        let (projection, mut binding, key, dto) = authenticated_reasoning_transport_test_fixture();
+        binding.request_digest[0] ^= 1;
+        let request_error = match consume_prepared_reasoning_transport(
+            key,
+            &binding,
+            AgentKind::ClaudeCode,
+            "og16-native-source",
+            &projection,
+            Some(true),
+            Some(dto),
+        ) {
+            Ok(_) => panic!("changed request must fail before native proof validation"),
+            Err(error) => error,
+        };
+        assert_transport_rejected_before_native_proof(&request_error);
+
+        let (projection, binding, key, dto) = authenticated_reasoning_transport_test_fixture();
+        let changed_context = tamper_encoded_transport_context_sha256(dto, 2);
+        let context_error = match consume_prepared_reasoning_transport(
+            key,
+            &binding,
+            AgentKind::ClaudeCode,
+            "og16-native-source",
+            &projection,
+            Some(true),
+            Some(changed_context),
+        ) {
+            Ok(_) => panic!("changed DTO context must fail before native proof validation"),
+            Err(error) => error,
+        };
+        assert_transport_rejected_before_native_proof(&context_error);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reasoning_transport_parent_rejects_missing_required_transport() {
+        let (projection, binding, key, dto) = authenticated_reasoning_transport_test_fixture();
+        let missing = consume_prepared_reasoning_transport(
+            key,
+            &binding,
+            AgentKind::ClaudeCode,
+            "og16-native-source",
+            &projection,
+            Some(true),
+            None,
+        );
+        assert!(
+            missing.is_err(),
+            "a native-marked response cannot omit its DTO"
+        );
+        let key = ImportTransportKey::random().expect("fresh parent key");
+        let unsolicited = consume_prepared_reasoning_transport(
+            key,
+            &binding,
+            AgentKind::ClaudeCode,
+            "og16-native-source",
+            &projection,
+            None,
+            Some(dto),
+        );
+        assert!(
+            unsolicited.is_err(),
+            "an unmarked response cannot inject a native DTO"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reasoning_transport_control_extension_has_closed_version() {
+        let key = ImportTransportKey::random().expect("fresh key");
+        let mut control = test_descriptor_control();
+        control.transport = Some(PreparationImportTransportControl {
+            version: 1,
+            challenge: [0x44; 32],
+            source_preimage_commitment: [0x22; 32],
+            scope_digest: [0x33; 32],
+            key: key.encode_for_helper(),
+        });
+        assert!(
+            PreparationImportTransportBinding::from_control(&control)
+                .expect("v1 is supported")
+                .is_some()
+        );
+        let mut value = serde_json::to_value(&control).expect("encode closed control");
+        value["transport"]["version"] = serde_json::json!(2);
+        let old = serde_json::from_value::<PreparationDescriptorControl>(value.clone())
+            .expect("closed shape with an unsupported version");
+        assert!(PreparationImportTransportBinding::from_control(&old).is_err());
+        value["transport"]["unexpected"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<PreparationDescriptorControl>(value).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reasoning_transport_wire_key_is_redacted_from_debug_errors_and_stdout() {
+        let (projection, mut binding, key, dto) = authenticated_reasoning_transport_test_fixture();
+        let encoded_key = key.encode_for_helper();
+        let key_canary = serde_json::to_string(&encoded_key).expect("encode wire key");
+        let debug_key = format!("{encoded_key:?}");
+        assert!(!debug_key.contains(&key_canary));
+        let challenge_canary = serde_json::to_string(&[0x44_u8; 32]).expect("encode challenge");
+        let response = PreparationDescriptorHelperResponse::Ok {
+            projection: Box::new(projection),
+            raw_bytes: 8,
+            transport_required: Some(true),
+            transport: Some(dto),
+        };
+        let stdout = serde_json::to_string(&response).expect("encode helper response");
+        assert!(!stdout.contains(&key_canary));
+        assert!(!stdout.contains(&challenge_canary));
+        let PreparationDescriptorHelperResponse::Ok {
+            projection,
+            transport: Some(dto),
+            ..
+        } = response
+        else {
+            panic!("fixture response must carry its sealed transport");
+        };
+        binding.request_digest[0] ^= 1;
+        let error = match consume_prepared_reasoning_transport(
+            key,
+            &binding,
+            AgentKind::ClaudeCode,
+            "og16-native-source",
+            &projection,
+            Some(true),
+            Some(dto),
+        ) {
+            Ok(_) => panic!("mutated request must fail closed"),
+            Err(error) => error,
+        };
+        let diagnostic = format!("{error:#}");
+        assert!(!diagnostic.contains(&key_canary));
+        assert!(!diagnostic.contains(&challenge_canary));
+    }
 
     #[test]
     fn source_commitment_failure_preserves_deadline_classification() {
@@ -3616,6 +4353,7 @@ mod tests {
             provider_commitment: [7; 32],
             read_cap: 1024,
             remaining_ms: 1_000,
+            transport: None,
         }
     }
 

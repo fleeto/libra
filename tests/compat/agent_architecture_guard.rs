@@ -1883,6 +1883,7 @@ fn import_command_helpers_stay_registered_bounded_and_content_free() {
         "source_preimage".to_string(),
         "read_cap".to_string(),
         "remaining_ms".to_string(),
+        "transport".to_string(),
     ]);
     assert!(
         control_fields.is_subset(&permitted_control_fields)
@@ -1919,6 +1920,48 @@ fn import_command_helpers_stay_registered_bounded_and_content_free() {
             field.ident
         );
     }
+    let transport = descriptor_control
+        .fields
+        .iter()
+        .find(|field| field.ident.as_ref().is_some_and(|name| name == "transport"))
+        .expect("descriptor control has the private transport extension");
+    assert!(
+        matches!(&transport.ty, syn::Type::Path(path)
+        if path.path.segments.last().is_some_and(|segment| {
+            segment.ident == "Option"
+                && matches!(&segment.arguments, syn::PathArguments::AngleBracketed(args)
+                    if matches!(args.args.first(), Some(syn::GenericArgument::Type(syn::Type::Path(ty)))
+                        if ty.path.is_ident("PreparationImportTransportControl")))
+        })),
+        "{} transport control must be a closed optional extension",
+        path.display()
+    );
+    let extension = top_level_struct(&command_file, "PreparationImportTransportControl");
+    let extension_fields = extension
+        .fields
+        .iter()
+        .filter_map(|field| field.ident.as_ref().map(ToString::to_string))
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        extension_fields,
+        BTreeSet::from([
+            "version".to_string(),
+            "challenge".to_string(),
+            "source_preimage_commitment".to_string(),
+            "scope_digest".to_string(),
+            "key".to_string(),
+        ]),
+        "{} transport extension may contain only fixed version, commitments and encoded key",
+        path.display()
+    );
+    assert!(
+        extension.attrs.iter().any(|attribute| {
+            attribute.path().is_ident("serde")
+                && matches!(&attribute.meta, syn::Meta::List(list) if list.tokens.to_string().contains("deny_unknown_fields"))
+        }),
+        "{} transport extension must reject unknown fields",
+        path.display()
+    );
     assert!(
         descriptor_control.attrs.iter().any(|attribute| {
             attribute.path().is_ident("serde")
@@ -8918,6 +8961,7 @@ impl<'ast> syn::visit::Visit<'ast> for ReasoningPortScan {
     }
     fn visit_expr_struct(&mut self, item: &'ast syn::ExprStruct) {
         if let Some(last) = item.path.segments.last() {
+            self.events.push(format!("constructor:{}", last.ident));
             self.constructors.push((
                 last.ident.to_string(),
                 self.owner.last().cloned().unwrap_or_default(),
@@ -8992,12 +9036,20 @@ fn reasoning_carrier_rejects_arbitrary_raw_constructor() {
         fs::read_to_string(repo_root().join("src/internal/ai/observed_agents/reasoning.rs"))
             .unwrap();
     let scan = reasoning_scan(&reasoning);
-    assert!(
-        !scan
-            .constructors
-            .iter()
-            .any(|(t, _)| t == "NativeReasoningProof" || t == "NativeProvenReasoning"),
-        "production native issuer admission remains closed in OG-16"
+    let native_constructors = scan
+        .constructors
+        .iter()
+        .filter(|(name, _)| name == "NativeReasoningProof" || name == "NativeProvenReasoning")
+        .map(|(name, owner)| (name.as_str(), owner.as_str()))
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        native_constructors,
+        BTreeSet::from([
+            ("NativeReasoningProof", "verify_import_transport"),
+            ("NativeProvenReasoning", "verify_import_transport"),
+            ("NativeProvenReasoning", "partition_import_reasoning"),
+        ]),
+        "only authenticated restoration and owned partitioning may construct native values"
     );
 }
 
@@ -9058,6 +9110,7 @@ fn reasoning_bound_identity_accessor_has_closed_adapter_caller() {
             &[
                 "prepare_reasoning_identity_inputs_from_disposition",
                 "prepare_reasoning_artifact_params_from_disposition",
+                "partition_reasoning_for_import",
             ],
         ),
         ("prepare_reasoning_identity_inputs", &[]),
@@ -9206,16 +9259,22 @@ fn reasoning_bound_identity_accessor_has_closed_adapter_caller() {
     );
     let import = fs::read_to_string(repo_root().join("src/internal/ai/agent_import.rs")).unwrap();
     let ast = syn::parse_file(&import).unwrap();
-    for name in ["prepare_import_request", "prepare_import_projection"] {
+    for (name, owning_method) in [
+        ("prepare_import_request", "try_into_ordinary"),
+        (
+            "prepare_import_projection_with_reasoning",
+            "into_checkpoint_parts",
+        ),
+    ] {
         let f = top_level_function(&ast, name);
         let mut flow = ReasoningPortScan::default();
         syn::visit::Visit::visit_item_fn(&mut flow, f);
-        assert!(flow.references.contains_key("try_into_ordinary"));
+        assert!(flow.references.contains_key(owning_method));
         assert!(!flow.references.contains_key("into_redacted_transcript"));
         let owning = flow
             .events
             .iter()
-            .position(|e| e == "method:try_into_ordinary")
+            .position(|e| e == &format!("method:{owning_method}"))
             .unwrap();
         for normalizer in [
             "normalize_claude_transcript_until",
@@ -9232,4 +9291,568 @@ fn reasoning_bound_identity_accessor_has_closed_adapter_caller() {
             );
         }
     }
+}
+
+fn import_reasoning_production_references(name: &str) -> BTreeSet<(String, String)> {
+    use syn::visit::Visit;
+
+    let mut references = BTreeSet::new();
+    for entry in walkdir::WalkDir::new(repo_root().join("src")) {
+        let entry = entry.expect("walk production Rust source");
+        if !entry.file_type().is_file() || entry.path().extension().is_none_or(|ext| ext != "rs") {
+            continue;
+        }
+        let source = fs::read_to_string(entry.path()).expect("read production Rust source");
+        if !source.contains(name) {
+            continue;
+        }
+        let ast = syn::parse_file(&source).expect("parse production Rust source");
+        let mut scan = ReasoningPortScan::default();
+        scan.visit_file(&ast);
+        let path = entry
+            .path()
+            .strip_prefix(repo_root())
+            .expect("source under repository")
+            .display()
+            .to_string();
+        for owner in scan.references.get(name).into_iter().flatten() {
+            references.insert((path.clone(), owner.clone()));
+        }
+    }
+    references
+}
+
+fn assert_import_reference_detector_catches_rogue(name: &str) {
+    let rogue = reasoning_scan(&format!("fn rogue() {{ let _ = {name}(); }}"));
+    assert_eq!(rogue.references.get(name), Some(&vec!["rogue".to_string()]));
+    let test_only = reasoning_scan(&format!(
+        "#[cfg(test)] fn ignored() {{ let _ = {name}(); }}"
+    ));
+    assert!(!test_only.references.contains_key(name));
+}
+
+/// Associated key factories and key conversions need a narrower scan than
+/// ReasoningPortScan: a local variable named `random` is not a key mint.
+#[derive(Default)]
+struct ImportTransportKeyCallScan {
+    owner: Vec<String>,
+    references: std::collections::BTreeMap<String, Vec<String>>,
+}
+
+impl ImportTransportKeyCallScan {
+    fn record(&mut self, name: &str) {
+        self.references
+            .entry(name.to_owned())
+            .or_default()
+            .push(self.owner.last().cloned().unwrap_or_default());
+    }
+
+    fn scan_macro_tokens(&mut self, tokens: proc_macro2::TokenStream) {
+        use proc_macro2::TokenTree;
+
+        let tokens = tokens.into_iter().collect::<Vec<_>>();
+        for (index, token) in tokens.iter().enumerate() {
+            let TokenTree::Ident(ident) = token else {
+                if let TokenTree::Group(group) = token {
+                    self.scan_macro_tokens(group.stream());
+                }
+                continue;
+            };
+            let name = ident.to_string();
+            let has_path_prefix = index >= 2
+                && matches!(&tokens[index - 1], TokenTree::Punct(p) if p.as_char() == ':')
+                && matches!(&tokens[index - 2], TokenTree::Punct(p) if p.as_char() == ':');
+            let has_method_prefix = index >= 1
+                && matches!(&tokens[index - 1], TokenTree::Punct(p) if p.as_char() == '.');
+            if (name == "random" && has_path_prefix)
+                || (matches!(name.as_str(), "encode_for_helper" | "into_key")
+                    && (has_path_prefix || has_method_prefix))
+            {
+                self.record(&name);
+            }
+        }
+    }
+}
+
+impl<'ast> syn::visit::Visit<'ast> for ImportTransportKeyCallScan {
+    fn visit_item(&mut self, item: &'ast syn::Item) {
+        if !has_exact_cfg_test(syn_item_attrs(item)) {
+            syn::visit::visit_item(self, item);
+        }
+    }
+
+    fn visit_item_fn(&mut self, item: &'ast syn::ItemFn) {
+        self.owner.push(item.sig.ident.to_string());
+        syn::visit::visit_item_fn(self, item);
+        self.owner.pop();
+    }
+
+    fn visit_impl_item_fn(&mut self, item: &'ast syn::ImplItemFn) {
+        if has_exact_cfg_test(&item.attrs) {
+            return;
+        }
+        self.owner.push(item.sig.ident.to_string());
+        syn::visit::visit_impl_item_fn(self, item);
+        self.owner.pop();
+    }
+
+    fn visit_arm(&mut self, arm: &'ast syn::Arm) {
+        if !has_exact_cfg_test(&arm.attrs) {
+            syn::visit::visit_arm(self, arm);
+        }
+    }
+
+    fn visit_expr_path(&mut self, expression: &'ast syn::ExprPath) {
+        if expression.path.segments.len() >= 2
+            && let Some(last) = expression.path.segments.last()
+        {
+            let name = last.ident.to_string();
+            if matches!(name.as_str(), "random" | "encode_for_helper" | "into_key") {
+                self.record(&name);
+            }
+        }
+        syn::visit::visit_expr_path(self, expression);
+    }
+
+    fn visit_expr_method_call(&mut self, expression: &'ast syn::ExprMethodCall) {
+        let name = expression.method.to_string();
+        if matches!(name.as_str(), "encode_for_helper" | "into_key") {
+            self.record(&name);
+        }
+        syn::visit::visit_expr_method_call(self, expression);
+    }
+
+    fn visit_macro(&mut self, item: &'ast syn::Macro) {
+        self.scan_macro_tokens(item.tokens.clone());
+        syn::visit::visit_macro(self, item);
+    }
+}
+
+fn import_key_factory_scan(source: &str) -> ImportTransportKeyCallScan {
+    use syn::visit::Visit;
+
+    let ast = syn::parse_file(source).expect("parse key factory boundary source");
+    let mut scan = ImportTransportKeyCallScan::default();
+    scan.visit_file(&ast);
+    scan
+}
+
+fn import_key_factory_production_references(name: &str) -> BTreeSet<(String, String)> {
+    use syn::visit::Visit;
+
+    let mut references = BTreeSet::new();
+    for entry in walkdir::WalkDir::new(repo_root().join("src")) {
+        let entry = entry.expect("walk production Rust source");
+        if !entry.file_type().is_file() || entry.path().extension().is_none_or(|ext| ext != "rs") {
+            continue;
+        }
+        let source = fs::read_to_string(entry.path()).expect("read production Rust source");
+        if !source.contains(name) {
+            continue;
+        }
+        let ast = syn::parse_file(&source).expect("parse production Rust source");
+        let mut scan = ImportTransportKeyCallScan::default();
+        scan.visit_file(&ast);
+        let path = entry
+            .path()
+            .strip_prefix(repo_root())
+            .expect("source under repository")
+            .display()
+            .to_string();
+        for owner in scan.references.get(name).into_iter().flatten() {
+            references.insert((path.clone(), owner.clone()));
+        }
+    }
+    references
+}
+
+fn import_type_is_owned_arg(function: &syn::ItemFn, index: usize, name: &str) -> bool {
+    matches!(function.sig.inputs.iter().nth(index), Some(syn::FnArg::Typed(arg))
+        if matches!(arg.ty.as_ref(), syn::Type::Path(path)
+            if path.path.segments.last().is_some_and(|segment| segment.ident == name)))
+}
+
+fn import_type_is_borrowed_arg(function: &syn::ItemFn, index: usize, name: &str) -> bool {
+    matches!(function.sig.inputs.iter().nth(index), Some(syn::FnArg::Typed(arg))
+        if matches!(arg.ty.as_ref(), syn::Type::Reference(reference)
+            if matches!(reference.elem.as_ref(), syn::Type::Path(path)
+                if path.path.segments.last().is_some_and(|segment| segment.ident == name))))
+}
+
+fn import_type_derives_or_implements_deserialize(ast: &syn::File, name: &str) -> bool {
+    let derived = top_level_struct(ast, name).attrs.iter().any(|attr| {
+        attr.path().is_ident("derive")
+            && attr
+                .meta
+                .require_list()
+                .is_ok_and(|list| list.tokens.to_string().contains("Deserialize"))
+    });
+    let implemented = ast.items.iter().any(|item| {
+        matches!(item, syn::Item::Impl(implementation)
+            if matches!(implementation.self_ty.as_ref(), syn::Type::Path(path)
+                if path.path.segments.last().is_some_and(|segment| segment.ident == name))
+                && implementation.trait_.as_ref().is_some_and(|(_, path, _)|
+                    path.segments.last().is_some_and(|segment| segment.ident == "Deserialize")))
+    });
+    derived || implemented
+}
+
+#[test]
+fn reasoning_import_dto_cannot_mint_opaque() {
+    use syn::visit::Visit;
+
+    let (_, lower) = parse_rust_source("src/internal/ai/observed_agents/reasoning.rs");
+    for name in [
+        "ImportTransportDto",
+        "ImportTransportItem",
+        "ImportTransportProof",
+        "NativeReasoningProof",
+        "NativeProvenReasoning",
+        "OpaqueEncryptedBytes",
+    ] {
+        assert!(
+            top_level_struct(&lower, name)
+                .fields
+                .iter()
+                .all(|field| matches!(field.vis, syn::Visibility::Inherited)),
+            "{name} must have no public constructor fields"
+        );
+    }
+    for name in [
+        "NativeReasoningProof",
+        "NativeProvenReasoning",
+        "OpaqueEncryptedBytes",
+    ] {
+        assert!(
+            !import_type_derives_or_implements_deserialize(&lower, name),
+            "untrusted DTO bytes cannot Deserialize into {name}"
+        );
+    }
+    let probe =
+        syn::parse_file("#[derive(Deserialize)] struct OpaqueEncryptedBytes { data: Vec<u8> }")
+            .expect("parse forbidden Deserialize probe");
+    assert!(import_type_derives_or_implements_deserialize(
+        &probe,
+        "OpaqueEncryptedBytes"
+    ));
+    let verifier = top_level_function(&lower, "verify_import_transport");
+    let mut flow = ReasoningPortScan::default();
+    flow.visit_item_fn(verifier);
+    let authenticated = flow
+        .events
+        .iter()
+        .position(|event| event == "reference:verify")
+        .expect("transport MAC verification remains in the restorer");
+    for constructor in ["OpaqueEncryptedBytes", "NativeReasoningProof"] {
+        let restored = flow
+            .events
+            .iter()
+            .position(|event| event == &format!("constructor:{constructor}"))
+            .expect("verified native restoration remains in the lower module");
+        assert!(
+            authenticated < restored,
+            "{constructor} precedes MAC verification"
+        );
+    }
+    let rogue = reasoning_scan("fn rogue() { let _ = NativeReasoningProof { raw: 1 }; }");
+    assert!(
+        rogue
+            .events
+            .contains(&"constructor:NativeReasoningProof".to_string())
+    );
+}
+
+#[test]
+fn reasoning_import_transport_seal_consumes_native_witness() {
+    let (_, lower) = parse_rust_source("src/internal/ai/observed_agents/reasoning.rs");
+    let seal = top_level_function(&lower, "seal_import_transport");
+    let verify = top_level_function(&lower, "verify_import_transport");
+    assert!(import_type_is_owned_arg(seal, 0, "ImportTransportKey"));
+    assert!(import_type_is_borrowed_arg(
+        seal,
+        1,
+        "ImportTransportContext"
+    ));
+    assert!(import_type_is_owned_arg(seal, 2, "NativeProvenReasoning"));
+    assert!(import_type_is_owned_arg(verify, 0, "ImportTransportKey"));
+    assert!(import_type_is_owned_arg(
+        verify,
+        1,
+        "ImportTransportContext"
+    ));
+    assert!(import_type_is_owned_arg(verify, 2, "ImportTransportDto"));
+    let bad = syn::parse_file(
+        "fn seal_import_transport(key: Vec<u8>, context: &ImportTransportContext, native: ImportTransportDto) {}",
+    )
+    .expect("parse raw-sealer probe");
+    assert!(!import_type_is_owned_arg(
+        top_level_function(&bad, "seal_import_transport"),
+        2,
+        "NativeProvenReasoning"
+    ));
+}
+
+#[test]
+fn reasoning_import_transport_has_closed_issuer() {
+    use syn::visit::Visit;
+
+    let (_, lower) = parse_rust_source("src/internal/ai/observed_agents/reasoning.rs");
+    for name in ["NativeReasoningIssuer", "ImportTransportIssuer"] {
+        let issuer = lower
+            .items
+            .iter()
+            .find_map(|item| match item {
+                syn::Item::Enum(issuer) if issuer.ident == name => Some(issuer),
+                _ => None,
+            })
+            .expect("closed issuer enum");
+        let production = issuer
+            .variants
+            .iter()
+            .filter(|variant| !has_exact_cfg_test(&variant.attrs))
+            .map(|variant| variant.ident.to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            production,
+            ["Unregistered"],
+            "{name} admits a native issuer"
+        );
+    }
+    let mut scan = ReasoningPortScan::default();
+    scan.visit_file(&lower);
+    let proof_constructors = scan
+        .constructors
+        .iter()
+        .filter(|(name, _)| name == "NativeReasoningProof")
+        .map(|(_, owner)| owner.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(proof_constructors, ["verify_import_transport"]);
+    let rogue = reasoning_scan("fn rogue() { let _ = NativeReasoningProof { raw: 1 }; }");
+    assert_eq!(
+        rogue
+            .constructors
+            .iter()
+            .filter(|(name, _)| name == "NativeReasoningProof")
+            .map(|(_, owner)| owner.as_str())
+            .collect::<Vec<_>>(),
+        ["rogue"]
+    );
+}
+
+#[test]
+fn reasoning_import_transport_has_closed_callers() {
+    for (name, path, owner) in [
+        (
+            "seal_import_transport",
+            "src/command/agent/import.rs",
+            "run_import_preparation_descriptor_helper_from_stdin",
+        ),
+        (
+            "verify_import_transport",
+            "src/command/agent/import.rs",
+            "consume_prepared_reasoning_transport",
+        ),
+        (
+            "consume_prepared_reasoning_transport",
+            "src/command/agent/import.rs",
+            "prepare_candidate_bounded",
+        ),
+    ] {
+        assert_import_reference_detector_catches_rogue(name);
+        assert_eq!(
+            import_reasoning_production_references(name),
+            BTreeSet::from([(path.to_string(), owner.to_string())]),
+            "{name} gained an unregistered production caller"
+        );
+    }
+}
+
+#[test]
+fn reasoning_import_transport_key_factory_has_closed_callers() {
+    let rogue = import_key_factory_scan(
+        "fn rogue() { let key = ImportTransportKey::random()?; \
+         let wire = key.encode_for_helper(); let _ = wire.into_key()?; Ok::<(), ()>(()) }",
+    );
+    for name in ["random", "encode_for_helper", "into_key"] {
+        assert_eq!(
+            rogue.references.get(name),
+            Some(&vec!["rogue".to_string()]),
+            "the AST detector missed a rogue {name} caller"
+        );
+    }
+    let macro_rogue = import_key_factory_scan(
+        "fn rogue() { let _ = identity!(ImportTransportKey::random().unwrap() \
+         .encode_for_helper().into_key()); }",
+    );
+    for name in ["random", "encode_for_helper", "into_key"] {
+        assert_eq!(
+            macro_rogue.references.get(name),
+            Some(&vec!["rogue".to_string()]),
+            "the AST detector missed a macro-hidden {name} caller"
+        );
+    }
+    let test_only = import_key_factory_scan(
+        "#[cfg(test)] fn ignored() { let key = ImportTransportKey::random().unwrap(); \
+         let _ = key.encode_for_helper().into_key(); }",
+    );
+    for name in ["random", "encode_for_helper", "into_key"] {
+        assert!(!test_only.references.contains_key(name));
+    }
+    for (name, owner) in [
+        ("random", "prepare_candidate_bounded"),
+        ("encode_for_helper", "prepare_candidate_bounded"),
+        (
+            "into_key",
+            "run_import_preparation_descriptor_helper_from_stdin",
+        ),
+    ] {
+        assert_eq!(
+            import_key_factory_production_references(name),
+            BTreeSet::from([("src/command/agent/import.rs".to_string(), owner.to_string())]),
+            "{name} gained an unregistered production caller"
+        );
+    }
+}
+
+#[derive(Default)]
+struct ReasoningReverseDependencyScan {
+    paths: Vec<String>,
+}
+
+impl<'ast> syn::visit::Visit<'ast> for ReasoningReverseDependencyScan {
+    fn visit_item(&mut self, item: &'ast syn::Item) {
+        if !has_exact_cfg_test(syn_item_attrs(item)) {
+            syn::visit::visit_item(self, item);
+        }
+    }
+
+    fn visit_impl_item_fn(&mut self, item: &'ast syn::ImplItemFn) {
+        if !has_exact_cfg_test(&item.attrs) {
+            syn::visit::visit_impl_item_fn(self, item);
+        }
+    }
+
+    fn visit_item_use(&mut self, item: &'ast syn::ItemUse) {
+        flatten_syn_use(&item.tree, "", &mut self.paths);
+        syn::visit::visit_item_use(self, item);
+    }
+
+    fn visit_path(&mut self, path: &'ast syn::Path) {
+        self.paths.push(syn_path_text(path));
+        syn::visit::visit_path(self, path);
+    }
+
+    fn visit_macro(&mut self, mac: &'ast syn::Macro) {
+        self.paths.push(mac.tokens.to_string().replace(' ', ""));
+        syn::visit::visit_macro(self, mac);
+    }
+}
+
+fn reasoning_reverse_dependencies(source: &str) -> Vec<String> {
+    use syn::visit::Visit;
+
+    let ast = syn::parse_file(source).expect("parse reasoning dependency source");
+    let mut scan = ReasoningReverseDependencyScan::default();
+    scan.visit_file(&ast);
+    scan.paths
+        .into_iter()
+        .filter(|path| {
+            path.split("::")
+                .any(|segment| segment == "command" || segment == "capture")
+                || path.contains("::command::")
+                || path.contains("::capture::")
+        })
+        .collect()
+}
+
+#[test]
+fn reasoning_import_transport_has_no_reverse_dependency() {
+    for probe in [
+        "use crate::internal::ai::capture::checkpoint; fn rogue() {}",
+        "use crate::command as cmd; fn rogue() {}",
+        "fn rogue() { anyhow::ensure!(crate::internal::ai::capture::checkpoint::ok(), \"x\"); }",
+    ] {
+        assert!(!reasoning_reverse_dependencies(probe).is_empty());
+    }
+    assert!(
+        reasoning_reverse_dependencies(
+            "#[cfg(test)] fn ignored() { let _ = crate::internal::ai::capture::checkpoint::ok(); }"
+        )
+        .is_empty()
+    );
+    let source =
+        fs::read_to_string(repo_root().join("src/internal/ai/observed_agents/reasoning.rs"))
+            .expect("read lower reasoning source");
+    assert!(
+        reasoning_reverse_dependencies(&source).is_empty(),
+        "lower reasoning transport must not import command or capture authority"
+    );
+}
+
+#[test]
+fn reasoning_import_partition_has_closed_ownership_transform_callers() {
+    for (name, path, owner) in [
+        (
+            "partition_import_reasoning",
+            "src/internal/ai/capture/checkpoint.rs",
+            "partition_reasoning_for_import",
+        ),
+        (
+            "from_validated_import_mapping",
+            "src/internal/ai/capture/checkpoint.rs",
+            "partition_reasoning_for_import",
+        ),
+        (
+            "partition_reasoning_for_import",
+            "src/internal/ai/agent_import.rs",
+            "import_prepared_with_subagent_discovery",
+        ),
+    ] {
+        assert_import_reference_detector_catches_rogue(name);
+        assert_eq!(
+            import_reasoning_production_references(name),
+            BTreeSet::from([(path.to_string(), owner.to_string())]),
+            "{name} gained an unregistered production caller"
+        );
+    }
+    let (_, lower) = parse_rust_source("src/internal/ai/observed_agents/reasoning.rs");
+    let mapping = top_level_struct(&lower, "VerifiedImportTurnMapping");
+    assert!(
+        mapping
+            .fields
+            .iter()
+            .all(|field| matches!(field.vis, syn::Visibility::Inherited))
+            && !mapping
+                .attrs
+                .iter()
+                .any(|attr| attr.path().is_ident("derive")),
+        "verified mapping must have private fields and no Clone/Debug/Serde derive"
+    );
+    let partition = top_level_function(&lower, "partition_import_reasoning");
+    assert!(import_type_is_owned_arg(
+        partition,
+        0,
+        "NativeProvenReasoning"
+    ));
+    assert!(import_type_is_borrowed_arg(
+        partition,
+        1,
+        "VerifiedImportTurnMapping"
+    ));
+    let mut scan = ReasoningPortScan::default();
+    syn::visit::Visit::visit_item_fn(&mut scan, partition);
+    assert!(
+        !scan
+            .constructors
+            .iter()
+            .any(|(name, _)| name == "NativeReasoningProof" || name == "OpaqueEncryptedBytes"),
+        "partition must only move already proven artifact/proof values"
+    );
+    let rogue = reasoning_scan("fn rogue() { let _ = OpaqueEncryptedBytes { raw: 1 }; }");
+    assert!(
+        rogue
+            .constructors
+            .iter()
+            .any(|(name, _)| name == "OpaqueEncryptedBytes")
+    );
 }

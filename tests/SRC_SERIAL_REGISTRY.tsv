@@ -1,4 +1,9 @@
 file	fn	lane	reason
+src/internal/ai/agent_import.rs	reasoning_real_multi_turn_import_consumes_only_reserved_batches	lane:cwd+env	isolates a real repository, registered helper executable and process-global capture test state
+src/internal/ai/agent_import.rs	reasoning_real_multi_turn_import_failure_keeps_committed_progress	lane:cwd+env	isolates a real repository, registered helper executable and process-global capture failpoint
+src/command/agent/import.rs	reasoning_transport_production_consumer_accepts_authenticated_fixture	lane:cwd+env	uses a real repository and registered helper to inspect authenticated shared-store artifact bytes
+src/command/agent/import.rs	reasoning_transport_identity_reaches_real_import_reservation	lane:cwd+env	uses a real repository and registered helper to verify native identity reservation
+src/command/agent/import.rs	reasoning_transport_preserves_bound_native_proof	lane:cwd+env	uses a real repository and registered helper to verify the complete native proof binding
 src/command/agent/checkpoint.rs	lookup_truncation_support_is_false_without_safe_mutation_primitive	lane:env	uses a test-local LIBRA_TEST_HOME while confirming a derived Claude source cannot enable unsafe rewinding
 src/command/agent/checkpoint.rs	rewind_truncate_refuses_derived_claude_source_without_safe_rewrite	lane:env	uses a test-local LIBRA_TEST_HOME to verify durable identity wins over metadata without a provider rewrite
 src/command/agent/checkpoint.rs	rewind_truncate_skips_when_no_derived_source_is_available	lane:env	uses a test-local LIBRA_TEST_HOME while testing an absent Claude source

@@ -952,6 +952,10 @@ functional acceptance remains with the operator.
 The pre-redaction capability defaults to None; ordinary snapshot/live/store bytes remain compatible. Nonordinary reasoning dispositions, including zero-artifact partials, cannot become ordinary complete imports or pending envelopes. Native bytes and proof remain one sealed owner; identity views contain metadata only. Production native issuers and OpenCode archival remain disabled, Source A UNPROVEN. No new public metadata enum value, CLI option, database schema or decryption capability is added.
 
 
+### OG-20 private import transport
+
+The authorized descriptor helper can return a native-proven typed collection through an authenticated private import transport response. A one-request key binds request, authorized source, repository scope and collection before the parent restores the complete native proof and partitions owned items by reserved turn. An empty collection retains the previous helper response and source projection bytes; an unauthenticated or unproved collection fails closed without returning candidate bytes to ordinary import. Production provider capabilities and native issuers remain disabled. Source A remains UNPROVEN, and real native field admission is deferred. The transport adds no public option, database schema or decryption capability.
+
 ### Private reasoning identity and garbage collection
 
 Garbage collection excludes the reserved `agent_reasoning_identity` scope from generic metadata object-reference scanning. This applies to the entire stored value, including a damaged value containing a JSON object ID or a nested object ID; those values do not trigger object hydration. This exclusion requires no private reasoning key. Ordinary metadata object roots, private capture recovery exclusions, and capture pending parent roots retain their existing rules. Forward recovery must retain both the private rows and this exclusion while a reasoning identity writer is stopped or repaired. This guard does not create identity records, issue native provenance, or enable OpenCode reasoning archival.

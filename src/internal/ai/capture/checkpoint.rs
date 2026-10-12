@@ -34,7 +34,8 @@ use crate::internal::{
             NormalizedTurn, RedactedBytes,
             reasoning::{
                 BoundIdentityInputRef, NativeProvenReasoning, ReasoningSourceDisposition,
-                ReasoningSourceState, VerifiedCaptureBinding, borrow_native_identity_bindings,
+                ReasoningSourceState, VerifiedCaptureBinding, VerifiedImportTurnMapping,
+                borrow_native_identity_bindings, partition_import_reasoning,
             },
         },
         traces::{
@@ -531,6 +532,37 @@ fn prepare_reasoning_identity_inputs_from_disposition<'a>(
             field: "reasoning source preparation".to_owned(),
         }),
     }
+}
+
+/// Validate the complete authorized import association before the importer
+/// acquires an identity lease, then move each proven item into its turn's
+/// private batch. The lower mapping factory has no capture or catalog access;
+/// this adapter is its sole production caller.
+pub(crate) fn partition_reasoning_for_import(
+    batch: NativeProvenReasoning,
+    capture_session: &str,
+    provider: &str,
+    source_session: &str,
+    turns: &[NormalizedTurn],
+) -> Result<BTreeMap<String, NativeProvenReasoning>, CheckpointStoreError> {
+    validate_reasoning_capture_binding(&batch, capture_session, provider)?;
+    let keys = turns
+        .iter()
+        .map(|turn| turn.logical_turn_key.as_str())
+        .collect::<Vec<_>>();
+    let mapping = VerifiedImportTurnMapping::from_validated_import_mapping(
+        &batch,
+        capture_session,
+        provider,
+        source_session,
+        &keys,
+    )
+    .map_err(|_| CheckpointStoreError::InvalidRequest {
+        field: "reasoning import turn association".to_owned(),
+    })?;
+    partition_import_reasoning(batch, &mapping).map_err(|_| CheckpointStoreError::InvalidRequest {
+        field: "reasoning import turn association".to_owned(),
+    })
 }
 
 /// Immutable, locally authenticated comparison inputs. Construction is owned
@@ -1128,6 +1160,27 @@ impl CheckpointRedactedPayload {
         lifecycle_events_jsonl: RedactedBytes,
         redaction_report_json: RedactedBytes,
     ) -> Result<Self, CheckpointStoreError> {
+        Self::from_derived_turn_projection_with_reasoning(
+            transcript,
+            source_snapshot,
+            metadata_json,
+            lifecycle_events_jsonl,
+            redaction_report_json,
+            None,
+        )
+    }
+
+    /// Consume only a previously partitioned native turn batch. An empty
+    /// turn keeps the same ordinary payload bytes while its separately owned
+    /// coverage plan records an authenticated Empty identity on commit.
+    pub(crate) fn from_derived_turn_projection_with_reasoning(
+        transcript: RedactedBytes,
+        source_snapshot: CaptureSnapshotProjection,
+        metadata_json: RedactedBytes,
+        lifecycle_events_jsonl: RedactedBytes,
+        redaction_report_json: RedactedBytes,
+        native: Option<NativeProvenReasoning>,
+    ) -> Result<Self, CheckpointStoreError> {
         if source_snapshot.completeness
             != crate::internal::ai::capture::snapshot::CaptureSnapshotCompleteness::Complete
             || source_snapshot.source.is_none()
@@ -1142,7 +1195,10 @@ impl CheckpointRedactedPayload {
         Ok(Self {
             transcript,
             snapshot: source_snapshot,
-            reasoning: ReasoningSourceDisposition::Ordinary,
+            reasoning: native.map_or(
+                ReasoningSourceDisposition::Ordinary,
+                ReasoningSourceDisposition::NativeProven,
+            ),
             provenance: CheckpointPayloadProvenance::DerivedTurnProjection,
             metadata_json,
             lifecycle_events_jsonl,

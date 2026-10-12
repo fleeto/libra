@@ -1165,6 +1165,51 @@ fn authorized_reasoning_carrier_docs_preserve_partial_and_source_gates() {
 }
 
 #[test]
+fn private_reasoning_import_transport_docs_preserve_native_gate() {
+    for (label, document) in [
+        ("agent EN", AGENT_CMD_DOC_EN),
+        ("developer EN", AGENT_DEV_DOC),
+        ("compatibility", COMPATIBILITY_DOC),
+    ] {
+        for term in [
+            "authenticated private import transport",
+            "one-request key",
+            "complete native proof",
+            "Source A remains UNPROVEN",
+        ] {
+            assert_contains(document, label, term);
+        }
+    }
+    for (label, document) in [("agent ZH", AGENT_CMD_DOC_ZH), ("tracing", AGENT_DOC)] {
+        for term in [
+            "认证的私有导入传输",
+            "单请求密钥",
+            "完整 native proof",
+            "Source A 仍为 UNPROVEN",
+        ] {
+            assert_contains(document, label, term);
+        }
+    }
+    for (label, document) in [
+        ("agent EN", AGENT_CMD_DOC_EN),
+        ("developer EN", AGENT_DEV_DOC),
+        ("agent ZH", AGENT_CMD_DOC_ZH),
+        ("tracing", AGENT_DOC),
+    ] {
+        assert_absent(
+            document,
+            label,
+            "until the authenticated reasoning import transport is ready",
+        );
+        assert_absent(
+            document,
+            label,
+            "authenticated reasoning import transport 就绪前",
+        );
+    }
+}
+
+#[test]
 fn reasoning_identity_gc_docs_preserve_scope_and_source_boundaries() {
     for (label, document) in [
         ("agent EN", AGENT_CMD_DOC_EN),

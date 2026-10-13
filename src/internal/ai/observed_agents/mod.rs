@@ -39,6 +39,7 @@ pub mod extract;
 pub(crate) mod live_capture;
 pub mod native_origin;
 pub mod opencode_export;
+pub(crate) mod opencode_reasoning;
 pub mod preview;
 pub mod reasoning;
 pub mod redaction;

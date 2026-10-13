@@ -951,7 +951,67 @@ functional acceptance remains with the operator.
 
 ### OG-16 authorized reasoning carrier
 
-The pre-redaction capability defaults to None; ordinary snapshot/live/store bytes remain compatible. Nonordinary reasoning dispositions, including zero-artifact partials, cannot become ordinary complete imports or pending envelopes. Native bytes and proof remain one sealed owner; identity views contain metadata only. Production native issuers and OpenCode archival remain disabled, Source A UNPROVEN. No new public metadata enum value, CLI option, database schema or decryption capability is added.
+OpenCode's assistant reasoning classifier runs on the authorized export before
+ordinary redaction. Visible text remains in the ordinary redacted transcript;
+reasoning-bearing turns stay Incomplete under coverage v1 and do not add a new
+digest record. The ordinary copy drops
+`messages[].providerContext.messages` and assistant reasoning metadata beyond
+visible `id`, `type`, and `text`.
+Provider metadata on every role's parts, message envelopes, and the export
+document/session info is also removed before redaction, except
+completed tool `state.metadata.files[].file` strings retain a minimal
+modified-file projection. Other tool metadata is omitted. A Boolean
+`state.metadata.truncated` is recognized and dropped without changing
+completeness, including `false` on ordinary successful tools. A wrong-typed
+`truncated`, any other completed-tool metadata sibling (including the
+`outputPath` written for truncated output), or an unknown/wrong-typed
+`files[]` child is dropped and keeps capture partial. `files[].diff` is
+omitted without changing completeness; running/error metadata is omitted
+without changing completeness unless it contains a named opaque hint. Such a
+partial export is ineligible for live checkpoint writes (`SourceRejected`)
+and verified imports (`ImportError::SourceAuthorization`); partial is not
+merely a warning. Native completed/error tool `state.content`
+keeps clean visible text after nested metadata scrubbing; a named opaque hint makes it partial.
+Classic tool `state.content` is unsupported and omitted with partial status.
+Known classic nonreasoning part identifiers,
+step fields and timestamps, and safe tool title/time/file attachments remain;
+native model variants, compaction models and safe error/retry headers also remain.
+Schema-shaped native and classic fixtures must stay Ordinary with unchanged
+coverage and extractor projections. Open provider response bodies/headers,
+classic format/summary/structured payloads, and session fork, permission,
+revert or share metadata are deliberately omitted with partial status.
+This includes classic user `info.summary` objects and assistant summary flags;
+nonempty native user `files`, native `skills[].text`, and additional native
+location workspace identifiers are likewise omitted with partial status.
+Message and part envelopes use closed field and type projections; unknown child
+fields or wrong-type values keep capture partial, while nested provider metadata
+and named opaque hints in user attachments, classic `info.model`, assistant
+`model` or error objects cannot enter ordinary sinks. Unsafe nonassistant
+parts are omitted while separate safe prompt parts remain. Native and classic
+tool `state.input` are free-form ordinary content. Classic `state.output` is
+ordinary content only when it is a String; an object or array is removed with
+partial status. Same-named keys in free-form content are not native-origin evidence. Native
+`state.output`, `state.raw`, `state.title`, `state.attachments` and
+`state.time` are outside the 2.0.26 native schema and are removed with partial
+status.
+Named opaque fields, unknown state shapes and malformed/ambiguous exports stay
+partial with no artifact. Candidate-bearing or unsupported reasoning also drops
+its `text` from the ordinary copy because it may repeat opaque bytes; unsupported envelopes may yield a content-free
+partial snapshot with the existing generic `SourceAuthorizationMismatch`
+reason. Same-named SDK metadata on reasoning is also removed
+and kept partial; it never proves native origin.
+This does not change the public CLI or grant OpenCode native archive authority;
+real installed-model acceptance is local macOS only and remains outside CI.
+Capture accepts only one JSON export object with a `messages` array. Flat
+records, JSONL, absent/wrong-typed `messages`, duplicate keys and malformed
+JSON yield content-free partial with generic `SourceAuthorizationMismatch` and
+cannot become ordinary checkpoints. Standalone OpenCode metadata extraction
+still has best-effort flat/JSONL compatibility, which does not bypass capture.
+Unknown root/message/classic-info keys in a parseable export are dropped with
+partial status; independently safe visible text remains, with no payload in
+the fixed diagnostic.
+
+The pre-redaction capability remains None for the other promoted adapters; their ordinary snapshot/live/store bytes remain compatible. Nonordinary reasoning dispositions, including zero-artifact partials, cannot become ordinary complete imports or pending envelopes. Native bytes and proof remain one sealed owner; identity views contain metadata only. Production native issuers and OpenCode archival remain disabled, Source A UNPROVEN. No new public metadata enum value, CLI option, database schema or decryption capability is added.
 
 
 ### OG-20 private import transport

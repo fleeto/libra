@@ -23,6 +23,54 @@ const FIXTURE: &str = include_str!("fixtures/agent_transcripts/opencode/hook_eve
 const MANIFEST: &str = include_str!("fixtures/agent_transcripts/opencode/MANIFEST.md");
 const PLAN: &str = include_str!("../docs/development/plan/plan-20260902.md");
 
+#[test]
+fn opencode_fixture_additions_preserve_rg_owned_cases() {
+    use sha2::{Digest, Sha256};
+
+    let frozen: [(&str, &[u8], &str); 5] = [
+        (
+            "provider_visible",
+            include_bytes!("fixtures/agent_transcripts/reasoning/provider_visible.json"),
+            "fb45309563ed1427b11dcc277470de42e7ee1c7a9a2d844c6aacd1104b1a80f9",
+        ),
+        (
+            "not_present",
+            include_bytes!("fixtures/agent_transcripts/reasoning/not_present.json"),
+            "42ca3d234ca56f3d8389ff6bf0bbdba41efc698e68fd3273fb465e2e88057a62",
+        ),
+        (
+            "opencode",
+            include_bytes!("fixtures/agent_transcripts/reasoning/opencode.json"),
+            "4750cff90cead1a31f79bc484bc0df180640c31946aa413b049250d2b410af8e",
+        ),
+        (
+            "generic_encrypted",
+            include_bytes!("fixtures/agent_transcripts/reasoning/generic_encrypted.json"),
+            "4f7a60ed6186417e3e460c03b6505c53a77030e87ccd245aae1e0ddba2183e57",
+        ),
+        (
+            "contract",
+            include_bytes!("fixtures/agent_transcripts/reasoning/contract.snap"),
+            "1e83e39d582c76d3b297ab8252c109a11eadaed40f2e6d299d221ae750b1b665",
+        ),
+    ];
+    for (name, bytes, expected) in frozen {
+        assert_eq!(
+            hex::encode(Sha256::digest(bytes)),
+            expected,
+            "RG fixture {name}"
+        );
+    }
+    let og25 = include_bytes!("fixtures/agent_transcripts/reasoning/opencode_og25.json");
+    assert_eq!(
+        hex::encode(Sha256::digest(og25)),
+        "1d1aed5a6e1f9df6c1d2e0e7fea3039148af4cf77a744fe4966f16a24e4d0004"
+    );
+    let parsed: Value = serde_json::from_slice(og25).expect("synthetic fixture JSON");
+    assert_eq!(parsed["info"]["id"], "ses_og25_synthetic");
+    assert_eq!(parsed["messages"][1]["content"][0]["type"], "reasoning");
+}
+
 fn source_record() -> &'static str {
     let start = "\n<!-- OG-00-PROBE-START -->\n";
     let end = "\n<!-- OG-00-PROBE-END -->\n";

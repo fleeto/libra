@@ -170,6 +170,12 @@ impl ObservedAgent for StablePromotedAgent {
     fn as_hooks(&self) -> Option<&dyn crate::internal::ai::hooks::provider::HookProvider> {
         self.0.hooks
     }
+    fn as_reasoning_source_preprocessor(
+        &self,
+    ) -> Option<&dyn crate::internal::ai::observed_agents::reasoning::ReasoningSourcePreprocessor>
+    {
+        (self.0.kind == AgentKind::OpenCode).then_some(self)
+    }
 
     // AG-21: best-effort transcript intelligence for the first-batch
     // promoted agents only (codex/opencode rollout/export formats); the
@@ -194,6 +200,25 @@ impl ObservedAgent for StablePromotedAgent {
         &self,
     ) -> Option<&dyn crate::internal::ai::observed_agents::capability::SkillEventExtractor> {
         matches!(self.0.kind, AgentKind::Codex | AgentKind::OpenCode).then_some(self)
+    }
+}
+
+impl crate::internal::ai::observed_agents::reasoning::ReasoningSourcePreprocessor
+    for StablePromotedAgent
+{
+    fn prepare_authorized_source(
+        &self,
+        source: Vec<u8>,
+    ) -> Result<
+        crate::internal::ai::observed_agents::reasoning::PreparedReasoningSource,
+        crate::internal::ai::observed_agents::reasoning::ReasoningFieldError,
+    > {
+        if self.0.kind != AgentKind::OpenCode {
+            return Err(
+                crate::internal::ai::observed_agents::reasoning::ReasoningFieldError::UnsupportedShape,
+            );
+        }
+        crate::internal::ai::observed_agents::opencode_reasoning::prepare_authorized_source(source)
     }
 }
 

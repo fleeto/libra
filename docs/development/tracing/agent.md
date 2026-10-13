@@ -2598,6 +2598,61 @@ byte_len/locator/provider/source_kind/availability/decrypt_capability），对�
 
 Libra 保存 provider 已加密 bytes，不拥有也不猜测解密密钥。可读 reasoning 先经过 typed redaction；signature 认证 provider 输出，redactedData 表示 provider 已遮蔽的 reasoning 块，reasoningEncryptedContent 是 opaque provider 密文。这四类边界不混用；字段名称本身不能证明 native 来源，原有来源证明门禁继续保留。
 
+OG-25 在已授权、16 MiB 有界的 OpenCode export buffer 上执行同步分类，
+然后才交给 Redactor。只在 assistant reasoning part 的封闭 `state` 路径识别
+三个候选名称；普通副本从 assistant reasoning 仅保留可见的
+`id`、`type`、`text`，并删除 `messages[].providerContext.messages`。
+所有 role 的 part、message envelope、export document／session info 的
+provider metadata 也在进入
+Redactor 前剥离；已完成工具的 `state.metadata.files[].file` 字符串作为最小文件投影
+保留，其余工具 metadata 删除；producer 写入的布尔型
+`state.metadata.truncated` 被识别后删除且不改变完整度（包括普通成功工具的
+`false`）。已完成工具 metadata 的错型 `truncated`、其它同级字段（包括输出被
+截断时写入的 `outputPath`），以及 `files[]` 未知子字段或错型值均删除并标
+partial；`files[].diff` 删除但不改变完整度，运行中／失败工具 metadata 删除
+也不改变完整度，除非包含具名 opaque 提示；此类 partial export 无法写入
+live checkpoint（`SourceRejected`）或执行 verified import
+（`ImportError::SourceAuthorization`）；partial 并非仅是提示；
+native 已完成／失败工具的 `state.content` 经过嵌套 metadata 清理后保留安全可见文本，
+含具名 opaque 提示则转 partial；classic 工具没有该字段，遇到则省略并标 partial；
+已知 classic 非 reasoning part 的 `sessionID`／`messageID`／`time`、step
+字段、安全工具 `title`／`time`／文件附件保留；native model variant、
+compaction model 与安全 error／retry 摘要保留。schema 形状的两种 export
+fixture 验证 Ordinary 与原 coverage／extractor 投影等价。provider 响应
+正文／头、classic format／summary／structured 和 session fork、permission、
+revert／share metadata 即使是有效上游字段，也按设计丢弃并标 partial。
+这包括 classic user 的 `info.summary` 对象与 assistant 的 summary 标志；
+非空 native user `files`、native `skills[].text` 和 native location 的额外
+workspace 标识同样丢弃并标 partial。
+各 role 的 message／part envelope 采用封闭字段及类型投影；未知子字段或错型值
+标记 partial，嵌套 provider metadata
+和具名 opaque 提示不能经用户附件、classic `info.model`、assistant `model`／
+error 等对象绕过；不安全的非 assistant part 整体删除，独立安全 prompt part
+仍保留。native／classic 工具的 `state.input` 是自由形状的普通用户／工具内容；
+classic `state.output` 仅在
+String 类型时作为普通内容保留，object／array 删除并标记 partial。自由内容中
+同名 JSON 键不构成 native 来源证明。native
+`state.output`、`state.raw`、`state.title`、`state.attachments` 和
+`state.time` 不属于 2.0.26 native schema，须剥离并标记 partial。
+用户／工具 JSON 或 SDK 同名字段不构成 native 来源证明。没有候选、没有开放 state 的字符串 `text`（包括空字符串）
+保留在普通副本中接受 Redactor 脱敏。含 reasoning 的 turn 在 coverage v1 下仍为
+Incomplete，不产生新的 `SemanticRecord::Reasoning` 或 v1 digest claim；五类记录的协议扩展
+留给 `DEFER-OG25-COVERAGE-V2` 进行全路径 schema bump。
+候选、未知状态、reasoning 上的同名 SDK metadata、重复 JSON key／消息／part ID
+或错误类型都保持 partial，
+候选或不支持的 reasoning part 同时删除 `text`，防止明文位置重复 opaque 值或片段；
+只给出固定且无载荷的状态／诊断；错误或不支持的 export 封套生成无正文 partial，
+使用现有通用 `SourceAuthorizationMismatch` 原因；`try_into_ordinary` 与 checkpoint consumer
+均拒绝未证实候选。
+OG-25 不保存候选字节，也不签发 opaque artifact；后续 OG-26 才可设计密封
+候选载体，OG-05 的真实 Source A 正例仍未通过。复杂模型验收只在 macOS
+本机手工执行，不进入 CI。
+采集分类仅接受一个带 `messages` 数组的 JSON export object。flat／JSONL、
+缺失或错型 `messages`、重复键或损坏 JSON 给出无正文 partial 和固定
+`SourceAuthorizationMismatch`；独立 `extract_opencode` 的 best-effort
+flat／JSONL 兼容不绕过采集门。可解析 export 的未知 root、message、
+classic-info 字段被剥离并标 partial，同时保留独立的安全可见文本。
+
 `checkpoint show` 保留固定的人工可读安全摘要。`checkpoint show --json` 仅在存在已声明 artifact 时增加 `reasoning_artifacts[]`，单条仅包含 `provider`、`source_kind`、`locator`、`byte_len`、`sha256`、`availability`、`decrypt_capability`；不返回路径、对象 id、任意 metadata 或正文。默认 show、普通 transcript export、scoped input 和 skill 读端不读取 artifact body。无效 checkpoint 布局或 manifest 拒绝且不回显其内容。 catalog 根 id 合法但对象尚未到位时保留旧安全摘要、省略可选 artifact 数组并发出固定无正文诊断；已存在但损坏的根仍拒绝。此兼容分支不授权导出。
 
 ```sh

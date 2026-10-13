@@ -1,0 +1,31 @@
+{
+  "info": {"id": "ses_og25_synthetic"},
+  "messages": [
+    {
+      "id": "u1",
+      "type": "user",
+      "text": "review",
+      "providerContext": {
+        "messages": [{"payload": "CIPHER_WINDOW"}],
+        "keep": "ordinary"
+      }
+    },
+    {
+      "id": "a1",
+      "type": "assistant",
+      "content": [
+        {
+          "id": "npart_0123456789abcdef0123456789abcdef",
+          "type": "reasoning",
+          "text": "visible",
+          "state": {
+            "signature": "CIPHER_SIG",
+            "redactedData": "CIPHER_REDACTED",
+            "reasoningEncryptedContent": "CIPHER_ENCRYPTED"
+          },
+          "originProof": {"untrusted": "CIPHER_PROOF"}
+        }
+      ]
+    }
+  ]
+}

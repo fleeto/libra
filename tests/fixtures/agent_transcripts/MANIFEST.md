@@ -45,13 +45,20 @@ The RG-04 `reasoning/opencode.json` is an unchanged historical synthetic
 open-state / UnsupportedShape counterexample, applicable to the current pin
 only for that semantic decision. Its historical note is not a current native
 three-field sample. All four RG-04 fixtures and the embedded contract/digest
-expectations stay frozen in OG-04. OG-05 owns the later complete state matrix,
-independent canaries and production wiring; this audit does not claim them
-implemented. Current pin/commit declarations must agree with OG-00, OG-04 and
+expectations stay frozen in OG-04. OG-25 owns the additive fail-closed state
+matrix and independent canaries; OG-05 retains final native proof and archive
+integration. Current pin/commit declarations must agree with OG-00, OG-04 and
 the nested `opencode/MANIFEST.md`; drift, absence or duplication must fail
 visibly. JSON string value UTF-8 bytes define the downstream opaque candidate
 boundary, without base64 decoding, trimming or normalization. No fixture or
 synthetic label grants trusted native provenance.
+
+OG-25 adds `reasoning/opencode_og25.json` as a separate synthetic privacy
+fixture. It combines all three named `state` canaries, an untrusted
+`originProof`, and `messages[].providerContext.messages`. The pre-redaction
+classifier must remove these from the ordinary copy and keep the snapshot
+partial with zero artifact. It does not change the frozen RG-04 fixture or
+prove any model's native field.
 
 
 NPR-18 keeps the historical official `2.0.26` / `9b4ec5714d481559990db0a816d5dec19541a814` source record and all existing JSON bytes frozen. The additional `opencode/native-origin-build.json` (named `native-origin-build.json` in this directory) is the separate current public identity descriptor for the reviewed private `2.0.26-libra-native.1` darwin-arm64 artifact, build `bac21cc4027896b8d1836133c347d20f`. Its official base commit is not the patched source identity. The source-ready audit is actual single Claude PASS; Source A remains UNPROVEN, archive/native GO is false. It contains no issuer, key or per-installation policy. Neither old synthetic fixtures nor this public descriptor is real native provider proof. macOS acceptance explicitly selects `LIBRA_OPENCODE_NATIVE_BINARY`; no global fallback or Linux functional claim.

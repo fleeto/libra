@@ -170,3 +170,56 @@ fn unsupported_shape_warning_is_payload_free() {
         "the warning must be payload-free, got: {serialized}"
     );
 }
+
+#[test]
+fn opencode_visible_reasoning_stays_out_of_coverage_v1() {
+    use libra::internal::ai::observed_agents::coverage::{
+        Completeness, SemanticRecord, normalize_opencode_export, safe_turn_projection,
+    };
+
+    let source = br#"{"info":{"id":"ses_og25"},"messages":[{"id":"u1","type":"user","text":"review"},{"id":"a1","type":"assistant","content":[{"id":"r1","type":"reasoning","text":"thought sk-ant-EXAMPLE0000000000000000"}]},{"id":"i1","type":"idle","outcome":"succeeded"}]}"#;
+    let turns = normalize_opencode_export(source);
+    assert_eq!(turns.len(), 1);
+    assert_eq!(turns[0].completeness, Completeness::Incomplete);
+    assert!(
+        !turns[0]
+            .records
+            .iter()
+            .any(|record| matches!(record, SemanticRecord::Reasoning { .. }))
+    );
+    let projection = safe_turn_projection("opencode", &turns[0]).to_string();
+    assert!(!projection.contains("\"type\":\"reasoning\""));
+    assert!(!projection.contains("sk-ant-EXAMPLE0000000000000000"));
+}
+
+#[test]
+fn opencode_unknown_reasoning_shape_partial_warning() {
+    use libra::internal::ai::observed_agents::coverage::{
+        Completeness, SemanticRecord, normalize_opencode_export, safe_turn_projection,
+    };
+
+    let canary = "CIPHER_UNKNOWN_OG25";
+    let source = format!(
+        r#"{{"info":{{"id":"ses_og25"}},"messages":[{{"id":"u1","type":"user","text":"review"}},{{"id":"a1","type":"assistant","content":[{{"id":"r1","type":"reasoning","text":"visible","state":{{"unknown":"{canary}"}}}}]}}]}}"#
+    );
+    let turns = normalize_opencode_export(source.as_bytes());
+    assert_eq!(turns.len(), 1);
+    assert_eq!(turns[0].completeness, Completeness::Incomplete);
+    assert!(
+        !turns[0]
+            .records
+            .iter()
+            .any(|record| matches!(record, SemanticRecord::Reasoning { .. }))
+    );
+    let projection = safe_turn_projection("opencode", &turns[0]).to_string();
+    assert!(!projection.contains(canary));
+    let warning = classify_unrecognized_field(
+        ReasoningProvider::OpenCode,
+        UnrecognizedReasoningField::ReasoningLike,
+        canary.as_bytes(),
+    )
+    .warning()
+    .expect("unsupported shape warning");
+    let warning = serde_json::to_string(&warning).expect("payload-free warning serializes");
+    assert!(!warning.contains(canary));
+}

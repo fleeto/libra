@@ -1037,6 +1037,73 @@ without recompression.
 
 Libra preserves provider-encrypted bytes; it neither owns nor guesses decryption keys. Readable reasoning text passes typed redaction; a provider signature authenticates provider output, redactedData represents a provider-redacted reasoning block, and reasoningEncryptedContent is opaque provider ciphertext. None of these metadata labels alone proves native origin. The existing native source requirement remains in force.
 
+For OpenCode exports, Libra now classifies assistant reasoning before the
+ordinary transcript Redactor. Visible reasoning text remains in the ordinary
+transcript and is redacted. Reasoning-bearing turns remain Incomplete under
+coverage v1; they do not gain a new digest record. The ordinary copy excludes
+`messages[].providerContext.messages` and assistant reasoning metadata beyond its
+visible `id`, `type`, and `text`.
+Provider metadata on parts of every role, message envelopes, and the export
+document/session info is also removed before redaction, except that completed
+tool `state.metadata.files[].file`
+strings retain a minimal modified-file projection. Other tool metadata fields
+are omitted. The producer-owned Boolean `state.metadata.truncated` is recognized
+and dropped without changing completeness, including `false` on routine
+successful tools. In a completed tool, a wrong-typed `truncated`, another
+metadata sibling such as the `outputPath` written for truncated output, an
+unknown `files[]` child, or a wrong type makes capture partial; `files[].diff`
+is omitted without changing completeness. Running/error tool metadata is
+omitted without changing completeness unless it carries a named opaque hint.
+Such a partial export is ineligible for live checkpoint writes
+(`SourceRejected`) and verified imports (`ImportError::SourceAuthorization`);
+partial is not merely a warning.
+Native completed/error tool
+`state.content` keeps clean visible text after nested metadata scrubbing; a
+named opaque hint makes it partial. Classic tool `state.content` is unsupported
+and omitted with partial status. Known classic
+nonreasoning part identifiers, step fields, timestamps and safe tool
+title/time/file attachments remain. Native model variants, compaction models
+and safe error/retry headers remain, with schema-shaped native/classic fixtures
+required to retain ordinary coverage and extractor projections. Provider
+response bodies/headers, classic format/summary/structured payloads and
+session fork, permission, revert or share metadata are omitted with partial
+status even when those fields are valid upstream.
+This includes classic user `info.summary` objects and assistant summary flags.
+Nonempty native user `files`, native `skills[].text`, and additional native
+location workspace identifiers are also omitted with partial status.
+Retained message and part envelopes use closed field and type projections:
+unknown child fields or wrong-type values make capture partial, and nested
+provider metadata and named opaque hints cannot ride in user attachments,
+classic `info.model`, assistant `model`, errors, or other envelope objects.
+An unsafe non-assistant part is omitted as a unit; an independent safe prompt
+part remains. Native tool `state.input` and classic tool
+`state.input` are free-form ordinary user/tool content. Classic `state.output`
+is retained as ordinary content only when it is a String; an object or array
+is removed with partial status. Same-named JSON keys in free-form content
+alone never prove native origin. Native
+`state.output`, `state.raw`, `state.title`, `state.attachments` and
+`state.time` are outside the 2.0.26 native schema and are removed with partial
+status.
+A candidate `state.signature`, `state.redactedData`, or
+`state.reasoningEncryptedContent`, an unknown state shape, or a malformed proof
+keeps capture partial with no artifact until native origin is verified. Its
+reasoning `text` is also omitted from the ordinary copy because it may repeat
+or contain fragments of the opaque value. Malformed
+or unsupported export envelopes yield a content-free partial snapshot with the
+existing generic `SourceAuthorizationMismatch` reason. A
+same-named SDK metadata field on reasoning also stays partial and is removed
+from the ordinary copy. Installed
+OpenCode/model acceptance remains a local macOS check, outside CI.
+The capture preprocessor accepts one JSON export object with a `messages`
+array. Flat message records, JSONL, missing or wrong-typed `messages`,
+duplicate keys, and malformed JSON are content-free partial captures with
+`SourceAuthorizationMismatch`; they cannot become ordinary checkpoints.
+The standalone OpenCode metadata extractor retains its best-effort flat/JSONL
+compatibility, but it does not bypass this capture gate. A parseable export
+with an unknown root, message, or classic-info key drops that key and remains
+partial while preserving independently safe visible text. The fixed partial
+reason does not print the rejected payload; use a supported export to retry.
+
 `checkpoint show` keeps its fixed human-readable safe summary. `checkpoint show --json` adds `reasoning_artifacts[]` only when a checkpoint declares artifacts. Each item exposes only `provider`, `source_kind`, `locator`, `byte_len`, `sha256`, `availability`, and `decrypt_capability`; it never exposes artifact paths, object ids, arbitrary metadata or bytes. Default show, transcript export, scoped input and skill readers do not read artifact bodies. An invalid checkpoint layout or manifest fails closed without reflecting its contents. A valid catalog root whose object is not yet available keeps the legacy safe summary, omits the optional artifact array and emits a fixed content-free diagnostic; present corrupt roots still refuse. This compatibility fallback never authorizes export.
 
 ```sh

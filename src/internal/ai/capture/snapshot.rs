@@ -1101,14 +1101,15 @@ mod tests {
 
     #[test]
     fn commitment_failure_downgrades_without_retaining_transient_digest() {
+        // Generic snapshot contract: this plain text is not an OpenCode export.
         let bytes = b"redacted source commitment fixture".to_vec();
         let snapshot = TranscriptSource::Bytes {
-            auth: ExportAuthorized::issue("opencode", "session-marker", &bytes),
+            auth: ExportAuthorized::issue("claude_code", "session-marker", &bytes),
             bytes,
         };
         let mut snapshot = CaptureSnapshotService::capture_authorized(
             snapshot,
-            "opencode",
+            "claude_code",
             "session-marker",
             CaptureSnapshotPolicy::default(),
         );
@@ -1251,17 +1252,18 @@ mod tests {
 
     #[test]
     fn source_digest_commits_only_redacted_snapshot_bytes() {
+        // Generic digest contract over JSON without provider-specific shape.
         let secret = "ghp_abcdefghijklmnopqrstuvwxyz0123456789AB";
         let raw_bytes = format!("{{\"token\":\"{secret}\"}}\n").into_bytes();
         let raw_digest = digest_hex(&raw_bytes);
         let source = TranscriptSource::Bytes {
-            auth: ExportAuthorized::issue("opencode", "libra-session", &raw_bytes),
+            auth: ExportAuthorized::issue("claude_code", "libra-session", &raw_bytes),
             bytes: raw_bytes,
         };
 
         let snapshot = CaptureSnapshotService::capture_authorized(
             source,
-            "opencode",
+            "claude_code",
             "libra-session",
             CaptureSnapshotPolicy::default(),
         );
@@ -1322,6 +1324,7 @@ mod tests {
 
     #[test]
     fn trusted_export_identity_is_noncorrelating_and_never_commits_raw_content() {
+        // Generic identity contract over JSON without provider-specific shape.
         let first_secret = "ghp_abcdefghijklmnopqrstuvwxyz0123456789AB";
         let second_secret = "ghp_ZYXWVUTSRQPONMLKJIHGFEDCBA9876543210CD";
         let first_raw = format!("{{\"token\":\"{first_secret}\"}}\n").into_bytes();
@@ -1329,10 +1332,10 @@ mod tests {
         assert_ne!(first_raw, second_raw);
 
         let capture_export = |bytes: Vec<u8>| {
-            let auth = ExportAuthorized::issue("opencode", "libra-session", &bytes);
+            let auth = ExportAuthorized::issue("claude_code", "libra-session", &bytes);
             CaptureSnapshotService::capture_authorized(
                 TranscriptSource::Bytes { auth, bytes },
-                "opencode",
+                "claude_code",
                 "libra-session",
                 CaptureSnapshotPolicy::default(),
             )
@@ -1482,13 +1485,13 @@ mod tests {
         // that the catalog rejects only after import ownership is prepared.
         let bytes = b"redis://a:b@c".to_vec();
         let source = TranscriptSource::Bytes {
-            auth: ExportAuthorized::issue("opencode", "libra-session", &bytes),
+            auth: ExportAuthorized::issue("claude_code", "libra-session", &bytes),
             bytes,
         };
 
         let snapshot = CaptureSnapshotService::capture_authorized(
             source,
-            AgentKind::OpenCode.as_db_str(),
+            AgentKind::ClaudeCode.as_db_str(),
             "libra-session",
             CaptureSnapshotPolicy::with_max_bytes(None, 64),
         );

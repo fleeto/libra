@@ -2054,7 +2054,11 @@ pub(super) async fn run_checkpoint_stage<P: LiveExportLeasePort>(
             .claims
             .iter()
             .map(|claim| traces::TracesCoverageFence {
+                coverage_schema_version: crate::internal::ai::observed_agents::CoverageSchemaVersion::V1,
                 logical_turn_key: &claim.logical_turn_key,
+                coverage_digest: &claim.coverage_digest,
+                completeness: claim.completeness,
+                next_revision: claim.next_revision,
                 owner: &claim_plan.owner,
                 fence_token: claim.fence_token,
                 reservation_state: "reserved_live",
@@ -3246,6 +3250,54 @@ pub(crate) mod tests {
             .unwrap();
         std::fs::create_dir_all(dir.path().join("objects")).unwrap();
         (dir, conn)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn legacy_v1_covered_noop_settles_nonempty_prior_revision() {
+        use crate::internal::ai::{
+            coverage_gate::tests::ReasoningFixture,
+            observed_agents::reasoning::carrier_test_support as native,
+            traces::{self, TracesInflightMarker},
+        };
+
+        let fixture = ReasoningFixture::new().await;
+        let checkpoint_id = "legacy-v1-covered-noop";
+        fixture
+            .seed_legacy_v1_checkpoint_revision(checkpoint_id)
+            .await;
+        let marker = TracesInflightMarker::new(
+            native::CAPTURE,
+            checkpoint_id,
+            chrono::Utc::now().timestamp_millis(),
+        );
+        traces::write_traces_inflight_marker(&fixture.conn, &marker)
+            .await
+            .expect("seed old no-op's ordinary marker");
+        assert_eq!(
+            settle_covered_checkpoint_replay(
+                &fixture.conn,
+                &fixture.scope,
+                native::CAPTURE,
+                checkpoint_id,
+                None,
+            )
+            .await
+            .expect("settle old v1 no-op with a committed revision"),
+            CoveredCheckpointReplay::Settled,
+        );
+        assert!(
+            crate::internal::metadata::MetadataKv::get_with_conn(
+                &fixture.conn,
+                crate::internal::metadata::MetadataScope::AgentTracesInflight,
+                native::CAPTURE,
+                checkpoint_id,
+            )
+            .await
+            .expect("read old no-op marker")
+            .is_none(),
+            "the old no-op's ordinary marker must be retired"
+        );
     }
 
     #[cfg(unix)]

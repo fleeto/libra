@@ -78,10 +78,12 @@ A separate `VersionedReservedTurnClaim` carries each claim's version, and
 `VersionedLiveClaimCommitPlan` binds an ordered collection of those claims to
 the unchanged commit-plan literal. Its uniqueness check uses `(version,key)`,
 so a pending artifact can later hold one claim for each version of the same
-logical key without guessing from the key. COV2-03 adds version-aware marker
-and commit transactions; COV2-04 adds the authenticated pending wire; COV2-11
-switches production live/import paths together. This preparatory arbitration
-does not itself enable OpenCode Session capture or native archival.
+logical key without guessing from the key. COV2-03 binds version-aware marker
+and checkpoint transactions; COV2-19/20/21 add the native companion and
+versioned reservation/retain steps, COV2-04/22 add pending sealing/persistence,
+and COV2-11 switches production live/import paths together.
+This preparatory arbitration does not itself enable OpenCode Session capture
+or native archival.
 
 ## Private identity authentication preparation
 
@@ -96,10 +98,12 @@ Explicit v2 helpers choose the schema version before borrowing that key. The
 v2 descriptor, record and whole-map each have a distinct visible prefix and
 HMAC byte-domain tag; replacing a prefix cannot transplant a tag across
 versions or purposes. Unknown versions and missing keys fail closed. These
-are authentication primitives only. COV2-14 must bind each v2 MAC to a closed
-v2 record/map body and enforce the shared map capacity before persistence;
-COV2-03/04/11 later connect marker, pending and live writers. A valid private
-MAC does not prove provider-native origin or authorize opaque archival.
+are authentication primitives only. COV2-14 binds each v2 MAC to a closed
+v2 record/map body and enforces the shared map capacity before persistence;
+COV2-03 binds marker/ref fences; COV2-19/21 add native v2 identity writes,
+COV2-04/22 add pending seal/persistence, and COV2-11 switches live/import.
+A valid private MAC does not prove provider-native origin or authorize opaque
+archival.
 
 ## Private identity map carrier (COV2-14)
 
@@ -116,9 +120,51 @@ unknown private map fails the entire reservation batch before any claim-state wr
 
 The existing v1 claim companion updates only `identity-v1` and preserves the
 stored `identity-v2` value byte-for-byte, while applying the combined capacity
-check before its claim/catalog mutation. COV2-03 owns the versioned claim/ref
-transaction that will write v2 from a source-derived plan; COV2-11 owns the
-production Session switch. The COV2-14 v2 carrier tests use synthetic signed
-records and do not establish OpenCode native provenance. An older binary's
+check before its claim/catalog mutation. COV2-03 binds the versioned marker
+and ref transaction; COV2-19/21 own the sealed native v2 identity/retain
+producer, and COV2-11 owns the production Session switch. The COV2-14 v2
+carrier tests use synthetic signed records and do not establish OpenCode
+native provenance. An older binary's
 v1-only reader may reject a Session containing both keys; upgrading the
 binary restores access, with no silent v2-to-v1 downgrade.
+
+## Versioned checkpoint marker and replay fence (COV2-03)
+
+A marker-bound checkpoint now carries an immutable per-claim tuple of coverage
+version, logical turn key, digest, completeness, next revision, reservation
+owner, fence token, and reservation state. The registration transaction checks
+each tuple against the current claim row and its previous revision before it
+can publish a successful marker. Duplicate `(version,key)` tuples, an invalid
+version, or a stale owner/fence/revision reject the whole attempt. A checkpoint
+containing v2 claims is bounded by 4096 tuples; historical pure-v1 checkpoints
+above that count remain replayable. The checkpoint, live
+persisted-generation, and recovery constructors retain the complete tuple;
+the typed checkpoint request must bind the same versioned claim plan before a
+v2 write. Ref/catalog/revision/claim changes remain in one transaction, so a
+failed later claim leaves the earlier state unchanged.
+
+A marker-bound replay of a committed checkpoint compares the complete
+immutable `agent_coverage_revision` set with the expected tuples, including
+when the expected set is empty. Missing, extra, or changed revisions reject
+before `AlreadyExists`/`AlreadyCommitted`. If another writer commits a
+revision between the optimistic replay probe and marker registration, the
+registration returns a replay-payload conflict without publishing a marker or
+ref. A pre-coverage v1 database with **both** coverage tables absent and no
+coverage-or-later migration receipt can replay only an empty claim set;
+nonempty expectations, a partial schema, or missing tables after the coverage
+migration fail closed. This also applies to no-write settlement and completed
+terminal receipts. A completed terminal receipt with an expected or durably committed v2
+revision additionally requires its committed checkpoint in the same session
+and scope and an exact revision set;
+an empty or v1-only caller cannot downgrade that v2 receipt to an ACK. A
+legacy no-write/prebound settlement without an authoritative set still accepts
+a previously committed nonempty v1 revision set, but refuses a durable v2
+revision. The frozen v1 terminal receipt without an action checkpoint remains
+acknowledgeable. A rejected replay preserves any pre-existing repairable
+cleanup marker for doctor/GC.
+
+The persisted marker JSON remains `schema_version: 3`, independent of the
+claim's coverage version. This step adds no SQL schema or public command
+change. It does not activate production v2 identity writing, pending v2
+persistence/replay, OpenCode Session capture, native issuer authority, or
+reasoning archival; those remain with their later task cards and Source A.

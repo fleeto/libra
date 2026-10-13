@@ -1042,7 +1042,8 @@ are idempotent, incomplete-to-complete advances only that version, and a
 different complete digest conflicts without overwriting the other version.
 Unknown or selector-mismatched versions fail before claim writes. Marker,
 pending, import and production Session paths are not switched by this card;
-COV2-03/04/11 own those later changes. No SQL DDL, public CLI change, native
+COV2-03 owns the marker fence, while COV2-04/11 own later pending and Session
+changes. No SQL DDL, public CLI change, native
 issuer, or OpenCode Session CI integration is introduced.
 
 
@@ -1058,9 +1059,40 @@ hard reservation error instead of a per-turn partial result; import records a
 failed receipt rather than a partial/no-op outcome. Updating v1 preserves the
 parallel v2 value byte-for-byte. An older v1-only binary can fail closed on
 a dual-map Session and may be unable to read even its v1 turn until upgraded;
-it does not silently downgrade v2. The versioned v2 claim/ref producer and
-production OpenCode Session switch remain assigned to COV2-03 and COV2-11.
-Synthetic carrier tests do not establish native provenance or archive rights.
+it does not silently downgrade v2. COV2-03 binds the versioned checkpoint
+marker/ref fence; COV2-19/21 own the native v2 identity/retain producer and
+COV2-11 owns the production OpenCode Session switch. Synthetic carrier tests
+do not establish native provenance or archive rights.
+
+### Versioned checkpoint marker and replay fence (COV2-03)
+
+A marker-bound writer binds each claim's coverage version, logical key,
+digest, completeness, next revision, owner, fence token, and reservation state
+before persisting a marker. An invalid or duplicate `(version,key)` tuple, or
+a stale claim field, aborts the registration transaction. Checkpoint, live
+persisted-generation, and recovery constructors preserve the complete tuple;
+a v2 write request must also bind its matching versioned claim plan. A later
+claim fault rolls back the claim/revision/catalog/ref transaction as a unit.
+The 4096-tuple ceiling applies to checkpoints containing v2 claims; larger
+historical pure-v1 checkpoints remain replayable against their full revision set.
+
+Committed checkpoint replay verifies the exact persisted revision set, even
+for an empty expected set, before returning `AlreadyExists` or
+`AlreadyCommitted`. A pre-coverage v1 database with both coverage tables
+absent and no coverage-or-later migration receipt may replay only an empty
+claim set; nonempty expectations, a partial schema, or missing tables after
+the coverage migration fail closed, including no-write and terminal paths.
+A completed terminal receipt with expected or persisted
+v2 revisions requires a committed checkpoint with matching session, scope,
+and exact revision set; an empty or v1-only request cannot acknowledge it by
+downgrading. The legacy no-write/prebound path still settles nonempty v1
+revisions but rejects persisted v2. A frozen v1 terminal receipt without an
+action checkpoint remains valid. Rejected replay preserves a pre-existing
+repairable cleanup marker for doctor/GC. The marker JSON stays at
+`schema_version: 3`, independent of the claim version. This is an internal
+checkpoint contract; it adds no SQL DDL or public CLI surface. Production v2
+identity writing, pending v2 replay, OpenCode Session capture and Source A
+native admission remain separate later work.
 
 ### OG-20 private import transport
 

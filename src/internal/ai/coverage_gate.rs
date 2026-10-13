@@ -2559,9 +2559,21 @@ pub struct ImportIdentityCommit {
     pub final_turn: bool,
 }
 
-#[async_trait]
-impl TracesTxnExtra for LiveClaimCommitPlan {
-    async fn apply(&self, txn: &DatabaseTransaction, ctx: &TracesCommitCtx) -> Result<()> {
+impl LiveClaimCommitPlan {
+    async fn apply_bound_claims(
+        &self,
+        txn: &DatabaseTransaction,
+        ctx: &TracesCommitCtx,
+        bound_claims: &[(CoverageSchemaVersion, &ReservedTurnClaim)],
+    ) -> Result<()> {
+        ensure!(
+            bound_claims.len() == self.claims.len()
+                && bound_claims
+                    .iter()
+                    .zip(&self.claims)
+                    .all(|((_, bound), ordinary)| *bound == ordinary),
+            "coverage commit claim binding changed; run libra agent doctor"
+        );
         if let Some(scope) = &self.capture_scope {
             scope.assert_workspace_fence_live(txn).await.context(
                 "verify capture workspace lease before final coverage checkpoint transaction",
@@ -2674,7 +2686,12 @@ impl TracesTxnExtra for LiveClaimCommitPlan {
         .await
         .context("commit typed checkpoint catalog companion in ref transaction")?;
 
-        for claim in &self.claims {
+        for (version, claim) in bound_claims {
+            let previous_revision = claim
+                .next_revision
+                .checked_sub(1)
+                .filter(|revision| *revision >= 0)
+                .context("invalid coverage claim revision at commit")?;
             // Append-only revision history (ADR-DR-16).
             txn.execute_raw(Statement::from_sql_and_values(
                 txn.get_database_backend(),
@@ -2686,7 +2703,7 @@ impl TracesTxnExtra for LiveClaimCommitPlan {
                 [
                     self.session_id.clone().into(),
                     claim.logical_turn_key.clone().into(),
-                    COVERAGE_SCHEMA_VERSION.into(),
+                    version.as_i64().into(),
                     claim.next_revision.into(),
                     self.checkpoint_id.clone().into(),
                     claim.coverage_digest.clone().into(),
@@ -2712,7 +2729,8 @@ impl TracesTxnExtra for LiveClaimCommitPlan {
                      WHERE session_id = ? AND logical_turn_key = ?
                        AND coverage_schema_version = ?
                        AND state = ?
-                       AND owner = ? AND fence_token = ?",
+                       AND owner = ? AND fence_token = ?
+                       AND revision = ? AND coverage_digest = ? AND completeness = ?",
                     [
                         claim.next_revision.into(),
                         claim.coverage_digest.clone().into(),
@@ -2722,23 +2740,51 @@ impl TracesTxnExtra for LiveClaimCommitPlan {
                         self.now_ms.into(),
                         self.session_id.clone().into(),
                         claim.logical_turn_key.clone().into(),
-                        COVERAGE_SCHEMA_VERSION.into(),
+                        version.as_i64().into(),
                         reservation_state(self.source_channel)?.into(),
                         self.owner.clone().into(),
                         claim.fence_token.into(),
+                        previous_revision.into(),
+                        claim.coverage_digest.clone().into(),
+                        claim.completeness.as_db_str().into(),
                     ],
                 ))
                 .await
                 .context("advance agent_coverage_claim in ref transaction")?;
             if advanced.rows_affected() != 1 {
                 bail!(
-                    "coverage claim for turn '{}' was fenced out during commit \
-                     (stale reservation); rolling back checkpoint transaction",
-                    claim.logical_turn_key
+                    "coverage claim was fenced out during commit (stale reservation); \
+                     rolling back checkpoint transaction"
                 );
             }
         }
         Ok(())
+    }
+}
+
+#[async_trait]
+impl TracesTxnExtra for LiveClaimCommitPlan {
+    async fn apply(&self, txn: &DatabaseTransaction, ctx: &TracesCommitCtx) -> Result<()> {
+        let bound_claims = self
+            .claims
+            .iter()
+            .map(|claim| (CoverageSchemaVersion::V1, claim))
+            .collect::<Vec<_>>();
+        self.apply_bound_claims(txn, ctx, &bound_claims).await
+    }
+}
+
+#[async_trait]
+impl TracesTxnExtra for VersionedLiveClaimCommitPlan {
+    async fn apply(&self, txn: &DatabaseTransaction, ctx: &TracesCommitCtx) -> Result<()> {
+        let bound_claims = self.claims().collect::<Vec<_>>();
+        self.ordinary
+            .apply_bound_claims(txn, ctx, &bound_claims)
+            .await
+    }
+
+    fn requires_versioned_coverage_binding(&self) -> bool {
+        true
     }
 }
 
@@ -3042,6 +3088,520 @@ pub(crate) mod tests {
     }
 
     #[cfg(unix)]
+    #[tokio::test]
+    async fn cov2_owner_and_companion_fault_atomicity() {
+        cov2_real_ref_cas_failure_and_replay().await;
+    }
+
+    #[cfg(unix)]
+    async fn cov2_real_ref_cas_failure_and_replay() {
+        use crate::internal::ai::{
+            capture::{
+                checkpoint::{
+                    CheckpointConflictReason, CheckpointRedactedPayload, CheckpointStore,
+                    CheckpointWriteOutcome, CheckpointWriteRequest, TracesCheckpointStore,
+                    test_support,
+                },
+                snapshot::carrier_test_snapshot,
+            },
+            observed_agents::{RedactedBytes, reasoning::carrier_test_support as native},
+            traces::{CheckpointScope, TracesCoverageFence},
+        };
+
+        let fixture = ReasoningFixture::new().await;
+        let mut v2 = turn(
+            "shared-turn",
+            "same ordinary prompt",
+            Completeness::Complete,
+        );
+        let (_, visible) =
+            crate::internal::ai::observed_agents::reasoning::classify_provider_visible_reasoning(
+                crate::internal::ai::observed_agents::reasoning::ReasoningProvider::ClaudeCode,
+                crate::internal::ai::observed_agents::reasoning::ReasoningSourceKind::Reasoning,
+                "visible reasoning".to_owned(),
+            );
+        v2.records.push(SemanticRecord::Reasoning {
+            provider:
+                crate::internal::ai::observed_agents::reasoning::ReasoningProvider::ClaudeCode,
+            source_kind: Some(
+                crate::internal::ai::observed_agents::reasoning::ReasoningSourceKind::Reasoning,
+            ),
+            text: visible,
+        });
+        let turns = [
+            turn(
+                "shared-turn",
+                "same ordinary prompt",
+                Completeness::Complete,
+            ),
+            v2,
+        ];
+        let reserved = reserve_turn_claims_by_version_with_capture_scope(
+            &fixture.conn,
+            &fixture.scope,
+            native::CAPTURE,
+            &turns,
+            &[1, 2],
+            "cov2-store-owner",
+            Utc::now().timestamp_millis(),
+            "live",
+        )
+        .await
+        .expect("reserve same key in two coverage domains");
+        assert_eq!(reserved.reserved.len(), 2);
+        let fences = reserved
+            .reserved
+            .iter()
+            .map(|bound| (bound.coverage_schema_version, &bound.claim))
+            .map(|(version, claim)| TracesCoverageFence {
+                coverage_schema_version: version,
+                logical_turn_key: &claim.logical_turn_key,
+                coverage_digest: &claim.coverage_digest,
+                completeness: claim.completeness,
+                next_revision: claim.next_revision,
+                owner: "cov2-store-owner",
+                fence_token: claim.fence_token,
+                reservation_state: "reserved_live",
+            })
+            .collect::<Vec<_>>();
+        let sidecar = |bytes: &[u8]| RedactedBytes::new_unchecked(bytes.to_vec());
+        let payload = CheckpointRedactedPayload::from_snapshot(
+            carrier_test_snapshot(&native::NONE, b"ordinary".to_vec()),
+            sidecar(b"{}"),
+            sidecar(b"{}\n"),
+            sidecar(b"{}"),
+        )
+        .expect("build ordinary payload for visible typed turn");
+        let object_index_before =
+            scalar(&fixture.conn, "SELECT COUNT(*) AS n FROM object_index").await;
+        fixture
+            .conn
+            .execute_unprepared(
+                "CREATE TRIGGER cov2_real_reject_v2_revision BEFORE INSERT ON agent_coverage_revision
+                 WHEN NEW.coverage_schema_version = 2
+                 BEGIN SELECT RAISE(ABORT, 'injected v2 revision failure'); END",
+            )
+            .await
+            .expect("inject actual companion fault");
+        let retry_checkpoint_id = "cov2-real-success";
+        for (fault, checkpoint_id) in [
+            ("revision", retry_checkpoint_id),
+            ("owner", "cov2-owner-loss"),
+            ("none", retry_checkpoint_id),
+        ] {
+            if fault == "owner" {
+                fixture
+                    .conn
+                    .execute_unprepared("DROP TRIGGER cov2_real_reject_v2_revision")
+                    .await
+                    .expect("remove actual companion fault before owner-loss trial");
+            }
+            let plan = VersionedLiveClaimCommitPlan::new(
+                LiveClaimCommitPlan {
+                    source_channel: "live",
+                    session_id: native::CAPTURE.to_owned(),
+                    checkpoint_id: checkpoint_id.to_owned(),
+                    owner: "cov2-store-owner".to_owned(),
+                    parent_commit: None,
+                    created_at: 1,
+                    now_ms: Utc::now().timestamp_millis(),
+                    claims: reserved
+                        .reserved
+                        .iter()
+                        .map(|bound| bound.claim.clone())
+                        .collect(),
+                    import_session: None,
+                    import_identity: None,
+                    capture_scope: Some(fixture.scope.clone()),
+                },
+                &reserved.reserved,
+            )
+            .expect("bind exact sidecar");
+            let store = TracesCheckpointStore::new(
+                &fixture.conn,
+                fixture.dir.path(),
+                native::CAPTURE,
+                checkpoint_id,
+                &fences,
+            )
+            .expect("prepare real store")
+            .with_capture_scope(fixture.scope.clone());
+            let request = CheckpointWriteRequest::new(
+                checkpoint_id,
+                checkpoint_id,
+                native::CAPTURE,
+                "claude_code",
+                None,
+                CheckpointScope::Committed,
+                store.marker_generation(),
+                None,
+                &payload,
+                None,
+                None,
+            )
+            .expect("build request")
+            .with_versioned_claims(&plan)
+            .expect("bind exact versioned plan");
+            let result = if fault == "owner" {
+                let pause = test_support::pause_after_registration_once(fixture.dir.path());
+                let preempt = async {
+                    pause.wait_until_entered().await;
+                    let preempted = fixture
+                        .conn
+                        .execute_raw(Statement::from_sql_and_values(
+                            fixture.conn.get_database_backend(),
+                            "UPDATE agent_coverage_claim SET owner = 'preempting-owner'
+                             WHERE session_id = ? AND logical_turn_key = 'shared-turn'
+                               AND coverage_schema_version = 2 AND state = 'reserved_live'",
+                            [native::CAPTURE.into()],
+                        ))
+                        .await
+                        .expect("preempt v2 owner after marker registration");
+                    assert_eq!(preempted.rows_affected(), 1);
+                    pause.release();
+                };
+                let (write, ()) = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                    tokio::join!(store.write(request), preempt)
+                })
+                .await
+                .expect("paused owner-loss writer must finish");
+                write
+            } else {
+                store.write(request).await
+            };
+            if fault != "none" {
+                assert!(
+                    result.is_err(),
+                    "real v2 {fault} fault must reject: {result:?}"
+                );
+                assert_eq!(
+                    scalar(
+                        &fixture.conn,
+                        "SELECT COUNT(*) AS n FROM reference WHERE name = 'traces'"
+                    )
+                    .await,
+                    0,
+                    "real traces ref must roll back"
+                );
+                assert_eq!(
+                    scalar(&fixture.conn, &format!("SELECT COUNT(*) AS n FROM agent_checkpoint WHERE checkpoint_id = '{checkpoint_id}'")).await,
+                    0,
+                    "catalog must roll back"
+                );
+                assert_eq!(
+                    scalar(&fixture.conn, &format!("SELECT COUNT(*) AS n FROM agent_coverage_revision WHERE checkpoint_id = '{checkpoint_id}'")).await,
+                    0,
+                    "both revision rows must roll back"
+                );
+                assert_eq!(
+                    scalar(&fixture.conn, "SELECT COUNT(*) AS n FROM agent_coverage_claim WHERE logical_turn_key = 'shared-turn' AND state = 'reserved_live' AND revision = 0").await,
+                    2,
+                    "both reserved claims must remain"
+                );
+                assert_eq!(
+                    scalar(&fixture.conn, "SELECT COUNT(*) AS n FROM object_index").await,
+                    object_index_before,
+                    "failed ref transaction must not publish object index rows"
+                );
+                if fault == "owner" {
+                    assert_eq!(
+                        scalar(&fixture.conn, "SELECT COUNT(*) AS n FROM agent_coverage_claim WHERE logical_turn_key = 'shared-turn' AND coverage_schema_version = 2 AND owner = 'preempting-owner'").await,
+                        1,
+                        "failed ref CAS must not retake the lost owner"
+                    );
+                    fixture
+                        .conn
+                        .execute_unprepared(
+                            "UPDATE agent_coverage_claim SET owner = 'cov2-store-owner'
+                             WHERE logical_turn_key = 'shared-turn' AND coverage_schema_version = 2
+                               AND owner = 'preempting-owner' AND state = 'reserved_live'",
+                        )
+                        .await
+                        .expect("restore original owner for clean retry fixture");
+                }
+                // The failed append can leave a cleanup-pending marker owning
+                // newly written but unpublished objects. Retire that exact
+                // failed attempt through the production repair path before
+                // retrying the same checkpoint identity with a fresh store.
+                let marker = crate::internal::metadata::MetadataKv::get_with_conn(
+                    &fixture.conn,
+                    crate::internal::metadata::MetadataScope::AgentTracesInflight,
+                    native::CAPTURE,
+                    checkpoint_id,
+                )
+                .await
+                .expect("read failed checkpoint marker");
+                if let Some(marker) = marker {
+                    let marker =
+                        crate::internal::ai::traces::decode_and_validate_traces_inflight_marker(
+                            &marker.value,
+                            native::CAPTURE,
+                            checkpoint_id,
+                        )
+                        .expect("failed attempt marker must remain valid");
+                    assert!(
+                        marker.cleanup_pending,
+                        "failed append with unpublished objects must keep recoverable ownership"
+                    );
+                    let storage =
+                        std::sync::Arc::new(crate::utils::client_storage::ClientStorage::init(
+                            fixture.dir.path().join("objects"),
+                        ));
+                    let manager = crate::internal::ai::history::HistoryManager::for_traces(
+                        storage,
+                        fixture.dir.path().to_path_buf(),
+                        std::sync::Arc::new(fixture.conn.clone()),
+                    );
+                    assert!(
+                        manager
+                            .repair_expired_traces_inflight_marker_for_test(
+                                native::CAPTURE,
+                                checkpoint_id,
+                                Utc::now().timestamp_millis(),
+                            )
+                            .await
+                            .expect("repair failed checkpoint's cleanup marker"),
+                        "failed checkpoint marker must be repairable before same-ID retry"
+                    );
+                }
+                assert!(
+                    crate::internal::metadata::MetadataKv::get_with_conn(
+                        &fixture.conn,
+                        crate::internal::metadata::MetadataScope::AgentTracesInflight,
+                        native::CAPTURE,
+                        checkpoint_id,
+                    )
+                    .await
+                    .expect("read marker after failed-attempt repair")
+                    .is_none(),
+                    "same checkpoint ID retry requires the failed marker to be retired"
+                );
+            } else {
+                assert!(matches!(result, Ok(CheckpointWriteOutcome::Written { .. })));
+                assert_eq!(checkpoint_id, retry_checkpoint_id);
+                assert_eq!(
+                    scalar(&fixture.conn, &format!("SELECT COUNT(*) AS n FROM agent_coverage_revision WHERE checkpoint_id = '{checkpoint_id}'")).await,
+                    2,
+                    "the failed v2 checkpoint ID must commit both revisions on its clean retry"
+                );
+                assert_eq!(
+                    scalar(&fixture.conn, "SELECT COUNT(*) AS n FROM agent_coverage_claim WHERE logical_turn_key = 'shared-turn' AND state = 'catalog_committed'").await,
+                    2
+                );
+                let replay_store = TracesCheckpointStore::new(
+                    &fixture.conn,
+                    fixture.dir.path(),
+                    native::CAPTURE,
+                    checkpoint_id,
+                    &fences,
+                )
+                .expect("prepare replay store")
+                .with_capture_scope(fixture.scope.clone());
+                let replay = CheckpointWriteRequest::new(
+                    checkpoint_id,
+                    checkpoint_id,
+                    native::CAPTURE,
+                    "claude_code",
+                    None,
+                    CheckpointScope::Committed,
+                    replay_store.marker_generation(),
+                    None,
+                    &payload,
+                    None,
+                    None,
+                )
+                .expect("build exact replay")
+                .with_versioned_claims(&plan)
+                .expect("bind exact replay sidecar");
+                assert!(matches!(
+                    replay_store.write(replay).await,
+                    Ok(CheckpointWriteOutcome::AlreadyExists { .. })
+                ));
+                let empty_store = TracesCheckpointStore::new(
+                    &fixture.conn,
+                    fixture.dir.path(),
+                    native::CAPTURE,
+                    checkpoint_id,
+                    &[],
+                )
+                .expect("prepare metadata-only replay store")
+                .with_capture_scope(fixture.scope.clone());
+                let empty_replay = CheckpointWriteRequest::new(
+                    checkpoint_id,
+                    checkpoint_id,
+                    native::CAPTURE,
+                    "claude_code",
+                    None,
+                    CheckpointScope::Committed,
+                    empty_store.marker_generation(),
+                    None,
+                    &payload,
+                    None,
+                    None,
+                )
+                .expect("build metadata-only replay request");
+                assert!(
+                    matches!(
+                        empty_store.write(empty_replay).await,
+                        Ok(CheckpointWriteOutcome::ConflictUnchanged {
+                            reason: CheckpointConflictReason::ReplayPayloadMismatch
+                        })
+                    ),
+                    "empty expected claims must not acknowledge a claim-bearing checkpoint"
+                );
+            }
+        }
+
+        // A committed checkpoint can arrive after the optimistic replay probe
+        // but before the marker-registration writer lock. Registration must
+        // compare the authoritative empty set against the new durable v2
+        // revision and reject without creating a marker or append.
+        let race = ReasoningFixture::new().await;
+        let race_checkpoint_id = "cov2-registration-race";
+        let race_store = TracesCheckpointStore::new(
+            &race.conn,
+            race.dir.path(),
+            native::CAPTURE,
+            race_checkpoint_id,
+            &[],
+        )
+        .expect("prepare empty-claim race store")
+        .with_capture_scope(race.scope.clone());
+        let race_request = CheckpointWriteRequest::new(
+            race_checkpoint_id,
+            race_checkpoint_id,
+            native::CAPTURE,
+            "claude_code",
+            None,
+            CheckpointScope::Committed,
+            race_store.marker_generation(),
+            None,
+            &payload,
+            None,
+            None,
+        )
+        .expect("build empty-claim race request");
+        let race_pause = test_support::pause_before_registration_once(race.dir.path());
+        let seed_committed = async {
+            race_pause.wait_until_entered().await;
+            assert_eq!(
+                scalar(
+                    &race.conn,
+                    "SELECT COUNT(*) AS n FROM reference WHERE name = 'traces'"
+                )
+                .await,
+                0,
+                "the optimistic probe must not append the traces ref"
+            );
+            assert!(
+                crate::internal::metadata::MetadataKv::get_with_conn(
+                    &race.conn,
+                    crate::internal::metadata::MetadataScope::AgentTracesInflight,
+                    native::CAPTURE,
+                    race_checkpoint_id,
+                )
+                .await
+                .expect("read marker while writer is paused")
+                .is_none(),
+                "the registration race must begin before marker mutation"
+            );
+            race.conn
+                .execute_raw(Statement::from_sql_and_values(
+                    race.conn.get_database_backend(),
+                    "INSERT INTO agent_checkpoint
+                     (checkpoint_id, session_id, scope, parent_commit, tree_oid,
+                      metadata_blob_oid, traces_commit, created_at)
+                     VALUES (?, ?, 'committed', ?, ?, ?, ?, 1)",
+                    [
+                        race_checkpoint_id.into(),
+                        native::CAPTURE.into(),
+                        "a".repeat(40).into(),
+                        "b".repeat(40).into(),
+                        "c".repeat(40).into(),
+                        "d".repeat(40).into(),
+                    ],
+                ))
+                .await
+                .expect("race in a same-session committed checkpoint");
+            race.conn
+                .execute_raw(Statement::from_sql_and_values(
+                    race.conn.get_database_backend(),
+                    "INSERT INTO agent_coverage_revision
+                     (session_id, logical_turn_key, coverage_schema_version, revision,
+                      checkpoint_id, coverage_digest, completeness, source_channel, created_at)
+                     VALUES (?, 'raced-v2-turn', 2, 1, ?, ?, 'complete', 'live', 1)",
+                    [
+                        native::CAPTURE.into(),
+                        race_checkpoint_id.into(),
+                        "e".repeat(64).into(),
+                    ],
+                ))
+                .await
+                .expect("race in a nonempty v2 committed revision set");
+            race_pause.release();
+        };
+        let (raced_write, ()) = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            tokio::join!(race_store.write(race_request), seed_committed)
+        })
+        .await
+        .expect("registration-race writer must finish");
+        assert!(
+            matches!(
+                &raced_write,
+                Ok(CheckpointWriteOutcome::ConflictUnchanged {
+                    reason: CheckpointConflictReason::ReplayPayloadMismatch
+                })
+            ),
+            "registration must reject the raced nonempty v2 claim set: {raced_write:?}"
+        );
+        assert_eq!(
+            scalar(&race.conn, "SELECT COUNT(*) AS n FROM agent_checkpoint").await,
+            1,
+            "the raced catalog row must remain the only checkpoint"
+        );
+        assert_eq!(
+            scalar(
+                &race.conn,
+                "SELECT COUNT(*) AS n FROM agent_coverage_revision"
+            )
+            .await,
+            1,
+            "registration must not mutate the raced revision"
+        );
+        assert_eq!(
+            scalar(&race.conn, "SELECT COUNT(*) AS n FROM agent_coverage_claim").await,
+            0,
+            "registration must not create or mutate claims"
+        );
+        assert_eq!(
+            scalar(
+                &race.conn,
+                "SELECT COUNT(*) AS n FROM reference WHERE name = 'traces'"
+            )
+            .await,
+            0,
+            "registration conflict must not append a traces ref"
+        );
+        assert_eq!(
+            scalar(&race.conn, "SELECT COUNT(*) AS n FROM object_index").await,
+            0,
+            "registration conflict must not publish objects"
+        );
+        assert!(
+            crate::internal::metadata::MetadataKv::get_with_conn(
+                &race.conn,
+                crate::internal::metadata::MetadataScope::AgentTracesInflight,
+                native::CAPTURE,
+                race_checkpoint_id,
+            )
+            .await
+            .expect("read marker after registration conflict")
+            .is_none(),
+            "registration conflict must leave no marker"
+        );
+    }
+
+    #[cfg(unix)]
     pub(crate) struct ReasoningFixture {
         pub(crate) dir: tempfile::TempDir,
         pub(crate) conn: DatabaseConnection,
@@ -3078,6 +3638,43 @@ pub(crate) mod tests {
             )
             .unwrap();
             Self { dir, conn, scope }
+        }
+
+        pub(crate) async fn seed_legacy_v1_checkpoint_revision(&self, checkpoint_id: &str) {
+            use crate::internal::ai::observed_agents::reasoning::carrier_test_support as native;
+            self.conn
+                .execute_raw(Statement::from_sql_and_values(
+                    self.conn.get_database_backend(),
+                    "INSERT INTO agent_checkpoint
+                     (checkpoint_id, session_id, scope, parent_commit, tree_oid,
+                      metadata_blob_oid, traces_commit, created_at)
+                     VALUES (?, ?, 'committed', ?, ?, ?, ?, 1)",
+                    [
+                        checkpoint_id.into(),
+                        native::CAPTURE.into(),
+                        "a".repeat(40).into(),
+                        "b".repeat(40).into(),
+                        "c".repeat(40).into(),
+                        "d".repeat(40).into(),
+                    ],
+                ))
+                .await
+                .expect("seed actual-schema legacy checkpoint");
+            self.conn
+                .execute_raw(Statement::from_sql_and_values(
+                    self.conn.get_database_backend(),
+                    "INSERT INTO agent_coverage_revision
+                     (session_id, logical_turn_key, coverage_schema_version, revision,
+                      checkpoint_id, coverage_digest, completeness, source_channel, created_at)
+                     VALUES (?, 'legacy-turn', 1, 1, ?, ?, 'complete', 'live', 1)",
+                    [
+                        native::CAPTURE.into(),
+                        checkpoint_id.into(),
+                        "e".repeat(64).into(),
+                    ],
+                ))
+                .await
+                .expect("seed nonempty legacy v1 revision set");
         }
 
         fn reader(&self) -> ReasoningIdentityReadContext {
@@ -4305,7 +4902,11 @@ pub(crate) mod tests {
                 .reserved
                 .iter()
                 .map(|claim| TracesCoverageFence {
+                    coverage_schema_version: CoverageSchemaVersion::V1,
                     logical_turn_key: &claim.logical_turn_key,
+                    coverage_digest: &claim.coverage_digest,
+                    completeness: claim.completeness,
+                    next_revision: claim.next_revision,
                     owner: "atomic-owner",
                     fence_token: claim.fence_token,
                     reservation_state: state,

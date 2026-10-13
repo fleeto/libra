@@ -23,7 +23,7 @@ use crate::internal::ai::{
         authorize_final_capture_commit,
     },
     hooks::lifecycle::LIFECYCLE_EVENT_JSONL_SCHEMA_VERSION,
-    observed_agents::RedactedBytes,
+    observed_agents::{Completeness, CoverageSchemaVersion, RedactedBytes},
 };
 
 /// A caller-owned absolute deadline elapsed while a standalone traces-marker
@@ -365,6 +365,13 @@ pub fn rebuild_catalog_row_from_traces_ref(
 #[async_trait::async_trait]
 pub trait TracesTxnExtra: Send + Sync {
     async fn apply(&self, txn: &DatabaseTransaction, ctx: &TracesCommitCtx) -> Result<()>;
+
+    /// Closed versioned companions must enter through a request that also
+    /// binds their complete marker and replay fences. Existing v1 companions
+    /// preserve the old constructor behavior.
+    fn requires_versioned_coverage_binding(&self) -> bool {
+        false
+    }
 }
 
 impl std::fmt::Debug for dyn TracesTxnExtra + '_ {
@@ -1192,10 +1199,251 @@ pub async fn retire_stale_traces_inflight_marker<C: ConnectionTrait>(
 /// are valid for metadata/subagent checkpoints, but every claimed live/export
 /// turn must still be owned before any object is built.
 pub struct TracesCoverageFence<'a> {
+    pub coverage_schema_version: CoverageSchemaVersion,
     pub logical_turn_key: &'a str,
+    pub coverage_digest: &'a str,
+    pub completeness: Completeness,
+    pub next_revision: i64,
     pub owner: &'a str,
     pub fence_token: i64,
     pub reservation_state: &'a str,
+}
+
+impl TracesCoverageFence<'_> {
+    fn previous_revision(&self) -> Result<i64> {
+        self.next_revision
+            .checked_sub(1)
+            .filter(|revision| *revision >= 0)
+            .context("invalid coverage revision for checkpoint marker")
+    }
+}
+
+fn validate_traces_coverage_fences(fences: &[TracesCoverageFence<'_>]) -> Result<()> {
+    // The v2 identity-map bound must not retroactively cap historical pure
+    // v1 checkpoints, whose reservation path allowed larger claim sets.
+    if fences.len() > crate::internal::metadata::REASONING_IDENTITY_SESSION_MAP_MAX_ENTRIES {
+        anyhow::ensure!(
+            fences
+                .iter()
+                .all(|fence| fence.coverage_schema_version == CoverageSchemaVersion::V1),
+            "checkpoint coverage fence count exceeds its safe limit"
+        );
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for fence in fences {
+        anyhow::ensure!(
+            !fence.logical_turn_key.is_empty()
+                && !fence.owner.is_empty()
+                && fence.fence_token > 0
+                && fence.coverage_digest.len() == 64
+                && fence
+                    .coverage_digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit())
+                && matches!(fence.reservation_state, "reserved_live" | "reserved_import")
+                && seen.insert((
+                    fence.coverage_schema_version.as_i64(),
+                    fence.logical_turn_key
+                )),
+            "invalid or duplicate checkpoint coverage fence"
+        );
+        fence.previous_revision()?;
+    }
+    Ok(())
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("checkpoint coverage replay differs from committed claims; run libra agent doctor")]
+pub(crate) struct TracesCheckpointClaimMismatch;
+
+/// A frozen v1 catalog may predate both coverage tables. Missing tables are
+/// legacy evidence only while no coverage-or-later migration receipt exists;
+/// a partial or modern-but-damaged schema must fail closed.
+pub(crate) async fn legacy_coverage_tables_absent_with_conn<C: ConnectionTrait>(
+    conn: &C,
+) -> Result<bool> {
+    let has_coverage_table = conn
+        .query_one_raw(Statement::from_string(
+            conn.get_database_backend(),
+            "SELECT 1 AS present FROM sqlite_master
+             WHERE type = 'table'
+               AND name IN ('agent_coverage_claim', 'agent_coverage_revision')
+             LIMIT 1"
+                .to_owned(),
+        ))
+        .await
+        .context("inspect legacy checkpoint coverage schema")?
+        .is_some();
+    if has_coverage_table {
+        return Ok(false);
+    }
+    let has_schema_versions = conn
+        .query_one_raw(Statement::from_string(
+            conn.get_database_backend(),
+            "SELECT 1 AS present FROM sqlite_master
+             WHERE type = 'table' AND name = 'schema_versions' LIMIT 1"
+                .to_owned(),
+        ))
+        .await
+        .context("inspect checkpoint migration receipt ledger")?
+        .is_some();
+    if has_schema_versions {
+        let applied_coverage_or_later = conn
+            .query_one_raw(Statement::from_sql_and_values(
+                conn.get_database_backend(),
+                "SELECT 1 AS present FROM schema_versions WHERE version >= ? LIMIT 1",
+                [2026071301_i64.into()],
+            ))
+            .await
+            .context("read checkpoint coverage migration provenance")?
+            .is_some();
+        if applied_coverage_or_later {
+            return Err(TracesCheckpointClaimMismatch.into());
+        }
+    }
+    Ok(true)
+}
+
+/// Compare the complete immutable revision set, rather than the current
+/// claim row that a later checkpoint may legitimately have advanced.
+pub(crate) async fn verify_checkpoint_claim_set_with_conn<C: ConnectionTrait>(
+    conn: &C,
+    session_id: &str,
+    checkpoint_id: &str,
+    fences: &[TracesCoverageFence<'_>],
+) -> Result<()> {
+    // An empty expected set must still prove that the committed checkpoint
+    // has no coverage revisions; otherwise a claim-bearing replay could be
+    // acknowledged through a metadata-only request.
+    validate_traces_coverage_fences(fences)?;
+    if legacy_coverage_tables_absent_with_conn(conn).await? {
+        // The only authenticated claim set in a pre-coverage catalog is empty.
+        // A nonempty request must not turn a missing table into a store error
+        // that masks the actual replay mismatch.
+        return if fences.is_empty() {
+            Ok(())
+        } else {
+            Err(TracesCheckpointClaimMismatch.into())
+        };
+    }
+    // Read one beyond the caller's authoritative set to detect an extra
+    // committed revision, including historical v1 sets above the v2 cap.
+    let query_limit = fences
+        .len()
+        .checked_add(1)
+        .and_then(|count| i64::try_from(count).ok())
+        .context("checkpoint coverage replay set exceeds SQLite query limit")?;
+    let rows = conn
+        .query_all_raw(Statement::from_sql_and_values(
+            conn.get_database_backend(),
+            "SELECT logical_turn_key, coverage_schema_version, coverage_digest,
+                    completeness, revision
+             FROM agent_coverage_revision
+             WHERE session_id = ? AND checkpoint_id = ?
+             LIMIT ?",
+            [session_id.into(), checkpoint_id.into(), query_limit.into()],
+        ))
+        .await
+        .context("read committed checkpoint coverage revisions")?;
+    if rows.len() != fences.len() {
+        return Err(TracesCheckpointClaimMismatch.into());
+    }
+    let mut expected = std::collections::BTreeMap::new();
+    for fence in fences {
+        expected.insert(
+            (
+                fence.coverage_schema_version.as_i64(),
+                fence.logical_turn_key.to_owned(),
+            ),
+            (
+                fence.coverage_digest,
+                fence.completeness.as_db_str(),
+                fence.next_revision,
+            ),
+        );
+    }
+    for row in rows {
+        let version: i64 = row.try_get_by("coverage_schema_version")?;
+        CoverageSchemaVersion::try_from(version).map_err(|_| TracesCheckpointClaimMismatch)?;
+        let key: String = row.try_get_by("logical_turn_key")?;
+        let digest: String = row.try_get_by("coverage_digest")?;
+        let completeness: String = row.try_get_by("completeness")?;
+        let revision: i64 = row.try_get_by("revision")?;
+        if expected.remove(&(version, key))
+            != Some((digest.as_str(), completeness.as_str(), revision))
+        {
+            return Err(TracesCheckpointClaimMismatch.into());
+        }
+    }
+    if !expected.is_empty() {
+        return Err(TracesCheckpointClaimMismatch.into());
+    }
+    Ok(())
+}
+
+/// A completed v1 terminal receipt keeps its established content-free replay
+/// behavior when neither side carries versioned evidence. A v2 expected or
+/// non-v1 committed revision requires the same durable checkpoint and its exact
+/// revision set;
+/// an empty or v1-only request cannot downgrade an already committed v2 set.
+async fn verify_completed_terminal_claim_set_with_conn<C: ConnectionTrait>(
+    conn: &C,
+    marker: &TracesInflightMarker,
+    expected_checkpoint_scope: Option<CheckpointScope>,
+    fences: &[TracesCoverageFence<'_>],
+) -> Result<()> {
+    let expected_v2 = fences
+        .iter()
+        .any(|fence| fence.coverage_schema_version == CoverageSchemaVersion::V2);
+    let committed = conn
+        .query_one_raw(Statement::from_sql_and_values(
+            conn.get_database_backend(),
+            "SELECT session_id, scope FROM agent_checkpoint
+             WHERE checkpoint_id = ? LIMIT 1",
+            [marker.attempt_id.clone().into()],
+        ))
+        .await
+        .context("read completed terminal checkpoint before replay")?;
+    // A frozen v1 receipt may predate both coverage tables, whether or not
+    // this action has a checkpoint row. A nonempty expectation cannot be
+    // authenticated without the revision table; a partial schema is corrupt.
+    if legacy_coverage_tables_absent_with_conn(conn).await? {
+        return if fences.is_empty() {
+            Ok(())
+        } else {
+            Err(TracesCheckpointClaimMismatch.into())
+        };
+    }
+    let committed_versioned = conn
+        .query_one_raw(Statement::from_sql_and_values(
+            conn.get_database_backend(),
+            "SELECT 1 AS present FROM agent_coverage_revision
+             WHERE checkpoint_id = ? AND coverage_schema_version <> 1 LIMIT 1",
+            [marker.attempt_id.clone().into()],
+        ))
+        .await
+        .context("read completed terminal checkpoint's versioned coverage")?
+        .is_some();
+    let Some(committed) = committed else {
+        return if expected_v2 || committed_versioned {
+            Err(TracesCheckpointClaimMismatch.into())
+        } else {
+            Ok(())
+        };
+    };
+    if !expected_v2 && !committed_versioned {
+        return Ok(());
+    }
+    if expected_checkpoint_scope != Some(CheckpointScope::Committed) {
+        return Err(TracesCheckpointClaimMismatch.into());
+    }
+    let session_id: String = committed.try_get_by("session_id")?;
+    let scope: String = committed.try_get_by("scope")?;
+    if session_id != marker.session_id || scope != CheckpointScope::Committed.as_str() {
+        return Err(TracesCheckpointClaimMismatch.into());
+    }
+    verify_checkpoint_claim_set_with_conn(conn, &marker.session_id, &marker.attempt_id, fences)
+        .await
 }
 
 /// Result of attempting to establish the one writer marker for a replayable
@@ -1488,6 +1736,7 @@ async fn register_traces_write_attempt_with_capture_scope_prepare(
     deadline: Option<CaptureCommitDeadline>,
 ) -> Result<TracesWriteAttemptPreparation> {
     ensure_before_traces_marker_deadline(deadline)?;
+    validate_traces_coverage_fences(coverage_fences)?;
     let txn = begin_traces_marker_write_transaction_until(
         conn,
         deadline,
@@ -1541,7 +1790,19 @@ async fn register_traces_write_attempt_with_capture_scope_prepare(
         match registration {
             crate::internal::ai::capture::catalog::CaptureCatalogTerminalAttemptRegistration::Authorized => {}
             crate::internal::ai::capture::catalog::CaptureCatalogTerminalAttemptRegistration::TerminalReceiptAlreadyComplete => {
+                let claim_set = await_traces_marker_precommit_read_until(
+                    deadline,
+                    "verify completed terminal coverage before acknowledgement",
+                    verify_completed_terminal_claim_set_with_conn(
+                        &txn,
+                        marker,
+                        expected_checkpoint_scope,
+                        coverage_fences,
+                    ),
+                )
+                .await;
                 txn.rollback().await.ok();
+                claim_set?;
                 return Ok(TracesWriteAttemptPreparation::Complete(
                     TracesWriteAttemptRegistration::TerminalReceiptAlreadyComplete,
                 ));
@@ -1617,6 +1878,23 @@ async fn register_traces_write_attempt_with_capture_scope_prepare(
             let scope: String = committed
                 .try_get_by("scope")
                 .context("decode durable checkpoint scope before marker registration")?;
+            if session_id == marker.session_id && scope == expected_scope.as_str() {
+                let claims = await_traces_marker_precommit_read_until(
+                    deadline,
+                    "verify committed coverage before marker registration",
+                    verify_checkpoint_claim_set_with_conn(
+                        &txn,
+                        &marker.session_id,
+                        &marker.attempt_id,
+                        coverage_fences,
+                    ),
+                )
+                .await;
+                if let Err(error) = claims {
+                    txn.rollback().await.ok();
+                    return Err(error);
+                }
+            }
             txn.rollback().await.ok();
             if session_id == marker.session_id && scope == expected_scope.as_str() {
                 return Ok(TracesWriteAttemptPreparation::Complete(
@@ -1635,14 +1913,19 @@ async fn register_traces_write_attempt_with_capture_scope_prepare(
                     txn.get_database_backend(),
                     "SELECT 1 AS owned FROM agent_coverage_claim
                      WHERE session_id = ? AND logical_turn_key = ?
-                       AND coverage_schema_version = 1 AND state = ?
-                       AND owner = ? AND fence_token = ?",
+                       AND coverage_schema_version = ? AND state = ?
+                       AND owner = ? AND fence_token = ?
+                       AND coverage_digest = ? AND completeness = ? AND revision = ?",
                     [
                         marker.session_id.clone().into(),
                         fence.logical_turn_key.into(),
+                        fence.coverage_schema_version.as_i64().into(),
                         fence.reservation_state.into(),
                         fence.owner.into(),
                         fence.fence_token.into(),
+                        fence.coverage_digest.into(),
+                        fence.completeness.as_db_str().into(),
+                        fence.previous_revision()?.into(),
                     ],
                 ))
                 .await
@@ -1659,10 +1942,7 @@ async fn register_traces_write_attempt_with_capture_scope_prepare(
         };
         if owned.is_none() {
             txn.rollback().await.ok();
-            bail!(
-                "coverage fence for turn '{}' is no longer owned; checkpoint write aborted",
-                fence.logical_turn_key
-            );
+            bail!("checkpoint coverage fence is no longer owned; checkpoint write aborted");
         }
     }
 
@@ -2352,6 +2632,1108 @@ mod tests {
         .await
         .expect("read scoped traces marker")
         .map(|entry| entry.value)
+    }
+
+    #[tokio::test]
+    async fn cov2_marker_fence_binds_version() {
+        let (conn, scope, marker) = scoped_marker_fixture().await;
+        conn.execute_unprepared(
+            "CREATE TABLE agent_coverage_claim (
+                session_id TEXT, logical_turn_key TEXT, coverage_schema_version INTEGER,
+                state TEXT, owner TEXT, fence_token INTEGER, coverage_digest TEXT,
+                completeness TEXT, revision INTEGER
+            )",
+        )
+        .await
+        .expect("create versioned claim fixture");
+        for (version, owner, token, digest) in [
+            (1, "v1-owner", 3, "a".repeat(64)),
+            (2, "v2-owner", 7, "b".repeat(64)),
+        ] {
+            conn.execute_raw(Statement::from_sql_and_values(
+                conn.get_database_backend(),
+                "INSERT INTO agent_coverage_claim VALUES (?, ?, ?, 'reserved_live', ?, ?, ?, 'complete', 0)",
+                [
+                    marker.session_id.clone().into(),
+                    "shared-turn".into(),
+                    version.into(),
+                    owner.into(),
+                    token.into(),
+                    digest.into(),
+                ],
+            ))
+            .await
+            .expect("seed versioned claim");
+        }
+        let digest = "b".repeat(64);
+        let fence = TracesCoverageFence {
+            coverage_schema_version: CoverageSchemaVersion::V2,
+            logical_turn_key: "shared-turn",
+            coverage_digest: &digest,
+            completeness: Completeness::Complete,
+            next_revision: 1,
+            owner: "v2-owner",
+            fence_token: 7,
+            reservation_state: "reserved_live",
+        };
+        assert_eq!(
+            register_traces_write_attempt_with_capture_scope(
+                &conn,
+                Some(&scope),
+                &marker,
+                &[fence],
+                None,
+                None,
+            )
+            .await
+            .expect("exact v2 fence registers"),
+            TracesWriteAttemptRegistration::Registered
+        );
+        assert!(marker_value(&conn, &marker).await.is_some());
+
+        for (ordinal, version, owner, token, digest, completeness, next_revision) in [
+            (
+                1,
+                CoverageSchemaVersion::V1,
+                "v2-owner",
+                7,
+                "b".repeat(64),
+                Completeness::Complete,
+                1,
+            ),
+            (
+                2,
+                CoverageSchemaVersion::V2,
+                "wrong-owner",
+                7,
+                "b".repeat(64),
+                Completeness::Complete,
+                1,
+            ),
+            (
+                3,
+                CoverageSchemaVersion::V2,
+                "v2-owner",
+                8,
+                "b".repeat(64),
+                Completeness::Complete,
+                1,
+            ),
+            (
+                4,
+                CoverageSchemaVersion::V2,
+                "v2-owner",
+                7,
+                "c".repeat(64),
+                Completeness::Complete,
+                1,
+            ),
+            (
+                5,
+                CoverageSchemaVersion::V2,
+                "v2-owner",
+                7,
+                "b".repeat(64),
+                Completeness::Incomplete,
+                1,
+            ),
+            (
+                6,
+                CoverageSchemaVersion::V2,
+                "v2-owner",
+                7,
+                "b".repeat(64),
+                Completeness::Complete,
+                2,
+            ),
+        ] {
+            let mut rejected_marker = marker.clone();
+            rejected_marker.attempt_id = format!("mismatch-{ordinal}");
+            let rejected = TracesCoverageFence {
+                coverage_schema_version: version,
+                logical_turn_key: "shared-turn",
+                coverage_digest: &digest,
+                completeness,
+                next_revision,
+                owner,
+                fence_token: token,
+                reservation_state: "reserved_live",
+            };
+            assert!(
+                register_traces_write_attempt_with_capture_scope(
+                    &conn,
+                    Some(&scope),
+                    &rejected_marker,
+                    &[rejected],
+                    None,
+                    None,
+                )
+                .await
+                .is_err(),
+                "mismatch {ordinal} must fail before marker success"
+            );
+            assert!(marker_value(&conn, &rejected_marker).await.is_none());
+        }
+        cov2_committed_marker_replay_checks_complete_revision_set().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cov2_completed_terminal_receipt_runtime_branch() {
+        use crate::internal::ai::{
+            capture::{
+                catalog::{
+                    CaptureCatalogAction, CaptureCatalogApplyRequest,
+                    CaptureCatalogCompleteRequest, CaptureCatalogCompleteResult,
+                    CaptureCatalogFinalizeRequest, CaptureCatalogFinalizeResult,
+                    CaptureCatalogMutation, CaptureCatalogPort, CaptureCatalogSession,
+                    CaptureCatalogStore, CaptureCatalogTerminalAttempt,
+                },
+                finalizer::{
+                    CaptureFinalizeMode, CaptureFinalizePolicy, FinalizeCheckpointProgress,
+                },
+                state::{
+                    CapturePhase, CheckpointWrite, DurableCaptureState, LifecycleReducerInput,
+                    reduce_lifecycle,
+                },
+            },
+            coverage_gate::tests::ReasoningFixture,
+            hooks::LifecycleEventKind,
+            observed_agents::reasoning::carrier_test_support as native,
+        };
+
+        let fixture = ReasoningFixture::new().await;
+        let conn = &fixture.conn;
+        let catalog = CaptureCatalogStore::new(conn.clone());
+        let event_id = uuid::Uuid::from_u128(0xc03);
+        let action = CaptureCatalogAction::lifecycle(event_id, None);
+        let current = DurableCaptureState {
+            phase: CapturePhase::Active,
+            stopped_at: None,
+            sync_revision: 1,
+        };
+        let plan = reduce_lifecycle(LifecycleReducerInput {
+            current: Some(current),
+            event_kind: LifecycleEventKind::SessionEnd,
+            event_id,
+            occurred_at: 1_700_000_010,
+            deadline: None,
+        })
+        .expect("reduce real terminal action");
+        let mutation = CaptureCatalogMutation::from_reducer(Some(current), &plan, 1_700_000_010)
+            .expect("create terminal catalog mutation");
+        let apply = CaptureCatalogApplyRequest::new(
+            fixture.scope.clone(),
+            CaptureCatalogSession::new(
+                native::CAPTURE,
+                "claude_code",
+                native::SOURCE,
+                fixture.dir.path().to_string_lossy().into_owned(),
+            )
+            .expect("match existing scoped capture session"),
+            action.clone(),
+            mutation,
+        )
+        .expect("bind terminal action to catalog");
+        catalog
+            .apply(&apply)
+            .await
+            .expect("reserve terminal receipt");
+        let marker = TracesInflightMarker::new(
+            native::CAPTURE,
+            &crate::internal::ai::capture::checkpoint::checkpoint_id_for_capture_action(
+                event_id,
+                CheckpointWrite::Committed,
+            ),
+            chrono::Utc::now().timestamp_millis(),
+        );
+        let generation = marker
+            .generation
+            .as_deref()
+            .expect("test marker generation");
+        let policy = CaptureFinalizePolicy::new(
+            None,
+            CaptureFinalizeMode::Deferrable,
+            action.action_key().to_owned(),
+        )
+        .expect("terminal policy");
+        let finalizer = |now, checkpoint| {
+            CaptureCatalogFinalizeRequest::from_apply(
+                &apply,
+                policy.clone(),
+                generation,
+                None,
+                now,
+                checkpoint,
+            )
+            .expect("bind terminal finalizer request")
+        };
+        let terminal_fence = match catalog
+            .claim_terminal_attempt(&finalizer(1, FinalizeCheckpointProgress::NotStarted), true)
+            .await
+            .expect("elect terminal marker")
+        {
+            CaptureCatalogTerminalAttempt::Bound {
+                registration_fence, ..
+            } => *registration_fence,
+            other => panic!("expected bound terminal marker, got {other:?}"),
+        };
+        let proof = match catalog
+            .finalize(&finalizer(2, FinalizeCheckpointProgress::Durable))
+            .await
+            .expect("record durable terminal finalizer")
+        {
+            CaptureCatalogFinalizeResult::ReadyToComplete { proof } => proof,
+            other => panic!("expected terminal completion proof, got {other:?}"),
+        };
+        assert_eq!(
+            catalog
+                .complete(
+                    &CaptureCatalogCompleteRequest::from_finalizer(&apply, proof)
+                        .expect("bind strict terminal completion"),
+                )
+                .await
+                .expect("complete terminal receipt"),
+            CaptureCatalogCompleteResult::Completed,
+        );
+
+        let digest = "b".repeat(64);
+        let v2 = [TracesCoverageFence {
+            coverage_schema_version: CoverageSchemaVersion::V2,
+            logical_turn_key: "terminal-turn",
+            coverage_digest: &digest,
+            completeness: Completeness::Complete,
+            next_revision: 1,
+            owner: "terminal-owner",
+            fence_token: 7,
+            reservation_state: "reserved_live",
+        }];
+        assert!(
+            register_traces_write_attempt_with_capture_scope(
+                conn,
+                None,
+                &marker,
+                &v2,
+                Some(CheckpointScope::Committed),
+                Some(&terminal_fence),
+            )
+            .await
+            .is_err(),
+            "completed v2 receipt must not acknowledge an absent checkpoint"
+        );
+        let legacy = [TracesCoverageFence {
+            coverage_schema_version: CoverageSchemaVersion::V1,
+            logical_turn_key: "terminal-turn",
+            coverage_digest: &digest,
+            completeness: Completeness::Complete,
+            next_revision: 1,
+            owner: "terminal-owner",
+            fence_token: 7,
+            reservation_state: "reserved_live",
+        }];
+        assert_eq!(
+            register_traces_write_attempt_with_capture_scope(
+                conn,
+                None,
+                &marker,
+                &legacy,
+                Some(CheckpointScope::Committed),
+                Some(&terminal_fence),
+            )
+            .await
+            .expect("legacy completed receipt keeps content-free acknowledgement"),
+            TracesWriteAttemptRegistration::TerminalReceiptAlreadyComplete,
+        );
+        conn.execute_raw(Statement::from_sql_and_values(
+            conn.get_database_backend(),
+            "INSERT INTO agent_coverage_revision
+             (session_id, logical_turn_key, coverage_schema_version, revision,
+              checkpoint_id, coverage_digest, completeness, source_channel, created_at)
+             VALUES (?, 'orphan-v2', 2, 1, ?, ?, 'complete', 'live', 1)",
+            [
+                marker.session_id.clone().into(),
+                marker.attempt_id.clone().into(),
+                digest.clone().into(),
+            ],
+        ))
+        .await
+        .expect("seed orphaned v2 revision before its checkpoint row");
+        assert!(
+            register_traces_write_attempt_with_capture_scope(
+                conn,
+                None,
+                &marker,
+                &[],
+                Some(CheckpointScope::Committed),
+                Some(&terminal_fence),
+            )
+            .await
+            .is_err(),
+            "orphaned v2 revision must not pass the legacy no-checkpoint acknowledgement"
+        );
+        conn.execute_unprepared(
+            "DELETE FROM agent_coverage_revision WHERE logical_turn_key = 'orphan-v2'",
+        )
+        .await
+        .expect("remove orphaned v2 test row");
+        conn.execute_raw(Statement::from_sql_and_values(
+            conn.get_database_backend(),
+            "INSERT INTO agent_checkpoint
+             (checkpoint_id, session_id, scope, parent_commit, tree_oid,
+              metadata_blob_oid, traces_commit, created_at)
+             VALUES (?, ?, 'committed',
+                     'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                     'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+                     'cccccccccccccccccccccccccccccccccccccccc',
+                     'dddddddddddddddddddddddddddddddddddddddd', 1)",
+            [
+                marker.attempt_id.clone().into(),
+                marker.session_id.clone().into(),
+            ],
+        ))
+        .await
+        .expect("seed completed checkpoint catalog row");
+        conn.execute_raw(Statement::from_sql_and_values(
+            conn.get_database_backend(),
+            "INSERT INTO agent_coverage_revision
+             (session_id, logical_turn_key, coverage_schema_version, revision,
+              checkpoint_id, coverage_digest, completeness, source_channel, created_at)
+             VALUES (?, 'terminal-turn', 2, 1, ?, ?, 'complete', 'live', 1)",
+            [
+                marker.session_id.clone().into(),
+                marker.attempt_id.clone().into(),
+                digest.clone().into(),
+            ],
+        ))
+        .await
+        .expect("seed exact terminal v2 revision");
+        assert_eq!(
+            register_traces_write_attempt_with_capture_scope(
+                conn,
+                None,
+                &marker,
+                &v2,
+                Some(CheckpointScope::Committed),
+                Some(&terminal_fence),
+            )
+            .await
+            .expect("exact terminal v2 receipt and claim set"),
+            TracesWriteAttemptRegistration::TerminalReceiptAlreadyComplete,
+        );
+        assert!(
+            marker_value(conn, &marker).await.is_none(),
+            "exact completed receipt ACK must not publish a new marker"
+        );
+        let mut repair_marker = marker.clone();
+        repair_marker.created_oids.push("a".repeat(40));
+        repair_marker.cleanup_pending = true;
+        write_traces_inflight_marker(conn, &repair_marker)
+            .await
+            .expect("seed pre-existing repairable terminal marker");
+        let preserved_marker = marker_value(conn, &marker)
+            .await
+            .expect("repairable marker is durable before replay failures");
+        assert!(
+            register_traces_write_attempt_with_capture_scope(
+                conn,
+                None,
+                &marker,
+                &[],
+                Some(CheckpointScope::Committed),
+                Some(&terminal_fence),
+            )
+            .await
+            .is_err(),
+            "an empty expected set must not acknowledge a committed v2 receipt"
+        );
+        assert!(
+            register_traces_write_attempt_with_capture_scope(
+                conn,
+                None,
+                &marker,
+                &legacy,
+                Some(CheckpointScope::Committed),
+                Some(&terminal_fence),
+            )
+            .await
+            .is_err(),
+            "a v1-only expectation must not downgrade a committed v2 receipt"
+        );
+        conn.execute_raw(Statement::from_sql_and_values(
+            conn.get_database_backend(),
+            "INSERT INTO agent_coverage_revision
+             (session_id, logical_turn_key, coverage_schema_version, revision,
+              checkpoint_id, coverage_digest, completeness, source_channel, created_at)
+             VALUES (?, 'extra-v1', 1, 1, ?, ?, 'complete', 'live', 1)",
+            [
+                marker.session_id.clone().into(),
+                marker.attempt_id.clone().into(),
+                digest.clone().into(),
+            ],
+        ))
+        .await
+        .expect("seed extra committed revision");
+        assert!(
+            register_traces_write_attempt_with_capture_scope(
+                conn,
+                None,
+                &marker,
+                &v2,
+                Some(CheckpointScope::Committed),
+                Some(&terminal_fence),
+            )
+            .await
+            .is_err(),
+            "an extra committed revision must reject the completed receipt replay"
+        );
+        conn.execute_unprepared(
+            "DELETE FROM agent_coverage_revision WHERE logical_turn_key = 'extra-v1'",
+        )
+        .await
+        .expect("remove extra revision");
+        conn.execute_unprepared(
+            "DELETE FROM agent_coverage_revision WHERE logical_turn_key = 'terminal-turn'",
+        )
+        .await
+        .expect("remove expected revision");
+        assert!(
+            register_traces_write_attempt_with_capture_scope(
+                conn,
+                None,
+                &marker,
+                &v2,
+                Some(CheckpointScope::Committed),
+                Some(&terminal_fence),
+            )
+            .await
+            .is_err(),
+            "a missing committed revision must reject the completed receipt replay"
+        );
+        conn.execute_raw(Statement::from_sql_and_values(
+            conn.get_database_backend(),
+            "INSERT INTO agent_coverage_revision
+             (session_id, logical_turn_key, coverage_schema_version, revision,
+              checkpoint_id, coverage_digest, completeness, source_channel, created_at)
+             VALUES (?, 'terminal-turn', 2, 1, ?, ?, 'complete', 'live', 1)",
+            [
+                marker.session_id.clone().into(),
+                marker.attempt_id.clone().into(),
+                digest.clone().into(),
+            ],
+        ))
+        .await
+        .expect("restore exact terminal v2 revision");
+        conn.execute_unprepared(
+            "UPDATE agent_coverage_revision SET coverage_digest =
+             'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc'
+             WHERE logical_turn_key = 'terminal-turn' AND coverage_schema_version = 2",
+        )
+        .await
+        .expect("alter terminal v2 revision");
+        assert!(
+            register_traces_write_attempt_with_capture_scope(
+                conn,
+                None,
+                &marker,
+                &v2,
+                Some(CheckpointScope::Committed),
+                Some(&terminal_fence),
+            )
+            .await
+            .is_err(),
+            "completed receipt must not acknowledge changed v2 revision bytes"
+        );
+        assert_eq!(
+            marker_value(conn, &marker).await,
+            Some(preserved_marker.clone()),
+            "failed completed-receipt replays must preserve the pre-existing repairable marker"
+        );
+        assert_eq!(
+            decode_and_validate_traces_inflight_marker(
+                &preserved_marker,
+                &marker.session_id,
+                &marker.attempt_id,
+            )
+            .expect("decode preserved repairable marker"),
+            repair_marker,
+        );
+        assert!(
+            list_live_traces_inflight_markers(conn, chrono::Utc::now().timestamp_millis())
+                .await
+                .expect("list repairable markers after rejected terminal replays")
+                .contains(&repair_marker),
+            "doctor/GC must still discover the pre-existing cleanup marker"
+        );
+    }
+
+    async fn cov2_committed_marker_replay_checks_complete_revision_set() {
+        let (conn, scope, mut marker) = scoped_marker_fixture().await;
+        marker.attempt_id = "committed-checkpoint".to_owned();
+        for statement in [
+            "CREATE TABLE agent_checkpoint (
+                checkpoint_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, scope TEXT NOT NULL
+            )",
+            "CREATE TABLE agent_coverage_revision (
+                session_id TEXT NOT NULL, checkpoint_id TEXT NOT NULL,
+                logical_turn_key TEXT NOT NULL, coverage_schema_version INTEGER NOT NULL,
+                coverage_digest TEXT NOT NULL, completeness TEXT NOT NULL,
+                revision INTEGER NOT NULL
+            )",
+            "INSERT INTO agent_checkpoint VALUES
+                ('committed-checkpoint', 'scope-marker-session', 'committed')",
+        ] {
+            conn.execute_unprepared(statement)
+                .await
+                .expect("seed committed replay fixture");
+        }
+        assert!(
+            verify_checkpoint_claim_set_with_conn(
+                &conn,
+                &marker.session_id,
+                &marker.attempt_id,
+                &[],
+            )
+            .await
+            .is_ok(),
+            "an empty legacy checkpoint has an exact empty revision set"
+        );
+        let digest = "b".repeat(64);
+        let expected = [TracesCoverageFence {
+            coverage_schema_version: CoverageSchemaVersion::V2,
+            logical_turn_key: "shared-turn",
+            coverage_digest: &digest,
+            completeness: Completeness::Complete,
+            next_revision: 1,
+            owner: "v2-owner",
+            fence_token: 7,
+            reservation_state: "reserved_live",
+        }];
+        assert!(
+            register_traces_write_attempt_with_capture_scope(
+                &conn,
+                Some(&scope),
+                &marker,
+                &expected,
+                Some(CheckpointScope::Committed),
+                None,
+            )
+            .await
+            .is_err(),
+            "missing committed revision must reject replay"
+        );
+        assert!(marker_value(&conn, &marker).await.is_none());
+
+        conn.execute_raw(Statement::from_sql_and_values(
+            conn.get_database_backend(),
+            "INSERT INTO agent_coverage_revision VALUES (?, ?, ?, ?, ?, ?, ?)",
+            [
+                marker.session_id.clone().into(),
+                marker.attempt_id.clone().into(),
+                "shared-turn".into(),
+                2.into(),
+                digest.clone().into(),
+                "complete".into(),
+                1.into(),
+            ],
+        ))
+        .await
+        .expect("seed exact committed revision");
+        assert!(
+            verify_checkpoint_claim_set_with_conn(
+                &conn,
+                &marker.session_id,
+                &marker.attempt_id,
+                &[],
+            )
+            .await
+            .is_err(),
+            "an empty expected set must not accept a committed claim"
+        );
+        assert!(
+            register_traces_write_attempt_with_capture_scope(
+                &conn,
+                Some(&scope),
+                &marker,
+                &[],
+                Some(CheckpointScope::Committed),
+                None,
+            )
+            .await
+            .is_err(),
+            "metadata-only replay must not acknowledge a claim-bearing checkpoint"
+        );
+        assert_eq!(
+            register_traces_write_attempt_with_capture_scope(
+                &conn,
+                Some(&scope),
+                &marker,
+                &expected,
+                Some(CheckpointScope::Committed),
+                None,
+            )
+            .await
+            .expect("exact committed revision set"),
+            TracesWriteAttemptRegistration::AlreadyCommitted
+        );
+        assert!(marker_value(&conn, &marker).await.is_none());
+        assert!(
+            verify_completed_terminal_claim_set_with_conn(
+                &conn,
+                &marker,
+                Some(CheckpointScope::Committed),
+                &expected,
+            )
+            .await
+            .is_ok(),
+            "a complete versioned receipt may replay only its exact checkpoint claims"
+        );
+        assert!(
+            verify_completed_terminal_claim_set_with_conn(&conn, &marker, None, &expected)
+                .await
+                .is_err(),
+            "a versioned receipt needs a committed checkpoint scope"
+        );
+        let mut absent_marker = marker.clone();
+        absent_marker.attempt_id = "missing-terminal-checkpoint".to_owned();
+        assert!(
+            verify_completed_terminal_claim_set_with_conn(
+                &conn,
+                &absent_marker,
+                Some(CheckpointScope::Committed),
+                &expected,
+            )
+            .await
+            .is_err(),
+            "a complete versioned receipt cannot acknowledge absent checkpoint state"
+        );
+        let legacy = [TracesCoverageFence {
+            coverage_schema_version: CoverageSchemaVersion::V1,
+            logical_turn_key: "shared-turn",
+            coverage_digest: &digest,
+            completeness: Completeness::Complete,
+            next_revision: 1,
+            owner: "v1-owner",
+            fence_token: 3,
+            reservation_state: "reserved_live",
+        }];
+        assert!(
+            verify_completed_terminal_claim_set_with_conn(
+                &conn,
+                &absent_marker,
+                Some(CheckpointScope::Committed),
+                &legacy,
+            )
+            .await
+            .is_ok(),
+            "the historical v1 complete-receipt acknowledgement stays unchanged"
+        );
+
+        for (column, wrong, exact) in [
+            ("coverage_schema_version", "1", "2"),
+            ("coverage_schema_version", "999", "2"),
+            (
+                "coverage_digest",
+                "'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc'",
+                "'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'",
+            ),
+            ("completeness", "'incomplete'", "'complete'"),
+            ("revision", "2", "1"),
+        ] {
+            conn.execute_unprepared(&format!(
+                "UPDATE agent_coverage_revision SET {column} = {wrong}"
+            ))
+            .await
+            .expect("alter committed revision");
+            assert!(
+                register_traces_write_attempt_with_capture_scope(
+                    &conn,
+                    Some(&scope),
+                    &marker,
+                    &expected,
+                    Some(CheckpointScope::Committed),
+                    None,
+                )
+                .await
+                .is_err(),
+                "{column} drift must reject replay"
+            );
+            assert!(
+                verify_completed_terminal_claim_set_with_conn(
+                    &conn,
+                    &marker,
+                    Some(CheckpointScope::Committed),
+                    &expected,
+                )
+                .await
+                .is_err(),
+                "{column} drift must also reject versioned terminal receipt replay"
+            );
+            assert!(marker_value(&conn, &marker).await.is_none());
+            conn.execute_unprepared(&format!(
+                "UPDATE agent_coverage_revision SET {column} = {exact}"
+            ))
+            .await
+            .expect("restore committed revision");
+        }
+        conn.execute_unprepared(
+            "INSERT INTO agent_coverage_revision VALUES
+                ('scope-marker-session', 'committed-checkpoint', 'extra-turn', 1,
+                 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                 'complete', 1)",
+        )
+        .await
+        .expect("seed extra committed revision");
+        assert!(
+            register_traces_write_attempt_with_capture_scope(
+                &conn,
+                Some(&scope),
+                &marker,
+                &expected,
+                Some(CheckpointScope::Committed),
+                None,
+            )
+            .await
+            .is_err(),
+            "extra committed revision must reject replay"
+        );
+        assert!(
+            verify_completed_terminal_claim_set_with_conn(
+                &conn,
+                &marker,
+                Some(CheckpointScope::Committed),
+                &expected,
+            )
+            .await
+            .is_err(),
+            "an extra revision must also reject versioned terminal receipt replay"
+        );
+        assert!(marker_value(&conn, &marker).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn cov2_legacy_absent_coverage_tables_allow_only_empty_replay() {
+        let (conn, _scope, marker) = scoped_marker_fixture().await;
+        conn.execute_unprepared(
+            "CREATE TABLE agent_checkpoint (
+                checkpoint_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, scope TEXT NOT NULL
+            )",
+        )
+        .await
+        .expect("create legacy checkpoint table without coverage tables");
+        conn.execute_raw(Statement::from_sql_and_values(
+            conn.get_database_backend(),
+            "INSERT INTO agent_checkpoint VALUES (?, ?, 'committed')",
+            [
+                marker.attempt_id.clone().into(),
+                marker.session_id.clone().into(),
+            ],
+        ))
+        .await
+        .expect("seed legacy committed checkpoint");
+        assert!(
+            legacy_coverage_tables_absent_with_conn(&conn)
+                .await
+                .unwrap()
+        );
+        verify_checkpoint_claim_set_with_conn(&conn, &marker.session_id, &marker.attempt_id, &[])
+            .await
+            .expect("empty legacy checkpoint has no coverage revisions");
+        verify_completed_terminal_claim_set_with_conn(
+            &conn,
+            &marker,
+            Some(CheckpointScope::Committed),
+            &[],
+        )
+        .await
+        .expect("empty legacy terminal receipt remains acknowledgeable");
+
+        let digest = "a".repeat(64);
+        for version in [CoverageSchemaVersion::V1, CoverageSchemaVersion::V2] {
+            let fence = [TracesCoverageFence {
+                coverage_schema_version: version,
+                logical_turn_key: "unproven-turn",
+                coverage_digest: &digest,
+                completeness: Completeness::Complete,
+                next_revision: 1,
+                owner: "legacy-owner",
+                fence_token: 1,
+                reservation_state: "reserved_live",
+            }];
+            let replay_error = verify_checkpoint_claim_set_with_conn(
+                &conn,
+                &marker.session_id,
+                &marker.attempt_id,
+                &fence,
+            )
+            .await
+            .expect_err("a missing revision table cannot prove a nonempty claim set");
+            assert!(
+                replay_error.is::<TracesCheckpointClaimMismatch>(),
+                "nonempty {version:?} must be a typed replay conflict: {replay_error:#}"
+            );
+            let terminal_error = verify_completed_terminal_claim_set_with_conn(
+                &conn,
+                &marker,
+                Some(CheckpointScope::Committed),
+                &fence,
+            )
+            .await
+            .expect_err("a missing revision table cannot ACK nonempty terminal coverage");
+            assert!(
+                terminal_error.is::<TracesCheckpointClaimMismatch>(),
+                "nonempty {version:?} terminal coverage must be a typed mismatch: {terminal_error:#}"
+            );
+        }
+
+        conn.execute_unprepared("CREATE TABLE agent_coverage_claim (id INTEGER PRIMARY KEY)")
+            .await
+            .expect("seed a partial, non-legacy coverage schema");
+        assert!(
+            !legacy_coverage_tables_absent_with_conn(&conn)
+                .await
+                .unwrap()
+        );
+        assert!(
+            verify_checkpoint_claim_set_with_conn(
+                &conn,
+                &marker.session_id,
+                &marker.attempt_id,
+                &[]
+            )
+            .await
+            .is_err(),
+            "a missing revision table in a partial schema must not ACK even an empty set"
+        );
+        assert!(
+            verify_completed_terminal_claim_set_with_conn(
+                &conn,
+                &marker,
+                Some(CheckpointScope::Committed),
+                &[],
+            )
+            .await
+            .is_err(),
+            "a partial coverage schema must fail closed at terminal ACK"
+        );
+
+        conn.execute_unprepared("DROP TABLE agent_coverage_claim")
+            .await
+            .expect("remove the partial coverage table");
+        conn.execute_unprepared(
+            "CREATE TABLE schema_versions (
+                 version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL
+             )",
+        )
+        .await
+        .expect("create migration receipt ledger");
+        conn.execute_unprepared(
+            "INSERT INTO schema_versions VALUES (2026071300, 'precoverage', 'fixture')",
+        )
+        .await
+        .expect("seed a pre-coverage migration receipt");
+        assert!(
+            legacy_coverage_tables_absent_with_conn(&conn)
+                .await
+                .expect("pre-coverage receipt keeps old behavior")
+        );
+        verify_checkpoint_claim_set_with_conn(&conn, &marker.session_id, &marker.attempt_id, &[])
+            .await
+            .expect("empty replay stays valid before the coverage migration");
+        for version in [2026071301_i64, 2026071302_i64] {
+            conn.execute_unprepared("DELETE FROM schema_versions")
+                .await
+                .expect("reset isolated migration provenance");
+            conn.execute_raw(Statement::from_sql_and_values(
+                conn.get_database_backend(),
+                "INSERT INTO schema_versions VALUES (?, 'coverage-or-later', 'fixture')",
+                [version.into()],
+            ))
+            .await
+            .expect("seed coverage-or-later migration provenance");
+            let error = legacy_coverage_tables_absent_with_conn(&conn)
+                .await
+                .expect_err("modern receipt cannot identify a missing table as legacy");
+            assert!(error.is::<TracesCheckpointClaimMismatch>());
+            let replay_error = verify_checkpoint_claim_set_with_conn(
+                &conn,
+                &marker.session_id,
+                &marker.attempt_id,
+                &[],
+            )
+            .await
+            .expect_err("modern receipt plus missing tables must reject empty replay");
+            assert!(replay_error.is::<TracesCheckpointClaimMismatch>());
+            let terminal_error = verify_completed_terminal_claim_set_with_conn(
+                &conn,
+                &marker,
+                Some(CheckpointScope::Committed),
+                &[],
+            )
+            .await
+            .expect_err("modern receipt plus missing tables must reject terminal ACK");
+            assert!(terminal_error.is::<TracesCheckpointClaimMismatch>());
+        }
+    }
+
+    #[tokio::test]
+    async fn cov2_v1_marker_golden() {
+        let mut frozen = TracesInflightMarker::new("v1-session", "v1-attempt", 1_700_000_000_000);
+        frozen.generation = Some("00000000-0000-4000-8000-000000000000".to_owned());
+        assert_eq!(frozen.schema_version, 3);
+        assert_eq!(
+            serde_json::to_string(&frozen).expect("serialize fixed legacy marker"),
+            "{\"schema_version\":3,\"session_id\":\"v1-session\",\"attempt_id\":\"v1-attempt\",\"generation\":\"00000000-0000-4000-8000-000000000000\",\"started_at_ms\":1700000000000,\"ttl_ms\":600000}"
+        );
+        let (conn, scope, marker) = scoped_marker_fixture().await;
+        assert_eq!(
+            register_traces_write_attempt_with_capture_scope(
+                &conn,
+                Some(&scope),
+                &marker,
+                &[],
+                None,
+                None,
+            )
+            .await
+            .expect("legacy empty-fence marker registration"),
+            TracesWriteAttemptRegistration::Registered
+        );
+        let value = marker_value(&conn, &marker)
+            .await
+            .expect("legacy marker persisted");
+        let decoded = decode_and_validate_traces_inflight_marker(
+            &value,
+            &marker.session_id,
+            &marker.attempt_id,
+        )
+        .expect("legacy lookup is unchanged");
+        assert_eq!(decoded, marker);
+    }
+
+    #[tokio::test]
+    async fn cov2_large_pure_v1_checkpoint_replay_preserves_legacy_claim_count() {
+        let (conn, scope, mut marker) = scoped_marker_fixture().await;
+        marker.attempt_id = "large-legacy-v1-checkpoint".to_owned();
+        for statement in [
+            "CREATE TABLE agent_checkpoint (
+                checkpoint_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, scope TEXT NOT NULL
+            )",
+            "CREATE TABLE agent_coverage_revision (
+                session_id TEXT NOT NULL, checkpoint_id TEXT NOT NULL,
+                logical_turn_key TEXT NOT NULL, coverage_schema_version INTEGER NOT NULL,
+                coverage_digest TEXT NOT NULL, completeness TEXT NOT NULL,
+                revision INTEGER NOT NULL
+            )",
+            "INSERT INTO agent_checkpoint VALUES
+                ('large-legacy-v1-checkpoint', 'scope-marker-session', 'committed')",
+        ] {
+            conn.execute_unprepared(statement)
+                .await
+                .expect("seed large legacy checkpoint fixture");
+        }
+        let count = crate::internal::metadata::REASONING_IDENTITY_SESSION_MAP_MAX_ENTRIES + 1;
+        let keys = (0..count)
+            .map(|index| format!("legacy-turn-{index:04}"))
+            .collect::<Vec<_>>();
+        let digest = "a".repeat(64);
+        let fences = keys
+            .iter()
+            .map(|key| TracesCoverageFence {
+                coverage_schema_version: CoverageSchemaVersion::V1,
+                logical_turn_key: key,
+                coverage_digest: &digest,
+                completeness: Completeness::Complete,
+                next_revision: 1,
+                owner: "legacy-owner",
+                fence_token: 1,
+                reservation_state: "reserved_live",
+            })
+            .collect::<Vec<_>>();
+        conn.execute_raw(Statement::from_sql_and_values(
+            conn.get_database_backend(),
+            "WITH RECURSIVE legacy_turn(n) AS (
+                 SELECT 0 UNION ALL SELECT n + 1 FROM legacy_turn WHERE n < ?
+             )
+             INSERT INTO agent_coverage_revision
+                 (session_id, checkpoint_id, logical_turn_key,
+                  coverage_schema_version, coverage_digest, completeness, revision)
+             SELECT ?, ?, 'legacy-turn-' || printf('%04d', n), 1, ?, 'complete', 1
+             FROM legacy_turn",
+            [
+                i64::try_from(count - 1)
+                    .expect("test count fits SQLite integer")
+                    .into(),
+                marker.session_id.clone().into(),
+                marker.attempt_id.clone().into(),
+                digest.clone().into(),
+            ],
+        ))
+        .await
+        .expect("seed more than 4096 historical v1 revisions");
+        assert_eq!(
+            register_traces_write_attempt_with_capture_scope(
+                &conn,
+                Some(&scope),
+                &marker,
+                &fences,
+                Some(CheckpointScope::Committed),
+                None,
+            )
+            .await
+            .expect("large pure-v1 committed checkpoint remains replayable"),
+            TracesWriteAttemptRegistration::AlreadyCommitted
+        );
+        assert!(marker_value(&conn, &marker).await.is_none());
+
+        conn.execute_raw(Statement::from_sql_and_values(
+            conn.get_database_backend(),
+            "INSERT INTO agent_coverage_revision VALUES
+                 (?, ?, 'legacy-extra-turn', 1, ?, 'complete', 1)",
+            [
+                marker.session_id.clone().into(),
+                marker.attempt_id.clone().into(),
+                digest.clone().into(),
+            ],
+        ))
+        .await
+        .expect("seed an extra revision beyond the old fixed replay limit");
+        assert!(
+            register_traces_write_attempt_with_capture_scope(
+                &conn,
+                Some(&scope),
+                &marker,
+                &fences,
+                Some(CheckpointScope::Committed),
+                None,
+            )
+            .await
+            .is_err(),
+            "the extra revision after 4097 v1 rows must not be truncated into a false ACK"
+        );
+        assert!(marker_value(&conn, &marker).await.is_none());
+
+        let mixed = keys
+            .iter()
+            .enumerate()
+            .map(|(index, key)| TracesCoverageFence {
+                coverage_schema_version: if index == 0 {
+                    CoverageSchemaVersion::V2
+                } else {
+                    CoverageSchemaVersion::V1
+                },
+                logical_turn_key: key,
+                coverage_digest: &digest,
+                completeness: Completeness::Complete,
+                next_revision: 1,
+                owner: "legacy-owner",
+                fence_token: 1,
+                reservation_state: "reserved_live",
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            validate_traces_coverage_fences(&mixed).is_err(),
+            "v2/mixed checkpoints must retain the 4096-entry safe limit"
+        );
     }
 
     /// A trigger expires the workspace lease *after* each marker DML but

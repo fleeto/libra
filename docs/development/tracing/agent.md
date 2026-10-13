@@ -2601,8 +2601,9 @@ codec 本身不证明 OpenCode native 来源或放行 opaque artifact。
 per-claim sidecar 显式携带 `(coverage_schema_version, logical_turn_key)`，
 DB 仲裁按该组合键隔离 v1/v2，同版本等价内容幂等、incomplete→complete
 推进 revision、complete digest 冲突不覆盖。未知版本或与 typed turn
-selector 不符的版本在写 claim 前拒绝；COV2-03/04 才负责 marker 与
-pending 传递，COV2-11 才切换生产 Session 路径。本卡测试只用本地
+selector 不符的版本在写 claim 前拒绝；COV2-03 已负责 marker，
+COV2-04 负责后续 pending 传递，COV2-11 才切换生产 Session 路径。
+本卡测试只用本地
 DB/静态 literal，不启动 OpenCode Session，也不授予 native 来源。
 
 
@@ -2611,10 +2612,36 @@ Session 可同时持有 `identity-v1` 与 `identity-v2`。v1 编码和 MAC 不�
 v2 采用独立闭合 codec 与 descriptor/record/map MAC 域。读取先校验完整
 key 集、TEXT 类型及两份持久 envelope 合计 4096 条/1 MiB，再逐份认证；
 未知、损坏或超限 map 在 claim 写入前拒绝。既有 v1 companion 只更新
-`identity-v1` 并保留 v2 原始字节。COV2-03 才接入版本化 v2
+`identity-v1` 并保留 v2 原始字节。COV2-03 已接入版本化 v2
 claim/ref 事务，COV2-11 才切换生产 Session；本卡本地 synthetic map
 测试不构成真实 native 来源证明。旧版单 map 读端遇双 map Session 可能
 fail closed，升级后可恢复读取，不作 v2→v1 降级。
+
+**COV2-03 版本化 checkpoint marker/ref 围栏：** marker-bound writer 将
+`(coverage_schema_version, logical_turn_key, coverage_digest, completeness,
+next_revision, owner, fence_token, reservation_state)` 作为不可变 sidecar；
+注册 marker 的同一事务逐条比对 claim 现态及 `next_revision - 1`，第二条
+claim 失配也整笔拒绝，不留下成功 marker。checkpoint、live 已持久代次与
+recovery 三种 constructor 保留完整 tuple；v2 写入请求须同时携带匹配的
+versioned claim plan。重复 `(version,key)`、无效版本与失效 owner/fence/
+revision 都 fail closed。含 v2 的 checkpoint 最多 4096 个 tuple；历史纯 v1
+checkpoint 即使超过此数仍可按完整 revision 集重放。
+
+对 marker-bound 的已提交 checkpoint，replay 包括空 expected set 都必须
+比对完整持久 `agent_coverage_revision` 集；少、额外、digest 或 revision
+失配不得回 `AlreadyExists`/`AlreadyCommitted`。coverage 两表均不存在的旧
+v1 库，仅在无 coverage 或更晚迁移收据时允许
+空 claim set 重放；非空期望、仅缺一张表或现代迁移后丢表都必须拒绝，同样约束
+无写入结算与完成回执。completed terminal receipt
+只要请求或持久事实含 v2，就须同 session/committed scope 的 checkpoint 和
+精确 revision set；空或纯 v1 请求不能降级 ACK 已提交 v2。旧 v1 no-write/
+prebound 无权威 expected set 的结算仍允许非空 v1 revision，但拒绝持久 v2；
+旧 v1 无 action checkpoint 的 terminal receipt 仍可 ACK。失败 replay 保留
+预先存在的可修复 cleanup marker 供 doctor/GC 查找。marker JSON
+`schema_version=3` 与 claim 的 coverage version 独立，既有 v1 字节不变。
+本卡不新增 DDL/公开命令、不启用生产 v2 identity writer、pending v2
+持久化/重放、OpenCode Session 或 native 来源权限；后续 COV2-19/20/21/
+04/22/08/11 与父计划 Source A 分别验收。
 
 RG-02 归档 opaque 密文 artifact：manifest `reasoning_artifacts[]`（path/oid/sha256/
 byte_len/locator/provider/source_kind/availability/decrypt_capability），对象存

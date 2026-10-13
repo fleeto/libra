@@ -87,22 +87,36 @@ text-preview limit still applies. Multiline syntax remains correct while scrolli
 | `←`, `Backspace` or `h` | Fold a branch or select its parent; at a subtree root, load its parent (never above `/`); content `←` scrolls left |
 | `Tab` | Switch focus between directory tree and file content |
 | `PageUp` / `PageDown` | Scroll file content one screen |
-| `+` | Create a directory here (see below) |
-| `d` | Delete the selected directory (extra confirmation line; files are inert) |
-| `m` | Move the selected directory under an edited destination parent |
-| `R` | Rename the selected directory (same parent; `r` still reloads) |
+| `a` | Create a child inside the selected directory (see below) |
+| `d` | Delete the selected directory (confirmation dialog; files are inert) |
+| `m` | Move the selected file or directory with a destination-folder picker |
+| `e` | Rename the selected directory (same parent; `r` still reloads) |
 | `t` | Toggle the tag panel (see below) |
 | `r` | Reload the selected directory or file; from an empty tree, reload its root |
 | `q` (or `Ctrl-C`, `Esc`) | Quit |
 
+The primary shortcuts use single keys without Shift. `a` also creates a tag
+inside the tag panel; legacy `+` (create) and `R` (rename) remain aliases.
+While entering a name or tag message, printable shortcut characters are literal
+text (including `q`); Enter submits, Backspace edits and Esc cancels. Directory
+names and tag names/messages use centered popup dialogs with a labeled input
+and visible cursor. Long input scrolls to its end; validation errors appear
+inside the dialog. Delete confirmations also use a popup. Moving uses a separate
+folder picker: `Right` enters a destination folder, `Enter` chooses it, and a
+second `Enter` confirms the write. Dialogs fit terminals down to 49 × 10, work
+without color, and preserve
+the underlying tree/tag selection when cancelled.
+
 Terminal state (raw mode and the alternate screen) is restored on every exit
 path, including errors and signals handled by the process.
-Directory mutation shortcuts apply only while the tree has focus. Their parent
-is the selected row's actual parent, including for nested rows: `+` creates a
-sibling of the selected directory, not a child inside it. Confirmed mutations
-refresh that parent branch. A cross-parent move from a nested branch also
-reloads the visible root and folds its branches, avoiding stale destination
-entries. JSON/machine schemas and their one-request behavior are unchanged.
+Directory mutation shortcuts apply only while the tree has focus. `a` creates
+inside the selected directory, whether expanded or folded, and refreshes that
+directory's children. Delete and rename operate on the selected directory;
+move operates on the selected file or directory, using its actual parent even
+for nested rows, and refreshes that parent branch. A cross-parent move from a
+nested branch also reloads the visible root and folds its branches, avoiding
+stale destination entries. JSON/machine schemas and their one-request behavior
+are unchanged.
 
 ### Machine mode (`--json` / `--machine`)
 
@@ -145,12 +159,12 @@ the forms available in this release.
 | Interactive key | Flag | Request |
 |-----------------|------|---------|
 | start, expand/reload a directory, load a parent root | `--list` (PATH is the directory; `--json` without a flag is the same) | `GET /api/v1/tree` |
-| `+` | `--create-dir <NAME>` (PATH is the parent) | `POST /api/v1/create-entry` |
+| `a` | `--create-dir <NAME>` (PATH is the parent) | `POST /api/v1/create-entry` |
 | `d` | `--delete-dir <NAME>` (PATH is the parent) | `POST /api/v1/delete-entry` |
-| `m` | `--move-dir <NAME> <PARENT-PATH>` (PATH is NAME's current parent; the name is kept) | `POST /api/v1/move-entry` |
-| `R` | `--rename-dir <NAME> <NEW-NAME>` (PATH is the parent, which is kept) | `POST /api/v1/move-entry` |
+| `m` | `--move-dir <NAME> <PARENT-PATH>` (directory only; PATH is NAME's current parent; the name is kept) | `POST /api/v1/move-entry` |
+| `e` | `--rename-dir <NAME> <NEW-NAME>` (PATH is the parent, which is kept) | `POST /api/v1/move-entry` |
 | `t`, then `n`/`p` | `--list-tags [--page <N>] [--per-page <N>]` (PATH must be `/`) | `GET /api/v1/tags/list` |
-| `t`, then `+` | `--create-tag <NAME> [--message <TEXT>]` (PATH must be `/`) | `POST /api/v1/tags` |
+| `t`, then `a` | `--create-tag <NAME> [--message <TEXT>]` (PATH must be `/`) | `POST /api/v1/tags` |
 | `t`, then `d` | `--delete-tag <NAME>` (PATH must be `/`) | `DELETE /api/v1/tags/{name}` |
 
 Every non-interactive call follows the same rules:
@@ -419,21 +433,29 @@ Errors:
 | HTTP 400, 405 or 422 / 409 | `LBR-CLI-002` / `LBR-CONFLICT-002` | `http_status` |
 | Any other non-2xx or an invalid receipt / a timeout or dropped connection | `LBR-NET-002` / `LBR-NET-001`, as for `--create-dir` | `http_status` or `transport` |
 
-### Creating a directory (`+`, interactive only)
+### Creating a directory (`a`, interactive only)
 
-Press `+` to open a single-line name editor for a sibling of the selected
-directory (or a child of the visible root when the tree is empty). While a **file** is
+Press `a` to open a centered name dialog for a child of the selected
+directory (or of the visible root when the tree is empty). The dialog shows the
+parent path: selecting `/artifact` and entering `rust` creates `/artifact/rust`,
+not `/rust`. The selected directory need not be expanded. While a **file** is
 selected the editor refuses to open — selection must be a directory or an
 empty area. `Enter` validates the name with the same rules used for the wire
 (`/`, `\`, `.`, `..`, NUL and control characters are refused) and only then
 performs **one** `POST /api/v1/create-entry` with `is_directory=true`,
 `skip_build=true` and no `content`; `Esc` cancels with no network at all.
 
-A confirmed creation reloads the current listing exactly once. Failures
+A confirmed creation reloads the target directory exactly once and shows its children. Failures
 (401/403, duplicate name, timeout, malformed response) keep the last safe
 listing on screen and show a secret-free status line; the terminal is never
 left in raw mode and the TUI never asks you to type a raw token on the
 alternate screen.
+
+HTTP 400 does not necessarily mean the name already exists: check the parent
+path, the server's path policy and the name. Mega2 deployments restrict new
+paths to configured monorepo roots; selecting `/artifact` creates beneath that
+root without attempting a new top-level path. Raw server error bodies are not
+displayed, to avoid leaking secrets.
 
 Write tokens are read, in order of precedence, from `--token-file <path>`,
 then the `LIBRA_MEGA2_TOKEN` environment variable, then `--token` (visible in
@@ -442,13 +464,21 @@ non-interactive write operations (see above). Read operations refuse token
 flags: `--json`/`--machine` without a write flag and `--list` take no
 credentials.
 
-### Deleting, moving and renaming (`d`, `m`, `R`, interactive only)
+### Deleting, moving and renaming (`d`, `m`, `e`, interactive only)
 
-`d` asks for an extra confirmation line before deleting the selected
-directory; `m` moves it under an edited destination parent path; `R` renames
-it in place (the same-parent form of the move operation). Files are inert for
-all three keys, `Esc` cancels every editor without any request, and hostile
-destinations (`..`, separators, unrooted paths) are refused before the POST.
+`d` opens a confirmation dialog before deleting the selected directory; `m`
+opens a destination-folder picker for the selected file or directory; `e`
+renames a selected directory in place (the same-parent form of the move
+operation). The picker fixes the source before browsing: `Right` enters a
+folder, the first `Enter` chooses it, and the second `Enter` performs the
+move. `Esc` returns from confirmation to the picker, then cancels without a
+write request. Files stay inert for delete and rename only.
+
+Mega2 trunk writes cannot land on `/`; therefore a move cannot cross top-level
+monorepo roots. For example, `/artifact/rust` cannot move to `/data`. The
+picker only shows destinations below the source root (for example,
+`/artifact`), so that impossible request is never sent. It also refuses a
+directory's own descendants before the POST.
 
 Each confirmed mutation performs **one** `POST /api/v1/delete-entry` or
 `POST /api/v1/move-entry` followed by **one** parent-branch listing reload.
@@ -457,7 +487,8 @@ Success clears
 the status; failures (401/403, missing source, duplicate destination,
 timeout) keep the last safe listing and show a secret-free status line while
 the terminal stays intact. There is no multi-select and no recursion: one
-selected directory per operation.
+selected entry per operation (a directory for delete/rename, or a file or
+directory for move).
 
 ### Tag panel (`t`, interactive only)
 
@@ -465,10 +496,10 @@ selected directory per operation.
 `GET /api/v1/tags/list` for page 1 (the three required query keys are
 `page`, `per_page`, `path`; this MVP always uses the repository root
 `path=/`). `n`/`p` request the explicit next/previous page — one request per
-key, never prefetched. `+` collects a tag name and then an optional message
+key, never prefetched. `a` collects a tag name and then an optional message
 (an empty message creates a lightweight tag; a non-empty one creates an
-annotated tag); `d` deletes the selected tag after an extra confirmation
-line. `t`, `Esc` or `q` close the panel without leaving the browser, and the
+annotated tag); `d` deletes the selected tag after a confirmation
+dialog. `t`, `Esc` or `q` close the panel without leaving the browser, and the
 directory listing reappears unchanged.
 
 Tag names are validated with the server's rules before any request (non-empty,
@@ -541,8 +572,8 @@ never include the response body, the server URL or a token; see
 - One request per directory expansion/reload or file selection; moving between
   directory rows and collapsing branches sends none. No recursive prefetch,
   background task, or cache that outlives the process.
-- Browse is read-only and anonymous. A confirmed `+` adds at most one
-  `create-entry` POST plus one reload GET; `d`/`m`/`R` likewise add one
+- Browse is read-only and anonymous. A confirmed `a` adds at most one
+  `create-entry` POST plus one reload GET; `d`/`m`/`e` likewise add one
   `delete-entry`/`move-entry` POST plus one parent reload GET (a cross-parent
   move from a nested branch adds one root reload). No recursive or
   multi-selection operation exists in this command.
@@ -569,8 +600,8 @@ libra --json mega2 browser --server https://mega2.example.com --create-dir pkg /
 # Delete /src/pkg without a terminal (no confirmation: the flag names the target)
 libra --json mega2 browser --server https://mega2.example.com --delete-dir pkg /src --token-file ~/.mega2-token
 
-# Move /src/pkg to /lib/pkg without a terminal
-libra --json mega2 browser --server https://mega2.example.com --move-dir pkg /lib /src --token-file ~/.mega2-token
+# Move /src/pkg to /src/archive/pkg without a terminal
+libra --json mega2 browser --server https://mega2.example.com --move-dir pkg /src/archive /src --token-file ~/.mega2-token
 
 # Rename /src/old to /src/new without a terminal
 libra --json mega2 browser --server https://mega2.example.com --rename-dir old new /src --token-file ~/.mega2-token
@@ -587,7 +618,7 @@ libra --json mega2 browser --server https://mega2.example.com --delete-tag v1.0 
 # List a specific commit or tag
 libra mega2 browser --server https://mega2.example.com --ref v1.2
 
-# Create, delete, move or rename directories interactively (press +, d, m or R; t for tags)
+# Create/delete/rename directories or move a file/directory interactively (press a, d, m or e; t for tags)
 libra mega2 browser --server https://mega2.example.com --token-file ~/.mega2-token
 
 # Exactly one fetch, JSON envelope (works without a TTY, outside any repository)

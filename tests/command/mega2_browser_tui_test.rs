@@ -6,14 +6,13 @@
 #[cfg(unix)]
 use std::{
     io::{Read, Write},
-    sync::Mutex,
     time::Instant,
 };
 use std::{
     net::TcpListener,
     sync::{
-        Arc,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
     },
     thread,
     time::Duration,
@@ -28,7 +27,7 @@ use serde_json::json;
 /// Minimal blocking mock of the mega2 tree route with a canned body.
 struct MockTreeServer {
     addr: std::net::SocketAddr,
-    requests: Arc<AtomicUsize>,
+    request_log: Arc<Mutex<Vec<(String, String)>>>,
     stop: Arc<AtomicBool>,
 }
 
@@ -40,12 +39,16 @@ impl MockTreeServer {
     }
 
     fn serve(respond: impl Fn(&str) -> serde_json::Value + Send + 'static) -> Self {
+        Self::serve_requests(move |target, _| respond(target))
+    }
+
+    fn serve_requests(respond: impl Fn(&str, &[u8]) -> serde_json::Value + Send + 'static) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock");
         listener.set_nonblocking(true).expect("nonblocking");
         let addr = listener.local_addr().expect("addr");
-        let requests = Arc::new(AtomicUsize::new(0));
+        let request_log = Arc::new(Mutex::new(Vec::new()));
         let stop = Arc::new(AtomicBool::new(false));
-        let requests_clone = Arc::clone(&requests);
+        let request_log_clone = Arc::clone(&request_log);
         let stop_clone = Arc::clone(&stop);
         thread::spawn(move || {
             while !stop_clone.load(Ordering::Relaxed) {
@@ -59,20 +62,47 @@ impl MockTreeServer {
                         stream
                             .set_read_timeout(Some(Duration::from_secs(3)))
                             .expect("request deadline");
-                        let size = stream.read(&mut buf).expect("request");
-                        let request = String::from_utf8_lossy(&buf[..size]);
-                        let target = request
+                        let mut bytes = Vec::new();
+                        let (header_end, content_length) = loop {
+                            let size = stream.read(&mut buf).expect("request headers");
+                            assert!(size > 0, "incomplete request headers");
+                            bytes.extend_from_slice(&buf[..size]);
+                            assert!(bytes.len() <= 65536, "oversized mock request");
+                            if let Some(end) = bytes.windows(4).position(|b| b == b"\r\n\r\n") {
+                                let headers = String::from_utf8_lossy(&bytes[..end]);
+                                let length = headers
+                                    .lines()
+                                    .filter_map(|line| line.split_once(':'))
+                                    .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                                    .map_or(0, |(_, value)| value.trim().parse::<usize>().unwrap());
+                                assert!(length <= 65536, "oversized mock body");
+                                break (end + 4, length);
+                            }
+                        };
+                        while bytes.len() < header_end + content_length {
+                            let size = stream.read(&mut buf).expect("request body");
+                            assert!(size > 0, "incomplete request body");
+                            bytes.extend_from_slice(&buf[..size]);
+                        }
+                        let request = String::from_utf8_lossy(&bytes[..header_end]);
+                        let mut parts = request
                             .lines()
                             .next()
-                            .and_then(|line| line.split_whitespace().nth(1))
-                            .unwrap_or("/");
-                        let body = respond(target).to_string();
+                            .unwrap_or_default()
+                            .split_whitespace();
+                        let method = parts.next().unwrap_or_default();
+                        let target = parts.next().unwrap_or("/");
+                        request_log_clone
+                            .lock()
+                            .expect("request log")
+                            .push((method.to_owned(), target.to_owned()));
+                        let body = respond(target, &bytes[header_end..header_end + content_length])
+                            .to_string();
                         let response = format!(
                             "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                             body.len(),
                             body
                         );
-                        requests_clone.fetch_add(1, Ordering::SeqCst);
                         let _ = stream.write_all(response.as_bytes());
                         let _ = stream.flush();
                     }
@@ -85,7 +115,7 @@ impl MockTreeServer {
         });
         Self {
             addr,
-            requests,
+            request_log,
             stop,
         }
     }
@@ -95,7 +125,7 @@ impl MockTreeServer {
     }
 
     fn requests(&self) -> usize {
-        self.requests.load(Ordering::SeqCst)
+        self.request_log.lock().expect("request log").len()
     }
 }
 
@@ -200,12 +230,22 @@ fn wait_for_browser_frame(
     start: usize,
     selected: &str,
 ) {
+    wait_for_browser_text(child, transcript, start, &[selected, "q quit"]);
+}
+
+#[cfg(unix)]
+fn wait_for_browser_text(
+    child: &mut BrowserPtyChild,
+    transcript: &Mutex<Vec<u8>>,
+    start: usize,
+    expected: &[&str],
+) {
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
         let seen =
             String::from_utf8_lossy(&transcript.lock().expect("browser pty transcript")[start..])
                 .into_owned();
-        if seen.contains(selected) && seen.contains("q quit") && seen.contains("\x1b[0m") {
+        if expected.iter().all(|text| seen.contains(text)) && seen.contains("\x1b[0m") {
             return;
         }
         assert!(
@@ -214,11 +254,11 @@ fn wait_for_browser_frame(
                 .try_wait()
                 .expect("poll browser pty child")
                 .is_none(),
-            "browser exited before selecting {selected:?}; transcript: {seen:?}"
+            "browser exited before showing {expected:?}; transcript: {seen:?}"
         );
         assert!(
             Instant::now() < deadline,
-            "browser did not select {selected:?}; transcript: {seen:?}"
+            "browser did not show {expected:?}; transcript: {seen:?}"
         );
         thread::sleep(Duration::from_millis(20));
     }
@@ -343,6 +383,450 @@ fn with_browser_pty_options(
     assert!(
         status.success(),
         "browser should exit successfully: {status:?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn browser_pty_single_key_dialogs_preserve_text_input_and_cancel_without_writes() {
+    let server = MockTreeServer::serve(|target| {
+        if target.starts_with("/api/v1/tags/list?") {
+            json!({"req_result": true, "data": {"items": [], "total": 0}, "err_message": ""})
+        } else if target.starts_with("/api/v1/tree?") {
+            json!({"req_result": true, "data": {"tree_items": [
+                {"name": "alpha", "path": "/", "content_type": "directory"}
+            ]}, "err_message": ""})
+        } else {
+            json!({"req_result": false, "err_message": "unexpected request"})
+        }
+    });
+    with_browser_pty(&server, |child, transcript, writer, _| {
+        wait_for_browser_text(child, transcript, 0, &["a new dir", "e rename", "q quit"]);
+        for (input, expected) in [
+            (
+                &b"a\r"[..],
+                &[
+                    "┌ New directory",
+                    "Error: mega2 entry name must not be empty",
+                    "Esc cancel",
+                ][..],
+            ),
+            (
+                &b"area-rqjktmde+R"[..],
+                &["┌ New directory", "> area-rqjktmde+R▏", "Esc cancel"][..],
+            ),
+            (&b"\x1b"[..], &["create cancelled", "q quit"][..]),
+            (
+                &b"e\x7f\x7f\x7f\x7f\x7farea-ae"[..],
+                &["┌ Rename directory", "New name", "> area-ae▏", "Esc cancel"][..],
+            ),
+            (&b"\x1b"[..], &["rename cancelled", "q quit"][..]),
+            (
+                &b"d"[..],
+                &["┌ Delete directory", "delete 'alpha'?", "Enter/y confirm"][..],
+            ),
+            (&b"\x1b"[..], &["delete cancelled", "q quit"][..]),
+            (&b"t"[..], &["mega2 tags", "a create"][..]),
+            (
+                &b"a\r"[..],
+                &["┌ New tag", "Error: mega2 tag name must not be empty"][..],
+            ),
+            (
+                &b"release-ae"[..],
+                &["┌ New tag", "Tag name", "> release-ae▏"][..],
+            ),
+            (
+                &b"\r"[..],
+                &[
+                    "Tag: release-ae",
+                    "Message (empty = lightweight)",
+                    "Enter create",
+                ][..],
+            ),
+            (
+                &b"a release q+R rjkdtm"[..],
+                &["> a release q+R rjkdtm▏"][..],
+            ),
+            (&b"\x1b"[..], &["tag create cancelled"][..]),
+            (&b"q"[..], &["Directory tree", "q quit"][..]),
+        ] {
+            let start = transcript.lock().expect("transcript").len();
+            writer
+                .write_all(input)
+                .expect("send single-key action or text");
+            writer.flush().expect("flush input");
+            wait_for_browser_text(child, transcript, start, expected);
+            if expected.contains(&"Message (empty = lightweight)") {
+                let transcript = transcript.lock().expect("transcript");
+                let output = String::from_utf8_lossy(&transcript[start..]);
+                let frame = output.rsplit("\x1b[2J").next().expect("dialog frame");
+                assert!(
+                    !frame.contains("Error:"),
+                    "corrected name must clear the old error: {frame}"
+                );
+            }
+        }
+    });
+    assert_eq!(
+        server.requests(),
+        2,
+        "cancelled editors must not write or reload"
+    );
+    let requests = server.request_log.lock().expect("request log");
+    assert!(
+        requests.iter().all(|(method, _)| method == "GET"),
+        "cancelled editors must not issue write requests: {requests:?}"
+    );
+    assert!(requests[0].1.starts_with("/api/v1/tree?"));
+    assert!(requests[1].1.starts_with("/api/v1/tags/list?"));
+}
+
+#[cfg(unix)]
+#[test]
+fn browser_pty_create_posts_inside_selected_directory_and_reloads_that_branch() {
+    for expanded in [false, true] {
+        let creates = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
+        let captured_creates = Arc::clone(&creates);
+        let server = MockTreeServer::serve_requests(move |target, body| {
+            let url = url::Url::parse(&format!("http://localhost{target}")).unwrap();
+            let data = if url.path() == "/api/v1/create-entry" {
+                captured_creates
+                    .lock()
+                    .unwrap()
+                    .push(serde_json::from_slice(body).unwrap());
+                json!({"commit_id":"commit-1", "new_oid":"tree-1", "path":"/artifact/rust"})
+            } else {
+                let path = url.query_pairs().find(|(key, _)| key == "path").unwrap().1;
+                match path.as_ref() {
+                    "/" => json!({"tree_items":[
+                        {"name":"artifact", "content_type":"directory"},
+                        {"name":"doc", "content_type":"directory"}
+                    ]}),
+                    "/artifact" if captured_creates.lock().unwrap().is_empty() => {
+                        json!({"tree_items":[{"name":".gitkeep", "content_type":"file"}]})
+                    }
+                    "/artifact" => json!({"tree_items":[
+                        {"name":"rust", "content_type":"directory"},
+                        {"name":".gitkeep", "content_type":"file"}
+                    ]}),
+                    _ => panic!("unexpected request {target}"),
+                }
+            };
+            json!({"req_result":true, "data":data})
+        });
+        with_browser_pty(&server, |child, transcript, writer, _| {
+            wait_for_browser_frame(child, transcript, 0, "> ├─ [+] artifact/");
+            if expanded {
+                let start = transcript.lock().unwrap().len();
+                writer.write_all(b"\x1b[C").unwrap();
+                writer.flush().unwrap();
+                wait_for_browser_frame(child, transcript, start, "> ├─ [-] artifact/");
+            }
+            let start = transcript.lock().unwrap().len();
+            writer.write_all(b"a").unwrap();
+            writer.flush().unwrap();
+            wait_for_browser_text(
+                child,
+                transcript,
+                start,
+                &["New directory", "Parent: /artifact"],
+            );
+            let start = transcript.lock().unwrap().len();
+            writer.write_all(b"rust\r").unwrap();
+            writer.flush().unwrap();
+            wait_for_browser_frame(child, transcript, start, "[+] rust/");
+            let captured = transcript.lock().unwrap().clone();
+            let text = String::from_utf8_lossy(&captured[start..]);
+            let frame = text.split("\x1b[2J\x1b[H").last().unwrap();
+            assert!(
+                frame.contains("> ├─ [-] artifact/"),
+                "selection retained: {frame}"
+            );
+            assert!(frame.contains("[+] doc/"), "sibling retained: {frame}");
+        });
+        assert_eq!(
+            *creates.lock().unwrap(),
+            vec![json!({
+                "path":"/artifact", "name":"rust", "is_directory":true,
+                "content":null, "skip_build":true
+            })]
+        );
+        let requests = server.request_log.lock().unwrap();
+        assert_eq!(requests.len(), if expanded { 4 } else { 3 });
+        let post = &requests[requests.len() - 2];
+        assert_eq!(post, &("POST".into(), "/api/v1/create-entry".into()));
+        let (method, target) = requests.last().unwrap();
+        assert_eq!(method, "GET");
+        let url = url::Url::parse(&format!("http://localhost{target}")).unwrap();
+        assert_eq!(url.path(), "/api/v1/tree");
+        assert!(
+            url.query_pairs()
+                .any(|(key, value)| key == "path" && value == "/artifact")
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn browser_pty_file_move_uses_a_separate_destination_picker_and_second_confirmation() {
+    let moves = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
+    let captured_moves = Arc::clone(&moves);
+    let server = MockTreeServer::serve_requests(move |target, body| {
+        let url = url::Url::parse(&format!("http://localhost{target}")).expect("mock URL");
+        let data = match url.path() {
+            "/api/v1/move-entry" => {
+                captured_moves
+                    .lock()
+                    .expect("move captures")
+                    .push(serde_json::from_slice(body).expect("move body"));
+                json!({
+                    "commit_id": "commit-1",
+                    "from_path": "/artifact/readme.txt",
+                    "to_path": "/artifact/destination/readme.txt",
+                    "cl_link": null,
+                })
+            }
+            "/api/v1/tree" => {
+                let path = url
+                    .query_pairs()
+                    .find(|(key, _)| key == "path")
+                    .expect("tree path")
+                    .1;
+                match path.as_ref() {
+                    "/" => json!({"tree_items": [
+                        {"name": "artifact", "content_type": "directory"}
+                    ]}),
+                    "/artifact" if captured_moves.lock().expect("move captures").is_empty() => {
+                        json!({"tree_items": [
+                            {"name": "destination", "content_type": "directory"},
+                            {"name": "readme.txt", "content_type": "file"}
+                        ]})
+                    }
+                    "/artifact" => json!({"tree_items": [
+                        {"name": "destination", "content_type": "directory"}
+                    ]}),
+                    "/artifact/destination" => json!({"tree_items": []}),
+                    other => panic!("unexpected tree path {other}"),
+                }
+            }
+            "/api/v1/blob" => json!("file preview\n"),
+            other => panic!("unexpected request {other}"),
+        };
+        json!({"req_result": true, "data": data, "err_message": ""})
+    });
+
+    with_browser_pty(&server, |child, transcript, writer, _| {
+        wait_for_browser_frame(child, transcript, 0, "> └─ [+] artifact/");
+        let start = transcript.lock().expect("transcript").len();
+        writer
+            .write_all(b"\x1b[C\x1b[B\x1b[B")
+            .expect("expand and select file");
+        writer.flush().expect("flush expand and select file");
+        wait_for_browser_text(child, transcript, start, &["readme.txt", "file preview"]);
+
+        let start = transcript.lock().expect("transcript").len();
+        writer.write_all(b"m").expect("open move picker");
+        writer.flush().expect("flush move picker");
+        wait_for_browser_text(
+            child,
+            transcript,
+            start,
+            &[
+                "Move file",
+                "Source: /artifact/readme.txt",
+                "Destination within /artifact: /artifact",
+                "Enter choose | Right open",
+            ],
+        );
+        assert!(
+            moves.lock().expect("moves").is_empty(),
+            "opening is read-only"
+        );
+
+        let start = transcript.lock().expect("transcript").len();
+        writer
+            .write_all(b"\x1b[B\x1b[C")
+            .expect("browse destination");
+        writer.flush().expect("flush destination browse");
+        wait_for_browser_text(
+            child,
+            transcript,
+            start,
+            &["Destination within /artifact: /artifact/destination"],
+        );
+        assert!(
+            moves.lock().expect("moves").is_empty(),
+            "Right only opens a folder"
+        );
+
+        let start = transcript.lock().expect("transcript").len();
+        writer.write_all(b"\r").expect("choose destination");
+        writer.flush().expect("flush destination choice");
+        wait_for_browser_text(
+            child,
+            transcript,
+            start,
+            &[
+                "Destination: /artifact/destination",
+                "Enter move | Esc back",
+            ],
+        );
+        assert!(
+            moves.lock().expect("moves").is_empty(),
+            "first Enter does not write"
+        );
+
+        let start = transcript.lock().expect("transcript").len();
+        writer.write_all(b"\r").expect("confirm move");
+        writer.flush().expect("flush move confirmation");
+        wait_for_browser_text(child, transcript, start, &["q quit"]);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while moves.lock().expect("moves").is_empty() {
+            assert!(Instant::now() < deadline, "move request was not sent");
+            thread::sleep(Duration::from_millis(20));
+        }
+    });
+    assert_eq!(
+        *moves.lock().expect("moves"),
+        vec![json!({
+            "from_path": "/artifact",
+            "from_name": "readme.txt",
+            "to_path": "/artifact/destination",
+            "to_name": "readme.txt",
+            "is_directory": false,
+            "skip_build": true,
+        })]
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn browser_pty_directory_move_uses_the_picker_and_preserves_directory_type() {
+    let moves = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
+    let captured_moves = Arc::clone(&moves);
+    let server = MockTreeServer::serve_requests(move |target, body| {
+        let url = url::Url::parse(&format!("http://localhost{target}")).expect("mock URL");
+        let data = match url.path() {
+            "/api/v1/move-entry" => {
+                captured_moves
+                    .lock()
+                    .expect("move captures")
+                    .push(serde_json::from_slice(body).expect("move body"));
+                json!({
+                    "commit_id": "commit-1",
+                    "from_path": "/artifact/rust",
+                    "to_path": "/artifact/destination/rust",
+                    "cl_link": null,
+                })
+            }
+            "/api/v1/tree" => {
+                let path = url
+                    .query_pairs()
+                    .find(|(key, _)| key == "path")
+                    .expect("tree path")
+                    .1;
+                match path.as_ref() {
+                    "/" => json!({"tree_items": [
+                        {"name": "artifact", "content_type": "directory"}
+                    ]}),
+                    "/artifact" if captured_moves.lock().expect("move captures").is_empty() => {
+                        json!({"tree_items": [
+                            {"name": "destination", "content_type": "directory"},
+                            {"name": "rust", "content_type": "directory"}
+                        ]})
+                    }
+                    "/artifact" => json!({"tree_items": [
+                        {"name": "destination", "content_type": "directory"}
+                    ]}),
+                    "/artifact/destination" => json!({"tree_items": []}),
+                    other => panic!("unexpected tree path {other}"),
+                }
+            }
+            other => panic!("unexpected request {other}"),
+        };
+        json!({"req_result": true, "data": data, "err_message": ""})
+    });
+
+    with_browser_pty(&server, |child, transcript, writer, _| {
+        wait_for_browser_frame(child, transcript, 0, "> └─ [+] artifact/");
+        let start = transcript.lock().expect("transcript").len();
+        writer
+            .write_all(b"\x1b[C\x1b[B\x1b[B")
+            .expect("expand and select directory");
+        writer.flush().expect("flush expand and select directory");
+        wait_for_browser_frame(child, transcript, start, ">   └─ [+] rust/");
+
+        let start = transcript.lock().expect("transcript").len();
+        writer.write_all(b"m").expect("open move picker");
+        writer.flush().expect("flush move picker");
+        wait_for_browser_text(
+            child,
+            transcript,
+            start,
+            &[
+                "Move directory",
+                "Source: /artifact/rust",
+                "Destination within /artifact: /artifact",
+            ],
+        );
+        assert!(
+            moves.lock().expect("moves").is_empty(),
+            "opening is read-only"
+        );
+
+        let start = transcript.lock().expect("transcript").len();
+        writer
+            .write_all(b"\x1b[B\x1b[C")
+            .expect("browse destination");
+        writer.flush().expect("flush destination browse");
+        wait_for_browser_text(
+            child,
+            transcript,
+            start,
+            &["Destination within /artifact: /artifact/destination"],
+        );
+        assert!(
+            moves.lock().expect("moves").is_empty(),
+            "Right only opens a folder"
+        );
+
+        let start = transcript.lock().expect("transcript").len();
+        writer.write_all(b"\r").expect("choose destination");
+        writer.flush().expect("flush destination choice");
+        wait_for_browser_text(
+            child,
+            transcript,
+            start,
+            &[
+                "Destination: /artifact/destination",
+                "Enter move | Esc back",
+            ],
+        );
+        assert!(
+            moves.lock().expect("moves").is_empty(),
+            "first Enter does not write"
+        );
+
+        let start = transcript.lock().expect("transcript").len();
+        writer.write_all(b"\r").expect("confirm move");
+        writer.flush().expect("flush move confirmation");
+        wait_for_browser_text(child, transcript, start, &["q quit"]);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while moves.lock().expect("moves").is_empty() {
+            assert!(Instant::now() < deadline, "move request was not sent");
+            thread::sleep(Duration::from_millis(20));
+        }
+    });
+    assert_eq!(
+        *moves.lock().expect("moves"),
+        vec![json!({
+            "from_path": "/artifact",
+            "from_name": "rust",
+            "to_path": "/artifact/destination",
+            "to_name": "rust",
+            "skip_build": true,
+        })],
+        "directory moves preserve Mega2's default is_directory=true by omitting the field"
     );
 }
 

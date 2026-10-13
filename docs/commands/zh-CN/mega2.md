@@ -68,19 +68,28 @@ JavaScript、C/C++、Shell、JSON、YAML、Markdown、HTML/CSS 与 TOML/INI 配�
 | `←`、`Backspace` 或 `h` | 折叠分支或选择父节点；位于子树顶层时加载上级目录（不高于 `/`）；内容区 `←` 向左滚动 |
 | `Tab` | 在目录树与文件内容区之间切换焦点 |
 | `PageUp` / `PageDown` | 按屏滚动文件内容 |
-| `+` | 在当前目录建立子目录（见下） |
-| `d` | 删除选中目录（需要额外确认行；文件为惰性） |
-| `m` | 将选中目录移动到编辑后的目标父路径 |
-| `R` | 原地重命名选中目录（同层移动；`r` 仍是重新加载） |
+| `a` | 在所选目录内新建子目录（见下） |
+| `d` | 删除选中目录（弹出确认框；文件为惰性） |
+| `m` | 通过目标目录选择器移动选中的文件或目录 |
+| `e` | 原地重命名选中目录（同层移动；`r` 仍是重新加载） |
 | `t` | 开关 tag 面板（见下） |
 | `r` | 刷新选中的目录或文件；空目录树时刷新根路径 |
 | `q`（或 `Ctrl-C`、`Esc`） | 退出 |
 
+主要快捷键均为无需 Shift 的单键；tag 面板中同样按 `a` 新建。
+旧的 `+`（新建）和 `R`（改名）保留为兼容别名。
+输入名称或 tag 说明时，可打印的快捷键字符（包括 `q`）按普通文本输入；Enter 提交，
+Backspace 删除字符，Esc 取消。目录名称及 tag 名称/说明都在居中的弹出框内输入，带有
+字段标签和可见光标；长输入自动显示末尾，校验错误直接显示在框内。删除也使用弹出确认框。
+移动使用单独的目录选择器：`→` 进入目标目录，第一个 `Enter` 选择目标，第二个
+`Enter` 才确认写入。弹出框适配最小 49 × 10 的终端并支持无颜色模式，取消后保留原来的目录树/tag 选中项。
+
 所有退出路径（含错误与被处理的信号）都会还原终端状态（raw mode 与备用屏幕）。
-目录修改快捷键仅在目录树获得焦点时生效，并使用选中节点的实际父路径，深层节点
-同样如此：`+` 在选中目录的同层建立目录，而非在选中目录内部建立。确认修改后刷新
-其父分支；从深层分支跨父路径移动目录时，还会重新加载可见根并折叠分支，避免目标
-位置保留过时内容。JSON/机器模式的 schema 和单次请求行为保持不变。
+目录修改快捷键仅在目录树获得焦点时生效。`a` 在选中目录内部建立子目录，无论该
+目录展开还是折叠，完成后刷新其子项。删除、重命名作用于选中目录；移动则作用于
+选中的文件或目录，并使用其实际父路径（包括深层节点），完成后刷新父分支。
+从深层分支跨父路径移动时，还会重新加载可见根并折叠分支，避免目标位置保留过时内容。
+JSON/机器模式的 schema 和单次请求行为保持不变。
 
 ### 机器模式（`--json` / `--machine`）
 
@@ -120,12 +129,12 @@ browser 的功能另有非交互形式，供脚本、CI 与黑盒测试使用：
 | 交互键 | Flag | 请求 |
 |--------|------|------|
 | 启动、展开/刷新目录、加载上级根目录 | `--list`（PATH 即目标目录；不带 flag 的 `--json` 与之相同） | `GET /api/v1/tree` |
-| `+` | `--create-dir <NAME>`（PATH 为父目录） | `POST /api/v1/create-entry` |
+| `a` | `--create-dir <NAME>`（PATH 为父目录） | `POST /api/v1/create-entry` |
 | `d` | `--delete-dir <NAME>`（PATH 为父目录） | `POST /api/v1/delete-entry` |
-| `m` | `--move-dir <NAME> <PARENT-PATH>`（PATH 为 NAME 当前的父目录；名称不变） | `POST /api/v1/move-entry` |
-| `R` | `--rename-dir <NAME> <NEW-NAME>`（PATH 为父目录，保持不变） | `POST /api/v1/move-entry` |
+| `m` | `--move-dir <NAME> <PARENT-PATH>`（仅目录；PATH 为 NAME 当前的父目录；名称不变） | `POST /api/v1/move-entry` |
+| `e` | `--rename-dir <NAME> <NEW-NAME>`（PATH 为父目录，保持不变） | `POST /api/v1/move-entry` |
 | `t`，再按 `n`/`p` | `--list-tags [--page <N>] [--per-page <N>]`（PATH 只能为 `/`） | `GET /api/v1/tags/list` |
-| `t`，再按 `+` | `--create-tag <NAME> [--message <TEXT>]`（PATH 只能为 `/`） | `POST /api/v1/tags` |
+| `t`，再按 `a` | `--create-tag <NAME> [--message <TEXT>]`（PATH 只能为 `/`） | `POST /api/v1/tags` |
 | `t`，再按 `d` | `--delete-tag <NAME>`（PATH 只能为 `/`） | `DELETE /api/v1/tags/{name}` |
 
 所有非交互调用遵守同一组规则：
@@ -365,42 +374,53 @@ root tag NAME，没有确认行，之后不重新列出。与建立 root tag 相
 | HTTP 400、405 或 422 / 409 | `LBR-CLI-002` / `LBR-CONFLICT-002` | `http_status` |
 | 其它非 2xx 或回执不合规 / 超时或连接中断 | `LBR-NET-002` / `LBR-NET-001`，同 `--create-dir` | `http_status` 或 `transport` |
 
-### 建目录（`+`，仅交互模式）
+### 建目录（`a`，仅交互模式）
 
-按 `+` 打开单行名称编辑器，建立选中目录的同级目录（目录树为空时，在可见根目录下
-建立子目录）。若当前选中项是**文件**，编辑器拒绝打开（选择项必须是目录或空白
+按 `a` 打开居中的名称输入框，在选中目录内建立子目录（目录树为空时，在可见根目录下
+建立子目录）。输入框显示父路径：选中 `/artifact` 并输入 `rust` 会创建
+`/artifact/rust`，而非 `/rust`，选中目录无需先展开。若当前选中项是**文件**，编辑器拒绝打开（选择项必须是目录或空白
 区域）。按 `Enter` 会先用与 wire 相同的规则校验名称（拒绝 `/`、`\`、`.`、`..`、
 NUL 与控制字符），通过后才发送**一次** `POST /api/v1/create-entry`
 （`is_directory=true`、`skip_build=true`、无 `content`）；按 `Esc` 直接取消，完全不发
 请求。
 
-确认建立后恰好重新加载一次当前列表。失败情形（401/403、重名、超时、响应格式
+确认建立后恰好重新加载一次目标目录并显示其子项。失败情形（401/403、重名、超时、响应格式
 错误）会保留屏幕上最后一次安全列表，并显示**不含秘密**的状态行；终端不会停留在
 raw mode，TUI 也永不要求你在备用屏幕上输入原始 token。
+
+HTTP 400 不一定表示名称已存在，还需检查父路径、服务端路径策略和名称。
+Mega2 限制新路径必须位于配置的 monorepo 根目录下；选中 `/artifact` 会在该根目录
+内部创建，而不是新增顶层路径。为避免泄露秘密，不直接显示服务端错误响应正文。
 
 写入 token 的解析优先级：`--token-file <path>` → 环境变量 `LIBRA_MEGA2_TOKEN` →
 `--token`（会留在 shell history，建议用前两者）。非交互写操作（见上文）遵守同一规则。
 读操作拒绝 token flag：不带写操作 flag 的 `--json`/`--machine` 与 `--list` 都不接受凭据。
 
-### 删除、移动与改名（`d`、`m`、`R`，仅交互模式）
+### 删除、移动与改名（`d`、`m`、`e`，仅交互模式）
 
-`d` 在删除选中目录前要求额外的确认行；`m` 把选中目录移动到编辑后的目标父路径；
-`R` 原地重命名（即同层移动）。这三个键对文件一律惰性；`Esc` 取消任何编辑器且不
-发请求；敌意目标（`..`、分隔符、非 rooted 路径）在 POST 前即被拒绝。
+`d` 在删除选中目录前弹出确认框；`m` 为选中的文件或目录打开目标目录选择器；
+`e` 原地重命名选中的目录（即同层移动）。选择器在浏览目标时固定源项：`→` 进入目录，
+第一个 `Enter` 选择目标，第二个 `Enter` 执行移动。确认页按 `Esc` 回到选择器，再按
+一次才取消，且不发送写入请求。文件仅对删除和改名保持惰性。
+
+Mega2 的 trunk 写入不能落在 `/`，所以不能跨一级 monorepo 根目录移动。例如
+`/artifact/rust` 不能移动到 `/data`。选择器只展示源根目录（例如 `/artifact`）之下的
+目标，因而不会发送这个必然失败的请求；它也会在 POST 前拒绝把目录移动到自身或子目录。
 
 每次确认的变更执行**一次** `POST /api/v1/delete-entry` 或
 `POST /api/v1/move-entry`，成功后重新加载一次父分支列表。
 从嵌套分支跨父目录移动时，会额外重载一次根目录并折叠目录树。成功会清除状态行；
 失败（401/403、源不存在、目标重名、超时）保留最后一次安全列表并显示不含秘密的
-状态行，终端保持完好。没有多选、没有递归：每次操作只针对一个选中目录。
+状态行，终端保持完好。没有多选、没有递归：每次操作只针对一个选中条目
+（删除/改名为目录，移动可以是文件或目录）。
 
 ### Tag 面板（`t`，仅交互模式）
 
 按 `t` 打开 tag 面板，并为第 1 页执行**一次**匿名
 `GET /api/v1/tags/list`（三个必填 query 键为 `page`、`per_page`、`path`；本 MVP
 固定使用仓库根 `path=/`）。`n`/`p` 显式请求下一页/上一页——每键一次请求，绝不
-预取。`+` 先收集 tag 名，再收集可选 message（message 为空 = lightweight tag，
-非空 = annotated tag）；`d` 在删除选中 tag 前要求额外确认行。`t`、`Esc` 或 `q`
+预取。`a` 先收集 tag 名，再收集可选 message（message 为空 = lightweight tag，
+非空 = annotated tag）；`d` 在删除选中 tag 前弹出确认框。`t`、`Esc` 或 `q`
 关闭面板但不退出 browser，目录列表原样恢复。
 
 tag 名在发请求前按服务端规则校验（非空、≤255 字节、不含 `..`、`@{`、`//`、不以
@@ -467,8 +487,8 @@ ADR-MB-03 的会话写入 token。渲染时对 tagger/message 做消毒，敌意
 
 - 每次展开/刷新目录或切换到文件时一个请求；在目录行之间移动与折叠分支不发请求。
   无递归预取、无后台任务、无跨进程缓存。
-- 浏览只读且匿名。确认 `+` 后最多一次 `create-entry` POST 加一次重载 GET；
-  `d`/`m`/`R` 同样各加一次 `delete-entry`/`move-entry` POST 加一次父分支重载 GET
+- 浏览只读且匿名。确认 `a` 后最多一次 `create-entry` POST 加一次重载 GET；
+  `d`/`m`/`e` 同样各加一次 `delete-entry`/`move-entry` POST 加一次父分支重载 GET
   （从嵌套分支跨父目录移动时额外重载一次根目录）；本命令
   不含递归或多选操作。
 - 不持久化任何配置或凭据；不写磁盘。
@@ -494,8 +514,8 @@ libra --json mega2 browser --server https://mega2.example.com --create-dir pkg /
 # 不用终端删除 /src/pkg（没有确认行：flag 写明了目标）
 libra --json mega2 browser --server https://mega2.example.com --delete-dir pkg /src --token-file ~/.mega2-token
 
-# 不用终端把 /src/pkg 移到 /lib/pkg
-libra --json mega2 browser --server https://mega2.example.com --move-dir pkg /lib /src --token-file ~/.mega2-token
+# 不用终端把 /src/pkg 移到 /src/archive/pkg
+libra --json mega2 browser --server https://mega2.example.com --move-dir pkg /src/archive /src --token-file ~/.mega2-token
 
 # 不用终端把 /src/old 改名为 /src/new
 libra --json mega2 browser --server https://mega2.example.com --rename-dir old new /src --token-file ~/.mega2-token
@@ -512,7 +532,7 @@ libra --json mega2 browser --server https://mega2.example.com --delete-tag v1.0 
 # 列出指定 commit 或 tag
 libra mega2 browser --server https://mega2.example.com --ref v1.2
 
-# 交互建/删/移/改名（+、d、m、R）与 tag 面板（t），可配 --token-file
+# 交互建/删/移/改名（a、d、m、e）与 tag 面板（t），可配 --token-file
 libra mega2 browser --server https://mega2.example.com --token-file ~/.mega2-token
 
 # 单次请求 + JSON envelope（无需 TTY，可在仓库外运行）

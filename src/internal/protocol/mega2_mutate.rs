@@ -3,8 +3,8 @@
 //!
 //! The client turns an untrusted directory delete/move response into an
 //! immutable receipt. It only ever calls the two mounted routes, sends
-//! `is_directory`/`author_username` as omitted (the server defaults
-//! `is_directory` to `true`), reuses [`Mega2Token`] for exactly one
+//! `is_directory=false` for a known file target (and otherwise preserves the
+//! server's directory default), reuses [`Mega2Token`] for exactly one
 //! `Authorization: Bearer` header, and performs exactly one request per
 //! operation — no recursion, no child enumeration, no local repository or
 //! filesystem writes.
@@ -90,6 +90,10 @@ struct MoveEntryBody<'a> {
     from_name: &'a str,
     to_path: &'a str,
     to_name: &'a str,
+    /// Mega2 defaults this field to `true`; only a known file needs the
+    /// explicit `false` needed to preserve its Blob mode.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    is_directory: Option<bool>,
     skip_build: bool,
 }
 
@@ -158,12 +162,14 @@ fn move_body<'a>(
     from_name: &'a str,
     to_path: &'a str,
     to_name: &'a str,
+    known_type: Option<ContentType>,
 ) -> MoveEntryBody<'a> {
     MoveEntryBody {
         from_path,
         from_name,
         to_path,
         to_name,
+        is_directory: (known_type == Some(ContentType::File)).then_some(false),
         skip_build: true,
     }
 }
@@ -195,7 +201,6 @@ fn validate_move_target(
     from_name: &str,
     to_parent: &str,
     to_name: &str,
-    known_type: Option<ContentType>,
     overwrite: bool,
 ) -> CliResult<(String, String)> {
     if overwrite {
@@ -210,12 +215,6 @@ fn validate_move_target(
     let to = normalize_path(to_parent)?;
     validate_entry_name(from_name)?;
     validate_entry_name(to_name)?;
-    if known_type == Some(ContentType::File) {
-        return Err(CliError::fatal(
-            "mega2 mutate: file targets are not supported; only directories can be moved",
-        )
-        .with_stable_code(StableErrorCode::CliInvalidTarget));
-    }
     Ok((from, to))
 }
 
@@ -249,9 +248,15 @@ fn parse_common_envelope<T: DeserializeOwned>(
         }
         400 => {
             return Err(CliError::fatal(format!(
-                "mega2 server rejected the {operation} request (HTTP 400) — the name may not exist or already exists"
+                "mega2 server rejected the {operation} request (HTTP 400) — check the source and destination paths, entry type, name collision, and server path policy"
             ))
             .with_stable_code(StableErrorCode::CliInvalidTarget));
+        }
+        404 => {
+            return Err(CliError::fatal(format!(
+                "mega2 server could not find the selected entry or source/destination folder, or does not expose {operation} (HTTP 404)"
+            ))
+            .with_stable_code(StableErrorCode::NetworkProtocol));
         }
         status if (300..400).contains(&status) => {
             return Err(CliError::fatal(format!(
@@ -421,7 +426,7 @@ impl Mega2MutateClient {
         })
     }
 
-    /// Moves/renames one directory child; exactly one request. Destination
+    /// Moves/renames one directory or file child; exactly one request. Destination
     /// collisions are refused by the server (HTTP 400) and never overwrite.
     pub async fn move_entry(
         &self,
@@ -447,18 +452,11 @@ impl Mega2MutateClient {
         to_name: &str,
         known_type: Option<ContentType>,
     ) -> CliResult<MoveReceipt> {
-        let (from, to) = validate_move_target(
-            from_parent,
-            from_name,
-            to_parent,
-            to_name,
-            known_type,
-            false,
-        )?;
+        let (from, to) = validate_move_target(from_parent, from_name, to_parent, to_name, false)?;
         let data: WireMoveResult = self
             .post_json(
                 MOVE_ENTRY_ROUTE,
-                &move_body(&from, from_name, &to, to_name),
+                &move_body(&from, from_name, &to, to_name, known_type),
                 "move-entry",
             )
             .await?;
@@ -698,7 +696,8 @@ mod tests {
     #[test]
     fn move_posts_path_and_fields() {
         assert_eq!(MOVE_ENTRY_ROUTE, "/api/v1/move-entry");
-        let body = serde_json::to_value(move_body("/src", "a", "/dst", "b")).expect("serialize");
+        let body =
+            serde_json::to_value(move_body("/src", "a", "/dst", "b", None)).expect("serialize");
         assert_eq!(
             body,
             serde_json::json!({
@@ -711,11 +710,22 @@ mod tests {
         );
         assert!(body.get("is_directory").is_none());
         assert!(body.get("author_username").is_none());
+
+        let file = serde_json::to_value(move_body(
+            "/src",
+            "readme.txt",
+            "/dst",
+            "readme.txt",
+            Some(ContentType::File),
+        ))
+        .expect("serialize file move");
+        assert_eq!(file["is_directory"], false);
     }
 
     #[test]
     fn rename_is_same_parent_move() {
-        let rename = serde_json::to_value(move_body("/src", "old", "/src", "new")).expect("ser");
+        let rename =
+            serde_json::to_value(move_body("/src", "old", "/src", "new", None)).expect("ser");
         assert_eq!(rename["from_path"], rename["to_path"]);
         assert_ne!(rename["from_name"], rename["to_name"]);
 
@@ -819,7 +829,7 @@ mod tests {
         let parsed: WireMoveResult =
             parse_common_envelope(200, move_receipt_raw, "move-entry").expect("parses");
         let move_body_value =
-            serde_json::to_value(move_body("/safe", "a", "/safe", "b")).expect("serialize");
+            serde_json::to_value(move_body("/safe", "a", "/safe", "b", None)).expect("serialize");
         assert_eq!(move_body_value["from_path"], "/safe");
         assert_ne!(
             move_body_value["to_path"],
@@ -828,7 +838,7 @@ mod tests {
     }
 
     #[test]
-    fn root_and_file_rejected_locally() {
+    fn root_and_file_delete_are_rejected_locally_but_file_move_is_allowed() {
         // Root deletion: an entry name is mandatory and cannot be `/` or empty.
         assert!(validate_delete_target("/", "/", None).is_err());
         assert!(validate_delete_target("/", "", None).is_err());
@@ -838,18 +848,15 @@ mod tests {
         let err = validate_delete_target("/", "readme.txt", Some(ContentType::File))
             .expect_err("file delete refused");
         assert_eq!(err.stable_code(), StableErrorCode::CliInvalidTarget);
-        assert!(
-            validate_move_target("/a", "f", "/b", "f", Some(ContentType::File), false).is_err()
-        );
+        assert!(validate_move_target("/a", "f", "/b", "f", false).is_ok());
         // Destination traversal and overwrite are refused.
-        assert!(validate_move_target("/a", "x", "/../escape", "x", None, false).is_err());
-        assert!(validate_move_target("/a", "x", "/b", "..", None, false).is_err());
-        let err =
-            validate_move_target("/a", "x", "/b", "y", None, true).expect_err("overwrite refused");
+        assert!(validate_move_target("/a", "x", "/../escape", "x", false).is_err());
+        assert!(validate_move_target("/a", "x", "/b", "..", false).is_err());
+        let err = validate_move_target("/a", "x", "/b", "y", true).expect_err("overwrite refused");
         assert_eq!(err.stable_code(), StableErrorCode::Unsupported);
         // Valid inputs normalize to rooted canonical paths.
         assert_eq!(
-            validate_move_target("//a//b/", "x", "/c", "y", None, false).expect("valid"),
+            validate_move_target("//a//b/", "x", "/c", "y", false).expect("valid"),
             ("/a/b".to_string(), "/c".to_string())
         );
     }

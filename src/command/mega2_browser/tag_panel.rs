@@ -2,7 +2,7 @@
 //!
 //! The panel is a modal view over the same `browser` command: `t` opens it
 //! (fetching page 1 only), `n`/`p` request the explicit next/previous page,
-//! `+` creates a tag (name, then an optional message; an empty message is a
+//! `a` creates a tag (name, then an optional message; an empty message is a
 //! lightweight tag), `d` deletes after an extra confirmation, and `q`/`Esc`
 //! close the panel without leaving the browser. All server strings (tag name,
 //! tagger, message) are sanitized before rendering.
@@ -18,7 +18,7 @@ pub const MAX_TAG_MESSAGE_BYTES: usize = 1024;
 /// The panel's own modal editor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TagEditor {
-    /// `+`: collect the tag name first.
+    /// `a`: collect the tag name first.
     CreateName(String),
     /// After a valid name: collect an optional message (empty = lightweight).
     CreateMessage { name: String, message: String },
@@ -114,6 +114,7 @@ impl TagPanel {
             TagEditor::CreateName(mut input) => match key {
                 Key::Enter => match validate_tag_name(&input) {
                     Ok(()) => {
+                        self.status = None;
                         self.editor = Some(TagEditor::CreateMessage {
                             name: input,
                             message: String::new(),
@@ -277,30 +278,13 @@ impl TagPanel {
             }
         }
         out.push_str("──────────────────────────────────────────────\r\n");
-        match self.editor.as_ref() {
-            Some(TagEditor::CreateName(input)) => {
-                out.push_str(&format!("new tag name: {}\r\n", sanitize(input)));
-                out.push_str("Enter continue · Esc cancel\r\n");
-            }
-            Some(TagEditor::CreateMessage { name, message }) => {
-                out.push_str(&format!(
-                    "tag '{}' message (empty = lightweight): {}\r\n",
-                    sanitize(name),
-                    sanitize(message)
-                ));
-                out.push_str("Enter create · Esc cancel\r\n");
-            }
-            Some(TagEditor::ConfirmDelete(name)) => {
-                out.push_str(&format!(
-                    "delete tag '{}'? Enter/y confirm · Esc cancel\r\n",
-                    sanitize(name)
-                ));
-            }
-            None => {}
-        }
-        let status = self.status.as_deref().unwrap_or(
-            "Up/Down select · n next · p prev · + create · d delete · t/Esc close panel",
-        );
+        let status = if self.editor.is_some() {
+            "Dialog open — Enter confirm | Esc cancel"
+        } else {
+            self.status.as_deref().unwrap_or(
+                "Up/Down select · n next · p prev · a create · d delete · t/Esc close panel",
+            )
+        };
         out.push_str(&sanitize(status));
         out.push_str("\r\n");
         out
@@ -335,6 +319,32 @@ mod tests {
         panel.apply_page(3, 45, vec![]);
         assert!(!panel.has_next(), "last page");
         assert!(panel.has_prev());
+    }
+
+    #[test]
+    fn corrected_tag_name_clears_validation_error_before_message_dialog() {
+        let mut panel = TagPanel::new();
+        panel.handle_key(Key::Create);
+        panel.handle_key(Key::Enter);
+        assert!(
+            panel
+                .status
+                .as_deref()
+                .unwrap()
+                .contains("must not be empty")
+        );
+        for ch in "v1.0".chars() {
+            panel.handle_key(Key::Other(ch));
+        }
+        panel.handle_key(Key::Enter);
+        assert!(matches!(
+            panel.editor,
+            Some(TagEditor::CreateMessage { .. })
+        ));
+        assert_eq!(
+            panel.status, None,
+            "the next dialog must not show the old name error"
+        );
     }
 
     #[test]

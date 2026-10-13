@@ -310,7 +310,7 @@ async fn create_flow_posts_once_then_refreshes_the_page() {
         .expect("initial page");
     assert_eq!(server.requests(), 1);
 
-    // Drive the modal flow: `+`, name, Enter, message, Enter.
+    // Drive the modal flow: `a`, name, Enter, message, Enter.
     state.handle_key(Key::Create);
     for ch in "v2.0.0".chars() {
         state.handle_key(Key::Other(ch));

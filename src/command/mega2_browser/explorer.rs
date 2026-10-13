@@ -18,6 +18,9 @@ pub enum ExplorerAction {
     Core(ActionResult),
     LoadDirectory(String),
     LoadRoot(String),
+    /// Load a folder into the modal destination picker without replacing a
+    /// branch in the visible source tree.
+    LoadMoveDestination(String),
 }
 
 pub struct Explorer {
@@ -29,6 +32,13 @@ pub struct Explorer {
 }
 
 impl Explorer {
+    fn from_browser_action(action: ActionResult) -> ExplorerAction {
+        match action {
+            ActionResult::LoadMoveDestination { path } => ExplorerAction::LoadMoveDestination(path),
+            action => ExplorerAction::Core(action),
+        }
+    }
+
     pub fn new(state: &BrowserState) -> CliResult<Self> {
         let mut view = Self {
             tree: DirectoryTree::new(state.path.clone(), &state.entries)?,
@@ -103,6 +113,12 @@ impl Explorer {
         key: Key,
         page_rows: usize,
     ) -> ExplorerAction {
+        // The move picker owns its source snapshot.  Route it before the
+        // ordinary q/Esc/tree handlers so destination navigation can never
+        // open, collapse, or replace a branch in the source tree.
+        if state.move_picker.is_some() {
+            return Self::from_browser_action(state.handle_key(key));
+        }
         if state.editor.is_some() || state.panel.is_some() {
             return ExplorerAction::Core(state.handle_key(key));
         }
@@ -184,7 +200,15 @@ impl Explorer {
                 }
                 _ => {
                     self.tree.sync_selection(state);
-                    return ExplorerAction::Core(state.handle_key(key));
+                    if key == Key::Create
+                        && let Some(row) = self.tree.selected()
+                        && row.kind == ContentType::Directory
+                    {
+                        // Creation goes inside the selected directory; other
+                        // mutations operate on that row in its parent branch.
+                        state.path = row.path.clone();
+                    }
+                    return Self::from_browser_action(state.handle_key(key));
                 }
             }
         }
@@ -197,7 +221,7 @@ impl Explorer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::internal::protocol::mega2_tree::Mega2TreeSession;
+    use crate::internal::protocol::mega2_tree::{Listing, ListingEntry, Mega2TreeSession};
 
     fn setup() -> (BrowserState, Explorer) {
         let mut state = BrowserState::new(
@@ -260,5 +284,151 @@ mod tests {
         assert!(
             matches!(view.handle_key(&mut state, Key::Enter, 10), ExplorerAction::Core(ActionResult::DeleteDirectory { parent, name }) if parent == "/dir" && name == "child")
         );
+    }
+
+    #[test]
+    fn create_targets_selected_directory_collapsed_expanded_or_nested() {
+        for (expanded, nested) in [(false, false), (true, false), (true, true)] {
+            let (mut state, mut view) = setup();
+            if expanded {
+                view.tree
+                    .replace_children("/dir", &[("child".into(), ContentType::Directory)])
+                    .unwrap();
+            }
+            if nested {
+                view.tree.selection = 1;
+            }
+            let expected_parent = if nested { "/dir/child" } else { "/dir" };
+            view.handle_key(&mut state, Key::Create, 10);
+            assert_eq!(state.path, expected_parent, "dialog parent");
+            for ch in "rust".chars() {
+                view.handle_key(&mut state, Key::Other(ch), 10);
+            }
+            assert!(
+                matches!(view.handle_key(&mut state, Key::Enter, 10), ExplorerAction::Core(ActionResult::CreateDirectory { parent, name }) if parent == expected_parent && name == "rust")
+            );
+        }
+    }
+
+    #[test]
+    fn create_in_empty_tree_uses_visible_root_and_file_selection_is_inert() {
+        let mut state = BrowserState::new(
+            Mega2TreeSession::new("http://localhost:9000").unwrap(),
+            "/artifact",
+            None,
+        )
+        .unwrap();
+        let mut view = Explorer::new(&state).unwrap();
+        view.handle_key(&mut state, Key::Create, 10);
+        view.handle_key(&mut state, Key::Other('x'), 10);
+        assert!(
+            matches!(view.handle_key(&mut state, Key::Enter, 10), ExplorerAction::Core(ActionResult::CreateDirectory { parent, name }) if parent == "/artifact" && name == "x")
+        );
+
+        let (mut state, mut view) = setup();
+        view.handle_key(&mut state, Key::Down, 10);
+        view.handle_key(&mut state, Key::Create, 10);
+        assert!(state.editor.is_none());
+        assert!(
+            state
+                .status
+                .as_deref()
+                .unwrap()
+                .contains("select a directory")
+        );
+    }
+
+    #[test]
+    fn cancelling_create_restores_selected_directory_as_mutation_operand() {
+        let (mut state, mut view) = setup();
+        for key in [Key::Delete, Key::Rename] {
+            view.handle_key(&mut state, Key::Create, 10);
+            view.handle_key(&mut state, Key::Cancel, 10);
+            assert_eq!(view.tree.selected().unwrap().path, "/dir");
+            view.handle_key(&mut state, key, 10);
+            assert_eq!(state.path, "/", "operand parent after {key:?}");
+            let action = view.handle_key(&mut state, Key::Enter, 10);
+            match action {
+                ExplorerAction::Core(ActionResult::DeleteDirectory { parent, name }) => {
+                    assert_eq!((parent.as_str(), name.as_str()), ("/", "dir"));
+                }
+                ExplorerAction::Core(ActionResult::MoveEntry {
+                    from_parent,
+                    from_name,
+                    to_parent,
+                    to_name,
+                    kind: ContentType::Directory,
+                }) => {
+                    assert_eq!((from_parent.as_str(), from_name.as_str()), ("/", "dir"));
+                    assert_eq!((to_parent.as_str(), to_name.as_str()), ("/", "dir"));
+                }
+                _ => panic!("expected directory mutation"),
+            }
+        }
+    }
+
+    #[test]
+    fn move_picker_freezes_the_nested_source_and_right_only_browses_destination() {
+        let mut state = BrowserState::new(
+            Mega2TreeSession::new("http://localhost:9000").unwrap(),
+            "/artifact",
+            None,
+        )
+        .unwrap();
+        state.entries = vec![
+            ("readme.txt".into(), ContentType::File),
+            ("destination".into(), ContentType::Directory),
+        ];
+        let mut view = Explorer::new(&state).unwrap();
+
+        assert!(matches!(
+            view.handle_key(&mut state, Key::Move, 10),
+            ExplorerAction::LoadMoveDestination(ref path) if path == "/artifact"
+        ));
+        let picker = state.move_picker.as_ref().expect("picker");
+        assert_eq!(picker.source_path(), "/artifact/readme.txt");
+        assert_eq!(picker.kind, ContentType::File);
+
+        state.move_picker.as_mut().expect("picker").apply_listing(
+            "/artifact".into(),
+            Listing {
+                entries: vec![ListingEntry {
+                    name: "destination".into(),
+                    content_type: ContentType::Directory,
+                }],
+            },
+        );
+        assert!(matches!(
+            view.handle_key(&mut state, Key::Down, 10),
+            ExplorerAction::Core(ActionResult::Continue)
+        ));
+        assert!(matches!(
+            view.handle_key(&mut state, Key::Right, 10),
+            ExplorerAction::LoadMoveDestination(ref path) if path == "/artifact/destination"
+        ));
+        assert_eq!(
+            view.tree.selected().map(|row| row.path.as_str()),
+            Some("/artifact/readme.txt")
+        );
+        assert_eq!(state.path, "/artifact");
+
+        state.move_picker.as_mut().expect("picker").apply_listing(
+            "/artifact/destination".into(),
+            Listing {
+                entries: Vec::new(),
+            },
+        );
+        assert!(matches!(
+            view.handle_key(&mut state, Key::Enter, 10),
+            ExplorerAction::Core(ActionResult::Continue)
+        ));
+        assert!(matches!(
+            view.handle_key(&mut state, Key::Enter, 10),
+            ExplorerAction::Core(ActionResult::MoveEntry { ref from_parent, ref from_name, ref to_parent, ref to_name, kind: ContentType::File })
+                if from_parent == "/artifact"
+                    && from_name == "readme.txt"
+                    && to_parent == "/artifact/destination"
+                    && to_name == "readme.txt"
+        ));
     }
 }

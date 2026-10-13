@@ -261,6 +261,45 @@ async fn move_and_rename_success_use_the_move_route() {
 }
 
 #[tokio::test]
+async fn file_move_posts_explicit_file_type() {
+    let server = MockMutateServer::start(None);
+    let client = client(&server, false);
+
+    let receipt = client
+        .move_entry(
+            "/src",
+            "readme.txt",
+            "/dst",
+            "moved.txt",
+            Some(ContentType::File),
+        )
+        .await
+        .expect("file move succeeds");
+
+    assert_eq!(receipt.commit_id, "commit-1");
+    assert_eq!(server.requests(), 1, "exactly one file move request");
+    let captured = server.last();
+    assert!(
+        captured
+            .line
+            .starts_with(&format!("POST {MOVE_ENTRY_ROUTE} ")),
+        "{}",
+        captured.line
+    );
+    assert_eq!(
+        captured.body,
+        serde_json::json!({
+            "from_path": "/src",
+            "from_name": "readme.txt",
+            "to_path": "/dst",
+            "to_name": "moved.txt",
+            "is_directory": false,
+            "skip_build": true,
+        })
+    );
+}
+
+#[tokio::test]
 async fn unauthenticated_mutation_maps_to_auth_missing_credentials() {
     let server = MockMutateServer::start(Some(|_| 401));
     let client = client(&server, false);
@@ -321,9 +360,49 @@ async fn missing_source_and_duplicate_destination_map_to_stable_errors() {
             "status {status}: {:?}",
             err.stable_code()
         );
+        match status {
+            400 => assert!(
+                err.render().contains("server path policy"),
+                "400 must not misdiagnose every refusal as a duplicate: {err}"
+            ),
+            404 => assert!(
+                err.render().contains("does not expose delete-entry"),
+                "404 must cover a missing delete route as well as missing operands: {err}"
+            ),
+            _ => {}
+        }
         assert!(!err.render().contains("tok-1"), "token leaked");
         assert_eq!(server.requests(), 1);
     }
+}
+
+#[tokio::test]
+async fn missing_move_route_is_explained_without_exposing_credentials() {
+    let server = MockMutateServer::start(Some(|_| 404));
+    let client = client(&server, true);
+
+    let err = client
+        .move_entry(
+            "/src",
+            "missing",
+            "/dst",
+            "missing",
+            Some(ContentType::File),
+        )
+        .await
+        .expect_err("missing move route is refused");
+
+    assert_eq!(err.stable_code(), StableErrorCode::NetworkProtocol);
+    assert!(
+        err.render().contains("source/destination folder"),
+        "404 still explains the likely operand error: {err}"
+    );
+    assert!(
+        err.render().contains("does not expose move-entry"),
+        "404 also covers a deployment without the move route: {err}"
+    );
+    assert!(!err.render().contains("tok-1"), "token leaked");
+    assert_eq!(server.requests(), 1);
 }
 
 #[tokio::test]

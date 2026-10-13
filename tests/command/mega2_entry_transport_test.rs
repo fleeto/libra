@@ -218,7 +218,7 @@ async fn anonymous_configuration_sends_no_authorization_header() {
 #[tokio::test]
 async fn remote_rejections_map_to_stable_secret_free_errors() {
     let cases: &[(u16, StableErrorCode, &str)] = &[
-        (400, StableErrorCode::CliInvalidTarget, "already exist"),
+        (400, StableErrorCode::CliInvalidTarget, "server path policy"),
         (401, StableErrorCode::AuthMissingCredentials, "write token"),
         (403, StableErrorCode::AuthPermissionDenied, "not authorized"),
         (409, StableErrorCode::ConflictOperationBlocked, "409"),

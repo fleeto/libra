@@ -141,6 +141,9 @@ Libra 使用 Git 的语言。磁盘格式（objects、index、pack、pack-index�
 预览按代码/配置文件类型进行语法高亮，`--no-color` 可关闭颜色。
 文本预览上限为 256 KiB，无需 clone 或本地仓库；脚本使用的 `--list`/`--json`
 仍只返回一层目录。按键和限制见[浏览器指南](docs/commands/zh-CN/mega2.md)。
+按 `a` 新建目录、`m` 移动文件或目录、`e` 重命名目录，或先按 `t` 再按 `a` 新建 tag；均无需 Shift。
+名称和 tag 说明通过居中弹出框输入。移动使用独立的目标目录选择器：右方向键浏览、
+第一个 Enter 选择目标、第二个 Enter 确认；Esc 返回或取消。
 
 ## 支持的外部 Agent
 

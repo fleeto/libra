@@ -185,6 +185,21 @@ async fn run_bounded(
     .expect("review run reaches a terminal state")
 }
 
+/// Direct engine runs use the in-process store, so their object-index writes
+/// outlive [`run_bounded`]. Keep the test process live under unrelated queue
+/// trouble while making a subsequent child process or destructive assertion
+/// observe the producer's completed state.
+async fn drain_review_object_index_updates(context: &str) {
+    const DRAIN_BUDGET: Duration = Duration::from_secs(60);
+    assert!(
+        libra::utils::client_storage::ClientStorage::wait_for_background_tasks_until(
+            Instant::now() + DRAIN_BUDGET,
+        )
+        .await,
+        "timed out waiting for review object-index updates before {context}"
+    );
+}
+
 /// Assert no `libra-task-worktree-*` workspace is left under the repo's
 /// task-worktree base after a run — the workspace lease was released.
 fn assert_no_leaked_workspace(repo: &Path) {
@@ -1447,6 +1462,7 @@ async fn review_checkpoint_scoped() {
     });
     let outcome = run_bounded(&store, request, ReviewCancelHandle::new(), 60).await;
     assert_eq!(outcome.terminal_state, ReviewTerminalState::Success);
+    drain_review_object_index_updates("the separate agent doctor process").await;
     let findings =
         std::fs::read_to_string(outcome.run_dir.join("findings.md")).expect("scoped findings");
     assert!(findings.contains("metadata.json"), "{findings}");
@@ -1540,6 +1556,7 @@ async fn fix_rg_scoped_02_review_revalidation() {
     });
     let refused = run_bounded(&store, hostile, ReviewCancelHandle::new(), 60).await;
     assert_eq!(refused.terminal_state, ReviewTerminalState::Error);
+    drain_review_object_index_updates("the follow-up scoped review").await;
     assert_eq!(std::fs::read(&outside).unwrap(), b"UNTOUCHED");
 
     let mut request = ReviewRunRequest::new(
@@ -1569,6 +1586,7 @@ async fn fix_rg_scoped_02_review_revalidation() {
     });
     let outcome = run_bounded(&store, request, ReviewCancelHandle::new(), 60).await;
     assert_eq!(outcome.terminal_state, ReviewTerminalState::Success);
+    drain_review_object_index_updates("removing the checkpoint catalog").await;
     assert_eq!(
         std::fs::read(
             outcome
@@ -1609,6 +1627,7 @@ async fn fix_rg_scoped_02_review_revalidation() {
     });
     let refused_catalog = run_bounded(&store, missing_catalog, ReviewCancelHandle::new(), 60).await;
     assert_eq!(refused_catalog.terminal_state, ReviewTerminalState::Error);
+    drain_review_object_index_updates("tearing down the missing-catalog fixture").await;
     let infra = refused_catalog
         .infra_error
         .expect("catalog transport stays an infrastructure error");
@@ -2087,6 +2106,7 @@ async fn fix_rg_scoped_03_infrastructure_error_clean() {
         request.reviewer_timeout = Duration::ZERO;
         let outcome = run_bounded(&store, request, ReviewCancelHandle::new(), 60).await;
         assert_eq!(outcome.terminal_state, ReviewTerminalState::Error);
+        drain_review_object_index_updates("the catalog snapshot and review clean process").await;
         assert!(outcome.infra_error.as_deref().unwrap().contains("deadline"));
         assert!(!outcome.run_dir.join("checkpoint-input").exists());
         assert!(

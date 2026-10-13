@@ -210,7 +210,7 @@ impl Mega2EntryClient {
             }
             StatusCode::BAD_REQUEST => {
                 return Err(CliError::fatal(
-                    "mega2 server rejected the create request (HTTP 400) — the name may already exist",
+                    "mega2 server rejected the create request (HTTP 400) — check the parent path, server path policy and name",
                 )
                 .with_stable_code(StableErrorCode::CliInvalidTarget));
             }

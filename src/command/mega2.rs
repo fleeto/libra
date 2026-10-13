@@ -70,9 +70,16 @@ Interactive mode has a directory tree on the left and file content on the right.
 Up/Down or k/j select; Enter toggles a directory or focuses file content.
 Right expands, Left/Backspace/h collapses or selects the parent.
 Tab switches panes; arrows and PageUp/PageDown scroll file content.
-+ creates a directory beside the selection, d deletes the
-selected directory (after a confirmation line), m moves it, R renames it
-(same parent), r reloads the selected directory/file, q quits.
+a creates a directory inside the selected directory, d deletes the
+selected directory (after a confirmation dialog), m moves the selected file
+or directory, e renames the selected directory (same parent), r reloads the
+selected directory/file, q quits.
+t opens tags; a creates a tag there. No Shift key is required.
+Legacy +/R aliases still work; shortcut letters are literal text in editors.
+Names and tag messages are entered in centered popup dialogs. Moving uses a
+separate destination-folder picker: Right browses, the first Enter chooses a
+destination, and the second Enter confirms. Esc returns or cancels; validation
+errors stay in the dialog.
 Text previews use anonymous GET /api/v1/blob, with a 256 KiB text limit.
 Syntax colors follow the file type; --no-color disables highlighting.
 

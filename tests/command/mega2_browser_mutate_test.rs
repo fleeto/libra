@@ -1,7 +1,7 @@
-//! plan-20260912 MB-08: TUI `d`/`m`/`R` mutation keys on `mega2 browser`.
+//! plan-20260912 MB-08: TUI `d`/`m`/`e` mutation keys on `mega2 browser`.
 //!
-//! Pins the confirm/cancel rules, the file/root inertness, one POST + one
-//! reload per confirmed mutation, hostile destination refusal before any
+//! Pins the confirm/cancel rules, file move typing, one POST + one reload per
+//! confirmed mutation, hostile destination refusal before any
 //! request, and the unchanged CLI surface (no `rmdir`/`mv` subcommands).
 
 use std::{
@@ -24,7 +24,7 @@ use libra::{
     internal::protocol::{
         mega2_auth::Mega2Token,
         mega2_mutate::Mega2MutateClient,
-        mega2_tree::{ContentType, Mega2TreeSession},
+        mega2_tree::{ContentType, Listing, ListingEntry, Mega2TreeSession},
     },
 };
 
@@ -222,18 +222,107 @@ fn delete_requires_an_extra_confirmation_and_esc_cancels() {
 }
 
 #[test]
-fn files_are_inert_for_all_mutation_keys() {
+fn file_move_modal_keeps_the_source_selected_while_choosing_a_destination() {
     let tree = MockServer::start(false);
-    let mut state = state_with(&tree);
+    let session = Mega2TreeSession::new(&tree.url()).expect("session");
+    let mut state = BrowserState::new(session, "/artifact", None).expect("state");
+    state.entries = vec![
+        ("readme.txt".into(), ContentType::File),
+        ("destination".into(), ContentType::Directory),
+    ];
+    assert_eq!(
+        state.handle_key(Key::Move),
+        ActionResult::LoadMoveDestination {
+            path: "/artifact".into()
+        }
+    );
+    let picker = state.move_picker.as_mut().expect("file move picker");
+    picker.apply_listing(
+        "/artifact".into(),
+        Listing {
+            entries: vec![ListingEntry {
+                name: "destination".into(),
+                content_type: ContentType::Directory,
+            }],
+        },
+    );
+    assert_eq!(state.handle_key(Key::Down), ActionResult::Continue);
+    assert_eq!(
+        state.selection, 0,
+        "choosing a target must not replace the source"
+    );
+    assert_eq!(state.handle_key(Key::Enter), ActionResult::Continue);
+    assert!(
+        state
+            .move_picker
+            .as_ref()
+            .and_then(|picker| picker.confirmed_parent.as_deref())
+            .is_some(),
+        "the first Enter only chooses the destination"
+    );
+    assert!(matches!(
+        state.handle_key(Key::Enter),
+        ActionResult::MoveEntry { ref from_parent, ref from_name, ref to_parent, ref to_name, kind: ContentType::File }
+            if from_parent == "/artifact"
+                && from_name == "readme.txt"
+                && to_parent == "/artifact/destination"
+                && to_name == "readme.txt"
+    ));
+    assert!(state.move_picker.is_none());
+    assert_eq!(tree.requests(), 0);
+}
+
+#[test]
+fn directory_move_modal_does_not_submit_on_the_first_enter() {
+    let tree = MockServer::start(false);
+    let session = Mega2TreeSession::new(&tree.url()).expect("session");
+    let mut state = BrowserState::new(session, "/artifact", None).expect("state");
+    state.entries = vec![("source".into(), ContentType::Directory)];
+    assert!(matches!(
+        state.handle_key(Key::Move),
+        ActionResult::LoadMoveDestination { ref path } if path == "/artifact"
+    ));
+    state.move_picker.as_mut().expect("picker").apply_listing(
+        "/artifact".into(),
+        Listing {
+            entries: vec![ListingEntry {
+                name: "destination".into(),
+                content_type: ContentType::Directory,
+            }],
+        },
+    );
+    state.handle_key(Key::Down);
+    assert_eq!(state.handle_key(Key::Enter), ActionResult::Continue);
+    assert!(
+        state
+            .move_picker
+            .as_ref()
+            .and_then(|picker| picker.confirmed_parent.as_deref())
+            .is_some(),
+        "destination confirmation remains active"
+    );
+    assert_eq!(tree.requests(), 0);
+}
+
+#[test]
+fn files_are_inert_for_delete_and_rename_but_can_be_moved() {
+    let tree = MockServer::start(false);
+    let session = Mega2TreeSession::new(&tree.url()).expect("session");
+    let mut state = BrowserState::new(session, "/artifact", None).expect("state");
     state.entries = vec![("readme.txt".to_string(), ContentType::File)];
     state.selection = 0;
 
-    for key in [Key::Delete, Key::Move, Key::Rename] {
+    for key in [Key::Delete, Key::Rename] {
         state.status = None;
         assert_eq!(state.handle_key(key), ActionResult::Continue);
         assert!(state.editor.is_none(), "files must not open an editor");
         assert!(state.status.is_some(), "status explains the refusal");
     }
+    assert!(matches!(
+        state.handle_key(Key::Move),
+        ActionResult::LoadMoveDestination { ref path } if path == "/artifact"
+    ));
+    assert!(state.move_picker.is_some(), "files open the move picker");
     assert_eq!(tree.requests(), 0);
 }
 
@@ -268,23 +357,25 @@ fn rename_is_prefilled_same_parent_move_and_hostile_names_are_refused() {
         input: "sub2".to_string(),
     });
     let action = state.handle_key(Key::Enter);
-    let ActionResult::MoveDirectory {
+    let ActionResult::MoveEntry {
         from_parent,
         from_name,
         to_parent,
         to_name,
+        kind,
     } = action
     else {
-        panic!("expected MoveDirectory, got {action:?}");
+        panic!("expected MoveEntry, got {action:?}");
     };
     assert_eq!(from_parent, to_parent, "rename keeps the parent");
     assert_eq!(from_name, "sub");
     assert_eq!(to_name, "sub2");
+    assert_eq!(kind, ContentType::Directory);
     assert!(state.editor.is_none());
 }
 
 #[test]
-fn move_editor_takes_a_validated_destination_parent() {
+fn root_level_move_is_refused_before_any_destination_request() {
     let tree = MockServer::start(false);
     let mut state = state_with(&tree);
     state.entries = vec![("sub".to_string(), ContentType::Directory)];
@@ -292,37 +383,14 @@ fn move_editor_takes_a_validated_destination_parent() {
 
     assert_eq!(state.handle_key(Key::Move), ActionResult::Continue);
     assert!(
-        matches!(state.editor, Some(Editor::MoveDir { ref name, ref input }) if name == "sub" && input == "/"),
-        "move prefills the current parent: {:?}",
-        state.editor
+        state
+            .status
+            .as_deref()
+            .is_some_and(|status| status.contains("root-level")),
+        "root-level moves are refused with the Mega2 path-policy reason"
     );
-
-    // Traversal destinations are refused in-place.
-    state.editor = Some(Editor::MoveDir {
-        name: "sub".to_string(),
-        input: "/..".to_string(),
-    });
-    assert_eq!(state.handle_key(Key::Enter), ActionResult::Continue);
-    assert!(state.editor.is_some(), "traversal destination rejected");
-
-    state.editor = Some(Editor::MoveDir {
-        name: "sub".to_string(),
-        input: "/dst".to_string(),
-    });
-    let action = state.handle_key(Key::Enter);
-    let ActionResult::MoveDirectory {
-        from_parent,
-        from_name,
-        to_parent,
-        to_name,
-    } = action
-    else {
-        panic!("expected MoveDirectory, got {action:?}");
-    };
-    assert_eq!(from_parent, "/");
-    assert_eq!(to_parent, "/dst");
-    assert_eq!(from_name, to_name, "move keeps the name");
-    assert_eq!(tree.requests(), 0, "planning is offline");
+    assert!(state.move_picker.is_none());
+    assert_eq!(tree.requests(), 0, "refusal is offline");
 }
 
 #[tokio::test]
@@ -346,9 +414,17 @@ async fn confirmed_delete_and_rename_post_once_then_reload_once() {
 
     let mut state2 = state_with(&tree);
     state2.fetch_current().await.expect("listing");
-    perform_move(&mut state2, &client, "/", "sub", "/", "sub2")
-        .await
-        .expect("rename succeeds");
+    perform_move(
+        &mut state2,
+        &client,
+        "/",
+        "sub",
+        "/",
+        "sub2",
+        ContentType::Directory,
+    )
+    .await
+    .expect("rename succeeds");
     assert_eq!(entry.requests(), 2, "one rename POST");
     assert_eq!(
         entry.bodies()[1],

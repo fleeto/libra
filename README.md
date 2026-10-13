@@ -164,6 +164,11 @@ panes. Previews highlight recognized code/configuration types; `--no-color`
 disables syntax colors. Text previews are limited to 256 KiB. No clone or local repository is
 required; `--list`/`--json` still return one directory level for scripts.
 See the [browser guide](docs/commands/mega2.md) for keys and limits.
+Use `a` to create a directory, `m` to move a file or directory, `e` to rename
+a directory, or `t` then `a` to create a tag; these shortcuts do not require
+Shift. Names and tag messages are entered in centered popup dialogs. Moving
+uses a separate destination-folder picker: Right browses, the first Enter
+chooses a destination, and the second Enter confirms; Esc goes back or cancels.
 
 ## Supported External Agents
 

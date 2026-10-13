@@ -1,4 +1,4 @@
-//! plan-20260912 MB-05: TUI `+` create-directory flow on `mega2 browser`.
+//! plan-20260912 MB-05: TUI `a` create-directory flow on `mega2 browser`.
 //!
 //! Pins the editor contract (sanitized input, Esc cancel with zero network,
 //! hostile names refused before POST), the success path (exactly one POST +
@@ -53,8 +53,36 @@ impl MockServer {
             while !stop_clone.load(Ordering::Relaxed) {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
+                        // Accepted sockets may inherit the listener's nonblocking
+                        // mode. Drain the complete request before closing, so a
+                        // fragmented body cannot cause a TCP reset of the reply.
+                        stream.set_nonblocking(false).expect("blocking connection");
+                        stream
+                            .set_read_timeout(Some(Duration::from_secs(3)))
+                            .expect("request deadline");
                         let mut buf = [0u8; 8192];
-                        let _ = stream.read(&mut buf);
+                        let mut request = Vec::new();
+                        let request_len = loop {
+                            let size = stream.read(&mut buf).expect("request headers");
+                            assert!(size > 0, "incomplete headers");
+                            request.extend_from_slice(&buf[..size]);
+                            assert!(request.len() <= 65536, "oversized request");
+                            if let Some(end) = request.windows(4).position(|b| b == b"\r\n\r\n") {
+                                let headers = String::from_utf8_lossy(&request[..end]);
+                                let length = headers
+                                    .lines()
+                                    .filter_map(|line| line.split_once(':'))
+                                    .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                                    .map_or(0, |(_, value)| value.trim().parse::<usize>().unwrap());
+                                assert!(length <= 65536, "oversized body");
+                                break end + 4 + length;
+                            }
+                        };
+                        while request.len() < request_len {
+                            let size = stream.read(&mut buf).expect("request body");
+                            assert!(size > 0, "incomplete body");
+                            request.extend_from_slice(&buf[..size]);
+                        }
                         requests_clone.fetch_add(1, Ordering::SeqCst);
                         let _ = stream.write_all(response.as_bytes());
                         let _ = stream.flush();
@@ -295,6 +323,19 @@ fn duplicate_and_forbidden_statuses_are_secret_free() {
     }
 }
 
+#[tokio::test]
+async fn bad_create_request_does_not_misdiagnose_a_name_collision() {
+    let server = MockServer::start(400, "SECRET-BODY".to_string());
+    let client = Mega2EntryClient::new(&server.url(), None).expect("client");
+    let error = client.create_directory("/", "rust").await.expect_err("400");
+    assert_eq!(
+        error.message(),
+        "mega2 server rejected the create request (HTTP 400) — check the parent path, server path policy and name"
+    );
+    assert!(!error.render().contains("SECRET-BODY"));
+    assert_eq!(server.requests(), 1);
+}
+
 fn libra(dir: &Path, args: &[&str]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_libra"))
         .args(args)
@@ -359,6 +400,14 @@ fn help_has_token_flags_and_no_mkdir_subcommand() {
     assert!(browser_help.contains("--token-file"), "{browser_help}");
     assert!(browser_help.contains("--token"), "{browser_help}");
     assert!(browser_help.contains("EXAMPLES:"), "{browser_help}");
+    assert!(
+        browser_help.contains("a creates a directory inside the selected directory"),
+        "{browser_help}"
+    );
+    assert!(
+        !browser_help.contains("beside the selection"),
+        "{browser_help}"
+    );
     assert!(!browser_help.contains("mkdir"), "{browser_help}");
 
     let parent = libra(workdir.path(), &["mega2", "--help"]);

@@ -6,9 +6,11 @@
 //! (plan-20261001 MN-02).
 
 mod config_highlight;
+mod dialog;
 pub mod explorer;
 pub mod highlight;
 pub mod layout;
+pub mod move_picker;
 pub mod noninteractive;
 pub mod tag_panel;
 pub mod terminal;
@@ -28,6 +30,7 @@ use libc::{STDIN_FILENO, STDOUT_FILENO};
 
 use self::{
     explorer::{Explorer, ExplorerAction},
+    move_picker::{MoveChoice, MovePicker},
     terminal::TerminalGuard,
 };
 use crate::{
@@ -37,10 +40,7 @@ use crate::{
         mega2_entry::{Mega2EntryClient, validate_entry_name},
         mega2_mutate::Mega2MutateClient,
         mega2_tag::{CreateTagOptions, Mega2TagClient},
-        mega2_tree::{
-            ContentType, Listing, MAX_CACHE_ENTRIES, MAX_NAME_BYTES, Mega2TreeSession,
-            normalize_path,
-        },
+        mega2_tree::{ContentType, Listing, MAX_CACHE_ENTRIES, MAX_NAME_BYTES, Mega2TreeSession},
     },
     utils::error::{CliError, CliResult, StableErrorCode},
 };
@@ -59,13 +59,13 @@ pub enum Key {
     Backspace,
     Home,
     Reload,
-    /// `+`: start the create-directory editor.
+    /// `a` (legacy `+`): start the create-directory editor.
     Create,
     /// `d`: ask to delete the selected directory.
     Delete,
     /// `m`: start the move editor for the selected directory.
     Move,
-    /// `R`: start the same-parent rename editor (distinct from `r` reload).
+    /// `e` (legacy `R`): start the same-parent rename editor.
     Rename,
     /// `t`: toggle the tag panel.
     Tags,
@@ -90,12 +90,18 @@ pub enum ActionResult {
         parent: String,
         name: String,
     },
+    /// Fetch one directory listing for the move destination picker only.
+    /// This never changes the selected move source or the visible tree.
+    LoadMoveDestination {
+        path: String,
+    },
     /// Run one confirmed remote move/rename, then reload once.
-    MoveDirectory {
+    MoveEntry {
         from_parent: String,
         from_name: String,
         to_parent: String,
         to_name: String,
+        kind: ContentType,
     },
     /// One explicit tag page fetch (panel open or page change; never prefetched).
     FetchTags {
@@ -119,13 +125,11 @@ pub enum ActionResult {
 /// planned. `Esc` always closes the editor without touching the network.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Editor {
-    /// `+`: create a directory under the current path.
+    /// `a`: create a directory under the current path.
     CreateDir(String),
     /// `d`: confirmation line for deleting the selected directory.
     ConfirmDelete(String),
-    /// `m`: move the selected directory under an edited destination parent.
-    MoveDir { name: String, input: String },
-    /// `R`: rename the selected directory (same parent, edited name).
+    /// `e`: rename the selected directory (same parent, edited name).
     RenameDir { name: String, input: String },
 }
 
@@ -143,6 +147,9 @@ pub struct BrowserState {
     pub editor: Option<Editor>,
     /// The tag panel when it is open (directory keys become inert).
     pub panel: Option<TagPanel>,
+    /// The move destination picker.  It owns an immutable source entry while
+    /// the user navigates possible destination folders.
+    pub move_picker: Option<MovePicker>,
 }
 
 impl BrowserState {
@@ -159,6 +166,7 @@ impl BrowserState {
             running: true,
             editor: None,
             panel: None,
+            move_picker: None,
         })
     }
 
@@ -203,6 +211,23 @@ impl BrowserState {
             Some((name, ContentType::Directory)) => Some(name.clone()),
             _ => None,
         }
+    }
+
+    /// Selected entry including its server-provided type.
+    fn selected_entry(&self) -> Option<(String, ContentType)> {
+        self.entries.get(self.selection).cloned()
+    }
+
+    fn editing_text(&self) -> bool {
+        matches!(
+            self.editor,
+            Some(Editor::CreateDir(_) | Editor::RenameDir { .. })
+        ) || self.panel.as_ref().is_some_and(|panel| {
+            matches!(
+                panel.editor,
+                Some(TagEditor::CreateName(_) | TagEditor::CreateMessage { .. })
+            )
+        })
     }
 
     /// Handles one key while an editor is open. Input is sanitized on entry
@@ -258,46 +283,14 @@ impl BrowserState {
                     ActionResult::Continue
                 }
             },
-            Editor::MoveDir { name, mut input } => match key {
-                Key::Enter => match normalize_path(&input) {
-                    Ok(parent) => ActionResult::MoveDirectory {
-                        from_parent: self.path.clone(),
-                        from_name: name.clone(),
-                        to_parent: parent,
-                        to_name: name,
-                    },
-                    Err(err) => {
-                        self.status = Some(err.message().to_string());
-                        self.editor = Some(Editor::MoveDir { name, input });
-                        ActionResult::Continue
-                    }
-                },
-                Key::Backspace => {
-                    input.pop();
-                    self.editor = Some(Editor::MoveDir { name, input });
-                    ActionResult::Continue
-                }
-                Key::Cancel | Key::Quit => {
-                    self.status = Some("move cancelled".to_string());
-                    ActionResult::Continue
-                }
-                Key::Other(ch) => {
-                    push_bounded(&mut input, ch);
-                    self.editor = Some(Editor::MoveDir { name, input });
-                    ActionResult::Continue
-                }
-                _ => {
-                    self.editor = Some(Editor::MoveDir { name, input });
-                    ActionResult::Continue
-                }
-            },
             Editor::RenameDir { name, mut input } => match key {
                 Key::Enter => match validate_entry_name(&input) {
-                    Ok(()) => ActionResult::MoveDirectory {
+                    Ok(()) => ActionResult::MoveEntry {
                         from_parent: self.path.clone(),
                         from_name: name,
                         to_parent: self.path.clone(),
                         to_name: input,
+                        kind: ContentType::Directory,
                     },
                     Err(err) => {
                         self.status = Some(err.message().to_string());
@@ -339,8 +332,45 @@ impl BrowserState {
         self.status = None;
     }
 
+    /// Handles the move-picker state machine without ever changing the fixed
+    /// source entry until the user accepts the confirmation screen.
+    fn handle_move_picker_key(&mut self, key: Key) -> ActionResult {
+        let choice = self
+            .move_picker
+            .as_mut()
+            .map(|picker| picker.handle_key(key))
+            .unwrap_or(MoveChoice::Continue);
+        match choice {
+            MoveChoice::Continue => ActionResult::Continue,
+            MoveChoice::Load(path) => ActionResult::LoadMoveDestination { path },
+            MoveChoice::Cancel => {
+                self.move_picker = None;
+                self.status = Some("move cancelled".to_string());
+                ActionResult::Continue
+            }
+            MoveChoice::Submit(to_parent) => {
+                let Some(picker) = self.move_picker.take() else {
+                    return ActionResult::Continue;
+                };
+                // `perform_move` reloads the source parent after a successful
+                // write, so restore it even if the user browsed elsewhere.
+                self.path = picker.from_parent.clone();
+                ActionResult::MoveEntry {
+                    from_parent: picker.from_parent,
+                    from_name: picker.name.clone(),
+                    to_parent,
+                    to_name: picker.name,
+                    kind: picker.kind,
+                }
+            }
+        }
+    }
+
     /// Handles one key against the state; the caller performs `FetchCurrent`.
     pub fn handle_key(&mut self, key: Key) -> ActionResult {
+        if self.move_picker.is_some() {
+            return self.handle_move_picker_key(key);
+        }
         if self.editor.is_some() {
             return self.handle_editor_key(key);
         }
@@ -428,21 +458,30 @@ impl BrowserState {
                 }
                 ActionResult::Continue
             }
-            Key::Move => {
-                match self.selected_directory_name() {
-                    Some(name) => {
-                        self.editor = Some(Editor::MoveDir {
-                            name,
-                            input: self.path.clone(),
-                        });
-                        self.status = None;
-                    }
-                    None => {
-                        self.status = Some("select a directory to move".to_string());
+            Key::Move => match self.selected_entry() {
+                Some(_) if self.path == "/" => {
+                    self.status = Some(
+                            "Mega2 cannot move a root-level entry: destinations in another top-level root are not supported"
+                                .to_string(),
+                        );
+                    ActionResult::Continue
+                }
+                Some((name, kind)) => {
+                    self.move_picker = Some(MovePicker::new(self.path.clone(), name, kind));
+                    self.status = None;
+                    ActionResult::LoadMoveDestination {
+                        path: self
+                            .move_picker
+                            .as_ref()
+                            .map(|picker| picker.destination_root.clone())
+                            .unwrap_or_else(|| "/".to_string()),
                     }
                 }
-                ActionResult::Continue
-            }
+                None => {
+                    self.status = Some("select a file or directory to move".to_string());
+                    ActionResult::Continue
+                }
+            },
             Key::Rename => {
                 match self.selected_directory_name() {
                     Some(name) => {
@@ -498,8 +537,8 @@ pub fn parse_key(byte: u8, sequence: &[u8]) -> Key {
         127 | 8 => Key::Backspace,
         b'q' | b'Q' => Key::Quit,
         b'r' => Key::Reload,
-        b'R' => Key::Rename,
-        b'+' => Key::Create,
+        b'e' | b'R' => Key::Rename,
+        b'a' | b'+' => Key::Create,
         b'd' => Key::Delete,
         b'm' => Key::Move,
         b't' => Key::Tags,
@@ -582,6 +621,10 @@ pub fn tty_required(stdin_tty: bool, stdout_tty: bool) -> CliResult<()> {
 /// Reads one logical key from raw-mode stdin. A lone `Esc` (no sequence bytes
 /// within a short window) maps to [`Key::Cancel`].
 pub fn read_key(stdin: &mut io::Stdin) -> io::Result<Key> {
+    read_key_with_mode(stdin, false)
+}
+
+fn read_key_with_mode(stdin: &mut io::Stdin, text_input: bool) -> io::Result<Key> {
     #[cfg(unix)]
     {
         use std::os::fd::AsRawFd;
@@ -589,21 +632,30 @@ pub fn read_key(stdin: &mut io::Stdin) -> io::Result<Key> {
         // Do not mix `Stdin`'s buffered `Read` implementation with `poll` on
         // its raw descriptor. A buffered first read can consume all of `ESC`
         // `[` `B`, leaving `poll` to mistake an ordinary arrow key for Esc.
-        read_key_from_fd(stdin.as_raw_fd())
+        read_key_from_fd(stdin.as_raw_fd(), text_input)
     }
 
     #[cfg(not(unix))]
     {
-        read_key_from_stream(stdin)
+        read_key_from_stream(stdin, text_input)
+    }
+}
+
+fn parse_input_byte(byte: u8, text_input: bool) -> Key {
+    // Shortcut letters and their legacy aliases remain literal text in editors.
+    if text_input && !byte.is_ascii_control() {
+        Key::Other(byte as char)
+    } else {
+        parse_key(byte, &[])
     }
 }
 
 #[cfg(any(not(unix), test))]
-fn read_key_from_stream(stdin: &mut impl io::Read) -> io::Result<Key> {
+fn read_key_from_stream(stdin: &mut impl io::Read, text_input: bool) -> io::Result<Key> {
     let mut byte = [0u8; 1];
     stdin.read_exact(&mut byte)?;
     if byte[0] != 0x1b {
-        return Ok(parse_key(byte[0], &[]));
+        return Ok(parse_input_byte(byte[0], text_input));
     }
     let mut seq = [0u8; 16];
     for index in 0..seq.len() {
@@ -619,10 +671,10 @@ fn read_key_from_stream(stdin: &mut impl io::Read) -> io::Result<Key> {
 }
 
 #[cfg(unix)]
-fn read_key_from_fd(fd: libc::c_int) -> io::Result<Key> {
+fn read_key_from_fd(fd: libc::c_int, text_input: bool) -> io::Result<Key> {
     let byte = read_byte_from_fd(fd)?;
     if byte != 0x1b {
-        return Ok(parse_key(byte, &[]));
+        return Ok(parse_input_byte(byte, text_input));
     }
 
     // Raw terminals may deliver each byte separately (VMIN=1). Wait for
@@ -733,15 +785,10 @@ pub async fn perform_move(
     from_name: &str,
     to_parent: &str,
     to_name: &str,
+    kind: ContentType,
 ) -> CliResult<()> {
     client
-        .move_entry(
-            from_parent,
-            from_name,
-            to_parent,
-            to_name,
-            Some(ContentType::Directory),
-        )
+        .move_entry(from_parent, from_name, to_parent, to_name, Some(kind))
         .await?;
     state.fetch_current().await
 }
@@ -832,6 +879,7 @@ pub async fn run(
         let mut stdout = io::stdout();
         let mut last_frame = String::new();
         let mut pending_directory: Option<(String, bool)> = None;
+        let mut pending_move_destination: Option<String> = None;
         while state.running {
             let (width, height) = layout::terminal_size();
             let frame = layout::render(&view, &state, server, width, height);
@@ -875,6 +923,19 @@ pub async fn run(
                 view.refresh_preview(false);
                 continue;
             }
+            if let Some(path) = pending_move_destination.take() {
+                let result = state
+                    .session
+                    .fetch(&path, state.git_ref.as_deref())
+                    .await;
+                if let Some(picker) = state.move_picker.as_mut() {
+                    match result {
+                        Ok(listing) => picker.apply_listing(path, listing),
+                        Err(error) => picker.apply_load_error(error.message().to_string()),
+                    }
+                }
+                continue;
+            }
             if let Some(path) = view.pending_preview.take() {
                 let result = blob_client.fetch(&path, state.git_ref.as_deref()).await;
                 state.status = result
@@ -896,7 +957,7 @@ pub async fn run(
                 }
             }
 
-            let key = read_key(&mut stdin).map_err(|e| {
+            let key = read_key_with_mode(&mut stdin, state.editing_text()).map_err(|e| {
                 CliError::fatal(format!("mega2 browser: input read failed: {e}"))
                     .with_stable_code(StableErrorCode::IoReadFailed)
             })?;
@@ -913,16 +974,24 @@ pub async fn run(
                     pending_directory = Some((path, true));
                     continue;
                 }
+                ExplorerAction::LoadMoveDestination(path) => {
+                    pending_move_destination = Some(path);
+                    continue;
+                }
             };
             let mutation = matches!(
                 action,
                 ActionResult::CreateDirectory { .. }
                     | ActionResult::DeleteDirectory { .. }
-                    | ActionResult::MoveDirectory { .. }
+                    | ActionResult::MoveEntry { .. }
             );
-            let moved_branch = matches!(&action, ActionResult::MoveDirectory { from_parent, to_parent, .. } if from_parent != to_parent);
+            let moved_branch = matches!(&action, ActionResult::MoveEntry { from_parent, to_parent, .. } if from_parent != to_parent);
             match action {
                 ActionResult::Quit => break,
+                ActionResult::LoadMoveDestination { path } => {
+                    pending_move_destination = Some(path);
+                    continue;
+                }
                 ActionResult::FetchCurrent => {
                     if let Err(e) = state.fetch_current().await {
                         // Keep the last safe listing; show a secret-free status.
@@ -945,11 +1014,12 @@ pub async fn run(
                         state.status = Some(format!("error: {}", e.message()));
                     }
                 }
-                ActionResult::MoveDirectory {
+                ActionResult::MoveEntry {
                     from_parent,
                     from_name,
                     to_parent,
                     to_name,
+                    kind,
                 } => {
                     if let Err(e) = perform_move(
                         &mut state,
@@ -958,6 +1028,7 @@ pub async fn run(
                         &from_name,
                         &to_parent,
                         &to_name,
+                        kind,
                     )
                     .await
                     {
@@ -1166,10 +1237,73 @@ mod tests {
     }
 
     #[test]
+    fn mutation_shortcuts_do_not_require_shift() {
+        assert_eq!(parse_key(b'a', &[]), Key::Create);
+        assert_eq!(parse_key(b'e', &[]), Key::Rename);
+        assert_eq!(parse_key(b'r', &[]), Key::Reload);
+        assert_eq!(parse_key(b'n', &[]), Key::Other('n'));
+        assert_eq!(parse_key(b'p', &[]), Key::Other('p'));
+        // Existing bindings remain available for compatibility.
+        assert_eq!(parse_key(b'+', &[]), Key::Create);
+        assert_eq!(parse_key(b'R', &[]), Key::Rename);
+    }
+
+    #[test]
+    fn text_input_keeps_shortcuts_literal_and_control_keys_functional() {
+        let text = b"aerqQjJkKhHdmt+R np";
+        let mut input = io::Cursor::new(text);
+        for byte in text {
+            assert_eq!(
+                read_key_from_stream(&mut input, true).unwrap(),
+                Key::Other(*byte as char)
+            );
+        }
+        let mut input = io::Cursor::new(b"\r\x7f\x03\x1b[D");
+        for expected in [Key::Enter, Key::Backspace, Key::Quit, Key::Left] {
+            assert_eq!(read_key_from_stream(&mut input, true).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn only_text_editors_disable_shortcuts() {
+        let session = Mega2TreeSession::new("http://localhost:9000").unwrap();
+        let mut state = BrowserState::new(session, "/", None).unwrap();
+        for editor in [
+            Editor::CreateDir(String::new()),
+            Editor::RenameDir {
+                name: "dir".into(),
+                input: "dir".into(),
+            },
+        ] {
+            state.editor = Some(editor);
+            assert!(state.editing_text());
+        }
+        state.editor = Some(Editor::ConfirmDelete("dir".into()));
+        assert!(!state.editing_text());
+        state.editor = None;
+        assert!(!state.editing_text());
+        let mut panel = TagPanel::new();
+        for editor in [
+            TagEditor::CreateName(String::new()),
+            TagEditor::CreateMessage {
+                name: "tag".into(),
+                message: String::new(),
+            },
+        ] {
+            panel.editor = Some(editor);
+            state.panel = Some(panel.clone());
+            assert!(state.editing_text());
+        }
+        panel.editor = Some(TagEditor::ConfirmDelete("tag".into()));
+        state.panel = Some(panel);
+        assert!(!state.editing_text());
+    }
+
+    #[test]
     fn stream_input_consumes_page_keys_without_swallowing_the_next_key() {
         let mut input = io::Cursor::new(b"\x1b[6~\x1b[5~\x1b[Dq");
         for expected in [Key::PageDown, Key::PageUp, Key::Left, Key::Quit] {
-            assert_eq!(read_key_from_stream(&mut input).unwrap(), expected);
+            assert_eq!(read_key_from_stream(&mut input, false).unwrap(), expected);
         }
     }
 
@@ -1181,12 +1315,15 @@ mod tests {
         let (reader, mut writer) = UnixStream::pair().expect("input stream");
         writer.write_all(b"\x1b[B\x1b[Aq").expect("queue keys");
         assert_eq!(
-            read_key_from_fd(reader.as_raw_fd()).expect("down"),
+            read_key_from_fd(reader.as_raw_fd(), false).expect("down"),
             Key::Down
         );
-        assert_eq!(read_key_from_fd(reader.as_raw_fd()).expect("up"), Key::Up);
         assert_eq!(
-            read_key_from_fd(reader.as_raw_fd()).expect("quit"),
+            read_key_from_fd(reader.as_raw_fd(), false).expect("up"),
+            Key::Up
+        );
+        assert_eq!(
+            read_key_from_fd(reader.as_raw_fd(), false).expect("quit"),
             Key::Quit
         );
     }
@@ -1203,7 +1340,7 @@ mod tests {
                 std::thread::sleep(std::time::Duration::from_millis(10));
                 writer.write_all(&[suffix]).expect("send arrow suffix");
             });
-            let actual = read_key_from_fd(reader.as_raw_fd()).expect("fragmented arrow");
+            let actual = read_key_from_fd(reader.as_raw_fd(), false).expect("fragmented arrow");
             sender.join().expect("arrow sender");
             assert_eq!(actual, expected);
         }
@@ -1221,12 +1358,12 @@ mod tests {
             let (reader, mut writer) = UnixStream::pair().expect("input stream");
             writer.write_all(input).expect("queue partial key");
             assert_eq!(
-                read_key_from_fd(reader.as_raw_fd()).expect("bounded key"),
+                read_key_from_fd(reader.as_raw_fd(), false).expect("bounded key"),
                 expected
             );
             writer.write_all(b"q").expect("queue quit after timeout");
             assert_eq!(
-                read_key_from_fd(reader.as_raw_fd()).expect("quit"),
+                read_key_from_fd(reader.as_raw_fd(), false).expect("quit"),
                 Key::Quit
             );
         }
@@ -1240,13 +1377,13 @@ mod tests {
         let (reader, writer) = UnixStream::pair().expect("input stream");
         drop(writer);
         assert_eq!(
-            read_key_from_fd(reader.as_raw_fd())
+            read_key_from_fd(reader.as_raw_fd(), false)
                 .expect_err("closed input")
                 .kind(),
             io::ErrorKind::UnexpectedEof
         );
         assert_eq!(
-            read_key_from_fd(-1)
+            read_key_from_fd(-1, false)
                 .expect_err("invalid input")
                 .raw_os_error(),
             Some(libc::EBADF)

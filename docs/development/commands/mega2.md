@@ -27,7 +27,12 @@
 交互模式在原目录操作/标签状态机外增加 `mega2_browser::explorer::Explorer`：
 `tree.rs` 保存有界的扁平目录树，按需展开、保留兄弟节点；`layout.rs` 按终端单元格
 宽度绘制左树右预览，处理中文、控制字符、滚动与尺寸变化。选中嵌套节点时将实际
-父路径映射回 `BrowserState`，既有删除确认与写入鉴权不变；内容区焦点不接受写入快捷键。
+父路径映射回 `BrowserState`，供删除、移动与重命名使用；创建目录则以选中的目录本身
+作为父路径（展开、折叠均适用），空树使用可见根。确认创建后只刷新目标目录，保留其它分支。
+既有删除确认与写入鉴权不变；内容区焦点不接受写入快捷键。
+`dialog.rs` 将目录/tag 编辑状态映射为居中弹出框，由 `layout.rs` 绘制目标、字段、
+输入尾部光标、校验错误与 Enter/Esc 提示；删除使用同样的确认框。弹框打开时输入
+仍由原状态机处理，背景选择不变，且不改变任何请求或鉴权契约。
 `mega2_blob.rs` 对已挂载的 `GET /api/v1/blob` 发匿名请求，转发选中路径和 `refs`，
 消费 `{req_result, data: string|null}`，使用 `mega2_diag` 保留无秘密诊断。禁止代理和
 重定向，10 秒超时、1 MiB 响应上限、256 KiB 文本上限；失败显示提示且不退出。
@@ -43,7 +48,8 @@
 
 新增验证位于 `mega2_browser::{tree,explorer,layout,highlight,config_highlight}`、`mega2_blob` 单元测试和
 `command_test::command::mega2_browser_tui_test`：真实 PTY 覆盖方向键、目录展开/折叠、
-文件自动预览、Tab 焦点、翻页、缩放、无额外读取和终端恢复。
+文件自动预览、Tab 焦点、翻页、缩放、无额外读取和终端恢复；创建目录用真实按键验证
+弹框父路径、POST 的 `path/name` 和成功后对该目录的唯一一次 reload。
 
 - 入口与分发：已公开接入 `src/cli.rs::Commands::Mega2`；`command_preflight` 归类为
   `CommandPreflight::none()`（不打开仓库数据库/对象存储），`command_scope` 归类为
@@ -56,9 +62,10 @@
   - 交互状态机与终端生命周期：`src/command/mega2_browser/`（`BrowserState`、
     `Key`/`parse_key`、`render`、`sanitize`、`ensure_tty`/`tty_required`、`run`、
     `perform_create`；Unix 采用 `terminal_unix.rs` 的 termios RAII guard，Windows
-    采用 `terminal_windows.rs` 的 windows-sys console guard）。MB-05 增加 `+` 键的单行编辑器，MB-08 扩展为统一 modal `Editor`；MB-11 追加 `t` tag 面板（`tag_panel.rs`，页面/编辑器状态与 `TagPanelAction`）
-    （`+` 建目录、`d` 删除确认、`m` 移动、`R` 同层改名；输入即消毒、长度受
-    `MAX_NAME_BYTES` 限制，`Esc` 取消零网络，文件与根均惰性）。
+    采用 `terminal_windows.rs` 的 windows-sys console guard）。MB-05 增加 `a` 键的单行编辑器，MB-08 扩展为统一 modal `Editor`；MB-11 追加 `t` tag 面板（`tag_panel.rs`，页面/编辑器状态与 `TagPanelAction`）
+    （`a` 建目录、`d` 删除确认、`m` 为文件或目录打开独立的目标目录选择器、`e` 同层改名；
+    输入即消毒、长度受 `MAX_NAME_BYTES` 限制，选择器以 `Right` 进入目录、两次 `Enter`
+    依次选择/确认，`Esc` 关闭选择器而不发送 POST；删除与改名的文件仍惰性，根级移动因 Mega2 的路径策略拒绝）。
   - 有界传输与 wire 校验：`src/internal/protocol/mega2_tree.rs`（URL/path/name
     校验、`Mega2TreeClient`/`Mega2TreeSession`、`ListingCache`、上限常量）。
   - 非交互执行（plan-20261001 MN-02 起）：`src/command/mega2_browser/noninteractive.rs`
@@ -69,7 +76,9 @@
     写类操作由类别规则拒绝 `--ref`（R8），并按 ADR-MN-05（MN-11）取凭据：读类拒绝 token flag、
     不读 `LIBRA_MEGA2_TOKEN`，写类以 `resolve_token_from_process` 取至多一个 token，
     经 `Mega2EntryClient::create_directory`（建目录）、`Mega2MutateClient::delete_directory`（删目录）、
-    `Mega2MutateClient::move_entry`（移动目录，名称不变，目标父目录先经 `normalize_path` 校验）或
+    `Mega2MutateClient::move_entry`（移动目录或文件，名称不变，目标父目录先经 `normalize_path` 校验；
+    交互选择器传入已知类型，文件发送 `is_directory=false`，而仅支持目录的非交互
+    `--move-dir` 保持省略该字段、使用服务端目录默认值）或
     `Mega2MutateClient::rename_directory`（改名目录，即同父目录的 move）发一次
     POST（`known_type` 传 `None`：目标是否存在、是否为目录由服务端回答；无 token 来源时匿名），
     写操作的 payload 把本地 `target` 与服务端 `receipt` 分开。tag 类操作另由类别规则只接受 PATH `/`（R10a），
@@ -85,7 +94,7 @@
      `emit_json_data("mega2 browser", …)` 输出 `{ ok, command, data }`（`data.operation` 为
      `list`），人读为每项一行 `dir  <name>`/`file  <name>`（经 `sanitize`，`--quiet` 不输出）；
   3. 否则（人读且无操作 flag）`mega2_browser::run`：`ensure_tty` → 终端 guard → 首屏 fetch → 事件循环
-     （每个导航动作恰好一个请求）→ 退出时强制还原终端；`+` 确认后经 MB-04
+     （每个导航动作恰好一个请求）→ 退出时强制还原终端；`a` 确认后经 MB-04
      `perform_create` 发一次 POST 并重载一次。
   4. Token 解析（ADR-MB-03 / ADR-MN-05）：TUI 与非交互写操作按 `--token-file` →
      `LIBRA_MEGA2_TOKEN` → `--token` 取至多一个 token；读操作（不带写操作 flag 的
@@ -130,11 +139,11 @@ flowchart TD
   mega2_browser_cli` 覆盖默认值、`--ref`/path 查询编码、JSON 与 NDJSON schema、
   非 TTY 拒绝且零请求、URL 四类拒绝、HTTP 500 与坏 schema（无响应体泄漏）、
   仓库外零本地写入、help 面（仅 `browser`，无 mkdir）；`mega2_browser_mkdir` 覆盖
-  `+` 编辑器（文件选择拒绝、`Esc` 零网络、敌意名称不发 POST）、成功路径
+  `a` 编辑器（文件选择拒绝、`Esc` 零网络、敌意名称不发 POST）、成功路径
   （1 POST + 1 重载 GET）、401/400/403/409 保持最后安全列表且无 token/响应体泄漏、
-  读操作的 token flag 被拒绝且不回显（`token_flags_are_refused_for_reads_and_never_echoed`）；`mega2_browser_tag` 覆盖 `t` 面板（第 1 页单次匿名 GET、显式翻页、create 名称+可选 message、delete 确认、敌意名不发请求、面板关闭恢复目录视图、渲染消毒）；`mega2_browser_mutate` 覆盖 `d`/`m`/`R`
-  （确认行、Esc 取消零网络、文件惰性、改名=同层移动、敌意目标不发 POST、
-  1 POST + 1 重载 GET、help 无 rmdir/mv）。
+  读操作的 token flag 被拒绝且不回显（`token_flags_are_refused_for_reads_and_never_echoed`）；`mega2_browser_tag` 覆盖 `t` 面板（第 1 页单次匿名 GET、显式翻页、create 名称+可选 message、delete 确认、敌意名不发请求、面板关闭恢复目录视图、渲染消毒）；`mega2_browser_mutate` 覆盖 `d`/`m`/`e`
+  （确认行、独立目标选择器与二次确认、Esc 取消不发送 POST、文件移动的 `is_directory=false`、
+  改名=同层移动、跨顶层根目录在 POST 前拒绝、1 POST + 1 重载 GET、help 无 rmdir/mv）。
 - 失败诊断（MN-01）：`cargo test --lib internal::protocol::mega2_diag`（作用域的四种附加分支、
   发请求前的错误原样返回、返回的仍是原错误）；`cargo test --test command_test --
   mega2_tree_transport_test::failure_details_ mega2_entry_transport_test::failure_details_
@@ -156,8 +165,10 @@ flowchart TD
 
 ## 边界与延后
 
-- 不读 blob、不递归、不带 token（GET）、不持久化配置；不修改 mega2。
+- 目录和文件预览分别匿名读取 tree/blob；无递归预取、不持久化配置或凭据。写入只影响
+  Mega2 远端状态，并且仅在写操作配置 token 时发送一个 Bearer token。
 - 终端渲染不引入第三方 TUI 依赖（G-05）。
-- 目录删除/移动/tag 属后续卡（MB-07/08、MB-10/11）；不带操作 flag 的 `--json` 与
-  `--list` 是「一次 GET」；写操作与 tag 的非交互形式由 plan-20261001 MN-03 起各卡以操作 flag
-  加入（MN-03：`--create-dir`；MN-04：`--delete-dir`；MN-08：`--move-dir`；MN-12：`--rename-dir`；MN-05：`--list-tags`；MN-06：`--create-tag`；MN-09：`--delete-tag`），仍没有 `mega2 mkdir` 一类子命令。
+- 目录删除/移动/tag 均已落地；不带操作 flag 的 `--json` 与 `--list` 是「一次 GET」。
+  非交互写入与 tag 以操作 flag 提供（`--create-dir`、`--delete-dir`、`--move-dir`、
+  `--rename-dir`、`--list-tags`、`--create-tag`、`--delete-tag`），仍没有 `mega2 mkdir`
+  一类子命令；文件移动目前仅由交互式 `m` 提供。

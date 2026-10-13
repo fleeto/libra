@@ -817,6 +817,10 @@ sealed native carrier 将原始 opaque 字节和来源绑定证明一起移入�
 
 生产 provider capability 仍未启用，生产 native issuer 仍未准入。合成正例只证明载体和导入传输机制；Source A 仍为 UNPROVEN，真实 native 字段接入已延期，未获证明的 OpenCode 字段不归档。durable reasoning replay 仍需通过后续门。本机制不增加解密能力或 public metadata enum 值。
 
+### OpenCode native 准入前的 sealed candidate（OG-26）
+
+对已授权的 OpenCode export，采集在构建 JSON 解析树前检查结构预算，再于普通脱敏前私有分离封闭的 assistant reasoning `state` 与原始 `originProof` 字节。候选保留解码后的 UTF-8 原值及 source session、message、part、field 坐标；限额为 16 MiB 来源、65,536 个 JSON 节点、64 层嵌套、每条 receipt 8 KiB，以及既有 512 条 artifact 数量上限。普通副本不含这些私有值；未验证候选仍是 partial snapshot，不能交给普通 checkpoint consumer。损坏或超预算输入成为无正文 partial；结构预算超限报告 `source_oversize`，不误报为来源授权不匹配。长会话即使小于 16 MiB，也可能超过 65,536 节点限额；请开启较小的新采集会话，并在重试前查看不含正文的 partial 原因。在来源拒绝与 sealed candidate 路径，自有原始来源、候选与解析树分配会清零，但 Serde 在成功及失败解析过程中的内部 scratch 与部分构造值无法逐项清零。此候选不签发 native 证明、不写 reasoning artifact；issuer 验证、真实字段准入与 replay 仍各有独立门。调用 OpenCode CLI／hook／export 并进入 Session 采集管道的集成验收（包括确定性 fake-exporter）在 CI 中显式 ignored，仅在 macOS 本机执行；纯解析器和沙箱单元测试可留在 CI。依赖已安装 OpenCode 和模型实际响应的检查亦只在 macOS 本机验收。
+
 
 ### Pending reasoning v2 codec（OG-17）
 

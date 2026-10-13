@@ -74,6 +74,16 @@ impl HookRepo {
     }
 
     fn run(&self, args: &[&str], stdin: Option<&str>) -> Output {
+        self.run_with_overrides(args, stdin, None, None)
+    }
+
+    fn run_with_overrides(
+        &self,
+        args: &[&str],
+        stdin: Option<&str>,
+        log_filter: Option<&str>,
+        xdg_data_home: Option<&std::path::Path>,
+    ) -> Output {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_libra"));
         cmd.args(args)
             .current_dir(&self.repo)
@@ -88,6 +98,12 @@ impl HookRepo {
             })
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        if let Some(log_filter) = log_filter {
+            cmd.env("LIBRA_LOG", log_filter);
+        }
+        if let Some(xdg_data_home) = xdg_data_home {
+            cmd.env("XDG_DATA_HOME", xdg_data_home);
+        }
         let mut child = cmd.spawn().expect("spawn libra binary");
         if let Some(payload) = stdin {
             child
@@ -1174,6 +1190,296 @@ async fn session_checkpoint_ids(repo: &HookRepo, session_id: &str) -> Vec<String
     .into_iter()
     .map(|row| row.try_get_by("checkpoint_id").expect("checkpoint id"))
     .collect()
+}
+
+#[cfg(target_os = "macos")]
+async fn install_og26_fake_exporter(repo: &HookRepo, export: &str) {
+    use std::os::unix::fs::PermissionsExt;
+
+    use libra::internal::ai::observed_agents::compute_provenance;
+
+    std::fs::create_dir_all(repo.home.join(".local/share/opencode"))
+        .expect("create isolated OpenCode data store");
+
+    let enabled = repo.run(
+        &["config", "set", "agent.external_agents.enabled", "true"],
+        None,
+    );
+    assert!(
+        enabled.status.success(),
+        "enable export: {}",
+        describe(&enabled)
+    );
+
+    let trusted_dir = repo.home.join("trusted-exporters");
+    std::fs::create_dir_all(&trusted_dir).expect("create trusted exporter directory");
+    let exporter = trusted_dir.join("opencode");
+    let shell_literal = export.replace('\'', "'\"'\"'");
+    // The real macOS bridge requires a Seatbelt server readiness line and a
+    // separate Seatbelt client. This fake holds the stdin lease without
+    // opening a socket; its client prints only the fixed synthetic export.
+    std::fs::write(
+        &exporter,
+        format!(
+            "#!/bin/sh\n\
+             if [ \"$1\" = serve ]; then\n\
+               while [ \"$#\" -gt 0 ]; do\n\
+                 if [ \"$1\" = --port ]; then shift; port=$1; fi\n\
+                 shift\n\
+               done\n\
+               printf '{{\"url\":\"http://127.0.0.1:%s/\"}}\\n' \"$port\"\n\
+               while IFS= read -r line; do :; done\n\
+               exit 0\n\
+             fi\n\
+             if [ \"$1\" = session ] && [ \"$2\" = export ]; then\n\
+               printf '%s' '{shell_literal}'\n\
+               exit 0\n\
+             fi\n\
+             exit 1\n"
+        ),
+    )
+    .expect("write deterministic fake exporter");
+    std::fs::set_permissions(&exporter, std::fs::Permissions::from_mode(0o755))
+        .expect("make fake exporter executable");
+    let provenance = compute_provenance(&exporter).expect("compute fake exporter provenance");
+    let record = json!({
+        "path": provenance.canonical_path.to_string_lossy(),
+        "sha256": provenance.sha256,
+        "device": provenance.device,
+        "inode": provenance.inode,
+        "mtime": provenance.mtime,
+    })
+    .to_string();
+    let dirs = json!([trusted_dir.to_string_lossy()]).to_string();
+    let url = format!("sqlite://{}?mode=rwc", repo.db_path().display());
+    let conn = Database::connect(url)
+        .await
+        .expect("open isolated repo config store");
+    for (key, value) in [
+        ("agent.external_agents.trusted_dirs", dirs.as_str()),
+        ("agent.trust.opencode", record.as_str()),
+    ] {
+        conn.execute_raw(Statement::from_sql_and_values(
+            conn.get_database_backend(),
+            "INSERT INTO config_kv (key, value, encrypted) VALUES (?, ?, 0)",
+            [key.into(), value.into()],
+        ))
+        .await
+        .expect("seed isolated exporter trust");
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn assert_og26_store_free_of(repo: &HookRepo, markers: &[&str]) {
+    let objects = repo.repo.join(".libra").join("objects");
+    let mut pending = vec![repo.repo.join(".libra")];
+    while let Some(path) = pending.pop() {
+        if path.is_dir() {
+            for entry in std::fs::read_dir(&path).expect("walk isolated store") {
+                pending.push(entry.expect("read store entry").path());
+            }
+            continue;
+        }
+        if !path.is_file() {
+            continue;
+        }
+        let bytes = std::fs::read(&path).expect("read isolated store file");
+        for marker in markers {
+            assert!(
+                !bytes
+                    .windows(marker.len())
+                    .any(|window| window == marker.as_bytes()),
+                "candidate reached a durable store file: {}",
+                path.display()
+            );
+        }
+        if !path.starts_with(&objects) {
+            continue;
+        }
+        let Some(parent) = path.parent().and_then(|parent| parent.file_name()) else {
+            continue;
+        };
+        let Some(name) = path.file_name() else {
+            continue;
+        };
+        let oid = format!("{}{}", parent.to_string_lossy(), name.to_string_lossy());
+        if oid.len() != 40 || !oid.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            continue;
+        }
+        let hash = ObjectHash::from_str(&oid).expect("valid object pathname");
+        let decoded = libra::utils::object::read_git_object(&repo.repo.join(".libra"), &hash)
+            .expect("decode isolated object");
+        for marker in markers {
+            assert!(
+                !decoded
+                    .windows(marker.len())
+                    .any(|window| window == marker.as_bytes()),
+                "candidate reached a decoded durable object: {}",
+                oid
+            );
+        }
+    }
+}
+
+/// OG-26 VER4 uses a deterministic fake exporter through the macOS Required
+/// Seatbelt and CLI hook path, and requires OpenCode to reject before any
+/// checkpoint is committed. Claude/Codex controls use synthetic sessions.
+/// No installed OpenCode, account, model or network request is involved.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+#[ignore = "macOS local OpenCode hook/export capture acceptance; excluded from CI"]
+async fn og26_candidate_has_zero_normal_sink_hits() {
+    assert!(
+        libra::internal::ai::observed_agents::opencode_export::required_export_sandbox_available()
+            .await,
+        "the macOS Required Seatbelt export sandbox is unavailable"
+    );
+    let repo = HookRepo::init();
+    let provider_session = "ses_og26_sealed_sink";
+    let markers = [
+        "OG26_SIG_PRIVATE_ea51",
+        "OG26_REDACTED_PRIVATE_03d8",
+        "OG26_ENCRYPTED_PRIVATE_38e1",
+        "OG26_RECEIPT_PRIVATE_eb70",
+    ];
+    let export = json!({
+        "info": {"id": provider_session, "directory": repo.repo.to_string_lossy()},
+        "messages": [
+            {"id": "msg_user_og26", "type": "user", "text": "safe prompt"},
+            {"id": "msg_assistant_og26", "type": "assistant", "content": [{
+                "id": "npart_0123456789abcdef0123456789abcdef",
+                "type": "reasoning",
+                "text": "visible thought",
+                "state": {
+                    "signature": markers[0],
+                    "redactedData": markers[1],
+                    "reasoningEncryptedContent": markers[2]
+                },
+                "originProof": {"test": markers[3]}
+            }]}
+        ]
+    })
+    .to_string();
+    install_og26_fake_exporter(&repo, &export).await;
+    let output = repo.run_with_overrides(
+        &["agent", "hooks", "opencode", "stop"],
+        Some(&repo.envelope("session.idle", provider_session, json!({}))),
+        Some("debug"),
+        Some(&repo.home.join(".local/share")),
+    );
+    let rendered = describe(&output);
+    assert!(
+        !output.status.success()
+            && rendered.contains("reasoning source is partial")
+            && rendered.contains("capture could not be completed"),
+        "the trusted export must reach the fail-closed candidate path: {rendered}"
+    );
+    for marker in &markers {
+        assert!(
+            !rendered.contains(marker),
+            "candidate leaked into hook output"
+        );
+    }
+    let list = repo.run(&["agent", "checkpoint", "list", "--json"], None);
+    let sessions = repo.run(&["agent", "session", "list", "--json"], None);
+    assert!(
+        list.status.success(),
+        "list checkpoints: {}",
+        describe(&list)
+    );
+    assert!(
+        sessions.status.success(),
+        "list sessions: {}",
+        describe(&sessions)
+    );
+    let checkpoint_list: Value =
+        serde_json::from_slice(&list.stdout).expect("negative OpenCode checkpoint list JSON");
+    let checkpoint_rows = checkpoint_list["data"]["checkpoints"]
+        .as_array()
+        .expect("negative OpenCode checkpoint list array");
+    assert!(
+        checkpoint_rows.is_empty(),
+        "unverified OpenCode candidate committed a checkpoint: {checkpoint_list}"
+    );
+    for marker in &markers {
+        assert!(
+            !describe(&list).contains(marker),
+            "candidate leaked via checkpoint list"
+        );
+        assert!(
+            !describe(&sessions).contains(marker),
+            "candidate leaked via session list"
+        );
+    }
+    assert_og26_store_free_of(&repo, &markers);
+
+    // Other adapters retain their ordinary hook paths. Unknown provider
+    // selection must fail before it can obtain an OpenCode candidate.
+    let claude = HookRepo::init();
+    let claude_session = "sess_og26_claude_control";
+    let claude_start = claude.hook_for_agent(
+        "claude-code",
+        "session-start",
+        &claude.envelope("SessionStart", claude_session, json!({})),
+    );
+    let claude_stop = claude.hook_for_agent(
+        "claude-code",
+        "stop",
+        &claude.envelope("Stop", claude_session, json!({})),
+    );
+    assert!(
+        claude_start.status.success(),
+        "Claude start: {}",
+        describe(&claude_start)
+    );
+    assert!(
+        claude_stop.status.success(),
+        "Claude stop: {}",
+        describe(&claude_stop)
+    );
+    let _ = claude.checkpoint_id_for_session(&format!("claude__{claude_session}"));
+    assert_og26_store_free_of(&claude, &markers);
+
+    let codex = HookRepo::init();
+    let codex_session = "sess_og26_codex_control";
+    let codex_start = codex.hook_for_agent(
+        "codex",
+        "session-start",
+        &codex.envelope("SessionStart", codex_session, json!({})),
+    );
+    let codex_end = codex.hook_for_agent(
+        "codex",
+        "session-end",
+        &codex.envelope("SessionEnd", codex_session, json!({})),
+    );
+    assert!(
+        codex_start.status.success(),
+        "Codex start: {}",
+        describe(&codex_start)
+    );
+    assert!(
+        codex_end.status.success(),
+        "Codex end: {}",
+        describe(&codex_end)
+    );
+    let _ = codex.checkpoint_id_for_session(&format!("codex__{codex_session}"));
+    assert_og26_store_free_of(&codex, &markers);
+
+    let unknown = codex.hook_for_agent(
+        "unknown-provider",
+        "stop",
+        &codex.envelope("Stop", "sess_og26_unknown", json!({})),
+    );
+    assert!(
+        !unknown.status.success(),
+        "unknown provider unexpectedly admitted"
+    );
+    for marker in &markers {
+        assert!(
+            !describe(&unknown).contains(marker),
+            "unknown provider leaked a candidate"
+        );
+    }
 }
 
 /// ACF-08: Codex's opaque reasoning ciphertext and ordinary secrets keep one

@@ -2650,6 +2650,24 @@ Incomplete，不产生新的 `SemanticRecord::Reasoning` 或 v1 digest claim；�
 OG-25 不保存候选字节，也不签发 opaque artifact；后续 OG-26 才可设计密封
 候选载体，OG-05 的真实 Source A 正例仍未通过。复杂模型验收只在 macOS
 本机手工执行，不进入 CI。
+OG-26 的私有载体在同一次严格解析后、OG-25 普通副本清除前复制已解码的
+`state.*` 原 UTF-8、原始 `originProof` JSON 字节与精确 session／message／part／field
+坐标，不实现 issuer。解析树 materialize 前的词法结构预检限定 65,536 节点、
+64 层深度，并记录 receipt 原字节区间；来源仍限 16 MiB，每条 receipt 8 KiB，
+候选总数 512。checked 累计私有字节与有界序列化阻止候选数／普通输出扩张；
+重复键交给严格 Canon parser 拒绝。预处理前遭拒的内存来源字节、分流后的
+candidate raw source、保留的 carrier，以及解析树保留或移除的分支均显式清零；
+Serde 在成功和失败的严格解析过程中产生的内部 scratch 与部分构造值均不能逐项清零；
+这是当前内存残留边界，owned tree 的清零不覆盖 Serde scratch。
+结构预算超限明确映射 `source_oversize`，不误报来源授权不匹配；长会话即使
+未满 16 MiB 也可能触顶。一次冻结的历史真实工具 export 仅测得 5,362 字节、
+150 个 JSON 值节点、最大深度 8、5 条 messages；它通过本限额，但不能代表
+长会话可用性或 Source A 准入。
+OpenCode CLI／hook／export→Session 的集成验收（包括 deterministic fake exporter）在
+CI 中显式 ignored，仅由 macOS 本机运行；纯解析器和沙箱单元测试可进 CI。
+deadline 的同步后复核只保证超时拒绝，不可抢占 CPU。候选从不变成
+`OpaqueEncryptedBytes`／`NativeProvenReasoning`，未映射、超限或失败维持 partial，
+不进入 ordinary sink 或完整 checkpoint；OG-27 的事务验证另行验收。
 采集分类仅接受一个带 `messages` 数组的 JSON export object。flat／JSONL、
 缺失或错型 `messages`、重复键或损坏 JSON 给出无正文 partial 和固定
 `SourceAuthorizationMismatch`；独立 `extract_opencode` 的 best-effort

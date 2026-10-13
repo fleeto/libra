@@ -21,9 +21,12 @@ use serde::{
 use serde_json::value::RawValue;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
-use super::transcript_source::TRANSCRIPT_READ_HARD_CAP_BYTES;
+use super::{
+    native_origin::codec::{FieldName, RECEIPT_BYTE_CAP},
+    transcript_source::TRANSCRIPT_READ_HARD_CAP_BYTES,
+};
 
 /// Optional provider port at the authorized, bounded source boundary.
 /// Implementations only separate an owned buffer. They cannot open a source,
@@ -59,6 +62,198 @@ impl PreparedReasoningSource {
             disposition: ReasoningSourceDisposition::Unproven,
         }
     }
+
+    /// The OpenCode parser has moved a bounded, unverified candidate out of
+    /// the ordinary copy. This is only private input for a later verifier;
+    /// constructing it grants no native or capture authority.
+    pub(super) fn with_opencode_candidates(
+        ordinary: Vec<u8>,
+        candidates: SealedOpenCodeCandidates,
+    ) -> Self {
+        Self {
+            ordinary,
+            disposition: ReasoningSourceDisposition::OpenCodeCandidate(candidates),
+        }
+    }
+}
+
+/// A single export part's source coordinates and original decoded JSON
+/// strings. All payload-bearing allocations wipe on drop. This type has no
+/// Clone, Serialize, Debug or public raw accessor.
+pub(super) struct OpenCodeCandidatePart {
+    source_message: Zeroizing<String>,
+    message_ordinal: usize,
+    source_part: Zeroizing<String>,
+    part_ordinal: usize,
+    receipt: Zeroizing<Vec<u8>>,
+    fields: Vec<(FieldName, Zeroizing<String>)>,
+    private_bytes: usize,
+}
+
+/// Maximum parser nodes and source ordinals admitted before materializing an
+/// OpenCode JSON tree. The preprocessor applies this bound before parsing.
+pub(super) const OPENCODE_CANON_MAX_NODES: usize = 65_536;
+
+impl OpenCodeCandidatePart {
+    /// Checks only bounded syntax and ownership, never receipt authority.
+    pub(super) fn checked(
+        source_message: Zeroizing<String>,
+        message_ordinal: usize,
+        source_part: Zeroizing<String>,
+        part_ordinal: usize,
+        receipt: Zeroizing<Vec<u8>>,
+        fields: Vec<(FieldName, Zeroizing<String>)>,
+        source_len: usize,
+    ) -> Result<Self, ReasoningFieldError> {
+        let part_suffix = source_part
+            .strip_prefix("npart_")
+            .ok_or(ReasoningFieldError::UnsupportedShape)?;
+        if source_message.is_empty()
+            || source_message.len() > 1024
+            || part_suffix.len() != 32
+            || !part_suffix
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            || receipt.is_empty()
+            || receipt.len() > RECEIPT_BYTE_CAP
+            || fields.is_empty()
+            || fields.len() > 3
+        {
+            return Err(ReasoningFieldError::UnsupportedShape);
+        }
+        let mut private_bytes = receipt.len();
+        let mut previous = None;
+        for (name, value) in &fields {
+            if value.is_empty() || previous.is_some_and(|last| last >= *name) {
+                return Err(ReasoningFieldError::UnsupportedShape);
+            }
+            private_bytes = private_bytes
+                .checked_add(value.len())
+                .filter(|total| *total <= source_len)
+                .ok_or(ReasoningFieldError::SourceTooLarge)?;
+            previous = Some(*name);
+        }
+        Ok(Self {
+            source_message,
+            message_ordinal,
+            source_part,
+            part_ordinal,
+            receipt,
+            fields,
+            private_bytes,
+        })
+    }
+}
+
+/// Session-scoped, non-authoritative private carrier. Even a syntactically
+/// correct receipt stays Unproven until a future writer-transaction verifier.
+pub(crate) struct SealedOpenCodeCandidates {
+    source_session: Zeroizing<String>,
+    source_len: usize,
+    private_bytes: usize,
+    parts: Vec<OpenCodeCandidatePart>,
+}
+
+impl SealedOpenCodeCandidates {
+    pub(super) fn checked(
+        source_session: Zeroizing<String>,
+        source_len: usize,
+    ) -> Result<Self, ReasoningFieldError> {
+        if source_session.is_empty()
+            || source_session.len() > 1024
+            || source_len == 0
+            || source_len as u64 > TRANSCRIPT_READ_HARD_CAP_BYTES
+        {
+            return Err(ReasoningFieldError::UnsupportedShape);
+        }
+        Ok(Self {
+            source_session,
+            source_len,
+            private_bytes: 0,
+            parts: Vec::new(),
+        })
+    }
+
+    pub(super) fn append(
+        &mut self,
+        part: OpenCodeCandidatePart,
+    ) -> Result<(), ReasoningFieldError> {
+        if self.parts.len() >= crate::internal::ai::traces::REASONING_ARTIFACT_MAX_ENTRIES
+            || part.message_ordinal >= OPENCODE_CANON_MAX_NODES
+            || part.part_ordinal >= OPENCODE_CANON_MAX_NODES
+            || part.source_message.is_empty()
+            || part.source_part.is_empty()
+            || part.receipt.is_empty()
+            || part.fields.is_empty()
+        {
+            return Err(ReasoningFieldError::SourceTooLarge);
+        }
+        if self.parts.iter().any(|existing| {
+            existing.source_part.as_str() == part.source_part.as_str()
+                || (existing.message_ordinal == part.message_ordinal
+                    && existing.part_ordinal == part.part_ordinal)
+                || (existing.source_message.as_str() == part.source_message.as_str()
+                    && existing.message_ordinal != part.message_ordinal)
+        }) {
+            return Err(ReasoningFieldError::UnsupportedShape);
+        }
+        let actual_bytes = part
+            .fields
+            .iter()
+            .try_fold(part.receipt.len(), |total, (_, value)| {
+                total.checked_add(value.len())
+            });
+        if actual_bytes != Some(part.private_bytes) {
+            return Err(ReasoningFieldError::UnsupportedShape);
+        }
+        let private_bytes = self
+            .private_bytes
+            .checked_add(part.private_bytes)
+            .filter(|total| *total <= self.source_len)
+            .ok_or(ReasoningFieldError::SourceTooLarge)?;
+        self.parts
+            .try_reserve(1)
+            .map_err(|_| ReasoningFieldError::SourceTooLarge)?;
+        self.parts.push(part);
+        self.private_bytes = private_bytes;
+        Ok(())
+    }
+
+    pub(super) fn is_empty(&self) -> bool {
+        self.parts.is_empty()
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn assert_og26_candidate_for_test(
+    disposition: &ReasoningSourceDisposition,
+    receipt: &[u8],
+) {
+    let ReasoningSourceDisposition::OpenCodeCandidate(candidates) = disposition else {
+        panic!("the unverified candidate must remain privately owned")
+    };
+    assert_eq!(candidates.source_session.as_str(), "ses_og26_fixture");
+    assert_eq!(candidates.parts.len(), 1);
+    let part = &candidates.parts[0];
+    assert_eq!(part.source_message.as_str(), "msg_og26");
+    assert_eq!(part.message_ordinal, 0);
+    assert_eq!(
+        part.source_part.as_str(),
+        "npart_0123456789abcdef0123456789abcdef"
+    );
+    assert_eq!(part.part_ordinal, 0);
+    assert_eq!(part.receipt.as_slice(), receipt);
+    assert_eq!(
+        part.fields
+            .iter()
+            .map(|(name, value)| (*name, value.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            (FieldName::Signature, "sig-界"),
+            (FieldName::RedactedData, "red-é"),
+            (FieldName::ReasoningEncryptedContent, "enc-🚀"),
+        ]
+    );
 }
 
 /// Payload-free state readable by the narrow capture adapters. This is an
@@ -79,6 +274,7 @@ pub(crate) enum ReasoningSourceDisposition {
     Unproven,
     Unmapped,
     HelperUnsupported,
+    OpenCodeCandidate(SealedOpenCodeCandidates),
     #[allow(dead_code)] // OG-05 alone may admit a production native issuer.
     NativeProven(NativeProvenReasoning),
 }
@@ -98,6 +294,13 @@ impl ReasoningSourceDisposition {
         let mut disposition = prepared.disposition;
         if !has_verified_source_mapping && !disposition.is_ordinary() {
             disposition = Self::Unmapped;
+        } else if let Self::OpenCodeCandidate(candidates) = &disposition {
+            if provider != "opencode"
+                || source_session != Some(candidates.source_session.as_str())
+                || candidates.is_empty()
+            {
+                return Err(ReasoningFieldError::UnsupportedShape);
+            }
         } else if let Self::NativeProven(batch) = &disposition {
             let kind = match provider {
                 "claude_code" => ReasoningProvider::ClaudeCode,
@@ -133,6 +336,7 @@ impl ReasoningSourceDisposition {
             Self::Unproven => ReasoningSourceState::Unproven,
             Self::Unmapped => ReasoningSourceState::Unmapped,
             Self::HelperUnsupported => ReasoningSourceState::HelperUnsupported,
+            Self::OpenCodeCandidate(_) => ReasoningSourceState::Unproven,
             Self::NativeProven(_) => ReasoningSourceState::NativeProven,
         }
     }
@@ -1756,7 +1960,7 @@ impl ProviderVisibleText {
 /// Errors do not include source field names, values, or raw provider JSON.
 #[derive(Debug, Error, Eq, PartialEq)]
 pub enum ReasoningFieldError {
-    #[error("reasoning source exceeds the 16 MiB transcript read limit; use a bounded export")]
+    #[error("reasoning source exceeds its 16 MiB byte or structural budget; use a smaller export")]
     SourceTooLarge,
     #[error("reasoning source is not a valid provider record; check the pinned provider export")]
     MalformedSource,
@@ -2335,6 +2539,129 @@ mod tests {
     use std::time::Instant;
 
     use super::*;
+
+    #[test]
+    fn og26_unverified_candidate_cannot_become_native() {
+        fn part(index: usize, source_len: usize) -> OpenCodeCandidatePart {
+            OpenCodeCandidatePart::checked(
+                Zeroizing::new(format!("msg_{index}")),
+                index,
+                Zeroizing::new(format!("npart_{index:032x}")),
+                0,
+                Zeroizing::new(b"{\"untrusted\":true}".to_vec()),
+                vec![(
+                    FieldName::Signature,
+                    Zeroizing::new("synthetic-private-value".to_owned()),
+                )],
+                source_len,
+            )
+            .expect("bounded synthetic candidate")
+        }
+
+        fn prepared() -> PreparedReasoningSource {
+            let source_len = 16 * 1024;
+            let mut candidates = SealedOpenCodeCandidates::checked(
+                Zeroizing::new("source_session".to_owned()),
+                source_len,
+            )
+            .expect("bounded source session");
+            candidates
+                .append(part(1, source_len))
+                .expect("one bounded part");
+            PreparedReasoningSource::with_opencode_candidates(b"safe ordinary".to_vec(), candidates)
+        }
+
+        let (_, disposition) = ReasoningSourceDisposition::from_prepared_authorized_source(
+            prepared(),
+            true,
+            16 * 1024,
+            "opencode",
+            "capture_session",
+            Some("source_session"),
+        )
+        .expect("unverified candidate remains contained");
+        assert!(matches!(
+            disposition.state(),
+            ReasoningSourceState::Unproven
+        ));
+        assert!(!disposition.is_ordinary());
+        assert!(!disposition.has_capture_consumer());
+        let ReasoningSourceDisposition::OpenCodeCandidate(candidates) = &disposition else {
+            panic!("candidate must remain privately sealed")
+        };
+        assert_eq!(candidates.parts[0].message_ordinal, 1);
+        assert_eq!(candidates.parts[0].part_ordinal, 0);
+        assert_eq!(candidates.parts[0].source_message.as_str(), "msg_1");
+        assert_eq!(
+            candidates.parts[0].source_part.as_str(),
+            format!("npart_{:032x}", 1)
+        );
+        assert_eq!(
+            candidates.parts[0].receipt.as_slice(),
+            b"{\"untrusted\":true}"
+        );
+        assert_eq!(
+            candidates.parts[0].fields[0].1.as_bytes(),
+            b"synthetic-private-value"
+        );
+
+        let (_, unmapped) = ReasoningSourceDisposition::from_prepared_authorized_source(
+            prepared(),
+            false,
+            16 * 1024,
+            "opencode",
+            "capture_session",
+            Some("source_session"),
+        )
+        .expect("missing mapping is a safe partial");
+        assert!(matches!(unmapped.state(), ReasoningSourceState::Unmapped));
+        for (provider, source_session) in [
+            ("claude_code", Some("source_session")),
+            ("codex", Some("source_session")),
+            ("unknown", Some("source_session")),
+            ("opencode", Some("wrong_session")),
+            ("opencode", None),
+        ] {
+            assert!(
+                ReasoningSourceDisposition::from_prepared_authorized_source(
+                    prepared(),
+                    true,
+                    16 * 1024,
+                    provider,
+                    "capture_session",
+                    source_session,
+                )
+                .is_err(),
+                "{provider} must not receive a candidate"
+            );
+        }
+
+        let source_len = 64 * 1024;
+        let mut overfull = SealedOpenCodeCandidates::checked(
+            Zeroizing::new("source_session".to_owned()),
+            source_len,
+        )
+        .expect("bounded source session");
+        for index in 0..crate::internal::ai::traces::REASONING_ARTIFACT_MAX_ENTRIES {
+            overfull
+                .append(part(index, source_len))
+                .expect("within bounded candidate count");
+        }
+        assert!(overfull.append(part(512, source_len)).is_err());
+        assert!(
+            OpenCodeCandidatePart::checked(
+                Zeroizing::new("msg".to_owned()),
+                0,
+                Zeroizing::new("npart_invalid".to_owned()),
+                0,
+                Zeroizing::new(b"{}".to_vec()),
+                vec![(FieldName::Signature, Zeroizing::new("x".to_owned()))],
+                source_len,
+            )
+            .is_err()
+        );
+    }
+
     #[test]
     fn decryptor_registry_is_none_for_all_providers() {
         for provider in [
@@ -2581,7 +2908,7 @@ mod tests {
         for (error, expected) in [
             (
                 ReasoningFieldError::SourceTooLarge,
-                "reasoning source exceeds the 16 MiB transcript read limit; use a bounded export",
+                "reasoning source exceeds its 16 MiB byte or structural budget; use a smaller export",
             ),
             (
                 ReasoningFieldError::MalformedSource,

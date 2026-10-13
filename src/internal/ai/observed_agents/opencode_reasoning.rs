@@ -4,15 +4,405 @@
 //! never proves native origin. This stage removes the closed opaque window
 //! before the shared Redactor and deliberately discards unverified candidates.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    io::{self, Write},
+    ops::{Deref, DerefMut},
+};
+
+use zeroize::{Zeroize, Zeroizing};
 
 use super::{
     coverage::{CanonValue, parse_canon_value},
-    reasoning::{PreparedReasoningSource, ReasoningFieldError},
+    native_origin::codec::{FieldName, RECEIPT_BYTE_CAP},
+    reasoning::{
+        OPENCODE_CANON_MAX_NODES, OpenCodeCandidatePart, PreparedReasoningSource,
+        ReasoningFieldError, SealedOpenCodeCandidates,
+    },
     transcript_source::TRANSCRIPT_READ_HARD_CAP_BYTES,
 };
 
 const MAX_OBSERVED_IDS: usize = 100_000;
+const MAX_JSON_DEPTH: usize = 64;
+
+/// Offsets refer to the *authorized raw export*, before either JSON decoding
+/// or ordinary projection. A receipt is copied only after the strict parse has
+/// confirmed the corresponding assistant part and closed candidate state.
+struct ReceiptSpan {
+    message_ordinal: usize,
+    part_ordinal: usize,
+    start: usize,
+    end: usize,
+}
+
+#[derive(Clone, Copy)]
+enum ScanLocation {
+    Root,
+    Messages,
+    Message(usize),
+    ContentParts(usize),
+    Part(usize, usize),
+    Other,
+}
+
+/// A small lexical structural preflight. It bounds container depth and total
+/// JSON values *before* `CanonValue` materializes an adversarial tree. The
+/// strict CanonValue parser remains the grammar and duplicate-key authority.
+struct StructureScanner<'a> {
+    input: &'a [u8],
+    offset: usize,
+    nodes: usize,
+    receipts: Vec<ReceiptSpan>,
+}
+
+impl<'a> StructureScanner<'a> {
+    fn scan(input: &'a [u8]) -> Result<Vec<ReceiptSpan>, ReasoningFieldError> {
+        let mut scanner = Self {
+            input,
+            offset: 0,
+            nodes: 0,
+            receipts: Vec::new(),
+        };
+        scanner.value(ScanLocation::Root, 0)?;
+        scanner.space();
+        if scanner.offset != input.len() {
+            return Err(ReasoningFieldError::MalformedSource);
+        }
+        Ok(scanner.receipts)
+    }
+
+    fn space(&mut self) {
+        while self
+            .input
+            .get(self.offset)
+            .is_some_and(|byte| matches!(byte, b' ' | b'\n' | b'\r' | b'\t'))
+        {
+            self.offset += 1;
+        }
+    }
+
+    fn consume(&mut self, expected: u8) -> Result<(), ReasoningFieldError> {
+        if self.input.get(self.offset) != Some(&expected) {
+            return Err(ReasoningFieldError::MalformedSource);
+        }
+        self.offset += 1;
+        Ok(())
+    }
+
+    fn value(&mut self, location: ScanLocation, depth: usize) -> Result<(), ReasoningFieldError> {
+        if depth > MAX_JSON_DEPTH {
+            return Err(ReasoningFieldError::SourceTooLarge);
+        }
+        self.nodes = self
+            .nodes
+            .checked_add(1)
+            .filter(|count| *count <= OPENCODE_CANON_MAX_NODES)
+            .ok_or(ReasoningFieldError::SourceTooLarge)?;
+        self.space();
+        match self.input.get(self.offset).copied() {
+            Some(b'{') => self.object(location, depth),
+            Some(b'[') => self.array(location, depth),
+            Some(b'"') => {
+                self.string()?;
+                Ok(())
+            }
+            Some(b't') => self.literal(b"true"),
+            Some(b'f') => self.literal(b"false"),
+            Some(b'n') => self.literal(b"null"),
+            Some(b'-' | b'0'..=b'9') => self.number(),
+            _ => Err(ReasoningFieldError::MalformedSource),
+        }
+    }
+
+    fn object(&mut self, location: ScanLocation, depth: usize) -> Result<(), ReasoningFieldError> {
+        self.consume(b'{')?;
+        self.space();
+        if self.input.get(self.offset) == Some(&b'}') {
+            return self.consume(b'}');
+        }
+        loop {
+            let key = self.string()?;
+            self.space();
+            self.consume(b':')?;
+            self.space();
+            let start = self.offset;
+            let child = match location {
+                ScanLocation::Root if key == b"messages" => ScanLocation::Messages,
+                ScanLocation::Message(index) if key == b"content" => {
+                    ScanLocation::ContentParts(index)
+                }
+                _ => ScanLocation::Other,
+            };
+            self.value(child, depth + 1)?;
+            if let ScanLocation::Part(message_ordinal, part_ordinal) = location
+                && key == b"originProof"
+            {
+                if self.offset - start > RECEIPT_BYTE_CAP
+                    || self.receipts.len()
+                        >= crate::internal::ai::traces::REASONING_ARTIFACT_MAX_ENTRIES
+                {
+                    return Err(ReasoningFieldError::SourceTooLarge);
+                }
+                self.receipts
+                    .try_reserve(1)
+                    .map_err(|_| ReasoningFieldError::SourceTooLarge)?;
+                self.receipts.push(ReceiptSpan {
+                    message_ordinal,
+                    part_ordinal,
+                    start,
+                    end: self.offset,
+                });
+            }
+            self.space();
+            match self.input.get(self.offset).copied() {
+                Some(b',') => {
+                    self.offset += 1;
+                    self.space();
+                }
+                Some(b'}') => return self.consume(b'}'),
+                _ => return Err(ReasoningFieldError::MalformedSource),
+            }
+        }
+    }
+
+    fn array(&mut self, location: ScanLocation, depth: usize) -> Result<(), ReasoningFieldError> {
+        self.consume(b'[')?;
+        self.space();
+        if self.input.get(self.offset) == Some(&b']') {
+            return self.consume(b']');
+        }
+        let mut ordinal = 0_usize;
+        loop {
+            let child = match location {
+                ScanLocation::Messages => ScanLocation::Message(ordinal),
+                ScanLocation::ContentParts(message) => ScanLocation::Part(message, ordinal),
+                _ => ScanLocation::Other,
+            };
+            self.value(child, depth + 1)?;
+            ordinal = ordinal
+                .checked_add(1)
+                .ok_or(ReasoningFieldError::SourceTooLarge)?;
+            self.space();
+            match self.input.get(self.offset).copied() {
+                Some(b',') => {
+                    self.offset += 1;
+                    self.space();
+                }
+                Some(b']') => return self.consume(b']'),
+                _ => return Err(ReasoningFieldError::MalformedSource),
+            }
+        }
+    }
+
+    /// Return the unescaped key bytes only when the source spelling is direct.
+    /// Escaped field names still parse safely but cannot yield a receipt span.
+    fn string(&mut self) -> Result<&'a [u8], ReasoningFieldError> {
+        self.consume(b'"')?;
+        let start = self.offset;
+        let mut direct = true;
+        loop {
+            match self.input.get(self.offset).copied() {
+                Some(b'"') => {
+                    let end = self.offset;
+                    self.offset += 1;
+                    return Ok(if direct { &self.input[start..end] } else { &[] });
+                }
+                Some(b'\\') => {
+                    direct = false;
+                    self.offset += 1;
+                    match self.input.get(self.offset).copied() {
+                        Some(b'"' | b'\\' | b'/' | b'b' | b'f' | b'n' | b'r' | b't') => {
+                            self.offset += 1;
+                        }
+                        Some(b'u') => {
+                            self.offset += 1;
+                            let Some(hex) = self.input.get(self.offset..self.offset + 4) else {
+                                return Err(ReasoningFieldError::MalformedSource);
+                            };
+                            if !hex.iter().all(u8::is_ascii_hexdigit) {
+                                return Err(ReasoningFieldError::MalformedSource);
+                            }
+                            self.offset += 4;
+                        }
+                        _ => return Err(ReasoningFieldError::MalformedSource),
+                    }
+                }
+                Some(0..=31) | None => return Err(ReasoningFieldError::MalformedSource),
+                Some(_) => self.offset += 1,
+            }
+        }
+    }
+
+    fn literal(&mut self, literal: &[u8]) -> Result<(), ReasoningFieldError> {
+        if self.input.get(self.offset..self.offset + literal.len()) != Some(literal) {
+            return Err(ReasoningFieldError::MalformedSource);
+        }
+        self.offset += literal.len();
+        Ok(())
+    }
+
+    fn number(&mut self) -> Result<(), ReasoningFieldError> {
+        if self.input.get(self.offset) == Some(&b'-') {
+            self.offset += 1;
+        }
+        match self.input.get(self.offset).copied() {
+            Some(b'0') => self.offset += 1,
+            Some(b'1'..=b'9') => {
+                self.offset += 1;
+                while self.input.get(self.offset).is_some_and(u8::is_ascii_digit) {
+                    self.offset += 1;
+                }
+            }
+            _ => return Err(ReasoningFieldError::MalformedSource),
+        }
+        if self.input.get(self.offset) == Some(&b'.') {
+            self.offset += 1;
+            let start = self.offset;
+            while self.input.get(self.offset).is_some_and(u8::is_ascii_digit) {
+                self.offset += 1;
+            }
+            if start == self.offset {
+                return Err(ReasoningFieldError::MalformedSource);
+            }
+        }
+        if self
+            .input
+            .get(self.offset)
+            .is_some_and(|byte| matches!(byte, b'e' | b'E'))
+        {
+            self.offset += 1;
+            if self
+                .input
+                .get(self.offset)
+                .is_some_and(|byte| matches!(byte, b'+' | b'-'))
+            {
+                self.offset += 1;
+            }
+            let start = self.offset;
+            while self.input.get(self.offset).is_some_and(u8::is_ascii_digit) {
+                self.offset += 1;
+            }
+            if start == self.offset {
+                return Err(ReasoningFieldError::MalformedSource);
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Zeroize for CanonValue {
+    fn zeroize(&mut self) {
+        match self {
+            Self::Str(value) => value.zeroize(),
+            Self::Array(items) => {
+                for item in items.iter_mut() {
+                    item.zeroize();
+                }
+            }
+            Self::Object(fields) => {
+                for (mut key, mut value) in std::mem::take(fields) {
+                    key.zeroize();
+                    value.zeroize();
+                }
+            }
+            Self::Null | Self::Bool(_) | Self::Int(_) | Self::Float(_) => {}
+        }
+        *self = Self::Null;
+    }
+}
+
+/// Every branch removed from the owned parse tree is wiped before its
+/// allocation is released. `Zeroizing<CanonValue>` on the root alone cannot
+/// cover nodes dropped by `retain`, `remove` or replacement during scrub.
+fn retain_wiping(
+    fields: &mut BTreeMap<String, CanonValue>,
+    mut keep: impl FnMut(&String, &mut CanonValue) -> bool,
+) {
+    for (mut key, mut value) in fields.extract_if(.., |key, value| !keep(key, value)) {
+        key.zeroize();
+        value.zeroize();
+    }
+}
+
+fn remove_wiping(fields: &mut BTreeMap<String, CanonValue>, name: &str) -> bool {
+    if let Some((mut key, mut value)) = fields.remove_entry(name) {
+        key.zeroize();
+        value.zeroize();
+        true
+    } else {
+        false
+    }
+}
+
+fn take_wiping(
+    fields: &mut BTreeMap<String, CanonValue>,
+    name: &str,
+) -> Option<Zeroizing<CanonValue>> {
+    fields.remove_entry(name).map(|(mut key, value)| {
+        key.zeroize();
+        Zeroizing::new(value)
+    })
+}
+
+/// The duplicate-ID check owns copies of source coordinates while scanning.
+/// They leave no unwiped heap strings on either the success or error path.
+struct WipingIdSet(BTreeSet<String>);
+
+impl Deref for WipingIdSet {
+    type Target = BTreeSet<String>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for WipingIdSet {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl Drop for WipingIdSet {
+    fn drop(&mut self) {
+        for mut id in std::mem::take(&mut self.0) {
+            id.zeroize();
+        }
+    }
+}
+
+/// `serde_json::to_vec` may allocate well beyond the admitted source after
+/// escapes expand. An output failure drops and wipes every partial write.
+struct BoundedOrdinaryWriter {
+    bytes: Zeroizing<Vec<u8>>,
+    cap: usize,
+}
+
+impl BoundedOrdinaryWriter {
+    fn into_bytes(mut self) -> Vec<u8> {
+        std::mem::take(&mut *self.bytes)
+    }
+}
+
+impl Write for BoundedOrdinaryWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let next = self
+            .bytes
+            .len()
+            .checked_add(bytes.len())
+            .filter(|next| *next <= self.cap)
+            .ok_or_else(|| io::Error::other("bounded OpenCode output exceeded source cap"))?;
+        let additional = next - self.bytes.len();
+        self.bytes
+            .try_reserve(additional)
+            .map_err(|_| io::Error::other("bounded OpenCode output allocation failed"))?;
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
 
 /// A payload-free classification; `Candidate` never grants native authority.
 enum ReasoningPartShape {
@@ -117,7 +507,7 @@ fn strip_provider_metadata(
     removed: &mut bool,
     unproven: &mut bool,
 ) {
-    if let Some(value) = fields.remove("metadata") {
+    if let Some(value) = take_wiping(fields, "metadata") {
         *removed = true;
         *unproven |= contains_opaque_hint(&value);
     }
@@ -137,7 +527,7 @@ fn strip_provider_metadata_except_tool_files(
         "providerOptions",
         "providerContext",
     ] {
-        if let Some(value) = fields.remove(name) {
+        if let Some(value) = take_wiping(fields, name) {
             *removed = true;
             *unproven |= contains_opaque_hint(&value);
         }
@@ -157,7 +547,7 @@ fn strip_named_opaque_fields(
         "state",
         "thoughtSignature",
     ] {
-        if fields.remove(name).is_some() {
+        if remove_wiping(fields, name) {
             *removed = true;
             *unproven = true;
         }
@@ -169,7 +559,7 @@ fn strip_named_opaque_fields(
 /// Redactor sees it; tool input/output and visible text are handled separately.
 fn scrub_nested_envelope_value(value: &mut CanonValue, removed: &mut bool, unproven: &mut bool) {
     if contains_opaque_hint(value) {
-        *value = CanonValue::Null;
+        value.zeroize();
         *removed = true;
         *unproven = true;
         return;
@@ -180,7 +570,7 @@ fn scrub_nested_envelope_value(value: &mut CanonValue, removed: &mut bool, unpro
 fn strip_nested_envelope_metadata(value: &mut CanonValue, removed: &mut bool, unproven: &mut bool) {
     match value {
         CanonValue::Object(fields) => {
-            fields.retain(|name, child| {
+            retain_wiping(fields, |name, child| {
                 if matches!(
                     name.as_str(),
                     "metadata"
@@ -224,7 +614,7 @@ fn scrub_retained_envelope_fields(
             if !matches!(value, CanonValue::Str(_)) {
                 // The only ordinary text exception is a validated string.
                 // An object here could carry provider ciphertext by name.
-                *value = CanonValue::Null;
+                value.zeroize();
                 *removed = true;
                 *unproven = true;
             }
@@ -241,7 +631,7 @@ fn retain_native_nonassistant_envelope(
     unproven: &mut bool,
 ) {
     let prior_len = fields.len();
-    fields.retain(|name, _| {
+    retain_wiping(fields, |name, _| {
         matches!(name.as_str(), "id" | "type" | "time")
             || match kind {
                 "user" => matches!(name.as_str(), "text" | "files" | "agents" | "skills"),
@@ -362,7 +752,7 @@ fn retain_native_nonassistant_envelope(
         if let Some(files) = fields.get("files")
             && !matches!(files, CanonValue::Array(entries) if entries.is_empty())
         {
-            fields.remove("files");
+            remove_wiping(fields, "files");
             *removed = true;
             *unproven = true;
         }
@@ -374,14 +764,14 @@ fn retain_native_nonassistant_envelope(
                 if let CanonValue::Array(entries) = value {
                     for entry in entries {
                         if contains_opaque_hint(entry) {
-                            *entry = CanonValue::Null;
+                            entry.zeroize();
                             *removed = true;
                             *unproven = true;
                             continue;
                         }
                         if let CanonValue::Object(item) = entry {
                             let prior_len = item.len();
-                            item.retain(|key, _| allowed.contains(&key.as_str()));
+                            retain_wiping(item, |key, _| allowed.contains(&key.as_str()));
                             if item.len() != prior_len {
                                 *removed = true;
                                 *unproven = true;
@@ -400,13 +790,13 @@ fn retain_native_nonassistant_envelope(
                                 unproven,
                             );
                         } else {
-                            *entry = CanonValue::Null;
+                            entry.zeroize();
                             *removed = true;
                             *unproven = true;
                         }
                     }
                 } else {
-                    fields.remove(name);
+                    remove_wiping(fields, name);
                     *removed = true;
                     *unproven = true;
                 }
@@ -425,19 +815,19 @@ fn project_shell_output(
         return;
     };
     if contains_opaque_hint(value) {
-        fields.remove("output");
+        remove_wiping(fields, "output");
         *removed = true;
         *unproven = true;
         return;
     }
     let CanonValue::Object(output) = value else {
-        fields.remove("output");
+        remove_wiping(fields, "output");
         *removed = true;
         *unproven = true;
         return;
     };
     let prior_len = output.len();
-    output.retain(|name, value| match name.as_str() {
+    retain_wiping(output, |name, value| match name.as_str() {
         "output" => matches!(value, CanonValue::Str(_)),
         "cursor" | "size" => matches!(value, CanonValue::Int(_)),
         "truncated" => matches!(value, CanonValue::Bool(_)),
@@ -460,18 +850,18 @@ fn project_envelope_object(
         return;
     };
     if contains_opaque_hint(value) {
-        fields.remove(name);
+        remove_wiping(fields, name);
         *removed = true;
         *unproven = true;
         return;
     }
     let CanonValue::Object(projected) = value else {
-        *removed |= fields.remove(name).is_some();
+        *removed |= remove_wiping(fields, name);
         *unproven = true;
         return;
     };
     let prior_len = projected.len();
-    projected.retain(|key, value| {
+    retain_wiping(projected, |key, value| {
         if !allowed.contains(&key.as_str()) {
             return false;
         }
@@ -486,7 +876,9 @@ fn project_envelope_object(
             "tokens" | "cache" => {
                 matches!(value, CanonValue::Int(_) | CanonValue::Float(_))
             }
-            "snapshot" if key == "files" => matches!(value, CanonValue::Array(items) if items.iter().all(|item| matches!(item, CanonValue::Str(_)))),
+            "snapshot" if key == "files" => {
+                matches!(value, CanonValue::Array(items) if items.iter().all(|item| matches!(item, CanonValue::Str(_))))
+            }
             "snapshot" => matches!(value, CanonValue::Str(_)),
             "previous" if key == "location" => matches!(value, CanonValue::Object(_)),
             "previous" => matches!(value, CanonValue::Str(_)),
@@ -528,7 +920,7 @@ fn project_scalar_fields(
             ScalarShape::Boolean => !matches!(value, CanonValue::Bool(_)),
         });
         if invalid {
-            fields.remove(*name);
+            remove_wiping(fields, name);
             *removed = true;
             *unproven = true;
         }
@@ -552,7 +944,7 @@ fn project_classic_integer_time(
             .get(*name)
             .is_some_and(|value| !matches!(value, CanonValue::Int(_)))
         {
-            time.remove(*name);
+            remove_wiping(time, name);
             *removed = true;
             *unproven = true;
         }
@@ -572,19 +964,19 @@ fn project_structured_error(
         return;
     };
     if contains_opaque_hint(value) {
-        fields.remove(name);
+        remove_wiping(fields, name);
         *removed = true;
         *unproven = true;
         return;
     }
     let CanonValue::Object(error) = value else {
-        fields.remove(name);
+        remove_wiping(fields, name);
         *removed = true;
         *unproven = true;
         return;
     };
     let prior_len = error.len();
-    error.retain(|key, value| match key.as_str() {
+    retain_wiping(error, |key, value| match key.as_str() {
         "type" | "message" => matches!(value, CanonValue::Str(_)),
         "status" => matches!(value, CanonValue::Int(_)),
         _ => false,
@@ -604,19 +996,19 @@ fn project_native_retry(
         return;
     };
     if contains_opaque_hint(value) {
-        fields.remove("retry");
+        remove_wiping(fields, "retry");
         *removed = true;
         *unproven = true;
         return;
     }
     let CanonValue::Object(retry) = value else {
-        fields.remove("retry");
+        remove_wiping(fields, "retry");
         *removed = true;
         *unproven = true;
         return;
     };
     let prior_len = retry.len();
-    retry.retain(|key, value| match key.as_str() {
+    retain_wiping(retry, |key, value| match key.as_str() {
         "attempt" => matches!(value, CanonValue::Int(_)),
         "at" => matches!(value, CanonValue::Int(_) | CanonValue::Float(_)),
         "error" => matches!(value, CanonValue::Object(_)),
@@ -642,21 +1034,21 @@ fn project_native_tool_content(
     scrub_nested_envelope_value(content, removed, unproven);
     let CanonValue::Array(entries) = content else {
         if !matches!(content, CanonValue::Str(_) | CanonValue::Null) {
-            *content = CanonValue::Null;
+            content.zeroize();
             *removed = true;
             *unproven = true;
         }
         return;
     };
     if entries.is_empty() {
-        *content = CanonValue::Null;
+        content.zeroize();
         *removed = true;
         *unproven = true;
         return;
     }
     for entry in entries {
         let CanonValue::Object(fields) = entry else {
-            *entry = CanonValue::Null;
+            entry.zeroize();
             *removed = true;
             *unproven = true;
             continue;
@@ -672,14 +1064,14 @@ fn project_native_tool_content(
                 &["type", "uri", "mime", "name"]
             }
             _ => {
-                *entry = CanonValue::Null;
+                entry.zeroize();
                 *removed = true;
                 *unproven = true;
                 continue;
             }
         };
         let prior_len = fields.len();
-        fields.retain(|name, value| {
+        retain_wiping(fields, |name, value| {
             allowed.contains(&name.as_str())
                 && (name != "name" || matches!(value, CanonValue::Str(_)))
         });
@@ -702,19 +1094,19 @@ fn project_classic_error(
         return;
     };
     if contains_opaque_hint(value) {
-        fields.remove(name);
+        remove_wiping(fields, name);
         *removed = true;
         *unproven = true;
         return;
     }
     let CanonValue::Object(error) = value else {
-        fields.remove(name);
+        remove_wiping(fields, name);
         *removed = true;
         *unproven = true;
         return;
     };
     let prior_len = error.len();
-    error.retain(|key, value| match key.as_str() {
+    retain_wiping(error, |key, value| match key.as_str() {
         "name" => matches!(value, CanonValue::Str(_)),
         "data" => matches!(value, CanonValue::Object(_)),
         _ => false,
@@ -727,7 +1119,7 @@ fn project_classic_error(
         return;
     };
     let prior_len = data.len();
-    data.retain(|key, value| match key.as_str() {
+    retain_wiping(data, |key, value| match key.as_str() {
         "providerID" | "message" | "ref" => matches!(value, CanonValue::Str(_)),
         "statusCode" | "retries" => matches!(value, CanonValue::Int(_)),
         "isRetryable" => matches!(value, CanonValue::Bool(_)),
@@ -748,7 +1140,7 @@ fn project_tool_state_files(
     unproven: &mut bool,
 ) {
     let completed = state.get("status").and_then(CanonValue::as_str) == Some("completed");
-    let Some(metadata) = state.remove("metadata") else {
+    let Some(metadata) = take_wiping(state, "metadata") else {
         return;
     };
     *unproven |= contains_opaque_hint(&metadata);
@@ -756,7 +1148,7 @@ fn project_tool_state_files(
         *removed = true;
         return;
     }
-    let projected = if let CanonValue::Object(fields) = &metadata {
+    let projected = if let CanonValue::Object(fields) = &*metadata {
         // OpenCode's tool-output transform adds this Boolean to successful
         // tool results, including results that did not need truncation. The
         // value has no extractor use, so recognize its type and drop it.
@@ -799,7 +1191,7 @@ fn project_tool_state_files(
         *unproven = true;
         None
     };
-    *removed |= projected.as_ref() != Some(&metadata);
+    *removed |= projected.as_ref() != Some(&*metadata);
     if let Some(projected) = projected {
         state.insert("metadata".to_owned(), projected);
     }
@@ -814,7 +1206,7 @@ fn scrub_assistant_message_hints(
     strip_provider_metadata(fields, removed, unproven);
     strip_named_opaque_fields(fields, removed, unproven);
     let prior_len = fields.len();
-    fields.retain(|name, _| {
+    retain_wiping(fields, |name, _| {
         if native {
             matches!(
                 name.as_str(),
@@ -857,7 +1249,7 @@ fn scrub_assistant_message_hints(
     if !native && let Some(CanonValue::Object(info)) = fields.get_mut("info") {
         strip_provider_metadata(info, removed, unproven);
         let prior_len = info.len();
-        info.retain(|name, _| {
+        retain_wiping(info, |name, _| {
             matches!(
                 name.as_str(),
                 "id" | "sessionID"
@@ -929,7 +1321,7 @@ fn scrub_assistant_message_hints(
         // V1 schema and generated output can carry arbitrary nested JSON.
         // A future card can type-project it; this card leaves a safe partial.
         for name in ["summary", "format", "structured"] {
-            if info.remove(name).is_some() {
+            if remove_wiping(info, name) {
                 *removed = true;
                 *unproven = true;
             }
@@ -937,13 +1329,13 @@ fn scrub_assistant_message_hints(
         if let Some(tools) = info.get_mut("tools") {
             if let CanonValue::Object(entries) = tools {
                 let prior_len = entries.len();
-                entries.retain(|_, value| matches!(value, CanonValue::Bool(_)));
+                retain_wiping(entries, |_, value| matches!(value, CanonValue::Bool(_)));
                 if entries.len() != prior_len {
                     *removed = true;
                     *unproven = true;
                 }
             } else {
-                info.remove("tools");
+                remove_wiping(info, "tools");
                 *removed = true;
                 *unproven = true;
             }
@@ -1034,13 +1426,13 @@ fn project_classic_file_source(
         return;
     };
     if contains_opaque_hint(value) {
-        fields.remove("source");
+        remove_wiping(fields, "source");
         *removed = true;
         *unproven = true;
         return;
     }
     let CanonValue::Object(source) = value else {
-        fields.remove("source");
+        remove_wiping(fields, "source");
         *removed = true;
         *unproven = true;
         return;
@@ -1051,14 +1443,14 @@ fn project_classic_file_source(
         Some("symbol") => &["type", "text", "path", "range", "name", "kind"],
         Some("resource") => &["type", "text", "clientName", "uri"],
         _ => {
-            fields.remove("source");
+            remove_wiping(fields, "source");
             *removed = true;
             *unproven = true;
             return;
         }
     };
     let prior_len = source.len();
-    source.retain(|name, _| allowed.contains(&name.as_str()));
+    retain_wiping(source, |name, _| allowed.contains(&name.as_str()));
     if source.len() != prior_len {
         *removed = true;
         *unproven = true;
@@ -1112,7 +1504,7 @@ fn project_classic_part(
         _ => &[],
     };
     let prior_len = fields.len();
-    fields.retain(|name, _| {
+    retain_wiping(fields, |name, _| {
         matches!(name.as_str(), "id" | "type" | "sessionID" | "messageID")
             || allowed.contains(&name.as_str())
     });
@@ -1185,7 +1577,7 @@ fn project_classic_part(
         && let Some(files) = fields.get("files")
         && !matches!(files, CanonValue::Array(entries) if entries.iter().all(|entry| matches!(entry, CanonValue::Str(_))))
     {
-        fields.remove("files");
+        remove_wiping(fields, "files");
         *removed = true;
         *unproven = true;
     }
@@ -1201,14 +1593,14 @@ fn project_classic_attachments(
         return;
     };
     let CanonValue::Array(parts) = attachments else {
-        state.remove("attachments");
+        remove_wiping(state, "attachments");
         *removed = true;
         *unproven = true;
         return;
     };
     for part in parts {
         let CanonValue::Object(fields) = part else {
-            *part = CanonValue::Null;
+            part.zeroize();
             *removed = true;
             *unproven = true;
             continue;
@@ -1217,7 +1609,7 @@ fn project_classic_attachments(
             || has_opaque_hint_on_nonreasoning(fields)
             || fields.values().any(contains_opaque_hint)
         {
-            *part = CanonValue::Null;
+            part.zeroize();
             *removed = true;
             *unproven = true;
             continue;
@@ -1236,8 +1628,10 @@ fn inspect_id_field(
     let invalid = match fields.get("id") {
         None | Some(CanonValue::Null) => false,
         Some(CanonValue::Str(id)) if !id.is_empty() => {
-            if seen.len() >= MAX_OBSERVED_IDS || !seen.insert(id.clone()) {
+            if seen.len() >= MAX_OBSERVED_IDS || seen.contains(id) {
                 *unproven = true;
+            } else {
+                let _ = seen.insert(id.clone());
             }
             false
         }
@@ -1245,7 +1639,7 @@ fn inspect_id_field(
     };
     if invalid {
         *unproven = true;
-        *removed |= fields.remove("id").is_some();
+        *removed |= remove_wiping(fields, "id");
     }
 }
 
@@ -1255,7 +1649,7 @@ fn inspect_nonunique_tool_id(
     unproven: &mut bool,
 ) {
     if !matches!(fields.get("id"), None | Some(CanonValue::Str(_))) {
-        *removed |= fields.remove("id").is_some();
+        *removed |= remove_wiping(fields, "id");
         *unproven = true;
     }
 }
@@ -1269,7 +1663,7 @@ fn scrub_parts(
 ) -> Result<(), ReasoningFieldError> {
     for part in parts {
         let CanonValue::Object(fields) = part else {
-            *part = CanonValue::Null;
+            part.zeroize();
             *removed = true;
             *unproven = true;
             continue;
@@ -1277,23 +1671,23 @@ fn scrub_parts(
         let Some(part_type) = fields
             .get("type")
             .and_then(CanonValue::as_str)
-            .map(str::to_owned)
+            .map(|value| Zeroizing::new(value.to_owned()))
         else {
             // An untyped part cannot identify a safe visible field. Discard
             // its complete payload while preserving the rest of the export.
-            *part = CanonValue::Null;
+            part.zeroize();
             *removed = true;
             *unproven = true;
             continue;
         };
-        if part_type == "tool" && !classic {
+        if part_type.as_str() == "tool" && !classic {
             // Native tool ids are provider call ids and can repeat across turns.
             inspect_nonunique_tool_id(fields, removed, unproven);
         } else {
             inspect_id_field(fields, seen_parts, removed, unproven);
         }
-        if part_type != "reasoning" {
-            if part_type == "text" {
+        if part_type.as_str() != "reasoning" {
+            if part_type.as_str() == "text" {
                 for name in [
                     "signature",
                     "redactedData",
@@ -1301,19 +1695,19 @@ fn scrub_parts(
                     "thoughtSignature",
                     "originProof",
                 ] {
-                    if fields.remove(name).is_some() {
+                    if remove_wiping(fields, name) {
                         *removed = true;
                         *unproven = true;
                     }
                 }
                 strip_provider_metadata(fields, removed, unproven);
-                if let Some(state) = fields.remove("state") {
+                if let Some(state) = take_wiping(fields, "state") {
                     *removed = true;
                     *unproven |= contains_opaque_hint(&state);
                 }
                 let visible_text = matches!(fields.get("text"), Some(CanonValue::Str(_)));
                 let prior_len = fields.len();
-                fields.retain(|name, _| {
+                retain_wiping(fields, |name, _| {
                     matches!(
                         name.as_str(),
                         "id" | "type"
@@ -1333,7 +1727,7 @@ fn scrub_parts(
                         .get(name)
                         .is_some_and(|value| !matches!(value, CanonValue::Str(_)))
                     {
-                        fields.remove(name);
+                        remove_wiping(fields, name);
                         *removed = true;
                         *unproven = true;
                     }
@@ -1343,7 +1737,7 @@ fn scrub_parts(
                         .get(name)
                         .is_some_and(|value| !matches!(value, CanonValue::Bool(_)))
                     {
-                        fields.remove(name);
+                        remove_wiping(fields, name);
                         *removed = true;
                         *unproven = true;
                     }
@@ -1351,25 +1745,25 @@ fn scrub_parts(
                 if classic {
                     project_envelope_object(fields, "time", &["start", "end"], removed, unproven);
                     project_classic_integer_time(fields, &["start", "end"], removed, unproven);
-                } else if fields.remove("time").is_some() {
+                } else if remove_wiping(fields, "time") {
                     *removed = true;
                     *unproven = true;
                 }
                 scrub_retained_envelope_fields(fields, "", removed, unproven);
             } else if has_opaque_hint_on_nonreasoning(fields) {
-                *part = CanonValue::Null;
+                part.zeroize();
                 *removed = true;
                 *unproven = true;
-            } else if !known_nonreasoning_part(&part_type, classic) {
+            } else if !known_nonreasoning_part(part_type.as_str(), classic) {
                 let prior_len = fields.len();
-                fields.retain(|name, _| matches!(name.as_str(), "id" | "type"));
+                retain_wiping(fields, |name, _| matches!(name.as_str(), "id" | "type"));
                 *removed |= fields.len() != prior_len;
                 *unproven = true;
             } else {
                 strip_provider_metadata(fields, removed, unproven);
-                if part_type == "tool" {
+                if part_type.as_str() == "tool" {
                     let prior_len = fields.len();
-                    fields.retain(|name, _| {
+                    retain_wiping(fields, |name, _| {
                         matches!(
                             name.as_str(),
                             "id" | "type"
@@ -1403,7 +1797,7 @@ fn scrub_parts(
                         unproven,
                     );
                     if classic {
-                        if fields.remove("time").is_some() {
+                        if remove_wiping(fields, "time") {
                             *removed = true;
                             *unproven = true;
                         }
@@ -1450,7 +1844,7 @@ fn scrub_parts(
                                     }
                                     _ => &["status", "input"],
                                 };
-                            state.retain(|name, _| allowed.contains(&name.as_str()));
+                            retain_wiping(state, |name, _| allowed.contains(&name.as_str()));
                             if state.len() != prior_len {
                                 *removed = true;
                                 *unproven = true;
@@ -1472,7 +1866,7 @@ fn scrub_parts(
                                 }
                             });
                             if !valid_status {
-                                *removed |= state.remove("status").is_some();
+                                *removed |= remove_wiping(state, "status");
                                 *unproven = true;
                             }
                             if classic {
@@ -1481,14 +1875,14 @@ fn scrub_parts(
                                         .get(name)
                                         .is_some_and(|value| !matches!(value, CanonValue::Str(_)))
                                     {
-                                        state.remove(name);
+                                        remove_wiping(state, name);
                                         *removed = true;
                                         *unproven = true;
                                     }
                                 }
                                 // V1 tool state has no content field. Do not
                                 // mistake an injected value for tool output.
-                                if state.remove("content").is_some() {
+                                if remove_wiping(state, "content") {
                                     *removed = true;
                                     *unproven = true;
                                 }
@@ -1516,7 +1910,7 @@ fn scrub_parts(
                                     .get("error")
                                     .is_some_and(|value| !matches!(value, CanonValue::Str(_)))
                                 {
-                                    state.remove("error");
+                                    remove_wiping(state, "error");
                                     *removed = true;
                                     *unproven = true;
                                 }
@@ -1525,7 +1919,7 @@ fn scrub_parts(
                             }
                         }
                         Some(_) => {
-                            *part = CanonValue::Null;
+                            part.zeroize();
                             *removed = true;
                             *unproven = true;
                         }
@@ -1534,7 +1928,7 @@ fn scrub_parts(
                         }
                     }
                 } else {
-                    project_classic_part(fields, &part_type, removed, unproven);
+                    project_classic_part(fields, part_type.as_str(), removed, unproven);
                 }
             }
             continue;
@@ -1547,8 +1941,16 @@ fn scrub_parts(
             *unproven = true;
         }
         let visible_text = visible_only && matches!(fields.get("text"), Some(CanonValue::Str(_)));
+        // The owning carrier has already copied the original decoded values.
+        // Erase the parsed private branch before the ordinary projection drops
+        // it; neither a denied nor a malformed proof is kept in that copy.
+        for name in ["state", "originProof"] {
+            if take_wiping(fields, name).is_some() {
+                *removed = true;
+            }
+        }
         let prior_len = fields.len();
-        fields.retain(|name, _| {
+        retain_wiping(fields, |name, _| {
             matches!(name.as_str(), "id" | "type") || (name == "text" && visible_text)
         });
         *removed |= fields.len() != prior_len;
@@ -1556,17 +1958,196 @@ fn scrub_parts(
     Ok(())
 }
 
+/// Copy only the closed assistant state that has an exact raw receipt span.
+/// The carrier is deliberately non-authoritative; a missing/malformed span
+/// leaves the part on OG-25's safe partial path without an issuer witness.
+fn collect_sealed_candidates(
+    export: &CanonValue,
+    source: &[u8],
+    receipts: &[ReceiptSpan],
+) -> Result<Option<SealedOpenCodeCandidates>, ReasoningFieldError> {
+    let CanonValue::Object(export) = export else {
+        return Ok(None);
+    };
+    let Some(CanonValue::Object(document)) = export.get("info") else {
+        return Ok(None);
+    };
+    let Some(source_session) = document.get("id").and_then(CanonValue::as_str) else {
+        return Ok(None);
+    };
+    let Some(messages) = export.get("messages").and_then(CanonValue::as_array) else {
+        return Ok(None);
+    };
+    // IDs are source coordinates, not merely display text. Ambiguous IDs must
+    // never be bound to a receipt from a different message or part.
+    let mut message_ids = BTreeMap::<&str, usize>::new();
+    let mut part_ids = BTreeMap::<&str, usize>::new();
+    for message in messages {
+        let CanonValue::Object(message) = message else {
+            continue;
+        };
+        if let Some(id) = message.get("id").and_then(CanonValue::as_str) {
+            *message_ids.entry(id).or_default() += 1;
+        }
+        if let Some(parts) = message.get("content").and_then(CanonValue::as_array) {
+            for part in parts {
+                if let CanonValue::Object(part) = part
+                    && let Some(id) = part.get("id").and_then(CanonValue::as_str)
+                {
+                    *part_ids.entry(id).or_default() += 1;
+                }
+            }
+        }
+    }
+    let mut candidates = None;
+    for (message_ordinal, message) in messages.iter().enumerate() {
+        let CanonValue::Object(message) = message else {
+            continue;
+        };
+        if message.get("type").and_then(CanonValue::as_str) != Some("assistant")
+            || message.contains_key("info")
+            || message.contains_key("parts")
+        {
+            continue;
+        }
+        let Some(source_message) = message.get("id").and_then(CanonValue::as_str) else {
+            continue;
+        };
+        if message_ids.get(source_message) != Some(&1) {
+            continue;
+        }
+        let Some(parts) = message.get("content").and_then(CanonValue::as_array) else {
+            continue;
+        };
+        for (part_ordinal, part) in parts.iter().enumerate() {
+            let CanonValue::Object(part) = part else {
+                continue;
+            };
+            if part.get("type").and_then(CanonValue::as_str) != Some("reasoning")
+                || !matches!(
+                    classify_reasoning_fields(part),
+                    ReasoningPartShape::Candidate
+                )
+            {
+                continue;
+            }
+            let Some(source_part) = part.get("id").and_then(CanonValue::as_str) else {
+                continue;
+            };
+            if part_ids.get(source_part) != Some(&1)
+                || part
+                    .get("sessionID")
+                    .is_some_and(|value| value.as_str() != Some(source_session))
+                || part
+                    .get("messageID")
+                    .is_some_and(|value| value.as_str() != Some(source_message))
+            {
+                continue;
+            }
+            let Some(CanonValue::Object(state)) = part.get("state") else {
+                continue;
+            };
+            let Some(CanonValue::Object(_)) = part.get("originProof") else {
+                continue;
+            };
+            let mut matching_receipts = receipts.iter().filter(|receipt| {
+                receipt.message_ordinal == message_ordinal && receipt.part_ordinal == part_ordinal
+            });
+            let Some(receipt) = matching_receipts.next() else {
+                continue;
+            };
+            if matching_receipts.next().is_some() {
+                return Err(ReasoningFieldError::MalformedSource);
+            }
+            let Some(raw_receipt) = source.get(receipt.start..receipt.end) else {
+                return Err(ReasoningFieldError::MalformedSource);
+            };
+            let mut fields = Vec::new();
+            fields
+                .try_reserve(state.len())
+                .map_err(|_| ReasoningFieldError::SourceTooLarge)?;
+            for (name, value) in state {
+                let field = match name.as_str() {
+                    "signature" => FieldName::Signature,
+                    "redactedData" => FieldName::RedactedData,
+                    "reasoningEncryptedContent" => FieldName::ReasoningEncryptedContent,
+                    // A closed state is checked above. If that invariant
+                    // changes, keep the whole export on the safe Unproven
+                    // path rather than suppressing its ordinary projection.
+                    _ => return Ok(None),
+                };
+                let Some(value) = value.as_str() else {
+                    return Ok(None);
+                };
+                fields.push((field, Zeroizing::new(value.to_owned())));
+            }
+            fields.sort_by_key(|(name, _)| *name);
+            let part = match OpenCodeCandidatePart::checked(
+                Zeroizing::new(source_message.to_owned()),
+                message_ordinal,
+                Zeroizing::new(source_part.to_owned()),
+                part_ordinal,
+                Zeroizing::new(raw_receipt.to_vec()),
+                fields,
+                source.len(),
+            ) {
+                Ok(part) => part,
+                // A malformed candidate is not evidence. Drop any earlier
+                // candidates too; scrub_parts will still remove every
+                // opaque field from the ordinary copy and mark it Unproven.
+                Err(ReasoningFieldError::UnsupportedShape) => return Ok(None),
+                Err(error) => return Err(error),
+            };
+            if candidates.is_none() {
+                candidates = Some(
+                    match SealedOpenCodeCandidates::checked(
+                        Zeroizing::new(source_session.to_owned()),
+                        source.len(),
+                    ) {
+                        Ok(batch) => batch,
+                        Err(ReasoningFieldError::UnsupportedShape) => return Ok(None),
+                        Err(error) => return Err(error),
+                    },
+                );
+            }
+            let Some(candidates) = candidates.as_mut() else {
+                return Ok(None);
+            };
+            match candidates.append(part) {
+                Ok(()) => {}
+                Err(ReasoningFieldError::UnsupportedShape) => return Ok(None),
+                Err(error) => return Err(error),
+            }
+        }
+    }
+    Ok(candidates)
+}
+
+/// The parser is invoked only after the structural preflight succeeds.
+/// Keeping this seam explicit lets a test prove oversized malformed input
+/// never materializes a JSON tree.
+fn parse_bounded_canon_value(
+    source: &[u8],
+    parse: impl FnOnce(&[u8]) -> Result<CanonValue, serde_json::Error>,
+) -> Result<(Vec<ReceiptSpan>, CanonValue), ReasoningFieldError> {
+    let receipts = StructureScanner::scan(source)?;
+    let export = parse(source).map_err(|_| ReasoningFieldError::MalformedSource)?;
+    Ok((receipts, export))
+}
+
 /// Consume the one authorized export buffer. No ciphertext, receipt, or
 /// providerContext.messages bytes are returned to ordinary capture sinks.
 pub(crate) fn prepare_authorized_source(
     source: Vec<u8>,
 ) -> Result<PreparedReasoningSource, ReasoningFieldError> {
+    let mut source = Zeroizing::new(source);
     if source.len() as u64 > TRANSCRIPT_READ_HARD_CAP_BYTES {
         return Err(ReasoningFieldError::SourceTooLarge);
     }
-    let mut export =
-        parse_canon_value(&source).map_err(|_| ReasoningFieldError::MalformedSource)?;
-    let CanonValue::Object(document) = &mut export else {
+    let (receipts, export) = parse_bounded_canon_value(&source, parse_canon_value)?;
+    let mut export = Zeroizing::new(export);
+    let candidates = collect_sealed_candidates(&export, &source, &receipts)?;
+    let CanonValue::Object(document) = &mut *export else {
         return Err(ReasoningFieldError::MalformedSource);
     };
     let classic_root = matches!(document.get("messages"), Some(CanonValue::Array(messages)) if messages.iter().any(|message| {
@@ -1577,7 +2158,9 @@ pub(crate) fn prepare_authorized_source(
     strip_provider_metadata(document, &mut removed, &mut unproven);
     strip_named_opaque_fields(document, &mut removed, &mut unproven);
     let root_len = document.len();
-    document.retain(|name, _| matches!(name.as_str(), "info" | "messages"));
+    retain_wiping(document, |name, _| {
+        matches!(name.as_str(), "info" | "messages")
+    });
     if document.len() != root_len {
         removed = true;
         unproven = true;
@@ -1587,7 +2170,7 @@ pub(crate) fn prepare_authorized_source(
             strip_provider_metadata(fields, &mut removed, &mut unproven);
             strip_named_opaque_fields(fields, &mut removed, &mut unproven);
             let prior_len = fields.len();
-            fields.retain(|name, _| {
+            retain_wiping(fields, |name, _| {
                 matches!(
                     name.as_str(),
                     "id" | "slug"
@@ -1685,7 +2268,7 @@ pub(crate) fn prepare_authorized_source(
                 );
             }
             let prior_len = fields.len();
-            fields.retain(|_, value| !contains_opaque_hint(value));
+            retain_wiping(fields, |_, value| !contains_opaque_hint(value));
             if fields.len() != prior_len {
                 removed = true;
                 unproven = true;
@@ -1694,7 +2277,7 @@ pub(crate) fn prepare_authorized_source(
                 scrub_nested_envelope_value(value, &mut removed, &mut unproven);
             }
         } else {
-            document.remove("info");
+            remove_wiping(document, "info");
             removed = true;
             unproven = true;
         }
@@ -1702,29 +2285,29 @@ pub(crate) fn prepare_authorized_source(
     let Some(CanonValue::Array(messages)) = document.get_mut("messages") else {
         return Err(ReasoningFieldError::MalformedSource);
     };
-    let mut seen_messages = BTreeSet::new();
-    let mut seen_parts = BTreeSet::new();
+    let mut seen_messages = WipingIdSet(BTreeSet::new());
+    let mut seen_parts = WipingIdSet(BTreeSet::new());
     for message in messages {
         let CanonValue::Object(fields) = message else {
             // The remaining messages can still contribute safe coverage.
-            *message = CanonValue::Null;
+            message.zeroize();
             removed = true;
             unproven = true;
             continue;
         };
-        if let Some(provider_context) = fields.remove("providerContext") {
+        if let Some(provider_context) = take_wiping(fields, "providerContext") {
             removed = true;
             unproven |= contains_opaque_hint(&provider_context);
-            if !matches!(provider_context, CanonValue::Object(_) | CanonValue::Null) {
+            if !matches!(&*provider_context, CanonValue::Object(_) | CanonValue::Null) {
                 unproven = true;
             }
         }
         let kind = match fields.get("type") {
             None => None,
-            Some(CanonValue::Str(kind)) => Some(kind.clone()),
+            Some(CanonValue::Str(kind)) => Some(Zeroizing::new(kind.clone())),
             Some(_) => {
                 // Without a valid type, no envelope field is safe to retain.
-                *message = CanonValue::Null;
+                message.zeroize();
                 removed = true;
                 unproven = true;
                 continue;
@@ -1734,7 +2317,7 @@ pub(crate) fn prepare_authorized_source(
         if (native && (fields.contains_key("info") || fields.contains_key("parts")))
             || (!native && fields.contains_key("content"))
         {
-            *message = CanonValue::Null;
+            message.zeroize();
             removed = true;
             unproven = true;
             continue;
@@ -1745,7 +2328,7 @@ pub(crate) fn prepare_authorized_source(
             inspect_id_field(info, &mut seen_messages, &mut removed, &mut unproven);
         }
         let assistant = if native {
-            kind.as_deref() == Some("assistant")
+            kind.as_ref().map(|kind| kind.as_str()) == Some("assistant")
         } else {
             let role = fields
                 .get("info")
@@ -1754,13 +2337,13 @@ pub(crate) fn prepare_authorized_source(
             let Some(role) = role else {
                 // The classic role is the only proof that its payload is
                 // ordinary user text rather than assistant provider state.
-                *message = CanonValue::Null;
+                message.zeroize();
                 removed = true;
                 unproven = true;
                 continue;
             };
             if !matches!(role, "user" | "assistant") {
-                *message = CanonValue::Null;
+                message.zeroize();
                 removed = true;
                 unproven = true;
                 continue;
@@ -1768,9 +2351,13 @@ pub(crate) fn prepare_authorized_source(
             role == "assistant"
         };
         if !assistant {
-            if native && !kind.as_deref().is_some_and(known_native_nonassistant) {
+            if native
+                && !kind
+                    .as_ref()
+                    .is_some_and(|kind| known_native_nonassistant(kind.as_str()))
+            {
                 let prior_len = fields.len();
-                fields.retain(|name, _| matches!(name.as_str(), "id" | "type"));
+                retain_wiping(fields, |name, _| matches!(name.as_str(), "id" | "type"));
                 removed |= fields.len() != prior_len;
                 unproven = true;
                 continue;
@@ -1780,7 +2367,7 @@ pub(crate) fn prepare_authorized_source(
                 strip_named_opaque_fields(fields, &mut removed, &mut unproven);
                 retain_native_nonassistant_envelope(
                     fields,
-                    kind.as_deref().unwrap_or_default(),
+                    kind.as_ref().map(|kind| kind.as_str()).unwrap_or_default(),
                     &mut removed,
                     &mut unproven,
                 );
@@ -1792,7 +2379,7 @@ pub(crate) fn prepare_authorized_source(
                 Some(CanonValue::Array(parts)) => {
                     for part in parts {
                         let CanonValue::Object(part_fields) = part else {
-                            *part = CanonValue::Null;
+                            part.zeroize();
                             removed = true;
                             unproven = true;
                             continue;
@@ -1802,7 +2389,7 @@ pub(crate) fn prepare_authorized_source(
                             .and_then(CanonValue::as_str)
                             .is_none()
                         {
-                            *part = CanonValue::Null;
+                            part.zeroize();
                             removed = true;
                             unproven = true;
                             continue;
@@ -1811,14 +2398,14 @@ pub(crate) fn prepare_authorized_source(
                             || has_opaque_hint_on_nonreasoning(part_fields)
                             || part_fields.values().any(contains_opaque_hint)
                         {
-                            *part = CanonValue::Null;
+                            part.zeroize();
                             removed = true;
                             unproven = true;
                             continue;
                         }
                         strip_provider_metadata(part_fields, &mut removed, &mut unproven);
-                        let removed_context = part_fields.remove("providerContext").is_some();
-                        let removed_state = part_fields.remove("state").is_some();
+                        let removed_context = remove_wiping(part_fields, "providerContext");
+                        let removed_state = remove_wiping(part_fields, "state");
                         if removed_context || removed_state {
                             removed = true;
                             unproven = true;
@@ -1827,7 +2414,7 @@ pub(crate) fn prepare_authorized_source(
                             part_fields.get("type").and_then(CanonValue::as_str) == Some("text");
                         if text_part && !matches!(part_fields.get("text"), Some(CanonValue::Str(_)))
                         {
-                            *part = CanonValue::Null;
+                            part.zeroize();
                             removed = true;
                             unproven = true;
                             continue;
@@ -1842,26 +2429,28 @@ pub(crate) fn prepare_authorized_source(
                                 true,
                             )
                         {
-                            let part_type = part_fields
-                                .get("type")
-                                .and_then(CanonValue::as_str)
-                                .unwrap_or_default()
-                                .to_owned();
-                            if part_type == "tool" {
-                                *part = CanonValue::Null;
+                            let part_type = Zeroizing::new(
+                                part_fields
+                                    .get("type")
+                                    .and_then(CanonValue::as_str)
+                                    .unwrap_or_default()
+                                    .to_owned(),
+                            );
+                            if part_type.as_str() == "tool" {
+                                part.zeroize();
                                 removed = true;
                                 unproven = true;
                                 continue;
                             }
                             project_classic_part(
                                 part_fields,
-                                &part_type,
+                                part_type.as_str(),
                                 &mut removed,
                                 &mut unproven,
                             );
                         } else {
                             let prior_len = part_fields.len();
-                            part_fields.retain(|name, _| {
+                            retain_wiping(part_fields, |name, _| {
                                 matches!(name.as_str(), "id" | "type" | "time")
                                     || (text_part
                                         && matches!(
@@ -1905,7 +2494,7 @@ pub(crate) fn prepare_authorized_source(
                                     &mut removed,
                                     &mut unproven,
                                 );
-                            } else if part_fields.remove("time").is_some() {
+                            } else if remove_wiping(part_fields, "time") {
                                 removed = true;
                                 unproven = true;
                             }
@@ -1919,7 +2508,7 @@ pub(crate) fn prepare_authorized_source(
                     }
                 }
                 Some(_) => {
-                    removed |= fields.remove(part_key).is_some();
+                    removed |= remove_wiping(fields, part_key);
                     unproven = true;
                 }
                 None => {}
@@ -1933,7 +2522,7 @@ pub(crate) fn prepare_authorized_source(
                 scrub_parts(parts, !native, &mut seen_parts, &mut removed, &mut unproven)?;
             }
             Some(_) => {
-                removed |= fields.remove(part_key).is_some();
+                removed |= remove_wiping(fields, part_key);
                 unproven = true;
             }
             None => unproven = true,
@@ -1947,11 +2536,23 @@ pub(crate) fn prepare_authorized_source(
         );
     }
     let ordinary = if removed {
-        serde_json::to_vec(&export).map_err(|_| ReasoningFieldError::MalformedSource)?
+        let cap = usize::try_from(TRANSCRIPT_READ_HARD_CAP_BYTES)
+            .map_err(|_| ReasoningFieldError::SourceTooLarge)?;
+        let mut writer = BoundedOrdinaryWriter {
+            bytes: Zeroizing::new(Vec::new()),
+            cap,
+        };
+        serde_json::to_writer(&mut writer, &*export)
+            .map_err(|_| ReasoningFieldError::SourceTooLarge)?;
+        writer.into_bytes()
     } else {
-        source
+        std::mem::take(&mut *source)
     };
-    if unproven {
+    if let Some(candidates) = candidates {
+        Ok(PreparedReasoningSource::with_opencode_candidates(
+            ordinary, candidates,
+        ))
+    } else if unproven {
         Ok(PreparedReasoningSource::unproven_candidates(ordinary))
     } else {
         Ok(PreparedReasoningSource::without_candidates(ordinary))
@@ -1966,6 +2567,156 @@ mod tests {
         extract::extract_opencode,
         reasoning::{ReasoningSourceDisposition, ReasoningSourceState},
     };
+
+    #[test]
+    fn og26_structural_preflight_never_calls_parser_over_budget() {
+        use std::cell::Cell;
+
+        let mut bytes = Vec::with_capacity(2 * (OPENCODE_CANON_MAX_NODES + 1) + 10);
+        bytes.push(b'[');
+        for index in 0..=OPENCODE_CANON_MAX_NODES {
+            if index != 0 {
+                bytes.push(b',');
+            }
+            bytes.push(b'0');
+        }
+        bytes.extend_from_slice(b",INVALID]");
+        let called = Cell::new(false);
+        assert!(matches!(
+            parse_bounded_canon_value(&bytes, |_| {
+                called.set(true);
+                parse_canon_value(b"null")
+            }),
+            Err(ReasoningFieldError::SourceTooLarge)
+        ));
+        assert!(!called.get());
+        let deep = "[".repeat(200);
+        assert!(matches!(
+            parse_bounded_canon_value(deep.as_bytes(), |_| {
+                called.set(true);
+                parse_canon_value(b"null")
+            }),
+            Err(ReasoningFieldError::SourceTooLarge)
+        ));
+        assert!(!called.get());
+    }
+
+    #[test]
+    fn og26_candidate_receipt_coordinates_are_unambiguous() {
+        let candidate = r#"{"id":"npart_0123456789abcdef0123456789abcdef","type":"reasoning","text":"safe","state":{"signature":"private"},"originProof":{"nonce":"content"}}"#;
+        let source = format!(
+            r#"{{"info":{{"id":"ses_og26_fixture"}},"messages":[{{"id":"msg_og26","type":"assistant","parts":[{{"originProof":{{"nonce":"parts"}}}}],"content":[{candidate}]}}]}}"#
+        );
+        let (receipts, export) =
+            parse_bounded_canon_value(source.as_bytes(), parse_canon_value).expect("strict source");
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(
+            &source.as_bytes()[receipts[0].start..receipts[0].end],
+            br#"{"nonce":"content"}"#
+        );
+        assert!(
+            collect_sealed_candidates(&export, source.as_bytes(), &receipts)
+                .expect("invalid mixed native/classic cannot create a candidate")
+                .is_none()
+        );
+
+        let source = source.replace(r#","parts":[{"originProof":{"nonce":"parts"}}]"#, "");
+        let (receipts, export) = parse_bounded_canon_value(source.as_bytes(), parse_canon_value)
+            .expect("strict native source");
+        assert!(
+            collect_sealed_candidates(&export, source.as_bytes(), &receipts)
+                .expect("unique native coordinates")
+                .is_some()
+        );
+        let duplicate_receipts = [
+            ReceiptSpan {
+                message_ordinal: 0,
+                part_ordinal: 0,
+                start: receipts[0].start,
+                end: receipts[0].end,
+            },
+            ReceiptSpan {
+                message_ordinal: 0,
+                part_ordinal: 0,
+                start: receipts[0].start,
+                end: receipts[0].end,
+            },
+        ];
+        assert!(matches!(
+            collect_sealed_candidates(&export, source.as_bytes(), &duplicate_receipts),
+            Err(ReasoningFieldError::MalformedSource)
+        ));
+
+        let duplicate_part = format!(
+            r#"{{"info":{{"id":"ses_og26_fixture"}},"messages":[{{"id":"msg_og26","type":"assistant","content":[{candidate},{candidate}]}}]}}"#
+        );
+        let (receipts, export) =
+            parse_bounded_canon_value(duplicate_part.as_bytes(), parse_canon_value)
+                .expect("strict duplicate-ID source");
+        assert!(
+            collect_sealed_candidates(&export, duplicate_part.as_bytes(), &receipts)
+                .expect("ambiguous IDs stay unproved")
+                .is_none()
+        );
+
+        let duplicate_message = format!(
+            r#"{{"info":{{"id":"ses_og26_fixture"}},"messages":[{{"id":"msg_og26","type":"assistant","content":[{candidate}]}},{{"id":"msg_og26","type":"user","text":"safe"}}]}}"#
+        );
+        let (receipts, export) =
+            parse_bounded_canon_value(duplicate_message.as_bytes(), parse_canon_value)
+                .expect("strict duplicate-message source");
+        assert!(
+            collect_sealed_candidates(&export, duplicate_message.as_bytes(), &receipts)
+                .expect("ambiguous message coordinates stay unproved")
+                .is_none()
+        );
+
+        let wrong_ref = candidate.replace(
+            r#""type":"reasoning""#,
+            r#""type":"reasoning","sessionID":"ses_other","messageID":"msg_og26""#,
+        );
+        let wrong_ref = format!(
+            r#"{{"info":{{"id":"ses_og26_fixture"}},"messages":[{{"id":"msg_og26","type":"assistant","content":[{wrong_ref}]}}]}}"#
+        );
+        let (receipts, export) = parse_bounded_canon_value(wrong_ref.as_bytes(), parse_canon_value)
+            .expect("strict inconsistent-reference source");
+        assert!(
+            collect_sealed_candidates(&export, wrong_ref.as_bytes(), &receipts)
+                .expect("mismatched source coordinates stay unproved")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn og26_malformed_candidate_coordinates_keep_safe_ordinary_copy() {
+        let valid = r#"{"id":"npart_0123456789abcdef0123456789abcdef","type":"reasoning","text":"visible","state":{"signature":"private-signature"},"originProof":{"nonce":"private-proof"}}"#;
+        let malformed = valid.replace("npart_", "prt_");
+        for source in [
+            export(&malformed),
+            export(&format!("{valid},{malformed}")),
+            export(valid).replace("ses_og25", &"s".repeat(1025)),
+        ] {
+            let (ordinary, state) = prepare(&source).expect("malformed candidate is partial");
+            assert!(matches!(state, ReasoningSourceState::Unproven));
+            let ordinary = String::from_utf8(ordinary).expect("ordinary copy is UTF-8");
+            assert!(ordinary.contains("prompt"));
+            assert!(!ordinary.contains("private-signature"));
+            assert!(!ordinary.contains("private-proof"));
+            assert!(!ordinary.contains("originProof"));
+            assert!(!ordinary.contains("\"state\""));
+        }
+    }
+
+    #[test]
+    fn og26_bounded_ordinary_writer_rejects_expansion() {
+        let mut writer = BoundedOrdinaryWriter {
+            bytes: Zeroizing::new(Vec::new()),
+            cap: 4,
+        };
+        writer.write_all(b"safe").expect("exact output cap");
+        assert!(writer.write_all(b"extra").is_err());
+        assert_eq!(writer.into_bytes(), b"safe");
+    }
 
     fn prepare(source: &str) -> Result<(Vec<u8>, ReasoningSourceState), ReasoningFieldError> {
         let prepared = prepare_authorized_source(source.as_bytes().to_vec())?;

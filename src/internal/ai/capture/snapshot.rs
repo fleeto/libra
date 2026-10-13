@@ -11,6 +11,7 @@ use std::{fmt, time::Instant};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use zeroize::{Zeroize, Zeroizing};
 
 pub(crate) use crate::internal::ai::capture::extraction::DeadlineExtractionResult;
 use crate::internal::ai::{
@@ -21,8 +22,10 @@ use crate::internal::ai::{
     observed_agents::{
         AgentKind, AgentSessionCtx, ObservedAgent, RedactedBytes, RedactionReport, Redactor,
         TRANSCRIPT_READ_HARD_CAP_BYTES, TranscriptReadError, TranscriptSource,
-        TranscriptSourceResolution, reasoning::ReasoningSourceDisposition,
-        resolve_live_transcript_source_until, transcript_source::InMemoryTranscriptOrigin,
+        TranscriptSourceResolution,
+        reasoning::{ReasoningFieldError, ReasoningSourceDisposition},
+        resolve_live_transcript_source_until,
+        transcript_source::InMemoryTranscriptOrigin,
     },
 };
 
@@ -297,27 +300,42 @@ impl AuthorizedReasoningSourceContext {
     }
 }
 
+/// Rejections before the preprocessor still own an authorized in-memory export.
+/// Erase that raw allocation before returning a content-free partial result.
+fn wipe_in_memory_source(source: &mut TranscriptSource) {
+    if let TranscriptSource::Bytes { bytes, .. } = source {
+        bytes.zeroize();
+    }
+}
+
 /// Called once, after source authorization and a bounded read, before Redactor.
 fn prepare_authorized_reasoning_source(
     bytes: Vec<u8>,
     adapter: &dyn ObservedAgent,
     context: &AuthorizedReasoningSourceContext,
     policy: CaptureSnapshotPolicy,
-) -> Result<(Vec<u8>, ReasoningSourceDisposition), ()> {
-    if deadline_elapsed(policy)
-        || bytes.len() as u64 > policy.max_bytes
-        || adapter.provider_kind().as_db_str() != context.provider
-    {
-        return Err(());
+) -> Result<(Vec<u8>, ReasoningSourceDisposition), CaptureSnapshotPartialReason> {
+    let mut bytes = Zeroizing::new(bytes);
+    if deadline_elapsed(policy) {
+        return Err(CaptureSnapshotPartialReason::DeadlineExceeded);
+    }
+    if bytes.len() as u64 > policy.max_bytes {
+        return Err(CaptureSnapshotPartialReason::SourceOversize);
+    }
+    if adapter.provider_kind().as_db_str() != context.provider {
+        return Err(CaptureSnapshotPartialReason::SourceAuthorizationMismatch);
     }
     let Some(preprocessor) = adapter.as_reasoning_source_preprocessor() else {
-        return Ok((bytes, ReasoningSourceDisposition::Ordinary));
+        return Ok((
+            std::mem::take(&mut *bytes),
+            ReasoningSourceDisposition::Ordinary,
+        ));
     };
     let prepared = preprocessor
-        .prepare_authorized_source(bytes)
-        .map_err(|_| ())?;
+        .prepare_authorized_source(std::mem::take(&mut *bytes))
+        .map_err(reasoning_preparation_partial_reason)?;
     if deadline_elapsed(policy) {
-        return Err(());
+        return Err(CaptureSnapshotPartialReason::DeadlineExceeded);
     }
     ReasoningSourceDisposition::from_prepared_authorized_source(
         prepared,
@@ -327,7 +345,18 @@ fn prepare_authorized_reasoning_source(
         &context.capture_session,
         context.provider_session.as_deref(),
     )
-    .map_err(|_| ())
+    .map_err(reasoning_preparation_partial_reason)
+}
+
+fn reasoning_preparation_partial_reason(
+    error: ReasoningFieldError,
+) -> CaptureSnapshotPartialReason {
+    match error {
+        ReasoningFieldError::SourceTooLarge => CaptureSnapshotPartialReason::SourceOversize,
+        ReasoningFieldError::MalformedSource | ReasoningFieldError::UnsupportedShape => {
+            CaptureSnapshotPartialReason::SourceAuthorizationMismatch
+        }
+    }
 }
 
 /// A captured transcript after its raw source was bounded and redacted.
@@ -643,7 +672,7 @@ impl CaptureSnapshotService {
         if policy.deadline().is_some() {
             return CaptureSnapshot::partial(CaptureSnapshotPartialReason::SourceReadError, None);
         }
-        let resolution = match resolve_live_transcript_source_until(adapter, context, None) {
+        let mut resolution = match resolve_live_transcript_source_until(adapter, context, None) {
             Ok(resolution) => resolution,
             Err(_) => {
                 return CaptureSnapshot::partial(
@@ -653,6 +682,9 @@ impl CaptureSnapshotService {
             }
         };
         if deadline_elapsed(policy) {
+            if let TranscriptSourceResolution::Authorized(source) = &mut resolution {
+                wipe_in_memory_source(source);
+            }
             return CaptureSnapshot::partial(CaptureSnapshotPartialReason::DeadlineExceeded, None);
         }
         match resolution {
@@ -721,7 +753,11 @@ impl CaptureSnapshotService {
                     }
                 }
             }
-            Ok(TranscriptSourceResolution::Authorized(TranscriptSource::Bytes { .. })) => {
+            Ok(TranscriptSourceResolution::Authorized(TranscriptSource::Bytes {
+                mut bytes,
+                ..
+            })) => {
+                bytes.zeroize();
                 return CaptureSnapshot::partial(
                     CaptureSnapshotPartialReason::SourceAuthorizationMismatch,
                     None,
@@ -793,12 +829,13 @@ impl CaptureSnapshotService {
     /// provider file, trusted exporter response, or securely discovered child
     /// source. This consumes the source exactly once and never reopens a path.
     pub fn capture_authorized(
-        source: TranscriptSource,
+        mut source: TranscriptSource,
         agent_kind: &str,
         libra_session_id: &str,
         policy: CaptureSnapshotPolicy,
     ) -> CaptureSnapshot {
         let Some(kind) = AgentKind::from_db_str(agent_kind) else {
+            wipe_in_memory_source(&mut source);
             return CaptureSnapshot::partial(
                 CaptureSnapshotPartialReason::SourceAuthorizationMismatch,
                 None,
@@ -817,19 +854,21 @@ impl CaptureSnapshotService {
     }
 
     pub(crate) fn capture_authorized_with_reasoning_context(
-        source: TranscriptSource,
+        mut source: TranscriptSource,
         adapter: &dyn ObservedAgent,
         context: AuthorizedReasoningSourceContext,
         policy: CaptureSnapshotPolicy,
     ) -> CaptureSnapshot {
         let mut source_projection = source_projection(&source);
         if adapter.provider_kind().as_db_str() != context.provider {
+            wipe_in_memory_source(&mut source);
             return CaptureSnapshot::partial(
                 CaptureSnapshotPartialReason::SourceAuthorizationMismatch,
                 Some(source_projection),
             );
         }
         if deadline_elapsed(policy) {
+            wipe_in_memory_source(&mut source);
             return CaptureSnapshot::partial(
                 CaptureSnapshotPartialReason::DeadlineExceeded,
                 Some(source_projection),
@@ -839,6 +878,7 @@ impl CaptureSnapshotService {
         let source_len = match source.authorized_len() {
             Ok(length) => length,
             Err(_) => {
+                wipe_in_memory_source(&mut source);
                 return CaptureSnapshot::partial(
                     CaptureSnapshotPartialReason::SourceReadError,
                     Some(source_projection),
@@ -847,6 +887,7 @@ impl CaptureSnapshotService {
         };
         source_projection.byte_len = Some(source_len);
         if source_len > policy.max_bytes {
+            wipe_in_memory_source(&mut source);
             return CaptureSnapshot::partial(
                 CaptureSnapshotPartialReason::SourceOversize,
                 Some(source_projection),
@@ -855,10 +896,11 @@ impl CaptureSnapshotService {
 
         let bytes = match source {
             TranscriptSource::File { mut file, .. } => file.read_bounded(policy.max_bytes),
-            TranscriptSource::Bytes { bytes, auth } => {
+            TranscriptSource::Bytes { mut bytes, auth } => {
                 if auth.matches(&context.provider, &context.authorized_session, &bytes) {
                     Ok(bytes)
                 } else {
+                    bytes.zeroize();
                     return CaptureSnapshot::partial(
                         CaptureSnapshotPartialReason::SourceAuthorizationMismatch,
                         Some(source_projection),
@@ -891,6 +933,7 @@ impl CaptureSnapshotService {
         context: &AuthorizedReasoningSourceContext,
         policy: CaptureSnapshotPolicy,
     ) -> CaptureSnapshot {
+        let mut bytes = Zeroizing::new(bytes);
         // A descriptor-pinned file may change between its metadata probe and
         // bounded read. Complete durable evidence must describe exactly the
         // bytes that were read and redacted, not the earlier inode length.
@@ -909,18 +952,19 @@ impl CaptureSnapshotService {
             );
         }
 
-        let (bytes, reasoning) =
-            match prepare_authorized_reasoning_source(bytes, adapter, context, policy) {
-                Ok(prepared) => prepared,
-                Err(()) => {
-                    let mut snapshot = CaptureSnapshot::partial(
-                        CaptureSnapshotPartialReason::SourceAuthorizationMismatch,
-                        Some(source_projection),
-                    );
-                    snapshot.reasoning = ReasoningSourceDisposition::Unproven;
-                    return snapshot;
-                }
-            };
+        let (bytes, reasoning) = match prepare_authorized_reasoning_source(
+            std::mem::take(&mut *bytes),
+            adapter,
+            context,
+            policy,
+        ) {
+            Ok(prepared) => prepared,
+            Err(reason) => {
+                let mut snapshot = CaptureSnapshot::partial(reason, Some(source_projection));
+                snapshot.reasoning = ReasoningSourceDisposition::Unproven;
+                return snapshot;
+            }
+        };
         // Apply the same output and two-buffer budget as the helper-backed
         // path. A redaction placeholder may expand a short secret, but an
         // unbounded expansion must become a content-free partial here rather
@@ -2005,7 +2049,7 @@ mod tests {
         let snapshot = carrier_test_snapshot(&fixture::OVERSIZE, b"ordinary".to_vec());
         assert_eq!(
             snapshot.partial_reason(),
-            Some(CaptureSnapshotPartialReason::SourceAuthorizationMismatch)
+            Some(CaptureSnapshotPartialReason::SourceOversize)
         );
         assert!(snapshot.transcript().is_none());
         assert!(snapshot.try_into_ordinary().is_err());
@@ -2026,5 +2070,253 @@ mod tests {
         );
         assert!(snapshot.transcript().is_none());
         assert!(snapshot.try_into_ordinary().is_err());
+    }
+
+    fn og26_snapshot(bytes: Vec<u8>, policy: CaptureSnapshotPolicy) -> CaptureSnapshot {
+        use crate::internal::ai::observed_agents::{ExportAuthorized, agent_for};
+
+        let capture = "capture__og26_fixture";
+        let source = "ses_og26_fixture";
+        CaptureSnapshotService::capture_authorized_with_reasoning_context(
+            TranscriptSource::Bytes {
+                auth: ExportAuthorized::issue("opencode", capture, &bytes),
+                bytes,
+            },
+            agent_for(AgentKind::OpenCode),
+            AuthorizedReasoningSourceContext::authorized_export("opencode", capture, source),
+            policy,
+        )
+    }
+
+    #[test]
+    fn og26_preprocessor_rejections_wipe_and_hide_raw_source() {
+        use crate::internal::ai::observed_agents::{ExportAuthorized, agent_for};
+
+        const MARKER: &[u8] = b"OG26_PREPARSER_PRIVATE_canary";
+        let source = |bytes: &[u8], session: &str| TranscriptSource::Bytes {
+            auth: ExportAuthorized::issue("opencode", session, bytes),
+            bytes: bytes.to_vec(),
+        };
+        let mut probe = source(MARKER, "capture_og26");
+        wipe_in_memory_source(&mut probe);
+        let TranscriptSource::Bytes { bytes, .. } = probe else {
+            panic!("test source must remain an owned export")
+        };
+        assert!(bytes.is_empty(), "zeroize clears the owned export buffer");
+
+        let capture = "capture_og26";
+        let provider = "ses_og26_fixture";
+        let adapter = agent_for(AgentKind::OpenCode);
+        let expired = Instant::now()
+            .checked_sub(Duration::from_millis(1))
+            .expect("test clock has a past instant");
+        let cases = [
+            (
+                "unknown provider",
+                CaptureSnapshotService::capture_authorized(
+                    source(MARKER, capture),
+                    "unknown-provider",
+                    capture,
+                    CaptureSnapshotPolicy::default(),
+                ),
+                CaptureSnapshotPartialReason::SourceAuthorizationMismatch,
+            ),
+            (
+                "provider mismatch",
+                CaptureSnapshotService::capture_authorized_with_reasoning_context(
+                    source(MARKER, capture),
+                    adapter,
+                    AuthorizedReasoningSourceContext::authorized_export(
+                        "claude_code",
+                        capture,
+                        provider,
+                    ),
+                    CaptureSnapshotPolicy::default(),
+                ),
+                CaptureSnapshotPartialReason::SourceAuthorizationMismatch,
+            ),
+            (
+                "expired deadline",
+                CaptureSnapshotService::capture_authorized_with_reasoning_context(
+                    source(MARKER, capture),
+                    adapter,
+                    AuthorizedReasoningSourceContext::authorized_export(
+                        "opencode", capture, provider,
+                    ),
+                    CaptureSnapshotPolicy::with_max_bytes(Some(expired), 1024),
+                ),
+                CaptureSnapshotPartialReason::DeadlineExceeded,
+            ),
+            (
+                "source oversize",
+                CaptureSnapshotService::capture_authorized_with_reasoning_context(
+                    source(MARKER, capture),
+                    adapter,
+                    AuthorizedReasoningSourceContext::authorized_export(
+                        "opencode", capture, provider,
+                    ),
+                    CaptureSnapshotPolicy::with_max_bytes(None, 1),
+                ),
+                CaptureSnapshotPartialReason::SourceOversize,
+            ),
+            (
+                "authorization mismatch",
+                CaptureSnapshotService::capture_authorized_with_reasoning_context(
+                    source(MARKER, "another_capture"),
+                    adapter,
+                    AuthorizedReasoningSourceContext::authorized_export(
+                        "opencode", capture, provider,
+                    ),
+                    CaptureSnapshotPolicy::default(),
+                ),
+                CaptureSnapshotPartialReason::SourceAuthorizationMismatch,
+            ),
+            (
+                "empty export",
+                CaptureSnapshotService::capture_authorized_with_reasoning_context(
+                    source(&[], capture),
+                    adapter,
+                    AuthorizedReasoningSourceContext::authorized_export(
+                        "opencode", capture, provider,
+                    ),
+                    CaptureSnapshotPolicy::default(),
+                ),
+                CaptureSnapshotPartialReason::SourceEmpty,
+            ),
+        ];
+        for (name, snapshot, reason) in cases {
+            assert_eq!(snapshot.partial_reason(), Some(reason), "{name}");
+            assert_eq!(
+                snapshot.completeness(),
+                CaptureSnapshotCompleteness::Partial,
+                "{name}"
+            );
+            assert!(snapshot.transcript().is_none(), "{name}");
+            assert!(
+                !format!("{snapshot:?}").contains("OG26_PREPARSER_PRIVATE"),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn og26_opencode_candidate_is_removed_before_redactor() {
+        use crate::internal::ai::observed_agents::reasoning::{
+            ReasoningSourceDisposition, assert_og26_candidate_for_test,
+        };
+
+        let receipt = r#"{ "receipt" : "r\u0065ceipt", "nonce" : 3 }"#;
+        let source = format!(
+            r#"{{"info":{{"id":"ses_og26_fixture"}},"messages":[{{"id":"msg_og26","type":"assistant","content":[{{"id":"npart_0123456789abcdef0123456789abcdef","type":"reasoning","text":"safe visible","state":{{"signature":"sig-\u754c","redactedData":"red-\u00e9","reasoningEncryptedContent":"enc-\uD83D\uDE80"}},"originProof":{receipt}}}]}}]}}"#
+        );
+        let snapshot = og26_snapshot(source.into_bytes(), CaptureSnapshotPolicy::default());
+        assert_eq!(
+            snapshot.completeness(),
+            CaptureSnapshotCompleteness::Partial
+        );
+        assert!(snapshot.rejects_capture_source_consumer());
+        assert!(matches!(
+            snapshot.reasoning,
+            ReasoningSourceDisposition::OpenCodeCandidate(_)
+        ));
+        assert_og26_candidate_for_test(&snapshot.reasoning, receipt.as_bytes());
+        let ordinary = snapshot
+            .transcript()
+            .expect("a safe redacted copy remains in the private snapshot")
+            .bytes();
+        let visible = std::str::from_utf8(ordinary).expect("JSON remains UTF-8");
+        assert!(visible.contains("messages"));
+        for forbidden in [
+            "sig-",
+            "red-",
+            "enc-",
+            "receipt",
+            "originProof",
+            "signature",
+        ] {
+            assert!(
+                !visible.contains(forbidden),
+                "ordinary output leaked {forbidden}"
+            );
+        }
+        assert!(!format!("{snapshot:?}").contains("sig-"));
+        assert!(snapshot.try_into_ordinary().is_err());
+    }
+
+    #[test]
+    fn og26_candidate_budget_and_partial_are_closed() {
+        use crate::internal::ai::observed_agents::{
+            opencode_reasoning::prepare_authorized_source, reasoning::ReasoningFieldError,
+        };
+
+        let mut dense = Vec::with_capacity(2 * 65_537 + 2);
+        dense.push(b'[');
+        for ordinal in 0..=65_536 {
+            if ordinal > 0 {
+                dense.push(b',');
+            }
+            dense.push(b'0');
+        }
+        dense.push(b']');
+        assert!(matches!(
+            prepare_authorized_source(dense.clone()),
+            Err(ReasoningFieldError::SourceTooLarge)
+        ));
+        let snapshot = og26_snapshot(dense, CaptureSnapshotPolicy::default());
+        assert_eq!(
+            snapshot.completeness(),
+            CaptureSnapshotCompleteness::Partial
+        );
+        assert!(snapshot.transcript().is_none());
+        assert_eq!(
+            snapshot.partial_reason(),
+            Some(CaptureSnapshotPartialReason::SourceOversize)
+        );
+
+        // The lexical budget refuses even a malformed tail before JSON tree materialization.
+        let mut invalid_after_budget = Vec::with_capacity(2 * 65_537 + 12);
+        invalid_after_budget.push(b'[');
+        for ordinal in 0..=65_536 {
+            if ordinal > 0 {
+                invalid_after_budget.push(b',');
+            }
+            invalid_after_budget.push(b'0');
+        }
+        invalid_after_budget.extend_from_slice(b",NOT_JSON]");
+        assert!(matches!(
+            prepare_authorized_source(invalid_after_budget),
+            Err(ReasoningFieldError::SourceTooLarge)
+        ));
+
+        let deep = format!("{}0{}", "[".repeat(70), "]".repeat(70));
+        assert!(matches!(
+            prepare_authorized_source(deep.into_bytes()),
+            Err(ReasoningFieldError::SourceTooLarge)
+        ));
+        let duplicate = br#"{"info":{"id":"ses_og26_fixture"},"info":{},"messages":[]}"#;
+        assert!(matches!(
+            prepare_authorized_source(duplicate.to_vec()),
+            Err(ReasoningFieldError::MalformedSource)
+        ));
+        let oversized_receipt = format!(
+            r#"{{"info":{{"id":"ses_og26_fixture"}},"messages":[{{"id":"msg_og26","type":"assistant","content":[{{"id":"npart_0123456789abcdef0123456789abcdef","type":"reasoning","text":"safe","state":{{"signature":"private"}},"originProof":{{"padding":"{}"}}}}]}}]}}"#,
+            "x".repeat(8192)
+        );
+        assert!(matches!(
+            prepare_authorized_source(oversized_receipt.into_bytes()),
+            Err(ReasoningFieldError::SourceTooLarge)
+        ));
+
+        let expired = og26_snapshot(
+            br#"{"info":{"id":"ses_og26_fixture"},"messages":[]}"#.to_vec(),
+            CaptureSnapshotPolicy::with_deadline(
+                Instant::now().checked_sub(Duration::from_secs(1)),
+            ),
+        );
+        assert_eq!(
+            expired.partial_reason(),
+            Some(CaptureSnapshotPartialReason::DeadlineExceeded)
+        );
+        assert!(expired.transcript().is_none());
     }
 }

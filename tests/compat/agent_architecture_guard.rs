@@ -8986,6 +8986,65 @@ struct ReasoningPortScan {
     events: Vec<String>,
     references: std::collections::BTreeMap<String, Vec<String>>,
     constructors: Vec<(String, String)>,
+    typed_calls: Vec<(String, String)>,
+    sealed_paths: Vec<(String, String)>,
+    sealed_aliases: Vec<String>,
+}
+
+const SEALED_CANDIDATE_PATHS: [&str; 4] = [
+    "SealedOpenCodeCandidates::checked",
+    "OpenCodeCandidatePart::checked",
+    "PreparedReasoningSource::with_opencode_candidates",
+    "ReasoningSourceDisposition::OpenCodeCandidate",
+];
+
+fn trailing_two_path(path: &syn::Path) -> String {
+    path.segments
+        .iter()
+        .rev()
+        .take(2)
+        .map(|part| part.ident.to_string())
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join("::")
+}
+
+fn is_sealed_candidate_type(name: &str) -> bool {
+    matches!(
+        name,
+        "OpenCodeCandidatePart"
+            | "SealedOpenCodeCandidates"
+            | "PreparedReasoningSource"
+            | "ReasoningSourceDisposition"
+    )
+}
+
+fn sealed_candidate_use_alias(tree: &syn::UseTree, parent: Option<&str>) -> bool {
+    match tree {
+        syn::UseTree::Path(path) => {
+            let parent = path.ident.to_string();
+            sealed_candidate_use_alias(&path.tree, Some(&parent))
+        }
+        syn::UseTree::Name(name) => {
+            (parent == Some("ReasoningSourceDisposition") && name.ident == "OpenCodeCandidate")
+                || (parent.is_some_and(is_sealed_candidate_type)
+                    && matches!(
+                        name.ident.to_string().as_str(),
+                        "checked" | "with_opencode_candidates"
+                    ))
+        }
+        syn::UseTree::Glob(_) => parent.is_some_and(is_sealed_candidate_type),
+        syn::UseTree::Rename(rename) => {
+            is_sealed_candidate_type(&rename.ident.to_string())
+                || parent.is_some_and(is_sealed_candidate_type)
+        }
+        syn::UseTree::Group(group) => group
+            .items
+            .iter()
+            .any(|item| sealed_candidate_use_alias(item, parent)),
+    }
 }
 impl<'ast> syn::visit::Visit<'ast> for ReasoningPortScan {
     fn visit_item(&mut self, item: &'ast syn::Item) {
@@ -8997,6 +9056,24 @@ impl<'ast> syn::visit::Visit<'ast> for ReasoningPortScan {
         self.owner.push(item.sig.ident.to_string());
         syn::visit::visit_item_fn(self, item);
         self.owner.pop();
+    }
+    fn visit_item_use(&mut self, item: &'ast syn::ItemUse) {
+        if sealed_candidate_use_alias(&item.tree, None) {
+            self.sealed_aliases.push("use alias".to_owned());
+        }
+        syn::visit::visit_item_use(self, item);
+    }
+    fn visit_item_type(&mut self, item: &'ast syn::ItemType) {
+        if let syn::Type::Path(path) = item.ty.as_ref()
+            && path
+                .path
+                .segments
+                .last()
+                .is_some_and(|segment| is_sealed_candidate_type(&segment.ident.to_string()))
+        {
+            self.sealed_aliases.push(item.ident.to_string());
+        }
+        syn::visit::visit_item_type(self, item);
     }
     fn visit_impl_item_fn(&mut self, item: &'ast syn::ImplItemFn) {
         if has_exact_cfg_test(&item.attrs) {
@@ -9012,6 +9089,11 @@ impl<'ast> syn::visit::Visit<'ast> for ReasoningPortScan {
         }
     }
     fn visit_expr_path(&mut self, item: &'ast syn::ExprPath) {
+        let path = trailing_two_path(&item.path);
+        if SEALED_CANDIDATE_PATHS.contains(&path.as_str()) {
+            self.sealed_paths
+                .push((path, self.owner.last().cloned().unwrap_or_default()));
+        }
         if let Some(last) = item.path.segments.last() {
             self.events.push(format!("reference:{}", last.ident));
             self.references
@@ -9020,6 +9102,15 @@ impl<'ast> syn::visit::Visit<'ast> for ReasoningPortScan {
                 .push(self.owner.last().cloned().unwrap_or_default());
         }
         syn::visit::visit_expr_path(self, item);
+    }
+    fn visit_expr_call(&mut self, item: &'ast syn::ExprCall) {
+        if let syn::Expr::Path(path) = item.func.as_ref() {
+            self.typed_calls.push((
+                trailing_two_path(&path.path),
+                self.owner.last().cloned().unwrap_or_default(),
+            ));
+        }
+        syn::visit::visit_expr_call(self, item);
     }
     fn visit_expr_method_call(&mut self, item: &'ast syn::ExprMethodCall) {
         self.events.push(format!("method:{}", item.method));
@@ -9054,6 +9145,8 @@ fn sealed_reasoning_types() {
     .unwrap();
     for name in [
         "PreparedReasoningSource",
+        "OpenCodeCandidatePart",
+        "SealedOpenCodeCandidates",
         "NativeReasoningProof",
         "NativeProvenReasoning",
         "VerifiedCaptureBinding",
@@ -9077,6 +9170,59 @@ fn sealed_reasoning_types() {
             !item.attrs.iter().any(|a| a.path().is_ident("derive")),
             "{name} must not derive cloning/debug/serde"
         );
+    }
+    for implementation in ast.items.iter().filter_map(|item| match item {
+        syn::Item::Impl(implementation) if !has_exact_cfg_test(&implementation.attrs) => {
+            Some(implementation)
+        }
+        _ => None,
+    }) {
+        let syn::Type::Path(owner) = implementation.self_ty.as_ref() else {
+            continue;
+        };
+        let Some(name) = owner
+            .path
+            .segments
+            .last()
+            .map(|segment| segment.ident.to_string())
+        else {
+            continue;
+        };
+        if !matches!(
+            name.as_str(),
+            "PreparedReasoningSource" | "OpenCodeCandidatePart" | "SealedOpenCodeCandidates"
+        ) {
+            continue;
+        }
+        if let Some((_, trait_path, _)) = &implementation.trait_ {
+            let trait_name = trait_path
+                .segments
+                .last()
+                .map(|segment| segment.ident.to_string());
+            assert!(
+                !matches!(
+                    trait_name.as_deref(),
+                    Some("Clone" | "Debug" | "Serialize" | "Deref" | "AsRef")
+                ),
+                "sealed {name} cannot acquire a cloning, logging, serialization or raw accessor trait"
+            );
+        }
+        for method in implementation.items.iter().filter_map(|item| match item {
+            syn::ImplItem::Fn(method) => Some(method),
+            _ => None,
+        }) {
+            if (name == "PreparedReasoningSource" && method.sig.ident == "with_opencode_candidates")
+                || (name == "OpenCodeCandidatePart" && method.sig.ident == "checked")
+                || (name == "SealedOpenCodeCandidates"
+                    && matches!(method.sig.ident.to_string().as_str(), "checked" | "append"))
+            {
+                assert!(
+                    matches!(&method.vis, syn::Visibility::Restricted(vis) if vis.in_token.is_none() && vis.path.is_ident("super")),
+                    "sealed {name}::{} must be exactly pub(super)",
+                    method.sig.ident
+                );
+            }
+        }
     }
     let mut production = ReasoningPortScan::default();
     syn::visit::Visit::visit_file(&mut production, &ast);
@@ -9147,20 +9293,167 @@ fn reasoning_carrier_rejects_native_label_constructor() {
         .map(|v| v.ident.to_string())
         .collect::<Vec<_>>();
     assert_eq!(variants, ["Unregistered"]);
-    let prepared=ast.items.iter().find_map(|i|match i {
-        syn::Item::Impl(i) if matches!(i.self_ty.as_ref(), syn::Type::Path(p) if p.path.segments.last().is_some_and(|s|s.ident=="PreparedReasoningSource"))=>Some(i),_=>None
-    }).unwrap();
+    let prepared = ast
+        .items
+        .iter()
+        .find_map(|item| match item {
+            syn::Item::Impl(implementation)
+                if matches!(implementation.self_ty.as_ref(), syn::Type::Path(path) if path.path.segments.last().is_some_and(|segment| segment.ident == "PreparedReasoningSource")) =>
+            {
+                Some(implementation)
+            }
+            _ => None,
+        })
+        .unwrap();
     for method in prepared.items.iter().filter_map(|i| match i {
         syn::ImplItem::Fn(f) => Some(f),
         _ => None,
     }) {
         assert!(
-            ["without_candidates", "unproven_candidates"]
-                .contains(&method.sig.ident.to_string().as_str())
+            [
+                "without_candidates",
+                "unproven_candidates",
+                "with_opencode_candidates",
+            ]
+            .contains(&method.sig.ident.to_string().as_str())
         );
+        if method.sig.ident == "with_opencode_candidates" {
+            assert!(
+                matches!(&method.vis, syn::Visibility::Restricted(vis) if vis.in_token.is_none() && vis.path.is_ident("super")),
+                "unverified OpenCode carrier construction must stay exactly pub(super)"
+            );
+        }
         let mut scan = ReasoningPortScan::default();
         syn::visit::Visit::visit_block(&mut scan, &method.block);
         assert!(!scan.references.contains_key("NativeProven"));
+    }
+}
+
+#[test]
+fn og26_sealed_candidate_callers_are_closed() {
+    sealed_reasoning_types();
+    let qualified =
+        reasoning_scan("fn rogue() { super::reasoning::OpenCodeCandidatePart::checked(); }");
+    assert!(
+        qualified
+            .typed_calls
+            .iter()
+            .any(|(path, _)| { path == "OpenCodeCandidatePart::checked" })
+    );
+    let renamed = reasoning_scan(
+        "use super::reasoning::{SealedOpenCodeCandidates as S, OpenCodeCandidatePart as P}; fn rogue() { S::checked(); P::checked(); }",
+    );
+    assert!(!renamed.sealed_aliases.is_empty());
+    let type_alias = reasoning_scan(
+        "type S = super::reasoning::SealedOpenCodeCandidates; fn rogue() { S::checked(); }",
+    );
+    assert!(!type_alias.sealed_aliases.is_empty());
+    let imported_variant = reasoning_scan(
+        "use super::reasoning::ReasoningSourceDisposition::OpenCodeCandidate; fn rogue() { OpenCodeCandidate(value); }",
+    );
+    assert!(!imported_variant.sealed_aliases.is_empty());
+    let indirect_call = reasoning_scan(
+        "fn rogue() { let constructor = super::reasoning::OpenCodeCandidatePart::checked; constructor(); }",
+    );
+    assert!(
+        indirect_call
+            .sealed_paths
+            .iter()
+            .any(|(path, _)| { path == "OpenCodeCandidatePart::checked" })
+    );
+    let reasoning = reasoning_scan(
+        &fs::read_to_string(repo_root().join("src/internal/ai/observed_agents/reasoning.rs"))
+            .unwrap(),
+    );
+    let opencode = reasoning_scan(
+        &fs::read_to_string(
+            repo_root().join("src/internal/ai/observed_agents/opencode_reasoning.rs"),
+        )
+        .unwrap(),
+    );
+    let guarded = SEALED_CANDIDATE_PATHS;
+    assert!(
+        reasoning.sealed_aliases.is_empty() && opencode.sealed_aliases.is_empty(),
+        "the two sealed owner modules may not hide a constructor behind an alias"
+    );
+    assert!(
+        reasoning.sealed_paths.iter().all(|(path, owner)| {
+            path == "ReasoningSourceDisposition::OpenCodeCandidate"
+                && owner == "with_opencode_candidates"
+        }),
+        "reasoning source may only construct the non-authoritative disposition in its sealed constructor"
+    );
+    let calls = opencode
+        .sealed_paths
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        calls,
+        BTreeSet::from([
+            (
+                "SealedOpenCodeCandidates::checked".to_owned(),
+                "collect_sealed_candidates".to_owned()
+            ),
+            (
+                "OpenCodeCandidatePart::checked".to_owned(),
+                "collect_sealed_candidates".to_owned()
+            ),
+            (
+                "PreparedReasoningSource::with_opencode_candidates".to_owned(),
+                "prepare_authorized_source".to_owned()
+            ),
+        ])
+    );
+    assert_eq!(
+        opencode.references.get("append"),
+        Some(&vec!["collect_sealed_candidates".to_owned()])
+    );
+    assert_eq!(
+        opencode.references.get("with_opencode_candidates"),
+        Some(&vec!["prepare_authorized_source".to_owned()])
+    );
+    for entry in walkdir::WalkDir::new(repo_root().join("src")) {
+        let entry = entry.expect("walk production source");
+        if !entry.file_type().is_file() || entry.path().extension().is_none_or(|ext| ext != "rs") {
+            continue;
+        }
+        let relative = entry
+            .path()
+            .strip_prefix(repo_root())
+            .expect("source path under repo");
+        if matches!(
+            relative.to_str(),
+            Some(
+                "src/internal/ai/observed_agents/reasoning.rs"
+                    | "src/internal/ai/observed_agents/opencode_reasoning.rs"
+            )
+        ) {
+            continue;
+        }
+        let source = fs::read_to_string(entry.path()).expect("read production source");
+        if !guarded.iter().any(|name| source.contains(name))
+            && !source.contains("with_opencode_candidates")
+            && ![
+                "SealedOpenCodeCandidates",
+                "OpenCodeCandidatePart",
+                "PreparedReasoningSource",
+                "ReasoningSourceDisposition",
+            ]
+            .iter()
+            .any(|name| source.contains(name))
+        {
+            continue;
+        }
+        let scan = reasoning_scan(&source);
+        assert!(
+            scan.sealed_aliases.is_empty()
+                && scan.sealed_paths.is_empty()
+                && !scan.references.contains_key("with_opencode_candidates")
+                && !scan.references.contains_key("OpenCodeCandidate"),
+            "an unregistered module may not construct an OpenCode candidate or disposition: {}",
+            relative.display()
+        );
     }
 }
 

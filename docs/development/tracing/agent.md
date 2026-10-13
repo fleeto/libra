@@ -2596,6 +2596,15 @@ reasoning 文本中的 canary 秘密会计入 redaction report 并在投影、ch
 `agent graph`/`agent list` 的公开默认 schema 仍为 1，显式 list-v2 仍可用；
 codec 本身不证明 OpenCode native 来源或放行 opaque artifact。
 
+**COV2-02 claim 仲裁准备：** 既有 v1 reservation API 与
+`ReservedTurnClaim`/`LiveClaimCommitPlan` struct literal 保持原样；新的
+per-claim sidecar 显式携带 `(coverage_schema_version, logical_turn_key)`，
+DB 仲裁按该组合键隔离 v1/v2，同版本等价内容幂等、incomplete→complete
+推进 revision、complete digest 冲突不覆盖。未知版本或与 typed turn
+selector 不符的版本在写 claim 前拒绝；COV2-03/04 才负责 marker 与
+pending 传递，COV2-11 才切换生产 Session 路径。本卡测试只用本地
+DB/静态 literal，不启动 OpenCode Session，也不授予 native 来源。
+
 
 RG-02 归档 opaque 密文 artifact：manifest `reasoning_artifacts[]`（path/oid/sha256/
 byte_len/locator/provider/source_kind/availability/decrypt_capability），对象存

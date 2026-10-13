@@ -1032,6 +1032,19 @@ grants native origin; unproved OpenCode candidates remain partial and are not
 archived. OpenCode Session and model acceptance remains macOS-local, outside
 CI.
 
+### Coverage claim v1/v2 arbitration preparation (COV2-02)
+
+The existing v1 reservation calls and `ReservedTurnClaim` /
+`LiveClaimCommitPlan` struct literals keep their shape. A separate per-claim
+version carrier lets internal DB arbitration distinguish the same logical
+turn key in coverage versions 1 and 2. Equivalent same-version reservations
+are idempotent, incomplete-to-complete advances only that version, and a
+different complete digest conflicts without overwriting the other version.
+Unknown or selector-mismatched versions fail before claim writes. Marker,
+pending, import and production Session paths are not switched by this card;
+COV2-03/04/11 own those later changes. No SQL DDL, public CLI change, native
+issuer, or OpenCode Session CI integration is introduced.
+
 
 ### OG-20 private import transport
 

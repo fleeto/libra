@@ -25,7 +25,7 @@
 
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use async_trait::async_trait;
 use sea_orm::{ConnectionTrait, DatabaseConnection, DatabaseTransaction, Statement};
 
@@ -46,8 +46,8 @@ use crate::internal::{
         },
         history::{CheckpointScope, TracesCommitCtx, TracesTxnExtra},
         observed_agents::{
-            COVERAGE_SCHEMA_VERSION, Completeness, NormalizedTurn, canonical_turn_bytes,
-            redact_turns_with_report,
+            COVERAGE_SCHEMA_VERSION, Completeness, CoverageSchemaVersion, NormalizedTurn,
+            encode_coverage_turn_for_schema, redact_turns_with_report, select_coverage_schema,
         },
     },
     metadata::{
@@ -132,13 +132,74 @@ fn live_reservation_turn_test_delay() -> Option<std::time::Duration> {
 
 /// One reserved turn: the writer holds `(owner, fence_token)` and must present
 /// both at commit time.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReservedTurnClaim {
     pub logical_turn_key: String,
     pub coverage_digest: String,
     pub completeness: Completeness,
     pub fence_token: i64,
     pub next_revision: i64,
+}
+
+/// The claim's version travels beside the frozen v1 reservation shape. A
+/// logical turn key may be present once in each version; callers must never
+/// reconstruct this version from the current transcript during replay.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VersionedReservedTurnClaim {
+    pub coverage_schema_version: CoverageSchemaVersion,
+    pub claim: ReservedTurnClaim,
+}
+
+impl VersionedReservedTurnClaim {
+    pub fn new(version: i64, claim: ReservedTurnClaim) -> Result<Self> {
+        Ok(Self {
+            coverage_schema_version: CoverageSchemaVersion::try_from(version)?,
+            claim,
+        })
+    }
+}
+
+/// An ordinal-aligned version sidecar for the unchanged `LiveClaimCommitPlan`
+/// literal. COV2-03 can use this for marker/ref fences; COV2-04 can encode it
+/// into pending without guessing a version from a repeated logical key.
+#[derive(Clone)]
+pub struct VersionedLiveClaimCommitPlan {
+    ordinary: LiveClaimCommitPlan,
+    versions: Vec<CoverageSchemaVersion>,
+}
+
+impl VersionedLiveClaimCommitPlan {
+    pub fn new(
+        ordinary: LiveClaimCommitPlan,
+        versioned: &[VersionedReservedTurnClaim],
+    ) -> Result<Self> {
+        ensure!(
+            ordinary.claims.len() == versioned.len(),
+            "versioned coverage claim plan length changed"
+        );
+        let mut seen = std::collections::BTreeSet::new();
+        let mut versions = Vec::with_capacity(versioned.len());
+        for (claim, bound) in ordinary.claims.iter().zip(versioned) {
+            ensure!(
+                claim == &bound.claim
+                    && seen.insert((
+                        bound.coverage_schema_version.as_i64(),
+                        claim.logical_turn_key.as_str()
+                    )),
+                "versioned coverage claim plan binding changed"
+            );
+            versions.push(bound.coverage_schema_version);
+        }
+        Ok(Self { ordinary, versions })
+    }
+
+    pub fn ordinary(&self) -> &LiveClaimCommitPlan {
+        &self.ordinary
+    }
+
+    pub fn claims(&self) -> impl Iterator<Item = (CoverageSchemaVersion, &ReservedTurnClaim)> {
+        self.versions.iter().copied().zip(&self.ordinary.claims)
+    }
 }
 
 /// Verify retained live reservations before an authenticated recovery artifact
@@ -237,6 +298,17 @@ pub struct LiveReservationOutcome {
     pub conflicted: usize,
 }
 
+/// A reservation result whose claims retain their individual DB identity.
+/// The v1 entry points continue returning `LiveReservationOutcome` unchanged.
+#[derive(Debug, Default)]
+pub struct VersionedReservationOutcome {
+    pub reserved: Vec<VersionedReservedTurnClaim>,
+    pub skipped_covered: usize,
+    pub skipped_inflight: usize,
+    pub skipped_retained: usize,
+    pub conflicted: usize,
+}
+
 impl LiveReservationOutcome {
     /// Nothing to write: every turn is covered / in flight / conflicted.
     pub fn is_noop(&self) -> bool {
@@ -259,6 +331,7 @@ impl LiveReservationOutcome {
 #[derive(Default)]
 pub(crate) struct ReasoningReservationOutcome {
     pub(crate) ordinary: LiveReservationOutcome,
+    pub(crate) versioned_reserved: Vec<VersionedReservedTurnClaim>,
     pub(crate) skipped_incomplete_reasoning: usize,
 }
 
@@ -268,6 +341,26 @@ impl ReasoningReservationOutcome {
             bail!("reasoning coverage is partial; run libra agent doctor before retrying capture");
         }
         Ok(self.ordinary)
+    }
+
+    // COV2-11 wires the versioned writer; COV2-02 exercises this seam in
+    // isolated claim tests while production callers remain on v1.
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn into_versioned(self) -> Result<VersionedReservationOutcome> {
+        if self.skipped_incomplete_reasoning != 0 {
+            bail!("reasoning coverage is partial; run libra agent doctor before retrying capture");
+        }
+        ensure!(
+            self.versioned_reserved.len() == self.ordinary.reserved.len(),
+            "versioned coverage reservation lost a claim binding"
+        );
+        Ok(VersionedReservationOutcome {
+            reserved: self.versioned_reserved,
+            skipped_covered: self.ordinary.skipped_covered,
+            skipped_inflight: self.ordinary.skipped_inflight,
+            skipped_retained: self.ordinary.skipped_retained,
+            conflicted: self.ordinary.conflicted,
+        })
     }
 }
 
@@ -375,6 +468,7 @@ async fn compare_reasoning_identity(
     scope: &CaptureScope,
     session_id: &str,
     logical_turn_key: &str,
+    coverage_schema_version: CoverageSchemaVersion,
     existing: &ExistingClaim,
     incoming: Option<&ReasoningTurnIdentity>,
     map: &StoredReasoningMap,
@@ -419,7 +513,7 @@ async fn compare_reasoning_identity(
         repository_id: scope.repo_id.clone(),
         session_id: session_id.to_owned(),
         logical_turn_key: incoming.slot().to_owned(),
-        coverage_schema_version: COVERAGE_SCHEMA_VERSION,
+        coverage_schema_version: coverage_schema_version.as_i64(),
         claim_revision: existing.revision,
         claim_fence_token: fence,
         checkpoint_id: checkpoint.clone(),
@@ -470,6 +564,7 @@ async fn read_claim(
     conn: &impl ConnectionTrait,
     session_id: &str,
     logical_turn_key: &str,
+    coverage_schema_version: CoverageSchemaVersion,
 ) -> Result<Option<ExistingClaim>> {
     let row = conn
         .query_one_raw(Statement::from_sql_and_values(
@@ -482,7 +577,7 @@ async fn read_claim(
             [
                 session_id.into(),
                 logical_turn_key.into(),
-                COVERAGE_SCHEMA_VERSION.into(),
+                coverage_schema_version.as_i64().into(),
             ],
         ))
         .await
@@ -516,10 +611,12 @@ fn next_revision(revision: i64) -> Result<i64> {
 /// Insert a brand-new `reserved_live` claim. Returns the reservation, or
 /// `None` when a concurrent writer won the INSERT race (unique violation) —
 /// the caller re-reads and re-decides.
+#[allow(clippy::too_many_arguments)]
 async fn try_insert_fresh_claim(
     conn: &impl ConnectionTrait,
     session_id: &str,
     turn: &NormalizedTurn,
+    coverage_schema_version: CoverageSchemaVersion,
     digest: &str,
     owner: &str,
     now_ms: i64,
@@ -541,7 +638,7 @@ async fn try_insert_fresh_claim(
             [
                 session_id.into(),
                 turn.logical_turn_key.clone().into(),
-                COVERAGE_SCHEMA_VERSION.into(),
+                coverage_schema_version.as_i64().into(),
                 digest.into(),
                 turn.completeness.as_db_str().into(),
                 reservation_state.into(),
@@ -575,6 +672,7 @@ async fn try_reown_claim(
     conn: &impl ConnectionTrait,
     session_id: &str,
     logical_turn_key: &str,
+    coverage_schema_version: CoverageSchemaVersion,
     expected_state: &str,
     expected_fence: Option<i64>,
     new_digest: &str,
@@ -611,7 +709,7 @@ async fn try_reown_claim(
                 now_ms.into(),
                 session_id.into(),
                 logical_turn_key.into(),
-                COVERAGE_SCHEMA_VERSION.into(),
+                coverage_schema_version.as_i64().into(),
                 expected_state.into(),
                 expected_fence_value,
             ],
@@ -640,6 +738,7 @@ async fn try_mark_conflicted(
     conn: &impl ConnectionTrait,
     session_id: &str,
     logical_turn_key: &str,
+    coverage_schema_version: CoverageSchemaVersion,
     incumbent: &ExistingClaim,
     incoming_turn: &NormalizedTurn,
     incoming_source_channel: &'static str,
@@ -648,11 +747,13 @@ async fn try_mark_conflicted(
 ) -> Result<ConflictMarkOutcome> {
     let mut sanitized_turn = incoming_turn.clone();
     let redaction_report = redact_turns_with_report(std::slice::from_mut(&mut sanitized_turn));
-    let incoming_digest = sanitized_turn.digest_hex();
+    let encoded =
+        encode_coverage_turn_for_schema(coverage_schema_version.as_i64(), &sanitized_turn)?;
+    let incoming_digest = encoded.digest_hex;
     if incoming_digest == incumbent.coverage_digest && !reasoning_changed {
         return Ok(ConflictMarkOutcome::EquivalentAfterRedaction);
     }
-    let incoming_canonical_json = String::from_utf8(canonical_turn_bytes(&sanitized_turn.records))
+    let incoming_canonical_json = String::from_utf8(encoded.canonical_bytes)
         .context("coverage conflict canonical evidence is not UTF-8")?;
     let incoming_redaction_report_json = if reasoning_changed {
         let mut report = serde_json::to_value(&redaction_report)
@@ -682,7 +783,7 @@ async fn try_mark_conflicted(
                 now_ms.into(),
                 session_id.into(),
                 logical_turn_key.into(),
-                COVERAGE_SCHEMA_VERSION.into(),
+                coverage_schema_version.as_i64().into(),
                 incumbent.coverage_digest.clone().into(),
                 incumbent.revision.into(),
                 incumbent.fence_token.into(),
@@ -706,7 +807,7 @@ async fn try_mark_conflicted(
         [
             session_id.into(),
             logical_turn_key.into(),
-            COVERAGE_SCHEMA_VERSION.into(),
+            coverage_schema_version.as_i64().into(),
             incumbent.revision.into(),
             incumbent.coverage_digest.clone().into(),
             incumbent.checkpoint_id.clone().into(),
@@ -1278,6 +1379,9 @@ pub(crate) async fn reserve_import_turn_claims_with_reasoning_until(
             .ordinary
             .reserved
             .extend(outcome.ordinary.reserved);
+        aggregate
+            .versioned_reserved
+            .extend(outcome.versioned_reserved);
         aggregate.ordinary.skipped_covered = aggregate
             .ordinary
             .skipped_covered
@@ -1302,6 +1406,7 @@ pub(crate) async fn reserve_import_turn_claims_with_reasoning_until(
                 .await
                 .context("release earlier import batches after partial reasoning coverage")?;
                 aggregate.ordinary.reserved.clear();
+                aggregate.versioned_reserved.clear();
             }
             return Ok(aggregate);
         }
@@ -1392,6 +1497,44 @@ pub(crate) async fn reserve_turn_claims_with_reasoning_no_deadline(
     .await
 }
 
+/// Reserve explicit per-turn coverage versions without activating a provider
+/// Session. `versions[i]` names `turns[i]`; invalid versions and v1 typed
+/// Reasoning reject before the first database write. This entry point is the
+/// versioned arbitration seam later capture/import cards will consume.
+#[allow(clippy::too_many_arguments)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) async fn reserve_turn_claims_by_version_with_capture_scope(
+    conn: &DatabaseConnection,
+    scope: &CaptureScope,
+    session_id: &str,
+    turns: &[NormalizedTurn],
+    versions: &[i64],
+    owner: &str,
+    now_ms: i64,
+    source_channel: &'static str,
+) -> Result<VersionedReservationOutcome> {
+    let outcome = reserve_turn_claims_with_reasoning_inner_versioned(
+        conn,
+        scope,
+        session_id,
+        turns,
+        Some(versions),
+        owner,
+        now_ms,
+        source_channel,
+        None,
+        ReasoningCoverageInput::default(),
+    )
+    .await;
+    match outcome {
+        Err(error) if is_sqlite_busy(&error) => Ok(VersionedReservationOutcome {
+            skipped_inflight: turns.len(),
+            ..VersionedReservationOutcome::default()
+        }),
+        outcome => outcome?.into_versioned(),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn reserve_turn_claims_with_reasoning_inner(
     conn: &DatabaseConnection,
@@ -1404,6 +1547,56 @@ async fn reserve_turn_claims_with_reasoning_inner(
     deadline: Option<CaptureCommitDeadline>,
     reasoning: ReasoningCoverageInput<'_>,
 ) -> Result<ReasoningReservationOutcome> {
+    reserve_turn_claims_with_reasoning_inner_versioned(
+        conn,
+        scope,
+        session_id,
+        turns,
+        None,
+        owner,
+        now_ms,
+        source_channel,
+        deadline,
+        reasoning,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn reserve_turn_claims_with_reasoning_inner_versioned(
+    conn: &DatabaseConnection,
+    scope: &CaptureScope,
+    session_id: &str,
+    turns: &[NormalizedTurn],
+    versions: Option<&[i64]>,
+    owner: &str,
+    now_ms: i64,
+    source_channel: &'static str,
+    deadline: Option<CaptureCommitDeadline>,
+    reasoning: ReasoningCoverageInput<'_>,
+) -> Result<ReasoningReservationOutcome> {
+    ensure!(
+        versions.is_none_or(|versions| versions.len() == turns.len()),
+        "coverage claim version count differs from turn count"
+    );
+    let mut checked_versions = Vec::with_capacity(turns.len());
+    let mut seen_versioned_keys = std::collections::BTreeSet::new();
+    for (index, turn) in turns.iter().enumerate() {
+        let version = CoverageSchemaVersion::try_from(
+            versions.map_or(COVERAGE_SCHEMA_VERSION, |versions| versions[index]),
+        )?;
+        ensure!(
+            version == select_coverage_schema(turn),
+            "coverage claim version does not match the typed turn"
+        );
+        if versions.is_some() {
+            ensure!(
+                seen_versioned_keys.insert((version.as_i64(), turn.logical_turn_key.as_str())),
+                "duplicate versioned coverage claim in one reservation"
+            );
+        }
+        checked_versions.push(version);
+    }
     if let Some(candidate) = reasoning.candidate {
         candidate.validate_for(scope, session_id, turns)?;
     }
@@ -1481,12 +1674,12 @@ async fn reserve_turn_claims_with_reasoning_inner(
         }
     };
     let mut outcome = ReasoningReservationOutcome::default();
-    for turn in turns {
+    for (turn, version) in turns.iter().zip(checked_versions) {
         if let Err(error) = ensure_reservation_deadline(deadline, source_channel) {
             txn.rollback().await.ok();
             return Err(error);
         }
-        let digest = turn.digest_hex();
+        let digest = encode_coverage_turn_for_schema(version.as_i64(), turn)?.digest_hex;
         let mut rounds = 0;
         loop {
             if let Err(error) = ensure_reservation_deadline(deadline, source_channel) {
@@ -1497,7 +1690,7 @@ async fn reserve_turn_claims_with_reasoning_inner(
             let existing = match await_reservation_precommit_read_until(
                 deadline,
                 source_channel,
-                read_claim(&txn, session_id, &turn.logical_turn_key),
+                read_claim(&txn, session_id, &turn.logical_turn_key, version),
             )
             .await
             {
@@ -1515,6 +1708,7 @@ async fn reserve_turn_claims_with_reasoning_inner(
                 &txn,
                 session_id,
                 turn,
+                version,
                 &digest,
                 owner,
                 now_ms,
@@ -1538,6 +1732,10 @@ async fn reserve_turn_claims_with_reasoning_inner(
             }
             match decision {
                 AttemptOutcome::Reserved(claim) => {
+                    outcome.versioned_reserved.push(VersionedReservedTurnClaim {
+                        coverage_schema_version: version,
+                        claim: claim.clone(),
+                    });
                     outcome.ordinary.reserved.push(claim);
                     break;
                 }
@@ -1591,6 +1789,7 @@ async fn reserve_turn_claims_with_reasoning_inner(
             .await
             .context("roll back partial reasoning coverage reservation")?;
         outcome.ordinary.reserved.clear();
+        outcome.versioned_reserved.clear();
         outcome.ordinary.conflicted = 0;
         return Ok(outcome);
     }
@@ -1631,6 +1830,7 @@ async fn decide_reasoning_and_attempt(
     conn: &impl ConnectionTrait,
     session_id: &str,
     turn: &NormalizedTurn,
+    coverage_schema_version: CoverageSchemaVersion,
     digest: &str,
     owner: &str,
     now_ms: i64,
@@ -1647,6 +1847,7 @@ async fn decide_reasoning_and_attempt(
                 scope,
                 session_id,
                 &turn.logical_turn_key,
+                coverage_schema_version,
                 incumbent,
                 input
                     .candidate
@@ -1667,6 +1868,7 @@ async fn decide_reasoning_and_attempt(
                                 conn,
                                 session_id,
                                 &turn.logical_turn_key,
+                                coverage_schema_version,
                                 incumbent,
                                 turn,
                                 source_channel,
@@ -1701,6 +1903,7 @@ async fn decide_reasoning_and_attempt(
         conn,
         session_id,
         turn,
+        coverage_schema_version,
         digest,
         owner,
         now_ms,
@@ -1715,6 +1918,7 @@ async fn decide_and_attempt(
     conn: &impl ConnectionTrait,
     session_id: &str,
     turn: &NormalizedTurn,
+    coverage_schema_version: CoverageSchemaVersion,
     digest: &str,
     owner: &str,
     now_ms: i64,
@@ -1727,6 +1931,7 @@ async fn decide_and_attempt(
                 conn,
                 session_id,
                 turn,
+                coverage_schema_version,
                 digest,
                 owner,
                 now_ms,
@@ -1759,6 +1964,7 @@ async fn decide_and_attempt(
                         conn,
                         session_id,
                         &turn.logical_turn_key,
+                        coverage_schema_version,
                         "catalog_committed",
                         existing.fence_token,
                         digest,
@@ -1785,6 +1991,7 @@ async fn decide_and_attempt(
                         conn,
                         session_id,
                         &turn.logical_turn_key,
+                        coverage_schema_version,
                         &existing,
                         turn,
                         source_channel,
@@ -1835,6 +2042,7 @@ async fn decide_and_attempt(
                 conn,
                 session_id,
                 &turn.logical_turn_key,
+                coverage_schema_version,
                 &existing.state,
                 existing.fence_token,
                 digest,
@@ -1860,6 +2068,7 @@ async fn decide_and_attempt(
                 conn,
                 session_id,
                 &turn.logical_turn_key,
+                coverage_schema_version,
                 "abandoned",
                 existing.fence_token,
                 digest,
@@ -2308,9 +2517,296 @@ pub(crate) mod tests {
 
     use super::*;
     use crate::internal::{
-        ai::observed_agents::SemanticRecord, config::ConfigKv,
+        ai::observed_agents::{SemanticRecord, canonical_turn_bytes},
+        config::ConfigKv,
         db::migration::run_builtin_migrations,
     };
+
+    fn cov2_visible_turn(key: &str, text: &str, completeness: Completeness) -> NormalizedTurn {
+        use crate::internal::ai::observed_agents::reasoning::{
+            ReasoningProvider, ReasoningSourceKind, classify_provider_visible_reasoning,
+        };
+        let (_, visible) = classify_provider_visible_reasoning(
+            ReasoningProvider::OpenCode,
+            ReasoningSourceKind::Reasoning,
+            text.to_owned(),
+        );
+        let mut turn = turn(key, "same ordinary prompt", completeness);
+        turn.records.push(SemanticRecord::Reasoning {
+            provider: ReasoningProvider::OpenCode,
+            source_kind: Some(ReasoningSourceKind::Reasoning),
+            text: visible,
+        });
+        turn
+    }
+
+    async fn cov2_mark_claim_committed(
+        conn: &DatabaseConnection,
+        bound: &VersionedReservedTurnClaim,
+        owner: &str,
+        checkpoint_id: &str,
+    ) {
+        let changed = conn
+            .execute_raw(Statement::from_sql_and_values(
+                conn.get_database_backend(),
+                "UPDATE agent_coverage_claim
+                 SET state = 'catalog_committed', revision = ?, owner = NULL,
+                     lease_expires_at = NULL, checkpoint_id = ?
+                 WHERE session_id = ? AND logical_turn_key = ?
+                   AND coverage_schema_version = ? AND state = 'reserved_live'
+                   AND owner = ? AND fence_token = ?",
+                [
+                    bound.claim.next_revision.into(),
+                    checkpoint_id.into(),
+                    "claude_code__s1".into(),
+                    bound.claim.logical_turn_key.clone().into(),
+                    bound.coverage_schema_version.as_i64().into(),
+                    owner.into(),
+                    bound.claim.fence_token.into(),
+                ],
+            ))
+            .await
+            .expect("commit synthetic DB claim");
+        assert_eq!(changed.rows_affected(), 1);
+    }
+
+    #[tokio::test]
+    async fn cov2_claim_arbitration_by_version() {
+        let conn = gate_db().await;
+        let scope = CaptureScope::main_for_connection(&conn)
+            .await
+            .expect("capture scope");
+        let key = "cov2-shared-key";
+        let v1 = turn(key, "same ordinary prompt", Completeness::Complete);
+        let v2_incomplete = cov2_visible_turn(key, "visible reasoning", Completeness::Incomplete);
+        let first = reserve_turn_claims_by_version_with_capture_scope(
+            &conn,
+            &scope,
+            "claude_code__s1",
+            std::slice::from_ref(&v1),
+            &[1],
+            "v1-owner",
+            1,
+            "live",
+        )
+        .await
+        .expect("reserve v1 claim");
+        assert_eq!(first.reserved.len(), 1);
+        assert_eq!(first.reserved[0].coverage_schema_version.as_i64(), 1);
+        cov2_mark_claim_committed(&conn, &first.reserved[0], "v1-owner", "v1-checkpoint").await;
+
+        let second = reserve_turn_claims_by_version_with_capture_scope(
+            &conn,
+            &scope,
+            "claude_code__s1",
+            std::slice::from_ref(&v2_incomplete),
+            &[2],
+            "v2-owner",
+            2,
+            "live",
+        )
+        .await
+        .expect("reserve independent v2 claim");
+        assert_eq!(second.reserved.len(), 1);
+        assert_eq!(second.reserved[0].coverage_schema_version.as_i64(), 2);
+        cov2_mark_claim_committed(&conn, &second.reserved[0], "v2-owner", "v2-checkpoint").await;
+        assert_eq!(
+            scalar(
+                &conn,
+                "SELECT COUNT(*) AS n FROM agent_coverage_claim WHERE logical_turn_key = 'cov2-shared-key'",
+            )
+            .await,
+            2,
+            "one logical key must coexist once per version"
+        );
+
+        for (turn, version) in [(v1.clone(), 1), (v2_incomplete.clone(), 2)] {
+            let duplicate = reserve_turn_claims_by_version_with_capture_scope(
+                &conn,
+                &scope,
+                "claude_code__s1",
+                &[turn],
+                &[version],
+                "duplicate-owner",
+                3,
+                "live",
+            )
+            .await
+            .expect("equivalent same-version claim is idempotent");
+            assert!(duplicate.reserved.is_empty());
+            assert_eq!(duplicate.skipped_covered, 1);
+        }
+
+        let v2_complete = cov2_visible_turn(key, "visible reasoning", Completeness::Complete);
+        let upgrade = reserve_turn_claims_by_version_with_capture_scope(
+            &conn,
+            &scope,
+            "claude_code__s1",
+            std::slice::from_ref(&v2_complete),
+            &[2],
+            "upgrade-owner",
+            4,
+            "live",
+        )
+        .await
+        .expect("incomplete-to-complete v2 upgrade");
+        assert_eq!(upgrade.reserved.len(), 1);
+        assert_eq!(upgrade.reserved[0].claim.next_revision, 2);
+        cov2_mark_claim_committed(&conn, &upgrade.reserved[0], "upgrade-owner", "v2-upgrade").await;
+
+        let changed = cov2_visible_turn(key, "different visible reasoning", Completeness::Complete);
+        let conflict = reserve_turn_claims_by_version_with_capture_scope(
+            &conn,
+            &scope,
+            "claude_code__s1",
+            &[changed],
+            &[2],
+            "conflict-owner",
+            5,
+            "live",
+        )
+        .await
+        .expect("conflicting complete content is diagnosed");
+        assert!(conflict.reserved.is_empty());
+        assert_eq!(conflict.conflicted, 1);
+        let rows = conn
+            .query_all_raw(Statement::from_sql_and_values(
+                conn.get_database_backend(),
+                "SELECT coverage_schema_version, state, revision, coverage_digest FROM agent_coverage_claim
+                 WHERE session_id = ? AND logical_turn_key = ? ORDER BY coverage_schema_version",
+                ["claude_code__s1".into(), key.into()],
+            ))
+            .await
+            .expect("read both versions");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            rows[0]
+                .try_get_by::<i64, _>("coverage_schema_version")
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            rows[0].try_get_by::<String, _>("state").unwrap(),
+            "catalog_committed"
+        );
+        assert_eq!(rows[0].try_get_by::<i64, _>("revision").unwrap(), 1);
+        assert_eq!(
+            rows[0].try_get_by::<String, _>("coverage_digest").unwrap(),
+            first.reserved[0].claim.coverage_digest
+        );
+        assert_eq!(
+            rows[1]
+                .try_get_by::<i64, _>("coverage_schema_version")
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            rows[1].try_get_by::<String, _>("state").unwrap(),
+            "conflicted"
+        );
+        assert_eq!(rows[1].try_get_by::<i64, _>("revision").unwrap(), 2);
+        assert_eq!(
+            rows[1].try_get_by::<String, _>("coverage_digest").unwrap(),
+            upgrade.reserved[0].claim.coverage_digest,
+            "a complete conflict cannot replace the committed digest"
+        );
+        assert_eq!(
+            scalar(
+                &conn,
+                "SELECT COUNT(*) AS n FROM agent_coverage_conflict WHERE logical_turn_key = 'cov2-shared-key' AND coverage_schema_version = 2",
+            )
+            .await,
+            1,
+            "the conflict must have one durable version-specific diagnostic"
+        );
+    }
+
+    #[tokio::test]
+    async fn cov2_invalid_version_or_db_error_zero_success() {
+        let conn = gate_db().await;
+        let scope = CaptureScope::main_for_connection(&conn)
+            .await
+            .expect("capture scope");
+        let ordinary = turn("invalid-version", "ordinary", Completeness::Complete);
+        assert!(
+            reserve_turn_claims_by_version_with_capture_scope(
+                &conn,
+                &scope,
+                "claude_code__s1",
+                &[ordinary],
+                &[3],
+                "owner",
+                1,
+                "live",
+            )
+            .await
+            .is_err()
+        );
+        let typed = cov2_visible_turn("typed-v1", "visible", Completeness::Complete);
+        assert!(
+            reserve_turn_claims_by_version_with_capture_scope(
+                &conn,
+                &scope,
+                "claude_code__s1",
+                std::slice::from_ref(&typed),
+                &[1],
+                "owner",
+                1,
+                "live",
+            )
+            .await
+            .is_err(),
+            "typed Reasoning must not become a v1 production claim"
+        );
+        assert!(
+            reserve_live_turn_claims_with_capture_scope(
+                &conn,
+                &scope,
+                "claude_code__s1",
+                &[typed],
+                "v1-owner",
+                1,
+            )
+            .await
+            .is_err(),
+            "the legacy production v1 entry point also rejects typed Reasoning"
+        );
+        assert_eq!(
+            scalar(&conn, "SELECT COUNT(*) AS n FROM agent_coverage_claim").await,
+            0
+        );
+
+        conn.execute_unprepared(
+            "CREATE TRIGGER cov2_reject_second_claim BEFORE INSERT ON agent_coverage_claim
+             WHEN NEW.logical_turn_key = 'second'
+             BEGIN SELECT RAISE(ABORT, 'injected claim failure'); END",
+        )
+        .await
+        .expect("install deterministic claim fault");
+        let turns = [
+            turn("first", "ordinary", Completeness::Complete),
+            turn("second", "ordinary", Completeness::Complete),
+        ];
+        assert!(
+            reserve_turn_claims_by_version_with_capture_scope(
+                &conn,
+                &scope,
+                "claude_code__s1",
+                &turns,
+                &[1, 1],
+                "owner",
+                1,
+                "live",
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(
+            scalar(&conn, "SELECT COUNT(*) AS n FROM agent_coverage_claim").await,
+            0,
+            "a mid-batch DB failure must roll back the first reservation"
+        );
+    }
 
     #[cfg(unix)]
     pub(crate) struct ReasoningFixture {

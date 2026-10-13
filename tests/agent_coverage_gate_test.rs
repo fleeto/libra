@@ -24,7 +24,13 @@ use std::{
     process::{Command, Output, Stdio},
 };
 
-use libra::internal::ai::observed_agents::claude_project_slug;
+use libra::internal::ai::{
+    coverage_gate::{
+        LiveClaimCommitPlan, ReservedTurnClaim, VersionedLiveClaimCommitPlan,
+        VersionedReservedTurnClaim,
+    },
+    observed_agents::{Completeness, claude_project_slug},
+};
 use sea_orm::{ConnectionTrait, Database, DatabaseConnection, Statement};
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -193,6 +199,52 @@ const TURN_TRUNCATED: &str = concat!(
     "\n",
     r#"{"type":"assistant","uuid":"a1","message":{"role":"assistant","content":[{"type":"te"#,
 );
+
+/// Pure contract check: this case does not start or simulate a provider
+/// Session. It pins the old struct literals while exercising the separate
+/// per-claim version carrier needed by pending recovery.
+#[test]
+fn cov2_v1_claim_and_legacy_literals_stay_valid() {
+    let v1 = ReservedTurnClaim {
+        logical_turn_key: "same-logical-key".to_owned(),
+        coverage_digest: "a".repeat(64),
+        completeness: Completeness::Complete,
+        fence_token: 1,
+        next_revision: 1,
+    };
+    let v2 = ReservedTurnClaim {
+        coverage_digest: "b".repeat(64),
+        ..v1.clone()
+    };
+    let legacy = LiveClaimCommitPlan {
+        source_channel: "live",
+        session_id: "legacy-session".to_owned(),
+        checkpoint_id: "legacy-checkpoint".to_owned(),
+        owner: "legacy-owner".to_owned(),
+        parent_commit: None,
+        created_at: 1,
+        now_ms: 1,
+        claims: vec![v1.clone(), v2.clone()],
+        import_session: None,
+        import_identity: None,
+        capture_scope: None,
+    };
+    let claims = [
+        VersionedReservedTurnClaim::new(1, v1).expect("v1 carrier"),
+        VersionedReservedTurnClaim::new(2, v2).expect("v2 carrier"),
+    ];
+    let bound = VersionedLiveClaimCommitPlan::new(legacy, &claims)
+        .expect("same logical key is distinct across versions");
+    assert_eq!(
+        bound
+            .claims()
+            .map(|(version, claim)| (version.as_i64(), claim.logical_turn_key.as_str()))
+            .collect::<Vec<_>>(),
+        [(1, "same-logical-key"), (2, "same-logical-key")]
+    );
+    assert_eq!(bound.ordinary().claims.len(), 2);
+    assert!(VersionedReservedTurnClaim::new(3, claims[0].claim.clone()).is_err());
+}
 
 #[tokio::test]
 async fn live_repeat_turn_noops_via_coverage_gate() {

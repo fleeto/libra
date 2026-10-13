@@ -61,3 +61,24 @@ proof that every production typed path enforces that order and that unproved
 state/proof-bearing candidates stay partial with zero ordinary or typed
 persistence. Version 2 does not confer OpenCode native issuer authority or
 permit opaque artifact archival. Source A remains a separate hard gate.
+
+## Claim arbitration preparation
+
+COV2-02 adds a version-bound reservation entry point for local claim DB
+arbitration. It uses the existing unique key
+`(session_id, logical_turn_key, coverage_schema_version)`: equivalent rows
+within one version are idempotent, an incomplete row can advance to complete,
+and a different complete digest becomes a conflict in that version only. An
+unsupported version or a version that disagrees with the typed turn selector
+is rejected before any reservation write. The older reservation entry points
+remain v1 and reject a typed Reasoning turn rather than claiming it as v1.
+
+`ReservedTurnClaim` and `LiveClaimCommitPlan` keep their old field layouts.
+A separate `VersionedReservedTurnClaim` carries each claim's version, and
+`VersionedLiveClaimCommitPlan` binds an ordered collection of those claims to
+the unchanged commit-plan literal. Its uniqueness check uses `(version,key)`,
+so a pending artifact can later hold one claim for each version of the same
+logical key without guessing from the key. COV2-03 adds version-aware marker
+and commit transactions; COV2-04 adds the authenticated pending wire; COV2-11
+switches production live/import paths together. This preparatory arbitration
+does not itself enable OpenCode Session capture or native archival.

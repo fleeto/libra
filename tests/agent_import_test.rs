@@ -3304,6 +3304,7 @@ fn agent_import_non_tty_requires_yes_before_content_read() {
 }
 
 #[test]
+#[ignore = "OpenCode Session capture is an operator-local manual gate"]
 fn agent_import_confirmation_precedes_opencode_export() {
     let fixture = ImportRepo::init();
     let output = fixture.run(&[

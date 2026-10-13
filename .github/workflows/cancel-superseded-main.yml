@@ -1,0 +1,29 @@
+name: Cancel superseded main Actions
+
+on:
+  push:
+    branches: [main]
+
+# This workflow never shares a concurrency group with CI or a release.
+concurrency:
+  group: cancel-superseded-main
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  cancel-old-runs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: Checkout this main commit
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: Validate cancellation policy
+        run: python3 -m unittest discover -s .github/scripts -p 'test_cancel_superseded_main_runs.py'
+      - name: Cancel unfinished Actions for older main commits
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/cancel_superseded_main_runs.py

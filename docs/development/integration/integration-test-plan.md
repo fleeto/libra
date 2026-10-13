@@ -269,6 +269,20 @@ LIBRA_RUN_LIVE_AGENT_GATE=1 cargo test --features test-live-agent \
   --test agent_live_gate_test -- --test-threads=1
 ```
 
+OpenCode CLI → Session/Checkpoint 的采集验收只在操作者本机手工运行；CI 不运行该正向集成链。macOS 选定经审查的私有 OpenCode 二进制后，显式执行：
+
+```bash
+LIBRA_RUN_LOCAL_AGENTS=1 \
+LIBRA_LOCAL_AGENT_SET=opencode \
+LIBRA_OPENCODE_NATIVE_BINARY=/absolute/path/to/reviewed/opencode \
+cargo test --test agent_local_capture_smoke_test \
+  local_capture_smoke_opencode_macos -- --ignored --exact --test-threads=1
+```
+
+受控 OpenCode hook 采集（含拒绝写入负例）与混合重放契约可在本机另以 `cargo test --test agent_lifecycle_event_test opencode_ -- --ignored --test-threads=1`、`cargo test --test agent_lifecycle_event_test hook_public_contract_byte_compat_matrix -- --ignored --exact --test-threads=1`、`cargo test --test agent_hook_crash_test capture_coordinator_native_replay_matrix -- --ignored --exact --test-threads=1` 验证。OpenCode import CLI 的前置拒绝门本机运行：`cargo test --test agent_import_test agent_import_confirmation_precedes_opencode_export -- --ignored --exact`。lib 内经合成 exporter 写入 Session/Checkpoint 的 `opencode_extraction_failure_continues_checkpoint`、`export_stage_releases_runner_lease_on_every_exit` 和三 provider `live_checkpoint_metadata_shape_is_stable` 也须本机显式 `--ignored` 运行；其独立入口要求先 `cargo build --bin libra`，避免把缺辅助二进制的失败误记为功能失败。Linux bridge 内容链由用户后验：`cargo test --features test-live-agent --test agent_opencode_bridge_test -- --ignored --nocapture --test-threads=1`；若缺可信可用 bwrap 而打印 `skipped`，只能记 UNRUN，不能记 PASS。CI 仍运行不建立 OpenCode Session 的解析、密码学、沙箱单元及静态契约守卫；只写 frame log 的插件模板测试不作 Session/Checkpoint 验收。
+
+2026-10-13 在 `5cafe322` 基线上，显式本机运行 `opencode_extraction_failure_continues_checkpoint` 仍为 **FAIL**：报 `reasoning source preparation has no ready capture consumer; keep the receipt pending and retry after the consumer is available`；该用例待后续卡复核，不计 OpenCode 本机全套验收通过。默认 CI 中保留的 `opencode_rejected_runner_sources_release_export_leases` 仅验证 `agent_export_job` 租约拒绝，不调用 OpenCode CLI/exporter，也不写 Session/Checkpoint。
+
 通过标准：
 1. 若未配置 key，测试允许输出 skipped。
 2. 若已配置 key，失败视为真实回归。

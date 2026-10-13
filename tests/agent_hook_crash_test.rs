@@ -2384,6 +2384,7 @@ struct ReplayDurableOracle {
 /// `agent_kind`, `transcript_snapshot.partial_reason`, claim channels) and
 /// adds OpenCode rows; ADR-ACF-10 freezes this function's token stream.
 #[tokio::test]
+#[ignore = "OpenCode Session capture is an operator-local manual gate"]
 async fn capture_coordinator_native_replay_matrix() {
     let cases = [
         ReplayCase {
@@ -2539,6 +2540,360 @@ async fn capture_coordinator_native_replay_matrix() {
             durable: ReplayDurableOracle {
                 agent_kind: "opencode",
                 partial_reason: Some("source_read_error"),
+                claim_channels: &[],
+            },
+        },
+    ];
+
+    for case in cases {
+        let label = case.label;
+        let repo = HookRepo::init();
+        let session = format!("sess-replay-matrix-{label}");
+        if case.transcript {
+            repo.write_claude_transcript(&session, TURN_COMPLETE);
+        }
+        let start = repo.run(
+            &["agent", "hooks", case.provider, "session-start"],
+            Some(&repo.envelope(case.start_event, &session, json!({}))),
+            &[],
+        );
+        assert!(
+            start.status.success(),
+            "{label}: session start: {}",
+            describe(&start)
+        );
+        let hook = ["agent", "hooks", case.provider, case.verb];
+        let mut identity = serde_json::Map::new();
+        identity.insert(
+            case.identity_key.to_string(),
+            json!(format!("replay-matrix-{label}-v1")),
+        );
+        let delivery = repo.envelope(case.hook_event_name, &session, Value::Object(identity));
+        let pending = vec![(
+            case.receipt.0.to_string(),
+            case.receipt.1.to_string(),
+            "pending".to_string(),
+        )];
+        let complete = vec![(
+            case.receipt.0.to_string(),
+            case.receipt.1.to_string(),
+            "complete".to_string(),
+        )];
+
+        // First delivery fails at the case's stage.
+        let blocker = case.fault.arm(&repo, &session).await;
+        let failed = repo.run(&hook, Some(&delivery), &[]);
+        let claims_under_fault = repo.coverage_claims().await;
+        case.fault.disarm(&repo, blocker).await;
+        assert!(
+            !failed.status.success(),
+            "{label}: the faulted delivery must not acknowledge: {}",
+            describe(&failed)
+        );
+        let stderr = String::from_utf8_lossy(&failed.stderr);
+        assert!(
+            !stderr.contains(&session)
+                && !stderr.contains("injected")
+                && !stderr.contains("foreign"),
+            "{label}: the failure must stay content-free: {}",
+            describe(&failed)
+        );
+        assert_eq!(
+            repo.checkpoint_receipts(&session).await,
+            pending,
+            "{label}: the failed delivery must leave its receipt pending"
+        );
+        assert_ne!(
+            repo.session_ledger(&session).await.0,
+            "stopped",
+            "{label}: a pending receipt must not publish a terminal state"
+        );
+        let faulted_head = repo.traces_head_if_present();
+        match case.fault {
+            ReplayFault::PostRegistration | ReplayFault::CoverageHeld => {
+                assert!(
+                    repo.checkpoints().is_empty() && faulted_head.is_none(),
+                    "{label}: nothing may become durable before the fault clears"
+                );
+                assert_eq!(
+                    repo.inflight_marker_count().await,
+                    0,
+                    "{label}: a pre-durable failure must retire its writer marker"
+                );
+            }
+            ReplayFault::MarkerCleanup => {
+                let durable = repo.checkpoints();
+                assert_eq!(
+                    durable.len(),
+                    1,
+                    "{label}: the ref/catalog transaction committed before cleanup failed"
+                );
+                assert_eq!(
+                    faulted_head.as_deref(),
+                    durable[0]["traces_commit"].as_str(),
+                    "{label}: the durable checkpoint is already the traces head"
+                );
+                assert_eq!(
+                    repo.inflight_marker_count().await,
+                    1,
+                    "{label}: the failed cleanup must leave its ordinary marker"
+                );
+                let checkpoint_id = durable[0]["checkpoint_id"]
+                    .as_str()
+                    .expect("durable checkpoint has an id");
+                let leftover = repo.inflight_markers_for(checkpoint_id).await;
+                assert!(
+                    leftover.len() == 1 && leftover[0].get("cleanup_pending").is_none(),
+                    "{label}: the leftover marker is this action's ordinary marker: {leftover:?}"
+                );
+            }
+        }
+        if matches!(case.fault, ReplayFault::CoverageHeld) {
+            assert_eq!(
+                claims_under_fault,
+                vec![(
+                    "u1".to_string(),
+                    "reserved_live".to_string(),
+                    Some("foreign-owner".to_string()),
+                    1,
+                    0,
+                    Some(4_102_444_800_000),
+                )],
+                "{label}: the delivery must not take over a live foreign claim"
+            );
+        }
+
+        // The identical native replay resumes the failure outcome.
+        let replay = repo.run(&hook, Some(&delivery), &[]);
+        assert!(
+            replay.status.success(),
+            "{label}: the native replay must complete: {}",
+            describe(&replay)
+        );
+        let committed = repo.checkpoints();
+        assert_eq!(
+            committed.len(),
+            1,
+            "{label}: replay must leave exactly one durable checkpoint: {committed:?}"
+        );
+        assert_eq!(
+            committed[0]["scope"].as_str(),
+            Some(case.scope),
+            "{label}: checkpoint scope"
+        );
+        let commit = committed[0]["traces_commit"]
+            .as_str()
+            .expect("checkpoint has traces commit")
+            .to_string();
+        assert_eq!(
+            repo.traces_head(),
+            commit,
+            "{label}: the traces ref must name the catalog checkpoint"
+        );
+        if let Some(faulted_head) = faulted_head {
+            assert_eq!(
+                commit, faulted_head,
+                "{label}: replay over a durable checkpoint must not advance the traces ref"
+            );
+        }
+        let checkpoint_id = committed[0]["checkpoint_id"]
+            .as_str()
+            .expect("checkpoint has an id")
+            .to_string();
+        assert!(
+            repo.inflight_markers_for(&checkpoint_id).await.is_empty(),
+            "{label}: replay must retire this action's ordinary writer marker"
+        );
+        assert_eq!(
+            repo.inflight_marker_count().await,
+            0,
+            "{label}: replay must leave no writer marker behind"
+        );
+        assert_eq!(
+            repo.checkpoint_receipts(&session).await,
+            complete,
+            "{label}: replay must complete the original receipt"
+        );
+        let ledger = repo.session_ledger(&session).await;
+        assert_eq!(
+            ledger.0 == "stopped",
+            case.terminal,
+            "{label}: only a terminal receipt publishes `stopped`: {ledger:?}"
+        );
+        assert_eq!(
+            case.terminal,
+            ledger.1.is_some(),
+            "{label}: stopped_at is set exactly for a terminal completion"
+        );
+
+        // A completed receipt turns every further delivery into a pure
+        // acknowledgement.
+        let duplicate = repo.run(&hook, Some(&delivery), &[]);
+        assert!(
+            duplicate.status.success(),
+            "{label}: completed replay acknowledges: {}",
+            describe(&duplicate)
+        );
+        assert_eq!(
+            repo.checkpoints(),
+            committed,
+            "{label}: duplicate must not append or rewrite a checkpoint"
+        );
+        assert_eq!(
+            repo.traces_head(),
+            commit,
+            "{label}: duplicate must not advance refs/libra/traces"
+        );
+        assert_eq!(
+            repo.session_ledger(&session).await,
+            ledger,
+            "{label}: duplicate must not revise state, revision, or receipts"
+        );
+        assert!(
+            repo.session_show(&format!("{}__{session}", case.provider_prefix))
+                .get("capture_status")
+                .is_none(),
+            "{label}: successful replay clears the retry diagnostic"
+        );
+        let durable = repo
+            .replay_durable_oracle(&session, case.provider_prefix, &checkpoint_id)
+            .await;
+        assert_eq!(
+            durable,
+            (
+                case.durable.agent_kind.to_string(),
+                case.durable.partial_reason.map(str::to_string),
+                case.durable
+                    .claim_channels
+                    .iter()
+                    .map(|channel| channel.to_string())
+                    .collect::<Vec<_>>(),
+            ),
+            "{label}: per-provider durable oracle (agent kind, snapshot partial reason, claim channels)"
+        );
+    }
+}
+
+/// Run all six Claude/Codex replay and fault oracles in default CI. The
+/// complete eight-row matrix above is an explicit local OpenCode gate.
+#[tokio::test]
+async fn claude_codex_native_replay_stays_in_ci() {
+    let cases = [
+        ReplayCase {
+            label: "turn-end-post-registration",
+            provider: "claude-code",
+            provider_prefix: "claude",
+            start_event: "SessionStart",
+            verb: "stop",
+            hook_event_name: "Stop",
+            identity_key: "turn_id",
+            transcript: true,
+            fault: ReplayFault::PostRegistration,
+            scope: "committed",
+            receipt: ("committed", "active"),
+            terminal: false,
+            durable: ReplayDurableOracle {
+                agent_kind: "claude_code",
+                partial_reason: None,
+                claim_channels: &["live"],
+            },
+        },
+        ReplayCase {
+            label: "turn-end-coverage-held",
+            provider: "claude-code",
+            provider_prefix: "claude",
+            start_event: "SessionStart",
+            verb: "stop",
+            hook_event_name: "Stop",
+            identity_key: "turn_id",
+            transcript: true,
+            fault: ReplayFault::CoverageHeld,
+            scope: "committed",
+            receipt: ("committed", "active"),
+            terminal: false,
+            durable: ReplayDurableOracle {
+                agent_kind: "claude_code",
+                partial_reason: None,
+                claim_channels: &["live"],
+            },
+        },
+        ReplayCase {
+            label: "turn-end-marker-cleanup",
+            provider: "claude-code",
+            provider_prefix: "claude",
+            start_event: "SessionStart",
+            verb: "stop",
+            hook_event_name: "Stop",
+            identity_key: "turn_id",
+            transcript: false,
+            fault: ReplayFault::MarkerCleanup,
+            scope: "committed",
+            receipt: ("committed", "active"),
+            terminal: false,
+            durable: ReplayDurableOracle {
+                agent_kind: "claude_code",
+                partial_reason: Some("source_absent"),
+                claim_channels: &[],
+            },
+        },
+        // The first delivery commits the turn's coverage claim with its
+        // checkpoint, so the replay reaches the coverage-gate no-op rather
+        // than the checkpoint store's write. That settlement must still let
+        // the store's replay retire the leftover ordinary marker.
+        ReplayCase {
+            label: "turn-end-covered-marker-cleanup",
+            provider: "claude-code",
+            provider_prefix: "claude",
+            start_event: "SessionStart",
+            verb: "stop",
+            hook_event_name: "Stop",
+            identity_key: "turn_id",
+            transcript: true,
+            fault: ReplayFault::MarkerCleanup,
+            scope: "committed",
+            receipt: ("committed", "active"),
+            terminal: false,
+            durable: ReplayDurableOracle {
+                agent_kind: "claude_code",
+                partial_reason: None,
+                claim_channels: &["live"],
+            },
+        },
+        ReplayCase {
+            label: "session-end-marker-cleanup",
+            provider: "claude-code",
+            provider_prefix: "claude",
+            start_event: "SessionStart",
+            verb: "session-end",
+            hook_event_name: "SessionEnd",
+            identity_key: "event_id",
+            transcript: false,
+            fault: ReplayFault::MarkerCleanup,
+            scope: "committed",
+            receipt: ("committed", "stopped"),
+            terminal: true,
+            durable: ReplayDurableOracle {
+                agent_kind: "claude_code",
+                partial_reason: Some("source_absent"),
+                claim_channels: &[],
+            },
+        },
+        ReplayCase {
+            label: "subagent-end-post-registration",
+            provider: "codex",
+            provider_prefix: "codex",
+            start_event: "SessionStart",
+            verb: "subagent-end",
+            hook_event_name: "SubagentStop",
+            identity_key: "event_id",
+            transcript: false,
+            fault: ReplayFault::PostRegistration,
+            scope: "subagent",
+            receipt: ("subagent_boundary", "active"),
+            terminal: false,
+            durable: ReplayDurableOracle {
+                agent_kind: "codex",
+                partial_reason: None,
                 claim_channels: &[],
             },
         },

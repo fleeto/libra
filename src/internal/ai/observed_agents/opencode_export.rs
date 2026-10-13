@@ -5585,10 +5585,10 @@ printf 'tty=detached'"#,
     /// SBX-03 D-group: a trusted, usable bwrap must be present. Missing or
     /// user-writable bwrap is a hard failure (never a skip-green). The broad
     /// self-hosted compatibility suite does not guarantee this environment;
-    /// opencode-export-linux explicitly runs this ignored gate with
+    /// opencode-export-sandbox-linux explicitly runs this ignored gate with
     /// `--include-ignored` on its pinned Linux runner.
     #[cfg(target_os = "linux")]
-    #[ignore = "Linux D-group environment gate; run via opencode-export-linux"]
+    #[ignore = "Linux D-group environment gate; run via opencode-export-sandbox-linux"]
     #[serial_test::serial(export_sandbox_env)]
     #[tokio::test]
     async fn trusted_bwrap_preflight() {

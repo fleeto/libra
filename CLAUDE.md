@@ -104,14 +104,17 @@ cargo run -- <command>          # e.g. cargo run -- status
 
 ### CI Pipeline (`.github/workflows/base.yml`)
 
-`base.yml` runs on `pull_request` only. All PRs must pass these jobs (display names below; the job ids are `format`, `clippy`, `redundancy`, `test`, `network-remotes`, `owner-liveness-macos`, `opencode-export-linux`). Jobs 1–5 run on the `[self-hosted]` runner pool, 6 on `macos-latest`, 7 on `ubuntu-latest`:
+`base.yml` runs on pull requests and pushes to `main`. Applicable checks include the jobs below (job ids: `format`, `clippy`, `redundancy`, `test`, `network-remotes`, `owner-liveness-macos`, `scoped-input-windows`, `opencode-export-sandbox-linux`). The self-hosted jobs run format, Clippy, redundancy, offline tests and network remotes; platform-specific safety jobs use GitHub-hosted runners:
 1. **compat-rustfmt** — `cargo +nightly fmt --all --check`
 2. **compat-clippy** — `cargo clippy --all-targets --all-features -- -D warnings`, then `RUSTDOCFLAGS="-D rustdoc::broken_intra_doc_links" cargo doc --no-deps --all-features`
 3. **compat-redundancy** — directory-shape check on `third-party/rust/crates` (passes trivially when the directory is absent, as it is today)
 4. **compat-offline-core** — `cargo test --test compat_matrix_alignment compatibility_matrix_matches_cli_commands -- --exact` + pinned `cargo nextest run --all --no-fail-fast --retries 2` (one process per test; external-resource mutual exclusion from the generated `.config/nextest.toml`) + `cargo test --doc` + the `otlp` (`otlp_telemetry`), `keyring` (`auth_keyring_backend`) and `test-upgrade` (`upgrade_auto_test`, `upgrade_publish_contract_test`, with `LIBRA_TEST=1`) feature sections on `cargo test`. Test steps run with `HOME` / `USERPROFILE` / `XDG_CONFIG_HOME` pointed at an isolated `libra-ci-home` and require `rg` (ripgrep) on `PATH`
 5. **compat-network-remotes** — `cargo test --features test-network --test network_remotes_test -- --test-threads=1`
 6. **compat-owner-liveness-macos** — `cargo test --lib -- claim_owner_tests --test-threads=1` on `macos-latest` (plan-20260714 W1 §C.9 claim-owner liveness proof)
-7. **opencode-export-linux** — on `ubuntu-latest`: installs bubblewrap, runs the `internal::ai::observed_agents::opencode_export` lib gates, then `cargo test --test agent_opencode_bridge_test` (fails if the bridge test reports `skipped`)
+7. **compat-scoped-input-windows** — on `windows-latest`: runs the exact scoped-input safety fixtures.
+8. **opencode-export-sandbox-linux** — on `ubuntu-24.04`: installs pinned bubblewrap and runs the `internal::ai::observed_agents::opencode_export` sandbox unit safety gates. OpenCode CLI → Session/Checkpoint bridge E2E is excluded from CI.
+
+OpenCode Session-capture acceptance runs on the operator machine. On macOS, select the reviewed private binary explicitly and run `LIBRA_RUN_LOCAL_AGENTS=1 LIBRA_LOCAL_AGENT_SET=opencode LIBRA_OPENCODE_NATIVE_BINARY=/absolute/path/to/reviewed/opencode cargo test --test agent_local_capture_smoke_test local_capture_smoke_opencode_macos -- --ignored --exact --test-threads=1`. The controlled bridge target requires `--features test-live-agent` and explicit `--ignored`; its Linux content cases are user-later/UNRUN until run with usable trusted bwrap and no skips. Default CI keeps offline parser, cryptographic and sandbox unit tests, plus frame-log-only plugin checks; OpenCode CLI/hook/import Session capture, checkpoint metadata and durable zero-write integration cases require explicit local `--ignored` execution.
 
 Additional workflows: `codeql.yml` (security analysis), `live-compat.yml` (scheduled / manual `compat-live-cloud`, not a required check), `release.yml` (release pipeline: runs on `v*` tags only, builds with `--features keyring`, uploads through the OIDC credential broker at `https://libra.tools` with no long-term R2 secrets — `compat_release_rclone_env_guard` — then requests the Ed25519-signed stable manifest).
 

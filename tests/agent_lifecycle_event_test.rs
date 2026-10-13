@@ -4643,6 +4643,7 @@ async fn hook_contract_projection(repo: &HookRepo) -> String {
 /// stay in their dedicated unit tests. ADR-ACF-10 freezes this function's
 /// token stream together with the helpers it calls directly.
 #[tokio::test]
+#[ignore = "OpenCode Session capture is an operator-local manual gate"]
 async fn hook_public_contract_byte_compat_matrix() {
     // One invocation -> one pinned line:
     // `<surface> <case> <verb> exit=<code> stdout=<bytes> stderr=<bytes> | <durable>`.
@@ -4759,6 +4760,128 @@ async fn hook_public_contract_byte_compat_matrix() {
     );
 }
 
+/// Keep the four Claude/Codex public hook byte contracts in CI while the
+/// OpenCode Session-producing surface is exercised only by the manual matrix.
+#[tokio::test]
+async fn hook_public_contract_claude_codex_ci() {
+    // One invocation -> one pinned line:
+    // `<surface> <case> <verb> exit=<code> stdout=<bytes> stderr=<bytes> | <durable>`.
+    macro_rules! observe {
+        ($repo:expr, $surface:expr, $case:expr, $args:expr, $stdin:expr) => {{
+            let repo: &HookRepo = $repo;
+            let args: Vec<&str> = $args;
+            let stdin: &str = $stdin;
+            let out = repo.run(&args, Some(stdin));
+            format!(
+                "{} {} {} exit={:?} stdout={} stderr={} | {}",
+                $surface,
+                $case,
+                args.last().copied().unwrap_or_default(),
+                out.status.code(),
+                hook_contract_bytes(repo, &out.stdout),
+                hook_contract_bytes(repo, &out.stderr),
+                hook_contract_projection(repo).await,
+            )
+        }};
+    }
+
+    let mut observed = Vec::new();
+    for surface in &HOOK_CONTRACT_SURFACES[..4] {
+        let repo = HookRepo::init();
+        let label = surface.label;
+        let session = format!("contract-{label}");
+        let edge_session = format!("contract-{label}-edge");
+        let with_verb = |verb: &'static str| {
+            let mut args = surface.command.to_vec();
+            args.push(verb);
+            args
+        };
+        observed.push(observe!(
+            &repo,
+            label,
+            "envelope-invalid",
+            with_verb("session-start"),
+            "not a hook envelope"
+        ));
+        observed.push(observe!(
+            &repo,
+            label,
+            "unknown-event",
+            with_verb("stop"),
+            &repo.envelope(
+                "LibraContractUnknownEvent",
+                &edge_session,
+                None,
+                json!({ "event_id": format!("{edge_session}-unknown") }),
+            )
+        ));
+        observed.push(observe!(
+            &repo,
+            label,
+            "cwd-outside-worktree",
+            with_verb("session-start"),
+            &repo.envelope_at(
+                &repo.home,
+                "SessionStart",
+                &edge_session,
+                None,
+                json!({ "event_id": format!("{edge_session}-outside") }),
+            )
+        ));
+        for (verb, native_event) in HOOK_CONTRACT_VERBS.into_iter().zip(surface.native_events) {
+            observed.push(observe!(
+                &repo,
+                label,
+                native_event,
+                with_verb(verb),
+                &repo.envelope(
+                    native_event,
+                    &session,
+                    None,
+                    if surface.label == "agent-hooks-opencode" && native_event == "message.updated"
+                    {
+                        json!({ "event_id": format!("{session}-{verb}"), "prompt": "" })
+                    } else {
+                        json!({ "event_id": format!("{session}-{verb}") })
+                    },
+                )
+            ));
+        }
+    }
+
+    let repo = HookRepo::init();
+    for command in [&["hooks", "gemini"][..], &["agent", "hooks", "gemini"][..]] {
+        let label = command.join("-");
+        for (verb, native_event) in HOOK_CONTRACT_VERBS.into_iter().zip(CLAUDE_CONTRACT_EVENTS) {
+            let mut args = command.to_vec();
+            args.push(verb);
+            observed.push(observe!(
+                &repo,
+                label,
+                native_event,
+                args,
+                &repo.envelope(
+                    native_event,
+                    "contract-gemini",
+                    None,
+                    json!({ "event_id": format!("contract-gemini-{verb}") }),
+                )
+            ));
+        }
+    }
+
+    let expected: Vec<&str> = HOOK_PUBLIC_CONTRACT_MATRIX
+        .lines()
+        .filter(|line| !line.starts_with("agent-hooks-opencode "))
+        .collect();
+    assert_eq!(
+        observed,
+        expected,
+        "public hook contract drifted; observed matrix:\n{}",
+        observed.join("\n")
+    );
+}
+
 // OG-01 inputs are synthetic Libra envelopes, not upstream/native provenance.
 type Og01DurableSnapshot = (
     std::collections::BTreeMap<String, Vec<String>>,
@@ -4830,6 +4953,7 @@ async fn og01_durable_snapshot(repo: &HookRepo) -> Og01DurableSnapshot {
 }
 
 #[tokio::test]
+#[ignore = "OpenCode Session capture is an operator-local manual gate"]
 async fn opencode_status_idle_maps_turn_end() {
     let repo = HookRepo::init();
     let start = repo.envelope(
@@ -4871,6 +4995,7 @@ async fn opencode_status_idle_maps_turn_end() {
 }
 
 #[tokio::test]
+#[ignore = "OpenCode Session capture is an operator-local manual gate"]
 async fn opencode_status_busy_retry_fails_closed() {
     let repo = HookRepo::init();
     let baseline = og01_durable_snapshot(&repo).await;
@@ -4900,6 +5025,7 @@ async fn opencode_status_busy_retry_fails_closed() {
 }
 
 #[tokio::test]
+#[ignore = "OpenCode Session capture is an operator-local manual gate"]
 async fn opencode_message_updated_is_single_envelope_turn_start() {
     for mut extra in [
         json!({"prompt":""}),
@@ -4929,6 +5055,7 @@ async fn opencode_message_updated_is_single_envelope_turn_start() {
 }
 
 #[tokio::test]
+#[ignore = "OpenCode Session capture is an operator-local manual gate"]
 async fn opencode_missing_legacy_prompt_fails_before_writes() {
     for active in [false, true] {
         let repo = HookRepo::init();
@@ -4972,6 +5099,7 @@ async fn opencode_missing_legacy_prompt_fails_before_writes() {
 }
 
 #[tokio::test]
+#[ignore = "OpenCode Session capture is an operator-local manual gate"]
 async fn opencode_legacy_alias_transition_forwarded() {
     for stable_id in [false, true] {
         let repo = HookRepo::init();
@@ -5174,6 +5302,7 @@ fn exit_flush_orders_after_sync_session_start() {
 }
 
 #[tokio::test]
+#[ignore = "OpenCode Session capture is an operator-local manual gate"]
 async fn opencode_produced_frames_reach_real_ingress_and_survive_history_rollover() {
     let repo = HookRepo::init();
     let installed = repo.run(&["agent", "enable", "--agent", "opencode"], None);

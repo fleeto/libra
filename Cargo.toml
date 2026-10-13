@@ -188,6 +188,14 @@ name = "agent_native_origin_test"
 path = "tests/agent_native_origin_test.rs"
 required-features = ["test-live-agent"]
 
+# OpenCode CLI -> session/checkpoint export bridge exercises a complete
+# provider capture path. Run it explicitly on an operator machine, never in
+# the default CI suite (the feature enables compilation, not model calls).
+[[test]]
+name = "agent_opencode_bridge_test"
+path = "tests/agent_opencode_bridge_test.rs"
+required-features = ["test-live-agent"]
+
 [[test]]
 name = "compat_stash_subcommand_surface"
 path = "tests/compat/stash_subcommand_surface.rs"

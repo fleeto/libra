@@ -18,6 +18,9 @@ on:
 permissions:
   contents: read
 
+# A newer main commit is handled by cancel-superseded-main.yml, which stops
+# this older-SHA job so self-hosted runners can test the newest commit.
+# This local group setting only prevents one live run from cancelling another.
 concurrency:
   group: ${{ github.workflow }}
   cancel-in-progress: false

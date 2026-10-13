@@ -10,11 +10,11 @@
 //! without editing the oracle. Its token stream is fingerprinted by
 //! `compat_agent_architecture_guard::capture_runtime_extraction_oracles_are_frozen`.
 //!
-//! Run prerequisite: the OpenCode leg borrows the `libra` binary Cargo builds
-//! beside the unit-test executable, and `cargo test --lib` does not build bin
-//! targets. Run the oracle after `cargo build --bin libra`, or under
-//! `cargo test --all` / `cargo nextest run`, which build that binary from the
-//! same sources. A missing binary fails loudly; a stale one is not detected.
+//! The complete three-provider oracle is an operator-local ignored test.
+//! Its OpenCode leg borrows the `libra` binary Cargo builds beside the unit
+//! test executable: build that binary before running the ignored test under
+//! `cargo test --lib`. A missing binary fails loudly; a stale one is not
+//! detected. Default CI runs a separate Claude/Codex-only oracle.
 
 use std::path::{Path, PathBuf};
 
@@ -284,6 +284,7 @@ fn oracle_normalize(value: &mut Value, repo: &str) {
 /// without one, and an OpenCode session whose export bridge is unavailable.
 #[tokio::test(flavor = "current_thread")]
 #[serial(cwd, env)]
+#[ignore = "OpenCode Session capture is an operator-local manual gate"]
 async fn live_checkpoint_metadata_shape_is_stable() {
     let home = tempfile::tempdir().expect("create oracle provider home");
     let _env = OracleEnvGuard::set(&[
@@ -390,6 +391,114 @@ async fn live_checkpoint_metadata_shape_is_stable() {
         }
     }
     let expected: Vec<&str> = LIVE_CHECKPOINT_METADATA_SHAPE.lines().collect();
+    assert_eq!(
+        observed,
+        expected,
+        "live checkpoint metadata shape drifted; observed table:\n{}",
+        observed.join("\n")
+    );
+}
+
+/// Keep the Claude and Codex checkpoint metadata oracle in default CI while
+/// the complete three-provider oracle is an explicit local OpenCode gate.
+#[tokio::test(flavor = "current_thread")]
+#[serial(cwd, env)]
+async fn live_checkpoint_metadata_shape_claude_codex_ci() {
+    let home = tempfile::tempdir().expect("create oracle provider home");
+    let _env = OracleEnvGuard::set(&[
+        ("LIBRA_TEST_HOME", home.path().to_path_buf()),
+        (
+            "LIBRA_CONFIG_GLOBAL_DB",
+            home.path().join("oracle-global-config.db"),
+        ),
+    ]);
+    let cases: [(&str, &dyn HookProvider, [&str; 3]); 2] = [
+        (
+            "claude-source",
+            claude_provider(),
+            ["SessionStart", "Stop", "SessionEnd"],
+        ),
+        (
+            "codex-source-absent",
+            codex_provider(),
+            ["SessionStart", "Stop", "SessionEnd"],
+        ),
+    ];
+    let mut observed = Vec::new();
+    for (label, provider, events) in cases {
+        let (_dir, repo, conn) = oracle_repository().await;
+        // Capture helpers that resolve repository storage from the process
+        // cwd must see this oracle's fixture, not the developer checkout (or
+        // GitHub's plain .git checkout, which has no .libra directory).
+        let _cwd = crate::utils::test::ChangeDirGuard::new(&repo);
+        let session_id = format!("oracle-{label}");
+        if label == "claude-source" {
+            let source_dir = crate::internal::ai::observed_agents::claude_session_dir(&repo)
+                .expect("oracle home provides a Claude project directory");
+            std::fs::create_dir_all(&source_dir).expect("create oracle Claude project");
+            std::fs::write(
+                source_dir.join(format!("{session_id}.jsonl")),
+                ORACLE_CLAUDE_TRANSCRIPT,
+            )
+            .expect("write oracle Claude transcript");
+        }
+        let deliveries = async {
+            for (command, hook_event_name) in [
+                ProviderHookCommand::SessionStart,
+                ProviderHookCommand::Stop,
+                ProviderHookCommand::SessionEnd,
+            ]
+            .into_iter()
+            .zip(events)
+            {
+                oracle_deliver(
+                    &conn,
+                    &repo,
+                    provider,
+                    command,
+                    hook_event_name,
+                    &session_id,
+                )
+                .await;
+            }
+        };
+        deliveries.await;
+        crate::utils::client_storage::ClientStorage::wait_for_background_tasks();
+        let rows = conn
+            .query_all_raw(Statement::from_string(
+                conn.get_database_backend(),
+                "SELECT checkpoint_id, scope, tree_oid, metadata_blob_oid \
+                 FROM agent_checkpoint ORDER BY created_at, rowid"
+                    .to_string(),
+            ))
+            .await
+            .expect("query oracle checkpoints");
+        for (index, row) in rows.iter().enumerate() {
+            let checkpoint_id: String = row.try_get_by("checkpoint_id").expect("checkpoint id");
+            let scope: String = row.try_get_by("scope").expect("checkpoint scope");
+            let tree_oid: String = row.try_get_by("tree_oid").expect("checkpoint tree");
+            let metadata_oid: String = row
+                .try_get_by("metadata_blob_oid")
+                .expect("checkpoint metadata blob");
+            let leaf = format!("checkpoint/{}/{}", &checkpoint_id[..2], &checkpoint_id[2..]);
+            for (file, bytes) in [
+                ("metadata.json", oracle_object_body(&repo, &metadata_oid)),
+                (
+                    "redaction_report.json",
+                    oracle_tree_blob(&repo, &tree_oid, &format!("{leaf}/redaction_report.json")),
+                ),
+            ] {
+                let mut document: Value = serde_json::from_slice(&bytes)
+                    .unwrap_or_else(|error| panic!("{label} {file} is not JSON: {error}"));
+                oracle_normalize(&mut document, &repo.to_string_lossy());
+                observed.push(format!("{label} {index} {scope} {file} {document}"));
+            }
+        }
+    }
+    let expected: Vec<&str> = LIVE_CHECKPOINT_METADATA_SHAPE
+        .lines()
+        .filter(|line| !line.starts_with("opencode-bridge-unavailable "))
+        .collect();
     assert_eq!(
         observed,
         expected,

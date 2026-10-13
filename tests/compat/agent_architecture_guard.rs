@@ -8787,16 +8787,19 @@ fn public_signature_fingerprint(relative_path: &str, function: &str) -> String {
     hex::encode(Sha256::digest(signature.as_bytes()))
 }
 
-/// ADR-ACF-10 "Oracle freeze" (ACF-17): the three live-runtime extraction
-/// oracles, the same-file helpers they use directly, and the public signature
+/// ADR-ACF-10 "Oracle freeze" (ACF-17): the three historical live-runtime
+/// extraction oracles and their Claude/Codex CI copies, the same-file helpers
+/// they use directly, and the public signature
 /// of the in-process AgentTraces harness are fingerprinted before the first
 /// move. ACF-18/19/20 must not change these constants; a genuine oracle change
 /// requires an ADR-ACF-10 revision and a fresh design review first.
 #[test]
 fn capture_runtime_extraction_oracles_are_frozen() {
     // First digest: OG-01 input-only Contract A revision after fresh Claude
-    // design PASS. Other digests remain ACF-17; helpers/output/signature are
-    // unchanged. ADR-ACF-10 records the bounded exception.
+    // design PASS. The three current digests include only the subsequent
+    // local-only #[ignore] test attribute required by OpenCode CI policy;
+    // oracle bodies, helpers, expectation tables, and harness signature are
+    // unchanged. ADR-ACF-10 records this bounded execution-scope revision.
     const FROZEN_ORACLES: [(&str, &str, &[&str], &str); 3] = [
         (
             "tests/agent_lifecycle_event_test.rs",
@@ -8816,7 +8819,7 @@ fn capture_runtime_extraction_oracles_are_frozen() {
                 "fn hook_contract_projection",
                 "struct HookRepo",
             ],
-            "797636312e8468779a9819255111fdb4acabf7fa7cef896ec756c44cff5cb8ae",
+            "92b101aa8079a041517adb95626f13cec2a366ef326bf24ea48846c0427bf206",
         ),
         (
             "tests/agent_hook_crash_test.rs",
@@ -8845,7 +8848,7 @@ fn capture_runtime_extraction_oracles_are_frozen() {
                 "struct ReplayCase",
                 "struct ReplayDurableOracle",
             ],
-            "1a32c4659d50b14ae37b1ac9a0d1eb7b8a0934e6c2005c44aed107f7a1beee9f",
+            "42718713cfa9baf3fbf5949f3e5fd1830e439aee84fc3292d1cda04215c91bc3",
         ),
         (
             "src/internal/ai/capture/live_oracle_tests.rs",
@@ -8862,14 +8865,81 @@ fn capture_runtime_extraction_oracles_are_frozen() {
                 "fn oracle_tree_blob",
                 "struct OracleEnvGuard",
             ],
-            "71d9f1664e413488f14ca66de5a482b3355954fa70d18afcf6fa70019cc7c970",
+            "11d5c090d7a88e731de4f9316dc662f4273fbc2fb6bd1e30099e39ae13095019",
+        ),
+    ];
+    const CI_ORACLES: [(&str, &str, &[&str], &str); 3] = [
+        (
+            "tests/agent_lifecycle_event_test.rs",
+            "hook_public_contract_claude_codex_ci",
+            &[
+                "HookRepo::envelope",
+                "HookRepo::envelope_at",
+                "HookRepo::init",
+                "HookRepo::run",
+                "const CLAUDE_CONTRACT_EVENTS",
+                "const CODEX_CONTRACT_EVENTS",
+                "const HOOK_CONTRACT_SURFACES",
+                "const HOOK_CONTRACT_VERBS",
+                "const HOOK_PUBLIC_CONTRACT_MATRIX",
+                "const OPENCODE_CONTRACT_EVENTS",
+                "fn hook_contract_bytes",
+                "fn hook_contract_projection",
+                "struct HookRepo",
+            ],
+            "d3826fda088310fb89c67b5df57ae0638477578c88b72da2d2de74399f621638",
+        ),
+        (
+            "tests/agent_hook_crash_test.rs",
+            "claude_codex_native_replay_stays_in_ci",
+            &[
+                "HookRepo::checkpoint_receipts",
+                "HookRepo::checkpoints",
+                "HookRepo::coverage_claims",
+                "HookRepo::envelope",
+                "HookRepo::inflight_marker_count",
+                "HookRepo::inflight_markers_for",
+                "HookRepo::init",
+                "HookRepo::replay_durable_oracle",
+                "HookRepo::run",
+                "HookRepo::session_ledger",
+                "HookRepo::session_show",
+                "HookRepo::traces_head",
+                "HookRepo::traces_head_if_present",
+                "HookRepo::write_claude_transcript",
+                "ReplayFault::arm",
+                "ReplayFault::disarm",
+                "const TURN_COMPLETE",
+                "enum ReplayFault",
+                "fn describe",
+                "struct HookRepo",
+                "struct ReplayCase",
+                "struct ReplayDurableOracle",
+            ],
+            "bdf7b32879957d3d13fc495bec45dbebfcd0768cc9436e8a2325851c3614a5c2",
+        ),
+        (
+            "src/internal/ai/capture/live_oracle_tests.rs",
+            "live_checkpoint_metadata_shape_claude_codex_ci",
+            &[
+                "OracleEnvGuard::set",
+                "const LIVE_CHECKPOINT_METADATA_SHAPE",
+                "const ORACLE_CLAUDE_TRANSCRIPT",
+                "fn oracle_deliver",
+                "fn oracle_normalize",
+                "fn oracle_object_body",
+                "fn oracle_repository",
+                "fn oracle_tree_blob",
+                "struct OracleEnvGuard",
+            ],
+            "888a03ddc146e0271421ab09a080e298ef42c0354d7a1c7594b2b554a2b167fe",
         ),
     ];
     const FROZEN_HARNESS_SIGNATURE: &str =
         "59dcac0ec79268681a04242f71650b028cc5b834e322e97c048b99aff6642244";
 
     let mut drift = Vec::new();
-    for (relative_path, oracle, helpers, digest) in FROZEN_ORACLES {
+    for (relative_path, oracle, helpers, digest) in FROZEN_ORACLES.into_iter().chain(CI_ORACLES) {
         let (covered, actual) = extraction_oracle_fingerprint(relative_path, oracle);
         if covered != helpers || actual != digest {
             drift.push(format!(

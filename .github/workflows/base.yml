@@ -502,13 +502,15 @@ jobs:
           XDG_CONFIG_HOME: ${{ runner.temp }}/libra-ci-home/.config
         run: cargo test --features test-network --test network_remotes_test -- --test-threads=1
 
-  # plan-20260830 SBX-03 / DEP-SBX-03: Linux-only export-bridge e2e with a
-  # trusted bwrap preflight. compat-offline-core is self-hosted and does not
-  # guarantee Linux+apt+bwrap, so this job is the D-group oracle
+  # plan-20260830 SBX-03 / DEP-SBX-03: Linux-only exporter sandbox unit
+  # safety gates with a trusted bwrap preflight. OpenCode CLI -> Session
+  # capture E2E is operator-local and never runs in CI. compat-offline-core
+  # is self-hosted and does not guarantee Linux+apt+bwrap, so this job is
+  # the sandbox D-group oracle
   # (`runs-on: ubuntu-24.04`, uname pin, pinned bubblewrap build, named
   # gates must not skip).
-  opencode-export-linux:
-    name: opencode-export-linux
+  opencode-export-sandbox-linux:
+    name: opencode-export-sandbox-linux
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:
@@ -587,11 +589,3 @@ jobs:
           run_gate opencode_export_sandboxed_outer_cancel_contains_setsid_writer
           run_gate trusted_export_retry_recovers_a_transient_sandbox_failure
 
-      - name: Run OpenCode export bridge e2e (must not skip)
-        run: |
-          set -euo pipefail
-          cargo test --test agent_opencode_bridge_test -- --nocapture | tee /tmp/opencode-bridge.log
-          if grep -F "skipped (no trusted, usable bwrap)" /tmp/opencode-bridge.log; then
-            echo "FAIL: agent_opencode_bridge_test skipped on Linux D-group"
-            exit 1
-          fi

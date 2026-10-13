@@ -266,6 +266,7 @@ const EXPORT_WRONG_SESSION: &str = r#"printf '%s' '{"info":{"id":"ses_other","di
 /// export bridge and persists an import-channel checkpoint, not an export-job
 /// side effect or a file-backed source.
 #[tokio::test]
+#[ignore = "OpenCode Session capture is an operator-local manual gate"]
 #[serial_test::serial(opencode_export_bridge)]
 async fn opencode_historical_import_e2e_uses_trusted_export_bytes() {
     let Some(repo) = BridgeRepo::init(EXPORT_IMPORT).await else {
@@ -323,6 +324,7 @@ async fn opencode_historical_import_e2e_uses_trusted_export_bytes() {
 /// opencode_export_whole_session_idempotent: two idles over unchanged export
 /// content append exactly one checkpoint; the export job converges.
 #[tokio::test]
+#[ignore = "OpenCode Session capture is an operator-local manual gate"]
 #[serial_test::serial(opencode_export_bridge)]
 async fn opencode_export_whole_session_idempotent() {
     let Some(repo) = BridgeRepo::init(EXPORT_HELLO).await else {
@@ -366,6 +368,7 @@ async fn opencode_export_whole_session_idempotent() {
 /// checksum. Its successful durable path must bind that checksum to this
 /// repository before a snapshot projection reaches `agent_session` metadata.
 #[tokio::test]
+#[ignore = "OpenCode Session capture is an operator-local manual gate"]
 #[serial_test::serial(opencode_export_bridge)]
 async fn opencode_export_durable_snapshot_uses_repository_keyed_hmac() {
     let Some(repo) = BridgeRepo::init(EXPORT_HELLO).await else {
@@ -456,6 +459,7 @@ async fn opencode_export_durable_snapshot_uses_repository_keyed_hmac() {
 /// OpenCode session. Identity validation must keep those bytes out of the
 /// export channel while the hook continues with its metadata-only fallback.
 #[tokio::test]
+#[ignore = "OpenCode Session capture is an operator-local manual gate"]
 #[serial_test::serial(opencode_export_bridge)]
 async fn opencode_export_rejects_wrong_native_session_without_export_claim() {
     let Some(repo) = BridgeRepo::init(EXPORT_WRONG_SESSION).await else {
@@ -482,6 +486,7 @@ async fn opencode_export_rejects_wrong_native_session_without_export_claim() {
 }
 
 #[tokio::test]
+#[ignore = "OpenCode Session capture is an operator-local manual gate"]
 #[serial_test::serial(opencode_export_bridge)]
 async fn opencode_registered_failure_releases_dirty_job_claim_and_marker() {
     let Some(repo) = BridgeRepo::init(EXPORT_HELLO).await else {
@@ -528,6 +533,7 @@ async fn opencode_registered_failure_releases_dirty_job_claim_and_marker() {
 /// opencode_export_plaintext_never_in_persist_or_logs: a secret in the
 /// export content is redacted before it reaches the traces blob.
 #[tokio::test]
+#[ignore = "OpenCode Session capture is an operator-local manual gate"]
 #[serial_test::serial(opencode_export_bridge)]
 async fn opencode_export_plaintext_never_in_persist_or_logs() {
     let secret = "AKIAZZZZZZZZZZZZZZZZ";
@@ -555,6 +561,7 @@ async fn opencode_export_plaintext_never_in_persist_or_logs() {
 /// binary after registration revokes trust — the next idle degrades to
 /// metadata-only capture (no content append), never an untrusted spawn.
 #[tokio::test]
+#[ignore = "OpenCode Session capture is an operator-local manual gate"]
 #[serial_test::serial(opencode_export_bridge)]
 async fn opencode_export_binary_trust_revalidates() {
     let Some(repo) = BridgeRepo::init(EXPORT_HELLO).await else {
@@ -596,6 +603,7 @@ async fn opencode_export_binary_trust_revalidates() {
 /// GiB disk backstop) and degrades to metadata-only — no truncated content
 /// claim, the write still succeeds.
 #[tokio::test]
+#[ignore = "OpenCode Session capture is an operator-local manual gate"]
 #[serial_test::serial(opencode_export_bridge)]
 async fn opencode_export_oversize_session_degrades() {
     // 32 MiB of zeros — well past the 16 MiB cap.
@@ -620,6 +628,7 @@ async fn opencode_export_oversize_session_degrades() {
 /// The Required macOS pair must still reject a substituted exporter before spawn.
 #[cfg(target_os = "macos")]
 #[tokio::test]
+#[ignore = "OpenCode Session capture is an operator-local manual gate"]
 #[serial_test::serial(opencode_export_bridge)]
 async fn opencode_export_macos_requires_trust_before_spawn() {
     use libra::internal::ai::observed_agents::opencode_export::{

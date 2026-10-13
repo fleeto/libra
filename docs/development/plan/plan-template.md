@@ -268,7 +268,7 @@
    ```
 
    ② 读取受影响 job 的**完整定义**——`permissions`、`strategy` / `matrix`（含 `fail-fast`）、job 与 step 级 `env`、`if`、`shell`、`run`、`uses`、`with`——再据此写判据。只看 `run:` 不够：`codeql.yml` 当前**没有任何 `run:` 步骤**，其执行步骤主要由 action 定义并同时受上述完整 job/step 字段约束；`release.yml` 也有大量语义性 `uses:` 步骤。分流：
-   - **可本地复现**的步骤 → 抄成命令进 A 组，保留其 `env`、shell、`--features`、`--test-threads` 等全部约束。**依赖 GitHub checkout 的 Git 命令不得照抄**（本仓库无 `.git`，见 ER-07）：写出保持同一判据的 Libra-native 等价实现，例如 `opencode-export-linux` 的生成产物漂移检查用 `libra status --porcelain=v1 <artifact>`（输出非空即失败）替代 `git status --porcelain -- <artifact>`。（`web-check`/`web/` 於 0.23.x 已拆除，原示例保留僅為歷史口徑。）
+   - **可本地复现**的步骤 → 抄成命令进 A 组，保留其 `env`、shell、`--features`、`--test-threads` 等全部约束。**依赖 GitHub checkout 的 Git 命令不得照抄**（本仓库无 `.git`，见 ER-07）：写出保持同一判据的 Libra-native 等价实现，例如 GitHub checkout 下的生成产物漂移检查用 `libra status --porcelain=v1 <artifact>`（输出非空即失败）替代 `git status --porcelain -- <artifact>`。（`web-check`/`web/` 於 0.23.x 已拆除，原示例保留僅為歷史口徑。）
    - **不可本地复现**的 action-only 语义（CodeQL 扫描、artifact 上传、Homebrew tap 更新等）→ 不得凭空造命令，归入下文 **D 组远端后置门**。
 
    参考：`base.yml` 在 2026-07-28 的 job 集合为 `format` / `clippy` / `web-check` / `redundancy` / `test` / `network-remotes`（仅核对日快照，判定一律以现场读取的 workflow 文件为准）。

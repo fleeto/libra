@@ -265,35 +265,37 @@ COV2-REL-01 冻结不含 OG-27 源码的最终 COV2 树，完成 bumped exact-tr
 
 **Task type:** implementation
 
-**Lifecycle / Acceptance:** pending / 空
+**Lifecycle / Acceptance:** in-progress / locally-accepted（8 AC、4 VER、fmt、严格 Clippy 与唯一 Claude Code PASS；本卡 signed main Push 随本提交交付，家族 C/D 仍待）
 
 **Description:** frozen v1/RG-04 legacy oracle。本卡唯一行为轴、恢复和粒度见下方 Granularity；不得以 synthetic/native 互换验收。
 
 **Out of scope:** 不让历史 synthetic v1 fixture 授权生产 typed v1；生产接线由 COV2-11 承接。
 
-**Current evidence:** tests/fixtures/agent_transcripts/reasoning/contract.snap; src/internal/ai/observed_agents/coverage.rs:2490（基线 `dcc468b`；ER-02 开工刷新行号与实际源码）。
+**Current evidence:** 冻结 `contract.snap` SHA-256 `1e83e39d582c76d3b297ab8252c109a11eadaed40f2e6d299d221ae750b1b665` 未变；当前 `coverage.rs:2134,2163,2908` 与 `tests/compat/agent_architecture_guard.rs:10653` 是本卡具名 oracle，起点为 signed main `a3b51fd103fc2aa95f64c3395339a00937060356`。
 
 **Frozen vector authority:** `docs/development/tracing/coverage-v1.md` §5 与基线 `dcc468bd31c88a7e8d8c0d2957d6e80b65908990:src/internal/ai/observed_agents/coverage.rs` 的既有 `golden_vector_1_user_assistant` / `_2_tool_call_and_result` / `_3_escapes_and_unicode` 测试字面量是预变更 oracle；基线源码 blob SHA-256 `796aef2cf5717d6ef133c5c7f727c08aede2861af5eab3691ce858ef32b00d85`。三个 digest 固定为 `df991cd9a1ac5c12c32b8cdf0254c3dfbbf26485b505a5afc83a90d1128ebc54`、`af085109b1584fd77bb3b752c1141c1c0f0f12b51a163e94b0f91ddd329460a4`、`f1e76bf75df5d6b0f67a46806abb256cd6de30eaea30e45254a8a66cf5183356`，不可由修改后的 codec 重新生成预期值。`contract.snap` 原字节 SHA-256 `1e83e39d582c76d3b297ab8252c109a11eadaed40f2e6d299d221ae750b1b665`，只读。
 
 **Acceptance criteria:**
 
-- [ ] AC1：v1 向量 1 的 canonical bytes 与冻结值相同。
-- [ ] AC2：v1 向量 1 的 SHA-256 digest 与冻结值相同。
-- [ ] AC3：v1 向量 2 的 canonical bytes 与冻结值相同。
-- [ ] AC4：v1 向量 2 的 SHA-256 digest 与冻结值相同。
-- [ ] AC5：v1 向量 3 的 canonical bytes 与冻结值相同。
-- [ ] AC6：v1 向量 3 的 SHA-256 digest 与冻结值相同。
-- [ ] AC7：RG-04 的 contract.snap blob 与冻结原件字节完全相同。
-- [ ] AC8：既有 RG-04 synthetic 投影经显式 legacy-v1 oracle 精确匹配该 fixture。
+- [x] AC1：v1 向量 1 的 canonical bytes 与冻结值相同。
+- [x] AC2：v1 向量 1 的 SHA-256 digest 与冻结值相同。
+- [x] AC3：v1 向量 2 的 canonical bytes 与冻结值相同。
+- [x] AC4：v1 向量 2 的 SHA-256 digest 与冻结值相同。
+- [x] AC5：v1 向量 3 的 canonical bytes 与冻结值相同。
+- [x] AC6：v1 向量 3 的 SHA-256 digest 与冻结值相同。
+- [x] AC7：RG-04 的 contract.snap blob 与冻结原件字节完全相同。
+- [x] AC8：既有 RG-04 synthetic 投影经显式 legacy-v1 oracle 精确匹配该 fixture。
 
 **Verification:**
 
-- [ ] VER1→AC1/3/5: `source .env.test && cargo test --lib internal::ai::observed_agents::coverage::tests::cov2_v1_vector_bytes_frozen -- --exact` (1/1).
-- [ ] VER2→AC2/4/6: `source .env.test && cargo test --lib internal::ai::observed_agents::coverage::tests::cov2_v1_vector_digests_frozen -- --exact` (1/1).
-- [ ] VER3→AC7: `source .env.test && cargo test --test compat_agent_architecture_guard cov2_rg04_contract_snap_sha_is_frozen -- --exact` (1/1; pinned historical SHA, file read-only).
-- [ ] VER4→AC8: `source .env.test && cargo test --lib internal::ai::observed_agents::coverage::tests::rg04_fixture_provider_visible_conformance -- --exact` (existing 1/1; any required production-source fix is confined to the explicit legacy oracle, never the fixture). The two paths cannot be conflated.
+- [x] VER1→AC1/3/5: `source .env.test && cargo test --lib internal::ai::observed_agents::coverage::tests::cov2_v1_vector_bytes_frozen -- --exact` (1/1；root log SHA-256 `0f5d3812009e80cdd45feb9426e39df4ff59271c19838d102b2e9a9d88279219`).
+- [x] VER2→AC2/4/6: `source .env.test && cargo test --lib internal::ai::observed_agents::coverage::tests::cov2_v1_vector_digests_frozen -- --exact` (1/1；root log SHA-256 `becd6b4664b2a05e8f0df2bd3a74bfcdf735da8dc5906d659a598d16c2c125b1`).
+- [x] VER3→AC7: `source .env.test && cargo test --test compat_agent_architecture_guard cov2_rg04_contract_snap_sha_is_frozen -- --exact` (1/1；root log SHA-256 `3c6238f008c2c98ce3607dcad876d8a086b738550d98f3b9e0b7460df352da5c`；pinned historical SHA，file read-only).
+- [x] VER4→AC8: `source .env.test && cargo test --lib internal::ai::observed_agents::coverage::tests::rg04_fixture_provider_visible_conformance -- --exact` (existing 1/1；root log SHA-256 `38b7aa8bdca07f17b2b901c54b6e527bfda9a4832cbb2f4362a8851cbeb20c7c`；只比对 legacy-v1 投影与原 fixture，未改 fixture). The two paths cannot be conflated.
 
-**Full-suite trigger:** family child 不自行发布；按 ER-13 对最终改动重新判定 T-1/T-4/T-6。若命中 shared single-source helper、测试基建或 focused 信号不足，则在本卡 A/B 阶段运行双 env 全量 Nextest；无论是否命中，COV2-REL-01 T-2 均须在 bumped 树上重跑。
+**Final A/B local evidence:** 四项具名 VER 在根工作区最终源码各 1/1、0 skipped；`cargo +nightly fmt --all --check` exit 0；`cargo clippy --all-targets --all-features -- -D warnings` exit 0（raw SHA-256 `c390c26cd50bf4f19aaef41fdef60b34bd766cfd7f8a506e323a3bc38b679302`）；`libra diff --check` exit 0。四个非状态文件均为 mode `100644`，SHA-256：`coverage.rs` `f2ad98262d69332bec0ba9b7a91861006203ea56a828cbbe16f77b1b07c55ccd`、`agent_architecture_guard.rs` `46d67ec907e09bd8982ef5713d03cdf0cf4419ddc1d0346511fe6d85c73bbae3`、`coverage-v1.md` `d1c8bd683a40eb9a02bc106ee5c61715e4c13cac2234cbcccb33c9873b7efd4a`、`coverage-v2.md` `5c61bf28a1689423d0f20f9baf69b36a015914be15914a789ec09d3edfad4086`。`contract.snap` 仍为原 SHA-256；这四项是 synthetic/冻结兼容证据，不证明真实 native Source A，也不运行 OpenCode Session。唯一 Claude Code 最终 **PASS**（P0/P1/P2=0；raw SHA-256 `f900a64d58bc2b125145cec3e608d9356bb613bb8a0aca7e6d0338efb34b3afd`）；后审仅补本行和状态事实，signed main 随本提交交付。
+
+**Full-suite trigger:** 本卡只在现有文件新增 `#[cfg(test)]` oracle、既有 compat 测试和文档说明，不改 production helper、测试基建、公开 CLI/错误码、SQL 或 CI；按 ER-13 复核未命中 T-1/T-4/T-6，四项 exact VER 已覆盖 8 AC，因此本卡不独立重跑全量。COV2-01 的 10053/10053 仅是前驱源码证据，不冒称本卡全量；COV2-REL-01 T-2 仍须在 bumped 树上重跑。
 
 **Dependencies:** COV2-01；消费前驱实际最终 A/B、适用 focused/full、fmt/strict、单 Claude PASS 与 signed+DCO main 的 source-qualified 文件 SHA/mode；不以其尚待 C/D 的 `locally-accepted` 冒称 complete。
 
@@ -1492,6 +1494,7 @@ COV2-REL-01 冻结不含 OG-27 源码的最终 COV2 树，完成 bumped exact-tr
 | 2026-10-13（暂行草案审查；未记精确 UTC） | 隔离草案 R5 | PASS（临时稿） | 0×P0/P1/P2；另有4×P3已在隔离稿修订，采纳到main后仍须重新审查实际字节 | raw SHA-256 `df9f77cdd9ebc5e0055a35c5c59324ecac68ce10a75c2d001159b762822cb793`；被审草案 SHA `9a042abef56de8218546b2080d10d35c38e6ab1dd8877c5682d7c575fb5f55b2`，parent patch SHA `27cbe6983691dc252283fc5f739ca53e7fa2220fa4fd78e32d6bffb41ff903cf` |
 | 2026-10-13 11:33:56 UTC | 本计划最终采纳 | **PASS** | 唯一 Claude Code 最终字节复审 P0/P1/P2=0；前轮两个 P2（Linux CI 选择器与父计划 C/D 状态）已修正；只批准计划采纳，不当 COV2-01 实现评审 | raw SHA-256 `b05a5dd7761cecefe6956aa30e62e4f36a195c8f27a786bb9ab2656275a66114`；签名+DCO main `c94fd8dd60d8d9fa670b2682bf7b9979bae91548` |
 | 2026-10-13 13:04:09 UTC | COV2-01 最终源码/文档 | **PASS** | 唯一 Claude Code Sonnet 最终审查 P0=0/P1=0/P2=0；保留 5 项 P3 后续注意（redaction 次序、legacy API、重复判断、Source A 未证、审查者未亲自重跑测试）；reviewer 独立核对八文件 SHA、153-byte golden digest、RG-04 快照，确认 23 skipped 未被误算验收 | raw SHA-256 `5e5ad9af5b9b917054ba5a94d6c17629d9e9b6b959edc8033b6ee72cfaa9c64c`；签名前八文件 SHA/mode 见 COV2-01 卡；后审只作本行及状态事实登记 |
+| 2026-10-13 13:37:14 UTC | COV2-13 冻结 v1/RG-04 合同 | **PASS** | 唯一 Claude Code Sonnet 最终审查 P0=0/P1=0/P2=0；独立对照历史 `dcc468b` 三字节/摘要常量、fixture SHA 与四文件 post SHA/mode，确认测试非空、生产无 delta、ER-13 不冒称本卡 full；仅保留 deterministic/Source A 未证等残余 | raw SHA-256 `f900a64d58bc2b125145cec3e608d9356bb613bb8a0aca7e6d0338efb34b3afd`；起点 signed main `a3b51fd103fc2aa95f64c3395339a00937060356`；后审只补本行与状态事实 |
 
 ## 非目标与延后项
 
@@ -1508,7 +1511,8 @@ COV2-REL-01 冻结不含 OG-27 源码的最终 COV2 树，完成 bumped exact-tr
 | 2026-10-13 10:59 UTC | 采纳前只读预核 | OG-26 待签工作树，实际 main SHA 尚缺 | 0/19 卡完成；22 个继承本机 case（原21+OG-26新增1）仍须最终行为源码 12/12+10/10 验收 | UNRUN | 草案修改待最终 Claude | r2 binary-to-source 有限子门 PASS，runtime/issuer/Source A/归档仍 NO-GO；OG-26 signed main 与网站 owner 未交接 |
 | 2026-10-13 11:16:08 UTC | OG-26 signed main 只读交接 | `734b6f03884d3aa38400acbbfd446b557e642d94`，`HEAD=origin/main` | 0/19 卡完成；22 个继承本机 case（12+10）均未作 COV2 最终行为源码验收 | UNRUN | 采纳后最终字节单 Claude 待审 | OG-26 源码已交；网站 owner 仍待隔离确认，runtime/issuer/Source A/归档仍 NO-GO |
 | 2026-10-13 11:33:56 UTC | 计划采纳 | `c94fd8dd60d8d9fa670b2682bf7b9979bae91548`，签名+DCO main | 0/19 正式完成；COV2-01 已立卡但此时未验收 | 采纳文件 docs contract 30/30、fmt、strict Clippy exit0；非 COV2 实现门 | 唯一 Claude Code **PASS**，raw SHA-256 `b05a5dd7761cecefe6956aa30e62e4f36a195c8f27a786bb9ab2656275a66114` | COV2-01 起顺序实施；Source A/native、22 个最终行为源码 Session 门及家族 C/D 仍未完成 |
-| 2026-10-13 13:04:09 UTC | COV2-01 本机 A/B+单审交付 | 签名前八个非状态文件 SHA/mode 见卡内清单；本行随 signed+DCO main Push 固定树 | 8/8 AC、3/3 VER、RG-04 frozen 1/1；0/19 formal，source-ready **1/19=5.26%**（以 signed main 交付为生效条件） | fmt exit0；strict Clippy exit0/raw SHA `ce387dd8e31968c025fdd8ba63e0b5902fd0341d3d409b50665a660039d4d334`；双 env full 10053/10053 passed、23 skipped/raw SHA `fa3327517528a07abd8ece858e56a519d70d010b7a1ac56e80890c39665cc7c0` | 唯一 Claude Code **PASS**，P0/P1/P2=0，raw SHA `5e5ad9af5b9b917054ba5a94d6c17629d9e9b6b959edc8033b6ee72cfaa9c64c` | COV2-13 下一卡；家族 C/D、22 个最终行为源码 Session 与 Source A 仍待 |
+| 2026-10-13 13:04:09 UTC | COV2-01 本机 A/B+单审交付 | signed+DCO main `a3b51fd103fc2aa95f64c3395339a00937060356`；八个非状态文件 SHA/mode 见卡内清单 | 8/8 AC、3/3 VER、RG-04 frozen 1/1；0/19 formal，source-ready **1/19=5.26%** | fmt exit0；strict Clippy exit0/raw SHA `ce387dd8e31968c025fdd8ba63e0b5902fd0341d3d409b50665a660039d4d334`；双 env full 10053/10053 passed、23 skipped/raw SHA `fa3327517528a07abd8ece858e56a519d70d010b7a1ac56e80890c39665cc7c0` | 唯一 Claude Code **PASS**，P0/P1/P2=0，raw SHA `5e5ad9af5b9b917054ba5a94d6c17629d9e9b6b959edc8033b6ee72cfaa9c64c` | COV2-13 下一卡；家族 C/D、22 个最终行为源码 Session 与 Source A 仍待 |
+| 2026-10-13 13:37:14 UTC | COV2-13 本机 A/B+单审交付 | 起点 signed main `a3b51fd103fc2aa95f64c3395339a00937060356`；四个非状态文件 SHA/mode 见卡内清单；本行随 signed+DCO main Push 固定树 | 8/8 AC、4/4 VER 各1/1；0/19 formal，source-ready **2/19=10.53%**（以 signed main 交付为生效条件） | fmt exit0；strict Clippy exit0/raw SHA `c390c26cd50bf4f19aaef41fdef60b34bd766cfd7f8a506e323a3bc38b679302`；ER-13 无独立 full 触发 | 唯一 Claude Code **PASS**，P0/P1/P2=0，raw SHA `f900a64d58bc2b125145cec3e608d9356bb613bb8a0aca7e6d0338efb34b3afd` | COV2-02 下一卡；COV2 家族 C/D 与父计划 Source A 仍待 |
 
 **终止链末端 D 组记账协议预登记：** 如 COV2-REL-01 最后只是纯文档登记，推送后的 main CI 观察不能写入该提交自身。按模板 v2.14 将该 SHA、run ID、结论及 UTC 留到下一次 `docs/development/plan/plan-status.md` 例行同步；次日仍无同步时单独作状态维护提交。本例外不把未观察 D 当 PASS。
 

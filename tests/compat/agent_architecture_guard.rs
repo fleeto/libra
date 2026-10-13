@@ -10648,3 +10648,15 @@ fn reasoning_pending_signers_and_native_record_fillers_are_closed() {
         ]),
     );
 }
+
+#[test]
+fn cov2_rg04_contract_snap_sha_is_frozen() {
+    use sha2::{Digest, Sha256};
+
+    const EXPECTED_SHA256: &str =
+        "1e83e39d582c76d3b297ab8252c109a11eadaed40f2e6d299d221ae750b1b665";
+    let bytes =
+        fs::read(repo_root().join("tests/fixtures/agent_transcripts/reasoning/contract.snap"))
+            .expect("read frozen RG-04 contract.snap bytes");
+    assert_eq!(hex::encode(Sha256::digest(bytes)), EXPECTED_SHA256);
+}

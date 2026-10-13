@@ -13,6 +13,13 @@ Live hook writers, import writers (M4), and the OpenCode export bridge (M3)
 MUST all produce identical `(logical_turn_key, coverage_digest)` values for
 the same content, or cross-path idempotence breaks.
 
+Coverage schema v2 adds a typed `Reasoning` record in a separate claim
+namespace. New production turns containing that record must use v2; the four
+v1 record shapes, canonical bytes, and digest vectors below remain frozen.
+The RG-04 synthetic `contract.snap` contains a legacy v1-shaped projection
+for compatibility testing only; it does not authorize a production v1 claim
+with `Reasoning`. See [coverage-v2.md](coverage-v2.md).
+
 ## 1. Pipeline position (ADR-DR-12, fixed order)
 
 ```

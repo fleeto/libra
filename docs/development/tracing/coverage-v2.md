@@ -46,6 +46,12 @@ has digest
 `be52311c1b5daf77926d352c3b44eb93bb4fd57b78423774b3d0ac7ecbccc586`.
 The independent fixture is
 `tests/fixtures/agent_transcripts/reasoning/coverage_v2_golden.json`.
+COV2-13 independently pins all three historical v1 byte and digest
+vectors against the new versioned encoder. It also checks the original
+`contract.snap` file's SHA-256 before the existing RG-04 legacy projection
+test compares the complete JSON value. These checks are compatibility oracles;
+they do not switch production writers to v2.
+
 The RG-04 `contract.snap` remains unchanged and continues to exercise the
 legacy projection; its synthetic Reasoning example is not a production v1
 claim.

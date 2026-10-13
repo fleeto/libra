@@ -57,6 +57,46 @@ fn reasoning_source_kind_tag(kind: reasoning::ReasoningSourceKind) -> &'static s
 /// Coverage schema version this module implements (`coverage-v1.md`).
 pub const COVERAGE_SCHEMA_VERSION: i64 = 1;
 
+/// The claim's semantic coverage domain. This is independent of the public
+/// `agent list` and `agent graph` envelope versions.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CoverageSchemaVersion {
+    V1,
+    V2,
+}
+
+impl CoverageSchemaVersion {
+    pub const fn as_i64(self) -> i64 {
+        match self {
+            Self::V1 => COVERAGE_SCHEMA_VERSION,
+            Self::V2 => 2,
+        }
+    }
+}
+
+/// A rejected version never falls back to v1 or includes turn content in its
+/// diagnostic. The legacy serializer remains available only for frozen v1
+/// compatibility oracles until the production writers adopt this API.
+#[derive(Debug, thiserror::Error)]
+pub enum CoverageCodecError {
+    #[error("unsupported coverage schema version {0}; supported versions are 1 and 2")]
+    UnsupportedVersion(i64),
+    #[error("coverage schema v1 cannot encode typed reasoning; use schema v2")]
+    ReasoningRequiresV2,
+}
+
+impl TryFrom<i64> for CoverageSchemaVersion {
+    type Error = CoverageCodecError;
+
+    fn try_from(value: i64) -> Result<Self, Self::Error> {
+        match value {
+            COVERAGE_SCHEMA_VERSION => Ok(Self::V1),
+            2 => Ok(Self::V2),
+            other => Err(CoverageCodecError::UnsupportedVersion(other)),
+        }
+    }
+}
+
 /// Strict JSON value for the coverage v1 domain: integers only, duplicate
 /// object keys rejected at parse time, objects held sorted (BTreeMap) so the
 /// canonical writer just iterates.
@@ -424,6 +464,64 @@ pub struct NormalizedTurn {
     pub started_at: Option<i64>,
     pub ended_at: Option<i64>,
     pub records: Vec<SemanticRecord>,
+}
+
+/// One version-bound encoding of an already redacted logical turn. The
+/// canonical bytes can contain user text, so this type deliberately has no
+/// `Debug` or `Serialize` implementation.
+pub struct EncodedCoverageTurn {
+    pub schema_version: CoverageSchemaVersion,
+    pub canonical_bytes: Vec<u8>,
+    pub digest_hex: String,
+}
+
+/// Select the production coverage domain from typed semantic content. Merely
+/// observing a reasoning-like source field does not construct this variant or
+/// grant native-source authority.
+pub fn select_coverage_schema(turn: &NormalizedTurn) -> CoverageSchemaVersion {
+    if turn
+        .records
+        .iter()
+        .any(|record| matches!(record, SemanticRecord::Reasoning { .. }))
+    {
+        CoverageSchemaVersion::V2
+    } else {
+        CoverageSchemaVersion::V1
+    }
+}
+
+/// Encode a redacted turn for an explicitly supplied claim version. Validate
+/// the version and semantic allowlist before constructing any output bytes;
+/// future readers may request v2 even for a turn without a reasoning record,
+/// while the automatic production selector still chooses v1 for that turn.
+pub fn encode_coverage_turn_for_schema(
+    version: i64,
+    turn: &NormalizedTurn,
+) -> Result<EncodedCoverageTurn, CoverageCodecError> {
+    let schema_version = CoverageSchemaVersion::try_from(version)?;
+    if schema_version == CoverageSchemaVersion::V1
+        && turn
+            .records
+            .iter()
+            .any(|record| matches!(record, SemanticRecord::Reasoning { .. }))
+    {
+        return Err(CoverageCodecError::ReasoningRequiresV2);
+    }
+    let canonical_bytes = canonical_turn_bytes(&turn.records);
+    let digest_hex = hex::encode(Sha256::digest(&canonical_bytes));
+    Ok(EncodedCoverageTurn {
+        schema_version,
+        canonical_bytes,
+        digest_hex,
+    })
+}
+
+/// Encode under the selected production version. Call only after typed-field
+/// redaction, before coverage claim reservation or any persistence sink.
+pub fn encode_coverage_turn(
+    turn: &NormalizedTurn,
+) -> Result<EncodedCoverageTurn, CoverageCodecError> {
+    encode_coverage_turn_for_schema(select_coverage_schema(turn).as_i64(), turn)
 }
 
 impl NormalizedTurn {
@@ -1747,6 +1845,38 @@ fn canon_to_json(value: &CanonValue) -> serde_json::Value {
 /// fields cannot enter this shape because it is rebuilt solely from the typed
 /// coverage model.
 pub fn safe_turn_projection(agent_kind: &str, turn: &NormalizedTurn) -> serde_json::Value {
+    project_turn_for_schema(agent_kind, turn, COVERAGE_SCHEMA_VERSION)
+}
+
+/// Build an allowlist-only projection for an explicitly validated coverage
+/// version. Unlike the frozen legacy helper, this rejects typed Reasoning in
+/// v1 and never silently downgrades an unknown version.
+pub fn safe_turn_projection_for_schema(
+    version: i64,
+    agent_kind: &str,
+    turn: &NormalizedTurn,
+) -> Result<serde_json::Value, CoverageCodecError> {
+    let schema_version = CoverageSchemaVersion::try_from(version)?;
+    if schema_version == CoverageSchemaVersion::V1
+        && turn
+            .records
+            .iter()
+            .any(|record| matches!(record, SemanticRecord::Reasoning { .. }))
+    {
+        return Err(CoverageCodecError::ReasoningRequiresV2);
+    }
+    Ok(project_turn_for_schema(
+        agent_kind,
+        turn,
+        schema_version.as_i64(),
+    ))
+}
+
+fn project_turn_for_schema(
+    agent_kind: &str,
+    turn: &NormalizedTurn,
+    schema_version: i64,
+) -> serde_json::Value {
     let records = turn
         .records
         .iter()
@@ -1786,7 +1916,7 @@ pub fn safe_turn_projection(agent_kind: &str, turn: &NormalizedTurn) -> serde_js
         })
         .collect::<Vec<_>>();
     serde_json::json!({
-        "schema_version": COVERAGE_SCHEMA_VERSION,
+        "schema_version": schema_version,
         "agent_kind": agent_kind,
         "logical_turn_key": turn.logical_turn_key,
         "ordinal": turn.ordinal,
@@ -1799,6 +1929,34 @@ pub fn safe_turn_projection(agent_kind: &str, turn: &NormalizedTurn) -> serde_js
 mod tests {
     use super::*;
 
+    fn cov2_visible_turn(text: &str) -> NormalizedTurn {
+        let (_, visible_text) = reasoning::classify_provider_visible_reasoning(
+            reasoning::ReasoningProvider::OpenCode,
+            reasoning::ReasoningSourceKind::Reasoning,
+            text.to_owned(),
+        );
+        NormalizedTurn {
+            logical_turn_key: "synthetic-turn".to_owned(),
+            ordinal: 0,
+            completeness: Completeness::Complete,
+            started_at: None,
+            ended_at: None,
+            records: vec![
+                SemanticRecord::User {
+                    text: "hi".to_owned(),
+                },
+                SemanticRecord::Reasoning {
+                    provider: reasoning::ReasoningProvider::OpenCode,
+                    source_kind: Some(reasoning::ReasoningSourceKind::Reasoning),
+                    text: visible_text,
+                },
+                SemanticRecord::Assistant {
+                    text: "hello".to_owned(),
+                },
+            ],
+        }
+    }
+
     fn user_hi_assistant_hello() -> Vec<SemanticRecord> {
         vec![
             SemanticRecord::User {
@@ -1808,6 +1966,120 @@ mod tests {
                 text: "hello".to_string(),
             },
         ]
+    }
+
+    #[test]
+    fn cov2_selects_from_typed_turn() {
+        let visible = cov2_visible_turn("synthetic");
+        assert_eq!(select_coverage_schema(&visible), CoverageSchemaVersion::V2);
+        let encoded = encode_coverage_turn(&visible).expect("v2 typed turn encodes");
+        assert_eq!(encoded.schema_version.as_i64(), 2);
+        let projection = safe_turn_projection_for_schema(2, "opencode", &visible)
+            .expect("v2 projection encodes");
+        assert_eq!(projection["schema_version"], 2);
+        assert_eq!(projection["records"][1]["type"], "reasoning");
+
+        let plain = NormalizedTurn {
+            logical_turn_key: "plain-turn".to_owned(),
+            ordinal: 0,
+            completeness: Completeness::Complete,
+            started_at: None,
+            ended_at: None,
+            records: user_hi_assistant_hello(),
+        };
+        assert_eq!(select_coverage_schema(&plain), CoverageSchemaVersion::V1);
+        let v1 = encode_coverage_turn(&plain).expect("plain turn encodes as v1");
+        assert_eq!(v1.schema_version.as_i64(), 1);
+        assert_eq!(v1.canonical_bytes, canonical_turn_bytes(&plain.records));
+        assert_eq!(v1.digest_hex, plain.digest_hex());
+        assert_eq!(
+            safe_turn_projection_for_schema(1, "opencode", &plain).expect("plain v1 projection"),
+            safe_turn_projection("opencode", &plain)
+        );
+
+        for unsupported in [0, -1, 3, i64::MAX] {
+            assert!(matches!(
+                encode_coverage_turn_for_schema(unsupported, &visible),
+                Err(CoverageCodecError::UnsupportedVersion(value)) if value == unsupported
+            ));
+            assert!(matches!(
+                safe_turn_projection_for_schema(unsupported, "opencode", &visible),
+                Err(CoverageCodecError::UnsupportedVersion(value)) if value == unsupported
+            ));
+        }
+        assert!(matches!(
+            encode_coverage_turn_for_schema(1, &visible),
+            Err(CoverageCodecError::ReasoningRequiresV2)
+        ));
+        assert!(matches!(
+            safe_turn_projection_for_schema(1, "opencode", &visible),
+            Err(CoverageCodecError::ReasoningRequiresV2)
+        ));
+        assert_eq!(
+            CoverageCodecError::UnsupportedVersion(3).to_string(),
+            "unsupported coverage schema version 3; supported versions are 1 and 2"
+        );
+        assert_eq!(
+            CoverageCodecError::ReasoningRequiresV2.to_string(),
+            "coverage schema v1 cannot encode typed reasoning; use schema v2"
+        );
+        assert!(
+            !CoverageCodecError::ReasoningRequiresV2
+                .to_string()
+                .contains("synthetic")
+        );
+    }
+
+    #[test]
+    fn cov2_closed_reasoning_golden() {
+        let golden: serde_json::Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/agent_transcripts/reasoning/coverage_v2_golden.json"
+        )))
+        .expect("independent v2 golden is valid JSON");
+        let mut visible = cov2_visible_turn("synthetic");
+        let encoded = encode_coverage_turn(&visible).expect("synthetic v2 turn encodes");
+        assert_eq!(golden["schema_version"], encoded.schema_version.as_i64());
+        assert_eq!(golden["canonical_byte_len"], encoded.canonical_bytes.len());
+        assert_eq!(
+            encoded.canonical_bytes,
+            golden["canonical_utf8"]
+                .as_str()
+                .expect("golden canonical bytes")
+                .as_bytes()
+        );
+        assert_eq!(
+            encoded.digest_hex,
+            golden["sha256"].as_str().expect("golden sha256")
+        );
+        let canonical: serde_json::Value =
+            serde_json::from_slice(&encoded.canonical_bytes).expect("canonical JSON parses");
+        let reasoning = canonical[1].as_object().expect("reasoning record object");
+        assert_eq!(
+            reasoning.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["provider", "role", "source_kind", "text"]
+        );
+        assert_eq!(reasoning["role"], "reasoning");
+        assert_eq!(reasoning["provider"], "opencode");
+        assert_eq!(reasoning["source_kind"], "reasoning");
+        assert_eq!(reasoning["text"], "synthetic");
+
+        visible.started_at = Some(123);
+        visible.ended_at = Some(456);
+        visible.logical_turn_key = "another-provenance-key".to_owned();
+        let changed_provenance =
+            encode_coverage_turn(&visible).expect("provenance-only edit encodes");
+        assert_eq!(changed_provenance.canonical_bytes, encoded.canonical_bytes);
+        assert_eq!(changed_provenance.digest_hex, encoded.digest_hex);
+
+        let mut with_secret =
+            cov2_visible_turn("reasoning sk-ant-EXAMPLE0000000000000000 should be redacted");
+        redact_turns_with_report(std::slice::from_mut(&mut with_secret));
+        let redacted = encode_coverage_turn(&with_secret).expect("redacted v2 turn encodes");
+        let redacted_projection = safe_turn_projection_for_schema(2, "opencode", &with_secret)
+            .expect("redacted v2 projection encodes");
+        assert!(!String::from_utf8_lossy(&redacted.canonical_bytes).contains("sk-ant-"));
+        assert!(!redacted_projection.to_string().contains("sk-ant-"));
     }
 
     /// coverage-v1.md §5 vector 1 — canonical bytes and digest are normative.

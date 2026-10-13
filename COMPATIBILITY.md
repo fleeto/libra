@@ -1015,6 +1015,23 @@ The pre-redaction capability remains None for the other promoted adapters; their
 
 OG-26 adds a private, non-authoritative OpenCode candidate within that snapshot boundary. Before materializing the strict JSON tree, a lexical pass bounds nodes to 65,536 and depth to 64 and records only original receipt byte offsets; a receipt is at most 8 KiB, and the existing 16 MiB source and 512-entry caps still apply. The candidate keeps decoded original values and exact source coordinates separately from the redacted ordinary copy. Missing mapping, malformed JSON, budget failure or unproved origin stays partial with no ordinary checkpoint; the candidate does not grant native provenance or archive permission. Authorized in-memory source bytes rejected before preprocessing, a raw source buffer split from a private candidate, the retained private candidate, and both retained and removed branches of the owned parse tree are explicitly wiped; Serde's internal scratch and partially constructed values during both successful and failed strict parses cannot be individually wiped here. Structural budget failures report `source_oversize`, not an authorization mismatch; a long session can reach the 65,536-node cap below 16 MiB and needs a smaller new capture session and inspection of the content-free partial reason before retrying. Synchronous deadline checks refuse after an overrun but do not preempt parser CPU time; the structural pass limits that work. OpenCode CLI/hook/export-to-Session integration acceptance, including deterministic fake-exporter runs, is explicitly ignored in CI and run locally on macOS. Pure parser and sandbox unit tests remain deterministic CI checks; installed-model tests are local-only as well.
 
+### Coverage schema v2 codec preparation (COV2-01)
+
+The new versioned coverage codec selects claim schema v2 only for a typed
+`SemanticRecord::Reasoning` turn; turns without that record select v1 and
+retain their frozen bytes and digest. An unknown version or an explicit v1
+request with typed Reasoning fails closed. The four-field Reasoning canonical
+shape and SHA-256 golden are documented in
+[`coverage-v2.md`](docs/development/tracing/coverage-v2.md). The existing
+`safe_turn_projection`, `NormalizedTurn` wire form, public `agent graph`
+schema v1, default `agent list` schema v1, and explicit `agent list`
+schema v2 remain unchanged. This card exposes an internal encoder only;
+live/import writers, database claims, replay and reader behavior are not yet
+switched to coverage v2. Neither visible text nor a same-named provider field
+grants native origin; unproved OpenCode candidates remain partial and are not
+archived. OpenCode Session and model acceptance remains macOS-local, outside
+CI.
+
 
 ### OG-20 private import transport
 

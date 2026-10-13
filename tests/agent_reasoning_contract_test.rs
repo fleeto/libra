@@ -28,6 +28,94 @@ fn provider_tag(value: serde_json::Value) -> ReasoningProvider {
     }
 }
 
+/// COV2-01 keeps the old normalized-turn wire shape and public reader
+/// envelopes independent of the new private coverage-claim version. The CLI
+/// cases use a synthetic Codex catalog row and do not start OpenCode or any
+/// provider session.
+#[tokio::test]
+async fn cov2_turn_wire_and_public_envelope_are_stable() {
+    use std::process::Command;
+
+    use libra::internal::ai::observed_agents::coverage::NormalizedTurn;
+    use sea_orm::{ConnectionTrait, Database};
+
+    let wire = r#"{"logical_turn_key":"wire-turn","ordinal":0,"completeness":"complete","started_at":null,"ended_at":null,"records":[{"kind":"user","text":"hi"}]}"#;
+    let turn: NormalizedTurn = serde_json::from_str(wire).expect("legacy turn wire decodes");
+    assert_eq!(
+        serde_json::to_string(&turn).expect("legacy turn wire encodes"),
+        wire
+    );
+
+    let temp = tempfile::tempdir().expect("create isolated repository root");
+    let repo = temp.path().join("repo");
+    let home = temp.path().join("home");
+    std::fs::create_dir_all(&repo).expect("create repository directory");
+    std::fs::create_dir_all(&home).expect("create isolated home directory");
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_libra"))
+            .current_dir(&repo)
+            .env("HOME", &home)
+            .env("LIBRA_TEST_HOME", &home)
+            .env_remove("CODEX_HOME")
+            .args(args)
+            .output()
+            .expect("run isolated Libra CLI")
+    };
+
+    let init = run(&["init"]);
+    assert!(
+        init.status.success(),
+        "init failed: {}",
+        String::from_utf8_lossy(&init.stderr)
+    );
+    let list_v1 = run(&["agent", "list", "--json"]);
+    assert!(
+        list_v1.status.success(),
+        "default list failed: {}",
+        String::from_utf8_lossy(&list_v1.stderr)
+    );
+    let list_v1: serde_json::Value =
+        serde_json::from_slice(&list_v1.stdout).expect("default list JSON");
+    assert_eq!(list_v1["data"]["schema_version"], 1);
+
+    let list_v2 = run(&["agent", "list", "--schema-version", "2", "--json"]);
+    assert!(
+        list_v2.status.success(),
+        "explicit list v2 failed: {}",
+        String::from_utf8_lossy(&list_v2.stderr)
+    );
+    let list_v2: serde_json::Value =
+        serde_json::from_slice(&list_v2.stdout).expect("explicit list v2 JSON");
+    assert_eq!(list_v2["data"]["schema_version"], 2);
+
+    let database = Database::connect(format!(
+        "sqlite://{}?mode=rwc",
+        repo.join(".libra/libra.db").display()
+    ))
+    .await
+    .expect("open isolated catalog");
+    database
+        .execute_unprepared(
+            r#"INSERT INTO agent_session (
+                session_id, agent_kind, provider_session_id, state, working_dir,
+                metadata_json, redaction_report, started_at, last_event_at, schema_version
+            ) VALUES (
+                'codex__cov2-wire', 'codex', 'cov2-wire', 'stopped', '/synthetic',
+                '{}', '{}', 1, 1, 1
+            )"#,
+        )
+        .await
+        .expect("seed synthetic catalog row");
+    let graph = run(&["--json", "agent", "graph", "codex__cov2-wire"]);
+    assert!(
+        graph.status.success(),
+        "graph failed: {}",
+        String::from_utf8_lossy(&graph.stderr)
+    );
+    let graph: serde_json::Value = serde_json::from_slice(&graph.stdout).expect("graph JSON");
+    assert_eq!(graph["data"]["schema_version"], 1);
+}
+
 /// AC 5: the existing coverage canonical digest is byte-for-byte unchanged by
 /// the new Reasoning variant (regression pin on the coverage-v1.md §5
 /// vector 1; the byte-level golden lives in coverage.rs golden_vector_1).

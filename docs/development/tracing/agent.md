@@ -2587,6 +2587,15 @@ reasoning 文本中的 canary 秘密会计入 redaction report 并在投影、ch
 
 `ProviderVisibleText` 的 serde 序列化/反序列化明确拒绝；调用者须经分类与 typed redaction 后使用 `canonical_turn_bytes` 或 `safe_turn_projection`。RG-04 不接入真实 provider adapter。
 
+**COV2-01 编码边界：** 新增显式
+[`coverage-v2.md`](coverage-v2.md) selector/codec：含 typed
+`SemanticRecord::Reasoning` 的 turn 选择 coverage schema v2，其余仍选 v1；
+未知版本与 v1+typed Reasoning 拒绝，digest 只取 typed redaction 后的规范
+字节。RG-04 的 `safe_turn_projection` 与 `contract.snap` 保持 legacy-v1
+冻结语义，当前生产 live/import 入口仍走旧路径，COV2-11 才负责成组切换。
+`agent graph`/`agent list` 的公开默认 schema 仍为 1，显式 list-v2 仍可用；
+codec 本身不证明 OpenCode native 来源或放行 opaque artifact。
+
 
 RG-02 归档 opaque 密文 artifact：manifest `reasoning_artifacts[]`（path/oid/sha256/
 byte_len/locator/provider/source_kind/availability/decrypt_capability），对象存

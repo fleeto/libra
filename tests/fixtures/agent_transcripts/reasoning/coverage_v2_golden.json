@@ -1,0 +1,7 @@
+{
+  "schema_version": 2,
+  "description": "Synthetic provider-visible reasoning between one user and assistant record; no native-source proof is implied.",
+  "canonical_utf8": "[{\"role\":\"user\",\"text\":\"hi\"},{\"provider\":\"opencode\",\"role\":\"reasoning\",\"source_kind\":\"reasoning\",\"text\":\"synthetic\"},{\"role\":\"assistant\",\"text\":\"hello\"}]",
+  "canonical_byte_len": 153,
+  "sha256": "be52311c1b5daf77926d352c3b44eb93bb4fd57b78423774b3d0ac7ecbccc586"
+}

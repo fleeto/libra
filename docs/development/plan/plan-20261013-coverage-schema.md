@@ -1,6 +1,6 @@
 # OpenCode coverage schema-v2 前置实施计划（2026-10-13）
 
-**状态：** 已排期，OG-26 signed+DCO main `734b6f03884d3aa38400acbbfd446b557e642d94` 已交接，待本文件最终字节单 Claude 审查；本文件按计划模板 v2.14 成稿，初始 0/19。2026-10-13 09:15:00 UTC 的旧只读基线为本地 `main` `dcc468bd31c88a7e8d8c0d2957d6e80b65908990`；2026-10-13 10:59 UTC 的采纳前预核发现 OG-26 新增一个本机 ignored OpenCode Session 案例，使继承清单从旧21例变为22例。2026-10-13 11:16:08 UTC 已只读核 `HEAD=origin/main=734b6f03884d3aa38400acbbfd446b557e642d94`；开工前仍按 ER-01/02 重核逐路径源码/网站状态。来源 R4 草案 SHA-256 `18c34afa261f89100f2d6f0e9ce30953dbc97f7c9c1d7cf8661845d0733f7c2f`。R4 的拟议文件名 `plan-20261013-coverage-v2.md` 已改为符合模板小写字母后缀规则的 `docs/development/plan/plan-20261013-coverage-schema.md`；卡 ID 保持 COV2。
+**状态：** 实施中，OG-26 signed+DCO main `734b6f03884d3aa38400acbbfd446b557e642d94` 已交接；采纳最终字节经单 Claude Code PASS（P0/P1/P2=0），并由签名+DCO main `c94fd8dd60d8d9fa670b2682bf7b9979bae91548` 交付；本文件按计划模板 v2.14 成稿，初始 0/19。2026-10-13 09:15:00 UTC 的旧只读基线为本地 `main` `dcc468bd31c88a7e8d8c0d2957d6e80b65908990`；2026-10-13 10:59 UTC 的采纳前预核发现 OG-26 新增一个本机 ignored OpenCode Session 案例，使继承清单从旧21例变为22例。2026-10-13 11:16:08 UTC 已只读核 `HEAD=origin/main=734b6f03884d3aa38400acbbfd446b557e642d94`；开工前仍按 ER-01/02 重核逐路径源码/网站状态。来源 R4 草案 SHA-256 `18c34afa261f89100f2d6f0e9ce30953dbc97f7c9c1d7cf8661845d0733f7c2f`。R4 的拟议文件名 `plan-20261013-coverage-v2.md` 已改为符合模板小写字母后缀规则的 `docs/development/plan/plan-20261013-coverage-schema.md`；卡 ID 保持 COV2。
 
 ## 文档职责
 
@@ -202,7 +202,7 @@ COV2-REL-01 冻结不含 OG-27 源码的最终 COV2 树，完成 bumped exact-tr
 
 **Task type:** implementation
 
-**Lifecycle / Acceptance:** pending / 空
+**Lifecycle / Acceptance:** in-progress / locally-accepted（具名本机门、ER-13 全量与唯一 Claude Code 最终 PASS；本卡 signed main Push 随本提交交付，家族 C/D 仍待完成）
 
 **Description:** 新增显式 coverage-v2 选择/规范编码 API，同时保留现有 `safe_turn_projection` 的 legacy-v1 语义；RG-04 `reasoning.rs::tests::contract_serde_snapshot` 继续调用旧 API 比对冻结 `contract.snap`。本卡只定义版本化编码边界，COV2-11 才把生产 live/import 调用点切到新 API；不得以 synthetic/native 互换验收。
 
@@ -212,20 +212,22 @@ COV2-REL-01 冻结不含 OG-27 源码的最终 COV2 树，完成 bumped exact-tr
 
 **Acceptance criteria:**
 
-- [ ] AC1 typed Reasoning selects v2
-- [ ] AC2 a turn without typed Reasoning selects v1
-- [ ] AC3 an unsupported coverage version fails closed
-- [ ] AC4 v2 Reasoning uses the closed four-field canonical shape
-- [ ] AC5 its bytes equal the new golden
-- [ ] AC6 its SHA-256 digest equals the new golden
-- [ ] AC7 the existing `NormalizedTurn` wire form is unchanged
-- [ ] AC8 the default graph/list public envelope schema version remains unchanged.
+- [x] AC1 typed Reasoning selects v2
+- [x] AC2 a turn without typed Reasoning selects v1
+- [x] AC3 an unsupported coverage version fails closed
+- [x] AC4 v2 Reasoning uses the closed four-field canonical shape
+- [x] AC5 its bytes equal the new golden
+- [x] AC6 its SHA-256 digest equals the new golden
+- [x] AC7 the existing `NormalizedTurn` wire form is unchanged
+- [x] AC8 the default graph/list public envelope schema version remains unchanged.
 
 **Verification:**
 
-- [ ] VER1→AC1/2/3: `source .env.test && cargo test --lib internal::ai::observed_agents::coverage::tests::cov2_selects_from_typed_turn -- --exact` (1/1).
-- [ ] VER2→AC4/5/6: `source .env.test && cargo test --lib internal::ai::observed_agents::coverage::tests::cov2_closed_reasoning_golden -- --exact` (1/1).
-- [ ] VER3→AC7/8: `source .env.test && cargo test --test agent_reasoning_contract_test cov2_turn_wire_and_public_envelope_are_stable -- --exact` (1/1; asserts default graph/list=1 and explicit list-v2 remains accepted). No OpenCode Session is invoked. 同卡静态比较现有 `safe_turn_projection` 的 legacy-v1 调用点与 `contract.snap` 调用保持原样；新 v2 API 不覆写旧函数。
+- [x] VER1→AC1/2/3: `source .env.test && cargo test --lib internal::ai::observed_agents::coverage::tests::cov2_selects_from_typed_turn -- --exact` (1/1；root log SHA-256 `93d2487931c6f699c27fd6fe17813b4a69d05fdcefa1c22725e25f39615022b3`).
+- [x] VER2→AC4/5/6: `source .env.test && cargo test --lib internal::ai::observed_agents::coverage::tests::cov2_closed_reasoning_golden -- --exact` (1/1；root log SHA-256 `7b48c9097c93a4da1ef894b72ed4d38c116dfb8379539e8648726b6003b7b6eb`).
+- [x] VER3→AC7/8: `source .env.test && cargo test --test agent_reasoning_contract_test cov2_turn_wire_and_public_envelope_are_stable -- --exact` (1/1；root log SHA-256 `04b91714e2fb2c879de2eda0539eb44e5b33ed37f94a8a8416acbac96c2ac43b`; asserts default graph/list=1 and explicit list-v2 remains accepted). No OpenCode Session was invoked. `reasoning.rs::contract_serde_snapshot` exact 1/1 (root log SHA-256 `48f04e23bcdc426acfdbd7e6212371e5e44bcde5baa77ceb91be8741c390ae0d`), still calls legacy `safe_turn_projection`; frozen `contract.snap` SHA-256 `1e83e39d582c76d3b297ab8252c109a11eadaed40f2e6d299d221ae750b1b665` unchanged. New v2 API does not overwrite that legacy function.
+
+**Final A/B local evidence:** `cargo +nightly fmt --all --check` exit 0；`cargo clippy --all-targets --all-features -- -D warnings` exit 0（raw SHA-256 `ce387dd8e31968c025fdd8ba63e0b5902fd0341d3d409b50665a660039d4d334`）；双 env `cargo nextest run --all --no-fail-fast --retries 2` exit 0，**10053/10053 passed、0 failed、23 skipped**（16 slow、3 leaky；raw SHA-256 `fa3327517528a07abd8ece858e56a519d70d010b7a1ac56e80890c39665cc7c0`）。23 skipped 不算 OpenCode Session/macOS 实验验收；本卡没有模型调用。首轮在最终 test-only Display 断言增补后由 root 中止，exit 130/raw SHA-256 `354f6c3488b391a1d27ac2f77b0cdff595c01bbe14fac4579596be25523ca1a4`，不计通过。最终源码八个非状态文件均为 mode `100644`，SHA-256 依次为 `coverage.rs` `91c0232fe09b299a02523c9b3fe53ee44408511c519d65c3015675cb0cd114a3`、`mod.rs` `e703995210ddc6932b40a269c139c15600d46072e7bffc56e61623f99e9153ec`、`agent_reasoning_contract_test.rs` `da73b9b354d76ebc2c8b0479a05e1824d5e7b894424537f574dece852333de57`、`coverage_v2_golden.json` `77d480e93846df7cb17854fbe934293c0416c57bf486e257c85874b9cb87c78b`、`tests/INDEX.md` `4a1b8629a7a872386e9a4f1381dcfdbc9808201c39fdca1730513fcf26000fc8`、`coverage-v2.md` `69aaf9ab74fa0c9accb080fe80199a695f2a042dc2a8f7829e84dca0172c115c`、`agent.md` `2a26ff5c2c1bc9b45114a7363c76f7a3d1fbd4ff9c94b0f05e04930ec8e9035e`、`COMPATIBILITY.md` `d8dcc4b2cca00e31e459f9d9dc964315d98a9702ac3c898606930e0c6fa4f2be`。计划/状态自描述文件以本卡 signed main tree 为源锚。唯一 Claude Code 最终 PASS（P0/P1/P2=0，raw SHA-256 `5e5ad9af5b9b917054ba5a94d6c17629d9e9b6b959edc8033b6ee72cfaa9c64c`），只复核源码/文档；对实测日志 SHA 的最终记账由 root 核验。正式 C/D 继承发布卡。
 
 **Full-suite trigger:** `coverage.rs` 是 live/import/export 共用规范 turn/digest 源，本卡客观命中 ER-13 T-1；在 COV2-01 最终源码的 A/B 阶段必须运行 `source .env.test && source .env.live-test && cargo nextest run --all --no-fail-fast --retries 2`。COV2-REL-01 T-2 仍须在 bumped release 树上独立重跑，不能复用本卡全量。
 
@@ -1488,6 +1490,8 @@ COV2-REL-01 冻结不含 OG-27 源码的最终 COV2 树，完成 bumped exact-tr
 | 2026-10-13（暂行草案审查；未记精确 UTC） | 隔离草案 R3 | FAIL | 0×P0/P1、1×P2（G-03 复合 AC）；已将有关 AC 收窄为单谓词，待复审 | raw SHA-256 `f9c283c780d81bea834b64c0dbbd6d93aace7937a60d32bf3417223701467607`；被审草案 SHA `762ee903225dec3847fccd6ef98cefd57368cfcdba910dc313d30df8296b8049`，parent patch SHA `ccdb7f9823568e6da4ce4793acab9665c69026a80ce3ff0a4cf2dfe37d8e1fff` |
 | 2026-10-13（暂行草案审查；未记精确 UTC） | 隔离草案 R4 | FAIL | 0×P0/P1，parent/status patch 1×P2（status table duplicate/malformed row）；temp 补丁已修订。8×P3 文案/slot一致性随本次修订；不可当计划采纳 PASS | raw SHA-256 `73f5d9b2d94283cada9b24bb659e2a5cd261acd7d1b0fadaf081625527059561`；被审草案 SHA `855f52465f92016eae29342d43fffb0a0b56960198b7a6fc5f38814c9fcb0eaf`，parent patch SHA `ccdb7f9823568e6da4ce4793acab9665c69026a80ce3ff0a4cf2dfe37d8e1fff` |
 | 2026-10-13（暂行草案审查；未记精确 UTC） | 隔离草案 R5 | PASS（临时稿） | 0×P0/P1/P2；另有4×P3已在隔离稿修订，采纳到main后仍须重新审查实际字节 | raw SHA-256 `df9f77cdd9ebc5e0055a35c5c59324ecac68ce10a75c2d001159b762822cb793`；被审草案 SHA `9a042abef56de8218546b2080d10d35c38e6ab1dd8877c5682d7c575fb5f55b2`，parent patch SHA `27cbe6983691dc252283fc5f739ca53e7fa2220fa4fd78e32d6bffb41ff903cf` |
+| 2026-10-13 11:33:56 UTC | 本计划最终采纳 | **PASS** | 唯一 Claude Code 最终字节复审 P0/P1/P2=0；前轮两个 P2（Linux CI 选择器与父计划 C/D 状态）已修正；只批准计划采纳，不当 COV2-01 实现评审 | raw SHA-256 `b05a5dd7761cecefe6956aa30e62e4f36a195c8f27a786bb9ab2656275a66114`；签名+DCO main `c94fd8dd60d8d9fa670b2682bf7b9979bae91548` |
+| 2026-10-13 13:04:09 UTC | COV2-01 最终源码/文档 | **PASS** | 唯一 Claude Code Sonnet 最终审查 P0=0/P1=0/P2=0；保留 5 项 P3 后续注意（redaction 次序、legacy API、重复判断、Source A 未证、审查者未亲自重跑测试）；reviewer 独立核对八文件 SHA、153-byte golden digest、RG-04 快照，确认 23 skipped 未被误算验收 | raw SHA-256 `5e5ad9af5b9b917054ba5a94d6c17629d9e9b6b959edc8033b6ee72cfaa9c64c`；签名前八文件 SHA/mode 见 COV2-01 卡；后审只作本行及状态事实登记 |
 
 ## 非目标与延后项
 
@@ -1503,6 +1507,8 @@ COV2-REL-01 冻结不含 OG-27 源码的最终 COV2 树，完成 bumped exact-tr
 | 2026-10-13 09:15:00 UTC | 全计划初稿 | `dcc468b` 只读基线 | 0/19 卡完成；21 个本机旧 case 未在本计划验收 | UNRUN | UNRUN | OG-26、网站、Source A 与 release 未闭合 |
 | 2026-10-13 10:59 UTC | 采纳前只读预核 | OG-26 待签工作树，实际 main SHA 尚缺 | 0/19 卡完成；22 个继承本机 case（原21+OG-26新增1）仍须最终行为源码 12/12+10/10 验收 | UNRUN | 草案修改待最终 Claude | r2 binary-to-source 有限子门 PASS，runtime/issuer/Source A/归档仍 NO-GO；OG-26 signed main 与网站 owner 未交接 |
 | 2026-10-13 11:16:08 UTC | OG-26 signed main 只读交接 | `734b6f03884d3aa38400acbbfd446b557e642d94`，`HEAD=origin/main` | 0/19 卡完成；22 个继承本机 case（12+10）均未作 COV2 最终行为源码验收 | UNRUN | 采纳后最终字节单 Claude 待审 | OG-26 源码已交；网站 owner 仍待隔离确认，runtime/issuer/Source A/归档仍 NO-GO |
+| 2026-10-13 11:33:56 UTC | 计划采纳 | `c94fd8dd60d8d9fa670b2682bf7b9979bae91548`，签名+DCO main | 0/19 正式完成；COV2-01 已立卡但此时未验收 | 采纳文件 docs contract 30/30、fmt、strict Clippy exit0；非 COV2 实现门 | 唯一 Claude Code **PASS**，raw SHA-256 `b05a5dd7761cecefe6956aa30e62e4f36a195c8f27a786bb9ab2656275a66114` | COV2-01 起顺序实施；Source A/native、22 个最终行为源码 Session 门及家族 C/D 仍未完成 |
+| 2026-10-13 13:04:09 UTC | COV2-01 本机 A/B+单审交付 | 签名前八个非状态文件 SHA/mode 见卡内清单；本行随 signed+DCO main Push 固定树 | 8/8 AC、3/3 VER、RG-04 frozen 1/1；0/19 formal，source-ready **1/19=5.26%**（以 signed main 交付为生效条件） | fmt exit0；strict Clippy exit0/raw SHA `ce387dd8e31968c025fdd8ba63e0b5902fd0341d3d409b50665a660039d4d334`；双 env full 10053/10053 passed、23 skipped/raw SHA `fa3327517528a07abd8ece858e56a519d70d010b7a1ac56e80890c39665cc7c0` | 唯一 Claude Code **PASS**，P0/P1/P2=0，raw SHA `5e5ad9af5b9b917054ba5a94d6c17629d9e9b6b959edc8033b6ee72cfaa9c64c` | COV2-13 下一卡；家族 C/D、22 个最终行为源码 Session 与 Source A 仍待 |
 
 **终止链末端 D 组记账协议预登记：** 如 COV2-REL-01 最后只是纯文档登记，推送后的 main CI 观察不能写入该提交自身。按模板 v2.14 将该 SHA、run ID、结论及 UTC 留到下一次 `docs/development/plan/plan-status.md` 例行同步；次日仍无同步时单独作状态维护提交。本例外不把未观察 D 当 PASS。
 

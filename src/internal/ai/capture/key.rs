@@ -95,10 +95,15 @@ const PENDING_ENVELOPE_MAX_BYTES: usize = 64 * 1024 * 1024;
 /// Local identity authentication is not provider-origin evidence. Only the
 /// checkpoint adapter can borrow native bindings; an identity MAC never mints
 /// a NativeProven reasoning carrier.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ReasoningIdentityMacPurpose {
+    /// Frozen identity-v1 descriptor/turn-slot purpose.
     Descriptor,
+    /// Frozen identity-v1 record and whole-map purpose.
     Record,
+    DescriptorV2,
+    RecordV2,
+    SessionMapV2,
 }
 
 pub(crate) struct ReasoningIdentityAuthentication<'a> {
@@ -112,10 +117,41 @@ pub(crate) struct ReasoningIdentityAuthentication<'a> {
 pub(crate) struct ReasoningIdentityMacMismatch;
 
 impl ReasoningIdentityMacPurpose {
+    /// The legacy variants remain the default for every existing v1 caller.
+    /// A caller handling an untrusted version must select a purpose before it
+    /// can borrow the repository key or accept a persisted tag.
+    pub(crate) fn descriptor_for_schema_version(version: i64) -> Result<Self> {
+        match version {
+            1 => Ok(Self::Descriptor),
+            2 => Ok(Self::DescriptorV2),
+            _ => bail!("unsupported private reasoning identity version; run libra agent doctor"),
+        }
+    }
+
+    pub(crate) fn record_for_schema_version(version: i64) -> Result<Self> {
+        match version {
+            1 => Ok(Self::Record),
+            2 => Ok(Self::RecordV2),
+            _ => bail!("unsupported private reasoning identity version; run libra agent doctor"),
+        }
+    }
+
+    pub(crate) fn map_for_schema_version(version: i64) -> Result<Self> {
+        match version {
+            // identity-v1 deliberately used the Record purpose for its map.
+            1 => Ok(Self::Record),
+            2 => Ok(Self::SessionMapV2),
+            _ => bail!("unsupported private reasoning identity version; run libra agent doctor"),
+        }
+    }
+
     pub(crate) fn prefix(self) -> &'static str {
         match self {
             Self::Descriptor => "reasoning-identity/hmac-v1/",
             Self::Record => "reasoning-record/hmac-v1/",
+            Self::DescriptorV2 => "reasoning-identity/hmac-v2/",
+            Self::RecordV2 => "reasoning-record/hmac-v2/",
+            Self::SessionMapV2 => "reasoning-map/hmac-v2/",
         }
     }
 
@@ -123,6 +159,9 @@ impl ReasoningIdentityMacPurpose {
         match self {
             Self::Descriptor => PrivateArtifactMacDomain::ReasoningDescriptor,
             Self::Record => PrivateArtifactMacDomain::ReasoningRecord,
+            Self::DescriptorV2 => PrivateArtifactMacDomain::ReasoningDescriptorV2,
+            Self::RecordV2 => PrivateArtifactMacDomain::ReasoningRecordV2,
+            Self::SessionMapV2 => PrivateArtifactMacDomain::ReasoningMapV2,
         }
     }
 }
@@ -133,6 +172,9 @@ enum PrivateArtifactMacDomain {
     SessionAlias,
     ReasoningDescriptor,
     ReasoningRecord,
+    ReasoningDescriptorV2,
+    ReasoningRecordV2,
+    ReasoningMapV2,
 }
 
 impl PrivateArtifactMacDomain {
@@ -140,13 +182,12 @@ impl PrivateArtifactMacDomain {
         match self {
             Self::Envelope => PENDING_ENVELOPE_MAX_BYTES,
             Self::SessionAlias => 8 * 1024,
-            Self::ReasoningDescriptor => {
+            Self::ReasoningDescriptor | Self::ReasoningDescriptorV2 | Self::ReasoningRecordV2 => {
                 crate::internal::ai::traces::REASONING_ARTIFACT_MANIFEST_MAX_BYTES
             }
-            // The Record purpose also authenticates the whole retained
-            // session map, whose cap is intentionally larger than one
-            // checkpoint artifact manifest.
-            Self::ReasoningRecord => {
+            // The frozen v1 Record purpose also authenticates the whole
+            // retained session map. V2 uses a separate map purpose.
+            Self::ReasoningRecord | Self::ReasoningMapV2 => {
                 crate::internal::metadata::REASONING_IDENTITY_SESSION_MAP_MAX_BYTES
             }
         }
@@ -159,6 +200,9 @@ impl PrivateArtifactMacDomain {
             Self::SessionAlias => "pending-alias/hmac-v1/",
             Self::ReasoningDescriptor => ReasoningIdentityMacPurpose::Descriptor.prefix(),
             Self::ReasoningRecord => ReasoningIdentityMacPurpose::Record.prefix(),
+            Self::ReasoningDescriptorV2 => ReasoningIdentityMacPurpose::DescriptorV2.prefix(),
+            Self::ReasoningRecordV2 => ReasoningIdentityMacPurpose::RecordV2.prefix(),
+            Self::ReasoningMapV2 => ReasoningIdentityMacPurpose::SessionMapV2.prefix(),
         }
     }
 
@@ -169,6 +213,9 @@ impl PrivateArtifactMacDomain {
             Self::SessionAlias => b"libra-agent-pending-alias-hmac-v1\0",
             Self::ReasoningDescriptor => b"libra-agent-reasoning-identity-descriptor-hmac-v1\0",
             Self::ReasoningRecord => b"libra-agent-reasoning-identity-record-hmac-v1\0",
+            Self::ReasoningDescriptorV2 => b"libra-agent-reasoning-identity-descriptor-hmac-v2\0",
+            Self::ReasoningRecordV2 => b"libra-agent-reasoning-identity-record-hmac-v2\0",
+            Self::ReasoningMapV2 => b"libra-agent-reasoning-identity-map-hmac-v2\0",
         }
     }
 }
@@ -566,7 +613,10 @@ fn authenticate_private_artifact_existing_key(
                 .context("pending capture artifact has an invalid authentication tag")?;
             hmac::verify(&key, &message, &tag).map_err(|_| match domain {
                 PrivateArtifactMacDomain::ReasoningDescriptor
-                | PrivateArtifactMacDomain::ReasoningRecord => {
+                | PrivateArtifactMacDomain::ReasoningRecord
+                | PrivateArtifactMacDomain::ReasoningDescriptorV2
+                | PrivateArtifactMacDomain::ReasoningRecordV2
+                | PrivateArtifactMacDomain::ReasoningMapV2 => {
                     anyhow::Error::new(ReasoningIdentityMacMismatch)
                 }
                 _ => anyhow!(
@@ -587,6 +637,24 @@ fn authenticate_private_artifact_existing_key(
         Err(CaptureDedupUnsupportedPlatform.into())
     }
 }
+
+/// Test-only access to the production verifier for a fixed-key v1 golden.
+#[cfg(all(test, unix))]
+pub(crate) fn authenticate_reasoning_identity_existing_key_for_test(
+    storage_path: &Path,
+    body: &[u8],
+    expected_mac: Option<&str>,
+    purpose: ReasoningIdentityMacPurpose,
+) -> Result<String> {
+    authenticate_private_artifact_existing_key(
+        storage_path,
+        body,
+        expected_mac,
+        Instant::now() + Duration::from_secs(5),
+        purpose.private_domain(),
+    )
+}
+
 #[cfg(unix)]
 /// Staging is deliberately a dedicated child of `private`, rather than the
 /// generic `.tmp*` namespace. A killed helper can therefore leave only an
@@ -1701,6 +1769,189 @@ mod tests {
                 .count(),
             0
         );
+    }
+
+    #[test]
+    fn cov2_identity_v2_domains_are_disjoint() {
+        let root = tempfile::tempdir().expect("create isolated key fixture");
+        let storage = root.path().join("storage");
+        fs::create_dir(&storage).expect("create storage");
+        load_capture_dedup_secret(&storage).expect("initialize trusted fixture key");
+        let body = b"same bounded synthetic identity body";
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let purposes = [
+            ReasoningIdentityMacPurpose::descriptor_for_schema_version(1).unwrap(),
+            ReasoningIdentityMacPurpose::record_for_schema_version(1).unwrap(),
+            ReasoningIdentityMacPurpose::descriptor_for_schema_version(2).unwrap(),
+            ReasoningIdentityMacPurpose::record_for_schema_version(2).unwrap(),
+            ReasoningIdentityMacPurpose::map_for_schema_version(2).unwrap(),
+        ];
+        assert_eq!(
+            ReasoningIdentityMacPurpose::map_for_schema_version(1).unwrap(),
+            ReasoningIdentityMacPurpose::Record,
+            "frozen identity-v1 map must retain the Record purpose"
+        );
+        let mut prefixes = std::collections::BTreeSet::new();
+        let mut tags = std::collections::BTreeSet::new();
+        for purpose in purposes {
+            let domain = purpose.private_domain();
+            assert!(prefixes.insert(purpose.prefix()));
+            assert!(tags.insert(domain.tag()));
+            let mac =
+                authenticate_private_artifact_existing_key(&storage, body, None, deadline, domain)
+                    .expect("derive bounded identity commitment");
+            assert!(mac.starts_with(purpose.prefix()));
+        }
+        assert_eq!(prefixes.len(), 5);
+        assert_eq!(tags.len(), 5, "all five HMAC byte domains must differ");
+        assert_eq!(
+            ReasoningIdentityMacPurpose::SessionMapV2
+                .private_domain()
+                .byte_cap(),
+            crate::internal::metadata::REASONING_IDENTITY_SESSION_MAP_MAX_BYTES
+        );
+        assert_eq!(
+            ReasoningIdentityMacPurpose::RecordV2
+                .private_domain()
+                .byte_cap(),
+            crate::internal::ai::traces::REASONING_ARTIFACT_MANIFEST_MAX_BYTES
+        );
+    }
+
+    #[test]
+    fn cov2_identity_cross_domain_transplant_rejects() {
+        let root = tempfile::tempdir().expect("create isolated key fixture");
+        let storage = root.path().join("storage");
+        fs::create_dir(&storage).expect("create storage");
+        load_capture_dedup_secret(&storage).expect("initialize trusted fixture key");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let body = b"same bounded synthetic identity body";
+        let purposes = [
+            ReasoningIdentityMacPurpose::Descriptor,
+            ReasoningIdentityMacPurpose::Record,
+            ReasoningIdentityMacPurpose::DescriptorV2,
+            ReasoningIdentityMacPurpose::RecordV2,
+            ReasoningIdentityMacPurpose::SessionMapV2,
+        ];
+        for source in purposes {
+            let mac = authenticate_private_artifact_existing_key(
+                &storage,
+                body,
+                None,
+                deadline,
+                source.private_domain(),
+            )
+            .expect("derive source commitment");
+            let suffix = mac.strip_prefix(source.prefix()).expect("source prefix");
+            for target in purposes {
+                if source == target {
+                    continue;
+                }
+                // Replacing the visible prefix must not bypass the HMAC's
+                // independent byte domain for the same body and secret.
+                let transplant = format!("{}{suffix}", target.prefix());
+                assert!(
+                    authenticate_private_artifact_existing_key(
+                        &storage,
+                        body,
+                        Some(&transplant),
+                        deadline,
+                        target.private_domain(),
+                    )
+                    .is_err(),
+                    "a tag from {source:?} was accepted as {target:?}"
+                );
+            }
+            assert!(
+                authenticate_private_artifact_existing_key(
+                    &storage,
+                    b"changed body",
+                    Some(&mac),
+                    deadline,
+                    source.private_domain(),
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn cov2_identity_unknown_version_and_missing_key_fail_closed() {
+        let root = tempfile::tempdir().expect("create isolated key fixture");
+        let storage = root.path().join("storage");
+        fs::create_dir(&storage).expect("create storage");
+        let scope = CaptureScope {
+            repo_id: "synthetic-repository".to_owned(),
+            worktree_id: String::new(),
+            workspace_id: None,
+            workspace_fence: None,
+        };
+        for version in [-1, 0, 3, i64::MAX] {
+            assert!(ReasoningIdentityMacPurpose::descriptor_for_schema_version(version).is_err());
+            assert!(ReasoningIdentityMacPurpose::record_for_schema_version(version).is_err());
+            assert!(ReasoningIdentityMacPurpose::map_for_schema_version(version).is_err());
+            assert!(
+                crate::internal::ai::capture::checkpoint::reasoning_turn_slot_body_for_schema_version(
+                    &scope, "synthetic-session", "synthetic-turn", version,
+                )
+                .is_err()
+            );
+            assert!(
+                crate::internal::ai::capture::checkpoint::reasoning_turn_descriptor_body_for_schema_version(
+                    &scope, "synthetic-session", "synthetic-turn", &Vec::<()>::new(), version,
+                )
+                .is_err()
+            );
+        }
+        assert_eq!(fs::read_dir(&storage).expect("inspect storage").count(), 0);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        for purpose in [
+            ReasoningIdentityMacPurpose::DescriptorV2,
+            ReasoningIdentityMacPurpose::RecordV2,
+            ReasoningIdentityMacPurpose::SessionMapV2,
+        ] {
+            assert!(
+                authenticate_private_artifact_existing_key(
+                    &storage,
+                    b"synthetic body",
+                    None,
+                    deadline,
+                    purpose.private_domain(),
+                )
+                .is_err(),
+                "missing key must fail for {purpose:?}"
+            );
+        }
+        assert_eq!(fs::read_dir(&storage).expect("inspect storage").count(), 0);
+        let original = load_capture_dedup_secret(&storage).expect("initialize trusted fixture key");
+        for purpose in [
+            ReasoningIdentityMacPurpose::DescriptorV2,
+            ReasoningIdentityMacPurpose::RecordV2,
+            ReasoningIdentityMacPurpose::SessionMapV2,
+        ] {
+            let mac = authenticate_private_artifact_existing_key(
+                &storage,
+                b"synthetic body",
+                None,
+                deadline,
+                purpose.private_domain(),
+            )
+            .expect("derive v2 tag from existing key");
+            authenticate_private_artifact_existing_key(
+                &storage,
+                b"synthetic body",
+                Some(&mac),
+                deadline,
+                purpose.private_domain(),
+            )
+            .expect("verify v2 tag from existing key");
+        }
+        assert_eq!(
+            fs::read(storage.join("private/agent-capture-dedup-v1.key"))
+                .expect("read existing fixture key"),
+            original
+        );
+        assert_eq!(fs::read_dir(&storage).expect("inspect storage").count(), 1);
     }
 
     #[cfg(unix)]

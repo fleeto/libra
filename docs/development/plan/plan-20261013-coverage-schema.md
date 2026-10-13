@@ -331,7 +331,7 @@ COV2-REL-01 冻结不含 OG-27 源码的最终 COV2 树，完成 bumped exact-tr
 
 **Task type:** implementation
 
-**Lifecycle / Acceptance:** in-progress / locally-accepted（8 AC、3 VER、fmt、严格 Clippy、双 env 全量与唯一 Claude Code PASS；signed main 随本提交交付，家族 C/D 仍待）
+**Lifecycle / Acceptance:** in-progress / locally-accepted（8 AC、3 VER、fmt、严格 Clippy、双 env 全量与唯一 Claude Code PASS；signed+DCO main `d4f159fd17676c7b591c1f80858f2de17094260f` 已交付，家族 C/D 仍待）
 
 **Description:** versioned DB claim arbitration。本卡唯一行为轴、恢复和粒度见下方 Granularity；不得以 synthetic/native 互换验收。
 
@@ -394,7 +394,7 @@ COV2-REL-01 冻结不含 OG-27 源码的最终 COV2 树，完成 bumped exact-tr
 
 **Task type:** implementation
 
-**Lifecycle / Acceptance:** pending / 空
+**Lifecycle / Acceptance:** in-progress / locally-accepted（8 AC、4 VER、fmt、严格 Clippy、双 env 全量与唯一 Claude Code PASS；signed main 随本提交交付，家族 C/D 仍待）
 
 **Description:** key-owner v1/v2 identity MAC domains。本卡唯一行为轴、恢复和粒度见下方 Granularity；不得以 synthetic/native 互换验收。
 
@@ -404,23 +404,25 @@ COV2-REL-01 冻结不含 OG-27 源码的最终 COV2 树，完成 bumped exact-tr
 
 **Acceptance criteria:**
 
-- [ ] AC1 the complete frozen identity-v1 canonical byte bundle equals its pinned golden
-- [ ] AC2 the complete frozen identity-v1 MAC known-answer bundle equals its pinned golden
-- [ ] AC3 identity-v2 Descriptor uses a distinct prefix and HMAC byte domain
-- [ ] AC4 identity-v2 Record does likewise
-- [ ] AC5 identity-v2 whole-map MAC uses its own distinct prefix and byte domain (not the v1 Record purpose)
-- [ ] AC6 cross-version or cross-purpose tag transplants fail verification
-- [ ] AC7 unknown identity/coverage version fails before a MAC can be accepted
-- [ ] AC8 authentication leaves repository-private key material unchanged.
+- [x] AC1 the complete frozen identity-v1 canonical byte bundle equals its pinned golden
+- [x] AC2 the complete frozen identity-v1 MAC known-answer bundle equals its pinned golden
+- [x] AC3 identity-v2 Descriptor uses a distinct prefix and HMAC byte domain
+- [x] AC4 identity-v2 Record does likewise
+- [x] AC5 identity-v2 whole-map MAC uses its own distinct prefix and byte domain (not the v1 Record purpose)
+- [x] AC6 cross-version or cross-purpose tag transplants fail verification
+- [x] AC7 unknown identity/coverage version fails before a MAC can be accepted
+- [x] AC8 authentication leaves repository-private key material unchanged.
 
 **Verification:**
 
-- [ ] VER1→AC1/2: `source .env.test && cargo test --lib internal::metadata::tests::cov2_v1_identity_bytes_and_mac_frozen -- --exact` (1/1).
-- [ ] VER2→AC3/4/5: `source .env.test && cargo test --lib internal::ai::capture::key::tests::cov2_identity_v2_domains_are_disjoint -- --exact` (1/1; compare prefixes and key-owner byte-domain tags for the same body).
-- [ ] VER3→AC6: `source .env.test && cargo test --lib internal::ai::capture::key::tests::cov2_identity_cross_domain_transplant_rejects -- --exact` (1/1).
-- [ ] VER4→AC7/8: `source .env.test && cargo test --lib internal::ai::capture::key::tests::cov2_identity_unknown_version_and_missing_key_fail_closed -- --exact` (1/1). `key.rs:99-174,1705-1885` owns MAC prefixes/tags; `checkpoint.rs:630-665,752-764,930-958` owns purpose selection. Preserve v1 default APIs and bytes while adding explicit v2 constructors; no public claim may be emitted by this primitive-only card.
+- [x] VER1→AC1/2: `source .env.test && cargo test --lib internal::metadata::tests::cov2_v1_identity_bytes_and_mac_frozen -- --exact`（root 1/1、0 skipped；六组规范字节 SHA-256 与四组固定 MAC）。
+- [x] VER2→AC3/4/5: `source .env.test && cargo test --lib internal::ai::capture::key::tests::cov2_identity_v2_domains_are_disjoint -- --exact`（root 1/1、0 skipped；五个 purpose 的前缀及 HMAC 消息域互异）。
+- [x] VER3→AC6: `source .env.test && cargo test --lib internal::ai::capture::key::tests::cov2_identity_cross_domain_transplant_rejects -- --exact`（root 1/1、0 skipped；逐对移植和 body 改写均拒绝）。
+- [x] VER4→AC7/8: `source .env.test && cargo test --lib internal::ai::capture::key::tests::cov2_identity_unknown_version_and_missing_key_fail_closed -- --exact`（root 1/1、0 skipped；未知版本与缺 key 零成功，签验前后 key 原字节不变）。`key.rs` owns MAC prefixes/tags; `checkpoint.rs` owns purpose selection. Existing v1 APIs and bytes remain the default; this primitive-only card emits no public v2 claim.
 
-**Full-suite trigger:** family child 不自行发布；按 ER-13 对最终改动重新判定 T-1/T-4/T-6。若命中 shared single-source helper、测试基建或 focused 信号不足，则在本卡 A/B 阶段运行双 env 全量 Nextest；无论是否命中，COV2-REL-01 T-2 均须在 bumped 树上重跑。
+**Final A/B local evidence:** 四项具名 VER 在根工作区最终源码各 1/1、0 skipped；固定合成密钥的独立 stdlib oracle 脚本 SHA-256 `465b022eac1d3036816c1308596957892c295630eb034d21389839439c71c30d` 实际重算六组完整 v1 规范字节摘要和四组 MAC，逐项与冻结断言一致，不接触仓库私钥。`cargo +nightly fmt --all --check` exit 0；`cargo clippy --all-targets --all-features -- -D warnings` exit 0；`libra diff --check` exit 0。双 env `CARGO_BUILD_JOBS=2 cargo nextest run --all --no-fail-fast --retries 2` exit 0，**10063/10063 passed、0 failed、23 skipped**（14 slow、1 leaky；raw SHA-256 `553bfa450a3efb7fecdf1907fc7e5bf4d14e51c8cfef40bd2d6f2a62754d05b8`）；四个新增用例均在该全量中再次 PASS。23 skipped 不算 OpenCode Session 或真实模型验收。本卡六个非状态文件均为 mode `100644`，SHA-256：`metadata.rs` `d92da0ff39bbd676561a6da3158230b33d556009864b91aed7892f069f9ce983`、`key.rs` `cfb505f061883e6331a80de350774658b541dad6158fb146d518d304c4667e7a`、`checkpoint.rs` `5e2609af811bb94f94047e80f3f8b9c69d646f70be013064f67be48985d9d789`、`coverage-v2.md` `c50cb282678f98ed85d9638f8972cc1fb644b2d0564a5a2e5a6a161330b0e203`、`agent.md` `1799c4d1ef191236750a5b02ee2704bc97133eba7143bf83aae47b05275b7a7f`、`COMPATIBILITY.md` `8ebe067ff16e9f4e390c821042571cd9e14cf73118bb3d55ae1e88e46fb84829`。唯一 Claude Code Sonnet 源码/文档审查 **PASS**（P0/P1/P2=0，raw SHA-256 `c275fa3872348db329daaa71591307daff4bf154483a4332687bb129b946bd9c`），审查者未运行测试，最终门由 root 核验。v2 record/map 封闭编码与共同容量属 COV2-14；此卡不持久化 v2 identity，不铸造 Source A 或 native 权限。
+
+**Full-suite trigger:** 本卡修改共享 `src/internal/metadata.rs` 身份 codec，命中 ER-13 T-1；已在最终源码 A/B 阶段实际运行双 env Nextest 10063/10063。COV2-REL-01 T-2 仍须在 bumped 树上独立重跑。
 
 **Dependencies:** COV2-02；消费前驱实际最终 A/B、适用 focused/full、fmt/strict、单 Claude PASS 与 signed+DCO main 的 source-qualified 文件 SHA/mode；不以其尚待 C/D 的 `locally-accepted` 冒称 complete。
 
@@ -1498,6 +1500,7 @@ COV2-REL-01 冻结不含 OG-27 源码的最终 COV2 树，完成 bumped exact-tr
 | 2026-10-13 13:04:09 UTC | COV2-01 最终源码/文档 | **PASS** | 唯一 Claude Code Sonnet 最终审查 P0=0/P1=0/P2=0；保留 5 项 P3 后续注意（redaction 次序、legacy API、重复判断、Source A 未证、审查者未亲自重跑测试）；reviewer 独立核对八文件 SHA、153-byte golden digest、RG-04 快照，确认 23 skipped 未被误算验收 | raw SHA-256 `5e5ad9af5b9b917054ba5a94d6c17629d9e9b6b959edc8033b6ee72cfaa9c64c`；签名前八文件 SHA/mode 见 COV2-01 卡；后审只作本行及状态事实登记 |
 | 2026-10-13 13:37:14 UTC | COV2-13 冻结 v1/RG-04 合同 | **PASS** | 唯一 Claude Code Sonnet 最终审查 P0=0/P1=0/P2=0；独立对照历史 `dcc468b` 三字节/摘要常量、fixture SHA 与四文件 post SHA/mode，确认测试非空、生产无 delta、ER-13 不冒称本卡 full；仅保留 deterministic/Source A 未证等残余 | raw SHA-256 `f900a64d58bc2b125145cec3e608d9356bb613bb8a0aca7e6d0338efb34b3afd`；起点 signed main `a3b51fd103fc2aa95f64c3395339a00937060356`；后审只补本行与状态事实 |
 | 2026-10-13（审查时未记精确 UTC） | COV2-02 版本化 DB claim 仲裁 | **PASS** | 唯一完成的 Claude Code Sonnet 源码审查 P0=0/P1=0/P2=0；确认 v1 旧调用保持，v2 sidecar 暂不接生产 writer；Fable 用量上限请求无结论；审查时 full 尚在运行，后续 root 已核 exit 0/10059 passed | raw SHA-256 `02db003513b2729c9b24fc82fe5a70bcabd0eaf9de11b065f83e5078ce88b244`；五文件最终 SHA/mode 见 COV2-02 卡；后审仅补测试结果与状态事实 |
+| 2026-10-13（审查时未记精确 UTC） | COV2-07 identity-v1/v2 MAC 域 | **PASS** | 唯一 Claude Code Sonnet 最终源码/文档审查 P0=0/P1=0/P2=0；v1 字节与 MAC、版本前置拒绝、私钥生命周期、跨域移植、容量和旧调用逐项检查；P3 包括 v2 record 拒绝的显式测试建议及后继 COV2-14 输入界限，均不改变本卡原语结论。审查者未运行本机测试；root 独立核验门结果 | raw SHA-256 `c275fa3872348db329daaa71591307daff4bf154483a4332687bb129b946bd9c`；六个非状态文件的最终 SHA/mode 见 COV2-07 卡；后审仅补测试/状态事实 |
 
 ## 非目标与延后项
 
@@ -1516,7 +1519,8 @@ COV2-REL-01 冻结不含 OG-27 源码的最终 COV2 树，完成 bumped exact-tr
 | 2026-10-13 11:33:56 UTC | 计划采纳 | `c94fd8dd60d8d9fa670b2682bf7b9979bae91548`，签名+DCO main | 0/19 正式完成；COV2-01 已立卡但此时未验收 | 采纳文件 docs contract 30/30、fmt、strict Clippy exit0；非 COV2 实现门 | 唯一 Claude Code **PASS**，raw SHA-256 `b05a5dd7761cecefe6956aa30e62e4f36a195c8f27a786bb9ab2656275a66114` | COV2-01 起顺序实施；Source A/native、22 个最终行为源码 Session 门及家族 C/D 仍未完成 |
 | 2026-10-13 13:04:09 UTC | COV2-01 本机 A/B+单审交付 | signed+DCO main `a3b51fd103fc2aa95f64c3395339a00937060356`；八个非状态文件 SHA/mode 见卡内清单 | 8/8 AC、3/3 VER、RG-04 frozen 1/1；0/19 formal，source-ready **1/19=5.26%** | fmt exit0；strict Clippy exit0/raw SHA `ce387dd8e31968c025fdd8ba63e0b5902fd0341d3d409b50665a660039d4d334`；双 env full 10053/10053 passed、23 skipped/raw SHA `fa3327517528a07abd8ece858e56a519d70d010b7a1ac56e80890c39665cc7c0` | 唯一 Claude Code **PASS**，P0/P1/P2=0，raw SHA `5e5ad9af5b9b917054ba5a94d6c17629d9e9b6b959edc8033b6ee72cfaa9c64c` | COV2-13 下一卡；家族 C/D、22 个最终行为源码 Session 与 Source A 仍待 |
 | 2026-10-13 13:37:14 UTC | COV2-13 本机 A/B+单审交付 | signed+DCO main `cd698ade182a935c4d91b0f84cb3ad13e8325e0b`；四个非状态文件 SHA/mode 见卡内清单 | 8/8 AC、4/4 VER 各1/1；0/19 formal，source-ready **2/19=10.53%** | fmt exit0；strict Clippy exit0/raw SHA `c390c26cd50bf4f19aaef41fdef60b34bd766cfd7f8a506e323a3bc38b679302`；ER-13 无独立 full 触发 | 唯一 Claude Code **PASS**，P0/P1/P2=0，raw SHA `f900a64d58bc2b125145cec3e608d9356bb613bb8a0aca7e6d0338efb34b3afd` | COV2-02 下一卡；COV2 家族 C/D 与父计划 Source A 仍待 |
-| 2026-10-13 14:45:54 UTC | COV2-02 本机 A/B+单审交付 | 起点 signed main `cd698ade182a935c4d91b0f84cb3ad13e8325e0b`；五个非状态文件 SHA/mode 见卡内清单；本行随本卡 signed+DCO main Push 固定树 | 8/8 AC、3/3 VER 各1/1；0/19 formal，source-ready **3/19=15.79%**（以 signed main 交付为生效条件） | fmt/strict Clippy exit0；双 env full 10059/10059 passed、23 skipped/raw SHA `afbadf5ca0b5ce4b3265d6810ff022efd054d9d7344f7f2c3737162eed5a6d1e` | 唯一 Claude Code **PASS**，P0/P1/P2=0，raw SHA `02db003513b2729c9b24fc82fe5a70bcabd0eaf9de11b065f83e5078ce88b244` | COV2-07 下一卡；家族 C/D 与父计划 Source A 仍待 |
+| 2026-10-13 14:45:54 UTC | COV2-02 本机 A/B+单审交付 | signed+DCO main `d4f159fd17676c7b591c1f80858f2de17094260f`；五个非状态文件 SHA/mode 见卡内清单 | 8/8 AC、3/3 VER 各1/1；0/19 formal，source-ready **3/19=15.79%** | fmt/strict Clippy exit0；双 env full 10059/10059 passed、23 skipped/raw SHA `afbadf5ca0b5ce4b3265d6810ff022efd054d9d7344f7f2c3737162eed5a6d1e` | 唯一 Claude Code **PASS**，P0/P1/P2=0，raw SHA `02db003513b2729c9b24fc82fe5a70bcabd0eaf9de11b065f83e5078ce88b244` | COV2-07 下一卡；家族 C/D 与父计划 Source A 仍待 |
+| 2026-10-13 15:34:12 UTC | COV2-07 本机 A/B+单审交付 | 起点 signed main `d4f159fd17676c7b591c1f80858f2de17094260f`；六个非状态文件 SHA/mode 见卡内清单；本行随本卡 signed+DCO main Push 固定树 | 8/8 AC、4/4 VER 各1/1；0/19 formal，source-ready **4/19=21.05%**（以 signed main 交付为生效条件） | fmt/strict Clippy exit0；双 env full 10063/10063 passed、23 skipped/raw SHA `553bfa450a3efb7fecdf1907fc7e5bf4d14e51c8cfef40bd2d6f2a62754d05b8` | 唯一 Claude Code **PASS**，P0/P1/P2=0，raw SHA `c275fa3872348db329daaa71591307daff4bf154483a4332687bb129b946bd9c` | COV2-14 下一卡；v2 map 封闭与共同容量、家族 C/D、父计划 Source A 仍待 |
 
 **终止链末端 D 组记账协议预登记：** 如 COV2-REL-01 最后只是纯文档登记，推送后的 main CI 观察不能写入该提交自身。按模板 v2.14 将该 SHA、run ID、结论及 UTC 留到下一次 `docs/development/plan/plan-status.md` 例行同步；次日仍无同步时单独作状态维护提交。本例外不把未观察 D 当 PASS。
 

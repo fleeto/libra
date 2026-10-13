@@ -82,3 +82,21 @@ logical key without guessing from the key. COV2-03 adds version-aware marker
 and commit transactions; COV2-04 adds the authenticated pending wire; COV2-11
 switches production live/import paths together. This preparatory arbitration
 does not itself enable OpenCode Session capture or native archival.
+
+## Private identity authentication preparation
+
+COV2-07 preserves the complete identity-v1 slot, descriptor, record and
+whole-map bytes and MAC answers in a fixed-key local oracle. Existing v1
+callers keep the same canonical body version, `reasoning-identity/hmac-v1/`
+descriptor purpose and `reasoning-record/hmac-v1/` record/whole-map purpose.
+The repository-private 32-byte key remains at its existing path; verification
+never creates or rotates it.
+
+Explicit v2 helpers choose the schema version before borrowing that key. The
+v2 descriptor, record and whole-map each have a distinct visible prefix and
+HMAC byte-domain tag; replacing a prefix cannot transplant a tag across
+versions or purposes. Unknown versions and missing keys fail closed. These
+are authentication primitives only. COV2-14 must bind each v2 MAC to a closed
+v2 record/map body and enforce the shared map capacity before persistence;
+COV2-03/04/11 later connect marker, pending and live writers. A valid private
+MAC does not prove provider-native origin or authorize opaque archival.

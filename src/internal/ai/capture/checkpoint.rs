@@ -633,6 +633,47 @@ impl ReasoningIdentityReadContext {
         body: &[u8],
         expected_mac: Option<&str>,
     ) -> anyhow::Result<String> {
+        self.authenticate_record_for_schema_version(conn, 1, body, expected_mac)
+            .await
+    }
+
+    pub(crate) async fn authenticate_record_for_schema_version<C: ConnectionTrait>(
+        &self,
+        conn: &C,
+        coverage_schema_version: i64,
+        body: &[u8],
+        expected_mac: Option<&str>,
+    ) -> anyhow::Result<String> {
+        let purpose = super::key::ReasoningIdentityMacPurpose::record_for_schema_version(
+            coverage_schema_version,
+        )?;
+        self.authenticate_with_purpose(conn, purpose, body, expected_mac)
+            .await
+    }
+
+    // COV2-14 will connect the dual-map codec to this explicit version gate.
+    #[allow(dead_code)]
+    pub(crate) async fn authenticate_map_for_schema_version<C: ConnectionTrait>(
+        &self,
+        conn: &C,
+        coverage_schema_version: i64,
+        body: &[u8],
+        expected_mac: Option<&str>,
+    ) -> anyhow::Result<String> {
+        let purpose = super::key::ReasoningIdentityMacPurpose::map_for_schema_version(
+            coverage_schema_version,
+        )?;
+        self.authenticate_with_purpose(conn, purpose, body, expected_mac)
+            .await
+    }
+
+    async fn authenticate_with_purpose<C: ConnectionTrait>(
+        &self,
+        conn: &C,
+        purpose: super::key::ReasoningIdentityMacPurpose,
+        body: &[u8],
+        expected_mac: Option<&str>,
+    ) -> anyhow::Result<String> {
         self.validate_for(&self.scope, &self.session_id)?;
         super::key::authenticate_reasoning_identity_in_scope_until(
             conn,
@@ -640,7 +681,7 @@ impl ReasoningIdentityReadContext {
             &self.storage_path,
             &self.authorized_root,
             super::key::ReasoningIdentityAuthentication {
-                purpose: super::key::ReasoningIdentityMacPurpose::Record,
+                purpose,
                 body,
                 expected_mac,
             },
@@ -654,21 +695,37 @@ impl ReasoningIdentityReadContext {
         conn: &C,
         logical_turn_key: &str,
     ) -> anyhow::Result<String> {
-        self.validate_for(&self.scope, &self.session_id)?;
-        let body = reasoning_turn_slot_body(&self.scope, &self.session_id, logical_turn_key)?;
-        super::key::authenticate_reasoning_identity_in_scope_until(
-            conn,
+        self.turn_slot_for_schema_version(conn, 1, logical_turn_key)
+            .await
+    }
+
+    pub(crate) async fn turn_slot_for_schema_version<C: ConnectionTrait>(
+        &self,
+        conn: &C,
+        coverage_schema_version: i64,
+        logical_turn_key: &str,
+    ) -> anyhow::Result<String> {
+        let purpose = super::key::ReasoningIdentityMacPurpose::descriptor_for_schema_version(
+            coverage_schema_version,
+        )?;
+        let body = reasoning_turn_slot_body_for_schema_version(
             &self.scope,
-            &self.storage_path,
-            &self.authorized_root,
-            super::key::ReasoningIdentityAuthentication {
-                purpose: super::key::ReasoningIdentityMacPurpose::Descriptor,
-                body: &body,
-                expected_mac: None,
-            },
-            self.deadline,
-        )
-        .await
+            &self.session_id,
+            logical_turn_key,
+            coverage_schema_version,
+        )?;
+        self.authenticate_with_purpose(conn, purpose, &body, None)
+            .await
+    }
+}
+
+fn reasoning_identity_body_version(coverage_schema_version: i64) -> anyhow::Result<u8> {
+    match coverage_schema_version {
+        1 => Ok(1),
+        2 => Ok(2),
+        _ => {
+            anyhow::bail!("unsupported private reasoning identity version; run libra agent doctor")
+        }
     }
 }
 
@@ -677,9 +734,19 @@ fn reasoning_turn_slot_body(
     session_id: &str,
     logical_turn_key: &str,
 ) -> anyhow::Result<Vec<u8>> {
+    reasoning_turn_slot_body_for_schema_version(scope, session_id, logical_turn_key, 1)
+}
+
+pub(crate) fn reasoning_turn_slot_body_for_schema_version(
+    scope: &CaptureScope,
+    session_id: &str,
+    logical_turn_key: &str,
+    coverage_schema_version: i64,
+) -> anyhow::Result<Vec<u8>> {
+    let version = reasoning_identity_body_version(coverage_schema_version)?;
     let bytes = serde_json::to_vec(&(
         "reasoning-turn-slot",
-        1u8,
+        version,
         &scope.repo_id,
         session_id,
         logical_turn_key,
@@ -690,6 +757,25 @@ fn reasoning_turn_slot_body(
         "reasoning coverage exceeds its safe byte limit"
     );
     Ok(bytes)
+}
+
+pub(crate) fn reasoning_turn_descriptor_body_for_schema_version<E: serde::Serialize>(
+    scope: &CaptureScope,
+    session_id: &str,
+    logical_turn_key: &str,
+    entries: &E,
+    coverage_schema_version: i64,
+) -> anyhow::Result<Vec<u8>> {
+    let version = reasoning_identity_body_version(coverage_schema_version)?;
+    serde_json::to_vec(&(
+        "reasoning-turn-identity",
+        version,
+        &scope.repo_id,
+        session_id,
+        logical_turn_key,
+        entries,
+    ))
+    .context("cannot prepare reasoning coverage identity")
 }
 
 #[derive(Clone)]
@@ -755,13 +841,54 @@ impl ReasoningCoveragePlan {
         body: &[u8],
         expected_mac: Option<&str>,
     ) -> anyhow::Result<String> {
+        self.authenticate_record_for_schema_version(conn, 1, body, expected_mac)
+            .await
+    }
+
+    pub(crate) async fn authenticate_record_for_schema_version<C: ConnectionTrait>(
+        &self,
+        conn: &C,
+        coverage_schema_version: i64,
+        body: &[u8],
+        expected_mac: Option<&str>,
+    ) -> anyhow::Result<String> {
+        let purpose = super::key::ReasoningIdentityMacPurpose::record_for_schema_version(
+            coverage_schema_version,
+        )?;
+        self.authenticate_with_purpose(conn, purpose, body, expected_mac)
+            .await
+    }
+
+    // COV2-14 will connect the dual-map writer to this explicit version gate.
+    #[allow(dead_code)]
+    pub(crate) async fn authenticate_map_for_schema_version<C: ConnectionTrait>(
+        &self,
+        conn: &C,
+        coverage_schema_version: i64,
+        body: &[u8],
+        expected_mac: Option<&str>,
+    ) -> anyhow::Result<String> {
+        let purpose = super::key::ReasoningIdentityMacPurpose::map_for_schema_version(
+            coverage_schema_version,
+        )?;
+        self.authenticate_with_purpose(conn, purpose, body, expected_mac)
+            .await
+    }
+
+    async fn authenticate_with_purpose<C: ConnectionTrait>(
+        &self,
+        conn: &C,
+        purpose: super::key::ReasoningIdentityMacPurpose,
+        body: &[u8],
+        expected_mac: Option<&str>,
+    ) -> anyhow::Result<String> {
         super::key::authenticate_reasoning_identity_in_scope_until(
             conn,
             &self.scope,
             &self.storage_path,
             &self.authorized_root,
             super::key::ReasoningIdentityAuthentication {
-                purpose: super::key::ReasoningIdentityMacPurpose::Record,
+                purpose,
                 body,
                 expected_mac,
             },
@@ -921,15 +1048,13 @@ async fn prepare_reasoning_coverage_plan_for_keys(
         } else {
             ReasoningIdentityKind::Nonempty
         };
-        let descriptor = serde_json::to_vec(&(
-            "reasoning-turn-identity",
-            1u8,
-            &request.scope.repo_id,
+        let descriptor = reasoning_turn_descriptor_body_for_schema_version(
+            request.scope,
             request.session_id,
             turn,
-            entries,
-        ))
-        .context("cannot prepare reasoning coverage identity")?;
+            &entries,
+            1,
+        )?;
         let slot = reasoning_turn_slot_body(request.scope, request.session_id, turn)?;
         descriptor_bytes = descriptor_bytes
             .checked_add(descriptor.len())

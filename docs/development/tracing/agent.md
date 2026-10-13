@@ -2830,3 +2830,5 @@ sealed native carrier 将原始 opaque 字节和来源绑定证明一起移入�
 ### 私有 reasoning identity 与垃圾回收
 
 垃圾回收将保留的 `agent_reasoning_identity` scope 整体排除在通用 metadata 对象引用扫描之外。即使整个存储值损坏为 JSON 对象 ID，或包含嵌套对象 ID，也不会由这一路径触发对象加载。该隔离不需要私有 reasoning 密钥。其它 metadata 对象根、私有 capture 恢复 scope 的排除和 capture pending 父提交根继续遵守原有规则。前滚恢复中，停止或修复 reasoning identity writer 时必须同时保留私有记录与该隔离。这个护栏不创建 identity 记录、不签发 native 来源证明，也不启用 OpenCode reasoning 归档。
+
+COV2-07 在现有 `capture/key.rs` 私钥 owner 内增设显式的 identity-v2 Descriptor、Record、SessionMap 三种独立 HMAC 前缀和消息域。既有 identity-v1 slot、descriptor、record、whole-map 的规范字节与 MAC 已用固定合成密钥逐项锁定，v1 map 仍沿用旧 Record 域；原私钥路径与 32-byte 内容不变。未知版本在借 key 前拒绝，缺 key 不补造，跨版本／跨用途替换可见前缀仍不能通过认证。本卡只准备密码学原语；COV2-14 负责将闭合的 v2 record/map 字节及共同容量绑定到签验流程，后续卡再接生产 writer。私有 MAC 不等于 provider native 来源证明。

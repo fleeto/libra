@@ -1090,6 +1090,8 @@ The harness and synthetic tests do not prove real content or native reasoning.
 
 Ordinary `agent rpc trust opencode` pins an exporter binary; it does not register an issuer or prove native reasoning. The native path requires the separately installed, reviewed `2.0.26-libra-native.1` macOS arm64 producer. Enable the OpenCode observer with the actual Libra executable, then prepare a fresh owned installation using that private bundle's initialization instructions. Global OpenCode remains independent.
 
+The immutable catalog also pins a separate `2.0.26-libra-native.2` candidate (build `78c1f19e9249da8d0143a079f90aec9a`, macOS arm64 binary SHA-256 `28174e893a2b63b75f58af4c77212747f6e1eebce5dd0252cfe64847b342615c`). Its additional endpoint descriptor v2 permits only the first-party `anthropic-messages` route to the exact URL `https://api.anthropic.com/v1/messages?beta=true`; the receipt and Ed25519 attestation remain v1. Anthropic-compatible providers, proxies and changed URLs do not match this endpoint. Selecting `.2` still requires separately measured binary bytes, a fresh private installation/key, explicit exporter trust and explicit epoch-checked issuer registration. The `.1` issuer can remain historical verify-only; no key is automatically promoted. The `.1` build remains the current local content acceptance baseline. A catalog match or synthetic test does not prove real `signature`/`redactedData` source bytes or allow their archival; `reasoningEncryptedContent` remains deferred. Provider/account/model checks stay local manual gates, outside CI.
+
 ```sh
 libra agent rpc trust --dir /absolute/approved-private/bin
 libra agent rpc trust opencode

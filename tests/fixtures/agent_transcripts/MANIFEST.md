@@ -56,6 +56,8 @@ synthetic label grants trusted native provenance.
 
 NPR-18 keeps the historical official `2.0.26` / `9b4ec5714d481559990db0a816d5dec19541a814` source record and all existing JSON bytes frozen. The additional `opencode/native-origin-build.json` (named `native-origin-build.json` in this directory) is the separate current public identity descriptor for the reviewed private `2.0.26-libra-native.1` darwin-arm64 artifact, build `bac21cc4027896b8d1836133c347d20f`. Its official base commit is not the patched source identity. The source-ready audit is actual single Claude PASS; Source A remains UNPROVEN, archive/native GO is false. It contains no issuer, key or per-installation policy. Neither old synthetic fixtures nor this public descriptor is real native provider proof. macOS acceptance explicitly selects `LIBRA_OPENCODE_NATIVE_BINARY`; no global fallback or Linux functional claim.
 
+The separate `native_origin_endpoint_anthropic_v2.json` is an independently encoded, synthetic 111-byte endpoint descriptor vector for the exact first-party Anthropic Messages URL. `opencode/native-origin-build-anthropic.json` is the public, uninstalled and unregistered `2.0.26-libra-native.2` candidate identity. Its source archive and manifest describe the complete reviewed private `.2` tree; its patch and changed-path manifest describe the complete official 2.0.26-to-`.2` delta, not the incremental `.1`-to-`.2` review diff. Both fixtures contain only public hashes and synthetic protocol data. They do not contain account output, issuer keys or evidence that real `signature`/`redactedData` bytes are native; Source A and archive admission remain unproved.
+
 ## OG-17 frozen pre-v2 pending reader
 
 `reasoning/pending_v1_decoder.rs` is the compiled pre-v2 pending reader oracle,

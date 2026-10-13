@@ -549,6 +549,72 @@ mod tests {
         .unwrap();
     }
 
+    #[tokio::test]
+    async fn anthropic_rotation_keeps_old_issuer_verify_only_and_requires_new_key() {
+        let conn = storage("sqlite::memory:").await;
+        let original = prepared();
+        seed_trust(&conn, &original).await;
+        let txn = db::begin_write_transaction(&conn).await.unwrap();
+        assert_eq!(
+            commit_registration(&txn, &original, 0).await.unwrap().epoch,
+            1
+        );
+        txn.commit().await.unwrap();
+
+        let build = approved_build::lookup(
+            codec::ANTHROPIC_PRODUCER_VERSION,
+            "78c1f19e9249da8d0143a079f90aec9a",
+            "28174e893a2b63b75f58af4c77212747f6e1eebce5dd0252cfe64847b342615c",
+        )
+        .unwrap();
+        let mut next = prepared();
+        next.exporter_trust.path = "/synthetic/producer/opencode-anthropic".into();
+        next.exporter_trust.sha256 = build.identity().binary_sha256.into();
+        next.record.producer_path = next.exporter_trust.path.to_str().unwrap().into();
+        next.record.producer_binary_digest = build.identity().binary_sha256.into();
+        next.record.producer_version = build.identity().producer_version.into();
+        next.record.build_identity = build.identity().build_identity.into();
+        let command = "/Applications/Libra.app/Contents/MacOS/libra";
+        let rendered = build.render_observer(command).unwrap();
+        next.record.policy_descriptor = build
+            .installation_policy(command, rendered.as_bytes())
+            .unwrap();
+        next.record.policy_digest = hex::encode(Sha256::digest(
+            codec::policy_bytes(&next.record.policy_descriptor).unwrap(),
+        ));
+        next.record.public_key = hex::encode([8u8; 32]);
+        next.record.issuer = hex::encode(Sha256::digest([8u8; 32]));
+        seed_trust(&conn, &next).await;
+
+        let txn = db::begin_write_transaction(&conn).await.unwrap();
+        assert_eq!(commit_registration(&txn, &next, 1).await.unwrap().epoch, 2);
+        txn.commit().await.unwrap();
+        let registry = read_with_conn(&conn).await.unwrap().unwrap();
+        assert_eq!(registry.issuers.len(), 2);
+        assert_eq!(registry.issuers[0].state, IssuerState::VerifyOnly);
+        assert_eq!(
+            registry.issuers[0].producer_version,
+            codec::PRODUCER_VERSION
+        );
+        assert_eq!(registry.issuers[1].state, IssuerState::Active);
+        assert_eq!(
+            registry.issuers[1].producer_version,
+            codec::ANTHROPIC_PRODUCER_VERSION
+        );
+        next.record.public_key = original.record.public_key.clone();
+        next.record.issuer = original.record.issuer.clone();
+        let txn = db::begin_write_transaction(&conn).await.unwrap();
+        assert_eq!(
+            commit_registration(&txn, &next, 2)
+                .await
+                .unwrap_err()
+                .downcast_ref(),
+            Some(&NativeOriginError::ExistingIssuer)
+        );
+        txn.rollback().await.unwrap();
+        assert_eq!(read_with_conn(&conn).await.unwrap().unwrap(), registry);
+    }
+
     #[test]
     fn npr_09_owned_json_grammar() {
         #[derive(Debug, Deserialize, PartialEq)]

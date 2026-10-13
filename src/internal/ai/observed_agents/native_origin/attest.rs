@@ -76,6 +76,7 @@ pub(super) struct PreparedRegistration {
 
 struct LocalBinding {
     installation: Installation,
+    producer_version: &'static str,
     key_dir: PathBuf,
     command_path: PathBuf,
     observer_executable_sha256: String,
@@ -198,11 +199,7 @@ fn local_binding(worktree: &Path, manifest: &Path, trusted: &TrustRecord) -> Res
     }
     // Select the catalog BEFORE passing a private installation directory to a
     // child. A trusted ordinary exporter is not an approved attest producer.
-    let build = approved_build::lookup(
-        codec::PRODUCER_VERSION,
-        &installation.build_identity,
-        &provenance.sha256,
-    )?;
+    let build = approved_build::select_measured(&installation.build_identity, &provenance.sha256)?;
     let command = measure_executable(
         &std::env::current_exe()
             .context("locate current Libra executable for native-origin registration")?,
@@ -222,6 +219,7 @@ fn local_binding(worktree: &Path, manifest: &Path, trusted: &TrustRecord) -> Res
     }
     Ok(LocalBinding {
         installation,
+        producer_version: build.identity().producer_version,
         key_dir: manifest
             .parent()
             .ok_or(NativeOriginError::Descriptor)?
@@ -391,7 +389,7 @@ fn verify_challenge(bytes: &[u8], challenge: &str, local: &LocalBinding) -> Resu
         || response.public_key != installation.issuer_public_key
         || response.key_generation != installation.key_generation
         || response.build_identity != installation.build_identity
-        || response.producer_version != codec::PRODUCER_VERSION
+        || response.producer_version != local.producer_version
         || response.producer_binary_digest != installation.producer_binary_digest
         || response.policy_digest != installation.policy_digest
     {
@@ -685,6 +683,7 @@ mod tests {
                 policy_digest: hex::encode(Sha256::digest(codec::policy_bytes(&policy).unwrap())),
                 policy_descriptor: policy,
             },
+            producer_version: codec::PRODUCER_VERSION,
             key_dir: "/synthetic/private".into(),
             command_path: "/synthetic/libra".into(),
             observer_executable_sha256: "0".repeat(64),
@@ -756,5 +755,35 @@ mod tests {
         trailing.extend(b"{}\n");
         assert!(verify_challenge(&trailing, &challenge, &local).is_err());
         assert!(verify_challenge(&valid, &"8".repeat(64), &local).is_err());
+
+        let build = approved_build::lookup(
+            codec::ANTHROPIC_PRODUCER_VERSION,
+            "78c1f19e9249da8d0143a079f90aec9a",
+            "28174e893a2b63b75f58af4c77212747f6e1eebce5dd0252cfe64847b342615c",
+        )
+        .unwrap();
+        let rendered = build
+            .render_observer("/Applications/Libra.app/Contents/MacOS/libra")
+            .unwrap();
+        let policy = build
+            .installation_policy(
+                "/Applications/Libra.app/Contents/MacOS/libra",
+                rendered.as_bytes(),
+            )
+            .unwrap();
+        let mut anthropic = local;
+        anthropic.producer_version = build.identity().producer_version;
+        anthropic.installation.build_identity = build.identity().build_identity.into();
+        anthropic.installation.producer_binary_digest = build.identity().binary_sha256.into();
+        anthropic.installation.policy_digest =
+            hex::encode(Sha256::digest(codec::policy_bytes(&policy).unwrap()));
+        anthropic.installation.policy_descriptor = policy;
+        assert!(verify_challenge(&valid, &challenge, &anthropic).is_err());
+        let mut claimed = original;
+        claimed["buildIdentity"] = json!(anthropic.installation.build_identity);
+        claimed["producerVersion"] = json!(anthropic.producer_version);
+        claimed["producerBinaryDigest"] = json!(anthropic.installation.producer_binary_digest);
+        claimed["policyDigest"] = json!(anthropic.installation.policy_digest);
+        assert!(verify_challenge(&signed(claimed, domain), &challenge, &anthropic).is_ok());
     }
 }

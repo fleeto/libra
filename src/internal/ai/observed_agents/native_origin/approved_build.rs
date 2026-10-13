@@ -30,6 +30,7 @@ pub struct ArtifactIdentity {
 /// A closed source-derived endpoint. A receipt cannot add or normalize endpoints.
 #[derive(Debug, Serialize)]
 pub struct ApprovedEndpoint {
+    pub version: u32,
     pub protocol: Protocol,
     pub url: &'static str,
     pub sha256: &'static str,
@@ -368,6 +369,7 @@ export default {
   },
 };
 "####;
+const EVENT_COMMANDS_JSON: &str = r####"{"message.updated":"prompt","server.instance.disposed":"session-end","session.compacted":"compaction","session.compaction.ended":"compaction","session.created":"session-start","session.deleted":"session-end","session.execution.failed":"stop","session.execution.interrupted":"stop","session.execution.succeeded":"stop","session.inbox.delivered":"prompt","session.status":"stop","tool.execute.after":"tool-use"}"####;
 static REVIEWED: ApprovedBuild = ApprovedBuild {
     identity: ArtifactIdentity {
         producer_version: "2.0.26-libra-native.1",
@@ -389,11 +391,13 @@ static REVIEWED: ApprovedBuild = ApprovedBuild {
     protocols: &[Protocol::OpenaiResponses],
     endpoints: &[
         ApprovedEndpoint {
+            version: 1,
             protocol: Protocol::OpenaiResponses,
             url: "https://ark.cn-beijing.volces.com/api/plan/v3/responses",
             sha256: "061f0c9e9a7b58c124b2282e620b1d01483350b246d38a4a2017002f13878531",
         },
         ApprovedEndpoint {
+            version: 1,
             protocol: Protocol::OpenaiResponses,
             url: "https://opencode.ai/zen/v1/responses",
             sha256: "253ec2c2c92c5e0b154de256a3cf1d1ac27f2f03c0119312229d2fe66b9b4cd3",
@@ -402,7 +406,58 @@ static REVIEWED: ApprovedBuild = ApprovedBuild {
     builtin_set_digest: "137c5c7b18c756b75e520a6ffdd042397b5c29f917bac383084df5c664dd0e82",
     libra_template: REVIEWED_TEMPLATE,
     libra_template_digest: "9c67213be10e16538bfa550501a2dcb7a21c24493b3a8f05592f6c96ff4be27d",
-    event_commands_json: r####"{"message.updated":"prompt","server.instance.disposed":"session-end","session.compacted":"compaction","session.compaction.ended":"compaction","session.created":"session-start","session.deleted":"session-end","session.execution.failed":"stop","session.execution.interrupted":"stop","session.execution.succeeded":"stop","session.inbox.delivered":"prompt","session.status":"stop","tool.execute.after":"tool-use"}"####,
+    event_commands_json: EVENT_COMMANDS_JSON,
+    event_map_digest: "3fe0008b685e48e61d2f63a339de2e3510d9c9719dc572794afc6c95ef7d2ebe",
+    export_deadline_millis: 30000,
+    transport_policy: "compiled-native-http-only-v1",
+};
+
+// Candidate `.2` identity is pinned to the independently measured private
+// binary and the reviewed R4 source closure. Catalog membership alone never
+// registers an issuer, enables capture, or grants artifact authority.
+static REVIEWED_ANTHROPIC: ApprovedBuild = ApprovedBuild {
+    identity: ArtifactIdentity {
+        producer_version: codec::ANTHROPIC_PRODUCER_VERSION,
+        build_identity: "78c1f19e9249da8d0143a079f90aec9a",
+        target: "darwin-arm64",
+        binary_sha256: "28174e893a2b63b75f58af4c77212747f6e1eebce5dd0252cfe64847b342615c",
+        binary_bytes: 187635570,
+        official_base_commit: "9b4ec5714d481559990db0a816d5dec19541a814",
+        source_archive_sha256: "70d550c2371c40da2003de98dc12ea88e7d3de064d618c75a8aff72d22ae2ded",
+        source_manifest_sha256: "549ab9e8159c18ea25f5c85348b3df458e464527aec83cdcd86a7ea97638506c",
+        patch_sha256: "d14ae6dbda0c6c9859acbf290fdcb5842bf23fb1270befe07c4ee22240658ec5",
+        patch_manifest_sha256: "1ac2a777337c76609ffa737d4ee8add3fd67f6bfc3ff6a1c08053be5cf038556",
+        lock_sha256: "5dbf5d6003729a1e5f04eaec5ac66ef25993a83191a9e0438b9ed0ecfcf909fc",
+        build_inputs_sha256: "b20fdb22e57e60b7d40a5eb0881d937a24ca9fa9dceb164e3014f51345366426",
+        bun_version: "1.4.2",
+        bun_binary_sha256: "35d20dd0263e5c950194434b925454fdfa9ba6e4467da960410fa05b08a7a5b5",
+        review_raw_sha256: "9ce650ffbd6e4ba147434d4dbff1083829ef8f4d32f3eeffcb91720197373ed7",
+    },
+    protocols: &[Protocol::AnthropicMessages, Protocol::OpenaiResponses],
+    endpoints: &[
+        ApprovedEndpoint {
+            version: 1,
+            protocol: Protocol::OpenaiResponses,
+            url: "https://ark.cn-beijing.volces.com/api/plan/v3/responses",
+            sha256: "061f0c9e9a7b58c124b2282e620b1d01483350b246d38a4a2017002f13878531",
+        },
+        ApprovedEndpoint {
+            version: 1,
+            protocol: Protocol::OpenaiResponses,
+            url: "https://opencode.ai/zen/v1/responses",
+            sha256: "253ec2c2c92c5e0b154de256a3cf1d1ac27f2f03c0119312229d2fe66b9b4cd3",
+        },
+        ApprovedEndpoint {
+            version: 2,
+            protocol: Protocol::AnthropicMessages,
+            url: codec::ANTHROPIC_ENDPOINT,
+            sha256: "4d87d389c2853ef2ee92e297146b3576d59c343900f70d099f6ed977573bcae0",
+        },
+    ],
+    builtin_set_digest: "137c5c7b18c756b75e520a6ffdd042397b5c29f917bac383084df5c664dd0e82",
+    libra_template: REVIEWED_TEMPLATE,
+    libra_template_digest: "9c67213be10e16538bfa550501a2dcb7a21c24493b3a8f05592f6c96ff4be27d",
+    event_commands_json: EVENT_COMMANDS_JSON,
     event_map_digest: "3fe0008b685e48e61d2f63a339de2e3510d9c9719dc572794afc6c95ef7d2ebe",
     export_deadline_millis: 30000,
     transport_policy: "compiled-native-http-only-v1",
@@ -416,15 +471,27 @@ pub fn lookup(
     build_identity: &str,
     measured_binary_sha256: &str,
 ) -> Result<&'static ApprovedBuild, ApprovedBuildError> {
-    let identity = &REVIEWED.identity;
-    if version == identity.producer_version
-        && build_identity == identity.build_identity
-        && measured_binary_sha256 == identity.binary_sha256
-    {
-        Ok(&REVIEWED)
-    } else {
-        Err(ApprovedBuildError::Unknown)
+    let build = select_measured(build_identity, measured_binary_sha256)?;
+    if version != build.identity.producer_version {
+        return Err(ApprovedBuildError::Unknown);
     }
+    Ok(build)
+}
+
+/// Choose only from controlled measured bytes and the installation's build
+/// identity. Neither the challenge's claimed version nor export data selects
+/// which producer receives the private key-directory path.
+pub fn select_measured(
+    build_identity: &str,
+    measured_binary_sha256: &str,
+) -> Result<&'static ApprovedBuild, ApprovedBuildError> {
+    [&REVIEWED, &REVIEWED_ANTHROPIC]
+        .into_iter()
+        .find(|build| {
+            build.identity.build_identity == build_identity
+                && build.identity.binary_sha256 == measured_binary_sha256
+        })
+        .ok_or(ApprovedBuildError::Unknown)
 }
 
 impl ApprovedBuild {
@@ -436,6 +503,12 @@ impl ApprovedBuild {
         self.endpoints
             .iter()
             .find(|endpoint| endpoint.protocol == protocol && endpoint.url == prepared_url)
+    }
+
+    pub fn matches_endpoint_pair(&self, protocol: Protocol, digest: &str) -> bool {
+        self.endpoints
+            .iter()
+            .any(|endpoint| endpoint.protocol == protocol && endpoint.sha256 == digest)
     }
 
     /// Pure rendering of the frozen public template. No filesystem, environment
@@ -495,6 +568,28 @@ impl ApprovedBuild {
         let rendered = self.render_observer(controlled_command_path)?;
         if measured_observer_bytes != rendered.as_bytes() {
             return Err(ApprovedBuildError::Observer);
+        }
+        for endpoint in self.endpoints {
+            let descriptor = codec::Endpoint {
+                version: endpoint.version,
+                protocol: endpoint.protocol,
+                url: endpoint.url.to_owned(),
+            };
+            let bytes = codec::endpoint_bytes(&descriptor)
+                .map_err(|_| ApprovedBuildError::CompiledPolicy)?;
+            if hex::encode(Sha256::digest(bytes)) != endpoint.sha256 {
+                return Err(ApprovedBuildError::CompiledPolicy);
+            }
+        }
+        let mut endpoint_protocols = self
+            .endpoints
+            .iter()
+            .map(|endpoint| endpoint.protocol)
+            .collect::<Vec<_>>();
+        endpoint_protocols.sort_unstable();
+        endpoint_protocols.dedup();
+        if endpoint_protocols.as_slice() != self.protocols {
+            return Err(ApprovedBuildError::CompiledPolicy);
         }
         let policy = Policy {
             version: 1,
@@ -617,6 +712,89 @@ mod tests {
             "547c36eb928da163ef61d019bad669860d519f2da0b67737c9a3920e831c9196",
         )
         .unwrap()
+    }
+
+    #[test]
+    fn anthropic_build_requires_measured_identity_and_exact_endpoint_pairs() {
+        let build = select_measured(
+            "78c1f19e9249da8d0143a079f90aec9a",
+            "28174e893a2b63b75f58af4c77212747f6e1eebce5dd0252cfe64847b342615c",
+        )
+        .unwrap();
+        assert_eq!(
+            build.identity().producer_version,
+            codec::ANTHROPIC_PRODUCER_VERSION
+        );
+        assert_eq!(build.identity().binary_bytes, 187635570);
+        let candidate: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../../tests/fixtures/agent_transcripts/opencode/native-origin-build-anthropic.json"
+        ))
+        .unwrap();
+        let pinned = serde_json::to_value(build.identity()).unwrap();
+        for (name, value) in pinned.as_object().unwrap() {
+            assert_eq!(value, &candidate[name], "candidate identity member {name}");
+        }
+        assert_eq!(candidate["native_source_a_go"], false);
+        assert!(
+            lookup(
+                codec::PRODUCER_VERSION,
+                build.identity().build_identity,
+                build.identity().binary_sha256,
+            )
+            .is_err()
+        );
+        assert!(
+            select_measured(
+                reviewed().identity().build_identity,
+                build.identity().binary_sha256,
+            )
+            .is_err()
+        );
+        assert!(
+            select_measured(
+                build.identity().build_identity,
+                reviewed().identity().binary_sha256,
+            )
+            .is_err()
+        );
+
+        let path = "/Applications/Libra.app/Contents/MacOS/libra";
+        let rendered = build.render_observer(path).unwrap();
+        let policy = build
+            .installation_policy(path, rendered.as_bytes())
+            .unwrap();
+        assert_eq!(
+            policy.protocols,
+            vec![Protocol::AnthropicMessages, Protocol::OpenaiResponses]
+        );
+        assert_eq!(
+            policy.endpoint_digests,
+            vec![
+                "061f0c9e9a7b58c124b2282e620b1d01483350b246d38a4a2017002f13878531",
+                "253ec2c2c92c5e0b154de256a3cf1d1ac27f2f03c0119312229d2fe66b9b4cd3",
+                "4d87d389c2853ef2ee92e297146b3576d59c343900f70d099f6ed977573bcae0",
+            ]
+        );
+        for endpoint in build.endpoints {
+            let descriptor = Endpoint {
+                version: endpoint.version,
+                protocol: endpoint.protocol,
+                url: endpoint.url.into(),
+            };
+            let bytes = codec::endpoint_bytes(&descriptor).unwrap();
+            assert_eq!(hex::encode(Sha256::digest(bytes)), endpoint.sha256);
+            assert!(build.matches_endpoint_pair(endpoint.protocol, endpoint.sha256));
+        }
+        assert!(
+            !build.matches_endpoint_pair(Protocol::AnthropicMessages, build.endpoints[0].sha256,)
+        );
+        assert!(
+            !build.matches_endpoint_pair(Protocol::OpenaiResponses, build.endpoints[2].sha256,)
+        );
+        assert!(
+            !reviewed()
+                .matches_endpoint_pair(Protocol::AnthropicMessages, build.endpoints[2].sha256,)
+        );
     }
 
     #[test]

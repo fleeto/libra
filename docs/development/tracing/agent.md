@@ -2642,6 +2642,8 @@ OpenCode 2.0.26并选择`volcengine-agent-plan/glm-5.3-flash`，先核对临时�
 
 Ordinary `agent rpc trust opencode` pins an exporter binary; it does not register an issuer or prove native reasoning. The native path requires the separately installed, reviewed `2.0.26-libra-native.1` macOS arm64 producer. Enable the OpenCode observer with the actual Libra executable, then prepare a fresh owned installation using that private bundle's initialization instructions. Global OpenCode remains independent.
 
+The catalog also recognizes only one additional measured `2.0.26-libra-native.2` candidate (build `78c1f19e9249da8d0143a079f90aec9a`, binary SHA-256 `28174e893a2b63b75f58af4c77212747f6e1eebce5dd0252cfe64847b342615c`). Endpoint descriptor v2 is limited to the first-party `anthropic-messages` route at the exact URL `https://api.anthropic.com/v1/messages?beta=true`; receipt and attestation remain v1. A selected build is derived from measured bytes and the owned installation build identity before a key path is passed to the challenge child. Signed receipts require a protocol/digest pair from that same build and current active issuer permission. `.1` remains the accepted local content baseline; `.2` registration requires a new key and explicit trust, and does not prove real native field bytes or grant archival. Real account/model checks remain local manual gates outside CI; `reasoningEncryptedContent` is deferred.
+
 ```sh
 libra agent rpc trust --dir /absolute/approved-private/bin
 libra agent rpc trust opencode

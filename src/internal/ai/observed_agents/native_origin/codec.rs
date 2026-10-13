@@ -8,6 +8,8 @@ use url::Url;
 use super::super::coverage::parse_canon_value;
 
 pub const PRODUCER_VERSION: &str = "2.0.26-libra-native.1";
+pub const ANTHROPIC_PRODUCER_VERSION: &str = "2.0.26-libra-native.2";
+pub const ANTHROPIC_ENDPOINT: &str = "https://api.anthropic.com/v1/messages?beta=true";
 pub const RECEIPT_BYTE_CAP: usize = 8192;
 pub const DESCRIPTOR_BYTE_CAP: usize = 65536;
 const TRANSPORT_POLICY: &str = "compiled-native-http-only-v1";
@@ -179,7 +181,12 @@ fn json_size<T: Serialize>(value: &T, cap: usize) -> Result<(), CodecError> {
 }
 
 fn validate_receipt(value: &Receipt) -> Result<(), CodecError> {
-    if value.version != 1 || value.key_generation == 0 || value.producer_version != PRODUCER_VERSION
+    if value.version != 1
+        || value.key_generation == 0
+        || !matches!(
+            value.producer_version.as_str(),
+            PRODUCER_VERSION | ANTHROPIC_PRODUCER_VERSION
+        )
     {
         return Err(invalid("receipt version or key generation"));
     }
@@ -226,10 +233,16 @@ fn validate_receipt(value: &Receipt) -> Result<(), CodecError> {
 }
 
 fn validate_endpoint(value: &Endpoint) -> Result<(), CodecError> {
+    text(&value.url, DESCRIPTOR_BYTE_CAP)?;
+    if value.version == 2 {
+        if value.protocol != Protocol::AnthropicMessages || value.url != ANTHROPIC_ENDPOINT {
+            return Err(invalid("endpoint version or URL spelling"));
+        }
+        return json_size(value, DESCRIPTOR_BYTE_CAP);
+    }
     if value.version != 1 {
         return Err(invalid("endpoint version"));
     }
-    text(&value.url, DESCRIPTOR_BYTE_CAP)?;
     if !value.url.bytes().all(|b| (0x21..=0x7e).contains(&b)) || value.url.contains(['?', '#']) {
         return Err(invalid("endpoint URL spelling"));
     }
@@ -371,7 +384,12 @@ pub fn signing_bytes(value: &Receipt) -> Result<Vec<u8>, CodecError> {
 
 pub fn endpoint_bytes(value: &Endpoint) -> Result<Vec<u8>, CodecError> {
     validate_endpoint(value)?;
-    let mut out = Encoder::new(b"libra-opencode-native-endpoint-v1\0", DESCRIPTOR_BYTE_CAP)?;
+    let domain = if value.version == 2 {
+        b"libra-opencode-native-endpoint-v2\0".as_slice()
+    } else {
+        b"libra-opencode-native-endpoint-v1\0".as_slice()
+    };
+    let mut out = Encoder::new(domain, DESCRIPTOR_BYTE_CAP)?;
     out.u32(value.version)?;
     out.lp(value.protocol.as_str())?;
     out.lp(&value.url)?;
@@ -489,6 +507,46 @@ mod tests {
                 vector["canonical_sha256"].as_str().unwrap()
             );
         }
+    }
+
+    #[test]
+    fn anthropic_endpoint_v2_exact_vector_and_closed_grammar() {
+        let vector: Value = serde_json::from_str(include_str!(
+            "../../../../../tests/fixtures/agent_transcripts/native_origin_endpoint_anthropic_v2.json"
+        ))
+        .unwrap();
+        let endpoint = decode_endpoint(&wire(&vector["endpoint"])).unwrap();
+        let bytes = endpoint_bytes(&endpoint).unwrap();
+        assert_eq!(bytes.len(), 111);
+        assert_eq!(hex(&bytes), vector["canonical_hex"]);
+        assert_eq!(hex(&Sha256::digest(&bytes)), vector["canonical_sha256"]);
+
+        for url in [
+            "https://api.anthropic.com/v1/messages",
+            "https://api.anthropic.com/v1/messages?beta=True",
+            "https://api.anthropic.com/v1/messages?beta=true&beta=true",
+            "https://api.anthropic.com/v1/messages?beta%3Dtrue",
+            "https://api.anthropic.com/v1/messages?beta=true#fragment",
+            "https://api.anthropic.com:443/v1/messages?beta=true",
+            "https://proxy.example/v1/messages?beta=true",
+            "https://user@api.anthropic.com/v1/messages?beta=true",
+        ] {
+            let changed = json!({"version":2,"protocol":"anthropic-messages","url":url});
+            assert!(decode_endpoint(&wire(&changed)).is_err(), "URL {url}");
+        }
+        for changed in [
+            json!({"version":1,"protocol":"anthropic-messages","url":ANTHROPIC_ENDPOINT}),
+            json!({"version":2,"protocol":"openai-responses","url":ANTHROPIC_ENDPOINT}),
+            json!({"version":3,"protocol":"anthropic-messages","url":ANTHROPIC_ENDPOINT}),
+        ] {
+            assert!(decode_endpoint(&wire(&changed)).is_err());
+        }
+        let mut receipt = receipt();
+        receipt["producerVersion"] = json!(ANTHROPIC_PRODUCER_VERSION);
+        let decoded = decode_receipt(&wire(&receipt)).unwrap();
+        assert_eq!(decoded.version, 1, "endpoint v2 does not change receipt v1");
+        receipt["producerVersion"] = json!("2.0.26-libra-native.3");
+        rejected(&receipt);
     }
 
     #[test]

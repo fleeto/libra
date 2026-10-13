@@ -1,0 +1,23 @@
+{
+  "status": "PRIVATE CANDIDATE; UNINSTALLED; UNREGISTERED; SOURCE A UNPROVEN",
+  "producer_version": "2.0.26-libra-native.2",
+  "build_identity": "78c1f19e9249da8d0143a079f90aec9a",
+  "target": "darwin-arm64",
+  "official_base_commit": "9b4ec5714d481559990db0a816d5dec19541a814",
+  "binary_sha256": "28174e893a2b63b75f58af4c77212747f6e1eebce5dd0252cfe64847b342615c",
+  "binary_bytes": 187635570,
+  "source_archive_sha256": "70d550c2371c40da2003de98dc12ea88e7d3de064d618c75a8aff72d22ae2ded",
+  "source_manifest_sha256": "549ab9e8159c18ea25f5c85348b3df458e464527aec83cdcd86a7ea97638506c",
+  "patch_sha256": "d14ae6dbda0c6c9859acbf290fdcb5842bf23fb1270befe07c4ee22240658ec5",
+  "patch_manifest_sha256": "1ac2a777337c76609ffa737d4ee8add3fd67f6bfc3ff6a1c08053be5cf038556",
+  "lock_sha256": "5dbf5d6003729a1e5f04eaec5ac66ef25993a83191a9e0438b9ed0ecfcf909fc",
+  "build_inputs_sha256": "b20fdb22e57e60b7d40a5eb0881d937a24ca9fa9dceb164e3014f51345366426",
+  "bun_version": "1.4.2",
+  "bun_binary_sha256": "35d20dd0263e5c950194434b925454fdfa9ba6e4467da960410fa05b08a7a5b5",
+  "review_raw_sha256": "9ce650ffbd6e4ba147434d4dbff1083829ef8f4d32f3eeffcb91720197373ed7",
+  "source_archive_semantics": "Complete reviewed private .2 source archive: 8772 paths",
+  "source_manifest_semantics": "Complete private .2 source file SHA256, byte length, mode and symlink map",
+  "patch_semantics": "Complete unified official OpenCode 2.0.26 to private .2 source patch",
+  "patch_manifest_semantics": "All 65 changed paths with official and private identities",
+  "native_source_a_go": false
+}

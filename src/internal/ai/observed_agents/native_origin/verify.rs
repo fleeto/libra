@@ -246,15 +246,12 @@ fn verify_bound(
     let policy = build
         .installation_policy(&measured.observer_command, &measured.observer_bytes)
         .map_err(|_| VerificationError::Runtime)?;
-    // The current immutable catalog contains only OpenAI Responses endpoints.
-    // A future catalog must bind any added protocol to its own endpoint set.
     if receipt.build_identity != record.build_identity
         || receipt.producer_version != record.producer_version
         || policy != record.policy_descriptor
         || receipt.policy_digest != record.policy_digest
         || record.policy_digest != hex::encode(Sha256::digest(codec::policy_bytes(&policy)?))
-        || !policy.protocols.contains(&receipt.protocol)
-        || !policy.endpoint_digests.contains(&receipt.endpoint_digest)
+        || !build.matches_endpoint_pair(receipt.protocol, &receipt.endpoint_digest)
     {
         return Err(VerificationError::Runtime.into());
     }
@@ -338,6 +335,39 @@ mod tests {
         (receipt, record, measured)
     }
 
+    fn anthropic_input() -> (codec::Receipt, registry::IssuerRecord, MeasuredRuntime) {
+        let (mut receipt, mut record, mut measured) = input();
+        let build = approved_build::lookup(
+            codec::ANTHROPIC_PRODUCER_VERSION,
+            "78c1f19e9249da8d0143a079f90aec9a",
+            "28174e893a2b63b75f58af4c77212747f6e1eebce5dd0252cfe64847b342615c",
+        )
+        .unwrap();
+        let policy = build
+            .installation_policy(&measured.observer_command, &measured.observer_bytes)
+            .unwrap();
+        record.build_identity = build.identity().build_identity.into();
+        record.producer_version = build.identity().producer_version.into();
+        record.producer_binary_digest = build.identity().binary_sha256.into();
+        record.policy_digest = hex::encode(Sha256::digest(codec::policy_bytes(&policy).unwrap()));
+        record.policy_descriptor = policy;
+        measured.producer.sha256 = build.identity().binary_sha256.into();
+        receipt.build_identity = record.build_identity.clone();
+        receipt.producer_version = record.producer_version.clone();
+        receipt.policy_digest = record.policy_digest.clone();
+        receipt.protocol = codec::Protocol::AnthropicMessages;
+        receipt.endpoint_digest = build
+            .endpoint(
+                codec::Protocol::AnthropicMessages,
+                codec::ANTHROPIC_ENDPOINT,
+            )
+            .unwrap()
+            .sha256
+            .into();
+        sign(&mut receipt);
+        (receipt, record, measured)
+    }
+
     fn coordinates(r: &codec::Receipt) -> SourceCoordinates<'_> {
         SourceCoordinates {
             session: &r.source_session,
@@ -395,6 +425,61 @@ mod tests {
                 &fields()
             )),
             VerificationError::Authority
+        );
+    }
+
+    #[test]
+    fn anthropic_receipt_rejects_crossed_protocol_endpoint_pair() {
+        let (receipt, record, measured) = anthropic_input();
+        assert!(
+            verify_bound(
+                receipt.clone(),
+                &record,
+                &measured,
+                &coordinates(&receipt),
+                &fields(),
+            )
+            .is_ok()
+        );
+        let mut wrong = receipt.clone();
+        wrong.protocol = codec::Protocol::OpenaiResponses;
+        sign(&mut wrong);
+        assert_eq!(
+            error(verify_bound(
+                wrong,
+                &record,
+                &measured,
+                &coordinates(&receipt),
+                &fields(),
+            )),
+            VerificationError::Runtime
+        );
+        let mut wrong = receipt.clone();
+        wrong.endpoint_digest = record.policy_descriptor.endpoint_digests[0].clone();
+        sign(&mut wrong);
+        assert_eq!(
+            error(verify_bound(
+                wrong,
+                &record,
+                &measured,
+                &coordinates(&receipt),
+                &fields(),
+            )),
+            VerificationError::Runtime
+        );
+        let (mut old_receipt, old_record, old_measured) = input();
+        old_receipt.protocol = codec::Protocol::AnthropicMessages;
+        old_receipt.endpoint_digest = receipt.endpoint_digest;
+        sign(&mut old_receipt);
+        assert_eq!(
+            error(verify_bound(
+                old_receipt.clone(),
+                &old_record,
+                &old_measured,
+                &coordinates(&old_receipt),
+                &fields(),
+            )),
+            VerificationError::Runtime
         );
     }
 

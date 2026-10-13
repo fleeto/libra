@@ -1,0 +1,11 @@
+{
+  "endpoint": {
+    "version": 2,
+    "protocol": "anthropic-messages",
+    "url": "https://api.anthropic.com/v1/messages?beta=true"
+  },
+  "canonical_hex": "6c696272612d6f70656e636f64652d6e61746976652d656e64706f696e742d7632000000000200000012616e7468726f7069632d6d657373616765730000002f68747470733a2f2f6170692e616e7468726f7069632e636f6d2f76312f6d657373616765733f626574613d74727565",
+  "canonical_sha256": "4d87d389c2853ef2ee92e297146b3576d59c343900f70d099f6ed977573bcae0",
+  "canonical_bytes": 111,
+  "encoder": "independent Python struct.pack/UTF-8/SHA-256; synthetic public vector"
+}

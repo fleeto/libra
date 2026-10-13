@@ -683,6 +683,8 @@ macOS本地内容门是`agent_local_capture_smoke_test`中的
 
 普通 `agent rpc trust opencode` 只固定 exporter binary，不登记 issuer，也不证明 reasoning 的 native 来源。此登记路径要求独立安装、已审查的 macOS arm64 `2.0.26-libra-native.1` 私有 producer。先用当前 Libra 可执行文件安装 OpenCode 观察器，再按该私有交付包的初始化说明准备一个新的 owned 安装目录；全局 OpenCode 保持独立。
 
+不可变目录另钉住独立的 `2.0.26-libra-native.2` 候选（build `78c1f19e9249da8d0143a079f90aec9a`，macOS arm64 binary SHA-256 `28174e893a2b63b75f58af4c77212747f6e1eebce5dd0252cfe64847b342615c`）。新增 endpoint descriptor v2 只允许第一方 `anthropic-messages` 路由使用精确 URL `https://api.anthropic.com/v1/messages?beta=true`；receipt 与 Ed25519 安装挑战仍为 v1。Anthropic-compatible、代理与改写 URL 均不匹配。选择 `.2` 仍需实测 binary、新私有安装与 key、显式 exporter trust、按 epoch 显式登记 issuer；`.1` 旧 issuer 可保留为 verify-only，不自动提升旧 key。`.1` 仍是当前本地内容验收基线。目录匹配或合成测试不证明真实 `signature`/`redactedData` 的来源与归档资格；`reasoningEncryptedContent` 仍延期。依赖账号/模型的检查只在本机手工执行，不进入 CI。
+
 ```sh
 libra agent rpc trust --dir /absolute/approved-private/bin
 libra agent rpc trust opencode

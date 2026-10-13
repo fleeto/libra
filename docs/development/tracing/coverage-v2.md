@@ -100,3 +100,25 @@ are authentication primitives only. COV2-14 must bind each v2 MAC to a closed
 v2 record/map body and enforce the shared map capacity before persistence;
 COV2-03/04/11 later connect marker, pending and live writers. A valid private
 MAC does not prove provider-native origin or authorize opaque archival.
+
+## Private identity map carrier (COV2-14)
+
+A Session may retain `identity-v1` and `identity-v2` side by side in the
+local `agent_reasoning_identity` metadata scope. The existing v1 envelope,
+record bytes, key, and MAC purpose are unchanged. The v2 codec has its own
+closed envelope and independent descriptor, record, and whole-map MAC
+purposes. A reader enumerates the complete bounded private key set, admits
+only those two keys, bounds the declared type before loading it, checks both
+stored text types and their combined encoded length before loading values,
+then authenticates both maps. The two maps share
+a ceiling of 4096 records and 1 MiB of stored envelope bytes. A damaged or
+unknown private map fails the entire reservation batch before any claim-state write.
+
+The existing v1 claim companion updates only `identity-v1` and preserves the
+stored `identity-v2` value byte-for-byte, while applying the combined capacity
+check before its claim/catalog mutation. COV2-03 owns the versioned claim/ref
+transaction that will write v2 from a source-derived plan; COV2-11 owns the
+production Session switch. The COV2-14 v2 carrier tests use synthetic signed
+records and do not establish OpenCode native provenance. An older binary's
+v1-only reader may reject a Session containing both keys; upgrading the
+binary restores access, with no silent v2-to-v1 downgrade.

@@ -1283,19 +1283,23 @@ fn reasoning_identity_gc_docs_preserve_scope_and_source_boundaries() {
 }
 
 #[test]
-fn reasoning_identity_partial_errors_and_session_limits_are_documented() {
+fn reasoning_identity_reservation_errors_and_session_limits_are_documented() {
     for (label, document) in [("agent EN", AGENT_CMD_DOC_EN)] {
         for term in [
             "reasoning coverage is partial; run libra agent doctor before retrying capture",
             "reasoning_identity_changed",
             "4096 records",
             "1 MiB",
+            "identity-v1",
+            "identity-v2",
             "start a new capture session",
             "An absent map is the legacy state",
             "candidate-free ordinary turns retain their existing coverage behavior",
-            "first eligible identity-bearing turn may create the map",
-            "is invalid for the entire session; every turn in that session is treated as partial",
-            "even if a turn has no incoming candidate",
+            "first eligible identity-bearing turn may create a map",
+            "rejects the entire reservation",
+            "private reasoning identity is invalid; start a new capture session",
+            "before any claim write, including candidate-free turns",
+            "an import receipt records this as failed",
             "Doctor does not repair an invalid identity map",
             "Unproved OpenCode reasoning remains partial and is not archived",
         ] {
@@ -1308,13 +1312,16 @@ fn reasoning_identity_partial_errors_and_session_limits_are_documented() {
             "reasoning_identity_changed",
             "4096 条记录",
             "1 MiB",
+            "identity-v1",
+            "identity-v2",
             "start a new capture session",
             "map 缺失属于 legacy 状态",
-            "没有 candidate 的普通 turn 继续遵循原 coverage 行为",
+            "没有 candidate 的普通 turn 保持原 coverage 行为",
             "首个符合准入条件且带 identity 的 turn 可以创建 map",
-            "会使整个 session 的 map 无效",
-            "该 session 中每个 turn 都按 partial 处理",
-            "即使 turn 不含 incoming candidate",
+            "整个 reservation 在任何 claim 写入前",
+            "private reasoning identity is invalid; start a new capture session",
+            "包括不含 candidate 的 turn",
+            "import receipt 会记录为 failed",
             "doctor 不会修复无效 identity map",
             "未获证明的 OpenCode reasoning 保持 partial，不会归档",
         ] {

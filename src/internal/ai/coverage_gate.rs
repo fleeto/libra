@@ -53,7 +53,8 @@ use crate::internal::{
     metadata::{
         MetadataKv, MetadataScope, MetadataValueType, ReasoningIdentityKind,
         ReasoningIdentityRecord, ReasoningIdentityRecordBody, ReasoningIdentityRecordContext,
-        ReasoningIdentitySessionMap,
+        ReasoningIdentityRecordV2, ReasoningIdentitySessionMap, ReasoningIdentitySessionMapV2,
+        validate_reasoning_identity_private_map_keys,
     },
 };
 
@@ -389,14 +390,48 @@ impl<'a> ReasoningCoverageInput<'a> {
     }
 }
 
+#[derive(Default)]
+struct VerifiedReasoningMaps {
+    v1: Option<ReasoningIdentitySessionMap>,
+    v2: Option<ReasoningIdentitySessionMapV2>,
+    v1_encoded_bytes: usize,
+    v2_encoded_bytes: usize,
+}
+
+impl VerifiedReasoningMaps {
+    fn entries(&self) -> Result<usize> {
+        self.v1
+            .as_ref()
+            .map_or(0, |map| map.records().len())
+            .checked_add(self.v2.as_ref().map_or(0, |map| map.records().len()))
+            .context("private reasoning identity exceeds its safe capacity")
+    }
+
+    fn encoded_bytes(&self) -> Result<usize> {
+        self.v1_encoded_bytes
+            .checked_add(self.v2_encoded_bytes)
+            .context("private reasoning identity exceeds its safe capacity")
+    }
+}
+
 enum StoredReasoningMap {
     LegacyAbsent,
     Invalid,
-    Verified(ReasoningIdentitySessionMap),
+    Verified(Box<VerifiedReasoningMaps>),
 }
 
-/// Read the whole private scope before interpreting absence. Authentication
-/// uses the existing key reader and happens inside the coverage writer txn.
+fn validate_reasoning_map_aggregate_capacity(entries: usize, encoded_bytes: usize) -> Result<()> {
+    if entries > crate::internal::metadata::REASONING_IDENTITY_SESSION_MAP_MAX_ENTRIES
+        || encoded_bytes > crate::internal::metadata::REASONING_IDENTITY_SESSION_MAP_MAX_BYTES
+    {
+        return Err(crate::internal::metadata::ReasoningIdentityMapCapacity.into());
+    }
+    Ok(())
+}
+
+/// Enumerate the complete bounded key set without materializing private map
+/// text. Only after key, type and aggregate size validation do we fetch and
+/// authenticate either value in the same transaction.
 async fn read_reasoning_map(
     conn: &impl ConnectionTrait,
     scope: &CaptureScope,
@@ -406,53 +441,155 @@ async fn read_reasoning_map(
     let rows = conn
         .query_all_raw(Statement::from_sql_and_values(
             conn.get_database_backend(),
-            "SELECT key,
-                    CASE WHEN length(CAST(value AS BLOB)) <= ? THEN value ELSE NULL END AS value
-             FROM metadata_kv WHERE scope = ? AND target = ? LIMIT 2",
+            "SELECT CASE WHEN typeof(key) = 'text' AND length(CAST(key AS BLOB)) <= ?
+                         THEN key ELSE NULL END AS bounded_key,
+                    typeof(value) AS sqlite_value_type,
+                    CASE WHEN typeof(value_type) = 'text'
+                              AND length(CAST(value_type AS BLOB)) <= 16
+                         THEN value_type ELSE NULL END AS bounded_value_type,
+                    length(CAST(value AS BLOB)) AS value_bytes
+             FROM metadata_kv WHERE scope = ? AND target = ? ORDER BY key LIMIT 3",
             [
-                (crate::internal::metadata::REASONING_IDENTITY_SESSION_MAP_MAX_BYTES as i64)
-                    .into(),
+                (crate::internal::metadata::MAX_KEY_LEN as i64).into(),
                 MetadataScope::AgentReasoningIdentity.as_str().into(),
                 session_id.into(),
             ],
         ))
         .await
         .context("cannot read private reasoning identity; check the repository database or start a new capture session")?;
-    let Some(row) = rows.first() else {
+    if rows.is_empty() {
         return Ok(StoredReasoningMap::LegacyAbsent);
-    };
-    if rows.len() != 1 || row.try_get_by::<String, _>("key")? != ReasoningIdentitySessionMap::KEY {
+    }
+    if rows.len() > 2 {
         return Ok(StoredReasoningMap::Invalid);
     }
-    let Some(text) = row.try_get_by::<Option<String>, _>("value")? else {
-        return Ok(StoredReasoningMap::Invalid);
-    };
-    let Ok(map) = ReasoningIdentitySessionMap::decode(&text) else {
-        return Ok(StoredReasoningMap::Invalid);
-    };
-    if map.validate_owner(&scope.repo_id, session_id).is_err() {
+    let mut keys = std::collections::BTreeMap::new();
+    let mut encoded_bytes = 0usize;
+    for row in &rows {
+        let Some(key) = row.try_get_by::<Option<String>, _>("bounded_key")? else {
+            return Ok(StoredReasoningMap::Invalid);
+        };
+        if row.try_get_by::<String, _>("sqlite_value_type")? != "text"
+            || row
+                .try_get_by::<Option<String>, _>("bounded_value_type")?
+                .as_deref()
+                != Some("text")
+        {
+            return Ok(StoredReasoningMap::Invalid);
+        }
+        let Some(value_bytes) = row.try_get_by::<Option<i64>, _>("value_bytes")? else {
+            return Ok(StoredReasoningMap::Invalid);
+        };
+        let Ok(value_bytes) = usize::try_from(value_bytes) else {
+            return Ok(StoredReasoningMap::Invalid);
+        };
+        let Some(total) = encoded_bytes.checked_add(value_bytes) else {
+            return Ok(StoredReasoningMap::Invalid);
+        };
+        encoded_bytes = total;
+        if keys.insert(key, value_bytes).is_some() {
+            return Ok(StoredReasoningMap::Invalid);
+        }
+    }
+    if validate_reasoning_identity_private_map_keys(keys.keys().map(String::as_str)).is_err()
+        || validate_reasoning_map_aggregate_capacity(0, encoded_bytes).is_err()
+    {
         return Ok(StoredReasoningMap::Invalid);
     }
     let Some(reader) = reader else {
-        // Older entry points lacking scoped key-read authority cannot
-        // interpret a retained map as ordinary or authenticated empty.
         return Ok(StoredReasoningMap::Invalid);
     };
-    let bytes = ReasoningIdentitySessionMap::authentication_body(
-        &scope.repo_id,
-        session_id,
-        map.records(),
-    )?;
-    if let Err(error) = reader
-        .authenticate_record(conn, &bytes, Some(map.mac()))
+    let values = conn
+        .query_all_raw(Statement::from_sql_and_values(
+            conn.get_database_backend(),
+            "SELECT key,
+                    CASE WHEN typeof(value) = 'text' AND length(CAST(value AS BLOB)) <= ?
+                         THEN value ELSE NULL END AS bounded_value
+             FROM metadata_kv WHERE scope = ? AND target = ?
+               AND key IN (?, ?) ORDER BY key LIMIT 3",
+            [
+                (crate::internal::metadata::REASONING_IDENTITY_SESSION_MAP_MAX_BYTES as i64).into(),
+                MetadataScope::AgentReasoningIdentity.as_str().into(),
+                session_id.into(),
+                ReasoningIdentitySessionMap::KEY.into(),
+                ReasoningIdentitySessionMapV2::KEY.into(),
+            ],
+        ))
         .await
-    {
-        if error.is::<crate::internal::ai::capture::key::ReasoningIdentityMacMismatch>() {
+        .context("cannot load private reasoning identity; check the repository database or start a new capture session")?;
+    if values.len() != keys.len() {
+        return Ok(StoredReasoningMap::Invalid);
+    }
+    let mut maps = VerifiedReasoningMaps::default();
+    for row in values {
+        let key = row.try_get_by::<String, _>("key")?;
+        let Some(expected_bytes) = keys.get(&key) else {
+            return Ok(StoredReasoningMap::Invalid);
+        };
+        let Some(text) = row.try_get_by::<Option<String>, _>("bounded_value")? else {
+            return Ok(StoredReasoningMap::Invalid);
+        };
+        if text.len() != *expected_bytes {
             return Ok(StoredReasoningMap::Invalid);
         }
-        return Err(error);
+        match key.as_str() {
+            ReasoningIdentitySessionMap::KEY => {
+                let Ok(map) = ReasoningIdentitySessionMap::decode(&text) else {
+                    return Ok(StoredReasoningMap::Invalid);
+                };
+                if map.validate_owner(&scope.repo_id, session_id).is_err() {
+                    return Ok(StoredReasoningMap::Invalid);
+                }
+                let bytes = ReasoningIdentitySessionMap::authentication_body(
+                    &scope.repo_id,
+                    session_id,
+                    map.records(),
+                )?;
+                if let Err(error) = reader
+                    .authenticate_map_for_schema_version(conn, 1, &bytes, Some(map.mac()))
+                    .await
+                {
+                    if error.is::<crate::internal::ai::capture::key::ReasoningIdentityMacMismatch>()
+                    {
+                        return Ok(StoredReasoningMap::Invalid);
+                    }
+                    return Err(error);
+                }
+                maps.v1_encoded_bytes = text.len();
+                maps.v1 = Some(map);
+            }
+            ReasoningIdentitySessionMapV2::KEY => {
+                let Ok(map) = ReasoningIdentitySessionMapV2::decode(&text) else {
+                    return Ok(StoredReasoningMap::Invalid);
+                };
+                if map.validate_owner(&scope.repo_id, session_id).is_err() {
+                    return Ok(StoredReasoningMap::Invalid);
+                }
+                let bytes = ReasoningIdentitySessionMapV2::authentication_body(
+                    &scope.repo_id,
+                    session_id,
+                    map.records(),
+                )?;
+                if let Err(error) = reader
+                    .authenticate_map_for_schema_version(conn, 2, &bytes, Some(map.mac()))
+                    .await
+                {
+                    if error.is::<crate::internal::ai::capture::key::ReasoningIdentityMacMismatch>()
+                    {
+                        return Ok(StoredReasoningMap::Invalid);
+                    }
+                    return Err(error);
+                }
+                maps.v2_encoded_bytes = text.len();
+                maps.v2 = Some(map);
+            }
+            _ => return Ok(StoredReasoningMap::Invalid),
+        }
     }
-    Ok(StoredReasoningMap::Verified(map))
+    if validate_reasoning_map_aggregate_capacity(maps.entries()?, maps.encoded_bytes()?).is_err() {
+        return Ok(StoredReasoningMap::Invalid);
+    }
+    Ok(StoredReasoningMap::Verified(Box::new(maps)))
 }
 
 enum ReasoningComparison {
@@ -460,6 +597,41 @@ enum ReasoningComparison {
     Same,
     Changed,
     Partial,
+}
+
+enum StoredReasoningRecord<'a> {
+    V1(&'a ReasoningIdentityRecord),
+    V2(&'a ReasoningIdentityRecordV2),
+}
+
+impl StoredReasoningRecord<'_> {
+    fn body(&self) -> &ReasoningIdentityRecordBody {
+        match self {
+            Self::V1(record) => record.body(),
+            Self::V2(record) => record.body(),
+        }
+    }
+
+    fn mac(&self) -> &str {
+        match self {
+            Self::V1(record) => record.mac(),
+            Self::V2(record) => record.mac(),
+        }
+    }
+
+    fn validate_context(&self, expected: &ReasoningIdentityRecordContext) -> Result<()> {
+        match self {
+            Self::V1(record) => record.validate_context(expected),
+            Self::V2(record) => record.validate_context(expected),
+        }
+    }
+
+    fn authentication_body(&self) -> Result<Vec<u8>> {
+        match self {
+            Self::V1(record) => ReasoningIdentityRecord::authentication_body(record.body()),
+            Self::V2(record) => ReasoningIdentityRecordV2::authentication_body(record.body()),
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -474,20 +646,47 @@ async fn compare_reasoning_identity(
     map: &StoredReasoningMap,
     reader: Option<&ReasoningIdentityReadContext>,
 ) -> Result<ReasoningComparison> {
+    // The current production source plan is v1-only. A v2 claim must never
+    // interpret its v1 slot or descriptor as a v2 native candidate.
+    let incoming = if coverage_schema_version == CoverageSchemaVersion::V1 {
+        incoming
+    } else {
+        None
+    };
     let record = match map {
         StoredReasoningMap::LegacyAbsent => None,
         StoredReasoningMap::Invalid => return Ok(ReasoningComparison::Partial),
-        StoredReasoningMap::Verified(map) => {
+        StoredReasoningMap::Verified(maps) => {
             let slot = match incoming {
                 Some(incoming) => incoming.slot().to_owned(),
                 None => {
                     let Some(reader) = reader else {
                         return Ok(ReasoningComparison::Partial);
                     };
-                    reader.turn_slot(conn, logical_turn_key).await?
+                    match coverage_schema_version {
+                        CoverageSchemaVersion::V1 => {
+                            reader.turn_slot(conn, logical_turn_key).await?
+                        }
+                        CoverageSchemaVersion::V2 => {
+                            reader
+                                .turn_slot_for_schema_version(conn, 2, logical_turn_key)
+                                .await?
+                        }
+                    }
                 }
             };
-            map.records().get(&slot)
+            match coverage_schema_version {
+                CoverageSchemaVersion::V1 => maps
+                    .v1
+                    .as_ref()
+                    .and_then(|map| map.records().get(&slot))
+                    .map(StoredReasoningRecord::V1),
+                CoverageSchemaVersion::V2 => maps
+                    .v2
+                    .as_ref()
+                    .and_then(|map| map.records().get(&slot))
+                    .map(StoredReasoningRecord::V2),
+            }
         }
     };
     let Some(record) = record else {
@@ -529,11 +728,20 @@ async fn compare_reasoning_identity(
     if catalog.is_none() {
         return Ok(ReasoningComparison::Partial);
     }
-    let body = ReasoningIdentityRecord::authentication_body(record.body())?;
-    if let Err(error) = reader
-        .authenticate_record(conn, &body, Some(record.mac()))
-        .await
-    {
+    let body = record.authentication_body()?;
+    let authentication = match coverage_schema_version {
+        CoverageSchemaVersion::V1 => {
+            reader
+                .authenticate_record(conn, &body, Some(record.mac()))
+                .await
+        }
+        CoverageSchemaVersion::V2 => {
+            reader
+                .authenticate_record_for_schema_version(conn, 2, &body, Some(record.mac()))
+                .await
+        }
+    };
+    if let Err(error) = authentication {
         if error.is::<crate::internal::ai::capture::key::ReasoningIdentityMacMismatch>() {
             return Ok(ReasoningComparison::Partial);
         }
@@ -1599,6 +1807,12 @@ async fn reserve_turn_claims_with_reasoning_inner_versioned(
     }
     if let Some(candidate) = reasoning.candidate {
         candidate.validate_for(scope, session_id, turns)?;
+        ensure!(
+            checked_versions
+                .iter()
+                .all(|version| *version == CoverageSchemaVersion::V1),
+            "reasoning coverage source version does not match its claims; run libra agent doctor"
+        );
     }
     if let Some(reader) = &reasoning.reader {
         reader.validate_for(scope, session_id)?;
@@ -1673,6 +1887,10 @@ async fn reserve_turn_claims_with_reasoning_inner_versioned(
             return Err(error);
         }
     };
+    if matches!(map, StoredReasoningMap::Invalid) {
+        txn.rollback().await.ok();
+        bail!("private reasoning identity is invalid; start a new capture session");
+    }
     let mut outcome = ReasoningReservationOutcome::default();
     for (turn, version) in turns.iter().zip(checked_versions) {
         if let Err(error) = ensure_reservation_deadline(deadline, source_channel) {
@@ -2220,10 +2438,15 @@ impl TracesTxnExtra for ReasoningClaimCommitPlan {
             .await
             .context("verify capture workspace lease before private reasoning commit")?;
         let reader = self.reasoning.read_context();
-        let mut records =
+        let (mut records, retained_v2_entries, retained_v2_bytes) =
             match read_reasoning_map(txn, scope, &self.ordinary.session_id, Some(&reader)).await? {
-                StoredReasoningMap::LegacyAbsent => std::collections::BTreeMap::new(),
-                StoredReasoningMap::Verified(map) => map.records().clone(),
+                StoredReasoningMap::LegacyAbsent => (std::collections::BTreeMap::new(), 0, 0),
+                StoredReasoningMap::Verified(maps) => (
+                    maps.v1
+                        .map_or_else(std::collections::BTreeMap::new, |map| map.records().clone()),
+                    maps.v2.as_ref().map_or(0, |map| map.records().len()),
+                    maps.v2_encoded_bytes,
+                ),
                 StoredReasoningMap::Invalid => {
                     bail!("private reasoning identity is invalid; start a new capture session")
                 }
@@ -2291,7 +2514,7 @@ impl TracesTxnExtra for ReasoningClaimCommitPlan {
         )?;
         let mac = self
             .reasoning
-            .authenticate_record(txn, &bytes, None)
+            .authenticate_map_for_schema_version(txn, 1, &bytes, None)
             .await?;
         let map = ReasoningIdentitySessionMap::from_records_and_mac(
             scope.repo_id.clone(),
@@ -2300,6 +2523,16 @@ impl TracesTxnExtra for ReasoningClaimCommitPlan {
             mac,
         )?;
         let value = map.encode()?;
+        let combined_entries = map
+            .records()
+            .len()
+            .checked_add(retained_v2_entries)
+            .context("private reasoning identity exceeds its safe capacity")?;
+        let combined_bytes = value
+            .len()
+            .checked_add(retained_v2_bytes)
+            .context("private reasoning identity exceeds its safe capacity")?;
+        validate_reasoning_map_aggregate_capacity(combined_entries, combined_bytes)?;
         self.ordinary.apply(txn, ctx).await?;
         MetadataKv::set_with_conn(
             txn,
@@ -2847,6 +3080,17 @@ pub(crate) mod tests {
             Self { dir, conn, scope }
         }
 
+        fn reader(&self) -> ReasoningIdentityReadContext {
+            use crate::internal::ai::observed_agents::reasoning::carrier_test_support as native;
+            ReasoningIdentityReadContext::new(
+                &self.scope,
+                native::CAPTURE,
+                &self.dir.path().join(crate::utils::util::ROOT_DIR),
+                self.dir.path(),
+                Instant::now() + Duration::from_secs(30),
+            )
+        }
+
         pub(crate) async fn plan(
             &self,
             turns: &[NormalizedTurn],
@@ -2884,6 +3128,15 @@ pub(crate) mod tests {
             plan: Option<&ReasoningCoveragePlan>,
             owner: &str,
         ) -> ReasoningReservationOutcome {
+            self.try_reserve(turns, plan, owner).await.unwrap()
+        }
+
+        pub(crate) async fn try_reserve(
+            &self,
+            turns: &[NormalizedTurn],
+            plan: Option<&ReasoningCoveragePlan>,
+            owner: &str,
+        ) -> Result<ReasoningReservationOutcome> {
             use crate::internal::ai::observed_agents::reasoning::carrier_test_support as native;
             let reader = ReasoningIdentityReadContext::new(
                 &self.scope,
@@ -2909,7 +3162,6 @@ pub(crate) mod tests {
                 input,
             )
             .await
-            .unwrap()
         }
 
         pub(crate) async fn commit(
@@ -2973,6 +3225,997 @@ pub(crate) mod tests {
             )
             .await
         }
+    }
+
+    // These synthetic maps test the private carrier. Only the checkpoint
+    // adapter may produce native-source evidence for a production claim.
+    #[cfg(unix)]
+    async fn cov2_seed_signed_private_map(
+        fixture: &ReasoningFixture,
+        version: i64,
+        logical_turn_key: &str,
+        checkpoint_id: &str,
+    ) -> String {
+        use crate::internal::ai::observed_agents::reasoning::carrier_test_support as native;
+        let reader = fixture.reader();
+        let slot = reader
+            .turn_slot_for_schema_version(&fixture.conn, version, logical_turn_key)
+            .await
+            .unwrap();
+        let body = ReasoningIdentityRecordBody {
+            context: ReasoningIdentityRecordContext {
+                repository_id: fixture.scope.repo_id.clone(),
+                session_id: native::CAPTURE.to_owned(),
+                logical_turn_key: slot.clone(),
+                coverage_schema_version: version,
+                claim_revision: 1,
+                claim_fence_token: 1,
+                checkpoint_id: checkpoint_id.to_owned(),
+            },
+            kind: ReasoningIdentityKind::Empty,
+            descriptor_mac: slot.clone(),
+        };
+        let (key, value) = match version {
+            1 => {
+                let body_bytes = ReasoningIdentityRecord::authentication_body(&body).unwrap();
+                let record_mac = reader
+                    .authenticate_record_for_schema_version(
+                        &fixture.conn,
+                        version,
+                        &body_bytes,
+                        None,
+                    )
+                    .await
+                    .unwrap();
+                let record = ReasoningIdentityRecord::from_body_and_mac(body, record_mac).unwrap();
+                let records = std::collections::BTreeMap::from([(slot, record)]);
+                let map_body = ReasoningIdentitySessionMap::authentication_body(
+                    &fixture.scope.repo_id,
+                    native::CAPTURE,
+                    &records,
+                )
+                .unwrap();
+                let map_mac = reader
+                    .authenticate_map_for_schema_version(&fixture.conn, version, &map_body, None)
+                    .await
+                    .unwrap();
+                let map = ReasoningIdentitySessionMap::from_records_and_mac(
+                    fixture.scope.repo_id.clone(),
+                    native::CAPTURE.to_owned(),
+                    records,
+                    map_mac,
+                )
+                .unwrap();
+                (ReasoningIdentitySessionMap::KEY, map.encode().unwrap())
+            }
+            2 => {
+                let body_bytes = ReasoningIdentityRecordV2::authentication_body(&body).unwrap();
+                let record_mac = reader
+                    .authenticate_record_for_schema_version(
+                        &fixture.conn,
+                        version,
+                        &body_bytes,
+                        None,
+                    )
+                    .await
+                    .unwrap();
+                let record =
+                    ReasoningIdentityRecordV2::from_body_and_mac(body, record_mac).unwrap();
+                let records = std::collections::BTreeMap::from([(slot, record)]);
+                let map_body = ReasoningIdentitySessionMapV2::authentication_body(
+                    &fixture.scope.repo_id,
+                    native::CAPTURE,
+                    &records,
+                )
+                .unwrap();
+                let map_mac = reader
+                    .authenticate_map_for_schema_version(&fixture.conn, version, &map_body, None)
+                    .await
+                    .unwrap();
+                let map = ReasoningIdentitySessionMapV2::from_records_and_mac(
+                    fixture.scope.repo_id.clone(),
+                    native::CAPTURE.to_owned(),
+                    records,
+                    map_mac,
+                )
+                .unwrap();
+                (ReasoningIdentitySessionMapV2::KEY, map.encode().unwrap())
+            }
+            _ => panic!("test only accepts two known versions"),
+        };
+        MetadataKv::set_with_conn(
+            &fixture.conn,
+            MetadataScope::AgentReasoningIdentity,
+            native::CAPTURE,
+            key,
+            &value,
+            MetadataValueType::Text,
+        )
+        .await
+        .unwrap();
+        value
+    }
+
+    #[cfg(unix)]
+    async fn cov2_seed_bulk_signed_private_map(
+        fixture: &ReasoningFixture,
+        version: i64,
+        count: usize,
+    ) -> String {
+        use crate::internal::ai::{
+            capture::key::ReasoningIdentityMacPurpose,
+            observed_agents::reasoning::carrier_test_support as native,
+        };
+        let descriptor =
+            ReasoningIdentityMacPurpose::descriptor_for_schema_version(version).unwrap();
+        let record_purpose =
+            ReasoningIdentityMacPurpose::record_for_schema_version(version).unwrap();
+        let fake_record_mac = format!("{}{}", record_purpose.prefix(), "a".repeat(64));
+        let value = match version {
+            1 => {
+                let mut records = std::collections::BTreeMap::new();
+                for index in 0..count {
+                    let slot = format!("{}{index:064x}", descriptor.prefix());
+                    let body = ReasoningIdentityRecordBody {
+                        context: ReasoningIdentityRecordContext {
+                            repository_id: fixture.scope.repo_id.clone(),
+                            session_id: native::CAPTURE.to_owned(),
+                            logical_turn_key: slot.clone(),
+                            coverage_schema_version: 1,
+                            claim_revision: 1,
+                            claim_fence_token: 1,
+                            checkpoint_id: "synthetic-bulk-checkpoint".to_owned(),
+                        },
+                        kind: ReasoningIdentityKind::Empty,
+                        descriptor_mac: slot.clone(),
+                    };
+                    records.insert(
+                        slot,
+                        ReasoningIdentityRecord::from_body_and_mac(body, fake_record_mac.clone())
+                            .unwrap(),
+                    );
+                }
+                let map_body = ReasoningIdentitySessionMap::authentication_body(
+                    &fixture.scope.repo_id,
+                    native::CAPTURE,
+                    &records,
+                )
+                .unwrap();
+                let map_mac = fixture
+                    .reader()
+                    .authenticate_map_for_schema_version(&fixture.conn, 1, &map_body, None)
+                    .await
+                    .unwrap();
+                ReasoningIdentitySessionMap::from_records_and_mac(
+                    fixture.scope.repo_id.clone(),
+                    native::CAPTURE.to_owned(),
+                    records,
+                    map_mac,
+                )
+                .unwrap()
+                .encode()
+                .unwrap()
+            }
+            2 => {
+                let mut records = std::collections::BTreeMap::new();
+                for index in 0..count {
+                    let slot = format!("{}{index:064x}", descriptor.prefix());
+                    let body = ReasoningIdentityRecordBody {
+                        context: ReasoningIdentityRecordContext {
+                            repository_id: fixture.scope.repo_id.clone(),
+                            session_id: native::CAPTURE.to_owned(),
+                            logical_turn_key: slot.clone(),
+                            coverage_schema_version: 2,
+                            claim_revision: 1,
+                            claim_fence_token: 1,
+                            checkpoint_id: "synthetic-bulk-checkpoint".to_owned(),
+                        },
+                        kind: ReasoningIdentityKind::Empty,
+                        descriptor_mac: slot.clone(),
+                    };
+                    records.insert(
+                        slot,
+                        ReasoningIdentityRecordV2::from_body_and_mac(body, fake_record_mac.clone())
+                            .unwrap(),
+                    );
+                }
+                let map_body = ReasoningIdentitySessionMapV2::authentication_body(
+                    &fixture.scope.repo_id,
+                    native::CAPTURE,
+                    &records,
+                )
+                .unwrap();
+                let map_mac = fixture
+                    .reader()
+                    .authenticate_map_for_schema_version(&fixture.conn, 2, &map_body, None)
+                    .await
+                    .unwrap();
+                ReasoningIdentitySessionMapV2::from_records_and_mac(
+                    fixture.scope.repo_id.clone(),
+                    native::CAPTURE.to_owned(),
+                    records,
+                    map_mac,
+                )
+                .unwrap()
+                .encode()
+                .unwrap()
+            }
+            _ => panic!("test only accepts two known versions"),
+        };
+        MetadataKv::set_with_conn(
+            &fixture.conn,
+            MetadataScope::AgentReasoningIdentity,
+            native::CAPTURE,
+            if version == 1 {
+                ReasoningIdentitySessionMap::KEY
+            } else {
+                ReasoningIdentitySessionMapV2::KEY
+            },
+            &value,
+            MetadataValueType::Text,
+        )
+        .await
+        .unwrap();
+        value
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cov2_dual_private_map_same_key_coexists() {
+        use crate::internal::ai::observed_agents::reasoning::carrier_test_support as native;
+        let fixture = ReasoningFixture::new().await;
+        let first = turn("synthetic-turn-0", "ordinary", Completeness::Complete);
+        let first_plan = fixture
+            .plan(
+                std::slice::from_ref(&first),
+                vec![b"synthetic source".to_vec()],
+            )
+            .await;
+        let first_reserved = fixture
+            .reserve(std::slice::from_ref(&first), Some(&first_plan), "v1-owner")
+            .await;
+        fixture
+            .commit(
+                &first_reserved.ordinary.reserved,
+                &first_plan,
+                "v1-owner",
+                "cp-v1",
+            )
+            .await;
+        let v1 = fixture.identity_text().await;
+        let v2 = cov2_seed_signed_private_map(&fixture, 2, "synthetic-turn-0", "cp-v2").await;
+        let maps = read_reasoning_map(
+            &fixture.conn,
+            &fixture.scope,
+            native::CAPTURE,
+            Some(&fixture.reader()),
+        )
+        .await
+        .unwrap();
+        let StoredReasoningMap::Verified(maps) = maps else {
+            panic!("both private maps must authenticate");
+        };
+        let v1_slot = fixture
+            .reader()
+            .turn_slot(&fixture.conn, "synthetic-turn-0")
+            .await
+            .unwrap();
+        let v2_slot = fixture
+            .reader()
+            .turn_slot_for_schema_version(&fixture.conn, 2, "synthetic-turn-0")
+            .await
+            .unwrap();
+        assert_ne!(v1_slot, v2_slot, "logical keys are domain separated");
+        assert_eq!(maps.v1.as_ref().unwrap().records().len(), 1);
+        assert_eq!(maps.v2.as_ref().unwrap().records().len(), 1);
+        assert!(maps.v1.as_ref().unwrap().records().contains_key(&v1_slot));
+        assert!(maps.v2.as_ref().unwrap().records().contains_key(&v2_slot));
+        assert_eq!(fixture.identity_text().await, v1);
+        let second = turn(
+            "synthetic-turn-1",
+            "ordinary second",
+            Completeness::Complete,
+        );
+        let second_plan = fixture
+            .plan(&[first, second.clone()], vec![b"synthetic source".to_vec()])
+            .await;
+        let second_reserved = fixture
+            .reserve(
+                std::slice::from_ref(&second),
+                Some(&second_plan),
+                "v1-owner-2",
+            )
+            .await;
+        fixture
+            .commit(
+                &second_reserved.ordinary.reserved,
+                &second_plan,
+                "v1-owner-2",
+                "cp-v1-second",
+            )
+            .await;
+        let revised_v1 = fixture.identity_text().await;
+        assert_ne!(revised_v1, v1);
+        assert_eq!(
+            ReasoningIdentitySessionMap::decode(&revised_v1)
+                .unwrap()
+                .records()
+                .len(),
+            2
+        );
+        assert_eq!(
+            MetadataKv::get_with_conn(
+                &fixture.conn,
+                MetadataScope::AgentReasoningIdentity,
+                native::CAPTURE,
+                ReasoningIdentitySessionMapV2::KEY,
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .value,
+            v2,
+            "v1 claim/ref commit cannot rewrite the parallel v2 key"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cov2_private_map_aggregate_entry_and_byte_caps() {
+        let max_entries = crate::internal::metadata::REASONING_IDENTITY_SESSION_MAP_MAX_ENTRIES;
+        let max_bytes = crate::internal::metadata::REASONING_IDENTITY_SESSION_MAP_MAX_BYTES;
+        for (entries, bytes, accepts) in [
+            (max_entries - 1, max_bytes - 1, true),
+            (max_entries, max_bytes, true),
+            (max_entries + 1, max_bytes, false),
+            (max_entries, max_bytes + 1, false),
+        ] {
+            assert_eq!(
+                validate_reasoning_map_aggregate_capacity(entries, bytes).is_ok(),
+                accepts,
+                "aggregate boundary entries={entries}, bytes={bytes}"
+            );
+        }
+        // A genuine two-map read must enforce the same shared ceiling, and
+        // the v1 writer must leave the retained v2 bytes untouched.
+        let fixture = ReasoningFixture::new().await;
+        let v1 = cov2_seed_signed_private_map(&fixture, 1, "same", "cp-v1").await;
+        let v2 = cov2_seed_signed_private_map(&fixture, 2, "same", "cp-v2").await;
+        assert!(validate_reasoning_map_aggregate_capacity(2, v1.len() + v2.len()).is_ok());
+        assert!(matches!(
+            read_reasoning_map(
+                &fixture.conn,
+                &fixture.scope,
+                crate::internal::ai::observed_agents::reasoning::carrier_test_support::CAPTURE,
+                Some(&fixture.reader()),
+            )
+            .await
+            .unwrap(),
+            StoredReasoningMap::Verified(_)
+        ));
+        let bulk = ReasoningFixture::new().await;
+        let large_v1 = cov2_seed_bulk_signed_private_map(&bulk, 1, 1500).await;
+        let large_v2 = cov2_seed_bulk_signed_private_map(&bulk, 2, 1500).await;
+        assert!(large_v1.len() <= max_bytes && large_v2.len() <= max_bytes);
+        assert!(large_v1.len() + large_v2.len() > max_bytes);
+        assert!(matches!(
+            read_reasoning_map(
+                &bulk.conn,
+                &bulk.scope,
+                crate::internal::ai::observed_agents::reasoning::carrier_test_support::CAPTURE,
+                Some(&bulk.reader()),
+            )
+            .await
+            .unwrap(),
+            StoredReasoningMap::Invalid
+        ));
+        assert!(
+            reserve_turn_claims_with_reasoning_no_deadline(
+                &bulk.conn,
+                &bulk.scope,
+                crate::internal::ai::observed_agents::reasoning::carrier_test_support::CAPTURE,
+                &[turn("bulk-rejected", "ordinary", Completeness::Complete)],
+                "owner",
+                1,
+                "live",
+                ReasoningCoverageInput::ordinary(&bulk.reader()),
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(
+            scalar(&bulk.conn, "SELECT COUNT(*) AS n FROM agent_coverage_claim").await,
+            0
+        );
+
+        // Cross the cap in the real v1 companion, rather than proving only
+        // the pure bound helper or rejecting an already-invalid stored pair.
+        use crate::internal::ai::observed_agents::reasoning::carrier_test_support as native;
+        let crossing = ReasoningFixture::new().await;
+        let candidate_turn = turn("synthetic-turn-0", "ordinary", Completeness::Complete);
+        let source = crossing
+            .plan(
+                std::slice::from_ref(&candidate_turn),
+                vec![b"synthetic-capacity-source".to_vec()],
+            )
+            .await;
+        let reservation = crossing
+            .reserve(
+                std::slice::from_ref(&candidate_turn),
+                Some(&source),
+                "capacity-owner",
+            )
+            .await;
+        assert_eq!(reservation.ordinary.reserved.len(), 1);
+        let ordinary = LiveClaimCommitPlan {
+            source_channel: "live",
+            session_id: native::CAPTURE.to_owned(),
+            checkpoint_id: "capacity-cross-checkpoint".to_owned(),
+            owner: "capacity-owner".to_owned(),
+            parent_commit: None,
+            created_at: 1,
+            now_ms: 1,
+            claims: reservation.ordinary.reserved.clone(),
+            import_session: None,
+            import_identity: None,
+            capture_scope: Some(crossing.scope.clone()),
+        };
+        let companion = ReasoningClaimCommitPlan::new(ordinary, &source)
+            .expect("bind exact v1 source to reserved claim");
+        let ctx = TracesCommitCtx {
+            commit_hash: "c".repeat(40),
+            tree_oid: "d".repeat(40),
+            metadata_blob_oid: "e".repeat(40),
+        };
+        let txn = crate::internal::db::begin_write_transaction(&crossing.conn)
+            .await
+            .expect("begin size measurement transaction");
+        TracesTxnExtra::apply(&companion, &txn, &ctx)
+            .await
+            .expect("one v1 record fits before adding v2");
+        let new_v1 = MetadataKv::get_with_conn(
+            &txn,
+            MetadataScope::AgentReasoningIdentity,
+            native::CAPTURE,
+            ReasoningIdentitySessionMap::KEY,
+        )
+        .await
+        .expect("read staged v1 map")
+        .expect("staged v1 map exists")
+        .value;
+        txn.rollback().await.expect("revert size measurement");
+
+        // The fixed-width slot/record encoding makes every additional
+        // synthetic v2 record the same byte increment. Choose the smallest
+        // individually valid v2 map that makes the new v1 envelope cross 1 MiB.
+        let one = cov2_seed_bulk_signed_private_map(&crossing, 2, 1).await;
+        let two = cov2_seed_bulk_signed_private_map(&crossing, 2, 2).await;
+        let per_entry = two.len() - one.len();
+        assert!(per_entry > 0 && new_v1.len() > per_entry);
+        let base = one.len() - per_entry;
+        let count = (max_bytes - new_v1.len() - base) / per_entry + 1;
+        assert!(count <= max_entries);
+        let retained_v2 = cov2_seed_bulk_signed_private_map(&crossing, 2, count).await;
+        assert!(retained_v2.len() <= max_bytes);
+        assert!(retained_v2.len() + new_v1.len() > max_bytes);
+        assert!(matches!(
+            read_reasoning_map(
+                &crossing.conn,
+                &crossing.scope,
+                native::CAPTURE,
+                Some(&crossing.reader()),
+            )
+            .await
+            .expect("read pre-crossing map"),
+            StoredReasoningMap::Verified(_)
+        ));
+        crossing
+            .conn
+            .execute_unprepared("CREATE TABLE cov2_capacity_ref_probe (oid TEXT NOT NULL)")
+            .await
+            .expect("create ref transaction rollback probe");
+        crossing
+            .conn
+            .execute_unprepared("INSERT INTO cov2_capacity_ref_probe VALUES ('old')")
+            .await
+            .expect("seed ref transaction rollback probe");
+        let claim_before = claim_row(&crossing.conn, "synthetic-turn-0").await;
+        let txn = crate::internal::db::begin_write_transaction(&crossing.conn)
+            .await
+            .expect("begin real companion transaction");
+        txn.execute_unprepared("UPDATE cov2_capacity_ref_probe SET oid = 'new'")
+            .await
+            .expect("stage ref probe");
+        let capacity_error = TracesTxnExtra::apply(&companion, &txn, &ctx)
+            .await
+            .expect_err("new v1 record must fail the combined persisted-byte ceiling");
+        assert!(
+            capacity_error.is::<crate::internal::metadata::ReasoningIdentityMapCapacity>(),
+            "the failure must be the combined private-map capacity"
+        );
+        txn.rollback().await.expect("rollback over-cap companion");
+        assert_eq!(
+            claim_row(&crossing.conn, "synthetic-turn-0").await,
+            claim_before
+        );
+        assert_eq!(
+            scalar(
+                &crossing.conn,
+                "SELECT COUNT(*) AS n FROM agent_coverage_revision
+                 WHERE checkpoint_id = 'capacity-cross-checkpoint'"
+            )
+            .await,
+            0
+        );
+        assert_eq!(
+            scalar(
+                &crossing.conn,
+                "SELECT COUNT(*) AS n FROM agent_checkpoint
+                 WHERE checkpoint_id = 'capacity-cross-checkpoint'"
+            )
+            .await,
+            0
+        );
+        assert!(
+            MetadataKv::get_with_conn(
+                &crossing.conn,
+                MetadataScope::AgentReasoningIdentity,
+                native::CAPTURE,
+                ReasoningIdentitySessionMap::KEY,
+            )
+            .await
+            .expect("read rolled back v1 map")
+            .is_none()
+        );
+        assert_eq!(
+            MetadataKv::get_with_conn(
+                &crossing.conn,
+                MetadataScope::AgentReasoningIdentity,
+                native::CAPTURE,
+                ReasoningIdentitySessionMapV2::KEY,
+            )
+            .await
+            .expect("read retained v2 map")
+            .expect("retained v2 map exists")
+            .value,
+            retained_v2
+        );
+        let ref_row = crossing
+            .conn
+            .query_one_raw(Statement::from_string(
+                crossing.conn.get_database_backend(),
+                "SELECT oid FROM cov2_capacity_ref_probe".to_owned(),
+            ))
+            .await
+            .expect("read ref rollback probe")
+            .expect("ref rollback row");
+        assert_eq!(ref_row.try_get_by::<String, _>("oid").unwrap(), "old");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cov2_private_map_failure_zero_claim() {
+        use crate::internal::ai::observed_agents::reasoning::carrier_test_support as native;
+        let fixture = ReasoningFixture::new().await;
+        let original = turn("zero-claim", "original", Completeness::Complete);
+        let reserved = fixture
+            .reserve(std::slice::from_ref(&original), None, "owner")
+            .await;
+        let claim = &reserved.ordinary.reserved[0];
+        fixture.conn.execute_raw(Statement::from_sql_and_values(
+            fixture.conn.get_database_backend(),
+            "UPDATE agent_coverage_claim SET state = 'catalog_committed', revision = ?, owner = NULL,
+                    lease_expires_at = NULL, checkpoint_id = 'synthetic-committed'
+             WHERE session_id = ? AND logical_turn_key = ?",
+            [claim.next_revision.into(), native::CAPTURE.into(), claim.logical_turn_key.clone().into()],
+        )).await.unwrap();
+        let baseline_state = claim_row(&fixture.conn, "zero-claim").await;
+        let baseline_revisions = scalar(
+            &fixture.conn,
+            "SELECT COUNT(*) AS n FROM agent_coverage_revision",
+        )
+        .await;
+        let baseline_conflicts = scalar(
+            &fixture.conn,
+            "SELECT COUNT(*) AS n FROM agent_coverage_conflict",
+        )
+        .await;
+        let valid_v1 =
+            cov2_seed_signed_private_map(&fixture, 1, "zero-claim", "synthetic-committed").await;
+        MetadataKv::set_with_conn(
+            &fixture.conn,
+            MetadataScope::AgentReasoningIdentity,
+            native::CAPTURE,
+            "unexpected-private-key",
+            "hidden-canary",
+            MetadataValueType::Text,
+        )
+        .await
+        .unwrap();
+        let challenger = turn("zero-claim", "changed", Completeness::Complete);
+        let result = reserve_turn_claims_with_reasoning_no_deadline(
+            &fixture.conn,
+            &fixture.scope,
+            native::CAPTURE,
+            &[challenger],
+            "challenger",
+            2,
+            "live",
+            ReasoningCoverageInput::ordinary(&fixture.reader()),
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "unknown private key must reject before claim writes"
+        );
+        assert_eq!(claim_row(&fixture.conn, "zero-claim").await, baseline_state);
+        assert_eq!(
+            scalar(
+                &fixture.conn,
+                "SELECT COUNT(*) AS n FROM agent_coverage_revision"
+            )
+            .await,
+            baseline_revisions
+        );
+        assert_eq!(
+            scalar(
+                &fixture.conn,
+                "SELECT COUNT(*) AS n FROM agent_coverage_conflict"
+            )
+            .await,
+            baseline_conflicts
+        );
+        fixture
+            .conn
+            .execute_raw(Statement::from_sql_and_values(
+                fixture.conn.get_database_backend(),
+                "DELETE FROM metadata_kv WHERE scope = ? AND target = ? AND key = ?",
+                [
+                    MetadataScope::AgentReasoningIdentity.as_str().into(),
+                    native::CAPTURE.into(),
+                    "unexpected-private-key".into(),
+                ],
+            ))
+            .await
+            .unwrap();
+        for variant in [
+            "blob-value",
+            "blob-declared-type",
+            "oversized-declared-type",
+        ] {
+            let (sql, values): (&str, Vec<sea_orm::Value>) = match variant {
+                "blob-value" => (
+                    "UPDATE metadata_kv SET value = CAST(value AS BLOB)
+                     WHERE scope = ? AND target = ? AND key = ?",
+                    vec![
+                        MetadataScope::AgentReasoningIdentity.as_str().into(),
+                        native::CAPTURE.into(),
+                        ReasoningIdentitySessionMap::KEY.into(),
+                    ],
+                ),
+                "blob-declared-type" => (
+                    "UPDATE metadata_kv SET value_type = CAST(x'74657874' AS BLOB)
+                     WHERE scope = ? AND target = ? AND key = ?",
+                    vec![
+                        MetadataScope::AgentReasoningIdentity.as_str().into(),
+                        native::CAPTURE.into(),
+                        ReasoningIdentitySessionMap::KEY.into(),
+                    ],
+                ),
+                _ => (
+                    "UPDATE metadata_kv SET value_type = ?
+                     WHERE scope = ? AND target = ? AND key = ?",
+                    vec![
+                        "x".repeat(1024).into(),
+                        MetadataScope::AgentReasoningIdentity.as_str().into(),
+                        native::CAPTURE.into(),
+                        ReasoningIdentitySessionMap::KEY.into(),
+                    ],
+                ),
+            };
+            fixture
+                .conn
+                .execute_raw(Statement::from_sql_and_values(
+                    fixture.conn.get_database_backend(),
+                    sql,
+                    values,
+                ))
+                .await
+                .expect("seed noncanonical private map SQL type");
+            assert!(
+                reserve_turn_claims_with_reasoning_no_deadline(
+                    &fixture.conn,
+                    &fixture.scope,
+                    native::CAPTURE,
+                    &[turn("zero-claim", "changed type", Completeness::Complete)],
+                    "type-challenger",
+                    3,
+                    "live",
+                    ReasoningCoverageInput::ordinary(&fixture.reader()),
+                )
+                .await
+                .is_err(),
+                "{variant} must reject before loading map text or mutating claim"
+            );
+            assert_eq!(claim_row(&fixture.conn, "zero-claim").await, baseline_state);
+            assert_eq!(
+                scalar(
+                    &fixture.conn,
+                    "SELECT COUNT(*) AS n FROM agent_coverage_revision"
+                )
+                .await,
+                baseline_revisions
+            );
+            assert_eq!(
+                scalar(
+                    &fixture.conn,
+                    "SELECT COUNT(*) AS n FROM agent_coverage_conflict"
+                )
+                .await,
+                baseline_conflicts
+            );
+            fixture
+                .conn
+                .execute_raw(Statement::from_sql_and_values(
+                    fixture.conn.get_database_backend(),
+                    "UPDATE metadata_kv SET value = ?, value_type = 'text'
+                     WHERE scope = ? AND target = ? AND key = ?",
+                    [
+                        valid_v1.clone().into(),
+                        MetadataScope::AgentReasoningIdentity.as_str().into(),
+                        native::CAPTURE.into(),
+                        ReasoningIdentitySessionMap::KEY.into(),
+                    ],
+                ))
+                .await
+                .expect("restore canonical private map after incompatible SQL type");
+        }
+        let mut corrupt_mac: serde_json::Value = serde_json::from_str(&valid_v1).unwrap();
+        corrupt_mac["mac"] = format!("reasoning-record/hmac-v1/{}", "0".repeat(64)).into();
+        MetadataKv::set_with_conn(
+            &fixture.conn,
+            MetadataScope::AgentReasoningIdentity,
+            native::CAPTURE,
+            ReasoningIdentitySessionMap::KEY,
+            &corrupt_mac.to_string(),
+            MetadataValueType::Text,
+        )
+        .await
+        .unwrap();
+        assert!(
+            reserve_turn_claims_with_reasoning_no_deadline(
+                &fixture.conn,
+                &fixture.scope,
+                native::CAPTURE,
+                &[turn("zero-claim", "changed again", Completeness::Complete)],
+                "challenger-2",
+                3,
+                "live",
+                ReasoningCoverageInput::ordinary(&fixture.reader()),
+            )
+            .await
+            .is_err(),
+            "incorrect whole-map MAC must reject before claim writes"
+        );
+        assert_eq!(claim_row(&fixture.conn, "zero-claim").await, baseline_state);
+        assert_eq!(
+            scalar(
+                &fixture.conn,
+                "SELECT COUNT(*) AS n FROM agent_coverage_conflict"
+            )
+            .await,
+            baseline_conflicts
+        );
+        fixture
+            .conn
+            .execute_raw(Statement::from_sql_and_values(
+                fixture.conn.get_database_backend(),
+                "UPDATE metadata_kv SET value = ? WHERE scope = ? AND target = ? AND key = ?",
+                [
+                    "x".repeat(
+                        crate::internal::metadata::REASONING_IDENTITY_SESSION_MAP_MAX_BYTES + 1,
+                    )
+                    .into(),
+                    MetadataScope::AgentReasoningIdentity.as_str().into(),
+                    native::CAPTURE.into(),
+                    ReasoningIdentitySessionMap::KEY.into(),
+                ],
+            ))
+            .await
+            .unwrap();
+        assert!(
+            reserve_turn_claims_with_reasoning_no_deadline(
+                &fixture.conn,
+                &fixture.scope,
+                native::CAPTURE,
+                &[turn("zero-claim", "changed third", Completeness::Complete)],
+                "challenger-3",
+                4,
+                "live",
+                ReasoningCoverageInput::ordinary(&fixture.reader()),
+            )
+            .await
+            .is_err(),
+            "oversized private map must reject before allocating its text"
+        );
+        assert_eq!(claim_row(&fixture.conn, "zero-claim").await, baseline_state);
+        assert_eq!(
+            scalar(
+                &fixture.conn,
+                "SELECT COUNT(*) AS n FROM agent_coverage_revision"
+            )
+            .await,
+            baseline_revisions
+        );
+        assert_eq!(
+            scalar(
+                &fixture.conn,
+                "SELECT COUNT(*) AS n FROM agent_coverage_conflict"
+            )
+            .await,
+            baseline_conflicts
+        );
+        fixture
+            .conn
+            .execute_raw(Statement::from_sql_and_values(
+                fixture.conn.get_database_backend(),
+                "UPDATE metadata_kv SET value = ? WHERE scope = ? AND target = ? AND key = ?",
+                [
+                    valid_v1.clone().into(),
+                    MetadataScope::AgentReasoningIdentity.as_str().into(),
+                    native::CAPTURE.into(),
+                    ReasoningIdentitySessionMap::KEY.into(),
+                ],
+            ))
+            .await
+            .expect("restore canonical private map after oversized SQL value");
+        let key_path = fixture
+            .dir
+            .path()
+            .join(crate::utils::util::ROOT_DIR)
+            .join("private/agent-capture-dedup-v1.key");
+        std::fs::remove_file(key_path).unwrap();
+        assert!(
+            reserve_turn_claims_with_reasoning_no_deadline(
+                &fixture.conn,
+                &fixture.scope,
+                native::CAPTURE,
+                &[turn(
+                    "zero-claim",
+                    "changed without key",
+                    Completeness::Complete
+                )],
+                "challenger-4",
+                5,
+                "live",
+                ReasoningCoverageInput::ordinary(&fixture.reader()),
+            )
+            .await
+            .is_err(),
+            "missing private key cannot authenticate either map"
+        );
+        assert_eq!(claim_row(&fixture.conn, "zero-claim").await, baseline_state);
+        assert_eq!(
+            scalar(
+                &fixture.conn,
+                "SELECT COUNT(*) AS n FROM agent_coverage_conflict"
+            )
+            .await,
+            baseline_conflicts
+        );
+
+        let db_fault = ReasoningFixture::new().await;
+        let prior_v1 = cov2_seed_signed_private_map(&db_fault, 1, "existing", "cp-v1").await;
+        let prior_v2 = cov2_seed_signed_private_map(&db_fault, 2, "existing", "cp-v2").await;
+        db_fault
+            .conn
+            .execute_unprepared(
+                "CREATE TRIGGER cov2_reject_private_map_claim BEFORE INSERT ON agent_coverage_claim
+             BEGIN SELECT RAISE(ABORT, 'injected claim write failure'); END",
+            )
+            .await
+            .unwrap();
+        assert!(
+            reserve_turn_claims_with_reasoning_no_deadline(
+                &db_fault.conn,
+                &db_fault.scope,
+                native::CAPTURE,
+                &[turn("db-fault", "ordinary", Completeness::Complete)],
+                "owner",
+                1,
+                "live",
+                ReasoningCoverageInput::ordinary(&db_fault.reader()),
+            )
+            .await
+            .is_err(),
+            "SQL failure must roll back the claim attempt"
+        );
+        assert_eq!(
+            scalar(
+                &db_fault.conn,
+                "SELECT COUNT(*) AS n FROM agent_coverage_claim"
+            )
+            .await,
+            0
+        );
+        assert_eq!(
+            scalar(
+                &db_fault.conn,
+                "SELECT COUNT(*) AS n FROM agent_coverage_revision"
+            )
+            .await,
+            0
+        );
+        assert_eq!(
+            scalar(
+                &db_fault.conn,
+                "SELECT COUNT(*) AS n FROM agent_coverage_conflict"
+            )
+            .await,
+            0
+        );
+        for (key, prior) in [
+            (ReasoningIdentitySessionMap::KEY, prior_v1),
+            (ReasoningIdentitySessionMapV2::KEY, prior_v2),
+        ] {
+            assert_eq!(
+                MetadataKv::get_with_conn(
+                    &db_fault.conn,
+                    MetadataScope::AgentReasoningIdentity,
+                    native::CAPTURE,
+                    key,
+                )
+                .await
+                .expect("read retained private map after SQL fault")
+                .expect("retained private map exists")
+                .value,
+                prior
+            );
+        }
+        db_fault
+            .conn
+            .execute_unprepared("DROP TABLE metadata_kv")
+            .await
+            .unwrap();
+        assert!(
+            reserve_turn_claims_with_reasoning_no_deadline(
+                &db_fault.conn,
+                &db_fault.scope,
+                native::CAPTURE,
+                &[turn("db-read-fault", "ordinary", Completeness::Complete)],
+                "owner",
+                2,
+                "live",
+                ReasoningCoverageInput::ordinary(&db_fault.reader()),
+            )
+            .await
+            .is_err(),
+            "private-map SQL read failure must not publish a claim"
+        );
+        assert_eq!(
+            scalar(
+                &db_fault.conn,
+                "SELECT COUNT(*) AS n FROM agent_coverage_claim"
+            )
+            .await,
+            0
+        );
+        assert_eq!(
+            scalar(
+                &db_fault.conn,
+                "SELECT COUNT(*) AS n FROM agent_coverage_revision"
+            )
+            .await,
+            0
+        );
+        assert_eq!(
+            scalar(
+                &db_fault.conn,
+                "SELECT COUNT(*) AS n FROM agent_coverage_conflict"
+            )
+            .await,
+            0
+        );
     }
 
     #[cfg(unix)]
@@ -4085,7 +5328,7 @@ pub(crate) mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn reasoning_legacy_and_invalid_identity_preserve_partial_conflict_and_no_writes() {
+    async fn reasoning_legacy_partial_and_invalid_identity_error_preserve_no_writes() {
         use crate::internal::ai::observed_agents::reasoning::carrier_test_support as native;
         for (incumbent, text, expect_conflict) in [
             (Completeness::Complete, "ordinary", false),
@@ -4172,14 +5415,18 @@ pub(crate) mod tests {
             )
             .await
             .unwrap();
-            let rejected = fixture.reserve(&turns, Some(&plan), "bad-map-owner").await;
-            assert_eq!(
-                rejected.skipped_incomplete_reasoning, 1,
-                "variant {variant}"
+            assert!(
+                fixture
+                    .try_reserve(&turns, Some(&plan), "bad-map-owner")
+                    .await
+                    .is_err(),
+                "invalid private map variant {variant} must reject the whole reservation"
             );
-            assert_eq!(rejected.ordinary.skipped_covered, 0);
-            assert!(rejected.ordinary.reserved.is_empty());
             assert_eq!(fixture.identity_text().await, value.to_string());
+            assert_eq!(
+                claim_row(&fixture.conn, "synthetic-turn-0").await,
+                ("catalog_committed".to_owned(), 1, Some(1))
+            );
         }
         // Seed an oversized legacy/corrupt value below the metadata owner API
         // so the bounded SQL reader is tested against data that can only be
@@ -4201,11 +5448,18 @@ pub(crate) mod tests {
             .await
             .unwrap();
         assert_eq!(updated.rows_affected(), 1);
-        let rejected = fixture
-            .reserve(&turns, Some(&plan), "oversized-map-owner")
-            .await;
-        assert_eq!(rejected.skipped_incomplete_reasoning, 1);
+        assert!(
+            fixture
+                .try_reserve(&turns, Some(&plan), "oversized-map-owner")
+                .await
+                .is_err(),
+            "oversized private map must reject the whole reservation"
+        );
         assert_eq!(fixture.identity_text().await, oversized);
+        assert_eq!(
+            claim_row(&fixture.conn, "synthetic-turn-0").await,
+            ("catalog_committed".to_owned(), 1, Some(1))
+        );
 
         MetadataKv::set_with_conn(
             &fixture.conn,

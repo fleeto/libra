@@ -485,6 +485,33 @@ mod tests {
             .await
             .unwrap();
         }
+        for (key, canary) in [
+            ("identity-v1", "private-only-identity-v1"),
+            ("identity-v2", "private-only-identity-v2"),
+        ] {
+            MetadataKv::set_with_conn(
+                &conn,
+                MetadataScope::AgentReasoningIdentity,
+                existing_pk,
+                key,
+                canary,
+                MetadataValueType::Text,
+            )
+            .await
+            .unwrap();
+            assert!(
+                MetadataKv::get_with_conn(
+                    &conn,
+                    MetadataScope::AgentReasoningIdentity,
+                    existing_pk,
+                    key,
+                )
+                .await
+                .unwrap()
+                .is_some(),
+                "both private identity keys must exist before the cloud snapshot"
+            );
+        }
         let after = load_agent_capture_catalog_snapshot(&conn, "cloud-private-repo", true)
             .await
             .unwrap();
@@ -503,10 +530,15 @@ mod tests {
             "private-only-header",
             "private-only-quarantine",
             "private-only-chunk",
+            "private-only-identity-v1",
+            "private-only-identity-v2",
             "agent_capture_session_alias",
             "agent_capture_pending",
             "agent_capture_quarantine",
             "agent_capture_pending_chunk",
+            "agent_reasoning_identity",
+            "identity-v1",
+            "identity-v2",
         ] {
             assert!(
                 !wire.contains(canary),

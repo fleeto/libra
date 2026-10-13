@@ -2606,6 +2606,16 @@ pending 传递，COV2-11 才切换生产 Session 路径。本卡测试只用本�
 DB/静态 literal，不启动 OpenCode Session，也不授予 native 来源。
 
 
+**COV2-14 私有 identity map 载体：** `agent_reasoning_identity` 同一
+Session 可同时持有 `identity-v1` 与 `identity-v2`。v1 编码和 MAC 不变；
+v2 采用独立闭合 codec 与 descriptor/record/map MAC 域。读取先校验完整
+key 集、TEXT 类型及两份持久 envelope 合计 4096 条/1 MiB，再逐份认证；
+未知、损坏或超限 map 在 claim 写入前拒绝。既有 v1 companion 只更新
+`identity-v1` 并保留 v2 原始字节。COV2-03 才接入版本化 v2
+claim/ref 事务，COV2-11 才切换生产 Session；本卡本地 synthetic map
+测试不构成真实 native 来源证明。旧版单 map 读端遇双 map Session 可能
+fail closed，升级后可恢复读取，不作 v2→v1 降级。
+
 RG-02 归档 opaque 密文 artifact：manifest `reasoning_artifacts[]`（path/oid/sha256/
 byte_len/locator/provider/source_kind/availability/decrypt_capability），对象存
 `reasoning/encrypted/<sha256>`，sha256 去重、重复 locator 拒绝、512/256 KiB/

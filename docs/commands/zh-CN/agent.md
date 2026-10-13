@@ -834,6 +834,6 @@ sealed native carrier 将原始 opaque 字节和来源绑定证明一起移入�
 
 reasoning 覆盖无法安全比较时，live capture 和 export 会 fail closed，并返回 `reasoning coverage is partial; run libra agent doctor before retrying capture`。doctor 会用 `reasoning_identity_changed` 报告完整 turn 的 identity 冲突；该情况需要人工检查已授权的 reasoning artifact，doctor 不会替用户选择保留哪一份。
 
-每个 session 的私有 identity map 最多保存 4096 条记录，序列化数据最多 1 MiB。达到任一上限时会停止写入，并返回 `private reasoning identity session map reached its safe capacity; start a new capture session`。map 缺失属于 legacy 状态：没有 candidate 的普通 turn 继续遵循原 coverage 行为，首个符合准入条件且带 identity 的 turn 可以创建 map。格式错误、超限、含未预期内容或无法通过认证的 map 会使整个 session 的 map 无效；该 session 中每个 turn 都按 partial 处理，即使 turn 不含 incoming candidate。doctor 不会修复无效 identity map；doctor 没有报告 conflict finding，也不代表 partial 结果已经 complete。不要手动编辑私有 metadata scope。
+同一 session 的私有 identity 命名空间有独立的 `identity-v1` 与 `identity-v2` 键；两者合计最多 4096 条记录、1 MiB 已编码存储值。达到任一上限时会停止写入，并返回 `private reasoning identity session map reached its safe capacity; start a new capture session`。map 缺失属于 legacy 状态：没有 candidate 的普通 turn 保持原 coverage 行为，首个符合准入条件且带 identity 的 turn 可以创建 map。格式错误、超限、含未预期内容或无法通过认证的 map 会使整个 reservation 在任何 claim 写入前以 `private reasoning identity is invalid; start a new capture session` 失败，包括不含 candidate 的 turn；import receipt 会记录为 failed。doctor 不会修复无效 identity map；没有 conflict finding 也不代表 session 已 complete。不要手动编辑私有 metadata scope。
 
 这些检查只比较 capture identity，不证明来源来自 provider 的 native 字段。未获证明的 OpenCode reasoning 保持 partial，不会归档。

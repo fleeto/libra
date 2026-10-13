@@ -1046,6 +1046,22 @@ COV2-03/04/11 own those later changes. No SQL DDL, public CLI change, native
 issuer, or OpenCode Session CI integration is introduced.
 
 
+### Private reasoning identity v1/v2 map carrier (COV2-14)
+
+The repository-private `agent_reasoning_identity` namespace now admits the
+existing `identity-v1` key beside a closed `identity-v2` key. V1 serialized
+bytes and MAC purpose remain frozen. The v2 descriptor, record and map use
+separate authenticated domains. The reader rejects unknown keys, malformed
+or unauthenticated maps, and combined capacity above 4096 records or 1 MiB
+of stored encoded values before mutating a claim. An invalid map now causes a
+hard reservation error instead of a per-turn partial result; import records a
+failed receipt rather than a partial/no-op outcome. Updating v1 preserves the
+parallel v2 value byte-for-byte. An older v1-only binary can fail closed on
+a dual-map Session and may be unable to read even its v1 turn until upgraded;
+it does not silently downgrade v2. The versioned v2 claim/ref producer and
+production OpenCode Session switch remain assigned to COV2-03 and COV2-11.
+Synthetic carrier tests do not establish native provenance or archive rights.
+
 ### OG-20 private import transport
 
 The authorized descriptor helper can return a native-proven typed collection through an authenticated private import transport response. A one-request key binds request, authorized source, repository scope and collection before the parent restores the complete native proof and partitions owned items by reserved turn. An empty collection retains the previous helper response and source projection bytes; an unauthenticated or unproved collection fails closed without returning candidate bytes to ordinary import. Production provider capabilities and native issuers remain disabled. Source A remains UNPROVEN, and real native field admission is deferred. The transport adds no public option, database schema or decryption capability.

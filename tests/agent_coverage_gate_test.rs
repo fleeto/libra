@@ -22,16 +22,26 @@
 use std::{
     path::PathBuf,
     process::{Command, Output, Stdio},
+    sync::Arc,
+    time::{Duration, UNIX_EPOCH},
 };
 
-use libra::internal::ai::{
-    coverage_gate::{
-        LiveClaimCommitPlan, ReservedTurnClaim, VersionedLiveClaimCommitPlan,
-        VersionedReservedTurnClaim,
+use libra::{
+    internal::{
+        ai::{
+            coverage_gate::{
+                LiveClaimCommitPlan, ReservedTurnClaim, VersionedLiveClaimCommitPlan,
+                VersionedReservedTurnClaim,
+            },
+            history::HistoryManager,
+            observed_agents::{Completeness, claude_project_slug},
+        },
+        branch::TRACES_BRANCH,
+        metadata::{MetadataKv, MetadataScope, MetadataValueType},
     },
-    observed_agents::{Completeness, claude_project_slug},
+    utils::{client_storage::ClientStorage, object::write_git_object},
 };
-use sea_orm::{ConnectionTrait, Database, DatabaseConnection, Statement};
+use sea_orm::{ConnectionTrait, Database, DatabaseConnection, Statement, Value as SqlValue};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
@@ -244,6 +254,191 @@ fn cov2_v1_claim_and_legacy_literals_stay_valid() {
     );
     assert_eq!(bound.ordinary().claims.len(), 2);
     assert!(VersionedReservedTurnClaim::new(3, claims[0].claim.clone()).is_err());
+}
+
+/// DB-owned lifecycle gate: these values deliberately have no authenticated
+/// codec or model Session. Clean, GC, and erasure must act on the private
+/// scope without decoding either map or treating its OID-looking contents as
+/// object roots. A real cloud snapshot is a separate endpoint-dependent gate.
+#[tokio::test]
+async fn cov2_identity_v2_lifecycle_erasure_and_gc_exclusion() {
+    let repo = HookRepo::init();
+    let db_path = repo.repo.join(".libra/libra.db");
+    let conn = Database::connect(format!("sqlite://{}?mode=rw", db_path.display()))
+        .await
+        .expect("open writable repository DB");
+    let backend = conn.get_database_backend();
+    let session_id = "cov2-private-lifecycle";
+    conn.execute_raw(Statement::from_sql_and_values(
+        backend,
+        "INSERT INTO agent_session (
+            session_id, agent_kind, provider_session_id, state, working_dir,
+            metadata_json, redaction_report, started_at, last_event_at, stopped_at
+         ) VALUES (?, 'claude_code', 'cov2-private-provider', 'stopped', ?, '{}', '{}', 1, 2, 3)",
+        [
+            SqlValue::from(session_id),
+            SqlValue::from(repo.repo.to_string_lossy().to_string()),
+        ],
+    ))
+    .await
+    .expect("seed stopped local session");
+    let old_checkpoint_at = chrono::Utc::now().timestamp() - 2 * 86_400;
+    conn.execute_raw(Statement::from_sql_and_values(
+        backend,
+        "INSERT INTO agent_checkpoint (
+            checkpoint_id, session_id, scope, parent_commit, tree_oid,
+            metadata_blob_oid, traces_commit, created_at
+         ) VALUES ('cov2-private-old-checkpoint', ?, 'committed', ?, ?, ?, '', ?)",
+        [
+            SqlValue::from(session_id),
+            SqlValue::from("1".repeat(40)),
+            SqlValue::from("2".repeat(40)),
+            SqlValue::from("3".repeat(40)),
+            SqlValue::from(old_checkpoint_at),
+        ],
+    ))
+    .await
+    .expect("seed DB-only expired checkpoint");
+
+    let store = repo.repo.join(".libra");
+    let v1_oid = write_git_object(&store, "blob", b"cov2-private-v1-gc-control")
+        .expect("write v1 private GC control")
+        .to_string();
+    let v2_oid = write_git_object(&store, "blob", b"cov2-private-v2-gc-control")
+        .expect("write v2 private GC control")
+        .to_string();
+    let loose_path = |oid: &str| store.join("objects").join(&oid[..2]).join(&oid[2..]);
+    for oid in [&v1_oid, &v2_oid] {
+        std::fs::File::open(loose_path(oid))
+            .expect("open private GC control")
+            .set_modified(UNIX_EPOCH + Duration::from_secs(1))
+            .expect("age private GC control");
+    }
+    for (key, oid) in [("identity-v1", &v1_oid), ("identity-v2", &v2_oid)] {
+        MetadataKv::set_with_conn(
+            &conn,
+            MetadataScope::AgentReasoningIdentity,
+            session_id,
+            key,
+            &json!({"root": oid}).to_string(),
+            MetadataValueType::Text,
+        )
+        .await
+        .expect("seed private identity map key");
+    }
+    conn.close()
+        .await
+        .expect("release writable seed connection");
+
+    const PRIVATE_ROWS_SQL: &str = "SELECT `key`, value FROM metadata_kv
+         WHERE scope = 'agent_reasoning_identity'
+           AND target = 'cov2-private-lifecycle' ORDER BY `key`";
+    let entries = |rows: Vec<sea_orm::QueryResult>| {
+        rows.iter()
+            .map(|row| {
+                (
+                    row.try_get_by::<String, _>("key").expect("private key"),
+                    row.try_get_by::<String, _>("value").expect("private value"),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let before = entries(repo.query_rows(PRIVATE_ROWS_SQL).await);
+    assert_eq!(
+        before,
+        vec![
+            (
+                "identity-v1".to_owned(),
+                json!({"root": &v1_oid}).to_string()
+            ),
+            (
+                "identity-v2".to_owned(),
+                json!({"root": &v2_oid}).to_string()
+            ),
+        ],
+        "both private map keys and values share the session scope"
+    );
+
+    let cleaned = repo.run(&["agent", "clean", "--gc", "--retention-days", "1"], None);
+    assert!(
+        cleaned.status.success(),
+        "retention clean: {}",
+        describe(&cleaned)
+    );
+    assert!(
+        repo.query_rows(
+            "SELECT checkpoint_id FROM agent_checkpoint
+             WHERE checkpoint_id = 'cov2-private-old-checkpoint'",
+        )
+        .await
+        .is_empty(),
+        "retention removes the expired checkpoint"
+    );
+    assert_eq!(
+        entries(repo.query_rows(PRIVATE_ROWS_SQL).await),
+        before,
+        "retention keeps both session-owned identity maps unchanged until erasure"
+    );
+
+    let first_gc = repo.run(&["maintenance", "run", "--task", "gc"], None);
+    assert!(
+        first_gc.status.success(),
+        "first GC: {}",
+        describe(&first_gc)
+    );
+    let ledger_path = store.join("gc-prune-candidates.json");
+    let mut ledger: Value =
+        serde_json::from_slice(&std::fs::read(&ledger_path).expect("first GC candidate ledger"))
+            .expect("parse GC candidate ledger");
+    let candidates = ledger.as_object_mut().expect("GC candidate map");
+    for oid in [&v1_oid, &v2_oid] {
+        *candidates
+            .get_mut(oid)
+            .expect("private map value must not root its orphan object") = json!(1);
+    }
+    std::fs::write(
+        &ledger_path,
+        serde_json::to_vec(&ledger).expect("encode aged ledger"),
+    )
+    .expect("age private GC candidates");
+    let second_gc = repo.run(&["maintenance", "run", "--task", "gc"], None);
+    assert!(
+        second_gc.status.success(),
+        "second GC: {}",
+        describe(&second_gc)
+    );
+    for oid in [&v1_oid, &v2_oid] {
+        assert!(
+            !loose_path(oid).exists(),
+            "private map key must not retain an otherwise orphan object"
+        );
+    }
+    assert_eq!(
+        entries(repo.query_rows(PRIVATE_ROWS_SQL).await),
+        before,
+        "GC must not delete or rewrite either map"
+    );
+
+    let conn = Database::connect(format!("sqlite://{}?mode=rw", db_path.display()))
+        .await
+        .expect("open DB for local erasure");
+    let history = HistoryManager::new_with_ref(
+        Arc::new(ClientStorage::init(store.join("objects"))),
+        store,
+        Arc::new(conn.clone()),
+        TRACES_BRANCH,
+    );
+    assert!(
+        history
+            .erase_session_local(session_id)
+            .await
+            .expect("erase private-map owner")
+            .session_deleted
+    );
+    assert!(
+        repo.query_rows(PRIVATE_ROWS_SQL).await.is_empty(),
+        "erasure removes both private keys by scope and session target"
+    );
 }
 
 #[tokio::test]

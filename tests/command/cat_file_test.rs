@@ -1477,3 +1477,226 @@ fn test_cat_file_batch_all_objects_lists_sorted_objects() {
         "--batch-all-objects requires --batch/--batch-check"
     );
 }
+
+/// Commit one file and return `(HEAD hash, HEAD commit size)`.
+fn commit_and_read_head(temp_path: &std::path::Path) -> (String, String) {
+    configure_user_identity(temp_path);
+    create_commit(temp_path, "hello.txt", "hello world\n", "first commit");
+
+    let read = |args: &[&str]| {
+        let output = Command::new(env!("CARGO_BIN_EXE_libra"))
+            .current_dir(temp_path)
+            .args(args)
+            .output()
+            .expect("Failed to run libra");
+        assert!(
+            output.status.success(),
+            "{args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    };
+    (
+        read(&["rev-parse", "HEAD"]),
+        read(&["cat-file", "-s", "HEAD"]),
+    )
+}
+
+/// Scenario: batch input is raw bytes. A line that is not valid UTF-8 is
+/// answered `<input> missing` with the bytes echoed unchanged, and the lines
+/// around it (including a CRLF-terminated one) are still processed.
+/// Regression: stdin was decoded with `read_to_string`, so a single invalid
+/// byte aborted the whole batch with a read error and no output.
+#[test]
+fn test_cat_file_batch_accepts_non_utf8_input() {
+    let temp_dir = init_temp_repo();
+    let temp_path = temp_dir.path();
+    let (head_hash, head_size) = commit_and_read_head(temp_path);
+    let head_line = format!("{head_hash} commit {head_size}\n");
+
+    let check = run_libra_with_stdin_bytes(
+        temp_path,
+        &["cat-file", "--batch-check"],
+        b"HEAD\r\n\xff\xfe-name\nnot-a-real-ref\n",
+    );
+    assert!(
+        check.status.success(),
+        "--batch-check must accept non-UTF-8 input: {}",
+        String::from_utf8_lossy(&check.stderr)
+    );
+    let mut expected = head_line.clone().into_bytes();
+    expected.extend_from_slice(b"\xff\xfe-name missing\nnot-a-real-ref missing\n");
+    assert_eq!(
+        check.stdout,
+        expected,
+        "unexpected --batch-check output: {}",
+        String::from_utf8_lossy(&check.stdout)
+    );
+
+    let batch = run_libra_with_stdin_bytes(temp_path, &["cat-file", "--batch"], b"\xc3\x28\n");
+    assert!(
+        batch.status.success(),
+        "--batch must accept non-UTF-8 input: {}",
+        String::from_utf8_lossy(&batch.stderr)
+    );
+    assert_eq!(batch.stdout, b"\xc3\x28 missing\n");
+
+    for args in [
+        ["cat-file", "--batch-command"].as_slice(),
+        ["cat-file", "--batch-command", "--buffer"].as_slice(),
+    ] {
+        let command = run_libra_with_stdin_bytes(temp_path, args, b"info \xff\xfe\ninfo HEAD\n");
+        assert!(
+            command.status.success(),
+            "{args:?} must accept a non-UTF-8 argument: {}",
+            String::from_utf8_lossy(&command.stderr)
+        );
+        let mut expected = b"\xff\xfe missing\n".to_vec();
+        expected.extend_from_slice(head_line.as_bytes());
+        assert_eq!(
+            command.stdout,
+            expected,
+            "unexpected {args:?} output: {}",
+            String::from_utf8_lossy(&command.stdout)
+        );
+    }
+
+    // A non-UTF-8 command word is an ordinary unknown-command usage error.
+    let unknown =
+        run_libra_with_stdin_bytes(temp_path, &["cat-file", "--batch-command"], b"\xff HEAD\n");
+    assert_eq!(
+        unknown.status.code(),
+        Some(129),
+        "non-UTF-8 command must be a usage error: {}",
+        String::from_utf8_lossy(&unknown.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&unknown.stderr).contains("unknown command"),
+        "stderr: {}",
+        String::from_utf8_lossy(&unknown.stderr)
+    );
+}
+
+/// Drive `libra <args>` interactively: send each request without closing
+/// stdin and wait (bounded) for a stdout line starting with the expected
+/// prefix before sending the next request. A batch mode that reads stdin to
+/// EOF before answering never produces those lines, so this times out.
+fn assert_batch_answers_each_line(
+    temp_path: &std::path::Path,
+    args: &[&str],
+    exchanges: &[(&str, &str)],
+) {
+    use std::{
+        io::BufRead,
+        process::Stdio,
+        sync::mpsc,
+        time::{Duration, Instant},
+    };
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(temp_path)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("Failed to spawn libra");
+    let mut stdin = child.stdin.take().expect("child stdin");
+    let stdout = child.stdout.take().expect("child stdout");
+
+    let (tx, rx) = mpsc::channel::<String>();
+    let reader = std::thread::spawn(move || {
+        let mut stdout = std::io::BufReader::new(stdout);
+        loop {
+            let mut line = Vec::new();
+            match stdout.read_until(b'\n', &mut line) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {
+                    if tx
+                        .send(String::from_utf8_lossy(&line).into_owned())
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+
+    for (request, expected_prefix) in exchanges {
+        stdin
+            .write_all(request.as_bytes())
+            .expect("Failed to write batch request");
+        stdin.flush().expect("Failed to flush batch request");
+
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let mut seen = Vec::new();
+        loop {
+            match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                Ok(line) if line.starts_with(expected_prefix) => break,
+                // `--batch` object contents follow the header line.
+                Ok(line) => seen.push(line),
+                Err(_) => {
+                    let _ = child.kill();
+                    let output = child.wait_with_output().expect("Failed to reap libra");
+                    panic!(
+                        "{args:?}: no response starting with {expected_prefix:?} to \
+                         {request:?} while stdin stayed open (other lines: {seen:?}; \
+                         stderr: {})",
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                }
+            }
+        }
+    }
+
+    drop(stdin);
+    let output = child.wait_with_output().expect("Failed to wait on libra");
+    let _ = reader.join();
+    assert!(
+        output.status.success(),
+        "{args:?} failed after stdin closed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// Scenario: without `--buffer`, every batch mode answers each input line
+/// before the next one arrives, so a caller can keep one cat-file process
+/// open and query it interactively (as `git cat-file --batch` allows).
+/// Regression: stdin was read to EOF before any output was produced.
+#[test]
+fn test_cat_file_batch_modes_answer_each_line_before_eof() {
+    let temp_dir = init_temp_repo();
+    let temp_path = temp_dir.path();
+    let (head_hash, _) = commit_and_read_head(temp_path);
+    let head_header = format!("{head_hash} commit ");
+
+    let lookups = [
+        ("HEAD\n", head_header.as_str()),
+        ("not-a-real-ref\n", "not-a-real-ref missing"),
+        ("HEAD\n", head_header.as_str()),
+    ];
+    assert_batch_answers_each_line(temp_path, &["cat-file", "--batch-check"], &lookups);
+    assert_batch_answers_each_line(temp_path, &["cat-file", "--batch"], &lookups);
+    assert_batch_answers_each_line(
+        temp_path,
+        &["cat-file", "--batch-command"],
+        &[
+            ("info HEAD\n", head_header.as_str()),
+            ("contents not-a-real-ref\n", "not-a-real-ref missing"),
+            ("contents HEAD\n", head_header.as_str()),
+        ],
+    );
+    // Under --buffer, queued commands are answered once `flush` arrives.
+    assert_batch_answers_each_line(
+        temp_path,
+        &["cat-file", "--batch-command", "--buffer"],
+        &[
+            (
+                "info not-a-real-ref\ninfo HEAD\nflush\n",
+                head_header.as_str(),
+            ),
+            ("info HEAD\nflush\n", head_header.as_str()),
+        ],
+    );
+}

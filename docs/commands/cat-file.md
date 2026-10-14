@@ -35,6 +35,14 @@ In batch modes, only an unresolvable or nonexistent name is rendered as
 `<input> missing`. A ref-database read failure or corrupt/unreadable object
 fails the command with a structured error so storage damage is not hidden.
 
+Batch modes read stdin one line at a time and answer each line before
+reading the next. Without `--buffer`, every response is flushed immediately,
+so a caller can keep one `cat-file --batch` process open and query it
+interactively through a pipe. Input is treated as raw bytes: a line that is
+not valid UTF-8 cannot name an object (refs, object ids, and tree entry names
+are UTF-8) and is answered `<input> missing` with the original bytes echoed,
+instead of aborting the batch.
+
 During a non-squash merge paused on conflicts, `AUTO_MERGE` is also accepted
 as an object spec and names the automatic result tree with its conflict
 markers. It exists only for that merge state's lifetime; clean and squash
@@ -53,7 +61,7 @@ merges do not create it. The historical pseudo-refs (`ORIG_HEAD`,
 | `--batch-check[=<fmt>]` | | Read object names from stdin (one per line); print `<sha> <type> <size>` (or `<input> missing`). Optional format atoms `%(objectname)`/`%(objecttype)`/`%(objectsize)`. |
 | `--batch[=<fmt>]` | | Like `--batch-check` plus the raw object contents and a trailing newline. |
 | `--batch-command[=<fmt>]` | | Read commands from stdin: `info <object>` (header only) or `contents <object>` (header + contents). The `flush` command is accepted only under `--buffer`. |
-| `--buffer` | | Buffer batch output and write it only on an explicit `flush` (or at end of input); this is what makes `--batch-command`'s `flush` valid. Requires a batch mode. |
+| `--buffer` | | Block-buffer batch output instead of flushing it after every object. With `--batch-command`, commands are queued and run only on an explicit `flush` (or at end of input); this is what makes `flush` valid. Requires a batch mode. |
 | `--batch-all-objects` | | With `--batch`/`--batch-check`, operate on every object in the store (loose + packed) in id order instead of reading stdin. |
 | `--ai <ID>` | | Pretty-print an AI object by ID. Accepts `TYPE:ID` to disambiguate. |
 | `--ai-type <ID>` | | Print the AI object type for the given ID. |
@@ -256,9 +264,12 @@ dispatching `info`/`contents` per line), all sharing the same per-object
 formatter with optional `=<format>` atom expansion. `--batch-all-objects` (with
 `--batch`/`--batch-check`) enumerates every object in the store — loose plus
 packed — in id order, instead of reading stdin. For agents, `--json` remains
-the recommended interface — it returns typed fields in one call. Streaming
-`--buffer` is supported (buffer batch output and flush only on an explicit `flush`
-command or end of input — it is what makes `--batch-command`'s `flush` valid; without
+the recommended interface — it returns typed fields in one call. Batch input is
+streamed: each line is answered (and, without `--buffer`, flushed) before the
+next is read, and non-UTF-8 lines are reported as `missing` rather than
+failing the batch. `--buffer` is supported (block-buffer output instead of
+flushing per object; with `--batch-command`, queue commands until an explicit
+`flush` command or end of input — it is what makes `flush` valid; without
 `--buffer` the `flush` command is rejected exactly as Git does, and `--buffer` requires
 a batch mode). `--follow-symlinks` is not exposed.
 
@@ -283,7 +294,7 @@ hard error (`LBR-CLI-003`, exit 129) that emits no envelope.
 | Print object size | `-s` | `-s` | N/A |
 | Pretty-print content | `-p` | `-p` | N/A (`jj file show` for blobs) |
 | Check existence | `-e` | `-e` | N/A |
-| Batch mode | `--batch[=<format>]`, `--batch-check[=<format>]`, `--batch-command[=<format>]` (info/contents), `--batch-all-objects` (`%(objectname)`/`%(objecttype)`/`%(objectsize)` atoms), `--buffer` (enables `--batch-command`'s `flush`) | `--batch`, `--batch-check`, `--batch-command`, `--batch-all-objects`, `--buffer` | N/A |
+| Batch mode | `--batch[=<format>]`, `--batch-check[=<format>]`, `--batch-command[=<format>]` (info/contents), `--batch-all-objects` (`%(objectname)`/`%(objecttype)`/`%(objectsize)` atoms), line-by-line streaming with byte-safe input, `--buffer` (block buffering; enables `--batch-command`'s `flush`) | `--batch`, `--batch-check`, `--batch-command`, `--batch-all-objects`, `--buffer` | N/A |
 | AI object inspection | `--ai`, `--ai-type` | N/A | N/A |
 | AI object listing | `--ai-list`, `--ai-list-types` | N/A | N/A |
 | JSON output | `--json` | No | No |

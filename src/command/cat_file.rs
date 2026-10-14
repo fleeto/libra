@@ -17,7 +17,10 @@
 //! - `--ai-list <type>`:     list all AI objects of the given type
 //! - `--ai-list-types`:      list all AI object types present in history
 
-use std::sync::Arc;
+use std::{
+    io::{BufRead, BufWriter, Write},
+    sync::Arc,
+};
 
 use clap::Parser;
 use git_internal::{
@@ -49,6 +52,9 @@ Modes:
   - Git batch modes (stdin): --batch-check / --batch / --batch-command read object
     names (or info/contents commands) from stdin instead of OBJECT, with an optional
     =<format> for the header line.
+  - Batch input is read and answered one line at a time: without --buffer each
+    response is flushed before the next line is read. Input is raw bytes; a line
+    that is not valid UTF-8 cannot name an object and is reported as missing.
   - --batch-all-objects (with --batch/--batch-check): operate on every object in the
     store (loose + packed, in id order) instead of reading stdin.
   - AI lookup modes: use exactly one of --ai/--ai-type with an AI object ID or TYPE:ID.
@@ -119,10 +125,11 @@ pub struct CatFileArgs {
     #[clap(long = "batch-command", group = "mode", num_args = 0..=1, require_equals = true, default_missing_value = "")]
     pub batch_command: Option<String>,
 
-    /// Buffer batch output and write it only on an explicit `flush` command (or
-    /// at end of input), matching `git cat-file --buffer`. Requires a batch mode
-    /// (`--batch` / `--batch-check` / `--batch-command`); it is what makes the
-    /// `--batch-command` `flush` command valid.
+    /// Buffer batch output instead of flushing it after every object, matching
+    /// `git cat-file --buffer`. With `--batch-command`, commands are queued and
+    /// run only on an explicit `flush` command (or at end of input); it is what
+    /// makes that `flush` command valid. Requires a batch mode (`--batch` /
+    /// `--batch-check` / `--batch-command`).
     #[clap(long = "buffer")]
     pub buffer: bool,
 
@@ -397,15 +404,15 @@ pub async fn execute_safe(args: CatFileArgs, output: &OutputConfig) -> CliResult
                 .with_stable_code(StableErrorCode::CliInvalidArguments));
             }
         };
-        return run_batch_all_objects(include_content, fmt).await;
+        return run_batch_all_objects(include_content, fmt, args.buffer).await;
     }
 
     if let Some(fmt) = &args.batch_check {
-        return run_batch(false, fmt).await;
+        return run_batch(false, fmt, args.buffer).await;
     }
 
     if let Some(fmt) = &args.batch {
-        return run_batch(true, fmt).await;
+        return run_batch(true, fmt, args.buffer).await;
     }
 
     if let Some(fmt) = &args.batch_command {
@@ -568,51 +575,135 @@ fn invalid_object_name_error(object_ref: &str) -> CliError {
         .with_stable_code(StableErrorCode::CliInvalidTarget)
 }
 
-/// `cat-file --batch-check`: read object names from stdin (one per line) and
-/// print `<objectname> <type> <size>` for each, or `<input> missing` when the
-/// name does not resolve to a single object. Input is read fully before
-/// processing (not streamed); object specs are ASCII so UTF-8 decoding is safe.
-/// Shared driver for `--batch-check` (`include_content = false`) and `--batch`
-/// (`include_content = true`). Reads object names from stdin (one per line) and
-/// emits, per object, a `<sha> <type> <size>` header — followed by the raw
-/// object contents and a trailing newline when `include_content` is set — or
-/// `<input> missing` when the name does not resolve. Each object's output is
-/// buffered and written once so the BrokenPipe early-exit is handled uniformly.
-async fn run_batch(include_content: bool, format: &str) -> CliResult<()> {
-    use std::io::{Read, Write};
+/// Stdout sink shared by the batch modes. Without `--buffer` every response is
+/// flushed as soon as it is written, so a caller driving cat-file through a
+/// pipe sees each answer before it sends the next line. With `--buffer` output
+/// is block-buffered and only pushed out by [`BatchOutput::flush`] (or when
+/// the buffer fills). A closed reader (`BrokenPipe`) is reported as `Ok(false)`
+/// so callers stop cleanly instead of failing.
+struct BatchOutput<W: Write> {
+    out: BufWriter<W>,
+    flush_each: bool,
+    mode: &'static str,
+}
 
+impl<W: Write> BatchOutput<W> {
+    fn new(inner: W, buffer: bool, mode: &'static str) -> Self {
+        Self {
+            out: BufWriter::new(inner),
+            flush_each: !buffer,
+            mode,
+        }
+    }
+
+    /// Write one response. Returns `Ok(false)` once the reader has gone away.
+    fn emit(&mut self, bytes: &[u8]) -> CliResult<bool> {
+        let written = self.out.write_all(bytes);
+        if !self.check(written, "write")? {
+            return Ok(false);
+        }
+        if self.flush_each {
+            return self.flush();
+        }
+        Ok(true)
+    }
+
+    /// Push everything written so far to the underlying stream.
+    fn flush(&mut self) -> CliResult<bool> {
+        let flushed = self.out.flush();
+        self.check(flushed, "flush")
+    }
+
+    fn check(&self, result: std::io::Result<()>, action: &str) -> CliResult<bool> {
+        match result {
+            Ok(()) => Ok(true),
+            Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(false),
+            Err(e) => Err(CliError::fatal(format!(
+                "failed to {action} cat-file {} output: {e}",
+                self.mode
+            ))
+            .with_stable_code(StableErrorCode::IoWriteFailed)),
+        }
+    }
+}
+
+/// Read the next batch input line into `line` as raw bytes, without its `\n`.
+/// Returns `Ok(false)` at end of input. Nothing is decoded here, so a line that
+/// is not valid UTF-8 cannot abort the batch.
+fn read_batch_line(input: &mut impl BufRead, line: &mut Vec<u8>, mode: &str) -> CliResult<bool> {
+    line.clear();
+    let read = input.read_until(b'\n', line).map_err(|e| {
+        CliError::fatal(format!("failed to read cat-file {mode} input: {e}"))
+            .with_stable_code(StableErrorCode::IoReadFailed)
+    })?;
+    if line.last() == Some(&b'\n') {
+        line.pop();
+    }
+    Ok(read > 0)
+}
+
+/// Strip surrounding whitespace (including the `\r` of a CRLF line ending) from
+/// one batch input line. UTF-8 lines are trimmed exactly like `str::trim`; any
+/// other line falls back to trimming ASCII whitespace.
+fn trim_batch_line(line: &[u8]) -> &[u8] {
+    match std::str::from_utf8(line) {
+        Ok(text) => text.trim().as_bytes(),
+        Err(_) => line.trim_ascii(),
+    }
+}
+
+/// Split a trimmed `--batch-command` line into its command word and its
+/// (trimmed) argument, which is empty when the line has no whitespace.
+fn split_batch_command(line: &[u8]) -> (&[u8], &[u8]) {
+    match std::str::from_utf8(line) {
+        Ok(text) => match text.split_once(char::is_whitespace) {
+            Some((command, rest)) => (command.as_bytes(), rest.trim().as_bytes()),
+            None => (line, b"".as_slice()),
+        },
+        Err(_) => match line.iter().position(u8::is_ascii_whitespace) {
+            Some(at) => (&line[..at], line[at..].trim_ascii()),
+            None => (line, b"".as_slice()),
+        },
+    }
+}
+
+/// Shared driver for `--batch-check` (`include_content = false`) and `--batch`
+/// (`include_content = true`). Reads object names from stdin one line at a
+/// time and, per line, emits a `<sha> <type> <size>` header — followed by the
+/// raw object contents and a trailing newline when `include_content` is set —
+/// or `<input> missing` when the name does not resolve. Each response is
+/// written before the next line is read, and flushed unless `buffer` is set.
+async fn run_batch(include_content: bool, format: &str, buffer: bool) -> CliResult<()> {
     let mode = if include_content {
         "--batch"
     } else {
         "--batch-check"
     };
     let storage = ClientStorage::init(path::objects());
-    let mut input = String::new();
-    std::io::stdin().read_to_string(&mut input).map_err(|e| {
-        CliError::fatal(format!("failed to read cat-file {mode} input: {e}"))
-            .with_stable_code(StableErrorCode::IoReadFailed)
-    })?;
+    let mut input = std::io::stdin().lock();
+    let mut out = BatchOutput::new(std::io::stdout().lock(), buffer, mode);
+    let mut line = Vec::new();
 
-    let stdout = std::io::stdout();
-    let mut out = stdout.lock();
-    for raw in input.lines() {
-        let spec = raw.trim();
+    while read_batch_line(&mut input, &mut line, mode)? {
+        let spec = trim_batch_line(&line);
         if spec.is_empty() {
             continue;
         }
         let buf = build_batch_object(spec, include_content, format, &storage).await?;
-        match out.write_all(&buf) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => return Ok(()),
-            Err(e) => {
-                return Err(CliError::fatal(format!(
-                    "failed to write cat-file {mode} output: {e}"
-                ))
-                .with_stable_code(StableErrorCode::IoWriteFailed));
-            }
+        if !out.emit(&buf)? {
+            return Ok(());
         }
     }
+    out.flush()?;
     Ok(())
+}
+
+/// The `<input> missing` response, echoing the input bytes unchanged.
+fn batch_missing_line(spec: &[u8]) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(spec.len() + " missing\n".len());
+    buf.extend_from_slice(spec);
+    buf.extend_from_slice(b" missing\n");
+    buf
 }
 
 /// Build the batch output bytes for one object spec: the `<sha> <type> <size>`
@@ -622,11 +713,16 @@ async fn run_batch(include_content: bool, format: &str) -> CliResult<()> {
 /// being misreported as a missing object. Shared by `--batch`/`--batch-check`
 /// and the `--batch-command` `contents`/`info` commands.
 async fn build_batch_object(
-    spec: &str,
+    spec: &[u8],
     include_content: bool,
     format: &str,
     storage: &ClientStorage,
 ) -> CliResult<Vec<u8>> {
+    // Refs, object ids and tree entry names are all UTF-8, so input that is not
+    // valid UTF-8 cannot name an object; like Git, report it as missing.
+    let Ok(spec) = std::str::from_utf8(spec) else {
+        return Ok(batch_missing_line(spec));
+    };
     let mut buf: Vec<u8> = Vec::new();
     match resolve_object_safe(spec, storage).await {
         Ok(hash) => match (storage.get_object_type(&hash), storage.get(&hash)) {
@@ -643,7 +739,7 @@ async fn build_batch_object(
                 }
             }
             (Err(GitError::ObjectNotFound(_)), _) | (_, Err(GitError::ObjectNotFound(_))) => {
-                buf.extend_from_slice(format!("{spec} missing\n").as_bytes());
+                buf = batch_missing_line(spec.as_bytes());
             }
             (Err(error), _) => {
                 return Err(CliError::fatal(format!(
@@ -664,7 +760,7 @@ async fn build_batch_object(
                 StableErrorCode::CliInvalidTarget | StableErrorCode::CliInvalidArguments
             ) =>
         {
-            buf.extend_from_slice(format!("{spec} missing\n").as_bytes());
+            buf = batch_missing_line(spec.as_bytes());
         }
         Err(error) => return Err(error),
     }
@@ -673,28 +769,21 @@ async fn build_batch_object(
 
 /// `cat-file --batch[-check] --batch-all-objects`: emit a batch line for every
 /// object in the store (loose and packed) instead of reading names from stdin.
-/// Objects are emitted in ascending object-id order.
-async fn run_batch_all_objects(include_content: bool, format: &str) -> CliResult<()> {
-    use std::io::Write;
-
+/// Objects are emitted in ascending object-id order, each flushed as it is
+/// produced unless `buffer` is set.
+async fn run_batch_all_objects(include_content: bool, format: &str, buffer: bool) -> CliResult<()> {
     let storage = ClientStorage::init(path::objects());
     let ids = collect_all_object_ids(&storage)?;
 
-    let stdout = std::io::stdout();
-    let mut out = stdout.lock();
+    let mut out = BatchOutput::new(std::io::stdout().lock(), buffer, "--batch-all-objects");
     for id in ids {
-        let buf = build_batch_object(&id.to_string(), include_content, format, &storage).await?;
-        match out.write_all(&buf) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => return Ok(()),
-            Err(e) => {
-                return Err(CliError::fatal(format!(
-                    "failed to write cat-file --batch-all-objects output: {e}"
-                ))
-                .with_stable_code(StableErrorCode::IoWriteFailed));
-            }
+        let spec = id.to_string();
+        let buf = build_batch_object(spec.as_bytes(), include_content, format, &storage).await?;
+        if !out.emit(&buf)? {
+            return Ok(());
         }
     }
+    out.flush()?;
     Ok(())
 }
 
@@ -771,53 +860,31 @@ fn collect_all_object_ids(storage: &ClientStorage) -> CliResult<Vec<ObjectHash>>
 
 /// `cat-file --batch-command`: read one command per line from stdin and dispatch
 /// `info <object>` (header only, like `--batch-check`) or `contents <object>`
-/// (header + contents, like `--batch`). Without `--buffer` each command's
-/// output is written immediately and the `flush` command is rejected (exactly
-/// as Git does outside buffered mode). With `--buffer`, output is accumulated
-/// and written only on an explicit `flush` command (or at end of input).
+/// (header + contents, like `--batch`). Without `--buffer` each command runs
+/// and its output is flushed before the next line is read, and the `flush`
+/// command is rejected (exactly as Git does outside buffered mode). With
+/// `--buffer`, commands are queued — as Git does — and run only on an explicit
+/// `flush` command (or at end of input), so memory grows with the queued
+/// command lines rather than with the object contents they will print.
 async fn run_batch_command(format: &str, buffer: bool) -> CliResult<()> {
-    use std::io::{Read, Write};
+    const MODE: &str = "--batch-command";
 
     let storage = ClientStorage::init(path::objects());
-    let mut input = String::new();
-    std::io::stdin().read_to_string(&mut input).map_err(|e| {
-        CliError::fatal(format!(
-            "failed to read cat-file --batch-command input: {e}"
-        ))
-        .with_stable_code(StableErrorCode::IoReadFailed)
-    })?;
+    let mut input = std::io::stdin().lock();
+    let mut out = BatchOutput::new(std::io::stdout().lock(), buffer, MODE);
+    let mut queued: Vec<(bool, Vec<u8>)> = Vec::new();
+    let mut line = Vec::new();
 
-    let stdout = std::io::stdout();
-    let mut out = stdout.lock();
-    // Under `--buffer`, command output collects here until a `flush`; otherwise
-    // each command writes through immediately.
-    let mut pending: Vec<u8> = Vec::new();
-
-    // Write `bytes` to stdout, treating a closed pipe as a clean early stop.
-    fn emit(out: &mut impl Write, bytes: &[u8]) -> CliResult<bool> {
-        match out.write_all(bytes) {
-            Ok(()) => Ok(true),
-            Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(false),
-            Err(e) => Err(CliError::fatal(format!(
-                "failed to write cat-file --batch-command output: {e}"
-            ))
-            .with_stable_code(StableErrorCode::IoWriteFailed)),
-        }
-    }
-
-    for raw in input.lines() {
-        let line = raw.trim();
-        if line.is_empty() {
+    while read_batch_line(&mut input, &mut line, MODE)? {
+        let trimmed = trim_batch_line(&line);
+        if trimmed.is_empty() {
             continue;
         }
-        let (command, arg) = match line.split_once(char::is_whitespace) {
-            Some((cmd, rest)) => (cmd, rest.trim()),
-            None => (line, ""),
-        };
+        let (command, arg) = split_batch_command(trimmed);
         let include_content = match command {
-            "contents" => true,
-            "info" => false,
-            "flush" => {
+            b"contents" => true,
+            b"info" => false,
+            b"flush" => {
                 if !buffer {
                     return Err(CliError::command_usage("flush is only for --buffer mode")
                         .with_stable_code(StableErrorCode::CliInvalidArguments));
@@ -826,25 +893,17 @@ async fn run_batch_command(format: &str, buffer: bool) -> CliResult<()> {
                     return Err(CliError::command_usage("flush takes no argument")
                         .with_stable_code(StableErrorCode::CliInvalidArguments));
                 }
-                if !emit(&mut out, &pending)? {
+                if !run_queued_batch_commands(&mut queued, format, &storage, &mut out).await?
+                    || !out.flush()?
+                {
                     return Ok(());
-                }
-                pending.clear();
-                match out.flush() {
-                    Ok(()) => {}
-                    Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => return Ok(()),
-                    Err(e) => {
-                        return Err(CliError::fatal(format!(
-                            "failed to flush cat-file --batch-command output: {e}"
-                        ))
-                        .with_stable_code(StableErrorCode::IoWriteFailed));
-                    }
                 }
                 continue;
             }
             other => {
                 return Err(CliError::command_usage(format!(
-                    "unknown command '{other}' in --batch-command"
+                    "unknown command '{}' in --batch-command",
+                    String::from_utf8_lossy(other)
                 ))
                 .with_stable_code(StableErrorCode::CliInvalidArguments)
                 .with_hint("supported commands: contents <object>, info <object>"));
@@ -852,22 +911,42 @@ async fn run_batch_command(format: &str, buffer: bool) -> CliResult<()> {
         };
         if arg.is_empty() {
             return Err(CliError::command_usage(format!(
-                "missing object argument for '{command}'"
+                "missing object argument for '{}'",
+                String::from_utf8_lossy(command)
             ))
             .with_stable_code(StableErrorCode::CliInvalidArguments));
         }
-        let buf = build_batch_object(arg, include_content, format, &storage).await?;
         if buffer {
-            pending.extend_from_slice(&buf);
-        } else if !emit(&mut out, &buf)? {
+            queued.push((include_content, arg.to_vec()));
+            continue;
+        }
+        let buf = build_batch_object(arg, include_content, format, &storage).await?;
+        if !out.emit(&buf)? {
             return Ok(());
         }
     }
-    // Flush any output buffered after the last explicit `flush`.
-    if buffer && !pending.is_empty() {
-        emit(&mut out, &pending)?;
+    // Run whatever was queued after the last explicit `flush`.
+    if run_queued_batch_commands(&mut queued, format, &storage, &mut out).await? {
+        out.flush()?;
     }
     Ok(())
+}
+
+/// Run the `--batch-command` commands queued under `--buffer`, in input order,
+/// draining the queue. Returns `Ok(false)` once stdout has been closed.
+async fn run_queued_batch_commands<W: Write>(
+    queued: &mut Vec<(bool, Vec<u8>)>,
+    format: &str,
+    storage: &ClientStorage,
+    out: &mut BatchOutput<W>,
+) -> CliResult<bool> {
+    for (include_content, arg) in queued.drain(..) {
+        let buf = build_batch_object(&arg, include_content, format, storage).await?;
+        if !out.emit(&buf)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 /// Expand a `--batch-check`/`--batch` format string into a single output line.
@@ -1175,7 +1254,6 @@ fn print_blob(hash: &ObjectHash) {
         Ok(text) => print!("{}", text),
         Err(_) => {
             // Write raw binary to stdout
-            use std::io::Write;
             let stdout = std::io::stdout();
             let mut handle = stdout.lock();
             handle.write_all(&blob.data).unwrap_or_else(|e| {
@@ -1226,7 +1304,6 @@ fn print_commit(hash: &ObjectHash) {
                 .with_stable_code(StableErrorCode::IoReadFailed),
         ),
     };
-    use std::io::Write;
     let stdout = std::io::stdout();
     let mut handle = stdout.lock();
     match handle.write_all(&data).and_then(|()| handle.flush()) {
@@ -1727,6 +1804,105 @@ mod tests {
         );
         assert_eq!(commit_message_body("encoding UTF-8\n"), "");
         assert_eq!(commit_message_body(""), "");
+    }
+
+    #[test]
+    fn test_read_batch_line_yields_raw_lines_including_non_utf8() {
+        let mut input = std::io::Cursor::new(b"HEAD\r\n\xff\xfe-name\n\nlast".to_vec());
+        let mut line = Vec::new();
+        let mut lines = Vec::new();
+        while read_batch_line(&mut input, &mut line, "--batch").unwrap() {
+            lines.push(line.clone());
+        }
+        assert_eq!(
+            lines,
+            vec![
+                b"HEAD\r".to_vec(),
+                b"\xff\xfe-name".to_vec(),
+                Vec::new(),
+                b"last".to_vec(),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_trim_batch_line_handles_crlf_and_non_utf8() {
+        assert_eq!(trim_batch_line(b"  HEAD\r"), b"HEAD");
+        assert_eq!(trim_batch_line("\u{3000}HEAD\u{3000}".as_bytes()), b"HEAD");
+        assert_eq!(trim_batch_line(b" \xff\xfe \r"), b"\xff\xfe");
+        assert_eq!(trim_batch_line(b" \t\r"), b"");
+    }
+
+    #[test]
+    fn test_split_batch_command_splits_utf8_and_raw_lines() {
+        assert_eq!(
+            split_batch_command(b"info  HEAD"),
+            (b"info".as_slice(), b"HEAD".as_slice())
+        );
+        assert_eq!(
+            split_batch_command(b"flush"),
+            (b"flush".as_slice(), b"".as_slice())
+        );
+        assert_eq!(
+            split_batch_command(b"contents\t\xff\xfe"),
+            (b"contents".as_slice(), b"\xff\xfe".as_slice())
+        );
+        assert_eq!(
+            split_batch_command(b"\xff"),
+            (b"\xff".as_slice(), b"".as_slice())
+        );
+    }
+
+    #[test]
+    fn test_batch_missing_line_echoes_input_bytes() {
+        assert_eq!(batch_missing_line(b"\xffref"), b"\xffref missing\n");
+    }
+
+    #[test]
+    fn test_batch_output_flushes_each_response_unless_buffered() {
+        let mut unbuffered = BatchOutput::new(Vec::new(), false, "--batch");
+        assert!(unbuffered.emit(b"one\n").unwrap());
+        assert_eq!(unbuffered.out.get_ref().as_slice(), b"one\n");
+
+        let mut buffered = BatchOutput::new(Vec::new(), true, "--batch");
+        assert!(buffered.emit(b"one\n").unwrap());
+        assert!(buffered.out.get_ref().is_empty());
+        assert!(buffered.flush().unwrap());
+        assert_eq!(buffered.out.get_ref().as_slice(), b"one\n");
+    }
+
+    #[test]
+    fn test_batch_output_maps_write_errors() {
+        struct FailingWriter(std::io::ErrorKind);
+        impl Write for FailingWriter {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(self.0.into())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let mut closed = BatchOutput::new(
+            FailingWriter(std::io::ErrorKind::BrokenPipe),
+            false,
+            "--batch",
+        );
+        assert!(!closed.emit(b"one\n").unwrap());
+
+        let mut failing = BatchOutput::new(
+            FailingWriter(std::io::ErrorKind::PermissionDenied),
+            false,
+            "--batch",
+        );
+        let error = failing.emit(b"one\n").unwrap_err();
+        assert_eq!(error.stable_code(), StableErrorCode::IoWriteFailed);
+        assert!(
+            error
+                .to_string()
+                .contains("failed to flush cat-file --batch output"),
+            "{error}"
+        );
     }
 
     #[test]

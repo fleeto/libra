@@ -10473,10 +10473,16 @@ fn reasoning_pending_seal_borrows_only_bound_native_witness() {
     assert_import_reference_detector_catches_rogue("seal_pending");
     assert_eq!(
         import_reasoning_production_references("seal_pending"),
-        BTreeSet::from([(
-            "src/internal/ai/capture/pending_payload.rs".to_owned(),
-            "with_bound_reasoning".to_owned(),
-        )]),
+        BTreeSet::from([
+            (
+                "src/internal/ai/capture/pending_payload.rs".to_owned(),
+                "with_bound_reasoning".to_owned(),
+            ),
+            (
+                "src/internal/ai/capture/pending_payload.rs".to_owned(),
+                "seal_bound_versioned_reasoning".to_owned(),
+            ),
+        ]),
     );
 }
 

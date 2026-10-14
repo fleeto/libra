@@ -22,7 +22,8 @@ use crate::internal::{
         capture::{
             catalog::{CaptureCatalogError, PendingSessionContext},
             checkpoint::{
-                AuthenticatedPendingEnvelope, CheckpointRedactedPayload, ReasoningCoveragePlan,
+                AuthenticatedPendingEnvelope, CheckpointRedactedPayload, PreparedPendingNativeSeal,
+                ReasoningCoveragePlan,
             },
             key,
             pending_identity::{self, PreparedPendingAlias},
@@ -33,7 +34,10 @@ use crate::internal::{
             },
         },
         capture_scope::CaptureScope,
-        coverage_gate::{LiveClaimCommitPlan, ReservedTurnClaim},
+        coverage_gate::{
+            LiveClaimCommitPlan, NativeVersionedReasoningClaimCommitPlan, ReservedTurnClaim,
+            VersionedReservedTurnClaim,
+        },
         observed_agents::parse_canon_value,
     },
     metadata::{MetadataKv, MetadataScope, MetadataValueType},
@@ -470,6 +474,159 @@ pub(crate) struct PendingSealRequest<'a> {
     pub(crate) payload: &'a CheckpointRedactedPayload,
     pub(crate) coverage: &'a LiveClaimCommitPlan,
     pub(crate) reasoning: Option<&'a ReasoningCoveragePlan>,
+}
+
+/// An in-memory native-v2 artifact only. COV2-22 owns the later writer
+/// transaction; constructing this value never writes a pending row or ACK.
+#[cfg_attr(not(all(test, unix)), allow(dead_code))]
+pub(crate) struct SealedVersionedPendingArtifact {
+    header: PendingHeader,
+    bytes: Vec<u8>,
+    identity: PreparedPendingAlias,
+    coverage_owner: String,
+    coverage_claims: Vec<VersionedReservedTurnClaim>,
+}
+
+/// The caller supplies one payload and its sealed source-derived companion.
+/// It cannot pass an independently prepared borrow or an issuer label.
+#[cfg_attr(not(all(test, unix)), allow(dead_code))]
+pub(crate) struct VersionedPendingSealRequest<'a> {
+    pub(crate) binding: PendingBinding,
+    pub(crate) identity: PreparedPendingAlias,
+    pub(crate) payload: &'a CheckpointRedactedPayload,
+    pub(crate) companion: &'a NativeVersionedReasoningClaimCommitPlan,
+}
+
+/// Only this module can pair the payload with the borrow returned by its
+/// checked native gate; the inner projection cannot recombine source parts.
+#[cfg_attr(not(all(test, unix)), allow(dead_code))]
+pub(crate) struct VersionedPendingSealMaterial<'a> {
+    payload: &'a CheckpointRedactedPayload,
+    prepared: PreparedPendingNativeSeal<'a>,
+    companion: &'a NativeVersionedReasoningClaimCommitPlan,
+}
+
+#[cfg_attr(not(all(test, unix)), allow(dead_code))]
+impl<'a> VersionedPendingSealMaterial<'a> {
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        &'a CheckpointRedactedPayload,
+        PreparedPendingNativeSeal<'a>,
+        &'a NativeVersionedReasoningClaimCommitPlan,
+    ) {
+        (self.payload, self.prepared, self.companion)
+    }
+}
+
+#[cfg_attr(not(all(test, unix)), allow(dead_code))]
+impl SealedVersionedPendingArtifact {
+    pub(crate) async fn seal<C: ConnectionTrait>(
+        conn: &C,
+        storage: &Path,
+        root: &Path,
+        request: VersionedPendingSealRequest<'_>,
+        deadline: Instant,
+    ) -> Result<Self> {
+        let VersionedPendingSealRequest {
+            binding,
+            identity,
+            payload,
+            companion,
+        } = request;
+        check_deadline(deadline)?;
+        binding.validate()?;
+        let versioned = companion.versioned();
+        let ordinary = versioned.ordinary();
+        ensure!(
+            payload.is_exact_complete_snapshot()
+                && payload
+                    .snapshot()
+                    .source
+                    .as_ref()
+                    .and_then(|source| source.digest_sha256.as_deref())
+                    == Some(binding.source_commitment.as_str()),
+            "capture recovery requires a complete sealed source snapshot; retry through the provider"
+        );
+        ensure!(
+            binding.session_id == identity.alias()
+                && binding.scope == *identity.context().scope()
+                && ordinary.session_id == identity.context().session_id()
+                && ordinary.checkpoint_id == binding.checkpoint_id
+                && ordinary.parent_commit == binding.parent_commit
+                && ordinary.capture_scope.as_ref() == Some(&binding.scope),
+            "capture recovery identity changed; retry through the provider"
+        );
+        let portable = VersionedPortablePendingCoverage::from_live(versioned, &identity)?;
+        check_sidecar_capacity(payload, serde_json::to_vec(&portable)?.len())?;
+        validate_payload_binding(payload, &binding)?;
+        let prepared = payload.prepare_pending_native_versioned_seal(
+            &binding.scope,
+            companion,
+            identity.context().agent_kind(),
+        )?;
+        let projection = PendingPayloadProjection::seal_bound_versioned_reasoning(
+            conn,
+            storage,
+            root,
+            &identity,
+            VersionedPendingSealMaterial {
+                payload,
+                prepared,
+                companion,
+            },
+            deadline,
+        )
+        .await?;
+        let bytes = encode_versioned_envelope(binding.clone(), projection, portable)?;
+        check_deadline(deadline)?;
+        // This is the historical local MAC domain over the exact outer bytes,
+        // not a native issuer proof or a persistence authorization.
+        let mac = binding
+            .scope
+            .sign_pending_envelope_until(conn, storage, root, &bytes, deadline)
+            .await
+            .map_err(|error| {
+                error.context(
+                    "cannot authenticate capture recovery artifact; run `libra agent doctor`",
+                )
+            })?;
+        let header = PendingHeader {
+            version: VERSION,
+            binding,
+            mac,
+            envelope_bytes: bytes.len(),
+            chunks: bytes.len().div_ceil(CHUNK_BYTES),
+            manual_attempted: false,
+        };
+        ensure!(
+            serde_json::to_vec(&header)?.len() <= MAX_HEADER_BYTES,
+            "capture recovery header exceeds its capacity; retry through the provider"
+        );
+        Ok(Self {
+            header,
+            bytes,
+            identity,
+            coverage_owner: ordinary.owner.clone(),
+            coverage_claims: versioned
+                .claims()
+                .map(
+                    |(coverage_schema_version, claim)| VersionedReservedTurnClaim {
+                        coverage_schema_version,
+                        claim: claim.clone(),
+                    },
+                )
+                .collect(),
+        })
+    }
+
+    pub(crate) fn binding(&self) -> &PendingBinding {
+        &self.header.binding
+    }
+
+    pub(crate) fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
 }
 
 impl SealedPendingArtifact {
@@ -2187,6 +2344,599 @@ pub(crate) mod tests {
             .unwrap()
             .len()
         }
+    }
+
+    #[cfg(unix)]
+    struct VersionedNativeSealFixture {
+        f: Fixture,
+        binding: PendingBinding,
+        identity: PreparedPendingAlias,
+        payload: CheckpointRedactedPayload,
+        ordinary_payload: CheckpointRedactedPayload,
+        companion: NativeVersionedReasoningClaimCommitPlan,
+    }
+
+    #[cfg(unix)]
+    fn native_pending_payload_from_ordinary(
+        ordinary: &CheckpointRedactedPayload,
+        fields: Vec<(u64, Vec<u8>)>,
+    ) -> CheckpointRedactedPayload {
+        use crate::internal::ai::observed_agents::{
+            RedactedBytes,
+            reasoning::{ReasoningSourceDisposition, synthetic_native_batch_for_turns},
+        };
+
+        CheckpointRedactedPayload::from_redacted_capture_with_reasoning(
+            RedactedBytes::new_unchecked(ordinary.transcript().bytes().to_vec()),
+            Some(ordinary.snapshot().clone()),
+            RedactedBytes::new_unchecked(ordinary.metadata_json().bytes().to_vec()),
+            RedactedBytes::new_unchecked(ordinary.lifecycle_events_jsonl().bytes().to_vec()),
+            RedactedBytes::new_unchecked(ordinary.redaction_report_json().bytes().to_vec()),
+            ReasoningSourceDisposition::NativeProven(synthetic_native_batch_for_turns(
+                PK, NATIVE, fields,
+            )),
+        )
+        .expect("construct a complete redacted synthetic native payload")
+    }
+
+    #[cfg(unix)]
+    async fn versioned_companion_for_turns(
+        f: &Fixture,
+        payload: &CheckpointRedactedPayload,
+        binding: &PendingBinding,
+        turns: &[crate::internal::ai::observed_agents::NormalizedTurn],
+    ) -> NativeVersionedReasoningClaimCommitPlan {
+        use crate::internal::ai::{
+            capture::checkpoint::{
+                ReasoningIdentityPreparation, prepare_native_versioned_reasoning_coverage_plan,
+            },
+            coverage_gate::{VersionedLiveClaimCommitPlan, VersionedReservedTurnClaim},
+            observed_agents::coverage::{encode_coverage_turn_for_schema, select_coverage_schema},
+        };
+
+        let source = prepare_native_versioned_reasoning_coverage_plan(
+            payload,
+            ReasoningIdentityPreparation {
+                conn: &f.db,
+                scope: &f.scope,
+                storage_path: &f.storage,
+                authorized_root: f.root.path(),
+                session_id: PK,
+                provider: "claude_code",
+                turns,
+                deadline: deadline(),
+            },
+        )
+        .await
+        .expect("derive synthetic native identities from the sealed payload");
+        let versioned = turns
+            .iter()
+            .map(|turn| {
+                let version = select_coverage_schema(turn);
+                let digest = encode_coverage_turn_for_schema(version.as_i64(), turn)
+                    .expect("encode synthetic normalized turn")
+                    .digest_hex;
+                VersionedReservedTurnClaim::new(
+                    version.as_i64(),
+                    ReservedTurnClaim {
+                        logical_turn_key: turn.logical_turn_key.clone(),
+                        coverage_digest: digest,
+                        completeness: turn.completeness,
+                        fence_token: 1,
+                        next_revision: 1,
+                    },
+                )
+                .expect("use a supported coverage version")
+            })
+            .collect::<Vec<_>>();
+        let ordinary = LiveClaimCommitPlan {
+            source_channel: "live",
+            session_id: PK.to_owned(),
+            checkpoint_id: binding.checkpoint_id.clone(),
+            owner: "owned-live-reservation".to_owned(),
+            parent_commit: binding.parent_commit.clone(),
+            created_at: 1,
+            now_ms: 1,
+            claims: versioned.iter().map(|claim| claim.claim.clone()).collect(),
+            import_session: None,
+            import_identity: None,
+            capture_scope: Some(f.scope.clone()),
+        };
+        let plan = VersionedLiveClaimCommitPlan::new(ordinary, &versioned)
+            .expect("bind exact versioned synthetic claims");
+        NativeVersionedReasoningClaimCommitPlan::new(plan, &source)
+            .expect("seal the source-derived synthetic companion")
+    }
+
+    #[cfg(unix)]
+    async fn versioned_native_seal_fixture() -> VersionedNativeSealFixture {
+        use crate::internal::ai::coverage_gate::tests::cov2_native_v2_turn;
+
+        let f = Fixture::new().await;
+        let (ordinary, ordinary_payload) = f.artifact(None).await;
+        let binding = ordinary.header.binding;
+        let identity = ordinary.identity;
+        let payload = native_pending_payload_from_ordinary(
+            &ordinary_payload,
+            vec![(0, b"synthetic native pending-v2 proof".to_vec())],
+        );
+        let turns = [cov2_native_v2_turn(
+            "synthetic-turn-0",
+            "synthetic visible typed reasoning",
+            Completeness::Complete,
+        )];
+        let companion = versioned_companion_for_turns(&f, &payload, &binding, &turns).await;
+        VersionedNativeSealFixture {
+            f,
+            binding,
+            identity,
+            payload,
+            ordinary_payload,
+            companion,
+        }
+    }
+
+    /// Compare the actual repository rows and ref tip without exposing any
+    /// synthetic source bytes in failed assertions.
+    #[cfg(unix)]
+    async fn versioned_seal_state(f: &Fixture) -> (Vec<String>, Vec<String>, i64, Option<String>) {
+        use sha2::{Digest, Sha256};
+
+        let metadata =
+            f.db.query_all_raw(Statement::from_string(
+                f.db.get_database_backend(),
+                "SELECT json_object('scope',scope,'target',target,'key',key,'value',hex(value), \
+                 'type',value_type,'created',created_at,'updated',updated_at) AS row \
+                 FROM metadata_kv ORDER BY scope,target,key"
+                    .to_owned(),
+            ))
+            .await
+            .expect("read pending, alias, marker and receipt rows")
+            .into_iter()
+            .map(|row| {
+                let value: String = row.try_get_by("row").expect("read metadata row");
+                hex::encode(Sha256::digest(value.as_bytes()))
+            })
+            .collect();
+        let claims = f
+            .db
+            .query_all_raw(Statement::from_string(
+                f.db.get_database_backend(),
+                "SELECT json_object('session',session_id,'key',logical_turn_key, \
+                 'version',coverage_schema_version,'digest',coverage_digest, \
+                 'completeness',completeness,'revision',revision,'state',state, \
+                 'attempt',attempt_checkpoint_id,'owner',owner,'lease',lease_expires_at, \
+                 'fence',fence_token,'checkpoint',checkpoint_id,'traces',traces_commit, \
+                 'channel',source_channel,'created',created_at,'updated',updated_at) AS row \
+                 FROM agent_coverage_claim ORDER BY session_id,coverage_schema_version,logical_turn_key"
+                    .to_owned(),
+            ))
+            .await
+            .expect("read full coverage lease rows")
+            .into_iter()
+            .map(|row| {
+                let value: String = row.try_get_by("row").expect("read coverage row");
+                hex::encode(Sha256::digest(value.as_bytes()))
+            })
+            .collect();
+        let checkpoints =
+            f.db.query_one_raw(Statement::from_string(
+                f.db.get_database_backend(),
+                "SELECT COUNT(*) AS n FROM agent_checkpoint".to_owned(),
+            ))
+            .await
+            .expect("count catalog checkpoints")
+            .expect("receive checkpoint count")
+            .try_get_by("n")
+            .expect("decode checkpoint count");
+        let traces_ref = std::fs::read_to_string(f.storage.join("refs/libra/traces")).ok();
+        (metadata, claims, checkpoints, traces_ref)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cov2_versioned_native_seal_consumes_checked_borrow() {
+        use crate::internal::ai::{
+            coverage_gate::tests::{cov2_native_v2_turn, turn},
+            observed_agents::{RedactedBytes, coverage::CoverageSchemaVersion},
+        };
+
+        let fixture = versioned_native_seal_fixture().await;
+        let VersionedNativeSealFixture {
+            f,
+            binding,
+            identity,
+            payload,
+            companion,
+            ..
+        } = fixture;
+        let before = versioned_seal_state(&f).await;
+        let artifact = SealedVersionedPendingArtifact::seal(
+            &f.db,
+            &f.storage,
+            f.root.path(),
+            VersionedPendingSealRequest {
+                binding: binding.clone(),
+                identity,
+                payload: &payload,
+                companion: &companion,
+            },
+            deadline(),
+        )
+        .await
+        .expect("the same sealed source and companion must seal in memory");
+        assert_eq!(versioned_seal_state(&f).await, before);
+        let envelope: VersionedPendingEnvelope = serde_json::from_slice(artifact.bytes()).unwrap();
+        envelope.validate().unwrap();
+        let (version, claim) = companion.versioned().claims().next().unwrap();
+        let expected = companion
+            .reasoning()
+            .turn(version, &claim.logical_turn_key)
+            .unwrap();
+        let association = &envelope.payload.identity_commit_associations[0];
+        assert_eq!(association.coverage_schema_version, version.as_i64());
+        assert_eq!(association.logical_turn_key, claim.logical_turn_key);
+        assert_eq!(association.slot, expected.slot());
+        assert_eq!(association.descriptor_mac, expected.descriptor_mac());
+        assert_eq!(
+            envelope.coverage.claims[0].coverage_schema_version,
+            version.as_i64()
+        );
+        assert_eq!(
+            envelope.coverage.claims[0].logical_turn_key,
+            claim.logical_turn_key
+        );
+        assert!(envelope.payload.reasoning_source.is_some());
+
+        // A locally re-authenticated wire edit still cannot swap identity
+        // descriptor domains or the corresponding versioned claim tuple.
+        let mut wrong_domain: serde_json::Value = serde_json::from_slice(artifact.bytes()).unwrap();
+        wrong_domain["payload"]["identity_commit_associations"][0]["descriptor_mac"] =
+            serde_json::json!(format!("reasoning-identity/hmac-v1/{}", "a".repeat(64)));
+        let wrong_domain: VersionedPendingEnvelope = serde_json::from_value(wrong_domain).unwrap();
+        assert!(wrong_domain.validate().is_err());
+        let mut wrong_version: serde_json::Value =
+            serde_json::from_slice(artifact.bytes()).unwrap();
+        wrong_version["coverage"]["claims"][0]["coverage_schema_version"] =
+            serde_json::json!(CoverageSchemaVersion::V1.as_i64());
+        let wrong_version: VersionedPendingEnvelope =
+            serde_json::from_value(wrong_version).unwrap();
+        assert!(wrong_version.validate().is_err());
+
+        let changed = versioned_native_seal_fixture().await;
+        let other_source = native_pending_payload_from_ordinary(
+            &changed.ordinary_payload,
+            vec![(0, b"different synthetic native source".to_vec())],
+        );
+        assert!(
+            SealedVersionedPendingArtifact::seal(
+                &changed.f.db,
+                &changed.f.storage,
+                changed.f.root.path(),
+                VersionedPendingSealRequest {
+                    binding: changed.binding,
+                    identity: changed.identity,
+                    payload: &other_source,
+                    companion: &changed.companion,
+                },
+                deadline(),
+            )
+            .await
+            .is_err(),
+            "another NativeProven payload cannot borrow the companion"
+        );
+
+        let ordinary = versioned_native_seal_fixture().await;
+        assert!(
+            SealedVersionedPendingArtifact::seal(
+                &ordinary.f.db,
+                &ordinary.f.storage,
+                ordinary.f.root.path(),
+                VersionedPendingSealRequest {
+                    binding: ordinary.binding,
+                    identity: ordinary.identity,
+                    payload: &ordinary.ordinary_payload,
+                    companion: &ordinary.companion,
+                },
+                deadline(),
+            )
+            .await
+            .is_err(),
+            "ordinary content cannot enter the native sealer"
+        );
+
+        let partial = versioned_native_seal_fixture().await;
+        let partial_payload = CheckpointRedactedPayload::from_redacted_capture(
+            RedactedBytes::new_unchecked(partial.ordinary_payload.transcript().bytes().to_vec()),
+            None,
+            RedactedBytes::new_unchecked(partial.ordinary_payload.metadata_json().bytes().to_vec()),
+            RedactedBytes::new_unchecked(
+                partial
+                    .ordinary_payload
+                    .lifecycle_events_jsonl()
+                    .bytes()
+                    .to_vec(),
+            ),
+            RedactedBytes::new_unchecked(
+                partial
+                    .ordinary_payload
+                    .redaction_report_json()
+                    .bytes()
+                    .to_vec(),
+            ),
+        )
+        .unwrap();
+        assert!(
+            SealedVersionedPendingArtifact::seal(
+                &partial.f.db,
+                &partial.f.storage,
+                partial.f.root.path(),
+                VersionedPendingSealRequest {
+                    binding: partial.binding,
+                    identity: partial.identity,
+                    payload: &partial_payload,
+                    companion: &partial.companion,
+                },
+                deadline(),
+            )
+            .await
+            .is_err(),
+            "partial source cannot become a native pending artifact"
+        );
+
+        let shared = versioned_native_seal_fixture().await;
+        let same_key_turns = [
+            turn("synthetic-turn-0", "ordinary v1", Completeness::Complete),
+            cov2_native_v2_turn("synthetic-turn-0", "visible v2", Completeness::Complete),
+        ];
+        let same_key = versioned_companion_for_turns(
+            &shared.f,
+            &shared.payload,
+            &shared.binding,
+            &same_key_turns,
+        )
+        .await;
+        assert!(
+            SealedVersionedPendingArtifact::seal(
+                &shared.f.db,
+                &shared.f.storage,
+                shared.f.root.path(),
+                VersionedPendingSealRequest {
+                    binding: shared.binding,
+                    identity: shared.identity,
+                    payload: &shared.payload,
+                    companion: &same_key,
+                },
+                deadline(),
+            )
+            .await
+            .is_err(),
+            "native cross-version bare-key aliases remain closed until OG-29"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cov2_versioned_native_seal_binding_and_zero_write() {
+        use crate::internal::ai::coverage_gate::{
+            VersionedLiveClaimCommitPlan, VersionedReservedTurnClaim, tests::cov2_native_v2_turn,
+        };
+
+        let valid = versioned_native_seal_fixture().await;
+        let before = versioned_seal_state(&valid.f).await;
+        let sealed = SealedVersionedPendingArtifact::seal(
+            &valid.f.db,
+            &valid.f.storage,
+            valid.f.root.path(),
+            VersionedPendingSealRequest {
+                binding: valid.binding,
+                identity: valid.identity,
+                payload: &valid.payload,
+                companion: &valid.companion,
+            },
+            deadline(),
+        )
+        .await
+        .expect("a valid source-bound request seals only in RAM");
+        assert!(!sealed.bytes().is_empty());
+        assert_eq!(versioned_seal_state(&valid.f).await, before);
+
+        for mutation in [
+            "source_commitment",
+            "session_alias",
+            "scope",
+            "checkpoint",
+            "parent",
+            "provider",
+            "companion_checkpoint",
+        ] {
+            let mut fixture = versioned_native_seal_fixture().await;
+            let mut alternate_companion = None;
+            match mutation {
+                "source_commitment" => {
+                    fixture.binding.source_commitment =
+                        format!("source/hmac-v2/{}", "f".repeat(64));
+                }
+                "session_alias" => fixture.binding.session_id = Uuid::new_v4().to_string(),
+                "scope" => fixture.binding.scope.worktree_id = "wrong-worktree".to_owned(),
+                "checkpoint" => fixture.binding.checkpoint_id = Uuid::new_v4().to_string(),
+                "parent" => {
+                    fixture.binding.parent_commit = None;
+                    fixture.binding.parent_unborn = true;
+                }
+                "provider" => {
+                    fixture
+                        .f
+                        .db
+                        .execute_raw(Statement::from_sql_and_values(
+                            fixture.f.db.get_database_backend(),
+                            "UPDATE agent_session SET agent_kind = 'codex' WHERE session_id = ?",
+                            [PK.into()],
+                        ))
+                        .await
+                        .unwrap();
+                    fixture.identity = fixture.f.identity(None).await;
+                    fixture.binding.session_id = fixture.identity.alias().to_owned();
+                }
+                "companion_checkpoint" => {
+                    let mut wrong = fixture.binding.clone();
+                    wrong.checkpoint_id = Uuid::new_v4().to_string();
+                    let turns = [cov2_native_v2_turn(
+                        "synthetic-turn-0",
+                        "synthetic visible typed reasoning",
+                        Completeness::Complete,
+                    )];
+                    alternate_companion = Some(
+                        versioned_companion_for_turns(&fixture.f, &fixture.payload, &wrong, &turns)
+                            .await,
+                    );
+                }
+                _ => unreachable!("fixed mutation matrix"),
+            }
+            let before = versioned_seal_state(&fixture.f).await;
+            let error = SealedVersionedPendingArtifact::seal(
+                &fixture.f.db,
+                &fixture.f.storage,
+                fixture.f.root.path(),
+                VersionedPendingSealRequest {
+                    binding: fixture.binding,
+                    identity: fixture.identity,
+                    payload: &fixture.payload,
+                    companion: alternate_companion.as_ref().unwrap_or(&fixture.companion),
+                },
+                deadline(),
+            )
+            .await;
+            assert!(
+                error.is_err(),
+                "{mutation} must not produce a sealed artifact"
+            );
+            assert_eq!(
+                versioned_seal_state(&fixture.f).await,
+                before,
+                "{mutation} must not alter artifact, lease, catalog or ref state"
+            );
+        }
+
+        // A claim edited after source derivation cannot become a sealed
+        // companion and therefore cannot reach the production seal entrance.
+        let source_bound = versioned_native_seal_fixture().await;
+        let mut changed = source_bound.companion.versioned().ordinary().clone();
+        changed.claims[0].coverage_digest = "f".repeat(64);
+        let sidecar = [VersionedReservedTurnClaim::new(2, changed.claims[0].clone()).unwrap()];
+        let changed = VersionedLiveClaimCommitPlan::new(changed, &sidecar).unwrap();
+        let before = versioned_seal_state(&source_bound.f).await;
+        assert!(
+            NativeVersionedReasoningClaimCommitPlan::new(
+                changed,
+                source_bound.companion.reasoning(),
+            )
+            .is_err()
+        );
+        assert_eq!(versioned_seal_state(&source_bound.f).await, before);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cov2_versioned_native_seal_authenticated_outer_roundtrip() {
+        let fixture = versioned_native_seal_fixture().await;
+        let VersionedNativeSealFixture {
+            f,
+            binding,
+            identity,
+            payload,
+            companion,
+            ..
+        } = fixture;
+        let artifact = SealedVersionedPendingArtifact::seal(
+            &f.db,
+            &f.storage,
+            f.root.path(),
+            VersionedPendingSealRequest {
+                binding: binding.clone(),
+                identity,
+                payload: &payload,
+                companion: &companion,
+            },
+            deadline(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(artifact.header.version, VERSION);
+        assert!(artifact.binding() == &binding);
+        assert_eq!(artifact.header.envelope_bytes, artifact.bytes().len());
+        assert_eq!(artifact.identity.alias(), binding.session_id);
+        assert_eq!(
+            artifact.coverage_owner,
+            companion.versioned().ordinary().owner
+        );
+        assert_eq!(artifact.coverage_claims.len(), 1);
+        PendingHeader::decode(&serde_json::to_string(&artifact.header).unwrap()).unwrap();
+        let exact_mac = binding
+            .scope
+            .sign_pending_envelope_until(
+                &f.db,
+                &f.storage,
+                f.root.path(),
+                artifact.bytes(),
+                deadline(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(artifact.header.mac, exact_mac);
+        let authenticated = AuthenticatedPendingEnvelope::verify(
+            &f.db,
+            &f.storage,
+            f.root.path(),
+            &binding.scope,
+            artifact.bytes(),
+            &artifact.header.mac,
+            deadline(),
+        )
+        .await
+        .unwrap();
+        let decoded = decode_authenticated_versioned_envelope(&authenticated, &binding).unwrap();
+        assert_eq!(decoded.version, VERSIONED_ENVELOPE_VERSION);
+        assert!(decoded.binding == binding);
+        assert_eq!(decoded.coverage.claims.len(), 1);
+        assert_eq!(decoded.payload.identity_commit_associations.len(), 1);
+        let claim = &decoded.coverage.claims[0];
+        let association = &decoded.payload.identity_commit_associations[0];
+        assert_eq!(
+            claim.coverage_schema_version,
+            association.coverage_schema_version
+        );
+        assert_eq!(claim.logical_turn_key, association.logical_turn_key);
+        assert!(decoded.payload.reasoning_source.is_some());
+        assert!(
+            serde_json::to_value(&decoded.payload.redacted)
+                .unwrap()
+                .get("transcript")
+                .is_some(),
+            "authenticated v2 keeps the redacted ordinary projection"
+        );
+
+        let mut tampered = artifact.bytes().to_vec();
+        tampered[10] ^= 1;
+        assert!(
+            AuthenticatedPendingEnvelope::verify(
+                &f.db,
+                &f.storage,
+                f.root.path(),
+                &binding.scope,
+                &tampered,
+                &artifact.header.mac,
+                deadline(),
+            )
+            .await
+            .is_err(),
+            "a modified outer byte cannot receive an authentication witness"
+        );
+        // Re-entering the pure COV2-04 codec from the actual sealed fields
+        // must reproduce exactly the MACed bytes, including tuple order.
+        let rebuilt =
+            encode_versioned_envelope(decoded.binding, decoded.payload, decoded.coverage).unwrap();
+        assert_eq!(rebuilt, artifact.bytes());
     }
 
     fn binding(

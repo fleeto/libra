@@ -267,3 +267,21 @@ a bare logical key across versions; COV2-24 consumes its checked same-source
 borrow to seal an in-memory artifact, and COV2-22 owns real persistence and
 frozen old-reader behavior. No durable v2 pending artifact, replay, OpenCode
 Session admission or provider Source A is established by this card.
+
+## Source-bound in-memory pending-v2 seal (COV2-24)
+
+The private v2 sealer accepts one complete redacted payload, its sealed
+source-derived versioned claim companion, and a matching capture binding and
+prepared alias. It invokes the COV2-23 checked borrow from that same payload;
+the versioned inner projection then pairs each ordered `(version, logical key)`
+claim with the checked slot and descriptor MAC. A missing or mismatched pair
+fails before a v2 artifact can be returned. The resulting outer-v2 bytes use
+the COV2-04 bounded codec and the existing exact-byte pending MAC domain with
+the historical header version. The v1 sealer and its bytes remain unchanged.
+
+This operation produces only an authenticated artifact in memory. It does not
+persist pending rows, retain a claim lease, move a ref, or acknowledge a
+checkpoint. COV2-22 owns the transaction and frozen old-reader behavior;
+COV2-08 owns replay. Synthetic tests of this seal do not prove OpenCode
+provider Source A or permit native cross-version aliases with the same bare
+logical key.

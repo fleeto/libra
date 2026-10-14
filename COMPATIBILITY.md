@@ -1175,6 +1175,22 @@ owns the in-memory sealed artifact and COV2-22 owns persistence and frozen
 old-reader rejection; COV2-08 owns recovery/replay. No OpenCode native archive or
 provider Source A is established by synthetic codec tests.
 
+### Source-bound in-memory pending-v2 seal (COV2-24)
+
+The private v2 sealer takes a complete redacted payload and its sealed,
+source-derived versioned claim companion with a matching capture binding and
+prepared alias. It calls the COV2-23 same-source gate, pairs every ordered
+`(version, logical key)` claim with its checked inner identity and descriptor
+MAC, then encodes bounded outer-v2 bytes through COV2-04. The existing header
+version and exact-byte pending MAC domain authenticate the result. The v1
+sealer and persisted byte format remain unchanged.
+
+Sealing alone creates an in-memory artifact; it writes no pending row, claim
+lease, marker, ref or success acknowledgment. COV2-22 owns transactional
+persistence and frozen old-reader rejection, and COV2-08 owns replay. Native
+cross-version bare-key aliases still fail closed until OG-29. These synthetic
+checks do not establish OpenCode provider Source A or native archival.
+
 ### OG-20 private import transport
 
 The authorized descriptor helper can return a native-proven typed collection through an authenticated private import transport response. A one-request key binds request, authorized source, repository scope and collection before the parent restores the complete native proof and partitions owned items by reserved turn. An empty collection retains the previous helper response and source projection bytes; an unauthenticated or unproved collection fails closed without returning candidate bytes to ordinary import. Production provider capabilities and native issuers remain disabled. Source A remains UNPROVEN, and real native field admission is deferred. The transport adds no public option, database schema or decryption capability.

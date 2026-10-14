@@ -30,7 +30,7 @@ use crate::internal::{
                 AuthenticatedPendingEnvelope, CheckpointRedactedPayload, PreparedPendingNativeSeal,
                 ReasoningCoveragePlan, ReasoningTurnIdentity,
             },
-            pending::PendingBinding,
+            pending::{PendingBinding, VersionedPendingSealMaterial},
             pending_identity::PreparedPendingAlias,
             snapshot::CaptureSnapshotProjection,
         },
@@ -642,6 +642,48 @@ impl PendingPayloadProjection {
         Self::seal_base(conn, storage, root, payload, identity, deadline)
             .await?
             .with_bound_reasoning(prepared.batch, &prepared.binding, prepared.associations)
+    }
+
+    /// Only the pending artifact sealer supplies this payload-owned borrow and
+    /// its source-derived companion. Bare logical keys cannot supply a version.
+    #[cfg_attr(not(all(test, unix)), allow(dead_code))]
+    pub(crate) async fn seal_bound_versioned_reasoning<C: ConnectionTrait>(
+        conn: &C,
+        storage: &Path,
+        root: &Path,
+        identity: &PreparedPendingAlias,
+        material: VersionedPendingSealMaterial<'_>,
+        deadline: Instant,
+    ) -> Result<VersionedPendingPayloadProjection> {
+        let (payload, prepared, companion) = material.into_parts();
+        let claims = companion.versioned();
+        let count = claims.claims().count();
+        ensure!(
+            count > 0
+                && count <= crate::internal::ai::traces::REASONING_ARTIFACT_MAX_ENTRIES
+                && prepared.associations.len() == count,
+            REMEDY
+        );
+        let mut associations = Vec::with_capacity(count);
+        for ((version, claim), (key, turn)) in claims.claims().zip(prepared.associations) {
+            let expected = companion
+                .reasoning()
+                .turn(version, &claim.logical_turn_key)
+                .ok_or_else(failure)?;
+            ensure!(
+                key == claim.logical_turn_key
+                    && turn.slot() == expected.slot()
+                    && turn.descriptor_mac() == expected.descriptor_mac()
+                    && turn.kind() == expected.kind(),
+                REMEDY
+            );
+            associations.push(VersionedPendingIdentityAssociation::from_prepared_turn(
+                version, &key, &turn,
+            ));
+        }
+        let source = seal_pending(prepared.batch, &prepared.binding).map_err(|_| failure())?;
+        let redacted = Self::seal_base(conn, storage, root, payload, identity, deadline).await?;
+        VersionedPendingPayloadProjection::new_codec(redacted, Some(source), associations)
     }
 
     async fn seal_base<C: ConnectionTrait>(

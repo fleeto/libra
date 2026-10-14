@@ -1118,6 +1118,17 @@ This internal producer path does not activate OpenCode live/import Sessions,
 durable v2 pending replay or native archival. A synthetic sealed payload does
 not prove real provider Source A; unproven fields remain partial.
 
+### Versioned live-reservation read verification (COV2-20)
+
+The internal pending preparation seam can verify a sealed versioned claim plan
+against the actual claim rows using its caller's database connection or
+transaction. It checks each `(session, version, logical key)` independently,
+including digest, completeness, owner, fence, previous revision and live
+reservation state. An expired lease with unchanged ownership remains valid;
+verification never retains or changes a lease. The v1 API and persisted bytes
+stay unchanged. Transactional retain and durable v2 pending artifacts belong
+to later cards; this read-only helper does not enable real native archival.
+
 ### OG-20 private import transport
 
 The authorized descriptor helper can return a native-proven typed collection through an authenticated private import transport response. A one-request key binds request, authorized source, repository scope and collection before the parent restores the complete native proof and partitions owned items by reserved turn. An empty collection retains the previous helper response and source projection bytes; an unauthenticated or unproved collection fails closed without returning candidate bytes to ordinary import. Production provider capabilities and native issuers remain disabled. Source A remains UNPROVEN, and real native field admission is deferred. The transport adds no public option, database schema or decryption capability.

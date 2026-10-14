@@ -197,3 +197,16 @@ v1 byte domains remain unchanged. This writer capability is internal;
 OpenCode live/import activation, durable v2 pending replay, real provider
 Source A proof, and native archival remain gated by later work. Synthetic
 sealed fixtures exercise transaction behavior but confer no issuer authority.
+
+## Versioned live-reservation verification (COV2-20)
+
+An internal read-only helper accepts the sealed `VersionedLiveClaimCommitPlan`
+and the caller's existing database connection or SQLite transaction. It reads
+each actual `(session, coverage version, logical key)` claim row and requires
+exact digest, completeness, owner, fence, previous revision and `reserved_live`
+state. A still-owned expired lease remains valid; a changed ownership tuple
+fails closed. Same-key v1/v2 reservations are checked independently. The
+helper checks the current workspace scope, has a 4096-claim bound, and does not
+update leases or open another connection. COV2-21 owns retain mutations and
+COV2-22 owns durable pending-v2 persistence; this helper alone does not enable
+pending replay or native-source admission.

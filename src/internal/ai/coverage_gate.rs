@@ -243,6 +243,89 @@ pub(crate) async fn verify_reserved_live_claims_with_conn<C: ConnectionTrait>(
     Ok(())
 }
 
+/// Read back the exact sealed version-keyed reservation tuple in the
+/// caller's connection (normally its pending-artifact SQLite transaction).
+/// Lease expiry alone does not revoke ownership: only a changed owner, fence,
+/// revision, digest, completeness, or state does. This helper never updates a
+/// claim or opens an independent pool connection.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) async fn verify_versioned_reserved_live_claims_with_conn<C: ConnectionTrait>(
+    conn: &C,
+    scope: &CaptureScope,
+    plan: &VersionedLiveClaimCommitPlan,
+) -> Result<()> {
+    let ordinary = plan.ordinary();
+    ensure!(
+        ordinary.capture_scope.as_ref() == Some(scope),
+        "capture recovery coverage scope changed; retry through the current provider session"
+    );
+    ensure!(
+        !ordinary.claims.is_empty()
+            && ordinary.claims.len()
+                <= crate::internal::metadata::REASONING_IDENTITY_SESSION_MAP_MAX_ENTRIES,
+        "capture recovery coverage claim count is invalid; run `libra agent doctor`"
+    );
+    scope.assert_workspace_fence_live(conn).await?;
+    for (version, claim) in plan.claims() {
+        let previous_revision = claim
+            .next_revision
+            .checked_sub(1)
+            .context("capture recovery coverage revision is invalid; run `libra agent doctor`")?;
+        ensure!(
+            previous_revision >= 0 && claim.fence_token > 0,
+            "capture recovery coverage fence is invalid; run `libra agent doctor`"
+        );
+        let row = conn
+            .query_one_raw(Statement::from_sql_and_values(
+                conn.get_database_backend(),
+                "SELECT coverage_digest, completeness, owner, fence_token, revision, state
+                 FROM agent_coverage_claim
+                 WHERE session_id = ? AND logical_turn_key = ?
+                   AND coverage_schema_version = ? LIMIT 1",
+                [
+                    ordinary.session_id.clone().into(),
+                    claim.logical_turn_key.clone().into(),
+                    version.as_i64().into(),
+                ],
+            ))
+            .await
+            .context("cannot verify versioned capture coverage claims; run `libra agent doctor`")?;
+        let Some(row) = row else {
+            bail!(
+                "capture recovery coverage ownership changed; retry through the current provider session"
+            );
+        };
+        let digest: String = row
+            .try_get_by("coverage_digest")
+            .context("cannot decode versioned capture coverage digest; run `libra agent doctor`")?;
+        let completeness: String = row.try_get_by("completeness").context(
+            "cannot decode versioned capture coverage completeness; run `libra agent doctor`",
+        )?;
+        let owner: Option<String> = row
+            .try_get_by("owner")
+            .context("cannot decode versioned capture coverage owner; run `libra agent doctor`")?;
+        let fence_token: Option<i64> = row
+            .try_get_by("fence_token")
+            .context("cannot decode versioned capture coverage fence; run `libra agent doctor`")?;
+        let revision: i64 = row.try_get_by("revision").context(
+            "cannot decode versioned capture coverage revision; run `libra agent doctor`",
+        )?;
+        let state: String = row
+            .try_get_by("state")
+            .context("cannot decode versioned capture coverage state; run `libra agent doctor`")?;
+        ensure!(
+            digest == claim.coverage_digest
+                && completeness == claim.completeness.as_db_str()
+                && owner.as_deref() == Some(ordinary.owner.as_str())
+                && fence_token == Some(claim.fence_token)
+                && revision == previous_revision
+                && state == "reserved_live",
+            "capture recovery coverage ownership changed; retry through the current provider session"
+        );
+    }
+    Ok(())
+}
+
 /// Hand verified live reservations to the durable artifact that is being
 /// persisted in this same writer transaction. The same owner/fence/revision
 /// guards as [`verify_reserved_live_claims_with_conn`] apply; the lease
@@ -385,7 +468,7 @@ impl<'a> ReasoningCoverageInput<'a> {
         }
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg_attr(not(all(test, unix)), allow(dead_code))]
     pub(crate) fn native_versioned(candidate: &'a NativeVersionedReasoningCoveragePlan) -> Self {
         Self {
             candidate: None,
@@ -2576,13 +2659,13 @@ impl TracesTxnExtra for ReasoningClaimCommitPlan {
 /// A sealed native-v2 identity companion. The plan constructor only accepts
 /// payload-derived metadata, and this companion checks the exact versioned
 /// source tuples before it can enter the HistoryManager ref-CAS transaction.
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg_attr(not(all(test, unix)), allow(dead_code))]
 pub(crate) struct NativeVersionedReasoningClaimCommitPlan {
     versioned: VersionedLiveClaimCommitPlan,
     reasoning: NativeVersionedReasoningCoveragePlan,
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg_attr(not(all(test, unix)), allow(dead_code))]
 impl NativeVersionedReasoningClaimCommitPlan {
     pub(crate) fn new(
         versioned: VersionedLiveClaimCommitPlan,
@@ -3139,7 +3222,7 @@ impl TracesTxnExtra for VersionedLiveClaimCommitPlan {
 pub(crate) mod tests {
     #[cfg(unix)]
     use chrono::Utc;
-    use sea_orm::Database;
+    use sea_orm::{Database, TransactionTrait};
 
     use super::*;
     use crate::internal::{
@@ -3170,6 +3253,7 @@ pub(crate) mod tests {
         turn
     }
 
+    #[cfg(unix)]
     pub(crate) fn cov2_native_v2_turn(
         key: &str,
         text: &str,
@@ -3220,6 +3304,315 @@ pub(crate) mod tests {
             .await
             .expect("commit synthetic DB claim");
         assert_eq!(changed.rows_affected(), 1);
+    }
+
+    async fn cov2_versioned_verify_fixture() -> (
+        DatabaseConnection,
+        CaptureScope,
+        VersionedLiveClaimCommitPlan,
+    ) {
+        let conn = gate_db().await;
+        let scope = CaptureScope::main_for_connection(&conn)
+            .await
+            .expect("capture scope");
+        let turns = [
+            turn("cov2-verify-shared", "ordinary", Completeness::Complete),
+            cov2_visible_turn("cov2-verify-shared", "visible", Completeness::Complete),
+        ];
+        let reserved = reserve_turn_claims_by_version_with_capture_scope(
+            &conn,
+            &scope,
+            "claude_code__s1",
+            &turns,
+            &[1, 2],
+            "verify-owner",
+            1,
+            "live",
+        )
+        .await
+        .expect("reserve both schema versions of one key");
+        assert_eq!(reserved.reserved.len(), 2);
+        let ordinary = LiveClaimCommitPlan {
+            source_channel: "live",
+            session_id: "claude_code__s1".to_owned(),
+            checkpoint_id: "cov2-verify-checkpoint".to_owned(),
+            owner: "verify-owner".to_owned(),
+            parent_commit: None,
+            created_at: 1,
+            now_ms: 1,
+            claims: reserved
+                .reserved
+                .iter()
+                .map(|bound| bound.claim.clone())
+                .collect(),
+            import_session: None,
+            import_identity: None,
+            capture_scope: Some(scope.clone()),
+        };
+        let plan = VersionedLiveClaimCommitPlan::new(ordinary, &reserved.reserved)
+            .expect("bind both real DB reservations");
+        (conn, scope, plan)
+    }
+
+    fn cov2_verify_subset_plan(
+        plan: &VersionedLiveClaimCommitPlan,
+        index: usize,
+    ) -> VersionedLiveClaimCommitPlan {
+        let (coverage_schema_version, claim) = plan
+            .claims()
+            .nth(index)
+            .expect("the fixture has two versions");
+        let bound = VersionedReservedTurnClaim {
+            coverage_schema_version,
+            claim: claim.clone(),
+        };
+        let mut ordinary = plan.ordinary().clone();
+        ordinary.claims = vec![bound.claim.clone()];
+        VersionedLiveClaimCommitPlan::new(ordinary, &[bound])
+            .expect("bind one schema version independently")
+    }
+
+    async fn cov2_verify_claim_rows(conn: &impl ConnectionTrait) -> Vec<String> {
+        let mut rows = Vec::with_capacity(2);
+        for version in [1_i64, 2_i64] {
+            let row = conn
+                .query_one_raw(Statement::from_sql_and_values(
+                    conn.get_database_backend(),
+                    "SELECT logical_turn_key, coverage_schema_version, coverage_digest,
+                            completeness, revision, state, attempt_checkpoint_id,
+                            owner, lease_expires_at, fence_token, checkpoint_id,
+                            traces_commit, source_channel, created_at, updated_at
+                     FROM agent_coverage_claim
+                     WHERE session_id = 'claude_code__s1'
+                       AND logical_turn_key = 'cov2-verify-shared'
+                       AND coverage_schema_version = ?",
+                    [version.into()],
+                ))
+                .await
+                .expect("read original versioned claim")
+                .expect("original versioned claim exists");
+            rows.push(format!(
+                "{:?}{:?}",
+                (
+                    row.try_get_by::<String, _>("logical_turn_key")
+                        .expect("key"),
+                    row.try_get_by::<i64, _>("coverage_schema_version")
+                        .expect("version"),
+                    row.try_get_by::<String, _>("coverage_digest")
+                        .expect("digest"),
+                    row.try_get_by::<String, _>("completeness")
+                        .expect("completeness"),
+                    row.try_get_by::<i64, _>("revision").expect("revision"),
+                    row.try_get_by::<String, _>("state").expect("state"),
+                    row.try_get_by::<Option<String>, _>("attempt_checkpoint_id")
+                        .expect("attempt checkpoint"),
+                    row.try_get_by::<Option<String>, _>("owner").expect("owner"),
+                ),
+                (
+                    row.try_get_by::<Option<i64>, _>("lease_expires_at")
+                        .expect("lease"),
+                    row.try_get_by::<Option<i64>, _>("fence_token")
+                        .expect("fence"),
+                    row.try_get_by::<Option<String>, _>("checkpoint_id")
+                        .expect("checkpoint"),
+                    row.try_get_by::<Option<String>, _>("traces_commit")
+                        .expect("traces commit"),
+                    row.try_get_by::<String, _>("source_channel")
+                        .expect("source channel"),
+                    row.try_get_by::<i64, _>("created_at").expect("created at"),
+                    row.try_get_by::<i64, _>("updated_at").expect("updated at"),
+                )
+            ));
+        }
+        rows
+    }
+
+    #[tokio::test]
+    async fn cov2_versioned_reserved_live_claims_verify_actual_tuple() {
+        let (conn, scope, plan) = cov2_versioned_verify_fixture().await;
+        let original = cov2_verify_claim_rows(&conn).await;
+        verify_versioned_reserved_live_claims_with_conn(&conn, &scope, &plan)
+            .await
+            .expect("both actual version-keyed DB tuples match their sealed claims");
+        let mut empty_ordinary = plan.ordinary().clone();
+        empty_ordinary.claims.clear();
+        let empty = VersionedLiveClaimCommitPlan::new(empty_ordinary, &[])
+            .expect("an empty version sidecar is structurally valid");
+        assert!(
+            verify_versioned_reserved_live_claims_with_conn(&conn, &scope, &empty)
+                .await
+                .is_err(),
+            "an empty pending claim set must not receive a vacuous ownership ACK"
+        );
+        let excessive_bound = (0
+            ..=crate::internal::metadata::REASONING_IDENTITY_SESSION_MAP_MAX_ENTRIES)
+            .map(|index| VersionedReservedTurnClaim {
+                coverage_schema_version: CoverageSchemaVersion::V1,
+                claim: ReservedTurnClaim {
+                    logical_turn_key: format!("excessive-{index}"),
+                    coverage_digest: "0".repeat(64),
+                    completeness: Completeness::Complete,
+                    fence_token: 1,
+                    next_revision: 1,
+                },
+            })
+            .collect::<Vec<_>>();
+        let mut excessive_ordinary = plan.ordinary().clone();
+        excessive_ordinary.claims = excessive_bound
+            .iter()
+            .map(|bound| bound.claim.clone())
+            .collect();
+        let excessive = VersionedLiveClaimCommitPlan::new(excessive_ordinary, &excessive_bound)
+            .expect("oversized input remains structurally bindable before the bounded DB helper");
+        assert!(
+            verify_versioned_reserved_live_claims_with_conn(&conn, &scope, &excessive)
+                .await
+                .is_err(),
+            "an oversized plan must reject before an unbounded claim-row scan"
+        );
+        let mutations = [
+            "coverage_digest = 'ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff'",
+            "completeness = 'incomplete'",
+            "owner = 'other-owner'",
+            "fence_token = fence_token + 1",
+            "revision = revision + 1",
+            "state = 'reserved_import'",
+            "logical_turn_key = 'different-key'",
+            "coverage_schema_version = 3",
+        ];
+        for mutation in mutations {
+            let txn = conn.begin().await.expect("begin isolated tuple mutation");
+            let sql = format!(
+                "UPDATE agent_coverage_claim SET {mutation}
+                 WHERE session_id = 'claude_code__s1'
+                   AND logical_turn_key = 'cov2-verify-shared'
+                   AND coverage_schema_version = 2"
+            );
+            let changed = txn
+                .execute_unprepared(&sql)
+                .await
+                .expect("mutate exactly one versioned claim");
+            assert_eq!(changed.rows_affected(), 1, "{mutation}");
+            assert!(
+                verify_versioned_reserved_live_claims_with_conn(&txn, &scope, &plan)
+                    .await
+                    .is_err(),
+                "{mutation} must reject the altered stored tuple"
+            );
+            txn.rollback().await.expect("restore fixture tuple");
+            assert_eq!(cov2_verify_claim_rows(&conn).await, original);
+        }
+    }
+
+    #[tokio::test]
+    async fn cov2_versioned_reserved_live_claims_verify_same_key_and_expired_lease() {
+        let (conn, scope, plan) = cov2_versioned_verify_fixture().await;
+        conn.execute_unprepared(
+            "UPDATE agent_coverage_claim SET lease_expires_at = 0
+             WHERE session_id = 'claude_code__s1'
+               AND logical_turn_key = 'cov2-verify-shared'",
+        )
+        .await
+        .expect("expire both leases without transferring ownership");
+        let expired = cov2_verify_claim_rows(&conn).await;
+        verify_versioned_reserved_live_claims_with_conn(&conn, &scope, &plan)
+            .await
+            .expect("an expired lease does not revoke unchanged owner and fence");
+        let v1 = cov2_verify_subset_plan(&plan, 0);
+        let v2 = cov2_verify_subset_plan(&plan, 1);
+        for (version, accepted, rejected) in [(1_i64, &v2, &v1), (2_i64, &v1, &v2)] {
+            let txn = conn
+                .begin()
+                .await
+                .expect("begin independent version mutation");
+            let changed = txn
+                .execute_raw(Statement::from_sql_and_values(
+                    txn.get_database_backend(),
+                    "UPDATE agent_coverage_claim SET owner = 'other-owner'
+                     WHERE session_id = 'claude_code__s1'
+                       AND logical_turn_key = 'cov2-verify-shared'
+                       AND coverage_schema_version = ?",
+                    [version.into()],
+                ))
+                .await
+                .expect("change one version's owner");
+            assert_eq!(changed.rows_affected(), 1);
+            verify_versioned_reserved_live_claims_with_conn(&txn, &scope, accepted)
+                .await
+                .expect("the other version remains independently owned");
+            assert!(
+                verify_versioned_reserved_live_claims_with_conn(&txn, &scope, rejected)
+                    .await
+                    .is_err(),
+                "the altered version must reject even with the same logical key"
+            );
+            txn.rollback().await.expect("restore independent version");
+        }
+        assert_eq!(cov2_verify_claim_rows(&conn).await, expired);
+    }
+
+    #[tokio::test]
+    async fn cov2_versioned_reserved_live_claims_verify_is_read_only_in_caller_transaction() {
+        let (conn, scope, plan) = cov2_versioned_verify_fixture().await;
+        let committed = cov2_verify_claim_rows(&conn).await;
+        let mut changed_bound = plan
+            .claims()
+            .map(
+                |(coverage_schema_version, claim)| VersionedReservedTurnClaim {
+                    coverage_schema_version,
+                    claim: claim.clone(),
+                },
+            )
+            .collect::<Vec<_>>();
+        changed_bound[1].claim.coverage_digest = "e".repeat(64);
+        let mut changed_ordinary = plan.ordinary().clone();
+        changed_ordinary.claims = changed_bound
+            .iter()
+            .map(|bound| bound.claim.clone())
+            .collect();
+        let changed_plan = VersionedLiveClaimCommitPlan::new(changed_ordinary, &changed_bound)
+            .expect("bind deliberate uncommitted digest mutation");
+        let txn = conn
+            .begin()
+            .await
+            .expect("begin caller-owned pending transaction");
+        let changed = txn
+            .execute_unprepared(
+                "UPDATE agent_coverage_claim
+                 SET coverage_digest = 'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee'
+                 WHERE session_id = 'claude_code__s1'
+                   AND logical_turn_key = 'cov2-verify-shared'
+                   AND coverage_schema_version = 2",
+            )
+            .await
+            .expect("make only an uncommitted versioned claim change");
+        assert_eq!(changed.rows_affected(), 1);
+        let before_verify = cov2_verify_claim_rows(&txn).await;
+        assert!(
+            verify_versioned_reserved_live_claims_with_conn(&txn, &scope, &plan)
+                .await
+                .is_err(),
+            "the old sealed tuple must reject the uncommitted DB value"
+        );
+        verify_versioned_reserved_live_claims_with_conn(&txn, &scope, &changed_plan)
+            .await
+            .expect("the caller transaction must see its own uncommitted tuple");
+        assert_eq!(
+            cov2_verify_claim_rows(&txn).await,
+            before_verify,
+            "successful and rejected verification must not write any claim column"
+        );
+        txn.rollback().await.expect("restore committed claims");
+        assert_eq!(cov2_verify_claim_rows(&conn).await, committed);
+        verify_versioned_reserved_live_claims_with_conn(&conn, &scope, &plan)
+            .await
+            .expect("the original plan still verifies after rollback");
+        assert!(
+            verify_versioned_reserved_live_claims_with_conn(&conn, &scope, &changed_plan)
+                .await
+                .is_err(),
+            "an uncommitted mutation must not leak to the main connection"
+        );
     }
 
     #[tokio::test]

@@ -1118,7 +1118,7 @@ async fn prepare_reasoning_coverage_plan_for_keys(
 /// A v2 writer's source-derived identity set. Only the payload-owned factory
 /// below can create this value; a read context or a version label grants no
 /// producer authority. Equal logical keys remain separate across versions.
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg_attr(not(all(test, unix)), allow(dead_code))]
 #[derive(Clone)]
 pub(crate) struct NativeVersionedReasoningCoveragePlan {
     scope: CaptureScope,
@@ -1130,7 +1130,7 @@ pub(crate) struct NativeVersionedReasoningCoveragePlan {
     source_tag: [u8; 32],
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg_attr(not(all(test, unix)), allow(dead_code))]
 impl NativeVersionedReasoningCoveragePlan {
     pub(crate) fn read_context(&self) -> ReasoningIdentityReadContext {
         self.reader.clone()
@@ -1226,7 +1226,7 @@ impl NativeVersionedReasoningCoveragePlan {
 /// capture binding are revalidated for both preparation and request binding;
 /// this digest only prevents a different sealed payload from being paired
 /// with the already-created identity plan.
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg_attr(not(all(test, unix)), allow(dead_code))]
 fn native_versioned_source_tag(
     reasoning: &ReasoningSourceDisposition,
     capture_session: &str,
@@ -1280,7 +1280,7 @@ fn native_versioned_source_tag(
 /// Derive both coverage domains from one sealed native payload. The source
 /// tuple is frozen before reservations are bound; later claim ownership data
 /// cannot manufacture an identity or change a digest.
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg_attr(not(all(test, unix)), allow(dead_code))]
 pub(crate) async fn prepare_native_versioned_reasoning_coverage_plan(
     payload: &CheckpointRedactedPayload,
     request: ReasoningIdentityPreparation<'_>,
@@ -1991,7 +1991,7 @@ impl<'a> CheckpointWriteRequest<'a> {
     /// Pair a sealed native v2 source, its exact versioned claims and the
     /// transaction companion in one request. The ordinary constructor alone
     /// cannot carry a versioned companion past marker/replay fences.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg_attr(not(all(test, unix)), allow(dead_code))]
     pub(crate) fn with_native_versioned_claims(
         mut self,
         companion: &'a NativeVersionedReasoningClaimCommitPlan,

@@ -1,5 +1,44 @@
 # Changelog
 
+## [0.30.49] — 2026-10-15
+
+### OpenCode 2.0.29 ordinary capture on macOS
+
+- Fix automatic OpenCode capture failing to write a checkpoint when an
+  otherwise valid session contains unsupported reasoning state. A verified,
+  redacted ordinary copy can now be saved as a nonempty **Partial** checkpoint;
+  unsupported reasoning state and its associated reasoning text and timing
+  are removed before storage. Ordinary prompt, model and usage projections
+  remain available without granting native reasoning archive permission.
+- Recognize OpenCode's nested session working directory and validate the
+  current official 2.0.29 source separately from frozen native producer
+  baselines. Add typed ordinary projection for the 2.0.29 idle-error shape.
+
+### `cat-file` streaming and byte input
+
+- Include the upstream fixes for commit/raw object output and batch modes.
+  Batch requests are answered as input lines arrive; responses flush without
+  waiting for end of input unless buffering is requested. Non-UTF-8 object
+  queries are handled without aborting the whole batch.
+- Buffered batch commands execute on `flush` or end of input. Input lines and
+  queued commands remain unbounded; a broken output pipe can still return
+  success under the existing BrokenPipe policy. These limitations are deferred.
+
+### Known limitations
+
+- Historical OpenCode imports with unsupported reasoning state still fail
+  with `LBR-AGENT-020`; that import repair is deferred. Successful automatic
+  ordinary capture does not mean those historical imports are supported.
+- Trusted native reasoning archival is not enabled by these ordinary capture
+  fixes. `signature`, `redactedData` and `reasoningEncryptedContent` remain
+  outside the verified native admission path; official OpenCode version or
+  ordinary exporter trust does not prove native field provenance.
+- The inherited interactive Mega2 browser can display `--ref` content while
+  create, delete, move or rename actions still write to **trunk**, potentially
+  changing a different object from the one displayed. Avoid mutating actions
+  in the interactive browser when using `--ref`. This issue is deferred and
+  remains unfixed; noninteractive writes already reject `--ref`.
+
 ## [0.30.48] — 2026-10-14
 
 ### `cat-file` batch modes stream line by line and accept non-UTF-8 input

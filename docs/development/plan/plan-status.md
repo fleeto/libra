@@ -1696,3 +1696,32 @@ OG-17/21/22 的实际 C/D 已由 signed+DCO main `71e9f44699932b43d31037d0d0c8f4
 ## 2026-10-13 11:01:52 UTC OG-26 本机 A/B 验收与后续门
 
 OG-26 的九条实现/测试/文档路径已在 signed main `dcc468bd31c88a7e8d8c0d2957d6e80b65908990` 上按逐文件 pre/post hash/mode 对拍，计划内 VER4 不可能的 `0 filtered` 条件已修正为具名 1 passed/0 failed/0 ignored，实测其余 14 个用例 filtered-out。最终源码 VER1–3 各 1/1、OG26 lib 8/8、architecture 55/55、docs 30/30，唯一 Claude Code R4 **PASS**（P0/P1/P2=0）；真实 `.libra` 根的 macOS 全量 Nextest exit0，10050/10050 passed、23 skipped、1 flaky 重试通过、2 leaky，日志 SHA-256 `768cdac31bbf6918bb222252e8337fee278a5bf8ef60ae6176010beebca569e3`。根 fmt 与严格 Clippy 均 exit0；签名 main Push 待执行；隔离环境先前失败的 full/carrier 测试不倒记 PASS。OG-26 为 `in-progress / locally-accepted`，FAST-OG-04 C/D 尚未完成，父计划正式 **55/67=82.09%**；将 OG-24/25/26 的本机源码就绪单独计数为 **58/67=86.57%**，不替代正式完成。下一步在 OG-26 签名 main 后先立卡并单 Claude 审查独立 coverage-v2 计划；草案中的 COV2-01 尚未正式立卡、owner 未分配，当前不可视为可执行卡。OG-27 仍须 coverage-v2 与真实 Source A 双门。Linux 功能由用户后验。
+
+
+### 2026-10-14 — COV2-25 开工与 G-09 实际交付
+
+三文档 G-09 的唯一 Claude Code R2 实际 PASS（P0/P1/P2=0、P3=3），raw SHA-256 `078014fb07a626ba2bf80de0afdae79fbcafce4404a9f8aa3ea67df4221d65d9`；完整三路径 SHA/mode manifest `c0a907fed96d481125bdeed1a931daf070b497bd98e41086c22cb3cf9f874eab` 已对拍 signed+DCO main `2b80a56242c89518e706eaca18ceb4b0d66798d6`，Push 后 Libra/GitHub main 同 SHA。最终 nightly fmt/diff/strict Clippy exit0、hook contract 11/11，quality index `bea125fa600546496462c208f1d268de9b46b5b66d2adbfa38cbb4f1ef71d085`；R1 两项 P2 已由 R2 闭合，R1 FAIL 及其 raw `69d1778c017383ea4e3bff16872dbddab553faf589ff98be5dd3864c34897da4` 保留，不倒写历史。正式0/26、源码就绪12/26=46.15%、父正式55/67=82.09%不预增。
+
+COV2-25 现为 in-progress，批准的 key verifier、既有 Unix tests 与精确 architecture guard 已实施，八 AC/四 VER/八 mandatory 回归、最终 full 与单审仍待实际结果。当前最终实现树包含上游35f8的cat-file源码修复，临时0.30.49只在本卡源码交付后执行，且不解除 COV2家族/DEP-OG-13/Source A。没有新增 OpenCode Session或模型 CI，复杂Session仍macOS本机，Linux功能由用户后验；此源码卡不调用模型，不碰两份无关计划工作区改动。下一项为临时0.30.49发布，再推进COV2-22真实持久化。
+
+
+COV2-25 focused r1 的 signers闭集与VER1各1/1，VER2实际FAIL/raw `467fdb6501037ae2dacdea8f0abcd8c890cd54771be40f49a2b6481e29790b09`：同仓库子路径不是foreign repository，旧scope/storage解析允许；仅以独立初始化repo替换测试fixture。无生产鉴权改变、不扩I、不缩减AC/VER；r2整组及最终full/单审仍待，旧失败不倒记PASS。
+
+
+COV2-25 r2 focused实际全部通过：四VER、八mandatory、三闭集及三上游cat-file exact共18 selector各1/1，日志index SHA-256 `6be14aba178bf940dcf9012ee2b1cc05e8c5c0334fddf54b9cd70df78e6b861b`。八AC本机机制断言通过，None-source token不能匹配实际Some source digest；synthetic proof/codec fixtures不证明Source A。首轮VER2错误fixtureFAIL保留；最终fmt/strict/full、单Claude及signedPush待，因此source-ready仍12/26、formal0/26，父formal55/67不变。
+
+
+COV2-25 r2 fmt/diff exit0；strict Clippy初始化后长时无CPU/输出进展，root仅终止本次20个cargo/clippy子进程，实际exit1为interrupted/unqualified，不判源码缺陷或网络故障且不计PASS。采用runner-only `CARGO_BUILD_JOBS=4` 重跑同一all-target/all-feature `-D warnings` 检查；本轮不改仓库/CI配置、不缩减测试门。
+
+
+COV2-25 source Claude R1实际FAIL/raw `5c621a92df654579df39509008ced7fa62c6848ac6afff570b3c7c9557f0c1b4`（0P0/0P1/1P2/4P3）；生产 verifier无缺陷，r2历史收据把组合foreign root/storage拒绝误记为独立storage验收。现仅在VER2补原root+foreign repo storage独立负例；原r2结果不能替代新增断言。P3的deadline和v1 golden证据边界写明，ACcheckbox仅本机机制状态；最终exact/strict/full/单审/signedPush仍待，source-ready不预增。
+
+
+COV2-25 r4补齐独立foreign-storage参数负例后，18 exact全部各1/1，index `066a7684766b957208e3774c91dd97b3d0a59fff045670c89fb423468bc5d45f`。r3四jobs strict/fmt/diff exit0为补storage断言前的快照（qualityindex `208360fb18549e1ff7867e976442352e61ae72f2d549e2bfbbc3c9814a5ca5fb`），最终r4质量/full/单审仍独立执行；不复用旧结果为新增断言PASS。source-ready12/26/formal0/26/父55/67保持。
+
+
+COV2-25 r4最终quality fmt/diff/strict all-target/all-feature `-D warnings` 四jobs实际exit0，index `8cdf4695a85138e2e7c2ac1cdfc9c4f5214e10385a8d81ee8a0367e3a4a5b7d2`。临时49只读AST检查640src，manifest `8a1d7b82ee1f02b4716b52b78ec3e86a235fe8501d53b28b2ed583dd43e122ed`，新keyauth→decoder仅内部引用，auth自己零生产caller；保留embedding/native证明边界。本段时点dual-env full与最终Claude/signedPush仍待。
+
+### 2026-10-14 13:36:45 UTC — COV2-25 冻结2b候选 full 通过；新版合流门未预记
+
+r4同时加载两env，runner-only四jobs/四test threads，Nextest实际exit0：10110/10110 passed（2 slow）、23 skipped、2645.131s，raw SHA-256 `01dafbcbf51f87db809fa1c3b57ad44333913286f0cc72daf181e6735e34b789`。八候选路径在full期间原字节/mode不变，测试已含独立foreign-storage负例；key/pending/guard精确后像见COV2-25。23 skipped不计通过，Source A仍未证明。此full是HEAD2b加COV2-25、包含35f8，未包含期间新上游5c的cat-file批处理/nonUTF8变化或29普通适配；临时49实际最终源码必须另验，不能冒用冻结收据。最终单Claude、signed+DCO main Push仍待，source-ready12/26、formal0/26与父55/67暂不变。真实本机OpenCode29全局binary已核官方同SHA/size，但版本核验不代表内容捕获通过；新原生目录导入修复和普通29独立协调仍为私有准备，不纳入本卡key轴。

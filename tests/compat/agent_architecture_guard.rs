@@ -10537,10 +10537,116 @@ fn reasoning_pending_restore_has_closed_issuer() {
     );
     assert_eq!(
         import_reasoning_production_references("from_authenticated_members"),
-        BTreeSet::from([(
-            "src/internal/ai/capture/key.rs".to_owned(),
-            "authenticate_pending_reasoning_members_in_scope_until".to_owned(),
-        )]),
+        BTreeSet::from([
+            (
+                "src/internal/ai/capture/key.rs".to_owned(),
+                "authenticate_pending_reasoning_members_in_scope_until".to_owned(),
+            ),
+            (
+                "src/internal/ai/capture/key.rs".to_owned(),
+                "authenticate_pending_versioned_reasoning_members_in_scope_until".to_owned(),
+            ),
+        ]),
+    );
+}
+
+#[test]
+fn cov2_v2_pending_original_member_issuer_is_integrity_only() {
+    use syn::visit::Visit;
+
+    struct DirectCalls(Vec<String>);
+    impl<'ast> Visit<'ast> for DirectCalls {
+        fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+            if let syn::Expr::Path(path) = call.func.as_ref() {
+                self.0.push(syn_path_text(&path.path));
+            }
+            syn::visit::visit_expr_call(self, call);
+        }
+    }
+
+    let (_, key) = parse_rust_source("src/internal/ai/capture/key.rs");
+    let issuer = top_level_function(
+        &key,
+        "authenticate_pending_versioned_reasoning_members_in_scope_until",
+    );
+    let syn::ReturnType::Type(_, output) = &issuer.sig.output else {
+        panic!("the v2 original-member issuer must return a checked result");
+    };
+    let syn::Type::Path(result) = output.as_ref() else {
+        panic!("the v2 original-member issuer must return Result<PendingIntegrityToken>");
+    };
+    let Some(segment) = result.path.segments.last() else {
+        panic!("the v2 original-member issuer has no result type");
+    };
+    assert_eq!(segment.ident, "Result");
+    let syn::PathArguments::AngleBracketed(arguments) = &segment.arguments else {
+        panic!("the v2 original-member issuer has no result payload");
+    };
+    assert!(matches!(
+        arguments.args.first(),
+        Some(syn::GenericArgument::Type(syn::Type::Path(token)))
+            if token.path.segments.last().is_some_and(|segment| segment.ident == "PendingIntegrityToken")
+    ));
+    let request = top_level_struct(&key, "PendingVersionedReasoningAuthentication");
+    assert!(
+        !request
+            .attrs
+            .iter()
+            .any(|attr| attr.path().is_ident("derive"))
+    );
+    let call_sites = issuer
+        .block
+        .stmts
+        .iter()
+        .enumerate()
+        .flat_map(|(statement, item)| {
+            let mut calls = DirectCalls(Vec::new());
+            calls.visit_stmt(item);
+            calls.0.into_iter().map(move |path| (statement, path))
+        })
+        .collect::<Vec<_>>();
+    let expected_order = [
+        "AuthenticatedPendingEnvelope::verify",
+        "decode_authenticated_versioned_envelope",
+        "verify_pending_versioned_reasoning_members",
+        "ensure_capture_source_commitment_deadline",
+        "PendingIntegrityToken::from_authenticated_members",
+    ];
+    let positions = expected_order.map(|name| {
+        let matches = call_sites
+            .iter()
+            .filter_map(|(statement, path)| (path == name).then_some(*statement))
+            .collect::<Vec<_>>();
+        assert_eq!(matches.len(), 1, "v2 issuer must call {name} exactly once");
+        matches[0]
+    });
+    assert!(
+        positions.windows(2).all(|pair| pair[0] < pair[1]),
+        "v2 issuer must recheck its deadline after member parsing and before token mint"
+    );
+    let syn::Stmt::Expr(syn::Expr::Try(check), Some(_)) = &issuer.block.stmts[positions[3]] else {
+        panic!("the post-parse deadline check must be a top-level fallible statement");
+    };
+    let syn::Expr::Call(check_call) = check.expr.as_ref() else {
+        panic!("the post-parse deadline check must call the deadline helper directly");
+    };
+    assert!(matches!(
+        check_call.func.as_ref(),
+        syn::Expr::Path(path)
+            if syn_path_text(&path.path) == "ensure_capture_source_commitment_deadline"
+    ));
+    assert_eq!(
+        import_reasoning_production_references("from_authenticated_members"),
+        BTreeSet::from([
+            (
+                "src/internal/ai/capture/key.rs".to_owned(),
+                "authenticate_pending_reasoning_members_in_scope_until".to_owned(),
+            ),
+            (
+                "src/internal/ai/capture/key.rs".to_owned(),
+                "authenticate_pending_versioned_reasoning_members_in_scope_until".to_owned(),
+            ),
+        ]),
     );
 }
 
@@ -10676,6 +10782,12 @@ fn reasoning_pending_signers_and_native_record_fillers_are_closed() {
         ),
     ] {
         let mut expected = BTreeSet::from([(path.to_owned(), owner.to_owned())]);
+        if name == "from_authenticated_members" {
+            expected.insert((
+                "src/internal/ai/capture/key.rs".to_owned(),
+                "authenticate_pending_versioned_reasoning_members_in_scope_until".to_owned(),
+            ));
+        }
         if name == "from_validated_pending_context" {
             expected.insert((
                 "src/internal/ai/capture/checkpoint.rs".to_owned(),

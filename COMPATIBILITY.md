@@ -1191,6 +1191,23 @@ persistence and frozen old-reader rejection, and COV2-08 owns replay. Native
 cross-version bare-key aliases still fail closed until OG-29. These synthetic
 checks do not establish OpenCode provider Source A or native archival.
 
+### Original pending-v2 member integrity (COV2-25)
+
+The private key owner verifies the existing whole-envelope MAC, capture scope,
+storage binding, authorized root and deadline before bounded decoding. Caller binding,
+redacted projection, optional source, ordered associations and coverage must
+match the original canonical member slices and decoded ordered version/key
+tuples. A final deadline check precedes local `PendingIntegrityToken` issuance.
+The verifier reads the existing key and fails closed if it is missing; unknown
+envelope/payload fields and duplicate JSON keys are rejected.
+
+Canonical source omission has a domain-separated
+`libra/pending-v2/no-reasoning-source\0` digest; explicit `null` is rejected.
+These local integrity checks grant no native provenance, persistence or
+checkpoint ACK, and synthetic positives do not establish provider Source A.
+The production durable loader consumer remains COV2-22 work, with replay in
+COV2-08. The v1 member API, bytes and pending MAC domain remain unchanged.
+
 ### OG-20 private import transport
 
 The authorized descriptor helper can return a native-proven typed collection through an authenticated private import transport response. A one-request key binds request, authorized source, repository scope and collection before the parent restores the complete native proof and partitions owned items by reserved turn. An empty collection retains the previous helper response and source projection bytes; an unauthenticated or unproved collection fails closed without returning candidate bytes to ordinary import. Production provider capabilities and native issuers remain disabled. Source A remains UNPROVEN, and real native field admission is deferred. The transport adds no public option, database schema or decryption capability.

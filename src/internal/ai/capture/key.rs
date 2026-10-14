@@ -34,7 +34,14 @@ use serde_json::value::RawValue;
 use thiserror::Error;
 
 use crate::internal::ai::{
-    capture_scope::CaptureScope, observed_agents::reasoning::PendingIntegrityToken,
+    capture::{
+        checkpoint::AuthenticatedPendingEnvelope,
+        pending::{
+            PendingBinding, VersionedPendingEnvelope, decode_authenticated_versioned_envelope,
+        },
+    },
+    capture_scope::CaptureScope,
+    observed_agents::reasoning::PendingIntegrityToken,
 };
 
 /// Fixed, path-free capability result safe to render to a hook host.
@@ -467,6 +474,197 @@ pub(crate) async fn authenticate_pending_reasoning_original_in_scope_until<
         },
     )
     .await
+}
+
+/// Compare an outer-v2 DTO with the same original, bounded, MACed bytes.
+/// The DTO is only an equality input; neither it nor a local MAC is native
+/// provider authority. The original v1 member verifier remains unchanged.
+#[allow(dead_code)] // COV2-22 wires the durable reader to this integrity-only check.
+pub(crate) struct PendingVersionedReasoningAuthentication<'a> {
+    pub(crate) scope: &'a CaptureScope,
+    pub(crate) storage_path: &'a Path,
+    pub(crate) authorized_root: &'a Path,
+    pub(crate) original_envelope: &'a [u8],
+    pub(crate) original_mac: &'a str,
+    pub(crate) expected_binding: &'a PendingBinding,
+    pub(crate) candidate: &'a VersionedPendingEnvelope,
+    pub(crate) deadline: Instant,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code)] // COV2-22 supplies the production caller of the verifier.
+struct PendingVersionedEnvelopeMembers<'a> {
+    version: u8,
+    #[serde(borrow)]
+    binding: &'a RawValue,
+    #[serde(borrow)]
+    payload: &'a RawValue,
+    #[serde(borrow)]
+    coverage: &'a RawValue,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code)] // COV2-22 supplies the production caller of the verifier.
+struct PendingVersionedPayloadMembers<'a> {
+    #[serde(borrow)]
+    redacted: &'a RawValue,
+    #[serde(borrow)]
+    reasoning_source: Option<&'a RawValue>,
+    #[serde(borrow)]
+    identity_commit_associations: &'a RawValue,
+}
+
+/// The only v2 key-owner issuer. It rechecks the original envelope using the
+/// historical pending MAC purpose, then calls the same bounded typed decoder
+/// used by the loader. Only a byte-identical caller DTO can receive a local
+/// integrity token; no key is initialized, artifact persisted, or ACK issued.
+#[allow(dead_code)] // COV2-22 wires the durable reader to this integrity-only check.
+pub(crate) async fn authenticate_pending_versioned_reasoning_members_in_scope_until<
+    C: sea_orm::ConnectionTrait,
+>(
+    conn: &C,
+    request: PendingVersionedReasoningAuthentication<'_>,
+) -> Result<PendingIntegrityToken> {
+    const REMEDY: &str =
+        "capture recovery membership authentication failed; run libra agent doctor";
+    let PendingVersionedReasoningAuthentication {
+        scope,
+        storage_path,
+        authorized_root,
+        original_envelope,
+        original_mac,
+        expected_binding,
+        candidate,
+        deadline,
+    } = request;
+    anyhow::ensure!(
+        original_envelope.first() == Some(&b'{')
+            && original_envelope.len() <= PENDING_ENVELOPE_MAX_BYTES,
+        REMEDY
+    );
+    // This witness verifies scope/root/key/MAC before the bounded decoder
+    // allocates typed association or claim vectors.
+    let authenticated = AuthenticatedPendingEnvelope::verify(
+        conn,
+        storage_path,
+        authorized_root,
+        scope,
+        original_envelope,
+        original_mac,
+        deadline,
+    )
+    .await?;
+    let decoded = decode_authenticated_versioned_envelope(&authenticated, expected_binding)?;
+    let preflight =
+        verify_pending_versioned_reasoning_members(original_envelope, candidate, &decoded)?;
+    // The bounded parse/canonical comparisons can be expensive near the
+    // envelope cap. Never issue a fresh integrity capability after expiry.
+    ensure_capture_source_commitment_deadline(deadline)?;
+    Ok(PendingIntegrityToken::from_authenticated_members(
+        preflight.envelope_sha256,
+        preflight.payload_sha256,
+        preflight.source_sha256,
+        preflight.associations_sha256,
+        preflight.coverage_sha256,
+    ))
+}
+
+/// Pure exact-member comparison after the caller's MAC and bounded decoder.
+/// Returning digests here does not mint an integrity token or native proof.
+fn verify_pending_versioned_reasoning_members(
+    original_envelope: &[u8],
+    candidate: &VersionedPendingEnvelope,
+    decoded: &VersionedPendingEnvelope,
+) -> Result<PendingIntegrityPreflight> {
+    const REMEDY: &str =
+        "capture recovery membership authentication failed; run libra agent doctor";
+    anyhow::ensure!(
+        original_envelope.first() == Some(&b'{')
+            && original_envelope.len() <= PENDING_ENVELOPE_MAX_BYTES,
+        REMEDY
+    );
+    anyhow::ensure!(
+        matches_exact_json_encoding(candidate, original_envelope),
+        REMEDY
+    );
+    // The typed decoder has already enforced tuple count, wire cap, unique
+    // (version,key), version domain, canonical JSON, and association/claim
+    // ordering. Bind the caller's ordered pair to that precise result too.
+    anyhow::ensure!(
+        candidate.payload.identity_commit_associations.len()
+            == decoded.payload.identity_commit_associations.len()
+            && candidate.coverage.claims.len() == decoded.coverage.claims.len()
+            && candidate
+                .payload
+                .identity_commit_associations
+                .iter()
+                .zip(&decoded.payload.identity_commit_associations)
+                .all(|(given, original)| {
+                    given.coverage_schema_version == original.coverage_schema_version
+                        && given.logical_turn_key == original.logical_turn_key
+                })
+            && candidate
+                .coverage
+                .claims
+                .iter()
+                .zip(&decoded.coverage.claims)
+                .all(|(given, original)| {
+                    given.coverage_schema_version == original.coverage_schema_version
+                        && given.logical_turn_key == original.logical_turn_key
+                }),
+        REMEDY
+    );
+    let outer: PendingVersionedEnvelopeMembers<'_> =
+        serde_json::from_slice(original_envelope).map_err(|_| anyhow!(REMEDY))?;
+    let payload: PendingVersionedPayloadMembers<'_> =
+        serde_json::from_str(outer.payload.get()).map_err(|_| anyhow!(REMEDY))?;
+    anyhow::ensure!(
+        outer.version == 2
+            && matches_exact_json_encoding(&candidate.binding, outer.binding.get().as_bytes())
+            && matches_exact_json_encoding(
+                &candidate.payload.redacted,
+                payload.redacted.get().as_bytes()
+            )
+            && matches_exact_json_encoding(
+                &candidate.payload.identity_commit_associations,
+                payload.identity_commit_associations.get().as_bytes()
+            )
+            && matches_exact_json_encoding(&candidate.coverage, outer.coverage.get().as_bytes()),
+        REMEDY
+    );
+    let source_sha256 = match (
+        candidate.payload.reasoning_source.as_ref(),
+        payload.reasoning_source,
+    ) {
+        (Some(source), Some(original))
+            if matches_exact_json_encoding(source, original.get().as_bytes()) =>
+        {
+            sha256_array(original.get().as_bytes())
+        }
+        (None, None) => sha256_array(b"libra/pending-v2/no-reasoning-source\0"),
+        _ => bail!(REMEDY),
+    };
+    Ok(PendingIntegrityPreflight {
+        envelope_sha256: sha256_array(original_envelope),
+        payload_sha256: sha256_array(payload.redacted.get().as_bytes()),
+        source_sha256,
+        associations_sha256: sha256_array(payload.identity_commit_associations.get().as_bytes()),
+        coverage_sha256: sha256_array(outer.coverage.get().as_bytes()),
+    })
+}
+
+/// Test-only access to the optional-source member rule. It deliberately
+/// bypasses MAC/token issuance so a codec-level absent-source positive cannot
+/// be misreported as a production-sealed or native-origin acceptance case.
+#[cfg(test)]
+#[cfg(unix)]
+pub(crate) fn cov2_versioned_absent_source_members_match_for_test(
+    original_envelope: &[u8],
+    candidate: &VersionedPendingEnvelope,
+) -> bool {
+    verify_pending_versioned_reasoning_members(original_envelope, candidate, candidate).is_ok()
 }
 
 fn authenticate_pending_reasoning_members_existing_key(

@@ -2939,6 +2939,807 @@ pub(crate) mod tests {
         assert_eq!(rebuilt, artifact.bytes());
     }
 
+    #[cfg(unix)]
+    async fn cov2_25_seal_two_turns_in_repo(
+        f: &Fixture,
+        proof_tag: &str,
+    ) -> SealedVersionedPendingArtifact {
+        use crate::internal::ai::coverage_gate::tests::cov2_native_v2_turn;
+
+        let (ordinary, ordinary_payload) = f.artifact(None).await;
+        let binding = ordinary.header.binding;
+        let identity = ordinary.identity;
+        let payload = native_pending_payload_from_ordinary(
+            &ordinary_payload,
+            vec![
+                (
+                    0,
+                    format!("synthetic {proof_tag} native proof for first key").into_bytes(),
+                ),
+                (
+                    1,
+                    format!("synthetic {proof_tag} native proof for second key").into_bytes(),
+                ),
+            ],
+        );
+        let turns = [
+            cov2_native_v2_turn(
+                "synthetic-turn-0",
+                &format!("synthetic {proof_tag} visible reasoning for first key"),
+                Completeness::Complete,
+            ),
+            cov2_native_v2_turn(
+                "synthetic-turn-1",
+                &format!("synthetic {proof_tag} visible reasoning for second key"),
+                Completeness::Complete,
+            ),
+        ];
+        let companion = versioned_companion_for_turns(f, &payload, &binding, &turns).await;
+        SealedVersionedPendingArtifact::seal(
+            &f.db,
+            &f.storage,
+            f.root.path(),
+            VersionedPendingSealRequest {
+                binding,
+                identity,
+                payload: &payload,
+                companion: &companion,
+            },
+            deadline(),
+        )
+        .await
+        .expect("production v2 sealer must preserve both distinct native turns")
+    }
+
+    #[cfg(unix)]
+    async fn cov2_25_sealed_fixture() -> (Fixture, SealedVersionedPendingArtifact) {
+        let f = Fixture::new().await;
+        let artifact = cov2_25_seal_two_turns_in_repo(&f, "first").await;
+        (f, artifact)
+    }
+
+    #[cfg(unix)]
+    async fn cov2_25_authenticate_candidate(
+        f: &Fixture,
+        bytes: &[u8],
+        mac: &str,
+        expected_binding: &PendingBinding,
+        candidate: &VersionedPendingEnvelope,
+        root: &Path,
+    ) -> Result<crate::internal::ai::observed_agents::reasoning::PendingIntegrityToken> {
+        key::authenticate_pending_versioned_reasoning_members_in_scope_until(
+            &f.db,
+            key::PendingVersionedReasoningAuthentication {
+                scope: &f.scope,
+                storage_path: &f.storage,
+                authorized_root: root,
+                original_envelope: bytes,
+                original_mac: mac,
+                expected_binding,
+                candidate,
+                deadline: deadline(),
+            },
+        )
+        .await
+    }
+
+    #[cfg(unix)]
+    async fn cov2_25_absent_source_codec_fixture(
+        f: &Fixture,
+        artifact: &SealedVersionedPendingArtifact,
+    ) -> (Vec<u8>, String, VersionedPendingEnvelope) {
+        // This is a codec/key-owner integrity fixture, not a native seal or
+        // evidence that a production source can omit its reasoning member.
+        let mut codec: VersionedPendingEnvelope = serde_json::from_slice(artifact.bytes()).unwrap();
+        codec.payload.reasoning_source = None;
+        let bytes = encode_versioned_envelope(codec.binding, codec.payload, codec.coverage)
+            .expect("encode bounded canonical absent-source v2 bytes");
+        let candidate: VersionedPendingEnvelope = serde_json::from_slice(&bytes).unwrap();
+        assert!(candidate.payload.reasoning_source.is_none());
+        let mac = f
+            .scope
+            .sign_pending_envelope_until(&f.db, &f.storage, f.root.path(), &bytes, deadline())
+            .await
+            .expect("sign absent-source codec bytes with the existing repository key");
+        (bytes, mac, candidate)
+    }
+
+    #[cfg(unix)]
+    fn cov2_25_assert_token_has_five_original_digests(
+        token: &crate::internal::ai::observed_agents::reasoning::PendingIntegrityToken,
+        bytes: &[u8],
+        some_source_envelope: Option<&[u8]>,
+    ) {
+        use sha2::{Digest, Sha256};
+
+        #[derive(Deserialize)]
+        struct RawOuter<'a> {
+            #[serde(borrow)]
+            payload: &'a RawValue,
+            #[serde(borrow)]
+            coverage: &'a RawValue,
+        }
+        #[derive(Deserialize)]
+        struct RawPayload<'a> {
+            #[serde(borrow)]
+            redacted: &'a RawValue,
+            #[serde(borrow)]
+            reasoning_source: Option<&'a RawValue>,
+            #[serde(borrow)]
+            identity_commit_associations: &'a RawValue,
+        }
+        fn digest(bytes: &[u8]) -> [u8; 32] {
+            Sha256::digest(bytes).into()
+        }
+
+        let outer: RawOuter<'_> = serde_json::from_slice(bytes).unwrap();
+        let payload: RawPayload<'_> = serde_json::from_str(outer.payload.get()).unwrap();
+        let source_digest = payload.reasoning_source.map_or_else(
+            || digest(b"libra/pending-v2/no-reasoning-source\0"),
+            |source| digest(source.get().as_bytes()),
+        );
+        let originals = [
+            digest(bytes),
+            digest(payload.redacted.get().as_bytes()),
+            source_digest,
+            digest(payload.identity_commit_associations.get().as_bytes()),
+            digest(outer.coverage.get().as_bytes()),
+        ];
+        let expected =
+            crate::internal::ai::observed_agents::reasoning::PendingIntegrityToken::from_authenticated_members(
+                originals[0], originals[1], originals[2], originals[3], originals[4],
+            );
+        assert!(token.matches_stamp(&expected.into_stamp()));
+        if payload.reasoning_source.is_none() {
+            let some_outer: RawOuter<'_> = serde_json::from_slice(
+                some_source_envelope.expect("absent-source case needs an actual sealed source"),
+            )
+            .unwrap();
+            let some_payload: RawPayload<'_> =
+                serde_json::from_str(some_outer.payload.get()).unwrap();
+            let actual_source_digest = digest(
+                some_payload
+                    .reasoning_source
+                    .expect("production-sealed source must be present")
+                    .get()
+                    .as_bytes(),
+            );
+            assert_ne!(source_digest, actual_source_digest);
+            let real_source_stamp =
+                crate::internal::ai::observed_agents::reasoning::PendingIntegrityToken::from_authenticated_members(
+                    originals[0], originals[1], actual_source_digest, originals[3], originals[4],
+                )
+                .into_stamp();
+            assert!(
+                !token.matches_stamp(&real_source_stamp),
+                "absent-source integrity sentinel must not authorize a real source"
+            );
+        }
+        for changed in 0..originals.len() {
+            let mut altered = originals;
+            altered[changed][0] ^= 1;
+            let wrong =
+                crate::internal::ai::observed_agents::reasoning::PendingIntegrityToken::from_authenticated_members(
+                    altered[0], altered[1], altered[2], altered[3], altered[4],
+                );
+            assert!(
+                !token.matches_stamp(&wrong.into_stamp()),
+                "token digest {changed} must come from the original raw member"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cov2_pending_v2_original_members_authenticate_exact_tuple() {
+        let (f, artifact) = cov2_25_sealed_fixture().await;
+        let key_path = f.storage.join("private/agent-capture-dedup-v1.key");
+        let key_before = std::fs::read(&key_path).unwrap();
+        let candidate: VersionedPendingEnvelope = serde_json::from_slice(artifact.bytes()).unwrap();
+        let token = cov2_25_authenticate_candidate(
+            &f,
+            artifact.bytes(),
+            &artifact.header.mac,
+            artifact.binding(),
+            &candidate,
+            f.root.path(),
+        )
+        .await
+        .expect("original production-sealed v2 members must authenticate");
+        cov2_25_assert_token_has_five_original_digests(&token, artifact.bytes(), None);
+        let associations =
+            serde_json::to_vec(&candidate.payload.identity_commit_associations).unwrap();
+        assert!(token.matches_associations(&associations));
+        assert_eq!(candidate.payload.identity_commit_associations.len(), 2);
+        assert_eq!(candidate.coverage.claims.len(), 2);
+        assert_eq!(
+            candidate
+                .payload
+                .identity_commit_associations
+                .iter()
+                .map(|entry| entry.logical_turn_key.as_str())
+                .collect::<Vec<_>>(),
+            ["synthetic-turn-0", "synthetic-turn-1"]
+        );
+        assert_eq!(
+            candidate
+                .payload
+                .identity_commit_associations
+                .iter()
+                .map(|entry| (
+                    entry.coverage_schema_version,
+                    entry.logical_turn_key.as_str()
+                ))
+                .collect::<Vec<_>>(),
+            candidate
+                .coverage
+                .claims
+                .iter()
+                .map(|entry| (
+                    entry.coverage_schema_version,
+                    entry.logical_turn_key.as_str()
+                ))
+                .collect::<Vec<_>>()
+        );
+        let second = cov2_25_seal_two_turns_in_repo(&f, "second").await;
+        assert_ne!(artifact.bytes(), second.bytes());
+        let second_candidate: VersionedPendingEnvelope =
+            serde_json::from_slice(second.bytes()).unwrap();
+        let second_token = cov2_25_authenticate_candidate(
+            &f,
+            second.bytes(),
+            &second.header.mac,
+            second.binding(),
+            &second_candidate,
+            f.root.path(),
+        )
+        .await
+        .expect("second production-sealed envelope under the same key must authenticate");
+        cov2_25_assert_token_has_five_original_digests(&second_token, second.bytes(), None);
+
+        // The optional absence case uses the bounded codec and the same
+        // already initialized repository key. It proves full raw-member
+        // integrity only; the native production sealer above emits Some.
+        let (absent_bytes, absent_mac, absent_candidate) =
+            cov2_25_absent_source_codec_fixture(&f, &artifact).await;
+        let absent_token = cov2_25_authenticate_candidate(
+            &f,
+            &absent_bytes,
+            &absent_mac,
+            &absent_candidate.binding,
+            &absent_candidate,
+            f.root.path(),
+        )
+        .await
+        .expect("canonical absent-source members must receive local integrity only");
+        cov2_25_assert_token_has_five_original_digests(
+            &absent_token,
+            &absent_bytes,
+            Some(artifact.bytes()),
+        );
+        assert!(absent_token.matches_associations(
+            &serde_json::to_vec(&absent_candidate.payload.identity_commit_associations).unwrap()
+        ));
+        assert_eq!(std::fs::read(&key_path).unwrap(), key_before);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cov2_pending_v2_original_members_reject_substitution_or_bad_mac() {
+        let (f, artifact) = cov2_25_sealed_fixture().await;
+        let key_path = f.storage.join("private/agent-capture-dedup-v1.key");
+        let key_before = std::fs::read(&key_path).unwrap();
+        let original: serde_json::Value = serde_json::from_slice(artifact.bytes()).unwrap();
+        let candidate: VersionedPendingEnvelope = serde_json::from_slice(artifact.bytes()).unwrap();
+        let mut changed_mac = artifact.header.mac.clone();
+        changed_mac.replace_range(changed_mac.len() - 1.., "0");
+        if changed_mac == artifact.header.mac {
+            changed_mac.replace_range(changed_mac.len() - 1.., "1");
+        }
+        assert!(
+            cov2_25_authenticate_candidate(
+                &f,
+                artifact.bytes(),
+                &changed_mac,
+                artifact.binding(),
+                &candidate,
+                f.root.path(),
+            )
+            .await
+            .is_err()
+        );
+        let (absent_bytes, absent_mac, absent_candidate) =
+            cov2_25_absent_source_codec_fixture(&f, &artifact).await;
+        assert!(key::cov2_versioned_absent_source_members_match_for_test(
+            &absent_bytes,
+            &absent_candidate
+        ));
+        assert!(
+            cov2_25_authenticate_candidate(
+                &f,
+                &absent_bytes,
+                &absent_mac,
+                &absent_candidate.binding,
+                &candidate,
+                f.root.path(),
+            )
+            .await
+            .is_err(),
+            "a caller Some source must not match authenticated absent source bytes"
+        );
+        let mut bad_absent_mac = absent_mac.clone();
+        bad_absent_mac.replace_range(bad_absent_mac.len() - 1.., "0");
+        if bad_absent_mac == absent_mac {
+            bad_absent_mac.replace_range(bad_absent_mac.len() - 1.., "1");
+        }
+        assert!(
+            cov2_25_authenticate_candidate(
+                &f,
+                &absent_bytes,
+                &bad_absent_mac,
+                &absent_candidate.binding,
+                &absent_candidate,
+                f.root.path(),
+            )
+            .await
+            .is_err(),
+            "absent source cannot bypass the whole-envelope MAC"
+        );
+        let with_null_source = String::from_utf8(absent_bytes.clone()).unwrap().replacen(
+            "\"identity_commit_associations\":",
+            "\"reasoning_source\":null,\"identity_commit_associations\":",
+            1,
+        );
+        assert_ne!(with_null_source.as_bytes(), absent_bytes);
+        assert!(serde_json::from_str::<VersionedPendingEnvelope>(&with_null_source).is_ok());
+        assert!(!key::cov2_versioned_absent_source_members_match_for_test(
+            with_null_source.as_bytes(),
+            &absent_candidate
+        ));
+        let null_mac = f
+            .scope
+            .sign_pending_envelope_until(
+                &f.db,
+                &f.storage,
+                f.root.path(),
+                with_null_source.as_bytes(),
+                deadline(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            cov2_25_authenticate_candidate(
+                &f,
+                with_null_source.as_bytes(),
+                &null_mac,
+                &absent_candidate.binding,
+                &absent_candidate,
+                f.root.path(),
+            )
+            .await
+            .is_err(),
+            "even validly MACed explicit null is not canonical source omission"
+        );
+        let wrong_domain = artifact.header.mac.replacen(
+            "pending-envelope/hmac-v1/",
+            "pending-envelope/hmac-v2/",
+            1,
+        );
+        assert!(
+            cov2_25_authenticate_candidate(
+                &f,
+                artifact.bytes(),
+                &wrong_domain,
+                artifact.binding(),
+                &candidate,
+                f.root.path(),
+            )
+            .await
+            .is_err()
+        );
+        let mut wrong_scope = artifact.binding().clone();
+        wrong_scope.scope.repo_id.push_str("-foreign");
+        assert!(
+            cov2_25_authenticate_candidate(
+                &f,
+                artifact.bytes(),
+                &artifact.header.mac,
+                &wrong_scope,
+                &candidate,
+                f.root.path(),
+            )
+            .await
+            .is_err()
+        );
+        let mut foreign_request_scope = f.scope.clone();
+        foreign_request_scope.repo_id.push_str("-foreign");
+        assert!(
+            key::authenticate_pending_versioned_reasoning_members_in_scope_until(
+                &f.db,
+                key::PendingVersionedReasoningAuthentication {
+                    scope: &foreign_request_scope,
+                    storage_path: &f.storage,
+                    authorized_root: f.root.path(),
+                    original_envelope: artifact.bytes(),
+                    original_mac: &artifact.header.mac,
+                    expected_binding: artifact.binding(),
+                    candidate: &candidate,
+                    deadline: deadline(),
+                },
+            )
+            .await
+            .is_err(),
+            "a foreign requested capture scope must not authenticate the original envelope"
+        );
+        // A child path still resolves to this same repository and scope.
+        // Use a separate initialized repository to test a foreign root.
+        let foreign_repo = Fixture::new().await;
+        assert!(
+            cov2_25_authenticate_candidate(
+                &f,
+                artifact.bytes(),
+                &artifact.header.mac,
+                artifact.binding(),
+                &candidate,
+                foreign_repo.root.path(),
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            key::authenticate_pending_versioned_reasoning_members_in_scope_until(
+                &f.db,
+                key::PendingVersionedReasoningAuthentication {
+                    scope: &f.scope,
+                    storage_path: &foreign_repo.storage,
+                    authorized_root: f.root.path(),
+                    original_envelope: artifact.bytes(),
+                    original_mac: &artifact.header.mac,
+                    expected_binding: artifact.binding(),
+                    candidate: &candidate,
+                    deadline: deadline(),
+                },
+            )
+            .await
+            .is_err(),
+            "a foreign storage path must not authenticate under the original root"
+        );
+        for (path, substitute) in [
+            (
+                "/binding/first_attempt_millis",
+                serde_json::json!(123_456_789),
+            ),
+            (
+                "/payload/redacted/redaction_report",
+                serde_json::json!("changed report"),
+            ),
+            (
+                "/payload/reasoning_source/capture_session",
+                serde_json::json!("foreign"),
+            ),
+            (
+                "/payload/identity_commit_associations/0/logical_turn_key",
+                serde_json::json!("foreign-turn"),
+            ),
+            ("/coverage/owner", serde_json::json!("foreign-owner")),
+            (
+                "/coverage/claims/0/coverage_schema_version",
+                serde_json::json!(1),
+            ),
+        ] {
+            let mut changed = original.clone();
+            *changed
+                .pointer_mut(path)
+                .expect("fixture member must exist") = substitute;
+            let changed: VersionedPendingEnvelope = serde_json::from_value(changed).unwrap();
+            assert!(
+                cov2_25_authenticate_candidate(
+                    &f,
+                    artifact.bytes(),
+                    &artifact.header.mac,
+                    artifact.binding(),
+                    &changed,
+                    f.root.path(),
+                )
+                .await
+                .is_err(),
+                "changed member must not receive an integrity token: {path}"
+            );
+        }
+        let mut reordered: VersionedPendingEnvelope =
+            serde_json::from_slice(artifact.bytes()).unwrap();
+        reordered.payload.identity_commit_associations.swap(0, 1);
+        reordered.coverage.claims.swap(0, 1);
+        reordered.validate().unwrap();
+        assert!(
+            cov2_25_authenticate_candidate(
+                &f,
+                artifact.bytes(),
+                &artifact.header.mac,
+                artifact.binding(),
+                &reordered,
+                f.root.path(),
+            )
+            .await
+            .is_err(),
+            "a paired, internally valid tuple reorder must not match the original order"
+        );
+        let other_artifact = cov2_25_seal_two_turns_in_repo(&f, "other").await;
+        assert_ne!(artifact.bytes(), other_artifact.bytes());
+        let other_candidate: VersionedPendingEnvelope =
+            serde_json::from_slice(other_artifact.bytes()).unwrap();
+        cov2_25_authenticate_candidate(
+            &f,
+            other_artifact.bytes(),
+            &other_artifact.header.mac,
+            other_artifact.binding(),
+            &other_candidate,
+            f.root.path(),
+        )
+        .await
+        .expect("the donor must itself be valid under the same repository key");
+        assert!(
+            cov2_25_authenticate_candidate(
+                &f,
+                artifact.bytes(),
+                &artifact.header.mac,
+                artifact.binding(),
+                &other_candidate,
+                f.root.path(),
+            )
+            .await
+            .is_err(),
+            "a DTO from another valid envelope must not be spliced in"
+        );
+        let other_value: serde_json::Value =
+            serde_json::from_slice(other_artifact.bytes()).unwrap();
+        assert_ne!(
+            original["payload"]["reasoning_source"],
+            other_value["payload"]["reasoning_source"]
+        );
+        assert_ne!(original["coverage"], other_value["coverage"]);
+        let mut spliced = original.clone();
+        spliced["payload"]["reasoning_source"] = other_value["payload"]["reasoning_source"].clone();
+        spliced["coverage"] = other_value["coverage"].clone();
+        let spliced: VersionedPendingEnvelope = serde_json::from_value(spliced).unwrap();
+        assert!(
+            cov2_25_authenticate_candidate(
+                &f,
+                artifact.bytes(),
+                &artifact.header.mac,
+                artifact.binding(),
+                &spliced,
+                f.root.path(),
+            )
+            .await
+            .is_err(),
+            "originally valid same-key source/coverage members cannot cross envelopes"
+        );
+        let mut absent_source = original.clone();
+        absent_source["payload"]
+            .as_object_mut()
+            .unwrap()
+            .remove("reasoning_source");
+        let absent_source: VersionedPendingEnvelope =
+            serde_json::from_value(absent_source).unwrap();
+        assert!(
+            cov2_25_authenticate_candidate(
+                &f,
+                artifact.bytes(),
+                &artifact.header.mac,
+                artifact.binding(),
+                &absent_source,
+                f.root.path(),
+            )
+            .await
+            .is_err(),
+            "dropping the original source member must not receive a token"
+        );
+        let mut noncanonical = artifact.bytes().to_vec();
+        noncanonical.insert(1, b' ');
+        let noncanonical_mac = f
+            .scope
+            .sign_pending_envelope_until(
+                &f.db,
+                &f.storage,
+                f.root.path(),
+                &noncanonical,
+                deadline(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            cov2_25_authenticate_candidate(
+                &f,
+                &noncanonical,
+                &noncanonical_mac,
+                artifact.binding(),
+                &candidate,
+                f.root.path(),
+            )
+            .await
+            .is_err()
+        );
+        let wrong_version = String::from_utf8(artifact.bytes().to_vec())
+            .unwrap()
+            .replacen("\"version\":2", "\"version\":3", 1);
+        assert_ne!(wrong_version.as_bytes(), artifact.bytes());
+        let wrong_version_mac = f
+            .scope
+            .sign_pending_envelope_until(
+                &f.db,
+                &f.storage,
+                f.root.path(),
+                wrong_version.as_bytes(),
+                deadline(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            cov2_25_authenticate_candidate(
+                &f,
+                wrong_version.as_bytes(),
+                &wrong_version_mac,
+                artifact.binding(),
+                &candidate,
+                f.root.path(),
+            )
+            .await
+            .is_err()
+        );
+        // Authenticate these adversarial originals with the existing key so
+        // rejection proves structural validation after MAC verification too.
+        let original_text = String::from_utf8(artifact.bytes().to_vec()).unwrap();
+        let redacted_text = serde_json::to_string(&candidate.payload.redacted).unwrap();
+        let adversarial = [
+            (
+                "unknown outer field",
+                original_text.replacen(
+                    "\"version\":2,",
+                    "\"version\":2,\"unknown_outer\":true,",
+                    1,
+                ),
+            ),
+            (
+                "unknown payload field",
+                original_text.replacen(
+                    "\"payload\":{",
+                    "\"payload\":{\"unknown_payload\":true,",
+                    1,
+                ),
+            ),
+            (
+                "duplicate outer field",
+                original_text.replacen("\"version\":2,", "\"version\":2,\"version\":2,", 1),
+            ),
+            (
+                "duplicate payload field",
+                original_text.replacen(
+                    "\"redacted\":",
+                    &format!("\"redacted\":{redacted_text},\"redacted\":"),
+                    1,
+                ),
+            ),
+            (
+                "malformed authenticated JSON",
+                original_text[..original_text.len() - 1].to_owned(),
+            ),
+        ];
+        for (label, bytes) in adversarial {
+            assert_ne!(
+                bytes.as_bytes(),
+                artifact.bytes(),
+                "{label} must change the input"
+            );
+            let mac = f
+                .scope
+                .sign_pending_envelope_until(
+                    &f.db,
+                    &f.storage,
+                    f.root.path(),
+                    bytes.as_bytes(),
+                    deadline(),
+                )
+                .await
+                .unwrap();
+            assert!(
+                cov2_25_authenticate_candidate(
+                    &f,
+                    bytes.as_bytes(),
+                    &mac,
+                    artifact.binding(),
+                    &candidate,
+                    f.root.path(),
+                )
+                .await
+                .is_err(),
+                "{label} must fail after whole-envelope MAC authentication"
+            );
+        }
+        let oversized = vec![b'{'; MAX_ENVELOPE_BYTES + 1];
+        assert!(
+            cov2_25_authenticate_candidate(
+                &f,
+                &oversized,
+                &artifact.header.mac,
+                artifact.binding(),
+                &candidate,
+                f.root.path(),
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            key::authenticate_pending_versioned_reasoning_members_in_scope_until(
+                &f.db,
+                key::PendingVersionedReasoningAuthentication {
+                    scope: &f.scope,
+                    storage_path: &f.storage,
+                    authorized_root: f.root.path(),
+                    original_envelope: artifact.bytes(),
+                    original_mac: &artifact.header.mac,
+                    expected_binding: artifact.binding(),
+                    candidate: &candidate,
+                    deadline: Instant::now() - Duration::from_millis(1),
+                },
+            )
+            .await
+            .is_err(),
+            "expired verification cannot issue an integrity token"
+        );
+        assert_eq!(std::fs::read(&key_path).unwrap(), key_before);
+        std::fs::remove_file(&key_path).unwrap();
+        assert!(
+            cov2_25_authenticate_candidate(
+                &f,
+                artifact.bytes(),
+                &artifact.header.mac,
+                artifact.binding(),
+                &candidate,
+                f.root.path(),
+            )
+            .await
+            .is_err()
+        );
+        assert!(!key_path.exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cov2_pending_v2_member_auth_preserves_v1() {
+        let (f, artifact) = cov2_25_sealed_fixture().await;
+        let candidate: VersionedPendingEnvelope = serde_json::from_slice(artifact.bytes()).unwrap();
+        assert!(
+            key::authenticate_pending_reasoning_original_in_scope_until(
+                &f.db,
+                &f.scope,
+                &f.storage,
+                f.root.path(),
+                artifact.bytes(),
+                &artifact.header.mac,
+                deadline(),
+            )
+            .await
+            .is_err(),
+            "the unchanged v1 member API must reject outer-v2"
+        );
+        let v1_fixture = Fixture::new().await;
+        let (v1, _) = v1_fixture.artifact(None).await;
+        assert!(
+            cov2_25_authenticate_candidate(
+                &v1_fixture,
+                &v1.bytes,
+                &v1.header.mac,
+                &v1.header.binding,
+                &candidate,
+                v1_fixture.root.path(),
+            )
+            .await
+            .is_err(),
+            "the v2 member API must reject outer-v1"
+        );
+    }
+
     fn binding(
         alias: &str,
         checkpoint: Uuid,

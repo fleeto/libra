@@ -153,6 +153,8 @@
 
 > **用户临时 patch 发布 USER-TEMP-REL-049（恢复后的新增明确授权）：** 用户要求纳入上游 `cat-file` 修复，在 COV2-25 本机 A/B、最终单 Claude PASS 与 signed+DCO main 源码交付后临时发布 **0.30.49**。执行者为本对话 root 单一主仓写者/发布者；先核真实最新上游并保留双方变更，实际源码变化须在最终源码重验。此项是一次独立发布操作与窗口例外，不新增 COV2/父计划任务卡，不代替 COV2-REL-01，不据此把 COV2 家族子卡或 DEP-OG-13 记 complete。原半家族禁止稳定发布的规则只对此次用户明确授权操作覆写：必须证明所有未完成 coverage-v2 生产入口仍不可触达且普通 macOS 捕获行为安全；若证明失败则先修复或保持 UNRUN，不能发布。该临时 release 须沿用用户已授权的纯版本变动例外：先把真实上游 `cat-file` 修复纳入 COV2-25 最终实现树并完成适用 focused、双 env 全量 Nextest 与唯一 Claude PASS；若后续临时 bump 仅改变三个版本面及工具链锁文件中的包版本（另可新增 `CHANGELOG.md` 的纯发布说明及本次计划记账），并以逐路径 SHA/mode 证明生产实现、测试、配置与行为文档同一，可复用该已绿 full，不再重复全量。新增 CHANGELOG 仅追加 `[0.30.49]` 节并保留全部历史节；它是发布说明的新增验收面，不从用户纯版本授权推断已测试，bump 树必须现场核 `rg -n "CHANGELOG" tests src build.rs` 的读取者，并实跑 `source .env.test && cargo test --test compat_r0_9_doc_closeout diff_docs_and_changelog_carry_the_degradation_semantics -- --exact` 具名 1/1及任何其它实际读取该文件的相关契约。bump 后仍实跑 fmt/strict、版本面契约、唯一 Claude 最终字节审查、当前 SHA 安全 CI、完整 release 流程（当前 8 个 job）全部 success、Homebrew tap 更新与 `verify-homebrew-formula` 实际运行且 success（不得 skipped 或仅缺 token warning；formula version/SHA 必须与本次 release 资产一致）、四平台签名资产/manifest、CDN 版本/manifest/资产同源及网站/安装验收、实际 macOS 安装版 `cat-file` smoke 与用户指定 curl 安装；任何实际源码/测试/配置/行为变化均须在最终实现树重新 full。网络失败仅在日志确认后用 gh 重跑。家族正式唯一发布点仍为 COV2-REL-01，Source A/native 三字段门不变。
 
+**临时不可达扫描工具冻结（首次最终源码执行前）：** 本机只读 Python driver SHA-256 `0dc5ba2bfe09cc7f40958ffb79ccaa087fce72bc968062717ac8d699b09c6d6c`，syn scanner source `d43d3e5957780717e4b0a463cde52f29f94a3f02b085f0af13dcb77bc6e19c90`，Cargo.toml `fcd0de5173feea9d605f36b9858887f584c714b368612b79ee1a61aa1fc962d2`、工具链 Cargo.lock `1cf63de32023e1908fd95a13caab6340e4ea8e499df5df014efd80ed6b843f27`、实际 scanner binary `2d22f3b322f68f729e5efbada75b1aea1c9942799abaa7231af0aea2194fb1cc`。工具在仓库外，不是产品或验收结果；执行前核这些 hash，执行后记录全部实际 src 输入 hash/mode 和原始结果。此刻最终 COV2-25 扫描仍 UNRUN。
+
 **临时 R 精确写集与门：** 只写 `Cargo.toml`、`install.sh`、`install.ps1`、工具链更新的 `Cargo.lock`、`CHANGELOG.md` 新增 `[0.30.49]` 纯发布说明（原历史版本节不改）及本次发布记录的三份计划文档；签名 tag/Release/manifest/四平台 artifact 与安装操作按现有稳定发布流程执行。版本面以 `compat_version_surface_sync` 实时集合为准；业务修复只来自已合入/已审上游 cat-file 与已审 COV2-25 精确 I，不在该发布操作扩充业务轴。必须固定最终源码与未完成 v2 生产入口不可达证明的 SHA/路径/实际测试，实际执行只读生产调用 AST 扫描 `python3 /private/tmp/libra-temp49-release-preflight-r1/refresh-v2-entry-preflight.py . /private/tmp/libra-temp49-release-preflight-final-cov25`（核 helper SHA、所有 src 输入 SHA/mode 与结果；新 key verifier 对 decoder 的内部引用不等于 CLI 可达，verifier 自身必须零生产 caller），并实跑原 v1 `cov2_v1_pending_bytes_and_mac_frozen` 与 `reasoning_pending_pre_v2_reader_oracle_is_immutable` 两个 exact 1/1 门；扫描不覆盖任意外部 embedding 调用，不作全程序或 native Source A 证明。先完成含真实上游修复的 COV2-25 最终实现 full；临时版本变化按上述逐路径同一性条件复用该 full，实际源码变化则重跑。完成适用 full 证据、bump fmt/strict/version-surface/macOS 安装 cat-file smoke、单审、安全 CI 与发布安装门后才记录临时 release success。未完成的 COV2 child 继续 `locally-accepted`，COV2-REL-01 继续 `pending`，父 `DEP-OG-13` 不提前解除；失败/取消/未运行不记 PASS。首次家族稳定发布仍在最终完整 bumped 实现树另行验证，不能把本临时版 full 当后续不同实现的 final-family full。
 
 **并发声明:** 全串行；libra-backend `cf` 网站 owner 与主仓写者分仓，09/11 的同一网站页仍互斥。
@@ -764,7 +766,7 @@ COV2-REL-01 冻结不含 OG-27 源码的最终 COV2 树；首次完成 bumped �
 
 **C/D coverage from:** COV2-REL-01；发布点的 exact-source C/D 绿后才能 `done/complete`。
 
-**Granularity:** `type=implementation; axis=pending 同版本恢复; recovery=forward-only; complete=yes; self-contained=yes; AC=8/8; VER=4/8; landing=2; prod-files=6; scope=M; deps=COV2-22; writeset=串行于前驱; release=family child; split-from=COV2-04; exception=N/A`
+**Granularity:** `type=implementation; axis=pending 同版本恢复; recovery=forward-only; complete=yes; self-contained=yes; AC=8/8; VER=4/8; landing=2; prod-files=6; scope=M; deps=COV2-22,COV2-25; writeset=串行于前驱; release=family child; split-from=COV2-04; exception=N/A`
 
 ### Task COV2-05：版本化 import cursor/digest/故障
 
@@ -1732,7 +1734,7 @@ COV2-REL-01 冻结不含 OG-27 源码的最终 COV2 树；首次完成 bumped �
 
 **Task type:** implementation
 
-**Lifecycle / Acceptance:** pending / 空；本卡八项 AC、四项 VER 和全部继承门 **UNRUN**。COV2-24 signed API 已核；本次三文档规划提交的唯一 Claude PASS 与 signed+DCO main/remote 收据须在 COV2-25 开工前复核，规划文本本身不算本卡验收。
+**Lifecycle / Acceptance:** in-progress / 空；实现已落入批准写集；最终 r4 四项 VER、八项 mandatory 与三闭集/三上游 cat-file 补充共18个 exact selector 各1/1，八项 AC 的本机机制断言通过；r4 fmt/diff/strict Clippy exit0，冻结2b实现树的双env full 10110/10110 passed、23 skipped、exit0。最终单审与signed交付仍待，不预增源码就绪；新上游5c及29适配不在本轮full内，临时49须在其真实最终实现树另验。G-09 三文档已由唯一 Claude Code R2 实际 PASS（P0/P1/P2=0，P3=3；raw SHA-256 `078014fb07a626ba2bf80de0afdae79fbcafce4404a9f8aa3ea67df4221d65d9`）、nightly fmt/diff/strict Clippy exit0、hook contract 11/11（quality index `bea125fa600546496462c208f1d268de9b46b5b66d2adbfa38cbb4f1ef71d085`），signed+DCO main `2b80a56242c89518e706eaca18ceb4b0d66798d6` 已 Push 且 Libra/GitHub remote 同 SHA；三路径最终 manifest `c0a907fed96d481125bdeed1a931daf070b497bd98e41086c22cb3cf9f874eab` 逐字节对拍。协调本身不算本卡验收。
 
 **Description:** 自 COV2-22 拆出。密钥所有者读取既有 repository key、预期 capture scope/storage/root/deadline 与原始 canonical outer-v2 bytes/MAC；在 COV2-04 有界 authenticated decoder/preflight 后精确认证原始 binding、嵌套 `payload.redacted`、reasoning source、ordered versioned associations、coverage 和 ordered `(version,key)` tuple，只颁发本地 `PendingIntegrityToken` 或等价 integrity-only 结果。原 v1 成员入口、字节和 MAC 域不变。本卡不生成 native provenance，也不做 persist/ACK。
 
@@ -1740,27 +1742,31 @@ COV2-REL-01 冻结不含 OG-27 源码的最终 COV2 树；首次完成 bumped �
 
 **Current evidence（COV2-24 signed main 基线，2026-10-14）：** 当前 `pending.rs` 既有 `versioned_native_seal_fixture()` 及所返回结构位于 private `#[cfg(test)]` 模块；COV2-25 将在 `pending.rs` 既有 `#[cfg(test)]` 模块内新增 Unix-only VER 测试：`Some/Some` native 正例必须借现有 fixture 真实调用生产 `SealedVersionedPendingArtifact::seal` 并保留其原始 canonical bytes/MAC，不能手写或测试重签；唯 `None/None` 本地完整性正例可由受控 COV2-04 bounded codec 构造省略 source 的 canonical outer-v2，再走现有 `CaptureScope::sign_pending_envelope_until` 仓库 key 正常签认路径，供 key-owner 校验。后者仅为 synthetic integrity-only fixture，不是 production native seal、durable persist 或 Source A。当前 `src/internal/ai/capture/key.rs:282–537` 包含 whole-envelope MAC 与只接受 outer-v1 的 `verify_pending_reasoning_members`，`observed_agents/reasoning.rs:628–684` 是不可序列化 token/stamp；`tests/compat/agent_architecture_guard.rs:10538–10546` 闭集限定 `from_authenticated_members` 的 key owner。COV2-24 signed main `c56de683acf71d7327436eef7ef9185d97dcff27`/remote 同 SHA；八路径 manifest `cd43b9af3980c8f3e90ce5751df7855ebaf1f604e2803130f0d32d9556b46e98`。当前 `pending.rs` SHA-256 `fa486918ea80a0f818663116cee3293f8255ad839f34d5a25c6c4968c30cba33`、`pending_payload.rs` `3e74e26c7fb70f024bb7ef7d68289472f57b00cf0b02dc9f431fd51fcfce158e`、`key.rs` `cfb505f061883e6331a80de350774658b541dad6158fb146d518d304c4667e7a`、兼容守卫 `89540b4675f4f2d1fe0ff112e4004f52b066a4c206ff8c238f726c4fa154ef3b`，均 mode 0644；`pending.rs:373` authenticated decoder、`:482–493` sealed artifact/request、`:2452` test fixture、`pending_payload.rs:650` versioned inner seal 已在签名源码定位。COV2-25 的生产 verifier/测试仍 UNRUN，隔离候选不作本卡已验收 API。
 
-**Acceptance criteria（8/8 独立谓词，均 UNRUN）：**
+**实际开工源码：** 最终基线已含上游 `35f8b15` 的 cat-file 修复；本卡只在 `key.rs` 新增原始 v2 成员完整性入口，在 `pending.rs` 的既有 Unix test 模块补真实 sealer/codec/key 机制正负例，在已有 architecture guard 登记两个精确 key-owner。`pending.rs` 生产前缀 80056 bytes 与 signed G-09 基线完全一致；`pending_payload.rs`、`reasoning.rs`、冻结 v1 decoder、SQL、公开 CLI、CI 与版本面均只读未改。None-source sentinel 已增加实际 Some 原始 source digest 不可匹配断言；五项有效 MAC 的 unknown/duplicate/malformed 输入也独立拒绝。Rust 编译、测试、full 与最终单审仍待实际结果，不能从 private rustfmt/静态检查预记 PASS。
 
-- [ ] AC1：v2 integrity result 的颁发以同一原始 whole envelope 的既有认证为前置。
-- [ ] AC2：binding 成员与原始 authenticated binding slice 字节完全相同。
-- [ ] AC3：redacted projection 与原始 nested `payload.redacted` slice 字节完全相同。
-- [ ] AC4：caller 的可选 reasoning source 与原始 nested source slice 按 `Option<raw bytes>` 精确相等。VER1 必须分别证明 COV2-24 生产 `seal` 的 `Some/Some`、以及既有 COV2-04 codec 加仓库 key 正规认证路径的 synthetic `None/None`，两者都经原始 canonical bytes/MAC 到 key-owner integrity-only token；`None` caller 对 `Some` 原始成员由 VER2 拒绝。`None/None` 纯 helper 对照只补充语义断言，不算 MAC/token 正例，更不证明 native Source A。若现有 codec/仓库 key 合法路径无法构造完整 `None` 原始成员，则 AC4 保持 UNRUN 并在实施前按 G-03 修订，不能把 helper-only 或重签 DTO 计作通过。
-- [ ] AC5：versioned associations 与原始 nested association slice 字节完全相同。
-- [ ] AC6：versioned coverage 与原始 coverage slice 字节完全相同。
-- [ ] AC7：caller 的有序 `(coverage_schema_version, logical_turn_key)` tuple 与同一已认证 envelope 的有界 decoder tuple 精确相等。
-- [ ] AC8：v2 key-owner 入口唯一返回现有本地 `PendingIntegrityToken` 权限类型。
+**首次 focused 失败及前滚 fixture 修正：** r1 的闭集 signers guard 和 VER1 各具名 1/1，VER2 实际 FAIL（raw SHA-256 `467fdb6501037ae2dacdea8f0abcd8c890cd54771be40f49a2b6481e29790b09`）。原因是将同仓库的子路径当 foreign root：既有 `CaptureScope::assert_capture_key_storage_binding_until` 按 scope 和 canonical storage 选择仓库，子路径仍解析到同一个仓库，不应被当成跨根。仅把 VER2 fixture 改为第二个独立初始化仓库的 root；生产鉴权、原 v1 API 和 pending 生产前缀未改。r1 失败保留，不作网络重试或 PASS；r2 整组 exact、最终质量/full/单审仍待实际结果。
 
-**Verification（4/8 卡特有门；最终名称须与 COV2-24 signed API 对齐；均 UNRUN）：**
+**Acceptance criteria（8/8 独立谓词，locally-mechanism-passed；r4 新增 storage 负例已具名通过；Source A 未证明）：**
 
-- [ ] VER1→AC1–7：`source .env.test && cargo test --lib internal::ai::capture::pending::tests::cov2_pending_v2_original_members_authenticate_exact_tuple -- --exact`（同一具名测试须含两个完整认证正例：① COV2-24 生产 `seal` 的 `Some/Some` source；② COV2-04 既有 bounded codec 生成原始 outer-v2 `None/None` source，再由仓库 key 的正常签认路径得到真实 MAC，并经 v2 key-owner 从这些原始 bytes/MAC 颁发本地 integrity-only token。两例均核全部原始成员与 ordered tuple；②是 deterministic synthetic 机制正例，不是 native Source A、也不冒称 COV2-24 native seal 能产出 `None`。helper-only `None/None` 只能作为额外断言；不能替代②。若②合法路径不可构造，本 VER 与 AC4 UNRUN，先 G-03 修订；1/1）。
-- [ ] VER2→AC1–7：`source .env.test && cargo test --lib internal::ai::capture::pending::tests::cov2_pending_v2_original_members_reject_substitution_or_bad_mac -- --exact`（原始 source `Some` 而 caller `None`、原始省略 source 而 caller `Some`、把省略 source 非规范地改成 `null`、错误 MAC/scope/root/各成员/tuple/畸形超界输入逐项负例；token 不颁发、key 不改变；1/1）。
-- [ ] VER3→v1 隔离：`source .env.test && cargo test --lib internal::ai::capture::pending::tests::cov2_pending_v2_member_auth_preserves_v1 -- --exact`（v1 bytes/MAC 相同，两 API 对相反 outer version 均拒绝；1/1）。
-- [ ] VER4→AC8：`source .env.test && cargo test --test compat_agent_architecture_guard cov2_v2_pending_original_member_issuer_is_integrity_only -- --exact`（精确 key-owner token 构造闭集与唯一返回类型；另以既有 proof/ACK 闭集 ER-04 回归，不合并计数；1/1）。
+- [x] AC1：v2 integrity result 的颁发以同一原始 whole envelope 的既有认证为前置。
+- [x] AC2：binding 成员与原始 authenticated binding slice 字节完全相同。
+- [x] AC3：redacted projection 与原始 nested `payload.redacted` slice 字节完全相同。
+- [x] AC4：caller 的可选 reasoning source 与原始 nested source slice 按 `Option<raw bytes>` 精确相等。VER1 必须分别证明 COV2-24 生产 `seal` 的 `Some/Some`、以及既有 COV2-04 codec 加仓库 key 正规认证路径的 synthetic `None/None`，两者都经原始 canonical bytes/MAC 到 key-owner integrity-only token；`None` caller 对 `Some` 原始成员由 VER2 拒绝。`None/None` 纯 helper 对照只补充语义断言，不算 MAC/token 正例，更不证明 native Source A。若现有 codec/仓库 key 合法路径无法构造完整 `None` 原始成员，则 AC4 保持 UNRUN 并在实施前按 G-03 修订，不能把 helper-only 或重签 DTO 计作通过。
+- [x] AC5：versioned associations 与原始 nested association slice 字节完全相同。
+- [x] AC6：versioned coverage 与原始 coverage slice 字节完全相同。
+- [x] AC7：caller 的有序 `(coverage_schema_version, logical_turn_key)` tuple 与同一已认证 envelope 的有界 decoder tuple 精确相等。
+- [x] AC8：v2 key-owner 入口唯一返回现有本地 `PendingIntegrityToken` 权限类型。
+
+**Verification（4/8 卡特有门；r2 下述四个具名 selector 各1/1）：**
+
+- [x] VER1→AC1–7：`source .env.test && cargo test --lib internal::ai::capture::pending::tests::cov2_pending_v2_original_members_authenticate_exact_tuple -- --exact`（同一具名测试须含两个完整认证正例：① COV2-24 生产 `seal` 的 `Some/Some` source；② COV2-04 既有 bounded codec 生成原始 outer-v2 `None/None` source，再由仓库 key 的正常签认路径得到真实 MAC，并经 v2 key-owner 从这些原始 bytes/MAC 颁发本地 integrity-only token。两例均核全部原始成员与 ordered tuple；②是 deterministic synthetic 机制正例，不是 native Source A、也不冒称 COV2-24 native seal 能产出 `None`。helper-only `None/None` 只能作为额外断言；不能替代②。若②合法路径不可构造，本 VER 与 AC4 UNRUN，先 G-03 修订；1/1）。
+- [x] VER2→AC1–7：`source .env.test && cargo test --lib internal::ai::capture::pending::tests::cov2_pending_v2_original_members_reject_substitution_or_bad_mac -- --exact`（原始 source `Some` 而 caller `None`、原始省略 source 而 caller `Some`、把省略 source 非规范地改成 `null`、错误 MAC/scope/root/各成员/tuple/畸形超界输入逐项负例；token 不颁发、key 不改变；1/1）。
+- [x] VER3→AC1/AC8 与 v1 隔离：`source .env.test && cargo test --lib internal::ai::capture::pending::tests::cov2_pending_v2_member_auth_preserves_v1 -- --exact`（v1 bytes/MAC 相同，两 API 对相反 outer version 均拒绝；1/1）。
+- [x] VER4→AC8：`source .env.test && cargo test --test compat_agent_architecture_guard cov2_v2_pending_original_member_issuer_is_integrity_only -- --exact`（精确 key-owner token 构造闭集与唯一返回类型；另以既有 proof/ACK 闭集 ER-04 回归，不合并计数；1/1）。
 
 **实现接线与 Optional-source 约束：** 未接生产 caller 的 v2 verifier 及其私有类型使用范围限定的 `allow(dead_code)`，COV2-22 接线时复核并删除不再需要的限定；Unix-only test helper/VER 各自 cfg 匹配，Windows strict 编译不因 Unix-only seam 放宽。`None/None` 的 source digest 固定为 `SHA256(b"libra/pending-v2/no-reasoning-source\0")`，只作域分隔的本地完整性 sentinel；VER1 必须额外断言该 token 不匹配实际 `Some` 原始 source 的 digest stamp，不能据此恢复 native proof。此为 AC4/AC8 的断言细化，不新增行为轴或计数。
 
-**AC4 验收边界：** 当前生产 native seal 要求完整 source commitment，只能提供 `Some/Some` 的 production-sealed 正例；COV2-04 的 `VersionedPendingPayloadProjection::new_codec` 接受 `None`，但这只是编码可行的源码证据，尚未证明仓库 key 完整认证路径。VER1 的第二个 `None/None` 正例必须经该 codec 的真实 canonical bytes、正常仓库 key MAC 和 v2 key-owner token，且仅授本地完整性；纯 helper 通过不计。不能构造时为具体阻断，先 G-03 改卡而不验收 AC4。所有本卡新 VER 仍 UNRUN。
+**AC4 验收边界：** 当前生产 native seal 要求完整 source commitment，只能提供 `Some/Some` 的 production-sealed 正例；COV2-04 的 `VersionedPendingPayloadProjection::new_codec` 接受 `None`，但这只是编码可行的源码证据，尚未证明仓库 key 完整认证路径。VER1 的第二个 `None/None` 正例必须经该 codec 的真实 canonical bytes、正常仓库 key MAC 和 v2 key-owner token，且仅授本地完整性；纯 helper 通过不计。不能构造时为具体阻断，先 G-03 改卡而不验收 AC4。开工时所有新 VER 均 UNRUN；现在 r2 四项均具名1/1，含 None-source sentinel 对真实 Some source digest 的负例，仅为本地完整性机制证据。
 
 **Mandatory ER-04 inherited regressions（不计本卡四项 VER）：** 以下八个 selector 均已在 COV2-24 候选时点的现有源码中按精确名称定位；在 COV2-25 最终源码上逐条运行，每条须实际 1 passed/0 failed/0 ignored。0 matched、skip、失败或旧源码结果不是 PASS。
 
@@ -1776,6 +1782,18 @@ COV2-REL-01 冻结不含 OG-27 源码的最终 COV2 树；首次完成 bumped �
 复杂 OpenCode Session/模型验收仅 macOS 本机，不进 CI。
 
 **Full-suite trigger:** ER-13 T-1：`key.rs` 是共享单一认证来源，且架构守卫修改；最终源码运行双 env `cargo nextest run --all --no-fail-fast --retries 2`、nightly fmt、strict all-target/all-feature Clippy、精确 focused。家族首次 release bumped exact-tree 仍须全量；后续仅上游纯 patch 顺延可按 COV2-REL-01 的逐路径同一性规则复用已绿全量。
+
+**r2 focused 实际收据：** 日志索引 SHA-256 `6be14aba178bf940dcf9012ee2b1cc05e8c5c0334fddf54b9cd70df78e6b861b`；四项 VER、八项上述 mandatory、额外三个旧 key/proof 调用闭集，以及随临时49乘载的上游 `commit_message_body`/tree mode/raw commit 三项 exact，共18 selector 各报告1 passed/0 failed/0 ignored。r2 不含独立 foreign-storage 参数负例，其原收据把跨 root/storage 的组合拒绝列为单独 storage 门属于过度表述，已被下述审查指出；本段仅保留历史，不代表修正后最终源码通过。其中完整 MAC 的 malformed JSON、unknown outer/payload、duplicate outer/payload、None/Some/null、scope/storage/root/deadline、tuple与同key跨envelope拼接拒绝均在 VER2，第二独立repo root替代错误的同仓子目录fixture。Some/Some正例走真实生产sealer，None/None走真实codec+existing-key MAC，均synthetic机制，不是模型native Source A。最终质量/full/单审、signed+DCO main/remote及家族C/D尚未据此通过。
+
+**r2 strict 检查中断：** nightly fmt/diff check 已 exit0；strict all-target/all-feature Clippy 子进程初始化后约10分钟无CPU/日志进展，root仅停止本次拥有的20个 cargo/clippy进程。此轮 strict 实际 exit1，不作PASS，也不判源码编译缺陷或网络错误。原始日志与中断receipt保留；改用 runner-only `CARGO_BUILD_JOBS=4` 重跑同一 `cargo clippy --all-targets --all-features -- -D warnings`，无项目/CI配置或检查面缩减。最终full、单审与signed交付仍待。
+
+**源码审查 R1 FAIL 与测试补齐：** 唯一 Claude Code R1 实际 FAIL（P0/P1=0、P2=1、P3=4；raw SHA-256 `5c621a92df654579df39509008ced7fa62c6848ac6afff570b3c7c9557f0c1b4`），未发现生产 verifier 缺陷，P2 是 r2 收据声称独立 storage 拒绝而测试只覆盖 foreign root。仅在既有 VER2 测试添加 original scope/root/bytes/MAC + 第二 repo storage 的独立负例；生产文件 key.rs 和 pending 生产前缀未改，新 exact/full/strict/最终单审待。P3 边界如实登记：post-parse deadline 的位置由结构 guard 验证，runtime expired case 仅早期deadline；VER3的v1历史bytes/MAC同一性依赖独立mandatory frozen用例，不由VER3单独证明；member多次stream比较是整-envelope byte gate后的防御；AC/VER checkbox仅 `locally-mechanism-passed`，不等于最终 Acceptance。
+
+**r4 最终 focused 补齐：** 新增 independent foreign-storage 负例后，r4 全部18 exact selector 再次各1/1，日志索引 SHA-256 `066a7684766b957208e3774c91dd97b3d0a59fff045670c89fb423468bc5d45f`。VER2 此轮实际分别拒绝 original storage + foreign root，以及 original root + foreign storage；r2原过度收据不倒写。r3四jobs质量 fmt/diff/strict exit0（index `208360fb18549e1ff7867e976442352e61ae72f2d549e2bfbbc3c9814a5ca5fb`）属于新增storage断言前的旧快照，最终r4仍独立跑质量/full/单审，不能从旧质量预记通过。
+
+**r4 最终质量与临时接线预检：** nightly fmt/diff/四jobs strict all-target/all-feature `-D warnings` 实际exit0，quality index SHA-256 `8cdf4695a85138e2e7c2ac1cdfc9c4f5214e10385a8d81ee8a0367e3a4a5b7d2`。固定driver/scanner hash后只读AST实扫640个src文件，输入manifest `8a1d7b82ee1f02b4716b52b78ec3e86a235fe8501d53b28b2ed583dd43e122ed`；唯一生产表达式新增为本卡authenticator→boundeddecoder内部引用，authenticator自身仍零生产caller。只证明当前CLI/provider接线未启用未完v2，不证明任意embedding不可调用，不证明native Source A。下步在该最终实现/测试/行为文档快照运行双env全量；最终单Claude、签名Push及家族C/D仍待。
+
+**r4 冻结源码 full 实际收据（2026-10-14 13:36:45 UTC）：** 同时加载 `.env.test` 与 `.env.live-test`，runner-only `CARGO_BUILD_JOBS=4`、`NEXTEST_TEST_THREADS=4`，实际 `cargo nextest run --all --no-fail-fast --retries 2` exit0：`Summary [2645.131s] 10110 tests run: 10110 passed (2 slow), 23 skipped`；raw SHA-256 `01dafbcbf51f87db809fa1c3b57ad44333913286f0cc72daf181e6735e34b789`。full期间八个本卡候选文件的SHA/mode与冻结快照同一；生产 key SHA `97575b6a46fe05a86e25b011d9d33292ce07ba3bfb39bf96f58a433c24cca4f6`、pending test后像 `ec9fa86821d21148c66b839021950951802e074dcdffb71f5b885366b1b31ed3`、architecture guard `be9bdd53b8cba8f8071fc2c9019f003122f858829e3715265058a3c55c58ab7a`。23 skipped不作验收通过，synthetic不证明Source A。该full基于HEAD `2b80a56242c89518e706eaca18ceb4b0d66798d6` 加本卡精确I，包含35f8 cat-file修复；期间新上游 `5c0eb71c57f5cf73e8f711e459826758086a4c11` 与官方OpenCode29/新普通适配均未写入此冻结树，本收据不能冒称它们的最终源码验收。最终单Claude/signed交付、最新上游合流与临时49最终源码full/C-D仍待；source-ready12/26、formal0/26不预增。
 
 **Dependencies:** COV2-24 实际最终 A/B、适用 focused/full、fmt/strict、唯一 Claude Code PASS、signed+DCO main 与远端同 SHA、逐路径 SHA/mode；另先完成本次三文档独立 G-09 协调单审及 signed main。只消费 source-qualified 前驱，不冒称继承 C/D complete。
 

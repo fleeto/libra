@@ -285,3 +285,24 @@ checkpoint. COV2-22 owns the transaction and frozen old-reader behavior;
 COV2-08 owns replay. Synthetic tests of this seal do not prove OpenCode
 provider Source A or permit native cross-version aliases with the same bare
 logical key.
+
+## Original pending-v2 member integrity (COV2-25)
+
+The private key-owner verifier checks the original whole-envelope MAC with the
+existing repository key, capture scope, storage binding, authorized root and
+deadline before using the COV2-04 bounded authenticated decoder. It compares the caller's binding,
+`payload.redacted`, optional reasoning source, ordered associations and coverage
+with the exact original canonical member slices, including the decoder's
+ordered `(coverage_schema_version, logical_turn_key)` tuples. After parsing it
+checks the deadline again before issuing the local `PendingIntegrityToken`.
+Missing keys fail closed; verification does not initialize or replace a key.
+Unknown envelope/payload fields and duplicate JSON keys fail closed.
+
+An omitted source uses the domain-separated digest of
+`libra/pending-v2/no-reasoning-source\0`; explicitly present `null` is rejected
+rather than treated as canonical omission. Source-present production-seal tests
+and absent-source codec/key-owner tests exercise local integrity mechanisms;
+neither supplies real provider Source A. This entry has no production durable
+loader consumer until COV2-22 and grants no native proof, artifact persistence
+or checkpoint ACK. COV2-08 owns subsequent replay checks. The v1 member API,
+serialization and pending MAC domain remain unchanged.

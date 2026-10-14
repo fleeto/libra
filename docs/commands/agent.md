@@ -1259,3 +1259,17 @@ When reasoning coverage cannot be safely compared, live capture and export fail 
 The private identity namespace has separate `identity-v1` and `identity-v2` keys. Together they are limited to 4096 records and 1 MiB of stored encoded values per session. Reaching either limit stops the write and reports `private reasoning identity session map reached its safe capacity; start a new capture session`. An absent map is the legacy state: candidate-free ordinary turns retain their existing coverage behavior, and the first eligible identity-bearing turn may create a map. A malformed, oversized, unexpected, or unauthenticated map rejects the entire reservation with `private reasoning identity is invalid; start a new capture session` before any claim write, including candidate-free turns; an import receipt records this as failed. Doctor does not repair an invalid identity map, and a missing conflict finding does not make the session complete. Do not edit the private metadata scope manually.
 
 These checks compare capture identity only; they do not prove native provider origin. Unproved OpenCode reasoning remains partial and is not archived.
+
+
+### OpenCode native import directory binding
+
+Native OpenCode exports bind the session directory in `info.location.directory`.
+Import also accepts classic `info.directory` and `info.cwd` declarations. It
+collects all declared string directories and requires them to resolve to one
+canonical directory in the current Libra storage boundary; no field takes
+precedence over a conflicting declaration. Directory fact collection does not
+coerce non-string values; the existing source and schema validation still applies.
+Equivalent lexical paths and symlink aliases keep the same canonical scope
+checks. A missing or conflicting directory returns `LBR-AGENT-016`; a directory
+belonging to another repository stays rejected. This compatibility fix does not
+approve native reasoning origin.

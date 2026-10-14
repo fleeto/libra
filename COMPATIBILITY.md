@@ -1221,3 +1221,15 @@ The private pending codec pairs its closed inner payload v2 with the live Sessio
 Garbage collection excludes the reserved `agent_reasoning_identity` scope from generic metadata object-reference scanning. This applies to the entire stored value, including a damaged value containing a JSON object ID or a nested object ID; those values do not trigger object hydration. This exclusion requires no private reasoning key. Ordinary metadata object roots, private capture recovery exclusions, and capture pending parent roots retain their existing rules. Forward recovery must retain both the private rows and this exclusion while a reasoning identity writer is stopped or repaired. This guard does not create identity records, issue native provenance, or enable OpenCode reasoning archival.
 
 COV2-07 freezes identity-v1 slot, descriptor, record and whole-map canonical bytes and MAC answers. Existing v1 callers keep their original key, HMAC prefixes and byte domains; the v1 map still uses the record purpose. Explicit identity-v2 descriptor, record and whole-map helpers use three distinct prefixes and HMAC byte domains under that same repository-private key. Unknown versions and missing keys fail closed, and a visible-prefix change cannot transplant a MAC between purposes. These helpers do not yet persist a v2 map or enable v2 claims; COV2-14 will bind them to closed v2 record/map bodies and shared capacity checks. A private identity MAC is not provider-native evidence.
+
+
+## OpenCode native import directory compatibility
+
+Native `info.location.directory` joins classic `info.directory` / `info.cwd`
+in import scope discovery. Every string declaration is collected before the
+existing canonical-directory and repository-storage gates; conflicting aliases
+are rejected instead of choosing the first field. Fact collection does not coerce
+non-string values, and existing source/schema validation remains required. Missing
+or ambiguous paths retain `LBR-AGENT-016`, cross-repository paths remain rejected,
+and same-directory symlink aliases retain canonical equivalence. No native
+producer or reasoning source authorization follows from this ordinary import fix.

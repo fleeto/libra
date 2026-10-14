@@ -928,10 +928,19 @@ fn collect_facts(kind: AgentKind, bytes: &[u8], deadline: Option<Instant>) -> Re
                 ) {
                     facts.terminal = true;
                 }
-                if let Some(cwd) = info
-                    .get("directory")
-                    .or_else(|| info.get("cwd"))
-                    .and_then(CanonValue::as_str)
+                // Native exports bind the session directory under location;
+                // classic exports use directory/cwd. Collect every declaration
+                // so canonical scope validation can reject conflicts instead
+                // of allowing one spelling to hide another.
+                for cwd in [
+                    info.get("directory"),
+                    info.get("cwd"),
+                    info.get("location")
+                        .and_then(|location| location.get("directory")),
+                ]
+                .into_iter()
+                .flatten()
+                .filter_map(CanonValue::as_str)
                 {
                     facts.working_dirs.insert(PathBuf::from(cwd));
                 }
@@ -8460,6 +8469,117 @@ pub(crate) mod tests {
                 .as_deref(),
             Some(lease.owner.as_str())
         );
+    }
+
+    #[test]
+    fn opencode_import_collects_native_and_classic_directory_declarations() {
+        for info in [
+            serde_json::json!({"id":"ses_directory", "location":{"directory":"/repo"}}),
+            serde_json::json!({"id":"ses_directory", "directory":"/repo"}),
+            serde_json::json!({"id":"ses_directory", "cwd":"/repo"}),
+            serde_json::json!({"id":"ses_directory", "directory":"/repo", "cwd":"/repo",
+                "location":{"directory":"/repo"}}),
+        ] {
+            let bytes = serde_json::to_vec(&serde_json::json!({"info":info, "messages":[]}))
+                .expect("encode OpenCode directory fixture");
+            let facts = collect_facts(AgentKind::OpenCode, &bytes, None)
+                .expect("collect OpenCode native/classic directory facts");
+            assert_eq!(facts.working_dirs, BTreeSet::from([PathBuf::from("/repo")]));
+            assert_eq!(
+                facts.provider_session_ids,
+                BTreeSet::from(["ses_directory".to_owned()])
+            );
+        }
+    }
+
+    #[test]
+    fn opencode_import_directory_conflicts_and_repository_scope_are_preserved() {
+        let fixture = tempfile::tempdir().expect("create explicit repository-scope fixture");
+        let repository = fixture.path().join("repo");
+        let foreign = fixture.path().join("foreign");
+        for directory in [&repository, &foreign] {
+            let storage = directory.join(util::ROOT_DIR);
+            std::fs::create_dir_all(&storage).expect("create repository recognition markers");
+            // Scope discovery needs only the existing database marker; these
+            // fixtures never open a database or invoke an agent/model.
+            std::fs::write(storage.join(util::DATABASE), b"").expect("write database marker");
+        }
+        let repository = repository.canonicalize().expect("canonicalize repository");
+        let foreign = foreign
+            .canonicalize()
+            .expect("canonicalize foreign repository");
+        let storage = repository
+            .join(util::ROOT_DIR)
+            .canonicalize()
+            .expect("canonicalize storage");
+        let facts_for = |info| {
+            let bytes = serde_json::to_vec(&serde_json::json!({"info":info, "messages":[]}))
+                .expect("encode explicit directory declarations");
+            collect_facts(AgentKind::OpenCode, &bytes, None)
+                .expect("collect directory declarations")
+        };
+        let native = facts_for(serde_json::json!({"location":{"directory":repository}}));
+        assert_eq!(
+            verified_repo_root(&native, &repository, &storage).expect("native directory accepted"),
+            repository
+        );
+        // Non-string values add no directory facts under the existing filter.
+        // A valid classic string remains usable; this does not approve the
+        // complete export schema or bypass the earlier source authorization.
+        let non_string_native =
+            facts_for(serde_json::json!({"directory":repository, "location":{"directory":42}}));
+        assert_eq!(
+            verified_repo_root(&non_string_native, &repository, &storage)
+                .expect("only string directory evidence is considered"),
+            repository
+        );
+        let lexical_alias = facts_for(serde_json::json!({"directory":repository,
+            "cwd":repository.join("."), "location":{"directory":repository}}));
+        assert_eq!(
+            verified_repo_root(&lexical_alias, &repository, &storage)
+                .expect("same canonical directory accepted"),
+            repository
+        );
+        for info in [
+            serde_json::json!({"directory":repository, "location":{"directory":foreign}}),
+            serde_json::json!({"cwd":repository, "location":{"directory":foreign}}),
+            serde_json::json!({"directory":repository, "cwd":foreign}),
+            serde_json::json!({"location":{"directory":42}}),
+            serde_json::json!({"location":{"directory":true}}),
+            serde_json::json!({"location":{"directory":null}}),
+            serde_json::json!({"location":{"directory":[]}}),
+            serde_json::json!({"location":{"directory":{}}}),
+            serde_json::json!({}),
+        ] {
+            let facts = facts_for(info);
+            let error = verified_repo_root(&facts, &repository, &storage)
+                .expect_err("missing/conflicting directory refused");
+            assert!(matches!(
+                error.downcast_ref::<ImportError>(),
+                Some(ImportError::WorkingDirMissingOrAmbiguous)
+            ));
+        }
+        let foreign_only = facts_for(serde_json::json!({"location":{"directory":foreign}}));
+        let error = verified_repo_root(&foreign_only, &repository, &storage)
+            .expect_err("foreign native repository refused");
+        assert!(matches!(
+            error.downcast_ref::<ImportError>(),
+            Some(ImportError::RepositoryConflict)
+        ));
+        #[cfg(unix)]
+        {
+            let alias = fixture.path().join("repo-alias");
+            std::os::unix::fs::symlink(&repository, &alias)
+                .expect("create canonical directory alias");
+            let aliased = facts_for(
+                serde_json::json!({"directory":alias, "location":{"directory":repository}}),
+            );
+            assert_eq!(
+                verified_repo_root(&aliased, &repository, &storage)
+                    .expect("symlink same-repository alias accepted"),
+                repository
+            );
+        }
     }
 
     #[test]

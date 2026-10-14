@@ -837,3 +837,14 @@ reasoning 覆盖无法安全比较时，live capture 和 export 会 fail closed�
 同一 session 的私有 identity 命名空间有独立的 `identity-v1` 与 `identity-v2` 键；两者合计最多 4096 条记录、1 MiB 已编码存储值。达到任一上限时会停止写入，并返回 `private reasoning identity session map reached its safe capacity; start a new capture session`。map 缺失属于 legacy 状态：没有 candidate 的普通 turn 保持原 coverage 行为，首个符合准入条件且带 identity 的 turn 可以创建 map。格式错误、超限、含未预期内容或无法通过认证的 map 会使整个 reservation 在任何 claim 写入前以 `private reasoning identity is invalid; start a new capture session` 失败，包括不含 candidate 的 turn；import receipt 会记录为 failed。doctor 不会修复无效 identity map；没有 conflict finding 也不代表 session 已 complete。不要手动编辑私有 metadata scope。
 
 这些检查只比较 capture identity，不证明来源来自 provider 的 native 字段。未获证明的 OpenCode reasoning 保持 partial，不会归档。
+
+
+### OpenCode 原生导入的目录绑定
+
+OpenCode 原生 export 通过 `info.location.directory` 绑定会话目录。导入同时
+兼容旧格式 `info.directory` 和 `info.cwd`，收集所有已声明的字符串目录，
+要求它们 canonicalize 后只有一个目录且处于当前 Libra storage 边界。字段
+顺序不会掩盖冲突；目录事实采集不强制转换非字符串值，原有来源与 schema
+校验继续适用。等价词法路径或 symlink 别名仍经过原 canonical scope 检查。
+目录缺失或冲突返回 `LBR-AGENT-016`，另一仓库的目录继续拒绝。
+本兼容修复不授予 reasoning 的 native 来源权限。

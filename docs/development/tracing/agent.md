@@ -2883,3 +2883,9 @@ COV2-04 的纯 pending-v2 codec 让 claim 和有序 identity tuple 显式携带 
 COV2-24 的私有入口只接收同一个完整 redacted payload、由它派生的封闭 versioned companion、匹配的 capture binding 与 prepared alias，并在入口调用 COV2-23 已审同源借用门。versioned inner projection 按原顺序逐项配对 `(version,logical key)`、slot 与 descriptor MAC，错配即拒绝；随后只用 COV2-04 有界 codec 形成 outer-v2 精确字节，沿原 header-v1 和 pending MAC 域认证。成功只产生内存 artifact，失败与成功均不写 pending/alias/lease/marker/ref，也不发 checkpoint ACK；原 v1 sealer 与字节保持不变。COV2-22 负责同一事务的真实持久化和冻结旧读端，COV2-08 负责 replay；synthetic 验收不能替代 OpenCode Source A，OG-29 前 native 跨版本同裸 key 继续拒绝。
 
 COV2-25 的私有 key-owner verifier 先以既有仓库 key、capture scope、storage 绑定、授权 root 和 deadline 认证原始完整 outer-v2 bytes/MAC，再调用 COV2-04 有界 authenticated decoder。caller 的 binding、`payload.redacted`、可选 source、ordered associations 和 coverage 必须逐字节对应原始 canonical member slice；有序 `(coverage_schema_version, logical_turn_key)` tuple 还须对应同一 decoder 结果。解析结束后再次核 deadline，才颁发本地 `PendingIntegrityToken`；缺 key 拒绝，不创建或替换 key；未知 envelope/payload 字段与重复 JSON key 均拒绝。省略 source 使用 `libra/pending-v2/no-reasoning-source\0` 的域分离摘要，显式 `null` 不算规范省略。生产 seal 的 source-present 合成测试与 codec/key-owner 的 absent-source 合成测试都只证明本地完整性机制。COV2-22 尚须接入真实 durable loader，COV2-08 尚须接入 replay；本入口不授 native proof、不持久化、不发 checkpoint ACK、不证明 OpenCode Source A。v1 成员入口、规范字节和 pending MAC 域不变。
+
+### OpenCode 2.0.29 idle 错误投影
+
+OpenCode 2.0.29 的 idle 消息可以带可选 `error`。普通投影只保留字符串 `type`、`message` 和可选的 100..599 整数 `status`；缺省 error 不改变 ordinary 状态。缺少必需字段、字段错型或非法 status 会删除整个 error 并保持 partial。`response` 与未知成员被剥离并保持 partial；具名 `signature`、`redactedData` 或 `reasoningEncryptedContent` hint 则删除整个 error。这个 idle 专用校验不改变 retry、compaction 或 tool 的既有 structured-error 处理。
+
+本卡三个新回归均为 synthetic；真实模型 Session 的 idle.error 失败输出仍未证明，普通成功会话不替代该证据。此投影不认证 provider/native 来源，不授归档权限，也不增加 CI 的 Session 或模型调用。

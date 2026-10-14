@@ -658,7 +658,7 @@ fn retain_native_nonassistant_envelope(
                         | "tokens"
                         | "error"
                 ),
-                "idle" => matches!(name.as_str(), "outcome"),
+                "idle" => matches!(name.as_str(), "outcome" | "error"),
                 _ => false,
             }
     });
@@ -745,6 +745,8 @@ fn retain_native_nonassistant_envelope(
             project_envelope_object(tokens, "cache", &["read", "write"], removed, unproven);
         }
         project_structured_error(fields, "error", removed, unproven);
+    } else if kind == "idle" {
+        project_native_idle_error(fields, removed, unproven);
     } else if kind == "shell" {
         project_shell_output(fields, removed, unproven);
     }
@@ -949,6 +951,32 @@ fn project_classic_integer_time(
             *unproven = true;
         }
     }
+}
+
+/// OpenCode 2.0.29 adds an optional SessionError to idle messages. Required
+/// strings and the optional HTTP status use its exact public schema; response
+/// bodies, unknown fields and opaque hints still follow the existing partial
+/// projection policy. This does not authenticate provider/native provenance.
+fn project_native_idle_error(
+    fields: &mut BTreeMap<String, CanonValue>,
+    removed: &mut bool,
+    unproven: &mut bool,
+) {
+    let Some(value) = fields.get("error") else {
+        return;
+    };
+    let valid_header = matches!(value, CanonValue::Object(error)
+        if matches!(error.get("type"), Some(CanonValue::Str(_)))
+            && matches!(error.get("message"), Some(CanonValue::Str(_)))
+            && error.get("status").is_none_or(|status|
+                matches!(status, CanonValue::Int(code) if (100..=599).contains(code))));
+    if !valid_header {
+        remove_wiping(fields, "error");
+        *removed = true;
+        *unproven = true;
+        return;
+    }
+    project_structured_error(fields, "error", removed, unproven);
 }
 
 /// Provider error bodies can contain raw request or response material. Keep
@@ -4304,6 +4332,102 @@ mod tests {
             AgentKind::FactoryAi,
         ] {
             assert!(agent_for(kind).as_reasoning_source_preprocessor().is_none());
+        }
+    }
+    fn opencode29_idle_fixture(error: Option<serde_json::Value>) -> String {
+        let mut idle = serde_json::json!({
+            "id": "msg_idle29", "type": "idle", "outcome": "failed",
+            "time": { "created": 2 }
+        });
+        if let Some(error) = error {
+            idle["error"] = error;
+        }
+        serde_json::json!({
+            "info": { "id": "ses_ordinary29" },
+            "messages": [
+                { "id": "msg_user29", "type": "user", "text": "safe prompt", "time": { "created": 1 } },
+                idle
+            ]
+        }).to_string()
+    }
+
+    #[test]
+    fn opencode29_idle_error_accepts_exact_typed_header_and_absence() {
+        for error in [
+            None,
+            Some(serde_json::json!({ "type": "output-limit", "message": "limit reached" })),
+            Some(
+                serde_json::json!({ "type": "tool.input-incomplete", "message": "incomplete input", "status": 100 }),
+            ),
+            Some(serde_json::json!({ "type": "", "message": "", "status": 599 })),
+        ] {
+            let input = opencode29_idle_fixture(error.clone());
+            let (ordinary, state) = prepare(&input).expect("synthetic official29 idle parses");
+            assert!(matches!(state, ReasoningSourceState::Ordinary));
+            let value: serde_json::Value = serde_json::from_slice(&ordinary).expect("safe JSON");
+            assert_eq!(value["messages"][1].get("error"), error.as_ref());
+        }
+    }
+
+    #[test]
+    fn opencode29_idle_error_unknown_response_or_opaque_stays_partial() {
+        for extra in [
+            serde_json::json!({ "unknown": "ERROR29_CANARY" }),
+            serde_json::json!({ "response": { "body": "ERROR29_CANARY" } }),
+            serde_json::json!({ "signature": "ERROR29_CANARY" }),
+            serde_json::json!({ "redactedData": "ERROR29_CANARY" }),
+            serde_json::json!({ "reasoningEncryptedContent": "ERROR29_CANARY" }),
+        ] {
+            let mut error = serde_json::json!({ "type": "output-limit", "message": "safe header" });
+            error
+                .as_object_mut()
+                .expect("object")
+                .extend(extra.as_object().expect("object").clone());
+            let (ordinary, state) =
+                prepare(&opencode29_idle_fixture(Some(error))).expect("synthetic29 error parses");
+            assert!(matches!(state, ReasoningSourceState::Unproven));
+            assert!(!String::from_utf8_lossy(&ordinary).contains("ERROR29_CANARY"));
+            let safe: serde_json::Value = serde_json::from_slice(&ordinary).expect("safe JSON");
+            if ["signature", "redactedData", "reasoningEncryptedContent"]
+                .iter()
+                .any(|key| extra.get(key).is_some())
+            {
+                assert!(safe["messages"][1].get("error").is_none());
+            } else {
+                assert_eq!(
+                    safe["messages"][1]["error"],
+                    serde_json::json!({
+                        "type": "output-limit", "message": "safe header"
+                    })
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn opencode29_idle_error_malformed_required_or_status_stays_partial() {
+        for error in [
+            serde_json::json!(null),
+            serde_json::json!("invalid"),
+            serde_json::json!({}),
+            serde_json::json!({ "type": "missing-message" }),
+            serde_json::json!({ "message": "missing-type" }),
+            serde_json::json!({ "type": 1, "message": "safe" }),
+            serde_json::json!({ "type": "safe", "message": 1 }),
+            serde_json::json!({ "type": "safe", "message": "safe", "status": 99 }),
+            serde_json::json!({ "type": "safe", "message": "safe", "status": 600 }),
+            serde_json::json!({ "type": "safe", "message": "safe", "status": 400.5 }),
+            serde_json::json!({ "type": "safe", "message": "safe", "status": "400" }),
+            serde_json::json!({ "type": "safe", "message": "safe", "status": null }),
+            serde_json::json!({ "type": "safe", "message": "safe", "status": false }),
+            serde_json::json!([]),
+            serde_json::json!(1),
+        ] {
+            let (ordinary, state) =
+                prepare(&opencode29_idle_fixture(Some(error))).expect("synthetic29 error parses");
+            assert!(matches!(state, ReasoningSourceState::Unproven));
+            let value: serde_json::Value = serde_json::from_slice(&ordinary).expect("safe JSON");
+            assert!(value["messages"][1].get("error").is_none());
         }
     }
 }

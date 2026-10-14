@@ -1233,3 +1233,20 @@ non-string values, and existing source/schema validation remains required. Missi
 or ambiguous paths retain `LBR-AGENT-016`, cross-repository paths remain rejected,
 and same-directory symlink aliases retain canonical equivalence. No native
 producer or reasoning source authorization follows from this ordinary import fix.
+
+
+### OpenCode 2.0.29 idle error projection
+
+The public 2.0.29 idle-message schema adds an optional `error`. An absent error
+keeps the ordinary projection. A present diagnostic header requires string
+`type` and `message`; optional HTTP `status` is an integer from 100 to 599.
+Missing required fields, a wrong shape or an invalid status removes the whole
+error and marks capture partial. A `response` body and unknown members are
+removed and keep capture partial; an opaque hint removes the entire error.
+Existing compaction and retry error handling is unchanged.
+
+These are ordinary typed diagnostics, not native producer or field proof. The
+new regression fixtures are synthetic. Actual idle-error output from a live
+model Session remains unproven; a successful ordinary session does not prove
+that failure path. Real OpenCode/account/model checks run locally on macOS
+and stay outside CI. Native reasoning Source A remains a separate gate.

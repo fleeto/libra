@@ -848,3 +848,17 @@ OpenCode 原生 export 通过 `info.location.directory` 绑定会话目录。导
 校验继续适用。等价词法路径或 symlink 别名仍经过原 canonical scope 检查。
 目录缺失或冲突返回 `LBR-AGENT-016`，另一仓库的目录继续拒绝。
 本兼容修复不授予 reasoning 的 native 来源权限。
+
+
+### OpenCode 2.0.29 idle 错误投影
+
+公开2.0.29 idle消息schema新增可选 `error`；缺省error保持ordinary投影。
+诊断header必须含string `type` 和 `message`，可选HTTP `status`只能是
+100到599的整数。必需字段缺失、错型或非法status删除整个error并标partial；
+`response`整段和未知成员剥离且partial，opaque提示删除整个error。
+已有compaction/retry的error处理不变。
+
+这些是普通typed诊断，不是native producer或字段来源证明。新增回归fixture
+为synthetic；真实模型Session的idle.error失败输出仍未证明，成功普通会话
+不授此失败路径PASS。真实OpenCode/账号/模型验收只在macOS本机，不进CI。
+reasoning Source A仍是独立门。

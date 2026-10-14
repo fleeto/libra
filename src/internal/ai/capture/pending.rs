@@ -3,12 +3,17 @@
 //! enter this codec. Headers are small indexed discovery/GC records and chunks
 //! are read only for one explicitly selected artifact.
 
-use std::{path::Path, time::Instant};
+use std::{
+    io::{self, Write},
+    path::Path,
+    time::Instant,
+};
 
 use anyhow::{Context, Result, ensure};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use sea_orm::{ConnectionTrait, DatabaseTransaction, Statement};
 use serde::{Deserialize, Serialize};
+use serde_json::value::RawValue;
 
 #[cfg(test)]
 use super::snapshot;
@@ -21,10 +26,15 @@ use crate::internal::{
             },
             key,
             pending_identity::{self, PreparedPendingAlias},
-            pending_payload::{PendingPayloadProjection, PortablePendingCoverage},
+            pending_payload::{
+                PendingPayloadProjection, PortablePendingCoverage,
+                VersionedPendingPayloadProjection, VersionedPortablePendingCoverage,
+                check_versioned_tuple_wire_capacity, preflight_versioned_tuples,
+            },
         },
         capture_scope::CaptureScope,
         coverage_gate::{LiveClaimCommitPlan, ReservedTurnClaim},
+        observed_agents::parse_canon_value,
     },
     metadata::{MetadataKv, MetadataScope, MetadataValueType},
 };
@@ -38,6 +48,7 @@ const CHUNK_BYTES: usize = 512 * 1024;
 const MAX_CHUNKS: usize = 128;
 const CHUNK_TEXT_BYTES: usize = CHUNK_BYTES.div_ceil(3) * 4;
 const VERSION: u8 = 1;
+const VERSIONED_ENVELOPE_VERSION: u8 = 2;
 
 // Compiled pre-v2 payload/header/envelope decoder and original recovery
 // dispatch. Kept separate from the live reader so v2 cannot pass an oracle
@@ -192,6 +203,226 @@ struct PendingEnvelope {
     binding: PendingBinding,
     payload: PendingPayloadProjection,
     coverage: PortablePendingCoverage,
+}
+
+/// Outer-v2 is a separate wire schema. It leaves `PendingEnvelope` and its
+/// historical v1 serialization path completely unchanged.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code)] // COV2-24 seals and COV2-22 persists/loads this codec.
+pub(crate) struct VersionedPendingEnvelope {
+    pub(crate) version: u8,
+    pub(crate) binding: PendingBinding,
+    pub(crate) payload: VersionedPendingPayloadProjection,
+    pub(crate) coverage: VersionedPortablePendingCoverage,
+}
+
+impl VersionedPendingEnvelope {
+    fn validate(&self) -> Result<()> {
+        ensure!(
+            self.version == VERSIONED_ENVELOPE_VERSION,
+            "unsupported capture recovery envelope version; run `libra agent doctor`"
+        );
+        self.binding.validate()?;
+        self.payload.validate()?;
+        self.payload.matches_binding(&self.binding)?;
+        self.coverage.validate()?;
+        ensure!(
+            self.payload.identity_commit_associations.len() == self.coverage.claims.len(),
+            "capture recovery claim and identity tuple changed; run `libra agent doctor`"
+        );
+        for (association, claim) in self
+            .payload
+            .identity_commit_associations
+            .iter()
+            .zip(&self.coverage.claims)
+        {
+            ensure!(
+                association.coverage_schema_version == claim.coverage_schema_version
+                    && association.logical_turn_key == claim.logical_turn_key,
+                "capture recovery claim and identity tuple changed; run `libra agent doctor`"
+            );
+        }
+        check_versioned_tuple_wire_capacity(&self.payload, &self.coverage)?;
+        Ok(())
+    }
+}
+
+struct BoundedEnvelopeCounter {
+    len: usize,
+}
+
+impl Write for BoundedEnvelopeCounter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.len = self
+            .len
+            .checked_add(bytes.len())
+            .filter(|size| *size <= MAX_ENVELOPE_BYTES)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "capture recovery envelope capacity",
+                )
+            })?;
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+struct BoundedEnvelopeWriter {
+    bytes: Vec<u8>,
+}
+
+impl Write for BoundedEnvelopeWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let remaining = MAX_ENVELOPE_BYTES.saturating_sub(self.bytes.len());
+        if bytes.len() > remaining {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "capture recovery envelope capacity",
+            ));
+        }
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+struct ExactEnvelopeWriter<'a> {
+    original: &'a [u8],
+    offset: usize,
+}
+
+impl Write for ExactEnvelopeWriter<'_> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let end = self.offset.checked_add(bytes.len()).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "capture recovery envelope overflow",
+            )
+        })?;
+        if self.original.get(self.offset..end) != Some(bytes) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "capture recovery envelope is not canonical",
+            ));
+        }
+        self.offset = end;
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Pure bounded encoding; this does not sign, seal, persist or confer native
+/// source authority. The v1 envelope and existing MAC domain stay untouched.
+#[allow(dead_code)] // COV2-24 supplies the checked native seal caller.
+pub(crate) fn encode_versioned_envelope(
+    binding: PendingBinding,
+    payload: VersionedPendingPayloadProjection,
+    coverage: VersionedPortablePendingCoverage,
+) -> Result<Vec<u8>> {
+    let envelope = VersionedPendingEnvelope {
+        version: VERSIONED_ENVELOPE_VERSION,
+        binding,
+        payload,
+        coverage,
+    };
+    envelope.validate()?;
+    let mut counter = BoundedEnvelopeCounter { len: 0 };
+    serde_json::to_writer(&mut counter, &envelope).map_err(|_| {
+        anyhow::anyhow!(
+            "capture recovery envelope exceeds its safe capacity; run `libra agent doctor`"
+        )
+    })?;
+    let mut bytes = Vec::new();
+    bytes.try_reserve_exact(counter.len).map_err(|_| {
+        anyhow::anyhow!(
+            "cannot reserve bounded capture recovery envelope; retry through the provider"
+        )
+    })?;
+    let mut writer = BoundedEnvelopeWriter { bytes };
+    serde_json::to_writer(&mut writer, &envelope).map_err(|_| {
+        anyhow::anyhow!(
+            "capture recovery envelope exceeds its safe capacity; run `libra agent doctor`"
+        )
+    })?;
+    ensure!(
+        writer.bytes.len() == counter.len,
+        "capture recovery envelope changed during encoding; retry through the provider"
+    );
+    validate_envelope_shape(&writer.bytes)?;
+    Ok(writer.bytes)
+}
+
+/// The witness is issued only after verification of the original exact-byte
+/// envelope MAC. Parsing an unauthenticated DTO cannot call this decoder.
+#[allow(dead_code)] // COV2-22 wires the authenticated reader.
+pub(crate) fn decode_authenticated_versioned_envelope(
+    authentication: &AuthenticatedPendingEnvelope<'_>,
+    expected: &PendingBinding,
+) -> Result<VersionedPendingEnvelope> {
+    ensure!(
+        authentication.scope() == &expected.scope,
+        "capture recovery authentication scope changed; run `libra agent doctor`"
+    );
+    let bytes = authentication.bytes();
+    validate_envelope_shape(bytes)?;
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct RawVersionedEnvelope<'a> {
+        version: u8,
+        #[serde(borrow)]
+        binding: &'a RawValue,
+        #[serde(borrow)]
+        payload: &'a RawValue,
+        #[serde(borrow)]
+        coverage: &'a RawValue,
+    }
+    let raw: RawVersionedEnvelope<'_> = serde_json::from_slice(bytes).map_err(|_| {
+        anyhow::anyhow!("invalid authenticated capture recovery envelope; run `libra agent doctor`")
+    })?;
+    ensure!(
+        raw.version == VERSIONED_ENVELOPE_VERSION,
+        "unsupported capture recovery envelope version; run `libra agent doctor`"
+    );
+    preflight_versioned_tuples(raw.payload, raw.coverage)?;
+    // Detect duplicate nested JSON keys before typed deserialization can
+    // collapse them into a map. This runs only after entry/wire preflight.
+    parse_canon_value(bytes).map_err(|_| {
+        anyhow::anyhow!("invalid authenticated capture recovery envelope; run `libra agent doctor`")
+    })?;
+    let envelope: VersionedPendingEnvelope = serde_json::from_slice(bytes).map_err(|_| {
+        anyhow::anyhow!("invalid authenticated capture recovery envelope; run `libra agent doctor`")
+    })?;
+    ensure!(
+        envelope.binding == *expected
+            && serde_json::to_vec(&envelope.binding).map_err(|_| {
+                anyhow::anyhow!("invalid capture recovery binding; run `libra agent doctor`")
+            })? == raw.binding.get().as_bytes(),
+        "capture recovery binding changed; run `libra agent doctor`"
+    );
+    envelope.validate()?;
+    let mut exact = ExactEnvelopeWriter {
+        original: bytes,
+        offset: 0,
+    };
+    serde_json::to_writer(&mut exact, &envelope).map_err(|_| {
+        anyhow::anyhow!("noncanonical capture recovery envelope; run `libra agent doctor`")
+    })?;
+    ensure!(
+        exact.offset == bytes.len(),
+        "noncanonical capture recovery envelope; run `libra agent doctor`"
+    );
+    Ok(envelope)
 }
 
 pub(crate) struct VerifiedPendingPayload {
@@ -2009,6 +2240,128 @@ pub(crate) mod tests {
     #[cfg(unix)]
     fn deadline() -> Instant {
         Instant::now() + Duration::from_secs(30)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cov2_v1_pending_bytes_and_mac_frozen() {
+        use sha2::{Digest, Sha256};
+
+        let frozen = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/agent_transcripts/reasoning/pending_v1_decoder.rs"
+        ));
+        assert_eq!(
+            hex::encode(Sha256::digest(frozen)),
+            "96d71660e8b75d61cff2dccaa59a410b90b499afd63e10c9dcc2cc678312e32c",
+            "the pre-v2 decoder oracle must remain byte-for-byte frozen"
+        );
+        let fixture = Fixture::new().await;
+        let (artifact, _) = fixture.artifact(None).await;
+        let envelope: PendingEnvelope = serde_json::from_slice(&artifact.bytes).unwrap();
+        assert_eq!(envelope.version, VERSION);
+        let binding = serde_json::to_vec(&envelope.binding).unwrap();
+        let payload = serde_json::to_vec(&envelope.payload).unwrap();
+        let coverage = serde_json::to_vec(&envelope.coverage).unwrap();
+        let frozen_v1_layout = [
+            b"{\"version\":1,\"binding\":".as_slice(),
+            binding.as_slice(),
+            b",\"payload\":".as_slice(),
+            payload.as_slice(),
+            b",\"coverage\":".as_slice(),
+            coverage.as_slice(),
+            b"}".as_slice(),
+        ]
+        .concat();
+        assert_eq!(artifact.bytes, frozen_v1_layout);
+        frozen_pre_v2::decode_payload_v1(&payload).unwrap();
+        let header_text = serde_json::to_string(&artifact.header).unwrap();
+        frozen_pre_v2::decode_header_v1(&header_text).unwrap();
+        let mac = fixture
+            .scope
+            .sign_pending_envelope_until(
+                &fixture.db,
+                &fixture.storage,
+                fixture.root.path(),
+                &artifact.bytes,
+                deadline(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(mac, artifact.header.mac);
+        fixture
+            .scope
+            .verify_pending_envelope_until(
+                &fixture.db,
+                &fixture.storage,
+                fixture.root.path(),
+                &artifact.bytes,
+                &artifact.header.mac,
+                deadline(),
+            )
+            .await
+            .unwrap();
+        // Frozen v1 wire order from dcc468bd31c88a7e8d8c0d2957d6e80b65908990
+        // pending.rs/pending_payload.rs. The fixed key exercises the historical
+        // pending HMAC domain; the literal MAC pins these exact bytes.
+        // Sidecar tags are format-valid placeholders: only outer bytes and MAC are pinned.
+        const FROZEN_V1_BYTES: &[u8] = concat!(
+            r#"{"version":1,"binding":{"scope":{"repo_id":"opaque-repository","worktree_id":"","workspace_id":null,"workspace_fence":null},"session_id":"00000000-0000-4000-8000-000000000001","checkpoint_id":"00000000-0000-4000-8000-000000000002","event_id":"00000000-0000-4000-8000-000000000003","action_key":"action-1","receipt_key":"receipt-1","marker_generation":"generation-1","#,
+            r#""source_commitment":"source/hmac-v2/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","reserved_revision":1,"original_deadline_millis":null,"deferrable":false,"first_attempt_millis":1,"parent_commit":null,"parent_unborn":true},"payload":{"version":1,"alias":"00000000-0000-4000-8000-000000000001","snapshot":{"completeness":"complete","partial_reason":null,"#,
+            r#""source":{"kind":"trusted_export","identity":"not_retained:v1","digest_sha256":"source/hmac-v2/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","byte_len":1},"transcript_redacted_bytes":1,"redaction_match_count":0,"redaction_bytes_scanned":1,"redaction_bytes_redacted":0},"transcript":"eA==","metadata":{"agent_kind":"claude_code","#,
+            r#""checkpoint_id":"00000000-0000-4000-8000-000000000002","created_at":1,"extraction":{},"model":{},"redaction_report":{"bytes_redacted":0,"bytes_scanned":1,"matches":[]},"schema_version":2,"scope":"committed"},"lifecycle":[{"agent_kind":"claude_code","event_id":"00000000-0000-4000-8000-000000000003","identity_scheme":"native_replay_hmac_v2","kind":"session_end","partial":false,"provenance":{},"#,
+            r#""schema_version":2,"source":null,"timestamp":"1970-01-01T00:00:01Z"}],"redaction_report":"eyJieXRlc19yZWRhY3RlZCI6MCwiYnl0ZXNfc2Nhbm5lZCI6MSwibWF0Y2hlcyI6W119","metadata_mac":"pending-envelope/hmac-v1/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","lifecycle_mac":"pending-envelope/hmac-v1/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"},"#,
+            r#""coverage":{"owner":"owned-live-reservation","created_at":1,"claims":[{"logical_turn_key":"turn-1","coverage_digest":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","completeness":"complete","fence_token":1,"next_revision":1}]}}"#,
+        ).as_bytes();
+        const FROZEN_V1_MAC: &str = "pending-envelope/hmac-v1/a164845ca8c6b45df9a777f1a80f77f67243b47b1f933bf8e270c4eff8501bbd";
+        let frozen_envelope: PendingEnvelope = serde_json::from_slice(FROZEN_V1_BYTES).unwrap();
+        let frozen_payload = serde_json::to_vec(&frozen_envelope.payload).unwrap();
+        frozen_pre_v2::decode_payload_v1(&frozen_payload).unwrap();
+        let encoded_v1 = encode_envelope(
+            frozen_envelope.binding,
+            frozen_envelope.payload,
+            frozen_envelope.coverage,
+        )
+        .unwrap();
+        assert_eq!(
+            encoded_v1.as_slice(),
+            FROZEN_V1_BYTES,
+            "v1 encoder changed the complete frozen pending envelope",
+        );
+        assert_eq!(
+            hex::encode(Sha256::digest(FROZEN_V1_BYTES)),
+            "61d071a8ed03aa1bde199ccace8af992c98eaa89e23bf15c7abe646108b8b4ba",
+        );
+        let key_path = fixture
+            .storage
+            .join(key::CAPTURE_DEDUP_SECRET_DIR)
+            .join(key::CAPTURE_DEDUP_SECRET_FILE);
+        let fixed_key: [u8; 32] = std::array::from_fn(|index| index as u8);
+        std::fs::write(&key_path, fixed_key).unwrap();
+        let known_mac = fixture
+            .scope
+            .sign_pending_envelope_until(
+                &fixture.db,
+                &fixture.storage,
+                fixture.root.path(),
+                FROZEN_V1_BYTES,
+                deadline(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(known_mac, FROZEN_V1_MAC);
+        fixture
+            .scope
+            .verify_pending_envelope_until(
+                &fixture.db,
+                &fixture.storage,
+                fixture.root.path(),
+                FROZEN_V1_BYTES,
+                FROZEN_V1_MAC,
+                deadline(),
+            )
+            .await
+            .unwrap();
     }
     #[cfg(unix)]
     fn redact(bytes: &[u8]) -> crate::internal::ai::observed_agents::RedactedBytes {

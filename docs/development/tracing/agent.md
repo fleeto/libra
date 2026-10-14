@@ -2602,7 +2602,7 @@ per-claim sidecar 显式携带 `(coverage_schema_version, logical_turn_key)`，
 DB 仲裁按该组合键隔离 v1/v2，同版本等价内容幂等、incomplete→complete
 推进 revision、complete digest 冲突不覆盖。未知版本或与 typed turn
 selector 不符的版本在写 claim 前拒绝；COV2-03 已负责 marker，
-COV2-04 负责后续 pending 传递，COV2-11 才切换生产 Session 路径。
+COV2-04 只负责后续 pending-v2 纯 codec；COV2-24/22 分别负责 seal 与持久化，COV2-11 才切换生产 Session 路径。
 本卡测试只用本地
 DB/静态 literal，不启动 OpenCode Session，也不授予 native 来源。
 
@@ -2877,3 +2877,5 @@ COV2-20 在同一个调用方 SQLite connection／transaction 只读验领 seale
 COV2-21 在调用方拥有的同一个 `DatabaseTransaction` 中逐版本 UPDATE sealed live reservation 的 lease，再次使用 digest、completeness、state、owner、fence 与 previous revision 围栏；单独过期的 lease 不剥夺仍属原持有人的合法保留。helper 不开第二连接、不自行 commit。第二行陈旧或 SQL 故障可能使第一行仅在未提交事务中已更新，调用方必须整笔 rollback，不得在 Err 后 commit 或发成功 ACK。COV2-04/24/22 才负责有界 codec、同源内存 seal、真实 pending 持久化与 artifact writer 故障验收；此能力不证明真实 Source A。
 
 COV2-23 只从同一个已封闭 `NativeProven` payload 借用 pending batch：入口核当前 capture scope、source tag 和完整版本化 claim 集，按 `(version,logical key)` 的原有顺序取 identity，并拒绝缺失关联、空集或超限。当前 pending association 仍以裸 key 表示，因此 native 两版本共用裸 key 必须在这里 fail closed；纯 wire codec 表达该值不等于给 native writer 授权。此步不生成 MAC、不写 artifact/lease，也不注册 issuer；COV2-04/24/22 分别负责 codec、内存 seal 与真实持久化，真实 Source A 仍待父计划证明。
+
+COV2-04 的纯 pending-v2 codec 让 claim 和有序 identity tuple 显式携带 coverage version：同一 logical key 可各有一条 v1/v2 wire tuple，同版本重复或未知 version 拒绝。producer 在收集 claim 前核 entry 数，并在分配 envelope 前限制编码字节；authenticated decoder 仅接受原始字节 MAC 验证产生的 `AuthenticatedPendingEnvelope`，先检查 raw entry/byte 上限，再核 binding、有序关联与规范字节。独立 outer-v2 编码不改变冻结 v1 envelope/MAC。它只给内存投影/claim plan，不产生 native 来源、pending seal、durable artifact、lease 或 replay 权限；COV2-24/22 分别负责内存 seal 与真实持久化/冻结旧读端，真实 OpenCode Source A 仍未证明。

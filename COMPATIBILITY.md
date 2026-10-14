@@ -1042,8 +1042,9 @@ are idempotent, incomplete-to-complete advances only that version, and a
 different complete digest conflicts without overwriting the other version.
 Unknown or selector-mismatched versions fail before claim writes. Marker,
 pending, import and production Session paths are not switched by this card;
-COV2-03 owns the marker fence, while COV2-04/11 own later pending and Session
-changes. No SQL DDL, public CLI change, native
+COV2-03 owns the marker fence; COV2-04 owns the pending-v2 codec,
+COV2-24/22 own sealing and persistence, and COV2-11 owns the Session switch.
+No SQL DDL, public CLI change, native
 issuer, or OpenCode Session CI integration is introduced.
 
 
@@ -1156,6 +1157,23 @@ authority. This entry makes no artifact or lease mutation and does not prove
 OpenCode provider Source A. The v1 pending writer and persisted bytes remain
 unchanged; bounded codec, in-memory seal and durable persistence belong to
 COV2-04/24/22.
+
+### Bounded authenticated pending-v2 codec (COV2-04)
+
+The private v2 pending codec represents ordered versioned claim and identity
+tuples, including one v1 and one v2 tuple with the same logical key. It
+refuses duplicate `(version, key)` tuples and unknown versions. The producer
+bounds entry count before claim collection and encoded bytes before allocating
+the separate outer-v2 envelope. Authenticated decoding requires the existing
+exact-byte MAC witness before typed projection; it checks raw entry and byte
+bounds, expected binding, ordered associations and canonical bytes. Historical
+v1 envelope and MAC bytes remain frozen.
+
+This codec cannot mint native provenance or a durable pending artifact. The
+COV2-23 native same-bare-key guard still rejects such a native write; COV2-24
+owns the in-memory sealed artifact and COV2-22 owns persistence and frozen
+old-reader rejection; COV2-08 owns recovery/replay. No OpenCode native archive or
+provider Source A is established by synthetic codec tests.
 
 ### OG-20 private import transport
 

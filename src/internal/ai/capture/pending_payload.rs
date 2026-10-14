@@ -5,6 +5,7 @@
 
 use std::{
     collections::{HashMap, HashSet},
+    io::{self, Write},
     path::Path,
     time::Instant,
 };
@@ -12,8 +13,11 @@ use std::{
 use anyhow::{Result, ensure};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use sea_orm::ConnectionTrait;
-use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use serde::{
+    Deserialize, Deserializer, Serialize,
+    de::{IgnoredAny, SeqAccess, Visitor},
+};
+use serde_json::{Map, Value, value::RawValue};
 use uuid::Uuid;
 
 #[cfg(test)]
@@ -26,12 +30,18 @@ use crate::internal::{
                 AuthenticatedPendingEnvelope, CheckpointRedactedPayload, PreparedPendingNativeSeal,
                 ReasoningCoveragePlan, ReasoningTurnIdentity,
             },
+            pending::PendingBinding,
             pending_identity::PreparedPendingAlias,
             snapshot::CaptureSnapshotProjection,
         },
-        coverage_gate::{LiveClaimCommitPlan, ReservedTurnClaim},
+        coverage_gate::{
+            LiveClaimCommitPlan, ReservedTurnClaim, VersionedLiveClaimCommitPlan,
+            VersionedReservedTurnClaim,
+        },
         observed_agents::{
-            Completeness, MAX_REDACTION_MATCH_SAMPLES, RedactedBytes, Redactor, parse_canon_value,
+            Completeness, MAX_REDACTION_MATCH_SAMPLES, RedactedBytes, Redactor,
+            coverage::CoverageSchemaVersion,
+            parse_canon_value,
             reasoning::{
                 MAX_REASONING_TURN_KEY_BYTES, NativeProvenReasoning, PendingIntegrityStamp,
                 PendingIntegrityToken, PendingReasoningSourceDto, VerifiedPendingBinding,
@@ -48,6 +58,13 @@ const MAX_TRANSCRIPT: usize = 24 * 1024 * 1024;
 const MAX_SIDECARS: usize = 4 * 1024 * 1024;
 const MAX_PORTABLE_CLAIMS: usize = MAX_SIDECARS / 64;
 const MAX_PORTABLE_TURN_KEY_BYTES: usize = MAX_REASONING_TURN_KEY_BYTES;
+/// The private map's existing cap bounds a versioned pending tuple before
+/// allocating its typed claim/association vectors. The combined JSON arrays
+/// also have the existing 1 MiB private-map wire budget.
+pub(crate) const MAX_VERSIONED_PENDING_ENTRIES: usize =
+    crate::internal::metadata::REASONING_IDENTITY_SESSION_MAP_MAX_ENTRIES;
+pub(crate) const MAX_VERSIONED_PENDING_TUPLE_BYTES: usize =
+    crate::internal::metadata::REASONING_IDENTITY_SESSION_MAP_MAX_BYTES;
 // Keep the existing outer v1 coverage limit fixed if the inner reasoning
 // source's key bound changes in a later revision.
 const _: () = assert!(MAX_PORTABLE_TURN_KEY_BYTES == 512);
@@ -173,7 +190,7 @@ impl PendingReasoningReplay {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum PendingReasoningIdentityDisposition {
+pub(crate) enum PendingReasoningIdentityDisposition {
     VerifiedEmpty,
     VerifiedNonempty,
 }
@@ -193,6 +210,406 @@ impl PendingReasoningIdentityAssociation {
             },
         }
     }
+}
+
+/// A pure wire projection. It contains neither a native-origin capability
+/// nor permission to persist an artifact. COV2-24 supplies the checked source
+/// and identity tuple before this value can be used by a production sealer.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct VersionedPendingPayloadProjection {
+    pub(crate) redacted: PendingPayloadProjection,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) reasoning_source: Option<PendingReasoningSourceDto>,
+    pub(crate) identity_commit_associations: Vec<VersionedPendingIdentityAssociation>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct VersionedPendingIdentityAssociation {
+    pub(crate) coverage_schema_version: i64,
+    pub(crate) logical_turn_key: String,
+    pub(crate) slot: String,
+    pub(crate) descriptor_mac: String,
+    pub(crate) disposition: PendingReasoningIdentityDisposition,
+}
+
+impl VersionedPendingIdentityAssociation {
+    #[allow(dead_code)] // COV2-24 consumes the checked COV2-23 borrow.
+    pub(crate) fn from_prepared_turn(
+        version: CoverageSchemaVersion,
+        key: &str,
+        turn: &ReasoningTurnIdentity,
+    ) -> Self {
+        Self {
+            coverage_schema_version: version.as_i64(),
+            logical_turn_key: key.to_owned(),
+            slot: turn.slot().to_owned(),
+            descriptor_mac: turn.descriptor_mac().to_owned(),
+            disposition: match turn.kind() {
+                ReasoningIdentityKind::Empty => PendingReasoningIdentityDisposition::VerifiedEmpty,
+                ReasoningIdentityKind::Nonempty => {
+                    PendingReasoningIdentityDisposition::VerifiedNonempty
+                }
+            },
+        }
+    }
+
+    fn validate(&self) -> Result<()> {
+        let version =
+            CoverageSchemaVersion::try_from(self.coverage_schema_version).map_err(|_| failure())?;
+        let prefix = match version {
+            CoverageSchemaVersion::V1 => "reasoning-identity/hmac-v1/",
+            CoverageSchemaVersion::V2 => "reasoning-identity/hmac-v2/",
+        };
+        ensure!(
+            !self.logical_turn_key.is_empty()
+                && self.logical_turn_key.len() <= MAX_PORTABLE_TURN_KEY_BYTES
+                && !self.logical_turn_key.chars().any(char::is_control)
+                && [self.slot.as_str(), self.descriptor_mac.as_str()]
+                    .into_iter()
+                    .all(|value| value
+                        .strip_prefix(prefix)
+                        .is_some_and(|digest| digest.len() == 64 && lower_hex(digest))),
+            REMEDY
+        );
+        Ok(())
+    }
+}
+
+impl VersionedPendingPayloadProjection {
+    #[allow(dead_code)] // COV2-24 connects the checked native seal to this codec.
+    pub(crate) fn new_codec(
+        redacted: PendingPayloadProjection,
+        reasoning_source: Option<PendingReasoningSourceDto>,
+        identity_commit_associations: Vec<VersionedPendingIdentityAssociation>,
+    ) -> Result<Self> {
+        let result = Self {
+            redacted,
+            reasoning_source,
+            identity_commit_associations,
+        };
+        result.validate()?;
+        Ok(result)
+    }
+
+    /// Canonical inner bytes for the pure codec only. The size is counted
+    /// before reserving the encoded buffer; no native or storage capability
+    /// is issued by a successful encoding.
+    #[allow(dead_code)] // COV2-24 consumes this inner encoder.
+    pub(crate) fn encode_canonical(&self) -> Result<Vec<u8>> {
+        self.validate()?;
+        let mut tuple_counter = BoundedTupleCounter {
+            remaining: MAX_VERSIONED_PENDING_TUPLE_BYTES,
+        };
+        serde_json::to_writer(&mut tuple_counter, &self.identity_commit_associations)
+            .map_err(|_| failure())?;
+        let mut counter = BoundedTupleCounter {
+            remaining: MAX_ENVELOPE,
+        };
+        serde_json::to_writer(&mut counter, self).map_err(|_| failure())?;
+        let measured = MAX_ENVELOPE - counter.remaining;
+        let mut bytes = Vec::new();
+        bytes.try_reserve_exact(measured).map_err(|_| failure())?;
+        serde_json::to_writer(&mut bytes, self).map_err(|_| failure())?;
+        ensure!(bytes.len() == measured, REMEDY);
+        preflight(&bytes, MAX_ENVELOPE, MAX_DEPTH)?;
+        Ok(bytes)
+    }
+
+    pub(crate) fn validate(&self) -> Result<()> {
+        ensure!(
+            self.redacted.version == VERSION
+                && self.redacted.reasoning_source.is_none()
+                && self.redacted.identity_commit_associations.is_none(),
+            REMEDY
+        );
+        self.redacted.validate()?;
+        if let Some(source) = &self.reasoning_source {
+            source.validate_shape().map_err(|_| failure())?;
+        }
+        ensure!(
+            !self.identity_commit_associations.is_empty()
+                && self.identity_commit_associations.len() <= MAX_VERSIONED_PENDING_ENTRIES,
+            REMEDY
+        );
+        let mut seen = HashSet::with_capacity(self.identity_commit_associations.len());
+        for association in &self.identity_commit_associations {
+            association.validate()?;
+            ensure!(
+                seen.insert((
+                    association.coverage_schema_version,
+                    association.logical_turn_key.as_str(),
+                )),
+                REMEDY
+            );
+        }
+        Ok(())
+    }
+
+    pub(crate) fn matches_binding(&self, binding: &PendingBinding) -> Result<()> {
+        ensure!(
+            self.redacted.alias == binding.session_id
+                && self
+                    .redacted
+                    .snapshot
+                    .source
+                    .as_ref()
+                    .and_then(|source| source.digest_sha256.as_deref())
+                    == Some(binding.source_commitment.as_str())
+                && self
+                    .redacted
+                    .metadata
+                    .get("checkpoint_id")
+                    .and_then(Value::as_str)
+                    == Some(binding.checkpoint_id.as_str())
+                && self.redacted.lifecycle.iter().any(|event| {
+                    event.get("event_id").and_then(Value::as_str) == Some(binding.event_id.as_str())
+                }),
+            REMEDY
+        );
+        Ok(())
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct VersionedPortableClaim {
+    pub(crate) coverage_schema_version: i64,
+    pub(crate) logical_turn_key: String,
+    pub(crate) coverage_digest: String,
+    pub(crate) completeness: Completeness,
+    pub(crate) fence_token: i64,
+    pub(crate) next_revision: i64,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct VersionedPortablePendingCoverage {
+    pub(crate) owner: String,
+    pub(crate) created_at: i64,
+    pub(crate) claims: Vec<VersionedPortableClaim>,
+}
+
+impl VersionedPortablePendingCoverage {
+    #[allow(dead_code)] // COV2-24 connects the versioned reservation plan.
+    pub(crate) fn from_live(
+        plan: &VersionedLiveClaimCommitPlan,
+        identity: &PreparedPendingAlias,
+    ) -> Result<Self> {
+        let ordinary = plan.ordinary();
+        ensure!(
+            !ordinary.claims.is_empty() && ordinary.claims.len() <= MAX_VERSIONED_PENDING_ENTRIES,
+            REMEDY
+        );
+        ensure!(
+            ordinary.source_channel == "live"
+                && ordinary.import_identity.is_none()
+                && ordinary.import_session.is_none()
+                && ordinary.session_id == identity.context().session_id()
+                && ordinary.capture_scope.as_ref() == Some(identity.context().scope()),
+            REMEDY
+        );
+        let result = Self {
+            owner: ordinary.owner.clone(),
+            created_at: ordinary.created_at,
+            claims: plan
+                .claims()
+                .map(|(version, claim)| VersionedPortableClaim {
+                    coverage_schema_version: version.as_i64(),
+                    logical_turn_key: claim.logical_turn_key.clone(),
+                    coverage_digest: claim.coverage_digest.clone(),
+                    completeness: claim.completeness,
+                    fence_token: claim.fence_token,
+                    next_revision: claim.next_revision,
+                })
+                .collect(),
+        };
+        result.validate()?;
+        Ok(result)
+    }
+
+    #[allow(dead_code)] // COV2-22 consumes this memory-only replay plan.
+    pub(crate) fn into_live(
+        self,
+        identity: &PreparedPendingAlias,
+        checkpoint_id: &str,
+        parent_commit: Option<String>,
+        now_ms: i64,
+    ) -> Result<VersionedLiveClaimCommitPlan> {
+        self.validate()?;
+        ensure!(canonical_uuid(checkpoint_id) && now_ms >= 0, REMEDY);
+        let mut bound = Vec::with_capacity(self.claims.len());
+        let mut ordinary = Vec::with_capacity(self.claims.len());
+        for claim in self.claims {
+            let version = claim.coverage_schema_version;
+            let unversioned = ReservedTurnClaim {
+                logical_turn_key: claim.logical_turn_key,
+                coverage_digest: claim.coverage_digest,
+                completeness: claim.completeness,
+                fence_token: claim.fence_token,
+                next_revision: claim.next_revision,
+            };
+            bound.push(VersionedReservedTurnClaim::new(
+                version,
+                unversioned.clone(),
+            )?);
+            ordinary.push(unversioned);
+        }
+        let plan = LiveClaimCommitPlan {
+            source_channel: "live",
+            session_id: identity.context().session_id().into(),
+            checkpoint_id: checkpoint_id.into(),
+            owner: self.owner,
+            parent_commit,
+            created_at: self.created_at,
+            now_ms,
+            claims: ordinary,
+            import_session: None,
+            import_identity: None,
+            capture_scope: Some(identity.context().scope().clone()),
+        };
+        VersionedLiveClaimCommitPlan::new(plan, &bound).map_err(|_| failure())
+    }
+
+    pub(crate) fn validate(&self) -> Result<()> {
+        ensure!(
+            !self.owner.is_empty()
+                && self.owner.len() <= 512
+                && !self.owner.chars().any(char::is_control)
+                && self.created_at >= 0
+                && !self.claims.is_empty()
+                && self.claims.len() <= MAX_VERSIONED_PENDING_ENTRIES,
+            REMEDY
+        );
+        let mut seen = HashSet::with_capacity(self.claims.len());
+        for claim in &self.claims {
+            CoverageSchemaVersion::try_from(claim.coverage_schema_version)
+                .map_err(|_| failure())?;
+            ensure!(
+                !claim.logical_turn_key.is_empty()
+                    && claim.logical_turn_key.len() <= MAX_PORTABLE_TURN_KEY_BYTES
+                    && !claim.logical_turn_key.chars().any(char::is_control)
+                    && claim.coverage_digest.len() == 64
+                    && lower_hex(&claim.coverage_digest)
+                    && claim.fence_token > 0
+                    && claim.next_revision > 0
+                    && seen.insert((
+                        claim.coverage_schema_version,
+                        claim.logical_turn_key.as_str()
+                    )),
+                REMEDY
+            );
+        }
+        Ok(())
+    }
+}
+
+struct BoundedArrayCount(usize);
+
+impl<'de> Deserialize<'de> for BoundedArrayCount {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct Counter;
+        impl<'de> Visitor<'de> for Counter {
+            type Value = BoundedArrayCount;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a bounded pending tuple array")
+            }
+
+            fn visit_seq<A>(self, mut sequence: A) -> std::result::Result<Self::Value, A::Error>
+            where
+                A: SeqAccess<'de>,
+            {
+                let mut count = 0;
+                while let Some(_ignored) = sequence.next_element::<IgnoredAny>()? {
+                    count += 1;
+                    if count > MAX_VERSIONED_PENDING_ENTRIES {
+                        return Err(serde::de::Error::custom("too many pending tuples"));
+                    }
+                }
+                Ok(BoundedArrayCount(count))
+            }
+        }
+        deserializer.deserialize_seq(Counter)
+    }
+}
+
+/// Borrow raw array slices before typed `Vec` decoding. A hostile, correctly
+/// MACed local artifact can still be malformed; count and wire bytes must be
+/// checked before reserving claim/association storage.
+pub(crate) fn preflight_versioned_tuples(
+    payload_raw: &RawValue,
+    coverage_raw: &RawValue,
+) -> Result<()> {
+    #[derive(Deserialize)]
+    struct RawPayload<'a> {
+        #[serde(borrow)]
+        identity_commit_associations: &'a RawValue,
+    }
+    #[derive(Deserialize)]
+    struct RawCoverage<'a> {
+        #[serde(borrow)]
+        claims: &'a RawValue,
+    }
+    let payload: RawPayload<'_> = serde_json::from_str(payload_raw.get()).map_err(|_| failure())?;
+    let coverage: RawCoverage<'_> =
+        serde_json::from_str(coverage_raw.get()).map_err(|_| failure())?;
+    let associations = payload.identity_commit_associations.get();
+    let claims = coverage.claims.get();
+    ensure!(
+        associations
+            .len()
+            .checked_add(claims.len())
+            .is_some_and(|bytes| bytes <= MAX_VERSIONED_PENDING_TUPLE_BYTES),
+        REMEDY
+    );
+    let associations_count: BoundedArrayCount =
+        serde_json::from_str(associations).map_err(|_| failure())?;
+    let claims_count: BoundedArrayCount = serde_json::from_str(claims).map_err(|_| failure())?;
+    ensure!(
+        associations_count.0 > 0 && associations_count.0 == claims_count.0,
+        REMEDY
+    );
+    Ok(())
+}
+
+struct BoundedTupleCounter {
+    remaining: usize,
+}
+
+impl Write for BoundedTupleCounter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if bytes.len() > self.remaining {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "pending tuple capacity",
+            ));
+        }
+        self.remaining -= bytes.len();
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Measure both tuple arrays without allocating their encoded bytes.
+pub(crate) fn check_versioned_tuple_wire_capacity(
+    payload: &VersionedPendingPayloadProjection,
+    coverage: &VersionedPortablePendingCoverage,
+) -> Result<()> {
+    let mut counter = BoundedTupleCounter {
+        remaining: MAX_VERSIONED_PENDING_TUPLE_BYTES,
+    };
+    serde_json::to_writer(&mut counter, &payload.identity_commit_associations)
+        .map_err(|_| failure())?;
+    serde_json::to_writer(&mut counter, &coverage.claims).map_err(|_| failure())?;
+    Ok(())
 }
 
 impl PendingPayloadProjection {
@@ -1982,6 +2399,454 @@ mod tests {
             )
             .unwrap();
         (fixture, identity, v1, v2)
+    }
+
+    fn synthetic_versioned_codec(
+        fixture: &Fixture,
+        identity: &PreparedPendingAlias,
+        v1: PendingPayloadProjection,
+        v2: PendingPayloadProjection,
+    ) -> (
+        PendingBinding,
+        VersionedPendingPayloadProjection,
+        VersionedPortablePendingCoverage,
+    ) {
+        let binding = PendingBinding {
+            scope: fixture.scope.clone(),
+            session_id: identity.alias().to_owned(),
+            checkpoint_id: v1.metadata["checkpoint_id"].as_str().unwrap().to_owned(),
+            event_id: v1.lifecycle[0]["event_id"].as_str().unwrap().to_owned(),
+            action_key: "cov2-codec-action".into(),
+            receipt_key: "cov2-codec-receipt".into(),
+            marker_generation: "cov2-codec-generation".into(),
+            source_commitment: v1
+                .snapshot
+                .source
+                .as_ref()
+                .unwrap()
+                .digest_sha256
+                .as_ref()
+                .unwrap()
+                .clone(),
+            reserved_revision: 1,
+            original_deadline_millis: None,
+            deferrable: false,
+            first_attempt_millis: 1,
+            parent_commit: None,
+            parent_unborn: true,
+        };
+        let associations = [1, 2]
+            .into_iter()
+            .map(|version| VersionedPendingIdentityAssociation {
+                coverage_schema_version: version,
+                logical_turn_key: "synthetic-turn-0".into(),
+                slot: format!("reasoning-identity/hmac-v{version}/{}", "a".repeat(64)),
+                descriptor_mac: format!("reasoning-identity/hmac-v{version}/{}", "b".repeat(64)),
+                disposition: PendingReasoningIdentityDisposition::VerifiedNonempty,
+            })
+            .collect();
+        let payload =
+            VersionedPendingPayloadProjection::new_codec(v1, v2.reasoning_source, associations)
+                .unwrap();
+        let coverage = VersionedPortablePendingCoverage {
+            owner: "cov2-codec-owner".into(),
+            created_at: 1,
+            claims: [1, 2]
+                .into_iter()
+                .map(|version| VersionedPortableClaim {
+                    coverage_schema_version: version,
+                    logical_turn_key: "synthetic-turn-0".into(),
+                    coverage_digest: "c".repeat(64),
+                    completeness: Completeness::Complete,
+                    fence_token: version,
+                    next_revision: 1,
+                })
+                .collect(),
+        };
+        (binding, payload, coverage)
+    }
+
+    #[tokio::test]
+    async fn cov2_cross_version_same_key_authenticated_codec_roundtrip() {
+        let (fixture, identity, v1, v2) = synthetic_v2_projection().await;
+        let (binding, payload, coverage) = synthetic_versioned_codec(&fixture, &identity, v1, v2);
+        let bytes = crate::internal::ai::capture::pending::encode_versioned_envelope(
+            binding.clone(),
+            payload,
+            coverage,
+        )
+        .unwrap();
+        let mac = fixture
+            .scope
+            .sign_pending_envelope_until(
+                &fixture.conn,
+                &fixture.storage,
+                fixture.root.path(),
+                &bytes,
+                deadline(),
+            )
+            .await
+            .unwrap();
+        let authentication = AuthenticatedPendingEnvelope::verify(
+            &fixture.conn,
+            &fixture.storage,
+            fixture.root.path(),
+            &fixture.scope,
+            &bytes,
+            &mac,
+            deadline(),
+        )
+        .await
+        .unwrap();
+        let decoded =
+            crate::internal::ai::capture::pending::decode_authenticated_versioned_envelope(
+                &authentication,
+                &binding,
+            )
+            .unwrap();
+        assert_eq!(decoded.version, 2);
+        assert!(decoded.binding == binding);
+        assert!(decoded.payload.reasoning_source.is_some());
+        let inner = decoded.payload.encode_canonical().unwrap();
+        let inner_json: Value = serde_json::from_slice(&inner).unwrap();
+        assert_eq!(
+            inner_json["identity_commit_associations"][0]["coverage_schema_version"],
+            1
+        );
+        assert_eq!(
+            inner_json["identity_commit_associations"][1]["coverage_schema_version"],
+            2
+        );
+        assert_eq!(serde_json::to_vec(&decoded.payload).unwrap(), inner);
+        assert_eq!(
+            decoded
+                .coverage
+                .claims
+                .iter()
+                .map(|claim| (
+                    claim.coverage_schema_version,
+                    claim.logical_turn_key.as_str()
+                ))
+                .collect::<Vec<_>>(),
+            [(1, "synthetic-turn-0"), (2, "synthetic-turn-0")]
+        );
+        assert_eq!(
+            decoded
+                .payload
+                .identity_commit_associations
+                .iter()
+                .map(|identity| (
+                    identity.coverage_schema_version,
+                    identity.logical_turn_key.as_str()
+                ))
+                .collect::<Vec<_>>(),
+            [(1, "synthetic-turn-0"), (2, "synthetic-turn-0")]
+        );
+        assert_eq!(
+            serde_json::to_vec(&decoded).unwrap(),
+            bytes,
+            "the authenticated decoder must retain the exact ordered sealed tuple"
+        );
+        let mut wrong_binding = binding.clone();
+        wrong_binding.checkpoint_id = Uuid::new_v4().to_string();
+        assert!(
+            crate::internal::ai::capture::pending::decode_authenticated_versioned_envelope(
+                &authentication,
+                &wrong_binding,
+            )
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn cov2_same_version_duplicate_and_unknown_reject() {
+        let (fixture, identity, v1, v2) = synthetic_v2_projection().await;
+        let (binding, payload, coverage) = synthetic_versioned_codec(&fixture, &identity, v1, v2);
+        let bytes = crate::internal::ai::capture::pending::encode_versioned_envelope(
+            binding, payload, coverage,
+        )
+        .unwrap();
+        let mut reordered: crate::internal::ai::capture::pending::VersionedPendingEnvelope =
+            serde_json::from_slice(&bytes).unwrap();
+        reordered.payload.identity_commit_associations.swap(0, 1);
+        let error = crate::internal::ai::capture::pending::encode_versioned_envelope(
+            reordered.binding,
+            reordered.payload,
+            reordered.coverage,
+        )
+        .expect_err("claim and identity ordering must remain paired");
+        assert!(
+            error
+                .to_string()
+                .contains("claim and identity tuple changed")
+        );
+        for version in [1, 0, 3] {
+            let mut changed: crate::internal::ai::capture::pending::VersionedPendingEnvelope =
+                serde_json::from_slice(&bytes).unwrap();
+            changed.coverage.claims[1].coverage_schema_version = version;
+            changed.payload.identity_commit_associations[1].coverage_schema_version = version;
+            if version == 1 {
+                changed.payload.identity_commit_associations[1].slot =
+                    format!("reasoning-identity/hmac-v1/{}", "a".repeat(64));
+                changed.payload.identity_commit_associations[1].descriptor_mac =
+                    format!("reasoning-identity/hmac-v1/{}", "b".repeat(64));
+            }
+            let error = crate::internal::ai::capture::pending::encode_versioned_envelope(
+                changed.binding,
+                changed.payload,
+                changed.coverage,
+            )
+            .expect_err("same-version duplicate and unsupported versions fail closed");
+            assert!(
+                error
+                    .to_string()
+                    .contains("capture recovery payload cannot be trusted")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn cov2_versioned_producer_claim_count_guard_precedes_projection() {
+        let fixture = Fixture::new().await;
+        let identity = fixture.identity("claude__native-session", None).await;
+        let template = ReservedTurnClaim {
+            logical_turn_key: String::new(),
+            coverage_digest: "a".repeat(64),
+            completeness: Completeness::Complete,
+            fence_token: 1,
+            next_revision: 1,
+        };
+        let ordinary = LiveClaimCommitPlan {
+            source_channel: "live",
+            session_id: identity.context().session_id().into(),
+            checkpoint_id: Uuid::new_v4().to_string(),
+            owner: "cov2-count-owner".into(),
+            parent_commit: None,
+            created_at: 1,
+            now_ms: 2,
+            claims: (0..MAX_VERSIONED_PENDING_ENTRIES)
+                .map(|index| ReservedTurnClaim {
+                    logical_turn_key: format!("turn-{index:04}"),
+                    ..template.clone()
+                })
+                .collect(),
+            import_session: None,
+            import_identity: None,
+            capture_scope: Some(fixture.scope.clone()),
+        };
+        let mut bound = ordinary
+            .claims
+            .iter()
+            .cloned()
+            .map(|claim| VersionedReservedTurnClaim::new(1, claim).unwrap())
+            .collect::<Vec<_>>();
+        let at_cap = VersionedLiveClaimCommitPlan::new(ordinary.clone(), &bound).unwrap();
+        assert_eq!(
+            VersionedPortablePendingCoverage::from_live(&at_cap, &identity)
+                .unwrap()
+                .claims
+                .len(),
+            MAX_VERSIONED_PENDING_ENTRIES
+        );
+
+        let mut excessive = ordinary;
+        let extra = ReservedTurnClaim {
+            logical_turn_key: "turn-over-cap".into(),
+            ..template
+        };
+        excessive.claims.push(extra.clone());
+        bound.push(VersionedReservedTurnClaim::new(1, extra).unwrap());
+        let over_cap = VersionedLiveClaimCommitPlan::new(excessive, &bound).unwrap();
+        assert_eq!(
+            over_cap.ordinary().claims.len(),
+            MAX_VERSIONED_PENDING_ENTRIES + 1
+        );
+        let files_before = walkdir::WalkDir::new(fixture.root.path())
+            .into_iter()
+            .map(|entry| entry.unwrap())
+            .filter(|entry| entry.file_type().is_file())
+            .map(|entry| entry.path().to_path_buf())
+            .collect::<std::collections::BTreeSet<_>>();
+        let error = VersionedPortablePendingCoverage::from_live(&over_cap, &identity)
+            .err()
+            .expect("4097 live claims must not produce a portable projection");
+        assert_eq!(error.to_string(), REMEDY);
+        let files_after = walkdir::WalkDir::new(fixture.root.path())
+            .into_iter()
+            .map(|entry| entry.unwrap())
+            .filter(|entry| entry.file_type().is_file())
+            .map(|entry| entry.path().to_path_buf())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            files_before, files_after,
+            "rejection must not create an envelope"
+        );
+    }
+
+    #[tokio::test]
+    async fn cov2_pending_v2_mac_and_bounds_fail_closed() {
+        let (fixture, identity, v1, v2) = synthetic_v2_projection().await;
+        let (binding, payload, coverage) = synthetic_versioned_codec(&fixture, &identity, v1, v2);
+        let bytes = crate::internal::ai::capture::pending::encode_versioned_envelope(
+            binding.clone(),
+            payload,
+            coverage,
+        )
+        .unwrap();
+        let mac = fixture
+            .scope
+            .sign_pending_envelope_until(
+                &fixture.conn,
+                &fixture.storage,
+                fixture.root.path(),
+                &bytes,
+                deadline(),
+            )
+            .await
+            .unwrap();
+        let mut tampered = bytes.clone();
+        let position = tampered.iter().position(|byte| *byte == b'c').unwrap();
+        tampered[position] = b'd';
+        assert!(
+            AuthenticatedPendingEnvelope::verify(
+                &fixture.conn,
+                &fixture.storage,
+                fixture.root.path(),
+                &fixture.scope,
+                &tampered,
+                &mac,
+                deadline(),
+            )
+            .await
+            .is_err()
+        );
+
+        // Tiny malformed arrays exercise the count guard independently of
+        // the 1 MiB wire guard, before either typed Vec is allocated.
+        let mut count_attack: Value = serde_json::from_slice(&bytes).unwrap();
+        count_attack["payload"]["identity_commit_associations"] =
+            Value::Array(vec![Value::Null; MAX_VERSIONED_PENDING_ENTRIES + 1]);
+        count_attack["coverage"]["claims"] =
+            Value::Array(vec![Value::Null; MAX_VERSIONED_PENDING_ENTRIES + 1]);
+        let count_bytes = serde_json::to_vec(&count_attack).unwrap();
+        assert!(count_bytes.len() < MAX_VERSIONED_PENDING_TUPLE_BYTES);
+        let count_mac = fixture
+            .scope
+            .sign_pending_envelope_until(
+                &fixture.conn,
+                &fixture.storage,
+                fixture.root.path(),
+                &count_bytes,
+                deadline(),
+            )
+            .await
+            .unwrap();
+        let count_auth = AuthenticatedPendingEnvelope::verify(
+            &fixture.conn,
+            &fixture.storage,
+            fixture.root.path(),
+            &fixture.scope,
+            &count_bytes,
+            &count_mac,
+            deadline(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            crate::internal::ai::capture::pending::decode_authenticated_versioned_envelope(
+                &count_auth,
+                &binding,
+            )
+            .is_err()
+        );
+
+        let mut too_many: crate::internal::ai::capture::pending::VersionedPendingEnvelope =
+            serde_json::from_slice(&bytes).unwrap();
+        let first_claim = too_many.coverage.claims[0].clone();
+        let first_identity = too_many.payload.identity_commit_associations[0].clone();
+        for index in 2..=MAX_VERSIONED_PENDING_ENTRIES {
+            let key = format!("overflow-{index}");
+            let mut claim = first_claim.clone();
+            claim.logical_turn_key = key.clone();
+            let mut association = first_identity.clone();
+            association.logical_turn_key = key;
+            too_many.coverage.claims.push(claim);
+            too_many
+                .payload
+                .identity_commit_associations
+                .push(association);
+        }
+        assert_eq!(
+            too_many.coverage.claims.len(),
+            MAX_VERSIONED_PENDING_ENTRIES + 1
+        );
+        assert!(
+            crate::internal::ai::capture::pending::encode_versioned_envelope(
+                too_many.binding.clone(),
+                too_many.payload,
+                too_many.coverage,
+            )
+            .is_err()
+        );
+
+        let mut oversized: crate::internal::ai::capture::pending::VersionedPendingEnvelope =
+            serde_json::from_slice(&bytes).unwrap();
+        let first_claim = oversized.coverage.claims[0].clone();
+        let first_identity = oversized.payload.identity_commit_associations[0].clone();
+        for index in 2..MAX_VERSIONED_PENDING_ENTRIES {
+            let key = format!("{index:04}{}", "k".repeat(508));
+            let mut claim = first_claim.clone();
+            claim.logical_turn_key = key.clone();
+            let mut association = first_identity.clone();
+            association.logical_turn_key = key;
+            oversized.coverage.claims.push(claim);
+            oversized
+                .payload
+                .identity_commit_associations
+                .push(association);
+        }
+        assert_eq!(
+            oversized.coverage.claims.len(),
+            MAX_VERSIONED_PENDING_ENTRIES
+        );
+        let wire_bytes = serde_json::to_vec(&oversized).unwrap();
+        assert!(wire_bytes.len() < crate::internal::ai::capture::pending::MAX_ENVELOPE_BYTES);
+        let wire_mac = fixture
+            .scope
+            .sign_pending_envelope_until(
+                &fixture.conn,
+                &fixture.storage,
+                fixture.root.path(),
+                &wire_bytes,
+                deadline(),
+            )
+            .await
+            .unwrap();
+        let wire_auth = AuthenticatedPendingEnvelope::verify(
+            &fixture.conn,
+            &fixture.storage,
+            fixture.root.path(),
+            &fixture.scope,
+            &wire_bytes,
+            &wire_mac,
+            deadline(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            crate::internal::ai::capture::pending::decode_authenticated_versioned_envelope(
+                &wire_auth, &binding,
+            )
+            .is_err()
+        );
+        assert!(
+            crate::internal::ai::capture::pending::encode_versioned_envelope(
+                oversized.binding,
+                oversized.payload,
+                oversized.coverage,
+            )
+            .is_err()
+        );
     }
 
     fn v2_original_envelope(projection: &PendingPayloadProjection) -> (Vec<u8>, Vec<u8>) {

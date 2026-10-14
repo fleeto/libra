@@ -80,8 +80,9 @@ the unchanged commit-plan literal. Its uniqueness check uses `(version,key)`,
 so a pending artifact can later hold one claim for each version of the same
 logical key without guessing from the key. COV2-03 binds version-aware marker
 and checkpoint transactions; COV2-19/20/21 add the native companion and
-versioned reservation/retain steps, COV2-04/22 add pending sealing/persistence,
-and COV2-11 switches production live/import paths together.
+versioned reservation/retain steps, COV2-04 adds the bounded pending codec,
+COV2-24 adds in-memory sealing, COV2-22 adds persistence, and COV2-11
+switches production live/import paths together.
 This preparatory arbitration does not itself enable OpenCode Session capture
 or native archival.
 
@@ -101,7 +102,8 @@ versions or purposes. Unknown versions and missing keys fail closed. These
 are authentication primitives only. COV2-14 binds each v2 MAC to a closed
 v2 record/map body and enforces the shared map capacity before persistence;
 COV2-03 binds marker/ref fences; COV2-19/21 add native v2 identity writes,
-COV2-04/22 add pending seal/persistence, and COV2-11 switches live/import.
+COV2-04 adds the pending codec, COV2-24 adds in-memory sealing, COV2-22
+adds persistence, and COV2-11 switches live/import.
 A valid private MAC does not prove provider-native origin or authorize opaque
 archival.
 
@@ -245,3 +247,23 @@ format, COV2-24 seals an in-memory artifact from this borrow, and COV2-22
 persists and rolls back real artifact writes. The borrow does not grant native
 issuer authority, establish provider Source A, or enable OpenCode Session
 archival.
+
+## Bounded authenticated pending-v2 codec (COV2-04)
+
+The private pending-v2 codec carries an explicit coverage schema version on
+each claim and its ordered identity association. Its wire representation can
+contain v1 and v2 entries with the same logical key; duplicate `(version, key)`
+tuples and unknown versions are rejected. The producer bounds the entry count
+before collecting claims and checks encoded tuple bytes before allocating the
+outer envelope. The decoder accepts only an `AuthenticatedPendingEnvelope`
+issued after exact-byte MAC verification, checks raw entry and byte limits
+before constructing the typed projection, and then validates the expected
+binding, ordered claim/identity association and canonical envelope bytes.
+The outer-v2 encoding is separate from the frozen v1 pending envelope and MAC.
+
+This is a pure, in-memory codec. An envelope MAC does not establish native
+provider origin. COV2-23 still rejects native pending associations that reuse
+a bare logical key across versions; COV2-24 consumes its checked same-source
+borrow to seal an in-memory artifact, and COV2-22 owns real persistence and
+frozen old-reader behavior. No durable v2 pending artifact, replay, OpenCode
+Session admission or provider Source A is established by this card.

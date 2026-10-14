@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.30.48] — 2026-10-14
+
+### `cat-file` batch modes stream line by line and accept non-UTF-8 input
+
+- `cat-file --batch-check` / `--batch` / `--batch-command` now read stdin one
+  line at a time and answer each line before reading the next; without
+  `--buffer` every response is flushed immediately, so one long-lived
+  `cat-file --batch` process can be queried interactively through a pipe.
+  Previously stdin was read to EOF before any output was produced.
+- Batch input is treated as raw bytes. A line that is not valid UTF-8 is
+  answered `<input> missing` with the original bytes echoed (as Git does)
+  instead of aborting the whole batch with a read error; a non-UTF-8
+  `--batch-command` command word is an ordinary unknown-command usage error.
+- `--buffer` now block-buffers `--batch` / `--batch-check` /
+  `--batch-all-objects` output (it previously had no effect there), and
+  `--batch-command --buffer` queues commands until `flush` or end of input,
+  as Git does, instead of holding all of their output in memory. Emitted bytes
+  are unchanged; an object read failure under `--buffer` is now reported when
+  the queued commands run.
+
 ## [0.30.38] — 2026-10-08
 
 ### Commit-source freshness, horizon window and rebuild equivalence (plan-20260926 DM-13)

@@ -20,6 +20,8 @@ Git 对象模式与 batch 输入复用 `rev-parse` 的严格 resolver：支持 r
 
 Batch 模式仅把不可解析或不存在的名称输出为 `<input> missing`。ref 数据库读取失败或对象损坏/不可读会让命令以结构化错误失败，避免把存储损坏静默伪装成缺失对象。
 
+Batch 模式逐行读取 stdin，并在读取下一行之前先输出当前行的结果。不带 `--buffer` 时每条结果立即 flush，因此调用方可以保持一个 `cat-file --batch` 进程常驻，通过管道交互式查询。输入按原始字节处理：非 UTF-8 的行无法命名任何对象（ref、对象 id 与 tree 条目名均为 UTF-8），会原样回显字节并输出 `<input> missing`，而不会中止整个 batch。
+
 非 squash 合并因冲突暂停时，`AUTO_MERGE` 也可作为对象 spec，表示含冲突标记的自动结果 tree。它只在该 merge state 的生命周期内存在；干净合并和 squash 合并不会创建它。历史伪引用（`ORIG_HEAD`、`MERGE_HEAD`、`CHERRY_PICK_HEAD`、`REVERT_HEAD`、`REBASE_HEAD`、`FETCH_HEAD`）仍不参与对象解析。
 
 ## 选项
@@ -33,7 +35,7 @@ Batch 模式仅把不可解析或不存在的名称输出为 `<input> missing`�
 | `--batch-check[=<fmt>]` | | 从 stdin 逐行读对象名，输出 `<sha> <type> <size>`（无法解析时输出 `<input> missing`）。可选格式原子 `%(objectname)`/`%(objecttype)`/`%(objectsize)`。 |
 | `--batch[=<fmt>]` | | 同 `--batch-check`，并附加 raw 对象内容与换行。 |
 | `--batch-command[=<fmt>]` | | 从 stdin 逐行读命令：`info <object>`（仅 header）或 `contents <object>`（header + 内容）。`flush` 命令仅在 `--buffer` 下有效。 |
-| `--buffer` | | 缓冲 batch 输出，仅在显式 `flush`（或输入结束）时写出；这使 `--batch-command` 的 `flush` 生效。需配合 batch 模式。 |
+| `--buffer` | | 对 batch 输出做块缓冲，而不是每个对象 flush 一次。配合 `--batch-command` 时命令先排队，仅在显式 `flush`（或输入结束）时执行；这使 `flush` 生效。需配合 batch 模式。 |
 | `--batch-all-objects` | | 配合 `--batch`/`--batch-check`，对存储中每个对象（loose + packed）按 id 排序处理，替代从 stdin 读取。 |
 | `--ai <ID>` | | 按 ID 美化打印 AI 对象。接受 `TYPE:ID` 以消除歧义。 |
 | `--ai-type <ID>` | | 打印给定 ID 的 AI 对象类型。 |
@@ -217,7 +219,7 @@ Libra 的 AI 代理基础设施将流程产物（intents、plans、tasks、runs�
 
 ### Batch 模式与结构化输出
 
-Git 的 batch 模式从 stdin 读取对象 ID（或命令）以批量检查。Libra 已公开 `--batch-check`、`--batch` 和 `--batch-command`（后者逐行分发 `info`/`contents`），三者共享同一个逐对象 formatter，并支持可选的 `=<format>` 原子展开。`--batch-all-objects`（配合 `--batch`/`--batch-check`）遍历存储中的每个对象——loose 加 packed——按 id 排序，替代从 stdin 读取。对代理而言，仍推荐 `--json`——它在一次调用中返回类型化字段。`--buffer` 已支持（缓冲 batch 输出，仅在显式 `flush` 或输入结束时写出——这使 `--batch-command` 的 `flush` 生效；无 `--buffer` 时 `flush` 像 Git 一样被拒绝，且 `--buffer` 需配合 batch 模式）。`--follow-symlinks` 未公开。
+Git 的 batch 模式从 stdin 读取对象 ID（或命令）以批量检查。Libra 已公开 `--batch-check`、`--batch` 和 `--batch-command`（后者逐行分发 `info`/`contents`），三者共享同一个逐对象 formatter，并支持可选的 `=<format>` 原子展开。`--batch-all-objects`（配合 `--batch`/`--batch-check`）遍历存储中的每个对象——loose 加 packed——按 id 排序，替代从 stdin 读取。对代理而言，仍推荐 `--json`——它在一次调用中返回类型化字段。Batch 输入是流式处理的：每一行都在读取下一行之前得到响应（无 `--buffer` 时立即 flush），非 UTF-8 行输出 `missing` 而不会让 batch 失败。`--buffer` 已支持（对输出做块缓冲而非逐对象 flush；配合 `--batch-command` 时命令排队直到显式 `flush` 或输入结束——这使 `flush` 生效；无 `--buffer` 时 `flush` 像 Git 一样被拒绝，且 `--buffer` 需配合 batch 模式）。`--follow-symlinks` 未公开。
 
 ### `-e` 在 `--json` 下如何表现？
 
@@ -233,7 +235,7 @@ Git 的 batch 模式从 stdin 读取对象 ID（或命令）以批量检查。Li
 | 打印对象大小 | `-s` | `-s` | N/A |
 | 美化打印内容 | `-p` | `-p` | N/A（blob 使用 `jj file show`） |
 | 检查存在性 | `-e` | `-e` | N/A |
-| Batch 模式 | `--batch`, `--batch-check`, `--batch-command`, `--batch-all-objects`（带可选 `=<format>`） | `--batch`, `--batch-check`, `--batch-command`, `--batch-all-objects` | N/A |
+| Batch 模式 | `--batch`, `--batch-check`, `--batch-command`, `--batch-all-objects`（带可选 `=<format>`），逐行流式处理且输入按字节安全处理，`--buffer` | `--batch`, `--batch-check`, `--batch-command`, `--batch-all-objects`, `--buffer` | N/A |
 | AI 对象检查 | `--ai`, `--ai-type` | N/A | N/A |
 | AI 对象列出 | `--ai-list`, `--ai-list-types` | N/A | N/A |
 | JSON 输出 | `--json` | 无 | 无 |

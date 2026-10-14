@@ -1129,6 +1129,20 @@ verification never retains or changes a lease. The v1 API and persisted bytes
 stay unchanged. Transactional retain and durable v2 pending artifacts belong
 to later cards; this read-only helper does not enable real native archival.
 
+### Caller-transaction versioned reservation retention (COV2-21)
+
+After the sealed versioned plan verifies on its caller-owned SQLite artifact
+transaction, an internal helper can retain both v1 and v2 live reservations
+there. Each conditional update uses the actual version and logical key and
+rechecks digest, completeness, state, owner, fence and previous revision.
+Lease expiry alone does not revoke an unchanged owner. A stale tuple or a
+later SQL failure requires the caller to roll back the entire transaction;
+the helper never opens a second connection or commits early. The frozen v1
+retain path and persisted bytes remain unchanged. Pending-v2 sealing and
+actual durable artifact failure handling belong to COV2-04/24/22; this
+internal capability does not enable OpenCode Session capture or native
+archival without provider Source A.
+
 ### OG-20 private import transport
 
 The authorized descriptor helper can return a native-proven typed collection through an authenticated private import transport response. A one-request key binds request, authorized source, repository scope and collection before the parent restores the complete native proof and partitions owned items by reserved turn. An empty collection retains the previous helper response and source projection bytes; an unauthenticated or unproved collection fails closed without returning candidate bytes to ordinary import. Production provider capabilities and native issuers remain disabled. Source A remains UNPROVEN, and real native field admission is deferred. The transport adds no public option, database schema or decryption capability.

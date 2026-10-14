@@ -210,3 +210,20 @@ helper checks the current workspace scope, has a 4096-claim bound, and does not
 update leases or open another connection. COV2-21 owns retain mutations and
 COV2-22 owns durable pending-v2 persistence; this helper alone does not enable
 pending replay or native-source admission.
+
+## Caller-transaction reservation retention (COV2-21)
+
+After the caller verifies that exact sealed versioned plan on its artifact
+transaction, the retain helper updates each actual `(version, logical key)`
+row in that same transaction. Its conditional UPDATE repeats digest,
+completeness, `reserved_live` state, owner, fence and previous revision before
+setting the lease to the durable-artifact sentinel. An expired lease alone
+does not block retention. A stale tuple or SQL failure rejects the handoff;
+the caller must roll back the whole transaction because an earlier row may
+already have been updated. The helper neither opens nor commits a transaction.
+
+The frozen v1 helper and claim bytes remain unchanged. COV2-04/24/22 own
+bounded pending payloads, same-source sealing and real artifact persistence;
+COV2-22 must roll back retained leases if a chunk, header or alias writer
+fails. This internal retain seam does not establish provider Source A or permit
+native reasoning archival.

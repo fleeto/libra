@@ -326,6 +326,69 @@ pub(crate) async fn verify_versioned_reserved_live_claims_with_conn<C: Connectio
     Ok(())
 }
 
+/// Retain the sealed version-keyed reservations in the caller-owned artifact
+/// transaction. The caller must first verify the same plan on this transaction
+/// and roll the whole transaction back on any error: an earlier version may
+/// already have been updated when a later conditional UPDATE or SQL fault fails.
+/// This helper neither opens a second connection nor commits the transaction.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) async fn retain_versioned_reserved_live_claims_for_artifact_with_conn(
+    txn: &DatabaseTransaction,
+    scope: &CaptureScope,
+    plan: &VersionedLiveClaimCommitPlan,
+) -> Result<()> {
+    let ordinary = plan.ordinary();
+    ensure!(
+        ordinary.capture_scope.as_ref() == Some(scope)
+            && reservation_state(ordinary.source_channel)? == "reserved_live",
+        "capture recovery coverage scope or channel changed; run `libra agent doctor`"
+    );
+    ensure!(
+        !ordinary.claims.is_empty()
+            && ordinary.claims.len()
+                <= crate::internal::metadata::REASONING_IDENTITY_SESSION_MAP_MAX_ENTRIES,
+        "capture recovery coverage claim count is invalid; run `libra agent doctor`"
+    );
+    scope.assert_workspace_fence_live(txn).await?;
+    for (version, claim) in plan.claims() {
+        let previous_revision = claim
+            .next_revision
+            .checked_sub(1)
+            .context("capture recovery coverage revision is invalid; run `libra agent doctor`")?;
+        ensure!(
+            previous_revision >= 0 && claim.fence_token > 0,
+            "capture recovery coverage fence is invalid; run `libra agent doctor`"
+        );
+        let retained = txn
+            .execute_raw(Statement::from_sql_and_values(
+                txn.get_database_backend(),
+                "UPDATE agent_coverage_claim SET lease_expires_at = ?
+                 WHERE session_id = ? AND logical_turn_key = ?
+                   AND coverage_schema_version = ? AND coverage_digest = ?
+                   AND completeness = ? AND state = 'reserved_live'
+                   AND owner = ? AND fence_token = ? AND revision = ?",
+                [
+                    ARTIFACT_RETAINED_LEASE_MS.into(),
+                    ordinary.session_id.clone().into(),
+                    claim.logical_turn_key.clone().into(),
+                    version.as_i64().into(),
+                    claim.coverage_digest.clone().into(),
+                    claim.completeness.as_db_str().into(),
+                    ordinary.owner.clone().into(),
+                    claim.fence_token.into(),
+                    previous_revision.into(),
+                ],
+            ))
+            .await
+            .context("cannot retain versioned capture coverage claims; run `libra agent doctor`")?;
+        ensure!(
+            retained.rows_affected() == 1,
+            "capture recovery coverage ownership changed; retry through the current provider session"
+        );
+    }
+    Ok(())
+}
+
 /// Hand verified live reservations to the durable artifact that is being
 /// persisted in this same writer transaction. The same owner/fence/revision
 /// guards as [`verify_reserved_live_claims_with_conn`] apply; the lease
@@ -3613,6 +3676,225 @@ pub(crate) mod tests {
                 .is_err(),
             "an uncommitted mutation must not leak to the main connection"
         );
+    }
+
+    #[tokio::test]
+    async fn cov2_versioned_reserved_live_claims_retain_both_versions() {
+        let (conn, scope, plan) = cov2_versioned_verify_fixture().await;
+        let control = reserve_turn_claims_by_version_with_capture_scope(
+            &conn,
+            &scope,
+            "claude_code__s1",
+            &[turn(
+                "cov2-retain-control",
+                "control",
+                Completeness::Complete,
+            )],
+            &[1],
+            "verify-owner",
+            1,
+            "live",
+        )
+        .await
+        .expect("reserve an unrelated control key");
+        assert_eq!(control.reserved.len(), 1);
+        let control_before = conn
+            .query_one_raw(Statement::from_string(
+                conn.get_database_backend(),
+                "SELECT lease_expires_at FROM agent_coverage_claim
+                 WHERE session_id = 'claude_code__s1'
+                   AND logical_turn_key = 'cov2-retain-control'
+                   AND coverage_schema_version = 1"
+                    .to_owned(),
+            ))
+            .await
+            .expect("read unrelated control row")
+            .expect("unrelated control row exists")
+            .try_get_by::<Option<i64>, _>("lease_expires_at")
+            .expect("read unrelated control lease");
+        let original = cov2_verify_claim_rows(&conn).await;
+        conn.execute_unprepared(
+            "UPDATE agent_coverage_claim SET lease_expires_at = 0
+             WHERE session_id = 'claude_code__s1'
+               AND logical_turn_key = 'cov2-verify-shared'",
+        )
+        .await
+        .expect("expire both leases without changing the owner");
+        let expired = cov2_verify_claim_rows(&conn).await;
+        assert_ne!(expired, original);
+        let txn = crate::internal::db::begin_write_transaction(&conn)
+            .await
+            .expect("begin caller-owned artifact transaction");
+        verify_versioned_reserved_live_claims_with_conn(&txn, &scope, &plan)
+            .await
+            .expect("verify both expired but still-owned versioned rows");
+        retain_versioned_reserved_live_claims_for_artifact_with_conn(&txn, &scope, &plan)
+            .await
+            .expect("retain both versions in the caller transaction");
+        let retained = cov2_verify_claim_rows(&txn).await;
+        assert_ne!(retained, expired);
+        for version in [1_i64, 2_i64] {
+            let row = txn
+                .query_one_raw(Statement::from_sql_and_values(
+                    txn.get_database_backend(),
+                    "SELECT lease_expires_at FROM agent_coverage_claim
+                     WHERE session_id = 'claude_code__s1'
+                       AND logical_turn_key = 'cov2-verify-shared'
+                       AND coverage_schema_version = ?",
+                    [version.into()],
+                ))
+                .await
+                .expect("read retained version")
+                .expect("versioned row remains present");
+            assert_eq!(
+                row.try_get_by::<Option<i64>, _>("lease_expires_at")
+                    .expect("read retained lease"),
+                Some(ARTIFACT_RETAINED_LEASE_MS)
+            );
+        }
+        txn.commit().await.expect("commit both versioned leases");
+        assert_eq!(cov2_verify_claim_rows(&conn).await, retained);
+        let control_after = conn
+            .query_one_raw(Statement::from_string(
+                conn.get_database_backend(),
+                "SELECT lease_expires_at FROM agent_coverage_claim
+                 WHERE session_id = 'claude_code__s1'
+                   AND logical_turn_key = 'cov2-retain-control'
+                   AND coverage_schema_version = 1"
+                    .to_owned(),
+            ))
+            .await
+            .expect("read unrelated control row after retain")
+            .expect("unrelated control row still exists")
+            .try_get_by::<Option<i64>, _>("lease_expires_at")
+            .expect("read unrelated control lease after retain");
+        assert_eq!(control_after, control_before);
+    }
+
+    #[tokio::test]
+    async fn cov2_versioned_reserved_live_claims_retain_stale_tuple_rejects() {
+        let (conn, scope, plan) = cov2_versioned_verify_fixture().await;
+        let original = cov2_verify_claim_rows(&conn).await;
+        let mutations = [
+            (
+                1_i64,
+                "coverage_digest = 'ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff'",
+            ),
+            (
+                2,
+                "coverage_digest = 'ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff'",
+            ),
+            (2, "completeness = 'incomplete'"),
+            (2, "owner = 'other-owner'"),
+            (2, "fence_token = fence_token + 1"),
+            (2, "revision = revision + 1"),
+            (2, "state = 'reserved_import'"),
+            (2, "logical_turn_key = 'different-key'"),
+            (2, "coverage_schema_version = 3"),
+        ];
+        for (version, mutation) in mutations {
+            let txn = crate::internal::db::begin_write_transaction(&conn)
+                .await
+                .expect("begin isolated stale-tuple transaction");
+            verify_versioned_reserved_live_claims_with_conn(&txn, &scope, &plan)
+                .await
+                .expect("verify original sealed tuple before deliberate drift");
+            let changed = txn
+                .execute_unprepared(&format!(
+                    "UPDATE agent_coverage_claim SET {mutation}
+                     WHERE session_id = 'claude_code__s1'
+                       AND logical_turn_key = 'cov2-verify-shared'
+                       AND coverage_schema_version = {version}"
+                ))
+                .await
+                .expect("mutate exactly one versioned row");
+            assert_eq!(changed.rows_affected(), 1, "{mutation}");
+            let error =
+                retain_versioned_reserved_live_claims_for_artifact_with_conn(&txn, &scope, &plan)
+                    .await
+                    .expect_err("stale sealed tuple cannot be retained");
+            assert!(
+                format!("{error:#}").contains("coverage ownership changed"),
+                "{mutation}: {error:#}"
+            );
+            txn.rollback()
+                .await
+                .expect("discard all earlier lease writes with the stale row");
+            assert_eq!(cov2_verify_claim_rows(&conn).await, original, "{mutation}");
+        }
+    }
+
+    #[tokio::test]
+    async fn cov2_versioned_reserved_live_claims_second_row_fault_rolls_back() {
+        let (conn, scope, plan) = cov2_versioned_verify_fixture().await;
+        let original = cov2_verify_claim_rows(&conn).await;
+        conn.execute_unprepared(
+            "CREATE TRIGGER cov2_retain_reject_second
+             BEFORE UPDATE OF lease_expires_at ON agent_coverage_claim
+             WHEN OLD.session_id = 'claude_code__s1'
+               AND OLD.logical_turn_key = 'cov2-verify-shared'
+               AND OLD.coverage_schema_version = 2
+               AND EXISTS (
+                   SELECT 1 FROM agent_coverage_claim
+                   WHERE session_id = OLD.session_id
+                     AND logical_turn_key = OLD.logical_turn_key
+                     AND coverage_schema_version = 1
+                     AND lease_expires_at = 9223372036854775807
+               )
+             BEGIN SELECT RAISE(ABORT, 'injected second-version retain failure'); END",
+        )
+        .await
+        .expect("install real SQL fault armed only after v1 retain");
+        let txn = crate::internal::db::begin_write_transaction(&conn)
+            .await
+            .expect("begin caller-owned artifact transaction");
+        verify_versioned_reserved_live_claims_with_conn(&txn, &scope, &plan)
+            .await
+            .expect("verify both original sealed reservations");
+        let error =
+            retain_versioned_reserved_live_claims_for_artifact_with_conn(&txn, &scope, &plan)
+                .await
+                .expect_err("second version UPDATE must fail through the real SQLite trigger");
+        assert!(format!("{error:#}").contains("injected second-version retain failure"));
+        assert_ne!(
+            cov2_verify_claim_rows(&txn).await,
+            original,
+            "the first lease was updated before the second SQL fault"
+        );
+        txn.rollback()
+            .await
+            .expect("rollback the first version after second-version SQL fault");
+        assert_eq!(cov2_verify_claim_rows(&conn).await, original);
+    }
+
+    #[tokio::test]
+    async fn cov2_versioned_reserved_live_claims_later_sql_fault_rolls_back() {
+        let (conn, scope, plan) = cov2_versioned_verify_fixture().await;
+        let original = cov2_verify_claim_rows(&conn).await;
+        let txn = crate::internal::db::begin_write_transaction(&conn)
+            .await
+            .expect("begin caller-owned artifact transaction");
+        verify_versioned_reserved_live_claims_with_conn(&txn, &scope, &plan)
+            .await
+            .expect("verify both original sealed reservations");
+        retain_versioned_reserved_live_claims_for_artifact_with_conn(&txn, &scope, &plan)
+            .await
+            .expect("retain both leases before later caller SQL");
+        assert_ne!(cov2_verify_claim_rows(&txn).await, original);
+        let error = txn
+            .execute_unprepared(
+                "INSERT INTO agent_coverage_claim SELECT * FROM agent_coverage_claim
+                 WHERE session_id = 'claude_code__s1'
+                   AND logical_turn_key = 'cov2-verify-shared'
+                   AND coverage_schema_version = 1 LIMIT 1",
+            )
+            .await
+            .expect_err("later SQL must hit the existing version-keyed unique key");
+        assert!(format!("{error:#}").contains("UNIQUE"), "{error:#}");
+        txn.rollback()
+            .await
+            .expect("rollback both retained leases after later caller SQL failure");
+        assert_eq!(cov2_verify_claim_rows(&conn).await, original);
     }
 
     #[tokio::test]

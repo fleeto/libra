@@ -1205,8 +1205,29 @@ Canonical source omission has a domain-separated
 `libra/pending-v2/no-reasoning-source\0` digest; explicit `null` is rejected.
 These local integrity checks grant no native provenance, persistence or
 checkpoint ACK, and synthetic positives do not establish provider Source A.
-The production durable loader consumer remains COV2-22 work, with replay in
-COV2-08. The v1 member API, bytes and pending MAC domain remain unchanged.
+COV2-22 owns the separate private durable loader consumer, with replay in
+COV2-08. Neither connects a production Session path at this stage. The v1
+member API, bytes and pending MAC domain remain unchanged.
+
+### Private pending-v2 transaction and deferred load (COV2-22)
+
+The closed v2 artifact persists through one caller-owned SQLite transaction:
+its pure guards reject all-v1 plans and native cross-version bare-key aliases
+before SQL, then it verifies and retains exact versioned live claims before
+writing bounded chunks, the header and authenticated private alias. Any error
+requires a complete caller rollback. Idempotent delivery preserves original
+chunks and manual/quarantine state; persistence issues no checkpoint ACK.
+
+The separate loader authenticates the committed original bytes/MAC and the
+COV2-25 exact original members before rebuilding redacted sidecars. The
+source must be present, so the pure codec's absent-source integrity sentinel
+cannot enter this native load lane. Its non-Clone, non-Serde deferred carrier
+keeps the original bytes/MAC, source DTO, exact ordered version/key
+associations and local integrity stamp. COV2-08 owns fresh replay fences and
+lower native validation; this card connects no production Session/native
+restore/ref/checkpoint publication or success ACK. The v1 format, pending MAC
+domains and immutable old oracle remain unchanged. Synthetic fixture/storage
+checks do not establish real provider Source A or native archival.
 
 ### OG-20 private import transport
 

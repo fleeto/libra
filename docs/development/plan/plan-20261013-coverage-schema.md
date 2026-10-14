@@ -1,5 +1,7 @@
 # OpenCode coverage schema-v2 前置实施计划（2026-10-13）
 
+> **COV2-22 采用候选条件状态（2026-10-15，未预授签推）：** 原 8 AC/6 VER 的本机机制、21 unique exact、相关质量门与双 env full 已实际执行，完整 run 为 10139/10139、2 slow/2 leaky/23 skipped/exit0，原失败与警示保留。本次采用的新增两计划事实仍须 root 最终单 Claude/裁决及本次实际 signed+DCO main 交付、remote 同一性；仅在该 source qualification 完成后 COV source 为 **14/26=53.85%**，此前仍为 **13/26=50.00%**，formal **0/26** 不变。父 formal **59/71=83.10%**、source **62/71=87.32%** 及下段最新 049 十四门／四卡 done/complete 事实全部保留；本候选不写未知提交 SHA，不把记账后的完整 2043 字节称为 full 同一输入。
+
 > **当前049实际C/D与四卡正式收口（2026-10-14 22:28:49 UTC）：** USER-TEMP-REL-049 / 0.30.49 的实际C/D已由root按完整收据 `dad01d952f7ce629354118264a4926b048693bf851258e4cd14beb9853727f8c` 逐项裁决关闭；release source/tag peel为 `04617cd2a3ffbf3a3e68ce4ddfecf94b78bc6574`，release run `38639329379` attempt `2` 的8个job全部success，当前SHA CI/CodeQL、四平台签名manifest/资产及CDN、pinned Homebrew、网站HTTP200/visible六段、用户指定curl home安装、同正式Darwin资产原子替换root目标及installed cat-file/既有BASE1345B读回均有hash绑定的实际证据。 仅四张父卡由locally-accepted转done/complete，父formal **59/71=83.10%**（原55增加4），source仍 **62/71=87.32%**；COV source **13/26=50.00%**、formal **0/26**，71/26分母不变。COV2-25/COV2-REL-01/DEP-OG-13、OG24..26的FAST-OG-04、Source A及native三字段未因此关闭；Source A UNPROVEN，历史unsupported-state import020仍FAIL/默认拒绝/计划外deferred。真实provider idle.error正例仍未观察，本卡typed机制按原7AC/3VER验收，不把成功Session或synthetic称真实错误/native来源。既有FAIL/cancelled/skip、Mega2与cat-file延期观察保留。 下方原日期状态保留为历史；本次仅例行事实记账，不改AC/VER/I/R/DAG或扩大权限。
 
 > **历史BASE源码就绪交接（2026-10-14 20:10:13 UTC；当时正式049/C-D仍待）：** `OG-UPGRADE-029-01`已按8AC/2VER、相关门/fmt/strict、最终单Claude R2 PASS及实际双env全量完成A/B，现`in-progress / locally-accepted`、source-qualified；signed+DCO main `1e2177e11029e28e3c81afbe6ec9f1609cdde7da`与cf `93b10519e1943ea3eea7c943e816418e92b1ca0b`均Push exit0、actual remote同SHA，12root+1site reviewed postimage/mode逐项相同。最终full实际exit0：10133/10133 passed（2slow均最终PASS，23skipped不计PASS，0retry/0flaky），raw `24febb2eba3d2aad09c6f516988e06e9ae127ad8dd96b362fbda4ea45671fdb2`；2043项前后SHA/mode同一。父source **62/71=87.32%**，formal仍 **55/71=77.46%**；COVsource **13/26=50.00%**、formal **0/26**不变。网站已实际deploy0/HTTP200、六段visible text对拍通过；正式0.30.49的最终SHA安全CI/版本guard/单审发布delta/8releasejob/四平台签名manifest/CDN/Homebrew/指定curl安装及installed smoke仍pending；Source A UNPROVEN、历史import020 FAIL/default reject/deferred不变。下方旧开工、未终态full及61/71均保留历史，不倒改失败或未验收门。
@@ -1537,7 +1539,7 @@ COV2-REL-01 冻结不含 OG-27 源码的最终 COV2 树；首次完成 bumped �
 
 **Task type:** implementation
 
-**Lifecycle / Acceptance:** pending / 空（新增卡；下列 AC/VER 尚未执行）
+**Lifecycle / Acceptance:** in-progress / locally-accepted（COV2-22 采用候选：原 8 AC/6 VER 与继承本机机制门已实际验收；最终新增事实文档的单 Claude 裁决、本次 signed+DCO main 交付及 remote 同一性仍由 root 完成，不在本私有候选中自授 source-qualified 或 formal complete）
 
 **Description:** 自 COV2-04 拆出，且原始 outer-v2 成员完整性轴进一步拆出 COV2-25；消费 COV2-24 已审的内存 `SealedVersionedPendingArtifact`、COV2-25 key-owner verifier 与 COV2-20/21 事务 API，真实执行 `seal→persist(&DatabaseTransaction)→commit→load`。`pending_payload.rs` 只为 AC6/VER2 补同一持久化 artifact 的认证后 redacted rehydrate/typed deferred loader，不能新增来源铸造或 replay ACK；同时验证同事务双版本 lease/artifact、编译冻结旧读端拒绝、真实 writer 故障回滚，以及原 v1 生产 seal→persist→commit→load 后持久化 chunk/header 原字节/MAC 与历史冻结常量兼容。本卡 AC8 是 persist 入口对已封闭 artifact 的二次防御，不重复 COV2-23 的 checked-borrow 准入门。
 
@@ -1547,25 +1549,25 @@ COV2-REL-01 冻结不含 OG-27 源码的最终 COV2 树；首次完成 bumped �
 
 **Acceptance criteria:**
 
-- [ ] AC1：真实 sealed-v2 persist 在同一个 caller `DatabaseTransaction` 调用 COV2-20 verify 与 COV2-21 retain。
-- [ ] AC2：chunk/header/alias 与 v1/v2 两版 lease 原子提交。
-- [ ] AC3：全 v1 claim set 的 v2 artifact writer 在任何写前拒绝。
-- [ ] AC4：编译冻结的 pre-v2 reader 认证后拒绝真实已提交的 v2 artifact。
-- [ ] AC5：上述旧读端拒绝使 artifact/claims/ref/marker/receipt 字节和行均不变。
-- [ ] AC6：新 versioned loader 仅在 COV2-25 从同一已提交 artifact 的原始 bytes/MAC 验证成员后，重建并返回精确有序 `(coverage_schema_version, logical_turn_key)` tuple；认证失败无 verified payload。
-- [ ] AC7：在 retain 之后的真实 chunk/header/alias SQL fault 回滚两版 lease、artifact/alias 行且零成功 ACK。
-- [ ] AC8：OG-29 version-keyed association 存在前，`persist(&DatabaseTransaction)` 对已经封闭但含 native 双版本同裸 logical key 的 artifact 在首次 SQLite 写前再次 fail closed；这是与 COV2-23 borrow 拒绝不同的持久化入口防御。
+- [x] AC1：真实 sealed-v2 persist 在同一个 caller `DatabaseTransaction` 调用 COV2-20 verify 与 COV2-21 retain。
+- [x] AC2：chunk/header/alias 与 v1/v2 两版 lease 原子提交。
+- [x] AC3：全 v1 claim set 的 v2 artifact writer 在任何写前拒绝。
+- [x] AC4：编译冻结的 pre-v2 reader 认证后拒绝真实已提交的 v2 artifact。
+- [x] AC5：上述旧读端拒绝使 artifact/claims/ref/marker/receipt 字节和行均不变。
+- [x] AC6：新 versioned loader 仅在 COV2-25 从同一已提交 artifact 的原始 bytes/MAC 验证成员后，重建并返回精确有序 `(coverage_schema_version, logical_turn_key)` tuple；认证失败无 verified payload。
+- [x] AC7：在 retain 之后的真实 chunk/header/alias SQL fault 回滚两版 lease、artifact/alias 行且零成功 ACK。
+- [x] AC8：OG-29 version-keyed association 存在前，`persist(&DatabaseTransaction)` 对已经封闭但含 native 双版本同裸 logical key 的 artifact 在首次 SQLite 写前再次 fail closed；这是与 COV2-23 borrow 拒绝不同的持久化入口防御。
 
 **旧读端与 Source A：** `source .env.test && cargo test --test compat_agent_architecture_guard reasoning_pending_pre_v2_reader_oracle_is_immutable -- --exact` 与现有 `source .env.test && cargo test --lib internal::ai::capture::pending::tests::cov2_v1_pending_bytes_and_mac_frozen -- --exact` 均为本卡六条 VER 之外的 mandatory ER-04 冻结门，须各额外实际 1/1；冻结 decoder、v1 canonical bytes 与 MAC 不变。手插行或重签 synthetic envelope 不算 AC1/4/7。COV2-22 的 same-key 负例须用 test-only adversarial 构造绕过 COV2-23，仅为触达生产 `persist` 的防御门；不得把该 synthetic 构造或 MAC 当作 native Source A 正例。正常生产 seal 路径先由 COV2-23 拒绝，版本化 native 同 key 正例留父 OG-29 与真实 Source A。
 
 **Verification:**
 
-- [ ] VER1：AC1/2/4/5：`source .env.test && cargo test --lib internal::ai::capture::pending::tests::cov2_real_v2_persist_and_frozen_old_reader_reject -- --exact`（真实 seal→persist→commit，编译冻结 decoder，全 before/after；1/1）。
-- [ ] VER2：AC6：`source .env.test && cargo test --lib internal::ai::capture::pending::tests::cov2_real_v2_artifact_new_reader_roundtrip -- --exact`（同一真实 seal→persist→commit→load artifact 验精确 tuple，并对原始成员篡改/错误 MAC 无 verified payload；1/1）。
-- [ ] VER3：AC3：`source .env.test && cargo test --lib internal::ai::capture::pending::tests::cov2_real_v2_artifact_rejects_all_v1_plan -- --exact`（无写入，1/1）。
-- [ ] VER4：AC7：`source .env.test && cargo test --lib internal::ai::capture::pending::tests::cov2_real_v2_artifact_later_sql_fault_rolls_back -- --exact`（两版 retain 之后真 chunk/header/alias trigger，逐行和逐字节比较；1/1）。
-- [ ] VER5：AC8：`source .env.test && cargo test --lib internal::ai::capture::pending::tests::cov2_sealed_native_same_key_persist_defense_fails_closed -- --exact`（test-only 构造同一 exact sealed bytes/coverage 的 native same-key artifact，绕过 COV2-23 仅为触达生产 persist 入口；断言 guard 在首次 SQLite 写/verify/retain 前失败、零 artifact/alias/lease/ACK 变化，不以普通 seal 提前拒绝冒充本卡通过；synthetic 非 Source A，1/1）。
-- [ ] VER6→v1 writer compatibility：`source .env.test && cargo test --lib internal::ai::capture::pending::tests::cov2_v1_pending_persisted_bytes_and_mac_frozen -- --exact`（在固定旧版 scope/IDs/clock/key 的受控 fixture 中真实调用生产 v1 `seal→persist(&DatabaseTransaction)→commit→load`，再从已提交存储读取 chunk/header 原字节与 MAC，逐项比较独立保留的历史冻结常量；期望值不得由当前 serializer、当前 loader 的 roundtrip 或测试重签生成；1/1）。
+- [x] VER1：AC1/2/4/5：`source .env.test && cargo test --lib internal::ai::capture::pending::tests::cov2_real_v2_persist_and_frozen_old_reader_reject -- --exact`（真实 seal→persist→commit，编译冻结 decoder，全 before/after；1/1）。
+- [x] VER2：AC6：`source .env.test && cargo test --lib internal::ai::capture::pending::tests::cov2_real_v2_artifact_new_reader_roundtrip -- --exact`（同一真实 seal→persist→commit→load artifact 验精确 tuple，并对原始成员篡改/错误 MAC 无 verified payload；1/1）。
+- [x] VER3：AC3：`source .env.test && cargo test --lib internal::ai::capture::pending::tests::cov2_real_v2_artifact_rejects_all_v1_plan -- --exact`（无写入，1/1）。
+- [x] VER4：AC7：`source .env.test && cargo test --lib internal::ai::capture::pending::tests::cov2_real_v2_artifact_later_sql_fault_rolls_back -- --exact`（两版 retain 之后真 chunk/header/alias trigger，逐行和逐字节比较；1/1）。
+- [x] VER5：AC8：`source .env.test && cargo test --lib internal::ai::capture::pending::tests::cov2_sealed_native_same_key_persist_defense_fails_closed -- --exact`（test-only 构造同一 exact sealed bytes/coverage 的 native same-key artifact，绕过 COV2-23 仅为触达生产 persist 入口；断言 guard 在首次 SQLite 写/verify/retain 前失败、零 artifact/alias/lease/ACK 变化，不以普通 seal 提前拒绝冒充本卡通过；synthetic 非 Source A，1/1）。
+- [x] VER6→v1 writer compatibility：`source .env.test && cargo test --lib internal::ai::capture::pending::tests::cov2_v1_pending_persisted_bytes_and_mac_frozen -- --exact`（在固定旧版 scope/IDs/clock/key 的受控 fixture 中真实调用生产 v1 `seal→persist(&DatabaseTransaction)→commit→load`，再从已提交存储读取 chunk/header 原字节与 MAC，逐项比较独立保留的历史冻结常量；期望值不得由当前 serializer、当前 loader 的 roundtrip 或测试重签生成；1/1）。
 
 **进一步写集门：** 若现有 compat guard 必须更新断言，先明确把 `tests/compat/agent_architecture_guard.rs` 加入本卡精确 I，并按 ER-13/单 Claude 重审；否则该文件只读。
 
@@ -1607,6 +1609,33 @@ COV2-REL-01 冻结不含 OG-27 源码的最终 COV2 树；首次完成 bumped �
 **C/D coverage from:** COV2-REL-01；真实 exact-source C/D 通过后本卡才可 done/complete。
 
 **Granularity:** `type=implementation; axis=真实 pending artifact 事务与冻结旧读端; recovery=forward-only; complete=yes; self-contained=yes; AC=8/8; VER=6/8; landing=1; prod-files=2; scope=M; deps=DEP-COV2-029-BASE,COV2-25; writeset=严格串行; release=family child; split-from=COV2-04; exception=N/A`
+
+**COV2-22 采用候选的实际本机事实（2026-10-15；交付资格由 root 最终裁决）：** 本候选把下述两生产 owner 与三行为文档的精确受测后像交给本次实际 signed+DCO main 提交，未知提交 SHA 不预写为事实；root 尚须完成最新两计划事实增量的唯一 Claude Code 审查、父级裁决及签推同一性。原 AC/VER、命令、I/R、DAG、Granularity 与能力边界不变。上方 Current evidence 是原开工态，下面“历史隔离准备快照”保留其原时点状态，不用旧 UNRUN 文字否认本段实际运行，也不倒改旧失败。
+
+实现仍是单一 caller transaction 的 v2 verify→retain→chunk/header/alias 与原始成员认证后的 redacted/deferred loader；封闭 artifact 在首次 SQLite 前拒绝 all-v1 和 native 跨版本同裸 key。非 Clone／非 Serde carrier 保留原 bytes/MAC/source/有序 version-key tuple 与本地 integrity stamp，不接生产 Session、native restore 或 replay ACK。`pending.rs` 受测 SHA `f8f1160cd1832de2f76ccedde9e67fecd36c8e47628619e635ee8c8d7c0abde9`、`pending_payload.rs` 为 `cadba46d0960cde91650ea4129a03113333303683a4b891b1a82a24c774b667c`，两者 mode 0644；三行为文档逐字使用同一 full/Claude 后像。原 v1 seal/persist/reader、原 memory gold、冻结 decoder `96d71660e8b75d61cff2dccaa59a410b90b499afd63e10c9dcc2cc678312e32c` 不变。Source A、父计划 native 三字段、历史 import020、Linux 功能及家族 C/D 均不由本卡扩权或放行。
+
+原六项 VER、两个冻结门、COV2-25 继承与三闭集守卫合计 21 unique exact 各实际 1/1、无所选用例 ignored/零匹配；pending owner 70/70、payload 31/31、完整 architecture 58/58、docs 32/32，nightly fmt 与 strict all-targets/all-features Clippy `-D warnings` 实际 exit0，strict raw `8a0830ace293d01c005fcffde899cc5196399034c7539c65cdee82d177238f68`。原 8 AC 的机制断言到六项 VER 的索引及 36 个测试动作组已逐项列明；这不新增判据、落点或豁免，目录落点 1／生产 owner 2／scope M 不变。
+
+双 env 完整 Nextest r4 曾实际 exit100：10139 run、10133 passed、6 failed、2 slow、23 skipped，raw `3b6c0c7ea30bd73c4f61460aff7204d3499e1be86113f5553499c2cc38a954fd`；六项各三次 FAIL，共 18 failed attempts／12 additional retries，不能改称 PASS。它们是纯源码私有目录缺少真实仓库上下文引出的既有 macOS exporter `storage_path()` 一项和五个 serial classifier root-precondition 失败。root 仅授权以正常 a70 helper 执行私有 `libra init --vault false --initial-branch main`，真实 DB/HEAD 有效、未复制根元数据／凭据、未 commit/push/remote 或初始化全局 vault；原 2043 文件 SHA/mode 不变，未生成额外默认 untracked 文件。六项随后各 Nextest exact 实际 1 run/1 passed，并在下一完整 run 内均实际 PASS；没有改 registry、阈值或源码来绕过断言。
+
+双 env r5 原命令 `cargo nextest run --all --no-fail-fast --retries 2`、jobs2／test_threads4，2026-10-14 21:57:47.085756→22:26:35.513934 UTC 实际 exit0：**10139/10139 passed（2 slow、2 leaky），23 skipped，0 failed/flaky/retry/timeout/abort/execfail**；raw `59e34e861d296be52474835a559ebb259f58e4f8501836f8311d6c1136382cec`，完整收据 `87594346f55f6c724e639415e64324cc6ded20581b1b52132204606da50832fa`。runner 的 10139 passed 含 10137 条普通 PASS 与两条 LEAK，不能写成零警示。两条分别为 `internal::ai::authorized_read::tests::helper_report_accepts_evolving_offsets_and_cumulative_lengths` 和 `command::diff_plumbing_test::diff_plumbing_outside_repository_is_an_error`；同环境各一次原 Nextest exact 后分别 1 run/1 passed、0 LEAK/重试，raw `faf7f5af66d55e6662f9723b409896d99244f88e26e3087d2638f253067db95a`／`6adced633bc8ecdb279907251f1d6206efba540999ef403311e82ca99c421a1c`。单独诊断不擦除 full 两条警示、不证明其原因，也不新增零 LEAK 门禁。
+
+VER6 的唯一 expected 来源是独立原 `7efcf868d49a5183e7f0851a89abebee91357155`／0.30.46 完整旧源码 writer 实际 `seal→persist→commit→load` 后先行封存的原始 chunk/header/alias/sidecar/MAC；历史生产、依赖和其余 2029 文件不变，仅追加采样 test。历史 whole-source writer receipt `1bb278f923d0f5e3ab83a1deba498b056218553cd12878eac676f0f39a18ed11`，原 envelope 2104B/SHA `bf87589384983e2ad5ae74f3773f8459c9a20c56e4736775eb3129fe52a005ef`，root 独立原 tag/源核验 `c734b52441f51901f6f8c9a3752b1d95b3558025a44e37874515df50b131ad43`。原 Python-only KAT、VER3/VER6 失败、历史 sampler r1 编译失败均保留；expected 不由当前 serializer/loader/重签产生，不冒称历史发布 binary 或真实 provider Source A。
+
+root 发起的唯一 Claude Code R1 实际 SOURCE PASS、P0/P1/P2=0，raw `9cd81f9801f5313ac59813f796d7008736a8c5436d160a4b712b6b93b27ea020`；root 已核七 diff 的 Read 工具完整覆盖。该 R1 审查的是受测原后像；本次两计划新记账字节仍待 root 的最终文档增量审查，不借旧 PASS 预授新字节。full 前后及后续诊断的 2043 文件字节/mode 同一，受测 manifest `8592fc2bcc13c4a2eac6cac205f49eaba553b988697ccacfe8eabda75227afe9`、完整源 ZIP `fb700edeeb8927c794b023befe2ea005be3c363de0b834cc52706d1ca7b016ea`；**本次例行记账改变两计划，且 root 的父计划已有 049 纯事实增量，因此不宣称采用后的完整 2043 字节与 full 相同**。采用时以逐路径程序核对证明受测实现、测试、配置和原行为契约同一，三行为文档也为受测精确后像。
+
+**条件进度与后继：** 仅在 root 将本候选实际完成最终审查/裁决并以本次 signed+DCO main 交付、核对 remote 后，COV source 从 13/26 变为 **14/26=53.85%**；formal 仍 **0/26**。本候选本身不是已经发生的 source-qualified 提交，不伪造未知 SHA；父计划保持 formal **59/71=83.10%**、source **62/71=87.32%**，71/26 分母不变。最新 USER-TEMP-REL-049 的十四门及四张父卡实际 done/complete 直接继承 root 22:28:49 UTC 的完整收据 `dad01d952f7ce629354118264a4926b048693bf851258e4cd14beb9853727f8c`，不被旧隔离冻结文字回退；它不关闭 COV2-REL-01、DEP-OG-13 或 native Source A。COV2-22 实际 source-qualified 后才按原 DAG 转 COV2-08，本次没有实施该后继。
+
+**历史隔离准备快照（原文按当时状态保留；实际运行与当前采用条件见上段）：**
+
+**COV2-22 隔离候选准备快照（2026-10-15，非最终验收）：** 已消费 BASE 的 signed+DCO main `1e2177e11029e28e3c81afbe6ec9f1609cdde7da` 精确源交接；该前驱最终双 env full 10133/10133、23 skipped、exit0/raw `24febb2eba3d2aad09c6f516988e06e9ae127ad8dd96b362fbda4ea45671fdb2`，sole-Claude R2 PASS/raw `1da1fc13e2798ab51918f09f83de5499e87f204deea9614612b6ea6c01ca9c56` 只证明前驱最终源码，不替代本卡新行为。隔离候选仅写本卡两生产 owner 与五 I-core 文档，不改变任何 AC/VER、冻结 oracle、原 v1 seal/persist/reader 或其它卡范围。候选新增 caller-txn v2 verify→retain→chunk/header/alias、原始成员认证后的 redacted/deferred loader、非 Clone/非 Serde 的原 bytes/MAC/source/有序 tuple/integrity carrier；在首次 SQLite 动作前再次拒绝 all-v1 与 native 跨版本同裸 key。没有接入生产 Session/replay/native issuer/ACK，没有模型或 OpenCode 集成 CI。
+
+六个新具名测试已准备，包括真实 reserve→seal→persist→commit、冻结旧读端拒绝后全部相关行（含 SQLite 类型、ID、完整 agent_session receipt metadata）与 ref 原字节不变；原 bytes/MAC loader 的坏 MAC、同 MAC 字节变异、独立 root/storage/scope 拒绝，及 None-source codec sentinel 不能进入 native loader；all-v1/same-key 以 test-only 已封闭对抗 artifact 到达 persist 且用事务内缺表探针辨别首次 SQL 前拒绝；三处 retain 后真实 trigger、调用方 rollback 与零 ACK。对抗构造仅在 cfg(test)，不放宽正常 source factory，也不是 native 来源正例。私有 preflight 的首轮 VER3 fixture 未到 persist，已保留失败并仅修 test 构造；其后 VER6 的原 Python-only KAT 在真实 alias 验证失败，原常量与 FAIL 留档，不能把该错误 KAT 当作历史 gold。
+
+VER6 现仅消费独立历史源码 `7efcf868d49a5183e7f0851a89abebee91357155`（0.30.46）的真实完整 v1 writer `seal→persist→commit→load` 先行产出并封存的原始 chunk/header/alias/sidecar/MAC 常量。旧 2030 源文件经 archive blob/mode 核验；仅追加 cfg(test) 采样、2029 其它文件及旧生产前缀和 Cargo.lock 不变。历史 sampler r2 已实际 exact 1/1、exit0，raw `3fdb5f22a7b75518c80b0bac304eff1b960db69f9e0851d2709ba2e31f3b67ea`；封存 receipt `1bb278f923d0f5e3ab83a1deba498b056218553cd12878eac676f0f39a18ed11`，原 envelope 2104 bytes/SHA `bf87589384983e2ad5ae74f3773f8459c9a20c56e4736775eb3129fe52a005ef`。当前测试不生成期望值、不重签 gold，再调用不可变 frozen old inner producer/coverage、当前生产 v1 writer 与新旧读端逐项对拍。此证据是受控 synthetic 输入下的历史完整源码 writer 执行，不冒称历史发布 binary 或真实 OpenCode Source A；历史 sampler r1 编译失败亦保留。
+
+本快照不勾选 8 AC/6 VER，不改 lifecycle/acceptance/source/formal 分子。私有候选 focused 运行的逐命令结果、失败与最终重跑另附私有交接，均不替代 root 最终整合源码的全部 exact/mandatory、fmt/strict、双 env full、唯一 Claude、signed main/remote。本卡继承的 C/D 仍归 COV2-REL-01。049 发布冻结期间此候选不得推入 main。Source A/native 三字段、历史 import020、Linux 功能与家族发布状态均不从本准备推断通过。
+
 
 ### Task COV2-23：同源 NativeProven pending-v2 借用门
 
@@ -2376,3 +2405,7 @@ USER-TEMP-REL-049 / 0.30.49 的实际C/D已由root按完整收据 `dad01d952f7ce
 **精确覆盖四卡：** `FIX-OG-NATIVE-IMPORT-01`、`OG-IDLE-ERROR-029-01`、`OG-UPGRADE-029-01`、`FIX-OG-PARTIAL-LIVE-01`。原逐卡A/B、单Claude、signed source/网站交接及fresh BASE证据依现行四卡映射继承；不新增模型/Session或历史import验收。仅四张父卡由locally-accepted转done/complete，父formal **59/71=83.10%**（原55增加4），source仍 **62/71=87.32%**；COV source **13/26=50.00%**、formal **0/26**，71/26分母不变。COV2-25/COV2-REL-01/DEP-OG-13、OG24..26的FAST-OG-04、Source A及native三字段未因此关闭；Source A UNPROVEN，历史unsupported-state import020仍FAIL/默认拒绝/计划外deferred。真实provider idle.error正例仍未观察，本卡typed机制按原7AC/3VER验收，不把成功Session或synthetic称真实错误/native来源。既有FAIL/cancelled/skip、Mega2与cat-file延期观察保留。
 
 **实际身份：** signed manifest核验后的Darwin binary SHA256 `fffd723d0997d2cc0a2fccad7e31c0ae0d19f55d648ed635b3636f1ac051409e`、`79866176` bytes；home与root两个安装目标为同一正式资产。BASE原saved checkpoint `7d465f02-26f6-5fb8-a1d6-72164ac425f2`普通读回1345B/SHA `96583a9c4f4db01efffee8a6a31fe9f4a791ed866cda9c2a6893ebf8fd422d4a`、raw=false/truncated=false/native artifacts0。完整本机C/D收据 `/private/tmp/libra-temp49-parent-complete-r1-tdqm0h5x/USER-TEMP-REL-049-COMPLETE.json` / SHA256 `dad01d952f7ce629354118264a4926b048693bf851258e4cd14beb9853727f8c`；它只证明所列原门，不追认任何旧失败。
+
+### 2026-10-15 — COV2-22 采用候选的例行事实（不改规范）
+
+仅合并本卡原实现说明、原 8 AC/6 VER 的实际机制 checkbox、R4 环境失败/合法私有 init/R5 完整 10139 passed（2 slow/2 leaky/23 skipped）及两条原测试一次诊断、真实旧源码 writer 原样本、原 Claude R1 与最终新事实审查待门。root 最新 049 完成收据与父 59/71/source62、COV family formal0 原样保留；source14/26 仅为本次采用实际 source-qualified 后的条件计数。原判据/命令/I/R/DAG/Granularity 未改，本次不实施 COV2-08，不预授未知签名提交或 Source A。

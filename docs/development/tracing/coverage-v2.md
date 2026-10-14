@@ -302,7 +302,42 @@ An omitted source uses the domain-separated digest of
 `libra/pending-v2/no-reasoning-source\0`; explicitly present `null` is rejected
 rather than treated as canonical omission. Source-present production-seal tests
 and absent-source codec/key-owner tests exercise local integrity mechanisms;
-neither supplies real provider Source A. This entry has no production durable
-loader consumer until COV2-22 and grants no native proof, artifact persistence
-or checkpoint ACK. COV2-08 owns subsequent replay checks. The v1 member API,
+neither supplies real provider Source A. COV2-22 owns its separate private
+durable loader consumer; no production Session path is connected here. This
+key-owner entry grants no native proof, artifact persistence or checkpoint ACK.
+COV2-08 owns subsequent replay checks. The v1 member API,
 serialization and pending MAC domain remain unchanged.
+
+
+## Private pending-v2 transaction and deferred loader (COV2-22)
+
+The closed versioned artifact's `persist(&DatabaseTransaction)` checks its
+canonical sealed bytes, bounds, binding and ordered claim correspondence
+before its first SQLite action. An all-v1 claim set and a native association
+with the same bare logical key in two versions are rejected at this entry,
+even though the normal native borrow already rejects the latter. Within the
+one caller-owned writer transaction it verifies the exact versioned live
+reservations, retains both claim versions, then writes bounded chunks, the
+header and the authenticated private alias. The caller must roll back the
+whole transaction on every error. Retention is not an ACK, and idempotent
+delivery preserves retained quarantine/manual state and original chunks.
+
+The separate versioned loader reads the committed original bytes and MAC.
+After whole-envelope authentication and bounded decoding, the COV2-25 key
+owner authenticates the exact original binding, nested `payload.redacted`,
+source, ordered associations and coverage. Only then does the payload owner
+rebuild redacted sidecars and verify their existing commitments. A source
+must be present; the codec's valid absent-source integrity sentinel is not a
+native pending-load capability. The loader checks its deadline again after
+rehydration and after allocating the deferred result.
+
+The non-Clone, non-Serde carrier retains the original bounded bytes/MAC,
+source DTO, exact ordered `(coverage_schema_version, logical_turn_key)`
+associations and integrity stamp. These remain local integrity data, not
+NativeProven. COV2-08 must keep the deferred source attached and freshly
+revalidate original bytes/MAC, current catalog/receipt/workspace/claim fences
+and the lower fixed source proof on each replay attempt. No production
+Session path, native restore, checkpoint/ref publication or success ACK is
+connected by this card. The v1 wire, MAC domains and immutable old oracle
+remain unchanged. Pure Rust storage/codec fixtures do not prove OpenCode
+Source A; account/model capture stays outside CI.

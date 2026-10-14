@@ -29,16 +29,19 @@ use crate::internal::{
             pending_identity::{self, PreparedPendingAlias},
             pending_payload::{
                 PendingPayloadProjection, PortablePendingCoverage,
-                VersionedPendingPayloadProjection, VersionedPortablePendingCoverage,
-                check_versioned_tuple_wire_capacity, preflight_versioned_tuples,
+                VersionedPendingPayloadProjection, VersionedPendingReasoningReplay,
+                VersionedPortablePendingCoverage, check_versioned_tuple_wire_capacity,
+                preflight_versioned_tuples,
             },
         },
         capture_scope::CaptureScope,
         coverage_gate::{
             LiveClaimCommitPlan, NativeVersionedReasoningClaimCommitPlan, ReservedTurnClaim,
-            VersionedReservedTurnClaim,
+            VersionedLiveClaimCommitPlan, VersionedReservedTurnClaim,
         },
-        observed_agents::parse_canon_value,
+        observed_agents::{
+            coverage::CoverageSchemaVersion, parse_canon_value, reasoning::PendingIntegrityToken,
+        },
     },
     metadata::{MetadataKv, MetadataScope, MetadataValueType},
 };
@@ -458,6 +461,109 @@ impl VerifiedPendingPayload {
     }
 }
 
+/// A checked outer-v2 load remains a separate carrier until COV2-08 consumes
+/// its typed deferred source. No native proof or checkpoint ACK is issued.
+#[allow(dead_code)] // COV2-08 wires this private recovery carrier.
+pub(crate) struct VerifiedVersionedPendingPayload {
+    payload: CheckpointRedactedPayload,
+    coverage: VersionedLiveClaimCommitPlan,
+    reasoning: VersionedPendingReasoningReplay,
+    header: PendingHeader,
+    context: PendingSessionContext,
+}
+
+#[allow(dead_code)] // COV2-08 wires this private recovery carrier.
+impl VerifiedVersionedPendingPayload {
+    pub(crate) fn payload(&self) -> &CheckpointRedactedPayload {
+        &self.payload
+    }
+
+    pub(crate) fn coverage(&self) -> &VersionedLiveClaimCommitPlan {
+        &self.coverage
+    }
+
+    pub(crate) fn reasoning(&self) -> &VersionedPendingReasoningReplay {
+        &self.reasoning
+    }
+
+    pub(crate) fn header(&self) -> &PendingHeader {
+        &self.header
+    }
+
+    pub(crate) fn context(&self) -> &PendingSessionContext {
+        &self.context
+    }
+
+    /// Transfer the entire local-integrity carrier to the COV2-08 replay owner.
+    /// Its deferred source must remain attached until lower native validation.
+    pub(crate) fn into_replay_parts(
+        self,
+    ) -> (
+        CheckpointRedactedPayload,
+        VersionedLiveClaimCommitPlan,
+        VersionedPendingReasoningReplay,
+        PendingHeader,
+        PendingSessionContext,
+    ) {
+        (
+            self.payload,
+            self.coverage,
+            self.reasoning,
+            self.header,
+            self.context,
+        )
+    }
+}
+
+/// Only the authenticated loader in this module can pair its exact decoded
+/// projection with the MAC witness and the key-owner token from those bytes.
+#[allow(dead_code)] // COV2-08 consumes the loader without widening provenance.
+pub(crate) struct VersionedPendingRehydrateMaterial<'a> {
+    projection: &'a VersionedPendingPayloadProjection,
+    authentication: &'a AuthenticatedPendingEnvelope<'a>,
+    integrity: &'a PendingIntegrityToken,
+}
+
+impl<'a> VersionedPendingRehydrateMaterial<'a> {
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        &'a VersionedPendingPayloadProjection,
+        &'a AuthenticatedPendingEnvelope<'a>,
+        &'a PendingIntegrityToken,
+    ) {
+        (self.projection, self.authentication, self.integrity)
+    }
+}
+
+/// Only the authenticated loader can transfer the exact projection, original
+/// bytes/MAC and key-owner token into the deferred replay carrier.
+#[allow(dead_code)] // COV2-08 consumes the loader without widening provenance.
+pub(crate) struct VersionedPendingReplayMaterial {
+    projection: VersionedPendingPayloadProjection,
+    original_envelope: Vec<u8>,
+    original_mac: String,
+    integrity: PendingIntegrityToken,
+}
+
+impl VersionedPendingReplayMaterial {
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        VersionedPendingPayloadProjection,
+        Vec<u8>,
+        String,
+        PendingIntegrityToken,
+    ) {
+        (
+            self.projection,
+            self.original_envelope,
+            self.original_mac,
+            self.integrity,
+        )
+    }
+}
+
 /// The constructor is the only production path from payload to artifact.
 /// No Debug implementation may inadvertently log the authenticated content.
 pub(crate) struct SealedPendingArtifact {
@@ -476,8 +582,8 @@ pub(crate) struct PendingSealRequest<'a> {
     pub(crate) reasoning: Option<&'a ReasoningCoveragePlan>,
 }
 
-/// An in-memory native-v2 artifact only. COV2-22 owns the later writer
-/// transaction; constructing this value never writes a pending row or ACK.
+/// A closed native-v2 artifact. Construction alone writes no rows or ACK;
+/// persistence retains both claim versions in one caller-owned transaction.
 #[cfg_attr(not(all(test, unix)), allow(dead_code))]
 pub(crate) struct SealedVersionedPendingArtifact {
     header: PendingHeader,
@@ -626,6 +732,189 @@ impl SealedVersionedPendingArtifact {
 
     pub(crate) fn bytes(&self) -> &[u8] {
         &self.bytes
+    }
+
+    /// Native outer-v2 persistence uses one caller-owned writer transaction.
+    /// The caller must roll the whole transaction back on every error.
+    pub(crate) async fn persist(&self, txn: &DatabaseTransaction, deadline: Instant) -> Result<()> {
+        check_deadline(deadline)?;
+        let binding = self.binding();
+        binding.validate()?;
+        validate_envelope_shape(&self.bytes)?;
+        #[derive(Deserialize)]
+        struct RawPersistEnvelope<'a> {
+            #[serde(borrow)]
+            payload: &'a RawValue,
+            #[serde(borrow)]
+            coverage: &'a RawValue,
+        }
+        let raw: RawPersistEnvelope<'_> = serde_json::from_slice(&self.bytes).map_err(|_| {
+            anyhow::anyhow!("invalid sealed capture recovery artifact; run `libra agent doctor`")
+        })?;
+        // Repeat entry/wire bounds before allocating typed vectors even though
+        // the closed production sealer has already enforced them.
+        preflight_versioned_tuples(raw.payload, raw.coverage)?;
+        let envelope: VersionedPendingEnvelope =
+            serde_json::from_slice(&self.bytes).map_err(|_| {
+                anyhow::anyhow!(
+                    "invalid sealed capture recovery artifact; run `libra agent doctor`"
+                )
+            })?;
+        envelope.validate()?;
+        let mut exact = ExactEnvelopeWriter {
+            original: &self.bytes,
+            offset: 0,
+        };
+        serde_json::to_writer(&mut exact, &envelope).map_err(|_| {
+            anyhow::anyhow!("sealed capture recovery artifact changed; run `libra agent doctor`")
+        })?;
+        ensure!(
+            exact.offset == self.bytes.len()
+                && envelope.binding == *binding
+                && self.header.envelope_bytes == self.bytes.len()
+                && self.header.chunks == self.bytes.len().div_ceil(CHUNK_BYTES)
+                && envelope.coverage.owner == self.coverage_owner
+                && envelope.payload.reasoning_source.is_some()
+                && self
+                    .coverage_claims
+                    .iter()
+                    .any(|claim| { claim.coverage_schema_version == CoverageSchemaVersion::V2 }),
+            "versioned capture recovery requires a sealed v2 claim; run `libra agent doctor`"
+        );
+        // The sealed type's normal constructor already enforces this. Repeat
+        // the native bare-key guard at persistence before any SQLite mutation,
+        // verification or lease retention; OG-29 owns version-keyed aliases.
+        let mut bare_keys = std::collections::HashSet::with_capacity(
+            envelope.payload.identity_commit_associations.len(),
+        );
+        ensure!(
+            envelope
+                .payload
+                .identity_commit_associations
+                .iter()
+                .all(|association| { bare_keys.insert(association.logical_turn_key.as_str()) }),
+            "native capture recovery cannot persist cross-version turn aliases yet; run `libra agent doctor`"
+        );
+        drop(bare_keys);
+        drop(envelope.payload);
+        let plan = envelope.coverage.into_live(
+            &self.identity,
+            &binding.checkpoint_id,
+            binding.parent_commit.clone(),
+            binding.first_attempt_millis,
+        )?;
+        ensure!(
+            plan.ordinary().session_id == self.identity.context().session_id()
+                && plan.ordinary().owner == self.coverage_owner
+                && self.coverage_claims.len() == plan.claims().count()
+                && self.coverage_claims.iter().zip(plan.claims()).all(
+                    |(given, (version, original))| {
+                        given.coverage_schema_version == version && given.claim == *original
+                    }
+                ),
+            "sealed capture recovery claim tuple changed; run `libra agent doctor`"
+        );
+        check_deadline(deadline)?;
+        // All retained leases, chunks, header and alias use this one caller
+        // transaction. Any Err requires a full caller rollback.
+        txn.execute_unprepared("UPDATE metadata_kv SET updated_at = updated_at WHERE 0")
+            .await
+            .context("cannot lock capture recovery storage; run `libra agent doctor`")?;
+        pending_identity::assert_private_repo(txn, &binding.scope.repo_id).await?;
+        crate::internal::ai::coverage_gate::verify_versioned_reserved_live_claims_with_conn(
+            txn,
+            &binding.scope,
+            &plan,
+        )
+        .await?;
+        crate::internal::ai::coverage_gate::retain_versioned_reserved_live_claims_for_artifact_with_conn(
+            txn,
+            &binding.scope,
+            &plan,
+        )
+        .await?;
+        let headers =
+            headers_for_repo(txn, &binding.scope.repo_id, MAX_ARTIFACTS as u64 + 1).await?;
+        ensure!(
+            headers.len() <= MAX_ARTIFACTS,
+            "capture recovery capacity is invalid; run `libra agent doctor`"
+        );
+        let mut existing = None;
+        for entry in &headers {
+            let header = decode_entry(entry)?;
+            if entry.key == binding.checkpoint_id {
+                ensure!(
+                    existing.is_none(),
+                    "duplicate capture recovery headers; run `libra agent doctor`"
+                );
+                existing = Some(header);
+            }
+        }
+        if let Some(existing) = existing {
+            ensure!(
+                existing.binding == *binding
+                    && existing.mac == self.header.mac
+                    && existing.envelope_bytes == self.header.envelope_bytes
+                    && existing.chunks == self.header.chunks,
+                "capture recovery artifact conflicts with retained evidence; run `libra agent doctor`"
+            );
+            // An idempotent delivery never replaces quarantine/manual state
+            // or rewrites payload rows. Corrupt chunks remain repair-required.
+            let retained = load_chunks(txn, &existing).await?;
+            ensure!(
+                retained == self.bytes,
+                "capture recovery chunks conflict with retained evidence; run `libra agent doctor`"
+            );
+            self.identity
+                .publish_for_artifact(txn, &binding.checkpoint_id)
+                .await?;
+            check_deadline(deadline)?;
+            return Ok(());
+        }
+        ensure!(
+            headers.len() < MAX_ARTIFACTS,
+            "capture recovery capacity is full; repair or explicitly erase a retained session"
+        );
+        let range = chunk_range(&binding.checkpoint_id);
+        ensure!(
+            MetadataKv::list_bounded_with_conn(
+                txn,
+                &[MetadataScope::AgentCapturePendingChunk],
+                Some(&binding.scope.repo_id),
+                Some((&range.0, &range.1)),
+                1,
+                CHUNK_TEXT_BYTES
+            )
+            .await?
+            .is_empty(),
+            "orphaned capture recovery chunks require inspection; run `libra agent doctor`"
+        );
+        for (index, chunk) in self.bytes.chunks(CHUNK_BYTES).enumerate() {
+            check_deadline(deadline)?;
+            MetadataKv::set_with_conn(
+                txn,
+                MetadataScope::AgentCapturePendingChunk,
+                &binding.scope.repo_id,
+                &chunk_key(&binding.checkpoint_id, index),
+                &STANDARD.encode(chunk),
+                MetadataValueType::Binary,
+            )
+            .await?;
+        }
+        MetadataKv::set_with_conn(
+            txn,
+            MetadataScope::AgentCapturePending,
+            &binding.scope.repo_id,
+            &binding.checkpoint_id,
+            &serde_json::to_string(&self.header)?,
+            MetadataValueType::Text,
+        )
+        .await?;
+        self.identity
+            .publish_for_artifact(txn, &binding.checkpoint_id)
+            .await?;
+        check_deadline(deadline)?;
+        Ok(())
     }
 }
 
@@ -1053,6 +1342,107 @@ pub(crate) async fn load_verified_payload<C: ConnectionTrait>(
             expected.parent_commit.clone(),
             chrono::Utc::now().timestamp_millis(),
         )?,
+        header: header.clone(),
+        context: identity.context().clone(),
+    })
+}
+
+/// Read an explicitly selected committed outer-v2 artifact. This returns a
+/// local-integrity carrier only; COV2-08 owns native source replay and ACKs.
+#[allow(dead_code)] // COV2-08 connects this separate authenticated recovery path.
+pub(crate) async fn load_verified_versioned_payload<C: ConnectionTrait>(
+    conn: &C,
+    storage: &Path,
+    root: &Path,
+    identity: &PreparedPendingAlias,
+    expected: &PendingBinding,
+    header: &PendingHeader,
+    deadline: Instant,
+) -> Result<VerifiedVersionedPendingPayload> {
+    check_deadline(deadline)?;
+    expected.validate()?;
+    ensure!(
+        &header.binding == expected
+            && expected.session_id == identity.alias()
+            && expected.scope == *identity.context().scope(),
+        "capture recovery binding changed; run `libra agent doctor`"
+    );
+    let bytes = load_chunks(conn, header).await?;
+    let authentication = AuthenticatedPendingEnvelope::verify(
+        conn,
+        storage,
+        root,
+        &expected.scope,
+        &bytes,
+        &header.mac,
+        deadline,
+    )
+    .await?;
+    let envelope = decode_authenticated_versioned_envelope(&authentication, expected)?;
+    ensure!(
+        envelope.payload.reasoning_source.is_some(),
+        "versioned capture recovery requires retained source evidence; run `libra agent doctor`"
+    );
+    let integrity = key::authenticate_pending_versioned_reasoning_members_in_scope_until(
+        conn,
+        key::PendingVersionedReasoningAuthentication {
+            scope: &expected.scope,
+            storage_path: storage,
+            authorized_root: root,
+            original_envelope: &bytes,
+            original_mac: &header.mac,
+            expected_binding: expected,
+            candidate: &envelope,
+            deadline,
+        },
+    )
+    .await?;
+    let coverage_bytes = serde_json::to_vec(&envelope.coverage)?.len();
+    let payload = VersionedPendingPayloadProjection::rehydrate_authenticated_deferred(
+        VersionedPendingRehydrateMaterial {
+            projection: &envelope.payload,
+            authentication: &authentication,
+            integrity: &integrity,
+        },
+        conn,
+        storage,
+        root,
+        identity,
+        deadline,
+    )
+    .await?;
+    check_sidecar_capacity(&payload, coverage_bytes)?;
+    validate_payload_binding(&payload, expected)?;
+    ensure!(
+        payload.is_exact_complete_snapshot()
+            && payload
+                .snapshot()
+                .source
+                .as_ref()
+                .and_then(|source| source.digest_sha256.as_deref())
+                == Some(expected.source_commitment.as_str()),
+        "capture recovery source commitment changed; run `libra agent doctor`"
+    );
+    let coverage = envelope.coverage.into_live(
+        identity,
+        &expected.checkpoint_id,
+        expected.parent_commit.clone(),
+        chrono::Utc::now().timestamp_millis(),
+    )?;
+    check_deadline(deadline)?;
+    let reasoning = VersionedPendingPayloadProjection::into_deferred_reasoning(
+        VersionedPendingReplayMaterial {
+            projection: envelope.payload,
+            original_envelope: bytes,
+            original_mac: header.mac.clone(),
+            integrity,
+        },
+    )?;
+    check_deadline(deadline)?;
+    Ok(VerifiedVersionedPendingPayload {
+        payload,
+        coverage,
+        reasoning,
         header: header.clone(),
         context: identity.context().clone(),
     })
@@ -2937,6 +3327,1013 @@ pub(crate) mod tests {
         let rebuilt =
             encode_versioned_envelope(decoded.binding, decoded.payload, decoded.coverage).unwrap();
         assert_eq!(rebuilt, artifact.bytes());
+    }
+
+    #[cfg(unix)]
+    async fn cov2_22_persisted_state(f: &Fixture) -> (Vec<(String, Vec<String>)>, Option<Vec<u8>>) {
+        use sha2::{Digest, Sha256};
+
+        let mut tables = Vec::new();
+        for table in [
+            "metadata_kv",
+            "agent_coverage_claim",
+            "agent_coverage_revision",
+            "agent_checkpoint",
+            "agent_session",
+            "reference",
+            "reflog",
+        ] {
+            let columns =
+                f.db.query_all_raw(Statement::from_string(
+                    f.db.get_database_backend(),
+                    format!("PRAGMA table_info(\"{table}\")"),
+                ))
+                .await
+                .unwrap();
+            assert!(!columns.is_empty(), "snapshot table must exist");
+            let expressions = columns
+                .iter()
+                .map(|column| {
+                    let name: String = column.try_get_by("name").unwrap();
+                    let quoted = format!("\"{}\"", name.replace('"', "\"\""));
+                    format!("json_array(typeof({quoted}),hex(CAST({quoted} AS BLOB)))")
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            let rows =
+                f.db.query_all_raw(Statement::from_string(
+                    f.db.get_database_backend(),
+                    format!(
+                        "SELECT json_array({expressions}) AS row FROM \"{table}\" ORDER BY row"
+                    ),
+                ))
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|row| {
+                    let bytes: String = row.try_get_by("row").unwrap();
+                    hex::encode(Sha256::digest(bytes.as_bytes()))
+                })
+                .collect();
+            tables.push((table.to_owned(), rows));
+        }
+        (
+            tables,
+            std::fs::read(f.storage.join("refs/libra/traces")).ok(),
+        )
+    }
+
+    #[cfg(unix)]
+    async fn cov2_22_real_artifact() -> (Fixture, SealedVersionedPendingArtifact) {
+        use crate::internal::ai::coverage_gate::{
+            reserve_turn_claims_by_version_with_capture_scope,
+            tests::{cov2_native_v2_turn, turn},
+        };
+        let f = Fixture::new().await;
+        let (ordinary, ordinary_payload) = f.artifact(None).await;
+        let binding = ordinary.header.binding;
+        let identity = ordinary.identity;
+        let payload = native_pending_payload_from_ordinary(
+            &ordinary_payload,
+            vec![
+                (0, b"synthetic v1 native source".to_vec()),
+                (1, b"synthetic v2 native source".to_vec()),
+            ],
+        );
+        let first = turn(
+            "synthetic-turn-0",
+            "ordinary v1 content",
+            Completeness::Complete,
+        );
+        let mut second = cov2_native_v2_turn(
+            "synthetic-turn-1",
+            "synthetic visible v2 reasoning",
+            Completeness::Complete,
+        );
+        second.ordinal = 1;
+        let turns = [first, second];
+        let versions = [1, 2];
+        let reservation = reserve_turn_claims_by_version_with_capture_scope(
+            &f.db,
+            &f.scope,
+            PK,
+            &turns,
+            &versions,
+            "owned-live-reservation",
+            1,
+            "live",
+        )
+        .await
+        .expect("reserve actual versioned rows through the production seam");
+        assert_eq!(reservation.reserved.len(), 2);
+        let companion = versioned_companion_for_turns(&f, &payload, &binding, &turns).await;
+        assert_eq!(
+            reservation.reserved,
+            companion
+                .versioned()
+                .claims()
+                .map(|(coverage_schema_version, claim)| {
+                    VersionedReservedTurnClaim {
+                        coverage_schema_version,
+                        claim: claim.clone(),
+                    }
+                })
+                .collect::<Vec<_>>()
+        );
+        let artifact = SealedVersionedPendingArtifact::seal(
+            &f.db,
+            &f.storage,
+            f.root.path(),
+            VersionedPendingSealRequest {
+                binding,
+                identity,
+                payload: &payload,
+                companion: &companion,
+            },
+            deadline(),
+        )
+        .await
+        .expect("seal one real production artifact from the same source");
+        (f, artifact)
+    }
+
+    #[cfg(unix)]
+    async fn cov2_22_commit_artifact(f: &Fixture, artifact: &SealedVersionedPendingArtifact) {
+        let txn = db::begin_write_transaction(&f.db).await.unwrap();
+        artifact.persist(&txn, deadline()).await.unwrap();
+        txn.commit().await.unwrap();
+    }
+
+    #[cfg(unix)]
+    async fn cov2_22_scope_count(
+        conn: &impl ConnectionTrait,
+        f: &Fixture,
+        scope: MetadataScope,
+    ) -> i64 {
+        let row = conn
+            .query_one_raw(Statement::from_sql_and_values(
+                conn.get_database_backend(),
+                "SELECT COUNT(*) AS n FROM metadata_kv WHERE target = ? AND scope = ?",
+                [f.scope.repo_id.clone().into(), scope.as_str().into()],
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        row.try_get_by("n").unwrap()
+    }
+
+    #[cfg(unix)]
+    async fn cov2_22_assert_no_ack(conn: &impl ConnectionTrait) {
+        for table in [
+            "agent_checkpoint",
+            "agent_coverage_revision",
+            "reference",
+            "reflog",
+        ] {
+            let row = conn
+                .query_one_raw(Statement::from_string(
+                    conn.get_database_backend(),
+                    format!("SELECT COUNT(*) AS n FROM \"{table}\""),
+                ))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                row.try_get_by::<i64, _>("n").unwrap(),
+                0,
+                "no publication in {table}"
+            );
+        }
+        let row = conn
+            .query_one_raw(Statement::from_sql_and_values(
+                conn.get_database_backend(),
+                "SELECT metadata_json FROM agent_session WHERE session_id = ?",
+                [PK.into()],
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.try_get_by::<String, _>("metadata_json").unwrap(), "{}");
+    }
+
+    #[cfg(unix)]
+    async fn cov2_22_assert_retained(conn: &impl ConnectionTrait, count: i64) {
+        let row = conn.query_one_raw(Statement::from_sql_and_values(
+            conn.get_database_backend(),
+            "SELECT COUNT(*) AS n FROM agent_coverage_claim WHERE session_id = ? AND lease_expires_at = ?",
+            [PK.into(), crate::internal::ai::coverage_gate::ARTIFACT_RETAINED_LEASE_MS.into()],
+        )).await.unwrap().unwrap();
+        assert_eq!(row.try_get_by::<i64, _>("n").unwrap(), count);
+        if count == 2 {
+            let rows = conn.query_all_raw(Statement::from_sql_and_values(
+                conn.get_database_backend(),
+                "SELECT coverage_schema_version, logical_turn_key FROM agent_coverage_claim
+                 WHERE session_id = ? AND lease_expires_at = ? ORDER BY coverage_schema_version, logical_turn_key LIMIT 3",
+                [PK.into(), crate::internal::ai::coverage_gate::ARTIFACT_RETAINED_LEASE_MS.into()],
+            )).await.unwrap();
+            let actual = rows
+                .iter()
+                .map(|row| {
+                    (
+                        row.try_get_by::<i64, _>("coverage_schema_version").unwrap(),
+                        row.try_get_by::<String, _>("logical_turn_key").unwrap(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                actual,
+                [
+                    (1, "synthetic-turn-0".to_owned()),
+                    (2, "synthetic-turn-1".to_owned())
+                ]
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cov2_real_v2_persist_and_frozen_old_reader_reject() {
+        let (f, artifact) = cov2_22_real_artifact().await;
+        cov2_22_commit_artifact(&f, &artifact).await;
+        cov2_22_assert_retained(&f.db, 2).await;
+        cov2_22_assert_no_ack(&f.db).await;
+        assert_eq!(f.count(MetadataScope::AgentCapturePending).await, 1);
+        assert_eq!(f.count(MetadataScope::AgentCaptureSessionAlias).await, 1);
+        assert_eq!(
+            load_chunks(&f.db, &artifact.header).await.unwrap(),
+            artifact.bytes()
+        );
+        let header =
+            header_for_checkpoint(&f.db, &f.scope.repo_id, &artifact.binding().checkpoint_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .0;
+        assert_eq!(header.mac, artifact.header.mac);
+        let identity = f.identity(Some(artifact.identity.alias())).await;
+        let before = cov2_22_persisted_state(&f).await;
+        let committed = load_chunks(&f.db, &header).await.unwrap();
+        AuthenticatedPendingEnvelope::verify(
+            &f.db,
+            &f.storage,
+            f.root.path(),
+            &f.scope,
+            &committed,
+            &header.mac,
+            deadline(),
+        )
+        .await
+        .expect("the original committed v2 MAC authenticates before old-reader rejection");
+        let error = frozen_pre_v2::load_verified_payload(
+            &f.db,
+            &f.storage,
+            f.root.path(),
+            &identity,
+            artifact.binding(),
+            &header,
+            deadline(),
+        )
+        .await
+        .err()
+        .expect("compiled pre-v2 reader must reject actual committed outer-v2");
+        assert!(
+            error
+                .to_string()
+                .contains("invalid authenticated capture recovery envelope")
+        );
+        assert_eq!(cov2_22_persisted_state(&f).await, before);
+        assert_eq!(load_chunks(&f.db, &header).await.unwrap(), artifact.bytes());
+        cov2_22_assert_retained(&f.db, 2).await;
+        // Idempotent delivery must not reset quarantine/manual policy or
+        // rewrite the original chunks/alias/leases after their first commit.
+        let txn = db::begin_write_transaction(&f.db).await.unwrap();
+        quarantine_header(&txn, &header).await.unwrap();
+        let manual = claim_manual_attempt(&txn, &header).await.unwrap();
+        assert!(manual.manual_attempted);
+        txn.commit().await.unwrap();
+        let retained = cov2_22_persisted_state(&f).await;
+        cov2_22_commit_artifact(&f, &artifact).await;
+        assert_eq!(cov2_22_persisted_state(&f).await, retained);
+        let (retained_header, namespace) =
+            header_for_checkpoint(&f.db, &f.scope.repo_id, &artifact.binding().checkpoint_id)
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(namespace, MetadataScope::AgentCaptureQuarantine);
+        assert!(retained_header.manual_attempted);
+        cov2_22_assert_no_ack(&f.db).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cov2_real_v2_artifact_new_reader_roundtrip() {
+        let (f, artifact) = cov2_22_real_artifact().await;
+        cov2_22_commit_artifact(&f, &artifact).await;
+        let identity = f.identity(Some(artifact.identity.alias())).await;
+        let (committed_header, namespace) =
+            header_for_checkpoint(&f.db, &f.scope.repo_id, &artifact.binding().checkpoint_id)
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(namespace, MetadataScope::AgentCapturePending);
+        assert_eq!(committed_header.mac, artifact.header.mac);
+        let verified = load_verified_versioned_payload(
+            &f.db,
+            &f.storage,
+            f.root.path(),
+            &identity,
+            artifact.binding(),
+            &committed_header,
+            deadline(),
+        )
+        .await
+        .expect("new reader must load the same committed production artifact");
+        assert_eq!(
+            verified
+                .coverage()
+                .claims()
+                .map(|(version, claim)| { (version.as_i64(), claim.logical_turn_key.as_str()) })
+                .collect::<Vec<_>>(),
+            [(1, "synthetic-turn-0"), (2, "synthetic-turn-1")]
+        );
+        assert_eq!(
+            verified
+                .reasoning()
+                .associations()
+                .iter()
+                .map(|entry| {
+                    (
+                        entry.coverage_schema_version,
+                        entry.logical_turn_key.as_str(),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            [(1, "synthetic-turn-0"), (2, "synthetic-turn-1")]
+        );
+        assert!(
+            verified
+                .coverage()
+                .claims()
+                .zip(&artifact.coverage_claims)
+                .all(
+                    |((version, original), sealed)| version == sealed.coverage_schema_version
+                        && *original == sealed.claim
+                )
+        );
+        assert_eq!(verified.reasoning().original_envelope(), artifact.bytes());
+        assert_eq!(verified.reasoning().original_mac(), committed_header.mac);
+        assert!(verified.payload().is_exact_complete_snapshot());
+        let candidate = serde_json::from_slice(artifact.bytes()).unwrap();
+        let token = cov2_25_authenticate_candidate(
+            &f,
+            artifact.bytes(),
+            &artifact.header.mac,
+            artifact.binding(),
+            &candidate,
+            f.root.path(),
+        )
+        .await
+        .unwrap();
+        assert!(verified.reasoning().matches_integrity(&token));
+        let before = cov2_22_persisted_state(&f).await;
+        let mut wrong_header = artifact.header.clone();
+        wrong_header
+            .mac
+            .replace_range(wrong_header.mac.len() - 1.., "0");
+        if wrong_header.mac == artifact.header.mac {
+            wrong_header
+                .mac
+                .replace_range(wrong_header.mac.len() - 1.., "1");
+        }
+        assert!(
+            load_verified_versioned_payload(
+                &f.db,
+                &f.storage,
+                f.root.path(),
+                &identity,
+                artifact.binding(),
+                &wrong_header,
+                deadline(),
+            )
+            .await
+            .is_err()
+        );
+        let foreign = Fixture::new().await;
+        assert!(
+            load_verified_versioned_payload(
+                &f.db,
+                &f.storage,
+                foreign.root.path(),
+                &identity,
+                artifact.binding(),
+                &artifact.header,
+                deadline(),
+            )
+            .await
+            .is_err(),
+            "foreign authorized root returns no verified payload"
+        );
+        assert!(
+            load_verified_versioned_payload(
+                &f.db,
+                &foreign.storage,
+                f.root.path(),
+                &identity,
+                artifact.binding(),
+                &artifact.header,
+                deadline(),
+            )
+            .await
+            .is_err(),
+            "foreign storage returns no verified payload"
+        );
+        let mut changed_binding = artifact.binding().clone();
+        changed_binding.scope.repo_id = "foreign-repository".into();
+        let mut changed_header = artifact.header.clone();
+        changed_header.binding = changed_binding.clone();
+        assert!(
+            load_verified_versioned_payload(
+                &f.db,
+                &f.storage,
+                f.root.path(),
+                &identity,
+                &changed_binding,
+                &changed_header,
+                deadline(),
+            )
+            .await
+            .is_err(),
+            "foreign scope returns no verified payload"
+        );
+        // Tamper the stored original in a disposable transaction while keeping
+        // its committed header MAC. This negative never substitutes for the
+        // real persist/commit positive above.
+        let txn = db::begin_write_transaction(&f.db).await.unwrap();
+        let mut changed = artifact.bytes().to_vec();
+        let target = changed
+            .windows(b"owned-live-reservation".len())
+            .position(|bytes| bytes == b"owned-live-reservation")
+            .unwrap();
+        changed[target] = b'x';
+        assert_eq!(changed.len(), artifact.bytes().len());
+        MetadataKv::set_with_conn(
+            &txn,
+            MetadataScope::AgentCapturePendingChunk,
+            &f.scope.repo_id,
+            &chunk_key(&artifact.binding().checkpoint_id, 0),
+            &STANDARD.encode(&changed),
+            MetadataValueType::Binary,
+        )
+        .await
+        .unwrap();
+        assert!(
+            load_verified_versioned_payload(
+                &txn,
+                &f.storage,
+                f.root.path(),
+                &identity,
+                artifact.binding(),
+                &artifact.header,
+                deadline(),
+            )
+            .await
+            .is_err()
+        );
+        txn.rollback().await.unwrap();
+        assert_eq!(cov2_22_persisted_state(&f).await, before);
+        let (absent_bytes, absent_mac, absent_candidate) =
+            cov2_25_absent_source_codec_fixture(&f, &artifact).await;
+        let absent_token = cov2_25_authenticate_candidate(
+            &f,
+            &absent_bytes,
+            &absent_mac,
+            &absent_candidate.binding,
+            &absent_candidate,
+            f.root.path(),
+        )
+        .await
+        .expect("codec absence still permits the existing integrity-only sentinel");
+        cov2_25_assert_token_has_five_original_digests(
+            &absent_token,
+            &absent_bytes,
+            Some(artifact.bytes()),
+        );
+        let mut absent_header = artifact.header.clone();
+        absent_header.mac = absent_mac;
+        absent_header.envelope_bytes = absent_bytes.len();
+        absent_header.chunks = absent_bytes.len().div_ceil(CHUNK_BYTES);
+        let txn = db::begin_write_transaction(&f.db).await.unwrap();
+        MetadataKv::set_with_conn(
+            &txn,
+            MetadataScope::AgentCapturePendingChunk,
+            &f.scope.repo_id,
+            &chunk_key(&artifact.binding().checkpoint_id, 0),
+            &STANDARD.encode(&absent_bytes),
+            MetadataValueType::Binary,
+        )
+        .await
+        .unwrap();
+        let error = load_verified_versioned_payload(
+            &txn,
+            &f.storage,
+            f.root.path(),
+            &identity,
+            artifact.binding(),
+            &absent_header,
+            deadline(),
+        )
+        .await
+        .err()
+        .expect("native loader must reject codec-only absent source");
+        assert!(
+            error
+                .to_string()
+                .contains("requires retained source evidence")
+        );
+        txn.rollback().await.unwrap();
+        assert_eq!(cov2_22_persisted_state(&f).await, before);
+        cov2_22_assert_no_ack(&f.db).await;
+        let (payload, coverage, reasoning, header, context) = verified.into_replay_parts();
+        assert!(payload.is_exact_complete_snapshot());
+        assert_eq!(coverage.claims().count(), 2);
+        assert_eq!(reasoning.original_envelope(), artifact.bytes());
+        assert_eq!(header.mac, artifact.header.mac);
+        assert_eq!(context.session_id(), PK);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cov2_real_v2_artifact_rejects_all_v1_plan() {
+        let (f, mut artifact) = cov2_22_real_artifact().await;
+        // The real native source factory correctly rejects an all-v1 plan.
+        // This test-only adversarial mutation starts from a real sealed mixed
+        // artifact and bypasses that source gate solely to exercise persist's
+        // independent pre-SQL all-v1 defense. It is not a valid native producer
+        // or a Source A positive, even though its canonical outer MAC is valid.
+        let mut envelope: VersionedPendingEnvelope =
+            serde_json::from_slice(artifact.bytes()).unwrap();
+        let association = &mut envelope.payload.identity_commit_associations[1];
+        assert_eq!(association.coverage_schema_version, 2);
+        association.coverage_schema_version = 1;
+        for mac in [&mut association.slot, &mut association.descriptor_mac] {
+            let suffix = mac
+                .strip_prefix("reasoning-identity/hmac-v2/")
+                .expect("the original second identity uses the v2 syntax domain");
+            *mac = format!("reasoning-identity/hmac-v1/{suffix}");
+        }
+        envelope.coverage.claims[1].coverage_schema_version = 1;
+        artifact.coverage_claims[1].coverage_schema_version = CoverageSchemaVersion::V1;
+        artifact.bytes =
+            encode_versioned_envelope(envelope.binding, envelope.payload, envelope.coverage)
+                .unwrap();
+        artifact.header.envelope_bytes = artifact.bytes.len();
+        artifact.header.chunks = artifact.bytes.len().div_ceil(CHUNK_BYTES);
+        artifact.header.mac = f
+            .scope
+            .sign_pending_envelope_until(
+                &f.db,
+                &f.storage,
+                f.root.path(),
+                &artifact.bytes,
+                deadline(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            artifact
+                .coverage_claims
+                .iter()
+                .all(|entry| entry.coverage_schema_version == CoverageSchemaVersion::V1)
+        );
+        let before = cov2_22_persisted_state(&f).await;
+        let txn = db::begin_write_transaction(&f.db).await.unwrap();
+        // Missing tables make even the writer-lock statement or claim verify
+        // observable as DbErr, so only the pure persist guard can succeed.
+        txn.execute_unprepared("DROP TABLE metadata_kv")
+            .await
+            .unwrap();
+        txn.execute_unprepared("DROP TABLE agent_coverage_claim")
+            .await
+            .unwrap();
+        let error = artifact.persist(&txn, deadline()).await.unwrap_err();
+        assert!(error.to_string().contains("requires a sealed v2 claim"));
+        assert!(!error.chain().any(|cause| cause.is::<sea_orm::DbErr>()));
+        txn.rollback().await.unwrap();
+        assert_eq!(cov2_22_persisted_state(&f).await, before);
+        cov2_22_assert_retained(&f.db, 0).await;
+        cov2_22_assert_no_ack(&f.db).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cov2_real_v2_artifact_later_sql_fault_rolls_back() {
+        for scope in [
+            "agent_capture_pending_chunk",
+            "agent_capture_pending",
+            "agent_capture_session_alias",
+        ] {
+            let (f, artifact) = cov2_22_real_artifact().await;
+            let before = cov2_22_persisted_state(&f).await;
+            f.db.execute_unprepared(&format!(
+                "CREATE TRIGGER cov2_22_late_fault BEFORE INSERT ON metadata_kv
+                 WHEN NEW.scope = '{scope}' AND
+                 (SELECT COUNT(*) FROM agent_coverage_claim WHERE session_id = 'claude__native-session'
+                    AND lease_expires_at = 9223372036854775807) = 2
+                 BEGIN SELECT RAISE(ABORT, 'synthetic later artifact writer fault'); END"
+            )).await.unwrap();
+            let txn = db::begin_write_transaction(&f.db).await.unwrap();
+            let error = artifact.persist(&txn, deadline()).await.unwrap_err();
+            assert!(error.chain().any(|cause| cause.is::<sea_orm::DbErr>()));
+            cov2_22_assert_retained(&txn, 2).await;
+            // The fault must occur at the selected writer stage, after both
+            // retentions; later stage tests observe the earlier real writes.
+            let expected_chunks = i64::from(scope != "agent_capture_pending_chunk");
+            let expected_header = i64::from(scope == "agent_capture_session_alias");
+            assert_eq!(
+                cov2_22_scope_count(&txn, &f, MetadataScope::AgentCapturePendingChunk).await,
+                expected_chunks
+            );
+            assert_eq!(
+                cov2_22_scope_count(&txn, &f, MetadataScope::AgentCapturePending).await,
+                expected_header
+            );
+            assert_eq!(
+                cov2_22_scope_count(&txn, &f, MetadataScope::AgentCaptureSessionAlias).await,
+                0
+            );
+            cov2_22_assert_no_ack(&txn).await;
+            txn.rollback().await.unwrap();
+            assert_eq!(
+                cov2_22_persisted_state(&f).await,
+                before,
+                "{scope} rollback must restore every row/ref"
+            );
+            cov2_22_assert_retained(&f.db, 0).await;
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cov2_sealed_native_same_key_persist_defense_fails_closed() {
+        let (f, mut artifact) = cov2_22_real_artifact().await;
+        // Test-only adversarial construction bypasses the normal COV2-23
+        // source borrow rejection solely to reach persistence's second guard.
+        let mut envelope: VersionedPendingEnvelope =
+            serde_json::from_slice(artifact.bytes()).unwrap();
+        envelope.payload.identity_commit_associations[1].logical_turn_key =
+            "synthetic-turn-0".into();
+        envelope.coverage.claims[1].logical_turn_key = "synthetic-turn-0".into();
+        artifact.coverage_claims[1].claim.logical_turn_key = "synthetic-turn-0".into();
+        envelope.validate().unwrap();
+        artifact.bytes =
+            encode_versioned_envelope(envelope.binding, envelope.payload, envelope.coverage)
+                .unwrap();
+        artifact.header.envelope_bytes = artifact.bytes.len();
+        artifact.header.chunks = artifact.bytes.len().div_ceil(CHUNK_BYTES);
+        artifact.header.mac = f
+            .scope
+            .sign_pending_envelope_until(
+                &f.db,
+                &f.storage,
+                f.root.path(),
+                &artifact.bytes,
+                deadline(),
+            )
+            .await
+            .unwrap();
+        let before = cov2_22_persisted_state(&f).await;
+        let txn = db::begin_write_transaction(&f.db).await.unwrap();
+        // If persistence touches its first writer-lock statement, verify or
+        // retain before the pure guard, these missing tables produce DbErr.
+        // Rollback restores the test's DDL as well as any caller mutations.
+        txn.execute_unprepared("DROP TABLE metadata_kv")
+            .await
+            .unwrap();
+        txn.execute_unprepared("DROP TABLE agent_coverage_claim")
+            .await
+            .unwrap();
+        let error = artifact.persist(&txn, deadline()).await.unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("cannot persist cross-version turn aliases yet")
+        );
+        assert!(!error.chain().any(|cause| cause.is::<sea_orm::DbErr>()));
+        txn.rollback().await.unwrap();
+        assert_eq!(cov2_22_persisted_state(&f).await, before);
+        cov2_22_assert_retained(&f.db, 0).await;
+        cov2_22_assert_no_ack(&f.db).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cov2_v1_pending_persisted_bytes_and_mac_frozen() {
+        // Frozen only after the complete 7efcf868d49a5183e7f0851a89abebee91357155
+        // v1 production writer actually sealed, persisted, committed and loaded
+        // these raw storage rows under its original locked dependencies. Only
+        // cfg(test) sampling was added to that independent historical tree.
+        // Reference receipt SHA256: 1bb278f923d0f5e3ab83a1deba498b056218553cd12878eac676f0f39a18ed11.
+        // Original envelope SHA256: bf87589384983e2ad5ae74f3773f8459c9a20c56e4736775eb3129fe52a005ef.
+        // Public synthetic key bytes 0..31; never derive expected bytes/MACs
+        // from the current serializer, loader, signer or roundtrip. This is
+        // historical-source compatibility evidence, not a released binary or
+        // real provider-native Source A. Rejected Python-only KATs stay in the
+        // private failure record and are not accepted reference artifacts.
+        const HISTORICAL_SOURCE_7EFCF_BYTES: &[u8] = br#"{"version":1,"binding":{"scope":{"repo_id":"opaque-repository","worktree_id":"","workspace_id":null,"workspace_fence":null},"session_id":"00000000-0000-4000-8000-000000000001","checkpoint_id":"00000000-0000-4000-8000-000000000002","event_id":"00000000-0000-4000-8000-000000000003","action_key":"action-1","receipt_key":"receipt-1","marker_generation":"generation-1","source_commitment":"source/hmac-v2/66ec8ea49c85476434b3dda0ca28738cc02e3d82b1cc9573413ee423e44a088e","reserved_revision":1,"original_deadline_millis":null,"deferrable":false,"first_attempt_millis":1,"parent_commit":null,"parent_unborn":true},"payload":{"version":1,"alias":"00000000-0000-4000-8000-000000000001","snapshot":{"completeness":"complete","partial_reason":null,"source":{"kind":"trusted_export","identity":"not_retained:v1","digest_sha256":"source/hmac-v2/66ec8ea49c85476434b3dda0ca28738cc02e3d82b1cc9573413ee423e44a088e","byte_len":1},"transcript_redacted_bytes":1,"redaction_match_count":0,"redaction_bytes_scanned":1,"redaction_bytes_redacted":0},"transcript":"eA==","metadata":{"agent_kind":"claude_code","checkpoint_id":"00000000-0000-4000-8000-000000000002","created_at":1,"extraction":{},"model":{},"redaction_report":{"bytes_redacted":0,"bytes_scanned":1,"matches":[]},"schema_version":2,"scope":"committed"},"lifecycle":[{"agent_kind":"claude_code","event_id":"00000000-0000-4000-8000-000000000003","identity_scheme":"native_replay_hmac_v2","kind":"session_end","partial":false,"provenance":{},"schema_version":2,"source":null,"timestamp":"1970-01-01T00:00:01Z"}],"redaction_report":"eyJieXRlc19yZWRhY3RlZCI6MCwiYnl0ZXNfc2Nhbm5lZCI6MSwibWF0Y2hlcyI6W119","metadata_mac":"pending-envelope/hmac-v1/ab0bd2a456d062e3c0f91e4b8d3be1814c9ff26482680fc17e89c3bc9ca18be0","lifecycle_mac":"pending-envelope/hmac-v1/ec60fa7223a85b8c464869fb91467a11c0fa44cc8040eed5e9e53aed284d6aec"},"coverage":{"owner":"owned-live-reservation","created_at":1,"claims":[{"logical_turn_key":"turn-1","coverage_digest":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","completeness":"complete","fence_token":1,"next_revision":1}]}}"#;
+        const HISTORICAL_SOURCE_7EFCF_HEADER: &str = r#"{"version":1,"binding":{"scope":{"repo_id":"opaque-repository","worktree_id":"","workspace_id":null,"workspace_fence":null},"session_id":"00000000-0000-4000-8000-000000000001","checkpoint_id":"00000000-0000-4000-8000-000000000002","event_id":"00000000-0000-4000-8000-000000000003","action_key":"action-1","receipt_key":"receipt-1","marker_generation":"generation-1","source_commitment":"source/hmac-v2/66ec8ea49c85476434b3dda0ca28738cc02e3d82b1cc9573413ee423e44a088e","reserved_revision":1,"original_deadline_millis":null,"deferrable":false,"first_attempt_millis":1,"parent_commit":null,"parent_unborn":true},"mac":"pending-envelope/hmac-v1/70f5d7b8cb511d2ea2d9f964b44ba3a404be80f9e6467f22c7e873f093367c8a","envelope_bytes":2104,"chunks":1,"manual_attempted":false}"#;
+        const HISTORICAL_SOURCE_7EFCF_MAC: &str = "pending-envelope/hmac-v1/70f5d7b8cb511d2ea2d9f964b44ba3a404be80f9e6467f22c7e873f093367c8a";
+        const HISTORICAL_SOURCE_7EFCF_ALIAS: &str = r#"{"body":{"version":1,"alias":"00000000-0000-4000-8000-000000000001","session_id":"claude__native-session","repo_id":"opaque-repository","worktree_id":"","workspace_id":null,"capture_incarnation":null},"mac":"pending-alias/hmac-v1/091353a81935e0694b52f4cf99250b7f44ef857b35bd709bdfa4eadfcc28cc87"}"#;
+        const HISTORICAL_SOURCE_7EFCF_METADATA: &[u8] = br#"{
+  "agent_kind": "claude_code",
+  "checkpoint_id": "00000000-0000-4000-8000-000000000002",
+  "created_at": 1,
+  "extraction": {},
+  "model": {},
+  "provider_session_id": "native-session",
+  "redaction_report": {
+    "bytes_redacted": 0,
+    "bytes_scanned": 1,
+    "matches": []
+  },
+  "schema_version": 2,
+  "scope": "committed",
+  "session_id": "claude__native-session",
+  "working_dir": "/frozen/workspace"
+}"#;
+        const HISTORICAL_SOURCE_7EFCF_LIFECYCLE: &[u8] = br#"{"agent_kind":"claude_code","event_id":"00000000-0000-4000-8000-000000000003","identity_scheme":"native_replay_hmac_v2","kind":"session_end","partial":false,"provenance":{},"provider_session_id":"native-session","schema_version":2,"session_id":"claude__native-session","source":null,"timestamp":"1970-01-01T00:00:01Z"}
+"#;
+        const HISTORICAL_SOURCE_7EFCF_REPORT: &[u8] =
+            br#"{"bytes_redacted":0,"bytes_scanned":1,"matches":[]}"#;
+        let f = Fixture::new().await;
+        let fixed_key: [u8; 32] = std::array::from_fn(|index| index as u8);
+        std::fs::write(
+            f.storage.join("private/agent-capture-dedup-v1.key"),
+            fixed_key,
+        )
+        .unwrap();
+        f.db.execute_unprepared("UPDATE agent_session SET working_dir = '/frozen/workspace' WHERE session_id = 'claude__native-session'").await.unwrap();
+        let txn = db::begin_write_transaction(&f.db).await.unwrap();
+        let context = resolve_pending_session_context(&txn, &f.scope, PK)
+            .await
+            .unwrap();
+        txn.commit().await.unwrap();
+        // Verify the actual historical committed alias record; its original
+        // MAC is consumed unchanged, never produced by the current test signer.
+        let record: PendingSessionAlias =
+            serde_json::from_str(HISTORICAL_SOURCE_7EFCF_ALIAS).unwrap();
+        let identity = PendingSessionAlias::prepare(
+            &f.db,
+            &context,
+            Some(record),
+            &f.storage,
+            f.root.path(),
+            deadline(),
+        )
+        .await
+        .unwrap();
+        let bytes = b"x".to_vec();
+        let auth = ExportAuthorized::issue("claude_code", NATIVE, &bytes);
+        let mut snapshot = CaptureSnapshotService::capture_authorized(
+            TranscriptSource::Bytes { bytes, auth },
+            "claude_code",
+            NATIVE,
+            Default::default(),
+        );
+        let source = key::derive_snapshot_content_commitment_in_scope_until(
+            &f.db,
+            &f.scope,
+            &f.storage,
+            f.root.path(),
+            &snapshot.redacted_digest_preimage().unwrap(),
+            deadline(),
+        )
+        .await
+        .unwrap();
+        assert!(snapshot.bind_source_commitment(source.clone()));
+        let mut bound = binding(
+            identity.alias(),
+            Uuid::parse_str("00000000-0000-4000-8000-000000000002").unwrap(),
+            Uuid::parse_str("00000000-0000-4000-8000-000000000003").unwrap(),
+            &f.scope,
+            source,
+        );
+        bound.original_deadline_millis = None;
+        bound.deferrable = false;
+        bound.parent_commit = None;
+        bound.parent_unborn = true;
+        let report = serde_json::to_value(snapshot.redaction_report()).unwrap();
+        let metadata = serde_json::json!({
+            "schema_version":2,"checkpoint_id":bound.checkpoint_id,"session_id":PK,"provider_session_id":NATIVE,
+            "working_dir":"/frozen/workspace","agent_kind":"claude_code","scope":"committed",
+            "model":{},"created_at":1,"redaction_report":report,"extraction":{},
+        });
+        let event = serde_json::json!({
+            "schema_version":2,"event_id":bound.event_id,"identity_scheme":"native_replay_hmac_v2",
+            "kind":"session_end","agent_kind":"claude_code","timestamp":"1970-01-01T00:00:01Z",
+            "source":null,"partial":false,"provenance":{},"session_id":PK,"provider_session_id":NATIVE,
+        });
+        let mut lifecycle = serde_json::to_vec(&event).unwrap();
+        lifecycle.push(b'\n');
+        let payload = CheckpointRedactedPayload::from_snapshot(
+            snapshot,
+            redact(&serde_json::to_vec_pretty(&metadata).unwrap()),
+            redact(&lifecycle),
+            redact(&serde_json::to_vec(&report).unwrap()),
+        )
+        .unwrap();
+        let coverage = LiveClaimCommitPlan {
+            source_channel: "live",
+            session_id: PK.into(),
+            checkpoint_id: bound.checkpoint_id.clone(),
+            owner: "owned-live-reservation".into(),
+            parent_commit: None,
+            created_at: 1,
+            now_ms: 1,
+            claims: vec![ReservedTurnClaim {
+                logical_turn_key: "turn-1".into(),
+                coverage_digest: "d".repeat(64),
+                completeness: Completeness::Complete,
+                fence_token: 1,
+                next_revision: 1,
+            }],
+            import_session: None,
+            import_identity: None,
+            capture_scope: Some(f.scope.clone()),
+        };
+        #[derive(Deserialize)]
+        struct OriginalGoldMembers<'a> {
+            #[serde(borrow)]
+            payload: &'a RawValue,
+            #[serde(borrow)]
+            coverage: &'a RawValue,
+        }
+        let gold: OriginalGoldMembers<'_> =
+            serde_json::from_slice(HISTORICAL_SOURCE_7EFCF_BYTES).unwrap();
+        let old_projection = frozen_pre_v2::PendingPayloadProjection::seal(
+            &f.db,
+            &f.storage,
+            f.root.path(),
+            &payload,
+            &identity,
+            deadline(),
+        )
+        .await
+        .expect("execute the immutable pre-v2 inner producer");
+        assert_eq!(
+            old_projection.encode().unwrap(),
+            gold.payload.get().as_bytes()
+        );
+        let old_coverage =
+            frozen_pre_v2::PortablePendingCoverage::from_live(&coverage, &identity).unwrap();
+        assert_eq!(
+            serde_json::to_vec(&old_coverage).unwrap(),
+            gold.coverage.get().as_bytes()
+        );
+        let expected_sidecars = [
+            HISTORICAL_SOURCE_7EFCF_METADATA,
+            HISTORICAL_SOURCE_7EFCF_LIFECYCLE,
+            HISTORICAL_SOURCE_7EFCF_REPORT,
+        ];
+        assert_eq!(payload.metadata_json().bytes(), expected_sidecars[0]);
+        assert_eq!(
+            payload.lifecycle_events_jsonl().bytes(),
+            expected_sidecars[1]
+        );
+        assert_eq!(
+            payload.redaction_report_json().bytes(),
+            expected_sidecars[2]
+        );
+        let artifact = SealedPendingArtifact::seal(
+            &f.db,
+            &f.storage,
+            f.root.path(),
+            PendingSealRequest {
+                binding: bound,
+                identity,
+                payload: &payload,
+                coverage: &coverage,
+                reasoning: None,
+            },
+            deadline(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(artifact.bytes.as_slice(), HISTORICAL_SOURCE_7EFCF_BYTES);
+        assert_eq!(artifact.header.mac, HISTORICAL_SOURCE_7EFCF_MAC);
+        assert_eq!(
+            serde_json::to_string(&artifact.header).unwrap(),
+            HISTORICAL_SOURCE_7EFCF_HEADER
+        );
+        f.persist(&artifact).await;
+        let stored = MetadataKv::get_with_conn(
+            &f.db,
+            MetadataScope::AgentCapturePending,
+            &f.scope.repo_id,
+            &artifact.binding().checkpoint_id,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(stored.value_type, "text");
+        assert_eq!(
+            stored.value.as_bytes(),
+            HISTORICAL_SOURCE_7EFCF_HEADER.as_bytes()
+        );
+        let range = chunk_range(&artifact.binding().checkpoint_id);
+        let chunks = MetadataKv::list_bounded_with_conn(
+            &f.db,
+            &[MetadataScope::AgentCapturePendingChunk],
+            Some(&f.scope.repo_id),
+            Some((&range.0, &range.1)),
+            MAX_CHUNKS as u64 + 1,
+            CHUNK_TEXT_BYTES,
+        )
+        .await
+        .unwrap();
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(
+            chunks[0].key,
+            chunk_key(&artifact.binding().checkpoint_id, 0)
+        );
+        assert_eq!(chunks[0].value_type, "binary");
+        assert_eq!(
+            chunks[0].value,
+            STANDARD.encode(HISTORICAL_SOURCE_7EFCF_BYTES)
+        );
+        assert_eq!(
+            STANDARD.decode(&chunks[0].value).unwrap(),
+            HISTORICAL_SOURCE_7EFCF_BYTES
+        );
+        let alias = MetadataKv::get_with_conn(
+            &f.db,
+            MetadataScope::AgentCaptureSessionAlias,
+            &f.scope.repo_id,
+            artifact.identity.alias(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(alias.value_type, "text");
+        assert_eq!(alias.value, HISTORICAL_SOURCE_7EFCF_ALIAS);
+        let header = decode_entry(&stored).unwrap();
+        assert_eq!(
+            load_chunks(&f.db, &header).await.unwrap(),
+            HISTORICAL_SOURCE_7EFCF_BYTES
+        );
+        let bound = artifact.binding().clone();
+        let identity = f.identity(Some(artifact.identity.alias())).await;
+        drop(payload);
+        drop(artifact);
+        let before = cov2_22_persisted_state(&f).await;
+        let loaded = load_verified_payload(
+            &f.db,
+            &f.storage,
+            f.root.path(),
+            &identity,
+            &bound,
+            &header,
+            deadline(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(loaded.payload().transcript().bytes(), b"x");
+        assert_eq!(loaded.header().mac, HISTORICAL_SOURCE_7EFCF_MAC);
+        let old_loaded = frozen_pre_v2::load_verified_payload(
+            &f.db,
+            &f.storage,
+            f.root.path(),
+            &identity,
+            &bound,
+            &header,
+            deadline(),
+        )
+        .await
+        .expect("immutable old reader accepts original committed gold bytes/MAC");
+        for restored in [loaded.payload(), old_loaded.payload()] {
+            assert_eq!(restored.transcript().bytes(), b"x");
+            assert_eq!(restored.metadata_json().bytes(), expected_sidecars[0]);
+            assert_eq!(
+                restored.lifecycle_events_jsonl().bytes(),
+                expected_sidecars[1]
+            );
+            assert_eq!(
+                restored.redaction_report_json().bytes(),
+                expected_sidecars[2]
+            );
+        }
+        for plan in [loaded.coverage(), old_loaded.coverage()] {
+            assert_eq!(plan.claims, coverage.claims);
+            assert_eq!(plan.owner, coverage.owner);
+            assert_eq!(plan.session_id, coverage.session_id);
+            assert_eq!(plan.capture_scope, coverage.capture_scope);
+            assert_eq!(plan.checkpoint_id, coverage.checkpoint_id);
+            assert_eq!(plan.parent_commit, coverage.parent_commit);
+            assert_eq!(plan.created_at, coverage.created_at);
+            assert_eq!(plan.source_channel, "live");
+            assert!(plan.import_identity.is_none() && plan.import_session.is_none());
+        }
+        assert_eq!(cov2_22_persisted_state(&f).await, before);
+        cov2_22_assert_no_ack(&f.db).await;
     }
 
     #[cfg(unix)]

@@ -2882,7 +2882,7 @@ COV2-04 的纯 pending-v2 codec 让 claim 和有序 identity tuple 显式携带 
 
 COV2-24 的私有入口只接收同一个完整 redacted payload、由它派生的封闭 versioned companion、匹配的 capture binding 与 prepared alias，并在入口调用 COV2-23 已审同源借用门。versioned inner projection 按原顺序逐项配对 `(version,logical key)`、slot 与 descriptor MAC，错配即拒绝；随后只用 COV2-04 有界 codec 形成 outer-v2 精确字节，沿原 header-v1 和 pending MAC 域认证。成功只产生内存 artifact，失败与成功均不写 pending/alias/lease/marker/ref，也不发 checkpoint ACK；原 v1 sealer 与字节保持不变。COV2-22 负责同一事务的真实持久化和冻结旧读端，COV2-08 负责 replay；synthetic 验收不能替代 OpenCode Source A，OG-29 前 native 跨版本同裸 key 继续拒绝。
 
-COV2-25 的私有 key-owner verifier 先以既有仓库 key、capture scope、storage 绑定、授权 root 和 deadline 认证原始完整 outer-v2 bytes/MAC，再调用 COV2-04 有界 authenticated decoder。caller 的 binding、`payload.redacted`、可选 source、ordered associations 和 coverage 必须逐字节对应原始 canonical member slice；有序 `(coverage_schema_version, logical_turn_key)` tuple 还须对应同一 decoder 结果。解析结束后再次核 deadline，才颁发本地 `PendingIntegrityToken`；缺 key 拒绝，不创建或替换 key；未知 envelope/payload 字段与重复 JSON key 均拒绝。省略 source 使用 `libra/pending-v2/no-reasoning-source\0` 的域分离摘要，显式 `null` 不算规范省略。生产 seal 的 source-present 合成测试与 codec/key-owner 的 absent-source 合成测试都只证明本地完整性机制。COV2-22 尚须接入真实 durable loader，COV2-08 尚须接入 replay；本入口不授 native proof、不持久化、不发 checkpoint ACK、不证明 OpenCode Source A。v1 成员入口、规范字节和 pending MAC 域不变。
+COV2-25 的私有 key-owner verifier 先以既有仓库 key、capture scope、storage 绑定、授权 root 和 deadline 认证原始完整 outer-v2 bytes/MAC，再调用 COV2-04 有界 authenticated decoder。caller 的 binding、`payload.redacted`、可选 source、ordered associations 和 coverage 必须逐字节对应原始 canonical member slice；有序 `(coverage_schema_version, logical_turn_key)` tuple 还须对应同一 decoder 结果。解析结束后再次核 deadline，才颁发本地 `PendingIntegrityToken`；缺 key 拒绝，不创建或替换 key；未知 envelope/payload 字段与重复 JSON key 均拒绝。省略 source 使用 `libra/pending-v2/no-reasoning-source\0` 的域分离摘要，显式 `null` 不算规范省略。生产 seal 的 source-present 合成测试与 codec/key-owner 的 absent-source 合成测试都只证明本地完整性机制。COV2-22 消费此原始成员入口实现独立 private durable loader，COV2-08 负责后续 replay；尚未接生产 Session。本 key-owner 入口不授 native proof、不持久化、不发 checkpoint ACK、不证明 OpenCode Source A。v1 成员入口、规范字节和 pending MAC 域不变。
 
 ### OpenCode 2.0.29 idle 错误投影
 
@@ -2984,3 +2984,12 @@ fields, complete reasoning, real idle.error failures, automatic terminal
 completion or full-suite acceptance. Real OpenCode Session/account/model checks
 run locally on macOS and stay outside CI. Metadata-only, empty output and skipped
 checks do not count as content acceptance.
+
+
+### coverage-v2 pending 事务与 deferred loader（COV2-22）
+
+封闭 v2 artifact 的 persist 入口在首次 SQLite 动作前核原 canonical bytes、bounds、binding、完整有序 claim 集，重复拒绝 all-v1 计划以及 OG-29 前 native 跨版本同裸 key。随后在同一个 caller-owned writer transaction 内 verify 两版 reservation、retain 两版 lease，再写 bounded chunks、header 与 authenticated alias；任何错误都要求调用方回滚整个事务。幂等重投保留原 chunks、manual/quarantine 状态，artifact 持久化不产生 checkpoint ACK。
+
+独立 loader 从同一已提交 artifact 读取原 bytes/MAC，经 whole-envelope 和 bounded decoder 后，调用 COV2-25 key-owner 验原 binding、nested redacted member、source、ordered associations 和 coverage；payload owner 再验该 nested member 的精确字节并重建、认证 sidecar。native pending loader 要求 source-present，pure codec 的 None-source sentinel 不能变成此入口的权限。最终重建及 deferred carrier 分配后再次检查 deadline。
+
+非 Clone／非 Serde 的 typed deferred carrier 保留原 bounded bytes/MAC、source DTO、精确有序 version-key associations 与本地 integrity stamp；它不授 NativeProven。COV2-08 才在每次 replay 时重新核原 MAC、当前 catalog/receipt/workspace/claim fences 和 lower fixed proof，并保持 source 附着。此卡未接生产 Session/replay/ACK，v1 canonical wire、MAC 域与 frozen old oracle 不变。纯 Rust fixture/storage 验证与真实 OpenCode Source A 独立，账号/模型采集不进入 CI。

@@ -30,7 +30,10 @@ use crate::internal::{
                 AuthenticatedPendingEnvelope, CheckpointRedactedPayload, PreparedPendingNativeSeal,
                 ReasoningCoveragePlan, ReasoningTurnIdentity,
             },
-            pending::{PendingBinding, VersionedPendingSealMaterial},
+            pending::{
+                PendingBinding, VersionedPendingRehydrateMaterial, VersionedPendingReplayMaterial,
+                VersionedPendingSealMaterial,
+            },
             pending_identity::PreparedPendingAlias,
             snapshot::CaptureSnapshotProjection,
         },
@@ -224,6 +227,38 @@ pub(crate) struct VersionedPendingPayloadProjection {
     pub(crate) identity_commit_associations: Vec<VersionedPendingIdentityAssociation>,
 }
 
+/// Original authenticated outer-v2 bytes retained with their ordered,
+/// explicitly versioned associations. This owns DTOs, not native authority.
+#[allow(dead_code)] // COV2-08 consumes this carrier and freshly reauthenticates it.
+pub(crate) struct VersionedPendingReasoningReplay {
+    original_envelope: Vec<u8>,
+    original_mac: String,
+    source: PendingReasoningSourceDto,
+    associations: Vec<VersionedPendingIdentityAssociation>,
+    integrity: PendingIntegrityStamp,
+}
+
+#[allow(dead_code)] // COV2-08 consumes the typed deferred data.
+impl VersionedPendingReasoningReplay {
+    pub(crate) fn original_envelope(&self) -> &[u8] {
+        &self.original_envelope
+    }
+    pub(crate) fn original_mac(&self) -> &str {
+        &self.original_mac
+    }
+    pub(crate) fn source(&self) -> &PendingReasoningSourceDto {
+        &self.source
+    }
+    pub(crate) fn associations(&self) -> &[VersionedPendingIdentityAssociation] {
+        &self.associations
+    }
+    pub(crate) fn matches_integrity(&self, token: &PendingIntegrityToken) -> bool {
+        token.matches_stamp(&self.integrity)
+            && serde_json::to_vec(&self.associations)
+                .is_ok_and(|encoded| token.matches_associations(&encoded))
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct VersionedPendingIdentityAssociation {
@@ -278,6 +313,105 @@ impl VersionedPendingIdentityAssociation {
 }
 
 impl VersionedPendingPayloadProjection {
+    /// The pending owner supplies a projection bound to its original bytes
+    /// and exact key-owner token. Source DTOs remain deferred and untrusted.
+    #[allow(dead_code)] // COV2-08 wires recovery through the v2 loader.
+    pub(crate) async fn rehydrate_authenticated_deferred<C: ConnectionTrait>(
+        material: VersionedPendingRehydrateMaterial<'_>,
+        conn: &C,
+        storage: &Path,
+        root: &Path,
+        identity: &PreparedPendingAlias,
+        deadline: Instant,
+    ) -> Result<CheckpointRedactedPayload> {
+        let (projection, authentication, integrity) = material.into_parts();
+        projection.validate()?;
+        check_budget(deadline)?;
+        ensure!(
+            projection.reasoning_source.is_some()
+                && projection.redacted.alias == identity.alias()
+                && authentication.scope() == identity.context().scope()
+                && integrity.matches_associations(
+                    &serde_json::to_vec(&projection.identity_commit_associations)
+                        .map_err(|_| failure())?
+                ),
+            REMEDY
+        );
+        #[derive(Deserialize)]
+        struct RawOuter<'a> {
+            version: u8,
+            #[serde(borrow)]
+            payload: &'a RawValue,
+        }
+        #[derive(Deserialize)]
+        struct RawProjection<'a> {
+            #[serde(borrow)]
+            redacted: &'a RawValue,
+        }
+        let outer: RawOuter<'_> =
+            serde_json::from_slice(authentication.bytes()).map_err(|_| failure())?;
+        ensure!(outer.version == 2, REMEDY);
+        let raw: RawProjection<'_> =
+            serde_json::from_str(outer.payload.get()).map_err(|_| failure())?;
+        // Compare only this bounded redacted component; the pending key owner
+        // has already authenticated the full canonical envelope and tuple.
+        struct OriginalMemberWriter<'a> {
+            original: &'a [u8],
+            offset: usize,
+        }
+        impl Write for OriginalMemberWriter<'_> {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                let end = self.offset.checked_add(bytes.len()).ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidData, "capture member length overflow")
+                })?;
+                if self.original.get(self.offset..end) != Some(bytes) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "capture member differs",
+                    ));
+                }
+                self.offset = end;
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut exact = OriginalMemberWriter {
+            original: raw.redacted.get().as_bytes(),
+            offset: 0,
+        };
+        serde_json::to_writer(&mut exact, &projection.redacted).map_err(|_| failure())?;
+        ensure!(exact.offset == exact.original.len(), REMEDY);
+        projection
+            .redacted
+            .rehydrate_authenticated_components(conn, storage, root, identity, deadline)
+            .await
+    }
+
+    #[allow(dead_code)] // COV2-08 consumes the original bytes on every replay attempt.
+    pub(crate) fn into_deferred_reasoning(
+        material: VersionedPendingReplayMaterial,
+    ) -> Result<VersionedPendingReasoningReplay> {
+        let (projection, original_envelope, original_mac, integrity) = material.into_parts();
+        projection.validate()?;
+        ensure!(original_envelope.len() <= MAX_ENVELOPE, REMEDY);
+        ensure!(
+            integrity.matches_associations(
+                &serde_json::to_vec(&projection.identity_commit_associations)
+                    .map_err(|_| failure())?
+            ),
+            REMEDY
+        );
+        Ok(VersionedPendingReasoningReplay {
+            original_envelope,
+            original_mac,
+            source: projection.reasoning_source.ok_or_else(failure)?,
+            associations: projection.identity_commit_associations,
+            integrity: integrity.into_stamp(),
+        })
+    }
+
     #[allow(dead_code)] // COV2-24 connects the checked native seal to this codec.
     pub(crate) fn new_codec(
         redacted: PendingPayloadProjection,
@@ -887,6 +1021,21 @@ impl PendingPayloadProjection {
             REMEDY
         );
         verify_payload_membership(authentication.bytes(), self)?;
+        self.rehydrate_authenticated_components(conn, storage, root, identity, deadline)
+            .await
+    }
+
+    /// Private common byte restoration after the appropriate outer member
+    /// gate. Neither call path restores a native-origin capability.
+    async fn rehydrate_authenticated_components<C: ConnectionTrait>(
+        &self,
+        conn: &C,
+        storage: &Path,
+        root: &Path,
+        identity: &PreparedPendingAlias,
+        deadline: Instant,
+    ) -> Result<CheckpointRedactedPayload> {
+        check_budget(deadline)?;
         let (metadata, lifecycle) = self.rebuild(identity)?;
         for (kind, bytes, mac) in [
             ("metadata", metadata.bytes(), &self.metadata_mac),

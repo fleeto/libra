@@ -1143,6 +1143,20 @@ actual durable artifact failure handling belong to COV2-04/24/22; this
 internal capability does not enable OpenCode Session capture or native
 archival without provider Source A.
 
+### Same-source native pending borrow (COV2-23)
+
+An internal checkpoint entry now prepares a checked borrow from the exact
+sealed `NativeProven` payload and its versioned companion. It verifies the
+current capture binding, complete ordered `(version, logical key)` claims and
+their source-bound identities before returning associations. Empty, oversized
+or orphaned claims fail closed. While pending associations still carry bare
+logical keys, a native key repeated across schema versions is rejected; the
+bounded wire codec may represent the value without granting native writer
+authority. This entry makes no artifact or lease mutation and does not prove
+OpenCode provider Source A. The v1 pending writer and persisted bytes remain
+unchanged; bounded codec, in-memory seal and durable persistence belong to
+COV2-04/24/22.
+
 ### OG-20 private import transport
 
 The authorized descriptor helper can return a native-proven typed collection through an authenticated private import transport response. A one-request key binds request, authorized source, repository scope and collection before the parent restores the complete native proof and partitions owned items by reserved turn. An empty collection retains the previous helper response and source projection bytes; an unauthenticated or unproved collection fails closed without returning candidate bytes to ordinary import. Production provider capabilities and native issuers remain disabled. Source A remains UNPROVEN, and real native field admission is deferred. The transport adds no public option, database schema or decryption capability.

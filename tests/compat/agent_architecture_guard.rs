@@ -10563,9 +10563,16 @@ fn reasoning_pending_restore_has_closed_callers() {
         ),
     ] {
         assert_import_reference_detector_catches_rogue(name);
+        let mut expected = BTreeSet::from([(path.to_owned(), owner.to_owned())]);
+        if name == "from_validated_pending_context" {
+            expected.insert((
+                "src/internal/ai/capture/checkpoint.rs".to_owned(),
+                "prepare_pending_native_versioned_seal".to_owned(),
+            ));
+        }
         assert_eq!(
             import_reasoning_production_references(name),
-            BTreeSet::from([(path.to_owned(), owner.to_owned())]),
+            expected,
             "{name} gained an unreviewed production caller",
         );
     }
@@ -10662,9 +10669,16 @@ fn reasoning_pending_signers_and_native_record_fillers_are_closed() {
             "prepare_current_pending_reasoning_fence",
         ),
     ] {
+        let mut expected = BTreeSet::from([(path.to_owned(), owner.to_owned())]);
+        if name == "from_validated_pending_context" {
+            expected.insert((
+                "src/internal/ai/capture/checkpoint.rs".to_owned(),
+                "prepare_pending_native_versioned_seal".to_owned(),
+            ));
+        }
         assert_eq!(
             import_reasoning_production_references(name),
-            BTreeSet::from([(path.to_owned(), owner.to_owned())]),
+            expected,
             "{name} escaped its private caller set",
         );
     }

@@ -2875,3 +2875,5 @@ COV2-19 将已持有 `NativeProven` 和现有 capture binding 的 payload 接到
 COV2-20 在同一个调用方 SQLite connection／transaction 只读验领 sealed 的版本化 live reservation：逐个 `(version,key)` 查实际 claim 行，精确比较 digest、completeness、owner、fence、previous revision 与 `reserved_live`，仍归原持有人的过期 lease 可以通过。v1/v2 同 logical key 独立，任何 tuple 漂移均拒绝；此步不更新 lease，也不自行开启第二连接。COV2-21 负责 retain，COV2-22 才接真实 pending 持久化；本卡不放行 OpenCode Session 或 native 来源。
 
 COV2-21 在调用方拥有的同一个 `DatabaseTransaction` 中逐版本 UPDATE sealed live reservation 的 lease，再次使用 digest、completeness、state、owner、fence 与 previous revision 围栏；单独过期的 lease 不剥夺仍属原持有人的合法保留。helper 不开第二连接、不自行 commit。第二行陈旧或 SQL 故障可能使第一行仅在未提交事务中已更新，调用方必须整笔 rollback，不得在 Err 后 commit 或发成功 ACK。COV2-04/24/22 才负责有界 codec、同源内存 seal、真实 pending 持久化与 artifact writer 故障验收；此能力不证明真实 Source A。
+
+COV2-23 只从同一个已封闭 `NativeProven` payload 借用 pending batch：入口核当前 capture scope、source tag 和完整版本化 claim 集，按 `(version,logical key)` 的原有顺序取 identity，并拒绝缺失关联、空集或超限。当前 pending association 仍以裸 key 表示，因此 native 两版本共用裸 key 必须在这里 fail closed；纯 wire codec 表达该值不等于给 native writer 授权。此步不生成 MAC、不写 artifact/lease，也不注册 issuer；COV2-04/24/22 分别负责 codec、内存 seal 与真实持久化，真实 Source A 仍待父计划证明。

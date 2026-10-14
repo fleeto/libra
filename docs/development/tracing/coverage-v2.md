@@ -227,3 +227,21 @@ bounded pending payloads, same-source sealing and real artifact persistence;
 COV2-22 must roll back retained leases if a chunk, header or alias writer
 fails. This internal retain seam does not establish provider Source A or permit
 native reasoning archival.
+
+## Same-source native pending borrow (COV2-23)
+
+The internal pending preparation entry borrows `NativeProven` from the same
+sealed checkpoint payload as its versioned companion. It checks the capture
+scope and source binding, then requires the companion's complete canonical
+`(version, logical key, digest, completeness)` claim set before looking up
+identities by `(version, logical key)` in claim order. Empty or over-capacity
+claims fail before allocating associations; an unassociated pending key fails
+closed. Because the current pending association still uses a bare logical key,
+native claims sharing that key across versions are rejected here. This does
+not prohibit the separate versioned wire codec from representing such values.
+
+This is a checked in-memory borrow only. COV2-04 encodes the bounded wire
+format, COV2-24 seals an in-memory artifact from this borrow, and COV2-22
+persists and rolls back real artifact writes. The borrow does not grant native
+issuer authority, establish provider Source A, or enable OpenCode Session
+archival.

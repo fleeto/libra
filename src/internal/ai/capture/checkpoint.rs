@@ -1820,6 +1820,90 @@ impl CheckpointRedactedPayload {
         })
     }
 
+    /// Borrow the versioned identity set from this exact sealed native source.
+    /// The pending projection still uses bare logical keys, so a native key
+    /// shared by two schema versions cannot be represented safely yet.
+    #[cfg_attr(not(all(test, unix)), allow(dead_code))]
+    pub(crate) fn prepare_pending_native_versioned_seal(
+        &self,
+        scope: &CaptureScope,
+        companion: &NativeVersionedReasoningClaimCommitPlan,
+        provider: &str,
+    ) -> Result<PreparedPendingNativeSeal<'_>, CheckpointStoreError> {
+        let ReasoningSourceDisposition::NativeProven(batch) = &self.reasoning else {
+            return Err(CheckpointStoreError::InvalidRequest {
+                field: "pending native v2 source".to_owned(),
+            });
+        };
+        let versioned = companion.versioned();
+        let ordinary = versioned.ordinary();
+        let claim_count = versioned.claims().count();
+        if claim_count == 0 || claim_count > traces::REASONING_ARTIFACT_MAX_ENTRIES {
+            return Err(CheckpointStoreError::InvalidRequest {
+                field: "pending native v2 claim limit".to_owned(),
+            });
+        }
+        if ordinary.capture_scope.as_ref() != Some(scope)
+            || !companion
+                .reasoning()
+                .matches_payload(self, &ordinary.session_id, provider)?
+        {
+            return Err(CheckpointStoreError::InvalidRequest {
+                field: "pending native v2 source binding".to_owned(),
+            });
+        }
+        companion.reasoning().bind_claims(versioned).map_err(|_| {
+            CheckpointStoreError::InvalidRequest {
+                field: "pending native v2 claim binding".to_owned(),
+            }
+        })?;
+
+        // Check every bare key before allocating the association vector. The
+        // old inner projection cannot distinguish (v1,key) from (v2,key).
+        let mut bare_keys = BTreeSet::new();
+        for (_, claim) in versioned.claims() {
+            if !bare_keys.insert(claim.logical_turn_key.as_str()) {
+                return Err(CheckpointStoreError::InvalidRequest {
+                    field: "pending native v2 bare key alias".to_owned(),
+                });
+            }
+        }
+        if batch
+            .pending_logical_turns()
+            .any(|key| !bare_keys.contains(key))
+        {
+            return Err(CheckpointStoreError::InvalidRequest {
+                field: "pending native v2 claim association".to_owned(),
+            });
+        }
+        let associations = versioned
+            .claims()
+            .map(|(version, claim)| {
+                companion
+                    .reasoning()
+                    .turn(version, &claim.logical_turn_key)
+                    .cloned()
+                    .map(|identity| (claim.logical_turn_key.clone(), identity))
+                    .ok_or_else(|| CheckpointStoreError::InvalidRequest {
+                        field: "pending native v2 claim association".to_owned(),
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let binding = VerifiedPendingBinding::from_validated_pending_context(
+            batch,
+            &ordinary.session_id,
+            provider,
+        )
+        .map_err(|_| CheckpointStoreError::InvalidRequest {
+            field: "pending native v2 source binding".to_owned(),
+        })?;
+        Ok(PreparedPendingNativeSeal {
+            batch,
+            binding,
+            associations,
+        })
+    }
+
     pub(crate) fn is_exact_complete_snapshot(&self) -> bool {
         self.provenance == CheckpointPayloadProvenance::ExactSnapshot
             && self.snapshot.completeness
@@ -4233,6 +4317,495 @@ mod tests {
     use sha2::Digest;
 
     use super::*;
+
+    #[cfg(unix)]
+    async fn cov2_pending_native_companion(
+        fixture: &crate::internal::ai::coverage_gate::tests::ReasoningFixture,
+        payload: &CheckpointRedactedPayload,
+        turns: &[NormalizedTurn],
+    ) -> NativeVersionedReasoningClaimCommitPlan {
+        use crate::internal::ai::{
+            coverage_gate::{ReservedTurnClaim, VersionedReservedTurnClaim},
+            observed_agents::reasoning::carrier_test_support as native,
+        };
+
+        let source = prepare_native_versioned_reasoning_coverage_plan(
+            payload,
+            ReasoningIdentityPreparation {
+                conn: &fixture.conn,
+                scope: &fixture.scope,
+                storage_path: &fixture.dir.path().join(crate::utils::util::ROOT_DIR),
+                authorized_root: fixture.dir.path(),
+                session_id: native::CAPTURE,
+                provider: "claude_code",
+                turns,
+                deadline: Instant::now() + Duration::from_secs(30),
+            },
+        )
+        .await
+        .expect("derive the synthetic source-bound identity set");
+        let claims = turns
+            .iter()
+            .map(|turn| {
+                let version = select_coverage_schema(turn);
+                let digest = encode_coverage_turn_for_schema(version.as_i64(), turn)
+                    .expect("encode the synthetic normalized turn")
+                    .digest_hex;
+                VersionedReservedTurnClaim::new(
+                    version.as_i64(),
+                    ReservedTurnClaim {
+                        logical_turn_key: turn.logical_turn_key.clone(),
+                        coverage_digest: digest,
+                        completeness: turn.completeness,
+                        fence_token: 1,
+                        next_revision: 1,
+                    },
+                )
+                .expect("keep a known coverage schema version")
+            })
+            .collect::<Vec<_>>();
+        let ordinary = LiveClaimCommitPlan {
+            source_channel: "live",
+            session_id: native::CAPTURE.to_owned(),
+            checkpoint_id: "pending-native-checkpoint".to_owned(),
+            owner: "pending-native-owner".to_owned(),
+            parent_commit: None,
+            created_at: 1,
+            now_ms: 1,
+            claims: claims.iter().map(|bound| bound.claim.clone()).collect(),
+            import_session: None,
+            import_identity: None,
+            capture_scope: Some(fixture.scope.clone()),
+        };
+        let versioned = VersionedLiveClaimCommitPlan::new(ordinary, &claims)
+            .expect("bind exact synthetic version sidecar");
+        NativeVersionedReasoningClaimCommitPlan::new(versioned, &source)
+            .expect("bind the sealed source and its complete claims")
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cov2_pending_native_versioned_source_borrow_rejects_recombination() {
+        use crate::internal::ai::{
+            coverage_gate::tests::{ReasoningFixture, cov2_native_v2_turn},
+            observed_agents::reasoning::{
+                ReasoningSourceDisposition, carrier_test_support as native,
+            },
+        };
+
+        let fixture = ReasoningFixture::new().await;
+        let payload = reasoning_coverage_test_payload(vec![b"synthetic sealed proof".to_vec()]);
+        let turns = [cov2_native_v2_turn(
+            "synthetic-turn-0",
+            "visible typed test turn",
+            Completeness::Complete,
+        )];
+        let companion = cov2_pending_native_companion(&fixture, &payload, &turns).await;
+        let prepared = payload
+            .prepare_pending_native_versioned_seal(&fixture.scope, &companion, "claude_code")
+            .expect("the exact source may supply a pending native borrow");
+        assert_eq!(prepared.associations.len(), 1);
+        assert_eq!(prepared.associations[0].0, "synthetic-turn-0");
+        assert_eq!(
+            prepared.associations[0].1.slot(),
+            companion
+                .reasoning()
+                .turn(CoverageSchemaVersion::V2, "synthetic-turn-0")
+                .expect("source-derived identity")
+                .slot()
+        );
+        let other = reasoning_coverage_test_payload(vec![b"independent sealed proof".to_vec()]);
+        assert!(
+            prepare_native_versioned_reasoning_coverage_plan(
+                &other,
+                ReasoningIdentityPreparation {
+                    conn: &fixture.conn,
+                    scope: &fixture.scope,
+                    storage_path: &fixture.dir.path().join(crate::utils::util::ROOT_DIR),
+                    authorized_root: fixture.dir.path(),
+                    session_id: native::CAPTURE,
+                    provider: "claude_code",
+                    turns: &turns,
+                    deadline: Instant::now() + Duration::from_secs(30),
+                },
+            )
+            .await
+            .is_ok(),
+            "the second native payload is independently valid"
+        );
+        assert!(
+            other
+                .prepare_pending_native_versioned_seal(&fixture.scope, &companion, "claude_code")
+                .is_err(),
+            "another valid payload cannot borrow the first source tag"
+        );
+        let mut wrong_scope = fixture.scope.clone();
+        wrong_scope.repo_id.push_str("-other");
+        assert!(
+            payload
+                .prepare_pending_native_versioned_seal(&wrong_scope, &companion, "claude_code")
+                .is_err()
+        );
+        assert!(
+            payload
+                .prepare_pending_native_versioned_seal(&fixture.scope, &companion, "codex")
+                .is_err(),
+            "provider drift cannot borrow the original capture proof"
+        );
+        assert!(
+            companion
+                .reasoning()
+                .matches_payload(&payload, "different-session", "claude_code")
+                .is_err(),
+            "the sealed source rejects a changed capture session"
+        );
+        for state in [
+            ReasoningSourceDisposition::Ordinary,
+            ReasoningSourceDisposition::Unproven,
+            ReasoningSourceDisposition::Unmapped,
+            ReasoningSourceDisposition::HelperUnsupported,
+        ] {
+            let mut non_native =
+                reasoning_coverage_test_payload(vec![b"synthetic sealed proof".to_vec()]);
+            non_native.reasoning = state;
+            assert!(
+                non_native
+                    .prepare_pending_native_versioned_seal(
+                        &fixture.scope,
+                        &companion,
+                        "claude_code",
+                    )
+                    .is_err(),
+                "ordinary or partial sources cannot borrow native authority"
+            );
+        }
+        assert_eq!(
+            fixture_row_count(&fixture.conn, "SELECT COUNT(*) AS n FROM agent_checkpoint").await,
+            0,
+            "the prepare-only entry never persists a checkpoint"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cov2_pending_native_versioned_claims_bind_by_version_and_order() {
+        use crate::internal::ai::coverage_gate::{
+            VersionedReservedTurnClaim,
+            tests::{ReasoningFixture, cov2_native_v2_turn, turn},
+        };
+
+        let fixture = ReasoningFixture::new().await;
+        let payload = reasoning_coverage_test_payload_for_native_turns(vec![
+            (0, b"synthetic field zero".to_vec()),
+            (1, b"synthetic field one".to_vec()),
+            (2, b"synthetic field two".to_vec()),
+        ]);
+        // The claim order is deliberately not the source map's key order.
+        let turns = [
+            cov2_native_v2_turn("synthetic-turn-2", "visible two", Completeness::Complete),
+            turn("synthetic-turn-0", "visible zero", Completeness::Complete),
+            cov2_native_v2_turn("synthetic-turn-1", "visible one", Completeness::Complete),
+        ];
+        let companion = cov2_pending_native_companion(&fixture, &payload, &turns).await;
+        let prepared = payload
+            .prepare_pending_native_versioned_seal(&fixture.scope, &companion, "claude_code")
+            .expect("all ordered versioned claims are bound to the sealed source");
+        assert_eq!(prepared.associations.len(), turns.len());
+        assert!(std::ptr::eq(
+            prepared.batch,
+            reasoning_coverage_test_native_batch(&payload)
+        ));
+        for ((key, identity), (version, claim)) in prepared
+            .associations
+            .iter()
+            .zip(companion.versioned().claims())
+        {
+            assert_eq!(key, &claim.logical_turn_key, "preserve claim order");
+            let expected = companion
+                .reasoning()
+                .turn(version, &claim.logical_turn_key)
+                .expect("source-derived versioned identity");
+            assert_eq!(identity.slot(), expected.slot());
+            assert_eq!(identity.kind(), expected.kind());
+            assert_eq!(identity.descriptor_mac(), expected.descriptor_mac());
+        }
+        for proof_key in reasoning_coverage_test_native_batch(&payload).pending_logical_turns() {
+            assert_eq!(
+                prepared
+                    .associations
+                    .iter()
+                    .filter(|(key, _)| key == proof_key)
+                    .count(),
+                1,
+                "each proof-bearing key has exactly one versioned association"
+            );
+        }
+
+        // A malformed source/claim pair cannot pass the predecessor's sealed
+        // companion constructor; the entry above re-runs this same binding.
+        let canonical = companion
+            .versioned()
+            .claims()
+            .map(|(version, claim)| VersionedReservedTurnClaim {
+                coverage_schema_version: version,
+                claim: claim.clone(),
+            })
+            .collect::<Vec<_>>();
+        let make_versioned = |bound: &[VersionedReservedTurnClaim]| {
+            let mut ordinary = companion.versioned().ordinary().clone();
+            ordinary.claims = bound.iter().map(|item| item.claim.clone()).collect();
+            VersionedLiveClaimCommitPlan::new(ordinary, bound)
+                .expect("test mutation keeps its ordinal sidecar aligned")
+        };
+        let mut missing = canonical.clone();
+        missing.pop();
+        let mut extra = canonical.clone();
+        let mut additional = canonical[0].clone();
+        additional.claim.logical_turn_key = "synthetic-turn-extra".to_owned();
+        extra.push(additional);
+        let mut changed_version = canonical.clone();
+        changed_version[0].coverage_schema_version = CoverageSchemaVersion::V1;
+        let mut changed_digest = canonical.clone();
+        changed_digest[0].claim.coverage_digest = "0".repeat(64);
+        let mut changed_completeness = canonical.clone();
+        changed_completeness[0].claim.completeness = Completeness::Incomplete;
+        for changed in [
+            missing,
+            extra,
+            changed_version,
+            changed_digest,
+            changed_completeness,
+        ] {
+            let versioned = make_versioned(&changed);
+            assert!(companion.reasoning().bind_claims(&versioned).is_err());
+            assert!(
+                NativeVersionedReasoningClaimCommitPlan::new(versioned, companion.reasoning())
+                    .is_err(),
+                "a recombined claim set cannot create a pending-ready companion"
+            );
+        }
+        let mut reversed = canonical;
+        reversed.reverse();
+        let reversed_companion = NativeVersionedReasoningClaimCommitPlan::new(
+            make_versioned(&reversed),
+            companion.reasoning(),
+        )
+        .expect("claim order changes no canonical source set");
+        let reversed_prepared = payload
+            .prepare_pending_native_versioned_seal(
+                &fixture.scope,
+                &reversed_companion,
+                "claude_code",
+            )
+            .expect("the reordered sealed companion remains source-bound");
+        assert_eq!(
+            reversed_prepared
+                .associations
+                .iter()
+                .map(|(key, _)| key.as_str())
+                .collect::<Vec<_>>(),
+            reversed
+                .iter()
+                .map(|item| item.claim.logical_turn_key.as_str())
+                .collect::<Vec<_>>(),
+            "the pending borrow must follow the companion's original claim order"
+        );
+        assert_eq!(
+            fixture_row_count(&fixture.conn, "SELECT COUNT(*) AS n FROM agent_checkpoint").await,
+            0,
+            "claim binding and borrowing must not write pending state"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cov2_pending_native_versioned_claim_count_is_bounded() {
+        use crate::internal::ai::coverage_gate::{
+            VersionedReservedTurnClaim,
+            tests::{ReasoningFixture, cov2_native_v2_turn},
+        };
+
+        let fixture = ReasoningFixture::new().await;
+        let payload = reasoning_coverage_test_payload(vec![b"synthetic sealed proof".to_vec()]);
+        let turns = [cov2_native_v2_turn(
+            "synthetic-turn-0",
+            "visible typed turn",
+            Completeness::Complete,
+        )];
+        let companion = cov2_pending_native_companion(&fixture, &payload, &turns).await;
+        assert!(
+            payload
+                .prepare_pending_native_versioned_seal(&fixture.scope, &companion, "claude_code")
+                .is_ok(),
+            "the normal one-claim sealed companion reaches this entry"
+        );
+
+        let mut empty_source = companion.reasoning().clone();
+        empty_source.turns.clear();
+        empty_source.claims.clear();
+        let mut empty_ordinary = companion.versioned().ordinary().clone();
+        empty_ordinary.claims.clear();
+        let empty_versioned = VersionedLiveClaimCommitPlan::new(empty_ordinary, &[])
+            .expect("construct a test-only empty versioned sidecar");
+        let empty_companion =
+            NativeVersionedReasoningClaimCommitPlan::new(empty_versioned, &empty_source)
+                .expect("the predecessor accepts a matching test-only empty source");
+        let empty_error = match payload.prepare_pending_native_versioned_seal(
+            &fixture.scope,
+            &empty_companion,
+            "claude_code",
+        ) {
+            Ok(_) => panic!("empty claims produced a pending native witness"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            empty_error,
+            CheckpointStoreError::InvalidRequest { ref field }
+                if field == "pending native v2 claim limit"
+        ));
+
+        // This same-module test seam deliberately bypasses the COV2-19
+        // factory's 512-entry limit. The source map, identities and claims
+        // stay internally paired so only this pending entry's guard rejects.
+        let mut oversized_source = companion.reasoning().clone();
+        let identity = oversized_source
+            .turn(CoverageSchemaVersion::V2, "synthetic-turn-0")
+            .expect("original source identity")
+            .clone();
+        let mut bound = companion
+            .versioned()
+            .claims()
+            .map(|(version, claim)| VersionedReservedTurnClaim {
+                coverage_schema_version: version,
+                claim: claim.clone(),
+            })
+            .collect::<Vec<_>>();
+        for index in 1..=traces::REASONING_ARTIFACT_MAX_ENTRIES {
+            let key = format!("synthetic-turn-{index}");
+            let mut next = bound[0].clone();
+            next.claim.logical_turn_key = key.clone();
+            oversized_source.turns.insert(
+                (CoverageSchemaVersion::V2.as_i64(), key.clone()),
+                identity.clone(),
+            );
+            oversized_source.claims.insert(
+                (CoverageSchemaVersion::V2.as_i64(), key),
+                (next.claim.coverage_digest.clone(), next.claim.completeness),
+            );
+            bound.push(next);
+        }
+        assert_eq!(bound.len(), traces::REASONING_ARTIFACT_MAX_ENTRIES + 1);
+        assert_eq!(oversized_source.turns.len(), bound.len());
+        assert_eq!(oversized_source.claims.len(), bound.len());
+        let mut oversized_ordinary = companion.versioned().ordinary().clone();
+        oversized_ordinary.claims = bound.iter().map(|item| item.claim.clone()).collect();
+        let oversized_versioned = VersionedLiveClaimCommitPlan::new(oversized_ordinary, &bound)
+            .expect("construct the internally paired 513-claim sidecar");
+        let oversized_companion =
+            NativeVersionedReasoningClaimCommitPlan::new(oversized_versioned, &oversized_source)
+                .expect("the predecessor binding accepts the test-only 513-claim companion");
+        assert!(
+            oversized_companion
+                .reasoning()
+                .matches_payload(
+                    &payload,
+                    companion.versioned().ordinary().session_id.as_str(),
+                    "claude_code"
+                )
+                .expect("compare the same original native source"),
+            "the oversized fixture must remain source-bound"
+        );
+        let oversized_error = match payload.prepare_pending_native_versioned_seal(
+            &fixture.scope,
+            &oversized_companion,
+            "claude_code",
+        ) {
+            Ok(_) => panic!("513 claims produced a pending native witness"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            oversized_error,
+            CheckpointStoreError::InvalidRequest { ref field }
+                if field == "pending native v2 claim limit"
+        ));
+        assert_eq!(
+            fixture_row_count(&fixture.conn, "SELECT COUNT(*) AS n FROM agent_checkpoint").await,
+            0,
+            "both entry-limit failures remain prepare-only"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cov2_pending_native_same_bare_key_fails_closed() {
+        use crate::internal::ai::coverage_gate::tests::{
+            ReasoningFixture, cov2_native_v2_turn, turn,
+        };
+
+        let fixture = ReasoningFixture::new().await;
+        let payload = reasoning_coverage_test_payload_for_native_turns(vec![(
+            0,
+            b"synthetic shared-key field".to_vec(),
+        )]);
+        let same_key_turns = [
+            turn("synthetic-turn-0", "ordinary v1", Completeness::Complete),
+            cov2_native_v2_turn("synthetic-turn-0", "visible v2", Completeness::Complete),
+        ];
+        let companion = cov2_pending_native_companion(&fixture, &payload, &same_key_turns).await;
+        assert_eq!(companion.versioned().claims().count(), 2);
+        assert!(
+            companion
+                .reasoning()
+                .turn(CoverageSchemaVersion::V1, "synthetic-turn-0")
+                .is_some()
+        );
+        assert!(
+            companion
+                .reasoning()
+                .turn(CoverageSchemaVersion::V2, "synthetic-turn-0")
+                .is_some()
+        );
+        let alias_error = match payload.prepare_pending_native_versioned_seal(
+            &fixture.scope,
+            &companion,
+            "claude_code",
+        ) {
+            Ok(_) => panic!("cross-version native bare-key alias produced a pending witness"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            alias_error,
+            CheckpointStoreError::InvalidRequest { ref field }
+                if field == "pending native v2 bare key alias"
+        ));
+
+        let distinct_payload = reasoning_coverage_test_payload_for_native_turns(vec![
+            (0, b"synthetic v1 field".to_vec()),
+            (1, b"synthetic v2 field".to_vec()),
+        ]);
+        let distinct_turns = [
+            turn("synthetic-turn-0", "ordinary v1", Completeness::Complete),
+            cov2_native_v2_turn("synthetic-turn-1", "visible v2", Completeness::Complete),
+        ];
+        let distinct =
+            cov2_pending_native_companion(&fixture, &distinct_payload, &distinct_turns).await;
+        let prepared = distinct_payload
+            .prepare_pending_native_versioned_seal(&fixture.scope, &distinct, "claude_code")
+            .expect("different bare keys can borrow their versioned identities");
+        assert_eq!(
+            prepared
+                .associations
+                .iter()
+                .map(|(key, _)| key.as_str())
+                .collect::<Vec<_>>(),
+            ["synthetic-turn-0", "synthetic-turn-1"]
+        );
+        assert_eq!(
+            fixture_row_count(&fixture.conn, "SELECT COUNT(*) AS n FROM agent_checkpoint").await,
+            0,
+            "the native alias rejection and success path do not write an artifact"
+        );
+    }
 
     #[cfg(unix)]
     #[tokio::test]

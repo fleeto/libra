@@ -1293,6 +1293,7 @@ pub(crate) fn carrier_test_snapshot(
 
 /// Deterministic source seam only: no exporter, CLI, hook or Session runtime.
 #[cfg(test)]
+#[cfg(unix)]
 pub(crate) fn verified_partial_fixture_snapshot(
     capture_session: &str,
     provider_session: &str,

@@ -1,5 +1,11 @@
 # OpenCode coverage schema-v2 前置实施计划（2026-10-13）
 
+> **最新实际源码交接（2026-10-14 18:03:50 UTC）：** live修复已signed main `d8422534b07724349591d53aa445ce50c38453f5` / cf `a80d3ff9d2d194b739da6148dde3297d325f1a7e` 并Push、remote同SHA；source **61/71=85.92%**、formal **55/71=77.46%**，COV source13/26/formal0/26。d842 Windows测试编译FAIL已定位仅Unix fixture cfg遗漏；本次窄前滚的本机门/Claude/签推及新SHA Windows仍待，不影响已安装macOS临时版。下述G09草案仅实际sole-Claude PASS和signed采纳后生效，不预授BASE/049通过。
+
+
+> **当前G09范围修订草案（2026-10-14 17:58:11 UTC，仅实际sole-Claude PASS＋signed main采纳后生效）：** `DEFER-OG29-PARTIAL-IMPORT`把GLM unsupported-state历史import020的helper认证胶囊与direct-only持久化两轴移出本计划和USER-TEMP-REL-049；原FAIL/UNRUN保留且默认拒绝，不记import PASS。BASE仍为8AC/2VER、1生产文件的official29 namespace＋真实自然自动capture/checkpoint/普通export基线。DAG与71卡分母、COV26卡分母不变；本修订不增完成分子，source保持61/71=85.92%、formal55/71=77.46%，COV source13/26=50.00%/formal0/26；BASE及049其它实测门仍待逐项关闭。此前带时间戳的“当前”段落保留为当时历史，涉及historical import为BASE/049硬前驱的旧规范由本G09明确替代，不能倒改旧收据。
+
+
 > **FIX-OG-PARTIAL-LIVE-01 本机验收与临时交付（2026-10-14 17:44:21 UTC）：** 五生产文件的 storage-only ordinary partial live 修复已完成本机 A/B：六项 new exact 各1/1；最终live15/15、architecture58/58、docs31/31、相关reasoning21（1 ignored）/OpenCode32/snapshot26/checkpoint34/pending31及14项既有ER04 exact通过。nightly fmt/diff/strict all-target/all-feature实际0；sole Claude code R1 PASS（0P0/P1、4P2/7P3，raw `16a23ab014a4304487c165f92670d416cf551870b6f4bd555b6515e856a3831e`）及R2 PASS（0P0/P1/newP2，raw `63791e1e9218f05377e0981692f6da94b9e03f6f0cb3f5014668a86b7b0acdf0`）。R1四P2通过终态/escaped-key机制与准确docs收口，旧P3及R2新P3保留，不声称历次零P2。三计划本次最终单审与signed source Push尚待；此前source仍 **60/71=84.51%**，本卡与网站owner实际签推后为 **61/71=85.92%**；formal仍 **55/71=77.46%**。COV2 source13/26=50.00%、formal0/26不变。
 
 
@@ -142,14 +148,14 @@
 
 ## 实施顺序
 
-**DEP-COV2-029-BASE（incoming，父三卡source-qualified shared I–I handoff）：** artifact为FIX-OG-NATIVE-IMPORT-01/OG-IDLE-ERROR-029-01/OG-UPGRADE-029-01最终A/B、单Claude、signed+DCO main/remote与精确源pre/postSHA/mode；owner本对话root。因所有后继Icore相交tracing/COMPAT/三计划，COV2-22开工前先消费BASE源（不等其049 C/D），原25→22边成为25→FIX→IDLE→BASE→22；COV2-05/18的agent_import、06/15/18的opencode_reasoning、11生产调用及其它后继均从该源重基且保留原oracle，不能并行写。网站顺序为FIX→IDLE→BASE→COV2-09→11，仍由DEP-COV2-SITE与parent DEP-OG-029-SITE干净cf owner。当前FIX及IDLE95ab/cfbc58已actual源交接；本G09插入FIX-OG-PARTIAL-LIVE-01后BASE source链，live新门UNRUN，BASE真实owned GLM import020失败未关闭；相关COV后继等完整BASE source-qualified再开工，native3/Source A独立。
+**DEP-COV2-029-BASE（incoming，父ordinary29 source-qualified shared I–I handoff）：** artifact为FIX-OG-NATIVE-IMPORT-01/OG-IDLE-ERROR-029-01/FIX-OG-PARTIAL-LIVE-01/OG-UPGRADE-029-01最终A/B、单Claude、signed+DCO main/remote与精确源pre/postSHA/mode；owner本对话root。BASE按父当前G09只交付official29 namespace＋真实自然自动capture/checkpoint/普通export基线；DEFER-OG29-PARTIAL-IMPORT计划外延期，不授历史unsupported-state import能力，也不作为本DEP/049/COV2前驱。COV2-22仍先消费完整BASE源（不等其049 C/D），严格边25→FIX→IDLE→FIX-OG-PARTIAL-LIVE-01→BASE→22保留；COV2-05/18的agent_import、06/15/18的opencode_reasoning、11生产调用及其它后继均按实际源重基且保留原candidate/privacy/cursor oracle，不能并行写。网站FIX→IDLE→live→BASE→COV2-09→11由原cf owner串行交接。既往GLM import020 FAIL保留、默认拒绝，不由live成功替代；native3/Source A独立。本次范围修订及草案本身不使BASE source-qualified，仍须其全部实际门。
 
 ### 依赖登记表
 
 | ID | direction | 类型 | 对象 | Owner | 产物与可用性判据 | 证据 | 超时与失败策略 |
 |---|---|---|---|---|---|---|---|
 | DEP-COV2-OG26 | incoming | 跨计划 | `plan-20260902.md#OG-26` | OG-26 单写者；COV2-01 只读核验接收 | OG-26 最终 A/B、适用 focused/full、fmt/strict、唯一 Claude PASS；signed+DCO main SHA 与 `reasoning.rs`、`opencode_reasoning.rs`、`snapshot.rs` 及相关路径逐文件 post SHA/mode；共享写集已让出。 | 父计划 OG-26 执行记录及实际 main SHA/hash/mode；COV2-01 首笔写前刷新 | 任一缺口则 COV2-01 保持 pending，只可只读准备；当日交接无法证明即停止该卡，不覆盖 OG-26 修改。 |
-| DEP-COV2-029-BASE | incoming | 跨计划shared I–I source handoff | 父FIX/IDLE/新live/BASE最终source链 | 本对话root | BASE source-qualified signed main前消费新live五源；COV22/05/06/11/15/18及其它相交Icore重基，网站同parent serial | IDLE95ab/cfbc58 actual signed/remote同SHA；新live UNRUN，BASE实际import020不假clean；pending/native/SourceA门不改 | 后继pending，不并发写，不豁免Source A/COV family |
+| DEP-COV2-029-BASE | incoming | 跨计划shared I–I source handoff | 父FIX/IDLE/新live/BASE最终source链 | 本对话root | BASE source-qualified signed main前消费新live五源；COV22/05/06/11/15/18及其它相交Icore重基，网站同parent serial | IDLE95ab/cfbc58 actual signed/remote同SHA；live按实际signed交接；BASE自动捕获基线待自身验收，import020原FAIL归DEFER-OG29-PARTIAL-IMPORT；pending/native/SourceA门不改 | 后继仍等BASE source-qualified；DEFER不设前驱，不并发写，不豁免Source A/COV family或import隐私门 |
 | DEP-COV2-SITE | incoming | 外部仓库 | libra-backend `origin/cf` 的 `apps/tanstack-app/content/docs/commands/agent.en.md` | 经仓库 VCS 核实的独立 `cf` owner；09/11 互斥 | 记录远端 cf pre-SHA、干净隔离 checkout 根、目标页 pre-hash/mode；同卡 typecheck/build、签名+DCO 推送，发布点另核部署/HTTP。现有原 checkout 落后31且页已脏，不可覆盖。 | 隔离 owner 的 VCS/status/pre-hash 与 build/推送/部署收据，开工时刷新 | 无干净 owner 则 COV2-09 保持 pending 并停止依赖链；绝不以 locally-accepted 假过，同日无法交接即登记 blocked；发布 D 不得声称网站已部署。 |
 | DEP-COV2-MODEL | incoming | 本机外部模型 | 用户已配置的 OpenCode Anthropic 可读响应路径（非 native 来源证明） | COV2-17 macOS 本机执行者 | 最终行为源码上观察 genuine visible-only 响应，必须由已审 classifier 证实该样本无 state/proof-bearing 候选；记录无敏字段名、JSON 类型/数量、版本与 keyed digest；如实际返回 `signature`/`originProof`，该样本不算 visible-only 正例。不登记 issuer、不触发 live mint、不把它当 Source A。 | 本机 sanitized 1/1 观察记录、实际 build/model/plugin/transport ID、最终源码 SHA；不得记录正文/密钥 | 每个不同最终行为源码 SHA 最多一次本机尝试、10 分钟；COV2-REL bumped SHA 的复测另计一次。无样本或模型失败则 COV2-17/REL 保持 blocked，明确 UNRUN，不用 synthetic 代替。 |
 | DEP-COV2-OG27 | outgoing | 跨计划 | `plan-20260902.md#OG-27` / `DEP-OG-13` | 父计划 OG-27 接收者 | COV2-17 在全部22例本机非 skip PASS 且23张 implementation 源卡签名 main 交接后仅登记 `source-ready`，只允许隔离准备；COV2-REL-01 stable patch、四平台、安全 CI、站点/安装 C/D 全绿后才登记 `complete` 并许可 OG-27 main Push。接收者不重做 coverage-v2 家族实现，仍独立证明 `DEP-OG-12` Source A。 | 新计划 COV2-17/COV2-REL-01 报告、release run/manifest/site/install SHA/UTC；OG-27 开工时刷新 | 若接收者下一工作日未接手或门未绿，本计划保持 complete/source-ready 事实、父计划 OG-27 blocked；不替接收者做 native 注册、不以 synthetic 或旧版拒绝充当 GO。 |
@@ -162,7 +168,7 @@
 
 | ID | 成员 | 唯一发布点 | 窗口规则 | 失败回滚顺序 | 理由 |
 |---|---|---|---|---|---|
-| REL-OG-TEMP-049（用户授权临时操作，不新增Task） | COV25→FIX→IDLE→FIX-OG-PARTIAL-LIVE-01→BASE，latest upstream归最终树 | 三卡same-card文档/website，COV25保留家族C-D | 唯一root R/USER-TEMP-REL-049；final-source/full含新live，BASE真实import当前未闭；actualCI/8jobs/4平台/安装/网站全部保留 | BASE→live→IDLE→FIX→COV25逆序前滚；不complete COV family/DEP13 |
+| REL-OG-TEMP-049（用户授权临时操作，不新增Task） | COV25→FIX→IDLE→FIX-OG-PARTIAL-LIVE-01→BASE，latest upstream归最终树 | 三卡same-card文档/website，COV25保留家族C-D | 唯一root R/USER-TEMP-REL-049；final-source/full含新live，BASE自动捕获基线须实际验收；排除DEFER-OG29-PARTIAL-IMPORT，原020仍FAIL；actualCI/8jobs/4平台/安装/网站全部保留 | BASE→live→IDLE→FIX→COV25逆序前滚；不complete COV family/DEP13 |
 | REL-COV2-01 | `COV2-01→13→02→07→14→03→19→20→21→23→04→24→25→22→08→05→09→06→10→11→12→15→18→16→17`；23 implementation + 2 no-release audit | COV2-REL-01，家族内仅此卡写 R；USER-TEMP-REL-049 独立例外见下文 | OG-26 签名交接后开窗；每张子卡本机 A/B、Claude PASS、signed+DCO main Push，但不 bump/tag/release；除下方 USER-TEMP-REL-049 明确授权例外外，不得让其它计划在半成品 COV2 main 上发布稳定版。COV2-11 前无生产入口可激活 v2 writer，并以静态/运行时守卫证明。冻结/bump/tag 时禁止其它 COV2/OG-27 源码及 R 写入；若其它发布无法停，先证明其中不携带可触达的半成品 v2，否则 COV2 链暂停。 | `17→16→18→15→12→11→10→06→09→05→08→22→25→24→04→23→21→20→19→03→14→07→02→13→01` 逆序定位受影响 owner，签名前滚，重跑下游门并重新冻结；已发版 tag/asset 不改写，只出新 patch。 | schema/reader/持久化不能分开用户可见发布；G-08 唯一版本点。 |
 
 ### 用户明确授权的临时 0.30.49 发布窗口
@@ -2239,6 +2245,8 @@ IDLE实际唯一Claude PASS（0P0/P1/P2/5P3），raw SHA256 `829c06700313d1740cc
 
 **实施/DEP/G10新串行边：** `COV2-25→FIX-OG-NATIVE-IMPORT-01→OG-IDLE-ERROR-029-01→FIX-OG-PARTIAL-LIVE-01→OG-UPGRADE-029-01→COV2-22→COV2-08`。新卡先消费actualIDLE postimages，后BASE及所有相交COV Icore按 `DEP-OG-029-COV-REBASING` / `DEP-COV2-029-BASE` 从该五源保留修复、逐路径hash/mode重新交接。新卡不需要BASE或native3作为前驱。网站同owner `FIX→IDLE→FIX-OG-PARTIAL-LIVE-01→BASE→COV2-09→11`；root从actual cfbc58单页preimage串行写，不覆盖原dirty checkout。
 
+> **历史规范：** 下段保留原结论；其historical import作为BASE/049前驱的部分，由2026-10-14 17:58:11 UTC G09显式替代，原020失败未改为PASS。
+
 **REL-OG-TEMP-049新增精确成员与反序：** USER-TEMP-REL-049仍是唯一临时正式release操作，不新增release Task；当前精确成员含最新upstream cat-file、COV25及FIX/IDLE/本live卡/BASE，按上述串行链交接。失败定位逆序 `BASE→FIX-OG-PARTIAL-LIVE-01→IDLE→FIX→COV25`，已持久化/发布只前滚，新卡C/D明确继承USER-TEMP-REL-049。正式0.30.49最终实现树full必须含本live修复及实际后来源变化；用户既有纯版本同一实现复用例外保留。BASE实际GLM import020已失败，不能手工剥原provider形状造clean输入充PASS；新live成功不代替该门，普通import修复须另行精确规划/Claude采纳，故BASE/049 import门仍未闭合。原native OG27/28、SourceA与COV2家族C/D不由此次解除。
 
 **用户当前本机临时交付授权：** 修复后先构建本机debug版并在独立owned仓复测，不等待BASE或正式049 release。本卡必要focused、fmt/strict、实际源码sole-Claude及源身份核对须真通过；根代码只由root应用/签推，私有prototype不等于实施或PASS。临时安装两已有目标及旧正式marker/backup按前条实际receipt保留，再记录新构建源码manifest/binSHA/size/version，不bump、不冒称官方release/full/C-D，正式049后按指定curl安装同源正式版。
@@ -2260,3 +2268,51 @@ macOS真实一次 `volcengine-coding-plan/glm-5.3-flash`，隔离repo `/Volumes/
 用户要求的新临时debug artifact已实际安装到 `/Users/eli/.libra/bin/libra` 与 `/Volumes/Sea/libra/libra`：均193956968bytes/0755/SHA `a70adfbbf474a741f16497384b7c833214979507dfba4367f37bcd2e566dfd1f`、`libra 0.30.48`；不是正式049或版本bump。源manifest SHA `052dda0aeedccec8def356cff792638d556f1a021c3aea52dbab6463f07c57c6`、codesign验证0，旧临时和原正式备份保留、无official marker。安装receipt `/private/tmp/libra-partial-live-temp-install-yxw0xwia/temporary-install-receipt.json`。正式049通过后仍按用户指定HTTPS curl安装，验证正式manifest/digest/marker后替换这两个路径。未改用户Demo数据。
 
 本卡保持in-progress/Acceptance空（仅A/B locally accepted，当前三计划单审与signed root/site Push待）。实际签推后父source61/71，formal55/71；不将temp/fixture/本机A/B充C/D。BASE真实import仍020拒绝、相关必要后续尚未另行采纳，不因本live成功或旧reader读回放行BASE/049 import门；最终049新实现树双envfull、四平台/安全CI/稳定release/Homebrew/CDN/指定curl及native Source A都未完成。下一步先完成本卡source交接与三计划收据，继续普通29基线及import边界的必要后续；不重触用户Demo。
+
+
+### 2026-10-14 17:58:11 UTC — G09：BASE自动捕获基线与DEFER-OG29-PARTIAL-IMPORT范围修订
+
+**依据与效力：** 按用户既有“同类复杂问题延后、基础采集优先”和无需再问默认推荐授权，本次提出明确范围修订；只在最终三文档实际sole-Claude PASS、signed+DCO main采纳后生效。它不是认定旧门已通过，也不使BASE/049自动通过。本修订前日期记录、raw失败/UNRUN、旧完整门原文作为历史保留；旧关于“BASE/049 import门仍未闭合”的规范在本采纳后由本段前瞻性替代，而非修改其当时结论。
+
+**范围与计数：** 原OG-UPGRADE-029-01编号保留namespace＋真实自然自动capture/checkpoint/普通export主轴，原8AC/2VER及1 landing/1生产文件、原I/R与逐文件文档/网站义务不变；仅AC5与VER2移除historical import正例。AC1/2 pin/namespace、AC3/4实际同29 binary/runtime、AC6/7/8真实prompt/model/token投影仍逐项实际验收，files原兼容控制保留。未完成项保持unchecked/UNRUN，不因计数8/8文字把8项写成已通过。DEFER-OG29-PARTIAL-IMPORT登记为计划外未实施两轴，不新增Task或完成分子；父71卡/source61/71/formal55/71，COV26卡/source13/26/formal0/26保持，BASE自身待门。
+
+**延期与负例：** 原GLM unsupported-state历史import020仍未修复，默认Unproven拒绝；live自然自动partial checkpoint非零成功仅证明live，不是import PASS，也不是native/Complete claim/Source A。不得修改原provider字段、清洗源、补假证据或用synthetic对象伪造正例；无state ordinary若另有真实通过只按实际源单独记。两轴helper认证partial胶囊与direct-only导入持久化由计划外遗留承接，未来另做具体设计/写集/单Claude/原样实际正例，当前不实现，不授权新增模型调用。
+
+**DAG / DEP / G10：** 严格顺序仍为COV2-25→FIX-OG-NATIVE-IMPORT-01→OG-IDLE-ERROR-029-01→FIX-OG-PARTIAL-LIVE-01→OG-UPGRADE-029-01→COV2-22→COV2-08；无新边或卡。DEP-OG-029-PLAN及SITE、DEP-OG-029-COV-REBASING与incoming DEP-COV2-029-BASE只按修订后BASE最终A/B/fmt/strict/单Claude/signed源码/hash/mode交接，不把计划外导入修复作为incoming前驱。相交COV2-05/06/11/15/18及Icore从最终源精确重基，原cursor/candidate/隐私/字节对齐oracle不减；若执行这些卡需要新consumer，应在其各自范围实现或明确复议，不能引用本延期跳验。root共享单写者、干净cf owner及FIX→IDLE→live→BASE→COV2-09→11站点顺序不变。
+
+**REL-OG-TEMP-049 / USER-TEMP-REL-049：** 唯一临时patch0.30.49操作，成员保持latest upstream cat-file、COV2-25和FIX/IDLE/live/BASE最终实现；显式排除DEFER-OG29-PARTIAL-IMPORT能力，发布说明和网站必须披露unsupported-state历史import仍拒绝/未修复。此排除只改变发布范围，不证明release可执行：最终实现树focused/fmt/strict/sole-Claude及双env full、实际最新SHA安全CI、8releasejob/四平台签名manifest与资产、CDN/Homebrew、网站typecheck/build/签源/部署HTTP、指定HTTPS curl安装及installed cat-file smoke仍全部必需。纯版本同一实现复用例外不变；未完成v2入口不可达证明、COV2家族C/D和Source A硬门不变，不以本临时发布complete COV family/DEP-OG-13。
+
+**安全与证据边界：** 没有生产代码/默认ordinary或native权限/旧V2 Partial零bytes/pending replay变化；G09规范修订自身仅三计划，同次收口另含原FIX范围内的Unix测试helper cfg前滚，后续BASE仍只写其原exact I，不能顺带实现延期6文件。真实OpenCode Session/account/model/hook/CLI只macOS本机、绝不加入CI，不新增自动模型重试。既有复杂失败不被延期为PASS；最终全量若暴露实际回归仍须forward-fix。未实施能力在最终说明中明确列为限制，已发布只新patch前滚。
+
+**本次当前门：** 本段草案未做正式Claude、没有VCS/模型/cargo/真实验收；root采纳时须补实际最终三文件manifest、sole-Claude raw/结论、signed+DCO main与remote同SHA。该规划采纳不改变BASE unchecked及049 C/D状态。下一实施仍为BASE current namespace和自然自动capture内容门，随后COV2-22；延期不占当前写slot。
+
+**计划外遗留镜像：** DEFER-OG29-PARTIAL-IMPORT由父plan-20260902登记，未来独立承接未指定；本COV不接管两轴、不新增任务，也不变更本COV任一AC/VER/原import oracle。
+
+
+### 2026-10-14 18:03:50 UTC — 已签 live 源码交接及 Unix 测试 fixture 前滚
+
+FIX-OG-PARTIAL-LIVE-01 实际 signed+DCO main `d8422534b07724349591d53aa445ce50c38453f5`（精确14路径）与网站 cf `a80d3ff9d2d194b739da6148dde3297d325f1a7e`（精确1页）均已 Push exit0、remote同SHA、PGP header/DCO/逐blob同一性核验通过。三计划例行收据实际sole-Claude PASS，raw SHA `e30b717ec6754916b7fd87a171346357227abfa526081d797e7f54ec6cd35557`，0P0/P1/P2、5P3保留。本卡source-qualified，父source61/71=85.92%、formal55/71=77.46%；COV source13/26=50.00%、formal0/26。此前“签推待”是当时事实，不回改旧收据。
+
+当前 d842 的 Windows 必要安全CI job `116010393408` / run `38609801760` 实际失败：四个仅Unix测试消费的常量、`VerifiedPartialStoreFixture`及其impl、`verified_partial_fixture_snapshot`未同步Unix cfg，`-D dead_code`导致lib-test编译失败。原始日志SHA `d22b0a896e123b351caf01e0437290a88a1c09aba618539491b1bf513533d481`；属于确定性代码问题，不作为network重试。只在原FIX写集 `capture/live_checkpoint.rs` 和 `capture/snapshot.rs` 的测试helper补7处cfg属性，无生产行为、旧测试删除/ignored、CI或新卡/写集扩张。当前 macOS fmt/strict/focused、单Claude及本次signed Push仍待；Windows只有后续实际新SHA成功才可关闭，不能以本机编译代替。
+
+G09规范修订自身仅三计划；同次收口另包含上述原FIX范围内测试cfg修正。BASE全部8AC/2VER仍unchecked，本次不预增完成。已有真实自然自动采集的prompt/model/token/files只读核对输入可作为后续BASE候选：prompt1、typed extraction.model同原native assistant、五token input7681/output32/reasoning14/cache0/0与持久化7727总数一致；files仅零工具/空路径对照，不是修改文件正例。顶层hook model与native model不同，不能拿它冒称实际模型；只用已核typed extraction.model。该核查未新增CLI/服务/模型，未重跑live或import，不独自构成BASE PASS。GLM历史import020依G09明确延期，Source A仍UNPROVEN；正式049最终full/安全CI/四平台/发布/安装及网站门全部保留。
+
+
+### 2026-10-14 18:10:19 UTC — G09 R1 P2 规范澄清（最终字节复审待）
+
+R1实际sole-Claude为PASS（0P0/P1、4P2/4P3），raw SHA `6921a0cb37742edc903c5f106104f80bdf507a1440e7270031936ec864aed479`；保留该结论与全部意见，不把其写成零P2。最终复审另核完整长行覆盖，不用“读到EOF”替代完整字节覆盖。
+
+1. **source-qualified与CI分层：** source-qualified是本计划内部的最终A/B、适用focused/fmt/strict、唯一Claude、signed+DCO source Push及hash/mode交接；Windows/其它远端CI属于ER-04 D组，按用户no-wait授权不阻下一张源码卡开工，但失败必须保留且阻正式release/C-D。因此d842的内部source61/71成立，Windows失败不记通过，formal仍55/71；本次前滚新SHA必须实际Windows绿后才可关闭该远端门。DEP-OG-029-PLAN/DEP-COV2-029-BASE按内部source交接，不声称D组已通过，不把source-ready充formal complete。
+
+2. **真实证据复用范围：** 1369-byte VER8摘要本身只支撑对应的AC5/6/7/8普通内容、prompt/model/token及files空对照，不能单独支撑AC1–4。AC1/2必须由BASE新增常量/namespace及VER1实际核验；AC3/4须另核原官方29实物version/SHA/size、同一server PID/endpoint/runtime与对应exporter的独立precheck原收据。BASE最终Libra源码到原实际capture运行时的逐路径同一性、仅测试cfg/无运行consumer常量变化及新候选普通读回必须由root机械核实并经最终Claude接受；任何未证实项维持UNRUN，不声称不同binary SHA相同。不得用新无state源替代原GLM失败。
+
+3. **强制范围披露：** BASE的ER-06 Deliverables必须同步EN、zh、tracing、COMPAT与唯一cf agent页，明确“含不支持推理状态的历史OpenCode Session导入仍以LBR-AGENT-020拒绝，修复延期”，并保留自动捕获可保存安全ordinary Partial、native Source A未证明的边界。新增既有docs-contract函数`opencode29_ordinary_extension_is_distinct_from_frozen_native_source`须逐四root文档断言该披露；网站逐页验收由root核与EN新增段逐字相同及实际typecheck/build/签源/部署HTTP，不把外部网站文件引入CI。USER-TEMP-REL-049的实际CHANGELOG0.30.49说明与最终网站须实核同一限制；不新增本卡特有AC/VER或版本写权。
+
+4. **旧规范显式历史化：** 原“REL-OG-TEMP-049新增精确成员与反序”每份现存未引用正文前插入本G09替代标记，保留原文字与旧FAIL结论。日期快照仍保留；本次仅前瞻性调整发布范围，不修改曾经失败的import门结果。
+
+AC5的对应性明确只指validator安全普通投影；snapshot保持Partial/Unproven，unsupported state及关联reasoning text/time被擦除，不承诺原始完整性、typed/native归档或Complete coverage。文件维度仍仅empty control，不记修改文件正例。最终G09仍须实际单Claude复审PASS及signed采纳，BASE仍全unchecked，不预授049或COV完成。
+
+
+### 2026-10-14 18:10:59 UTC — 测试cfg写法与既有AST守卫对齐
+
+窄前滚首轮fmt/diff实际0、live15/15、snapshot26/26通过；ARCH实际57/58、1失败，raw SHA `50a6986e1eaec4ca69423502645a6304c915d80f31aedde7b21b1d815abc6a03`，保持FAIL。原因是既有provider-neutral AST守卫只识别独立`cfg(test)`，把新`cfg(all(test, unix))` helper误算为生产AgentKind入口。改为保留原独立`#[cfg(test)]`并另加`#[cfg(unix)]`，Rust含义同为test AND unix；四常量/fixture struct/impl仍各Unix限定，共七个新增Unix属性。不修改或放宽AST守卫/旧计数、不新增生产provider分支。最终ARCH/docs/fmt/strict及完整长行单Claude复审仍待，Windows须新SHA实际验证。

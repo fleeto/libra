@@ -3462,13 +3462,18 @@ pub(crate) mod tests {
         (dir, conn)
     }
 
+    #[cfg(unix)]
     const VERIFIED_PARTIAL_CAPTURE: &str = "opencode__pure-partial-store";
+    #[cfg(unix)]
     const VERIFIED_PARTIAL_PROVIDER: &str = "pure-partial-store";
+    #[cfg(unix)]
     const VERIFIED_PARTIAL_TEXT: &str = "safe ordinary reply";
+    #[cfg(unix)]
     const VERIFIED_PARTIAL_CANARY: &str = "PRIVATE_ASSOCIATED_REASONING_CANARY";
 
     /// Pure source/storage fixture. It never runs an exporter, CLI, provider
     /// Session, hook parser, account lookup, or fake collection service.
+    #[cfg(unix)]
     struct VerifiedPartialStoreFixture {
         _directory: tempfile::TempDir,
         repo: std::path::PathBuf,
@@ -3477,6 +3482,7 @@ pub(crate) mod tests {
         scope: CaptureScope,
     }
 
+    #[cfg(unix)]
     impl VerifiedPartialStoreFixture {
         async fn new() -> Self {
             let directory = tempfile::tempdir().expect("create partial store fixture");

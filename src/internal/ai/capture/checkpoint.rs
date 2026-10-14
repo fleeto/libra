@@ -31,17 +31,20 @@ use crate::internal::{
         },
         capture_scope::{CaptureCommitDeadline, CaptureScope},
         coverage_gate::{
-            LiveCaptureClaimCommitPlan, LiveClaimCommitPlan, VersionedLiveClaimCommitPlan,
+            LiveCaptureClaimCommitPlan, LiveClaimCommitPlan,
+            NativeVersionedReasoningClaimCommitPlan, VersionedLiveClaimCommitPlan,
         },
         history::{CheckpointAppendConflict, CheckpointCompanionTransactionFailed},
         observed_agents::{
-            NormalizedTurn, RedactedBytes,
+            Completeness, CoverageSchemaVersion, NormalizedTurn, RedactedBytes,
+            encode_coverage_turn_for_schema,
             reasoning::{
                 BoundIdentityInputRef, NativeProvenReasoning, ReasoningSourceDisposition,
                 ReasoningSourceState, VerifiedCaptureBinding, VerifiedCurrentBinding,
                 VerifiedImportTurnMapping, VerifiedPendingBinding, borrow_native_identity_bindings,
                 partition_import_reasoning,
             },
+            select_coverage_schema,
         },
         traces::{
             self, CheckpointCommitParams, CheckpointScope, TracesCommitCtx, TracesCoverageFence,
@@ -1112,6 +1115,319 @@ async fn prepare_reasoning_coverage_plan_for_keys(
     }))
 }
 
+/// A v2 writer's source-derived identity set. Only the payload-owned factory
+/// below can create this value; a read context or a version label grants no
+/// producer authority. Equal logical keys remain separate across versions.
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Clone)]
+pub(crate) struct NativeVersionedReasoningCoveragePlan {
+    scope: CaptureScope,
+    session_id: String,
+    reader: ReasoningIdentityReadContext,
+    deadline: Instant,
+    turns: BTreeMap<(i64, String), ReasoningTurnIdentity>,
+    claims: BTreeMap<(i64, String), (String, Completeness)>,
+    source_tag: [u8; 32],
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+impl NativeVersionedReasoningCoveragePlan {
+    pub(crate) fn read_context(&self) -> ReasoningIdentityReadContext {
+        self.reader.clone()
+    }
+
+    pub(crate) fn turn(
+        &self,
+        version: CoverageSchemaVersion,
+        key: &str,
+    ) -> Option<&ReasoningTurnIdentity> {
+        self.turns.get(&(version.as_i64(), key.to_owned()))
+    }
+
+    pub(crate) fn validate_for(
+        &self,
+        scope: &CaptureScope,
+        session_id: &str,
+        turns: &[NormalizedTurn],
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.scope == *scope && self.session_id == session_id,
+            "reasoning coverage source does not match the current capture; run libra agent doctor"
+        );
+        anyhow::ensure!(
+            Instant::now() < self.deadline,
+            "reasoning coverage authentication exceeded its execution deadline"
+        );
+        if !turns.is_empty() {
+            let mut incoming = BTreeMap::new();
+            for turn in turns {
+                let version = select_coverage_schema(turn);
+                let encoded = encode_coverage_turn_for_schema(version.as_i64(), turn)?;
+                anyhow::ensure!(
+                    incoming
+                        .insert(
+                            (version.as_i64(), turn.logical_turn_key.clone()),
+                            (encoded.digest_hex, turn.completeness),
+                        )
+                        .is_none(),
+                    "duplicate versioned reasoning coverage turn; run libra agent doctor"
+                );
+            }
+            anyhow::ensure!(
+                incoming
+                    .iter()
+                    .all(|(key, value)| self.claims.get(key) == Some(value)),
+                "reasoning coverage source changed before reservation; run libra agent doctor"
+            );
+        }
+        Ok(())
+    }
+
+    pub(crate) fn bind_claims(&self, plan: &VersionedLiveClaimCommitPlan) -> anyhow::Result<()> {
+        self.validate_for(
+            plan.ordinary()
+                .capture_scope
+                .as_ref()
+                .context("reasoning coverage requires the current capture scope")?,
+            &plan.ordinary().session_id,
+            &[],
+        )?;
+        let mut bound = BTreeMap::new();
+        for (version, claim) in plan.claims() {
+            anyhow::ensure!(
+                bound
+                    .insert(
+                        (version.as_i64(), claim.logical_turn_key.clone()),
+                        (claim.coverage_digest.clone(), claim.completeness),
+                    )
+                    .is_none(),
+                "duplicate versioned reasoning claim; run libra agent doctor"
+            );
+        }
+        anyhow::ensure!(
+            bound == self.claims,
+            "reasoning coverage source does not match its reserved turns; run libra agent doctor"
+        );
+        Ok(())
+    }
+
+    pub(crate) fn matches_payload(
+        &self,
+        payload: &CheckpointRedactedPayload,
+        session_id: &str,
+        provider: &str,
+    ) -> Result<bool, CheckpointStoreError> {
+        Ok(self.source_tag
+            == native_versioned_source_tag(&payload.reasoning, session_id, provider)?)
+    }
+}
+
+/// Stable, non-authoritative in-memory equality tag. The native borrow and
+/// capture binding are revalidated for both preparation and request binding;
+/// this digest only prevents a different sealed payload from being paired
+/// with the already-created identity plan.
+#[cfg_attr(not(test), allow(dead_code))]
+fn native_versioned_source_tag(
+    reasoning: &ReasoningSourceDisposition,
+    capture_session: &str,
+    provider: &str,
+) -> Result<[u8; 32], CheckpointStoreError> {
+    use sha2::{Digest, Sha256};
+
+    let ReasoningSourceDisposition::NativeProven(_) = reasoning else {
+        return Err(CheckpointStoreError::InvalidRequest {
+            field: "native v2 reasoning source".to_owned(),
+        });
+    };
+    let inputs =
+        prepare_reasoning_identity_inputs_from_disposition(reasoning, capture_session, provider)?;
+    let artifacts =
+        prepare_reasoning_artifact_params_from_disposition(reasoning, capture_session, provider)?;
+    if inputs.len() != artifacts.len() || inputs.len() > traces::REASONING_ARTIFACT_MAX_ENTRIES {
+        return Err(CheckpointStoreError::InvalidRequest {
+            field: "native v2 reasoning source".to_owned(),
+        });
+    }
+    let mut digest = Sha256::new();
+    digest.update(b"libra/native-v2-identity-source/v1\0");
+    for field in [capture_session.as_bytes(), provider.as_bytes()] {
+        digest.update((field.len() as u64).to_le_bytes());
+        digest.update(field);
+    }
+    digest.update((inputs.len() as u64).to_le_bytes());
+    for (input, artifact) in inputs.iter().zip(artifacts) {
+        let entry = serde_json::to_vec(&(
+            input.logical_turn(),
+            input.issuer_tag(),
+            hex::encode(input.source_binding_sha256()),
+            hex::encode(input.original_wire_sha256()),
+            &artifact.locator,
+            artifact.provider,
+            artifact.source_kind,
+            artifact.availability,
+            &artifact.decrypt_capability,
+            hex::encode(Sha256::digest(artifact.bytes.as_bytes())),
+        ))
+        .map_err(|_| CheckpointStoreError::InvalidRequest {
+            field: "native v2 reasoning source".to_owned(),
+        })?;
+        digest.update((entry.len() as u64).to_le_bytes());
+        digest.update(entry);
+    }
+    Ok(digest.finalize().into())
+}
+
+/// Derive both coverage domains from one sealed native payload. The source
+/// tuple is frozen before reservations are bound; later claim ownership data
+/// cannot manufacture an identity or change a digest.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) async fn prepare_native_versioned_reasoning_coverage_plan(
+    payload: &CheckpointRedactedPayload,
+    request: ReasoningIdentityPreparation<'_>,
+) -> anyhow::Result<NativeVersionedReasoningCoveragePlan> {
+    use sha2::{Digest, Sha256};
+
+    use super::key::ReasoningIdentityMacPurpose;
+
+    let source_tag =
+        native_versioned_source_tag(&payload.reasoning, request.session_id, request.provider)?;
+    let inputs = prepare_reasoning_identity_inputs_from_disposition(
+        &payload.reasoning,
+        request.session_id,
+        request.provider,
+    )?;
+    let artifacts = prepare_reasoning_artifact_params_from_disposition(
+        &payload.reasoning,
+        request.session_id,
+        request.provider,
+    )?;
+    anyhow::ensure!(
+        !request.turns.is_empty()
+            && request.turns.len() <= traces::REASONING_ARTIFACT_MAX_ENTRIES
+            && inputs.len() == artifacts.len(),
+        "native v2 reasoning coverage exceeds its safe turn limit"
+    );
+    let known_keys = request
+        .turns
+        .iter()
+        .map(|turn| turn.logical_turn_key.as_str())
+        .collect::<BTreeSet<_>>();
+    anyhow::ensure!(
+        inputs
+            .iter()
+            .all(|input| known_keys.contains(input.logical_turn())),
+        "reasoning source cannot be associated with its logical turns; run libra agent doctor"
+    );
+    let mut artifact_bytes = 0u64;
+    for artifact in artifacts {
+        artifact_bytes = artifact_bytes
+            .checked_add(artifact.bytes.len() as u64)
+            .context("reasoning coverage exceeds its safe byte limit")?;
+        anyhow::ensure!(
+            artifact_bytes <= traces::REASONING_ARTIFACT_TOTAL_MAX_BYTES,
+            "reasoning coverage exceeds its safe byte limit"
+        );
+    }
+    let reader = ReasoningIdentityReadContext::new(
+        request.scope,
+        request.session_id,
+        request.storage_path,
+        request.authorized_root,
+        request.deadline,
+    );
+    let mut turns = BTreeMap::new();
+    let mut claims = BTreeMap::new();
+    let mut descriptor_bytes = 0usize;
+    let mut has_v2 = false;
+    for turn in request.turns {
+        anyhow::ensure!(
+            Instant::now() < request.deadline,
+            "reasoning coverage authentication exceeded its execution deadline"
+        );
+        let version = select_coverage_schema(turn);
+        has_v2 |= version == CoverageSchemaVersion::V2;
+        let encoded = encode_coverage_turn_for_schema(version.as_i64(), turn)?;
+        let key = (version.as_i64(), turn.logical_turn_key.clone());
+        anyhow::ensure!(
+            claims
+                .insert(key.clone(), (encoded.digest_hex, turn.completeness))
+                .is_none(),
+            "duplicate versioned reasoning coverage turn; run libra agent doctor"
+        );
+        let entries = inputs
+            .iter()
+            .zip(artifacts)
+            .filter(|(input, _)| input.logical_turn() == turn.logical_turn_key)
+            .map(|(input, artifact)| {
+                (
+                    "native_proven",
+                    input.issuer_tag(),
+                    hex::encode(input.source_binding_sha256()),
+                    hex::encode(input.original_wire_sha256()),
+                    &artifact.locator,
+                    artifact.provider,
+                    artifact.source_kind,
+                    hex::encode(Sha256::digest(artifact.bytes.as_bytes())),
+                )
+            })
+            .collect::<Vec<_>>();
+        let kind = if entries.is_empty() {
+            ReasoningIdentityKind::Empty
+        } else {
+            ReasoningIdentityKind::Nonempty
+        };
+        let descriptor = reasoning_turn_descriptor_body_for_schema_version(
+            request.scope,
+            request.session_id,
+            &turn.logical_turn_key,
+            &entries,
+            version.as_i64(),
+        )?;
+        let slot = reasoning_turn_slot_body_for_schema_version(
+            request.scope,
+            request.session_id,
+            &turn.logical_turn_key,
+            version.as_i64(),
+        )?;
+        descriptor_bytes = descriptor_bytes
+            .checked_add(descriptor.len())
+            .and_then(|size| size.checked_add(slot.len()))
+            .context("reasoning coverage exceeds its safe byte limit")?;
+        anyhow::ensure!(
+            descriptor_bytes <= traces::REASONING_ARTIFACT_MANIFEST_MAX_BYTES,
+            "reasoning coverage exceeds its safe byte limit"
+        );
+        let purpose = ReasoningIdentityMacPurpose::descriptor_for_schema_version(version.as_i64())?;
+        let descriptor_mac = reader
+            .authenticate_with_purpose(request.conn, purpose, &descriptor, None)
+            .await?;
+        let slot = reader
+            .authenticate_with_purpose(request.conn, purpose, &slot, None)
+            .await?;
+        turns.insert(
+            key,
+            ReasoningTurnIdentity {
+                slot,
+                kind,
+                descriptor_mac,
+            },
+        );
+    }
+    anyhow::ensure!(
+        has_v2,
+        "native v2 reasoning source has no typed v2 turn; run libra agent doctor"
+    );
+    Ok(NativeVersionedReasoningCoveragePlan {
+        scope: request.scope.clone(),
+        session_id: request.session_id.to_owned(),
+        reader,
+        deadline: request.deadline,
+        turns,
+        claims,
+        source_tag,
+    })
+}
+
 #[cfg(all(test, unix))]
 pub(crate) fn reasoning_coverage_test_payload(fields: Vec<Vec<u8>>) -> CheckpointRedactedPayload {
     use crate::internal::ai::observed_agents::reasoning::{
@@ -1145,6 +1461,32 @@ pub(crate) fn reasoning_coverage_test_payload(fields: Vec<Vec<u8>>) -> Checkpoin
     .expect("synthetic native proof validation")
     .1;
     payload
+}
+
+#[cfg(all(test, unix))]
+pub(crate) fn reasoning_coverage_test_payload_for_native_turns(
+    fields: Vec<(u64, Vec<u8>)>,
+) -> CheckpointRedactedPayload {
+    use crate::internal::ai::observed_agents::reasoning::{
+        carrier_test_support as fixture, synthetic_native_batch_for_turns,
+    };
+    let mut payload = reasoning_coverage_test_payload(vec![b"synthetic native seed".to_vec()]);
+    payload.reasoning = ReasoningSourceDisposition::NativeProven(synthetic_native_batch_for_turns(
+        fixture::CAPTURE,
+        fixture::SOURCE,
+        fields,
+    ));
+    payload
+}
+
+#[cfg(all(test, unix))]
+pub(crate) fn reasoning_coverage_test_native_batch(
+    payload: &CheckpointRedactedPayload,
+) -> &NativeProvenReasoning {
+    let ReasoningSourceDisposition::NativeProven(batch) = &payload.reasoning else {
+        panic!("expected a synthetic native batch")
+    };
+    batch
 }
 
 #[cfg(all(test, unix))]
@@ -1523,6 +1865,9 @@ pub struct CheckpointWriteRequest<'a> {
     tool_use_id: Option<&'a str>,
     payload: &'a CheckpointRedactedPayload,
     txn_extra: Option<&'a dyn TracesTxnExtra>,
+    /// Native-v2 source and claims are carried as data until the concrete
+    /// store has checked the exact marker fences and registered its attempt.
+    native_versioned_companion: Option<&'a NativeVersionedReasoningClaimCommitPlan>,
     /// The same closed per-claim binding supplied as the transaction extra.
     /// A versioned request cannot substitute an unrelated companion.
     versioned_coverage: Option<&'a VersionedLiveClaimCommitPlan>,
@@ -1579,6 +1924,7 @@ impl<'a> CheckpointWriteRequest<'a> {
             tool_use_id,
             payload,
             txn_extra,
+            native_versioned_companion: None,
             versioned_coverage: None,
             pending_coverage: None,
             pending_key_storage: None,
@@ -1623,6 +1969,7 @@ impl<'a> CheckpointWriteRequest<'a> {
     ) -> Result<Self, CheckpointStoreError> {
         let ordinary = plan.ordinary();
         if self.txn_extra.is_some()
+            || self.native_versioned_companion.is_some()
             || self.pending_coverage.is_some()
             || !self.payload.reasoning.is_ordinary()
             || self.payload.deferred_pending_reasoning().is_some()
@@ -1638,6 +1985,41 @@ impl<'a> CheckpointWriteRequest<'a> {
         }
         self.txn_extra = Some(plan);
         self.versioned_coverage = Some(plan);
+        Ok(self)
+    }
+
+    /// Pair a sealed native v2 source, its exact versioned claims and the
+    /// transaction companion in one request. The ordinary constructor alone
+    /// cannot carry a versioned companion past marker/replay fences.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn with_native_versioned_claims(
+        mut self,
+        companion: &'a NativeVersionedReasoningClaimCommitPlan,
+    ) -> Result<Self, CheckpointStoreError> {
+        let ordinary = companion.versioned().ordinary();
+        let matches_source = companion.reasoning().matches_payload(
+            self.payload,
+            self.session_id,
+            self.agent_kind,
+        )?;
+        if self.txn_extra.is_some()
+            || self.native_versioned_companion.is_some()
+            || self.versioned_coverage.is_some()
+            || self.pending_coverage.is_some()
+            || self.payload.deferred_pending_reasoning().is_some()
+            || !matches_source
+            || ordinary.claims.is_empty()
+            || ordinary.session_id != self.session_id
+            || ordinary.checkpoint_id != self.checkpoint_id
+            || ordinary.parent_commit.as_deref() != self.parent_commit
+            || self.scope != CheckpointScope::Committed
+        {
+            return Err(CheckpointStoreError::InvalidRequest {
+                field: "native v2 reasoning claim plan".to_owned(),
+            });
+        }
+        self.native_versioned_companion = Some(companion);
+        self.versioned_coverage = Some(companion.versioned());
         Ok(self)
     }
 
@@ -1688,6 +2070,35 @@ impl<'a> CheckpointWriteRequest<'a> {
     #[allow(dead_code)] // OG-21 late restore pairs this with a lower current binding.
     pub(crate) fn pending_coverage(&self) -> Option<&LiveClaimCommitPlan> {
         self.pending_coverage
+    }
+}
+
+/// Constructible only by this checkpoint store module after the versioned
+/// marker has been registered. A crate sibling cannot call the companion's
+/// low-level transaction method without this capability.
+pub(crate) struct StoreBoundNativeVersionedPermit {
+    _private: (),
+}
+
+/// Only the concrete store constructs this adapter after the versioned
+/// registration matched its request and the marker was registered. Keeping
+/// the native companion itself out of `TracesTxnExtra` prevents a direct
+/// HistoryManager append from skipping those store-owned fences.
+struct StoreBoundNativeVersionedTxnExtra<'a> {
+    companion: &'a NativeVersionedReasoningClaimCommitPlan,
+    permit: StoreBoundNativeVersionedPermit,
+}
+
+#[async_trait]
+impl TracesTxnExtra for StoreBoundNativeVersionedTxnExtra<'_> {
+    async fn apply(&self, txn: &DatabaseTransaction, ctx: &TracesCommitCtx) -> anyhow::Result<()> {
+        self.companion
+            .apply_store_bound(&self.permit, txn, ctx)
+            .await
+    }
+
+    fn requires_versioned_coverage_binding(&self) -> bool {
+        true
     }
 }
 
@@ -2249,6 +2660,11 @@ pub(crate) enum CheckpointReplayStatus {
     Missing,
     Complete,
     PendingCleanup { marker_generation: String },
+}
+
+struct CheckpointReplayExpectation<'a, 'fence> {
+    claim_set: Option<&'a [TracesCoverageFence<'fence>]>,
+    native_companion: Option<&'a NativeVersionedReasoningClaimCommitPlan>,
 }
 
 /// Safe conflict classes used by a coordinator/finalizer to choose replay.
@@ -2887,7 +3303,10 @@ impl<'a> TracesCheckpointStore<'a> {
             session_id,
             scope,
             deadline,
-            None,
+            CheckpointReplayExpectation {
+                claim_set: None,
+                native_companion: None,
+            },
         )
         .await
     }
@@ -2899,7 +3318,7 @@ impl<'a> TracesCheckpointStore<'a> {
         session_id: &str,
         scope: CheckpointScope,
         deadline: Option<CaptureCommitDeadline>,
-        expected_claim_set: Option<&[TracesCoverageFence<'_>]>,
+        expectation: CheckpointReplayExpectation<'_, '_>,
     ) -> Result<CheckpointReplayStatus, CheckpointStoreError> {
         if deadline.is_some_and(|deadline| Instant::now() >= deadline.monotonic()) {
             return Err(CheckpointStoreError::DeadlineExceeded);
@@ -2912,7 +3331,7 @@ impl<'a> TracesCheckpointStore<'a> {
         // A no-write settlement (or legacy prebound recovery) has no
         // authoritative expected claim set. An explicit empty set from a
         // marker-bound writer does: it must reject committed revisions.
-        if let Some(coverage_fences) = expected_claim_set {
+        if let Some(coverage_fences) = expectation.claim_set {
             await_checkpoint_precommit_read_until(deadline, async {
                 traces::verify_checkpoint_claim_set_with_conn(
                     conn,
@@ -2965,6 +3384,29 @@ impl<'a> TracesCheckpointStore<'a> {
             })
             .await?;
             if has_versioned_revision {
+                return Err(CheckpointStoreError::ReplayPayloadMismatch);
+            }
+        }
+        // A revision-set match alone cannot authorize native replay: an
+        // ordinary versioned writer can commit the same tuple. Check the
+        // authenticated private identity before settling any old marker.
+        if let Some(companion) = expectation.native_companion {
+            let matches = await_checkpoint_precommit_read_until(deadline, async {
+                companion
+                    .verify_committed_native_replay(conn)
+                    .await
+                    .map_err(|_| {
+                        tracing::warn!(
+                            stage = "native_replay_identity",
+                            "cannot authenticate native replay identity; run libra agent doctor"
+                        );
+                        CheckpointStoreError::StoreFailure {
+                            stage: CheckpointStoreStage::CatalogTransaction,
+                        }
+                    })
+            })
+            .await?;
+            if !matches {
                 return Err(CheckpointStoreError::ReplayPayloadMismatch);
             }
         }
@@ -3260,6 +3702,32 @@ impl<'a> TracesCheckpointStore<'a> {
         })
     }
 
+    /// An exact revision-set replay is not an authoritative native-source
+    /// replay until the persisted private identity proves the same companion.
+    async fn native_replay_matches(
+        &self,
+        request: &CheckpointWriteRequest<'_>,
+    ) -> Result<bool, CheckpointStoreError> {
+        let Some(companion) = request.native_versioned_companion else {
+            return Ok(true);
+        };
+        await_checkpoint_precommit_read_until(request.deadline(), async {
+            companion
+                .verify_committed_native_replay(self.conn)
+                .await
+                .map_err(|_| {
+                    tracing::warn!(
+                        stage = "native_replay_identity",
+                        "cannot authenticate native replay identity; run libra agent doctor"
+                    );
+                    CheckpointStoreError::StoreFailure {
+                        stage: CheckpointStoreStage::CatalogTransaction,
+                    }
+                })
+        })
+        .await
+    }
+
     /// Classify a failed append from its typed causes alone. Display text is
     /// deliberately ignored: deadline and SQLite errors may carry context
     /// that mentions a marker generation without being a fence conflict.
@@ -3340,6 +3808,19 @@ impl CheckpointStore for TracesCheckpointStore<'_> {
                 });
             }
         }
+        if let Some(companion) = request.native_versioned_companion {
+            let Some(scope) = self.capture_scope.as_ref() else {
+                return Err(CheckpointStoreError::InvalidRequest {
+                    field: "native v2 capture scope".to_owned(),
+                });
+            };
+            companion
+                .reasoning()
+                .validate_for(scope, request.session_id(), &[])
+                .map_err(|_| CheckpointStoreError::InvalidRequest {
+                    field: "native v2 capture scope".to_owned(),
+                })?;
+        }
         if let Some(scope) = &self.capture_scope {
             await_checkpoint_precommit_read_until(request.deadline(), async {
                 scope
@@ -3367,7 +3848,10 @@ impl CheckpointStore for TracesCheckpointStore<'_> {
             request.session_id(),
             request.scope(),
             request.deadline(),
-            replay_fences.as_deref(),
+            CheckpointReplayExpectation {
+                claim_set: replay_fences.as_deref(),
+                native_companion: request.native_versioned_companion,
+            },
         )
         .await;
         if matches!(
@@ -3464,11 +3948,21 @@ impl CheckpointStore for TracesCheckpointStore<'_> {
                     });
                 }
                 traces::TracesWriteAttemptRegistration::AlreadyCommitted => {
+                    if !self.native_replay_matches(&request).await? {
+                        return Ok(CheckpointWriteOutcome::ConflictUnchanged {
+                            reason: CheckpointConflictReason::ReplayPayloadMismatch,
+                        });
+                    }
                     return Ok(CheckpointWriteOutcome::AlreadyExists {
                         checkpoint_id: request.checkpoint_id().to_string(),
                     });
                 }
                 traces::TracesWriteAttemptRegistration::TerminalReceiptAlreadyComplete => {
+                    if !self.native_replay_matches(&request).await? {
+                        return Ok(CheckpointWriteOutcome::ConflictUnchanged {
+                            reason: CheckpointConflictReason::ReplayPayloadMismatch,
+                        });
+                    }
                     return Ok(CheckpointWriteOutcome::TerminalReceiptAlreadyApplied);
                 }
             }
@@ -3565,7 +4059,17 @@ impl CheckpointStore for TracesCheckpointStore<'_> {
         let manager = test_support::with_history_fault(manager);
         #[cfg(test)]
         let companion_fault = test_support::companion_fault(request.txn_extra());
+        let store_bound_native =
+            request
+                .native_versioned_companion
+                .map(|companion| StoreBoundNativeVersionedTxnExtra {
+                    companion,
+                    permit: StoreBoundNativeVersionedPermit { _private: () },
+                });
         let mut params = self.append_params(&request)?;
+        if let Some(bound) = store_bound_native.as_ref() {
+            params.txn_extra = Some(bound);
+        }
         if let Some(restored) = restored_pending.as_ref() {
             params.reasoning_artifacts = &restored.artifacts;
             params.txn_extra = Some(&restored.commit_plan);
@@ -3729,6 +4233,165 @@ mod tests {
     use sha2::Digest;
 
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cov2_v2_native_plan_rejects_unbound_source() {
+        use crate::internal::ai::{
+            coverage_gate::tests::{
+                ReasoningFixture, cov2_native_v2_source_and_reservation, cov2_native_v2_turn,
+                cov2_native_v2_write,
+            },
+            observed_agents::reasoning::{
+                ReasoningSourceDisposition, carrier_test_support as native,
+            },
+        };
+
+        let fixture = ReasoningFixture::new().await;
+        let storage = fixture.dir.path().join(crate::utils::util::ROOT_DIR);
+        let turns = [cov2_native_v2_turn(
+            "synthetic-turn-0",
+            "visible typed test turn",
+            Completeness::Complete,
+        )];
+        let payload = reasoning_coverage_test_payload(vec![b"synthetic sealed proof".to_vec()]);
+        let request =
+            |session_id: &'static str, provider: &'static str| ReasoningIdentityPreparation {
+                conn: &fixture.conn,
+                scope: &fixture.scope,
+                storage_path: &storage,
+                authorized_root: fixture.dir.path(),
+                session_id,
+                provider,
+                turns: &turns,
+                deadline: Instant::now() + Duration::from_secs(30),
+            };
+        let source = prepare_native_versioned_reasoning_coverage_plan(
+            &payload,
+            request(native::CAPTURE, "claude_code"),
+        )
+        .await
+        .expect("sealed synthetic source can prepare a v2 identity");
+        assert!(
+            source
+                .matches_payload(&payload, native::CAPTURE, "claude_code")
+                .expect("compare the original sealed native source"),
+            "the companion must match the payload that produced it"
+        );
+        let other_native_payload =
+            reasoning_coverage_test_payload(vec![b"independent legal sealed proof".to_vec()]);
+        assert!(
+            !source
+                .matches_payload(&other_native_payload, native::CAPTURE, "claude_code")
+                .expect("compare a second sealed native source"),
+            "a different legal opaque proof cannot borrow the first source tag"
+        );
+        assert!(
+            prepare_native_versioned_reasoning_coverage_plan(
+                &other_native_payload,
+                request(native::CAPTURE, "claude_code"),
+            )
+            .await
+            .is_ok(),
+            "the second payload must be independently valid so only the source binding can reject it"
+        );
+        let (write_source, reserved) = cov2_native_v2_source_and_reservation(
+            &fixture,
+            &payload,
+            &turns,
+            "source-binding-owner",
+        )
+        .await;
+        let write_error = cov2_native_v2_write(
+            &fixture,
+            &other_native_payload,
+            &write_source,
+            &reserved,
+            "source-binding-owner",
+            "source-binding-checkpoint",
+        )
+        .await
+        .expect_err("the real checkpoint writer must reject an unrelated native source");
+        assert_eq!(
+            write_error.to_string(),
+            "capture checkpoint request has an invalid native v2 reasoning claim plan"
+        );
+        for sql in [
+            "SELECT COUNT(*) AS n FROM agent_checkpoint WHERE checkpoint_id = 'source-binding-checkpoint'",
+            "SELECT COUNT(*) AS n FROM agent_coverage_revision WHERE checkpoint_id = 'source-binding-checkpoint'",
+            "SELECT COUNT(*) AS n FROM reference WHERE name = 'traces'",
+            "SELECT COUNT(*) AS n FROM object_index",
+            "SELECT COUNT(*) AS n FROM agent_coverage_claim WHERE state = 'catalog_committed'",
+        ] {
+            assert_eq!(fixture_row_count(&fixture.conn, sql).await, 0, "{sql}");
+        }
+        assert!(
+            crate::internal::metadata::MetadataKv::get_with_conn(
+                &fixture.conn,
+                crate::internal::metadata::MetadataScope::AgentTracesInflight,
+                native::CAPTURE,
+                "source-binding-checkpoint",
+            )
+            .await
+            .expect("read source-binding checkpoint marker")
+            .is_none(),
+            "rejected source binding must not register a checkpoint marker"
+        );
+        assert!(
+            source
+                .turn(CoverageSchemaVersion::V2, "synthetic-turn-0")
+                .is_some()
+        );
+        assert!(
+            prepare_native_versioned_reasoning_coverage_plan(
+                &payload,
+                request("different-capture", "claude_code"),
+            )
+            .await
+            .is_err(),
+            "capture session drift must reject the existing proof binding"
+        );
+        assert!(
+            prepare_native_versioned_reasoning_coverage_plan(
+                &payload,
+                request(native::CAPTURE, "codex"),
+            )
+            .await
+            .is_err(),
+            "provider drift must reject the existing proof binding"
+        );
+        let mut changed_source =
+            reasoning_coverage_test_payload(vec![b"synthetic sealed proof".to_vec()]);
+        native::tamper_carrier_locator(&mut changed_source.reasoning);
+        assert!(
+            prepare_native_versioned_reasoning_coverage_plan(
+                &changed_source,
+                request(native::CAPTURE, "claude_code"),
+            )
+            .await
+            .is_err(),
+            "a changed sealed source locator must fail before identity preparation"
+        );
+        for state in [
+            ReasoningSourceDisposition::Ordinary,
+            ReasoningSourceDisposition::Unproven,
+            ReasoningSourceDisposition::Unmapped,
+            ReasoningSourceDisposition::HelperUnsupported,
+        ] {
+            let mut non_native =
+                reasoning_coverage_test_payload(vec![b"synthetic sealed proof".to_vec()]);
+            non_native.reasoning = state;
+            assert!(
+                prepare_native_versioned_reasoning_coverage_plan(
+                    &non_native,
+                    request(native::CAPTURE, "claude_code"),
+                )
+                .await
+                .is_err(),
+                "only the sealed NativeProven payload may prepare a v2 identity"
+            );
+        }
+    }
 
     #[tokio::test]
     async fn cov2_all_marker_constructors_keep_version() {

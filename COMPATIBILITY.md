@@ -1090,9 +1090,33 @@ revisions but rejects persisted v2. A frozen v1 terminal receipt without an
 action checkpoint remains valid. Rejected replay preserves a pre-existing
 repairable cleanup marker for doctor/GC. The marker JSON stays at
 `schema_version: 3`, independent of the claim version. This is an internal
-checkpoint contract; it adds no SQL DDL or public CLI surface. Production v2
-identity writing, pending v2 replay, OpenCode Session capture and Source A
-native admission remain separate later work.
+checkpoint contract; it adds no SQL DDL or public CLI surface. Pending v2
+replay, OpenCode Session capture and Source A native admission remain separate
+later work.
+
+### Sealed native v2 identity checkpoint commit (COV2-19)
+
+A checkpoint carrying an existing verified `NativeProven` payload can now
+prepare a version-keyed private identity plan. The source-derived claim set
+must equal the submitted versioned sidecar, and the concrete store checks its
+marker fences before handing a store-bound transaction adapter to
+HistoryManager. That single ref-CAS transaction writes the private v1/v2
+records and maps with the catalog, revisions, claims and object index, subject
+to the shared 4096-record/1-MiB encoded budget. A replay of that native
+companion requires authenticated matching private records as well as identical
+coverage revisions. An ordinary versioned checkpoint with the same ID and
+claims cannot be acknowledged as a native replay, including when it wins a
+marker-registration race. If a later checkpoint supersedes the same
+version/key slot in the current private session map, replay of the older
+native checkpoint returns a non-retryable replay-payload conflict. Its
+committed data remains intact and can be inspected with `libra agent doctor`.
+An invalid or unauthenticated private map reports a store failure with a
+content-free doctor diagnostic rather than being treated as another payload.
+SQL or capacity failure gives no success ACK. The older v1 writer and its
+canonical bytes remain unchanged.
+This internal producer path does not activate OpenCode live/import Sessions,
+durable v2 pending replay or native archival. A synthetic sealed payload does
+not prove real provider Source A; unproven fields remain partial.
 
 ### OG-20 private import transport
 

@@ -9488,6 +9488,8 @@ fn reasoning_bound_identity_accessor_has_closed_adapter_caller() {
                 "prepare_reasoning_identity_inputs",
                 "prepare_reasoning_coverage_plan_from_disposition",
                 "prepare_reasoning_coverage_plan_for_keys",
+                "native_versioned_source_tag",
+                "prepare_native_versioned_reasoning_coverage_plan",
             ],
         ),
         (
@@ -9568,6 +9570,40 @@ fn reasoning_bound_identity_accessor_has_closed_adapter_caller() {
             assert!(!calls.is_empty(), "{name} has no actual closed consumer");
         }
     }
+    // COV2-19 may reuse the one sealed disposition adapter only from the
+    // checkpoint planner and its source-tag binding. Pin the exact module
+    // and call sites so this allowlist cannot grow by a namesake elsewhere.
+    let identity_borrowers = actual
+        .get("prepare_reasoning_identity_inputs_from_disposition")
+        .expect("the closed identity adapter must have callers");
+    let checkpoint_path = "src/internal/ai/capture/checkpoint.rs".to_owned();
+    assert_eq!(
+        identity_borrowers.len(),
+        4,
+        "unexpected native identity borrower"
+    );
+    assert_eq!(
+        identity_borrowers.iter().cloned().collect::<BTreeSet<_>>(),
+        BTreeSet::from([
+            (
+                checkpoint_path.clone(),
+                "prepare_reasoning_identity_inputs".to_owned()
+            ),
+            (
+                checkpoint_path.clone(),
+                "prepare_reasoning_coverage_plan_for_keys".to_owned()
+            ),
+            (
+                checkpoint_path.clone(),
+                "native_versioned_source_tag".to_owned()
+            ),
+            (
+                checkpoint_path,
+                "prepare_native_versioned_reasoning_coverage_plan".to_owned(),
+            ),
+        ]),
+        "native identity access must remain inside the closed checkpoint adapter"
+    );
     let lower =
         fs::read_to_string(repo_root().join("src/internal/ai/observed_agents/reasoning.rs"))
             .unwrap();

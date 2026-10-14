@@ -165,6 +165,35 @@ cleanup marker for doctor/GC.
 
 The persisted marker JSON remains `schema_version: 3`, independent of the
 claim's coverage version. This step adds no SQL schema or public command
-change. It does not activate production v2 identity writing, pending v2
-persistence/replay, OpenCode Session capture, native issuer authority, or
-reasoning archival; those remain with their later task cards and Source A.
+change. Pending v2 persistence/replay, OpenCode Session capture, native issuer
+authority, and reasoning archival remain with later task cards and Source A.
+
+## Sealed native v2 identity commit (COV2-19)
+
+The private v2 identity plan is derived only from a `NativeProven` checkpoint
+payload whose existing capture proof and binding match the request. Its typed
+turns determine a canonical `(coverage version, logical key, digest,
+completeness)` claim set; the submitted version sidecar must match exactly.
+The concrete checkpoint store verifies those same claims against the marker
+fences and registers the marker before it gives a private transaction adapter
+to HistoryManager. The native companion itself cannot be passed as a low-level
+`txn_extra`. The winning ref-CAS transaction authenticates retained maps,
+checks claim ownership and the shared 4096-entry/1-MiB budget, then commits
+sealed v1/v2 records and maps with catalog, revisions, claims, ref, and object
+index. On a replay, matching committed revisions alone do not prove that this
+native companion was committed: the store also authenticates the retained
+private record and map for every bound version/key against the source's
+checkpoint, revision, fence, kind, and descriptor. It applies this check to
+the initial replay probe and to a concurrent writer winning marker registration.
+If a later checkpoint has superseded the same version/key slot in the current
+session map, an older replay returns a non-retryable replay-payload conflict:
+the current map cannot prove its historical native identity. The earlier
+checkpoint remains committed; operators can inspect it with `libra agent doctor`.
+An invalid or unauthenticated private map instead reports a store failure and
+logs only a fixed diagnostic stage with the doctor hint; it never becomes a
+successful replay or exposes private bytes.
+A failure leaves no successful checkpoint ACK. The frozen v1 writer and
+v1 byte domains remain unchanged. This writer capability is internal;
+OpenCode live/import activation, durable v2 pending replay, real provider
+Source A proof, and native archival remain gated by later work. Synthetic
+sealed fixtures exercise transaction behavior but confer no issuer authority.

@@ -1386,7 +1386,8 @@ fn opencode_verified_partial_live_capture_keeps_native_and_replay_closed() {
             "V2 import rule requiring partial",
             "zero bytes and zero redaction metrics",
             "debug build, not the official 0.30.49 release",
-            "BASE's real import gate",
+            "historical OpenCode imports, sessions containing unsupported reasoning state",
+            "remain rejected with `LBR-AGENT-020`; their repair is deferred",
             "formal release checks remain pending",
             "locally on macOS",
             "CI; synthetic tests do not prove native source",
@@ -1456,7 +1457,8 @@ fn opencode_verified_partial_live_capture_keeps_native_and_replay_closed() {
             "V2 import 对 partial projection 的 zero bytes/zero redaction metrics 规则不放宽",
             "debug build，不是正式",
             "0.30.49 release",
-            "BASE 真实 import 门",
+            "含 unsupported reasoning state 的历史 OpenCode import",
+            "仍以 `LBR-AGENT-020` 拒绝，修复已延期",
             "macOS 本机运行，不进 CI",
             "synthetic 不证明",
         ] {
@@ -1471,6 +1473,83 @@ fn opencode_verified_partial_live_capture_keeps_native_and_replay_closed() {
             "`originProof`",
         ] {
             assert_contains(section, label, opaque_hint);
+        }
+    }
+}
+
+#[test]
+fn opencode29_ordinary_extension_is_distinct_from_frozen_native_source() {
+    for (label, document, heading, import_condition, import_limit, source_limit, sample_limit) in [
+        (
+            "commands/agent.md",
+            AGENT_CMD_DOC_EN,
+            "### Current official OpenCode ordinary source baseline",
+            "historical OpenCode imports, sessions containing unsupported reasoning state",
+            "remain rejected with `LBR-AGENT-020`; their repair is deferred",
+            "Source A remains UNPROVEN",
+            "does not establish native fields, complete reasoning",
+        ),
+        (
+            "commands/zh-CN/agent.md",
+            AGENT_CMD_DOC_ZH,
+            "### 当前官方 OpenCode 普通来源基线",
+            "含 unsupported reasoning state 的历史 OpenCode import",
+            "仍以 `LBR-AGENT-020` 拒绝，修复已延期",
+            "Source A 仍为 UNPROVEN",
+            "不证明 native 字段、完整 reasoning",
+        ),
+        (
+            "tracing/agent.md",
+            AGENT_DOC,
+            "### Current official OpenCode ordinary source baseline",
+            "historical OpenCode imports, sessions containing unsupported reasoning state",
+            "remain rejected with `LBR-AGENT-020`; their repair is deferred",
+            "Source A remains UNPROVEN",
+            "does not establish native fields, complete reasoning",
+        ),
+        (
+            "COMPATIBILITY.md",
+            COMPATIBILITY_DOC,
+            "### Current official OpenCode ordinary source baseline",
+            "historical OpenCode imports, sessions containing unsupported reasoning state",
+            "remain rejected with `LBR-AGENT-020`; their repair is deferred",
+            "Source A remains UNPROVEN",
+            "does not establish native fields, complete reasoning",
+        ),
+    ] {
+        let heading_line = format!("\n{heading}\n");
+        assert_eq!(
+            document.matches(heading_line.as_str()).count(),
+            1,
+            "{label} must have one current ordinary source baseline section"
+        );
+        let (_, section) = document
+            .split_once(heading_line.as_str())
+            .unwrap_or_else(|| {
+                panic!("{label} must disclose its current ordinary source baseline")
+            });
+        let section = section.split("\n## ").next().unwrap_or(section);
+        let section = section.split("\n### ").next().unwrap_or(section);
+        let readable = section.split_whitespace().collect::<Vec<_>>().join(" ");
+        for required in [
+            "2.0.29",
+            "042d0832f5f3a73eaa039a58a7d565776f6d4290",
+            "2.0.26",
+            "100",
+            "599",
+            "partial",
+            "automatic capture",
+            "`Unproven` / `Partial`",
+            "unsupported reasoning state",
+            "`LBR-AGENT-020`",
+            "extraction.model",
+            "empty-files consistency",
+            import_condition,
+            import_limit,
+            source_limit,
+            sample_limit,
+        ] {
+            assert_contains(&readable, label, required);
         }
     }
 }

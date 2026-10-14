@@ -184,3 +184,9 @@ pub fn event_spec(name: &str) -> Option<&'static OpenCodeHookEventSpec> {
 pub fn recognizes_event(name: &str) -> bool {
     event_spec(name).is_some_and(|spec| spec.kind.is_some())
 }
+
+/// Current official ordinary-capture source identity. The private acceptance
+/// constants above retain their historical exact identity and helper contract.
+/// An official version/source match never approves a native producer or issuer.
+pub const CURRENT_OFFICIAL_PIN: &str = "2.0.29";
+pub const CURRENT_OFFICIAL_COMMIT: &str = "042d0832f5f3a73eaa039a58a7d565776f6d4290";

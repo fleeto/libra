@@ -480,3 +480,65 @@ fn npr_18_opt_in() {
         }
     }
 }
+
+#[test]
+fn current_official_identity_does_not_rewrite_frozen_native_baseline() {
+    use libra::internal::ai::hooks::providers::opencode::events::{
+        CURRENT_OFFICIAL_COMMIT, CURRENT_OFFICIAL_PIN,
+    };
+    use sha2::{Digest, Sha256};
+    assert_eq!(CURRENT_OFFICIAL_PIN, "2.0.29");
+    assert_eq!(
+        CURRENT_OFFICIAL_COMMIT,
+        "042d0832f5f3a73eaa039a58a7d565776f6d4290"
+    );
+    assert_eq!(OPENCODE_OFFICIAL_BASE_PIN, "2.0.26");
+    assert_eq!(OPENCODE_COMMIT, "9b4ec5714d481559990db0a816d5dec19541a814");
+    assert_eq!(OPENCODE_PIN, "2.0.26-libra-native.1");
+    let fixture: Value = serde_json::from_str(FIXTURE).expect("historical synthetic fixture");
+    assert_eq!(fixture["opencode_pin"], OPENCODE_OFFICIAL_BASE_PIN);
+    assert_ne!(CURRENT_OFFICIAL_COMMIT, OPENCODE_COMMIT);
+    // Frozen dc1 prefixes are measured from committed bytes, never generated
+    // from the new namespace or a rewritten fixture postimage.
+    for (bytes, length, expected_sha) in [
+        (
+            include_bytes!("fixtures/agent_transcripts/MANIFEST.md").as_slice(),
+            8725usize,
+            "52539a4cd4d3f01406ea9dae05352a7309fcac27746217e3d89a5c41e003c0d6",
+        ),
+        (
+            include_bytes!("fixtures/agent_transcripts/opencode/MANIFEST.md").as_slice(),
+            4466usize,
+            "ed31d690f373f742eabc0ec25e04a266a202324ba6522d01b7810e1b949d573d",
+        ),
+    ] {
+        let frozen = bytes
+            .get(..length)
+            .expect("original manifest prefix must remain");
+        assert_eq!(
+            hex::encode(Sha256::digest(frozen)),
+            expected_sha,
+            "historical MANIFEST prefix was modified"
+        );
+    }
+    for (label, manifest) in [
+        ("opencode/MANIFEST.md", MANIFEST),
+        (
+            "MANIFEST.md",
+            include_str!("fixtures/agent_transcripts/MANIFEST.md"),
+        ),
+    ] {
+        assert!(
+            manifest.contains(&format!(
+                "current_official_opencode_pin: {CURRENT_OFFICIAL_PIN}"
+            )),
+            "{label} must declare the current ordinary version"
+        );
+        assert!(
+            manifest.contains(&format!(
+                "current_official_opencode_commit: {CURRENT_OFFICIAL_COMMIT}"
+            )),
+            "{label} must declare the current ordinary source commit"
+        );
+    }
+}

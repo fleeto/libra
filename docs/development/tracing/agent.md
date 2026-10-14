@@ -2933,6 +2933,54 @@ public reason/metadata enum value；本构建的 checkpoint/export 读端读取�
 V2 import 对 partial projection 的 zero bytes/zero redaction metrics 规则不放宽。
 
 通过 focused 检查和源码评审后提供的本机临时构建是 debug build，不是正式
-0.30.49 release。BASE 真实 import 门和正式发布门须各自取得实际证据后通过。
+0.30.49 release。含 unsupported reasoning state 的历史 OpenCode import
+仍以 `LBR-AGENT-020` 拒绝，修复已延期。其它正式发布门继续待验。
 OpenCode Session/账号/模型检查只在 macOS 本机运行，不进 CI；synthetic 不证明
 native 来源。
+
+
+### Current official OpenCode ordinary source baseline
+
+The current official ordinary source reference is OpenCode **2.0.29** at
+`042d0832f5f3a73eaa039a58a7d565776f6d4290`. It uses an explicitly measured
+official binary and a server/exporter of that same version for local acceptance.
+The frozen 2.0.26 source record, existing JSON fixtures and separate private
+`.1` / `.2` identities retain their original meanings. The old private `.1`
+acceptance helper still accepts only its exact version, binary and build ID.
+
+Official version/source matching does not approve a native producer, register
+an issuer or prove any opaque field. Ordinary exporter trust is never native
+producer approval or Source A. The separate native.3 registration and real
+field-source gates remain independent and do not block ordinary capture;
+151 mechanical producer cases are not
+whole-producer source/full acceptance.
+
+The 2.0.29 idle header requires string type/message and optional integer HTTP
+status from 100 to 599; malformed or sensitive error members stay partial.
+Offline synthetic tests cover that adapter; real idle-error failure output
+remains unproven.
+
+This ordinary baseline is scoped to automatic capture, a durable checkpoint and the
+ordinary redacted export of that checkpoint, with prompt, model and token
+projections compared to the authorized source. Unsupported reasoning state is
+discarded. The source/snapshot status pair is `Unproven` / `Partial`: `Unproven`
+is the internal source classification, while `Partial` is the persisted
+completeness value. The associated reasoning text/time is omitted. The model comparison uses `extraction.model` from the
+native assistant record. The top-level `model` is hook metadata and can differ.
+Token totals use distinct native assistant records without counting the session
+summary twice. A no-tool sample proves only empty-files consistency, not a
+write/edit/apply_patch positive.
+
+For historical OpenCode imports, sessions containing unsupported reasoning state
+remain rejected with `LBR-AGENT-020`; their repair is deferred. This automatic
+capture baseline does not enable historical import, pending replay or native
+admission. Ordinary exporter trust is never native producer approval or Source A.
+Source A remains UNPROVEN.
+
+Reuse earlier automatic-capture evidence only after checking the final source
+and configuration and verifying readback with the actual new binary. Unverified
+checks remain pending. A successful ordinary sample does not establish native
+fields, complete reasoning, real idle.error failures, automatic terminal
+completion or full-suite acceptance. Real OpenCode Session/account/model checks
+run locally on macOS and stay outside CI. Metadata-only, empty output and skipped
+checks do not count as content acceptance.

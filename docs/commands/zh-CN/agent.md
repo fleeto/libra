@@ -906,6 +906,43 @@ public reason/metadata enum value；本构建的 checkpoint/export 读端读取�
 V2 import 对 partial projection 的 zero bytes/zero redaction metrics 规则不放宽。
 
 通过 focused 检查和源码评审后提供的本机临时构建是 debug build，不是正式
-0.30.49 release。BASE 真实 import 门和正式发布门须各自取得实际证据后通过。
+0.30.49 release。含 unsupported reasoning state 的历史 OpenCode import
+仍以 `LBR-AGENT-020` 拒绝，修复已延期。其它正式发布门继续待验。
 OpenCode Session/账号/模型检查只在 macOS 本机运行，不进 CI；synthetic 不证明
 native 来源。
+
+
+### 当前官方 OpenCode 普通来源基线
+
+当前官方ordinary来源参考为OpenCode **2.0.29** /
+`042d0832f5f3a73eaa039a58a7d565776f6d4290`。本机验收显式选择已测量的
+官方binary和同版本server/exporter。冻结2.0.26 source record、全部既有JSON
+fixture及私有 `.1` / `.2` 保留原身份；旧 `.1` helper只接收原精确version、
+binary和build ID。
+
+官方版本/来源匹配不批准 native producer，不登记issuer或证明opaque字段。
+普通exporter trust不是native来源授权；Source A仍独立，native.3登记不阻塞
+普通基线。151个机械producer案例不是whole-producer source/full验收。
+
+2.0.29 idle header 要求 string type/message，以及可选的 100 到 599 整数
+HTTP status；错型或敏感 error 保持 partial。adapter 的离线 synthetic 测试
+不证明真实 idle.error 失败输出。
+
+本普通基线验收自然 automatic capture、durable checkpoint 及该 checkpoint 的
+普通脱敏 export，并将 prompt、model、token 投影与已授权源比较。删除
+unsupported reasoning state 后，来源/已存 snapshot 的状态对为 `Unproven` / `Partial`：
+`Unproven` 仅指内部 source 分类，`Partial` 才是持久化 completeness 值。
+关联 reasoning text/time 不保留。model 比较使用 native assistant record 的
+`extraction.model`；顶层 `model` 来自 hook metadata，可以不同。token 只累加
+不同 native assistant record，不重复累加 session summary。无工具调用的样本
+只证明 empty-files consistency（空文件一致性），不证明 write/edit/apply_patch 正例。
+
+含 unsupported reasoning state 的历史 OpenCode import
+仍以 `LBR-AGENT-020` 拒绝，修复已延期。本 automatic capture 基线不启用历史
+import、pending replay 或 native admission。官方版本/来源匹配不批准 native producer，
+普通 exporter trust 不是 native producer 批准或 Source A。Source A 仍为 UNPROVEN。
+
+只有核对最终源码、配置，并用实际新 binary 验证读回后，才能复用此前的自动采集
+证据；未核实项保持待验。成功普通样本不证明 native 字段、完整 reasoning、真实
+idle.error 失败、自动终态或 full-suite 验收。真实 OpenCode Session/账号/模型检查
+只在 macOS 本机运行，不进 CI；metadata-only、空输出或 skip 不算内容验收。

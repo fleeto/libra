@@ -108,3 +108,19 @@ route test runs the frozen dispatch against a signed v2 artifact. Do not
 regenerate this oracle from a later decoder. This is
 historical reader compatibility evidence, never native provider-origin
 evidence.
+
+
+## Current official ordinary-export source extension
+
+current_official_opencode_pin: 2.0.29
+current_official_opencode_commit: 042d0832f5f3a73eaa039a58a7d565776f6d4290
+
+These current-source fields are distinct from the frozen `opencode_pin` and
+`opencode_commit` above. All existing JSON bytes and private `.1`/`.2`
+descriptors remain historical; none is relabeled as a live 2.0.29 capture or
+native Source A. The new inline deterministic `opencode29_idle_fixture` in
+`opencode_reasoning.rs` follows the public 2.0.29 optional idle SessionError
+shape: required string type/message, optional integer status 100..599 and
+optional response body. Response/unknown/malformed/opaque error branches stay
+partial after safe projection. These synthetic mechanism cases are not
+provider or account evidence; real Session/model checks stay macOS local.

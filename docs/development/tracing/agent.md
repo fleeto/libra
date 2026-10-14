@@ -2889,3 +2889,50 @@ COV2-25 的私有 key-owner verifier 先以既有仓库 key、capture scope、st
 OpenCode 2.0.29 的 idle 消息可以带可选 `error`。普通投影只保留字符串 `type`、`message` 和可选的 100..599 整数 `status`；缺省 error 不改变 ordinary 状态。缺少必需字段、字段错型或非法 status 会删除整个 error 并保持 partial。`response` 与未知成员被剥离并保持 partial；具名 `signature`、`redactedData` 或 `reasoningEncryptedContent` hint 则删除整个 error。这个 idle 专用校验不改变 retry、compaction 或 tool 的既有 structured-error 处理。
 
 本卡三个新回归均为 synthetic；真实模型 Session 的 idle.error 失败输出仍未证明，普通成功会话不替代该证据。此投影不认证 provider/native 来源，不授归档权限，也不增加 CI 的 Session 或模型调用。
+
+
+### OpenCode 普通 partial live checkpoint
+
+自动 live 采集可以保存已授权 OpenCode export 经安全擦除后的普通副本。
+checkpoint 始终标为 `Unproven` / `Partial`；保存内容不代表 reasoning 完整
+覆盖或 provider native 来源。至少要保留一个含实际可用内容的已知非 reasoning
+text/message part；只有 metadata 或已擦除 reasoning 骨架的源仍拒绝。
+该路径只支持当前 native `messages` export；旧 classic `info` / `parts` export 仍排除。
+
+该 storage-only 路径要求严格单 JSON、exporter 授权、精确会话映射、有界脱敏及
+repository-scoped source HMAC 绑定全部成功。源 `info.id` 必须等于所选 provider
+session。owning carrier 在绑定时记录 `repo_id`、Libra session、provider session
+及 agent kind，并与实际 checkpoint request 比较。HMAC 是 opaque string，格式
+正确本身不验证 scope，也不证明 native 来源。generic ordinary consumer 继续拒绝
+`Unproven`。
+
+unsupported reasoning state（包括 `reasoningField`）连同关联 reasoning text/time
+全部删除。opaque hints 包括 `signature`、`redactedData`、
+`reasoningEncryptedContent`、`thoughtSignature`、`originProof`。原始解析树任意
+位置出现 `originProof` key（包括错型或未知嵌套值）或 sealed candidate 都不能走
+该 fallback。只有完成擦除和 Redactor 的结果可入库，metadata flag 不能授此权限。
+
+在这个已验证的 storage-only 路径，`source_authorization_mismatch` 也表示删除了
+reasoning 或 unrecognized data；exporter 授权已经成功。其它路径保留原拒绝含义。
+该 marker 仍为 `Partial`，Source A 仍为 UNPROVEN。不创建 reasoning artifact、
+私有 reasoning identity、Complete coverage claim 或 native ACK。
+
+每份 snapshot 的 source 输入单独受上限约束（最多 16 MiB）。不同 idle action
+可以在 content-addressed storage 内保存重复 whole-source snapshot。每个 Session
+没有累计总量上限，保留内容可能随 idle 次数 × source 大小增长，另有脱敏及存储开销；
+本路径不新增跨 idle deduplication 协议。已有 action、
+generation、lease、scoped tombstone 和 ref-CAS 围栏保持。只有实际确认 durable
+partial checkpoint 写入后才产生普通 lifecycle 成功收据；直接写入失败保持 dirty
+或 content-free pending intent，不产生成功 ACK、不提前推进 generation。
+当前不支持 durable partial payload replay。
+
+此 unsupported-state 源的显式 import 仍以 `LBR-AGENT-020` 拒绝，live 修复不启用
+import 或 native admission。普通 payload 仍为单个已脱敏 JSON document，无新增
+public reason/metadata enum value；本构建的 checkpoint/export 读端读取普通 payload。
+旧二进制兼容必须另外实测读回，不能仅由 source 形状推断。
+V2 import 对 partial projection 的 zero bytes/zero redaction metrics 规则不放宽。
+
+通过 focused 检查和源码评审后提供的本机临时构建是 debug build，不是正式
+0.30.49 release。BASE 真实 import 门和正式发布门须各自取得实际证据后通过。
+OpenCode Session/账号/模型检查只在 macOS 本机运行，不进 CI；synthetic 不证明
+native 来源。

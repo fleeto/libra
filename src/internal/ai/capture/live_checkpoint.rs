@@ -51,8 +51,9 @@ use crate::{
                 reserve_capture_catalog_until,
             },
             snapshot::{
-                CaptureSnapshotCompleteness, CaptureSnapshotPartialReason, CaptureSnapshotPolicy,
-                CaptureSnapshotProjection, CaptureSnapshotService, DeadlineExtractionResult,
+                CaptureSnapshot, CaptureSnapshotCompleteness, CaptureSnapshotPartialReason,
+                CaptureSnapshotPolicy, CaptureSnapshotProjection, CaptureSnapshotService,
+                DeadlineExtractionResult, VerifiedOrdinaryPartialSnapshot,
             },
         },
         capture_scope::{CaptureCommitDeadline, CaptureScope},
@@ -1048,6 +1049,7 @@ pub(super) async fn write_committed_checkpoint<P: LiveExportLeasePort>(
     // content write.
     let mut claim_channel: &'static str = "live";
     let mut export_runner = None;
+    let mut verified_partial = None;
     let catalog_reservation = match binding.transcript_exporter() {
         None => catalog_reservation,
         Some(exporter) => match run_export_stage(
@@ -1090,6 +1092,20 @@ pub(super) async fn write_committed_checkpoint<P: LiveExportLeasePort>(
                 export_runner = Some(runner);
                 *catalog_reservation
             }
+            ExportStage::VerifiedPartial {
+                catalog_reservation,
+                runner,
+                source,
+            } => {
+                // Storage-only partial content has no coverage-v1 or native
+                // identity reservation. The checkpoint stage still builds
+                // the existing empty scope/tombstone/catalog CAS companion.
+                claim_channel = "export";
+                live_reservation = None;
+                verified_partial = Some(*source);
+                export_runner = Some(runner);
+                *catalog_reservation
+            }
         },
     };
 
@@ -1118,10 +1134,15 @@ pub(super) async fn write_committed_checkpoint<P: LiveExportLeasePort>(
             subagent_sources,
             subagent_discovery_warning,
             report_value,
-            transcript_is_authorized,
-            transcript_snapshot_projection,
-            transcript_redacted,
-            reasoning: live_reasoning,
+            source: match verified_partial {
+                Some(source) => CheckpointStageSource::VerifiedPartial(source),
+                None => CheckpointStageSource::Captured {
+                    transcript_is_authorized,
+                    projection: transcript_snapshot_projection,
+                    transcript: transcript_redacted,
+                    reasoning: live_reasoning,
+                },
+            },
             claim_channel,
             live_reservation,
         },
@@ -1151,6 +1172,14 @@ pub(super) enum ExportStage<'a, P: LiveExportLeasePort> {
         transcript: RedactedBytes,
         claims: Box<CaptureClaimReservation>,
         reasoning: Box<ReasoningSourceDisposition>,
+    },
+    /// Strictly scrubbed OpenCode ordinary content with an owning,
+    /// scope-bound partial permit. It bypasses complete-turn reservation and
+    /// can reach only the direct storage-only checkpoint consumer.
+    VerifiedPartial {
+        catalog_reservation: Box<LiveCaptureReservation>,
+        runner: LiveExportRunner<'a, P>,
+        source: Box<VerifiedOrdinaryPartialSnapshot>,
     },
 }
 
@@ -1183,6 +1212,30 @@ struct ExportedSource {
     transcript: RedactedBytes,
     reservation: CaptureClaimReservation,
     reasoning: ReasoningSourceDisposition,
+}
+
+enum PreparedExportSource {
+    Captured(ExportedSource),
+    VerifiedPartial(VerifiedOrdinaryPartialSnapshot),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExportSnapshotRoute {
+    Captured,
+    VerifiedPartial,
+    Rejected,
+}
+
+/// Select the owning source consumer without changing default readiness.
+/// This pure boundary is tested without a provider exporter or Session.
+fn export_snapshot_route(snapshot: &CaptureSnapshot) -> ExportSnapshotRoute {
+    if snapshot.has_verified_ordinary_partial_permit() {
+        ExportSnapshotRoute::VerifiedPartial
+    } else if snapshot.rejects_capture_source_consumer() {
+        ExportSnapshotRoute::Rejected
+    } else {
+        ExportSnapshotRoute::Captured
+    }
 }
 
 /// The lease disposition, structured `reason=` and tracing fields of each
@@ -1320,7 +1373,37 @@ pub(super) async fn run_export_stage<'a, P: LiveExportLeasePort>(
             ),
             CaptureSnapshotPolicy::with_deadline(Some(export_deadline.monotonic())),
         );
-        if snapshot.rejects_capture_source_consumer() {
+        let source_route = export_snapshot_route(&snapshot);
+        if source_route == ExportSnapshotRoute::VerifiedPartial {
+            // This consumer owns the source's strict pre-scrub permit. It
+            // independently binds the actual redacted bytes to the current
+            // scope/HMAC and deadline; a generic Unproven flag cannot enter.
+            let storage = util::try_get_storage_path(Some(repo_path.to_path_buf()))
+                .map_err(|_| {
+                    ExportStageExit::CoverageFailed(anyhow!(
+                        "verified partial export storage scope is unavailable"
+                    ))
+                })?;
+            let source = snapshot
+                .try_into_verified_ordinary_partial_in_scope_until(
+                    conn,
+                    scope,
+                    &storage,
+                    repo_path,
+                    export_deadline.monotonic(),
+                )
+                .await
+                .map_err(|_| {
+                    ExportStageExit::CoverageFailed(anyhow!(
+                        "verified partial export did not retain its source binding"
+                    ))
+                })?;
+            merge_redaction_report_into(report_value, source.redaction_report());
+            // Do not run the coverage-v1 normalizer: its all-incomplete skip
+            // is not proof that this nonzero partial source was persisted.
+            return Ok(PreparedExportSource::VerifiedPartial(source));
+        }
+        if source_route == ExportSnapshotRoute::Rejected {
             return Err(ExportStageExit::SourceRejected(SourcePreparationRejected.into()));
         }
         // Keep an incomplete source on its existing typed outcome. In
@@ -1477,7 +1560,7 @@ pub(super) async fn run_export_stage<'a, P: LiveExportLeasePort>(
                 "transcript export: terminal action has no new turns; writing strict completion checkpoint"
             );
         }
-        Ok(ExportedSource {
+        Ok(PreparedExportSource::Captured(ExportedSource {
             projection,
             transcript,
             reservation: CaptureClaimReservation {
@@ -1487,22 +1570,27 @@ pub(super) async fn run_export_stage<'a, P: LiveExportLeasePort>(
                 reasoning: identity_plan.map(Box::new),
             },
             reasoning,
-        })
+        }))
     }
     .await;
     match source {
-        Ok(ExportedSource {
+        Ok(PreparedExportSource::Captured(ExportedSource {
             projection,
             transcript,
             reservation,
             reasoning,
-        }) => Ok(ExportStage::Proceed {
+        })) => Ok(ExportStage::Proceed {
             catalog_reservation: Box::new(catalog_reservation),
             runner,
             projection: Box::new(projection),
             transcript,
             claims: Box::new(reservation),
             reasoning: Box::new(reasoning),
+        }),
+        Ok(PreparedExportSource::VerifiedPartial(source)) => Ok(ExportStage::VerifiedPartial {
+            catalog_reservation: Box::new(catalog_reservation),
+            runner,
+            source: Box::new(source),
         }),
         Err(exit) => {
             let (disposition, reason, log) =
@@ -1558,6 +1646,48 @@ pub(super) async fn run_export_stage<'a, P: LiveExportLeasePort>(
     }
 }
 
+/// Source ownership at the checkpoint stage. The partial branch cannot be
+/// rebuilt from a disposition, snapshot projection, or metadata flag.
+enum CheckpointStageSource {
+    Captured {
+        transcript_is_authorized: bool,
+        projection: Option<CaptureSnapshotProjection>,
+        transcript: RedactedBytes,
+        reasoning: ReasoningSourceDisposition,
+    },
+    VerifiedPartial(VerifiedOrdinaryPartialSnapshot),
+}
+
+impl CheckpointStageSource {
+    fn is_verified_partial(&self) -> bool {
+        matches!(self, Self::VerifiedPartial(_))
+    }
+
+    fn transcript_is_authorized(&self) -> bool {
+        match self {
+            Self::Captured {
+                transcript_is_authorized,
+                ..
+            } => *transcript_is_authorized,
+            Self::VerifiedPartial(_) => true,
+        }
+    }
+
+    fn transcript(&self) -> &RedactedBytes {
+        match self {
+            Self::Captured { transcript, .. } => transcript,
+            Self::VerifiedPartial(source) => source.transcript(),
+        }
+    }
+
+    fn projection(&self) -> Option<CaptureSnapshotProjection> {
+        match self {
+            Self::Captured { projection, .. } => projection.clone(),
+            Self::VerifiedPartial(source) => Some(source.projection()),
+        }
+    }
+}
+
 /// The checkpoint stage's inputs other than the export runner token.
 pub(super) struct CheckpointStageInput<'a> {
     conn: &'a sea_orm::DatabaseConnection,
@@ -1580,10 +1710,7 @@ pub(super) struct CheckpointStageInput<'a> {
     subagent_sources: Vec<crate::internal::ai::subagent_content::DiscoveredSubagentContent>,
     subagent_discovery_warning: Option<&'a str>,
     report_value: serde_json::Value,
-    transcript_is_authorized: bool,
-    transcript_snapshot_projection: Option<CaptureSnapshotProjection>,
-    transcript_redacted: RedactedBytes,
-    reasoning: ReasoningSourceDisposition,
+    source: CheckpointStageSource,
     claim_channel: &'static str,
     live_reservation: Option<CaptureClaimReservation>,
 }
@@ -1745,15 +1872,16 @@ pub(super) async fn run_checkpoint_stage<P: LiveExportLeasePort>(
         subagent_sources,
         subagent_discovery_warning,
         mut report_value,
-        transcript_is_authorized,
-        transcript_snapshot_projection,
-        transcript_redacted,
-        reasoning,
+        source,
         claim_channel,
         live_reservation,
     } = input;
     let runner_held = runner.is_some();
+    let verified_partial = source.is_verified_partial();
+    let transcript_is_authorized = source.transcript_is_authorized();
+    let transcript_snapshot_projection = source.projection();
     let exit = async {
+        let transcript_redacted = source.transcript();
         // From here until the coordinator durably consumes the reservation,
         // every fallible preparation step and every non-committing outcome
         // must release the scope-fenced claims it may have acquired above.
@@ -1770,6 +1898,14 @@ pub(super) async fn run_checkpoint_stage<P: LiveExportLeasePort>(
             claim_channel,
             claim_owner: failure_claim_owner.as_deref(),
         };
+        if verified_partial && (claim_channel != "export" || live_reservation.is_some()) {
+            return uncommitted(conn, &cleanup, capture_deadline, None, || {
+                Err(anyhow!(
+                    "verified partial source cannot carry coverage or native identity reservations"
+                ))
+            })
+            .await;
+        }
 
         // Coverage may have reserved work while the source helper was still
         // within budget. Do not launch the extraction worker after that
@@ -1794,8 +1930,9 @@ pub(super) async fn run_checkpoint_stage<P: LiveExportLeasePort>(
         let has_identity_plan = live_reservation
             .as_ref()
             .is_some_and(|reservation| reservation.reasoning.is_some());
-        if let Err(error) =
-            require_identity_plan_for_native_reasoning(&reasoning, has_identity_plan)
+        if let CheckpointStageSource::Captured { reasoning, .. } = &source
+            && let Err(error) =
+                require_identity_plan_for_native_reasoning(reasoning, has_identity_plan)
         {
             return uncommitted(conn, &cleanup, capture_deadline, None, || Err(error)).await;
         }
@@ -1831,7 +1968,7 @@ pub(super) async fn run_checkpoint_stage<P: LiveExportLeasePort>(
         let mut extraction_value = match capture_deadline {
             Some(deadline) => match CaptureSnapshotService::build_extraction_projection_until(
                 agent_kind,
-                transcript_is_authorized.then_some(&transcript_redacted),
+                transcript_is_authorized.then_some(transcript_redacted),
                 subagent_snapshots.children_omitted_for_deadline(),
                 deadline.monotonic(),
             )
@@ -1847,7 +1984,7 @@ pub(super) async fn run_checkpoint_stage<P: LiveExportLeasePort>(
             },
             None => build_extraction_metadata(
                 agent_kind,
-                transcript_is_authorized.then_some(&transcript_redacted),
+                transcript_is_authorized.then_some(transcript_redacted),
                 &subagent_snapshots.transcripts,
                 &subagent_extraction_warnings,
             ),
@@ -1889,7 +2026,6 @@ pub(super) async fn run_checkpoint_stage<P: LiveExportLeasePort>(
         // row and tree path, so a pending receipt retry addresses the same
         // durable checkpoint rather than creating a second one.
         let checkpoint_id = checkpoint_id.to_string();
-        let checkpoint_snapshot_projection = transcript_snapshot_projection.clone();
         let mut metadata = metadata;
         if let Some(obj) = metadata.as_object_mut() {
             obj.insert(
@@ -2069,14 +2205,30 @@ pub(super) async fn run_checkpoint_stage<P: LiveExportLeasePort>(
         // store. Every byte was already redacted above; the optional safe
         // projection makes a metadata-only compatibility fallback explicitly
         // partial rather than falsely claiming an authorized source snapshot.
-        let checkpoint_payload = match CheckpointRedactedPayload::from_redacted_capture_with_reasoning(
-            transcript_redacted,
-            checkpoint_snapshot_projection,
-            metadata_redacted,
-            lifecycle_events_redacted,
-            redaction_report_redacted,
-            reasoning,
-        ) {
+        let prepared_payload = match source {
+            CheckpointStageSource::Captured {
+                transcript,
+                projection,
+                reasoning,
+                ..
+            } => CheckpointRedactedPayload::from_redacted_capture_with_reasoning(
+                transcript,
+                projection,
+                metadata_redacted,
+                lifecycle_events_redacted,
+                redaction_report_redacted,
+                reasoning,
+            ),
+            CheckpointStageSource::VerifiedPartial(source) => {
+                CheckpointRedactedPayload::from_verified_ordinary_partial(
+                    source,
+                    metadata_redacted,
+                    lifecycle_events_redacted,
+                    redaction_report_redacted,
+                )
+            }
+        };
+        let checkpoint_payload = match prepared_payload {
             Ok(payload) => payload,
             Err(error) => {
                 return uncommitted(conn, &cleanup, capture_deadline, None, || {
@@ -2622,6 +2774,53 @@ pub(super) async fn run_checkpoint_stage<P: LiveExportLeasePort>(
         }
     }
     .await;
+    // A storage-only partial may not inherit a catalog-only successful
+    // outcome (AlreadyApplied, adopted, quarantined, or deferred). Confirm
+    // the actual scoped checkpoint/ref evidence before any success can
+    // advance the export generation. No partial payload is queued here.
+    let exit = if verified_partial
+        && matches!(
+            &exit,
+            CheckpointStageExit::Authorized
+                | CheckpointStageExit::Uncommitted(Ok(()))
+                | CheckpointStageExit::PostCheckpoint(Ok(()))
+        ) {
+        match TracesCheckpointStore::replay_status_for(
+            conn,
+            Some(scope),
+            checkpoint_id,
+            libra_session_id,
+            crate::internal::ai::traces::CheckpointScope::Committed,
+            capture_deadline,
+        )
+        .await
+        {
+            Ok(CheckpointReplayStatus::Complete) => exit,
+            Ok(CheckpointReplayStatus::PendingCleanup { .. }) => post_checkpoint(Err(anyhow!(
+                "verified partial checkpoint needs durable cleanup before completion"
+            ))),
+            Ok(CheckpointReplayStatus::Missing) => {
+                let cleanup = CheckpointReservationCleanup {
+                    session_id: libra_session_id,
+                    checkpoint_id,
+                    scope,
+                    claim_channel,
+                    claim_owner: None,
+                };
+                uncommitted(conn, &cleanup, capture_deadline, None, || {
+                    Err(anyhow!(
+                        "verified partial capture has no durable checkpoint; keep the receipt pending"
+                    ))
+                })
+                .await
+            }
+            Err(_) => post_checkpoint(Err(anyhow!(
+                "verified partial capture could not confirm its durable checkpoint"
+            ))),
+        }
+    } else {
+        exit
+    };
     let (disposition, reason, log) =
         checkpoint_stage_lease_disposition(&exit, libra_session_id, checkpoint_id);
     let settled = if let Some(runner) = runner {
@@ -2641,6 +2840,13 @@ pub(super) async fn run_checkpoint_stage<P: LiveExportLeasePort>(
             catalog_reservation,
             catalog_request,
         } => {
+            if verified_partial && !catalog_request.mutation().is_terminal() {
+                // A nonterminal no-checkpoint completion would retire this
+                // receipt despite losing its actual source. Keep the
+                // original reservation pending instead.
+                drop(catalog_reservation);
+                bail!("verified partial capture deadline elapsed before its checkpoint");
+            }
             settle_preapplied_without_checkpoint(
                 conn,
                 *catalog_reservation,
@@ -2648,7 +2854,11 @@ pub(super) async fn run_checkpoint_stage<P: LiveExportLeasePort>(
                 capture_finalizer_deadline_millis,
                 terminal_settlement_deadline,
             )
-            .await
+            .await?;
+            if verified_partial {
+                bail!("verified partial terminal capture remains content-free pending");
+            }
+            Ok(())
         }
         CheckpointStageExit::Uncommitted(result) | CheckpointStageExit::PostCheckpoint(result) => {
             result
@@ -3250,6 +3460,795 @@ pub(crate) mod tests {
             .unwrap();
         std::fs::create_dir_all(dir.path().join("objects")).unwrap();
         (dir, conn)
+    }
+
+    const VERIFIED_PARTIAL_CAPTURE: &str = "opencode__pure-partial-store";
+    const VERIFIED_PARTIAL_PROVIDER: &str = "pure-partial-store";
+    const VERIFIED_PARTIAL_TEXT: &str = "safe ordinary reply";
+    const VERIFIED_PARTIAL_CANARY: &str = "PRIVATE_ASSOCIATED_REASONING_CANARY";
+
+    /// Pure source/storage fixture. It never runs an exporter, CLI, provider
+    /// Session, hook parser, account lookup, or fake collection service.
+    struct VerifiedPartialStoreFixture {
+        _directory: tempfile::TempDir,
+        repo: std::path::PathBuf,
+        storage: std::path::PathBuf,
+        conn: sea_orm::DatabaseConnection,
+        scope: CaptureScope,
+    }
+
+    impl VerifiedPartialStoreFixture {
+        async fn new() -> Self {
+            let directory = tempfile::tempdir().expect("create partial store fixture");
+            let repo = directory
+                .path()
+                .canonicalize()
+                .expect("canonical fixture root");
+            let storage = repo.join(util::ROOT_DIR);
+            std::fs::create_dir_all(storage.join("objects")).expect("create local object store");
+            let conn = crate::internal::db::create_database(
+                storage
+                    .join(util::DATABASE)
+                    .to_str()
+                    .expect("UTF-8 fixture database"),
+            )
+            .await
+            .expect("create source/storage database");
+            crate::internal::workspace::RepoIdentity::resolve_or_init(&conn)
+                .await
+                .expect("initialize isolated repository identity");
+            let scope = CaptureScope::resolve(&conn, &repo)
+                .await
+                .expect("resolve own scope");
+            Self {
+                _directory: directory,
+                repo,
+                storage,
+                conn,
+                scope,
+            }
+        }
+
+        fn snapshot(&self) -> CaptureSnapshot {
+            crate::internal::ai::capture::snapshot::verified_partial_fixture_snapshot(
+                VERIFIED_PARTIAL_CAPTURE,
+                VERIFIED_PARTIAL_PROVIDER,
+                &self.repo,
+            )
+        }
+
+        async fn carrier(&self) -> VerifiedOrdinaryPartialSnapshot {
+            let snapshot = self.snapshot();
+            assert_eq!(
+                export_snapshot_route(&snapshot),
+                ExportSnapshotRoute::VerifiedPartial
+            );
+            assert!(
+                snapshot.rejects_capture_source_consumer(),
+                "default readiness must stay closed"
+            );
+            snapshot
+                .try_into_verified_ordinary_partial_in_scope_until(
+                    &self.conn,
+                    &self.scope,
+                    &self.storage,
+                    &self.repo,
+                    Instant::now() + Duration::from_secs(30),
+                )
+                .await
+                .expect("consume strict source into scope-bound partial carrier")
+        }
+
+        async fn scalar(&self, sql: &str) -> i64 {
+            self.conn
+                .query_one_raw(Statement::from_string(
+                    self.conn.get_database_backend(),
+                    sql.to_owned(),
+                ))
+                .await
+                .expect("read fixture count")
+                .expect("count row")
+                .try_get_by("n")
+                .expect("decode fixture count")
+        }
+
+        async fn current(
+            &self,
+        ) -> Option<crate::internal::ai::capture::state::DurableCaptureState> {
+            use crate::internal::ai::capture::state::{CapturePhase, DurableCaptureState};
+            self.conn.query_one_raw(Statement::from_sql_and_values(
+                self.conn.get_database_backend(),
+                "SELECT state, stopped_at, sync_revision FROM agent_session WHERE session_id = ?",
+                [VERIFIED_PARTIAL_CAPTURE.into()],
+            )).await.expect("read store state").map(|row| DurableCaptureState {
+                phase: CapturePhase::from_db(&row.try_get_by::<String,_>("state").expect("phase")).expect("typed phase"),
+                stopped_at: row.try_get_by("stopped_at").expect("stopped timestamp"),
+                sync_revision: row.try_get_by("sync_revision").expect("revision"),
+            })
+        }
+
+        async fn write(
+            &self,
+            action: u128,
+            terminal: bool,
+            deadline: Option<CaptureCommitDeadline>,
+        ) -> Result<String> {
+            self.write_with_tombstone(action, terminal, deadline, false)
+                .await
+        }
+
+        async fn write_with_tombstone(
+            &self,
+            action: u128,
+            terminal: bool,
+            deadline: Option<CaptureCommitDeadline>,
+            tombstone_before_store: bool,
+        ) -> Result<String> {
+            use crate::internal::ai::capture::{
+                catalog::{CaptureCatalogAction, CaptureCatalogMutation, CaptureCatalogSession},
+                checkpoint::checkpoint_id_for_capture_action,
+                live::ExportJobLeaseStore,
+                state::{LifecycleReducerInput, reduce_lifecycle},
+            };
+            let source = self.carrier().await;
+            let kind = if terminal {
+                LifecycleEventKind::SessionEnd
+            } else {
+                LifecycleEventKind::TurnEnd
+            };
+            let event_id = uuid::Uuid::from_u128(action);
+            let current = self.current().await;
+            let reduced = reduce_lifecycle(LifecycleReducerInput {
+                current,
+                event_kind: kind,
+                event_id,
+                occurred_at: 1,
+                deadline: None,
+            })?;
+            let checkpoint_id = checkpoint_id_for_capture_action(event_id, reduced.checkpoint);
+            let request = CaptureCatalogApplyRequest::new(
+                self.scope.clone(),
+                CaptureCatalogSession::new(
+                    VERIFIED_PARTIAL_CAPTURE,
+                    "opencode",
+                    VERIFIED_PARTIAL_PROVIDER,
+                    self.repo.to_string_lossy().into_owned(),
+                )?,
+                CaptureCatalogAction::from_ingress(event_id, None, kind)?,
+                CaptureCatalogMutation::from_reducer(current, &reduced, 1)?,
+            )?;
+            let reservation =
+                match reserve_capture_catalog_until(self.conn.clone(), &request, None).await? {
+                    CaptureCoordinatorReserveOutcome::Reserved(reservation) => *reservation,
+                    CaptureCoordinatorReserveOutcome::AlreadyApplied => {
+                        assert!(
+                            TracesCheckpointStore::durable_replay_exists_for(
+                                &self.conn,
+                                &checkpoint_id,
+                                VERIFIED_PARTIAL_CAPTURE,
+                                crate::internal::ai::traces::CheckpointScope::Committed,
+                                None,
+                            )
+                            .await?
+                        );
+                        return Ok(checkpoint_id);
+                    }
+                    CaptureCoordinatorReserveOutcome::ConflictUnchanged { conflict } => {
+                        bail!("source/storage reservation did not proceed: {conflict:?}")
+                    }
+                };
+            let request = reservation.effective_request().clone();
+            if tombstone_before_store {
+                self.conn.execute_raw(Statement::from_sql_and_values(
+                    self.conn.get_database_backend(),
+                    "INSERT INTO agent_import_tombstone (tombstone_id, agent_kind, provider_session_id, erased_session_id, erased_at) VALUES ('partial-store-fence','opencode',?,?,1)",
+                    [VERIFIED_PARTIAL_PROVIDER.into(), VERIFIED_PARTIAL_CAPTURE.into()],
+                )).await.expect("insert the real concurrent tombstone fence");
+            }
+            let envelope = SessionHookEnvelope {
+                hook_event_name: "pure-storage-action".to_owned(),
+                session_id: VERIFIED_PARTIAL_PROVIDER.to_owned(),
+                cwd: self.repo.to_string_lossy().into_owned(),
+                transcript_path: None,
+                extra: serde_json::Map::new(),
+            };
+            let event = LifecycleEvent {
+                kind,
+                session_id: VERIFIED_PARTIAL_PROVIDER.to_owned(),
+                session_ref: None,
+                prompt: None,
+                model: None,
+                source: None,
+                tool_name: None,
+                tool_input: None,
+                tool_response: None,
+                assistant_message: None,
+                timestamp: Utc::now(),
+            };
+            run_checkpoint_stage::<ExportJobLeaseStore<'_>>(
+                CheckpointStageInput {
+                    conn: &self.conn,
+                    // The checkpoint-stage API receives the Libra storage
+                    // directory; scope and source authorization use the
+                    // distinct worktree root above.
+                    repo_path: &self.storage,
+                    catalog_request: request.clone(),
+                    diagnostic_request: request,
+                    catalog_reservation: reservation,
+                    libra_session_id: VERIFIED_PARTIAL_CAPTURE,
+                    envelope: &envelope,
+                    agent_kind: "opencode",
+                    event: &event,
+                    ingress_event_id: event_id,
+                    identity_scheme: LifecycleIdentityScheme::FallbackActionHmacV1,
+                    checkpoint_id: &checkpoint_id,
+                    capture_deadline: deadline,
+                    terminal_settlement_deadline: None,
+                    capture_finalizer_deadline_millis: deadline
+                        .map(CaptureCommitDeadline::sqlite_not_after_millis),
+                    now: 1,
+                    scope: &self.scope,
+                    subagent_sources: Vec::new(),
+                    subagent_discovery_warning: None,
+                    report_value: json!({}),
+                    source: CheckpointStageSource::VerifiedPartial(source),
+                    claim_channel: "export",
+                    live_reservation: None,
+                },
+                None,
+            )
+            .await?;
+            Ok(checkpoint_id)
+        }
+
+        /// Read the same manifest/role-proof primitives used by ordinary
+        /// checkpoint export, without invoking its CLI or account surface.
+        async fn read_back(&self, checkpoint_id: &str) -> (Vec<u8>, serde_json::Value) {
+            use crate::internal::ai::checkpoint_reader::{
+                checkpoint_plain_files, checkpoint_plain_manifest, checkpoint_transcript_oids,
+                read_checkpoint_object_bounded, read_tree_object, reasoning_artifact_tree_oids,
+                subtree,
+            };
+            let row = self.conn.query_one_raw(Statement::from_sql_and_values(
+                self.conn.get_database_backend(),
+                "SELECT tree_oid, metadata_blob_oid FROM agent_checkpoint WHERE checkpoint_id = ?",
+                [checkpoint_id.into()],
+            )).await.expect("read actual catalog row").expect("checkpoint row exists");
+            let tree_oid: String = row.try_get_by("tree_oid").expect("tree oid");
+            let root =
+                read_tree_object(&self.storage, &tree_oid).expect("read committed traces tree");
+            let checkpoints = subtree(&self.storage, &root, "checkpoint").expect("checkpoint root");
+            let prefix = subtree(&self.storage, &checkpoints, &checkpoint_id[..2])
+                .expect("checkpoint prefix");
+            let inner =
+                subtree(&self.storage, &prefix, &checkpoint_id[2..]).expect("checkpoint leaf");
+            let artifacts = reasoning_artifact_tree_oids(&self.storage, &inner)
+                .expect("validate reasoning roles");
+            assert!(
+                artifacts.is_empty(),
+                "partial storage adds no native artifact role"
+            );
+            let ordinary = checkpoint_plain_files(&self.storage, &inner, &artifacts)
+                .expect("validate ordinary roles");
+            let manifest = checkpoint_plain_manifest(&self.storage, &inner, &artifacts, &ordinary)
+                .expect("validate manifest")
+                .expect("modern checkpoint manifest");
+            let oids = checkpoint_transcript_oids(&self.storage, &inner, &manifest, &artifacts)
+                .expect("resolve transcript roles");
+            let mut bytes = Vec::new();
+            for oid in oids {
+                let (part, truncated) =
+                    read_checkpoint_object_bounded(&self.storage, &oid, 1024 * 1024)
+                        .expect("read stored ordinary transcript");
+                assert!(!truncated);
+                bytes.extend(part);
+            }
+            let metadata_oid: String = row.try_get_by("metadata_blob_oid").expect("metadata oid");
+            let metadata_oid = metadata_oid.parse().expect("typed metadata oid");
+            let (metadata, truncated) =
+                read_checkpoint_object_bounded(&self.storage, &metadata_oid, 1024 * 1024)
+                    .expect("read actual metadata blob");
+            assert!(!truncated);
+            (
+                bytes,
+                serde_json::from_slice(&metadata).expect("decode stored metadata"),
+            )
+        }
+
+        /// Pure SQL lease seam, separate from the no-deadline direct object
+        /// store seam. It does not start a provider exporter or Session.
+        async fn settle_real_lease(&self, exit: CheckpointStageExit) -> (String, i64) {
+            use crate::internal::ai::capture::live::ExportJobLeaseStore;
+            let port = ExportJobLeaseStore::new(&self.conn);
+            let deadline = CaptureCommitDeadline::from_budget(Duration::from_secs(30))
+                .expect("bounded lease deadline");
+            let target = LiveExportTarget {
+                agent_kind: "opencode",
+                provider_session_id: VERIFIED_PARTIAL_PROVIDER,
+                scope: &self.scope,
+            };
+            let runner = LiveExportRunner::admit(&port, target, deadline)
+                .await
+                .expect("real lease admission")
+                .expect("fixture owns runner");
+            let (disposition, reason, log) = checkpoint_stage_lease_disposition(
+                &exit,
+                VERIFIED_PARTIAL_CAPTURE,
+                "pure-partial-lease",
+            );
+            runner
+                .settle(disposition, reason, log)
+                .await
+                .expect("settle real SQL lease");
+            let row = self.conn.query_one_raw(Statement::from_sql_and_values(
+                self.conn.get_database_backend(),
+                "SELECT state, processed_generation, owner FROM agent_export_job WHERE agent_kind = 'opencode' AND provider_session_id = ?",
+                [VERIFIED_PARTIAL_PROVIDER.into()],
+            )).await.expect("read actual export job").expect("export job exists");
+            assert!(
+                row.try_get_by::<Option<String>, _>("owner")
+                    .expect("lease owner")
+                    .is_none()
+            );
+            (
+                row.try_get_by("state").expect("lease state"),
+                row.try_get_by("processed_generation")
+                    .expect("processed generation"),
+            )
+        }
+
+        async fn assert_no_native_or_partial_payload(&self) {
+            assert_eq!(
+                self.scalar("SELECT COUNT(*) AS n FROM agent_coverage_claim")
+                    .await,
+                0
+            );
+            assert_eq!(
+                self.scalar("SELECT COUNT(*) AS n FROM agent_coverage_revision")
+                    .await,
+                0
+            );
+            assert_eq!(
+                self.scalar(
+                    "SELECT COUNT(*) AS n FROM metadata_kv WHERE scope = 'agent_reasoning_identity'"
+                )
+                .await,
+                0
+            );
+            assert_eq!(self.scalar("SELECT COUNT(*) AS n FROM metadata_kv WHERE scope IN ('agent_capture_session_alias','agent_capture_pending_chunk')").await, 0);
+            let rows = self.conn.query_all_raw(Statement::from_string(self.conn.get_database_backend(),
+                "SELECT value FROM metadata_kv WHERE scope IN ('agent_capture_pending','agent_capture_quarantine')".to_owned())).await.expect("read content-free pending intents");
+            for row in rows {
+                let value: String = row.try_get_by("value").expect("pending value");
+                assert!(!value.contains(VERIFIED_PARTIAL_TEXT));
+                assert!(!value.contains(VERIFIED_PARTIAL_CANARY));
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn verified_partial_export_commits_nonzero_empty_claim_checkpoint() {
+        let fixture = VerifiedPartialStoreFixture::new().await;
+        let snapshot = fixture.snapshot();
+        assert_eq!(
+            export_snapshot_route(&snapshot),
+            ExportSnapshotRoute::VerifiedPartial
+        );
+        assert!(
+            snapshot.try_into_ordinary().is_err(),
+            "default consuming route remains closed"
+        );
+        let rejected = crate::internal::ai::capture::snapshot::carrier_test_snapshot(
+            &fixture::UNMAPPED,
+            fixture::CANARY.to_vec(),
+        );
+        assert_eq!(
+            export_snapshot_route(&rejected),
+            ExportSnapshotRoute::Rejected
+        );
+        let mut stale_scope = fixture.scope.clone();
+        stale_scope.repo_id = "foreign-source-scope".to_owned();
+        let rejected = match fixture
+            .snapshot()
+            .try_into_verified_ordinary_partial_in_scope_until(
+                &fixture.conn,
+                &stale_scope,
+                &fixture.storage,
+                &fixture.repo,
+                Instant::now() + Duration::from_secs(30),
+            )
+            .await
+        {
+            Ok(_) => panic!("foreign scope cannot bind a partial source"),
+            Err(rejected) => rejected,
+        };
+        assert_eq!(
+            export_snapshot_route(&rejected),
+            ExportSnapshotRoute::Rejected
+        );
+        assert!(
+            rejected.transcript().is_none(),
+            "binding failure erases content and permit"
+        );
+        let checkpoint = fixture
+            .write(0x101, false, None)
+            .await
+            .expect("real partial store commit");
+        let (bytes, metadata) = fixture.read_back(&checkpoint).await;
+        assert!(!bytes.is_empty());
+        let stored = String::from_utf8(bytes).expect("stored JSON is UTF-8");
+        assert!(stored.contains(VERIFIED_PARTIAL_TEXT));
+        assert!(!stored.contains(VERIFIED_PARTIAL_CANARY));
+        assert!(!stored.contains("reasoningField"));
+        assert!(!stored.contains("PRIVATE_STATE_CANARY"));
+        assert_eq!(metadata["transcript_snapshot"]["completeness"], "partial");
+        assert_eq!(
+            metadata["transcript_snapshot"]["partial_reason"],
+            "source_authorization_mismatch"
+        );
+        assert!(
+            metadata["transcript_snapshot"]["transcript_redacted_bytes"]
+                .as_u64()
+                .unwrap()
+                > 0
+        );
+        assert_eq!(
+            fixture
+                .scalar("SELECT COUNT(*) AS n FROM agent_checkpoint")
+                .await,
+            1
+        );
+        assert_eq!(
+            fixture
+                .scalar("SELECT COUNT(*) AS n FROM reference WHERE name = 'traces'")
+                .await,
+            1
+        );
+        fixture.assert_no_native_or_partial_payload().await;
+
+        // A terminal action uses the same strict partial export carrier, but
+        // must publish stopped only after the nonzero checkpoint/ref commit.
+        let terminal = VerifiedPartialStoreFixture::new().await;
+        let checkpoint = terminal
+            .write(0x102, true, None)
+            .await
+            .expect("terminal partial commits before acknowledgement");
+        let (bytes, metadata) = terminal.read_back(&checkpoint).await;
+        assert!(!bytes.is_empty());
+        let stored = String::from_utf8(bytes).expect("stored terminal JSON is UTF-8");
+        assert!(stored.contains(VERIFIED_PARTIAL_TEXT));
+        assert!(!stored.contains(VERIFIED_PARTIAL_CANARY));
+        assert!(!stored.contains("reasoningField"));
+        assert_eq!(metadata["transcript_snapshot"]["completeness"], "partial");
+        let completed = terminal.current().await.expect("terminal catalog state");
+        assert_eq!(
+            completed.phase,
+            crate::internal::ai::capture::state::CapturePhase::Stopped
+        );
+        assert!(completed.stopped_at.is_some());
+        assert_eq!(
+            terminal
+                .scalar("SELECT COUNT(*) AS n FROM agent_checkpoint")
+                .await,
+            1
+        );
+        assert_eq!(
+            terminal
+                .scalar("SELECT COUNT(*) AS n FROM reference WHERE name = 'traces'")
+                .await,
+            1
+        );
+        assert_eq!(
+            terminal
+                .write(0x102, true, None)
+                .await
+                .expect("same terminal action replays durable checkpoint"),
+            checkpoint
+        );
+        assert_eq!(
+            terminal.current().await,
+            Some(completed),
+            "same-action terminal replay does not mutate the completed catalog"
+        );
+        assert_eq!(
+            terminal
+                .scalar("SELECT COUNT(*) AS n FROM agent_checkpoint")
+                .await,
+            1
+        );
+        let scan = CaptureCatalogStore::new(terminal.conn.clone())
+            .pending_finalizer_recoveries_for_doctor(Utc::now().timestamp_millis())
+            .await
+            .expect("read terminal finalizer receipts");
+        assert!(
+            scan.recoveries.is_empty(),
+            "durable terminal has no pending finalizer"
+        );
+        assert_eq!(scan.malformed_rows, 0);
+        terminal.assert_no_native_or_partial_payload().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn verified_partial_does_not_settle_as_all_skipped_or_complete_coverage() {
+        let fixture = VerifiedPartialStoreFixture::new().await;
+        let source = fixture.carrier().await;
+        let turns = crate::internal::ai::observed_agents::coverage::normalize_opencode_export(
+            source.transcript().bytes(),
+        );
+        assert!(!turns.is_empty(), "fixture has real logical ordinary turns");
+        assert!(turns.iter().all(|turn| turn.completeness
+            == crate::internal::ai::observed_agents::Completeness::Incomplete));
+        drop(source);
+        let first = fixture
+            .write(0x201, false, None)
+            .await
+            .expect("all-incomplete source still writes");
+        fixture
+            .write(0x201, false, None)
+            .await
+            .expect("same action replays its durable checkpoint");
+        assert_eq!(
+            fixture
+                .scalar("SELECT COUNT(*) AS n FROM agent_checkpoint")
+                .await,
+            1
+        );
+        let second = fixture
+            .write(0x202, false, None)
+            .await
+            .expect("a distinct idle remains a bounded direct write");
+        assert_ne!(first, second);
+        assert_eq!(
+            fixture
+                .scalar("SELECT COUNT(*) AS n FROM agent_checkpoint")
+                .await,
+            2,
+            "distinct idle actions may retain duplicate full transcripts; no cross-idle coverage claim is fabricated"
+        );
+        let (first_bytes, _) = fixture.read_back(&first).await;
+        let (second_bytes, _) = fixture.read_back(&second).await;
+        assert_eq!(
+            first_bytes, second_bytes,
+            "distinct idles retain bounded duplicate source bytes"
+        );
+        fixture.assert_no_native_or_partial_payload().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn verified_partial_replay_and_failure_remain_direct_only() {
+        use crate::internal::ai::capture::checkpoint::test_support::{
+            self as faults, CheckpointFaultPoint,
+        };
+        for fault in CheckpointFaultPoint::ALL {
+            let fixture = VerifiedPartialStoreFixture::new().await;
+            faults::fail_once_at(fault);
+            let failure = fixture.write(0x301, false, None).await;
+            assert!(failure.is_err(), "{fault:?}");
+            let (job_state, processed) = fixture
+                .settle_real_lease(CheckpointStageExit::Uncommitted(failure.map(|_| ())))
+                .await;
+            assert_eq!(
+                job_state, "dirty",
+                "failed partial store never cleans lease: {fault:?}"
+            );
+            assert_eq!(
+                processed, 0,
+                "failed partial store never advances processed: {fault:?}"
+            );
+            assert!(
+                faults::armed_fault().is_none(),
+                "fault must be reached: {fault:?}"
+            );
+            let count = fixture
+                .scalar("SELECT COUNT(*) AS n FROM agent_checkpoint")
+                .await;
+            let traces_refs = fixture
+                .scalar("SELECT COUNT(*) AS n FROM reference WHERE name = 'traces'")
+                .await;
+            if fault == CheckpointFaultPoint::MarkerCleanup {
+                // This fault fires after the checkpoint/ref transaction.
+                // Its retained cleanup marker must keep the failed export
+                // dirty, while the single durable checkpoint remains intact.
+                assert_eq!(count, 1, "post-CAS cleanup retains checkpoint: {fault:?}");
+                assert_eq!(traces_refs, 1, "post-CAS cleanup retains ref: {fault:?}");
+                let checkpoint_id =
+                    crate::internal::ai::capture::checkpoint::checkpoint_id_for_capture_action(
+                        uuid::Uuid::from_u128(0x301),
+                        crate::internal::ai::capture::state::CheckpointWrite::Committed,
+                    );
+                let entry = crate::internal::metadata::MetadataKv::get_with_conn(
+                    &fixture.conn,
+                    crate::internal::metadata::MetadataScope::AgentTracesInflight,
+                    VERIFIED_PARTIAL_CAPTURE,
+                    &checkpoint_id,
+                )
+                .await
+                .expect("read retained post-CAS marker")
+                .expect("post-CAS cleanup failure retains marker");
+                let marker =
+                    crate::internal::ai::traces::decode_and_validate_traces_inflight_marker(
+                        &entry.value,
+                        VERIFIED_PARTIAL_CAPTURE,
+                        &checkpoint_id,
+                    )
+                    .expect("decode retained post-CAS marker");
+                assert!(
+                    !marker.cleanup_pending && marker.commit.is_some(),
+                    "post-CAS cleanup retains committed ordinary marker: {fault:?}"
+                );
+                assert_eq!(
+                    fixture.scalar(
+                        "SELECT COUNT(*) AS n FROM agent_checkpoint c JOIN reference r ON r.\"commit\" = c.traces_commit WHERE r.name = 'traces' AND r.kind = 'Branch' AND r.remote IS NULL"
+                    ).await,
+                    1,
+                    "durable catalog and traces ref agree: {fault:?}"
+                );
+            } else {
+                assert_eq!(count, 0, "precommit failure must not publish: {fault:?}");
+                if fault == CheckpointFaultPoint::RefCasExhausted {
+                    // The real fault seam commits a competing traces writer
+                    // on every CAS attempt. Its ref is not this checkpoint.
+                    assert_eq!(
+                        traces_refs, 1,
+                        "competing writer owns traces ref: {fault:?}"
+                    );
+                } else {
+                    assert_eq!(
+                        traces_refs, 0,
+                        "pre-CAS fault leaves no traces ref: {fault:?}"
+                    );
+                }
+            }
+            fixture.assert_no_native_or_partial_payload().await;
+        }
+        let fixture = VerifiedPartialStoreFixture::new().await;
+        assert!(
+            fixture
+                .write_with_tombstone(0x399, false, None, true)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            fixture
+                .scalar("SELECT COUNT(*) AS n FROM agent_checkpoint")
+                .await,
+            0
+        );
+        assert_eq!(
+            fixture
+                .scalar("SELECT COUNT(*) AS n FROM reference WHERE name = 'traces'")
+                .await,
+            0
+        );
+        fixture.assert_no_native_or_partial_payload().await;
+        let fixture = VerifiedPartialStoreFixture::new().await;
+        let expired =
+            CaptureCommitDeadline::from_test_pair(Instant::now() - Duration::from_secs(1), 0);
+        assert!(fixture.write(0x401, false, Some(expired)).await.is_err());
+        assert_eq!(
+            fixture
+                .scalar("SELECT COUNT(*) AS n FROM agent_checkpoint")
+                .await,
+            0
+        );
+        fixture.assert_no_native_or_partial_payload().await;
+
+        let terminal = VerifiedPartialStoreFixture::new().await;
+        let terminal_failure = terminal
+            .write(0x402, true, Some(expired))
+            .await
+            .expect_err("expired terminal must never acknowledge an unwritten partial checkpoint");
+        assert!(
+            terminal_failure
+                .to_string()
+                .contains("verified partial terminal capture remains content-free pending")
+        );
+        assert_eq!(
+            terminal
+                .scalar("SELECT COUNT(*) AS n FROM agent_checkpoint")
+                .await,
+            0
+        );
+        assert_eq!(
+            terminal
+                .scalar("SELECT COUNT(*) AS n FROM reference WHERE name = 'traces'")
+                .await,
+            0
+        );
+        let current = terminal
+            .current()
+            .await
+            .expect("pending terminal remains in catalog");
+        assert_ne!(
+            current.phase,
+            crate::internal::ai::capture::state::CapturePhase::Stopped
+        );
+        assert!(
+            current.stopped_at.is_none(),
+            "deadline miss never publishes stopped_at"
+        );
+        let scan = CaptureCatalogStore::new(terminal.conn.clone())
+            .pending_finalizer_recoveries_for_doctor(Utc::now().timestamp_millis())
+            .await
+            .expect("read content-free terminal recovery receipt");
+        assert_eq!(scan.malformed_rows, 0);
+        assert_eq!(
+            scan.recoveries.len(),
+            1,
+            "deadline miss retains exactly one original receipt"
+        );
+        let pending = &scan.recoveries[0];
+        assert_eq!(pending.scope(), &terminal.scope);
+        assert!(
+            !pending.artifact_present(),
+            "partial bytes are never sealed for replay"
+        );
+        assert!(!pending.artifact_pending());
+        assert!(!pending.quarantined());
+        let (state, processed) = terminal
+            .settle_real_lease(CheckpointStageExit::Uncommitted(Err(terminal_failure)))
+            .await;
+        assert_eq!(state, "dirty");
+        assert_eq!(
+            processed, 0,
+            "expired terminal never advances the export generation"
+        );
+        let row = terminal
+            .conn
+            .query_one_raw(Statement::from_sql_and_values(
+                terminal.conn.get_database_backend(),
+                "SELECT metadata_json FROM agent_session WHERE session_id = ?",
+                [VERIFIED_PARTIAL_CAPTURE.into()],
+            ))
+            .await
+            .expect("read terminal receipt metadata")
+            .expect("pending terminal session");
+        let receipt_metadata: String = row.try_get_by("metadata_json").expect("receipt metadata");
+        assert!(!receipt_metadata.contains(VERIFIED_PARTIAL_TEXT));
+        assert!(!receipt_metadata.contains(VERIFIED_PARTIAL_CANARY));
+        terminal.assert_no_native_or_partial_payload().await;
+
+        let fixture = VerifiedPartialStoreFixture::new().await;
+        crate::internal::ai::capture::coordinator::test_support::interrupt_after_checkpoint_once();
+        assert!(
+            fixture.write(0x501, false, None).await.is_err(),
+            "post-CAS interruption stays retryable"
+        );
+        assert_eq!(
+            fixture
+                .scalar("SELECT COUNT(*) AS n FROM agent_checkpoint")
+                .await,
+            1
+        );
+        fixture
+            .write(0x501, false, None)
+            .await
+            .expect("same action recovers durable checkpoint once");
+        assert_eq!(
+            fixture
+                .scalar("SELECT COUNT(*) AS n FROM agent_checkpoint")
+                .await,
+            1
+        );
+        fixture.assert_no_native_or_partial_payload().await;
+        let fixture = VerifiedPartialStoreFixture::new().await;
+        let checkpoint = fixture
+            .write(0x601, false, None)
+            .await
+            .expect("real durable partial source");
+        let (bytes, metadata) = fixture.read_back(&checkpoint).await;
+        assert!(!bytes.is_empty());
+        assert_eq!(metadata["transcript_snapshot"]["completeness"], "partial");
+        let (state, processed) = fixture.settle_real_lease(authorized(false, None)).await;
+        assert_eq!(state, "idle");
+        assert_eq!(
+            processed, 1,
+            "real SQL lease advances only after an independently confirmed durable store result"
+        );
+        fixture.assert_no_native_or_partial_payload().await;
     }
 
     #[cfg(unix)]

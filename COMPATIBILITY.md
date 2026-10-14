@@ -1250,3 +1250,60 @@ new regression fixtures are synthetic. Actual idle-error output from a live
 model Session remains unproven; a successful ordinary session does not prove
 that failure path. Real OpenCode/account/model checks run locally on macOS
 and stay outside CI. Native reasoning Source A remains a separate gate.
+
+
+### OpenCode ordinary partial live checkpoints
+
+Automatic live capture can save a safe ordinary copy of an authorized OpenCode
+export when unsupported reasoning was discarded. The checkpoint remains
+`Unproven` / `Partial`; saved content is not complete reasoning coverage or native
+provider evidence. At least one known non-reasoning text or message part with
+usable content must remain. A source containing only metadata or erased reasoning
+skeletons is refused. This route accepts the current native `messages` export;
+legacy classic `info` / `parts` exports remain excluded.
+
+This storage-only route requires strict single-JSON parsing, successful exporter
+authorization, exact session mapping, bounded redaction and repository-scoped
+source HMAC binding. The source session's `info.id` must equal the selected
+provider session. The owning carrier records `repo_id`, Libra session, provider
+session and agent kind at bind time and checks them against the actual checkpoint
+request. The HMAC is an opaque string; its format alone does not verify the scope
+or prove native origin. Generic ordinary consumers stay closed to `Unproven`.
+
+Unsupported reasoning state, including `reasoningField`, is removed together with
+its associated reasoning text and time. Opaque hints include `signature`,
+`redactedData`, `reasoningEncryptedContent`, `thoughtSignature` and `originProof`.
+An original `originProof` key anywhere in the parsed source, including malformed
+or unfamiliar nested values, or a sealed candidate prevents this fallback.
+Only the completed scrub and redaction result can enter storage; a metadata flag
+cannot grant this capability.
+
+For this verified storage-only route, `source_authorization_mismatch` also means
+reasoning or unrecognized data was discarded; exporter authorization has already
+passed. Other paths retain their existing rejection behavior. The marker still
+means `Partial`, and Source A remains UNPROVEN. No reasoning artifacts, private
+reasoning identity, Complete coverage claims or native ACK are created.
+
+The source input cap bounds each snapshot independently (up to 16 MiB).
+Different idle actions can duplicate whole-source snapshots in content-addressed
+storage. Cumulative retained snapshots have no per-session total cap and can grow
+with idle count × source size, before redaction and storage overhead. This route adds
+no cross-idle deduplication protocol; existing action, generation, lease, scoped
+tombstone and ref-CAS fences remain in force. A successful ordinary lifecycle
+receipt follows a verified durable partial checkpoint write. A failed direct
+write stays dirty or leaves a content-free pending intent, without a successful
+ACK or generation advance. There is no durable partial payload replay.
+
+Explicit import of this unsupported-state source remains refused with
+`LBR-AGENT-020`; this live fix does not enable import or native admission. The
+stored ordinary payload remains a single redacted JSON document, with no new
+public reason or metadata enum value. Checkpoint/export readers in this build use
+that ordinary payload. Older-binary compatibility requires a separate actual
+readback and is not inferred from the source shape; this does not relax the V2 import rule requiring partial
+projections to have zero bytes and zero redaction metrics.
+
+A temporary local build supplied after focused checks and source review is a
+debug build, not the official 0.30.49 release. BASE's real import gate and the
+formal release checks remain pending until their own evidence passes. Real
+OpenCode Session/account/model checks run only locally on macOS and stay outside
+CI; synthetic tests do not prove native source.

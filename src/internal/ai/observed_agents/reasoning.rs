@@ -43,6 +43,23 @@ pub trait ReasoningSourcePreprocessor: Send + Sync {
 pub struct PreparedReasoningSource {
     ordinary: Vec<u8>,
     disposition: ReasoningSourceDisposition,
+    ordinary_partial_permit: Option<OpenCodeOrdinaryPartialPermit>,
+}
+
+/// Storage-only eligibility from the strict OpenCode scrubber. It cannot
+/// authorize native bytes, serialize across a helper, or be cloned.
+pub(crate) struct OpenCodeOrdinaryPartialPermit {
+    source_session: String,
+    capture_session: String,
+}
+
+impl OpenCodeOrdinaryPartialPermit {
+    pub(crate) fn capture_session(&self) -> &str {
+        &self.capture_session
+    }
+    pub(crate) fn source_session(&self) -> &str {
+        &self.source_session
+    }
 }
 
 impl PreparedReasoningSource {
@@ -51,6 +68,7 @@ impl PreparedReasoningSource {
         Self {
             ordinary,
             disposition: ReasoningSourceDisposition::Ordinary,
+            ordinary_partial_permit: None,
         }
     }
 
@@ -60,6 +78,23 @@ impl PreparedReasoningSource {
         Self {
             ordinary,
             disposition: ReasoningSourceDisposition::Unproven,
+            ordinary_partial_permit: None,
+        }
+    }
+
+    /// Sole storage-only producer: the strict OpenCode parser has erased all
+    /// unsupported reasoning and ruled out every original originProof key.
+    pub(super) fn with_verified_opencode_partial(
+        ordinary: Vec<u8>,
+        source_session: String,
+    ) -> Self {
+        Self {
+            ordinary,
+            disposition: ReasoningSourceDisposition::Unproven,
+            ordinary_partial_permit: Some(OpenCodeOrdinaryPartialPermit {
+                source_session,
+                capture_session: String::new(),
+            }),
         }
     }
 
@@ -73,6 +108,7 @@ impl PreparedReasoningSource {
         Self {
             ordinary,
             disposition: ReasoningSourceDisposition::OpenCodeCandidate(candidates),
+            ordinary_partial_permit: None,
         }
     }
 }
@@ -313,6 +349,43 @@ impl ReasoningSourceDisposition {
             }
         }
         Ok((prepared.ordinary, disposition))
+    }
+
+    /// Preserve the parser's owning storage permit only after the existing
+    /// source authorization mapping agrees with its original native info.id.
+    pub(crate) fn from_prepared_authorized_source_with_partial_permit(
+        mut prepared: PreparedReasoningSource,
+        has_verified_source_mapping: bool,
+        max_source_bytes: u64,
+        provider: &str,
+        capture_session: &str,
+        source_session: Option<&str>,
+    ) -> Result<(Vec<u8>, Self, Option<OpenCodeOrdinaryPartialPermit>), ReasoningFieldError> {
+        let permit = prepared.ordinary_partial_permit.take();
+        let (ordinary, disposition) = Self::from_prepared_authorized_source(
+            prepared,
+            has_verified_source_mapping,
+            max_source_bytes,
+            provider,
+            capture_session,
+            source_session,
+        )?;
+        let permit = match permit {
+            Some(mut permit)
+                if matches!(disposition, Self::Unproven) && has_verified_source_mapping =>
+            {
+                if provider != "opencode"
+                    || capture_session.is_empty()
+                    || source_session != Some(permit.source_session.as_str())
+                {
+                    return Err(ReasoningFieldError::UnsupportedShape);
+                }
+                permit.capture_session = capture_session.to_owned();
+                Some(permit)
+            }
+            _ => None,
+        };
+        Ok((ordinary, disposition, permit))
     }
 
     pub(crate) fn helper_unsupported() -> Self {
@@ -1514,6 +1587,7 @@ pub(crate) fn synthetic_native_preparation(
             source_session,
             fields,
         )),
+        ordinary_partial_permit: None,
     }
 }
 
@@ -1623,10 +1697,12 @@ pub(crate) mod carrier_test_support {
                 Mode::Unmapped => Ok(PreparedReasoningSource {
                     ordinary,
                     disposition: ReasoningSourceDisposition::Unmapped,
+                    ordinary_partial_permit: None,
                 }),
                 Mode::Helper => Ok(PreparedReasoningSource {
                     ordinary,
                     disposition: ReasoningSourceDisposition::HelperUnsupported,
+                    ordinary_partial_permit: None,
                 }),
                 Mode::Native => Ok(synthetic_native_preparation(
                     ordinary,

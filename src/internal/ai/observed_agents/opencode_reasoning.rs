@@ -2165,6 +2165,47 @@ fn parse_bounded_canon_value(
 
 /// Consume the one authorized export buffer. No ciphertext, receipt, or
 /// providerContext.messages bytes are returned to ordinary capture sinks.
+fn has_original_origin_proof(value: &CanonValue) -> bool {
+    match value {
+        CanonValue::Object(fields) => {
+            fields.contains_key("originProof") || fields.values().any(has_original_origin_proof)
+        }
+        CanonValue::Array(items) => items.iter().any(has_original_origin_proof),
+        _ => false,
+    }
+}
+
+/// A skeleton left after reasoning erasure is not useful ordinary capture.
+fn retained_meaningful_ordinary_message(document: &BTreeMap<String, CanonValue>) -> bool {
+    let Some(messages) = document.get("messages").and_then(CanonValue::as_array) else {
+        return false;
+    };
+    messages.iter().any(|message| {
+        let CanonValue::Object(fields) = message else {
+            return false;
+        };
+        match fields.get("type").and_then(CanonValue::as_str) {
+            Some("user" | "system") => fields
+                .get("text")
+                .and_then(CanonValue::as_str)
+                .is_some_and(|text| !text.trim().is_empty()),
+            Some("assistant") => fields
+                .get("content")
+                .and_then(CanonValue::as_array)
+                .is_some_and(|parts| {
+                    parts.iter().any(|part| {
+                        part.get("type").and_then(CanonValue::as_str) == Some("text")
+                            && part
+                                .get("text")
+                                .and_then(CanonValue::as_str)
+                                .is_some_and(|text| !text.trim().is_empty())
+                    })
+                }),
+            _ => false,
+        }
+    })
+}
+
 pub(crate) fn prepare_authorized_source(
     source: Vec<u8>,
 ) -> Result<PreparedReasoningSource, ReasoningFieldError> {
@@ -2174,10 +2215,17 @@ pub(crate) fn prepare_authorized_source(
     }
     let (receipts, export) = parse_bounded_canon_value(&source, parse_canon_value)?;
     let mut export = Zeroizing::new(export);
+    let original_origin_proof = has_original_origin_proof(&export);
     let candidates = collect_sealed_candidates(&export, &source, &receipts)?;
     let CanonValue::Object(document) = &mut *export else {
         return Err(ReasoningFieldError::MalformedSource);
     };
+    let original_source_session = document
+        .get("info")
+        .and_then(|info| info.get("id"))
+        .and_then(CanonValue::as_str)
+        .filter(|id| !id.is_empty())
+        .map(str::to_owned);
     let classic_root = matches!(document.get("messages"), Some(CanonValue::Array(messages)) if messages.iter().any(|message| {
         matches!(message, CanonValue::Object(fields) if fields.contains_key("info") && !fields.contains_key("type"))
     }));
@@ -2563,6 +2611,12 @@ pub(crate) fn prepare_authorized_source(
             "reasoning source is partial"
         );
     }
+    let ordinary_partial_eligible = unproven
+        && !classic_root
+        && !original_origin_proof
+        && candidates.is_none()
+        && original_source_session.is_some()
+        && retained_meaningful_ordinary_message(document);
     let ordinary = if removed {
         let cap = usize::try_from(TRANSCRIPT_READ_HARD_CAP_BYTES)
             .map_err(|_| ReasoningFieldError::SourceTooLarge)?;
@@ -2579,6 +2633,12 @@ pub(crate) fn prepare_authorized_source(
     if let Some(candidates) = candidates {
         Ok(PreparedReasoningSource::with_opencode_candidates(
             ordinary, candidates,
+        ))
+    } else if ordinary_partial_eligible {
+        let source_session = original_source_session.ok_or(ReasoningFieldError::MalformedSource)?;
+        Ok(PreparedReasoningSource::with_verified_opencode_partial(
+            ordinary,
+            source_session,
         ))
     } else if unproven {
         Ok(PreparedReasoningSource::unproven_candidates(ordinary))
@@ -4429,5 +4489,273 @@ mod tests {
             let value: serde_json::Value = serde_json::from_slice(&ordinary).expect("safe JSON");
             assert!(value["messages"][1].get("error").is_none());
         }
+    }
+    #[test]
+    fn verified_partial_single_json_permit_is_closed() {
+        use crate::internal::ai::observed_agents::reasoning::ReasoningSourceDisposition;
+        fn source(state: serde_json::Value) -> serde_json::Value {
+            serde_json::json!({"info":{"id":"ses_verified_partial","location":{"directory":"/fixture"}},
+                "messages":[{"id":"msg_user","type":"user","text":"safe request"},
+                {"id":"msg_assistant","type":"assistant","content":[
+                    {"type":"reasoning","text":"PRIVATE_REASONING_CANARY","time":{"start":1},"state":state},
+                    {"type":"text","text":"safe reply"}]}]})
+        }
+        fn has_permit(value: serde_json::Value) -> bool {
+            let bytes = serde_json::to_vec(&value).expect("source fixture");
+            let prepared = prepare_authorized_source(bytes).expect("strict valid fixture");
+            let (ordinary, disposition, permit) =
+                ReasoningSourceDisposition::from_prepared_authorized_source_with_partial_permit(
+                    prepared,
+                    true,
+                    1024 * 1024,
+                    "opencode",
+                    "capture_partial",
+                    Some("ses_verified_partial"),
+                )
+                .expect("verified matching mapping");
+            assert!(!disposition.has_capture_consumer());
+            assert!(!String::from_utf8_lossy(&ordinary).contains("PRIVATE_REASONING_CANARY"));
+            assert!(!String::from_utf8_lossy(&ordinary).contains("PRIVATE_STATE_CANARY"));
+            let safe: serde_json::Value =
+                serde_json::from_slice(&ordinary).expect("safe projection");
+            if let Some(parts) = safe["messages"][1]["content"].as_array() {
+                for part in parts {
+                    if part["type"] == "reasoning" {
+                        for erased in [
+                            "text",
+                            "time",
+                            "state",
+                            "signature",
+                            "redactedData",
+                            "reasoningEncryptedContent",
+                        ] {
+                            assert!(
+                                part.get(erased).is_none(),
+                                "associated {erased} was retained"
+                            );
+                        }
+                    }
+                }
+            }
+            permit.is_some()
+        }
+        for state in [
+            serde_json::json!({"reasoningField":"PRIVATE_STATE_CANARY"}),
+            serde_json::json!({"signature":"PRIVATE_STATE_CANARY"}),
+            serde_json::json!({"redactedData":"PRIVATE_STATE_CANARY"}),
+            serde_json::json!({"reasoningEncryptedContent":"PRIVATE_STATE_CANARY"}),
+            serde_json::json!({"anthropic":{"signature":"PRIVATE_STATE_CANARY"}}),
+            serde_json::json!({"signature":"PRIVATE_STATE_CANARY", "redactedData":"PRIVATE_STATE_CANARY", "reasoningEncryptedContent":"PRIVATE_STATE_CANARY"}),
+        ] {
+            assert!(has_permit(source(state)));
+        }
+        for field in ["signature", "redactedData", "reasoningEncryptedContent"] {
+            let mut value = source(serde_json::json!({"reasoningField":"PRIVATE_STATE_CANARY"}));
+            value["messages"][1]["content"][0][field] = serde_json::json!("PRIVATE_STATE_CANARY");
+            assert!(
+                has_permit(value),
+                "top-level {field} must be erased before eligibility"
+            );
+        }
+        for path in ["root", "info", "nested", "part"] {
+            let mut value = source(serde_json::json!({"signature":"PRIVATE_STATE_CANARY"}));
+            match path {
+                "root" => value["originProof"] = serde_json::json!(null),
+                "info" => value["info"]["originProof"] = serde_json::json!(17),
+                "nested" => {
+                    value["info"]["metadata"] = serde_json::json!({"outer":{"originProof":false}})
+                }
+                _ => {
+                    value["messages"][1]["content"][0]["originProof"] =
+                        serde_json::json!({"nonce":"invalid"})
+                }
+            }
+            assert!(!has_permit(value), "originProof in {path}");
+        }
+        let escaped_origin = serde_json::to_vec(&source(
+            serde_json::json!({"reasoningField":"PRIVATE_STATE_CANARY", "originProof":null}),
+        ))
+        .unwrap();
+        let escaped_origin = String::from_utf8(escaped_origin)
+            .unwrap()
+            .replace("originProof", r"origin\u0050roof");
+        let escaped = prepare_authorized_source(escaped_origin.into_bytes()).unwrap();
+        let (_, _, permit) =
+            ReasoningSourceDisposition::from_prepared_authorized_source_with_partial_permit(
+                escaped,
+                true,
+                1024 * 1024,
+                "opencode",
+                "capture_partial",
+                Some("ses_verified_partial"),
+            )
+            .unwrap();
+        assert!(
+            permit.is_none(),
+            "canonical escaped originProof must remain blocked"
+        );
+        let escaped_duplicate = br#"{"info":{"id":"ses_verified_partial"},"messages":[],"originProof":null,"origin\u0050roof":false}"#;
+        assert!(
+            matches!(
+                prepare_authorized_source(escaped_duplicate.to_vec()),
+                Err(ReasoningFieldError::MalformedSource)
+            ),
+            "decoded duplicate originProof keys must reject the whole source"
+        );
+        let classic = serde_json::json!({
+            "info":{"id":"ses_verified_partial"},
+            "messages":[
+                {"info":{"id":"msg_user","role":"user"},"parts":[{"type":"text","text":"safe request"}]},
+                {"info":{"id":"msg_assistant","role":"assistant"},"parts":[
+                    {"type":"reasoning","text":"PRIVATE_REASONING_CANARY","state":{"signature":"PRIVATE_STATE_CANARY"}},
+                    {"type":"text","text":"safe reply"}
+                ]}
+            ]
+        });
+        assert!(
+            !has_permit(classic),
+            "classic roots cannot mint a native-format partial permit"
+        );
+        let mut candidate = source(serde_json::json!({"signature":"PRIVATE_STATE_CANARY"}));
+        candidate["messages"][1]["content"][0]["id"] =
+            serde_json::json!("npart_0123456789abcdef0123456789abcdef");
+        candidate["messages"][1]["content"][0]["originProof"] =
+            serde_json::json!({"receipt":"fixture", "nonce":3});
+        let candidate = prepare_authorized_source(serde_json::to_vec(&candidate).unwrap()).unwrap();
+        let (_, disposition, permit) =
+            ReasoningSourceDisposition::from_prepared_authorized_source_with_partial_permit(
+                candidate,
+                true,
+                1024 * 1024,
+                "opencode",
+                "capture_partial",
+                Some("ses_verified_partial"),
+            )
+            .unwrap();
+        assert!(
+            matches!(
+                disposition,
+                ReasoningSourceDisposition::OpenCodeCandidate(_)
+            ),
+            "fixture must exercise a present sealed candidate"
+        );
+        assert!(!disposition.has_capture_consumer());
+        assert!(
+            permit.is_none(),
+            "present candidate cannot take the ordinary partial lane"
+        );
+        let unrecognized_only = serde_json::json!({
+            "info":{"id":"ses_verified_partial"},
+            "messages":[{"id":"msg_unknown","type":"Assistant","text":"PRIVATE_REASONING_CANARY",
+                "metadata":{"signature":"PRIVATE_STATE_CANARY"}}]
+        });
+        assert!(
+            !has_permit(unrecognized_only),
+            "unrecognized-only source has no retained meaningful ordinary content"
+        );
+        let mut skeleton = source(serde_json::json!({"reasoningField":"PRIVATE_STATE_CANARY"}));
+        skeleton["messages"]
+            .as_array_mut()
+            .expect("messages")
+            .remove(0);
+        skeleton["messages"][0]["content"]
+            .as_array_mut()
+            .expect("content")
+            .pop();
+        assert!(!has_permit(skeleton));
+        let value = source(serde_json::json!({"reasoningField":"PRIVATE_STATE_CANARY"}));
+        let prepared = prepare_authorized_source(serde_json::to_vec(&value).unwrap()).unwrap();
+        assert!(
+            ReasoningSourceDisposition::from_prepared_authorized_source_with_partial_permit(
+                prepared,
+                true,
+                1024 * 1024,
+                "opencode",
+                "capture_partial",
+                Some("wrong_session")
+            )
+            .is_err()
+        );
+        for bytes in [
+            b"{\"info\":{},\"info\":{},\"messages\":[]}".to_vec(),
+            [serde_json::to_vec(&value).unwrap(), b" {}".to_vec()].concat(),
+            b"{broken".to_vec(),
+        ] {
+            assert!(prepare_authorized_source(bytes).is_err());
+        }
+        let cap = usize::try_from(TRANSCRIPT_READ_HARD_CAP_BYTES).expect("fixture byte cap");
+        let mut dense = Vec::with_capacity(2 * (OPENCODE_CANON_MAX_NODES + 1) + 2);
+        dense.push(b'[');
+        for ordinal in 0..=OPENCODE_CANON_MAX_NODES {
+            if ordinal > 0 {
+                dense.push(b',');
+            }
+            dense.push(b'0');
+        }
+        dense.push(b']');
+        for (budget, bytes) in [
+            ("byte", vec![b' '; cap + 1]),
+            ("node", dense),
+            (
+                "depth",
+                format!(
+                    "{}0{}",
+                    "[".repeat(MAX_JSON_DEPTH + 2),
+                    "]".repeat(MAX_JSON_DEPTH + 2)
+                )
+                .into_bytes(),
+            ),
+        ] {
+            assert!(
+                matches!(
+                    prepare_authorized_source(bytes),
+                    Err(ReasoningFieldError::SourceTooLarge)
+                ),
+                "{budget} limit cannot mint a permit"
+            );
+        }
+        let unmapped = prepare_authorized_source(serde_json::to_vec(&value).unwrap()).unwrap();
+        let (_, disposition, permit) =
+            ReasoningSourceDisposition::from_prepared_authorized_source_with_partial_permit(
+                unmapped,
+                false,
+                1024 * 1024,
+                "opencode",
+                "capture_partial",
+                Some("ses_verified_partial"),
+            )
+            .unwrap();
+        assert!(matches!(disposition, ReasoningSourceDisposition::Unmapped));
+        assert!(permit.is_none());
+        for (provider, capture, source_session) in [
+            ("codex", "capture_partial", Some("ses_verified_partial")),
+            ("opencode", "", Some("ses_verified_partial")),
+            ("opencode", "capture_partial", None),
+        ] {
+            let prepared = prepare_authorized_source(serde_json::to_vec(&value).unwrap()).unwrap();
+            assert!(
+                ReasoningSourceDisposition::from_prepared_authorized_source_with_partial_permit(
+                    prepared,
+                    true,
+                    1024 * 1024,
+                    provider,
+                    capture,
+                    source_session
+                )
+                .is_err()
+            );
+        }
+        let generic = PreparedReasoningSource::unproven_candidates(b"safe request".to_vec());
+        let (_, _, permit) =
+            ReasoningSourceDisposition::from_prepared_authorized_source_with_partial_permit(
+                generic,
+                true,
+                1024 * 1024,
+                "opencode",
+                "capture_partial",
+                Some("ses_verified_partial"),
+            )
+            .unwrap();
+        assert!(permit.is_none());
     }
 }

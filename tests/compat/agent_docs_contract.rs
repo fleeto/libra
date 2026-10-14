@@ -1329,3 +1329,148 @@ fn reasoning_identity_reservation_errors_and_session_limits_are_documented() {
         }
     }
 }
+
+#[test]
+fn opencode_verified_partial_live_capture_keeps_native_and_replay_closed() {
+    for (label, document) in [
+        ("agent EN", AGENT_CMD_DOC_EN),
+        ("compatibility", COMPATIBILITY_DOC),
+    ] {
+        let (_, section) = document
+            .split_once("### OpenCode ordinary partial live checkpoints")
+            .expect("ordinary partial live capture must have its own contract section");
+        for term in [
+            "`Unproven` / `Partial`",
+            "known non-reasoning text or message part",
+            "only metadata or erased reasoning",
+            "strict single-JSON parsing",
+            "successful exporter",
+            "exact session mapping",
+            "repository-scoped",
+            "source HMAC binding",
+            "`info.id`",
+            "provider session",
+            "`repo_id`",
+            "agent kind at bind time",
+            "actual checkpoint",
+            "HMAC is an opaque string",
+            "Generic ordinary consumers stay closed to `Unproven`",
+            "associated reasoning text and time",
+            "original `originProof` key anywhere",
+            "or a sealed candidate prevents this fallback",
+            "metadata flag",
+            "`source_authorization_mismatch`",
+            "exporter authorization has already",
+            "Source A remains UNPROVEN",
+            "No reasoning artifacts, private",
+            "Complete coverage claims or native ACK",
+            "source input cap bounds each snapshot independently",
+            "up to 16 MiB",
+            "no per-session total cap",
+            "idle count × source size",
+            "legacy classic `info` / `parts` exports remain excluded",
+            "Checkpoint/export readers in this build",
+            "Older-binary compatibility requires a separate actual",
+            "no cross-idle deduplication protocol",
+            "generation, lease, scoped",
+            "ref-CAS fences",
+            "verified durable partial checkpoint write",
+            "content-free pending intent",
+            "ACK or generation advance",
+            "no durable partial payload replay",
+            "`LBR-AGENT-020`",
+            "does not enable import or native admission",
+            "single redacted JSON document",
+            "no new",
+            "public reason or metadata enum value",
+            "V2 import rule requiring partial",
+            "zero bytes and zero redaction metrics",
+            "debug build, not the official 0.30.49 release",
+            "BASE's real import gate",
+            "formal release checks remain pending",
+            "locally on macOS",
+            "CI; synthetic tests do not prove native source",
+        ] {
+            assert_contains(section, label, term);
+        }
+        for opaque_hint in [
+            "`reasoningField`",
+            "`signature`",
+            "`redactedData`",
+            "`reasoningEncryptedContent`",
+            "`thoughtSignature`",
+            "`originProof`",
+        ] {
+            assert_contains(section, label, opaque_hint);
+        }
+    }
+    for (label, document) in [("agent ZH", AGENT_CMD_DOC_ZH), ("tracing", AGENT_DOC)] {
+        let (_, section) = document
+            .split_once("### OpenCode 普通 partial live checkpoint")
+            .expect("ordinary partial live capture must have its own contract section");
+        for term in [
+            "`Unproven` / `Partial`",
+            "已知非 reasoning",
+            "只有 metadata 或已擦除 reasoning 骨架的源仍拒绝",
+            "严格单 JSON",
+            "exporter 授权",
+            "精确会话映射",
+            "有界脱敏",
+            "repository-scoped source HMAC",
+            "`info.id`",
+            "`repo_id`",
+            "agent kind",
+            "实际 checkpoint request 比较",
+            "HMAC 是 opaque string",
+            "generic ordinary consumer 继续拒绝",
+            "关联 reasoning text/time",
+            "原始解析树任意",
+            "错型或未知嵌套值",
+            "sealed candidate",
+            "metadata flag 不能授此权限",
+            "`source_authorization_mismatch`",
+            "exporter 授权已经成功",
+            "Source A 仍为 UNPROVEN",
+            "不创建 reasoning artifact",
+            "私有 reasoning identity、Complete coverage claim 或 native ACK",
+            "source 输入单独受上限约束",
+            "最多 16 MiB",
+            "没有累计总量上限",
+            "idle 次数 × source 大小",
+            "旧 classic `info` / `parts` export 仍排除",
+            "本构建的 checkpoint/export 读端",
+            "旧二进制兼容必须另外实测读回",
+            "重复 whole-source snapshot",
+            "不新增跨 idle deduplication 协议",
+            "generation、lease、scoped tombstone 和 ref-CAS",
+            "partial checkpoint 写入后",
+            "content-free pending intent",
+            "不产生成功 ACK、不提前推进 generation",
+            "不支持 durable partial payload replay",
+            "`LBR-AGENT-020`",
+            "live 修复不启用",
+            "import 或 native admission",
+            "单个已脱敏 JSON document",
+            "无新增",
+            "public reason/metadata enum value",
+            "V2 import 对 partial projection 的 zero bytes/zero redaction metrics 规则不放宽",
+            "debug build，不是正式",
+            "0.30.49 release",
+            "BASE 真实 import 门",
+            "macOS 本机运行，不进 CI",
+            "synthetic 不证明",
+        ] {
+            assert_contains(section, label, term);
+        }
+        for opaque_hint in [
+            "`reasoningField`",
+            "`signature`",
+            "`redactedData`",
+            "`reasoningEncryptedContent`",
+            "`thoughtSignature`",
+            "`originProof`",
+        ] {
+            assert_contains(section, label, opaque_hint);
+        }
+    }
+}

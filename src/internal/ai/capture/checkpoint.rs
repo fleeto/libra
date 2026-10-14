@@ -25,8 +25,13 @@ use crate::internal::ai::capture::snapshot::CaptureSnapshot;
 use crate::internal::{
     ai::{
         capture::{
-            catalog::CaptureCatalogTerminalAttemptFence, key,
-            pending_payload::PendingReasoningReplay, snapshot::CaptureSnapshotProjection,
+            catalog::CaptureCatalogTerminalAttemptFence,
+            key,
+            pending_payload::PendingReasoningReplay,
+            snapshot::{
+                CaptureSnapshotProjection, VerifiedOrdinaryPartialBinding,
+                VerifiedOrdinaryPartialSnapshot,
+            },
             state::CheckpointWrite,
         },
         capture_scope::{CaptureCommitDeadline, CaptureScope},
@@ -432,6 +437,7 @@ pub struct CheckpointRedactedPayload {
     redaction_report_json: RedactedBytes,
     reasoning: ReasoningSourceDisposition,
     pending_reasoning: Option<PendingReasoningReplay>,
+    verified_partial_binding: Option<VerifiedOrdinaryPartialBinding>,
 }
 
 /// What the redacted transcript blob represents relative to its safe source
@@ -442,6 +448,7 @@ enum CheckpointPayloadProvenance {
     ExactSnapshot,
     DerivedTurnProjection,
     MetadataFallback,
+    VerifiedOrdinaryPartial,
 }
 
 /// Immutable evidence that the repository-private envelope MAC was checked.
@@ -515,6 +522,12 @@ pub(crate) fn prepare_reasoning_identity_inputs<'a>(
     capture_session: &str,
     provider: &str,
 ) -> Result<Vec<BoundIdentityInputRef<'a>>, CheckpointStoreError> {
+    // Storage-only does not create Empty native identity authority for future
+    // OG-19/20 consumers. The generic Unproven branch below remains closed.
+    if payload.provenance == CheckpointPayloadProvenance::VerifiedOrdinaryPartial {
+        payload.validate_verified_partial_capture(capture_session, provider)?;
+        return Ok(Vec::new());
+    }
     prepare_reasoning_identity_inputs_from_disposition(
         &payload.reasoning,
         capture_session,
@@ -1501,6 +1514,10 @@ fn prepare_reasoning_artifact_params<'a>(
     capture_session: &str,
     provider: &str,
 ) -> Result<&'a [traces::ReasoningArtifactParam], CheckpointStoreError> {
+    if payload.provenance == CheckpointPayloadProvenance::VerifiedOrdinaryPartial {
+        payload.validate_verified_partial_capture(capture_session, provider)?;
+        return Ok(&[]);
+    }
     prepare_reasoning_artifact_params_from_disposition(
         &payload.reasoning,
         capture_session,
@@ -1567,11 +1584,98 @@ impl CheckpointRedactedPayload {
             snapshot: projection,
             reasoning,
             pending_reasoning: None,
+            verified_partial_binding: None,
             provenance: CheckpointPayloadProvenance::ExactSnapshot,
             metadata_json,
             lifecycle_events_jsonl,
             redaction_report_json,
         })
+    }
+
+    /// Sole storage consumer of the scoped owning ordinary-partial capsule.
+    /// It never relabels Unproven as Ordinary or admits native/pending bytes.
+    pub(crate) fn from_verified_ordinary_partial(
+        source: VerifiedOrdinaryPartialSnapshot,
+        metadata_json: RedactedBytes,
+        lifecycle_events_jsonl: RedactedBytes,
+        redaction_report_json: RedactedBytes,
+    ) -> Result<Self, CheckpointStoreError> {
+        let (transcript, snapshot, binding) = source.into_payload_parts();
+        let invalid = || CheckpointStoreError::InvalidRequest {
+            field: "verified ordinary partial source binding".to_owned(),
+        };
+        let metadata =
+            crate::internal::ai::observed_agents::parse_canon_value(metadata_json.bytes())
+                .map_err(|_| invalid())?;
+        if metadata.get("session_id").and_then(|v| v.as_str()) != Some(binding.capture_session())
+            || metadata.get("provider_session_id").and_then(|v| v.as_str())
+                != Some(binding.source_session())
+            || metadata.get("agent_kind").and_then(|v| v.as_str()) != Some("opencode")
+            || metadata.get("scope").and_then(|v| v.as_str()) != Some("committed")
+        {
+            return Err(invalid());
+        }
+        // The sidecar is already redacted, but cannot substitute a different
+        // projection than the one authorized at the scoped HMAC bind.
+        let value: serde_json::Value =
+            serde_json::from_slice(metadata_json.bytes()).map_err(|_| invalid())?;
+        let written_snapshot: CaptureSnapshotProjection = serde_json::from_value(
+            value
+                .get("transcript_snapshot")
+                .cloned()
+                .ok_or_else(invalid)?,
+        )
+        .map_err(|_| invalid())?;
+        if written_snapshot != snapshot {
+            return Err(invalid());
+        }
+        let payload = Self {
+            transcript,
+            snapshot,
+            provenance: CheckpointPayloadProvenance::VerifiedOrdinaryPartial,
+            metadata_json,
+            lifecycle_events_jsonl,
+            redaction_report_json,
+            reasoning: ReasoningSourceDisposition::Unproven,
+            pending_reasoning: None,
+            verified_partial_binding: Some(binding),
+        };
+        let session = payload
+            .verified_partial_binding
+            .as_ref()
+            .ok_or_else(invalid)?
+            .capture_session();
+        payload.validate_verified_partial_capture(session, "opencode")?;
+        Ok(payload)
+    }
+
+    fn validate_verified_partial_capture(
+        &self,
+        session: &str,
+        provider: &str,
+    ) -> Result<(), CheckpointStoreError> {
+        if self.provenance != CheckpointPayloadProvenance::VerifiedOrdinaryPartial
+            || !matches!(self.reasoning, ReasoningSourceDisposition::Unproven)
+            || self.pending_reasoning.is_some()
+            || !self
+                .verified_partial_binding
+                .as_ref()
+                .is_some_and(|binding| binding.matches_capture(session, provider))
+            || self.snapshot.completeness != super::snapshot::CaptureSnapshotCompleteness::Partial
+            || self.snapshot.partial_reason
+                != Some(super::snapshot::CaptureSnapshotPartialReason::SourceAuthorizationMismatch)
+            || self.snapshot.source.as_ref().is_none_or(|source| {
+                source.kind != super::snapshot::CaptureSnapshotSourceKind::TrustedExport
+            })
+            || !self.snapshot.has_durable_source_commitment()
+            || self.transcript.is_empty()
+            || self.snapshot.transcript_redacted_bytes != self.transcript.len()
+        {
+            return Err(CheckpointStoreError::InvalidRequest {
+                field: "verified ordinary partial source binding".to_owned(),
+            });
+        }
+        Ok(())
     }
 
     /// Construct a checkpoint payload from redacted capture material.
@@ -1658,6 +1762,7 @@ impl CheckpointRedactedPayload {
             provenance,
             reasoning,
             pending_reasoning: None,
+            verified_partial_binding: None,
             metadata_json,
             lifecycle_events_jsonl,
             redaction_report_json,
@@ -1718,6 +1823,7 @@ impl CheckpointRedactedPayload {
                 ReasoningSourceDisposition::NativeProven,
             ),
             pending_reasoning: None,
+            verified_partial_binding: None,
             provenance: CheckpointPayloadProvenance::DerivedTurnProjection,
             metadata_json,
             lifecycle_events_jsonl,
@@ -1994,6 +2100,13 @@ impl<'a> CheckpointWriteRequest<'a> {
         if txn_extra.is_some_and(|extra| extra.requires_versioned_coverage_binding()) {
             return Err(CheckpointStoreError::InvalidRequest {
                 field: "versioned coverage claim plan".to_owned(),
+            });
+        }
+        if payload.provenance == CheckpointPayloadProvenance::VerifiedOrdinaryPartial
+            && (scope != CheckpointScope::Committed || txn_extra.is_none())
+        {
+            return Err(CheckpointStoreError::InvalidRequest {
+                field: "verified ordinary partial claim barrier".to_owned(),
             });
         }
         prepare_reasoning_artifact_params(payload, session_id, agent_kind)?;
@@ -3116,6 +3229,14 @@ impl<'a> TracesCheckpointStore<'a> {
         &self,
         request: &CheckpointWriteRequest<'_>,
     ) -> Result<(), CheckpointWriteOutcome> {
+        if let Some(binding) = &request.payload.verified_partial_binding
+            && (!binding.matches_scope(self.capture_scope.as_ref())
+                || !binding.matches_capture(request.session_id(), request.agent_kind))
+        {
+            return Err(CheckpointWriteOutcome::ConflictUnchanged {
+                reason: CheckpointConflictReason::ScopeFence,
+            });
+        }
         if let Some(fence) = &self.terminal_attempt_fence
             && (request.scope() != CheckpointScope::Committed
                 || !fence.matches_checkpoint_attempt(
@@ -7384,6 +7505,168 @@ mod tests {
         assert_eq!(
             retained_objects, original_objects,
             "disabling admission must preserve persisted artifact OIDs and byte-exact readback"
+        );
+    }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn verified_partial_payload_has_no_native_authority() {
+        use crate::internal::ai::capture::snapshot::{
+            verified_partial_fixture_snapshot, verified_partial_key_fixture,
+        };
+        let (dir, storage, conn, scope) = verified_partial_key_fixture().await;
+        let capture = "opencode__partial-payload";
+        let source = "ses_partial_payload";
+        let snapshot = verified_partial_fixture_snapshot(capture, source, dir.path());
+        assert!(
+            CheckpointRedactedPayload::from_redacted_capture_with_reasoning(
+                snapshot.transcript().unwrap().clone(),
+                Some(snapshot.safe_projection()),
+                sidecar(b"{}"),
+                sidecar(b"{}\n"),
+                sidecar(b"{}"),
+                ReasoningSourceDisposition::Unproven
+            )
+            .is_err()
+        );
+        let carrier = snapshot
+            .try_into_verified_ordinary_partial_in_scope_until(
+                &conn,
+                &scope,
+                &storage,
+                dir.path(),
+                Instant::now() + Duration::from_secs(10),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("sealed partial fixture"));
+        let metadata=serde_json::to_vec(&serde_json::json!({"session_id":capture,"provider_session_id":source,
+            "agent_kind":"opencode","scope":"committed","transcript_snapshot":carrier.projection()})).unwrap();
+        let payload = CheckpointRedactedPayload::from_verified_ordinary_partial(
+            carrier,
+            sidecar(&metadata),
+            sidecar(b"{}\n"),
+            sidecar(b"{}"),
+        )
+        .expect("storage-only sealed partial factory");
+        assert!(!payload.reasoning.has_capture_consumer());
+        assert!(!payload.reasoning.is_ordinary());
+        assert!(!payload.is_exact_complete_snapshot());
+        assert!(payload.authorize_ordinary_pending_payload().is_err());
+        assert!(payload.pending_reasoning.is_none());
+        assert_eq!(
+            payload.provenance,
+            CheckpointPayloadProvenance::VerifiedOrdinaryPartial
+        );
+        assert_eq!(
+            payload.snapshot.completeness,
+            super::super::snapshot::CaptureSnapshotCompleteness::Partial
+        );
+        assert_eq!(
+            payload.snapshot.partial_reason,
+            Some(super::super::snapshot::CaptureSnapshotPartialReason::SourceAuthorizationMismatch)
+        );
+        assert!(
+            prepare_reasoning_artifact_params(&payload, capture, "opencode")
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            prepare_reasoning_identity_inputs(&payload, capture, "opencode")
+                .unwrap()
+                .is_empty()
+        );
+        assert!(prepare_reasoning_artifact_params(&payload, "different", "opencode").is_err());
+        assert!(prepare_reasoning_artifact_params(&payload, capture, "codex").is_err());
+        assert!(prepare_reasoning_identity_inputs(&payload, "different", "opencode").is_err());
+        assert!(prepare_reasoning_identity_inputs(&payload, capture, "codex").is_err());
+        for (field, replacement) in [
+            ("session_id", serde_json::json!("foreign_capture")),
+            ("provider_session_id", serde_json::json!("foreign_source")),
+            ("agent_kind", serde_json::json!("codex")),
+            ("scope", serde_json::json!("uncommitted")),
+            ("provider_session_id", serde_json::json!(null)),
+        ] {
+            let carrier = verified_partial_fixture_snapshot(capture, source, dir.path())
+                .try_into_verified_ordinary_partial_in_scope_until(
+                    &conn,
+                    &scope,
+                    &storage,
+                    dir.path(),
+                    Instant::now() + Duration::from_secs(10),
+                )
+                .await
+                .unwrap_or_else(|_| panic!("metadata identity test carrier"));
+            let mut metadata = serde_json::json!({"session_id":capture,"provider_session_id":source,
+                "agent_kind":"opencode","scope":"committed","transcript_snapshot":carrier.projection()});
+            metadata[field] = replacement;
+            let metadata = serde_json::to_vec(&metadata).unwrap();
+            assert!(
+                CheckpointRedactedPayload::from_verified_ordinary_partial(
+                    carrier,
+                    sidecar(&metadata),
+                    sidecar(b"{}\n"),
+                    sidecar(b"{}")
+                )
+                .is_err(),
+                "mismatched metadata {field} cannot consume the carrier"
+            );
+        }
+        assert!(
+            prepare_reasoning_identity_inputs_from_disposition(
+                &payload.reasoning,
+                capture,
+                "opencode"
+            )
+            .is_err()
+        );
+        assert!(
+            prepare_reasoning_artifact_params_from_disposition(
+                &payload.reasoning,
+                capture,
+                "opencode"
+            )
+            .is_err()
+        );
+        let mismatch_carrier = verified_partial_fixture_snapshot(capture, source, dir.path())
+            .try_into_verified_ordinary_partial_in_scope_until(
+                &conn,
+                &scope,
+                &storage,
+                dir.path(),
+                Instant::now() + Duration::from_secs(10),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("mismatch carrier bound"));
+        let mut mismatch_projection = mismatch_carrier.projection();
+        mismatch_projection.transcript_redacted_bytes += 1;
+        let mismatch_metadata = serde_json::to_vec(
+            &serde_json::json!({"session_id":capture,"provider_session_id":source,
+            "agent_kind":"opencode","scope":"committed","transcript_snapshot":mismatch_projection}),
+        )
+        .unwrap();
+        assert!(
+            CheckpointRedactedPayload::from_verified_ordinary_partial(
+                mismatch_carrier,
+                sidecar(&mismatch_metadata),
+                sidecar(b"{}\n"),
+                sidecar(b"{}")
+            )
+            .is_err()
+        );
+        assert!(
+            CheckpointWriteRequest::new(
+                "replay",
+                "checkpoint",
+                capture,
+                "opencode",
+                None,
+                CheckpointScope::Committed,
+                "generation",
+                None,
+                &payload,
+                None,
+                None
+            )
+            .is_err()
         );
     }
 }

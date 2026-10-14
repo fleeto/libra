@@ -7,8 +7,9 @@
 //! This makes the snapshot service the one common boundary for live capture,
 //! historical import, and later capture-push consumers.
 
-use std::{fmt, time::Instant};
+use std::{fmt, path::Path, time::Instant};
 
+use sea_orm::ConnectionTrait;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, Zeroizing};
@@ -19,11 +20,14 @@ use crate::internal::ai::{
         LiveClaudeSourceRead, SOURCE_IDENTITY_NOT_RETAINED, capture_redacted_output_cap,
         capture_redaction_working_set_cap, provider_file_identity, read_live_claude_source_until,
     },
+    capture_scope::CaptureScope,
     observed_agents::{
         AgentKind, AgentSessionCtx, ObservedAgent, RedactedBytes, RedactionReport, Redactor,
         TRANSCRIPT_READ_HARD_CAP_BYTES, TranscriptReadError, TranscriptSource,
         TranscriptSourceResolution,
-        reasoning::{ReasoningFieldError, ReasoningSourceDisposition},
+        reasoning::{
+            OpenCodeOrdinaryPartialPermit, ReasoningFieldError, ReasoningSourceDisposition,
+        },
         resolve_live_transcript_source_until,
         transcript_source::InMemoryTranscriptOrigin,
     },
@@ -314,7 +318,14 @@ fn prepare_authorized_reasoning_source(
     adapter: &dyn ObservedAgent,
     context: &AuthorizedReasoningSourceContext,
     policy: CaptureSnapshotPolicy,
-) -> Result<(Vec<u8>, ReasoningSourceDisposition), CaptureSnapshotPartialReason> {
+) -> Result<
+    (
+        Vec<u8>,
+        ReasoningSourceDisposition,
+        Option<OpenCodeOrdinaryPartialPermit>,
+    ),
+    CaptureSnapshotPartialReason,
+> {
     let mut bytes = Zeroizing::new(bytes);
     if deadline_elapsed(policy) {
         return Err(CaptureSnapshotPartialReason::DeadlineExceeded);
@@ -329,6 +340,7 @@ fn prepare_authorized_reasoning_source(
         return Ok((
             std::mem::take(&mut *bytes),
             ReasoningSourceDisposition::Ordinary,
+            None,
         ));
     };
     let prepared = preprocessor
@@ -337,7 +349,7 @@ fn prepare_authorized_reasoning_source(
     if deadline_elapsed(policy) {
         return Err(CaptureSnapshotPartialReason::DeadlineExceeded);
     }
-    ReasoningSourceDisposition::from_prepared_authorized_source(
+    ReasoningSourceDisposition::from_prepared_authorized_source_with_partial_permit(
         prepared,
         context.has_verified_mapping(),
         policy.max_bytes,
@@ -372,6 +384,60 @@ pub struct CaptureSnapshot {
     transcript_redacted: Option<RedactedBytes>,
     redaction_report: RedactionReport,
     reasoning: ReasoningSourceDisposition,
+    ordinary_partial_permit: Option<OpenCodeOrdinaryPartialPermit>,
+}
+
+/// Scope and both Session identities recorded at the actual scoped HMAC bind.
+/// This private owner carries no native-source authority or serialization.
+pub(crate) struct VerifiedOrdinaryPartialBinding {
+    scope: CaptureScope,
+    agent_kind: &'static str,
+    capture_session: String,
+    source_session: String,
+}
+
+impl VerifiedOrdinaryPartialBinding {
+    pub(crate) fn matches_capture(&self, session: &str, provider: &str) -> bool {
+        provider == self.agent_kind && session == self.capture_session
+    }
+    pub(crate) fn matches_scope(&self, scope: Option<&CaptureScope>) -> bool {
+        scope == Some(&self.scope)
+    }
+    pub(crate) fn capture_session(&self) -> &str {
+        &self.capture_session
+    }
+    pub(crate) fn source_session(&self) -> &str {
+        &self.source_session
+    }
+}
+
+/// Non-Clone storage-only owner, never a native or ordinary readiness flag.
+pub(crate) struct VerifiedOrdinaryPartialSnapshot {
+    transcript: RedactedBytes,
+    projection: CaptureSnapshotProjection,
+    redaction_report: RedactionReport,
+    binding: VerifiedOrdinaryPartialBinding,
+}
+
+impl VerifiedOrdinaryPartialSnapshot {
+    pub(crate) fn transcript(&self) -> &RedactedBytes {
+        &self.transcript
+    }
+    pub(crate) fn projection(&self) -> CaptureSnapshotProjection {
+        self.projection.clone()
+    }
+    pub(crate) fn redaction_report(&self) -> &RedactionReport {
+        &self.redaction_report
+    }
+    pub(crate) fn into_payload_parts(
+        self,
+    ) -> (
+        RedactedBytes,
+        CaptureSnapshotProjection,
+        VerifiedOrdinaryPartialBinding,
+    ) {
+        (self.transcript, self.projection, self.binding)
+    }
 }
 
 impl fmt::Debug for CaptureSnapshot {
@@ -410,6 +476,7 @@ impl CaptureSnapshot {
             transcript_redacted: Some(transcript_redacted),
             redaction_report,
             reasoning: ReasoningSourceDisposition::Ordinary,
+            ordinary_partial_permit: None,
         }
     }
 
@@ -424,6 +491,7 @@ impl CaptureSnapshot {
             transcript_redacted: None,
             redaction_report: RedactionReport::default(),
             reasoning: ReasoningSourceDisposition::Ordinary,
+            ordinary_partial_permit: None,
         }
     }
 
@@ -459,6 +527,101 @@ impl CaptureSnapshot {
         } else {
             Err(Box::new(self))
         }
+    }
+
+    /// A pure routing observation. Generic consumer/native gates stay shut.
+    pub(crate) fn has_verified_ordinary_partial_permit(&self) -> bool {
+        matches!(self.reasoning, ReasoningSourceDisposition::Unproven)
+            && self.ordinary_partial_permit.is_some()
+            && self.completeness == CaptureSnapshotCompleteness::Partial
+            && self.partial_reason
+                == Some(CaptureSnapshotPartialReason::SourceAuthorizationMismatch)
+            && self
+                .source
+                .as_ref()
+                .is_some_and(|source| source.kind == CaptureSnapshotSourceKind::TrustedExport)
+            && self
+                .transcript_redacted
+                .as_ref()
+                .is_some_and(|bytes| !bytes.is_empty())
+    }
+
+    /// Mint only after the actual current scope/key binds these exact bytes;
+    /// a prefix-valid caller-supplied HMAC cannot manufacture this owner.
+    pub(crate) async fn try_into_verified_ordinary_partial_in_scope_until<C: ConnectionTrait>(
+        mut self,
+        conn: &C,
+        scope: &CaptureScope,
+        storage: &Path,
+        authorized_root: &Path,
+        deadline: Instant,
+    ) -> Result<VerifiedOrdinaryPartialSnapshot, Box<Self>> {
+        if !self.has_verified_ordinary_partial_permit() || Instant::now() >= deadline {
+            self.downgrade_for_commitment_failure(
+                CaptureSnapshotPartialReason::SourceAuthorizationMismatch,
+            );
+            return Err(Box::new(self));
+        }
+        let Some(preimage) = self.redacted_digest_preimage() else {
+            self.downgrade_for_commitment_failure(
+                CaptureSnapshotPartialReason::SourceCommitmentUnavailable,
+            );
+            return Err(Box::new(self));
+        };
+        let digest_matches = self
+            .transcript_redacted
+            .as_ref()
+            .is_some_and(|bytes| <[u8; 32]>::from(Sha256::digest(bytes.bytes())) == preimage);
+        if !digest_matches {
+            self.downgrade_for_commitment_failure(
+                CaptureSnapshotPartialReason::SourceAuthorizationMismatch,
+            );
+            return Err(Box::new(self));
+        }
+        let commitment = super::key::derive_snapshot_content_commitment_in_scope_until(
+            conn,
+            scope,
+            storage,
+            authorized_root,
+            &preimage,
+            deadline,
+        )
+        .await;
+        let Ok(commitment) = commitment else {
+            self.downgrade_for_commitment_failure(
+                CaptureSnapshotPartialReason::SourceCommitmentUnavailable,
+            );
+            return Err(Box::new(self));
+        };
+        if Instant::now() >= deadline || !self.bind_source_commitment(commitment) {
+            self.downgrade_for_commitment_failure(
+                CaptureSnapshotPartialReason::SourceCommitmentUnavailable,
+            );
+            return Err(Box::new(self));
+        }
+        let Some(permit) = self.ordinary_partial_permit.take() else {
+            self.downgrade_for_commitment_failure(
+                CaptureSnapshotPartialReason::SourceAuthorizationMismatch,
+            );
+            return Err(Box::new(self));
+        };
+        let projection = self.safe_projection();
+        let Some(transcript) = self.transcript_redacted.take() else {
+            self.downgrade_for_commitment_failure(CaptureSnapshotPartialReason::SourceReadError);
+            return Err(Box::new(self));
+        };
+        let binding = VerifiedOrdinaryPartialBinding {
+            scope: scope.clone(),
+            agent_kind: "opencode",
+            capture_session: permit.capture_session().to_owned(),
+            source_session: permit.source_session().to_owned(),
+        };
+        Ok(VerifiedOrdinaryPartialSnapshot {
+            transcript,
+            projection,
+            redaction_report: self.redaction_report,
+            binding,
+        })
     }
 
     /// A readiness check only; ownership is still moved to the actual
@@ -546,6 +709,7 @@ impl CaptureSnapshot {
             source.digest_sha256 = None;
         }
         self.transcript_redacted = None;
+        self.ordinary_partial_permit = None;
         self.redaction_report = RedactionReport::default();
     }
 }
@@ -952,7 +1116,7 @@ impl CaptureSnapshotService {
             );
         }
 
-        let (bytes, reasoning) = match prepare_authorized_reasoning_source(
+        let (bytes, reasoning, ordinary_partial_permit) = match prepare_authorized_reasoning_source(
             std::mem::take(&mut *bytes),
             adapter,
             context,
@@ -1006,6 +1170,17 @@ impl CaptureSnapshotService {
                 Some(CaptureSnapshotPartialReason::SourceAuthorizationMismatch);
         }
         snapshot.reasoning = reasoning;
+        if snapshot
+            .source
+            .as_ref()
+            .is_some_and(|source| source.kind == CaptureSnapshotSourceKind::TrustedExport)
+            && matches!(
+                context.origin,
+                AuthorizedReasoningSourceOrigin::AuthorizedExport
+            )
+        {
+            snapshot.ordinary_partial_permit = ordinary_partial_permit;
+        }
         snapshot
     }
 
@@ -1114,6 +1289,74 @@ pub(crate) fn carrier_test_snapshot(
         ),
         CaptureSnapshotPolicy::default(),
     )
+}
+
+/// Deterministic source seam only: no exporter, CLI, hook or Session runtime.
+#[cfg(test)]
+pub(crate) fn verified_partial_fixture_snapshot(
+    capture_session: &str,
+    provider_session: &str,
+    directory: &Path,
+) -> CaptureSnapshot {
+    use crate::internal::ai::observed_agents::{ExportAuthorized, agent_for};
+    let bytes = serde_json::to_vec(&serde_json::json!({
+        "info": {"id":provider_session,"location":{"directory":directory.to_string_lossy()}},
+        "messages": [
+            {"id":"msg_fixture_user","type":"user","text":"safe ordinary request"},
+            {"id":"msg_fixture_assistant","type":"assistant","model":{"id":"fixture"},
+             "tokens":{"input":1,"output":1,"reasoning":0,"cache":{"read":0,"write":0}},
+             "content":[
+                 {"type":"reasoning","text":"PRIVATE_ASSOCIATED_REASONING_CANARY","time":{"start":1,"end":2},"state":{"reasoningField":"PRIVATE_STATE_CANARY"}},
+                 {"type":"text","text":"safe ordinary reply"}
+             ]}
+        ]
+    })).expect("encode deterministic partial source");
+    CaptureSnapshotService::capture_authorized_with_reasoning_context(
+        TranscriptSource::Bytes {
+            auth: ExportAuthorized::issue("opencode", capture_session, &bytes),
+            bytes,
+        },
+        agent_for(AgentKind::OpenCode),
+        AuthorizedReasoningSourceContext::authorized_export(
+            "opencode",
+            capture_session,
+            provider_session,
+        ),
+        CaptureSnapshotPolicy::with_deadline(None),
+    )
+}
+
+/// Isolated Rust storage fixture; no cwd/env mutation or external process.
+#[cfg(all(test, unix))]
+pub(crate) async fn verified_partial_key_fixture() -> (
+    tempfile::TempDir,
+    std::path::PathBuf,
+    sea_orm::DatabaseConnection,
+    CaptureScope,
+) {
+    let dir = tempfile::tempdir().expect("private partial repository");
+    let storage = dir.path().join(crate::utils::util::ROOT_DIR);
+    std::fs::create_dir_all(storage.join("objects")).expect("private partial object store");
+    let conn = crate::internal::db::create_database(
+        storage
+            .join(crate::utils::util::DATABASE)
+            .to_str()
+            .expect("UTF-8 partial fixture path"),
+    )
+    .await
+    .expect("private partial database");
+    crate::internal::config::ConfigKv::set_with_conn(
+        &conn,
+        "libra.repoid",
+        "verified-partial-test-repo",
+        false,
+    )
+    .await
+    .expect("private partial identity");
+    let scope = CaptureScope::resolve(&conn, dir.path())
+        .await
+        .expect("private partial scope");
+    (dir, storage, conn, scope)
 }
 
 #[cfg(test)]
@@ -2318,5 +2561,200 @@ mod tests {
             Some(CaptureSnapshotPartialReason::DeadlineExceeded)
         );
         assert!(expired.transcript().is_none());
+    }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn verified_partial_snapshot_requires_authorization_mapping_and_redaction() {
+        let (dir, storage, conn, scope) = verified_partial_key_fixture().await;
+        let capture = "opencode__partial-test";
+        let source = "ses_partial_test";
+        let snapshot = verified_partial_fixture_snapshot(capture, source, dir.path());
+        use crate::internal::ai::observed_agents::{ExportAuthorized, agent_for};
+        let ordinary = snapshot.transcript().expect("safe source").bytes().to_vec();
+        let authorization_mismatch =
+            CaptureSnapshotService::capture_authorized_with_reasoning_context(
+                TranscriptSource::Bytes {
+                    auth: ExportAuthorized::issue(
+                        "opencode",
+                        capture,
+                        b"different authorized preimage",
+                    ),
+                    bytes: ordinary.clone(),
+                },
+                agent_for(AgentKind::OpenCode),
+                AuthorizedReasoningSourceContext::authorized_export("opencode", capture, source),
+                CaptureSnapshotPolicy::default(),
+            );
+        assert!(!authorization_mismatch.has_verified_ordinary_partial_permit());
+        assert!(authorization_mismatch.transcript().is_none());
+        let raw = serde_json::to_vec(&serde_json::json!({"info":{"id":source},"messages":[
+            {"id":"u","type":"user","text":"safe"},
+            {"id":"a","type":"assistant","content":[{"type":"reasoning","text":"private","state":{"reasoningField":"private"}},{"type":"text","text":"safe"}]}
+        ]})).unwrap();
+        let mapping_mismatch = CaptureSnapshotService::capture_authorized_with_reasoning_context(
+            TranscriptSource::Bytes {
+                auth: ExportAuthorized::issue("opencode", capture, &raw),
+                bytes: raw.clone(),
+            },
+            agent_for(AgentKind::OpenCode),
+            AuthorizedReasoningSourceContext::authorized_export(
+                "opencode",
+                capture,
+                "wrong-provider-session",
+            ),
+            CaptureSnapshotPolicy::default(),
+        );
+        assert!(!mapping_mismatch.has_verified_ordinary_partial_permit());
+        assert!(mapping_mismatch.transcript().is_none());
+        let legacy = CaptureSnapshotService::capture_authorized(
+            TranscriptSource::Bytes {
+                auth: ExportAuthorized::issue("opencode", capture, &raw),
+                bytes: raw,
+            },
+            "opencode",
+            capture,
+            CaptureSnapshotPolicy::default(),
+        );
+        assert!(!legacy.has_verified_ordinary_partial_permit());
+        let mut wrong_kind = verified_partial_fixture_snapshot(capture, source, dir.path());
+        wrong_kind.source.as_mut().unwrap().kind = CaptureSnapshotSourceKind::ProviderFile;
+        assert!(!wrong_kind.has_verified_ordinary_partial_permit());
+        assert!(snapshot.has_verified_ordinary_partial_permit());
+        assert!(snapshot.rejects_capture_source_consumer());
+        let copy = snapshot.transcript().expect("safe partial source").bytes();
+        for canary in [
+            "PRIVATE_ASSOCIATED_REASONING_CANARY",
+            "PRIVATE_STATE_CANARY",
+        ] {
+            assert!(!String::from_utf8_lossy(copy).contains(canary));
+        }
+        assert!(
+            verified_partial_fixture_snapshot(capture, source, dir.path())
+                .try_into_ordinary()
+                .is_err()
+        );
+        let carrier = snapshot
+            .try_into_verified_ordinary_partial_in_scope_until(
+                &conn,
+                &scope,
+                &storage,
+                dir.path(),
+                Instant::now() + std::time::Duration::from_secs(10),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("current scope accepts sealed ordinary partial"));
+        assert_eq!(
+            carrier.projection().completeness,
+            CaptureSnapshotCompleteness::Partial
+        );
+        assert!(carrier.projection().has_durable_source_commitment());
+        assert!(carrier.binding.matches_capture(capture, "opencode"));
+        assert!(!carrier.binding.matches_capture("different", "opencode"));
+        assert!(!carrier.binding.matches_capture(capture, "codex"));
+        let mut wrong_scope = scope.clone();
+        wrong_scope.repo_id = "foreign".to_owned();
+        assert!(!carrier.binding.matches_scope(Some(&wrong_scope)));
+        for (candidate_scope, candidate_root, deadline) in [
+            (
+                &wrong_scope,
+                dir.path(),
+                Instant::now() + std::time::Duration::from_secs(10),
+            ),
+            (&scope, dir.path(), Instant::now()),
+        ] {
+            let rejected = verified_partial_fixture_snapshot(capture, source, dir.path())
+                .try_into_verified_ordinary_partial_in_scope_until(
+                    &conn,
+                    candidate_scope,
+                    &storage,
+                    candidate_root,
+                    deadline,
+                )
+                .await
+                .err()
+                .expect("invalid scope/deadline rejected");
+            assert!(!rejected.has_verified_ordinary_partial_permit());
+            assert!(rejected.transcript().is_none());
+        }
+        let foreign = tempfile::tempdir().expect("foreign scope root");
+        let foreign_storage = foreign.path().join(".libra");
+        std::fs::create_dir(&foreign_storage).expect("foreign storage");
+        for (candidate_storage, candidate_root) in [
+            (storage.as_path(), foreign.path()),
+            (foreign_storage.as_path(), dir.path()),
+        ] {
+            let rejected = verified_partial_fixture_snapshot(capture, source, dir.path())
+                .try_into_verified_ordinary_partial_in_scope_until(
+                    &conn,
+                    &scope,
+                    candidate_storage,
+                    candidate_root,
+                    Instant::now() + std::time::Duration::from_secs(10),
+                )
+                .await
+                .err()
+                .expect("foreign storage/root rejected");
+            assert!(!rejected.has_verified_ordinary_partial_permit());
+            assert!(rejected.transcript().is_none());
+        }
+        let mut missing_source = verified_partial_fixture_snapshot(capture, source, dir.path());
+        missing_source.source = None;
+        let rejected = missing_source
+            .try_into_verified_ordinary_partial_in_scope_until(
+                &conn,
+                &scope,
+                &storage,
+                dir.path(),
+                Instant::now() + std::time::Duration::from_secs(10),
+            )
+            .await
+            .err()
+            .expect("missing source cannot mint a carrier");
+        assert!(!rejected.has_verified_ordinary_partial_permit());
+        assert!(rejected.transcript().is_none());
+        let mut forged_commitment = verified_partial_fixture_snapshot(capture, source, dir.path());
+        forged_commitment.source.as_mut().unwrap().digest_sha256 =
+            Some(format!("source/hmac-v2/{}", "00".repeat(32)));
+        assert!(
+            forged_commitment
+                .safe_projection()
+                .has_durable_source_commitment(),
+            "syntactically valid HMAC is still not current-scope authorization"
+        );
+        let rejected = forged_commitment
+            .try_into_verified_ordinary_partial_in_scope_until(
+                &conn,
+                &scope,
+                &storage,
+                dir.path(),
+                Instant::now() + std::time::Duration::from_secs(10),
+            )
+            .await
+            .err()
+            .expect("caller HMAC cannot replace fresh current-scope derivation");
+        assert!(!rejected.has_verified_ordinary_partial_permit());
+        assert!(rejected.transcript().is_none());
+        let mut corrupted = verified_partial_fixture_snapshot(capture, source, dir.path());
+        corrupted
+            .source
+            .as_mut()
+            .expect("source projection")
+            .digest_sha256 = Some(format!("sha256:{}", "00".repeat(32)));
+        let rejected = corrupted
+            .try_into_verified_ordinary_partial_in_scope_until(
+                &conn,
+                &scope,
+                &storage,
+                dir.path(),
+                Instant::now() + std::time::Duration::from_secs(10),
+            )
+            .await
+            .err()
+            .expect("digest mismatch cannot be rebound");
+        assert!(rejected.transcript().is_none());
+        let mut downgraded = verified_partial_fixture_snapshot(capture, source, dir.path());
+        downgraded.downgrade_for_commitment_failure(CaptureSnapshotPartialReason::SourceReadError);
+        assert!(!downgraded.has_verified_ordinary_partial_permit());
+        assert!(downgraded.transcript().is_none());
     }
 }

@@ -5784,6 +5784,8 @@ fn line_column_key(at: proc_macro2::LineColumn) -> (usize, usize) {
     (at.line, at.column)
 }
 
+type RunnerMatchBranch = (usize, usize, usize);
+
 /// How a stage function uses its export runner token (`runner`).
 #[derive(Default)]
 struct RunnerTokenUses {
@@ -5791,8 +5793,40 @@ struct RunnerTokenUses {
     settle: Vec<proc_macro2::LineColumn>,
     borrows: usize,
     handoffs: usize,
+    handoff_variants: Vec<&'static str>,
+    handoff_branches: Vec<Option<RunnerMatchBranch>>,
+    match_branches: Vec<RunnerMatchBranch>,
     scrutinees: usize,
     violations: Vec<String>,
+}
+
+// Only the owner enum's two explicit variants can receive the token. Bare
+// variant aliases or other types with the same final segment are not owners.
+fn export_runner_handoff_variant(path: &syn::Path) -> Option<&'static str> {
+    if path.leading_colon.is_some()
+        || path.segments.len() != 2
+        || !path
+            .segments
+            .iter()
+            .all(|segment| matches!(&segment.arguments, syn::PathArguments::None))
+        || path.segments[0].ident != "ExportStage"
+    {
+        return None;
+    }
+    match path.segments[1].ident.to_string().as_str() {
+        "Proceed" => Some("Proceed"),
+        "VerifiedPartial" => Some("VerifiedPartial"),
+        _ => None,
+    }
+}
+
+impl RunnerTokenUses {
+    fn has_two_exclusive_export_handoffs(&self) -> bool {
+        self.handoffs == 2
+            && self.handoff_variants.as_slice() == ["Proceed", "VerifiedPartial"]
+            && matches!(self.handoff_branches.as_slice(), [Some((left_line, left_column, left_arm)), Some((right_line, right_column, right_arm))]
+                if (left_line, left_column) == (right_line, right_column) && left_arm != right_arm)
+    }
 }
 
 fn is_runner_token(expr: &syn::Expr) -> bool {
@@ -5840,16 +5874,17 @@ impl<'ast> syn::visit::Visit<'ast> for RunnerTokenUses {
             let named_runner =
                 matches!(&field.member, syn::Member::Named(name) if name == "runner");
             if named_runner && is_runner_token(&field.expr) {
-                let proceed = expr
-                    .path
-                    .segments
-                    .last()
-                    .is_some_and(|segment| segment.ident == "Proceed");
-                if proceed && self.nested == 0 {
+                if let Some(variant) = export_runner_handoff_variant(&expr.path)
+                    && expr.qself.is_none()
+                    && self.nested == 0
+                {
                     self.handoffs += 1;
+                    self.handoff_variants.push(variant);
+                    self.handoff_branches
+                        .push(self.match_branches.last().copied());
                 } else {
                     self.violations.push(
-                        "runner moved into a struct other than ExportStage::Proceed".to_string(),
+                        "runner moved outside ExportStage::{Proceed, VerifiedPartial}".to_string(),
                     );
                 }
             } else {
@@ -5878,13 +5913,20 @@ impl<'ast> syn::visit::Visit<'ast> for RunnerTokenUses {
             self.violations
                 .push("runner matched by `match`; use one `if let` settlement".to_string());
         }
-        syn::visit::visit_expr_match(self, expr);
+        let at = expr.match_token.span.start();
+        self.visit_expr(&expr.expr);
+        for (ordinal, arm) in expr.arms.iter().enumerate() {
+            self.match_branches.push((at.line, at.column, ordinal));
+            self.visit_arm(arm);
+            self.match_branches.pop();
+        }
     }
 
     fn visit_expr_path(&mut self, expr: &'ast syn::ExprPath) {
         if expr.path.is_ident("runner") {
-            self.violations
-                .push("runner moved outside settle / ExportStage::Proceed".to_string());
+            self.violations.push(
+                "runner moved outside settle / ExportStage::{Proceed, VerifiedPartial}".to_string(),
+            );
         }
     }
 
@@ -5987,9 +6029,9 @@ fn awaited_call_counts(
 /// - between the token's binding and `settle`, neither stage exits early
 ///   (`return` / `?` / `bail!`) outside its inner future, and
 ///   `write_committed_checkpoint` exits nowhere between the
-///   `ExportStage::Proceed` handoff and `run_checkpoint_stage`;
+///   either `ExportStage::{Proceed, VerifiedPartial}` handoff and `run_checkpoint_stage`;
 /// - the token is only borrowed (`owner` / `now_ms` / `is_some`), settled,
-///   or handed off through `ExportStage::Proceed` / the writer's one
+///   or handed off through `ExportStage::{Proceed, VerifiedPartial}` / the writer's one
 ///   `Some(runner)` into `run_checkpoint_stage`, and never named inside an
 ///   inner future or closure;
 /// - the lease port's release/advance methods are called only inside
@@ -6393,6 +6435,54 @@ fn capture_export_runner_token_settles_at_two_sites() {
         );
     }
 
+    // Scanner self-controls: both success arms are type-qualified, mutually
+    // exclusive, outside the inner future, and retain exactly one settlement.
+    let scan_runner = |source: &str| {
+        let file = syn::parse_file(source).expect("runner scanner self fixture");
+        let mut uses = RunnerTokenUses::default();
+        uses.visit_item_fn(top_level_function(&file, "stage"));
+        uses
+    };
+    let scanner_positive = scan_runner(
+        r#"async fn stage() {
+        runner.owner();
+        match source {
+            Captured => ExportStage::Proceed { runner },
+            Partial => ExportStage::VerifiedPartial { runner },
+            Failed => runner.settle(disposition, reason, log).await,
+        }
+    }"#,
+    );
+    assert!(scanner_positive.violations.is_empty());
+    assert_eq!(scanner_positive.settle.len(), 1);
+    assert!(scanner_positive.has_two_exclusive_export_handoffs());
+    for source in [
+        "fn stage() { Other::Proceed { runner }; }",
+        "fn stage() { Other::VerifiedPartial { runner }; }",
+        "fn stage() { Proceed { runner }; }",
+        "fn stage() { VerifiedPartial { runner }; }",
+        "fn stage() { alias::ExportStage::VerifiedPartial { runner }; }",
+        "fn stage() { let alias = runner; }",
+        "fn stage() { async { ExportStage::VerifiedPartial { runner }; }; }",
+        "fn stage() { move || ExportStage::Proceed { runner }; }",
+    ] {
+        assert!(
+            !scan_runner(source).violations.is_empty(),
+            "invalid runner escape: {source}"
+        );
+    }
+    for source in [
+        "fn stage() { ExportStage::Proceed { runner }; ExportStage::VerifiedPartial { runner }; }",
+        "fn stage() { match source { Only => { ExportStage::Proceed { runner }; ExportStage::VerifiedPartial { runner }; } } }",
+        "fn stage() { match first { Only => ExportStage::Proceed { runner } }; match second { Only => ExportStage::VerifiedPartial { runner } }; }",
+        "fn stage() { match source { First => ExportStage::Proceed { runner }, Second => ExportStage::Proceed { runner } }; }",
+    ] {
+        assert!(
+            !scan_runner(source).has_two_exclusive_export_handoffs(),
+            "handoffs must be the two separate success arms: {source}"
+        );
+    }
+
     // The token is only borrowed, settled or handed off.
     let mut export_uses = RunnerTokenUses::default();
     for stmt in &export_stage.block.stmts {
@@ -6408,7 +6498,7 @@ fn capture_export_runner_token_settles_at_two_sites() {
     assert!(
         export_uses.violations.is_empty()
             && export_uses.settle.len() == 1
-            && export_uses.handoffs == 1
+            && export_uses.has_two_exclusive_export_handoffs()
             && export_uses.scrutinees == 0
             && export_uses.borrows >= 1,
         "run_export_stage must only borrow, settle or hand off its runner: {:?} (settle {}, handoffs {}, scrutinees {})",
@@ -6431,12 +6521,17 @@ fn capture_export_runner_token_settles_at_two_sites() {
         checkpoint_uses.scrutinees
     );
 
-    // The writer's single handoff: ExportStage::Proceed → Some(runner) →
-    // run_checkpoint_stage, with no early exit in between.
+    // The writer's mutually exclusive handoffs: each exact ExportStage
+    // success variant moves into Some(runner), then one checkpoint-stage call.
     let writer = top_level_function(&live_checkpoint_file, "write_committed_checkpoint");
     #[derive(Default)]
     struct Handoff {
-        proceed_binding: Vec<proc_macro2::LineColumn>,
+        stage_bindings: Vec<(
+            &'static str,
+            proc_macro2::LineColumn,
+            Option<RunnerMatchBranch>,
+        )>,
+        match_branches: Vec<RunnerMatchBranch>,
         runner_uses: Vec<String>,
         export_runner_uses: Vec<String>,
         stage_call: Vec<proc_macro2::LineColumn>,
@@ -6444,18 +6539,26 @@ fn capture_export_runner_token_settles_at_two_sites() {
     }
     impl<'ast> Visit<'ast> for Handoff {
         fn visit_pat_struct(&mut self, pattern: &'ast syn::PatStruct) {
-            if pattern
-                .path
-                .segments
-                .last()
-                .is_some_and(|segment| segment.ident == "Proceed")
-                && pattern.fields.iter().any(
-                    |field| matches!(&field.member, syn::Member::Named(name) if name == "runner"),
-                )
+            if let Some(variant) = export_runner_handoff_variant(&pattern.path)
+                && pattern.qself.is_none()
+                && pattern.fields.iter().any(|field| {
+                    matches!(&field.member, syn::Member::Named(name) if name == "runner")
+                        && matches!(field.pat.as_ref(), syn::Pat::Ident(binding) if binding.ident == "runner")
+                })
             {
-                self.proceed_binding.push(pattern.span().end());
+                self.stage_bindings.push((variant, pattern.span().end(), self.match_branches.last().copied()));
             }
             syn::visit::visit_pat_struct(self, pattern);
+        }
+
+        fn visit_expr_match(&mut self, expr: &'ast syn::ExprMatch) {
+            let at = expr.match_token.span.start();
+            self.visit_expr(&expr.expr);
+            for (ordinal, arm) in expr.arms.iter().enumerate() {
+                self.match_branches.push((at.line, at.column, ordinal));
+                self.visit_arm(arm);
+                self.match_branches.pop();
+            }
         }
 
         fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
@@ -6502,29 +6605,37 @@ fn capture_export_runner_token_settles_at_two_sites() {
     }
     let mut handoff = Handoff::default();
     handoff.visit_item_fn(writer);
-    let ([proceed], [stage_call]) = (
-        handoff.proceed_binding.as_slice(),
+    let ([first, second], [stage_call]) = (
+        handoff.stage_bindings.as_slice(),
         handoff.stage_call.as_slice(),
     ) else {
         panic!(
-            "write_committed_checkpoint binds one ExportStage::Proceed runner and calls run_checkpoint_stage once"
+            "write_committed_checkpoint binds both exact ExportStage success variants and calls run_checkpoint_stage once"
         );
     };
+    assert_eq!((first.0, second.0), ("Proceed", "VerifiedPartial"));
+    assert!(
+        matches!((first.2, second.2), (Some((left_line, left_column, left_arm)), Some((right_line, right_column, right_arm)))
+        if (left_line, left_column) == (right_line, right_column) && left_arm != right_arm),
+        "writer handoffs must be different arms of the same match"
+    );
     assert_eq!(
         handoff.runner_uses,
-        ["Some(..)"],
-        "the Proceed runner moves only into Some(runner)"
+        ["Some(..)", "Some(..)"],
+        "each mutually exclusive runner moves only into Some(runner)"
     );
     assert_eq!(
         handoff.export_runner_uses,
-        ["assigned", "run_checkpoint_stage(..)"],
-        "the handed-off runner moves only into run_checkpoint_stage"
+        ["assigned", "assigned", "run_checkpoint_stage(..)"],
+        "the mutually exclusive handed-off runner moves only into run_checkpoint_stage"
     );
-    let exits = exits_between(writer, *proceed, *stage_call);
-    assert!(
-        exits.is_empty(),
-        "write_committed_checkpoint may not exit between the Proceed handoff and run_checkpoint_stage: {exits:?}"
-    );
+    for binding in [first.1, second.1] {
+        let exits = exits_between(writer, binding, *stage_call);
+        assert!(
+            exits.is_empty(),
+            "write_committed_checkpoint may not exit between either handoff and run_checkpoint_stage: {exits:?}"
+        );
+    }
 
     // Each CheckpointStageExit variant is built only by its class helper.
     #[derive(Default)]
@@ -8991,10 +9102,11 @@ struct ReasoningPortScan {
     sealed_aliases: Vec<String>,
 }
 
-const SEALED_CANDIDATE_PATHS: [&str; 4] = [
+const SEALED_CANDIDATE_PATHS: [&str; 5] = [
     "SealedOpenCodeCandidates::checked",
     "OpenCodeCandidatePart::checked",
     "PreparedReasoningSource::with_opencode_candidates",
+    "PreparedReasoningSource::with_verified_opencode_partial",
     "ReasoningSourceDisposition::OpenCodeCandidate",
 ];
 
@@ -9018,6 +9130,9 @@ fn is_sealed_candidate_type(name: &str) -> bool {
             | "SealedOpenCodeCandidates"
             | "PreparedReasoningSource"
             | "ReasoningSourceDisposition"
+            | "OpenCodeOrdinaryPartialPermit"
+            | "VerifiedOrdinaryPartialBinding"
+            | "VerifiedOrdinaryPartialSnapshot"
     )
 }
 
@@ -9032,7 +9147,7 @@ fn sealed_candidate_use_alias(tree: &syn::UseTree, parent: Option<&str>) -> bool
                 || (parent.is_some_and(is_sealed_candidate_type)
                     && matches!(
                         name.ident.to_string().as_str(),
-                        "checked" | "with_opencode_candidates"
+                        "checked" | "with_opencode_candidates" | "with_verified_opencode_partial"
                     ))
         }
         syn::UseTree::Glob(_) => parent.is_some_and(is_sealed_candidate_type),
@@ -9145,6 +9260,7 @@ fn sealed_reasoning_types() {
     .unwrap();
     for name in [
         "PreparedReasoningSource",
+        "OpenCodeOrdinaryPartialPermit",
         "OpenCodeCandidatePart",
         "SealedOpenCodeCandidates",
         "NativeReasoningProof",
@@ -9190,7 +9306,10 @@ fn sealed_reasoning_types() {
         };
         if !matches!(
             name.as_str(),
-            "PreparedReasoningSource" | "OpenCodeCandidatePart" | "SealedOpenCodeCandidates"
+            "PreparedReasoningSource"
+                | "OpenCodeOrdinaryPartialPermit"
+                | "OpenCodeCandidatePart"
+                | "SealedOpenCodeCandidates"
         ) {
             continue;
         }
@@ -9202,7 +9321,7 @@ fn sealed_reasoning_types() {
             assert!(
                 !matches!(
                     trait_name.as_deref(),
-                    Some("Clone" | "Debug" | "Serialize" | "Deref" | "AsRef")
+                    Some("Clone" | "Debug" | "Serialize" | "Deserialize" | "Deref" | "AsRef")
                 ),
                 "sealed {name} cannot acquire a cloning, logging, serialization or raw accessor trait"
             );
@@ -9211,7 +9330,11 @@ fn sealed_reasoning_types() {
             syn::ImplItem::Fn(method) => Some(method),
             _ => None,
         }) {
-            if (name == "PreparedReasoningSource" && method.sig.ident == "with_opencode_candidates")
+            if (name == "PreparedReasoningSource"
+                && matches!(
+                    method.sig.ident.to_string().as_str(),
+                    "with_opencode_candidates" | "with_verified_opencode_partial"
+                ))
                 || (name == "OpenCodeCandidatePart" && method.sig.ident == "checked")
                 || (name == "SealedOpenCodeCandidates"
                     && matches!(method.sig.ident.to_string().as_str(), "checked" | "append"))
@@ -9314,10 +9437,14 @@ fn reasoning_carrier_rejects_native_label_constructor() {
                 "without_candidates",
                 "unproven_candidates",
                 "with_opencode_candidates",
+                "with_verified_opencode_partial",
             ]
             .contains(&method.sig.ident.to_string().as_str())
         );
-        if method.sig.ident == "with_opencode_candidates" {
+        if matches!(
+            method.sig.ident.to_string().as_str(),
+            "with_opencode_candidates" | "with_verified_opencode_partial"
+        ) {
             assert!(
                 matches!(&method.vis, syn::Visibility::Restricted(vis) if vis.in_token.is_none() && vis.path.is_ident("super")),
                 "unverified OpenCode carrier construction must stay exactly pub(super)"
@@ -9403,6 +9530,10 @@ fn og26_sealed_candidate_callers_are_closed() {
                 "PreparedReasoningSource::with_opencode_candidates".to_owned(),
                 "prepare_authorized_source".to_owned()
             ),
+            (
+                "PreparedReasoningSource::with_verified_opencode_partial".to_owned(),
+                "prepare_authorized_source".to_owned()
+            ),
         ])
     );
     assert_eq!(
@@ -9460,7 +9591,7 @@ fn og26_sealed_candidate_callers_are_closed() {
 #[test]
 fn reasoning_bound_identity_accessor_has_closed_adapter_caller() {
     sealed_reasoning_types();
-    let expected: [(&str, &[&str]); 11] = [
+    let expected: [(&str, &[&str]); 12] = [
         (
             "borrow_native_identity_bindings",
             &["prepare_reasoning_identity_inputs_from_disposition"],
@@ -9495,9 +9626,13 @@ fn reasoning_bound_identity_accessor_has_closed_adapter_caller() {
         (
             "from_prepared_authorized_source",
             &[
-                "prepare_authorized_reasoning_source",
+                "from_prepared_authorized_source_with_partial_permit",
                 "reasoning_coverage_test_payload",
             ],
+        ),
+        (
+            "from_prepared_authorized_source_with_partial_permit",
+            &["prepare_authorized_reasoning_source"],
         ),
         (
             "prepare_authorized_reasoning_source",
@@ -10827,4 +10962,298 @@ fn cov2_rg04_contract_snap_sha_is_frozen() {
         fs::read(repo_root().join("tests/fixtures/agent_transcripts/reasoning/contract.snap"))
             .expect("read frozen RG-04 contract.snap bytes");
     assert_eq!(hex::encode(Sha256::digest(bytes)), EXPECTED_SHA256);
+}
+
+#[test]
+fn opencode_verified_partial_live_permit_and_provenance_have_closed_owners() {
+    use syn::visit::Visit;
+
+    const REASONING: &str = "src/internal/ai/observed_agents/reasoning.rs";
+    const OPENCODE: &str = "src/internal/ai/observed_agents/opencode_reasoning.rs";
+    const SNAPSHOT: &str = "src/internal/ai/capture/snapshot.rs";
+    const CHECKPOINT: &str = "src/internal/ai/capture/checkpoint.rs";
+    const LIVE: &str = "src/internal/ai/capture/live_checkpoint.rs";
+
+    for (path, name) in [
+        (REASONING, "OpenCodeOrdinaryPartialPermit"),
+        (SNAPSHOT, "VerifiedOrdinaryPartialBinding"),
+        (SNAPSHOT, "VerifiedOrdinaryPartialSnapshot"),
+    ] {
+        let (_, ast) = parse_rust_source(path);
+        let item = top_level_struct(&ast, name);
+        assert!(
+            item.fields
+                .iter()
+                .all(|field| matches!(field.vis, syn::Visibility::Inherited))
+        );
+        assert!(!item.attrs.iter().any(|attr| attr.path().is_ident("derive")));
+        assert!(!import_type_derives_or_implements_deserialize(&ast, name));
+        for implementation in ast.items.iter().filter_map(|item| match item {
+            syn::Item::Impl(implementation)
+                if matches!(implementation.self_ty.as_ref(), syn::Type::Path(path)
+                    if path.path.segments.last().is_some_and(|segment| segment.ident == name)) =>
+            {
+                Some(implementation)
+            }
+            _ => None,
+        }) {
+            if has_exact_cfg_test(&implementation.attrs) {
+                continue;
+            }
+            if let Some((_, trait_path, _)) = &implementation.trait_ {
+                assert!(
+                    !trait_path.segments.last().is_some_and(|segment| matches!(
+                        segment.ident.to_string().as_str(),
+                        "Clone" | "Debug" | "Serialize" | "Deserialize" | "Deref" | "AsRef"
+                    )),
+                    "{path}: {name} must remain an owning storage-only capability"
+                );
+            }
+        }
+    }
+
+    let calls: [(&str, &str, &str); 6] = [
+        (
+            "with_verified_opencode_partial",
+            OPENCODE,
+            "prepare_authorized_source",
+        ),
+        (
+            "from_prepared_authorized_source_with_partial_permit",
+            SNAPSHOT,
+            "prepare_authorized_reasoning_source",
+        ),
+        (
+            "try_into_verified_ordinary_partial_in_scope_until",
+            LIVE,
+            "run_export_stage",
+        ),
+        (
+            "from_verified_ordinary_partial",
+            LIVE,
+            "run_checkpoint_stage",
+        ),
+        (
+            "into_payload_parts",
+            CHECKPOINT,
+            "from_verified_ordinary_partial",
+        ),
+        ("export_snapshot_route", LIVE, "run_export_stage"),
+    ];
+    let constructors: [(&str, &str, &str); 3] = [
+        (
+            "OpenCodeOrdinaryPartialPermit",
+            REASONING,
+            "with_verified_opencode_partial",
+        ),
+        (
+            "VerifiedOrdinaryPartialBinding",
+            SNAPSHOT,
+            "try_into_verified_ordinary_partial_in_scope_until",
+        ),
+        (
+            "VerifiedOrdinaryPartialSnapshot",
+            SNAPSHOT,
+            "try_into_verified_ordinary_partial_in_scope_until",
+        ),
+    ];
+    let mut actual_calls = std::collections::BTreeMap::<String, Vec<(String, String)>>::new();
+    let mut actual_constructors =
+        std::collections::BTreeMap::<String, Vec<(String, String)>>::new();
+    let mut partial_provenance_owners = BTreeSet::new();
+    for entry in walkdir::WalkDir::new(repo_root().join("src")) {
+        let entry = entry.expect("walk production partial capability sources");
+        if !entry.file_type().is_file() || entry.path().extension().is_none_or(|ext| ext != "rs") {
+            continue;
+        }
+        let path = entry
+            .path()
+            .strip_prefix(repo_root())
+            .unwrap()
+            .display()
+            .to_string();
+        let source = fs::read_to_string(entry.path()).expect("read partial capability source");
+        let scan = reasoning_scan(&source);
+        for (name, _, _) in calls {
+            for owner in scan.references.get(name).into_iter().flatten() {
+                actual_calls
+                    .entry(name.to_owned())
+                    .or_default()
+                    .push((path.clone(), owner.clone()));
+            }
+        }
+        for (name, _, _) in constructors {
+            for (constructed, owner) in &scan.constructors {
+                if constructed == name {
+                    actual_constructors
+                        .entry(name.to_owned())
+                        .or_default()
+                        .push((path.clone(), owner.clone()));
+                }
+            }
+        }
+        for owner in scan
+            .references
+            .get("VerifiedOrdinaryPartial")
+            .into_iter()
+            .flatten()
+        {
+            partial_provenance_owners.insert((path.clone(), owner.clone()));
+        }
+        if [
+            "OpenCodeOrdinaryPartialPermit",
+            "VerifiedOrdinaryPartialBinding",
+            "VerifiedOrdinaryPartialSnapshot",
+        ]
+        .iter()
+        .any(|name| source.contains(name))
+        {
+            assert!(
+                scan.sealed_aliases.is_empty(),
+                "{path}: partial owners cannot be hidden behind aliases"
+            );
+        }
+    }
+    for (name, path, owner) in calls {
+        assert_eq!(
+            actual_calls.remove(name).unwrap_or_default(),
+            vec![(path.to_owned(), owner.to_owned())],
+            "{name} must retain one exact module and consumer"
+        );
+    }
+    for (name, path, owner) in constructors {
+        assert_eq!(
+            actual_constructors.remove(name).unwrap_or_default(),
+            vec![(path.to_owned(), owner.to_owned())],
+            "{name} must retain one exact producer"
+        );
+    }
+    assert_eq!(
+        partial_provenance_owners,
+        BTreeSet::from([
+            (
+                CHECKPOINT.to_owned(),
+                "prepare_reasoning_identity_inputs".to_owned()
+            ),
+            (
+                CHECKPOINT.to_owned(),
+                "prepare_reasoning_artifact_params".to_owned()
+            ),
+            (
+                CHECKPOINT.to_owned(),
+                "from_verified_ordinary_partial".to_owned()
+            ),
+            (
+                CHECKPOINT.to_owned(),
+                "validate_verified_partial_capture".to_owned()
+            ),
+            (CHECKPOINT.to_owned(), "new".to_owned()),
+        ]),
+        "private partial provenance must not gain import/pending/native consumers"
+    );
+    assert!(
+        reasoning_scan("fn rogue() { PreparedReasoningSource::with_verified_opencode_partial(bytes, session); }")
+            .sealed_paths.iter().any(|(path, owner)|
+                path == "PreparedReasoningSource::with_verified_opencode_partial" && owner == "rogue")
+    );
+    assert!(
+        !reasoning_scan("type Alias = OpenCodeOrdinaryPartialPermit;")
+            .sealed_aliases
+            .is_empty()
+    );
+    assert!(
+        !reasoning_scan("use crate::VerifiedOrdinaryPartialSnapshot as Alias;")
+            .sealed_aliases
+            .is_empty()
+    );
+
+    let (_, lower) = parse_rust_source(REASONING);
+    let (_, snapshot) = parse_rust_source(SNAPSHOT);
+    let (_, checkpoint) = parse_rust_source(CHECKPOINT);
+    let method_data = |ast: &syn::File, owner: &str, name: &str| {
+        let method = ast
+            .items
+            .iter()
+            .find_map(|item| match item {
+                syn::Item::Impl(implementation)
+                    if matches!(implementation.self_ty.as_ref(), syn::Type::Path(path)
+                    if path.path.segments.last().is_some_and(|segment| segment.ident == owner)) =>
+                {
+                    implementation.items.iter().find_map(|item| match item {
+                        syn::ImplItem::Fn(method) if method.sig.ident == name => Some(method),
+                        _ => None,
+                    })
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("missing {owner}::{name}"));
+        let mut scan = ReasoningPortScan::default();
+        scan.visit_block(&method.block);
+        let macro_tokens = if name == "has_capture_consumer" {
+            assert_eq!(method.block.stmts.len(), 1);
+            let syn::Stmt::Expr(syn::Expr::Macro(expression), None) = &method.block.stmts[0] else {
+                panic!("capture consumer gate must remain a single matches! expression");
+            };
+            assert!(expression.mac.path.is_ident("matches"));
+            expression.mac.tokens.to_string()
+        } else {
+            String::new()
+        };
+        (scan, macro_tokens)
+    };
+    let (_, generic_capture) =
+        method_data(&lower, "ReasoningSourceDisposition", "has_capture_consumer");
+    // matches! bodies are opaque to syn::Visit; inspect their parsed tokens.
+    assert!(!generic_capture.contains("Unproven"));
+    assert!(generic_capture.contains("Self :: Ordinary"));
+    assert!(generic_capture.contains("Self :: NativeProven"));
+    let (generic_ordinary, _) = method_data(&snapshot, "CaptureSnapshot", "try_into_ordinary");
+    assert!(generic_ordinary.references.contains_key("is_ordinary"));
+    assert!(
+        !generic_ordinary
+            .references
+            .contains_key("has_verified_ordinary_partial_permit")
+    );
+    let (source_bind, _) = method_data(
+        &snapshot,
+        "CaptureSnapshot",
+        "try_into_verified_ordinary_partial_in_scope_until",
+    );
+    for name in [
+        "derive_snapshot_content_commitment_in_scope_until",
+        "bind_source_commitment",
+        "downgrade_for_commitment_failure",
+    ] {
+        assert!(
+            source_bind.references.contains_key(name),
+            "scoped partial capability missing {name}"
+        );
+    }
+    for wrapper in [
+        "prepare_reasoning_identity_inputs",
+        "prepare_reasoning_artifact_params",
+    ] {
+        let function = top_level_function(&checkpoint, wrapper);
+        let mut scan = ReasoningPortScan::default();
+        scan.visit_block(&function.block);
+        let validation = scan
+            .events
+            .iter()
+            .position(|event| event == "method:validate_verified_partial_capture")
+            .expect("partial payload wrapper must revalidate the current capture");
+        let adapter = if wrapper == "prepare_reasoning_identity_inputs" {
+            "reference:prepare_reasoning_identity_inputs_from_disposition"
+        } else {
+            "reference:prepare_reasoning_artifact_params_from_disposition"
+        };
+        let generic = scan
+            .events
+            .iter()
+            .position(|event| event == adapter)
+            .expect("generic adapter remains present");
+        assert!(
+            validation < generic,
+            "{wrapper}: private partial validation precedes generic admission"
+        );
+    }
 }

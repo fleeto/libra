@@ -823,6 +823,180 @@ async fn test_cat_file_tree_multiple_files() {
     assert!(stdout.contains("b.txt"), "Should list b.txt: {}", stdout);
 }
 
+/// Pipe raw `stdin` bytes into `libra <args>` and collect the output.
+fn run_libra_with_stdin_bytes(
+    temp_path: &std::path::Path,
+    args: &[&str],
+    stdin: &[u8],
+) -> std::process::Output {
+    use std::process::Stdio;
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(temp_path)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("Failed to spawn libra");
+    child
+        .stdin
+        .take()
+        .expect("child stdin")
+        .write_all(stdin)
+        .expect("Failed to write libra stdin");
+    child.wait_with_output().expect("Failed to wait on libra")
+}
+
+/// Store `body` as a raw object of type `kind` via `hash-object -w --stdin`
+/// and return its object id.
+fn write_raw_object(temp_path: &std::path::Path, kind: &str, body: &[u8]) -> String {
+    let output = run_libra_with_stdin_bytes(
+        temp_path,
+        &["hash-object", "-t", kind, "-w", "--stdin"],
+        body,
+    );
+    assert!(
+        output.status.success(),
+        "hash-object -t {kind} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+/// Scenario: `cat-file -p <tree>` renders every entry kind with Git's
+/// zero-padded octal mode and the type of the object it points to: regular
+/// file, symlink, executable, subtree, and gitlink (submodule, typed
+/// `commit`), in both human and JSON output. Regression: modes were printed
+/// from the enum discriminant (`000000`, `000004`, `000001`, …) and gitlinks
+/// were typed `blob`.
+#[test]
+fn test_cat_file_pretty_tree_prints_git_modes_and_types() {
+    let temp_dir = init_temp_repo();
+    let temp_path = temp_dir.path();
+
+    const BLOB: &str = "ce013625030ba8dba906f756967f9e9ca394464a";
+    const SUBTREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+    const GITLINK: &str = "0123456789abcdef0123456789abcdef01234567";
+    let entries = [
+        ("100644", "blob", BLOB, "a.txt"),
+        ("120000", "blob", BLOB, "b-link"),
+        ("100755", "blob", BLOB, "c.sh"),
+        ("040000", "tree", SUBTREE, "d-dir"),
+        ("160000", "commit", GITLINK, "e-module"),
+    ];
+    let mut raw_tree = Vec::new();
+    for (mode, _, id, name) in entries {
+        // Raw tree entries store the directory mode without its leading zero.
+        raw_tree.extend_from_slice(mode.trim_start_matches('0').as_bytes());
+        raw_tree.push(b' ');
+        raw_tree.extend_from_slice(name.as_bytes());
+        raw_tree.push(0);
+        raw_tree.extend_from_slice(&hex::decode(id).expect("valid hex object id"));
+    }
+    let tree = write_raw_object(temp_path, "tree", &raw_tree);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(temp_path)
+        .args(["cat-file", "-p", &tree])
+        .output()
+        .expect("Failed to execute cat-file -p");
+    assert!(
+        output.status.success(),
+        "cat-file -p tree failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let expected: String = entries
+        .iter()
+        .map(|(mode, kind, id, name)| format!("{mode} {kind} {id}\t{name}\n"))
+        .collect();
+    assert_eq!(String::from_utf8_lossy(&output.stdout), expected);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(temp_path)
+        .args(["--json", "cat-file", "-p", &tree])
+        .output()
+        .expect("Failed to execute cat-file -p --json");
+    assert!(
+        output.status.success(),
+        "cat-file -p tree --json failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json = parse_json_stdout(&output);
+    let json_entries = json["data"]["entries"]
+        .as_array()
+        .expect("tree JSON must carry entries");
+    assert_eq!(json_entries.len(), entries.len());
+    for (entry, (mode, kind, id, name)) in json_entries.iter().zip(entries) {
+        assert_eq!(entry["mode"], mode, "{entry}");
+        assert_eq!(entry["object_type"], kind, "{entry}");
+        assert_eq!(entry["hash"], id, "{entry}");
+        assert_eq!(entry["name"], name, "{entry}");
+    }
+}
+
+/// Scenario: `cat-file -p <commit>` prints the stored object byte-for-byte,
+/// like Git: signature and other extra headers stay in the header block and
+/// the message keeps its exact whitespace, with no newline appended. The JSON
+/// `message` carries only the (trimmed) message, never header lines.
+/// Regression: the commit was re-rendered from parsed fields, dropping
+/// `gpgsig`, moving extra headers below the blank line, and trimming the
+/// message.
+#[test]
+fn test_cat_file_pretty_commit_prints_raw_object() {
+    let temp_dir = init_temp_repo();
+    let temp_path = temp_dir.path();
+
+    let raw_commit = [
+        "tree 4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+        "author Alice <alice@example.com> 1700000000 +0000",
+        "committer Bob <bob@example.com> 1700000001 +0100",
+        "encoding ISO-8859-1",
+        "gpgsig -----BEGIN PGP SIGNATURE-----",
+        " ",
+        " iQEzBAABCAAdFiEE",
+        " -----END PGP SIGNATURE-----",
+        "change-id abc",
+        "",
+        "",
+        "  indented subject  ",
+        "",
+        "body line   ",
+    ]
+    .join("\n");
+    let commit = write_raw_object(temp_path, "commit", raw_commit.as_bytes());
+
+    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(temp_path)
+        .args(["cat-file", "-p", &commit])
+        .output()
+        .expect("Failed to execute cat-file -p");
+    assert!(
+        output.status.success(),
+        "cat-file -p commit failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), raw_commit);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(temp_path)
+        .args(["--json", "cat-file", "-p", &commit])
+        .output()
+        .expect("Failed to execute cat-file -p --json");
+    assert!(
+        output.status.success(),
+        "cat-file -p commit --json failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["data"]["object_type"], "commit");
+    assert_eq!(
+        json["data"]["tree"],
+        "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+    );
+    assert_eq!(json["data"]["message"], "indented subject  \n\nbody line");
+}
+
 /// Test `cat-file` with a non-existent reference.
 #[tokio::test]
 async fn test_cat_file_nonexistent_ref() {

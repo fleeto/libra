@@ -27,8 +27,10 @@ use git_internal::{
 };
 
 use crate::{
-    command::load_object,
-    common_utils::parse_commit_msg,
+    command::{
+        load_object,
+        ls_tree::{mode_string, object_type_for_mode},
+    },
     internal::{ai::history::HistoryManager, db},
     utils::{
         client_storage::ClientStorage,
@@ -948,10 +950,8 @@ fn emit_pretty_print_json(
                     .iter()
                     .map(|item| {
                         serde_json::json!({
-                            "mode": format!("{:06o}", item.mode as u32),
-                            "object_type": match item.mode {
-                                git_internal::internal::object::tree::TreeItemMode::Tree => "tree",
-                                _ => "blob"},
+                            "mode": mode_string(item.mode),
+                            "object_type": object_type_for_mode(item.mode),
                             "hash": item.id.to_string(),
                             "name": item.name})
                     })
@@ -975,7 +975,7 @@ fn emit_pretty_print_json(
                     .with_stable_code(StableErrorCode::IoReadFailed)
             })?;
             if output.is_json() {
-                let (message, _) = parse_commit_msg(&commit.message);
+                let message = commit_message_body(&commit.message);
                 emit_json_data(
                     "cat-file",
                     &serde_json::json!({
@@ -1204,53 +1204,53 @@ fn print_tree(hash: &ObjectHash) {
         ),
     };
     for item in &tree.tree_items {
-        let type_name = match item.mode {
-            git_internal::internal::object::tree::TreeItemMode::Tree => "tree",
-            _ => "blob",
-        };
         println!(
-            "{:06o} {} {}\t{}",
-            item.mode as u32, type_name, item.id, item.name
+            "{} {} {}\t{}",
+            mode_string(item.mode),
+            object_type_for_mode(item.mode),
+            item.id,
+            item.name
         );
     }
 }
 
-/// Print a commit object in human-readable format.
+/// Print a commit object exactly as stored, like `git cat-file -p`: every
+/// header (including `gpgsig`, `encoding`, `mergetag`, …) and the message are
+/// emitted byte-for-byte rather than re-rendered from parsed fields.
 fn print_commit(hash: &ObjectHash) {
-    let commit: Commit = match std::panic::catch_unwind(|| load_object(hash)) {
-        Ok(Ok(c)) => c,
-        Ok(Err(e)) => cat_file_exit_error(
+    let storage = ClientStorage::init(path::objects());
+    let data = match storage.get(hash) {
+        Ok(d) => d,
+        Err(e) => cat_file_exit_error(
             CliError::fatal(format!("could not read commit {hash}: {e}"))
                 .with_stable_code(StableErrorCode::IoReadFailed),
         ),
-        Err(_) => cat_file_exit_error(
-            CliError::fatal(format!(
-                "failed to load commit object {hash}: internal error (panic)"
-            ))
-            .with_stable_code(StableErrorCode::InternalInvariant),
-        ),
     };
-    println!("tree {}", commit.tree_id);
-    for parent in &commit.parent_commit_ids {
-        println!("parent {}", parent);
+    use std::io::Write;
+    let stdout = std::io::stdout();
+    let mut handle = stdout.lock();
+    match handle.write_all(&data).and_then(|()| handle.flush()) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {}
+        Err(e) => cat_file_exit_error(
+            CliError::fatal(format!("write error: {e}"))
+                .with_stable_code(StableErrorCode::IoWriteFailed),
+        ),
     }
-    println!(
-        "author {} <{}> {} {}",
-        commit.author.name.trim(),
-        commit.author.email.trim(),
-        commit.author.timestamp,
-        commit.author.timezone,
-    );
-    println!(
-        "committer {} <{}> {} {}",
-        commit.committer.name.trim(),
-        commit.committer.email.trim(),
-        commit.committer.timestamp,
-        commit.committer.timezone,
-    );
-    println!();
-    let (msg, _) = parse_commit_msg(&commit.message);
-    println!("{}", msg.trim());
+}
+
+/// Return the commit message from the text that follows the `committer` line.
+/// The header block may continue with extra headers (`gpgsig`, `encoding`,
+/// `mergetag`, …) and ends at the first empty line; everything after it is the
+/// message. A commit without that separator has no message.
+fn commit_message_body(after_committer: &str) -> &str {
+    if let Some(body) = after_committer.strip_prefix('\n') {
+        return body;
+    }
+    after_committer
+        .split_once("\n\n")
+        .map(|(_, body)| body)
+        .unwrap_or("")
 }
 
 /// Print a tag object in human-readable format.
@@ -1710,6 +1710,23 @@ mod tests {
         assert!(help.contains("persisted session objects such as ai_session"));
         assert!(help.contains("TYPE:ID"));
         assert!(help.contains("--ai-type <ID>"));
+    }
+
+    #[test]
+    fn test_commit_message_body_excludes_extra_headers() {
+        assert_eq!(commit_message_body("\nsubject\n"), "subject\n");
+        assert_eq!(
+            commit_message_body("encoding ISO-8859-1\nchange-id abc\n\n\n  subject  "),
+            "\n  subject  "
+        );
+        assert_eq!(
+            commit_message_body(
+                "gpgsig -----BEGIN PGP SIGNATURE-----\n \n iQEz\n -----END PGP SIGNATURE-----\n\nsigned\n"
+            ),
+            "signed\n"
+        );
+        assert_eq!(commit_message_body("encoding UTF-8\n"), "");
+        assert_eq!(commit_message_body(""), "");
     }
 
     #[test]

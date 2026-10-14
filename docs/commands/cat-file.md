@@ -117,10 +117,15 @@ libra cat-file --ai <session-id>
 
 - `-t`: prints the object type on a single line (e.g., `commit`)
 - `-s`: prints the size in bytes on a single line (e.g., `342`)
-- `-p`: pretty-prints content depending on type:
-  - Commit: header fields and message
-  - Tree: `<mode> <type> <hash>\t<name>` per entry
-  - Blob: raw text content
+- `-p`: pretty-prints content depending on type (matching `git cat-file -p`):
+  - Commit: the raw object exactly as stored — every header in order
+    (`tree`, `parent`, `author`, `committer`, plus `gpgsig`, `encoding`,
+    `mergetag`, … when present), the blank line, and the message byte-for-byte
+    (no newline is appended)
+  - Tree: `<mode> <type> <hash>\t<name>` per entry, with Git's zero-padded
+    octal mode (`100644`, `100755`, `120000`, `040000`, `160000`) and the
+    pointed-to type (`blob`, `tree`, or `commit` for a gitlink/submodule)
+  - Blob: raw content
   - Tag: tag header and message
 - `-e`: no output; exit code 0 if the object exists, non-zero otherwise (with `--json`/`--machine`, also writes `{ "exists": bool }` to stdout)
 - `--ai <ID>`: prints a formatted summary (session summary for `ai_session` objects, full JSON for others)
@@ -170,13 +175,44 @@ libra cat-file --ai <session-id>
     "object": "HEAD",
     "hash": "abc1234def5678901234567890abcdef12345678",
     "object_type": "commit",
-    "content": {
-      "tree": "def456...",
-      "parents": ["abc123..."],
-      "author": "Alice <alice@example.com> 1711929600 +0000",
-      "committer": "Alice <alice@example.com> 1711929600 +0000",
-      "message": "feat: add new feature"
-    }
+    "tree": "def456...",
+    "parents": ["abc123..."],
+    "author": {
+      "name": "Alice",
+      "email": "alice@example.com",
+      "timestamp": 1711929600,
+      "timezone": "+0000"
+    },
+    "committer": {
+      "name": "Alice",
+      "email": "alice@example.com",
+      "timestamp": 1711929600,
+      "timezone": "+0000"
+    },
+    "message": "feat: add new feature"
+  }
+}
+```
+
+`message` is the commit message only (trimmed); extra headers such as
+`gpgsig` or `encoding` never appear in it.
+
+### Pretty-print mode (`-p`) -- tree
+
+```json
+{
+  "ok": true,
+  "command": "cat-file",
+  "data": {
+    "mode": "pretty",
+    "object": "HEAD^{tree}",
+    "hash": "def456...",
+    "object_type": "tree",
+    "entries": [
+      { "mode": "100644", "object_type": "blob", "hash": "ce0136...", "name": "a.txt" },
+      { "mode": "040000", "object_type": "tree", "hash": "add479...", "name": "src" },
+      { "mode": "160000", "object_type": "commit", "hash": "5474b9...", "name": "vendor" }
+    ]
   }
 }
 ```

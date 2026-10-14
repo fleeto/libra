@@ -230,7 +230,13 @@ fn applies_format_patch_and_preserves_message_author_and_date() {
         raw.contains(&expected_author),
         "author metadata was not preserved:\nexpected: {expected_author}\nactual:\n{raw}"
     );
-    assert!(raw.ends_with("\n\nmail change\n\nMail body.\n"), "{raw}");
+    // `cat-file -p` prints the commit object byte-for-byte, so the message is
+    // compared without the stored trailing newline.
+    assert!(
+        raw.trim_end_matches('\n')
+            .ends_with("\n\nmail change\n\nMail body."),
+        "{raw}"
+    );
     assert_failure(
         &fixture.run(&fixture.repo, &["am", "--abort"]),
         "no am operation",

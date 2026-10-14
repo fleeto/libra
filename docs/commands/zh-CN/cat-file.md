@@ -97,10 +97,10 @@ libra cat-file --ai <session-id>
 
 - `-t`：在单行打印对象类型（例如 `commit`）
 - `-s`：在单行打印字节大小（例如 `342`）
-- `-p`：根据类型美化打印内容：
-  - Commit：头字段和消息
-  - Tree：每个条目为 `<mode> <type> <hash>\t<name>`
-  - Blob：原始文本内容
+- `-p`：根据类型美化打印内容（与 `git cat-file -p` 一致）：
+  - Commit：按存储原样输出对象——全部头字段按原顺序（`tree`、`parent`、`author`、`committer`，以及存在时的 `gpgsig`、`encoding`、`mergetag` 等）、空行和逐字节的提交消息（不追加换行）
+  - Tree：每个条目为 `<mode> <type> <hash>\t<name>`，mode 为 Git 的 6 位八进制（`100644`、`100755`、`120000`、`040000`、`160000`），type 为所指对象类型（`blob`、`tree`，gitlink/子模块为 `commit`）
+  - Blob：原始内容
   - Tag：tag 头和消息
 - `-e`：无输出；对象存在时退出码为 0，否则非零
 - `--ai <ID>`：打印格式化摘要（`ai_session` 对象为 session 摘要，其他对象为完整 JSON）
@@ -150,13 +150,43 @@ libra cat-file --ai <session-id>
     "object": "HEAD",
     "hash": "abc1234def5678901234567890abcdef12345678",
     "object_type": "commit",
-    "content": {
-      "tree": "def456...",
-      "parents": ["abc123..."],
-      "author": "Alice <alice@example.com> 1711929600 +0000",
-      "committer": "Alice <alice@example.com> 1711929600 +0000",
-      "message": "feat: add new feature"
-    }
+    "tree": "def456...",
+    "parents": ["abc123..."],
+    "author": {
+      "name": "Alice",
+      "email": "alice@example.com",
+      "timestamp": 1711929600,
+      "timezone": "+0000"
+    },
+    "committer": {
+      "name": "Alice",
+      "email": "alice@example.com",
+      "timestamp": 1711929600,
+      "timezone": "+0000"
+    },
+    "message": "feat: add new feature"
+  }
+}
+```
+
+`message` 仅为提交消息（已去除首尾空白），不会包含 `gpgsig`、`encoding` 等额外头字段。
+
+### Pretty-print 模式（`-p`）-- tree
+
+```json
+{
+  "ok": true,
+  "command": "cat-file",
+  "data": {
+    "mode": "pretty",
+    "object": "HEAD^{tree}",
+    "hash": "def456...",
+    "object_type": "tree",
+    "entries": [
+      { "mode": "100644", "object_type": "blob", "hash": "ce0136...", "name": "a.txt" },
+      { "mode": "040000", "object_type": "tree", "hash": "add479...", "name": "src" },
+      { "mode": "160000", "object_type": "commit", "hash": "5474b9...", "name": "vendor" }
+    ]
   }
 }
 ```

@@ -660,7 +660,7 @@ fn display_path(path: &str, path_context: &LsTreePathContext) -> String {
         .to_string()
 }
 
-fn object_type_for_mode(mode: TreeItemMode) -> &'static str {
+pub(crate) fn object_type_for_mode(mode: TreeItemMode) -> &'static str {
     match mode {
         TreeItemMode::Tree => "tree",
         TreeItemMode::Commit => "commit",
@@ -668,7 +668,7 @@ fn object_type_for_mode(mode: TreeItemMode) -> &'static str {
     }
 }
 
-fn mode_string(mode: TreeItemMode) -> &'static str {
+pub(crate) fn mode_string(mode: TreeItemMode) -> &'static str {
     match mode {
         TreeItemMode::Blob => "100644",
         TreeItemMode::BlobExecutable => "100755",

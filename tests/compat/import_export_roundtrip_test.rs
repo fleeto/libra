@@ -56,6 +56,28 @@ fn run_libra_stdin(cwd: &Path, args: &[&str], input: &[u8]) -> Output {
     child.wait_with_output().expect("collect libra output")
 }
 
+/// Drop the `gpgsig`/`gpgsig-sha256` header (and its continuation lines) from
+/// a raw commit object. `fast-export` does not carry commit signatures, so a
+/// round trip preserves everything except that header.
+fn strip_commit_signature(raw: &[u8]) -> Vec<u8> {
+    let text = String::from_utf8_lossy(raw);
+    let (headers, message) = text.split_once("\n\n").unwrap_or((&text, ""));
+    let mut kept = Vec::new();
+    let mut in_signature = false;
+    for line in headers.split('\n') {
+        if line.starts_with("gpgsig ") || line.starts_with("gpgsig-sha256 ") {
+            in_signature = true;
+            continue;
+        }
+        if in_signature && line.starts_with(' ') {
+            continue;
+        }
+        in_signature = false;
+        kept.push(line);
+    }
+    format!("{}\n\n{message}", kept.join("\n")).into_bytes()
+}
+
 fn success(output: &Output, context: &str) {
     assert!(
         output.status.success(),
@@ -539,7 +561,8 @@ fn import_export_and_bundle_are_hash_kind_neutral_in_sha256_repositories() {
     let imported_commit = run_libra(target.path(), &["cat-file", "-p", &imported_head_text]);
     success(&imported_commit, "read imported sha256 commit");
     assert_eq!(
-        imported_commit.stdout, source_commit.stdout,
+        String::from_utf8_lossy(&strip_commit_signature(&imported_commit.stdout)),
+        String::from_utf8_lossy(&strip_commit_signature(&source_commit.stdout)),
         "sha256 import must preserve the rendered commit body"
     );
     success(

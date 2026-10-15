@@ -416,6 +416,62 @@ async fn opencode_legacy_raw_read_preserves_original_bytes() {
     assert_eq!(audit_rows(repo.path()).await, vec![(id, 1)]);
 }
 
+/// A metadata-only checkpoint (no transcript was captured, e.g. while the
+/// OpenCode export bridge could not run its exporter) exports zero bytes.
+/// The export still succeeds but warns, naming the bridge for OpenCode, so
+/// an empty file is not mistaken for captured content; a checkpoint with a
+/// transcript exports without that warning.
+#[tokio::test]
+async fn metadata_only_checkpoint_export_warns_that_nothing_was_captured() {
+    let repo = tempfile::tempdir().expect("metadata-only repo");
+    init_repo_via_cli(repo.path());
+    let id = seed_og13_legacy_checkpoint(repo.path(), b"").await;
+    let target = repo.path().join("capture.json");
+    let target_arg = target.to_str().unwrap();
+    let export = run_libra_command(
+        &["agent", "checkpoint", "export", &id, "-o", target_arg],
+        repo.path(),
+    );
+    assert!(
+        export.status.success(),
+        "an empty export is not an error: {}",
+        String::from_utf8_lossy(&export.stderr)
+    );
+    assert_eq!(std::fs::read(&target).unwrap(), b"");
+    let stderr = String::from_utf8_lossy(&export.stderr);
+    assert!(
+        stderr.contains(&format!(
+            "warning: checkpoint {id} has no captured transcript"
+        )) && stderr.contains("export_bridge"),
+        "{stderr}"
+    );
+    let strict = run_libra_command(
+        &[
+            "--exit-code-on-warning",
+            "agent",
+            "checkpoint",
+            "export",
+            &id,
+            "-o",
+            target_arg,
+        ],
+        repo.path(),
+    );
+    assert_eq!(strict.status.code(), Some(9), "{strict:?}");
+
+    let captured = tempfile::tempdir().expect("captured repo");
+    init_repo_via_cli(captured.path());
+    let id = seed_og13_legacy_checkpoint(captured.path(), br#"{"messages":[]}"#).await;
+    let export = run_libra_command(&["agent", "checkpoint", "export", &id], captured.path());
+    assert!(export.status.success());
+    assert_eq!(export.stdout, br#"{"messages":[]}"#);
+    assert!(
+        !String::from_utf8_lossy(&export.stderr).contains("no captured transcript"),
+        "{}",
+        String::from_utf8_lossy(&export.stderr)
+    );
+}
+
 #[tokio::test]
 async fn opencode_legacy_invalid_ordinary_export_is_refused_raw_is_audited() {
     for (original, cap) in [

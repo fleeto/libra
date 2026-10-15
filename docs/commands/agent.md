@@ -245,7 +245,7 @@ native-origin gates remain required.
 | `checkpoint list` | List captured checkpoints |
 | `checkpoint show <id>` | Show a safe structural checkpoint summary (metadata and internal object IDs are withheld) |
 | `checkpoint rewind <id>` | Inspect or apply a working-tree rewind for one checkpoint |
-| `checkpoint export <id>` | Export a checkpoint's transcript. Redacted by default (no authorization); raw (un-redacted) export requires `--allow-raw --raw` and is recorded in the append-only `agent_audit_log` (`LBR-AGENT-013` when refused without it) |
+| `checkpoint export <id>` | Export a checkpoint's transcript. Redacted by default (no authorization); raw (un-redacted) export requires `--allow-raw --raw` and is recorded in the append-only `agent_audit_log` (`LBR-AGENT-013` when refused without it). A checkpoint recorded without a transcript (metadata-only capture — for OpenCode, the export bridge was unavailable when it was written) exports zero bytes and emits a warning |
 | `skill search` | Search captured skill events by `--skill`, `--provider`, `--session`, and RFC3339 `--since`/`--until` (keyset-paginated with `--limit`/`--cursor`, `--json`). A read-time projection over checkpoint metadata — no dedicated table |
 | `skill list` | Alias of `skill search` (same filters) |
 | `skill registry` | Show the curated per-agent discoverable-skill registry (`--provider <slug>` to scope; the public SkillDiscoverer surface) |
@@ -253,7 +253,7 @@ native-origin gates remain required.
 | `doctor` | Diagnose hook installation and capture state; detect (and with `--repair` fix) checkpoint-store inconsistencies. Its object checks deliberately inspect only this repository's local object directory: unavailable alternate/remote objects are reported conservatively rather than resolving an externally controlled alternate path while producing diagnostics. The read-only `legacy_code_residue` field (human: a "Frozen Code residue" line) reports whether the frozen Code-era paths `.libra/sessions/code/` and `.libra/code/` and the `libra/intent` ref still exist; it never deletes or rewrites that state — cleanup is tracked separately (plan-20260920 ADR-RC-04 / DEFER-RC-02) |
 | `push` | Push `refs/libra/traces` to a remote (`--force-rewrite` for the non-fast-forward push after a `clean` prune, using force-with-lease) |
 | `rpc list` | List discovered `libra-agent-*` binaries on `PATH` (with trusted/quarantined state); requires the external-agents opt-in |
-| `rpc trust <slug>` | Trust a discovered binary — records path + sha256 + device/inode/mtime provenance (refused when its directory is world-writable, or when the binary is not under a trusted directory — `LBR-AGENT-005`). The provider-exporter slug `opencode` instead pins the provider's own CLI binary — resolved only from registered trusted directories, never `$PATH` — for the sandboxed export bridge; this form needs no external-agents opt-in. Provenance is hashed in one streaming pass with no fixed size cap, so large single-file provider CLIs (the OpenCode Bun build is ~171 MiB) stay trustable; a file that yields more bytes than its reported size while being hashed is refused (`LBR-AGENT-005`) |
+| `rpc trust <slug>` | Trust a discovered binary — records path + sha256 + device/inode/mtime provenance (refused when its directory is world-writable, or when the binary is not under a trusted directory — `LBR-AGENT-005`). The provider-exporter slug `opencode` instead pins the provider's own CLI binary — resolved only from registered trusted directories, never `$PATH` — for the sandboxed export bridge; this form needs no external-agents opt-in. A mise (aube) or pnpm `.bin` launcher shim is followed to the native executable it declares, which must itself be under a trusted directory (reported as `launcher` in `--json`); a JavaScript launcher is refused (`LBR-AGENT-005`). Provenance is hashed in one streaming pass with no fixed size cap, so large single-file provider CLIs (the OpenCode Bun build is ~171 MiB) stay trustable; a file that yields more bytes than its reported size while being hashed is refused (`LBR-AGENT-005`) |
 | `rpc trust --dir <path>` | Register a trusted directory (`agent.external_agents.trusted_dirs`, default `~/.libra/agents`): external binaries are only trustable when their canonical path lives under one. The path is canonicalized and must be an existing, non-world-writable directory |
 | `rpc untrust <slug>` | Revoke binary trust; OpenCode also revokes native issuers atomically (see native-origin rotation and revocation below). Always available, even while external agents are disabled |
 | `rpc invoke` | Invoke one JSON-RPC method on a trusted `libra-agent-*` binary |
@@ -356,6 +356,14 @@ the verified
 followed by `libra agent rpc trust opencode`. Neither step opens the
 external-RPC surface (`agent.external_agents.enabled` stays untouched); the
 binary is resolved only from registered trusted directories, never `$PATH`.
+The sandbox maps only the pinned file, so it must be the native OpenCode
+executable. When the trusted directory holds a package-manager launcher —
+the `.bin/opencode` shim written by mise's npm backend (aube) or by pnpm —
+`rpc trust opencode` pins the native executable that shim declares, provided
+that executable's own directory is also registered (the refusal names the
+exact `rpc trust --dir` to run); a JavaScript launcher (`#!/usr/bin/env node`)
+is refused. A trust record that still pins a launcher reports `export_bridge`
+unavailable until `libra agent rpc trust opencode` is re-run.
 Linux content export additionally requires a trusted `bwrap` that passes
 Libra's descriptor-native `--bind-fd` safety probe. Unsupported or legacy
 `bwrap` is reported unavailable and fails closed to metadata-only capture;

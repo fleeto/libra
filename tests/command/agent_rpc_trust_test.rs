@@ -571,6 +571,213 @@ fn provider_exporter_trust_is_ungated_and_trusted_dir_bound() {
     );
 }
 
+/// The `.bin/opencode` shim mise's npm backend (aube) writes for
+/// `@opencode/cli`: it execs a target named relative to its own location.
+fn aube_opencode_shim(target: &str) -> String {
+    format!(
+        "#!/bin/sh\n# aube-bin-shim v2 target={target}\nlink=\"$0\"\n\
+         basedir=$(dirname \"$link\")\n\
+         export NODE_PATH=\"$basedir/..:$basedir/../.mise/node_modules\"\n\
+         exec \"$basedir/{target}\" \"$@\"\n"
+    )
+}
+
+fn write_executable(path: &Path, bytes: &[u8]) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, bytes).unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+fn opencode_export_bridge_method(repo: &Path, fixtures: &Path) -> serde_json::Value {
+    let list = run_with_path(
+        &["--json", "agent", "list", "--schema-version", "2"],
+        repo,
+        fixtures,
+    );
+    assert!(
+        list.status.success(),
+        "agent list v2 must succeed: {}",
+        String::from_utf8_lossy(&list.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&list.stdout).unwrap();
+    json["data"]["agents"]
+        .as_array()
+        .and_then(|agents| agents.iter().find(|row| row["slug"] == "opencode"))
+        .and_then(|row| row["methods"].as_array())
+        .and_then(|methods| methods.iter().find(|m| m["name"] == "export_bridge"))
+        .cloned()
+        .unwrap_or_else(|| panic!("no OpenCode export_bridge method in {json}"))
+}
+
+/// The export sandbox maps only the pinned exporter file, so a
+/// package-manager shim (here mise's aube `.bin/opencode`) cannot reach the
+/// native OpenCode it launches and every capture silently exported nothing.
+/// `rpc trust opencode` therefore pins the shim's declared native target —
+/// once that target's own directory is trusted, which the refusal names —
+/// and a record that still pins a shim (written by an earlier release)
+/// reports the export bridge unavailable, without being revoked, until it is
+/// re-trusted.
+#[test]
+fn provider_exporter_trust_pins_the_native_target_of_a_package_manager_shim() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    init_repo_via_cli(&repo);
+    let modules = temp
+        .path()
+        .canonicalize()
+        .unwrap()
+        .join("npm-opencode-cli/2.0.29/node_modules");
+    let shim_dir = modules.join(".bin");
+    let package_bin = modules.join(".mise/@opencode+cli@2.0.29/node_modules/@opencode/cli/bin");
+    let native = package_bin.join("opencode.exe");
+    write_executable(&native, b"\x7fELF\x02\x01\x01\x00");
+    let shim = shim_dir.join("opencode");
+    write_executable(
+        &shim,
+        aube_opencode_shim(
+            "../.mise/@opencode+cli@2.0.29/node_modules/@opencode/cli/bin/opencode.exe",
+        )
+        .as_bytes(),
+    );
+
+    // (a) Trusting only the shim's directory is refused with the provenance
+    // code and the exact directory of the native executable to register.
+    let shim_dir_arg = shim_dir.to_str().unwrap();
+    let registered = run_with_path(
+        &["agent", "rpc", "trust", "--dir", shim_dir_arg],
+        &repo,
+        &shim_dir,
+    );
+    assert!(
+        registered.status.success(),
+        "{}",
+        String::from_utf8_lossy(&registered.stderr)
+    );
+    let refused = run_with_path(&["agent", "rpc", "trust", "opencode"], &repo, &shim_dir);
+    assert!(!refused.status.success(), "a shim must never be pinned");
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        stderr.contains("LBR-AGENT-005")
+            && stderr.contains("package-manager launcher")
+            && stderr.contains(&format!("trust --dir {}", package_bin.display())),
+        "refusal names the native executable's directory: {stderr}"
+    );
+
+    // (b) With that directory trusted too, the native target is pinned and
+    // the shim is reported as its launcher.
+    let package_bin_arg = package_bin.to_str().unwrap();
+    let registered = run_with_path(
+        &["agent", "rpc", "trust", "--dir", package_bin_arg],
+        &repo,
+        &shim_dir,
+    );
+    assert!(
+        registered.status.success(),
+        "{}",
+        String::from_utf8_lossy(&registered.stderr)
+    );
+    let trusted = run_with_path(
+        &["--json", "agent", "rpc", "trust", "opencode"],
+        &repo,
+        &shim_dir,
+    );
+    assert!(
+        trusted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&trusted.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&trusted.stdout).unwrap();
+    assert_eq!(json["data"]["path"], native.to_str().unwrap(), "{json}");
+    assert_eq!(json["data"]["launcher"], shim.to_str().unwrap(), "{json}");
+    let human = run_with_path(&["agent", "rpc", "trust", "opencode"], &repo, &shim_dir);
+    assert!(
+        String::from_utf8_lossy(&human.stdout).contains(&format!("launched by {}", shim.display())),
+        "{}",
+        String::from_utf8_lossy(&human.stdout)
+    );
+
+    // (c) A record that still pins the shim keeps the export bridge
+    // unavailable but is not revoked: it did not drift.
+    let provenance = libra::internal::ai::observed_agents::compute_provenance(&shim).unwrap();
+    let stale = serde_json::json!({
+        "path": provenance.canonical_path,
+        "sha256": provenance.sha256,
+        "device": provenance.device,
+        "inode": provenance.inode,
+        "mtime": provenance.mtime,
+    })
+    .to_string();
+    let seeded = run_with_path(
+        &["config", "set", "agent.trust.opencode", &stale],
+        &repo,
+        &shim_dir,
+    );
+    assert!(
+        seeded.status.success(),
+        "{}",
+        String::from_utf8_lossy(&seeded.stderr)
+    );
+    let method = opencode_export_bridge_method(&repo, &shim_dir);
+    assert_eq!(method["available"], false, "{method}");
+    let kept = run_with_path(&["config", "get", "agent.trust.opencode"], &repo, &shim_dir);
+    assert!(
+        kept.status.success()
+            && String::from_utf8_lossy(&kept.stdout).contains(shim.to_str().unwrap()),
+        "a launcher record is refused, not revoked: {}",
+        String::from_utf8_lossy(&kept.stdout)
+    );
+
+    // (d) Re-trusting repairs it.
+    let repaired = run_with_path(
+        &["--json", "agent", "rpc", "trust", "opencode"],
+        &repo,
+        &shim_dir,
+    );
+    assert!(
+        repaired.status.success(),
+        "{}",
+        String::from_utf8_lossy(&repaired.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&repaired.stdout).unwrap();
+    assert_eq!(json["data"]["path"], native.to_str().unwrap(), "{json}");
+}
+
+/// A JavaScript launcher (npm's `opencode-ai` wrapper) locates the native
+/// binary in its package tree at run time, which the export sandbox does not
+/// provide: it is refused rather than pinned.
+#[test]
+fn provider_exporter_trust_refuses_a_javascript_launcher() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    init_repo_via_cli(&repo);
+    let fixtures = temp.path().join("bin");
+    write_executable(
+        &fixtures.join("opencode"),
+        b"#!/usr/bin/env node\nrequire('../lib/launch.js')\n",
+    );
+    let registered = run_with_path(
+        &["agent", "rpc", "trust", "--dir", fixtures.to_str().unwrap()],
+        &repo,
+        &fixtures,
+    );
+    assert!(
+        registered.status.success(),
+        "{}",
+        String::from_utf8_lossy(&registered.stderr)
+    );
+    let refused = run_with_path(&["agent", "rpc", "trust", "opencode"], &repo, &fixtures);
+    assert!(
+        !refused.status.success(),
+        "a JavaScript launcher must not be pinned"
+    );
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        stderr.contains("LBR-AGENT-005") && stderr.contains("JavaScript launcher"),
+        "{stderr}"
+    );
+}
+
 /// R85: provider-exporter trust has no fixed binary-size cap. The stock
 /// OpenCode CLI is a ~171 MiB single-file Bun binary, so a 200 MiB (sparse)
 /// `opencode` must be trustable, its sha256 must be the whole-file digest, and

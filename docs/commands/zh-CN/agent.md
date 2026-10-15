@@ -185,7 +185,7 @@ OpenCode 提取对空输入、非法 JSON 和非法 export 形状显式标记
 | `checkpoint list` | 列出已捕获 checkpoint |
 | `checkpoint show <id>` | 显示安全的 checkpoint 结构摘要（隐藏 metadata 和内部对象 ID） |
 | `checkpoint rewind <id>` | 检查或应用某个 checkpoint 的工作树回退 |
-| `checkpoint export <id>` | 导出 checkpoint transcript：默认脱敏（无需授权）；raw（未脱敏）导出须 `--allow-raw --raw` 并写入 append-only `agent_audit_log`（缺失授权时拒绝并返回 `LBR-AGENT-013`） |
+| `checkpoint export <id>` | 导出 checkpoint transcript：默认脱敏（无需授权）；raw（未脱敏）导出须 `--allow-raw --raw` 并写入 append-only `agent_audit_log`（缺失授权时拒绝并返回 `LBR-AGENT-013`）。未采集到 transcript 的 checkpoint（metadata-only 采集——对 OpenCode 而言即写入时 export bridge 不可用）导出 0 字节并发出 warning |
 | `skill search` | 按 `--skill`、`--provider`、`--session`、RFC3339 `--since`/`--until` 搜索捕获的 skill events（`--limit`/`--cursor` keyset 分页、`--json`）。基于 checkpoint metadata 的读时投影，无独立表 |
 | `skill list` | `skill search` 的别名（同过滤项） |
 | `skill registry` | 展示各 agent 的 curated 可发现 skill 注册表（`--provider <slug>` 限定；公开 SkillDiscoverer 面） |
@@ -193,7 +193,7 @@ OpenCode 提取对空输入、非法 JSON 和非法 export 形状显式标记
 | `doctor` | 诊断 hook 安装和捕获状态；检测（`--repair` 时修复）checkpoint 存储不一致。对象检查刻意只读取本仓库的本地对象目录：不可用的 alternate/remote 对象会保守地报告为不可用，而不会在产生诊断时解析外部可控的 alternate 路径。只读的 `legacy_code_residue` 字段（人读为「Frozen Code residue」行）报告冷冻的 Code 时代路径 `.libra/sessions/code/`、`.libra/code/` 与 `libra/intent` ref 是否仍存在；它不会删除或改写该状态，清理另由 plan-20260920 ADR-RC-04 / DEFER-RC-02 承接 |
 | `push` | 将 `refs/libra/traces` 推送到远程（`clean` prune 重写后的非快进推送用 `--force-rewrite`，采用 force-with-lease 语义） |
 | `rpc list` | 列出 `PATH` 上发现的 `libra-agent-*` 二进制（含 trusted/quarantined 状态）；需先开启 external-agents 开关 |
-| `rpc trust <slug>` | 信任一个已发现的二进制——记录 path + sha256 + device/inode/mtime 来源（所在目录 world-writable、或二进制不在受信目录下时拒绝——`LBR-AGENT-005`）。provider-exporter slug `opencode` 则改为固定 provider 自身的 CLI 二进制——只从已注册受信目录解析、绝不扫描 `$PATH`——供沙箱化 export bridge 使用；该形式无需 external-agents opt-in。来源 sha256 以单次流式读取计算、不设固定大小上限，因此大型单文件 provider CLI（OpenCode Bun 构建约 171 MiB）仍可受信；计算期间读出字节超过其报告大小的文件会被拒绝（`LBR-AGENT-005`） |
+| `rpc trust <slug>` | 信任一个已发现的二进制——记录 path + sha256 + device/inode/mtime 来源（所在目录 world-writable、或二进制不在受信目录下时拒绝——`LBR-AGENT-005`）。provider-exporter slug `opencode` 则改为固定 provider 自身的 CLI 二进制——只从已注册受信目录解析、绝不扫描 `$PATH`——供沙箱化 export bridge 使用；该形式无需 external-agents opt-in。来源 sha256 以单次流式读取计算、不设固定大小上限，因此大型单文件 provider CLI（OpenCode Bun 构建约 171 MiB）仍可受信；计算期间读出字节超过其报告大小的文件会被拒绝（`LBR-AGENT-005`）。mise（aube）或 pnpm 的 `.bin` 启动器 shim 会被跟随到其声明的原生可执行文件，该文件本身也必须位于受信目录下（`--json` 中以 `launcher` 字段报告）；JavaScript 启动器会被拒绝（`LBR-AGENT-005`） |
 | `rpc trust --dir <path>` | 注册一个受信目录（`agent.external_agents.trusted_dirs`，默认 `~/.libra/agents`）：外部二进制的 canonical path 必须位于其中之一才可被信任。路径会被 canonicalize，且必须是存在且非 world-writable 的目录 |
 | `rpc untrust <slug>` | 撤销 binary trust；OpenCode 同时原子吊销 native issuer，详见下方轮换与撤销章节（始终可用，不受开关限制） |
 | `rpc invoke` | 在**已信任**的 `libra-agent-*` 二进制上调用一个 JSON-RPC 方法 |
@@ -272,7 +272,13 @@ loopback 端口。取消和绝对 deadline 回收仍持有的进程组，leader 
 二进制的目录，再固定它——`libra agent rpc trust --dir <path>`，然后
 `libra agent rpc trust opencode`。两步都不会打开 external-RPC 表面
 （`agent.external_agents.enabled` 保持不变）；二进制只从已注册受信目录解析，
-绝不扫描 `$PATH`。Linux 内容导出还要求受信的 `bwrap` 通过 Libra 的 descriptor-native
+绝不扫描 `$PATH`。沙箱只映射被固定的那一个文件，因此它必须是 OpenCode 原生可执行文件。
+受信目录中若是包管理器启动器——mise npm 后端（aube）或 pnpm 生成的 `.bin/opencode`
+shim——`rpc trust opencode` 会改为固定该 shim 声明的原生可执行文件，前提是该文件
+所在目录也已登记（拒绝信息会给出需要执行的 `rpc trust --dir` 命令）；JavaScript
+启动器（`#!/usr/bin/env node`）会被拒绝。仍固定着启动器的旧信任记录会让
+`export_bridge` 报告 unavailable，直到重新执行 `libra agent rpc trust opencode`。
+Linux 内容导出还要求受信的 `bwrap` 通过 Libra 的 descriptor-native
 `--bind-fd` 安全探测；不支持或过旧的 `bwrap` 会报告 unavailable 并 fail-closed 为
 metadata-only 捕获。应安装或升级系统 `bwrap` 包，绝不启用未沙箱化回退。不支持的 schema version 以 usage 错误（exit 129、category
 `cli`）返回 `LBR-AGENT-017`。当平台无法提供 Libra 的 provider-root 安全打开

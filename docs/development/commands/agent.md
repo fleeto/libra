@@ -16,7 +16,13 @@ or legacy bwrap is unavailable and remains metadata-only. Install or upgrade
 the system bwrap package—there is no unsandboxed fallback.
 
 The shared `run_bounded_exporter` Unix `pre_exec` sets both soft and hard
-`RLIMIT_CORE` to zero next to the existing per-platform `RLIMIT_FSIZE`.
+`RLIMIT_CORE` to zero next to the existing `RLIMIT_FSIZE`. That file-size
+limit is a coarse 8 GiB backstop on every platform, not the 16 MiB export
+cap: it is process-wide, so a cap-sized limit also failed OpenCode's own
+SQLite writes once the store outgrew the cap (macOS FIX-SBX-01; on Linux the
+`--standalone` server then exited before readiness and every capture was
+metadata-only). The export cap stays enforced on stdout by the size poll and
+the post-exit recheck.
 Failure to set either limit fails spawn with context. Core limits propagate
 to exporter descendants without changing the parent process; SIGXFSZ
 disposition, byte caps, deadlines and sandbox controls are unchanged.

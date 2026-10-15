@@ -21,11 +21,11 @@
 //!   while exiting success). The `max_bytes` cap is enforced by actively
 //!   polling that file while the child runs and re-checking after exit;
 //!   over-cap always kills and errors, never returns truncated content.
-//!   `RLIMIT_FSIZE` backs this with a write-time bound — strict
-//!   (`max_bytes + 1`) on Linux (GC-SBX-01 pre-plan behavior, isolated
-//!   tmpfs scratch), a coarse 8 GiB disk backstop on macOS where the
-//!   process-wide limit would SIGXFSZ OpenCode's SQLite WAL checkpoint on
-//!   a large store (FIX-SBX-01). The whole run sits under a wall-clock
+//!   `RLIMIT_FSIZE` is only a coarse 8 GiB disk backstop on every
+//!   platform: the limit is process-wide, so a `max_bytes + 1` bound would
+//!   also fail OpenCode's own SQLite writes on any store larger than the
+//!   export cap (FIX-SBX-01 on macOS; on Linux the `--standalone` server
+//!   exited before readiness). The whole run sits under a wall-clock
 //!   deadline (default 3 s — expiry kills the still-owned child's process
 //!   group and, once captured, the bwrap namespace-init process through a
 //!   pidfd). On Linux the outer bwrap process is detached from the invoking
@@ -75,7 +75,10 @@ use crate::internal::ai::authorized_read::{
 use crate::internal::ai::observed_agents::{
     TranscriptSource,
     transcript_source::ExportAuthorized,
-    trust::{OPENCODE_EXPORTER_SLUG, read_trust, revalidate_trust},
+    trust::{
+        ExporterLauncher, OPENCODE_EXPORTER_SLUG, classify_exporter_launcher, read_trust,
+        revalidate_trust,
+    },
 };
 #[cfg(target_os = "macos")]
 use crate::internal::ai::sandbox::{
@@ -272,7 +275,32 @@ async fn trusted_opencode_provenance_from(
     let provenance = revalidate_trust(OPENCODE_TRUST_SLUG, &record)
         .await
         .context("revalidate opencode binary trust")?;
-    Ok(provenance)
+    // The sandbox maps only the pinned file at a fixed private path, so a
+    // package-manager launcher trusted by an earlier release cannot reach its
+    // target there: it exits before exporting and every capture silently
+    // degrades to metadata-only. Refuse it with the operator fix instead.
+    // This read is diagnostic only; sealing still verifies the pinned bytes.
+    let path = provenance.canonical_path.clone();
+    let launcher = tokio::task::spawn_blocking(move || classify_exporter_launcher(&path))
+        .await
+        .context("join trusted OpenCode exporter inspection")?
+        .context("inspect trusted OpenCode exporter")?;
+    match launcher {
+        ExporterLauncher::Direct => Ok(provenance),
+        ExporterLauncher::Shim { target } => bail!(
+            "the trusted OpenCode exporter {} is a package-manager launcher for {}, which the \
+             export sandbox cannot start; re-run 'libra agent rpc trust opencode' to pin the \
+             native executable instead",
+            provenance.canonical_path.display(),
+            target.display()
+        ),
+        ExporterLauncher::JavaScript => bail!(
+            "the trusted OpenCode exporter {} is a JavaScript launcher that the export sandbox \
+             cannot run; trust the native OpenCode executable with 'libra agent rpc trust \
+             --dir <path>' and 'libra agent rpc trust opencode'",
+            provenance.canonical_path.display()
+        ),
+    }
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos", test))]
@@ -861,21 +889,17 @@ async fn run_bounded_exporter_inner(
         .context("clone export stdout handle")?;
     let mut command = tokio::process::Command::new(program);
     // The export *stdout* byte cap is the tempfile poll below on every
-    // platform. RLIMIT_FSIZE is per-OS: Linux keeps the strict write-time
-    // cap (GC-SBX-01: pre-plan Linux semantics unchanged); macOS raises it
-    // to a coarse disk backstop because the limit is process-wide and a
-    // max_bytes cap SIGXFSZes OpenCode's WAL checkpoint on a store larger
-    // than max_bytes (FIX-SBX-01: a ~1 GiB `opencode.db` failed
-    // `PRAGMA wal_checkpoint` under 16 MiB).
+    // platform. RLIMIT_FSIZE is process-wide, so it also bounds OpenCode's
+    // own writes into the bound store: a max_bytes cap fails every SQLite
+    // write past that offset on a store larger than max_bytes (FIX-SBX-01 on
+    // macOS: a ~1 GiB `opencode.db` failed `PRAGMA wal_checkpoint` under
+    // 16 MiB; on Linux the `--standalone` server exited before readiness on
+    // a ~119 MiB store, so every capture degraded to metadata-only). It is
+    // therefore only a coarse disk backstop on every platform.
     #[cfg(unix)]
     {
-        #[cfg(target_os = "macos")]
-        let fsize_limit: u64 = {
-            const EXPORT_RLIMIT_FSIZE_BACKSTOP: u64 = 8 * 1024 * 1024 * 1024;
-            EXPORT_RLIMIT_FSIZE_BACKSTOP.max(limits.max_bytes.saturating_add(1))
-        };
-        #[cfg(not(target_os = "macos"))]
-        let fsize_limit: u64 = limits.max_bytes.saturating_add(1);
+        const EXPORT_RLIMIT_FSIZE_BACKSTOP: u64 = 8 * 1024 * 1024 * 1024;
+        let fsize_limit: u64 = EXPORT_RLIMIT_FSIZE_BACKSTOP.max(limits.max_bytes.saturating_add(1));
         unsafe {
             command.pre_exec(move || {
                 #[cfg(target_os = "linux")]
@@ -4361,6 +4385,34 @@ printf unsanitized"#,
         assert!(format!("{err:#}").contains("byte cap"), "got {err:#}");
     }
 
+    /// The byte cap bounds the export on stdout only. OpenCode's
+    /// `--standalone` server writes its SQLite store, routinely far larger
+    /// than the export cap; a process-wide `RLIMIT_FSIZE` at the cap failed
+    /// those writes, so the server exited before readiness and every Linux
+    /// capture silently degraded to metadata-only.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn opencode_export_store_writes_past_the_byte_cap_still_export() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = dir.path().join("opencode.db");
+        let bin = fake_exporter(
+            dir.path(),
+            &format!(
+                "head -c 65536 /dev/zero > '{}' && printf ok",
+                store.display()
+            ),
+        );
+        let limits = ExportLimits {
+            max_bytes: 1024,
+            deadline: Duration::from_secs(5),
+        };
+        let out = run_export_subprocess(&bin, "s1", limits)
+            .await
+            .expect("store writes beyond the stdout cap must not fail the export");
+        assert_eq!(out, b"ok");
+        assert_eq!(std::fs::metadata(&store).unwrap().len(), 65536);
+    }
+
     /// A non-terminating writer is killed by the byte cap instead of being
     /// allowed to consume disk until the much later wall-clock deadline.
     #[cfg(unix)]
@@ -5018,9 +5070,9 @@ printf 'tty=detached'"#,
     }
 
     /// SBX-03: execution stays `run_bounded_exporter` (file-backed stdout
-    /// with the 16 MiB poll cap, per-OS RLIMIT_FSIZE — strict on Linux, 8
-    /// GiB backstop on macOS (FIX-SBX-01) — RLIMIT_CORE=0 in the child,
-    /// process group, 3s wall clock).
+    /// with the 16 MiB poll cap, an 8 GiB RLIMIT_FSIZE backstop
+    /// (FIX-SBX-01) — RLIMIT_CORE=0 in the child, process group, 3s wall
+    /// clock).
     /// Linux retained exporter/store fds remain CLOEXEC in the parent until
     /// the fork-child allowlist restores only those exact capabilities.
     #[cfg(all(unix, not(target_os = "macos")))]

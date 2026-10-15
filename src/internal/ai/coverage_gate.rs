@@ -8840,7 +8840,7 @@ pub(crate) mod tests {
         .await
         .expect("seed coverage deadline session");
 
-        let locker = crate::internal::db::establish_connection_with_busy_timeout(
+        let locker = crate::internal::db::establish_connection_with_lock_timeout(
             database_path
                 .to_str()
                 .expect("coverage deadline database path is utf-8"),

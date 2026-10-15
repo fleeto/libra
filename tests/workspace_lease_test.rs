@@ -13,7 +13,7 @@ use std::{path::Path, sync::Arc};
 #[cfg(debug_assertions)]
 use libra::internal::workspace::test_hooks;
 use libra::internal::{
-    db::establish_connection_with_busy_timeout,
+    db::establish_connection_with_lock_timeout,
     workspace::{
         AcquireRequest, DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT, RepoIdentity, WorkspaceError,
         WorkspaceKind, WorkspaceLease, WorkspaceListQuery, WorkspaceOwnerKind, WorkspaceState,
@@ -67,13 +67,22 @@ async fn open_db_with_repo_id(repo_id: &str) -> TestDb {
 /// A second, independent connection to the same file — used by the concurrency
 /// cases so two writers really contend for the SQLite write lock.
 async fn connect(path: &Path) -> DatabaseConnection {
-    connect_with_busy_timeout(path, std::time::Duration::from_secs(30)).await
+    connect_with_lock_timeout(path, std::time::Duration::from_secs(30)).await
 }
 
 /// A connection whose lock patience is under the test's control: a tiny timeout
 /// turns "blocked on another writer" into an observable outcome.
-async fn connect_with_busy_timeout(path: &Path, busy: std::time::Duration) -> DatabaseConnection {
-    establish_connection_with_busy_timeout(path.to_str().expect("utf-8 db path"), busy)
+///
+/// Only lock waits are cut short; opening keeps its full budget. Opening runs
+/// `PRAGMA synchronous = FULL`, which parses the whole repository schema, and
+/// while sibling tests of the same `cargo test` process run SQLite work that
+/// parse can take longer than 50 ms, so a timeout that also bounded the open
+/// failed this case with `PoolTimedOut` before it began.
+async fn connect_with_lock_timeout(
+    path: &Path,
+    lock_timeout: std::time::Duration,
+) -> DatabaseConnection {
+    establish_connection_with_lock_timeout(path.to_str().expect("utf-8 db path"), lock_timeout)
         .await
         .expect("open repository database")
 }
@@ -196,7 +205,7 @@ async fn concurrent_acquire_overlap_is_decided_by_the_unique_index() {
 
     let db = open_db().await;
     let path = workspace_dir(db.path.parent().expect("db parent"), "linked-a");
-    let impatient = connect_with_busy_timeout(&db.path, std::time::Duration::from_millis(50)).await;
+    let impatient = connect_with_lock_timeout(&db.path, std::time::Duration::from_millis(50)).await;
     let observer = connect(&db.path).await;
 
     // A: transaction open, row inserted, NOT yet committed. The identity is

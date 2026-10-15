@@ -72,6 +72,24 @@ use crate::internal::{
     db,
 };
 
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::cell::Cell;
+
+    thread_local! {
+        static VERSIONED_DURABLE_AUTHORIZATION_FAILURE: Cell<bool> = const { Cell::new(false) };
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn fail_versioned_durable_authorization_once() {
+        VERSIONED_DURABLE_AUTHORIZATION_FAILURE.with(|flag| flag.set(true));
+    }
+
+    pub(crate) fn take_versioned_durable_authorization_failure() -> bool {
+        VERSIONED_DURABLE_AUTHORIZATION_FAILURE.with(|flag| flag.replace(false))
+    }
+}
+
 /// Private metadata field.  This is intentionally versioned independently of
 /// the public `agent_session` wire because it is recovery machinery, not
 /// provider metadata.
@@ -2393,18 +2411,142 @@ pub(crate) async fn resolve_pending_session_context(
     })
 }
 
+/// A catalog proof is borrowed only from one of the two authenticated loaders.
+/// Ordinary coverage is used for common binding fields, never to infer versions.
+#[derive(Clone, Copy)]
+pub(crate) enum PendingArtifactProof<'a> {
+    V1(&'a super::pending::VerifiedPendingPayload),
+    V2(&'a super::pending::VerifiedVersionedPendingPayload),
+}
+impl<'a> From<&'a super::pending::VerifiedPendingPayload> for PendingArtifactProof<'a> {
+    fn from(value: &'a super::pending::VerifiedPendingPayload) -> Self {
+        Self::V1(value)
+    }
+}
+impl<'a> From<&'a super::pending::VerifiedVersionedPendingPayload> for PendingArtifactProof<'a> {
+    fn from(value: &'a super::pending::VerifiedVersionedPendingPayload) -> Self {
+        Self::V2(value)
+    }
+}
+impl PendingArtifactProof<'_> {
+    fn header(&self) -> &super::pending::PendingHeader {
+        match self {
+            Self::V1(v) => v.header(),
+            Self::V2(v) => v.header(),
+        }
+    }
+    fn binding(&self) -> &super::pending::PendingBinding {
+        match self {
+            Self::V1(value) => value.binding(),
+            Self::V2(value) => &value.header().binding,
+        }
+    }
+    fn context(&self) -> &PendingSessionContext {
+        match self {
+            Self::V1(v) => v.context(),
+            Self::V2(v) => v.context(),
+        }
+    }
+    fn coverage(&self) -> &crate::internal::ai::coverage_gate::LiveClaimCommitPlan {
+        match self {
+            Self::V1(v) => v.coverage(),
+            Self::V2(v) => v.coverage().ordinary(),
+        }
+    }
+    async fn verify_reserved<C: ConnectionTrait>(
+        &self,
+        conn: &C,
+        scope: &CaptureScope,
+    ) -> anyhow::Result<()> {
+        match self {
+            Self::V1(v) => {
+                crate::internal::ai::coverage_gate::verify_reserved_live_claims_with_conn(
+                    conn,
+                    scope,
+                    self.context().session_id(),
+                    &v.coverage().owner,
+                    &v.coverage().claims,
+                )
+                .await
+            }
+            Self::V2(v) => {
+                crate::internal::ai::coverage_gate::verify_versioned_reserved_live_claims_with_conn(
+                    conn,
+                    scope,
+                    v.coverage(),
+                )
+                .await
+            }
+        }
+    }
+}
+
 impl CaptureCatalogStore {
     /// Re-elect the exact persisted terminal attempt for one authenticated
     /// pending artifact. The artifact/alias remain discovery inputs only;
     /// current catalog, tombstone, receipt and coverage fences are checked
     /// under the same writer lock which advances the original retry budget.
-    pub(crate) async fn claim_pending_artifact_attempt(
+    pub(crate) async fn claim_pending_artifact_attempt<'a>(
         &self,
         recovery: &CaptureCatalogFinalizerRecovery,
-        verified: &super::pending::VerifiedPendingPayload,
+        verified: impl Into<PendingArtifactProof<'a>>,
         identity: &super::pending_identity::PreparedPendingAlias,
         now_millis: i64,
         deadline: CaptureCommitDeadline,
+    ) -> Result<CaptureCatalogTerminalAttempt, CaptureCatalogError> {
+        self.claim_pending_artifact_attempt_checked(
+            recovery,
+            verified.into(),
+            identity,
+            now_millis,
+            deadline,
+            false,
+        )
+        .await
+    }
+
+    /// A durable retry revalidates the original receipt without requiring its
+    /// already-committed claims to become reservations again. This fence alone
+    /// cannot acknowledge: the store must freshly restore native identities.
+    pub(crate) async fn authorize_versioned_pending_durable_replay(
+        &self,
+        recovery: &CaptureCatalogFinalizerRecovery,
+        verified: &super::pending::VerifiedVersionedPendingPayload,
+        identity: &super::pending_identity::PreparedPendingAlias,
+        now_millis: i64,
+        deadline: CaptureCommitDeadline,
+    ) -> Result<CaptureCatalogTerminalAttemptFence, CaptureCatalogError> {
+        #[cfg(test)]
+        if test_support::take_versioned_durable_authorization_failure() {
+            return Err(CaptureCatalogError::Database);
+        }
+        match self
+            .claim_pending_artifact_attempt_checked(
+                recovery,
+                verified.into(),
+                identity,
+                now_millis,
+                deadline,
+                true,
+            )
+            .await?
+        {
+            CaptureCatalogTerminalAttempt::Bound {
+                registration_fence, ..
+            } => Ok(*registration_fence),
+            _ => Err(CaptureCatalogError::InvalidRequest),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn claim_pending_artifact_attempt_checked(
+        &self,
+        recovery: &CaptureCatalogFinalizerRecovery,
+        verified: PendingArtifactProof<'_>,
+        identity: &super::pending_identity::PreparedPendingAlias,
+        now_millis: i64,
+        deadline: CaptureCommitDeadline,
+        durable: bool,
     ) -> Result<CaptureCatalogTerminalAttempt, CaptureCatalogError> {
         let header = verified.header();
         if identity.alias() != header.binding.session_id
@@ -2417,17 +2559,17 @@ impl CaptureCatalogStore {
             || header.binding.event_id != recovery.action.event_id.to_string()
             || header.binding.action_key != recovery.action.action_key()
             || header.binding.receipt_key != recovery.action.completion_receipt_storage_key()
-            || header.manual_attempted
+            || (!durable && header.manual_attempted)
         {
             return Err(CaptureCatalogError::InvalidRequest);
         }
 
         let txn = begin_catalog_write_transaction(&self.conn, Some(deadline)).await?;
         let result = async {
-            if super::pending::current_header_namespace(&txn, header)
-                .await
-                .map_err(classify_pending_validation_error)?
-                != crate::internal::metadata::MetadataScope::AgentCapturePending
+            let namespace = super::pending::current_header_namespace(&txn, header)
+                .await.map_err(classify_pending_validation_error)?;
+            if namespace != crate::internal::metadata::MetadataScope::AgentCapturePending
+                && !(durable && namespace == crate::internal::metadata::MetadataScope::AgentCaptureQuarantine)
             {
                 return Err(CaptureCatalogError::InvalidRequest);
             }
@@ -2498,25 +2640,43 @@ impl CaptureCatalogStore {
                 finalizer.marker_generation.clone(),
                 finalizer.source_digest.clone(),
             );
-            let expected_binding = pending_artifact_binding(
-                &txn,
-                &fence,
-                identity.alias(),
-                verified.coverage().parent_commit.clone(),
-            )
-            .await?;
+            let expected_binding = if durable {
+                // Read-proof mode does not spend or recreate manual marker
+                // registration authority: every current receipt field above
+                // still has to match the authenticated original binding.
+                let parent_commit = verified.coverage().parent_commit.clone();
+                super::pending::PendingBinding {
+                    scope: recovery.scope.clone(), session_id: identity.alias().to_owned(),
+                    checkpoint_id: recovery.checkpoint_id.clone(), event_id: recovery.action.event_id.to_string(),
+                    action_key: recovery.action.action_key().to_owned(), receipt_key: recovery.action.completion_receipt_storage_key(),
+                    marker_generation: finalizer.marker_generation.clone(),
+                    source_commitment: finalizer.source_digest.clone().ok_or(CaptureCatalogError::InvalidRequest)?,
+                    reserved_revision: receipt.reserved_revision, original_deadline_millis: finalizer.deadline_millis,
+                    deferrable: finalizer.mode == StoredFinalizeMode::Deferrable, first_attempt_millis: finalizer.first_attempt_millis,
+                    parent_unborn: parent_commit.is_none(), parent_commit,
+                }
+            } else {
+                pending_artifact_binding(&txn, &fence, identity.alias(), verified.coverage().parent_commit.clone()).await?
+            };
             if expected_binding != header.binding {
                 return Err(CaptureCatalogError::InvalidRequest);
             }
-            crate::internal::ai::coverage_gate::verify_reserved_live_claims_with_conn(
-                &txn,
-                &recovery.scope,
-                identity.context().session_id(),
-                &verified.coverage().owner,
-                &verified.coverage().claims,
-            )
-            .await
-            .map_err(classify_pending_validation_error)?;
+            if durable {
+                if !matches!(verified, PendingArtifactProof::V2(_)) || txn.query_one_raw(Statement::from_sql_and_values(
+                    txn.get_database_backend(),
+                    "SELECT 1 FROM agent_checkpoint WHERE checkpoint_id = ? AND session_id = ? AND scope = 'committed' LIMIT 1",
+                    [recovery.checkpoint_id.clone().into(), identity.context().session_id().into()],
+                )).await.map_err(|_| CaptureCatalogError::Database)?.is_none() {
+                    return Err(CaptureCatalogError::InvalidRequest);
+                }
+                return Ok(CaptureCatalogTerminalAttempt::Bound {
+                    marker_generation: finalizer.marker_generation.clone(),
+                    source_digest: finalizer.source_digest.clone(),
+                    attempts: finalizer.to_pending_receipt()?.attempts(),
+                    registration_fence: Box::new(fence),
+                });
+            }
+            verified.verify_reserved(&txn, &recovery.scope).await.map_err(classify_pending_validation_error)?;
             self.claim_terminal_attempt_inner(&txn, &request, true)
                 .await
         }
@@ -2527,14 +2687,15 @@ impl CaptureCatalogStore {
     /// Consume an expired artifact's one explicit operator attempt. The MAC
     /// capability is constructed only by the payload loader; the header is
     /// discovery evidence, never authority to bypass current catalog fences.
-    pub(crate) async fn claim_manual_pending_artifact(
+    pub(crate) async fn claim_manual_pending_artifact<'a>(
         &self,
-        verified: &super::pending::VerifiedPendingPayload,
+        verified: impl Into<PendingArtifactProof<'a>>,
         identity: &super::pending_identity::PreparedPendingAlias,
         header: &super::pending::PendingHeader,
         now_millis: i64,
         deadline: CaptureCommitDeadline,
     ) -> Result<CaptureCatalogTerminalAttemptFence, CaptureCatalogError> {
+        let verified = verified.into();
         if verified.header() != header
             || verified.binding() != &header.binding
             || verified.context() != identity.context()
@@ -2602,10 +2763,7 @@ impl CaptureCatalogStore {
             {
                 return Err(CaptureCatalogError::InvalidRequest);
             }
-            crate::internal::ai::coverage_gate::verify_reserved_live_claims_with_conn(
-                &txn, scope, identity.context().session_id(), &verified.coverage().owner,
-                &verified.coverage().claims,
-            ).await.map_err(classify_pending_validation_error)?;
+            verified.verify_reserved(&txn, scope).await.map_err(classify_pending_validation_error)?;
             txn.execute_raw(Statement::from_sql_and_values(txn.get_database_backend(),
                 "INSERT INTO agent_audit_log(audit_id,timestamp,action,checkpoint_id,scope,justification,granted)
                  VALUES(?,?,'repair_pending_capture',?,'session',?,1)",

@@ -2993,3 +2993,12 @@ checks do not count as content acceptance.
 独立 loader 从同一已提交 artifact 读取原 bytes/MAC，经 whole-envelope 和 bounded decoder 后，调用 COV2-25 key-owner 验原 binding、nested redacted member、source、ordered associations 和 coverage；payload owner 再验该 nested member 的精确字节并重建、认证 sidecar。native pending loader 要求 source-present，pure codec 的 None-source sentinel 不能变成此入口的权限。最终重建及 deferred carrier 分配后再次检查 deadline。
 
 非 Clone／非 Serde 的 typed deferred carrier 保留原 bounded bytes/MAC、source DTO、精确有序 version-key associations 与本地 integrity stamp；它不授 NativeProven。COV2-08 才在每次 replay 时重新核原 MAC、当前 catalog/receipt/workspace/claim fences 和 lower fixed proof，并保持 source 附着。此卡未接生产 Session/replay/ACK，v1 canonical wire、MAC 域与 frozen old oracle 不变。纯 Rust fixture/storage 验证与真实 OpenCode Source A 独立，账号/模型采集不进入 CI。
+
+
+### COV2-08 同版本 pending 恢复边界
+
+外层 v2 恢复保留同一已提交 artifact 的原有序 `(coverage_schema_version, logical_turn_key)`、原 bytes/MAC 和 typed deferred source；不按 discovery header、裸 turn key 或错误文本猜测版本。V1 loader 的临时错误或总 deadline 到期直接稍后重试，不降为其它版成功。早期 redacted payload 的认证关联在 sidecar 被丢弃时仍阻止普通落库；完整 sidecar 也只代表本地完整性，不能生成 native 来源。现有 ordinary versioned direct writer 与 verified ordinary partial 的 direct-only 规则保持，未获 native 证明的保留 payload 不降成 ordinary checkpoint。
+
+catalog 在同一 writer transaction 复查 alias、scope/workspace、tombstone、receipt/source/marker 与每个版本的 owner/fence/revision；manual repair 的 one-shot/audit 失败仍全回滚。marker 登记后由原 closed checkpoint owner 重新认证原 bytes/MAC 及 COV2-25 原始成员，lower issuer 仍独立判定 native；各版本 identity 从本次 lower 结果重新计算并精确对拍，再用 store-owned permit 与原 versioned claims/refCAS 一起提交。已提交后的中断重试只在原 receipt、source、exact versioned revision 和新鲜 native identity 核对通过后做 no-write settlement；不能只看 checkpoint 存在或把 committed claims 重新要求为 reserved。失败/deadline/cleanup_pending 保留可修复原证据，不 ACK。
+
+这是本地机制路径，不增加 OpenCode Session/model CI 或证明真实 Source A；同裸 key 跨 schema 的 native pending 在父 OG-29 正例与真实 Source A 前仍 fail closed。COV2-08 的正式验收/家族 C/D 以计划实际收据为准。

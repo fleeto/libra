@@ -1,5 +1,17 @@
 # OpenCode coverage schema-v2 前置实施计划（2026-10-13）
 
+> **COV2-08 最终实现验收事实（2026-10-15，本次两事实审查/签推前）：** 原8AC/4VER在R3当前源已实际通过：36个exact各1/1、103reader、fmt/strict及完整双env全量10143/10143、23skip、exit0；唯一Claude静态PASS、0P0/P1/P2。当前只更新两计划的实际结果/勾选/生命周期，七个实现/测试/行为文档后像与受测受审源完全同一；本两事实的新reader QA/单Claude/裁决/签推仍待实际执行，不预填本次SHA。仅当这些交付条件实际完成，COV source由14/26变为15/26=57.69%，此前仍14/26；formal0/26、父59formal/61sourceof71不变。下一卡COV2-05。下列旧UNRUN、FAIL、cancelled与计数保留为各日期历史，SourceA与家族C/D不由本事实关闭。
+
+
+> **历史 COV2-08 R3 准备状态（2026-10-15）：** R2 的40步相关验收已实际通过（36个exact各1/1、103reader、fmt/strict），但唯一Claude仍FAIL（0P0/P1、1P2）：durable重放底层重认证会丢失暂时错误/deadline分类。已停止R2未完成full后再改源码；其实际7607/10143 passed、1slow、23skip、exit100，余2536未运行，不记完整PASS。R3保留v2重认证的可重试分类、向既有doctor传递其它错误，并在原VER3补durable late deadline真实重放回归；当前新QA/Claude/full/签推均待。此轮先取得Claude静态PASS才启动full。source仍14/26、formal0/26，父59formal/61sourceof71，原8AC/4VER/I/R/DAG/gold与SourceA边界不变。
+
+
+> **历史 COV2-08 R2 准备状态（2026-10-15）：** R1当前源36个具名exact/103reader/fmt/strict均实际通过，但唯一Claude静态审查为FAIL（0P0/P1、2P2）；因此停止其未完成full后才改源码。R1full实际7049/10143 passed（7046普通PASS+3LEAK）、23skip、exit100，余3094未运行，不记完整通过。现修测试setter的Unix cfg及v2 durable replay暂时错误分类，并扩展原VER3；R2验证/单Claude/新full/签推全部待，不借R1 PASS。当前source仍14/26、formal0/26，父59formal/61sourceof71；原8AC/4VER/I/R/DAG/gold和SourceA边界保持。
+
+
+> **COV2-08 当前开工（2026-10-15）：** 前驱 COV2-22 已以 signed+DCO main `58b4c02e7ec372e5e9bfec13e108e0e68810c510` 实际 Push exit0、remote 同 SHA，指定 dcc 旧 writer / 当前 d188 完整全量 / 新增事实 reader QA 103 / 最终唯一 Claude PASS及root裁决均已核；COV2-22 source HOLD 已解除。当前 COV source **14/26=53.85%**、formal **0/26**，父 formal **59/71=83.10%**、source **61/71=85.92%**。本次只开工 COV2-08，四项新 VER/8 AC 在当前重基源仍未验收，不预计15。以下旧条件/索引历史由本条和本卡新收据覆盖；Source A、家族 C/D 与 native 同裸key边界不变。
+
+
 > **COV2-22 资格恢复的最终事实（2026-10-15，当前两计划事实交付条件）：** 指定 dcc 真实旧 writer、独立 clean-b644 全量及当前 signed main `d188be90c1669ce7a36a185c0668584d96b841de` 的完整 2048 输入验收均已有实际终态。当前新增事实仍须本次唯一 Claude Code PASS、root 裁决和 signed+DCO main Push/remote 同一性；这些条件实际完成后，COV source 恢复 **14/26=53.85%**，此前仍 **13/26=50.00% HOLD**，formal **0/26**。父计划仍 formal **59/71=83.10%**、source **61/71=85.92%**，不提前计 OG24 `.3`。以下旧 HOLD/UNRUN/62及采用候选是各自日期的历史，不改原 8 AC/6 VER、I/R、DAG、Granularity、gold 或 Source A 门。
 
 
@@ -765,31 +777,31 @@ COV2-REL-01 冻结不含 OG-27 源码的最终 COV2 树；首次完成 bumped �
 
 **Task type:** implementation
 
-**Lifecycle / Acceptance:** pending / 空
+**Lifecycle / Acceptance:** in-progress / locally-accepted（原8AC/4VER、相关质量与R3完整full已实际满足；本次两事实单审/签推交付待，家族C/D未完成，不记done/complete）
 
 **Description:** pending same-version recovery。本卡唯一行为轴、恢复和粒度见下方 Granularity；不得以 synthetic/native 互换验收。
 
 **Out of scope:** 不以 pending MAC 铸造 native 来源；每次 late replay 必须复用 COV2-25 原始成员 verifier 并保留可修复原始 bytes/MAC。`pending_payload.rs` 的本卡写权仅用于 AC1/5/7、VER1/3 的 outer-v2 deferred reasoning 关联、original bytes/MAC 留存与 late reauthentication，不改 COV2-22 的持久化 loader 主轴；只消费 COV2-22 真实已持久化 v2 artifact，不以 COV2-21 SQL 探针作 durable receipt。native same-key pending 在父 OG-29 版本关联正例及真实 Source A 前保持 partial/fail closed。
 
-**Current evidence:** `recovery.rs` 与 `catalog.rs` 持有旧重放/目录；`pending_payload.rs` 当前仅有 v1 deferred replay/rehydrate 入口（基线 `dcc468b`；ER-02 开工刷新行号与最终源码）。本卡为已持久化 outer-v2 的 late replay 补 versioned deferred 关联及可修复原始 bytes/MAC 留存；VER1/3 以真实 COV2-22 artifact 消费它，不另造第二恢复轴。
+**Current evidence:** 当前actual58b重基的 `catalog.rs::authorize_versioned_pending_durable_replay`、`checkpoint.rs::restore_pending_reasoning` / `settle_versioned_pending_replay_without_write`、`pending_payload.rs::VersionedPendingReasoningReplay` 与 `recovery.rs::replay_for_doctor` 已承接真实outer-v2 artifact；有序版本关联、late原始成员重验和可修复原bytes/MAC保留均经本卡四个具名VER/继承门及R3完整full。具体实际输入/输出/审查与交付条件见本计划末尾2026-10-15最终实现验收条目；不以SQL探针或synthetic称native来源。
 
 **Acceptance criteria:**
 
-- [ ] AC1 v2 replay retains the exact ordered `(coverage_schema_version, logical_turn_key)` tuple from the same committed artifact
-- [ ] AC2 replay rejects stale owner
-- [ ] AC3 stale fence yields zero checkpoint ACK
-- [ ] AC4 replay rejects stale revision
-- [ ] AC5 late COV2-25 original-member reauthentication failure yields zero checkpoint ACK
-- [ ] AC6 interrupted replay cannot acknowledge one
-- [ ] AC7 repairable pending bytes remain available after rejection
-- [ ] AC8 pending authentication alone cannot mint native provenance.
+- [x] AC1 v2 replay retains the exact ordered `(coverage_schema_version, logical_turn_key)` tuple from the same committed artifact
+- [x] AC2 replay rejects stale owner
+- [x] AC3 stale fence yields zero checkpoint ACK
+- [x] AC4 replay rejects stale revision
+- [x] AC5 late COV2-25 original-member reauthentication failure yields zero checkpoint ACK
+- [x] AC6 interrupted replay cannot acknowledge one
+- [x] AC7 repairable pending bytes remain available after rejection
+- [x] AC8 pending authentication alone cannot mint native provenance.
 
 **Verification:**
 
-- [ ] VER1→AC1: `source .env.test && cargo test --lib internal::ai::capture::recovery::tests::cov2_replay_preserves_claim_version -- --exact` (1/1；由真实 COV2-22 artifact 重放，断言原始有序 version/key tuple 不变).
-- [ ] VER2→AC2/3/4: `source .env.test && cargo test --lib internal::ai::capture::recovery::tests::cov2_replay_owner_fence_revision_fail_closed -- --exact` (1/1).
-- [ ] VER3→AC5/6/7: `source .env.test && cargo test --lib internal::ai::capture::recovery::tests::cov2_failed_or_interrupted_replay_keeps_pending -- --exact` (1/1；含 late COV2-25 原始成员复验失败零 ACK、原始 bytes/MAC 留存；fence 零 ACK 归 VER2/AC3).
-- [ ] VER4→AC8: `source .env.test && cargo test --lib internal::ai::capture::recovery::tests::cov2_authenticated_pending_has_no_native_authority -- --exact` (1/1). Existing v1 recovery tests are a required ER-04 A surface gate, not an unrun assumption.
+- [x] VER1→AC1: `source .env.test && cargo test --lib internal::ai::capture::recovery::tests::cov2_replay_preserves_claim_version -- --exact` (1/1；由真实 COV2-22 artifact 重放，断言原始有序 version/key tuple 不变).
+- [x] VER2→AC2/3/4: `source .env.test && cargo test --lib internal::ai::capture::recovery::tests::cov2_replay_owner_fence_revision_fail_closed -- --exact` (1/1).
+- [x] VER3→AC5/6/7: `source .env.test && cargo test --lib internal::ai::capture::recovery::tests::cov2_failed_or_interrupted_replay_keeps_pending -- --exact` (1/1；含 late COV2-25 原始成员复验失败零 ACK、原始 bytes/MAC 留存；fence 零 ACK 归 VER2/AC3).
+- [x] VER4→AC8: `source .env.test && cargo test --lib internal::ai::capture::recovery::tests::cov2_authenticated_pending_has_no_native_authority -- --exact` (1/1). Existing v1 recovery tests are a required ER-04 A surface gate, not an unrun assumption.
 
 **Full-suite trigger:** family child 不自行发布；按 ER-13 对最终改动重新判定 T-1/T-4/T-6。若命中 shared single-source helper、测试基建或 focused 信号不足，则在本卡 A/B 阶段运行双 env 全量 Nextest；无论是否命中，COV2-REL-01 首次 T-2 均须在最终 bumped 实现树上重跑；后续仅上游纯 patch 顺延按该卡逐路径同一性规则复用。
 
@@ -1562,7 +1574,7 @@ COV2-REL-01 冻结不含 OG-27 源码的最终 COV2 树；首次完成 bumped �
 
 **Task type:** implementation
 
-**Lifecycle / Acceptance:** in-progress / locally-accepted（COV2-22 采用候选：原 8 AC/6 VER 与继承本机机制门已实际验收；最终新增事实文档的单 Claude 裁决、本次 signed+DCO main 交付及 remote 同一性仍由 root 完成，不在本私有候选中自授 source-qualified 或 formal complete）
+**Lifecycle / Acceptance:** in-progress / locally-accepted（source-qualified：指定dcc固定writer补证、最终d188 full、新事实103 reader/fmt/strict、唯一Claude PASS与root裁决已闭；signed+DCO main `58b4c02e7ec372e5e9bfec13e108e0e68810c510` 实际Push/remote同一；家族C/D待COV2-REL-01，不授formal complete或Source A）
 
 **Description:** 自 COV2-04 拆出，且原始 outer-v2 成员完整性轴进一步拆出 COV2-25；消费 COV2-24 已审的内存 `SealedVersionedPendingArtifact`、COV2-25 key-owner verifier 与 COV2-20/21 事务 API，真实执行 `seal→persist(&DatabaseTransaction)→commit→load`。`pending_payload.rs` 只为 AC6/VER2 补同一持久化 artifact 的认证后 redacted rehydrate/typed deferred loader，不能新增来源铸造或 replay ACK；同时验证同事务双版本 lease/artifact、编译冻结旧读端拒绝、真实 writer 故障回滚，以及原 v1 生产 seal→persist→commit→load 后持久化 chunk/header 原字节/MAC 与历史冻结常量兼容。本卡 AC8 是 persist 入口对已封闭 artifact 的二次防御，不重复 COV2-23 的 checked-borrow 准入门。
 
@@ -2491,3 +2503,82 @@ COV incoming OG24只有signed6685 `.2`snapshot，不消费liveOG24current3生命
 **不成功的运行仍保留。** 较早 052 run 在7514普通PASS+2LEAK后失去进程，没有 Summary/exit，原因未知，不能记全量通过。随后 d188 attemptA 因私有启动器误继承 umask0077，使三个可执行位测试0755得到0700：每项三次 FAIL，共9 failed attempts；5736 run/5733 passed/3 failed/23 skipped、exit100，余4403未运行，owned组被主动中断。未改业务源码、gold或断言，只修 child umask0022；三项 exact 随后各1/1/0ignored，才启动上面的完整新 run。原失败 raw `d2946792ddf95d6ceeb1c574b07e6072c77a203d3bc200907a4841c35e667ac4` 保留；旧 attemptA parser 漏掉 `TRY n FAIL` 的空列表不作零失败证明。
 
 **本次两路径事实交付边界。** 本增量只写 COV 计划与 plan-status，原六 VER、继承 ER-04、8 AC 机制的实际原运行继续按原收据逐项消费；当前新增事实仍须自己的 reader QA、fmt/strict、最终唯一 Claude Code PASS、root 裁决与 signed main Push/remote 核对，未发生项不预填 SHA/PASS。本次不改任何生产/测试/配置/CLI、I/R、依赖或验收门，不接网站新命令，不新增 full 触发面；新完整 d188 运行证明上述实现输入，不把加入本两计划记账后的整树字节称为与 d188 相同。条件实际完成后仅恢复 COV source **14/26=53.85%**，formal **0/26**、父 formal **59/71=83.10%** / source **61/71=85.92%** 不变，下一卡 **COV2-08**。家族 C/D、DEP-OG-13、OG24.3、Source A、真实 native 三字段及历史 import020 FAIL/default reject/deferred 均不由本事实关闭。
+
+
+### 2026-10-15 — COV2-08 当前签名基线开工收据
+
+实际基线为 signed+DCO main `58b4c02e7ec372e5e9bfec13e108e0e68810c510`，parent `d188be90c1669ce7a36a185c0668584d96b841de`，二者实际 Push exit0、remote 同一性已核。COV2-22 真实 source 资格恢复收据的唯一 Claude raw `197a661f09e2de5aae74dcdfce07248c634e92fb716cf535ba91596c9a093835`（0 P0/P1/P2、5非阻断P3由root接受）、新增事实 QA result `6d27e6521965c16b5c79ae7ab1e1031ef0ca08a21c5bd629e7e7fc60298b1a22`、root裁决 `9385257cbbc2ef1ed8c3dbd182993cd2bfb7a5eae4681d2d30e2271724d0b257`；两已提交blob精确匹配被审后像。指定 dcc 的8原始产物/6常量固定fixture同一性及 clean-b644、d188 两次独立全量按其原收据继承，不改 gold、GC03或Source A。COV2-22 现为 source-qualified/locally-accepted；正式 C/D 仍由 COV2-REL-01 负责。此前标题/索引中的13与“未实施”是原日期历史，当前明确为14，不能倒改失败记录或把当前事实条目当新模型/native验收。
+
+本卡按原8 AC/4 VER、I-core五文档与六生产owner预算实施，当前实际选择四个原owner `catalog.rs`、`checkpoint.rs`、`pending_payload.rs`、`recovery.rs`；三个行为文档保留完整当前前缀及原COV08追加段，另两I-core计划只做生命周期、依赖交接与实际验收事实。卡片未给出单独Issue链接，按用户已授权的内部任务卡执行；不创建远端Issue或PR。旧隔离候选的36具名focused、ARCH/docs/质量结果仅是旧输入历史，不冒充本次重基输入验收；四Rust后像虽与原受测候选相同，本次仍从实际58b全2048输入逐路径重基并重新测试。
+
+当前 COV2-08 为 in-progress / Acceptance空，8 AC/4 VER 未通过当前源验证。后续须原36个独立selector各1/1、当前完整architecture58/docs32/examples1/hook12、nightly fmt、严格all-targets/all-features Clippy `-D warnings`，并因共享pending payload/checkpoint/recovery命中 ER-13 T-1，运行最终实现的双env完整Nextest；最后唯一Claude审查、root裁决与实际signed main Push/remote交接后才条件计COV source15/26。已通过的d188全量10139不能当成本卡含四Rust改动的全量。缓存只作加速，不是源码或运行证明；所有旧隔离源/封存产物保持不变。
+
+生产OpenCode v2 claim入口仍按后继COV2-11 activation开放，本卡不增加公开CLI旗标、Session/exporter/model CI或可信native来源；同裸key跨版本native pending仍在OG-29正例与真实Source A前fail closed。修复后源完整性、所有实际输出与失败/skip/LEAK/重试将逐项保留，不改旧reader/gold/阈值或原AC/VER/I/R/DAG/Granularity。当前 COV source14/26、formal0/26，父formal59/71/source61/71均不增；本机基准为macOS，Linux功能仍由用户后验。
+
+
+### 2026-10-15 — COV2-08 R1 审查与 R2 必要前滚
+
+R1唯一Claude实际exit0但静态结论FAIL，raw `ca7fe6731a7f278d72563a5c27dc86a413cd3128aabc22f6eb8c7e07c8dcb0d5`，0P0/P1、2P2及10组非阻断P3。P2分别为仅Unix测试调用的setter在Windows lib-test上可能dead_code，以及durable-v2 catalog/store暂时错误误归ManualRequired并被doctor当永久失败处理。前者采用与唯一调用相同的`#[cfg(unix)]`；后者保持ScopeRejected/不匹配拒绝，将其它catalog错误带上下文交给既有doctor retryable classifier，store的StoreFailure保留RetryLater。Windows真实CI仍待新commit，不能把macOS静态cfg修订当Windows实测。
+
+原VER3扩展同一真实sealed/persisted/committed artifact的catalog Database一次故障和真实marker删除SQL trigger故障：保留pending原bytes/MAC、receipt/claims/ref/identity等行，不给成功ACK；故障解除后同一artifact可结算。测试缝只存在cfg(test)，setter同样Unix限定，不接模型、Session/exporter或生产开关。另修正原函数doc/属性位置及v2错误上下文；其它非阻断P3保持观察，不削减验收或默认放行。是否通过仍以R2实际结果为准。
+
+为上述修复，在任何源码修改前对owned full进程组发SIGINT。其真实终态为exit100，7049/10143 tests run、7049 passed（3leaky）、23skipped，0failed/retry；剩余3094未执行。raw `de4e7b15c76d554cbd4c7c55932ff1e204fcebcb9093f1456ad997460c4910d6`，2048输入前后同一、manifest `1fc510833fe49d2bc09369d292fb04f6c611480c4b65d59f008764fcd1dcfe86`。这是审查前滚而中断的run，不是完整PASS，也不是3项测试失败；3LEAK原样保留，不新增零LEAK门。R1的旧9后像/源码ZIP/运行前后/实际40步QA与FAIL审查均独立保留。
+
+R2仍只写原9路径；catalog/checkpoint/recovery承接窄修复与VER3扩展，pending_payload及三个行为文档未改。因此“4Rust与旧受测后像相同”只再描述R1历史，不能转移R1结果给当前3Rust新字节。当前8AC/4VER仍未勾选、Lifecycle in-progress/Acceptance空；须R2全36focused、103reader、fmt/strict、完整新full与唯一Claude、root裁决及signed main交付才可条件source15。既有source14、formal0、父59/61及SourceA/native三字段/家族C-D/历史import020 deferred均不变。
+
+
+### 2026-10-15 — COV2-08 R2 实际终态与 R3 前滚
+
+R2全部40步相关验收实际exit0：36个具名selector各1/1、architecture58/docs32/examples1/hook12共103、fmt与严格all-targets/all-features Clippy通过，2048源输入前后同一，manifest `41f130b52dda94b7a640dc179ace416970fe482c3e8c344e9fc573600bcbe241`。唯一Claude实际exit0但静态FAIL（0P0/P1、1P2），raw `49244febb5f8760937ef000bf6a29c22ee2c9227b2d31a057b134913beb4bf9e`；Windows setter cfg问题已关闭，剩余P2为durable-v2底层原始envelope/late key-owner/stable identity认证将deadline或暂时DB错误抹为InvalidRequest，继而被当永久失败隔离。原R1与R2的FAIL及全部非阻断观察均保留，不以相关测试PASS替代审查。
+
+在R3任何源码修改前已对owned R2 full进程组发SIGINT并取得真实exit100：7607/10143 tests run、7607 passed（1slow）、23skipped，0FAIL/RETRY/LEAK/FLAKY，余2536未执行；raw `3b9defc50ac185fddec629006534cb7234d89b55ed0503eee9435690bcc7b281`，2048输入前后同一41f。该run不是完整PASS。R2封存的9后像、原始输出、源码ZIP/manifest与终态均不改写。
+
+R3仅在原checkpoint/recovery owner内保留v2认证错误的deadline/既有retryable分类，其余durable结算错误带可操作context交给doctor；v1分支不变。原VER3增加真实sealed/persisted/committed artifact在durable晚期认证暂停并到期的子例，要求RetryLater、原pending bytes/MAC及八表逐行同一，之后同artifact新deadline结算；不新增selector、target、全局env/cwd或Session/model CI。这是待运行的机制回归，不是native来源正例。
+
+当前R3新相关验收、唯一Claude、完整full、最终两计划事实复核和signed main Push仍待；先实际Claude静态PASS才启动full，代码/测试/行为七路径若再变化必须重新验证。原8AC/4VER未勾选、Lifecycle in-progress/Acceptance空及全部I/R/DAG/gold不变。COV source14/26、formal0/26，父formal59/71/source61/71不增加；后续COV2-05仅在08实际source-qualified交付后开工，家族C/D、Source A与历史import020延期边界不变。
+
+
+### 2026-10-15 — COV2-08 最终实现验收与两计划事实交付条件
+
+**实际实现输入。** 基线signed+DCO main `58b4c02e7ec372e5e9bfec13e108e0e68810c510`。R3全2048输入manifest `d76e75ebb43e5f3e2cb04137bc907cda3b9ba43ea1045a2a9a1ecdc2d8a7485e`，四Rust owner与三个行为文档的精确后像见下表；它们在相关QA、唯一Claude静态审查及完整full期间不变，本次两计划事实增量不改变这七路径。d188旧10139或R1/R2被中断的10143运行不能替代本R3完整运行。
+
+| 实现/行为路径 | R3受测受审SHA-256 |
+| --- | --- |
+| `COMPATIBILITY.md` | `1c6b10d2f14e86328038b509d97ef60dc23c488ac1e4b81f227393ffe4b5f39c` |
+| `docs/development/tracing/agent.md` | `91bd52dc0aabbb9b0b5f1d552d8c1d59c07f9fbaf9da27bcd84140a2c94672fe` |
+| `docs/development/tracing/coverage-v2.md` | `61c7b6533877bc4bff961b615d33d97d221a2cce06ebb9ccfbae3fc379c729e7` |
+| `src/internal/ai/capture/catalog.rs` | `079457d12e7a1c120a51a46ab8cd1c6424c39a3f2b6b1852509198314506b432` |
+| `src/internal/ai/capture/checkpoint.rs` | `dc964d0fa7da47586fa432a9befb44a7d0ee8c869bf82a60cd1dc393f21b0d48` |
+| `src/internal/ai/capture/pending_payload.rs` | `5b1b5669b26365bb00500c9942f217e902f6313d674d66e355a3b68bf0e9cd67` |
+| `src/internal/ai/capture/recovery.rs` | `a94100341bcb7f7c726b43cb7a877489e9f235731580528121b6329640bed754` |
+
+**A/B及质量门。** R3实际40步骤全部exit0：helper从当前源构建；36个独立exact selector各1passed/0failed/0ignored（原4VER、继承COV22/25的21及既有v1/catalog/store/recovery的11），完整architecture58/docs32/examples1/hook12共103，nightly fmt与all-targets/all-features Clippy `-D warnings`均exit0。原VER3新增的真实durable晚期deadline子例包含于实际1/1，整个selector约18秒；测试未启动/模拟OpenCode Session、exporter或模型。相关QA收据SHA `f99e7be2ade0159469604eee5e1390b7b4464ea3c31112604c86078ca975ea54`，源2048前后同一。
+
+原8AC保持原谓词，当前本机映射为VER1→AC1精确有序(version,key)；VER2→AC2/3/4旧owner/fence/revision零ACK；VER3→AC5/6/7 late COV25原始成员重验失败、故障/中断/暂时catalog和SQL cleanup故障及durable晚期deadline均保留原bytes/MAC和原行，不给假ACK，故障解除同artifact可结算；VER4→AC8 MAC/local integrity不能构造独立native发行权，sidecar遗失不能降级ordinary/partial/versioned写入。全部为纯Rust固定fixture机制证明，不是真实native SourceA，native跨schema同裸key仍fail closed。
+
+**实际完整full。** `2026-10-15T06:18:46.951794+00:00`至`2026-10-15T06:39:00.451990+00:00`，双env、无本机native/model opt-in，`cargo nextest run --all --no-fail-fast --retries 2`，8threads、child umask022，原serial groups/registry/profile/阈值未改。真实exit0，原始Summary如下，23skip不计PASS：
+
+```text
+     Summary [1159.064s] 10143 tests run: 10143 passed (2 slow, 2 leaky), 23 skipped
+```
+
+普通PASS行10141；LEAK事件2，SLOW事件2；FAIL/LEAK-FAIL/RETRY/FLAKY/TIMEOUT/ABORT/EXECFAIL实际计数为 `{"ABORT": 0, "EXECFAIL": 0, "FAIL": 0, "FLAKY": 0, "LEAK-FAIL": 0, "RETRY": 0, "TIMEOUT": 0}`。LEAK原样保留，不推断根因、不称普通PASS、不新增零LEAK门。raw SHA `062a5f2538eb3b8025d92bd5a12dfe3573cb36c803ca1a209febe08e32e9237e`，full结果SHA `5ffec8cee81761f4180bf9e4ea7b4d31a7015ae20d97c23922ec41d72a8b90dc`；2048源输入前后SHA/bytes/kind/mode全部同一。本次两计划事实新增后整树不是full同一字节；仅七实现/行为路径及其余非事实输入逐项不变，更新事实由后续reader/质量/单审单独覆盖。
+
+```text
+        LEAK [   0.210s] ( 1673/10143) libra internal::ai::capture::key::tests::capture_dedup_staging_lock_retries_only_bootstrap_enoent
+        LEAK [   0.627s] ( 6043/10143) libra::command_test command::fetch_test::test_ssh_changed_host_key_never_prompts
+        SLOW [> 60.000s] (───────────) libra::command_test command::merge_test::rename_path_collisions::binary_rename_path_collisions_keep_bytes_and_unmerged_stages
+        SLOW [> 60.000s] (───────────) libra::command_test command::reset_test::test_reset_clears_single_pick_and_revert_state_matrix
+```
+
+编译器/链接器原始警示（不记成Clippy失败，也不隐去）：
+
+```text
+warning: linker stderr: ld: __eh_frame section too large (max 16MB) to encode dwarf unwind offsets in compact unwind table, performance of exception handling might be affected
+warning: `libra` (lib test) generated 1 warning
+warning: the following packages contain code that will be rejected by a future version of Rust: proc-macro-error2 v2.0.1
+```
+
+**唯一Claude及root。** R3九文件静态实际PASS，0P0/P1/P2，raw `6a171689c04d812797f6d1d6c861f54c5ed8aa72834c4d7d87284a8c50fe12bc`，报告SHA `1cf4e511a7607f9b76ea80a5c8a1d701fb69f02a4bb10ebd0a5f4d4b808bee39`，root静态裁决SHA `155464d68f517063571b7c8bf388c62475d9b28ecb05ae77602b73e19532e902`。R1两P2、R2剩余durable错误分类P2均关闭；历史FAIL与两次owned-SIGINT partial runs保留。非阻断P3继续保留：diagnostic stage/cause；非durable StoreFailure的Refused/RetryLater不对称但不隔离/丢数据；manual durable与v1一致但无专项测试；暂时DB与后两认证调用为共享映射间接覆盖；短测试窗口/钩子命名；损坏v1的有界v2 retry；identity/缺checkpoint的有界重试、三次HMAC成本、旧dead_code属性/长SQL/英文文档中文追加段。当前索引旧13段明确标为历史。上述不是新行为/新门，也不把旧审核称历次无P2。
+
+**本次事实交付条件。** 当前Lifecycle为in-progress/locally-accepted（A/B及适用实现full已实际满足），正式C/D只由COV2-REL-01继承。两计划最终字节仍须新103reader、fmt/strict、唯一Claude事实审查（绑定七路径与上述受审受测后像同一）、root最终裁决、signed+DCO main提交与实际Push/remote同一；未实际完成项不预填PASS/未知commitSHA。仅完成该交付后COV source15/26=57.69%，此前14/26；formal0/26，父formal59/71=83.10%/source61/71=85.92%均不增加。下一卡COV2-05。无本卡bump/tag/release或新公开命令，三个机制文档对应本实现；无需本卡网站命令更新。必要Windows/security CI与四平台发布留在家族D门，macOS为本机功能基准，Linux由用户后验。所有原AC/VER文本、I/R、DAG、Granularity、gold与SourceA边界不变。

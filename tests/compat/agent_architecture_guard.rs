@@ -11594,7 +11594,7 @@ fn cov2_runtime_data_transport_has_closed_callers() {
     );
 }
 
-// COV2-12/15 inventory the inherited 22 Session gates and four macOS
+// COV2-12/15/18 inventory the inherited 22 Session gates and five macOS
 // additions. Paid local-agent smoke tests have their own, separate gates.
 const COV2_MANUAL_SESSION_CASES: &[(&str, &[&str])] = &[
     (
@@ -11613,6 +11613,7 @@ const COV2_MANUAL_SESSION_CASES: &[(&str, &[&str])] = &[
             "cov2_macos_fake_exporter_import_session_capture",
             "cov2_macos_failed_export_session_zero_write",
             "cov2_macos_fake_exporter_candidate_live_partial_no_plaintext",
+            "cov2_macos_fake_exporter_candidate_import_partial_no_plaintext",
         ],
     ),
     (
@@ -11937,7 +11938,7 @@ fn cov2_opencode_session_e2e_is_manual_only() {
             .iter()
             .map(|(_, names)| names.len())
             .sum::<usize>(),
-        22 + 4
+        22 + 5
     );
     for (path, names) in COV2_MANUAL_SESSION_CASES {
         let (_, file) = parse_rust_source(path);
@@ -12468,4 +12469,205 @@ fn cov2_candidate_live_session_case_is_ignored_and_non_skippable() {
             assert!(errors.is_empty(), "{}: {errors:?}", path.display());
         }
     }
+}
+
+// This bounded structural check ties the manual source-classification oracle
+// to the private import route; it does not expose a private runtime field.
+fn cov2_import_candidate_route(function: &syn::ItemFn) -> Option<(usize, usize)> {
+    fn path(expr: &syn::Expr, expected: &str) -> bool {
+        matches!(expr, syn::Expr::Path(value) if syn_path_text(&value.path) == expected)
+    }
+    fn local<'a>(block: &'a syn::Block, name: &str) -> Option<(usize, &'a syn::Expr)> {
+        let found = block
+            .stmts
+            .iter()
+            .enumerate()
+            .filter_map(|(index, statement)| {
+                let syn::Stmt::Local(local) = statement else {
+                    return None;
+                };
+                if !matches!(&local.pat, syn::Pat::Ident(binding) if binding.ident == name) {
+                    return None;
+                }
+                Some((index, local.init.as_ref()?.expr.as_ref()))
+            })
+            .collect::<Vec<_>>();
+        match found.as_slice() {
+            [(index, expr)] => Some((*index, *expr)),
+            _ => None,
+        }
+    }
+    fn method<'a>(
+        expr: &'a syn::Expr,
+        receiver: &str,
+        name: &str,
+    ) -> Option<&'a syn::ExprMethodCall> {
+        match expr {
+            syn::Expr::MethodCall(call)
+                if call.method == name && path(&call.receiver, receiver) =>
+            {
+                Some(call)
+            }
+            _ => None,
+        }
+    }
+    fn authorization_return(expr: &syn::Expr) -> bool {
+        let syn::Expr::Return(ret) = expr else {
+            return false;
+        };
+        let Some(value) = &ret.expr else {
+            return false;
+        };
+        let syn::Expr::Call(call) = value.as_ref() else {
+            return false;
+        };
+        path(&call.func, "Err")
+            && call.args.len() == 1
+            && method(&call.args[0], "ImportError::SourceAuthorization", "into")
+                .is_some_and(|call| call.args.is_empty())
+    }
+    fn partial_is_sufficient(expr: &syn::Expr) -> bool {
+        match expr {
+            syn::Expr::Field(field) => {
+                path(&field.base, "runtime")
+                    && matches!(&field.member, syn::Member::Named(name) if name == "source_partial")
+            }
+            syn::Expr::Binary(binary) if matches!(binary.op, syn::BinOp::Or(_)) => {
+                partial_is_sufficient(&binary.left) || partial_is_sufficient(&binary.right)
+            }
+            syn::Expr::Paren(paren) => partial_is_sufficient(&paren.expr),
+            _ => false,
+        }
+    }
+    let (services_at, services) = local(&function.block, "capture_services")?;
+    if !matches!(services, syn::Expr::Call(call)
+        if path(&call.func, "ImportCaptureServices::production") && call.args.is_empty())
+    {
+        return None;
+    }
+    let (capture_at, snapshot) = local(&function.block, "snapshot")?;
+    let capture = method(snapshot, "capture_services", "capture_authorized")?;
+    if !matches!(capture.args.first(), Some(syn::Expr::Struct(source))
+        if syn_path_text(&source.path) == "TranscriptSource::Bytes"
+            && source.fields.iter().any(|field| matches!(&field.member, syn::Member::Named(name) if name == "bytes") && path(&field.expr, "bytes")))
+    {
+        return None;
+    }
+    let (runtime_at, runtime) = local(&function.block, "runtime")?;
+    if !method(runtime, "snapshot", "take_coverage_runtime")?
+        .args
+        .is_empty()
+    {
+        return None;
+    }
+    let split_at = function.block.stmts.iter().position(|statement| {
+        let syn::Stmt::Local(local) = statement else { return false; };
+        let syn::Pat::Tuple(tuple) = &local.pat else { return false; };
+        let Some(init) = &local.init else { return false; };
+        tuple.elems.len() == 3
+            && tuple.elems.iter().zip(["transcript_snapshot", "transcript", "reasoning"])
+                .all(|(pattern, name)| matches!(pattern, syn::Pat::Ident(binding) if binding.ident == name))
+            && method(&init.expr, "snapshot", "into_checkpoint_parts").is_some_and(|call| call.args.is_empty())
+    })?;
+    let (reasoning_at, native) = local(&function.block, "native")?;
+    let syn::Expr::Match(disposition) = native else {
+        return None;
+    };
+    if !path(&disposition.expr, "reasoning")
+        || disposition.arms.len() != 3
+        || disposition.arms.iter().any(|arm| arm.guard.is_some())
+    {
+        return None;
+    }
+    let arms = &disposition.arms;
+    if !matches!(&arms[0].pat, syn::Pat::Path(value) if syn_path_text(&value.path) == "ReasoningSourceDisposition::Ordinary")
+        || !path(&arms[0].body, "None")
+    {
+        return None;
+    }
+    let syn::Pat::TupleStruct(proven) = &arms[1].pat else {
+        return None;
+    };
+    if syn_path_text(&proven.path) != "ReasoningSourceDisposition::NativeProven"
+        || proven.elems.len() != 1
+    {
+        return None;
+    }
+    let syn::Pat::Ident(batch) = &proven.elems[0] else {
+        return None;
+    };
+    if !matches!(arms[1].body.as_ref(), syn::Expr::Call(call)
+        if path(&call.func, "Some") && call.args.len() == 1 && path(&call.args[0], &batch.ident.to_string()))
+        || !matches!(arms[2].pat, syn::Pat::Wild(_))
+        || !authorization_return(&arms[2].body)
+    {
+        return None;
+    }
+    let reject_at = function.block.stmts.iter().position(|statement| {
+        let syn::Stmt::Expr(syn::Expr::If(branch), _) = statement else { return false; };
+        partial_is_sufficient(&branch.cond) && branch.else_branch.is_none()
+            && matches!(branch.then_branch.stmts.as_slice(), [syn::Stmt::Expr(expr, _)] if authorization_return(expr))
+    })?;
+    let (projection_at, projection) = local(&function.block, "projection")?;
+    if !matches!(projection, syn::Expr::Struct(value) if syn_path_text(&value.path) == "PreparedImportProjection")
+    {
+        return None;
+    }
+    struct Projections(usize);
+    impl<'ast> syn::visit::Visit<'ast> for Projections {
+        fn visit_expr_struct(&mut self, value: &'ast syn::ExprStruct) {
+            self.0 += usize::from(syn_path_text(&value.path) == "PreparedImportProjection");
+            syn::visit::visit_expr_struct(self, value);
+        }
+    }
+    let mut projections = Projections(0);
+    syn::visit::Visit::visit_item_fn(&mut projections, function);
+    let ordered = [
+        services_at,
+        capture_at,
+        runtime_at,
+        split_at,
+        reasoning_at,
+        reject_at,
+        projection_at,
+    ];
+    (projections.0 == 1 && ordered.windows(2).all(|pair| pair[0] < pair[1]))
+        .then_some((reject_at, projection_at))
+}
+
+#[test]
+fn cov2_candidate_import_session_case_is_ignored_and_non_skippable() {
+    let (_, import) = parse_rust_source("src/internal/ai/agent_import.rs");
+    let preparation = top_level_function(&import, "prepare_import_projection_with_reasoning");
+    let (reject_at, projection_at) = cov2_import_candidate_route(preparation).expect(
+        "private import must reject candidate/partial capture before constructing a projection",
+    );
+    let mut missing_reject = preparation.clone();
+    missing_reject.block.stmts.remove(reject_at);
+    assert!(
+        cov2_import_candidate_route(&missing_reject).is_none(),
+        "removing partial rejection must fail the route proof"
+    );
+    let mut early_projection = preparation.clone();
+    let projection = early_projection.block.stmts.remove(projection_at);
+    early_projection.block.stmts.insert(reject_at, projection);
+    assert!(
+        cov2_import_candidate_route(&early_projection).is_none(),
+        "constructing the projection before rejection must fail the route proof"
+    );
+    // Reuse the candidate classifier's controls and the unchanged shared
+    // feature/prerequisite/workflow checks without copying their matrix.
+    cov2_candidate_live_session_case_is_ignored_and_non_skippable();
+    const CASE: &str = "cov2_macos_fake_exporter_candidate_import_partial_no_plaintext";
+    let (_, bridge) = parse_rust_source("tests/agent_opencode_bridge_test.rs");
+    let functions = cov2_test_functions(&bridge);
+    let candidate = functions
+        .get(CASE)
+        .unwrap_or_else(|| panic!("missing manual candidate import Session case {CASE}"));
+    let errors = cov2_candidate_live_case_errors(candidate);
+    assert!(errors.is_empty(), "{CASE}: {errors:?}");
+    assert!(COV2_MANUAL_SESSION_CASES.iter().any(|(path, names)| {
+        *path == "tests/agent_opencode_bridge_test.rs" && names.contains(&CASE)
+    }));
+    assert!(!cov2_workflow_session_errors(&format!("cargo test --features test-live-agent --test agent_opencode_bridge_test {CASE} -- --ignored --exact")).is_empty());
 }

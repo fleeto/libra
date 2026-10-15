@@ -1455,3 +1455,326 @@ async fn cov2_macos_fake_exporter_candidate_live_partial_no_plaintext() {
         }
     }
 }
+
+/// Historical candidate imports refuse before gaining native authority.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+#[ignore = "OpenCode Session capture is an operator-local manual gate"]
+async fn cov2_macos_fake_exporter_candidate_import_partial_no_plaintext() {
+    use std::str::FromStr;
+
+    use git_internal::hash::ObjectHash;
+    use libra::internal::ai::capture::snapshot::{CaptureSnapshotPolicy, CaptureSnapshotService};
+
+    const WINDOW: &str = "COV18_PRIVATE_WINDOW_7A3E";
+    const SIGNATURE: &str = "COV18_PRIVATE_SIGNATURE_4D9C";
+    const REDACTED: &str = "COV18_PRIVATE_REDACTED_6B2F";
+    const ENCRYPTED: &str = "COV18_PRIVATE_ENCRYPTED_8E1A";
+    const PROOF: &str = "COV18_PRIVATE_PROOF_5C0D";
+
+    fn assert_absent(bytes: &[u8], canaries: &[&str], sink: &str) {
+        for canary in canaries {
+            assert!(
+                !bytes
+                    .windows(canary.len())
+                    .any(|part| part == canary.as_bytes()),
+                "candidate canary reached {sink}"
+            );
+        }
+    }
+
+    fn read_object(repo: &BridgeRepo, oid: &str) -> Vec<u8> {
+        let hash = ObjectHash::from_str(oid).expect("actual loose object id");
+        libra::utils::object::read_git_object(&repo.repo.join(".libra"), &hash)
+            .expect("decode actual published object")
+    }
+
+    let state_fixture = json!({"info":{"id":"ses_cov18_state","location":{"directory":"__REPO__"}},
+        "messages":[{"id":"u","type":"user","text":"cov18 safe request"},
+            {"id":"a","type":"assistant","content":[
+                {"id":"r","type":"reasoning","text":WINDOW,"state":{
+                    "signature":SIGNATURE,"redactedData":REDACTED,"reasoningEncryptedContent":ENCRYPTED}},
+                {"id":"t","type":"text","text":"cov18 safe reply"}]},
+            {"id":"i","type":"idle","outcome":"succeeded"}]});
+    let mut proof_fixture = state_fixture.clone();
+    proof_fixture["info"]["id"] = json!("ses_cov18_proof");
+    proof_fixture["messages"][1]["content"][0]["id"] =
+        json!("npart_0123456789abcdef0123456789abcdef");
+    proof_fixture["messages"][1]["content"][0]["originProof"] = json!({"nonce":PROOF});
+    let mut control_fixture = state_fixture.clone();
+    control_fixture["info"]["id"] = json!("ses_cov18_control");
+    control_fixture["messages"][0]["text"] = json!("hi");
+    control_fixture["messages"][1]["content"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("state");
+    control_fixture["messages"][1]["content"][0]["text"] =
+        json!("before sk-ant-EXAMPLE0000000000000000 after");
+    control_fixture["messages"][1]["content"][1]["text"] = json!("hello");
+    let state_body = format!("printf '%s' '{}'", state_fixture);
+    let proof_body = format!("printf '%s' '{}'", proof_fixture);
+    let control_body = format!("printf '%s' '{}'", control_fixture);
+    let repo = BridgeRepo::init(&state_body)
+        .await
+        .expect("Required macOS import fixture must run");
+    let proof_repo = BridgeRepo::init(&proof_body)
+        .await
+        .expect("Required macOS proof import fixture must run");
+    let control_repo = BridgeRepo::init(&control_body)
+        .await
+        .expect("Required macOS ordinary import control must run");
+    // The same Required fixture and actual import CLI must also accept an
+    // ordinary visible source. Its existing independent gold binds a real
+    // committed import, rather than treating all exporter failures as safe.
+    let control_source = control_fixture
+        .to_string()
+        .replace("__REPO__", &control_repo.repo.to_string_lossy());
+    assert_absent(
+        control_source.as_bytes(),
+        &[WINDOW, SIGNATURE, REDACTED, ENCRYPTED, PROOF],
+        "ordinary control fixture",
+    );
+    let (_, control_preview) = CaptureSnapshotService::preview_redacted_coverage_v2(
+        "opencode",
+        control_source.into_bytes(),
+        CaptureSnapshotPolicy::default(),
+    )
+    .expect("ordinary control preview");
+    assert_eq!(
+        control_preview["partial"], false,
+        "idle control is complete before import's active-session fence"
+    );
+    let control = control_repo.run(
+        &[
+            "agent",
+            "import",
+            "--session",
+            "ses_cov18_control",
+            "--agent",
+            "opencode",
+            "--yes",
+            "--json",
+        ],
+        None,
+    );
+    assert!(
+        control.status.success(),
+        "ordinary import control: {}",
+        describe(&control)
+    );
+    assert_eq!(
+        control_repo
+            .client_invocations()
+            .lines()
+            .collect::<Vec<_>>(),
+        ["ses_cov18_control"]
+    );
+    assert_eq!(
+        control_repo.cov2_canonical_checkpoint("import").await,
+        COV2_CANONICAL.as_bytes()
+    );
+    assert!(
+        control_repo
+            .query_rows("SELECT job_id FROM agent_export_job")
+            .await
+            .is_empty()
+    );
+
+    for (repo, fixture, session_id, proof_bearing) in [
+        (&repo, state_fixture, "ses_cov18_state", false),
+        (&proof_repo, proof_fixture, "ses_cov18_proof", true),
+    ] {
+        let canaries = if proof_bearing {
+            vec![WINDOW, SIGNATURE, REDACTED, ENCRYPTED, PROOF]
+        } else {
+            vec![WINDOW, SIGNATURE, REDACTED, ENCRYPTED]
+        };
+        let original = fixture
+            .to_string()
+            .replace("__REPO__", &repo.repo.to_string_lossy());
+        for canary in &canaries {
+            assert!(
+                original.contains(canary),
+                "fixture contains each sink probe"
+            );
+        }
+        // Supporting data-only observations destroy authority. The import
+        // helper deliberately hides its warning and rejects nonordinary
+        // dispositions before returning any snapshot or creating a Session.
+        let (ordinary, typed) = CaptureSnapshotService::preview_redacted_coverage_v2(
+            "opencode",
+            original.into_bytes(),
+            CaptureSnapshotPolicy::default(),
+        )
+        .expect("bounded data-only candidate preview");
+        assert_eq!(typed["partial"], true);
+        assert_absent(ordinary.bytes(), &canaries, "ordinary plaintext preview");
+        let ordinary_json: Value = serde_json::from_slice(ordinary.bytes()).unwrap();
+        assert_eq!(ordinary_json["messages"][0]["text"], "cov18 safe request");
+        assert_eq!(
+            ordinary_json["messages"][1]["content"][1]["text"],
+            "cov18 safe reply"
+        );
+        assert_absent(
+            &serde_json::to_vec(&typed).unwrap(),
+            &canaries,
+            "typed plaintext preview",
+        );
+        let records = typed["turns"][0]["projection"]["records"]
+            .as_array()
+            .unwrap();
+        assert_eq!(records.len(), 2, "nonempty exact safe typed records");
+        assert_eq!(records[0]["type"], "user");
+        assert_eq!(records[0]["text"], "cov18 safe request");
+        assert_eq!(records[1]["type"], "assistant");
+        assert_eq!(records[1]["text"], "cov18 safe reply");
+
+        let objects_before = repo.object_files();
+        let imported = repo.run_with_log(
+            &[
+                "agent",
+                "import",
+                "--session",
+                session_id,
+                "--agent",
+                "opencode",
+                "--yes",
+                "--json",
+            ],
+            None,
+            Some("debug"),
+        );
+        assert_eq!(
+            repo.client_invocations().lines().collect::<Vec<_>>(),
+            [session_id],
+            "actual trusted historical-export client must execute"
+        );
+        assert!(
+            !imported.status.success(),
+            "candidate import must refuse: {}",
+            describe(&imported)
+        );
+        assert_absent(&imported.stdout, &canaries, "actual import stdout/logs");
+        assert_absent(
+            &imported.stderr,
+            &canaries,
+            "actual import public errors/logs",
+        );
+        let stderr = String::from_utf8(imported.stderr.clone()).unwrap();
+        let (notice, envelope) = stderr.split_once('\n').expect("existing import notice");
+        assert_eq!(
+            notice,
+            "Provider-encrypted reasoning original bytes may be archived without decryption and mirrored to cloud storage with their checkpoint; session erasure hides the references and local GC reclaims unreachable objects. Native source proof is required; unproved fields are not archived."
+        );
+        let error: Value = serde_json::from_str(envelope).expect("fixed public import refusal");
+        assert_eq!(error["error_code"], "LBR-AGENT-020");
+        assert_eq!(
+            error["message"],
+            "agent import failed; resolve the reported stable error code and retry (run `libra agent doctor --repair` if object-index repair cannot complete)"
+        );
+        assert_eq!(error["details"]["succeeded"], 0);
+        assert_eq!(error["details"]["partial"], 0);
+        assert_eq!(error["details"]["failed"], 1);
+        assert!(error["details"]["next_cursor"].is_null());
+        assert_eq!(error["details"]["failures"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            error["details"]["failures"][0]["error_code"],
+            "LBR-AGENT-020"
+        );
+
+        // Import's rejection precedes its identity/cursor and Session writes;
+        // it must never inherit live's export-job or pending-receipt behavior.
+        assert!(
+            repo.query_rows("SELECT session_id FROM agent_session")
+                .await
+                .is_empty()
+        );
+        assert!(
+            repo.query_rows("SELECT identity_id, state, next_ordinal FROM agent_import_identity")
+                .await
+                .is_empty(),
+            "no import identity/cursor advance"
+        );
+        assert!(
+            repo.query_rows("SELECT job_id FROM agent_export_job")
+                .await
+                .is_empty(),
+            "historical import never creates an export job"
+        );
+        assert!(
+            repo.query_rows("SELECT checkpoint_id FROM agent_checkpoint")
+                .await
+                .is_empty()
+        );
+        assert!(repo.checkpoints().is_empty());
+        assert!(
+            repo.query_rows("SELECT source_channel FROM agent_coverage_claim")
+                .await
+                .is_empty()
+        );
+        assert!(
+            repo.query_rows("SELECT revision FROM agent_coverage_revision")
+                .await
+                .is_empty()
+        );
+        assert_eq!(
+            repo.object_files(),
+            objects_before,
+            "rejected import publishes no object"
+        );
+
+        // Inspect authority/publication stores independently of empty catalog.
+        assert!(
+            repo.query_rows(
+                "SELECT key FROM config_kv WHERE lower(key) = 'agent.native_origin.opencode.v1'"
+            )
+            .await
+            .is_empty(),
+            "no native issuer enrollment"
+        );
+        assert!(
+            repo.query_rows("SELECT key FROM metadata_kv WHERE scope = 'agent_reasoning_identity'")
+                .await
+                .is_empty(),
+            "no native reasoning identity"
+        );
+        assert!(
+            repo.query_rows("SELECT key FROM metadata_kv WHERE scope = 'agent_traces_inflight'")
+                .await
+                .is_empty(),
+            "no unpublished artifact attempt"
+        );
+        assert!(
+            repo.query_rows("SELECT key FROM metadata_kv WHERE scope LIKE 'agent_import%'")
+                .await
+                .is_empty(),
+            "no import index/cursor repair artifact"
+        );
+        for row in repo.query_rows("SELECT value FROM metadata_kv").await {
+            let value: String = row.try_get_by("value").unwrap();
+            assert_absent(value.as_bytes(), &canaries, "persisted import metadata");
+        }
+        // Scan any loose object even if the catalog cannot reach it. Any
+        // unexpected manifest/artifact is independently rejected as well.
+        for path in repo.object_files() {
+            let relative = path.strip_prefix(repo.repo.join(".libra/objects")).unwrap();
+            let oid = relative
+                .components()
+                .map(|part| part.as_os_str().to_str().unwrap())
+                .collect::<String>();
+            assert_eq!(oid.len(), 40, "fixture only publishes loose SHA-1 objects");
+            let bytes = read_object(repo, &oid);
+            assert_absent(
+                &bytes,
+                &canaries,
+                "all decoded persisted import/checkpoint objects",
+            );
+            if let Ok(value) = serde_json::from_slice::<Value>(&bytes) {
+                assert!(
+                    value.get("reasoning_artifacts").is_none(),
+                    "no opaque artifact manifest"
+                );
+            }
+        }
+    }
+}

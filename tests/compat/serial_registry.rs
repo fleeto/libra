@@ -2299,3 +2299,114 @@ fn src_serial_registry_matches_src_classifier() {
         "SRC_SERIAL_REGISTRY fns missing from TREE=src classify: {missing:?}"
     );
 }
+
+/// Keys of one `serial_test` lock attribute line — `#[serial(..)]`,
+/// `#[serial_test::serial(..)]`, or either inside `#[cfg_attr(<cfg>, ..)]` —
+/// sorted, because one attribute requests its keys in sorted order.
+fn lock_attribute_keys(line: &str) -> Option<Vec<String>> {
+    let text = line.trim();
+    if !text.starts_with("#[") {
+        return None;
+    }
+    let at = text.find("serial(")?;
+    // `serial_test::serial(`, `#[serial(` or `cfg_attr(<cfg>, serial(`; never
+    // `file_serial(` and friends.
+    if !matches!(text[..at].chars().last(), Some('[' | ':' | ' ' | ',')) {
+        return None;
+    }
+    let rest = &text[at + "serial(".len()..];
+    let mut keys: Vec<String> = rest[..rest.find(')')?]
+        .split(',')
+        .map(|key| key.trim().to_string())
+        .filter(|key| !key.is_empty())
+        .collect();
+    keys.sort();
+    Some(keys)
+}
+
+/// The order a test with these attribute lines (top to bottom) takes its
+/// `serial_test` locks. Attribute macros nest outward — the attribute nearest
+/// the `fn` becomes the outermost wrapper — so stacked attributes lock
+/// bottom-up, each attribute's own keys in sorted order.
+fn stacked_lock_order(attribute_lines: &[&str]) -> Vec<String> {
+    attribute_lines
+        .iter()
+        .rev()
+        .filter_map(|line| lock_attribute_keys(line))
+        .flatten()
+        .collect()
+}
+
+/// Serial locks must be taken in one global (sorted) order: a test that
+/// holds one key while waiting for a second can deadlock against a test that
+/// holds the second while waiting for the first. That hung the parallel lib
+/// suite until its timeout (`#[serial(env)]` above
+/// `#[cfg_attr(linux, serial(sandbox_env))]` locked `sandbox_env` first, while
+/// `#[serial(sandbox_env, env)]` locks `env` first). A single attribute is
+/// always sorted; stacked ones, read bottom-up, must be too.
+#[test]
+fn stacked_serial_attributes_lock_in_one_global_order() {
+    let sorted = |order: &[String]| order.windows(2).all(|pair| pair[0] <= pair[1]);
+    let hung = [
+        "#[serial_test::serial(env)]",
+        "#[cfg_attr(target_os = \"linux\", serial_test::serial(sandbox_env))]",
+    ];
+    assert_eq!(stacked_lock_order(&hung), ["sandbox_env", "env"]);
+    assert!(!sorted(&stacked_lock_order(&hung)));
+    for good in [
+        &["#[serial_test::serial(sandbox_env, env)]"][..],
+        &[
+            "#[cfg_attr(target_os = \"linux\", serial_test::serial(sandbox_env))]",
+            "#[serial_test::serial(env)]",
+        ],
+        &["#[serial(env)]", "#[serial(cwd)]"],
+    ] {
+        assert!(sorted(&stacked_lock_order(good)), "{good:?}");
+    }
+    assert_eq!(lock_attribute_keys("#[file_serial(env)]"), None);
+
+    let mut offenders = Vec::new();
+    let mut stack = vec![repo_root().join("src"), repo_root().join("tests")];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).expect("read source dir") {
+            let path = entry.expect("dir entry").path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if path.extension().is_none_or(|ext| ext != "rs") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).expect("read source");
+            let lines: Vec<&str> = text.lines().collect();
+            for (idx, line) in lines.iter().enumerate() {
+                let trimmed = line.trim_start();
+                if !(trimmed.starts_with("fn ") || trimmed.starts_with("async fn ")) {
+                    continue;
+                }
+                let mut attributes = Vec::new();
+                for prev in lines[..idx].iter().rev() {
+                    let prev = prev.trim();
+                    if prev.is_empty() || prev.starts_with("//") {
+                        continue;
+                    }
+                    if !prev.starts_with("#[") {
+                        break;
+                    }
+                    attributes.push(prev);
+                }
+                attributes.reverse();
+                let order = stacked_lock_order(&attributes);
+                if !sorted(&order) {
+                    offenders.push(format!("{}:{} locks {order:?}", path.display(), idx + 1));
+                }
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "stacked serial attributes lock out of order (list the keys in one \
+         #[serial(..)] attribute, or stack them so they lock in sorted order \
+         bottom-up): {offenders:?}"
+    );
+}

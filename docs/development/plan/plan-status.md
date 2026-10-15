@@ -2264,3 +2264,44 @@ COV2-10 pre-review upstream sync: main/remote b4851995e48488a8886c963081eda2b4b1
 | `COMPATIBILITY.md` | `29f5f489c01e77ed8024c27b4d074b3ee190163731ef72085e22746388cdce1d` | 0o644 |
 
 自身两事实计划不作selfhash：finalQA manifest/actualcommitblob及后继ER02绑定。full后只改本两个事实计划；接下来须fresh104reader/fmt/strict、root核2048仅两事实差异及9非事实同一，再explicit11I stage、signed+DCOmaincommit/Push、actualarchive2048等于finalQA、freshremote。尚未执行的最终门不预写PASS、不预填本commitSHA。全部闭合才COVsource由18/26到19/26=73.08%；formal仍0/26、继承COV2-REL-01 C/D；父formal59/71=83.10%/source61/71=85.92%不变。Lifecycle in-progress/locally-accepted。下一COV2-11先完成必要I/G前瞻修订/单Claude规划PASS再实施；不在本次事实收口偷偷改后继规范。本卡不bump/tag/release或替换official49、不改demo。
+
+
+### COV2-10 实际源码交付 / COV2-11 前瞻范围采纳（2026-10-15）
+
+COV2-10 actual signed+DCO main/remote 31a219969d8506555012ee2d63bcad82270d8e37，11I commit/archive/push实际0，PGP签名头及DCO同提交存在（不声称独立crypto复验）；actualarchive2048逐SHA/blobOID/size/mode/kind=finalQA。archiveSHA7c7f21ac635cfe76c570659deaf1da25e8842908389920fb40563df0416ab683；finalmanifestbc396dc8a32966da1d0bb63fd6454fe2868839efddb50aa3d110c61a54fe315e，final104/fmtstrict实际0。full10163/10163passed2slow1leaky23skip、0failretry/flaky，rawb7c890ba8aa7d6e4fea1250777682e3f60f818b2f26ade230d0a1cbf8ea146f2；soleCODEPASSraw481ec64cdd5bfe4e05892711caeb713fedbc2844502d5296225b429ad0a380d9，1P2/7P3依用户延期。user04/05dirty及untrackedofficial49/lock、installed49不变。旧mainAction无待取消，31a最新CodeQuality/CodeQL已观察success，CheckBuild仍inprogress，不冒称全部CI绿。COVsource19/26=73.08%，formal0继承familyC/D；父formal59/71=83.10%/source61/71=85.92%不变。
+
+COV2-11原8AC/6literalVER/26cards/DAG/R不变，R4当前契约见主计划；max10prod/4landings/rootI23+site1。R1FAIL88b864...删unreachableordinarypendingwire，推荐A现有exportpendingreceipt；R2FAILaa86c8...补权威coveredV2expectedset/rejectionhistory/一次重采；R3FAIL360475...补同动作V1/empty先只读结算/nextNEWaction才V2、wholeattemptstall文案。R4soleClaudePLANNINGactualPASSraw09d94eda943aa9644c051e78134b9a548e7cc73dea21e5ab8e8db8e821456840（0P0/P1/P2,4P3）root实读接受。P3按建议落实施说明：绝不V1reservationgate含freshkeysV2history反例、terminal/nonterminal已有settlement+freshworkDirty、两pointreads、empty动作也可升级后。只规范2plans和actual31a非事实anchors，scope104reader/fmtstrict/signedpush待实际执行；implementation6VER/CODEreview/T1fullUNRUN，无source20/native/SourceA/C-D信用。网站actualcf/d582freshremote clean，直接现有cf，不建branch/PR/worktree；当前isolated/dirty指令已同步，datedhistory保留。
+
+实际实现/readonly prehash锚点（两事实计划由actualcommitblob/后继ER02绑定，不selfhash）：
+
+| 路径 | actual31a SHA256 | mode |
+|---|---|---|
+| `src/internal/ai/capture/live_checkpoint.rs` | `5e5dd2b53ec492e38f41a309619098ae770c3368df02e1f3ff57a12fcbc7e98d` | 0o644 |
+| `src/internal/ai/agent_import.rs` | `4ea2d9414592b0b0306e6a0d7c7ad15f6ee48d4550fbecb8bce646ad7269e1b4` | 0o644 |
+| `src/internal/ai/capture/snapshot.rs` | `11e3f3bdbefea68470abfee381d2b9c1b14c1600fed3ca24bdd8357d1569abbe` | 0o644 |
+| `src/internal/ai/capture/recovery.rs` | `a94100341bcb7f7c726b43cb7a877489e9f235731580528121b6329640bed754` | 0o644 |
+| `src/internal/ai/observed_agents/mod.rs` | `e703995210ddc6932b40a269c139c15600d46072e7bffc56e61623f99e9153ec` | 0o644 |
+| `src/internal/ai/coverage_gate.rs` | `421ee7b3d8bb361710f02c2d39864ba79ffbb28daf7bdca8ca2436dfc4198561` | 0o644 |
+| `src/internal/ai/capture/checkpoint.rs` | `717af0971e89e54480b97ce69e70757e05ed6c7cbdb89995db802a174a63fbdf` | 0o644 |
+| `src/internal/ai/observed_agents/coverage.rs` | `9dbc53ae9070e416a2cf64305ba084e9bd9877f41fb57d6998ae1cc0a84bf9ba` | 0o644 |
+| `src/internal/ai/observed_agents/reasoning.rs` | `b7627bb251d7a4d13a4c240a927ebf21c0f72a2bde3a8dab6e849656225ec69b` | 0o644 |
+| `src/internal/ai/observed_agents/opencode_reasoning.rs` | `2765a7bb1c07d388bbb594c537f11fe97caa6c138f81e51ef9b086c4b7302c88` | 0o644 |
+| `docs/development/tracing/coverage-v2.md` | `7bf86a46215b5d21373c25a788747eb8a5104b731fe2672332b59273f9cb6c2c` | 0o644 |
+| `docs/development/tracing/agent.md` | `8118ebcb6909f5a6d17b0fe12132f7322adf1ffd305b5ce71b36ffba668d9ea0` | 0o644 |
+| `COMPATIBILITY.md` | `29f5f489c01e77ed8024c27b4d074b3ee190163731ef72085e22746388cdce1d` | 0o644 |
+| `docs/development/commands/agent.md` | `091def29d1058386ed1ed0fa8b47129351802ad859000a043e4fed5d68f72787` | 0o644 |
+| `docs/commands/agent.md` | `69968640d18ee478ad18f085f8663f81017f4caa5cb3c736d7a77a224107e7bf` | 0o644 |
+| `docs/commands/zh-CN/agent.md` | `592f302a757d28eb36c134dd843b1dcc52c56f5901b73714384c7a39076b4c68` | 0o644 |
+| `README.md` | `d0b30387b6485d01ac2da97bd2520b815d296e838795d7da78f9752adfa6e41f` | 0o644 |
+| `README.zh-CN.md` | `785f8d9053c7782b9740ee8594d160a3e5e19981ad19f76d04dd0e87cbe44f45` | 0o644 |
+| `tests/agent_reasoning_contract_test.rs` | `1354cd241fe63f81f3dccceb33ed05b9fff09135ebabd49ab9cc41e10d70fd99` | 0o644 |
+| `tests/INDEX.md` | `4a1b8629a7a872386e9a4f1381dcfdbc9808201c39fdca1730513fcf26000fc8` | 0o644 |
+| `tests/compat/agent_architecture_guard.rs` | `8475a57a50bd8d8213f2c5e18785474f05bdbb707e522fb404b2a3827b70d23d` | 0o644 |
+| `src/internal/ai/observed_agents/builtin/stable_promoted.rs` | `71f5a8228cff647462392d38fc0979e8e9dc2b380dd6f7c8f9172f50c816e24a` | 0o644 |
+| `src/internal/ai/observed_agents/live_capture.rs` | `11199950983ac41f537fd7e65e2f0023acf4224b6207724b3b0eb475d4cf3c85` | 0o644 |
+| `src/internal/ai/capture/catalog.rs` | `079457d12e7a1c120a51a46ab8cd1c6424c39a3f2b6b1852509198314506b432` | 0o644 |
+| `src/internal/ai/capture/pending.rs` | `f8f1160cd1832de2f76ccedde9e67fecd36c8e47628619e635ee8c8d7c0abde9` | 0o644 |
+| `src/internal/ai/capture/pending_payload.rs` | `5b1b5669b26365bb00500c9942f217e902f6313d674d66e355a3b68bf0e9cd67` | 0o644 |
+| `src/internal/ai/authorized_read.rs` | `62ae2b1b33f1b1ad8532e5a599a29995aaf20b81e9e1543298d2585b5009628d` | 0o644 |
+| `src/internal/ai/observed_agents/adapter.rs` | `c7cd1261ffa207894073fa5a38b9ae41439e00e63292574e321efccb91f4fe4c` | 0o644 |
+| `src/internal/ai/traces.rs` | `49b86e0e2f86ec275880439e9c5e93ac934ee54a8a9e4b30bedebecba2d97d5b` | 0o644 |

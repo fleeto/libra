@@ -1,5 +1,8 @@
 # OpenCode coverage schema-v2 前置实施计划（2026-10-13）
 
+> **COV2-11 范围采纳准备（2026-10-15）：** 前驱10actual signedmain/remote31a2199、full10163、soleCODEPASS/final104/archive2048同一，COVsource19/26=73.08%、formal0。R4 soleClaudePLANNING PASS（0P0/P1/P2、4P3）/rootactualanchors；本次仅2plans规范I/G，须实际104reader/fmtstrict和signedPush后开实现。原8AC/6VER/26cards不变，无新增SourceA/家族C-D信用；父formal59/71=83.10%不变，下一工作仍COV2-11。
+
+
 > **COV2-10 本机A/B闭合、待最终源码交付（2026-10-15）：** 原8AC/4VER及13steps/104readers/fmt/strict、soleClaudePASS（0P0/P1、1P2/7P3依用户延期）、freshT1fullactualexit0。当前source18/26；本次signedPush/remote/archive/finalfacts门闭合才19/26=73.08%，formal0/26继承家族C/D。下张COV2-11；父formal59/71=83.10%不变。
 
 
@@ -142,7 +145,7 @@
 |---|---|---|
 | 合理性/接口兼容 | v1 冻结且 typed v2 独立，公开 graph/list envelope 仍为 1 | ADR-COV2-01；COV2-13/11 双 oracle |
 | 粒度/恢复 | 23 个单轴实现、两个不写代码的 audit、唯一 release；无 EX 豁免；COV2-25 8/8 AC、4/8 VER 已按 signed COV2-24 API 对齐，开工时仍按 ER-02 复核 | 下方 G 审计表；任一实际 AC/VER 超限先按 G-03 拆卡 |
-| 依赖/写集 | 全链串行、OG-26 后排他单写者；网站另有已脏 checkout | DEP-COV2-OG26 / SITE；COV2-09/11 仅隔离 `cf` owner 写 |
+| 依赖/写集 | 全链串行、OG-26 后排他单写者；网站现有cf另核状态 | DEP-COV2-OG26 / SITE；COV2-09/11 直接既有 `cf` 单写者，不新建worktree |
 | 功能/数据流 | marker、map、pending、import 都须按 version/domain 认证并原子恢复 | COV2-02..09、COV2-14、19/20/21/23/04/24/25/22；故障矩阵 |
 | 安全/隐私 | fake exporter 只证明管道；候选状态/证明材料不入明文 | COV2-06/10/12/15/18；Source A 独立 |
 | 测试/可靠性 | 22 个继承 ignored cases（原21+OG-26新1）全部需 final-source 本机非 skip PASS | COV2-16/17；无本机 Session CI |
@@ -235,7 +238,7 @@
 
 **G-09 计划内新增顺序边：** `COV2-03→COV2-19→COV2-20→COV2-21→COV2-23→COV2-04→COV2-24→COV2-25→FIX-OG-NATIVE-IMPORT-01→OG-IDLE-ERROR-029-01→OG-UPGRADE-029-01→COV2-22→COV2-08`。前驱必须以最终 A/B、适用 focused/full、fmt/strict、唯一 Claude PASS 及 signed+DCO main SHA/hash/mode 交接；后继不能把其继承的家族 C/D `locally-accepted` 冒称 complete。外部 `DEP-*` 不变。
 
-网站卡写集中的 `apps/tanstack-app/content/docs/commands/agent.en.md` 是 libra-backend 仓库的精确相对路径；执行前把实际 `origin/cf` pre-SHA、隔离 checkout 的绝对根路径和该文件的 pre-hash/mode 登记在 DEP-COV2-SITE。只在核验过的干净隔离 `cf` checkout 编辑该相对路径；`cf` 是分支名，不属于文件写集。原脏 checkout 不可写。
+网站卡写集中的 `apps/tanstack-app/content/docs/commands/agent.en.md` 是 libra-backend 仓库的精确相对路径；执行前核actualHEAD/freshoriginCF preSHA、现有 /Volumes/Sea/libra-backend 绝对路径及文件prehash/mode。直接既有cf单写者、保留无关改动/新upstream，不建branch/PR/worktree；cf为分支而非文件路径。
 
 ### 发布分组与并发窗口
 
@@ -294,7 +297,7 @@
 | COV2-09 | implementation | graph/doctor 双版本只读契约 | forward-only | yes | yes | 8/8 | 4/8 | 1/1 | M | COV2-05；DEP-COV2-SITE | 严格串行 | family child | COV2-05 | N/A |
 | COV2-06 | implementation | OpenCode typed 来源分类的未激活交付 | forward-only | yes | yes | 8/8 | 4/8 | 1/3 | M | DEP-COV2-029-BASE；COV2-09；DEP-COV2-OG26 | 严格串行 | family child | N/A | N/A |
 | COV2-10 | implementation | typed 脱敏与零明文 sink | forward-only | yes | yes | 8/8 | 4/8 | 2/4 | M | COV2-06 | 严格串行 | family child | COV2-06 | N/A |
-| COV2-11 | implementation | live/import v2 生产接线与字节对齐 | forward-only | yes | yes | 8/8 | 6/8 | 3/5 | M | DEP-COV2-029-BASE；COV2-10；DEP-COV2-SITE | 严格串行 | family child | COV2-06 | N/A |
+| COV2-11 | implementation | live/import v2 生产接线与字节对齐 | forward-only | yes | yes | 8/8 | 6/8 | 4/10 | M | DEP-COV2-029-BASE；COV2-10；DEP-COV2-SITE | 严格串行 | family child | COV2-06 | N/A |
 | COV2-12 | implementation | macOS 本地 Session 入口与既有 fixture 修复 | forward-only | yes | yes | 8/8 | 6/8 | 1/1 | M | COV2-11 | 严格串行 | family child | COV2-06 | N/A |
 | COV2-15 | implementation | 候选 live Session 权限防火墙 | forward-only | yes | yes | 8/8 | 2/8 | 2/2 | M | DEP-COV2-029-BASE；COV2-12 | 严格串行 | family child | COV2-12 | N/A |
 | COV2-18 | implementation | 候选 import Session 权限防火墙 | forward-only | yes | yes | 8/8 | 2/8 | 2/2 | M | DEP-COV2-029-BASE；COV2-15 | 严格串行 | family child | COV2-15 | N/A |
@@ -308,7 +311,7 @@ OG-26 的最终 signed main 源码和共享路径逐字节交接完成后，依�
 
 ### Phase 1：import/reader/OpenCode typed 接线
 
-严格接 COV2-05/09/06/10/11；COV2-09 与 COV2-11 的网站文档只在干净隔离 `cf` owner 中实施；同卡门是编辑、typecheck/build 与签名 `cf` 推送，部署/HTTP 由 COV2-REL-01 D 门验收，不把本地页修改当上线。
+严格接 COV2-05/09/06/10/11；COV2-09 与 COV2-11 的网站文档直接既有 /Volumes/Sea/libra-backend cf单写者实施，不建branch/PR/worktree；同卡门是编辑、typecheck/build 与签名 `cf` 推送，部署/HTTP 由 COV2-REL-01 D 门验收，不把本地页修改当上线。
 
 ### Phase 2：macOS Session 与完整审计
 
@@ -1160,13 +1163,13 @@ COV2-REL-01 冻结不含 OG-27 源码的最终 COV2 树；首次完成 bumped �
 
 **Task type:** implementation
 
-**Lifecycle / Acceptance:** pending / 空
+**Lifecycle / Acceptance:** in-progress / 空
 
 **Description:** live/import v2 activation and byte parity。本卡唯一行为轴、恢复和粒度见下方 Granularity；不得以 synthetic/native 互换验收。
 
 **Out of scope:** 只用直接 normalized-turn 入口验证；实际 OpenCode Session/假 exporter E2E 由 COV2-12 在 macOS 手工完成。
 
-**Current evidence:** src/internal/ai/capture/live_checkpoint.rs; src/internal/ai/agent_import.rs（基线 `dcc468b`；ER-02 开工刷新行号与实际源码）。
+**Current evidence:** ER-02 actual signed+DCO main/remote `31a219969d8506555012ee2d63bcad82270d8e37` consumes COV2-10 sourcequalified original8AC/4VER, all13steps/104readers/fmt/strict, soleClaudeCODEPASSraw481ec64... (0P0/P1,1P2/7P3deferred peruser), freshT1full10163/10163 passed2slow1leaky23skip/0failretry, actualarchive2048=finalQA. ArchiveSHA7c7f21ac635cfe76c570659deaf1da25e8842908389920fb40563df0416ab683; finalQAmanifestbc396dc8a32966da1d0bb63fd6454fe2868839efddb50aa3d110c61a54fe315e. OpenCode export-only normalizer/lease and live-only artifact policy are live_capture.rs:312-322, live_checkpoint.rs:338-345,1050-1110; covered replay :298-326,1508-1552. Current checkpoint.rs:3906-3988,4182-4218 None replay refusesV2; traces.rs:1309-1382 existingexactsethelper read-only. R4 soleClaudePLANNING actualPASSraw09d94eda943aa9644c051e78134b9a548e7cc73dea21e5ab8e8db8e821456840 (0P0/P1/P2,4P3), rootverifiedactualnonplanSHA/mode against31a. No independent Issue; authorizedexistingcard. Source19/26=73.08%,formal0; parent59formal/61sourceof71 unchanged. Scopeadoption notimplementation: sixVER/CODEreview/T1fullUNRUN, no20/SourceA/native/releasecredit.
 
 **Acceptance criteria:**
 
@@ -1188,19 +1191,19 @@ COV2-REL-01 冻结不含 OG-27 源码的最终 COV2 树；首次完成 bumped �
 - [ ] VER5→AC7: `source .env.test && cargo test --lib internal::ai::capture::live_checkpoint::tests::cov2_direct_candidate_turn_stays_partial -- --exact` (1/1; proof/state-bearing candidate-specific direct normalized-turn assertion, no Session, no issuer/opaque mint).
 - [ ] VER6→AC8: `source .env.test && cargo test --test agent_reasoning_contract_test cov2_production_typed_path_uses_v2_api -- --exact` (1/1; exercise live/import production call sites and assert typed-v2 versus RG-04 legacy-v1, plus a static source guard forbidding fallback to legacy helper for typed turns). 同卡把 COV2-06 的 `cov2_production_normalize_inert_before_activation` 守卫改为 post-activation v2 守卫并记录旧→新 selector；保留前驱签名源码的历史 PASS，不让旧“仍未激活”断言留在默认 CI 变红。
 
-**Full-suite trigger:** family child 不自行发布；按 ER-13 对最终改动重新判定 T-1/T-4/T-6。若命中 shared single-source helper、测试基建或 focused 信号不足，则在本卡 A/B 阶段运行双 env 全量 Nextest；无论是否命中，COV2-REL-01 首次 T-2 均须在最终 bumped 实现树上重跑；后续仅上游纯 patch 顺延按该卡逐路径同一性规则复用。
+**Full-suite trigger:** T-1：共享授权preprocessing/typedredaction及runtime versioned gate/checkpoint/replay/fences；最终实现原6VER和相关focused/fmt/strict、soleClaudeCODEPASS/root后，actual quiet-load .env.test+.env.live-test Nextest full，不复用10full。家族首次bumpedT2/全卡最终full保留；不加Session/model/exporter CI或sharedtestinfra。
 
 **Dependencies:** DEP-COV2-029-BASE（必须包含FIX-OG-PARTIAL-LIVE-01实际五源交接，不等正式049 C/D）； DEP-COV2-029-BASE（父三卡final source重基，shared I–I串行，非native能力）； COV2-10；DEP-COV2-SITE；消费前驱实际最终 A/B、适用 focused/full、fmt/strict、单 Claude PASS 与 signed+DCO main 的 source-qualified 文件 SHA/mode；不以其尚待 C/D 的 `locally-accepted` 冒称 complete。
 
 **Deliverables:** 无独立文件；本卡实现/测试/文档随唯一发布点交付；每卡的计数、源码 SHA、hash/mode、review/门结果写在本计划正文，不建证据文件。
 
-**Implementation write set:** I-core = `docs/development/plan/plan-20261013-coverage-schema.md`; `docs/development/plan/plan-status.md`; `docs/development/tracing/coverage-v2.md`; `docs/development/tracing/agent.md`; `COMPATIBILITY.md`；本卡新增精确路径 = `src/internal/ai/capture/live_checkpoint.rs`; `src/internal/ai/agent_import.rs`; `src/internal/ai/capture/snapshot.rs`; `src/internal/ai/capture/recovery.rs`; `src/internal/ai/observed_agents/mod.rs`; `tests/agent_reasoning_contract_test.rs`; `tests/INDEX.md`; `docs/development/commands/agent.md`; `docs/commands/agent.md`; `docs/commands/zh-CN/agent.md`; `apps/tanstack-app/content/docs/commands/agent.en.md` (libra-backend `cf`)。无 glob 默示写权。
+**Implementation write set:** I-core = `docs/development/plan/plan-20261013-coverage-schema.md`; `docs/development/plan/plan-status.md`; `docs/development/tracing/coverage-v2.md`; `docs/development/tracing/agent.md`; `COMPATIBILITY.md`；本卡精确新增路径 = `src/internal/ai/capture/live_checkpoint.rs`; `src/internal/ai/agent_import.rs`; `src/internal/ai/capture/snapshot.rs`; `src/internal/ai/capture/recovery.rs`; `src/internal/ai/observed_agents/mod.rs`; `src/internal/ai/coverage_gate.rs`; `src/internal/ai/capture/checkpoint.rs`; `src/internal/ai/observed_agents/coverage.rs`; `src/internal/ai/observed_agents/reasoning.rs`; `src/internal/ai/observed_agents/opencode_reasoning.rs`; `docs/development/commands/agent.md`; `docs/commands/agent.md`; `docs/commands/zh-CN/agent.md`; `README.md`; `README.zh-CN.md`; `tests/agent_reasoning_contract_test.rs`; `tests/INDEX.md`; `tests/compat/agent_architecture_guard.rs`; `apps/tanstack-app/content/docs/commands/agent.en.md` (libra-backend existing `cf`)。root23+site1最大精确I，max10prod/4landings/一处公开行为变化。未编辑I文件保留preSHA/mode；catalog.rs、pending.rs、pending_payload.rs、stable_promoted.rs、live_capture.rs、adapter.rs、authorized_read.rs、traces.rs均read-only。无glob/默示写权，额外owner/第二公开面先修I/G+review或拆卡，不越M。
 
 **Release write set:** N/A；C/D 继承 COV2-REL-01。
 
-**Files likely touched:** `docs/development/plan/plan-20261013-coverage-schema.md`; `docs/development/plan/plan-status.md`; `docs/development/tracing/coverage-v2.md`; `docs/development/tracing/agent.md`; `COMPATIBILITY.md`; `src/internal/ai/capture/live_checkpoint.rs`; `src/internal/ai/agent_import.rs`; `src/internal/ai/capture/snapshot.rs`; `src/internal/ai/capture/recovery.rs`; `src/internal/ai/observed_agents/mod.rs`; `tests/agent_reasoning_contract_test.rs`; `tests/INDEX.md`; `docs/development/commands/agent.md`; `docs/commands/agent.md`; `docs/commands/zh-CN/agent.md`; `apps/tanstack-app/content/docs/commands/agent.en.md` (libra-backend `cf`)。
+**Files likely touched:** `src/internal/ai/capture/live_checkpoint.rs`; `src/internal/ai/agent_import.rs`; `src/internal/ai/capture/snapshot.rs`; `src/internal/ai/capture/recovery.rs`; `src/internal/ai/observed_agents/mod.rs`; `src/internal/ai/coverage_gate.rs`; `src/internal/ai/capture/checkpoint.rs`; `src/internal/ai/observed_agents/coverage.rs`; `src/internal/ai/observed_agents/reasoning.rs`; `src/internal/ai/observed_agents/opencode_reasoning.rs`; `docs/development/plan/plan-20261013-coverage-schema.md`; `docs/development/plan/plan-status.md`; `docs/development/tracing/coverage-v2.md`; `docs/development/tracing/agent.md`; `COMPATIBILITY.md`; `docs/development/commands/agent.md`; `docs/commands/agent.md`; `docs/commands/zh-CN/agent.md`; `README.md`; `README.zh-CN.md`; `tests/agent_reasoning_contract_test.rs`; `tests/INDEX.md`; `tests/compat/agent_architecture_guard.rs`; `apps/tanstack-app/content/docs/commands/agent.en.md` (libra-backend existing `cf`)。最大I中未编辑路径记录unchanged，不虚称touched。
 
-**Docs and compatibility impact:** `docs/development/tracing/coverage-v2.md`; `docs/development/tracing/agent.md`; `COMPATIBILITY.md`; `docs/development/commands/agent.md`; `docs/commands/agent.md`; `docs/commands/zh-CN/agent.md`; `apps/tanstack-app/content/docs/commands/agent.en.md` (libra-backend `cf`)；逐文件核内容与源码行为对应，`tests/INDEX.md` 只在本卡精确写集确有索引变化时同步。网站文件仅在 DEP-COV2-SITE 的隔离 `cf` owner 中编辑、同卡 typecheck/build、签名交付；文案须写成“仅适用于首个包含 coverage-v2 的稳定发布及其后续版本”等不依赖未确定版本号的条件，不可声称当前稳定版已提供未发布能力；当前原 checkout 脏且落后，禁止覆盖。
+**Docs and compatibility impact:** `docs/development/tracing/coverage-v2.md`; `docs/development/tracing/agent.md`; `COMPATIBILITY.md`; `docs/development/commands/agent.md`; `docs/commands/agent.md`; `docs/commands/zh-CN/agent.md`; `README.md`; `README.zh-CN.md`; `apps/tanstack-app/content/docs/commands/agent.en.md` (libra-backend existing `cf`)；tests/INDEX只在既有target描述/selector索引确有变化时同步，无新target。文案条件为首次包含coverage-v2稳定版；旧V1/empty同动作回执先原路只读结算，下一NEWaction才一次V2重采；rejected-source+V2history停采，doctor提示新建Session，旧数据可读。SourceA/native不获证明不归档，不声称installed49有未发布能力。直接现有 /Volumes/Sea/libra-backend cf单写者，actualnative/freshremote d582clean；保留无关改动/新upstream，不建branch/PR/worktree；同卡sync/fixtures/docsunit/typecheck/build/soleClaudePASS、signedDCOcfpush/部署HTTP。此前六个wholefrontendbaselineFAIL不称全绿。
 
 **Rollback mode:** forward-only；恢复时签名+DCO 新 main 修复，既有 v1 claim/artifact/digest 不回写或重解释。
 
@@ -1210,7 +1213,7 @@ COV2-REL-01 冻结不含 OG-27 源码的最终 COV2 树；首次完成 bumped �
 
 **Performance budget:** 继承 GC-COV2-05；identity map 的 v1+v2 总量仍限 4096 条/1 MiB，任何新增解析在分配前有界；变更 hot path 时以具名门证明无无界扫描。
 
-**Estimated scope:** M（落点/生产文件计数：8/8, 6/8, 3, 5; M）。
+**Estimated scope:** M（落点/生产文件计数：8/8, 6/8, 4, 10; M）。
 
 **Version increment:** N/A；此卡不发版。
 
@@ -1218,7 +1221,43 @@ COV2-REL-01 冻结不含 OG-27 源码的最终 COV2 树；首次完成 bumped �
 
 **C/D coverage from:** COV2-REL-01；发布点的 exact-source C/D 绿后才能 `done/complete`。
 
-**Granularity:** `type=implementation; axis=live/import v2 生产接线与字节对齐; recovery=forward-only; complete=yes; self-contained=yes; AC=8/8; VER=6/8; landing=3; prod-files=5; scope=M; deps=DEP-COV2-029-BASE,COV2-10；DEP-COV2-SITE; writeset=串行于前驱; release=family child; split-from=COV2-06; exception=N/A`
+**Granularity:** `type=implementation; axis=live/import v2 生产接线与字节对齐; recovery=forward-only; complete=yes; self-contained=yes; AC=8/8; VER=6/8; landing=4; prod-files=10; scope=M; deps=DEP-COV2-029-BASE,COV2-10；DEP-COV2-SITE; writeset=串行于前驱; release=family child; split-from=COV2-06; exception=N/A`
+
+
+
+**R4 prospective implementation contract（原8AC/6VER不增计，必需安全/兼容/文档义务）：**
+
+This consolidated R4 is the current proposal; earlier proposals are historical only. Actual R1/R2/R3 planning FAILs stay preserved. R3 confirmed all prior core repairs, feasibility of authoritative covered-v2 sets and rejection history query, no missing owner, M10/fourlandings/noDDL. R4 fixes its remaining same-action upgrade replay and availability contradiction. No implementation or normative card edits yet.
+
+COV10 prerequisite is ACTUALLY delivered main/remote31a219969d8506555012ee2d63bcad82270d8e37, archive2048 equals finalQA, soleClaudeCODEPASS481ec64...0P0/P1+1P2/7P3deferred, freshT1full10163passed2slow1leaky23skip/0failure/retry, final104reader/fmtstrictPASS. COVsource19/26/formal0, parent59formal61sourceof71. R4planningPASS cannot credit20, actualnativeSourceA or release.
+
+1. Exact bounded scope. Original8AC/6literalVER/26cards/DAG/familychild/forward-only unchanged. I23root+1site inSETUP: originalfive production + coverage_gate/checkpoint/coverage/reasoning/opencode_reasoning = maximum10production, fourlandings(capture,observed,import,gate), onepublicbehavioractivation, no newpublicAPI planned. UnusedIpaths staySHA/mode. catalog,pending,pending_payload,stable_promoted,live_capture,adapter,authorized_read,traces READ-ONLY; no newseriallanes/registry/targets/sharedtestinfra/SQL/deps/installer. Extraowner or secondpublicsurface requires prospectiveamendment/split beforeediting; <=12prod/fourlandings mandatory.
+
+2. Actual route. OpenCode has an exporter but no live normalizer. Existing admitted export runner uses exportchannel; live-only pendingartifact sealer is ineligible. AC6 means ACTUAL pendingRECEIPT dirty-release/re-export/redelivery/covered-terminal, not a fabricated pendingartifact. No newordinarypendingwire/kind/seal/exporteligibility. Existing nativeouterv2 artifacts/SourceDTO/source-proof/sidecar/tamper/dispatch remain unchanged. Doctor withnoartifact stillManualRequired/zeroACKwrites. VER4 drives actualsharedafter-snapshot function calledbyrun_export_stage, realtempDB+ExportJobLeaseStore; no FakeExportLease, artifactseal, model, Session or exporterprocess. Recovery production likelyunchanged, tests-only countedhonestly.
+
+3. Source transport and fallback. Keep existing public preprocessor port/opaquePreparedReasoningSource and closedfourconstructors/defaultNone. A privateowned typedfragment retains originalsource/message/part coordinates, visibleparts andpartial; freeattachment/consumers have exactclosedcallers, no Debug/Serde/Clone/publicrawconstructor/nativeissuer. Shared BORROWED classifier reads originaloneZeroizingVec before erasure, tree/maps drop before oldordinarypreparer consumes SAMEbuffer. Existing owningpreview classifier calls oldordinarypreparer directly, never recurses throughnewadapterwrapper. Classifier-reject runs byte-identical oldordinarypreparer/output/disposition/partialpermit/errors, but attachesCONTENT-FREE private rejectionflag iflegacy succeeds; no fragment/V2claim, sourceclone/reread/errorstringfallback. Adapter caller staysreadonly. Marker/typedstatus travels through every actuallive/export/import/ordinarypartial/empty/covered path. GenericSnapshot keeps realverifiedsourcecontext, sealedcandidates/native andordinarypartialpermit; neveruses publicdata-onlypreview/authoritydiscard toauthorizecapture. Providerneutralratchet preserved. Ordinary+decodedtypedredaction BEFOREencoding/digest/projection/persistence; privateownedredactedturncompanion consumedbeforeexistingpublicsnapshotAPI, no global3tupleAPIbreak. COV10P2 structureredactor issue remainsdeferred/partial; anynewcoreACfailure must befixed, no falsecomplete.
+
+4. Versioned writing. AddPRIVATE runtimeversionedreasoning/deadline route and live txn_extra companion; do not use import-only with_versioned_claims pathrequiringtxn_extraNone asaliveescape. Preserve scope/tombstone/identity/native reader, deadline, marker/generation/owner/fence/revision/refCAS/atomiccursor. Versionedfences carryactualversions ratherthan1. CrossschemaNativeNonempty staysfailclosed, no native-v2mixing/fakeemptyidentity. Existingpublicordinary-onlyimportAPI unchanged; actualprivatecapture/importtypedroute usesauthorizedsnapshotdata. Emptyclaimterminal staysitslegacyroute and neverpretendsv1coverageofv2. Candidates/unprovedtypeddata cannot producecomplete/coveredACK; existingauthorizedordinarypartialcheckpoint may remainexplicitpartial underitslegacyadmission. OrdinarynonReasoningbytes/adapters unchanged.
+
+5. Decision order for a READY delivery. First preserve ALLexisting source/capture-scope/nativeidentity authorization. Then apply the same-action legacy durable rule in6. If it doesnot settle, apply rejection/history barrier7 BEFORE any reservation or empty/noop/covered fastpath. Then normalversionedwriting/coveredreplay8. Rule6 is an explicit READ-ONLY exception to7: it settles ONLYalready-authenticatedoldV1action and cannot mutate/create anyturn. Legacyvalidationfailure neverforcesACK. No rule bypassesexistingauth/nativechecks.
+
+6. Same-action pre-upgrade boundary (R3P1 fix). BeforeselectingV2/reservingclaims, one boundedread underexistingdeadline/scope/markerfence determines whether THISaction's deterministiccheckpoint is alreadydurable withV1-ONLYrevisions (or the already-supportedlegacyemptyrevisionterminalcase). Ifso, use unchangedautomaticV1/no-write None-expectation settlement, byte-identical legacycanonical semantics, ZERO newclaim/checkpoint/reservation. Do not firstreserveV2 then collidewithC1. Currentfreshsourceadditionalturns mustnot be stuffedintooldimmutableC1; settleonlytheexistingaction underitsoriginalcheckedrevision/source/scope and leavefuturedata to nextnewaction underexistingdirtygeneration rules. Superseded/invalidsource/rows givefailcloseddoctorhint. Unknown/busy/unsupportedversion isNOTv1-only. Next NEWaction/newcheckpointID recapturesV2ONCE; repeatsidempotent. VER2/4 coversV1C1commit→receiptinterrupted→upgrade→sameactionACKonce/nonewclaims/checkpoints→nextnewactiononeV2capture→repeatnonew. Docs stateboundary.
+
+7. Rejected-source availability tradeoff (R3P2 fix). Except rule6 oldauthenticatedread-onlysettlement, REJECTEDclassification + ANYV2claimhistory inthisvalidatedsession FAILS THE WHOLEattempt, includingunrelatednewordinarykeys: noreserve/checkpoint/ACK, pending/Dirty, doctor/startnewsessionhint. No-blanket-denial appliesONLY to NON-REJECTEDsources or sessionswithoutV2history. This can permanentlystall retainedoverlimit/unsupportedsource untiloperatorstartsANEWsession orafuturesupportedbuild; keepolddatareadable, no truncation/demotion orAC5availabilitypromise. Oneprefix-indexrangeexistenceread perattempt, boundedbysessionclaimcount/deadline, NOTO(1), no allrowvector/N+1; DBunknown/busynevermeansnohistory. FreshV1-onlysession usesexactlegacybytes/permit/errors; validnonrejectedordinaryNEWkeys stillV1. Prior SAME-keyV2 cannot silentlydemote throughanotherfallback. ExistingVER2/4 pinsv2commit→classifierreject→zeroV1/newcheckpoint/ACK plusfreshV1paritycontrol. Disclose stall andremedy inmechanism/compat/commands/site/READMEwhereaffected.
+
+8. Authoritative covered-v2 replay. GateSkipCovered retainsactualcommitted(schema,key,digest,completeness,revision,checkpointID) inPRIVATE runtimeoutcome/companion, no newpublicoutcomefield. FiltertoTHISactioncheckpoint. ONLYwhenfilteredsetincludesatleastoneV2, invokeNEWprivateversionedcovered-replayentry withALLV1+V2tuplesofthatcheckpoint asONEexactset. Existingread-only traces::verify_checkpoint_claim_set_with_conn checkscomplete immutable revision membership/currentrowbindings. Superseded/foreign/partial/missingexpectedfences failclosed/Dirty withdoctorhint. Gate-read snapshot isnotaTOCTOUwaiver: preserveexisting scopefence, conditionalmarkerCAS andcatalogCASacknowledgment. Catalogitselfdoesnotcheckversions; ifactualcodeprovesversion-awarecatalogACKrequired, stop/prospectivelyamendIbeforeediting. EmptyorV1-onlyFILTEREDsets useunchangedNonepath; preserveMissing/emptyterminal/v1settlement. Nonebranch MUSTstillrejectanyACTUALV2durablerevision; originalCOV03pinnednegative staysIDENTICAL. No booleanrelaxation/untrustedmetadataauthority. VER4 actualv2commit→receiptinterruption→redeliveryACKonce/noduplicate +empty/v1-only/foreign/supersededfencesnegative controls. RealDBlease, nosyntheticnativeauthority.
+
+9. Migration and originalverification. Preactivationvisibleturns mayrecaptureONCEasV2 onNEXTNEWaction; keepoldV1objects/claims/digests, boundedoneV2claim/checkpoint andsubsequentidempotence. OrdinarywithoutReasoning keepsoldV1bytes. NativeNonemptyother-schema isnotautomigrated. Original6literalVER each1/1, actualnormalized/realDB only, independentliteralredactedcanonicalgold+SHA live/import parity, legacyV1gold/fallbackpermit parity, actualreceiptupgrade/replay/idempotence/historymarker negatives, candidatepartial/noremint, productiontypedv2notlegacyprojection guard. Update06preactivationselector topostactivation peroriginal11VER6, preservesignedhistoricalPASS. No hiddennewindependentACorVERcount.
+
+10. Mandatory GC/performance/hygiene. v1+v2 privateidentitygrowth hits4096/1MiB asfailclosederror, nevertruncation, usingactualexistingboundedhelpers/guardswithinaffectedVER/modules, no fakeNativeSourcepositive. Maximumtwo CLASSIFICATION/PREPROCESSOR boundedtreepasses; downstreamCOV10redaction/normalizationareseparateboundedlinearstages, no falseclaimoftwoparsestotal orO(n²)prefixprocessing. Actualcooperativedeadlinebefore/afterprep/expiredzerosuccess, no intra-parserharddeadlineclaim ornewpublicdeadlineport. NewfragmentnoDebug/Serde/Clone andpayload/coordinatebuffers wiped/droppedonreject/deadline/candidate; existingProviderVisibleTextString globalnonwipe remainsdocumentedunlessactuallyimprovedincurrentI. Removeobsolete dead_code onlyonactualactivatedseams; finalrecordwith_versioned_claims caller/dead_code truthfully. No newserial/globalteststate.
+
+11. Samecarddocs/site. RootEN/zhcommand/developer/mechanism/COMPATIBILITY/ENzhREADMEaudit, firststablecontainingcoverage-v2condition ratherthaninstalled49claims. Explainboundedrecapture6/9 andstall7/remedy. UpdateallCURRENTstalesiteisolated/dirtyinstructions inrelease/DEP/risk/card/milestone, keepdatedhistory. Existingproductioncf direct, preserveunrelated/newupstream, no branch/PR/worktree. Actualcf d582 clean/freshremoteconfirmed; recheckbeforeediting. Syncfixtures/docsunit/typecheck/build/soleClaudePASS/signedcfpush/deployHTTP; old6frontendbaselinefails notwholegreen. No account/Session/exporter/modelCI.
+
+12. Adoption and delivery. R4soleClaudeplanningPASS/root +fresh31aremote/nonplanSHA/modeanchors ->exacttwo-plan normativeI/G/currentevidence update,104readers/fmtstrict andsignedDCOmainpush BEFOREimplementation. No source20credit fromscope. Actual11implementation original8AC6VER/focused/fmtstrict/soleClaudeCODEPASS/root/freshdualenvT1full; familyfirstbumpedT2/finalallcardfull remain. NoR/bump/tag/release/install child. SourceA/native3fields/producer/macSession areseparatelatercards, nocapabilitybyplanningPASS. Any actualextraowner/surface/axis needsprospectiverepair, neverwaiveM orforgeproof.
+
+**R4 PASS四项P3实施说明（未虚称代码已实现）：** rule6完全不调用V1 reservation gate；freshsource新增keys且其已有V2history的反例也须zeroV1reservation/oneACK/noloop。terminal沿用 settle_preapplied_covered_terminal_replay /export CoveredNoop terminal settlement，nonterminal沿用 settle_preapplied_without_checkpoint /nonterminal CoveredNoop，保留source/scope/native/marker/CAS校验；freshuncoveredwork保守保持runnerDirty等待对应新动作，不能把未捕获数据标已处理。v1/empty检查为checkpointrow+非V1revisionprobe两次indexedpointreads。emptyrevision动作也可来自升级后，不专称oldV1。实际exit绑定及freshwork处理在VER2/4、CODEreview/full证明，不能擅改read-onlyowner。
+
+**规划失败/采纳事实：** R1actualFAILraw88b864313e682f1f2ff22e85034aee373d1359b03973bc4bd9919584427b8413（ordinaryV2artifact无真实exportproducer/第二轴），按推荐A删新wire、AC6绑定existingexportpendingreceipt；R2FAILrawaa86c8b7b7bae3916cb93fef677e9b0cc4f9be669690fa68936e587325a7265e（权威expectedset/rejectionhistory/一次重采）；R3FAILraw360475c7208de39509a1854a28b336f821e88736707b6aa60bcabb867358c344（同动作V1checkpoint碰撞、wholeattemptstall文案矛盾）；当前R4actualPASSraw09d94eda943aa9644c051e78134b9a548e7cc73dea21e5ab8e8db8e821456840、root实读接受，前述是契约修复、不是代码已修。原8AC/6literalcommands/26cards/DAG/R不变。只改本2plans规范并核prehash，scope104reader/fmtstrict及signedmainpush实际完成前不开实现、不记source20。无独立R、tag、release或installer。
 
 ### Task COV2-12：macOS 本地 Session 入口与既有 fixture 修复
 
@@ -2234,7 +2273,7 @@ VER6 现仅消费独立历史源码 `7efcf868d49a5183e7f0851a89abebee91357155`�
 
 | 里程碑 | 完成条件 | 发布/证据 | 恢复 |
 |---|---|---|---|
-| M-COV2-0 | OG-26 实际 signed main source-qualified handoff；网站 cf 隔离 owner 确认 | DEP-COV2-OG26/SITE 在本计划记录 SHA/mode/UTC | 缺口保持 pending，不覆盖脏文件 |
+| M-COV2-0 | OG-26 实际 signed main source-qualified handoff；网站现有cf单写者状态确认 | DEP-COV2-OG26/SITE 在本计划记录 SHA/mode/UTC | 缺口保持 pending，不覆盖脏文件 |
 | M-COV2-1 | COV2-01/13/02/07/14/03/19/20/21/23/04/24/25/22/08/05/09/06/10/11 A/B+Claude+signed main 逐卡交付 | 每卡证据写本计划，仍 locally-accepted | 出错在 owner 卡前滚、重跑下游 |
 | M-COV2-2 | COV2-12/15/18 与 16/17 全 22 继承 case 完整本机 PASS | final-source manual report；`DEP-OG-13=source-ready` | 一例失败回 owner，审计全部重跑 |
 | M-COV2-3 | COV2-REL-01 exact-tree stable patch 与 C/D 完成 | Release/CI/site/install 真实 SHA/run | immutable release；新 patch 修复，随后 `DEP-OG-13=complete` |
@@ -2262,7 +2301,7 @@ VER6 现仅消费独立历史源码 `7efcf868d49a5183e7f0851a89abebee91357155`�
 | pending 先写 artifact 后保留 versioned claims，或以手工插入行冒充真持久化 | 过期 lease 被接管、旧端破坏性重放、假绿 | COV2-20 提供只读 versioned verify、COV2-21 提供同事务 retain、COV2-23 提供同源 NativeProven checked borrow 且跨版本裸 key fail closed，COV2-04 提供有界 codec、COV2-24 提供同源内存 seal；COV2-22 必须从真实 seal/persist/commit 运行编译冻结旧读端并注入后续 artifact SQL fault |
 | 双 map 容量倍增或 unknown key 假 absent | 热路径资源超支/身份绕过 | COV2-07/14 域隔离与 aggregate cap/fail-closed |
 | 本机 Session 用例因 bwrap 不存在早退 | 虚假 22/22 与 release 假绿 | COV2-12 Required Seatbelt + COV2-16/17 非 skip inventory |
-| 网站 checkout 脏且落后 | 覆盖他人改动/站点源码不一致 | DEP-COV2-SITE 干净隔离 cf owner，source hash、部署 HTTP |
+| 网站cf出现无关改动或新upstream | 覆盖他人改动/站点源码不一致 | DEP-COV2-SITE既有cf核HEAD/freshremote/prehash，保留改动，同卡signedpush/部署HTTP |
 | v2 typed 与 native 来源混淆 | 未授权 opaque 归档/明文泄漏 | COV2-06/10/15/18、父计划 Source A 硬门 |
 | 2026-10-13 旧安装版 0.30.48 不批准私有 `.2` | 当时 OG-27 注册失败，不能外推到未安装的新版本 | COV2-REL stable patch 实装后，在父计划原 issuer epoch0 流程重验；r2 binary-to-source PASS 不替代 runtime/issuer/Source A，当前仍 NO-GO |
 

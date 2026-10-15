@@ -285,7 +285,7 @@ native-origin gates remain required.
 
 3. **安装配置目标形态（2.0.26 当前契约）**
 
-   默认导出 `{ id, setup(ctx) }`，通过 `ctx.event.subscribe({signal})` 订阅本 location 的事件并注册 `ctx.tool.hook("execute.after", callback)`；返回 cleanup。插件只观察，不调用修改会话/提示/模型的方法。`--pure` / `OPENCODE_PURE=1` 关闭全部外部 plugin。
+   默认导出 `{ id, setup(ctx) }`，通过 `ctx.event.subscribe({signal})` 订阅事件并注册 `ctx.tool.hook("execute.after", callback)`；返回 cleanup。该订阅覆盖服务器上的所有 location（OpenCode 2.0.29 实测：共享 `opencode serve --service` 把每个项目的事件发给每个项目的插件），因此插件按事件信封的 `location.directory` 只处理本目录的 session；`session.moved` 移出本目录即结束该 session；工具回调只带 session ID，未归属的 session 经 `ctx.session.get({ sessionID })` 的 `location` 判定，宿主无法回答时照旧转发并只报告一次 `session_location_unavailable`。插件只观察，不调用修改会话/提示/模型的方法。`--pure` / `OPENCODE_PURE=1` 关闭全部外部 plugin。
 
    Libra 唯一写入 `.opencode/plugin/libra-hooks.js`，首行 marker 保留 ownership，第二行 revision 和完整渲染内容用于 current status。`.opencode/plugins/` 仅检查/清理 managed 重复副本；不带 marker 的用户文件不删除、不覆盖。新模板不发送弃用的 `session.idle`；parser 仍接受其历史输入。非普通路径快速拒绝、读取/写入使用 no-follow、快照复核和整体原子更新；legacy cleanup 失败回滚 canonical 更新。对检查后 reparent/末次归属检查后叶替换的对抗性证明登记 DEFER-OG-INSTALL-01，不作本卡通过。
 
@@ -309,10 +309,17 @@ and a declared role must be `user`. Neither `message` nor `user_prompt` fills a
 missing prompt. The deprecated `session.idle` alias remains accepted, with a
 content-free `legacy_event_alias` tracing warning.
 
-The managed plugin uses the OpenCode 2.0.26 `setup(ctx)` API, a
-location-scoped event subscription and an observe-only tool hook. Refresh it
-with `libra agent enable --agent opencode`: status reports old or edited
-templates, and duplicate managed copies, as not installed until refreshed.
+The managed plugin uses the OpenCode 2.0.26 `setup(ctx)` API, an event
+subscription and an observe-only tool hook. One OpenCode server (for example
+`opencode serve --service`) delivers every project's events to every project's
+plugin, so the plugin forwards only sessions whose `location.directory` is its
+own directory: other projects' sessions never reach this repository, a session
+moved out of the directory is closed here, and a tool call for a session not yet
+placed is attributed through the host's `session.get` (when the host cannot
+answer, it is forwarded as before and `session_location_unavailable` is reported
+once). Refresh it with `libra agent enable --agent opencode`: status reports old
+or edited templates, and duplicate managed copies, as not installed until
+refreshed.
 Node and Bun use the same `node:child_process` transport with the pinned
 absolute Libra filename and `shell:false`. Session/turn boundaries run
 synchronously; tool and compaction observations run asynchronously and never

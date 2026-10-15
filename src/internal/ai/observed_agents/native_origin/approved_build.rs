@@ -79,7 +79,7 @@ const SLOTS: [&str; 3] = [
     "__EXPORT_DEADLINE_MS__",
 ];
 const REVIEWED_TEMPLATE: &str = r####"// libra-managed: do not edit — installed by libra agent enable (AG-19)
-// libra-plugin-template: opencode-2.0.26-v1
+// libra-plugin-template: opencode-2.0.26-v2
 // OpenCode 2.0.26. Observe-only; runs on Node and Bun using agent hooks opencode.
 // OpenCode --pure / OPENCODE_PURE=1 disables external plugins.
 import { spawn, spawnSync } from "node:child_process";
@@ -92,6 +92,7 @@ const FORWARD_TIMEOUT_MS = EXPORT_DEADLINE_MS + 15000;
 const MAX_SESSIONS = 64;
 const MAX_PENDING = 128;
 const MAX_PROMPT = 16384;
+const MAX_PLACEMENTS = 1024;
 const REGISTRY_KEY = Symbol.for("libra.opencode.exit.v2");
 
 function exitRegistry() {
@@ -116,6 +117,10 @@ export default {
     const pending = new Map();
     const seen = new Map();
     const earlyText = new Map();
+    // One OpenCode server hosts every project and delivers each location's
+    // events to every plugin, so a session belongs to this plugin only while
+    // its location is this directory: session id -> owned here.
+    const placements = new Map();
     const warnings = new Set();
     const children = new Set();
     const controller = new AbortController();
@@ -128,6 +133,27 @@ export default {
       try { process.stderr.write("libra opencode: " + reason + "\n"); } catch (_error) {}
     };
     const validId = (id) => typeof id === "string" && id.length > 0 && id.length <= 512;
+    const directoryOf = (location) => typeof location?.directory === "string" ? location.directory : undefined;
+    const place = (id, own) => {
+      if (!validId(id)) return own;
+      placements.delete(id);
+      if (placements.size >= MAX_PLACEMENTS) placements.delete(placements.keys().next().value);
+      placements.set(id, own);
+      return own;
+    };
+    // Tool callbacks name only their session. Ask the host where an unplaced
+    // one lives; when it cannot say, keep forwarding (Libra still binds
+    // exported content to this workspace).
+    const ownSession = async (id) => {
+      const known = placements.get(id);
+      if (known !== undefined) return known;
+      try {
+        const directory = directoryOf((await context.session?.get?.({ sessionID: id }))?.location);
+        if (directory !== undefined) return place(id, directory === cwd);
+      } catch (_error) {}
+      warn("session_location_unavailable");
+      return true;
+    };
     const binaryAvailable = () => {
       try { return statSync(LIBRA_COMMAND).isFile(); } catch (_error) { return false; }
     };
@@ -242,6 +268,15 @@ export default {
         const data = event.data ?? event.properties ?? {};
         const info = data.info;
         const id = data.sessionID ?? info?.sessionID ?? info?.id;
+        if (name === "session.moved") {
+          const destination = directoryOf(data.location);
+          if (destination !== undefined && !place(id, destination === cwd)) end(id, "server.instance.disposed");
+          return;
+        }
+        // Another location's events never reach this plugin's state. An event
+        // without a location stays here unless its session was placed elsewhere.
+        const directory = directoryOf(event.location);
+        if (!place(id, directory === undefined ? placements.get(id) !== false : directory === cwd)) return;
         // Old hosts used separate user-message and text-part events. Flush an
         // empty prompt only when the next event cannot supply that message's text.
         for (const [key, item] of pending) {
@@ -334,14 +369,15 @@ export default {
     const registry = exitRegistry();
     registry.instances.add(flush);
     try {
-      toolRegistration = await context.tool.hook("execute.after", (input) => {
+      toolRegistration = await context.tool.hook("execute.after", async (input) => {
         try {
-          if (disposed || !validId(input?.sessionID) || !start(input.sessionID)) return;
+          const id = input?.sessionID;
           const extra = {};
-          if (typeof input.tool === "string") extra.tool_name = input.tool.slice(0, 512);
-          if (typeof input.id === "string") extra.tool_use_id = input.id.slice(0, 512);
+          if (typeof input?.tool === "string") extra.tool_name = input.tool.slice(0, 512);
+          if (typeof input?.id === "string") extra.tool_use_id = input.id.slice(0, 512);
+          if (disposed || !validId(id) || !(await ownSession(id)) || disposed || !start(id)) return;
           // Do not forward input/result/provider state and never mutate the hook argument.
-          forward(frame("tool.execute.after", input.sessionID, extra), false);
+          forward(frame("tool.execute.after", id, extra), false);
         } catch (_error) { warn("tool_event_skipped"); }
       });
     } catch (_error) { warn("tool_registration_unavailable"); }
@@ -405,7 +441,7 @@ static REVIEWED: ApprovedBuild = ApprovedBuild {
     ],
     builtin_set_digest: "137c5c7b18c756b75e520a6ffdd042397b5c29f917bac383084df5c664dd0e82",
     libra_template: REVIEWED_TEMPLATE,
-    libra_template_digest: "9c67213be10e16538bfa550501a2dcb7a21c24493b3a8f05592f6c96ff4be27d",
+    libra_template_digest: "cd53b2535c3dccd147ea851c8089c405ea84fcfaf2237e4a8284969520bdfdbd",
     event_commands_json: EVENT_COMMANDS_JSON,
     event_map_digest: "3fe0008b685e48e61d2f63a339de2e3510d9c9719dc572794afc6c95ef7d2ebe",
     export_deadline_millis: 30000,
@@ -456,7 +492,7 @@ static REVIEWED_ANTHROPIC: ApprovedBuild = ApprovedBuild {
     ],
     builtin_set_digest: "137c5c7b18c756b75e520a6ffdd042397b5c29f917bac383084df5c664dd0e82",
     libra_template: REVIEWED_TEMPLATE,
-    libra_template_digest: "9c67213be10e16538bfa550501a2dcb7a21c24493b3a8f05592f6c96ff4be27d",
+    libra_template_digest: "cd53b2535c3dccd147ea851c8089c405ea84fcfaf2237e4a8284969520bdfdbd",
     event_commands_json: EVENT_COMMANDS_JSON,
     event_map_digest: "3fe0008b685e48e61d2f63a339de2e3510d9c9719dc572794afc6c95ef7d2ebe",
     export_deadline_millis: 30000,
@@ -653,6 +689,8 @@ mod tests {
     const INDEPENDENT_VECTORS: &str = r####"{
   "prepared_utc": "2026-10-11T08:09:17.512486+00:00",
   "status": "independent Python fixture preparation only; Rust NPR15 implementation/tests UNRUN",
+  "template_repinned_utc": "2026-10-15T08:45:00+00:00",
+  "template_repin": "opencode-2.0.26-v2 location filter: template/rendered digests, rendered sizes and policy pre-images recomputed independently in Python after reproducing every v1 value",
   "SourceA": "UNPROVEN",
   "rows": [
     {
@@ -667,16 +705,16 @@ mod tests {
           "253ec2c2c92c5e0b154de256a3cf1d1ac27f2f03c0119312229d2fe66b9b4cd3"
         ],
         "builtinSetDigest": "137c5c7b18c756b75e520a6ffdd042397b5c29f917bac383084df5c664dd0e82",
-        "libraTemplateDigest": "9c67213be10e16538bfa550501a2dcb7a21c24493b3a8f05592f6c96ff4be27d",
-        "libraRenderedDigest": "e116b0f36e73bc9b0201e3ed0e65743205193233d46f4077a5ffa8a008d6ec6b",
+        "libraTemplateDigest": "cd53b2535c3dccd147ea851c8089c405ea84fcfaf2237e4a8284969520bdfdbd",
+        "libraRenderedDigest": "23c03c773635b1015401c16dfcb240bbf36e698e3e3b45dcfe078639890b5b57",
         "libraCommandPath": "/Applications/Libra.app/Contents/MacOS/libra",
         "eventMapDigest": "3fe0008b685e48e61d2f63a339de2e3510d9c9719dc572794afc6c95ef7d2ebe",
         "exportDeadlineMillis": 30000,
         "transportPolicy": "compiled-native-http-only-v1"
       },
-      "policy_bytes_sha256": "92ca0b7127e92865cfee1ad34b82c4deff63c18cfb8e80514311820ccd067fa5",
-      "policy_preimage_hex": "6c696272612d6f70656e636f64652d6e61746976652d706f6c6963792d76310000000001bac21cc4027896b8d1836133c347d20f00000001000000106f70656e61692d726573706f6e73657300000002061f0c9e9a7b58c124b2282e620b1d01483350b246d38a4a2017002f13878531253ec2c2c92c5e0b154de256a3cf1d1ac27f2f03c0119312229d2fe66b9b4cd3137c5c7b18c756b75e520a6ffdd042397b5c29f917bac383084df5c664dd0e829c67213be10e16538bfa550501a2dcb7a21c24493b3a8f05592f6c96ff4be27de116b0f36e73bc9b0201e3ed0e65743205193233d46f4077a5ffa8a008d6ec6b0000002c2f4170706c69636174696f6e732f4c696272612e6170702f436f6e74656e74732f4d61634f532f6c696272613fe0008b685e48e61d2f63a339de2e3510d9c9719dc572794afc6c95ef7d2ebe000075300000001c636f6d70696c65642d6e61746976652d687474702d6f6e6c792d7631",
-      "rendered_utf8_bytes": 13993
+      "policy_bytes_sha256": "435447c7779c8b028c62ca4adc89ea08490c1bad907cc106f8abf1caf77cf52d",
+      "policy_preimage_hex": "6c696272612d6f70656e636f64652d6e61746976652d706f6c6963792d76310000000001bac21cc4027896b8d1836133c347d20f00000001000000106f70656e61692d726573706f6e73657300000002061f0c9e9a7b58c124b2282e620b1d01483350b246d38a4a2017002f13878531253ec2c2c92c5e0b154de256a3cf1d1ac27f2f03c0119312229d2fe66b9b4cd3137c5c7b18c756b75e520a6ffdd042397b5c29f917bac383084df5c664dd0e82cd53b2535c3dccd147ea851c8089c405ea84fcfaf2237e4a8284969520bdfdbd23c03c773635b1015401c16dfcb240bbf36e698e3e3b45dcfe078639890b5b570000002c2f4170706c69636174696f6e732f4c696272612e6170702f436f6e74656e74732f4d61634f532f6c696272613fe0008b685e48e61d2f63a339de2e3510d9c9719dc572794afc6c95ef7d2ebe000075300000001c636f6d70696c65642d6e61746976652d687474702d6f6e6c792d7631",
+      "rendered_utf8_bytes": 15847
     },
     {
       "policy": {
@@ -690,16 +728,16 @@ mod tests {
           "253ec2c2c92c5e0b154de256a3cf1d1ac27f2f03c0119312229d2fe66b9b4cd3"
         ],
         "builtinSetDigest": "137c5c7b18c756b75e520a6ffdd042397b5c29f917bac383084df5c664dd0e82",
-        "libraTemplateDigest": "9c67213be10e16538bfa550501a2dcb7a21c24493b3a8f05592f6c96ff4be27d",
-        "libraRenderedDigest": "be742723a06b5b26357d5c4a935eca2ee9caf0e377596afcac7605b9cd9938ac",
+        "libraTemplateDigest": "cd53b2535c3dccd147ea851c8089c405ea84fcfaf2237e4a8284969520bdfdbd",
+        "libraRenderedDigest": "62b7798108e8f89839dc2a02663656926fbfe0a291e975c67297e996a665cdd8",
         "libraCommandPath": "/opt/homebrew/bin/libra",
         "eventMapDigest": "3fe0008b685e48e61d2f63a339de2e3510d9c9719dc572794afc6c95ef7d2ebe",
         "exportDeadlineMillis": 30000,
         "transportPolicy": "compiled-native-http-only-v1"
       },
-      "policy_bytes_sha256": "368d6c66e9c605a3989ba815aeb638e78d33834f73dd7192d62337274b1d5753",
-      "policy_preimage_hex": "6c696272612d6f70656e636f64652d6e61746976652d706f6c6963792d76310000000001bac21cc4027896b8d1836133c347d20f00000001000000106f70656e61692d726573706f6e73657300000002061f0c9e9a7b58c124b2282e620b1d01483350b246d38a4a2017002f13878531253ec2c2c92c5e0b154de256a3cf1d1ac27f2f03c0119312229d2fe66b9b4cd3137c5c7b18c756b75e520a6ffdd042397b5c29f917bac383084df5c664dd0e829c67213be10e16538bfa550501a2dcb7a21c24493b3a8f05592f6c96ff4be27dbe742723a06b5b26357d5c4a935eca2ee9caf0e377596afcac7605b9cd9938ac000000172f6f70742f686f6d65627265772f62696e2f6c696272613fe0008b685e48e61d2f63a339de2e3510d9c9719dc572794afc6c95ef7d2ebe000075300000001c636f6d70696c65642d6e61746976652d687474702d6f6e6c792d7631",
-      "rendered_utf8_bytes": 13972
+      "policy_bytes_sha256": "e7038ef1817ba77337f4d6c95b9f7462fcc747f9e5f2b2b4076b8986c6275234",
+      "policy_preimage_hex": "6c696272612d6f70656e636f64652d6e61746976652d706f6c6963792d76310000000001bac21cc4027896b8d1836133c347d20f00000001000000106f70656e61692d726573706f6e73657300000002061f0c9e9a7b58c124b2282e620b1d01483350b246d38a4a2017002f13878531253ec2c2c92c5e0b154de256a3cf1d1ac27f2f03c0119312229d2fe66b9b4cd3137c5c7b18c756b75e520a6ffdd042397b5c29f917bac383084df5c664dd0e82cd53b2535c3dccd147ea851c8089c405ea84fcfaf2237e4a8284969520bdfdbd62b7798108e8f89839dc2a02663656926fbfe0a291e975c67297e996a665cdd8000000172f6f70742f686f6d65627265772f62696e2f6c696272613fe0008b685e48e61d2f63a339de2e3510d9c9719dc572794afc6c95ef7d2ebe000075300000001c636f6d70696c65642d6e61746976652d687474702d6f6e6c792d7631",
+      "rendered_utf8_bytes": 15826
     }
   ]
 }

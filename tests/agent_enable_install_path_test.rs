@@ -1124,7 +1124,7 @@ fn opencode_plugin_template_is_node_child_process() {
         "setup(context)",
         "context.event.subscribe",
         "context.tool.hook(\"execute.after\"",
-        "// libra-plugin-template: opencode-2.0.26-v1",
+        "// libra-plugin-template: opencode-2.0.26-v2",
     ] {
         assert!(
             source.contains(present),

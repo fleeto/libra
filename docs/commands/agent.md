@@ -131,10 +131,17 @@ and a declared role must be `user`. Neither `message` nor `user_prompt` fills a
 missing prompt. The deprecated `session.idle` alias remains accepted, with a
 content-free `legacy_event_alias` tracing warning.
 
-The managed plugin uses the OpenCode 2.0.26 `setup(ctx)` API, a
-location-scoped event subscription and an observe-only tool hook. Refresh it
-with `libra agent enable --agent opencode`: status reports old or edited
-templates, and duplicate managed copies, as not installed until refreshed.
+The managed plugin uses the OpenCode 2.0.26 `setup(ctx)` API, an event
+subscription and an observe-only tool hook. One OpenCode server (for example
+`opencode serve --service`) delivers every project's events to every project's
+plugin, so the plugin forwards only sessions whose `location.directory` is its
+own directory: other projects' sessions never reach this repository, a session
+moved out of the directory is closed here, and a tool call for a session not yet
+placed is attributed through the host's `session.get` (when the host cannot
+answer, it is forwarded as before and `session_location_unavailable` is reported
+once). Refresh it with `libra agent enable --agent opencode`: status reports old
+or edited templates, and duplicate managed copies, as not installed until
+refreshed.
 Node and Bun use the same `node:child_process` transport with the pinned
 absolute Libra filename and `shell:false`. Session/turn boundaries run
 synchronously; tool and compaction observations run asynchronously and never

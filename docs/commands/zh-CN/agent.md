@@ -100,8 +100,12 @@ enqueue 由插件内部合并，不作为独立 lifecycle 输入。
 role 只能为 `user`。`message` 和 `user_prompt` 不会填补缺失 prompt。独立弃用
 alias `session.idle` 仍接受，只记录不含内容的 `legacy_event_alias` tracing 警告。
 
-managed plugin 使用 OpenCode 2.0.26 的 `setup(ctx)` API、location-scoped
-事件订阅和只观察的工具 hook。执行 `libra agent enable --agent opencode`
+managed plugin 使用 OpenCode 2.0.26 的 `setup(ctx)` API、事件订阅和只观察的工具
+hook。一个 OpenCode 服务器（例如 `opencode serve --service`）会把所有项目的事件发给
+每个项目的插件，因此插件只转发 `location.directory` 等于自身目录的 session：其他项目的
+session 不会进入本仓库；移出该目录的 session 会在这里结束；尚未归属的 session 的工具调用
+通过宿主的 `session.get` 判定（宿主无法回答时照旧转发，并只报告一次
+`session_location_unavailable`）。执行 `libra agent enable --agent opencode`
 刷新；旧模板、修改过的模板或双目录 managed 重复副本均不报告 installed=true。
 Node/Bun 共用 `node:child_process`，固定绝对二进制文件名、`shell:false`；
 session/turn 边界同步转发，tool/compaction 异步观察，不修改宿主参数或返回控制字段。

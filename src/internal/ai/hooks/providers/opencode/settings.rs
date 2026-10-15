@@ -44,13 +44,13 @@ pub(super) const LIBRA_MANAGED_MARKER: &str =
 /// Placeholder replaced with the JSON-encoded (i.e. valid JS string literal)
 /// hook command for the pinned Libra binary.
 const LIBRA_COMMAND_PLACEHOLDER: &str = "__LIBRA_COMMAND_JSON__";
-const PLUGIN_REVISION: &str = "// libra-plugin-template: opencode-2.0.26-v1";
+const PLUGIN_REVISION: &str = "// libra-plugin-template: opencode-2.0.26-v2";
 const EVENT_COMMANDS_PLACEHOLDER: &str = "__EVENT_COMMANDS_JSON__";
 const EXPORT_DEADLINE_PLACEHOLDER: &str = "__EXPORT_DEADLINE_MS__";
 
 /// Pinned observe-only plugin; subprocess forwarding works in both Node and Bun.
 const OPENCODE_PLUGIN_TEMPLATE: &str = r#"// libra-managed: do not edit — installed by libra agent enable (AG-19)
-// libra-plugin-template: opencode-2.0.26-v1
+// libra-plugin-template: opencode-2.0.26-v2
 // OpenCode 2.0.26. Observe-only; runs on Node and Bun using agent hooks opencode.
 // OpenCode --pure / OPENCODE_PURE=1 disables external plugins.
 import { spawn, spawnSync } from "node:child_process";
@@ -63,6 +63,7 @@ const FORWARD_TIMEOUT_MS = EXPORT_DEADLINE_MS + 15000;
 const MAX_SESSIONS = 64;
 const MAX_PENDING = 128;
 const MAX_PROMPT = 16384;
+const MAX_PLACEMENTS = 1024;
 const REGISTRY_KEY = Symbol.for("libra.opencode.exit.v2");
 
 function exitRegistry() {
@@ -87,6 +88,10 @@ export default {
     const pending = new Map();
     const seen = new Map();
     const earlyText = new Map();
+    // One OpenCode server hosts every project and delivers each location's
+    // events to every plugin, so a session belongs to this plugin only while
+    // its location is this directory: session id -> owned here.
+    const placements = new Map();
     const warnings = new Set();
     const children = new Set();
     const controller = new AbortController();
@@ -99,6 +104,27 @@ export default {
       try { process.stderr.write("libra opencode: " + reason + "\n"); } catch (_error) {}
     };
     const validId = (id) => typeof id === "string" && id.length > 0 && id.length <= 512;
+    const directoryOf = (location) => typeof location?.directory === "string" ? location.directory : undefined;
+    const place = (id, own) => {
+      if (!validId(id)) return own;
+      placements.delete(id);
+      if (placements.size >= MAX_PLACEMENTS) placements.delete(placements.keys().next().value);
+      placements.set(id, own);
+      return own;
+    };
+    // Tool callbacks name only their session. Ask the host where an unplaced
+    // one lives; when it cannot say, keep forwarding (Libra still binds
+    // exported content to this workspace).
+    const ownSession = async (id) => {
+      const known = placements.get(id);
+      if (known !== undefined) return known;
+      try {
+        const directory = directoryOf((await context.session?.get?.({ sessionID: id }))?.location);
+        if (directory !== undefined) return place(id, directory === cwd);
+      } catch (_error) {}
+      warn("session_location_unavailable");
+      return true;
+    };
     const binaryAvailable = () => {
       try { return statSync(LIBRA_COMMAND).isFile(); } catch (_error) { return false; }
     };
@@ -213,6 +239,15 @@ export default {
         const data = event.data ?? event.properties ?? {};
         const info = data.info;
         const id = data.sessionID ?? info?.sessionID ?? info?.id;
+        if (name === "session.moved") {
+          const destination = directoryOf(data.location);
+          if (destination !== undefined && !place(id, destination === cwd)) end(id, "server.instance.disposed");
+          return;
+        }
+        // Another location's events never reach this plugin's state. An event
+        // without a location stays here unless its session was placed elsewhere.
+        const directory = directoryOf(event.location);
+        if (!place(id, directory === undefined ? placements.get(id) !== false : directory === cwd)) return;
         // Old hosts used separate user-message and text-part events. Flush an
         // empty prompt only when the next event cannot supply that message's text.
         for (const [key, item] of pending) {
@@ -305,14 +340,15 @@ export default {
     const registry = exitRegistry();
     registry.instances.add(flush);
     try {
-      toolRegistration = await context.tool.hook("execute.after", (input) => {
+      toolRegistration = await context.tool.hook("execute.after", async (input) => {
         try {
-          if (disposed || !validId(input?.sessionID) || !start(input.sessionID)) return;
+          const id = input?.sessionID;
           const extra = {};
-          if (typeof input.tool === "string") extra.tool_name = input.tool.slice(0, 512);
-          if (typeof input.id === "string") extra.tool_use_id = input.id.slice(0, 512);
+          if (typeof input?.tool === "string") extra.tool_name = input.tool.slice(0, 512);
+          if (typeof input?.id === "string") extra.tool_use_id = input.id.slice(0, 512);
+          if (disposed || !validId(id) || !(await ownSession(id)) || disposed || !start(id)) return;
           // Do not forward input/result/provider state and never mutate the hook argument.
-          forward(frame("tool.execute.after", input.sessionID, extra), false);
+          forward(frame("tool.execute.after", id, extra), false);
         } catch (_error) { warn("tool_event_skipped"); }
       });
     } catch (_error) { warn("tool_registration_unavailable"); }
@@ -1832,6 +1868,182 @@ await cleanup();
             "libra opencode: session_capacity_exceeded\n"
         );
     }
+    /// Wait (bounded) until an asynchronously forwarded frame, including the
+    /// newline the fake Libra binary appends separately, reaches its log, so
+    /// neither cleanup nor the next frame can interleave with it.
+    #[cfg(unix)]
+    const WAIT_FOR_FRAME: &str = r#"
+const { readFileSync } = await import("node:fs");
+const waitFor = async (needle) => {
+  for (let n = 0; n < 400; n++) {
+    try {
+      const log = readFileSync(process.env.LIBRA_TEST_FORWARD_LOG, "utf8");
+      if (log.includes(needle) && log.endsWith("\n")) return;
+    } catch (_error) {}
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  throw new Error("forwarded frame never arrived: " + needle);
+};
+const here = context.location.directory;
+const there = "/elsewhere/other-project";
+const at = (directory, type, data) => ({ type, location: { directory }, data });
+"#;
+
+    /// One OpenCode server (`opencode serve --service`) hosts every project
+    /// and delivers each location's events to every project's plugin. Only
+    /// sessions whose location is this plugin's directory may reach Libra:
+    /// another project's lifecycle, prompts, idles, disposal and tool calls
+    /// are ignored, including a later location-less event for a session
+    /// already placed elsewhere.
+    #[cfg(unix)]
+    #[test]
+    fn other_location_sessions_are_never_forwarded() {
+        let tail = format!(
+            r#"{WAIT_FOR_FRAME}
+await cleanup();
+context.event.subscribe = () => (async function* () {{
+  yield at(here, "session.created", {{ sessionID: "own-a", location: {{ directory: here }} }});
+  yield at(there, "session.created", {{ sessionID: "foreign-a", location: {{ directory: there }} }});
+  yield at(there, "session.inbox.enqueued", {{ sessionID: "foreign-a", inboxID: "f1", item: {{ type: "user", payload: {{ text: "FOREIGN_PROMPT" }} }} }});
+  yield at(there, "session.inbox.delivered", {{ sessionID: "foreign-a", inboxID: "f1" }});
+  yield at(there, "session.status", {{ sessionID: "foreign-a", status: {{ type: "idle" }} }});
+  yield {{ type: "session.status", data: {{ sessionID: "foreign-a", status: {{ type: "idle" }} }} }};
+  yield at(there, "server.instance.disposed", {{}});
+  yield at(here, "session.status", {{ sessionID: "own-a", status: {{ type: "idle" }} }});
+}})();
+const next = await plugin.setup(context);
+await new Promise(resolve => setImmediate(resolve));
+await tool({{ sessionID: "foreign-a", tool: "bash", id: "call-foreign" }});
+await tool({{ sessionID: "own-a", tool: "bash", id: "call-own" }});
+await waitFor("call-own");
+await next();
+"#
+        );
+        let (frames, output) = run_plugin("node", serde_json::json!([]), &tail, false)
+            .expect("Node required for the cross-location filter gate");
+        let observed: Vec<_> = frames
+            .iter()
+            .map(|frame| {
+                (
+                    frame["session_id"].as_str().unwrap(),
+                    frame["hook_event_name"].as_str().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            observed,
+            [
+                ("own-a", "session.created"),
+                ("own-a", "session.status"),
+                ("own-a", "tool.execute.after"),
+                ("own-a", "server.instance.disposed"),
+            ]
+        );
+        assert_eq!(frames[2]["tool_use_id"], "call-own");
+        assert!(
+            !serde_json::Value::from(frames)
+                .to_string()
+                .contains("FOREIGN")
+        );
+        assert!(output.stdout.is_empty() && output.stderr.is_empty());
+    }
+
+    /// A tool callback names only its session. An unplaced one is attributed
+    /// through the host's `session.get`; when the host cannot say, the call
+    /// is still forwarded (Libra binds exported content to the workspace) and
+    /// the fixed reason is reported once.
+    #[cfg(unix)]
+    #[test]
+    fn tool_callbacks_place_unknown_sessions_through_the_host() {
+        let tail = format!(
+            r#"{WAIT_FOR_FRAME}
+await cleanup();
+context.session = {{ get: async ({{ sessionID }}) => ({{ id: sessionID, location: {{ directory: sessionID.startsWith("own") ? here : there }} }}) }};
+context.event.subscribe = () => (async function* () {{}})();
+const next = await plugin.setup(context);
+await tool({{ sessionID: "foreign-b", tool: "read", id: "call-foreign" }});
+await tool({{ sessionID: "own-b", tool: "read", id: "call-own" }});
+await waitFor("call-own");
+delete context.session;
+await tool({{ sessionID: "unplaced-c", tool: "read", id: "call-unplaced" }});
+await waitFor("call-unplaced");
+await next();
+"#
+        );
+        let (frames, output) = run_plugin("node", serde_json::json!([]), &tail, false)
+            .expect("Node required for the tool placement gate");
+        let observed: Vec<_> = frames
+            .iter()
+            .map(|frame| {
+                (
+                    frame["session_id"].as_str().unwrap(),
+                    frame["hook_event_name"].as_str().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            observed,
+            [
+                ("own-b", "session.created"),
+                ("own-b", "tool.execute.after"),
+                ("unplaced-c", "session.created"),
+                ("unplaced-c", "tool.execute.after"),
+                ("own-b", "server.instance.disposed"),
+                ("unplaced-c", "server.instance.disposed"),
+            ]
+        );
+        assert!(output.stdout.is_empty());
+        assert_eq!(
+            String::from_utf8_lossy(&output.stderr),
+            "libra opencode: session_location_unavailable\n"
+        );
+    }
+
+    /// A session moved out of this directory is closed here and stops
+    /// forwarding; one moved in is captured from its next event.
+    #[cfg(unix)]
+    #[test]
+    fn moved_sessions_follow_their_location() {
+        let tail = format!(
+            r#"{WAIT_FOR_FRAME}
+await cleanup();
+context.event.subscribe = () => (async function* () {{
+  yield at(here, "session.created", {{ sessionID: "mover", location: {{ directory: here }} }});
+  yield at(here, "session.moved", {{ sessionID: "mover", location: {{ directory: there }} }});
+  yield at(there, "session.status", {{ sessionID: "mover", status: {{ type: "idle" }} }});
+  yield {{ type: "session.status", data: {{ sessionID: "mover", status: {{ type: "idle" }} }} }};
+  yield at(there, "session.moved", {{ sessionID: "returner", location: {{ directory: here }} }});
+  yield at(here, "session.status", {{ sessionID: "returner", status: {{ type: "idle" }} }});
+}})();
+const next = await plugin.setup(context);
+await new Promise(resolve => setImmediate(resolve));
+await next();
+"#
+        );
+        let (frames, output) = run_plugin("node", serde_json::json!([]), &tail, false)
+            .expect("Node required for the moved-session gate");
+        let observed: Vec<_> = frames
+            .iter()
+            .map(|frame| {
+                (
+                    frame["session_id"].as_str().unwrap(),
+                    frame["hook_event_name"].as_str().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            observed,
+            [
+                ("mover", "session.created"),
+                ("mover", "server.instance.disposed"),
+                ("returner", "session.created"),
+                ("returner", "session.status"),
+                ("returner", "server.instance.disposed"),
+            ]
+        );
+        assert!(output.stdout.is_empty() && output.stderr.is_empty());
+    }
+
     #[cfg(unix)]
     #[test]
     fn early_text_capacity_rolls_without_disabling_later_user_prompts() {

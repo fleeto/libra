@@ -33,7 +33,8 @@ use std::{
 
 pub use schema::{
     DatabaseRole, create_database_for_role, establish_connection_for_role,
-    establish_connection_with_busy_timeout_for_role, inspect_database_schema_for_role,
+    establish_connection_with_busy_timeout_for_role,
+    establish_connection_with_lock_timeout_for_role, inspect_database_schema_for_role,
     upgrade_database_schema_for_role,
 };
 use sea_orm::{
@@ -116,20 +117,43 @@ fn normalize_path_for_sqlite(db_path: &str) -> String {
 /// - A schema *newer* than this binary supports is surfaced as `IOError::other`
 ///   with an "install a newer Libra binary" hint (it cannot be migrated down).
 pub async fn establish_connection(db_path: &str) -> Result<DatabaseConnection, IOError> {
-    establish_connection_with_busy_timeout(db_path, Duration::from_secs(30)).await
+    establish_connection_with_busy_timeout(db_path, DEFAULT_CONNECTION_TIMEOUT).await
 }
+
+/// The busy timeout and open budget of an ordinary connection.
+pub(crate) const DEFAULT_CONNECTION_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Establish a SQLite connection with a caller-specified busy timeout.
 ///
-/// This is useful for best-effort/background jobs that should fail fast on lock
-/// contention instead of waiting for long periods. Like
+/// The timeout bounds the whole open as well: it is also the pool's
+/// connect/acquire timeout, so a caller with a hard deadline (the managed hook
+/// hot path) never waits longer for any part of it. Like
 /// [`establish_connection`], it brings the schema up to date by applying any
-/// pending migrations on open.
+/// pending migrations on open. Callers that only want to give up quickly on
+/// lock contention use [`establish_connection_with_lock_timeout`] instead.
 pub async fn establish_connection_with_busy_timeout(
     db_path: &str,
     busy_timeout: Duration,
 ) -> Result<DatabaseConnection, IOError> {
     establish_connection_with_busy_timeout_for_role(db_path, busy_timeout, DatabaseRole::Repository)
+        .await
+}
+
+/// Establish a SQLite connection whose `lock_timeout` bounds only waits for
+/// another connection's lock, while opening keeps the ordinary 30-second
+/// budget (or `lock_timeout`, if that is longer).
+///
+/// For best-effort/background work that should fail fast on lock contention
+/// but must not fail merely because opening was slow: every fresh connection
+/// loads the full schema (its `synchronous = FULL` pragma requires it), which
+/// can take far longer than a short lock wait on a loaded host. A lock held by
+/// another connection still fails the open after `lock_timeout`. Like
+/// [`establish_connection`], it applies pending migrations on open.
+pub async fn establish_connection_with_lock_timeout(
+    db_path: &str,
+    lock_timeout: Duration,
+) -> Result<DatabaseConnection, IOError> {
+    establish_connection_with_lock_timeout_for_role(db_path, lock_timeout, DatabaseRole::Repository)
         .await
 }
 
@@ -146,6 +170,20 @@ pub(crate) async fn open_connection_without_schema_management(
     db_path: &str,
     busy_timeout: Duration,
 ) -> Result<DatabaseConnection, IOError> {
+    // A caller selecting a short SQLite busy timeout (notably the managed
+    // hook hot path) must not still wait for SeaORM's independent default
+    // pool-acquire timeout before that pragma can take effect.
+    open_connection_without_schema_management_within(db_path, busy_timeout, busy_timeout).await
+}
+
+/// [`open_connection_without_schema_management`] with the pool's
+/// connect/acquire timeout (`open_timeout`) independent of SQLite's busy
+/// timeout.
+pub(crate) async fn open_connection_without_schema_management_within(
+    db_path: &str,
+    busy_timeout: Duration,
+    open_timeout: Duration,
+) -> Result<DatabaseConnection, IOError> {
     if !Path::new(db_path).exists() {
         return Err(IOError::new(
             ErrorKind::NotFound,
@@ -156,10 +194,7 @@ pub(crate) async fn open_connection_without_schema_management(
     let normalized_path = normalize_path_for_sqlite(db_path);
     let mut option = ConnectOptions::new(format!("sqlite://{normalized_path}"));
     option.sqlx_logging(false); // TODO use better option
-    // A caller selecting a short SQLite busy timeout (notably the managed
-    // hook hot path) must not still wait for SeaORM's independent default
-    // pool-acquire timeout before that pragma can take effect.
-    option.connect_timeout(busy_timeout);
+    option.connect_timeout(open_timeout);
     option.map_sqlx_sqlite_pool_opts(sqlite_pool_options);
     // Recovery-critical durability (lore.md 2.6 / _general.md §12): the
     // sequencer, refs, reflog, and config all live here, so every commit MUST
@@ -851,6 +886,81 @@ mod tests {
             options.iter().any(|option| option == "DEFAULT_MEMSTATUS=0"),
             "the bundled SQLite must be compiled with SQLITE_DEFAULT_MEMSTATUS=0 \
              (LIBSQLITE3_FLAGS in .cargo/config.toml); compile options: {options:?}"
+        );
+    }
+
+    /// A short lock timeout must not also bound the open: opening parses the
+    /// whole schema (`synchronous = FULL` needs it), which can outlast a short
+    /// lock wait on a loaded host. The busy-timeout helper keeps bounding the
+    /// whole open, which the managed hook's hard deadline relies on.
+    #[tokio::test]
+    async fn lock_timeout_bounds_only_lock_waits_but_busy_timeout_bounds_the_open() {
+        async fn busy_timeout(conn: &DatabaseConnection) -> Duration {
+            let row = conn
+                .query_one_raw(Statement::from_string(
+                    conn.get_database_backend(),
+                    "PRAGMA busy_timeout",
+                ))
+                .await
+                .unwrap()
+                .expect("PRAGMA busy_timeout returns a row");
+            Duration::from_millis(u64::try_from(row.try_get_by_index::<i64>(0).unwrap()).unwrap())
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("libra.db");
+        let path = path.to_str().unwrap();
+        create_database(path).await.unwrap();
+
+        for (lock_timeout, open_timeout) in [
+            (Duration::from_millis(50), DEFAULT_CONNECTION_TIMEOUT),
+            (Duration::from_secs(45), Duration::from_secs(45)),
+        ] {
+            let conn = establish_connection_with_lock_timeout(path, lock_timeout)
+                .await
+                .unwrap();
+            assert_eq!(busy_timeout(&conn).await, lock_timeout);
+            assert_eq!(
+                conn.get_sqlite_connection_pool()
+                    .options()
+                    .get_acquire_timeout(),
+                open_timeout
+            );
+        }
+
+        let deadline = Duration::from_secs(5);
+        let conn = establish_connection_with_busy_timeout(path, deadline)
+            .await
+            .unwrap();
+        assert_eq!(busy_timeout(&conn).await, deadline);
+        assert_eq!(
+            conn.get_sqlite_connection_pool()
+                .options()
+                .get_acquire_timeout(),
+            deadline
+        );
+
+        // A lock held by another connection still fails the open after the
+        // lock timeout, not after the open budget.
+        let locker = establish_connection(path).await.unwrap();
+        locker
+            .execute_unprepared("PRAGMA journal_mode = DELETE")
+            .await
+            .unwrap();
+        locker.execute_unprepared("BEGIN EXCLUSIVE").await.unwrap();
+        let lock_timeout = Duration::from_millis(50);
+        let started = std::time::Instant::now();
+        let blocked = establish_connection_with_lock_timeout(path, lock_timeout).await;
+        let waited = started.elapsed();
+        locker.execute_unprepared("ROLLBACK").await.unwrap();
+        let error = blocked.expect_err("an exclusive lock must fail the open");
+        assert!(
+            error.to_string().contains("database is locked"),
+            "unexpected open error: {error}"
+        );
+        assert!(
+            waited < Duration::from_secs(10),
+            "the open gave up on the lock only after {waited:?}"
         );
     }
 

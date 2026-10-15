@@ -1042,4 +1042,123 @@ mod tests {
             "Native-origin issuer already exists; do not reactivate an old key, prepare a new private installation for rotation"
         );
     }
+
+    // Frozen public data from signed6685b82a's 9c672 legacy recipe, never from
+    // the current catalog's render_observer/installation_policy. The first two
+    // policies match its independent byte/digest vectors; the .2 policies use
+    // its frozen public protocols/endpoints with the same rendered digests,
+    // independently encoded before this regression was added. Keys and paths
+    // below are synthetic data only: no registration, authority or Source A.
+    // Tuple: closed old registry wire, rejected cd53 render digest/policy digest.
+    const LEGACY_REGISTRY_ORIGINAL_RECIPE_GOLD: [(&str, &str, &str); 4] = [
+        (
+            r#"{"version":1,"epoch":7,"issuers":[{"issuer":"4bb06f8e4e3a7715d201d573d0aa423762e55dabd61a2c02278fa56cc6d294e0","publicKey":"0707070707070707070707070707070707070707070707070707070707070707","keyGeneration":1,"buildIdentity":"bac21cc4027896b8d1836133c347d20f","producerVersion":"2.0.26-libra-native.1","producerBinaryDigest":"547c36eb928da163ef61d019bad669860d519f2da0b67737c9a3920e831c9196","producerPath":"/Applications/LibraRegistryFixture.app/Contents/MacOS/opencode","policyDescriptor":{"version":1,"buildIdentity":"bac21cc4027896b8d1836133c347d20f","protocols":["openai-responses"],"endpointDigests":["061f0c9e9a7b58c124b2282e620b1d01483350b246d38a4a2017002f13878531","253ec2c2c92c5e0b154de256a3cf1d1ac27f2f03c0119312229d2fe66b9b4cd3"],"builtinSetDigest":"137c5c7b18c756b75e520a6ffdd042397b5c29f917bac383084df5c664dd0e82","libraTemplateDigest":"9c67213be10e16538bfa550501a2dcb7a21c24493b3a8f05592f6c96ff4be27d","eventMapDigest":"3fe0008b685e48e61d2f63a339de2e3510d9c9719dc572794afc6c95ef7d2ebe","exportDeadlineMillis":30000,"transportPolicy":"compiled-native-http-only-v1","libraCommandPath":"/Applications/Libra.app/Contents/MacOS/libra","libraRenderedDigest":"e116b0f36e73bc9b0201e3ed0e65743205193233d46f4077a5ffa8a008d6ec6b"},"policyDigest":"92ca0b7127e92865cfee1ad34b82c4deff63c18cfb8e80514311820ccd067fa5","state":"active"}]}"#,
+            "23c03c773635b1015401c16dfcb240bbf36e698e3e3b45dcfe078639890b5b57",
+            "435447c7779c8b028c62ca4adc89ea08490c1bad907cc106f8abf1caf77cf52d",
+        ),
+        (
+            r#"{"version":1,"epoch":7,"issuers":[{"issuer":"4bb06f8e4e3a7715d201d573d0aa423762e55dabd61a2c02278fa56cc6d294e0","publicKey":"0707070707070707070707070707070707070707070707070707070707070707","keyGeneration":1,"buildIdentity":"bac21cc4027896b8d1836133c347d20f","producerVersion":"2.0.26-libra-native.1","producerBinaryDigest":"547c36eb928da163ef61d019bad669860d519f2da0b67737c9a3920e831c9196","producerPath":"/Applications/LibraRegistryFixture.app/Contents/MacOS/opencode","policyDescriptor":{"version":1,"buildIdentity":"bac21cc4027896b8d1836133c347d20f","protocols":["openai-responses"],"endpointDigests":["061f0c9e9a7b58c124b2282e620b1d01483350b246d38a4a2017002f13878531","253ec2c2c92c5e0b154de256a3cf1d1ac27f2f03c0119312229d2fe66b9b4cd3"],"builtinSetDigest":"137c5c7b18c756b75e520a6ffdd042397b5c29f917bac383084df5c664dd0e82","libraTemplateDigest":"9c67213be10e16538bfa550501a2dcb7a21c24493b3a8f05592f6c96ff4be27d","eventMapDigest":"3fe0008b685e48e61d2f63a339de2e3510d9c9719dc572794afc6c95ef7d2ebe","exportDeadlineMillis":30000,"transportPolicy":"compiled-native-http-only-v1","libraCommandPath":"/opt/homebrew/bin/libra","libraRenderedDigest":"be742723a06b5b26357d5c4a935eca2ee9caf0e377596afcac7605b9cd9938ac"},"policyDigest":"368d6c66e9c605a3989ba815aeb638e78d33834f73dd7192d62337274b1d5753","state":"active"}]}"#,
+            "62b7798108e8f89839dc2a02663656926fbfe0a291e975c67297e996a665cdd8",
+            "e7038ef1817ba77337f4d6c95b9f7462fcc747f9e5f2b2b4076b8986c6275234",
+        ),
+        (
+            r#"{"version":1,"epoch":7,"issuers":[{"issuer":"4bb06f8e4e3a7715d201d573d0aa423762e55dabd61a2c02278fa56cc6d294e0","publicKey":"0707070707070707070707070707070707070707070707070707070707070707","keyGeneration":1,"buildIdentity":"78c1f19e9249da8d0143a079f90aec9a","producerVersion":"2.0.26-libra-native.2","producerBinaryDigest":"28174e893a2b63b75f58af4c77212747f6e1eebce5dd0252cfe64847b342615c","producerPath":"/Applications/LibraRegistryFixture.app/Contents/MacOS/opencode","policyDescriptor":{"version":1,"buildIdentity":"78c1f19e9249da8d0143a079f90aec9a","protocols":["anthropic-messages","openai-responses"],"endpointDigests":["061f0c9e9a7b58c124b2282e620b1d01483350b246d38a4a2017002f13878531","253ec2c2c92c5e0b154de256a3cf1d1ac27f2f03c0119312229d2fe66b9b4cd3","4d87d389c2853ef2ee92e297146b3576d59c343900f70d099f6ed977573bcae0"],"builtinSetDigest":"137c5c7b18c756b75e520a6ffdd042397b5c29f917bac383084df5c664dd0e82","libraTemplateDigest":"9c67213be10e16538bfa550501a2dcb7a21c24493b3a8f05592f6c96ff4be27d","eventMapDigest":"3fe0008b685e48e61d2f63a339de2e3510d9c9719dc572794afc6c95ef7d2ebe","exportDeadlineMillis":30000,"transportPolicy":"compiled-native-http-only-v1","libraCommandPath":"/Applications/Libra.app/Contents/MacOS/libra","libraRenderedDigest":"e116b0f36e73bc9b0201e3ed0e65743205193233d46f4077a5ffa8a008d6ec6b"},"policyDigest":"794e9116fe4c244f6f553168f31a8cb54d9d004e66df274b15e4e7b49939f16a","state":"active"}]}"#,
+            "23c03c773635b1015401c16dfcb240bbf36e698e3e3b45dcfe078639890b5b57",
+            "a886b39e5f3de6e8fb35bdc95ed9930af34bd401a376920e4ac2db8629427b32",
+        ),
+        (
+            r#"{"version":1,"epoch":7,"issuers":[{"issuer":"4bb06f8e4e3a7715d201d573d0aa423762e55dabd61a2c02278fa56cc6d294e0","publicKey":"0707070707070707070707070707070707070707070707070707070707070707","keyGeneration":1,"buildIdentity":"78c1f19e9249da8d0143a079f90aec9a","producerVersion":"2.0.26-libra-native.2","producerBinaryDigest":"28174e893a2b63b75f58af4c77212747f6e1eebce5dd0252cfe64847b342615c","producerPath":"/Applications/LibraRegistryFixture.app/Contents/MacOS/opencode","policyDescriptor":{"version":1,"buildIdentity":"78c1f19e9249da8d0143a079f90aec9a","protocols":["anthropic-messages","openai-responses"],"endpointDigests":["061f0c9e9a7b58c124b2282e620b1d01483350b246d38a4a2017002f13878531","253ec2c2c92c5e0b154de256a3cf1d1ac27f2f03c0119312229d2fe66b9b4cd3","4d87d389c2853ef2ee92e297146b3576d59c343900f70d099f6ed977573bcae0"],"builtinSetDigest":"137c5c7b18c756b75e520a6ffdd042397b5c29f917bac383084df5c664dd0e82","libraTemplateDigest":"9c67213be10e16538bfa550501a2dcb7a21c24493b3a8f05592f6c96ff4be27d","eventMapDigest":"3fe0008b685e48e61d2f63a339de2e3510d9c9719dc572794afc6c95ef7d2ebe","exportDeadlineMillis":30000,"transportPolicy":"compiled-native-http-only-v1","libraCommandPath":"/opt/homebrew/bin/libra","libraRenderedDigest":"be742723a06b5b26357d5c4a935eca2ee9caf0e377596afcac7605b9cd9938ac"},"policyDigest":"3593923e7f7e5b86048bc192a66b3b75a7872fe97891846747b94f34dbd867d8","state":"active"}]}"#,
+            "62b7798108e8f89839dc2a02663656926fbfe0a291e975c67297e996a665cdd8",
+            "8f804c39f6ca01a752fcf04e6e531a3f9e6dbe7fc97b88444a1627bcf7bb6e57",
+        ),
+    ];
+
+    fn legacy_registry_original_recipe_wire(index: usize, state: &str) -> Vec<u8> {
+        let mut wire: serde_json::Value =
+            serde_json::from_str(LEGACY_REGISTRY_ORIGINAL_RECIPE_GOLD[index].0).unwrap();
+        wire["issuers"][0]["state"] = serde_json::json!(state);
+        serde_json::to_vec(&wire).unwrap()
+    }
+
+    #[test]
+    fn legacy_registry_original_recipe_rows_remain_readable() {
+        // read_with_conn uses this exact closed decoder and validator after its
+        // storage guards. No DB, current trust, challenge or state change occurs.
+        for index in 0..LEGACY_REGISTRY_ORIGINAL_RECIPE_GOLD.len() {
+            for (state_name, state) in [
+                ("active", IssuerState::Active),
+                ("verify-only", IssuerState::VerifyOnly),
+                ("revoked", IssuerState::Revoked),
+            ] {
+                let wire = legacy_registry_original_recipe_wire(index, state_name);
+                let registry: Registry = decode_owned(&wire).unwrap();
+                let before = registry.clone();
+                let record = &registry.issuers[0];
+                assert_eq!(registry.version, 1);
+                assert_eq!(registry.epoch, 7);
+                assert_eq!(record.state, state);
+                assert_eq!(
+                    hex::encode(Sha256::digest(
+                        codec::policy_bytes(&record.policy_descriptor).unwrap()
+                    )),
+                    record.policy_digest,
+                    "independently frozen policy digest, case {index}"
+                );
+                registry.validate().unwrap_or_else(|error| {
+                    panic!("original legacy policy case {index}/{state_name}: {error}")
+                });
+                assert_eq!(registry, before, "read validation must retain every state");
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_registry_original_recipe_binding_tamper_is_rejected() {
+        for (index, gold) in LEGACY_REGISTRY_ORIGINAL_RECIPE_GOLD.iter().enumerate() {
+            let wire = legacy_registry_original_recipe_wire(index, "revoked");
+            let original: Registry = decode_owned(&wire).unwrap();
+            original.validate().unwrap();
+
+            let mut extra: serde_json::Value = serde_json::from_slice(&wire).unwrap();
+            extra["issuers"][0]["unreviewedField"] = serde_json::json!(true);
+            assert!(decode_owned::<Registry>(&serde_json::to_vec(&extra).unwrap()).is_err());
+
+            let mut wrong_command = original.clone();
+            wrong_command.issuers[0]
+                .policy_descriptor
+                .libra_command_path = "/Applications/OtherLibra.app/Contents/MacOS/libra".into();
+            assert!(wrong_command.validate().is_err());
+
+            let mut wrong_digest = original.clone();
+            wrong_digest.issuers[0]
+                .policy_digest
+                .replace_range(0..1, "0");
+            assert!(wrong_digest.validate().is_err());
+
+            // Self-consistent policy bytes from the unreleased cd53 template
+            // remain invalid for these immutable old producer identities.
+            let mut current_template = original.clone();
+            let record = &mut current_template.issuers[0];
+            record.policy_descriptor.libra_template_digest =
+                "cd53b2535c3dccd147ea851c8089c405ea84fcfaf2237e4a8284969520bdfdbd".into();
+            record.policy_descriptor.libra_rendered_digest = gold.1.into();
+            record.policy_digest = gold.2.into();
+            assert_eq!(
+                hex::encode(Sha256::digest(
+                    codec::policy_bytes(&record.policy_descriptor).unwrap()
+                )),
+                record.policy_digest
+            );
+            assert!(current_template.validate().is_err());
+
+            let other_wire = legacy_registry_original_recipe_wire((index + 2) % 4, "revoked");
+            let other: Registry = decode_owned(&other_wire).unwrap();
+            let mut crossed = original.clone();
+            crossed.issuers[0].policy_descriptor = other.issuers[0].policy_descriptor.clone();
+            crossed.issuers[0].policy_digest = other.issuers[0].policy_digest.clone();
+            assert!(crossed.validate().is_err());
+            assert_eq!(original.issuers[0].state, IssuerState::Revoked);
+            assert_eq!(original.epoch, 7);
+        }
+    }
 }

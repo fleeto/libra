@@ -796,14 +796,17 @@ macOS本地内容门是`agent_local_capture_smoke_test`中的
 
 ### 私有 native-origin issuer 登记（macOS）
 
-普通 `agent rpc trust opencode` 只固定 exporter binary，不登记 issuer，也不证明 reasoning 的 native 来源。此登记路径要求独立安装、已审查的 macOS arm64 `2.0.26-libra-native.1` 私有 producer。先用当前 Libra 可执行文件安装 OpenCode 观察器，再按该私有交付包的初始化说明准备一个新的 owned 安装目录；全局 OpenCode 保持独立。
+普通 `agent rpc trust opencode` 只固定 exporter binary，不登记 issuer，也不证明 reasoning 的 native 来源。历史 native 路径要求独立安装、已审查的 macOS arm64 `2.0.26-libra-native.1` 或 `.2` producer，以及为当前 canonical Libra 可执行文件路径渲染的精确冻结 v1 observer recipe。按已审私有交付包的说明，在隔离、owned 的环境准备该观察器；全局 OpenCode 保持独立。
 
-不可变目录另钉住独立的 `2.0.26-libra-native.2` 候选（build `78c1f19e9249da8d0143a079f90aec9a`，macOS arm64 binary SHA-256 `28174e893a2b63b75f58af4c77212747f6e1eebce5dd0252cfe64847b342615c`）。新增 endpoint descriptor v2 只允许第一方 `anthropic-messages` 路由使用精确 URL `https://api.anthropic.com/v1/messages?beta=true`；receipt 与 Ed25519 安装挑战仍为 v1。Anthropic-compatible、代理与改写 URL 均不匹配。选择 `.2` 仍需实测 binary、新私有安装与 key、显式 exporter trust、按 epoch 显式登记 issuer；`.1` 旧 issuer 可保留为 verify-only，不自动提升旧 key。`.1` 仍是当前本地内容验收基线。目录匹配或合成测试不证明真实 `signature`/`redactedData` 的来源与归档资格；`reasoningEncryptedContent` 仍延期。依赖账号/模型的检查只在本机手工执行，不进入 CI。
+不可变目录另钉住独立的 `2.0.26-libra-native.2` 候选（build `78c1f19e9249da8d0143a079f90aec9a`，macOS arm64 binary SHA-256 `28174e893a2b63b75f58af4c77212747f6e1eebce5dd0252cfe64847b342615c`）。新增 endpoint descriptor v2 只允许第一方 `anthropic-messages` 路由使用精确 URL `https://api.anthropic.com/v1/messages?beta=true`；receipt 与 Ed25519 安装挑战仍为 v1。Anthropic-compatible、代理与改写 URL 均不匹配。选择 `.2` 仍需实测 binary、新私有安装与 key、显式 exporter trust、按 epoch 显式登记 issuer；`.1` 旧 issuer 可保留为 verify-only，不自动提升旧 key。`.1` 仍是冻结的历史 NPR-18 harness 基线，不是当前普通 OpenCode 基线。目录匹配或合成测试不证明真实 `signature`/`redactedData` 的来源与归档资格；`reasoningEncryptedContent` 仍延期。依赖账号/模型的检查只在本机手工执行，不进入 CI。
+
+历史 v1 观察器与当前普通 v2 观察器不同，**没有按目录过滤**，禁止用于共享多项目 OpenCode server。优先使用当前普通采集；任何 legacy 使用都必须隔离为每个 server 仅一个仓库。`agent doctor`/观察器状态因当前检测要求 v2 header，会把旧 v1 报为未安装。`libra agent enable --agent opencode` 会把 managed v1 替换为 v2，导致旧私有 recipe 不匹配。因此，通用重装或 `agent enable` 不是 legacy issuer 登记的修复方式。本兼容修复不改变普通插件的目录过滤，也不新增 legacy 安装器。
+
+下面登记示例以精确的已审历史观察器已就位为前提，刻意不执行 `agent enable`。正式安装版兼容门使用新的 owned 仓库、HOME、XDG 目录与 epoch-0 registry，保留原 `.2` 公开 descriptor 和 issuer/key 不变；仅由实测 producer 的登记挑战访问原 key。不运行 Session、账号/模型请求或 OpenCode server，清理时撤销新 registry。成功仅证明登记兼容，不证明 Source A、当前 `.3` producer 或真实 native 字段归档。
 
 ```sh
 libra agent rpc trust --dir /absolute/approved-private/bin
 libra agent rpc trust opencode
-libra agent enable --agent opencode
 libra agent rpc trust opencode \
   --native-origin-manifest /absolute/private-installation/installation.json \
   --native-origin-expected-epoch 0
@@ -816,6 +819,9 @@ libra agent rpc trust opencode \
 实际 producer 必须在 30 秒内成功回答一次新随机、独立 domain 的 Ed25519 challenge，stdout 上限 4096 bytes，stderr 有界捕获且失败时不回显。随后在同一写事务中重查当前 trust 和 trusted dirs、执行 expected-epoch CAS，只提交一个完整 registry 值。重复物理行、大小写 alias、encrypted/malformed/超限记录均拒绝，不自动修复。上限 64 KiB / 128 issuer；不删除吊销历史腾位置。
 
 新的独立安装 key 为 active，旧 active 转 verify-only；已有 issuer 不由登记或普通 re-trust 重新激活。登记成功仅证明安装 key/binary 关联，不代表 native 字段或归档验收通过；仍须验证 receipt 签名、当前许可、来源坐标和原字段，未知来源保持 partial。JSON 输出中的当前 Libra executable SHA256 仅用于本机 transient 审计，不进入 signed policy，也不固定为历史 Libra 构建。
+
+若人工针对未发布开发版 `cd53…` observer policy 建立了未许可记录，仍会拒绝。请完整保留并备份 registry 和仓库，暂停该仓库受影响的 native 登记/归档，等待单独审查的修复；不得删行、自动迁移或把记录视为已许可。有界兼容检查不代表扫描了所有用户仓库；可在新的隔离工作区使用受支持的普通采集，但不能声称原仓库已修复。
+
 
 
 ### OpenCode native-origin 轮换与撤销

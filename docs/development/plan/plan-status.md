@@ -1,5 +1,9 @@
 # 计划执行状况总表（plan-status.md）
 
+> **FIX-OG-OBSERVER-RECIPE-01 本地验收已过、源码交付待（2026-10-15 23:18:52 UTC）：** 已actual通过原16/16本机登记、37/37 native unit、109/109 hook/docs、fmt严格clippy及修复后49双env T1：`Summary [1118.151s] 10219 tests run: 10219 passed (2 slow, 1 leaky), 23 skipped` / exit0，2048输入前后相同，raw `d7c23044d3d2564702c8b9088c990ed50345776132289e2f2374fdc063664b21`。最终代码Claude、signed main/cf和网站部署仍待；实际全部交付后才source-qualified、父source61→62/72=86.11%，此前61/72。formal59/72=81.94%，COV source25/26/formal0不变；不是卡done。下一COV2-REL-01，最终repaired bumped源码新T2及原installed-F .2 epoch0/完整C-D仍需；SourceA/current3未放行。
+
+> **当前兼容修复实施（2026-10-15 22:35:29 UTC）：** G09 已由 signed+DCO main `3158302c0eab2994bae571d3268542ec7c0970ab` 实际 Push/freshremote 采纳，FIX-OG-OBSERVER-RECIPE-01 开工。新独立 gold 回归在未修复 cd53 catalog 上实测 FAIL（1/1，raw `e6fc8c2cd22bd47e9b417747550c8e761c0980b82fef0a946ad65c94a4ec7456`）；已合入精确历史 recipe 及 cfg(test) 修复，GREEN/49 T1/单审/源码交付与网站部署待验。不新增完成数：parent formal59/72=81.94%、source61/72=84.72%；COV source25/26=96.15%、formal0/26。默认普通 v2 目录过滤源码原 SHA/mode 不变；下一 COV2-REL-01，旧候选50 full不能覆盖真实修复。Source A/current3/installed-F/C-D 未放行。
+
 > **当前G09兼容修复候选（由本次signed main采纳生效）：** 新增FIX-OG-OBSERVER-RECIPE-01，parent72卡/formal59/72=81.94%/source61/72=84.72%，不增加完成数；COV仍25/26 source、0/26正式。首次旧候选50 full已actual10216 PASS（2flaky），但历史producer recipe兼容缺口阻止发布冻结；先新修复卡，再COVREL最终源码复测/发布。下面旧时点统计保持历史，不代表当前门已通过。
 
 > **历史开工快照（已由上方G09阻断/后续修复顺序覆盖）：COV2-17已actual交付，COV2-REL-01开工。** main7350099，25/26=96.15%源码就绪，DEP-OG-13 source-ready；formal0家族C/D。当前patch候选0.30.50，首次bumped最终源码全量/本机门尚待；父formal59/71不变。
@@ -2846,7 +2850,7 @@ COVsource仍25/26、formal0家族C/D、父formal59/71/source61/71。Release 12AC
 | 协调项 | 当前规范/owner/证据/失败路径 |
 |---|---|
 | DEP-COV2-OBSERVER-RECIPE | incoming：parent FIX-OG-OBSERVER-RECIPE-01→COV2-REL-01。root sourceowner交出exact源manifest/SHA/mode、gold/负例、全native/hook/docs/fmt/strict、actual49T1、soleClaude PASS、signed+DCO main及freshremote/archive；未齐则pending并阻freeze。只等source deliverables，不等下游Acceptance，避免C/D环。 |
-| 发布分组与单写者 | 新卡是COVREL显式familychild，I9root＋site1，prod2保守计数/2落点/6AC6VER，独立sourcecommit，不写R；COVREL仍I3/R4和12AC12VER、prod0。root暂停pre-freeze发布候选，先授新卡legacy-only排他slot；没有current`.3` sharedgrant，也不改原SRC029/RUN029/OG24当前6AC8VER。 |
+| 发布分组与单写者 | 新卡是COVREL显式familychild，I10root＋site1，prod3 touched保守（1runtime+2test-only）/3落点/6AC6VER，独立sourcecommit，不写R；COVREL仍I3/R4和12AC12VER、prod0。root暂停pre-freeze发布候选，先授新卡legacy-only排他slot；没有current`.3` sharedgrant，也不改原SRC029/RUN029/OG24当前6AC8VER。 |
 | 追溯/测试矩阵 | catalog静态漂移→新卡VER1/3；旧registry各状态重读→VER2；公开docs/site→VER4；sourcequalification/T1→VER5；既有COVREL VER2/12 installed-F原`.2`freshownedepoch0与完整C/D→VER6。普通插件目录隔离源码与既有回归保持。 |
 | 里程碑与回滚 | 新卡source-ready才重启COVREL冻结；actualC/D后新卡done/complete。FAST-OG-04下游C/D独立pending，current3/SourceA未闭。发布前修复只前滚源码；发布后immutable tag/assets不得改，缺陷新patch前滚。 |
 | 风险/边界 | restore的是已审历史完整recipe，不能从descriptor反向扩catalog、替换binary hash、接受任意新template或让revoked重新active。所有旧catalog条件/priortrust/challenge/CAS/epoch/permission保留；`.2`安装门成功仍不等SourceA。 |
@@ -2864,4 +2868,26 @@ COVsource仍25/26、formal0家族C/D、父formal59/71/source61/71。Release 12AC
 
 必须逐字恢复signed6685 INDEPENDENT_VECTORS、明确改npr_15_policy旧catalog==default耦合为13600B/9c672独立gold及currentv2拒绝；LEGACY_V1_TEMPLATE不可跟默认漂移。精确修复observer错误Display及pin。不删回归、不改当前settings。所有5文档明确v1无目录隔离（shared多项目服务禁止；优先ordinary当前路径）、doctor/status为not-installed、agent enable覆盖旧v1而破坏legacy匹配；本release原`.2`ownedepoch0门只放精确旧observer、不调用enable、不运行Session/account/model或shared服务。R1FAIL保留，原raw6f2ad28f…；source/注册未实施。
 
-只读6个具名persistent roots没有cd53策略行，两个历史reg仅revoked9c672；stable049源码仍9c672。此有限核验不是扫描所有用户repo；若开发版手注cd53行则保持拒绝、备份保留原库/registry，暂停该库native操作并另受审修复；不自动改/删/迁移或升权限。所有5文档披露，不假称未知原库已修复。新卡VER3的agent_native_origin_test明确feature=test-live-agent仅本机，producer/model opt-ins全unset，不加入CI。
+只读6个具名persistent roots没有cd53策略行，两个历史reg仅revoked9c672；stable049源码仍9c672。此有限核验不是扫描所有用户repo；若开发版手注cd53行则保持拒绝、备份保留原库/registry，暂停该库native操作并另受审修复；不自动改/删/迁移或升权限。所有5文档披露，不假称未知原库已修复。新卡VER3的agent_native_origin_test明确feature=test-live-agent仅本机，四个显式复测历史输入LIBRA_NATIVE_TEST_PRODUCER/BUN/SOURCE/RECIPE；Session/live/model opt-ins unset，不加入CI。
+
+
+### FIX-OG-OBSERVER-RECIPE-01 本机登记测试装配修订（2026-10-15 22:40:05 UTC；草案待唯一Claude审查）
+
+原VER3要求清空producer输入却执行必须显式四输入的真实本机target，actual16FAIL/rawba65e33d…全部在required_path，保留失败不当PASS。测试本身还用普通agent enable安装v2，无法匹配固定legacyv1。保持原6AC/6VER、72/26分母与DAG，精确增加既有tests/agent_native_origin_test.rs为第11写路径（root10+site1）；3Rust touched/1runtime+2test-only，3落点/M，仍一条历史recipe兼容行为轴，不新增卡/target/CI/fixture文件。仅ownedtemp fixture从独立13600B/9c672模板、85977event-map和30000ms旧recipe渲染，保留原16测试，增加普通v2拒绝及alternatepath旧v1装配。VER3纠正为四个显式复测历史输入，其余live/model入口清空；本地producer只初始化独立测试key/登记挑战，绝不Session/server/account/model/网络或用户global操作。原key/descriptor只读，正式F原`.2`freshregistry epoch0门仍独立不替换。原FAIL与strict needless_range_loop FAIL保留；strict只修新加cfgtest迭代器。新路径须actualClaude范围/具体postimage PASS及root裁决后才写入root；当前仅private草案，不构成source-qualified/GO/SourceA。
+
+
+### FIX-OG-OBSERVER-RECIPE-01 实际 A/B 与 final49 T1收据（2026-10-15 23:18:52 UTC）
+
+此为事实推进，不新增任务卡/AC/VER/DAG/I/R。signed3158302为实际基线；scope补充actual soleClaude R2 PASS/raw931aa3e48f2325c429440994cc3a79d2fa493cff0f1fb2dc48b2c9d60a57994c及root裁决先采纳、后写harness。R1 FAIL/raw501778a…保留。现行root10+site1/3Rust touched（1runtime+2test-only）/3落点/M，原6AC6VER与72/26分母不变。
+
+- signed6685两完整catalog rows、原13600B/SHA9c672 v1template与INDEPENDENT_VECTORS已精确恢复，catalog SHA97b5f404d9799166ea00a220bcbaff5ebc9296dc6c0b693d93ef132cbe711e5d；ordinary settings SHA ec4cd10f1b0628ec031be8526e15407d8e2b02b78d67564c02fdfea8de796c5c/mode原样，目录过滤默认未回退。registry生产与原tests字节保持，新增test clippy前滚后SHA dfecf5e931572922154f43f62128fa13ff47b3a23493f112d18387fdcb9db682；本机harness SHA644b67e59ac9745d997653ed8335e843f9a4070964161d57300effdca53fcf65。
+- 新独立gold正例覆盖12组（.1/.2×2synthetic路径×3状态），否定20项；未修catalog baseline新positive actual1FAIL/rawe6fc8c2c…保留，不冒称baseline全部12组都执行。最终native unit37PASS/rawff8747334f44c49d11af215c77dbc675554d68bacf7c187731815454fb110b60。
+- 原feature-gated本机16案例逐名保留，actual16PASS/0FAIL/0ignored/raw94f1133f8cb4eb9ef51dbc071938a64c50437c5b6a42832d7a74eb909260eb3a。四显式输入实际复核原.1测量producer、原Bun1.4.2、原publicrecipe与仅init用3个已审原source字节（晚期schema12526，非早期08744或.2schema8b）。9有限依赖按原锁5dbf从官方registry取得，SHA512 SRI一致、与两旧installed副本2474regular files逐字相等；新owned helper2503项before/after一致。这只恢复有限初始化helper，不重建完整producer编译闭包，原完整archive/manifest缺失如实保留。只owned测试新key/登记挑战，无Session/server/账号/模型/原key读取/全局变更/CI接入；原.2 issuer installed-F门仍待COVREL。
+- 最初错误unset输入的16FAIL/rawba65e33d…及新增test迭代器strictFAIL/raw2b014a5f…保留；原VER3和owned fixture已reviewed前滚。最终16、37、109、fmt、strict均actual0，没有失败/skip转PASS。
+- 本卡final49 T1：`Summary [1118.151s] 10219 tests run: 10219 passed (2 slow, 1 leaky), 23 skipped` / exit0；start 2026-10-15T22:56:49.089436+00:00 / end 2026-10-15T23:17:25.442851+00:00；raw d7c23044d3d2564702c8b9088c990ed50345776132289e2f2374fdc063664b21，2048输入前后相同。终态原事件计数：{"ABORT": 0, "EXECFAIL": 0, "FAIL": 0, "FLAKY": 0, "LEAK": 1, "LEAK-FAIL": 0, "RETRY": 0, "SLOW": 2, "TIMEOUT": 0}。skip不计PASS，不另发zeroLEAK门；旧修复前50 full10216PASS含2flaky仍只历史，不能代替本T1或后续最终bumpedT2。
+- 五docs已同步v1无目录过滤/禁止共享多项目、doctor/status旧v1未安装及enable覆盖v2/非legacy修复、原.2freshregistry无Session兼容门及未许可cd53row保存backup/failclosed。网站1页candidate4122be…，sync/fixture/gen/docsunit9/typecheck/build、本机EN+zh可见main8概念HTTP200均actual0；网站单Claude PASS/raw13b5d3fa14283a0607a32587d19074566fd7f0931a133235f790acc3665c65fb，2Low由root按明确version-scoped/unreleased边界接受。正式cf Push/Cloudflare/公网HTTP未验收。
+
+本卡当前in-progress/locally-accepted，只是A/B通过；最终源码Claude、signed+DCO main Push/freshremote/archive、cf交付与DEP-COV2-OBSERVER-RECIPE source handoff尚待。实际取得这些交付后才在root私有收据记source-qualified/父source62/72；下张COVREL I3再登记实际SHA，不预填futurecommit。AC4/5、VER4/5的source交付部分须真实后置收据补齐；AC6/VER6待COVREL exactF/C-D才done/complete。父formal59/72不变，COV25source/0formal；current3 sharedgrant/SRC029/RUN029/OG27、FAST04、SourceA、三真实字段及旧unsupported-stateimport020 FAIL/deferred边界不因此放行。
+
+
+**DEFER-OG-EXPORT-TEST-LEAK-01（计划外遗留，不新增卡/门）：** 本次T1 Nextest对既有cfg(test) `opencode_export_failure_omits_stderr`报告1项LEAK，测试断言通过且整个进程exit0、0FAIL/0retry。此处用owned假shell exporter（固定stderr后exit3），不接入真实OpenCode/账号/Session；source与本卡基线逐字同一。真实资源遗留原因尚UNKNOWN，不能凭PASS推断无害，也不将告警重标为无告警。按用户复杂旁支问题延后政策保留原始full/raw及有限诊断，后续独立排查；本卡不修改exporter runner/Nextest profile/timeout，不新增zeroLEAK门，不影响SourceA/当前3/真实字段硬门。

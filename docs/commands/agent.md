@@ -1234,14 +1234,17 @@ The harness and synthetic tests do not prove real content or native reasoning.
 
 ### Private native-origin issuer registration (macOS)
 
-Ordinary `agent rpc trust opencode` pins an exporter binary; it does not register an issuer or prove native reasoning. The native path requires the separately installed, reviewed `2.0.26-libra-native.1` macOS arm64 producer. Enable the OpenCode observer with the actual Libra executable, then prepare a fresh owned installation using that private bundle's initialization instructions. Global OpenCode remains independent.
+Ordinary `agent rpc trust opencode` pins an exporter binary; it does not register an issuer or prove native reasoning. The historical native path requires a separately installed, reviewed macOS arm64 `2.0.26-libra-native.1` or `.2` producer and its exact frozen v1 observer recipe, rendered for the current canonical Libra executable path. Prepare that observer using the reviewed private bundle's instructions in an isolated owned setup. Global OpenCode remains independent.
 
 The immutable catalog also pins a separate `2.0.26-libra-native.2` candidate (build `78c1f19e9249da8d0143a079f90aec9a`, macOS arm64 binary SHA-256 `28174e893a2b63b75f58af4c77212747f6e1eebce5dd0252cfe64847b342615c`). Its additional endpoint descriptor v2 permits only the first-party `anthropic-messages` route to the exact URL `https://api.anthropic.com/v1/messages?beta=true`; the receipt and Ed25519 attestation remain v1. Anthropic-compatible providers, proxies and changed URLs do not match this endpoint. Selecting `.2` still requires separately measured binary bytes, a fresh private installation/key, explicit exporter trust and explicit epoch-checked issuer registration. The `.1` issuer can remain historical verify-only; no key is automatically promoted. The `.1` build remains the frozen NPR-18 harness baseline, not the current official29 ordinary baseline. A catalog match or synthetic test does not prove real `signature`/`redactedData` source bytes or allow their archival; `reasoningEncryptedContent` remains deferred. Provider/account/model checks stay local manual gates, outside CI.
+
+The legacy v1 observer is distinct from the current ordinary v2 observer. It lacks per-directory filtering: never use it with a shared multi-project OpenCode server. Prefer current ordinary capture; any legacy use must isolate one repository per server. `agent doctor`/observer status reports this old v1 plugin as not installed because current detection requires the v2 header. `libra agent enable --agent opencode` replaces a managed v1 plugin with v2 and breaks the old private recipe match. Generic reinstall or `agent enable` is therefore not a repair for legacy issuer registration. This compatibility fix does not change the ordinary per-directory observer or add a legacy installer.
+
+The following registration example assumes the exact reviewed historical observer is already in place; it deliberately omits `agent enable`. The published-binary compatibility gate uses a fresh owned repository, HOME, XDG directories and epoch-0 registry with the original `.2` public descriptor and issuer/key unchanged. Only the measured producer's registration challenge may access that key. It runs no Session, account/model request or OpenCode server, and revokes the fresh registry during cleanup. A successful gate proves registration compatibility only, not Source A, a current `.3` producer or real native-field archival.
 
 ```sh
 libra agent rpc trust --dir /absolute/approved-private/bin
 libra agent rpc trust opencode
-libra agent enable --agent opencode
 libra agent rpc trust opencode \
   --native-origin-manifest /absolute/private-installation/installation.json \
   --native-origin-expected-epoch 0
@@ -1254,6 +1257,9 @@ The public descriptor must be a regular, non-symlink `installation.json`, owned 
 The actual producer must successfully answer a new random, domain-separated Ed25519 challenge within 30 seconds, with at most 4096 stdout bytes and bounded captured stderr. Child output is withheld on failure. After the challenge, one write transaction rechecks current exporter trust and trusted directories, performs expected-epoch CAS, and writes one complete registry row. Duplicate rows, case aliases, encryption, malformed records and size overflow refuse without repair. Limits are 64 KiB and 128 issuer records; revoked history is never removed to make space.
 
 A new independent installation key becomes active; earlier active keys become verify-only. Existing issuer keys cannot be reactivated by registration or ordinary binary re-trust. Historical records remain immutable. Successful registration proves installation key/binary association only. Receipt signature, current issuer permission, source coordinates and original native field checks remain required before any archive admission; unknown or unproven sessions stay partial. JSON registration output includes the transient current Libra executable SHA256 for local audit; this measurement is neither a signed policy field nor a pinned historical Libra version.
+
+An unapproved row manually created against the unreleased development `cd53…` observer policy remains rejected. Preserve and back up the entire registry and repository, and suspend affected native registration/archive operations pending a separate reviewed repair. Do not delete rows, automatically migrate them or treat them as approved. The bounded compatibility checks do not establish that every user repository has been scanned; supported ordinary capture can be used in a fresh isolated workspace without claiming the affected repository is repaired.
+
 
 
 ### OpenCode native-origin rotation and revocation

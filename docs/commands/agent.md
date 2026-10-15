@@ -2,6 +2,50 @@
 
 Manage external-agent capture for Claude Code, Codex, and OpenCode.
 
+## OpenCode ordinary capture on macOS (Libra 0.30.49)
+
+Use the official OpenCode **2.0.29** for ordinary automatic capture. The frozen
+2.0.26 vocabulary and private native producer sections below describe separate
+historical/explicit native lanes; they are not prerequisites for ordinary capture.
+
+From the repository you want to capture, check the installed versions and prepare
+its exporter trust and observer:
+
+```bash
+libra --version
+opencode --version
+libra agent rpc trust --dir /absolute/directory/containing/opencode
+libra agent rpc trust opencode
+libra agent add opencode
+libra --json agent list --schema-version 2
+libra agent doctor
+```
+
+Use the real directory containing the reviewed executable. The current CLI takes
+directory registration and binary trust as two separate commands; it does not
+accept a binary filename as the `opencode` slug or combine `--dir` with that slug.
+Run OpenCode from this repository after installing or refreshing the observer;
+`--pure` / `OPENCODE_PURE=1` disables its capture plugin. After a captured turn,
+inspect and export the stored checkpoint:
+
+```bash
+libra agent session list
+libra agent checkpoint list
+libra agent checkpoint show <checkpoint-id>
+libra agent checkpoint export <checkpoint-id> -o capture.json
+```
+
+An authorized source with unsupported reasoning state may save its safe ordinary
+copy as `Unproven` / `Partial`. This includes prompt, model and token projections;
+unsupported reasoning state and associated text/time are omitted. It grants no
+native artifact, Complete coverage claim or native ACK. Any original `originProof`
+or sealed candidate remains outside this fallback. Historical imports containing
+unsupported reasoning state still fail with `LBR-AGENT-020`; ordinary capture
+support does not enable that import or durable partial replay. Real native
+`signature`, `redactedData` and `reasoningEncryptedContent` source and archival
+remain separate gates; Source A remains UNPROVEN. OpenCode/account/model checks
+run only locally on macOS, outside CI.
+
 ## Synopsis
 
 ```bash
@@ -68,7 +112,8 @@ is intentionally zero-write rather than an automatic repair.
 
 ### OpenCode event input contract
 
-The OpenCode parser targets the audited **2.0.26** vocabulary. Its current
+The frozen OpenCode event contract below records the audited **2.0.26** vocabulary;
+the current ordinary 2.0.29 baseline is described above and in its dedicated section. Its current
 lifecycle inputs are `session.created`, user `session.inbox.delivered`,
 `session.execution.succeeded`, `session.execution.failed`,
 `session.execution.interrupted`, `session.deleted`, and
@@ -1148,7 +1193,7 @@ the disposable project before requesting a single fixed file write. The gate
 checks captured prompt/model/tokens/files against the source projection,
 persisted file metadata, stopped sessions, doctor and uninstall retention.
 A failed or timed-out preflight is a failure, with no model request started.
-On the current acceptance machine, OpenCode's private server did not report
+At the historical NPR-18 acceptance checkpoint, OpenCode's private server did not report
 readiness; real content acceptance is deferred as `DEFER-OG-OPENCODE-BOOT-01`.
 The harness and synthetic tests do not prove real content or native reasoning.
 
@@ -1157,7 +1202,7 @@ The harness and synthetic tests do not prove real content or native reasoning.
 
 Ordinary `agent rpc trust opencode` pins an exporter binary; it does not register an issuer or prove native reasoning. The native path requires the separately installed, reviewed `2.0.26-libra-native.1` macOS arm64 producer. Enable the OpenCode observer with the actual Libra executable, then prepare a fresh owned installation using that private bundle's initialization instructions. Global OpenCode remains independent.
 
-The immutable catalog also pins a separate `2.0.26-libra-native.2` candidate (build `78c1f19e9249da8d0143a079f90aec9a`, macOS arm64 binary SHA-256 `28174e893a2b63b75f58af4c77212747f6e1eebce5dd0252cfe64847b342615c`). Its additional endpoint descriptor v2 permits only the first-party `anthropic-messages` route to the exact URL `https://api.anthropic.com/v1/messages?beta=true`; the receipt and Ed25519 attestation remain v1. Anthropic-compatible providers, proxies and changed URLs do not match this endpoint. Selecting `.2` still requires separately measured binary bytes, a fresh private installation/key, explicit exporter trust and explicit epoch-checked issuer registration. The `.1` issuer can remain historical verify-only; no key is automatically promoted. The `.1` build remains the current local content acceptance baseline. A catalog match or synthetic test does not prove real `signature`/`redactedData` source bytes or allow their archival; `reasoningEncryptedContent` remains deferred. Provider/account/model checks stay local manual gates, outside CI.
+The immutable catalog also pins a separate `2.0.26-libra-native.2` candidate (build `78c1f19e9249da8d0143a079f90aec9a`, macOS arm64 binary SHA-256 `28174e893a2b63b75f58af4c77212747f6e1eebce5dd0252cfe64847b342615c`). Its additional endpoint descriptor v2 permits only the first-party `anthropic-messages` route to the exact URL `https://api.anthropic.com/v1/messages?beta=true`; the receipt and Ed25519 attestation remain v1. Anthropic-compatible providers, proxies and changed URLs do not match this endpoint. Selecting `.2` still requires separately measured binary bytes, a fresh private installation/key, explicit exporter trust and explicit epoch-checked issuer registration. The `.1` issuer can remain historical verify-only; no key is automatically promoted. The `.1` build remains the frozen NPR-18 harness baseline, not the current official29 ordinary baseline. A catalog match or synthetic test does not prove real `signature`/`redactedData` source bytes or allow their archival; `reasoningEncryptedContent` remains deferred. Provider/account/model checks stay local manual gates, outside CI.
 
 ```sh
 libra agent rpc trust --dir /absolute/approved-private/bin
@@ -1190,9 +1235,9 @@ If combined untrust refuses because the registry is damaged, suspend exporter ac
 Automatic provenance revalidation after an unreadable or changed binary or withdrawal of its trusted directory still removes only exporter trust. Native admission pauses while that trust is absent or mismatched; it leaves the issuer registry unchanged. Explicitly trusting the same reviewed build again can restore an active issuer that was never explicitly revoked. Ordinary binary trust never restores a verify-only or revoked issuer. Re-registering an old issuer is refused: rotation requires a fresh independent key. Registration/revocation do not rewrite historical receipts, private installation descriptors or immutable artifacts. Successful lifecycle operations do not prove native field origin; unproven content stays partial.
 
 
-### Current private OpenCode acceptance baseline (NPR-18)
+### Frozen historical private OpenCode acceptance baseline (NPR-18)
 
-The unique macOS arm64 acceptance build is `2.0.26-libra-native.1`, build
+The frozen NPR-18 macOS arm64 harness uniquely accepts `2.0.26-libra-native.1`, build
 `bac21cc4027896b8d1836133c347d20f`, SHA-256
 `547c36eb928da163ef61d019bad669860d519f2da0b67737c9a3920e831c9196`
 and 187635570 bytes. It is based on official OpenCode `2.0.26` commit
@@ -1342,11 +1387,11 @@ that ordinary payload. Older-binary compatibility requires a separate actual
 readback and is not inferred from the source shape; this does not relax the V2 import rule requiring partial
 projections to have zero bytes and zero redaction metrics.
 
-A temporary local build supplied after focused checks and source review is a
-debug build, not the official 0.30.49 release.
+The official 0.30.49 release includes this ordinary live fix and can save its safe
+ordinary copy under the closed rules above. Release completion does not prove native source
+or complete later COV family gates.
 For historical OpenCode imports, sessions containing unsupported reasoning state
-remain rejected with `LBR-AGENT-020`; their repair is deferred.
-Other formal release checks remain pending until verified. Real
+remain rejected with `LBR-AGENT-020`; their repair is deferred. Real
 OpenCode Session/account/model checks run only locally on macOS and stay outside
 CI; synthetic tests do not prove native source.
 

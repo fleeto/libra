@@ -37,7 +37,8 @@ Objects are written while parsing. Branch, tag, and notes changes are buffered
 and published together in one SQLite transaction at `checkpoint`, `done`, or a
 clean EOF. A failure before publication changes no refs or notes; any already
 written objects are unreachable and can be reclaimed with `libra fsck` followed
-by `libra gc`. A `checkpoint` intentionally makes the preceding batch durable.
+by `libra maintenance run --task gc` (preview first with `--dry-run`).
+A `checkpoint` intentionally makes the preceding batch durable.
 
 ### Safety and resource limits
 

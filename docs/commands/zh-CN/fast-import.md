@@ -25,7 +25,7 @@ libra fast-import [--input <file>] [--max-count <n>] [--quiet]
 
 ### 事务模型
 
-对象在解析时写入；branch、tag 与 notes 变更先缓冲，并在 `checkpoint`、`done` 或干净 EOF 时由一个 SQLite 事务统一发布。发布前失败不会改变 refs/notes；已写对象不可达，可在 `libra fsck` 后用 `libra gc` 回收。`checkpoint` 会有意让此前批次持久化。
+对象在解析时写入；branch、tag 与 notes 变更先缓冲，并在 `checkpoint`、`done` 或干净 EOF 时由一个 SQLite 事务统一发布。发布前失败不会改变 refs/notes；已写对象不可达，可在 `libra fsck` 后用 `libra maintenance run --task gc` 回收（先加 `--dry-run` 预览）。`checkpoint` 会有意让此前批次持久化。
 
 ### 安全与资源上限
 

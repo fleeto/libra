@@ -17,7 +17,7 @@ Libra fits into existing developer workflows through Git-compatible objects and 
 <div align="center">
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![CI](https://github.com/wingwangsz/libra/actions/workflows/base.yml/badge.svg)](https://github.com/wingwangsz/libra/actions/workflows/base.yml)
+[![CI](https://github.com/libra-tools/libra/actions/workflows/base.yml/badge.svg)](https://github.com/libra-tools/libra/actions/workflows/base.yml)
 [![Discord](https://img.shields.io/badge/Discord-join-%235865F2?logo=discord&logoColor=white)](https://discord.gg/MTbb5rDYsC)
 [![X](https://img.shields.io/badge/X-%40git_mono_AI-%231DA1F2?logo=x&logoColor=white)](https://x.com/git_mono_AI)
 [![Docs](https://img.shields.io/badge/docs-docs.libra.tools-29B1FF)](https://docs.libra.tools)
@@ -51,13 +51,16 @@ Libra fits into existing developer workflows through Git-compatible objects and 
 curl -fsSL https://download.libra.tools/install.sh | sh
 
 # Homebrew (macOS)
-brew install libra
+brew install libra-tools/libra/libra
 
 # From source (requires Rust)
-git clone https://github.com/wingwangsz/libra.git
+git clone https://github.com/libra-tools/libra.git
 cd libra
-cargo build --release
+cargo build --release --locked
 ```
+
+The source build writes `target/release/libra`; run that binary directly, or use
+`cargo install --path . --locked` to install it in Cargo's binary directory.
 
 The script installer also creates the optional shorthand
 `~/.libra/bin/lba -> libra` as a relative symlink. Re-running the same version
@@ -98,8 +101,10 @@ libra init --from-git-repository /path/to/existing/git/repo
 ### Use Agent Capture
 
 ```bash
-# Enable capture hooks for your agent (e.g., codex)
-libra agent enable
+# Enable capture hooks for Codex, then check the installation
+libra agent enable --agent codex
+libra agent list
+libra agent doctor
 
 # Run your agent tool normally — Libra captures sessions and checkpoints
 codex
@@ -109,7 +114,7 @@ libra agent session list
 libra agent checkpoint list
 ```
 
-> See [Agent Capture documentation](https://docs.libra.tools/en/docs/getting-started/agent) for all supported agents, advanced configuration, and session management.
+> See the [agent command guide](docs/commands/agent.md) for supported agents, provider setup, and session management.
 
 ---
 
@@ -119,7 +124,9 @@ libra agent checkpoint list
 
 `libra agent` records sessions and checkpoints from supported external coding agents. Checkpoint metadata is indexed locally; when transcript content is available, redacted snapshots are stored as repository objects reachable from `refs/libra/traces`. Use `libra agent session`, `checkpoint`, and `doctor` to inspect captured state, and `libra agent push` to share traces with a remote.
 
-The built-in `libra code` UI and runtime, its MCP `--stdio` entry point, and the `libra publish` site host were removed in the 0.23.x release line. External-agent capture continues through `libra agent`; repository backup uses `libra cloud`.
+`libra review` and `libra investigate` run supported external agent CLIs in isolated workspaces for read-only reviews and investigations. `libra agent bridge --stdio` exposes the repository-scoped DeepSeek Harness bridge over JSON-RPC. See the [review](docs/commands/review.md), [investigate](docs/commands/investigate.md), and [agent](docs/commands/agent.md) guides.
+
+The former `libra code` UI/runtime and `libra publish` site host were removed in 0.23.x. External-agent capture uses `libra agent`; repository backup uses `libra cloud`.
 
 ```
 .libra/
@@ -131,17 +138,13 @@ The built-in `libra code` UI and runtime, its MCP `--stdio` entry point, and the
 
 ### 🔄 Git-Compatible Foundation
 
-Libra speaks Git's language. On-disk formats (objects, index, pack, pack-index) and wire protocols are fully compatible with standard Git servers (GitHub, GitLab, Gitea, etc.). You can `push` and `pull` to any Git remote with zero friction.
+Libra uses Git-compatible objects, index and pack formats, and supports Git remote workflows with servers such as GitHub, GitLab and Gitea. Command and flag coverage varies; consult the [compatibility matrix](COMPATIBILITY.md) for supported behavior and limitations.
 
 Key difference: Git manages files. Libra manages **creation**.
 
 ### 🔐 Vault-Backed Security
 
-By default, `libra init` creates a per-repository vault for encrypted key management:
-- **GPG signing keys** for commit verification
-- **SSH keys** for remote authentication
-
-Signing and authentication keys are isolated per repository.
+By default, `libra init` creates a per-repository encrypted vault and generates a **GPG signing key**. Generate **SSH authentication keys** separately with `libra config generate-ssh-key --remote origin`. Signing and authentication keys are isolated per repository. See the [configuration guide](docs/commands/config.md).
 
 ### 🛡️ Sandbox Diagnostics
 
@@ -150,8 +153,8 @@ Signing and authentication keys are isolated per repository.
 ### ☁️ Tiered Cloud Storage & Backup
 
 - **Tiered storage**: Offload large objects to S3/R2/RustFS with local LRU caching
-- **Cloud backup**: Sync your entire repository state (including AI history) to Cloudflare D1 + R2
-- **Portable**: Move a Libra repository between machines with all AI context intact
+- **Cloud backup**: Sync repository objects, references and captured agent history to Cloudflare D1 + R2
+- **Portable**: Restore backed-up repository state and captured context on another machine
 
 ---
 
@@ -172,10 +175,11 @@ chooses a destination, and the second Enter confirms; Esc goes back or cancels.
 
 ## Supported External Agents
 
+The supported capture roster is **Claude Code**, **Codex**, and **OpenCode**. Use `libra agent list --schema-version 2 --json` to inspect installation state and import/export capabilities.
 
-Libra supports hook-based capture for Claude Code, Codex, and OpenCode. The built-in model-provider runner was removed with `libra code` in 0.23.x.
+The current macOS ordinary OpenCode capture baseline is official **OpenCode 2.0.29** with **Libra 0.30.49**. Follow the [exporter-trust and capture-plugin setup](docs/commands/agent.md#opencode-ordinary-capture-on-macos-libra-03049); `opencode --pure` disables capture. Unsupported reasoning state and its associated text/time are omitted from a safe ordinary checkpoint, which remains `Unproven` / `Partial`. Historical imports containing unsupported reasoning state still fail with `LBR-AGENT-020`. This ordinary path does not admit native `signature`, `redactedData` or `reasoningEncryptedContent` artifacts or prove complete reasoning coverage; native source proof remains unproven.
 
-> See the [agent command guide](docs/commands/agent.md) for capture setup and supported agents.
+> See the [agent command guide](docs/commands/agent.md) for provider setup, capture boundaries, and session management.
 
 ---
 
@@ -202,6 +206,9 @@ cargo +nightly fmt --all --check
 
 # Fix formatting automatically if needed
 cargo +nightly fmt --all
+
+# Run the default acceptance suite
+cargo test --all
 ```
 
 For Windows installation, see the [Windows installation instructions](docs/installation.md#windows).

@@ -365,3 +365,23 @@ All-v1 source digest and import identity preimages retain frozen legacy bytes. A
 The explicit binary selects only the existing checkpoint object-I/O helper within this import task. Selection checks availability and Unix containment before acquiring any identity lease, restores on return/error/cancellation, and cannot affect other tasks, source readers, discovery, preparation or index repair. `None` uses the existing `helper_program()` (main registration in production; the established private override in unit tests); no host executable, PATH or environment fallback is inferred. This is caller-authorized execution configuration, not binary attestation or Source A. The shared fixed helper argument also serves VerifyReasoningArtifacts in cloud/doctor; those operations are unreachable and forbidden within this ordinary-only scope. Production VerifySnapshot uses the caller-trusted helper response; write OIDs are compared to their expected content, while snapshot verification is not an independent binary/source proof.
 
 macOS real DB acceptance builds the same-source Libra binary before the four exact tests and records its SHA256 before and after. Lib tests locate that binary only in cfg(test) code; the external direct DB test supplies compile-time CARGO_BIN_EXE_libra, including production VerifySnapshot. Existing Unix containment limits these object-helper DB paths to Unix; other platforms reject this opt-in before lease mutation. Pure legacy gold remains portable. Windows compilation/security and four-platform release checks remain required; Linux functional acceptance follows separately.
+
+## Versioned graph/doctor readers (COV2-09, unreleased)
+
+The graph reader decodes each selected claim and revision through the existing
+closed `CoverageSchemaVersion` enum before joining or skipping unmatched rows.
+Both revision history and current claims use `(logical_turn_key, coverage_schema_version)`;
+v1 and v2 rows sharing a key/checkpoint remain distinct. The public graph JSON
+schema remains 1. Unknown stored versions return the existing
+`LBR-AGENT-009` error with upgrade/doctor guidance, without an indexed-success
+response or candidate content. No version coercion, catalog mutation or blob
+read is added. An unmatched revision is still validated before it can be ignored.
+
+Doctor already joins conflicts by both key and version; its production code is
+unchanged. Each conflict remains a distinct content-free, manual-required finding
+in JSON and human output, with or without `--repair`. Synthetic catalog fixtures
+check version separation, envelope stability, unknown-version failure and raw
+identity/content canaries. They do not run an OpenCode Session, exporter or model,
+and confer no native-origin proof. These reader guarantees apply to the first
+stable release containing coverage-v2 and later; they do not assert that the
+currently installed stable release contains this unreleased implementation.

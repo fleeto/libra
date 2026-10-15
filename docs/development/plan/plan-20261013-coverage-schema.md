@@ -1,5 +1,9 @@
 # OpenCode coverage schema-v2 前置实施计划（2026-10-13）
 
+> **COV2-09 本地及网站验收闭合、待本次 main 源码交付（2026-10-15）：** 原8AC/4VER各实测满足；唯一 Claude 代码 PASS（0P0/P1/P2、6P3），网站单页 Claude PASS（0阻断、2P3），网站已 signed cf `d5824ca86a33307df09286aec21f2158d873feae` / Cloudflare success / EN+zh HTTP200。COV当前 source16/26；本次最终事实门、signed+DCO main Push/remote 同一闭合后才 **17/26=65.38%**，formal仍0/26，父formal59/71=83.10%/source61/71=85.92%。下张 **COV2-06**；不以网站部署或 synthetic reader 测试放行 Source A、native 或家族 C/D。以下旧进度均为对应历史时点。
+
+> **COV2-09 执行中（2026-10-15）：** 前驱 COV2-05 已实际 signed+DCO main Push/remote `b1443c9ba3e8a70b4ae7a6b84a3e2ab052715021`；COV source **16/26=61.54%**、formal0/26，父 formal59/71=83.10%/source61/71=85.92%。本卡按原8AC/4VER补 graph 闭合版本校验与 doctor 隐私回归；backend clean cf/direct交付。尚未把本卡计入17；下列历史“待05交付”已由实际b144收据取代。
+
 > **COV2-05 本地验收完成、待本次源码交付（2026-10-15 09:49:12 UTC）：** 原7AC/4VER及相关质量门已满足，唯一Claude代码评审实际PASS（0P0/P1/P2、8非阻断P3），新T1双env full实际10150/10150 passed（2slow、23skip、0FAIL/retry/flaky/LEAK，exit0）。source交付前15/26；只有本次最终事实复核、signed main Push/remote同一闭合后才16/26=61.54%，formal仍0/26，父formal59/71=83.10%/source61/71=85.92%。下张COV2-09在实际交付后开工；不以本机full放行SourceA/native/家族C-D或Linux后验。以下旧当前/暂停/待验收头部属于各自历史时点。
 
 > **COV2-05 四owner实际采纳后实施中（2026-10-15）：** scope修订已由actualsigned+DCO main/remote `d36aa2bac136f8d80b0d8c781d38a1d861a50d52` 采纳，唯一Claude规划R4实际PASS/raw `494779f84e69722a149bb362b4f388526985507817964df63f15d4c0572f1517`，两非阻断P3由实现明确普通scope内不得调用VerifyReasoningArtifacts及None的原helper_program语义。首次失败及R3FAIL保留；当前已恢复四owner实现/原验收，代码相关QA、代码单审、T1双env full和源码签推尚未完成，仍不计source16。COVsource15/26/formal0，父formal59/71/source61/71；现安装正式49保持，非新CLI/Session/modelCI。以下草案/暂停/待采纳表述为各自历史时点。
@@ -216,7 +220,7 @@
 | DEP-OG-24-029-SHARED | incoming/outgoing | stage-level exclusive shared I handoff | DEP13原source-ready + COVREL自身I/R immutable sourcefreezeF + sharedpath grant | root是唯一rootsource/三plan/Rowner；cf单页原独立owner；OG24.3接收lease | RouteA须SRC029实际ready；F原门/full/单Claude/signedsource并排除3landing/OG27；grant逐path SHA-mode-lastwriter/UTC/route，覆盖三plans、tracing-agent/EN/zh/COMPAT/docscontract及完整OG24I；COV相交写者暂停，R仍只F | 原DEP13的25nonrelease/22finalmacOScases source-ready收据、F/source及具体授出manifest；当前未授出 | 缺gate不授；SRC未好选B先RELcloseout；A发grant后只能signedreturn或严格abort-return，不能时间窗豁免/双写/偷偷改route |
 | DEP-OG-24-029-RETURN | incoming/outgoing | stage-level shared I return / abort | OG24.3 signed source交接或严格未落地abort-return；REL closeout事实写权 | OG24唯一root/cfowner交还，root签收并唯一写COVREL三planactualC/D | 成功return：6AC8VER/ER04/full/单Claude/signed+DCOsource、每sharedpostSHA/mode/lastwriter；或root发abort-return：未有任何3实现/站点signed或pushedlanding，且逐path为grant SHA/mode或与独立账本中准许非OG24 signed delta的完整机械重放SHA/mode相等、保护region字节不变；只此receipt可A→B | success逐源收据；abort列root/cf签推不存在的实际核查、每path grant/expected/current blob-OID/SHA/mode、唯一保护anchor/region SHA和逐commit非OG24 signed-delta ledger；未知差异拒绝。G09规范采纳commit不是3实现landing；receipt不能伪造 | 成功已签源仅forward-only，禁止以复原bytes偷偷A→B；无return REL三planfacts暂停。return后唯一root在postimages写actualC/D，不改F/tag或声称F含3 |
 | DEP-COV2-029-BASE | incoming | 跨计划shared I–I source handoff | 父FIX/IDLE/新live/BASE最终source链 | 本对话root | BASE source-qualified signed main前消费新live五源；COV22/05/06/11/15/18及其它相交Icore重基，网站同parent serial | BASE已按最终A/B/full10133/soleClaudeR2与signed main `1e2177e11029e28e3c81afbe6ec9f1609cdde7da`/cf `93b10519e1943ea3eea7c943e816418e92b1ca0b`、Push0/remote同SHA完成source-qualified交接；该前置源条件现已满足，COV2后继仍须按既定shared I逐SHA/mode串行重基；父四卡formal049 C/D已实际完成；本COV2家族C-D仍pending、Source A仍UNPROVEN，020仍FAIL/deferred/defaultreject | 后继仍等BASE source-qualified；DEFER不设前驱，不并发写，不豁免Source A/COV family或import隐私门 |
-| DEP-COV2-SITE | incoming | 外部仓库 | libra-backend `origin/cf` 的 `apps/tanstack-app/content/docs/commands/agent.en.md` | 经仓库 VCS 核实的独立 `cf` owner；09/11 互斥 | 记录远端 cf pre-SHA、干净隔离 checkout 根、目标页 pre-hash/mode；同卡 typecheck/build、签名+DCO 推送，发布点另核部署/HTTP。现有原 checkout 落后31且页已脏，不可覆盖。 | 隔离 owner 的 VCS/status/pre-hash 与 build/推送/部署收据，开工时刷新 | 无干净 owner 则 COV2-09 保持 pending 并停止依赖链；绝不以 locally-accepted 假过，同日无法交接即登记 blocked；发布 D 不得声称网站已部署。 |
+| DEP-COV2-SITE | incoming | 外部仓库 | libra-backend `origin/cf` 的 `apps/tanstack-app/content/docs/commands/agent.en.md` | 经 VCS 核实的现有干净 `cf` 单写者；09/11 互斥 | 记录远端 cf pre-SHA、现有 checkout 根、目标页 pre-hash/mode；按用户常设授权直接 cf，不建分支/PR/worktree；同卡 sync/check、typecheck/build、Claude PASS、签名+DCO 推送并核部署/HTTP。历史落后31且页脏已于 COV2-09 ER-02 刷新为 clean/synced 19d91bf；新出现无关改动仍不可覆盖。 | 隔离 owner 的 VCS/status/pre-hash 与 build/推送/部署收据，开工时刷新 | 无干净 owner 则 COV2-09 保持 pending 并停止依赖链；绝不以 locally-accepted 假过，同日无法交接即登记 blocked；发布 D 不得声称网站已部署。 |
 | DEP-COV2-MODEL | incoming | 本机外部模型 | 用户已配置的 OpenCode Anthropic 可读响应路径（非 native 来源证明） | COV2-17 macOS 本机执行者 | 最终行为源码上观察 genuine visible-only 响应，必须由已审 classifier 证实该样本无 state/proof-bearing 候选；记录无敏字段名、JSON 类型/数量、版本与 keyed digest；如实际返回 `signature`/`originProof`，该样本不算 visible-only 正例。不登记 issuer、不触发 live mint、不把它当 Source A。 | 本机 sanitized 1/1 观察记录、实际 build/model/plugin/transport ID、最终源码 SHA；不得记录正文/密钥 | 每个不同最终行为源码 SHA 最多一次本机尝试、10 分钟；COV2-REL bumped SHA 的复测另计一次。无样本或模型失败则 COV2-17/REL 保持 blocked，明确 UNRUN，不用 synthetic 代替。 |
 | DEP-COV2-OG27 | outgoing | 跨计划 | `plan-20260902.md#OG-27` / `DEP-OG-13` | 父计划 OG-27 接收者 | COV2-17 在全部22例本机非 skip PASS 且23张 implementation 源卡签名 main 交接后仅登记 `source-ready`，只允许隔离准备；COV2-REL-01 stable patch、四平台、安全 CI、站点/安装 C/D 全绿后才登记 `complete` 并许可 OG-27 main Push。接收者不重做 coverage-v2 家族实现，仍独立证明 `DEP-OG-12` Source A。 | 新计划 COV2-17/COV2-REL-01 报告、release run/manifest/site/install SHA/UTC；OG-27 开工时刷新 | 若接收者下一工作日未接手或门未绿，本计划保持 complete/source-ready 事实、父计划 OG-27 blocked；不替接收者做 native 注册、不以 synthetic 或旧版拒绝充当 GO。 |
 
@@ -915,33 +919,33 @@ COV2-REL-01 冻结不含 OG-27 源码的最终 COV2 树；首次完成 bumped �
 
 **Task type:** implementation
 
-**Lifecycle / Acceptance:** pending / 空
+**Lifecycle / Acceptance:** in-progress / locally-accepted
 
 **Description:** graph/doctor v1+v2 read contract and unsupported-version fail-closed。本卡唯一行为轴、恢复和粒度见下方 Granularity；不得以 synthetic/native 互换验收。
 
 **Out of scope:** 不改 doctor 生产源码，除非先按 G-10 修订本卡精确写集；不改 graph/list 公共 envelope 版本。
 
-**Current evidence:** src/command/agent/graph.rs:329-398; src/command/agent/doctor.rs:1913-1990（基线 `dcc468b`；ER-02 开工刷新行号与实际源码）。
+**Current evidence:** ER-02 refreshed against actual signed+DCO main/remote `b1443c9ba3e8a70b4ae7a6b84a3e2ab052715021` (COV2-05 source-qualified: original 7AC/4VER, full 10150/10150, sole Claude PASS, signed push and remote equality). `src/command/agent/graph.rs:303-399` already joins both versioned keys but decodes raw i64 without a supported-version check; `src/command/agent/doctor.rs:1913-1995` already groups conflicts by version and stays production-readonly. Backend actual clean synchronized `cf` = `19d91bfd388d2ae50eee2e67ba339998aadc4a91`; command-doc check 107 commands/108 navigation, drift 0. No independent Issue; continue the user-authorized plan without creating an Issue. No native/Source A inference from these predecessor or reader tests.
 
 **Acceptance criteria:**
 
-- [ ] AC1 graph lists distinct v1/v2 rows for one logical key
-- [ ] AC2 graph does not deduplicate their revisions across versions
-- [ ] AC3 graph's public envelope schema remains 1
-- [ ] AC4 graph output excludes raw reasoning text
-- [ ] AC5 doctor reports each versioned conflict separately
-- [ ] AC6 doctor output excludes raw identity
-- [ ] AC7 doctor output excludes raw content
-- [ ] AC8 graph rejects unsupported coverage versions rather than displaying them as indexed success.
+- [x] AC1 graph lists distinct v1/v2 rows for one logical key
+- [x] AC2 graph does not deduplicate their revisions across versions
+- [x] AC3 graph's public envelope schema remains 1
+- [x] AC4 graph output excludes raw reasoning text
+- [x] AC5 doctor reports each versioned conflict separately
+- [x] AC6 doctor output excludes raw identity
+- [x] AC7 doctor output excludes raw content
+- [x] AC8 graph rejects unsupported coverage versions rather than displaying them as indexed success.
 
 **Verification:**
 
-- [ ] VER1→AC1/2: `source .env.test && cargo test --test agent_graph_test cov2_graph_keeps_versions_distinct -- --exact` (1/1).
-- [ ] VER2→AC3/4: `source .env.test && cargo test --test agent_graph_test cov2_graph_envelope_and_text_privacy -- --exact` (1/1).
-- [ ] VER3→AC5/6/7: `source .env.test && cargo test --test agent_doctor_repair_test doctor_surfaces_conflicted_coverage_claim_without_raw_identity -- --exact` (existing 1/1, augmented with a raw-content canary absent from both human and JSON output).
-- [ ] VER4→AC8: `source .env.test && cargo test --test agent_graph_test cov2_graph_unknown_version_fails_closed -- --exact` (1/1). Implement the narrow supported-version decode in `src/command/agent/graph.rs:329-398` in this same card; preserve public envelope schema 1 and add the actionable corruption/error guidance to the EN/zh command docs and verified `cf` site. `doctor.rs:1913-1990` already groups conflicts by version and is read-only unless VER3 fails, in which case amend I/G before editing.
+- [x] VER1→AC1/2: `source .env.test && cargo test --test agent_graph_test cov2_graph_keeps_versions_distinct -- --exact` (1/1).
+- [x] VER2→AC3/4: `source .env.test && cargo test --test agent_graph_test cov2_graph_envelope_and_text_privacy -- --exact` (1/1).
+- [x] VER3→AC5/6/7: `source .env.test && cargo test --test agent_doctor_repair_test doctor_surfaces_conflicted_coverage_claim_without_raw_identity -- --exact` (existing 1/1, augmented with a raw-content canary absent from both human and JSON output).
+- [x] VER4→AC8: `source .env.test && cargo test --test agent_graph_test cov2_graph_unknown_version_fails_closed -- --exact` (1/1). Implement the narrow supported-version decode in `src/command/agent/graph.rs:329-398` in this same card; preserve public envelope schema 1 and add the actionable corruption/error guidance to the EN/zh command docs and verified `cf` site. `doctor.rs:1913-1990` already groups conflicts by version and is read-only unless VER3 fails, in which case amend I/G before editing.
 
-**Full-suite trigger:** family child 不自行发布；按 ER-13 对最终改动重新判定 T-1/T-4/T-6。若命中 shared single-source helper、测试基建或 focused 信号不足，则在本卡 A/B 阶段运行双 env 全量 Nextest；无论是否命中，COV2-REL-01 首次 T-2 均须在最终 bumped 实现树上重跑；后续仅上游纯 patch 顺延按该卡逐路径同一性规则复用。
+**Full-suite trigger:** none（ER-13：仅 graph 私有读取校验，调用未变的共享版本枚举；复用既有稳定错误码，无共享 helper/SSOT、SQL/schema、CLI 注册、配置、测试基建、target 或公开 surface 删除/重命名。两次失败均为本卡可归因编译/测试断言问题并已修正；最终四 exact、完整受影响 targets 与 103 readers 足以覆盖。COV2-REL-01 首次 T-2 与计划最终全量均保留，不复用 COV2-05 full 证明本卡。）
 
 **Dependencies:** COV2-05；DEP-COV2-SITE；消费前驱实际最终 A/B、适用 focused/full、fmt/strict、单 Claude PASS 与 signed+DCO main 的 source-qualified 文件 SHA/mode；不以其尚待 C/D 的 `locally-accepted` 冒称 complete。
 
@@ -953,7 +957,7 @@ COV2-REL-01 冻结不含 OG-27 源码的最终 COV2 树；首次完成 bumped �
 
 **Files likely touched:** `docs/development/plan/plan-20261013-coverage-schema.md`; `docs/development/plan/plan-status.md`; `docs/development/tracing/coverage-v2.md`; `docs/development/tracing/agent.md`; `COMPATIBILITY.md`; `src/command/agent/graph.rs`; `tests/agent_graph_test.rs`; `tests/agent_doctor_repair_test.rs`; `tests/INDEX.md`; `docs/development/commands/agent.md`; `docs/commands/agent.md`; `docs/commands/zh-CN/agent.md`; `apps/tanstack-app/content/docs/commands/agent.en.md` (libra-backend `cf`)。
 
-**Docs and compatibility impact:** `docs/development/tracing/coverage-v2.md`; `docs/development/tracing/agent.md`; `COMPATIBILITY.md`; `docs/development/commands/agent.md`; `docs/commands/agent.md`; `docs/commands/zh-CN/agent.md`; `apps/tanstack-app/content/docs/commands/agent.en.md` (libra-backend `cf`)；逐文件核内容与源码行为对应，`tests/INDEX.md` 只在本卡精确写集确有索引变化时同步。网站文件仅在 DEP-COV2-SITE 的隔离 `cf` owner 中编辑、同卡 typecheck/build、签名交付；文案须写成“仅适用于首个包含 coverage-v2 的稳定发布及其后续版本”等不依赖未确定版本号的条件，不可声称当前稳定版已提供未发布能力；当前原 checkout 脏且落后，禁止覆盖。
+**Docs and compatibility impact:** `docs/development/tracing/coverage-v2.md`; `docs/development/tracing/agent.md`; `COMPATIBILITY.md`; `docs/development/commands/agent.md`; `docs/commands/agent.md`; `docs/commands/zh-CN/agent.md`; `apps/tanstack-app/content/docs/commands/agent.en.md` (libra-backend `cf`)；逐文件核内容与源码行为对应，`tests/INDEX.md` 只在本卡精确写集确有索引变化时同步。网站文件按用户常设授权直接在现有 `/Volumes/Sea/libra-backend` 干净 `cf` 单写者中编辑，不建分支/PR/worktree；同卡 sync/check、typecheck/build、单 Claude PASS、签名+DCO 推送并核部署；文案须写成“仅适用于首个包含 coverage-v2 的稳定发布及其后续版本”等不依赖未确定版本号的条件，不可声称当前稳定版已提供未发布能力；历史“原 checkout 脏且落后”已由本次 ER-02 实际 clean/up-to-date 状态取代；若出现无关改动，保留并重新核对，不覆盖。
 
 **Rollback mode:** forward-only；恢复时签名+DCO 新 main 修复，既有 v1 claim/artifact/digest 不回写或重解释。
 
@@ -2655,3 +2659,29 @@ authorized_read只提供pub(crate)的异步task-local scope，且override仅对�
 **非阻断维护建议与限制（计划外跟踪，未声称已实现）。** 8个P3原文及root处置随受审收据保存：cross-native reader错误的显式rollback/专项负例、ordinary入口拒Reasoning纵深回归、额外boundary/Float/depth负例、legacy稀疏ordinal noop语义、过期dead-code attr、宏内手工换行、canonical数据库路径说明、文档精简/INDEX建议。当前已有行为限制为：tool input须已normalized，Float拒绝；SQLite数据库文件与storage为字面匹配，调用方须传数据库对应的canonical绝对.libra路径；noop cursor按连续ordinal前缀推进，稀疏旧输入可低于旧len值，当前未用于控制流。公开路径参数仅调用方的执行授权，不构成可信binary/SourceA；同一固定helper参数的VerifyReasoningArtifacts在ordinary scope不可达且不得引入。INDEX按test target维护，本卡未增/改名target，现有行已涵盖idempotent claims/checkpoints，未为单case追加行或改索引。旧dcc有限pure gold不证明三个旧DB helpers/writer/事务等价，helper snapshot回复依赖调用方选择，prepared redaction_report/snapshot仍沿既有调用方信任模型。真实native三字段/SourceA及家族C-D未闭合。
 
 **最后交付门与计数。** full后仅本两事实计划变化，四Rust/一个测试/三个机制文档共八路径及其余2046输入仍与受审受测后像同一；须新103reader/fmt/strict、唯一Claude事实审查与root裁决，然后只stage本卡10路径、actualsigned+DCO main Push及fresh remote同一。未完成步骤/未知提交SHA不预填；本次签名提交本身承载证据，实际SHA由root交付收据和下一卡ER02绑定。只有交付闭合才COVsource16/26=61.54%，此前15/26；Lifecycle in-progress/locally-accepted，家族COV2-REL-01 actualC/D后才done/complete。父formal59/71/source61/71不变。两用户04/05 dirty改动及未跟踪正式49/lock均保留，不stage或覆盖；正式安装49不替换，demo不处理。本卡无用户可见命令变化，backendcf只读check实测107commands/108nav、drift0，未写站点；下卡09按站点实际clean cf/directpush和当前CLI同步。
+
+### COV2-09 本地 A/B 与网站交付收据（2026-10-15，源码签推前最终事实）
+
+**来源与写集。** 本卡基线 actual signed+DCO main/remote `b1443c9ba3e8a70b4ae7a6b84a3e2ab052715021`；前驱 COV2-05 原7AC/4VER、full10150/10150、代码Claude PASS及实际Push已闭合。保持原8AC/4VER，M=1 landing/1生产文件，仅graph私有版本解码；doctor生产代码未改。根11个精确I路径、cf一页；无新target，INDEX每target一行无需改；无新稳定错误码/CLI/schema/DDL/API，未运行OpenCode Session/exporter/model。
+**四项指定实测。** .env.test静默加载成功；四 exact 均1/1、exit0：
+- VER1：raw SHA256 `83d4ae134d6d118b3c94eee57271f6ed5eb4fc1d24f69e56a513fb4020a3dfe5`。
+- VER2：raw SHA256 `02ff90b2739f4b2d68a693cb569f61622e2d0d64a17999365678456778bcf8a3`。
+- VER3：raw SHA256 `d777effd9d1557bb835870970a3a6b560bd226cf07e87fc57451fd0bdd848b75`。
+- VER4：raw SHA256 `18691d92462d0df1fa93a6ea057b2938c48da6ac1a6140af69c0a4b88e64027b`。
+
+**附加实测。** graph14+doctor39=53passed/0failed/0ignored，graph只读架构单测1/1，reader58+32+1+12=103passed；fmt exit0，strict all-targets/all-features `-D warnings` exit0。2048源码before/after逐项SHA/blob-OID/size/mode/kind同一，manifest SHA256 `1144b46796570d844cd2e6450ad7b976b1f3196b4fe7d09c4149cd0004e5d9a2`。`Full-suite trigger=none`，依据见本卡字段及唯一Claude确认；本卡不声称运行新full，不以05的full替代；家族发布首次T2和最终全量保留。
+**保留失败。** 首轮prepare编译E0277/exit101：私有required<T>缺i64标注，raw `e27cd40300489ac2aec493f2bb1831b9e7ead839bb8ef9e386eeaa4b2789f31b`；第二轮VER1/2/3各1/1，VER4 0/1/exit101，测试错误地从stdout解析错误JSON，raw `97df4b1385c69bb3593d68ffee645d12081da556f381dde9d56ecd2af0a72729`。现已按原CLI stderr错误契约修正，原AC不减；第三轮四exact及其余质量门全绿，旧失败不计PASS。
+**唯一评审与父级裁决。** Claude Code代码审查实际exit0/PASS、0P0/P1/P2、6非阻断P3，raw `398e3ae0ad040a0ebe7eb8319a9736b001b0080fcb11d8f356511ef6343a3fff`；网站单页exit0/PASS、0阻断、2P3，raw `2b6f6bf32264b540aabd1b501a809db7d3b59889d98c621cda77748bc79db12d`。root实读报告后接受PASS及ER13 none。P3保留而非假称修复：doctor不专门诊断未知版本、两条doctor hint重复、支持版本提示缺精确断言、graph canary只覆盖未选隐私列、human finding存在性未显式断言、v2顶层字段/ordinal断言可扩充；网站文字对selected committed row/erased边界略宽及doctor期望同类建议亦保留。旧行为描述仅为静态推断，未声称执行baseline-negative。Linux/Windows实际功能、大catalog性能及未来生产v2数据未在本卡证明。
+**网站同卡实际交付。** 开工原clean cf19d91bf；签推前fresh remote发现 `06a74c631cf007fa3d32fcafa4cd6f86ba4714e1`（四个非重叠安装示例/文案路径）。仅stash本卡一页，原空stash→确认自有ID335bebd908a7dd9b5df192bb9998c5dc8c1a529c→native ff→apply逐SHA/mode相同→drop自有stash并恢复空列表；保留所有上游。最终树重新sync-check107commands/108nav/drift0、fixture tests、docs unit9/9、typecheck/build全exit0；受审页面SHA/mode未变。实际signed+DCO cf `d5824ca86a33307df09286aec21f2158d873feae`，parent06a74c6，stage/commit/Push exit0、fresh remote同SHA；页SHA256 `15845768144be81301bf87b6c17a985f24a0508ca350c7ece7c5141cb694afc5` /0644。Cloudflare check `116372523665` completed success、Worker `ae715879-f044-4f0c-95a3-a3430d1d4e5c`；EN/zh-CN两页面实际HTTP200含新增conditional/unreleased段落；发布能力措辞未伪称当前49已包含v2。frontend全量未运行，既有6基线失败不冒称全绿；不把site静态评审冒称production验证，后者由实际check+HTTP单独闭合。
+**受审受测的九个非事实路径后像。** 以下均0644；两个事实计划自身SHA由签名提交/后续ER02实际绑定，不预填自指hash：
+- `src/command/agent/graph.rs` SHA256 `675ca2dce74c5c8ac22f752f71e28051e5f57dc583351bcd11cb593d3edc089e`。
+- `tests/agent_graph_test.rs` SHA256 `a95146a6bfc977c2f2d8f3ba00c10b0d3894afd7881982dbcbb8672558ec8c98`。
+- `tests/agent_doctor_repair_test.rs` SHA256 `809bcc6344ce8f15379e09c83b590a0cd8cb3260939d1980100ab0bf2a1f73e7`。
+- `docs/development/tracing/coverage-v2.md` SHA256 `910e78e2ea42002a8d0f7d1d9640d1e389b092e18a3e61b2631fda876fd854f3`。
+- `docs/development/tracing/agent.md` SHA256 `e7451aa17835975c1483ff9b6aef90b37a218810d9019705e5a090f21178bce8`。
+- `COMPATIBILITY.md` SHA256 `65cf7e7af258554d0c675ff59ef996e334f8d318e3d96e23c7c1b94dd432cece`。
+- `docs/development/commands/agent.md` SHA256 `091def29d1058386ed1ed0fa8b47129351802ad859000a043e4fed5d68f72787`。
+- `docs/commands/agent.md` SHA256 `69968640d18ee478ad18f085f8663f81017f4caa5cb3c736d7a77a224107e7bf`。
+- `docs/commands/zh-CN/agent.md` SHA256 `592f302a757d28eb36c134dd843b1dcc52c56f5901b73714384c7a39076b4c68`。
+
+**最终门与计数。** 代码/测试/命令文档/机制文档九路径与上述受审受测后像冻结；最后只更新两事实计划，并重跑103reader/fmt/strict、root核全部2048差异仅两计划，再只stage本卡11I路径、signed+DCO commit、Push与fresh remote同一。未完成步骤不写通过、未知rootSHA不预填；实际交付收据与下一卡ER02绑定本提交。只有该交付闭合才COVsource17/26=65.38%，此前16/26；in-progress/locally-accepted仍继承COV2-REL-01 actualC/D，formal0/26。父formal59/71/source61/71不变。两用户04/05 dirty改动及untracked正式49/lock保留，官方安装49不替换；demo不处理。不bump/tag/release本卡；下一COV2-06。

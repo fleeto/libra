@@ -369,3 +369,23 @@ The private pending codec pairs its closed inner payload v2 with the live Sessio
 ### Private reasoning identity and garbage collection
 
 Garbage collection excludes the reserved `agent_reasoning_identity` scope from generic metadata object-reference scanning. This applies to the entire stored value, including a damaged value containing a JSON object ID or a nested object ID; those values do not trigger object hydration. This exclusion requires no private reasoning key. Ordinary metadata object roots, private capture recovery exclusions, and capture pending parent roots retain their existing rules. Forward recovery must retain both the private rows and this exclusion while a reasoning identity writer is stopped or repaired. This guard does not create identity records, issue native provenance, or enable OpenCode reasoning archival.
+
+## Versioned graph/doctor readers (COV2-09, unreleased)
+
+The graph reader decodes each selected claim and revision through the existing
+closed `CoverageSchemaVersion` enum before joining or skipping unmatched rows.
+Both revision history and current claims use `(logical_turn_key, coverage_schema_version)`;
+v1 and v2 rows sharing a key/checkpoint remain distinct. The public graph JSON
+schema remains 1. Unknown stored versions return the existing
+`LBR-AGENT-009` error with upgrade/doctor guidance, without an indexed-success
+response or candidate content. No version coercion, catalog mutation or blob
+read is added. An unmatched revision is still validated before it can be ignored.
+
+Doctor already joins conflicts by both key and version; its production code is
+unchanged. Each conflict remains a distinct content-free, manual-required finding
+in JSON and human output, with or without `--repair`. Synthetic catalog fixtures
+check version separation, envelope stability, unknown-version failure and raw
+identity/content canaries. They do not run an OpenCode Session, exporter or model,
+and confer no native-origin proof. These reader guarantees apply to the first
+stable release containing coverage-v2 and later; they do not assert that the
+currently installed stable release contains this unreleased implementation.

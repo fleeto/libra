@@ -378,6 +378,18 @@ hidden as superseded. Pre-coverage captures are returned as
 facts. Subagent nodes expose only checkpoint/link structure and retain
 `resolved` or `unresolved` explicitly.
 
+For the first stable release containing coverage-v2 and later, graph keeps
+separate rows and revision histories for coverage versions 1 and 2, even when
+they share a logical turn key or checkpoint. This does not change the public
+JSON schema version 1. An unsupported stored coverage version fails the query
+with `LBR-AGENT-009`, without returning a successful graph or candidate content.
+Use a Libra release that supports the stored version and run `libra agent doctor`
+to inspect the catalog; do not rewrite version numbers or delete evidence.
+Doctor reports each version's conflict separately, without raw identities or
+candidate content, and leaves conflict resolution manual, including with
+`--repair`. These coverage-v2 reader guarantees are unreleased until that stable
+release is available.
+
 The JSON/machine graph query never opens transcript or object blobs and never
 selects working directories, descriptions, metadata JSON, redaction reports,
 or coverage digests. **Breaking change (W5-08):** the interactive

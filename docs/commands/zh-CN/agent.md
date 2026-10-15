@@ -288,6 +288,14 @@ M1 前的 capture 以 `coverage_state="unindexed"` checkpoint 时间线返回，
 revision。subagent 节点只暴露 checkpoint/link 结构，并明确保留 `resolved` 或
 `unresolved`。
 
+首个包含 coverage-v2 的稳定发布及其后续版本中，即使逻辑 turn key 或 checkpoint
+相同，graph 仍分别保留 coverage 1、2 两版记录及各自 revision 历史；公共 JSON
+schema version 1 不变。读到不支持的已存 coverage 版本时，整个查询以
+`LBR-AGENT-009` 失败，不返回成功 graph 或候选内容。请使用支持该已存版本的 Libra
+发布，并运行 `libra agent doctor` 检查目录；不要改写版本号或删除证据。
+doctor 分别报告两版冲突，不输出原始身份或候选内容；包括 `--repair` 在内，
+冲突仍需人工处理。这些 coverage-v2 读取保证在上述稳定发布前属于未发布能力。
+
 JSON/machine graph 查询不会打开 transcript/object blob，也不 SELECT working directory、
 description、metadata JSON、redaction report 或 coverage digest。**Breaking change（W5-08）：**
 交互式 capture-graph TUI 已在 W5 breaking 发布中删除——其受限、已脱敏的内容预览

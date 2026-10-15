@@ -231,6 +231,39 @@ INSERT INTO agent_import_tombstone (
         }
         snapshot
     }
+
+    async fn add_v2_reader_fixture(&self) {
+        // Synthetic catalog rows test the reader only, without a provider,
+        // transcript export, native-origin proof or production v2 activation.
+        self.connection()
+            .await
+            .execute_unprepared(
+                r#"
+INSERT INTO agent_coverage_claim (
+    session_id, logical_turn_key, coverage_schema_version, coverage_digest,
+    completeness, revision, state, checkpoint_id, traces_commit,
+    source_channel, created_at, updated_at
+) VALUES (
+    'codex__graph-fixture', 'turn:alpha', 2, 'RAW_REASONING_CONTENT_CANARY',
+    'complete', 1, 'catalog_committed', 'checkpoint-shared', 'trace-shared',
+    'import', 400, 400
+);
+INSERT INTO agent_coverage_revision (
+    session_id, logical_turn_key, coverage_schema_version, revision,
+    checkpoint_id, coverage_digest, completeness, source_channel, created_at
+) VALUES (
+    'codex__graph-fixture', 'turn:alpha', 2, 1, 'checkpoint-shared',
+    'RAW_REASONING_CONTENT_CANARY', 'complete', 'import', 400
+);
+UPDATE agent_session
+SET metadata_json = '{"reasoning":"RAW_REASONING_CONTENT_CANARY"}',
+    redaction_report = '{"raw":"RAW_REASONING_CONTENT_CANARY"}'
+WHERE session_id = 'codex__graph-fixture';
+"#,
+            )
+            .await
+            .expect("add synthetic v2 reader rows");
+    }
 }
 
 fn describe(output: &Output) -> String {
@@ -249,6 +282,123 @@ fn json_output(output: &Output) -> Value {
         describe(output)
     );
     serde_json::from_slice(&output.stdout).expect("parse graph JSON envelope")
+}
+
+#[tokio::test]
+async fn cov2_graph_keeps_versions_distinct() {
+    let fixture = GraphRepo::init().await;
+    fixture.add_v2_reader_fixture().await;
+    let before = fixture.capture_snapshot().await;
+    let payload = json_output(&fixture.run(&["--json", "agent", "graph", SESSION_ID]));
+    let turns = payload["data"]["turns"].as_array().expect("turns");
+    assert_eq!(turns.len(), 3);
+    let versions = turns
+        .iter()
+        .filter(|turn| turn["logical_turn_key"] == "turn:alpha")
+        .collect::<Vec<_>>();
+    assert_eq!(versions.len(), 2);
+    assert_eq!(versions[0]["coverage_schema_version"], 1);
+    assert_eq!(versions[1]["coverage_schema_version"], 2);
+    assert_eq!(versions[0]["current_revision"], 2);
+    assert_eq!(versions[1]["current_revision"], 1);
+    assert_eq!(versions[0]["revisions"].as_array().map(Vec::len), Some(2));
+    assert_eq!(versions[1]["revisions"].as_array().map(Vec::len), Some(1));
+    assert_eq!(
+        versions[0]["revisions"][0]["checkpoint_id"],
+        "checkpoint-shared"
+    );
+    assert_eq!(
+        versions[0]["revisions"][1]["checkpoint_id"],
+        "checkpoint-current"
+    );
+    assert_eq!(
+        versions[1]["revisions"][0]["checkpoint_id"],
+        "checkpoint-shared"
+    );
+    assert_eq!(versions[0]["revisions"][0]["source_channel"], "live");
+    assert_eq!(versions[1]["revisions"][0]["source_channel"], "import");
+    assert_eq!(fixture.capture_snapshot().await, before);
+}
+
+#[tokio::test]
+async fn cov2_graph_envelope_and_text_privacy() {
+    let fixture = GraphRepo::init().await;
+    fixture.add_v2_reader_fixture().await;
+    for mode in ["--json", "--machine"] {
+        let output = fixture.run(&[mode, "agent", "graph", SESSION_ID]);
+        let payload = json_output(&output);
+        let data = payload["data"].as_object().expect("data object");
+        assert_eq!(data["schema_version"], 1);
+        assert_eq!(
+            data.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["schema_version", "session", "state", "subagents", "turns"]
+        );
+        let rendered = format!(
+            "{} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        for private in [
+            "RAW_REASONING_CONTENT_CANARY",
+            "SUPER_SECRET",
+            "metadata_json",
+            "redaction_report",
+            "coverage_digest",
+            "\"reasoning\"",
+        ] {
+            assert!(
+                !rendered.contains(private),
+                "private graph content: {rendered}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn cov2_graph_unknown_version_fails_closed() {
+    // Exercise each decode independently, including rows with no counterpart
+    // that could otherwise be skipped before validation.
+    for (table, orphan) in [
+        ("agent_coverage_claim", false),
+        ("agent_coverage_revision", false),
+        ("agent_coverage_claim", true),
+        ("agent_coverage_revision", true),
+    ] {
+        let fixture = GraphRepo::init().await;
+        let connection = fixture.connection().await;
+        connection.execute_unprepared(&format!(
+            "UPDATE {table} SET coverage_schema_version = 99 WHERE session_id = '{SESSION_ID}' AND logical_turn_key = 'turn:alpha'"
+        )).await.expect("insert unknown catalog version");
+        if orphan {
+            let other = if table == "agent_coverage_claim" {
+                "agent_coverage_revision"
+            } else {
+                "agent_coverage_claim"
+            };
+            connection.execute_unprepared(&format!(
+                "DELETE FROM {other} WHERE session_id = '{SESSION_ID}' AND logical_turn_key = 'turn:alpha'"
+            )).await.expect("remove unknown row counterpart");
+        }
+        let before = fixture.capture_snapshot().await;
+        for mode in ["--json", "--machine"] {
+            let output = fixture.run(&[mode, "agent", "graph", SESSION_ID]);
+            assert_eq!(output.status.code(), Some(128), "{}", describe(&output));
+            let rendered = describe(&output);
+            assert!(rendered.contains("LBR-AGENT-009"), "{rendered}");
+            assert!(
+                rendered.contains("unsupported coverage schema version"),
+                "{rendered}"
+            );
+            assert!(rendered.contains("libra agent doctor"), "{rendered}");
+            assert!(!rendered.contains("SUPER_SECRET"), "{rendered}");
+            assert!(!rendered.contains("\"indexed\""), "{rendered}");
+            assert!(output.stdout.is_empty(), "{rendered}");
+            let payload: Value = serde_json::from_slice(&output.stderr).expect("error envelope");
+            assert_eq!(payload["error_code"], "LBR-AGENT-009");
+            assert!(payload.get("data").is_none_or(Value::is_null), "{payload}");
+        }
+        assert_eq!(fixture.capture_snapshot().await, before);
+    }
 }
 
 #[tokio::test]

@@ -1,5 +1,8 @@
 # Coverage schema v2 — typed reasoning encoding boundary
 
+> **G09 前瞻范围修订（由本次签名提交采纳生效）：** legacy `info.status="stopped"`终态import样例实际FAIL，归DEFER-COV11-IMPORT-TERMINAL-01计划外延期；本轮import功能正例以已审当前格式替代。源码/测试不改，旧FAIL不变；仅实际soleClaude PASS、signed main采纳后新matrix生效；source23/26不增。
+
+
 This document covers the codec introduced by COV2-01 and the unreleased
 COV2-11 live/export and historical-import wiring. Stable availability and the
 upgrade boundary are described under Coverage-v2 capture below.
@@ -521,3 +524,30 @@ Historical OpenCode import applies its own source, cursor and object-write bound
 The operator-local macOS case is `cov2_macos_fake_exporter_candidate_import_partial_no_plaintext`, with `test-live-agent` and `--ignored --exact --nocapture --test-threads=1`. Its static companion is `cov2_candidate_import_session_case_is_ignored_and_non_skippable`. The case must execute the trusted controlled exporter through the actual historical import path and inspect the actual import outputs and stores independently. A missing prerequisite, early success return or zero selected tests is UNRUN. Synthetic candidates provide no native/Source A proof. Session capture remains operator-local; CI can run parser, crypto, sandbox unit and static guards. COV2-15 remains the separate live-path acceptance.
 
 At the current import source gate, proof/state candidates are refused before a Session, cursor or checkpoint is published. The private preparation helper clears its environment and discards stderr. Its internal partial warning is therefore not a public import diagnostic. Local acceptance couples a successful ordinary import control and a same-input data-only partial comparison to the actual content-free source refusal, zero published content and a static check of the pre-projection rejection route; it does not claim direct observation of a private partial field.
+
+
+## Current macOS capture audit (COV2-16; effective through the signed G09 adoption)
+
+The current selection of eight retained bridge cases, one current-format import replacement, two pipeline cases and the OG-26 candidate case must be audited locally on the final source. The excluded classic legacy case remains FAIL/deferred; across both audits the 22 selected names are 21 inherited plus one replacement, with 26 unique required names after deduplication against the five new cases. The extraction fixture now uses `opencode_extraction_no_consumer_keeps_pending_without_checkpoint`, the reviewed COV2-12 successor of the historical failing selector. Tests and production files remain read-only during this audit. A zero selection, ignored prerequisite or successful early skip is not acceptance. The legacy oversize test alone does not establish that the byte cap was reached if its exporter instead failed to fork inside the sandbox; that limitation stays explicit. No real native fields, Source A or Linux acceptance is implied.
+
+
+## Legacy terminal-status import debt (effective through the signed G09 adoption)
+
+The old `opencode_historical_import_e2e_uses_trusted_export_bytes` fixture supplies classic `info.status="stopped"`. It currently fails with `LBR-AGENT-020`; its failure is preserved under `DEFER-COV11-IMPORT-TERMINAL-01`. The G09-defined macOS audit requires the reviewed current-format `cov2_macos_fake_exporter_import_session_capture` for the import positive instead. This changes the acceptance inventory, not the old test result or production admission rules. The original test remains ignored/manual and unchanged. Required current audit names total 22 (21 inherited plus one replacement); the replacement already belongs to the five new cases, so the unique required Session set is 26. No Source A/native, full-suite or release gate is waived.
+
+
+### COV2-16 legacy import 终态样例延期与当前格式替代（2026-10-15 19:53:41 UTC，由本次signed main采纳生效）
+
+95a9400最终行为源码只读审计实际11/12通过，唯一失败 `opencode_historical_import_e2e_uses_trusted_export_bytes` 的fixture包含classic `info.status="stopped"`，来源投影closed-info不接纳该非当前格式字段而标unproven，实际import返回LBR-AGENT-020；原9组为8PASS/1FAIL/0ignored，rawSHA `b1ab0f5fe8a6637a25c7484753146bb89d4f391395357cc869f1579589a9e077`，不能记9/9或把失败改PASS。collect_facts虽仍认识legacy status终态，当前ordinary29源要求与该旧契约不一致；把status添加到来源准入会涉及legacy终态兼容，归既有 `DEFER-COV11-IMPORT-TERMINAL-01` 计划外延后，当前默认拒绝不改。用户已授权相似复杂外围问题延后、优先当前OpenCode基础采集与producer；本次不增加生产写权，不弱化candidate/native/Source A边界。
+
+当前审计AC1改用已经COV12source-reviewed的 `cov2_macos_fake_exporter_import_session_capture`：真实trusted exporter经当前格式历史import写入独立checkpoint，绑定独立canonical gold7973604f...与live/import readback，保留actualimport Incomplete/active fence。这**替代一项本轮功能验收**，不是旧compatibility PASS，旧测试body/fixture全部保留不改。COV16当前12名=8个其余旧bridge+1当前格式import+2pipeline+1OG26；COV17仍10个旧名。当前两个audit共22个选定名=21继承+1当前替代；全部新增Sessioncase仍单独要求，不重复计算：原27名immutable/static CI inventory保留，release必需unique26=21继承+5新增，另1legacy名明确DEFER/FAIL。旧22 inherited allPASS历史判据由本段及当前卡/REL/DEP镜像明确覆盖，不倒改任何旧事实。
+
+COV16仍13AC/5VER/S/0prod0landing，26卡和71父卡分母、DAG、SourceA/真实模型/四平台/安全CI/站点安装/最终bumped full要求均不变。此四文档G09协调仅source23/26=88.46%、formal0/26，父formal59/71=83.10%、source61/71=85.92%不增；COV16仍in-progress/空，原失败不能被批准后的新矩阵回写。实际单Claude PASS/root裁决、109reader/fmtstrict和signed+DCO main/Push/freshremote后才采纳；新8+1+1+1+1矩阵仍须实际运行，本提案不预授audit/source24。
+
+
+**G09 协调写集（与 COV2-16 审计写集分开）：** 本次仅同步以下四条既有文档精确路径：`docs/development/plan/plan-20261013-coverage-schema.md`、`docs/development/plan/plan-status.md`、`docs/development/plan/plan-20260902.md`、`docs/development/tracing/coverage-v2.md`。这是验收范围/依赖镜像的前瞻协调，不是 COV2-16 的实现写权扩展；COV2-16 后续审计仍仅 I-audit 原三文档。四路径只由 root 串行写入，无新增任务/依赖边/生产或测试写权、无版本/安装/网站行为变更，恢复为 signed+DCO main 前滚。G-01–11 复核：单一 legacy 终态兼容延期与当前格式功能替代；COV16 保持 13 AC/5 VER、S、0 生产文件/0 落点，REL 保持 12 AC/12 VER，26/71 卡分母与既有 DAG 不变；原始失败、legacy fixture 和 CI 中仅静态库存检查全部保留。仅单 Claude Code 实际 PASS、root 裁决、文档门/fmt/strict 和签名 main 交付闭合后采纳；不授 source24。
+
+
+**替代覆盖边界与遗留重启：** 当前格式import正例不覆盖旧classic `info`/`parts`端到端兼容，也没有查询session行来证明`started_at`/`last_event_at`由`info.time`映射，更不证明`stopped_at`终态；pure collect_facts timestamp单测不等于该DB端到端证明。这些缺口与原终态例的FAIL一并明确归计划外`DEFER-COV11-IMPORT-TERMINAL-01`，未修复、不记PASS；将来另有界兼容任务须保留来源安全边界、soleClaude审查并使原legacy用例实际非skip1/1、读回上述时间与终态后才可解除。原COV11的“不免除原AC/VER”不被追溯更改，本次只前瞻调整COV16和依赖/发布集合。
+
+**R1评审事实：** soleClaude实际exit0但VERDICT FAIL，rawSHA `91ceab399575e8dd72f1832a06b1b960e45eebaae30f84cf9df621b0f0d70372`；1P2为五处当前规范未同步，另4P3为覆盖缺口、遗留登记/重启、采纳措辞与时区顺序。本版同步这些项；旧R1不是PASS、尚未采纳。当前修订须自己的实际R2PASS与签推门，不预授新matrix/source24。

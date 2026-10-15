@@ -1334,11 +1334,11 @@ that ordinary payload. Older-binary compatibility requires a separate actual
 readback and is not inferred from the source shape; this does not relax the V2 import rule requiring partial
 projections to have zero bytes and zero redaction metrics.
 
-A temporary local build supplied after focused checks and source review is a
-debug build, not the official 0.30.49 release.
+The official 0.30.49 release includes this ordinary live fix and can save its safe
+ordinary copy under the closed rules above. Release completion does not prove native source
+nor complete later COV family gates.
 For historical OpenCode imports, sessions containing unsupported reasoning state
-remain rejected with `LBR-AGENT-020`; their repair is deferred.
-Other formal release checks remain pending until verified. Real
+remain rejected with `LBR-AGENT-020`; their repair is deferred. Real
 OpenCode Session/account/model checks run only locally on macOS and stay outside
 CI; synthetic tests do not prove native source.
 

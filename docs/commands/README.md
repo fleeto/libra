@@ -29,6 +29,9 @@ Every Libra command accepts the following global flags:
 | `--quiet` | `-q` | Suppress stdout |
 | `--exit-code-on-warning` | | Return exit code 9 on warnings |
 | `--progress` | | Control progress output (`json`, `text`, `none`, `auto`) |
+| `--sync-data` | | fsync object writes and parent directories; also `LIBRA_SYNC_DATA=1`, with additional write cost. |
+| `--offline` | | Read objects only from local storage; never fetch missing objects from the durable tier. |
+| `--max-connections <N>` | | Bound remote connections/requests (default 16; 0 means 1); also `LIBRA_MAX_CONNECTIONS`. |
 | `--literal-pathspecs` | | Treat pathspecs as literal (no glob, no `:(magic)`). Also `GIT_LITERAL_PATHSPECS=1`. |
 | `--no-literal-pathspecs` | | Cancel `--literal-pathspecs` / `GIT_LITERAL_PATHSPECS` (last flag wins). |
 
@@ -164,18 +167,45 @@ Every Libra command accepts the following global flags:
 | `libra write-tree` | | Write the current index out as a tree object | [write-tree.md](write-tree.md) |
 | `libra read-tree` | | Read a tree object into the index (index-only) | [read-tree.md](read-tree.md) |
 | `libra update-index` | | Modify the index directly (add/remove/cacheinfo) | [update-index.md](update-index.md) |
-| `libra update-ref` | | Safely update, create, or delete a refs/heads/<branch> ref | [update-ref.md](update-ref.md) |
+| `libra update-ref` | | Safely update, create, or delete a `refs/heads/<branch>` ref | [update-ref.md](update-ref.md) |
 | `libra verify-pack` | | Validate pack index files against their pack archives | [verify-pack.md](verify-pack.md) |
 | `libra show-ref` | | List local refs (branches, tags, HEAD) and their object IDs | [show-ref.md](show-ref.md) |
 | `libra symbolic-ref` | | Read or update the symbolic HEAD ref | [symbolic-ref.md](symbolic-ref.md) |
 | `libra index-pack` | | Build a `.idx` pack index file for an existing `.pack` archive (hidden) | [index-pack.md](index-pack.md) |
-| `libra hooks` | | External AI agent (Claude Code / Gemini) hook entry point; called by configs installed by `libra agent enable` (hidden) | [hooks.md](hooks.md) |
+| `libra hooks` | | Claude Code / Codex hook entry point, with a legacy Gemini entry (hidden); OpenCode uses `libra agent hooks opencode` | [hooks.md](hooks.md) |
 
 ## Unsupported Git Transport Commands
 
 | Git command | Libra status | Safe workflow | Doc |
 |-------------|--------------|---------------|-----|
 | `git send-email` | No `libra send-email`; Libra performs no SMTP delivery | Generate with `libra format-patch`, then validate/send with stock Git or another mailer | [send-email.md](send-email.md) |
+
+### Additional registered commands
+
+These entries complete the current CLI index. `media` requires a build with the `fastcdc` feature; hidden plumbing entries are not ordinary user commands.
+
+| Command | Availability | Description | Doc |
+|---|---|---|---|
+| `libra alternates` | public | Manage alternate object stores | [alternates.md](alternates.md) |
+| `libra archive` | public | Create an archive from a tree | [archive.md](archive.md) |
+| `libra deps` | public | Manage the file dependency graph | [deps.md](deps.md) |
+| `libra file` | public | Inspect object-level operations and payload erasure | [file.md](file.md) |
+| `libra for-each-ref` | public | Format and filter references | [for-each-ref.md](for-each-ref.md) |
+| `libra hydrate` | public | Hydrate working-tree content on demand | [hydrate.md](hydrate.md) |
+| `libra investigate` | public | Run read-only external-agent investigations | [investigate.md](investigate.md) |
+| `libra layer` | public | Manage never-committed local working-tree overlays | [layer.md](layer.md) |
+| `libra ls-files` | public | List index and working-tree paths | [ls-files.md](ls-files.md) |
+| `libra ls-tree` | public | List tree object contents | [ls-tree.md](ls-tree.md) |
+| `libra maintenance` | public | Run repository maintenance tasks | [maintenance.md](maintenance.md) |
+| `libra media` | fastcdc feature only | FastCDC LFS media chunking | [media.md](media.md) |
+| `libra mega2` | public | Browse a Mega2 remote repository | [mega2.md](mega2.md) |
+| `libra notes` | public | Manage commit notes | [notes.md](notes.md) |
+| `libra op` | public | Inspect and restore command-level operation history | [op.md](op.md) |
+| `libra pack-objects` | hidden plumbing | Create a pack from object IDs on stdin | [pack-objects.md](pack-objects.md) |
+| `libra repack` | public | Combine repository objects into a pack | [repack.md](repack.md) |
+| `libra review` | public | Run read-only external-agent code reviews | [review.md](review.md) |
+| `libra sparse-view` | public | Manage read-only sparse view filters | [sparse-view.md](sparse-view.md) |
+| `libra upgrade` | public | Check the signed stable channel and upgrade the installation | [upgrade.md](upgrade.md) |
 
 ## Structured Output Envelope
 

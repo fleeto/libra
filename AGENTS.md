@@ -130,6 +130,7 @@ Do not dismiss an issue only because:
 - Keep changes small and cohesive; update README/CLI docs when adding flags or altering compatibility tables.
 
 ## Workspace Notes
+- Every user-visible command change must update the repository command documentation and the website documentation in `/Volumes/Sea/libra-backend` in the same delivery. The current CLI implementation is authoritative. Work directly on the backend's `cf` production branch, preserving unrelated changes; do not create a branch, PR, or worktree. Run the website documentation sync/check and relevant frontend verification, obtain Claude Code PASS, then commit and push `cf` with Libra so Cloudflare deploys it. Verify deployment and report any remaining external gate. This is the user's standing delivery instruction.
 - This repository is a single Rust package; this checkout is a Libra repository (`.libra/`, no `.git/`), so all version-control operations go through `libra` commands — raw `git` does not work here.
 - Prefer this command flow for changes: `libra status` -> inspect diff -> `libra add` -> `libra commit -a -s -m "<scope>: ..."` -> `libra push origin <branch>`.
 - When a user requests version operations or release copy steps, follow the `libra` command workflow instead of `git` commands.

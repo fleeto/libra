@@ -2932,9 +2932,9 @@ public reason/metadata enum value；本构建的 checkpoint/export 读端读取�
 旧二进制兼容必须另外实测读回，不能仅由 source 形状推断。
 V2 import 对 partial projection 的 zero bytes/zero redaction metrics 规则不放宽。
 
-通过 focused 检查和源码评审后提供的本机临时构建是 debug build，不是正式
-0.30.49 release。含 unsupported reasoning state 的历史 OpenCode import
-仍以 `LBR-AGENT-020` 拒绝，修复已延期。其它正式发布门继续待验。
+正式 0.30.49 已包含普通 live 修复：它可以按上述封闭规则保存安全的普通副本。
+正式发布不证明 native 来源，也不完成后续 COV 家族门。含 unsupported reasoning state 的历史 OpenCode import
+仍以 `LBR-AGENT-020` 拒绝，修复已延期。
 OpenCode Session/账号/模型检查只在 macOS 本机运行，不进 CI；synthetic 不证明
 native 来源。
 

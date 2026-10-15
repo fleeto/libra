@@ -17,7 +17,7 @@ Libra 的对象格式和传输协议兼容 Git，可融入现有开发流程。�
 <div align="center">
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![CI](https://github.com/wingwangsz/libra/actions/workflows/base.yml/badge.svg)](https://github.com/wingwangsz/libra/actions/workflows/base.yml)
+[![CI](https://github.com/libra-tools/libra/actions/workflows/base.yml/badge.svg)](https://github.com/libra-tools/libra/actions/workflows/base.yml)
 [![Discord](https://img.shields.io/badge/Discord-加入社区-%235865F2?logo=discord&logoColor=white)](https://discord.gg/MTbb5rDYsC)
 [![X](https://img.shields.io/badge/X-%40git_mono_AI-%231DA1F2?logo=x&logoColor=white)](https://x.com/git_mono_AI)
 [![文档](https://img.shields.io/badge/文档-docs.libra.tools-29B1FF)](https://docs.libra.tools)
@@ -44,19 +44,23 @@ Libra 的对象格式和传输协议兼容 Git，可融入现有开发流程。�
 ### 安装
 
 ```bash
-# macOS / Linux（推荐）
+# macOS（Apple Silicon）/ Linux（amd64、arm64，推荐）
+# Intel macOS 无预编译二进制，请按下方步骤从源码构建。
 # 安装器先验证 Ed25519 签名的 release manifest 及二进制 sha256/size 再安装；
 # 信任模型见 docs/installation.zh-CN.md。
 curl -fsSL https://download.libra.tools/install.sh | sh
 
 # Homebrew（macOS）
-brew install libra
+brew install libra-tools/libra/libra
 
 # 从源码编译（需要 Rust）
-git clone https://github.com/wingwangsz/libra.git
+git clone https://github.com/libra-tools/libra.git
 cd libra
-cargo build --release
+cargo build --release --locked
 ```
+
+源码构建生成 `target/release/libra`；可直接运行该二进制，或运行
+`cargo install --path . --locked` 将其安装到 Cargo 的二进制目录。
 
 脚本安装器还会创建可选短命令 `~/.libra/bin/lba -> libra`（相对 symlink）。
 重复安装同一版本会修复缺失的 alias，不替换二进制。使用 `--no-alias` 或
@@ -77,8 +81,10 @@ libra init --from-git-repository /path/to/existing/git/repo
 ### 使用 Agent 捕获
 
 ```bash
-# 为你的 Agent 启用捕获钩子（以 codex 为例）
-libra agent enable
+# 为 Codex 启用捕获钩子，然后检查安装状态
+libra agent enable --agent codex
+libra agent list
+libra agent doctor
 
 # 正常使用你的 Agent 工具——Libra 会自动捕获会话和检查点
 codex
@@ -88,7 +94,7 @@ libra agent session list
 libra agent checkpoint list
 ```
 
-> 查看 [Agent 捕获文档](https://docs.libra.tools/en/docs/getting-started/agent)了解所有支持的 Agent、高级配置和会话管理。
+> 查看 [Agent 命令指南](docs/commands/zh-CN/agent.md)，了解支持的 Agent、提供商配置和会话管理。
 
 ---
 
@@ -98,7 +104,9 @@ libra agent checkpoint list
 
 `libra agent` 记录受支持的外部编程 Agent 的会话和检查点。检查点元数据保存在本地索引中；会话内容可捕获时，脱敏快照作为仓库对象存储，可从 `refs/libra/traces` 到达。可用 `libra agent session`、`checkpoint` 和 `doctor` 查阅捕获状态，用 `libra agent push` 将 traces 推送到远端。
 
-内置 `libra code` UI 与执行器、其 MCP `--stdio` 入口及 `libra publish` 站点宿主已在 0.23.x 版本线移除。外部 Agent 捕获由 `libra agent` 提供；仓库备份使用 `libra cloud`。
+`libra review` 和 `libra investigate` 在隔离工作空间中调用受支持的外部 Agent CLI，执行只读审查与调查。`libra agent bridge --stdio` 通过 JSON-RPC 提供仓库级 DeepSeek Harness bridge。详见 [review](docs/commands/zh-CN/review.md)、[investigate](docs/commands/zh-CN/investigate.md) 和 [agent](docs/commands/zh-CN/agent.md) 指南。
+
+原有 `libra code` UI/执行器和 `libra publish` 站点宿主已在 0.23.x 移除。外部 Agent 捕获使用 `libra agent`；仓库备份使用 `libra cloud`。
 
 ```
 .libra/
@@ -110,17 +118,13 @@ libra agent checkpoint list
 
 ### 🔄 Git 兼容基础
 
-Libra 使用 Git 的语言。磁盘格式（objects、index、pack、pack-index）和传输协议与标准 Git 服务器（GitHub、GitLab、Gitea 等）完全兼容。你可以零摩擦地向任何 Git 远程仓库 `push` 和 `pull`。
+Libra 使用兼容 Git 的对象、索引和 pack 格式，支持与 GitHub、GitLab、Gitea 等服务器进行 Git 远程协作。命令和参数的支持程度各不相同；具体行为与限制见[兼容性矩阵](COMPATIBILITY.md)。
 
 关键区别：Git 管理文件。Libra 管理**创造**。
 
 ### 🔐 Vault 安全
 
-默认情况下，`libra init` 会创建仓库级加密密钥库：
-- **GPG 签名密钥**用于提交验证
-- **SSH 密钥**用于远程认证
-
-签名和认证密钥按仓库隔离。
+默认情况下，`libra init` 会创建仓库级加密密钥库并生成 **GPG 签名密钥**。**SSH 认证密钥**需另行运行 `libra config generate-ssh-key --remote origin` 生成。签名和认证密钥按仓库隔离，详见[配置指南](docs/commands/zh-CN/config.md)。
 
 ### 🛡️ 沙箱诊断
 
@@ -129,8 +133,8 @@ Libra 使用 Git 的语言。磁盘格式（objects、index、pack、pack-index�
 ### ☁️ 分层云存储与备份
 
 - **分层存储**：将大对象卸载到 S3/R2/RustFS，本地 LRU 缓存
-- **云端备份**：将完整仓库状态（含 AI 历史）同步到 Cloudflare D1 + R2
-- **可移植**：在不同机器之间迁移 Libra 仓库，AI 上下文完整保留
+- **云端备份**：将仓库对象、引用和已捕获的 Agent 历史同步到 Cloudflare D1 + R2
+- **可移植**：在另一台机器上恢复已备份的仓库状态和捕获上下文
 
 ---
 
@@ -147,10 +151,11 @@ Libra 使用 Git 的语言。磁盘格式（objects、index、pack、pack-index�
 
 ## 支持的外部 Agent
 
+当前支持 **Claude Code**、**Codex** 和 **OpenCode** 捕获。运行 `libra agent list --schema-version 2 --json` 可查看安装状态和导入/导出能力。
 
-Libra 支持 Claude Code、Codex 和 OpenCode 的 hook 捕获。内置模型提供商执行器已随 `libra code` 在 0.23.x 版本线移除。
+当前 macOS 普通 OpenCode 捕获基线为官方 **OpenCode 2.0.29** 与 **Libra 0.30.49**。请按 [exporter 信任与捕获插件配置](docs/commands/zh-CN/agent.md)完成准备；`opencode --pure` 会禁用捕获。安全的普通检查点会丢弃不支持的 reasoning state 及其关联文本/时间，状态仍为 `Unproven` / `Partial`。含不支持 reasoning state 的历史导入仍返回 `LBR-AGENT-020`。该普通路径不准入原生 `signature`、`redactedData` 或 `reasoningEncryptedContent` artifact，也不证明完整 reasoning 覆盖；原生来源证明仍未通过。
 
-> 查看 [Agent 命令指南](docs/commands/zh-CN/agent.md)，了解捕获配置和支持的 Agent。
+> 查看 [Agent 命令指南](docs/commands/zh-CN/agent.md)，了解提供商配置、捕获边界和会话管理。
 
 ---
 
@@ -177,6 +182,9 @@ cargo +nightly fmt --all --check
 
 # 如需要自动修复格式
 cargo +nightly fmt --all
+
+# 运行默认验收测试
+cargo test --all
 ```
 
 Windows 安装方法见 [Windows 安装说明](docs/installation.zh-CN.md#windows)。

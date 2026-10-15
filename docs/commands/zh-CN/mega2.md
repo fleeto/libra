@@ -35,6 +35,11 @@ libra mega2 browser --server <BASE-URL> [PATH] [--ref <COMMIT-OR-TAG>] --list [-
 2000，且 `content_type` 只接受 `directory` 或 `file`。名称含 `..`、路径分隔符
 或终端控制字符的条目一律 fail-closed；服务端返回的条目 `path` 不作为导航依据。
 
+> **Revision 注意：** `--ref` 只选择浏览/读取的 revision。当前交互模式的创建、删除、
+> 移动和重命名快捷键仍作用于服务端默认 revision，而不是屏幕选择的 commit/tag。
+> 使用 `--ref` 浏览时只读，不要确认交互写入；此行为修复已延期。非交互写操作
+> 与 `--ref` 的组合继续在发请求前被拒绝。
+
 ### 交互模式（默认）
 
 交互模式要求 **stdin 与 stdout 都是终端**。任一不是 TTY 时立即以稳定错误拒绝，

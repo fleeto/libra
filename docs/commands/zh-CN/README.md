@@ -25,6 +25,9 @@ porcelain 输出、冲突处理或 plumbing 语法等特定 Git-compatible 表�
 | `--quiet` | `-q` | 抑制 stdout |
 | `--exit-code-on-warning` | | 出现警告时返回退出码 9 |
 | `--progress` | | 控制进度输出（`json`、`text`、`none`、`auto`） |
+| `--sync-data` | | 对对象及父目录执行 fsync；也可用 `LIBRA_SYNC_DATA=1`，会增加写入成本。 |
+| `--offline` | | 只读本地对象存储，不从远端层拉取缺失对象。 |
+| `--max-connections <N>` | | 远端连接/请求并发上限，默认 16；0 按 1 处理，也可用 `LIBRA_MAX_CONNECTIONS`。 |
 | `--literal-pathspecs` | | 把 pathspec 当字面路径（不通配、不解析 `:(magic)`）。也可用 `GIT_LITERAL_PATHSPECS=1`。 |
 | `--no-literal-pathspecs` | | 取消 `--literal-pathspecs` / `GIT_LITERAL_PATHSPECS`（后出现的标志生效）。 |
 
@@ -161,13 +164,44 @@ porcelain 输出、冲突处理或 plumbing 语法等特定 Git-compatible 表�
 | `libra show-ref` | | 列出本地 refs（branches、tags、HEAD）及其 object IDs | [show-ref.md](show-ref.md) |
 | `libra symbolic-ref` | | 读取或更新 symbolic HEAD ref | [symbolic-ref.md](symbolic-ref.md) |
 | `libra index-pack` | | 为现有 `.pack` archive 构建 `.idx` pack index 文件（隐藏） | [index-pack.md](index-pack.md) |
-| `libra hooks` | | 外部 AI agent（Claude Code / Gemini）hook 入口；由 `libra agent enable` 安装的配置调用（隐藏） | [hooks.md](hooks.md) |
+| `libra hooks` | | Claude Code / Codex hook 入口，保留旧 Gemini 入口（隐藏）；OpenCode 使用 `libra agent hooks opencode` | [hooks.md](hooks.md) |
 
 ## 不支持的 Git 邮件传输命令
 
 | Git 命令 | Libra 状态 | 安全工作流 | 文档 |
 |----------|------------|------------|------|
 | `git send-email` | 没有 `libra send-email`；Libra 不执行 SMTP 投递 | 用 `libra format-patch` 生成，再用 stock Git 或其他 mailer 校验/发送 | [send-email.md](send-email.md) |
+
+### 其它已注册命令
+
+以下补齐当前 CLI 的命令索引；`media` 只在 `fastcdc` feature 构建中提供，隐藏 plumbing 入口不属于常规用户命令。
+
+| 命令 | 可用范围 | 说明 | 文档 |
+|---|---|---|---|
+| `libra alternates` | 公开命令 | 管理借用对象的替代对象库 | [alternates.md](alternates.md) |
+| `libra archive` | 公开命令 | 从指定 tree 创建归档 | [archive.md](archive.md) |
+| `libra deps` | 公开命令 | 管理文件依赖图 | [deps.md](deps.md) |
+| `libra file` | 公开命令 | 对象级操作与 payload 清除 | [file.md](file.md) |
+| `libra for-each-ref` | 公开命令 | 按格式和筛选条件遍历引用 | [for-each-ref.md](for-each-ref.md) |
+| `libra hydrate` | 公开命令 | 按需补齐工作区内容 | [hydrate.md](hydrate.md) |
+| `libra investigate` | 公开命令 | 运行只读外部 agent 调查 | [investigate.md](investigate.md) |
+| `libra layer` | 公开命令 | 管理不提交的本地工作区 overlay | [layer.md](layer.md) |
+| `libra login` | 公开命令 | 通过浏览器授权登录 Libra host | [login.md](login.md) |
+| `libra logout` | 公开命令 | 撤销并清除 Libra host 会话 | [logout.md](logout.md) |
+| `libra ls-files` | 公开命令 | 列出 index 与工作区文件 | [ls-files.md](ls-files.md) |
+| `libra ls-tree` | 公开命令 | 列出 tree 对象内容 | [ls-tree.md](ls-tree.md) |
+| `libra maintenance` | 公开命令 | 运行仓库维护任务 | [maintenance.md](maintenance.md) |
+| `libra media` | 仅 fastcdc feature | FastCDC LFS 媒体分块 | [media.md](media.md) |
+| `libra mega2` | 公开命令 | 浏览 Mega2 远端仓库 | [mega2.md](mega2.md) |
+| `libra memory` | 公开命令 | 查看或重建确定性的 agent 开发历史投影 | [memory.md](memory.md) |
+| `libra notes` | 公开命令 | 管理提交附注 | [notes.md](notes.md) |
+| `libra op` | 公开命令 | 查看与恢复命令级操作历史 | [op.md](op.md) |
+| `libra pack-objects` | 隐藏 plumbing | 从 stdin 对象 ID 创建 pack | [pack-objects.md](pack-objects.md) |
+| `libra repack` | 公开命令 | 把仓库对象组合成 pack | [repack.md](repack.md) |
+| `libra review` | 公开命令 | 运行只读外部 agent 代码评审 | [review.md](review.md) |
+| `libra sparse-view` | 公开命令 | 管理只读稀疏视图筛选器 | [sparse-view.md](sparse-view.md) |
+| `libra upgrade` | 公开命令 | 检查签名稳定通道并更新安装 | [upgrade.md](upgrade.md) |
+| `libra whoami` | 公开命令 | 查询当前 Libra host 会话身份 | [whoami.md](whoami.md) |
 
 ## 结构化输出信封
 

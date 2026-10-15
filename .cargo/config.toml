@@ -13,3 +13,19 @@
 # far smaller).
 [env]
 RUST_MIN_STACK = "16777216"
+#
+# LIBSQLITE3_FLAGS — extra compile options for the bundled SQLite, read by
+# libsqlite3-sys. SQLITE_DEFAULT_MEMSTATUS=0 turns off SQLite's memory-usage
+# statistics, which otherwise take one process-wide mutex in every
+# sqlite3_malloc/sqlite3_free (SQLite lists the option among its
+# recommended compile-time options). Nothing in the dependency tree reads
+# those statistics (no soft/hard heap limit, sqlite3_memory_used or
+# sqlite3_status), but with many connections busy in one process the mutex
+# convoys: with sibling tests of one `cargo test` process running SQLite
+# work, parsing the schema while opening a connection went from ~1.5 ms to
+# 60-80 ms on a 16-core Linux host (first seen 2026-10-15) and timed out
+# 50 ms connection budgets. Release binaries built in this repository get
+# it too; an explicitly exported LIBSQLITE3_FLAGS replaces it (not
+# `force`d), and builds outside this repository keep SQLite's default.
+# `internal::db::tests::bundled_sqlite_keeps_memory_statistics_off` guards it.
+LIBSQLITE3_FLAGS = "-DSQLITE_DEFAULT_MEMSTATUS=0"

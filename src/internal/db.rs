@@ -824,6 +824,36 @@ mod tests {
         }
     }
 
+    /// `LIBSQLITE3_FLAGS` in `.cargo/config.toml` builds the bundled SQLite
+    /// without memory statistics: they take one process-wide mutex in every
+    /// SQLite allocation, which convoys when many connections work in one
+    /// process and made opening a connection about 40 times slower.
+    #[tokio::test]
+    async fn bundled_sqlite_keeps_memory_statistics_off() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let conn = open_connection_without_schema_management(
+            file.path().to_str().unwrap(),
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+        let options: Vec<String> = conn
+            .query_all_raw(Statement::from_string(
+                conn.get_database_backend(),
+                "PRAGMA compile_options",
+            ))
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|row| row.try_get_by_index::<String>(0).unwrap())
+            .collect();
+        assert!(
+            options.iter().any(|option| option == "DEFAULT_MEMSTATUS=0"),
+            "the bundled SQLite must be compiled with SQLITE_DEFAULT_MEMSTATUS=0 \
+             (LIBSQLITE3_FLAGS in .cargo/config.toml); compile options: {options:?}"
+        );
+    }
+
     /// TestDbPath is a helper struct create and delete test database file
     struct TestDbPath(String);
     impl Drop for TestDbPath {

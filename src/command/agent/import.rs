@@ -1,8 +1,8 @@
 //! `libra agent import` — consented historical transcript backfill (M4).
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use std::io::{Seek, SeekFrom, Write};
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use std::process::Stdio;
 use std::{
     io::{self, IsTerminal},
@@ -13,13 +13,13 @@ use std::{
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use clap::{ArgGroup, Args};
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use ring::rand::SecureRandom;
 use sea_orm::{ConnectionTrait, DatabaseConnection, Statement};
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use crate::internal::ai::{
     agent_import::{
         LegacyImportMigrationRequest, import_provider_commitment, import_request_from_projection,
@@ -584,12 +584,12 @@ fn import_transport_digest(domain: &[u8], fields: &[&[u8]]) -> [u8; 32] {
     hasher.finalize().into()
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn import_transport_source_preimage_commitment(preimage: &[u8; 32]) -> [u8; 32] {
     import_transport_digest(b"libra/import-transport-source-preimage/v1\0", &[preimage])
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn import_transport_scope_digest(scope: &CaptureScope) -> Result<[u8; 32]> {
     let encoded = serde_json::to_vec(scope).map_err(|_| ImportError::AuthorizedReaderFailed)?;
     Ok(import_transport_digest(
@@ -676,7 +676,7 @@ impl PreparationImportTransportBinding {
 /// The single production parent consumer for a helper's untrusted optional
 /// typed response. The caller must invoke it before any scoped key derivation
 /// or legacy ownership migration.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn consume_prepared_reasoning_transport(
     key: ImportTransportKey,
     binding: &PreparationImportTransportBinding,
@@ -2615,7 +2615,7 @@ async fn run_import_preparation_descriptor_helper_bounded(
     output_cap: u64,
     deadline: Instant,
 ) -> Result<Vec<u8>> {
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = (command, control, source, output_cap, deadline);
         // Preparation can carry transcript-derived material. Without the
@@ -2624,7 +2624,7 @@ async fn run_import_preparation_descriptor_helper_bounded(
         return Err(ImportError::AuthorizedReaderUnavailable.into());
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     {
         ensure_before_deadline(deadline)?;
         let control =
@@ -2641,10 +2641,15 @@ async fn run_import_preparation_descriptor_helper_bounded(
             .stderr(Stdio::null())
             .kill_on_drop(true);
         crate::internal::ai::authorized_read::configure_private_helper_process_group(&mut command);
+        #[cfg(unix)]
         let child = command
             .spawn()
             .map_err(|_| ImportError::AuthorizedReaderFailed)?;
+        #[cfg(unix)]
         let mut child = CancellationSafeChild::new_process_group(child);
+        #[cfg(windows)]
+        let mut child = CancellationSafeChild::spawn_windows(&mut command)
+            .map_err(|_| ImportError::AuthorizedReaderFailed)?;
         let Some(mut stdout) = child.child_mut().and_then(|child| child.stdout.take()) else {
             child.terminate_and_reap();
             return Err(ImportError::AuthorizedReaderFailed.into());
@@ -2728,7 +2733,7 @@ async fn prepare_candidate_bounded(
     capture_scope: &CaptureScope,
     deadline: CaptureCommitDeadline,
 ) -> Result<PreparedCandidateOutcome> {
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = (
             candidate,
@@ -2742,7 +2747,7 @@ async fn prepare_candidate_bounded(
         return Err(ImportError::AuthorizedReaderUnavailable.into());
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     {
         let monotonic_deadline = deadline.monotonic();
         ensure_before_deadline(monotonic_deadline)?;

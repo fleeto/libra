@@ -1828,9 +1828,10 @@ fn import_command_helpers_stay_registered_bounded_and_content_free() {
         );
     }
     assert!(
-        preparation.contains("#[cfg(not(unix))]")
-            && preparation.contains("ImportError::AuthorizedReaderUnavailable"),
-        "{} descriptor preparation must fail closed outside Unix rather than launch a raw-source helper without process-tree containment",
+        preparation.contains("#[cfg(not(any(unix, windows)))]")
+            && preparation.contains("ImportError::AuthorizedReaderUnavailable")
+            && preparation.contains("CancellationSafeChild::spawn_windows(&mut command)"),
+        "{} descriptor preparation must use Windows job containment or fail closed when no process-tree containment exists",
         path.display()
     );
     let stdout_drain = preparation

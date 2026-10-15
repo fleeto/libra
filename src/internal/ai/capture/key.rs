@@ -24,15 +24,16 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow, bail};
+#[cfg(any(unix, windows))]
+use ring::hmac;
 #[cfg(unix)]
-use ring::{
-    hmac,
-    rand::{SecureRandom, SystemRandom},
-};
+use ring::rand::{SecureRandom, SystemRandom};
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use thiserror::Error;
 
+#[cfg(windows)]
+use super::key_windows::{CaptureDedupPrivateDir, load_capture_dedup_secret_windows};
 use crate::internal::ai::{
     capture::{
         checkpoint::AuthenticatedPendingEnvelope,
@@ -45,15 +46,18 @@ use crate::internal::ai::{
 };
 
 /// Fixed, path-free capability result safe to render to a hook host.
+#[cfg(not(windows))]
 pub(crate) const CAPTURE_UNSUPPORTED_PLATFORM_REMEDY: &str = "Session Capture is unavailable on this platform because secure repository-private key initialization requires Unix descriptor-relative no-replace file APIs; run the hook on a Unix host";
+#[cfg(windows)]
+pub(crate) const CAPTURE_UNSUPPORTED_PLATFORM_REMEDY: &str = "Session Capture requires native Windows no-follow filesystem access and a registered Libra helper; run this hook with the matching libra.exe on a local drive";
 
 #[derive(Debug, Error)]
 #[error("{CAPTURE_UNSUPPORTED_PLATFORM_REMEDY}")]
 pub(crate) struct CaptureDedupUnsupportedPlatform;
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub(crate) const CAPTURE_DEDUP_SECRET_DIR: &str = "private";
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub(crate) const CAPTURE_DEDUP_SECRET_FILE: &str = "agent-capture-dedup-v1.key";
 pub(crate) const CAPTURE_DEDUP_SECRET_BYTES: usize = 32;
 
@@ -93,9 +97,9 @@ impl CaptureSourceCommitmentDomain {
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 const PENDING_ENVELOPE_MAC_PREFIX: &str = "pending-envelope/hmac-v1/";
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 const PENDING_ENVELOPE_MAC_DOMAIN: &[u8] = b"libra-agent-pending-envelope-hmac-v1\0";
 const PENDING_ENVELOPE_MAX_BYTES: usize = 64 * 1024 * 1024;
 
@@ -200,7 +204,7 @@ impl PrivateArtifactMacDomain {
         }
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     fn prefix(self) -> &'static str {
         match self {
             Self::Envelope => PENDING_ENVELOPE_MAC_PREFIX,
@@ -213,7 +217,7 @@ impl PrivateArtifactMacDomain {
         }
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     fn tag(self) -> &'static [u8] {
         match self {
             Self::Envelope => PENDING_ENVELOPE_MAC_DOMAIN,
@@ -773,7 +777,7 @@ fn authenticate_private_artifact_existing_key(
             "pending capture artifact exceeds its safe authentication limit; run libra agent doctor"
         );
     }
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     {
         // This read neither creates directories/files nor tightens modes,
         // reclaims staging entries, or waits for an initializer. A lost key
@@ -829,7 +833,7 @@ fn authenticate_private_artifact_existing_key(
             hex::encode(hmac::sign(&key, &message).as_ref())
         ))
     }
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = (storage_path, envelope, expected_mac);
         Err(CaptureDedupUnsupportedPlatform.into())
@@ -884,8 +888,8 @@ const CAPTURE_DEDUP_TEMP_LOCK_MAX_WAIT_WITHOUT_DEADLINE: Duration = Duration::fr
 /// key. The scoped helper may be SIGKILLed while writing its first key: Unix
 /// staging entries hold an advisory lock while live, so the next helper can
 /// reclaim only released, attributable entries without racing an active one.
-/// Non-Unix targets fail closed until they have an equivalent descriptor-relative
-/// no-replace publication primitive; they never fall back to path-based key I/O.
+/// Windows uses protected ACLs and handle-relative, no-replace publication.
+/// Other targets fail closed without falling back to path-based key I/O.
 #[cfg(test)]
 pub(crate) fn load_capture_dedup_secret(
     storage_path: &Path,
@@ -904,7 +908,11 @@ pub(crate) fn load_capture_dedup_secret_with_mutation_deadline(
     {
         load_capture_dedup_secret_unix(storage_path, mutation_deadline_millis)
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        load_capture_dedup_secret_windows(storage_path, mutation_deadline_millis)
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         load_capture_dedup_secret_non_unix_unsupported(storage_path, mutation_deadline_millis)
     }
@@ -942,7 +950,7 @@ pub(crate) async fn derive_capture_source_commitment_in_scope_until<C: sea_orm::
             Some(mutation_deadline_millis),
         )?;
         ensure_capture_dedup_mutation_deadline(Some(mutation_deadline_millis))?;
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         {
             let key = hmac::Key::new(hmac::HMAC_SHA256, &secret);
             let mut context = hmac::Context::with_key(&key);
@@ -954,7 +962,7 @@ pub(crate) async fn derive_capture_source_commitment_in_scope_until<C: sea_orm::
                 hex::encode(context.sign().as_ref())
             ))
         }
-        #[cfg(not(unix))]
+        #[cfg(not(any(unix, windows)))]
         {
             let _ = (secret, domain, preimage);
             Err(CaptureDedupUnsupportedPlatform.into())
@@ -1035,7 +1043,7 @@ fn capture_source_commitment_deadline_millis(deadline: Instant) -> Result<i64> {
 /// did not replace either endpoint between validation and no-replace publish.
 /// Do not create a key, staging directory, or temp file on targets where the
 /// runtime lacks the Unix descriptor-relative primitives used above.
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn load_capture_dedup_secret_non_unix_unsupported(
     _storage_path: &Path,
     _mutation_deadline_millis: Option<i64>,
@@ -1788,7 +1796,9 @@ pub(crate) fn ensure_scope_binding_mutation_deadline(deadline_millis: i64) -> Re
 /// Keep the optional host-issued deadline at the key I/O boundary. This
 /// helper deliberately accepts no provider data, so a hook payload cannot
 /// shorten or extend the mutation window.
-fn ensure_capture_dedup_mutation_deadline(mutation_deadline_millis: Option<i64>) -> Result<()> {
+pub(super) fn ensure_capture_dedup_mutation_deadline(
+    mutation_deadline_millis: Option<i64>,
+) -> Result<()> {
     if let Some(deadline_millis) = mutation_deadline_millis {
         ensure_scope_binding_mutation_deadline(deadline_millis)?;
     }

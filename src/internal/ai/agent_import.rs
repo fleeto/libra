@@ -5,7 +5,7 @@
 //! they are strictly parsed into typed turns, redacted field-by-field, and
 //! re-serialized as an allowlist-only per-turn projection before persistence.
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use std::process::Stdio;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use super::authorized_read::{
     AUTHORIZED_READ_HELPER_ARG, AUTHORIZED_READ_HELPER_CAP_ENV, CancellationSafeChild,
     configure_private_helper_process_group, read_async_strictly_bounded, registered_helper_command,
@@ -372,12 +372,28 @@ mod import_path_serde {
         Vec::<u8>::deserialize(deserializer).map(|bytes| PathBuf::from(OsString::from_vec(bytes)))
     }
 
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    pub fn serialize<S: Serializer>(path: &Path, serializer: S) -> Result<S::Ok, S::Error> {
+        use std::os::windows::ffi::OsStrExt;
+        path.as_os_str()
+            .encode_wide()
+            .collect::<Vec<_>>()
+            .serialize(serializer)
+    }
+
+    #[cfg(windows)]
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<PathBuf, D::Error> {
+        use std::{ffi::OsString, os::windows::ffi::OsStringExt};
+        Vec::<u16>::deserialize(deserializer)
+            .map(|units| PathBuf::from(OsString::from_wide(&units)))
+    }
+
+    #[cfg(not(any(unix, windows)))]
     pub fn serialize<S: Serializer>(path: &Path, serializer: S) -> Result<S::Ok, S::Error> {
         path.to_string_lossy().serialize(serializer)
     }
 
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<PathBuf, D::Error> {
         String::deserialize(deserializer).map(PathBuf::from)
     }
@@ -1191,7 +1207,7 @@ async fn read_authorized_descriptor_until(
     read_cap: u64,
     deadline: Instant,
 ) -> (Result<Vec<u8>>, u64) {
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = (file, read_cap, deadline);
         // The raw descriptor reader relies on Unix process-group containment
@@ -1200,7 +1216,7 @@ async fn read_authorized_descriptor_until(
         return (Err(ImportError::AuthorizedReaderUnavailable.into()), 0);
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     {
         if let Err(error) = ensure_before_deadline(deadline) {
             return (Err(error), 0);
@@ -1222,11 +1238,18 @@ async fn read_authorized_descriptor_until(
             .stderr(Stdio::null())
             .kill_on_drop(true);
         configure_private_helper_process_group(&mut command);
+        #[cfg(unix)]
         let child = match command.spawn() {
             Ok(child) => child,
             Err(_) => return (Err(ImportError::AuthorizedReaderFailed.into()), 0),
         };
+        #[cfg(unix)]
         let mut child = CancellationSafeChild::new_process_group(child);
+        #[cfg(windows)]
+        let mut child = match CancellationSafeChild::spawn_windows(&mut command) {
+            Ok(child) => child,
+            Err(_) => return (Err(ImportError::AuthorizedReaderFailed.into()), 0),
+        };
         let Some(mut stdout) = child.child_mut().and_then(|child| child.stdout.take()) else {
             let _ = child.terminate_and_reap_checked();
             return (Err(ImportError::AuthorizedReaderFailed.into()), 0);

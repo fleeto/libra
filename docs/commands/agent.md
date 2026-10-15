@@ -2,6 +2,49 @@
 
 Manage external-agent capture for Claude Code, Codex, and OpenCode.
 
+### Native Windows capture
+
+Windows builds support Session Capture on local NTFS drives, without WSL.
+Install **OpenCode 2.x** (the GitHub 1.19.0 CLI has an incompatible plugin API),
+and place its configuration in `%USERPROFILE%\.config\opencode\opencode.json`.
+The native CLI is available from
+<https://opencode.ai/update/api/latest/cli/opencode/opencode-windows-x64.zip>.
+In PowerShell, with `libra.exe` and `opencode.exe` on PATH:
+
+```powershell
+libra init
+libra agent add opencode
+libra agent rpc trust --dir C:\path\to\verified-opencode2
+libra agent rpc trust opencode
+opencode run --standalone "Reply with a short greeting."
+libra agent session list
+libra agent checkpoint list
+libra agent checkpoint export <checkpoint-id>
+```
+
+Windows validates local paths with no-follow `CreateFileW` handles and rejects
+reparse points (including junctions), alternate streams, device names, and UNC
+capture storage. Repository-private keys use a current-user/SYSTEM ACL,
+`LockFileEx` exclusion, and atomic no-replace publication. A missing or damaged
+key is never silently replaced during authentication or recovery.
+
+The Windows OpenCode exporter runs **without an OS filesystem/network sandbox**.
+Only an explicitly trusted `opencode.exe` can run; its bytes and file identity
+are revalidated, and the executable is held against replacement. A Windows Job
+Object contains the process tree, with a 30-second deadline and a 16 MiB accepted
+output limit. Output is held in an ACL-protected temporary file and removed
+after reading; stderr and ambient credential variables are not forwarded.
+The size is checked while the process runs and after it exits; Windows has no
+Unix `RLIMIT_FSIZE` write-time limit, so temporary output can exceed the accepted
+limit between checks. Linux bubblewrap and macOS Seatbelt requirements are
+unchanged. Windows capability availability requires trusted exporter bytes;
+it does not claim that an OS sandbox is present.
+
+Windows checkpoint listing and ordinary transcript export are available.
+Owner-only raw reasoning artifact export and the object/findings scans in
+`libra agent doctor` remain unavailable on Windows; doctor reports these scans
+as unavailable and applies no repairs to them.
+
 ## Synopsis
 
 ```bash
@@ -293,8 +336,9 @@ The default OpenCode export budget is 30 seconds; the export lease and plugin
 forwarding timeout derive a 15-second margin (45 seconds). Run
 `libra agent add opencode` again to refresh an older installed plugin. Schema v2
 `importable` and `export_bridge` require a trusted exporter and a successful
-platform sandbox probe: Seatbelt on macOS, the existing trusted bwrap probe on
-Linux. Availability reports those prerequisites; it does not prove that OpenCode
+platform sandbox probe on Unix: Seatbelt on macOS, the existing trusted bwrap probe on
+Linux. Windows requires the trusted native exporter and uses the Job Object
+boundary described above, without an OS sandbox. Availability reports those prerequisites; it does not prove that OpenCode
 boots, that a session exports successfully, or that reasoning fields have a
 trusted native origin. Timeout still rejects partial output and preserves the
 existing metadata-only fallback; the 16 MiB export cap is unchanged.
@@ -866,8 +910,8 @@ on them:
   store — a catalog row whose `parent_commit` is malformed or points at a
   missing traces object — fails with `LBR-AGENT-009` (exit 128); run `libra
   agent doctor` to inspect the store.
-- Managed Session Capture currently requires Unix for secure repository-private
-  deduplication-key initialization. On non-Unix platforms it fails closed
+- Managed Session Capture supports Unix and native Windows secure repository-private
+  deduplication-key initialization. On other platforms it fails closed
   before creating key files, with an actionable diagnostic, rather than using
   a weaker path-based publication fallback. The fixed capability diagnostic is
   explicit for both Codex entry points: nonterminal `hooks codex` callbacks

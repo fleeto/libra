@@ -77,6 +77,17 @@ fn prepare_loose_object_temp_dir(
         )
     })?;
     ensure_dir_exists(parent, sync_data)?;
+    #[cfg(windows)]
+    let _pinned = {
+        let parent = open_directory_tree_no_follow(parent)?;
+        let name = path.file_name().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "loose-object temp directory has no filename",
+            )
+        })?;
+        open_or_create_directory_at(&parent, name, sync_data)?
+    };
     match fs::create_dir(path) {
         Ok(()) => {
             #[cfg(unix)]
@@ -266,7 +277,7 @@ pub(crate) fn open_regular_file_at_no_follow(
     Ok(file)
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 pub(crate) fn open_directory_tree_no_follow(_path: &Path) -> std::io::Result<fs::File> {
     Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
@@ -274,7 +285,7 @@ pub(crate) fn open_directory_tree_no_follow(_path: &Path) -> std::io::Result<fs:
     ))
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 pub(crate) fn open_directory_at_no_follow(
     _parent: &fs::File,
     _name: &std::ffi::OsStr,
@@ -285,7 +296,7 @@ pub(crate) fn open_directory_at_no_follow(
     ))
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 pub(crate) fn open_regular_file_at_no_follow(
     _parent: &fs::File,
     _name: &std::ffi::OsStr,
@@ -294,6 +305,36 @@ pub(crate) fn open_regular_file_at_no_follow(
         std::io::ErrorKind::Unsupported,
         "secure descriptor-relative reads are unavailable on this platform",
     ))
+}
+
+#[cfg(windows)]
+pub(crate) fn open_directory_tree_no_follow(path: &Path) -> std::io::Result<fs::File> {
+    crate::utils::windows_fs::open_tree(path)
+}
+
+#[cfg(windows)]
+pub(crate) fn open_directory_at_no_follow(
+    parent: &fs::File,
+    name: &std::ffi::OsStr,
+) -> std::io::Result<fs::File> {
+    crate::utils::windows_fs::open_at(parent, name, true)
+}
+
+#[cfg(windows)]
+pub(crate) fn open_regular_file_at_no_follow(
+    parent: &fs::File,
+    name: &std::ffi::OsStr,
+) -> std::io::Result<fs::File> {
+    crate::utils::windows_fs::open_at(parent, name, false)
+}
+
+#[cfg(windows)]
+fn open_or_create_directory_at(
+    parent: &fs::File,
+    name: &std::ffi::OsStr,
+    _sync_data: bool,
+) -> std::io::Result<fs::File> {
+    crate::utils::windows_fs::create_directory_at(parent, name, false)
 }
 
 #[cfg(unix)]
@@ -916,7 +957,7 @@ pub(crate) fn open_local_loose_object_no_follow(
 /// There is no cross-platform descriptor-relative no-follow primitive in the
 /// standard library. A doctor scan must fail closed rather than use a
 /// path-check-then-open sequence that a local attacker can race.
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 pub(crate) fn open_local_loose_object_no_follow(
     _git_dir: &Path,
     _hash: &ObjectHash,
@@ -925,6 +966,17 @@ pub(crate) fn open_local_loose_object_no_follow(
         std::io::ErrorKind::Unsupported,
         "secure loose-object reads are unavailable on this platform",
     ))
+}
+
+#[cfg(windows)]
+pub(crate) fn open_local_loose_object_no_follow(
+    git_dir: &Path,
+    hash: &ObjectHash,
+) -> std::io::Result<fs::File> {
+    let objects = open_directory_tree_no_follow(&git_dir.join("objects"))?;
+    let hash = hash.to_string();
+    let shard = open_directory_at_no_follow(&objects, std::ffi::OsStr::new(&hash[..2]))?;
+    open_regular_file_at_no_follow(&shard, std::ffi::OsStr::new(&hash[2..]))
 }
 
 /// Helper function to write a git object to the object database.

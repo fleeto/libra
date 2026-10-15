@@ -27,7 +27,7 @@
 //! deferred path check; unsupported platforms fail closed. The writer then
 //! consumes only that held descriptor and never re-opens the source path.
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use std::path::Component;
 use std::{
     fmt,
@@ -493,11 +493,111 @@ fn open_beneath_no_follow(root: &Path, relative: &Path) -> Result<std::fs::File>
     anyhow::bail!("provider transcript path did not resolve to a file")
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn open_beneath_no_follow(_root: &Path, _relative: &Path) -> Result<std::fs::File> {
     anyhow::bail!(
         "secure provider transcript opening is unavailable on this platform; import fails closed"
     )
+}
+
+#[cfg(windows)]
+fn open_beneath_no_follow(root: &Path, relative: &Path) -> Result<std::fs::File> {
+    let directory = crate::utils::windows_fs::open_tree(root)
+        .context("open Windows provider root without reparse points")?;
+    open_file_beneath_pinned_provider_directory(&directory, relative)
+}
+
+#[cfg(windows)]
+pub(crate) fn open_file_beneath_pinned_provider_directory(
+    directory: &std::fs::File,
+    relative: &Path,
+) -> Result<std::fs::File> {
+    let mut directory = directory
+        .try_clone()
+        .context("retain Windows provider directory")?;
+    let mut parts = relative.components().peekable();
+    while let Some(part) = parts.next() {
+        let Component::Normal(name) = part else {
+            anyhow::bail!("provider source contains a non-normal path component");
+        };
+        let final_part = parts.peek().is_none();
+        let file = if final_part {
+            crate::utils::windows_fs::open_live_source_at(&directory, name)
+        } else {
+            crate::utils::windows_fs::open_at(&directory, name, true)
+        }
+        .context("open Windows provider descendant without reparse points")?;
+        if final_part {
+            return Ok(file);
+        }
+        directory = file;
+    }
+    anyhow::bail!("provider source must name a regular file")
+}
+
+#[cfg(windows)]
+pub(crate) fn open_provider_directory_for_discovery(
+    adapter: &dyn ObservedAgent,
+    path: &Path,
+) -> Result<Option<std::fs::File>> {
+    if !path.is_absolute() {
+        return Ok(None);
+    }
+    for root in configured_provider_roots(adapter) {
+        if !path.starts_with(&root) {
+            continue;
+        }
+        return match crate::utils::windows_fs::open_tree(path) {
+            Ok(file) => Ok(Some(file)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e).context("discover Windows provider directory without reparse points"),
+        };
+    }
+    Ok(None)
+}
+
+#[cfg(windows)]
+pub(crate) struct PinnedReadDir {
+    entries: std::fs::ReadDir,
+    _pin: crate::utils::windows_fs::PinnedParent,
+}
+
+#[cfg(windows)]
+impl Iterator for PinnedReadDir {
+    type Item = Result<PinnedDirEntry>;
+    fn next(&mut self) -> Option<Self::Item> {
+        use std::os::windows::fs::MetadataExt;
+        self.entries.next().map(|entry| {
+            let entry = entry.context("enumerate Windows provider entry")?;
+            let metadata = std::fs::symlink_metadata(entry.path())
+                .context("inspect Windows provider entry")?;
+            let file_type = if metadata.file_attributes()
+                & windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT
+                != 0
+            {
+                PinnedEntryType::Symlink
+            } else if metadata.is_file() {
+                PinnedEntryType::File
+            } else if metadata.is_dir() {
+                PinnedEntryType::Directory
+            } else {
+                PinnedEntryType::Other
+            };
+            Ok(PinnedDirEntry {
+                file_name: entry.file_name(),
+                file_type,
+            })
+        })
+    }
+}
+
+#[cfg(windows)]
+pub(crate) fn read_dir_pinned_provider_directory(
+    directory: &std::fs::File,
+) -> Result<PinnedReadDir> {
+    let pin = crate::utils::windows_fs::PinnedParent::new(directory)?;
+    let entries = std::fs::read_dir(crate::utils::windows_fs::handle_path(directory)?)?;
+    Ok(PinnedReadDir { entries, _pin: pin })
 }
 
 /// Open a provider-owned directory for pre-consent discovery without ever
@@ -573,7 +673,7 @@ pub(crate) fn open_provider_directory_for_discovery(
 /// File type of one entry yielded by [`read_dir_pinned_provider_directory`],
 /// resolved relative to the pinned directory descriptor so it always refers
 /// to the opened directory object even when its pathname was swapped.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PinnedEntryType {
     File,
@@ -582,7 +682,7 @@ pub(crate) enum PinnedEntryType {
     Other,
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 impl PinnedEntryType {
     pub(crate) fn is_file(self) -> bool {
         matches!(self, Self::File)
@@ -595,7 +695,7 @@ impl PinnedEntryType {
 
 /// One entry of a pinned provider directory: its name plus a
 /// descriptor-relative file type.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub(crate) struct PinnedDirEntry {
     pub(crate) file_name: std::ffi::OsString,
     pub(crate) file_type: PinnedEntryType,
@@ -845,7 +945,7 @@ pub(crate) fn open_file_beneath_pinned_provider_directory(
     anyhow::bail!("provider-relative source did not resolve to a file")
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 pub(crate) fn open_file_beneath_pinned_provider_directory(
     _directory: &std::fs::File,
     _relative: &Path,
@@ -855,7 +955,7 @@ pub(crate) fn open_file_beneath_pinned_provider_directory(
     )
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 pub(crate) fn open_provider_directory_for_discovery(
     _adapter: &dyn ObservedAgent,
     _path: &Path,
@@ -888,7 +988,7 @@ fn securely_open_provider_file(
 /// Unix descriptor-relative no-follow traversal. Historical import calls the
 /// strict resolver below and still fails closed there; this compatibility
 /// path is only for an already-running provider hook capture.
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn compatibly_open_provider_file(
     adapter: &dyn ObservedAgent,
     path: &Path,
@@ -918,12 +1018,12 @@ fn open_provider_file_for_capture(
     path: &Path,
     strict_import: bool,
 ) -> Result<Option<(std::fs::File, String)>> {
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     {
         let _ = strict_import;
         securely_open_provider_file(adapter, path)
     }
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     {
         if strict_import {
             securely_open_provider_file(adapter, path)

@@ -1483,9 +1483,14 @@ fn create_private_command_tmpdir(path: &Path) -> std::io::Result<()> {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(COMMAND_TMPDIR_MODE))
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn create_private_command_tmpdir(path: &Path) -> std::io::Result<()> {
     std::fs::create_dir(path)
+}
+
+#[cfg(windows)]
+fn create_private_command_tmpdir(path: &Path) -> std::io::Result<()> {
+    crate::utils::windows_fs::create_private_directory(path)
 }
 
 fn inject_command_tmp_env(spec: &mut CommandSpec, command_tmpdir: &Path) {

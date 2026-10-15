@@ -5,7 +5,7 @@
 //! checkpoint catalog row, source revision/current leaf, association row, and
 //! traces ref CAS commit atomically through [`history::TracesTxnExtra`].
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use std::process::Stdio;
 use std::{
     collections::HashMap,
@@ -16,21 +16,21 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow, bail};
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use chrono::Utc;
 use sea_orm::{ConnectionTrait, DatabaseConnection, DatabaseTransaction, Statement};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use tokio::io::AsyncWriteExt;
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use super::authorized_read::{
     CancellationSafeChild, StrictBoundedRead, configure_private_helper_process_group,
     read_async_strictly_bounded, read_strictly_bounded,
 };
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use super::observed_agents::{
     claude_project_slug, claude_session_dir, open_file_beneath_pinned_provider_directory,
     open_provider_directory_for_discovery,
@@ -613,6 +613,33 @@ fn decode_helper_path(encoded: &str) -> Result<PathBuf> {
     Ok(PathBuf::from(OsString::from_vec(bytes)))
 }
 
+#[cfg(windows)]
+fn encode_helper_path(path: &Path) -> String {
+    use std::os::windows::ffi::OsStrExt;
+    let bytes: Vec<u8> = path
+        .as_os_str()
+        .encode_wide()
+        .flat_map(u16::to_le_bytes)
+        .collect();
+    STANDARD.encode(bytes)
+}
+
+#[cfg(windows)]
+fn decode_helper_path(encoded: &str) -> Result<PathBuf> {
+    use std::{ffi::OsString, os::windows::ffi::OsStringExt};
+    let bytes = STANDARD
+        .decode(encoded)
+        .context("decode Windows subagent discovery path")?;
+    if bytes.len() % 2 != 0 {
+        bail!("Windows subagent discovery path has invalid UTF-16 bytes");
+    }
+    let units: Vec<_> = bytes
+        .chunks_exact(2)
+        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .collect();
+    Ok(PathBuf::from(OsString::from_wide(&units)))
+}
+
 /// Resolve the registered Libra executable for every private child-content
 /// helper. Never infer a sibling named `libra`: managed hooks may be installed
 /// under a renamed `--binary-path`, and an embedded host must fail closed.
@@ -681,16 +708,16 @@ fn helper_unavailable_discovery() -> SubagentDiscovery {
 pub fn run_subagent_discovery_helper(input: &[u8]) -> Result<Vec<u8>> {
     let request: SubagentDiscoveryHelperRequest =
         serde_json::from_slice(input).context("decode subagent discovery helper request")?;
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     let _ = &request;
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     let discovery = SubagentDiscovery {
         sources: Vec::new(),
         bytes_read: 0,
         warning: Some("secure subagent content discovery is unavailable on this platform".into()),
         incomplete: false,
     };
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     let discovery = {
         let cwd = decode_helper_path(&request.cwd_base64)?;
         let deadline = Instant::now()
@@ -923,7 +950,7 @@ pub(crate) async fn discover_claude_subagent_contents_bounded(
     if let Ok(Some(discovery)) = TEST_SUBAGENT_DISCOVERY_OVERRIDE.try_with(|value| value.clone()) {
         return Ok(discovery);
     }
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     return discover_claude_subagent_contents(
         cwd,
         provider_session_id,
@@ -932,7 +959,7 @@ pub(crate) async fn discover_claude_subagent_contents_bounded(
         source_limit,
     );
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     {
         ensure_before_discovery_deadline(deadline)?;
         let Some(helper_program) = helper_program() else {
@@ -969,10 +996,15 @@ pub(crate) async fn discover_claude_subagent_contents_bounded(
             .stderr(Stdio::null())
             .kill_on_drop(true);
         configure_private_helper_process_group(&mut command);
+        #[cfg(unix)]
         let child = command
             .spawn()
             .context("start bounded subagent discovery helper")?;
+        #[cfg(unix)]
         let mut child = CancellationSafeChild::new_process_group(child);
+        #[cfg(windows)]
+        let mut child = CancellationSafeChild::spawn_windows(&mut command)
+            .context("start contained Windows subagent helper")?;
         let Some(mut stdin) = child.child_mut().and_then(|child| child.stdin.take()) else {
             child.terminate_and_reap();
             bail!("bounded subagent discovery helper has no stdin pipe");
@@ -1208,7 +1240,7 @@ pub(crate) fn discover_claude_subagent_contents(
             ..SubagentDiscovery::default()
         });
     }
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = (cwd, deadline, byte_budget, source_limit);
         return Ok(SubagentDiscovery {
@@ -1218,7 +1250,7 @@ pub(crate) fn discover_claude_subagent_contents(
             ..SubagentDiscovery::default()
         });
     }
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     let result = (|| -> Result<SubagentDiscovery> {
         ensure_before_deadline(deadline)?;
         let Some(project_dir) = claude_session_dir(cwd) else {
@@ -1332,7 +1364,7 @@ pub(crate) fn discover_claude_subagent_contents(
             incomplete: false,
         })
     })();
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     result
 }
 
@@ -2685,7 +2717,7 @@ fn decode_subagent_projection_frame(
 /// Run the CPU-heavy projection under the same absolute deadline as child
 /// persistence. The parent only copies bounded helper output; it never parses
 /// or redacts native child transcript bytes in-process on a live deadline.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 async fn safe_content_projection_until(
     source: &DiscoveredSubagentContent,
     deadline: Instant,
@@ -2721,10 +2753,15 @@ async fn safe_content_projection_until(
         .stderr(Stdio::null())
         .kill_on_drop(true);
     configure_private_helper_process_group(&mut command);
+    #[cfg(unix)]
     let child = command
         .spawn()
         .context("start killable subagent content projection helper")?;
+    #[cfg(unix)]
     let mut child = CancellationSafeChild::new_process_group(child);
+    #[cfg(windows)]
+    let mut child = CancellationSafeChild::spawn_windows(&mut command)
+        .context("start contained Windows subagent helper")?;
     let Some(mut stdin) = child.child_mut().and_then(|child| child.stdin.take()) else {
         child.terminate_and_reap();
         bail!("killable subagent content projection helper has no stdin pipe");
@@ -2821,7 +2858,7 @@ async fn safe_content_projection_until(
     Ok(projection.into_parts_with_digest())
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 async fn safe_content_projection_until(
     _source: &DiscoveredSubagentContent,
     _deadline: Instant,

@@ -252,6 +252,7 @@ impl CapturedStat {
 }
 
 #[cfg(not(unix))]
+#[cfg_attr(windows, allow(dead_code))]
 fn system_time_parts(time: Option<std::time::SystemTime>) -> (i64, i64) {
     use std::time::UNIX_EPOCH;
     let Some(time) = time else {

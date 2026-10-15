@@ -452,8 +452,13 @@ fn configure_new_session(command: &mut Command) {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn configure_new_session(_command: &mut Command) {}
+
+#[cfg(windows)]
+fn configure_new_session(command: &mut Command) {
+    command.creation_flags(0x0800_0000 | 0x0000_0200);
+}
 
 /// Extra writable bind for export-style FD-pinned mounts (`source` may
 /// differ from `destination`, e.g. `/proc/self/fd/N` → store).

@@ -1,5 +1,9 @@
 # OpenCode coverage schema-v2 前置实施计划（2026-10-13）
 
+> **COV2-05 本地验收完成、待本次源码交付（2026-10-15 09:49:12 UTC）：** 原7AC/4VER及相关质量门已满足，唯一Claude代码评审实际PASS（0P0/P1/P2、8非阻断P3），新T1双env full实际10150/10150 passed（2slow、23skip、0FAIL/retry/flaky/LEAK，exit0）。source交付前15/26；只有本次最终事实复核、signed main Push/remote同一闭合后才16/26=61.54%，formal仍0/26，父formal59/71=83.10%/source61/71=85.92%。下张COV2-09在实际交付后开工；不以本机full放行SourceA/native/家族C-D或Linux后验。以下旧当前/暂停/待验收头部属于各自历史时点。
+
+> **COV2-05 四owner实际采纳后实施中（2026-10-15）：** scope修订已由actualsigned+DCO main/remote `d36aa2bac136f8d80b0d8c781d38a1d861a50d52` 采纳，唯一Claude规划R4实际PASS/raw `494779f84e69722a149bb362b4f388526985507817964df63f15d4c0572f1517`，两非阻断P3由实现明确普通scope内不得调用VerifyReasoningArtifacts及None的原helper_program语义。首次失败及R3FAIL保留；当前已恢复四owner实现/原验收，代码相关QA、代码单审、T1双env full和源码签推尚未完成，仍不计source16。COVsource15/26/formal0，父formal59/71/source61/71；现安装正式49保持，非新CLI/Session/modelCI。以下草案/暂停/待采纳表述为各自历史时点。
+
 > **COV2-05 当前实施状态（2026-10-15）：** 必要三owner写集修订已由实际signed+DCO main/remote `3e824e27eb28f3fe31475b2c1ae20030a3230dfb` 采纳，唯一Claude规划R2实际PASS/raw `094d32b1da65e51c346083c2251ddee94291bc3b8ee8473278ff1941efa8d448`、103reader/fmt/strict实际0；R1 FAIL保留。首次真实DB验收已FAIL，当前暂停前三owner未合格WIP，待第四helper-owner精确修订单审/采纳后再实现；尚无代码QA/代码评审/full/源码交付资格，不计source16。COV仍source15/26、formal0/26，父formal59/71/source61/71；下一卡COV2-09在本卡source-qualified后执行。
 
 > **历史快照（已由页首当前状态取代）：COV2-08 已源码交付 / COV2-05 写集修订草案（2026-10-15 07:18:48 UTC）：** actual含签名头+DCO main/remote `c60b2817b0d7c2b889491f85a9777e0855356fe1` 已交付COV08（源提交9417及上游5522均保留），COV source **15/26=57.69%**、formal **0/26**，父formal **59/71=83.10%** / source **61/71=85.92%**。COV05仍pending/空、实现UNRUN；本次只将必要import binding/typed port的精确I修为3生产owner/3落点、M，原7AC/4VER/26分母与DAG不变。修订须实际规划单Claude PASS、root裁决及signed main Push/remote采纳后才生效；此前不授新增源码写权、不计source16，不以此放行SourceA/家族C-D。
@@ -850,7 +854,7 @@ COV2-REL-01 冻结不含 OG-27 源码的最终 COV2 树；首次完成 bumped �
 
 **Task type:** implementation
 
-**Lifecycle / Acceptance:** in-progress / 空
+**Lifecycle / Acceptance:** in-progress / locally-accepted（原7AC/4VER、相关质量、代码单Claude及新T1 full已满足；最终两事实复核/签推交接待，家族C-D仍待）
 
 **Description:** version-aware import cursor/digest/fault。本卡唯一行为轴、恢复和粒度见下方 Granularity；不得以 synthetic/native 互换验收。
 
@@ -860,20 +864,20 @@ COV2-REL-01 冻结不含 OG-27 源码的最终 COV2 树；首次完成 bumped �
 
 **Acceptance criteria:**
 
-- [ ] AC1 import cursor keys by `(version,logical_turn_key)`
-- [ ] AC2 v1 source digest bytes remain exact
-- [ ] AC3 v1 import identity preimage remains exact
-- [ ] AC4 v2 source digest has an explicit version domain
-- [ ] AC5 a stale marker leaves no completed cursor
-- [ ] AC6 failed claim leaves no durable imported artifact
-- [ ] AC7 mixed v1/v2 import is independently idempotent.
+- [x] AC1 import cursor keys by `(version,logical_turn_key)`
+- [x] AC2 v1 source digest bytes remain exact
+- [x] AC3 v1 import identity preimage remains exact
+- [x] AC4 v2 source digest has an explicit version domain
+- [x] AC5 a stale marker leaves no completed cursor
+- [x] AC6 failed claim leaves no durable imported artifact
+- [x] AC7 mixed v1/v2 import is independently idempotent.
 
 **Verification:**
 
-- [ ] VER1→AC1/2/3/4: `source .env.test && cargo test --lib internal::ai::agent_import::tests::cov2_import_cursor_and_digest_golden -- --exact` (1/1).
-- [ ] VER2→AC7: `source .env.test && cargo test --test agent_import_test cov2_mixed_v1_v2_direct_import_idempotent -- --exact` (1/1; use only a synthetic normalized turn and local temp DB, without starting/faking an OpenCode Session. If that boundary cannot be implemented, stop and amend this card before coding; do not silently turn this exact CI gate into a Session test).
-- [ ] VER3→AC5: `source .env.test && cargo test --lib internal::ai::agent_import::tests::cov2_stale_marker_keeps_cursor_unfinished -- --exact` (1/1; injected stale-marker fault, zero completed cursor).
-- [ ] VER4→AC6: `source .env.test && cargo test --lib internal::ai::agent_import::tests::cov2_failed_claim_writes_no_import_artifact -- --exact` (1/1; injected claim failure). Do not map the graph test to AC5: it cannot prove either fault condition.
+- [x] VER1→AC1/2/3/4: `source .env.test && cargo test --lib internal::ai::agent_import::tests::cov2_import_cursor_and_digest_golden -- --exact` (1/1).
+- [x] VER2→AC7: `source .env.test && cargo test --test agent_import_test cov2_mixed_v1_v2_direct_import_idempotent -- --exact` (1/1; use only a synthetic normalized turn and local temp DB, without starting/faking an OpenCode Session. If that boundary cannot be implemented, stop and amend this card before coding; do not silently turn this exact CI gate into a Session test).
+- [x] VER3→AC5: `source .env.test && cargo test --lib internal::ai::agent_import::tests::cov2_stale_marker_keeps_cursor_unfinished -- --exact` (1/1; injected stale-marker fault, zero completed cursor).
+- [x] VER4→AC6: `source .env.test && cargo test --lib internal::ai::agent_import::tests::cov2_failed_claim_writes_no_import_artifact -- --exact` (1/1; injected claim failure). Do not map the graph test to AC5: it cannot prove either fault condition.
 
 **Full-suite trigger:** family child 不自行发布；按 ER-13 对最终改动重新判定 T-1/T-4/T-6。若命中 shared single-source helper、测试基建或 focused 信号不足，则在本卡 A/B 阶段运行双 env 全量 Nextest；无论是否命中，COV2-REL-01 首次 T-2 均须在最终 bumped 实现树上重跑；后续仅上游纯 patch 顺延按该卡逐路径同一性规则复用。 本次四owner共享claim binding与checkpoint port命中T-1，最终实现必须在双env执行完整Nextest；先实际单Claude静态PASS再跑full，任何后续Rust/测试/行为变化重新验证，不能复用COV08旧full替新实现。
 
@@ -2636,3 +2640,18 @@ authorized_read只提供pub(crate)的异步task-local scope，且override仅对�
 
 
 **helper规划R3审查处置（2026-10-15 08:46:57 UTC）：** 实际R3 FAIL（0P0/0P1/1P2/6P3）保留；P2补明三个lib门的cfg(test)定位、前置同源build/binSHA收据与首败原因归属；六P3同步修复baseline锚点/状态、信任边界、覆盖优先级、VerifySnapshot生产路径及历史头部时态。此R4只修改同两计划，前三ownerWIP仍暂停、不进QA或stage；实际单Claude R4、root及signed Push/remote未发生前第四owner仍未采纳，不预填PASS或source16。
+
+
+### COV2-05 最终本地验收与签推交付条件（2026-10-15 09:49:12 UTC）
+
+**范围和输入。** 三owner由actualsigned main/remote3e824e2采纳，第四owner由d36aa2bac136f8d80b0d8c781d38a1d861a50d52采纳；实际代码写集为agent_import、coverage_gate、capture/checkpoint、authorized_read四生产文件/四落点M，只有一处新增public direct库入口，既有agent_import_test和三个机制文档及本两计划同交付，共10路径，无新target/DDL/CLI旗标/Session模型CI。最终实现与code评审及full绑定的2048输入manifest SHA256 `d5e6060ac8ade10929bfdfd1e02769241b23da0be6fc522652853fed72588e4e`，before/after同一。普通prepared入口显式版本、同序sidecar排序、租约前redaction/shape/time/scope/SQLite数据库与storage配对、限定helper选择、exact tuple binding与typed prebound port保持deadline/marker/owner/fence/revision/ref/catalog/identity原子性。旧默认CLI/live导入不激活v2，native来源不由该入口供给。
+
+**逐项门。** 原VER1/2/3/4各实际1/1、exit0，分别冻结旧digest/identity/tuple cursor、真实tempDB混合与交替重放、真实stale-generation故障零完成cursor、真实claim SQL失败零durable imported artifact并retry成功；命令/判据未替换。VER3额外比较traces提交目标前后同一，而非误把引用行数当作提交推进；原zero completed cursor/checkpoint/committed claim保留，替换generation的marker仍保留。VER4同时核对象文件/索引、ref、catalog及cursor不变。新增helper scope三exact各1/1；相关authorized_read14/14、import41/41、gate55/55、checkpoint34/34；agent_import_test53 passed/0failed/1ignored，ignored为OpenCode Session手工门，不当PASS。reader58+32+1+12=103；nightly fmt与all-target/all-feature严格Clippy -D warnings各exit0。17步骤实际全0。
+
+先cargo build --locked --offline --bin libra成功（其binary SHA6571872b9c63b470af989224b2e9b2d5b4cd81bf9322ac8c19ba1d18c635a36a），再cargo test --no-run预备真实测试产物成功。预备helper SHA `c3c42638825801dd33b5f8cf61e57476116723420561bc149d20109270e7c440`、195827096B，在每个实际test/quality步骤及full后逐次同一；不把两个构建阶段的不同bytes说成相同，也不称其binary attestation或SourceA。lib测试只在cfg(test)取同轮实际bin路径，integration经CARGO_BIN_EXE_libra走真实生产helper/VerifySnapshot，不fake exporter/Session/helper或seed成功。需要bounded对象helper的DB例按现有Unix containment在macOS实测，pure gold可跨平台，Windows必要编译/安全/四平台发布保留，Linux用户后验。
+
+**单审及全量。** 唯一Claude代码评审actualexit0/PASS，0P0/P1/P2、8非阻断P3，raw SHA `961c3f28a65fc484e6dbb3e0087c35284b92f04ebe33c2ec69f36993fce6a0ce`；root裁决后才启动新T1，不复用COV08旧full。实际UTC2026-10-15 09:26:10.429291至09:46:24.055105，双env静默加载.env.test+.env.live-test，childumask022、jobs2、Nextest8threads；`Summary [1127.838s] 10150 tests run: 10150 passed (2 slow), 23 skipped`，exit0、普通PASS10150，FAIL/LEAK-FAIL/LEAK/retry/flaky/timeout/abort/execfail全0，raw SHA `881a529375329b4a714c8403ecd072776e99a7a0a74b398facc49bf179521202`。两slow为binary_rename_path_collisions_keep_bytes_and_unmerged_stages和test_reset_clears_single_pick_and_revert_state_matrix，最终均PASS；无新增零LEAK门、阈值/serial registry/profile变化。先前missing-admission编译101、unit缺helper0/1以及R2错误额外ref行数断言0/1和binary变更均保留FAIL，不并入本次绿；R3重新核实际head及每步helper SHA。
+
+**非阻断维护建议与限制（计划外跟踪，未声称已实现）。** 8个P3原文及root处置随受审收据保存：cross-native reader错误的显式rollback/专项负例、ordinary入口拒Reasoning纵深回归、额外boundary/Float/depth负例、legacy稀疏ordinal noop语义、过期dead-code attr、宏内手工换行、canonical数据库路径说明、文档精简/INDEX建议。当前已有行为限制为：tool input须已normalized，Float拒绝；SQLite数据库文件与storage为字面匹配，调用方须传数据库对应的canonical绝对.libra路径；noop cursor按连续ordinal前缀推进，稀疏旧输入可低于旧len值，当前未用于控制流。公开路径参数仅调用方的执行授权，不构成可信binary/SourceA；同一固定helper参数的VerifyReasoningArtifacts在ordinary scope不可达且不得引入。INDEX按test target维护，本卡未增/改名target，现有行已涵盖idempotent claims/checkpoints，未为单case追加行或改索引。旧dcc有限pure gold不证明三个旧DB helpers/writer/事务等价，helper snapshot回复依赖调用方选择，prepared redaction_report/snapshot仍沿既有调用方信任模型。真实native三字段/SourceA及家族C-D未闭合。
+
+**最后交付门与计数。** full后仅本两事实计划变化，四Rust/一个测试/三个机制文档共八路径及其余2046输入仍与受审受测后像同一；须新103reader/fmt/strict、唯一Claude事实审查与root裁决，然后只stage本卡10路径、actualsigned+DCO main Push及fresh remote同一。未完成步骤/未知提交SHA不预填；本次签名提交本身承载证据，实际SHA由root交付收据和下一卡ER02绑定。只有交付闭合才COVsource16/26=61.54%，此前15/26；Lifecycle in-progress/locally-accepted，家族COV2-REL-01 actualC/D后才done/complete。父formal59/71/source61/71不变。两用户04/05 dirty改动及未跟踪正式49/lock均保留，不stage或覆盖；正式安装49不替换，demo不处理。本卡无用户可见命令变化，backendcf只读check实测107commands/108nav、drift0，未写站点；下卡09按站点实际clean cf/directpush和当前CLI同步。

@@ -2211,6 +2211,8 @@ pub struct CheckpointWriteRequest<'a> {
     /// The same closed per-claim binding supplied as the transaction extra.
     /// A versioned request cannot substitute an unrelated companion.
     versioned_coverage: Option<&'a VersionedLiveClaimCommitPlan>,
+    /// Set exclusively by the typed import adapter after its attempt binding.
+    imported_versioned_prebound: bool,
     /// Set only by authenticated pending recovery after the retained claim
     /// plan was checked against the original envelope and catalog fences.
     pending_coverage: Option<&'a LiveClaimCommitPlan>,
@@ -2274,6 +2276,7 @@ impl<'a> CheckpointWriteRequest<'a> {
             txn_extra,
             native_versioned_companion: None,
             versioned_coverage: None,
+            imported_versioned_prebound: false,
             pending_coverage: None,
             pending_versioned_header: None,
             pending_key_storage: None,
@@ -2838,6 +2841,7 @@ pub(crate) struct ImportedCheckpointWriteRequest<'a> {
     parent_commit: Option<&'a str>,
     payload: &'a CheckpointRedactedPayload,
     txn_extra: &'a dyn TracesTxnExtra,
+    versioned_coverage: Option<&'a VersionedLiveClaimCommitPlan>,
     deadline: CaptureCommitDeadline,
 }
 
@@ -2878,8 +2882,45 @@ impl<'a> ImportedCheckpointWriteRequest<'a> {
             parent_commit,
             payload,
             txn_extra,
+            versioned_coverage: None,
             deadline,
         })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_versioned(
+        checkpoint_id: &'a str,
+        session_id: &'a str,
+        agent_kind: &'a str,
+        parent_commit: Option<&'a str>,
+        payload: &'a CheckpointRedactedPayload,
+        plan: &'a VersionedLiveClaimCommitPlan,
+        deadline: CaptureCommitDeadline,
+    ) -> Result<Self, CheckpointStoreError> {
+        let ordinary = plan.ordinary();
+        if ordinary.source_channel != "import"
+            || ordinary.session_id != session_id
+            || ordinary.checkpoint_id != checkpoint_id
+            || ordinary.parent_commit.as_deref() != parent_commit
+            || ordinary.capture_scope.is_none()
+            || ordinary.import_identity.is_none()
+            || ordinary.import_session.is_none()
+        {
+            return Err(CheckpointStoreError::InvalidRequest {
+                field: "versioned import checkpoint companion".to_owned(),
+            });
+        }
+        let mut request = Self::new(
+            checkpoint_id,
+            session_id,
+            agent_kind,
+            parent_commit,
+            payload,
+            plan,
+            deadline,
+        )?;
+        request.versioned_coverage = Some(plan);
+        Ok(request)
     }
 }
 
@@ -2975,7 +3016,8 @@ impl<'a> ImportedCheckpointWriter<'a> {
         &self,
         request: ImportedCheckpointWriteRequest<'_>,
     ) -> Result<CheckpointWriteOutcome, CheckpointStoreError> {
-        let request = CheckpointWriteRequest::new(
+        let versioned = request.versioned_coverage;
+        let mut request = CheckpointWriteRequest::new(
             request.checkpoint_id,
             request.checkpoint_id,
             request.session_id,
@@ -2985,9 +3027,17 @@ impl<'a> ImportedCheckpointWriter<'a> {
             self.store.marker_generation(),
             None,
             request.payload,
-            Some(request.txn_extra),
+            if versioned.is_some() {
+                None
+            } else {
+                Some(request.txn_extra)
+            },
             Some(request.deadline),
         )?;
+        if let Some(plan) = versioned {
+            request = request.with_versioned_claims(plan)?;
+            request.imported_versioned_prebound = true;
+        }
         self.store.write(request).await
     }
 }
@@ -4432,6 +4482,12 @@ impl CheckpointStore for TracesCheckpointStore<'_> {
                         == crate::internal::ai::observed_agents::CoverageSchemaVersion::V1
                 }) => {}
             (MarkerRegistration::Prebound, None) => {}
+            (MarkerRegistration::Prebound, Some(plan))
+                if request.imported_versioned_prebound
+                    && plan.ordinary().source_channel == "import"
+                    && plan.ordinary().capture_scope.as_ref() == self.capture_scope.as_ref()
+                    && plan.ordinary().import_identity.is_some()
+                    && plan.ordinary().import_session.is_some() => {}
             _ => {
                 return Err(CheckpointStoreError::InvalidRequest {
                     field: "checkpoint versioned coverage fence".to_owned(),

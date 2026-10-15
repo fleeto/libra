@@ -48,12 +48,13 @@ use super::{
         authorize_final_capture_commit,
     },
     observed_agents::{
-        AgentKind, CanonValue, Completeness, ExportAuthorized, MAX_REDACTION_MATCH_SAMPLES,
-        NormalizedTurn, RedactedBytes, RedactionReport, Redactor, TRANSCRIPT_READ_HARD_CAP_BYTES,
-        TranscriptSource, normalize_claude_transcript_until, normalize_codex_rollout_until,
+        AgentKind, CanonValue, Completeness, CoverageSchemaVersion, ExportAuthorized,
+        MAX_REDACTION_MATCH_SAMPLES, NormalizedTurn, RedactedBytes, RedactionReport, Redactor,
+        TRANSCRIPT_READ_HARD_CAP_BYTES, TranscriptSource, encode_coverage_turn_for_schema,
+        normalize_claude_transcript_until, normalize_codex_rollout_until,
         normalize_opencode_export_until, parse_canon_value,
         reasoning::{NativeProvenReasoning, ReasoningSourceDisposition},
-        redact_turns_with_report, safe_turn_projection,
+        redact_turns_with_report, safe_turn_projection, safe_turn_projection_for_schema,
     },
 };
 use crate::{
@@ -61,7 +62,7 @@ use crate::{
         ai::{
             coverage_gate::{
                 self, ImportIdentityCommit, LiveCaptureClaimCommitPlan, LiveClaimCommitPlan,
-                ReasoningCoverageInput, ReservedTurnClaim,
+                ReasoningCoverageInput, ReservedTurnClaim, VersionedLiveClaimCommitPlan,
             },
             history::{self, TracesInflightMarker},
             hooks::{
@@ -1048,6 +1049,30 @@ fn source_digest(turns: &[NormalizedTurn]) -> String {
         digest.update([0xff]);
     }
     hex::encode(digest.finalize())
+}
+
+fn source_digest_for_coverage_versions(
+    turns: &[NormalizedTurn],
+    versions: &[i64],
+) -> Result<String> {
+    if versions.len() != turns.len() {
+        bail!("import coverage version count differs from turn count");
+    }
+    for (turn, version) in turns.iter().zip(versions) {
+        encode_coverage_turn_for_schema(*version, turn)?;
+    }
+    if versions.iter().all(|version| *version == 1) {
+        return Ok(source_digest(turns));
+    }
+    let mut digest = Sha256::new();
+    digest.update(b"libra-agent-import-source-coverage-v2\0");
+    for (turn, version) in turns.iter().zip(versions) {
+        digest.update(version.to_be_bytes());
+        update_length_delimited_import_preimage(&mut digest, turn.logical_turn_key.as_bytes())?;
+        let encoded = encode_coverage_turn_for_schema(*version, turn)?;
+        update_length_delimited_import_preimage(&mut digest, encoded.digest_hex.as_bytes())?;
+    }
+    Ok(hex::encode(digest.finalize()))
 }
 
 fn update_length_delimited_import_preimage(digest: &mut Sha256, value: &[u8]) -> Result<()> {
@@ -2850,6 +2875,30 @@ async fn bind_attempt(
     now_ms: i64,
     deadline: CaptureCommitDeadline,
 ) -> Result<TracesInflightMarker> {
+    bind_attempt_for_coverage(
+        conn,
+        request,
+        lease,
+        None,
+        claim,
+        checkpoint_id,
+        now_ms,
+        deadline,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn bind_attempt_for_coverage(
+    conn: &DatabaseConnection,
+    request: &ImportRequest,
+    lease: &ImportLease,
+    version: Option<CoverageSchemaVersion>,
+    claim: &ReservedTurnClaim,
+    checkpoint_id: &str,
+    now_ms: i64,
+    deadline: CaptureCommitDeadline,
+) -> Result<TracesInflightMarker> {
     ensure_before_deadline(deadline.monotonic())?;
     let scope = capture_scope_for_request_until(conn, request, deadline.monotonic()).await?;
     let txn = begin_import_write_transaction_until(conn, deadline, "begin import attempt binding")
@@ -2932,15 +2981,31 @@ async fn bind_attempt(
         txn.rollback().await.ok();
         return Err(error).context("verify import deadline before binding import coverage attempt");
     }
-    let coverage_bound = coverage_gate::bind_import_turn_claim_attempt_with_conn(
-        &txn,
-        &request.session_id,
-        claim,
-        &lease.owner,
-        checkpoint_id,
-        now_ms,
-    )
-    .await
+    let coverage_bound = match version {
+        Some(version) => {
+            coverage_gate::bind_import_turn_claim_attempt_for_schema_with_conn(
+                &txn,
+                &request.session_id,
+                version,
+                claim,
+                &lease.owner,
+                checkpoint_id,
+                now_ms,
+            )
+            .await
+        }
+        None => {
+            coverage_gate::bind_import_turn_claim_attempt_with_conn(
+                &txn,
+                &request.session_id,
+                claim,
+                &lease.owner,
+                checkpoint_id,
+                now_ms,
+            )
+            .await
+        }
+    }
     .context("bind import coverage attempt")?;
     if !coverage_bound {
         txn.rollback().await.ok();
@@ -3084,8 +3149,7 @@ async fn finalize_noop_identity(
                 state.into(),
                 committed_digest,
                 (state == "committed").into(),
-                i64::try_from(request.turns.len())
-                    .context("turn count exceeds import cursor range")?
+                contiguous_next_ordinal(&request.turns.iter().map(|turn| turn.ordinal).collect())?
                     .into(),
                 last_error_code.into(),
                 now_ms.into(),
@@ -3345,30 +3409,69 @@ async fn committed_source_ordinals(
     request: &ImportRequest,
     deadline: Instant,
 ) -> Result<BTreeSet<usize>> {
-    let rows = await_import_precommit_read_until(deadline, async {
-        conn.query_all_raw(Statement::from_sql_and_values(
-            conn.get_database_backend(),
-            "SELECT logical_turn_key FROM agent_coverage_claim
-             WHERE session_id = ? AND coverage_schema_version = ?
-               AND state = 'catalog_committed'",
-            [
-                request.session_id.clone().into(),
-                super::observed_agents::COVERAGE_SCHEMA_VERSION.into(),
-            ],
-        ))
-        .await
-        .context("load committed source ordinals for import cursor")
-    })
-    .await?;
-    let committed_keys = rows
+    committed_source_ordinals_for_coverage(conn, request, None, deadline).await
+}
+
+async fn committed_source_ordinals_for_coverage(
+    conn: &DatabaseConnection,
+    request: &ImportRequest,
+    versions: Option<&BTreeMap<String, CoverageSchemaVersion>>,
+    deadline: Instant,
+) -> Result<BTreeSet<usize>> {
+    let mut ordinals = BTreeMap::<usize, bool>::new();
+    for batch in request.turns.chunks(64) {
+        let mut requested = Vec::with_capacity(batch.len());
+        let mut values = Vec::<Value>::with_capacity(batch.len() * 2 + 1);
+        for turn in batch {
+            let version = match versions {
+                Some(versions) => *versions
+                    .get(&turn.logical_turn_key)
+                    .context("import cursor lost its coverage version binding")?,
+                None => CoverageSchemaVersion::V1,
+            };
+            requested.push((turn, version));
+            values.push(turn.logical_turn_key.clone().into());
+            values.push(version.as_i64().into());
+        }
+        values.push(request.session_id.clone().into());
+        // At most 64 exact indexed tuples / 129 bindings. Do not load the
+        // session's historical claims or issue one round trip per turn.
+        let placeholders = vec!["(?, ?)"; batch.len()].join(", ");
+        let sql = format!(
+            "WITH requested(logical_turn_key, coverage_schema_version) AS (VALUES {placeholders})
+            SELECT c.logical_turn_key, c.coverage_schema_version
+            FROM requested r JOIN agent_coverage_claim c
+              ON c.session_id = ? AND c.logical_turn_key = r.logical_turn_key
+                AND c.coverage_schema_version = r.coverage_schema_version
+            WHERE c.state = 'catalog_committed'"
+        );
+        let rows = await_import_precommit_read_until(deadline, async {
+            conn.query_all_raw(Statement::from_sql_and_values(
+                conn.get_database_backend(),
+                sql,
+                values,
+            ))
+            .await
+            .context("load committed source tuples for import cursor")
+        })
+        .await?;
+        let committed = rows
+            .into_iter()
+            .map(|row| {
+                Ok((
+                    row.try_get_by::<String, _>("logical_turn_key")?,
+                    row.try_get_by::<i64, _>("coverage_schema_version")?,
+                ))
+            })
+            .collect::<Result<BTreeSet<_>>>()?;
+        for (turn, version) in requested {
+            *ordinals.entry(turn.ordinal).or_insert(true) &=
+                committed.contains(&(turn.logical_turn_key.clone(), version.as_i64()));
+        }
+    }
+    Ok(ordinals
         .into_iter()
-        .map(|row| row.try_get_by::<String, _>("logical_turn_key"))
-        .collect::<std::result::Result<BTreeSet<_>, _>>()?;
-    Ok(request
-        .turns
-        .iter()
-        .filter(|turn| committed_keys.contains(&turn.logical_turn_key))
-        .map(|turn| turn.ordinal)
+        .filter_map(|(ordinal, committed)| committed.then_some(ordinal))
         .collect())
 }
 
@@ -3472,6 +3575,225 @@ pub async fn import_prepared(
     import_prepared_with_subagent_discovery(conn, storage_root, request, deadline, discovery, None)
         .await
         .map(|detailed| detailed.summary)
+}
+
+/// Import already prepared, redacted ordinary turns with explicit coverage
+/// versions. `versions[i]` describes `request.turns[i]`; this does not authorize
+/// native reasoning or activate version selection in CLI/provider capture.
+///
+/// Separate requests may explicitly use independent v1/v2 claims for the same
+/// key. A single request must use distinct keys and source ordinals. The import
+/// identity records the latest request digest/cursor; claims remain the durable
+/// authority for idempotence across alternating request versions.
+pub async fn import_prepared_with_coverage_versions(
+    conn: &DatabaseConnection,
+    storage_root: &Path,
+    mut request: ImportRequest,
+    versions: &[i64],
+    budget: Duration,
+    helper_program: Option<&Path>,
+) -> Result<ImportSummary> {
+    if budget.is_zero() || budget > Duration::from_secs(300) {
+        bail!("explicit import budget must be greater than zero and at most 300 seconds");
+    }
+    let deadline = CaptureCommitDeadline::from_budget(budget)?;
+    validate_direct_import_turn_bounds(&request.turns, deadline.monotonic())?;
+    if versions.len() != request.turns.len() || request.turns.is_empty() {
+        bail!("explicit import requires one coverage version for every nonempty source turn");
+    }
+    let mut bound_versions = BTreeMap::new();
+    let mut ordinals = BTreeSet::new();
+    for (turn, version) in request.turns.iter().zip(versions) {
+        ensure_before_deadline(deadline.monotonic())?;
+        let version = CoverageSchemaVersion::try_from(*version)?;
+        if bound_versions
+            .insert(turn.logical_turn_key.clone(), version)
+            .is_some()
+            || !ordinals.insert(turn.ordinal)
+            || !request.turn_boundaries.contains_key(&turn.logical_turn_key)
+        {
+            bail!(
+                "explicit import requires distinct logical turn keys and ordinals with matching chronology"
+            );
+        }
+    }
+    if request.turn_boundaries.len() != request.turns.len() {
+        bail!("explicit import chronology differs from its source turns");
+    }
+    // A prepared embedding request is not a source/provenance capability.
+    // Refuse any newly matched content before digest, lease or persistence.
+    if redact_turns_with_report(&mut request.turns).match_count() != 0 {
+        return Err(ImportError::SourceAuthorization.into());
+    }
+    request.content_digest = source_digest_for_coverage_versions(&request.turns, versions)?;
+    validate_persisted_import_timestamps(&request, Utc::now().timestamp())?;
+    assert_v2_durable_import_request(&request)?;
+    if request.session_id
+        != build_ai_session_id(
+            capture_provider_name(request.agent_kind),
+            &request.provider_session_id,
+        )
+    {
+        return Err(ImportError::SessionIdentityConflict.into());
+    }
+    let scope = capture_scope_for_request_until(conn, &request, deadline.monotonic()).await?;
+    let database_scope = await_import_precommit_read_until(
+        deadline.monotonic(),
+        CaptureScope::main_for_connection(conn),
+    )
+    .await?;
+    if scope.repo_id != database_scope.repo_id {
+        return Err(ImportError::RepositoryConflict.into());
+    }
+    if !storage_root.is_absolute() {
+        bail!("explicit import requires the database's absolute .libra storage directory");
+    }
+    let databases = await_import_precommit_read_until(deadline.monotonic(), async {
+        conn.query_all_raw(Statement::from_string(
+            conn.get_database_backend(),
+            "PRAGMA database_list".to_owned(),
+        ))
+        .await
+        .context("verify the explicit import SQLite repository database")
+    })
+    .await?;
+    let mut database_file = None;
+    for database in databases {
+        if database.try_get_by::<String, _>("name")? == "main" {
+            database_file = Some(database.try_get_by::<String, _>("file")?);
+        }
+    }
+    let expected_database = storage_root.join(util::DATABASE);
+    if database_file
+        .as_ref()
+        .is_none_or(|file| Path::new(file) != expected_database)
+    {
+        bail!(
+            "explicit import database and storage root differ; pass the database's absolute .libra directory"
+        );
+    }
+    let existing = await_import_precommit_read_until(
+        deadline.monotonic(),
+        load_existing_session_ownership_in_scope(
+            conn,
+            request.agent_kind,
+            &request.provider_session_id,
+            &scope,
+        ),
+    )
+    .await?;
+    validate_scoped_prepared_existing_session(&mut request, existing.as_ref())?;
+    super::authorized_read::with_explicit_import_checkpoint_helper(
+        helper_program,
+        deadline.monotonic(),
+        import_prepared_with_reasoning_identity_batches_and_coverage(
+            conn,
+            storage_root,
+            request,
+            deadline,
+            super::subagent_content::SubagentDiscovery::default(),
+            None,
+            BTreeMap::new(),
+            Some(bound_versions),
+        ),
+    )
+    .await
+    .map(|detailed| detailed.summary)
+}
+
+/// Check sizes/depth before redaction or canonical encoding can allocate a
+/// second transcript-sized buffer. Only the four ordinary record kinds enter
+/// this prepared-import seam; sealed reasoning stays with its existing owner.
+fn validate_direct_import_turn_bounds(turns: &[NormalizedTurn], deadline: Instant) -> Result<()> {
+    use super::observed_agents::SemanticRecord;
+    if turns.len() > 4096 {
+        return Err(ImportError::BatchInputLimit.into());
+    }
+    let mut remaining = usize::try_from(TRANSCRIPT_READ_HARD_CAP_BYTES)?;
+    let mut charge = |bytes: usize| -> Result<()> {
+        remaining = remaining
+            .checked_sub(bytes)
+            .ok_or(ImportError::BatchInputLimit)?;
+        Ok(())
+    };
+    let string_cost = |value: &str| {
+        value
+            .len()
+            .checked_mul(6)
+            .and_then(|n| n.checked_add(8))
+            .ok_or(ImportError::BatchInputLimit)
+    };
+    for turn in turns {
+        ensure_before_deadline(deadline)?;
+        charge(128)?;
+        charge(string_cost(&turn.logical_turn_key)?)?;
+        for record in &turn.records {
+            charge(64)?;
+            match record {
+                SemanticRecord::User { text } | SemanticRecord::Assistant { text } => {
+                    charge(string_cost(text)?)?
+                }
+                SemanticRecord::ToolResult {
+                    call_id, content, ..
+                } => {
+                    if let Some(id) = call_id {
+                        charge(string_cost(id)?)?;
+                    }
+                    charge(string_cost(content)?)?;
+                }
+                SemanticRecord::ToolCall {
+                    call_id,
+                    name,
+                    input,
+                } => {
+                    if let Some(id) = call_id {
+                        charge(string_cost(id)?)?;
+                    }
+                    charge(string_cost(name)?)?;
+                    let mut stack = vec![(input, 0usize)];
+                    while let Some((value, depth)) = stack.pop() {
+                        ensure_before_deadline(deadline)?;
+                        if depth > 64 {
+                            return Err(ImportError::BatchInputLimit.into());
+                        }
+                        charge(32)?;
+                        match value {
+                            CanonValue::Str(text) => charge(string_cost(text)?)?,
+                            CanonValue::Array(values) => {
+                                charge(
+                                    values
+                                        .len()
+                                        .checked_mul(16)
+                                        .ok_or(ImportError::BatchInputLimit)?,
+                                )?;
+                                stack.extend(values.iter().map(|value| (value, depth + 1)));
+                            }
+                            CanonValue::Object(values) => {
+                                charge(
+                                    values
+                                        .len()
+                                        .checked_mul(16)
+                                        .ok_or(ImportError::BatchInputLimit)?,
+                                )?;
+                                for (key, value) in values {
+                                    charge(string_cost(key)?)?;
+                                    stack.push((value, depth + 1));
+                                }
+                            }
+                            CanonValue::Float(_) => bail!(
+                                "explicit import tool input must use normalized integer semantic values"
+                            ),
+                            CanonValue::Null | CanonValue::Bool(_) | CanonValue::Int(_) => {}
+                        }
+                    }
+                }
+                SemanticRecord::Reasoning { .. } => bail!(
+                    "explicit ordinary import does not authorize reasoning; use the typed capture source"
+                ),
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Command-path variant whose child discovery was already charged to the
@@ -3626,7 +3948,31 @@ async fn import_prepared_with_reasoning_identity_and_batches(
     deadline: CaptureCommitDeadline,
     subagent_discovery: super::subagent_content::SubagentDiscovery,
     reasoning_identity_plan: Option<ReasoningCoveragePlan>,
+    per_turn_native: BTreeMap<String, NativeProvenReasoning>,
+) -> Result<DetailedImportSummary> {
+    import_prepared_with_reasoning_identity_batches_and_coverage(
+        conn,
+        storage_root,
+        request,
+        deadline,
+        subagent_discovery,
+        reasoning_identity_plan,
+        per_turn_native,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn import_prepared_with_reasoning_identity_batches_and_coverage(
+    conn: &DatabaseConnection,
+    storage_root: &std::path::Path,
+    request: ImportRequest,
+    deadline: CaptureCommitDeadline,
+    subagent_discovery: super::subagent_content::SubagentDiscovery,
+    reasoning_identity_plan: Option<ReasoningCoveragePlan>,
     mut per_turn_native: BTreeMap<String, NativeProvenReasoning>,
+    coverage_versions: Option<BTreeMap<String, CoverageSchemaVersion>>,
 ) -> Result<DetailedImportSummary> {
     let monotonic_deadline = deadline.monotonic();
     // A prepared request can cross the private preparation-helper boundary or
@@ -3668,17 +4014,44 @@ async fn import_prepared_with_reasoning_identity_and_batches(
         Some(reasoning) => ReasoningCoverageInput::native(reasoning),
         None => ReasoningCoverageInput::ordinary(&reasoning_reader),
     };
-    let reservation = coverage_gate::reserve_import_turn_claims_with_reasoning_until(
-        conn,
-        &import_scope,
-        &request.session_id,
-        &ordered_owned,
-        &lease.owner,
-        started_ms,
-        deadline,
-        reasoning_input,
-    )
-    .await;
+    let reservation = match coverage_versions.as_ref() {
+        Some(versions) => {
+            let ordered_versions = ordered_owned
+                .iter()
+                .map(|turn| {
+                    versions
+                        .get(&turn.logical_turn_key)
+                        .map(|version| version.as_i64())
+                        .context("import reservation lost its coverage version binding")
+                })
+                .collect::<Result<Vec<_>>>()?;
+            coverage_gate::reserve_import_turn_claims_by_version_until(
+                conn,
+                &import_scope,
+                &request.session_id,
+                &ordered_owned,
+                &ordered_versions,
+                &lease.owner,
+                started_ms,
+                deadline,
+                reasoning_input,
+            )
+            .await
+        }
+        None => {
+            coverage_gate::reserve_import_turn_claims_with_reasoning_until(
+                conn,
+                &import_scope,
+                &request.session_id,
+                &ordered_owned,
+                &lease.owner,
+                started_ms,
+                deadline,
+                reasoning_input,
+            )
+            .await
+        }
+    };
     let outcome = match reservation {
         Ok(outcome) => outcome,
         Err(error) => {
@@ -3730,6 +4103,7 @@ async fn import_prepared_with_reasoning_identity_and_batches(
             &lease,
         ));
     }
+    let versioned_reserved = outcome.versioned_reserved;
     let outcome = outcome.ordinary;
     // Reservation is the authority boundary for owned native bytes. Drop
     // covered or conflicted turn batches now; only a fresh reserved claim may
@@ -3861,17 +4235,27 @@ async fn import_prepared_with_reasoning_identity_and_batches(
         .await;
         return Err(error);
     }
-    let mut committed_ordinals =
-        match committed_source_ordinals(conn, &request, monotonic_deadline).await {
-            Ok(ordinals) => ordinals,
-            Err(error) => {
-                let error = abandon_import_attempt_after_error(
-                    conn, &request, &lease, None, "failed", error, deadline,
-                )
-                .await;
-                return Err(error);
-            }
-        };
+    let mut committed_ordinals = match match coverage_versions.as_ref() {
+        Some(versions) => {
+            committed_source_ordinals_for_coverage(
+                conn,
+                &request,
+                Some(versions),
+                monotonic_deadline,
+            )
+            .await
+        }
+        None => committed_source_ordinals(conn, &request, monotonic_deadline).await,
+    } {
+        Ok(ordinals) => ordinals,
+        Err(error) => {
+            let error = abandon_import_attempt_after_error(
+                conn, &request, &lease, None, "failed", error, deadline,
+            )
+            .await;
+            return Err(error);
+        }
+    };
     let mut written = 0usize;
     // Reservation arbitration is keyed by logical id, which is not
     // necessarily ordinal order. Persist in source ordinal order so a
@@ -3903,16 +4287,14 @@ async fn import_prepared_with_reasoning_identity_and_batches(
             let checkpoint_id = uuid::Uuid::new_v4().to_string();
             let now_ms = Utc::now().timestamp_millis();
             bound_checkpoint_id = Some(checkpoint_id.clone());
-            let attempt_marker = bind_attempt(
-                conn,
-                &request,
-                &lease,
-                claim,
-                &checkpoint_id,
-                now_ms,
-                deadline,
-            )
-            .await?;
+            let version = match coverage_versions.as_ref() {
+                Some(versions) => Some(*versions.get(&turn.logical_turn_key).context("import attempt lost its coverage version binding")?),
+                None => None,
+            };
+            let attempt_marker = match version {
+                Some(version) => bind_attempt_for_coverage(conn, &request, &lease, Some(version), claim, &checkpoint_id, now_ms, deadline).await,
+                None => bind_attempt(conn, &request, &lease, claim, &checkpoint_id, now_ms, deadline).await,
+            }?;
             let marker_generation = attempt_marker
                 .generation
                 .clone()
@@ -3934,7 +4316,10 @@ async fn import_prepared_with_reasoning_identity_and_batches(
             #[cfg(test)]
             import_test_failpoint("after_bind")?;
             ensure_before_deadline(monotonic_deadline)?;
-            let projection = safe_turn_projection(request.agent_kind.as_db_str(), turn);
+            let projection = match version {
+                Some(version) => safe_turn_projection_for_schema(version.as_i64(), request.agent_kind.as_db_str(), turn)?,
+                None => safe_turn_projection(request.agent_kind.as_db_str(), turn),
+            };
             let transcript = redacted_json_line(&projection)?;
             let metadata = redacted_json(&serde_json::json!({
             "schema_version": history::CHECKPOINT_METADATA_SCHEMA_VERSION,
@@ -4051,21 +4436,24 @@ async fn import_prepared_with_reasoning_identity_and_batches(
                 }),
                 capture_scope: Some(import_scope.clone()),
             };
-            let commit_plan = LiveCaptureClaimCommitPlan::new(
-                plan,
-                reasoning_identity_plan.as_ref(),
-            )
-            .context("prepare imported reasoning identity transaction companion")?;
-            let checkpoint_request = ImportedCheckpointWriteRequest::new(
-                &checkpoint_id,
-                &request.session_id,
-                request.agent_kind.as_db_str(),
-                parent_commit.as_deref(),
-                &checkpoint_payload,
-                &commit_plan,
-                deadline,
-            )
-            .map_err(|error| anyhow!("prepare imported checkpoint write request: {error}"))?;
+            let legacy_commit_plan;
+            let versioned_commit_plan;
+            let checkpoint_request = if let Some(version) = version {
+                let bound = versioned_reserved.iter().find(|bound| bound.coverage_schema_version == version && &bound.claim == *claim)
+                    .context("import commit lost its exact versioned reservation")?;
+                versioned_commit_plan = VersionedLiveClaimCommitPlan::new(plan, std::slice::from_ref(bound))?;
+                ImportedCheckpointWriteRequest::new_versioned(
+                    &checkpoint_id, &request.session_id, request.agent_kind.as_db_str(), parent_commit.as_deref(),
+                    &checkpoint_payload, &versioned_commit_plan, deadline,
+                )
+            } else {
+                legacy_commit_plan = LiveCaptureClaimCommitPlan::new(plan, reasoning_identity_plan.as_ref())
+                    .context("prepare imported reasoning identity transaction companion")?;
+                ImportedCheckpointWriteRequest::new(
+                    &checkpoint_id, &request.session_id, request.agent_kind.as_db_str(), parent_commit.as_deref(),
+                    &checkpoint_payload, &legacy_commit_plan, deadline,
+                )
+            }.map_err(|error| anyhow!("prepare imported checkpoint write request: {error}"))?;
             match checkpoint_writer
                 .write_turn(checkpoint_request)
                 .await
@@ -4339,6 +4727,394 @@ pub async fn restore_tombstone(
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    async fn cov2_import_test_setup()
+    -> (tempfile::TempDir, DatabaseConnection, PathBuf, CaptureScope) {
+        let tmp = tempfile::tempdir().unwrap();
+        crate::utils::test::setup_with_new_libra_in(tmp.path()).await;
+        let root = tmp.path().canonicalize().unwrap();
+        let storage = root.join(util::ROOT_DIR);
+        let conn = sea_orm::Database::connect(format!(
+            "sqlite://{}",
+            storage.join(util::DATABASE).display()
+        ))
+        .await
+        .unwrap();
+        let scope = CaptureScope::main_for_connection(&conn).await.unwrap();
+        (tmp, conn, root, scope)
+    }
+
+    #[cfg(unix)]
+    fn cov2_import_test_request(
+        root: &Path,
+        scope: &CaptureScope,
+        turns: Vec<NormalizedTurn>,
+    ) -> ImportRequest {
+        use crate::internal::ai::capture::snapshot::{
+            CaptureSnapshotCompleteness, CaptureSnapshotSource, CaptureSnapshotSourceKind,
+        };
+        let commitment = format!("source/hmac-v2/{}", "a".repeat(64));
+        ImportRequest {
+            agent_kind: AgentKind::Codex,
+            provider_session_id: "cov2-direct-fixed".to_owned(),
+            session_id: "codex__cov2-direct-fixed".to_owned(),
+            source_kind: "file".to_owned(),
+            source_id: commitment.clone(),
+            identity_schema_version: IMPORT_IDENTITY_SCHEMA_VERSION_V2,
+            content_digest: "untrusted caller digest must be replaced".to_owned(),
+            started_at: 1,
+            ended_at: 2,
+            session_state: "stopped".to_owned(),
+            stopped_at: Some(2),
+            working_dir: root.to_path_buf(),
+            repository_identity: IMPORT_DURABLE_IDENTITY_NOT_RETAINED.to_owned(),
+            capture_scope: Some(scope.clone()),
+            source_fingerprint: commitment.clone(),
+            existing_session_fingerprint: None,
+            redaction_report: serde_json::json!({"pipeline":"typed_allowlist","raw_persisted":false,"matches":[],"bytes_scanned":16,"bytes_redacted":0}),
+            transcript_snapshot: Some(CaptureSnapshotProjection {
+                completeness: CaptureSnapshotCompleteness::Complete,
+                partial_reason: None,
+                source: Some(CaptureSnapshotSource {
+                    kind: CaptureSnapshotSourceKind::ProviderFile,
+                    identity: "not_retained:v1".to_owned(),
+                    digest_sha256: Some(commitment),
+                    byte_len: Some(16),
+                }),
+                transcript_redacted_bytes: 16,
+                redaction_match_count: 0,
+                redaction_bytes_scanned: 16,
+                redaction_bytes_redacted: 0,
+            }),
+            turn_boundaries: turns
+                .iter()
+                .map(|turn| {
+                    (
+                        turn.logical_turn_key.clone(),
+                        TurnBoundary {
+                            started_at: 1,
+                            ended_at: 2,
+                        },
+                    )
+                })
+                .collect(),
+            turns,
+        }
+    }
+
+    fn cov2_test_turn(key: &str, ordinal: usize) -> NormalizedTurn {
+        NormalizedTurn {
+            logical_turn_key: key.to_owned(),
+            ordinal,
+            completeness: Completeness::Complete,
+            started_at: None,
+            ended_at: None,
+            records: vec![super::super::observed_agents::SemanticRecord::User {
+                text: "fixed synthetic prompt".to_owned(),
+            }],
+        }
+    }
+
+    #[cfg(unix)]
+    fn cov2_object_files(storage: &Path) -> BTreeMap<PathBuf, String> {
+        let mut files = BTreeMap::new();
+        let mut directories = vec![storage.join("objects")];
+        while let Some(directory) = directories.pop() {
+            if !directory.exists() {
+                continue;
+            }
+            for entry in std::fs::read_dir(directory).unwrap() {
+                let entry = entry.unwrap();
+                if entry.file_type().unwrap().is_dir() {
+                    directories.push(entry.path());
+                } else {
+                    files.insert(
+                        entry.path(),
+                        hex::encode(Sha256::digest(std::fs::read(entry.path()).unwrap())),
+                    );
+                }
+            }
+        }
+        files
+    }
+
+    #[cfg(unix)]
+    async fn cov2_traces_head(conn: &DatabaseConnection) -> Option<String> {
+        conn.query_one_raw(Statement::from_string(conn.get_database_backend(),
+            "SELECT `commit` AS oid FROM reference WHERE name='traces' AND remote IS NULL AND kind='Branch'".to_owned()))
+            .await.unwrap().and_then(|row| row.try_get_by::<Option<String>,_>("oid").unwrap())
+    }
+
+    #[cfg(unix)]
+    async fn cov2_count(conn: &DatabaseConnection, query: &str) -> i64 {
+        conn.query_one_raw(Statement::from_string(
+            conn.get_database_backend(),
+            query.to_owned(),
+        ))
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get_by("n")
+        .unwrap()
+    }
+
+    // Finite constants from actual dcc468b original-helper execution, not the
+    // current serializer. Raw 021eaae37ae7bfd4fa734e904198496be0ad081e89dedd47c6d18805af5a8b78,
+    // 2026-10-15 01:00:59..01:32:18 UTC, old exact1/1 exit0. The path-bound
+    // control and three unsampled DB helpers are not portable legacy oracles.
+    #[tokio::test]
+    async fn cov2_import_cursor_and_digest_golden() {
+        {
+            let turns: Vec<NormalizedTurn> = serde_json::from_str(r###"[]"###).unwrap();
+            assert_eq!(
+                source_digest(&turns),
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            );
+            assert_eq!(
+                source_digest_for_coverage_versions(&turns, &vec![1; turns.len()]).unwrap(),
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            );
+        }
+        {
+            let turns: Vec<NormalizedTurn> = serde_json::from_str(r###"[{"completeness":"complete","ended_at":null,"logical_turn_key":"turn-0","ordinal":0,"records":[{"kind":"user","text":"fixed synthetic prompt"},{"kind":"assistant","text":"fixed synthetic answer"}],"started_at":null}]"###).unwrap();
+            assert_eq!(
+                source_digest(&turns),
+                "f872e06898f3bb4bcde68e27ac1eaeef2e6109d8faa8d69edea38e69965ca5af"
+            );
+            assert_eq!(
+                source_digest_for_coverage_versions(&turns, &vec![1; turns.len()]).unwrap(),
+                "f872e06898f3bb4bcde68e27ac1eaeef2e6109d8faa8d69edea38e69965ca5af"
+            );
+        }
+        {
+            let turns: Vec<NormalizedTurn> = serde_json::from_str(r###"[{"completeness":"incomplete","ended_at":2,"logical_turn_key":"turn-0","ordinal":0,"records":[{"kind":"user","text":"固定输入 / newline\nNUL\u0000 / quote\" / slash\\"}],"started_at":1},{"completeness":"complete","ended_at":4,"logical_turn_key":"turn-1","ordinal":1,"records":[{"kind":"assistant","text":"second turn"}],"started_at":3}]"###).unwrap();
+            assert_eq!(
+                source_digest(&turns),
+                "03cbc1dcd2da33de8e9d023479d4417a7bb2f6d3e4af4fd5603f7c0f45c8b685"
+            );
+            assert_eq!(
+                source_digest_for_coverage_versions(&turns, &vec![1; turns.len()]).unwrap(),
+                "03cbc1dcd2da33de8e9d023479d4417a7bb2f6d3e4af4fd5603f7c0f45c8b685"
+            );
+        }
+        {
+            let turns: Vec<NormalizedTurn> = serde_json::from_str(r###"[{"completeness":"incomplete","ended_at":456,"logical_turn_key":"turn-0","ordinal":7,"records":[{"kind":"user","text":"fixed synthetic prompt"},{"kind":"assistant","text":"fixed synthetic answer"}],"started_at":123}]"###).unwrap();
+            assert_eq!(
+                source_digest(&turns),
+                "f872e06898f3bb4bcde68e27ac1eaeef2e6109d8faa8d69edea38e69965ca5af"
+            );
+            assert_eq!(
+                source_digest_for_coverage_versions(&turns, &vec![1; turns.len()]).unwrap(),
+                "f872e06898f3bb4bcde68e27ac1eaeef2e6109d8faa8d69edea38e69965ca5af"
+            );
+        }
+        assert_eq!(
+            import_identity_id_for_parts(
+                AgentKind::OpenCode,
+                "cov05-fixed-provider",
+                "opencode_export",
+                "fixed/source/locator",
+                1
+            ),
+            "import-9af690cf9308441630bd4fc4d8cce7070569e5d243209a87c53557bb4a50df1d"
+        );
+        assert_eq!(
+            import_identity_id_for_parts(
+                AgentKind::OpenCode,
+                "cov05-fixed-provider",
+                "opencode_export",
+                "source/hmac-v2/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                2
+            ),
+            "import-87265e9c2d8df11c675cc3105be18c323bfa73d5d1497e5bbbb340c7fdf2981b"
+        );
+        assert_eq!(contiguous_next_ordinal(&BTreeSet::from([])).unwrap(), 0);
+        assert_eq!(contiguous_next_ordinal(&BTreeSet::from([0])).unwrap(), 1);
+        assert_eq!(contiguous_next_ordinal(&BTreeSet::from([0, 2])).unwrap(), 1);
+        assert_eq!(
+            contiguous_next_ordinal(&BTreeSet::from([0, 1, 2])).unwrap(),
+            3
+        );
+        assert_eq!(contiguous_next_ordinal(&BTreeSet::from([1])).unwrap(), 0);
+        assert_eq!(
+            contiguous_next_ordinal(&BTreeSet::from([0, 1, 3])).unwrap(),
+            2
+        );
+        let turn = cov2_test_turn("shared", 0);
+        let v1 = source_digest_for_coverage_versions(std::slice::from_ref(&turn), &[1]).unwrap();
+        let v2 = source_digest_for_coverage_versions(std::slice::from_ref(&turn), &[2]).unwrap();
+        assert_ne!(v1, v2);
+        let mixed = vec![turn.clone(), cov2_test_turn("second", 1)];
+        assert_ne!(
+            source_digest_for_coverage_versions(&mixed, &[1, 2]).unwrap(),
+            source_digest_for_coverage_versions(&mixed, &[2, 1]).unwrap()
+        );
+        assert!(source_digest_for_coverage_versions(&mixed, &[1]).is_err());
+        assert!(source_digest_for_coverage_versions(&mixed, &[1, 3]).is_err());
+        #[cfg(unix)]
+        {
+            let (_tmp, conn, root, scope) = cov2_import_test_setup().await;
+            let storage = root.join(util::ROOT_DIR);
+            let first = import_prepared_with_coverage_versions(
+                &conn,
+                &storage,
+                cov2_import_test_request(&root, &scope, vec![turn.clone()]),
+                &[1],
+                Duration::from_secs(30),
+                Some(&native_import_test_helper_program()),
+            )
+            .await
+            .unwrap();
+            assert_eq!(first.checkpoints_written, 1);
+            let request = cov2_import_test_request(&root, &scope, vec![turn]);
+            let versions = BTreeMap::from([("shared".to_owned(), CoverageSchemaVersion::V2)]);
+            assert!(
+                committed_source_ordinals_for_coverage(
+                    &conn,
+                    &request,
+                    Some(&versions),
+                    Instant::now() + Duration::from_secs(5)
+                )
+                .await
+                .unwrap()
+                .is_empty()
+            );
+            assert_eq!(
+                committed_source_ordinals(&conn, &request, Instant::now() + Duration::from_secs(5))
+                    .await
+                    .unwrap(),
+                BTreeSet::from([0])
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn cov2_stale_marker_keeps_cursor_unfinished() {
+        use super::super::capture::checkpoint::test_support::{self, CheckpointFaultPoint};
+        let (_tmp, conn, root, scope) = cov2_import_test_setup().await;
+        let storage = root.join(util::ROOT_DIR);
+        let before_traces = cov2_traces_head(&conn).await;
+        test_support::fail_once_at(CheckpointFaultPoint::StaleMarkerGeneration);
+        let error = import_prepared_with_coverage_versions(
+            &conn,
+            &storage,
+            cov2_import_test_request(&root, &scope, vec![cov2_test_turn("stale", 0)]),
+            &[2],
+            Duration::from_secs(30),
+            Some(&native_import_test_helper_program()),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            test_support::armed_fault(),
+            None,
+            "actual store fault must fire"
+        );
+        assert!(
+            format!("{error:#}").contains("StaleMarkerGeneration"),
+            "expected stale-marker rejection: {error:#}"
+        );
+        assert_eq!(cov2_count(&conn,"SELECT COUNT(*) AS n FROM agent_import_identity WHERE state='committed' OR next_ordinal<>0").await,0);
+        assert_eq!(
+            cov2_count(&conn, "SELECT COUNT(*) AS n FROM agent_checkpoint").await,
+            0
+        );
+        assert_eq!(
+            cov2_count(
+                &conn,
+                "SELECT COUNT(*) AS n FROM agent_coverage_claim WHERE state='catalog_committed'"
+            )
+            .await,
+            0
+        );
+        assert_eq!(
+            cov2_traces_head(&conn).await,
+            before_traces,
+            "initial traces ref must not advance"
+        );
+        assert_eq!(
+            cov2_count(&conn, "SELECT COUNT(*) AS n FROM agent_coverage_revision").await,
+            0
+        );
+        assert_eq!(
+            cov2_count(
+                &conn,
+                "SELECT COUNT(*) AS n FROM metadata_kv WHERE scope='agent_traces_inflight'"
+            )
+            .await,
+            1,
+            "takeover marker must survive old owner cleanup"
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn cov2_failed_claim_writes_no_import_artifact() {
+        let (_tmp, conn, root, scope) = cov2_import_test_setup().await;
+        let storage = root.join(util::ROOT_DIR);
+        let before_traces = cov2_traces_head(&conn).await;
+        let before_files = cov2_object_files(&storage);
+        let before = cov2_count(&conn, "SELECT COUNT(*) AS n FROM object_index").await;
+        conn.execute_raw(Statement::from_string(conn.get_database_backend(),
+            "CREATE TRIGGER cov2_fail_claim_bind BEFORE UPDATE ON agent_coverage_claim
+             WHEN NEW.attempt_checkpoint_id IS NOT NULL BEGIN SELECT RAISE(ABORT, 'cov2_claim_binding_failed'); END".to_owned())).await.unwrap();
+        let error = import_prepared_with_coverage_versions(
+            &conn,
+            &storage,
+            cov2_import_test_request(&root, &scope, vec![cov2_test_turn("failed", 0)]),
+            &[2],
+            Duration::from_secs(30),
+            Some(&native_import_test_helper_program()),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("cov2_claim_binding_failed"),
+            "must reach actual claim SQL fault: {error:#}"
+        );
+        for query in [
+            "SELECT COUNT(*) AS n FROM agent_checkpoint",
+            "SELECT COUNT(*) AS n FROM agent_coverage_revision",
+            "SELECT COUNT(*) AS n FROM metadata_kv WHERE scope='agent_traces_inflight'",
+            "SELECT COUNT(*) AS n FROM agent_import_identity WHERE state='committed' OR next_ordinal<>0",
+        ] {
+            assert_eq!(cov2_count(&conn, query).await, 0, "{query}");
+        }
+        assert_eq!(
+            cov2_count(&conn, "SELECT COUNT(*) AS n FROM object_index").await,
+            before
+        );
+        assert_eq!(
+            cov2_traces_head(&conn).await,
+            before_traces,
+            "failed claim must not advance initial traces ref"
+        );
+        assert_eq!(
+            cov2_object_files(&storage),
+            before_files,
+            "failed claim must construct no object"
+        );
+        conn.execute_raw(Statement::from_string(
+            conn.get_database_backend(),
+            "DROP TRIGGER cov2_fail_claim_bind".to_owned(),
+        ))
+        .await
+        .unwrap();
+        let retry = import_prepared_with_coverage_versions(
+            &conn,
+            &storage,
+            cov2_import_test_request(&root, &scope, vec![cov2_test_turn("failed", 0)]),
+            &[2],
+            Duration::from_secs(30),
+            Some(&native_import_test_helper_program()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(retry.checkpoints_written, 1);
+        assert_eq!(cov2_count(&conn,"SELECT COUNT(*) AS n FROM agent_import_identity WHERE state='committed' AND next_ordinal=1").await,1);
+    }
 
     fn commit_deadline_after(duration: Duration) -> CaptureCommitDeadline {
         let monotonic = Instant::now()

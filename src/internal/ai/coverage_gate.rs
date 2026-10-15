@@ -1586,6 +1586,28 @@ pub(crate) async fn bind_import_turn_claim_attempt_with_conn(
     checkpoint_id: &str,
     now_ms: i64,
 ) -> Result<bool> {
+    bind_import_turn_claim_attempt_for_schema_with_conn(
+        conn,
+        session_id,
+        CoverageSchemaVersion::V1,
+        claim,
+        owner,
+        checkpoint_id,
+        now_ms,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn bind_import_turn_claim_attempt_for_schema_with_conn(
+    conn: &impl ConnectionTrait,
+    session_id: &str,
+    version: CoverageSchemaVersion,
+    claim: &ReservedTurnClaim,
+    owner: &str,
+    checkpoint_id: &str,
+    now_ms: i64,
+) -> Result<bool> {
     let bound = conn
         .execute_raw(Statement::from_sql_and_values(
             conn.get_database_backend(),
@@ -1598,7 +1620,7 @@ pub(crate) async fn bind_import_turn_claim_attempt_with_conn(
                 now_ms.into(),
                 session_id.into(),
                 claim.logical_turn_key.clone().into(),
-                COVERAGE_SCHEMA_VERSION.into(),
+                version.as_i64().into(),
                 owner.into(),
                 claim.fence_token.into(),
             ],
@@ -1703,6 +1725,56 @@ pub(crate) async fn reserve_import_turn_claims_with_reasoning_until(
     deadline: CaptureCommitDeadline,
     input: ReasoningCoverageInput<'_>,
 ) -> Result<ReasoningReservationOutcome> {
+    reserve_import_turn_claims_with_reasoning_versions_until(
+        conn, scope, session_id, turns, None, owner, now_ms, deadline, input,
+    )
+    .await
+}
+
+/// Only the explicit prepared-import adapter may override automatic ordinary
+/// version selection. Existing live/export/default-import entry points do not.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn reserve_import_turn_claims_by_version_until(
+    conn: &DatabaseConnection,
+    scope: &CaptureScope,
+    session_id: &str,
+    turns: &[NormalizedTurn],
+    versions: &[i64],
+    owner: &str,
+    now_ms: i64,
+    deadline: CaptureCommitDeadline,
+    input: ReasoningCoverageInput<'_>,
+) -> Result<ReasoningReservationOutcome> {
+    ensure!(
+        versions.len() == turns.len(),
+        "import coverage version count differs from turn count"
+    );
+    reserve_import_turn_claims_with_reasoning_versions_until(
+        conn,
+        scope,
+        session_id,
+        turns,
+        Some(versions),
+        owner,
+        now_ms,
+        deadline,
+        input,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn reserve_import_turn_claims_with_reasoning_versions_until(
+    conn: &DatabaseConnection,
+    scope: &CaptureScope,
+    session_id: &str,
+    turns: &[NormalizedTurn],
+    versions: Option<&[i64]>,
+    owner: &str,
+    now_ms: i64,
+    deadline: CaptureCommitDeadline,
+    input: ReasoningCoverageInput<'_>,
+) -> Result<ReasoningReservationOutcome> {
     if let Some(candidate) = input.candidate {
         candidate.validate_for(scope, session_id, turns)?;
     }
@@ -1717,20 +1789,41 @@ pub(crate) async fn reserve_import_turn_claims_with_reasoning_until(
     // are abandoned by the importer if a later batch reaches the deadline.
     const IMPORT_RESERVATION_BATCH_TURNS: usize = 64;
     let mut aggregate = ReasoningReservationOutcome::default();
-    for batch in turns.chunks(IMPORT_RESERVATION_BATCH_TURNS) {
+    for (batch_index, batch) in turns.chunks(IMPORT_RESERVATION_BATCH_TURNS).enumerate() {
         ensure_reservation_deadline(Some(deadline), "import")?;
-        let outcome = reserve_turn_claims_with_reasoning_inner(
-            conn,
-            scope,
-            session_id,
-            batch,
-            owner,
-            now_ms,
-            "import",
-            Some(deadline),
-            input.clone(),
-        )
-        .await?;
+        let outcome = match versions {
+            Some(versions) => {
+                let offset = batch_index * IMPORT_RESERVATION_BATCH_TURNS;
+                reserve_turn_claims_with_reasoning_inner_versioned(
+                    conn,
+                    scope,
+                    session_id,
+                    batch,
+                    Some(&versions[offset..offset + batch.len()]),
+                    owner,
+                    now_ms,
+                    "import",
+                    Some(deadline),
+                    input.clone(),
+                    CoverageVersionAdmission::ExplicitOrdinaryImport,
+                )
+                .await?
+            }
+            None => {
+                reserve_turn_claims_with_reasoning_inner(
+                    conn,
+                    scope,
+                    session_id,
+                    batch,
+                    owner,
+                    now_ms,
+                    "import",
+                    Some(deadline),
+                    input.clone(),
+                )
+                .await?
+            }
+        };
         #[cfg(test)]
         if let Some(delay) = import_reservation_batch_test_delay() {
             tokio::time::sleep(delay).await;
@@ -1887,6 +1980,7 @@ pub(crate) async fn reserve_turn_claims_by_version_with_capture_scope(
         source_channel,
         None,
         ReasoningCoverageInput::default(),
+        CoverageVersionAdmission::Automatic,
     )
     .await;
     match outcome {
@@ -1921,8 +2015,15 @@ async fn reserve_turn_claims_with_reasoning_inner(
         source_channel,
         deadline,
         reasoning,
+        CoverageVersionAdmission::Automatic,
     )
     .await
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CoverageVersionAdmission {
+    Automatic,
+    ExplicitOrdinaryImport,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1937,6 +2038,7 @@ async fn reserve_turn_claims_with_reasoning_inner_versioned(
     source_channel: &'static str,
     deadline: Option<CaptureCommitDeadline>,
     reasoning: ReasoningCoverageInput<'_>,
+    admission: CoverageVersionAdmission,
 ) -> Result<ReasoningReservationOutcome> {
     ensure!(
         versions.is_none_or(|versions| versions.len() == turns.len()),
@@ -1949,7 +2051,12 @@ async fn reserve_turn_claims_with_reasoning_inner_versioned(
             versions.map_or(COVERAGE_SCHEMA_VERSION, |versions| versions[index]),
         )?;
         ensure!(
-            version == select_coverage_schema(turn),
+            version == select_coverage_schema(turn)
+                || (admission == CoverageVersionAdmission::ExplicitOrdinaryImport
+                    && source_channel == "import"
+                    && versions.is_some()
+                    && version == CoverageSchemaVersion::V2
+                    && select_coverage_schema(turn) == CoverageSchemaVersion::V1),
             "coverage claim version does not match the typed turn"
         );
         if versions.is_some() {
@@ -2054,6 +2161,56 @@ async fn reserve_turn_claims_with_reasoning_inner_versioned(
     if matches!(map, StoredReasoningMap::Invalid) {
         txn.rollback().await.ok();
         bail!("private reasoning identity is invalid; start a new capture session");
+    }
+    // Native identity is not portable between schema domains. A fresh target
+    // claim must not evade the incumbent native proof in the other domain.
+    if admission == CoverageVersionAdmission::ExplicitOrdinaryImport
+        && let StoredReasoningMap::Verified(maps) = &map
+    {
+        let reader = reasoning
+            .reader
+            .as_ref()
+            .context("explicit import requires a scoped reasoning reader")?;
+        for (turn, version) in turns.iter().zip(&checked_versions) {
+            let native_alias = match version {
+                CoverageSchemaVersion::V1 => {
+                    if let Some(other) = &maps.v2 {
+                        let slot = await_reservation_precommit_read_until(
+                            deadline,
+                            source_channel,
+                            reader.turn_slot_for_schema_version(&txn, 2, &turn.logical_turn_key),
+                        )
+                        .await?;
+                        other.records().get(&slot).is_some_and(|record| {
+                            record.body().kind == ReasoningIdentityKind::Nonempty
+                        })
+                    } else {
+                        false
+                    }
+                }
+                CoverageSchemaVersion::V2 => {
+                    if let Some(other) = &maps.v1 {
+                        let slot = await_reservation_precommit_read_until(
+                            deadline,
+                            source_channel,
+                            reader.turn_slot(&txn, &turn.logical_turn_key),
+                        )
+                        .await?;
+                        other.records().get(&slot).is_some_and(|record| {
+                            record.body().kind == ReasoningIdentityKind::Nonempty
+                        })
+                    } else {
+                        false
+                    }
+                }
+            };
+            if native_alias {
+                txn.rollback().await.ok();
+                bail!(
+                    "native reasoning cannot be imported across coverage versions; use the original version or run libra agent doctor"
+                );
+            }
+        }
     }
     let mut outcome = ReasoningReservationOutcome::default();
     for (turn, version) in turns.iter().zip(checked_versions) {
@@ -4741,6 +4898,7 @@ pub(crate) mod tests {
             "live",
             None,
             ReasoningCoverageInput::native_versioned(&source),
+            CoverageVersionAdmission::Automatic,
         )
         .await
         .expect("reserve source-bound versioned claims")

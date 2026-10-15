@@ -1,5 +1,7 @@
 # 计划执行状况总表（plan-status.md）
 
+> **COV2-11 cfg前滚本机门与单审已闭合：** 原6VER各1/1、cfg单测1/1、两相关模块各37/37、109reader/fmtstrict及soleClaude实际PASS；新SHA Windows CI仍pending。仅签推同一性完成后交付该前滚，COVsource仍23/26。下一卡恢复COV2-16新12matrix，旧legacyFAIL/defer不改。
+
 > **G09 前瞻范围修订（由本次签名提交采纳生效）：** legacy `info.status="stopped"`终态import样例实际FAIL，归DEFER-COV11-IMPORT-TERMINAL-01计划外延期；本轮import功能正例以已审当前格式替代。源码/测试不改，旧FAIL不变；仅实际soleClaude PASS、signed main采纳后新matrix生效；source23/26不增。
 
 
@@ -2557,3 +2559,24 @@ COV16仍13AC/5VER/S/0prod0landing，26卡和71父卡分母、DAG、SourceA/真�
 **替代覆盖边界与遗留重启：** 当前格式import正例不覆盖旧classic `info`/`parts`端到端兼容，也没有查询session行来证明`started_at`/`last_event_at`由`info.time`映射，更不证明`stopped_at`终态；pure collect_facts timestamp单测不等于该DB端到端证明。这些缺口与原终态例的FAIL一并明确归计划外`DEFER-COV11-IMPORT-TERMINAL-01`，未修复、不记PASS；将来另有界兼容任务须保留来源安全边界、soleClaude审查并使原legacy用例实际非skip1/1、读回上述时间与终态后才可解除。原COV11的“不免除原AC/VER”不被追溯更改，本次只前瞻调整COV16和依赖/发布集合。
 
 **R1评审事实：** soleClaude实际exit0但VERDICT FAIL，rawSHA `91ceab399575e8dd72f1832a06b1b960e45eebaae30f84cf9df621b0f0d70372`；1P2为五处当前规范未同步，另4P3为覆盖缺口、遗留登记/重启、采纳措辞与时区顺序。本版同步这些项；旧R1不是PASS、尚未采纳。当前修订须自己的实际R2PASS与签推门，不预授新matrix/source24。
+
+
+### COV2-11 Windows cfg 编译边界前滚（2026-10-15 20:16 UTC；实施中）
+
+COV16延期G09已由actual signed+DCO main `a4a863f67856bf1a3053fcef72e8743b6d0a1eea`、Push0/freshremote同SHA、archive2048同最终109reader/fmtstrict后像以及soleClaudeR2 PASS（raw `a7d1dcb6b40309fcf637b3f091f2bbd30c6e7c034790fddd53e2afea0db984af`，0P0/P1/P2、3P3延期）实际采纳；R1 FAIL仍保留，source23/26不增。当前22名=21继承+1当前格式替代，required unique26；旧classic import终态/时间映射FAIL计划外defer，不追认为PASS。COV16新12matrix仍UNRUN。
+
+发现实际95a9400的必要Windows CI run38795955431/job116633088835失败：`src/command/agent/import.rs:62`的`decode_redacted_import_runtime`仅Unix路径使用却无cfg限制；`snapshot.rs:3132`的unit test调用Unix专用`verified_partial_fixture_snapshot`。返回原COV11实现owner，在既有I24内只把import归入现有`#[cfg(unix)] use`、给依赖Unix fixture的原unit test加`#[cfg(unix)]`，并按本文件既有惯例给`validate_prepared_runtime_response`加`#[cfg_attr(windows, allow(dead_code))]`，保留其Windows编译但允许该平台暂未调用。函数体、原断言/fixture/许可边界、Session CI政策、原8AC/6VER及26/71分母全部不变；COV16 audit I3仍只读，不在审计卡改源码。
+
+此编译范围修正不改runtime/共享SSOT/CLI/CI配置/installer行为，ER13按cfg-only followup为none；原COV11 T1的10212PASS仅保留其原输入历史，不冒称本新整树跑full，家族最终bumped T2双env full仍mandatory。当前需实际helper、原6exact、相关Mac unit/modules/109reader/fmtstrict、soleClaude及signed+DCO main交付；Windows实际新SHA CI仍须真绿，不能以Mac替代。无公开命令变化/网站新增写权、不bump/tag/release/安装，不改globalOpenCode或用户04/05/7stash。当前source23/26=88.46%、formal0家族C-D；父formal59/71=83.10%、source61/71=85.92%保持，不因修复同卡再增加分子。闭合后再执行COV16最终源码12例。
+
+
+**COV11 cfg CODE R1实际FAIL与R2前滚：** soleClaude R1 actualexit0/VERDICT FAIL，raw `9109468c907f29eebe93efa6319b1359c50d27f8ee29c80b39441b732fc0b970`，1P1指出初始两处错误消除后Windows late-lint还会发现validator及其callee仅Unix调用。原13门Mac PASS仍只绑定R1候选，不是R2通过。R2采用既有Windows定点dead_code属性，不放宽其它平台或全局warnings，不改任何functionbody/assertion；原2Rust/2plans精确I和计数不变。新13门/soleClaude与签推仍须实际完成，Windows新SHA CI仍pending；不把静态推断写成已发生的Windows新FAIL或PASS。
+
+
+### COV2-11 Windows cfg 前滚本机闭合事实（2026-10-15 20:30:52 UTC）
+
+候选13步实际全部exit0：默认helper build、原6VER各1selected/1PASS/0ignored、Unix partial fixture exact1/1、commandimport37/37、snapshot37/37、64+32+1+12=109readers、fmt与strictall-targets/all-features-Dwarnings。2048输入前后SHA/OID/size/mode/kind同一，manifestSHA `caea7dc3650f755dff974fef45aa996f6ee7dc776144f6f641b7d62eb9eed8c3`。soleClaude CODE实际PASS，rawSHA `2e95bbe94161a611df30e4893da5de23084fa14cbaff5d5bd47bac659cf30f5e`，root实读裁决后才写本事实；审查残留按原报告保存，不擅称已修复。
+
+两Rust精确逆归一化与actual a4a863f逐字相同：仅decoder import移至已有cfgunix组、一个依赖Unix testfixture的unit加cfgunix、validator加定点Windowsdeadcode属性；所有functionbody/断言/fixture不变，非Windows runtime修复。此前95a Windows编译FAIL保留，新SHA实际Windows必要CI仍未运行/不预授PASS；原4scoped fixtures、requiredsecurity及四平台发布门均保留。当前cfg-only followup ER13none、未跑新full，不把旧10212PASS称本次整树full；REL首次bumped T2和全计划最终full仍mandatory。
+
+CODE后只更新本两个事实计划，另两Rust字节仍绑定CODE/QA后像；须最后109reader/fmtstrict、root2048核对、仅stage本卡四路径、actual signed+DCO main/archive/Push/freshremote同一。实际未知新SHA不预填，receipt由后继开工绑定；source23/26=88.46%不重复增加、formal0/26家族C-D，父formal59/71=83.10%/source61/71=85.92%不变。保留用户04/05、原7stash和official49，网站N/A、无版本/安装/模型/SessionCI变化。之后才准备最终源码COV16新12matrix（原11/12 legacyFAIL仍计划外延期），此处不记source24。

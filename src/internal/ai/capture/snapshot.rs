@@ -3103,6 +3103,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn cov2_runtime_partial_classifier_keeps_candidate_and_partial_permit() {
         use crate::internal::ai::observed_agents::reasoning::assert_og26_candidate_for_test;

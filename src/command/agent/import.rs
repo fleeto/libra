@@ -32,7 +32,10 @@ use crate::internal::ai::{
         CaptureSourceCommitmentDomain, derive_capture_source_commitment_in_scope_until,
         derive_snapshot_content_commitment_in_scope_until,
     },
-    observed_agents::reasoning::{ImportTransportKey, verify_import_transport},
+    observed_agents::{
+        coverage::decode_redacted_import_runtime,
+        reasoning::{ImportTransportKey, verify_import_transport},
+    },
 };
 use crate::{
     internal::{
@@ -58,10 +61,7 @@ use crate::{
                 AgentKind, AgentSessionCtx, TRANSCRIPT_READ_HARD_CAP_BYTES, TranscriptSource,
                 agent_for, claude_session_dir, claude_session_id_is_safe_path_component,
                 compliance::{MAX_TRANSCRIPT_READ_BYTES_KEY, max_transcript_read_bytes_setting},
-                coverage::{
-                    decode_redacted_import_runtime, encode_bounded_json,
-                    import_runtime_has_typed_turns,
-                },
+                coverage::{encode_bounded_json, import_runtime_has_typed_turns},
                 find_codex_rollout, open_provider_directory_for_discovery,
                 opencode_export::{ExportLimits, authorized_trusted_sandboxed_export_until},
                 reasoning::{
@@ -704,6 +704,7 @@ fn consume_prepared_reasoning_transport(
 
 /// Shape validation only: source/native authentication remains the caller's
 /// prerequisite. Missing runtime data cannot choose a legacy OpenCode path.
+#[cfg_attr(windows, allow(dead_code))]
 fn validate_prepared_runtime_response(
     kind: AgentKind,
     projection: &PreparedImportProjection,

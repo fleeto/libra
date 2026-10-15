@@ -13,17 +13,193 @@ use std::{
 use zeroize::{Zeroize, Zeroizing};
 
 use super::{
-    coverage::{CanonValue, parse_canon_value},
+    coverage::{CanonValue, SemanticRecord, parse_canon_value},
     native_origin::codec::{FieldName, RECEIPT_BYTE_CAP},
     reasoning::{
-        OPENCODE_CANON_MAX_NODES, OpenCodeCandidatePart, PreparedReasoningSource,
-        ReasoningFieldError, SealedOpenCodeCandidates,
+        OPENCODE_CANON_MAX_NODES, OpenCodeCandidatePart, OpenCodeCoverageClassification,
+        OpenCodeCoverageSource, OpenCodeVisibleReasoningPart, PreparedReasoningSource,
+        ReasoningFieldError, ReasoningProvider, ReasoningSourceKind, SealedOpenCodeCandidates,
+        classify_provider_visible_reasoning, prepared_source_is_ordinary_projection,
     },
     transcript_source::TRANSCRIPT_READ_HARD_CAP_BYTES,
 };
 
 const MAX_OBSERVED_IDS: usize = 100_000;
 const MAX_JSON_DEPTH: usize = 64;
+const MAX_VISIBLE_REASONING_PARTS: usize = 4096;
+
+/// Classify the original, authorized in-memory export before the scrubber
+/// erases state/proof fields. This seam has no production callers yet. It
+/// retains the existing non-authoritative prepared source for the later
+/// typed-redaction stage; nothing here writes a claim, artifact or cursor.
+#[allow(dead_code)] // COV2-11 alone activates this private parser seam.
+pub(crate) fn classify_opencode_coverage_source(source: Vec<u8>) -> OpenCodeCoverageClassification {
+    fn classify(
+        mut source: Zeroizing<Vec<u8>>,
+    ) -> Result<OpenCodeCoverageSource, ReasoningFieldError> {
+        if source.len() as u64 > TRANSCRIPT_READ_HARD_CAP_BYTES {
+            return Err(ReasoningFieldError::SourceTooLarge);
+        }
+        let (_, document) = parse_bounded_canon_value(&source, parse_canon_value)?;
+        let document = Zeroizing::new(document);
+        let source_session = document
+            .get("info")
+            .and_then(|info| info.get("id"))
+            .and_then(CanonValue::as_str)
+            .filter(|id| !id.is_empty() && id.len() <= 1024)
+            .ok_or(ReasoningFieldError::UnsupportedShape)?;
+        let messages = document
+            .get("messages")
+            .and_then(CanonValue::as_array)
+            .ok_or(ReasoningFieldError::UnsupportedShape)?;
+        let mut message_ids = BTreeMap::<&str, usize>::new();
+        let mut part_ids = BTreeMap::<&str, usize>::new();
+        for message in messages {
+            let (_, id, parts) = coverage_message(message)?;
+            if let Some(id) = id {
+                *message_ids.entry(id).or_default() += 1;
+            }
+            if let Some(parts) = parts {
+                for part in parts {
+                    if let Some(id) = part.get("id").and_then(CanonValue::as_str) {
+                        *part_ids.entry(id).or_default() += 1;
+                    }
+                }
+            }
+        }
+
+        let mut partial = false;
+        let mut visible_parts = Vec::new();
+        for (message_ordinal, message) in messages.iter().enumerate() {
+            let (kind, id, parts) = coverage_message(message)?;
+            if kind != "assistant" {
+                continue;
+            }
+            let Some(id) = id.filter(|id| !id.is_empty() && id.len() <= 1024) else {
+                partial = true;
+                continue;
+            };
+            if message_ids.get(id) != Some(&1) {
+                partial = true;
+                continue;
+            }
+            let Some(parts) = parts else {
+                partial = true;
+                continue;
+            };
+            for (part_ordinal, part) in parts.iter().enumerate() {
+                let CanonValue::Object(fields) = part else {
+                    partial = true;
+                    continue;
+                };
+                if fields.get("type").and_then(CanonValue::as_str) != Some("reasoning") {
+                    continue;
+                }
+                let part_id = fields
+                    .get("id")
+                    .and_then(CanonValue::as_str)
+                    .filter(|id| !id.is_empty() && id.len() <= 1024);
+                let text = fields
+                    .get("text")
+                    .and_then(CanonValue::as_str)
+                    .filter(|text| !text.trim().is_empty());
+                let (Some(part_id), Some(text)) = (part_id, text) else {
+                    partial = true;
+                    continue;
+                };
+                if part_ids.get(part_id) != Some(&1)
+                    || !matches!(
+                        classify_reasoning_fields(fields),
+                        ReasoningPartShape::Visible
+                    )
+                    || fields
+                        .get("sessionID")
+                        .is_some_and(|value| value.as_str() != Some(source_session))
+                    || fields
+                        .get("messageID")
+                        .is_some_and(|value| value.as_str() != Some(id))
+                {
+                    partial = true;
+                    continue;
+                }
+                if visible_parts.len() >= MAX_VISIBLE_REASONING_PARTS {
+                    return Err(ReasoningFieldError::SourceTooLarge);
+                }
+                let (_, text) = classify_provider_visible_reasoning(
+                    ReasoningProvider::OpenCode,
+                    ReasoningSourceKind::Reasoning,
+                    text.to_owned(),
+                );
+                visible_parts.push(OpenCodeVisibleReasoningPart {
+                    source_message: Zeroizing::new(id.to_owned()),
+                    message_ordinal,
+                    source_part: Zeroizing::new(part_id.to_owned()),
+                    part_ordinal,
+                    record: SemanticRecord::Reasoning {
+                        provider: ReasoningProvider::OpenCode,
+                        source_kind: Some(ReasoningSourceKind::Reasoning),
+                        text,
+                    },
+                });
+            }
+        }
+        // Reuse the reviewed closed export projection rather than inventing
+        // another envelope allowlist. Its own bounded parser runs once more;
+        // both passes share the existing source/node/depth caps. Candidates
+        // remain sealed and unproven, and unknown envelope data stays partial.
+        let prepared = prepare_authorized_source(std::mem::take(&mut *source))?;
+        partial |= !prepared_source_is_ordinary_projection(&prepared);
+        Ok(OpenCodeCoverageSource {
+            source_session: Zeroizing::new(source_session.to_owned()),
+            prepared,
+            visible_parts,
+            partial,
+        })
+    }
+
+    match classify(Zeroizing::new(source)) {
+        Ok(source) => OpenCodeCoverageClassification::Parsed(Box::new(source)),
+        Err(reason) => OpenCodeCoverageClassification::Partial(reason),
+    }
+}
+
+/// Accept exactly one of the two already supported export message envelopes.
+/// All returned coordinates borrow the bounded, wiping parse tree.
+type CoverageMessageView<'a> = (&'a str, Option<&'a str>, Option<&'a [CanonValue]>);
+
+fn coverage_message(message: &CanonValue) -> Result<CoverageMessageView<'_>, ReasoningFieldError> {
+    let CanonValue::Object(fields) = message else {
+        return Err(ReasoningFieldError::UnsupportedShape);
+    };
+    if let Some(kind) = fields.get("type") {
+        if fields.contains_key("info") || fields.contains_key("parts") {
+            return Err(ReasoningFieldError::UnsupportedShape);
+        }
+        let kind = kind.as_str().ok_or(ReasoningFieldError::UnsupportedShape)?;
+        let parts = match fields.get("content") {
+            None => None,
+            Some(CanonValue::Array(parts)) => Some(parts.as_slice()),
+            Some(_) => return Err(ReasoningFieldError::UnsupportedShape),
+        };
+        Ok((kind, fields.get("id").and_then(CanonValue::as_str), parts))
+    } else {
+        if fields.contains_key("content") {
+            return Err(ReasoningFieldError::UnsupportedShape);
+        }
+        let info = fields
+            .get("info")
+            .ok_or(ReasoningFieldError::UnsupportedShape)?;
+        let role = info
+            .get("role")
+            .and_then(CanonValue::as_str)
+            .ok_or(ReasoningFieldError::UnsupportedShape)?;
+        let parts = match fields.get("parts") {
+            Some(CanonValue::Array(parts)) => Some(parts.as_slice()),
+            _ => return Err(ReasoningFieldError::UnsupportedShape),
+        };
+        Ok((role, info.get("id").and_then(CanonValue::as_str), parts))
+    }
+}
 
 /// Offsets refer to the *authorized raw export*, before either JSON decoding
 /// or ordinary projection. A receipt is copied only after the strict parse has
@@ -2655,6 +2831,142 @@ mod tests {
         extract::extract_opencode,
         reasoning::{ReasoningSourceDisposition, ReasoningSourceState},
     };
+
+    fn cov2_classify_part(
+        part: serde_json::Value,
+        classic: bool,
+    ) -> OpenCodeCoverageClassification {
+        let message = if classic {
+            serde_json::json!({"info":{"id":"msg_cov2","role":"assistant"},"parts":[part]})
+        } else {
+            serde_json::json!({"id":"msg_cov2","type":"assistant","content":[part]})
+        };
+        classify_opencode_coverage_source(
+            serde_json::to_vec(&serde_json::json!({"info":{"id":"ses_cov2"},"messages":[message]}))
+                .expect("synthetic export"),
+        )
+    }
+
+    #[test]
+    fn cov2_visible_only_classification() {
+        for classic in [false, true] {
+            let result = cov2_classify_part(
+                serde_json::json!({"id":"prt_cov2","type":"reasoning","text":"visible 中文"}),
+                classic,
+            );
+            let OpenCodeCoverageClassification::Parsed(source) = result else {
+                panic!("closed visible source must classify");
+            };
+            assert!(!source.partial);
+            assert!(prepared_source_is_ordinary_projection(&source.prepared));
+            assert_eq!(source.source_session.as_str(), "ses_cov2");
+            assert_eq!(source.visible_parts.len(), 1);
+            let part = &source.visible_parts[0];
+            assert_eq!(part.source_message.as_str(), "msg_cov2");
+            assert_eq!(part.message_ordinal, 0);
+            assert_eq!(part.source_part.as_str(), "prt_cov2");
+            assert_eq!(part.part_ordinal, 0);
+            assert!(matches!(&part.record, SemanticRecord::Reasoning {
+                provider: ReasoningProvider::OpenCode,
+                source_kind: Some(ReasoningSourceKind::Reasoning), text,
+            } if text.as_str() == "visible 中文"));
+            assert!(
+                serde_json::to_string(&part.record).is_err(),
+                "unredacted typed text must retain its serialization barrier"
+            );
+            assert!(!format!("{:?}", part.record).contains("visible 中文"));
+
+            for text in ["", " \n\t"] {
+                let result = cov2_classify_part(
+                    serde_json::json!({"id":"prt_empty","type":"reasoning","text":text}),
+                    classic,
+                );
+                let OpenCodeCoverageClassification::Parsed(source) = result else {
+                    panic!("empty readable source remains explicit partial");
+                };
+                assert!(source.partial);
+                assert!(source.visible_parts.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn cov2_candidate_and_unsupported_partial() {
+        for classic in [false, true] {
+            for extra in [
+                serde_json::json!({"state":{"signature":"CANDIDATE_CANARY"}}),
+                serde_json::json!({"state":{"redactedData":"CANDIDATE_CANARY"}}),
+                serde_json::json!({"state":{"reasoningEncryptedContent":"CANDIDATE_CANARY"}}),
+                serde_json::json!({"originProof":{"nonce":"CANDIDATE_CANARY"}}),
+                serde_json::json!({"state":{}}),
+                serde_json::json!({"state":null}),
+                serde_json::json!({"providerMetadata":{"signature":"CANDIDATE_CANARY"}}),
+                serde_json::json!({"extra":"CANDIDATE_CANARY"}),
+                serde_json::json!({"time":{"unexpected":"CANDIDATE_CANARY"}}),
+                serde_json::json!({"sessionID":"foreign_session"}),
+                serde_json::json!({"messageID":"foreign_message"}),
+            ] {
+                let mut part = serde_json::json!({"id":"prt_cov2","type":"reasoning","text":"CANDIDATE_CANARY"});
+                part.as_object_mut()
+                    .expect("object")
+                    .extend(extra.as_object().expect("extra object").clone());
+                match cov2_classify_part(part, classic) {
+                    OpenCodeCoverageClassification::Parsed(source) => {
+                        assert!(source.partial);
+                        assert!(
+                            source.visible_parts.is_empty(),
+                            "candidate cannot become typed text"
+                        );
+                    }
+                    OpenCodeCoverageClassification::Partial(_) => {}
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cov2_malformed_duplicate_unknown_partial() {
+        for bytes in [
+            b"{".as_slice(),
+            br#"{"info":{"id":"ses_cov2"},"messages":[],"messages":[]}"#,
+            br#"{"info":{"id":"ses_cov2"},"messages":[{"id":"m","type":"assistant","content":[{"id":"p","type":"reasoning","text":"a","text":"b"}]}]}"#,
+            br#"{"info":{"id":"ses_cov2"},"messages":{}}"#,
+            br#"{"messages":[]}"#,
+            br#"{"info":{"id":"ses_cov2"},"messages":[{"id":"m","type":"assistant","parts":[],"content":[]}]}"#,
+            br#"{"info":{"id":"ses_cov2"},"messages":[{"id":"m","type":"assistant","content":[{"id":"p","type":"reasoning","text":"a"},{"id":"p","type":"reasoning","text":"b"}]}]}"#,
+            br#"{"info":{"id":"ses_cov2"},"messages":[{"id":"m","type":"assistant","content":[{"id":"p","type":"reasoning","text":"a"}]},{"id":"m","type":"assistant","content":[{"id":"q","type":"reasoning","text":"b"}]}]}"#,
+            br#"{"info":{"id":"ses_cov2"},"messages":[{"id":"m","type":"unknown","content":[]}]}"#,
+        ] {
+            match classify_opencode_coverage_source(bytes.to_vec()) {
+                OpenCodeCoverageClassification::Partial(_) => {}
+                OpenCodeCoverageClassification::Parsed(source) => {
+                    assert!(source.partial);
+                    assert!(source.visible_parts.is_empty());
+                }
+            }
+        }
+        for bytes in [
+            vec![b' '; TRANSCRIPT_READ_HARD_CAP_BYTES as usize + 1],
+            "[".repeat(MAX_JSON_DEPTH + 2).into_bytes(),
+            format!("[{}]", "0,".repeat(OPENCODE_CANON_MAX_NODES)).into_bytes(),
+        ] {
+            assert!(matches!(
+                classify_opencode_coverage_source(bytes),
+                OpenCodeCoverageClassification::Partial(ReasoningFieldError::SourceTooLarge)
+            ));
+        }
+        let parts = (0..=MAX_VISIBLE_REASONING_PARTS).map(|index| {
+            serde_json::json!({"id":format!("p{index}"),"type":"reasoning","text":"visible"})
+        }).collect::<Vec<_>>();
+        let source = serde_json::to_vec(&serde_json::json!({
+            "info":{"id":"ses_cap"},"messages":[{"id":"msg_cap","type":"assistant","content":parts}]
+        }))
+        .expect("synthetic bounded part-count input");
+        assert!(matches!(
+            classify_opencode_coverage_source(source),
+            OpenCodeCoverageClassification::Partial(ReasoningFieldError::SourceTooLarge)
+        ));
+    }
 
     #[test]
     fn og26_structural_preflight_never_calls_parser_over_budget() {

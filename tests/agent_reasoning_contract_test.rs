@@ -13,6 +13,67 @@ use libra::internal::ai::observed_agents::reasoning::{
 
 const FIXTURE_DIR: &str = "tests/fixtures/agent_transcripts/reasoning";
 
+/// COV2-06 is an inert parser delivery. The actual normalized-turn adapter
+/// still returns incomplete v1 for reasoning, without a Session or exporter.
+#[test]
+fn cov2_production_normalize_inert_before_activation() {
+    use libra::internal::ai::observed_agents::{
+        Completeness, CoverageSchemaVersion, SemanticRecord, normalize_opencode_export,
+        select_coverage_schema,
+    };
+
+    let source = br#"{"info":{"id":"ses_inert"},"messages":[{"id":"u","type":"user","text":"hi"},{"id":"a","type":"assistant","content":[{"id":"ap","type":"reasoning","text":"synthetic visible"}]},{"id":"i","type":"idle","outcome":"succeeded"}]}"#;
+    let ordinary = std::str::from_utf8(source)
+        .expect("synthetic UTF-8")
+        .replace(
+            r#""type":"reasoning","text":"synthetic visible""#,
+            r#""type":"text","text":"ordinary""#,
+        );
+    let baseline = normalize_opencode_export(ordinary.as_bytes());
+    assert_eq!(baseline.len(), 1);
+    assert_eq!(
+        baseline[0].completeness,
+        Completeness::Complete,
+        "the control must not be incomplete for an unrelated envelope error"
+    );
+    let turns = normalize_opencode_export(source);
+    assert_eq!(turns.len(), 1);
+    assert!(matches!(&turns[0].records[0], SemanticRecord::User { text } if text == "hi"));
+    for turn in &turns {
+        assert_eq!(turn.completeness, Completeness::Incomplete);
+        assert_eq!(select_coverage_schema(turn), CoverageSchemaVersion::V1);
+        assert!(
+            !turn
+                .records
+                .iter()
+                .any(|record| matches!(record, SemanticRecord::Reasoning { .. }))
+        );
+    }
+    for path in [
+        "src/internal/ai/capture/snapshot.rs",
+        "src/internal/ai/capture/live_checkpoint.rs",
+        "src/internal/ai/agent_import.rs",
+    ] {
+        let code = std::fs::read_to_string(path).expect("read actual production source");
+        assert!(
+            !code.contains("classify_opencode_coverage_source"),
+            "COV2-11 owns production activation: {path}"
+        );
+    }
+    let live =
+        std::fs::read_to_string("src/internal/ai/capture/live_checkpoint.rs").expect("live source");
+    let live = live
+        .split("#[cfg(test)]\nmod tests")
+        .next()
+        .expect("production section");
+    assert!(
+        !live.contains("encode_coverage_turn") && !live.contains("safe_turn_projection_for_schema")
+    );
+    let import = std::fs::read_to_string("src/internal/ai/agent_import.rs").expect("import source");
+    assert_eq!(import.matches("AgentKind::OpenCode => normalize_opencode_export_until(transcript.bytes(), deadline)").count(), 2,
+               "production OpenCode import still uses the legacy normalizer; the separate ordinary versioned library entry is allowed");
+}
+
 fn read_fixture(name: &str) -> serde_json::Value {
     let path = format!("{FIXTURE_DIR}/{name}");
     let raw = std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("read {path}: {error}"));

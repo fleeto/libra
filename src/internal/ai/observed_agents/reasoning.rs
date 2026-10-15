@@ -24,6 +24,7 @@ use thiserror::Error;
 use zeroize::{Zeroize, Zeroizing};
 
 use super::{
+    coverage::SemanticRecord,
     native_origin::codec::{FieldName, RECEIPT_BYTE_CAP},
     transcript_source::TRANSCRIPT_READ_HARD_CAP_BYTES,
 };
@@ -46,6 +47,34 @@ pub struct PreparedReasoningSource {
     ordinary_partial_permit: Option<OpenCodeOrdinaryPartialPermit>,
 }
 
+/// Inert coverage-v2 parser output, not a capture or native-origin authority.
+/// No serialization, cloning or content-bearing Debug is available. COV2-10
+/// must redact the typed records before COV2-11 connects a production sink.
+#[allow(dead_code)] // COV2-06 prepares the private seam; COV2-11 activates it.
+pub(crate) enum OpenCodeCoverageClassification {
+    Parsed(Box<OpenCodeCoverageSource>),
+    Partial(ReasoningFieldError),
+}
+
+#[allow(dead_code)] // Owned, unredacted in-memory input for COV2-10/11 only.
+pub(crate) struct OpenCodeCoverageSource {
+    pub(crate) source_session: Zeroizing<String>,
+    pub(crate) prepared: PreparedReasoningSource,
+    pub(crate) visible_parts: Vec<OpenCodeVisibleReasoningPart>,
+    /// Additional malformed, empty or unsupported content can never be
+    /// cleared by the presence of an independently readable part.
+    pub(crate) partial: bool,
+}
+
+#[allow(dead_code)] // COV2-11 associates these source coordinates with turns.
+pub(crate) struct OpenCodeVisibleReasoningPart {
+    pub(crate) source_message: Zeroizing<String>,
+    pub(crate) message_ordinal: usize,
+    pub(crate) source_part: Zeroizing<String>,
+    pub(crate) part_ordinal: usize,
+    pub(crate) record: SemanticRecord,
+}
+
 /// Storage-only eligibility from the strict OpenCode scrubber. It cannot
 /// authorize native bytes, serialize across a helper, or be cloned.
 pub(crate) struct OpenCodeOrdinaryPartialPermit {
@@ -60,6 +89,13 @@ impl OpenCodeOrdinaryPartialPermit {
     pub(crate) fn source_session(&self) -> &str {
         &self.source_session
     }
+}
+
+/// Conservative, read-only shape check for the inert coverage classifier.
+/// A free query keeps the carrier's closed constructor-method set unchanged;
+/// this boolean cannot construct a native proof or an ordinary permit.
+pub(super) fn prepared_source_is_ordinary_projection(source: &PreparedReasoningSource) -> bool {
+    source.disposition.is_ordinary()
 }
 
 impl PreparedReasoningSource {

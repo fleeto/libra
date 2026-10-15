@@ -1421,3 +1421,35 @@ identity/content canaries. They do not run an OpenCode Session, exporter or mode
 and confer no native-origin proof. These reader guarantees apply to the first
 stable release containing coverage-v2 and later; they do not assert that the
 currently installed stable release contains this unreleased implementation.
+
+## Inert OpenCode visible reasoning classification (COV2-06, unreleased)
+
+`classify_opencode_coverage_source` is a crate-private, pure in-memory parser
+seam with no production callers before COV2-11. It consumes the original
+bounded export before state/proof erasure. Closed native/classic assistant
+reasoning parts with nonempty visible text become gated typed Reasoning
+records, retaining source message/part IDs and ordinals. Duplicate or missing
+coordinates, contradictory session/message references, empty/whitespace text,
+state/proof-bearing or unsupported parts remain partial without a typed record
+for that part. Malformed/duplicate-key/unknown export structure and budget
+failures return an explicit payload-free Partial result; no cursor can complete
+from that result. A separate valid visible part never clears a partial flag.
+
+The source/tree byte, node and depth budgets run before materialization; at
+most 4096 visible parts are emitted. The existing reviewed preprocessor runs
+as a second bounded pass to preserve its closed envelope classification and
+owning candidate separation. Both parse passes are bounded; this is not a new
+unbounded scan. IDs and the original parse tree wipe on drop. The carrier has
+no Clone/Serialize/Debug, and ProviderVisibleText retains its serialization
+barrier and content-free Debug. It grants neither native provenance, an issuer,
+an opaque artifact, nor capture authority. COV2-10 must perform typed redaction
+before COV2-11 connects any persistence path; the retained ordinary projection
+also remains unredacted input for that later stage.
+
+Actual production normalization is unchanged: reasoning keeps the turn
+incomplete, contains no typed Reasoning record and selects v1. The COV2-06
+contract test uses a complete ordinary control to distinguish that decision
+from unrelated malformed input, and pins the absence of the new parser from
+live/import/snapshot call sites. The separate COV2-05 ordinary versioned library
+API remains available. These tests use synthetic buffers only, with no Session,
+exporter or model; no user-visible command or website behavior changes here.

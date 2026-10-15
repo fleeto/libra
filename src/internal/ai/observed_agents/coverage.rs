@@ -30,6 +30,7 @@ use serde::{
     ser::{SerializeMap, SerializeSeq},
 };
 use sha2::{Digest, Sha256};
+use zeroize::Zeroizing;
 
 use super::reasoning;
 
@@ -1163,7 +1164,7 @@ fn normalize_codex_rollout_inner(
 /// native semantic messages without a subsequent valid idle stay incomplete.
 pub fn normalize_opencode_export(data: &[u8]) -> Vec<NormalizedTurn> {
     // INVARIANT: `None` disables the only early-exit condition.
-    let Some(turns) = normalize_opencode_export_inner(data, None) else {
+    let Some(turns) = normalize_opencode_export_inner(data, None, None) else {
         return Vec::new();
     };
     turns
@@ -1173,12 +1174,454 @@ pub(crate) fn normalize_opencode_export_until(
     data: &[u8],
     deadline: Instant,
 ) -> Option<Vec<NormalizedTurn>> {
-    normalize_opencode_export_inner(data, Some(deadline))
+    normalize_opencode_export_inner(data, Some(deadline), None)
+}
+
+struct BoundedOrdinaryWriter {
+    bytes: Zeroizing<Vec<u8>>,
+    cap: usize,
+}
+
+impl BoundedOrdinaryWriter {
+    fn into_bytes(mut self) -> Vec<u8> {
+        std::mem::take(&mut *self.bytes)
+    }
+}
+
+impl std::io::Write for BoundedOrdinaryWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let next = self
+            .bytes
+            .len()
+            .checked_add(bytes.len())
+            .filter(|next| *next <= self.cap)
+            .ok_or_else(|| std::io::Error::other("bounded OpenCode output exceeded source cap"))?;
+        let additional = next - self.bytes.len();
+        self.bytes
+            .try_reserve(additional)
+            .map_err(|_| std::io::Error::other("bounded OpenCode output allocation failed"))?;
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Serialize an already separated ordinary tree under its existing byte cap.
+/// No source/capture/native authority is constructed by this memory helper.
+pub(crate) fn encode_bounded_json(
+    value: &impl serde::Serialize,
+    cap: usize,
+) -> Result<Vec<u8>, reasoning::ReasoningFieldError> {
+    let mut writer = BoundedOrdinaryWriter {
+        bytes: Zeroizing::new(Vec::new()),
+        cap,
+    };
+    serde_json::to_writer(&mut writer, value)
+        .map_err(|_| reasoning::ReasoningFieldError::SourceTooLarge)?;
+    Ok(writer.into_bytes())
+}
+
+pub(crate) struct CoverageRedactionLimits {
+    pub(crate) max_source_bytes: u64,
+    pub(crate) max_output_bytes: usize,
+    pub(crate) max_working_set_bytes: usize,
+    pub(crate) deadline: Option<Instant>,
+}
+
+/// Redacted data only. This is not source authorization, a native witness,
+/// a serialized DTO, or permission to commit a checkpoint.
+pub(crate) struct RedactedCoveragePreparation {
+    pub(crate) transcript: super::RedactedBytes,
+    pub(crate) turns: Vec<NormalizedTurn>,
+    pub(crate) report: super::RedactionReport,
+    pub(crate) partial: bool,
+}
+
+/// Pure provider data preparation; no source or native authority is issued.
+pub(crate) fn prepare_coverage_preview(
+    agent_kind: &str,
+    bytes: Vec<u8>,
+    limits: CoverageRedactionLimits,
+) -> Result<RedactedCoveragePreparation, reasoning::ReasoningFieldError> {
+    use super::AgentKind;
+    let mut bytes = Zeroizing::new(bytes);
+    if bytes.len() as u64 > limits.max_source_bytes
+        || bytes.len() as u64 > super::TRANSCRIPT_READ_HARD_CAP_BYTES
+    {
+        return Err(reasoning::ReasoningFieldError::SourceTooLarge);
+    }
+    let kind = AgentKind::from_db_str(agent_kind)
+        .ok_or(reasoning::ReasoningFieldError::UnsupportedShape)?;
+    let max_output = limits.max_output_bytes;
+    let max_working = limits.max_working_set_bytes;
+    if kind == AgentKind::OpenCode {
+        let source = match super::opencode_reasoning::classify_opencode_coverage_source(
+            std::mem::take(&mut *bytes),
+        ) {
+            reasoning::OpenCodeCoverageClassification::Parsed(source) => *source,
+            reasoning::OpenCodeCoverageClassification::Partial(reason) => {
+                return Err(reason);
+            }
+        };
+        if limits
+            .deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            return Err(reasoning::ReasoningFieldError::UnsupportedShape);
+        }
+        // This data-only consumer destroys, rather than validates or returns,
+        // every sealed candidate/native/permit capability.
+        let (ordinary, source_partial) =
+            reasoning::discard_prepared_authority_for_coverage_preview(source.prepared);
+        let partial = source.partial || source_partial;
+        let prepared = prepare_opencode_redacted_coverage(
+            ordinary,
+            source.source_session.as_str(),
+            source.visible_parts,
+            partial,
+            CoverageRedactionLimits {
+                max_source_bytes: limits.max_source_bytes,
+                max_output_bytes: max_output,
+                max_working_set_bytes: max_working,
+                deadline: limits.deadline,
+            },
+        );
+        if limits
+            .deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            return Err(reasoning::ReasoningFieldError::UnsupportedShape);
+        }
+        return prepared;
+    }
+    // Claude Code and Codex currently have no reasoning preprocessor port;
+    // retain their established ordinary redactor/normalizer decisions. This
+    // preview never asks a source-authorization adapter to grant authority.
+    if !matches!(kind, AgentKind::ClaudeCode | AgentKind::Codex) {
+        return Err(reasoning::ReasoningFieldError::UnsupportedShape);
+    }
+    let ordinary = std::mem::take(&mut *bytes);
+    if limits
+        .deadline
+        .is_some_and(|deadline| Instant::now() >= deadline)
+    {
+        return Err(reasoning::ReasoningFieldError::UnsupportedShape);
+    }
+    let (transcript, mut report) = super::Redactor::new_default()
+        .redact_owned_bounded(ordinary, max_output, max_working)
+        .ok_or(reasoning::ReasoningFieldError::SourceTooLarge)?;
+    let mut turns = match (kind, limits.deadline) {
+        (AgentKind::ClaudeCode, Some(deadline)) => {
+            normalize_claude_transcript_until(transcript.bytes(), deadline)
+        }
+        (AgentKind::Codex, Some(deadline)) => {
+            normalize_codex_rollout_until(transcript.bytes(), deadline)
+        }
+        (AgentKind::ClaudeCode, None) => Some(normalize_claude_transcript(transcript.bytes())),
+        (AgentKind::Codex, None) => Some(normalize_codex_rollout(transcript.bytes())),
+        _ => return Err(reasoning::ReasoningFieldError::UnsupportedShape),
+    }
+    .ok_or(reasoning::ReasoningFieldError::UnsupportedShape)?;
+    let partial = false;
+    merge_redaction_reports(&mut report, redact_turns_with_report(&mut turns));
+    if limits
+        .deadline
+        .is_some_and(|deadline| Instant::now() >= deadline)
+    {
+        return Err(reasoning::ReasoningFieldError::UnsupportedShape);
+    }
+    Ok(RedactedCoveragePreparation {
+        transcript,
+        turns,
+        report,
+        partial,
+    })
+}
+
+fn source_part_view(
+    document: &CanonValue,
+    message_ordinal: usize,
+    part_ordinal: usize,
+) -> Option<(&str, &CanonValue)> {
+    let message = document.get("messages")?.as_array()?.get(message_ordinal)?;
+    let (id, parts) = if message.get("type").is_some() {
+        if message.get("type")?.as_str()? != "assistant"
+            || message.get("info").is_some()
+            || message.get("parts").is_some()
+        {
+            return None;
+        }
+        (
+            message.get("id")?.as_str()?,
+            message.get("content")?.as_array()?,
+        )
+    } else {
+        let info = message.get("info")?;
+        if info.get("role")?.as_str()? != "assistant" || message.get("content").is_some() {
+            return None;
+        }
+        (info.get("id")?.as_str()?, message.get("parts")?.as_array()?)
+    };
+    Some((id, parts.get(part_ordinal)?))
+}
+
+fn source_part_fields_mut(
+    document: &mut CanonValue,
+    message_ordinal: usize,
+    part_ordinal: usize,
+) -> Option<&mut BTreeMap<String, CanonValue>> {
+    let CanonValue::Object(root) = document else {
+        return None;
+    };
+    let CanonValue::Array(messages) = root.get_mut("messages")? else {
+        return None;
+    };
+    let CanonValue::Object(message) = messages.get_mut(message_ordinal)? else {
+        return None;
+    };
+    let key = if message.contains_key("type") {
+        "content"
+    } else {
+        "parts"
+    };
+    let CanonValue::Array(parts) = message.get_mut(key)? else {
+        return None;
+    };
+    let CanonValue::Object(part) = parts.get_mut(part_ordinal)? else {
+        return None;
+    };
+    Some(part)
+}
+
+pub(crate) fn prepare_opencode_redacted_coverage(
+    ordinary: Vec<u8>,
+    source_session: &str,
+    mut visible: Vec<reasoning::OpenCodeVisibleReasoningPart>,
+    mut partial: bool,
+    limits: CoverageRedactionLimits,
+) -> Result<RedactedCoveragePreparation, reasoning::ReasoningFieldError> {
+    use reasoning::ReasoningFieldError;
+    let mut ordinary = Zeroizing::new(ordinary);
+    if ordinary.len() as u64 > limits.max_source_bytes || visible.len() > 4096 {
+        return Err(ReasoningFieldError::SourceTooLarge);
+    }
+    let elapsed = || {
+        limits
+            .deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+    };
+    if elapsed() {
+        return Err(ReasoningFieldError::UnsupportedShape);
+    }
+    // Bind the original classifier output before any redactor can transform
+    // IDs or text. Coordinates locate a part; text equality only confirms it.
+    if !visible.is_empty() {
+        let original = Zeroizing::new(
+            parse_canon_value(&ordinary).map_err(|_| ReasoningFieldError::MalformedSource)?,
+        );
+        if original
+            .get("info")
+            .and_then(|i| i.get("id"))
+            .and_then(CanonValue::as_str)
+            != Some(source_session)
+        {
+            return Err(ReasoningFieldError::UnsupportedShape);
+        }
+        let mut coordinates = BTreeSet::new();
+        for part in &visible {
+            let (message_id, field) =
+                source_part_view(&original, part.message_ordinal, part.part_ordinal)
+                    .ok_or(ReasoningFieldError::UnsupportedShape)?;
+            let SemanticRecord::Reasoning {
+                provider: reasoning::ReasoningProvider::OpenCode,
+                source_kind: Some(reasoning::ReasoningSourceKind::Reasoning),
+                text,
+            } = &part.record
+            else {
+                return Err(ReasoningFieldError::UnsupportedShape);
+            };
+            if message_id != part.source_message.as_str()
+                || field.get("id").and_then(CanonValue::as_str) != Some(part.source_part.as_str())
+                || field.get("type").and_then(CanonValue::as_str) != Some("reasoning")
+                || field.get("text").and_then(CanonValue::as_str) != Some(text.as_str())
+                || !coordinates.insert((part.message_ordinal, part.part_ordinal))
+            {
+                return Err(ReasoningFieldError::UnsupportedShape);
+            }
+        }
+    }
+    let redactor = super::Redactor::new_default();
+    let (mut transcript, mut report) = redactor
+        .redact_owned_bounded(
+            std::mem::take(&mut *ordinary),
+            limits.max_output_bytes,
+            limits.max_working_set_bytes,
+        )
+        .ok_or(ReasoningFieldError::SourceTooLarge)?;
+    if elapsed() {
+        return Err(ReasoningFieldError::UnsupportedShape);
+    }
+    let mut redacted_session = source_session.to_owned();
+    if !visible.is_empty() {
+        let mut document = Zeroizing::new(
+            parse_canon_value(transcript.bytes())
+                .map_err(|_| ReasoningFieldError::MalformedSource)?,
+        );
+        // The original decoded thinking value, not a possibly half-matched
+        // JSON escape spelling, is the input to typed-field redaction.
+        for part in &mut visible {
+            let SemanticRecord::Reasoning { text, .. } = &mut part.record else {
+                return Err(ReasoningFieldError::UnsupportedShape);
+            };
+            merge_redaction_reports(&mut report, text.redact_with(&redactor));
+            let field =
+                source_part_fields_mut(&mut document, part.message_ordinal, part.part_ordinal)
+                    .ok_or(ReasoningFieldError::UnsupportedShape)?;
+            field.insert("text".to_owned(), CanonValue::Str(text.as_str().to_owned()));
+        }
+        // Decode-aware redaction also prevents canonical serialization from
+        // revealing an escaped secret in ordinary metadata or tool fields.
+        // Extra decoded matches are conservatively partial; visible thinking
+        // was already redacted above and does not itself poison completeness.
+        let mut decoded_report = super::RedactionReport::default();
+        redact_canon_value(&mut document, &redactor, &mut decoded_report);
+        partial |= decoded_report.match_count() != 0;
+        merge_redaction_reports(&mut report, decoded_report);
+        redacted_session = document
+            .get("info")
+            .and_then(|i| i.get("id"))
+            .and_then(CanonValue::as_str)
+            .ok_or(ReasoningFieldError::UnsupportedShape)?
+            .to_owned();
+        for part in &mut visible {
+            let (message_id, field) =
+                source_part_view(&document, part.message_ordinal, part.part_ordinal)
+                    .ok_or(ReasoningFieldError::UnsupportedShape)?;
+            part.source_message = Zeroizing::new(message_id.to_owned());
+            part.source_part = Zeroizing::new(
+                field
+                    .get("id")
+                    .and_then(CanonValue::as_str)
+                    .ok_or(ReasoningFieldError::UnsupportedShape)?
+                    .to_owned(),
+            );
+        }
+        let bytes = encode_bounded_json(&*document, limits.max_output_bytes)?;
+        // Serialization introduced no new content; re-enter the RedactedBytes
+        // constructor through the same bounded redactor, not a raw wrapper.
+        (transcript, decoded_report) = redactor
+            .redact_owned_bounded(bytes, limits.max_output_bytes, limits.max_working_set_bytes)
+            .ok_or(ReasoningFieldError::SourceTooLarge)?;
+        merge_redaction_reports(&mut report, decoded_report);
+    }
+    let mut turns = normalize_opencode_typed_parts(
+        transcript.bytes(),
+        &redacted_session,
+        visible,
+        partial,
+        limits.deadline,
+        limits.max_output_bytes,
+    )
+    .ok_or(ReasoningFieldError::UnsupportedShape)?;
+    merge_redaction_reports(&mut report, redact_turns_with_report(&mut turns));
+    if elapsed() {
+        return Err(ReasoningFieldError::UnsupportedShape);
+    }
+    Ok(RedactedCoveragePreparation {
+        transcript,
+        turns,
+        report,
+        partial,
+    })
+}
+
+/// Private preparation path: original classifier coordinates must still
+/// identify exactly the same visible part in the prepared ordinary export.
+/// This function does not redact or authorize persistence; only the snapshot
+/// service may consume its raw typed result before doing typed redaction.
+pub(crate) fn normalize_opencode_typed_parts(
+    data: &[u8],
+    source_session: &str,
+    visible_parts: Vec<reasoning::OpenCodeVisibleReasoningPart>,
+    partial: bool,
+    deadline: Option<Instant>,
+    max_redacted_bytes: usize,
+) -> Option<Vec<NormalizedTurn>> {
+    if deadline.is_some_and(|deadline| Instant::now() >= deadline)
+        || data.len() > max_redacted_bytes
+        || visible_parts.len() > 4096
+    {
+        return None;
+    }
+    let mut records = BTreeMap::new();
+    if !visible_parts.is_empty() {
+        let document = Zeroizing::new(parse_canon_value(data).ok()?);
+        if document.get("info")?.get("id")?.as_str()? != source_session {
+            return None;
+        }
+        let messages = document.get("messages")?.as_array()?;
+        for part in visible_parts {
+            if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                return None;
+            }
+            let message = messages.get(part.message_ordinal)?;
+            let (message_id, parts) = if message.get("type").is_some() {
+                if message.get("type")?.as_str()? != "assistant"
+                    || message.get("info").is_some()
+                    || message.get("parts").is_some()
+                {
+                    return None;
+                }
+                (
+                    message.get("id")?.as_str()?,
+                    message.get("content")?.as_array()?,
+                )
+            } else {
+                let info = message.get("info")?;
+                if info.get("role")?.as_str()? != "assistant" || message.get("content").is_some() {
+                    return None;
+                }
+                (info.get("id")?.as_str()?, message.get("parts")?.as_array()?)
+            };
+            let original = parts.get(part.part_ordinal)?;
+            let SemanticRecord::Reasoning {
+                provider: reasoning::ReasoningProvider::OpenCode,
+                source_kind: Some(reasoning::ReasoningSourceKind::Reasoning),
+                text,
+            } = &part.record
+            else {
+                return None;
+            };
+            if message_id != part.source_message.as_str()
+                || original.get("id")?.as_str()? != part.source_part.as_str()
+                || original.get("type")?.as_str()? != "reasoning"
+                || original.get("text")?.as_str()? != text.as_str()
+                || records
+                    .insert((part.message_ordinal, part.part_ordinal), part.record)
+                    .is_some()
+            {
+                return None;
+            }
+        }
+    }
+    // With no readable part, keep the legacy record order and byte behavior.
+    let mut turns =
+        normalize_opencode_export_inner(data, deadline, (!records.is_empty()).then_some(records))?;
+    if partial {
+        for turn in &mut turns {
+            turn.completeness = Completeness::Incomplete;
+        }
+    }
+    Some(turns)
 }
 
 fn normalize_opencode_export_inner(
     data: &[u8],
     deadline: Option<Instant>,
+    mut typed_parts: Option<BTreeMap<(usize, usize), SemanticRecord>>,
 ) -> Option<Vec<NormalizedTurn>> {
     let mut turns: Vec<NormalizedTurn> = Vec::new();
     let Ok(document) = parse_canon_value(data) else {
@@ -1372,11 +1815,126 @@ fn normalize_opencode_export_inner(
         Some(())
     }
 
+    fn classic_tool(turn: &mut NormalizedTurn, part: &CanonValue) {
+        let mut part_violation = false;
+        let name = match part.get("tool") {
+            Some(CanonValue::Str(t)) => t.clone(),
+            Some(_) => {
+                part_violation = true;
+                String::new()
+            }
+            None => String::new(),
+        };
+        let call_id = match part.get("callID") {
+            Some(CanonValue::Str(c)) => Some(c.clone()),
+            Some(CanonValue::Null) | None => None,
+            Some(_) => {
+                part_violation = true;
+                None
+            }
+        };
+        let state = part.get("state");
+        let status = state
+            .and_then(|st| st.get("status"))
+            .and_then(CanonValue::as_str)
+            .unwrap_or("");
+        let mut input = state
+            .and_then(|st| st.get("input"))
+            .cloned()
+            .unwrap_or(CanonValue::Null);
+        if contains_float(&input) {
+            part_violation = true;
+            sanitize_floats(&mut input);
+        }
+        turn.records.push(SemanticRecord::ToolCall {
+            call_id: call_id.clone(),
+            input,
+            name,
+        });
+        match status {
+            "completed" | "error" => {
+                let content = match state.and_then(|st| st.get("output")) {
+                    Some(CanonValue::Str(o)) => o.clone(),
+                    Some(CanonValue::Null) | None => String::new(),
+                    Some(_) => {
+                        part_violation = true;
+                        String::new()
+                    }
+                };
+                turn.records.push(SemanticRecord::ToolResult {
+                    call_id,
+                    content,
+                    is_error: status == "error",
+                });
+            }
+            // Tool still in flight at export time: the turn is
+            // not faithfully complete yet.
+            _ => part_violation = true,
+        }
+        if part_violation {
+            turn.completeness = Completeness::Incomplete;
+        }
+    }
+
+    fn flush_typed_text(turn: &mut NormalizedTurn, fragments: &mut Vec<&str>) {
+        if !fragments.is_empty() {
+            let text = fragments.join("\n");
+            fragments.clear();
+            if !text.is_empty() {
+                turn.records.push(SemanticRecord::Assistant { text });
+            }
+        }
+    }
+
+    fn typed_message_parts(
+        turn: &mut NormalizedTurn,
+        parts: &[CanonValue],
+        message_ordinal: usize,
+        native: bool,
+        typed: &mut BTreeMap<(usize, usize), SemanticRecord>,
+        deadline: Option<Instant>,
+    ) -> Option<()> {
+        let mut fragments = Vec::new();
+        for (part_ordinal, part) in parts.iter().enumerate() {
+            if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                return None;
+            }
+            match part.get("type").and_then(CanonValue::as_str) {
+                Some("text") => match part.get("text").and_then(CanonValue::as_str) {
+                    Some(text) => fragments.push(text),
+                    None => turn.completeness = Completeness::Incomplete,
+                },
+                Some("reasoning") => {
+                    flush_typed_text(turn, &mut fragments);
+                    match typed.remove(&(message_ordinal, part_ordinal)) {
+                        Some(record) => turn.records.push(record),
+                        None => turn.completeness = Completeness::Incomplete,
+                    }
+                }
+                Some("tool") => {
+                    flush_typed_text(turn, &mut fragments);
+                    if native {
+                        native_tool(turn, part, deadline)?;
+                    } else {
+                        classic_tool(turn, part);
+                    }
+                }
+                Some(
+                    "step-finish" | "patch" | "step-start" | "snapshot" | "retry" | "compaction"
+                    | "agent" | "subtask" | "file",
+                ) if !native => {}
+                _ => turn.completeness = Completeness::Incomplete,
+            }
+        }
+        flush_typed_text(turn, &mut fragments);
+        Some(())
+    }
+
     let mut native_seen = false;
     let mut classic_seen = false;
     let mut pending_native = BTreeSet::new();
 
-    for message in messages {
+    for (message_ordinal, message) in messages.iter().enumerate() {
         if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             return None;
         }
@@ -1431,6 +1989,28 @@ fn normalize_opencode_export_inner(
                     pending_native.insert(turn.ordinal);
                     if violation {
                         turn.completeness = Completeness::Incomplete;
+                    }
+                    if let Some(typed) = typed_parts.as_mut()
+                        && typed
+                            .range((message_ordinal, 0)..=(message_ordinal, usize::MAX))
+                            .next()
+                            .is_some()
+                    {
+                        match message.get("content").and_then(CanonValue::as_array) {
+                            Some(content) => {
+                                typed_message_parts(
+                                    turn,
+                                    content,
+                                    message_ordinal,
+                                    true,
+                                    typed,
+                                    deadline,
+                                )?;
+                            }
+                            None => turn.completeness = Completeness::Incomplete,
+                        }
+                        observe_turn_timestamp(turn, timestamp);
+                        continue;
                     }
                     match message.get("content").and_then(CanonValue::as_array) {
                         Some(content) => {
@@ -1536,6 +2116,21 @@ fn normalize_opencode_export_inner(
                 &[]
             }
         };
+        if role == "assistant"
+            && let Some(typed) = typed_parts.as_mut()
+            && typed
+                .range((message_ordinal, 0)..=(message_ordinal, usize::MAX))
+                .next()
+                .is_some()
+        {
+            let turn = current_or_open(&mut turns);
+            if structural_violation {
+                turn.completeness = Completeness::Incomplete;
+            }
+            typed_message_parts(turn, parts, message_ordinal, false, typed, deadline)?;
+            observe_turn_timestamp(turn, message_timestamp);
+            continue;
+        }
         // A structural violation poisons THIS message's own turn (Codex M3 R2
         // P1-3), never a neighbor — fold it into the per-turn `violation` flag
         // that is applied at role dispatch below.
@@ -1585,67 +2180,8 @@ fn normalize_opencode_export_inner(
                     turn.records.push(SemanticRecord::Assistant { text });
                 }
                 for part in parts {
-                    if part.get("type").and_then(CanonValue::as_str) != Some("tool") {
-                        continue;
-                    }
-                    let mut part_violation = false;
-                    let name = match part.get("tool") {
-                        Some(CanonValue::Str(t)) => t.clone(),
-                        Some(_) => {
-                            part_violation = true;
-                            String::new()
-                        }
-                        None => String::new(),
-                    };
-                    let call_id = match part.get("callID") {
-                        Some(CanonValue::Str(c)) => Some(c.clone()),
-                        Some(CanonValue::Null) | None => None,
-                        Some(_) => {
-                            part_violation = true;
-                            None
-                        }
-                    };
-                    let state = part.get("state");
-                    let status = state
-                        .and_then(|st| st.get("status"))
-                        .and_then(CanonValue::as_str)
-                        .unwrap_or("");
-                    let mut input = state
-                        .and_then(|st| st.get("input"))
-                        .cloned()
-                        .unwrap_or(CanonValue::Null);
-                    if contains_float(&input) {
-                        part_violation = true;
-                        sanitize_floats(&mut input);
-                    }
-                    let turn = current_or_open(&mut turns);
-                    turn.records.push(SemanticRecord::ToolCall {
-                        call_id: call_id.clone(),
-                        input,
-                        name,
-                    });
-                    match status {
-                        "completed" | "error" => {
-                            let content = match state.and_then(|st| st.get("output")) {
-                                Some(CanonValue::Str(o)) => o.clone(),
-                                Some(CanonValue::Null) | None => String::new(),
-                                Some(_) => {
-                                    part_violation = true;
-                                    String::new()
-                                }
-                            };
-                            turn.records.push(SemanticRecord::ToolResult {
-                                call_id,
-                                content,
-                                is_error: status == "error",
-                            });
-                        }
-                        // Tool still in flight at export time: the turn is
-                        // not faithfully complete yet.
-                        _ => part_violation = true,
-                    }
-                    if part_violation {
-                        turn.completeness = Completeness::Incomplete;
+                    if part.get("type").and_then(CanonValue::as_str) == Some("tool") {
+                        classic_tool(current_or_open(&mut turns), part);
                     }
                 }
             }
@@ -1662,6 +2198,10 @@ fn normalize_opencode_export_inner(
         if let Some(turn) = turns.last_mut() {
             observe_turn_timestamp(turn, message_timestamp);
         }
+    }
+
+    if typed_parts.as_ref().is_some_and(|parts| !parts.is_empty()) {
+        return None;
     }
 
     for index in pending_native {
@@ -1697,6 +2237,80 @@ pub fn redact_turns(turns: &mut [NormalizedTurn]) {
     let _ = redact_turns_with_report(turns);
 }
 
+pub(crate) fn merge_redaction_reports(
+    aggregate: &mut crate::internal::ai::observed_agents::RedactionReport,
+    report: crate::internal::ai::observed_agents::RedactionReport,
+) {
+    aggregate.bytes_scanned = aggregate.bytes_scanned.saturating_add(report.bytes_scanned);
+    aggregate.bytes_redacted = aggregate
+        .bytes_redacted
+        .saturating_add(report.bytes_redacted);
+    aggregate.dropped_matches = aggregate
+        .dropped_matches
+        .saturating_add(report.dropped_matches);
+    for matched in report.matches {
+        if aggregate.matches.len()
+            < crate::internal::ai::observed_agents::MAX_REDACTION_MATCH_SAMPLES
+        {
+            aggregate.matches.push(matched);
+        } else {
+            aggregate.dropped_matches = aggregate.dropped_matches.saturating_add(1);
+        }
+    }
+}
+
+fn redact_string(
+    s: &mut String,
+    redactor: &crate::internal::ai::observed_agents::Redactor,
+    aggregate: &mut crate::internal::ai::observed_agents::RedactionReport,
+) {
+    let (bytes, report) = redactor.redact(s.as_bytes());
+    *s = String::from_utf8_lossy(bytes.as_ref()).into_owned();
+    merge_redaction_reports(aggregate, report);
+}
+
+pub(crate) fn redact_canon_value(
+    value: &mut CanonValue,
+    redactor: &crate::internal::ai::observed_agents::Redactor,
+    aggregate: &mut crate::internal::ai::observed_agents::RedactionReport,
+) {
+    match value {
+        CanonValue::Str(s) => redact_string(s, redactor, aggregate),
+        CanonValue::Array(items) => {
+            for item in items {
+                redact_canon_value(item, redactor, aggregate);
+            }
+        }
+        CanonValue::Object(map) => {
+            let mut redacted = BTreeMap::new();
+            for (original_key, mut item) in std::mem::take(map) {
+                redact_canon_value(&mut item, redactor, aggregate);
+                let (_, key_report) = redactor.redact(original_key.as_bytes());
+                let key_matched = !key_report.matches.is_empty();
+                merge_redaction_reports(aggregate, key_report);
+                let original_digest = hex::encode(Sha256::digest(original_key.as_bytes()));
+                let mut output_key = if key_matched {
+                    format!("redacted-key-sha256-{original_digest}")
+                } else {
+                    original_key
+                };
+                if redacted.contains_key(&output_key) {
+                    let collision_base = format!("redacted-collision-key-sha256-{original_digest}");
+                    output_key = collision_base.clone();
+                    let mut ordinal = 0_u64;
+                    while redacted.contains_key(&output_key) {
+                        ordinal += 1;
+                        output_key = format!("{collision_base}-{ordinal}");
+                    }
+                }
+                redacted.insert(output_key, item);
+            }
+            *map = redacted;
+        }
+        _ => {}
+    }
+}
+
 /// Redact normalized turns and return the aggregate typed-field evidence for
 /// persistence by audit-sensitive callers such as historical import.
 pub fn redact_turns_with_report(
@@ -1704,86 +2318,14 @@ pub fn redact_turns_with_report(
 ) -> crate::internal::ai::observed_agents::RedactionReport {
     let redactor = crate::internal::ai::observed_agents::Redactor::new_default();
     let mut aggregate = crate::internal::ai::observed_agents::RedactionReport::default();
-    fn merge_report(
-        aggregate: &mut crate::internal::ai::observed_agents::RedactionReport,
-        report: crate::internal::ai::observed_agents::RedactionReport,
-    ) {
-        aggregate.bytes_scanned = aggregate.bytes_scanned.saturating_add(report.bytes_scanned);
-        aggregate.bytes_redacted = aggregate
-            .bytes_redacted
-            .saturating_add(report.bytes_redacted);
-        aggregate.dropped_matches = aggregate
-            .dropped_matches
-            .saturating_add(report.dropped_matches);
-        for matched in report.matches {
-            if aggregate.matches.len()
-                < crate::internal::ai::observed_agents::MAX_REDACTION_MATCH_SAMPLES
-            {
-                aggregate.matches.push(matched);
-            } else {
-                aggregate.dropped_matches = aggregate.dropped_matches.saturating_add(1);
-            }
-        }
-    }
-    fn redact_string(
-        s: &mut String,
-        redactor: &crate::internal::ai::observed_agents::Redactor,
-        aggregate: &mut crate::internal::ai::observed_agents::RedactionReport,
-    ) {
-        let (bytes, report) = redactor.redact(s.as_bytes());
-        *s = String::from_utf8_lossy(bytes.as_ref()).into_owned();
-        merge_report(aggregate, report);
-    }
-    fn redact_value(
-        value: &mut CanonValue,
-        redactor: &crate::internal::ai::observed_agents::Redactor,
-        aggregate: &mut crate::internal::ai::observed_agents::RedactionReport,
-    ) {
-        match value {
-            CanonValue::Str(s) => redact_string(s, redactor, aggregate),
-            CanonValue::Array(items) => {
-                for item in items {
-                    redact_value(item, redactor, aggregate);
-                }
-            }
-            CanonValue::Object(map) => {
-                let mut redacted = BTreeMap::new();
-                for (original_key, mut item) in std::mem::take(map) {
-                    redact_value(&mut item, redactor, aggregate);
-                    let (_, key_report) = redactor.redact(original_key.as_bytes());
-                    let key_matched = !key_report.matches.is_empty();
-                    merge_report(aggregate, key_report);
-                    let original_digest = hex::encode(Sha256::digest(original_key.as_bytes()));
-                    let mut output_key = if key_matched {
-                        format!("redacted-key-sha256-{original_digest}")
-                    } else {
-                        original_key
-                    };
-                    if redacted.contains_key(&output_key) {
-                        let collision_base =
-                            format!("redacted-collision-key-sha256-{original_digest}");
-                        output_key = collision_base.clone();
-                        let mut ordinal = 0_u64;
-                        while redacted.contains_key(&output_key) {
-                            ordinal += 1;
-                            output_key = format!("{collision_base}-{ordinal}");
-                        }
-                    }
-                    redacted.insert(output_key, item);
-                }
-                *map = redacted;
-            }
-            _ => {}
-        }
-    }
     for turn in turns {
         let (_, key_report) = redactor.redact(turn.logical_turn_key.as_bytes());
         if !key_report.matches.is_empty() {
             let digest = hex::encode(Sha256::digest(turn.logical_turn_key.as_bytes()));
             turn.logical_turn_key = format!("redacted-id-sha256-{digest}");
-            merge_report(&mut aggregate, key_report);
+            merge_redaction_reports(&mut aggregate, key_report);
         } else {
-            merge_report(&mut aggregate, key_report);
+            merge_redaction_reports(&mut aggregate, key_report);
         }
         for record in &mut turn.records {
             match record {
@@ -1798,7 +2340,7 @@ pub fn redact_turns_with_report(
                     if let Some(call_id) = call_id {
                         redact_string(call_id, &redactor, &mut aggregate);
                     }
-                    redact_value(input, &redactor, &mut aggregate);
+                    redact_canon_value(input, &redactor, &mut aggregate);
                     redact_string(name, &redactor, &mut aggregate);
                 }
                 SemanticRecord::ToolResult {
@@ -1814,7 +2356,7 @@ pub fn redact_turns_with_report(
                     // toward the report; the redaction rewrites the gated
                     // text in place (no arbitrary-text minting route).
                     let report = text.redact_with(&redactor);
-                    merge_report(&mut aggregate, report);
+                    merge_redaction_reports(&mut aggregate, report);
                 }
             }
         }
@@ -1927,7 +2469,20 @@ fn project_turn_for_schema(
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write;
+
     use super::*;
+
+    #[test]
+    fn og26_bounded_ordinary_writer_rejects_expansion() {
+        let mut writer = BoundedOrdinaryWriter {
+            bytes: Zeroizing::new(Vec::new()),
+            cap: 4,
+        };
+        writer.write_all(b"safe").expect("exact output cap");
+        assert!(writer.write_all(b"extra").is_err());
+        assert_eq!(writer.into_bytes(), b"safe");
+    }
 
     fn cov2_visible_turn(text: &str) -> NormalizedTurn {
         let (_, visible_text) = reasoning::classify_provider_visible_reasoning(

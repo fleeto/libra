@@ -8020,6 +8020,26 @@ fn capture_foundation_downstream_plan_and_layering_contract() {
         );
     }
 
+    // Both legacy closure prose and the index's canonical completion status
+    // express the same foundation evidence. Check the status column rather
+    // than treating an incidental historical mention as current completion.
+    let row_reports_closed = |row: &str| {
+        row.contains("已收口")
+            || row
+                .split('|')
+                .nth(3)
+                .is_some_and(|status| status.trim() == "已完成")
+    };
+    assert!(row_reports_closed(
+        "| plan | foundation | 已完成 | ACF-09 |"
+    ));
+    assert!(row_reports_closed(
+        "| plan | foundation | 已收口 | ACF-09 |"
+    ));
+    assert!(!row_reports_closed(
+        "| plan | foundation | pending | historical 已完成 |"
+    ));
+
     for plan in ["plan-status.md", "plan-long.md"] {
         let path = plan_dir.join(plan);
         let document = fs::read_to_string(&path).expect("read plan index");
@@ -8039,13 +8059,13 @@ fn capture_foundation_downstream_plan_and_layering_contract() {
         );
         if foundation_closed {
             assert!(
-                foundation_rows.iter().any(|row| row.contains("已收口")),
+                foundation_rows.iter().any(|row| row_reports_closed(row)),
                 "{} must reflect Session Capture foundation closure after all ACF evidence is complete",
                 path.display()
             );
         } else {
             assert!(
-                foundation_rows.iter().all(|row| !row.contains("已收口")),
+                foundation_rows.iter().all(|row| !row_reports_closed(row)),
                 "{} must not report Session Capture as closed before all ACF evidence is complete",
                 path.display()
             );
@@ -11254,6 +11274,152 @@ fn opencode_verified_partial_live_permit_and_provenance_have_closed_owners() {
         assert!(
             validation < generic,
             "{wrapper}: private partial validation precedes generic admission"
+        );
+    }
+}
+
+#[test]
+fn cov2_visible_text_cannot_mint_native_or_opaque() {
+    use syn::visit::Visit;
+    #[derive(Default)]
+    struct Guard {
+        paths: BTreeSet<String>,
+        violations: Vec<String>,
+        authority_discard_calls: usize,
+    }
+    impl<'ast> Visit<'ast> for Guard {
+        fn visit_path(&mut self, path: &'ast syn::Path) {
+            self.paths.insert(syn_path_text(path));
+            for segment in &path.segments {
+                if [
+                    "NativeProven",
+                    "NativeProvenReasoning",
+                    "NativeReasoningProof",
+                    "OpaqueEncryptedBytes",
+                    "PreparedPendingNativeSeal",
+                    "NativeReasoningIssuer",
+                    "from_prepared_authorized_source",
+                    "from_prepared_authorized_source_with_partial_permit",
+                    "as_reasoning_source_preprocessor",
+                ]
+                .contains(&segment.ident.to_string().as_str())
+                {
+                    self.violations.push(syn_path_text(path));
+                }
+            }
+            syn::visit::visit_path(self, path);
+        }
+        fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+            if let syn::Expr::Path(path) = call.func.as_ref()
+                && path.path.segments.last().is_some_and(|segment| {
+                    segment.ident == "discard_prepared_authority_for_coverage_preview"
+                })
+            {
+                self.authority_discard_calls += 1;
+            }
+            syn::visit::visit_expr_call(self, call);
+        }
+    }
+    let (_, snapshot) = parse_rust_source("src/internal/ai/capture/snapshot.rs");
+    let method = snapshot
+        .items
+        .iter()
+        .find_map(|item| match item {
+            syn::Item::Impl(imp)
+                if matches!(imp.self_ty.as_ref(), syn::Type::Path(path)
+            if path.path.segments.last().is_some_and(|s| s.ident == "CaptureSnapshotService")) =>
+            {
+                imp.items.iter().find_map(|item| match item {
+                    syn::ImplItem::Fn(method)
+                        if method.sig.ident == "preview_redacted_coverage_v2" =>
+                    {
+                        Some(method)
+                    }
+                    _ => None,
+                })
+            }
+            _ => None,
+        })
+        .expect("explicit pure-memory preview API");
+    let mut output = Guard::default();
+    output.visit_return_type(&method.sig.output);
+    assert!(output.violations.is_empty());
+    assert!(output.paths.contains("RedactedBytes") && output.paths.contains("serde_json::Value"));
+    for private in [
+        "CaptureSnapshot",
+        "ProviderVisibleText",
+        "SemanticRecord",
+        "OpenCodeCoverageClassification",
+    ] {
+        assert!(
+            !output.paths.iter().any(|path| path.ends_with(private)),
+            "raw carrier escaped: {private}"
+        );
+    }
+    let mut guard = Guard::default();
+    guard.visit_block(&method.block);
+    guard.visit_item_fn(top_level_function(
+        &snapshot,
+        "prepare_redacted_coverage_preview",
+    ));
+    let (_, coverage) = parse_rust_source("src/internal/ai/observed_agents/coverage.rs");
+    for name in [
+        "prepare_coverage_preview",
+        "prepare_opencode_redacted_coverage",
+        "normalize_opencode_typed_parts",
+        "redact_canon_value",
+    ] {
+        guard.visit_item_fn(top_level_function(&coverage, name));
+    }
+    assert_eq!(
+        guard.authority_discard_calls, 1,
+        "preview must destroy the owning prepared authority"
+    );
+    assert!(
+        guard.violations.is_empty(),
+        "readable preparation must not mint native/opaque authority: {:?}",
+        guard.violations
+    );
+    let (_, reasoning) = parse_rust_source("src/internal/ai/observed_agents/reasoning.rs");
+    let discard = top_level_function(
+        &reasoning,
+        "discard_prepared_authority_for_coverage_preview",
+    );
+    let mut discard_guard = Guard::default();
+    discard_guard.visit_item_fn(discard);
+    assert!(discard_guard.violations.is_empty());
+    let mut return_guard = Guard::default();
+    return_guard.visit_return_type(&discard.sig.output);
+    assert!(
+        return_guard
+            .paths
+            .iter()
+            .all(|path| ["Vec", "u8", "bool"].contains(&path.as_str()))
+    );
+    for entry in walkdir::WalkDir::new(repo_root().join("src")) {
+        let entry = entry.expect("source entry");
+        if !entry.file_type().is_file() || entry.path().extension().is_none_or(|e| e != "rs") {
+            continue;
+        }
+        let source = fs::read_to_string(entry.path()).expect("source text");
+        let scan = reasoning_scan(&source);
+        if let Some(owners) = scan
+            .references
+            .get("discard_prepared_authority_for_coverage_preview")
+        {
+            assert_eq!(
+                entry.path(),
+                repo_root().join("src/internal/ai/observed_agents/coverage.rs")
+            );
+            assert_eq!(owners, &["prepare_coverage_preview".to_owned()]);
+        }
+    }
+    for path in &guard.paths {
+        assert!(
+            !path.starts_with("std::fs")
+                && !path.contains("Command")
+                && !path.contains("CheckpointStore"),
+            "preview cannot open a source or persist: {path}"
         );
     }
 }

@@ -6,7 +6,6 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    io::{self, Write},
     ops::{Deref, DerefMut},
 };
 
@@ -29,7 +28,7 @@ const MAX_JSON_DEPTH: usize = 64;
 const MAX_VISIBLE_REASONING_PARTS: usize = 4096;
 
 /// Classify the original, authorized in-memory export before the scrubber
-/// erases state/proof fields. This seam has no production callers yet. It
+/// erases state/proof fields. This seam has no capture/live/import callers yet. It
 /// retains the existing non-authoritative prepared source for the later
 /// typed-redaction stage; nothing here writes a claim, artifact or cursor.
 #[allow(dead_code)] // COV2-11 alone activates this private parser seam.
@@ -147,10 +146,14 @@ pub(crate) fn classify_opencode_coverage_source(source: Vec<u8>) -> OpenCodeCove
         // another envelope allowlist. Its own bounded parser runs once more;
         // both passes share the existing source/node/depth caps. Candidates
         // remain sealed and unproven, and unknown envelope data stays partial.
+        let source_session = Zeroizing::new(source_session.to_owned());
+        drop(message_ids);
+        drop(part_ids);
+        drop(document);
         let prepared = prepare_authorized_source(std::mem::take(&mut *source))?;
         partial |= !prepared_source_is_ordinary_projection(&prepared);
         Ok(OpenCodeCoverageSource {
-            source_session: Zeroizing::new(source_session.to_owned()),
+            source_session,
             prepared,
             visible_parts,
             partial,
@@ -548,38 +551,6 @@ impl Drop for WipingIdSet {
 
 /// `serde_json::to_vec` may allocate well beyond the admitted source after
 /// escapes expand. An output failure drops and wipes every partial write.
-struct BoundedOrdinaryWriter {
-    bytes: Zeroizing<Vec<u8>>,
-    cap: usize,
-}
-
-impl BoundedOrdinaryWriter {
-    fn into_bytes(mut self) -> Vec<u8> {
-        std::mem::take(&mut *self.bytes)
-    }
-}
-
-impl Write for BoundedOrdinaryWriter {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        let next = self
-            .bytes
-            .len()
-            .checked_add(bytes.len())
-            .filter(|next| *next <= self.cap)
-            .ok_or_else(|| io::Error::other("bounded OpenCode output exceeded source cap"))?;
-        let additional = next - self.bytes.len();
-        self.bytes
-            .try_reserve(additional)
-            .map_err(|_| io::Error::other("bounded OpenCode output allocation failed"))?;
-        self.bytes.extend_from_slice(bytes);
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
 /// A payload-free classification; `Candidate` never grants native authority.
 enum ReasoningPartShape {
     Visible,
@@ -2796,13 +2767,7 @@ pub(crate) fn prepare_authorized_source(
     let ordinary = if removed {
         let cap = usize::try_from(TRANSCRIPT_READ_HARD_CAP_BYTES)
             .map_err(|_| ReasoningFieldError::SourceTooLarge)?;
-        let mut writer = BoundedOrdinaryWriter {
-            bytes: Zeroizing::new(Vec::new()),
-            cap,
-        };
-        serde_json::to_writer(&mut writer, &*export)
-            .map_err(|_| ReasoningFieldError::SourceTooLarge)?;
-        writer.into_bytes()
+        super::coverage::encode_bounded_json(&*export, cap)?
     } else {
         std::mem::take(&mut *source)
     };
@@ -2887,6 +2852,31 @@ mod tests {
                 assert!(source.partial);
                 assert!(source.visible_parts.is_empty());
             }
+        }
+    }
+
+    #[test]
+    fn cov2_partial_source_keeps_independent_visible_part() {
+        for unknown_root in [false, true] {
+            let mut source = serde_json::json!({"info":{"id":"ses_mixed"},"messages":[
+                {"id":"m","type":"assistant","content":[
+                    {"id":"good","type":"reasoning","text":"readable"},
+                    {"id":"bad","type":"reasoning","text":"PRIVATE_CANDIDATE","state":{"signature":"PRIVATE_CANDIDATE"}}]}]});
+            if unknown_root {
+                source["unknown_root"] = serde_json::json!("PRIVATE_METADATA");
+            }
+            let OpenCodeCoverageClassification::Parsed(result) = classify_opencode_coverage_source(
+                serde_json::to_vec(&source).expect("synthetic mixed source"),
+            ) else {
+                panic!("known structure retains safe visible data with a partial flag");
+            };
+            assert!(result.partial);
+            assert_eq!(result.visible_parts.len(), 1);
+            assert_eq!(result.visible_parts[0].source_part.as_str(), "good");
+            assert!(
+                matches!(&result.visible_parts[0].record, SemanticRecord::Reasoning { text, .. }
+                if text.as_str() == "readable")
+            );
         }
     }
 
@@ -3105,17 +3095,6 @@ mod tests {
             assert!(!ordinary.contains("originProof"));
             assert!(!ordinary.contains("\"state\""));
         }
-    }
-
-    #[test]
-    fn og26_bounded_ordinary_writer_rejects_expansion() {
-        let mut writer = BoundedOrdinaryWriter {
-            bytes: Zeroizing::new(Vec::new()),
-            cap: 4,
-        };
-        writer.write_all(b"safe").expect("exact output cap");
-        assert!(writer.write_all(b"extra").is_err());
-        assert_eq!(writer.into_bytes(), b"safe");
     }
 
     fn prepare(source: &str) -> Result<(Vec<u8>, ReasoningSourceState), ReasoningFieldError> {

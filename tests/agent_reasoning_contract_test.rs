@@ -50,7 +50,6 @@ fn cov2_production_normalize_inert_before_activation() {
         );
     }
     for path in [
-        "src/internal/ai/capture/snapshot.rs",
         "src/internal/ai/capture/live_checkpoint.rs",
         "src/internal/ai/agent_import.rs",
     ] {
@@ -60,6 +59,21 @@ fn cov2_production_normalize_inert_before_activation() {
             "COV2-11 owns production activation: {path}"
         );
     }
+    let snapshot =
+        std::fs::read_to_string("src/internal/ai/capture/snapshot.rs").expect("snapshot source");
+    let legacy = snapshot
+        .split("pub fn capture_authorized(")
+        .nth(1)
+        .expect("legacy capture entry")
+        .split("pub(crate) fn capture_authorized_with_reasoning_context")
+        .next()
+        .expect("legacy body");
+    assert!(legacy.contains("LegacyOrdinary"));
+    assert!(
+        !legacy.contains("preview_redacted_coverage_v2")
+            && !legacy.contains("prepare_redacted_coverage_preview")
+            && !legacy.contains("classify_opencode_coverage_source")
+    );
     let live =
         std::fs::read_to_string("src/internal/ai/capture/live_checkpoint.rs").expect("live source");
     let live = live
@@ -72,6 +86,123 @@ fn cov2_production_normalize_inert_before_activation() {
     let import = std::fs::read_to_string("src/internal/ai/agent_import.rs").expect("import source");
     assert_eq!(import.matches("AgentKind::OpenCode => normalize_opencode_export_until(transcript.bytes(), deadline)").count(), 2,
                "production OpenCode import still uses the legacy normalizer; the separate ordinary versioned library entry is allowed");
+}
+
+/// In-memory persistence spies see only the actual preview's redacted outputs.
+/// Canaries deliberately do not match a secret regex: absence proves erasure,
+/// not a regex hiding a leaked candidate. No Session, exporter, DB or model.
+#[test]
+fn cov2_candidate_zero_plaintext_sinks() {
+    use libra::internal::ai::capture::snapshot::{CaptureSnapshotPolicy, CaptureSnapshotService};
+    const CANARY: &str = "COV10_OPAQUE_CANDIDATE_PAYLOAD_CANARY";
+    #[derive(Default)]
+    struct MemorySinks {
+        ordinary: Vec<Vec<u8>>,
+        typed: Vec<serde_json::Value>,
+    }
+    for include_visible in [false, true] {
+        let mut content = vec![
+            serde_json::json!({"id":"npart_0123456789abcdef0123456789abcdef","type":"reasoning","text":CANARY,
+            "state":{"signature":CANARY,"redactedData":CANARY,"reasoningEncryptedContent":CANARY},
+            "originProof":{"nonce":CANARY},"time":{"start":1,"end":2}}),
+        ];
+        if include_visible {
+            content
+                .push(serde_json::json!({"id":"good","type":"reasoning","text":"public visible"}));
+        }
+        content.push(serde_json::json!({"id":"answer","type":"text","text":"done"}));
+        let source = serde_json::to_vec(&serde_json::json!({"info":{"id":"ses_sinks"},"messages":[
+            {"id":"u","type":"user","text":"prompt"}, {"id":"m","type":"assistant","content":content},
+            {"id":"i","type":"idle","outcome":"succeeded"}]})).expect("synthetic source");
+        let (ordinary, typed) = CaptureSnapshotService::preview_redacted_coverage_v2(
+            "opencode",
+            source,
+            CaptureSnapshotPolicy::default(),
+        )
+        .expect("safe partial preview");
+        assert_eq!(typed["partial"], true);
+        let mut sinks = MemorySinks::default();
+        sinks.ordinary.push(ordinary.bytes().to_vec());
+        sinks.typed.push(typed);
+        assert_eq!(sinks.ordinary.len(), 1);
+        assert_eq!(sinks.typed.len(), 1);
+        assert!(!sinks.ordinary[0].is_empty());
+        let decoded: serde_json::Value =
+            serde_json::from_slice(&sinks.ordinary[0]).expect("ordinary JSON");
+        for output in [
+            String::from_utf8(sinks.ordinary[0].clone()).expect("UTF8"),
+            decoded.to_string(),
+            sinks.typed[0].to_string(),
+        ] {
+            assert!(
+                !output.contains(CANARY),
+                "candidate reached a plaintext sink"
+            );
+        }
+        let rows = sinks.typed[0]["turns"]
+            .as_array()
+            .expect("nonempty turn output");
+        assert!(!rows.is_empty());
+        assert!(
+            rows.iter()
+                .all(|row| row["projection"]["completeness"] == "incomplete")
+        );
+        if include_visible {
+            assert_eq!(rows[0]["coverage_schema_version"], 2);
+            assert!(rows[0]["projection"].to_string().contains("public visible"));
+        } else {
+            assert!(rows.iter().all(|row| row["coverage_schema_version"] == 1));
+        }
+    }
+}
+
+#[test]
+fn cov2_non_opencode_adapter_unchanged() {
+    use libra::internal::ai::{
+        capture::snapshot::{CaptureSnapshotPolicy, CaptureSnapshotService},
+        observed_agents::{
+            Redactor, normalize_claude_transcript, normalize_codex_rollout, redact_turns,
+            safe_turn_projection,
+        },
+    };
+    let claude = concat!(
+        r#"{"type":"user","message":{"role":"user","content":"hi"}}"#,
+        "\n",
+        r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"hello"}]}}"#
+    );
+    let codex = concat!(
+        r#"{"type":"event_msg","payload":{"type":"task_started","turn_id":"t"}}"#,
+        "\n",
+        r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}}"#,
+        "\n",
+        r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hello"}]}}"#,
+        "\n",
+        r#"{"type":"event_msg","payload":{"type":"task_complete"}}"#
+    );
+    for (provider, raw) in [("claude_code", claude), ("codex", codex)] {
+        let (baseline, _) = Redactor::new_default().redact(raw.as_bytes());
+        let mut old = if provider == "codex" {
+            normalize_codex_rollout(baseline.bytes())
+        } else {
+            normalize_claude_transcript(baseline.bytes())
+        };
+        redact_turns(&mut old);
+        assert!(!old.is_empty(), "control must exercise real normalization");
+        let (ordinary, preview) = CaptureSnapshotService::preview_redacted_coverage_v2(
+            provider,
+            raw.as_bytes().to_vec(),
+            CaptureSnapshotPolicy::default(),
+        )
+        .expect("ordinary preview");
+        assert_eq!(ordinary.bytes(), baseline.bytes());
+        let rows = preview["turns"].as_array().expect("turns");
+        assert_eq!(rows.len(), old.len());
+        for (row, turn) in rows.iter().zip(&old) {
+            assert_eq!(row["coverage_schema_version"], 1);
+            assert_eq!(row["digest"], turn.digest_hex());
+            assert_eq!(row["projection"], safe_turn_projection(provider, turn));
+        }
+    }
 }
 
 fn read_fixture(name: &str) -> serde_json::Value {

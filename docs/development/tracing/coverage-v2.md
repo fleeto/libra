@@ -389,15 +389,19 @@ currently installed stable release contains this unreleased implementation.
 ## Inert OpenCode visible reasoning classification (COV2-06, unreleased)
 
 `classify_opencode_coverage_source` is a crate-private, pure in-memory parser
-seam with no production callers before COV2-11. It consumes the original
+seam with no capture/live/import callers before COV2-11. The explicit COV2-10
+pure-memory preview may consume it. It consumes the original
 bounded export before state/proof erasure. Closed native/classic assistant
 reasoning parts with nonempty visible text become gated typed Reasoning
 records, retaining source message/part IDs and ordinals. Duplicate or missing
 coordinates, contradictory session/message references, empty/whitespace text,
 state/proof-bearing or unsupported parts remain partial without a typed record
 for that part. Malformed/duplicate-key/unknown export structure and budget
-failures return an explicit payload-free Partial result; no cursor can complete
-from that result. A separate valid visible part never clears a partial flag.
+failures return payload-free `Partial(error)` when parsing cannot continue.
+Safely retained parts with unsupported siblings instead return
+`Parsed(source)` with `source.partial = true`; neither case permits cursor
+completion from unproved content. A separate valid visible part never clears
+a partial flag.
 
 The source/tree byte, node and depth budgets run before materialization; at
 most 4096 visible parts are emitted. The existing reviewed preprocessor runs
@@ -406,14 +410,54 @@ owning candidate separation. Both parse passes are bounded; this is not a new
 unbounded scan. IDs and the original parse tree wipe on drop. The carrier has
 no Clone/Serialize/Debug, and ProviderVisibleText retains its serialization
 barrier and content-free Debug. It grants neither native provenance, an issuer,
-an opaque artifact, nor capture authority. COV2-10 must perform typed redaction
-before COV2-11 connects any persistence path; the retained ordinary projection
-also remains unredacted input for that later stage.
+an opaque artifact, nor capture authority. COV2-10 performs typed redaction in
+the explicit preview before COV2-11 connects any persistence path; the retained
+ordinary projection is unredacted input until that bounded redaction stage.
 
 Actual production normalization is unchanged: reasoning keeps the turn
 incomplete, contains no typed Reasoning record and selects v1. The COV2-06
 contract test uses a complete ordinary control to distinguish that decision
-from unrelated malformed input, and pins the absence of the new parser from
-live/import/snapshot call sites. The separate COV2-05 ordinary versioned library
+from unrelated malformed input, and pins the absence of the new parser/preview from
+live/import and the actual authorized capture entry. The separate COV2-05 ordinary versioned library
 API remains available. These tests use synthetic buffers only, with no Session,
 exporter or model; no user-visible command or website behavior changes here.
+
+
+## Redacted in-memory coverage preview (COV2-10, unreleased)
+
+`CaptureSnapshotService::preview_redacted_coverage_v2(agent_kind, bytes, policy)`
+accepts caller-owned memory and returns `(RedactedBytes, serde_json::Value)`.
+It opens no source, runs no exporter or model, and writes no checkpoint, claim,
+artifact or cursor. The JSON envelope remains 1, with each turn's explicit
+coverage version, digest and safe projection. This library data API grants no
+source/capture authorization, native issuer or opaque-artifact capability.
+Production live/import activation is a separate COV2-11 change; this preview
+must not replace its authorized source boundary.
+
+For OpenCode, classification precedes state/proof erasure. Original session,
+message and part coordinates are checked before redaction; text equality only
+confirms the located part. Ordinary bytes and decoded visible reasoning are
+redacted before any v2 canonical encoding, digest or safe projection. Decoded
+JSON strings are also redacted before reserialization, so JSON escape spellings
+cannot reveal a secret during canonicalization. Additional matches outside the
+visible reasoning field conservatively make the result partial. Readable parts
+retain source order alongside text and tools; they do not settle a turn without
+the normal supported completion event. Unsupported siblings keep it partial.
+Unproved state/proof candidates supply no ordinary or typed plaintext: the
+preview consumes the separated ordinary projection and destroys the owning
+sealed candidate, native and partial-permit authority. Its only retained signal
+is a boolean that makes the result partial. Candidate absence is checked using a non-secret-shaped
+canary, independently of the redactor's matching rules.
+
+Source bytes, parse depth/nodes and visible-part count remain bounded. Original
+parse trees are dropped before the preprocessor's second bounded parse. The
+redactor retains its output/working-buffer limits; those limits are not a claim
+about total process RSS. Canonical/JSON output also has a checked byte budget,
+and the optional absolute deadline is checked between stages and turns. Errors
+are payload-free. `ProviderVisibleText` still owns an ordinary Rust String: its
+serialization barrier and hidden Debug do not wipe that String on drop. No
+stronger memory-erasure guarantee is added here. Existing Claude Code/Codex
+adapter preprocessing, ordinary bytes, v1 digest and safe projection are checked
+against their established pure-memory path. All these checks run without an
+OpenCode Session, exporter, account or model; account capture remains local to
+macOS and outside CI. No command, flag or website command behavior changes.

@@ -39,7 +39,7 @@ pub trait ReasoningSourcePreprocessor: Send + Sync {
     ) -> Result<PreparedReasoningSource, ReasoningFieldError>;
 }
 
-/// A separated ordinary buffer and a sealed, owning disposition. No raw
+/// A separated ordinary buffer and a sealed, owning disposition. No public raw
 /// accessor, serialization, cloning or content-bearing Debug is available.
 pub struct PreparedReasoningSource {
     ordinary: Vec<u8>,
@@ -96,6 +96,18 @@ impl OpenCodeOrdinaryPartialPermit {
 /// this boolean cannot construct a native proof or an ordinary permit.
 pub(super) fn prepared_source_is_ordinary_projection(source: &PreparedReasoningSource) -> bool {
     source.disposition.is_ordinary()
+}
+
+/// Consume only the separated ordinary projection for an untrusted preview.
+/// Dropping the owning carrier destroys all candidate/native/permit authority;
+/// the returned boolean can only make a preview partial, never authorize it.
+pub(super) fn discard_prepared_authority_for_coverage_preview(
+    mut source: PreparedReasoningSource,
+) -> (Vec<u8>, bool) {
+    let partial = !source.disposition.is_ordinary();
+    let ordinary = std::mem::take(&mut source.ordinary);
+    drop(source);
+    (ordinary, partial)
 }
 
 impl PreparedReasoningSource {
@@ -1999,6 +2011,8 @@ pub(crate) fn classify_provider_visible_reasoning(
 /// };
 /// ```
 #[derive(Clone, Eq, PartialEq)]
+// The existing String is not wiped on drop. The owning pipeline must not
+// infer memory erasure from its serialization gate or content-free Debug.
 pub struct ProviderVisibleText {
     inner: String,
 }

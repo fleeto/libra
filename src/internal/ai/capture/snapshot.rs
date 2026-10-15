@@ -770,10 +770,123 @@ fn is_durable_source_commitment(value: &str) -> bool {
     })
 }
 
+/// Pure in-memory preview, distinct from source/capture authorization.
+fn prepare_redacted_coverage_preview(
+    agent_kind: &str,
+    bytes: Vec<u8>,
+    policy: CaptureSnapshotPolicy,
+) -> Result<
+    crate::internal::ai::observed_agents::coverage::RedactedCoveragePreparation,
+    CaptureSnapshotPartialReason,
+> {
+    let mut bytes = Zeroizing::new(bytes);
+    if deadline_elapsed(policy) {
+        return Err(CaptureSnapshotPartialReason::DeadlineExceeded);
+    }
+    let raw_bytes =
+        u64::try_from(bytes.len()).map_err(|_| CaptureSnapshotPartialReason::SourceOversize)?;
+    if raw_bytes == 0 {
+        return Err(CaptureSnapshotPartialReason::SourceEmpty);
+    }
+    if raw_bytes > policy.max_bytes || raw_bytes > TRANSCRIPT_READ_HARD_CAP_BYTES {
+        return Err(CaptureSnapshotPartialReason::SourceOversize);
+    }
+    let limits = crate::internal::ai::observed_agents::coverage::CoverageRedactionLimits {
+        max_source_bytes: policy.max_bytes,
+        max_output_bytes: usize::try_from(capture_redacted_output_cap(raw_bytes))
+            .map_err(|_| CaptureSnapshotPartialReason::SourceOversize)?,
+        max_working_set_bytes: usize::try_from(capture_redaction_working_set_cap(raw_bytes))
+            .map_err(|_| CaptureSnapshotPartialReason::SourceOversize)?,
+        deadline: policy.deadline(),
+    };
+    let result = crate::internal::ai::observed_agents::coverage::prepare_coverage_preview(
+        agent_kind,
+        std::mem::take(&mut *bytes),
+        limits,
+    );
+    if deadline_elapsed(policy) {
+        return Err(CaptureSnapshotPartialReason::DeadlineExceeded);
+    }
+    result.map_err(reasoning_preparation_partial_reason)
+}
+
 /// The single raw-byte boundary for capture snapshots.
 pub struct CaptureSnapshotService;
 
 impl CaptureSnapshotService {
+    /// Prepare a bounded, redacted coverage preview from caller-owned memory.
+    ///
+    /// This pure data API grants no source/capture/native authority, reads no
+    /// file and writes no checkpoint. It returns only redacted bytes and safe
+    /// JSON (envelope 1, per-turn coverage 1/2); no unredacted typed carrier or
+    /// opaque artifact can escape. Existing live/import entry points continue
+    /// to use their legacy behavior until the separate production activation.
+    pub fn preview_redacted_coverage_v2(
+        agent_kind: &str,
+        bytes: Vec<u8>,
+        policy: CaptureSnapshotPolicy,
+    ) -> Result<(RedactedBytes, serde_json::Value), CaptureSnapshotPartialReason> {
+        use crate::internal::ai::observed_agents::coverage::{
+            Completeness, encode_coverage_turn, safe_turn_projection_for_schema,
+        };
+        let prepared = prepare_redacted_coverage_preview(agent_kind, bytes, policy)?;
+        let cap = usize::try_from(capture_redacted_output_cap(policy.max_bytes))
+            .map_err(|_| CaptureSnapshotPartialReason::SourceOversize)?;
+        let mut encoded_bytes =
+            crate::internal::ai::observed_agents::coverage::encode_bounded_json(
+                &prepared.report,
+                cap,
+            )
+            .map_err(reasoning_preparation_partial_reason)?
+            .len()
+            .checked_add(128)
+            .filter(|size| *size <= cap)
+            .ok_or(CaptureSnapshotPartialReason::SourceOversize)?;
+        let mut turns = Vec::with_capacity(prepared.turns.len());
+        for turn in &prepared.turns {
+            if deadline_elapsed(policy) {
+                return Err(CaptureSnapshotPartialReason::DeadlineExceeded);
+            }
+            // Both ordinary and typed-field redaction have already succeeded.
+            // The legacy-v1 projection is never used for typed Reasoning.
+            let encoded = encode_coverage_turn(turn)
+                .map_err(|_| CaptureSnapshotPartialReason::SourceReadError)?;
+            if encoded.canonical_bytes.len() > cap {
+                return Err(CaptureSnapshotPartialReason::SourceOversize);
+            }
+            let version = encoded.schema_version;
+            let digest = encoded.digest_hex;
+            drop(encoded.canonical_bytes);
+            let projection = safe_turn_projection_for_schema(version.as_i64(), agent_kind, turn)
+                .map_err(|_| CaptureSnapshotPartialReason::SourceReadError)?;
+            let row = serde_json::json!({"coverage_schema_version":version.as_i64(),
+                "digest":digest, "projection":projection});
+            let row_bytes =
+                crate::internal::ai::observed_agents::coverage::encode_bounded_json(&row, cap)
+                    .map_err(reasoning_preparation_partial_reason)?
+                    .len();
+            encoded_bytes = encoded_bytes
+                .checked_add(row_bytes)
+                .and_then(|size| size.checked_add(1))
+                .filter(|size| *size <= cap)
+                .ok_or(CaptureSnapshotPartialReason::SourceOversize)?;
+            turns.push(row);
+        }
+        if deadline_elapsed(policy) {
+            return Err(CaptureSnapshotPartialReason::DeadlineExceeded);
+        }
+        let partial = prepared.partial
+            || prepared
+                .turns
+                .iter()
+                .any(|turn| turn.completeness != Completeness::Complete);
+        Ok((
+            prepared.transcript,
+            serde_json::json!({"schema_version":1,"partial":partial,
+            "turns":turns,"redaction_report":prepared.report}),
+        ))
+    }
+
     /// Build extraction metadata over already-redacted parent/child snapshots
     /// without a deadline. Historical import retains this established
     /// in-process behavior; SessionEnd uses the helper-backed method below.
@@ -1362,6 +1475,162 @@ pub(crate) async fn verified_partial_key_fixture() -> (
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn cov2_preview_preserves_order_and_fails_closed_on_budget() {
+        let native = serde_json::json!({"info":{"id":"ses_order"},"messages":[
+            {"id":"u","type":"user","text":"go"},
+            {"id":"a","type":"assistant","content":[
+                {"id":"b","type":"text","text":"before"},
+                {"id":"r","type":"reasoning","text":"visible thought"},
+                {"id":"t","type":"tool","name":"read","state":{
+                    "status":"completed","input":{},"content":[{"type":"text","text":"ok"}]}},
+                {"id":"z","type":"text","text":"after"}]},
+            {"id":"i","type":"idle","outcome":"succeeded"}]});
+        let classic = serde_json::json!({"info":{"id":"ses_order"},"messages":[
+            {"info":{"id":"u","role":"user"},"parts":[{"id":"up","type":"text","text":"go"}]},
+            {"info":{"id":"a","role":"assistant"},"parts":[
+                {"id":"b","type":"text","text":"before"},
+                {"id":"r","type":"reasoning","text":"visible thought"},
+                {"id":"t","type":"tool","tool":"read","state":{
+                    "status":"completed","input":{},"output":"ok"}},
+                {"id":"z","type":"text","text":"after"}]}]});
+        for source in [native.clone(), classic] {
+            let raw = serde_json::to_vec(&source).expect("synthetic ordered export");
+            let (_, preview) = CaptureSnapshotService::preview_redacted_coverage_v2(
+                "opencode",
+                raw.clone(),
+                CaptureSnapshotPolicy::default(),
+            )
+            .expect("ordered pure-memory preview");
+            assert_eq!(preview["partial"], false);
+            assert_eq!(preview["turns"][0]["coverage_schema_version"], 2);
+            let records = preview["turns"][0]["projection"]["records"]
+                .as_array()
+                .expect("actual records");
+            let roles: Vec<_> = records
+                .iter()
+                .map(|row| row["type"].as_str().expect("record tag"))
+                .collect();
+            assert_eq!(
+                roles,
+                [
+                    "user",
+                    "assistant",
+                    "reasoning",
+                    "tool_call",
+                    "tool_result",
+                    "assistant"
+                ]
+            );
+            assert_eq!(records[1]["text"], "before");
+            assert_eq!(records[2]["text"], "visible thought");
+            assert_eq!(records[5]["text"], "after");
+            assert!(matches!(
+                CaptureSnapshotService::preview_redacted_coverage_v2(
+                    "opencode",
+                    raw.clone(),
+                    CaptureSnapshotPolicy::with_max_bytes(None, raw.len() as u64 - 1),
+                ),
+                Err(CaptureSnapshotPartialReason::SourceOversize)
+            ));
+            assert!(matches!(
+                CaptureSnapshotService::preview_redacted_coverage_v2(
+                    "opencode",
+                    raw,
+                    CaptureSnapshotPolicy::with_deadline(Some(
+                        Instant::now() - Duration::from_secs(1)
+                    )),
+                ),
+                Err(CaptureSnapshotPartialReason::DeadlineExceeded)
+            ));
+        }
+        let mut unsettled = native;
+        unsettled["messages"]
+            .as_array_mut()
+            .expect("messages")
+            .pop();
+        let (_, preview) = CaptureSnapshotService::preview_redacted_coverage_v2(
+            "opencode",
+            serde_json::to_vec(&unsettled).expect("unsettled export"),
+            CaptureSnapshotPolicy::default(),
+        )
+        .expect("unsettled pure-memory preview");
+        assert_eq!(
+            preview["partial"], true,
+            "visible thought cannot fabricate idle"
+        );
+        assert_eq!(
+            preview["turns"][0]["projection"]["completeness"],
+            "incomplete"
+        );
+    }
+
+    #[test]
+    fn cov2_visible_text_redacted_before_digest_and_projection() {
+        use sha2::{Digest, Sha256};
+
+        use crate::internal::ai::observed_agents::coverage::{
+            encode_coverage_turn, safe_turn_projection_for_schema,
+        };
+        const KEY: &str = "sk-ant-EXAMPLE0000000000000000";
+        const EXPECTED: &str = r#"[{"role":"user","text":"hi"},{"provider":"opencode","role":"reasoning","source_kind":"reasoning","text":"before <REDACTED:anthropic-api-key> after"},{"role":"assistant","text":"hello"}]"#;
+        let source =
+            serde_json::to_string(&serde_json::json!({"info":{"id":"ses_cov10"},"messages":[
+            {"id":"u","type":"user","text":"hi"},
+            {"id":"a","type":"assistant","content":[
+                {"id":"p","type":"reasoning","text":format!("before {KEY} after")},
+                {"id":"t","type":"text","text":"hello"}]},
+            {"id":"i","type":"idle","outcome":"succeeded"}]}))
+            .expect("synthetic export");
+        for raw in [source.clone(), source.replace("sk-ant-", "sk-\\u0061nt-")] {
+            let prepared = prepare_redacted_coverage_preview(
+                "opencode",
+                raw.clone().into_bytes(),
+                CaptureSnapshotPolicy::default(),
+            )
+            .expect("redacted memory preparation");
+            assert!(!prepared.partial);
+            assert_eq!(prepared.turns.len(), 1);
+            assert_eq!(
+                prepared.turns[0].completeness,
+                crate::internal::ai::observed_agents::Completeness::Complete
+            );
+            let encoded = encode_coverage_turn(&prepared.turns[0]).expect("redacted typed encoder");
+            assert_eq!(encoded.schema_version.as_i64(), 2);
+            assert_eq!(encoded.canonical_bytes, EXPECTED.as_bytes());
+            assert_eq!(
+                encoded.digest_hex,
+                hex::encode(Sha256::digest(EXPECTED.as_bytes()))
+            );
+            let projection = safe_turn_projection_for_schema(2, "opencode", &prepared.turns[0])
+                .expect("safe v2 projection");
+            assert!(!projection.to_string().contains(KEY));
+            let ordinary: serde_json::Value = serde_json::from_slice(prepared.transcript.bytes())
+                .expect("ordinary source still valid JSON");
+            assert_eq!(
+                ordinary["messages"][1]["content"][0]["text"],
+                "before <REDACTED:anthropic-api-key> after"
+            );
+            assert!(!ordinary.to_string().contains(KEY));
+            assert!(prepared.report.match_count() >= 1);
+            let (bytes, preview) = CaptureSnapshotService::preview_redacted_coverage_v2(
+                "opencode",
+                raw.into_bytes(),
+                CaptureSnapshotPolicy::default(),
+            )
+            .expect("public safe preview");
+            assert_eq!(preview["schema_version"], 1);
+            assert_eq!(preview["partial"], false);
+            assert_eq!(preview["turns"][0]["coverage_schema_version"], 2);
+            assert_eq!(
+                preview["turns"][0]["digest"],
+                hex::encode(Sha256::digest(EXPECTED.as_bytes()))
+            );
+            assert_eq!(bytes.bytes(), prepared.transcript.bytes());
+        }
+    }
+
     use std::{
         path::{Path, PathBuf},
         time::Duration,

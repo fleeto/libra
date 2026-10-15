@@ -2,6 +2,43 @@
 
 管理 Claude Code、Codex 与 OpenCode 的外部代理捕获。
 
+## macOS 上的 OpenCode 普通采集（Libra 0.30.49）
+
+普通自动采集使用官方 OpenCode **2.0.29**。下文冻结的 2.0.26 词汇和私有 native
+producer 章节属于独立的历史/显式 native 路线，不是普通采集的前置。
+
+在要采集的仓库中核对版本，然后准备本仓库的 exporter trust 和 observer：
+
+```bash
+libra --version
+opencode --version
+libra agent rpc trust --dir /absolute/directory/containing/opencode
+libra agent rpc trust opencode
+libra agent add opencode
+libra --json agent list --schema-version 2
+libra agent doctor
+```
+
+把示例目录替换为已核验可执行文件所在的真实目录。当前 CLI 分开登记目录和信任 binary；
+不能把 binary 文件名当作 `opencode` slug，也不能把 `--dir` 与该 slug 合并。
+安装或刷新 observer 后，从这个仓库启动 OpenCode；`--pure` / `OPENCODE_PURE=1`
+会禁用采集插件。采集一轮后检查并导出已存 checkpoint：
+
+```bash
+libra agent session list
+libra agent checkpoint list
+libra agent checkpoint show <checkpoint-id>
+libra agent checkpoint export <checkpoint-id> -o capture.json
+```
+
+已授权源包含不支持的 reasoning state 时，可以将安全普通副本存为 `Unproven` / `Partial`，
+保留 prompt、model 和 token 投影，丢弃不支持的 reasoning state 及关联 text/time。
+这不授予 native artifact、Complete coverage claim 或 native ACK；原始任意 `originProof`
+或 sealed candidate 仍不能走此 fallback。含这类 state 的历史 import 仍报
+`LBR-AGENT-020`；普通采集不启用该 import 或 durable partial replay。真实 native
+`signature`、`redactedData`、`reasoningEncryptedContent` 的来源与归档是独立门，
+Source A 仍为 UNPROVEN。OpenCode/账号/模型检查只在 macOS 本机执行，不进 CI。
+
 ## 概要
 
 ```bash
@@ -770,9 +807,9 @@ JSON 保留 `slug` 和 `removed`（后者只表示是否移除了 exporter trust
 自动 provenance 重验发现 binary 不可读/漂移或 trusted directory 被撤回时，仍只移除 binary trust，暂停 native admission，registry 保持原字节。显式重新 trust 同一已审 build 可恢复从未被 native 吊销的 active issuer；verify-only/revoked 绝不复活。重新登记已有 issuer 仍拒绝，必须准备新独立 key。轮换/撤销不回写既存 receipt、安装 descriptor 或 immutable artifact；成功不代表 native 字段已证明，未知来源继续 partial。
 
 
-### 当前私有 OpenCode 验收基线（NPR-18）
+### 冻结的历史私有 OpenCode 验收基线（NPR-18）
 
-macOS arm64 的唯一当前验收构建是 `2.0.26-libra-native.1`，build
+NPR-18 历史 macOS arm64 harness 唯一允许的验收构建是 `2.0.26-libra-native.1`，build
 `bac21cc4027896b8d1836133c347d20f`，SHA-256
 `547c36eb928da163ef61d019bad669860d519f2da0b67737c9a3920e831c9196`，
 大小 187635570 字节。官方基底是 OpenCode `2.0.26` commit
@@ -905,9 +942,9 @@ public reason/metadata enum value；本构建的 checkpoint/export 读端读取�
 旧二进制兼容必须另外实测读回，不能仅由 source 形状推断。
 V2 import 对 partial projection 的 zero bytes/zero redaction metrics 规则不放宽。
 
-通过 focused 检查和源码评审后提供的本机临时构建是 debug build，不是正式
-0.30.49 release。含 unsupported reasoning state 的历史 OpenCode import
-仍以 `LBR-AGENT-020` 拒绝，修复已延期。其它正式发布门继续待验。
+正式 0.30.49 已包含普通 live 修复：它可以按上述封闭规则保存安全的普通副本。
+正式发布不证明 native 来源，也不完成后续 COV 家族门。含 unsupported reasoning state 的历史 OpenCode import
+仍以 `LBR-AGENT-020` 拒绝，修复已延期。
 OpenCode Session/账号/模型检查只在 macOS 本机运行，不进 CI；synthetic 不证明
 native 来源。
 

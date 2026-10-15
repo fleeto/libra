@@ -45,6 +45,12 @@ accepts only entries whose `content_type` is `directory` or `file`. Names with
 fail-closed, and the server-provided item `path` is never used as navigation
 authority.
 
+> **Revision warning:** `--ref` selects the revision for browsing and reads only.
+> Current interactive create/delete/move/rename actions still target the server default
+> revision, not the selected commit/tag. Treat `--ref` browsing as read-only and do not
+> confirm interactive writes there; the behavior fix is deferred. Non-interactive write
+> flags combined with `--ref` remain rejected before any request.
+
 ### Interactive mode (default)
 
 Interactive mode requires **stdin and stdout to be terminals**. If either is

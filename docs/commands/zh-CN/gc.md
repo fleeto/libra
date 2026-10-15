@@ -1,6 +1,10 @@
 # `libra gc`
 
-清理不可达 loose object，并移除陈旧的 pack 辅助文件。
+保留的历史设计：清理不可达 loose object，并移除陈旧的 pack 辅助文件。
+
+> 状态：未发布。`libra gc` 未注册到当前公开 CLI，运行会返回
+> `LBR-CLI-001`。当前入口是 `libra maintenance run --dry-run --task gc`；
+> 去掉 `--dry-run` 才会执行实际回收。下文只记录历史设计，不是可执行命令契约。
 
 ## 概要
 

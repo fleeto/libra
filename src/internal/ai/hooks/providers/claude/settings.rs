@@ -440,7 +440,7 @@ fn unquote_single_quoted_command_path(executable: &str) -> Option<String> {
     #[cfg(windows)]
     {
         let _ = executable;
-        return None;
+        None
     }
 
     #[cfg(not(windows))]

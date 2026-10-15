@@ -1221,11 +1221,13 @@ fn decode_checkpoint_object_path(encoded: &str) -> Result<PathBuf> {
     #[cfg(windows)]
     {
         use std::{ffi::OsString, os::windows::ffi::OsStringExt};
-        if bytes.len() % 2 != 0 {
+        if !bytes.len().is_multiple_of(2) {
             bail!("checkpoint object store path has invalid Windows UTF-16 bytes");
         }
         let units: Vec<_> = bytes
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
             .collect();
         Ok(PathBuf::from(OsString::from_wide(&units)))

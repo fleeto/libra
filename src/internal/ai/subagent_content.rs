@@ -630,11 +630,13 @@ fn decode_helper_path(encoded: &str) -> Result<PathBuf> {
     let bytes = STANDARD
         .decode(encoded)
         .context("decode Windows subagent discovery path")?;
-    if bytes.len() % 2 != 0 {
+    if !bytes.len().is_multiple_of(2) {
         bail!("Windows subagent discovery path has invalid UTF-16 bytes");
     }
     let units: Vec<_> = bytes
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| u16::from_le_bytes([c[0], c[1]]))
         .collect();
     Ok(PathBuf::from(OsString::from_wide(&units)))

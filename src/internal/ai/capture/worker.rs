@@ -119,7 +119,7 @@ pub(crate) fn try_lock(storage: &Path) -> io::Result<Option<File>> {
                 "capture recovery lock has unexpected hard links",
             ));
         }
-        return Ok(windows_fs::try_lock(&file)?.then_some(file));
+        Ok(windows_fs::try_lock(&file)?.then_some(file))
     }
     #[cfg(not(windows))]
     {

@@ -637,7 +637,7 @@ fn read_windows_symlink_target(file: &fs::File) -> io::Result<Vec<u8>> {
         range(substitute_offset, substitute_len)?
     };
     let mut wide = Vec::with_capacity(target_bytes.len() / 2);
-    for chunk in target_bytes.chunks_exact(2) {
+    for chunk in target_bytes.as_chunks::<2>().0 {
         wide.push(u16::from_le_bytes([chunk[0], chunk[1]]));
     }
     if target_bytes.len() % 2 != 0 {

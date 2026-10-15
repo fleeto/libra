@@ -2232,10 +2232,10 @@ async fn run_windows_opencode_export_until(
     )
     .await
     .context("Windows OpenCode trust check exceeded the capture deadline")??;
-    if let Some(requested) = requested_binary {
-        if requested.canonicalize()? != provenance.canonical_path {
-            bail!("requested Windows OpenCode exporter does not match the trusted binary");
-        }
+    if let Some(requested) = requested_binary
+        && requested.canonicalize()? != provenance.canonical_path
+    {
+        bail!("requested Windows OpenCode exporter does not match the trusted binary");
     }
     let parent = provenance
         .canonical_path

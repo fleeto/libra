@@ -279,7 +279,7 @@ cargo test --test agent_local_capture_smoke_test \
   local_capture_smoke_opencode_macos -- --ignored --exact --test-threads=1
 ```
 
-受控 OpenCode hook 采集（含拒绝写入负例）与混合重放契约可在本机另以 `cargo test --test agent_lifecycle_event_test opencode_ -- --ignored --test-threads=1`、`cargo test --test agent_lifecycle_event_test hook_public_contract_byte_compat_matrix -- --ignored --exact --test-threads=1`、`cargo test --test agent_hook_crash_test capture_coordinator_native_replay_matrix -- --ignored --exact --test-threads=1` 验证。OpenCode import CLI 的前置拒绝门本机运行：`cargo test --test agent_import_test agent_import_confirmation_precedes_opencode_export -- --ignored --exact`。lib 内经合成 exporter 写入 Session/Checkpoint 的 `opencode_extraction_failure_continues_checkpoint`、`export_stage_releases_runner_lease_on_every_exit` 和三 provider `live_checkpoint_metadata_shape_is_stable` 也须本机显式 `--ignored` 运行；其独立入口要求先 `cargo build --bin libra`，避免把缺辅助二进制的失败误记为功能失败。Linux bridge 内容链由用户后验：`cargo test --features test-live-agent --test agent_opencode_bridge_test -- --ignored --nocapture --test-threads=1`；若缺可信可用 bwrap 而打印 `skipped`，只能记 UNRUN，不能记 PASS。CI 仍运行不建立 OpenCode Session 的解析、密码学、沙箱单元及静态契约守卫；只写 frame log 的插件模板测试不作 Session/Checkpoint 验收。
+受控 OpenCode hook 采集（含拒绝写入负例）与混合重放契约可在本机另以 `cargo test --test agent_lifecycle_event_test opencode_ -- --ignored --test-threads=1`、`cargo test --test agent_lifecycle_event_test hook_public_contract_byte_compat_matrix -- --ignored --exact --test-threads=1`、`cargo test --test agent_hook_crash_test capture_coordinator_native_replay_matrix -- --ignored --exact --test-threads=1` 验证。OpenCode import CLI 的前置拒绝门本机运行：`cargo test --test agent_import_test agent_import_confirmation_precedes_opencode_export -- --ignored --exact`。lib 内经合成 exporter 验证 Session/Checkpoint 契约的 `opencode_extraction_no_consumer_keeps_pending_without_checkpoint`（无 ready consumer 时 zero completed checkpoint、receipt 保持 pending）、`export_stage_releases_runner_lease_on_every_exit` 和三 provider `live_checkpoint_metadata_shape_is_stable` 也须本机显式 `--ignored` 运行；其独立入口要求先 `cargo build --bin libra`，避免把缺辅助二进制的失败误记为功能失败。Linux bridge 内容链由用户后验：`cargo test --features test-live-agent --test agent_opencode_bridge_test -- --ignored --nocapture --test-threads=1`；若缺可信可用 bwrap 而打印 `skipped`，只能记 UNRUN，不能记 PASS。CI 仍运行不建立 OpenCode Session 的解析、密码学、沙箱单元及静态契约守卫；只写 frame log 的插件模板测试不作 Session/Checkpoint 验收。
 
 2026-10-13 在 `5cafe322` 基线上，显式本机运行 `opencode_extraction_failure_continues_checkpoint` 仍为 **FAIL**：报 `reasoning source preparation has no ready capture consumer; keep the receipt pending and retry after the consumer is available`；该用例待后续卡复核，不计 OpenCode 本机全套验收通过。默认 CI 中保留的 `opencode_rejected_runner_sources_release_export_leases` 仅验证 `agent_export_job` 租约拒绝，不调用 OpenCode CLI/exporter，也不写 Session/Checkpoint。
 
@@ -789,3 +789,22 @@ The inline serial test is outside SERIAL_CLASSIFY's tests/**/*.rs input; it
 uses the existing adjacent HTTP tests' keys. No registry or nextest configuration
 change is needed. Actual source/local/full/review/release acceptance must be
 recorded separately in plan-20260901.md.
+
+### macOS 受控 exporter Session 验收（COV2-12）
+
+以下入口只在 macOS 操作者本机手工运行，使用隔离仓库、HOME/XDG、真实 exporter 信任登记和现有 Required Seatbelt server/client 路径；不需要真实 OpenCode 账号、模型或密钥。能力探测、可信 exporter 或隔离 store 前置缺失必须使该手工门失败，不允许提前返回并显示成功。这四条不适用通用 live-account wave 的“未配置 key 则 skipped”规则。
+
+```bash
+source .env.test
+source .env.live-test
+cargo build --bin libra
+cargo test --features test-live-agent --test agent_opencode_bridge_test cov2_macos_fake_exporter_live_session_capture -- --ignored --exact --nocapture --test-threads=1
+cargo test --features test-live-agent --test agent_opencode_bridge_test cov2_macos_fake_exporter_import_session_capture -- --ignored --exact --nocapture --test-threads=1
+cargo test --features test-live-agent --test agent_opencode_bridge_test cov2_macos_failed_export_session_zero_write -- --ignored --exact --nocapture --test-threads=1
+cargo build --bin libra
+cargo test --lib internal::ai::capture::live_pipeline::tests::export_runner_lease::end_to_end::opencode_extraction_no_consumer_keeps_pending_without_checkpoint -- --ignored --exact --nocapture --test-threads=1
+```
+
+每条必须实际选中1例、1PASS、0ignored；不能用零测试或平台排除替代。live/import 实际持久化语义重建的 canonical bytes 及实际 claim digest 必须与独立冻结的 COV2-11 gold 对拍（依赖摘要抗碰撞，不声称读出私有 runtime canonical buffer），重复调用不得新增 checkpoint/claim；当前 fixture 明确 live Complete/import Incomplete，保留 active import Session/terminal 遗留，两侧 canonical digest 仍须一致；失败负例须证明经过预期 exporter 路径且没有完成 checkpoint。无 consumer fixture 保留原始 PARTIAL 和 broken-input 两次投递，直接读取真实 DB 证明 zero completed checkpoint 与 pending receipt；不改变生产 consumer/issuer/native 规则。
+
+`opencode_extraction_failure_continues_checkpoint` 的旧失败记录保持历史：在 `95a4099` 原样运行仍实际0PASS/1FAIL，原因与上方 `5cafe322` 一致；修正后的名称表达原已批准的无 consumer 契约。COV2-12 的三个新增 Session 门和修正 fixture 不替代 COV2-16/17 对另外21个旧 body 的本机审计。以上均是受控 synthetic/exporter 测试，不证明真实 `signature`、`redactedData`、`reasoningEncryptedContent` 或 Source A。所有这些 Session/Checkpoint 集成入口仍 excluded from CI，保留纯解析、密码学、sandbox 单元和静态守卫。

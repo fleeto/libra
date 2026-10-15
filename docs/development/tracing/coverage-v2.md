@@ -497,3 +497,11 @@ unverified reasoning source cannot turn this failure into complete coverage.
 These changes add no command flags and are not included in the installed
 0.30.49 release. OpenCode Session/exporter/model acceptance runs locally on
 macOS; it is not a CI integration test.
+
+## macOS local Session acceptance (COV2-12, unreleased)
+
+Controlled-exporter Session acceptance is an operator-local, ignored gate under the existing `test-live-agent` target feature. The macOS harness uses the existing Required Seatbelt server/client protocol, a canonical isolated repository/store, and registered exporter provenance. A missing containment or store prerequisite fails the manual test; it must not return success before its assertions. The live and import gates compare persisted semantic canonical bytes and actual claim digests against the independently pinned COV2-11 gold, then check repeated-delivery idempotence. This does not expose the private runtime canonical buffer; the binding relies on digest collision resistance. Native idle closes the live turn, while the current import Session remains active: the fixture expects live Complete and import Incomplete without changing the canonical digest or claiming to fix deferred import-terminal handling. The failed-export gate checks its intended failure path and zero completed writes.
+
+The scripted extraction fixture is named `opencode_extraction_no_consumer_keeps_pending_without_checkpoint`: both its original PARTIAL input and broken-input delivery must leave zero completed checkpoints and pending receipts in the real temporary database. The old `opencode_extraction_failure_continues_checkpoint` failure remains historical evidence; it does not authorize a consumer-policy change. COV2-12 covers its three new macOS Session cases and this repaired fixture. COV2-16/17 separately audit the other 21 inherited test bodies.
+
+These controlled fixtures do not prove native Source A or the three native fields. They require neither an account nor a model call, and Session/Checkpoint integration is not selected by CI. Pure parser, cryptographic, sandbox-unit and static guards remain eligible for CI. The manual commands and exact-selector requirements are in `docs/development/integration/integration-test-plan.md`. No public command, flag, schema, release version or installed OpenCode changes in this card.

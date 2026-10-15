@@ -256,7 +256,7 @@ fn opencode_session_capture_requires_local_opt_in() {
         .expect("OpenCode import preflight has test attribute");
     assert!(import[import_test_attribute..import_at].contains(MANUAL));
     for name in [
-        "opencode_extraction_failure_continues_checkpoint",
+        "opencode_extraction_no_consumer_keeps_pending_without_checkpoint",
         "export_stage_releases_runner_lease_on_every_exit",
     ] {
         let signature = format!("async fn {name}(");

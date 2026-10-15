@@ -1,5 +1,8 @@
 # OpenCode coverage schema-v2 前置实施计划（2026-10-13）
 
+> **COV2-12 本机验收闭合、源码交付门待闭合（2026-10-16）：** 原6VER与最终14门、107reader/fmtstrict及soleClaude CODE已实际通过。COVsource当前20/26，signed main/archive/freshremote门实际全闭合后才21/26=80.77%；formal0/26继承家族C/D，父formal59/71不增。下一卡COV2-15。以下旧状态为各自日期历史。
+
+
 > **COV2-11 本机验收闭合、最终交付门待闭合（2026-10-16）：** 原8AC/6VER、最终相关QA、soleClaudeCODE R3 PASS及新T1 full实际通过。source当前19/26；signed main/cf与最终archive/部署门全部实际闭合才20/26=76.92%，formal0/26继承家族C/D。下一卡COV2-12，父formal59/71不变。以下旧状态为各自日期历史。
 
 
@@ -1446,7 +1449,7 @@ No new AC/VER/card/target/serial/global teststate/publicAPI, no newowner beyond 
 
 **Task type:** implementation
 
-**Lifecycle / Acceptance:** pending / 空
+**Lifecycle / Acceptance:** in-progress / locally-accepted
 
 **Description:** macOS trusted fake exporter integration, ignored Session gates and legacy extraction repair。本卡的旧 fixture 修复只调整此 Session 入口的既有 ignored 断言/预检，不能改变生产授权或把独立行为错误塞入此卡；恢复和粒度见下方 Granularity；不得以 synthetic/native 互换验收。
 
@@ -1456,25 +1459,25 @@ No new AC/VER/card/target/serial/global teststate/publicAPI, no newowner beyond 
 
 **Acceptance criteria:**
 
-- [ ] AC1 existing OpenCode Session capture E2Es are ignored in ordinary cargo/Nextest
-- [ ] AC2 CI does not explicitly select those ignored cases
-- [ ] AC3 macOS fake-exporter live Session capture produces a v2 claim
-- [ ] AC4 macOS fake-exporter Session import/replay matches its live canonical bytes
-- [ ] AC5 fail-closed Session negatives run only as ignored macOS local tests
-- [ ] AC6 the existing ignored no-consumer extraction scenario writes no completed checkpoint
-- [ ] AC7 a missing macOS containment prerequisite fails its manual Session test instead of returning success
-- [ ] AC8 the existing ignored no-consumer extraction scenario retains its pending receipt.
+- [x] AC1 existing OpenCode Session capture E2Es are ignored in ordinary cargo/Nextest
+- [x] AC2 CI does not explicitly select those ignored cases
+- [x] AC3 macOS fake-exporter live Session capture produces a v2 claim
+- [x] AC4 macOS fake-exporter Session import/replay matches its live canonical bytes
+- [x] AC5 fail-closed Session negatives run only as ignored macOS local tests
+- [x] AC6 the existing ignored no-consumer extraction scenario writes no completed checkpoint
+- [x] AC7 a missing macOS containment prerequisite fails its manual Session test instead of returning success
+- [x] AC8 the existing ignored no-consumer extraction scenario retains its pending receipt.
 
 **Verification:**
 
-- [ ] VER1→AC1/2: `source .env.test && cargo test --test compat_agent_architecture_guard cov2_opencode_session_e2e_is_manual_only -- --exact` (1/1; inventory all existing/new Session cases and workflow selectors; `.github/workflows/base.yml` 的 `run_gate` 对八个 Linux sandbox unit selectors 都用 `--include-ignored`：`runner_controls_preserved`、`trusted_bwrap_preflight`、`bwrap_argv_equivalent`、`trusted_bwrap_rejects_user_writable`、`backend_missing_degrades_metadata_only`、`trusted_bwrap_exe_channel_used`、`opencode_export_sandboxed_outer_cancel_contains_setsid_writer`、`trusted_export_retry_recovers_a_transient_sandbox_failure`。逐名白名单只允许这些不产生 OpenCode Session/Checkpoint 的 Linux sandbox unit gates；其中 `trusted_bwrap_preflight` 和 `opencode_export_sandboxed_outer_cancel_contains_setsid_writer` 是 ignored，`runner_controls_preserved` 不是。任何新增或显式选择 `agent_opencode_bridge_test`、`cov2_*` 及其它 OpenCode Session/Checkpoint E2E 的 CI 路径均须使静态守卫失败，不以泛化的 `--include-ignored` 规则豁免)。
-- [ ] VER2→AC3/7: **macOS manual** `source .env.test && cargo test --features test-live-agent --test agent_opencode_bridge_test cov2_macos_fake_exporter_live_session_capture -- --ignored --exact --nocapture --test-threads=1` (1/1).
-- [ ] VER3→AC4/7: **macOS manual** `source .env.test && cargo test --features test-live-agent --test agent_opencode_bridge_test cov2_macos_fake_exporter_import_session_capture -- --ignored --exact --nocapture --test-threads=1` (1/1; assert the independently pinned COV2-11 digest parity too).
-- [ ] VER4→AC5/7: **macOS manual** `source .env.test && cargo test --features test-live-agent --test agent_opencode_bridge_test cov2_macos_failed_export_session_zero_write -- --ignored --exact --nocapture --test-threads=1` (1/1; actual Session fail-closed negative, no CI fallback).
-- [ ] VER5→AC7: `source .env.test && cargo test --test compat_agent_architecture_guard cov2_manual_session_tests_cannot_silently_skip -- --exact` (1/1; static guard on all new and pre-existing ignored Session test bodies, including the legacy lib case, and the `test-live-agent` feature gate).
-- [ ] VER6→AC6/7/8: **macOS manual preflight and final gate** `source .env.test && source .env.live-test && cargo test --lib internal::ai::capture::live_pipeline::tests::export_runner_lease::end_to_end::opencode_extraction_failure_continues_checkpoint -- --ignored --exact --nocapture --test-threads=1` (final 1/1 PASS required under the current name; prior exit 101 on signed main `5cafe322` is documented in `/private/tmp/libra-opencode-ci-handoff-20261013/local-opencode-extraction-fail.log`). First rerun after COV2-11 to determine the actual sealed disposition and record it without private payloads. `live_checkpoint.rs:973-987` rejects `!has_capture_consumer()`, and `reasoning.rs:126-129` currently admits only Ordinary/NativeProven; therefore for an Unmapped no-consumer fixture, update the ignored test to assert pending receipt and zero checkpoint rather than relax production authorization. If COV2-11 establishes a ready v2 consumer for this exact fixture, stop and revise AC6/8, the selector, and G-03 before implementation; then preserve and prove the continuation assertion under the revised source-qualified card. If the test must be renamed to describe the corrected no-consumer contract, update `live_pipeline_tests.rs`, `tests/compat/live_compat_workflow.rs`, `tests/INDEX.md`, `integration-test-plan.md` and this exact VER6 selector in the same card before acceptance; the final renamed command must run 1/1, and the old failing scenario must not be deleted. COV2-12 owns only the test body in `live_pipeline_tests.rs:5553-5630`; `live_checkpoint.rs:366-369,973-987` is read-only policy. If an actual production consumer-policy defect is proven, first create a separately reviewed FIX card with exact write set before editing; no 0-test/skip counts as PASS. Rerun affected focused/full gates and Claude review on final bytes. The current positive bridge harness requires Linux `bwrap` and skips macOS; VER2/3 require a new trusted **macOS Required Seatbelt** fake-exporter path through the actual local Session hook/import, never a production trust relaxation. A real native `signature` positive remains OG-27's separate gate.
+- [x] VER1→AC1/2: `source .env.test && cargo test --test compat_agent_architecture_guard cov2_opencode_session_e2e_is_manual_only -- --exact` (1/1; inventory all existing/new Session cases and workflow selectors; `.github/workflows/base.yml` 的 `run_gate` 对八个 Linux sandbox unit selectors 都用 `--include-ignored`：`runner_controls_preserved`、`trusted_bwrap_preflight`、`bwrap_argv_equivalent`、`trusted_bwrap_rejects_user_writable`、`backend_missing_degrades_metadata_only`、`trusted_bwrap_exe_channel_used`、`opencode_export_sandboxed_outer_cancel_contains_setsid_writer`、`trusted_export_retry_recovers_a_transient_sandbox_failure`。逐名白名单只允许这些不产生 OpenCode Session/Checkpoint 的 Linux sandbox unit gates；其中 `trusted_bwrap_preflight` 和 `opencode_export_sandboxed_outer_cancel_contains_setsid_writer` 是 ignored，`runner_controls_preserved` 不是。任何新增或显式选择 `agent_opencode_bridge_test`、`cov2_*` 及其它 OpenCode Session/Checkpoint E2E 的 CI 路径均须使静态守卫失败，不以泛化的 `--include-ignored` 规则豁免)。
+- [x] VER2→AC3/7: **macOS manual** `source .env.test && cargo test --features test-live-agent --test agent_opencode_bridge_test cov2_macos_fake_exporter_live_session_capture -- --ignored --exact --nocapture --test-threads=1` (1/1).
+- [x] VER3→AC4/7: **macOS manual** `source .env.test && cargo test --features test-live-agent --test agent_opencode_bridge_test cov2_macos_fake_exporter_import_session_capture -- --ignored --exact --nocapture --test-threads=1` (1/1; assert the independently pinned COV2-11 digest parity too).
+- [x] VER4→AC5/7: **macOS manual** `source .env.test && cargo test --features test-live-agent --test agent_opencode_bridge_test cov2_macos_failed_export_session_zero_write -- --ignored --exact --nocapture --test-threads=1` (1/1; actual Session fail-closed negative, no CI fallback).
+- [x] VER5→AC7: `source .env.test && cargo test --test compat_agent_architecture_guard cov2_manual_session_tests_cannot_silently_skip -- --exact` (1/1; static guard on all new and pre-existing ignored Session test bodies, including the legacy lib case, and the `test-live-agent` feature gate).
+- [x] VER6→AC6/7/8: **macOS manual preflight and final gate** `source .env.test && source .env.live-test && cargo test --lib internal::ai::capture::live_pipeline::tests::export_runner_lease::end_to_end::opencode_extraction_no_consumer_keeps_pending_without_checkpoint -- --ignored --exact --nocapture --test-threads=1` (final 1/1 PASS required under the corrected no-consumer name; original name `opencode_extraction_failure_continues_checkpoint` preflight actual0/1 failed on signed `95a4099`, raw `4b4c2721dff5595ea16fcb780b4b2ae45848609e4c301e74ae2522dff950c9ea`; prior exit 101 on signed main `5cafe322` is documented in `/private/tmp/libra-opencode-ci-handoff-20261013/local-opencode-extraction-fail.log`). First rerun after COV2-11 to determine the actual sealed disposition and record it without private payloads. `live_checkpoint.rs:973-987` rejects `!has_capture_consumer()`, and `reasoning.rs:126-129` currently admits only Ordinary/NativeProven; therefore for an Unmapped no-consumer fixture, update the ignored test to assert pending receipt and zero checkpoint rather than relax production authorization. If COV2-11 establishes a ready v2 consumer for this exact fixture, stop and revise AC6/8, the selector, and G-03 before implementation; then preserve and prove the continuation assertion under the revised source-qualified card. If the test must be renamed to describe the corrected no-consumer contract, update `live_pipeline_tests.rs`, `tests/compat/live_compat_workflow.rs`, `tests/INDEX.md`, `integration-test-plan.md` and this exact VER6 selector in the same card before acceptance; the final renamed command must run 1/1, and the old failing scenario must not be deleted. COV2-12 owns only the test body in `live_pipeline_tests.rs:5553-5630`; `live_checkpoint.rs:366-369,973-987` is read-only policy. If an actual production consumer-policy defect is proven, first create a separately reviewed FIX card with exact write set before editing; no 0-test/skip counts as PASS. Rerun affected focused/full gates and Claude review on final bytes. The current positive bridge harness requires Linux `bwrap` and skips macOS; VER2/3 require a new trusted **macOS Required Seatbelt** fake-exporter path through the actual local Session hook/import, never a production trust relaxation. A real native `signature` positive remains OG-27's separate gate.
 
-**Full-suite trigger:** family child 不自行发布；按 ER-13 对最终改动重新判定 T-1/T-4/T-6。若命中 shared single-source helper、测试基建或 focused 信号不足，则在本卡 A/B 阶段运行双 env 全量 Nextest；无论是否命中，COV2-REL-01 首次 T-2 均须在最终 bumped 实现树上重跑；后续仅上游纯 patch 顺延按该卡逐路径同一性规则复用。
+**Full-suite trigger:** none — 最终只有局部单target fixture、四测试文件与文档，生产全同前驱；无T1/T2/T3/T4/T5/T6触发。原及中间fixture失败已精确归因且最终相关门全绿。本卡不新增full；COV2-REL-01首次T2仍在最终bumped树重跑双env全量。
 
 **Dependencies:** COV2-11；消费前驱实际最终 A/B、适用 focused/full、fmt/strict、单 Claude PASS 与 signed+DCO main 的 source-qualified 文件 SHA/mode；不以其尚待 C/D 的 `locally-accepted` 冒称 complete。
 
@@ -1507,6 +1510,39 @@ No new AC/VER/card/target/serial/global teststate/publicAPI, no newowner beyond 
 **C/D coverage from:** COV2-REL-01；发布点的 exact-source C/D 绿后才能 `done/complete`。
 
 **Granularity:** `type=implementation; axis=macOS 本地 Session 入口与既有 fixture 修复; recovery=forward-only; complete=yes; self-contained=yes; AC=8/8; VER=6/8; landing=1; prod-files=1; scope=M; deps=COV2-11; writeset=串行于前驱; release=family child; split-from=COV2-06; exception=N/A`
+
+
+
+### COV2-12 本机 A/B 验收闭合，最终源码交付待闭合（2026-10-16）
+
+前驱实际signed main95a4099，原8AC/6VER保持；四个测试文件与七份文档为全部11个changed路径，生产文件全同前驱，opencode_export SHA59245be55256401d5d0c3ba62c705788910431b151b17bae2cbd0666646617ca。Mac共享fixture使用现有Required Seatbelt、canonical隔离store、真实trust/provenance、server readiness/stdinlease和sandboxclient；env_clear同时隔离global/system config，缺前置明确失败。原9bridge bodies逐字节同一；旧extraction函数之外完整prefix/suffix同一，其余未触及旧用例文件保持前驱SHA；旧architecture457183bytes完整prefix保留，workflow既有变化仅准确名称替换。
+
+| 门 | exit | 实际计数（重复selector不累计unique） | raw SHA256 |
+|---|---:|---|---|
+| prepare-default-binaries | 0 | static/build | `23fac48ee2e6a84f7643a5dd2e01de5b108fcd3b4d9c289a4a565a1d0854dba2` |
+| VER1 | 0 | 1passed/0failed/0ignored | `a8170deb21de45ababe1f5b8bcedc6a4d687f18cccd53d6f84744ed49dde1b34` |
+| VER5 | 0 | 1passed/0failed/0ignored | `658ef913ec8cde480e46b5cd58b5f17033e261eb379696bd9c50231fff6e3484` |
+| prepare-manual-binary | 0 | static/build | `9d5bc9dcc82d7fbf63202598e7de67e1904c93c2fb9e18e88e723109a5c30a96` |
+| VER2 | 0 | 1passed/0failed/0ignored | `694d642f4961e336a75fc9452762b6ac7c7cd83a980abc3c2f5d636efb8280b5` |
+| VER3 | 0 | 1passed/0failed/0ignored | `f181e70552c5cfb8659b7e38f561b77d5dac8973e3c581a21643208c182b1c70` |
+| VER4 | 0 | 1passed/0failed/0ignored | `e34e4b5b59054e80ef20858c662c95c7952c0d44be96c44f7a5872854aedaeee` |
+| build-default-helper | 0 | static/build | `bd5e8c9c5cd47da8da3cf8ef378e38331000864a5118ac028a17d48151487739` |
+| VER6 | 0 | 1passed/0failed/0ignored | `76b3dc940c9c38a838ddac18e80494f24d91e02cd84b949b90ec5ac49af176e8` |
+| docs-readers | 0 | 62passed/0failed/0ignored; 32passed/0failed/0ignored; 1passed/0failed/0ignored; 12passed/0failed/0ignored | `76e51a4e67919f29510ee37b08666e27d4d3fe7186e41b78929e46da4f64d0b3` |
+| workflow-module | 0 | 3passed/0failed/0ignored | `c02026ca423726b55bffa6d65d21411c1697a84366af97cfa4effd36a7ad5c1c` |
+| serial-module | 0 | 26passed/0failed/0ignored | `feeacb9afd29589706277ad6cc9d9e4d72599233be9c59202d2418011d43b2df` |
+| fmt | 0 | static/build | `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855` |
+| strict | 0 | static/build | `31ade9d6db20a51f0c154e818518469b82c4acb04b029072b359fde4059aa03c` |
+
+全部14门实际exit0，原六精确VER各1selected/1PASS/0ignored；107reader、workflow3、serial26、fmt及alltarget/allfeature严格clippy实际通过，2048源码前后SHA/blobOID/size/mode/kind完全一致。ER13实际判none：只有单target局部fixture/测试守卫/文档，无生产、DDL、命令、配置、Cargo/CI/installer或被至少3target复用的测试helper变化。已知fixture失败逐一归因，未带未归因失败过门；本卡没有新增full，不把前驱10212PASS冒称当前树full。COV2-REL-01仍须最终bumped树T2双env全量与发布C/D。
+
+VER2真实live路径提交v2，same event_id重投不新增client调用，fresh event_id重导同export确有client调用而checkpoint/claim/revision不增。VER3从独立live/import仓的真实checkpoint export读回持久化语义，严格重建canonical bytes并对独立literal/goldSHA7973604f43b515e1af6b1206e85c4fdc88447eed5a7822ca0ec3a77224b792a9，两个实际committed claim digest也对同一gold；依赖SHA抗碰撞，不声称读出私有runtime buffer或仅对两次preview。明确live Complete/import Incomplete，native idle/import active和import-terminal遗留不改。VER4是valididentity/invalidmessages的实际post-export source拒绝：client marker、固定publicLBR-INTERNAL-001/消息、SourceReadError、ownerless failed job与真实pending receipt均核验，0 completedcheckpoint/claim/revision/contentpublication；Session/job/pending metadata允许写，名字zero_write不是零DB操作。私有sealed error不经CLI暴露，该较早拒绝无checkpoint-write诊断，不增加公开API。
+
+原旧VER6在95a4099原样1selected/1FAIL/raw4b4c2721dff5595ea16fcb780b4b2ae45848609e4c301e74ae2522dff950c9ea保留；修正名称及断言仅对原PARTIAL和broken两次输入。最终真实DB checkpoint0/claim0，pending1→2，complete仍为SessionStart baseline1、每次新增complete0，session active/stoppedNULL、错误与metadata无canary；actual sealedSourcePreparationRejected与既有FakeLease ObserveIdle→ReleaseFailed均核。该fakeport没有persistjob，真实jobrows0，不冒称dirtyjob。中间错误query引用不存在checkpoint_count列已仅删该冗余断言，实际checkpoint表计数保留；所有旧/中间失败日志保留。新增harness的unsupportedstatus、私有错误可见性、legacy无eventID/noledger与早期无checkpointdiagnostic四类错误预期也保留，均为fixture适配、不声称修复生产缺陷。
+
+首轮soleClaude CODE实际PASS但指出1P2宽泛ignored CI守卫缺口，raw3aa7320c7c975744838ba5d1c871229eca127b59ad5f7f6d15af6a2d89d1b947。父在原I内仅扩展architectureguard，拒绝broad lib/targetless ignored及nextest run-ignored，并只允许已精确绑定的Linux unit dispatcher body，新增反例，原workflow无写入；重跑最终14门后进行第二轮soleClaude。最终CODE实际exit0/PASS，raw `0d26e2bf6278d47a025b6b123ae1cd44cbc24387e7e6bc4e61c3ac3e94a59498`，root实读接受，实际评审计数与非阻断遗留为 `{"P0": 0, "P1": 0, "P2": 1, "P3": 5}` / `["P2: staticCIscanner doesnotcover cargo+toolchain/globalflags/llvm-cov, glob --test/alltargets or extra whitespace. No currentworkflowuses these to selectmanualSession; futureCIedit mustreview these forms, notassume exhaustive guard. Deferredoutsidecurrentimplementation underuserstrategy.", "P3 new: compoundcommands/commentquotedhash and --list mixedrun notfullyparsed; currentworkflows clean, deferredwithscannerrobustness.", "P3: oldoversizebody may hitforkdenial before16MiBcap; COV16/17must independentlyprovecap beforeacceptance.", "P3: newMac cases relydocumentedexactthreads1; arbitrarywholebinaryparallel notproven, no newserialregistrychange.", "P3: twofuturecards explicitlyrequireoldselector synchronization; 0selectedneverPASS.", "P3: bothenvnormativeacceptancekept; bridgeenv_clear blockscredentialinheritance. FakeLeasejobcount0structural, notrealDBleaseproof."]`，未称修复。没有模型/账号/真实OpenCode调用，没有新OpenCode Session CI；纯parser/crypto/sandboxunit/staticguard仍可CI。这里不证明signature/redactedData/reasoningEncryptedContent、Source A或native归档，Linux由用户后验，其他21旧body全套manual审计仍归COV2-16/17。本卡没有用户命令行为变化，因此没有网站写集/新cf交付；前驱cf3f7ca9已部署的命令文档继续有效。
+
+CODE/QA后仅本两事实计划修改，另9个owned非事实后像继续绑定已审已测SHA；最终107reader/fmtstrict/root事实裁决、signed+DCO main commit/archive2048/Push/freshremote仍待实际闭合。全部闭合后COVsource20/26→21/26=80.77%，formal0/26继承家族C/D；父formal59/71=83.10%、source61/71=85.92%不增。下一卡COV2-15候选live Session权限防火墙。本卡不bump/tag/release，不更换official49，不改demo/user04/05或原7stashes。
 
 ### Task COV2-15：候选 live Session 权限防火墙
 
@@ -3033,3 +3069,12 @@ R2是实际PASS而非失败；本次新修复仍须自己的真实修前失败�
 此前33a5输入QA9既有Mac cap用例34/35失败、exact失败，原断言/预算不改，后续同2048 unmodified module35/35实际通过；QA10只复用19项实际PASS和该模块真实复核，再新跑余9项，最终29门actual0且源码2048前后同一。所有失败与limited诊断保留，根因尚未获证明；不把诊断PASS当正式源码验收。其结果现在仅为旧33a5输入历史，不能代替d182最终验收。
 
 当前d182涉及共享DB/config真实源码，最终相关门在原29项外增加6个既有目标/模块（DB、client-storage、history、subagent-content、workspace-lease、scoped-config），共35项；原8AC/6literalVER、I24+site1、max11prod/4landings及family C/D不变。新字节related/fmtstrict、唯一Claude CODE R3/newfull均待实际运行；full仍UNRUN，不复用此前COV10全量或旧QA。card source仍19/26=73.08%、formal0、父59formal/61sourceof71不增。macOS标准、Linux用户后验，未新增Session/exporter/model CI。
+
+
+### COV2-12 开工与旧 extraction 原样预复现（2026-10-16）
+
+前驱 COV2-11 实际 signed+DCO main `95a40996c0eb7343e1fe2704979df83c58e0830d` 已签推且freshremote同一，2048实际commit文件与最终A/B后像SHA/blobOID/size/mode/kind同一；原6VER/35相关QA、soleClaude R3 PASS/raw `6d14592b62932520adf3f8326ba50fa1384b6d18705bee1ce71d7d93b6fd890d`、新T1双env全量10212PASS/2slow/23skip及最终105reader/fmtstrict均actual0。网站cf `3f7ca9c4eb862d75a9c1b66811927632bd03151b` Cloudflare成功且EN/ZHHTTP200。COV source为20/26=76.92%、formal0/26继承家族C/D；父formal59/71不增，新mainCI尚非PASS。
+
+COV2-12原8AC/6VER和I12不变，无单独关联Issue。ER02刷新：BridgeRepo init仍38；无consumer政策live_checkpoint.rs1048/reasoning.rs524；旧用例live_pipeline_tests.rs5553，export-stage matrix5849。先在上述实际2048同源树构建helper（exit0，SHA `8892c39109ad4ec6bd5ea775da99950274d0578f4f05439d159d2bd2f9e49da1`），再原样exact运行旧VER6：实际1selected/0PASS/1FAIL/0ignored、exit101，raw `4b4c2721dff5595ea16fcb780b4b2ae45848609e4c301e74ae2522dff950c9ea`。实际无内容错误为reasoning preparation无ready capture consumer，要求保留pending后重试；2048源码未改。此轮失败不是本卡验收PASS，也不追认旧全量10212中被ignored的该Session用例已验。原历史5cafe322失败与本次失败均保留。
+
+按既有AC6/8只前滚该旧fixture的断言，准确命名为 `opencode_extraction_no_consumer_keeps_pending_without_checkpoint`；VER6及INDEX/integration/local-opt-in guard同步名称，保留原输入和broken-input场景，不改生产consumer/issuer/native授权。最终还须实际证明zero completed checkpoint和pending receipt；当前错误文本不冒称已读取这两个真实DB状态。其余21旧body只读，共享helper只按原I修macOS Required Seatbelt路径，不以pre-exec拒绝替代内容/oversize验收。3新增Session例继续ignored/feature-gated且仅本机manual；不加CI、模型调用或新serial配置。尚未运行本卡最终6VER/fmtstrict/soleClaude，不计source21。

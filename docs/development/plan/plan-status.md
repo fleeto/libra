@@ -2412,3 +2412,44 @@ R2是实际PASS而非失败；本次新修复仍须自己的真实修前失败�
 新T1双env全量实际 2026-10-15T17:35:48.378948+00:00 → 2026-10-15T17:56:21.761483+00:00，exit0：`     Summary [1134.295s] 10212 tests run: 10212 passed (2 slow), 23 skipped`；事件 {"FAIL": 0, "LEAK-FAIL": 0, "LEAK": 0, "RETRY": 0, "FLAKY": 0, "SLOW": 2, "TIMEOUT": 0, "ABORT": 0, "EXECFAIL": 0}，LEAK/skip/retry按实际记录，不新增zeroLEAK门。raw `395e3b88d0bfb003f6f6d75a20ef6a0086920f105bc2f35bba1833e77344d117`；2048候选文件前后SHA/blobOID/size/mode/kind同一，manifest `b6201d842c57c9ef2f9a8d2b99d146608090c65ef56f11c2a40b8cd0e8e6c2a9`；helper full前后same=True、after `7ab654deaa3f81538c53aeb6135186a91523c24d36a902bb02dd76944a9500c8`，仅本地私有对象helper验证，不是binary/native attestation。8threads与原groups/profile/retry2不改；不加OpenCode Session/exporter/model CI。macOS功能标准，Linux用户后验；不把上游早前33a5 CI当本卡CI或Windows实测。
 
 当前同卡网站页已单ClaudePASS/raw9c7349e75867a92eeafc8ca381ec0f4b2e1158ed82681b7de411341e3c890e64、sync/fixtures/docsunit/typecheck/build实际通过，仍须最终freshsync、signed cf Push及Cloudflare/HTTP核对；未发生的commit/deploy不预填。full后仅本两事实计划修改，21个owned非事实后像继续绑定CODE/full，最终105reader/fmtstrict/root裁决及main signed+DCO Push/remote/archive2048门待实际闭合。全部闭合后才COVsource由19/26到20/26=76.92%；formal0/26继承familyC/D，父formal59/71=83.10%/source61/71=85.92%不增。下一卡COV2-12原macOS Session入口；本卡不bump/release，不替换official49、不修改demo或user04/05/stashes。
+
+
+### COV2-12 开工与旧 extraction 原样预复现（2026-10-16）
+
+前驱 COV2-11 实际 signed+DCO main `95a40996c0eb7343e1fe2704979df83c58e0830d` 已签推且freshremote同一，2048实际commit文件与最终A/B后像SHA/blobOID/size/mode/kind同一；原6VER/35相关QA、soleClaude R3 PASS/raw `6d14592b62932520adf3f8326ba50fa1384b6d18705bee1ce71d7d93b6fd890d`、新T1双env全量10212PASS/2slow/23skip及最终105reader/fmtstrict均actual0。网站cf `3f7ca9c4eb862d75a9c1b66811927632bd03151b` Cloudflare成功且EN/ZHHTTP200。COV source为20/26=76.92%、formal0/26继承家族C/D；父formal59/71不增，新mainCI尚非PASS。
+
+COV2-12原8AC/6VER和I12不变，无单独关联Issue。ER02刷新：BridgeRepo init仍38；无consumer政策live_checkpoint.rs1048/reasoning.rs524；旧用例live_pipeline_tests.rs5553，export-stage matrix5849。先在上述实际2048同源树构建helper（exit0，SHA `8892c39109ad4ec6bd5ea775da99950274d0578f4f05439d159d2bd2f9e49da1`），再原样exact运行旧VER6：实际1selected/0PASS/1FAIL/0ignored、exit101，raw `4b4c2721dff5595ea16fcb780b4b2ae45848609e4c301e74ae2522dff950c9ea`。实际无内容错误为reasoning preparation无ready capture consumer，要求保留pending后重试；2048源码未改。此轮失败不是本卡验收PASS，也不追认旧全量10212中被ignored的该Session用例已验。原历史5cafe322失败与本次失败均保留。
+
+按既有AC6/8只前滚该旧fixture的断言，准确命名为 `opencode_extraction_no_consumer_keeps_pending_without_checkpoint`；VER6及INDEX/integration/local-opt-in guard同步名称，保留原输入和broken-input场景，不改生产consumer/issuer/native授权。最终还须实际证明zero completed checkpoint和pending receipt；当前错误文本不冒称已读取这两个真实DB状态。其余21旧body只读，共享helper只按原I修macOS Required Seatbelt路径，不以pre-exec拒绝替代内容/oversize验收。3新增Session例继续ignored/feature-gated且仅本机manual；不加CI、模型调用或新serial配置。尚未运行本卡最终6VER/fmtstrict/soleClaude，不计source21。
+
+
+### COV2-12 本机 A/B 验收闭合，最终源码交付待闭合（2026-10-16）
+
+前驱实际signed main95a4099，原8AC/6VER保持；四个测试文件与七份文档为全部11个changed路径，生产文件全同前驱，opencode_export SHA59245be55256401d5d0c3ba62c705788910431b151b17bae2cbd0666646617ca。Mac共享fixture使用现有Required Seatbelt、canonical隔离store、真实trust/provenance、server readiness/stdinlease和sandboxclient；env_clear同时隔离global/system config，缺前置明确失败。原9bridge bodies逐字节同一；旧extraction函数之外完整prefix/suffix同一，其余未触及旧用例文件保持前驱SHA；旧architecture457183bytes完整prefix保留，workflow既有变化仅准确名称替换。
+
+| 门 | exit | 实际计数（重复selector不累计unique） | raw SHA256 |
+|---|---:|---|---|
+| prepare-default-binaries | 0 | static/build | `23fac48ee2e6a84f7643a5dd2e01de5b108fcd3b4d9c289a4a565a1d0854dba2` |
+| VER1 | 0 | 1passed/0failed/0ignored | `a8170deb21de45ababe1f5b8bcedc6a4d687f18cccd53d6f84744ed49dde1b34` |
+| VER5 | 0 | 1passed/0failed/0ignored | `658ef913ec8cde480e46b5cd58b5f17033e261eb379696bd9c50231fff6e3484` |
+| prepare-manual-binary | 0 | static/build | `9d5bc9dcc82d7fbf63202598e7de67e1904c93c2fb9e18e88e723109a5c30a96` |
+| VER2 | 0 | 1passed/0failed/0ignored | `694d642f4961e336a75fc9452762b6ac7c7cd83a980abc3c2f5d636efb8280b5` |
+| VER3 | 0 | 1passed/0failed/0ignored | `f181e70552c5cfb8659b7e38f561b77d5dac8973e3c581a21643208c182b1c70` |
+| VER4 | 0 | 1passed/0failed/0ignored | `e34e4b5b59054e80ef20858c662c95c7952c0d44be96c44f7a5872854aedaeee` |
+| build-default-helper | 0 | static/build | `bd5e8c9c5cd47da8da3cf8ef378e38331000864a5118ac028a17d48151487739` |
+| VER6 | 0 | 1passed/0failed/0ignored | `76b3dc940c9c38a838ddac18e80494f24d91e02cd84b949b90ec5ac49af176e8` |
+| docs-readers | 0 | 62passed/0failed/0ignored; 32passed/0failed/0ignored; 1passed/0failed/0ignored; 12passed/0failed/0ignored | `76e51a4e67919f29510ee37b08666e27d4d3fe7186e41b78929e46da4f64d0b3` |
+| workflow-module | 0 | 3passed/0failed/0ignored | `c02026ca423726b55bffa6d65d21411c1697a84366af97cfa4effd36a7ad5c1c` |
+| serial-module | 0 | 26passed/0failed/0ignored | `feeacb9afd29589706277ad6cc9d9e4d72599233be9c59202d2418011d43b2df` |
+| fmt | 0 | static/build | `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855` |
+| strict | 0 | static/build | `31ade9d6db20a51f0c154e818518469b82c4acb04b029072b359fde4059aa03c` |
+
+全部14门实际exit0，原六精确VER各1selected/1PASS/0ignored；107reader、workflow3、serial26、fmt及alltarget/allfeature严格clippy实际通过，2048源码前后SHA/blobOID/size/mode/kind完全一致。ER13实际判none：只有单target局部fixture/测试守卫/文档，无生产、DDL、命令、配置、Cargo/CI/installer或被至少3target复用的测试helper变化。已知fixture失败逐一归因，未带未归因失败过门；本卡没有新增full，不把前驱10212PASS冒称当前树full。COV2-REL-01仍须最终bumped树T2双env全量与发布C/D。
+
+VER2真实live路径提交v2，same event_id重投不新增client调用，fresh event_id重导同export确有client调用而checkpoint/claim/revision不增。VER3从独立live/import仓的真实checkpoint export读回持久化语义，严格重建canonical bytes并对独立literal/goldSHA7973604f43b515e1af6b1206e85c4fdc88447eed5a7822ca0ec3a77224b792a9，两个实际committed claim digest也对同一gold；依赖SHA抗碰撞，不声称读出私有runtime buffer或仅对两次preview。明确live Complete/import Incomplete，native idle/import active和import-terminal遗留不改。VER4是valididentity/invalidmessages的实际post-export source拒绝：client marker、固定publicLBR-INTERNAL-001/消息、SourceReadError、ownerless failed job与真实pending receipt均核验，0 completedcheckpoint/claim/revision/contentpublication；Session/job/pending metadata允许写，名字zero_write不是零DB操作。私有sealed error不经CLI暴露，该较早拒绝无checkpoint-write诊断，不增加公开API。
+
+原旧VER6在95a4099原样1selected/1FAIL/raw4b4c2721dff5595ea16fcb780b4b2ae45848609e4c301e74ae2522dff950c9ea保留；修正名称及断言仅对原PARTIAL和broken两次输入。最终真实DB checkpoint0/claim0，pending1→2，complete仍为SessionStart baseline1、每次新增complete0，session active/stoppedNULL、错误与metadata无canary；actual sealedSourcePreparationRejected与既有FakeLease ObserveIdle→ReleaseFailed均核。该fakeport没有persistjob，真实jobrows0，不冒称dirtyjob。中间错误query引用不存在checkpoint_count列已仅删该冗余断言，实际checkpoint表计数保留；所有旧/中间失败日志保留。新增harness的unsupportedstatus、私有错误可见性、legacy无eventID/noledger与早期无checkpointdiagnostic四类错误预期也保留，均为fixture适配、不声称修复生产缺陷。
+
+首轮soleClaude CODE实际PASS但指出1P2宽泛ignored CI守卫缺口，raw3aa7320c7c975744838ba5d1c871229eca127b59ad5f7f6d15af6a2d89d1b947。父在原I内仅扩展architectureguard，拒绝broad lib/targetless ignored及nextest run-ignored，并只允许已精确绑定的Linux unit dispatcher body，新增反例，原workflow无写入；重跑最终14门后进行第二轮soleClaude。最终CODE实际exit0/PASS，raw `0d26e2bf6278d47a025b6b123ae1cd44cbc24387e7e6bc4e61c3ac3e94a59498`，root实读接受，实际评审计数与非阻断遗留为 `{"P0": 0, "P1": 0, "P2": 1, "P3": 5}` / `["P2: staticCIscanner doesnotcover cargo+toolchain/globalflags/llvm-cov, glob --test/alltargets or extra whitespace. No currentworkflowuses these to selectmanualSession; futureCIedit mustreview these forms, notassume exhaustive guard. Deferredoutsidecurrentimplementation underuserstrategy.", "P3 new: compoundcommands/commentquotedhash and --list mixedrun notfullyparsed; currentworkflows clean, deferredwithscannerrobustness.", "P3: oldoversizebody may hitforkdenial before16MiBcap; COV16/17must independentlyprovecap beforeacceptance.", "P3: newMac cases relydocumentedexactthreads1; arbitrarywholebinaryparallel notproven, no newserialregistrychange.", "P3: twofuturecards explicitlyrequireoldselector synchronization; 0selectedneverPASS.", "P3: bothenvnormativeacceptancekept; bridgeenv_clear blockscredentialinheritance. FakeLeasejobcount0structural, notrealDBleaseproof."]`，未称修复。没有模型/账号/真实OpenCode调用，没有新OpenCode Session CI；纯parser/crypto/sandboxunit/staticguard仍可CI。这里不证明signature/redactedData/reasoningEncryptedContent、Source A或native归档，Linux由用户后验，其他21旧body全套manual审计仍归COV2-16/17。本卡没有用户命令行为变化，因此没有网站写集/新cf交付；前驱cf3f7ca9已部署的命令文档继续有效。
+
+CODE/QA后仅本两事实计划修改，另9个owned非事实后像继续绑定已审已测SHA；最终107reader/fmtstrict/root事实裁决、signed+DCO main commit/archive2048/Push/freshremote仍待实际闭合。全部闭合后COVsource20/26→21/26=80.77%，formal0/26继承家族C/D；父formal59/71=83.10%、source61/71=85.92%不增。下一卡COV2-15候选live Session权限防火墙。本卡不bump/tag/release，不更换official49，不改demo/user04/05或原7stashes。

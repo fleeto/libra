@@ -11593,3 +11593,720 @@ fn cov2_runtime_data_transport_has_closed_callers() {
         Some(&vec!["rogue".to_owned()])
     );
 }
+
+// COV2-12 inventories the inherited 22 Session gates and the three macOS
+// additions. Paid local-agent smoke tests have their own, separate gates.
+const COV2_MANUAL_SESSION_CASES: &[(&str, &[&str])] = &[
+    (
+        "tests/agent_opencode_bridge_test.rs",
+        &[
+            "opencode_historical_import_e2e_uses_trusted_export_bytes",
+            "opencode_export_whole_session_idempotent",
+            "opencode_export_durable_snapshot_uses_repository_keyed_hmac",
+            "opencode_export_rejects_wrong_native_session_without_export_claim",
+            "opencode_registered_failure_releases_dirty_job_claim_and_marker",
+            "opencode_export_plaintext_never_in_persist_or_logs",
+            "opencode_export_binary_trust_revalidates",
+            "opencode_export_oversize_session_degrades",
+            "opencode_export_macos_requires_trust_before_spawn",
+            "cov2_macos_fake_exporter_live_session_capture",
+            "cov2_macos_fake_exporter_import_session_capture",
+            "cov2_macos_failed_export_session_zero_write",
+        ],
+    ),
+    (
+        "tests/agent_lifecycle_event_test.rs",
+        &[
+            "hook_public_contract_byte_compat_matrix",
+            "opencode_status_idle_maps_turn_end",
+            "opencode_status_busy_retry_fails_closed",
+            "opencode_message_updated_is_single_envelope_turn_start",
+            "opencode_legacy_alias_transition_forwarded",
+            "opencode_missing_legacy_prompt_fails_before_writes",
+            "opencode_produced_frames_reach_real_ingress_and_survive_history_rollover",
+        ],
+    ),
+    (
+        "tests/agent_hook_crash_test.rs",
+        &["capture_coordinator_native_replay_matrix"],
+    ),
+    (
+        "tests/agent_import_test.rs",
+        &["agent_import_confirmation_precedes_opencode_export"],
+    ),
+    (
+        "src/internal/ai/capture/live_pipeline_tests.rs",
+        &[
+            "opencode_extraction_no_consumer_keeps_pending_without_checkpoint",
+            "export_stage_releases_runner_lease_on_every_exit",
+        ],
+    ),
+    (
+        "src/internal/ai/capture/live_oracle_tests.rs",
+        &["live_checkpoint_metadata_shape_is_stable"],
+    ),
+    (
+        "tests/agent_checkpoint_redaction_test.rs",
+        &["og26_candidate_has_zero_normal_sink_hits"],
+    ),
+];
+
+// These are sandbox unit tests, not Session/Checkpoint E2Es. The bool pins
+// their actual ignore attribute; run_gate intentionally includes both kinds.
+const COV2_LINUX_SANDBOX_UNITS: &[(&str, bool)] = &[
+    ("runner_controls_preserved", false),
+    ("trusted_bwrap_preflight", true),
+    ("bwrap_argv_equivalent", false),
+    ("trusted_bwrap_rejects_user_writable", false),
+    ("backend_missing_degrades_metadata_only", false),
+    ("trusted_bwrap_exe_channel_used", false),
+    (
+        "opencode_export_sandboxed_outer_cancel_contains_setsid_writer",
+        true,
+    ),
+    (
+        "trusted_export_retry_recovers_a_transient_sandbox_failure",
+        false,
+    ),
+];
+
+fn cov2_test_functions(file: &syn::File) -> BTreeMap<String, &syn::ItemFn> {
+    struct Tests<'a>(BTreeMap<String, &'a syn::ItemFn>);
+    impl<'ast> syn::visit::Visit<'ast> for Tests<'ast> {
+        fn visit_item_fn(&mut self, function: &'ast syn::ItemFn) {
+            if function.attrs.iter().any(|attr| {
+                attr.path()
+                    .segments
+                    .last()
+                    .is_some_and(|segment| segment.ident == "test")
+            }) {
+                assert!(
+                    self.0
+                        .insert(function.sig.ident.to_string(), function)
+                        .is_none(),
+                    "manual inventory requires unambiguous test names"
+                );
+            }
+            syn::visit::visit_item_fn(self, function);
+        }
+    }
+    let mut tests = Tests(BTreeMap::new());
+    syn::visit::Visit::visit_file(&mut tests, file);
+    tests.0
+}
+
+fn cov2_is_ignored(attrs: &[syn::Attribute]) -> bool {
+    attrs.iter().any(|attr| attr.path().is_ident("ignore"))
+}
+
+fn cov2_bridge_feature_gate(cargo: &str) -> bool {
+    let bridge = cargo.split("[[test]]").find(|table| {
+        table
+            .lines()
+            .any(|line| line.trim() == "name = \"agent_opencode_bridge_test\"")
+    });
+    bridge.is_some_and(|table| {
+        table
+            .lines()
+            .any(|line| line.trim() == "required-features = [\"test-live-agent\"]")
+            && table
+                .lines()
+                .any(|line| line.trim() == "path = \"tests/agent_opencode_bridge_test.rs\"")
+    })
+}
+
+fn cov2_linux_gate_body_is_exact(source: &str) -> bool {
+    let Some((_, rest)) = source.split_once("          run_gate() {\n") else {
+        return false;
+    };
+    let Some((body, _)) = rest.split_once("          }\n") else {
+        return false;
+    };
+    body.lines().map(str::trim).collect::<Vec<_>>()
+        == [
+            r#"full=$(printf '%s\n' "$list" | sed -n "s/^\(.*::$1\): test$/\1/p" | head -n1)"#,
+            r#"[ -n "$full" ] || { echo "FAIL: $1 missing"; exit 1; }"#,
+            r#"cargo test --lib "$full" -- --exact --include-ignored \"#,
+            r#"|| { echo "FAIL: $1"; exit 1; }"#,
+        ]
+}
+
+// Fold YAML's `run: >` command form before checking selectors split over
+// several lines. Literal blocks retain shell newlines and continuations.
+fn cov2_workflow_commands(source: &str) -> String {
+    let mut lines = Vec::new();
+    let mut folded: Option<(usize, String)> = None;
+    for line in source.lines() {
+        let indentation = line.len() - line.trim_start().len();
+        if folded
+            .as_ref()
+            .is_some_and(|(start, _)| !line.trim().is_empty() && indentation <= *start)
+        {
+            lines.push(folded.take().unwrap().1);
+        }
+        if let Some((_, command)) = &mut folded {
+            command.push(' ');
+            command.push_str(line.trim());
+        } else if line.trim_start().starts_with("run: >") {
+            folded = Some((indentation, String::new()));
+        } else {
+            lines.push(line.to_owned());
+        }
+    }
+    if let Some((_, command)) = folded {
+        lines.push(command);
+    }
+    lines.join("\n").replace("\\\n", " ")
+}
+
+fn cov2_workflow_session_errors(source: &str) -> Vec<String> {
+    let active = source
+        .lines()
+        .filter(|line| !line.trim_start().starts_with('#'))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut errors = Vec::new();
+    for (_, names) in COV2_MANUAL_SESSION_CASES {
+        for name in *names {
+            if active.contains(name) {
+                errors.push(format!("explicit manual Session selector {name}"));
+            }
+        }
+    }
+    if active.contains("agent_opencode_bridge") {
+        errors.push("explicit OpenCode bridge target".to_owned());
+    }
+    // Only this verified dispatcher body may include ignored lib tests. Remove
+    // that one body before scanning; an identical command elsewhere still fails.
+    let scan = if cov2_linux_gate_body_is_exact(&active) {
+        let (prefix, rest) = active.split_once("          run_gate() {\n").unwrap();
+        let (_, suffix) = rest.split_once("          }\n").unwrap();
+        format!("{prefix}{suffix}")
+    } else {
+        active.clone()
+    };
+    let commands = cov2_workflow_commands(&scan);
+    for line in commands.lines() {
+        let line = line.split('#').next().unwrap_or_default();
+        let lower = line.to_ascii_lowercase();
+        let static_guard = lower.contains("--test compat_agent_architecture_guard")
+            && lower.contains("--exact")
+            && [
+                "cov2_opencode_session_e2e_is_manual_only",
+                "cov2_manual_session_tests_cannot_silently_skip",
+            ]
+            .iter()
+            .any(|name| lower.contains(name));
+        if lower.contains("cov2_macos_")
+            || lower.contains("test(cov2_)")
+            || lower.contains("test(cov2_*)")
+            || lower
+                .split_whitespace()
+                .any(|argument| matches!(argument.trim_matches(['\'', '"']), "cov2_" | "cov2_*"))
+        {
+            errors.push("explicit COV2 macOS manual selector".to_owned());
+        }
+        if !static_guard
+            && lower.contains("opencode")
+            && (lower.contains("session") || lower.contains("checkpoint"))
+        {
+            errors.push("explicit OpenCode Session/Checkpoint path".to_owned());
+        }
+        if !static_guard && lower.contains("cargo ") && lower.contains("opencode") {
+            let listing = lower.contains("--list")
+                && lower.contains("internal::ai::observed_agents::opencode_export")
+                && !lower.contains("--ignored")
+                && !lower.contains("--include-ignored");
+            let unit = line.contains("--exact")
+                && line.split_whitespace().any(|argument| {
+                    let argument = argument.trim_matches(['\'', '"']);
+                    COV2_LINUX_SANDBOX_UNITS.iter().any(|(name, _)| {
+                        argument == *name || argument.ends_with(&format!("::{name}"))
+                    })
+                });
+            if !listing && !unit {
+                errors.push("OpenCode cargo selector is not a named sandbox unit".to_owned());
+            }
+        }
+        // Broad ignored lib/target-less runs include the manual inventory,
+        // even when a filter uses only a module prefix. Listing never executes.
+        let unquoted = line.replace(['\'', '"'], "");
+        let arguments = unquoted.split_whitespace().collect::<Vec<_>>();
+        let cargo_run = lower.contains("cargo test ") || lower.contains("cargo nextest run ");
+        let includes_ignored = arguments.iter().enumerate().any(|(index, argument)| {
+            matches!(*argument, "--ignored" | "--include-ignored")
+                || argument
+                    .strip_prefix("--run-ignored=")
+                    .is_some_and(|value| matches!(value, "all" | "only" | "ignored-only"))
+                || (*argument == "--run-ignored"
+                    && arguments
+                        .get(index + 1)
+                        .is_some_and(|value| matches!(*value, "all" | "only" | "ignored-only")))
+        });
+        if cargo_run && includes_ignored && !arguments.contains(&"--list") {
+            let has_test_target = arguments
+                .iter()
+                .any(|argument| *argument == "--test" || argument.starts_with("--test="));
+            if arguments.contains(&"--lib") || !has_test_target {
+                errors.push("broad ignored lib or target-less Session selection".to_owned());
+            }
+            for (path, _) in COV2_MANUAL_SESSION_CASES {
+                if !path.starts_with("tests/") {
+                    continue;
+                }
+                let target = Path::new(path).file_stem().unwrap().to_string_lossy();
+                if unquoted.contains(&format!("--test {target}"))
+                    || unquoted.contains(&format!("--test={target}"))
+                {
+                    errors.push(format!("ignored mixed Session target {target}"));
+                }
+            }
+        }
+        if line.trim_start().starts_with("run_gate ") {
+            let fields = line.split_whitespace().collect::<Vec<_>>();
+            if fields.len() != 2
+                || !COV2_LINUX_SANDBOX_UNITS
+                    .iter()
+                    .any(|(name, _)| fields[1] == *name)
+            {
+                errors.push(format!("unapproved sandbox run_gate selector: {line}"));
+            }
+        }
+    }
+    errors
+}
+
+#[test]
+fn cov2_opencode_session_e2e_is_manual_only() {
+    // These controls distinguish manual selection from unrelated ignored units.
+    assert!(
+        cov2_workflow_session_errors("cargo test --test unrelated -- --include-ignored").is_empty()
+    );
+    assert!(cov2_workflow_session_errors("run_gate runner_controls_preserved").is_empty());
+    assert!(
+        cov2_workflow_session_errors("cargo test --locked --lib -- --list --ignored").is_empty()
+    );
+    assert!(
+        cov2_workflow_session_errors("cargo nextest run --test unrelated --run-ignored all")
+            .is_empty()
+    );
+    assert!(cov2_workflow_session_errors("cargo test --test compat_agent_architecture_guard cov2_opencode_session_e2e_is_manual_only -- --exact").is_empty());
+    assert!(
+        cov2_workflow_session_errors(
+            "cargo test --lib cov2_v2_pending_original_member_issuer_is_integrity_only"
+        )
+        .is_empty()
+    );
+    for forbidden in [
+        "cargo test --features test-live-agent --test agent_opencode_bridge_test",
+        "cargo nextest run -E 'test(cov2_macos_fake_exporter_live_session_capture)'",
+        "cargo nextest run -E 'test(cov2_)'",
+        "cargo test --lib opencode_session_checkpoint -- --ignored",
+        "run_gate opencode_export_whole_session_idempotent",
+        "cargo test --test agent_checkpoint_redaction_test -- --ignored",
+        "cargo test --test=agent_lifecycle_event_test -- --include-ignored",
+        "run: >\n  cargo test --test agent_checkpoint_redaction_test\n  -- --ignored\n",
+        "cargo test --lib opencode -- --ignored # runner_controls_preserved",
+        "cargo test --lib internal::ai::observed_agents::opencode_export -- --include-ignored",
+        "cargo test --lib -- --include-ignored",
+        "cargo test --lib export_runner_lease -- --ignored",
+        "cargo test -- --ignored",
+        "cargo nextest run --all-features --run-ignored all",
+        "cargo nextest run --all-features --run-ignored=only",
+        "cargo nextest run --test agent_lifecycle_event_test --run-ignored ignored-only",
+        "cargo nextest run --test=agent_lifecycle_event_test --run-ignored=all",
+        "cargo test --lib \"$full\" -- --exact --include-ignored",
+    ] {
+        assert!(
+            !cov2_workflow_session_errors(forbidden).is_empty(),
+            "selector control escaped: {forbidden}"
+        );
+    }
+    let cargo = fs::read_to_string(repo_root().join("Cargo.toml")).unwrap();
+    assert!(
+        cov2_bridge_feature_gate(&cargo),
+        "bridge must require test-live-agent"
+    );
+    assert!(!cov2_bridge_feature_gate(&cargo.replace(
+        "required-features = [\"test-live-agent\"]",
+        "required-features = []"
+    )));
+    assert_eq!(
+        COV2_MANUAL_SESSION_CASES
+            .iter()
+            .map(|(_, names)| names.len())
+            .sum::<usize>(),
+        22 + 3
+    );
+    for (path, names) in COV2_MANUAL_SESSION_CASES {
+        let (_, file) = parse_rust_source(path);
+        let functions = cov2_test_functions(&file);
+        for name in *names {
+            let function = functions
+                .get(*name)
+                .unwrap_or_else(|| panic!("missing {path}::{name}"));
+            assert!(
+                cov2_is_ignored(&function.attrs),
+                "{path}::{name} must stay ignored"
+            );
+            if name.starts_with("cov2_") {
+                assert!(
+                    function.attrs.iter().any(|attr| {
+                        attr.path().is_ident("cfg")
+                            && attr.parse_args::<syn::Meta>().is_ok_and(|meta| {
+                                matches!(meta, syn::Meta::NameValue(value)
+                                if value.path.is_ident("target_os")
+                                    && matches!(value.value, syn::Expr::Lit(syn::ExprLit {
+                                        lit: syn::Lit::Str(ref value), ..
+                                    }) if value.value() == "macos"))
+                            })
+                    }),
+                    "{name} must be macOS-only"
+                );
+            }
+        }
+        let ignored_manual = functions.iter().filter_map(|(name, function)| {
+            function.attrs.iter().any(|attr| match &attr.meta {
+                syn::Meta::NameValue(value) if value.path.is_ident("ignore") => {
+                    matches!(&value.value, syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(value), .. })
+                        if value.value() == "OpenCode Session capture is an operator-local manual gate"
+                            || value.value() == "macOS local OpenCode hook/export capture acceptance; excluded from CI")
+                }
+                _ => false,
+            }).then_some(name.as_str())
+        }).collect::<BTreeSet<_>>();
+        assert_eq!(
+            ignored_manual,
+            names.iter().copied().collect(),
+            "manual inventory drift in {path}"
+        );
+        if *path == "tests/agent_opencode_bridge_test.rs" {
+            assert_eq!(functions.len(), names.len(), "inventory every bridge test");
+        }
+    }
+    let (_, exporter) = parse_rust_source("src/internal/ai/observed_agents/opencode_export.rs");
+    let functions = cov2_test_functions(&exporter);
+    for (name, ignored) in COV2_LINUX_SANDBOX_UNITS {
+        assert_eq!(
+            cov2_is_ignored(&functions[*name].attrs),
+            *ignored,
+            "Linux unit ignore state: {name}"
+        );
+    }
+    let base = fs::read_to_string(repo_root().join(".github/workflows/base.yml")).unwrap();
+    let selected = base
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("run_gate ").map(str::to_owned))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        selected,
+        COV2_LINUX_SANDBOX_UNITS
+            .iter()
+            .map(|(name, _)| name.to_string())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        cov2_linux_gate_body_is_exact(&base),
+        "run_gate must execute only its exact named unit with include-ignored"
+    );
+    assert!(
+        !cov2_linux_gate_body_is_exact(&base.replace(
+            "cargo test --lib \"$full\" -- --exact --include-ignored",
+            "cargo test --lib -- --include-ignored"
+        )),
+        "a broad ignored run must not hide behind the unit dispatcher"
+    );
+    assert!(
+        !cov2_workflow_session_errors(&format!(
+            "{base}\ncargo test --lib \"$full\" -- --exact --include-ignored\n"
+        ))
+        .is_empty(),
+        "the pinned dispatcher exception must not exempt commands outside its body"
+    );
+    for entry in fs::read_dir(repo_root().join(".github/workflows")).unwrap() {
+        let path = entry.unwrap().path();
+        if matches!(
+            path.extension().and_then(|ext| ext.to_str()),
+            Some("yml" | "yaml")
+        ) {
+            let errors = cov2_workflow_session_errors(&fs::read_to_string(&path).unwrap());
+            assert!(errors.is_empty(), "{}: {errors:?}", path.display());
+        }
+    }
+}
+
+// Evaluate only platform predicates known on macOS. Unknown predicates remain
+// active so a new feature/cfg cannot accidentally exempt a successful skip.
+fn cov2_macos_cfg(meta: &syn::Meta) -> Option<bool> {
+    use syn::parse::Parser;
+    match meta {
+        syn::Meta::Path(path) if path.is_ident("unix") => Some(true),
+        syn::Meta::Path(path) if path.is_ident("windows") => Some(false),
+        syn::Meta::NameValue(value) if value.path.is_ident("target_os") => match &value.value {
+            syn::Expr::Lit(syn::ExprLit {
+                lit: syn::Lit::Str(value),
+                ..
+            }) => Some(value.value() == "macos"),
+            _ => None,
+        },
+        syn::Meta::List(list) => {
+            let items = syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated
+                .parse2(list.tokens.clone())
+                .ok()?;
+            let values = items.iter().map(cov2_macos_cfg).collect::<Vec<_>>();
+            if list.path.is_ident("not") && values.len() == 1 {
+                values[0].map(|value| !value)
+            } else if list.path.is_ident("all") {
+                if values.contains(&Some(false)) {
+                    Some(false)
+                } else if values.iter().all(|value| *value == Some(true)) {
+                    Some(true)
+                } else {
+                    None
+                }
+            } else if list.path.is_ident("any") {
+                if values.contains(&Some(true)) {
+                    Some(true)
+                } else if values.iter().all(|value| *value == Some(false)) {
+                    Some(false)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+fn cov2_active_on_macos(attrs: &[syn::Attribute]) -> bool {
+    attrs.iter().all(|attr| {
+        !attr.path().is_ident("cfg")
+            || attr
+                .parse_args::<syn::Meta>()
+                .ok()
+                .as_ref()
+                .and_then(cov2_macos_cfg)
+                != Some(false)
+    })
+}
+
+fn cov2_bridge_init_let_else(local: &syn::Local) -> bool {
+    let syn::Pat::TupleStruct(pattern) = &local.pat else {
+        return false;
+    };
+    if !pattern.path.is_ident("Some") {
+        return false;
+    }
+    let Some(init) = &local.init else {
+        return false;
+    };
+    let syn::Expr::Await(awaited) = init.expr.as_ref() else {
+        return false;
+    };
+    let syn::Expr::Call(call) = awaited.base.as_ref() else {
+        return false;
+    };
+    if !matches!(call.func.as_ref(), syn::Expr::Path(path) if syn_path_text(&path.path) == "BridgeRepo::init")
+    {
+        return false;
+    }
+    matches!(&init.diverge, Some((_, expr))
+        if matches!(expr.as_ref(), syn::Expr::Block(block)
+            if matches!(block.block.stmts.as_slice(), [syn::Stmt::Expr(syn::Expr::Return(syn::ExprReturn { expr: None, .. }), _)])))
+}
+
+fn cov2_statement_attrs(statement: &syn::Stmt) -> &[syn::Attribute] {
+    match statement {
+        syn::Stmt::Expr(syn::Expr::Return(expr), _) => &expr.attrs,
+        _ => syn_stmt_attrs(statement),
+    }
+}
+
+fn cov2_macro_contains_return(tokens: proc_macro2::TokenStream) -> bool {
+    tokens.into_iter().any(|token| match token {
+        proc_macro2::TokenTree::Ident(ident) => ident == "return",
+        proc_macro2::TokenTree::Group(group) => cov2_macro_contains_return(group.stream()),
+        _ => false,
+    })
+}
+
+fn cov2_macos_skip_errors(block: &syn::Block, allow_bridge_let_else: bool) -> Vec<&'static str> {
+    struct Skips {
+        errors: Vec<&'static str>,
+        allow_bridge_let_else: bool,
+    }
+    impl<'ast> syn::visit::Visit<'ast> for Skips {
+        fn visit_stmt(&mut self, statement: &'ast syn::Stmt) {
+            if cov2_active_on_macos(cov2_statement_attrs(statement)) {
+                syn::visit::visit_stmt(self, statement);
+            }
+        }
+        fn visit_local(&mut self, local: &'ast syn::Local) {
+            if self.allow_bridge_let_else && cov2_bridge_init_let_else(local) {
+                // This sole inherited return is unreachable on macOS only if
+                // the separately checked shared constructor cannot return None.
+                self.visit_expr(&local.init.as_ref().unwrap().expr);
+            } else {
+                syn::visit::visit_local(self, local);
+            }
+        }
+        fn visit_expr_return(&mut self, _: &'ast syn::ExprReturn) {
+            self.errors.push("successful early return");
+        }
+        fn visit_expr_try(&mut self, _: &'ast syn::ExprTry) {
+            self.errors.push("fallible early exit can skip assertions");
+        }
+        fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+            if matches!(call.func.as_ref(), syn::Expr::Path(path)
+                if path.path.segments.last().is_some_and(|part| part.ident == "exit"))
+            {
+                self.errors.push("process exit bypasses test assertions");
+            }
+            syn::visit::visit_expr_call(self, call);
+        }
+        fn visit_macro(&mut self, mac: &'ast syn::Macro) {
+            if cov2_macro_contains_return(mac.tokens.clone())
+                || mac
+                    .path
+                    .segments
+                    .last()
+                    .is_some_and(|part| part.ident.to_string().contains("skip"))
+            {
+                self.errors.push("macro can hide a successful skip");
+            }
+            syn::visit::visit_macro(self, mac);
+        }
+    }
+    let mut skips = Skips {
+        errors: Vec::new(),
+        allow_bridge_let_else,
+    };
+    syn::visit::Visit::visit_block(&mut skips, block);
+    skips.errors
+}
+
+fn cov2_bridge_init_is_fail_closed(function: &syn::ImplItemFn) -> bool {
+    use syn::parse::Parser;
+    let active = function
+        .block
+        .stmts
+        .iter()
+        .filter(|stmt| cov2_active_on_macos(cov2_statement_attrs(stmt)))
+        .collect::<Vec<_>>();
+    let asserted = match active.first() {
+        Some(syn::Stmt::Macro(statement)) if statement.mac.path.is_ident("assert") => {
+            syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated
+                .parse2(statement.mac.tokens.clone()).ok().is_some_and(|args| {
+                    matches!(args.first(), Some(syn::Expr::Await(awaited))
+                        if matches!(awaited.base.as_ref(), syn::Expr::Call(call)
+                            if call.args.is_empty() && matches!(call.func.as_ref(), syn::Expr::Path(path)
+                                if path.path.segments.last().is_some_and(|part| part.ident == "required_export_sandbox_available"))))
+                })
+        }
+        _ => false,
+    };
+    let some = matches!(active.last(), Some(syn::Stmt::Expr(syn::Expr::Call(call), None))
+        if matches!(call.func.as_ref(), syn::Expr::Path(path) if path.path.is_ident("Some")) && call.args.len() == 1);
+    asserted && some && cov2_macos_skip_errors(&function.block, false).is_empty()
+}
+
+#[test]
+fn cov2_manual_session_tests_cannot_silently_skip() {
+    let good: syn::ImplItemFn = syn::parse_quote! {
+        async fn init() -> Option<Self> {
+            #[cfg(target_os = "macos")]
+            assert!(required_export_sandbox_available().await, "Required Seatbelt missing");
+            #[cfg(not(target_os = "macos"))]
+            if !trusted_bwrap_available().await { return None; }
+            Some(this)
+        }
+    };
+    assert!(cov2_bridge_init_is_fail_closed(&good));
+    for bad in [
+        "async fn init() -> Option<Self> { if !required_export_sandbox_available().await { return None; } Some(this) }",
+        "async fn init() -> Option<Self> { assert!(true); Some(this) }",
+        "async fn init() -> Option<Self> { assert!(required_export_sandbox_available().await); return None; Some(this) }",
+        "async fn init() -> Option<Self> { #[cfg(not(target_os = \"macos\"))] assert!(required_export_sandbox_available().await); Some(this) }",
+        "async fn init() -> Option<Self> { assert!(required_export_sandbox_available().await); None }",
+    ] {
+        assert!(
+            !cov2_bridge_init_is_fail_closed(&syn::parse_str(bad).unwrap()),
+            "constructor skip escaped: {bad}"
+        );
+    }
+    for (body, bridge_allowed, fails) in [
+        (
+            "{ let Some(repo) = BridgeRepo::init(body).await else { return; }; assert!(repo.ok()); }",
+            true,
+            false,
+        ),
+        (
+            "{ let Some(repo) = BridgeRepo::init(body).await else { return; }; assert!(repo.ok()); }",
+            false,
+            true,
+        ),
+        (
+            "{ if !available().await { return; } assert!(true); }",
+            true,
+            true,
+        ),
+        (
+            "{ let Some(repo) = other_init().await else { return; }; assert!(repo.ok()); }",
+            true,
+            true,
+        ),
+        ("{ #[cfg(target_os = \"macos\")] return; }", true, true),
+        (
+            "{ #[cfg(not(target_os = \"macos\"))] return; assert!(true); }",
+            false,
+            false,
+        ),
+        ("{ std::process::exit(0); }", true, true),
+        ("{ maybe()?; assert!(true); }", true, true),
+        ("{ hidden!(return); }", true, true),
+    ] {
+        assert_eq!(
+            !cov2_macos_skip_errors(&syn::parse_str(body).unwrap(), bridge_allowed).is_empty(),
+            fails,
+            "skip control: {body}"
+        );
+    }
+    let cargo = fs::read_to_string(repo_root().join("Cargo.toml")).unwrap();
+    assert!(
+        cov2_bridge_feature_gate(&cargo),
+        "manual bridge must retain its feature gate"
+    );
+    let (_, bridge) = parse_rust_source("tests/agent_opencode_bridge_test.rs");
+    let init = bridge.items.iter().find_map(|item| match item {
+        syn::Item::Impl(item) if matches!(item.self_ty.as_ref(), syn::Type::Path(path) if path.path.is_ident("BridgeRepo")) => {
+            item.items.iter().find_map(|item| match item {
+                syn::ImplItem::Fn(function) if function.sig.ident == "init" => Some(function),
+                _ => None,
+            })
+        }
+        _ => None,
+    }).expect("BridgeRepo::init exists");
+    assert!(
+        cov2_bridge_init_is_fail_closed(init),
+        "BridgeRepo::init must assert macOS Required Seatbelt availability, never return None on macOS, and finish with Some"
+    );
+    for (path, names) in COV2_MANUAL_SESSION_CASES {
+        let (_, file) = parse_rust_source(path);
+        let functions = cov2_test_functions(&file);
+        for name in *names {
+            let function = functions
+                .get(*name)
+                .unwrap_or_else(|| panic!("missing {path}::{name}"));
+            assert!(
+                cov2_is_ignored(&function.attrs),
+                "{path}::{name} lost manual ignore"
+            );
+            let allow_inherited_bridge =
+                *path == "tests/agent_opencode_bridge_test.rs" && !name.starts_with("cov2_");
+            let errors = cov2_macos_skip_errors(&function.block, allow_inherited_bridge);
+            assert!(errors.is_empty(), "{path}::{name}: {errors:?}");
+        }
+    }
+}

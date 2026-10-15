@@ -1,5 +1,7 @@
 # Coverage schema v2 — typed reasoning encoding boundary
 
+> **COV2-16 本机12/12已通过，单审/交付待：** G09当前12选定名已在actual8a最终行为源码非skip通过，原legacy FAIL/defer保留；source当前23/26，本卡signed交付闭合后才24/26=92.31%，formal0/26，父formal59/71不变。下一COV2-17。
+
 > **G09 前瞻范围修订（由本次签名提交采纳生效）：** legacy `info.status="stopped"`终态import样例实际FAIL，归DEFER-COV11-IMPORT-TERMINAL-01计划外延期；本轮import功能正例以已审当前格式替代。源码/测试不改，旧FAIL不变；仅实际soleClaude PASS、signed main采纳后新matrix生效；source23/26不增。
 
 
@@ -551,3 +553,22 @@ COV16仍13AC/5VER/S/0prod0landing，26卡和71父卡分母、DAG、SourceA/真�
 **替代覆盖边界与遗留重启：** 当前格式import正例不覆盖旧classic `info`/`parts`端到端兼容，也没有查询session行来证明`started_at`/`last_event_at`由`info.time`映射，更不证明`stopped_at`终态；pure collect_facts timestamp单测不等于该DB端到端证明。这些缺口与原终态例的FAIL一并明确归计划外`DEFER-COV11-IMPORT-TERMINAL-01`，未修复、不记PASS；将来另有界兼容任务须保留来源安全边界、soleClaude审查并使原legacy用例实际非skip1/1、读回上述时间与终态后才可解除。原COV11的“不免除原AC/VER”不被追溯更改，本次只前瞻调整COV16和依赖/发布集合。
 
 **R1评审事实：** soleClaude实际exit0但VERDICT FAIL，rawSHA `91ceab399575e8dd72f1832a06b1b960e45eebaae30f84cf9df621b0f0d70372`；1P2为五处当前规范未同步，另4P3为覆盖缺口、遗留登记/重启、采纳措辞与时区顺序。本版同步这些项；旧R1不是PASS、尚未采纳。当前修订须自己的实际R2PASS与签推门，不预授新matrix/source24。
+
+
+### COV2-16 当前12例最终源码本机审计（2026-10-15 20:37:17 UTC；A通过，单审/交付待闭合）
+
+前驱CFG窄修复已实际signed+DCO main `8a547afd0fd5a73247ba47ec979541b3aacba8c9`、Push0/remote同SHA、actualarchive2048同13QA+final109reader/fmtstrict后像；codeR2soleClaude PASS/raw `2e95bbe94161a611df30e4893da5de23084fa14cbaff5d5bd47bac659cf30f5e`。仅import/cfg/lint变化、全部runtime body不变，原CODE R1 FAIL1P1保留。Windows必要CI仍pending，不以Mac冒称通过。此处测试冻结actual8a，root审计仍只写I3文档，不改任何生产/测试。
+
+本轮实际12个不重复功能用例全部PASS/0FAIL/0ignored：其余old bridge8/8（raw `29bd53356664efd2204229f29f3b23f4fd2aac7be6ef9df03adcf2aade56ad42`）＋当前格式import替代1/1（raw `e37324c9f50ea2931634034ec2841790b63c8219c248e8e1782f6ea8d78567c1`）＋no-consumer extraction1/1（raw `83be6e7d6387ccc1d60a9b854f26e230e16a4cf6b192c31dd5bfce33fc6082b4`）＋lease1/1（raw `bec70f4136de611348cc0f283ad3fe66bfe01fb14067bb74b818f5ccb9a20b5a`）＋OG26 zero-normal-sinks1/1（raw `919475e9442ea40514b2018a73cd77b05fc461d0daa9d785775bb92e6a262bb5`）。每个实际testname、匹配数、exit及start/end均与原始Cargo报告相符；静态non-skip/manual-only两门各1/1，64+32+1+12=109readers、fmt和strictalltargets/allfeatures-Dwarnings实际exit0。共12个QA步骤，2048文件前后SHA/OID/size/mode/kind同一，manifestSHA `4f0fde5edd16d4d9fdc21e017b3c6ef45e8e1ff90c655021177a517d4ad05208`。
+
+- `src/internal/ai/capture/live_pipeline_tests.rs` SHA256 `3413f5059f1899c499e7c8e0067da5e1c5b1babd11502071c2ab2c4467ad9722` mode `0o644`。
+
+- `tests/agent_checkpoint_redaction_test.rs` SHA256 `ef1896407d1a0db29be11dcb25892659fb96f5d3df1a524d72eecc247f3b7cb2` mode `0o644`。
+
+- `tests/agent_opencode_bridge_test.rs` SHA256 `c04d3544f3e1dd492a6be269efaa9962f90855e46d507af7bf16c0c2c5b915c8` mode `0o644`。
+
+Required macOS Seatbelt assert和每个选定body的执行路径已对照，未以缺sandbox/0selected/早return计PASS；static guard两门并不额外算功能用例。旧oversize body若先遇到sandboxfork拒绝，仅证明保守降级，不扩大成实际触达byte-cap正例。旧classifier私有字段仍只有此前审定的有界路由推断，不声称直接观测或SourceA。原parser postprocessing首次同一行ok正则漏识别nocapture插入日志，断言失败保留；只修私有收据解析，用实际name+exit+pass/fail/ignored结果校核，源码和测试从未改动。
+
+本轮范围严格依actual signed G09 a4a863f：AC1为current-format功能替代。旧classic status用例在95a实际8PASS/1FAIL的原FAIL/raw b1ab0f5...保留计划外DEFER-COV11-IMPORT-TERMINAL-01，classic info/parts、session行时间映射/终态缺口未修复、不追认兼容PASS；原27静态inventory与所有测试body未改。两个audit当前22名=21继承+1替代，替代已在5新增中；required unique26。COV17十例/真实visible-only、SourceA/native三字段、家族bumped full/安全CI/四平台/站点安装门均不减。
+
+原13AC/5VER按实际测试勾选，但Lifecycle仍in-progress/Acceptance空，须新增三文档相关QA、soleClaude审计PASS/root裁决及signed+DCO main/archive2048/Push/freshremote后才source24/26=92.31%；此前仍23/26=88.46%、formal0/26家族C-D。父formal59/71=83.10%、source61/71=85.92%不增；71/26分母不变。无新full、Linux功能/账号模型/nativeissuer/注册/网站/版本/安装/SessionCI操作。当前runtime已装official49原SHA保持，用户04/05及原7stash保留。下张COV2-17只在本卡源码交付真实闭合后开工。

@@ -1,5 +1,7 @@
 # OpenCode coverage schema-v2 前置实施计划（2026-10-13）
 
+> **COV2-16 A/B已闭合、源码交付待：** actual12/12＋109reader/fmtstrict＋soleClaude PASS/root已完成；source当前23/26，本次signed交付闭合后才24/26=92.31%，formal0家族C-D、父formal59/71保持。下一COV2-17。
+
 > **COV2-11 cfg前滚本机门与单审已闭合：** 原6VER各1/1、cfg单测1/1、两相关模块各37/37、109reader/fmtstrict及soleClaude实际PASS；新SHA Windows CI仍pending。仅签推同一性完成后交付该前滚，COVsource仍23/26。下一卡恢复COV2-16新12matrix，旧legacyFAIL/defer不改。
 
 > **G09 前瞻范围修订（由本次签名提交采纳生效）：** legacy `info.status="stopped"`终态import样例实际FAIL，归DEFER-COV11-IMPORT-TERMINAL-01计划外延期；本轮import功能正例以已审当前格式替代。源码/测试不改，旧FAIL不变；仅实际soleClaude PASS、signed main采纳后新matrix生效；source23/26不增。
@@ -2331,37 +2333,37 @@ VER6 现仅消费独立历史源码 `7efcf868d49a5183e7f0851a89abebee91357155`�
 
 **Task type:** audit
 
-**Lifecycle / Acceptance:** in-progress / 空
+**Lifecycle / Acceptance:** in-progress / locally-accepted
 
 **Description:** 12-case bridge/pipeline/OG-26 macOS acceptance inventory（两个审计共21继承+1当前格式替代，本卡为其中12名；classic status终态兼容延期）。本卡唯一行为轴、恢复和粒度见下方 Granularity；不得以 synthetic/native 互换验收。
 
 **Out of scope:** 只读审计，不修改生产/测试；失败回到 COV2-12/15/18 所属实现卡前滚。
 
-**Current evidence:** tests/agent_opencode_bridge_test.rs; src/internal/ai/capture/live_pipeline_tests.rs（旧21例基线 `dcc468b`）；OG-26 signed main `734b6f03884d3aa38400acbbfd446b557e642d94` 新增 `tests/agent_checkpoint_redaction_test.rs:1326-1331` 的 `og26_candidate_has_zero_normal_sink_hits`（ER-02 开工刷新行号与实际签名源码）。
+**Current evidence:** 本轮实际最终行为源码 signed+DCO main `8a547afd0fd5a73247ba47ec979541b3aacba8c9`，继承已审G09 `a4a863f`；`tests/agent_opencode_bridge_test.rs:936-1007` 的当前格式import替代、该文件其余8个old bridge；`src/internal/ai/capture/live_pipeline_tests.rs:5553/5880` 的no-consumer pending与lease cases；`tests/agent_checkpoint_redaction_test.rs:1331` 的OG26 case。旧dcc468b/734b6f基线和原legacy FAIL仅保留历史；三行为文件全SHA/mode与actual8a archive一致。 COV2-12已审选择器映射：`opencode_extraction_failure_continues_checkpoint` → `opencode_extraction_no_consumer_keeps_pending_without_checkpoint`，原失败历史保留。
 
 **Acceptance criteria:**
 
-- [ ] AC1 `cov2_macos_fake_exporter_import_session_capture`（当前格式替代；旧classic status终态样例仍FAIL/计划外DEFER-COV11-IMPORT-TERMINAL-01，不计本AC通过）
-- [ ] AC2 `opencode_export_whole_session_idempotent`
-- [ ] AC3 `opencode_export_durable_snapshot_uses_repository_keyed_hmac`
-- [ ] AC4 `opencode_export_rejects_wrong_native_session_without_export_claim`
-- [ ] AC5 `opencode_registered_failure_releases_dirty_job_claim_and_marker`
-- [ ] AC6 `opencode_export_plaintext_never_in_persist_or_logs`
-- [ ] AC7 `opencode_export_binary_trust_revalidates`
-- [ ] AC8 `opencode_export_oversize_session_degrades`
-- [ ] AC9 `opencode_export_macos_requires_trust_before_spawn`
-- [ ] AC10 `opencode_extraction_failure_continues_checkpoint` or its source-reviewed, scenario-preserving renamed successor
-- [ ] AC11 `export_stage_releases_runner_lease_on_every_exit`.
-- [ ] AC12 no case silently returns on absent bwrap/Seatbelt or reports 0 tests/skip as PASS.
-- [ ] AC13 `og26_candidate_has_zero_normal_sink_hits`.
+- [x] AC1 `cov2_macos_fake_exporter_import_session_capture`（当前格式替代；旧classic status终态样例仍FAIL/计划外DEFER-COV11-IMPORT-TERMINAL-01，不计本AC通过）
+- [x] AC2 `opencode_export_whole_session_idempotent`
+- [x] AC3 `opencode_export_durable_snapshot_uses_repository_keyed_hmac`
+- [x] AC4 `opencode_export_rejects_wrong_native_session_without_export_claim`
+- [x] AC5 `opencode_registered_failure_releases_dirty_job_claim_and_marker`
+- [x] AC6 `opencode_export_plaintext_never_in_persist_or_logs`
+- [x] AC7 `opencode_export_binary_trust_revalidates`
+- [x] AC8 `opencode_export_oversize_session_degrades`
+- [x] AC9 `opencode_export_macos_requires_trust_before_spawn`
+- [x] AC10 `opencode_extraction_failure_continues_checkpoint` or its source-reviewed, scenario-preserving renamed successor
+- [x] AC11 `export_stage_releases_runner_lease_on_every_exit`.
+- [x] AC12 no case silently returns on absent bwrap/Seatbelt or reports 0 tests/skip as PASS.
+- [x] AC13 `og26_candidate_has_zero_normal_sink_hits`.
 
 **Verification:**
 
-- [ ] (new) VER1→AC1–9/12: **macOS manual** `source .env.test && source .env.live-test && cargo test --features test-live-agent --test agent_opencode_bridge_test opencode_ -- --ignored --skip opencode_historical_import_e2e_uses_trusted_export_bytes --nocapture --test-threads=1` (actual required8/8)；另 `source .env.test && source .env.live-test && cargo test --features test-live-agent --test agent_opencode_bridge_test cov2_macos_fake_exporter_import_session_capture -- --ignored --exact --nocapture --test-threads=1` (actual required1/1)。本组当前9项由8保留旧例+1当前格式替代构成；原组独立历史8PASS/1FAIL保留，不算通过，新增cov2_其它例不混入。
-- [ ] VER2→AC10/12: **macOS manual** `source .env.test && source .env.live-test && cargo test --lib internal::ai::capture::live_pipeline::tests::export_runner_lease::end_to_end::opencode_extraction_no_consumer_keeps_pending_without_checkpoint -- --ignored --exact --nocapture --test-threads=1` (1/1; if COV2-12 renamed it, use the reviewed updated exact selector and record old→new mapping).
-- [ ] VER3→AC11/12: **macOS manual** `source .env.test && source .env.live-test && cargo test --lib internal::ai::capture::live_pipeline::tests::export_runner_lease::end_to_end::export_stage_releases_runner_lease_on_every_exit -- --ignored --exact --nocapture --test-threads=1` (1/1).
-- [ ] VER4→AC12: compare this card's three-file source inventory and each test body's non-skip assertion path with its actual report; a target reporting PASS after `BridgeRepo::init` returns `None` is FAIL, regardless of Cargo exit code. The bridge target's current `BridgeRepo::init` bwrap early return (`tests/agent_opencode_bridge_test.rs:38-45`) must be removed for macOS by COV2-12; the OG-26 target's Required Seatbelt prerequisite must assert/fail rather than skip. Linux bwrap-specific functional acceptance remains the user's later gate, while required security CI remains. Any failure returns to the named implementation owner for reviewed forward-fix and this entire final-source audit reruns; this audit cannot edit code.
-- [ ] VER5→AC12/13: **macOS manual** `source .env.test && source .env.live-test && cargo test --test agent_checkpoint_redaction_test og26_candidate_has_zero_normal_sink_hits -- --ignored --exact --nocapture --test-threads=1` (actual 1/1; confirm exporter execution and zero ordinary sink assertions on final behavior SHA; OG-26 pre-handoff VER4 historical PASS does not replace this audit).
+- [x] (new) VER1→AC1–9/12: **macOS manual** `source .env.test && source .env.live-test && cargo test --features test-live-agent --test agent_opencode_bridge_test opencode_ -- --ignored --skip opencode_historical_import_e2e_uses_trusted_export_bytes --nocapture --test-threads=1` (actual required8/8)；另 `source .env.test && source .env.live-test && cargo test --features test-live-agent --test agent_opencode_bridge_test cov2_macos_fake_exporter_import_session_capture -- --ignored --exact --nocapture --test-threads=1` (actual required1/1)。本组当前9项由8保留旧例+1当前格式替代构成；原组独立历史8PASS/1FAIL保留，不算通过，新增cov2_其它例不混入。
+- [x] VER2→AC10/12: **macOS manual** `source .env.test && source .env.live-test && cargo test --lib internal::ai::capture::live_pipeline::tests::export_runner_lease::end_to_end::opencode_extraction_no_consumer_keeps_pending_without_checkpoint -- --ignored --exact --nocapture --test-threads=1` (1/1; if COV2-12 renamed it, use the reviewed updated exact selector and record old→new mapping).
+- [x] VER3→AC11/12: **macOS manual** `source .env.test && source .env.live-test && cargo test --lib internal::ai::capture::live_pipeline::tests::export_runner_lease::end_to_end::export_stage_releases_runner_lease_on_every_exit -- --ignored --exact --nocapture --test-threads=1` (1/1).
+- [x] VER4→AC12: compare this card's three-file source inventory and each test body's non-skip assertion path with its actual report; a target reporting PASS after `BridgeRepo::init` returns `None` is FAIL, regardless of Cargo exit code. Actual8a: the bridge target's macOS Required Seatbelt assert is at `tests/agent_opencode_bridge_test.rs:40-44`; the bwrap early return at `:49-57` is non-macOS-only and remains for Linux user-later; the OG-26 target's Required Seatbelt prerequisite must assert/fail rather than skip. Linux bwrap-specific functional acceptance remains the user's later gate, while required security CI remains. Any failure returns to the named implementation owner for reviewed forward-fix and this entire final-source audit reruns; this audit cannot edit code.
+- [x] VER5→AC12/13: **macOS manual** `source .env.test && source .env.live-test && cargo test --test agent_checkpoint_redaction_test og26_candidate_has_zero_normal_sink_hits -- --ignored --exact --nocapture --test-threads=1` (actual 1/1; confirm exporter execution and zero ordinary sink assertions on final behavior SHA; OG-26 pre-handoff VER4 historical PASS does not replace this audit).
 
 **Full-suite trigger:** N/A：no-release audit 不自行执行 C 组；卡内本机 manual matrix 与文档 B 门必须通过，C/D 继承 COV2-REL-01。
 
@@ -2393,7 +2395,7 @@ VER6 现仅消费独立历史源码 `7efcf868d49a5183e7f0851a89abebee91357155`�
 
 **C/D coverage from:** COV2-REL-01；发布点的 exact-source C/D 绿后才能 `done/complete`。
 
-**Granularity:** `type=audit; axis=既有 bridge/pipeline/OG-26 12 例本机审计; recovery=forward-only; complete=yes; self-contained=yes; AC=13/20; VER=5/20; landing=0; prod-files=0; scope=S; deps=COV2-18; writeset=串行于前驱; release=no-release; split-from=N/A; exception=N/A`
+**Granularity:** `type=audit; axis=当前 bridge/pipeline/OG-26 12 例本机审计; recovery=forward-only; complete=yes; self-contained=yes; AC=13/20; VER=5/20; landing=0; prod-files=0; scope=S; deps=COV2-18; writeset=串行于前驱; release=no-release; split-from=N/A; exception=N/A`
 
 ### Task COV2-17：既有 lifecycle/crash/import/oracle 10 例本机审计
 
@@ -3216,3 +3218,40 @@ COV16延期G09已由actual signed+DCO main `a4a863f67856bf1a3053fcef72e8743b6d0a
 两Rust精确逆归一化与actual a4a863f逐字相同：仅decoder import移至已有cfgunix组、一个依赖Unix testfixture的unit加cfgunix、validator加定点Windowsdeadcode属性；所有functionbody/断言/fixture不变，非Windows runtime修复。此前95a Windows编译FAIL保留，新SHA实际Windows必要CI仍未运行/不预授PASS；原4scoped fixtures、requiredsecurity及四平台发布门均保留。当前cfg-only followup ER13none、未跑新full，不把旧10212PASS称本次整树full；REL首次bumped T2和全计划最终full仍mandatory。
 
 CODE后只更新本两个事实计划，另两Rust字节仍绑定CODE/QA后像；须最后109reader/fmtstrict、root2048核对、仅stage本卡四路径、actual signed+DCO main/archive/Push/freshremote同一。实际未知新SHA不预填，receipt由后继开工绑定；source23/26=88.46%不重复增加、formal0/26家族C-D，父formal59/71=83.10%/source61/71=85.92%不变。保留用户04/05、原7stash和official49，网站N/A、无版本/安装/模型/SessionCI变化。之后才准备最终源码COV16新12matrix（原11/12 legacyFAIL仍计划外延期），此处不记source24。
+
+
+### COV2-16 当前12例最终源码本机审计（2026-10-15 20:37:17 UTC；A通过，单审/交付待闭合）
+
+前驱CFG窄修复已实际signed+DCO main `8a547afd0fd5a73247ba47ec979541b3aacba8c9`、Push0/remote同SHA、actualarchive2048同13QA+final109reader/fmtstrict后像；codeR2soleClaude PASS/raw `2e95bbe94161a611df30e4893da5de23084fa14cbaff5d5bd47bac659cf30f5e`。仅import/cfg/lint变化、全部runtime body不变，原CODE R1 FAIL1P1保留。Windows必要CI仍pending，不以Mac冒称通过。此处测试冻结actual8a，root审计仍只写I3文档，不改任何生产/测试。
+
+本轮实际12个不重复功能用例全部PASS/0FAIL/0ignored：其余old bridge8/8（raw `29bd53356664efd2204229f29f3b23f4fd2aac7be6ef9df03adcf2aade56ad42`）＋当前格式import替代1/1（raw `e37324c9f50ea2931634034ec2841790b63c8219c248e8e1782f6ea8d78567c1`）＋no-consumer extraction1/1（raw `83be6e7d6387ccc1d60a9b854f26e230e16a4cf6b192c31dd5bfce33fc6082b4`）＋lease1/1（raw `bec70f4136de611348cc0f283ad3fe66bfe01fb14067bb74b818f5ccb9a20b5a`）＋OG26 zero-normal-sinks1/1（raw `919475e9442ea40514b2018a73cd77b05fc461d0daa9d785775bb92e6a262bb5`）。每个实际testname、匹配数、exit及start/end均与原始Cargo报告相符；静态non-skip/manual-only两门各1/1，64+32+1+12=109readers、fmt和strictalltargets/allfeatures-Dwarnings实际exit0。共12个QA步骤，2048文件前后SHA/OID/size/mode/kind同一，manifestSHA `4f0fde5edd16d4d9fdc21e017b3c6ef45e8e1ff90c655021177a517d4ad05208`。
+
+- `src/internal/ai/capture/live_pipeline_tests.rs` SHA256 `3413f5059f1899c499e7c8e0067da5e1c5b1babd11502071c2ab2c4467ad9722` mode `0o644`。
+
+- `tests/agent_checkpoint_redaction_test.rs` SHA256 `ef1896407d1a0db29be11dcb25892659fb96f5d3df1a524d72eecc247f3b7cb2` mode `0o644`。
+
+- `tests/agent_opencode_bridge_test.rs` SHA256 `c04d3544f3e1dd492a6be269efaa9962f90855e46d507af7bf16c0c2c5b915c8` mode `0o644`。
+
+Required macOS Seatbelt assert和每个选定body的执行路径已对照，未以缺sandbox/0selected/早return计PASS；static guard两门并不额外算功能用例。旧oversize body若先遇到sandboxfork拒绝，仅证明保守降级，不扩大成实际触达byte-cap正例。旧classifier私有字段仍只有此前审定的有界路由推断，不声称直接观测或SourceA。原parser postprocessing首次同一行ok正则漏识别nocapture插入日志，断言失败保留；只修私有收据解析，用实际name+exit+pass/fail/ignored结果校核，源码和测试从未改动。
+
+本轮范围严格依actual signed G09 a4a863f：AC1为current-format功能替代。旧classic status用例在95a实际8PASS/1FAIL的原FAIL/raw b1ab0f5...保留计划外DEFER-COV11-IMPORT-TERMINAL-01，classic info/parts、session行时间映射/终态缺口未修复、不追认兼容PASS；原27静态inventory与所有测试body未改。两个audit当前22名=21继承+1替代，替代已在5新增中；required unique26。COV17十例/真实visible-only、SourceA/native三字段、家族bumped full/安全CI/四平台/站点安装门均不减。
+
+原13AC/5VER按实际测试勾选，但Lifecycle仍in-progress/Acceptance空，须新增三文档相关QA、soleClaude审计PASS/root裁决及signed+DCO main/archive2048/Push/freshremote后才source24/26=92.31%；此前仍23/26=88.46%、formal0/26家族C-D。父formal59/71=83.10%、source61/71=85.92%不增；71/26分母不变。无新full、Linux功能/账号模型/nativeissuer/注册/网站/版本/安装/SessionCI操作。当前runtime已装official49原SHA保持，用户04/05及原7stash保留。下张COV2-17只在本卡源码交付真实闭合后开工。
+
+
+### COV2-16 单审与最终事实闭合（2026-10-15 20:48:59 UTC；signed交付仍待）
+
+soleClaude实际exit0/VERDICT PASS，P0/P1/P2=0、3P3，rawSHA `102e022978e69fa137bcb6c11c89d074a404f6be987d95dd5d745da7e98098f9`；root已实读并接受actual12/12、原13AC5VER、source2048同一性和审计边界。三P3在本两事实计划明确关闭：VER4刷新actual8a macOSassert40–44/nonMacbwrapreturn49–57；本卡Current evidence记录COV12 old→new exact映射；本段补实际argv与env加载。无生产/测试/验收范围变更，不预授nativeSourceA/旧legacy兼容或真实byte-cap正例。
+
+实际每个QA子进程由zsh -f静默加载root `.env.test`和`.env.live-test`，任一source失败会exit90；本轮全部QA exit0，所以两文件加载实际成功。仅记录文件名，不记录值/密钥；清除了模型/native/local Session opt-in，cargo jobs2，target为隔离warm源树。实际使用额外`--locked --offline`，保持已审锁定依赖；五功能命令的真实argv如下（分别8/8+1/1+1/1+1/1+1/1，合计12 unique）：
+- `cargo test --locked --offline --features test-live-agent --test agent_opencode_bridge_test opencode_ -- --ignored --skip opencode_historical_import_e2e_uses_trusted_export_bytes --nocapture --test-threads=1`。
+- `cargo test --locked --offline --features test-live-agent --test agent_opencode_bridge_test cov2_macos_fake_exporter_import_session_capture -- --ignored --exact --nocapture --test-threads=1`。
+- `cargo test --locked --offline --lib internal::ai::capture::live_pipeline::tests::export_runner_lease::end_to_end::opencode_extraction_no_consumer_keeps_pending_without_checkpoint -- --ignored --exact --nocapture --test-threads=1`。
+- `cargo test --locked --offline --lib internal::ai::capture::live_pipeline::tests::export_runner_lease::end_to_end::export_stage_releases_runner_lease_on_every_exit -- --ignored --exact --nocapture --test-threads=1`。
+- `cargo test --locked --offline --test agent_checkpoint_redaction_test og26_candidate_has_zero_normal_sink_hits -- --ignored --exact --nocapture --test-threads=1`。
+
+另有helper预备构建、staticno-skip/manual-only各1/1、109reader/fmtstrict全PASS；原functional12步完整2048输入前后同一，新增I3docs三门也实际109/fmtstrict通过且其余2045输入同functional8a一致。原parser-only断言失败不改测试结果。`coverage-v2.md`保持本轮CODE已审字节；其“单审/交付待”属于20:37UTC前审计快照，当前生命周期/门结果以本两事实计划与实际签推收据为准。
+
+实际必要Windowsjob `116656195322`（run `38802675784`、head `8a547afd0fd5a73247ba47ec979541b3aacba8c9`）现completed/success，completed_at `2026-10-15T20:41:24Z`；只证明该8a的libtest编译/4scopedfixtures，不冒称后续未知SHA CI或全部CI全绿。旧a4构建run38800340609已fresh确认completed/cancelled，旧提交自runner转最新8a；当前Windows无需重复因同一失败重跑，后续新commit仍保留其自身必要CI门。
+
+本卡现in-progress/locally-accepted、A/B已闭合，formal0仍继承家族C/D。CODE后仅这两事实计划变化，机制doc与全部生产/测试保持已审已测SHA；须最后109reader/fmtstrict、root2048同一性、仅stage I3、actual signed+DCO main/archive/Push/freshremote后才source24/26=92.31%；此前仍23/26=88.46%。未知提交SHA不预填，后继ER02绑定真实收据。父formal59/71=83.10%、source61/71=85.92%不变，26/71分母不变；旧legacy FAIL/DEFER、SourceA/三native字段、COV17真实观察、bumpedT2full/四平台/站点安装门保留。没有新full、bump/tag/release/安装、Linux功能或模型/账号/nativeissuer操作，网站N/A（无公开命令变化）。下一张COV2-17只在实际源码交付闭合后开工。

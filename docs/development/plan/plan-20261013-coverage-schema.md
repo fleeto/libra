@@ -1,5 +1,11 @@
 # OpenCode coverage schema-v2 前置实施计划（2026-10-13）
 
+> **COV2-17 A/B＋Claude PASS已闭合，签推待：** 实际10/10及唯一真实visible-only观察通过；当前source24/26，本提交实际signed交付后才25/26=96.15%及DEP-OG-13 source-ready；formal0家族C/D、父formal59/71不变。下一COV2-REL-01。
+
+> **COV2-17 10/10＋真实visible-only已通过，单审/交付待：** 仅一次Haiku4.5实际观察；source当前24/26=92.31%，本卡signed交付闭合后才25/26=96.15%；formal0家族C/D、父formal59/71不变。下一COV2-REL-01。
+
+> **历史快照（2026-10-15 21:06 UTC 真实观察前；已由上方结果覆盖）：COV2-17 实际10/10通过，真实观察待。** 前驱20f7787已signed交付，COV source24/26=92.31%；本卡AC12/VER6、单审/交付仍待，formal0家族C/D，父formal59/71不变。
+
 > **COV2-16 A/B已闭合、源码交付待：** actual12/12＋109reader/fmtstrict＋soleClaude PASS/root已完成；source当前23/26，本次signed交付闭合后才24/26=92.31%，formal0家族C-D、父formal59/71保持。下一COV2-17。
 
 > **COV2-11 cfg前滚本机门与单审已闭合：** 原6VER各1/1、cfg单测1/1、两相关模块各37/37、109reader/fmtstrict及soleClaude实际PASS；新SHA Windows CI仍pending。仅签推同一性完成后交付该前滚，COVsource仍23/26。下一卡恢复COV2-16新12matrix，旧legacyFAIL/defer不改。
@@ -2401,37 +2407,37 @@ VER6 现仅消费独立历史源码 `7efcf868d49a5183e7f0851a89abebee91357155`�
 
 **Task type:** audit
 
-**Lifecycle / Acceptance:** pending / 空
+**Lifecycle / Acceptance:** in-progress / locally-accepted
 
 **Description:** 10-case lifecycle/crash/import/oracle macOS acceptance inventory。本卡唯一行为轴、恢复和粒度见下方 Granularity；不得以 synthetic/native 互换验收。
 
 **Out of scope:** 只读审计，不修改生产/测试；失败回到所属实现卡前滚并重跑 COV2-16/17。
 
-**Current evidence:** tests/agent_lifecycle_event_test.rs; tests/agent_hook_crash_test.rs; tests/agent_import_test.rs; src/internal/ai/capture/live_oracle_tests.rs（基线 `dcc468b`；ER-02 开工刷新行号与实际源码）。
+**Current evidence:** 已核前驱实际 signed+DCO main `20f7787b8c8589e1af24c71d1835973adbce3d98`、Push0/remote同SHA及all2048与受审受测后像相同；COV16 actual12/12、soleClaude PASS/raw `102e022978e69fa137bcb6c11c89d074a404f6be987d95dd5d745da7e98098f9`，source24/26。当前 `tests/agent_lifecycle_event_test.rs:4647/4957/4999/5029/5059/5103/5306`、`tests/agent_hook_crash_test.rs:2388`、`tests/agent_import_test.rs:3308`、`src/internal/ai/capture/live_oracle_tests.rs:288`；历史dcc468b仅旧基线。
 
 **Acceptance criteria:**
 
-- [ ] AC1 `hook_public_contract_byte_compat_matrix`
-- [ ] AC2 `opencode_status_idle_maps_turn_end`
-- [ ] AC3 `opencode_status_busy_retry_fails_closed`
-- [ ] AC4 `opencode_message_updated_is_single_envelope_turn_start`
-- [ ] AC5 `opencode_missing_legacy_prompt_fails_before_writes`
-- [ ] AC6 `opencode_legacy_alias_transition_forwarded`
-- [ ] AC7 `opencode_produced_frames_reach_real_ingress_and_survive_history_rollover`
-- [ ] AC8 `capture_coordinator_native_replay_matrix`
-- [ ] AC9 `agent_import_confirmation_precedes_opencode_export`
-- [ ] AC10 `live_checkpoint_metadata_shape_is_stable`.
-- [ ] AC11 no case is counted PASS after an early return, 0 selected tests, a missing OpenCode matrix row or a printed skip.
-- [ ] AC12 a genuine visible-only OpenCode model observation is captured on the same final behavior source without issuer registration or live mint; this observation grants no Source A authority.
+- [x] AC1 `hook_public_contract_byte_compat_matrix`
+- [x] AC2 `opencode_status_idle_maps_turn_end`
+- [x] AC3 `opencode_status_busy_retry_fails_closed`
+- [x] AC4 `opencode_message_updated_is_single_envelope_turn_start`
+- [x] AC5 `opencode_missing_legacy_prompt_fails_before_writes`
+- [x] AC6 `opencode_legacy_alias_transition_forwarded`
+- [x] AC7 `opencode_produced_frames_reach_real_ingress_and_survive_history_rollover`
+- [x] AC8 `capture_coordinator_native_replay_matrix`
+- [x] AC9 `agent_import_confirmation_precedes_opencode_export`
+- [x] AC10 `live_checkpoint_metadata_shape_is_stable`.
+- [x] AC11 no case is counted PASS after an early return, 0 selected tests, a missing OpenCode matrix row or a printed skip.
+- [x] AC12 a genuine visible-only OpenCode model observation is captured on the same final behavior source without issuer registration or live mint; this observation grants no Source A authority.
 
 **Verification:**
 
-- [ ] VER1→AC1–7/11: **macOS manual** `source .env.test && source .env.live-test && cargo test --test agent_lifecycle_event_test -- --ignored --nocapture --test-threads=1` (actual 7/7).
-- [ ] VER2→AC8/11: **macOS manual** `source .env.test && source .env.live-test && cargo test --test agent_hook_crash_test capture_coordinator_native_replay_matrix -- --ignored --exact --nocapture --test-threads=1` (1/1; inspect OpenCode row execution).
-- [ ] VER3→AC9/11: **macOS manual** `source .env.test && source .env.live-test && cargo test --test agent_import_test agent_import_confirmation_precedes_opencode_export -- --ignored --exact --nocapture --test-threads=1` (1/1).
-- [ ] VER4→AC10/11: **macOS manual** `source .env.test && source .env.live-test && cargo test --lib internal::ai::capture::live_oracle_tests::live_checkpoint_metadata_shape_is_stable -- --ignored --exact --nocapture --test-threads=1` (1/1; inspect OpenCode row execution).
-- [ ] VER5→AC11: compare the exact 10-name static inventory to per-case test reports, non-skip branches and source hashes/modes; the manual report records test count, OpenCode assertion marker, elapsed time and final source SHA, never private payloads. Any failure returns to the named implementation owner for reviewed forward-fix and both COV2-16/17 final-source audits rerun; this audit cannot edit code.
-- [ ] VER6→AC12: under DEP-COV2-MODEL, pre-register actual isolated OpenCode executable/build/model/plugin/transport IDs and full sanitized argv in this plan, then run one genuine visible-only local model observation on final behavior source (≤10 minutes); record actual exit, JSON field names/types/counts, version/partial outcome, keyed digest and source SHA only. Do not register an issuer, call live mint, store transcript or treat readable output as native proof. Missing/failed response is UNRUN/blocked, not synthetic PASS.
+- [x] VER1→AC1–7/11: **macOS manual** `source .env.test && source .env.live-test && cargo test --test agent_lifecycle_event_test -- --ignored --nocapture --test-threads=1` (actual 7/7).
+- [x] VER2→AC8/11: **macOS manual** `source .env.test && source .env.live-test && cargo test --test agent_hook_crash_test capture_coordinator_native_replay_matrix -- --ignored --exact --nocapture --test-threads=1` (1/1; inspect OpenCode row execution).
+- [x] VER3→AC9/11: **macOS manual** `source .env.test && source .env.live-test && cargo test --test agent_import_test agent_import_confirmation_precedes_opencode_export -- --ignored --exact --nocapture --test-threads=1` (1/1).
+- [x] VER4→AC10/11: **macOS manual** `source .env.test && source .env.live-test && cargo test --lib internal::ai::capture::live_oracle_tests::live_checkpoint_metadata_shape_is_stable -- --ignored --exact --nocapture --test-threads=1` (1/1; inspect OpenCode row execution).
+- [x] VER5→AC11: compare the exact 10-name static inventory to per-case test reports, non-skip branches and source hashes/modes; the manual report records test count, OpenCode assertion marker, elapsed time and final source SHA, never private payloads. Any failure returns to the named implementation owner for reviewed forward-fix and both COV2-16/17 final-source audits rerun; this audit cannot edit code.
+- [x] VER6→AC12: under DEP-COV2-MODEL, pre-register actual isolated OpenCode executable/build/model/plugin/transport IDs and full sanitized argv in this plan, then run one genuine visible-only local model observation on final behavior source (≤10 minutes); record actual exit, JSON field names/types/counts, version/partial outcome, keyed digest and source SHA only. Do not register an issuer, call live mint, store transcript or treat readable output as native proof. Missing/failed response is UNRUN/blocked, not synthetic PASS.
 
 **Full-suite trigger:** N/A：no-release audit 不自行执行 C 组；卡内本机 manual matrix 与文档 B 门必须通过，C/D 继承 COV2-REL-01。
 
@@ -3255,3 +3261,306 @@ soleClaude实际exit0/VERDICT PASS，P0/P1/P2=0、3P3，rawSHA `102e022978e69fa1
 实际必要Windowsjob `116656195322`（run `38802675784`、head `8a547afd0fd5a73247ba47ec979541b3aacba8c9`）现completed/success，completed_at `2026-10-15T20:41:24Z`；只证明该8a的libtest编译/4scopedfixtures，不冒称后续未知SHA CI或全部CI全绿。旧a4构建run38800340609已fresh确认completed/cancelled，旧提交自runner转最新8a；当前Windows无需重复因同一失败重跑，后续新commit仍保留其自身必要CI门。
 
 本卡现in-progress/locally-accepted、A/B已闭合，formal0仍继承家族C/D。CODE后仅这两事实计划变化，机制doc与全部生产/测试保持已审已测SHA；须最后109reader/fmtstrict、root2048同一性、仅stage I3、actual signed+DCO main/archive/Push/freshremote后才source24/26=92.31%；此前仍23/26=88.46%。未知提交SHA不预填，后继ER02绑定真实收据。父formal59/71=83.10%、source61/71=85.92%不变，26/71分母不变；旧legacy FAIL/DEFER、SourceA/三native字段、COV17真实观察、bumpedT2full/四平台/站点安装门保留。没有新full、bump/tag/release/安装、Linux功能或模型/账号/nativeissuer操作，网站N/A（无公开命令变化）。下一张COV2-17只在实际源码交付闭合后开工。
+
+
+### COV2-17 开工与10例实际审计（2026-10-15 21:06:04 UTC；真实响应观察仍UNRUN）
+
+前驱COV16实际signed+DCO main `20f7787b8c8589e1af24c71d1835973adbce3d98`，parent8a547af；archiveSHA `ac25cbcfb3cfd6cbccaecd742c046f10e810d85b34a91a215e8e8d4ebd1924fc`，2048文件与最终QA后像相同，3个I文档外2045行为输入一致；实际Push0/freshremote同一，soleClaude PASS与root裁决已闭合。source当前24/26=92.31%，formal0/26仍家族C/D，父formal59/71=83.10%、source61/71=85.92%不变；Windows8a特定job实际success不预授20f新SHA的CI。
+
+本卡在actual20f最终行为源码运行：lifecycle7/7＋crash1/1＋import确认1/1＋oracle1/1，共10uniquePASS/0FAIL/0ignored；两个no-skip/manual-only静态门各1/1，109reader（64+32+1+12）、fmt与strictalltargets/allfeatures-Dwarnings全部实际exit0；共10个QA步骤，2048前后SHA/OID/size/mode/kind同一。
+
+- VER1-lifecycle7 actual 7/actual7，raw SHA256 `1a816571d12de02af202ed609f18dd5a55a24e2b6cb27e8f29543b48ecb7394a`，UTC 2026-10-15T20:56:24.558735+00:00→2026-10-15T20:56:53.387131+00:00。
+
+- VER2-crash actual 1/actual1，raw SHA256 `2b78a5b2bc5029be01943873564f0134eb5c0f42ec755009a2f8655df0142abf`，UTC 2026-10-15T20:56:53.387309+00:00→2026-10-15T20:57:01.473408+00:00。
+
+- VER3-consent actual 1/actual1，raw SHA256 `776dbbc2e3ad631876ae93c4f0dabf7b904efcc7c5583469059fcbecd1044c18`，UTC 2026-10-15T20:57:01.473599+00:00→2026-10-15T20:57:05.552888+00:00。
+
+- VER4-oracle actual 1/actual1，raw SHA256 `493cd059e627aeb66a06a460e8363204d872f81f4d56eb95c3d5e8012e59a328`，UTC 2026-10-15T20:57:05.553099+00:00→2026-10-15T20:57:19.608628+00:00。
+
+- `tests/agent_lifecycle_event_test.rs` SHA256 `c0bdb6ca4e4ce3f77c2e7e031f2af3551cfed58a2b3798b6143a7c6989facad4` mode `0o644`。
+
+- `tests/agent_hook_crash_test.rs` SHA256 `5c16c45c9e4fc6929b4681a30b4a8f541357240c708d61d1199e68a18f87e977` mode `0o644`。
+
+- `tests/agent_import_test.rs` SHA256 `9f165781a65971f9dbac5ed6442353e681be429ae73bef39987351371680dc74` mode `0o644`。
+
+- `src/internal/ai/capture/live_oracle_tests.rs` SHA256 `2493e17afad7211842e046c41f5327ae5ed7e902c6fd64ce76871904c301d0b8` mode `0o644`。
+
+原具名10项与实际Cargo所选name/positivecount/exit一一对应；lifecycle public-contract表包含OpenCode surface；crash固定8row中两条OpenCode逐一进入for循环，fault/replay/claim/receipt/session oracle无早退；metadata三provider包含OpenCode桥不可用row并与冻结整张gold逐字断言。所选body没有环境skip或return；两个静态guard不额外算功能用例。这些本机fixture并非真实native来源/正例；原COV16legacy FAIL/defer及SourceA仍保留。
+
+AC1–11/VER1–5按实际通过勾选；AC12/VER6仍未运行、不勾选。当前已验证官方OpenCode2.0.29 SHA7f46ba1...、88个公开builtin plugin active、外部plugin0、官方Anthropic endpoint配置一致、Haiku4.5 enabled、thinking disabled；工具权限最后wildcard deny后仅有browser deny，属于更窄deny而非allow/ask。官方2.0.29 `packages/core/src/permission.ts:87–95` 使用 `findLast`（第91行），故最后匹配rule优先；追加browser deny不会重开工具。实际四轮私有preflight停止，均在任何模型请求前（attempt0）；首轮只记总阶段、未保留更细原因，后续修正owned路径canonical比较及Location.response wrapper，并将过严的最后一条恰为wildcard检查改为最后wildcard deny之后只能继续deny。第四轮内容无敏元数据证实追加browser deny。这些是collector准备，不是模型FAIL或模型重试；其原STOPPED记录保留。已修正私有collector，不改任何仓库源码/测试/原AC/VER。独立私有Rust classifier初次误用cfg(test)辅助方法编译失败保留，修正调用现有public with_deadline后实际编译exit0；仅依已审pure preview API，不授native能力。
+
+本卡只写原I4文档，无生产、测试、CI、installer/版本或公开命令变化，网站N/A。Linux功能由用户后验；无新full，家族首次bumped T2全量/安全CI/四平台/站点安装仍必需。未登记issuer、不live-mint、不修改globalauth/config，owned credential以内存转移到临时store，完成后清理；不存响应正文或密钥。Source A/native三字段不因可读响应放行。未知后续SHA/结果不预填，soleClaude/root/signed交付待；source25/26只在本卡全部门实际闭合后登记。
+
+
+### COV17-OBSERVATION-PREREG-20f7787
+
+2026-10-15 21:06:04 UTC：这是该final行为源码的唯一一次genuine visible-only观察预登记；当前attempts=0，启动上限1，模型run与原始export/classify总预算600秒，不把1次CLI启动宣称为1次HTTP请求。所有配置/API检查为无推理preflight。所用Libra实际20f源码与下列classifier artifact绑定；本卡后续只变I4文档，全部2044非I行为输入必须保持同SHA/mode。本文完整sanitized argv的session-ID槽只允许由本次新Session实际事件ID代入；它不是任意历史Session。所有其他argv/环境同下；随机认证仅内存，不能出现在argv/证据中。
+
+```json
+{
+  "utc": "2026-10-15T21:04:39.056775+00:00",
+  "status": "READY_FOR_PARENT_PREREGISTRATION",
+  "base": "20f7787b8c8589e1af24c71d1835973adbce3d98",
+  "binary_version": "2.0.29",
+  "binary_sha256": "7f46ba1dad86b730903d9adf54015bb4e706fc1ab6a247affc5a635cd8a663f3",
+  "config_sha256": "fcc4a7124034f8dbe1409c72e7869b3f13e6371f62814b43c961a4e32787aa93",
+  "classifier_binary_sha256": "88fc35dad3fd735a5c076923b9aa35065b22d58e79ba5a92e5363a1d967077d8",
+  "classifier_source_sha256": "2fbf10743fa58f7ba24501c0f9a1794276a4723da6c636a5b124a06283639cfd",
+  "effective": {
+    "config": {
+      "entries": 3,
+      "owned_entries": 3,
+      "managed_or_unknown_entries": 0
+    },
+    "builtin_plugin_ids": [
+      "opencode.agent",
+      "opencode.browser",
+      "opencode.command",
+      "opencode.config.agent",
+      "opencode.config.command",
+      "opencode.config.compaction",
+      "opencode.config.compatibility",
+      "opencode.config.formatter",
+      "opencode.config.image",
+      "opencode.config.instruction",
+      "opencode.config.location-watcher",
+      "opencode.config.mcp",
+      "opencode.config.policy",
+      "opencode.config.provider",
+      "opencode.config.reference",
+      "opencode.config.shell",
+      "opencode.config.skill",
+      "opencode.config.snapshot",
+      "opencode.config.tool-output",
+      "opencode.config.websearch",
+      "opencode.config.worktree",
+      "opencode.mcp.codemode.defaults",
+      "opencode.models.dev",
+      "opencode.plan",
+      "opencode.prompt.anthropic",
+      "opencode.prompt.arcee",
+      "opencode.prompt.identity",
+      "opencode.prompt.kimi",
+      "opencode.prompt.meta",
+      "opencode.prompt.openai",
+      "opencode.prompt.verbosity",
+      "opencode.provider.amazon.bedrock",
+      "opencode.provider.azure",
+      "opencode.provider.cerebras",
+      "opencode.provider.chatgpt",
+      "opencode.provider.cloudflare.ai.gateway",
+      "opencode.provider.cloudflare.workers.ai",
+      "opencode.provider.cohere",
+      "opencode.provider.databricks",
+      "opencode.provider.digitalocean",
+      "opencode.provider.dynamic",
+      "opencode.provider.github.copilot",
+      "opencode.provider.gitlab",
+      "opencode.provider.google.vertex",
+      "opencode.provider.kilo",
+      "opencode.provider.llmgateway",
+      "opencode.provider.lmstudio",
+      "opencode.provider.modal",
+      "opencode.provider.neon",
+      "opencode.provider.nvidia",
+      "opencode.provider.ollama",
+      "opencode.provider.openai",
+      "opencode.provider.opencode",
+      "opencode.provider.openrouter",
+      "opencode.provider.perplexity",
+      "opencode.provider.poe",
+      "opencode.provider.prompt-cache-key",
+      "opencode.provider.sap.ai.core",
+      "opencode.provider.snowflake.cortex",
+      "opencode.provider.vercel",
+      "opencode.provider.vllm",
+      "opencode.provider.xai",
+      "opencode.provider.zenmux",
+      "opencode.skill",
+      "opencode.tool.edit",
+      "opencode.tool.glob",
+      "opencode.tool.grep",
+      "opencode.tool.input.repair",
+      "opencode.tool.patch",
+      "opencode.tool.question",
+      "opencode.tool.read",
+      "opencode.tool.shell",
+      "opencode.tool.skill",
+      "opencode.tool.subagent",
+      "opencode.tool.webfetch",
+      "opencode.tool.websearch",
+      "opencode.tool.write",
+      "opencode.tools",
+      "opencode.tools.mcp-resources",
+      "opencode.vcs.git",
+      "opencode.vcs.hg",
+      "opencode.warming",
+      "opencode.websearch.exa",
+      "opencode.websearch.firecrawl",
+      "opencode.websearch.parallel",
+      "opencode.websearch.tavily",
+      "opencode.websearch.tinyfish",
+      "opencode.wellknown"
+    ],
+    "external_plugins": 0,
+    "failed_plugins": 0,
+    "provider": "anthropic",
+    "model": "anthropic/claude-haiku-4-5",
+    "package": "@opencode/ai/providers/anthropic",
+    "official_endpoint_equal": true,
+    "transport": "native Anthropic over HTTPS/default HTTP",
+    "thinking": "disabled",
+    "agent": "cov17-visible",
+    "steps": 1,
+    "final_permission_rule": "wildcard deny, followed only by deny rules",
+    "no_thinking_override": true
+  },
+  "owned_root": "/private/tmp/libra-cov17-audit-r1-20f7787-20261016/observation/owned",
+  "environment": {
+    "HOME": "/private/tmp/libra-cov17-audit-r1-20f7787-20261016/observation/owned/home",
+    "XDG_DATA_HOME": "/private/tmp/libra-cov17-audit-r1-20f7787-20261016/observation/owned/xdg-data",
+    "XDG_CACHE_HOME": "/private/tmp/libra-cov17-audit-r1-20f7787-20261016/observation/owned/xdg-cache",
+    "XDG_CONFIG_HOME": "/private/tmp/libra-cov17-audit-r1-20f7787-20261016/observation/owned/xdg-config",
+    "XDG_STATE_HOME": "/private/tmp/libra-cov17-audit-r1-20f7787-20261016/observation/owned/xdg-state",
+    "TMPDIR": "/private/tmp/libra-cov17-audit-r1-20f7787-20261016/observation/owned/tmp",
+    "OPENCODE_CONFIG_DIR": "/private/tmp/libra-cov17-audit-r1-20f7787-20261016/observation/owned/config",
+    "OPENCODE_CONFIG": "/private/tmp/libra-cov17-audit-r1-20f7787-20261016/observation/owned/config/opencode.json",
+    "OPENCODE_DB": "/private/tmp/libra-cov17-audit-r1-20f7787-20261016/observation/owned/xdg-data/opencode/opencode.db",
+    "OPENCODE_CONFIG_PROJECT_DISABLE": "1",
+    "OPENCODE_DISABLE_MODELS_FETCH": "1",
+    "OPENCODE_DISABLE_AUTOUPDATE": "1",
+    "OPENCODE_FILEWATCHER_DISABLE": "1",
+    "OPENCODE_DISABLE_FFF": "1",
+    "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+    "TERM": "dumb",
+    "LANG": "en_US.UTF-8",
+    "PWD": "/private/tmp/libra-cov17-audit-r1-20f7787-20261016/observation/owned/cwd"
+  },
+  "secret_env_names": [
+    "OPENCODE_PASSWORD"
+  ],
+  "server_argv": [
+    "/Users/eli/.opencode/bin/opencode",
+    "serve",
+    "--stdio",
+    "--port",
+    "0",
+    "--hostname",
+    "127.0.0.1"
+  ],
+  "auth_source_argv": [
+    "/Users/eli/.opencode/bin/opencode",
+    "auth",
+    "export",
+    "anthropic"
+  ],
+  "auth_destination_argv": [
+    "/Users/eli/.opencode/bin/opencode",
+    "auth",
+    "import",
+    "--server",
+    "http://127.0.0.1:51053"
+  ],
+  "run_argv": [
+    "/Users/eli/.opencode/bin/opencode",
+    "run",
+    "--server",
+    "http://127.0.0.1:51053",
+    "--model",
+    "anthropic/claude-haiku-4-5",
+    "--agent",
+    "cov17-visible",
+    "--format",
+    "json",
+    "--title",
+    "cov17-visible-observation",
+    "Reply with the single word READY."
+  ],
+  "export_argv_template": [
+    "/Users/eli/.opencode/bin/opencode",
+    "session",
+    "export",
+    "<EXACT-NEW-SESSION-ID>",
+    "--server",
+    "http://127.0.0.1:51053"
+  ],
+  "max_attempts": 1,
+  "overall_timeout_seconds": 600,
+  "internal_http_retries_not_claimed_one_request": true,
+  "prompt_sha256": "a48ba54e9a3e9424e093278ebb22ab78048172fd5d87c7b54c01441252d7e719",
+  "host_managed_absent": true,
+  "model_attempts": 0,
+  "issuer_registration": false,
+  "live_mint": false,
+  "sourceA": false
+}
+```
+
+原始export不使用--sanitize或任何字段删除；同一未改bytebuffer先全树有界候选计数，后送当前pure preview classifier。只存固定字段名/类型/数量、coverage版本/partial、exit/时长与新鲜memory-only key的HMAC；任何state/proof、partial、模型失败/0样本都不算PASS，不重试同一final行为源码。普通text-only通过只证明可读响应，不证明typed Reasoning正例或SourceA。此处实际配置endpoint一致仅是配置事实，不宣称独立证明TLS对端或上游服务内部行为。
+
+
+### COV2-17 真实visible-only观察结果（2026-10-15 21:07:35 UTC；功能A通过，单审/交付待）
+
+预登记 `COV17-OBSERVATION-PREREG-20f7787` 在实际启动前已写本文；gate UTC `2026-10-15T21:06:04.673195+00:00`，绑定prereg SHA `f9ac142572ba7f629669b1db78546e60fc7af69e8f2ffe338a30739fb41e4d63` 与当时plan SHA `4606c0a9a235511d421fd84a67552bd0ca6eb2cc9f184807559a903c0109b161`。实际唯一attempt UTC `2026-10-15T21:06:04.962167+00:00`，结果UTC `2026-10-15T21:06:07.317946+00:00`；同一owned服务上重核88 builtin/0external、配置/endpoint/model/权限后才发起，genuine provider run/原始export/当前classifier实际exit均0，elapsed `2.355785`秒，小于600秒，不是按elapsed估算成功。1个新Session、1个step_start/1个text事件；无工具事件，无附加模型尝试，也不把一次CLI启动说成只有一次HTTP请求。
+
+当前pure classifier在actual20f行为源码实际编译的artifact上读同一未经sanitize/字段删除的export bytebuffer，实际classifier_ok=true、partial=false、1turn、coverage版本[1]。原始树全层有界检查state/signature/redactedData/reasoningEncryptedContent/originProof/thoughtSignature计数均0；结果HMAC-SHA256 `c1275413b2e9f8b84c87438d89182b61f51b26c258a18c6338c6844dd1d8f6ac`，新鲜HMAC key只在内存、未留存。只观察到普通可见文本；coverage-v1不证明typed Reasoning positive，native/SourceA credit=false。原始响应、stderr/credential内容不进证据；owned运行store已在进程终结后清理，保留的只是固定字段名、JSON类型/数量与以下无敏元数据。并未更改global auth/config、登记issuer、调用live mint或给native三字段放行。source-side `auth export anthropic` 使用现有用户环境且没有显式 `--server`，可能ensure/启动其现有managed服务（official29 cli auth/export.ts:12 与services/server-connection.ts:21–52）；未宣称该源端的服务或文件系统副作用为零，目标auth import仍仅owned store。
+
+观察收据SHA256 `5eda73cd5b53e4354a3314d55e754441da808cafddfcd020a63f8befc2daf97a`；独立原始树计数/classifier无敏收据SHA `c601d95d0712ccf8d4820c0299de56193daa7b6ae4eb5d1275b7b83a54b5bbe1`。内容无敏字段清单如下（`<other>`合并未知字段名，未保留任意自由字段/值）：
+
+```json
+{
+  "field_names_types_counts": {
+    "info:object": 1,
+    "id:string": 7,
+    "projectID:string": 1,
+    "agent:string": 3,
+    "model:object": 2,
+    "providerID:string": 2,
+    "<other>:string": 6,
+    "cost:number": 2,
+    "tokens:object": 2,
+    "input:number": 2,
+    "output:number": 2,
+    "reasoning:number": 2,
+    "cache:object": 2,
+    "read:number": 2,
+    "write:number": 2,
+    "time:object": 5,
+    "created:number": 5,
+    "updated:number": 1,
+    "<other>:number": 2,
+    "title:string": 1,
+    "<other>:object": 1,
+    "directory:string": 1,
+    "messages:array": 1,
+    "type:string": 5,
+    "text:string": 2,
+    "<other>:array": 1,
+    "completed:number": 1,
+    "content:array": 1,
+    "finish:string": 1
+  },
+  "state_proof_candidate_counts": {
+    "originProof": 0,
+    "reasoningEncryptedContent": 0,
+    "redactedData": 0,
+    "signature": 0,
+    "state": 0,
+    "thoughtSignature": 0
+  },
+  "node_count": 72
+}
+```
+
+AC12/VER6仅按上述实际观察勾选；原12AC/6VER现均有具名实证，Lifecycle仍in-progress/Acceptance空，不能在Claude/root/signed交付前称本卡已交付。后续只有I4文档变化，全部2044非I源码/测试/配置/fixtures与actual20f行为同SHA/mode；需新增I4文档109reader/fmtstrict、唯一Claude PASS/root裁决、签名+DCO main/archive2048/Push/freshremote，同一性闭合后才source25/26=96.15%并登记DEP-OG-13 source-ready。formal0/26仍家族C/D，父formal59/71=83.10%/source61/71=85.92%不变。下张COV2-REL-01首次bumped最终源码双env full、安全CI、四平台签名发布、站点/Homebrew/curl安装及原`.2`兼容门均保留；这次普通响应不关闭Source A或current`.3` SRC029/RUN029。
+
+
+### COV2-17 唯一Claude PASS及事实收口（2026-10-15 21:15:21 UTC）
+
+本卡CODE/审计唯一Claude Code实际exit0、result_is_error=false，最后原文VERDICT: PASS；0P0/P1/P2、3非阻断P3，raw SHA256 `4c177563ae451dbdad7ba32a852efd4d14ec86fa602f41b3ed380ce5de660a48`，实际结束UTC `2026-10-15T21:13:14.169412+00:00`。root已按原12AC/6VER与actual10uniquePASS/0FAIL/0ignored＋1次真实visible-only、109reader/fmtstrict和原始2048同一性接受；未改生产、测试、gold、native授权或任何AC/VER/I/R。三P3以本I4事实澄清关闭：旧未观察横幅标为21:06前历史；last-match权限语义补official29 permission.ts:91；源auth export可能ensure已有managed服务的副作用不声称为零。原R1 PASS与全部4次attempt0 preflight STOP及私有classifier R1 compileFAIL历史保留；不将它们改记模型PASS。
+
+Lifecycle现在in-progress/locally-accepted（A/B已满足），formal仍0/26继承COV2-REL-01实际C/D。本轮最后事实/标签补写只在原I4，全部2044非I源码与actual20f行为相同；还须对这些最终事实字节重新109reader/fmtstrict、soleClaude事实复核，之后root只stage I4、signed+DCO main/archive2048/Push/freshremote同一才交付。CODE审查之后未再执行模型/fixture；不重试20f同一行为源码。未知final提交SHA与事实复核结果不预填，受审后像/实际SHA由root交付收据及后继ER02绑定。
+
+**DEP-OG-13 source-ready条件交接：** 仅当本签名提交实际main Push/freshremote与以上源码/审查门闭合，25张nonrelease（23implementation+2audit）才全部source-qualified，COVsource24→25/26=96.15%，登记source-ready并允许隔离准备；在Push前当前仍24。current22auditnames为21继承+1current-format替代，actual12+10；替代与5新增去重required26；旧classic终态1FAIL明确计划外延期。父formal59/71=83.10%、source61/71=85.92%不增。source-ready不等complete，OG27 main Push仍须COVRELstable patch实际full/securityCI/四平台/网站/Homebrew/curl安装C-D及独立SourceA；native029 SRC/RUN/三字段不因此关闭。
+
+下一卡COV2-REL-01，先刷新upstreamlatest并仅patch顺延（最近只读latest0.30.49，拟0.30.50，冻结前再核）；首次bumped实现树双envNextestfull＋VER3–9本机六项/一次真实观察必须实际通过，原`.2` fresh owned epoch0兼容登记另验。当前不bump/tag/release/安装，无Linux功能或SessionCI操作；Windows/security CI留真实当前releaseSHA，旧cancelled不得记绿。网站无公开命令变化N/A；release网站/下载站与安装D门继续保留。用户04/05dirty/原7stash/正式49两binary必须保持。

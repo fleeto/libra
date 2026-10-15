@@ -1,6 +1,9 @@
 # OpenCode coverage schema-v2 前置实施计划（2026-10-13）
 
-> **COV2-08 最终实现验收事实（2026-10-15，本次两事实审查/签推前）：** 原8AC/4VER在R3当前源已实际通过：36个exact各1/1、103reader、fmt/strict及完整双env全量10143/10143、23skip、exit0；唯一Claude静态PASS、0P0/P1/P2。当前只更新两计划的实际结果/勾选/生命周期，七个实现/测试/行为文档后像与受测受审源完全同一；本两事实的新reader QA/单Claude/裁决/签推仍待实际执行，不预填本次SHA。仅当这些交付条件实际完成，COV source由14/26变为15/26=57.69%，此前仍14/26；formal0/26、父59formal/61sourceof71不变。下一卡COV2-05。下列旧UNRUN、FAIL、cancelled与计数保留为各日期历史，SourceA与家族C/D不由本事实关闭。
+> **COV2-08 上游文档整合（2026-10-15）：** 本卡已实际签名+DCO本地提交 `9417d976cd5ab78137869a2ef174fdf28abc59d7`，九个blob精确匹配受审后像，尚未Push。已实际fetch上游 `5522458235b824b4eb3a7cd7e8d6b8a492717092`；相对58b只有三个计划文档变化，全部Rust/测试/配置/版本及其余2045输入同一。现仅合并双方计划事实并补核最终文档，完整实现full仍绑定R3原输入，不能称新整树跑过full。合并后103reader/fmt/strict、唯一Claude及root裁决/签名merge/Push/remote核对均待实际完成；只有交付完成才source15/26=57.69%，此前14/26，formal0/26、父59formal/61sourceof71不变。Source A与家族C/D不由本次整合放行。
+
+
+> **COV2-08 原两事实受审输入（2026-10-15，本地9417提交前）：** 原8AC/4VER在R3当前源已实际通过：36个exact各1/1、103reader、fmt/strict及完整双env全量10143/10143、23skip、exit0；唯一Claude静态PASS、0P0/P1/P2。当前只更新两计划的实际结果/勾选/生命周期，七个实现/测试/行为文档后像与受测受审源完全同一；本两事实的新reader QA/单Claude/裁决/签推仍待实际执行，不预填本次SHA。仅当这些交付条件实际完成，COV source由14/26变为15/26=57.69%，此前仍14/26；formal0/26、父59formal/61sourceof71不变。下一卡COV2-05。下列旧UNRUN、FAIL、cancelled与计数保留为各日期历史，SourceA与家族C/D不由本事实关闭。
 
 
 > **历史 COV2-08 R3 准备状态（2026-10-15）：** R2 的40步相关验收已实际通过（36个exact各1/1、103reader、fmt/strict），但唯一Claude仍FAIL（0P0/P1、1P2）：durable重放底层重认证会丢失暂时错误/deadline分类。已停止R2未完成full后再改源码；其实际7607/10143 passed、1slow、23skip、exit100，余2536未运行，不记完整PASS。R3保留v2重认证的可重试分类、向既有doctor传递其它错误，并在原VER3补durable late deadline真实重放回归；当前新QA/Claude/full/签推均待。此轮先取得Claude静态PASS才启动full。source仍14/26、formal0/26，父59formal/61sourceof71，原8AC/4VER/I/R/DAG/gold与SourceA边界不变。
@@ -2535,7 +2538,7 @@ R2全部40步相关验收实际exit0：36个具名selector各1/1、architecture5
 
 R3仅在原checkpoint/recovery owner内保留v2认证错误的deadline/既有retryable分类，其余durable结算错误带可操作context交给doctor；v1分支不变。原VER3增加真实sealed/persisted/committed artifact在durable晚期认证暂停并到期的子例，要求RetryLater、原pending bytes/MAC及八表逐行同一，之后同artifact新deadline结算；不新增selector、target、全局env/cwd或Session/model CI。这是待运行的机制回归，不是native来源正例。
 
-当前R3新相关验收、唯一Claude、完整full、最终两计划事实复核和signed main Push仍待；先实际Claude静态PASS才启动full，代码/测试/行为七路径若再变化必须重新验证。原8AC/4VER未勾选、Lifecycle in-progress/Acceptance空及全部I/R/DAG/gold不变。COV source14/26、formal0/26，父formal59/71/source61/71不增加；后续COV2-05仅在08实际source-qualified交付后开工，家族C/D、Source A与历史import020延期边界不变。
+（历史，2026-10-15 R3准备期）当前R3新相关验收、唯一Claude、完整full、最终两计划事实复核和signed main Push仍待；先实际Claude静态PASS才启动full，代码/测试/行为七路径若再变化必须重新验证。原8AC/4VER未勾选、Lifecycle in-progress/Acceptance空及全部I/R/DAG/gold不变。COV source14/26、formal0/26，父formal59/71/source61/71不增加；后续COV2-05仅在08实际source-qualified交付后开工，家族C/D、Source A与历史import020延期边界不变。
 
 
 ### 2026-10-15 — COV2-08 最终实现验收与两计划事实交付条件
@@ -2582,3 +2585,14 @@ warning: the following packages contain code that will be rejected by a future v
 **唯一Claude及root。** R3九文件静态实际PASS，0P0/P1/P2，raw `6a171689c04d812797f6d1d6c861f54c5ed8aa72834c4d7d87284a8c50fe12bc`，报告SHA `1cf4e511a7607f9b76ea80a5c8a1d701fb69f02a4bb10ebd0a5f4d4b808bee39`，root静态裁决SHA `155464d68f517063571b7c8bf388c62475d9b28ecb05ae77602b73e19532e902`。R1两P2、R2剩余durable错误分类P2均关闭；历史FAIL与两次owned-SIGINT partial runs保留。非阻断P3继续保留：diagnostic stage/cause；非durable StoreFailure的Refused/RetryLater不对称但不隔离/丢数据；manual durable与v1一致但无专项测试；暂时DB与后两认证调用为共享映射间接覆盖；短测试窗口/钩子命名；损坏v1的有界v2 retry；identity/缺checkpoint的有界重试、三次HMAC成本、旧dead_code属性/长SQL/英文文档中文追加段。当前索引旧13段明确标为历史。上述不是新行为/新门，也不把旧审核称历次无P2。
 
 **本次事实交付条件。** 当前Lifecycle为in-progress/locally-accepted（A/B及适用实现full已实际满足），正式C/D只由COV2-REL-01继承。两计划最终字节仍须新103reader、fmt/strict、唯一Claude事实审查（绑定七路径与上述受审受测后像同一）、root最终裁决、signed+DCO main提交与实际Push/remote同一；未实际完成项不预填PASS/未知commitSHA。仅完成该交付后COV source15/26=57.69%，此前14/26；formal0/26，父formal59/71=83.10%/source61/71=85.92%均不增加。下一卡COV2-05。无本卡bump/tag/release或新公开命令，三个机制文档对应本实现；无需本卡网站命令更新。必要Windows/security CI与四平台发布留在家族D门，macOS为本机功能基准，Linux由用户后验。所有原AC/VER文本、I/R、DAG、Granularity、gold与SourceA边界不变。
+
+
+### 2026-10-15 — COV2-08 交付前的上游纯文档整合
+
+本卡原九文件已由实际signed+DCO本地 `9417d976cd5ab78137869a2ef174fdf28abc59d7` 保存，parent58b；原七实现/行为后像、完整R3双env10143/10143（2slow/2leaky/23skip、exit0、无FAIL/retry/flaky）、两计划新103reader/fmt/strict均按上述实际收据保留。最终两事实唯一Claude已实际PASS（0P0/P1/P2、2非阻断P3），raw `8c11ef08650f7cc244aa42f6e382a4aa940f616057e36d4f6d309802da28f5e0`；该PASS覆盖其原两事实后像，不预授本次合并后新字节。两P3的条件分子措辞与R3准备段历史标签在本次事实增量明确化，不改任何判据。
+
+推送前实际GitHub只读compare与Libra fetch确认，上游5522458比58b多两笔已提交文档历史。原生archive/ls-tree对全部2048文件逐blob OID、bytes、kind、mode核对，只有plan-20261015、plan-long、plan-status三路径变化；其余2045输入同一，Rust、测试、配置、lock、installer、版本面、公开命令文档均无变化。上游两独占文档完整保留其blob字节/模式；共享status按两边原文合并，保留LTR-00标题/索引行及全部COV事实。本次不改LTR任务判据/状态、不替上游授权声明作新裁决，也不据它授出OG/COV grant或SourceA。
+
+相对原R3完整full输入，最终候选仅四份计划事实文档不同（COV计划、status及上游plan-20261015/plan-long）；其余2044文件及七个受审受测实现/行为路径逐项相同。因此继承完整full对相同实现的证明，新四文档内容由合并后的完整103reader（ARCH58/docs32/examples1/hook12）、nightly fmt、严格all-target/all-feature Clippy及唯一Claude整合审查覆盖；不把旧整树字节说成新整树full，也不因事实更新重写旧raw。未运行的新门不预填PASS/未知合并SHA。原8AC/4VER字面、I/R、DAG、gold、Granularity和COV05尚pending的边界不变，必要家族C/D仍另行真实验收。
+
+两个原有用户计划改动仅以本任务具名stash与独立备份暂存，不进入本卡或合并提交；须合并签名提交后恢复并逐SHA/模式核对，再仅删除本任务stash，原七stash及未跟踪安装binary/lock保留。该保护不是交付或源码资格。最终实际Push/remote与上述门全部闭合后COV source才15/26=57.69%，此前14/26；formal0/26、父formal59/71/source61/71不变，下一卡COV2-05。无bump/tag/release、新公开CLI/网站行为或OpenCode Session/model CI。

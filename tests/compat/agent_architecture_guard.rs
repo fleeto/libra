@@ -11594,7 +11594,7 @@ fn cov2_runtime_data_transport_has_closed_callers() {
     );
 }
 
-// COV2-12 inventories the inherited 22 Session gates and the three macOS
+// COV2-12/15 inventory the inherited 22 Session gates and four macOS
 // additions. Paid local-agent smoke tests have their own, separate gates.
 const COV2_MANUAL_SESSION_CASES: &[(&str, &[&str])] = &[
     (
@@ -11612,6 +11612,7 @@ const COV2_MANUAL_SESSION_CASES: &[(&str, &[&str])] = &[
             "cov2_macos_fake_exporter_live_session_capture",
             "cov2_macos_fake_exporter_import_session_capture",
             "cov2_macos_failed_export_session_zero_write",
+            "cov2_macos_fake_exporter_candidate_live_partial_no_plaintext",
         ],
     ),
     (
@@ -11936,7 +11937,7 @@ fn cov2_opencode_session_e2e_is_manual_only() {
             .iter()
             .map(|(_, names)| names.len())
             .sum::<usize>(),
-        22 + 3
+        22 + 4
     );
     for (path, names) in COV2_MANUAL_SESSION_CASES {
         let (_, file) = parse_rust_source(path);
@@ -12307,6 +12308,164 @@ fn cov2_manual_session_tests_cannot_silently_skip() {
                 *path == "tests/agent_opencode_bridge_test.rs" && !name.starts_with("cov2_");
             let errors = cov2_macos_skip_errors(&function.block, allow_inherited_bridge);
             assert!(errors.is_empty(), "{path}::{name}: {errors:?}");
+        }
+    }
+}
+
+fn cov2_candidate_live_case_errors(function: &syn::ItemFn) -> Vec<&'static str> {
+    let mut errors = Vec::new();
+    if !cov2_is_ignored(&function.attrs) {
+        errors.push("candidate Session case must be ignored");
+    }
+    if !function.attrs.iter().any(|attr| {
+        attr.path().is_ident("cfg")
+            && attr.parse_args::<syn::Meta>().is_ok_and(|meta| {
+                matches!(meta, syn::Meta::NameValue(value)
+                    if value.path.is_ident("target_os")
+                        && matches!(value.value, syn::Expr::Lit(syn::ExprLit {
+                            lit: syn::Lit::Str(ref value), ..
+                        }) if value.value() == "macos"))
+            })
+    }) {
+        errors.push("candidate Session case must be macOS-only");
+    }
+    if function.sig.asyncness.is_none()
+        || !function
+            .attrs
+            .iter()
+            .any(|attr| syn_path_text(attr.path()) == "tokio::test")
+    {
+        errors.push("candidate Session case must remain an async test");
+    }
+    // A top-level binding is reached unconditionally on macOS. Finding a
+    // constructor name inside a closure/conditional would not prove this.
+    let checked_init = function.block.stmts.iter().any(|statement| {
+        if !cov2_active_on_macos(cov2_statement_attrs(statement)) {
+            return false;
+        }
+        let syn::Stmt::Local(local) = statement else {
+            return false;
+        };
+        let Some(init) = &local.init else {
+            return false;
+        };
+        let syn::Expr::MethodCall(method) = init.expr.as_ref() else {
+            return false;
+        };
+        if method.method != "expect" || method.args.len() != 1 {
+            return false;
+        }
+        let syn::Expr::Await(awaited) = method.receiver.as_ref() else {
+            return false;
+        };
+        matches!(awaited.base.as_ref(), syn::Expr::Call(call)
+            if matches!(call.func.as_ref(), syn::Expr::Path(path)
+                if syn_path_text(&path.path) == "BridgeRepo::init"))
+    });
+    if !checked_init {
+        errors.push("candidate Session case must unconditionally require BridgeRepo::init");
+    }
+    errors.extend(cov2_macos_skip_errors(&function.block, false));
+    errors
+}
+
+#[test]
+fn cov2_candidate_live_session_case_is_ignored_and_non_skippable() {
+    const CASE: &str = "cov2_macos_fake_exporter_candidate_live_partial_no_plaintext";
+    let good: syn::ItemFn = syn::parse_quote! {
+        #[cfg(target_os = "macos")]
+        #[tokio::test]
+        #[ignore = "OpenCode Session capture is an operator-local manual gate"]
+        async fn candidate_control() {
+            let repo = BridgeRepo::init(EXPORT).await.expect("Required Seatbelt unavailable");
+            assert!(repo.captured());
+        }
+    };
+    assert!(cov2_candidate_live_case_errors(&good).is_empty());
+    for removed in ["ignore", "cfg", "tokio::test"] {
+        let mut bad = good.clone();
+        bad.attrs
+            .retain(|attr| syn_path_text(attr.path()) != removed);
+        assert!(
+            !cov2_candidate_live_case_errors(&bad).is_empty(),
+            "missing {removed} must fail the candidate Session guard"
+        );
+    }
+    for body in [
+        "{ let repo = other_init().await.expect(\"not the checked helper\"); assert!(repo.captured()); }",
+        "{ if ready() { let repo = BridgeRepo::init(EXPORT).await.expect(\"unavailable\"); assert!(repo.captured()); } }",
+        "{ #[cfg(not(target_os = \"macos\"))] let repo = BridgeRepo::init(EXPORT).await.expect(\"unavailable\"); assert!(true); }",
+        "{ if !ready() { return; } let repo = BridgeRepo::init(EXPORT).await.expect(\"unavailable\"); assert!(repo.captured()); }",
+        "{ let Some(repo) = BridgeRepo::init(EXPORT).await else { return; }; assert!(repo.captured()); }",
+    ] {
+        let mut bad = good.clone();
+        bad.block = syn::parse_str(body).unwrap();
+        assert!(
+            !cov2_candidate_live_case_errors(&bad).is_empty(),
+            "candidate prerequisite/skip control escaped: {body}"
+        );
+    }
+    let init_control: syn::ImplItemFn = syn::parse_quote! {
+        async fn init() -> Option<Self> {
+            #[cfg(target_os = "macos")]
+            assert!(required_export_sandbox_available().await, "Required Seatbelt unavailable");
+            Some(this)
+        }
+    };
+    assert!(cov2_bridge_init_is_fail_closed(&init_control));
+    for body in [
+        "{ Some(this) }",
+        "{ if !required_export_sandbox_available().await { return None; } Some(this) }",
+    ] {
+        let mut bad = init_control.clone();
+        bad.block = syn::parse_str(body).unwrap();
+        assert!(
+            !cov2_bridge_init_is_fail_closed(&bad),
+            "missing/fallible prerequisite control escaped: {body}"
+        );
+    }
+
+    let cargo = fs::read_to_string(repo_root().join("Cargo.toml")).unwrap();
+    assert!(
+        cov2_bridge_feature_gate(&cargo),
+        "candidate Session target must require test-live-agent"
+    );
+    assert!(!cov2_bridge_feature_gate(&cargo.replace(
+        "required-features = [\"test-live-agent\"]",
+        "required-features = []"
+    )));
+    let (_, bridge) = parse_rust_source("tests/agent_opencode_bridge_test.rs");
+    let functions = cov2_test_functions(&bridge);
+    let candidate = functions
+        .get(CASE)
+        .unwrap_or_else(|| panic!("missing manual candidate Session case {CASE}"));
+    let errors = cov2_candidate_live_case_errors(candidate);
+    assert!(errors.is_empty(), "{CASE}: {errors:?}");
+    let init = bridge.items.iter().find_map(|item| match item {
+        syn::Item::Impl(item) if matches!(item.self_ty.as_ref(), syn::Type::Path(path) if path.path.is_ident("BridgeRepo")) => {
+            item.items.iter().find_map(|item| match item {
+                syn::ImplItem::Fn(function) if function.sig.ident == "init" => Some(function),
+                _ => None,
+            })
+        }
+        _ => None,
+    }).expect("BridgeRepo::init exists");
+    assert!(
+        cov2_bridge_init_is_fail_closed(init),
+        "candidate prerequisite must assert on macOS and finish with Some"
+    );
+    assert!(COV2_MANUAL_SESSION_CASES.iter().any(|(path, names)| {
+        *path == "tests/agent_opencode_bridge_test.rs" && names.contains(&CASE)
+    }));
+    assert!(!cov2_workflow_session_errors(&format!("cargo test --features test-live-agent --test agent_opencode_bridge_test {CASE} -- --ignored --exact")).is_empty());
+    for entry in fs::read_dir(repo_root().join(".github/workflows")).unwrap() {
+        let path = entry.unwrap().path();
+        if matches!(
+            path.extension().and_then(|ext| ext.to_str()),
+            Some("yml" | "yaml")
+        ) {
+            let errors = cov2_workflow_session_errors(&fs::read_to_string(&path).unwrap());
+            assert!(errors.is_empty(), "{}: {errors:?}", path.display());
         }
     }
 }

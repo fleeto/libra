@@ -1103,3 +1103,355 @@ async fn cov2_macos_failed_export_session_zero_write() {
             .is_none()
     );
 }
+
+/// Actual live candidates remain partial without gaining native authority.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+#[ignore = "OpenCode Session capture is an operator-local manual gate"]
+async fn cov2_macos_fake_exporter_candidate_live_partial_no_plaintext() {
+    use std::str::FromStr;
+
+    use git_internal::hash::ObjectHash;
+    use libra::internal::ai::capture::snapshot::{CaptureSnapshotPolicy, CaptureSnapshotService};
+
+    const WINDOW: &str = "COV15_PRIVATE_WINDOW_7A3E";
+    const SIGNATURE: &str = "COV15_PRIVATE_SIGNATURE_4D9C";
+    const REDACTED: &str = "COV15_PRIVATE_REDACTED_6B2F";
+    const ENCRYPTED: &str = "COV15_PRIVATE_ENCRYPTED_8E1A";
+    const PROOF: &str = "COV15_PRIVATE_PROOF_5C0D";
+
+    fn assert_absent(bytes: &[u8], canaries: &[&str], sink: &str) {
+        for canary in canaries {
+            assert!(
+                !bytes
+                    .windows(canary.len())
+                    .any(|part| part == canary.as_bytes()),
+                "candidate canary reached {sink}"
+            );
+        }
+    }
+
+    fn read_object(repo: &BridgeRepo, oid: &str) -> Vec<u8> {
+        let hash = ObjectHash::from_str(oid).expect("actual loose object id");
+        libra::utils::object::read_git_object(&repo.repo.join(".libra"), &hash)
+            .expect("decode actual published object")
+    }
+
+    fn tree_entries(tree: &[u8]) -> Vec<(bool, String, String)> {
+        let mut entries = Vec::new();
+        let mut cursor = 0;
+        while cursor < tree.len() {
+            let mode_end = cursor
+                + tree[cursor..]
+                    .iter()
+                    .position(|byte| *byte == b' ')
+                    .unwrap();
+            let name_end = mode_end
+                + 1
+                + tree[mode_end + 1..]
+                    .iter()
+                    .position(|byte| *byte == 0)
+                    .unwrap();
+            let oid_end = name_end + 21;
+            assert!(oid_end <= tree.len());
+            entries.push((
+                &tree[cursor..mode_end] == b"40000",
+                String::from_utf8(tree[mode_end + 1..name_end].to_vec()).unwrap(),
+                hex::encode(&tree[name_end + 1..oid_end]),
+            ));
+            cursor = oid_end;
+        }
+        entries
+    }
+
+    fn checkpoint_blobs(
+        repo: &BridgeRepo,
+        checkpoint_id: &str,
+        tree_oid: &str,
+    ) -> Vec<(String, Vec<u8>)> {
+        let mut oid = tree_oid.to_owned();
+        for component in ["checkpoint", &checkpoint_id[..2], &checkpoint_id[2..]] {
+            oid = tree_entries(&read_object(repo, &oid))
+                .into_iter()
+                .find(|(_, name, _)| name == component)
+                .expect("actual checkpoint subtree")
+                .2;
+        }
+        let mut pending = vec![(String::new(), oid)];
+        let mut blobs = Vec::new();
+        while let Some((prefix, tree)) = pending.pop() {
+            for (is_tree, name, oid) in tree_entries(&read_object(repo, &tree)) {
+                let path = format!("{prefix}{name}");
+                if is_tree {
+                    pending.push((format!("{path}/"), oid));
+                } else {
+                    blobs.push((path, read_object(repo, &oid)));
+                }
+            }
+        }
+        blobs
+    }
+
+    let state_fixture = json!({"info":{"id":"ses_cov15_state","location":{"directory":"__REPO__"}},
+        "messages":[{"id":"u","type":"user","text":"cov15 safe request"},
+            {"id":"a","type":"assistant","content":[
+                {"id":"r","type":"reasoning","text":WINDOW,"state":{
+                    "signature":SIGNATURE,"redactedData":REDACTED,"reasoningEncryptedContent":ENCRYPTED}},
+                {"id":"t","type":"text","text":"cov15 safe reply"}]},
+            {"id":"i","type":"idle","outcome":"succeeded"}]});
+    let mut proof_fixture = state_fixture.clone();
+    proof_fixture["info"]["id"] = json!("ses_cov15_proof");
+    proof_fixture["messages"][1]["content"][0]["id"] =
+        json!("npart_0123456789abcdef0123456789abcdef");
+    proof_fixture["messages"][1]["content"][0]["originProof"] = json!({"nonce":PROOF});
+    let state_body = format!("printf '%s' '{}'", state_fixture);
+    let proof_body = format!("printf '%s' '{}'", proof_fixture);
+    let repo = BridgeRepo::init(&state_body)
+        .await
+        .expect("Required macOS candidate fixture must run");
+    let proof_repo = BridgeRepo::init(&proof_body)
+        .await
+        .expect("Required macOS proof fixture must run");
+
+    for (repo, fixture, session_id, proof_bearing) in [
+        (&repo, state_fixture, "ses_cov15_state", false),
+        (&proof_repo, proof_fixture, "ses_cov15_proof", true),
+    ] {
+        let canaries = if proof_bearing {
+            vec![WINDOW, SIGNATURE, REDACTED, ENCRYPTED, PROOF]
+        } else {
+            vec![WINDOW, SIGNATURE, REDACTED, ENCRYPTED]
+        };
+        let original = fixture
+            .to_string()
+            .replace("__REPO__", &repo.repo.to_string_lossy());
+        for canary in &canaries {
+            assert!(
+                original.contains(canary),
+                "fixture contains each sink probe"
+            );
+        }
+        // This supporting preview destroys authority. Actual live admission is
+        // established separately by the client marker, warning and catalog.
+        let (ordinary, typed) = CaptureSnapshotService::preview_redacted_coverage_v2(
+            "opencode",
+            original.into_bytes(),
+            CaptureSnapshotPolicy::default(),
+        )
+        .expect("bounded data-only candidate preview");
+        assert_eq!(typed["partial"], true);
+        assert_absent(ordinary.bytes(), &canaries, "ordinary plaintext preview");
+        let ordinary_json: Value = serde_json::from_slice(ordinary.bytes()).unwrap();
+        assert_eq!(ordinary_json["messages"][0]["text"], "cov15 safe request");
+        assert_eq!(
+            ordinary_json["messages"][1]["content"][1]["text"],
+            "cov15 safe reply"
+        );
+        assert_absent(
+            &serde_json::to_vec(&typed).unwrap(),
+            &canaries,
+            "typed plaintext preview",
+        );
+        let records = typed["turns"][0]["projection"]["records"]
+            .as_array()
+            .unwrap();
+        assert_eq!(
+            records.len(),
+            2,
+            "safe typed records are nonempty and exact"
+        );
+        assert_eq!(records[0]["type"], "user");
+        assert_eq!(records[0]["text"], "cov15 safe request");
+        assert_eq!(records[1]["type"], "assistant");
+        assert_eq!(records[1]["text"], "cov15 safe reply");
+
+        let objects_before = repo.object_files();
+        let hook = repo.cov2_stop(session_id, &format!("cov15-{session_id}-idle"));
+        assert_eq!(
+            repo.client_invocations().lines().collect::<Vec<_>>(),
+            [session_id]
+        );
+        let stderr = String::from_utf8_lossy(&hook.stderr);
+        let live_logs = format!("{}{}", String::from_utf8_lossy(&hook.stdout), stderr);
+        assert!(
+            live_logs.contains("reasoning source is partial"),
+            "actual live classifier warning is required: {}",
+            describe(&hook)
+        );
+        assert!(
+            live_logs.contains("unsupported_reasoning_shape"),
+            "actual live partial reason is required"
+        );
+        assert_absent(&hook.stdout, &canaries, "live hook stdout");
+        assert_absent(&hook.stderr, &canaries, "live logs and public errors");
+        let sessions = repo
+            .query_rows("SELECT session_id, metadata_json FROM agent_session")
+            .await;
+        assert_eq!(sessions.len(), 1, "actual Session ingress must run");
+        let libra_session: String = sessions[0].try_get_by("session_id").unwrap();
+        let metadata_text: String = sessions[0].try_get_by("metadata_json").unwrap();
+        assert_absent(
+            metadata_text.as_bytes(),
+            &canaries,
+            "durable Session metadata",
+        );
+        let metadata: Value = serde_json::from_str(&metadata_text).unwrap();
+        let receipts = metadata["capture_catalog_receipts_v1"]["entries"]
+            .as_array()
+            .unwrap();
+        assert_eq!(receipts.len(), 1, "real explicit-event receipt");
+        let public = repo.run(
+            &["agent", "session", "show", &libra_session, "--json"],
+            None,
+        );
+        assert!(public.status.success(), "Session readback must run");
+        assert_absent(&public.stdout, &canaries, "public Session readback");
+        assert_absent(&public.stderr, &canaries, "public Session errors");
+        assert!(
+            repo.query_rows("SELECT state FROM agent_coverage_claim")
+                .await
+                .is_empty()
+        );
+        assert!(
+            repo.query_rows("SELECT revision FROM agent_coverage_revision")
+                .await
+                .is_empty()
+        );
+
+        // Enrollment, identity and inflight stores are independently inspected;
+        // absence of a checkpoint alone cannot prove no native artifact mint.
+        assert!(
+            repo.query_rows(
+                "SELECT key FROM config_kv WHERE lower(key) = 'agent.native_origin.opencode.v1'"
+            )
+            .await
+            .is_empty(),
+            "no native issuer enrollment"
+        );
+        assert!(
+            repo.query_rows("SELECT key FROM metadata_kv WHERE scope = 'agent_reasoning_identity'")
+                .await
+                .is_empty(),
+            "no native reasoning identity"
+        );
+        assert!(
+            repo.query_rows("SELECT key FROM metadata_kv WHERE scope = 'agent_traces_inflight'")
+                .await
+                .is_empty(),
+            "no retained unpublished object attempt"
+        );
+        for row in repo.query_rows("SELECT value FROM metadata_kv").await {
+            let value: String = row.try_get_by("value").unwrap();
+            assert_absent(value.as_bytes(), &canaries, "metadata_kv");
+        }
+        let checkpoints = repo
+            .query_rows("SELECT checkpoint_id, tree_oid FROM agent_checkpoint")
+            .await;
+        if proof_bearing {
+            assert!(
+                !hook.status.success(),
+                "unverified proof must refuse the live source"
+            );
+            let error: Value = stderr
+                .lines()
+                .find_map(|line| serde_json::from_str(line).ok())
+                .unwrap();
+            assert_eq!(error["error_code"], "LBR-INTERNAL-001");
+            assert_eq!(
+                error["message"],
+                "agent hook ingestion failed: capture could not be completed; retry the hook or inspect the local repository"
+            );
+            assert_eq!(receipts[0]["status"], "pending");
+            assert!(checkpoints.is_empty());
+            assert_eq!(
+                repo.object_files(),
+                objects_before,
+                "rejected proof publishes no objects"
+            );
+        } else {
+            assert!(
+                hook.status.success(),
+                "safe state-only partial source persists"
+            );
+            assert_eq!(receipts[0]["status"], "complete");
+            assert_eq!(checkpoints.len(), 1, "nonvacuous partial checkpoint");
+            let id: String = checkpoints[0].try_get_by("checkpoint_id").unwrap();
+            let tree: String = checkpoints[0].try_get_by("tree_oid").unwrap();
+            let blobs = checkpoint_blobs(repo, &id, &tree);
+            assert!(blobs.len() >= 6, "actual checkpoint roles are inspected");
+            for (path, bytes) in &blobs {
+                assert_absent(bytes, &canaries, "decoded persisted checkpoint objects");
+                assert!(
+                    !path.starts_with("reasoning/"),
+                    "no opaque reasoning object path"
+                );
+            }
+            let manifest: Value = serde_json::from_slice(
+                &blobs
+                    .iter()
+                    .find(|(path, _)| path == "manifest.json")
+                    .unwrap()
+                    .1,
+            )
+            .unwrap();
+            assert_eq!(manifest["checkpoint_id"], id);
+            assert!(
+                manifest.get("reasoning_artifacts").is_none(),
+                "no opaque artifact declared"
+            );
+            assert_eq!(manifest["entries"].as_object().unwrap().len(), 5);
+            let stored_metadata: Value = serde_json::from_slice(
+                &blobs
+                    .iter()
+                    .find(|(path, _)| path == "metadata.json")
+                    .unwrap()
+                    .1,
+            )
+            .unwrap();
+            assert_eq!(
+                stored_metadata["transcript_snapshot"]["completeness"], "partial",
+                "actual live snapshot remains partial"
+            );
+            let exported = repo.run(&["agent", "checkpoint", "export", &id], None);
+            assert!(
+                exported.status.success(),
+                "actual ordinary transcript readback"
+            );
+            assert_absent(&exported.stdout, &canaries, "persisted ordinary plaintext");
+            assert_absent(&exported.stderr, &canaries, "checkpoint public errors");
+            let actual: Value = serde_json::from_slice(&exported.stdout).unwrap();
+            assert_eq!(actual["messages"][0]["text"], "cov15 safe request");
+            assert_eq!(
+                actual["messages"][1]["content"][1]["text"],
+                "cov15 safe reply"
+            );
+        }
+        // Decode every loose object, including anything not catalog-reachable.
+        for path in repo.object_files() {
+            let relative = path.strip_prefix(repo.repo.join(".libra/objects")).unwrap();
+            let oid = relative
+                .components()
+                .map(|part| part.as_os_str().to_str().unwrap())
+                .collect::<String>();
+            assert_eq!(oid.len(), 40, "fixture only publishes loose SHA-1 objects");
+            assert_absent(
+                &read_object(repo, &oid),
+                &canaries,
+                "all published decoded objects",
+            );
+        }
+        let jobs = repo
+            .query_rows("SELECT state, owner FROM agent_export_job")
+            .await;
+        assert_eq!(jobs.len(), 1, "actual export job exists");
+        assert!(
+            jobs[0]
+                .try_get_by::<Option<String>, _>("owner")
+                .unwrap()
+                .is_none()
+        );
+        if proof_bearing {
+            assert_eq!(jobs[0].try_get_by::<String, _>("state").unwrap(), "failed");
+        }
+    }
+}

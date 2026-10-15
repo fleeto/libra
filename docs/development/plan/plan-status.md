@@ -2453,3 +2453,38 @@ VER2真实live路径提交v2，same event_id重投不新增client调用，fresh 
 首轮soleClaude CODE实际PASS但指出1P2宽泛ignored CI守卫缺口，raw3aa7320c7c975744838ba5d1c871229eca127b59ad5f7f6d15af6a2d89d1b947。父在原I内仅扩展architectureguard，拒绝broad lib/targetless ignored及nextest run-ignored，并只允许已精确绑定的Linux unit dispatcher body，新增反例，原workflow无写入；重跑最终14门后进行第二轮soleClaude。最终CODE实际exit0/PASS，raw `0d26e2bf6278d47a025b6b123ae1cd44cbc24387e7e6bc4e61c3ac3e94a59498`，root实读接受，实际评审计数与非阻断遗留为 `{"P0": 0, "P1": 0, "P2": 1, "P3": 5}` / `["P2: staticCIscanner doesnotcover cargo+toolchain/globalflags/llvm-cov, glob --test/alltargets or extra whitespace. No currentworkflowuses these to selectmanualSession; futureCIedit mustreview these forms, notassume exhaustive guard. Deferredoutsidecurrentimplementation underuserstrategy.", "P3 new: compoundcommands/commentquotedhash and --list mixedrun notfullyparsed; currentworkflows clean, deferredwithscannerrobustness.", "P3: oldoversizebody may hitforkdenial before16MiBcap; COV16/17must independentlyprovecap beforeacceptance.", "P3: newMac cases relydocumentedexactthreads1; arbitrarywholebinaryparallel notproven, no newserialregistrychange.", "P3: twofuturecards explicitlyrequireoldselector synchronization; 0selectedneverPASS.", "P3: bothenvnormativeacceptancekept; bridgeenv_clear blockscredentialinheritance. FakeLeasejobcount0structural, notrealDBleaseproof."]`，未称修复。没有模型/账号/真实OpenCode调用，没有新OpenCode Session CI；纯parser/crypto/sandboxunit/staticguard仍可CI。这里不证明signature/redactedData/reasoningEncryptedContent、Source A或native归档，Linux由用户后验，其他21旧body全套manual审计仍归COV2-16/17。本卡没有用户命令行为变化，因此没有网站写集/新cf交付；前驱cf3f7ca9已部署的命令文档继续有效。
 
 CODE/QA后仅本两事实计划修改，另9个owned非事实后像继续绑定已审已测SHA；最终107reader/fmtstrict/root事实裁决、signed+DCO main commit/archive2048/Push/freshremote仍待实际闭合。全部闭合后COVsource20/26→21/26=80.77%，formal0/26继承家族C/D；父formal59/71=83.10%、source61/71=85.92%不增。下一卡COV2-15候选live Session权限防火墙。本卡不bump/tag/release，不更换official49，不改demo/user04/05或原7stashes。
+
+
+### COV2-15 开工与 COV2-12 实际源码交接（2026-10-16）
+
+COV2-12 已按最终14门、原6VER各1/1、107reader/fmtstrict、soleClaude R2实际PASS与root裁决，signed+DCO main `4a7fbfb96f13103e786ee293aa488e3afd83dd63`、Push0/freshremote同SHA及archive2048逐SHA/OID/size/mode/kind同最终QA闭合；archiveSHA `1ad4c0b0568bf1fefdf23119ae4b1c40e633de6d84e7af39ab65468b0f026d75`，reviewraw `0d26e2bf6278d47a025b6b123ae1cd44cbc24387e7e6bc4e61c3ac3e94a59498`。本地A/B与source-qualified交付完成，formal家族C/D仍pending。COVsource现21/26=80.77%，父formal59/71=83.10%、source61/71=85.92%不变；本卡完成源码门后才可22/26，不预支。
+
+本卡保留原8AC/2VER/I10与max2prod/2landing，BASE及12实际前驱满足，按最终4a7fbfb全2048源码刷新；没有独立linkedIssue，不创建Issue/外部消息。root在main单写，两隔离普通源码副本分别仅候选live测试与静态守卫；旧25manual body只读、SharedMacRequired/trust/sandbox/deadline不改。首先通过真实sandboxfakeexport/hook证明candidate classification partial，再独立核ordinary/typed/persisted/log/error/nativeissuer/opaqueartifact，不以pureparser或syntheticnative代替。预计只加局部测试/文档则ER13none，须按实际结果重判；家族REL最终bumped树T2双env全量不免。本卡无发布/version/installer/公开命令差异，无网站新增写集；若实际实现需要改路由/公开行为，先按授权修写集与验收，不偷偷扩展。Linux不验、模型/账号不调用，source21/26不增直到实际交付。
+
+
+### COV2-15 本机 A/B 闭合，源码交付门待闭合（2026-10-16）
+
+原8AC/2VER与I10保持，生产2文件及全部其他生产路径同前驱signedmain4a7fbfb；实际变更只有2测试文件+6文档/index。真实Required sandbox/trust/stdinlease/client、原25manual主体及共享fixture不改。测试data-onlypreview只能作为普通/typed语义的辅助检查，不当作live运行时来源权；实际live partial warning、clientmarker、Session/receipt/job、checkpoint读回及decodedobjects/manifest为本机核心链路证据。未验证proof/state内容不能生成native来源证明；不使用syntheticnative替换Source A。
+
+| 门 | exit | 实际计数（重复selector不累计unique） | raw SHA256 |
+|---|---:|---|---|
+| prepare-default-binaries | 0 | static/build | `e7617159f8aa7ce2632c77a0f12260cdeb6d2774288405cb5b08f40703972b53` |
+| VER2 | 0 | 1passed/0failed/0ignored | `66dc097226d9026b973d25a6e9ac91a5e18052d4dbe49478dc2bf7f417f3766a` |
+| prepare-manual-binary | 0 | static/build | `dca218ba048b2fe8285f232e5bc05028ab825f03732ee721f2a8d5d4e8bf7703` |
+| VER1 | 0 | 1passed/0failed/0ignored | `db4b5982ddfb60c552d9e97ca43b4d73c158b7c14769dc4216437d2f651bb20d` |
+| REG-live | 0 | 1passed/0failed/0ignored | `0e95efb504aef1083f7aa9447406e45689f986d8e6a87ec54bd291a70a05fd21` |
+| REG-import | 0 | 1passed/0failed/0ignored | `3f0d9038f7d8bb6cbc8ccafd375fe5f669a3129bec7aa8222b43a5bfe3d00bdb` |
+| REG-failed | 0 | 1passed/0failed/0ignored | `ab073031a934dfadf5c09dae27821da529429ab875fe494c61ad485a8d72909b` |
+| docs-readers | 0 | 63passed/0failed/0ignored; 32passed/0failed/0ignored; 1passed/0failed/0ignored; 12passed/0failed/0ignored | `c7836f35c85437393057d304b3cd6031d8720527a0476a21bb15047214c9ea6a` |
+| workflow-module | 0 | 3passed/0failed/0ignored | `3f37710a9964283292c8eb02d5eeefcbe61680ae02f293f4765e4f2fcd239095` |
+| serial-module | 0 | 26passed/0failed/0ignored | `5073454f1d7c68e4f9bd5cd79a3569c67666081b874c0b53c4b3bc453a0dc25d` |
+| fmt | 0 | static/build | `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855` |
+| strict | 0 | static/build | `cf880ce34bb9d0818819e63505cfeb32297d76d5b9727cc15a451534e2801ec9` |
+
+最终12门实际allPASS，同2048源码前后SHA/blobOID/size/mode/kind完全相同，两个原VER各实际1selected/1PASS/0ignored，前驱3个manual回归各1/1，108reader(63+32+1+12)、workflow3、serial26、fmt及alltarget/allfeature严格clippy通过。ER13最终none：局部新测试/静态守卫/文档，无生产/DDL/命令/config/Cargo/CI/installer或>=3target复用helper变化；本卡无新增full，前驱full不是当前树full证据；COV2-REL-01仍须最终bumped树T2双env全量/发布C-D。
+
+受控前集成缺新用例的guard1FAIL以及其余中间失败若有均保留在本机证据，不能写成通过；最终实际门才计数。原始8AC的每一sink单独断言及其非空/权限界限，以已冻结test最终代码、父整合证明和soleClaude报告为准，不能从零checkpoint推断全链路已测。没有真实OpenCode/账号/模型调用，也无Linux/Windows功能验收。CI只跑机制unit/static，不跑Session捕获。继承COV12R2词法守卫未来命令写法P2/P3遗留，不声称解析任意shell或修复旧oversize/parallel遗留。
+
+soleClaude CODE实际exit0/PASS raw `f75a35e338898b73dfde7bfa9553b8405c1d37fc9612ed5b693d1a300d0262cd`，root实读接受；实际findings `{"P0": 0, "P1": 0, "P2": 0, "P3": 5}`；非阻断遗留 `["P3: DBcanaryscancoversSessionmetadata/metadata_kv andallactualcheckpointobjects; othercolumns/configDB/WALrawbytesnotfullyscanned. No claimofwholeDB/WAL audit.", "P3: AC7durableauthorityonly; transientcrateprivateissuerunobserved, combinednoidentity/noartifact/no reasoningpath/0claims is accepted. No native/SourceAproof granted.", "P3: proofrefusalpublicenvelope/receipt/jobdoesnotindependentlypinprivatecause; sameactualpartialwarning+clientmarkersreduceambiguity. Do notexposeprivateerrorforatest.", "P3: tree/looseobjectchecks assume20byte/40hexSHA1fixture; SHA256wouldfailclosed, nottestedclaimed.", "P3: integrationtestplanoutsideI10doesnotlistnewmanualcase. Newexactselectordocumented3Ibehaviorpages/index; generaldiscoverabilitysyncdeferredoutsidecurrentcard."]`，未修复项不声称修复。没有公开命令行为差异、网站新增写集或cf推送；前驱网站仍有效。没有bump/tag/release，不更换official49，不改demo/user04/05或原7stashes。
+
+CODE/QA后只改本两事实计划，另6owned非事实SHA继续绑定已审已测后像；最终108reader/fmtstrict及root事实裁决、signed+DCO main/archive2048/Push/freshremote仍须实际完成。全部闭合后才COVsource21/26→22/26=84.62%，formal0/26仍继承家族C-D；父formal59/71=83.10%、source61/71=85.92%不增。下一卡COV2-18候选import Session权限防火墙。

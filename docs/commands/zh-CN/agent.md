@@ -7,6 +7,10 @@
 普通自动采集使用官方 OpenCode **2.0.29**。下文冻结的 2.0.26 词汇和私有 native
 producer 章节属于独立的历史/显式 native 路线，不是普通采集的前置。
 
+0.30.49 之后尚未发布的 main 新增 Session 目录过滤、从受支持的包管理器启动器中
+选择原生可执行文件，以及 metadata-only checkpoint 导出为空时的明确警告。
+下文对应行为需要包含这些改动的新版本。
+
 在要采集的仓库中核对版本，然后准备本仓库的 exporter trust 和 observer：
 
 ```bash
@@ -102,8 +106,9 @@ alias `session.idle` 仍接受，只记录不含内容的 `legacy_event_alias` t
 
 managed plugin 使用 OpenCode 2.0.26 的 `setup(ctx)` API、事件订阅和只观察的工具
 hook。一个 OpenCode 服务器（例如 `opencode serve --service`）会把所有项目的事件发给
-每个项目的插件，因此插件只转发 `location.directory` 等于自身目录的 session：其他项目的
-session 不会进入本仓库；移出该目录的 session 会在这里结束；尚未归属的 session 的工具调用
+每个项目的插件。0.30.49 之后尚未发布的 main 不转发已知属于其他
+`location.directory` 的 Session，并在此关闭移出目录的 Session；没有位置的事件仍会
+转发，除非已知该 Session 属于其他目录。尚未归属的 Session 的工具调用
 通过宿主的 `session.get` 判定（宿主无法回答时照旧转发，并只报告一次
 `session_location_unavailable`）。执行 `libra agent enable --agent opencode`
 刷新；旧模板、修改过的模板或双目录 managed 重复副本均不报告 installed=true。
@@ -144,7 +149,7 @@ assistant 聚合用量优先，没有聚合时才累计去重的 step-finish 明
 ID 容量耗尽后不再消费后续消息。本提取不读取文件、不归档 reasoning 正文；合成 fixture
 不能证明真实 macOS 内容采集或 native reasoning 来源。
 
-OpenCode coverage normalizer 接受 2.0.26 原生 messages 与旧 `info/parts`。
+旧 ordinary OpenCode coverage normalizer 接受 2.0.26 原生 messages 与旧 `info/parts`。
 每条 human message 开始独立且稳定的 logical turn；有效 native `idle` 结束本区间
 所有待定分轮，包括 failed/interrupted。Complete 表示采集表示完整，不等于任务成功。
 最后有效 idle 后的语义消息保持 Incomplete；未知、错型内容与 reasoning 保持
@@ -189,7 +194,7 @@ OpenCode 提取对空输入、非法 JSON 和非法 export 形状显式标记
 | `checkpoint list` | 列出已捕获 checkpoint |
 | `checkpoint show <id>` | 显示安全的 checkpoint 结构摘要（隐藏 metadata 和内部对象 ID） |
 | `checkpoint rewind <id>` | 检查或应用某个 checkpoint 的工作树回退 |
-| `checkpoint export <id>` | 导出 checkpoint transcript：默认脱敏（无需授权）；raw（未脱敏）导出须 `--allow-raw --raw` 并写入 append-only `agent_audit_log`（缺失授权时拒绝并返回 `LBR-AGENT-013`）。未采集到 transcript 的 checkpoint（metadata-only 采集——对 OpenCode 而言即写入时 export bridge 不可用）导出 0 字节并发出 warning |
+| `checkpoint export <id>` | 导出 checkpoint transcript：默认脱敏（无需授权）；raw（未脱敏）导出须 `--allow-raw --raw` 并写入 append-only `agent_audit_log`（缺失授权时拒绝并返回 `LBR-AGENT-013`）。未采集到 transcript 的 checkpoint（metadata-only 采集——对 OpenCode 而言即写入时 export bridge 不可用或执行失败）导出 0 字节并发出 warning |
 | `skill search` | 按 `--skill`、`--provider`、`--session`、RFC3339 `--since`/`--until` 搜索捕获的 skill events（`--limit`/`--cursor` keyset 分页、`--json`）。基于 checkpoint metadata 的读时投影，无独立表 |
 | `skill list` | `skill search` 的别名（同过滤项） |
 | `skill registry` | 展示各 agent 的 curated 可发现 skill 注册表（`--provider <slug>` 限定；公开 SkillDiscoverer 面） |
@@ -281,7 +286,8 @@ loopback 端口。取消和绝对 deadline 回收仍持有的进程组，leader 
 shim——`rpc trust opencode` 会改为固定该 shim 声明的原生可执行文件，前提是该文件
 所在目录也已登记（拒绝信息会给出需要执行的 `rpc trust --dir` 命令）；JavaScript
 启动器（`#!/usr/bin/env node`）会被拒绝。仍固定着启动器的旧信任记录会让
-`export_bridge` 报告 unavailable，直到重新执行 `libra agent rpc trust opencode`。
+`export_bridge` 报告 unavailable。请先按需登记原生可执行文件的目录，再重新执行
+`libra agent rpc trust opencode`。
 Linux 内容导出还要求受信的 `bwrap` 通过 Libra 的 descriptor-native
 `--bind-fd` 安全探测；不支持或过旧的 `bwrap` 会报告 unavailable 并 fail-closed 为
 metadata-only 捕获。应安装或升级系统 `bwrap` 包，绝不启用未沙箱化回退。不支持的 schema version 以 usage 错误（exit 129、category
@@ -1001,3 +1007,27 @@ import、pending replay 或 native admission。官方版本/来源匹配不批�
 证据；未核实项保持待验。成功普通样本不证明 native 字段、完整 reasoning、真实
 idle.error 失败、自动终态或 full-suite 验收。真实 OpenCode Session/账号/模型检查
 只在 macOS 本机运行，不进 CI；metadata-only、空输出或 skip 不算内容验收。
+
+## coverage-v2 采集（未发布）
+
+从首个包含 coverage-v2 的稳定版本开始，OpenCode 导出采集与历史导入会保留受支持的
+provider-visible 可读 reasoning，并在脱敏后作为 typed turn 内容写入。含这类内容的
+turn 使用 coverage schema 2，普通 turn 仍使用 schema 1 并保留原有规范字节；
+计算 digest 和 checkpoint 投影前均先脱敏。这不证明 `signature`、`redactedData`
+或 `reasoningEncryptedContent` 的 native 来源；未获证明的字段仍为 partial，不能
+归档为可信 artifact。
+
+保留的可读 reasoning 属于脱敏 checkpoint；执行导出、`libra agent push` 或云同步时，
+它会随 checkpoint 一同处理。目前没有单独排除 reasoning、同时保留其他采集内容的参数。
+
+升级后，如果某个中断动作的 checkpoint 已按 v1（或旧空 revision 集）提交，会先只读
+结算原回执，不新增 claim 或改写 checkpoint。随后一次**新动作**可以按 v2 重采可读
+reasoning 一次，之后重复采集会去重；原 v1 对象、digest 和 claim 保持可读且不改写。
+
+如果来源分类被拒绝，而同一个 Session 已有 v2 claim，本次完整采集／导入都会停止，
+包括新出现的普通 turn；回执和导出任务保持待重试，不创建降级 claim 或成功 ACK。
+持续超限或不受支持的来源可能让该 Session 一直停采。请保留已记录数据，使用
+`libra agent doctor` 检查，并新建 OpenCode Session 继续受支持的采集。候选或未验证
+reasoning 不能将这种失败变为 complete coverage。这些改动不增加命令参数，尚未包含在
+Libra 0.30.49 及更早版本中；依赖 OpenCode Session／exporter／模型的验收只在 macOS
+本机执行，不进入 CI 集成测试。

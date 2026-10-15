@@ -42,37 +42,103 @@ pub trait ReasoningSourcePreprocessor: Send + Sync {
 /// A separated ordinary buffer and a sealed, owning disposition. No public raw
 /// accessor, serialization, cloning or content-bearing Debug is available.
 pub struct PreparedReasoningSource {
-    ordinary: Vec<u8>,
+    ordinary: Zeroizing<Vec<u8>>,
     disposition: ReasoningSourceDisposition,
     ordinary_partial_permit: Option<OpenCodeOrdinaryPartialPermit>,
+    coverage_fragment: Option<ReasoningCoverageFragment>,
+    classifier_rejected: bool,
 }
 
-/// Inert coverage-v2 parser output, not a capture or native-origin authority.
-/// No serialization, cloning or content-bearing Debug is available. COV2-10
-/// must redact the typed records before COV2-11 connects a production sink.
-#[allow(dead_code)] // COV2-06 prepares the private seam; COV2-11 activates it.
+/// Data-only owning classifier output. The preview consumer destroys the
+/// prepared source's authority before using the fragment.
 pub(crate) enum OpenCodeCoverageClassification {
     Parsed(Box<OpenCodeCoverageSource>),
     Partial(ReasoningFieldError),
 }
 
-#[allow(dead_code)] // Owned, unredacted in-memory input for COV2-10/11 only.
 pub(crate) struct OpenCodeCoverageSource {
     pub(crate) source_session: Zeroizing<String>,
     pub(crate) prepared: PreparedReasoningSource,
     pub(crate) visible_parts: Vec<OpenCodeVisibleReasoningPart>,
-    /// Additional malformed, empty or unsupported content can never be
-    /// cleared by the presence of an independently readable part.
+    /// An independently readable part cannot clear unsupported content.
     pub(crate) partial: bool,
 }
 
-#[allow(dead_code)] // COV2-11 associates these source coordinates with turns.
+/// Owning raw classifier result, sealed within the provider source boundary.
+/// It carries data only: no source, capture or native-origin authority. All
+/// coordinate strings and visible payload strings wipe when dropped.
+pub(crate) struct ReasoningCoverageFragment {
+    pub(super) contains_reasoning: bool,
+    pub(super) source_session: Zeroizing<String>,
+    pub(super) visible_parts: Vec<OpenCodeVisibleReasoningPart>,
+    pub(super) partial: bool,
+}
+
 pub(crate) struct OpenCodeVisibleReasoningPart {
     pub(crate) source_message: Zeroizing<String>,
     pub(crate) message_ordinal: usize,
     pub(crate) source_part: Zeroizing<String>,
     pub(crate) part_ordinal: usize,
     pub(crate) record: SemanticRecord,
+}
+
+/// Sole attachment site is the OpenCode adapter's bounded original-buffer
+/// classifier. This adds no constructor method or native authority.
+pub(super) fn attach_reasoning_coverage(
+    mut prepared: PreparedReasoningSource,
+    classification: Result<ReasoningCoverageFragment, ReasoningFieldError>,
+) -> PreparedReasoningSource {
+    match classification {
+        Ok(fragment) => {
+            // Candidates retain their separate sealed owner. Raw readable
+            // coordinates must not survive along that unverified route.
+            if !matches!(
+                prepared.disposition,
+                ReasoningSourceDisposition::OpenCodeCandidate(_)
+            ) {
+                prepared.coverage_fragment = Some(fragment);
+            }
+        }
+        Err(_) => prepared.classifier_rejected = true,
+    }
+    prepared
+}
+
+/// The authorized snapshot boundary consumes this data once, independently of
+/// disposition and storage-only permits. Original session identity is checked
+/// before typed redaction can transform its spelling.
+pub(crate) fn take_authorized_reasoning_coverage(
+    prepared: &mut PreparedReasoningSource,
+    has_verified_source_mapping: bool,
+    provider: &str,
+    source_session: Option<&str>,
+) -> Result<(Option<ReasoningCoverageFragment>, bool, bool), ReasoningFieldError> {
+    let rejected = prepared.classifier_rejected;
+    let partial = !prepared.disposition.has_capture_consumer();
+    let Some(mut fragment) = prepared.coverage_fragment.take() else {
+        return Ok((None, rejected, partial));
+    };
+    // A stricter typed classifier cannot demote an existing ordinary/native
+    // consumer. Destroy its incomplete companion and retain the legacy source
+    // decision; the caller's V2-history barrier owns rejection of the attempt.
+    if !partial && fragment.partial && fragment.contains_reasoning {
+        prepared.classifier_rejected = true;
+        return Ok((None, true, false));
+    }
+    let partial = partial || (fragment.partial && fragment.contains_reasoning);
+    // An ordinary export without a readable field retains its legacy bytes
+    // and does not require a new identity prerequisite.
+    if fragment.visible_parts.is_empty() {
+        return Ok((None, rejected, partial));
+    }
+    if !has_verified_source_mapping
+        || provider != "opencode"
+        || source_session != Some(fragment.source_session.as_str())
+    {
+        return Err(ReasoningFieldError::UnsupportedShape);
+    }
+    fragment.partial = partial;
+    Ok((Some(fragment), rejected, partial))
 }
 
 /// Storage-only eligibility from the strict OpenCode scrubber. It cannot
@@ -105,7 +171,7 @@ pub(super) fn discard_prepared_authority_for_coverage_preview(
     mut source: PreparedReasoningSource,
 ) -> (Vec<u8>, bool) {
     let partial = !source.disposition.is_ordinary();
-    let ordinary = std::mem::take(&mut source.ordinary);
+    let ordinary = std::mem::take(&mut *source.ordinary);
     drop(source);
     (ordinary, partial)
 }
@@ -114,9 +180,11 @@ impl PreparedReasoningSource {
     /// The selected, reviewed detector found no reasoning candidate.
     pub fn without_candidates(ordinary: Vec<u8>) -> Self {
         Self {
-            ordinary,
+            ordinary: Zeroizing::new(ordinary),
             disposition: ReasoningSourceDisposition::Ordinary,
             ordinary_partial_permit: None,
+            coverage_fragment: None,
+            classifier_rejected: false,
         }
     }
 
@@ -124,9 +192,11 @@ impl PreparedReasoningSource {
     /// The safe result remains nonordinary even when it has no artifact.
     pub fn unproven_candidates(ordinary: Vec<u8>) -> Self {
         Self {
-            ordinary,
+            ordinary: Zeroizing::new(ordinary),
             disposition: ReasoningSourceDisposition::Unproven,
             ordinary_partial_permit: None,
+            coverage_fragment: None,
+            classifier_rejected: false,
         }
     }
 
@@ -137,12 +207,14 @@ impl PreparedReasoningSource {
         source_session: String,
     ) -> Self {
         Self {
-            ordinary,
+            ordinary: Zeroizing::new(ordinary),
             disposition: ReasoningSourceDisposition::Unproven,
             ordinary_partial_permit: Some(OpenCodeOrdinaryPartialPermit {
                 source_session,
                 capture_session: String::new(),
             }),
+            coverage_fragment: None,
+            classifier_rejected: false,
         }
     }
 
@@ -154,9 +226,11 @@ impl PreparedReasoningSource {
         candidates: SealedOpenCodeCandidates,
     ) -> Self {
         Self {
-            ordinary,
+            ordinary: Zeroizing::new(ordinary),
             disposition: ReasoningSourceDisposition::OpenCodeCandidate(candidates),
             ordinary_partial_permit: None,
+            coverage_fragment: None,
+            classifier_rejected: false,
         }
     }
 }
@@ -365,7 +439,7 @@ pub(crate) enum ReasoningSourceDisposition {
 
 impl ReasoningSourceDisposition {
     pub(crate) fn from_prepared_authorized_source(
-        prepared: PreparedReasoningSource,
+        mut prepared: PreparedReasoningSource,
         has_verified_source_mapping: bool,
         max_source_bytes: u64,
         provider: &str,
@@ -396,7 +470,7 @@ impl ReasoningSourceDisposition {
                 return Err(ReasoningFieldError::UnsupportedShape);
             }
         }
-        Ok((prepared.ordinary, disposition))
+        Ok((std::mem::take(&mut *prepared.ordinary), disposition))
     }
 
     /// Preserve the parser's owning storage permit only after the existing
@@ -1629,13 +1703,15 @@ pub(crate) fn synthetic_native_preparation(
 ) -> PreparedReasoningSource {
     let fields = fields.into_iter().map(|bytes| (0, bytes)).collect();
     PreparedReasoningSource {
-        ordinary,
+        ordinary: Zeroizing::new(ordinary),
         disposition: ReasoningSourceDisposition::NativeProven(synthetic_native_batch_for_turns(
             capture_session,
             source_session,
             fields,
         )),
         ordinary_partial_permit: None,
+        coverage_fragment: None,
+        classifier_rejected: false,
     }
 }
 
@@ -1743,14 +1819,18 @@ pub(crate) mod carrier_test_support {
                 Mode::Strip => Ok(PreparedReasoningSource::without_candidates(ordinary)),
                 Mode::Malformed => Err(ReasoningFieldError::UnsupportedShape),
                 Mode::Unmapped => Ok(PreparedReasoningSource {
-                    ordinary,
+                    ordinary: Zeroizing::new(ordinary),
                     disposition: ReasoningSourceDisposition::Unmapped,
                     ordinary_partial_permit: None,
+                    coverage_fragment: None,
+                    classifier_rejected: false,
                 }),
                 Mode::Helper => Ok(PreparedReasoningSource {
-                    ordinary,
+                    ordinary: Zeroizing::new(ordinary),
                     disposition: ReasoningSourceDisposition::HelperUnsupported,
                     ordinary_partial_permit: None,
+                    coverage_fragment: None,
+                    classifier_rejected: false,
                 }),
                 Mode::Native => Ok(synthetic_native_preparation(
                     ordinary,
@@ -2011,10 +2091,16 @@ pub(crate) fn classify_provider_visible_reasoning(
 /// };
 /// ```
 #[derive(Clone, Eq, PartialEq)]
-// The existing String is not wiped on drop. The owning pipeline must not
-// infer memory erasure from its serialization gate or content-free Debug.
+// The payload wipes on drop and before typed redaction replaces it. This is
+// an in-process allocation guarantee, not a guarantee about allocator copies.
 pub struct ProviderVisibleText {
     inner: String,
+}
+
+impl Drop for ProviderVisibleText {
+    fn drop(&mut self) {
+        self.inner.zeroize();
+    }
 }
 
 impl fmt::Debug for ProviderVisibleText {
@@ -2058,8 +2144,9 @@ impl ProviderVisibleText {
     /// when the availability is not `ProviderVisible` — the gate holds in
     /// release builds too (Codex re-review P1, not just a debug assert).
     #[allow(dead_code)] // RG-04 adapters consume this gated constructor.
-    pub(crate) fn from_classification(record: &ReasoningRecord, text: String) -> Option<Self> {
+    pub(crate) fn from_classification(record: &ReasoningRecord, mut text: String) -> Option<Self> {
         if record.availability() != ReasoningAvailability::ProviderVisible {
+            text.zeroize();
             return None;
         }
         Some(Self { inner: text })
@@ -2078,6 +2165,7 @@ impl ProviderVisibleText {
         redactor: &super::redaction::Redactor,
     ) -> super::redaction::RedactionReport {
         let (bytes, report) = redactor.redact(self.inner.as_bytes());
+        self.inner.zeroize();
         self.inner = String::from_utf8_lossy(bytes.as_ref()).into_owned();
         report
     }
@@ -2665,6 +2753,48 @@ mod tests {
     use std::time::Instant;
 
     use super::*;
+
+    #[test]
+    fn cov2_runtime_partial_classifier_preserves_existing_native_owner() {
+        // Reuse the pre-existing synthetic carrier fixture; this test adds no
+        // native issuer and does not claim a real provider-origin positive.
+        let mut prepared = carrier_test_support::NATIVE
+            .prepare_authorized_source(b"ordinary".to_vec())
+            .expect("existing synthetic native carrier");
+        prepared.coverage_fragment = Some(ReasoningCoverageFragment {
+            contains_reasoning: true,
+            source_session: Zeroizing::new(carrier_test_support::SOURCE.to_owned()),
+            visible_parts: Vec::new(),
+            partial: true,
+        });
+        let (fragment, rejected, partial) = take_authorized_reasoning_coverage(
+            &mut prepared,
+            true,
+            "claude_code",
+            Some(carrier_test_support::SOURCE),
+        )
+        .expect("a rejected data-only companion does not consume native authority");
+        assert!(fragment.is_none());
+        assert!(rejected);
+        assert!(!partial);
+        assert!(prepared.classifier_rejected);
+        let (ordinary, disposition, permit) =
+            ReasoningSourceDisposition::from_prepared_authorized_source_with_partial_permit(
+                prepared,
+                true,
+                TRANSCRIPT_READ_HARD_CAP_BYTES,
+                "claude_code",
+                carrier_test_support::CAPTURE,
+                Some(carrier_test_support::SOURCE),
+            )
+            .expect("the original native binding remains valid");
+        assert_eq!(ordinary, b"ordinary");
+        assert!(matches!(
+            disposition,
+            ReasoningSourceDisposition::NativeProven(_)
+        ));
+        assert!(permit.is_none());
+    }
 
     #[test]
     fn og26_unverified_candidate_cannot_become_native() {

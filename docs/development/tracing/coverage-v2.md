@@ -1,7 +1,8 @@
 # Coverage schema v2 — typed reasoning encoding boundary
 
-This document specifies the codec introduced by COV2-01. It does not activate
-the live or historical-import writers; COV2-11 owns that production switch.
+This document covers the codec introduced by COV2-01 and the unreleased
+COV2-11 live/export and historical-import wiring. Stable availability and the
+upgrade boundary are described under Coverage-v2 capture below.
 The frozen v1 contract and its three byte/digest vectors remain in
 [coverage-v1.md](coverage-v1.md). A stored claim's `coverage_schema_version`
 is separate from the public `agent graph` and `agent list` envelope versions.
@@ -23,8 +24,8 @@ return the selected claim version, canonical bytes, and SHA-256 digest as one
 unit. `safe_turn_projection_for_schema` uses the same closed version check
 for allowlist-only JSON projections. Existing `NormalizedTurn::digest_hex`,
 `canonical_turn_bytes`, and `safe_turn_projection` retain their legacy
-behavior for frozen v1/RG-04 oracles; production live/import call sites must
-switch together under COV2-11. This codec does not change the database,
+behavior for frozen v1/RG-04 oracles. COV2-11 connects actual authorized
+live/export and import turns to the versioned gate together. This codec does not change the database,
 claim transactions, pending replay, graph, doctor, or public CLI defaults.
 
 ## Canonical bytes
@@ -354,7 +355,7 @@ catalog 在同一 writer transaction 复查 alias、scope/workspace、tombstone�
 
 ### Versioned prepared ordinary import (COV2-05, unreleased)
 
-The library entry `import_prepared_with_coverage_versions` accepts prepared ordinary turns, an index-aligned coverage version sidecar, a nonzero budget of at most 300 seconds and an optional absolute path to a caller-trusted Libra binary. It checks input size/depth, chronology, privacy-v2 ownership, timestamps and redaction before any lease. The capture scope must use the connected database repository ID, and the absolute storage root must contain that same SQLite database; a mismatched database/storage pair rejects before object writes. Newly matched sensitive content is rejected. This explicit entry alone may choose v2 for the four ordinary record kinds; existing CLI, live capture and default import retain their current automatic/default selection until COV2-11. It neither constructs typed/native reasoning nor proves OpenCode Source A.
+The library entry `import_prepared_with_coverage_versions` accepts prepared ordinary turns, an index-aligned coverage version sidecar, a nonzero budget of at most 300 seconds and an optional absolute path to a caller-trusted Libra binary. It checks input size/depth, chronology, privacy-v2 ownership, timestamps and redaction before any lease. The capture scope must use the connected database repository ID, and the absolute storage root must contain that same SQLite database; a mismatched database/storage pair rejects before object writes. Newly matched sensitive content is rejected. This explicit entry alone may choose v2 for the four ordinary record kinds. COV2-11 separately activates typed runtime selection: actual capture/import chooses v2 only when a turn contains supported typed Reasoning, and ordinary turns still choose v1. It neither constructs typed/native reasoning nor proves OpenCode Source A.
 
 Sidecars travel with their turns through sorting. One request rejects unknown versions, length mismatches, repeated bare keys (including across versions), repeated ordinals and missing chronology before writing. Separate requests may explicitly commit independent v1/v2 claims for the same ordinary key once each. An authenticated native association in the other schema still rejects; a version sidecar never supplies native provenance.
 
@@ -454,10 +455,45 @@ parse trees are dropped before the preprocessor's second bounded parse. The
 redactor retains its output/working-buffer limits; those limits are not a claim
 about total process RSS. Canonical/JSON output also has a checked byte budget,
 and the optional absolute deadline is checked between stages and turns. Errors
-are payload-free. `ProviderVisibleText` still owns an ordinary Rust String: its
-serialization barrier and hidden Debug do not wipe that String on drop. No
-stronger memory-erasure guarantee is added here. Existing Claude Code/Codex
+are payload-free. COV2-10 initially retained an ordinary Rust String.
+COV2-11 explicitly wipes `ProviderVisibleText` on drop and before redaction
+replacement, and the prepared ordinary owner uses `Zeroizing<Vec<u8>>`.
+This does not guarantee erasure of Serde scratch, allocator copies or all
+process memory. Existing Claude Code/Codex
 adapter preprocessing, ordinary bytes, v1 digest and safe projection are checked
 against their established pure-memory path. All these checks run without an
 OpenCode Session, exporter, account or model; account capture remains local to
 macOS and outside CI. No command, flag or website command behavior changes.
+
+## Coverage-v2 capture (unreleased)
+
+From the first stable release containing coverage-v2, OpenCode export capture
+and historical import retain supported provider-visible reasoning as typed,
+redacted turn content. Turns containing that content use coverage schema 2;
+ordinary turns keep schema 1 and their existing canonical bytes. Redaction runs
+before either digest or checkpoint projection. This does not authenticate
+`signature`, `redactedData`, or `reasoningEncryptedContent`: unproven native
+fields remain partial and cannot be archived as trusted artifacts.
+
+For a typed snapshot, the durable `redaction_bytes_scanned` projection records
+the original authorized source byte length. The detailed in-memory redaction
+report also counts the bounded decoded-text passes, so its aggregate
+`bytes_scanned` can be larger. Taking the private runtime turn companion does
+not change the durable source metric or its source commitment.
+
+After upgrading, an interrupted action whose checkpoint was already committed
+with v1 (or an empty legacy revision set) first settles that existing receipt
+without adding claims or rewriting its checkpoint. A subsequent **new action**
+may capture the visible reasoning once under v2; repeated capture then deduplicates.
+The old v1 objects, digests, and claims remain readable and unchanged.
+
+If source classification is rejected after that session already has v2 claims,
+the entire new capture/import attempt stops, including new ordinary turns.
+Its pending receipt/export work stays retryable; no fallback claims or success
+acknowledgment are created. An unchanged over-limit or unsupported source can
+keep that session blocked. Keep the recorded data, inspect `libra agent doctor`,
+and start a new OpenCode session to continue supported capture. A candidate or
+unverified reasoning source cannot turn this failure into complete coverage.
+These changes add no command flags and are not included in the installed
+0.30.49 release. OpenCode Session/exporter/model acceptance runs locally on
+macOS; it is not a CI integration test.

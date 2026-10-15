@@ -6,7 +6,11 @@
 //! adapter, external agents cannot enter the static roster, and the SQL
 //! CHECK constraint / doc roster / Rust enum stay in sync.
 
-use std::{collections::BTreeSet, fs, path::Path};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    path::Path,
+};
 
 use libra::internal::ai::observed_agents::{
     AgentKind, SlugLookup, agent_for, lookup_cli_slug, registration_for, registry,
@@ -9548,11 +9552,11 @@ fn og26_sealed_candidate_callers_are_closed() {
             ),
             (
                 "PreparedReasoningSource::with_opencode_candidates".to_owned(),
-                "prepare_authorized_source".to_owned()
+                "prepare_ordinary_authorized_source".to_owned()
             ),
             (
                 "PreparedReasoningSource::with_verified_opencode_partial".to_owned(),
-                "prepare_authorized_source".to_owned()
+                "prepare_ordinary_authorized_source".to_owned()
             ),
         ])
     );
@@ -9562,7 +9566,7 @@ fn og26_sealed_candidate_callers_are_closed() {
     );
     assert_eq!(
         opencode.references.get("with_opencode_candidates"),
-        Some(&vec!["prepare_authorized_source".to_owned()])
+        Some(&vec!["prepare_ordinary_authorized_source".to_owned()])
     );
     for entry in walkdir::WalkDir::new(repo_root().join("src")) {
         let entry = entry.expect("walk production source");
@@ -10552,7 +10556,7 @@ fn reasoning_import_partition_has_closed_ownership_transform_callers() {
         (
             "partition_reasoning_for_import",
             "src/internal/ai/agent_import.rs",
-            "import_prepared_with_subagent_discovery",
+            "import_prepared_with_subagent_discovery_and_runtime",
         ),
     ] {
         assert_import_reference_detector_catches_rogue(name);
@@ -11036,7 +11040,7 @@ fn opencode_verified_partial_live_permit_and_provenance_have_closed_owners() {
         (
             "with_verified_opencode_partial",
             OPENCODE,
-            "prepare_authorized_source",
+            "prepare_ordinary_authorized_source",
         ),
         (
             "from_prepared_authorized_source_with_partial_permit",
@@ -11046,7 +11050,7 @@ fn opencode_verified_partial_live_permit_and_provenance_have_closed_owners() {
         (
             "try_into_verified_ordinary_partial_in_scope_until",
             LIVE,
-            "run_export_stage",
+            "prepare_export_snapshot",
         ),
         (
             "from_verified_ordinary_partial",
@@ -11058,7 +11062,7 @@ fn opencode_verified_partial_live_permit_and_provenance_have_closed_owners() {
             CHECKPOINT,
             "from_verified_ordinary_partial",
         ),
-        ("export_snapshot_route", LIVE, "run_export_stage"),
+        ("export_snapshot_route", LIVE, "prepare_export_snapshot"),
     ];
     let constructors: [(&str, &str, &str); 3] = [
         (
@@ -11366,6 +11370,7 @@ fn cov2_visible_text_cannot_mint_native_or_opaque() {
     for name in [
         "prepare_coverage_preview",
         "prepare_opencode_redacted_coverage",
+        "prepare_opencode_redacted_coverage_inner",
         "normalize_opencode_typed_parts",
         "redact_canon_value",
     ] {
@@ -11422,4 +11427,169 @@ fn cov2_visible_text_cannot_mint_native_or_opaque() {
             "preview cannot open a source or persist: {path}"
         );
     }
+}
+
+/// Activation keeps raw/source and redacted import handoffs on exact closed
+/// callers. A new helper name is not an authorization to mint native data.
+#[test]
+fn cov2_runtime_data_transport_has_closed_callers() {
+    let expected: &[(&str, &[(&str, &str)])] = &[
+        (
+            "attach_reasoning_coverage",
+            &[(
+                "src/internal/ai/observed_agents/opencode_reasoning.rs",
+                "prepare_authorized_source",
+            )],
+        ),
+        (
+            "take_authorized_reasoning_coverage",
+            &[(
+                "src/internal/ai/capture/snapshot.rs",
+                "prepare_authorized_reasoning_source",
+            )],
+        ),
+        (
+            "prepare_authorized_reasoning_coverage",
+            &[(
+                "src/internal/ai/capture/snapshot.rs",
+                "capture_authorized_bytes",
+            )],
+        ),
+        (
+            "classify_borrowed_coverage_source",
+            &[
+                (
+                    "src/internal/ai/observed_agents/opencode_reasoning.rs",
+                    "prepare_authorized_source",
+                ),
+                (
+                    "src/internal/ai/observed_agents/opencode_reasoning.rs",
+                    "classify_opencode_coverage_source",
+                ),
+            ],
+        ),
+        (
+            "prepare_ordinary_authorized_source",
+            &[
+                (
+                    "src/internal/ai/observed_agents/opencode_reasoning.rs",
+                    "prepare_authorized_source",
+                ),
+                (
+                    "src/internal/ai/observed_agents/opencode_reasoning.rs",
+                    "classify_opencode_coverage_source",
+                ),
+            ],
+        ),
+        (
+            "take_coverage_runtime",
+            &[
+                (
+                    "src/internal/ai/capture/live_checkpoint.rs",
+                    "prepare_export_snapshot",
+                ),
+                (
+                    "src/internal/ai/agent_import.rs",
+                    "prepare_import_projection_with_reasoning",
+                ),
+            ],
+        ),
+        (
+            "encode_redacted_import_runtime",
+            &[(
+                "src/internal/ai/agent_import.rs",
+                "prepare_import_projection_with_reasoning",
+            )],
+        ),
+        (
+            "decode_redacted_import_runtime",
+            &[("src/command/agent/import.rs", "prepare_candidate_bounded")],
+        ),
+    ];
+    let mut actual = BTreeMap::<String, Vec<(String, String)>>::new();
+    for entry in walkdir::WalkDir::new(repo_root().join("src")) {
+        let entry = entry.expect("production source entry");
+        if !entry.file_type().is_file() || entry.path().extension().is_none_or(|e| e != "rs") {
+            continue;
+        }
+        let source = fs::read_to_string(entry.path()).expect("production source text");
+        if !expected.iter().any(|(name, _)| source.contains(name)) {
+            continue;
+        }
+        let relative = entry
+            .path()
+            .strip_prefix(repo_root())
+            .expect("source root")
+            .to_string_lossy()
+            .replace('\\', "/");
+        for (name, owners) in reasoning_scan(&source).references {
+            if expected.iter().any(|(seam, _)| *seam == name) {
+                actual
+                    .entry(name)
+                    .or_default()
+                    .extend(owners.into_iter().map(|owner| (relative.clone(), owner)));
+            }
+        }
+    }
+    for (name, callers) in expected {
+        let mut wanted = callers
+            .iter()
+            .map(|(path, owner)| (path.to_string(), owner.to_string()))
+            .collect::<Vec<_>>();
+        wanted.sort();
+        let mut got = actual.remove(*name).unwrap_or_default();
+        got.sort();
+        assert_eq!(got, wanted, "private transport caller changed: {name}");
+        assert!(
+            !wanted.is_empty(),
+            "guard must exercise an actual production caller"
+        );
+    }
+    for (path, ty) in [
+        (
+            "src/internal/ai/observed_agents/reasoning.rs",
+            "ReasoningCoverageFragment",
+        ),
+        (
+            "src/internal/ai/capture/snapshot.rs",
+            "CaptureCoverageRuntime",
+        ),
+    ] {
+        let (_, file) = parse_rust_source(path);
+        let item = file
+            .items
+            .iter()
+            .find_map(|item| match item {
+                syn::Item::Struct(item) if item.ident == ty => Some(item),
+                _ => None,
+            })
+            .expect("sealed runtime owner exists");
+        assert!(!matches!(item.vis, syn::Visibility::Public(_)));
+        for attr in &item.attrs {
+            if attr.path().is_ident("derive") {
+                let derives = attr
+                    .parse_args_with(
+                        syn::punctuated::Punctuated::<syn::Path, syn::Token![,]>::parse_terminated,
+                    )
+                    .expect("derive names");
+                assert!(derives.iter().all(|p| {
+                    !["Debug", "Clone", "Serialize", "Deserialize"].contains(
+                        &p.segments
+                            .last()
+                            .expect("derive path")
+                            .ident
+                            .to_string()
+                            .as_str(),
+                    )
+                }));
+            }
+        }
+    }
+    // Non-vacuous negative scanner control: aliases cannot hide a new consumer.
+    let rogue =
+        reasoning_scan("fn rogue() { let f = take_authorized_reasoning_coverage; f(input); }");
+    assert_eq!(
+        rogue.references.get("take_authorized_reasoning_coverage"),
+        Some(&vec!["rogue".to_owned()])
+    );
 }

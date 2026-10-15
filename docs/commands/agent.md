@@ -8,6 +8,11 @@ Use the official OpenCode **2.0.29** for ordinary automatic capture. The frozen
 2.0.26 vocabulary and private native producer sections below describe separate
 historical/explicit native lanes; they are not prerequisites for ordinary capture.
 
+Unreleased changes after 0.30.49 add session-directory filtering, native
+executable selection behind supported package-manager launchers, and an explicit
+warning for empty metadata-only checkpoint exports. The corresponding behavior
+below requires a release containing those changes.
+
 From the repository you want to capture, check the installed versions and prepare
 its exporter trust and observer:
 
@@ -134,9 +139,10 @@ content-free `legacy_event_alias` tracing warning.
 The managed plugin uses the OpenCode 2.0.26 `setup(ctx)` API, an event
 subscription and an observe-only tool hook. One OpenCode server (for example
 `opencode serve --service`) delivers every project's events to every project's
-plugin, so the plugin forwards only sessions whose `location.directory` is its
-own directory: other projects' sessions never reach this repository, a session
-moved out of the directory is closed here, and a tool call for a session not yet
+plugin. On unreleased main after 0.30.49, sessions known to belong to another
+`location.directory` are not forwarded, and a session moved out of the directory
+is closed here. Events without a location are forwarded unless their session
+was placed elsewhere. A tool call for a session not yet
 placed is attributed through the host's `session.get` (when the host cannot
 answer, it is forwarded as before and `session_location_unavailable` is reported
 once). Refresh it with `libra agent enable --agent opencode`: status reports old
@@ -197,7 +203,7 @@ alias limits also mark partial; at the ID cap later messages are omitted.
 Extraction does not read files or archive reasoning content, and synthetic
 fixtures do not prove real macOS content capture or native reasoning origin.
 
-OpenCode coverage normalization accepts native 2.0.26 messages and classic
+The legacy ordinary OpenCode coverage normalizer accepts native 2.0.26 messages and classic
 `info/parts`. Each human message starts its own stable logical turn. A valid
 native `idle` settles all pending human splits, including failed/interrupted
 outcomes; Complete describes captured representation, not task success.
@@ -252,7 +258,7 @@ native-origin gates remain required.
 | `checkpoint list` | List captured checkpoints |
 | `checkpoint show <id>` | Show a safe structural checkpoint summary (metadata and internal object IDs are withheld) |
 | `checkpoint rewind <id>` | Inspect or apply a working-tree rewind for one checkpoint |
-| `checkpoint export <id>` | Export a checkpoint's transcript. Redacted by default (no authorization); raw (un-redacted) export requires `--allow-raw --raw` and is recorded in the append-only `agent_audit_log` (`LBR-AGENT-013` when refused without it). A checkpoint recorded without a transcript (metadata-only capture — for OpenCode, the export bridge was unavailable when it was written) exports zero bytes and emits a warning |
+| `checkpoint export <id>` | Export a checkpoint's transcript. Redacted by default (no authorization); raw (un-redacted) export requires `--allow-raw --raw` and is recorded in the append-only `agent_audit_log` (`LBR-AGENT-013` when refused without it). A checkpoint recorded without a transcript (metadata-only capture — for OpenCode, the export bridge was unavailable or failed when it was written) exports zero bytes and emits a warning |
 | `skill search` | Search captured skill events by `--skill`, `--provider`, `--session`, and RFC3339 `--since`/`--until` (keyset-paginated with `--limit`/`--cursor`, `--json`). A read-time projection over checkpoint metadata — no dedicated table |
 | `skill list` | Alias of `skill search` (same filters) |
 | `skill registry` | Show the curated per-agent discoverable-skill registry (`--provider <slug>` to scope; the public SkillDiscoverer surface) |
@@ -370,7 +376,8 @@ the `.bin/opencode` shim written by mise's npm backend (aube) or by pnpm —
 that executable's own directory is also registered (the refusal names the
 exact `rpc trust --dir` to run); a JavaScript launcher (`#!/usr/bin/env node`)
 is refused. A trust record that still pins a launcher reports `export_bridge`
-unavailable until `libra agent rpc trust opencode` is re-run.
+unavailable. Register the native executable's directory if needed, then re-run
+`libra agent rpc trust opencode`.
 Linux content export additionally requires a trusted `bwrap` that passes
 Libra's descriptor-native `--bind-fd` safety probe. Unsupported or legacy
 `bwrap` is reported unavailable and fails closed to metadata-only capture;
@@ -1468,3 +1475,34 @@ fields, complete reasoning, real idle.error failures, automatic terminal
 completion or full-suite acceptance. Real OpenCode Session/account/model checks
 run locally on macOS and stay outside CI. Metadata-only, empty output and skipped
 checks do not count as content acceptance.
+
+## Coverage-v2 capture (unreleased)
+
+From the first stable release containing coverage-v2, OpenCode export capture
+and historical import retain supported provider-visible reasoning as typed,
+redacted turn content. Turns containing that content use coverage schema 2;
+ordinary turns keep schema 1 and their existing canonical bytes. Redaction runs
+before either digest or checkpoint projection. This does not authenticate
+`signature`, `redactedData`, or `reasoningEncryptedContent`: unproven native
+fields remain partial and cannot be archived as trusted artifacts.
+
+Retained visible reasoning is part of the redacted checkpoint and follows its
+export, `libra agent push`, and cloud-sync paths when used. There is no separate
+flag to exclude that reasoning while retaining other captured content.
+
+After upgrading, an interrupted action whose checkpoint was already committed
+with v1 (or an empty legacy revision set) first settles that existing receipt
+without adding claims or rewriting its checkpoint. A subsequent **new action**
+may capture the visible reasoning once under v2; repeated capture then deduplicates.
+The old v1 objects, digests, and claims remain readable and unchanged.
+
+If source classification is rejected after that session already has v2 claims,
+the entire new capture/import attempt stops, including new ordinary turns.
+Its pending receipt/export work stays retryable; no fallback claims or success
+acknowledgment are created. An unchanged over-limit or unsupported source can
+keep that session blocked. Keep the recorded data, inspect `libra agent doctor`,
+and start a new OpenCode session to continue supported capture. A candidate or
+unverified reasoning source cannot turn this failure into complete coverage.
+These changes add no command flags and are not included in Libra 0.30.49 or
+earlier. OpenCode Session/exporter/model acceptance runs locally on
+macOS; it is not a CI integration test.

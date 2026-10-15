@@ -26,6 +26,14 @@ Libra 的对象格式和传输协议兼容 Git，可融入现有开发流程。�
 
 ---
 
+
+coverage-v2 采集尚未发布。首个包含该能力的稳定版本将保留脱敏后的 OpenCode 可读
+reasoning typed turn，普通 v1 字节保持不变。中断的旧动作先结算原回执，之后的新动作
+可一次性重采 reasoning。如果已有 v2 历史的 Session 来源被拒绝，采集会停止；请使用
+`libra agent doctor` 检查并新建 Session。native 证明字段仍需独立来源验证，详见
+[采集命令文档](docs/commands/zh-CN/agent.md#coverage-v2-采集未发布)。
+
+
 ## 核心差异
 
 | 能力 | 传统版本控制（Git） | Libra |

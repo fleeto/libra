@@ -57,7 +57,10 @@ use crate::{
             },
         },
         capture_scope::{CaptureCommitDeadline, CaptureScope},
-        coverage_gate::{CaptureReservationExecution, ReasoningCoverageInput, ReservedTurnClaim},
+        coverage_gate::{
+            CaptureReservationExecution, CommittedTurnClaimSnapshot, ReasoningCoverageInput,
+            ReservedTurnClaim, VersionedReservedTurnClaim,
+        },
         hooks::lifecycle::{
             CanonicalEventContext, LifecycleEvent, LifecycleEventKind, LifecycleIdentityScheme,
             SessionHookEnvelope, lifecycle_event_canonical_json_with_identity,
@@ -95,6 +98,7 @@ pub(super) struct CaptureClaimReservation {
     owner: String,
     now_ms: i64,
     claims: Vec<ReservedTurnClaim>,
+    versioned_claims: Vec<VersionedReservedTurnClaim>,
     reasoning: Option<Box<ReasoningCoveragePlan>>,
 }
 
@@ -323,6 +327,75 @@ async fn settle_covered_checkpoint_replay(
             CheckpointConflictReason::ReplayPayloadMismatch
         ),
         Err(error) => Err(anyhow!("settle covered capture checkpoint replay: {error}")),
+    }
+}
+
+async fn settle_runtime_covered_checkpoint_replay(
+    conn: &sea_orm::DatabaseConnection,
+    scope: &CaptureScope,
+    session_id: &str,
+    checkpoint_id: &str,
+    deadline: CaptureCommitDeadline,
+    covered: &[CommittedTurnClaimSnapshot],
+) -> Result<CoveredCheckpointReplay> {
+    match TracesCheckpointStore::settle_runtime_covered_replay_without_write(
+        conn,
+        scope,
+        checkpoint_id,
+        session_id,
+        Some(deadline),
+        covered,
+    )
+    .await
+    {
+        Ok(CheckpointReplayStatus::Missing | CheckpointReplayStatus::Complete) => {
+            Ok(CoveredCheckpointReplay::Settled)
+        }
+        Ok(CheckpointReplayStatus::PendingCleanup { .. }) => {
+            bail!("capture checkpoint needs durable cleanup; run libra agent doctor")
+        }
+        Err(CheckpointStoreError::DeadlineExceeded) => Ok(CoveredCheckpointReplay::DeadlineElapsed),
+        Err(error) => Err(anyhow!(
+            "cannot settle versioned checkpoint replay: {error}; run libra agent doctor"
+        )),
+    }
+}
+
+async fn legacy_export_replay_exit(
+    conn: &sea_orm::DatabaseConnection,
+    scope: &CaptureScope,
+    session_id: &str,
+    checkpoint_id: &str,
+    deadline: CaptureCommitDeadline,
+) -> std::result::Result<Option<PreparedExportSource>, ExportStageExit> {
+    let durable = TracesCheckpointStore::durable_legacy_replay_exists_for(
+        conn,
+        scope,
+        checkpoint_id,
+        session_id,
+        Some(deadline),
+    )
+    .await
+    .map_err(|error| {
+        ExportStageExit::CoveredReplayFailed(anyhow!(
+            "cannot verify legacy capture replay: {error}; run libra agent doctor"
+        ))
+    })?;
+    if !durable {
+        return Ok(None);
+    }
+    match settle_covered_checkpoint_replay(conn, scope, session_id, checkpoint_id, Some(deadline))
+        .await
+    {
+        Ok(CoveredCheckpointReplay::Settled) => {
+            Ok(Some(PreparedExportSource::DurableActionReplay {
+                keep_export_dirty: true,
+            }))
+        }
+        Ok(CoveredCheckpointReplay::DeadlineElapsed) => Err(ExportStageExit::CoveredReplayFailed(
+            anyhow!("legacy capture replay exceeded its deadline"),
+        )),
+        Err(error) => Err(ExportStageExit::CoveredReplayFailed(error)),
     }
 }
 
@@ -865,6 +938,7 @@ async fn reserve_live_coverage(
             owner,
             now_ms,
             claims: outcome.reserved,
+            versioned_claims: Vec::new(),
             reasoning: identity_plan.map(Box::new),
         }),
     })
@@ -1215,8 +1289,24 @@ struct ExportedSource {
 }
 
 enum PreparedExportSource {
+    /// Only the original action is acknowledged, never a replacement payload.
+    DurableActionReplay {
+        keep_export_dirty: bool,
+    },
     Captured(ExportedSource),
     VerifiedPartial(VerifiedOrdinaryPartialSnapshot),
+}
+
+// Narrow success and settlement before matching the runner owner. The two
+// content arms can only hand it off; all other exits share one settlement site.
+enum ReadyExportSource {
+    Captured(ExportedSource),
+    VerifiedPartial(VerifiedOrdinaryPartialSnapshot),
+}
+
+enum ExportStageSettlement {
+    DurableActionReplay { keep_export_dirty: bool },
+    StageExit(ExportStageExit),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1281,6 +1371,327 @@ pub(super) fn export_stage_lease_disposition<'a>(
     )
 }
 
+/// Shared authorized-snapshot route. The exporter owns process admission;
+/// this stage consumes only an already authorized/redacted snapshot, so its
+/// persistence and receipt replay can also be exercised without a provider.
+#[allow(clippy::too_many_arguments)]
+async fn prepare_export_snapshot(
+    conn: &sea_orm::DatabaseConnection,
+    repo_path: &std::path::Path,
+    scope: &CaptureScope,
+    agent_kind: &str,
+    libra_session_id: &str,
+    checkpoint_id: &str,
+    catalog_request: &CaptureCatalogApplyRequest,
+    export_deadline: CaptureCommitDeadline,
+    preexisting_durable_terminal: bool,
+    report_value: &mut serde_json::Value,
+    normalizer: crate::internal::ai::observed_agents::live_capture::LiveCoverageNormalizer,
+    mut snapshot: CaptureSnapshot,
+    owner: String,
+    now_ms: i64,
+) -> std::result::Result<PreparedExportSource, ExportStageExit> {
+    use crate::internal::ai::observed_agents::coverage;
+    let source_route = export_snapshot_route(&snapshot);
+    let mut runtime = snapshot.take_coverage_runtime();
+    if source_route == ExportSnapshotRoute::VerifiedPartial {
+        // This consumer owns the source's strict pre-scrub permit. It
+        // independently binds the actual redacted bytes to the current
+        // scope/HMAC and deadline; a generic Unproven flag cannot enter.
+        let storage = util::try_get_storage_path(Some(repo_path.to_path_buf())).map_err(|_| {
+            ExportStageExit::CoverageFailed(anyhow!(
+                "verified partial export storage scope is unavailable"
+            ))
+        })?;
+        let source = snapshot
+            .try_into_verified_ordinary_partial_in_scope_until(
+                conn,
+                scope,
+                &storage,
+                repo_path,
+                export_deadline.monotonic(),
+            )
+            .await
+            .map_err(|_| {
+                ExportStageExit::CoverageFailed(anyhow!(
+                    "verified partial export did not retain its source binding"
+                ))
+            })?;
+        // The owning partial carrier has now revalidated source/scope/HMAC.
+        if let Some(exit) = legacy_export_replay_exit(
+            conn,
+            scope,
+            libra_session_id,
+            checkpoint_id,
+            export_deadline,
+        )
+        .await?
+        {
+            return Ok(exit);
+        }
+        crate::internal::ai::coverage_gate::ensure_runtime_source_admitted_until(
+            conn,
+            scope,
+            libra_session_id,
+            export_deadline,
+            "export",
+            runtime.classifier_rejected,
+        )
+        .await
+        .map_err(ExportStageExit::CoverageFailed)?;
+        merge_redaction_report_into(report_value, source.redaction_report());
+        // Do not run the coverage-v1 normalizer: its all-incomplete skip
+        // is not proof that this nonzero partial source was persisted.
+        return Ok(PreparedExportSource::VerifiedPartial(source));
+    }
+    if source_route == ExportSnapshotRoute::Rejected {
+        return Err(ExportStageExit::SourceRejected(
+            SourcePreparationRejected.into(),
+        ));
+    }
+    // Keep an incomplete source on its existing typed outcome. In
+    // particular, do not replace a deadline result with a commitment
+    // failure while no snapshot can reach a durable projection.
+    if snapshot.transcript().is_none() {
+        return Err(ExportStageExit::SourceRejected(anyhow!(
+            "LBR-AGENT-005: export snapshot is incomplete; write aborted (fail-closed)"
+        )));
+    }
+    // The export bridge's helper checksum is a transient preimage only.
+    // Bind it before the snapshot can reach coverage, checkpoint
+    // metadata, or a terminal finalizer; an export without that scoped
+    // proof must not downgrade into a durable raw-SHA projection.
+    let commitment = match (
+        snapshot.redacted_digest_preimage(),
+        util::try_get_storage_path(Some(repo_path.to_path_buf())),
+    ) {
+        (Some(preimage), Ok(storage_path)) => derive_snapshot_content_commitment_in_scope_until(
+            conn,
+            scope,
+            &storage_path,
+            repo_path,
+            &preimage,
+            export_deadline.monotonic(),
+        )
+        .await
+        .ok(),
+        _ => None,
+    };
+    if !commitment.is_some_and(|commitment| snapshot.bind_source_commitment(commitment)) {
+        return Err(ExportStageExit::SourceRejected(anyhow!(
+            "LBR-AGENT-005: export source commitment unavailable; \
+             write aborted (fail-closed)"
+        )));
+    }
+    let Some(snapshot_bytes) = snapshot.transcript() else {
+        return Err(ExportStageExit::SourceRejected(anyhow!(
+            "LBR-AGENT-005: export snapshot is incomplete; write aborted (fail-closed)"
+        )));
+    };
+    merge_redaction_report_into(report_value, snapshot.redaction_report());
+    let mut turns = runtime
+        .turns
+        .take()
+        .unwrap_or_else(|| (normalizer)(snapshot_bytes));
+    coverage::redact_turns(&mut turns);
+    let (projection, transcript, reasoning) = snapshot.into_checkpoint_parts();
+    let Some(transcript) = transcript else {
+        return Err(ExportStageExit::SourceRejected(anyhow!(
+            "LBR-AGENT-005: complete export snapshot lost its redacted transcript"
+        )));
+    };
+    if turns.is_empty() && !reasoning.is_ordinary() {
+        return Err(ExportStageExit::CoverageFailed(anyhow!(
+            "reasoning source has no logical turns for identity coverage"
+        )));
+    }
+    let storage_path =
+        util::try_get_storage_path(Some(repo_path.to_path_buf())).map_err(|error| {
+            ExportStageExit::CoverageFailed(
+                anyhow!(error).context("resolve storage for runtime reasoning coverage"),
+            )
+        })?;
+    let reader = ReasoningIdentityReadContext::new(
+        scope,
+        libra_session_id,
+        &storage_path,
+        repo_path,
+        export_deadline.monotonic(),
+    );
+    let identity_plan =
+        crate::internal::ai::capture::checkpoint::prepare_reasoning_coverage_plan_from_disposition(
+            &reasoning,
+            ReasoningIdentityPreparation {
+                conn,
+                scope,
+                storage_path: &storage_path,
+                authorized_root: repo_path,
+                session_id: libra_session_id,
+                provider: agent_kind,
+                turns: &turns,
+                deadline: export_deadline.monotonic(),
+            },
+        )
+        .await
+        .map_err(ExportStageExit::CoverageFailed)?;
+    if let Some(exit) = legacy_export_replay_exit(
+        conn,
+        scope,
+        libra_session_id,
+        checkpoint_id,
+        export_deadline,
+    )
+    .await?
+    {
+        return Ok(exit);
+    }
+    let input = match identity_plan.as_ref() {
+        Some(plan) => ReasoningCoverageInput::native(plan),
+        None => ReasoningCoverageInput::ordinary(&reader),
+    };
+    let reasoning_outcome =
+        crate::internal::ai::coverage_gate::reserve_runtime_turn_claims_with_reasoning(
+            conn,
+            scope,
+            libra_session_id,
+            &turns,
+            &owner,
+            now_ms,
+            CaptureReservationExecution::export(export_deadline),
+            input,
+            runtime.classifier_rejected,
+        )
+        .await
+        .map_err(ExportStageExit::CoverageFailed)?;
+    if reasoning_outcome.skipped_incomplete_reasoning != 0 {
+        return Err(ExportStageExit::CoverageFailed(anyhow!(
+            "reasoning coverage is partial; run libra agent doctor before retrying capture"
+        )));
+    }
+    let versioned_claims = reasoning_outcome.versioned_reserved;
+    let covered = reasoning_outcome.covered;
+    let outcome = reasoning_outcome.ordinary;
+    #[cfg(test)]
+    test_support::delay_after_live_coverage_reservation();
+    // Codex M3 R2 P1-2: a purely in-flight skip (another writer holds
+    // the claim lease for every turn, nothing reserved here) must NOT
+    // mark this export generation clean. If that writer then crashes, its
+    // claim lease expires and only a DIRTY job lets a later idle retry —
+    // advancing to clean would silently drop the transcript. Mirror the
+    // live path: release dirty WITHOUT advancing processed, so
+    // acquisition re-fires.
+    if outcome.is_inflight_only_skip() {
+        tracing::warn!(
+            session_id = %redact_session_id(libra_session_id),
+            skipped_inflight = outcome.skipped_inflight,
+            "transcript export: coverage held by another in-flight writer; \
+             releasing dirty for retry"
+        );
+        return Err(ExportStageExit::InflightOnly);
+    }
+    if runtime.source_partial && outcome.is_noop() {
+        return Err(ExportStageExit::CoverageFailed(anyhow!(
+            "partial capture source cannot acknowledge a covered replay; run libra agent doctor"
+        )));
+    }
+    let fully_covered = !runtime.source_partial
+        && !turns.is_empty()
+        && outcome.reserved.is_empty()
+        && outcome.skipped_covered == turns.len()
+        && outcome.skipped_inflight == 0
+        && outcome.conflicted == 0;
+    if fully_covered
+        && covered.iter().any(|claim| {
+            claim.checkpoint_id() == checkpoint_id
+                && claim.version()
+                    == crate::internal::ai::observed_agents::CoverageSchemaVersion::V2
+        })
+    {
+        match settle_runtime_covered_checkpoint_replay(
+            conn,
+            scope,
+            libra_session_id,
+            checkpoint_id,
+            export_deadline,
+            &covered,
+        )
+        .await
+        {
+            Ok(CoveredCheckpointReplay::Settled) => {
+                return Ok(PreparedExportSource::DurableActionReplay {
+                    keep_export_dirty: false,
+                });
+            }
+            Ok(CoveredCheckpointReplay::DeadlineElapsed) => {
+                return Err(ExportStageExit::CoveredReplayFailed(anyhow!(
+                    "versioned capture replay exceeded its deadline"
+                )));
+            }
+            Err(error) => return Err(ExportStageExit::CoveredReplayFailed(error)),
+        }
+    }
+    let covered_terminal_replay =
+        catalog_request.mutation().is_terminal() && preexisting_durable_terminal && fully_covered;
+    if outcome.is_noop() && (!catalog_request.mutation().is_terminal() || covered_terminal_replay) {
+        tracing::info!(
+            session_id = %redact_session_id(libra_session_id),
+            skipped_covered = outcome.skipped_covered,
+            skipped_inflight = outcome.skipped_inflight,
+            conflicted = outcome.conflicted,
+            terminal_coverage_replay = covered_terminal_replay,
+            "transcript export: every turn already covered; no append"
+        );
+        // Settle this action's own durable replay before the export
+        // generation can advance clean. Any unresolved outcome keeps the
+        // receipt pending and releases the runner dirty so a later idle
+        // retries.
+        return Err(
+            match settle_runtime_covered_checkpoint_replay(
+                conn,
+                scope,
+                libra_session_id,
+                checkpoint_id,
+                export_deadline,
+                &covered,
+            )
+            .await
+            {
+                Ok(CoveredCheckpointReplay::Settled) => ExportStageExit::CoveredNoop {
+                    covered_terminal_replay,
+                },
+                Ok(CoveredCheckpointReplay::DeadlineElapsed) => {
+                    ExportStageExit::CoveredReplayFailed(anyhow!(
+                        "covered export replay exceeded its deadline"
+                    ))
+                }
+                Err(error) => ExportStageExit::CoveredReplayFailed(error),
+            },
+        );
+    }
+    if outcome.is_noop() {
+        // See the live-source branch: a terminal receipt needs a durable
+        // proof for its own action key unless all covered turns replay
+        // an already durable terminal state.
+        tracing::info!(
+            session_id = %redact_session_id(libra_session_id),
+            skipped_covered = outcome.skipped_covered,
+            "transcript export: terminal action has no new turns; writing strict completion checkpoint"
+        );
+    }
+    Ok(PreparedExportSource::Captured(ExportedSource {
+        projection,
+        transcript,
+        reservation: CaptureClaimReservation {
+            owner,
+            now_ms,
+            claims: outcome.reserved,
+            versioned_claims,
+            reasoning: identity_plan.map(Box::new),
+        },
+        reasoning,
+    }))
+}
+
 /// Export stage (ADR-ACF-10, ACF-20): admit an export-job runner, export the
 /// transcript through the provider's exporter, snapshot and bind it, and
 /// reserve its turns on the export claim channel. Its token is settled here
@@ -1306,8 +1717,6 @@ pub(super) async fn run_export_stage<'a, P: LiveExportLeasePort>(
     export_lease: &'a P,
     exporter: &dyn LiveTranscriptExporter,
 ) -> Result<ExportStage<'a, P>> {
-    use crate::internal::ai::observed_agents::coverage;
-
     let libra_session_id = context.libra_session_id;
     // `effective_capture_deadline` establishes an exporter's default budget
     // before catalog/snapshot work. Reuse that exact pair here; re-anchoring
@@ -1365,7 +1774,7 @@ pub(super) async fn run_export_stage<'a, P: LiveExportLeasePort>(
         // hard cap/deadline, digests the exact authorized source, then
         // returns redacted-only bytes. A partial export is a failed closed
         // checkpoint write, never an unredacted normalization fallback.
-        let mut snapshot = CaptureSnapshotService::capture_authorized_with_reasoning_context(
+        let snapshot = CaptureSnapshotService::capture_authorized_with_reasoning_context(
             source,
             binding.observed(),
             crate::internal::ai::capture::snapshot::AuthorizedReasoningSourceContext::authorized_export(
@@ -1373,208 +1782,26 @@ pub(super) async fn run_export_stage<'a, P: LiveExportLeasePort>(
             ),
             CaptureSnapshotPolicy::with_deadline(Some(export_deadline.monotonic())),
         );
-        let source_route = export_snapshot_route(&snapshot);
-        if source_route == ExportSnapshotRoute::VerifiedPartial {
-            // This consumer owns the source's strict pre-scrub permit. It
-            // independently binds the actual redacted bytes to the current
-            // scope/HMAC and deadline; a generic Unproven flag cannot enter.
-            let storage = util::try_get_storage_path(Some(repo_path.to_path_buf()))
-                .map_err(|_| {
-                    ExportStageExit::CoverageFailed(anyhow!(
-                        "verified partial export storage scope is unavailable"
-                    ))
-                })?;
-            let source = snapshot
-                .try_into_verified_ordinary_partial_in_scope_until(
-                    conn,
-                    scope,
-                    &storage,
-                    repo_path,
-                    export_deadline.monotonic(),
-                )
-                .await
-                .map_err(|_| {
-                    ExportStageExit::CoverageFailed(anyhow!(
-                        "verified partial export did not retain its source binding"
-                    ))
-                })?;
-            merge_redaction_report_into(report_value, source.redaction_report());
-            // Do not run the coverage-v1 normalizer: its all-incomplete skip
-            // is not proof that this nonzero partial source was persisted.
-            return Ok(PreparedExportSource::VerifiedPartial(source));
-        }
-        if source_route == ExportSnapshotRoute::Rejected {
-            return Err(ExportStageExit::SourceRejected(SourcePreparationRejected.into()));
-        }
-        // Keep an incomplete source on its existing typed outcome. In
-        // particular, do not replace a deadline result with a commitment
-        // failure while no snapshot can reach a durable projection.
-        if snapshot.transcript().is_none() {
-            return Err(ExportStageExit::SourceRejected(anyhow!(
-                "LBR-AGENT-005: export snapshot is incomplete; write aborted (fail-closed)"
-            )));
-        }
-        // The export bridge's helper checksum is a transient preimage only.
-        // Bind it before the snapshot can reach coverage, checkpoint
-        // metadata, or a terminal finalizer; an export without that scoped
-        // proof must not downgrade into a durable raw-SHA projection.
-        let commitment = match (
-            snapshot.redacted_digest_preimage(),
-            util::try_get_storage_path(Some(repo_path.to_path_buf())),
-        ) {
-            (Some(preimage), Ok(storage_path)) => {
-                derive_snapshot_content_commitment_in_scope_until(
-                    conn,
-                    scope,
-                    &storage_path,
-                    repo_path,
-                    &preimage,
-                    export_deadline.monotonic(),
-                )
-                .await
-                .ok()
-            }
-            _ => None,
-        };
-        if !commitment.is_some_and(|commitment| snapshot.bind_source_commitment(commitment)) {
-            return Err(ExportStageExit::SourceRejected(anyhow!(
-                "LBR-AGENT-005: export source commitment unavailable; \
-                 write aborted (fail-closed)"
-            )));
-        }
-        let Some(snapshot_bytes) = snapshot.transcript() else {
-            return Err(ExportStageExit::SourceRejected(anyhow!(
-                "LBR-AGENT-005: export snapshot is incomplete; write aborted (fail-closed)"
-            )));
-        };
-        merge_redaction_report_into(report_value, snapshot.redaction_report());
-        let mut turns = (exporter.export_coverage_normalizer())(snapshot_bytes);
-        coverage::redact_turns(&mut turns);
-        let (projection, transcript, reasoning) = snapshot.into_checkpoint_parts();
-        let Some(transcript) = transcript else {
-            return Err(ExportStageExit::SourceRejected(anyhow!(
-                "LBR-AGENT-005: complete export snapshot lost its redacted transcript"
-            )));
-        };
-        if turns.is_empty() && !reasoning.is_ordinary() {
-            return Err(ExportStageExit::CoverageFailed(anyhow!(
-                "reasoning source has no logical turns for identity coverage"
-            )));
-        }
-        let (reasoning_outcome, identity_plan) = match reserve_reasoning_coverage(
-            conn,
-            scope,
-            repo_path,
-            libra_session_id,
-            &turns,
-            &reasoning,
-            binding.agent_kind_db(),
-            &owner,
-            now_ms,
-            "export",
-            Some(export_deadline),
-        )
-        .await
-        {
-            Ok(outcome) => outcome,
-            // Fail-closed: no ungated append; the runner is released dirty
-            // so the next idle retries.
-            Err(error) => return Err(ExportStageExit::CoverageFailed(error)),
-        };
-        if reasoning_outcome.skipped_incomplete_reasoning != 0 {
-            return Err(ExportStageExit::CoverageFailed(anyhow!(
-                "reasoning coverage is partial; run libra agent doctor before retrying capture"
-            )));
-        }
-        let outcome = reasoning_outcome.ordinary;
-        #[cfg(test)]
-        test_support::delay_after_live_coverage_reservation();
-        // Codex M3 R2 P1-2: a purely in-flight skip (another writer holds
-        // the claim lease for every turn, nothing reserved here) must NOT
-        // mark this export generation clean. If that writer then crashes, its
-        // claim lease expires and only a DIRTY job lets a later idle retry —
-        // advancing to clean would silently drop the transcript. Mirror the
-        // live path: release dirty WITHOUT advancing processed, so
-        // acquisition re-fires.
-        if outcome.is_inflight_only_skip() {
-            tracing::warn!(
-                session_id = %redact_session_id(libra_session_id),
-                skipped_inflight = outcome.skipped_inflight,
-                "transcript export: coverage held by another in-flight writer; \
-                 releasing dirty for retry"
-            );
-            return Err(ExportStageExit::InflightOnly);
-        }
-        let fully_covered = !turns.is_empty()
-            && outcome.reserved.is_empty()
-            && outcome.skipped_covered == turns.len()
-            && outcome.skipped_inflight == 0
-            && outcome.conflicted == 0;
-        let covered_terminal_replay = catalog_request.mutation().is_terminal()
-            && preexisting_durable_terminal
-            && fully_covered;
-        if outcome.is_noop()
-            && (!catalog_request.mutation().is_terminal() || covered_terminal_replay)
-        {
-            tracing::info!(
-                session_id = %redact_session_id(libra_session_id),
-                skipped_covered = outcome.skipped_covered,
-                skipped_inflight = outcome.skipped_inflight,
-                conflicted = outcome.conflicted,
-                terminal_coverage_replay = covered_terminal_replay,
-                "transcript export: every turn already covered; no append"
-            );
-            // Settle this action's own durable replay before the export
-            // generation can advance clean. Any unresolved outcome keeps the
-            // receipt pending and releases the runner dirty so a later idle
-            // retries.
-            return Err(
-                match settle_covered_checkpoint_replay(
-                    conn,
-                    scope,
-                    libra_session_id,
-                    checkpoint_id,
-                    Some(export_deadline),
-                )
-                .await
-                {
-                    Ok(CoveredCheckpointReplay::Settled) => ExportStageExit::CoveredNoop {
-                        covered_terminal_replay,
-                    },
-                    Ok(CoveredCheckpointReplay::DeadlineElapsed) => {
-                        ExportStageExit::CoveredReplayFailed(anyhow!(
-                            "covered export replay exceeded its deadline"
-                        ))
-                    }
-                    Err(error) => ExportStageExit::CoveredReplayFailed(error),
-                },
-            );
-        }
-        if outcome.is_noop() {
-            // See the live-source branch: a terminal receipt needs a durable
-            // proof for its own action key unless all covered turns replay
-            // an already durable terminal state.
-            tracing::info!(
-                session_id = %redact_session_id(libra_session_id),
-                skipped_covered = outcome.skipped_covered,
-                "transcript export: terminal action has no new turns; writing strict completion checkpoint"
-            );
-        }
-        Ok(PreparedExportSource::Captured(ExportedSource {
-            projection,
-            transcript,
-            reservation: CaptureClaimReservation {
-                owner,
-                now_ms,
-                claims: outcome.reserved,
-                reasoning: identity_plan.map(Box::new),
-            },
-            reasoning,
-        }))
+        prepare_export_snapshot(
+            conn, repo_path, scope, binding.agent_kind_db(), libra_session_id,
+            checkpoint_id, catalog_request, export_deadline,
+            preexisting_durable_terminal, report_value,
+            exporter.export_coverage_normalizer(), snapshot, owner, now_ms,
+        ).await
     }
     .await;
+    let source = match source {
+        Ok(PreparedExportSource::Captured(source)) => Ok(ReadyExportSource::Captured(source)),
+        Ok(PreparedExportSource::VerifiedPartial(source)) => {
+            Ok(ReadyExportSource::VerifiedPartial(source))
+        }
+        Ok(PreparedExportSource::DurableActionReplay { keep_export_dirty }) => {
+            Err(ExportStageSettlement::DurableActionReplay { keep_export_dirty })
+        }
+        Err(exit) => Err(ExportStageSettlement::StageExit(exit)),
+    };
     match source {
-        Ok(PreparedExportSource::Captured(ExportedSource {
+        Ok(ReadyExportSource::Captured(ExportedSource {
             projection,
             transcript,
             reservation,
@@ -1587,49 +1814,46 @@ pub(super) async fn run_export_stage<'a, P: LiveExportLeasePort>(
             claims: Box::new(reservation),
             reasoning: Box::new(reasoning),
         }),
-        Ok(PreparedExportSource::VerifiedPartial(source)) => Ok(ExportStage::VerifiedPartial {
+        Ok(ReadyExportSource::VerifiedPartial(source)) => Ok(ExportStage::VerifiedPartial {
             catalog_reservation: Box::new(catalog_reservation),
             runner,
             source: Box::new(source),
         }),
-        Err(exit) => {
-            let (disposition, reason, log) =
-                export_stage_lease_disposition(&exit, libra_session_id);
-            let settled = runner.settle(disposition, reason, log).await;
-            // Only a failed `AdvanceAndRelease` advance returns `Err`; the
-            // runner is already retired dirty, so skip the continuation and
-            // make the host retry the catalog receipt.
-            settled.context("settle no-op export job within its capture deadline")?;
-            match exit {
-                ExportStageExit::BridgeUnavailable => Ok(ExportStage::MetadataOnly {
-                    catalog_reservation: Box::new(catalog_reservation),
-                }),
-                ExportStageExit::SourceRejected(error)
-                | ExportStageExit::CoveredReplayFailed(error) => Err(error),
-                ExportStageExit::CoverageFailed(error) => Err(error.context(
-                    "coverage gate reservation failed; export capture aborted (fail-closed)",
-                )),
-                ExportStageExit::InflightOnly => {
-                    settle_preapplied_without_checkpoint(
-                        conn,
-                        catalog_reservation,
-                        catalog_request,
-                        capture_finalizer_deadline_millis,
-                        terminal_settlement_deadline,
-                    )
-                    .await?;
-                    Ok(ExportStage::Settled)
-                }
-                ExportStageExit::CoveredNoop {
-                    covered_terminal_replay,
-                } => {
-                    if covered_terminal_replay {
-                        settle_preapplied_covered_terminal_replay(
-                            catalog_reservation,
-                            catalog_request,
-                        )
-                        .await?;
+        Err(continuation) => {
+            let (disposition, reason, log, settlement_context) = match &continuation {
+                ExportStageSettlement::DurableActionReplay { keep_export_dirty } => (
+                    if *keep_export_dirty {
+                        LeaseDisposition::Dirty
                     } else {
+                        LeaseDisposition::AdvanceAndRelease
+                    },
+                    "settle_durable_action_export_job_failed",
+                    LeaseLogContext::Session {
+                        session_id: libra_session_id,
+                        message: "failed to settle original action export job",
+                    },
+                    "settle export runner for original durable action",
+                ),
+                ExportStageSettlement::StageExit(exit) => {
+                    let (disposition, reason, log) =
+                        export_stage_lease_disposition(exit, libra_session_id);
+                    (
+                        disposition,
+                        reason,
+                        log,
+                        "settle no-op export job within its capture deadline",
+                    )
+                }
+            };
+            // Every non-writing exit consumes the token at this one site.
+            // Failed advance already retires it dirty; keep the receipt pending.
+            runner
+                .settle(disposition, reason, log)
+                .await
+                .context(settlement_context)?;
+            match continuation {
+                ExportStageSettlement::DurableActionReplay { .. } => {
+                    if !catalog_request.mutation().is_terminal() {
                         settle_preapplied_without_checkpoint(
                             conn,
                             catalog_reservation,
@@ -1638,9 +1862,63 @@ pub(super) async fn run_export_stage<'a, P: LiveExportLeasePort>(
                             terminal_settlement_deadline,
                         )
                         .await?;
+                        return Ok(ExportStage::Settled);
                     }
-                    Ok(ExportStage::Settled)
+                    match catalog_reservation
+                        .complete_preapplied_durable_replay(catalog_request)
+                        .await
+                        .map_err(|error| {
+                            anyhow!("complete original durable capture receipt: {error}")
+                        })? {
+                        CaptureCoordinatorOutcome::CheckpointAlreadyExists { .. }
+                        | CaptureCoordinatorOutcome::AlreadyApplied => Ok(ExportStage::Settled),
+                        outcome => Err(anyhow!(
+                            "durable capture receipt remains pending: {outcome:?}; run libra agent doctor"
+                        )),
+                    }
                 }
+                ExportStageSettlement::StageExit(exit) => match exit {
+                    ExportStageExit::BridgeUnavailable => Ok(ExportStage::MetadataOnly {
+                        catalog_reservation: Box::new(catalog_reservation),
+                    }),
+                    ExportStageExit::SourceRejected(error)
+                    | ExportStageExit::CoveredReplayFailed(error) => Err(error),
+                    ExportStageExit::CoverageFailed(error) => Err(error.context(
+                        "coverage gate reservation failed; export capture aborted (fail-closed)",
+                    )),
+                    ExportStageExit::InflightOnly => {
+                        settle_preapplied_without_checkpoint(
+                            conn,
+                            catalog_reservation,
+                            catalog_request,
+                            capture_finalizer_deadline_millis,
+                            terminal_settlement_deadline,
+                        )
+                        .await?;
+                        Ok(ExportStage::Settled)
+                    }
+                    ExportStageExit::CoveredNoop {
+                        covered_terminal_replay,
+                    } => {
+                        if covered_terminal_replay {
+                            settle_preapplied_covered_terminal_replay(
+                                catalog_reservation,
+                                catalog_request,
+                            )
+                            .await?;
+                        } else {
+                            settle_preapplied_without_checkpoint(
+                                conn,
+                                catalog_reservation,
+                                catalog_request,
+                                capture_finalizer_deadline_millis,
+                                terminal_settlement_deadline,
+                            )
+                            .await?;
+                        }
+                        Ok(ExportStage::Settled)
+                    }
+                },
             }
         }
     }
@@ -2159,16 +2437,18 @@ pub(super) async fn run_checkpoint_stage<P: LiveExportLeasePort>(
         // INSERT into the same transaction as the traces-ref CAS. No live
         // writer may use the old ref-first/catalog-later path after
         // ADR-DR-19.
-        let (owner, claim_now_ms, claims, identity_plan) = match live_reservation {
+        let (owner, claim_now_ms, claims, versioned_claims, identity_plan) = match live_reservation {
             Some(reservation) => (
                 reservation.owner,
                 reservation.now_ms,
                 reservation.claims,
+                reservation.versioned_claims,
                 reservation.reasoning,
             ),
             None => (
                 format!("live-barrier:{}", uuid::Uuid::new_v4()),
                 Utc::now().timestamp_millis(),
+                Vec::new(),
                 Vec::new(),
                 None,
             ),
@@ -2186,11 +2466,27 @@ pub(super) async fn run_checkpoint_stage<P: LiveExportLeasePort>(
             import_identity: None,
             capture_scope: Some(scope.clone()),
         };
+        // Validate the ordinal sidecar before marker registration. A typed
+        // capture may not reinterpret a missing or mismatched version as v1.
+        if !versioned_claims.is_empty()
+            && let Err(error) = coverage_gate::VersionedLiveClaimCommitPlan::new(
+                claim_plan.clone(), &versioned_claims,
+            )
+        {
+            return uncommitted(conn, &cleanup, capture_deadline, None, || Err(error)).await;
+        }
+        let runtime_versioned = versioned_claims.iter().any(|claim| {
+            claim.coverage_schema_version == crate::internal::ai::observed_agents::CoverageSchemaVersion::V2
+        });
         let registration_fences = claim_plan
             .claims
             .iter()
-            .map(|claim| traces::TracesCoverageFence {
-                coverage_schema_version: crate::internal::ai::observed_agents::CoverageSchemaVersion::V1,
+            .enumerate()
+            .map(|(ordinal, claim)| traces::TracesCoverageFence {
+                coverage_schema_version: versioned_claims.get(ordinal).map_or(
+                    crate::internal::ai::observed_agents::CoverageSchemaVersion::V1,
+                    |bound| bound.coverage_schema_version,
+                ),
                 logical_turn_key: &claim.logical_turn_key,
                 coverage_digest: &claim.coverage_digest,
                 completeness: claim.completeness,
@@ -2524,10 +2820,13 @@ pub(super) async fn run_checkpoint_stage<P: LiveExportLeasePort>(
         // checkpoint_id remains the stable traces/catalog identity. Keeping
         // these distinct prevents a checkpoint from being completed under an
         // unrelated event.
-        let transaction_plan = match coverage_gate::LiveCaptureClaimCommitPlan::new(
-            claim_plan,
-            identity_plan.as_deref(),
-        ) {
+        let transaction_plan = match if runtime_versioned {
+            coverage_gate::LiveCaptureClaimCommitPlan::new_runtime_versioned(
+                claim_plan, &versioned_claims, identity_plan.as_deref(),
+            )
+        } else {
+            coverage_gate::LiveCaptureClaimCommitPlan::new(claim_plan, identity_plan.as_deref())
+        } {
             Ok(plan) => plan,
             Err(error) => {
                 return uncommitted(conn, &cleanup, capture_deadline, None, || {
@@ -2546,7 +2845,7 @@ pub(super) async fn run_checkpoint_stage<P: LiveExportLeasePort>(
             &marker_generation,
             None,
             &checkpoint_payload,
-            Some(&transaction_plan),
+            if runtime_versioned { None } else { Some(&transaction_plan) },
             capture_deadline,
         ) {
             Ok(request) => request,
@@ -2557,6 +2856,17 @@ pub(super) async fn run_checkpoint_stage<P: LiveExportLeasePort>(
                 .await;
             }
         };
+
+        let checkpoint_request = if runtime_versioned {
+            match checkpoint_request.with_runtime_versioned_claims(&transaction_plan) {
+                Ok(request) => request,
+                Err(error) => {
+                    return uncommitted(conn, &cleanup, capture_deadline, None, || {
+                        Err(anyhow!("bind runtime versioned checkpoint: {error}"))
+                    }).await;
+                }
+            }
+        } else { checkpoint_request };
 
         // The coordinator owns stages (a)–(d) and the only receipt-completion
         // edge. A terminal policy is persisted before checkpoint work;
@@ -3830,6 +4140,1368 @@ pub(crate) mod tests {
                 assert!(!value.contains(VERIFIED_PARTIAL_CANARY));
             }
         }
+    }
+
+    #[cfg(unix)]
+    const COV2_RUNTIME_CANONICAL: &str = r#"[{"role":"user","text":"hi"},{"provider":"opencode","role":"reasoning","source_kind":"reasoning","text":"before <REDACTED:anthropic-api-key> after"},{"role":"assistant","text":"hello"}]"#;
+    #[cfg(unix)]
+    const COV2_RUNTIME_SHA: &str =
+        "7973604f43b515e1af6b1206e85c4fdc88447eed5a7822ca0ec3a77224b792a9";
+
+    #[cfg(unix)]
+    #[derive(Debug, PartialEq, Eq)]
+    enum Cov2RuntimeDelivery {
+        Written(String),
+        Covered(String),
+        LegacyReplay(String),
+        AlreadyApplied(String),
+    }
+
+    #[cfg(unix)]
+    fn cov2_runtime_normalizer(
+        bytes: &RedactedBytes,
+    ) -> Vec<crate::internal::ai::observed_agents::coverage::NormalizedTurn> {
+        crate::internal::ai::observed_agents::coverage::normalize_opencode_export(bytes.bytes())
+    }
+
+    #[cfg(unix)]
+    impl VerifiedPartialStoreFixture {
+        fn cov2_visible_source(&self, user: &str, extra_ordinary_turn: bool) -> Vec<u8> {
+            let mut messages = vec![
+                json!({"id":user,"type":"user","text":"hi"}),
+                json!({"id":format!("a-{user}"),"type":"assistant","content":[
+                    {"id":format!("r-{user}"),"type":"reasoning","text":"before sk-ant-EXAMPLE0000000000000000 after"},
+                    {"id":format!("t-{user}"),"type":"text","text":"hello"}]}),
+                json!({"id":format!("i-{user}"),"type":"idle","outcome":"succeeded"}),
+            ];
+            if extra_ordinary_turn {
+                messages.extend([
+                    json!({"id":"ordinary-new-key","type":"user","text":"ordinary next"}),
+                    json!({"id":"ordinary-answer","type":"assistant","content":[{"id":"ordinary-text","type":"text","text":"ordinary reply"}]}),
+                    json!({"id":"ordinary-idle","type":"idle","outcome":"succeeded"}),
+                ]);
+            }
+            serde_json::to_vec(
+                &json!({"info":{"id":VERIFIED_PARTIAL_PROVIDER},"messages":messages}),
+            )
+            .expect("bounded source fixture")
+        }
+
+        fn cov2_runtime_snapshot(&self, bytes: Vec<u8>) -> CaptureSnapshot {
+            use crate::internal::ai::{
+                capture::snapshot::AuthorizedReasoningSourceContext,
+                observed_agents::{ExportAuthorized, agent_for},
+            };
+            CaptureSnapshotService::capture_authorized_with_reasoning_context(
+                TranscriptSource::Bytes {
+                    auth: ExportAuthorized::issue("opencode", VERIFIED_PARTIAL_CAPTURE, &bytes),
+                    bytes,
+                },
+                agent_for(AgentKind::OpenCode),
+                AuthorizedReasoningSourceContext::authorized_export(
+                    "opencode",
+                    VERIFIED_PARTIAL_CAPTURE,
+                    VERIFIED_PARTIAL_PROVIDER,
+                ),
+                CaptureSnapshotPolicy::default(),
+            )
+        }
+
+        /// Same post-export production stages and real SQL lease, with an
+        /// already authorized source instead of an exporter process. The
+        /// stage retains its paired deadline and runs the real private Libra
+        /// extraction/object-I/O helpers, without a provider or exporter.
+        async fn cov2_deliver(
+            &self,
+            action: u128,
+            terminal: bool,
+            mut snapshot: CaptureSnapshot,
+            pre_upgrade_v1: bool,
+            interrupt_receipt: bool,
+        ) -> Result<Cov2RuntimeDelivery> {
+            use crate::internal::ai::capture::{
+                catalog::{CaptureCatalogAction, CaptureCatalogMutation, CaptureCatalogSession},
+                checkpoint::checkpoint_id_for_capture_action,
+                live::ExportJobLeaseStore,
+                state::{LifecycleReducerInput, reduce_lifecycle},
+            };
+            if pre_upgrade_v1 {
+                // Model the pre-activation producer's ordinary-only snapshot;
+                // no native authority or public typed-text issuer is involved.
+                drop(snapshot.take_coverage_runtime());
+            }
+            let kind = if terminal {
+                LifecycleEventKind::SessionEnd
+            } else {
+                LifecycleEventKind::TurnEnd
+            };
+            let event_id = uuid::Uuid::from_u128(action);
+            let current = self.current().await;
+            let reduced = reduce_lifecycle(LifecycleReducerInput {
+                current,
+                event_kind: kind,
+                event_id,
+                occurred_at: 1,
+                deadline: None,
+            })?;
+            let checkpoint_id = checkpoint_id_for_capture_action(event_id, reduced.checkpoint);
+            let request = CaptureCatalogApplyRequest::new(
+                self.scope.clone(),
+                CaptureCatalogSession::new(
+                    VERIFIED_PARTIAL_CAPTURE,
+                    "opencode",
+                    VERIFIED_PARTIAL_PROVIDER,
+                    self.repo.to_string_lossy().into_owned(),
+                )?,
+                CaptureCatalogAction::from_ingress(
+                    event_id,
+                    Some(&format!("capture-dedup-v2:{action:064x}")),
+                    kind,
+                )?,
+                CaptureCatalogMutation::from_reducer(current, &reduced, 1)?,
+            )?;
+            let reservation =
+                match reserve_capture_catalog_until(self.conn.clone(), &request, None).await? {
+                    CaptureCoordinatorReserveOutcome::Reserved(reservation) => *reservation,
+                    CaptureCoordinatorReserveOutcome::AlreadyApplied => {
+                        return Ok(Cov2RuntimeDelivery::AlreadyApplied(checkpoint_id));
+                    }
+                    CaptureCoordinatorReserveOutcome::ConflictUnchanged { conflict } => {
+                        bail!("runtime test catalog fence: {conflict:?}")
+                    }
+                };
+            let request = reservation.effective_request().clone();
+            let deadline = CaptureCommitDeadline::from_budget(Duration::from_secs(30))
+                .expect("bounded runtime test deadline");
+            let lease = ExportJobLeaseStore::new(&self.conn);
+            let runner = LiveExportRunner::admit(
+                &lease,
+                LiveExportTarget {
+                    agent_kind: "opencode",
+                    provider_session_id: VERIFIED_PARTIAL_PROVIDER,
+                    scope: &self.scope,
+                },
+                deadline,
+            )
+            .await?
+            .expect("own actual SQL runner");
+            let mut report = json!({});
+            let prepared = prepare_export_snapshot(
+                &self.conn,
+                &self.repo,
+                &self.scope,
+                "opencode",
+                VERIFIED_PARTIAL_CAPTURE,
+                &checkpoint_id,
+                &request,
+                deadline,
+                current.is_some_and(|state| {
+                    state.phase == crate::internal::ai::capture::state::CapturePhase::Stopped
+                }),
+                &mut report,
+                cov2_runtime_normalizer,
+                snapshot,
+                runner.owner().to_owned(),
+                runner.now_ms(),
+            )
+            .await;
+            let prepared = match prepared {
+                Ok(prepared) => prepared,
+                Err(exit) => {
+                    let replay = match &exit {
+                        ExportStageExit::CoveredNoop {
+                            covered_terminal_replay,
+                        } => Some((false, *covered_terminal_replay)),
+                        _ => None,
+                    };
+                    let (disposition, reason, log) =
+                        export_stage_lease_disposition(&exit, VERIFIED_PARTIAL_CAPTURE);
+                    runner.settle(disposition, reason, log).await?;
+                    if let Some((legacy, terminal_replay)) = replay {
+                        if terminal_replay {
+                            settle_preapplied_covered_terminal_replay(reservation, &request)
+                                .await?;
+                        } else {
+                            settle_preapplied_without_checkpoint(
+                                &self.conn,
+                                reservation,
+                                &request,
+                                None,
+                                None,
+                            )
+                            .await?;
+                        }
+                        return Ok(if legacy {
+                            Cov2RuntimeDelivery::LegacyReplay(checkpoint_id)
+                        } else {
+                            Cov2RuntimeDelivery::Covered(checkpoint_id)
+                        });
+                    }
+                    return Err(match exit {
+                        ExportStageExit::SourceRejected(error)
+                        | ExportStageExit::CoverageFailed(error)
+                        | ExportStageExit::CoveredReplayFailed(error) => error,
+                        ExportStageExit::BridgeUnavailable => {
+                            anyhow!("unexpected exporter-only outcome")
+                        }
+                        ExportStageExit::InflightOnly => {
+                            anyhow!("unexpected concurrent coverage owner")
+                        }
+                        ExportStageExit::CoveredNoop { .. } => {
+                            unreachable!("replay already consumed")
+                        }
+                    });
+                }
+            };
+            let (source, live_reservation) = match prepared {
+                PreparedExportSource::DurableActionReplay { keep_export_dirty } => {
+                    runner
+                        .settle(
+                            if keep_export_dirty {
+                                LeaseDisposition::Dirty
+                            } else {
+                                LeaseDisposition::AdvanceAndRelease
+                            },
+                            "settle_durable_action_export_job_failed",
+                            LeaseLogContext::Session {
+                                session_id: VERIFIED_PARTIAL_CAPTURE,
+                                message: "failed to settle original action export job",
+                            },
+                        )
+                        .await?;
+                    if request.mutation().is_terminal() {
+                        match reservation
+                            .complete_preapplied_durable_replay(&request)
+                            .await?
+                        {
+                            CaptureCoordinatorOutcome::CheckpointAlreadyExists { .. }
+                            | CaptureCoordinatorOutcome::AlreadyApplied => {}
+                            outcome => {
+                                bail!("durable terminal receipt remains pending: {outcome:?}")
+                            }
+                        }
+                    } else {
+                        settle_preapplied_without_checkpoint(
+                            &self.conn,
+                            reservation,
+                            &request,
+                            None,
+                            None,
+                        )
+                        .await?;
+                    }
+                    return Ok(if keep_export_dirty {
+                        Cov2RuntimeDelivery::LegacyReplay(checkpoint_id)
+                    } else {
+                        Cov2RuntimeDelivery::Covered(checkpoint_id)
+                    });
+                }
+
+                PreparedExportSource::Captured(source) => (
+                    CheckpointStageSource::Captured {
+                        transcript_is_authorized: true,
+                        projection: Some(source.projection),
+                        transcript: source.transcript,
+                        reasoning: source.reasoning,
+                    },
+                    Some(source.reservation),
+                ),
+                PreparedExportSource::VerifiedPartial(source) => {
+                    (CheckpointStageSource::VerifiedPartial(source), None)
+                }
+            };
+            let envelope = SessionHookEnvelope {
+                hook_event_name: "pure-cov2-runtime".to_owned(),
+                session_id: VERIFIED_PARTIAL_PROVIDER.to_owned(),
+                cwd: self.repo.to_string_lossy().into_owned(),
+                transcript_path: None,
+                extra: serde_json::Map::new(),
+            };
+            let event = LifecycleEvent {
+                kind,
+                session_id: VERIFIED_PARTIAL_PROVIDER.to_owned(),
+                session_ref: None,
+                prompt: None,
+                model: None,
+                source: None,
+                tool_name: None,
+                tool_input: None,
+                tool_response: None,
+                assistant_message: None,
+                timestamp: Utc::now(),
+            };
+            if interrupt_receipt {
+                use crate::internal::ai::capture::checkpoint::test_support::{
+                    CheckpointFaultPoint, fail_once_at,
+                };
+                fail_once_at(CheckpointFaultPoint::MarkerCleanup);
+            }
+            let helper = std::env::current_exe()
+                .expect("library test executable")
+                .parent()
+                .and_then(std::path::Path::parent)
+                .expect("Cargo debug directory")
+                .join("libra");
+            assert!(
+                helper.is_file(),
+                "build the real Libra private-helper executable before this library test"
+            );
+            crate::internal::ai::authorized_read::with_test_helper_program(
+                helper,
+                run_checkpoint_stage(
+                    CheckpointStageInput {
+                        conn: &self.conn,
+                        repo_path: &self.storage,
+                        catalog_request: request.clone(),
+                        diagnostic_request: request,
+                        catalog_reservation: reservation,
+                        libra_session_id: VERIFIED_PARTIAL_CAPTURE,
+                        envelope: &envelope,
+                        agent_kind: "opencode",
+                        event: &event,
+                        ingress_event_id: event_id,
+                        identity_scheme: LifecycleIdentityScheme::FallbackActionHmacV1,
+                        checkpoint_id: &checkpoint_id,
+                        capture_deadline: Some(deadline),
+                        terminal_settlement_deadline: Some(deadline),
+                        capture_finalizer_deadline_millis: Some(deadline.sqlite_not_after_millis()),
+                        now: 1,
+                        scope: &self.scope,
+                        subagent_sources: Vec::new(),
+                        subagent_discovery_warning: None,
+                        report_value: report,
+                        source,
+                        claim_channel: "export",
+                        live_reservation,
+                    },
+                    Some(runner),
+                ),
+            )
+            .await?;
+            Ok(Cov2RuntimeDelivery::Written(checkpoint_id))
+        }
+
+        async fn cov2_receipt(&self, action: u128) -> Option<String> {
+            let row = self
+                .conn
+                .query_one_raw(Statement::from_sql_and_values(
+                    self.conn.get_database_backend(),
+                    "SELECT metadata_json FROM agent_session WHERE session_id = ?",
+                    [VERIFIED_PARTIAL_CAPTURE.into()],
+                ))
+                .await
+                .expect("receipt metadata read")?;
+            let metadata: String = row.try_get_by("metadata_json").expect("receipt metadata");
+            let value: serde_json::Value =
+                serde_json::from_str(&metadata).expect("catalog metadata JSON");
+            value["capture_catalog_receipts_v1"]["entries"]
+                .as_array()
+                .expect("bounded real receipt ledger")
+                .iter()
+                .find(|entry| entry["event_id"] == uuid::Uuid::from_u128(action).to_string())
+                .map(|entry| entry["status"].as_str().expect("receipt status").to_owned())
+        }
+
+        async fn cov2_claim_rows(&self) -> Vec<serde_json::Value> {
+            self.conn.query_all_raw(Statement::from_string(self.conn.get_database_backend(),"SELECT coverage_schema_version,logical_turn_key,coverage_digest,completeness,revision,checkpoint_id,fence_token,state,owner FROM agent_coverage_claim ORDER BY coverage_schema_version,logical_turn_key".to_owned())).await.expect("actual coverage rows").into_iter().map(|row|json!({
+                "version":row.try_get_by::<i64,_>("coverage_schema_version").unwrap(),"key":row.try_get_by::<String,_>("logical_turn_key").unwrap(),"digest":row.try_get_by::<String,_>("coverage_digest").unwrap(),"completeness":row.try_get_by::<String,_>("completeness").unwrap(),"revision":row.try_get_by::<i64,_>("revision").unwrap(),"checkpoint":row.try_get_by::<String,_>("checkpoint_id").unwrap(),"fence":row.try_get_by::<i64,_>("fence_token").unwrap(),"state":row.try_get_by::<String,_>("state").unwrap(),"owner":row.try_get_by::<Option<String>,_>("owner").unwrap(),
+            })).collect()
+        }
+
+        async fn cov2_job(&self) -> (String, i64) {
+            let row=self.conn.query_one_raw(Statement::from_sql_and_values(self.conn.get_database_backend(),"SELECT state,processed_generation,owner FROM agent_export_job WHERE agent_kind='opencode' AND provider_session_id=?",[VERIFIED_PARTIAL_PROVIDER.into()])).await.expect("real lease read").expect("admitted lease row");
+            assert!(
+                row.try_get_by::<Option<String>, _>("owner")
+                    .unwrap()
+                    .is_none()
+            );
+            (
+                row.try_get_by("state").unwrap(),
+                row.try_get_by("processed_generation").unwrap(),
+            )
+        }
+
+        async fn cov2_covered(&self, bytes: Vec<u8>) -> Vec<CommittedTurnClaimSnapshot> {
+            let mut snapshot = self.cov2_runtime_snapshot(bytes);
+            let turns = snapshot
+                .take_coverage_runtime()
+                .turns
+                .expect("authorized redacted typed turns");
+            let deadline = CaptureCommitDeadline::from_budget(Duration::from_secs(30)).unwrap();
+            let reader = ReasoningIdentityReadContext::new(
+                &self.scope,
+                VERIFIED_PARTIAL_CAPTURE,
+                &self.storage,
+                &self.repo,
+                deadline.monotonic(),
+            );
+            let outcome =
+                crate::internal::ai::coverage_gate::reserve_runtime_turn_claims_with_reasoning(
+                    &self.conn,
+                    &self.scope,
+                    VERIFIED_PARTIAL_CAPTURE,
+                    &turns,
+                    "coverage-replay-read",
+                    Utc::now().timestamp_millis(),
+                    CaptureReservationExecution::export(deadline),
+                    ReasoningCoverageInput::ordinary(&reader),
+                    false,
+                )
+                .await
+                .expect("actual committed-row observations");
+            assert!(outcome.versioned_reserved.is_empty());
+            assert!(outcome.ordinary.reserved.is_empty());
+            outcome.covered
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cov2_direct_visible_turn_claim_version() {
+        use crate::internal::ai::observed_agents::coverage::encode_coverage_turn;
+        let fixture = VerifiedPartialStoreFixture::new().await;
+        let bytes = fixture.cov2_visible_source("u", false);
+        let mut snapshot = fixture.cov2_runtime_snapshot(bytes.clone());
+        let turns = snapshot
+            .take_coverage_runtime()
+            .turns
+            .expect("production typed companion");
+        assert_eq!(turns.len(), 1);
+        let encoded = encode_coverage_turn(&turns[0]).unwrap();
+        assert_eq!(encoded.schema_version.as_i64(), 2);
+        assert_eq!(encoded.canonical_bytes, COV2_RUNTIME_CANONICAL.as_bytes());
+        assert_eq!(encoded.digest_hex, COV2_RUNTIME_SHA);
+        let Cov2RuntimeDelivery::Written(checkpoint) = fixture
+            .cov2_deliver(
+                0xc201,
+                false,
+                fixture.cov2_runtime_snapshot(bytes),
+                false,
+                false,
+            )
+            .await
+            .expect("actual runtime checkpoint")
+        else {
+            panic!("first typed delivery must write")
+        };
+        let rows = fixture.cov2_claim_rows().await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["version"], 2);
+        assert_eq!(rows[0]["digest"], COV2_RUNTIME_SHA);
+        assert_eq!(rows[0]["completeness"], "complete");
+        assert_eq!(rows[0]["revision"], 1);
+        assert_eq!(rows[0]["checkpoint"], checkpoint);
+        assert!(rows[0]["fence"].as_i64().unwrap() > 0);
+        assert_eq!(rows[0]["state"], "catalog_committed");
+        assert!(rows[0]["owner"].is_null());
+        assert_eq!(fixture.scalar("SELECT COUNT(*) AS n FROM agent_coverage_revision WHERE coverage_schema_version=2 AND revision=1 AND completeness='complete'").await,1);
+        assert_eq!(
+            fixture.cov2_receipt(0xc201).await.as_deref(),
+            Some("complete")
+        );
+        let (stored, metadata) = fixture.read_back(&checkpoint).await;
+        assert!(!String::from_utf8_lossy(&stored).contains("sk-ant-EXAMPLE"));
+        assert_eq!(metadata["transcript_snapshot"]["completeness"], "complete");
+        assert_eq!(
+            fixture
+                .scalar(
+                    "SELECT COUNT(*) AS n FROM metadata_kv WHERE scope='agent_reasoning_identity'"
+                )
+                .await,
+            0
+        );
+
+        // Ordinary text remains in the frozen v1 canonical domain.
+        let ordinary = VerifiedPartialStoreFixture::new().await;
+        let bytes=serde_json::to_vec(&json!({"info":{"id":VERIFIED_PARTIAL_PROVIDER},"messages":[{"id":"u","type":"user","text":"hi"},{"id":"a","type":"assistant","content":[{"id":"t","type":"text","text":"hello"}]},{"id":"i","type":"idle","outcome":"succeeded"}]})).unwrap();
+        const ORDINARY_CANONICAL: &str =
+            r#"[{"role":"user","text":"hi"},{"role":"assistant","text":"hello"}]"#;
+        const ORDINARY_SHA: &str =
+            "df991cd9a1ac5c12c32b8cdf0254c3dfbbf26485b505a5afc83a90d1128ebc54";
+        let ordinary_turns =
+            crate::internal::ai::observed_agents::coverage::normalize_opencode_export(&bytes);
+        let ordinary_encoded = encode_coverage_turn(&ordinary_turns[0]).unwrap();
+        assert_eq!(ordinary_encoded.schema_version.as_i64(), 1);
+        assert_eq!(
+            ordinary_encoded.canonical_bytes,
+            ORDINARY_CANONICAL.as_bytes()
+        );
+        assert_eq!(ordinary_encoded.digest_hex, ORDINARY_SHA);
+        ordinary
+            .cov2_deliver(
+                0xc202,
+                false,
+                ordinary.cov2_runtime_snapshot(bytes),
+                false,
+                false,
+            )
+            .await
+            .expect("ordinary runtime write");
+        let rows = ordinary.cov2_claim_rows().await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["version"], 1);
+        assert_eq!(rows[0]["digest"], ORDINARY_SHA);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cov2_direct_candidate_turn_stays_partial() {
+        let fixture = VerifiedPartialStoreFixture::new().await;
+        let Cov2RuntimeDelivery::Written(checkpoint) = fixture
+            .cov2_deliver(0xc251, false, fixture.snapshot(), false, false)
+            .await
+            .expect("owning partial still writes explicit partial")
+        else {
+            panic!("partial cannot take covered shortcut")
+        };
+        let (_, metadata) = fixture.read_back(&checkpoint).await;
+        assert_eq!(metadata["transcript_snapshot"]["completeness"], "partial");
+        fixture.assert_no_native_or_partial_payload().await;
+        assert!(matches!(
+            fixture
+                .cov2_deliver(0xc252, false, fixture.snapshot(), false, false)
+                .await
+                .unwrap(),
+            Cov2RuntimeDelivery::Written(_)
+        ));
+        assert_eq!(
+            fixture
+                .scalar("SELECT COUNT(*) AS n FROM agent_checkpoint")
+                .await,
+            2,
+            "incomplete turns never become covered ACK authority"
+        );
+        fixture.assert_no_native_or_partial_payload().await;
+
+        let candidate = VerifiedPartialStoreFixture::new().await;
+        let source=serde_json::to_vec(&json!({"info":{"id":VERIFIED_PARTIAL_PROVIDER},"messages":[{"id":"u","type":"user","text":"hi"},{"id":"a","type":"assistant","content":[{"id":"npart_0123456789abcdef0123456789abcdef","type":"reasoning","text":"unverified private text","state":{"signature":"unverified signature"},"originProof":{"nonce":"unverified receipt"}}]}]})).unwrap();
+        let snapshot = candidate.cov2_runtime_snapshot(source);
+        assert_eq!(
+            snapshot.completeness(),
+            CaptureSnapshotCompleteness::Partial
+        );
+        assert!(
+            candidate
+                .cov2_deliver(0xc253, false, snapshot, false, false)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            candidate
+                .scalar("SELECT COUNT(*) AS n FROM agent_checkpoint")
+                .await,
+            0
+        );
+        assert_eq!(
+            candidate.cov2_receipt(0xc253).await.as_deref(),
+            Some("pending")
+        );
+        candidate.assert_no_native_or_partial_payload().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cov2_structure_redaction_rejects_typed_and_keeps_legacy_receipt() {
+        use crate::internal::ai::observed_agents::Redactor;
+
+        const EMPTY_V1_SHA: &str =
+            "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945";
+        let fixture = VerifiedPartialStoreFixture::new().await;
+        let mut source: serde_json::Value =
+            serde_json::from_slice(&fixture.cov2_visible_source("u", false)).unwrap();
+        source["messages"][0]["text"] = "postgres://user:pass@host/db".into();
+        let bytes = serde_json::to_vec(&source).unwrap();
+        let (legacy, report) = Redactor::new_default().redact(&bytes);
+        assert!(serde_json::from_slice::<serde_json::Value>(legacy.bytes()).is_err());
+        let mut probe = fixture.cov2_runtime_snapshot(bytes.clone());
+        assert_eq!(probe.completeness(), CaptureSnapshotCompleteness::Complete);
+        assert!(!probe.rejects_capture_source_consumer());
+        assert_eq!(probe.transcript().unwrap(), &legacy);
+        assert_eq!(probe.redaction_report(), &report);
+        let runtime = probe.take_coverage_runtime();
+        assert!(runtime.turns.is_none());
+        assert!(runtime.classifier_rejected);
+        assert!(!runtime.source_partial);
+        assert!(
+            fixture
+                .cov2_deliver(
+                    0xc351,
+                    true,
+                    fixture.cov2_runtime_snapshot(bytes.clone()),
+                    false,
+                    true
+                )
+                .await
+                .is_err()
+        );
+        let rows = fixture.cov2_claim_rows().await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["version"], 1);
+        assert_eq!(rows[0]["digest"], EMPTY_V1_SHA);
+        assert_eq!(rows[0]["completeness"], "incomplete");
+        assert_eq!(
+            fixture.cov2_receipt(0xc351).await.as_deref(),
+            Some("pending")
+        );
+        assert!(matches!(
+            fixture
+                .cov2_deliver(
+                    0xc351,
+                    true,
+                    fixture.cov2_runtime_snapshot(bytes),
+                    false,
+                    false
+                )
+                .await
+                .unwrap(),
+            Cov2RuntimeDelivery::LegacyReplay(_)
+        ));
+        assert_eq!(fixture.cov2_claim_rows().await, rows);
+        assert_eq!(
+            fixture.cov2_receipt(0xc351).await.as_deref(),
+            Some("complete")
+        );
+        assert_eq!(
+            fixture
+                .scalar("SELECT COUNT(*) AS n FROM agent_checkpoint")
+                .await,
+            1
+        );
+
+        let history = VerifiedPartialStoreFixture::new().await;
+        history
+            .cov2_deliver(
+                0xc352,
+                false,
+                history.cov2_runtime_snapshot(history.cov2_visible_source("prior-v2-key", false)),
+                false,
+                false,
+            )
+            .await
+            .unwrap();
+        let before = history.cov2_claim_rows().await;
+        let mut source: serde_json::Value =
+            serde_json::from_slice(&history.cov2_visible_source("unrelated-new-key", true))
+                .unwrap();
+        source["messages"][0]["text"] = "postgres://user:pass@host/db".into();
+        assert!(
+            history
+                .cov2_deliver(
+                    0xc353,
+                    false,
+                    history.cov2_runtime_snapshot(serde_json::to_vec(&source).unwrap()),
+                    false,
+                    false
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(history.cov2_claim_rows().await, before);
+        assert_eq!(
+            history.cov2_receipt(0xc353).await.as_deref(),
+            Some("pending")
+        );
+        assert_eq!(
+            history
+                .scalar("SELECT COUNT(*) AS n FROM agent_checkpoint")
+                .await,
+            1
+        );
+        assert_eq!(history.cov2_job().await.0, "dirty");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cov2_ordinary_partial_fragment_keeps_v1_and_terminal_noop() {
+        const V1_SHA: &str = "df991cd9a1ac5c12c32b8cdf0254c3dfbbf26485b505a5afc83a90d1128ebc54";
+        for text in ["", " \t"] {
+            let fixture = VerifiedPartialStoreFixture::new().await;
+            let mut source: serde_json::Value =
+                serde_json::from_slice(&fixture.cov2_visible_source("u", false)).unwrap();
+            source["messages"][1]["content"][0]["text"] = text.into();
+            let bytes = serde_json::to_vec(&source).unwrap();
+            let mut probe = fixture.cov2_runtime_snapshot(bytes.clone());
+            assert_eq!(
+                probe.completeness(),
+                crate::internal::ai::capture::snapshot::CaptureSnapshotCompleteness::Complete
+            );
+            assert!(!probe.rejects_capture_source_consumer());
+            assert!(!probe.has_verified_ordinary_partial_permit());
+            let runtime = probe.take_coverage_runtime();
+            assert!(runtime.turns.is_none());
+            assert!(runtime.classifier_rejected);
+            assert!(!runtime.source_partial);
+            assert_eq!(probe.transcript().unwrap().bytes(), bytes);
+            assert!(matches!(
+                fixture
+                    .cov2_deliver(
+                        0xc301,
+                        false,
+                        fixture.cov2_runtime_snapshot(bytes.clone()),
+                        false,
+                        false,
+                    )
+                    .await
+                    .unwrap(),
+                Cov2RuntimeDelivery::Written(_)
+            ));
+            let rows = fixture.cov2_claim_rows().await;
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0]["version"], 1);
+            assert_eq!(rows[0]["digest"], V1_SHA);
+            assert_eq!(rows[0]["completeness"], "incomplete");
+            assert!(matches!(
+                fixture
+                    .cov2_deliver(
+                        0xc302,
+                        true,
+                        fixture.cov2_runtime_snapshot(bytes),
+                        false,
+                        false,
+                    )
+                    .await
+                    .expect("a supported incomplete V1 terminal capture must settle"),
+                Cov2RuntimeDelivery::Written(_)
+            ));
+            // The legacy ordinary normalizer deliberately keeps this turn
+            // incomplete; a new terminal action writes its next revision.
+            let terminal_rows = fixture.cov2_claim_rows().await;
+            assert_eq!(terminal_rows.len(), 1);
+            assert_eq!(terminal_rows[0]["version"], 1);
+            assert_eq!(terminal_rows[0]["digest"], V1_SHA);
+            assert_eq!(terminal_rows[0]["completeness"], "incomplete");
+            assert_eq!(
+                fixture.cov2_receipt(0xc302).await.as_deref(),
+                Some("complete")
+            );
+            assert_eq!(
+                fixture
+                    .scalar("SELECT COUNT(*) AS n FROM agent_checkpoint")
+                    .await,
+                2
+            );
+        }
+
+        // The legacy normalizer deliberately retains an incomplete turn
+        // even when reasoning is empty. Interrupt a real terminal V1 write
+        // after its CAS, then settle that same durable receipt read-only.
+        for text in ["", " \t"] {
+            let fixture = VerifiedPartialStoreFixture::new().await;
+            let mut source: serde_json::Value =
+                serde_json::from_slice(&fixture.cov2_visible_source("u", false)).unwrap();
+            source["messages"][1]["content"][0]["text"] = text.into();
+            let bytes = serde_json::to_vec(&source).unwrap();
+            assert!(
+                fixture
+                    .cov2_deliver(
+                        0xc303,
+                        true,
+                        fixture.cov2_runtime_snapshot(bytes.clone()),
+                        false,
+                        true
+                    )
+                    .await
+                    .is_err()
+            );
+            let rows = fixture.cov2_claim_rows().await;
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0]["version"], 1);
+            assert_eq!(rows[0]["digest"], V1_SHA);
+            assert_eq!(rows[0]["completeness"], "incomplete");
+            assert_eq!(
+                fixture.cov2_receipt(0xc303).await.as_deref(),
+                Some("pending")
+            );
+            assert!(matches!(
+                fixture
+                    .cov2_deliver(
+                        0xc303,
+                        true,
+                        fixture.cov2_runtime_snapshot(bytes.clone()),
+                        false,
+                        false
+                    )
+                    .await
+                    .expect("a committed V1 terminal receipt must settle read-only"),
+                Cov2RuntimeDelivery::LegacyReplay(_)
+            ));
+            assert_eq!(fixture.cov2_claim_rows().await, rows);
+            assert_eq!(
+                fixture.cov2_receipt(0xc303).await.as_deref(),
+                Some("complete")
+            );
+            assert_eq!(
+                fixture
+                    .scalar("SELECT COUNT(*) AS n FROM agent_checkpoint")
+                    .await,
+                1
+            );
+            assert!(matches!(
+                fixture
+                    .cov2_deliver(
+                        0xc303,
+                        true,
+                        fixture.cov2_runtime_snapshot(bytes),
+                        false,
+                        false
+                    )
+                    .await
+                    .unwrap(),
+                Cov2RuntimeDelivery::AlreadyApplied(_)
+            ));
+        }
+
+        let history = VerifiedPartialStoreFixture::new().await;
+        history
+            .cov2_deliver(
+                0xc311,
+                false,
+                history.cov2_runtime_snapshot(history.cov2_visible_source("u", false)),
+                false,
+                false,
+            )
+            .await
+            .unwrap();
+        let rows = history.cov2_claim_rows().await;
+        let mut rejected: serde_json::Value =
+            serde_json::from_slice(&history.cov2_visible_source("u", true)).unwrap();
+        rejected["messages"][1]["content"][0]["text"] = "".into();
+        assert!(
+            history
+                .cov2_deliver(
+                    0xc312,
+                    false,
+                    history.cov2_runtime_snapshot(serde_json::to_vec(&rejected).unwrap()),
+                    false,
+                    false,
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(history.cov2_claim_rows().await, rows);
+        assert_eq!(
+            history
+                .scalar("SELECT COUNT(*) AS n FROM agent_checkpoint")
+                .await,
+            1
+        );
+        assert_eq!(
+            history.cov2_receipt(0xc312).await.as_deref(),
+            Some("pending")
+        );
+        assert_eq!(history.cov2_job().await.0, "dirty");
+    }
+
+    #[cfg(unix)]
+    pub(crate) async fn assert_cov2_runtime_claim_replay_version() {
+        // Completeness belongs to the immutable committed turn. A pending
+        // receipt may settle its exact incomplete v2 set without upgrading it.
+        for terminal in [false, true] {
+            let incomplete = VerifiedPartialStoreFixture::new().await;
+            let mut source: serde_json::Value =
+                serde_json::from_slice(&incomplete.cov2_visible_source("incomplete-u", false))
+                    .unwrap();
+            source["messages"].as_array_mut().unwrap().pop();
+            let bytes = serde_json::to_vec(&source).unwrap();
+            let action = if terminal { 0xc3f1 } else { 0xc3f0 };
+            assert!(
+                incomplete
+                    .cov2_deliver(
+                        action,
+                        terminal,
+                        incomplete.cov2_runtime_snapshot(bytes.clone()),
+                        false,
+                        true,
+                    )
+                    .await
+                    .is_err()
+            );
+            let rows = incomplete.cov2_claim_rows().await;
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0]["version"], 2);
+            assert_eq!(rows[0]["completeness"], "incomplete");
+            assert_eq!(
+                incomplete.cov2_receipt(action).await.as_deref(),
+                Some("pending")
+            );
+            assert!(matches!(
+                incomplete
+                    .cov2_deliver(
+                        action,
+                        terminal,
+                        incomplete.cov2_runtime_snapshot(bytes.clone()),
+                        false,
+                        false,
+                    )
+                    .await
+                    .expect("the exact committed incomplete V2 set can settle its receipt"),
+                Cov2RuntimeDelivery::Covered(_)
+            ));
+            assert_eq!(incomplete.cov2_claim_rows().await, rows);
+            assert_eq!(
+                incomplete.cov2_receipt(action).await.as_deref(),
+                Some("complete")
+            );
+            assert_eq!(
+                incomplete
+                    .scalar("SELECT COUNT(*) AS n FROM agent_checkpoint")
+                    .await,
+                1
+            );
+            assert!(matches!(
+                incomplete
+                    .cov2_deliver(
+                        action,
+                        terminal,
+                        incomplete.cov2_runtime_snapshot(bytes),
+                        false,
+                        false,
+                    )
+                    .await
+                    .unwrap(),
+                Cov2RuntimeDelivery::AlreadyApplied(_)
+            ));
+            assert_eq!(incomplete.cov2_claim_rows().await, rows);
+        }
+        // Export SessionEnd retains an actual catalog receipt after a
+        // post-CAS interruption; it must recover without an ordinary pending
+        // artifact or a second checkpoint/reservation.
+        let terminal = VerifiedPartialStoreFixture::new().await;
+        let terminal_bytes = terminal.cov2_visible_source("terminal-u", false);
+        assert!(
+            terminal
+                .cov2_deliver(
+                    0xc400,
+                    true,
+                    terminal.cov2_runtime_snapshot(terminal_bytes.clone()),
+                    false,
+                    true
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            terminal.cov2_receipt(0xc400).await.as_deref(),
+            Some("pending")
+        );
+        assert_eq!(terminal.cov2_job().await, ("dirty".to_owned(), 0));
+        let terminal_rows = terminal.cov2_claim_rows().await;
+        assert_eq!(terminal_rows.len(), 1);
+        assert_eq!(terminal_rows[0]["version"], 2);
+        let replay = terminal
+            .cov2_deliver(
+                0xc400,
+                true,
+                terminal.cov2_runtime_snapshot(terminal_bytes.clone()),
+                false,
+                false,
+            )
+            .await
+            .expect("actual terminal receipt replay");
+        assert!(matches!(replay, Cov2RuntimeDelivery::Covered(_)));
+        assert_eq!(
+            terminal.cov2_receipt(0xc400).await.as_deref(),
+            Some("complete")
+        );
+        assert_eq!(terminal.cov2_claim_rows().await, terminal_rows);
+        assert_eq!(
+            terminal
+                .scalar("SELECT COUNT(*) AS n FROM agent_checkpoint")
+                .await,
+            1
+        );
+        assert_eq!(terminal.scalar("SELECT COUNT(*) AS n FROM metadata_kv WHERE scope='agent_capture_pending_chunk'").await, 0);
+        let terminal_job = terminal.cov2_job().await;
+        assert_eq!(terminal_job.0, "idle");
+        assert!(matches!(
+            terminal
+                .cov2_deliver(
+                    0xc400,
+                    true,
+                    terminal.cov2_runtime_snapshot(terminal_bytes),
+                    false,
+                    false
+                )
+                .await
+                .unwrap(),
+            Cov2RuntimeDelivery::AlreadyApplied(_)
+        ));
+        assert_eq!(terminal.cov2_job().await, terminal_job);
+
+        let fixture = VerifiedPartialStoreFixture::new().await;
+        let bytes = fixture.cov2_visible_source("u", false);
+        assert!(
+            fixture
+                .cov2_deliver(
+                    0xc401,
+                    false,
+                    fixture.cov2_runtime_snapshot(bytes.clone()),
+                    false,
+                    true
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            fixture.cov2_receipt(0xc401).await.as_deref(),
+            Some("pending")
+        );
+        assert_eq!(fixture.cov2_job().await, ("dirty".to_owned(), 0));
+        let committed = fixture.cov2_claim_rows().await;
+        assert_eq!(committed.len(), 1);
+        assert_eq!(committed[0]["version"], 2);
+        assert_eq!(committed[0]["digest"], COV2_RUNTIME_SHA);
+        assert!(matches!(
+            fixture
+                .cov2_deliver(
+                    0xc401,
+                    false,
+                    fixture.cov2_runtime_snapshot(bytes.clone()),
+                    false,
+                    false
+                )
+                .await
+                .unwrap(),
+            Cov2RuntimeDelivery::Covered(_)
+        ));
+        assert_eq!(
+            fixture.cov2_receipt(0xc401).await.as_deref(),
+            Some("complete")
+        );
+        assert_eq!(fixture.cov2_claim_rows().await, committed);
+        assert_eq!(
+            fixture
+                .scalar("SELECT COUNT(*) AS n FROM agent_checkpoint")
+                .await,
+            1
+        );
+        let job = fixture.cov2_job().await;
+        assert_eq!(job.0, "idle");
+        assert!(job.1 > 0);
+        assert!(matches!(
+            fixture
+                .cov2_deliver(
+                    0xc401,
+                    false,
+                    fixture.cov2_runtime_snapshot(bytes.clone()),
+                    false,
+                    false
+                )
+                .await
+                .unwrap(),
+            Cov2RuntimeDelivery::AlreadyApplied(_)
+        ));
+        assert_eq!(
+            fixture.cov2_job().await,
+            job,
+            "one receipt ACK advances once"
+        );
+
+        // A retained over-limit source after v2 blocks the entire new action,
+        // including an unrelated ordinary key, before any claim reservation.
+        let parts = (0..=4096)
+            .map(|n| json!({"id":format!("r{n}"),"type":"reasoning","text":"visible"}))
+            .collect::<Vec<_>>();
+        let rejected=serde_json::to_vec(&json!({"info":{"id":VERIFIED_PARTIAL_PROVIDER},"messages":[{"id":"new-unrelated-key","type":"user","text":"ordinary new"},{"id":"a-over-limit","type":"assistant","content":parts}]})).unwrap();
+        assert!(
+            fixture
+                .cov2_deliver(
+                    0xc402,
+                    false,
+                    fixture.cov2_runtime_snapshot(rejected),
+                    false,
+                    false
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(fixture.cov2_claim_rows().await, committed);
+        assert_eq!(
+            fixture
+                .scalar("SELECT COUNT(*) AS n FROM agent_checkpoint")
+                .await,
+            1
+        );
+        assert_eq!(
+            fixture.cov2_receipt(0xc402).await.as_deref(),
+            Some("pending")
+        );
+        assert_eq!(fixture.cov2_job().await.0, "dirty");
+
+        let covered = fixture.cov2_covered(bytes.clone()).await;
+        assert_eq!(covered.len(), 1);
+        let checkpoint = covered[0].checkpoint_id().to_owned();
+        assert!(
+            TracesCheckpointStore::settle_committed_replay_without_write(
+                &fixture.conn,
+                &fixture.scope,
+                &checkpoint,
+                VERIFIED_PARTIAL_CAPTURE,
+                None
+            )
+            .await
+            .is_err(),
+            "original None expectation must still reject actual v2 revisions"
+        );
+        assert!(
+            TracesCheckpointStore::settle_runtime_covered_replay_without_write(
+                &fixture.conn,
+                &fixture.scope,
+                &checkpoint,
+                VERIFIED_PARTIAL_CAPTURE,
+                None,
+                &[]
+            )
+            .await
+            .is_err(),
+            "an empty expectation cannot authorize v2"
+        );
+        let other = fixture.cov2_visible_source("foreign-key", false);
+        fixture
+            .cov2_deliver(
+                0xc403,
+                false,
+                fixture.cov2_runtime_snapshot(other.clone()),
+                false,
+                false,
+            )
+            .await
+            .unwrap();
+        let foreign = fixture.cov2_covered(other).await;
+        assert!(
+            TracesCheckpointStore::settle_runtime_covered_replay_without_write(
+                &fixture.conn,
+                &fixture.scope,
+                &checkpoint,
+                VERIFIED_PARTIAL_CAPTURE,
+                None,
+                &foreign
+            )
+            .await
+            .is_err(),
+            "foreign checkpoint observations cannot authorize this v2 checkpoint"
+        );
+        fixture.conn.execute_raw(Statement::from_sql_and_values(fixture.conn.get_database_backend(),"UPDATE agent_coverage_claim SET revision=revision+1 WHERE checkpoint_id=? AND coverage_schema_version=2",[checkpoint.clone().into()])).await.unwrap();
+        assert!(
+            TracesCheckpointStore::settle_runtime_covered_replay_without_write(
+                &fixture.conn,
+                &fixture.scope,
+                &checkpoint,
+                VERIFIED_PARTIAL_CAPTURE,
+                None,
+                &covered
+            )
+            .await
+            .is_err(),
+            "superseded current rows invalidate old observed fences"
+        );
+        assert_eq!(
+            fixture.cov2_receipt(0xc402).await.as_deref(),
+            Some("pending")
+        );
+        assert_eq!(
+            fixture
+                .scalar("SELECT COUNT(*) AS n FROM agent_checkpoint")
+                .await,
+            2
+        );
+
+        // Pre-upgrade C1 is immutable: settle its interrupted receipt before
+        // selecting v2, then let the next action capture typed reasoning once.
+        let old = VerifiedPartialStoreFixture::new().await;
+        let source = old.cov2_visible_source("u", false);
+        assert!(
+            old.cov2_deliver(0xc411, false, old.cov2_runtime_snapshot(source), true, true)
+                .await
+                .is_err()
+        );
+        let v1 = old.cov2_claim_rows().await;
+        assert_eq!(v1.len(), 1);
+        assert_eq!(v1[0]["version"], 1);
+        let fresh = old.cov2_visible_source("u", true);
+        assert!(matches!(
+            old.cov2_deliver(
+                0xc411,
+                false,
+                old.cov2_runtime_snapshot(fresh.clone()),
+                false,
+                false
+            )
+            .await
+            .unwrap(),
+            Cov2RuntimeDelivery::LegacyReplay(_)
+        ));
+        assert_eq!(
+            old.cov2_claim_rows().await,
+            v1,
+            "old action makes zero v1/v2 reservations, including fresh ordinary keys"
+        );
+        assert_eq!(old.cov2_receipt(0xc411).await.as_deref(), Some("complete"));
+        assert_eq!(old.cov2_job().await, ("dirty".to_owned(), 0));
+        assert_eq!(
+            old.scalar("SELECT COUNT(*) AS n FROM agent_checkpoint")
+                .await,
+            1
+        );
+        assert!(matches!(
+            old.cov2_deliver(
+                0xc412,
+                false,
+                old.cov2_runtime_snapshot(fresh.clone()),
+                false,
+                false
+            )
+            .await
+            .unwrap(),
+            Cov2RuntimeDelivery::Written(_)
+        ));
+        assert_eq!(
+            old.scalar(
+                "SELECT COUNT(*) AS n FROM agent_coverage_claim WHERE coverage_schema_version=2"
+            )
+            .await,
+            1
+        );
+        assert_eq!(
+            old.scalar(
+                "SELECT COUNT(*) AS n FROM agent_coverage_claim WHERE coverage_schema_version=1"
+            )
+            .await,
+            2
+        );
+        assert_eq!(
+            old.scalar("SELECT COUNT(*) AS n FROM agent_checkpoint")
+                .await,
+            2
+        );
+        let rows = old.cov2_claim_rows().await;
+        assert!(
+            rows.contains(&v1[0]),
+            "historical v1 row remains byte-for-byte semantically unchanged"
+        );
+        assert!(matches!(
+            old.cov2_deliver(
+                0xc412,
+                false,
+                old.cov2_runtime_snapshot(fresh.clone()),
+                false,
+                false
+            )
+            .await
+            .unwrap(),
+            Cov2RuntimeDelivery::AlreadyApplied(_)
+        ));
+        assert!(matches!(
+            old.cov2_deliver(
+                0xc413,
+                false,
+                old.cov2_runtime_snapshot(fresh),
+                false,
+                false
+            )
+            .await
+            .unwrap(),
+            Cov2RuntimeDelivery::Covered(_)
+        ));
+        assert_eq!(old.cov2_claim_rows().await, rows);
+        assert_eq!(
+            old.scalar("SELECT COUNT(*) AS n FROM agent_checkpoint")
+                .await,
+            2
+        );
+        // The same-action legacy exception also precedes the session's v2
+        // history barrier: a sibling action may already have created v2
+        // history while this old, authenticated receipt was still pending.
+        let mixed_history = VerifiedPartialStoreFixture::new().await;
+        assert!(
+            mixed_history
+                .cov2_deliver(
+                    0xc421,
+                    false,
+                    mixed_history
+                        .cov2_runtime_snapshot(mixed_history.cov2_visible_source("u", false)),
+                    true,
+                    true
+                )
+                .await
+                .is_err()
+        );
+        mixed_history
+            .cov2_deliver(
+                0xc422,
+                false,
+                mixed_history.cov2_runtime_snapshot(
+                    mixed_history.cov2_visible_source("prior-v2-key", false),
+                ),
+                false,
+                false,
+            )
+            .await
+            .expect("real sibling action commits v2 history");
+        let before = mixed_history.cov2_claim_rows().await;
+        assert_eq!(before.len(), 2);
+        assert_eq!(
+            mixed_history
+                .scalar(
+                    "SELECT COUNT(*) AS n FROM agent_coverage_claim WHERE coverage_schema_version=2"
+                )
+                .await,
+            1
+        );
+        assert!(matches!(
+            mixed_history
+                .cov2_deliver(
+                    0xc421,
+                    false,
+                    mixed_history
+                        .cov2_runtime_snapshot(mixed_history.cov2_visible_source("u", true)),
+                    false,
+                    false
+                )
+                .await
+                .expect("old action read-only exception precedes v2 history"),
+            Cov2RuntimeDelivery::LegacyReplay(_)
+        ));
+        assert_eq!(
+            mixed_history.cov2_claim_rows().await,
+            before,
+            "legacy same-action replay makes no v1/v2 reservation even with fresh keys and v2 history"
+        );
+        assert_eq!(
+            mixed_history
+                .scalar("SELECT COUNT(*) AS n FROM agent_checkpoint")
+                .await,
+            2
+        );
+        assert_eq!(
+            mixed_history.cov2_receipt(0xc421).await.as_deref(),
+            Some("complete")
+        );
+        let job = mixed_history.cov2_job().await;
+        assert_eq!(
+            job.0, "dirty",
+            "uncaptured fresh keys stay available to a new action"
+        );
+        assert!(matches!(
+            mixed_history
+                .cov2_deliver(
+                    0xc421,
+                    false,
+                    mixed_history
+                        .cov2_runtime_snapshot(mixed_history.cov2_visible_source("u", true)),
+                    false,
+                    false
+                )
+                .await
+                .unwrap(),
+            Cov2RuntimeDelivery::AlreadyApplied(_)
+        ));
+        assert_eq!(
+            mixed_history.cov2_job().await,
+            job,
+            "one ACK, no replay loop"
+        );
+        assert_eq!(mixed_history.cov2_claim_rows().await, before);
     }
 
     #[cfg(unix)]

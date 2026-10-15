@@ -13,10 +13,65 @@ use libra::internal::ai::observed_agents::reasoning::{
 
 const FIXTURE_DIR: &str = "tests/fixtures/agent_transcripts/reasoning";
 
-/// COV2-06 is an inert parser delivery. The actual normalized-turn adapter
-/// still returns incomplete v1 for reasoning, without a Session or exporter.
+/// The shared canonical contract is pinned independently of either writer.
+/// The two real temp-DB writer tests in lib use this same literal SHA; this
+/// external test exercises only the bounded memory codec, never a Session.
 #[test]
-fn cov2_production_normalize_inert_before_activation() {
+fn cov2_production_typed_v2_distinct_from_rg04_legacy() {
+    use libra::internal::ai::{
+        capture::snapshot::{CaptureSnapshotPolicy, CaptureSnapshotService},
+        observed_agents::{canonical_turn_bytes, normalize_opencode_export, redact_turns},
+    };
+    use sha2::{Digest, Sha256};
+
+    const RAW_SECRET: &str = "sk-ant-EXAMPLE0000000000000000";
+    const V2_CANONICAL: &str = r#"[{"role":"user","text":"hi"},{"provider":"opencode","role":"reasoning","source_kind":"reasoning","text":"before <REDACTED:anthropic-api-key> after"},{"role":"assistant","text":"hello"}]"#;
+    const V2_SHA: &str = "7973604f43b515e1af6b1206e85c4fdc88447eed5a7822ca0ec3a77224b792a9";
+    const V1_CANONICAL: &str =
+        r#"[{"role":"user","text":"hi"},{"role":"assistant","text":"hello"}]"#;
+    const V1_SHA: &str = "df991cd9a1ac5c12c32b8cdf0254c3dfbbf26485b505a5afc83a90d1128ebc54";
+    let source = br#"{"info":{"id":"pure-partial-store"},"messages":[{"id":"u","type":"user","text":"hi"},{"id":"a-u","type":"assistant","content":[{"id":"r-u","type":"reasoning","text":"before sk-ant-EXAMPLE0000000000000000 after"},{"id":"t-u","type":"text","text":"hello"}]},{"id":"i-u","type":"idle","outcome":"succeeded"}]}"#;
+    assert_eq!(hex::encode(Sha256::digest(V2_CANONICAL.as_bytes())), V2_SHA);
+    assert_eq!(hex::encode(Sha256::digest(V1_CANONICAL.as_bytes())), V1_SHA);
+    let (redacted, preview) = CaptureSnapshotService::preview_redacted_coverage_v2(
+        "opencode",
+        source.to_vec(),
+        CaptureSnapshotPolicy::default(),
+    )
+    .expect("bounded redacted typed preview");
+    assert!(!String::from_utf8_lossy(redacted.bytes()).contains(RAW_SECRET));
+    assert_eq!(preview["partial"], false);
+    let rows = preview["turns"].as_array().expect("typed turn array");
+    assert_eq!(rows.len(), 1);
+    let row = &rows[0];
+    assert_eq!(row["coverage_schema_version"], 2);
+    assert_eq!(row["digest"], V2_SHA);
+    assert_eq!(row["projection"]["logical_turn_key"], "u");
+    assert_eq!(
+        row["projection"]["records"],
+        serde_json::json!([
+            {"type":"user","text":"hi"},
+            {"type":"reasoning","provider":"opencode","source_kind":"reasoning",
+             "text":"before <REDACTED:anthropic-api-key> after"},
+            {"type":"assistant","text":"hello"},
+        ])
+    );
+    let mut legacy = normalize_opencode_export(redacted.bytes());
+    redact_turns(&mut legacy);
+    assert_eq!(legacy.len(), 1);
+    assert_eq!(
+        canonical_turn_bytes(&legacy[0].records),
+        V1_CANONICAL.as_bytes()
+    );
+    assert_eq!(legacy[0].digest_hex(), V1_SHA);
+    assert_ne!(V1_SHA, V2_SHA);
+}
+
+/// The legacy direct normalizer remains frozen while the actual authorized
+/// capture/import call graph consumes the private typed runtime companion.
+/// COV2-11 replaces COV2-06's temporary preactivation selector here.
+#[test]
+fn cov2_production_typed_path_uses_v2_api() {
     use libra::internal::ai::observed_agents::{
         Completeness, CoverageSchemaVersion, SemanticRecord, normalize_opencode_export,
         select_coverage_schema,
@@ -77,7 +132,7 @@ fn cov2_production_normalize_inert_before_activation() {
     let live =
         std::fs::read_to_string("src/internal/ai/capture/live_checkpoint.rs").expect("live source");
     let live = live
-        .split("#[cfg(test)]\nmod tests")
+        .split("#[cfg(test)]\npub(crate) mod tests")
         .next()
         .expect("production section");
     assert!(
@@ -85,7 +140,83 @@ fn cov2_production_normalize_inert_before_activation() {
     );
     let import = std::fs::read_to_string("src/internal/ai/agent_import.rs").expect("import source");
     assert_eq!(import.matches("AgentKind::OpenCode => normalize_opencode_export_until(transcript.bytes(), deadline)").count(), 2,
-               "production OpenCode import still uses the legacy normalizer; the separate ordinary versioned library entry is allowed");
+               "the two legacy ordinary preparation projections stay frozen");
+
+    use std::collections::BTreeSet;
+
+    use syn::visit::Visit;
+    #[derive(Default)]
+    struct Calls(BTreeSet<String>);
+    impl<'ast> Visit<'ast> for Calls {
+        fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+            if let syn::Expr::Path(path) = call.func.as_ref()
+                && let Some(segment) = path.path.segments.last()
+            {
+                self.0.insert(segment.ident.to_string());
+            }
+            syn::visit::visit_expr_call(self, call);
+        }
+        fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+            self.0.insert(call.method.to_string());
+            syn::visit::visit_expr_method_call(self, call);
+        }
+    }
+    for (path, function, required) in [
+        (
+            "src/internal/ai/capture/live_checkpoint.rs",
+            "run_export_stage",
+            &["prepare_export_snapshot"][..],
+        ),
+        (
+            "src/internal/ai/capture/live_checkpoint.rs",
+            "prepare_export_snapshot",
+            &[
+                "take_coverage_runtime",
+                "reserve_runtime_turn_claims_with_reasoning",
+            ][..],
+        ),
+        (
+            "src/internal/ai/agent_import.rs",
+            "prepare_import_projection_with_reasoning",
+            &["take_coverage_runtime", "encode_redacted_import_runtime"][..],
+        ),
+        (
+            "src/command/agent/import.rs",
+            "prepare_candidate_bounded",
+            &[
+                "decode_redacted_import_runtime",
+                "ensure_runtime_import_source_history_until",
+            ][..],
+        ),
+        (
+            "src/internal/ai/agent_import.rs",
+            "import_prepared_with_subagent_discovery_and_runtime",
+            &["partition_reasoning_for_import"][..],
+        ),
+    ] {
+        let code = std::fs::read_to_string(path).expect("actual production source");
+        let parsed = syn::parse_file(&code).expect("parse actual source");
+        let item = parsed
+            .items
+            .iter()
+            .find_map(|item| match item {
+                syn::Item::Fn(item) if item.sig.ident == function => Some(item),
+                _ => None,
+            })
+            .expect("actual top-level production entry exists");
+        let mut calls = Calls::default();
+        calls.visit_block(&item.block);
+        for required in required {
+            assert!(
+                calls.0.contains(*required),
+                "{path}::{function} lost runtime call {required}"
+            );
+        }
+        assert!(
+            !calls.0.contains("safe_turn_projection"),
+            "typed route must not choose frozen-v1 projection"
+        );
+    }
 }
 
 /// In-memory persistence spies see only the actual preview's redacted outputs.

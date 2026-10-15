@@ -1238,6 +1238,7 @@ pub(crate) struct RedactedCoveragePreparation {
     pub(crate) turns: Vec<NormalizedTurn>,
     pub(crate) report: super::RedactionReport,
     pub(crate) partial: bool,
+    pub(crate) classifier_rejected: bool,
 }
 
 /// Pure provider data preparation; no source or native authority is issued.
@@ -1338,6 +1339,7 @@ pub(crate) fn prepare_coverage_preview(
         turns,
         report,
         partial,
+        classifier_rejected: false,
     })
 }
 
@@ -1396,12 +1398,51 @@ fn source_part_fields_mut(
     Some(part)
 }
 
+/// Provider-neutral snapshot consumer of an already source-bound fragment.
+/// The source/session/part binding and the same COV2-10 typed redaction remain
+/// mandatory before any transcript digest or normalized-turn persistence.
+pub(crate) fn prepare_authorized_reasoning_coverage(
+    ordinary: Vec<u8>,
+    fragment: reasoning::ReasoningCoverageFragment,
+    limits: CoverageRedactionLimits,
+) -> Result<RedactedCoveragePreparation, reasoning::ReasoningFieldError> {
+    // Partial permits/non-consumers keep their owning partial route. Only a
+    // ready consumer can use classifier rejection to retain its legacy bytes.
+    let reject_decoded_matches = !fragment.partial;
+    prepare_opencode_redacted_coverage_inner(
+        ordinary,
+        fragment.source_session.as_str(),
+        fragment.visible_parts,
+        fragment.partial,
+        limits,
+        reject_decoded_matches,
+    )
+}
+
 pub(crate) fn prepare_opencode_redacted_coverage(
+    ordinary: Vec<u8>,
+    source_session: &str,
+    visible: Vec<reasoning::OpenCodeVisibleReasoningPart>,
+    partial: bool,
+    limits: CoverageRedactionLimits,
+) -> Result<RedactedCoveragePreparation, reasoning::ReasoningFieldError> {
+    prepare_opencode_redacted_coverage_inner(
+        ordinary,
+        source_session,
+        visible,
+        partial,
+        limits,
+        false,
+    )
+}
+
+fn prepare_opencode_redacted_coverage_inner(
     ordinary: Vec<u8>,
     source_session: &str,
     mut visible: Vec<reasoning::OpenCodeVisibleReasoningPart>,
     mut partial: bool,
     limits: CoverageRedactionLimits,
+    reject_decoded_matches: bool,
 ) -> Result<RedactedCoveragePreparation, reasoning::ReasoningFieldError> {
     use reasoning::ReasoningFieldError;
     let mut ordinary = Zeroizing::new(ordinary);
@@ -1464,12 +1505,61 @@ pub(crate) fn prepare_opencode_redacted_coverage(
     if elapsed() {
         return Err(ReasoningFieldError::UnsupportedShape);
     }
-    let mut redacted_session = source_session.to_owned();
+    // Keep the original RedactedBytes allocation for a capture-only rejection.
+    // This clones bounded rule/offset/count metadata, never raw source bytes.
+    let legacy_report = reject_decoded_matches.then(|| report.clone());
+    let rejected = |transcript, report| RedactedCoveragePreparation {
+        transcript,
+        turns: Vec::new(),
+        report,
+        partial: false,
+        classifier_rejected: true,
+    };
+    let mut redacted_session = Zeroizing::new(source_session.to_owned());
     if !visible.is_empty() {
-        let mut document = Zeroizing::new(
-            parse_canon_value(transcript.bytes())
-                .map_err(|_| ReasoningFieldError::MalformedSource)?,
-        );
+        let parsed = parse_canon_value(transcript.bytes()).map(Zeroizing::new);
+        if elapsed() {
+            return Err(ReasoningFieldError::UnsupportedShape);
+        }
+        let mut document = match parsed {
+            Ok(document) => document,
+            Err(_) => {
+                if let Some(report) = legacy_report {
+                    return Ok(rejected(transcript, report));
+                }
+                return Err(ReasoningFieldError::MalformedSource);
+            }
+        };
+        if reject_decoded_matches {
+            // Raw rules can absorb JSON syntax while leaving a parseable tree.
+            // Verify every original identity before inserting any typed text;
+            // an ordinal alone must never bind it to a shifted sibling.
+            let bindings_match = document
+                .get("info")
+                .and_then(|info| info.get("id"))
+                .and_then(CanonValue::as_str)
+                == Some(source_session)
+                && visible.iter().all(|part| {
+                    !elapsed()
+                        && source_part_view(&document, part.message_ordinal, part.part_ordinal)
+                            .is_some_and(|(message_id, field)| {
+                                message_id == part.source_message.as_str()
+                                    && field.get("id").and_then(CanonValue::as_str)
+                                        == Some(part.source_part.as_str())
+                                    && field.get("type").and_then(CanonValue::as_str)
+                                        == Some("reasoning")
+                            })
+                });
+            if elapsed() {
+                return Err(ReasoningFieldError::UnsupportedShape);
+            }
+            if !bindings_match {
+                if let Some(report) = legacy_report {
+                    return Ok(rejected(transcript, report));
+                }
+                return Err(ReasoningFieldError::UnsupportedShape);
+            }
+        }
         // The original decoded thinking value, not a possibly half-matched
         // JSON escape spelling, is the input to typed-field redaction.
         for part in &mut visible {
@@ -1484,18 +1574,30 @@ pub(crate) fn prepare_opencode_redacted_coverage(
         }
         // Decode-aware redaction also prevents canonical serialization from
         // revealing an escaped secret in ordinary metadata or tool fields.
-        // Extra decoded matches are conservatively partial; visible thinking
-        // was already redacted above and does not itself poison completeness.
+        // Preview remains conservatively partial on extra decoded matches.
+        // A ready capture consumer instead rejects the typed companion and
+        // keeps its original raw-redaction bytes/report, without re-encoding
+        // or claiming to repair the legacy escaped-secret redaction contract.
         let mut decoded_report = super::RedactionReport::default();
         redact_canon_value(&mut document, &redactor, &mut decoded_report);
+        if decoded_report.match_count() != 0
+            && let Some(report) = legacy_report
+        {
+            if elapsed() {
+                return Err(ReasoningFieldError::UnsupportedShape);
+            }
+            return Ok(rejected(transcript, report));
+        }
         partial |= decoded_report.match_count() != 0;
         merge_redaction_reports(&mut report, decoded_report);
-        redacted_session = document
-            .get("info")
-            .and_then(|i| i.get("id"))
-            .and_then(CanonValue::as_str)
-            .ok_or(ReasoningFieldError::UnsupportedShape)?
-            .to_owned();
+        redacted_session = Zeroizing::new(
+            document
+                .get("info")
+                .and_then(|i| i.get("id"))
+                .and_then(CanonValue::as_str)
+                .ok_or(ReasoningFieldError::UnsupportedShape)?
+                .to_owned(),
+        );
         for part in &mut visible {
             let (message_id, field) =
                 source_part_view(&document, part.message_ordinal, part.part_ordinal)
@@ -1535,6 +1637,7 @@ pub(crate) fn prepare_opencode_redacted_coverage(
         turns,
         report,
         partial,
+        classifier_rejected: false,
     })
 }
 
@@ -2467,6 +2570,504 @@ fn project_turn_for_schema(
     })
 }
 
+// The private import wire carries redacted data, never a source/native grant.
+// Its own reader is closed so ProviderVisibleText's generic serde gate stays shut.
+#[derive(Serialize)]
+pub(crate) struct RedactedImportCoverageRuntimeDto {
+    version: u8,
+    classifier_rejected: bool,
+    source_partial: bool,
+    turns: Option<Vec<ImportRuntimeTurnWire>>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ImportRuntimeEnvelopeWire {
+    version: u8,
+    classifier_rejected: bool,
+    source_partial: bool,
+    #[serde(deserialize_with = "import_runtime_required_option")]
+    turns: Option<Vec<ImportRuntimeTurnWire>>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ImportRuntimeTurnWire {
+    schema_version: i64,
+    agent_kind: String,
+    logical_turn_key: String,
+    ordinal: usize,
+    completeness: Completeness,
+    records: Vec<ImportRuntimeRecordWire>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+enum ImportRuntimeRecordWire {
+    User {
+        text: String,
+    },
+    Assistant {
+        text: String,
+    },
+    ToolCall {
+        #[serde(deserialize_with = "import_runtime_required_option")]
+        call_id: Option<String>,
+        name: String,
+        input: CanonValue,
+    },
+    ToolResult {
+        #[serde(deserialize_with = "import_runtime_required_option")]
+        call_id: Option<String>,
+        content: String,
+    },
+    ToolError {
+        #[serde(deserialize_with = "import_runtime_required_option")]
+        call_id: Option<String>,
+        content: String,
+    },
+    Reasoning {
+        provider: String,
+        #[serde(deserialize_with = "import_runtime_required_option")]
+        source_kind: Option<String>,
+        text: String,
+    },
+}
+
+fn import_runtime_required_option<'de, D: Deserializer<'de>, T: Deserialize<'de>>(
+    deserializer: D,
+) -> Result<Option<T>, D::Error> {
+    Option::<T>::deserialize(deserializer)
+}
+
+const IMPORT_RUNTIME_MAX_TURNS: usize = 4096;
+// The existing source redaction two-buffer budget, not a larger input cap.
+const IMPORT_RUNTIME_MAX_BYTES: usize = 40 * 1024 * 1024;
+
+struct ImportRuntimeBudget {
+    nodes: usize,
+    bytes: usize,
+}
+
+impl ImportRuntimeBudget {
+    fn charge<E: de::Error>(&mut self, depth: usize, bytes: usize) -> Result<(), E> {
+        if depth > 64 {
+            return Err(E::custom("import runtime exceeds its structural budget"));
+        }
+        self.nodes = self
+            .nodes
+            .checked_add(1)
+            .filter(|nodes| *nodes <= reasoning::OPENCODE_CANON_MAX_NODES)
+            .ok_or_else(|| E::custom("import runtime exceeds its structural budget"))?;
+        self.bytes = self
+            .bytes
+            .checked_add(bytes)
+            .and_then(|n| n.checked_add(32))
+            .filter(|bytes| *bytes <= IMPORT_RUNTIME_MAX_BYTES)
+            .ok_or_else(|| E::custom("import runtime exceeds its byte budget"))?;
+        Ok(())
+    }
+}
+
+struct ImportRuntimeValueSeed<'a> {
+    budget: &'a mut ImportRuntimeBudget,
+    depth: usize,
+}
+
+impl<'de> de::DeserializeSeed<'de> for ImportRuntimeValueSeed<'_> {
+    type Value = CanonValue;
+    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<CanonValue, D::Error> {
+        struct RuntimeVisitor<'a>(ImportRuntimeValueSeed<'a>);
+        impl<'de> Visitor<'de> for RuntimeVisitor<'_> {
+            type Value = CanonValue;
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a bounded redacted import runtime value")
+            }
+            fn visit_unit<E: de::Error>(self) -> Result<CanonValue, E> {
+                self.0.budget.charge(self.0.depth, 0)?;
+                Ok(CanonValue::Null)
+            }
+            fn visit_bool<E: de::Error>(self, value: bool) -> Result<CanonValue, E> {
+                self.0.budget.charge(self.0.depth, 0)?;
+                Ok(CanonValue::Bool(value))
+            }
+            fn visit_i64<E: de::Error>(self, value: i64) -> Result<CanonValue, E> {
+                self.0.budget.charge(self.0.depth, 0)?;
+                Ok(CanonValue::Int(value))
+            }
+            fn visit_u64<E: de::Error>(self, value: u64) -> Result<CanonValue, E> {
+                self.visit_i64(
+                    i64::try_from(value)
+                        .map_err(|_| E::custom("import runtime integer is out of range"))?,
+                )
+            }
+            fn visit_f64<E: de::Error>(self, _value: f64) -> Result<CanonValue, E> {
+                Err(E::custom("import runtime requires integer semantic values"))
+            }
+            fn visit_str<E: de::Error>(self, value: &str) -> Result<CanonValue, E> {
+                self.0.budget.charge(self.0.depth, value.len())?;
+                Ok(CanonValue::Str(value.to_owned()))
+            }
+            fn visit_string<E: de::Error>(self, value: String) -> Result<CanonValue, E> {
+                self.0.budget.charge(self.0.depth, value.len())?;
+                Ok(CanonValue::Str(value))
+            }
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<CanonValue, A::Error> {
+                self.0.budget.charge(self.0.depth, 0)?;
+                let mut values = Vec::new();
+                while let Some(value) = seq.next_element_seed(ImportRuntimeValueSeed {
+                    budget: self.0.budget,
+                    depth: self.0.depth + 1,
+                })? {
+                    values.push(value);
+                }
+                Ok(CanonValue::Array(values))
+            }
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<CanonValue, A::Error> {
+                self.0.budget.charge(self.0.depth, 0)?;
+                let mut values = BTreeMap::new();
+                while let Some(key) = map.next_key::<String>()? {
+                    self.0.budget.charge(self.0.depth + 1, key.len())?;
+                    if values.contains_key(&key) {
+                        return Err(de::Error::custom(
+                            "import runtime rejects duplicate object keys",
+                        ));
+                    }
+                    let value = map.next_value_seed(ImportRuntimeValueSeed {
+                        budget: self.0.budget,
+                        depth: self.0.depth + 1,
+                    })?;
+                    values.insert(key, value);
+                }
+                Ok(CanonValue::Object(values))
+            }
+        }
+        deserializer.deserialize_any(RuntimeVisitor(self))
+    }
+}
+
+fn import_runtime_into_json(value: CanonValue) -> Result<serde_json::Value, &'static str> {
+    Ok(match value {
+        CanonValue::Null => serde_json::Value::Null,
+        CanonValue::Float(_) => return Err("import runtime requires integer semantic values"),
+        CanonValue::Bool(value) => value.into(),
+        CanonValue::Int(value) => value.into(),
+        CanonValue::Str(value) => value.into(),
+        CanonValue::Array(values) => serde_json::Value::Array(
+            values
+                .into_iter()
+                .map(import_runtime_into_json)
+                .collect::<Result<Vec<_>, _>>()?,
+        ),
+        CanonValue::Object(values) => serde_json::Value::Object(
+            values
+                .into_iter()
+                .map(|(key, value)| Ok((key, import_runtime_into_json(value)?)))
+                .collect::<Result<_, &'static str>>()?,
+        ),
+    })
+}
+
+impl<'de> Deserialize<'de> for RedactedImportCoverageRuntimeDto {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = de::DeserializeSeed::deserialize(
+            ImportRuntimeValueSeed {
+                budget: &mut ImportRuntimeBudget { nodes: 0, bytes: 0 },
+                depth: 0,
+            },
+            deserializer,
+        )?;
+        if value
+            .get("turns")
+            .and_then(CanonValue::as_array)
+            .is_some_and(|turns| turns.len() > IMPORT_RUNTIME_MAX_TURNS)
+        {
+            return Err(de::Error::custom("import runtime exceeds its turn budget"));
+        }
+        let wire: ImportRuntimeEnvelopeWire =
+            serde_json::from_value(import_runtime_into_json(value).map_err(de::Error::custom)?)
+                .map_err(|_| de::Error::custom("invalid redacted import runtime shape"))?;
+        if wire.version != 1
+            || wire
+                .turns
+                .as_ref()
+                .is_some_and(|turns| turns.len() > IMPORT_RUNTIME_MAX_TURNS)
+        {
+            return Err(de::Error::custom("unsupported or oversized import runtime"));
+        }
+        Ok(Self {
+            version: wire.version,
+            classifier_rejected: wire.classifier_rejected,
+            source_partial: wire.source_partial,
+            turns: wire.turns,
+        })
+    }
+}
+
+pub(crate) fn import_runtime_has_typed_turns(dto: &RedactedImportCoverageRuntimeDto) -> bool {
+    dto.turns.as_ref().is_some_and(|turns| {
+        turns.iter().any(|turn| {
+            turn.records
+                .iter()
+                .any(|record| matches!(record, ImportRuntimeRecordWire::Reasoning { .. }))
+        })
+    })
+}
+
+/// Sole production encoder: the held-descriptor preparation owner supplies
+/// snapshot-redacted turns. This emits only the versioned safe projection.
+pub(crate) fn encode_redacted_import_runtime(
+    agent_kind: &str,
+    turns: Option<&[NormalizedTurn]>,
+    classifier_rejected: bool,
+    source_partial: bool,
+    deadline: Instant,
+) -> Result<RedactedImportCoverageRuntimeDto, reasoning::ReasoningFieldError> {
+    use reasoning::ReasoningFieldError as Error;
+    if agent_kind != "opencode" || Instant::now() >= deadline {
+        return Err(Error::UnsupportedShape);
+    }
+    let turns = turns.filter(|turns| {
+        turns
+            .iter()
+            .any(|turn| select_coverage_schema(turn) == CoverageSchemaVersion::V2)
+    });
+    if classifier_rejected && turns.is_some() {
+        return Err(Error::UnsupportedShape);
+    }
+    if turns.is_some_and(|turns| turns.len() > IMPORT_RUNTIME_MAX_TURNS) {
+        return Err(Error::SourceTooLarge);
+    }
+    // Charge borrowed semantic data before projection clones any payload.
+    let mut budget = ImportRuntimeBudget { nodes: 0, bytes: 0 };
+    let charge = |budget: &mut ImportRuntimeBudget, depth, bytes| {
+        budget
+            .charge::<de::value::Error>(depth, bytes)
+            .map_err(|_| Error::SourceTooLarge)
+    };
+    if let Some(turns) = turns {
+        for turn in turns {
+            charge(&mut budget, 0, turn.logical_turn_key.len())?;
+            for record in &turn.records {
+                if Instant::now() >= deadline {
+                    return Err(Error::UnsupportedShape);
+                }
+                charge(&mut budget, 1, 0)?;
+                match record {
+                    SemanticRecord::User { text } | SemanticRecord::Assistant { text } => {
+                        charge(&mut budget, 2, text.len())?
+                    }
+                    SemanticRecord::Reasoning { text, .. } => {
+                        charge(&mut budget, 2, text.as_str().len())?
+                    }
+                    SemanticRecord::ToolResult {
+                        call_id, content, ..
+                    } => {
+                        charge(&mut budget, 2, call_id.as_ref().map_or(0, String::len))?;
+                        charge(&mut budget, 2, content.len())?;
+                    }
+                    SemanticRecord::ToolCall {
+                        call_id,
+                        name,
+                        input,
+                    } => {
+                        charge(&mut budget, 2, call_id.as_ref().map_or(0, String::len))?;
+                        charge(&mut budget, 2, name.len())?;
+                        let mut stack = vec![(input, 2)];
+                        while let Some((value, depth)) = stack.pop() {
+                            if Instant::now() >= deadline {
+                                return Err(Error::UnsupportedShape);
+                            }
+                            charge(&mut budget, depth, 0)?;
+                            match value {
+                                CanonValue::Str(text) => charge(&mut budget, depth, text.len())?,
+                                CanonValue::Array(values) => {
+                                    stack.extend(values.iter().map(|value| (value, depth + 1)))
+                                }
+                                CanonValue::Object(values) => {
+                                    for (key, value) in values {
+                                        charge(&mut budget, depth, key.len())?;
+                                        stack.push((value, depth + 1));
+                                    }
+                                }
+                                CanonValue::Float(_) => return Err(Error::UnsupportedShape),
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let wire_turns = turns
+        .map(|turns| {
+            turns
+                .iter()
+                .map(|turn| {
+                    let projection = safe_turn_projection_for_schema(
+                        select_coverage_schema(turn).as_i64(),
+                        agent_kind,
+                        turn,
+                    )
+                    .map_err(|_| Error::UnsupportedShape)?;
+                    serde_json::from_value(projection).map_err(|_| Error::UnsupportedShape)
+                })
+                .collect::<Result<Vec<ImportRuntimeTurnWire>, Error>>()
+        })
+        .transpose()?;
+    let dto = RedactedImportCoverageRuntimeDto {
+        version: 1,
+        classifier_rejected,
+        source_partial,
+        turns: wire_turns,
+    };
+    // Stop escaped-output expansion while the bounded writer grows.
+    let _encoded = encode_bounded_json(&dto, IMPORT_RUNTIME_MAX_BYTES)?;
+    if Instant::now() >= deadline {
+        return Err(Error::UnsupportedShape);
+    }
+    Ok(dto)
+}
+
+/// A closed data reader. It cannot supply source, native or partial permits.
+pub(crate) fn decode_redacted_import_runtime(
+    dto: RedactedImportCoverageRuntimeDto,
+    agent_kind: &str,
+    ordinary_turns: &[NormalizedTurn],
+    session_state: &str,
+    deadline: Instant,
+) -> Result<(Option<Vec<NormalizedTurn>>, bool, bool), reasoning::ReasoningFieldError> {
+    use reasoning::ReasoningFieldError as Error;
+    if agent_kind != "opencode"
+        || dto.version != 1
+        || Instant::now() >= deadline
+        || (dto.classifier_rejected && dto.turns.is_some())
+    {
+        return Err(Error::UnsupportedShape);
+    }
+    let Some(wire_turns) = dto.turns else {
+        return Ok((None, dto.classifier_rejected, dto.source_partial));
+    };
+    if wire_turns.len() != ordinary_turns.len() || wire_turns.len() > IMPORT_RUNTIME_MAX_TURNS {
+        return Err(Error::UnsupportedShape);
+    }
+    let ordinary = ordinary_turns
+        .iter()
+        .map(|turn| (turn.logical_turn_key.as_str(), turn))
+        .collect::<BTreeMap<_, _>>();
+    let final_ordinal = ordinary_turns.iter().map(|turn| turn.ordinal).max();
+    let mut seen = BTreeSet::new();
+    let mut ordinals = BTreeSet::new();
+    let mut restored = Vec::with_capacity(wire_turns.len());
+    for (position, wire) in wire_turns.into_iter().enumerate() {
+        if Instant::now() >= deadline
+            || wire.agent_kind != agent_kind
+            || !seen.insert(wire.logical_turn_key.clone())
+            || !ordinals.insert(wire.ordinal)
+        {
+            return Err(Error::UnsupportedShape);
+        }
+        let legacy = ordinary
+            .get(wire.logical_turn_key.as_str())
+            .ok_or(Error::UnsupportedShape)?;
+        if wire.ordinal != legacy.ordinal
+            || ordinary_turns[position].logical_turn_key != wire.logical_turn_key
+        {
+            return Err(Error::UnsupportedShape);
+        }
+        let mut records = Vec::with_capacity(wire.records.len());
+        for record in wire.records {
+            if Instant::now() >= deadline {
+                return Err(Error::UnsupportedShape);
+            }
+            records.push(match record {
+                ImportRuntimeRecordWire::User { text } => SemanticRecord::User { text },
+                ImportRuntimeRecordWire::Assistant { text } => SemanticRecord::Assistant { text },
+                ImportRuntimeRecordWire::ToolCall {
+                    call_id,
+                    name,
+                    input,
+                } => SemanticRecord::ToolCall {
+                    call_id,
+                    name,
+                    input,
+                },
+                ImportRuntimeRecordWire::ToolResult { call_id, content } => {
+                    SemanticRecord::ToolResult {
+                        call_id,
+                        content,
+                        is_error: false,
+                    }
+                }
+                ImportRuntimeRecordWire::ToolError { call_id, content } => {
+                    SemanticRecord::ToolResult {
+                        call_id,
+                        content,
+                        is_error: true,
+                    }
+                }
+                ImportRuntimeRecordWire::Reasoning {
+                    provider,
+                    source_kind,
+                    text,
+                } => {
+                    if provider != "opencode" || source_kind.as_deref() != Some("reasoning") {
+                        return Err(Error::UnsupportedShape);
+                    }
+                    let (_, text) = reasoning::classify_provider_visible_reasoning(
+                        reasoning::ReasoningProvider::OpenCode,
+                        reasoning::ReasoningSourceKind::Reasoning,
+                        text,
+                    );
+                    SemanticRecord::Reasoning {
+                        provider: reasoning::ReasoningProvider::OpenCode,
+                        source_kind: Some(reasoning::ReasoningSourceKind::Reasoning),
+                        text,
+                    }
+                }
+            });
+        }
+        let turn = NormalizedTurn {
+            logical_turn_key: wire.logical_turn_key,
+            ordinal: wire.ordinal,
+            completeness: wire.completeness,
+            started_at: legacy.started_at,
+            ended_at: legacy.ended_at,
+            records,
+        };
+        let version = select_coverage_schema(&turn);
+        if version.as_i64() != wire.schema_version
+            || turn
+                .records
+                .iter()
+                .filter(|record| !matches!(record, SemanticRecord::Reasoning { .. }))
+                .ne(legacy.records.iter())
+        {
+            return Err(Error::UnsupportedShape);
+        }
+        if turn.completeness != legacy.completeness
+            && !(legacy.completeness == Completeness::Incomplete
+                && turn.completeness == Completeness::Complete
+                && version == CoverageSchemaVersion::V2
+                && !dto.source_partial
+                && !(session_state != "stopped" && Some(turn.ordinal) == final_ordinal))
+        {
+            return Err(Error::UnsupportedShape);
+        }
+        restored.push(turn);
+    }
+    if !restored
+        .iter()
+        .any(|turn| select_coverage_schema(turn) == CoverageSchemaVersion::V2)
+    {
+        return Err(Error::UnsupportedShape);
+    }
+    if redact_turns_with_report(&mut restored).match_count() != 0 || Instant::now() >= deadline {
+        return Err(Error::UnsupportedShape);
+    }
+    Ok((Some(restored), dto.classifier_rejected, dto.source_partial))
+}
+
 #[cfg(test)]
 mod tests {
     use std::io::Write;
@@ -2521,6 +3122,157 @@ mod tests {
                 text: "hello".to_string(),
             },
         ]
+    }
+
+    #[test]
+    fn cov2_import_runtime_codec_is_closed_and_preserves_lifecycle() {
+        let deadline = Instant::now() + std::time::Duration::from_secs(30);
+        let typed = cov2_visible_turn("safe visible");
+        let mut legacy = typed.clone();
+        legacy
+            .records
+            .retain(|record| !matches!(record, SemanticRecord::Reasoning { .. }));
+        legacy.completeness = Completeness::Incomplete;
+        let encode = || {
+            encode_redacted_import_runtime(
+                "opencode",
+                Some(std::slice::from_ref(&typed)),
+                false,
+                false,
+                deadline,
+            )
+            .unwrap()
+        };
+        let wire = serde_json::to_string(&encode()).unwrap();
+        assert!(
+            serde_json::to_vec(&typed).is_err(),
+            "generic ProviderVisibleText serde stays closed"
+        );
+        let decoded: RedactedImportCoverageRuntimeDto = serde_json::from_str(&wire).unwrap();
+        let (restored, rejected, partial) = decode_redacted_import_runtime(
+            decoded,
+            "opencode",
+            std::slice::from_ref(&legacy),
+            "stopped",
+            deadline,
+        )
+        .unwrap();
+        assert!(!rejected && !partial);
+        assert_eq!(restored.unwrap()[0].records, typed.records);
+        assert!(
+            decode_redacted_import_runtime(
+                encode(),
+                "opencode",
+                std::slice::from_ref(&legacy),
+                "active",
+                deadline
+            )
+            .is_err()
+        );
+        assert!(
+            decode_redacted_import_runtime(
+                encode(),
+                "codex",
+                std::slice::from_ref(&legacy),
+                "stopped",
+                deadline
+            )
+            .is_err()
+        );
+        let partial_wire = wire.replace("\"source_partial\":false", "\"source_partial\":true");
+        let partial = serde_json::from_str(&partial_wire).unwrap();
+        assert!(
+            decode_redacted_import_runtime(
+                partial,
+                "opencode",
+                std::slice::from_ref(&legacy),
+                "stopped",
+                deadline
+            )
+            .is_err()
+        );
+        let secret = cov2_visible_turn("sk-ant-EXAMPLE0000000000000000");
+        let dto =
+            encode_redacted_import_runtime("opencode", Some(&[secret]), false, false, deadline)
+                .unwrap();
+        assert!(
+            decode_redacted_import_runtime(
+                dto,
+                "opencode",
+                std::slice::from_ref(&legacy),
+                "stopped",
+                deadline
+            )
+            .is_err()
+        );
+        let many_ordinary = vec![legacy.clone(); 4097];
+        assert!(
+            serde_json::to_value(
+                encode_redacted_import_runtime(
+                    "opencode",
+                    Some(&many_ordinary),
+                    false,
+                    false,
+                    deadline
+                )
+                .unwrap()
+            )
+            .unwrap()["turns"]
+                .is_null(),
+            "reasoning-free sources do not acquire a new typed turn-count limit"
+        );
+        let ordinary = encode_redacted_import_runtime(
+            "opencode",
+            Some(std::slice::from_ref(&legacy)),
+            false,
+            false,
+            deadline,
+        )
+        .unwrap();
+        assert!(serde_json::to_value(ordinary).unwrap()["turns"].is_null());
+        for changed in [
+            wire.replace("\"version\":1", "\"version\":2"),
+            wire.replace("\"version\":1", "\"version\":1,\"version\":1"),
+            wire.replace(
+                "\"classifier_rejected\":false",
+                "\"unknown\":0,\"classifier_rejected\":false",
+            ),
+            wire.replace(
+                "\"text\":\"safe visible\"",
+                "\"state\":{},\"text\":\"safe visible\"",
+            ),
+        ] {
+            assert!(serde_json::from_str::<RedactedImportCoverageRuntimeDto>(&changed).is_err());
+        }
+        for input in ["{\"x\":1,\"x\":2}", "1.5", "18446744073709551615"] {
+            let mut turn = typed.clone();
+            turn.records.push(SemanticRecord::ToolCall {
+                call_id: None,
+                name: "tool".to_owned(),
+                input: CanonValue::Null,
+            });
+            let dto =
+                encode_redacted_import_runtime("opencode", Some(&[turn]), false, false, deadline)
+                    .unwrap();
+            let changed = serde_json::to_string(&dto)
+                .unwrap()
+                .replace("\"input\":null", &format!("\"input\":{input}"));
+            assert!(
+                serde_json::from_str::<RedactedImportCoverageRuntimeDto>(&changed).is_err(),
+                "strict tool values"
+            );
+        }
+        let expired = Instant::now() - std::time::Duration::from_millis(1);
+        assert!(
+            encode_redacted_import_runtime("opencode", Some(&[typed]), false, false, expired)
+                .is_err()
+        );
+        assert!(
+            serde_json::from_str::<RedactedImportCoverageRuntimeDto>(
+                r#"{"version":1,"classifier_rejected":false,"source_partial":false}"#
+            )
+            .is_err()
+        );
     }
 
     #[test]

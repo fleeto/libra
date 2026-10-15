@@ -395,3 +395,30 @@ identity/content canaries. They do not run an OpenCode Session, exporter or mode
 and confer no native-origin proof. These reader guarantees apply to the first
 stable release containing coverage-v2 and later; they do not assert that the
 currently installed stable release contains this unreleased implementation.
+
+## Coverage-v2 capture (unreleased)
+
+From the first stable release containing coverage-v2, OpenCode export capture
+and historical import retain supported provider-visible reasoning as typed,
+redacted turn content. Turns containing that content use coverage schema 2;
+ordinary turns keep schema 1 and their existing canonical bytes. Redaction runs
+before either digest or checkpoint projection. This does not authenticate
+`signature`, `redactedData`, or `reasoningEncryptedContent`: unproven native
+fields remain partial and cannot be archived as trusted artifacts.
+
+After upgrading, an interrupted action whose checkpoint was already committed
+with v1 (or an empty legacy revision set) first settles that existing receipt
+without adding claims or rewriting its checkpoint. A subsequent **new action**
+may capture the visible reasoning once under v2; repeated capture then deduplicates.
+The old v1 objects, digests, and claims remain readable and unchanged.
+
+If source classification is rejected after that session already has v2 claims,
+the entire new capture/import attempt stops, including new ordinary turns.
+Its pending receipt/export work stays retryable; no fallback claims or success
+acknowledgment are created. An unchanged over-limit or unsupported source can
+keep that session blocked. Keep the recorded data, inspect `libra agent doctor`,
+and start a new OpenCode session to continue supported capture. A candidate or
+unverified reasoning source cannot turn this failure into complete coverage.
+These changes add no command flags and are not included in the installed
+0.30.49 release. OpenCode Session/exporter/model acceptance runs locally on
+macOS; it is not a CI integration test.

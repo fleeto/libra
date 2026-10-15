@@ -1,5 +1,8 @@
 # OpenCode coverage schema-v2 前置实施计划（2026-10-13）
 
+> **COV2-11 本机验收闭合、最终交付门待闭合（2026-10-16）：** 原8AC/6VER、最终相关QA、soleClaudeCODE R3 PASS及新T1 full实际通过。source当前19/26；signed main/cf与最终archive/部署门全部实际闭合才20/26=76.92%，formal0/26继承家族C/D。下一卡COV2-12，父formal59/71不变。以下旧状态为各自日期历史。
+
+
 > **COV2-11 范围采纳准备（2026-10-15）：** 前驱10actual signedmain/remote31a2199、full10163、soleCODEPASS/final104/archive2048同一，COVsource19/26=73.08%、formal0。R4 soleClaudePLANNING PASS（0P0/P1/P2、4P3）/rootactualanchors；本次仅2plans规范I/G，须实际104reader/fmtstrict和signedPush后开实现。原8AC/6VER/26cards不变，无新增SourceA/家族C-D信用；父formal59/71=83.10%不变，下一工作仍COV2-11。
 
 
@@ -297,7 +300,7 @@
 | COV2-09 | implementation | graph/doctor 双版本只读契约 | forward-only | yes | yes | 8/8 | 4/8 | 1/1 | M | COV2-05；DEP-COV2-SITE | 严格串行 | family child | COV2-05 | N/A |
 | COV2-06 | implementation | OpenCode typed 来源分类的未激活交付 | forward-only | yes | yes | 8/8 | 4/8 | 1/3 | M | DEP-COV2-029-BASE；COV2-09；DEP-COV2-OG26 | 严格串行 | family child | N/A | N/A |
 | COV2-10 | implementation | typed 脱敏与零明文 sink | forward-only | yes | yes | 8/8 | 4/8 | 2/4 | M | COV2-06 | 严格串行 | family child | COV2-06 | N/A |
-| COV2-11 | implementation | live/import v2 生产接线与字节对齐 | forward-only | yes | yes | 8/8 | 6/8 | 4/10 | M | DEP-COV2-029-BASE；COV2-10；DEP-COV2-SITE | 严格串行 | family child | COV2-06 | N/A |
+| COV2-11 | implementation | live/import v2 生产接线与字节对齐 | forward-only | yes | yes | 8/8 | 6/8 | 4/11 | M | DEP-COV2-029-BASE；COV2-10；DEP-COV2-SITE | 严格串行 | family child | COV2-06 | N/A |
 | COV2-12 | implementation | macOS 本地 Session 入口与既有 fixture 修复 | forward-only | yes | yes | 8/8 | 6/8 | 1/1 | M | COV2-11 | 严格串行 | family child | COV2-06 | N/A |
 | COV2-15 | implementation | 候选 live Session 权限防火墙 | forward-only | yes | yes | 8/8 | 2/8 | 2/2 | M | DEP-COV2-029-BASE；COV2-12 | 严格串行 | family child | COV2-12 | N/A |
 | COV2-18 | implementation | 候选 import Session 权限防火墙 | forward-only | yes | yes | 8/8 | 2/8 | 2/2 | M | DEP-COV2-029-BASE；COV2-15 | 严格串行 | family child | COV2-15 | N/A |
@@ -1163,7 +1166,7 @@ COV2-REL-01 冻结不含 OG-27 源码的最终 COV2 树；首次完成 bumped �
 
 **Task type:** implementation
 
-**Lifecycle / Acceptance:** in-progress / 空
+**Lifecycle / Acceptance:** in-progress / locally-accepted
 
 **Description:** live/import v2 activation and byte parity。本卡唯一行为轴、恢复和粒度见下方 Granularity；不得以 synthetic/native 互换验收。
 
@@ -1173,23 +1176,23 @@ COV2-REL-01 冻结不含 OG-27 源码的最终 COV2 树；首次完成 bumped �
 
 **Acceptance criteria:**
 
-- [ ] AC1 the live path writes a v2 typed claim
-- [ ] AC2 historical import writes a v2 typed claim
-- [ ] AC3 the two paths produce identical canonical bytes
-- [ ] AC4 their digests match
-- [ ] AC5 v1 turns with no typed Reasoning retain old bytes
-- [ ] AC6 pending replay of that v2 claim retains its version
-- [ ] AC7 candidate turns remain partial through the runtime adapter
-- [ ] AC8 production live/import typed Reasoning never calls the legacy-v1 projection API.
+- [x] AC1 the live path writes a v2 typed claim
+- [x] AC2 historical import writes a v2 typed claim
+- [x] AC3 the two paths produce identical canonical bytes
+- [x] AC4 their digests match
+- [x] AC5 v1 turns with no typed Reasoning retain old bytes
+- [x] AC6 pending replay of that v2 claim retains its version
+- [x] AC7 candidate turns remain partial through the runtime adapter
+- [x] AC8 production live/import typed Reasoning never calls the legacy-v1 projection API.
 
 **Verification:**
 
-- [ ] VER1→AC1: `source .env.test && cargo test --lib internal::ai::capture::live_checkpoint::tests::cov2_direct_visible_turn_claim_version -- --exact` (1/1; direct normalized-turn function, no OpenCode Session).
-- [ ] VER2→AC2/5: `source .env.test && cargo test --lib internal::ai::agent_import::tests::cov2_direct_visible_import_and_v1_parity -- --exact` (1/1; direct normalized-turn function, no Session/exporter).
-- [ ] VER3→AC3/4/8: `source .env.test && cargo test --test agent_reasoning_contract_test cov2_production_typed_v2_distinct_from_rg04_legacy -- --exact` (1/1; explicit dual-path golden, no Session).
-- [ ] VER4→AC6: `source .env.test && cargo test --lib internal::ai::capture::recovery::tests::cov2_runtime_claim_replay_version -- --exact` (1/1). Actual Session route remains COV2-12 manual only.
-- [ ] VER5→AC7: `source .env.test && cargo test --lib internal::ai::capture::live_checkpoint::tests::cov2_direct_candidate_turn_stays_partial -- --exact` (1/1; proof/state-bearing candidate-specific direct normalized-turn assertion, no Session, no issuer/opaque mint).
-- [ ] VER6→AC8: `source .env.test && cargo test --test agent_reasoning_contract_test cov2_production_typed_path_uses_v2_api -- --exact` (1/1; exercise live/import production call sites and assert typed-v2 versus RG-04 legacy-v1, plus a static source guard forbidding fallback to legacy helper for typed turns). 同卡把 COV2-06 的 `cov2_production_normalize_inert_before_activation` 守卫改为 post-activation v2 守卫并记录旧→新 selector；保留前驱签名源码的历史 PASS，不让旧“仍未激活”断言留在默认 CI 变红。
+- [x] VER1→AC1: `source .env.test && cargo test --lib internal::ai::capture::live_checkpoint::tests::cov2_direct_visible_turn_claim_version -- --exact` (1/1; direct normalized-turn function, no OpenCode Session).
+- [x] VER2→AC2/5: `source .env.test && cargo test --lib internal::ai::agent_import::tests::cov2_direct_visible_import_and_v1_parity -- --exact` (1/1; direct normalized-turn function, no Session/exporter).
+- [x] VER3→AC3/4/8: `source .env.test && cargo test --test agent_reasoning_contract_test cov2_production_typed_v2_distinct_from_rg04_legacy -- --exact` (1/1; explicit dual-path golden, no Session).
+- [x] VER4→AC6: `source .env.test && cargo test --lib internal::ai::capture::recovery::tests::cov2_runtime_claim_replay_version -- --exact` (1/1). Actual Session route remains COV2-12 manual only.
+- [x] VER5→AC7: `source .env.test && cargo test --lib internal::ai::capture::live_checkpoint::tests::cov2_direct_candidate_turn_stays_partial -- --exact` (1/1; proof/state-bearing candidate-specific direct normalized-turn assertion, no Session, no issuer/opaque mint).
+- [x] VER6→AC8: `source .env.test && cargo test --test agent_reasoning_contract_test cov2_production_typed_path_uses_v2_api -- --exact` (1/1; exercise live/import production call sites and assert typed-v2 versus RG-04 legacy-v1, plus a static source guard forbidding fallback to legacy helper for typed turns). 同卡把 COV2-06 的 `cov2_production_normalize_inert_before_activation` 守卫改为 post-activation v2 守卫并记录旧→新 selector；保留前驱签名源码的历史 PASS，不让旧“仍未激活”断言留在默认 CI 变红。
 
 **Full-suite trigger:** T-1：共享授权preprocessing/typedredaction及runtime versioned gate/checkpoint/replay/fences；最终实现原6VER和相关focused/fmt/strict、soleClaudeCODEPASS/root后，actual quiet-load .env.test+.env.live-test Nextest full，不复用10full。家族首次bumpedT2/全卡最终full保留；不加Session/model/exporter CI或sharedtestinfra。
 
@@ -1197,11 +1200,11 @@ COV2-REL-01 冻结不含 OG-27 源码的最终 COV2 树；首次完成 bumped �
 
 **Deliverables:** 无独立文件；本卡实现/测试/文档随唯一发布点交付；每卡的计数、源码 SHA、hash/mode、review/门结果写在本计划正文，不建证据文件。
 
-**Implementation write set:** I-core = `docs/development/plan/plan-20261013-coverage-schema.md`; `docs/development/plan/plan-status.md`; `docs/development/tracing/coverage-v2.md`; `docs/development/tracing/agent.md`; `COMPATIBILITY.md`；本卡精确新增路径 = `src/internal/ai/capture/live_checkpoint.rs`; `src/internal/ai/agent_import.rs`; `src/internal/ai/capture/snapshot.rs`; `src/internal/ai/capture/recovery.rs`; `src/internal/ai/observed_agents/mod.rs`; `src/internal/ai/coverage_gate.rs`; `src/internal/ai/capture/checkpoint.rs`; `src/internal/ai/observed_agents/coverage.rs`; `src/internal/ai/observed_agents/reasoning.rs`; `src/internal/ai/observed_agents/opencode_reasoning.rs`; `docs/development/commands/agent.md`; `docs/commands/agent.md`; `docs/commands/zh-CN/agent.md`; `README.md`; `README.zh-CN.md`; `tests/agent_reasoning_contract_test.rs`; `tests/INDEX.md`; `tests/compat/agent_architecture_guard.rs`; `apps/tanstack-app/content/docs/commands/agent.en.md` (libra-backend existing `cf`)。root23+site1最大精确I，max10prod/4landings/一处公开行为变化。未编辑I文件保留preSHA/mode；catalog.rs、pending.rs、pending_payload.rs、stable_promoted.rs、live_capture.rs、adapter.rs、authorized_read.rs、traces.rs均read-only。无glob/默示写权，额外owner/第二公开面先修I/G+review或拆卡，不越M。
+**Implementation write set:** I-core = `docs/development/plan/plan-20261013-coverage-schema.md`; `docs/development/plan/plan-status.md`; `docs/development/tracing/coverage-v2.md`; `docs/development/tracing/agent.md`; `COMPATIBILITY.md`；本卡精确新增路径 = `src/internal/ai/capture/live_checkpoint.rs`; `src/internal/ai/agent_import.rs`; `src/command/agent/import.rs`; `src/internal/ai/capture/snapshot.rs`; `src/internal/ai/capture/recovery.rs`; `src/internal/ai/observed_agents/mod.rs`; `src/internal/ai/coverage_gate.rs`; `src/internal/ai/capture/checkpoint.rs`; `src/internal/ai/observed_agents/coverage.rs`; `src/internal/ai/observed_agents/reasoning.rs`; `src/internal/ai/observed_agents/opencode_reasoning.rs`; `docs/development/commands/agent.md`; `docs/commands/agent.md`; `docs/commands/zh-CN/agent.md`; `README.md`; `README.zh-CN.md`; `tests/agent_reasoning_contract_test.rs`; `tests/INDEX.md`; `tests/compat/agent_architecture_guard.rs`; `apps/tanstack-app/content/docs/commands/agent.en.md` (libra-backend existing `cf`)。root24+site1最大精确I，max11prod/4landings/一处公开行为变化。未编辑I文件保留preSHA/mode；catalog.rs、pending.rs、pending_payload.rs、stable_promoted.rs、live_capture.rs、adapter.rs、authorized_read.rs、traces.rs均read-only。无glob/默示写权，额外owner/第二公开面先修I/G+review或拆卡，不越M。
 
 **Release write set:** N/A；C/D 继承 COV2-REL-01。
 
-**Files likely touched:** `src/internal/ai/capture/live_checkpoint.rs`; `src/internal/ai/agent_import.rs`; `src/internal/ai/capture/snapshot.rs`; `src/internal/ai/capture/recovery.rs`; `src/internal/ai/observed_agents/mod.rs`; `src/internal/ai/coverage_gate.rs`; `src/internal/ai/capture/checkpoint.rs`; `src/internal/ai/observed_agents/coverage.rs`; `src/internal/ai/observed_agents/reasoning.rs`; `src/internal/ai/observed_agents/opencode_reasoning.rs`; `docs/development/plan/plan-20261013-coverage-schema.md`; `docs/development/plan/plan-status.md`; `docs/development/tracing/coverage-v2.md`; `docs/development/tracing/agent.md`; `COMPATIBILITY.md`; `docs/development/commands/agent.md`; `docs/commands/agent.md`; `docs/commands/zh-CN/agent.md`; `README.md`; `README.zh-CN.md`; `tests/agent_reasoning_contract_test.rs`; `tests/INDEX.md`; `tests/compat/agent_architecture_guard.rs`; `apps/tanstack-app/content/docs/commands/agent.en.md` (libra-backend existing `cf`)。最大I中未编辑路径记录unchanged，不虚称touched。
+**Files likely touched:** `src/internal/ai/capture/live_checkpoint.rs`; `src/internal/ai/agent_import.rs`; `src/command/agent/import.rs`; `src/internal/ai/capture/snapshot.rs`; `src/internal/ai/capture/recovery.rs`; `src/internal/ai/observed_agents/mod.rs`; `src/internal/ai/coverage_gate.rs`; `src/internal/ai/capture/checkpoint.rs`; `src/internal/ai/observed_agents/coverage.rs`; `src/internal/ai/observed_agents/reasoning.rs`; `src/internal/ai/observed_agents/opencode_reasoning.rs`; `docs/development/plan/plan-20261013-coverage-schema.md`; `docs/development/plan/plan-status.md`; `docs/development/tracing/coverage-v2.md`; `docs/development/tracing/agent.md`; `COMPATIBILITY.md`; `docs/development/commands/agent.md`; `docs/commands/agent.md`; `docs/commands/zh-CN/agent.md`; `README.md`; `README.zh-CN.md`; `tests/agent_reasoning_contract_test.rs`; `tests/INDEX.md`; `tests/compat/agent_architecture_guard.rs`; `apps/tanstack-app/content/docs/commands/agent.en.md` (libra-backend existing `cf`)。最大I中未编辑路径记录unchanged，不虚称touched。
 
 **Docs and compatibility impact:** `docs/development/tracing/coverage-v2.md`; `docs/development/tracing/agent.md`; `COMPATIBILITY.md`; `docs/development/commands/agent.md`; `docs/commands/agent.md`; `docs/commands/zh-CN/agent.md`; `README.md`; `README.zh-CN.md`; `apps/tanstack-app/content/docs/commands/agent.en.md` (libra-backend existing `cf`)；tests/INDEX只在既有target描述/selector索引确有变化时同步，无新target。文案条件为首次包含coverage-v2稳定版；旧V1/empty同动作回执先原路只读结算，下一NEWaction才一次V2重采；rejected-source+V2history停采，doctor提示新建Session，旧数据可读。SourceA/native不获证明不归档，不声称installed49有未发布能力。直接现有 /Volumes/Sea/libra-backend cf单写者，actualnative/freshremote d582clean；保留无关改动/新upstream，不建branch/PR/worktree；同卡sync/fixtures/docsunit/typecheck/build/soleClaudePASS、signedDCOcfpush/部署HTTP。此前六个wholefrontendbaselineFAIL不称全绿。
 
@@ -1213,7 +1216,7 @@ COV2-REL-01 冻结不含 OG-27 源码的最终 COV2 树；首次完成 bumped �
 
 **Performance budget:** 继承 GC-COV2-05；identity map 的 v1+v2 总量仍限 4096 条/1 MiB，任何新增解析在分配前有界；变更 hot path 时以具名门证明无无界扫描。
 
-**Estimated scope:** M（落点/生产文件计数：8/8, 6/8, 4, 10; M）。
+**Estimated scope:** M（落点/生产文件计数：8/8, 6/8, 4, 11; M）。
 
 **Version increment:** N/A；此卡不发版。
 
@@ -1221,17 +1224,17 @@ COV2-REL-01 冻结不含 OG-27 源码的最终 COV2 树；首次完成 bumped �
 
 **C/D coverage from:** COV2-REL-01；发布点的 exact-source C/D 绿后才能 `done/complete`。
 
-**Granularity:** `type=implementation; axis=live/import v2 生产接线与字节对齐; recovery=forward-only; complete=yes; self-contained=yes; AC=8/8; VER=6/8; landing=4; prod-files=10; scope=M; deps=DEP-COV2-029-BASE,COV2-10；DEP-COV2-SITE; writeset=串行于前驱; release=family child; split-from=COV2-06; exception=N/A`
+**Granularity:** `type=implementation; axis=live/import v2 生产接线与字节对齐; recovery=forward-only; complete=yes; self-contained=yes; AC=8/8; VER=6/8; landing=4; prod-files=11; scope=M; deps=DEP-COV2-029-BASE,COV2-10；DEP-COV2-SITE; writeset=串行于前驱; release=family child; split-from=COV2-06; exception=N/A`
 
 
 
 **R4 prospective implementation contract（原8AC/6VER不增计，必需安全/兼容/文档义务）：**
 
-This consolidated R4 is the current proposal; earlier proposals are historical only. Actual R1/R2/R3 planning FAILs stay preserved. R3 confirmed all prior core repairs, feasibility of authoritative covered-v2 sets and rejection history query, no missing owner, M10/fourlandings/noDDL. R4 fixes its remaining same-action upgrade replay and availability contradiction. No implementation or normative card edits yet.
+R4 was adopted at signed+DCO main04acabf; the R6 amendment below now governs the import helper boundary and root24/prod11 counts. Earlier proposals remain historical only. Actual R1/R2/R3 planning FAILs stay preserved. R3 confirmed all prior core repairs, feasibility of authoritative covered-v2 sets and rejection history query, no missing owner, M10/fourlandings/noDDL. R4 fixes its remaining same-action upgrade replay and availability contradiction. Existing R4 source/gate/live implementation is in progress; R6 new-owner edits start only after this local two-plan adoption and actual PLANNING PASS.
 
 COV10 prerequisite is ACTUALLY delivered main/remote31a219969d8506555012ee2d63bcad82270d8e37, archive2048 equals finalQA, soleClaudeCODEPASS481ec64...0P0/P1+1P2/7P3deferred, freshT1full10163passed2slow1leaky23skip/0failure/retry, final104reader/fmtstrictPASS. COVsource19/26/formal0, parent59formal61sourceof71. R4planningPASS cannot credit20, actualnativeSourceA or release.
 
-1. Exact bounded scope. Original8AC/6literalVER/26cards/DAG/familychild/forward-only unchanged. I23root+1site inSETUP: originalfive production + coverage_gate/checkpoint/coverage/reasoning/opencode_reasoning = maximum10production, fourlandings(capture,observed,import,gate), onepublicbehavioractivation, no newpublicAPI planned. UnusedIpaths staySHA/mode. catalog,pending,pending_payload,stable_promoted,live_capture,adapter,authorized_read,traces READ-ONLY; no newseriallanes/registry/targets/sharedtestinfra/SQL/deps/installer. Extraowner or secondpublicsurface requires prospectiveamendment/split beforeediting; <=12prod/fourlandings mandatory.
+1. Exact bounded scope. Original8AC/6literalVER/26cards/DAG/familychild/forward-only unchanged. I24root+1site inSETUP: originalfive production + coverage_gate/checkpoint/coverage/reasoning/opencode_reasoning + command/agent/import.rs = maximum11production, fourlandings(capture,observed,import,gate), onepublicbehavioractivation, no newpublicAPI planned. UnusedIpaths staySHA/mode. catalog,pending,pending_payload,stable_promoted,live_capture,adapter,authorized_read,traces READ-ONLY; no newseriallanes/registry/targets/sharedtestinfra/SQL/deps/installer. Extraowner or secondpublicsurface requires prospectiveamendment/split beforeediting; <=12prod/fourlandings mandatory.
 
 2. Actual route. OpenCode has an exporter but no live normalizer. Existing admitted export runner uses exportchannel; live-only pendingartifact sealer is ineligible. AC6 means ACTUAL pendingRECEIPT dirty-release/re-export/redelivery/covered-terminal, not a fabricated pendingartifact. No newordinarypendingwire/kind/seal/exporteligibility. Existing nativeouterv2 artifacts/SourceDTO/source-proof/sidecar/tamper/dispatch remain unchanged. Doctor withnoartifact stillManualRequired/zeroACKwrites. VER4 drives actualsharedafter-snapshot function calledbyrun_export_stage, realtempDB+ExportJobLeaseStore; no FakeExportLease, artifactseal, model, Session or exporterprocess. Recovery production likelyunchanged, tests-only countedhonestly.
 
@@ -1243,7 +1246,7 @@ COV10 prerequisite is ACTUALLY delivered main/remote31a219969d8506555012ee2d63bc
 
 6. Same-action pre-upgrade boundary (R3P1 fix). BeforeselectingV2/reservingclaims, one boundedread underexistingdeadline/scope/markerfence determines whether THISaction's deterministiccheckpoint is alreadydurable withV1-ONLYrevisions (or the already-supportedlegacyemptyrevisionterminalcase). Ifso, use unchangedautomaticV1/no-write None-expectation settlement, byte-identical legacycanonical semantics, ZERO newclaim/checkpoint/reservation. Do not firstreserveV2 then collidewithC1. Currentfreshsourceadditionalturns mustnot be stuffedintooldimmutableC1; settleonlytheexistingaction underitsoriginalcheckedrevision/source/scope and leavefuturedata to nextnewaction underexistingdirtygeneration rules. Superseded/invalidsource/rows givefailcloseddoctorhint. Unknown/busy/unsupportedversion isNOTv1-only. Next NEWaction/newcheckpointID recapturesV2ONCE; repeatsidempotent. VER2/4 coversV1C1commit→receiptinterrupted→upgrade→sameactionACKonce/nonewclaims/checkpoints→nextnewactiononeV2capture→repeatnonew. Docs stateboundary.
 
-7. Rejected-source availability tradeoff (R3P2 fix). Except rule6 oldauthenticatedread-onlysettlement, REJECTEDclassification + ANYV2claimhistory inthisvalidatedsession FAILS THE WHOLEattempt, includingunrelatednewordinarykeys: noreserve/checkpoint/ACK, pending/Dirty, doctor/startnewsessionhint. No-blanket-denial appliesONLY to NON-REJECTEDsources or sessionswithoutV2history. This can permanentlystall retainedoverlimit/unsupportedsource untiloperatorstartsANEWsession orafuturesupportedbuild; keepolddatareadable, no truncation/demotion orAC5availabilitypromise. Oneprefix-indexrangeexistenceread perattempt, boundedbysessionclaimcount/deadline, NOTO(1), no allrowvector/N+1; DBunknown/busynevermeansnohistory. FreshV1-onlysession usesexactlegacybytes/permit/errors; validnonrejectedordinaryNEWkeys stillV1. Prior SAME-keyV2 cannot silentlydemote throughanotherfallback. ExistingVER2/4 pinsv2commit→classifierreject→zeroV1/newcheckpoint/ACK plusfreshV1paritycontrol. Disclose stall andremedy inmechanism/compat/commands/site/READMEwhereaffected.
+7. Rejected-source availability tradeoff (R3P2 fix). Except rule6 oldauthenticatedread-onlysettlement, REJECTEDclassification + ANYV2claimhistory inthisvalidatedsession FAILS THE WHOLEattempt, includingunrelatednewordinarykeys: noreserve/checkpoint/ACK, pending/Dirty, doctor/startnewsessionhint. No-blanket-denial appliesONLY to NON-REJECTEDsources or sessionswithoutV2history. This can permanentlystall retainedoverlimit/unsupportedsource untiloperatorstartsANEWsession orafuturesupportedbuild; keepolddatareadable, no truncation/demotion orAC5availabilitypromise. Oneprefix-indexrangeexistenceread forlive/partial; rejected actualimport uses atmosttwo (preflight+firstbatchtransactionalrecheck) underR6, boundedbysessionclaimcount/deadline, NOTO(1), no allrowvector/N+1; DBunknown/busynevermeansnohistory. FreshV1-onlysession usesexactlegacybytes/permit/errors; validnonrejectedordinaryNEWkeys stillV1. Prior SAME-keyV2 cannot silentlydemote throughanotherfallback. ExistingVER2/4 pinsv2commit→classifierreject→zeroV1/newcheckpoint/ACK plusfreshV1paritycontrol. Disclose stall andremedy inmechanism/compat/commands/site/READMEwhereaffected.
 
 8. Authoritative covered-v2 replay. GateSkipCovered retainsactualcommitted(schema,key,digest,completeness,revision,checkpointID) inPRIVATE runtimeoutcome/companion, no newpublicoutcomefield. FiltertoTHISactioncheckpoint. ONLYwhenfilteredsetincludesatleastoneV2, invokeNEWprivateversionedcovered-replayentry withALLV1+V2tuplesofthatcheckpoint asONEexactset. Existingread-only traces::verify_checkpoint_claim_set_with_conn checkscomplete immutable revision membership/currentrowbindings. Superseded/foreign/partial/missingexpectedfences failclosed/Dirty withdoctorhint. Gate-read snapshot isnotaTOCTOUwaiver: preserveexisting scopefence, conditionalmarkerCAS andcatalogCASacknowledgment. Catalogitselfdoesnotcheckversions; ifactualcodeprovesversion-awarecatalogACKrequired, stop/prospectivelyamendIbeforeediting. EmptyorV1-onlyFILTEREDsets useunchangedNonepath; preserveMissing/emptyterminal/v1settlement. Nonebranch MUSTstillrejectanyACTUALV2durablerevision; originalCOV03pinnednegative staysIDENTICAL. No booleanrelaxation/untrustedmetadataauthority. VER4 actualv2commit→receiptinterruption→redeliveryACKonce/noduplicate +empty/v1-only/foreign/supersededfencesnegative controls. RealDBlease, nosyntheticnativeauthority.
 
@@ -1258,6 +1261,186 @@ COV10 prerequisite is ACTUALLY delivered main/remote31a219969d8506555012ee2d63bc
 **R4 PASS四项P3实施说明（未虚称代码已实现）：** rule6完全不调用V1 reservation gate；freshsource新增keys且其已有V2history的反例也须zeroV1reservation/oneACK/noloop。terminal沿用 settle_preapplied_covered_terminal_replay /export CoveredNoop terminal settlement，nonterminal沿用 settle_preapplied_without_checkpoint /nonterminal CoveredNoop，保留source/scope/native/marker/CAS校验；freshuncoveredwork保守保持runnerDirty等待对应新动作，不能把未捕获数据标已处理。v1/empty检查为checkpointrow+非V1revisionprobe两次indexedpointreads。emptyrevision动作也可来自升级后，不专称oldV1。实际exit绑定及freshwork处理在VER2/4、CODEreview/full证明，不能擅改read-onlyowner。
 
 **规划失败/采纳事实：** R1actualFAILraw88b864313e682f1f2ff22e85034aee373d1359b03973bc4bd9919584427b8413（ordinaryV2artifact无真实exportproducer/第二轴），按推荐A删新wire、AC6绑定existingexportpendingreceipt；R2FAILrawaa86c8b7b7bae3916cb93fef677e9b0cc4f9be669690fa68936e587325a7265e（权威expectedset/rejectionhistory/一次重采）；R3FAILraw360475c7208de39509a1854a28b336f821e88736707b6aa60bcabb867358c344（同动作V1checkpoint碰撞、wholeattemptstall文案矛盾）；当前R4actualPASSraw09d94eda943aa9644c051e78134b9a548e7cc73dea21e5ab8e8db8e821456840、root实读接受，前述是契约修复、不是代码已修。原8AC/6literalcommands/26cards/DAG/R不变。只改本2plans规范并核prehash，scope104reader/fmtstrict及signedmainpush实际完成前不开实现、不记source20。无独立R、tag、release或installer。
+
+**R6 scope amendment adopted / ER-02 refresh (2026-10-15):** actual signed+DCO main/remote `04acabfd9ee87472ac7b5d8909b0eb58c70b33fb` contains the R4 scope adoption, not implementation acceptance. Actual soleClaudeR5 PLANNING FAIL raw `55c9382a1ba678df8da9d2c9f9764de8ad73807b697145f539109d7df38e5a45` found active-final-turn completeness and fresh-session preflight mistakes. Actual R6 PLANNING PASS raw `7823707998f40d8d2df95380742ee04a6913e6811b5ac79431c08d406d750ad7` closes both, root read/adjudicated. New exact owner `src/command/agent/import.rs` is required by actual helper serde boundary; rootI24+site1, max11 production/fourlandings, original8AC/6VER/26cards/oneaxis/R unchanged. No Issue/new human decision; standing authorization applies. Existing R4 source/gate/live isolated focused evidence and parent compile0 are provisional, not CODE/full/source20 credit. Final six literal VER, related focused, fmt/strict, soleClaudeCODE PASS, fresh T1 full, exactsource signedmain/remote and samecardcfreview/push/deployment remain unrun/pending as applicable. Counts remain source19/26=73.08%, formal0; parent59formal61sourceof71. This local adoption precedes any command/import or new codec owner edits; signed delivery occurs with the final implementation, not an invented extra scope release.
+
+**R6 reviewed import transport contract (supersedes conflicting R4/R5 wording):**
+
+# COV2-11 R6 prospective import transport amendment
+
+Status: actual sole-Claude PLANNING PASS and root-adopted prospective implementation contract; not implementation acceptance. No implementation, test PASS, native Source A, COV source20, release, or acceptance credit. `agent_import.rs` remains unchanged at SHA256 `4ea2d9414592b0b0306e6a0d7c7ad15f6ee48d4550fbecb8bce646ad7269e1b4` against adopted actual main `04acabfd9ee87472ac7b5d8909b0eb58c70b33fb`.
+
+## Scope and reason
+
+Add exactly `src/command/agent/import.rs` to COV2-11 I as the eleventh production file. Four landings remain capture / observed / import / gate; command/import is part of the existing import landing. Keep original 8 AC, six literal VER selectors, DAG, forward-only recovery, one public behavior activation, no public API, no new target/serial lane/shared test infrastructure/SQL/dependency. All other R4 read-only owners remain read-only. New codec belongs only to the already-authorized `observed_agents/coverage.rs`; its visible-text restore uses the existing closed classifier in `reasoning.rs`, without modifying generic ProviderVisibleText serde or creating any raw/native/opaque constructor.
+
+The actual import helper prepares at command/import.rs:2019 and serializes its response at :2054. The parent deserializes at :2858, reconstructs ImportRequest at :2958, then calls import orchestration at :3240. Snapshot typed turns cannot use `PreparedImportProjection.turns`: ProviderVisibleText Serialize and Deserialize deliberately reject at reasoning.rs:2031/2044. A private redacted DTO must cross this existing process boundary.
+
+## Concrete wire and ownership design
+
+1. Keep `PreparedImportProjection.turns`, ordinary content digest, ordinary chronology, and current native transport fields in their legacy shapes. Do not put typed Reasoning in that Vec. Add one optional private field, with `serde(default, skip_serializing_if = "Option::is_none")`:
+
+   `pub(crate) coverage_runtime: Option<RedactedImportCoverageRuntimeDto>`
+
+   DTO fields are private and exact; no Debug/Clone/native/candidate/source capability. DTO derives only the strictly needed Serialize/Deserialize. PreparedImportProjection/response Debug must either be removed where unused or manually report runtime presence/count only, never require DTO Debug. Existing literal constructors in command tests add `coverage_runtime: None`.
+
+2. DTO envelope has a closed protocol version, `classifier_rejected`, `source_partial`, and optional full redacted turn projections. Its turn shape is exactly the existing `safe_turn_projection_for_schema` allowlist: coverage schema, provider, logical key, ordinal, completeness, and the closed ordinary/Reasoning record variants. Unknown fields, duplicate fields, unknown versions/providers/source kinds, floats, malformed optional values, and unrecognized records are errors. No provider state/proof/metadata/opaque bytes/source coordinates/raw JSON passthrough are represented.
+
+3. The sole actual helper encoder consumes the content-free flags and already-redacted owned turns taken from `CaptureSnapshot::take_coverage_runtime()` BEFORE snapshot consumption. It calls only `safe_turn_projection_for_schema(select_coverage_schema(turn), ...)`; it never serde-serializes NormalizedTurn/SemanticRecord/ProviderVisibleText for the runtime DTO and never uses legacy projection for a typed turn. The existing ordinary/native disposition match is still authoritative. Unsupported state/candidate imports remain refused under 049; a DTO does not grant an ordinary-partial permit or a new consumer.
+
+4. Every successful actual OpenCode helper response MUST contain the runtime envelope, including legacy/no-typed and classifier-rejected fallback responses. Missing/null/unsupported/malformed envelopes fail content-free before identity migration, index barrier, claim reservation, or cursor/covered/noop completion. They never select the ordinary route. Non-OpenCode legacy responses keep None and their old wire bytes. Rejected classification may carry only a marker and old ordinary turns, never a typed payload. `classifier_rejected && turns.is_some()` is invalid. Nonrejected typed payload requires at least one actual Reasoning record and exact selector-derived per-turn versions. Marker comes from the actual snapshot, never public transcript metadata or an embedding request.
+
+5. Parent decoder is a closed *data* reader, not a source authority constructor. Validate envelope/bounds and exact one-to-one logical key/ordinal membership against the ordinary projection before rebuilding turns. Ordinary records in each runtime turn must match the corresponding legacy ordinary record sequence with Reasoning removed; source-derived typed completeness is allowed to repair the known legacy reasoning incompleteness but cannot clear `source_partial` or a rejected/unsupported source disposition. Retain the ordinary turn chronology rather than trusting new wire timestamps (the safe projection contains no timestamps). Restore visible text only through the existing classifier with the exact admitted OpenCode/provider-visible/reasoning tags; then typed-redact the entire restored set again. Newly detected secrets, changed redacted keys, or inconsistency must fail; do not silently change source digest or tuple association. This data reader does not construct native/candidate values or a capture-consumer permit.
+
+## Native projection binding: retain complete authentication
+
+Current `PreparationImportTransportBinding::context` at command/import.rs:631-677 computes `projection_digest` from `serde_json::to_vec(FULL PreparedImportProjection)` under the existing projection/v1 domain. ImportTransportContext digest at reasoning.rs:598 includes that digest. `seal_import_transport` and `verify_import_transport` at reasoning.rs:1367/1460 authenticate it with the one-use key, then separately validate the fixed native issuer/coordinates.
+
+Keep that algorithm, domains, key lifetime, and native issuer validation unchanged. Never strip, normalize, take, or mutate the optional runtime field before native verification. None+skip_none retains byte-identical legacy non-OpenCode/native projection hashes. An actual OpenCode content-free runtime envelope, if accompanying a native batch, is included in the full projection hash on both child and parent; this changes only the exact authenticated projection, not native authority semantics. Native plus any typed runtime turn payload is rejected by both child and parent; no native-v2 mixing or fake empty native identity. Native plus a content-free marker retains all prior native validation and identity decisions. Do not reinterpret native import transport as an ordinary runtime sealer.
+
+Parent order remains: verify storage commitment; extract transient snapshot SHA; authenticate complete native transport against unchanged received projection; restore/validate runtime DTO; verify actual workspace/source bindings; derive scoped source and snapshot HMAC and bind snapshot projection; run history preflight; only then migrate old ownership, construct request/validate prepared ownership, and proceed. The native projection MAC check MUST occur before snapshot SHA-to-HMAC mutation, as today. DTO decoding is additional bounded data validation, never an alternative to source/native/scope verification.
+
+For ordinary responses, the trust boundary remains the registered current Libra helper with held descriptor and parent-owned anonymous pipe, matching the existing ordinary preparation boundary; the DTO itself is explicitly not an authenticated native/source capability. Mandatory envelope presence, closed decoding, exact legacy turn association, version re-derivation, and history gates prevent missing/unsupported runtime data from becoming a fallback or silent prior-v2 demotion. Do not claim that an unkeyed DTO checksum creates transport/source authority.
+
+## Minimal private API changes
+
+All are crate/private; `ImportRequest`, public `import_prepared`, public `import_prepared_with_coverage_versions`, public snapshot APIs, and snapshot's existing three-tuple remain unchanged.
+
+Coverage-owned codec proposal:
+
+```rust
+pub(crate) fn encode_redacted_import_runtime(
+    agent_kind: &str,
+    turns: Option<&[NormalizedTurn]>,
+    classifier_rejected: bool,
+    source_partial: bool,
+    deadline: Instant,
+) -> Result<RedactedImportCoverageRuntimeDto, ReasoningFieldError>;
+
+pub(crate) fn decode_redacted_import_runtime(
+    dto: RedactedImportCoverageRuntimeDto,
+    expected_agent_kind: &str,
+    ordinary_turns: &[NormalizedTurn],
+    session_state: &str,
+    deadline: Instant,
+) -> Result<(Option<Vec<NormalizedTurn>>, bool, bool), ReasoningFieldError>;
+```
+
+`PreparedCandidateOutcome.request` changes only its private successful payload:
+
+```rust
+Result<(ImportRequest, Option<NativeProvenReasoning>, Option<CaptureCoverageRuntime>)>
+```
+
+The parent takes/decodes the DTO before `import_request_from_projection` consumes the projection. Construct CaptureCoverageRuntime only from this closed decoder result; carry it as the triple's third owner, outside ImportRequest/serde/public metadata. Native payload and typed runtime payload cannot both be present.
+
+Keep existing private `import_prepared_with_subagent_discovery` signature as a compatibility wrapper passing None. Add one private command route:
+
+```rust
+pub(crate) async fn import_prepared_with_subagent_discovery_and_runtime(
+    conn: &DatabaseConnection,
+    storage_root: &Path,
+    request: ImportRequest,
+    deadline: CaptureCommitDeadline,
+    subagent_discovery: SubagentDiscovery,
+    native_reasoning: Option<NativeProvenReasoning>,
+    coverage_runtime: Option<CaptureCoverageRuntime>,
+) -> Result<DetailedImportSummary>;
+```
+
+It reuses the existing writer state machine, fresh per-attempt UUID checkpoints, exact sorted version sidecars, source-digest v2 domain, bounded 64-tuple cursor reads, native identity reader, marker/generation/owner/fence/ref CAS and deadline checks. It validates size/depth/redaction/source/scope/session/storage-root/same-SQLite identity before lease/object writes. Only typed Reasoning selects v2. Plain new keys stay v1, and existing v1 artifacts/claims/digests remain immutable. Existing explicit ordinary API keeps its controlled ordinary-v2 exception.
+
+## Rejected-source history order and race closure
+
+R6 prospectively replaces R4's one-query promise only for actual rejected imports:
+
+- Before legacy ownership migration and before command/import.rs:3194 acquires the object-index barrier, perform ONE bounded scoped prefix-index existence read for any v2 history in the validated session. This follows actual source/native/storage/scope validation and scoped HMAC binding. Rejected+v2 history returns doctor/start-new-session guidance before any migration/index lease/new claim/checkpoint/cursor/ACK. DB unknown/busy/error is not absence.
+- The runtime claim reservation gate performs a SECOND bounded prefix-index existence recheck in its existing serialized write transaction, before any claim writes, to close concurrent v2 insertion after preflight. A nonserialized data companion or preflight token is never an immutable authority over DB history.
+- Maximum two reads on this rejected-import path, not one per key/batch; live complete uses one transactional check and live partial one preflight. No all-row vector, history scan materialization, or N+1. Both checks use the original absolute deadline and exact scope/session binding.
+- Nonrejected ordinary same-key-v2 cannot be silently demoted by any fallback. Existing gate native-other-schema barrier stays closed. Fresh v1-only rejected fallback keeps its old bytes, disposition, permit and errors. Candidates/state-bearing unsupported import remains refused.
+
+The preflight must use the new history-only ensure_runtime_import_source_history_until with the exact validated scope/session/deadline; never the existing-session-writable guard. It is read-only validation, not a capability mint. The transactional runtime reservation entry remains the gate agent's already-proposed versioned+reasoning+deadline private API; public COV2-05 APIs do not change.
+
+## Bounds, deadlines, and hygiene
+
+Keep source16MiB, command raw batch64MiB, control4KiB, total helper response128MiB, import deadline120s and existing cap semantics unchanged. No expanded frame cap to fit the new DTO. Encode response and runtime DTO through bounded writers so an over-cap second transcript allocation is stopped while growing, rather than only checking an already-unbounded Vec. Decoder enforces at most4096 turns, existing65,536-node source structural budget, depth64, bounded record collections/strings and cumulative serialized/semantic byte charge before clone/restore; use the existing shared redaction expansion/working-set limits rather than a new truncation rule. Exact codec charge details must preserve the current16MiB positive boundary and existing expanding-placeholder controls; oversize is content-free error, never a partial DTO or truncated success. The v1+v2 private identity maps retain the existing combined4096/1MiB bound, which is distinct from source/frame budgets.
+
+Check deadline before/after helper prep, DTO encode/decode, typed redaction, HMAC reads, both history checks and reservation. The actual parent kill deadline remains authoritative across descriptor read/helper/response drain. Do not claim an intra-serde hard deadline; bounded stages cooperate and parent rejects expired results before mutation. DTO/coordinate/payload temporary owners are dropped/wiped on failure where existing private ownership supports it; no Debug/raw diagnostic, env fallback, new credential file, native issuer, or candidate serialization. Existing ProviderVisibleText String drop limitation remains disclosed.
+
+## Focused evidence within original VER/module gates
+
+No new target/serial infrastructure. Extend existing module tests and original VER2 (must still run exactly1/1): direct real-tempDB private runtime import, independent literal redacted v2 canonical+SHA shared with live, unchanged ordinary-v1 gold/source digest, one-time v1-to-v2 recapture then idempotence, exact mixed version cursor, native-other-domain refusal, classifier rejection after v2 history with unrelated new ordinary key (zero v1/new checkpoint/cursor), fresh-v1 fallback parity. Add codec/helper tests for mandatory OpenCode envelope, missing/null/unknown/duplicate/version/provider/record errors, re-redaction, source association, and content-free failures. Add deterministic transactional history race negative so preflight success cannot waive later v2 history. Assert native MAC covers full optional extension (tamper/removal fails), None native frames retain old projection bytes, and native+typed payload cannot reach writer; do not add a synthetic native proof as SourceA evidence. Existing native transport negatives remain in place.
+
+Run focused only after source/gate interfaces and revised scope are adopted and parent authorizes implementation. Parent alone runs original six literal VER, aggregate focused/fmt/strict, sole Claude code review, fresh T1 full, documentation/site delivery and signed main acceptance. No unrun result is PASS.
+
+## Parent clarification before review
+
+R4 implementation of source/gate/live is already authorized and is being developed in isolated copies; no R5 command/codec/import changes have begun. Sole scope extension is command/agent/import.rs, increasing root I23 to I24, production10 to11, landings still4 and publicactivationaxis unchanged. R5 planning does not re-credit source20 or invalidate approved independent R4 work. Source implementation improved ProviderVisibleText drop/replacement wiping and PreparedReasoningSource Zeroizing owner within existing I; implementation review will verify it, so historic non-wiping limit is not asserted for final11. No universal memory-erasure guarantee. New codec temporary redacted output still needs its own bounded/drop handling. Source/gate test results are provisional isolated focused evidence, not finalacceptance. After actual planning PASS parent adopts two-plan amendment before any new R5 owner edit, then implementation, original6exactVER/focused/fmtstrict, soleClaudeCODEPASS and actualfreshT1full are mandatory; finalsignedmain delivery bundles11source. No extra intermediate scopepush/full required by this amendment; prior04a scopepush remains historical.
+
+## R6 required corrections after actual R5 FAIL
+
+This R6 supersedes conflicting R5 text. Actual R5 soleClaude PLANNING FAIL raw55c9382a1ba678df8da9d2c9f9764de8ad73807b697145f539109d7df38e5a45 found exactly P1/P2 below; no other remaining core blocker, counts/owners/axis/nativebinding/serde shape feasible. Preserve failure honestly; no conditionalPASS credited.
+
+1. P1 active final turn: helper applies its existing !facts.terminal last-turn Incomplete rule to BOTH legacy and runtime turn sets BEFORE DTO encoding. Decoder receives trusted projection session_state; exact completeness agreement is required except incomplete->complete repair ONLY on a turn containing Reasoning, source_partial false, and NOT lastturn while session_state != stopped. A source_partial=true companion cannot clear its marker or promote completeness. Any other mismatch is rejected. Add active-session negative within VER2/module, proving no complete v2 final claim for an in-progress session. Runtime-only completeness does not override import lifecycle evidence.
+
+2. P2 fresh-session preflight: do NOT use ensure_runtime_source_admitted_until before an agent_session row exists. New PRIVATE gate ensure_runtime_import_source_history_until(conn,scope,session_id,deadline,source_rejected) checks scope/fence/deadline and ONLY rejected+V2 claim history. Missing agent_session/absent claim history means no history; busy/error/unknown means failclosed. It does NOT acquire or require session identity/lease, and cannot authorize native/capture capability. Existing source/native/storage/workspace/HMAC verification precedes it. Later identity writer and first reservation batch still enforce tombstone/session/writer scope and transactional history recheck. Up to2 prefixqueries for rejected actualimport as alreadyproposed, no per-key scan. Later import batches rely on existing per-key no-demotion, not a transaction spanning all batches. Gate helper is within existing R4 I; new commandowner stilluntouched until R6PASS/adoption.
+
+3. Explicit P3 implementation obligations: Some(turns) with no Reasoning encodes payloadNone; nonOpenCode DTO rejects; typed wire structs deny duplicatefields/unknownkeys and CanonValue duplicateobjects/floats/i64overflow; exactordinarymembership/recordparity and bounded second redaction rejects newlymatchedsecrets or changedkeys. Recompute source_digest_for_coverage_versions before any import identity lease. Native fullprojection MAC before DTO mutation, no native+typed or fallbackmissingframe. ClosedASTcaller encoder only prepare_import_projection_with_reasoning; decoder only command prepare_candidate_bounded; visibleclassifier productioncaller set existingopencodeclassifier plusdecoder; partition_reasoning_for_import solecaller movedto newprivatewriter. Pin existing16MiB positive fits unchanged128MiB outputcap. Refresh sourceanchors and all root24/prod11/fourlandings counts in two-plan adoption. ProviderVisibleText wiping improvement is implementation-specific, not universalwipe.
+
+No new AC/VER/card/target/serial/global teststate/publicAPI, no newowner beyond command/import, noDDL/configdependency, no model/Session/exporterCI. Existing R4 source/gate/live work continues. New R6 owner edits wait actualsoleClaudePASS thenlocaltwoplanadoption. Final6exactVER+focused/fmtstrict+soleCODEPASS+freshT1full+sitevalidationreview/directcfpush/deploy then signedmain/remote/sourcearchive bindstillrequired.
+
+
+
+
+### COV2-11 本机 A/B 验收闭合，最终源码交付门待闭合（2026-10-16）
+
+原8AC/6VER实际满足，currentd182上游变更完整保留；真正live/export和历史import的私有typed伴随路径已激活。源分类先于普通预处理/脱敏，只有支持的visible Reasoning turn选择v2，普通turn仍v1且literal bytes/digest不变；native三字段、Source A和归档未获证明。候选保持partial，不以synthetic fixture证明native。实际pending receipt的post-CAS中断、terminal/nonterminal、exact mixedset/currentrevision/completeness和重复交付均受验。
+
+| 门 | exit | 实际计数（重复 selector 不累计为 unique） | raw SHA256 |
+|---|---:|---|---|
+| prepare-test-binaries | 0 | static/build | `14f4300b4b6b8e38256e82ffd1049659df14dc6a53bec8ad6db55e00b668b4e4` |
+| docs-readers | 0 | 60passed/0failed/0ignored; 32passed/0failed/0ignored; 1passed/0failed/0ignored; 12passed/0failed/0ignored | `b3d8637602cbbb2ae7c2cc38b78d2216a6db4ee947af00bfcfa9e3fa1b30d60a` |
+| upstream-db-module | 0 | 86passed/0failed/0ignored | `00e685890b69d095789920b6bfb57fb6a9574998dea15a7d857890ac505d5d14` |
+| upstream-storage-module | 0 | 1passed/0failed/0ignored; 65passed/0failed/0ignored | `6c8a82272a2209539e9feb4398f94f3f51d198cbbd433093e531e7b4d1f537cc` |
+| upstream-history-module | 0 | 85passed/0failed/3ignored | `a29c9b46ebf367b4f1d420836de9abc4607d97c9d0b68e376b97a84f71892e26` |
+| upstream-subagent-content-module | 0 | 59passed/0failed/0ignored | `7fa4c356c683672af9809b1d9e48cbca12b572ab0bdf131b140b6db3374b99b5` |
+| upstream-workspace-lease | 0 | 34passed/0failed/0ignored | `f0f29981f175cd863eeffa461e50746be5aa8c84a355f224d7a71ff2e553aff8` |
+| upstream-config-future | 0 | 54passed/0failed/0ignored | `17c1b6d1676c82a35651853b75345ada908aba68a5882ba966fbe09dd6ea8d8a` |
+| VER1 | 0 | 1passed/0failed/0ignored | `d0a647d09efc48d8c1a4a28b8022102b6052b07b75949e1bfaf106180828a091` |
+| VER2 | 0 | 1passed/0failed/0ignored | `e3512c5135232a17bc536fe6feeec0a32aa792b5234252923484f67cfb02184c` |
+| VER3 | 0 | 1passed/0failed/0ignored | `669ade064532558f76149ba0fa517b7b4af2db593376e1a21aa7484adf26e4f6` |
+| VER4 | 0 | 1passed/0failed/0ignored | `7d2edf25fca05d4e63b341370c84479e4066fbc4f3836d75a16c45dc11536b45` |
+| VER5 | 0 | 1passed/0failed/0ignored | `0bf65228b6530018bf9c18cfb72642fdc67258e459d70ce214d9a26b3c150902` |
+| VER6 | 0 | 1passed/0failed/0ignored | `a1eca44d81f292742d16331bbdfacdf6152b51d37c82443938ad833f293e09ca` |
+| parser-module | 0 | 38passed/0failed/0ignored | `222714f41bf84e17e644d3004ad2a0f0e4a891aef691a4e64a7e7c82b1e83e07` |
+| reasoning-module | 0 | 22passed/0failed/1ignored | `3d3953dee6d1ad0a4197c51522f10030df94cad5faa043ad2da5557638192b06` |
+| coverage-module | 0 | 31passed/0failed/0ignored | `cb1400755dc730b91f56b34801479c6a3654d42c1ed025d07b9b909e6819a95b` |
+| snapshot-module | 0 | 37passed/0failed/0ignored | `962edc47a782828fac5532453b8ef6b102a897655d80c36e6b5ec802cb6dda8a` |
+| gate-module | 0 | 59passed/0failed/0ignored | `ce2f9b5961e84102c87e074d96c4665c44dc48d2ca2629ac7e6f86a0322287c1` |
+| checkpoint-module | 0 | 37passed/0failed/0ignored | `da7929afdbcd6464d390c9359a88becce79b75cdcd8c155950ffd99941a65d2f` |
+| recovery-module | 0 | 8passed/0failed/0ignored | `4003fe7fa9511b1b6aa6f393c5b4023b1e142bff645ae6a4de2fc1a432189897` |
+| live-module | 0 | 19passed/0failed/0ignored | `615d7df71d04f6f366d77e5d7c9bef62ab47bab0409f3cb38a14bf081e54d4e9` |
+| import-module | 0 | 46passed/0failed/0ignored | `2da86c10223833769f37c1734e7f20fb42d01c51e3f331805d7591f9388e188e` |
+| command-import-module | 0 | 37passed/0failed/0ignored | `323af6b4b22d5e2ce96e12ee479d3d97a7532d1956f230eebfe263736165b1f3` |
+| upstream-trust-module | 0 | 10passed/0failed/0ignored | `85363797c8751ef64b58e5491c9613dd332436d7a1f27ea0245c38bbed0d7fa5` |
+| upstream-export-module | 0 | 35passed/0failed/0ignored | `2e1e6d1b0881c482363df0170a768269e22ddf0b615b614811e1a47c5c59ca35` |
+| upstream-settings-module | 0 | 33passed/0failed/0ignored | `ec5c887e6b8ec9b61bea40f56bfec1d9f58358476cbe700a602c06b8ef38c707` |
+| upstream-sandbox-module | 0 | 43passed/0failed/0ignored | `bca5bd0e9cf8fd05ff7afdf2f27c1271dc70433f2521caaeb36bcf6ec3e4ac4f` |
+| contract-target | 0 | 10passed/0failed/0ignored | `ce97ccef7f7cc7d1e6139541791639a8cc8cdab9b25563ede2b1db5beb3acab9` |
+| upstream-checkpoint-command | 0 | 15passed/0failed/0ignored | `a99931fe71bdfc8394912e923c9d2736f2915e2c59938dfcf0c3de27de532001` |
+| upstream-rpc-command | 0 | 11passed/0failed/0ignored | `9f06a045d05105981312bc80fdc6546068fecb7a98a156255d268a083a785aa4` |
+| upstream-install-contract | 0 | 12passed/0failed/0ignored | `3fe2b8b0bd27b76eb944916b7915cd784b05e7743f20834921c9ce05953a3171` |
+| upstream-serial-contract | 0 | 26passed/0failed/0ignored | `9cf31baa80871d5a03bb3dfb45d1472ab7c7df8a74b9d25c52864876349edd7d` |
+| fmt | 0 | static/build | `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855` |
+| strict | 0 | static/build | `51dbf3da697f6fb123badbb31bd27e785926dec64c7c72932826271baeca0a76` |
+
+唯一Claude CODE R1真实FAIL/rawc258f6b6636ece19a7b5c63da260fbbc0d94886f21f593e16814d6cd78d2d3f9及全部失败保留；P1不确定typedfragment修为已有consumer的content-free rejection，保留legacy普通bytes/authority/旧错误，无v2history走原v1，有任意v2history拒绝整个attempt；decode额外匹配仅capture复用首次bounded RedactedBytes/report，preview保守partial不变，不声称修复旧escaped-secret/coordinate debt。P2移除额外complete-only门，已提交incomplete v2仍必须绑定真实exactset/revision/currentrow/checkpoint，结算不升级completeness。新测试保留原scrubber的duplicateIDs/missingcontent Unproven及原legacy Incomplete行为，不为过关扩大准入；早期新fixture错误预期与真实产品回归分开记录。原None replay函数/旧拒绝v2测试未改。 R2虽实际PASS（raw979d5446e39775cce37ce9eb15d4c544c6b231145a8c925542aa4a04b00cd5a5），其P2仍作同I内窄前滚：readyconsumer在FIRST bounded rawredaction后整批核原session/message/part IDs/type，先于任何typed树写入；结构失败/失配仅拒typed并返回FIRST bytes/report，preview/native/caps/deadline不改。URI/env-password真实修前失败、修后source/live/import回归均保留；parseable ordinal错位fixture只证明raw-pass错位，不声称已观察完整runtime falsecomplete。最终唯一Claude CODE R3 actualexit0/literalPASS raw `6d14592b62932520adf3f8326ba50fa1384b6d18705bee1ce71d7d93b6fd890d`，root实读接受（0P0/0P1/0P2，新增1P3）。新增P3为raw规则可能改变最后一个visible reasoning之后的非reasoning消息结构，当前身份检查不覆盖这些消息；legacy v1读取同一raw-redacted bytes，未观察完整runtime falsecomplete，归既有generic raw-redactor结构债延后。R2两个P3（decoded-only秘密/换行导致history stall的文档说明、early/late scan metric差异）及R1三个P3（真实stage continuation独立行为测试、下游batch预算确认、multi-batch/tool DTO专例）仍保留，未称修复。`DEFER-COV11-IMPORT-TERMINAL-01`及COV10已partial coordinate遗留不放行核心或native门。
+
+相关QA9的既有Mac输出cap单测曾module34/35失败，exact重跑也失败；原断言/预算/生产均未改。相同2048输入后续unmodified module35/35实际通过，QA10明确复用原19PASS+module复核并新跑余9门，不称29门全部新跑。所有FAIL、诊断only与实际复核日志保留，失败原因未证明，不称已修复。
+
+新T1双env全量实际 2026-10-15T17:35:48.378948+00:00 → 2026-10-15T17:56:21.761483+00:00，exit0：`     Summary [1134.295s] 10212 tests run: 10212 passed (2 slow), 23 skipped`；事件 {"FAIL": 0, "LEAK-FAIL": 0, "LEAK": 0, "RETRY": 0, "FLAKY": 0, "SLOW": 2, "TIMEOUT": 0, "ABORT": 0, "EXECFAIL": 0}，LEAK/skip/retry按实际记录，不新增zeroLEAK门。raw `395e3b88d0bfb003f6f6d75a20ef6a0086920f105bc2f35bba1833e77344d117`；2048候选文件前后SHA/blobOID/size/mode/kind同一，manifest `b6201d842c57c9ef2f9a8d2b99d146608090c65ef56f11c2a40b8cd0e8e6c2a9`；helper full前后same=True、after `7ab654deaa3f81538c53aeb6135186a91523c24d36a902bb02dd76944a9500c8`，仅本地私有对象helper验证，不是binary/native attestation。8threads与原groups/profile/retry2不改；不加OpenCode Session/exporter/model CI。macOS功能标准，Linux用户后验；不把上游早前33a5 CI当本卡CI或Windows实测。
+
+当前同卡网站页已单ClaudePASS/raw9c7349e75867a92eeafc8ca381ec0f4b2e1158ed82681b7de411341e3c890e64、sync/fixtures/docsunit/typecheck/build实际通过，仍须最终freshsync、signed cf Push及Cloudflare/HTTP核对；未发生的commit/deploy不预填。full后仅本两事实计划修改，21个owned非事实后像继续绑定CODE/full，最终105reader/fmtstrict/root裁决及main signed+DCO Push/remote/archive2048门待实际闭合。全部闭合后才COVsource由19/26到20/26=76.92%；formal0/26继承familyC/D，父formal59/71=83.10%/source61/71=85.92%不增。下一卡COV2-12原macOS Session入口；本卡不bump/release，不替换official49、不修改demo或user04/05/stashes。
 
 ### Task COV2-12：macOS 本地 Session 入口与既有 fixture 修复
 
@@ -2803,3 +2986,50 @@ authorized_read只提供pub(crate)的异步task-local scope，且override仅对�
 - `COMPATIBILITY.md` SHA256 `29587b3c22f0aaf5f53c835e80c19456891b589c8eaad34e85c298dce1f2961e`。
 
 **最终交付门。** full后只更新本两个事实计划；须新103reader/fmt/strict、root核2048差异仅2计划、六非事实路径与CODEPASS/full后像一致，再仅stage本卡8I路径，signed+DCO main commit/Push与fresh remote同一。未做步骤不预写PASS，root提交SHA未知不预填；实际收据/后继ER02绑定。仅交付闭合才COVsource18/26=69.23%，此前17；Lifecycle in-progress/locally-accepted，formal0/26继承COV2-REL-01 actualC/D。父formal59/71/source61/71不变；保留用户04/05dirty、untracked正式49/lock及官方安装，不处理demo；不bump/tag/release本卡。下张COV2-10。
+
+## COV2-11 上游重基与实际接线状态（2026-10-15）
+
+当前实际 main 已原生 fast-forward 到 `33a5a8b8954a072a091362124e38b738f923d5b2`，包含 `315c7c6` OpenCode Linux export/native launcher 修复、`fee5cfd` 按仓库目录过滤 Session 和 `33a5a8b` sandbox test lock-order 修复。2048 个源文件已逐 SHA/mode 核对：18 个上游变更完整保留；本地23个dirty路径中5个文档/INDEX采用无冲突diff3，其余逐字恢复；用户04/05、原7stash及未跟踪正式49 binary/lock均保持。实际 stash apply exit128（重叠文档冲突）保留原始失败；使用预先备份和已验证三方结果恢复、整树核对后才删除本任务stash，不将该命令记为PASS。
+
+R6三个import/command/codec owner已按冻结manifest整合，原6literal VER与8AC仍待父级最终验收，source仍19/26=73.08%、formal0/26，父formal59/71/source61/71不变。当前私有snapshot以原始授权字节长度记录durable redaction_bytes_scanned，详细RedactionReport保留所有bounded passes的合计；这修复既有catalog complete-source长度契约，不改catalog/DDL/public projection形状。NativeProven无typedfragment保持原capture-consumer readiness，不因运行时伴随数据误降级。
+
+`DEFER-COV11-IMPORT-TERMINAL-01`：既有严格OpenCode ordinary preparer对info.status的接受范围与历史import的terminal facts不一致，暂不扩展终止契约。VER2使用真实可准入、无status的idle源码，历史import保留active和最后一turn Incomplete；不能把TurnIdle当Session ended。live与import的canonical bytes/digest不包含completeness，独立literal gold仍必须相同；该延期不免除原AC1–8/VER1–6。来源/native/归档不获放行。
+
+最终验收须绑定当前33a5及全部接线：新6exact/相关模块、readers、fmt/strict、唯一Claude CODE PASS/root后新T1双env full；网站镜像必须基于三方合并后的命令文档重新同步、验证、单审、cf签推及部署核对。此前旧网站页PASS及COV10 full不能替代本次最终字节验收。macOS本机功能，Linux用户后验；无OpenCode Session/exporter/model CI，无本卡bump/release。未知结果/SHA不预填。
+
+
+
+### COV2-11 CODE R1 实际 FAIL 与核心前滚（2026-10-16）
+
+唯一 Claude Code R1 实际 exit0、Verdict FAIL：0P0/1P1/1P2/4P3，raw `c258f6b6636ece19a7b5c63da260fbbc0d94886f21f593e16814d6cd78d2d3f9`；root 未接受为 PASS，新 T1 full 尚未运行。P1 是原 scrubber 已授权 Ordinary/NativeProven consumer 的不确定 typed fragment 被错误升级为 source partial，连带拒绝既有 v1 导入、普通 turn 和 terminal noop。修复限定为保留既有 consumer、丢弃 typed 数据并标 classifier rejected；有 v2 history 时整个 attempt 仍拒绝，Candidate/Unproven/partial permit 不升级。decoded extra-match 的 capture fallback 只保留首次 bounded raw-redacted bytes/report；公开 preview 保留原 partial OR。P2 是已提交且 exact revision/current set 绑定的 incomplete v2 回执不能只读结算；删除额外 complete-only 条件，完整性仍必须匹配已提交状态，不升级 turn。两项均属原 AC/VER 核心前滚，不延期或改验收标准。
+
+修复前父级真实回归各匹配1例、各 exit101/0passed/1failed：P1 实际 Complete→Partial（raw `48d313119f4d7876e2f8bc836a0d72cde99178ed9c221cb80db7845db2d20156`）；P2 实际 durable incomplete checkpoint 后 redelivery 报 ReplayPayloadMismatch（raw `9f4e7586bdded4c90726b2dcbb77ae71c489524c2570bbb92a7864f8bc29aac4`）。不是编译失败，也不是 PASS。P2 窄修复已按冻结 SHA 整合，另两隔离 owner 正在补来源与真实临时数据库导入回归；最终相关 QA、唯一 Claude CODE 重审、新双 env full、同卡 cf 部署及 signed main 交付均待实际完成。四个外围 P3（实际 stage continuation 专测、legacy v1 terminal 专测、runtime cap 下游预算确认、多 batch/tool DTO 专测）依用户策略延后，不免除核心回归。
+
+最终 QA 输入排除用户04/05的未提交改动，使用实际33a5上游两文件，根工作区原字节保持；旧 QA5 含用户改动的结果不作为发布 archive/full 同一性证据。QA6 的29步相关门实际通过，但属于本次前滚之前的输入，不能转移给新修复。当前原8AC/6VER仍未勾选；COV source19/26=73.08%、formal0/26、父 formal59/71/source61/71不变。上游33a5对应 Check and Build run38755158034实际8项成功，不冒称未提交本卡的 CI 或 Linux 功能验收成功。
+
+
+**COV2-11 R1 核心修复实际回归（2026-10-16，最终聚合门仍待运行）：** 三隔离owner均已冻结并按baseline/final SHA整合；新source5/5、import2/2（完整import45/45、原VER2 exact1/1）、checkpoint7个focused及旧None control实际通过。父级新真实P1 live回归、原VER4和bound incomplete replay回归分别exact1/1，raw依次 `bdd4aa298803e0f4d1303fbb4802fb39d8c4d71f314fc8131878e1a9ad806768`、`f763346107f94e2dd308f85a457137a72f8bb40323fa1985f33d4541549ac3be`、`9bb64271de85b4ac922b2fe921023b6f066c21c4af2f38627943145365c9b00b`。新增同动作terminal V1真实post-CAS中断→只读结算→重复AlreadyApplied，覆盖R1对应P3的具体缺口；不再将该项称未测试。另三P3仍延期。首次parent post-fix两轮新测试误把旧normalizer的incomplete turn当fresh covered/empty，实际失败已保留；修正新fixture预期并改用真实中断回执，未修改旧production/gold/guard。
+
+两个foreign坐标import新矩阵保留七行：原33a5 frozen源码逐字比对证明，旧scrubber剥sessionID/messageID后report scan353与原source375不等，既有catalog equality拒绝；public v1 writer与private runtime均保持同样拒绝及零写，不将Ordinary disposition当作catalog已准入。该继承问题延期，未改catalog或放宽准入；其余五行必须实际写v1旧literal并幂等。七行带v2history且仅unrelated新keys全部被preflight拒绝，五个旧可准入行另受实际txn history recheck。当前6VER/29步相关聚合、soleClaude CODE R2/newfull、cf/main交付仍未完成，8AC/6VER保持未勾选、source19/26不增。
+
+
+**COV2-11 CODE R2 实际 PASS与窄前滚（2026-10-16）：** 唯一Claude Code实际exit0、literalPASS、0P0/0P1、1P2/2新P3，raw `979d5446e39775cce37ce9eb15d4c544c6b231145a8c925542aa4a04b00cd5a5`；确认R1两个核心问题修复正确、新真实回归有效、QA8的29步及原6exact/105readers/fmtstrict有效，无上游18项交互回归。其P2重新触及COV10脱敏后结构/坐标完整性：某些credential-uri/env-password规则会吞JSON语法，导致原consumer全会话持续拒绝，或错ordinal归属的可能性。root采用推荐窄修复，仅readyconsumer时将FIRST bounded raw-redacted后的结构/原绑定坐标失配归为typed classifier rejection，保留FIRST bytes/report和既有v1行为；先整批核原session/message/part IDs/type再写typed树，不改泛用redactor/preview/native授权/caps/deadline，history整体拒绝保持。该项在原I24、原8AC/6VER内自主前滚，不增加评审者或要求用户再决策。
+
+R2是实际PASS而非失败；本次新修复仍须自己的真实修前失败、修后回归、related/fmtstrict、唯一Claude CODE新字节PASS及新full，不能转移QA8/R2结果。R2两新P3（decode-only敏感项阻断原因文案、early/late scan metric继承差异）和三旧P3按用户策略延期；泛用rawredactor词边界问题亦未声称修复。此前R1 legacyV1terminal P3已由真实中断回执覆盖。当前full仍UNRUN、8AC/6VER未勾选、source19/26/formal0不增，无SourceA/native/发布信用。
+
+
+**COV2-11 结构边界窄修复阶段实证（2026-10-16）：** source owner冻结2文件（仅coverage生产变化，snapshot生产前缀与R2逐字同一，reasoning未改），新3/3实际通过；真实172B fixture证明FIRST rawredactor后JSON仍可parse而reasoning ordinal0的id由a变b，仅是raw-pass错位，原第二坐标丢失，未观察/声称完整runtime falsecomplete。当前capture先整批核root session和每个原message/part id/type，再写任何typed text；FIRST parse/绑定失败复用原首次bytes/report并标content-free rejection，deadline/caps/prebinding错误仍Err。无新module helper，既有inner AST visit覆盖局部closure，无新issuer或写集。父级真实live新exact修前1/1失败（Partial，raw `26fee524897f628ac5d41a4231d5f69becff6e1161913abfb079cb25579bcc32`），修后exact1/1通过（raw `2f6b140a208c7e25f456ae7d18795d4119d29cbb363a9c87e38355b2914d009b`）：无history沿旧v1 poisoned-empty-turn canonical `[]`/incomplete，真实terminal post-CAS中断回执只读结算；已有v2history+仅unrelated新keys拒绝零新写。泛用redactor结构/词边界遗留并未修复或称完整内容保真。
+
+隔离import的首次post命令实际0且真实descriptor helper已重建，但copy2保留旧mtime使in-process libtest可能缓存；此轮明确limited，不作为最终source验收。owner正在只touch其owned文件（bytes不变）强制fresh crate rebuild后重跑。父级QA准备对全部2048候选write_bytes刷新mtime；QA8与parent结构修前/后均有实际Compiling libra，libtest总数4423→4424→4427与新测试增量相符。最终聚合仍须含fresh import patch的原6/related29/fmtstrict、新字节唯一Claude R3及新full。source19/26、formal0、原8AC/6VER未勾选，网站CF/main签推与部署尚未发生。
+
+
+**COV2-11 import结构回归fresh收口（2026-10-16）：** 隔离owner已强制fresh重编译并实际终态全部exit0：真实helper build、新exact1/1、原VER2 exact1/1、import46/46、fmt；实际libtest总数4427（首轮cached4424），编译日志明确Compiling libra，testbinary mtime晚于owned source touch且SHA已记录。最终test-only agent_import SHA `888246ac1c65915345dd0fbe65de2da2a7516ed497f5ea22c8533bfe78a86533`，production prefix与原七行矩阵/既有断言逐字同一。修前真实descriptor SourceAuthorization失败保留；首轮post仍limited，不转成最终PASS。父级已按baseline/final SHA整合；新的原6/related29、soleClaude R3和full仍待实际完成，未计source20。
+
+
+### COV2-11 最终评审前刷新实际 d182 上游（2026-10-16）
+
+新的实际main/remote基线为 `d1824ab61cfb36f91a2858044f8c41c37fd830df`，继33a5后3个真实提交：3b38188关闭bundled SQLite memory statistics、dd0f24e区分lock等待与open预算、d182修锁竞争fixtures。11个上游路径完整保留；checkpoint/coverage_gate仅各自锁holder测试调用有重叠，预先diff3无冲突。Native fetch、exact25 tracked stash、ff、全2048 SHA/mode恢复核对、仅drop本任务stash最终脚本exit0；stash apply实际128保留未称PASS，按预先备份/两个三方结果恢复后才drop。user04/05、原7stash、空stage和untracked/installed official49保持；无PR/worktree或demo修改。旧None函数与旧v2拒绝negative继续与实际d182基线逐字同一。
+
+此前33a5输入QA9既有Mac cap用例34/35失败、exact失败，原断言/预算不改，后续同2048 unmodified module35/35实际通过；QA10只复用19项实际PASS和该模块真实复核，再新跑余9项，最终29门actual0且源码2048前后同一。所有失败与limited诊断保留，根因尚未获证明；不把诊断PASS当正式源码验收。其结果现在仅为旧33a5输入历史，不能代替d182最终验收。
+
+当前d182涉及共享DB/config真实源码，最终相关门在原29项外增加6个既有目标/模块（DB、client-storage、history、subagent-content、workspace-lease、scoped-config），共35项；原8AC/6literalVER、I24+site1、max11prod/4landings及family C/D不变。新字节related/fmtstrict、唯一Claude CODE R3/newfull均待实际运行；full仍UNRUN，不复用此前COV10全量或旧QA。card source仍19/26=73.08%、formal0、父59formal/61sourceof71不增。macOS标准、Linux用户后验，未新增Session/exporter/model CI。

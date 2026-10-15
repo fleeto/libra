@@ -39,7 +39,7 @@ use crate::internal::{
         },
         capture_scope::{CaptureCommitDeadline, CaptureScope},
         coverage_gate::{
-            LiveCaptureClaimCommitPlan, LiveClaimCommitPlan,
+            CommittedTurnClaimSnapshot, LiveCaptureClaimCommitPlan, LiveClaimCommitPlan,
             NativeVersionedReasoningClaimCommitPlan, VersionedLiveClaimCommitPlan,
         },
         history::{CheckpointAppendConflict, CheckpointCompanionTransactionFailed},
@@ -2376,6 +2376,42 @@ impl<'a> CheckpointWriteRequest<'a> {
         Ok(self)
     }
 
+    /// Bind the actual live/export transaction companion to its exact
+    /// versioned marker/replay fences. Its claim/catalog writes apply once.
+    pub(crate) fn with_runtime_versioned_claims(
+        mut self,
+        companion: &'a LiveCaptureClaimCommitPlan,
+    ) -> Result<Self, CheckpointStoreError> {
+        let plan =
+            companion
+                .runtime_versioned()
+                .ok_or_else(|| CheckpointStoreError::InvalidRequest {
+                    field: "runtime versioned coverage claim plan".to_owned(),
+                })?;
+        let ordinary = plan.ordinary();
+        if self.txn_extra.is_some()
+            || self.native_versioned_companion.is_some()
+            || self.versioned_coverage.is_some()
+            || self.pending_coverage.is_some()
+            || !self.payload.reasoning.is_ordinary()
+            || self.payload.has_deferred_pending_reasoning()
+            || ordinary.claims.is_empty()
+            || ordinary.session_id != self.session_id
+            || ordinary.checkpoint_id != self.checkpoint_id
+            || ordinary.parent_commit.as_deref() != self.parent_commit
+            || ordinary.capture_scope.is_none()
+            || !matches!(ordinary.source_channel, "live" | "export")
+            || self.scope != CheckpointScope::Committed
+        {
+            return Err(CheckpointStoreError::InvalidRequest {
+                field: "runtime versioned coverage claim plan".to_owned(),
+            });
+        }
+        self.txn_extra = Some(companion);
+        self.versioned_coverage = Some(plan);
+        Ok(self)
+    }
+
     /// Pair a sealed native v2 source, its exact versioned claims and the
     /// transaction companion in one request. The ordinary constructor alone
     /// cannot carry a versioned companion past marker/replay fences.
@@ -3883,6 +3919,119 @@ impl<'a> TracesCheckpointStore<'a> {
             return Err(CheckpointStoreError::ReplayPayloadMismatch);
         }
         Ok(true)
+    }
+
+    /// Detect the read-only same-action upgrade boundary before version
+    /// selection. Unknown versions and database errors are never legacy.
+    /// The checkpoint point-read and revision probe are indexed separately.
+    pub(crate) async fn durable_legacy_replay_exists_for(
+        conn: &DatabaseConnection,
+        capture_scope: &CaptureScope,
+        checkpoint_id: &str,
+        session_id: &str,
+        deadline: Option<CaptureCommitDeadline>,
+    ) -> Result<bool, CheckpointStoreError> {
+        await_checkpoint_precommit_read_until(deadline, async {
+            capture_scope
+                .assert_workspace_fence_live(conn)
+                .await
+                .map_err(|_| CheckpointStoreError::StoreFailure {
+                    stage: CheckpointStoreStage::ScopeFence,
+                })
+        })
+        .await?;
+        if !Self::durable_replay_exists_for(
+            conn,
+            checkpoint_id,
+            session_id,
+            CheckpointScope::Committed,
+            deadline,
+        )
+        .await?
+        {
+            return Ok(false);
+        }
+        let non_v1 = await_checkpoint_precommit_read_until(deadline, async {
+            conn.query_one_raw(Statement::from_sql_and_values(
+                conn.get_database_backend(),
+                "SELECT 1 FROM agent_coverage_revision
+                 WHERE checkpoint_id = ? AND coverage_schema_version <> 1 LIMIT 1",
+                [checkpoint_id.into()],
+            ))
+            .await
+            .map_err(|_| CheckpointStoreError::StoreFailure {
+                stage: CheckpointStoreStage::CatalogTransaction,
+            })
+        })
+        .await?;
+        Ok(non_v1.is_none())
+    }
+
+    /// Accept only gate-owned committed observations. A v2 replay binds all
+    /// this action's observed v1/v2 rows as one exact immutable revision set;
+    /// unrelated checkpoints cannot supply authority for this action.
+    pub(crate) async fn settle_runtime_covered_replay_without_write(
+        conn: &DatabaseConnection,
+        capture_scope: &CaptureScope,
+        checkpoint_id: &str,
+        session_id: &str,
+        deadline: Option<CaptureCommitDeadline>,
+        covered: &[CommittedTurnClaimSnapshot],
+    ) -> Result<CheckpointReplayStatus, CheckpointStoreError> {
+        let action_claims = covered
+            .iter()
+            .filter(|claim| claim.checkpoint_id() == checkpoint_id)
+            .collect::<Vec<_>>();
+        if !action_claims
+            .iter()
+            .any(|claim| claim.version() == CoverageSchemaVersion::V2)
+        {
+            return Self::settle_committed_replay_without_write(
+                conn,
+                capture_scope,
+                checkpoint_id,
+                session_id,
+                deadline,
+            )
+            .await;
+        }
+        await_checkpoint_precommit_read_until(deadline, async {
+            capture_scope
+                .assert_workspace_fence_live(conn)
+                .await
+                .map_err(|_| CheckpointStoreError::StoreFailure {
+                    stage: CheckpointStoreStage::ScopeFence,
+                })?;
+            for claim in &action_claims {
+                claim
+                    .verify_current_with_conn(conn, session_id)
+                    .await
+                    .map_err(|_| CheckpointStoreError::ReplayPayloadMismatch)?;
+            }
+            Ok(())
+        })
+        .await?;
+        let fences = action_claims
+            .iter()
+            .map(|claim| claim.replay_fence())
+            .collect::<Vec<_>>();
+        match Self::replay_status_for_bound(
+            conn,
+            Some(capture_scope),
+            checkpoint_id,
+            session_id,
+            CheckpointScope::Committed,
+            deadline,
+            CheckpointReplayExpectation {
+                claim_set: Some(&fences),
+                native_companion: None,
+            },
+        )
+        .await?
+        {
+            CheckpointReplayStatus::Missing => Err(CheckpointStoreError::ReplayPayloadMismatch),
+            status => Ok(status),
+        }
     }
 
     /// Resolve a durable replay and settle any ordinary marker left by a
@@ -5579,6 +5728,392 @@ mod tests {
                 .is_err(),
                 "only the sealed NativeProven payload may prepare a v2 identity"
             );
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cov11_legacy_same_action_probe_is_read_only_and_action_local() {
+        use crate::internal::ai::{
+            coverage_gate::tests::ReasoningFixture,
+            observed_agents::reasoning::carrier_test_support as fixture_ids,
+        };
+        let fixture = ReasoningFixture::new().await;
+        fixture
+            .seed_legacy_v1_checkpoint_revision("legacy-action")
+            .await;
+        let probe = |checkpoint| {
+            TracesCheckpointStore::durable_legacy_replay_exists_for(
+                &fixture.conn,
+                &fixture.scope,
+                checkpoint,
+                fixture_ids::CAPTURE,
+                None,
+            )
+        };
+        assert!(probe("legacy-action").await.unwrap());
+        assert!(!probe("missing-action").await.unwrap());
+        fixture
+            .conn
+            .execute_unprepared(
+                "INSERT INTO agent_checkpoint (checkpoint_id, session_id, scope, parent_commit,
+             tree_oid, metadata_blob_oid, traces_commit, created_at)
+             SELECT 'empty-action', session_id, scope, parent_commit,
+             tree_oid, metadata_blob_oid, traces_commit, created_at FROM agent_checkpoint
+             WHERE checkpoint_id = 'legacy-action'",
+            )
+            .await
+            .unwrap();
+        assert!(probe("empty-action").await.unwrap());
+        fixture
+            .conn
+            .execute_unprepared(
+                "INSERT INTO agent_coverage_revision SELECT session_id, 'extra-v2-key', 2, 1,
+             'newer-action', coverage_digest, completeness, source_channel, created_at
+             FROM agent_coverage_revision WHERE checkpoint_id = 'legacy-action'",
+            )
+            .await
+            .unwrap();
+        assert!(
+            probe("legacy-action").await.unwrap(),
+            "unrelated v2 history cannot prevent this action's legacy settlement"
+        );
+        assert!(probe("empty-action").await.unwrap());
+        assert_eq!(
+            TracesCheckpointStore::settle_committed_replay_without_write(
+                &fixture.conn,
+                &fixture.scope,
+                "legacy-action",
+                fixture_ids::CAPTURE,
+                None,
+            )
+            .await,
+            Ok(CheckpointReplayStatus::Complete)
+        );
+        assert_eq!(
+            TracesCheckpointStore::settle_committed_replay_without_write(
+                &fixture.conn,
+                &fixture.scope,
+                "empty-action",
+                fixture_ids::CAPTURE,
+                None,
+            )
+            .await,
+            Ok(CheckpointReplayStatus::Complete)
+        );
+        assert_eq!(
+            TracesCheckpointStore::durable_legacy_replay_exists_for(
+                &fixture.conn,
+                &fixture.scope,
+                "legacy-action",
+                "foreign-session",
+                None,
+            )
+            .await,
+            Err(CheckpointStoreError::ReplayPayloadMismatch)
+        );
+        fixture
+            .conn
+            .execute_unprepared(
+                "UPDATE agent_coverage_revision SET coverage_schema_version = 7
+             WHERE checkpoint_id = 'legacy-action'",
+            )
+            .await
+            .unwrap();
+        assert!(
+            !probe("legacy-action").await.unwrap(),
+            "unknown coverage is never v1-only"
+        );
+        let row = fixture
+            .conn
+            .query_one_raw(Statement::from_string(
+                fixture.conn.get_database_backend(),
+                "SELECT COUNT(*) AS n FROM agent_coverage_claim".to_owned(),
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            row.try_get_by::<i64, _>("n").unwrap(),
+            0,
+            "legacy probing and settlement must never enter either reservation gate"
+        );
+        let expired =
+            CaptureCommitDeadline::from_test_pair(Instant::now() - Duration::from_millis(1), 0);
+        assert_eq!(
+            TracesCheckpointStore::durable_legacy_replay_exists_for(
+                &fixture.conn,
+                &fixture.scope,
+                "empty-action",
+                fixture_ids::CAPTURE,
+                Some(expired),
+            )
+            .await,
+            Err(CheckpointStoreError::DeadlineExceeded)
+        );
+        fixture
+            .conn
+            .execute_unprepared("DROP TABLE agent_coverage_revision")
+            .await
+            .unwrap();
+        assert!(
+            probe("empty-action").await.is_err(),
+            "database failure cannot authorize legacy settlement"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cov11_incomplete_covered_replay_binds_exact_committed_state() {
+        use sea_orm::TransactionTrait;
+
+        use crate::internal::ai::{
+            coverage_gate::{
+                CaptureReservationExecution, ReasoningCoverageInput,
+                reserve_runtime_turn_claims_with_reasoning,
+                tests::{ReasoningFixture, cov2_visible_turn},
+            },
+            observed_agents::reasoning::carrier_test_support as fixture_ids,
+        };
+        let fixture = ReasoningFixture::new().await;
+        let checkpoint_id = "incomplete-runtime-checkpoint";
+        let deadline = CaptureCommitDeadline::from_budget(Duration::from_secs(30)).unwrap();
+        let reader = ReasoningIdentityReadContext::new(
+            &fixture.scope,
+            fixture_ids::CAPTURE,
+            &fixture.dir.path().join(crate::utils::util::ROOT_DIR),
+            fixture.dir.path(),
+            deadline.monotonic(),
+        );
+        let turns = [cov2_visible_turn(
+            "incomplete-visible-key",
+            "redacted typed data",
+            Completeness::Incomplete,
+        )];
+        let reserve = || {
+            reserve_runtime_turn_claims_with_reasoning(
+                &fixture.conn,
+                &fixture.scope,
+                fixture_ids::CAPTURE,
+                &turns,
+                "runtime-owner",
+                1,
+                CaptureReservationExecution::export(deadline),
+                ReasoningCoverageInput::ordinary(&reader),
+                false,
+            )
+        };
+        let reserved = reserve().await.unwrap();
+        assert_eq!(reserved.versioned_reserved.len(), 1);
+        assert_eq!(
+            reserved.versioned_reserved[0].coverage_schema_version,
+            CoverageSchemaVersion::V2
+        );
+        let ordinary = LiveClaimCommitPlan {
+            source_channel: "export",
+            session_id: fixture_ids::CAPTURE.to_owned(),
+            checkpoint_id: checkpoint_id.to_owned(),
+            owner: "runtime-owner".to_owned(),
+            parent_commit: None,
+            created_at: 1,
+            now_ms: 1,
+            claims: reserved.ordinary.reserved,
+            import_session: None,
+            import_identity: None,
+            capture_scope: Some(fixture.scope.clone()),
+        };
+        let plan = LiveCaptureClaimCommitPlan::new_runtime_versioned(
+            ordinary,
+            &reserved.versioned_reserved,
+            None,
+        )
+        .unwrap();
+        let txn = fixture.conn.begin().await.unwrap();
+        plan.apply(
+            &txn,
+            &TracesCommitCtx {
+                commit_hash: "a".repeat(40),
+                tree_oid: "b".repeat(40),
+                metadata_blob_oid: "c".repeat(40),
+            },
+        )
+        .await
+        .unwrap();
+        txn.commit().await.unwrap();
+        let covered = reserve().await.unwrap();
+        assert!(covered.ordinary.reserved.is_empty());
+        assert_eq!(covered.ordinary.skipped_covered, 1);
+        let settle = || {
+            TracesCheckpointStore::settle_runtime_covered_replay_without_write(
+                &fixture.conn,
+                &fixture.scope,
+                checkpoint_id,
+                fixture_ids::CAPTURE,
+                Some(deadline),
+                &covered.covered,
+            )
+        };
+        assert_eq!(settle().await, Ok(CheckpointReplayStatus::Complete));
+        assert_eq!(settle().await, Ok(CheckpointReplayStatus::Complete));
+        for sql in [
+            "SELECT COUNT(*) AS n FROM agent_checkpoint",
+            "SELECT COUNT(*) AS n FROM agent_coverage_claim WHERE coverage_schema_version = 2 AND completeness = 'incomplete' AND revision = 1 AND state = 'catalog_committed'",
+            "SELECT COUNT(*) AS n FROM agent_coverage_revision WHERE coverage_schema_version = 2 AND completeness = 'incomplete' AND revision = 1",
+        ] {
+            let row = fixture
+                .conn
+                .query_one_raw(Statement::from_string(
+                    fixture.conn.get_database_backend(),
+                    sql.to_owned(),
+                ))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(row.try_get_by::<i64, _>("n").unwrap(), 1, "{sql}");
+        }
+        // Completeness is an exact committed tuple member, not a condition
+        // for whether this immutable action's receipt may settle.
+        fixture.conn.execute_unprepared(
+            "UPDATE agent_coverage_revision SET completeness = 'complete' WHERE coverage_schema_version = 2",
+        ).await.unwrap();
+        assert_eq!(
+            settle().await,
+            Err(CheckpointStoreError::ReplayPayloadMismatch)
+        );
+        fixture.conn.execute_unprepared(
+            "UPDATE agent_coverage_revision SET completeness = 'incomplete' WHERE coverage_schema_version = 2",
+        ).await.unwrap();
+        assert_eq!(settle().await, Ok(CheckpointReplayStatus::Complete));
+        fixture.conn.execute_unprepared(
+            "UPDATE agent_coverage_claim SET completeness = 'complete' WHERE coverage_schema_version = 2",
+        ).await.unwrap();
+        assert_eq!(
+            settle().await,
+            Err(CheckpointStoreError::ReplayPayloadMismatch)
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cov11_runtime_versioned_companion_applies_claims_and_catalog_once() {
+        use sea_orm::TransactionTrait;
+
+        use crate::internal::ai::{
+            coverage_gate::{
+                CaptureReservationExecution, ReasoningCoverageInput,
+                reserve_runtime_turn_claims_with_reasoning,
+                tests::{ReasoningFixture, cov2_visible_turn},
+            },
+            observed_agents::reasoning::carrier_test_support as fixture_ids,
+        };
+        let fixture = ReasoningFixture::new().await;
+        fixture
+            .conn
+            .execute_unprepared("CREATE TABLE cov11_checkpoint_insert_count (attempt INTEGER)")
+            .await
+            .unwrap();
+        fixture.conn.execute_unprepared("CREATE TRIGGER cov11_count_checkpoint_insert BEFORE INSERT ON agent_checkpoint BEGIN INSERT INTO cov11_checkpoint_insert_count VALUES (1); END").await.unwrap();
+
+        let reader = ReasoningIdentityReadContext::new(
+            &fixture.scope,
+            fixture_ids::CAPTURE,
+            &fixture.dir.path().join(crate::utils::util::ROOT_DIR),
+            fixture.dir.path(),
+            Instant::now() + Duration::from_secs(30),
+        );
+        let turns = [cov2_visible_turn(
+            "visible-key",
+            "redacted typed data",
+            Completeness::Complete,
+        )];
+        let reserved = reserve_runtime_turn_claims_with_reasoning(
+            &fixture.conn,
+            &fixture.scope,
+            fixture_ids::CAPTURE,
+            &turns,
+            "runtime-owner",
+            1,
+            CaptureReservationExecution::live(
+                CaptureCommitDeadline::from_budget(Duration::from_secs(30)).unwrap(),
+            ),
+            ReasoningCoverageInput::ordinary(&reader),
+            false,
+        )
+        .await
+        .unwrap();
+        let ordinary = LiveClaimCommitPlan {
+            source_channel: "live",
+            session_id: fixture_ids::CAPTURE.to_owned(),
+            checkpoint_id: "runtime-checkpoint".to_owned(),
+            owner: "runtime-owner".to_owned(),
+            parent_commit: None,
+            created_at: 1,
+            now_ms: 1,
+            claims: reserved.ordinary.reserved,
+            import_session: None,
+            import_identity: None,
+            capture_scope: Some(fixture.scope.clone()),
+        };
+        let plan = LiveCaptureClaimCommitPlan::new_runtime_versioned(
+            ordinary,
+            &reserved.versioned_reserved,
+            None,
+        )
+        .unwrap();
+        let payload = CheckpointRedactedPayload::from_snapshot(
+            snapshot(),
+            sidecar(b"{}"),
+            sidecar(b"{}\n"),
+            sidecar(b"{}"),
+        )
+        .unwrap();
+        let request = CheckpointWriteRequest::new(
+            "runtime-action",
+            "runtime-checkpoint",
+            fixture_ids::CAPTURE,
+            "claude_code",
+            None,
+            CheckpointScope::Committed,
+            "runtime-generation",
+            None,
+            &payload,
+            None,
+            None,
+        )
+        .unwrap()
+        .with_runtime_versioned_claims(&plan)
+        .unwrap();
+        assert!(request.versioned_coverage.is_some());
+        let extra = request.txn_extra.unwrap();
+        let txn = fixture.conn.begin().await.unwrap();
+        extra
+            .apply(
+                &txn,
+                &TracesCommitCtx {
+                    commit_hash: "a".repeat(40),
+                    tree_oid: "b".repeat(40),
+                    metadata_blob_oid: "c".repeat(40),
+                },
+            )
+            .await
+            .unwrap();
+        txn.commit().await.unwrap();
+        for sql in [
+            "SELECT COUNT(*) AS n FROM cov11_checkpoint_insert_count",
+            "SELECT COUNT(*) AS n FROM agent_checkpoint",
+            "SELECT COUNT(*) AS n FROM agent_coverage_revision WHERE coverage_schema_version = 2",
+            "SELECT COUNT(*) AS n FROM agent_coverage_claim WHERE state = 'catalog_committed' AND coverage_schema_version = 2",
+        ] {
+            let row = fixture
+                .conn
+                .query_one_raw(Statement::from_string(
+                    fixture.conn.get_database_backend(),
+                    sql.to_owned(),
+                ))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(row.try_get_by::<i64, _>("n").unwrap(), 1, "{sql}");
         }
     }
 

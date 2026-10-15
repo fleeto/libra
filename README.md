@@ -26,6 +26,15 @@ Libra fits into existing developer workflows through Git-compatible objects and 
 
 ---
 
+
+Coverage-v2 capture is unreleased. Its first stable version will retain supported
+visible OpenCode reasoning as redacted typed turns while preserving ordinary v1
+bytes. An interrupted old action settles first; a new action can recapture that
+reasoning once. A rejected source in a session with v2 history stops capture;
+inspect `libra agent doctor` and start a new session. Native proof fields still
+require independent source verification. See the [capture reference](docs/commands/agent.md#coverage-v2-capture-unreleased).
+
+
 ## Key Differentiators
 
 | Capability | Traditional VCS (Git) | Libra |

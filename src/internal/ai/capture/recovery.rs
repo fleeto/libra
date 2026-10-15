@@ -603,6 +603,14 @@ async fn prepare_existing_identity(
 mod tests {
     use super::*;
 
+    /// Actual export pending receipt replay through the shared authorized
+    /// snapshot stage and real catalog/lease/checkpoint stores, no Session.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cov2_runtime_claim_replay_version() {
+        crate::internal::ai::capture::live_checkpoint::tests::assert_cov2_runtime_claim_replay_version().await;
+    }
+
     #[cfg(unix)]
     mod versioned_fixture {
         use std::{

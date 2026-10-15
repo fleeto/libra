@@ -1,6 +1,8 @@
 # OpenCode coverage schema-v2 前置实施计划（2026-10-13）
 
-> **当前 COV2-08 已源码交付 / COV2-05 写集修订草案（2026-10-15 07:18:48 UTC）：** actual含签名头+DCO main/remote `c60b2817b0d7c2b889491f85a9777e0855356fe1` 已交付COV08（源提交9417及上游5522均保留），COV source **15/26=57.69%**、formal **0/26**，父formal **59/71=83.10%** / source **61/71=85.92%**。COV05仍pending/空、实现UNRUN；本次只将必要import binding/typed port的精确I修为3生产owner/3落点、M，原7AC/4VER/26分母与DAG不变。修订须实际规划单Claude PASS、root裁决及signed main Push/remote采纳后才生效；此前不授新增源码写权、不计source16，不以此放行SourceA/家族C-D。
+> **COV2-05 当前实施状态（2026-10-15）：** 必要三owner写集修订已由实际signed+DCO main/remote `3e824e27eb28f3fe31475b2c1ae20030a3230dfb` 采纳，唯一Claude规划R2实际PASS/raw `094d32b1da65e51c346083c2251ddee94291bc3b8ee8473278ff1941efa8d448`、103reader/fmt/strict实际0；R1 FAIL保留。首次真实DB验收已FAIL，当前暂停前三owner未合格WIP，待第四helper-owner精确修订单审/采纳后再实现；尚无代码QA/代码评审/full/源码交付资格，不计source16。COV仍source15/26、formal0/26，父formal59/71/source61/71；下一卡COV2-09在本卡source-qualified后执行。
+
+> **历史快照（已由页首当前状态取代）：COV2-08 已源码交付 / COV2-05 写集修订草案（2026-10-15 07:18:48 UTC）：** actual含签名头+DCO main/remote `c60b2817b0d7c2b889491f85a9777e0855356fe1` 已交付COV08（源提交9417及上游5522均保留），COV source **15/26=57.69%**、formal **0/26**，父formal **59/71=83.10%** / source **61/71=85.92%**。COV05仍pending/空、实现UNRUN；本次只将必要import binding/typed port的精确I修为3生产owner/3落点、M，原7AC/4VER/26分母与DAG不变。修订须实际规划单Claude PASS、root裁决及signed main Push/remote采纳后才生效；此前不授新增源码写权、不计source16，不以此放行SourceA/家族C-D。
 
 
 > **COV2-08 上游文档整合（2026-10-15）：** 本卡已实际签名+DCO本地提交 `9417d976cd5ab78137869a2ef174fdf28abc59d7`，九个blob精确匹配受审后像，尚未Push。已实际fetch上游 `5522458235b824b4eb3a7cd7e8d6b8a492717092`；相对58b只有三个计划文档变化，全部Rust/测试/配置/版本及其余2045输入同一。现仅合并双方计划事实并补核最终文档，完整实现full仍绑定R3原输入，不能称新整树跑过full。合并后103reader/fmt/strict、唯一Claude及root裁决/签名merge/Push/remote核对均待实际完成；只有交付完成才source15/26=57.69%，此前14/26，formal0/26、父59formal/61sourceof71不变。Source A与家族C/D不由本次整合放行。
@@ -134,6 +136,8 @@
 
 | 时间 | 触发 | 变更内容 | 原卡 → 新卡 | 受影响引用 |
 |---|---|---|---|---|
+| 2026-10-15 08:46:57 UTC（同一第四owner草案复核，未采纳） | 唯一Claude R3 FAIL 1P2/6P3 | 澄清VER1测试接缝遗漏与VER2外部host缺口；三个lib门须同轮先build/binSHA，cfg(test)定位不进入生产；固定arg优先及VerifySnapshot信任边界 | COV2-05同ID；I4/4、7AC/4VER/26不变 | Current evidence/Security/末尾helper协议/status与历史头部；无新DEP/DAG/REL或写集 |
+| 2026-10-15 08:39:51 UTC（第四owner草案，签名采纳前不生效） | 首次COV2-05真实DB VER1 FAIL，嵌入host按既有规则无checkpoint helper | I精确新增authorized_read.rs；显式direct入口只授权task-local固定checkpoint对象helper，禁止其它helper/native/全局登记；4落点/4生产文件M | COV2-05同ID；原7AC/4VER/26不变，暂停未合格WIP | I/Files/Current evidence/Granularity/粒度表/末尾helper边界、原四VER的Unix可达性与status；DEP/DAG/REL不变 |
 | 2026-10-15 08:05:57 UTC（修订草案，签名采纳前不生效） | COV2-05实际owner核对及Claude规划R1 FAIL（1P1/3P2） | I新增coverage_gate.rs与capture/checkpoint.rs，3落点/3生产文件M；明确仅direct显式ordinary-v2例外、跨请求独立namespace/单请求同裸key跨版本拒绝与同序sidecar；补dcc有限oracle收据 | COV2-05同ID；原7AC/4VER/26卡分母不变，仍pending/空、实现UNRUN | I/Files/Current evidence/Out of scope/Docs/Granularity/粒度与追溯表/status及末尾实施边界；DEP/DAG/REL不变 |
 | 2026-10-15（由本次签名提交采纳生效；实际signed SHA/UTC由交付收据绑定） | G09 OG24 `.3`同轴版本维护 | 原6AC8VER仅AC2/AC6澄清；exact19rootI/1external、attest只读；OG27/OG05 current SRC029/RUN029版本与实测size绑定；COV incoming固定signed6685 `.2` | 无新增Task；本次profile采纳parent source62→61，formal59/71、71/26不变；COV13/26 hold仅为本G09采纳审计快照，dcc实际补核已闭、旧full输入边界/新事实单审与最终裁决仍待 | OG24/27/05、DEP12/13当前与历史适用范围、canonical五stage/实施顺序/DAG/共享slot及逐signed非OG24重基abort账本、COVREL协调/父REL71镜像、FAST04成员正逆序、测试矩阵/追溯/里程碑/风险/三计划状态；原判据和旧证据保留 |
 | 2026-10-14 22:28:49 UTC | USER-TEMP-REL-049实际C/D例行镜像 | 父四卡正式59/71、source62/71；当前临时release门关闭 | 无新增卡；COV26/source13/formal0不变 | incoming DEP-COV2-029-BASE仅同步父状态；COV2-REL-01/DEP13/nativeSourceA不关闭 |
@@ -269,7 +273,7 @@
 | COV2-25 | implementation | 原始 outer-v2 成员密钥完整性 | forward-only | yes | yes | 8/8 | 4/8 | 1/1 | M | COV2-24 | 严格串行 | family child | COV2-22 | N/A |
 | COV2-22 | implementation | 真实 pending artifact 事务与冻结旧读端 | forward-only | yes | yes | 8/8 | 6/8 | 1/2 | M | COV2-25,DEP-COV2-029-BASE | 严格串行 | family child | COV2-04 | N/A |
 | COV2-08 | implementation | pending 同版本恢复 | forward-only | yes | yes | 8/8 | 4/8 | 2/6 | M | COV2-22 | 严格串行 | family child | COV2-04 | N/A |
-| COV2-05 | implementation | 版本化 import cursor/digest/故障 | forward-only | yes | yes | 7/8 | 4/8 | 3/3 | M | DEP-COV2-029-BASE；COV2-08 | 严格串行 | family child | N/A | N/A |
+| COV2-05 | implementation | 版本化 import cursor/digest/故障 | forward-only | yes | yes | 7/8 | 4/8 | 4/4 | M | DEP-COV2-029-BASE；COV2-08 | 严格串行 | family child | N/A | N/A |
 | COV2-09 | implementation | graph/doctor 双版本只读契约 | forward-only | yes | yes | 8/8 | 4/8 | 1/1 | M | COV2-05；DEP-COV2-SITE | 严格串行 | family child | COV2-05 | N/A |
 | COV2-06 | implementation | OpenCode typed 来源分类的未激活交付 | forward-only | yes | yes | 8/8 | 4/8 | 1/3 | M | DEP-COV2-029-BASE；COV2-09；DEP-COV2-OG26 | 严格串行 | family child | N/A | N/A |
 | COV2-10 | implementation | typed 脱敏与零明文 sink | forward-only | yes | yes | 8/8 | 4/8 | 2/4 | M | COV2-06 | 严格串行 | family child | COV2-06 | N/A |
@@ -846,13 +850,13 @@ COV2-REL-01 冻结不含 OG-27 源码的最终 COV2 树；首次完成 bumped �
 
 **Task type:** implementation
 
-**Lifecycle / Acceptance:** pending / 空
+**Lifecycle / Acceptance:** in-progress / 空
 
 **Description:** version-aware import cursor/digest/fault。本卡唯一行为轴、恢复和粒度见下方 Granularity；不得以 synthetic/native 互换验收。
 
 **Out of scope:** 不启动或模拟 OpenCode exporter/Session/模型；不改现有 CLI 导入路径的 v1 默认或提前执行 COV2-11 的 provider/runtime activation。只增加显式版本的 direct normalized-turn 下层入口：普通四种 record 只可经本卡新 direct 入口显式选择 v2；这是对现有 reservation 自动选择约束的受控例外，须在 coverage_gate 实现，并在 coverage-v2.md 同步，不能仅因 codec 接受就假定 claim 层已经可行。以真实本地 DB 证明两版本幂等性。不得公开/弱化 ProviderVisibleText、native issuer 或 SourceA 构造器来满足 integration gate；若仍需 Session，先修订本卡，不把本卡原 VER2 偷换成 Session CI。
 
-**Current evidence:** 实际signed main/remote `c60b2817b0d7c2b889491f85a9777e0855356fe1`：`agent_import.rs:1042/2844/2935/3343/3442/4059` 的 legacy digest、binding/cursor 与导入编排；`coverage_gate.rs:1581/1869` 的固定v1 import bind与无deadline显式版本reservation；`capture/checkpoint.rs:2251/2351/2834/2974/4434` 的legacy typed import request/writer。原I遗漏后两实际owner，不能用generic traces store或SQL fallback绕开。前驱COV2-08已actual source-qualified，家族C/D仍待；本卡无独立Issue链接，按用户已授权内部卡执行。
+**Current evidence:** 实际signed main/remote `3e824e27eb28f3fe31475b2c1ae20030a3230dfb`（其生产源码与前驱COV08 c60b281相同）：`agent_import.rs:1042/2844/2935/3343/3442/4059` 为legacy digest、binding/cursor及编排；`coverage_gate.rs:1581/1869` 为固定v1 bind与无deadline显式reservation；`capture/checkpoint.rs:2251/2351/2834/2974/4434` 为typed port和versioned fence；`authorized_read.rs:373-416`/`history.rs:1411` 为main登记的checkpoint helper边界。前三owner已采纳，首次WIP测试失败且未合格；外部VER2驱动第四owner草案，只有文末单审/签推采纳门通过后才生效。原VER1测试接缝遗漏与外部host能力缺口分开处理；不使用generic traces/SQL fallback。前驱08 source-qualified、家族C/D仍待；无独立Issue链接，按用户已授权内部卡执行。
 
 **Acceptance criteria:**
 
@@ -871,17 +875,17 @@ COV2-REL-01 冻结不含 OG-27 源码的最终 COV2 树；首次完成 bumped �
 - [ ] VER3→AC5: `source .env.test && cargo test --lib internal::ai::agent_import::tests::cov2_stale_marker_keeps_cursor_unfinished -- --exact` (1/1; injected stale-marker fault, zero completed cursor).
 - [ ] VER4→AC6: `source .env.test && cargo test --lib internal::ai::agent_import::tests::cov2_failed_claim_writes_no_import_artifact -- --exact` (1/1; injected claim failure). Do not map the graph test to AC5: it cannot prove either fault condition.
 
-**Full-suite trigger:** family child 不自行发布；按 ER-13 对最终改动重新判定 T-1/T-4/T-6。若命中 shared single-source helper、测试基建或 focused 信号不足，则在本卡 A/B 阶段运行双 env 全量 Nextest；无论是否命中，COV2-REL-01 首次 T-2 均须在最终 bumped 实现树上重跑；后续仅上游纯 patch 顺延按该卡逐路径同一性规则复用。 本次三owner共享claim binding与checkpoint port命中T-1，最终实现必须在双env执行完整Nextest；先实际单Claude静态PASS再跑full，任何后续Rust/测试/行为变化重新验证，不能复用COV08旧full替新实现。
+**Full-suite trigger:** family child 不自行发布；按 ER-13 对最终改动重新判定 T-1/T-4/T-6。若命中 shared single-source helper、测试基建或 focused 信号不足，则在本卡 A/B 阶段运行双 env 全量 Nextest；无论是否命中，COV2-REL-01 首次 T-2 均须在最终 bumped 实现树上重跑；后续仅上游纯 patch 顺延按该卡逐路径同一性规则复用。 本次四owner共享claim binding与checkpoint port命中T-1，最终实现必须在双env执行完整Nextest；先实际单Claude静态PASS再跑full，任何后续Rust/测试/行为变化重新验证，不能复用COV08旧full替新实现。
 
 **Dependencies:** DEP-COV2-029-BASE（父三卡final source重基，shared I–I串行，非native能力）； COV2-08；消费前驱实际最终 A/B、适用 focused/full、fmt/strict、单 Claude PASS 与 signed+DCO main 的 source-qualified 文件 SHA/mode；不以其尚待 C/D 的 `locally-accepted` 冒称 complete。
 
 **Deliverables:** 无独立文件；本卡实现/测试/文档随唯一发布点交付；每卡的计数、源码 SHA、hash/mode、review/门结果写在本计划正文，不建证据文件。
 
-**Implementation write set:** I-core = `docs/development/plan/plan-20261013-coverage-schema.md`; `docs/development/plan/plan-status.md`; `docs/development/tracing/coverage-v2.md`; `docs/development/tracing/agent.md`; `COMPATIBILITY.md`；本卡新增精确路径 = `src/internal/ai/agent_import.rs`; `src/internal/ai/coverage_gate.rs`; `src/internal/ai/capture/checkpoint.rs`; `tests/agent_import_test.rs`; `tests/INDEX.md`。无 glob 默示写权。
+**Implementation write set:** I-core = `docs/development/plan/plan-20261013-coverage-schema.md`; `docs/development/plan/plan-status.md`; `docs/development/tracing/coverage-v2.md`; `docs/development/tracing/agent.md`; `COMPATIBILITY.md`；本卡新增精确路径 = `src/internal/ai/agent_import.rs`; `src/internal/ai/coverage_gate.rs`; `src/internal/ai/capture/checkpoint.rs`; `src/internal/ai/authorized_read.rs`; `tests/agent_import_test.rs`; `tests/INDEX.md`。无 glob 默示写权。
 
 **Release write set:** N/A；C/D 继承 COV2-REL-01。
 
-**Files likely touched:** `docs/development/plan/plan-20261013-coverage-schema.md`; `docs/development/plan/plan-status.md`; `docs/development/tracing/coverage-v2.md`; `docs/development/tracing/agent.md`; `COMPATIBILITY.md`; `src/internal/ai/agent_import.rs`; `src/internal/ai/coverage_gate.rs`; `src/internal/ai/capture/checkpoint.rs`; `tests/agent_import_test.rs`; `tests/INDEX.md`。
+**Files likely touched:** `docs/development/plan/plan-20261013-coverage-schema.md`; `docs/development/plan/plan-status.md`; `docs/development/tracing/coverage-v2.md`; `docs/development/tracing/agent.md`; `COMPATIBILITY.md`; `src/internal/ai/agent_import.rs`; `src/internal/ai/coverage_gate.rs`; `src/internal/ai/capture/checkpoint.rs`; `src/internal/ai/authorized_read.rs`; `tests/agent_import_test.rs`; `tests/INDEX.md`。
 
 **Docs and compatibility impact:** `docs/development/tracing/coverage-v2.md`; `docs/development/tracing/agent.md`; `COMPATIBILITY.md`；逐文件核内容与源码行为对应，`tests/INDEX.md` 只在本卡精确写集确有索引变化时同步。无新增网站命令行为；若实施引入公开差异，先按 ER-06a 修本卡写集再编辑。
 
@@ -889,11 +893,11 @@ COV2-REL-01 冻结不含 OG-27 源码的最终 COV2 树；首次完成 bumped �
 
 **Migration and rollback:** 无 DDL；Repository claim 仅用既有 versioned 键。若实现证明 DDL 必需，停止、加 GC-13 角色隔离迁移卡与旧/新读端门，再修本卡写集和 G-03/G-04。
 
-**Security and privacy:** 继承 GC-COV2-02/03；错误或不可信版本必须 zero-success、不得向 ordinary/typed/log/error 导出候选内容；Session 例只在本机 ignored 执行。
+**Security and privacy:** 调用方显式信任helper路径不等于binary证明/SourceA，窄task-local授权及负例见文末helper边界；继承 GC-COV2-02/03；错误或不可信版本必须 zero-success、不得向 ordinary/typed/log/error 导出候选内容；Session 例只在本机 ignored 执行。
 
 **Performance budget:** 继承 GC-COV2-05；identity map 的 v1+v2 总量仍限 4096 条/1 MiB，任何新增解析在分配前有界；变更 hot path 时以具名门证明无无界扫描。
 
-**Estimated scope:** M（落点/生产文件计数：7/8, 4/8, 3, 3; M）。
+**Estimated scope:** M（落点/生产文件计数：7/8, 4/8, 4, 4; M）。
 
 **Version increment:** N/A；此卡不发版。
 
@@ -901,7 +905,7 @@ COV2-REL-01 冻结不含 OG-27 源码的最终 COV2 树；首次完成 bumped �
 
 **C/D coverage from:** COV2-REL-01；发布点的 exact-source C/D 绿后才能 `done/complete`。
 
-**Granularity:** `type=implementation; axis=版本化 import cursor/digest/故障; recovery=forward-only; complete=yes; self-contained=yes; AC=7/8; VER=4/8; landing=3; prod-files=3; scope=M; deps=DEP-COV2-029-BASE,COV2-08; writeset=串行于前驱; release=family child; split-from=N/A; exception=N/A`
+**Granularity:** `type=implementation; axis=版本化 import cursor/digest/故障; recovery=forward-only; complete=yes; self-contained=yes; AC=7/8; VER=4/8; landing=4; prod-files=4; scope=M; deps=DEP-COV2-029-BASE,COV2-08; writeset=串行于前驱; release=family child; split-from=N/A; exception=N/A`
 
 ### Task COV2-09：graph/doctor 双版本只读契约
 
@@ -2158,7 +2162,7 @@ VER6 现仅消费独立历史源码 `7efcf868d49a5183e7f0851a89abebee91357155`�
 |---|---|---|---|---|
 | DEFER-OG25-COVERAGE-V2 / v1 四 record | COV2-01/13/11 | `observed_agents/coverage.rs`、live/import | coverage-v1/v2、COMPATIBILITY | v1 frozen 3 vectors + RG-04、production typed v2 exact |
 | versioned claim/identity/pending | COV2-02/07/14/03/19/20/21/23/04/24/25/22/08 | `coverage_gate.rs`、metadata/key/checkpoint/pending_payload/pending/recovery | coverage-v2 | 03 marker/ref、19 sealed identity-v2/最终读端篡改与互换拒绝、20 read-only verify、21 同事务 retain、23 同源 checked native borrow/裸 key collision 拒绝、04 有界 authenticated codec、24 versioned inner association + 内存 source-bound seal、25 原始成员 key-owner 完整性、22 真 artifact/冻结旧读端/写故障、08 replay |
-| import/reader | COV2-05/09 | `agent_import.rs`、`coverage_gate.rs`、typed import checkpoint port、graph/doctor | EN/zh/网站 cf | cursor/digest/fault/unknown-version/privacy |
+| import/reader | COV2-05/09 | `agent_import.rs`、`coverage_gate.rs`、typed import checkpoint port、`authorized_read.rs`的显式checkpoint helper scope、graph/doctor | EN/zh/网站 cf | cursor/digest/fault/unknown-version/privacy |
 | OpenCode privacy & pipeline | COV2-06/10/11/12/15/18 | classifier/snapshot/live/import/export | agent/tracing/integration | pure typed + ignored macOS live/import/candidate |
 | 22 inherited cases | COV2-16/17 | read-only tests | 本计划与 coverage-v2 summary | 12/12 + 10/10 non-skip/source-qualified |
 | 交接与稳定发布 | COV2-REL-01 | 版本面/Release | parent DEP-OG-13、status/site | 首次 bumped 实现树 nextest；后续纯上游 patch 顺延按逐路径同一性复用，当前 SHA 的 security CI、四平台、安装、网站仍实际验证 |
@@ -2618,3 +2622,17 @@ warning: the following packages contain code that will be rejected by a future v
 
 
 **COV2-05 有限旧 oracle 的脱敏实测收据（本次供复核，不授实现通过）。** authority `dcc468bd31c88a7e8d8c0d2957d6e80b65908990`（crate0.30.48），实际2026-10-15 01:00:59.085321至01:32:18.881409 UTC、exact sampler 1 passed/0 failed/0 ignored、exit0，raw SHA256 `021eaae37ae7bfd4fa734e904198496be0ad081e89dedd47c6d18805af5a8b78`。9个原pure helpers为source_digest、identity_id、import_identity_id_for_parts、import_lifecycle_event_id、import_provider_commitment、import_source_preimage、update_length_delimited_import_preimage、import_identity_schema_version、contiguous_next_ordinal。产物清单FROZEN-ARTIFACTS37.json的SHA256 `851300718e874ec747af7e176eeadf039be8c176079955bdaea9aa4af8a2b1ad`，准确为36 raw产物+1 sample-receipt=37文件；其中storage-path-bound-old-result.bin依赖采样仓库路径，只作path控制、不作portable gold，余35 raw可移植。样本收据SHA256 `4d3dacb716a5b1ae22b90c5e57cb63aee886bb9759020e2e2c6eb0a8db64ff2d`；固定输入SHA256 `9a13fb6c8af2c8d8fbc93b4e66d6cef7cfabccbdf238b8ee7658ae48ae86f217`。原始完整材料在本机`/private/tmp/libra-cov05-dcc-sampler-prep-r1-1zpwbu6a/`，root复核全部36 raw、旧源2040输入before/after相同及9函数体与当前同字节；仅有限函数/输入结论，非完整writer/事务/依赖等价。committed_source_ordinals、bind_attempt、finalize_noop_identity三个DB helper未采样；重建preimage不是截获内部buffer。R1遗漏正文收据属审查FAIL，保留原raw及FAIL；本次补收据不把当前COV05或SourceA记PASS。
+
+
+**COV2-05 helper 边界修订草案（非实现资格）。** 第一次实际原VER1因测试未接入已有helper定位/接缝，在真实DB写入处FAIL（0/1、exit101），raw `bc81340c3f1fb095fbde64da6394692860646f97cfea8c12db1edd783c21efbe`。仅隔离测试候选加临时cfg(test)诊断，复现原错误为“checkpoint object-I/O helper is unavailable in this host”，不是业务claim成功。对VER1本身，这是单测遗漏现有cfg(test)测试接缝；必须新增第四owner的理由是VER2及外部embedding host不能使用该cfg(test)接缝。现有authorized_read只接受main登记的当前Libra程序；库测试/embedding host不会被误当成Libra。因此R2只证明codec/claim/typed port方案，未证明外部direct入口能到达真实有deadline writer；原R2规划PASS保留其有限范围，首次实现仍UNQUALIFIED，原四VER不得放宽或替换。
+
+最小修订为同卡I精确新增`src/internal/ai/authorized_read.rs`，landing/prod=4/4（M上限4/12），仍单一版本化import轴、同ID/7AC/4VER/26卡，DEP/DAG/REL不变。公开API仍只新增一处：显式direct入口允许额外传入调用方明确选择并信任的绝对Libra binary路径（可选；None只可消费main原登记），不从PATH/env/current_exe猜测试宿主，也不自动登记全局binary。路径准入/平台支持/同一总deadline在lease前校验；无helper时提前可行动失败，不留下写入中的identity。路径选择是embedding调用方的显式执行授权，不能声称已证明binary来源或赋予SourceA。
+
+authorized_read只提供pub(crate)的异步task-local scope，且override仅对既有固定checkpoint-object-I/O helper argument生效；source reader、discovery、preparation、index repair、producer/native验证及其它argument仍只走既有main登记。固定checkpoint-arg的显式覆盖优先于现有TEST_AUTHORIZED_READ_HELPER_PROGRAM；其余argument仍调用既有helper_program()。helper_program、全局OnceLock、其它并发任务不变；scope的成功、错误、取消均恢复。显式入口先拒绝Reasoning/native、完成redaction/版本/shape校验，再在该私有scope内调用既有bounded/process-group/helper协议；无新private argv、CLI旗标、RPC/Session/exporter或proof字段。默认CLI/live/import没有此override能力。四owner分别为import编排/cursor-digest、gate reservation/bind、typed checkpoint port、窄checkpoint-helper选择；不允许generic traces fallback或取消deadline。
+
+实现时原VER2仍为现有agent_import_test target、synthetic normalized turns+真实temp DB；通过显式传入本次实际构建的CARGO_BIN_EXE_libra到生产入口执行真实writer，不能fake helper或seed成功。原VER1/3/4在同轮、同一最终源码树先执行`cargo build --locked --offline --bin libra`，记录成功退出、source manifest、该binary SHA256及测试前后同一性；cargo test --lib本身不会构建bin，不能使用未核对的旧target/debug/libra。这三个lib单测只在#[cfg(test)]内复用既有native_import_test_helper_program()定位Cargo target/debug/libra，传给新入口Some(path)（或既有测试接缝）；该测试定位与生产禁止current_exe推断宿主不矛盾，禁止把定位逻辑搬入生产。原VER1纯旧gold可跨平台；需要实际bounded对象helper的DB部分以及VER2/3/4按现有Unix containment能力限于Unix（本机macOS各exact1/1），非Unix入口在lease前fail closed，Windows必要编译/安全/四平台发布保留，不宣称Windows功能验收，Linux由用户后验。额外scope隔离/只限固定argument/取消与缺helper零写入测试写在该owner或既有I测试文件，不新增测试target/公共factory/guard豁免。History的VerifySnapshot只在cfg(not(test))走helper，由真实VER2覆盖；其响应信任来自调用方显式选中的binary，不能冒称独立校验证明，机制文档须说明写入OID有比对而VerifySnapshot回复仍属于该信任边界。相关tests/fmt/strict、代码单Claude和T1双env full仍必须在最终四owner源码上新执行；临时诊断须移除。
+
+本次两计划修订先在实际已采纳3e824e2的2046未改生产/测试/配置输入上运行103reader/fmt/strict，并取得本次单Claude规划PASS、root裁决及signed main Push/remote才采纳第四owner；root保留前三owner未合格WIP，暂停源码修改，不将其作为本次规划QA输入，也不stage用户04/05或WIP。修订后才继续源码与原四项验收。source15/26/formal0、父59formal/61sourceof71不变，不能计16或SourceA/native/C-D。
+
+
+**helper规划R3审查处置（2026-10-15 08:46:57 UTC）：** 实际R3 FAIL（0P0/0P1/1P2/6P3）保留；P2补明三个lib门的cfg(test)定位、前置同源build/binSHA收据与首败原因归属；六P3同步修复baseline锚点/状态、信任边界、覆盖优先级、VerifySnapshot生产路径及历史头部时态。此R4只修改同两计划，前三ownerWIP仍暂停、不进QA或stage；实际单Claude R4、root及signed Push/remote未发生前第四owner仍未采纳，不预填PASS或source16。

@@ -1,5 +1,15 @@
 # OpenCode coverage schema-v2 前置实施计划（2026-10-13）
 
+> **2026-10-15 G09规范采纳事实（由本次签名提交采纳生效）：** 原OG24 `.2` source交接历史保留，当前`.3` profile仍须原SRC029/RUN029及原6AC8VER；本次仅采用既有任务的规划修订，父formal **59/71=83.10%**不变，source由旧62/71暂扣为 **61/71=85.92%**，71/26分母不变。COV当前source **13/26=50.00%**、formal **0/26**，COV22仍HOLD。指定dcc实际old-writer补核现已完成：实际1/1/0ignored、8 raw artifacts与旧reference同一、6 current literals与actual dcc同一，root独立复核收据SHA `31cd4e23b68633ce4f6efa348488067a9444c721d0e1423476f67b2303206315`；该有限固定fixture事实不等于whole-writer/native/source qualification。当前HOLD未闭原因精准为：旧full对04/05 dirty计划输入的适用边界补核、新soleClaude事实复核及root最终裁决尚待；不能仍把dcc采样写成UNRUN，也不提前增加COV22分子。原错误source14计入、R1/R2失败与R6准备期HOLD原因均保留为有日期历史。
+>
+> **实际验收范围：** 唯一Claude R4规划设计已实际 **PASS（0P0/P1/P2，3项nonblocking P3）**，REPORT SHA `d457f6770188d1fd517e42d597bcc7ac4e8a8218b8b9495210d6c59271eb0fee`、raw SHA `9b3c31fd370244cd82c46c0ac85177d6e179216f847c1b2e0baea1d0c416709b`，只覆盖exact R6三文档设计，不覆盖producer源码/构建/SDKgold/Source A。b644+exact R6独立2044输入已实际完成双env、无native/model opt-in的whole hook12/12、ARCH58/58、docs32/32及5个exact计划读者各1/1（共102 unique，5 exact为重复确认，均0ignored）、fmt和strict all-targets/all-features `-D warnings` exit0；RESULT SHA `b36e9ccce60da0369c8f7e587b867585efae9e1712a36725b51c23e794d94ef6`、strict raw SHA `bec4797042e15f172e1b60f60b88a891facee2792ad52476e77047df928cca8a`，2044前后SHA/bytes/kind/mode全同，冻结manifest SHA `5d191b8a4dcd0a5c17189375abab39546ec3e4052956de8ecad547b75f937bcf`。未跑full、模型/Session或producer；本事实delta本身的唯一Claude、相关reader QA、实际Libra diff与signed main/remote收据仍由root另行真实完成，不预填未知commitSHA/采纳UTC，不把R6 QA称作本新增事实字节的已验收结果。原Source A/三字段UNPROVEN、复杂OpenCode验收不上CI、GC03/GC08、全部任务判据及家族C/D门不变。
+
+> **历史source计数更正（2026-10-15 R6准备期审计快照）：** signed18b旧收据曾将COV22计入source14/26；其GC-COV2-03指定dcc完整old-writer/gold同一性尚待真实补核，root已暂停该卡最终source资格，当前COV source **13/26=50.00%**、formal **0/26**。这是资格审计更正，不撤销旧signedsource事实或变更gold/GC03/AC/VER；COV08可继续focused，补核闭合前不full/sign。父formal **59/71=83.10%**、source **62/71**保持；本G09实际采用当前OG24.3修订时才source→61/71。后续仅真实dcc同一性收据和root裁决后才能事实更新恢复COV22 source，当前不预授。
+
+
+> **2026-10-15 G09：OG24 incoming冻结与阶段写权当前规范。** COV incoming读取已满足的`.2` signed snapshot `6685b82a938919a8e51f46b7c51cc305b40189a2`，不再依赖OG24 live生命周期；DEP13 source-ready和COVREL自身I/R源冻结后，才可按具名sharedgrant→OG24.3signedreturn→RELcloseout写三plan事实，或选择先RELcomplete再grant的互斥route。原26卡/逐卡AC/VER/I/R不改，COV当前source13/26、formal0/26；父formal59/71，本次OG24profile规范采纳生效后source61/71。所有旧日期source计数/旧48拒绝为历史，不授SourceA/native。详见文末本G09的精确DEP/共享路径与返还规则。
+
+
 > **COV2-22 采用候选条件状态（2026-10-15，未预授签推）：** 原 8 AC/6 VER 的本机机制、21 unique exact、相关质量门与双 env full 已实际执行，完整 run 为 10139/10139、2 slow/2 leaky/23 skipped/exit0，原失败与警示保留。本次采用的新增两计划事实仍须 root 最终单 Claude/裁决及本次实际 signed+DCO main 交付、remote 同一性；仅在该 source qualification 完成后 COV source 为 **14/26=53.85%**，此前仍为 **13/26=50.00%**，formal **0/26** 不变。父 formal **59/71=83.10%**、source **62/71=87.32%** 及下段最新 049 十四门／四卡 done/complete 事实全部保留；本候选不写未知提交 SHA，不把记账后的完整 2043 字节称为 full 同一输入。
 
 > **当前049实际C/D与四卡正式收口（2026-10-14 22:28:49 UTC）：** USER-TEMP-REL-049 / 0.30.49 的实际C/D已由root按完整收据 `dad01d952f7ce629354118264a4926b048693bf851258e4cd14beb9853727f8c` 逐项裁决关闭；release source/tag peel为 `04617cd2a3ffbf3a3e68ce4ddfecf94b78bc6574`，release run `38639329379` attempt `2` 的8个job全部success，当前SHA CI/CodeQL、四平台签名manifest/资产及CDN、pinned Homebrew、网站HTTP200/visible六段、用户指定curl home安装、同正式Darwin资产原子替换root目标及installed cat-file/既有BASE1345B读回均有hash绑定的实际证据。 仅四张父卡由locally-accepted转done/complete，父formal **59/71=83.10%**（原55增加4），source仍 **62/71=87.32%**；COV source **13/26=50.00%**、formal **0/26**，71/26分母不变。COV2-25/COV2-REL-01/DEP-OG-13、OG24..26的FAST-OG-04、Source A及native三字段未因此关闭；Source A UNPROVEN，历史unsupported-state import020仍FAIL/默认拒绝/计划外deferred。真实provider idle.error正例仍未观察，本卡typed机制按原7AC/3VER验收，不把成功Session或synthetic称真实错误/native来源。既有FAIL/cancelled/skip、Mega2与cat-file延期观察保留。 下方原日期状态保留为历史；本次仅例行事实记账，不改AC/VER/I/R/DAG或扩大权限。
@@ -103,6 +113,7 @@
 
 | 时间 | 触发 | 变更内容 | 原卡 → 新卡 | 受影响引用 |
 |---|---|---|---|---|
+| 2026-10-15（由本次签名提交采纳生效；实际signed SHA/UTC由交付收据绑定） | G09 OG24 `.3`同轴版本维护 | 原6AC8VER仅AC2/AC6澄清；exact19rootI/1external、attest只读；OG27/OG05 current SRC029/RUN029版本与实测size绑定；COV incoming固定signed6685 `.2` | 无新增Task；本次profile采纳parent source62→61，formal59/71、71/26不变；COV13/26 hold仅为本G09采纳审计快照，dcc实际补核已闭、旧full输入边界/新事实单审与最终裁决仍待 | OG24/27/05、DEP12/13当前与历史适用范围、canonical五stage/实施顺序/DAG/共享slot及逐signed非OG24重基abort账本、COVREL协调/父REL71镜像、FAST04成员正逆序、测试矩阵/追溯/里程碑/风险/三计划状态；原判据和旧证据保留 |
 | 2026-10-14 22:28:49 UTC | USER-TEMP-REL-049实际C/D例行镜像 | 父四卡正式59/71、source62/71；当前临时release门关闭 | 无新增卡；COV26/source13/formal0不变 | incoming DEP-COV2-029-BASE仅同步父状态；COV2-REL-01/DEP13/nativeSourceA不关闭 |
 | 2026-10-13 09:15:00 UTC | R4 草案转模板 v2.14 | 将 16+2+1 拆分、两阶段 `DEP-OG-13`、macOS 21-case 手工审计、单一 patch 发布点写入独立计划；将 R4 非法数字后缀改为合规文件名 | 草案 COV2-01..18 → 同 ID | 依赖表、REL、矩阵、父计划修订提案 |
 | 2026-10-13 10:59 UTC（采纳前预核） | OG-26 待签工作树、DEP-OG-12 独立 r2 | 继承本机 ignored Session 清单从旧21例增至22例；COV2-16 从11例/12 AC/4 VER 调整为12例/13 AC/5 VER。独立 r2 只确认 selected `.2` binary-to-source 有限子门并保留5个 P2 后续，旧 clean r4/0.30.48 仅作历史时点，不推断 Source A | COV2-16 同 ID；19卡分母不变 | 成功定义、事实/缺口、GC-08/09、COV2-12/16、REL-01、矩阵/风险/完成判据；待 OG-26 signed main SHA 与最终 Claude 审查 |
@@ -160,6 +171,8 @@
 
 ## 实施顺序
 
+**OG24.3共享写权阶段协调（DEP-OG-24-029-SHARED/RETURN）：** COVsource链只消费signed6685 `.2`snapshot；原DEP13 source-ready后，COV2-REL-01先完成自身三planI及R的immutable sourcefreezeF。RouteA仅在SRC029实际ready时授出共享path/hash/mode/owner lease；grant→OG24.3landing→signed-return（或满足严格条件的abort-return）→root唯一在返回postimages写COVREL actualC/D→DEP13complete。RouteB在SRC未ready或合法abort-return后先完成RELcloseout/DEP13complete再grant；禁止混装route。R始终仅root对F，OG24不写R，不改F/tag。该coordination不改本COV各卡AC/VER/I/R或12/12发布谓词；其完整共享清单/abort条件/owner/证据见canonical DEP rows及父[shared阶段](plan-20260902.md#native029-shared-stage-handoff)。
+
 **DEP-COV2-029-BASE（incoming，父ordinary29 source-qualified shared I–I handoff）：** artifact为FIX-OG-NATIVE-IMPORT-01/OG-IDLE-ERROR-029-01/FIX-OG-PARTIAL-LIVE-01/OG-UPGRADE-029-01最终A/B、单Claude、signed+DCO main/remote与精确源pre/postSHA/mode；owner本对话root。BASE按父当前G09只交付official29 namespace＋真实自然自动capture/checkpoint/普通export基线；DEFER-OG29-PARTIAL-IMPORT计划外延期，不授历史unsupported-state import能力，也不作为本DEP/049/COV2前驱。COV2-22仍先消费完整BASE源（不等其049 C/D），严格边25→FIX→IDLE→FIX-OG-PARTIAL-LIVE-01→BASE→22保留；COV2-05/18的agent_import、06/15/18的opencode_reasoning、11生产调用及其它后继均按实际源重基且保留原candidate/privacy/cursor oracle，不能并行写。网站FIX→IDLE→live→BASE→COV2-09→11由原cf owner串行交接。既往GLM import020 FAIL保留、默认拒绝，不由live成功替代；native3/Source A独立。本次范围修订已由signed+DCO main `84bbde7bd6a5f12dee2477755d0a955798518413`/remote同SHA实际采纳，完整五路径交接经sole-Claude R2 PASS；BASE现in-progress，8AC/2VER未验收，仍不source-qualified，COV2-22及相关后继仍须等待其全部实际source门。
 
 ### 依赖登记表
@@ -167,6 +180,11 @@
 | ID | direction | 类型 | 对象 | Owner | 产物与可用性判据 | 证据 | 超时与失败策略 |
 |---|---|---|---|---|---|---|---|
 | DEP-COV2-OG26 | incoming | 跨计划 | `plan-20260902.md#OG-26` | OG-26 单写者；COV2-01 只读核验接收 | OG-26 最终 A/B、适用 focused/full、fmt/strict、唯一 Claude PASS；signed+DCO main SHA 与 `reasoning.rs`、`opencode_reasoning.rs`、`snapshot.rs` 及相关路径逐文件 post SHA/mode；共享写集已让出。 | 父计划 OG-26 执行记录及实际 main SHA/hash/mode；COV2-01 首笔写前刷新 | 任一缺口则 COV2-01 保持 pending，只可只读准备；当日交接无法证明即停止该卡，不覆盖 OG-26 修改。 |
+| DEP-COV2-OG24-FROZEN2 | incoming | immutable source snapshot | OG24.2 signed main6685b82a938919a8e51f46b7c51cc305b40189a2及14path manifest e452796f5bce9316471ceaefa8796298826fece845927b99763b5e7c1c41ee85 | parent root交出，OG25/26及COV source owner只读消费 | 已满足的producer-independent原source资源；不指向currentOG24.3 lifecycle；native/runtime/SourceA仍不授予 | 原patch a1d530c75f359730d2f94b7d54911a16b5d54cdd8c43c49680780b6ef2522cdd；原Claude91f1759e98c542474bca5067d60e70f25afc8b78f07a523a8b6409c47c2cdd91 | 缺exactsignedsource/hashmode即停该资源复用；不得将current3→OG25/26/COV反向加环 |
+| DEP-OG-12-SRC029 | incoming | current producer source/profile | 当前selected2.0.29-libra-native.3及完整source/archive/patch/modes/lockeddependencies/compiler/nativeassets/SDKindependentexpected/binaryrelation | 外部private producer source owner交出；root最终裁决；OG24.3消费 | [父计划S1–S8](plan-20260902.md#native029-source-profile-gates)全门逐项actualreceipt：全66和nativeclosure正式单Claude PASS、independentofficial29generator+revieweddelta expected实际compare、独立rebuild或受限transformed-output绑定selected；当前UNRUN | 逐门完整source/tool/dependency/assets/binary SHA/size/mode及实际raw/exit/review；candidate26d914不先approved，794c不是gold | 缺一不写approved3row/不登记；保留失败，不用旧2或synthetic代替；需要producer代码修复先细化owner写集 |
+| DEP-OG-12-RUN029 | incoming | owned current runtime/issuer | SRC029合格及OG24.3 exactsigned source-qualified main，本地构建非release Libra与selected3producer双产物 | owned macOS runtime/registration owner交出；root裁决；OG27消费signature正例，OG05消费后续三字段 | source/recipe/tool/binary SHA-size-mode-version具名；独立HOME/XDG/config/registry；cold stdio/plugin/physicaltransport/freshkey/priortrust/epoch/撤权边界及至少真实signature receipt；无stable49/F包含3前置；当前UNRUN | Libra和producer分别准确身份、selectedpath、observer/policy/transport/challenge/epoch/realreceipt；仅macOS本机账号/模型，不进CI | 不改globalopencodeslot、不自动提升旧key；freshregistry才epoch0；未闭合OG27blocked；另两字段由OG05同current3 source真实逐路验，不被signature单项豁免 |
+| DEP-OG-24-029-SHARED | incoming/outgoing | stage-level exclusive shared I handoff | DEP13原source-ready + COVREL自身I/R immutable sourcefreezeF + sharedpath grant | root是唯一rootsource/三plan/Rowner；cf单页原独立owner；OG24.3接收lease | RouteA须SRC029实际ready；F原门/full/单Claude/signedsource并排除3landing/OG27；grant逐path SHA-mode-lastwriter/UTC/route，覆盖三plans、tracing-agent/EN/zh/COMPAT/docscontract及完整OG24I；COV相交写者暂停，R仍只F | 原DEP13的25nonrelease/22finalmacOScases source-ready收据、F/source及具体授出manifest；当前未授出 | 缺gate不授；SRC未好选B先RELcloseout；A发grant后只能signedreturn或严格abort-return，不能时间窗豁免/双写/偷偷改route |
+| DEP-OG-24-029-RETURN | incoming/outgoing | stage-level shared I return / abort | OG24.3 signed source交接或严格未落地abort-return；REL closeout事实写权 | OG24唯一root/cfowner交还，root签收并唯一写COVREL三planactualC/D | 成功return：6AC8VER/ER04/full/单Claude/signed+DCOsource、每sharedpostSHA/mode/lastwriter；或root发abort-return：未有任何3实现/站点signed或pushedlanding，且逐path为grant SHA/mode或与独立账本中准许非OG24 signed delta的完整机械重放SHA/mode相等、保护region字节不变；只此receipt可A→B | success逐源收据；abort列root/cf签推不存在的实际核查、每path grant/expected/current blob-OID/SHA/mode、唯一保护anchor/region SHA和逐commit非OG24 signed-delta ledger；未知差异拒绝。G09规范采纳commit不是3实现landing；receipt不能伪造 | 成功已签源仅forward-only，禁止以复原bytes偷偷A→B；无return REL三planfacts暂停。return后唯一root在postimages写actualC/D，不改F/tag或声称F含3 |
 | DEP-COV2-029-BASE | incoming | 跨计划shared I–I source handoff | 父FIX/IDLE/新live/BASE最终source链 | 本对话root | BASE source-qualified signed main前消费新live五源；COV22/05/06/11/15/18及其它相交Icore重基，网站同parent serial | BASE已按最终A/B/full10133/soleClaudeR2与signed main `1e2177e11029e28e3c81afbe6ec9f1609cdde7da`/cf `93b10519e1943ea3eea7c943e816418e92b1ca0b`、Push0/remote同SHA完成source-qualified交接；该前置源条件现已满足，COV2后继仍须按既定shared I逐SHA/mode串行重基；父四卡formal049 C/D已实际完成；本COV2家族C-D仍pending、Source A仍UNPROVEN，020仍FAIL/deferred/defaultreject | 后继仍等BASE source-qualified；DEFER不设前驱，不并发写，不豁免Source A/COV family或import隐私门 |
 | DEP-COV2-SITE | incoming | 外部仓库 | libra-backend `origin/cf` 的 `apps/tanstack-app/content/docs/commands/agent.en.md` | 经仓库 VCS 核实的独立 `cf` owner；09/11 互斥 | 记录远端 cf pre-SHA、干净隔离 checkout 根、目标页 pre-hash/mode；同卡 typecheck/build、签名+DCO 推送，发布点另核部署/HTTP。现有原 checkout 落后31且页已脏，不可覆盖。 | 隔离 owner 的 VCS/status/pre-hash 与 build/推送/部署收据，开工时刷新 | 无干净 owner 则 COV2-09 保持 pending 并停止依赖链；绝不以 locally-accepted 假过，同日无法交接即登记 blocked；发布 D 不得声称网站已部署。 |
 | DEP-COV2-MODEL | incoming | 本机外部模型 | 用户已配置的 OpenCode Anthropic 可读响应路径（非 native 来源证明） | COV2-17 macOS 本机执行者 | 最终行为源码上观察 genuine visible-only 响应，必须由已审 classifier 证实该样本无 state/proof-bearing 候选；记录无敏字段名、JSON 类型/数量、版本与 keyed digest；如实际返回 `signature`/`originProof`，该样本不算 visible-only 正例。不登记 issuer、不触发 live mint、不把它当 Source A。 | 本机 sanitized 1/1 观察记录、实际 build/model/plugin/transport ID、最终源码 SHA；不得记录正文/密钥 | 每个不同最终行为源码 SHA 最多一次本机尝试、10 分钟；COV2-REL bumped SHA 的复测另计一次。无样本或模型失败则 COV2-17/REL 保持 blocked，明确 UNRUN，不用 synthetic 代替。 |
@@ -181,7 +199,7 @@
 | ID | 成员 | 唯一发布点 | 窗口规则 | 失败回滚顺序 | 理由 |
 |---|---|---|---|---|---|
 | REL-OG-TEMP-049（用户授权临时操作，不新增Task） | COV25→FIX→IDLE→FIX-OG-PARTIAL-LIVE-01→BASE，latest upstream归最终树 | 三卡same-card文档/website，COV25保留家族C-D | 唯一root R/USER-TEMP-REL-049；final-source/full含新live，BASE自动捕获基线须实际验收；排除DEFER-OG29-PARTIAL-IMPORT，原020仍FAIL；actualCI/8jobs/4平台/安装/网站全部保留 | BASE→live→IDLE→FIX→COV25逆序前滚；不complete COV family/DEP13 |
-| REL-COV2-01 | `COV2-01→13→02→07→14→03→19→20→21→23→04→24→25→22→08→05→09→06→10→11→12→15→18→16→17`；23 implementation + 2 no-release audit | COV2-REL-01，家族内仅此卡写 R；USER-TEMP-REL-049 独立例外见下文 | OG-26 签名交接后开窗；每张子卡本机 A/B、Claude PASS、signed+DCO main Push，但不 bump/tag/release；除下方 USER-TEMP-REL-049 明确授权例外外，不得让其它计划在半成品 COV2 main 上发布稳定版。COV2-11 前无生产入口可激活 v2 writer，并以静态/运行时守卫证明。冻结/bump/tag 时禁止其它 COV2/OG-27 源码及 R 写入；若其它发布无法停，先证明其中不携带可触达的半成品 v2，否则 COV2 链暂停。 | `17→16→18→15→12→11→10→06→09→05→08→22→25→24→04→23→21→20→19→03→14→07→02→13→01` 逆序定位受影响 owner，签名前滚，重跑下游门并重新冻结；已发版 tag/asset 不改写，只出新 patch。 | schema/reader/持久化不能分开用户可见发布；G-08 唯一版本点。 |
+| REL-COV2-01 | `COV2-01→13→02→07→14→03→19→20→21→23→04→24→25→22→08→05→09→06→10→11→12→15→18→16→17`；23 implementation + 2 no-release audit | COV2-REL-01，家族内仅此卡写 R；USER-TEMP-REL-049 独立例外见下文 | OG-26 签名交接后开窗；每张子卡本机 A/B、Claude PASS、signed+DCO main Push，但不 bump/tag/release；除下方 USER-TEMP-REL-049 明确授权例外外，不得让其它计划在半成品 COV2 main 上发布稳定版。COV2-11 前无生产入口可激活 v2 writer，并以静态/运行时守卫证明。冻结/bump/tag 时禁止其它 COV2/OG-27 源码及 R 写入；若其它发布无法停，先证明其中不携带可触达的半成品 v2，否则 COV2 链暂停。 | `17→16→18→15→12→11→10→06→09→05→08→22→25→24→04→23→21→20→19→03→14→07→02→13→01` 逆序定位受影响 owner，签名前滚，重跑下游门并重新冻结；已发版 tag/asset 不改写，只出新 patch。 | schema/reader/持久化不能分开用户可见发布；G-08唯一版本点；DEP-OG-24-029-SHARED/RETURN显式约束sourcefreezeF→grant→signed/abort-return→rootfactscloseout（A）或closeout/complete→grant（B）；R只F，三plan事实在return后才写，原AC/VER/I/R不变。 |
 
 ### 用户明确授权的临时 0.30.49 发布窗口
 
@@ -1537,6 +1555,8 @@ COV2-REL-01 冻结不含 OG-27 源码的最终 COV2 树；首次完成 bumped �
 
 ### Task COV2-22：真实 pending artifact 事务与冻结旧读端
 
+**当前source资格暂停（事实覆写，原判据不变）：** root已因GC-COV2-03指定dcc完整old-writer/gold等价补核未闭合，暂停COV22最终source资格；原逐门运行与signed18b源收据保留其历史范围，不由旧7ef reference冒充dcc。当前source不计本卡，COV13/26；真实dcc采样/比较尚在进行，未运行或未通过不得记PASS，COV08可focused但不full/sign。后续仅实际收据+root裁决才恢复资格；不改本卡8AC/6VER、GC03或gold值、不回退隐私/SourceA。
+
 **Task type:** implementation
 
 **Lifecycle / Acceptance:** in-progress / locally-accepted（COV2-22 采用候选：原 8 AC/6 VER 与继承本机机制门已实际验收；最终新增事实文档的单 Claude 裁决、本次 signed+DCO main 交付及 remote 同一性仍由 root 完成，不在本私有候选中自授 source-qualified 或 formal complete）
@@ -2066,6 +2086,8 @@ VER6 现仅消费独立历史源码 `7efcf868d49a5183e7f0851a89abebee91357155`�
 
 **Full-suite trigger:** T-2：首次 COV2 stable release 必须在最终已 bump 实现树运行双 env `cargo nextest run --all --no-fail-fast --retries 2` 并实际全绿。若其后仅因上游稳定版号前进而顺延本计划 patch 版本，且生产源码、测试及行为文档逐路径 SHA/mode 与已全量通过的实现树完全相同，只有版本面与工具链生成的 root package lock 版本改变，可依用户授权复用同实现的既有全量/手工证据；记录两树逐路径等价、原全量 raw SHA/exit0、最终版本面 parity 与新 release SHA，不把旧 CI 当新 SHA 通过。任何非纯版本源码/测试/行为文档变化均在最终 bumped 树重新跑全量及相关本机门；失败、取消或未运行不能复用。
 
+**Shared-path coordination（非AC/VER/I/R变更）:** DEP-OG-24-029-SHARED/RETURN约束本卡source-freeze→事实closeout的唯一writer阶段：RouteA必须OG24.3 signed-return或严格abort-return后才可由root在返回postimage写actualC/D；RouteB先本卡closeout再grant。F及R已冻结且后续只构建/发布F，当前3不被该F携带；新main不改变tag/source归属。原GC-COV2-08、VER2与其installed-F原`.2` issuer兼容登记门继续有效，仅在独立owned legacy HOME/XDG的fresh registry中按epoch0执行，不用global，不作current29/3验收或SourceA。其余12AC12VER/I/R/D依赖全保留。
+
 **Dependencies:** COV2-01/13/02/07/14/03/19/20/21/23/04/24/25/22/08/05/09/06/10/11/12/15/18/16/17 全部本机 source-qualified A/B+review+signed main deliverables；DEP-COV2-SITE；DEP-COV2-MODEL；本卡 VER3–9 的新增/真实观察与 COV2-16/17 全22例在最终行为源码非 skip PASS。
 
 **Deliverables:** 稳定 patch tag/Release、签名 manifest、四平台资产、Homebrew、Cloudflare 下载与网站、指定 curl 本机安装、全部 child C/D ledger；汇总证据写入 `docs/development/plan/plan-20261013-coverage-schema.md` 与 `docs/development/plan/plan-status.md`。
@@ -2409,3 +2431,43 @@ USER-TEMP-REL-049 / 0.30.49 的实际C/D已由root按完整收据 `dad01d952f7ce
 ### 2026-10-15 — COV2-22 采用候选的例行事实（不改规范）
 
 仅合并本卡原实现说明、原 8 AC/6 VER 的实际机制 checkbox、R4 环境失败/合法私有 init/R5 完整 10139 passed（2 slow/2 leaky/23 skipped）及两条原测试一次诊断、真实旧源码 writer 原样本、原 Claude R1 与最终新事实审查待门。root 最新 049 完成收据与父 59/71/source62、COV family formal0 原样保留；source14/26 仅为本次采用实际 source-qualified 后的条件计数。原判据/命令/I/R/DAG/Granularity 未改，本次不实施 COV2-08，不预授未知签名提交或 Source A。
+
+
+## 2026-10-15 G09：OG24 incoming snapshot / DEP13共享写权阶段（当前覆写）
+
+本节只修订跨计划前置资源与共享I顺序；COV各卡原AC/VER/I/R/Granularity、26卡分母和COVREL12AC12VER不变。当前13/26 source、formal0/26，source-ready仍须全部25非发布卡及22例最终行为源码macOS非skip门，不因当前计数或本G09满足。
+
+本COV canonical「依赖登记表」已逐项登记对应五个stage resource及八列owner/产物/判据/证据/失败策略；SRC029完整来源门消费[父计划S1–S8](plan-20260902.md#native029-source-profile-gates)。
+
+## Stage ordering and current/count mirrors
+
+RouteA: frozenOG24.2@6685 → COV25-nonrelease-chain → DEP13.source-ready → COVREL.source-freezeF → SHAREDgrant → OG24.3landing → RETURN → COVREL.closeout → DEP13.complete → OG27.
+RouteB ifSRC029notready beforegrant: frozenOG24.2@6685 → COVsourcechain → DEP13.source-ready → COVREL.source-freezeF → COVREL.closeout → DEP13.complete → SHAREDgrant → OG24.3landing → RETURN → OG27.
+Both: SRC029 → OG24.3landing → RUN029 → OG27. Routes mutually exclusive and receipt-selected beforegrant; never unite conflictingedges. These are existingTask stages/resources, not newTasks.
+
+DEP13 source-ready retains exact25nonrelease/22cases signedsource gates; source-ready.sharedpaths additionally requires release-own I/R sourcefreeze and explicit lease. complete retains COVREL actualstable/signatures/safetyCI/4platform/site/Homebrew/curl/install/allC-D. Originalold48reject and 'installCOVstable then retry2' remain historical .2 only; current3runtime uses local exactsigned3Libra, not stable49. OG27 mainPush stillaftercomplete+realRUNsignature.
+
+
+### COVREL I/R交出与事实写权归还
+
+DEP13.source-ready.sharedpaths须同时具有原source-ready收据、COVREL自己的三planI及R最终源冻结F（full/唯一Claude/signed源、逐pathSHA/mode和原排除OG27门）、具名owner/UTC/route与排他lease。sharedroot路径明确三plan、tracing/agent.md、EN/zh agent.md、COMPATIBILITY.md、tests/compat/agent_docs_contract.rs；OG24其它5src/2tests/2fixtures/2MANIFEST/内部文档也仅其owner可写。cf独立owner单页agent.en.md另给signed SHA/mode。COVREL R不交出，始终仅root对immutableF构建/tag/release/manifest；grant期间COV/REL相交source/docs/三plan事实写者暂停；OG24唯一writer按grant范围持有共享写权，cf仍由登记的唯一owner按其grant写入；其它计划非保护region只可按父计划abort equality的逐signed非OG24账本由root串行接入，不全局冻结无关计划。此为G06/G10有向stage约束，不是时间窗例外。
+
+RouteA在SRC029已合格时：F→grant→OG24.3landing→signedreturn→COVRELcloseout→DEP13complete。return提供每共享postimageSHA/mode、signedsource和最后writer；root在返回postimage上**唯一**写实际C/D三planfacts，保留3记录，不改F/tag，不称F含3。COV站点既有内容保留；若cf页源被OG24改，原cfowner须绑定新signed页源重跑既定site/HTTP而不继承旧页面hash。RouteB在SRC未就绪时：F→RELcloseout/complete→grant→OG24.3landing→return。两route在grant前互斥选定收据，不能混成cycle。需要源修复则中止generation/新F和grant，immutable发布不改写。
+
+COV incoming OG24只有signed6685 `.2`snapshot，不消费liveOG24current3生命周期；旧0.30.48拒绝仅历史；GC-COV2-08/COVREL VER2的installed-F legacy原`.2` issuer在fresh owned registry中按epoch0兼容登记仍绑定F，独立owned HOME/XDG执行，不改global、不作current29/`.3`或SourceA验收，当前RUN029用exactsigned3main本地非releaseLibra/ownedHOME/XDG，不要求本COVrelease含3；OG27 mainPush仍等DEP13complete及RUN真实signature。SourceA/oldimport020FAIL/deferred/native三字段和复杂Session不上CI边界全保留。
+
+父计划本日G09 S1–S8的全66、official1705nativeclosure/dependency/nativeasset、9506/8595mode与membership、READMEreader、independentofficial29SDKexpected/repro硬门是SRC029来源条件；COV不替它审source/授issuer。FAST04 C/D仍独立，下游不能反作本COV source前置。发布被动ledger按F实际祖先核全量；后续main3source不是F祖先，不隐瞒、不倒称其由COVstable携带。
+
+**无live OG24回边：** OG25/OG26原producer-independent先序在父Dependencies/Granularity/主图与审计表均绑定signed6685 `.2` snapshot；本COV incoming同一版本化资源，current3只在COVrelease阶段grant之后落地。原历史日期图不建立新current3→OG25/26/COV边。
+
+**A阶段abort-return（唯一post-grant A→B条件）：** root先核没有任何OG24.3实现/站点landing提交已signed或pushed（G09规范采纳不是实现landing）。每个shared path必须等于grant SHA/mode，或严格等于下述逐项准许的非OG24 signed delta重放结果；不能仅以“无关改动”标签放行。未提交OG24草案只留私有目录，不夹入COV事实/R。root出具具名abort-return receipt，绑定grant/F/route、root/cf签推核查、逐path grant/expected/current blob-OID/SHA/mode、全部准许commit及独立ledger SHA、保护region校验、UTC和唯一返还owner后，才返还共享写权并显式A→B。任何3实现/站点landing一旦signed或pushed，即使字节复原也必须原forward-only源交接/修复和成功return，不得abort换B；F、真实gate和原route选择条件不变。
+
+**非OG24 signed-delta重基账本（abort equality的唯一扩展）：** grant时对每个shared path记录完整blob-OID/SHA/mode、唯一边界anchor及该边界内原始bytes/SHA。保护区逐项覆盖OG24卡片与其I/criteria、当前G09/DEP12/13/stage/DAG/统计归属、COVREL与其F/版本source/排除条件、所有lease/grant/return字段；无法用唯一anchor完整界定的path默认整文件受保护。生产源码/fixture/manifest的OG24归属全文件受保护；cf同样由唯一owner登记页面保护段。grant后其它计划仍可推进独立路径和已登记的非保护region，不能并发写共享文件：其signed变更只由root按唯一写者顺序接入，记录实际commit/parent-chain、每path前后blob-OID/完整SHA/mode、精确diff和owner/卡归属，不全局冻结无关计划。abort前root在独立只读ledger逐项核签名/DCO及实际对象链，确认准许delta未触任何保护区/anchor、OG24或COVREL归属、lease、版本source与F条件；模式变化、跨区hunk、未知owner/路径或无法还原的rebase一律拒绝。再从grant完整preimage按实际有序commit delta机械重放（重基也列原/新parent与blob链、精确delta），逐path证明生成的完整expected SHA/mode等于当前actual SHA/mode，同时原保护region bytes/anchors/SHA仍相同。没有delta则expected就是grant；任何差异未被枚举或重放不等即不出abort receipt。此ledger不移动F、不改变source-ready/原gate、不授权OG24已签实现回退。
+
+**R6准备期状态快照（2026-10-15；下段命令/判据继续有效，原UNRUN状态由页首实际QA事实覆写）：**
+
+**本次G09规范采纳提交的读者门（mandatory ER04，不新增Task/AC/VER）：** 三plan本身也是编译/测试输入；在本次exact拟采纳字节上实际运行 `source .env.test && cargo test --test opencode_hook_contract_test`（整target，含原VER8读者）、`source .env.test && cargo test --test compat_agent_docs_contract`、`source .env.test && cargo test --test compat_agent_architecture_guard`、`cargo +nightly fmt --all --check`、`cargo clippy --all-targets --all-features -- -D warnings`、`libra diff --check`，并用rg核实际其它plan读者再跑相关target。全部非零实际通过、soleClaude本exact规范PASS后root才能signed+DCO采纳；此时均UNRUN，不以probe字节相同代替运行。原OG24.3源码landing另跑原8VER/full等门不减。
+
+**F独立legacy兼容lane（原门保留，非current profile替代）：** GC-COV2-08及COVREL VER2对immutableF的`.2`source/admission兼容核验和installed-F原`.2` issuer在fresh owned registry中按epoch0登记重验仍按原文执行，属于COVREL发布/安装验收owner；只在新owned HOME/XDG/registry与固定旧`.2`产物运行，freshregistry才0，不改用户globalOpenCode/exporterslot。它读取F/历史6685`.2`许可，不依赖current3landing/RUN029/OG27或真实native字段归档，故不向源链回加边。该lane通过也只证F legacy兼容，不是official29/`.3`验收或SourceA；currentSRC/RUN3及OG05三字段门仍独立。旧0.30.48拒绝事实保留。
+
+**RouteA分支边明确登记：** `SHARED.grant_A→OG24.3.unsigned_attempt→RETURN.abort_A→REL.closeout→DEP13.complete→SHARED.grant_B→OG24.3.landing→RETURN.signed_B` 仅在abort严格谓词全部满足后成立；否则只可原成功A边`grant_A→OG24.3.landing→RETURN.signed_A→REL.closeout`。abort不是signed实现回退，不把两分支同时当活动边；所有C/D事实仍由root在实际return后写。

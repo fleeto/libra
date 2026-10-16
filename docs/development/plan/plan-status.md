@@ -1,5 +1,7 @@
 # 计划执行状况总表（plan-status.md）
 
+> **SRC029 候选范围修订（本次唯一Claude规划PASS、root裁决及签名main交付后生效）：** 以现有R2未批准候选替换R1作为来源审查输入：selected68=42production/build/generated+23tests/fixtures+3README，声明source8597（8540regular+57symlink）、nonREADME8594；未批准任何binary/profile/native来源。R1的66/8595/8592与26d914、旧R2静态PASS及失败均保留历史。只准在新private successor修改三README的版本/范围/历史与已证基线说明；现有5个生产/build delta按固定SHA纳入待审输入，不能继续改TS。S1–S8全部门、1705native closure、149transform、ROOT19/网站未来lease、OG24原6AC8VER及RUN029真实模型门保留；S6仅已证SDK11子门PASS。父formal60/72=83.33%、source62/72=86.11%，COV26/26卡完成均不变，计划级末端D后补仍待；本变更不新增任务卡、不发版、不改全局OpenCode。
+
 > **按本次收口签名 main 交付生效：** COV2 26/26 `done/complete`，父 FIX-OG-OBSERVER-RECIPE-01 继承实际 C/D 后，父正式 **60/72=83.33%**、source **62/72=86.11%**。v0.30.50 immutable F `deabb37b70d74949a59c3722ad5cee1d8d79145a` 的最终full/CODE/当前CI/四平台/manifest/CDN/Homebrew/网站/指定curl安装/原`.2`epoch0→2均已有真实证据；DEP-OG-13=complete。当前`.3`/RUN029/OG27..29/05/FAST04/SourceA仍未放行；Linux功能未运行。
 >
 > 以下有日期的旧开工、UNRUN、FAIL、旧计数及旧“当前/待”保留为历史；本次只写三plan事实，不改已发布F/tag/资产或授current3共享grant。收口提交自身D组按GC-COV2-06/模板v2.14预登记给下一次状态同步，未完成的新docs-SHA Actions不冒称PASS。
@@ -2034,7 +2036,7 @@ root 唯一 Claude R1 实际 SOURCE PASS、P0/P1/P2=0，raw `9cd81f9801f5313ac59
 | 对象 | 当前规范状态（不是新测试/模型PASS） | 下一步/独占写者 |
 |---|---|---|
 | OG24 `.3` | 同一原6AC8VER封闭producer-profile版本维护；旧2source收据真实留历史，当前source暂扣，parent61/71；formal59/71不变 | SRC029完整来源门后、真实sharedgrant才由root唯一落19rootI（2行为+2cfgtest+1commentsrc等）/原cf独立owner单页；attest只读；原8commands不变，AC2/6仅声明澄清 |
-| DEP12-SRC029 | UNRUN/UNPROVEN，参父本日G09 S1–S8；不重开doneNPR08（原9AC） | source/archive/全66及1705nativeclosure/依赖assets/SDKindependentofficial29expected/repro实际门；candidate不立gold，旧311a/6291不改 |
+| DEP12-SRC029 | UNRUN/UNPROVEN，参父本日G09 S1–S8；不重开doneNPR08（原9AC） | source/archive/当前全68（42+23+3）及1705nativeclosure/依赖assets/SDKindependentofficial29expected/repro实际门；candidate不立gold，旧311a/6291不改 |
 | DEP12-RUN029 | UNRUN，无stable49/COVstable依赖 | exact OG24.3 signedmain **本地构建非releaseLibra** binary/sourceSHA/size/version，ownedHOME/XDG/config/freshregistry；真实selected3/plugin/transport/freshkey/epoch/priortrust与signature；不改用户全局opencodeslot |
 | COVincoming OG24 | frozen2snapshot6685b82a938919a8e51f46b7c51cc305b40189a2已满足历史资源，不指liveOG24lifecycle | COV当前13/26source、0formal；原25非发布+22case门全满足才source-ready；26分母不变 |
 | DEP13/sharedlease | source-ready和complete原条件不减；另具名source-ready.sharedpaths记录REL三planI/R源冻结F、path/SHA/mode/owner/route/UTC | A: frozen2→COVsource→source-ready→RELfreezeF→grant→OG24.3landing→signedreturn→RELcloseout→complete；B:SRC未好则freezeF→RELcloseout/complete→grant→OG24landing→return，route互斥不混装 |
@@ -2983,3 +2985,13 @@ R5 范围已 actual signed+DCO/PGP main `be05b4d32ed07cdc5bc8ade34afba8d02986b70
 完整[逐门实证与逐卡C/D ledger](plan-20261013-coverage-schema.md#covrel050-actual-cd)绑定同F/release38849003385/稳定Release414541147及原`.2`epoch0→2，不替代SourceA/current3/FAST04。本三plan仍需本次reader/fmt/strict、单Claude与signed+DCO main Push/freshremote；交付后生效。原Linux功能后验/旧FAIL及延期边界不变，终止纯事实提交自身D组按GC-COV2-06/模板v2.14预登记。
 
 SDK11 independent A/B、完整11body/22diff单审与root裁决、derived versioned expected794c、固定6291实际比较11/11和同native checker类型检查已实际通过；首轮隔离Node/父metadata失败保留，最终11字节/mode不变。此仅S6 SDK11子门；完整S1–S8/source/profile/native闭包、依赖来源、selected binary关系及SourceA仍UNPROVEN，不授共享grant或当前3catalog写权。详见同一实证章节。
+
+
+## 例行状态同步：SRC029候选范围采纳（2026-10-16 05:41:51 UTC）
+
+**SRC029 候选范围修订（本次唯一Claude规划PASS、root裁决及签名main交付后生效）：** 以现有R2未批准候选替换R1作为来源审查输入：selected68=42production/build/generated+23tests/fixtures+3README，声明source8597（8540regular+57symlink）、nonREADME8594；未批准任何binary/profile/native来源。R1的66/8595/8592与26d914、旧R2静态PASS及失败均保留历史。只准在新private successor修改三README的版本/范围/历史与已证基线说明；现有5个生产/build delta按固定SHA纳入待审输入，不能继续改TS。S1–S8全部门、1705native closure、149transform、ROOT19/网站未来lease、OG24原6AC8VER及RUN029真实模型门保留；S6仅已证SDK11子门PASS。父formal60/72=83.33%、source62/72=86.11%，COV26/26卡完成均不变，计划级末端D后补仍待；本变更不新增任务卡、不发版、不改全局OpenCode。
+
+本次规划source前像main75d1734；具体判据和全部68 fixed R2 SHA/mode见[父计划范围登记](plan-20260902.md#native029-candidate68-scope)。R1→R2五个生产/build后像和两个新增test只读供审，当前新private successor只允许三README修版本/范围/历史；未知TS修复仍另作owner/轴修订。官方29原import-boundaries真实0/1FAIL和R2精确修正版真实1/1PASS均保留；前者不记候选失败、后者不记完整SOURCE PASS。SRC029总门UNPROVEN，S6独立SDK11子门actualPASS，不授当前3catalog/root19/cf共享lease；OG24仍6AC8VER，RouteB原依赖和真实native字段门不变。此纯规划无新增任务/进度/版本/网站命令delta；three-plan focused110/fmtstrict/单Claude/root/signPush在规划准备时均未跑；后续实测见末尾分阶段事实，不把准备时状态当最终结果。COV终止75d SHA的D组另按原预登记收实际结论，运行中的CI不记通过；不为本变更重启COV终止链。
+
+
+**SRC029候选范围修订的实际规划QA前像（2026-10-16 05:43:55 UTC）：** 新CH1、architecture64、docs32、examples1、hook12共110/110、0ignored/fail，nightly fmt与strict all-targets/all-features `-D warnings`均exit0；docs raw SHA `3418ba9710f5b3b8f09a37de5c98a1fd9122c23208c1c3bb6835a4be1a1aaaa0`、strict raw SHA `0ef1bf4ecfb80b0dd982dcf9e3a410084b2ca2f1b0a8f30c44d6637ab5bc45ff`，2048受测输入前后同一。此结果只绑定加入本事实前的三计划规划前像，其2045非规划输入仍与signed75d完全同一；新增事实后最终reader/fmt/strict另验，不预授最后字节。未跑full、producer全量/check/构建、账号/模型/Session；原official boundary FAIL与R2窄修正版1/1事实保留，SOURCE S1–S8整体未获PASS。唯一Claude及signed main尚未取得，本修订规范仍不生效。

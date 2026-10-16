@@ -1,20 +1,24 @@
 # OpenCode coverage schema-v2 前置实施计划（2026-10-13）
 
-> **当前最终0.30.50本机验收已过（2026-10-16 03:08:13 UTC）：** R5已实际signed main be05采纳，新双envT2 `Summary [1134.569s] 10219 tests run: 10219 passed (2 slow), 23 skipped` /exit0/raw `f28ad74f0aef5bb220618d175c323786117fa7b7c444bf03afd76ea92ae2d27e`；六manual各1/1/version2/相关质量门及原visible1＋22audit条件映射已核。2048前后同一，full后仅本三plan事实；最终CODE/F/CI/稳定发布/安装/原.2epoch0和C-D待，SourceA/current3未放行。formal59/72=81.94%、source62/72=86.11%、COVsource25/26/formal0不变。
+> **按本次收口签名 main 交付生效：** COV2 26/26 `done/complete`，父 FIX-OG-OBSERVER-RECIPE-01 继承实际 C/D 后，父正式 **60/72=83.33%**、source **62/72=86.11%**。v0.30.50 immutable F `deabb37b70d74949a59c3722ad5cee1d8d79145a` 的最终full/CODE/当前CI/四平台/manifest/CDN/Homebrew/网站/指定curl安装/原`.2`epoch0→2均已有真实证据；DEP-OG-13=complete。当前`.3`/RUN029/OG27..29/05/FAST04/SourceA仍未放行；Linux功能未运行。
+>
+> 以下有日期的旧开工、UNRUN、FAIL、旧计数及旧“当前/待”保留为历史；本次只写三plan事实，不改已发布F/tag/资产或授current3共享grant。收口提交自身D组按GC-COV2-06/模板v2.14预登记给下一次状态同步，未完成的新docs-SHA Actions不冒称PASS。
+
+> **发布前历史快照：最终0.30.50本机验收已过（2026-10-16 03:08:13 UTC）：** R5已实际signed main be05采纳，新双envT2 `Summary [1134.569s] 10219 tests run: 10219 passed (2 slow), 23 skipped` /exit0/raw `f28ad74f0aef5bb220618d175c323786117fa7b7c444bf03afd76ea92ae2d27e`；六manual各1/1/version2/相关质量门及原visible1＋22audit条件映射已核。2048前后同一，full后仅本三plan事实；最终CODE/F/CI/稳定发布/安装/原.2epoch0和C-D待，SourceA/current3未放行。formal59/72=81.94%、source62/72=86.11%、COVsource25/26/formal0不变。
 
 > **R5 范围起草历史快照（2026-10-16 02:13:58 UTC）：** main f6ff 已整合/推送且移机分支已删除；本次私有修订待 sole Claude/签名采纳。旧 release CODE R1/R2 FAIL 保留；新组合 bumped50 full、最终 CODE/F/C-D 未完成。formal59/72、source62/72、COVsource25/26/formal0不变，Source A/current3未放行。
 
 > **R5前历史：最终 repaired50 T2 已通过（2026-10-16T00:51:06.887345+00:00）：** actual 10219/10219 PASS（2slow、23skip；0FAIL/0retry/0flaky/0LEAK），raw `215dc8242692b4da3ea3eaca8c55f9c7ff8ec1248300c2def533e6ad378a555e`，受测2048源前后相同；六manual各1/1、version2、109/fmt/strict及fresh一次visible观察已实际通过。当前main d74范围已采纳、incoming repair189/cff290已source-qualified；最终发布CODE Claude/F/currentCI/四平台/站点新部署/安装/原.2 epoch0和C/D待。父formal59/72=81.94%、source62/72=86.11%，COVsource25/26/formal0不变，SourceA/current3未放行。下方有日期旧快照仅为历史。
 
 
-> **当前修复源码已交付、COVREL候选50开工（2026-10-16 00:18:45 UTC）：** FIX-OG-OBSERVER-RECIPE-01 已 actual signed+DCO main `1896475b023c983e4fbb7fca956445c1cc88b950` Push/freshremote/archive2048=finalQA、source CODE Claude PASS/raw293036d0…；cf `f29097a9eea5341b5a775bcbf888eaa6a44666c6` 已部署worker23945ad4-e2db-42e6-8915-349c0640db7d/check116728686156success且EN/zh visible8concept200。父source62/72=86.11%、formal59/72=81.94%，COVsource25/26/formal0。本次G09 I11/R4已由实际signed main `d74f37aecea801b07959b40326f19ad3b8dad4bb` 采纳；8doc已审source-version/status/anchor字节及toolchain生成R4现为候选0.30.50，尚无新50测试/full/F/tag/release/install通过。SourceA/current3未放行。以下旧时点记录保留历史。
+> **历史执行快照：当前修复源码已交付、COVREL候选50开工（2026-10-16 00:18:45 UTC）：** FIX-OG-OBSERVER-RECIPE-01 已 actual signed+DCO main `1896475b023c983e4fbb7fca956445c1cc88b950` Push/freshremote/archive2048=finalQA、source CODE Claude PASS/raw293036d0…；cf `f29097a9eea5341b5a775bcbf888eaa6a44666c6` 已部署worker23945ad4-e2db-42e6-8915-349c0640db7d/check116728686156success且EN/zh visible8concept200。父source62/72=86.11%、formal59/72=81.94%，COVsource25/26/formal0。本次G09 I11/R4已由实际signed main `d74f37aecea801b07959b40326f19ad3b8dad4bb` 采纳；8doc已审source-version/status/anchor字节及toolchain生成R4现为候选0.30.50，尚无新50测试/full/F/tag/release/install通过。SourceA/current3未放行。以下旧时点记录保留历史。
 
 
 > **FIX-OG-OBSERVER-RECIPE-01 本地验收已过、源码交付待（2026-10-15 23:18:52 UTC）：** 已actual通过原16/16本机登记、37/37 native unit、109/109 hook/docs、fmt严格clippy及修复后49双env T1：`Summary [1118.151s] 10219 tests run: 10219 passed (2 slow, 1 leaky), 23 skipped` / exit0，2048输入前后相同，raw `d7c23044d3d2564702c8b9088c990ed50345776132289e2f2374fdc063664b21`。最终代码Claude、signed main/cf和网站部署仍待；实际全部交付后才source-qualified、父source61→62/72=86.11%，此前61/72。formal59/72=81.94%，COV source25/26/formal0不变；不是卡done。下一COV2-REL-01，最终repaired bumped源码新T2及原installed-F .2 epoch0/完整C-D仍需；SourceA/current3未放行。
 
-> **当前兼容修复实施（2026-10-15 22:35:29 UTC）：** G09 已由 signed+DCO main `3158302c0eab2994bae571d3268542ec7c0970ab` 实际 Push/freshremote 采纳，FIX-OG-OBSERVER-RECIPE-01 开工。新独立 gold 回归在未修复 cd53 catalog 上实测 FAIL（1/1，raw `e6fc8c2cd22bd47e9b417747550c8e761c0980b82fef0a946ad65c94a4ec7456`）；已合入精确历史 recipe 及 cfg(test) 修复，GREEN/49 T1/单审/源码交付与网站部署待验。不新增完成数：parent formal59/72=81.94%、source61/72=84.72%；COV source25/26=96.15%、formal0/26。默认普通 v2 目录过滤源码原 SHA/mode 不变；下一 COV2-REL-01，旧候选50 full不能覆盖真实修复。Source A/current3/installed-F/C-D 未放行。
+> **历史执行快照：当前兼容修复实施（2026-10-15 22:35:29 UTC）：** G09 已由 signed+DCO main `3158302c0eab2994bae571d3268542ec7c0970ab` 实际 Push/freshremote 采纳，FIX-OG-OBSERVER-RECIPE-01 开工。新独立 gold 回归在未修复 cd53 catalog 上实测 FAIL（1/1，raw `e6fc8c2cd22bd47e9b417747550c8e761c0980b82fef0a946ad65c94a4ec7456`）；已合入精确历史 recipe 及 cfg(test) 修复，GREEN/49 T1/单审/源码交付与网站部署待验。不新增完成数：parent formal59/72=81.94%、source61/72=84.72%；COV source25/26=96.15%、formal0/26。默认普通 v2 目录过滤源码原 SHA/mode 不变；下一 COV2-REL-01，旧候选50 full不能覆盖真实修复。Source A/current3/installed-F/C-D 未放行。
 
-> **当前G09兼容修复候选（由本次signed main采纳生效）：** 新增FIX-OG-OBSERVER-RECIPE-01，parent72卡/formal59/72=81.94%/source61/72=84.72%，不增加完成数；COV仍25/26 source、0/26正式。首次旧候选50 full已actual10216 PASS（2flaky），但历史producer recipe兼容缺口阻止发布冻结；先新修复卡，再COVREL最终源码复测/发布。下面旧时点统计保持历史，不代表当前门已通过。
+> **历史执行快照：当前G09兼容修复候选（由本次signed main采纳生效）：** 新增FIX-OG-OBSERVER-RECIPE-01，parent72卡/formal59/72=81.94%/source61/72=84.72%，不增加完成数；COV仍25/26 source、0/26正式。首次旧候选50 full已actual10216 PASS（2flaky），但历史producer recipe兼容缺口阻止发布冻结；先新修复卡，再COVREL最终源码复测/发布。下面旧时点统计保持历史，不代表当前门已通过。
 
 > **历史开工快照（已由上方G09阻断/后续修复顺序覆盖）：COV2-17已actual交付，COV2-REL-01开工。** main7350099，25/26=96.15%源码就绪，DEP-OG-13 source-ready；formal0家族C/D。当前patch候选0.30.50，首次bumped最终源码全量/本机门尚待；父formal59/71不变。
 
@@ -271,10 +275,10 @@
 
 | ID | direction | 类型 | 对象 | Owner | 产物与可用性判据 | 证据 | 超时与失败策略 |
 |---|---|---|---|---|---|---|---|
-| DEP-COV2-OBSERVER-RECIPE | incoming | legacy-only source repair | parent FIX-OG-OBSERVER-RECIPE-01 | root源/三plan唯一writer、cf单页交接 | actual49T1/A-B/五docs-site/fmtstrict/soleClaude/signed-source+SHA-mode；不等下游C/D | 原signed6685 gold、735漂移、六root只读与新卡6AC6VER，当前UNRUN | 阻COVRELfreeze；保留原row，无`.3`grant/SourceA；C/D仍原REL |
+| DEP-COV2-OBSERVER-RECIPE | incoming | legacy-only source repair | parent FIX-OG-OBSERVER-RECIPE-01 | root源/三plan唯一writer、cf单页交接 | actual49T1/A-B/五docs-site/fmtstrict/soleClaude/signed-source+SHA-mode；不等下游C/D | 实际source signed main `1896475b023c983e4fbb7fca956445c1cc88b950`/cf `f29097a` 已交接；v0.30.50 F `deabb37`/cf `fb8911a` 实际C/D和原`.2`epoch0兼容门已过，本次收口后complete。起草UNRUN仅旧时事实。 | 阻COVRELfreeze；保留原row，无`.3`grant/SourceA；C/D仍原REL |
 | DEP-COV2-OG26 | incoming | 跨计划 | `plan-20260902.md#OG-26` | OG-26 单写者；COV2-01 只读核验接收 | OG-26 最终 A/B、适用 focused/full、fmt/strict、唯一 Claude PASS；signed+DCO main SHA 与 `reasoning.rs`、`opencode_reasoning.rs`、`snapshot.rs` 及相关路径逐文件 post SHA/mode；共享写集已让出。 | 父计划 OG-26 执行记录及实际 main SHA/hash/mode；COV2-01 首笔写前刷新 | 任一缺口则 COV2-01 保持 pending，只可只读准备；当日交接无法证明即停止该卡，不覆盖 OG-26 修改。 |
 | DEP-COV2-OG24-FROZEN2 | incoming | immutable source snapshot | OG24.2 signed main6685b82a938919a8e51f46b7c51cc305b40189a2及14path manifest e452796f5bce9316471ceaefa8796298826fece845927b99763b5e7c1c41ee85 | parent root交出，OG25/26及COV source owner只读消费 | 已满足的producer-independent原source资源；不指向currentOG24.3 lifecycle；native/runtime/SourceA仍不授予 | 原patch a1d530c75f359730d2f94b7d54911a16b5d54cdd8c43c49680780b6ef2522cdd；原Claude91f1759e98c542474bca5067d60e70f25afc8b78f07a523a8b6409c47c2cdd91 | 缺exactsignedsource/hashmode即停该资源复用；不得将current3→OG25/26/COV反向加环 |
-| DEP-OG-12-SRC029 | incoming | current producer source/profile | 当前selected2.0.29-libra-native.3及完整source/archive/patch/modes/lockeddependencies/compiler/nativeassets/SDKindependentexpected/binaryrelation | 外部private producer source owner交出；root最终裁决；OG24.3消费 | [父计划S1–S8](plan-20260902.md#native029-source-profile-gates)全门逐项actualreceipt：全66和nativeclosure正式单Claude PASS、independentofficial29generator+revieweddelta expected实际compare、独立rebuild或受限transformed-output绑定selected；当前UNRUN | 逐门完整source/tool/dependency/assets/binary SHA/size/mode及实际raw/exit/review；candidate26d914不先approved，794c不是gold | 缺一不写approved3row/不登记；保留失败，不用旧2或synthetic代替；需要producer代码修复先细化owner写集 |
+| DEP-OG-12-SRC029 | incoming | current producer source/profile | 当前selected2.0.29-libra-native.3及完整source/archive/patch/modes/lockeddependencies/compiler/nativeassets/SDKindependentexpected/binaryrelation | 外部private producer source owner交出；root最终裁决；OG24.3消费 | [父计划S1–S8](plan-20260902.md#native029-source-profile-gates)全门逐项actualreceipt：全66和nativeclosure正式单Claude PASS、independentofficial29generator+revieweddelta expected实际compare、独立rebuild或受限transformed-output绑定selected；整体仍UNPROVEN；仅S6 SDK11独立A/B生成、全11单Claude、derived expected/固定6291实际比较及类型检查子门已实际PASS，不授source/profile/native GO。 | 新expected SHA `794c99eb7b4a4748b4cacb24a4c967a2aff29baa2365fe477d632b9e439817d3` 由实际独立B推导，raw `06eab4d7ec0807e116f96c3326352bdb247ad811288ff54233d4b043cc422d67` 单审后versioned采纳；旧同SHA candidate直接立gold建议仍不成立，old311/6291不变，当前source/binary candidate26d914仍未批准。 逐门完整source/tool/dependency/assets/binary SHA/size/mode及实际raw/exit/review；candidate26d914不先approved，先前未独立推导的794c不能作gold  | 缺一不写approved3row/不登记；保留失败，不用旧2或synthetic代替；需要producer代码修复先细化owner写集 |
 | DEP-OG-12-RUN029 | incoming | owned current runtime/issuer | SRC029合格及OG24.3 exactsigned source-qualified main，本地构建非release Libra与selected3producer双产物 | owned macOS runtime/registration owner交出；root裁决；OG27消费signature正例，OG05消费后续三字段 | source/recipe/tool/binary SHA-size-mode-version具名；独立HOME/XDG/config/registry；cold stdio/plugin/physicaltransport/freshkey/priortrust/epoch/撤权边界及至少真实signature receipt；无stable49/F包含3前置；当前UNRUN | Libra和producer分别准确身份、selectedpath、observer/policy/transport/challenge/epoch/realreceipt；仅macOS本机账号/模型，不进CI | 不改globalopencodeslot、不自动提升旧key；freshregistry才epoch0；未闭合OG27blocked；另两字段由OG05同current3 source真实逐路验，不被signature单项豁免 |
 | DEP-OG-24-029-SHARED | incoming/outgoing | stage-level exclusive shared I handoff | DEP13原source-ready + COVREL自身I/R immutable sourcefreezeF + sharedpath grant | root是唯一rootsource/三plan/Rowner；cf单页原独立owner；OG24.3接收lease | RouteA须SRC029实际ready；F原门/full/单Claude/signedsource并排除3landing/OG27；grant逐path SHA-mode-lastwriter/UTC/route，覆盖三plans、tracing-agent/EN/zh/COMPAT/docscontract及完整OG24I；COV相交写者暂停，R仍只F | 原DEP13的25nonrelease/22finalmacOScases source-ready收据、F/source及具体授出manifest；当前未授出 | 缺gate不授；SRC未好选B先RELcloseout；A发grant后只能signedreturn或严格abort-return，不能时间窗豁免/双写/偷偷改route |
 | DEP-OG-24-029-RETURN | incoming/outgoing | stage-level shared I return / abort | OG24.3 signed source交接或严格未落地abort-return；REL closeout事实写权 | OG24唯一root/cfowner交还，root签收并唯一写COVREL三planactualC/D | 成功return：6AC8VER/ER04/full/单Claude/signed+DCOsource、每sharedpostSHA/mode/lastwriter；或root发abort-return：未有任何3实现/站点signed或pushedlanding，且逐path为grant SHA/mode或与独立账本中准许非OG24 signed delta的完整机械重放SHA/mode相等、保护region字节不变；只此receipt可A→B | success逐源收据；abort列root/cf签推不存在的实际核查、每path grant/expected/current blob-OID/SHA/mode、唯一保护anchor/region SHA和逐commit非OG24 signed-delta ledger；未知差异拒绝。G09规范采纳commit不是3实现landing；receipt不能伪造 | 成功已签源仅forward-only，禁止以复原bytes偷偷A→B；无return REL三planfacts暂停。return后唯一root在postimages写actualC/D，不改F/tag或声称F含3 |
@@ -376,7 +380,9 @@ COV2-REL-01 冻结不含 OG-27 源码的最终 COV2 树；首次完成 bumped �
 
 **Task type:** implementation
 
-**Lifecycle / Acceptance:** in-progress / locally-accepted（具名本机门、ER-13 全量与唯一 Claude Code 最终 PASS；本卡 signed main Push 随本提交交付，家族 C/D 仍待完成）
+**Lifecycle / Acceptance:** done / complete（本次签推收口生效；继承v0.30.50 / F `deabb37` 的实际C/D，见[收口ledger](#covrel050-actual-cd)；SourceA/current3不在此完成范围）
+
+**发布前 source acceptance 历史：** in-progress / locally-accepted（具名本机门、ER-13 全量与唯一 Claude Code 最终 PASS；本卡 signed main Push 随本提交交付，家族 C/D 仍待完成）
 
 **Description:** 新增显式 coverage-v2 选择/规范编码 API，同时保留现有 `safe_turn_projection` 的 legacy-v1 语义；RG-04 `reasoning.rs::tests::contract_serde_snapshot` 继续调用旧 API 比对冻结 `contract.snap`。本卡只定义版本化编码边界，COV2-11 才把生产 live/import 调用点切到新 API；不得以 synthetic/native 互换验收。
 
@@ -439,7 +445,9 @@ COV2-REL-01 冻结不含 OG-27 源码的最终 COV2 树；首次完成 bumped �
 
 **Task type:** implementation
 
-**Lifecycle / Acceptance:** in-progress / locally-accepted（8 AC、4 VER、fmt、严格 Clippy 与唯一 Claude Code PASS；signed+DCO main `cd698ade182a935c4d91b0f84cb3ad13e8325e0b` 已交付，家族 C/D 仍待）
+**Lifecycle / Acceptance:** done / complete（本次签推收口生效；继承v0.30.50 / F `deabb37` 的实际C/D，见[收口ledger](#covrel050-actual-cd)；SourceA/current3不在此完成范围）
+
+**发布前 source acceptance 历史：** in-progress / locally-accepted（8 AC、4 VER、fmt、严格 Clippy 与唯一 Claude Code PASS；signed+DCO main `cd698ade182a935c4d91b0f84cb3ad13e8325e0b` 已交付，家族 C/D 仍待）
 
 **Description:** frozen v1/RG-04 legacy oracle。本卡唯一行为轴、恢复和粒度见下方 Granularity；不得以 synthetic/native 互换验收。
 
@@ -505,7 +513,9 @@ COV2-REL-01 冻结不含 OG-27 源码的最终 COV2 树；首次完成 bumped �
 
 **Task type:** implementation
 
-**Lifecycle / Acceptance:** in-progress / locally-accepted（8 AC、3 VER、fmt、严格 Clippy、双 env 全量与唯一 Claude Code PASS；signed+DCO main `d4f159fd17676c7b591c1f80858f2de17094260f` 已交付，家族 C/D 仍待）
+**Lifecycle / Acceptance:** done / complete（本次签推收口生效；继承v0.30.50 / F `deabb37` 的实际C/D，见[收口ledger](#covrel050-actual-cd)；SourceA/current3不在此完成范围）
+
+**发布前 source acceptance 历史：** in-progress / locally-accepted（8 AC、3 VER、fmt、严格 Clippy、双 env 全量与唯一 Claude Code PASS；signed+DCO main `d4f159fd17676c7b591c1f80858f2de17094260f` 已交付，家族 C/D 仍待）
 
 **Description:** versioned DB claim arbitration。本卡唯一行为轴、恢复和粒度见下方 Granularity；不得以 synthetic/native 互换验收。
 
@@ -568,7 +578,9 @@ COV2-REL-01 冻结不含 OG-27 源码的最终 COV2 树；首次完成 bumped �
 
 **Task type:** implementation
 
-**Lifecycle / Acceptance:** in-progress / locally-accepted（8 AC、4 VER、fmt、严格 Clippy、双 env 全量与唯一 Claude Code PASS；signed+DCO main `14fc516d94955fadb867c16868e7f12792c4b52e` 已交付，家族 C/D 仍待）
+**Lifecycle / Acceptance:** done / complete（本次签推收口生效；继承v0.30.50 / F `deabb37` 的实际C/D，见[收口ledger](#covrel050-actual-cd)；SourceA/current3不在此完成范围）
+
+**发布前 source acceptance 历史：** in-progress / locally-accepted（8 AC、4 VER、fmt、严格 Clippy、双 env 全量与唯一 Claude Code PASS；signed+DCO main `14fc516d94955fadb867c16868e7f12792c4b52e` 已交付，家族 C/D 仍待）
 
 **Description:** key-owner v1/v2 identity MAC domains。本卡唯一行为轴、恢复和粒度见下方 Granularity；不得以 synthetic/native 互换验收。
 
@@ -632,7 +644,9 @@ COV2-REL-01 冻结不含 OG-27 源码的最终 COV2 树；首次完成 bumped �
 
 **Task type:** implementation
 
-**Lifecycle / Acceptance:** in-progress / locally-accepted（8 AC、7 VER、公开文档守卫与旧行为回归均已具名验收；fmt、严格 Clippy、双 env 全量与唯一 Claude Code PASS；本卡 signed+DCO main `4558af64c09e63c4716fa68595776a8044f66cc7` 已 Push，家族 C/D 仍待）
+**Lifecycle / Acceptance:** done / complete（本次签推收口生效；继承v0.30.50 / F `deabb37` 的实际C/D，见[收口ledger](#covrel050-actual-cd)；SourceA/current3不在此完成范围）
+
+**发布前 source acceptance 历史：** in-progress / locally-accepted（8 AC、7 VER、公开文档守卫与旧行为回归均已具名验收；fmt、严格 Clippy、双 env 全量与唯一 Claude Code PASS；本卡 signed+DCO main `4558af64c09e63c4716fa68595776a8044f66cc7` 已 Push，家族 C/D 仍待）
 
 **Description:** dual-version private-map storage and aggregate bounds。本卡唯一行为轴、恢复和粒度见下方 Granularity；不得以 synthetic/native 互换验收。
 
@@ -704,7 +718,9 @@ COV2-REL-01 冻结不含 OG-27 源码的最终 COV2 树；首次完成 bumped �
 
 **Task type:** implementation
 
-**Lifecycle / Acceptance:** in-progress / locally-accepted（AC1–8 的五项 VER、五项旧 v1 mandatory ER-04 与两项缺表回归均逐项 1/1；最终双 env full **Summary [1618.814s] 10078 tests run: 10078 passed (14 slow), 23 skipped**/raw SHA-256 `c49dd3c33652d55541a0e4c0269c817460b9109cf261eab5271d90760a49e8a9`、exit0；唯一最终 Claude Code PASS，P0/P1/P2=0、P3=5/raw SHA-256 `9ef25f92615eefcf2019212a306cfa7542ef416b693286bb99111006b3ea6df7`；signed+DCO 源码/文档 main `d717e42e0d1ec75e6ae576b21242fd1519040abd` 已 Push 且 remote 同 SHA；本卡 2026-10-13 20:29:37 UTC 交接时按已签 23 卡口径 source-ready 6/23=26.09%（历史收据；本次 25 卡修订的当前口径为 6/25=24.00%）。家族 C/D 仍待；0 matched、只有 helper 或 skip 均不算 PASS）
+**Lifecycle / Acceptance:** done / complete（本次签推收口生效；继承v0.30.50 / F `deabb37` 的实际C/D，见[收口ledger](#covrel050-actual-cd)；SourceA/current3不在此完成范围）
+
+**发布前 source acceptance 历史：** in-progress / locally-accepted（AC1–8 的五项 VER、五项旧 v1 mandatory ER-04 与两项缺表回归均逐项 1/1；最终双 env full **Summary [1618.814s] 10078 tests run: 10078 passed (14 slow), 23 skipped**/raw SHA-256 `c49dd3c33652d55541a0e4c0269c817460b9109cf261eab5271d90760a49e8a9`、exit0；唯一最终 Claude Code PASS，P0/P1/P2=0、P3=5/raw SHA-256 `9ef25f92615eefcf2019212a306cfa7542ef416b693286bb99111006b3ea6df7`；signed+DCO 源码/文档 main `d717e42e0d1ec75e6ae576b21242fd1519040abd` 已 Push 且 remote 同 SHA；本卡 2026-10-13 20:29:37 UTC 交接时按已签 23 卡口径 source-ready 6/23=26.09%（历史收据；本次 25 卡修订的当前口径为 6/25=24.00%）。家族 C/D 仍待；0 matched、只有 helper 或 skip 均不算 PASS）
 
 **Description:** versioned marker and transactional fence。本卡唯一行为轴、恢复和粒度见下方 Granularity；不得以 synthetic/native 互换验收。
 
@@ -783,7 +799,9 @@ COV2-REL-01 冻结不含 OG-27 源码的最终 COV2 树；首次完成 bumped �
 
 **Task type:** implementation
 
-**Lifecycle / Acceptance:** in-progress / locally-accepted：COV2-04 纯 codec 的 8/8 AC、4/4 VER 与额外 producer-count 回归已在最终格式化源码本机验证，nightly fmt/strict Clippy/diff exit0；唯一 Claude Code PASS、signed+DCO main `03b10f887368a3db5206589f5dd6947432ffe26c` 已 Push 且远端同 SHA；家族 C/D 未结。
+**Lifecycle / Acceptance:** done / complete（本次签推收口生效；继承v0.30.50 / F `deabb37` 的实际C/D，见[收口ledger](#covrel050-actual-cd)；SourceA/current3不在此完成范围）
+
+**发布前 source acceptance 历史：** in-progress / locally-accepted：COV2-04 纯 codec 的 8/8 AC、4/4 VER 与额外 producer-count 回归已在最终格式化源码本机验证，nightly fmt/strict Clippy/diff exit0；唯一 Claude Code PASS、signed+DCO main `03b10f887368a3db5206589f5dd6947432ffe26c` 已 Push 且远端同 SHA；家族 C/D 未结。
 
 **Description:** 本卡的一条纯 codec 落点跨两个生产文件：`pending_payload.rs` 实现 versioned claim/identity 的有界内层表示与规范化编码，`pending.rs` 实现独立 outer-v2 envelope 的有界规范化 encoder，以及只接受既有 exact-byte MAC 验证所得 `AuthenticatedPendingEnvelope` witness 的 authenticated decoder。该 decoder 校验版本、binding 和有序 sealed tuple 后只返回内存 projection/claim plan，不签发 native 来源或可持久化 artifact 权限。从原 COV2-04 拆出 COV2-23 的同源 checked native borrow、COV2-24 的内存 sealed artifact 接线，以及 COV2-22 的真实持久化/冻结旧读端行为。纯 codec 可表达跨版本同 logical key；COV2-24 才消费本卡 codec 和 COV2-23 borrow。v1 历史字节仍由原始基线固定。
 
@@ -855,7 +873,9 @@ COV2-REL-01 冻结不含 OG-27 源码的最终 COV2 树；首次完成 bumped �
 
 **Task type:** implementation
 
-**Lifecycle / Acceptance:** in-progress / locally-accepted（source-qualified：actualsigned+DCO main/remote c60b281；原8AC/4VER、相关质量、R3完整full及最终合并单Claude已满足；家族C/D未完成，不记done/complete）
+**Lifecycle / Acceptance:** done / complete（本次签推收口生效；继承v0.30.50 / F `deabb37` 的实际C/D，见[收口ledger](#covrel050-actual-cd)；SourceA/current3不在此完成范围）
+
+**发布前 source acceptance 历史：** in-progress / locally-accepted（source-qualified：actualsigned+DCO main/remote c60b281；原8AC/4VER、相关质量、R3完整full及最终合并单Claude已满足；家族C/D未完成，不记done/complete）
 
 **Description:** pending same-version recovery。本卡唯一行为轴、恢复和粒度见下方 Granularity；不得以 synthetic/native 互换验收。
 
@@ -917,7 +937,9 @@ COV2-REL-01 冻结不含 OG-27 源码的最终 COV2 树；首次完成 bumped �
 
 **Task type:** implementation
 
-**Lifecycle / Acceptance:** in-progress / locally-accepted（原7AC/4VER、相关质量、代码单Claude及新T1 full已满足；最终两事实复核/签推交接待，家族C-D仍待）
+**Lifecycle / Acceptance:** done / complete（本次签推收口生效；继承v0.30.50 / F `deabb37` 的实际C/D，见[收口ledger](#covrel050-actual-cd)；SourceA/current3不在此完成范围）
+
+**发布前 source acceptance 历史：** in-progress / locally-accepted（原7AC/4VER、相关质量、代码单Claude及新T1 full已满足；最终两事实复核/签推交接待，家族C-D仍待）
 
 **Description:** version-aware import cursor/digest/fault。本卡唯一行为轴、恢复和粒度见下方 Granularity；不得以 synthetic/native 互换验收。
 
@@ -978,7 +1000,9 @@ COV2-REL-01 冻结不含 OG-27 源码的最终 COV2 树；首次完成 bumped �
 
 **Task type:** implementation
 
-**Lifecycle / Acceptance:** in-progress / locally-accepted
+**Lifecycle / Acceptance:** done / complete（本次签推收口生效；继承v0.30.50 / F `deabb37` 的实际C/D，见[收口ledger](#covrel050-actual-cd)；SourceA/current3不在此完成范围）
+
+**发布前 source acceptance 历史：** in-progress / locally-accepted
 
 **Description:** graph/doctor v1+v2 read contract and unsupported-version fail-closed。本卡唯一行为轴、恢复和粒度见下方 Granularity；不得以 synthetic/native 互换验收。
 
@@ -1040,7 +1064,9 @@ COV2-REL-01 冻结不含 OG-27 源码的最终 COV2 树；首次完成 bumped �
 
 **Task type:** implementation
 
-**Lifecycle / Acceptance:** in-progress / locally-accepted
+**Lifecycle / Acceptance:** done / complete（本次签推收口生效；继承v0.30.50 / F `deabb37` 的实际C/D，见[收口ledger](#covrel050-actual-cd)；SourceA/current3不在此完成范围）
+
+**发布前 source acceptance 历史：** in-progress / locally-accepted
 
 **Description:** OpenCode part classification into typed source。本卡唯一行为轴、恢复和粒度见下方 Granularity；不得以 synthetic/native 互换验收。
 
@@ -1102,7 +1128,9 @@ COV2-REL-01 冻结不含 OG-27 源码的最终 COV2 树；首次完成 bumped �
 
 **Task type:** implementation
 
-**Lifecycle / Acceptance:** in-progress / locally-accepted
+**Lifecycle / Acceptance:** done / complete（本次签推收口生效；继承v0.30.50 / F `deabb37` 的实际C/D，见[收口ledger](#covrel050-actual-cd)；SourceA/current3不在此完成范围）
+
+**发布前 source acceptance 历史：** in-progress / locally-accepted
 
 **Description:** typed redaction and authority-zero-sink。本卡唯一行为轴、恢复和粒度见下方 Granularity；不得以 synthetic/native 互换验收。
 
@@ -1210,7 +1238,9 @@ COV2-REL-01 冻结不含 OG-27 源码的最终 COV2 树；首次完成 bumped �
 
 **Task type:** implementation
 
-**Lifecycle / Acceptance:** in-progress / locally-accepted
+**Lifecycle / Acceptance:** done / complete（本次签推收口生效；继承v0.30.50 / F `deabb37` 的实际C/D，见[收口ledger](#covrel050-actual-cd)；SourceA/current3不在此完成范围）
+
+**发布前 source acceptance 历史：** in-progress / locally-accepted
 
 **Description:** live/import v2 activation and byte parity。本卡唯一行为轴、恢复和粒度见下方 Granularity；不得以 synthetic/native 互换验收。
 
@@ -1490,7 +1520,9 @@ No new AC/VER/card/target/serial/global teststate/publicAPI, no newowner beyond 
 
 **Task type:** implementation
 
-**Lifecycle / Acceptance:** in-progress / locally-accepted
+**Lifecycle / Acceptance:** done / complete（本次签推收口生效；继承v0.30.50 / F `deabb37` 的实际C/D，见[收口ledger](#covrel050-actual-cd)；SourceA/current3不在此完成范围）
+
+**发布前 source acceptance 历史：** in-progress / locally-accepted
 
 **Description:** macOS trusted fake exporter integration, ignored Session gates and legacy extraction repair。本卡的旧 fixture 修复只调整此 Session 入口的既有 ignored 断言/预检，不能改变生产授权或把独立行为错误塞入此卡；恢复和粒度见下方 Granularity；不得以 synthetic/native 互换验收。
 
@@ -1589,7 +1621,9 @@ CODE/QA后仅本两事实计划修改，另9个owned非事实后像继续绑定�
 
 **Task type:** implementation
 
-**Lifecycle / Acceptance:** in-progress / locally-accepted
+**Lifecycle / Acceptance:** done / complete（本次签推收口生效；继承v0.30.50 / F `deabb37` 的实际C/D，见[收口ledger](#covrel050-actual-cd)；SourceA/current3不在此完成范围）
+
+**发布前 source acceptance 历史：** in-progress / locally-accepted
 
 **Description:** proof/state-bearing candidate live Session firewall。本卡唯一行为轴、恢复和粒度见下方 Granularity；不得以 synthetic/native 互换验收。
 
@@ -1678,7 +1712,9 @@ CODE/QA后只改本两事实计划，另6owned非事实SHA继续绑定已审已�
 
 **Task type:** implementation
 
-**Lifecycle / Acceptance:** in-progress / locally-accepted
+**Lifecycle / Acceptance:** done / complete（本次签推收口生效；继承v0.30.50 / F `deabb37` 的实际C/D，见[收口ledger](#covrel050-actual-cd)；SourceA/current3不在此完成范围）
+
+**发布前 source acceptance 历史：** in-progress / locally-accepted
 
 **Description:** proof/state-bearing candidate import Session firewall。本卡唯一行为轴、恢复和粒度见下方 Granularity；不得以 synthetic/native 互换验收。
 
@@ -1770,7 +1806,9 @@ CODE/QA后只改本两事实计划，另6owned非事实SHA继续绑定已审已�
 
 **Task type:** implementation
 
-**Lifecycle / Acceptance:** in-progress / locally-accepted（8/8 AC、5/5 VER、16 项继承回归、独立 replay 与架构守卫均已具名通过；nightly fmt、strict Clippy、diff check 与双 env full exit0；唯一 Claude Code PASS，P0/P1/P2=0、P3=3；signed+DCO main `354ff768c406bdad74607da62002bff810147c24` 已 Push、remote 同 SHA；家族 C/D、真实 Source A 未完成）
+**Lifecycle / Acceptance:** done / complete（本次签推收口生效；继承v0.30.50 / F `deabb37` 的实际C/D，见[收口ledger](#covrel050-actual-cd)；SourceA/current3不在此完成范围）
+
+**发布前 source acceptance 历史：** in-progress / locally-accepted（8/8 AC、5/5 VER、16 项继承回归、独立 replay 与架构守卫均已具名通过；nightly fmt、strict Clippy、diff check 与双 env full exit0；唯一 Claude Code PASS，P0/P1/P2=0、P3=3；signed+DCO main `354ff768c406bdad74607da62002bff810147c24` 已 Push、remote 同 SHA；家族 C/D、真实 Source A 未完成）
 
 **Description:** 自 COV2-03 拆出。经既有 native proof/binding 验证的 `NativeProven` payload 借用口构造 version-keyed v2 identity plan；把该 plan、版本化 claim sidecar、私有 identity-v2 record/map 与 ref/catalog/claim 提交绑定为一次真实 HistoryManager 事务。本卡交付封闭 `NativeVersionedReasoningCoveragePlan::{matches_payload, bind_claims, turn}` 只读消费面、`NativeVersionedReasoningClaimCommitPlan::new` 封闭构造器，以及该 commit plan 的 `reasoning()`/`versioned()` 只读访问器；COV2-23 只能在本卡最终 signed main 的 API 已审且具名 VER 通过后消费，隔离候选不算交付。`matches_payload` 比较 native proof/opaque artifact 元数据和 session/provider 的 source tag，不证明整个 redacted payload 对象逐字节相同，也不签发 Source A。v1 原路径和冻结字节保持。
 
@@ -1863,7 +1901,9 @@ CODE/QA后只改本两事实计划，另6owned非事实SHA继续绑定已审已�
 
 **Task type:** implementation
 
-**Lifecycle / Acceptance:** locally-accepted / 本机 7/7 AC、3/3 VER 与冻结 v1 回归各 1/1；nightly fmt、diff check、strict Clippy、双 env full、唯一 Claude PASS 与 signed+DCO main 已通过；当前精确提交的 Windows job `115625055658` 已 success，完整 CI 与家族 C/D 未闭合
+**Lifecycle / Acceptance:** done / complete（本次签推收口生效；继承v0.30.50 / F `deabb37` 的实际C/D，见[收口ledger](#covrel050-actual-cd)；SourceA/current3不在此完成范围）
+
+**发布前 source acceptance 历史：** locally-accepted / 本机 7/7 AC、3/3 VER 与冻结 v1 回归各 1/1；nightly fmt、diff check、strict Clippy、双 env full、唯一 Claude PASS 与 signed+DCO main 已通过；当前精确提交的 Windows job `115625055658` 已 success，完整 CI 与家族 C/D 未闭合
 
 **Description:** 自 COV2-03 拆出并经 COV2-19 接续，进一步拆出 COV2-21 的 retain 行为；本卡只提供 `verify_versioned_reserved_live_claims_with_conn(conn,scope,&VersionedLiveClaimCommitPlan)`。只读取 sealed 有序 (version,key,digest,completeness,owner,fence,previous_revision,state) 预留 tuple；使用调用方 `ConnectionTrait` 的事务视图，不更新 lease。v1 API 保持。
 
@@ -1935,7 +1975,9 @@ CODE/QA后只改本两事实计划，另6owned非事实SHA继续绑定已审已�
 
 **Task type:** implementation
 
-**Lifecycle / Acceptance:** locally-accepted / 7/7 AC、4/4 VER 与五项继承精确测试各 1/1；fmt/strict/full、唯一 Claude PASS 与 signed+DCO main 已交接；家族 C/D 待 COV2-REL-01
+**Lifecycle / Acceptance:** done / complete（本次签推收口生效；继承v0.30.50 / F `deabb37` 的实际C/D，见[收口ledger](#covrel050-actual-cd)；SourceA/current3不在此完成范围）
+
+**发布前 source acceptance 历史：** locally-accepted / 7/7 AC、4/4 VER 与五项继承精确测试各 1/1；fmt/strict/full、唯一 Claude PASS 与 signed+DCO main 已交接；家族 C/D 待 COV2-REL-01
 
 **Description:** 自 COV2-20 拆出，提供 `retain_versioned_reserved_live_claims_for_artifact_with_conn(conn,scope,&VersionedLiveClaimCommitPlan)`。使用同一 sealed canonical tuple 和调用方 SQLite transaction 更新双版本 lease；COV2-20 已独立验证只读验领。
 
@@ -2008,7 +2050,9 @@ CODE/QA后只改本两事实计划，另6owned非事实SHA继续绑定已审已�
 
 **Task type:** implementation
 
-**Lifecycle / Acceptance:** in-progress / locally-accepted（source-qualified：指定dcc固定writer补证、最终d188 full、新事实103 reader/fmt/strict、唯一Claude PASS与root裁决已闭；signed+DCO main `58b4c02e7ec372e5e9bfec13e108e0e68810c510` 实际Push/remote同一；家族C/D待COV2-REL-01，不授formal complete或Source A）
+**Lifecycle / Acceptance:** done / complete（本次签推收口生效；继承v0.30.50 / F `deabb37` 的实际C/D，见[收口ledger](#covrel050-actual-cd)；SourceA/current3不在此完成范围）
+
+**发布前 source acceptance 历史：** in-progress / locally-accepted（source-qualified：指定dcc固定writer补证、最终d188 full、新事实103 reader/fmt/strict、唯一Claude PASS与root裁决已闭；signed+DCO main `58b4c02e7ec372e5e9bfec13e108e0e68810c510` 实际Push/remote同一；家族C/D待COV2-REL-01，不授formal complete或Source A）
 
 **Description:** 自 COV2-04 拆出，且原始 outer-v2 成员完整性轴进一步拆出 COV2-25；消费 COV2-24 已审的内存 `SealedVersionedPendingArtifact`、COV2-25 key-owner verifier 与 COV2-20/21 事务 API，真实执行 `seal→persist(&DatabaseTransaction)→commit→load`。`pending_payload.rs` 只为 AC6/VER2 补同一持久化 artifact 的认证后 redacted rehydrate/typed deferred loader，不能新增来源铸造或 replay ACK；同时验证同事务双版本 lease/artifact、编译冻结旧读端拒绝、真实 writer 故障回滚，以及原 v1 生产 seal→persist→commit→load 后持久化 chunk/header 原字节/MAC 与历史冻结常量兼容。本卡 AC8 是 persist 入口对已封闭 artifact 的二次防御，不重复 COV2-23 的 checked-borrow 准入门。
 
@@ -2110,7 +2154,9 @@ VER6 现仅消费独立历史源码 `7efcf868d49a5183e7f0851a89abebee91357155`�
 
 **Task type:** implementation
 
-**Lifecycle / Acceptance:** in-progress / locally-accepted（8/8 AC、4/4 VER、四项继承与两项修订后架构守卫各 1/1；fmt/strict/full 与唯一 Claude PASS；signed+DCO main `d977d13c5e23111b93d78477b9e1a70015a111b8` 已交接；家族 C/D 待 COV2-REL-01）
+**Lifecycle / Acceptance:** done / complete（本次签推收口生效；继承v0.30.50 / F `deabb37` 的实际C/D，见[收口ledger](#covrel050-actual-cd)；SourceA/current3不在此完成范围）
+
+**发布前 source acceptance 历史：** in-progress / locally-accepted（8/8 AC、4/4 VER、四项继承与两项修订后架构守卫各 1/1；fmt/strict/full 与唯一 Claude PASS；signed+DCO main `d977d13c5e23111b93d78477b9e1a70015a111b8` 已交接；家族 C/D 待 COV2-REL-01）
 
 **Description:** 自原 COV2-04 的内存 seal 前置拆出，且消费 COV2-19 的最终已签名 `NativeVersionedReasoningClaimCommitPlan`。只在 `src/internal/ai/capture/checkpoint.rs` 增加 `CheckpointRedactedPayload::prepare_pending_native_versioned_seal(scope, &companion, provider) -> Result<PreparedPendingNativeSeal<'_>, CheckpointStoreError>`。该入口从同一个已封闭 payload 借用 NativeProven batch，验证 companion 的 payload/source tag、当前 capture binding、完整 versioned claim 集，按 `(coverage_schema_version, logical_turn_key)` 取每个 identity，并生成既有 `PreparedPendingNativeSeal`。在下游别名/投影仍按裸 logical key 关联期间，native 跨版本同 key 在此 fail closed；COV2-04 的纯 wire codec 同 key roundtrip 仍合法，不是 native 授权正例。
 
@@ -2190,7 +2236,9 @@ VER6 现仅消费独立历史源码 `7efcf868d49a5183e7f0851a89abebee91357155`�
 
 **Task type:** implementation
 
-**Lifecycle / Acceptance:** in-progress / locally-accepted；COV2-24 最终 5/5 AC、3/3 VER 与七项 mandatory ER-04 精确 1/1（十 selector；focused index `39306128fdc72bbb2ae9bca583f186f2d8bfda693b68fb1a38795b815c9e31d5`），nightly fmt/strict Clippy/diff exit0（quality index `d0c676eb165802886f6f700d869d813db610a0fc7d09bf5e9759c452b71e979b`），双 env T-5 `NEXTEST_TEST_THREADS=4` 10103/10103 passed、23 skipped、exit0（raw `2908fff258247c857ae857a4759fcde9b925c212cc5912fa373ece16b5373029`）；唯一 Claude Code PASS、P0/P1/P2=0、P3=3（raw `a6d467bcdc33c42fff3c45f55681ebbaefa213d96cfd59a8b901c5d3dff942f7`）；八路径 0644 manifest `cd43b9af3980c8f3e90ce5751df7855ebaf1f604e2803130f0d32d9556b46e98`；signed+DCO main `c56de683acf71d7327436eef7ef9185d97dcff27` 与远端同 SHA。两轮失败 full 保留为失败历史；COV2-24 交接时安全 CI 仍在运行；其后 `c56de683`/前次 `5b0e7fc1` 的未完成旧 Actions 按用户新 commit 策略取消，cancelled 不记 D 组通过。 本卡 C/D 仍由 COV2-REL-01 继承，尚未 formal done/complete。
+**Lifecycle / Acceptance:** done / complete（本次签推收口生效；继承v0.30.50 / F `deabb37` 的实际C/D，见[收口ledger](#covrel050-actual-cd)；SourceA/current3不在此完成范围）
+
+**发布前 source acceptance 历史：** in-progress / locally-accepted；COV2-24 最终 5/5 AC、3/3 VER 与七项 mandatory ER-04 精确 1/1（十 selector；focused index `39306128fdc72bbb2ae9bca583f186f2d8bfda693b68fb1a38795b815c9e31d5`），nightly fmt/strict Clippy/diff exit0（quality index `d0c676eb165802886f6f700d869d813db610a0fc7d09bf5e9759c452b71e979b`），双 env T-5 `NEXTEST_TEST_THREADS=4` 10103/10103 passed、23 skipped、exit0（raw `2908fff258247c857ae857a4759fcde9b925c212cc5912fa373ece16b5373029`）；唯一 Claude Code PASS、P0/P1/P2=0、P3=3（raw `a6d467bcdc33c42fff3c45f55681ebbaefa213d96cfd59a8b901c5d3dff942f7`）；八路径 0644 manifest `cd43b9af3980c8f3e90ce5751df7855ebaf1f604e2803130f0d32d9556b46e98`；signed+DCO main `c56de683acf71d7327436eef7ef9185d97dcff27` 与远端同 SHA。两轮失败 full 保留为失败历史；COV2-24 交接时安全 CI 仍在运行；其后 `c56de683`/前次 `5b0e7fc1` 的未完成旧 Actions 按用户新 commit 策略取消，cancelled 不记 D 组通过。 本卡 C/D 仍由 COV2-REL-01 继承，尚未 formal done/complete。
 
 **Description:** 自 COV2-04 的内存 seal 行为轴拆出。在 `src/internal/ai/capture/pending.rs` 实现 `SealedVersionedPendingArtifact::seal` 与封闭 `VersionedPendingSealRequest`：从请求中同一个 `CheckpointRedactedPayload` 和 COV2-19 已封闭 `NativeVersionedReasoningClaimCommitPlan`，在本入口调用 COV2-23 `prepare_pending_native_versioned_seal`；在 `src/internal/ai/capture/pending_payload.rs` 实现 `PendingPayloadProjection::seal_bound_versioned_reasoning`，将该 checked borrow 的有序 identity 与同一 companion 的有序 `(coverage_schema_version,logical_turn_key)` claim 精确配对，形成版本化 inner projection；最后消费 COV2-04 有界 codec，生成未持久化的 exact-byte authenticated outer-v2 artifact。COV2-23 既有 `PreparedPendingNativeSeal` 的 association 值仍不带 version，故不得单凭该裸 key 向内层投影补猜 version。`provider` 只从已验证 alias/capture context 导出，不额外接受可伪造标签。现有 v1 `SealedPendingArtifact::seal`、`PendingPayloadProjection::seal_bound_reasoning` 与其字节保持原路径。
 
@@ -2264,7 +2312,9 @@ VER6 现仅消费独立历史源码 `7efcf868d49a5183e7f0851a89abebee91357155`�
 
 **Task type:** implementation
 
-**Lifecycle / Acceptance:** locally-accepted / 空；实际代码Claude R2 PASS、signed+DCO783041fe已随4c628d4 Push/source-qualified；当前源码13/26，正式0/26。原18exact、fmt/strict及冻结full10110/10110按下方收据保留，实际49含5c/ordinary29新树full仍待；Source A/C-D不授予。原签前历史状态：in-progress / 空；实现已落入批准写集；最终 r4 四项 VER、八项 mandatory 与三闭集/三上游 cat-file 补充共18个 exact selector 各1/1，八项 AC 的本机机制断言通过；r4 fmt/diff/strict Clippy exit0，冻结2b实现树的双env full 10110/10110 passed、23 skipped、exit0。最终单审与signed交付仍待，不预增源码就绪；新上游5c及29适配不在本轮full内，临时49须在其真实最终实现树另验。G-09 三文档已由唯一 Claude Code R2 实际 PASS（P0/P1/P2=0，P3=3；raw SHA-256 `078014fb07a626ba2bf80de0afdae79fbcafce4404a9f8aa3ea67df4221d65d9`）、nightly fmt/diff/strict Clippy exit0、hook contract 11/11（quality index `bea125fa600546496462c208f1d268de9b46b5b66d2adbfa38cbb4f1ef71d085`），signed+DCO main `2b80a56242c89518e706eaca18ceb4b0d66798d6` 已 Push 且 Libra/GitHub remote 同 SHA；三路径最终 manifest `c0a907fed96d481125bdeed1a931daf070b497bd98e41086c22cb3cf9f874eab` 逐字节对拍。协调本身不算本卡验收。
+**Lifecycle / Acceptance:** done / complete（本次签推收口生效；继承v0.30.50 / F `deabb37` 的实际C/D，见[收口ledger](#covrel050-actual-cd)；SourceA/current3不在此完成范围）
+
+**发布前 source acceptance 历史：** locally-accepted / 空；实际代码Claude R2 PASS、signed+DCO783041fe已随4c628d4 Push/source-qualified；当前源码13/26，正式0/26。原18exact、fmt/strict及冻结full10110/10110按下方收据保留，实际49含5c/ordinary29新树full仍待；Source A/C-D不授予。原签前历史状态：in-progress / 空；实现已落入批准写集；最终 r4 四项 VER、八项 mandatory 与三闭集/三上游 cat-file 补充共18个 exact selector 各1/1，八项 AC 的本机机制断言通过；r4 fmt/diff/strict Clippy exit0，冻结2b实现树的双env full 10110/10110 passed、23 skipped、exit0。最终单审与signed交付仍待，不预增源码就绪；新上游5c及29适配不在本轮full内，临时49须在其真实最终实现树另验。G-09 三文档已由唯一 Claude Code R2 实际 PASS（P0/P1/P2=0，P3=3；raw SHA-256 `078014fb07a626ba2bf80de0afdae79fbcafce4404a9f8aa3ea67df4221d65d9`）、nightly fmt/diff/strict Clippy exit0、hook contract 11/11（quality index `bea125fa600546496462c208f1d268de9b46b5b66d2adbfa38cbb4f1ef71d085`），signed+DCO main `2b80a56242c89518e706eaca18ceb4b0d66798d6` 已 Push 且 Libra/GitHub remote 同 SHA；三路径最终 manifest `c0a907fed96d481125bdeed1a931daf070b497bd98e41086c22cb3cf9f874eab` 逐字节对拍。协调本身不算本卡验收。
 
 **Description:** 自 COV2-22 拆出。密钥所有者读取既有 repository key、预期 capture scope/storage/root/deadline 与原始 canonical outer-v2 bytes/MAC；在 COV2-04 有界 authenticated decoder/preflight 后精确认证原始 binding、嵌套 `payload.redacted`、reasoning source、ordered versioned associations、coverage 和 ordered `(version,key)` tuple，只颁发本地 `PendingIntegrityToken` 或等价 integrity-only 结果。原 v1 成员入口、字节和 MAC 域不变。本卡不生成 native provenance，也不做 persist/ACK。
 
@@ -2359,7 +2409,9 @@ VER6 现仅消费独立历史源码 `7efcf868d49a5183e7f0851a89abebee91357155`�
 
 **Task type:** audit
 
-**Lifecycle / Acceptance:** in-progress / locally-accepted
+**Lifecycle / Acceptance:** done / complete（本次签推收口生效；继承v0.30.50 / F `deabb37` 的实际C/D，见[收口ledger](#covrel050-actual-cd)；SourceA/current3不在此完成范围）
+
+**发布前 source acceptance 历史：** in-progress / locally-accepted
 
 **Description:** 12-case bridge/pipeline/OG-26 macOS acceptance inventory（两个审计共21继承+1当前格式替代，本卡为其中12名；classic status终态兼容延期）。本卡唯一行为轴、恢复和粒度见下方 Granularity；不得以 synthetic/native 互换验收。
 
@@ -2427,7 +2479,9 @@ VER6 现仅消费独立历史源码 `7efcf868d49a5183e7f0851a89abebee91357155`�
 
 **Task type:** audit
 
-**Lifecycle / Acceptance:** in-progress / locally-accepted
+**Lifecycle / Acceptance:** done / complete（本次签推收口生效；继承v0.30.50 / F `deabb37` 的实际C/D，见[收口ledger](#covrel050-actual-cd)；SourceA/current3不在此完成范围）
+
+**发布前 source acceptance 历史：** in-progress / locally-accepted
 
 **Description:** 10-case lifecycle/crash/import/oracle macOS acceptance inventory。本卡唯一行为轴、恢复和粒度见下方 Granularity；不得以 synthetic/native 互换验收。
 
@@ -2495,13 +2549,15 @@ VER6 现仅消费独立历史源码 `7efcf868d49a5183e7f0851a89abebee91357155`�
 
 **Task type:** release
 
-**Lifecycle / Acceptance:** in-progress / 空
+**Lifecycle / Acceptance:** done / complete（本次签推收口生效；继承v0.30.50 / F `deabb37` 的实际C/D，见[收口ledger](#covrel050-actual-cd)；SourceA/current3不在此完成范围）
+
+**发布前 source acceptance 历史：** in-progress / 空
 
 **Description:** 只把经审查的 23 implementation+2 audit COV2 family 按一个稳定 patch 发布并验证；不引入新行为，冻结树不含 OG-27 source。COV2-21/23/04/24/25/22 必须是实际 signed main A/B+单 Claude PASS 交付，12 AC/12 VER 的 release 计数不因拆卡静默增删。
 
 **Out of scope:** native Source A/issuer 注册属于父计划 DEP-OG-12/OG-27；若发布后发现缺陷，以新签名 patch 前滚，绝不改已发布 tag/asset。
 
-**Current evidence (2026-10-16 03:08:13 UTC):** actualR5 mainbe05已采纳；新最终50 T2 `Summary [1134.569s] 10219 tests run: 10219 passed (2 slow), 23 skipped` /exit0/raw `f28ad74f0aef5bb220618d175c323786117fa7b7c444bf03afd76ea92ae2d27e`、六manual各1/1/version2及原visible1+22audit条件映射完成，source2048前后同一。仅AC3–11/VER3–11恢复；final CODE/F/CI/发布安装/原.2epoch0/C-D仍待，source25/formal0、父formal59/source62不变。
+**Historical pre-release evidence (2026-10-16 03:08:13 UTC):** actualR5 mainbe05已采纳；新最终50 T2 `Summary [1134.569s] 10219 tests run: 10219 passed (2 slow), 23 skipped` /exit0/raw `f28ad74f0aef5bb220618d175c323786117fa7b7c444bf03afd76ea92ae2d27e`、六manual各1/1/version2及原visible1+22audit条件映射完成，source2048前后同一。仅AC3–11/VER3–11恢复；final CODE/F/CI/发布安装/原.2epoch0/C-D仍待，source25/formal0、父formal59/source62不变。
 
 **Historical evidence (2026-10-16T00:51:06.887345+00:00; before f6ff/R5):** actual adopted main d74f37a，incoming repair189/cff290 source-qualified；首次最终repaired50 T2 actual10219/10219/exit0（2slow、23skip、0FAIL0retry0flaky0LEAK）及六manual/fresh visible1/quality已过，2045非I3字节/mode保持受测值；最终CODE Claude/F及原C/D尚待，source25/26/formal0、parent source62/72/formal59/72。
 
@@ -2509,8 +2565,8 @@ VER6 现仅消费独立历史源码 `7efcf868d49a5183e7f0851a89abebee91357155`�
 
 **Acceptance criteria:**
 
-- [ ] AC1 all child behavior-file hashes/modes match the freeze, except only the separately reviewed exact release-status/anchor delta in the eight named public documentation files; bind their final postimage SHA/mode to F and preserve all other runtime, tests and behavior-paragraph bytes. 另允许且仅允许已审 `CHANGELOG.md` 当前0.30.50新顶节；冻结其SHA/mode并核旧历史尾逐字不变，不改变其它行为。 已审 main f6ff 的 README Quick Start/三 plan 交接为固定乘载基线，按 VER2 分类，不算本卡新增行为；对应旧八文档 SHA 仅属旧时点，本次以最终冻结后像为准。
-- [ ] AC2 the release tree equals the approved COV2 freeze, including every ancestor enumerated by VER2 and excluding OG-27, plus the allowed R-only bump and separately reviewed exact eight-document release-status/anchor delta; no other source delta is permitted. 另允许且仅允许已审 `CHANGELOG.md` 当前0.30.50新顶节；冻结其SHA/mode并核旧历史尾逐字不变，不改变其它行为。 已审 main f6ff 的 README Quick Start/三 plan 交接为固定乘载基线，按 VER2 分类，不算本卡新增行为；对应旧八文档 SHA 仅属旧时点，本次以最终冻结后像为准。
+- [x] AC1 all child behavior-file hashes/modes match the freeze, except only the separately reviewed exact release-status/anchor delta in the eight named public documentation files; bind their final postimage SHA/mode to F and preserve all other runtime, tests and behavior-paragraph bytes. 另允许且仅允许已审 `CHANGELOG.md` 当前0.30.50新顶节；冻结其SHA/mode并核旧历史尾逐字不变，不改变其它行为。 已审 main f6ff 的 README Quick Start/三 plan 交接为固定乘载基线，按 VER2 分类，不算本卡新增行为；对应旧八文档 SHA 仅属旧时点，本次以最终冻结后像为准。
+- [x] AC2 the release tree equals the approved COV2 freeze, including every ancestor enumerated by VER2 and excluding OG-27, plus the allowed R-only bump and separately reviewed exact eight-document release-status/anchor delta; no other source delta is permitted. 另允许且仅允许已审 `CHANGELOG.md` 当前0.30.50新顶节；冻结其SHA/mode并核旧历史尾逐字不变，不改变其它行为。 已审 main f6ff 的 README Quick Start/三 plan 交接为固定乘载基线，按 VER2 分类，不算本卡新增行为；对应旧八文档 SHA 仅属旧时点，本次以最终冻结后像为准。
 - [x] AC3 COV2-12 fake-exporter live Session report is source-qualified PASS
 - [x] AC4 its fake-exporter import Session report is source-qualified PASS
 - [x] AC5 its failed-export zero-write Session report is source-qualified PASS
@@ -2520,12 +2576,12 @@ VER6 现仅消费独立历史源码 `7efcf868d49a5183e7f0851a89abebee91357155`�
 - [x] AC9 genuine local visible-only observation is PASS on final behavior source
 - [x] AC10 COV2-16 current 12 selected bridge/pipeline/OG-26 cases (11 inherited +1 current-format import replacement) have non-skipped macOS PASS on final source; the excluded classic status legacy case remains explicitly FAIL/deferred, never PASS
 - [x] AC11 COV2-17 all 10 existing lifecycle/crash/import/oracle cases have non-skipped macOS PASS on final source
-- [ ] AC12 every child's inherited C/D ledger is valid for the published SHA before `done/complete` or `DEP-OG-13=complete`.
+- [x] AC12 every child's inherited C/D ledger is valid for the published SHA before `done/complete` or `DEP-OG-13=complete`.
 
 **Verification:** 以下 VER3–11 首次发布在同一最终行为源码验收；若上游仅推高 patch 版本且上述逐路径等价成立，可沿同实现复用已签 full/本机原始证据，但必须把旧证据映射到新 release SHA 并重新核版本面、安装、安全 CI 与四平台发布，不把不同源码或不同模型/配置的旧门冒称通过。
 
-- [ ] VER1→AC1 compare each source path hash/mode handoff with frozen source SHA; for the eight named public docs, verify only the approved exact statusface/version-label/anchor spans differ, freeze their final SHA/mode, and prove every other runtime/test/behavior paragraph retains its approved bytes. 另允许且仅允许已审 `CHANGELOG.md` 当前0.30.50新顶节；冻结其SHA/mode并核旧历史尾逐字不变，不改变其它行为。 已审 main f6ff 的 README Quick Start/三 plan 交接为固定乘载基线，按 VER2 分类，不算本卡新增行为；对应旧八文档 SHA 仅属旧时点，本次以最终冻结后像为准。
-- [ ] VER2→AC2 compare the freeze diff with approved card paths, the reviewed eight-document status/anchor manifest and OG-27 exclusion; execute `libra log <last-stable-tag>..<freeze-main-sha>` and classify **every** carried commit by owning plan/card, signed SHA, review, required C/D state and unmet release gate. COV2 children inherit this release C/D；OG-24/25/26 须核其 A/B+Claude+signed main 及本次安全/安装门，其下游 `REL-FAST-OG-04` C/D 保持 pending；其它计划乘载提交若有应先满足的独立前置则阻断冻结。Verify `approved_build.rs` `.2` admission source is in the actual release tree; installed-binary registration remains a separate test (`libra diff --check` is normal hygiene outside this count). 另允许且仅允许已审 `CHANGELOG.md` 当前0.30.50新顶节；冻结其SHA/mode并核旧历史尾逐字不变，不改变其它行为。 已审 main f6ff 的 README Quick Start/三 plan 交接为固定乘载基线，按 VER2 分类，不算本卡新增行为；对应旧八文档 SHA 仅属旧时点，本次以最终冻结后像为准。
+- [x] VER1→AC1 compare each source path hash/mode handoff with frozen source SHA; for the eight named public docs, verify only the approved exact statusface/version-label/anchor spans differ, freeze their final SHA/mode, and prove every other runtime/test/behavior paragraph retains its approved bytes. 另允许且仅允许已审 `CHANGELOG.md` 当前0.30.50新顶节；冻结其SHA/mode并核旧历史尾逐字不变，不改变其它行为。 已审 main f6ff 的 README Quick Start/三 plan 交接为固定乘载基线，按 VER2 分类，不算本卡新增行为；对应旧八文档 SHA 仅属旧时点，本次以最终冻结后像为准。
+- [x] VER2→AC2 compare the freeze diff with approved card paths, the reviewed eight-document status/anchor manifest and OG-27 exclusion; execute `libra log <last-stable-tag>..<freeze-main-sha>` and classify **every** carried commit by owning plan/card, signed SHA, review, required C/D state and unmet release gate. COV2 children inherit this release C/D；OG-24/25/26 须核其 A/B+Claude+signed main 及本次安全/安装门，其下游 `REL-FAST-OG-04` C/D 保持 pending；其它计划乘载提交若有应先满足的独立前置则阻断冻结。Verify `approved_build.rs` `.2` admission source is in the actual release tree; installed-binary registration remains a separate test (`libra diff --check` is normal hygiene outside this count). 另允许且仅允许已审 `CHANGELOG.md` 当前0.30.50新顶节；冻结其SHA/mode并核旧历史尾逐字不变，不改变其它行为。 已审 main f6ff 的 README Quick Start/三 plan 交接为固定乘载基线，按 VER2 分类，不算本卡新增行为；对应旧八文档 SHA 仅属旧时点，本次以最终冻结后像为准。
 - [x] VER3→AC3 **在首次实际 patch bump 后的最终行为源码树上重新运行** macOS manual `source .env.test && cargo test --features test-live-agent --test agent_opencode_bridge_test cov2_macos_fake_exporter_live_session_capture -- --ignored --exact --nocapture --test-threads=1` (1/1)，并核对行为文件 SHA/mode。
 - [x] VER4→AC4 同一最终行为源码树重新运行 `source .env.test && cargo test --features test-live-agent --test agent_opencode_bridge_test cov2_macos_fake_exporter_import_session_capture -- --ignored --exact --nocapture --test-threads=1` (1/1)。
 - [x] VER5→AC5 同一最终行为源码树重新运行 `source .env.test && cargo test --features test-live-agent --test agent_opencode_bridge_test cov2_macos_failed_export_session_zero_write -- --ignored --exact --nocapture --test-threads=1` (1/1)。
@@ -2535,7 +2591,7 @@ VER6 现仅消费独立历史源码 `7efcf868d49a5183e7f0851a89abebee91357155`�
 - [x] VER9→AC9 由 COV2-17 所有者在 DEP-COV2-MODEL 下预登记已授权 isolated OpenCode build、模型、完整无密 argv 和 ≤10 分钟上限，再在**首次 bumped 最终行为源码树**上重新执行 genuine visible-only 观察；实际原始命令、exit、无敏字段类型/数量和 keyed digest 写回本计划。不得登记 issuer、调用 live mint、使用 COV2-17 的过期样本或把观察当 Source A。
 - [x] VER10→AC10 audit COV2-16's exact (8/8 retained bridge +1/1 current-format import replacement)+1/1+1/1+1/1 results, separately retaining the legacy failure/defer receipt and no-skip source scan；逐行为文件 SHA/mode 必须与 bumped T-2 树完全一致，否则在该树重跑完整 12-case matrix，不能只引用旧审计 SHA。
 - [x] VER11→AC11 audit COV2-17's exact 7/7+1/1+1/1+1/1 results and OpenCode-row/non-skip source scan；逐行为文件 SHA/mode 必须与 bumped T-2 树完全一致，否则在该树重跑完整 10-case matrix，不能只引用旧审计 SHA。
-- [ ] VER12→AC12 audit the source-qualified C/D ledger for completeness and exact release-SHA consistency.
+- [x] VER12→AC12 audit the source-qualified C/D ledger for completeness and exact release-SHA consistency.
 
 **Full-suite trigger:** 本次八文档status/anchor后像是正式full输入，不属于可忽略的I3纯事实；首次repaired bumped50必须含其最终SHA/mode并重新T2，旧50full或49T1均不得替代。后续仅上游patch顺延复用也须这八文档最终字节/mode完全同一，否则重跑full。T-2：首次 COV2 stable release 必须在最终已 bump 实现树运行双 env `cargo nextest run --all --no-fail-fast --retries 2` 并实际全绿。若其后仅因上游稳定版号前进而顺延本计划 patch 版本，且生产源码、测试及行为文档逐路径 SHA/mode 与已全量通过的实现树完全相同，只有版本面与工具链生成的 root package lock 版本改变，可依用户授权复用同实现的既有全量/手工证据；记录两树逐路径等价、原全量 raw SHA/exit0、最终版本面 parity 与新 release SHA，不把旧 CI 当新 SHA 通过。除精确三plan的full后事实外，任何非纯版本源码/测试/文档（含CHANGELOG）变化均在最终 bumped 树重新跑全量及相关本机门；失败、取消或未运行不能复用。
 
@@ -2643,11 +2699,11 @@ VER6 现仅消费独立历史源码 `7efcf868d49a5183e7f0851a89abebee91357155`�
 
 ## 兼容与文档收口
 
-- [ ] `COMPATIBILITY.md` 与 `docs/development/tracing/coverage-v2.md` 对生产 v2、v1 冻结/旧读端拒绝、Source A 区别一致；`docs/development/tracing/agent.md` 同步。
-- [ ] `docs/commands/agent.md`、`docs/commands/zh-CN/agent.md`、`docs/development/commands/agent.md`、网站 `cf` EN 页由 COV2-09/11 同卡同步；网站真正部署与 HTTP 在发布 D 门核。
-- [ ] `docs/error-codes.md` 当前 N/A（不新增/改稳定 LBR 错误码）；若实际引入则先修卡 I/G/文档验收。
-- [ ] `tests/INDEX.md` 在具名卡新增/调整 target 描述时同步；`Cargo.toml` `[[test]]` 和 `tests/compat/README.md` 当前 N/A（无新增 compat 文件/target），若新增须同卡修写集与 ER-13 门。
-- [ ] `docs/development/plan/plan-long.md` 当前 N/A：本计划承接父计划 DEFER，不新建长期 LR；计划登记在 `docs/development/plan/plan-status.md`。
+- [x] `COMPATIBILITY.md` 与 `docs/development/tracing/coverage-v2.md` 对生产 v2、v1 冻结/旧读端拒绝、Source A 区别一致；`docs/development/tracing/agent.md` 同步。 （公开八文档最终已审F后像与相关reader已核；见[实际C/D](#covrel050-actual-cd)。）
+- [x] `docs/commands/agent.md`、`docs/commands/zh-CN/agent.md`、`docs/development/commands/agent.md`、网站 `cf` EN 页由 COV2-09/11 同卡同步；网站真正部署与 HTTP 在发布 D 门核。 （cf fb89与发布D的HTTP/部署实证已核；见[实际C/D](#covrel050-actual-cd)。）
+- [x] `docs/error-codes.md` 当前 N/A（不新增/改稳定 LBR 错误码）；若实际引入则先修卡 I/G/文档验收。 （确认N/A：复用既有错误码，无新增/改稳定码；见[实际C/D](#covrel050-actual-cd)。）
+- [x] `tests/INDEX.md` 在具名卡新增/调整 target 描述时同步；`Cargo.toml` `[[test]]` 和 `tests/compat/README.md` 当前 N/A（无新增 compat 文件/target），若新增须同卡修写集与 ER-13 门。 （INDEX现有条目及compat README描述已同步；确认N/A仅指无新增compat文件/target/[[test]]登记；见[实际C/D](#covrel050-actual-cd)。）
+- [x] `docs/development/plan/plan-long.md` 当前 N/A：本计划承接父计划 DEFER，不新建长期 LR；计划登记在 `docs/development/plan/plan-status.md`。 （确认N/A：无新长期LR；本计划已登记status；见[实际C/D](#covrel050-actual-cd)。）
 
 ## Claude Code review log
 
@@ -2709,15 +2765,16 @@ G-09 本次独立三文档修订在前驱 COV2-24 签名后增加 COV2-25；签�
 
 **终止链末端 D 组记账协议预登记：** 如 COV2-REL-01 最后只是纯文档登记，推送后的 main CI 观察不能写入该提交自身。按模板 v2.14 将该 SHA、run ID、结论及 UTC 留到下一次 `docs/development/plan/plan-status.md` 例行同步；次日仍无同步时单独作状态维护提交。本例外不把未观察 D 当 PASS。
 
+
 ## 完成判据
 
-- [ ] 拟 26 张卡逐一满足 G-01..11、实际 A/B/Claude PASS，23 implementation 与 2 audit 的 signed+DCO main 源码/文档 Push，唯一 release point 实际 C/D；每卡到 `done/complete`。父计划当前70卡分母始终独立（67为本次兼容前驱采纳前历史）。
-- [ ] COV2-16/17 对当前22个审计名（21继承+1当前格式替代）在最终行为源码上实测12/12+10/10；另1 classic legacy终态例仍FAIL/计划外延期；新增 COV2-12/15/18 本机正负例仍均非skip PASS，替代与5新增去重后required unique26；没有任何 OpenCode Session 模型/采集 E2E 进默认 CI。
-- [ ] v1 原字节/digest/MAC、RG-04 fixture 与 frozen pending decoder 未变；v2 writer/reader/import/pending/replay/graph/doctor 与 privacy/failure 门全部可重复通过。
-- [ ] 首次发布前在已 bump 的同一实现源码树完成 nightly fmt、strict Clippy、双 env Nextest 全绿；若之后仅上游纯 patch 顺延且逐路径 SHA/mode 等价，按 COV2-REL-01 规则复用同实现已绿 full/本机证据，并在当前发布 SHA 实证版本面、安全 CI、四平台及安装。触发 ER-13 的各子卡局部全量均已执行并修复本计划暴露的缺陷；ignored Session 不因全量 skip 代替本机门。
-- [ ] 唯一 patch 版本、版本面 2/2、Cargo.lock 工具链、签名+DCO、main 安全 CI、四平台资产/签名 manifest、Cloudflare/站点/HTTP、Homebrew 与指定 curl 安装均真实同源通过；失败或取消不得记绿。
-- [ ] `docs/development/plan/plan-status.md`、`docs/development/plan/plan-20260902.md` 的 `DEP-OG-13=source-ready→complete`、`DEFER-OG25-COVERAGE-V2` 交接与发布版本/提交/UTC 事实同步；OG-27 在 stable release 完成前不 Push，完成后仍独立受 DEP-OG-12 Source A/native `signature` 门控。
-- [ ] 没有在仓库创建额外证据文件或文件夹；每轮测试、review、发布和站点摘要写在本计划及状态正文；如采用终止链末端 D 组后补协议，按预登记办法补齐。
+- [x] 拟 26 张卡逐一满足 G-01..11、实际 A/B/Claude PASS，23 implementation 与 2 audit 的 signed+DCO main 源码/文档 Push，唯一 release point 实际 C/D；每卡到 `done/complete`。父计划当前72卡分母始终独立（70/71/67为先前历史）。 （实际依据见[同F逐门与逐卡ledger](#covrel050-actual-cd)；本次签推生效。）
+- [x] COV2-16/17 对当前22个审计名（21继承+1当前格式替代）在最终行为源码上实测12/12+10/10；另1 classic legacy终态例仍FAIL/计划外延期；新增 COV2-12/15/18 本机正负例仍均非skip PASS，替代与5新增去重后required unique26；没有任何 OpenCode Session 模型/采集 E2E 进默认 CI。 （实际依据见[同F逐门与逐卡ledger](#covrel050-actual-cd)；本次签推生效。）
+- [x] v1 原字节/digest/MAC、RG-04 fixture 与 frozen pending decoder 未变；v2 writer/reader/import/pending/replay/graph/doctor 与 privacy/failure 门全部可重复通过。 （实际依据见[同F逐门与逐卡ledger](#covrel050-actual-cd)；本次签推生效。）
+- [x] 首次发布前在已 bump 的同一实现源码树完成 nightly fmt、strict Clippy、双 env Nextest 全绿；若之后仅上游纯 patch 顺延且逐路径 SHA/mode 等价，按 COV2-REL-01 规则复用同实现已绿 full/本机证据，并在当前发布 SHA 实证版本面、安全 CI、四平台及安装。触发 ER-13 的各子卡局部全量均已执行并修复本计划暴露的缺陷；ignored Session 不因全量 skip 代替本机门。 （实际依据见[同F逐门与逐卡ledger](#covrel050-actual-cd)；本次签推生效。）
+- [x] 唯一 patch 版本、版本面 2/2、Cargo.lock 工具链、签名+DCO、main 安全 CI、四平台资产/签名 manifest、Cloudflare/站点/HTTP、Homebrew 与指定 curl 安装均真实同源通过；失败或取消不得记绿。 （实际依据见[同F逐门与逐卡ledger](#covrel050-actual-cd)；本次签推生效。）
+- [x] `docs/development/plan/plan-status.md`、`docs/development/plan/plan-20260902.md` 的 `DEP-OG-13=source-ready→complete`、`DEFER-OG25-COVERAGE-V2` 交接与发布版本/提交/UTC 事实同步；OG-27 在 stable release 完成前不 Push，完成后仍独立受 DEP-OG-12 Source A/native `signature` 门控。 （实际依据见[同F逐门与逐卡ledger](#covrel050-actual-cd)；本次签推生效。）
+- [ ] 没有在仓库创建额外证据文件或文件夹；每轮测试、review、发布和站点摘要写在本计划及状态正文；如采用终止链末端 D 组后补协议，按预登记办法补齐。 **后补尚待：** 仓库无额外证据已核；本次终止纯事实提交自身D组按GC-COV2-06/模板v2.14预登记下一次状态同步，目前未运行/未补记，故本项保持未勾。
 
 
 **REL-OG-TEMP-049 当前窗口覆写（2026-10-14 14:30:58 UTC，同步USER-TEMP-REL-049）：** 临时release操作自身不新增任务卡；本次兼容前驱G-09另新增父计划三卡 `FIX-OG-NATIVE-IMPORT-01`、`OG-IDLE-ERROR-029-01`、`OG-UPGRADE-029-01`，COV2不增卡。0.30.49精确成员为最新上游cat-file已审变化＋COV2-25源码＋按`COV2-25→FIX-OG-NATIVE-IMPORT-01→OG-IDLE-ERROR-029-01→OG-UPGRADE-029-01→COV2-22`串行交付的三卡最终实现/测试/文档；反向定位`OG-UPGRADE-029-01→OG-IDLE-ERROR-029-01→FIX-OG-NATIVE-IMPORT-01→COV2-25`，已持久化/已发布部分只前滚，不改tag/asset。当前R拥有者为本对话root，唯一发布操作ID是USER-TEMP-REL-049，三卡`C/D coverage from`均明确指向该ID（其实际门由REL-OG-TEMP-049登记）；不是新增release Task，COV2-REL-01及DEP-OG-13不因此complete。最终full必须含latest5c cat-file及本三卡新源码；旧COV25 full不能替代。最终含源码变化的实现树完成适用focused、fmt/strict、单Claude及双env full之后，若bump仅既有版本faces/self-lock/纯release说明和记账且逐文件实现/测试/配置/行为文档SHA/mode同一，才按用户既授权例外复用该final full，不再重复；其它源码变化重跑。安全CI、8个releasejob全部success、四平台/manifest/CDN/Homebrew/网站/HTTP、指定curl本机安装和installed cat-file smoke、未完成v2入口不可达证明全部保留，复杂OpenCode Session/account/model仅macOS本机，绝不进入CI。三卡实际release前locally-accepted，不记formalcomplete；签后source允许按noWait继续COV2，不以成员后置C/D制造依赖循环。
@@ -4351,3 +4408,70 @@ R5 范围已 actual signed+DCO/PGP main `be05b4d32ed07cdc5bc8ade34afba8d02986b70
 新实际 bumped50 双env T2 exit0：`Summary [1134.569s] 10219 tests run: 10219 passed (2 slow), 23 skipped`，raw `f28ad74f0aef5bb220618d175c323786117fa7b7c444bf03afd76ea92ae2d27e`；2048输入前后完全相同，不能换成旧215dc824或main49结果。六新macOS manual各实际1/1、版本面2/2、CH1＋109读者、fmt/strict及runbook CH/notes本地检查已过，同一最终候选source逐路径SHA/mode绑定。原repaired50一次真实v1 visible-only观察仅按已采纳G09的完整prod/test/config/build/Cargo/OpenCode/classifier与七行为文件/原ACVER同一性映射；原ready文件SHA及原classifier源码/二进制SHA已actual复核；原12＋10审计复核同一，不称重新执行模型或22项，legacy classic失败/延期保留。真实v2模型/native/SourceA/current3仍未通过。故此处只重勾AC3–11/VER3–11，AC1/2/12与VER1/2/12仍待最终F/冻结及C-D。
 
 本次full之后只更新精确三plan事实，其余2045输入（含CHANGELOG、八公开文档、R4、runtime/tests/config）SHA/mode必须与本次新T2完全一致；重新110读者/fmtstrict及最终单Claude CODE后才signed F/PGP/归档/Push。当前F/tag、当前F安全/Windows CI、四平台、manifest/Homebrew/cf/HTTP、指定curl安装、installed-F原`.2` fresh-owned epoch0登记/撤销与全部C-D均待；不预填未知F或PASS。新full slow/leak/retry等以原raw实际记录，不推断无害或修复；早先main49两项LEAK原因UNKNOWN（DEFER-HISTORY-REACHABILITY-TEST-LEAK-01、DEFER-IGNORE-ATTRIBUTES-TEST-LEAK-01）及原export-test遗留均计划外延期。formal59/72=81.94%、source62/72=86.11%、COVsource25/26/formal0不变。
+
+
+<a id="covrel050-actual-cd"></a>
+
+## 0.30.50 实际 C/D 收口（2026-10-16）
+
+本次三 plan 事实随本次签名 main 提交实际 Push 生效。COV2 25 张非 release 子卡和 COV2-REL-01 均继承同一已发布 F 的 C/D，合计 **26/26 done/complete**；父 FIX-OG-OBSERVER-RECIPE-01 AC6/VER6 亦继承完成，父正式分子仅 **59→60/72=83.33%**，source **62/72=86.11%** 不变，独立 COV26 卡不重复计入父分母。DEP-OG-13=complete。
+
+| 门 | 实际证据 |
+|---|---|
+| source/full/CODE | signed+DCO F `deabb37b70d74949a59c3722ad5cee1d8d79145a`；归档2048=最终QA，archive SHA `f2270dd0975ffa98694a05c14992ac46a631253e79f7cd042e37a1164fa479bc`；v049..F 全43 commit 已分类。最终 bumped50 T2 raw `f28ad74f0aef5bb220618d175c323786117fa7b7c444bf03afd76ea92ae2d27e`：10219/10219 PASS、23skip、0FAIL/0retry/0flaky/0LEAK。最终CODE唯一Claude raw `8c49beed9321416a93535a242a689cc914e2e9219a738cb020c832e1292fc9eb` PASS。六manual各1/1、版本2/2、原visible-only v1观察与22审计的R5条件映射保留，不称新真实v2/native正例。 |
+| 当前F安全CI/tag | main `38845443409` 8/8、CodeQL `38845443518` 2/2、CodeQuality `38845442610` 均 success；Libra签名验证后推v0.30.50，tag object `ad4b508a05212eec4a7fec8864411f911eeb8928`准确peel至F。旧cancelled/FAIL不作当前SHA PASS。 |
+| release | [run38849003385](https://github.com/libra-tools/libra/actions/runs/38849003385) attempt1全部8 job success，四平台与六份实际artifact绑定SHA/size；[稳定Release v0.30.50](https://github.com/libra-tools/libra/releases/tag/v0.30.50) ID414541147，notes准确来自已审F的CHANGELOG，latest已核。 |
+| manifest/CDN/Homebrew | raw Ed25519固定域验证exit0，manifest envelope SHA `2d02b449a90db4be6a68fa381694c04892f52410f01e296357174caa1d304fee`；四个CDN原始binary SHA/size=同run输出=签名manifest。Homebrew固定formula commit `012d2f084613af20369860aec61daa39b1e1ef05`、三个Unix URL/digest对及实际安装verify job116811903082 success。manifest不捏造source commit字段。 |
+| website | direct cf `fb8911ac3e2829118b94b4dfb5a23427f9130d26`，page SHA `b2627473016b7275d67408555595ee0ad7e83b62e6e0bd2e2d8985fdb9782aac`；单Claude raw `cfeafa1c879121f6f030bf066c0c2e9110471523b00ae833f1fdfad06f18aed2` PASS＋六QA、最终sync107。Cloudflare check116796349424 success，workerf9dbd57d-f95d-47ab-9faf-e0f87e0d7d95，EN/zh HTTP200与16visible/heading/anchor检查通过。 |
+| official install | 下列用户指定原命令实际exit0。官方49检查actual available50，此后官方50检查actual up_to_date50；canonical安装与根目录副本均官方darwin-arm64 SHA `7778554595b48607d40e4713edd233137ac5c04fea54f3336eebea93f7e639b9`、81270576B、0755；marker匹配，无txn/candidate/backup。根04/05改动、8 stash、全局ordinary OpenCode29保持。 |
+| original .2 compatibility | 六真实public role receipt SHA `96c51e1d79256507124483459fbedb56844178dd8b29862fe30a3feccb765b72`。UID-R3 helper SHA `2238aca5e8f065d09cd95015a613b77d746d7dcfb3c128b933733adf0082255c`、单Claude raw `a022a2f89906cfa1e8ef48fa1851575237477bafff3f18b030006d9e6f6891cb` PASS。新owned HOME/XDG/repo原registry缺省epoch0，version/init/trust-dir/trust-exporter/register/untrust六步全0，epoch1同一原issuer active→epoch2 revoked、exportertrust消除；root只读DB独立核实，summary SHA `c576e0d56a744da49ef36095a6f2a287787114d3ddfb7a7ea39762b4871d180a`。original key仅agent metadata检查，材料只由固定producer为挑战读取，元数据未改。无account/model/Session/server/global配置变更。首轮ps UID=-2解析失败保留FAILED/UNPROVEN且未登记；新修订新目录重跑才PASS，不倒记。 |
+
+实际安装原命令：
+
+```sh
+curl --proto '=https' --tlsv1.2 -sSf https://download.libra.tools/install.sh | sh
+```
+
+本次不修改发布F、tag、资产、runtime、test、八份公开行为文档或版本面；签名提交树除三plan事实外2045个输入保持F的SHA/mode，根工作区04/05用户改动单独保留。收口还须本三plan实际reader/fmt/strict、唯一Claude、root裁决与signed+DCO main Push/freshremote；本文在该提交实际交付时生效。终止纯事实提交自身D组按GC-COV2-06/模板v2.14预登记给下一次状态同步，不把F发布CI当新docs-SHA Actions通过，不建立无限自引用链。
+
+Route B按原顺序先closeout/DEP13complete；SRC029仍整体UNPROVEN，尚无current3共享grant或catalog写权。后续仍须SRC029→OG24.3 signed landing/return→RUN029→OG27，且OG27需DEP13 complete。本收口不结清FAST-OG-04、当前`.3`/RUN029、OG-27..29/05、Source A或三真实字段门；原`.2`兼容登记不是当前29/native字段验收。真实v2模型观察未运行，历史unsupported-state import020/经典stopped终态FAIL、unknown测试LEAK及用户延期项目保持原据，未修不记PASS。复杂OpenCode/Session/账号/模型只在macOS本机显式验收，不回加CI；Linux功能用户后验，四平台构建与安全CI如表已执行。
+
+### SDK11 独立子门的实际进展
+
+official29独立A和仅三已审schema叠加的独立B均先清空11输出后运行原generator；9506官方成员、42依赖root（156706regular/8442links/21052dirs，约2.6GB）完整身份前后同一。三schema input单Claude raw `e144d832aec1fccbdf9f0ec4a27fb4ca5461f9f8fb0d55d5645bfc0721eba103`、11完整body及22两轴diff/output-expected单Claude raw `06eab4d7ec0807e116f96c3326352bdb247ad811288ff54233d4b043cc422d67` PASS，root核实际Read全行覆盖。
+
+新versioned expected SHA `794c99eb7b4a4748b4cacb24a4c967a2aff29baa2365fe477d632b9e439817d3`从实际B推导再独立审/采纳，非先copy旧candidate作gold；old311a与原6291 comparator保持。已对实际canonical R1 SDK执行hash-guarded6291比较，11/11 PASS且无额外文件/目录/symlink。同native tsgo经固定Bun直接启动，仅允许父目录metadata的类型检查exit0、11产物不变；此前Node缺失127和Go父metadata拒绝exit2保留失败，不倒记。
+
+此仅S6 SDK11 expected/compare/typecheck子门，不授完整S1–S8/profile66或68/上游native1705闭包/149转换输入/依赖来源/selected binary复现/当前3/SourceA。导入proof、wire与canonical语法/未来版本和getter边界等评审风险留给full producer审计；现有transfer sanitize去proof的有限读取不等于完整生产安全修复。
+
+
+### COV2逐卡继承 C/D ledger（同一已发布F）
+
+| Card | 原本机/source证据 | 继承的正式C/D |
+|---|---|---|
+| COV2-01 | 原卡具名AC/VER与signed交付记录保留，未重跑不称新运行 | v0.30.50 / F `deabb37b70d74949a59c3722ad5cee1d8d79145a`；本节同run/site/install/legacy2实证，done/complete按本次签推生效 |
+| COV2-13 | 原卡具名AC/VER与signed交付记录保留，未重跑不称新运行 | v0.30.50 / F `deabb37b70d74949a59c3722ad5cee1d8d79145a`；本节同run/site/install/legacy2实证，done/complete按本次签推生效 |
+| COV2-02 | 原卡具名AC/VER与signed交付记录保留，未重跑不称新运行 | v0.30.50 / F `deabb37b70d74949a59c3722ad5cee1d8d79145a`；本节同run/site/install/legacy2实证，done/complete按本次签推生效 |
+| COV2-07 | 原卡具名AC/VER与signed交付记录保留，未重跑不称新运行 | v0.30.50 / F `deabb37b70d74949a59c3722ad5cee1d8d79145a`；本节同run/site/install/legacy2实证，done/complete按本次签推生效 |
+| COV2-14 | 原卡具名AC/VER与signed交付记录保留，未重跑不称新运行 | v0.30.50 / F `deabb37b70d74949a59c3722ad5cee1d8d79145a`；本节同run/site/install/legacy2实证，done/complete按本次签推生效 |
+| COV2-03 | 原卡具名AC/VER与signed交付记录保留，未重跑不称新运行 | v0.30.50 / F `deabb37b70d74949a59c3722ad5cee1d8d79145a`；本节同run/site/install/legacy2实证，done/complete按本次签推生效 |
+| COV2-04 | 原卡具名AC/VER与signed交付记录保留，未重跑不称新运行 | v0.30.50 / F `deabb37b70d74949a59c3722ad5cee1d8d79145a`；本节同run/site/install/legacy2实证，done/complete按本次签推生效 |
+| COV2-08 | 原卡具名AC/VER与signed交付记录保留，未重跑不称新运行 | v0.30.50 / F `deabb37b70d74949a59c3722ad5cee1d8d79145a`；本节同run/site/install/legacy2实证，done/complete按本次签推生效 |
+| COV2-05 | 原卡具名AC/VER与signed交付记录保留，未重跑不称新运行 | v0.30.50 / F `deabb37b70d74949a59c3722ad5cee1d8d79145a`；本节同run/site/install/legacy2实证，done/complete按本次签推生效 |
+| COV2-09 | 原卡具名AC/VER与signed交付记录保留，未重跑不称新运行 | v0.30.50 / F `deabb37b70d74949a59c3722ad5cee1d8d79145a`；本节同run/site/install/legacy2实证，done/complete按本次签推生效 |
+| COV2-06 | 原卡具名AC/VER与signed交付记录保留，未重跑不称新运行 | v0.30.50 / F `deabb37b70d74949a59c3722ad5cee1d8d79145a`；本节同run/site/install/legacy2实证，done/complete按本次签推生效 |
+| COV2-10 | 原卡具名AC/VER与signed交付记录保留，未重跑不称新运行 | v0.30.50 / F `deabb37b70d74949a59c3722ad5cee1d8d79145a`；本节同run/site/install/legacy2实证，done/complete按本次签推生效 |
+| COV2-11 | 原卡具名AC/VER与signed交付记录保留，未重跑不称新运行 | v0.30.50 / F `deabb37b70d74949a59c3722ad5cee1d8d79145a`；本节同run/site/install/legacy2实证，done/complete按本次签推生效 |
+| COV2-12 | 原卡具名AC/VER与signed交付记录保留，未重跑不称新运行 | v0.30.50 / F `deabb37b70d74949a59c3722ad5cee1d8d79145a`；本节同run/site/install/legacy2实证，done/complete按本次签推生效 |
+| COV2-15 | 原卡具名AC/VER与signed交付记录保留，未重跑不称新运行 | v0.30.50 / F `deabb37b70d74949a59c3722ad5cee1d8d79145a`；本节同run/site/install/legacy2实证，done/complete按本次签推生效 |
+| COV2-18 | 原卡具名AC/VER与signed交付记录保留，未重跑不称新运行 | v0.30.50 / F `deabb37b70d74949a59c3722ad5cee1d8d79145a`；本节同run/site/install/legacy2实证，done/complete按本次签推生效 |
+| COV2-19 | 原卡具名AC/VER与signed交付记录保留，未重跑不称新运行 | v0.30.50 / F `deabb37b70d74949a59c3722ad5cee1d8d79145a`；本节同run/site/install/legacy2实证，done/complete按本次签推生效 |
+| COV2-20 | 原卡具名AC/VER与signed交付记录保留，未重跑不称新运行 | v0.30.50 / F `deabb37b70d74949a59c3722ad5cee1d8d79145a`；本节同run/site/install/legacy2实证，done/complete按本次签推生效 |
+| COV2-21 | 原卡具名AC/VER与signed交付记录保留，未重跑不称新运行 | v0.30.50 / F `deabb37b70d74949a59c3722ad5cee1d8d79145a`；本节同run/site/install/legacy2实证，done/complete按本次签推生效 |
+| COV2-22 | 原卡具名AC/VER与signed交付记录保留，未重跑不称新运行 | v0.30.50 / F `deabb37b70d74949a59c3722ad5cee1d8d79145a`；本节同run/site/install/legacy2实证，done/complete按本次签推生效 |
+| COV2-23 | 原卡具名AC/VER与signed交付记录保留，未重跑不称新运行 | v0.30.50 / F `deabb37b70d74949a59c3722ad5cee1d8d79145a`；本节同run/site/install/legacy2实证，done/complete按本次签推生效 |
+| COV2-24 | 原卡具名AC/VER与signed交付记录保留，未重跑不称新运行 | v0.30.50 / F `deabb37b70d74949a59c3722ad5cee1d8d79145a`；本节同run/site/install/legacy2实证，done/complete按本次签推生效 |
+| COV2-25 | 原卡具名AC/VER与signed交付记录保留，未重跑不称新运行 | v0.30.50 / F `deabb37b70d74949a59c3722ad5cee1d8d79145a`；本节同run/site/install/legacy2实证，done/complete按本次签推生效 |
+| COV2-16 | 原卡具名AC/VER与signed交付记录保留，未重跑不称新运行 | v0.30.50 / F `deabb37b70d74949a59c3722ad5cee1d8d79145a`；本节同run/site/install/legacy2实证，done/complete按本次签推生效 |
+| COV2-17 | 原卡具名AC/VER与signed交付记录保留，未重跑不称新运行 | v0.30.50 / F `deabb37b70d74949a59c3722ad5cee1d8d79145a`；本节同run/site/install/legacy2实证，done/complete按本次签推生效 |
+| COV2-REL-01 | 原卡具名AC/VER与signed交付记录保留，未重跑不称新运行 | v0.30.50 / F `deabb37b70d74949a59c3722ad5cee1d8d79145a`；本节同run/site/install/legacy2实证，done/complete按本次签推生效 |

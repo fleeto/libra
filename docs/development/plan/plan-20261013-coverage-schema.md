@@ -1,5 +1,16 @@
 # OpenCode coverage schema-v2 前置实施计划（2026-10-13）
 
+> **native attest 启动隔离修复已采纳（本次签名 main 交付生效）：** 唯一 Claude Code 规划 R5 PASS，raw `03b328ec691520c68b53bb9885d1a6fa6b3c83e56d1df98046573c9f631be167`；root已核对3/3完整Read及R3/R4复用链并采用推荐方案。新增 `FIX-OG-NATIVE-LAUNCH-01`，父计划73卡，正式 **60/73=82.19%**、源码 **62/73=84.93%**，COV26/26完成不变；这是必要启动安全修复，不是新卡完成。原73采纳前72卡及全部FAIL/UNRUN历史保留。修复source/code/release尚待；原SOURCE/真实Bun/registered lane/SourceA/OG24.3/RUN029硬门保留，下一张先执行本修复卡。
+
+
+
+
+### native attest 启动修复交接镜像（随本次签名规划采纳）
+
+| 顺序/DEP/DAG | 写集/发布/共享slot | 追溯/验证矩阵 | 里程碑/风险/状态 |
+|---|---|---|---|
+| DEP-OG-NATIVE-LAUNCH-BASE→FIX-OG-NATIVE-LAUNCH-01.source-qualified→SRC029只读；FIX.release-closeout→shared-return→OG24.3 grant→RUN029→OG27 | 仅父计划attest.rs新writer、5docs/docs-contract/三plan/版本面及cf单页；独立patch全C-D/所有shared写入/postSHA登记先于OG24grant，非FAST04/COV成员；无新并发写权 | exact15/owned0700canonical空TMP/创建验证spawn及受控终态/cleanup失败/成功未reapleader同组回收；VER1–4+full/Claude/站点/四平台；真实Bun和registered lane仍阻SRC | M-NATIVE-LAUNCH / RISK-NATIVE-ATTEST-TMP-REUSE；原错误库实际dlopen，不属可延期TUI；当前pending、无SOURCE/native/cardGO。采纳后父73/formal60/source62，COV26/26原完成不变；修订履历见父G09本次表行 |
+
 > **SRC029 最新审查与窄修订（2026-10-16；修订须本次唯一Claude PASS、root裁决及signed main采纳后生效）：** 范围68已由main `f29685679e288b283d5d56f0328a27914650b4d2`实际采纳。R3静态完整Read审查297/297、sole Claude PASS（raw `88215a808d52d2a88a85fbd0d96eb1e19c10bcfd10968b3df76af88454e985de`），root已独立恢复全部68文件内容并核8597同一；随后50/50完整Read补审确认四旧测试断言保留，但Anthropic缺少block stop的两项负例真实FAIL，窄范围Claude结论FAIL/P2 blocking（raw `a652264cbac692f7005c76397d02556121b49357c16213e6f5199016611557c8`）。该新失败不倒改先前静态PASS；source/profile/native总门仍UNPROVEN。仅拟授新private successor内两个既选路径的最小修复，见父计划[明确原生结束修订](plan-20260902.md#native029-explicit-completion-scope)。父formal **60/72=83.33%**、source **62/72=86.11%**、COV **26/26**均不增加。
 
 > **上一轮D组实际补记（2026-10-16 07:00:25 UTC）：** 收口main `75d1734bf789fd1e6f1bec00b36a095389c7e630` 的主run `38855895311` 为superseded **cancelled**，不是PASS；其CodeQL `38855895283`成功。当前signed main `f29685679e288b283d5d56f0328a27914650b4d2` 主run `38858852998` **8/8 success**、CodeQL `38858849030` **2/2 success**，quality `38858849028`及cancel策略 `38858849014`成功；2048输入相对已发布F仅三plan变化，其余2045 bytes/modes同一。本次按预登记规则补齐上一轮终止链结果，不把新维护提交的Actions预记成功，不建立纯记账提交的无限链。下方有日期或“本次待采纳”的旧段落保留原时点历史；不撤回已完成COV或误授current3。

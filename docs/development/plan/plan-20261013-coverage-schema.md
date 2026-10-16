@@ -1,5 +1,13 @@
 # OpenCode coverage schema-v2 前置实施计划（2026-10-13）
 
+> **当前 COVREL R5 范围候选（2026-10-16 02:13:58 UTC）：** main f6ff 已整合/推送且移机分支已删除；本次私有修订待 sole Claude/签名采纳。旧 release CODE R1/R2 FAIL 保留；新组合 bumped50 full、最终 CODE/F/C-D 未完成。formal59/72、source62/72、COVsource25/26/formal0不变，Source A/current3未放行。
+
+> **当前最终 repaired50 T2 已通过（2026-10-16T00:51:06.887345+00:00）：** actual 10219/10219 PASS（2slow、23skip；0FAIL/0retry/0flaky/0LEAK），raw `215dc8242692b4da3ea3eaca8c55f9c7ff8ec1248300c2def533e6ad378a555e`，受测2048源前后相同；六manual各1/1、version2、109/fmt/strict及fresh一次visible观察已实际通过。当前main d74范围已采纳、incoming repair189/cff290已source-qualified；最终发布CODE Claude/F/currentCI/四平台/站点新部署/安装/原.2 epoch0和C/D待。父formal59/72=81.94%、source62/72=86.11%，COVsource25/26/formal0不变，SourceA/current3未放行。下方有日期旧快照仅为历史。
+
+
+> **当前修复源码已交付、COVREL候选50开工（2026-10-16 00:18:45 UTC）：** FIX-OG-OBSERVER-RECIPE-01 已 actual signed+DCO main `1896475b023c983e4fbb7fca956445c1cc88b950` Push/freshremote/archive2048=finalQA、source CODE Claude PASS/raw293036d0…；cf `f29097a9eea5341b5a775bcbf888eaa6a44666c6` 已部署worker23945ad4-e2db-42e6-8915-349c0640db7d/check116728686156success且EN/zh visible8concept200。父source62/72=86.11%、formal59/72=81.94%，COVsource25/26/formal0。本次G09 I11/R4已由实际signed main `d74f37aecea801b07959b40326f19ad3b8dad4bb` 采纳；8doc已审source-version/status/anchor字节及toolchain生成R4现为候选0.30.50，尚无新50测试/full/F/tag/release/install通过。SourceA/current3未放行。以下旧时点记录保留历史。
+
+
 > **FIX-OG-OBSERVER-RECIPE-01 本地验收已过、源码交付待（2026-10-15 23:18:52 UTC）：** 已actual通过原16/16本机登记、37/37 native unit、109/109 hook/docs、fmt严格clippy及修复后49双env T1：`Summary [1118.151s] 10219 tests run: 10219 passed (2 slow, 1 leaky), 23 skipped` / exit0，2048输入前后相同，raw `d7c23044d3d2564702c8b9088c990ed50345776132289e2f2374fdc063664b21`。最终代码Claude、signed main/cf和网站部署仍待；实际全部交付后才source-qualified、父source61→62/72=86.11%，此前61/72。formal59/72=81.94%，COV source25/26/formal0不变；不是卡done。下一COV2-REL-01，最终repaired bumped源码新T2及原installed-F .2 epoch0/完整C-D仍需；SourceA/current3未放行。
 
 > **当前兼容修复实施（2026-10-15 22:35:29 UTC）：** G09 已由 signed+DCO main `3158302c0eab2994bae571d3268542ec7c0970ab` 实际 Push/freshremote 采纳，FIX-OG-OBSERVER-RECIPE-01 开工。新独立 gold 回归在未修复 cd53 catalog 上实测 FAIL（1/1，raw `e6fc8c2cd22bd47e9b417747550c8e761c0980b82fef0a946ad65c94a4ec7456`）；已合入精确历史 recipe 及 cfg(test) 修复，GREEN/49 T1/单审/源码交付与网站部署待验。不新增完成数：parent formal59/72=81.94%、source61/72=84.72%；COV source25/26=96.15%、formal0/26。默认普通 v2 目录过滤源码原 SHA/mode 不变；下一 COV2-REL-01，旧候选50 full不能覆盖真实修复。Source A/current3/installed-F/C-D 未放行。
@@ -211,6 +219,7 @@
 | 2026-10-14 14:30:58 UTC | ordinary29三卡G09 R1-R3镜像及证据修复 | 父FIX→IDLE→OG-UPGRADE-029-01接入COV25→22；本COV依赖登记/DAG/发布窗口及05/06/11/15/18/22 Dependencies/Granularity/审计表同改；所有Icore后继精确重基，网站owner串行；原COV AC/VER及26卡分母不变 | 父70卡/正式55；COV26卡/正式0，source-ready不预增 | 本COV实际更新为DEP/DAG/REL/六卡依赖/审计及本日期行；新增三卡测试矩阵/追溯/里程碑/风险在父plan-20260902维护，本COV消费DEP-COV2-029-BASE镜像，不声称另改未动的COV各表；root最终单Claude/signed采纳前新门UNRUN |
 | 2026-10-14 15:47:50 UTC | IDLE例行三计划同步/FIX源交接 | FIX signed6524153/cf ddfee87及raw ac889106实际交接；IDLE3exact各1/1/模块31/31机制，最终quality/Claude/signed pending；COV25生命周期旧标签与签前时态明确历史 | 父source59/70、formal55/70；COVsource13/26、formal0/26；不增卡、不预授IDLE完成 | 本COV实际只改顶部现行统计、DEP-COV2-029-BASE当前源边、COV25历史状态卫生、本日期行与最新三计划同源收据；BASE实际验收改新独立repo，原AC/VER及写集不扩张；C/D、Source A、最终49full仍待 |
 | 2026-10-14 16:15:36 UTC | 单轴ordinary partial live新增G09 | 插入FIX-OG-PARTIAL-LIVE-01，parent70→71；actualIDLE95ab/cfbc58，private import未采纳 | 父source60/71/formal55/71；COV仍source13/26/formal0/26 | 本COV实际改top当前口径/DEP-COV2-029-BASE/REL窗口/此历史行与尾部实施镜像；原26卡AC/VER不变，最终049full含新live，SourceA/native不授 |
+| 2026-10-16 02:13:58 UTC | release CODE R1/R2 FAIL；main f6ff整合后重新冻结 | R5加入CHANGELOG；恢复VER4及历史R4；新最终50 full/六manual，原visible-only观察按完整行为同一性映射；保留全部C/D与native边界 | COV2-REL-01不拆卡，12AC/12VER不变 | 本卡I/R、粒度、三plan镜像、freeze/测试/发布门；旧失败不改写 |
 
 ## 已决议设计决策
 
@@ -339,7 +348,7 @@
 | COV2-18 | implementation | 候选 import Session 权限防火墙 | forward-only | yes | yes | 8/8 | 2/8 | 2/2 | M | DEP-COV2-029-BASE；COV2-15 | 严格串行 | family child | COV2-15 | N/A |
 | COV2-16 | audit | 既有 bridge/pipeline/OG-26 12 例本机审计 | forward-only | yes | yes | 13/20 | 5/20 | 0/0 | S | COV2-18 | 严格串行 | no-release | N/A | N/A |
 | COV2-17 | audit | 既有 lifecycle/crash/import/oracle 10 例及真实可读响应本机审计 | forward-only | yes | yes | 12/20 | 6/20 | 0/0 | S | COV2-16；DEP-COV2-MODEL | 严格串行 | no-release | N/A | N/A |
-| COV2-REL-01 | release | reviewed family patch | immutable-release | yes | yes | 12/12 | 12/12 | 0/0 | M | COV2-17,DEP-COV2-SITE,DEP-COV2-MODEL | 唯一 I11/R4 写者+site1 | family release point | N/A | N/A |
+| COV2-REL-01 | release | reviewed family patch | immutable-release | yes | yes | 12/12 | 12/12 | 0/0 | M | COV2-17,DEP-COV2-SITE,DEP-COV2-MODEL | 唯一 I11/R5 写者+site1 | family release point | N/A | N/A |
 
 ### Phase 0：OG-26 交接与 v1/v2 基础
 
@@ -2490,12 +2499,14 @@ VER6 现仅消费独立历史源码 `7efcf868d49a5183e7f0851a89abebee91357155`�
 
 **Out of scope:** native Source A/issuer 注册属于父计划 DEP-OG-12/OG-27；若发布后发现缺陷，以新签名 patch 前滚，绝不改已发布 tag/asset。
 
-**Current evidence:** 前驱25张nonrelease已actual source-qualified；COV17 signed+DCO main `73500993352fb53b2a7ebe61f136745280d0e784`、Push0/freshremote/archive2048=最终QA，原12AC/6VER、本机10/10＋唯一真实visible-only、Claude R1/R2 PASS/root已闭。家族formal仍0/26；735开工时父formal59/71/source61/71是历史快照，315 G09新增修复卡后当前父formal59/72/source61/72。开工base的cargo/install三面为0.30.49；旧候选三面0.30.50及toolchain lock已实际测试，firstT2 exit0/10216PASS含2flaky（rawc085795a…）；由于legacy recipe漂移，R4已私有park并恢复signed735原49字节，尚无本卡freeze/发布单审/tag/release/C-D。先消费DEP-COV2-OBSERVER-RECIPE新卡actual49T1/signed源，再最终bumped50新T2及本机/安装门；旧full只证明修复前树，不可复用。
+**Historical evidence (2026-10-16T00:51:06.887345+00:00; before f6ff/R5):** actual adopted main d74f37a，incoming repair189/cff290 source-qualified；首次最终repaired50 T2 actual10219/10219/exit0（2slow、23skip、0FAIL0retry0flaky0LEAK）及六manual/fresh visible1/quality已过，2045非I3字节/mode保持受测值；最终CODE Claude/F及原C/D尚待，source25/26/formal0、parent source62/72/formal59/72。
+
+**Historical start evidence:** 前驱25张nonrelease已actual source-qualified；COV17 signed+DCO main `73500993352fb53b2a7ebe61f136745280d0e784`、Push0/freshremote/archive2048=最终QA，原12AC/6VER、本机10/10＋唯一真实visible-only、Claude R1/R2 PASS/root已闭。家族formal仍0/26；735开工时父formal59/71/source61/71是历史快照，315 G09新增修复卡后当前父formal59/72/source61/72。开工base的cargo/install三面为0.30.49；旧候选三面0.30.50及toolchain lock已实际测试，firstT2 exit0/10216PASS含2flaky（rawc085795a…）；由于legacy recipe漂移，R4已私有park并恢复signed735原49字节，尚无本卡freeze/发布单审/tag/release/C-D。先消费DEP-COV2-OBSERVER-RECIPE新卡actual49T1/signed源，再最终bumped50新T2及本机/安装门；旧full只证明修复前树，不可复用。
 
 **Acceptance criteria:**
 
-- [ ] AC1 all child behavior-file hashes/modes match the freeze, except only the separately reviewed exact release-status/anchor delta in the eight named public documentation files; bind their final postimage SHA/mode to F and preserve all other runtime, tests and behavior-paragraph bytes.
-- [ ] AC2 the release tree equals the approved COV2 freeze, including every ancestor enumerated by VER2 and excluding OG-27, plus the allowed R-only bump and separately reviewed exact eight-document release-status/anchor delta; no other source delta is permitted.
+- [ ] AC1 all child behavior-file hashes/modes match the freeze, except only the separately reviewed exact release-status/anchor delta in the eight named public documentation files; bind their final postimage SHA/mode to F and preserve all other runtime, tests and behavior-paragraph bytes. 另允许且仅允许已审 `CHANGELOG.md` 当前0.30.50新顶节；冻结其SHA/mode并核旧历史尾逐字不变，不改变其它行为。 已审 main f6ff 的 README Quick Start/三 plan 交接为固定乘载基线，按 VER2 分类，不算本卡新增行为；对应旧八文档 SHA 仅属旧时点，本次以最终冻结后像为准。
+- [ ] AC2 the release tree equals the approved COV2 freeze, including every ancestor enumerated by VER2 and excluding OG-27, plus the allowed R-only bump and separately reviewed exact eight-document release-status/anchor delta; no other source delta is permitted. 另允许且仅允许已审 `CHANGELOG.md` 当前0.30.50新顶节；冻结其SHA/mode并核旧历史尾逐字不变，不改变其它行为。 已审 main f6ff 的 README Quick Start/三 plan 交接为固定乘载基线，按 VER2 分类，不算本卡新增行为；对应旧八文档 SHA 仅属旧时点，本次以最终冻结后像为准。
 - [ ] AC3 COV2-12 fake-exporter live Session report is source-qualified PASS
 - [ ] AC4 its fake-exporter import Session report is source-qualified PASS
 - [ ] AC5 its failed-export zero-write Session report is source-qualified PASS
@@ -2509,8 +2520,8 @@ VER6 现仅消费独立历史源码 `7efcf868d49a5183e7f0851a89abebee91357155`�
 
 **Verification:** 以下 VER3–11 首次发布在同一最终行为源码验收；若上游仅推高 patch 版本且上述逐路径等价成立，可沿同实现复用已签 full/本机原始证据，但必须把旧证据映射到新 release SHA 并重新核版本面、安装、安全 CI 与四平台发布，不把不同源码或不同模型/配置的旧门冒称通过。
 
-- [ ] VER1→AC1 compare each source path hash/mode handoff with frozen source SHA; for the eight named public docs, verify only the approved exact statusface/version-label/anchor spans differ, freeze their final SHA/mode, and prove every other runtime/test/behavior paragraph retains its approved bytes.
-- [ ] VER2→AC2 compare the freeze diff with approved card paths, the reviewed eight-document status/anchor manifest and OG-27 exclusion; execute `libra log <last-stable-tag>..<freeze-main-sha>` and classify **every** carried commit by owning plan/card, signed SHA, review, required C/D state and unmet release gate. COV2 children inherit this release C/D；OG-24/25/26 须核其 A/B+Claude+signed main 及本次安全/安装门，其下游 `REL-FAST-OG-04` C/D 保持 pending；其它计划乘载提交若有应先满足的独立前置则阻断冻结。Verify `approved_build.rs` `.2` admission source is in the actual release tree; installed-binary registration remains a separate test (`libra diff --check` is normal hygiene outside this count).
+- [ ] VER1→AC1 compare each source path hash/mode handoff with frozen source SHA; for the eight named public docs, verify only the approved exact statusface/version-label/anchor spans differ, freeze their final SHA/mode, and prove every other runtime/test/behavior paragraph retains its approved bytes. 另允许且仅允许已审 `CHANGELOG.md` 当前0.30.50新顶节；冻结其SHA/mode并核旧历史尾逐字不变，不改变其它行为。 已审 main f6ff 的 README Quick Start/三 plan 交接为固定乘载基线，按 VER2 分类，不算本卡新增行为；对应旧八文档 SHA 仅属旧时点，本次以最终冻结后像为准。
+- [ ] VER2→AC2 compare the freeze diff with approved card paths, the reviewed eight-document status/anchor manifest and OG-27 exclusion; execute `libra log <last-stable-tag>..<freeze-main-sha>` and classify **every** carried commit by owning plan/card, signed SHA, review, required C/D state and unmet release gate. COV2 children inherit this release C/D；OG-24/25/26 须核其 A/B+Claude+signed main 及本次安全/安装门，其下游 `REL-FAST-OG-04` C/D 保持 pending；其它计划乘载提交若有应先满足的独立前置则阻断冻结。Verify `approved_build.rs` `.2` admission source is in the actual release tree; installed-binary registration remains a separate test (`libra diff --check` is normal hygiene outside this count). 另允许且仅允许已审 `CHANGELOG.md` 当前0.30.50新顶节；冻结其SHA/mode并核旧历史尾逐字不变，不改变其它行为。 已审 main f6ff 的 README Quick Start/三 plan 交接为固定乘载基线，按 VER2 分类，不算本卡新增行为；对应旧八文档 SHA 仅属旧时点，本次以最终冻结后像为准。
 - [ ] VER3→AC3 **在首次实际 patch bump 后的最终行为源码树上重新运行** macOS manual `source .env.test && cargo test --features test-live-agent --test agent_opencode_bridge_test cov2_macos_fake_exporter_live_session_capture -- --ignored --exact --nocapture --test-threads=1` (1/1)，并核对行为文件 SHA/mode。
 - [ ] VER4→AC4 同一最终行为源码树重新运行 `source .env.test && cargo test --features test-live-agent --test agent_opencode_bridge_test cov2_macos_fake_exporter_import_session_capture -- --ignored --exact --nocapture --test-threads=1` (1/1)。
 - [ ] VER5→AC5 同一最终行为源码树重新运行 `source .env.test && cargo test --features test-live-agent --test agent_opencode_bridge_test cov2_macos_failed_export_session_zero_write -- --ignored --exact --nocapture --test-threads=1` (1/1)。
@@ -2522,7 +2533,9 @@ VER6 现仅消费独立历史源码 `7efcf868d49a5183e7f0851a89abebee91357155`�
 - [ ] VER11→AC11 audit COV2-17's exact 7/7+1/1+1/1+1/1 results and OpenCode-row/non-skip source scan；逐行为文件 SHA/mode 必须与 bumped T-2 树完全一致，否则在该树重跑完整 10-case matrix，不能只引用旧审计 SHA。
 - [ ] VER12→AC12 audit the source-qualified C/D ledger for completeness and exact release-SHA consistency.
 
-**Full-suite trigger:** 本次八文档status/anchor后像是正式full输入，不属于可忽略的I3纯事实；首次repaired bumped50必须含其最终SHA/mode并重新T2，旧50full或49T1均不得替代。后续仅上游patch顺延复用也须这八文档最终字节/mode完全同一，否则重跑full。T-2：首次 COV2 stable release 必须在最终已 bump 实现树运行双 env `cargo nextest run --all --no-fail-fast --retries 2` 并实际全绿。若其后仅因上游稳定版号前进而顺延本计划 patch 版本，且生产源码、测试及行为文档逐路径 SHA/mode 与已全量通过的实现树完全相同，只有版本面与工具链生成的 root package lock 版本改变，可依用户授权复用同实现的既有全量/手工证据；记录两树逐路径等价、原全量 raw SHA/exit0、最终版本面 parity 与新 release SHA，不把旧 CI 当新 SHA 通过。任何非纯版本源码/测试/行为文档变化均在最终 bumped 树重新跑全量及相关本机门；失败、取消或未运行不能复用。
+**Full-suite trigger:** 本次八文档status/anchor后像是正式full输入，不属于可忽略的I3纯事实；首次repaired bumped50必须含其最终SHA/mode并重新T2，旧50full或49T1均不得替代。后续仅上游patch顺延复用也须这八文档最终字节/mode完全同一，否则重跑full。T-2：首次 COV2 stable release 必须在最终已 bump 实现树运行双 env `cargo nextest run --all --no-fail-fast --retries 2` 并实际全绿。若其后仅因上游稳定版号前进而顺延本计划 patch 版本，且生产源码、测试及行为文档逐路径 SHA/mode 与已全量通过的实现树完全相同，只有版本面与工具链生成的 root package lock 版本改变，可依用户授权复用同实现的既有全量/手工证据；记录两树逐路径等价、原全量 raw SHA/exit0、最终版本面 parity 与新 release SHA，不把旧 CI 当新 SHA 通过。除精确三plan的full后事实外，任何非纯版本源码/测试/文档（含CHANGELOG）变化均在最终 bumped 树重新跑全量及相关本机门；失败、取消或未运行不能复用。
+
+**G09 release-note scope and fresh-freeze rule:** AC3–11/VER3–11 的原勾选只绑定旧 215dc824 树，本修订全部重开；六 manual 在新 bumped50 树重跑后、AC9–11 在 root 冻结点完成条件等价复核后，才能分别重新勾选。 R5 精确加入 CHANGELOG 当前版本新顶节，旧历史尾/mode不变；先独立 signed 三 plan 采纳再写共享 CHANGELOG。以 main f6ff 为当前基线，保留其已审 README Quick Start 和 traces 计划交接；本次最终八文档/CHANGELOG/版本面/三plan全部进入新 bumped50 T2，旧215dc824 full不能代替。六本机case在本树重跑；原一次 genuine visible-only 观察及22审计仅按本文件末尾 G09 的全部运行时/测试/config/build与具名行为文件/输入契约同一性映射，不称新执行或真实v2模型正例。全量后仅精确三plan事实可更新，其余2045 SHA/mode必须相同；其它变更重跑full。AC/VER仍12/12，I11/R5/root16/site1/prod0/M，原C/D/native门不变。
 
 **Shared-path coordination（非AC/VER/I/R变更）:** DEP-OG-24-029-SHARED/RETURN约束本卡source-freeze→事实closeout的唯一writer阶段：RouteA必须OG24.3 signed-return或严格abort-return后才可由root在返回postimage写actualC/D；RouteB先本卡closeout再grant。F及R已冻结且后续只构建/发布F，当前3不被该F携带；新main不改变tag/source归属。原GC-COV2-08、VER2与其installed-F原`.2` issuer兼容登记门继续有效，仅在独立owned legacy HOME/XDG的fresh registry中按epoch0执行，不用global，不作current29/3验收或SourceA。其余12AC12VER/I/R/D依赖全保留。
 
@@ -2532,7 +2545,7 @@ VER6 现仅消费独立历史源码 `7efcf868d49a5183e7f0851a89abebee91357155`�
 
 **Implementation write set:** `docs/development/plan/plan-20261013-coverage-schema.md`；`docs/development/plan/plan-20260902.md`（source-ready→complete/OG-27 release 边及本次release-label scope镜像）；`docs/development/plan/plan-status.md`；`COMPATIBILITY.md`；`README.md`；`README.zh-CN.md`；`docs/commands/agent.md`；`docs/commands/zh-CN/agent.md`；`docs/development/tracing/agent.md`；`docs/development/tracing/coverage-v2.md`；`docs/development/commands/agent.md`。新增八文档仅源码版本范围/statusface/锚点同步，I11；无production/test行为写入；网站单页由DEP-COV2-SITE独立owner串行同步。
 
-**Release write set:** `Cargo.toml`、`install.sh`、`install.ps1`、由工具链刷新的 `Cargo.lock`、签名 tag/Release/manifest/artifact；以 `compat_version_surface_sync` 报告的实时集合为权威，外部站点源由 DEP-COV2-SITE 独立 owner 写。
+**Release write set:** `Cargo.toml`、`install.sh`、`install.ps1`、由工具链刷新的 `Cargo.lock`、`CHANGELOG.md`（仅当前0.30.50新顶节，既有历史逐字不变）、签名 tag/Release/manifest/artifact；三版本面以 `compat_version_surface_sync` 为权威；CHANGELOG另按runbook版本节及现有changelog读者检查，外部站点源由 DEP-COV2-SITE 独立 owner 写。
 
 **Files likely touched:** 本卡 I 与 R；不修改 COV2 子卡行为源码。
 
@@ -2554,9 +2567,9 @@ VER6 现仅消费独立历史源码 `7efcf868d49a5183e7f0851a89abebee91357155`�
 
 **C/D coverage from:** self；发布点实际 C/D 全绿后登记 25 张非发布子卡继承完成，再将父计划 `DEP-OG-13=complete`。
 
-**Granularity:** `type=release; axis=atomic coverage-v2 family patch; recovery=immutable-release; complete=yes; self-contained=yes; AC=12/12; VER=12/12; landing=0; prod-files=0; scope=M; deps=COV2-17,DEP-COV2-SITE,DEP-COV2-MODEL; writeset=sole I11/R4 publisher+DEP-COV2-SITE单页; release=family release point; split-from=N/A; exception=N/A`
+**Granularity:** `type=release; axis=atomic coverage-v2 family patch; recovery=immutable-release; complete=yes; self-contained=yes; AC=12/12; VER=12/12; landing=0; prod-files=0; scope=M; deps=COV2-17,DEP-COV2-SITE,DEP-COV2-MODEL; writeset=sole I11/R5 publisher+DEP-COV2-SITE单页; release=family release point; split-from=N/A; exception=N/A`
 
-**ER 强制门（不计 G-03）：** `source .env.test && cargo test --test compat_version_surface_sync` 必须实际 2/2；首次 bumped 实现树 nightly fmt、strict all-targets/all-features Clippy、双 env 全量 nextest、release build/install；仅上游纯 patch 版本顺延可按上述逐路径等价收据复用同实现 full，本次版本面/构建/安装与发布后门仍须实证。同一提交签名+DCO；GitHub main 安全 CI、四平台稳定构建、manifest/签名、Cloudflare/Homebrew/站点 HTTP 与指定 `curl --proto '=https' --tlsv1.2 -sSf https://download.libra.tools/install.sh | sh` 本地安装都须实际通过。每新 commit 取消旧 commit Actions；不得把被取消的旧 run 计入当前 SHA。Linux 功能仍由用户后验。
+**ER 强制门（不计 G-03）：** 本次R5 CHANGELOG 读者实际运行 `source .env.test && cargo test --test compat_r0_9_doc_closeout diff_docs_and_changelog_carry_the_degradation_semantics -- --exact` 1/1及本地runbook版本节/notes提取；不得完整运行runbook release代替当前signed Libra发布流程。 `source .env.test && cargo test --test compat_version_surface_sync` 必须实际 2/2；首次 bumped 实现树 nightly fmt、strict all-targets/all-features Clippy、双 env 全量 nextest、release build/install；仅上游纯 patch 版本顺延可按上述逐路径等价收据复用同实现 full，本次版本面/构建/安装与发布后门仍须实证。同一提交签名+DCO；GitHub main 安全 CI、四平台稳定构建、manifest/签名、Cloudflare/Homebrew/站点 HTTP 与指定 `curl --proto '=https' --tlsv1.2 -sSf https://download.libra.tools/install.sh | sh` 本地安装都须实际通过。每新 commit 取消旧 commit Actions；不得把被取消的旧 run 计入当前 SHA。Linux 功能仍由用户后验。
 
 ## 测试矩阵
 
@@ -3959,3 +3972,370 @@ COVsource仍25/26、formal0家族C/D、父formal59/71/source61/71。Release 12AC
 **R1 FAIL及R2精确修正（2026-10-16 00:04:23 UTC，候选未采纳）：** 原scope R1 raw `c1ffeb83a136dd4b0baea7e07c9a4177a30fc105877400fd2799eed1dae6d900` 为FAIL，保留B1网站版本说明落入代码块、B2README误提升普通采集最低版本、B3漏developer命令页。R2以既有同步器纯函数从root候选重新生成网站单页；保留official49+OpenCode29普通采集基线和原普通采集标题/链接，仅三项新增行为及coverage-v2要求50；新增第八公开doc `docs/development/commands/agent.md`，因此I11/R4/root15+site1/prod0/M，12AC12VER与72/26不变。修订同步当前slot/summary/DEP及精确比较口径；其它行为/native门无变化。
 
 **锚点与后继边界：** root Markdown内保留旧heading兼容HTML id；网站现有Markdown编译器不保留raw HTML id，仅承诺新标题生成的实际站点锚点及现有普通49标题不变，不伪称旧coverage-unreleased站点片段已获兼容。这个有限网站旧片段兼容缺口作为计划外低优先事项延后，不扩大本次单页写集到renderer、不开general raw HTML权限。未来OG24/27/28/29写入这些页时必须给新增能力独立标版本/未发布状态，不能借本coverage-v2源码说明授予native/SourceA；如上游占用50需要修改本受审doc字节，须重新审查具体doc delta/链接并按真实源码差异验证，不能冒称doc逐字等价。只R4纯版本且8doc/生产/测试其余字节不变的同实现顺延仍沿用户已授权复用规则。
+
+
+### COV2-REL-01 I11/R4实际采纳、候选50写入（2026-10-16 00:18:45 UTC）
+
+原scope R1 FAIL/rawc1ffeb83a136dd4b0baea7e07c9a4177a30fc105877400fd2799eed1dae6d900（网站frame/README基线/遗漏developer页）；R2 FAIL/raw0e56207bc65e0f7ba6bfed007d93111a669e619e4f097fdf9e4daae685c58baa（两处I10/七的标签）；R3仅修两标签后soleClaude PASS/raw3b875be5d4152b18e4617af54f3afd69cb82609de0e904446775e7c78e5b8a40、root独立11postimage SHA/mode/其余10root+site同一性核验及实际3plan QA109/fmtstrict0，source2048前后一致。实际signed+DCO scope main `d74f37aecea801b07959b40326f19ad3b8dad4bb`、Push0/freshremote/归档SHA dbee2b3a1acab7ea2880c8be9467b256f637c2ae06f8c71c551d71aadec492f0 才采纳I11/R4；此前未写root8doc/R4。原私有QA准备SyntaxError在任何测试前发生并保留，不能称testFAIL或PASS；R1/R2/R3不同candidate的实际QA分别绑定其输入。
+
+修复卡source已actual189/cff290及站点交付；AC4/5、VER4/5实际源条件现勾选，仍in-progress/locally-accepted，AC6/VER6及C/D等待COVREL原installed-F .2freshowned epoch0与整套发布，非FAST04/current3/SourceA完成。原49T1 10219/2slow/1LEAK/23skip、0FAIL0retry0flaky不替代新50T2；LEAK causeUNKNOWN仍DEFER-OG-EXPORT-TEST-LEAK-01。原CODE review非阻断P2 registry旧Observer仍含enable误导，保留计划外DEFER-OG-LEGACY-REGISTRY-DIAGNOSTIC-01，原生产bytes冻结/失败关闭及五doc匹配历史配方指引不变。
+
+本次首次实际bump为0.30.50：fresh lateststable49、tag50未存在，Cargo/install三faces同步；Cargo.lock由实际cargo metadata --offline --format-version 1生成，逐字仅root package libra49→50、其它packages完全同一。8doc精确受审postimage已落root，普通capture基线仍49+OpenCode29，仅相应三新增行为与coverage-v2要求50；不宣告stable50已发布。root sole I11/R4/0prod/M、12AC12VER/72与26分母及全部COVREL checkbox不变。六manual、一次fresh prereg genuinevisible、22审计冻结同一性、新50T2、final release Claude/F/CI/四平台/签名manifest/Homebrew/站点/指定curl安装/原.2epoch0仍UNRUN，不预填未知SHA或门PASS。
+
+
+### COV2-REL-01 repaired50 本机验收与新观察事前登记（2026-10-16T00:27:14.785783+00:00）
+
+实际 base d74f37aecea801b07959b40326f19ad3b8dad4bb，incoming repair189/source-qualified；首次修复后bumped0.30.50，行为2045（排除精确三plan事实，包含8doc/R4）manifestSHA `98cbaff7923fb7a78670b685c9c327b72df1ec08a502abf24b69a82081321d6e`。六manual各1/1、version2/2、109reader64+32+1+12、fmt和严格clippy实际全部exit0；12step、all2048前后SHA/mode相同，full尚未运行。原49T1/旧73550full及已消费样本不替代本树。
+
+- prepare-featured-manual-binary：actual exit0 / counts [] / rawSHA256 `cb9ff840120f3e9a0430819971f32cb0df1bc7e9e7a6100988436f5e7d2d5258`。
+- VER3-live：actual exit0 / counts [["1", "0", "0"]] / rawSHA256 `a83f2e5101d5667770aba60bb94fce382308e7475b3584585d27d9307a1390ea`。
+- VER4-import：actual exit0 / counts [["1", "0", "0"]] / rawSHA256 `4574a78b180fca04a883493575e937723ccb5f78a9ceeda511f80f784fb35c60`。
+- VER5-failure：actual exit0 / counts [["1", "0", "0"]] / rawSHA256 `17e5aed296fe5a88f6875d4376d6a7cdb7141efcf8df3eb4551bcdc557106820`。
+- VER7-candidate-live：actual exit0 / counts [["1", "0", "0"]] / rawSHA256 `330d07af5499bfc7fdc5cdf978e78a00a2277040b5ae217bd9a4f4c89609acba`。
+- VER8-candidate-import：actual exit0 / counts [["1", "0", "0"]] / rawSHA256 `0f20deb695af1b92efd0b20ac5b5645d71980ed403992ce56426bd86d34ef2b5`。
+- build-default-helper：actual exit0 / counts [] / rawSHA256 `38659439f3c27956f5fb45e87dd98cf96bd6eea9c2bfa81393c399df00364d51`。
+- VER6-extraction：actual exit0 / counts [["1", "0", "0"]] / rawSHA256 `1430a0c756424f8f410e71917a121364709ac96ab9ada8c9dc351f8aa3f209e6`。
+- version-parity：actual exit0 / counts [["2", "0", "0"]] / rawSHA256 `5ee0efc586fcfa77f8fdb068753205320995a8a1a5249d6d1c045a16303b665c`。
+- docs-readers：actual exit0 / counts [["64", "0", "0"], ["32", "0", "0"], ["1", "0", "0"], ["12", "0", "0"]] / rawSHA256 `eb4f273118265ebfde5ee1880641620902dffe90cffa873784607ea6e81cab5d`。
+- fmt：actual exit0 / counts [] / rawSHA256 `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`。
+- strict：actual exit0 / counts [] / rawSHA256 `99fb5d83f1d72eeabfcbd3be612308ddb4423ef108e31c349adef6df14b244f1`。
+
+事前登记标记 `COVREL-REPAIRED-0.30.50-OBSERVATION-PREREG-98cbaff7923f`；PREFLIGHT-READY SHA256 `c0fbebdaddca011cdea8b6885ae5da267ee2e556c77201f5d5a860ce85ec862c`，fresh classifier actual compileexit0、binarySHA `5ccc7ff1c8b19a7d27d8a4d57cb98e681ba3cbf8aef9aa61c5a44ac4dcb2a62c`，当下model_attempts0。本树只授权接下来一次本机真实visible-only观察，总run/export/classifier≤600s、不得重试；auth只已授权Anthropic memory bridge，新owned临时store，88builtin/0external、thinking disabled、deny tools。全部无密argv/实际build/model/plugin/transport/config在以下完整事前登记；不登记issuer、不live mint、不存原文，原buffer未改传pureclassifier，只field/type/count+临时keyHMAC。此刻真实观察/full/F/CI/release/install均尚无PASS。SourceA/current3未放行，formal59/72/source62/72、COV25/26/formal0不变。
+
+```json
+{
+  "utc": "2026-10-16T00:26:36.222858+00:00",
+  "status": "READY_FOR_PARENT_PREREGISTRATION",
+  "base": "repaired-bumped-0.30.50-behavior-sha256:98cbaff7923fb7a78670b685c9c327b72df1ec08a502abf24b69a82081321d6e",
+  "libra_source_main": "d74f37aecea801b07959b40326f19ad3b8dad4bb",
+  "libra_candidate_version": "0.30.50",
+  "libra_behavior_manifest_sha256": "98cbaff7923fb7a78670b685c9c327b72df1ec08a502abf24b69a82081321d6e",
+  "binary_version": "2.0.29",
+  "binary_sha256": "7f46ba1dad86b730903d9adf54015bb4e706fc1ab6a247affc5a635cd8a663f3",
+  "config_sha256": "62847f5d06656422b15b27297cc6946d9cfcd91f97b2e70f71d3e0be9a61c5bc",
+  "classifier_binary_sha256": "5ccc7ff1c8b19a7d27d8a4d57cb98e681ba3cbf8aef9aa61c5a44ac4dcb2a62c",
+  "classifier_source_sha256": "2fbf10743fa58f7ba24501c0f9a1794276a4723da6c636a5b124a06283639cfd",
+  "effective": {
+    "config": {
+      "entries": 3,
+      "owned_entries": 3,
+      "managed_or_unknown_entries": 0
+    },
+    "builtin_plugin_ids": [
+      "opencode.agent",
+      "opencode.browser",
+      "opencode.command",
+      "opencode.config.agent",
+      "opencode.config.command",
+      "opencode.config.compaction",
+      "opencode.config.compatibility",
+      "opencode.config.formatter",
+      "opencode.config.image",
+      "opencode.config.instruction",
+      "opencode.config.location-watcher",
+      "opencode.config.mcp",
+      "opencode.config.policy",
+      "opencode.config.provider",
+      "opencode.config.reference",
+      "opencode.config.shell",
+      "opencode.config.skill",
+      "opencode.config.snapshot",
+      "opencode.config.tool-output",
+      "opencode.config.websearch",
+      "opencode.config.worktree",
+      "opencode.mcp.codemode.defaults",
+      "opencode.models.dev",
+      "opencode.plan",
+      "opencode.prompt.anthropic",
+      "opencode.prompt.arcee",
+      "opencode.prompt.identity",
+      "opencode.prompt.kimi",
+      "opencode.prompt.meta",
+      "opencode.prompt.openai",
+      "opencode.prompt.verbosity",
+      "opencode.provider.amazon.bedrock",
+      "opencode.provider.azure",
+      "opencode.provider.cerebras",
+      "opencode.provider.chatgpt",
+      "opencode.provider.cloudflare.ai.gateway",
+      "opencode.provider.cloudflare.workers.ai",
+      "opencode.provider.cohere",
+      "opencode.provider.databricks",
+      "opencode.provider.digitalocean",
+      "opencode.provider.dynamic",
+      "opencode.provider.github.copilot",
+      "opencode.provider.gitlab",
+      "opencode.provider.google.vertex",
+      "opencode.provider.kilo",
+      "opencode.provider.llmgateway",
+      "opencode.provider.lmstudio",
+      "opencode.provider.modal",
+      "opencode.provider.neon",
+      "opencode.provider.nvidia",
+      "opencode.provider.ollama",
+      "opencode.provider.openai",
+      "opencode.provider.opencode",
+      "opencode.provider.openrouter",
+      "opencode.provider.perplexity",
+      "opencode.provider.poe",
+      "opencode.provider.prompt-cache-key",
+      "opencode.provider.sap.ai.core",
+      "opencode.provider.snowflake.cortex",
+      "opencode.provider.vercel",
+      "opencode.provider.vllm",
+      "opencode.provider.xai",
+      "opencode.provider.zenmux",
+      "opencode.skill",
+      "opencode.tool.edit",
+      "opencode.tool.glob",
+      "opencode.tool.grep",
+      "opencode.tool.input.repair",
+      "opencode.tool.patch",
+      "opencode.tool.question",
+      "opencode.tool.read",
+      "opencode.tool.shell",
+      "opencode.tool.skill",
+      "opencode.tool.subagent",
+      "opencode.tool.webfetch",
+      "opencode.tool.websearch",
+      "opencode.tool.write",
+      "opencode.tools",
+      "opencode.tools.mcp-resources",
+      "opencode.vcs.git",
+      "opencode.vcs.hg",
+      "opencode.warming",
+      "opencode.websearch.exa",
+      "opencode.websearch.firecrawl",
+      "opencode.websearch.parallel",
+      "opencode.websearch.tavily",
+      "opencode.websearch.tinyfish",
+      "opencode.wellknown"
+    ],
+    "external_plugins": 0,
+    "failed_plugins": 0,
+    "provider": "anthropic",
+    "model": "anthropic/claude-haiku-4-5",
+    "package": "@opencode/ai/providers/anthropic",
+    "official_endpoint_equal": true,
+    "transport": "native Anthropic over HTTPS/default HTTP",
+    "thinking": "disabled",
+    "agent": "covrel-visible",
+    "steps": 1,
+    "final_permission_rule": "wildcard deny, followed only by deny rules",
+    "no_thinking_override": true
+  },
+  "owned_root": "/private/tmp/libra-covrel-repaired050-r1-1896475-20261016/observation/owned",
+  "environment": {
+    "HOME": "/private/tmp/libra-covrel-repaired050-r1-1896475-20261016/observation/owned/home",
+    "XDG_DATA_HOME": "/private/tmp/libra-covrel-repaired050-r1-1896475-20261016/observation/owned/xdg-data",
+    "XDG_CACHE_HOME": "/private/tmp/libra-covrel-repaired050-r1-1896475-20261016/observation/owned/xdg-cache",
+    "XDG_CONFIG_HOME": "/private/tmp/libra-covrel-repaired050-r1-1896475-20261016/observation/owned/xdg-config",
+    "XDG_STATE_HOME": "/private/tmp/libra-covrel-repaired050-r1-1896475-20261016/observation/owned/xdg-state",
+    "TMPDIR": "/private/tmp/libra-covrel-repaired050-r1-1896475-20261016/observation/owned/tmp",
+    "OPENCODE_CONFIG_DIR": "/private/tmp/libra-covrel-repaired050-r1-1896475-20261016/observation/owned/config",
+    "OPENCODE_CONFIG": "/private/tmp/libra-covrel-repaired050-r1-1896475-20261016/observation/owned/config/opencode.json",
+    "OPENCODE_DB": "/private/tmp/libra-covrel-repaired050-r1-1896475-20261016/observation/owned/xdg-data/opencode/opencode.db",
+    "OPENCODE_CONFIG_PROJECT_DISABLE": "1",
+    "OPENCODE_DISABLE_MODELS_FETCH": "1",
+    "OPENCODE_DISABLE_AUTOUPDATE": "1",
+    "OPENCODE_FILEWATCHER_DISABLE": "1",
+    "OPENCODE_DISABLE_FFF": "1",
+    "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+    "TERM": "dumb",
+    "LANG": "en_US.UTF-8",
+    "PWD": "/private/tmp/libra-covrel-repaired050-r1-1896475-20261016/observation/owned/cwd"
+  },
+  "secret_env_names": [
+    "OPENCODE_PASSWORD"
+  ],
+  "server_argv": [
+    "/Users/eli/.opencode/bin/opencode",
+    "serve",
+    "--stdio",
+    "--port",
+    "0",
+    "--hostname",
+    "127.0.0.1"
+  ],
+  "auth_source_argv": [
+    "/Users/eli/.opencode/bin/opencode",
+    "auth",
+    "export",
+    "anthropic"
+  ],
+  "auth_destination_argv": [
+    "/Users/eli/.opencode/bin/opencode",
+    "auth",
+    "import",
+    "--server",
+    "http://127.0.0.1:64979"
+  ],
+  "run_argv": [
+    "/Users/eli/.opencode/bin/opencode",
+    "run",
+    "--server",
+    "http://127.0.0.1:64979",
+    "--model",
+    "anthropic/claude-haiku-4-5",
+    "--agent",
+    "covrel-visible",
+    "--format",
+    "json",
+    "--title",
+    "covrel050-repaired-visible-observation",
+    "Reply with the single word READY."
+  ],
+  "export_argv_template": [
+    "/Users/eli/.opencode/bin/opencode",
+    "session",
+    "export",
+    "<EXACT-NEW-SESSION-ID>",
+    "--server",
+    "http://127.0.0.1:64979"
+  ],
+  "max_attempts": 1,
+  "overall_timeout_seconds": 600,
+  "internal_http_retries_not_claimed_one_request": true,
+  "prompt_sha256": "a48ba54e9a3e9424e093278ebb22ab78048172fd5d87c7b54c01441252d7e719",
+  "host_managed_absent": true,
+  "model_attempts": 0,
+  "issuer_registration": false,
+  "live_mint": false,
+  "sourceA": false
+}
+```
+
+
+### COV2-REL-01 repaired50 新真实可读观察已完成、T2待开跑（2026-10-16T00:28:00.630352+00:00）
+
+本树事前登记SHA `c0fbebdaddca011cdea8b6885ae5da267ee2e556c77201f5d5a860ce85ec862c` 后actual一次Haiku4.5 run/export/classifier exit0/0/0，2.270449秒、1Session/1text非空、partial=false/1turn/coverage version1；六类state/proof候选计数全0，原export未改、无raw transcript落盘、临时HMAC key未保留、owned store实际回收。结果receiptSHA `58667b739bf7a55ad0e25e37c220ddf5a7ae6ab89e1c8743ab0b9b3075d6b886`。这是ordinary visible-only观察，不证明native来源、不授予SourceA/current3/归档。新修复行为本次预算1已用，不再自动重试，旧样本未复用。
+
+七审计行为文件SHA/mode与原actual12+10及COV16/17原具名AC/VER完全同一，冻结点收据SHA `68964825d9c4a25f40607562d96dd2ea68a937d81cb83ba50f748965d69fda50`，按原VER10/11只映射原12/10真实审计，不声称新跑22；classic unsupported import020原FAIL/defer保留。唯一26新增case计数不扩大。full/F/发布Claude/currentCI/4平台/签名manifest/站点发布/安装/原.2epoch0及C/D仍待，正式59/72=81.94%、source62/72=86.11%、COVsource25/26/formal0不变。
+
+实际无敏观察终态（原文及鉴权不在此）：
+
+```json
+{
+  "utc": "2026-10-16T00:27:18.083511+00:00",
+  "base": "repaired-bumped-0.30.50-behavior-sha256:98cbaff7923fb7a78670b685c9c327b72df1ec08a502abf24b69a82081321d6e",
+  "attempts": 1,
+  "run_exit": 0,
+  "export_exit": 0,
+  "classifier_exit": 0,
+  "elapsed_seconds": 2.2704492079792544,
+  "preregistration_sha256": "c0fbebdaddca011cdea8b6885ae5da267ee2e556c77201f5d5a860ce85ec862c",
+  "events": {
+    "step_start": 1,
+    "text": 1
+  },
+  "assistant_text_observed": true,
+  "session_count": 1,
+  "raw_export_hmac_sha256": "5aa9286dcdfc6610cb4cf3a980130860106ce751019aafc5806f30921df39e96",
+  "hmac_key_retained": false,
+  "original_export_unmodified": true,
+  "raw_transcript_evidence_file_created": false,
+  "metadata": {
+    "field_names_types_counts": {
+      "info:object": 1,
+      "id:string": 7,
+      "projectID:string": 1,
+      "agent:string": 3,
+      "model:object": 2,
+      "providerID:string": 2,
+      "<other>:string": 6,
+      "cost:number": 2,
+      "tokens:object": 2,
+      "input:number": 2,
+      "output:number": 2,
+      "reasoning:number": 2,
+      "cache:object": 2,
+      "read:number": 2,
+      "write:number": 2,
+      "time:object": 5,
+      "created:number": 5,
+      "updated:number": 1,
+      "<other>:number": 2,
+      "title:string": 1,
+      "<other>:object": 1,
+      "directory:string": 1,
+      "messages:array": 1,
+      "type:string": 5,
+      "text:string": 2,
+      "<other>:array": 1,
+      "completed:number": 1,
+      "content:array": 1,
+      "finish:string": 1
+    },
+    "state_proof_candidate_counts": {
+      "originProof": 0,
+      "reasoningEncryptedContent": 0,
+      "redactedData": 0,
+      "signature": 0,
+      "state": 0,
+      "thoughtSignature": 0
+    },
+    "node_count": 72
+  },
+  "classifier": {
+    "classifier_ok": true,
+    "partial": false,
+    "turns": 1,
+    "coverage_versions": [
+      1
+    ],
+    "source_or_native_authority": false
+  },
+  "genuine_visible_only": true,
+  "native_proof": false,
+  "sourceA": false,
+  "issuer_registration": false,
+  "live_mint": false
+}
+```
+
+审计冻结点七文件：
+
+- `tests/agent_opencode_bridge_test.rs` / `c04d3544f3e1dd492a6be269efaa9962f90855e46d507af7bf16c0c2c5b915c8` / 0o644 / exact same。
+- `src/internal/ai/capture/live_pipeline_tests.rs` / `3413f5059f1899c499e7c8e0067da5e1c5b1babd11502071c2ab2c4467ad9722` / 0o644 / exact same。
+- `tests/agent_checkpoint_redaction_test.rs` / `ef1896407d1a0db29be11dcb25892659fb96f5d3df1a524d72eecc247f3b7cb2` / 0o644 / exact same。
+- `tests/agent_lifecycle_event_test.rs` / `c0bdb6ca4e4ce3f77c2e7e031f2af3551cfed58a2b3798b6143a7c6989facad4` / 0o644 / exact same。
+- `tests/agent_hook_crash_test.rs` / `5c16c45c9e4fc6929b4681a30b4a8f541357240c708d61d1199e68a18f87e977` / 0o644 / exact same。
+- `tests/agent_import_test.rs` / `9f165781a65971f9dbac5ed6442353e681be429ae73bef39987351371680dc74` / 0o644 / exact same。
+- `src/internal/ai/capture/live_oracle_tests.rs` / `2493e17afad7211842e046c41f5327ae5ed7e902c6fd64ce76871904c301d0b8` / 0o644 / exact same。
+
+
+### COV2-REL-01 repaired50 首次最终行为 T2 实际完成（2026-10-16T00:49:56.998427+00:00）
+
+actual dual-env `cargo nextest run --locked --offline --all --no-fail-fast --retries 2` exit0；     Summary [1124.297s] 10219 tests run: 10219 passed (2 slow), 23 skipped。开始 `2026-10-16T00:28:20.887379+00:00`，结束 `2026-10-16T00:49:10.202178+00:00`；rawSHA256 `215dc8242692b4da3ea3eaca8c55f9c7ff8ec1248300c2def533e6ad378a555e`。2048源前后SHA/mode同一，behavior2045 manifestSHA `98cbaff7923fb7a78670b685c9c327b72df1ec08a502abf24b69a82081321d6e`（精确排除三plan纯事实；含8doc最终字节及R4）。原49T1、旧73550full均仅历史；本次是真实修复后首次50T2。skip不计PASS，不新增zeroLEAK或zeroFLAKY门，也不把warning/retry/LEAK原因写成已修或无害。
+
+原终态事件数量：`{"FAIL": 0, "LEAK-FAIL": 0, "LEAK": 0, "RETRY": 0, "FLAKY": 0, "SLOW": 2, "TIMEOUT": 0, "ABORT": 0, "EXECFAIL": 0}`；原事件行如下。
+
+```json
+{
+  "FAIL": [],
+  "LEAK-FAIL": [],
+  "LEAK": [],
+  "RETRY": [],
+  "FLAKY": [],
+  "SLOW": [
+    "        SLOW [> 60.000s] (───────────) libra::command_test command::merge_test::rename_path_collisions::binary_rename_path_collisions_keep_bytes_and_unmerged_stages",
+    "        SLOW [> 60.000s] (───────────) libra::command_test command::reset_test::test_reset_clears_single_pick_and_revert_state_matrix"
+  ],
+  "TIMEOUT": [],
+  "ABORT": [],
+  "EXECFAIL": []
+}
+```
+
+本机六manual各1/1、version2、109readers/fmt/strict、新预登记一次真实visible-only观察及七行为文件绑定的原12+10审计已满足相应实测条件；此处仅勾AC3–11/VER3–11，最终F精确freeze/所有carried37及未来F38、发布唯一Claude/root签推、currentSHA安全/Windows/CI、四平台签名manifest/Homebrew/CDN、cf实际部署、指定curl安装与原installed-F .2 freshowned epoch0登记及撤销/C-D仍待。SourceA/current3/FAST04不放行；父formal59/72=81.94%、source62/72=86.11%，COVsource25/26、formal0。full后只允许这三plan纯事实更新且2045其余字节/mode完全同一，相关109/fmt/strict须实际再验；真实行为变化必须重验。
+
+
+## G09 — COVREL R5 发布说明与 main 整合后的最终冻结（2026-10-16 02:13:58 UTC；独立 signed main 采纳后生效）
+
+AC3–11/VER3–11 的原勾选只绑定旧 215dc824 树，本修订全部重开；六 manual 在新 bumped50 树重跑后、AC9–11 在 root 冻结点完成条件等价复核后，才能分别重新勾选。
+
+最终 release CODE R1 实际 FAIL（raw `828b147df894a683c23489a75fe3e4f5a957d81bd93d2308074e55923df74583`）：缺少 CHANGELOG 0.30.50；R2 实际 FAIL（raw `828e643ab3dc46a1ba9f6d91d3d6c4e0407d51ed338dc2b08469e9e1de78c6ea`）：私有草案误把 VER4 改为 VER5、历史 R4 park 改为 R5。原失败保留，本次精确恢复这两个字面值。COV2-REL-01 仍同一 release 轴，I11/R5（R 加 `CHANGELOG.md` 已审 0.30.50 新顶节），root16/site1、prod0/M、12AC/12VER、父72/COV26、全部依赖和 Source A/current3 边界不变。先 sole Claude scope PASS、49 源码三 plan 相关门及 signed+DCO/PGP/main Push，才在共享 root 写 CHANGELOG；不新增卡、Issue 或免审发布。
+
+当前基线是实际 signed main `f6ff2643cd20a19cf3b595dd2ea3957d60dcd08f`：已包含 f2080f3 的两份 README Quick Start 和 976091c 的三份计划文档交接。它们按 VER2 逐提交分类保留；traces 的 B8 FAIL/8次 STOP、formal0/26 及未来 C/D 不因乘载文档变成通过。README 的 Quick Start 是已审上游基线，发布文档增量仍仅原八文档的版本说明/锚点。旧 repaired50 T2 raw `215dc8242692b4da3ea3eaca8c55f9c7ff8ec1248300c2def533e6ad378a555e` 和新 main49 full raw `b1b511ddb02cd3773be0b30d3a54e5738f09de520aedee6dcb382f54b7c433b1` 都不是新组合发布树的 full。最终 bumped50 必须包含新 CHANGELOG、八文档和本三 plan，实际重跑双 env T2、六项本机 case、版本2/2、CH读者1/1、109读者、fmt/strict 及 runbook notes 本地检查。全量之后只允许精确三 plan 的实际事实收据更新，重新跑读者/fmt/strict、最终 Claude，并证明其余2045逐路径 SHA/mode 不变；其它字节变化重新 full，不启用旧四路径 notes-only full 复用例外。
+
+已实际执行的一次 repaired50 genuine visible-only 观察仅在全部生产源码/测试/config/build、OpenCode/classifier 输入契约及 COV16/17 七个行为文件 SHA/mode 与原已审输入一致时，才可逐项映射到本次最终冻结；冻结其事前登记、原 exit/无内容 shape/HMAC 收据及明确的 v1 visible-only 范围，不声称新执行模型调用或真实 v2 typed-reasoning 端到端正例。任一不等价则 AC9/VER9 保持未完成，按原模型授权/预算重验，不以 synthetic 替代。六 fake/manual 在新树重跑，22审计继续按原 VER10/11 的七文件及原 AC/VER 同一性核验。CHANGELOG 旧历史尾/mode逐字保留，不增加 CLI 或 native 权限。原当前 SHA 安全/Windows CI、四平台、签名 manifest、Homebrew/cf/HTTP、指定 curl 安装、installed-F 原 `.2` fresh-owned epoch0 登记/撤销及 C/D 全部保留。两项新 main49 LEAK 原因 UNKNOWN，按用户既有策略登记计划外遗留，不称已修复或零异常。formal59/72=81.94%、source62/72=86.11%、COVsource25/26/formal0不变。

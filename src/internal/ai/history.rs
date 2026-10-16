@@ -8530,7 +8530,7 @@ mod tests {
         let storage = Arc::new(LocalStorage::new(objects_dir));
         let manager = HistoryManager::new(storage, repo_path.clone(), db_conn.clone());
 
-        let locker = db::establish_connection_with_busy_timeout(
+        let locker = db::establish_connection_with_lock_timeout(
             db_path.to_str().unwrap(),
             Duration::from_millis(50),
         )
@@ -10919,7 +10919,7 @@ mod tests {
             .expect("original rejected cleanup marker exists");
         assert_eq!(original.created_oids, vec![candidate.to_string()]);
 
-        let locker = db::establish_connection_with_busy_timeout(
+        let locker = db::establish_connection_with_lock_timeout(
             database_path
                 .to_str()
                 .expect("rejected cleanup database path is utf-8"),
@@ -11346,7 +11346,7 @@ mod tests {
             "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391",
         )
         .expect("parse deterministic marker oid");
-        let locker = db::establish_connection_with_busy_timeout(
+        let locker = db::establish_connection_with_lock_timeout(
             database_path
                 .to_str()
                 .expect("deadline contention database path is utf-8"),
@@ -11459,7 +11459,7 @@ mod tests {
             .update_ref(crate::internal::branch::TRACES_BRANCH, oid)
             .await
             .expect("seed history head before exclusive read lock");
-        let locker = db::establish_connection_with_busy_timeout(
+        let locker = db::establish_connection_with_lock_timeout(
             database_path
                 .to_str()
                 .expect("deadline contention database path is utf-8"),

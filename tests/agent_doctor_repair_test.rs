@@ -1346,6 +1346,7 @@ async fn doctor_marker_findings_report_canonical_checkpoint_ids() {
 async fn doctor_surfaces_conflicted_coverage_claim_without_raw_identity() {
     let repo = DoctorRepo::init();
     let session = "conflict-doctor-sensitive-session";
+    let raw_content = "DOCTOR_RAW_REASONING_CONTENT_CANARY";
     repo.ingest_checkpoint(session, TRANSCRIPT);
     for schema_version in [1_i64, 2] {
         repo.exec_sql(
@@ -1368,8 +1369,7 @@ async fn doctor_surfaces_conflicted_coverage_claim_without_raw_identity() {
                 incoming_canonical_json, incoming_redaction_report_json
              )
              SELECT session_id, 'doctor-conflict-turn', ?, 1, ?, NULL, ?,
-                    'import', ?, '[{\"role\":\"user\",\"text\":\"redacted\"}]',
-                    '{\"matches\":[],\"bytes_scanned\":0,\"bytes_redacted\":0}'
+                    'import', ?, ?, ?
              FROM agent_session WHERE provider_session_id = ?",
             vec![
                 schema_version.into(),
@@ -1380,6 +1380,13 @@ async fn doctor_surfaces_conflicted_coverage_claim_without_raw_identity() {
                     "c".repeat(64).into()
                 },
                 schema_version.into(),
+                json!([{"role":"reasoning","text":raw_content}])
+                    .to_string()
+                    .into(),
+                json!({"matches":[],"bytes_scanned":0,"bytes_redacted":0,
+                       "private_identity":"DOCTOR_RAW_IDENTITY_CANARY"})
+                .to_string()
+                .into(),
                 session.into(),
             ],
         )
@@ -1388,6 +1395,29 @@ async fn doctor_surfaces_conflicted_coverage_claim_without_raw_identity() {
 
     for repair in [false, true] {
         let report = repo.doctor_json(repair);
+        let args = if repair {
+            vec!["agent", "doctor", "--repair"]
+        } else {
+            vec!["agent", "doctor"]
+        };
+        let human = repo.run(&args, None);
+        assert!(human.status.success(), "{}", describe(&human));
+        let rendered = format!(
+            "{report} {} {}",
+            String::from_utf8_lossy(&human.stdout),
+            String::from_utf8_lossy(&human.stderr)
+        );
+        for private in [
+            session,
+            "doctor-conflict-turn",
+            raw_content,
+            "DOCTOR_RAW_IDENTITY_CANARY",
+        ] {
+            assert!(
+                !rendered.contains(private),
+                "private doctor content: {rendered}"
+            );
+        }
         let conflict_findings = findings(&report)
             .into_iter()
             .filter(|finding| finding["inconsistency_type"] == "conflicted_coverage_claim")

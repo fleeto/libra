@@ -1100,7 +1100,7 @@ async fn read_stdin_bounded(deadline: CaptureDeadline) -> Result<Vec<u8>> {
         command.env(AUTHORIZED_READ_HELPER_CAP_ENV, MAX_STDIN_BYTES.to_string());
         let output = match run_registered_descriptor_helper_until(
             command,
-            std::fs::File::from(owned),
+            owned.into(),
             MAX_STDIN_BYTES as u64 + 9,
             deadline.monotonic(),
         )

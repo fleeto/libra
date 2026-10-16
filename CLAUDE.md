@@ -75,7 +75,10 @@ cargo nextest run --all
 
 # .cargo/config.toml sets RUST_MIN_STACK=16 MiB for every cargo-launched process
 # (debug test binaries overflow the 2 MiB default); the CLI itself runs on a
-# 32 MiB thread (src/main.rs).
+# 32 MiB thread (src/main.rs). It also sets LIBSQLITE3_FLAGS to build the
+# bundled SQLite with SQLITE_DEFAULT_MEMSTATUS=0 (memory statistics take a
+# process-wide mutex in every allocation, which convoys in-process parallel
+# tests); changing it recompiles libsqlite3-sys and everything above it.
 
 # Run specific tests (tests/command/*.rs compile into the single `command_test` binary)
 cargo test command::init_test

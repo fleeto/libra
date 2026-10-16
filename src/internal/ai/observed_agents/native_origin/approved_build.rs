@@ -62,7 +62,7 @@ pub enum ApprovedBuildError {
     )]
     CommandPath,
     #[error(
-        "Loaded OpenCode observer differs from the reviewed template; reinstall the observer before native-origin registration"
+        "Loaded OpenCode observer does not match the private producer's legacy recipe; use the reviewed matching historical observer only in an isolated single-repository setup; ordinary agent enable replaces it and cannot repair legacy matching"
     )]
     Observer,
     #[error(
@@ -78,7 +78,9 @@ const SLOTS: [&str; 3] = [
     "__EVENT_COMMANDS_JSON__",
     "__EXPORT_DEADLINE_MS__",
 ];
-const REVIEWED_TEMPLATE: &str = r####"// libra-managed: do not edit — installed by libra agent enable (AG-19)
+// Immutable recipe for the reviewed .1/.2 binaries; do not follow the ordinary default.
+// Legacy v1 has no per-directory filtering: use only an isolated single-repository setup.
+const LEGACY_V1_TEMPLATE: &str = r####"// libra-managed: do not edit — installed by libra agent enable (AG-19)
 // libra-plugin-template: opencode-2.0.26-v1
 // OpenCode 2.0.26. Observe-only; runs on Node and Bun using agent hooks opencode.
 // OpenCode --pure / OPENCODE_PURE=1 disables external plugins.
@@ -404,7 +406,7 @@ static REVIEWED: ApprovedBuild = ApprovedBuild {
         },
     ],
     builtin_set_digest: "137c5c7b18c756b75e520a6ffdd042397b5c29f917bac383084df5c664dd0e82",
-    libra_template: REVIEWED_TEMPLATE,
+    libra_template: LEGACY_V1_TEMPLATE,
     libra_template_digest: "9c67213be10e16538bfa550501a2dcb7a21c24493b3a8f05592f6c96ff4be27d",
     event_commands_json: EVENT_COMMANDS_JSON,
     event_map_digest: "3fe0008b685e48e61d2f63a339de2e3510d9c9719dc572794afc6c95ef7d2ebe",
@@ -455,7 +457,7 @@ static REVIEWED_ANTHROPIC: ApprovedBuild = ApprovedBuild {
         },
     ],
     builtin_set_digest: "137c5c7b18c756b75e520a6ffdd042397b5c29f917bac383084df5c664dd0e82",
-    libra_template: REVIEWED_TEMPLATE,
+    libra_template: LEGACY_V1_TEMPLATE,
     libra_template_digest: "9c67213be10e16538bfa550501a2dcb7a21c24493b3a8f05592f6c96ff4be27d",
     event_commands_json: EVENT_COMMANDS_JSON,
     event_map_digest: "3fe0008b685e48e61d2f63a339de2e3510d9c9719dc572794afc6c95ef7d2ebe",
@@ -898,7 +900,7 @@ mod tests {
         );
         assert_eq!(
             ApprovedBuildError::Observer.to_string(),
-            "Loaded OpenCode observer differs from the reviewed template; reinstall the observer before native-origin registration"
+            "Loaded OpenCode observer does not match the private producer's legacy recipe; use the reviewed matching historical observer only in an isolated single-repository setup; ordinary agent enable replaces it and cannot repair legacy matching"
         );
         assert_eq!(
             ApprovedBuildError::CompiledPolicy.to_string(),
@@ -958,6 +960,11 @@ mod tests {
     #[test]
     fn npr_15_policy() {
         let build = reviewed();
+        assert_eq!(build.libra_template.len(), 13600);
+        assert_eq!(
+            hex::encode(Sha256::digest(build.libra_template.as_bytes())),
+            "9c67213be10e16538bfa550501a2dcb7a21c24493b3a8f05592f6c96ff4be27d"
+        );
         let vectors: serde_json::Value = serde_json::from_str(INDEPENDENT_VECTORS).unwrap();
         let mut policy_digests = Vec::new();
         for row in vectors["rows"].as_array().unwrap() {
@@ -1054,6 +1061,84 @@ mod tests {
             .split_once("\"#;")
             .unwrap()
             .0;
-        assert_eq!(actual, build.libra_template);
+        assert_ne!(actual, build.libra_template);
+        let current_commands: std::collections::BTreeMap<_, _> =
+            crate::internal::ai::hooks::providers::opencode::events::OPENCODE_HOOK_EVENT_SPECS
+                .iter()
+                .chain(
+                    crate::internal::ai::hooks::providers::opencode::events::OPENCODE_LEGACY_EVENT_SPECS,
+                )
+                .filter_map(|spec| spec.command.map(|command| (spec.name, command.to_string())))
+                .collect();
+        let current_events = serde_json::to_string(&current_commands).unwrap();
+        let current_deadline =
+            crate::internal::ai::observed_agents::opencode_export::EXPORT_DEADLINE
+                .as_millis()
+                .to_string();
+        for legacy in [build, &REVIEWED_ANTHROPIC] {
+            assert_eq!(legacy.libra_template.len(), 13600);
+            assert_eq!(
+                hex::encode(Sha256::digest(legacy.libra_template.as_bytes())),
+                "9c67213be10e16538bfa550501a2dcb7a21c24493b3a8f05592f6c96ff4be27d"
+            );
+            assert_eq!(
+                hex::encode(Sha256::digest(legacy.event_commands_json.as_bytes())),
+                "85977fd993350c87dde2cd8cafc4473d7f86309f362a397def7cd16efbcd5dc4"
+            );
+            for row in vectors["rows"].as_array().unwrap() {
+                let path = row["policy"]["libraCommandPath"].as_str().unwrap();
+                let current_rendered = actual
+                    .replace(SLOTS[0], &serde_json::to_string(path).unwrap())
+                    .replace(SLOTS[1], &current_events)
+                    .replace(SLOTS[2], &current_deadline);
+                assert_eq!(
+                    legacy
+                        .installation_policy(path, current_rendered.as_bytes())
+                        .unwrap_err(),
+                    ApprovedBuildError::Observer
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn anthropic_legacy_policy_keeps_original_gold() {
+        let build = &REVIEWED_ANTHROPIC;
+        // Independent encoding of the signed6685 recipe, not the current renderer's output.
+        for (path, bytes, rendered_sha256, policy_sha256) in [
+            (
+                "/Applications/Libra.app/Contents/MacOS/libra",
+                13993,
+                "e116b0f36e73bc9b0201e3ed0e65743205193233d46f4077a5ffa8a008d6ec6b",
+                "794e9116fe4c244f6f553168f31a8cb54d9d004e66df274b15e4e7b49939f16a",
+            ),
+            (
+                "/opt/homebrew/bin/libra",
+                13972,
+                "be742723a06b5b26357d5c4a935eca2ee9caf0e377596afcac7605b9cd9938ac",
+                "3593923e7f7e5b86048bc192a66b3b75a7872fe97891846747b94f34dbd867d8",
+            ),
+        ] {
+            let rendered = build.render_observer(path).unwrap();
+            assert_eq!(rendered.len(), bytes);
+            assert_eq!(
+                hex::encode(Sha256::digest(rendered.as_bytes())),
+                rendered_sha256
+            );
+            let policy = build
+                .installation_policy(path, rendered.as_bytes())
+                .unwrap();
+            assert_eq!(
+                hex::encode(Sha256::digest(codec::policy_bytes(&policy).unwrap())),
+                policy_sha256
+            );
+            let other_path = format!("{path}-other");
+            assert_eq!(
+                build
+                    .installation_policy(&other_path, rendered.as_bytes())
+                    .unwrap_err(),
+                ApprovedBuildError::Observer
+            );
+        }
     }
 }

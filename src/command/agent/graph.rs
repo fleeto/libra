@@ -18,7 +18,7 @@ use sea_orm::{
 use serde::Serialize;
 
 use crate::{
-    internal::db::get_db_conn_instance_for_path,
+    internal::{ai::observed_agents::CoverageSchemaVersion, db::get_db_conn_instance_for_path},
     utils::{
         error::{CliError, CliResult, StableErrorCode},
         output::{OutputConfig, emit_json_data},
@@ -326,7 +326,7 @@ async fn load_indexed_turns<C: ConnectionTrait>(
     let mut revisions = BTreeMap::<(String, i64), Vec<RevisionOutput>>::new();
     for row in revision_rows {
         let logical_turn_key: String = required(&row, "logical_turn_key")?;
-        let coverage_schema_version: i64 = required(&row, "coverage_schema_version")?;
+        let coverage_schema_version = coverage_version(&row)?;
         revisions
             .entry((logical_turn_key, coverage_schema_version))
             .or_default()
@@ -343,7 +343,7 @@ async fn load_indexed_turns<C: ConnectionTrait>(
     for row in claim_rows {
         claims.push(ClaimRow {
             logical_turn_key: required(&row, "logical_turn_key")?,
-            coverage_schema_version: required(&row, "coverage_schema_version")?,
+            coverage_schema_version: coverage_version(&row)?,
             state: required(&row, "state")?,
             completeness: required(&row, "completeness")?,
             revision: required(&row, "revision")?,
@@ -494,6 +494,17 @@ async fn load_subagents<C: ConnectionTrait>(
 fn required<T: TryGetable>(row: &QueryResult, column: &str) -> CliResult<T> {
     row.try_get("", column)
         .map_err(|_| graph_store_error("decode capture-graph metadata"))
+}
+
+fn coverage_version(row: &QueryResult) -> CliResult<i64> {
+    let version: i64 = required(row, "coverage_schema_version")?;
+    CoverageSchemaVersion::try_from(version)
+        .map(CoverageSchemaVersion::as_i64)
+        .map_err(|_| {
+            graph_store_error("read an unsupported coverage schema version").with_hint(
+                "use a Libra release that supports the stored coverage version; run `libra agent doctor` to inspect the catalog, and do not rewrite version numbers or delete evidence.",
+            )
+        })
 }
 
 fn graph_store_error(action: &str) -> CliError {

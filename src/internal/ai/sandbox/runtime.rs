@@ -3107,9 +3107,12 @@ mod tests {
         );
     }
 
+    // Stacked serial attributes lock bottom-up: `env` first, then
+    // `sandbox_env`, the sorted order `serial(sandbox_env, env)` uses. The
+    // reverse order deadlocked the parallel lib suite against those tests.
     #[test]
-    #[serial_test::serial(env)]
     #[cfg_attr(target_os = "linux", serial_test::serial(sandbox_env))]
+    #[serial_test::serial(env)]
     fn seam_trusted_bwrap_field_consumed() {
         let cwd = tempfile::tempdir().expect("tempdir");
         let policy = SandboxPolicy::ReadOnly;

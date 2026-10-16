@@ -13,6 +13,329 @@ use libra::internal::ai::observed_agents::reasoning::{
 
 const FIXTURE_DIR: &str = "tests/fixtures/agent_transcripts/reasoning";
 
+/// The shared canonical contract is pinned independently of either writer.
+/// The two real temp-DB writer tests in lib use this same literal SHA; this
+/// external test exercises only the bounded memory codec, never a Session.
+#[test]
+fn cov2_production_typed_v2_distinct_from_rg04_legacy() {
+    use libra::internal::ai::{
+        capture::snapshot::{CaptureSnapshotPolicy, CaptureSnapshotService},
+        observed_agents::{canonical_turn_bytes, normalize_opencode_export, redact_turns},
+    };
+    use sha2::{Digest, Sha256};
+
+    const RAW_SECRET: &str = "sk-ant-EXAMPLE0000000000000000";
+    const V2_CANONICAL: &str = r#"[{"role":"user","text":"hi"},{"provider":"opencode","role":"reasoning","source_kind":"reasoning","text":"before <REDACTED:anthropic-api-key> after"},{"role":"assistant","text":"hello"}]"#;
+    const V2_SHA: &str = "7973604f43b515e1af6b1206e85c4fdc88447eed5a7822ca0ec3a77224b792a9";
+    const V1_CANONICAL: &str =
+        r#"[{"role":"user","text":"hi"},{"role":"assistant","text":"hello"}]"#;
+    const V1_SHA: &str = "df991cd9a1ac5c12c32b8cdf0254c3dfbbf26485b505a5afc83a90d1128ebc54";
+    let source = br#"{"info":{"id":"pure-partial-store"},"messages":[{"id":"u","type":"user","text":"hi"},{"id":"a-u","type":"assistant","content":[{"id":"r-u","type":"reasoning","text":"before sk-ant-EXAMPLE0000000000000000 after"},{"id":"t-u","type":"text","text":"hello"}]},{"id":"i-u","type":"idle","outcome":"succeeded"}]}"#;
+    assert_eq!(hex::encode(Sha256::digest(V2_CANONICAL.as_bytes())), V2_SHA);
+    assert_eq!(hex::encode(Sha256::digest(V1_CANONICAL.as_bytes())), V1_SHA);
+    let (redacted, preview) = CaptureSnapshotService::preview_redacted_coverage_v2(
+        "opencode",
+        source.to_vec(),
+        CaptureSnapshotPolicy::default(),
+    )
+    .expect("bounded redacted typed preview");
+    assert!(!String::from_utf8_lossy(redacted.bytes()).contains(RAW_SECRET));
+    assert_eq!(preview["partial"], false);
+    let rows = preview["turns"].as_array().expect("typed turn array");
+    assert_eq!(rows.len(), 1);
+    let row = &rows[0];
+    assert_eq!(row["coverage_schema_version"], 2);
+    assert_eq!(row["digest"], V2_SHA);
+    assert_eq!(row["projection"]["logical_turn_key"], "u");
+    assert_eq!(
+        row["projection"]["records"],
+        serde_json::json!([
+            {"type":"user","text":"hi"},
+            {"type":"reasoning","provider":"opencode","source_kind":"reasoning",
+             "text":"before <REDACTED:anthropic-api-key> after"},
+            {"type":"assistant","text":"hello"},
+        ])
+    );
+    let mut legacy = normalize_opencode_export(redacted.bytes());
+    redact_turns(&mut legacy);
+    assert_eq!(legacy.len(), 1);
+    assert_eq!(
+        canonical_turn_bytes(&legacy[0].records),
+        V1_CANONICAL.as_bytes()
+    );
+    assert_eq!(legacy[0].digest_hex(), V1_SHA);
+    assert_ne!(V1_SHA, V2_SHA);
+}
+
+/// The legacy direct normalizer remains frozen while the actual authorized
+/// capture/import call graph consumes the private typed runtime companion.
+/// COV2-11 replaces COV2-06's temporary preactivation selector here.
+#[test]
+fn cov2_production_typed_path_uses_v2_api() {
+    use libra::internal::ai::observed_agents::{
+        Completeness, CoverageSchemaVersion, SemanticRecord, normalize_opencode_export,
+        select_coverage_schema,
+    };
+
+    let source = br#"{"info":{"id":"ses_inert"},"messages":[{"id":"u","type":"user","text":"hi"},{"id":"a","type":"assistant","content":[{"id":"ap","type":"reasoning","text":"synthetic visible"}]},{"id":"i","type":"idle","outcome":"succeeded"}]}"#;
+    let ordinary = std::str::from_utf8(source)
+        .expect("synthetic UTF-8")
+        .replace(
+            r#""type":"reasoning","text":"synthetic visible""#,
+            r#""type":"text","text":"ordinary""#,
+        );
+    let baseline = normalize_opencode_export(ordinary.as_bytes());
+    assert_eq!(baseline.len(), 1);
+    assert_eq!(
+        baseline[0].completeness,
+        Completeness::Complete,
+        "the control must not be incomplete for an unrelated envelope error"
+    );
+    let turns = normalize_opencode_export(source);
+    assert_eq!(turns.len(), 1);
+    assert!(matches!(&turns[0].records[0], SemanticRecord::User { text } if text == "hi"));
+    for turn in &turns {
+        assert_eq!(turn.completeness, Completeness::Incomplete);
+        assert_eq!(select_coverage_schema(turn), CoverageSchemaVersion::V1);
+        assert!(
+            !turn
+                .records
+                .iter()
+                .any(|record| matches!(record, SemanticRecord::Reasoning { .. }))
+        );
+    }
+    for path in [
+        "src/internal/ai/capture/live_checkpoint.rs",
+        "src/internal/ai/agent_import.rs",
+    ] {
+        let code = std::fs::read_to_string(path).expect("read actual production source");
+        assert!(
+            !code.contains("classify_opencode_coverage_source"),
+            "COV2-11 owns production activation: {path}"
+        );
+    }
+    let snapshot =
+        std::fs::read_to_string("src/internal/ai/capture/snapshot.rs").expect("snapshot source");
+    let legacy = snapshot
+        .split("pub fn capture_authorized(")
+        .nth(1)
+        .expect("legacy capture entry")
+        .split("pub(crate) fn capture_authorized_with_reasoning_context")
+        .next()
+        .expect("legacy body");
+    assert!(legacy.contains("LegacyOrdinary"));
+    assert!(
+        !legacy.contains("preview_redacted_coverage_v2")
+            && !legacy.contains("prepare_redacted_coverage_preview")
+            && !legacy.contains("classify_opencode_coverage_source")
+    );
+    let live =
+        std::fs::read_to_string("src/internal/ai/capture/live_checkpoint.rs").expect("live source");
+    let live = live
+        .split("#[cfg(test)]\npub(crate) mod tests")
+        .next()
+        .expect("production section");
+    assert!(
+        !live.contains("encode_coverage_turn") && !live.contains("safe_turn_projection_for_schema")
+    );
+    let import = std::fs::read_to_string("src/internal/ai/agent_import.rs").expect("import source");
+    assert_eq!(import.matches("AgentKind::OpenCode => normalize_opencode_export_until(transcript.bytes(), deadline)").count(), 2,
+               "the two legacy ordinary preparation projections stay frozen");
+
+    use std::collections::BTreeSet;
+
+    use syn::visit::Visit;
+    #[derive(Default)]
+    struct Calls(BTreeSet<String>);
+    impl<'ast> Visit<'ast> for Calls {
+        fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+            if let syn::Expr::Path(path) = call.func.as_ref()
+                && let Some(segment) = path.path.segments.last()
+            {
+                self.0.insert(segment.ident.to_string());
+            }
+            syn::visit::visit_expr_call(self, call);
+        }
+        fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+            self.0.insert(call.method.to_string());
+            syn::visit::visit_expr_method_call(self, call);
+        }
+    }
+    for (path, function, required) in [
+        (
+            "src/internal/ai/capture/live_checkpoint.rs",
+            "run_export_stage",
+            &["prepare_export_snapshot"][..],
+        ),
+        (
+            "src/internal/ai/capture/live_checkpoint.rs",
+            "prepare_export_snapshot",
+            &[
+                "take_coverage_runtime",
+                "reserve_runtime_turn_claims_with_reasoning",
+            ][..],
+        ),
+        (
+            "src/internal/ai/agent_import.rs",
+            "prepare_import_projection_with_reasoning",
+            &["take_coverage_runtime", "encode_redacted_import_runtime"][..],
+        ),
+        (
+            "src/command/agent/import.rs",
+            "prepare_candidate_bounded",
+            &[
+                "decode_redacted_import_runtime",
+                "ensure_runtime_import_source_history_until",
+            ][..],
+        ),
+        (
+            "src/internal/ai/agent_import.rs",
+            "import_prepared_with_subagent_discovery_and_runtime",
+            &["partition_reasoning_for_import"][..],
+        ),
+    ] {
+        let code = std::fs::read_to_string(path).expect("actual production source");
+        let parsed = syn::parse_file(&code).expect("parse actual source");
+        let item = parsed
+            .items
+            .iter()
+            .find_map(|item| match item {
+                syn::Item::Fn(item) if item.sig.ident == function => Some(item),
+                _ => None,
+            })
+            .expect("actual top-level production entry exists");
+        let mut calls = Calls::default();
+        calls.visit_block(&item.block);
+        for required in required {
+            assert!(
+                calls.0.contains(*required),
+                "{path}::{function} lost runtime call {required}"
+            );
+        }
+        assert!(
+            !calls.0.contains("safe_turn_projection"),
+            "typed route must not choose frozen-v1 projection"
+        );
+    }
+}
+
+/// In-memory persistence spies see only the actual preview's redacted outputs.
+/// Canaries deliberately do not match a secret regex: absence proves erasure,
+/// not a regex hiding a leaked candidate. No Session, exporter, DB or model.
+#[test]
+fn cov2_candidate_zero_plaintext_sinks() {
+    use libra::internal::ai::capture::snapshot::{CaptureSnapshotPolicy, CaptureSnapshotService};
+    const CANARY: &str = "COV10_OPAQUE_CANDIDATE_PAYLOAD_CANARY";
+    #[derive(Default)]
+    struct MemorySinks {
+        ordinary: Vec<Vec<u8>>,
+        typed: Vec<serde_json::Value>,
+    }
+    for include_visible in [false, true] {
+        let mut content = vec![
+            serde_json::json!({"id":"npart_0123456789abcdef0123456789abcdef","type":"reasoning","text":CANARY,
+            "state":{"signature":CANARY,"redactedData":CANARY,"reasoningEncryptedContent":CANARY},
+            "originProof":{"nonce":CANARY},"time":{"start":1,"end":2}}),
+        ];
+        if include_visible {
+            content
+                .push(serde_json::json!({"id":"good","type":"reasoning","text":"public visible"}));
+        }
+        content.push(serde_json::json!({"id":"answer","type":"text","text":"done"}));
+        let source = serde_json::to_vec(&serde_json::json!({"info":{"id":"ses_sinks"},"messages":[
+            {"id":"u","type":"user","text":"prompt"}, {"id":"m","type":"assistant","content":content},
+            {"id":"i","type":"idle","outcome":"succeeded"}]})).expect("synthetic source");
+        let (ordinary, typed) = CaptureSnapshotService::preview_redacted_coverage_v2(
+            "opencode",
+            source,
+            CaptureSnapshotPolicy::default(),
+        )
+        .expect("safe partial preview");
+        assert_eq!(typed["partial"], true);
+        let mut sinks = MemorySinks::default();
+        sinks.ordinary.push(ordinary.bytes().to_vec());
+        sinks.typed.push(typed);
+        assert_eq!(sinks.ordinary.len(), 1);
+        assert_eq!(sinks.typed.len(), 1);
+        assert!(!sinks.ordinary[0].is_empty());
+        let decoded: serde_json::Value =
+            serde_json::from_slice(&sinks.ordinary[0]).expect("ordinary JSON");
+        for output in [
+            String::from_utf8(sinks.ordinary[0].clone()).expect("UTF8"),
+            decoded.to_string(),
+            sinks.typed[0].to_string(),
+        ] {
+            assert!(
+                !output.contains(CANARY),
+                "candidate reached a plaintext sink"
+            );
+        }
+        let rows = sinks.typed[0]["turns"]
+            .as_array()
+            .expect("nonempty turn output");
+        assert!(!rows.is_empty());
+        assert!(
+            rows.iter()
+                .all(|row| row["projection"]["completeness"] == "incomplete")
+        );
+        if include_visible {
+            assert_eq!(rows[0]["coverage_schema_version"], 2);
+            assert!(rows[0]["projection"].to_string().contains("public visible"));
+        } else {
+            assert!(rows.iter().all(|row| row["coverage_schema_version"] == 1));
+        }
+    }
+}
+
+#[test]
+fn cov2_non_opencode_adapter_unchanged() {
+    use libra::internal::ai::{
+        capture::snapshot::{CaptureSnapshotPolicy, CaptureSnapshotService},
+        observed_agents::{
+            Redactor, normalize_claude_transcript, normalize_codex_rollout, redact_turns,
+            safe_turn_projection,
+        },
+    };
+    let claude = concat!(
+        r#"{"type":"user","message":{"role":"user","content":"hi"}}"#,
+        "\n",
+        r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"hello"}]}}"#
+    );
+    let codex = concat!(
+        r#"{"type":"event_msg","payload":{"type":"task_started","turn_id":"t"}}"#,
+        "\n",
+        r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}}"#,
+        "\n",
+        r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hello"}]}}"#,
+        "\n",
+        r#"{"type":"event_msg","payload":{"type":"task_complete"}}"#
+    );
+    for (provider, raw) in [("claude_code", claude), ("codex", codex)] {
+        let (baseline, _) = Redactor::new_default().redact(raw.as_bytes());
+        let mut old = if provider == "codex" {
+            normalize_codex_rollout(baseline.bytes())
+        } else {
+            normalize_claude_transcript(baseline.bytes())
+        };
+        redact_turns(&mut old);
+        assert!(!old.is_empty(), "control must exercise real normalization");
+        let (ordinary, preview) = CaptureSnapshotService::preview_redacted_coverage_v2(
+            provider,
+            raw.as_bytes().to_vec(),
+            CaptureSnapshotPolicy::default(),
+        )
+        .expect("ordinary preview");
+        assert_eq!(ordinary.bytes(), baseline.bytes());
+        let rows = preview["turns"].as_array().expect("turns");
+        assert_eq!(rows.len(), old.len());
+        for (row, turn) in rows.iter().zip(&old) {
+            assert_eq!(row["coverage_schema_version"], 1);
+            assert_eq!(row["digest"], turn.digest_hex());
+            assert_eq!(row["projection"], safe_turn_projection(provider, turn));
+        }
+    }
+}
+
 fn read_fixture(name: &str) -> serde_json::Value {
     let path = format!("{FIXTURE_DIR}/{name}");
     let raw = std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("read {path}: {error}"));

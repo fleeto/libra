@@ -14,8 +14,6 @@ pub(crate) mod extraction;
 pub(crate) mod finalizer;
 pub mod ingress;
 pub(crate) mod key;
-#[cfg(windows)]
-mod key_windows;
 pub(crate) mod live;
 pub(crate) mod live_checkpoint;
 // This oracle uses Unix shell fixtures. Native Windows primitives have their

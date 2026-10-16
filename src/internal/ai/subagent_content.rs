@@ -5395,7 +5395,7 @@ mod tests {
         .await
         .expect("point scoped parent at the test worktree");
         let database = storage_root.join(crate::utils::util::DATABASE);
-        let holder = crate::internal::db::establish_connection_with_busy_timeout(
+        let holder = crate::internal::db::establish_connection_with_lock_timeout(
             &database.to_string_lossy(),
             Duration::from_millis(50),
         )

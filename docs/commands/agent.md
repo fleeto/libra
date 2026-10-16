@@ -1,5 +1,7 @@
 # `libra agent`
 
+> **Coverage-v2 source version:** The coverage-v2 descriptions below refer to the Libra 0.30.50 source line and later compatible versions. This is not a stable-release announcement; check the [official releases](https://github.com/libra-tools/libra/releases) and `libra --version` for installed support. Other sections retain their own version requirements. Coverage-v2 does not prove native origin or authorize native reasoning artifacts.
+
 Manage external-agent capture for Claude Code, Codex, and OpenCode.
 
 ## Native Windows capture
@@ -50,6 +52,11 @@ as unavailable and applies no repairs to them.
 Use the official OpenCode **2.0.29** for ordinary automatic capture. The frozen
 2.0.26 vocabulary and private native producer sections below describe separate
 historical/explicit native lanes; they are not prerequisites for ordinary capture.
+
+Libra 0.30.50 adds session-directory filtering, native executable selection
+behind supported package-manager launchers, and an explicit warning for empty
+metadata-only checkpoint exports. The corresponding behavior below requires
+Libra 0.30.50 or later.
 
 From the repository you want to capture, check the installed versions and prepare
 its exporter trust and observer:
@@ -174,10 +181,18 @@ and a declared role must be `user`. Neither `message` nor `user_prompt` fills a
 missing prompt. The deprecated `session.idle` alias remains accepted, with a
 content-free `legacy_event_alias` tracing warning.
 
-The managed plugin uses the OpenCode 2.0.26 `setup(ctx)` API, a
-location-scoped event subscription and an observe-only tool hook. Refresh it
-with `libra agent enable --agent opencode`: status reports old or edited
-templates, and duplicate managed copies, as not installed until refreshed.
+The managed plugin uses the OpenCode 2.0.26 `setup(ctx)` API, an event
+subscription and an observe-only tool hook. One OpenCode server (for example
+`opencode serve --service`) delivers every project's events to every project's
+plugin. In Libra 0.30.50 and later, sessions known to belong to another
+`location.directory` are not forwarded, and a session moved out of the directory
+is closed here. Events without a location are forwarded unless their session
+was placed elsewhere. A tool call for a session not yet
+placed is attributed through the host's `session.get` (when the host cannot
+answer, it is forwarded as before and `session_location_unavailable` is reported
+once). Refresh it with `libra agent enable --agent opencode`: status reports old
+or edited templates, and duplicate managed copies, as not installed until
+refreshed.
 Node and Bun use the same `node:child_process` transport with the pinned
 absolute Libra filename and `shell:false`. Session/turn boundaries run
 synchronously; tool and compaction observations run asynchronously and never
@@ -233,7 +248,7 @@ alias limits also mark partial; at the ID cap later messages are omitted.
 Extraction does not read files or archive reasoning content, and synthetic
 fixtures do not prove real macOS content capture or native reasoning origin.
 
-OpenCode coverage normalization accepts native 2.0.26 messages and classic
+The legacy ordinary OpenCode coverage normalizer accepts native 2.0.26 messages and classic
 `info/parts`. Each human message starts its own stable logical turn. A valid
 native `idle` settles all pending human splits, including failed/interrupted
 outcomes; Complete describes captured representation, not task success.
@@ -288,7 +303,7 @@ native-origin gates remain required.
 | `checkpoint list` | List captured checkpoints |
 | `checkpoint show <id>` | Show a safe structural checkpoint summary (metadata and internal object IDs are withheld) |
 | `checkpoint rewind <id>` | Inspect or apply a working-tree rewind for one checkpoint |
-| `checkpoint export <id>` | Export a checkpoint's transcript. Redacted by default (no authorization); raw (un-redacted) export requires `--allow-raw --raw` and is recorded in the append-only `agent_audit_log` (`LBR-AGENT-013` when refused without it) |
+| `checkpoint export <id>` | Export a checkpoint's transcript. Redacted by default (no authorization); raw (un-redacted) export requires `--allow-raw --raw` and is recorded in the append-only `agent_audit_log` (`LBR-AGENT-013` when refused without it). A checkpoint recorded without a transcript (metadata-only capture — for OpenCode, the export bridge was unavailable or failed when it was written) exports zero bytes and emits a warning |
 | `skill search` | Search captured skill events by `--skill`, `--provider`, `--session`, and RFC3339 `--since`/`--until` (keyset-paginated with `--limit`/`--cursor`, `--json`). A read-time projection over checkpoint metadata — no dedicated table |
 | `skill list` | Alias of `skill search` (same filters) |
 | `skill registry` | Show the curated per-agent discoverable-skill registry (`--provider <slug>` to scope; the public SkillDiscoverer surface) |
@@ -296,7 +311,7 @@ native-origin gates remain required.
 | `doctor` | Diagnose hook installation and capture state; detect (and with `--repair` fix) checkpoint-store inconsistencies. Its object checks deliberately inspect only this repository's local object directory: unavailable alternate/remote objects are reported conservatively rather than resolving an externally controlled alternate path while producing diagnostics. The read-only `legacy_code_residue` field (human: a "Frozen Code residue" line) reports whether the frozen Code-era paths `.libra/sessions/code/` and `.libra/code/` and the `libra/intent` ref still exist; it never deletes or rewrites that state — cleanup is tracked separately (plan-20260920 ADR-RC-04 / DEFER-RC-02) |
 | `push` | Push `refs/libra/traces` to a remote (`--force-rewrite` for the non-fast-forward push after a `clean` prune, using force-with-lease) |
 | `rpc list` | List discovered `libra-agent-*` binaries on `PATH` (with trusted/quarantined state); requires the external-agents opt-in |
-| `rpc trust <slug>` | Trust a discovered binary — records path + sha256 + device/inode/mtime provenance (refused when its directory is world-writable, or when the binary is not under a trusted directory — `LBR-AGENT-005`). The provider-exporter slug `opencode` instead pins the provider's own CLI binary — resolved only from registered trusted directories, never `$PATH` — for the sandboxed export bridge; this form needs no external-agents opt-in. Provenance is hashed in one streaming pass with no fixed size cap, so large single-file provider CLIs (the OpenCode Bun build is ~171 MiB) stay trustable; a file that yields more bytes than its reported size while being hashed is refused (`LBR-AGENT-005`) |
+| `rpc trust <slug>` | Trust a discovered binary — records path + sha256 + device/inode/mtime provenance (refused when its directory is world-writable, or when the binary is not under a trusted directory — `LBR-AGENT-005`). The provider-exporter slug `opencode` instead pins the provider's own CLI binary — resolved only from registered trusted directories, never `$PATH` — for the sandboxed export bridge; this form needs no external-agents opt-in. A mise (aube) or pnpm `.bin` launcher shim is followed to the native executable it declares, which must itself be under a trusted directory (reported as `launcher` in `--json`); a JavaScript launcher is refused (`LBR-AGENT-005`). Provenance is hashed in one streaming pass with no fixed size cap, so large single-file provider CLIs (the OpenCode Bun build is ~171 MiB) stay trustable; a file that yields more bytes than its reported size while being hashed is refused (`LBR-AGENT-005`) |
 | `rpc trust --dir <path>` | Register a trusted directory (`agent.external_agents.trusted_dirs`, default `~/.libra/agents`): external binaries are only trustable when their canonical path lives under one. The path is canonicalized and must be an existing, non-world-writable directory |
 | `rpc untrust <slug>` | Revoke binary trust; OpenCode also revokes native issuers atomically (see native-origin rotation and revocation below). Always available, even while external agents are disabled |
 | `rpc invoke` | Invoke one JSON-RPC method on a trusted `libra-agent-*` binary |
@@ -400,6 +415,15 @@ the verified
 followed by `libra agent rpc trust opencode`. Neither step opens the
 external-RPC surface (`agent.external_agents.enabled` stays untouched); the
 binary is resolved only from registered trusted directories, never `$PATH`.
+The sandbox maps only the pinned file, so it must be the native OpenCode
+executable. When the trusted directory holds a package-manager launcher —
+the `.bin/opencode` shim written by mise's npm backend (aube) or by pnpm —
+`rpc trust opencode` pins the native executable that shim declares, provided
+that executable's own directory is also registered (the refusal names the
+exact `rpc trust --dir` to run); a JavaScript launcher (`#!/usr/bin/env node`)
+is refused. A trust record that still pins a launcher reports `export_bridge`
+unavailable. Register the native executable's directory if needed, then re-run
+`libra agent rpc trust opencode`.
 Linux content export additionally requires a trusted `bwrap` that passes
 Libra's descriptor-native `--bind-fd` safety probe. Unsupported or legacy
 `bwrap` is reported unavailable and fails closed to metadata-only capture;
@@ -421,6 +445,17 @@ hidden as superseded. Pre-coverage captures are returned as
 `coverage_state="unindexed"` checkpoint chronology without invented revision
 facts. Subagent nodes expose only checkpoint/link structure and retain
 `resolved` or `unresolved` explicitly.
+
+In Libra 0.30.50 and later, graph keeps
+separate rows and revision histories for coverage versions 1 and 2, even when
+they share a logical turn key or checkpoint. This does not change the public
+JSON schema version 1. An unsupported stored coverage version fails the query
+with `LBR-AGENT-009`, without returning a successful graph or candidate content.
+Use a Libra release that supports the stored version and run `libra agent doctor`
+to inspect the catalog; do not rewrite version numbers or delete evidence.
+Doctor reports each version's conflict separately, without raw identities or
+candidate content, and leaves conflict resolution manual, including with
+`--repair`. These coverage-v2 reader guarantees require Libra 0.30.50 or later.
 
 The JSON/machine graph query never opens transcript or object blobs and never
 selects working directories, descriptions, metadata JSON, redaction reports,
@@ -1244,14 +1279,17 @@ The harness and synthetic tests do not prove real content or native reasoning.
 
 ### Private native-origin issuer registration (macOS)
 
-Ordinary `agent rpc trust opencode` pins an exporter binary; it does not register an issuer or prove native reasoning. The native path requires the separately installed, reviewed `2.0.26-libra-native.1` macOS arm64 producer. Enable the OpenCode observer with the actual Libra executable, then prepare a fresh owned installation using that private bundle's initialization instructions. Global OpenCode remains independent.
+Ordinary `agent rpc trust opencode` pins an exporter binary; it does not register an issuer or prove native reasoning. The historical native path requires a separately installed, reviewed macOS arm64 `2.0.26-libra-native.1` or `.2` producer and its exact frozen v1 observer recipe, rendered for the current canonical Libra executable path. Prepare that observer using the reviewed private bundle's instructions in an isolated owned setup. Global OpenCode remains independent.
 
 The immutable catalog also pins a separate `2.0.26-libra-native.2` candidate (build `78c1f19e9249da8d0143a079f90aec9a`, macOS arm64 binary SHA-256 `28174e893a2b63b75f58af4c77212747f6e1eebce5dd0252cfe64847b342615c`). Its additional endpoint descriptor v2 permits only the first-party `anthropic-messages` route to the exact URL `https://api.anthropic.com/v1/messages?beta=true`; the receipt and Ed25519 attestation remain v1. Anthropic-compatible providers, proxies and changed URLs do not match this endpoint. Selecting `.2` still requires separately measured binary bytes, a fresh private installation/key, explicit exporter trust and explicit epoch-checked issuer registration. The `.1` issuer can remain historical verify-only; no key is automatically promoted. The `.1` build remains the frozen NPR-18 harness baseline, not the current official29 ordinary baseline. A catalog match or synthetic test does not prove real `signature`/`redactedData` source bytes or allow their archival; `reasoningEncryptedContent` remains deferred. Provider/account/model checks stay local manual gates, outside CI.
+
+The legacy v1 observer is distinct from the current ordinary v2 observer. It lacks per-directory filtering: never use it with a shared multi-project OpenCode server. Prefer current ordinary capture; any legacy use must isolate one repository per server. `agent doctor`/observer status reports this old v1 plugin as not installed because current detection requires the v2 header. `libra agent enable --agent opencode` replaces a managed v1 plugin with v2 and breaks the old private recipe match. Generic reinstall or `agent enable` is therefore not a repair for legacy issuer registration. This compatibility fix does not change the ordinary per-directory observer or add a legacy installer.
+
+The following registration example assumes the exact reviewed historical observer is already in place; it deliberately omits `agent enable`. The published-binary compatibility gate uses a fresh owned repository, HOME, XDG directories and epoch-0 registry with the original `.2` public descriptor and issuer/key unchanged. Only the measured producer's registration challenge may access that key. It runs no Session, account/model request or OpenCode server, and revokes the fresh registry during cleanup. A successful gate proves registration compatibility only, not Source A, a current `.3` producer or real native-field archival.
 
 ```sh
 libra agent rpc trust --dir /absolute/approved-private/bin
 libra agent rpc trust opencode
-libra agent enable --agent opencode
 libra agent rpc trust opencode \
   --native-origin-manifest /absolute/private-installation/installation.json \
   --native-origin-expected-epoch 0
@@ -1264,6 +1302,9 @@ The public descriptor must be a regular, non-symlink `installation.json`, owned 
 The actual producer must successfully answer a new random, domain-separated Ed25519 challenge within 30 seconds, with at most 4096 stdout bytes and bounded captured stderr. Child output is withheld on failure. After the challenge, one write transaction rechecks current exporter trust and trusted directories, performs expected-epoch CAS, and writes one complete registry row. Duplicate rows, case aliases, encryption, malformed records and size overflow refuse without repair. Limits are 64 KiB and 128 issuer records; revoked history is never removed to make space.
 
 A new independent installation key becomes active; earlier active keys become verify-only. Existing issuer keys cannot be reactivated by registration or ordinary binary re-trust. Historical records remain immutable. Successful registration proves installation key/binary association only. Receipt signature, current issuer permission, source coordinates and original native field checks remain required before any archive admission; unknown or unproven sessions stay partial. JSON registration output includes the transient current Libra executable SHA256 for local audit; this measurement is neither a signed policy field nor a pinned historical Libra version.
+
+An unapproved row manually created against the unreleased development `cd53…` observer policy remains rejected. Preserve and back up the entire registry and repository, and suspend affected native registration/archive operations pending a separate reviewed repair. Do not delete rows, automatically migrate them or treat them as approved. The bounded compatibility checks do not establish that every user repository has been scanned; supported ordinary capture can be used in a fresh isolated workspace without claiming the affected repository is repaired.
+
 
 
 ### OpenCode native-origin rotation and revocation
@@ -1485,3 +1526,36 @@ fields, complete reasoning, real idle.error failures, automatic terminal
 completion or full-suite acceptance. Real OpenCode Session/account/model checks
 run locally on macOS and stay outside CI. Metadata-only, empty output and skipped
 checks do not count as content acceptance.
+
+<!-- Compatibility anchor for earlier links; not a release-status assertion. -->
+<a id="coverage-v2-capture-unreleased"></a>
+
+## Coverage-v2 capture (Libra 0.30.50)
+
+From the first stable release containing coverage-v2, OpenCode export capture
+and historical import retain supported provider-visible reasoning as typed,
+redacted turn content. Turns containing that content use coverage schema 2;
+ordinary turns keep schema 1 and their existing canonical bytes. Redaction runs
+before either digest or checkpoint projection. This does not authenticate
+`signature`, `redactedData`, or `reasoningEncryptedContent`: unproven native
+fields remain partial and cannot be archived as trusted artifacts.
+
+Retained visible reasoning is part of the redacted checkpoint and follows its
+export, `libra agent push`, and cloud-sync paths when used. There is no separate
+flag to exclude that reasoning while retaining other captured content.
+
+After upgrading, an interrupted action whose checkpoint was already committed
+with v1 (or an empty legacy revision set) first settles that existing receipt
+without adding claims or rewriting its checkpoint. A subsequent **new action**
+may capture the visible reasoning once under v2; repeated capture then deduplicates.
+The old v1 objects, digests, and claims remain readable and unchanged.
+
+If source classification is rejected after that session already has v2 claims,
+the entire new capture/import attempt stops, including new ordinary turns.
+Its pending receipt/export work stays retryable; no fallback claims or success
+acknowledgment are created. An unchanged over-limit or unsupported source can
+keep that session blocked. Keep the recorded data, inspect `libra agent doctor`,
+and start a new OpenCode session to continue supported capture. A candidate or
+unverified reasoning source cannot turn this failure into complete coverage.
+These changes add no command flags and require Libra 0.30.50 or later. OpenCode Session/exporter/model acceptance runs locally on
+macOS; it is not a CI integration test.

@@ -32,7 +32,10 @@ use crate::internal::ai::{
         CaptureSourceCommitmentDomain, derive_capture_source_commitment_in_scope_until,
         derive_snapshot_content_commitment_in_scope_until,
     },
-    observed_agents::reasoning::{ImportTransportKey, verify_import_transport},
+    observed_agents::{
+        coverage::decode_redacted_import_runtime,
+        reasoning::{ImportTransportKey, verify_import_transport},
+    },
 };
 use crate::{
     internal::{
@@ -41,7 +44,8 @@ use crate::{
                 DetailedImportSummary, IMPORT_INDEX_REPAIR_MARKER_KEY,
                 IMPORT_INDEX_REPAIR_MARKER_SCHEMA_V2, ImportError, ImportIndexRepairMarker,
                 ImportProgressError, ImportRequest, ImportSummary, PreparedImportProjection,
-                identity_id as import_identity_id, import_prepared_with_subagent_discovery,
+                identity_id as import_identity_id,
+                import_prepared_with_subagent_discovery_and_runtime,
                 is_import_source_commitment_v2, prepare_import_projection_with_reasoning,
                 restore_tombstone, session_is_tombstoned, validate_import_index_repair_marker,
             },
@@ -57,6 +61,7 @@ use crate::{
                 AgentKind, AgentSessionCtx, TRANSCRIPT_READ_HARD_CAP_BYTES, TranscriptSource,
                 agent_for, claude_session_dir, claude_session_id_is_safe_path_component,
                 compliance::{MAX_TRANSCRIPT_READ_BYTES_KEY, max_transcript_read_bytes_setting},
+                coverage::{encode_bounded_json, import_runtime_has_typed_turns},
                 find_codex_rollout, open_provider_directory_for_discovery,
                 opencode_export::{ExportLimits, authorized_trusted_sandboxed_export_until},
                 reasoning::{
@@ -697,6 +702,25 @@ fn consume_prepared_reasoning_transport(
         .context(ImportError::AuthorizedReaderFailed)
 }
 
+/// Shape validation only: source/native authentication remains the caller's
+/// prerequisite. Missing runtime data cannot choose a legacy OpenCode path.
+#[cfg_attr(windows, allow(dead_code))]
+fn validate_prepared_runtime_response(
+    kind: AgentKind,
+    projection: &PreparedImportProjection,
+    native_present: bool,
+) -> Result<()> {
+    match (kind, projection.coverage_runtime.as_ref()) {
+        (AgentKind::OpenCode, Some(dto))
+            if !native_present || !import_runtime_has_typed_turns(dto) =>
+        {
+            Ok(())
+        }
+        (AgentKind::OpenCode, _) | (_, Some(_)) => Err(ImportError::AuthorizedReaderFailed.into()),
+        (_, None) => Ok(()),
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum PreparationImportErrorKind {
@@ -761,7 +785,11 @@ struct ImportIdentityFence {
 }
 
 struct PreparedCandidateOutcome {
-    request: Result<(ImportRequest, Option<NativeProvenReasoning>)>,
+    request: Result<(
+        ImportRequest,
+        Option<NativeProvenReasoning>,
+        Option<crate::internal::ai::capture::snapshot::CaptureCoverageRuntime>,
+    )>,
     raw_bytes: u64,
 }
 
@@ -2051,8 +2079,11 @@ pub fn run_import_preparation_descriptor_helper_from_stdin() -> Result<Vec<u8>> 
             raw_bytes,
         },
     };
-    let encoded =
-        serde_json::to_vec(&response).context("encode internal descriptor preparation response")?;
+    let encoded = encode_bounded_json(
+        &response,
+        usize::try_from(IMPORT_PREPARATION_HELPER_OUTPUT_CAP)?,
+    )
+    .map_err(|_| ImportError::AuthorizedReaderFailed)?;
     if encoded.len() as u64 > IMPORT_PREPARATION_HELPER_OUTPUT_CAP {
         return Err(ImportError::AuthorizedReaderFailed.into());
     }
@@ -2897,6 +2928,37 @@ async fn prepare_candidate_bounded(
                     transport_required,
                     transport,
                 )?;
+                validate_prepared_runtime_response(
+                    candidate.kind,
+                    &projection,
+                    native_reasoning.is_some(),
+                )?;
+                // The native MAC above covers the entire received projection,
+                // including this optional extension. Only now may it move.
+                let coverage_runtime = match (candidate.kind, projection.coverage_runtime.take()) {
+                    (AgentKind::OpenCode, Some(dto)) => {
+                        let (turns, classifier_rejected, source_partial) =
+                            decode_redacted_import_runtime(
+                                dto,
+                                candidate.kind.as_db_str(),
+                                &projection.turns,
+                                &projection.session_state,
+                                monotonic_deadline,
+                            )
+                            .map_err(|_| ImportError::AuthorizedReaderFailed)?;
+                        Some(
+                            crate::internal::ai::capture::snapshot::CaptureCoverageRuntime {
+                                turns,
+                                classifier_rejected,
+                                source_partial,
+                            },
+                        )
+                    }
+                    (AgentKind::OpenCode, None) | (_, Some(_)) => {
+                        return Err(ImportError::AuthorizedReaderFailed.into());
+                    }
+                    (_, None) => None,
+                };
                 await_import_precommit_read_until(
                     monotonic_deadline,
                     capture_scope.assert_workspace_fence_live(conn),
@@ -2930,6 +2992,27 @@ async fn prepare_candidate_bounded(
                     .is_some_and(|snapshot| snapshot.bind_source_commitment(snapshot_commitment))
                 {
                     return Err(ImportError::AuthorizedReaderFailed.into());
+                }
+                // History-only preflight permits a fresh session with no row.
+                // Reservation rechecks rejected history under its first writer lock.
+                if let Some(runtime) = &coverage_runtime {
+                    await_import_precommit_read_until(
+                        monotonic_deadline,
+                        capture_scope.assert_provider_session_compatible(
+                            conn,
+                            &candidate.provider_session_id,
+                        ),
+                    )
+                    .await
+                    .context("verify scoped provider session before import history preflight")?;
+                    crate::internal::ai::coverage_gate::ensure_runtime_import_source_history_until(
+                        conn,
+                        capture_scope,
+                        &provisional_session_id,
+                        deadline,
+                        runtime.classifier_rejected,
+                    )
+                    .await?;
                 }
                 // A historical V1 row may still retain the exact raw locator
                 // used to authorize this held descriptor. Move it only after
@@ -2981,7 +3064,7 @@ async fn prepare_candidate_bounded(
                 .await?;
                 validate_scoped_prepared_existing_session(&mut request, existing_session.as_ref())?;
                 Ok(PreparedCandidateOutcome {
-                    request: Ok((request, native_reasoning)),
+                    request: Ok((request, native_reasoning, coverage_runtime)),
                     raw_bytes,
                 })
             }
@@ -3195,7 +3278,7 @@ pub async fn execute_safe(args: ImportArgs, output: &OutputConfig) -> CliResult<
             if cumulative_raw_bytes > raw_byte_cap {
                 return Err(ImportError::BatchInputLimit.into());
             }
-            let (request, native_reasoning) = prepared.request?;
+            let (request, native_reasoning, coverage_runtime) = prepared.request?;
             let barrier = acquire_import_index_barrier(
                 &conn,
                 &storage_root,
@@ -3242,13 +3325,14 @@ pub async fn execute_safe(args: ImportArgs, output: &OutputConfig) -> CliResult<
             } else {
                 crate::internal::ai::subagent_content::SubagentDiscovery::default()
             };
-            import_prepared_with_subagent_discovery(
+            import_prepared_with_subagent_discovery_and_runtime(
                 &conn,
                 &storage_root,
                 request,
                 commit_deadline,
                 subagent_discovery,
                 native_reasoning,
+                coverage_runtime,
             )
             .await
         }
@@ -3452,6 +3536,124 @@ mod tests {
     use crate::utils::error::CliErrorKind;
 
     #[cfg(unix)]
+    #[test]
+    fn cov2_runtime_response_required_and_native_projection_binding() {
+        let (mut projection, binding, key, native_dto) =
+            authenticated_reasoning_transport_test_fixture();
+        assert!(projection.coverage_runtime.is_none());
+        let old = serde_json::to_value(&projection).unwrap();
+        assert!(
+            old.get("coverage_runtime").is_none(),
+            "None retains old native wire shape"
+        );
+        assert!(
+            validate_prepared_runtime_response(AgentKind::ClaudeCode, &projection, true).is_ok()
+        );
+        assert!(
+            validate_prepared_runtime_response(AgentKind::OpenCode, &projection, false).is_err()
+        );
+        projection.coverage_runtime = Some(
+            serde_json::from_str(
+                r#"{"version":1,"classifier_rejected":true,"source_partial":false,"turns":null}"#,
+            )
+            .unwrap(),
+        );
+        assert!(
+            validate_prepared_runtime_response(AgentKind::OpenCode, &projection, false).is_ok()
+        );
+        assert!(
+            validate_prepared_runtime_response(AgentKind::ClaudeCode, &projection, false).is_err()
+        );
+        let error = consume_prepared_reasoning_transport(
+            key,
+            &binding,
+            AgentKind::ClaudeCode,
+            "og16-native-source",
+            &projection,
+            Some(true),
+            Some(native_dto),
+        )
+        .err()
+        .unwrap();
+        assert_transport_rejected_before_native_proof(&error);
+        projection.coverage_runtime = Some(serde_json::from_str(
+            r#"{"version":1,"classifier_rejected":false,"source_partial":false,"turns":[{"schema_version":2,"agent_kind":"opencode","logical_turn_key":"u","ordinal":0,"completeness":"complete","records":[{"type":"reasoning","provider":"opencode","source_kind":"reasoning","text":"visible"}]}]}"#).unwrap());
+        assert!(
+            validate_prepared_runtime_response(AgentKind::OpenCode, &projection, true).is_err(),
+            "typed runtime cannot ride a native transport"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cov2_descriptor_helper_carries_closed_runtime() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let storage = root.join(util::ROOT_DIR);
+        std::fs::create_dir_all(storage.join("objects")).unwrap();
+        let conn =
+            crate::internal::db::create_database(storage.join(util::DATABASE).to_str().unwrap())
+                .await
+                .unwrap();
+        crate::internal::workspace::RepoIdentity::resolve_or_init(&conn)
+            .await
+            .unwrap();
+        let bytes = serde_json::to_vec(&serde_json::json!({
+            "info":{"id":"pure-partial-store","directory":root},
+            "messages":[{"id":"u","type":"user","text":"hi"},
+              {"id":"a-u","type":"assistant","content":[
+                {"id":"r-u","type":"reasoning","text":"before sk-ant-EXAMPLE0000000000000000 after"},
+                {"id":"t-u","type":"text","text":"hello"}]},
+              {"id":"i-u","type":"idle","outcome":"succeeded"}]
+        })).unwrap();
+        let mut source = tempfile::tempfile().unwrap();
+        source.write_all(&bytes).unwrap();
+        source.seek(SeekFrom::Start(0)).unwrap();
+        let executable = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("libra");
+        assert!(executable.is_file());
+        let mut command = tokio::process::Command::new(executable);
+        command.arg(IMPORT_PREPARATION_DESCRIPTOR_HELPER_ARG);
+        let response = run_import_preparation_descriptor_helper_bounded(
+            command,
+            PreparationDescriptorControl {
+                agent_kind: "opencode".to_owned(),
+                source_kind: "export".to_owned(),
+                provider_commitment: import_provider_commitment("pure-partial-store"),
+                read_cap: TRANSCRIPT_READ_HARD_CAP_BYTES,
+                remaining_ms: 30_000,
+                transport: None,
+            },
+            source,
+            IMPORT_PREPARATION_HELPER_OUTPUT_CAP,
+            Instant::now() + Duration::from_secs(30),
+        )
+        .await
+        .unwrap();
+        assert!(!String::from_utf8_lossy(&response).contains("sk-ant-EXAMPLE"));
+        let frame: PreparationDescriptorHelperResponse = serde_json::from_slice(&response).unwrap();
+        let PreparationDescriptorHelperResponse::Ok {
+            projection,
+            transport,
+            transport_required,
+            ..
+        } = frame
+        else {
+            panic!("helper must prepare the source");
+        };
+        assert!(transport.is_none() && transport_required.is_none());
+        validate_prepared_runtime_response(AgentKind::OpenCode, &projection, false).unwrap();
+        assert!(import_runtime_has_typed_turns(
+            projection.coverage_runtime.as_ref().unwrap()
+        ));
+    }
+
+    #[cfg(unix)]
     fn reasoning_transport_test_projection() -> PreparedImportProjection {
         use crate::internal::ai::observed_agents::{Completeness, NormalizedTurn, SemanticRecord};
 
@@ -3506,6 +3708,7 @@ mod tests {
                 },
             )]),
             turns: vec![turn],
+            coverage_runtime: None,
         }
     }
 

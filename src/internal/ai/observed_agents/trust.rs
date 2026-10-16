@@ -332,25 +332,165 @@ pub fn is_provider_exporter_slug(slug: &str) -> bool {
     PROVIDER_EXPORTER_TRUST_SLUGS.contains(&slug)
 }
 
+/// Bytes inspected to recognise a package-manager launcher. Real shims are a
+/// few KiB at most (pnpm's embeds absolute `NODE_PATH` lists and writes its
+/// target marker last); a native executable is recognised by its first bytes.
+const LAUNCHER_PROBE_BYTES: u64 = 64 * 1024;
+
+/// How a provider-exporter file behaves once the export sandbox maps only its
+/// own bytes at a fixed private path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExporterLauncher {
+    /// The file runs by itself: a native executable or a self-contained
+    /// script.
+    Direct,
+    /// A package-manager shim that declares the file it executes: mise's npm
+    /// backend (`# aube-bin-shim v2 target=<relative path>`) or pnpm's
+    /// cmd-shim (`# cmd-shim-target=<absolute path>`). The shim locates that
+    /// target relative to its own host location, which does not exist inside
+    /// the sandbox, so only the target itself can be pinned.
+    Shim { target: PathBuf },
+    /// A script run by a JavaScript runtime (`node`, `bun`, `deno`) that
+    /// locates the provider binary in its package tree at run time.
+    JavaScript,
+}
+
+/// Classify the provider exporter at `path` (followed through symlinks) from
+/// its leading bytes. Nothing is executed; a declared shim target is returned
+/// unresolved and unverified.
+pub fn classify_exporter_launcher(path: &Path) -> Result<ExporterLauncher> {
+    let canonical = path
+        .canonicalize()
+        .with_context(|| format!("canonicalize provider exporter {}", path.display()))?;
+    let mut head = Vec::new();
+    fs::File::open(&canonical)
+        .and_then(|file| file.take(LAUNCHER_PROBE_BYTES).read_to_end(&mut head))
+        .with_context(|| format!("read provider exporter {}", canonical.display()))?;
+    let complete = (head.len() as u64) < LAUNCHER_PROBE_BYTES;
+    Ok(classify_launcher_bytes(&head, complete, canonical.parent()))
+}
+
+/// Pure core of [`classify_exporter_launcher`]. `complete` is false when
+/// `head` may end inside a line, whose partial text is then ignored.
+/// Relative shim targets resolve against `shim_dir`, the shim's canonical
+/// directory — where its own `$0` symlink walk ends.
+fn classify_launcher_bytes(
+    head: &[u8],
+    complete: bool,
+    shim_dir: Option<&Path>,
+) -> ExporterLauncher {
+    let Some(script) = head.strip_prefix(b"#!") else {
+        return ExporterLauncher::Direct;
+    };
+    let script = if complete {
+        script
+    } else {
+        match script.iter().rposition(|byte| *byte == b'\n') {
+            Some(end) => &script[..end],
+            None => &[],
+        }
+    };
+    let text = String::from_utf8_lossy(script);
+    let mut lines = text.lines();
+    if lines.next().is_some_and(shebang_runs_javascript) {
+        return ExporterLauncher::JavaScript;
+    }
+    for line in lines {
+        let line = line.trim();
+        let declared = match line.strip_prefix("# aube-bin-shim ") {
+            Some(header) => header.split_once("target=").map(|(_, target)| target),
+            None => line.strip_prefix("# cmd-shim-target="),
+        };
+        let Some(declared) = declared.map(str::trim).filter(|target| !target.is_empty()) else {
+            continue;
+        };
+        let declared = Path::new(declared);
+        let target = match shim_dir {
+            Some(dir) if declared.is_relative() => dir.join(declared),
+            _ => declared.to_path_buf(),
+        };
+        return ExporterLauncher::Shim { target };
+    }
+    ExporterLauncher::Direct
+}
+
+/// Whether a `#!` line hands its script to a JavaScript runtime, directly
+/// (`#!/usr/bin/node`) or through `env` (`#!/usr/bin/env node`,
+/// `#!/usr/bin/env -S bun --smol`).
+fn shebang_runs_javascript(shebang: &str) -> bool {
+    fn program_name(word: &str) -> &str {
+        word.rsplit('/').next().unwrap_or(word)
+    }
+    let mut words = shebang.split_whitespace();
+    let Some(mut program) = words.next().map(program_name) else {
+        return false;
+    };
+    if program == "env" {
+        // Skip env's own options and NAME=value assignments.
+        let Some(next) = words.find(|word| !word.starts_with('-') && !word.contains('=')) else {
+            return false;
+        };
+        program = program_name(next);
+    }
+    matches!(program, "node" | "nodejs" | "bun" | "deno")
+}
+
+/// Whether `head` starts with a native executable image: ELF, Mach-O (thin
+/// or universal) or PE.
+fn is_native_executable_header(head: &[u8]) -> bool {
+    const MAGICS: [&[u8]; 8] = [
+        b"\x7fELF",
+        &[0xfe, 0xed, 0xfa, 0xce],
+        &[0xce, 0xfa, 0xed, 0xfe],
+        &[0xfe, 0xed, 0xfa, 0xcf],
+        &[0xcf, 0xfa, 0xed, 0xfe],
+        &[0xca, 0xfe, 0xba, 0xbe],
+        &[0xbe, 0xba, 0xfe, 0xca],
+        b"MZ",
+    ];
+    MAGICS.iter().any(|magic| head.starts_with(magic))
+}
+
+/// A provider exporter located under a trusted directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedExporter {
+    /// The file to trust and pin: a directly runnable exporter, or the
+    /// canonical native executable a package-manager shim launches.
+    pub binary: PathBuf,
+    /// The shim that named `binary`, when one was followed.
+    pub launcher: Option<PathBuf>,
+}
+
 /// DR-04b: locate the provider-exporter binary named `slug` by probing the
 /// registered trusted directories — never `$PATH`, so exporter trust cannot
-/// widen the gated external-binary discovery surface. Returns the first
-/// `<trusted-dir>/<slug>` that resolves to an existing regular file;
-/// `record_trust` afterwards re-enforces canonicalization, world-writable
-/// refusal and trusted-directory containment on the final target.
-pub async fn resolve_exporter_binary(slug: &str) -> Result<PathBuf> {
+/// widen the gated external-binary discovery surface. The first
+/// `<trusted-dir>/<slug>` regular file that the export sandbox can run wins.
+/// A recognised package-manager shim is followed one hop to the native
+/// executable it declares, which must itself lie under a trusted directory;
+/// a JavaScript launcher is refused. `record_trust` afterwards re-enforces
+/// canonicalization, world-writable refusal and trusted-directory
+/// containment on the final target.
+pub async fn resolve_exporter_binary(slug: &str) -> Result<ResolvedExporter> {
     let dirs = read_trusted_dirs().await?;
+    let mut refusals = Vec::new();
     for dir in &dirs {
         #[cfg(windows)]
         let candidate = dir.join(format!("{slug}.exe"));
         #[cfg(not(windows))]
         let candidate = dir.join(slug);
-        if fs::metadata(&candidate)
+        if !fs::metadata(&candidate)
             .map(|m| m.is_file())
             .unwrap_or(false)
         {
-            return Ok(candidate);
+            continue;
         }
+        match resolve_exporter_candidate(slug, &candidate, &dirs) {
+            Ok(resolved) => return Ok(resolved),
+            Err(refusal) => refusals.push(format!("{refusal:#}")),
+        }
+    }
+    if !refusals.is_empty() {
+        bail!("{}", refusals.join("; "));
     }
     bail!(
         "no '{slug}' binary found under a trusted directory; register the directory containing \
@@ -360,6 +500,68 @@ pub async fn resolve_exporter_binary(slug: &str) -> Result<PathBuf> {
             .collect::<Vec<_>>()
             .join(", ")
     )
+}
+
+/// Map one `<trusted-dir>/<slug>` candidate to the file the export bridge
+/// can run (see [`resolve_exporter_binary`]).
+fn resolve_exporter_candidate(
+    slug: &str,
+    candidate: &Path,
+    trusted_dirs: &[PathBuf],
+) -> Result<ResolvedExporter> {
+    let target = match classify_exporter_launcher(candidate)? {
+        ExporterLauncher::Direct => {
+            return Ok(ResolvedExporter {
+                binary: candidate.to_path_buf(),
+                launcher: None,
+            });
+        }
+        ExporterLauncher::JavaScript => bail!(
+            "{} is a JavaScript launcher that the export sandbox cannot run; register the \
+             directory of the native '{slug}' executable with `libra agent rpc trust --dir <path>` \
+             and re-run `libra agent rpc trust {slug}`",
+            candidate.display()
+        ),
+        ExporterLauncher::Shim { target } => target,
+    };
+    let binary = target.canonicalize().with_context(|| {
+        format!(
+            "{} is a package-manager launcher for {}, which does not exist; reinstall '{slug}' or \
+             register the directory of its native executable with `libra agent rpc trust --dir <path>`",
+            candidate.display(),
+            target.display()
+        )
+    })?;
+    let mut head = Vec::new();
+    let native = fs::metadata(&binary).is_ok_and(|meta| meta.is_file())
+        && fs::File::open(&binary)
+            .and_then(|file| file.take(4).read_to_end(&mut head))
+            .is_ok()
+        && is_native_executable_header(&head);
+    if !native {
+        bail!(
+            "{} is a package-manager launcher for {}, which is not a native executable the export \
+             sandbox can run; register the directory of the native '{slug}' executable with \
+             `libra agent rpc trust --dir <path>` and re-run `libra agent rpc trust {slug}`",
+            candidate.display(),
+            binary.display()
+        );
+    }
+    if !path_within_trusted_dirs(&binary, trusted_dirs) {
+        let directory = binary.parent().unwrap_or(&binary);
+        bail!(
+            "{} is a package-manager launcher for {}; the export sandbox runs only that \
+             executable, which is not under a trusted directory — register it with \
+             `libra agent rpc trust --dir {}` and re-run `libra agent rpc trust {slug}`",
+            candidate.display(),
+            binary.display(),
+            directory.display()
+        );
+    }
+    Ok(ResolvedExporter {
+        binary,
+        launcher: Some(candidate.to_path_buf()),
+    })
 }
 
 /// A0-08: whether `canonical_binary` lives under one of the trusted `dirs`.
@@ -665,6 +867,195 @@ mod tests {
             provenance_drifted(&fresh, &record),
             "inode-only change must count as drift"
         );
+    }
+
+    /// The `.bin/opencode` shim written by mise's npm backend (aube) for the
+    /// `@opencode/cli` package, verbatim apart from the target.
+    fn aube_shim(target: &str) -> String {
+        format!(
+            "#!/bin/sh\n# aube-bin-shim v2 target={target}\nlink=\"$0\"\nhops=0\n\
+             while [ -L \"$link\" ] && [ \"$hops\" -lt 40 ]; do\nhops=$((hops+1))\n\
+             target=$(readlink \"$link\")\ncase \"$target\" in\n/*) link=\"$target\" ;;\n\
+             *)  link=\"$(dirname \"$link\")/$target\" ;;\nesac\ndone\n\
+             basedir=$(dirname \"$link\")\n\
+             export NODE_PATH=\"$basedir/..:$basedir/../.mise/node_modules\"\n\
+             exec \"$basedir/{target}\" \"$@\"\n"
+        )
+    }
+
+    /// pnpm's cmd-shim for a native package binary: a `$basedir`-relative
+    /// exec plus the absolute target marker as its last line.
+    fn pnpm_shim(target: &Path) -> String {
+        format!(
+            "#!/bin/sh\nbasedir=$(dirname \"$(echo \"$0\" | sed -e 's,\\\\,/,g')\")\n\n\
+             exec \"$basedir/../.pnpm/opencode/bin/opencode.exe\"   \"$@\"\nexit $?\n\
+             # cmd-shim-target={}\n",
+            target.display()
+        )
+    }
+
+    #[cfg(unix)]
+    fn write_executable(path: &Path, bytes: &[u8]) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, bytes).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[test]
+    fn launcher_classification_recognises_only_declared_shims_and_js_runtimes() {
+        let shim_dir = Path::new("/opt/tool/node_modules/.bin");
+        let classify = |bytes: &[u8]| classify_launcher_bytes(bytes, true, Some(shim_dir));
+
+        assert_eq!(classify(b"\x7fELF\x02\x01\x01"), ExporterLauncher::Direct);
+        assert_eq!(
+            classify(&[0xcf, 0xfa, 0xed, 0xfe, 0x07]),
+            ExporterLauncher::Direct
+        );
+        // Self-contained scripts keep running from their own bytes.
+        assert_eq!(classify(b"#!/bin/sh\nexit 0\n"), ExporterLauncher::Direct);
+        assert_eq!(
+            classify(b"#!/bin/sh\nprintf '{\"info\":{}}'\n"),
+            ExporterLauncher::Direct
+        );
+
+        let relative = "../.mise/@opencode+cli@2.0.29/node_modules/@opencode/cli/bin/opencode.exe";
+        assert_eq!(
+            classify(aube_shim(relative).as_bytes()),
+            ExporterLauncher::Shim {
+                target: shim_dir.join(relative)
+            }
+        );
+        let absolute = Path::new("/opt/tool/node_modules/.pnpm/opencode/bin/opencode.exe");
+        assert_eq!(
+            classify(pnpm_shim(absolute).as_bytes()),
+            ExporterLauncher::Shim {
+                target: absolute.to_path_buf()
+            }
+        );
+
+        for shebang in [
+            "#!/usr/bin/env node\nrequire('./launch')\n",
+            "#!/usr/bin/env -S bun --smol\n",
+            "#!/usr/bin/env NODE_OPTIONS=--no-warnings nodejs\n",
+            "#!/usr/local/bin/deno run\n",
+            "#!/usr/bin/node\r\n",
+        ] {
+            assert_eq!(
+                classify(shebang.as_bytes()),
+                ExporterLauncher::JavaScript,
+                "{shebang:?}"
+            );
+        }
+        assert_eq!(classify(b"#!/usr/bin/env\n"), ExporterLauncher::Direct);
+    }
+
+    /// A probe that stopped mid-file must not act on a truncated marker line.
+    #[test]
+    fn launcher_classification_ignores_a_partial_trailing_line() {
+        let head = b"#!/bin/sh\nexit 0\n# cmd-shim-target=/opt/tool/bin/openc";
+        assert_eq!(
+            classify_launcher_bytes(head, false, None),
+            ExporterLauncher::Direct
+        );
+        assert_eq!(
+            classify_launcher_bytes(head, true, None),
+            ExporterLauncher::Shim {
+                target: PathBuf::from("/opt/tool/bin/openc")
+            }
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exporter_candidate_follows_a_shim_to_its_trusted_native_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let bin = root.join("node_modules/.bin");
+        let package_bin = root.join("node_modules/.mise/@opencode+cli/bin");
+        let native = package_bin.join("opencode.exe");
+        write_executable(&native, b"\x7fELF\x02\x01\x01\x00");
+        let shim = bin.join("opencode");
+        write_executable(
+            &shim,
+            aube_shim("../.mise/@opencode+cli/bin/opencode.exe").as_bytes(),
+        );
+
+        // Only the shim's directory is trusted: the refusal names the exact
+        // directory to register next.
+        let error = resolve_exporter_candidate("opencode", &shim, std::slice::from_ref(&bin))
+            .expect_err("a target outside every trusted directory must be refused");
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("package-manager launcher")
+                && message.contains(&format!("trust --dir {}", package_bin.display())),
+            "{message}"
+        );
+
+        let resolved = resolve_exporter_candidate("opencode", &shim, &[bin.clone(), package_bin])
+            .expect("a trusted native target is pinned instead of its shim");
+        assert_eq!(
+            resolved,
+            ResolvedExporter {
+                binary: native,
+                launcher: Some(shim),
+            }
+        );
+
+        let pnpm = bin.join("opencode-pnpm");
+        let pnpm_native = root.join("node_modules/.pnpm/opencode/bin/opencode.exe");
+        write_executable(&pnpm_native, &[0xcf, 0xfa, 0xed, 0xfe, 0x07]);
+        write_executable(&pnpm, pnpm_shim(&pnpm_native).as_bytes());
+        let resolved = resolve_exporter_candidate("opencode", &pnpm, std::slice::from_ref(&root))
+            .expect("pnpm's absolute target marker resolves too");
+        assert_eq!(resolved.binary, pnpm_native);
+        assert_eq!(resolved.launcher, Some(pnpm));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exporter_candidate_refuses_launchers_the_sandbox_cannot_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let trusted = std::slice::from_ref(&root);
+
+        let direct = root.join("direct/opencode");
+        write_executable(&direct, b"#!/bin/sh\nexit 0\n");
+        assert_eq!(
+            resolve_exporter_candidate("opencode", &direct, trusted).unwrap(),
+            ResolvedExporter {
+                binary: direct.clone(),
+                launcher: None,
+            }
+        );
+
+        let javascript = root.join("js/opencode");
+        write_executable(&javascript, b"#!/usr/bin/env node\nrequire('../lib')\n");
+        let message = format!(
+            "{:#}",
+            resolve_exporter_candidate("opencode", &javascript, trusted).unwrap_err()
+        );
+        assert!(message.contains("JavaScript launcher"), "{message}");
+
+        let missing = root.join("missing/opencode");
+        write_executable(&missing, aube_shim("../pkg/bin/opencode.exe").as_bytes());
+        let message = format!(
+            "{:#}",
+            resolve_exporter_candidate("opencode", &missing, trusted).unwrap_err()
+        );
+        assert!(message.contains("which does not exist"), "{message}");
+
+        // A shim whose target is itself a script (here a JS entry point) is
+        // not followed any further.
+        let script_target = root.join("script/pkg/bin/opencode.js");
+        write_executable(&script_target, b"#!/usr/bin/env node\n");
+        let chained = root.join("script/.bin/opencode");
+        write_executable(&chained, aube_shim("../pkg/bin/opencode.js").as_bytes());
+        let message = format!(
+            "{:#}",
+            resolve_exporter_candidate("opencode", &chained, trusted).unwrap_err()
+        );
+        assert!(message.contains("not a native executable"), "{message}");
     }
 
     /// mtime-only drift (identical bytes and inode, touched timestamp)

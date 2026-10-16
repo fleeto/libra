@@ -27,7 +27,10 @@ use crate::internal::{
         capture::{
             catalog::CaptureCatalogTerminalAttemptFence,
             key,
-            pending_payload::PendingReasoningReplay,
+            pending_payload::{
+                PendingReasoningReplay, VersionedPendingPayloadRequirement,
+                VersionedPendingReasoningReplay,
+            },
             snapshot::{
                 CaptureSnapshotProjection, VerifiedOrdinaryPartialBinding,
                 VerifiedOrdinaryPartialSnapshot,
@@ -36,7 +39,7 @@ use crate::internal::{
         },
         capture_scope::{CaptureCommitDeadline, CaptureScope},
         coverage_gate::{
-            LiveCaptureClaimCommitPlan, LiveClaimCommitPlan,
+            CommittedTurnClaimSnapshot, LiveCaptureClaimCommitPlan, LiveClaimCommitPlan,
             NativeVersionedReasoningClaimCommitPlan, VersionedLiveClaimCommitPlan,
         },
         history::{CheckpointAppendConflict, CheckpointCompanionTransactionFailed},
@@ -142,6 +145,17 @@ pub(crate) mod test_support {
             Self::CompanionTransaction,
             Self::MarkerCleanup,
         ];
+    }
+
+    thread_local! {
+        static PENDING_MEMBER_SUBSTITUTION: Cell<bool> = const { Cell::new(false) };
+    }
+    #[cfg(unix)]
+    pub(crate) fn fail_versioned_pending_member_once() {
+        PENDING_MEMBER_SUBSTITUTION.with(|flag| flag.set(true));
+    }
+    pub(crate) fn take_versioned_pending_member_substitution() -> bool {
+        PENDING_MEMBER_SUBSTITUTION.with(|flag| flag.replace(false))
     }
 
     thread_local! {
@@ -437,6 +451,8 @@ pub struct CheckpointRedactedPayload {
     redaction_report_json: RedactedBytes,
     reasoning: ReasoningSourceDisposition,
     pending_reasoning: Option<PendingReasoningReplay>,
+    versioned_pending_reasoning: Option<VersionedPendingReasoningReplay>,
+    versioned_pending_requirement: Option<VersionedPendingPayloadRequirement>,
     verified_partial_binding: Option<VerifiedOrdinaryPartialBinding>,
 }
 
@@ -1290,45 +1306,128 @@ fn native_versioned_source_tag(
     Ok(digest.finalize().into())
 }
 
+fn versioned_pending_replay_authentication_error(
+    error: anyhow::Error,
+    deadline: CaptureCommitDeadline,
+    field: &'static str,
+) -> CheckpointStoreError {
+    if Instant::now() >= deadline.monotonic() {
+        CheckpointStoreError::DeadlineExceeded
+    } else if super::pending::retryable_load_failure(&error, deadline.monotonic()) {
+        CheckpointStoreError::StoreFailure {
+            stage: CheckpointStoreStage::CatalogTransaction,
+        }
+    } else {
+        CheckpointStoreError::InvalidRequest {
+            field: field.to_owned(),
+        }
+    }
+}
+
+/// Only this owner can construct restored-pending inputs, after the lower
+/// fixed-source issuer returned NativeProven. Retained tuples alone cannot
+/// enter this mode; ordinary callers keep their NormalizedTurn input API.
+pub(crate) struct RestoredPendingVersionedIdentityPreparation<'a> {
+    request: ReasoningIdentityPreparation<'a>,
+    source: &'a ReasoningSourceDisposition,
+    coverage: &'a VersionedLiveClaimCommitPlan,
+}
+pub(crate) enum NativeVersionedReasoningPreparation<'a> {
+    Normalized(ReasoningIdentityPreparation<'a>),
+    RestoredPending(RestoredPendingVersionedIdentityPreparation<'a>),
+}
+impl<'a> From<ReasoningIdentityPreparation<'a>> for NativeVersionedReasoningPreparation<'a> {
+    fn from(request: ReasoningIdentityPreparation<'a>) -> Self {
+        Self::Normalized(request)
+    }
+}
+
 /// Derive both coverage domains from one sealed native payload. The source
 /// tuple is frozen before reservations are bound; later claim ownership data
 /// cannot manufacture an identity or change a digest.
 #[cfg_attr(not(all(test, unix)), allow(dead_code))]
-pub(crate) async fn prepare_native_versioned_reasoning_coverage_plan(
+pub(crate) async fn prepare_native_versioned_reasoning_coverage_plan<'a>(
     payload: &CheckpointRedactedPayload,
-    request: ReasoningIdentityPreparation<'_>,
+    request: impl Into<NativeVersionedReasoningPreparation<'a>>,
 ) -> anyhow::Result<NativeVersionedReasoningCoveragePlan> {
     use sha2::{Digest, Sha256};
 
     use super::key::ReasoningIdentityMacPurpose;
 
+    let (request, restored) = match request.into() {
+        NativeVersionedReasoningPreparation::Normalized(request) => (request, None),
+        NativeVersionedReasoningPreparation::RestoredPending(restored) => {
+            (restored.request, Some((restored.source, restored.coverage)))
+        }
+    };
+    let disposition = restored.map_or(&payload.reasoning, |(source, _)| source);
     let source_tag =
-        native_versioned_source_tag(&payload.reasoning, request.session_id, request.provider)?;
+        native_versioned_source_tag(disposition, request.session_id, request.provider)?;
+    let claim_count = restored.map_or(request.turns.len(), |(_, coverage)| {
+        coverage.ordinary().claims.len()
+    });
+    anyhow::ensure!(
+        claim_count > 0 && claim_count <= traces::REASONING_ARTIFACT_MAX_ENTRIES,
+        "native v2 reasoning coverage exceeds its safe turn limit"
+    );
+    let mut prepared = Vec::with_capacity(claim_count);
+    if let Some((_, coverage)) = restored {
+        coverage
+            .ordinary()
+            .capture_scope
+            .as_ref()
+            .filter(|scope| *scope == request.scope)
+            .context("pending reasoning coverage scope changed; run libra agent doctor")?;
+        let mut bare_keys = BTreeSet::new();
+        for (version, claim) in coverage.claims() {
+            anyhow::ensure!(
+                bare_keys.insert(claim.logical_turn_key.as_str()),
+                "native pending coverage has ambiguous cross-version keys; keep the artifact and run libra agent doctor"
+            );
+            prepared.push((
+                version,
+                claim.logical_turn_key.clone(),
+                claim.coverage_digest.clone(),
+                claim.completeness,
+            ));
+        }
+    } else {
+        for turn in request.turns {
+            let version = select_coverage_schema(turn);
+            let encoded = encode_coverage_turn_for_schema(version.as_i64(), turn)?;
+            prepared.push((
+                version,
+                turn.logical_turn_key.clone(),
+                encoded.digest_hex,
+                turn.completeness,
+            ));
+        }
+    }
     let inputs = prepare_reasoning_identity_inputs_from_disposition(
-        &payload.reasoning,
+        disposition,
         request.session_id,
         request.provider,
     )?;
     let artifacts = prepare_reasoning_artifact_params_from_disposition(
-        &payload.reasoning,
+        disposition,
         request.session_id,
         request.provider,
     )?;
     anyhow::ensure!(
-        !request.turns.is_empty()
-            && request.turns.len() <= traces::REASONING_ARTIFACT_MAX_ENTRIES
+        !prepared.is_empty()
+            && prepared.len() <= traces::REASONING_ARTIFACT_MAX_ENTRIES
             && inputs.len() == artifacts.len(),
         "native v2 reasoning coverage exceeds its safe turn limit"
     );
-    let known_keys = request
-        .turns
+    let known_keys = prepared
         .iter()
-        .map(|turn| turn.logical_turn_key.as_str())
+        .map(|(_, key, _, _)| key.as_str())
         .collect::<BTreeSet<_>>();
     anyhow::ensure!(
-        inputs
-            .iter()
-            .all(|input| known_keys.contains(input.logical_turn())),
+        restored.is_some()
+            || inputs
+                .iter()
+                .all(|input| known_keys.contains(input.logical_turn())),
         "reasoning source cannot be associated with its logical turns; run libra agent doctor"
     );
     let mut artifact_bytes = 0u64;
@@ -1352,25 +1451,23 @@ pub(crate) async fn prepare_native_versioned_reasoning_coverage_plan(
     let mut claims = BTreeMap::new();
     let mut descriptor_bytes = 0usize;
     let mut has_v2 = false;
-    for turn in request.turns {
+    for (version, logical_turn_key, digest, completeness) in &prepared {
         anyhow::ensure!(
             Instant::now() < request.deadline,
             "reasoning coverage authentication exceeded its execution deadline"
         );
-        let version = select_coverage_schema(turn);
-        has_v2 |= version == CoverageSchemaVersion::V2;
-        let encoded = encode_coverage_turn_for_schema(version.as_i64(), turn)?;
-        let key = (version.as_i64(), turn.logical_turn_key.clone());
+        has_v2 |= *version == CoverageSchemaVersion::V2;
+        let key = (version.as_i64(), logical_turn_key.clone());
         anyhow::ensure!(
             claims
-                .insert(key.clone(), (encoded.digest_hex, turn.completeness))
+                .insert(key.clone(), (digest.clone(), *completeness))
                 .is_none(),
             "duplicate versioned reasoning coverage turn; run libra agent doctor"
         );
         let entries = inputs
             .iter()
             .zip(artifacts)
-            .filter(|(input, _)| input.logical_turn() == turn.logical_turn_key)
+            .filter(|(input, _)| input.logical_turn() == logical_turn_key)
             .map(|(input, artifact)| {
                 (
                     "native_proven",
@@ -1392,14 +1489,14 @@ pub(crate) async fn prepare_native_versioned_reasoning_coverage_plan(
         let descriptor = reasoning_turn_descriptor_body_for_schema_version(
             request.scope,
             request.session_id,
-            &turn.logical_turn_key,
+            logical_turn_key,
             &entries,
             version.as_i64(),
         )?;
         let slot = reasoning_turn_slot_body_for_schema_version(
             request.scope,
             request.session_id,
-            &turn.logical_turn_key,
+            logical_turn_key,
             version.as_i64(),
         )?;
         descriptor_bytes = descriptor_bytes
@@ -1584,6 +1681,8 @@ impl CheckpointRedactedPayload {
             snapshot: projection,
             reasoning,
             pending_reasoning: None,
+            versioned_pending_reasoning: None,
+            versioned_pending_requirement: None,
             verified_partial_binding: None,
             provenance: CheckpointPayloadProvenance::ExactSnapshot,
             metadata_json,
@@ -1638,6 +1737,8 @@ impl CheckpointRedactedPayload {
             redaction_report_json,
             reasoning: ReasoningSourceDisposition::Unproven,
             pending_reasoning: None,
+            versioned_pending_reasoning: None,
+            versioned_pending_requirement: None,
             verified_partial_binding: Some(binding),
         };
         let session = payload
@@ -1656,7 +1757,7 @@ impl CheckpointRedactedPayload {
     ) -> Result<(), CheckpointStoreError> {
         if self.provenance != CheckpointPayloadProvenance::VerifiedOrdinaryPartial
             || !matches!(self.reasoning, ReasoningSourceDisposition::Unproven)
-            || self.pending_reasoning.is_some()
+            || self.has_deferred_pending_reasoning()
             || !self
                 .verified_partial_binding
                 .as_ref()
@@ -1762,6 +1863,8 @@ impl CheckpointRedactedPayload {
             provenance,
             reasoning,
             pending_reasoning: None,
+            versioned_pending_reasoning: None,
+            versioned_pending_requirement: None,
             verified_partial_binding: None,
             metadata_json,
             lifecycle_events_jsonl,
@@ -1823,6 +1926,8 @@ impl CheckpointRedactedPayload {
                 ReasoningSourceDisposition::NativeProven,
             ),
             pending_reasoning: None,
+            versioned_pending_reasoning: None,
+            versioned_pending_requirement: None,
             verified_partial_binding: None,
             provenance: CheckpointPayloadProvenance::DerivedTurnProjection,
             metadata_json,
@@ -1840,7 +1945,7 @@ impl CheckpointRedactedPayload {
     /// Pending V1 carries only ordinary redacted content. Refuse before
     /// sealing or MAC writes; the caller still owns this immutable payload.
     pub(crate) fn authorize_ordinary_pending_payload(&self) -> Result<(), CheckpointStoreError> {
-        if self.reasoning.is_ordinary() && self.pending_reasoning.is_none() {
+        if self.reasoning.is_ordinary() && !self.has_deferred_pending_reasoning() {
             Ok(())
         } else {
             Err(CheckpointStoreError::InvalidRequest {
@@ -1856,7 +1961,7 @@ impl CheckpointRedactedPayload {
         mut self,
         replay: PendingReasoningReplay,
     ) -> Result<Self, CheckpointStoreError> {
-        if !self.reasoning.is_ordinary() || self.pending_reasoning.is_some() {
+        if !self.reasoning.is_ordinary() || self.has_deferred_pending_reasoning() {
             return Err(CheckpointStoreError::InvalidRequest {
                 field: "deferred pending reasoning".to_owned(),
             });
@@ -1867,6 +1972,51 @@ impl CheckpointRedactedPayload {
 
     pub(crate) fn deferred_pending_reasoning(&self) -> Option<&PendingReasoningReplay> {
         self.pending_reasoning.as_ref()
+    }
+
+    pub(crate) fn has_deferred_pending_reasoning(&self) -> bool {
+        self.pending_reasoning.is_some()
+            || self.versioned_pending_reasoning.is_some()
+            || self.versioned_pending_requirement.is_some()
+    }
+
+    pub(crate) fn with_versioned_pending_requirement(
+        mut self,
+        requirement: VersionedPendingPayloadRequirement,
+    ) -> Result<Self, CheckpointStoreError> {
+        if self.has_deferred_pending_reasoning()
+            || !self.reasoning.is_ordinary()
+            || !requirement.matches_payload(&self)
+        {
+            return Err(CheckpointStoreError::InvalidRequest {
+                field: "versioned pending redacted binding".to_owned(),
+            });
+        }
+        self.versioned_pending_requirement = Some(requirement);
+        Ok(self)
+    }
+
+    pub(crate) fn with_deferred_versioned_pending_reasoning(
+        mut self,
+        replay: VersionedPendingReasoningReplay,
+    ) -> Result<Self, CheckpointStoreError> {
+        if !self.reasoning.is_ordinary()
+            || self.pending_reasoning.is_some()
+            || self.versioned_pending_reasoning.is_some()
+            || !self
+                .versioned_pending_requirement
+                .as_ref()
+                .is_some_and(|requirement| {
+                    requirement.matches_payload(&self)
+                        && requirement.matches_original(replay.original_envelope())
+                })
+        {
+            return Err(CheckpointStoreError::InvalidRequest {
+                field: "deferred versioned pending reasoning".to_owned(),
+            });
+        }
+        self.versioned_pending_reasoning = Some(replay);
+        Ok(self)
     }
 
     /// This is the sole production factory for a pending native borrow. It
@@ -2061,9 +2211,12 @@ pub struct CheckpointWriteRequest<'a> {
     /// The same closed per-claim binding supplied as the transaction extra.
     /// A versioned request cannot substitute an unrelated companion.
     versioned_coverage: Option<&'a VersionedLiveClaimCommitPlan>,
+    /// Set exclusively by the typed import adapter after its attempt binding.
+    imported_versioned_prebound: bool,
     /// Set only by authenticated pending recovery after the retained claim
     /// plan was checked against the original envelope and catalog fences.
     pending_coverage: Option<&'a LiveClaimCommitPlan>,
+    pending_versioned_header: Option<&'a super::pending::PendingHeader>,
     pending_key_storage: Option<&'a Path>,
     pending_authorized_root: Option<&'a Path>,
     deadline: Option<CaptureCommitDeadline>,
@@ -2123,7 +2276,9 @@ impl<'a> CheckpointWriteRequest<'a> {
             txn_extra,
             native_versioned_companion: None,
             versioned_coverage: None,
+            imported_versioned_prebound: false,
             pending_coverage: None,
+            pending_versioned_header: None,
             pending_key_storage: None,
             pending_authorized_root: None,
             deadline,
@@ -2157,6 +2312,42 @@ impl<'a> CheckpointWriteRequest<'a> {
         Ok(self)
     }
 
+    pub(crate) fn with_versioned_pending_coverage(
+        mut self,
+        coverage: &'a VersionedLiveClaimCommitPlan,
+        header: &'a super::pending::PendingHeader,
+        key_storage: &'a Path,
+        authorized_root: &'a Path,
+    ) -> Result<Self, CheckpointStoreError> {
+        let ordinary = coverage.ordinary();
+        if self.payload.versioned_pending_reasoning.is_none()
+            || self.payload.pending_reasoning.is_some()
+            || self.txn_extra.is_some()
+            || self.native_versioned_companion.is_some()
+            || self.pending_coverage.is_some()
+            || self.versioned_coverage.is_some()
+            || self.scope != CheckpointScope::Committed
+            || ordinary.source_channel != "live"
+            || ordinary.session_id != self.session_id
+            || ordinary.checkpoint_id != self.checkpoint_id
+            || ordinary.parent_commit.as_deref() != self.parent_commit
+            || ordinary.capture_scope.as_ref() != Some(&header.binding.scope)
+            || header.binding.checkpoint_id != self.checkpoint_id
+            || header.binding.action_key != self.replay_key
+            || header.binding.marker_generation != self.marker_generation
+        {
+            return Err(CheckpointStoreError::InvalidRequest {
+                field: "versioned pending reasoning claim plan".to_owned(),
+            });
+        }
+        self.versioned_coverage = Some(coverage);
+        self.pending_coverage = Some(ordinary);
+        self.pending_versioned_header = Some(header);
+        self.pending_key_storage = Some(key_storage);
+        self.pending_authorized_root = Some(authorized_root);
+        Ok(self)
+    }
+
     /// Bind the immutable version sidecar as both replay expectation and the
     /// ref-CAS companion. The store separately matches it to its marker fences.
     #[cfg_attr(not(test), allow(dead_code))]
@@ -2169,7 +2360,7 @@ impl<'a> CheckpointWriteRequest<'a> {
             || self.native_versioned_companion.is_some()
             || self.pending_coverage.is_some()
             || !self.payload.reasoning.is_ordinary()
-            || self.payload.deferred_pending_reasoning().is_some()
+            || self.payload.has_deferred_pending_reasoning()
             || ordinary.claims.is_empty()
             || ordinary.session_id != self.session_id
             || ordinary.checkpoint_id != self.checkpoint_id
@@ -2181,6 +2372,42 @@ impl<'a> CheckpointWriteRequest<'a> {
             });
         }
         self.txn_extra = Some(plan);
+        self.versioned_coverage = Some(plan);
+        Ok(self)
+    }
+
+    /// Bind the actual live/export transaction companion to its exact
+    /// versioned marker/replay fences. Its claim/catalog writes apply once.
+    pub(crate) fn with_runtime_versioned_claims(
+        mut self,
+        companion: &'a LiveCaptureClaimCommitPlan,
+    ) -> Result<Self, CheckpointStoreError> {
+        let plan =
+            companion
+                .runtime_versioned()
+                .ok_or_else(|| CheckpointStoreError::InvalidRequest {
+                    field: "runtime versioned coverage claim plan".to_owned(),
+                })?;
+        let ordinary = plan.ordinary();
+        if self.txn_extra.is_some()
+            || self.native_versioned_companion.is_some()
+            || self.versioned_coverage.is_some()
+            || self.pending_coverage.is_some()
+            || !self.payload.reasoning.is_ordinary()
+            || self.payload.has_deferred_pending_reasoning()
+            || ordinary.claims.is_empty()
+            || ordinary.session_id != self.session_id
+            || ordinary.checkpoint_id != self.checkpoint_id
+            || ordinary.parent_commit.as_deref() != self.parent_commit
+            || ordinary.capture_scope.is_none()
+            || !matches!(ordinary.source_channel, "live" | "export")
+            || self.scope != CheckpointScope::Committed
+        {
+            return Err(CheckpointStoreError::InvalidRequest {
+                field: "runtime versioned coverage claim plan".to_owned(),
+            });
+        }
+        self.txn_extra = Some(companion);
         self.versioned_coverage = Some(plan);
         Ok(self)
     }
@@ -2203,7 +2430,7 @@ impl<'a> CheckpointWriteRequest<'a> {
             || self.native_versioned_companion.is_some()
             || self.versioned_coverage.is_some()
             || self.pending_coverage.is_some()
-            || self.payload.deferred_pending_reasoning().is_some()
+            || self.payload.has_deferred_pending_reasoning()
             || !matches_source
             || ordinary.claims.is_empty()
             || ordinary.session_id != self.session_id
@@ -2650,6 +2877,7 @@ pub(crate) struct ImportedCheckpointWriteRequest<'a> {
     parent_commit: Option<&'a str>,
     payload: &'a CheckpointRedactedPayload,
     txn_extra: &'a dyn TracesTxnExtra,
+    versioned_coverage: Option<&'a VersionedLiveClaimCommitPlan>,
     deadline: CaptureCommitDeadline,
 }
 
@@ -2690,8 +2918,45 @@ impl<'a> ImportedCheckpointWriteRequest<'a> {
             parent_commit,
             payload,
             txn_extra,
+            versioned_coverage: None,
             deadline,
         })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_versioned(
+        checkpoint_id: &'a str,
+        session_id: &'a str,
+        agent_kind: &'a str,
+        parent_commit: Option<&'a str>,
+        payload: &'a CheckpointRedactedPayload,
+        plan: &'a VersionedLiveClaimCommitPlan,
+        deadline: CaptureCommitDeadline,
+    ) -> Result<Self, CheckpointStoreError> {
+        let ordinary = plan.ordinary();
+        if ordinary.source_channel != "import"
+            || ordinary.session_id != session_id
+            || ordinary.checkpoint_id != checkpoint_id
+            || ordinary.parent_commit.as_deref() != parent_commit
+            || ordinary.capture_scope.is_none()
+            || ordinary.import_identity.is_none()
+            || ordinary.import_session.is_none()
+        {
+            return Err(CheckpointStoreError::InvalidRequest {
+                field: "versioned import checkpoint companion".to_owned(),
+            });
+        }
+        let mut request = Self::new(
+            checkpoint_id,
+            session_id,
+            agent_kind,
+            parent_commit,
+            payload,
+            plan,
+            deadline,
+        )?;
+        request.versioned_coverage = Some(plan);
+        Ok(request)
     }
 }
 
@@ -2787,7 +3052,8 @@ impl<'a> ImportedCheckpointWriter<'a> {
         &self,
         request: ImportedCheckpointWriteRequest<'_>,
     ) -> Result<CheckpointWriteOutcome, CheckpointStoreError> {
-        let request = CheckpointWriteRequest::new(
+        let versioned = request.versioned_coverage;
+        let mut request = CheckpointWriteRequest::new(
             request.checkpoint_id,
             request.checkpoint_id,
             request.session_id,
@@ -2797,9 +3063,17 @@ impl<'a> ImportedCheckpointWriter<'a> {
             self.store.marker_generation(),
             None,
             request.payload,
-            Some(request.txn_extra),
+            if versioned.is_some() {
+                None
+            } else {
+                Some(request.txn_extra)
+            },
             Some(request.deadline),
         )?;
+        if let Some(plan) = versioned {
+            request = request.with_versioned_claims(plan)?;
+            request.imported_versioned_prebound = true;
+        }
         self.store.write(request).await
     }
 }
@@ -2945,7 +3219,11 @@ struct OwnedRegistrationFence {
 
 struct RestoredPendingReasoning {
     artifacts: Vec<traces::ReasoningArtifactParam>,
-    commit_plan: LiveCaptureClaimCommitPlan,
+    commit_plan: RestoredPendingClaimPlan,
+}
+enum RestoredPendingClaimPlan {
+    V1(Box<LiveCaptureClaimCommitPlan>),
+    V2(Box<NativeVersionedReasoningClaimCommitPlan>),
 }
 
 impl OwnedRegistrationFence {
@@ -3298,10 +3576,16 @@ impl<'a> TracesCheckpointStore<'a> {
         if self.storage_mode != CheckpointStorageMode::LocalExisting
             || request.scope() != CheckpointScope::Committed
             || coverage.capture_scope.as_ref() != Some(scope)
-            || request.payload().deferred_pending_reasoning().is_none()
+            || !request.payload().has_deferred_pending_reasoning()
             || request.pending_key_storage.is_none()
             || request.pending_authorized_root.is_none()
-            || !registration_matches_pending_claims(registration, coverage)
+            || !match request.versioned_coverage {
+                Some(plan) if request.pending_versioned_header.is_some() => {
+                    registration_matches_versioned_claims(registration, plan)
+                }
+                None => registration_matches_pending_claims(registration, coverage),
+                _ => false,
+            }
             || self.request_matches_attempt(request).is_err()
             || !fence.matches_checkpoint_attempt(
                 Some(scope),
@@ -3347,12 +3631,25 @@ impl<'a> TracesCheckpointStore<'a> {
                 .ok_or_else(|| CheckpointStoreError::InvalidRequest {
                     field: "pending reasoning claim plan".to_owned(),
                 })?;
-        let replay = request
-            .payload()
-            .deferred_pending_reasoning()
-            .ok_or_else(|| CheckpointStoreError::InvalidRequest {
-                field: "pending reasoning original envelope".to_owned(),
-            })?;
+        let legacy = request.payload().deferred_pending_reasoning();
+        let versioned = request.payload().versioned_pending_reasoning.as_ref();
+        let (bytes, mac, source) = match (legacy, versioned) {
+            (Some(replay), None) => (
+                replay.original_envelope(),
+                replay.original_mac(),
+                replay.source(),
+            ),
+            (None, Some(replay)) => (
+                replay.original_envelope(),
+                replay.original_mac(),
+                replay.source(),
+            ),
+            _ => {
+                return Err(CheckpointStoreError::InvalidRequest {
+                    field: "pending reasoning original envelope".to_owned(),
+                });
+            }
+        };
         let storage =
             request
                 .pending_key_storage
@@ -3369,33 +3666,164 @@ impl<'a> TracesCheckpointStore<'a> {
             .ok_or_else(|| CheckpointStoreError::InvalidRequest {
                 field: "pending reasoning replay deadline".to_owned(),
             })?;
-        let integrity = key::authenticate_pending_reasoning_original_in_scope_until(
-            self.conn,
-            scope,
-            storage,
-            root,
-            replay.original_envelope(),
-            replay.original_mac(),
-            deadline.monotonic(),
-        )
-        .await
-        .map_err(|_| CheckpointStoreError::InvalidRequest {
-            field: "pending reasoning original authentication".to_owned(),
-        })?;
-        if !replay.matches_integrity(&integrity) {
-            return Err(CheckpointStoreError::InvalidRequest {
-                field: "pending reasoning retained membership".to_owned(),
-            });
-        }
+        let integrity = if let Some(replay) = versioned {
+            let header = request.pending_versioned_header.ok_or_else(|| {
+                CheckpointStoreError::InvalidRequest {
+                    field: "versioned pending header".to_owned(),
+                }
+            })?;
+            let authentication = AuthenticatedPendingEnvelope::verify(
+                self.conn,
+                storage,
+                root,
+                scope,
+                bytes,
+                mac,
+                deadline.monotonic(),
+            )
+            .await
+            .map_err(|error| {
+                versioned_pending_replay_authentication_error(
+                    error,
+                    deadline,
+                    "versioned pending original authentication",
+                )
+            })?;
+            let candidate = super::pending::decode_authenticated_versioned_envelope(
+                &authentication,
+                &header.binding,
+            )
+            .map_err(|_| CheckpointStoreError::InvalidRequest {
+                field: "versioned pending original members".to_owned(),
+            })?;
+            // A test-only substitution proves the late key-owner verifier
+            // compares against original authenticated members after registration.
+            #[cfg(test)]
+            let candidate = {
+                let mut candidate = candidate;
+                if test_support::take_versioned_pending_member_substitution() {
+                    candidate.binding.marker_generation.push_str("-substituted");
+                }
+                candidate
+            };
+            let token = key::authenticate_pending_versioned_reasoning_members_in_scope_until(
+                self.conn,
+                key::PendingVersionedReasoningAuthentication {
+                    scope,
+                    storage_path: storage,
+                    authorized_root: root,
+                    original_envelope: bytes,
+                    original_mac: mac,
+                    expected_binding: &header.binding,
+                    candidate: &candidate,
+                    deadline: deadline.monotonic(),
+                },
+            )
+            .await
+            .map_err(|error| {
+                versioned_pending_replay_authentication_error(
+                    error,
+                    deadline,
+                    "versioned pending late original authentication",
+                )
+            })?;
+            if !replay.matches_integrity(&token) {
+                return Err(CheckpointStoreError::InvalidRequest {
+                    field: "versioned pending retained membership".to_owned(),
+                });
+            }
+            token
+        } else {
+            let token = key::authenticate_pending_reasoning_original_in_scope_until(
+                self.conn,
+                scope,
+                storage,
+                root,
+                bytes,
+                mac,
+                deadline.monotonic(),
+            )
+            .await
+            .map_err(|_| CheckpointStoreError::InvalidRequest {
+                field: "pending reasoning original authentication".to_owned(),
+            })?;
+            if !legacy.is_some_and(|replay| replay.matches_integrity(&token)) {
+                return Err(CheckpointStoreError::InvalidRequest {
+                    field: "pending reasoning retained membership".to_owned(),
+                });
+            }
+            token
+        };
         let native = crate::internal::ai::observed_agents::reasoning::restore_pending(
-            replay.source(),
-            integrity,
-            current,
+            source, integrity, current,
         )
         .map_err(|_| CheckpointStoreError::InvalidRequest {
             field: "pending reasoning fixed native source proof".to_owned(),
         })?;
         let disposition = ReasoningSourceDisposition::NativeProven(native);
+        if let Some(replay) = versioned {
+            let versioned_coverage =
+                request
+                    .versioned_coverage
+                    .ok_or_else(|| CheckpointStoreError::InvalidRequest {
+                        field: "versioned pending claims".to_owned(),
+                    })?;
+            let identity = prepare_native_versioned_reasoning_coverage_plan(
+                request.payload(),
+                NativeVersionedReasoningPreparation::RestoredPending(
+                    RestoredPendingVersionedIdentityPreparation {
+                        request: ReasoningIdentityPreparation {
+                            conn: self.conn,
+                            scope,
+                            storage_path: storage,
+                            authorized_root: root,
+                            session_id: request.session_id(),
+                            provider: request.agent_kind(),
+                            turns: &[],
+                            deadline: deadline.monotonic(),
+                        },
+                        source: &disposition,
+                        coverage: versioned_coverage,
+                    },
+                ),
+            )
+            .await
+            .map_err(|error| {
+                versioned_pending_replay_authentication_error(
+                    error,
+                    deadline,
+                    "pending versioned stable identity",
+                )
+            })?;
+            replay
+                .verify_recomputed_associations(versioned_coverage, &identity)
+                .map_err(|_| CheckpointStoreError::InvalidRequest {
+                    field: "pending versioned identity association".to_owned(),
+                })?;
+            let ReasoningSourceDisposition::NativeProven(native) = disposition else {
+                return Err(CheckpointStoreError::InvalidRequest {
+                    field: "pending versioned restored source".to_owned(),
+                });
+            };
+            let keys = versioned_coverage
+                .claims()
+                .map(|(_, claim)| claim.logical_turn_key.clone())
+                .collect::<BTreeSet<_>>();
+            let artifacts = native
+                .into_pending_claim_artifacts(current, &keys)
+                .map_err(|_| CheckpointStoreError::InvalidRequest {
+                    field: "pending versioned artifact bounds".to_owned(),
+                })?;
+            let commit_plan =
+                NativeVersionedReasoningClaimCommitPlan::new(versioned_coverage.clone(), &identity)
+                    .map_err(|_| CheckpointStoreError::InvalidRequest {
+                        field: "pending versioned atomic identity commit".to_owned(),
+                    })?;
+            return Ok(RestoredPendingReasoning {
+                artifacts,
+                commit_plan: RestoredPendingClaimPlan::V2(Box::new(commit_plan)),
+            });
+        }
         let keys = coverage
             .claims
             .iter()
@@ -3422,7 +3850,10 @@ impl<'a> TracesCheckpointStore<'a> {
         .ok_or_else(|| CheckpointStoreError::InvalidRequest {
             field: "pending reasoning stable identity".to_owned(),
         })?;
-        replay
+        legacy
+            .ok_or_else(|| CheckpointStoreError::InvalidRequest {
+                field: "pending legacy source".to_owned(),
+            })?
             .verify_recomputed_associations(coverage, &identity)
             .map_err(|_| CheckpointStoreError::InvalidRequest {
                 field: "pending reasoning identity association".to_owned(),
@@ -3444,7 +3875,7 @@ impl<'a> TracesCheckpointStore<'a> {
             })?;
         Ok(RestoredPendingReasoning {
             artifacts,
-            commit_plan,
+            commit_plan: RestoredPendingClaimPlan::V1(Box::new(commit_plan)),
         })
     }
 
@@ -3488,6 +3919,119 @@ impl<'a> TracesCheckpointStore<'a> {
             return Err(CheckpointStoreError::ReplayPayloadMismatch);
         }
         Ok(true)
+    }
+
+    /// Detect the read-only same-action upgrade boundary before version
+    /// selection. Unknown versions and database errors are never legacy.
+    /// The checkpoint point-read and revision probe are indexed separately.
+    pub(crate) async fn durable_legacy_replay_exists_for(
+        conn: &DatabaseConnection,
+        capture_scope: &CaptureScope,
+        checkpoint_id: &str,
+        session_id: &str,
+        deadline: Option<CaptureCommitDeadline>,
+    ) -> Result<bool, CheckpointStoreError> {
+        await_checkpoint_precommit_read_until(deadline, async {
+            capture_scope
+                .assert_workspace_fence_live(conn)
+                .await
+                .map_err(|_| CheckpointStoreError::StoreFailure {
+                    stage: CheckpointStoreStage::ScopeFence,
+                })
+        })
+        .await?;
+        if !Self::durable_replay_exists_for(
+            conn,
+            checkpoint_id,
+            session_id,
+            CheckpointScope::Committed,
+            deadline,
+        )
+        .await?
+        {
+            return Ok(false);
+        }
+        let non_v1 = await_checkpoint_precommit_read_until(deadline, async {
+            conn.query_one_raw(Statement::from_sql_and_values(
+                conn.get_database_backend(),
+                "SELECT 1 FROM agent_coverage_revision
+                 WHERE checkpoint_id = ? AND coverage_schema_version <> 1 LIMIT 1",
+                [checkpoint_id.into()],
+            ))
+            .await
+            .map_err(|_| CheckpointStoreError::StoreFailure {
+                stage: CheckpointStoreStage::CatalogTransaction,
+            })
+        })
+        .await?;
+        Ok(non_v1.is_none())
+    }
+
+    /// Accept only gate-owned committed observations. A v2 replay binds all
+    /// this action's observed v1/v2 rows as one exact immutable revision set;
+    /// unrelated checkpoints cannot supply authority for this action.
+    pub(crate) async fn settle_runtime_covered_replay_without_write(
+        conn: &DatabaseConnection,
+        capture_scope: &CaptureScope,
+        checkpoint_id: &str,
+        session_id: &str,
+        deadline: Option<CaptureCommitDeadline>,
+        covered: &[CommittedTurnClaimSnapshot],
+    ) -> Result<CheckpointReplayStatus, CheckpointStoreError> {
+        let action_claims = covered
+            .iter()
+            .filter(|claim| claim.checkpoint_id() == checkpoint_id)
+            .collect::<Vec<_>>();
+        if !action_claims
+            .iter()
+            .any(|claim| claim.version() == CoverageSchemaVersion::V2)
+        {
+            return Self::settle_committed_replay_without_write(
+                conn,
+                capture_scope,
+                checkpoint_id,
+                session_id,
+                deadline,
+            )
+            .await;
+        }
+        await_checkpoint_precommit_read_until(deadline, async {
+            capture_scope
+                .assert_workspace_fence_live(conn)
+                .await
+                .map_err(|_| CheckpointStoreError::StoreFailure {
+                    stage: CheckpointStoreStage::ScopeFence,
+                })?;
+            for claim in &action_claims {
+                claim
+                    .verify_current_with_conn(conn, session_id)
+                    .await
+                    .map_err(|_| CheckpointStoreError::ReplayPayloadMismatch)?;
+            }
+            Ok(())
+        })
+        .await?;
+        let fences = action_claims
+            .iter()
+            .map(|claim| claim.replay_fence())
+            .collect::<Vec<_>>();
+        match Self::replay_status_for_bound(
+            conn,
+            Some(capture_scope),
+            checkpoint_id,
+            session_id,
+            CheckpointScope::Committed,
+            deadline,
+            CheckpointReplayExpectation {
+                claim_set: Some(&fences),
+                native_companion: None,
+            },
+        )
+        .await?
+        {
+            CheckpointReplayStatus::Missing => Err(CheckpointStoreError::ReplayPayloadMismatch),
+            status => Ok(status),
+        }
     }
 
     /// Resolve a durable replay and settle any ordinary marker left by a
@@ -3692,6 +4236,79 @@ impl<'a> TracesCheckpointStore<'a> {
                 Ok(CheckpointReplayStatus::PendingCleanup { marker_generation })
             }
         }
+    }
+
+    /// No-write v2 settlement still requires the exact original envelope,
+    /// current catalog fence, fresh lower native proof and committed private
+    /// identities. A durable row or matching coverage revisions alone is not ACK.
+    pub(crate) async fn settle_versioned_pending_replay_without_write(
+        &self,
+        request: &CheckpointWriteRequest<'_>,
+    ) -> Result<CheckpointReplayStatus, CheckpointStoreError> {
+        if request.pending_versioned_header.is_none()
+            || request.payload().versioned_pending_reasoning.is_none()
+        {
+            return Err(CheckpointStoreError::InvalidRequest {
+                field: "versioned pending durable proof".to_owned(),
+            });
+        }
+        if !Self::durable_replay_exists_for(
+            self.conn,
+            request.checkpoint_id(),
+            request.session_id(),
+            request.scope(),
+            request.deadline(),
+        )
+        .await?
+        {
+            return Ok(CheckpointReplayStatus::Missing);
+        }
+        let scope =
+            self.capture_scope
+                .as_ref()
+                .ok_or_else(|| CheckpointStoreError::InvalidRequest {
+                    field: "versioned pending durable scope".to_owned(),
+                })?;
+        await_checkpoint_precommit_read_until(request.deadline(), async {
+            scope
+                .assert_workspace_fence_live(self.conn)
+                .await
+                .map_err(|_| CheckpointStoreError::StoreFailure {
+                    stage: CheckpointStoreStage::ScopeFence,
+                })
+        })
+        .await?;
+        let current = self.prepare_current_pending_reasoning_fence(request)?;
+        #[cfg(test)]
+        test_support::pause_after_registration_if_armed(&self.repo_path).await;
+        let restored = self.restore_pending_reasoning(request, &current).await?;
+        let RestoredPendingClaimPlan::V2(companion) = &restored.commit_plan else {
+            return Err(CheckpointStoreError::InvalidRequest {
+                field: "versioned pending durable identity".to_owned(),
+            });
+        };
+        let MarkerRegistration::Required(registration) = &self.registration else {
+            return Err(CheckpointStoreError::InvalidRequest {
+                field: "versioned pending durable claim set".to_owned(),
+            });
+        };
+        let fences = registration
+            .iter()
+            .map(OwnedRegistrationFence::borrowed)
+            .collect::<Vec<_>>();
+        Self::replay_status_for_bound(
+            self.conn,
+            Some(scope),
+            request.checkpoint_id(),
+            request.session_id(),
+            request.scope(),
+            request.deadline(),
+            CheckpointReplayExpectation {
+                claim_set: Some(&fences),
+                native_companion: Some(companion),
+            },
+        )
+        .await
     }
 
     /// Settle one lifecycle action's durable replay before an adapter
@@ -3913,6 +4530,13 @@ impl<'a> TracesCheckpointStore<'a> {
         &self,
         request: &CheckpointWriteRequest<'_>,
     ) -> Result<bool, CheckpointStoreError> {
+        if request.pending_versioned_header.is_some() {
+            return Ok(matches!(
+                self.settle_versioned_pending_replay_without_write(request)
+                    .await?,
+                CheckpointReplayStatus::Complete
+            ));
+        }
         let Some(companion) = request.native_versioned_companion else {
             return Ok(true);
         };
@@ -3982,7 +4606,7 @@ impl CheckpointStore for TracesCheckpointStore<'_> {
         // The ordinary request constructor precedes the private recovery
         // association. A caller that omits that association must never write
         // a redacted-only checkpoint and retire a native pending artifact.
-        if request.payload().deferred_pending_reasoning().is_some()
+        if request.payload().has_deferred_pending_reasoning()
             != request.pending_coverage().is_some()
         {
             return Err(CheckpointStoreError::InvalidRequest {
@@ -4007,6 +4631,12 @@ impl CheckpointStore for TracesCheckpointStore<'_> {
                         == crate::internal::ai::observed_agents::CoverageSchemaVersion::V1
                 }) => {}
             (MarkerRegistration::Prebound, None) => {}
+            (MarkerRegistration::Prebound, Some(plan))
+                if request.imported_versioned_prebound
+                    && plan.ordinary().source_channel == "import"
+                    && plan.ordinary().capture_scope.as_ref() == self.capture_scope.as_ref()
+                    && plan.ordinary().import_identity.is_some()
+                    && plan.ordinary().import_session.is_some() => {}
             _ => {
                 return Err(CheckpointStoreError::InvalidRequest {
                     field: "checkpoint versioned coverage fence".to_owned(),
@@ -4046,19 +4676,24 @@ impl CheckpointStore for TracesCheckpointStore<'_> {
             ),
             MarkerRegistration::Prebound => None,
         };
-        let replay_status = Self::replay_status_for_bound(
-            self.conn,
-            self.capture_scope.as_ref(),
-            request.checkpoint_id(),
-            request.session_id(),
-            request.scope(),
-            request.deadline(),
-            CheckpointReplayExpectation {
-                claim_set: replay_fences.as_deref(),
-                native_companion: request.native_versioned_companion,
-            },
-        )
-        .await;
+        let replay_status = if request.pending_versioned_header.is_some() {
+            self.settle_versioned_pending_replay_without_write(&request)
+                .await
+        } else {
+            Self::replay_status_for_bound(
+                self.conn,
+                self.capture_scope.as_ref(),
+                request.checkpoint_id(),
+                request.session_id(),
+                request.scope(),
+                request.deadline(),
+                CheckpointReplayExpectation {
+                    claim_set: replay_fences.as_deref(),
+                    native_companion: request.native_versioned_companion,
+                },
+            )
+            .await
+        };
         if matches!(
             replay_status,
             Err(CheckpointStoreError::ReplayPayloadMismatch)
@@ -4262,23 +4897,32 @@ impl CheckpointStore for TracesCheckpointStore<'_> {
         );
         #[cfg(test)]
         let manager = test_support::with_history_fault(manager);
-        #[cfg(test)]
-        let companion_fault = test_support::companion_fault(request.txn_extra());
-        let store_bound_native =
-            request
-                .native_versioned_companion
-                .map(|companion| StoreBoundNativeVersionedTxnExtra {
-                    companion,
-                    permit: StoreBoundNativeVersionedPermit { _private: () },
-                });
+        let store_bound_native = request
+            .native_versioned_companion
+            .or_else(|| {
+                restored_pending
+                    .as_ref()
+                    .and_then(|restored| match &restored.commit_plan {
+                        RestoredPendingClaimPlan::V2(plan) => Some(plan.as_ref()),
+                        RestoredPendingClaimPlan::V1(_) => None,
+                    })
+            })
+            .map(|companion| StoreBoundNativeVersionedTxnExtra {
+                companion,
+                permit: StoreBoundNativeVersionedPermit { _private: () },
+            });
         let mut params = self.append_params(&request)?;
         if let Some(bound) = store_bound_native.as_ref() {
             params.txn_extra = Some(bound);
         }
         if let Some(restored) = restored_pending.as_ref() {
             params.reasoning_artifacts = &restored.artifacts;
-            params.txn_extra = Some(&restored.commit_plan);
+            if let RestoredPendingClaimPlan::V1(plan) = &restored.commit_plan {
+                params.txn_extra = Some(plan.as_ref());
+            }
         }
+        #[cfg(test)]
+        let companion_fault = test_support::companion_fault(params.txn_extra);
         #[cfg(test)]
         let params = test_support::with_companion_fault(params, companion_fault.as_ref());
         let written = match manager.append_checkpoint_commit(params).await {
@@ -5087,6 +5731,392 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cov11_legacy_same_action_probe_is_read_only_and_action_local() {
+        use crate::internal::ai::{
+            coverage_gate::tests::ReasoningFixture,
+            observed_agents::reasoning::carrier_test_support as fixture_ids,
+        };
+        let fixture = ReasoningFixture::new().await;
+        fixture
+            .seed_legacy_v1_checkpoint_revision("legacy-action")
+            .await;
+        let probe = |checkpoint| {
+            TracesCheckpointStore::durable_legacy_replay_exists_for(
+                &fixture.conn,
+                &fixture.scope,
+                checkpoint,
+                fixture_ids::CAPTURE,
+                None,
+            )
+        };
+        assert!(probe("legacy-action").await.unwrap());
+        assert!(!probe("missing-action").await.unwrap());
+        fixture
+            .conn
+            .execute_unprepared(
+                "INSERT INTO agent_checkpoint (checkpoint_id, session_id, scope, parent_commit,
+             tree_oid, metadata_blob_oid, traces_commit, created_at)
+             SELECT 'empty-action', session_id, scope, parent_commit,
+             tree_oid, metadata_blob_oid, traces_commit, created_at FROM agent_checkpoint
+             WHERE checkpoint_id = 'legacy-action'",
+            )
+            .await
+            .unwrap();
+        assert!(probe("empty-action").await.unwrap());
+        fixture
+            .conn
+            .execute_unprepared(
+                "INSERT INTO agent_coverage_revision SELECT session_id, 'extra-v2-key', 2, 1,
+             'newer-action', coverage_digest, completeness, source_channel, created_at
+             FROM agent_coverage_revision WHERE checkpoint_id = 'legacy-action'",
+            )
+            .await
+            .unwrap();
+        assert!(
+            probe("legacy-action").await.unwrap(),
+            "unrelated v2 history cannot prevent this action's legacy settlement"
+        );
+        assert!(probe("empty-action").await.unwrap());
+        assert_eq!(
+            TracesCheckpointStore::settle_committed_replay_without_write(
+                &fixture.conn,
+                &fixture.scope,
+                "legacy-action",
+                fixture_ids::CAPTURE,
+                None,
+            )
+            .await,
+            Ok(CheckpointReplayStatus::Complete)
+        );
+        assert_eq!(
+            TracesCheckpointStore::settle_committed_replay_without_write(
+                &fixture.conn,
+                &fixture.scope,
+                "empty-action",
+                fixture_ids::CAPTURE,
+                None,
+            )
+            .await,
+            Ok(CheckpointReplayStatus::Complete)
+        );
+        assert_eq!(
+            TracesCheckpointStore::durable_legacy_replay_exists_for(
+                &fixture.conn,
+                &fixture.scope,
+                "legacy-action",
+                "foreign-session",
+                None,
+            )
+            .await,
+            Err(CheckpointStoreError::ReplayPayloadMismatch)
+        );
+        fixture
+            .conn
+            .execute_unprepared(
+                "UPDATE agent_coverage_revision SET coverage_schema_version = 7
+             WHERE checkpoint_id = 'legacy-action'",
+            )
+            .await
+            .unwrap();
+        assert!(
+            !probe("legacy-action").await.unwrap(),
+            "unknown coverage is never v1-only"
+        );
+        let row = fixture
+            .conn
+            .query_one_raw(Statement::from_string(
+                fixture.conn.get_database_backend(),
+                "SELECT COUNT(*) AS n FROM agent_coverage_claim".to_owned(),
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            row.try_get_by::<i64, _>("n").unwrap(),
+            0,
+            "legacy probing and settlement must never enter either reservation gate"
+        );
+        let expired =
+            CaptureCommitDeadline::from_test_pair(Instant::now() - Duration::from_millis(1), 0);
+        assert_eq!(
+            TracesCheckpointStore::durable_legacy_replay_exists_for(
+                &fixture.conn,
+                &fixture.scope,
+                "empty-action",
+                fixture_ids::CAPTURE,
+                Some(expired),
+            )
+            .await,
+            Err(CheckpointStoreError::DeadlineExceeded)
+        );
+        fixture
+            .conn
+            .execute_unprepared("DROP TABLE agent_coverage_revision")
+            .await
+            .unwrap();
+        assert!(
+            probe("empty-action").await.is_err(),
+            "database failure cannot authorize legacy settlement"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cov11_incomplete_covered_replay_binds_exact_committed_state() {
+        use sea_orm::TransactionTrait;
+
+        use crate::internal::ai::{
+            coverage_gate::{
+                CaptureReservationExecution, ReasoningCoverageInput,
+                reserve_runtime_turn_claims_with_reasoning,
+                tests::{ReasoningFixture, cov2_visible_turn},
+            },
+            observed_agents::reasoning::carrier_test_support as fixture_ids,
+        };
+        let fixture = ReasoningFixture::new().await;
+        let checkpoint_id = "incomplete-runtime-checkpoint";
+        let deadline = CaptureCommitDeadline::from_budget(Duration::from_secs(30)).unwrap();
+        let reader = ReasoningIdentityReadContext::new(
+            &fixture.scope,
+            fixture_ids::CAPTURE,
+            &fixture.dir.path().join(crate::utils::util::ROOT_DIR),
+            fixture.dir.path(),
+            deadline.monotonic(),
+        );
+        let turns = [cov2_visible_turn(
+            "incomplete-visible-key",
+            "redacted typed data",
+            Completeness::Incomplete,
+        )];
+        let reserve = || {
+            reserve_runtime_turn_claims_with_reasoning(
+                &fixture.conn,
+                &fixture.scope,
+                fixture_ids::CAPTURE,
+                &turns,
+                "runtime-owner",
+                1,
+                CaptureReservationExecution::export(deadline),
+                ReasoningCoverageInput::ordinary(&reader),
+                false,
+            )
+        };
+        let reserved = reserve().await.unwrap();
+        assert_eq!(reserved.versioned_reserved.len(), 1);
+        assert_eq!(
+            reserved.versioned_reserved[0].coverage_schema_version,
+            CoverageSchemaVersion::V2
+        );
+        let ordinary = LiveClaimCommitPlan {
+            source_channel: "export",
+            session_id: fixture_ids::CAPTURE.to_owned(),
+            checkpoint_id: checkpoint_id.to_owned(),
+            owner: "runtime-owner".to_owned(),
+            parent_commit: None,
+            created_at: 1,
+            now_ms: 1,
+            claims: reserved.ordinary.reserved,
+            import_session: None,
+            import_identity: None,
+            capture_scope: Some(fixture.scope.clone()),
+        };
+        let plan = LiveCaptureClaimCommitPlan::new_runtime_versioned(
+            ordinary,
+            &reserved.versioned_reserved,
+            None,
+        )
+        .unwrap();
+        let txn = fixture.conn.begin().await.unwrap();
+        plan.apply(
+            &txn,
+            &TracesCommitCtx {
+                commit_hash: "a".repeat(40),
+                tree_oid: "b".repeat(40),
+                metadata_blob_oid: "c".repeat(40),
+            },
+        )
+        .await
+        .unwrap();
+        txn.commit().await.unwrap();
+        let covered = reserve().await.unwrap();
+        assert!(covered.ordinary.reserved.is_empty());
+        assert_eq!(covered.ordinary.skipped_covered, 1);
+        let settle = || {
+            TracesCheckpointStore::settle_runtime_covered_replay_without_write(
+                &fixture.conn,
+                &fixture.scope,
+                checkpoint_id,
+                fixture_ids::CAPTURE,
+                Some(deadline),
+                &covered.covered,
+            )
+        };
+        assert_eq!(settle().await, Ok(CheckpointReplayStatus::Complete));
+        assert_eq!(settle().await, Ok(CheckpointReplayStatus::Complete));
+        for sql in [
+            "SELECT COUNT(*) AS n FROM agent_checkpoint",
+            "SELECT COUNT(*) AS n FROM agent_coverage_claim WHERE coverage_schema_version = 2 AND completeness = 'incomplete' AND revision = 1 AND state = 'catalog_committed'",
+            "SELECT COUNT(*) AS n FROM agent_coverage_revision WHERE coverage_schema_version = 2 AND completeness = 'incomplete' AND revision = 1",
+        ] {
+            let row = fixture
+                .conn
+                .query_one_raw(Statement::from_string(
+                    fixture.conn.get_database_backend(),
+                    sql.to_owned(),
+                ))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(row.try_get_by::<i64, _>("n").unwrap(), 1, "{sql}");
+        }
+        // Completeness is an exact committed tuple member, not a condition
+        // for whether this immutable action's receipt may settle.
+        fixture.conn.execute_unprepared(
+            "UPDATE agent_coverage_revision SET completeness = 'complete' WHERE coverage_schema_version = 2",
+        ).await.unwrap();
+        assert_eq!(
+            settle().await,
+            Err(CheckpointStoreError::ReplayPayloadMismatch)
+        );
+        fixture.conn.execute_unprepared(
+            "UPDATE agent_coverage_revision SET completeness = 'incomplete' WHERE coverage_schema_version = 2",
+        ).await.unwrap();
+        assert_eq!(settle().await, Ok(CheckpointReplayStatus::Complete));
+        fixture.conn.execute_unprepared(
+            "UPDATE agent_coverage_claim SET completeness = 'complete' WHERE coverage_schema_version = 2",
+        ).await.unwrap();
+        assert_eq!(
+            settle().await,
+            Err(CheckpointStoreError::ReplayPayloadMismatch)
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cov11_runtime_versioned_companion_applies_claims_and_catalog_once() {
+        use sea_orm::TransactionTrait;
+
+        use crate::internal::ai::{
+            coverage_gate::{
+                CaptureReservationExecution, ReasoningCoverageInput,
+                reserve_runtime_turn_claims_with_reasoning,
+                tests::{ReasoningFixture, cov2_visible_turn},
+            },
+            observed_agents::reasoning::carrier_test_support as fixture_ids,
+        };
+        let fixture = ReasoningFixture::new().await;
+        fixture
+            .conn
+            .execute_unprepared("CREATE TABLE cov11_checkpoint_insert_count (attempt INTEGER)")
+            .await
+            .unwrap();
+        fixture.conn.execute_unprepared("CREATE TRIGGER cov11_count_checkpoint_insert BEFORE INSERT ON agent_checkpoint BEGIN INSERT INTO cov11_checkpoint_insert_count VALUES (1); END").await.unwrap();
+
+        let reader = ReasoningIdentityReadContext::new(
+            &fixture.scope,
+            fixture_ids::CAPTURE,
+            &fixture.dir.path().join(crate::utils::util::ROOT_DIR),
+            fixture.dir.path(),
+            Instant::now() + Duration::from_secs(30),
+        );
+        let turns = [cov2_visible_turn(
+            "visible-key",
+            "redacted typed data",
+            Completeness::Complete,
+        )];
+        let reserved = reserve_runtime_turn_claims_with_reasoning(
+            &fixture.conn,
+            &fixture.scope,
+            fixture_ids::CAPTURE,
+            &turns,
+            "runtime-owner",
+            1,
+            CaptureReservationExecution::live(
+                CaptureCommitDeadline::from_budget(Duration::from_secs(30)).unwrap(),
+            ),
+            ReasoningCoverageInput::ordinary(&reader),
+            false,
+        )
+        .await
+        .unwrap();
+        let ordinary = LiveClaimCommitPlan {
+            source_channel: "live",
+            session_id: fixture_ids::CAPTURE.to_owned(),
+            checkpoint_id: "runtime-checkpoint".to_owned(),
+            owner: "runtime-owner".to_owned(),
+            parent_commit: None,
+            created_at: 1,
+            now_ms: 1,
+            claims: reserved.ordinary.reserved,
+            import_session: None,
+            import_identity: None,
+            capture_scope: Some(fixture.scope.clone()),
+        };
+        let plan = LiveCaptureClaimCommitPlan::new_runtime_versioned(
+            ordinary,
+            &reserved.versioned_reserved,
+            None,
+        )
+        .unwrap();
+        let payload = CheckpointRedactedPayload::from_snapshot(
+            snapshot(),
+            sidecar(b"{}"),
+            sidecar(b"{}\n"),
+            sidecar(b"{}"),
+        )
+        .unwrap();
+        let request = CheckpointWriteRequest::new(
+            "runtime-action",
+            "runtime-checkpoint",
+            fixture_ids::CAPTURE,
+            "claude_code",
+            None,
+            CheckpointScope::Committed,
+            "runtime-generation",
+            None,
+            &payload,
+            None,
+            None,
+        )
+        .unwrap()
+        .with_runtime_versioned_claims(&plan)
+        .unwrap();
+        assert!(request.versioned_coverage.is_some());
+        let extra = request.txn_extra.unwrap();
+        let txn = fixture.conn.begin().await.unwrap();
+        extra
+            .apply(
+                &txn,
+                &TracesCommitCtx {
+                    commit_hash: "a".repeat(40),
+                    tree_oid: "b".repeat(40),
+                    metadata_blob_oid: "c".repeat(40),
+                },
+            )
+            .await
+            .unwrap();
+        txn.commit().await.unwrap();
+        for sql in [
+            "SELECT COUNT(*) AS n FROM cov11_checkpoint_insert_count",
+            "SELECT COUNT(*) AS n FROM agent_checkpoint",
+            "SELECT COUNT(*) AS n FROM agent_coverage_revision WHERE coverage_schema_version = 2",
+            "SELECT COUNT(*) AS n FROM agent_coverage_claim WHERE state = 'catalog_committed' AND coverage_schema_version = 2",
+        ] {
+            let row = fixture
+                .conn
+                .query_one_raw(Statement::from_string(
+                    fixture.conn.get_database_backend(),
+                    sql.to_owned(),
+                ))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(row.try_get_by::<i64, _>("n").unwrap(), 1, "{sql}");
+        }
+    }
+
     #[tokio::test]
     async fn cov2_all_marker_constructors_keep_version() {
         use crate::internal::ai::{
@@ -5514,7 +6544,7 @@ mod tests {
         committed_marker.commit = Some("e69de29bb2d1d6434b8b29ae775ad8c2e48c5391".to_string());
         committed_marker.oids = vec!["e69de29bb2d1d6434b8b29ae775ad8c2e48c5391".to_string()];
 
-        let locker = crate::internal::db::establish_connection_with_busy_timeout(
+        let locker = crate::internal::db::establish_connection_with_lock_timeout(
             database_path
                 .to_str()
                 .expect("marker refresh database path is utf-8"),
@@ -5746,7 +6776,7 @@ mod tests {
         .await
         .expect("seed checkpoint deadline workspace lease");
 
-        let locker = crate::internal::db::establish_connection_with_busy_timeout(
+        let locker = crate::internal::db::establish_connection_with_lock_timeout(
             database_path
                 .to_str()
                 .expect("checkpoint deadline database path is utf-8"),

@@ -6,24 +6,208 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    io::{self, Write},
     ops::{Deref, DerefMut},
 };
 
 use zeroize::{Zeroize, Zeroizing};
 
 use super::{
-    coverage::{CanonValue, parse_canon_value},
+    coverage::{CanonValue, SemanticRecord, parse_canon_value},
     native_origin::codec::{FieldName, RECEIPT_BYTE_CAP},
     reasoning::{
-        OPENCODE_CANON_MAX_NODES, OpenCodeCandidatePart, PreparedReasoningSource,
-        ReasoningFieldError, SealedOpenCodeCandidates,
+        OPENCODE_CANON_MAX_NODES, OpenCodeCandidatePart, OpenCodeCoverageClassification,
+        OpenCodeCoverageSource, OpenCodeVisibleReasoningPart, PreparedReasoningSource,
+        ReasoningCoverageFragment, ReasoningFieldError, ReasoningProvider, ReasoningSourceKind,
+        SealedOpenCodeCandidates, attach_reasoning_coverage, classify_provider_visible_reasoning,
+        prepared_source_is_ordinary_projection,
     },
     transcript_source::TRANSCRIPT_READ_HARD_CAP_BYTES,
 };
 
 const MAX_OBSERVED_IDS: usize = 100_000;
 const MAX_JSON_DEPTH: usize = 64;
+const MAX_VISIBLE_REASONING_PARTS: usize = 4096;
+
+/// Shared classification of the original bounded buffer. The parse tree and
+/// borrowed coordinate maps are dropped before the ordinary preparer receives
+/// this same allocation. Only bounded wiping strings escape the parse scope.
+fn classify_borrowed_coverage_source(
+    source: &[u8],
+) -> Result<ReasoningCoverageFragment, ReasoningFieldError> {
+    if source.len() as u64 > TRANSCRIPT_READ_HARD_CAP_BYTES {
+        return Err(ReasoningFieldError::SourceTooLarge);
+    }
+    let (_, document) = parse_bounded_canon_value(source, parse_canon_value)?;
+    let document = Zeroizing::new(document);
+    let source_session = document
+        .get("info")
+        .and_then(|info| info.get("id"))
+        .and_then(CanonValue::as_str)
+        .filter(|id| !id.is_empty() && id.len() <= 1024)
+        .ok_or(ReasoningFieldError::UnsupportedShape)?;
+    let messages = document
+        .get("messages")
+        .and_then(CanonValue::as_array)
+        .ok_or(ReasoningFieldError::UnsupportedShape)?;
+    let mut message_ids = BTreeMap::<&str, usize>::new();
+    let mut part_ids = BTreeMap::<&str, usize>::new();
+    let mut contains_reasoning = false;
+    for message in messages {
+        let (_, id, parts) = coverage_message(message)?;
+        if let Some(id) = id {
+            *message_ids.entry(id).or_default() += 1;
+        }
+        if let Some(parts) = parts {
+            for part in parts {
+                contains_reasoning |=
+                    part.get("type").and_then(CanonValue::as_str) == Some("reasoning");
+                if let Some(id) = part.get("id").and_then(CanonValue::as_str) {
+                    *part_ids.entry(id).or_default() += 1;
+                }
+            }
+        }
+    }
+
+    let mut partial = false;
+    let mut visible_parts = Vec::new();
+    for (message_ordinal, message) in messages.iter().enumerate() {
+        let (kind, id, parts) = coverage_message(message)?;
+        if kind != "assistant" {
+            continue;
+        }
+        let Some(id) = id.filter(|id| !id.is_empty() && id.len() <= 1024) else {
+            partial = true;
+            continue;
+        };
+        if message_ids.get(id) != Some(&1) {
+            partial = true;
+            continue;
+        }
+        let Some(parts) = parts else {
+            partial = true;
+            continue;
+        };
+        for (part_ordinal, part) in parts.iter().enumerate() {
+            let CanonValue::Object(fields) = part else {
+                partial = true;
+                continue;
+            };
+            if fields.get("type").and_then(CanonValue::as_str) != Some("reasoning") {
+                continue;
+            }
+            let part_id = fields
+                .get("id")
+                .and_then(CanonValue::as_str)
+                .filter(|id| !id.is_empty() && id.len() <= 1024);
+            let text = fields
+                .get("text")
+                .and_then(CanonValue::as_str)
+                .filter(|text| !text.trim().is_empty());
+            let (Some(part_id), Some(text)) = (part_id, text) else {
+                partial = true;
+                continue;
+            };
+            if part_ids.get(part_id) != Some(&1)
+                || !matches!(
+                    classify_reasoning_fields(fields),
+                    ReasoningPartShape::Visible
+                )
+                || fields
+                    .get("sessionID")
+                    .is_some_and(|value| value.as_str() != Some(source_session))
+                || fields
+                    .get("messageID")
+                    .is_some_and(|value| value.as_str() != Some(id))
+            {
+                partial = true;
+                continue;
+            }
+            if visible_parts.len() >= MAX_VISIBLE_REASONING_PARTS {
+                return Err(ReasoningFieldError::SourceTooLarge);
+            }
+            let (_, text) = classify_provider_visible_reasoning(
+                ReasoningProvider::OpenCode,
+                ReasoningSourceKind::Reasoning,
+                text.to_owned(),
+            );
+            visible_parts.push(OpenCodeVisibleReasoningPart {
+                source_message: Zeroizing::new(id.to_owned()),
+                message_ordinal,
+                source_part: Zeroizing::new(part_id.to_owned()),
+                part_ordinal,
+                record: SemanticRecord::Reasoning {
+                    provider: ReasoningProvider::OpenCode,
+                    source_kind: Some(ReasoningSourceKind::Reasoning),
+                    text,
+                },
+            });
+        }
+    }
+    Ok(ReasoningCoverageFragment {
+        contains_reasoning,
+        source_session: Zeroizing::new(source_session.to_owned()),
+        visible_parts,
+        partial,
+    })
+}
+
+/// The pure owning preview uses the old ordinary preparer directly. Calling
+/// the adapter wrapper here would classify again and add a third initial tree.
+pub(crate) fn classify_opencode_coverage_source(source: Vec<u8>) -> OpenCodeCoverageClassification {
+    let mut source = Zeroizing::new(source);
+    let classified = classify_borrowed_coverage_source(&source).and_then(|fragment| {
+        let prepared = prepare_ordinary_authorized_source(std::mem::take(&mut *source))?;
+        let partial = fragment.partial || !prepared_source_is_ordinary_projection(&prepared);
+        Ok(OpenCodeCoverageSource {
+            source_session: fragment.source_session,
+            prepared,
+            visible_parts: fragment.visible_parts,
+            partial,
+        })
+    });
+    match classified {
+        Ok(source) => OpenCodeCoverageClassification::Parsed(Box::new(source)),
+        Err(reason) => OpenCodeCoverageClassification::Partial(reason),
+    }
+}
+
+/// Accept exactly one of the two already supported export message envelopes.
+/// All returned coordinates borrow the bounded, wiping parse tree.
+type CoverageMessageView<'a> = (&'a str, Option<&'a str>, Option<&'a [CanonValue]>);
+
+fn coverage_message(message: &CanonValue) -> Result<CoverageMessageView<'_>, ReasoningFieldError> {
+    let CanonValue::Object(fields) = message else {
+        return Err(ReasoningFieldError::UnsupportedShape);
+    };
+    if let Some(kind) = fields.get("type") {
+        if fields.contains_key("info") || fields.contains_key("parts") {
+            return Err(ReasoningFieldError::UnsupportedShape);
+        }
+        let kind = kind.as_str().ok_or(ReasoningFieldError::UnsupportedShape)?;
+        let parts = match fields.get("content") {
+            None => None,
+            Some(CanonValue::Array(parts)) => Some(parts.as_slice()),
+            Some(_) => return Err(ReasoningFieldError::UnsupportedShape),
+        };
+        Ok((kind, fields.get("id").and_then(CanonValue::as_str), parts))
+    } else {
+        if fields.contains_key("content") {
+            return Err(ReasoningFieldError::UnsupportedShape);
+        }
+        let info = fields
+            .get("info")
+            .ok_or(ReasoningFieldError::UnsupportedShape)?;
+        let role = info
+            .get("role")
+            .and_then(CanonValue::as_str)
+            .ok_or(ReasoningFieldError::UnsupportedShape)?;
+        let parts = match fields.get("parts") {
+            Some(CanonValue::Array(parts)) => Some(parts.as_slice()),
+            _ => return Err(ReasoningFieldError::UnsupportedShape),
+        };
+        Ok((role, info.get("id").and_then(CanonValue::as_str), parts))
+    }
+}
 
 /// Offsets refer to the *authorized raw export*, before either JSON decoding
 /// or ordinary projection. A receipt is copied only after the strict parse has
@@ -372,38 +556,6 @@ impl Drop for WipingIdSet {
 
 /// `serde_json::to_vec` may allocate well beyond the admitted source after
 /// escapes expand. An output failure drops and wipes every partial write.
-struct BoundedOrdinaryWriter {
-    bytes: Zeroizing<Vec<u8>>,
-    cap: usize,
-}
-
-impl BoundedOrdinaryWriter {
-    fn into_bytes(mut self) -> Vec<u8> {
-        std::mem::take(&mut *self.bytes)
-    }
-}
-
-impl Write for BoundedOrdinaryWriter {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        let next = self
-            .bytes
-            .len()
-            .checked_add(bytes.len())
-            .filter(|next| *next <= self.cap)
-            .ok_or_else(|| io::Error::other("bounded OpenCode output exceeded source cap"))?;
-        let additional = next - self.bytes.len();
-        self.bytes
-            .try_reserve(additional)
-            .map_err(|_| io::Error::other("bounded OpenCode output allocation failed"))?;
-        self.bytes.extend_from_slice(bytes);
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
 /// A payload-free classification; `Candidate` never grants native authority.
 enum ReasoningPartShape {
     Visible,
@@ -2206,7 +2358,18 @@ fn retained_meaningful_ordinary_message(document: &BTreeMap<String, CanonValue>)
     })
 }
 
+/// Adapter-facing source port: classify before erasing state/proof fields,
+/// then preserve the old preparer's bytes, disposition, permits and errors.
 pub(crate) fn prepare_authorized_source(
+    source: Vec<u8>,
+) -> Result<PreparedReasoningSource, ReasoningFieldError> {
+    let mut source = Zeroizing::new(source);
+    let classified = classify_borrowed_coverage_source(&source);
+    let prepared = prepare_ordinary_authorized_source(std::mem::take(&mut *source))?;
+    Ok(attach_reasoning_coverage(prepared, classified))
+}
+
+fn prepare_ordinary_authorized_source(
     source: Vec<u8>,
 ) -> Result<PreparedReasoningSource, ReasoningFieldError> {
     let mut source = Zeroizing::new(source);
@@ -2620,13 +2783,7 @@ pub(crate) fn prepare_authorized_source(
     let ordinary = if removed {
         let cap = usize::try_from(TRANSCRIPT_READ_HARD_CAP_BYTES)
             .map_err(|_| ReasoningFieldError::SourceTooLarge)?;
-        let mut writer = BoundedOrdinaryWriter {
-            bytes: Zeroizing::new(Vec::new()),
-            cap,
-        };
-        serde_json::to_writer(&mut writer, &*export)
-            .map_err(|_| ReasoningFieldError::SourceTooLarge)?;
-        writer.into_bytes()
+        super::coverage::encode_bounded_json(&*export, cap)?
     } else {
         std::mem::take(&mut *source)
     };
@@ -2655,6 +2812,318 @@ mod tests {
         extract::extract_opencode,
         reasoning::{ReasoningSourceDisposition, ReasoningSourceState},
     };
+
+    #[test]
+    fn cov2_runtime_classifier_rejection_preserves_legacy_preparation() {
+        use super::super::reasoning::take_authorized_reasoning_coverage;
+
+        let source_session = "s".repeat(1025);
+        for unsupported in [false, true] {
+            let mut messages =
+                vec![serde_json::json!({"id":"u1","type":"user","text":"safe request"})];
+            if unsupported {
+                messages.push(serde_json::json!({"id":"a1","type":"assistant","content":[
+                    {"id":"p1","type":"reasoning","text":"removed private thought","state":{"signature":"removed private state"}},
+                    {"id":"p2","type":"text","text":"safe response"}
+                ]}));
+            }
+            let source = serde_json::to_vec(&serde_json::json!({
+                "info":{"id":source_session},"messages":messages
+            }))
+            .expect("bounded deterministic export");
+            assert!(classify_borrowed_coverage_source(&source).is_err());
+            let legacy =
+                prepare_ordinary_authorized_source(source.clone()).expect("legacy success");
+            let mut adapted = prepare_authorized_source(source).expect("same legacy success");
+            let (fragment, rejected, _) = take_authorized_reasoning_coverage(
+                &mut adapted,
+                true,
+                "opencode",
+                Some(&source_session),
+            )
+            .expect("content-free rejection does not add an identity gate");
+            assert!(fragment.is_none());
+            assert!(rejected);
+            let consume = |prepared| {
+                ReasoningSourceDisposition::from_prepared_authorized_source_with_partial_permit(
+                    prepared,
+                    true,
+                    TRANSCRIPT_READ_HARD_CAP_BYTES,
+                    "opencode",
+                    "capture",
+                    Some(&source_session),
+                )
+                .expect("same legacy source binding")
+            };
+            let (legacy_bytes, legacy_state, legacy_permit) = consume(legacy);
+            let (actual_bytes, actual_state, actual_permit) = consume(adapted);
+            assert_eq!(actual_bytes, legacy_bytes);
+            assert!(actual_state.state() == legacy_state.state());
+            assert_eq!(actual_permit.is_some(), legacy_permit.is_some());
+            assert_eq!(actual_permit.is_some(), unsupported);
+            if let (Some(actual), Some(legacy)) = (actual_permit, legacy_permit) {
+                assert_eq!(actual.source_session(), legacy.source_session());
+                assert_eq!(actual.capture_session(), legacy.capture_session());
+            }
+        }
+        for source in [
+            b"".as_slice(),
+            br#"{"messages":[],"messages":[]}"#.as_slice(),
+        ] {
+            assert!(matches!(
+                (prepare_authorized_source(source.to_vec()), prepare_ordinary_authorized_source(source.to_vec())),
+                (Err(actual), Err(legacy)) if actual == legacy
+            ));
+        }
+    }
+
+    #[test]
+    fn cov2_runtime_visible_limit_rejection_keeps_legacy_bytes() {
+        use super::super::reasoning::take_authorized_reasoning_coverage;
+        let parts = (0..=MAX_VISIBLE_REASONING_PARTS)
+            .map(|index| {
+                serde_json::json!({
+                    "id":format!("r{index}"),"type":"reasoning","text":"visible"
+                })
+            })
+            .collect::<Vec<_>>();
+        let source = serde_json::to_vec(&serde_json::json!({
+            "info":{"id":"ses_limit"},"messages":[
+                {"id":"u1","type":"user","text":"safe request"},
+                {"id":"a1","type":"assistant","content":parts}
+            ]
+        }))
+        .expect("bounded over-visible-limit export");
+        let legacy = prepare_ordinary_authorized_source(source.clone())
+            .expect("legacy accepts bounded source");
+        let mut adapted = prepare_authorized_source(source)
+            .expect("classifier cap cannot replace legacy error decisions");
+        let (fragment, rejected, partial) =
+            take_authorized_reasoning_coverage(&mut adapted, true, "opencode", Some("ses_limit"))
+                .expect("content-free rejection transport");
+        assert!(fragment.is_none());
+        assert!(rejected);
+        assert!(!partial);
+        let consume = |prepared| {
+            ReasoningSourceDisposition::from_prepared_authorized_source_with_partial_permit(
+                prepared,
+                true,
+                TRANSCRIPT_READ_HARD_CAP_BYTES,
+                "opencode",
+                "capture",
+                Some("ses_limit"),
+            )
+            .expect("same ordinary preparation")
+        };
+        let (legacy_bytes, legacy_state, legacy_permit) = consume(legacy);
+        let (actual_bytes, actual_state, actual_permit) = consume(adapted);
+        assert_eq!(actual_bytes, legacy_bytes);
+        assert!(actual_state.is_ordinary() && legacy_state.is_ordinary());
+        assert!(actual_permit.is_none() && legacy_permit.is_none());
+    }
+
+    #[test]
+    fn cov2_runtime_fragment_keeps_source_binding_and_candidate_seal() {
+        use super::super::reasoning::take_authorized_reasoning_coverage;
+
+        let visible = br#"{"info":{"id":"ses_cov2"},"messages":[{"id":"a1","type":"assistant","content":[{"id":"r1","type":"reasoning","text":"visible"}]}]}"#;
+        for (verified, provider, source) in [
+            (false, "opencode", Some("ses_cov2")),
+            (true, "codex", Some("ses_cov2")),
+            (true, "opencode", Some("other")),
+        ] {
+            let mut prepared = prepare_authorized_source(visible.to_vec()).expect("closed source");
+            assert!(matches!(
+                take_authorized_reasoning_coverage(&mut prepared, verified, provider, source,),
+                Err(ReasoningFieldError::UnsupportedShape)
+            ));
+        }
+        let candidate = br#"{"info":{"id":"ses_cov2"},"messages":[{"id":"u1","type":"user","text":"safe"},{"id":"a1","type":"assistant","content":[{"id":"npart_0123456789abcdef0123456789abcdef","type":"reasoning","text":"private","state":{"signature":"private-signature"},"originProof":{"nonce":"unverified-receipt"}},{"id":"r2","type":"reasoning","text":"readable"}]}]}"#;
+        let mut prepared = prepare_authorized_source(candidate.to_vec()).expect("sealed candidate");
+        let (fragment, rejected, partial) =
+            take_authorized_reasoning_coverage(&mut prepared, true, "opencode", Some("ses_cov2"))
+                .expect("candidate remains separate");
+        assert!(fragment.is_none());
+        assert!(!rejected);
+        assert!(partial);
+        let (_, disposition, permit) =
+            ReasoningSourceDisposition::from_prepared_authorized_source_with_partial_permit(
+                prepared,
+                true,
+                TRANSCRIPT_READ_HARD_CAP_BYTES,
+                "opencode",
+                "capture",
+                Some("ses_cov2"),
+            )
+            .expect("sealed source association");
+        assert!(matches!(
+            disposition,
+            ReasoningSourceDisposition::OpenCodeCandidate(_)
+        ));
+        assert!(!disposition.has_capture_consumer());
+        assert!(permit.is_none());
+    }
+
+    fn cov2_classify_part(
+        part: serde_json::Value,
+        classic: bool,
+    ) -> OpenCodeCoverageClassification {
+        let message = if classic {
+            serde_json::json!({"info":{"id":"msg_cov2","role":"assistant"},"parts":[part]})
+        } else {
+            serde_json::json!({"id":"msg_cov2","type":"assistant","content":[part]})
+        };
+        classify_opencode_coverage_source(
+            serde_json::to_vec(&serde_json::json!({"info":{"id":"ses_cov2"},"messages":[message]}))
+                .expect("synthetic export"),
+        )
+    }
+
+    #[test]
+    fn cov2_visible_only_classification() {
+        for classic in [false, true] {
+            let result = cov2_classify_part(
+                serde_json::json!({"id":"prt_cov2","type":"reasoning","text":"visible 中文"}),
+                classic,
+            );
+            let OpenCodeCoverageClassification::Parsed(source) = result else {
+                panic!("closed visible source must classify");
+            };
+            assert!(!source.partial);
+            assert!(prepared_source_is_ordinary_projection(&source.prepared));
+            assert_eq!(source.source_session.as_str(), "ses_cov2");
+            assert_eq!(source.visible_parts.len(), 1);
+            let part = &source.visible_parts[0];
+            assert_eq!(part.source_message.as_str(), "msg_cov2");
+            assert_eq!(part.message_ordinal, 0);
+            assert_eq!(part.source_part.as_str(), "prt_cov2");
+            assert_eq!(part.part_ordinal, 0);
+            assert!(matches!(&part.record, SemanticRecord::Reasoning {
+                provider: ReasoningProvider::OpenCode,
+                source_kind: Some(ReasoningSourceKind::Reasoning), text,
+            } if text.as_str() == "visible 中文"));
+            assert!(
+                serde_json::to_string(&part.record).is_err(),
+                "unredacted typed text must retain its serialization barrier"
+            );
+            assert!(!format!("{:?}", part.record).contains("visible 中文"));
+
+            for text in ["", " \n\t"] {
+                let result = cov2_classify_part(
+                    serde_json::json!({"id":"prt_empty","type":"reasoning","text":text}),
+                    classic,
+                );
+                let OpenCodeCoverageClassification::Parsed(source) = result else {
+                    panic!("empty readable source remains explicit partial");
+                };
+                assert!(source.partial);
+                assert!(source.visible_parts.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn cov2_partial_source_keeps_independent_visible_part() {
+        for unknown_root in [false, true] {
+            let mut source = serde_json::json!({"info":{"id":"ses_mixed"},"messages":[
+                {"id":"m","type":"assistant","content":[
+                    {"id":"good","type":"reasoning","text":"readable"},
+                    {"id":"bad","type":"reasoning","text":"PRIVATE_CANDIDATE","state":{"signature":"PRIVATE_CANDIDATE"}}]}]});
+            if unknown_root {
+                source["unknown_root"] = serde_json::json!("PRIVATE_METADATA");
+            }
+            let OpenCodeCoverageClassification::Parsed(result) = classify_opencode_coverage_source(
+                serde_json::to_vec(&source).expect("synthetic mixed source"),
+            ) else {
+                panic!("known structure retains safe visible data with a partial flag");
+            };
+            assert!(result.partial);
+            assert_eq!(result.visible_parts.len(), 1);
+            assert_eq!(result.visible_parts[0].source_part.as_str(), "good");
+            assert!(
+                matches!(&result.visible_parts[0].record, SemanticRecord::Reasoning { text, .. }
+                if text.as_str() == "readable")
+            );
+        }
+    }
+
+    #[test]
+    fn cov2_candidate_and_unsupported_partial() {
+        for classic in [false, true] {
+            for extra in [
+                serde_json::json!({"state":{"signature":"CANDIDATE_CANARY"}}),
+                serde_json::json!({"state":{"redactedData":"CANDIDATE_CANARY"}}),
+                serde_json::json!({"state":{"reasoningEncryptedContent":"CANDIDATE_CANARY"}}),
+                serde_json::json!({"originProof":{"nonce":"CANDIDATE_CANARY"}}),
+                serde_json::json!({"state":{}}),
+                serde_json::json!({"state":null}),
+                serde_json::json!({"providerMetadata":{"signature":"CANDIDATE_CANARY"}}),
+                serde_json::json!({"extra":"CANDIDATE_CANARY"}),
+                serde_json::json!({"time":{"unexpected":"CANDIDATE_CANARY"}}),
+                serde_json::json!({"sessionID":"foreign_session"}),
+                serde_json::json!({"messageID":"foreign_message"}),
+            ] {
+                let mut part = serde_json::json!({"id":"prt_cov2","type":"reasoning","text":"CANDIDATE_CANARY"});
+                part.as_object_mut()
+                    .expect("object")
+                    .extend(extra.as_object().expect("extra object").clone());
+                match cov2_classify_part(part, classic) {
+                    OpenCodeCoverageClassification::Parsed(source) => {
+                        assert!(source.partial);
+                        assert!(
+                            source.visible_parts.is_empty(),
+                            "candidate cannot become typed text"
+                        );
+                    }
+                    OpenCodeCoverageClassification::Partial(_) => {}
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cov2_malformed_duplicate_unknown_partial() {
+        for bytes in [
+            b"{".as_slice(),
+            br#"{"info":{"id":"ses_cov2"},"messages":[],"messages":[]}"#,
+            br#"{"info":{"id":"ses_cov2"},"messages":[{"id":"m","type":"assistant","content":[{"id":"p","type":"reasoning","text":"a","text":"b"}]}]}"#,
+            br#"{"info":{"id":"ses_cov2"},"messages":{}}"#,
+            br#"{"messages":[]}"#,
+            br#"{"info":{"id":"ses_cov2"},"messages":[{"id":"m","type":"assistant","parts":[],"content":[]}]}"#,
+            br#"{"info":{"id":"ses_cov2"},"messages":[{"id":"m","type":"assistant","content":[{"id":"p","type":"reasoning","text":"a"},{"id":"p","type":"reasoning","text":"b"}]}]}"#,
+            br#"{"info":{"id":"ses_cov2"},"messages":[{"id":"m","type":"assistant","content":[{"id":"p","type":"reasoning","text":"a"}]},{"id":"m","type":"assistant","content":[{"id":"q","type":"reasoning","text":"b"}]}]}"#,
+            br#"{"info":{"id":"ses_cov2"},"messages":[{"id":"m","type":"unknown","content":[]}]}"#,
+        ] {
+            match classify_opencode_coverage_source(bytes.to_vec()) {
+                OpenCodeCoverageClassification::Partial(_) => {}
+                OpenCodeCoverageClassification::Parsed(source) => {
+                    assert!(source.partial);
+                    assert!(source.visible_parts.is_empty());
+                }
+            }
+        }
+        for bytes in [
+            vec![b' '; TRANSCRIPT_READ_HARD_CAP_BYTES as usize + 1],
+            "[".repeat(MAX_JSON_DEPTH + 2).into_bytes(),
+            format!("[{}]", "0,".repeat(OPENCODE_CANON_MAX_NODES)).into_bytes(),
+        ] {
+            assert!(matches!(
+                classify_opencode_coverage_source(bytes),
+                OpenCodeCoverageClassification::Partial(ReasoningFieldError::SourceTooLarge)
+            ));
+        }
+        let parts = (0..=MAX_VISIBLE_REASONING_PARTS).map(|index| {
+            serde_json::json!({"id":format!("p{index}"),"type":"reasoning","text":"visible"})
+        }).collect::<Vec<_>>();
+        let source = serde_json::to_vec(&serde_json::json!({
+            "info":{"id":"ses_cap"},"messages":[{"id":"msg_cap","type":"assistant","content":parts}]
+        }))
+        .expect("synthetic bounded part-count input");
+        assert!(matches!(
+            classify_opencode_coverage_source(source),
+            OpenCodeCoverageClassification::Partial(ReasoningFieldError::SourceTooLarge)
+        ));
+    }
 
     #[test]
     fn og26_structural_preflight_never_calls_parser_over_budget() {
@@ -2793,17 +3262,6 @@ mod tests {
             assert!(!ordinary.contains("originProof"));
             assert!(!ordinary.contains("\"state\""));
         }
-    }
-
-    #[test]
-    fn og26_bounded_ordinary_writer_rejects_expansion() {
-        let mut writer = BoundedOrdinaryWriter {
-            bytes: Zeroizing::new(Vec::new()),
-            cap: 4,
-        };
-        writer.write_all(b"safe").expect("exact output cap");
-        assert!(writer.write_all(b"extra").is_err());
-        assert_eq!(writer.into_bytes(), b"safe");
     }
 
     fn prepare(source: &str) -> Result<(Vec<u8>, ReasoningSourceState), ReasoningFieldError> {

@@ -12,7 +12,7 @@ use std::{
 use anyhow::{Context, Result, anyhow, bail};
 use ring::rand::{SecureRandom, SystemRandom};
 
-use super::key::{
+use super::{
     CAPTURE_DEDUP_SECRET_BYTES, CAPTURE_DEDUP_SECRET_DIR, CAPTURE_DEDUP_SECRET_FILE,
     ensure_capture_dedup_mutation_deadline,
 };
@@ -174,7 +174,7 @@ mod tests {
         let keys: Vec<_> = workers.into_iter().map(|t| t.join().unwrap()).collect();
         assert!(keys.iter().all(|key| *key == keys[0]));
         assert_eq!(
-            super::super::key::load_capture_dedup_secret(root.path()).unwrap(),
+            super::super::load_capture_dedup_secret(root.path()).unwrap(),
             keys[0]
         );
         let private = root.path().join("private");

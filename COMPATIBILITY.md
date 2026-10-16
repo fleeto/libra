@@ -1,5 +1,7 @@
 # Libra Compatibility Matrix
 
+> **Coverage-v2 source version:** The coverage-v2 descriptions below refer to the Libra 0.30.50 source line and later compatible versions. This is not a stable-release announcement; check the [official releases](https://github.com/libra-tools/libra/releases) and `libra --version` for installed support. Other sections retain their own version requirements. Coverage-v2 does not prove native origin or authorize native reasoning artifacts.
+
 > 4 tiers: `supported` / `partial` / `unsupported` / `intentionally-different`
 > Source of truth: top-level `Commands` variants in [`src/cli.rs`](src/cli.rs).
 
@@ -893,12 +895,15 @@ existing metadata-only fallback; the 16 MiB export cap is unchanged.
 
 ### Private native-origin issuer registration (macOS)
 
-Ordinary `agent rpc trust opencode` pins an exporter binary; it does not register an issuer or prove native reasoning. The native path requires the separately installed, reviewed `2.0.26-libra-native.1` macOS arm64 producer. Enable the OpenCode observer with the actual Libra executable, then prepare a fresh owned installation using that private bundle's initialization instructions. Global OpenCode remains independent.
+Ordinary `agent rpc trust opencode` pins an exporter binary; it does not register an issuer or prove native reasoning. The historical native path requires a separately installed, reviewed macOS arm64 `2.0.26-libra-native.1` or `.2` producer and its exact frozen v1 observer recipe, rendered for the current canonical Libra executable path. Prepare that observer using the reviewed private bundle's instructions in an isolated owned setup. Global OpenCode remains independent.
+
+The legacy v1 observer is distinct from the current ordinary v2 observer. It lacks per-directory filtering: never use it with a shared multi-project OpenCode server. Prefer current ordinary capture; any legacy use must isolate one repository per server. `agent doctor`/observer status reports this old v1 plugin as not installed because current detection requires the v2 header. `libra agent enable --agent opencode` replaces a managed v1 plugin with v2 and breaks the old private recipe match. Generic reinstall or `agent enable` is therefore not a repair for legacy issuer registration. This compatibility fix does not change the ordinary per-directory observer or add a legacy installer.
+
+The following registration example assumes the exact reviewed historical observer is already in place; it deliberately omits `agent enable`. The published-binary compatibility gate uses a fresh owned repository, HOME, XDG directories and epoch-0 registry with the original `.2` public descriptor and issuer/key unchanged. Only the measured producer's registration challenge may access that key. It runs no Session, account/model request or OpenCode server, and revokes the fresh registry during cleanup. A successful gate proves registration compatibility only, not Source A, a current `.3` producer or real native-field archival.
 
 ```sh
 libra agent rpc trust --dir /absolute/approved-private/bin
 libra agent rpc trust opencode
-libra agent enable --agent opencode
 libra agent rpc trust opencode \
   --native-origin-manifest /absolute/private-installation/installation.json \
   --native-origin-expected-epoch 0
@@ -910,9 +915,12 @@ The public descriptor must be a regular, non-symlink `installation.json`, owned 
 
 The actual producer must successfully answer a new random, domain-separated Ed25519 challenge within 30 seconds, with at most 4096 stdout bytes and bounded captured stderr. Child output is withheld on failure. After the challenge, one write transaction rechecks current exporter trust and trusted directories, performs expected-epoch CAS, and writes one complete registry row. Duplicate rows, case aliases, encryption, malformed records and size overflow refuse without repair. Limits are 64 KiB and 128 issuer records; revoked history is never removed to make space.
 
-The catalog also contains one separately measured `2.0.26-libra-native.2` macOS arm64 candidate (build `78c1f19e9249da8d0143a079f90aec9a`, binary SHA-256 `28174e893a2b63b75f58af4c77212747f6e1eebce5dd0252cfe64847b342615c`). It adds only the exact first-party `anthropic-messages` endpoint `https://api.anthropic.com/v1/messages?beta=true` under endpoint descriptor v2; receipt and attestation domains stay v1. Its own fresh installation/key, measured binary, explicit trust and epoch-checked registration are required. Existing `.1` records remain valid history, and rotation makes the old active key verify-only. A mismatched protocol/endpoint pair, compatible provider, proxy or changed URL is rejected. `.1` remains the current local content acceptance baseline; `.2` has no real native-field archive acceptance yet. Account/model observations are manual macOS checks outside CI; `reasoningEncryptedContent` is deferred.
+The catalog also contains one separately measured `2.0.26-libra-native.2` macOS arm64 candidate (build `78c1f19e9249da8d0143a079f90aec9a`, binary SHA-256 `28174e893a2b63b75f58af4c77212747f6e1eebce5dd0252cfe64847b342615c`). It adds only the exact first-party `anthropic-messages` endpoint `https://api.anthropic.com/v1/messages?beta=true` under endpoint descriptor v2; receipt and attestation domains stay v1. Its own fresh installation/key, measured binary, explicit trust and epoch-checked registration are required. Existing `.1` records remain valid history, and rotation makes the old active key verify-only. A mismatched protocol/endpoint pair, compatible provider, proxy or changed URL is rejected. `.1` remains the frozen historical NPR-18 harness baseline; `.2` has no real native-field archive acceptance yet. Account/model observations are manual macOS checks outside CI; `reasoningEncryptedContent` is deferred.
 
 A new independent installation key becomes active; earlier active keys become verify-only. Existing issuer keys cannot be reactivated by registration or ordinary binary re-trust. Historical records remain immutable. Successful registration proves installation key/binary association only. Receipt signature, current issuer permission, source coordinates and original native field checks remain required before any archive admission; unknown or unproven sessions stay partial. JSON registration output includes the transient current Libra executable SHA256 for local audit; this measurement is neither a signed policy field nor a pinned historical Libra version.
+
+An unapproved row manually created against the unreleased development `cd53…` observer policy remains rejected. Preserve and back up the entire registry and repository, and suspend affected native registration/archive operations pending a separate reviewed repair. Do not delete rows, automatically migrate them or treat them as approved. The bounded compatibility checks do not establish that every user repository has been scanned; supported ordinary capture can be used in a fresh isolated workspace without claiming the affected repository is repaired.
+
 
 
 ### OpenCode native-origin rotation and revocation
@@ -1036,9 +1044,9 @@ shape and SHA-256 golden are documented in
 [`coverage-v2.md`](docs/development/tracing/coverage-v2.md). The existing
 `safe_turn_projection`, `NormalizedTurn` wire form, public `agent graph`
 schema v1, default `agent list` schema v1, and explicit `agent list`
-schema v2 remain unchanged. This card exposes an internal encoder only;
-live/import writers, database claims, replay and reader behavior are not yet
-switched to coverage v2. Neither visible text nor a same-named provider field
+schema v2 remain unchanged. COV2-01 introduced the internal encoder;
+Libra 0.30.50 includes COV2-11 runtime selection and version-preserving claims/replay.
+See Coverage-v2 capture below for the first-stable-release boundary. Neither visible text nor a same-named provider field
 grants native origin; unproved OpenCode candidates remain partial and are not
 archived. OpenCode Session and model acceptance remains macOS-local, outside
 CI.
@@ -1388,3 +1396,198 @@ fields, complete reasoning, real idle.error failures, automatic terminal
 completion or full-suite acceptance. Real OpenCode Session/account/model checks
 run locally on macOS and stay outside CI. Metadata-only, empty output and skipped
 checks do not count as content acceptance.
+
+
+### COV2-08 同版本 pending 恢复边界
+
+外层 v2 恢复保留同一已提交 artifact 的原有序 `(coverage_schema_version, logical_turn_key)`、原 bytes/MAC 和 typed deferred source；不按 discovery header、裸 turn key 或错误文本猜测版本。V1 loader 的临时错误或总 deadline 到期直接稍后重试，不降为其它版成功。早期 redacted payload 的认证关联在 sidecar 被丢弃时仍阻止普通落库；完整 sidecar 也只代表本地完整性，不能生成 native 来源。现有 ordinary versioned direct writer 与 verified ordinary partial 的 direct-only 规则保持，未获 native 证明的保留 payload 不降成 ordinary checkpoint。
+
+catalog 在同一 writer transaction 复查 alias、scope/workspace、tombstone、receipt/source/marker 与每个版本的 owner/fence/revision；manual repair 的 one-shot/audit 失败仍全回滚。marker 登记后由原 closed checkpoint owner 重新认证原 bytes/MAC 及 COV2-25 原始成员，lower issuer 仍独立判定 native；各版本 identity 从本次 lower 结果重新计算并精确对拍，再用 store-owned permit 与原 versioned claims/refCAS 一起提交。已提交后的中断重试只在原 receipt、source、exact versioned revision 和新鲜 native identity 核对通过后做 no-write settlement；不能只看 checkpoint 存在或把 committed claims 重新要求为 reserved。失败/deadline/cleanup_pending 保留可修复原证据，不 ACK。
+
+这是本地机制路径，不增加 OpenCode Session/model CI 或证明真实 Source A；同裸 key 跨 schema 的 native pending 在父 OG-29 正例与真实 Source A 前仍 fail closed。COV2-08 的正式验收/家族 C/D 以计划实际收据为准。
+
+
+<!-- Compatibility anchor for earlier links; not a release-status assertion. -->
+<a id="versioned-prepared-ordinary-import-cov2-05-unreleased"></a>
+
+### Versioned prepared ordinary import (COV2-05, Libra 0.30.50)
+
+The library entry `import_prepared_with_coverage_versions` accepts prepared ordinary turns, an index-aligned coverage version sidecar, a nonzero budget of at most 300 seconds and an optional absolute path to a caller-trusted Libra binary. It checks input size/depth, chronology, privacy-v2 ownership, timestamps and redaction before any lease. The capture scope must use the connected database repository ID, and the absolute storage root must contain that same SQLite database; a mismatched database/storage pair rejects before object writes. Newly matched sensitive content is rejected. This explicit entry alone may choose v2 for the four ordinary record kinds. COV2-11 separately activates typed runtime selection: actual capture/import chooses v2 only when a turn contains supported typed Reasoning, and ordinary turns still choose v1. It neither constructs typed/native reasoning nor proves OpenCode Source A.
+
+Sidecars travel with their turns through sorting. One request rejects unknown versions, length mismatches, repeated bare keys (including across versions), repeated ordinals and missing chronology before writing. Separate requests may explicitly commit independent v1/v2 claims for the same ordinary key once each. An authenticated native association in the other schema still rejects; a version sidecar never supplies native provenance.
+
+Import reservation and binding retain the exact `(coverage_schema_version, logical_turn_key)` through the opaque typed checkpoint adapter. Its prebound versioned branch is private to that adapter; marker generation, scope/deadline, claim owner/fence/revision, import lifecycle/identity and ref CAS remain transaction fences. Failed binding constructs no imported object; stale markers cannot complete the cursor. Committed-source lookup uses batches of at most 64 requested tuples rather than loading session history. Every requested tuple for an ordinal must be committed before the contiguous cursor can pass it.
+
+All-v1 source digest and import identity preimages retain frozen legacy bytes. A source containing v2 uses the explicit `libra-agent-import-source-coverage-v2\0` hash domain with per-turn versions. Privacy identity version is independent of coverage version; mutable privacy-v1 writes stay rejected. One source retains one import identity row whose committed digest/cursor describe its latest request; exact versioned claims, rather than that scalar digest, provide idempotence when requests alternate versions. The library API and its lower gate/store seams add no CLI flags or website command behavior. Pure normalized-turn/temp-DB tests run without an OpenCode Session/exporter/model; actual account capture remains local to macOS, outside CI.
+
+The explicit binary selects only the existing checkpoint object-I/O helper within this import task. Selection checks availability and Unix containment before acquiring any identity lease, restores on return/error/cancellation, and cannot affect other tasks, source readers, discovery, preparation or index repair. `None` uses the existing `helper_program()` (main registration in production; the established private override in unit tests); no host executable, PATH or environment fallback is inferred. This is caller-authorized execution configuration, not binary attestation or Source A. The shared fixed helper argument also serves VerifyReasoningArtifacts in cloud/doctor; those operations are unreachable and forbidden within this ordinary-only scope. Production VerifySnapshot uses the caller-trusted helper response; write OIDs are compared to their expected content, while snapshot verification is not an independent binary/source proof.
+
+macOS real DB acceptance builds the same-source Libra binary before the four exact tests and records its SHA256 before and after. Lib tests locate that binary only in cfg(test) code; the external direct DB test supplies compile-time CARGO_BIN_EXE_libra, including production VerifySnapshot. Existing Unix containment limits these object-helper DB paths to Unix; other platforms reject this opt-in before lease mutation. Pure legacy gold remains portable. Windows compilation/security and four-platform release checks remain required; Linux functional acceptance follows separately.
+
+<!-- Compatibility anchor for earlier links; not a release-status assertion. -->
+<a id="versioned-graphdoctor-readers-cov2-09-unreleased"></a>
+
+## Versioned graph/doctor readers (COV2-09, Libra 0.30.50)
+
+The graph reader decodes each selected claim and revision through the existing
+closed `CoverageSchemaVersion` enum before joining or skipping unmatched rows.
+Both revision history and current claims use `(logical_turn_key, coverage_schema_version)`;
+v1 and v2 rows sharing a key/checkpoint remain distinct. The public graph JSON
+schema remains 1. Unknown stored versions return the existing
+`LBR-AGENT-009` error with upgrade/doctor guidance, without an indexed-success
+response or candidate content. No version coercion, catalog mutation or blob
+read is added. An unmatched revision is still validated before it can be ignored.
+
+Doctor already joins conflicts by both key and version; its production code is
+unchanged. Each conflict remains a distinct content-free, manual-required finding
+in JSON and human output, with or without `--repair`. Synthetic catalog fixtures
+check version separation, envelope stability, unknown-version failure and raw
+identity/content canaries. They do not run an OpenCode Session, exporter or model,
+and confer no native-origin proof. These reader guarantees require Libra 0.30.50 or later; upgrading the installed
+binary is necessary before relying on them.
+
+<!-- Compatibility anchor for earlier links; not a release-status assertion. -->
+<a id="inert-opencode-visible-reasoning-classification-cov2-06-unreleased"></a>
+
+## Inert OpenCode visible reasoning classification (COV2-06, Libra 0.30.50)
+
+`classify_opencode_coverage_source` is a crate-private, pure in-memory parser
+seam with no capture/live/import callers before COV2-11. The explicit COV2-10
+pure-memory preview may consume it. It consumes the original
+bounded export before state/proof erasure. Closed native/classic assistant
+reasoning parts with nonempty visible text become gated typed Reasoning
+records, retaining source message/part IDs and ordinals. Duplicate or missing
+coordinates, contradictory session/message references, empty/whitespace text,
+state/proof-bearing or unsupported parts remain partial without a typed record
+for that part. Malformed/duplicate-key/unknown export structure and budget
+failures return payload-free `Partial(error)` when parsing cannot continue.
+Safely retained parts with unsupported siblings instead return
+`Parsed(source)` with `source.partial = true`; neither case permits cursor
+completion from unproved content. A separate valid visible part never clears
+a partial flag.
+
+The source/tree byte, node and depth budgets run before materialization; at
+most 4096 visible parts are emitted. The existing reviewed preprocessor runs
+as a second bounded pass to preserve its closed envelope classification and
+owning candidate separation. Both parse passes are bounded; this is not a new
+unbounded scan. IDs and the original parse tree wipe on drop. The carrier has
+no Clone/Serialize/Debug, and ProviderVisibleText retains its serialization
+barrier and content-free Debug. It grants neither native provenance, an issuer,
+an opaque artifact, nor capture authority. COV2-10 performs typed redaction in
+the explicit preview before COV2-11 connects any persistence path; the retained
+ordinary projection is unredacted input until that bounded redaction stage.
+
+Actual production normalization is unchanged: reasoning keeps the turn
+incomplete, contains no typed Reasoning record and selects v1. The COV2-06
+contract test uses a complete ordinary control to distinguish that decision
+from unrelated malformed input, and pins the absence of the new parser/preview from
+live/import and the actual authorized capture entry. The separate COV2-05 ordinary versioned library
+API remains available. These tests use synthetic buffers only, with no Session,
+exporter or model; no user-visible command or website behavior changes here.
+
+
+<!-- Compatibility anchor for earlier links; not a release-status assertion. -->
+<a id="redacted-in-memory-coverage-preview-cov2-10-unreleased"></a>
+
+## Redacted in-memory coverage preview (COV2-10, Libra 0.30.50)
+
+`CaptureSnapshotService::preview_redacted_coverage_v2(agent_kind, bytes, policy)`
+accepts caller-owned memory and returns `(RedactedBytes, serde_json::Value)`.
+It opens no source, runs no exporter or model, and writes no checkpoint, claim,
+artifact or cursor. The JSON envelope remains 1, with each turn's explicit
+coverage version, digest and safe projection. This library data API grants no
+source/capture authorization, native issuer or opaque-artifact capability.
+Production live/import activation is a separate COV2-11 change; this preview
+must not replace its authorized source boundary.
+
+For OpenCode, classification precedes state/proof erasure. Original session,
+message and part coordinates are checked before redaction; text equality only
+confirms the located part. Ordinary bytes and decoded visible reasoning are
+redacted before any v2 canonical encoding, digest or safe projection. Decoded
+JSON strings are also redacted before reserialization, so JSON escape spellings
+cannot reveal a secret during canonicalization. Additional matches outside the
+visible reasoning field conservatively make the result partial. Readable parts
+retain source order alongside text and tools; they do not settle a turn without
+the normal supported completion event. Unsupported siblings keep it partial.
+Unproved state/proof candidates supply no ordinary or typed plaintext: the
+preview consumes the separated ordinary projection and destroys the owning
+sealed candidate, native and partial-permit authority. Its only retained signal
+is a boolean that makes the result partial. Candidate absence is checked using a non-secret-shaped
+canary, independently of the redactor's matching rules.
+
+Source bytes, parse depth/nodes and visible-part count remain bounded. Original
+parse trees are dropped before the preprocessor's second bounded parse. The
+redactor retains its output/working-buffer limits; those limits are not a claim
+about total process RSS. Canonical/JSON output also has a checked byte budget,
+and the optional absolute deadline is checked between stages and turns. Errors
+are payload-free. COV2-10 initially retained an ordinary Rust String.
+COV2-11 explicitly wipes `ProviderVisibleText` on drop and before redaction
+replacement, and the prepared ordinary owner uses `Zeroizing<Vec<u8>>`.
+This does not guarantee erasure of Serde scratch, allocator copies or all
+process memory. Existing Claude Code/Codex
+adapter preprocessing, ordinary bytes, v1 digest and safe projection are checked
+against their established pure-memory path. All these checks run without an
+OpenCode Session, exporter, account or model; account capture remains local to
+macOS and outside CI. No command, flag or website command behavior changes.
+
+<!-- Compatibility anchor for earlier links; not a release-status assertion. -->
+<a id="coverage-v2-capture-unreleased"></a>
+
+## Coverage-v2 capture (Libra 0.30.50)
+
+From the first stable release containing coverage-v2, OpenCode export capture
+and historical import retain supported provider-visible reasoning as typed,
+redacted turn content. Turns containing that content use coverage schema 2;
+ordinary turns keep schema 1 and their existing canonical bytes. Redaction runs
+before either digest or checkpoint projection. This does not authenticate
+`signature`, `redactedData`, or `reasoningEncryptedContent`: unproven native
+fields remain partial and cannot be archived as trusted artifacts.
+
+After upgrading, an interrupted action whose checkpoint was already committed
+with v1 (or an empty legacy revision set) first settles that existing receipt
+without adding claims or rewriting its checkpoint. A subsequent **new action**
+may capture the visible reasoning once under v2; repeated capture then deduplicates.
+The old v1 objects, digests, and claims remain readable and unchanged.
+
+If source classification is rejected after that session already has v2 claims,
+the entire new capture/import attempt stops, including new ordinary turns.
+Its pending receipt/export work stays retryable; no fallback claims or success
+acknowledgment are created. An unchanged over-limit or unsupported source can
+keep that session blocked. Keep the recorded data, inspect `libra agent doctor`,
+and start a new OpenCode session to continue supported capture. A candidate or
+unverified reasoning source cannot turn this failure into complete coverage.
+These changes add no command flags and require Libra 0.30.50 or later. OpenCode Session/exporter/model acceptance runs locally on
+macOS; it is not a CI integration test.
+
+<!-- Compatibility anchor for earlier links; not a release-status assertion. -->
+<a id="macos-local-session-acceptance-cov2-12-unreleased"></a>
+
+## macOS local Session acceptance (COV2-12, Libra 0.30.50)
+
+Controlled-exporter Session acceptance is an operator-local, ignored gate under the existing `test-live-agent` target feature. The macOS harness uses the existing Required Seatbelt server/client protocol, a canonical isolated repository/store, and registered exporter provenance. A missing containment or store prerequisite fails the manual test; it must not return success before its assertions. The live and import gates compare persisted semantic canonical bytes and actual claim digests against the independently pinned COV2-11 gold, then check repeated-delivery idempotence. This does not expose the private runtime canonical buffer; the binding relies on digest collision resistance. Native idle closes the live turn, while the current import Session remains active: the fixture expects live Complete and import Incomplete without changing the canonical digest or claiming to fix deferred import-terminal handling. The failed-export gate checks its intended failure path and zero completed writes.
+
+The scripted extraction fixture is named `opencode_extraction_no_consumer_keeps_pending_without_checkpoint`: both its original PARTIAL input and broken-input delivery must leave zero completed checkpoints and pending receipts in the real temporary database. The old `opencode_extraction_failure_continues_checkpoint` failure remains historical evidence; it does not authorize a consumer-policy change. COV2-12 covers its three new macOS Session cases and this repaired fixture. COV2-16/17 separately audit the other 21 inherited test bodies.
+
+These controlled fixtures do not prove native Source A or the three native fields. They require neither an account nor a model call, and Session/Checkpoint integration is not selected by CI. Pure parser, cryptographic, sandbox-unit and static guards remain eligible for CI. The manual commands and exact-selector requirements are in `docs/development/integration/integration-test-plan.md`. No public command, flag, schema, release version or installed OpenCode changes in this card.
+
+
+<!-- Compatibility anchor for earlier links; not a release-status assertion. -->
+<a id="candidate-live-session-acceptance-cov2-15-unreleased"></a>
+
+## Candidate live Session acceptance (COV2-15, Libra 0.30.50)
+
+Exporter trust authenticates the local executable and export identity; it does not establish native origin for an OpenCode reasoning part. A proof/state-bearing part remains a candidate until the producer proof is verified. The live path must classify that source as partial, keep candidate content out of ordinary and typed text, persisted checkpoint objects, logs and public errors, and mint neither a native issuer nor an opaque reasoning artifact. A source without a ready consumer can leave its receipt pending and return the existing content-free hook error; that refusal is not a successful empty checkpoint. Safe retained ordinary content, where permitted by the existing partial consumer, does not promote the removed candidate.
+
+The operator-local macOS case is `cov2_macos_fake_exporter_candidate_live_partial_no_plaintext`. It uses the registered controlled exporter through the actual Required sandbox client and live hook, with explicit assertions for each sink. It requires `test-live-agent`, `--ignored --exact --nocapture --test-threads=1`; a missing prerequisite or zero selected tests is UNRUN. Its static companion is `cov2_candidate_live_session_case_is_ignored_and_non_skippable`. These gates use synthetic candidate content and grant no native/Source A evidence. Session capture cases stay out of CI; parser, crypto, sandbox unit and static guards can still run there. Historical import candidate acceptance belongs to COV2-18.
+
+
+<!-- Compatibility anchor for earlier links; not a release-status assertion. -->
+<a id="candidate-historical-import-acceptance-cov2-18-unreleased"></a>
+
+## Candidate historical import acceptance (COV2-18, Libra 0.30.50)
+
+Historical OpenCode import applies its own source, cursor and object-write boundaries. Exporter trust does not prove native origin for a proof/state-bearing reasoning part. Import must retain the partial classification, exclude candidate content from ordinary and typed text, persisted import/checkpoint objects, logs and public errors, and grant neither a native issuer nor an opaque reasoning artifact. The existing consumer decides whether safe ordinary partial content can be retained or the source must be refused; live capture acceptance does not establish import acceptance.
+
+The operator-local macOS case is `cov2_macos_fake_exporter_candidate_import_partial_no_plaintext`, with `test-live-agent` and `--ignored --exact --nocapture --test-threads=1`. Its static companion is `cov2_candidate_import_session_case_is_ignored_and_non_skippable`. The case must execute the trusted controlled exporter through the actual historical import path and inspect the actual import outputs and stores independently. A missing prerequisite, early success return or zero selected tests is UNRUN. Synthetic candidates provide no native/Source A proof. Session capture remains operator-local; CI can run parser, crypto, sandbox unit and static guards. COV2-15 remains the separate live-path acceptance.
+
+At the current import source gate, proof/state candidates are refused before a Session, cursor or checkpoint is published. The private preparation helper clears its environment and discards stderr. Its internal partial warning is therefore not a public import diagnostic. Local acceptance couples a successful ordinary import control and a same-input data-only partial comparison to the actual content-free source refusal, zero published content and a static check of the pre-projection rejection route; it does not claim direct observation of a private partial field.

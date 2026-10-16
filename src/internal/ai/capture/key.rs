@@ -33,7 +33,10 @@ use serde_json::value::RawValue;
 use thiserror::Error;
 
 #[cfg(windows)]
-use super::key_windows::{CaptureDedupPrivateDir, load_capture_dedup_secret_windows};
+#[path = "key_windows.rs"]
+mod windows;
+#[cfg(windows)]
+use self::windows::{CaptureDedupPrivateDir, load_capture_dedup_secret_windows};
 use crate::internal::ai::{
     capture::{
         checkpoint::AuthenticatedPendingEnvelope,

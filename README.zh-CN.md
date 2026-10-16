@@ -26,6 +26,16 @@ Libra 的对象格式和传输协议兼容 Git，可融入现有开发流程。�
 
 ---
 
+
+> **coverage-v2 源码版本：** 下文 coverage-v2 说明对应 Libra 0.30.50 源码线及后续兼容版本，不宣告稳定版已发布；可用性以[官方发布](https://github.com/libra-tools/libra/releases)及 `libra --version` 为准。其它章节保留各自的版本要求；coverage-v2 不证明 native 来源，也不准入原生 reasoning artifact。
+
+Libra 0.30.50 的 coverage-v2 采集会保留脱敏后的 OpenCode 可读
+reasoning typed turn，普通 v1 字节保持不变。中断的旧动作先结算原回执，之后的新动作
+可一次性重采 reasoning。如果已有 v2 历史的 Session 来源被拒绝，采集会停止；请使用
+`libra agent doctor` 检查并新建 Session。native 证明字段仍需独立来源验证，详见
+[采集命令文档](docs/commands/zh-CN/agent.md#coverage-v2-采集libra-03050)。
+
+
 ## 核心差异
 
 | 能力 | 传统版本控制（Git） | Libra |
@@ -81,18 +91,25 @@ libra init --from-git-repository /path/to/existing/git/repo
 ### 使用 Agent 捕获
 
 ```bash
-# 为 Codex 启用捕获钩子，然后检查安装状态
-libra agent enable --agent codex
+# 登记 OpenCode exporter 信任（请按实际安装位置调整目录）
+libra agent rpc trust --dir "$HOME/.opencode/bin"
+libra agent rpc trust opencode
+
+# 安装当前仓库的捕获插件，然后检查安装状态
+libra agent add opencode
 libra agent list
 libra agent doctor
 
-# 正常使用你的 Agent 工具——Libra 会自动捕获会话和检查点
-codex
+# 在当前仓库中启动 OpenCode，完成一轮对话后退出
+opencode
 
-# 查看已捕获的会话
+# 查看已捕获的会话和检查点
 libra agent session list
 libra agent checkpoint list
 ```
+
+如果实际安装位置与上面的路径不同，请使用 OpenCode 可执行文件所在的目录。
+安装插件后再启动 OpenCode；`--pure` / `OPENCODE_PURE=1` 会禁用捕获。
 
 > 查看 [Agent 命令指南](docs/commands/zh-CN/agent.md)，了解支持的 Agent、提供商配置和会话管理。
 
@@ -153,7 +170,7 @@ Libra 使用兼容 Git 的对象、索引和 pack 格式，支持与 GitHub、Gi
 
 当前支持 **Claude Code**、**Codex** 和 **OpenCode** 捕获。运行 `libra agent list --schema-version 2 --json` 可查看安装状态和导入/导出能力。
 
-当前 macOS 普通 OpenCode 捕获基线为官方 **OpenCode 2.0.29** 与 **Libra 0.30.49**。请按 [exporter 信任与捕获插件配置](docs/commands/zh-CN/agent.md)完成准备；`opencode --pure` 会禁用捕获。安全的普通检查点会丢弃不支持的 reasoning state 及其关联文本/时间，状态仍为 `Unproven` / `Partial`。含不支持 reasoning state 的历史导入仍返回 `LBR-AGENT-020`。该普通路径不准入原生 `signature`、`redactedData` 或 `reasoningEncryptedContent` artifact，也不证明完整 reasoning 覆盖；原生来源证明仍未通过。
+当前 macOS 普通 OpenCode 捕获基线为官方 **OpenCode 2.0.29** 与 **Libra 0.30.49**。Session 目录过滤、受支持包管理器启动器中的原生可执行文件选择及 metadata-only 空导出警告需要 **Libra 0.30.50 或后续版本**。请按 [exporter 信任与捕获插件配置](docs/commands/zh-CN/agent.md)完成准备；`opencode --pure` 会禁用捕获。安全的普通检查点会丢弃不支持的 reasoning state 及其关联文本/时间，状态仍为 `Unproven` / `Partial`。含不支持 reasoning state 的历史导入仍返回 `LBR-AGENT-020`。该普通路径不准入原生 `signature`、`redactedData` 或 `reasoningEncryptedContent` artifact，也不证明完整 reasoning 覆盖；原生来源证明仍未通过。
 
 > 查看 [Agent 命令指南](docs/commands/zh-CN/agent.md)，了解提供商配置、捕获边界和会话管理。
 

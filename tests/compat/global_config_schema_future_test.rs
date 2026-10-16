@@ -2246,6 +2246,7 @@ fn config_callsites_do_not_use_generic_schema_wrapper() {
                         "create_database",
                         "establish_connection",
                         "establish_connection_with_busy_timeout",
+                        "establish_connection_with_lock_timeout",
                         "get_db_conn_instance_for_path",
                         "open_connection_without_schema_management",
                     ] {

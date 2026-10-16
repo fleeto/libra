@@ -4494,3 +4494,290 @@ fn agent_list_schema_v1_stays_frozen_and_v2_is_explicit() {
         describe(&unsupported)
     );
 }
+
+/// Explicit direct prepared turns exercise the actual local DB writer, with no
+/// provider process, exported Session, credentials or model response.
+#[cfg(unix)]
+#[tokio::test]
+async fn cov2_mixed_v1_v2_direct_import_idempotent() {
+    use std::collections::BTreeMap;
+
+    use libra::internal::ai::{
+        agent_import::{ImportRequest, TurnBoundary, import_prepared_with_coverage_versions},
+        capture::snapshot::{
+            CaptureSnapshotCompleteness, CaptureSnapshotProjection, CaptureSnapshotSource,
+            CaptureSnapshotSourceKind,
+        },
+        capture_scope::CaptureScope,
+        observed_agents::{Completeness, NormalizedTurn, SemanticRecord},
+    };
+
+    let fixture = ImportRepo::init();
+    let storage = fixture.repo.join(".libra");
+    let conn = Database::connect(format!("sqlite://{}", storage.join("libra.db").display()))
+        .await
+        .unwrap();
+    let scope = CaptureScope::main_for_connection(&conn).await.unwrap();
+    let turn = |key: &str, ordinal: usize| NormalizedTurn {
+        logical_turn_key: key.to_owned(),
+        ordinal,
+        completeness: Completeness::Complete,
+        started_at: None,
+        ended_at: None,
+        records: vec![SemanticRecord::User {
+            text: "fixed ordinary direct import".to_owned(),
+        }],
+    };
+    let request = |turns: Vec<NormalizedTurn>| {
+        let commitment = format!("source/hmac-v2/{}", "a".repeat(64));
+        ImportRequest {
+            agent_kind: AgentKind::Codex,
+            provider_session_id: "cov2-direct-integration".to_owned(),
+            session_id: "codex__cov2-direct-integration".to_owned(),
+            source_kind: "file".to_owned(),
+            source_id: commitment.clone(),
+            identity_schema_version: 2,
+            content_digest: "caller digest must not be trusted".to_owned(),
+            started_at: 1,
+            ended_at: 2,
+            session_state: "stopped".to_owned(),
+            stopped_at: Some(2),
+            working_dir: fixture.repo.clone(),
+            repository_identity: "not_retained:v1".to_owned(),
+            capture_scope: Some(scope.clone()),
+            source_fingerprint: commitment.clone(),
+            existing_session_fingerprint: None,
+            redaction_report: json!({"pipeline":"typed_allowlist","raw_persisted":false,"matches":[],"bytes_scanned":32,"bytes_redacted":0}),
+            transcript_snapshot: Some(CaptureSnapshotProjection {
+                completeness: CaptureSnapshotCompleteness::Complete,
+                partial_reason: None,
+                source: Some(CaptureSnapshotSource {
+                    kind: CaptureSnapshotSourceKind::ProviderFile,
+                    identity: "not_retained:v1".to_owned(),
+                    digest_sha256: Some(commitment),
+                    byte_len: Some(32),
+                }),
+                transcript_redacted_bytes: 32,
+                redaction_match_count: 0,
+                redaction_bytes_scanned: 32,
+                redaction_bytes_redacted: 0,
+            }),
+            turn_boundaries: turns
+                .iter()
+                .map(|turn| {
+                    (
+                        turn.logical_turn_key.clone(),
+                        TurnBoundary {
+                            started_at: 1,
+                            ended_at: 2,
+                        },
+                    )
+                })
+                .collect::<BTreeMap<_, _>>(),
+            turns,
+        }
+    };
+    // Reverse lexical/source order catches a sidecar left behind by sorting.
+    let v1 = vec![turn("z-first", 0)];
+    let mixed = vec![turn("z-first", 0), turn("a-second", 1)];
+    for (turns, versions, written, skipped) in [
+        (v1.clone(), vec![1], 1, 0),
+        (mixed.clone(), vec![1, 2], 1, 1),
+        (v1.clone(), vec![1], 0, 1),
+        (v1.clone(), vec![2], 1, 0),
+        (v1.clone(), vec![2], 0, 1),
+        (mixed.clone(), vec![1, 2], 0, 2),
+        (vec![mixed[1].clone(), mixed[0].clone()], vec![2, 1], 0, 2),
+    ] {
+        let summary = import_prepared_with_coverage_versions(
+            &conn,
+            &storage,
+            request(turns),
+            &versions,
+            Duration::from_secs(30),
+            Some(Path::new(env!("CARGO_BIN_EXE_libra"))),
+        )
+        .await
+        .unwrap();
+        assert_eq!(summary.checkpoints_written, written);
+        assert_eq!(summary.skipped_covered, skipped);
+        assert!(!summary.partial);
+    }
+    let rows = conn.query_all_raw(Statement::from_string(conn.get_database_backend(),
+        "SELECT logical_turn_key, coverage_schema_version, revision FROM agent_coverage_claim ORDER BY logical_turn_key, coverage_schema_version".to_owned())).await.unwrap();
+    let actual = rows
+        .iter()
+        .map(|row| {
+            (
+                row.try_get_by::<String, _>("logical_turn_key").unwrap(),
+                row.try_get_by::<i64, _>("coverage_schema_version").unwrap(),
+                row.try_get_by::<i64, _>("revision").unwrap(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        actual,
+        vec![
+            ("a-second".to_owned(), 2, 1),
+            ("z-first".to_owned(), 1, 1),
+            ("z-first".to_owned(), 2, 1)
+        ]
+    );
+    let checkpoints = conn
+        .query_all_raw(Statement::from_string(
+            conn.get_database_backend(),
+            "SELECT r.logical_turn_key, r.coverage_schema_version, c.checkpoint_id, c.tree_oid
+         FROM agent_coverage_revision r JOIN agent_checkpoint c ON c.checkpoint_id=r.checkpoint_id"
+                .to_owned(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(checkpoints.len(), 3);
+    for row in checkpoints {
+        let key: String = row.try_get_by("logical_turn_key").unwrap();
+        let version: i64 = row.try_get_by("coverage_schema_version").unwrap();
+        let id: String = row.try_get_by("checkpoint_id").unwrap();
+        let tree: String = row.try_get_by("tree_oid").unwrap();
+        let transcript = read_checkpoint_blob(&storage, &tree, &id, &["transcript", "codex.jsonl"]);
+        let projection: Value = serde_json::from_slice(&transcript).unwrap();
+        assert_eq!(projection["schema_version"], version);
+        assert_eq!(projection["logical_turn_key"], key);
+    }
+    let count = |table: &str| {
+        let query = format!("SELECT COUNT(*) AS n FROM {table}");
+        let conn = &conn;
+        async move {
+            conn.query_one_raw(Statement::from_string(conn.get_database_backend(), query))
+                .await
+                .unwrap()
+                .unwrap()
+                .try_get_by::<i64, _>("n")
+                .unwrap()
+        }
+    };
+    assert_eq!(count("agent_checkpoint").await, 3);
+    assert_eq!(count("agent_coverage_revision").await, 3);
+    let before = conn
+        .query_one_raw(Statement::from_string(
+            conn.get_database_backend(),
+            "SELECT fence_token, committed_digest FROM agent_import_identity".to_owned(),
+        ))
+        .await
+        .unwrap()
+        .unwrap();
+    let fence: i64 = before.try_get_by("fence_token").unwrap();
+    let digest: String = before.try_get_by("committed_digest").unwrap();
+    assert_ne!(digest, "caller digest must not be trusted");
+    for (turns, versions) in [
+        (vec![turn("new", 0)], vec![3]),
+        (vec![turn("new", 0)], vec![]),
+        (vec![turn("same", 0), turn("same", 1)], vec![1, 2]),
+    ] {
+        assert!(
+            import_prepared_with_coverage_versions(
+                &conn,
+                &storage,
+                request(turns),
+                &versions,
+                Duration::from_secs(30),
+                Some(Path::new(env!("CARGO_BIN_EXE_libra"))),
+            )
+            .await
+            .is_err()
+        );
+    }
+    let canary = format!("AKIA{}", "A".repeat(16));
+    let mut secret = turn("private", 0);
+    secret.records = vec![SemanticRecord::User {
+        text: canary.clone(),
+    }];
+    let error = import_prepared_with_coverage_versions(
+        &conn,
+        &storage,
+        request(vec![secret]),
+        &[2],
+        Duration::from_secs(30),
+        Some(Path::new(env!("CARGO_BIN_EXE_libra"))),
+    )
+    .await
+    .unwrap_err();
+    assert!(!format!("{error:#}").contains(&canary));
+    for budget in [Duration::ZERO, Duration::from_secs(301)] {
+        assert!(
+            import_prepared_with_coverage_versions(
+                &conn,
+                &storage,
+                request(v1.clone()),
+                &[1],
+                budget,
+                Some(Path::new(env!("CARGO_BIN_EXE_libra"))),
+            )
+            .await
+            .is_err()
+        );
+    }
+    let mut foreign_scope = request(v1.clone());
+    foreign_scope.capture_scope.as_mut().unwrap().repo_id = "different-repository".to_owned();
+    assert!(
+        import_prepared_with_coverage_versions(
+            &conn,
+            &storage,
+            foreign_scope,
+            &[1],
+            Duration::from_secs(30),
+            Some(Path::new(env!("CARGO_BIN_EXE_libra")))
+        )
+        .await
+        .is_err()
+    );
+    let foreign_storage = fixture.repo.join("foreign-storage");
+    assert!(
+        import_prepared_with_coverage_versions(
+            &conn,
+            &foreign_storage,
+            request(v1.clone()),
+            &[1],
+            Duration::from_secs(30),
+            Some(Path::new(env!("CARGO_BIN_EXE_libra")))
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        !foreign_storage.exists(),
+        "storage mismatch must reject before any filesystem writes"
+    );
+    let absent_helper = fixture.repo.join("missing-libra-helper");
+    for helper in [
+        None,
+        Some(Path::new("relative-libra")),
+        Some(absent_helper.as_path()),
+    ] {
+        let error = import_prepared_with_coverage_versions(
+            &conn,
+            &storage,
+            request(v1.clone()),
+            &[1],
+            Duration::from_secs(30),
+            helper,
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("checkpoint helper"));
+    }
+    assert_eq!(count("agent_checkpoint").await, 3);
+    assert_eq!(count("agent_coverage_claim").await, 3);
+    let after = conn
+        .query_one_raw(Statement::from_string(
+            conn.get_database_backend(),
+            "SELECT fence_token FROM agent_import_identity".to_owned(),
+        ))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        after.try_get_by::<i64, _>("fence_token").unwrap(),
+        fence,
+        "invalid input must reject before leasing"
+    );
+}

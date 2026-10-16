@@ -480,7 +480,115 @@ impl LiveReservationOutcome {
 pub(crate) struct ReasoningReservationOutcome {
     pub(crate) ordinary: LiveReservationOutcome,
     pub(crate) versioned_reserved: Vec<VersionedReservedTurnClaim>,
+    pub(crate) covered: Vec<CommittedTurnClaimSnapshot>,
     pub(crate) skipped_incomplete_reasoning: usize,
+}
+
+/// Gate-owned observation of an actual committed row. Callers cannot mint
+/// replay expectations from transcript data or a coverage count.
+pub(crate) struct CommittedTurnClaimSnapshot {
+    session_id: String,
+    version: CoverageSchemaVersion,
+    logical_turn_key: String,
+    coverage_digest: String,
+    completeness: Completeness,
+    revision: i64,
+    checkpoint_id: String,
+    fence_token: i64,
+    requires_native_replay: bool,
+}
+
+impl CommittedTurnClaimSnapshot {
+    pub(crate) fn checkpoint_id(&self) -> &str {
+        &self.checkpoint_id
+    }
+
+    pub(crate) fn version(&self) -> CoverageSchemaVersion {
+        self.version
+    }
+
+    pub(crate) fn replay_fence(&self) -> crate::internal::ai::traces::TracesCoverageFence<'_> {
+        crate::internal::ai::traces::TracesCoverageFence {
+            coverage_schema_version: self.version,
+            logical_turn_key: &self.logical_turn_key,
+            coverage_digest: &self.coverage_digest,
+            completeness: self.completeness,
+            next_revision: self.revision,
+            // Replay compares committed membership, never reservation authority.
+            owner: "committed-replay",
+            fence_token: self.fence_token,
+            reservation_state: "reserved_live",
+        }
+    }
+
+    pub(crate) async fn verify_current_with_conn(
+        &self,
+        conn: &impl ConnectionTrait,
+        session_id: &str,
+    ) -> Result<()> {
+        ensure!(
+            !self.requires_native_replay,
+            "native covered replay requires its authenticated source companion; run libra agent doctor"
+        );
+        ensure!(
+            self.session_id == session_id,
+            "covered replay session changed; run libra agent doctor"
+        );
+        let current = read_claim(conn, session_id, &self.logical_turn_key, self.version)
+            .await?
+            .context("covered replay claim is missing; run libra agent doctor")?;
+        ensure!(
+            current.state == "catalog_committed"
+                && current.coverage_digest == self.coverage_digest
+                && current.completeness == self.completeness.as_db_str()
+                && current.revision == self.revision
+                && current.checkpoint_id.as_deref() == Some(self.checkpoint_id.as_str())
+                && current.fence_token == Some(self.fence_token),
+            "covered replay claim was superseded; run libra agent doctor"
+        );
+        Ok(())
+    }
+
+    fn from_committed(
+        session_id: &str,
+        turn_key: &str,
+        version: CoverageSchemaVersion,
+        claim: ExistingClaim,
+        requires_native_replay: bool,
+    ) -> Result<Self> {
+        ensure!(
+            claim.state == "catalog_committed",
+            "covered replay row is not committed; run libra agent doctor"
+        );
+        let completeness = match claim.completeness.as_str() {
+            "complete" => Completeness::Complete,
+            "incomplete" => Completeness::Incomplete,
+            _ => bail!("covered replay completeness is invalid; run libra agent doctor"),
+        };
+        let checkpoint_id = claim
+            .checkpoint_id
+            .filter(|id| !id.is_empty())
+            .context("covered replay checkpoint is missing; run libra agent doctor")?;
+        let fence_token = claim
+            .fence_token
+            .filter(|token| *token > 0)
+            .context("covered replay fence is missing; run libra agent doctor")?;
+        ensure!(
+            claim.revision > 0,
+            "covered replay revision is invalid; run libra agent doctor"
+        );
+        Ok(Self {
+            session_id: session_id.to_owned(),
+            version,
+            logical_turn_key: turn_key.to_owned(),
+            coverage_digest: claim.coverage_digest,
+            completeness,
+            revision: claim.revision,
+            checkpoint_id,
+            fence_token,
+            requires_native_replay,
+        })
+    }
 }
 
 impl ReasoningReservationOutcome {
@@ -1586,6 +1694,28 @@ pub(crate) async fn bind_import_turn_claim_attempt_with_conn(
     checkpoint_id: &str,
     now_ms: i64,
 ) -> Result<bool> {
+    bind_import_turn_claim_attempt_for_schema_with_conn(
+        conn,
+        session_id,
+        CoverageSchemaVersion::V1,
+        claim,
+        owner,
+        checkpoint_id,
+        now_ms,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn bind_import_turn_claim_attempt_for_schema_with_conn(
+    conn: &impl ConnectionTrait,
+    session_id: &str,
+    version: CoverageSchemaVersion,
+    claim: &ReservedTurnClaim,
+    owner: &str,
+    checkpoint_id: &str,
+    now_ms: i64,
+) -> Result<bool> {
     let bound = conn
         .execute_raw(Statement::from_sql_and_values(
             conn.get_database_backend(),
@@ -1598,7 +1728,7 @@ pub(crate) async fn bind_import_turn_claim_attempt_with_conn(
                 now_ms.into(),
                 session_id.into(),
                 claim.logical_turn_key.clone().into(),
-                COVERAGE_SCHEMA_VERSION.into(),
+                version.as_i64().into(),
                 owner.into(),
                 claim.fence_token.into(),
             ],
@@ -1703,6 +1833,120 @@ pub(crate) async fn reserve_import_turn_claims_with_reasoning_until(
     deadline: CaptureCommitDeadline,
     input: ReasoningCoverageInput<'_>,
 ) -> Result<ReasoningReservationOutcome> {
+    reserve_import_turn_claims_with_reasoning_versions_until(
+        conn,
+        scope,
+        session_id,
+        turns,
+        None,
+        owner,
+        now_ms,
+        deadline,
+        input,
+        CoverageVersionAdmission::Automatic,
+    )
+    .await
+}
+
+/// Only the explicit prepared-import adapter may override automatic ordinary
+/// version selection. Existing live/export/default-import entry points do not.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn reserve_import_turn_claims_by_version_until(
+    conn: &DatabaseConnection,
+    scope: &CaptureScope,
+    session_id: &str,
+    turns: &[NormalizedTurn],
+    versions: &[i64],
+    owner: &str,
+    now_ms: i64,
+    deadline: CaptureCommitDeadline,
+    input: ReasoningCoverageInput<'_>,
+) -> Result<ReasoningReservationOutcome> {
+    ensure!(
+        versions.len() == turns.len(),
+        "import coverage version count differs from turn count"
+    );
+    reserve_import_turn_claims_with_reasoning_versions_until(
+        conn,
+        scope,
+        session_id,
+        turns,
+        Some(versions),
+        owner,
+        now_ms,
+        deadline,
+        input,
+        CoverageVersionAdmission::ExplicitOrdinaryImport,
+    )
+    .await
+}
+
+/// Private production import route: rejected history is checked under the
+/// first reservation writer lock. Empty snapshots use a read-only preflight.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn reserve_runtime_import_turn_claims_with_reasoning_until(
+    conn: &DatabaseConnection,
+    scope: &CaptureScope,
+    session_id: &str,
+    turns: &[NormalizedTurn],
+    owner: &str,
+    now_ms: i64,
+    deadline: CaptureCommitDeadline,
+    input: ReasoningCoverageInput<'_>,
+    source_rejected: bool,
+) -> Result<ReasoningReservationOutcome> {
+    ensure_reservation_deadline(Some(deadline), "import")?;
+    if turns
+        .iter()
+        .any(|turn| select_coverage_schema(turn) == CoverageSchemaVersion::V2)
+    {
+        ensure!(
+            turns.len() <= crate::internal::metadata::REASONING_IDENTITY_SESSION_MAP_MAX_ENTRIES,
+            "runtime versioned coverage claim count exceeds its safe limit; start a new capture session"
+        );
+    }
+    if let Some(reader) = &input.reader {
+        reader.validate_for(scope, session_id)?;
+    }
+    if turns.is_empty() {
+        ensure_runtime_source_admitted_until(
+            conn,
+            scope,
+            session_id,
+            deadline,
+            "import",
+            source_rejected,
+        )
+        .await?;
+    }
+    reserve_import_turn_claims_with_reasoning_versions_until(
+        conn,
+        scope,
+        session_id,
+        turns,
+        None,
+        owner,
+        now_ms,
+        deadline,
+        input,
+        CoverageVersionAdmission::Runtime { source_rejected },
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn reserve_import_turn_claims_with_reasoning_versions_until(
+    conn: &DatabaseConnection,
+    scope: &CaptureScope,
+    session_id: &str,
+    turns: &[NormalizedTurn],
+    versions: Option<&[i64]>,
+    owner: &str,
+    now_ms: i64,
+    deadline: CaptureCommitDeadline,
+    input: ReasoningCoverageInput<'_>,
+    admission: CoverageVersionAdmission,
+) -> Result<ReasoningReservationOutcome> {
     if let Some(candidate) = input.candidate {
         candidate.validate_for(scope, session_id, turns)?;
     }
@@ -1717,20 +1961,54 @@ pub(crate) async fn reserve_import_turn_claims_with_reasoning_until(
     // are abandoned by the importer if a later batch reaches the deadline.
     const IMPORT_RESERVATION_BATCH_TURNS: usize = 64;
     let mut aggregate = ReasoningReservationOutcome::default();
-    for batch in turns.chunks(IMPORT_RESERVATION_BATCH_TURNS) {
+    for (batch_index, batch) in turns.chunks(IMPORT_RESERVATION_BATCH_TURNS).enumerate() {
         ensure_reservation_deadline(Some(deadline), "import")?;
-        let outcome = reserve_turn_claims_with_reasoning_inner(
-            conn,
-            scope,
-            session_id,
-            batch,
-            owner,
-            now_ms,
-            "import",
-            Some(deadline),
-            input.clone(),
-        )
-        .await?;
+        // Recheck rejected history under the first reservation writer lock.
+        // The attempt was admitted before its first claim; later bounded
+        // batches preserve per-key no-demotion, scope and tombstone fences.
+        let batch_admission = match admission {
+            CoverageVersionAdmission::Runtime { .. } if batch_index != 0 => {
+                CoverageVersionAdmission::Runtime {
+                    source_rejected: false,
+                }
+            }
+            admission => admission,
+        };
+        let outcome = match versions {
+            Some(versions) => {
+                let offset = batch_index * IMPORT_RESERVATION_BATCH_TURNS;
+                reserve_turn_claims_with_reasoning_inner_versioned(
+                    conn,
+                    scope,
+                    session_id,
+                    batch,
+                    Some(&versions[offset..offset + batch.len()]),
+                    owner,
+                    now_ms,
+                    "import",
+                    Some(deadline),
+                    input.clone(),
+                    batch_admission,
+                )
+                .await?
+            }
+            None => {
+                reserve_turn_claims_with_reasoning_inner_versioned(
+                    conn,
+                    scope,
+                    session_id,
+                    batch,
+                    None,
+                    owner,
+                    now_ms,
+                    "import",
+                    Some(deadline),
+                    input.clone(),
+                    batch_admission,
+                )
+                .await?
+            }
+        };
         #[cfg(test)]
         if let Some(delay) = import_reservation_batch_test_delay() {
             tokio::time::sleep(delay).await;
@@ -1745,6 +2023,7 @@ pub(crate) async fn reserve_import_turn_claims_with_reasoning_until(
         aggregate
             .versioned_reserved
             .extend(outcome.versioned_reserved);
+        aggregate.covered.extend(outcome.covered);
         aggregate.ordinary.skipped_covered = aggregate
             .ordinary
             .skipped_covered
@@ -1832,6 +2111,121 @@ pub(crate) async fn reserve_turn_claims_with_reasoning(
     .await
 }
 
+/// Runtime selection happens only after the authorized source has produced
+/// redacted turns. The rejection flag is content-free and cannot authorize v2.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn reserve_runtime_turn_claims_with_reasoning(
+    conn: &DatabaseConnection,
+    scope: &CaptureScope,
+    session_id: &str,
+    turns: &[NormalizedTurn],
+    owner: &str,
+    now_ms: i64,
+    execution: CaptureReservationExecution,
+    input: ReasoningCoverageInput<'_>,
+    source_rejected: bool,
+) -> Result<ReasoningReservationOutcome> {
+    ensure_reservation_deadline(Some(execution.deadline), execution.source_channel)?;
+    reserve_turn_claims_with_reasoning_inner_versioned(
+        conn,
+        scope,
+        session_id,
+        turns,
+        None,
+        owner,
+        now_ms,
+        execution.source_channel,
+        Some(execution.deadline),
+        input,
+        CoverageVersionAdmission::Runtime { source_rejected },
+    )
+    .await
+}
+
+/// Content-free admission for authorized partial/empty snapshots that will
+/// not enter a reservation gate. Source/native authorization remains the
+/// caller's prerequisite; this function does not manufacture empty identity.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn ensure_runtime_source_admitted_until(
+    conn: &DatabaseConnection,
+    scope: &CaptureScope,
+    session_id: &str,
+    deadline: CaptureCommitDeadline,
+    source_channel: &'static str,
+    source_rejected: bool,
+) -> Result<()> {
+    reservation_state(source_channel)?;
+    await_reservation_precommit_read_until(Some(deadline), source_channel, async {
+        scope.assert_workspace_fence_live(conn).await?;
+        let writable = conn
+            .query_one_raw(Statement::from_sql_and_values(
+                conn.get_database_backend(),
+                "SELECT 1 FROM agent_session s WHERE s.session_id = ? AND NOT EXISTS (
+             SELECT 1 FROM agent_import_tombstone t WHERE t.agent_kind = s.agent_kind
+             AND t.provider_session_id = s.provider_session_id)",
+                [session_id.into()],
+            ))
+            .await
+            .context("verify runtime coverage tombstone barrier")?;
+        ensure!(
+            writable.is_some(),
+            "agent session was erased or is unavailable for coverage reservation"
+        );
+        if source_rejected {
+            ensure_no_rejected_runtime_v2_history(conn, session_id).await?;
+        }
+        Ok(())
+    })
+    .await
+}
+
+/// Import needs this history check before identity migration creates its
+/// session row. Source/native/storage authorization remains the caller's
+/// prerequisite; the later reservation rechecks tombstones and history under
+/// its writer lock. Missing session rows cannot hide existing claim history.
+pub(crate) async fn ensure_runtime_import_source_history_until(
+    conn: &DatabaseConnection,
+    scope: &CaptureScope,
+    session_id: &str,
+    deadline: CaptureCommitDeadline,
+    source_rejected: bool,
+) -> Result<()> {
+    await_reservation_precommit_read_until(Some(deadline), "import", async {
+        scope
+            .assert_workspace_fence_live(conn)
+            .await
+            .context("verify capture workspace fence before import history preflight")?;
+        if source_rejected {
+            ensure_no_rejected_runtime_v2_history(conn, session_id).await?;
+        }
+        Ok(())
+    })
+    .await
+}
+
+/// Prefix-index range scan: the version is the third component of the
+/// existing session/key/version index. LIMIT bounds returned data, while the
+/// enclosing deadline bounds work across this session's historical rows.
+async fn ensure_no_rejected_runtime_v2_history(
+    conn: &impl ConnectionTrait,
+    session_id: &str,
+) -> Result<()> {
+    let present = conn
+        .query_one_raw(Statement::from_sql_and_values(
+            conn.get_database_backend(),
+            "SELECT 1 FROM agent_coverage_claim INDEXED BY idx_agent_coverage_claim_logical_key
+         WHERE session_id = ? AND coverage_schema_version = 2 LIMIT 1",
+            [session_id.into()],
+        ))
+        .await
+        .context("cannot check rejected capture coverage history; run libra agent doctor")?;
+    ensure!(
+        present.is_none(),
+        "capture source classification was rejected after coverage-v2 history; start a new session or run libra agent doctor"
+    );
+    Ok(())
+}
+
 /// Shared scoped reservation for in-process callers that have no enclosing
 /// managed capture deadline. The typed partial outcome is preserved just as
 /// it is on the deadline-aware path.
@@ -1887,6 +2281,7 @@ pub(crate) async fn reserve_turn_claims_by_version_with_capture_scope(
         source_channel,
         None,
         ReasoningCoverageInput::default(),
+        CoverageVersionAdmission::Automatic,
     )
     .await;
     match outcome {
@@ -1921,8 +2316,16 @@ async fn reserve_turn_claims_with_reasoning_inner(
         source_channel,
         deadline,
         reasoning,
+        CoverageVersionAdmission::Automatic,
     )
     .await
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CoverageVersionAdmission {
+    Automatic,
+    ExplicitOrdinaryImport,
+    Runtime { source_rejected: bool },
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1937,22 +2340,42 @@ async fn reserve_turn_claims_with_reasoning_inner_versioned(
     source_channel: &'static str,
     deadline: Option<CaptureCommitDeadline>,
     reasoning: ReasoningCoverageInput<'_>,
+    admission: CoverageVersionAdmission,
 ) -> Result<ReasoningReservationOutcome> {
     ensure!(
         versions.is_none_or(|versions| versions.len() == turns.len()),
         "coverage claim version count differs from turn count"
     );
+    if matches!(admission, CoverageVersionAdmission::Runtime { .. })
+        && turns
+            .iter()
+            .any(|turn| select_coverage_schema(turn) == CoverageSchemaVersion::V2)
+    {
+        ensure!(
+            turns.len() <= crate::internal::metadata::REASONING_IDENTITY_SESSION_MAP_MAX_ENTRIES,
+            "runtime versioned coverage claim count exceeds its safe limit; start a new capture session"
+        );
+    }
     let mut checked_versions = Vec::with_capacity(turns.len());
     let mut seen_versioned_keys = std::collections::BTreeSet::new();
     for (index, turn) in turns.iter().enumerate() {
-        let version = CoverageSchemaVersion::try_from(
-            versions.map_or(COVERAGE_SCHEMA_VERSION, |versions| versions[index]),
-        )?;
+        let version = CoverageSchemaVersion::try_from(versions.map_or_else(
+            || match admission {
+                CoverageVersionAdmission::Runtime { .. } => select_coverage_schema(turn).as_i64(),
+                _ => COVERAGE_SCHEMA_VERSION,
+            },
+            |versions| versions[index],
+        ))?;
         ensure!(
-            version == select_coverage_schema(turn),
+            version == select_coverage_schema(turn)
+                || (admission == CoverageVersionAdmission::ExplicitOrdinaryImport
+                    && source_channel == "import"
+                    && versions.is_some()
+                    && version == CoverageSchemaVersion::V2
+                    && select_coverage_schema(turn) == CoverageSchemaVersion::V1),
             "coverage claim version does not match the typed turn"
         );
-        if versions.is_some() {
+        if versions.is_some() || matches!(admission, CoverageVersionAdmission::Runtime { .. }) {
             ensure!(
                 seen_versioned_keys.insert((version.as_i64(), turn.logical_turn_key.as_str())),
                 "duplicate versioned coverage claim in one reservation"
@@ -1976,6 +2399,12 @@ async fn reserve_turn_claims_with_reasoning_inner_versioned(
                 candidate.turn(*version, &turn.logical_turn_key).is_some()
             }),
             "reasoning coverage source version does not match its claims; run libra agent doctor"
+        );
+    }
+    if matches!(admission, CoverageVersionAdmission::Runtime { .. }) {
+        ensure!(
+            reasoning.reader.is_some(),
+            "runtime capture requires a scoped reasoning identity reader; run libra agent doctor"
         );
     }
     if let Some(reader) = &reasoning.reader {
@@ -2038,6 +2467,19 @@ async fn reserve_turn_claims_with_reasoning_inner_versioned(
         txn.rollback().await.ok();
         bail!("agent session was erased or is unavailable for coverage reservation");
     }
+    if let CoverageVersionAdmission::Runtime {
+        source_rejected: true,
+    } = admission
+        && let Err(error) = await_reservation_precommit_read_until(
+            deadline,
+            source_channel,
+            ensure_no_rejected_runtime_v2_history(&txn, session_id),
+        )
+        .await
+    {
+        txn.rollback().await.ok();
+        return Err(error);
+    }
     let map = match await_reservation_precommit_read_until(
         deadline,
         source_channel,
@@ -2055,11 +2497,83 @@ async fn reserve_turn_claims_with_reasoning_inner_versioned(
         txn.rollback().await.ok();
         bail!("private reasoning identity is invalid; start a new capture session");
     }
+    // Native identity is not portable between schema domains. A fresh target
+    // claim must not evade the incumbent native proof in the other domain.
+    if matches!(
+        admission,
+        CoverageVersionAdmission::ExplicitOrdinaryImport | CoverageVersionAdmission::Runtime { .. }
+    ) && let StoredReasoningMap::Verified(maps) = &map
+    {
+        let reader = reasoning
+            .reader
+            .as_ref()
+            .context("explicit import requires a scoped reasoning reader")?;
+        for (turn, version) in turns.iter().zip(&checked_versions) {
+            let native_alias = match version {
+                CoverageSchemaVersion::V1 => {
+                    if let Some(other) = &maps.v2 {
+                        let slot = await_reservation_precommit_read_until(
+                            deadline,
+                            source_channel,
+                            reader.turn_slot_for_schema_version(&txn, 2, &turn.logical_turn_key),
+                        )
+                        .await?;
+                        other.records().get(&slot).is_some_and(|record| {
+                            record.body().kind == ReasoningIdentityKind::Nonempty
+                        })
+                    } else {
+                        false
+                    }
+                }
+                CoverageSchemaVersion::V2 => {
+                    if let Some(other) = &maps.v1 {
+                        let slot = await_reservation_precommit_read_until(
+                            deadline,
+                            source_channel,
+                            reader.turn_slot(&txn, &turn.logical_turn_key),
+                        )
+                        .await?;
+                        other.records().get(&slot).is_some_and(|record| {
+                            record.body().kind == ReasoningIdentityKind::Nonempty
+                        })
+                    } else {
+                        false
+                    }
+                }
+            };
+            if native_alias {
+                txn.rollback().await.ok();
+                bail!(
+                    "native reasoning cannot be imported across coverage versions; use the original version or run libra agent doctor"
+                );
+            }
+        }
+    }
     let mut outcome = ReasoningReservationOutcome::default();
     for (turn, version) in turns.iter().zip(checked_versions) {
         if let Err(error) = ensure_reservation_deadline(deadline, source_channel) {
             txn.rollback().await.ok();
             return Err(error);
+        }
+        if version == CoverageSchemaVersion::V1
+            && matches!(admission, CoverageVersionAdmission::Runtime { .. })
+            && await_reservation_precommit_read_until(
+                deadline,
+                source_channel,
+                read_claim(
+                    &txn,
+                    session_id,
+                    &turn.logical_turn_key,
+                    CoverageSchemaVersion::V2,
+                ),
+            )
+            .await?
+            .is_some()
+        {
+            txn.rollback().await.ok();
+            bail!(
+                "coverage-v2 history cannot be downgraded by capture; start a new session or run libra agent doctor"
+            );
         }
         let digest = encode_coverage_turn_for_schema(version.as_i64(), turn)?.digest_hex;
         let mut rounds = 0;
@@ -2121,7 +2635,19 @@ async fn reserve_turn_claims_with_reasoning_inner_versioned(
                     outcome.ordinary.reserved.push(claim);
                     break;
                 }
-                AttemptOutcome::SkipCovered => {
+                AttemptOutcome::SkipCovered(committed) => {
+                    if matches!(admission, CoverageVersionAdmission::Runtime { .. }) {
+                        outcome
+                            .covered
+                            .push(CommittedTurnClaimSnapshot::from_committed(
+                                session_id,
+                                &turn.logical_turn_key,
+                                version,
+                                committed,
+                                reasoning.candidate.is_some()
+                                    || reasoning.versioned_candidate.is_some(),
+                            )?);
+                    }
                     outcome.ordinary.skipped_covered += 1;
                     break;
                 }
@@ -2199,7 +2725,7 @@ async fn reserve_turn_claims_with_reasoning_inner_versioned(
 
 enum AttemptOutcome {
     Reserved(ReservedTurnClaim),
-    SkipCovered,
+    SkipCovered(ExistingClaim),
     SkipInflight,
     SkipRetained,
     Conflicted,
@@ -2343,7 +2869,7 @@ async fn decide_and_attempt(
                 // evidence is deliberately outside the semantic digest, so a
                 // same-digest incomplete -> complete transition must still
                 // advance the revision and session lifecycle.
-                return Ok(AttemptOutcome::SkipCovered);
+                return Ok(AttemptOutcome::SkipCovered(existing));
             }
             match (existing.completeness.as_str(), turn.completeness) {
                 ("incomplete", Completeness::Complete) => {
@@ -2391,17 +2917,17 @@ async fn decide_and_attempt(
                     Ok(match conflict {
                         ConflictMarkOutcome::Marked => AttemptOutcome::Conflicted,
                         ConflictMarkOutcome::EquivalentAfterRedaction => {
-                            AttemptOutcome::SkipCovered
+                            AttemptOutcome::SkipCovered(existing)
                         }
                         ConflictMarkOutcome::LostRace => AttemptOutcome::LostRace,
                     })
                 }
                 // A (different) incomplete snapshot never downgrades or
                 // replaces committed content.
-                (_, Completeness::Incomplete) => Ok(AttemptOutcome::SkipCovered),
+                (_, Completeness::Incomplete) => Ok(AttemptOutcome::SkipCovered(existing)),
                 // incomplete → incomplete with different digest: keep the
                 // committed one; a later complete parse upgrades it.
-                _ => Ok(AttemptOutcome::SkipCovered),
+                _ => Ok(AttemptOutcome::SkipCovered(existing)),
             }
         }
         "reserved_live" | "reserved_import" => {
@@ -2524,6 +3050,7 @@ pub(crate) struct ReasoningClaimCommitPlan {
 pub(crate) struct LiveCaptureClaimCommitPlan {
     ordinary: LiveClaimCommitPlan,
     reasoning: Option<ReasoningCoveragePlan>,
+    versioned: Option<VersionedLiveClaimCommitPlan>,
 }
 
 impl LiveCaptureClaimCommitPlan {
@@ -2550,7 +3077,38 @@ impl LiveCaptureClaimCommitPlan {
         Ok(Self {
             ordinary,
             reasoning: reasoning.cloned(),
+            versioned: None,
         })
+    }
+
+    /// Bind the existing live companion to its immutable schema sidecar.
+    /// Native-v1 identity plans cannot be mixed with a v2 ordinary claim.
+    pub(crate) fn new_runtime_versioned(
+        ordinary: LiveClaimCommitPlan,
+        claims: &[VersionedReservedTurnClaim],
+        reasoning: Option<&ReasoningCoveragePlan>,
+    ) -> Result<Self> {
+        let versioned = VersionedLiveClaimCommitPlan::new(ordinary.clone(), claims)?;
+        ensure!(
+            !claims.is_empty()
+                && ordinary.capture_scope.is_some()
+                && matches!(ordinary.source_channel, "live" | "export"),
+            "runtime coverage requires a scoped live/export claim plan"
+        );
+        ensure!(
+            reasoning.is_none()
+                || claims
+                    .iter()
+                    .all(|claim| claim.coverage_schema_version == CoverageSchemaVersion::V1),
+            "native reasoning cannot cross coverage versions; run libra agent doctor"
+        );
+        let mut companion = Self::new(ordinary, reasoning)?;
+        companion.versioned = Some(versioned);
+        Ok(companion)
+    }
+
+    pub(crate) fn runtime_versioned(&self) -> Option<&VersionedLiveClaimCommitPlan> {
+        self.versioned.as_ref()
     }
 }
 
@@ -2563,8 +3121,15 @@ impl TracesTxnExtra for LiveCaptureClaimCommitPlan {
                     .apply(txn, ctx)
                     .await
             }
-            None => self.ordinary.apply(txn, ctx).await,
+            None => match &self.versioned {
+                Some(versioned) => versioned.apply(txn, ctx).await,
+                None => self.ordinary.apply(txn, ctx).await,
+            },
         }
+    }
+
+    fn requires_versioned_coverage_binding(&self) -> bool {
+        self.versioned.is_some()
     }
 }
 
@@ -3293,6 +3858,502 @@ pub(crate) mod tests {
         config::ConfigKv,
         db::migration::run_builtin_migrations,
     };
+
+    #[tokio::test]
+    async fn cov11_import_history_preflight_before_session_exists_is_read_only() {
+        let (conn, scope) = scoped_gate_db().await;
+        let fresh_session = "opencode__fresh-import-before-identity";
+        let existing_session = "claude_code__scope_expiry";
+        let deadline = CaptureCommitDeadline::from_budget(Duration::from_secs(30)).unwrap();
+        let visible = cov2_visible_turn(
+            "history-turn",
+            "ordinary visible data",
+            Completeness::Complete,
+        );
+        let history = reserve_turn_claims_by_version_with_capture_scope(
+            &conn,
+            &scope,
+            existing_session,
+            &[visible],
+            &[2],
+            "history-owner",
+            1,
+            "live",
+        )
+        .await
+        .unwrap();
+        assert_eq!(history.reserved.len(), 1);
+        // SQLite rejects writes while these calls execute; total_changes also
+        // pins that none of the successful or rejected preflights mutated it.
+        conn.execute_unprepared("PRAGMA query_only = ON")
+            .await
+            .unwrap();
+        let before = scalar(&conn, "SELECT total_changes() AS n").await;
+        for rejected in [false, true] {
+            ensure_runtime_import_source_history_until(
+                &conn,
+                &scope,
+                fresh_session,
+                deadline,
+                rejected,
+            )
+            .await
+            .expect("fresh imports must not require a preexisting session row");
+        }
+        let fresh_count = conn
+            .query_one_raw(Statement::from_sql_and_values(
+                conn.get_database_backend(),
+                "SELECT COUNT(*) AS n FROM agent_session WHERE session_id = ?",
+                [fresh_session.into()],
+            ))
+            .await
+            .unwrap()
+            .unwrap()
+            .try_get_by::<i64, _>("n")
+            .unwrap();
+        assert_eq!(
+            fresh_count, 0,
+            "history preflight must not materialize the session"
+        );
+        let error = ensure_runtime_import_source_history_until(
+            &conn,
+            &scope,
+            existing_session,
+            deadline,
+            true,
+        )
+        .await
+        .expect_err("existing v2 history must reject the whole rejected-source attempt");
+        assert!(error.to_string().contains("start a new session"));
+        ensure_runtime_import_source_history_until(
+            &conn,
+            &scope,
+            existing_session,
+            deadline,
+            false,
+        )
+        .await
+        .expect("non-rejected sources retain their availability contract");
+        let wrong_scope = CaptureScope {
+            workspace_fence: scope.workspace_fence.map(|fence| fence + 1),
+            ..scope.clone()
+        };
+        assert!(
+            ensure_runtime_import_source_history_until(
+                &conn,
+                &wrong_scope,
+                fresh_session,
+                deadline,
+                false,
+            )
+            .await
+            .is_err(),
+            "a missing session must not bypass the workspace fence"
+        );
+        let expired =
+            CaptureCommitDeadline::from_test_pair(Instant::now() - Duration::from_millis(1), 0);
+        let error =
+            ensure_runtime_import_source_history_until(&conn, &scope, fresh_session, expired, true)
+                .await
+                .expect_err("expired preflight must fail before history classification");
+        assert!(error.to_string().contains("deadline"));
+        assert_eq!(scalar(&conn, "SELECT total_changes() AS n").await, before);
+        assert_eq!(
+            scalar(&conn, "SELECT COUNT(*) AS n FROM agent_coverage_claim").await,
+            1
+        );
+        conn.execute_unprepared("PRAGMA query_only = OFF")
+            .await
+            .unwrap();
+        conn.execute_unprepared("DROP INDEX idx_agent_coverage_claim_logical_key")
+            .await
+            .unwrap();
+        conn.execute_unprepared("PRAGMA query_only = ON")
+            .await
+            .unwrap();
+        let before_error = scalar(&conn, "SELECT total_changes() AS n").await;
+        let error = ensure_runtime_import_source_history_until(
+            &conn,
+            &scope,
+            fresh_session,
+            deadline,
+            true,
+        )
+        .await
+        .expect_err("database errors must not look like absent history");
+        assert!(format!("{error:#}").contains("cannot check rejected capture coverage history"));
+        assert_eq!(
+            scalar(&conn, "SELECT total_changes() AS n").await,
+            before_error
+        );
+    }
+
+    #[cfg(unix)]
+    async fn cov11_runtime_reserve(
+        fixture: &ReasoningFixture,
+        turns: &[NormalizedTurn],
+        rejected: bool,
+    ) -> Result<ReasoningReservationOutcome> {
+        use crate::internal::ai::observed_agents::reasoning::carrier_test_support as fixture_ids;
+        reserve_runtime_turn_claims_with_reasoning(
+            &fixture.conn,
+            &fixture.scope,
+            fixture_ids::CAPTURE,
+            turns,
+            "runtime-owner",
+            1,
+            CaptureReservationExecution::live(CaptureCommitDeadline::from_budget(
+                Duration::from_secs(30),
+            )?),
+            ReasoningCoverageInput::ordinary(&fixture.reader()),
+            rejected,
+        )
+        .await
+    }
+
+    #[cfg(unix)]
+    async fn cov11_commit_runtime(
+        fixture: &ReasoningFixture,
+        claims: &[VersionedReservedTurnClaim],
+        checkpoint_id: &str,
+    ) {
+        use crate::internal::ai::observed_agents::reasoning::carrier_test_support as fixture_ids;
+        let ordinary = LiveClaimCommitPlan {
+            source_channel: "live",
+            session_id: fixture_ids::CAPTURE.to_owned(),
+            checkpoint_id: checkpoint_id.to_owned(),
+            owner: "runtime-owner".to_owned(),
+            parent_commit: None,
+            created_at: 1,
+            now_ms: 1,
+            claims: claims.iter().map(|claim| claim.claim.clone()).collect(),
+            import_session: None,
+            import_identity: None,
+            capture_scope: Some(fixture.scope.clone()),
+        };
+        let plan = VersionedLiveClaimCommitPlan::new(ordinary, claims).unwrap();
+        let txn = fixture.conn.begin().await.unwrap();
+        plan.apply(
+            &txn,
+            &TracesCommitCtx {
+                commit_hash: "d".repeat(40),
+                tree_oid: "b".repeat(40),
+                metadata_blob_oid: "c".repeat(40),
+            },
+        )
+        .await
+        .unwrap();
+        txn.commit().await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cov11_runtime_selection_rejected_history_and_no_demotion() {
+        use crate::internal::ai::observed_agents::reasoning::carrier_test_support as fixture_ids;
+        let fixture = ReasoningFixture::new().await;
+        let turns = [
+            turn("ordinary", "legacy", Completeness::Complete),
+            cov2_visible_turn("visible", "redacted typed text", Completeness::Complete),
+        ];
+        let reserved = cov11_runtime_reserve(&fixture, &turns, false)
+            .await
+            .unwrap();
+        assert_eq!(
+            reserved
+                .versioned_reserved
+                .iter()
+                .map(|claim| claim.coverage_schema_version.as_i64())
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        assert_eq!(
+            reserved.versioned_reserved[0].claim.coverage_digest,
+            encode_coverage_turn_for_schema(1, &turns[0])
+                .unwrap()
+                .digest_hex
+        );
+        cov11_commit_runtime(&fixture, &reserved.versioned_reserved, "runtime-checkpoint").await;
+        let covered = cov11_runtime_reserve(&fixture, &turns, false)
+            .await
+            .unwrap();
+        assert_eq!(covered.ordinary.skipped_covered, 2);
+        assert_eq!(covered.covered.len(), 2);
+        assert_eq!(covered.covered[1].version(), CoverageSchemaVersion::V2);
+        let older_incomplete = cov11_runtime_reserve(
+            &fixture,
+            &[cov2_visible_turn(
+                "visible",
+                "a different incomplete parse",
+                Completeness::Incomplete,
+            )],
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            older_incomplete.covered[0].coverage_digest,
+            reserved.versioned_reserved[1].claim.coverage_digest
+        );
+        assert_eq!(
+            older_incomplete.covered[0].completeness,
+            Completeness::Complete,
+            "covered replay must retain actual committed content, never the incoming candidate"
+        );
+        for attempted in [
+            vec![],
+            vec![turn("unrelated-new", "ordinary", Completeness::Complete)],
+        ] {
+            let error = cov11_runtime_reserve(&fixture, &attempted, true)
+                .await
+                .err()
+                .unwrap();
+            assert!(error.to_string().contains("start a new session"));
+        }
+        assert_eq!(
+            scalar(
+                &fixture.conn,
+                "SELECT COUNT(*) AS n FROM agent_coverage_claim"
+            )
+            .await,
+            2
+        );
+        assert!(
+            cov11_runtime_reserve(
+                &fixture,
+                &[turn("visible", "fallback", Completeness::Complete)],
+                false
+            )
+            .await
+            .is_err()
+        );
+        let fresh = [turn("new-valid", "ordinary", Completeness::Complete)];
+        let accepted = cov11_runtime_reserve(&fixture, &fresh, false)
+            .await
+            .unwrap();
+        assert_eq!(
+            accepted.versioned_reserved[0].coverage_schema_version,
+            CoverageSchemaVersion::V1
+        );
+        // Fresh rejected sources retain the exact ordinary-v1 route when no
+        // v2 history exists, including its old digest and error contract.
+        let legacy = ReasoningFixture::new().await;
+        let accepted = cov11_runtime_reserve(&legacy, &fresh, true).await.unwrap();
+        assert_eq!(
+            accepted.versioned_reserved[0].coverage_schema_version,
+            CoverageSchemaVersion::V1
+        );
+        assert_eq!(
+            accepted.versioned_reserved[0].claim.coverage_digest,
+            encode_coverage_turn_for_schema(1, &fresh[0])
+                .unwrap()
+                .digest_hex
+        );
+        fixture
+            .conn
+            .execute_unprepared("DROP INDEX idx_agent_coverage_claim_logical_key")
+            .await
+            .unwrap();
+        let error = reserve_runtime_import_turn_claims_with_reasoning_until(
+            &fixture.conn,
+            &fixture.scope,
+            fixture_ids::CAPTURE,
+            &[],
+            "import-owner",
+            1,
+            CaptureCommitDeadline::from_budget(Duration::from_secs(30)).unwrap(),
+            ReasoningCoverageInput::ordinary(&fixture.reader()),
+            true,
+        )
+        .await
+        .err()
+        .unwrap();
+        assert!(format!("{error:#}").contains("cannot check rejected capture coverage history"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cov11_gate_owned_exact_covered_replay_fails_closed() {
+        use crate::internal::ai::{
+            capture::checkpoint::{
+                CheckpointReplayStatus, CheckpointStoreError, TracesCheckpointStore,
+            },
+            observed_agents::reasoning::carrier_test_support as fixture_ids,
+        };
+        let fixture = ReasoningFixture::new().await;
+        let turns = [
+            turn("ordinary", "legacy", Completeness::Complete),
+            cov2_visible_turn("visible", "redacted typed text", Completeness::Complete),
+        ];
+        let reserved = cov11_runtime_reserve(&fixture, &turns, false)
+            .await
+            .unwrap();
+        cov11_commit_runtime(&fixture, &reserved.versioned_reserved, "runtime-checkpoint").await;
+        let mut covered = cov11_runtime_reserve(&fixture, &turns, false)
+            .await
+            .unwrap();
+        async fn settle(
+            fixture: &ReasoningFixture,
+            claims: &[CommittedTurnClaimSnapshot],
+        ) -> Result<CheckpointReplayStatus, CheckpointStoreError> {
+            TracesCheckpointStore::settle_runtime_covered_replay_without_write(
+                &fixture.conn,
+                &fixture.scope,
+                "runtime-checkpoint",
+                fixture_ids::CAPTURE,
+                None,
+                claims,
+            )
+            .await
+        }
+        assert_eq!(
+            settle(&fixture, &covered.covered).await,
+            Ok(CheckpointReplayStatus::Complete)
+        );
+        assert_eq!(
+            settle(&fixture, &covered.covered).await,
+            Ok(CheckpointReplayStatus::Complete)
+        );
+        covered.covered[1].requires_native_replay = true;
+        assert_eq!(
+            settle(&fixture, &covered.covered).await,
+            Err(CheckpointStoreError::ReplayPayloadMismatch),
+            "an ordinary exact set cannot waive authenticated native replay"
+        );
+        covered.covered[1].requires_native_replay = false;
+        assert_eq!(
+            settle(&fixture, &covered.covered[1..]).await,
+            Err(CheckpointStoreError::ReplayPayloadMismatch)
+        );
+        assert_eq!(
+            settle(&fixture, &covered.covered[..1]).await,
+            Err(CheckpointStoreError::ReplayPayloadMismatch)
+        );
+        assert_eq!(
+            settle(&fixture, &[]).await,
+            Err(CheckpointStoreError::ReplayPayloadMismatch)
+        );
+        assert_eq!(
+            TracesCheckpointStore::settle_runtime_covered_replay_without_write(
+                &fixture.conn,
+                &fixture.scope,
+                "foreign-action",
+                fixture_ids::CAPTURE,
+                None,
+                &covered.covered,
+            )
+            .await,
+            Ok(CheckpointReplayStatus::Missing)
+        );
+        assert!(
+            !TracesCheckpointStore::durable_legacy_replay_exists_for(
+                &fixture.conn,
+                &fixture.scope,
+                "runtime-checkpoint",
+                fixture_ids::CAPTURE,
+                None,
+            )
+            .await
+            .unwrap()
+        );
+        fixture.conn.execute_unprepared("UPDATE agent_coverage_claim SET state = 'conflicted' WHERE coverage_schema_version = 2").await.unwrap();
+        assert_eq!(
+            settle(&fixture, &covered.covered).await,
+            Err(CheckpointStoreError::ReplayPayloadMismatch)
+        );
+        assert_eq!(
+            scalar(&fixture.conn, "SELECT COUNT(*) AS n FROM agent_checkpoint").await,
+            1
+        );
+        assert_eq!(
+            scalar(
+                &fixture.conn,
+                "SELECT COUNT(*) AS n FROM agent_coverage_revision"
+            )
+            .await,
+            2
+        );
+        fixture.conn.execute_unprepared("UPDATE agent_coverage_claim SET state = 'catalog_committed' WHERE coverage_schema_version = 2").await.unwrap();
+        fixture
+            .conn
+            .execute_unprepared(
+                "DELETE FROM agent_checkpoint WHERE checkpoint_id = 'runtime-checkpoint'",
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            settle(&fixture, &covered.covered).await,
+            Err(CheckpointStoreError::ReplayPayloadMismatch),
+            "gate-owned v2 expectations cannot settle a missing durable checkpoint"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cov11_runtime_capacity_and_expired_deadline_reject_before_write() {
+        let fixture = ReasoningFixture::new().await;
+        let max_entries = crate::internal::metadata::REASONING_IDENTITY_SESSION_MAP_MAX_ENTRIES;
+        let max_bytes = crate::internal::metadata::REASONING_IDENTITY_SESSION_MAP_MAX_BYTES;
+        assert!(validate_reasoning_map_aggregate_capacity(max_entries, max_bytes).is_ok());
+        assert!(validate_reasoning_map_aggregate_capacity(max_entries + 1, max_bytes).is_err());
+        assert!(validate_reasoning_map_aggregate_capacity(max_entries, max_bytes + 1).is_err());
+        let turns = (0..=max_entries)
+            .map(|index| {
+                cov2_visible_turn(
+                    &format!("visible-{index}"),
+                    "redacted",
+                    Completeness::Complete,
+                )
+            })
+            .collect::<Vec<_>>();
+        let error = cov11_runtime_reserve(&fixture, &turns, false)
+            .await
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("safe limit"));
+        let expired =
+            CaptureCommitDeadline::from_test_pair(Instant::now() - Duration::from_millis(1), 0);
+        let error = reserve_runtime_turn_claims_with_reasoning(
+            &fixture.conn,
+            &fixture.scope,
+            crate::internal::ai::observed_agents::reasoning::carrier_test_support::CAPTURE,
+            &turns[..1],
+            "runtime-owner",
+            1,
+            CaptureReservationExecution::live(expired),
+            ReasoningCoverageInput::ordinary(&fixture.reader()),
+            false,
+        )
+        .await
+        .err()
+        .unwrap();
+        assert!(error.to_string().contains("deadline"));
+        assert_eq!(
+            scalar(
+                &fixture.conn,
+                "SELECT COUNT(*) AS n FROM agent_coverage_claim"
+            )
+            .await,
+            0
+        );
+        let oversized = ReasoningFixture::new().await;
+        let v1 = cov2_seed_bulk_signed_private_map(&oversized, 1, 1500).await;
+        let v2 = cov2_seed_bulk_signed_private_map(&oversized, 2, 1500).await;
+        assert!(v1.len() <= max_bytes && v2.len() <= max_bytes && v1.len() + v2.len() > max_bytes);
+        assert!(
+            cov11_runtime_reserve(&oversized, &turns[..1], false)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            scalar(
+                &oversized.conn,
+                "SELECT COUNT(*) AS n FROM agent_coverage_claim"
+            )
+            .await,
+            0,
+            "combined map byte capacity must fail closed before any runtime claim"
+        );
+    }
 
     pub(crate) fn cov2_visible_turn(
         key: &str,
@@ -4741,6 +5802,7 @@ pub(crate) mod tests {
             "live",
             None,
             ReasoningCoverageInput::native_versioned(&source),
+            CoverageVersionAdmission::Automatic,
         )
         .await
         .expect("reserve source-bound versioned claims")
@@ -8682,7 +9744,7 @@ pub(crate) mod tests {
         .await
         .expect("seed coverage deadline session");
 
-        let locker = crate::internal::db::establish_connection_with_busy_timeout(
+        let locker = crate::internal::db::establish_connection_with_lock_timeout(
             database_path
                 .to_str()
                 .expect("coverage deadline database path is utf-8"),

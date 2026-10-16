@@ -1,5 +1,7 @@
 # Agent Command Development
 
+> **Coverage-v2 source version:** The coverage-v2 descriptions below refer to the Libra 0.30.50 source line and later compatible versions. This is not a stable-release announcement; check the [official releases](https://github.com/libra-tools/libra/releases) and `libra --version` for installed support. Other sections retain their own version requirements. Coverage-v2 does not prove native origin or authorize native reasoning artifacts.
+
 `libra agent` is an intentionally different external-agent capture extension,
 not a Git-compatible command.
 
@@ -16,7 +18,13 @@ or legacy bwrap is unavailable and remains metadata-only. Install or upgrade
 the system bwrap package—there is no unsandboxed fallback.
 
 The shared `run_bounded_exporter` Unix `pre_exec` sets both soft and hard
-`RLIMIT_CORE` to zero next to the existing per-platform `RLIMIT_FSIZE`.
+`RLIMIT_CORE` to zero next to the existing `RLIMIT_FSIZE`. That file-size
+limit is a coarse 8 GiB backstop on every platform, not the 16 MiB export
+cap: it is process-wide, so a cap-sized limit also failed OpenCode's own
+SQLite writes once the store outgrew the cap (macOS FIX-SBX-01; on Linux the
+`--standalone` server then exited before readiness and every capture was
+metadata-only). The export cap stays enforced on stdout by the size poll and
+the post-exit recheck.
 Failure to set either limit fails spawn with context. Core limits propagate
 to exporter descendants without changing the parent process; SIGXFSZ
 disposition, byte caps, deadlines and sandbox controls are unchanged.
@@ -369,3 +377,54 @@ The private pending codec pairs its closed inner payload v2 with the live Sessio
 ### Private reasoning identity and garbage collection
 
 Garbage collection excludes the reserved `agent_reasoning_identity` scope from generic metadata object-reference scanning. This applies to the entire stored value, including a damaged value containing a JSON object ID or a nested object ID; those values do not trigger object hydration. This exclusion requires no private reasoning key. Ordinary metadata object roots, private capture recovery exclusions, and capture pending parent roots retain their existing rules. Forward recovery must retain both the private rows and this exclusion while a reasoning identity writer is stopped or repaired. This guard does not create identity records, issue native provenance, or enable OpenCode reasoning archival.
+
+<!-- Compatibility anchor for earlier links; not a release-status assertion. -->
+<a id="versioned-graphdoctor-readers-cov2-09-unreleased"></a>
+
+## Versioned graph/doctor readers (COV2-09, Libra 0.30.50)
+
+The graph reader decodes each selected claim and revision through the existing
+closed `CoverageSchemaVersion` enum before joining or skipping unmatched rows.
+Both revision history and current claims use `(logical_turn_key, coverage_schema_version)`;
+v1 and v2 rows sharing a key/checkpoint remain distinct. The public graph JSON
+schema remains 1. Unknown stored versions return the existing
+`LBR-AGENT-009` error with upgrade/doctor guidance, without an indexed-success
+response or candidate content. No version coercion, catalog mutation or blob
+read is added. An unmatched revision is still validated before it can be ignored.
+
+Doctor already joins conflicts by both key and version; its production code is
+unchanged. Each conflict remains a distinct content-free, manual-required finding
+in JSON and human output, with or without `--repair`. Synthetic catalog fixtures
+check version separation, envelope stability, unknown-version failure and raw
+identity/content canaries. They do not run an OpenCode Session, exporter or model,
+and confer no native-origin proof. These reader guarantees require Libra 0.30.50 or later; upgrading the installed
+binary is necessary before relying on them.
+
+<!-- Compatibility anchor for earlier links; not a release-status assertion. -->
+<a id="coverage-v2-capture-unreleased"></a>
+
+## Coverage-v2 capture (Libra 0.30.50)
+
+From the first stable release containing coverage-v2, OpenCode export capture
+and historical import retain supported provider-visible reasoning as typed,
+redacted turn content. Turns containing that content use coverage schema 2;
+ordinary turns keep schema 1 and their existing canonical bytes. Redaction runs
+before either digest or checkpoint projection. This does not authenticate
+`signature`, `redactedData`, or `reasoningEncryptedContent`: unproven native
+fields remain partial and cannot be archived as trusted artifacts.
+
+After upgrading, an interrupted action whose checkpoint was already committed
+with v1 (or an empty legacy revision set) first settles that existing receipt
+without adding claims or rewriting its checkpoint. A subsequent **new action**
+may capture the visible reasoning once under v2; repeated capture then deduplicates.
+The old v1 objects, digests, and claims remain readable and unchanged.
+
+If source classification is rejected after that session already has v2 claims,
+the entire new capture/import attempt stops, including new ordinary turns.
+Its pending receipt/export work stays retryable; no fallback claims or success
+acknowledgment are created. An unchanged over-limit or unsupported source can
+keep that session blocked. Keep the recorded data, inspect `libra agent doctor`,
+and start a new OpenCode session to continue supported capture. A candidate or
+unverified reasoning source cannot turn this failure into complete coverage.
+These changes add no command flags and require Libra 0.30.50 or later. OpenCode Session/exporter/model acceptance runs locally on
+macOS; it is not a CI integration test.

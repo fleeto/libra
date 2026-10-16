@@ -411,6 +411,12 @@ impl Drop for CancellationSafeChild {
 
 static RUNNING_LIBRA_PROGRAM: OnceLock<PathBuf> = OnceLock::new();
 
+tokio::task_local! {
+    // Only the ordinary prepared-import adapter can opt into this scope.
+    // It never changes source-reader or native-producer executable selection.
+    static EXPLICIT_IMPORT_CHECKPOINT_HELPER: PathBuf;
+}
+
 #[cfg(test)]
 tokio::task_local! {
     static TEST_AUTHORIZED_READ_HELPER_PROGRAM: Option<PathBuf>;
@@ -447,10 +453,72 @@ pub fn helper_program() -> Option<PathBuf> {
 /// `main`. This is the one lifecycle entrypoint shared by source reads and
 /// deadline-bound CPU workers; embedded hosts deliberately receive no helper.
 pub(crate) fn registered_helper_command(argument: &str) -> Option<tokio::process::Command> {
-    let program = helper_program()?;
+    let explicit = if argument == super::history::CHECKPOINT_OBJECT_IO_HELPER_ARG {
+        EXPLICIT_IMPORT_CHECKPOINT_HELPER
+            .try_with(Clone::clone)
+            .ok()
+    } else {
+        None
+    };
+    let program = explicit.or_else(helper_program)?;
     let mut command = tokio::process::Command::new(program);
     command.arg(argument);
     Some(command)
+}
+
+/// The ordinary direct-import caller explicitly authorizes a Libra executable
+/// for checkpoint object I/O only. This is execution configuration, never
+/// binary attestation or native provenance. The caller rejects reasoning before
+/// entering; cloud/doctor's VerifyReasoningArtifacts must not run in this scope.
+pub(crate) async fn with_explicit_import_checkpoint_helper<F, T>(
+    program: Option<&Path>,
+    deadline: Instant,
+    future: F,
+) -> anyhow::Result<T>
+where
+    F: std::future::Future<Output = anyhow::Result<T>>,
+{
+    #[cfg(not(unix))]
+    {
+        let _ = (program, deadline, future);
+        anyhow::bail!("explicit import checkpoint helpers require Unix process containment");
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        if Instant::now() >= deadline {
+            anyhow::bail!("explicit import checkpoint helper validation exceeded its deadline");
+        }
+        let Some(program) = program else {
+            if helper_program().is_none() {
+                anyhow::bail!(
+                    "explicit import requires a trusted Libra checkpoint helper; pass the absolute Libra binary path"
+                );
+            }
+            return future.await;
+        };
+        if !program.is_absolute() {
+            anyhow::bail!(
+                "explicit import checkpoint helper must be an absolute trusted Libra binary path"
+            );
+        }
+        let metadata = tokio::time::timeout_at(deadline.into(), tokio::fs::metadata(program))
+            .await
+            .map_err(|_| anyhow::anyhow!("explicit import checkpoint helper validation exceeded its deadline"))?
+            .map_err(|_| anyhow::anyhow!("explicit import checkpoint helper is unavailable; select an existing trusted Libra binary"))?;
+        if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
+            anyhow::bail!(
+                "explicit import checkpoint helper must be an executable regular Libra binary"
+            );
+        }
+        if Instant::now() >= deadline {
+            anyhow::bail!("explicit import checkpoint helper validation exceeded its deadline");
+        }
+        EXPLICIT_IMPORT_CHECKPOINT_HELPER
+            .scope(program.to_path_buf(), future)
+            .await
+    }
 }
 
 fn helper_program_from_registered(running_program: Option<&Path>) -> Option<PathBuf> {
@@ -1148,6 +1216,123 @@ mod tests {
         frame.extend_from_slice(&0u64.to_le_bytes());
         frame.extend_from_slice(&0u32.to_le_bytes());
         frame
+    }
+
+    #[cfg(unix)]
+    fn cov2_real_checkpoint_helper() -> std::path::PathBuf {
+        let executable = std::env::current_exe().unwrap();
+        let program = executable
+            .parent()
+            .and_then(Path::parent)
+            .unwrap()
+            .join("libra");
+        assert!(
+            program.is_file(),
+            "build the same-source Libra helper before this test"
+        );
+        program
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cov2_explicit_checkpoint_helper_scope_is_narrow_and_task_local() {
+        let program = cov2_real_checkpoint_helper();
+        let argument = crate::internal::ai::history::CHECKPOINT_OBJECT_IO_HELPER_ARG;
+        super::with_no_test_helper_program(async {
+            super::with_explicit_import_checkpoint_helper(
+                Some(&program),
+                Instant::now() + Duration::from_secs(10),
+                async {
+                    assert_eq!(super::helper_program(), None);
+                    let selected = super::registered_helper_command(argument).unwrap();
+                    assert_eq!(selected.as_std().get_program(), program.as_os_str());
+                    assert!(
+                        super::registered_helper_command(super::AUTHORIZED_READ_HELPER_ARG)
+                            .is_none()
+                    );
+                    assert!(
+                        super::registered_helper_command(
+                            crate::internal::ai::history::REJECTED_CLEANUP_INDEX_HELPER_ARG
+                        )
+                        .is_none()
+                    );
+                    tokio::spawn(async move {
+                        super::with_no_test_helper_program(async move {
+                            assert!(
+                                super::registered_helper_command(argument).is_none(),
+                                "other tasks must not inherit executable authority"
+                            );
+                        })
+                        .await;
+                    })
+                    .await
+                    .unwrap();
+                    Ok(())
+                },
+            )
+            .await
+            .unwrap();
+            assert!(super::registered_helper_command(argument).is_none());
+        })
+        .await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cov2_explicit_checkpoint_helper_restores_after_error_and_cancel() {
+        let program = cov2_real_checkpoint_helper();
+        let argument = crate::internal::ai::history::CHECKPOINT_OBJECT_IO_HELPER_ARG;
+        super::with_no_test_helper_program(async {
+            let error: anyhow::Result<()> = super::with_explicit_import_checkpoint_helper(Some(&program), Instant::now()+Duration::from_secs(10), async {
+                assert!(super::registered_helper_command(argument).is_some());
+                anyhow::bail!("synthetic scoped caller failure")
+            }).await;
+            assert!(error.is_err());
+            assert!(super::registered_helper_command(argument).is_none());
+            let entered = std::sync::Arc::new(tokio::sync::Notify::new());
+            let notify = entered.clone();
+            let mut future = Box::pin(super::with_explicit_import_checkpoint_helper(Some(&program), Instant::now()+Duration::from_secs(10), async move {
+                assert!(super::registered_helper_command(argument).is_some());
+                notify.notify_one();
+                std::future::pending::<anyhow::Result<()>>().await
+            }));
+            tokio::select! {
+                _ = entered.notified() => {}
+                result = &mut future => panic!("scope must reach its pending operation: {result:?}"),
+            }
+            drop(future);
+            assert!(super::registered_helper_command(argument).is_none());
+        }).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cov2_explicit_checkpoint_helper_rejects_before_polling_import() {
+        let tmp = tempfile::tempdir().unwrap();
+        let absent = tmp.path().join("absent-libra");
+        let non_executable = tmp.path().join("not-executable");
+        std::fs::write(&non_executable, b"ordinary fixture, never executed").unwrap();
+        std::fs::set_permissions(&non_executable, std::fs::Permissions::from_mode(0o600)).unwrap();
+        for program in [
+            None,
+            Some(Path::new("relative-libra")),
+            Some(absent.as_path()),
+            Some(non_executable.as_path()),
+        ] {
+            let polled = std::sync::atomic::AtomicBool::new(false);
+            let result =
+                super::with_no_test_helper_program(super::with_explicit_import_checkpoint_helper(
+                    program,
+                    Instant::now() + Duration::from_secs(10),
+                    async {
+                        polled.store(true, std::sync::atomic::Ordering::SeqCst);
+                        Ok(())
+                    },
+                ))
+                .await;
+            assert!(result.is_err());
+            assert!(!polled.load(std::sync::atomic::Ordering::SeqCst));
+        }
     }
 
     #[test]

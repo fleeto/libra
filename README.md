@@ -26,6 +26,17 @@ Libra fits into existing developer workflows through Git-compatible objects and 
 
 ---
 
+
+> **Coverage-v2 source version:** The coverage-v2 descriptions below refer to the Libra 0.30.50 source line and later compatible versions. This is not a stable-release announcement; check the [official releases](https://github.com/libra-tools/libra/releases) and `libra --version` for installed support. Other sections retain their own version requirements. Coverage-v2 does not prove native origin or authorize native reasoning artifacts.
+
+In Libra 0.30.50, coverage-v2 capture retains supported
+visible OpenCode reasoning as redacted typed turns while preserving ordinary v1
+bytes. An interrupted old action settles first; a new action can recapture that
+reasoning once. A rejected source in a session with v2 history stops capture;
+inspect `libra agent doctor` and start a new session. Native proof fields still
+require independent source verification. See the [capture reference](docs/commands/agent.md#coverage-v2-capture-libra-03050).
+
+
 ## Key Differentiators
 
 | Capability | Traditional VCS (Git) | Libra |
@@ -105,18 +116,26 @@ libra init --from-git-repository /path/to/existing/git/repo
 ### Use Agent Capture
 
 ```bash
-# Enable capture hooks for Codex, then check the installation
-libra agent enable --agent codex
+# Trust the OpenCode exporter (adjust this directory for your installation)
+libra agent rpc trust --dir "$HOME/.opencode/bin"
+libra agent rpc trust opencode
+
+# Install this repository's capture plugin, then check the installation
+libra agent add opencode
 libra agent list
 libra agent doctor
 
-# Run your agent tool normally — Libra captures sessions and checkpoints
-codex
+# Run OpenCode in this repository, complete a turn, then exit
+opencode
 
-# Inspect captured sessions
+# Inspect captured sessions and checkpoints
 libra agent session list
 libra agent checkpoint list
 ```
+
+Use the directory containing your actual OpenCode executable if it differs from
+the path above. Start OpenCode after installing the plugin; `--pure` /
+`OPENCODE_PURE=1` disables capture.
 
 > See the [agent command guide](docs/commands/agent.md) for supported agents, provider setup, and session management.
 
@@ -181,7 +200,7 @@ chooses a destination, and the second Enter confirms; Esc goes back or cancels.
 
 The supported capture roster is **Claude Code**, **Codex**, and **OpenCode**. Use `libra agent list --schema-version 2 --json` to inspect installation state and import/export capabilities.
 
-The current macOS ordinary OpenCode capture baseline is official **OpenCode 2.0.29** with **Libra 0.30.49**. Follow the [exporter-trust and capture-plugin setup](docs/commands/agent.md#opencode-ordinary-capture-on-macos-libra-03049); `opencode --pure` disables capture. Unsupported reasoning state and its associated text/time are omitted from a safe ordinary checkpoint, which remains `Unproven` / `Partial`. Historical imports containing unsupported reasoning state still fail with `LBR-AGENT-020`. This ordinary path does not admit native `signature`, `redactedData` or `reasoningEncryptedContent` artifacts or prove complete reasoning coverage; native source proof remains unproven.
+The current macOS ordinary OpenCode capture baseline is official **OpenCode 2.0.29** with **Libra 0.30.49**. Session-directory filtering, native executable selection behind supported package-manager launchers, and the empty metadata-only export warning require **Libra 0.30.50 or later**. Follow the [exporter-trust and capture-plugin setup](docs/commands/agent.md#opencode-ordinary-capture-on-macos-libra-03049); `opencode --pure` disables capture. Unsupported reasoning state and its associated text/time are omitted from a safe ordinary checkpoint, which remains `Unproven` / `Partial`. Historical imports containing unsupported reasoning state still fail with `LBR-AGENT-020`. This ordinary path does not admit native `signature`, `redactedData` or `reasoningEncryptedContent` artifacts or prove complete reasoning coverage; native source proof remains unproven.
 
 > See the [agent command guide](docs/commands/agent.md) for provider setup, capture boundaries, and session management.
 

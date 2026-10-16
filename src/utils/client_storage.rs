@@ -57,7 +57,7 @@ use crate::{
         branch::Branch,
         config::{ConfigKv, decrypt_value},
         db,
-        db::{DatabaseRole, establish_connection_with_busy_timeout, schema},
+        db::{DatabaseRole, establish_connection_with_lock_timeout, schema},
         head::Head,
         model::object_index,
     },
@@ -2066,7 +2066,7 @@ impl ClientStorage {
             )
         })?;
         let db_conn =
-            establish_connection_with_busy_timeout(db_path_str, Duration::from_millis(200))
+            establish_connection_with_lock_timeout(db_path_str, Duration::from_millis(200))
                 .await
                 .map_err(|error| {
                     format!(
@@ -3384,7 +3384,7 @@ async fn read_config_env_value(
                     db_path.display()
                 )
             })?;
-            let conn = schema::establish_connection_with_busy_timeout_for_role(
+            let conn = schema::establish_connection_with_lock_timeout_for_role(
                 path,
                 Duration::from_millis(200),
                 role,
@@ -3997,7 +3997,7 @@ async fn update_object_index_once(
     // Background indexing is best-effort but must not lose rows during ordinary
     // commit-time SQLite lock windows; the outer retry loop handles longer locks.
     let db_conn =
-        match db::establish_connection_with_busy_timeout(db_path_str, Duration::from_millis(200))
+        match db::establish_connection_with_lock_timeout(db_path_str, Duration::from_millis(200))
             .await
         {
             Ok(conn) => conn,

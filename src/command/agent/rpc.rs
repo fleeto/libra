@@ -357,17 +357,19 @@ async fn trust(args: AgentRpcTrustArgs, output: &OutputConfig) -> CliResult<()> 
 
 /// DR-04b operator path: pin the provider-exporter binary (e.g. the real
 /// `opencode` CLI) for the sandboxed export bridge. Resolution probes only
-/// registered trusted directories; `record_trust` re-enforces
+/// registered trusted directories and pins the native executable behind a
+/// recognised package-manager shim (the sandbox maps only the pinned file,
+/// so a shim cannot start its target there); `record_trust` re-enforces
 /// canonicalization, world-writable refusal and trusted-directory
 /// containment on the final target (`LBR-AGENT-005` on refusal).
 async fn trust_exporter(slug: &str, output: &OutputConfig) -> CliResult<()> {
-    let binary = crate::internal::ai::observed_agents::resolve_exporter_binary(slug)
+    let resolved = crate::internal::ai::observed_agents::resolve_exporter_binary(slug)
         .await
         .map_err(|e| {
             CliError::fatal(format!("cannot trust provider exporter '{slug}': {e}"))
                 .with_stable_code(StableErrorCode::AgentProvenanceRejected)
         })?;
-    let record = record_trust(slug, &binary).await.map_err(|e| {
+    let record = record_trust(slug, &resolved.binary).await.map_err(|e| {
         CliError::fatal(format!("record trust for provider exporter '{slug}': {e}"))
             .with_stable_code(StableErrorCode::AgentProvenanceRejected)
     })?;
@@ -377,12 +379,18 @@ async fn trust_exporter(slug: &str, output: &OutputConfig) -> CliResult<()> {
             "kind": "provider-exporter",
             "path": record.path.display().to_string(),
             "sha256": record.sha256,
+            "launcher": resolved.launcher.as_ref().map(|path| path.display().to_string()),
         });
         return emit_json_data("agent_rpc_trust", &payload, output);
     }
     if !output.quiet {
+        let via = resolved
+            .launcher
+            .as_ref()
+            .map(|launcher| format!(", launched by {}", launcher.display()))
+            .unwrap_or_default();
         println!(
-            "trusted provider exporter '{slug}' at {} (sha256 {}); the sandboxed export \
+            "trusted provider exporter '{slug}' at {} (sha256 {}{via}); the sandboxed export \
              bridge can now use it",
             record.path.display(),
             record.sha256

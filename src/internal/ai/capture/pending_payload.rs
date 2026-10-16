@@ -27,7 +27,8 @@ use crate::internal::{
     ai::{
         capture::{
             checkpoint::{
-                AuthenticatedPendingEnvelope, CheckpointRedactedPayload, PreparedPendingNativeSeal,
+                AuthenticatedPendingEnvelope, CheckpointRedactedPayload,
+                NativeVersionedReasoningCoveragePlan, PreparedPendingNativeSeal,
                 ReasoningCoveragePlan, ReasoningTurnIdentity,
             },
             pending::{
@@ -227,6 +228,50 @@ pub(crate) struct VersionedPendingPayloadProjection {
     pub(crate) identity_commit_associations: Vec<VersionedPendingIdentityAssociation>,
 }
 
+/// A negative-authority barrier binding the exact rehydrated redacted value
+/// to its original authenticated outer-v2 bytes. It is not a native issuer.
+/// Only authenticated rehydration below can construct it.
+pub(crate) struct VersionedPendingPayloadRequirement {
+    original_envelope_sha256: [u8; 32],
+    redacted_payload_sha256: [u8; 32],
+}
+impl VersionedPendingPayloadRequirement {
+    fn from_authenticated_payload(
+        authentication: &AuthenticatedPendingEnvelope<'_>,
+        payload: &CheckpointRedactedPayload,
+    ) -> Result<Self> {
+        use sha2::{Digest, Sha256};
+        Ok(Self {
+            original_envelope_sha256: Sha256::digest(authentication.bytes()).into(),
+            redacted_payload_sha256: Self::payload_tag(payload)?,
+        })
+    }
+    fn payload_tag(payload: &CheckpointRedactedPayload) -> Result<[u8; 32]> {
+        use sha2::{Digest, Sha256};
+        let mut digest = Sha256::new();
+        digest.update(b"libra/versioned-pending-redacted/v1\0");
+        let snapshot = serde_json::to_vec(payload.snapshot()).map_err(|_| failure())?;
+        for bytes in [
+            snapshot.as_slice(),
+            payload.transcript().bytes(),
+            payload.metadata_json().bytes(),
+            payload.lifecycle_events_jsonl().bytes(),
+            payload.redaction_report_json().bytes(),
+        ] {
+            digest.update((bytes.len() as u64).to_le_bytes());
+            digest.update(bytes);
+        }
+        Ok(digest.finalize().into())
+    }
+    pub(crate) fn matches_payload(&self, payload: &CheckpointRedactedPayload) -> bool {
+        Self::payload_tag(payload).is_ok_and(|tag| tag == self.redacted_payload_sha256)
+    }
+    pub(crate) fn matches_original(&self, bytes: &[u8]) -> bool {
+        use sha2::{Digest, Sha256};
+        <[u8; 32]>::from(Sha256::digest(bytes)) == self.original_envelope_sha256
+    }
+}
+
 /// Original authenticated outer-v2 bytes retained with their ordered,
 /// explicitly versioned associations. This owns DTOs, not native authority.
 #[allow(dead_code)] // COV2-08 consumes this carrier and freshly reauthenticates it.
@@ -256,6 +301,35 @@ impl VersionedPendingReasoningReplay {
         token.matches_stamp(&self.integrity)
             && serde_json::to_vec(&self.associations)
                 .is_ok_and(|encoded| token.matches_associations(&encoded))
+    }
+    pub(crate) fn verify_recomputed_associations(
+        &self,
+        coverage: &VersionedLiveClaimCommitPlan,
+        reasoning: &NativeVersionedReasoningCoveragePlan,
+    ) -> Result<()> {
+        ensure!(
+            self.associations.len() == coverage.ordinary().claims.len(),
+            REMEDY
+        );
+        for (association, (version, claim)) in self.associations.iter().zip(coverage.claims()) {
+            let turn = reasoning
+                .turn(version, &claim.logical_turn_key)
+                .ok_or_else(failure)?;
+            let expected = VersionedPendingIdentityAssociation::from_prepared_turn(
+                version,
+                &claim.logical_turn_key,
+                turn,
+            );
+            ensure!(
+                association.coverage_schema_version == expected.coverage_schema_version
+                    && association.logical_turn_key == expected.logical_turn_key
+                    && association.slot == expected.slot
+                    && association.descriptor_mac == expected.descriptor_mac
+                    && association.disposition == expected.disposition,
+                REMEDY
+            );
+        }
+        Ok(())
     }
 }
 
@@ -383,10 +457,17 @@ impl VersionedPendingPayloadProjection {
         };
         serde_json::to_writer(&mut exact, &projection.redacted).map_err(|_| failure())?;
         ensure!(exact.offset == exact.original.len(), REMEDY);
-        projection
+        let payload = projection
             .redacted
             .rehydrate_authenticated_components(conn, storage, root, identity, deadline)
-            .await
+            .await?;
+        let requirement = VersionedPendingPayloadRequirement::from_authenticated_payload(
+            authentication,
+            &payload,
+        )?;
+        payload
+            .with_versioned_pending_requirement(requirement)
+            .map_err(Into::into)
     }
 
     #[allow(dead_code)] // COV2-08 consumes the original bytes on every replay attempt.

@@ -778,16 +778,48 @@ pub async fn establish_connection_for_role(
     db_path: &str,
     role: DatabaseRole,
 ) -> io::Result<DatabaseConnection> {
-    establish_connection_with_busy_timeout_for_role(db_path, Duration::from_secs(30), role).await
+    establish_connection_with_busy_timeout_for_role(
+        db_path,
+        super::DEFAULT_CONNECTION_TIMEOUT,
+        role,
+    )
+    .await
 }
 
+/// See [`super::establish_connection_with_busy_timeout`]: the timeout also
+/// bounds opening the connection.
 pub async fn establish_connection_with_busy_timeout_for_role(
     db_path: &str,
     busy_timeout: Duration,
     role: DatabaseRole,
 ) -> io::Result<DatabaseConnection> {
+    establish_connection_within_for_role(db_path, busy_timeout, busy_timeout, role).await
+}
+
+/// See [`super::establish_connection_with_lock_timeout`]: the timeout bounds
+/// only lock waits, while opening keeps the ordinary budget.
+pub async fn establish_connection_with_lock_timeout_for_role(
+    db_path: &str,
+    lock_timeout: Duration,
+    role: DatabaseRole,
+) -> io::Result<DatabaseConnection> {
+    let open_timeout = super::DEFAULT_CONNECTION_TIMEOUT.max(lock_timeout);
+    establish_connection_within_for_role(db_path, lock_timeout, open_timeout, role).await
+}
+
+async fn establish_connection_within_for_role(
+    db_path: &str,
+    busy_timeout: Duration,
+    open_timeout: Duration,
+    role: DatabaseRole,
+) -> io::Result<DatabaseConnection> {
     ledger_for_role(role)?;
-    let conn = super::open_connection_without_schema_management(db_path, busy_timeout).await?;
+    let conn = super::open_connection_without_schema_management_within(
+        db_path,
+        busy_timeout,
+        open_timeout,
+    )
+    .await?;
     let compatibility = inspect_schema_for_connection(&conn, role).await?;
     reject_future(role, &compatibility)?;
     if matches!(compatibility, SchemaCompatibility::UpgradeRequired { .. }) {

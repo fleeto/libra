@@ -136,8 +136,38 @@ impl Fixture {
             "547c36eb928da163ef61d019bad669860d519f2da0b67737c9a3920e831c9196"
         );
         this.ok(&["init"]);
-        this.ok(&["agent", "enable", "--agent", "opencode"]);
+        this.install_legacy_observer();
         this
+    }
+
+    fn install_legacy_observer(&self) {
+        // This local enrollment gate never starts OpenCode. Keep its old
+        // producer fixture independent from the current ordinary installer.
+        let recipe: Value = serde_json::from_slice(&fs::read(&self.recipe).unwrap()).unwrap();
+        assert_eq!(recipe["buildIdentity"], "bac21cc4027896b8d1836133c347d20f");
+        let template = recipe["libraTemplate"].as_str().unwrap();
+        assert_eq!(template.len(), 13600);
+        assert_eq!(
+            hex::encode(Sha256::digest(template.as_bytes())),
+            "9c67213be10e16538bfa550501a2dcb7a21c24493b3a8f05592f6c96ff4be27d"
+        );
+        let events = recipe["eventCommandsJson"].as_str().unwrap();
+        assert_eq!(
+            hex::encode(Sha256::digest(events.as_bytes())),
+            "85977fd993350c87dde2cd8cafc4473d7f86309f362a397def7cd16efbcd5dc4"
+        );
+        assert_eq!(recipe["exportDeadlineMillis"], 30000);
+        let observer = template
+            .replace(
+                "__LIBRA_COMMAND_JSON__",
+                &serde_json::to_string(self.libra.to_str().unwrap()).unwrap(),
+            )
+            .replace("__EVENT_COMMANDS_JSON__", events)
+            .replace("__EXPORT_DEADLINE_MS__", "30000");
+        let plugin = self.repo.join(".opencode/plugin/libra-hooks.js");
+        fs::create_dir_all(plugin.parent().unwrap()).unwrap();
+        fs::write(&plugin, observer).unwrap();
+        fs::set_permissions(&plugin, fs::Permissions::from_mode(0o644)).unwrap();
     }
 
     fn command(&self, args: &[&str]) -> Command {
@@ -905,6 +935,18 @@ async fn npr_09_approved() {
     fs::write(&plugin, changed).unwrap();
     repo.assert_refused_unchanged(&manifest, 0).await;
     fs::write(&plugin, &original_plugin).unwrap();
+    // The supported ordinary installer must keep its current v2 template;
+    // it cannot satisfy this immutable private producer's v1 recipe.
+    repo.ok(&["agent", "enable", "--agent", "opencode"]);
+    let ordinary_plugin = fs::read(&plugin).unwrap();
+    assert_ne!(ordinary_plugin, original_plugin);
+    assert!(
+        !String::from_utf8_lossy(&ordinary_plugin)
+            .contains("// libra-plugin-template: opencode-2.0.26-v1")
+    );
+    let mismatch = repo.assert_refused_unchanged(&manifest, 0).await;
+    assert!(String::from_utf8_lossy(&mismatch.stderr).contains("private producer's legacy recipe"));
+    fs::write(&plugin, &original_plugin).unwrap();
     let out = repo.registration(&manifest, 0);
     assert!(out.status.success(), "{}", describe(&out));
     assert_eq!(
@@ -924,7 +966,7 @@ async fn npr_09_approved() {
     fs::copy(&repo.libra, &alternate).unwrap();
     fs::set_permissions(&alternate, fs::Permissions::from_mode(0o755)).unwrap();
     repo.libra = alternate.canonicalize().unwrap();
-    repo.ok(&["agent", "enable", "--agent", "opencode"]);
+    repo.install_legacy_observer();
     let second = repo.manifest("approved-second-path");
     let out = repo.registration(&second, 1);
     assert!(

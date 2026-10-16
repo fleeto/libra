@@ -1,11 +1,17 @@
 # `libra agent`
 
+> **coverage-v2 源码版本：** 下文 coverage-v2 说明对应 Libra 0.30.50 源码线及后续兼容版本，不宣告稳定版已发布；可用性以[官方发布](https://github.com/libra-tools/libra/releases)及 `libra --version` 为准。其它章节保留各自的版本要求；coverage-v2 不证明 native 来源，也不准入原生 reasoning artifact。
+
 管理 Claude Code、Codex 与 OpenCode 的外部代理捕获。
 
 ## macOS 上的 OpenCode 普通采集（Libra 0.30.49）
 
 普通自动采集使用官方 OpenCode **2.0.29**。下文冻结的 2.0.26 词汇和私有 native
 producer 章节属于独立的历史/显式 native 路线，不是普通采集的前置。
+
+Libra 0.30.50 新增 Session 目录过滤、从受支持的包管理器启动器中
+选择原生可执行文件，以及 metadata-only checkpoint 导出为空时的明确警告。
+下文这三项新增行为需要 Libra 0.30.50 或后续版本。
 
 在要采集的仓库中核对版本，然后准备本仓库的 exporter trust 和 observer：
 
@@ -100,8 +106,13 @@ enqueue 由插件内部合并，不作为独立 lifecycle 输入。
 role 只能为 `user`。`message` 和 `user_prompt` 不会填补缺失 prompt。独立弃用
 alias `session.idle` 仍接受，只记录不含内容的 `legacy_event_alias` tracing 警告。
 
-managed plugin 使用 OpenCode 2.0.26 的 `setup(ctx)` API、location-scoped
-事件订阅和只观察的工具 hook。执行 `libra agent enable --agent opencode`
+managed plugin 使用 OpenCode 2.0.26 的 `setup(ctx)` API、事件订阅和只观察的工具
+hook。一个 OpenCode 服务器（例如 `opencode serve --service`）会把所有项目的事件发给
+每个项目的插件。Libra 0.30.50 及后续版本不转发已知属于其他
+`location.directory` 的 Session，并在此关闭移出目录的 Session；没有位置的事件仍会
+转发，除非已知该 Session 属于其他目录。尚未归属的 Session 的工具调用
+通过宿主的 `session.get` 判定（宿主无法回答时照旧转发，并只报告一次
+`session_location_unavailable`）。执行 `libra agent enable --agent opencode`
 刷新；旧模板、修改过的模板或双目录 managed 重复副本均不报告 installed=true。
 Node/Bun 共用 `node:child_process`，固定绝对二进制文件名、`shell:false`；
 session/turn 边界同步转发，tool/compaction 异步观察，不修改宿主参数或返回控制字段。
@@ -140,7 +151,7 @@ assistant 聚合用量优先，没有聚合时才累计去重的 step-finish 明
 ID 容量耗尽后不再消费后续消息。本提取不读取文件、不归档 reasoning 正文；合成 fixture
 不能证明真实 macOS 内容采集或 native reasoning 来源。
 
-OpenCode coverage normalizer 接受 2.0.26 原生 messages 与旧 `info/parts`。
+旧 ordinary OpenCode coverage normalizer 接受 2.0.26 原生 messages 与旧 `info/parts`。
 每条 human message 开始独立且稳定的 logical turn；有效 native `idle` 结束本区间
 所有待定分轮，包括 failed/interrupted。Complete 表示采集表示完整，不等于任务成功。
 最后有效 idle 后的语义消息保持 Incomplete；未知、错型内容与 reasoning 保持
@@ -185,7 +196,7 @@ OpenCode 提取对空输入、非法 JSON 和非法 export 形状显式标记
 | `checkpoint list` | 列出已捕获 checkpoint |
 | `checkpoint show <id>` | 显示安全的 checkpoint 结构摘要（隐藏 metadata 和内部对象 ID） |
 | `checkpoint rewind <id>` | 检查或应用某个 checkpoint 的工作树回退 |
-| `checkpoint export <id>` | 导出 checkpoint transcript：默认脱敏（无需授权）；raw（未脱敏）导出须 `--allow-raw --raw` 并写入 append-only `agent_audit_log`（缺失授权时拒绝并返回 `LBR-AGENT-013`） |
+| `checkpoint export <id>` | 导出 checkpoint transcript：默认脱敏（无需授权）；raw（未脱敏）导出须 `--allow-raw --raw` 并写入 append-only `agent_audit_log`（缺失授权时拒绝并返回 `LBR-AGENT-013`）。未采集到 transcript 的 checkpoint（metadata-only 采集——对 OpenCode 而言即写入时 export bridge 不可用或执行失败）导出 0 字节并发出 warning |
 | `skill search` | 按 `--skill`、`--provider`、`--session`、RFC3339 `--since`/`--until` 搜索捕获的 skill events（`--limit`/`--cursor` keyset 分页、`--json`）。基于 checkpoint metadata 的读时投影，无独立表 |
 | `skill list` | `skill search` 的别名（同过滤项） |
 | `skill registry` | 展示各 agent 的 curated 可发现 skill 注册表（`--provider <slug>` 限定；公开 SkillDiscoverer 面） |
@@ -193,7 +204,7 @@ OpenCode 提取对空输入、非法 JSON 和非法 export 形状显式标记
 | `doctor` | 诊断 hook 安装和捕获状态；检测（`--repair` 时修复）checkpoint 存储不一致。对象检查刻意只读取本仓库的本地对象目录：不可用的 alternate/remote 对象会保守地报告为不可用，而不会在产生诊断时解析外部可控的 alternate 路径。只读的 `legacy_code_residue` 字段（人读为「Frozen Code residue」行）报告冷冻的 Code 时代路径 `.libra/sessions/code/`、`.libra/code/` 与 `libra/intent` ref 是否仍存在；它不会删除或改写该状态，清理另由 plan-20260920 ADR-RC-04 / DEFER-RC-02 承接 |
 | `push` | 将 `refs/libra/traces` 推送到远程（`clean` prune 重写后的非快进推送用 `--force-rewrite`，采用 force-with-lease 语义） |
 | `rpc list` | 列出 `PATH` 上发现的 `libra-agent-*` 二进制（含 trusted/quarantined 状态）；需先开启 external-agents 开关 |
-| `rpc trust <slug>` | 信任一个已发现的二进制——记录 path + sha256 + device/inode/mtime 来源（所在目录 world-writable、或二进制不在受信目录下时拒绝——`LBR-AGENT-005`）。provider-exporter slug `opencode` 则改为固定 provider 自身的 CLI 二进制——只从已注册受信目录解析、绝不扫描 `$PATH`——供沙箱化 export bridge 使用；该形式无需 external-agents opt-in。来源 sha256 以单次流式读取计算、不设固定大小上限，因此大型单文件 provider CLI（OpenCode Bun 构建约 171 MiB）仍可受信；计算期间读出字节超过其报告大小的文件会被拒绝（`LBR-AGENT-005`） |
+| `rpc trust <slug>` | 信任一个已发现的二进制——记录 path + sha256 + device/inode/mtime 来源（所在目录 world-writable、或二进制不在受信目录下时拒绝——`LBR-AGENT-005`）。provider-exporter slug `opencode` 则改为固定 provider 自身的 CLI 二进制——只从已注册受信目录解析、绝不扫描 `$PATH`——供沙箱化 export bridge 使用；该形式无需 external-agents opt-in。来源 sha256 以单次流式读取计算、不设固定大小上限，因此大型单文件 provider CLI（OpenCode Bun 构建约 171 MiB）仍可受信；计算期间读出字节超过其报告大小的文件会被拒绝（`LBR-AGENT-005`）。mise（aube）或 pnpm 的 `.bin` 启动器 shim 会被跟随到其声明的原生可执行文件，该文件本身也必须位于受信目录下（`--json` 中以 `launcher` 字段报告）；JavaScript 启动器会被拒绝（`LBR-AGENT-005`） |
 | `rpc trust --dir <path>` | 注册一个受信目录（`agent.external_agents.trusted_dirs`，默认 `~/.libra/agents`）：外部二进制的 canonical path 必须位于其中之一才可被信任。路径会被 canonicalize，且必须是存在且非 world-writable 的目录 |
 | `rpc untrust <slug>` | 撤销 binary trust；OpenCode 同时原子吊销 native issuer，详见下方轮换与撤销章节（始终可用，不受开关限制） |
 | `rpc invoke` | 在**已信任**的 `libra-agent-*` 二进制上调用一个 JSON-RPC 方法 |
@@ -272,7 +283,14 @@ loopback 端口。取消和绝对 deadline 回收仍持有的进程组，leader 
 二进制的目录，再固定它——`libra agent rpc trust --dir <path>`，然后
 `libra agent rpc trust opencode`。两步都不会打开 external-RPC 表面
 （`agent.external_agents.enabled` 保持不变）；二进制只从已注册受信目录解析，
-绝不扫描 `$PATH`。Linux 内容导出还要求受信的 `bwrap` 通过 Libra 的 descriptor-native
+绝不扫描 `$PATH`。沙箱只映射被固定的那一个文件，因此它必须是 OpenCode 原生可执行文件。
+受信目录中若是包管理器启动器——mise npm 后端（aube）或 pnpm 生成的 `.bin/opencode`
+shim——`rpc trust opencode` 会改为固定该 shim 声明的原生可执行文件，前提是该文件
+所在目录也已登记（拒绝信息会给出需要执行的 `rpc trust --dir` 命令）；JavaScript
+启动器（`#!/usr/bin/env node`）会被拒绝。仍固定着启动器的旧信任记录会让
+`export_bridge` 报告 unavailable。请先按需登记原生可执行文件的目录，再重新执行
+`libra agent rpc trust opencode`。
+Linux 内容导出还要求受信的 `bwrap` 通过 Libra 的 descriptor-native
 `--bind-fd` 安全探测；不支持或过旧的 `bwrap` 会报告 unavailable 并 fail-closed 为
 metadata-only 捕获。应安装或升级系统 `bwrap` 包，绝不启用未沙箱化回退。不支持的 schema version 以 usage 错误（exit 129、category
 `cli`）返回 `LBR-AGENT-017`。当平台无法提供 Libra 的 provider-root 安全打开
@@ -287,6 +305,14 @@ source channel 与 append-only revision 历史。同一个 whole-transcript chec
 M1 前的 capture 以 `coverage_state="unindexed"` checkpoint 时间线返回，不伪造
 revision。subagent 节点只暴露 checkpoint/link 结构，并明确保留 `resolved` 或
 `unresolved`。
+
+Libra 0.30.50 及后续版本中，即使逻辑 turn key 或 checkpoint
+相同，graph 仍分别保留 coverage 1、2 两版记录及各自 revision 历史；公共 JSON
+schema version 1 不变。读到不支持的已存 coverage 版本时，整个查询以
+`LBR-AGENT-009` 失败，不返回成功 graph 或候选内容。请使用支持该已存版本的 Libra
+发布，并运行 `libra agent doctor` 检查目录；不要改写版本号或删除证据。
+doctor 分别报告两版冲突，不输出原始身份或候选内容；包括 `--repair` 在内，
+冲突仍需人工处理。这些 coverage-v2 读取保证要求 Libra 0.30.50 或后续版本。
 
 JSON/machine graph 查询不会打开 transcript/object blob，也不 SELECT working directory、
 description、metadata JSON、redaction report 或 coverage digest。**Breaking change（W5-08）：**
@@ -772,14 +798,17 @@ macOS本地内容门是`agent_local_capture_smoke_test`中的
 
 ### 私有 native-origin issuer 登记（macOS）
 
-普通 `agent rpc trust opencode` 只固定 exporter binary，不登记 issuer，也不证明 reasoning 的 native 来源。此登记路径要求独立安装、已审查的 macOS arm64 `2.0.26-libra-native.1` 私有 producer。先用当前 Libra 可执行文件安装 OpenCode 观察器，再按该私有交付包的初始化说明准备一个新的 owned 安装目录；全局 OpenCode 保持独立。
+普通 `agent rpc trust opencode` 只固定 exporter binary，不登记 issuer，也不证明 reasoning 的 native 来源。历史 native 路径要求独立安装、已审查的 macOS arm64 `2.0.26-libra-native.1` 或 `.2` producer，以及为当前 canonical Libra 可执行文件路径渲染的精确冻结 v1 observer recipe。按已审私有交付包的说明，在隔离、owned 的环境准备该观察器；全局 OpenCode 保持独立。
 
-不可变目录另钉住独立的 `2.0.26-libra-native.2` 候选（build `78c1f19e9249da8d0143a079f90aec9a`，macOS arm64 binary SHA-256 `28174e893a2b63b75f58af4c77212747f6e1eebce5dd0252cfe64847b342615c`）。新增 endpoint descriptor v2 只允许第一方 `anthropic-messages` 路由使用精确 URL `https://api.anthropic.com/v1/messages?beta=true`；receipt 与 Ed25519 安装挑战仍为 v1。Anthropic-compatible、代理与改写 URL 均不匹配。选择 `.2` 仍需实测 binary、新私有安装与 key、显式 exporter trust、按 epoch 显式登记 issuer；`.1` 旧 issuer 可保留为 verify-only，不自动提升旧 key。`.1` 仍是当前本地内容验收基线。目录匹配或合成测试不证明真实 `signature`/`redactedData` 的来源与归档资格；`reasoningEncryptedContent` 仍延期。依赖账号/模型的检查只在本机手工执行，不进入 CI。
+不可变目录另钉住独立的 `2.0.26-libra-native.2` 候选（build `78c1f19e9249da8d0143a079f90aec9a`，macOS arm64 binary SHA-256 `28174e893a2b63b75f58af4c77212747f6e1eebce5dd0252cfe64847b342615c`）。新增 endpoint descriptor v2 只允许第一方 `anthropic-messages` 路由使用精确 URL `https://api.anthropic.com/v1/messages?beta=true`；receipt 与 Ed25519 安装挑战仍为 v1。Anthropic-compatible、代理与改写 URL 均不匹配。选择 `.2` 仍需实测 binary、新私有安装与 key、显式 exporter trust、按 epoch 显式登记 issuer；`.1` 旧 issuer 可保留为 verify-only，不自动提升旧 key。`.1` 仍是冻结的历史 NPR-18 harness 基线，不是当前普通 OpenCode 基线。目录匹配或合成测试不证明真实 `signature`/`redactedData` 的来源与归档资格；`reasoningEncryptedContent` 仍延期。依赖账号/模型的检查只在本机手工执行，不进入 CI。
+
+历史 v1 观察器与当前普通 v2 观察器不同，**没有按目录过滤**，禁止用于共享多项目 OpenCode server。优先使用当前普通采集；任何 legacy 使用都必须隔离为每个 server 仅一个仓库。`agent doctor`/观察器状态因当前检测要求 v2 header，会把旧 v1 报为未安装。`libra agent enable --agent opencode` 会把 managed v1 替换为 v2，导致旧私有 recipe 不匹配。因此，通用重装或 `agent enable` 不是 legacy issuer 登记的修复方式。本兼容修复不改变普通插件的目录过滤，也不新增 legacy 安装器。
+
+下面登记示例以精确的已审历史观察器已就位为前提，刻意不执行 `agent enable`。正式安装版兼容门使用新的 owned 仓库、HOME、XDG 目录与 epoch-0 registry，保留原 `.2` 公开 descriptor 和 issuer/key 不变；仅由实测 producer 的登记挑战访问原 key。不运行 Session、账号/模型请求或 OpenCode server，清理时撤销新 registry。成功仅证明登记兼容，不证明 Source A、当前 `.3` producer 或真实 native 字段归档。
 
 ```sh
 libra agent rpc trust --dir /absolute/approved-private/bin
 libra agent rpc trust opencode
-libra agent enable --agent opencode
 libra agent rpc trust opencode \
   --native-origin-manifest /absolute/private-installation/installation.json \
   --native-origin-expected-epoch 0
@@ -792,6 +821,9 @@ libra agent rpc trust opencode \
 实际 producer 必须在 30 秒内成功回答一次新随机、独立 domain 的 Ed25519 challenge，stdout 上限 4096 bytes，stderr 有界捕获且失败时不回显。随后在同一写事务中重查当前 trust 和 trusted dirs、执行 expected-epoch CAS，只提交一个完整 registry 值。重复物理行、大小写 alias、encrypted/malformed/超限记录均拒绝，不自动修复。上限 64 KiB / 128 issuer；不删除吊销历史腾位置。
 
 新的独立安装 key 为 active，旧 active 转 verify-only；已有 issuer 不由登记或普通 re-trust 重新激活。登记成功仅证明安装 key/binary 关联，不代表 native 字段或归档验收通过；仍须验证 receipt 签名、当前许可、来源坐标和原字段，未知来源保持 partial。JSON 输出中的当前 Libra executable SHA256 仅用于本机 transient 审计，不进入 signed policy，也不固定为历史 Libra 构建。
+
+若人工针对未发布开发版 `cd53…` observer policy 建立了未许可记录，仍会拒绝。请完整保留并备份 registry 和仓库，暂停该仓库受影响的 native 登记/归档，等待单独审查的修复；不得删行、自动迁移或把记录视为已许可。有界兼容检查不代表扫描了所有用户仓库；可在新的隔离工作区使用受支持的普通采集，但不能声称原仓库已修复。
+
 
 
 ### OpenCode native-origin 轮换与撤销
@@ -983,3 +1015,29 @@ import、pending replay 或 native admission。官方版本/来源匹配不批�
 证据；未核实项保持待验。成功普通样本不证明 native 字段、完整 reasoning、真实
 idle.error 失败、自动终态或 full-suite 验收。真实 OpenCode Session/账号/模型检查
 只在 macOS 本机运行，不进 CI；metadata-only、空输出或 skip 不算内容验收。
+
+<!-- Compatibility anchor for earlier links; not a release-status assertion. -->
+<a id="coverage-v2-采集未发布"></a>
+
+## coverage-v2 采集（Libra 0.30.50）
+
+从首个包含 coverage-v2 的稳定版本开始，OpenCode 导出采集与历史导入会保留受支持的
+provider-visible 可读 reasoning，并在脱敏后作为 typed turn 内容写入。含这类内容的
+turn 使用 coverage schema 2，普通 turn 仍使用 schema 1 并保留原有规范字节；
+计算 digest 和 checkpoint 投影前均先脱敏。这不证明 `signature`、`redactedData`
+或 `reasoningEncryptedContent` 的 native 来源；未获证明的字段仍为 partial，不能
+归档为可信 artifact。
+
+保留的可读 reasoning 属于脱敏 checkpoint；执行导出、`libra agent push` 或云同步时，
+它会随 checkpoint 一同处理。目前没有单独排除 reasoning、同时保留其他采集内容的参数。
+
+升级后，如果某个中断动作的 checkpoint 已按 v1（或旧空 revision 集）提交，会先只读
+结算原回执，不新增 claim 或改写 checkpoint。随后一次**新动作**可以按 v2 重采可读
+reasoning 一次，之后重复采集会去重；原 v1 对象、digest 和 claim 保持可读且不改写。
+
+如果来源分类被拒绝，而同一个 Session 已有 v2 claim，本次完整采集／导入都会停止，
+包括新出现的普通 turn；回执和导出任务保持待重试，不创建降级 claim 或成功 ACK。
+持续超限或不受支持的来源可能让该 Session 一直停采。请保留已记录数据，使用
+`libra agent doctor` 检查，并新建 OpenCode Session 继续受支持的采集。候选或未验证
+reasoning 不能将这种失败变为 complete coverage。这些改动不增加命令参数，要求 Libra 0.30.50 或后续版本；依赖 OpenCode Session／exporter／模型的验收只在 macOS
+本机执行，不进入 CI 集成测试。

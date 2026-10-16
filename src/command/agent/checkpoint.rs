@@ -25,7 +25,7 @@ use crate::{
     command::load_object,
     internal::db::get_db_conn_instance,
     utils::{
-        error::{CliError, CliResult, StableErrorCode},
+        error::{CliError, CliResult, StableErrorCode, emit_post_envelope_warning},
         object_ext::TreeExt,
         output::{OutputConfig, emit_json_data},
         util,
@@ -942,6 +942,7 @@ async fn export(args: super::CheckpointExportArgs, output: &OutputConfig) -> Cli
         .await
         .map_err(|e| CliError::fatal(format!("read max_transcript_read_bytes config: {e:#}")))?;
     let (bytes, truncated) = load_checkpoint_transcript_bytes(&row, cap)?;
+    let transcript_captured = !bytes.is_empty();
 
     let emitted = if wants_raw {
         // Grant: audit the raw access, then emit the un-redacted bytes.
@@ -1037,7 +1038,41 @@ async fn export(args: super::CheckpointExportArgs, output: &OutputConfig) -> Cli
             .write_all(&emitted)
             .map_err(|e| CliError::fatal(format!("failed to write export to stdout: {e}")))?;
     }
+    if !transcript_captured {
+        warn_empty_checkpoint_transcript(&conn, &row).await;
+    }
     Ok(())
+}
+
+/// A checkpoint recorded without a transcript (metadata-only capture)
+/// exports zero bytes. Say so once the export is written, so an empty file is
+/// never mistaken for captured content; for OpenCode, name the export bridge
+/// whose unavailability causes it.
+async fn warn_empty_checkpoint_transcript(conn: &DatabaseConnection, row: &CheckpointRow) {
+    use crate::internal::ai::observed_agents::AgentKind;
+
+    let agent_kind = conn
+        .query_one_raw(Statement::from_sql_and_values(
+            conn.get_database_backend(),
+            "SELECT agent_kind FROM agent_session WHERE session_id = ?",
+            [row.session_id.as_str().into()],
+        ))
+        .await
+        .ok()
+        .flatten()
+        .and_then(|session| session.try_get_by::<String, _>("agent_kind").ok())
+        .and_then(|kind| AgentKind::from_db_str(&kind));
+    let hint = if agent_kind == Some(AgentKind::OpenCode) {
+        "; OpenCode content is captured only while its sandboxed export bridge is available \
+         (check `export_bridge` in `libra --json agent list --schema-version 2`)"
+    } else {
+        ""
+    };
+    emit_post_envelope_warning(format!(
+        "checkpoint {} has no captured transcript (metadata-only capture), so the export is \
+         empty{hint}",
+        row.checkpoint_id
+    ));
 }
 
 /// Opaque artifact access is authorized and audited before any lookup/body

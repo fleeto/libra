@@ -36,8 +36,9 @@ use windows_sys::{
                 GetSecurityInfo, SE_FILE_OBJECT,
             },
             DACL_SECURITY_INFORMATION, EqualSid, GetAce, GetSecurityDescriptorControl,
-            GetTokenInformation, IsWellKnownSid, OWNER_SECURITY_INFORMATION, SE_DACL_PROTECTED,
-            SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER, TokenUser, WinLocalSystemSid,
+            GetTokenInformation, IsValidAcl, IsValidSid, IsWellKnownSid,
+            OWNER_SECURITY_INFORMATION, SE_DACL_PROTECTED, SECURITY_ATTRIBUTES, TOKEN_QUERY,
+            TOKEN_USER, TokenUser, WinLocalSystemSid,
         },
         Storage::FileSystem::{
             BY_HANDLE_FILE_INFORMATION, CreateDirectoryW, CreateFileW, DELETE,
@@ -619,6 +620,69 @@ fn create_private_file_at_with_access(
     Ok(file)
 }
 
+/// Visit only bounded allow entries while the caller holds the security descriptor.
+///
+/// # Safety
+/// `acl` must be null or point into a live descriptor returned by Windows. The
+/// descriptor must stay allocated until this function and its callback return.
+unsafe fn for_each_allowed_ace(
+    acl: *const ACL,
+    mut check: impl FnMut(&ACCESS_ALLOWED_ACE) -> io::Result<()>,
+) -> io::Result<()> {
+    // SAFETY: the caller holds the descriptor. Each nullable API result is
+    // checked before conversion; IsValidAcl bounds its entries within the ACL.
+    unsafe {
+        let acl = acl
+            .as_ref()
+            .ok_or_else(|| invalid("Windows ACL is missing"))?;
+        if IsValidAcl(acl) == 0 {
+            return Err(invalid("Windows ACL is invalid"));
+        }
+        for index in 0..acl.AceCount {
+            let mut ace = null_mut();
+            if GetAce(acl, index as u32, &mut ace) == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let header = ace
+                .cast::<ACE_HEADER>()
+                .as_ref()
+                .ok_or_else(|| invalid("Windows ACL entry is missing"))?;
+            // DENY entries grant no access. Other nonstandard ACEs fail closed.
+            if header.AceType == 1 {
+                continue;
+            }
+            if header.AceType != 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "Windows ACL contains an unsupported entry",
+                ));
+            }
+            let size = usize::from(header.AceSize);
+            let sid_offset = std::mem::offset_of!(ACCESS_ALLOWED_ACE, SidStart);
+            // A SID has an eight-byte header followed by four bytes per
+            // subauthority. Bound it before passing it to the SID APIs.
+            if size < sid_offset + 8 {
+                return Err(invalid("Windows ACL allow entry is truncated"));
+            }
+            let sid_bytes =
+                std::slice::from_raw_parts(ace.cast::<u8>().add(sid_offset), size - sid_offset);
+            if 8 + usize::from(sid_bytes[1]) * 4 > sid_bytes.len() {
+                return Err(invalid("Windows ACL entry SID is truncated"));
+            }
+            let allowed = ace
+                .cast::<ACCESS_ALLOWED_ACE>()
+                .as_ref()
+                .ok_or_else(|| invalid("Windows ACL allow entry is missing"))?;
+            let sid = std::ptr::addr_of!(allowed.SidStart).cast_mut().cast();
+            if IsValidSid(sid) == 0 {
+                return Err(invalid("Windows ACL entry SID is invalid"));
+            }
+            check(allowed)?;
+        }
+    }
+    Ok(())
+}
+
 /// Refuse unprotected, foreign-owned or broadly readable key material. SYSTEM
 /// is the sole additional principal allowed by our creation descriptor.
 pub(crate) fn validate_private(file: &File) -> io::Result<()> {
@@ -661,23 +725,7 @@ pub(crate) fn validate_private(file: &File) -> io::Result<()> {
                 "capture key must have an owner-only Windows ACL; run libra agent doctor",
             ));
         }
-        for index in 0..(*acl).AceCount {
-            let mut ace = null_mut();
-            if GetAce(acl, index as u32, &mut ace) == 0 {
-                return Err(io::Error::last_os_error());
-            }
-            let header = &*ace.cast::<ACE_HEADER>();
-            // DENY ACEs grant no access. Reject unfamiliar allow/object/callback ACEs.
-            if header.AceType == 1 {
-                continue;
-            }
-            if header.AceType != 0 {
-                return Err(io::Error::new(
-                    io::ErrorKind::PermissionDenied,
-                    "capture key contains an unsupported Windows ACL entry",
-                ));
-            }
-            let allowed = &*ace.cast::<ACCESS_ALLOWED_ACE>();
+        for_each_allowed_ace(acl, |allowed| {
             let sid = std::ptr::addr_of!(allowed.SidStart).cast_mut().cast();
             if EqualSid(sid, user.User.Sid) == 0 && IsWellKnownSid(sid, WinLocalSystemSid) == 0 {
                 return Err(io::Error::new(
@@ -685,7 +733,8 @@ pub(crate) fn validate_private(file: &File) -> io::Result<()> {
                     "capture key grants access to another Windows user; use an owner-only ACL",
                 ));
             }
-        }
+            Ok(())
+        })?;
     }
     Ok(())
 }
@@ -743,22 +792,7 @@ pub(crate) fn ensure_directory_not_publicly_writable(path: &Path) -> io::Result<
                 "trusted Windows directory has an unrestricted ACL",
             ));
         }
-        for index in 0..(*acl).AceCount {
-            let mut ace = null_mut();
-            if GetAce(acl, index as u32, &mut ace) == 0 {
-                return Err(io::Error::last_os_error());
-            }
-            let header = &*ace.cast::<ACE_HEADER>();
-            if header.AceType == 1 {
-                continue;
-            }
-            if header.AceType != 0 {
-                return Err(io::Error::new(
-                    io::ErrorKind::PermissionDenied,
-                    "trusted Windows directory has an unsupported ACL",
-                ));
-            }
-            let allowed = &*ace.cast::<ACCESS_ALLOWED_ACE>();
+        for_each_allowed_ace(acl, |allowed| {
             let sid = std::ptr::addr_of!(allowed.SidStart).cast_mut().cast();
             const WRITE_RIGHTS: u32 = 0x4000_0000 | 0x1000_0000 | 0x000D_0046;
             if allowed.Mask & WRITE_RIGHTS != 0
@@ -771,7 +805,8 @@ pub(crate) fn ensure_directory_not_publicly_writable(path: &Path) -> io::Result<
                     "trusted Windows directory is writable by another user; move the binary to a protected directory",
                 ));
             }
-        }
+            Ok(())
+        })?;
     }
     Ok(())
 }
@@ -779,6 +814,90 @@ pub(crate) fn ensure_directory_not_publicly_writable(path: &Path) -> io::Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn acl_iteration_rejects_missing_and_truncated_entries() {
+        // SAFETY: null is explicitly rejected before dereference.
+        assert!(unsafe { for_each_allowed_ace(null(), |_| Ok(())) }.is_err());
+
+        #[repr(C)]
+        struct TruncatedAcl {
+            acl: ACL,
+            entry: ACE_HEADER,
+        }
+        let acl = TruncatedAcl {
+            acl: ACL {
+                AclRevision: 2,
+                Sbz1: 0,
+                AclSize: std::mem::size_of::<TruncatedAcl>() as u16,
+                AceCount: 1,
+                Sbz2: 0,
+            },
+            entry: ACE_HEADER {
+                AceType: 0,
+                AceFlags: 0,
+                AceSize: std::mem::size_of::<ACE_HEADER>() as u16,
+            },
+        };
+        let mut visited = false;
+        // SAFETY: the complete ACL and its deliberately short ACE remain live.
+        let result = unsafe {
+            for_each_allowed_ace(&acl.acl, |_| {
+                visited = true;
+                Ok(())
+            })
+        };
+        assert!(result.is_err());
+        assert!(
+            !visited,
+            "a truncated ACE must not reach SID or permission checks"
+        );
+    }
+
+    #[test]
+    fn acl_iteration_rejects_sid_length_outside_its_entry() {
+        #[repr(C)]
+        struct TruncatedSidAcl {
+            acl: ACL,
+            entry: ACCESS_ALLOWED_ACE,
+            authority_tail: u32,
+        }
+        let acl = TruncatedSidAcl {
+            acl: ACL {
+                AclRevision: 2,
+                Sbz1: 0,
+                AclSize: std::mem::size_of::<TruncatedSidAcl>() as u16,
+                AceCount: 1,
+                Sbz2: 0,
+            },
+            entry: ACCESS_ALLOWED_ACE {
+                Header: ACE_HEADER {
+                    AceType: 0,
+                    AceFlags: 0,
+                    AceSize: (std::mem::size_of::<TruncatedSidAcl>() - std::mem::size_of::<ACL>())
+                        as u16,
+                },
+                Mask: GENERIC_READ,
+                // SID revision 1 declares one subauthority, but the entry
+                // contains only its eight-byte SID header.
+                SidStart: u32::from_le_bytes([1, 1, 0, 0]),
+            },
+            authority_tail: 0,
+        };
+        let mut visited = false;
+        // SAFETY: the whole ACL allocation stays live throughout the call.
+        let result = unsafe {
+            for_each_allowed_ace(&acl.acl, |_| {
+                visited = true;
+                Ok(())
+            })
+        };
+        assert!(result.is_err());
+        assert!(
+            !visited,
+            "an out-of-bounds SID must not reach permission checks"
+        );
+    }
 
     #[test]
     fn rejects_traversal_streams_and_windows_device_aliases() {

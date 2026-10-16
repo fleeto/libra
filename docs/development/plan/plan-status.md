@@ -1,6 +1,6 @@
 # 计划执行状况总表（plan-status.md）
 
-> **plan-20261015 现场（2026-10-16 04:11:08 UTC）：** 本地 main 已 fast-forward 到 `deabb37b70d74949a59c3722ad5cee1d8d79145a`。Mega2 `REL-MTR-FIX-01` 已退出并回到 G-07。FIX-MTR-04 不再发布。LTR-00 仍 `in-progress` / `locally-accepted`，formal 0/26。LTR-01 不开工。本次不推送，避免进入未完成的 `0.30.50` coverage 发布。下方 COV/OG 状态条保持各自主题，不由本条改写。
+> **plan-20261015 现场（2026-10-16 04:11:08 UTC）：** 本地 main 已 fast-forward 到 `deabb37b70d74949a59c3722ad5cee1d8d79145a`。Mega2 `REL-MTR-FIX-01` 已退出并回到 G-07。FIX-MTR-04 不再发布。FIX-MTR-03 恢复窗命令已执行，AC-1 未勾选，不是 C/D。LTR-00 仍 `in-progress` / `locally-accepted`，formal 0/26。LTR-01 不开工。本次不推送，避免进入未完成的 `0.30.50` coverage 发布。下方 COV/OG 状态条保持各自主题，不由本条改写。
 
 > **当前最终0.30.50本机验收已过（2026-10-16 03:08:13 UTC）：** R5已实际signed main be05采纳，新双envT2 `Summary [1134.569s] 10219 tests run: 10219 passed (2 slow), 23 skipped` /exit0/raw `f28ad74f0aef5bb220618d175c323786117fa7b7c444bf03afd76ea92ae2d27e`；六manual各1/1/version2/相关质量门及原visible1＋22audit条件映射已核。2048前后同一，full后仅本三plan事实；最终CODE/F/CI/稳定发布/安装/原.2epoch0和C-D待，SourceA/current3未放行。formal59/72=81.94%、source62/72=86.11%、COVsource25/26/formal0不变。
 

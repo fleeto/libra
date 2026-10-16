@@ -4,6 +4,45 @@
 
 管理 Claude Code、Codex 与 OpenCode 的外部代理捕获。
 
+## 原生 Windows 采集
+
+此支持目前仅在 **main 源码构建**中提供，**v0.30.50 发布二进制不包含该功能**。
+在后续正式版本包含此功能之前，请按[源码构建说明](../../../README.md#install)安装。
+
+Windows 可在本地 NTFS 磁盘上采集 Session，无需 WSL。安装 **OpenCode 2.x**；
+GitHub 上的 1.19.0 CLI 使用不兼容的插件 API。配置文件位于
+`%USERPROFILE%\.config\opencode\opencode.json`，原生 CLI 下载地址为
+<https://opencode.ai/update/api/latest/cli/opencode/opencode-windows-x64.zip>。
+将 `libra.exe` 与 `opencode.exe` 加入 PATH 后，在 PowerShell 中运行：
+
+```powershell
+libra init
+libra agent add opencode
+libra agent rpc trust --dir C:\path\to\verified-opencode2
+libra agent rpc trust opencode
+opencode run --standalone "Reply with a short greeting."
+libra agent session list
+libra agent checkpoint list
+libra agent checkpoint export <checkpoint-id>
+```
+
+Windows 通过 no-follow `CreateFileW` 句柄校验本地路径，拒绝 reparse point
+（含 junction）、alternate stream、设备名与 UNC 采集存储。仓库私有密钥使用
+当前用户/SYSTEM ACL、`LockFileEx` 排他锁及原子 no-replace 发布；认证或恢复时
+不会静默替换缺失、损坏的密钥。
+
+Windows OpenCode exporter **没有操作系统级文件系统/网络沙箱**。只运行显式受信的
+`opencode.exe`，复验其字节与文件身份并持有防替换句柄；Windows Job Object
+约束进程树，deadline 为 30 秒，接受的 stdout 上限为 16 MiB。输出暂存在 ACL
+保护的临时文件中，读取后删除；stderr 和环境中的凭据变量不会转发。进程运行时及
+退出后均检查大小，但 Windows 没有 Unix `RLIMIT_FSIZE` 的写入时硬限制，故两次
+检查之间临时输出可能超过接受上限。macOS Seatbelt 与 Linux bubblewrap 要求不变；
+Windows capability 可用性要求受信 exporter，不表示存在 OS 沙箱。
+
+Windows 支持 checkpoint 列表和普通 transcript 导出。仅 owner 可读的原始
+reasoning artifact 导出，以及 `libra agent doctor` 的 object/findings 扫描仍不可用；
+doctor 会明确报告不可用，且不修复这些扫描项。
+
 ## macOS 上的 OpenCode 普通采集（Libra 0.30.49）
 
 普通自动采集使用官方 OpenCode **2.0.29**。下文冻结的 2.0.26 词汇和私有 native
@@ -270,8 +309,9 @@ exporter 与 sandbox。
 
 OpenCode 默认 export 预算为30秒，export lease与插件转发超时精确联动增加15秒余量，
 即45秒。重新运行 `libra agent add opencode` 可刷新旧插件。schema v2 的
-`importable` / `export_bridge` 要求受信 exporter 和当前平台 sandbox 探测成功：
-macOS 使用 Seatbelt，Linux 保留现有受信 bwrap 探测。available 只表示这些前提满足，
+`importable` / `export_bridge` 在 Unix 上要求受信 exporter 和平台 sandbox 探测成功：
+macOS 使用 Seatbelt，Linux 保留现有受信 bwrap 探测。Windows 要求受信的原生 exporter，
+使用上文的 Job Object 进程边界，不提供 OS 沙箱。available 只表示这些前提满足，
 不证明 OpenCode 启动成功、会话内容导出成功或 reasoning 的可信 native 来源。
 超时仍拒绝部分输出并保持现有 metadata-only 降级，16 MiB export 上限不变。
 
@@ -621,7 +661,7 @@ libra agent --json status
 - 外部 `libra-agent-*` 代理**默认禁用**。使用 `libra config set agent.external_agents.enabled true`（仓库级）显式开启；开启前 `rpc list`/`libra-agent-*` 的 `rpc trust`/`rpc invoke` 会以 `LBR-AGENT-002` 拒绝（`rpc untrust` 始终可用——撤销信任只会收紧安全面；`rpc trust --dir <path>` 与 provider-exporter 信任如 `rpc trust opencode` 属纯准备动作——不扫描 `$PATH`、本身不启用任何东西，因此门控下亦可用）。已发现的二进制在 `rpc trust <slug>` 记录来源前保持隔离（world-writable 目录中的二进制拒绝信任）；每次 invoke 都会复验来源（漂移即撤销信任，`LBR-AGENT-005`）；子进程环境被清空为白名单注入，stderr 被捕获/限长/脱敏——绝不继承。invoke 超时、broken pipe、malformed frame 映射 `LBR-AGENT-012`；IO 硬上限超限映射 `LBR-AGENT-007`。
 
 - `libra agent enable` 为 Claude Code 与 Codex 安装的 hook 配置调用顶层 `libra hooks claude|codex <verb>`，并带有 installer 根据 handler timeout 生成的受限隐藏 `--capture-budget-ms` 参数（默认 Claude `10s → 9000`、Codex 普通事件 `30s → 29000`；Codex `SessionEnd` 因宿主三秒上限为 `3s → 2000`；一秒的历史 handler 仍保留可用的 `500ms` capture 切片，另保留最多 1000ms 用于 terminal finalizer 清理）。重跑 enable 会刷新旧配置，隐藏别名也接受该参数以兼容历史已安装命令。已安装的 OpenCode plugin（`.opencode/plugin/libra-hooks.js`）则通过隐藏的 `libra agent hooks opencode <verb>` 入口转发所有事件，不带 installer budget；其 capture deadline 为 OpenCode export deadline。Claude 与隐藏别名在 hook envelope 未通过大小 / UTF-8 / JSON / schema / reported cwd / transcript 路径校验时，会以 `LBR-AGENT-008`（退出码 128）fail-closed 拒绝，且绝不回显 raw stdin。两个路径类字段会在存储解析前限制为 4096 字节。已安装的 Codex 表面会有意确认 malformed/unbound callback 与辅助性的 nonterminal 捕获失败，以免失败阻断宿主任务：通用 ingress、scope 和存储失败只输出经净化诊断且不创建 capture 行。在任何 Libra 仓库之外触发、格式正确的回调没有可绑定的 scope：已安装的 Codex hook 会确认它（退出码 `0`，包括 `SessionEnd`），而 Claude 与隐藏别名返回固定、不含路径的仓库未找到错误 `LBR-REPO-001`（退出码 128）。已损坏的活动仓库不视为“仓库之外”：Claude、隐藏别名（Claude Code / OpenCode / Codex）、gemini 入口以及已安装 Codex 的 `SessionEnd`（仍以非零退出）返回与其他所有仓库命令相同、不含路径的 `LBR-REPO-003`（无法解析的 linked worktree storage，附 `libra worktree repair --confirm <worktree-path>` 修复建议）、`LBR-REPO-002`（数据库缺失或 object format 不受支持）或 `LBR-IO-001`（数据库无法打开——包括由更新版本 Libra 写入——或 object format 无法读取），绝不返回通用的 `LBR-INTERNAL-001` capture 失败（见 `libra hooks`）。与其他所有仓库命令一样，这些入口打开数据库时会自动应用待处理的仓库 schema 迁移。但已校验且已绑定 scope 的 `SessionEnd` 必须持久化或观察到 durable terminal completion/pending receipt；在该证据存在前发生的有界数据库/finalizer 失败会以非零退出，而不会被静默确认。已有 catalog reservation 后的狭义 checkpoint 或 maintenance-lock 失败，才可能仅持久化一条不含敏感内容、可重试的 catalog 诊断。该预算约束可杀 helper、数据库和其它 deadline-aware 阶段；它不是严格的 whole-process host deadline，因为 source 分类、canonicalize、安全打开和 rewind 当前仍在 descriptor 交接前同步发生。NFS/FUSE stall 因而无法被强制取消，这条路径也不承诺 timeout 后的 FD-only autonomous replay。对不一致 store 执行 checkpoint 操作（如 `checkpoint rewind`）——catalog 行的 `parent_commit` 非法或指向缺失的 traces 对象——会以 `LBR-AGENT-009`（退出码 128）失败；运行 `libra agent doctor` 检查 store。
-- 受管 Session Capture 当前要求 Unix 才能安全初始化 repository-private deduplication key。non-Unix platform 会在创建 key file 前 fail-closed 并给出可操作的诊断，而不会使用较弱的 path-based publication fallback。该固定能力诊断会显式到达两个 Codex 入口：nonterminal `hooks codex` callback（包括隐藏历史 alias）向 stderr 输出不含路径的 Unix-host remedy 但以 `0` 退出；`SessionEnd` 以同一 remedy 非零退出。fail-closed 的已安装 Claude 表面与隐藏的 `agent hooks` Claude Code / OpenCode 别名对每个事件都携带同一 remedy 与 `LBR-UNSUPPORTED-001` 非零退出。这个例外不改变 alias 对 malformed envelope 的 fail-closed 契约。它只适用于在 Libra 仓库内触发的回调：在任何 Libra 仓库之外触发的回调在所有平台（无论是否为 Unix）上都遵循上文的仓库外契约。
+- 受管 Session Capture 支持 Unix 和原生 Windows 安全初始化 repository-private deduplication key。在无法提供这些安全原语的平台上，会在创建 key file 前 fail-closed 并给出可操作的诊断，而不会使用较弱的 path-based publication fallback。该固定能力诊断会显式到达两个 Codex 入口：nonterminal `hooks codex` callback（包括隐藏历史 alias）向 stderr 输出不含路径的平台 remedy 但以 `0` 退出；不受支持的非 Windows 平台使用 Unix-host remedy，原生 Windows 初始化失败则提示使用匹配的 `libra.exe` helper 和本地存储；`SessionEnd` 以同一 remedy 非零退出。fail-closed 的已安装 Claude 表面与隐藏的 `agent hooks` Claude Code / OpenCode 别名对每个事件都携带同一 remedy 与 `LBR-UNSUPPORTED-001` 非零退出。这个例外不改变 alias 对 malformed envelope 的 fail-closed 契约。它只适用于在 Libra 仓库内触发的回调：在任何 Libra 仓库之外触发的回调在所有平台（无论是否为 Unix）上都遵循上文的仓库外契约。
 - `checkpoint rewind --apply` 只恢复工作树文件；代理自身的 transcript 文件不会被重写。
 - Hook 和捕获诊断采用 best-effort 方式，设计目标是报告可操作的安装状态，而不是静默忽略缺失的提供商。
 

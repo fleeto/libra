@@ -6,6 +6,10 @@ Manage external-agent capture for Claude Code, Codex, and OpenCode.
 
 ## Native Windows capture
 
+This support is available in **current main source builds** and is not included
+in the **v0.30.50 release binaries**. Until a published release includes it, use
+the [source build instructions](../../README.md#install).
+
 Windows builds support Session Capture on local NTFS drives, without WSL.
 Install **OpenCode 2.x** (the GitHub 1.19.0 CLI has an incompatible plugin API),
 and place its configuration in `%USERPROFILE%\.config\opencode\opencode.json`.
@@ -995,8 +999,10 @@ on them:
   before creating key files, with an actionable diagnostic, rather than using
   a weaker path-based publication fallback. The fixed capability diagnostic is
   explicit for both Codex entry points: nonterminal `hooks codex` callbacks
-  (including the hidden legacy alias) print the path-free Unix-host remedy to
+  (including the hidden legacy alias) print a path-free platform remedy to
   stderr but exit `0`; `SessionEnd` returns non-zero with that same remedy.
+  Unsupported non-Windows platforms use the Unix-host remedy; a native Windows
+  initialization failure points to the matching `libra.exe` helper and local storage.
   The fail-closed installed Claude surface and the hidden `agent hooks`
   Claude Code / OpenCode alias return non-zero for every event with that same
   remedy and `LBR-UNSUPPORTED-001`. This exception does not change the alias's fail-closed malformed-envelope

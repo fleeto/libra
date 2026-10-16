@@ -58,15 +58,18 @@ Libra 以 `$CODEX_HOME` 锁串行自己的命令，在发布任一文件前准�
 元数据（schema 版本、操作、阶段和恢复围栏）及域隔离的文件指纹，不含原始设置快照。未知指纹
 状态会刻意保持零写入，而非自动修复。
 
-受管 Session Capture 当前要求 Unix host 才能以安全的 descriptor-relative、no-replace
-publication 初始化 repository-private deduplication key。non-Unix platform 会在创建任何
+受管 Session Capture 支持 Unix 和原生 Windows 安全初始化 repository-private
+deduplication key。Unix 使用 descriptor-relative、no-replace publication；Windows
+使用本地 NTFS 的 no-follow 句柄、当前用户/SYSTEM ACL 和句柄相对的 no-replace 发布。
+原生 Windows 支持仅在 main 源码构建中提供，不包含在 v0.30.50 发布二进制中，详见
+[原生 Windows 采集](agent.md#原生-windows-采集)。不支持这些安全原语的平台会在创建任何
 key file 前拒绝 capture，并给出可操作的诊断，而不会弱化该安全边界。这个固定能力失败
 对 Codex 绝不静默：nonterminal `libra hooks codex` callback（以及历史
-`libra agent hooks codex` alias）会向 stderr 输出不含路径的 Unix-host remedy 并以
+`libra agent hooks codex` alias）会向 stderr 输出不含路径的平台 remedy 并以
 `0` 退出；`SessionEnd` 则携带同一 remedy 以非零退出。fail-closed 的已安装 Claude
 表面与隐藏的 `libra agent hooks` Claude Code / OpenCode 别名对每个事件都以非零退出，
 并携带同一条不含路径的 remedy 与 `LBR-UNSUPPORTED-001`，绝不输出通用的“retry the hook”
-信息。这个狭窄的能力例外不会放宽
+信息。不受支持的非 Windows 平台使用 Unix-host remedy；原生 Windows 初始化失败则提示使用匹配的 `libra.exe` helper 和本地存储。这个狭窄的能力例外不会放宽
 历史 alias 对 malformed envelope 的 fail-closed 处理。它只适用于在 Libra 仓库内触发的
 回调：在任何 Libra 仓库之外触发的回调在所有平台（无论是否为 Unix）上都遵循下文的仓库外契约。
 
@@ -82,7 +85,7 @@ Codex 回调在存在可信终态边界之前对宿主 Agent 属于辅助采集�
 | 无法读取 `core.objectformat` | `LBR-IO-001` | 修复仓库数据库 |
 | `core.objectformat` 不受支持 | `LBR-REPO-002` | 修复 `core.objectformat` |
 
-优先级依次为：malformed frame（`LBR-AGENT-008`）与仓库之外的调用（`LBR-REPO-001`），其次是 non-Unix 能力拒绝（`LBR-UNSUPPORTED-001`），然后是上述仓库类别，最后是通用 capture 失败。已安装的 Codex 表面保持自身的退出策略：nonterminal 回调被确认（退出码 `0`），可信 `SessionEnd` 以非零退出——活动仓库损坏时给出与上述相同的仓库错误码与修复建议，其余情况给出通用终态诊断。
+优先级依次为：malformed frame（`LBR-AGENT-008`）与仓库之外的调用（`LBR-REPO-001`），其次是不受支持的平台能力拒绝（`LBR-UNSUPPORTED-001`），然后是上述仓库类别，最后是通用 capture 失败。已安装的 Codex 表面保持自身的退出策略：nonterminal 回调被确认（退出码 `0`），可信 `SessionEnd` 以非零退出——活动仓库损坏时给出与上述相同的仓库错误码与修复建议，其余情况给出通用终态诊断。
 
 `libra hooks gemini <verb>` 不再摄入：gemini 已是 uninstall-only（AG-17），降级前安装的过时 hook 配置会得到指向 `libra agent remove gemini` 的可操作错误，而不是静默捕获数据。在任何 Libra 仓库之外，它（以及隐藏的 `libra agent hooks gemini` 别名）改为返回固定的仓库未找到错误（`LBR-REPO-001`，退出码 128）；在已损坏的活动仓库中则返回上表所列不含路径的 `LBR-REPO-003` / `LBR-REPO-002` / `LBR-IO-001`（数据库按普通仓库命令的方式打开：自动应用待处理迁移，并拒绝较新 Libra 写入的 schema）。
 

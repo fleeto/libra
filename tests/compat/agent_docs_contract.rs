@@ -344,12 +344,12 @@ fn hook_docs_pin_marker_ownership_and_malformed_ingress_exit_policy() {
     assert_contains(
         HOOKS_CMD_DOC_EN,
         "docs/commands/hooks.md",
-        "requires a Unix host to initialize",
+        "supports Unix and native Windows",
     );
     assert_contains(
         HOOKS_CMD_DOC_EN,
         "docs/commands/hooks.md",
-        "prints the path-free Unix-host remedy to stderr and exits `0`",
+        "prints a path-free platform remedy to stderr and exits `0`",
     );
     assert_contains(
         HOOKS_CMD_DOC_EN,
@@ -409,7 +409,7 @@ fn hook_docs_pin_marker_ownership_and_malformed_ingress_exit_policy() {
         "docs/commands/zh-CN/hooks.md",
         "在 Libra 仓库之外被调用（`LBR-REPO-001`）",
     );
-    // The non-Unix capability result is scoped to in-repository callbacks;
+    // The unsupported-platform capability result is scoped to in-repository callbacks;
     // the outside-repository contract holds on every platform.
     assert_contains(
         HOOKS_CMD_DOC_EN,
@@ -460,7 +460,7 @@ fn hook_docs_pin_marker_ownership_and_malformed_ingress_exit_policy() {
     assert_contains(
         HOOKS_CMD_DOC_ZH,
         "docs/commands/zh-CN/hooks.md",
-        "当前要求 Unix host",
+        "支持 Unix 和原生 Windows",
     );
     assert_contains(
         HOOKS_CMD_DOC_ZH,

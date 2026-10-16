@@ -73,8 +73,9 @@ cargo build --release --locked
 The source build writes `target/release/libra`; run that binary directly, or use
 `cargo install --path . --locked` to install it in Cargo's binary directory.
 
-Native Windows Agent Session Capture is supported on local NTFS drives with
-OpenCode 2.x. See the [Windows capture setup](docs/commands/agent.md#native-windows-capture)
+Current main source builds support native Windows Agent Session Capture on
+local NTFS drives with OpenCode 2.x. This support is not included in the
+v0.30.50 release binaries. See the [Windows capture setup](docs/commands/agent.md#native-windows-capture)
 for exporter trust and the Windows sandbox limitations.
 
 The script installer also creates the optional shorthand

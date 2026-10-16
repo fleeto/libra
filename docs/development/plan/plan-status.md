@@ -2891,3 +2891,17 @@ COVsource仍25/26、formal0家族C/D、父formal59/71/source61/71。Release 12AC
 
 
 **DEFER-OG-EXPORT-TEST-LEAK-01（计划外遗留，不新增卡/门）：** 本次T1 Nextest对既有cfg(test) `opencode_export_failure_omits_stderr`报告1项LEAK，测试断言通过且整个进程exit0、0FAIL/0retry。此处用owned假shell exporter（固定stderr后exit3），不接入真实OpenCode/账号/Session；source与本卡基线逐字同一。真实资源遗留原因尚UNKNOWN，不能凭PASS推断无害，也不将告警重标为无告警。按用户复杂旁支问题延后政策保留原始full/raw及有限诊断，后续独立排查；本卡不修改exporter runner/Nextest profile/timeout，不新增zeroLEAK门，不影响SourceA/当前3/真实字段硬门。
+
+## G09 — COV2-REL-01 源码版本标签同轴写集（本次候选，实际采纳前不生效）
+
+本增补须唯一 Claude scope PASS、root 裁决、相关 reader/fmt/strict 及实际 signed+DCO main 采纳后生效；不借 FIX-OG-OBSERVER-RECIPE-01 的 CODE PASS 或 final49 T1 授予这些新字节。原修复10路径/49签推freeze及其回执保持原像，不回改。已交付 incoming 为 actual main `1896475b023c983e4fbb7fca956445c1cc88b950`（source-qualified；cf/Cloudflare/HTTP由独立原收据绑定）；它不是未来F或新50T2通过。父source62/72、formal59/72，COVsource25/26/formal0不因本scope再增加。
+
+仅 COV2-REL-01 同一 release availability 轴将 I3→I11：原三plan之外精确增加 `COMPATIBILITY.md`；`README.md`；`README.zh-CN.md`；`docs/commands/agent.md`；`docs/commands/zh-CN/agent.md`；`docs/development/tracing/agent.md`；`docs/development/tracing/coverage-v2.md`；`docs/development/commands/agent.md`；R4 `Cargo.toml`/`install.sh`/`install.ps1`/toolchain `Cargo.lock`及原tag/manifest/assets不变。production behavior0、M、AC/VER数量仍12/12、parent72/COV26和25nonrelease继承C/D不变；仅AC1/AC2/VER1/VER2比较口径明确允许八doc已审exact status/anchor delta，其余判据及out-of-scope原字节保持，无新test/target/registry/CI写权。root是唯一main I/R writer；网站仍由 DEP-COV2-SITE 原owner在 `apps/tanstack-app/content/docs/commands/agent.en.md` 单页对应同步，不默示其它网站路径。
+
+八文档最终postimage SHA/mode和唯一已审status/anchor patch须明确绑定F；runtime/tests/其它行为段原字节不变。八文档是首次新50T2真实输入，不能当I3记账跳过；后续纯上游patch复用仍须八doc最终SHA/mode同一，否则新full。八文档用相同statusface描述拟0.30.50源码线及兼容版本范围，不宣告稳定版已发布或安装已改变；实际可用性以official release及installed `libra --version`为准。若上游顺延patch，root先真实核最新stable并重验所有版本pin，不能机械冒用50。保留official49 ordinary-live历史、旧COV状态引文/失败、旧anchor兼容id、cd53开发行拒绝、未发布local-dev标志、SourceA/current3/native字段/opaque artifact独立门。
+
+顺序：独立scope审/采纳→最终新bump及已采纳labels→fresh六manual各1/1、fresh classifier/预登记后唯一visible-only一次（≤600s）及相关quality→新50 T2双env full→final发布单Claude/root/signedF/currentSHA CI/四平台/manifest/Homebrew/站点/curl/installedF原2freshownedepoch0及C/D。旧50T2实际10216/2slow/2flaky/23skip和修复49T1实际10219/2slow/1leaky/23skip均保留，不挪作新50 PASS；unknown LEAK原因不改称已修。12+10审计仅七行为文件SHA/mode及原具名gate完全同一且root冻结点再核才可映射，原legacyFAIL/defer不转PASS。未来F/role receipt/new50终态均由真实收据后填，不预写。
+
+**R1 FAIL及R2精确修正（2026-10-16 00:04:23 UTC，候选未采纳）：** 原scope R1 raw `c1ffeb83a136dd4b0baea7e07c9a4177a30fc105877400fd2799eed1dae6d900` 为FAIL，保留B1网站版本说明落入代码块、B2README误提升普通采集最低版本、B3漏developer命令页。R2以既有同步器纯函数从root候选重新生成网站单页；保留official49+OpenCode29普通采集基线和原普通采集标题/链接，仅三项新增行为及coverage-v2要求50；新增第八公开doc `docs/development/commands/agent.md`，因此I11/R4/root15+site1/prod0/M，12AC12VER与72/26不变。修订同步当前slot/summary/DEP及精确比较口径；其它行为/native门无变化。
+
+**锚点与后继边界：** root Markdown内保留旧heading兼容HTML id；网站现有Markdown编译器不保留raw HTML id，仅承诺新标题生成的实际站点锚点及现有普通49标题不变，不伪称旧coverage-unreleased站点片段已获兼容。这个有限网站旧片段兼容缺口作为计划外低优先事项延后，不扩大本次单页写集到renderer、不开general raw HTML权限。未来OG24/27/28/29写入这些页时必须给新增能力独立标版本/未发布状态，不能借本coverage-v2源码说明授予native/SourceA；如上游占用50需要修改本受审doc字节，须重新审查具体doc delta/链接并按真实源码差异验证，不能冒称doc逐字等价。只R4纯版本且8doc/生产/测试其余字节不变的同实现顺延仍沿用户已授权复用规则。

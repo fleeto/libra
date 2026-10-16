@@ -1,5 +1,11 @@
 # 计划执行状况总表（plan-status.md）
 
+> **native attest 隔离修复本机验收已过（0.30.51 未发布）：** 当前最终工作树 native-origin40、架构64/文档33/Hook12/版本2、nightlyfmt、all-targets/all-features `-D warnings`、双envfull均实际exit0；full **10223/10223 passed，13slow/1flaky/1leaky，23skip**，raw `67ac0a3ab4cc60c872dc755aa4764d90a407aff48a79e85cc96eb74f6a19fd1c`，strict raw `0da2d4e9a61b2484bfcef7aa3c7cbdee917f723567b3b8d2ff7f9dfc577453e1`。2051 tracked工作树输入前后SHA/mode相同；用户04/05原改动保留、不stage，明确guard消费的原/现DEP文本等价，不能把dirty文档冒称发布树同字节。唯一Claude完整实现/文档/版本/状态链R1/R2/R3 PASS（actual29+16+5完整Read；最终补证raw `e7103750a4529c47108dab36559ac6368725bed4030a34a9aec071ea232d9447`），root已裁决。网站最终11tests/typecheck/build/双语local200均过，signed+DCO cf `8c6e8f1ee22aaafeb54df14f635c5e11199d13ee` 已准备、尚未Push/部署；本次main/cf Push、当前F CI、tag/四平台/稳定发布/清单/CDN/安装和C-D仍待。正式 **60/73=82.19%**、source **62/73=84.93%**、COV26/26不增；无current3 SOURCE/native/OG24.3 grant。以下此前“待重验/待补审”段保留为历史，本机验收不等于卡done。
+
+
+> **native attest 隔离修复实施中（0.30.51 待发布）：** 规划已由 signed main `9071ad0e7f978e9c85f0e4a7bcbb399484e2b2b0` 采纳。首轮本地 native-origin 40、架构64/文档33/Hook12均实际通过；唯一Claude实现审查PASS raw `04997d05f8e278437ec46d8732de447babe9e962333c883fc0861d1becf5e7d6`，root恢复29/29完整Read（报告30为计数笔误）。其P3测试/取消措辞已补齐，当前最终源码待重验/补审；旧Clippy为该补改主动停止，不记PASS。网站首轮11文档tests/typecheck/build和双语本地预览200已过，最终同步/签推/实际部署仍待。上游稳定050、051 tag查询404后仅选定patch051，未发布；本卡独立full/最终strict/签名main-cf/四平台/发布及安装全部仍待，正式60/73=82.19%、source62/73=84.93%、COV26/26不增；无SOURCE/native/OG24.3授权。
+
+
 > **native attest 启动隔离修复已采纳（本次签名 main 交付生效）：** 唯一 Claude Code 规划 R5 PASS，raw `03b328ec691520c68b53bb9885d1a6fa6b3c83e56d1df98046573c9f631be167`；root已核对3/3完整Read及R3/R4复用链并采用推荐方案。新增 `FIX-OG-NATIVE-LAUNCH-01`，父计划73卡，正式 **60/73=82.19%**、源码 **62/73=84.93%**，COV26/26完成不变；这是必要启动安全修复，不是新卡完成。原73采纳前72卡及全部FAIL/UNRUN历史保留。修复source/code/release尚待；原SOURCE/真实Bun/registered lane/SourceA/OG24.3/RUN029硬门保留，下一张先执行本修复卡。
 
 
@@ -9,7 +15,7 @@
 
 | 顺序/DEP/DAG | 写集/发布/共享slot | 追溯/验证矩阵 | 里程碑/风险/状态 |
 |---|---|---|---|
-| DEP-OG-NATIVE-LAUNCH-BASE→FIX-OG-NATIVE-LAUNCH-01.source-qualified→SRC029只读；FIX.release-closeout→shared-return→OG24.3 grant→RUN029→OG27 | 仅父计划attest.rs新writer、5docs/docs-contract/三plan/版本面及cf单页；独立patch全C-D/所有shared写入/postSHA登记先于OG24grant，非FAST04/COV成员；无新并发写权 | exact15/owned0700canonical空TMP/创建验证spawn及受控终态/cleanup失败/成功未reapleader同组回收；VER1–4+full/Claude/站点/四平台；真实Bun和registered lane仍阻SRC | M-NATIVE-LAUNCH / RISK-NATIVE-ATTEST-TMP-REUSE；原错误库实际dlopen，不属可延期TUI；当前pending、无SOURCE/native/cardGO。采纳后父73/formal60/source62，COV26/26原完成不变；修订履历见父G09本次表行 |
+| DEP-OG-NATIVE-LAUNCH-BASE→FIX-OG-NATIVE-LAUNCH-01.source-qualified→SRC029只读；FIX.release-closeout→shared-return→OG24.3 grant→RUN029→OG27 | 仅父计划attest.rs新writer、5docs/docs-contract/三plan/版本面及cf单页；独立patch全C-D/所有shared写入/postSHA登记先于OG24grant，非FAST04/COV成员；无新并发写权 | exact15/owned0700canonical空TMP/创建验证spawn及受控终态/cleanup失败/成功未reapleader同组回收；VER1–4+full/Claude/站点/四平台；真实Bun和registered lane仍阻SRC | M-NATIVE-LAUNCH / RISK-NATIVE-ATTEST-TMP-REUSE；原错误库实际dlopen，不属可延期TUI；当前in_progress/local-accepted，本机full/strict/单Claude链过；main-cf Push/部署/独立发布C-D待；无SOURCE/native/cardGO。采纳后父73/formal60/source62，COV26/26原完成不变；修订履历见父G09本次表行 |
 
 > **SRC029 最新审查与窄修订（2026-10-16；修订须本次唯一Claude PASS、root裁决及signed main采纳后生效）：** 范围68已由main `f29685679e288b283d5d56f0328a27914650b4d2`实际采纳。R3静态完整Read审查297/297、sole Claude PASS（raw `88215a808d52d2a88a85fbd0d96eb1e19c10bcfd10968b3df76af88454e985de`），root已独立恢复全部68文件内容并核8597同一；随后50/50完整Read补审确认四旧测试断言保留，但Anthropic缺少block stop的两项负例真实FAIL，窄范围Claude结论FAIL/P2 blocking（raw `a652264cbac692f7005c76397d02556121b49357c16213e6f5199016611557c8`）。该新失败不倒改先前静态PASS；source/profile/native总门仍UNPROVEN。仅拟授新private successor内两个既选路径的最小修复，见父计划[明确原生结束修订](plan-20260902.md#native029-explicit-completion-scope)。父formal **60/72=83.33%**、source **62/72=86.11%**、COV **26/26**均不增加。
 
@@ -3014,3 +3020,17 @@ SDK11 independent A/B、完整11body/22diff单审与root裁决、derived version
 ## SRC029 下一执行项（2026-10-16）
 
 先完成[两路径G09](plan-20260902.md#native029-explicit-completion-scope)相关QA、唯一Claude及signed main采纳，再新private successor修复Anthropic未闭合reasoning撤销与回归；之后继续S1–S8整体来源门。不是当前3或native批准。上一轮75d cancelled/f296实际全部CI成功已按顶部补记；不重开已完成COV家族，不改版本、网站命令或全局OpenCode。正式60/72=83.33%、source62/72=86.11%，下张执行卡仍OG-UPGRADE-029-01的SRC029来源子门。
+
+
+<a id="native-attest-launch051-localacceptance"></a>
+### native attest 0.30.51 本机验收事实（签名源码/发布仍待）
+
+本卡工作树后像 `src/internal/ai/observed_agents/native_origin/attest.rs` 全文件SHA-256 `0be80d2ca58653f7a693034eb791438b14ccd54291db6f83f507aabf5583dc0e`、0644，唯一生产prefix自Claude R1起字节不变；R2仅补同文件tests与取消措辞，R3补实际Cargo.lock/父计划hunk（Libra LargeFile占位不当作已读）。三轮actual完整Read分别29/16/5，root逐行恢复工具返回，未凭报告计数笔误或占位授GO。R1 raw `04997d05f8e278437ec46d8732de447babe9e962333c883fc0861d1becf5e7d6`、R2 raw `dee29fa6b9011037556b20f41c8d3f248cf08b318cb0ab8996eac46e0d5dd39f`、R3 raw `e7103750a4529c47108dab36559ac6368725bed4030a34a9aec071ea232d9447`；全部PASS只覆盖实现/文档/patch意图，不是SOURCE/native/发布通过。
+
+新VER1/2/3及旧4个NPR09在定向和完整full均首试PASS。native-origin40、架构64+文档33+Hook12+版本2、fmt与strict全部0。双env `cargo nextest run --all --no-fail-fast --retries 2` 实际exit0、wall1867.40s、Nextest868.421s；10223/10223通过，13slow、1flaky、1leaky、23skip，原raw SHA `67ac0a3ab4cc60c872dc755aa4764d90a407aff48a79e85cc96eb74f6a19fd1c`。原40/109/fmt首轮与被主动中止的旧Clippy -2、最初非Send编译FAIL均保留，不倒记为最终PASS。最终严格Clippy275.33s/exit0，raw `0da2d4e9a61b2484bfcef7aa3c7cbdee917f723567b3b8d2ff7f9dfc577453e1`；附加生产lib/allfeatures lint93.53s/exit0，关闭先前let-and-return疑问。不是Linux功能验收。
+
+**计划外既有遗留追加，不新增卡/不改73分母：** `DEFER-OG-TEST01` 追加同一mirror fetch `test_fetch_into_mirror_updates_and_prunes_all_refs` 的TRY1 FAIL4.501s、TRY2 FAIL18.437s、TRY3 PASS38.616s / FLAKY3/3（此前2026-10-10及10-14已有同名观察），根因仍UNKNOWN/UNFIXED。`DEFER-VALIDATION-NEXTEST-LEAK-01` 追加 `agent_push_seed_readiness_accepts_missing_or_empty_marker_dir` 的LEAK0.215s；测试本体通过、进程/stdio残留归因未定，未修复，不记零leak。按用户延后同类难题的指令仅留实证，不扩大本卡写集、不移除原测试或改变full标准。
+
+网站cf `8c6e8f1ee22aaafeb54df14f635c5e11199d13ee` 为本卡单页signed+DCO提交，已核committed page SHA `c5f82020de058867d593a4bfdd41f45b0b36ca300453f9b32441cd6a13aef6f9`=最终sync/check/typecheck/build/11docs测试输入，双语本地预览200含新措辞。当前仅local commit，Push/Cloudflare/线上新文案未发生；线上old基线使用既有acceptance UA双语200、尚无新句。首次裸urllib403保留，不当发布失败或PASS；普通浏览器也已确认old文档正常可见，无CAPTCHA或安全绕过。
+
+只在本卡实际signed main交付并由root验证commit内上述post-image/mode后，SRC029才可消费此只读新像；具体F SHA由实际交付receipt实录，不能猜测。OG24自己的attest仍只读；修复全部shared I/独立release/C-D/三plan收口/postSHA登记及signed-return完毕前，不授OG24.3 grant。真实selected9f消费新TMP、registered lane every-launch、完整S1–S8与Source A仍阻断；合成helper/本次full不代替真实native字段或注册。主/站Push、当前F安全CI、签名tag、四平台、稳定release、manifest/CDN/Homebrew、指定curl安装均须actual完成后才卡done；正式60/73/source62/73/COV26/26不变。

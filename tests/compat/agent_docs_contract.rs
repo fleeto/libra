@@ -18,6 +18,44 @@ const COMPATIBILITY_DOC: &str = include_str!("../../COMPATIBILITY.md");
 const ERROR_CODES_DOC: &str = include_str!("../../docs/error-codes.md");
 
 #[test]
+fn native_attestation_launch_docs_disclose_isolation_and_limits() {
+    for (label, document) in [
+        ("EN", AGENT_CMD_DOC_EN),
+        ("compatibility", COMPATIBILITY_DOC),
+        ("tracing", AGENT_DOC),
+        (
+            "native-origin design",
+            include_str!("../../docs/development/internal/opencode-native-origin.md"),
+        ),
+    ] {
+        for required in [
+            "caller `TMPDIR`",
+            "mode 0700 and empty before the producer starts",
+            "cleanup refuses registration",
+            "cancellation cleanup is best effort",
+            "while the leader PID is still reserved",
+            "later challenges never reuse",
+            "Libra-launched installation challenge",
+            "real-field archive gates remain unproven",
+        ] {
+            assert_contains(document, label, required);
+        }
+    }
+    for required in [
+        "不继承调用者的 `TMPDIR`",
+        "0700 且为空",
+        "显式清理失败",
+        "取消时尽力清理",
+        "leader PID 仍保留",
+        "后续挑战绝不重用",
+        "仅覆盖 Libra 发起的安装挑战",
+        "真实字段归档门保持未放行",
+    ] {
+        assert_contains(AGENT_CMD_DOC_ZH, "zh-CN", required);
+    }
+}
+
+#[test]
 fn reasoning_artifact_lifecycle_docs_match_current_contract() {
     for (label, document) in [
         ("EN", AGENT_CMD_DOC_EN),

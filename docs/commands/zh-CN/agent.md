@@ -838,6 +838,10 @@ macOS本地内容门是`agent_local_capture_smoke_test`中的
 
 ### 私有 native-origin issuer 登记（macOS）
 
+安装挑战会在 owned 私有安装目录内，为每次启动建立独立的 home、config、data、cache、state 和 tmp 目录。初始环境逐项构造，不继承调用者的 `TMPDIR`、运行时加载覆盖变量或 HOME/XDG 配置。producer 启动前，tmp 必须为 canonical、当前用户所有、0700 且为空；前置检查或显式清理失败均通过既有固定挑战错误拒绝登记。
+
+Scratch 在子进程生命周期内保留，并在正常退出、失败或超时后清理；取消时尽力清理。继承同一进程组的后代会在 leader PID 仍保留时终止。父进程崩溃或 SIGKILL 可能留下仅 owner 可访问的 scratch，后续挑战绝不重用。此隔离仅覆盖 Libra 发起的安装挑战；独立启动的 OpenCode 会话仍须满足各自运行条件，当前 `.3` SOURCE、Source A 与真实字段归档门保持未放行。
+
 普通 `agent rpc trust opencode` 只固定 exporter binary，不登记 issuer，也不证明 reasoning 的 native 来源。历史 native 路径要求独立安装、已审查的 macOS arm64 `2.0.26-libra-native.1` 或 `.2` producer，以及为当前 canonical Libra 可执行文件路径渲染的精确冻结 v1 observer recipe。按已审私有交付包的说明，在隔离、owned 的环境准备该观察器；全局 OpenCode 保持独立。
 
 不可变目录另钉住独立的 `2.0.26-libra-native.2` 候选（build `78c1f19e9249da8d0143a079f90aec9a`，macOS arm64 binary SHA-256 `28174e893a2b63b75f58af4c77212747f6e1eebce5dd0252cfe64847b342615c`）。新增 endpoint descriptor v2 只允许第一方 `anthropic-messages` 路由使用精确 URL `https://api.anthropic.com/v1/messages?beta=true`；receipt 与 Ed25519 安装挑战仍为 v1。Anthropic-compatible、代理与改写 URL 均不匹配。选择 `.2` 仍需实测 binary、新私有安装与 key、显式 exporter trust、按 epoch 显式登记 issuer；`.1` 旧 issuer 可保留为 verify-only，不自动提升旧 key。`.1` 仍是冻结的历史 NPR-18 harness 基线，不是当前普通 OpenCode 基线。目录匹配或合成测试不证明真实 `signature`/`redactedData` 的来源与归档资格；`reasoningEncryptedContent` 仍延期。依赖账号/模型的检查只在本机手工执行，不进入 CI。

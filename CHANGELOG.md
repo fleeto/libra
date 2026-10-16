@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.30.51] — 2026-10-17
+
+### Native installation challenge isolation
+
+- Give each Libra-launched native-origin installation challenge fresh, owned
+  0700 home, configuration, data, cache, state and temporary directories.
+  Refuse unsafe or nonempty temporary directories before starting the producer;
+  use an explicit environment without caller runtime-loading overrides.
+- Keep the challenge leader unreaped while terminating inherited process-group
+  descendants, then reap the direct child and remove the private scratch.
+  Explicit cleanup failure refuses registration. Cancellation cleanup is best
+  effort; a parent crash may leave owner-only directories that are never reused.
+- This change protects installation challenges launched by Libra. Qualification
+  of the current private OpenCode producer, its separately launched sessions,
+  Source A native fields and archival remain incomplete. Account/model/session
+  checks remain local macOS acceptance; Linux functionality is user-verified.
+
 ## [0.30.50] — 2026-10-16
 
 ### OpenCode capture and coverage-v2

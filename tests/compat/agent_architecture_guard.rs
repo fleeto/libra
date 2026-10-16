@@ -572,6 +572,31 @@ fn capture_private_key_has_single_owner() {
         owner.hook_dependencies
     );
 
+    // Platform-specific key I/O remains a private child of the shared owner;
+    // no capture sibling or command can invoke its loader directly.
+    let windows = key
+        .items
+        .iter()
+        .find_map(|item| match item {
+            syn::Item::Mod(item) if item.ident == "windows" => Some(item),
+            _ => None,
+        })
+        .expect("the shared key owner must declare its Windows backend");
+    assert!(matches!(windows.vis, syn::Visibility::Inherited));
+    assert!(windows.attrs.iter().any(|attr| {
+        attr.path().is_ident("cfg")
+            && attr
+                .parse_args::<syn::Path>()
+                .is_ok_and(|path| path.is_ident("windows"))
+    }));
+    assert!(windows.attrs.iter().any(|attr| {
+        matches!(&attr.meta, syn::Meta::NameValue(meta)
+            if meta.path.is_ident("path")
+                && matches!(&meta.value, syn::Expr::Lit(value)
+                    if matches!(&value.lit, syn::Lit::Str(path) if path.value() == "key_windows.rs")))
+    }));
+    let windows_owner_path = repo_root().join("src/internal/ai/capture/key_windows.rs");
+
     // Walk every production source, not only the AI subtree: a doctor,
     // import, or cloud command must not grow a second key reader either.
     let mut paths = Vec::new();
@@ -596,6 +621,7 @@ fn capture_private_key_has_single_owner() {
         "src/command/agent/import.rs",
         "src/internal/ai/hooks/runtime.rs",
         "src/main.rs",
+        "src/internal/ai/capture/key_windows.rs",
     ] {
         assert!(
             paths.contains(&repo_root().join(expected)),
@@ -611,6 +637,14 @@ fn capture_private_key_has_single_owner() {
             "{} must not declare a second key location",
             path.display()
         );
+        if path == windows_owner_path {
+            assert_eq!(
+                other.loaders, 1,
+                "the private Windows backend has one initializer"
+            );
+            assert!(other.hook_dependencies.is_empty());
+            continue;
+        }
         assert_eq!(
             other.loaders,
             0,
@@ -1832,9 +1866,10 @@ fn import_command_helpers_stay_registered_bounded_and_content_free() {
         );
     }
     assert!(
-        preparation.contains("#[cfg(not(unix))]")
-            && preparation.contains("ImportError::AuthorizedReaderUnavailable"),
-        "{} descriptor preparation must fail closed outside Unix rather than launch a raw-source helper without process-tree containment",
+        preparation.contains("#[cfg(not(any(unix, windows)))]")
+            && preparation.contains("ImportError::AuthorizedReaderUnavailable")
+            && preparation.contains("CancellationSafeChild::spawn_windows(&mut command)"),
+        "{} descriptor preparation must use Windows job containment or fail closed when no process-tree containment exists",
         path.display()
     );
     let stdout_drain = preparation

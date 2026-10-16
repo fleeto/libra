@@ -4,7 +4,7 @@
 //! Library callers use it when a trusted descriptor can block in filesystem
 //! I/O and an in-process cancellation point cannot enforce the host deadline.
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use std::process::Stdio;
 use std::{
     io::{Read, Write},
@@ -15,7 +15,7 @@ use std::{
 
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncReadExt;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use tokio::io::AsyncWriteExt;
 
 use crate::internal::ai::observed_agents::{
@@ -231,6 +231,8 @@ pub(crate) struct CancellationSafeChild {
     // raw descriptor or pipe handles open.
     process_group: Option<u32>,
     task_abort_handles: Vec<tokio::task::AbortHandle>,
+    #[cfg(windows)]
+    job: Option<crate::utils::windows_process::CaptureJob>,
 }
 
 impl CancellationSafeChild {
@@ -240,6 +242,8 @@ impl CancellationSafeChild {
             child: Some(child),
             process_group: None,
             task_abort_handles: Vec::new(),
+            #[cfg(windows)]
+            job: None,
         }
     }
 
@@ -252,6 +256,37 @@ impl CancellationSafeChild {
             process_group: child.id(),
             child: Some(child),
             task_abort_handles: Vec::new(),
+            #[cfg(windows)]
+            job: None,
+        }
+    }
+
+    /// Spawn suspended, assign a kill-on-close job, then resume. Failure to
+    /// establish containment kills the still-suspended child and returns an error.
+    #[cfg(windows)]
+    pub(crate) fn spawn_windows(command: &mut tokio::process::Command) -> std::io::Result<Self> {
+        command.creation_flags(crate::utils::windows_process::CREATE_SUSPENDED_NO_WINDOW);
+        let mut child = command.spawn()?;
+        let job = child
+            .id()
+            .ok_or_else(|| std::io::Error::other("capture helper has no process id"))
+            .and_then(crate::utils::windows_process::CaptureJob::attach_and_resume);
+        match job {
+            Ok(job) => Ok(Self {
+                child: Some(child),
+                process_group: None,
+                task_abort_handles: Vec::new(),
+                job: Some(job),
+            }),
+            Err(error) => {
+                let _ = child.start_kill();
+                if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                    runtime.spawn(async move {
+                        let _ = child.wait().await;
+                    });
+                }
+                Err(error)
+            }
         }
     }
 
@@ -274,6 +309,8 @@ impl CancellationSafeChild {
     /// still receives the child even in that case: it may already have exited,
     /// and retaining it would leak a zombie.
     pub(crate) fn terminate_and_reap_checked(&mut self) -> std::io::Result<()> {
+        #[cfg(windows)]
+        self.job.take();
         // Kill the owned process group *before* reaping its leader. A helper
         // can fork/exec a descendant that inherits raw stdin or stdout; once
         // `wait()` observes the leader, its PID may be recycled and a later
@@ -315,6 +352,8 @@ impl CancellationSafeChild {
     pub(crate) fn disarm_child_after_wait(&mut self) {
         self.child.take();
         self.process_group = None;
+        #[cfg(windows)]
+        self.job.take();
     }
 
     /// Every child and registered pipe task has completed normally.
@@ -528,13 +567,13 @@ pub(crate) async fn read_live_claude_source_until(
 /// the import descriptor handoff rather than re-addressing a provider path in
 /// the child.
 #[cfg_attr(windows, allow(unused_mut))]
-async fn run_registered_descriptor_helper_until(
+pub(crate) async fn run_registered_descriptor_helper_until(
     mut command: tokio::process::Command,
     source: std::fs::File,
     output_cap: u64,
     deadline: Instant,
 ) -> RegisteredHelperOutput {
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = (command, source, output_cap, deadline);
         // A descriptor-bearing helper must remain contained as one owned
@@ -542,7 +581,7 @@ async fn run_registered_descriptor_helper_until(
         return RegisteredHelperOutput::Failed;
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     {
         if Instant::now() >= deadline {
             return RegisteredHelperOutput::DeadlineExceeded;
@@ -553,11 +592,18 @@ async fn run_registered_descriptor_helper_until(
             .stderr(Stdio::null())
             .kill_on_drop(true);
         configure_private_helper_process_group(&mut command);
+        #[cfg(unix)]
         let child = match command.spawn() {
             Ok(child) => child,
             Err(_) => return RegisteredHelperOutput::Failed,
         };
+        #[cfg(unix)]
         let mut child = CancellationSafeChild::new_process_group(child);
+        #[cfg(windows)]
+        let mut child = match CancellationSafeChild::spawn_windows(&mut command) {
+            Ok(child) => child,
+            Err(_) => return RegisteredHelperOutput::Failed,
+        };
         let Some(mut stdout) = child.child_mut().and_then(|child| child.stdout.take()) else {
             child.terminate_and_reap();
             return RegisteredHelperOutput::Failed;
@@ -628,7 +674,7 @@ pub(crate) async fn run_registered_bounded_helper_until(
     output_cap: u64,
     deadline: Instant,
 ) -> RegisteredHelperOutput {
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = (command, request_parts, output_cap, deadline);
         // Private helper descendants cannot be safely contained with the
@@ -638,7 +684,7 @@ pub(crate) async fn run_registered_bounded_helper_until(
         return RegisteredHelperOutput::Failed;
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     {
         if Instant::now() >= deadline {
             return RegisteredHelperOutput::DeadlineExceeded;
@@ -649,11 +695,18 @@ pub(crate) async fn run_registered_bounded_helper_until(
             .stderr(Stdio::null())
             .kill_on_drop(true);
         configure_private_helper_process_group(&mut command);
+        #[cfg(unix)]
         let child = match command.spawn() {
             Ok(child) => child,
             Err(_) => return RegisteredHelperOutput::Failed,
         };
+        #[cfg(unix)]
         let mut child = CancellationSafeChild::new_process_group(child);
+        #[cfg(windows)]
+        let mut child = match CancellationSafeChild::spawn_windows(&mut command) {
+            Ok(child) => child,
+            Err(_) => return RegisteredHelperOutput::Failed,
+        };
         let Some(mut stdin) = child.child_mut().and_then(|child| child.stdin.take()) else {
             child.terminate_and_reap();
             return RegisteredHelperOutput::Failed;
@@ -910,9 +963,20 @@ fn duplicate_helper_stdin_descriptor() -> Option<std::fs::File> {
     Some(unsafe { std::fs::File::from_raw_fd(fd) })
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn duplicate_helper_stdin_descriptor() -> Option<std::fs::File> {
     None
+}
+
+#[cfg(windows)]
+fn duplicate_helper_stdin_descriptor() -> Option<std::fs::File> {
+    use std::os::windows::io::{AsRawHandle, BorrowedHandle};
+    let stdin = std::io::stdin();
+    // SAFETY: stdin remains live while its borrowed handle is duplicated.
+    let owned = unsafe { BorrowedHandle::borrow_raw(stdin.as_raw_handle()) }
+        .try_clone_to_owned()
+        .ok()?;
+    Some(std::fs::File::from(owned))
 }
 
 struct LiveClaudeHelperResponse {
@@ -950,7 +1014,11 @@ fn run_live_claude_source_read(mut file: std::fs::File, cap: u64) -> LiveClaudeH
             return LiveClaudeHelperResponse::read_error(0);
         }
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    if !rewind_file(&file) {
+        return LiveClaudeHelperResponse::read_error(0);
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = &file;
         return LiveClaudeHelperResponse::read_error(0);
@@ -1040,6 +1108,12 @@ fn rewind_file(file: &std::fs::File) -> bool {
     // SAFETY: `file` is the helper-owned, descriptor-pinned regular source.
     // Seeking occurs only in this killable child, never in the hook parent.
     unsafe { libc::lseek(file.as_raw_fd(), 0, libc::SEEK_SET) >= 0 }
+}
+
+#[cfg(windows)]
+fn rewind_file(mut file: &std::fs::File) -> bool {
+    use std::io::Seek;
+    file.rewind().is_ok()
 }
 
 fn write_live_claude_frame(response: LiveClaudeHelperResponse) -> bool {

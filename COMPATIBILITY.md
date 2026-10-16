@@ -422,12 +422,23 @@ pending schema upgrade could not be applied — or unreadable
 `core.objectformat`), never `LBR-INTERNAL-001`; nonterminal Codex callbacks
 stay advisory. Like every repository command, these entries apply pending
 repository-schema migrations when they open the database; pending object-index
-repair markers are replayed by the next ordinary repository command. On non-Unix hosts managed capture fails closed before creating
+repair markers are replayed by the next ordinary repository command. On hosts
+other than Unix or Windows, managed capture fails closed before creating
 key files with the fixed path-free Unix-host remedy (`LBR-UNSUPPORTED-001`):
 nonterminal Codex callbacks print it and exit 0, while Codex `SessionEnd`, the
 installed Claude surface and the hidden Claude Code / OpenCode alias exit
 non-zero with it. The hook budget is cooperative, not a strict wall-clock
 guarantee.
+
+Native Windows managed capture supports local NTFS storage with no-follow
+handles, protected current-user/SYSTEM key ACLs, exclusive initializer locks,
+and atomic no-replace key publication. OpenCode 2.x content export requires an
+explicitly trusted executable; it runs in a kill-on-close Job Object with a
+30-second deadline and a 16 MiB accepted output cap, without an OS filesystem
+or network sandbox. Windows has no write-time output limit; the parent polls
+and rejects oversized output. Unix containment requirements are unchanged.
+Windows raw reasoning-artifact file export and doctor object/findings scans
+remain unavailable. See [Windows capture setup](docs/commands/agent.md#native-windows-capture).
 
 Durable agent checkpoint metadata no longer retains provider-supplied `model`,
 `tool_name`, `source` or `session_ref` values (`model` is recorded as

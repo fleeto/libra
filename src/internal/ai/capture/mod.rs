@@ -16,9 +16,8 @@ pub mod ingress;
 pub(crate) mod key;
 pub(crate) mod live;
 pub(crate) mod live_checkpoint;
-// The checkpoint object-I/O helper the OpenCode leg borrows is Unix-only, and
-// the repository capture key behind every checkpoint commitment fails closed
-// elsewhere, so the oracle is Unix-only.
+// This oracle uses Unix shell fixtures. Native Windows primitives have their
+// own tests and the OpenCode CLI workflow is validated locally on Windows.
 #[cfg(all(test, unix))]
 mod live_oracle_tests;
 /// Non-Unix stand-in so the oracle's verification gate reports `skipped`

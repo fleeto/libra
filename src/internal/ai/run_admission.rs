@@ -259,9 +259,9 @@ pub fn try_admit(runs_root: &Path, max: usize, cap: usize) -> Result<AdmissionOu
     #[cfg(not(unix))]
     {
         let _ = (runs_root, max, cap);
-        return Ok(AdmissionOutcome::Admitted(RunSlot {
+        Ok(AdmissionOutcome::Admitted(RunSlot {
             path: PathBuf::new(),
-        }));
+        }))
     }
     #[cfg(unix)]
     {

@@ -16,8 +16,10 @@
 //! implementation; `util::write_file` stays in use for non-blob files (config,
 //! sidecars).
 
+#[cfg(any(unix, test))]
+use std::fs;
 use std::{
-    fs::{self, Permissions},
+    fs::Permissions,
     io::{self, Write},
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},

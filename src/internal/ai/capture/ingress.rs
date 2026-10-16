@@ -1081,6 +1081,53 @@ async fn read_stdin_unbounded() -> Result<Vec<u8>> {
 
 #[cfg(windows)]
 async fn read_stdin_bounded(deadline: CaptureDeadline) -> Result<Vec<u8>> {
+    use std::os::windows::io::{AsRawHandle, BorrowedHandle};
+
+    use crate::internal::ai::authorized_read::{
+        AUTHORIZED_READ_HELPER_ARG, AUTHORIZED_READ_HELPER_CAP_ENV, RegisteredHelperOutput,
+        registered_helper_command, run_registered_descriptor_helper_until,
+    };
+    let stdin = std::io::stdin();
+    // SAFETY: the standard input handle is live and only queried here.
+    if unsafe { windows_sys::Win32::Storage::FileSystem::GetFileType(stdin.as_raw_handle()) }
+        == windows_sys::Win32::Storage::FileSystem::FILE_TYPE_DISK
+    {
+        // SAFETY: stdin lives until its borrowed handle has been duplicated.
+        let owned =
+            unsafe { BorrowedHandle::borrow_raw(stdin.as_raw_handle()) }.try_clone_to_owned()?;
+        let mut command = registered_helper_command(AUTHORIZED_READ_HELPER_ARG)
+            .context("bounded Windows hook stdin helper is unavailable")?;
+        command.env(AUTHORIZED_READ_HELPER_CAP_ENV, MAX_STDIN_BYTES.to_string());
+        let output = match run_registered_descriptor_helper_until(
+            command,
+            owned.into(),
+            MAX_STDIN_BYTES as u64 + 9,
+            deadline.monotonic(),
+        )
+        .await
+        {
+            RegisteredHelperOutput::Output(output) => output,
+            RegisteredHelperOutput::DeadlineExceeded => {
+                bail!("capture ingress deadline expired while reading stdin")
+            }
+            RegisteredHelperOutput::Failed => bail!("bounded Windows hook stdin reader failed"),
+        };
+        if output.len() < 9 {
+            bail!("bounded Windows hook stdin reader returned an invalid frame");
+        }
+        let count = u64::from_le_bytes(
+            output[1..9]
+                .try_into()
+                .context("invalid Windows hook stdin byte count")?,
+        );
+        return match output[0] {
+            0 if count <= MAX_STDIN_BYTES as u64 && count == (output.len() - 9) as u64 => {
+                Ok(output[9..].to_vec())
+            }
+            1 if count > MAX_STDIN_BYTES as u64 => Err(hook_input_exceeds_limit().into()),
+            _ => bail!("bounded Windows hook stdin reader returned an invalid response"),
+        };
+    }
     tokio::task::spawn_blocking(move || read_stdin_bounded_blocking(deadline))
         .await
         .context("bounded hook stdin reader task terminated")?

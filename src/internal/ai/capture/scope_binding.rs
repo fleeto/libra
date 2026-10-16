@@ -11,9 +11,9 @@
 //! failure of the active repository itself, one closed, content-free
 //! [`ActiveRepositoryFailureClass`].
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use std::process::Stdio;
-#[cfg(any(unix, test))]
+#[cfg(any(unix, windows, test))]
 use std::time::Instant;
 use std::{
     io::Write,
@@ -25,12 +25,12 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use crate::internal::ai::authorized_read::{
     CancellationSafeChild, configure_private_helper_process_group, helper_program,
     read_async_strictly_bounded,
 };
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use crate::internal::ai::capture::key::{
     ensure_scope_binding_mutation_deadline, load_capture_dedup_secret_with_mutation_deadline,
 };
@@ -353,7 +353,7 @@ fn classify_active_request_scope(
 /// Resolve only the invocation's active repository from `workdir` (the
 /// caller passes `std::env::current_dir()`), with no reported-path or key
 /// I/O. Non-Unix managed capture uses this before its capability result.
-#[cfg(any(not(unix), test))]
+#[cfg(any(not(any(unix, windows)), test))]
 fn resolve_active_invocation_scope(
     workdir: std::io::Result<PathBuf>,
 ) -> Result<crate::internal::worktree_scope::RequestScope> {
@@ -370,7 +370,7 @@ fn resolve_active_invocation_scope(
 /// `SessionEnd`; fail-closed surfaces report `LBR-REPO-001`). An invocation
 /// that reaches a repository, or whose discovery fails, keeps the fixed
 /// unsupported-platform result unchanged.
-#[cfg(any(not(unix), test))]
+#[cfg(any(not(any(unix, windows)), test))]
 fn non_unix_scope_binding_failure(
     active: Result<crate::internal::worktree_scope::RequestScope>,
 ) -> anyhow::Error {
@@ -488,13 +488,13 @@ fn bind_verified_capture_scope(
     // consulting a deadline: no key mutation is possible on this path, and
     // suppressing the capability behind an expired budget would turn Codex's
     // documented path-free remediation back into a silent advisory.
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = (verified_scope, mutation_deadline_millis);
         Err(CaptureDedupUnsupportedPlatform.into())
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     {
         if let Some(deadline_millis) = mutation_deadline_millis {
             ensure_scope_binding_mutation_deadline(deadline_millis)?;
@@ -1041,7 +1041,7 @@ pub(crate) async fn bind_capture_scope_cwd_bounded(
     scope_input: CaptureScopeInput,
     deadline: Option<HookExecutionDeadline>,
 ) -> Result<CaptureIngressBinding> {
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = (scope_input, deadline);
         // The scope helper carries a trusted replay-key boundary. Without a
@@ -1055,7 +1055,7 @@ pub(crate) async fn bind_capture_scope_cwd_bounded(
         ));
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     {
         let Some(deadline) = deadline else {
             return bind_capture_scope_cwd(&scope_input);
@@ -1076,10 +1076,16 @@ pub(crate) async fn bind_capture_scope_cwd_bounded(
             .stderr(Stdio::null())
             .kill_on_drop(true);
         configure_private_helper_process_group(&mut command);
+        #[cfg(unix)]
         let spawned = command.spawn().map_err(|_| {
             unverified_scope_binding_failure("start killable capture scope-binding helper")
         })?;
+        #[cfg(unix)]
         let mut child = CancellationSafeChild::new_process_group(spawned);
+        #[cfg(windows)]
+        let mut child = CancellationSafeChild::spawn_windows(&mut command).map_err(|_| {
+            unverified_scope_binding_failure("start contained Windows capture scope-binding helper")
+        })?;
         let mut stdin = match child.child_mut().and_then(|child| child.stdin.take()) {
             Some(stdin) => stdin,
             None => {
@@ -1309,7 +1315,7 @@ mod tests {
 
     use super::*;
     use crate::internal::ai::capture::key::CAPTURE_DEDUP_SECRET_BYTES;
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     use crate::internal::ai::{
         capture::key::{CAPTURE_UNSUPPORTED_PLATFORM_REMEDY, load_capture_dedup_secret},
         hooks::{
@@ -1335,6 +1341,30 @@ mod tests {
     };
     #[cfg(unix)]
     use crate::utils::util;
+
+    #[cfg(windows)]
+    #[test]
+    fn scope_binding_wire_preserves_windows_utf16_and_rejects_invalid_paths() {
+        use std::{ffi::OsString, os::windows::ffi::OsStringExt};
+
+        let mut units: Vec<_> = r"C:\捕获\session-".encode_utf16().collect();
+        units.push(0xd800);
+        let path = PathBuf::from(OsString::from_wide(&units));
+        let frame = serde_json::to_vec(&ScopeBindingWirePath::from_path(&path).unwrap()).unwrap();
+        let decoded: ScopeBindingWirePath = serde_json::from_slice(&frame).unwrap();
+        assert_eq!(decoded.into_path_buf().unwrap(), path);
+        assert!(
+            ScopeBindingWirePath { wide: vec![0] }
+                .into_path_buf()
+                .is_err()
+        );
+        assert!(
+            ScopeBindingWirePath::from_path(Path::new("relative"))
+                .unwrap()
+                .into_path_buf()
+                .is_err()
+        );
+    }
 
     #[cfg(unix)]
     #[test]
@@ -1827,7 +1857,7 @@ mod tests {
     /// Non-Unix platforms must not substitute path-only publication for the
     /// descriptor-relative Unix protocol. Refusing before any key namespace
     /// mutation is safer than trusting a locally swappable endpoint.
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     #[test]
     fn capture_dedup_non_unix_initialization_fails_closed_without_namespace_mutation() {
         let root = tempfile::tempdir().expect("create non-Unix capture-key tempdir");
@@ -1880,7 +1910,7 @@ mod tests {
     /// the full helper response, parent classification, and Codex settlement
     /// chain so a nonterminal still receives its safe diagnostic/zero exit
     /// while SessionEnd remains a visible unsupported-platform failure.
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     #[test]
     fn non_unix_expired_scope_binding_keeps_codex_platform_remedy() {
         fn expired_binding_response() -> ScopeBindingHelperResponse {
@@ -2327,7 +2357,7 @@ mod tests {
     /// replay-key helper, but it runs read-only repository discovery before
     /// its capability result. This test is deliberately platform-neutral so
     /// the Unix suite drives the exact discovery and decision functions the
-    /// `#[cfg(not(unix))]` branch of `bind_capture_scope_cwd_bounded` calls,
+    /// `#[cfg(not(any(unix, windows)))]` branch of `bind_capture_scope_cwd_bounded` calls,
     /// through the real runtime classification and command settlement.
     #[test]
     fn non_unix_scope_binding_keeps_outside_repository_contract() {

@@ -341,7 +341,12 @@ fn probe_and_resolve(
             Ok(Some(guard)) => {
                 txn.state = TxnState::PostProbePassed;
                 store_txn(dir, txn)?;
+                #[cfg(not(windows))]
                 drop(guard);
+                // Windows upgrade locks are empty: auto-upgrade fails closed
+                // before constructing this unsupported-platform guard.
+                #[cfg(windows)]
+                let _ = guard;
                 false
             }
             Ok(None) => true,

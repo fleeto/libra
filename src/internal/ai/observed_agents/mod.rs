@@ -102,10 +102,9 @@ pub use skill_projection::{
     DiscoveredSkill, IndexedSkillEvent, SKILL_PROJECTION_SCHEMA_VERSION, SkillEventProjection,
     SkillQuery, discover_skills,
 };
-// fd-pinned directory reads are Unix-only (dup/fdopendir). On non-Unix
-// targets the pinned reader does not exist and the provider-directory
-// discovery path fails closed (no std::fs fallback is implemented).
-#[cfg(unix)]
+// Unix uses dup/fdopendir; Windows retains no-reparse directory handles and
+// pins the complete ancestry while enumerating provider entries.
+#[cfg(any(unix, windows))]
 pub(crate) use transcript_source::read_dir_pinned_provider_directory;
 pub use transcript_source::{
     AuthorizedTranscriptFile, ExportAuthorized, ProviderRootAuthorized,

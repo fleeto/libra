@@ -226,6 +226,24 @@ jobs:
             }
           }
 
+      - name: Verify native Windows capture filesystem and key primitives
+        shell: pwsh
+        env:
+          RUSTFLAGS: "-D warnings -C link-arg=/IGNORE:4099"
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          foreach ($filter in @('utils::windows_fs::tests::', 'internal::ai::capture::key::windows::tests::')) {
+            $executed = @(& cargo test --locked --lib $filter -- --nocapture --color never --test-threads=1)
+            $testExit = $LASTEXITCODE
+            $executed | Write-Output
+            if ($testExit -ne 0 -or @($executed | Where-Object {
+              $_ -cmatch '^test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out; finished in .+$'
+            }).Count -ne 1) {
+              throw "Native Windows capture primitive tests failed or matched no tests: $filter"
+            }
+          }
+
   redundancy:
     name: compat-redundancy
     runs-on: [self-hosted]

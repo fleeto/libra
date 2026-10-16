@@ -1,7 +1,9 @@
 //! Detached, content-free SessionStart recovery worker ownership.
 
+#[cfg(not(windows))]
+use std::fs::OpenOptions;
 use std::{
-    fs::{self, File, OpenOptions},
+    fs::{self, File},
     io,
     path::Path,
     process::{Command, Stdio},
@@ -102,75 +104,97 @@ pub(crate) async fn hold_for_test() {
 /// Acquire the per-repository worker lock. `None` means another worker owns
 /// it. The descriptor is the lock guard; OS process teardown releases it.
 pub(crate) fn try_lock(storage: &Path) -> io::Result<Option<File>> {
-    let private = storage.join("private");
-    match fs::symlink_metadata(&private) {
-        Ok(metadata) if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() => {}
-        Ok(_) => {
-            return Err(io::Error::other(
-                "capture recovery lock directory is unsafe",
-            ));
-        }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            create_private_directory(&private)?;
-        }
-        Err(error) => return Err(error),
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt as _;
-        let metadata = fs::symlink_metadata(&private)?;
-        if metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o077 != 0 {
-            return Err(io::Error::other(
-                "capture recovery lock directory has unsafe ownership or permissions",
-            ));
-        }
-    }
-
-    let path = private.join(LOCK_NAME);
-    if let Ok(metadata) = fs::symlink_metadata(&path)
-        && (metadata.file_type().is_symlink() || !metadata.file_type().is_file())
-    {
-        return Err(io::Error::other("capture recovery lock file is unsafe"));
-    }
-    let mut options = OpenOptions::new();
-    options.read(true).write(true).create(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        options
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
-    }
     #[cfg(windows)]
     {
-        use std::os::windows::fs::OpenOptionsExt as _;
-        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
-        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
-    }
-    let file = options.open(&path)?;
-    let metadata = file.metadata()?;
-    if !metadata.is_file() {
-        return Err(io::Error::other("capture recovery lock file is unsafe"));
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt as _;
-        if metadata.uid() != unsafe { libc::geteuid() }
-            || metadata.nlink() != 1
-            || metadata.mode() & 0o077 != 0
-        {
+        use std::ffi::OsStr;
+
+        use crate::utils::windows_fs;
+        let storage = windows_fs::open_tree(storage)?;
+        let private = windows_fs::create_directory_at(&storage, OsStr::new("private"), true)?;
+        let name = OsStr::new(LOCK_NAME);
+        let file = windows_fs::open_private_lock_at(&private, name)?;
+        windows_fs::validate_private(&file)?;
+        if windows_fs::information(&file)?.nNumberOfLinks != 1 {
             return Err(io::Error::other(
-                "capture recovery lock file has unsafe ownership or permissions",
+                "capture recovery lock has unexpected hard links",
             ));
         }
+        Ok(windows_fs::try_lock(&file)?.then_some(file))
     }
-    match file.try_lock() {
-        Ok(()) => Ok(Some(file)),
-        Err(std::fs::TryLockError::WouldBlock) => Ok(None),
-        Err(std::fs::TryLockError::Error(error)) => Err(error),
+    #[cfg(not(windows))]
+    {
+        let private = storage.join("private");
+        match fs::symlink_metadata(&private) {
+            Ok(metadata) if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() => {
+            }
+            Ok(_) => {
+                return Err(io::Error::other(
+                    "capture recovery lock directory is unsafe",
+                ));
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                create_private_directory(&private)?;
+            }
+            Err(error) => return Err(error),
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            let metadata = fs::symlink_metadata(&private)?;
+            if metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o077 != 0 {
+                return Err(io::Error::other(
+                    "capture recovery lock directory has unsafe ownership or permissions",
+                ));
+            }
+        }
+
+        let path = private.join(LOCK_NAME);
+        if let Ok(metadata) = fs::symlink_metadata(&path)
+            && (metadata.file_type().is_symlink() || !metadata.file_type().is_file())
+        {
+            return Err(io::Error::other("capture recovery lock file is unsafe"));
+        }
+        let mut options = OpenOptions::new();
+        options.read(true).write(true).create(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options
+                .mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt as _;
+            const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+            options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+        }
+        let file = options.open(&path)?;
+        let metadata = file.metadata()?;
+        if !metadata.is_file() {
+            return Err(io::Error::other("capture recovery lock file is unsafe"));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            if metadata.uid() != unsafe { libc::geteuid() }
+                || metadata.nlink() != 1
+                || metadata.mode() & 0o077 != 0
+            {
+                return Err(io::Error::other(
+                    "capture recovery lock file has unsafe ownership or permissions",
+                ));
+            }
+        }
+        match file.try_lock() {
+            Ok(()) => Ok(Some(file)),
+            Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+            Err(std::fs::TryLockError::Error(error)) => Err(error),
+        }
     }
 }
 
+#[cfg(not(windows))]
 fn create_private_directory(path: &Path) -> io::Result<()> {
     #[cfg(unix)]
     {

@@ -60,7 +60,7 @@ use sea_orm::{
 use serde::{Deserialize, Serialize};
 use tokio::time::sleep;
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use crate::internal::ai::authorized_read::{
     RegisteredHelperOutput, registered_helper_command, run_registered_bounded_helper_until,
 };
@@ -882,7 +882,24 @@ fn read_cleanup_regular_file_inner<F: FnOnce()>(
             .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW | libc::O_CLOEXEC)
             .open(path)
     };
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    let opened = (|| {
+        let parent = path.parent().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "cleanup source has no parent",
+            )
+        })?;
+        let name = path.file_name().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "cleanup source has no filename",
+            )
+        })?;
+        let directory = crate::utils::windows_fs::open_tree(parent)?;
+        crate::utils::windows_fs::open_at(&directory, name, false)
+    })();
+    #[cfg(not(any(unix, windows)))]
     let opened = fs::File::open(path);
     let mut file = match opened {
         Ok(file) => file,
@@ -1170,7 +1187,17 @@ fn encode_checkpoint_object_path(path: &Path) -> Result<String> {
 
         Ok(STANDARD.encode(path.as_os_str().as_bytes()))
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        let bytes: Vec<_> = path
+            .as_os_str()
+            .encode_wide()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        Ok(STANDARD.encode(bytes))
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let text = path
             .to_str()
@@ -1191,7 +1218,21 @@ fn decode_checkpoint_object_path(encoded: &str) -> Result<PathBuf> {
 
         Ok(PathBuf::from(OsString::from_vec(bytes)))
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        use std::{ffi::OsString, os::windows::ffi::OsStringExt};
+        if !bytes.len().is_multiple_of(2) {
+            bail!("checkpoint object store path has invalid Windows UTF-16 bytes");
+        }
+        let units: Vec<_> = bytes
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect();
+        Ok(PathBuf::from(OsString::from_wide(&units)))
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let text =
             String::from_utf8(bytes).context("checkpoint object store path is not valid UTF-8")?;
@@ -1365,7 +1406,7 @@ async fn invoke_checkpoint_object_helper(
     operation: CheckpointObjectIoOperation<'_>,
     deadline: Instant,
 ) -> Result<CheckpointObjectIoHelperResponse> {
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = (repo_path, operation, deadline);
         // The central private-helper runner intentionally has no raw-pipe
@@ -1374,7 +1415,7 @@ async fn invoke_checkpoint_object_helper(
         bail!("checkpoint object-I/O helper is unavailable on this platform");
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     {
         let request = CheckpointObjectIoHelperRequest {
             repo_path_base64: encode_checkpoint_object_path(repo_path)?,

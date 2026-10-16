@@ -73,6 +73,10 @@ cargo build --release --locked
 The source build writes `target/release/libra`; run that binary directly, or use
 `cargo install --path . --locked` to install it in Cargo's binary directory.
 
+Native Windows Agent Session Capture is supported on local NTFS drives with
+OpenCode 2.x. See the [Windows capture setup](docs/commands/agent.md#native-windows-capture)
+for exporter trust and the Windows sandbox limitations.
+
 The script installer also creates the optional shorthand
 `~/.libra/bin/lba -> libra` as a relative symlink. Re-running the same version
 repairs a missing alias without replacing the binary. Use `--no-alias` or

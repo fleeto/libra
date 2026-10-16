@@ -1,5 +1,62 @@
 # Changelog
 
+## [0.30.50] — 2026-10-16
+
+### OpenCode capture and coverage-v2
+
+- Capture supported provider-visible reasoning as typed, redacted turn content
+  in coverage schema 2. Ordinary turns retain schema 1 and their canonical
+  bytes. Redaction happens before digests and checkpoint projection. Retained
+  visible reasoning follows checkpoint export, push and cloud-sync paths;
+  there is no separate flag to omit it while keeping other captured content.
+- Preserve v1 checkpoints, claims and interrupted receipts. Settle an existing
+  committed receipt before a new action captures visible reasoning under v2.
+  A rejected source in a session with v2 history stops the whole new capture
+  or import attempt, retaining retryable work without fallback claims or a
+  success acknowledgment. Inspect `libra agent doctor` and start a new
+  OpenCode session to continue supported capture.
+- Isolate capture by repository directory on shared multi-project OpenCode
+  servers, resolve the native executable behind package-manager launchers,
+  and warn when a metadata-only checkpoint has no transcript bytes to export.
+- Read v1/v2 identities without changing old objects. Graph rejects unknown
+  persisted versions with `LBR-AGENT-009`; doctor reports conflicts for each
+  version separately.
+
+### Compatibility and upstream fixes
+
+- Restore the immutable observer recipe of reviewed private native `.1`/`.2`
+  builds while keeping ordinary v2 directory filtering. Clarify recipe-mismatch
+  guidance; enabling the current ordinary plugin is not a legacy recipe repair.
+- Include upstream Omarchy OpenCode export and per-directory multi-repository
+  capture/database fixes. Use bundled SQLite with default global memory
+  statistics disabled; no database migration is introduced by this release.
+
+### Known limitations
+
+- Real-model acceptance observed visible-only v1 turns. Typed v2 reasoning
+  is covered by local fake-exporter workflows; a real-model v2 reasoning
+  end-to-end observation has not been performed.
+
+- Historical imports with unsupported reasoning state still fail with
+  `LBR-AGENT-020`; the classic legacy `stopped` terminal import repair remains
+  deferred. Supported automatic capture does not imply those imports work.
+- Source A and native `signature`, `redactedData`, and
+  `reasoningEncryptedContent` provenance remain unproven. Coverage-v2 visible
+  reasoning and ordinary exporter trust do not authorize trusted native
+  artifacts. Current private native `.3` source/runtime qualification and
+  native archival remain separate, incomplete work.
+- OpenCode Session/exporter/account/model acceptance runs locally on macOS,
+  outside CI. Linux functional acceptance is left to the user; four-platform
+  builds and required security CI remain release requirements.
+- Historical private v1 plugins lack directory isolation: never use them on a
+  shared multi-project server. Current doctor/status detection requires the
+  v2 header, and `agent enable` replaces a managed v1 plugin with v2.
+- Inherited `cat-file` batch input and buffered queues remain unbounded; a
+  broken output pipe may still return success under the existing policy.
+- The inherited interactive Mega2 browser can display `--ref` content while
+  create, delete, move or rename actions still write to **trunk**. Avoid
+  mutating actions with `--ref`; this remains deferred and unfixed.
+
 ## [0.30.49] — 2026-10-15
 
 ### OpenCode 2.0.29 ordinary capture on macOS

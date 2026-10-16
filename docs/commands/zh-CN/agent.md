@@ -1,5 +1,7 @@
 # `libra agent`
 
+> **coverage-v2 源码版本：** 下文 coverage-v2 说明对应 Libra 0.30.50 源码线及后续兼容版本，不宣告稳定版已发布；可用性以[官方发布](https://github.com/libra-tools/libra/releases)及 `libra --version` 为准。其它章节保留各自的版本要求；coverage-v2 不证明 native 来源，也不准入原生 reasoning artifact。
+
 管理 Claude Code、Codex 与 OpenCode 的外部代理捕获。
 
 ## macOS 上的 OpenCode 普通采集（Libra 0.30.49）
@@ -7,9 +9,9 @@
 普通自动采集使用官方 OpenCode **2.0.29**。下文冻结的 2.0.26 词汇和私有 native
 producer 章节属于独立的历史/显式 native 路线，不是普通采集的前置。
 
-0.30.49 之后尚未发布的 main 新增 Session 目录过滤、从受支持的包管理器启动器中
+Libra 0.30.50 新增 Session 目录过滤、从受支持的包管理器启动器中
 选择原生可执行文件，以及 metadata-only checkpoint 导出为空时的明确警告。
-下文对应行为需要包含这些改动的新版本。
+下文这三项新增行为需要 Libra 0.30.50 或后续版本。
 
 在要采集的仓库中核对版本，然后准备本仓库的 exporter trust 和 observer：
 
@@ -106,7 +108,7 @@ alias `session.idle` 仍接受，只记录不含内容的 `legacy_event_alias` t
 
 managed plugin 使用 OpenCode 2.0.26 的 `setup(ctx)` API、事件订阅和只观察的工具
 hook。一个 OpenCode 服务器（例如 `opencode serve --service`）会把所有项目的事件发给
-每个项目的插件。0.30.49 之后尚未发布的 main 不转发已知属于其他
+每个项目的插件。Libra 0.30.50 及后续版本不转发已知属于其他
 `location.directory` 的 Session，并在此关闭移出目录的 Session；没有位置的事件仍会
 转发，除非已知该 Session 属于其他目录。尚未归属的 Session 的工具调用
 通过宿主的 `session.get` 判定（宿主无法回答时照旧转发，并只报告一次
@@ -304,13 +306,13 @@ M1 前的 capture 以 `coverage_state="unindexed"` checkpoint 时间线返回，
 revision。subagent 节点只暴露 checkpoint/link 结构，并明确保留 `resolved` 或
 `unresolved`。
 
-首个包含 coverage-v2 的稳定发布及其后续版本中，即使逻辑 turn key 或 checkpoint
+Libra 0.30.50 及后续版本中，即使逻辑 turn key 或 checkpoint
 相同，graph 仍分别保留 coverage 1、2 两版记录及各自 revision 历史；公共 JSON
 schema version 1 不变。读到不支持的已存 coverage 版本时，整个查询以
 `LBR-AGENT-009` 失败，不返回成功 graph 或候选内容。请使用支持该已存版本的 Libra
 发布，并运行 `libra agent doctor` 检查目录；不要改写版本号或删除证据。
 doctor 分别报告两版冲突，不输出原始身份或候选内容；包括 `--repair` 在内，
-冲突仍需人工处理。这些 coverage-v2 读取保证在上述稳定发布前属于未发布能力。
+冲突仍需人工处理。这些 coverage-v2 读取保证要求 Libra 0.30.50 或后续版本。
 
 JSON/machine graph 查询不会打开 transcript/object blob，也不 SELECT working directory、
 description、metadata JSON、redaction report 或 coverage digest。**Breaking change（W5-08）：**
@@ -1014,7 +1016,10 @@ import、pending replay 或 native admission。官方版本/来源匹配不批�
 idle.error 失败、自动终态或 full-suite 验收。真实 OpenCode Session/账号/模型检查
 只在 macOS 本机运行，不进 CI；metadata-only、空输出或 skip 不算内容验收。
 
-## coverage-v2 采集（未发布）
+<!-- Compatibility anchor for earlier links; not a release-status assertion. -->
+<a id="coverage-v2-采集未发布"></a>
+
+## coverage-v2 采集（Libra 0.30.50）
 
 从首个包含 coverage-v2 的稳定版本开始，OpenCode 导出采集与历史导入会保留受支持的
 provider-visible 可读 reasoning，并在脱敏后作为 typed turn 内容写入。含这类内容的
@@ -1034,6 +1039,5 @@ reasoning 一次，之后重复采集会去重；原 v1 对象、digest 和 clai
 包括新出现的普通 turn；回执和导出任务保持待重试，不创建降级 claim 或成功 ACK。
 持续超限或不受支持的来源可能让该 Session 一直停采。请保留已记录数据，使用
 `libra agent doctor` 检查，并新建 OpenCode Session 继续受支持的采集。候选或未验证
-reasoning 不能将这种失败变为 complete coverage。这些改动不增加命令参数，尚未包含在
-Libra 0.30.49 及更早版本中；依赖 OpenCode Session／exporter／模型的验收只在 macOS
+reasoning 不能将这种失败变为 complete coverage。这些改动不增加命令参数，要求 Libra 0.30.50 或后续版本；依赖 OpenCode Session／exporter／模型的验收只在 macOS
 本机执行，不进入 CI 集成测试。

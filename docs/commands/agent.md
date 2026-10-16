@@ -1,5 +1,7 @@
 # `libra agent`
 
+> **Coverage-v2 source version:** The coverage-v2 descriptions below refer to the Libra 0.30.50 source line and later compatible versions. This is not a stable-release announcement; check the [official releases](https://github.com/libra-tools/libra/releases) and `libra --version` for installed support. Other sections retain their own version requirements. Coverage-v2 does not prove native origin or authorize native reasoning artifacts.
+
 Manage external-agent capture for Claude Code, Codex, and OpenCode.
 
 ## OpenCode ordinary capture on macOS (Libra 0.30.49)
@@ -8,10 +10,10 @@ Use the official OpenCode **2.0.29** for ordinary automatic capture. The frozen
 2.0.26 vocabulary and private native producer sections below describe separate
 historical/explicit native lanes; they are not prerequisites for ordinary capture.
 
-Unreleased changes after 0.30.49 add session-directory filtering, native
-executable selection behind supported package-manager launchers, and an explicit
-warning for empty metadata-only checkpoint exports. The corresponding behavior
-below requires a release containing those changes.
+Libra 0.30.50 adds session-directory filtering, native executable selection
+behind supported package-manager launchers, and an explicit warning for empty
+metadata-only checkpoint exports. The corresponding behavior below requires
+Libra 0.30.50 or later.
 
 From the repository you want to capture, check the installed versions and prepare
 its exporter trust and observer:
@@ -139,7 +141,7 @@ content-free `legacy_event_alias` tracing warning.
 The managed plugin uses the OpenCode 2.0.26 `setup(ctx)` API, an event
 subscription and an observe-only tool hook. One OpenCode server (for example
 `opencode serve --service`) delivers every project's events to every project's
-plugin. On unreleased main after 0.30.49, sessions known to belong to another
+plugin. In Libra 0.30.50 and later, sessions known to belong to another
 `location.directory` are not forwarded, and a session moved out of the directory
 is closed here. Events without a location are forwarded unless their session
 was placed elsewhere. A tool call for a session not yet
@@ -400,7 +402,7 @@ hidden as superseded. Pre-coverage captures are returned as
 facts. Subagent nodes expose only checkpoint/link structure and retain
 `resolved` or `unresolved` explicitly.
 
-For the first stable release containing coverage-v2 and later, graph keeps
+In Libra 0.30.50 and later, graph keeps
 separate rows and revision histories for coverage versions 1 and 2, even when
 they share a logical turn key or checkpoint. This does not change the public
 JSON schema version 1. An unsupported stored coverage version fails the query
@@ -409,8 +411,7 @@ Use a Libra release that supports the stored version and run `libra agent doctor
 to inspect the catalog; do not rewrite version numbers or delete evidence.
 Doctor reports each version's conflict separately, without raw identities or
 candidate content, and leaves conflict resolution manual, including with
-`--repair`. These coverage-v2 reader guarantees are unreleased until that stable
-release is available.
+`--repair`. These coverage-v2 reader guarantees require Libra 0.30.50 or later.
 
 The JSON/machine graph query never opens transcript or object blobs and never
 selects working directories, descriptions, metadata JSON, redaction reports,
@@ -1482,7 +1483,10 @@ completion or full-suite acceptance. Real OpenCode Session/account/model checks
 run locally on macOS and stay outside CI. Metadata-only, empty output and skipped
 checks do not count as content acceptance.
 
-## Coverage-v2 capture (unreleased)
+<!-- Compatibility anchor for earlier links; not a release-status assertion. -->
+<a id="coverage-v2-capture-unreleased"></a>
+
+## Coverage-v2 capture (Libra 0.30.50)
 
 From the first stable release containing coverage-v2, OpenCode export capture
 and historical import retain supported provider-visible reasoning as typed,
@@ -1509,6 +1513,5 @@ acknowledgment are created. An unchanged over-limit or unsupported source can
 keep that session blocked. Keep the recorded data, inspect `libra agent doctor`,
 and start a new OpenCode session to continue supported capture. A candidate or
 unverified reasoning source cannot turn this failure into complete coverage.
-These changes add no command flags and are not included in Libra 0.30.49 or
-earlier. OpenCode Session/exporter/model acceptance runs locally on
+These changes add no command flags and require Libra 0.30.50 or later. OpenCode Session/exporter/model acceptance runs locally on
 macOS; it is not a CI integration test.

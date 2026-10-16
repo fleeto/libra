@@ -1,5 +1,7 @@
 # Agent Command Development
 
+> **Coverage-v2 source version:** The coverage-v2 descriptions below refer to the Libra 0.30.50 source line and later compatible versions. This is not a stable-release announcement; check the [official releases](https://github.com/libra-tools/libra/releases) and `libra --version` for installed support. Other sections retain their own version requirements. Coverage-v2 does not prove native origin or authorize native reasoning artifacts.
+
 `libra agent` is an intentionally different external-agent capture extension,
 not a Git-compatible command.
 
@@ -376,7 +378,10 @@ The private pending codec pairs its closed inner payload v2 with the live Sessio
 
 Garbage collection excludes the reserved `agent_reasoning_identity` scope from generic metadata object-reference scanning. This applies to the entire stored value, including a damaged value containing a JSON object ID or a nested object ID; those values do not trigger object hydration. This exclusion requires no private reasoning key. Ordinary metadata object roots, private capture recovery exclusions, and capture pending parent roots retain their existing rules. Forward recovery must retain both the private rows and this exclusion while a reasoning identity writer is stopped or repaired. This guard does not create identity records, issue native provenance, or enable OpenCode reasoning archival.
 
-## Versioned graph/doctor readers (COV2-09, unreleased)
+<!-- Compatibility anchor for earlier links; not a release-status assertion. -->
+<a id="versioned-graphdoctor-readers-cov2-09-unreleased"></a>
+
+## Versioned graph/doctor readers (COV2-09, Libra 0.30.50)
 
 The graph reader decodes each selected claim and revision through the existing
 closed `CoverageSchemaVersion` enum before joining or skipping unmatched rows.
@@ -392,11 +397,13 @@ unchanged. Each conflict remains a distinct content-free, manual-required findin
 in JSON and human output, with or without `--repair`. Synthetic catalog fixtures
 check version separation, envelope stability, unknown-version failure and raw
 identity/content canaries. They do not run an OpenCode Session, exporter or model,
-and confer no native-origin proof. These reader guarantees apply to the first
-stable release containing coverage-v2 and later; they do not assert that the
-currently installed stable release contains this unreleased implementation.
+and confer no native-origin proof. These reader guarantees require Libra 0.30.50 or later; upgrading the installed
+binary is necessary before relying on them.
 
-## Coverage-v2 capture (unreleased)
+<!-- Compatibility anchor for earlier links; not a release-status assertion. -->
+<a id="coverage-v2-capture-unreleased"></a>
+
+## Coverage-v2 capture (Libra 0.30.50)
 
 From the first stable release containing coverage-v2, OpenCode export capture
 and historical import retain supported provider-visible reasoning as typed,
@@ -419,6 +426,5 @@ acknowledgment are created. An unchanged over-limit or unsupported source can
 keep that session blocked. Keep the recorded data, inspect `libra agent doctor`,
 and start a new OpenCode session to continue supported capture. A candidate or
 unverified reasoning source cannot turn this failure into complete coverage.
-These changes add no command flags and are not included in the installed
-0.30.49 release. OpenCode Session/exporter/model acceptance runs locally on
+These changes add no command flags and require Libra 0.30.50 or later. OpenCode Session/exporter/model acceptance runs locally on
 macOS; it is not a CI integration test.

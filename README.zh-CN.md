@@ -89,18 +89,25 @@ libra init --from-git-repository /path/to/existing/git/repo
 ### 使用 Agent 捕获
 
 ```bash
-# 为 Codex 启用捕获钩子，然后检查安装状态
-libra agent enable --agent codex
+# 登记 OpenCode exporter 信任（请按实际安装位置调整目录）
+libra agent rpc trust --dir "$HOME/.opencode/bin"
+libra agent rpc trust opencode
+
+# 安装当前仓库的捕获插件，然后检查安装状态
+libra agent add opencode
 libra agent list
 libra agent doctor
 
-# 正常使用你的 Agent 工具——Libra 会自动捕获会话和检查点
-codex
+# 在当前仓库中启动 OpenCode，完成一轮对话后退出
+opencode
 
-# 查看已捕获的会话
+# 查看已捕获的会话和检查点
 libra agent session list
 libra agent checkpoint list
 ```
+
+如果实际安装位置与上面的路径不同，请使用 OpenCode 可执行文件所在的目录。
+安装插件后再启动 OpenCode；`--pure` / `OPENCODE_PURE=1` 会禁用捕获。
 
 > 查看 [Agent 命令指南](docs/commands/zh-CN/agent.md)，了解支持的 Agent、提供商配置和会话管理。
 

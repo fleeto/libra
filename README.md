@@ -110,18 +110,26 @@ libra init --from-git-repository /path/to/existing/git/repo
 ### Use Agent Capture
 
 ```bash
-# Enable capture hooks for Codex, then check the installation
-libra agent enable --agent codex
+# Trust the OpenCode exporter (adjust this directory for your installation)
+libra agent rpc trust --dir "$HOME/.opencode/bin"
+libra agent rpc trust opencode
+
+# Install this repository's capture plugin, then check the installation
+libra agent add opencode
 libra agent list
 libra agent doctor
 
-# Run your agent tool normally — Libra captures sessions and checkpoints
-codex
+# Run OpenCode in this repository, complete a turn, then exit
+opencode
 
-# Inspect captured sessions
+# Inspect captured sessions and checkpoints
 libra agent session list
 libra agent checkpoint list
 ```
+
+Use the directory containing your actual OpenCode executable if it differs from
+the path above. Start OpenCode after installing the plugin; `--pure` /
+`OPENCODE_PURE=1` disables capture.
 
 > See the [agent command guide](docs/commands/agent.md) for supported agents, provider setup, and session management.
 

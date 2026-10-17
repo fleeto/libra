@@ -13,6 +13,15 @@
 
 ---
 
+OG-08 final-C audit (2026-10-18): existing Cargo targets remain unchanged.
+OpenCode installed-exporter, hook-to-Session and account/model acceptance,
+including controlled fake-exporter Session cases, stays explicitly ignored or
+feature/operator gated and is run manually on macOS; it is not CI integration.
+Pure parser, codec, cryptographic, sandbox-unit and static contract checks remain
+eligible for CI. Historical native registration targets describe compatibility
+checks only; their existence grants neither native provenance nor a new model run.
+
+
 ## Wave 1 — command layer & compat
 
 | target | wave | one-line purpose | relevant src |

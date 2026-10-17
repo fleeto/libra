@@ -1,5 +1,117 @@
 # Agent Trace 对照 Libra 归属方案：分析与改进设计
 
+
+<a id="opencode-final-c-ledger"></a>
+## OpenCode 最终方案 C 台账（2026-10-18，OG-08）
+
+本节是 plan-20260902 的当前 OpenCode 台账；下方 2026-06/08 的跨项目比较与
+第三方及 Libra 自身源码行号保持其原日期历史含义，不是当前源码 pin 或验收证明。
+[最终范围与计数](../plan/plan-20260902.md#ordinary-final-c-20261017)是权威来源。
+普通 OpenCode 2.0.29 采集与安全 partial 是最终产品范围；不保证任意 export
+形状、模型或历史 import 成功。未证的 `signature`、`redactedData`、
+`reasoningEncryptedContent` 保持 partial/Incomplete、候选剥离、零 native artifact；
+Source A 未获证明。已发布通用 verifier/非授权 carrier 和旧构建兼容契约保留。
+
+| 撤销卡 | 当前处置 |
+|---|---|
+| FIX-OG-NATIVE-BOOT-01 | scope withdrawal；未完成，不计 done，不改 AC2 FAIL/full VER2 UNRUN |
+| OG-24 | scope withdrawal；不新增当前 `.3` 生产登记；保留旧 `.2` 交接 |
+| OG-27 | scope withdrawal；不新增 native live 正向准入 |
+| OG-28 | scope withdrawal；不新增 native import 正向准入 |
+| OG-29 | scope withdrawal；不新增 native pending/replay 正向准入 |
+| OG-05 | scope withdrawal；不交付三字段跨路径可信归档终门 |
+
+`DEFER-COV2-NATIVE` 与 `DEFER-OG-NATIVE-INITIAL-ENV-01` 均为
+**closed-by-scope-decision / 未修复、非 PASS**，无自动恢复或未来实现承诺。
+这不是 Source A 豁免。另两张原用户延期卡 OG-15/FIX-OG-CP-01 不改状态。
+`DEFER-OG-LINUX` 的 14 个原 cell 逐行列于下表，仍交用户后验，未运行不能写 PASS。
+
+### DEFER-OG 身份清单
+
+以下逐项对应父计划出现的完整 `DEFER-OG*` 身份（不把通配前缀当独立卡）。
+同名历史评审/别名只是追溯条目，不凭名称增加活动任务或重新开启已交付卡；
+具体问题、旧失败、修复/重启条件按[父计划原始记录](../plan/plan-20260902.md)保留。
+本表不宣称所有历史引用仍为活动延期，也不将未知状态自动判通过。
+
+| ID | 本次处置与边界 |
+|---|---|
+| `DEFER-OG-01` | 继续计划外延期：checkpoint 回灌；须独立 ADR，不能授权捕获插件写会话。 |
+| `DEFER-OG-02` | 继续计划外延期：读取 parentID/subtask 子会话归属；创建会话仍永久禁止。 |
+| `DEFER-OG-03` | 继续计划外延期：PATH 查找；固定绝对路径不变，context 注入仍永久禁止。 |
+| `DEFER-OG-04` | 继续计划外延期：独立 session.error 分类；不是现有 idle.error 投影。 |
+| `DEFER-OG-05` | 继续计划外延期：用户可配置 export deadline；现有固定预算不变。 |
+| `DEFER-OG-ARGV-01` | 原计划同名历史/遗留记录保留；本次不改变其解除条件，不将旧 FAIL/UNRUN 或评审引用改为 PASS。 |
+| `DEFER-OG-AUDIT-01` | 原计划同名历史/遗留记录保留；本次不改变其解除条件，不将旧 FAIL/UNRUN 或评审引用改为 PASS。 |
+| `DEFER-OG-BUDGET-01` | 原计划同名历史/遗留记录保留；本次不改变其解除条件，不将旧 FAIL/UNRUN 或评审引用改为 PASS。 |
+| `DEFER-OG-BUDGET-DOC-01` | 原计划同名历史/遗留记录保留；本次不改变其解除条件，不将旧 FAIL/UNRUN 或评审引用改为 PASS。 |
+| `DEFER-OG-COMPAT-01` | 原计划同名历史/遗留记录保留；本次不改变其解除条件，不将旧 FAIL/UNRUN 或评审引用改为 PASS。 |
+| `DEFER-OG-CONTAINMENT-01` | 原计划同名历史/遗留记录保留；本次不改变其解除条件，不将旧 FAIL/UNRUN 或评审引用改为 PASS。 |
+| `DEFER-OG-CONTAINMENT01` | 原计划同名历史/遗留记录保留；本次不改变其解除条件，不将旧 FAIL/UNRUN 或评审引用改为 PASS。 |
+| `DEFER-OG-DOC-01` | 原计划同名历史/遗留记录保留；本次不改变其解除条件，不将旧 FAIL/UNRUN 或评审引用改为 PASS。 |
+| `DEFER-OG-DOC01` | 原计划同名历史/遗留记录保留；本次不改变其解除条件，不将旧 FAIL/UNRUN 或评审引用改为 PASS。 |
+| `DEFER-OG-EVICTION-01` | 原计划同名历史/遗留记录保留；本次不改变其解除条件，不将旧 FAIL/UNRUN 或评审引用改为 PASS。 |
+| `DEFER-OG-EXPORT-TEST-LEAK-01` | 原计划同名历史/遗留记录保留；本次不改变其解除条件，不将旧 FAIL/UNRUN 或评审引用改为 PASS。 |
+| `DEFER-OG-EXTRACT01` | 原计划同名历史/遗留记录保留；本次不改变其解除条件，不将旧 FAIL/UNRUN 或评审引用改为 PASS。 |
+| `DEFER-OG-FIELD-01` | 原计划同名历史/遗留记录保留；本次不改变其解除条件，不将旧 FAIL/UNRUN 或评审引用改为 PASS。 |
+| `DEFER-OG-FILTER-01` | 原计划同名历史/遗留记录保留；本次不改变其解除条件，不将旧 FAIL/UNRUN 或评审引用改为 PASS。 |
+| `DEFER-OG-FILTER01` | 原计划同名历史/遗留记录保留；本次不改变其解除条件，不将旧 FAIL/UNRUN 或评审引用改为 PASS。 |
+| `DEFER-OG-HARNESS-01` | 原计划同名历史/遗留记录保留；本次不改变其解除条件，不将旧 FAIL/UNRUN 或评审引用改为 PASS。 |
+| `DEFER-OG-INSTALL-01` | 原计划同名历史/遗留记录保留；本次不改变其解除条件，不将旧 FAIL/UNRUN 或评审引用改为 PASS。 |
+| `DEFER-OG-INSTALL01` | 原计划同名历史/遗留记录保留；本次不改变其解除条件，不将旧 FAIL/UNRUN 或评审引用改为 PASS。 |
+| `DEFER-OG-LEGACY-REGISTRY-DIAGNOSTIC-01` | 原计划同名历史/遗留记录保留；本次不改变其解除条件，不将旧 FAIL/UNRUN 或评审引用改为 PASS。 |
+| `DEFER-OG-LINUX-01` | 用户 Linux 功能后验 UNRUN，非 PASS；原逐 cell 命令和谓词保留。 |
+| `DEFER-OG-LINUX-02` | 用户 Linux 功能后验 UNRUN，非 PASS；原逐 cell 命令和谓词保留。 |
+| `DEFER-OG-LINUX-03` | 用户 Linux 功能后验 UNRUN，非 PASS；原逐 cell 命令和谓词保留。 |
+| `DEFER-OG-LINUX-04` | 用户 Linux 功能后验 UNRUN，非 PASS；原逐 cell 命令和谓词保留。 |
+| `DEFER-OG-LINUX-05` | 用户 Linux 功能后验 UNRUN，非 PASS；原逐 cell 命令和谓词保留。 |
+| `DEFER-OG-LINUX-06` | 用户 Linux 功能后验 UNRUN，非 PASS；原逐 cell 命令和谓词保留。 |
+| `DEFER-OG-LINUX-07` | 用户 Linux 功能后验 UNRUN，非 PASS；原逐 cell 命令和谓词保留。 |
+| `DEFER-OG-LINUX-08` | 用户 Linux 功能后验 UNRUN，非 PASS；原逐 cell 命令和谓词保留。 |
+| `DEFER-OG-LINUX-09` | 用户 Linux 功能后验 UNRUN，非 PASS；原逐 cell 命令和谓词保留。 |
+| `DEFER-OG-LINUX-10` | 用户 Linux 功能后验 UNRUN，非 PASS；原逐 cell 命令和谓词保留。 |
+| `DEFER-OG-LINUX-11` | 用户 Linux 功能后验 UNRUN，非 PASS；原逐 cell 命令和谓词保留。 |
+| `DEFER-OG-LINUX-12` | 用户 Linux 功能后验 UNRUN，非 PASS；原逐 cell 命令和谓词保留。 |
+| `DEFER-OG-LINUX-13` | 用户 Linux 功能后验 UNRUN，非 PASS；原逐 cell 命令和谓词保留。 |
+| `DEFER-OG-LINUX-14` | 用户 Linux 功能后验 UNRUN，非 PASS；原逐 cell 命令和谓词保留。 |
+| `DEFER-OG-NATIVE-INITIAL-ENV-01` | closed-by-scope-decision / 未修复、非 PASS；无自动恢复队列。 |
+| `DEFER-OG-NORMALIZER-01` | 原计划同名历史/遗留记录保留；本次不改变其解除条件，不将旧 FAIL/UNRUN 或评审引用改为 PASS。 |
+| `DEFER-OG-OPENCODE-BOOT-01` | 历史 2.0.26 smoke readiness FAIL 保留；当前 2.0.29 普通成功不回写旧 FAIL。 |
+| `DEFER-OG-PORTABILITY-01` | 原计划同名历史/遗留记录保留；本次不改变其解除条件，不将旧 FAIL/UNRUN 或评审引用改为 PASS。 |
+| `DEFER-OG-READER-01` | 原计划同名历史/遗留记录保留；本次不改变其解除条件，不将旧 FAIL/UNRUN 或评审引用改为 PASS。 |
+| `DEFER-OG-SRC029-TUI-WORKER-01` | 历史有条件草案，未采纳；不自动批准延期或宣称普通 TUI 修复。 |
+| `DEFER-OG-TEMP-01` | 原计划同名历史/遗留记录保留；本次不改变其解除条件，不将旧 FAIL/UNRUN 或评审引用改为 PASS。 |
+| `DEFER-OG-TEST-01` | 原计划同名历史/遗留记录保留；本次不改变其解除条件，不将旧 FAIL/UNRUN 或评审引用改为 PASS。 |
+| `DEFER-OG-TEST01` | 原计划同名历史/遗留记录保留；本次不改变其解除条件，不将旧 FAIL/UNRUN 或评审引用改为 PASS。 |
+| `DEFER-OG16-REVIEW-R1` | 原计划同名历史/遗留记录保留；本次不改变其解除条件，不将旧 FAIL/UNRUN 或评审引用改为 PASS。 |
+| `DEFER-OG19-IDENTITY-READ-CONTEXT-01` | 原计划同名历史/遗留记录保留；本次不改变其解除条件，不将旧 FAIL/UNRUN 或评审引用改为 PASS。 |
+| `DEFER-OG19-INVALID-MAP-DOCTOR-01` | 原计划同名历史/遗留记录保留；本次不改变其解除条件，不将旧 FAIL/UNRUN 或评审引用改为 PASS。 |
+| `DEFER-OG19-LIVE-PARTIAL-01` | 原计划同名历史/遗留记录保留；本次不改变其解除条件，不将旧 FAIL/UNRUN 或评审引用改为 PASS。 |
+| `DEFER-OG19-MACOS-FULL-FLAKE-01` | 原计划同名历史/遗留记录保留；本次不改变其解除条件，不将旧 FAIL/UNRUN 或评审引用改为 PASS。 |
+| `DEFER-OG19-REVIEW-R2-P3-01` | 原计划同名历史/遗留记录保留；本次不改变其解除条件，不将旧 FAIL/UNRUN 或评审引用改为 PASS。 |
+| `DEFER-OG20-REAL-BINARY-01` | 原计划同名历史/遗留记录保留；本次不改变其解除条件，不将旧 FAIL/UNRUN 或评审引用改为 PASS。 |
+| `DEFER-OG21-REVIEW-P2-01` | 原计划同名历史/遗留记录保留；本次不改变其解除条件，不将旧 FAIL/UNRUN 或评审引用改为 PASS。 |
+| `DEFER-OG21-REVIEW-P2-05` | 原计划同名历史/遗留记录保留；本次不改变其解除条件，不将旧 FAIL/UNRUN 或评审引用改为 PASS。 |
+| `DEFER-OG23-FULL-R1` | 原计划同名历史/遗留记录保留；本次不改变其解除条件，不将旧 FAIL/UNRUN 或评审引用改为 PASS。 |
+| `DEFER-OG23-FULL-R2` | 原计划同名历史/遗留记录保留；本次不改变其解除条件，不将旧 FAIL/UNRUN 或评审引用改为 PASS。 |
+| `DEFER-OG23-REVIEW-R1` | 原计划同名历史/遗留记录保留；本次不改变其解除条件，不将旧 FAIL/UNRUN 或评审引用改为 PASS。 |
+| `DEFER-OG25-COVERAGE-V2` | 由已完成 COV26/DEP-OG-13 交付覆盖；不证明 Source A，不重开 COV 卡。 |
+| `DEFER-OG29-PARTIAL-IMPORT` | 继续计划外延期、未修复：unsupported-state 历史 import 仍 LBR-AGENT-020。 |
+
+### 跨卡文档审计与归属
+
+OG-01 事件映射（含 session.status(idle)）、OG-02 Node/Bun 同步 session/turn
+与异步 tool/compaction、OG-03 user.text/assistant model.id 与 token/file 规则、
+OG-09 idle/part/attachment 的 Incomplete 边界，均按当前 EN/zh-CN 命令文档、
+COMPATIBILITY 和静态 docs-contract 复核。旧 spawnSync/info.modelID/patch.files
+字面 pin 不再代替当前文档语义；运行时仍可使用 spawnSync。
+
+当前 doctor 缺少 OpenCode legacy reasoning 标记和逐事件安装投影，归 OG-06：
+仅 doctor.rs、两个待追加的新测试及 EN/zh/COMPAT/网站 doctor 小节；不在 OG-08
+改行为。无其它已证实的跨卡行为文档缺陷；最终 OG-06 文档与本台账由
+FAST-OG-04 再复核。OG-08 审计 Deliverables 先交接，正式 Acceptance 等实际
+家族 C/D。复杂 OpenCode Session/account/model/exporter 集成验收仅 macOS 本机，
+不进 CI；纯 parser/codec/安全单测保留。
+
 ## 状态
 
 Proposed（分析 / 设计意见）
@@ -616,9 +728,9 @@ Agent Trace 联盟成员（README 致谢）大致分两类采集/存储形态，
 - 相邻竞品（AG-ATTR 的其他候选互操作格式，见 §7.3）：`/Volumes/Data/competition/git-ai-project/git-ai`（`793066013`，含 `specs/git_ai_standard_v3.0.0.md`）、`/Volumes/Data/competition/letta-ai/trajectory`（`21ae92d`）。
 - 计划治理：[`plan-long.md`](../plan/plan-long.md)（**AG-ATTR** @ `:267`，完成判据 @ `:276`，不采纳条 @ `:524`，竞品对照 @ `:253`，本仓 revision 快照 @ `:64`）；[`plan-20260818.md`](../plan/plan-20260818.md)（LB-05，已完成）；[`plan-20260822.md`](../plan/plan-20260822.md)（`ai_operation_link`：建表 `Task OL-02` @ `:759`（清单 @ `:765`）、字段集 `ADR-OL-08` @ `:191`、写入/查询 `Task CH-04` @ `:1528`；整体已排期未开始）。
 - 同目录相邻 gap 文档：[`delta.md`](delta.md)（§6.2 **B1** 建议 AG-ATTR 升 P1 + `blame --provenance`，与本文 P1-5 需收敛）。
-- Libra AI 对象模型：[`docs/ai/object-model-reference.md`](../ai/object-model-reference.md)、[`docs/development/code-agent-runtime.md`](code-agent-runtime.md)。
-- 兼容性矩阵：[`COMPATIBILITY.md`](../../COMPATIBILITY.md)（blame 行 @ `:170`）。
-- 关键实现锚点（2026-08-27 已重定位，详见 §7.5 三次核验增补）：`src/internal/ai/tools/apply_patch/core.rs:285`（compute_replacements）、`src/internal/ai/tools/handlers/apply_patch.rs:144`（仅产 UI metadata）、`src/internal/ai/hooks/runtime.rs:3110`（`append_normalized_event_with_envelope` 塌陷，`has_tool_input` @ `:3147`）、`src/internal/ai/observed_agents/`（外部采集 + redaction + traces orphan ref）、`src/internal/publish/ai_export.rs`（对象级导出）。
+- Libra AI 对象模型：[`docs/ai/object-model-reference.md`](../../ai/object-model-reference.md)、[`docs/development/internal/code-agent-runtime.md`](../internal/code-agent-runtime.md)。
+- 兼容性矩阵：[`COMPATIBILITY.md`](../../../COMPATIBILITY.md)（blame 行 @ `:170`）。
+- 关键实现锚点（2026-08-27 已重定位，详见 §7.5 三次核验增补）：`src/internal/ai/tools/apply_patch/core.rs:285`（compute_replacements）、`src/internal/ai/tools/handlers/apply_patch.rs:144`（仅产 UI metadata）、`src/internal/ai/hooks/runtime.rs:3110`（`append_normalized_event_with_envelope` 塌陷，`has_tool_input` @ `:3147`）、`src/internal/ai/observed_agents/`（外部采集 + redaction + traces orphan ref）、`src/internal/publish/ai_export.rs`（对象级导出）。 **历史锚点说明：** 本行仅对应 2026-08-27 `89081277a`；`src/internal/publish/ai_export.rs` 与两个 `tools/apply_patch` 路径已移除，`hooks/runtime.rs` 原行号已失效，不是当前源码 pin。
 
 ---
 

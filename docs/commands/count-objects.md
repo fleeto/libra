@@ -27,7 +27,11 @@ alternate: <alternate object directory>      (0..n lines)
 `--json` / `--machine` emit a structured census (raw byte and KiB fields, plus
 `garbage_entries` with `path`/`reason` on `-v`, capped at 100 with a
 `garbage_entries_truncated` flag). Structured mode suppresses the human warning
-lines and puts garbage detail into `data.garbage_entries`.
+lines and puts garbage detail into `data.garbage_entries`. `data.alternates`
+contains raw UTF-8 path strings, with no C-style display quotes. Non-UTF-8
+alternate paths fail with `LBR-IO-001` in structured mode; use text output to
+inspect their byte-preserving escapes. Human `alternate:` lines use Git's
+default C-style escaping; ordinary spaces remain unquoted.
 
 ## Examples
 
@@ -47,6 +51,8 @@ libra count-objects -v --json         Structured census for agents
   comparison pass falsely).
 - Operation Log snapshot objects written by real mutations are counted, so
   Libra's count is usually larger than Git's after a mutation.
+- Garbage detail and human warnings are limited to the first 100 entries;
+  totals remain complete, and the truncation flag is true only above 100.
 - Only the local storage tier is inspected; tiered remote objects are not
   counted and no network request is made.
 
@@ -54,7 +60,7 @@ libra count-objects -v --json         Structured census for agents
 
 - Read-only: no `.idx` rebuild, no schema migration, no maintenance lock, no
   operation record. `count-objects -v` output is byte-stable across runs.
-- Works in bare repositories, subdirectories, and linked worktrees; exits 0.
+- Works in bare repositories, subdirectories, and linked worktrees; exits 0 on success.
 
 ## Errors
 

@@ -24,7 +24,10 @@
   禁止复用会写盘的 `list_all_idx` 与 `list_loose_objects`。
 - hexsz 取 `get_hash_kind().size() * 2`，不硬编码。
 - 人类可读 `humanise_bytes` 逐字复刻 Git `strbuf_humanise_bytes`。
-- 路径按 `quote_c_style` 转义。
+- 人类 alternate 路径按 Git 默认 `quote_c_style` 表逐字节转义（包括 DEL），
+  普通空格不触发引号；machine `data.alternates` 保留原始 UTF-8 字符串，
+  非 UTF-8 则 `LBR-IO-001`，不把替换字符伪装成可用路径。
+- garbage 总数完整，明细与人类 warning 上限 100；仅超过上限时标 truncated。
 
 ## 有意差异（四处同步：EN/zh 命令页、COMPATIBILITY、本文件）
 
@@ -32,6 +35,7 @@
 2. 分片/pack 目录不可读 fail-closed `LBR-IO-001`（Git 告警后继续）。
 3. Operation Log 快照对象计入 `count`。
 4. 只统计本地 tier。
+5. garbage 总数完整，明细与人类 warning 最多 100 条，超过时才标 truncated。
 
 ## 错误码
 

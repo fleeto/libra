@@ -295,8 +295,8 @@ fn invalid_and_unreadable_commit_status_are_bypassed_on_inapplicable_paths() {
             false,
         ),
         (
-            "dry-run-bypass",
-            &["commit", "--dry-run", "--no-gpg-sign"],
+            "dry-run-no-status-bypass",
+            &["commit", "--dry-run", "--no-status", "--no-gpg-sign"],
             false,
         ),
         (
@@ -352,6 +352,97 @@ fn invalid_and_unreadable_commit_status_are_bypassed_on_inapplicable_paths() {
         &["commit", "--status", "--no-gpg-sign", "--no-verify"],
         true,
     );
+}
+
+#[test]
+fn explicit_dry_run_validates_commit_status_without_index_or_history_writes() {
+    for failure in [
+        CommitStatusFailure::InvalidValue,
+        CommitStatusFailure::UnreadableGlobalStore,
+    ] {
+        let fixture = Fixture::new();
+        let repo = fixture.path("explicit-dry-run-status-error");
+        fixture.init_repo(&repo);
+        fixture.commit_file(&repo, "base.txt", "base\n", "base");
+        fs::write(repo.join("next.txt"), "staged\n").expect("write staged file");
+        fixture.success(&repo, &["add", "next.txt"]);
+        let before_head = stdout_trim(&fixture.success(&repo, &["rev-parse", "HEAD"]));
+        let index_path = repo.join(".libra/index");
+        let before_index = fs::read(&index_path).expect("read index before preview");
+        let (exit, error_code, config_key) = match failure {
+            CommitStatusFailure::InvalidValue => {
+                fixture.success(&repo, &["config", "commit.status", "invalid"]);
+                (129, "LBR-CLI-002", "commit.status")
+            }
+            CommitStatusFailure::UnreadableGlobalStore => {
+                fs::create_dir_all(fixture.home.join(".libra/config.db"))
+                    .expect("replace global config database with a directory");
+                (128, "LBR-IO-001", "commit.status")
+            }
+        };
+        for extra in [
+            &[][..],
+            &["-m", "preview"][..],
+            &["--cleanup=whitespace"][..],
+            &["--porcelain"][..],
+            &["--json"][..],
+        ] {
+            let mut args = vec!["commit", "--dry-run", "--no-gpg-sign", "-a"];
+            args.extend_from_slice(extra);
+            let output = fixture.run(&repo, &args);
+            assert_eq!(output.status.code(), Some(exit), "args={args:?}");
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(stderr.contains(error_code), "args={args:?}: {stderr}");
+            assert!(stderr.contains(config_key), "args={args:?}: {stderr}");
+            assert_eq!(
+                fs::read(&index_path).expect("read index after refused preview"),
+                before_index
+            );
+            assert_eq!(
+                stdout_trim(&fixture.success(&repo, &["rev-parse", "HEAD"])),
+                before_head
+            );
+        }
+    }
+}
+
+#[test]
+fn explicit_dry_run_refusal_snapshot_honors_config_and_cli_override() {
+    let fixture = Fixture::new();
+    let repo = fixture.path("explicit-dry-run-status-config");
+    fixture.init_repo(&repo);
+    fixture.commit_file(&repo, "base.txt", "base\n", "base");
+    fs::write(repo.join("next.txt"), "untracked\n").expect("write untracked file");
+    let before_head = stdout_trim(&fixture.success(&repo, &["rev-parse", "HEAD"]));
+    let index_path = repo.join(".libra/index");
+    let before_index = fs::read(&index_path).expect("read index before preview");
+
+    for (config, extra, has_snapshot) in [
+        ("false", &[][..], false),
+        ("false", &["--status"][..], true),
+        ("true", &["--no-status"][..], false),
+    ] {
+        fixture.success(&repo, &["config", "commit.status", config]);
+        let mut args = vec!["commit", "--dry-run", "--no-gpg-sign", "-m", "preview"];
+        args.extend_from_slice(extra);
+        let output = fixture.run(&repo, &args);
+        assert_eq!(output.status.code(), Some(128), "args={args:?}");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(
+            stdout.contains("On branch "),
+            has_snapshot,
+            "args={args:?}: {stdout}"
+        );
+        assert_eq!(stdout.contains("next.txt"), has_snapshot, "{stdout}");
+        assert_eq!(
+            fs::read(&index_path).expect("read index after preview"),
+            before_index
+        );
+        assert_eq!(
+            stdout_trim(&fixture.success(&repo, &["rev-parse", "HEAD"])),
+            before_head
+        );
+    }
 }
 
 #[test]

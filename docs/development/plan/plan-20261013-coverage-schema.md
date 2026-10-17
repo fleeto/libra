@@ -1,5 +1,8 @@
 # OpenCode coverage schema-v2 前置实施计划（2026-10-13）
 
+> **2026-10-17 macOS native boot 实际验收：** `FIX-OG-NATIVE-BOOT-01` 的 VER1/3/4/5/6/7/8 已有实际 PASS；本次完成 VER6、VER1、VER8。**AC2 已由最终候选的真实反例证明 FAIL，完整 VER2 harness 仍 UNRUN**，本卡未完成、未 source-qualified，不能据此放行 SRC029、OG24.3、RUN029 或 native 归档。新问题按用户既有复杂问题延期策略登记为 `DEFER-OG-NATIVE-INITIAL-ENV-01`，保留原 AC2/VER2 要求及来源 A，未将延期或未审变量行记 PASS。正式 **61/74=82.43%**、source **63/74=85.14%**、COV **26/26** 均不变；先核对可独立执行的后续卡及发布门，依赖此来源证明的卡继续等待。下方旧“下一张/待”表述保留原时点含义，以本次实际状态为准。
+
+
 > **private native 启动保护 G09（2026-10-16 22:16:58 UTC；本次签名 main 交付后生效）：** 唯一 Claude Code R2 规划 PASS，raw `2c0a16b9353ed3c2be901f284b1acfdd1eeef4f88682df0944acc3fd986e58db`，root已逐字恢复13/13 required chunks及7/7原始输入并采用推荐方案。新增 `FIX-OG-NATIVE-BOOT-01`，只在新 private successor 实现单二进制 first trusted preload + macOS Hardened Runtime + sealed boot factory prerequisite；本卡不改 Libra 命令、不安装/登记该候选。父分母 **74**，正式 **61/74=82.43%**、source **63/74=85.14%**，COV **26/26** 不变；完成分子没有增加。原73卡统计/全部失败保留历史。**下一张 FIX-OG-NATIVE-BOOT-01，随后 SRC029 → OG-24 `.3` → RUN029 → OG-27。** SOURCE/profile/SourceA/native archive及ROOT19/cf grant均未放行；FIX-RG-SCOPED-04仍为用户指定计划外延期。下方旧“当前/待”段落按原时点保存，以本节及本次具名G09为准。
 
 > **上次收口提交实际 CI：** main `7e75d4138fe452d9d9b6c92f34e98ffc26fbf950` 的 run `38957783497` 已 completed/success，**8/8 jobs success**；CodeQL `38957783597` 2/2、quality `38957783232` 均 actual success。本次规划提交自己的Actions按模板v2.14在Push后查询并于下次常规状态同步记账，不预填成功、不制造纯记账无限链。本轮不发版，已发布0.30.51和其全部实际验收保持原状。
@@ -4539,3 +4542,19 @@ official29独立A和仅三已审schema叠加的独立B均先清空11输出后运
 网站cf `8c6e8f1ee22aaafeb54df14f635c5e11199d13ee` 为本卡单页signed+DCO提交，已核committed page SHA `c5f82020de058867d593a4bfdd41f45b0b36ca300453f9b32441cd6a13aef6f9`=最终sync/check/typecheck/build/11docs测试输入，双语本地预览200含新措辞。当前仅local commit，Push/Cloudflare/线上新文案未发生；线上old基线使用既有acceptance UA双语200、尚无新句。首次裸urllib403保留，不当发布失败或PASS；普通浏览器也已确认old文档正常可见，无CAPTCHA或安全绕过。
 
 只在本卡实际signed main交付并由root验证commit内上述post-image/mode后，SRC029才可消费此只读新像；具体F SHA由实际交付receipt实录，不能猜测。OG24自己的attest仍只读；修复全部shared I/独立release/C-D/三plan收口/postSHA登记及signed-return完毕前，不授OG24.3 grant。真实selected9f消费新TMP、registered lane every-launch、完整S1–S8与Source A仍阻断；合成helper/本次full不代替真实native字段或注册。主/站Push、当前F安全CI、签名tag、四平台、稳定release、manifest/CDN/Homebrew、指定curl安装均须actual完成后才卡done；正式60/73/source62/73/COV26/26不变。
+
+
+## 2026-10-17 native boot 实测状态同步
+
+`FIX-OG-NATIVE-BOOT-01` 为 blocked / empty、未 source-qualified：VER1/3/4/5/6/7/8实际PASS，AC2的初始 exact15要求已有最终同一f9候选的16/17项真实反例；完整VER2 harness仍UNRUN。按用户既有复杂问题延期策略登记计划外 `DEFER-OG-NATIVE-INITIAL-ENV-01`，不是豁免AC2或将该卡标完成。诊断单Claude PASS/raw `bbf77e0f5eca2f30ffa0ff9702f23355dba504d56aa1d8efdd159cdc231905c6`，root无损恢复23chunks/15正文；4次隔离version启动、0模型/账号/attest/真实用户Session调用、4个owned进程组实际已退出。root结果摘要SHA `d99449ad3e325db3a3c946fee4a908d1e8b9c7931ddf98b891613d92d2ecff44`。VER8新建model-free空测试Session的599B导出仅为Required ordinary兼容正例，绝非native字段/SourceA。
+
+逐门范围、具名失败/复用与计划外遗留（完整历史见证据capsule）见[父计划实际验收](plan-20260902.md#native-boot-macos-实际验收与初始环境遗留2026-10-17)。最终候选SHA `f9ab85e955f99f8a3027e4f7cd7233087b762db4f828a403b537c65f9422d06d`，当前manifest `268a79ac70a3f6f93ddf37b5a5486199a503c757a35f1ec35fbbf5050c9d4e5d`。原VER3/4/7收据与历史manifest身份保留，不改称当前新运行。BOOT验收没有修改原始key、已安装OpenCode与Libra51、用户04及05dirty或原8个stash；本卡本身无agent公开CLI变更，其agent网站页租约仍扣留。本次独立校正上游checkout/commit命令文档，不含新native能力。没有新main功能/full/CI/release结果可预填。
+
+父正式61/74=82.43%、source63/74=85.14%、COV26/26不变；原AC/VER、DAG、写集、REL-FAST-OG-04成员及实际C/D要求不变。SRC029/OG24.3/RUN029/OG27等native依赖仍不能放行，ROOT19/cf lease withheld；按既有依赖继续检查可独立执行的后续卡，不能因延期将native归档当完成。防重启证据capsule `native-boot9dc-seven-of-eight-PASS-20261017T125553Z`，3090files，MANIFEST SHA `7e0f7fbb70a214e0667307f14beba7df9b0ee79ef1b24e6df0505dad1029d9ea`（位于当前对话task-handoffs）；不包含原issuer key/测试认证配置或live runtime，不宣称全dependency离线资格。
+
+
+### 剩余任务开工核对与上游基线（2026-10-17）
+
+未完成的13卡按原依赖逐一核对：`FIX-OG-NATIVE-BOOT-01`、OG24/27/28/29/05/08/06、FAST-OG-04共9卡存在实际失败或未满足前置；OG25/26两卡已有source Deliverables、仍待FAST-OG-04实际C/D；OG15与FIX-OG-CP-01两卡为此前用户明确延期。当前没有可以独立完成的未交付卡，不能靠改依赖、登记未审producer或将延期记done来增加百分比。新初始环境遗留在计划外，原74卡分母和61个正式完成分子均保留，计划整体仍未完成。
+
+另已通过Libra原样快进上游 main `56e8a7ff19d42376f49760e6c992377d89f917b7`（checkout/status/commit修复，9路径），不是本卡新增native实现。2051项上游archive核对表明 `opencode_export.rs` 与 `native_origin/attest.rs` 字节均未变，selected f9与其manifest也未变；VER8实际renderer仍是当时9dc源码的具名证据，不改称56e的新执行。本次三plan状态提交自身不修改生产代码，Root19/OG24的agent文档cf lease仍 withheld；上游checkout/commit网站文档按用户常驻要求另作同步。原有5份dirty文档内容、2个untracked及8个stash均保留；合并wrapper继承077 umask造成的14处普通文件权限变化已按备份/上游archive逐项恢复0644，未改任何issuer key。旧9dc的111reader/fmt/strict/diff实际PASS保留；因56e含实际源码变化，须对最终工作树重新验证，不能把旧full当作当前full或计划收口通过。

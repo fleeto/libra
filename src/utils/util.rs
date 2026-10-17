@@ -1742,6 +1742,25 @@ async fn resolve_remote_branch_atom_typed(
     display_name: &str,
 ) -> Result<Option<ResolvedAtom>, CommitBaseError> {
     let short_name = name.strip_prefix("refs/remotes/").unwrap_or(name);
+
+    // Git's short-ref DWIM also resolves `refs/remotes/<remote>` and
+    // `refs/remotes/<remote>/HEAD` through the cached remote HEAD. A bare
+    // remote name never contains '/', and an explicit `.../HEAD` is stored as
+    // a `Head` row (not a `Branch` row), so both need this dedicated probe
+    // before the slash-split loop.
+    let remote_head = if let Some(remote) = short_name.strip_suffix("/HEAD") {
+        Some(remote)
+    } else if short_name.contains('/') {
+        None
+    } else {
+        Some(short_name)
+    };
+    if let Some(remote) = remote_head.filter(|remote| !remote.is_empty())
+        && let Some(atom) = resolve_remote_head_atom_typed(remote, display_name).await?
+    {
+        return Ok(Some(atom));
+    }
+
     for (remote, branch_name) in remote_tracking_candidates(short_name) {
         let full_ref = format!("refs/remotes/{remote}/{branch_name}");
         let candidates = [
@@ -1767,6 +1786,51 @@ async fn resolve_remote_branch_atom_typed(
         }
     }
     Ok(None)
+}
+
+/// Resolve the cached default branch of `remote`
+/// (`refs/remotes/<remote>/HEAD`) to the commit it points at.
+///
+/// Mirrors Git's `refs/remotes/<name>/HEAD` DWIM fallback: a symbolic row
+/// resolves through the mapped tracking branch (full name first, then the
+/// legacy short shape), a detached row uses its OID directly.
+async fn resolve_remote_head_atom_typed(
+    remote: &str,
+    display_name: &str,
+) -> Result<Option<ResolvedAtom>, CommitBaseError> {
+    let db = get_db_conn_instance().await;
+    let head = Head::remote_current_result_with_conn(&db, remote)
+        .await
+        .map_err(|error| {
+            CommitBaseError::from_branch_store_error(
+                format!("failed to resolve remote HEAD for '{display_name}' on remote '{remote}'"),
+                error,
+            )
+        })?;
+    let (object_id, reflog_ref) = match head {
+        Some(Head::Branch(branch_name)) => {
+            let full_ref = format!("refs/remotes/{remote}/{branch_name}");
+            let mut commit =
+                resolve_branch_commit_typed(&full_ref, Some(remote), display_name).await?;
+            if commit.is_none() {
+                commit =
+                    resolve_branch_commit_typed(&branch_name, Some(remote), display_name).await?;
+            }
+            match commit {
+                Some(commit) => (commit, full_ref),
+                None => return Ok(None),
+            }
+        }
+        Some(Head::Detached(commit)) => (commit, format!("refs/remotes/{remote}/HEAD")),
+        None => return Ok(None),
+    };
+    let storage = objects_storage();
+    let object_id =
+        validate_referenced_object(&storage, object_id, display_name, Some(ObjectType::Commit))?;
+    Ok(Some(ResolvedAtom {
+        object_id,
+        reflog_ref: Some(reflog_ref),
+    }))
 }
 
 async fn resolve_hash_atom_typed(name: &str) -> Result<ResolvedAtom, CommitBaseError> {
@@ -3526,6 +3590,88 @@ mod test {
                 "branch '{branch_name}' does not point to a commit"
             )),
             "unexpected error: {error}"
+        );
+    }
+
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn get_commit_base_typed_resolves_bare_remote_via_cached_head() {
+        let repo = tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = test::ChangeDirGuard::new(repo.path());
+
+        test::ensure_file("tracked.txt", Some("tracked\n"));
+        add::execute(AddArgs {
+            intent_to_add: false,
+            sparse: false,
+            pathspec: vec!["tracked.txt".into()],
+            all: false,
+            update: false,
+            refresh: false,
+            verbose: false,
+            force: false,
+            dry_run: false,
+            ignore_errors: false,
+            pathspec_from_file: None,
+            pathspec_file_nul: false,
+            chmod: None,
+            renormalize: false,
+            ignore_missing: false,
+            resolved: false,
+            patch: false,
+            auto_advance: false,
+            no_auto_advance: false,
+        })
+        .await;
+        commit::execute(CommitArgs {
+            message: Some("base".into()),
+            disable_pre: true,
+            no_verify: true,
+            ..Default::default()
+        })
+        .await;
+
+        let head_commit = Head::current_commit()
+            .await
+            .expect("expected committed HEAD");
+        let db = get_db_conn_instance().await;
+
+        // Cached remote HEAD (symbolic: kind Head + remote column, branch in name).
+        reference::ActiveModel {
+            name: Set(Some("main".to_string())),
+            kind: Set(reference::ConfigKind::Head),
+            commit: Set(Some(head_commit.to_string())),
+            remote: Set(Some("origin".to_string())),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .expect("failed to insert cached remote HEAD");
+
+        // Mapped tracking branch under the fully-qualified writer shape.
+        reference::ActiveModel {
+            name: Set(Some("refs/remotes/origin/main".to_string())),
+            kind: Set(reference::ConfigKind::Branch),
+            commit: Set(Some(head_commit.to_string())),
+            remote: Set(Some("origin".to_string())),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .expect("failed to insert tracking branch");
+
+        // Git DWIM: bare remote, `origin/HEAD` and its fully-qualified form all
+        // resolve through the cached remote HEAD (issue #464 companion fix).
+        assert_eq!(get_commit_base_typed("origin").await.unwrap(), head_commit);
+        assert_eq!(
+            get_commit_base_typed("origin/HEAD").await.unwrap(),
+            head_commit
+        );
+        assert_eq!(
+            get_commit_base_typed("refs/remotes/origin/HEAD")
+                .await
+                .unwrap(),
+            head_commit
         );
     }
 

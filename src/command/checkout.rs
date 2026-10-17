@@ -481,7 +481,9 @@ async fn run_checkout(
         map_switch_preflight(clean_status)?;
 
         let child_output = silent_child_output(output);
-        let commit = create_and_switch_new_branch(&new_branch, start_point, &child_output).await?;
+        let commit =
+            create_and_switch_new_branch(&new_branch, start_point, args.track, &child_output)
+                .await?;
         let commit = commit.to_string();
         return Ok(CheckoutOutput {
             action: "create".to_string(),
@@ -513,6 +515,13 @@ async fn run_checkout(
             return Err(CheckoutError::CreatingBranchBlocked(new_branch));
         }
         reset_and_switch_branch(&new_branch, target_commit, &silent_child_output(output)).await?;
+        maybe_set_startpoint_upstream(
+            &new_branch,
+            start_point.as_deref(),
+            args.track,
+            &silent_child_output(output),
+        )
+        .await?;
         let commit = target_commit.to_string();
         return Ok(CheckoutOutput {
             action: "create".to_string(),
@@ -793,13 +802,65 @@ async fn switch_branch_with_output(
 async fn create_and_switch_new_branch(
     new_branch: &str,
     start_point: Option<String>,
+    track: bool,
     output: &OutputConfig,
 ) -> Result<ObjectHash, CheckoutError> {
-    branch::create_branch_safe(new_branch.to_string(), start_point)
+    branch::create_branch_safe(new_branch.to_string(), start_point.clone())
         .await
         .map_err(CheckoutError::DelegatedCli)?;
+    maybe_set_startpoint_upstream(new_branch, start_point.as_deref(), track, output).await?;
     // A freshly created branch cannot be checked out elsewhere.
     switch_branch_with_output(new_branch, output, true).await
+}
+
+/// Git's `branch.autoSetupMerge` default: creating a branch from an existing
+/// remote-tracking start point configures upstream tracking. An explicit
+/// `--track` additionally tracks a local-branch start point; tags and raw
+/// commits are left alone.
+async fn maybe_set_startpoint_upstream(
+    new_branch: &str,
+    start_point: Option<&str>,
+    track: bool,
+    output: &OutputConfig,
+) -> Result<(), CheckoutError> {
+    let Some(spec) = start_point else {
+        return Ok(());
+    };
+    if !track && !start_point_is_remote_tracking(spec).await {
+        return Ok(());
+    }
+    branch::set_upstream_safe_with_output(new_branch, spec, output)
+        .await
+        .map_err(CheckoutError::DelegatedCli)
+}
+
+/// Whether `spec` names an existing remote-tracking branch: a
+/// `refs/remotes/...` / `<remote>/<branch>` shape, or a bare configured remote
+/// whose cached HEAD exists.
+async fn start_point_is_remote_tracking(spec: &str) -> bool {
+    let short = spec.strip_prefix("refs/remotes/").unwrap_or(spec);
+    if let Some((remote, branch)) = short.split_once('/') {
+        if branch.is_empty() {
+            return false;
+        }
+        let full = format!("refs/remotes/{remote}/{branch}");
+        return Branch::find_branch_result(&full, Some(remote))
+            .await
+            .ok()
+            .flatten()
+            .is_some()
+            || Branch::find_branch_result(branch, Some(remote))
+                .await
+                .ok()
+                .flatten()
+                .is_some();
+    }
+    !short.is_empty()
+        && Head::remote_current_result(short)
+            .await
+            .ok()
+            .flatten()
+            .is_some()
 }
 
 async fn resolve_checkout_create_startpoint(
@@ -863,7 +924,7 @@ async fn get_remote(branch_name: &str, output: &OutputConfig) -> Result<ObjectHa
     let remote_branch_name: String = format!("origin/{branch_name}");
     let child_output = silent_child_output(output);
 
-    create_and_switch_new_branch(branch_name, None, &child_output)
+    create_and_switch_new_branch(branch_name, None, false, &child_output)
         .await
         .map_err(|err| wrap_remote_proxy_error("create local tracking branch", err))?;
     // Set branch upstream

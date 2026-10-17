@@ -262,7 +262,7 @@ fn render_human_status(
 
     // Upstream tracking info
     if let Some(upstream) = &data.upstream {
-        render_upstream_human(upstream, buffer)?;
+        render_upstream_human(upstream, args.show_ahead_behind(), buffer)?;
     }
 
     if let Some(notice) = &data.sequence_notice {
@@ -620,7 +620,11 @@ fn render_merge_state_human(merge_state: &MergeStatusInfo, buffer: &mut Vec<u8>)
     Ok(())
 }
 
-fn render_upstream_human(upstream: &UpstreamInfo, buffer: &mut Vec<u8>) -> CliResult<()> {
+fn render_upstream_human(
+    upstream: &UpstreamInfo,
+    show_counts: bool,
+    buffer: &mut Vec<u8>,
+) -> CliResult<()> {
     let write_error =
         |err: io::Error| crate::utils::output::stdout_write_error("write status output", err);
 
@@ -651,31 +655,42 @@ fn render_upstream_human(upstream: &UpstreamInfo, buffer: &mut Vec<u8>) -> CliRe
         )
         .map_err(write_error)?;
     } else if ahead > 0 && behind == 0 {
-        writeln!(
-            buffer,
-            "Your branch is ahead of '{}' by {} commit{}.",
-            upstream.remote_ref,
-            ahead,
-            if ahead == 1 { "" } else { "s" }
-        )
-        .map_err(write_error)?;
+        // Git drops the numeric count under `--no-ahead-behind`.
+        if show_counts {
+            writeln!(
+                buffer,
+                "Your branch is ahead of '{}' by {} commit{}.",
+                upstream.remote_ref,
+                ahead,
+                if ahead == 1 { "" } else { "s" }
+            )
+            .map_err(write_error)?;
+        } else {
+            writeln!(buffer, "Your branch is ahead of '{}'.", upstream.remote_ref)
+                .map_err(write_error)?;
+        }
         writeln!(
             buffer,
             "  (use \"libra push\" to publish your local commits)"
         )
         .map_err(write_error)?;
     } else if ahead == 0 && behind > 0 {
-        writeln!(
-            buffer,
-            "Your branch is behind '{}' by {} commit{}.",
-            upstream.remote_ref,
-            behind,
-            if behind == 1 { "" } else { "s" }
-        )
-        .map_err(write_error)?;
+        if show_counts {
+            writeln!(
+                buffer,
+                "Your branch is behind '{}' by {} commit{}.",
+                upstream.remote_ref,
+                behind,
+                if behind == 1 { "" } else { "s" }
+            )
+            .map_err(write_error)?;
+        } else {
+            writeln!(buffer, "Your branch is behind '{}'.", upstream.remote_ref)
+                .map_err(write_error)?;
+        }
         writeln!(buffer, "  (use \"libra pull\" to update your local branch)")
             .map_err(write_error)?;
-    } else {
+    } else if show_counts {
         writeln!(
             buffer,
             "Your branch and '{}' have diverged,",
@@ -685,6 +700,18 @@ fn render_upstream_human(upstream: &UpstreamInfo, buffer: &mut Vec<u8>) -> CliRe
         writeln!(
             buffer,
             "and have {ahead} and {behind} different commits each, respectively."
+        )
+        .map_err(write_error)?;
+        writeln!(
+            buffer,
+            "  (use \"libra pull\" to merge the remote branch into yours)"
+        )
+        .map_err(write_error)?;
+    } else {
+        writeln!(
+            buffer,
+            "Your branch and '{}' refer to different commits.",
+            upstream.remote_ref
         )
         .map_err(write_error)?;
         writeln!(

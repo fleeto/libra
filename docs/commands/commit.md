@@ -296,10 +296,12 @@ libra config commit.cleanup whitespace   # default cleanup when --cleanup is omi
 
 ### `--dry-run`
 
-Do not actually create the commit. Show the commit summary that would be produced.
-The preview does not run repository hooks or open the commit-message editor, so
-no message is required and subprocesses cannot observe or mutate a live index while
-`-a` is being previewed. `-v` still prints the staged preview diff directly.
+Do not actually create the commit. Show the commit summary that would be produced,
+preceded by the branch-aware status snapshot Git prints for `commit --dry-run`
+(`On branch ...` plus upstream state). The preview does not run repository hooks or
+open the commit-message editor, so no message is required and subprocesses cannot
+observe or mutate a live index while `-a` is being previewed. `-v` still prints the
+staged preview diff directly.
 
 ```bash
 libra commit --dry-run -m "Draft commit"

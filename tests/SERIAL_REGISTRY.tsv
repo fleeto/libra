@@ -917,3 +917,12 @@ opencode_registered_failure_releases_dirty_job_claim_and_marker	lane:opencode_ex
 memory_core_is_repository_role_only	lane:env	uses the shared config database fixture to prove DM-01 registers to Repository role only
 memory_path_search_is_repository_role_only	lane:env	uses the shared config database fixture to prove DM-10 registers to Repository role only
 reasoning_artifact_mirrors_and_erases_with_checkpoint	lane:cloud_live	RG-05 real D1/R2 artifact lifecycle fixture shares the cloud account/bucket; mandatory when selected, owned UUID cleanup
+test_add_dry_run_pathspec_writes_no_objects	lane:cwd	retains the classifier-required cwd lane for upstream issue 483 preview and operation-recording checks in isolated repositories
+test_add_dry_run_update_writes_no_objects_tc0011	lane:cwd	retains the classifier-required cwd lane for upstream issue 483 preview and operation-recording checks in isolated repositories
+test_alternates_prune_dry_run_writes_no_objects	lane:cwd	retains the classifier-required cwd lane for upstream issue 483 preview and operation-recording checks in isolated repositories
+test_cache_evict_dry_run_writes_no_objects	lane:cwd	retains the classifier-required cwd lane for upstream issue 483 preview and operation-recording checks in isolated repositories
+test_clean_dry_run_writes_no_objects	lane:cwd	retains the classifier-required cwd lane for upstream issue 483 preview and operation-recording checks in isolated repositories
+test_mv_dry_run_writes_no_objects	lane:cwd	retains the classifier-required cwd lane for upstream issue 483 preview and operation-recording checks in isolated repositories
+test_reflog_expire_dry_run_writes_no_objects	lane:cwd	retains the classifier-required cwd lane for upstream issue 483 preview and operation-recording checks in isolated repositories
+test_rm_dry_run_writes_no_objects	lane:cwd	retains the classifier-required cwd lane for upstream issue 483 preview and operation-recording checks in isolated repositories
+test_worktree_mutations_still_record_operations	lane:cwd	retains the classifier-required cwd lane for upstream issue 483 preview and operation-recording checks in isolated repositories

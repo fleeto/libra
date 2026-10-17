@@ -52,7 +52,7 @@ Checking out branches or paths materializes entries with their mode's permission
 | | `[<start-point>]` | positional | Optional commit, tag, or branch used with `-b` / `-B` as the new branch tip |
 | | `--orphan` | `<name>` | Create an unborn orphan branch, preserve the index/worktree, and switch HEAD to it. A separate start-point is not supported. |
 | `-d` | `--detach` | | Detach HEAD at the named commit even when it is a branch. With no target, detach at the current HEAD instead of showing the current branch (unborn HEAD is refused: `You are on a branch yet to be born`, `LBR-REPO-003`, exit 128) |
-| `-t` | `--track` | | Set up upstream tracking for the new `-b` / `-B` branch. A remote-tracking start point is tracked by default (DWIM); `--track` additionally tracks a local-branch start point, matching Git's explicit request. A tag or raw-commit start point is refused (`cannot set up tracking information`, exit 129). |
+| `-t` | `--track` | | Set up upstream tracking for the new `-b` / `-B` branch. A remote-tracking start point is tracked by default (DWIM); `--track` additionally tracks a local-branch start point, matching Git's explicit request. A start point that only names a tag or commit is not a valid tracking branch. A tracking error can occur after `-b` has created the branch or `-B` has reset and switched to it; those effects are not rolled back. |
 | | `--ignore-other-worktrees` | | Accepted for CLI compatibility, but **does NOT** bypass Libra's other-worktree safety guard (intentionally-different from Git): Libra never allows the same shared branch checked out in two worktrees. It is a silent no-op in a single-worktree repo; against a real collision the checkout is still refused. |
 | | `--no-progress` | | Do not show a progress meter. Accepted as a no-op: Libra's checkout never renders a progress meter. |
 | | `--no-overlay` | | Do not check out paths in overlay mode (paths missing from the source are still removed). Accepted as a no-op: Libra's checkout is never in overlay mode, matching the Git default. (Git's `--overlay` is not implemented.) |
@@ -285,7 +285,7 @@ When `libra checkout feature` finds `origin/feature` but no local `feature` bran
 | Restore files | `git checkout -- file` | `libra checkout -- file` (prefer `libra restore file`) | `jj restore` |
 | Restore files from revision | `git checkout HEAD -- file` | `libra checkout HEAD -- file` (prefer `libra restore --source HEAD -S -W file`) | `jj restore --from <revision>` |
 | Detach HEAD | `git checkout <commit>` / `git checkout --detach <branch>` | `libra checkout <commit>` / `libra checkout -d`/`--detach <branch>` | `jj edit <rev>` |
-| Track remote branch | `git checkout -t`/`--track <remote>/<branch>` | `libra checkout -t`/`--track` (accepted no-op; DWIM always tracks) | N/A |
+| Track remote branch | `git checkout -t`/`--track <remote>/<branch>` | `libra checkout -b <new> --track <start-point>` (remote start points track by default; explicit `--track` also tracks local branches) | N/A |
 | Structured output | No | `--json` / `--machine` for branch compatibility actions | `--template` |
 
 Remaining unsupported interactive options fail with `LBR-UNSUPPORTED-001` (`-p`/`--patch` and `--[no-]auto-advance`, D15). Use `libra checkout <pathspec>` or `libra restore <pathspec>`.

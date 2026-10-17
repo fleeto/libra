@@ -296,9 +296,12 @@ libra config commit.cleanup whitespace   # default cleanup when --cleanup is omi
 
 ### `--dry-run`
 
-Do not actually create the commit. Show the commit summary that would be produced,
-preceded by the branch-aware status snapshot Git prints for `commit --dry-run`
-(`On branch ...` plus upstream state). The preview does not run repository hooks or
+Do not actually create the commit. A successful preview shows the commit summary
+that would be produced. When refusing because there is nothing to commit, the
+human preview first shows a branch-aware status snapshot (`On branch ...` plus
+upstream state). `--no-status` suppresses this refusal snapshot;
+`commit.status=false` also suppresses this refusal snapshot unless `--status` overrides it.
+The preview does not run repository hooks or
 open the commit-message editor, so no message is required and subprocesses cannot
 observe or mutate a live index while `-a` is being previewed. `-v` still prints the
 staged preview diff directly.
@@ -328,8 +331,10 @@ The commit-message editor template includes the working-tree status as
 and `--no-status` explicitly override that config (last flag wins). Because the
 lines are comments, the message
 cleanup strips them — they are informational only and never enter the final
-commit message. This has no effect when no editor is opened (e.g. with `-m`).
-The status is also omitted under cleanup modes that keep comment lines
+commit message. For a real commit, this has no effect when no editor is opened
+(e.g. with `-m`). Explicit `--dry-run` also uses the setting and these toggles to
+collect its preview status, independently of editor cleanup.
+The editor-template status is also omitted under cleanup modes that keep comment lines
 (`--cleanup=verbatim`, `--cleanup=whitespace`, and `--cleanup=scissors` — explicit
 scissors keeps `#` lines above the marker), so it can never leak into the message;
 it is seeded only when an editor opens and the effective cleanup strips comments
@@ -338,17 +343,18 @@ strip — so the status stays omitted under those modes even with `-v`.
 
 `commit.status` uses the strict local -> global -> system cascade and accepts a
 Git boolean (including numeric forms such as `0k` and `2`). When an editor status
-template can actually be generated, an invalid value fails with `LBR-CLI-002`,
+template can be generated or `--dry-run` is explicit, an invalid value fails with
+`LBR-CLI-002`,
 and an unreadable local/global config store fails with `LBR-IO-001`, before `-a`,
 hooks, object writes, or history updates — except a future-schema global store
 (newer than this binary), which is skipped with a one-time warning (see
-`LBR-CONFIG-001`). `-m`, dry-run/porcelain, JSON, and
-non-comment-stripping cleanup bypass the key because no template can exist. An explicit
+`LBR-CONFIG-001`). Without explicit `--dry-run`, `-m`, porcelain previews, JSON,
+and non-comment-stripping cleanup bypass the key when no template can exist. An explicit
 `--status` or `--no-status` bypasses the matching config read. When the status
 section is enabled, failures from its `status.*` config, collection, or rendering
 also preserve their stable error code and abort before the pre-commit hook,
 editor, commit/tree object write, or ref update; `--no-status` bypasses that
-template path. Consequently, `--status` with an unreadable shared config store
+template or preview-status path. Consequently, `--status` with an unreadable shared config store
 reports the first required `status.*` key rather than `commit.status`, proving
 the explicit toggle skipped the latter read. For `--dry-run -a`, the entire preview uses a task-local isolated
 temporary index; the live index is never replaced, and temporary auto-stage

@@ -669,6 +669,32 @@ libra agent --json status
 
 `libra agent doctor` 按 AG-20 修复矩阵扫描 checkpoint 存储及 writer marker registry；不带 `--repair` 时严格只读，仅报告 `--repair` 将执行的动作：
 
+
+OpenCode 的 JSON hook 状态新增 `provider_hooks[].events[]`，每项包含 `event`
+及与受管插件相同的可空 `installed`：`true` 表示安装了精确当前模板，`false`
+表示缺失或过时，`null` 表示无法检查。人类输出逐项标为 `(managed template)`。
+映射来自既有事件 registry，含 native bus、合并 inbox 及已接纳的兼容事件；
+`session.error` 仍跳过。这只描述已安装映射，不证明 OpenCode 已运行或发过该事件。
+模板过时后执行 `libra agent add opencode`，再启动新会话。
+
+打开插件前，doctor 用 no-follow 元数据检查 `.opencode`、`plugin`/`plugins`
+父目录及两个受管目标。symlink、FIFO/socket/device、文件父路径或目录目标会报告
+固定 slot/type 原因及未知安装状态；包括 `--repair` 在内，不打开或修改该节点、
+不输出正文或链接目标，也不误报 installed。仍假设目录名称稳定，不修复已延期的
+并发目录移动问题。
+
+`checkpoint_store.opencode_legacy_reasoning_checkpoints` 列出绑定本地 OpenCode
+元数据中缺少非 null `reasoning_state` 字段的 canonical checkpoint ID。人类输出
+标为 `legacy/unrecorded reasoning state; not evidence of complete capture or native origin`。
+这是字段缺失诊断，不代表年代或 schema 版本；当前 checkpoint 也可能没有该字段，
+字段存在本身同样不证明 reasoning 有效或来源可信。既有 coverage 完整性不提升、
+不重写。最多检查 64 个 OpenCode catalog 行、每行 64 KiB 经校验元数据（最坏载荷
+4 MiB）；对象不可用、超限、绑定不符或行数超限会显示不含正文的扫描不完整 note。
+空列表不代表完整采集；不读取 transcript 或 reasoning artifact 正文。标记仅在读取时
+计算，`--repair` 不改它；移除此诊断不需要数据迁移。此诊断随包含 OG-06 的版本首次
+发布，源码交付本身不代表已发稳定版。
+
+
 | `inconsistency_type` | 含义 | `--repair` 动作 |
 |----------------------|------|----------------|
 | `stale_catalog_row` | `agent_checkpoint` 行的 `traces_commit`/`tree_oid`/`metadata_blob_oid` 与仍可从 `refs/libra/traces` 到达的 checkpoint 不一致 | 从 ref 重建该行的 OID 列（幂等 UPDATE） |

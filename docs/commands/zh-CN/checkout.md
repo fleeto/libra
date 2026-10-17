@@ -48,7 +48,7 @@ libra checkout [<tree-ish>] -- <pathspec>...
 | | `[<start-point>]` | 位置参数 | 与 `-b` / `-B` 搭配使用的可选提交、标签或分支，作为新分支 tip |
 | | `--orphan` | `<name>` | 创建 unborn orphan 分支，保留索引/工作树，并把 HEAD 切到该分支。不支持额外 start-point。 |
 | `-d` | `--detach` | | 即使目标是分支也在其提交处 detach HEAD。不给目标时在当前 HEAD 处分离，而不是显示当前分支（未诞生 HEAD 拒绝：`You are on a branch yet to be born`，`LBR-REPO-003`，退出码 128） |
-| `-t` | `--track` | | checkout 远程跟踪分支时配置 upstream。接受式 no-op：Libra 在 checkout 远程跟踪分支时本就通过 DWIM 配置跟踪，故该标志请求的正是已有行为；对非远程目标无效果。独立显式跟踪请用 `libra switch --track`。 |
+| `-t` | `--track` | | 为通过 `-b` / `-B` 创建的分支配置 upstream。远程跟踪 start-point 默认通过 DWIM 建立跟踪；显式 `--track` 也可跟踪本地分支 start-point。仅指向标签或 commit 的 start-point 不是有效的跟踪分支。跟踪配置报错前，`-b` 可能已创建分支，`-B` 可能已重置并切换到该分支；这些操作不会随报错自动回滚。 |
 | | `--ignore-other-worktrees` | | 为 CLI 兼容而接受，但**不会**绕过 Libra 的 other-worktree 安全保护（有意与 Git 不同）：Libra 绝不允许同一共享分支在两个 worktree 同时 checkout。单 worktree 仓库中为静默 no-op；存在真实冲突时 checkout 仍被拒绝。 |
 | | `--no-progress` | | 不显示进度条。接受式 no-op：Libra 的 checkout 从不渲染进度条。 |
 | | `--no-overlay` | | 不以 overlay 模式检出路径（source 中缺失的路径仍会被移除）。接受式 no-op：Libra 的 checkout 从不处于 overlay 模式，已是 Git 默认。（Git 的 `--overlay` 未实现。） |
@@ -277,7 +277,7 @@ Git 肌肉记忆根深蒂固。使用 `git checkout` 多年的开发者会本能
 | 恢复文件 | `git checkout -- file` | `libra checkout -- file`（优先 `libra restore file`） | `jj restore` |
 | 从修订恢复文件 | `git checkout HEAD -- file` | `libra checkout HEAD -- file`（优先 `libra restore --source HEAD -S -W file`） | `jj restore --from <revision>` |
 | Detach HEAD | `git checkout <commit>` / `git checkout --detach <branch>` | `libra checkout <commit>` / `libra checkout -d`/`--detach <branch>` | `jj edit <rev>` |
-| 跟踪远程分支 | `git checkout -t`/`--track <remote>/<branch>` | `libra checkout -t`/`--track`（接受式 no-op；DWIM 本就跟踪） | N/A |
+| 跟踪远程分支 | `git checkout -t`/`--track <remote>/<branch>` | `libra checkout -b <new> --track <start-point>`（远程 start-point 默认跟踪；显式 `--track` 也可跟踪本地分支） | N/A |
 | 结构化输出 | 无 | 分支兼容动作支持 `--json` / `--machine` | `--template` |
 
 其余仍不支持的交互选项以 `LBR-UNSUPPORTED-001` 拒绝（`-p`/`--patch` 与 `--[no-]auto-advance`，D15）。请用 `libra checkout <pathspec>` 或 `libra restore <pathspec>`。

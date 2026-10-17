@@ -1,4 +1,5 @@
 test_fn	lane	reason
+checkout_b_resolves_bare_remote_start_point_and_sets_tracking	lane:cwd+env	uses an isolated repository, process working directory, and config environment while checking bare remote start-point tracking
 test_clone_ssh_publickey_auth_diagnostic	lane:cwd+env	uses an isolated repository and fake SSH environment while exercising clone failure cleanup
 test_fetch_ssh_publickey_auth_diagnostic	lane:cwd+env	uses an isolated repository and fake SSH environment while exercising fetch discovery
 test_pull_ssh_publickey_auth_diagnostic	lane:cwd+env	uses an isolated repository and fake SSH environment while exercising pull discovery

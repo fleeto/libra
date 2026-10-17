@@ -266,6 +266,15 @@ struct ProviderHookStatus {
     tier: AgentStability,
     installed: Option<bool>,
     error: Option<String>,
+    /// Managed-template mappings, not evidence that the host emitted an event.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    events: Vec<ProviderHookEventStatus>,
+}
+
+#[derive(Debug, Serialize)]
+struct ProviderHookEventStatus {
+    event: &'static str,
+    installed: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -344,6 +353,8 @@ struct CheckpointStoreReport {
     /// Pre-AG-20 layout checkpoints (no `manifest.json`). Exempt from the
     /// checkpoint-object inconsistency classes and from `--repair` by contract.
     legacy_v1_checkpoints: usize,
+    /// Read-only absence diagnosis, never a completeness/native-origin claim.
+    opencode_legacy_reasoning_checkpoints: Vec<String>,
     /// LIVE traces-writer in-flight markers (window A/B guards). Commits
     /// they name are writers mid-flight and are excluded from class 2.
     live_inflight_markers: usize,
@@ -696,6 +707,8 @@ pub async fn execute_safe(args: DoctorArgs, output: &OutputConfig) -> CliResult<
 #[derive(Debug, Clone)]
 struct CatalogRow {
     checkpoint_id: String,
+    session_id: String,
+    agent_kind: Option<String>,
     tree_oid: String,
     metadata_blob_oid: String,
     traces_commit: String,
@@ -1860,6 +1873,7 @@ async fn scan_checkpoint_store(
         catalog_rows: 0,
         ref_reachable_checkpoints: 0,
         legacy_v1_checkpoints: 0,
+        opencode_legacy_reasoning_checkpoints: Vec::new(),
         live_inflight_markers: 0,
         repair_applied: repair,
         repaired: 0,
@@ -2257,6 +2271,65 @@ async fn scan_checkpoint_store(
         }
     }
     report.legacy_v1_checkpoints = legacy_ids.len();
+
+    // This optional absence scan has its own 64 * 64 KiB worst-case bound.
+    // It reads only validated local metadata blobs, never transcript/artifact bodies.
+    let mut skipped_opencode_metadata = false;
+    let mut opencode_rows = rows
+        .iter()
+        .filter(|row| row.agent_kind.as_deref() == Some("opencode"));
+    for row in opencode_rows.by_ref().take(64) {
+        let metadata_oid = ref_map
+            .get(&row.checkpoint_id)
+            .and_then(|checkpoint| checkpoint.metadata_blob.as_deref())
+            .unwrap_or(&row.metadata_blob_oid);
+        let metadata = (|| -> anyhow::Result<serde_json::Value> {
+            let oid = crate::internal::object_format::parse_repo_oid(metadata_oid)?;
+            let file = reader.open_loose(&oid)?;
+            let (kind, bytes) = crate::utils::object::read_git_object_bounded_validated_file(
+                file,
+                &oid,
+                64 * 1024,
+            )?;
+            anyhow::ensure!(kind == "blob", "not checkpoint metadata");
+            let value: serde_json::Value = serde_json::from_slice(&bytes)?;
+            anyhow::ensure!(
+                value
+                    .get("checkpoint_id")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(row.checkpoint_id.as_str())
+                    && value.get("session_id").and_then(serde_json::Value::as_str)
+                        == Some(row.session_id.as_str())
+                    && value.get("agent_kind").and_then(serde_json::Value::as_str)
+                        == Some("opencode"),
+                "unbound checkpoint metadata"
+            );
+            Ok(value)
+        })();
+        match metadata {
+            Ok(value)
+                if canonical_checkpoint_id(&row.checkpoint_id).as_deref()
+                    == Some(row.checkpoint_id.as_str()) =>
+            {
+                // Presence is not validated provenance; doctor never promotes it to Complete.
+                if value
+                    .get("reasoning_state")
+                    .is_none_or(serde_json::Value::is_null)
+                {
+                    report
+                        .opencode_legacy_reasoning_checkpoints
+                        .push(row.checkpoint_id.clone());
+                }
+            }
+            _ => skipped_opencode_metadata = true,
+        }
+    }
+    if skipped_opencode_metadata {
+        notes.push("OpenCode reasoning-state diagnosis skipped unavailable, oversized or unbound metadata; unlisted checkpoints are not certified complete".to_string());
+    }
+    if opencode_rows.next().is_some() {
+        notes.push("OpenCode reasoning-state diagnosis reached its 64-checkpoint limit; unlisted checkpoints are not certified complete".to_string());
+    }
 
     // Only rows with an UNRECOVERABLE class-1 finding (`missing_objects`)
     // are excluded from class 3 ("unrecoverable falls back to class-1
@@ -3851,8 +3924,10 @@ async fn load_catalog_rows(conn: &DatabaseConnection) -> CliResult<Vec<CatalogRo
     let rows = conn
         .query_all_raw(Statement::from_sql_and_values(
             backend,
-            "SELECT checkpoint_id, tree_oid, metadata_blob_oid, traces_commit \
-             FROM agent_checkpoint ORDER BY created_at ASC, checkpoint_id ASC",
+            "SELECT cp.checkpoint_id, cp.session_id, s.agent_kind, cp.tree_oid,
+                    cp.metadata_blob_oid, cp.traces_commit
+             FROM agent_checkpoint cp LEFT JOIN agent_session s ON s.session_id = cp.session_id
+             ORDER BY cp.created_at ASC, cp.checkpoint_id ASC",
             [],
         ))
         .await
@@ -3865,6 +3940,12 @@ async fn load_catalog_rows(conn: &DatabaseConnection) -> CliResult<Vec<CatalogRo
     rows.into_iter()
         .map(|row| {
             Ok(CatalogRow {
+                session_id: row.try_get_by("session_id").map_err(|_| {
+                    CliError::fatal("agent doctor could not decode checkpoint session identity; check the repository database and rerun doctor".to_string())
+                })?,
+                agent_kind: row.try_get_by("agent_kind").map_err(|_| {
+                    CliError::fatal("agent doctor could not decode checkpoint agent kind; check the repository database and rerun doctor".to_string())
+                })?,
                 checkpoint_id: row.try_get_by("checkpoint_id").map_err(|_| {
                     CliError::fatal(
                         "agent doctor could not decode a checkpoint catalog row; check the repository database and rerun doctor"
@@ -4763,33 +4844,94 @@ fn check_provider(
     tier: AgentStability,
     provider: Option<&dyn crate::internal::ai::hooks::provider::HookProvider>,
 ) -> ProviderHookStatus {
-    let Some(provider) = provider else {
-        // Preview adapters don't carry a HookProvider yet. Surface them
-        // explicitly as preview/unknown so the report is still complete.
-        return ProviderHookStatus {
-            name,
-            tier,
-            installed: None,
-            error: None,
-        };
+    let (installed, error) = match provider {
+        None => (None, None),
+        Some(provider) => {
+            let path_error = if name == "opencode" {
+                opencode_config_path_error()
+            } else {
+                None
+            };
+            if let Some(error) = path_error {
+                (None, Some(error))
+            } else {
+                match provider.hooks_are_installed() {
+                    Ok(installed) => (Some(installed), None),
+                    Err(_) => (None, Some("provider hook settings could not be inspected; verify the provider configuration and rerun doctor".to_string())),
+                }
+            }
+        }
     };
-    match provider.hooks_are_installed() {
-        Ok(installed) => ProviderHookStatus {
-            name,
-            tier,
-            installed: Some(installed),
-            error: None,
-        },
-        Err(_) => ProviderHookStatus {
-            name,
-            tier,
-            installed: None,
-            error: Some(
-                "provider hook settings could not be inspected; verify the provider configuration and rerun doctor"
-                    .to_string(),
-            ),
-        },
+    let events = if name == "opencode" {
+        use crate::internal::ai::hooks::providers::opencode::events::{
+            OPENCODE_HOOK_EVENT_SPECS, OPENCODE_LEGACY_EVENT_SPECS, OpenCodeForwarding,
+        };
+        OPENCODE_HOOK_EVENT_SPECS
+            .iter()
+            .chain(OPENCODE_LEGACY_EVENT_SPECS)
+            .filter(|event| event.forwarding != OpenCodeForwarding::Skip)
+            .map(|event| ProviderHookEventStatus {
+                event: event.name,
+                installed,
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    ProviderHookStatus {
+        name,
+        tier,
+        installed,
+        error,
+        events,
     }
+}
+
+/// Diagnose known slots before the provider can open them. Directory-name races
+/// retain the existing installer limitation; this is not a new ownership proof.
+fn opencode_config_path_error() -> Option<String> {
+    let root = match util::try_working_dir() {
+        Ok(root) => root,
+        Err(_) => return Some("OpenCode configuration could not be located; run doctor inside the intended repository".to_string()),
+    };
+    for (relative, directory) in [
+        (".opencode", true),
+        (".opencode/plugin", true),
+        (".opencode/plugins", true),
+        (".opencode/plugin/libra-hooks.js", false),
+        (".opencode/plugins/libra-hooks.js", false),
+    ] {
+        let metadata = match std::fs::symlink_metadata(root.join(relative)) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => {
+                return Some(format!(
+                    "OpenCode config slot {relative} could not be inspected; check its permissions and rerun doctor"
+                ));
+            }
+        };
+        let kind = metadata.file_type();
+        if kind.is_symlink() || (directory && !kind.is_dir()) || (!directory && !kind.is_file()) {
+            let reason = if kind.is_symlink() {
+                "symlink"
+            } else if kind.is_file() {
+                "regular file instead of directory"
+            } else if kind.is_dir() {
+                "directory instead of regular file"
+            } else {
+                "special file (FIFO/socket/device)"
+            };
+            return Some(format!(
+                "OpenCode config slot {relative} is a {reason}; replace it with a {} and rerun doctor",
+                if directory {
+                    "directory"
+                } else {
+                    "regular file"
+                }
+            ));
+        }
+    }
+    None
 }
 
 fn emit_report(report: &DoctorReport, output: &OutputConfig) -> CliResult<()> {
@@ -4831,6 +4973,14 @@ fn emit_report(report: &DoctorReport, output: &OutputConfig) -> CliResult<()> {
             (None, Some(err)) => println!("  {}{tier_tag}: error — {err}", ph.name),
             (None, None) => println!("  {}{tier_tag}: not yet installable", ph.name),
         }
+        for event in &ph.events {
+            let state = match event.installed {
+                Some(true) => "installed",
+                Some(false) => "NOT installed",
+                None => "unknown",
+            };
+            println!("    {}: {state} (managed template)", event.event);
+        }
     }
 
     let store = &report.checkpoint_store;
@@ -4847,6 +4997,11 @@ fn emit_report(report: &DoctorReport, output: &OutputConfig) -> CliResult<()> {
             store.ref_reachable_checkpoints
         );
         println!("  Legacy-v1 checkpoints : {}", store.legacy_v1_checkpoints);
+        for checkpoint in &store.opencode_legacy_reasoning_checkpoints {
+            println!(
+                "  OpenCode {checkpoint}: legacy/unrecorded reasoning state; not evidence of complete capture or native origin"
+            );
+        }
         println!("  Live in-flight markers: {}", store.live_inflight_markers);
         println!("  Inconsistencies       : {}", store.findings.len());
         for finding in &store.findings {

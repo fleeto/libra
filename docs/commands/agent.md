@@ -1020,6 +1020,41 @@ on them:
 (AG-20 repair matrix); without `--repair` it is strictly read-only
 and reports what `--repair` would do:
 
+
+OpenCode hook status now includes `provider_hooks[].events[]` in JSON. Each
+entry has an `event` and the same nullable `installed` status as the managed
+plugin: `true` means the exact current template is installed, `false` means it
+is missing/outdated, and `null` means inspection was unavailable. Human output
+lists these mappings as `(managed template)`. The native bus, merged inbox and
+accepted compatibility mappings come from the existing event registry;
+`session.error` is skipped. This describes installed mappings, not proof that
+OpenCode ran or emitted each event. Reinstall an outdated managed template with
+`libra agent add opencode` before starting a new session.
+
+Before opening plugin files, doctor checks `.opencode`, both `plugin`/`plugins`
+parents and both managed leaves with no-follow metadata checks. A symlink,
+FIFO/socket/device, file parent or directory leaf produces a fixed slot/type
+reason and unknown installation status. It does not open or modify that node,
+print its contents or target, or mark it installed, including with `--repair`.
+These checks retain the existing stable-directory-name assumption; they do not
+resolve the deferred concurrent directory-relocation problem.
+
+`checkpoint_store.opencode_legacy_reasoning_checkpoints` lists canonical IDs
+whose bound local OpenCode metadata has no non-null `reasoning_state` field.
+Human output marks them `legacy/unrecorded reasoning state; not evidence of
+complete capture or native origin`. This is an absence diagnostic, not a date
+or schema classification: current checkpoints can also lack that field, and
+its presence alone proves neither valid reasoning nor native provenance.
+Existing coverage completeness is not promoted or rewritten. The scan examines
+at most 64 OpenCode catalog rows and 64 KiB of validated metadata per row
+(4 MiB worst-case payload). Unavailable, oversized/unbound metadata or excess
+rows produce a content-free incomplete-scan note; an empty list does not
+certify complete capture. It reads no transcript or reasoning-artifact bodies.
+The marker is read-time only, unchanged by `--repair`; removing this diagnostic
+requires no data migration. These diagnostics first ship in the release
+containing OG-06; the source change alone is not a release announcement.
+
+
 | `inconsistency_type` | Meaning | `--repair` action |
 |----------------------|---------|-------------------|
 | `stale_catalog_row` | An `agent_checkpoint` row's `traces_commit`/`tree_oid`/`metadata_blob_oid` disagree with the checkpoint still reachable from `refs/libra/traces` | Rebuild the row's OID columns from the ref (idempotent UPDATE) |

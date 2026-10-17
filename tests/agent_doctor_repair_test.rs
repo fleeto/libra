@@ -3935,3 +3935,335 @@ async fn doctor_unopenable_repository_database_is_io_read_failed_without_path() 
         "doctor's database error must not reveal the repository path: {stderr}"
     );
 }
+
+/// Pure local catalog/template diagnostics: no OpenCode process, exporter,
+/// Session capture, account or model is started by this test.
+#[tokio::test]
+async fn opencode_legacy_capture_is_visible() {
+    let repo = DoctorRepo::init();
+    let missing = repo.doctor_json(false);
+    let hook = missing["provider_hooks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|hook| hook["name"] == "opencode")
+        .unwrap();
+    assert_eq!(hook["installed"], false);
+    assert!(
+        hook["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|event| event["installed"] == false)
+    );
+    let install = repo.run(&["agent", "add", "opencode"], None);
+    assert!(install.status.success(), "{}", describe(&install));
+    let plugin = repo.repo.join(".opencode/plugin/libra-hooks.js");
+    let plugin_before = std::fs::read(&plugin).unwrap();
+
+    let storage = repo.repo.join(".libra");
+    let checkpoint_id = Uuid::new_v4().to_string();
+    let session_id = "opencode__legacy-doctor-fixture";
+    let metadata = serde_json::to_vec(&json!({
+        "schema_version": 1, "checkpoint_id": checkpoint_id,
+        "session_id": session_id, "agent_kind": "opencode",
+        "created_at": 1783206712_i64, "scope": "committed",
+        "signature": "DOCTOR_PRIVATE_METADATA_CANARY"
+    }))
+    .unwrap();
+    let mut objects = Vec::new();
+    let mut write = |kind, bytes: &[u8]| {
+        let oid = libra::utils::object::write_git_object(&storage, kind, bytes).unwrap();
+        objects.push(oid.to_string());
+        oid
+    };
+    let metadata_oid = write("blob", &metadata);
+    let transcript_oid = write("blob", b"DOCTOR_TRANSCRIPT_MUST_NOT_BE_RENDERED");
+    let mut tree = |items| {
+        let bytes = Tree::from_tree_items(items).unwrap().to_data().unwrap();
+        write("tree", &bytes)
+    };
+    let transcript = tree(vec![TreeItem::new(
+        TreeItemMode::Blob,
+        transcript_oid,
+        "opencode".to_string(),
+    )]);
+    let inner = tree(vec![
+        TreeItem::new(
+            TreeItemMode::Blob,
+            metadata_oid,
+            "metadata.json".to_string(),
+        ),
+        TreeItem::new(TreeItemMode::Tree, transcript, "transcript".to_string()),
+    ]);
+    let prefix = tree(vec![TreeItem::new(
+        TreeItemMode::Tree,
+        inner,
+        checkpoint_id[2..].to_string(),
+    )]);
+    let checkpoints = tree(vec![TreeItem::new(
+        TreeItemMode::Tree,
+        prefix,
+        checkpoint_id[..2].to_string(),
+    )]);
+    let root = tree(vec![TreeItem::new(
+        TreeItemMode::Tree,
+        checkpoints,
+        "checkpoint".to_string(),
+    )]);
+    let commit = Commit::new(
+        Signature::new(
+            SignatureType::Author,
+            "Fixture".to_string(),
+            "fixture@test.libra".to_string(),
+        ),
+        Signature::new(
+            SignatureType::Committer,
+            "Fixture".to_string(),
+            "fixture@test.libra".to_string(),
+        ),
+        root,
+        vec![],
+        &format!(
+            "fixture\n\nLibra-Session: {session_id}\nLibra-Agent: opencode\nLibra-Checkpoint-ID: {checkpoint_id}\nLibra-Scope: committed\n"
+        ),
+    );
+    let commit_oid = write("commit", &commit.to_data().unwrap());
+    repo.exec_sql("UPDATE reference SET \"commit\" = ? WHERE name = 'traces' AND kind = 'Branch' AND remote IS NULL",
+        vec![commit_oid.to_string().into()]).await;
+    repo.exec_sql("INSERT INTO agent_session (session_id, agent_kind, provider_session_id, state, working_dir, started_at, last_event_at) VALUES (?, 'opencode', 'legacy-doctor-fixture', 'stopped', ?, 1, 1)",
+        vec![session_id.into(), repo.repo.to_string_lossy().to_string().into()]).await;
+    repo.exec_sql("INSERT INTO agent_checkpoint (checkpoint_id, session_id, scope, parent_commit, tree_oid, metadata_blob_oid, traces_commit, created_at) VALUES (?, ?, 'committed', NULL, ?, ?, ?, 1783206712)",
+        vec![checkpoint_id.clone().into(), session_id.into(), root.to_string().into(), metadata_oid.to_string().into(), commit_oid.to_string().into()]).await;
+    let rows_before = repo.checkpoint_rows().await;
+    let bytes_before: Vec<_> = objects
+        .iter()
+        .map(|oid| repo.loose_object_bytes(oid))
+        .collect();
+    for repair in [false, true] {
+        let report = repo.doctor_json(repair);
+        assert_eq!(
+            report["checkpoint_store"]["opencode_legacy_reasoning_checkpoints"],
+            json!([checkpoint_id])
+        );
+        let hook = report["provider_hooks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|hook| hook["name"] == "opencode")
+            .unwrap();
+        assert_eq!(hook["installed"], true);
+        let events = hook["events"].as_array().unwrap();
+        for name in [
+            "session.created",
+            "session.inbox.delivered",
+            "session.execution.succeeded",
+            "session.execution.failed",
+            "session.execution.interrupted",
+            "session.deleted",
+            "tool.execute.after",
+            "session.inbox.enqueued",
+            "session.status",
+            "message.updated",
+            "session.compacted",
+            "server.instance.disposed",
+        ] {
+            assert!(
+                events
+                    .iter()
+                    .any(|event| event["event"] == name && event["installed"] == true),
+                "missing {name}"
+            );
+        }
+        assert!(!events.iter().any(|event| event["event"] == "session.error"));
+        let text = report.to_string();
+        assert!(!text.contains("DOCTOR_PRIVATE_METADATA_CANARY"));
+        assert!(!text.contains("DOCTOR_TRANSCRIPT_MUST_NOT_BE_RENDERED"));
+        assert_eq!(repo.checkpoint_rows().await, rows_before);
+        assert_eq!(std::fs::read(&plugin).unwrap(), plugin_before);
+        assert_eq!(
+            objects
+                .iter()
+                .map(|oid| repo.loose_object_bytes(oid))
+                .collect::<Vec<_>>(),
+            bytes_before
+        );
+    }
+    let human = repo.run(&["agent", "doctor"], None);
+    assert!(human.status.success(), "{}", describe(&human));
+    let human = String::from_utf8(human.stdout).unwrap();
+    assert!(human.contains("legacy/unrecorded reasoning state"));
+    assert!(human.contains("not evidence of complete capture or native origin"));
+    assert!(human.contains("session.inbox.delivered: installed (managed template)"));
+    assert!(!human.contains("DOCTOR_PRIVATE_METADATA_CANARY"));
+    assert!(!human.contains("DOCTOR_TRANSCRIPT_MUST_NOT_BE_RENDERED"));
+    // Bound the new diagnosis independently of the general store scan. These
+    // extra catalog-only identities deliberately do not bind the metadata.
+    let placeholders = vec!["(?, ?, 'committed', NULL, ?, ?, ?, 1783206713)"; 65].join(",");
+    let mut values = Vec::new();
+    for _ in 0..65 {
+        values.extend([
+            Uuid::new_v4().to_string().into(),
+            session_id.into(),
+            root.to_string().into(),
+            metadata_oid.to_string().into(),
+            commit_oid.to_string().into(),
+        ]);
+    }
+    repo.exec_sql(&format!("INSERT INTO agent_checkpoint (checkpoint_id, session_id, scope, parent_commit, tree_oid, metadata_blob_oid, traces_commit, created_at) VALUES {placeholders}"), values).await;
+    let bounded = repo.doctor_json(false);
+    assert_eq!(
+        bounded["checkpoint_store"]["opencode_legacy_reasoning_checkpoints"],
+        json!([checkpoint_id])
+    );
+    let note = bounded["checkpoint_store"]["note"].as_str().unwrap();
+    assert!(note.contains("64-checkpoint limit"));
+    assert!(note.contains("unbound metadata"));
+    assert!(
+        !bounded
+            .to_string()
+            .contains("DOCTOR_PRIVATE_METADATA_CANARY")
+    );
+    repo.exec_sql(
+        "DELETE FROM agent_checkpoint WHERE created_at = 1783206713",
+        vec![],
+    )
+    .await;
+    let saved = delete_loose_object(&repo, &metadata_oid.to_string());
+    let missing_metadata = repo.doctor_json(false);
+    assert_eq!(
+        missing_metadata["checkpoint_store"]["opencode_legacy_reasoning_checkpoints"],
+        json!([])
+    );
+    assert!(
+        missing_metadata["checkpoint_store"]["note"]
+            .as_str()
+            .unwrap()
+            .contains("unlisted checkpoints are not certified complete")
+    );
+    restore_loose_object(&repo, &metadata_oid.to_string(), &saved);
+    assert_eq!(
+        repo.loose_object_bytes(&metadata_oid.to_string()),
+        bytes_before[0]
+    );
+    assert_eq!(repo.checkpoint_rows().await, rows_before);
+}
+
+/// Configuration inspection only, with a deadline even if a regression tries
+/// opening a FIFO. It does not run OpenCode or capture a Session.
+#[test]
+fn opencode_config_path_type_is_visible() {
+    use std::{
+        os::unix::{ffi::OsStrExt, fs::symlink, net::UnixListener},
+        time::{Duration, Instant},
+    };
+    for (relative, kind) in [
+        (".opencode", "symlink"),
+        (".opencode", "file"),
+        (".opencode/plugin", "symlink"),
+        (".opencode/plugin", "file"),
+        (".opencode/plugins", "symlink"),
+        (".opencode/plugins", "file"),
+        (".opencode/plugin/libra-hooks.js", "symlink"),
+        (".opencode/plugins/libra-hooks.js", "symlink"),
+        (".opencode/plugin/libra-hooks.js", "fifo"),
+        (".opencode/plugins/libra-hooks.js", "socket"),
+        (".opencode/plugin/libra-hooks.js", "directory"),
+        (".opencode/plugin", "fifo"),
+        (".opencode/plugins", "socket"),
+    ] {
+        // sockaddr_un on macOS has a short fixed path limit. Use a fresh,
+        // owned short root without changing TMPDIR or the process cwd.
+        let tempdir = tempfile::Builder::new()
+            .prefix("lbd-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let home = tempdir.path().join("home");
+        let work = tempdir.path().join("repo");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&work).unwrap();
+        let repo = DoctorRepo {
+            _tempdir: tempdir,
+            repo: work.canonicalize().unwrap(),
+            home: home.canonicalize().unwrap(),
+        };
+        let init = repo.run(&["init"], None);
+        assert!(init.status.success(), "{}", describe(&init));
+        let node = repo.repo.join(relative);
+        std::fs::create_dir_all(node.parent().unwrap()).unwrap();
+        let target = repo._tempdir.path().join("PRIVATE_PATH_TYPE_TARGET");
+        std::fs::write(&target, "DOCTOR_PATH_TYPE_SECRET").unwrap();
+        let mut listener = None;
+        match kind {
+            "symlink" => symlink(&target, &node).unwrap(),
+            "file" => std::fs::write(&node, "DOCTOR_PATH_TYPE_SECRET").unwrap(),
+            "directory" => std::fs::create_dir(&node).unwrap(),
+            "socket" => listener = Some(UnixListener::bind(&node).unwrap()),
+            "fifo" => {
+                let path = std::ffi::CString::new(node.as_os_str().as_bytes()).unwrap();
+                // SAFETY: NUL-terminated owned path; mkfifo creates only the fixture node.
+                assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+            }
+            _ => unreachable!("closed fixture kinds"),
+        }
+        let before = std::fs::symlink_metadata(&node).unwrap();
+        for repair in [false, true] {
+            let mut command = Command::new(env!("CARGO_BIN_EXE_libra"));
+            command
+                .current_dir(&repo.repo)
+                .env("HOME", &repo.home)
+                .env("LIBRA_TEST_HOME", &repo.home)
+                .args(["agent", "doctor", "--json"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            if repair {
+                command.arg("--repair");
+            }
+            let mut child = command.spawn().unwrap();
+            let deadline = Instant::now() + Duration::from_secs(15);
+            loop {
+                if child.try_wait().unwrap().is_some() {
+                    break;
+                }
+                if Instant::now() >= deadline {
+                    child.kill().unwrap();
+                    child.wait().unwrap();
+                    panic!("doctor opened or stalled on {relative} {kind}");
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let output = child.wait_with_output().unwrap();
+            assert!(output.status.success(), "{}", describe(&output));
+            let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+            let hooks = report["data"]["provider_hooks"].as_array().unwrap();
+            let hook = hooks
+                .iter()
+                .find(|hook| hook["name"] == "opencode")
+                .unwrap();
+            assert!(hook["installed"].is_null());
+            assert!(
+                hook["events"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|event| event["installed"].is_null())
+            );
+            let reason = hook["error"].as_str().unwrap();
+            assert!(reason.contains(relative));
+            assert!(reason.contains(match kind {
+                "file" => "regular file",
+                "fifo" | "socket" => "FIFO/socket/device",
+                x => x,
+            }));
+            let rendered = describe(&output);
+            assert!(!rendered.contains("DOCTOR_PATH_TYPE_SECRET"));
+            assert!(!rendered.contains("PRIVATE_PATH_TYPE_TARGET"));
+            assert_eq!(std::fs::read(&target).unwrap(), b"DOCTOR_PATH_TYPE_SECRET");
+            let after = std::fs::symlink_metadata(&node).unwrap();
+            assert_eq!(before.file_type(), after.file_type());
+            assert_eq!(before.modified().unwrap(), after.modified().unwrap());
+        }
+        drop(listener);
+    }
+}

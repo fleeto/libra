@@ -169,6 +169,7 @@ Every Libra command accepts the following global flags:
 | `libra update-index` | | Modify the index directly (add/remove/cacheinfo) | [update-index.md](update-index.md) |
 | `libra update-ref` | | Safely update, create, or delete a `refs/heads/<branch>` ref | [update-ref.md](update-ref.md) |
 | `libra verify-pack` | | Validate pack index files against their pack archives | [verify-pack.md](verify-pack.md) |
+| `libra count-objects` | | Count unpacked objects and their disk consumption (`-v`, `-H`) | [count-objects.md](count-objects.md) |
 | `libra show-ref` | | List local refs (branches, tags, HEAD) and their object IDs | [show-ref.md](show-ref.md) |
 | `libra symbolic-ref` | | Read or update the symbolic HEAD ref | [symbolic-ref.md](symbolic-ref.md) |
 | `libra index-pack` | | Build a `.idx` pack index file for an existing `.pack` archive (hidden) | [index-pack.md](index-pack.md) |

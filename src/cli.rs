@@ -62,7 +62,7 @@ Command Groups:
   Commit And Branching    commit, branch, switch, checkout, tag, merge, mergetool, rebase, reset, cherry-pick, revert, am, rerere, metadata
   Remote And Cloud        remote, fetch, pull, push, open, cloud, cache, credential, bundle, auth, login, logout, whoami, mega2
   AI And Automation       automation, memory, sandbox, agent, review, investigate, service
-  Maintenance And Plumbing fsck, maintenance, repack, logfile, upgrade, cat-file, hash-object, write-tree, read-tree, update-index, update-ref, merge-file, merge-base, apply, mailinfo, diff-tree, diff-index, diff-files, fast-export, fast-import, replace, verify-pack, rev-parse, rev-list, symbolic-ref, reflog, bisect, for-each-ref, commit-tree, file, alternates, deps
+  Maintenance And Plumbing fsck, maintenance, repack, logfile, upgrade, cat-file, hash-object, write-tree, read-tree, update-index, update-ref, merge-file, merge-base, apply, mailinfo, diff-tree, diff-index, diff-files, fast-export, fast-import, replace, verify-pack, count-objects, rev-parse, rev-list, symbolic-ref, reflog, bisect, for-each-ref, commit-tree, file, alternates, deps
 
 Help Topics:
   error-codes  Print the stable CLI error code table (`libra help error-codes`)
@@ -603,6 +603,8 @@ enum Commands {
     UpdateRef(command::update_ref::UpdateRefArgs),
     #[command(about = "Validate pack index files against pack archives")]
     VerifyPack(command::verify_pack::VerifyPackArgs),
+    #[command(about = "Count unpacked number of objects and their disk consumption")]
+    CountObjects(command::count_objects::CountObjectsArgs),
 
     #[command(about = "Record changes to the repository", alias = "ci")]
     Commit(command::commit::CommitArgs),
@@ -1595,6 +1597,12 @@ fn command_preflight(command: &Commands, structured_output: bool) -> CliResult<C
             )),
             Err(_) => Ok(CommandPreflight::sha1_without_repo()),
         },
+        Commands::CountObjects(_) => match utils::util::try_get_storage_path(None) {
+            Ok(storage) => Ok(CommandPreflight::repo_hash_kind_without_schema_guard(
+                storage,
+            )),
+            Err(_) => Ok(CommandPreflight::sha1_without_repo()),
+        },
         // `grep --no-index` searches the filesystem directly and works outside a
         // repository, so it needs no storage/hash-kind preflight.
         Commands::Grep(args) if args.no_index => Ok(CommandPreflight::none()),
@@ -1949,6 +1957,7 @@ fn command_scope(command: &Commands) -> CommandScope {
         | Commands::FormatPatch(_)
         | Commands::Mailinfo(_)
         | Commands::VerifyPack(_)
+        | Commands::CountObjects(_)
         | Commands::Completions(_)
         | Commands::Open(_)
         | Commands::Mega2(_)
@@ -1997,6 +2006,30 @@ async fn operation_class_for_command(
         return MutationClass::ReadOnly;
     }
     if matches!(command, Commands::Merge(args) if args.dry_run) {
+        return MutationClass::ReadOnly;
+    }
+    // ADR-CO-05 (#483): preview invocations must not publish Operation Log
+    // snapshot objects. `command_scope` stays unchanged, so the maintenance
+    // lock and legacy-symlink worktree refusal still follow the scope census.
+    if matches!(
+        command,
+        Commands::Add(command::add::AddArgs { dry_run: true, .. })
+            | Commands::Rm(command::remove::RemoveArgs { dry_run: true, .. })
+            | Commands::Clean(command::clean::CleanArgs { dry_run: true, .. })
+            | Commands::Mv(command::mv::MvArgs { dry_run: true, .. })
+    ) {
+        return MutationClass::ReadOnly;
+    }
+    if matches!(
+        command,
+        Commands::Alternates(command::alternates::AlternatesArgs {
+            command: command::alternates::AlternatesCommand::Prune { dry_run: true, .. },
+            ..
+        }) | Commands::Cache(command::cache::CacheArgs {
+            command: command::cache::CacheCommand::Evict { dry_run: true, .. },
+            ..
+        })
+    ) {
         return MutationClass::ReadOnly;
     }
     if matches!(command_scope(command), CommandScope::ReadOnly) {
@@ -3652,6 +3685,9 @@ async fn parse_async_scoped(argv: Vec<std::ffi::OsString>) -> CliResult<()> {
             Commands::VerifyPack(cmd_args) => {
                 command::verify_pack::execute_safe(cmd_args, &output).await?
             }
+            Commands::CountObjects(cmd_args) => {
+                command::count_objects::execute_safe(cmd_args, &output).await?
+            }
             Commands::IndexPack(cmd_args) => command::index_pack::execute_safe(cmd_args, &output)?,
             Commands::PackObjects(cmd_args) => {
                 command::pack_objects::execute_safe(cmd_args, &output).await?
@@ -3987,6 +4023,61 @@ mod tests {
             let got = operation_class_for_command(&cli.command).await;
             assert_eq!(got, *expected, "operation class for {argv:?}");
         }
+    }
+
+    /// ADR-CO-05 (#483): every preview invocation is ReadOnly, so it publishes
+    /// no Operation Log snapshot object; the scope census is unchanged
+    /// (Worktree/Repository), keeping the maintenance lock and legacy-worktree
+    /// refusal on the original path.
+    #[tokio::test]
+    #[serial(cwd)]
+    async fn preview_invocations_are_read_only() {
+        use crate::internal::operation::MutationClass;
+
+        let cases: &[(&[&str], CommandScope)] = &[
+            (&["libra", "add", "-n", "f"], CommandScope::Worktree),
+            (&["libra", "add", "--dry-run", "-u"], CommandScope::Worktree),
+            (&["libra", "rm", "--dry-run", "f"], CommandScope::Worktree),
+            (&["libra", "clean", "-n"], CommandScope::Worktree),
+            (&["libra", "mv", "-n", "f", "g"], CommandScope::Worktree),
+            (
+                &["libra", "reflog", "expire", "--dry-run", "--all"],
+                CommandScope::Repository,
+            ),
+            (
+                &["libra", "alternates", "prune", "--dry-run"],
+                CommandScope::Repository,
+            ),
+            (
+                &["libra", "cache", "evict", "--dry-run"],
+                CommandScope::Repository,
+            ),
+        ];
+
+        for (argv, expected_scope) in cases {
+            let cli = Cli::try_parse_from(*argv).unwrap_or_else(|e| {
+                panic!("parse {:?}: {e}", argv);
+            });
+            assert_eq!(
+                command_scope(&cli.command),
+                *expected_scope,
+                "scope for {argv:?}"
+            );
+            let got = operation_class_for_command(&cli.command).await;
+            assert_eq!(got, MutationClass::ReadOnly, "operation class for {argv:?}");
+        }
+
+        // Non-preview forms stay on the mutation boundary.
+        let cli = Cli::try_parse_from(["libra", "add", "-u"]).expect("parse add -u");
+        assert_ne!(
+            operation_class_for_command(&cli.command).await,
+            MutationClass::ReadOnly
+        );
+        let cli = Cli::try_parse_from(["libra", "rm", "f"]).expect("parse rm f");
+        assert_ne!(
+            operation_class_for_command(&cli.command).await,
+            MutationClass::ReadOnly
+        );
     }
 
     /// G54: parsed tag/remote/reflog/notes forms. Read-only rows are the G1–G13,

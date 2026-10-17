@@ -638,6 +638,12 @@ path = "tests/code_provider_resolution_test.rs"
 name = "compat_serial_registry"
 path = "tests/compat/serial_registry.rs"
 
+# issue #483 / ADR-CO-05: every clap `dry_run` field under src/command must be
+# a registered ReadOnly preview or an accepted exception.
+[[test]]
+name = "compat_preview_no_operation"
+path = "tests/compat/preview_no_operation.rs"
+
 # plan-20260822 OL-00: Change ID header vs sidecar compatibility spike.
 [[test]]
 name = "commit_change_id_header_spike"

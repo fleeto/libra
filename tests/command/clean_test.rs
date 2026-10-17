@@ -1065,3 +1065,26 @@ fn test_clean_issue476_verified_surface_guard() {
         "G7 -fdx must keep tracked files"
     );
 }
+
+/// Issue #483: `clean -n` writes no objects.
+#[test]
+#[serial_test::serial(cwd)]
+fn test_clean_dry_run_writes_no_objects() {
+    let repo = tempdir().unwrap();
+    let p = repo.path();
+    init_repo_via_cli(p);
+    configure_identity_via_cli(p);
+    fs::write(p.join("tracked"), "base\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "tracked"], p), "add tracked");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "base", "--no-verify"], p),
+        "commit base",
+    );
+    fs::write(p.join("untracked.txt"), "new\n").unwrap();
+
+    let before = count_objects_snapshot(p);
+    let out = run_libra_command(&["clean", "-n"], p);
+    assert_cli_success(&out, "clean -n");
+    assert_no_objects_written(p, &before, "clean -n");
+    assert!(p.join("untracked.txt").exists(), "dry run keeps the file");
+}

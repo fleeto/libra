@@ -68,7 +68,7 @@ configured budget (`LIBRA_STORAGE_CACHE_SIZE`, overridable with
 unlink is gated on an error-aware durability probe run immediately before
 it — an object the durable tier *confirms absent* is skipped (push/backup to
 make it durable), a probe *error* is never treated as absence, and three
-leading probe failures abort the run with nothing deleted. `--dry-run`
+leading probe failures abort the run with nothing deleted. `--dry-run` writes no objects or operation and
 reports the outcome (probes still run); `--min-age` (default 600s) skips
 freshly materialized objects. Reads of evicted objects self-heal
 transparently from the durable tier (re-verified, re-cached) — but are

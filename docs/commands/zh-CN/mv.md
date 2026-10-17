@@ -39,7 +39,7 @@ Renaming old.rs to new.rs
 
 **`-n` / `--dry-run`**
 
-预览 rename 操作，不执行：
+预览 rename 操作，不执行；不写入对象，也不记录 operation：
 
 ```bash
 $ libra mv -n old.rs new.rs

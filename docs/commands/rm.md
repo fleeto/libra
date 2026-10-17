@@ -72,7 +72,7 @@ With `--force`, the file is removed regardless.
 
 **`--dry-run`**
 
-Shows what would be removed without touching the filesystem or index:
+Shows what would be removed without touching the filesystem or index. No objects are written and no operation is recorded:
 
 ```bash
 $ libra rm --dry-run src/old_module.rs tests/old_test.rs

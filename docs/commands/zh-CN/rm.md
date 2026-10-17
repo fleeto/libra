@@ -61,7 +61,7 @@ rm 'config/local.toml'
 
 **`--dry-run`**
 
-显示会移除什么，但不触碰文件系统或索引：
+显示会移除什么，但不触碰文件系统或索引；不写入对象，也不记录 operation：
 
 ```bash
 $ libra rm --dry-run src/old_module.rs tests/old_test.rs

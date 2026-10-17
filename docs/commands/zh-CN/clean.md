@@ -37,7 +37,7 @@ libra clean -f [-d] [-x | -X] [-e <pattern> | --exclude <pattern>]... [--json] [
 
 **`-n` / `--dry-run`**
 
-预览模式。列出每个*会*被删除的未跟踪路径，但不触碰文件系统：
+预览模式。列出每个*会*被删除的未跟踪路径，但不触碰文件系统；不写入对象，也不记录 operation：
 
 ```bash
 $ libra clean -n

@@ -1316,3 +1316,25 @@ fn test_t3600_staged_content_refusals() {
         "refusal keeps the index entry"
     );
 }
+
+/// Issue #483: `rm --dry-run` writes no objects.
+#[test]
+#[serial_test::serial(cwd)]
+fn test_rm_dry_run_writes_no_objects() {
+    let repo = tempdir().unwrap();
+    let p = repo.path();
+    init_repo_via_cli(p);
+    configure_identity_via_cli(p);
+    fs::write(p.join("f"), "base\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "f"], p), "add f");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "base", "--no-verify"], p),
+        "commit base",
+    );
+
+    let before = count_objects_snapshot(p);
+    let out = run_libra_command(&["rm", "--dry-run", "f"], p);
+    assert_cli_success(&out, "rm --dry-run f");
+    assert_no_objects_written(p, &before, "rm --dry-run");
+    assert!(p.join("f").exists(), "dry run keeps the working file");
+}

@@ -41,7 +41,7 @@ libra alternates prune                               # 退役这些登记（解�
 唯一会被自动清除的，是路径**存在但不是目录**的登记（对象库绝不会是文件）。仅仅
 “路径不存在”不算证据，这是有意为之：它与“挂载点未挂载”在外部看来完全相同，一旦
 猜错，挂载恢复后借用方所需的对象已经被删掉了。请在 **base 中**运行
-`libra alternates prune` 退役路径不存在的登记，`--dry-run` 可先行列出。若某条登记
+`libra alternates prune` 退役路径不存在的登记，`--dry-run` 可先行列出且不写对象/operation。若某条登记
 根本无法检查（挂载不可达、父目录权限不足），请点名退役：
 `libra alternates prune /path/to/gone/.libra/objects` 会不问文件系统状态地退役该条
 登记——此时用户是唯一可用的证据。该路径与登记逐字匹配，因此指向另一个借用方的

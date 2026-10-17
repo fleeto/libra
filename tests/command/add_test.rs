@@ -4502,3 +4502,70 @@ fn test_t3705_add_does_not_remove_sparse_entries() {
     assert_sparse_entry_unstaged(root);
     assert_sparse_entry_unchanged(root, &blob);
 }
+
+/// Issue #483 / upstream TC-0011: `add -n -u` reports candidates, changes no
+/// index state, and writes no objects (the assertion `count-objects -v` is the
+/// canonical "no objects written" check).
+#[test]
+#[serial_test::serial(cwd)]
+fn test_add_dry_run_update_writes_no_objects_tc0011() {
+    let repo = tempdir().unwrap();
+    let p = repo.path();
+    init_repo_via_cli(p);
+    configure_identity_via_cli(p);
+    fs::write(p.join("check"), "base\n").unwrap();
+    fs::write(p.join("top"), "base\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "check", "top"], p), "add base");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "base", "--no-verify"], p),
+        "commit base",
+    );
+
+    fs::write(p.join("check"), "changed\n").unwrap();
+    fs::remove_file(p.join("top")).unwrap();
+
+    let before_index = run_libra_command(&["ls-files", "-s", "check", "top"], p).stdout;
+    let before_objects = super::count_objects_snapshot(p);
+
+    let out = run_libra_command(&["add", "-n", "-u"], p);
+    assert_cli_success(&out, "add -n -u");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("check"),
+        "reports check candidate: {stdout}"
+    );
+    assert!(
+        stdout.contains("top"),
+        "reports top removal candidate: {stdout}"
+    );
+
+    let after_index = run_libra_command(&["ls-files", "-s", "check", "top"], p).stdout;
+    assert_eq!(
+        String::from_utf8_lossy(&before_index),
+        String::from_utf8_lossy(&after_index),
+        "dry run must not change the index"
+    );
+    super::assert_no_objects_written(p, &before_objects, "add -n -u");
+}
+
+/// A pathspec dry-run over an untracked new file writes no objects either.
+#[test]
+#[serial_test::serial(cwd)]
+fn test_add_dry_run_pathspec_writes_no_objects() {
+    let repo = tempdir().unwrap();
+    let p = repo.path();
+    init_repo_via_cli(p);
+    configure_identity_via_cli(p);
+    fs::write(p.join("tracked"), "base\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "tracked"], p), "add tracked");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "base", "--no-verify"], p),
+        "commit base",
+    );
+    fs::write(p.join("new.txt"), "new\n").unwrap();
+
+    let before = super::count_objects_snapshot(p);
+    let out = run_libra_command(&["add", "--dry-run", "new.txt"], p);
+    assert_cli_success(&out, "add --dry-run new.txt");
+    super::assert_no_objects_written(p, &before, "add --dry-run <pathspec>");
+}

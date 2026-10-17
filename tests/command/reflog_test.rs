@@ -688,3 +688,24 @@ fn test_reflog_no_abbrev_shows_full_hash() {
     );
     assert!(full_hash.starts_with(ab_hash), "abbrev is a prefix of full");
 }
+
+/// Issue #483: `reflog expire --dry-run` writes no objects.
+#[test]
+#[serial(cwd)]
+fn test_reflog_expire_dry_run_writes_no_objects() {
+    let repo = tempdir().unwrap();
+    let p = repo.path();
+    init_repo_via_cli(p);
+    configure_identity_via_cli(p);
+    fs::write(p.join("f"), "base\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "f"], p), "add f");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "base", "--no-verify"], p),
+        "commit base",
+    );
+
+    let before = count_objects_snapshot(p);
+    let out = run_libra_command(&["reflog", "expire", "--dry-run", "--all"], p);
+    assert_cli_success(&out, "reflog expire --dry-run --all");
+    assert_no_objects_written(p, &before, "reflog expire --dry-run");
+}

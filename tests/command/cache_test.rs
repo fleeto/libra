@@ -4,7 +4,9 @@
 
 use tempfile::tempdir;
 
-use super::{parse_json_stdout, run_libra_command_with_stdin_and_env};
+use super::{
+    assert_cli_success, parse_json_stdout, run_libra_command, run_libra_command_with_stdin_and_env,
+};
 
 /// With no `LIBRA_STORAGE_*` configured, `cache info` reports the local-only
 /// defaults (1 MiB threshold, 200 MiB LRU budget) and needs no repository.
@@ -141,4 +143,25 @@ fn cache_info_human_output_labels_fields() {
     assert!(stdout.contains("storage:"), "should label storage type");
     assert!(stdout.contains("threshold:"), "should label threshold");
     assert!(stdout.contains("cache:"), "should label cache budget");
+}
+
+/// Issue #483: `cache evict --dry-run` writes no objects.
+#[test]
+#[serial_test::serial(cwd)]
+fn test_cache_evict_dry_run_writes_no_objects() {
+    let repo = tempfile::tempdir().unwrap();
+    let p = repo.path();
+    super::init_repo_via_cli(p);
+    super::configure_identity_via_cli(p);
+    std::fs::write(p.join("f"), "base\n").unwrap();
+    assert_cli_success(&super::run_libra_command(&["add", "f"], p), "add f");
+    assert_cli_success(
+        &super::run_libra_command(&["commit", "-m", "base", "--no-verify"], p),
+        "commit base",
+    );
+
+    let before = super::count_objects_snapshot(p);
+    let out = run_libra_command(&["cache", "evict", "--dry-run"], p);
+    super::assert_cli_success(&out, "cache evict --dry-run");
+    super::assert_no_objects_written(p, &before, "cache evict --dry-run");
 }

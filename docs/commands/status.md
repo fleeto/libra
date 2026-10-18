@@ -51,6 +51,17 @@ ignored; entry-type changes (for example a regular file replaced by a symlink)
 are always reported. An invalid `core.filemode` value fails `status` closed
 before any output.
 
+### Legacy executable-bit repair hint
+
+A working tree created by a Libra version before mode-aware materialization
+(< v0.23.17) lost the execute bit on tracked `100755` files. After the mode
+detection above, such a tree shows the files as ` M`; the human long format
+therefore adds a one-shot note with the candidate count and the repair
+command (`libra restore -- <file>...`, or `libra restore -- .` when more than
+five files are affected). `--short`, `--porcelain`, `--json` and
+`core.filemode=false` do not print it. Running the suggested `libra restore`
+re-applies the executable bit and the tree goes clean.
+
 Skip-worktree entries (marked with
 [`update-index --skip-worktree`](update-index.md)) are never reported as
 deleted or modified: the working-tree copy is assumed good, matching Git's

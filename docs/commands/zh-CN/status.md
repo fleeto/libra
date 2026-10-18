@@ -22,6 +22,10 @@ libra status [OPTIONS] [pathspec]...
 
 当 `core.filemode=true`（Unix 默认）时，已跟踪普通文件的 owner-execute 位与索引不同而内容未变，属于仅 mode 变化，会在所有输出格式（short、long、porcelain v2、JSON）中被报告为修改；当 `core.filemode=false` 时忽略仅 mode 的差异，但条目类型变化（如普通文件被替换为符号链接）始终会被报告。非法的 `core.filemode` 值会在任何输出前使 `status` fail-closed。
 
+### 旧工作树可执行位修复提示
+
+由 mode-aware 物化之前的 Libra（< v0.23.17）创建的工作树，会丢掉已跟踪 `100755` 文件的可执行位。在上述 mode 检测之后，这类工作树会把这些文件显示为 ` M`；因此人类 long 格式会追加一次提示，给出候选数量与修复命令（`libra restore -- <file>...`，超过五个文件时用 `libra restore -- .`）。`--short`、`--porcelain`、`--json` 与 `core.filemode=false` 不输出该提示。执行提示的 `libra restore` 会重新应用可执行位，工作树随之干净。
+
 skip-worktree 条目（用 [`update-index --skip-worktree`](update-index.md) 标记）永远不会被报告为删除或修改：其工作树副本被视为完好，与 Git 对稀疏检出索引的行为一致。`core.sparseCheckout=true` 时 Libra 不评估稀疏模式（稀疏规则与物化延后——见兼容表），行为与 `false` 相同，外加每进程一次的提示警告。
 
 ### 显示相关的 config 默认值（`status.*`）

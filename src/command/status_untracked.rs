@@ -19,6 +19,11 @@ pub(crate) struct StatusWorktreeChanges {
     pub(crate) unstaged: Changes,
     pub(crate) ignored_files: Vec<PathBuf>,
     pub(crate) index: Index,
+    /// ADR-FM-06 (#470 FM-05): tracked regular files whose index mode is
+    /// executable (100755), whose working-tree owner execute bit is missing,
+    /// and whose content matches the index — the legacy-materialization shape
+    /// that only a human `status` long output repairs with a hint.
+    pub(crate) mode_fix_candidates: Vec<PathBuf>,
     /// §B.3.3 accumulator protocol: paths the scan could not inspect
     /// (workdir-relative). Text formats fail closed on any entry; JSON
     /// reports the partial result plus `data.io_blocked[]`.
@@ -76,6 +81,7 @@ pub(crate) fn collect_status_worktree_changes(
     })?;
     let tracked = TrackedPaths::from_index(&index, ignore_case);
     let mut io_blocked: Vec<crate::command::status_probe::IoBlockedEvent> = Vec::new();
+    let mut mode_fix_candidates: Vec<PathBuf> = Vec::new();
     // The index file's own mtime anchors the racily-clean guard: a stat
     // triple is only trusted for files strictly older than this snapshot.
     let index_file_mtime = std::fs::metadata(&index_path)
@@ -88,6 +94,7 @@ pub(crate) fn collect_status_worktree_changes(
         &mut io_blocked,
         index_file_mtime,
         file_mode,
+        &mut mode_fix_candidates,
     )?;
     let mut ignored_files = Vec::new();
 
@@ -112,6 +119,7 @@ pub(crate) fn collect_status_worktree_changes(
         unstaged,
         ignored_files,
         index,
+        mode_fix_candidates,
         io_blocked,
     })
 }
@@ -202,6 +210,7 @@ fn collect_tracked_worktree_changes(
     io_blocked: &mut Vec<crate::command::status_probe::IoBlockedEvent>,
     index_file_mtime: Option<std::time::SystemTime>,
     file_mode: bool,
+    mode_fix_candidates: &mut Vec<PathBuf>,
 ) -> Result<Changes, StatusError> {
     let mut changes = Changes::default();
     for file in tracked_files {
@@ -272,6 +281,17 @@ fn collect_tracked_worktree_changes(
             })
         {
             changes.modified.push(file.clone());
+            // ADR-FM-06: the executable-bit-lost direction with identical
+            // content is the legacy-materialization repair candidate.
+            if let Some(entry) = index.get(file_str, 0)
+                && entry.mode & 0o111 != 0
+                && metadata.mode & 0o111 == 0
+                && let Ok(Ok(hash)) =
+                    crate::command::status_io_worker::deadline_file_blob_hash(&file_abs, workdir)
+                && index.verify_hash(file_str, 0, &hash)
+            {
+                mode_fix_candidates.push(file.clone());
+            }
             continue;
         }
         // Compare against the metadata we ALREADY hold rather than calling

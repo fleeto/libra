@@ -4078,3 +4078,136 @@ fn test_status_uall_expands_nested_untracked_matrix() {
         "G2 must not expand a nested repository: {nested_text}"
     );
 }
+
+/// FM-05 (M-HINT H1–H5, issues/470): a legacy-materialization tree (index
+/// 100755, worktree not executable, content identical) gets one human
+/// long-format repair hint; machine formats and `core.fileMode=false` stay
+/// unchanged, the reverse direction does not hint, and the hinted command
+/// actually repairs.
+#[cfg(unix)]
+#[test]
+fn test_status_hints_missing_executable_bit_from_old_checkout() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let repo = tempdir().expect("tempdir");
+    let root = repo.path();
+    init_repo_via_cli(root);
+    configure_identity_via_cli(root);
+    let run = root.join("run.sh");
+    fs::write(&run, "#!/bin/sh\n").expect("write run");
+    fs::set_permissions(&run, fs::Permissions::from_mode(0o755)).expect("chmod run");
+    assert_cli_success(&run_libra_command(&["add", "run.sh"], root), "add");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "init", "--no-verify"], root),
+        "commit",
+    );
+
+    // H1: the legacy shape (index 755, worktree 644, content unchanged).
+    fs::set_permissions(&run, fs::Permissions::from_mode(0o644)).expect("chmod 644");
+    let long = run_libra_command(&["status"], root);
+    assert_cli_success(&long, "status long");
+    let long_out = String::from_utf8_lossy(&long.stdout);
+    assert!(
+        long_out.contains("lost the executable bit"),
+        "H1 hint text: {long_out}"
+    );
+    assert!(
+        long_out.contains("libra restore -- run.sh"),
+        "H1 repair command: {long_out}"
+    );
+
+    // H2: machine/short formats carry no hint.
+    for args in [
+        vec!["status", "--short"],
+        vec!["status", "--porcelain=v2"],
+        vec!["--json", "status"],
+    ] {
+        let out = run_libra_command(&args, root);
+        assert_cli_success(&out, "machine status");
+        assert!(
+            !String::from_utf8_lossy(&out.stdout).contains("lost the executable bit"),
+            "H2 {args:?} must not hint"
+        );
+    }
+
+    // H4: the hinted command repairs and the tree goes clean.
+    assert_cli_success(
+        &run_libra_command(&["restore", "--", "run.sh"], root),
+        "restore",
+    );
+    assert_eq!(
+        fs::metadata(&run).expect("stat run").permissions().mode() & 0o777,
+        0o755,
+        "H4 restore applies the executable bit"
+    );
+    let short = run_libra_command(&["status", "--short"], root);
+    assert!(
+        !String::from_utf8_lossy(&short.stdout).contains("run.sh"),
+        "H4 run.sh is clean: {}",
+        String::from_utf8_lossy(&short.stdout)
+    );
+
+    // H3: the reverse direction (index 644, worktree 755) does not hint.
+    let plain = root.join("plain.txt");
+    fs::write(&plain, "plain\n").expect("write plain");
+    fs::set_permissions(&plain, fs::Permissions::from_mode(0o644)).expect("chmod plain");
+    assert_cli_success(&run_libra_command(&["add", "plain.txt"], root), "add plain");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "plain", "--no-verify"], root),
+        "commit plain",
+    );
+    fs::set_permissions(&plain, fs::Permissions::from_mode(0o755)).expect("chmod 755 plain");
+    let long = run_libra_command(&["status"], root);
+    assert!(
+        !String::from_utf8_lossy(&long.stdout).contains("lost the executable bit"),
+        "H3 reverse direction must not hint: {}",
+        String::from_utf8_lossy(&long.stdout)
+    );
+
+    // H5: `core.fileMode=false` suppresses the hint.
+    fs::set_permissions(&run, fs::Permissions::from_mode(0o644)).expect("chmod 644 again");
+    assert_cli_success(
+        &run_libra_command(&["config", "core.fileMode", "false"], root),
+        "disable fileMode",
+    );
+    let long = run_libra_command(&["status"], root);
+    assert!(
+        !String::from_utf8_lossy(&long.stdout).contains("lost the executable bit"),
+        "H5 fileMode=false must not hint"
+    );
+}
+
+/// FM-05: more than five candidates switch the hint to the bulk `restore -- .`
+/// form.
+#[cfg(unix)]
+#[test]
+fn test_status_hint_bulk_form_over_five_candidates() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let repo = tempdir().expect("tempdir");
+    let root = repo.path();
+    init_repo_via_cli(root);
+    configure_identity_via_cli(root);
+    for i in 1..=6 {
+        let path = root.join(format!("s{i}.sh"));
+        fs::write(&path, "x\n").expect("write");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("chmod");
+    }
+    assert_cli_success(&run_libra_command(&["add", "."], root), "add");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "many", "--no-verify"], root),
+        "commit",
+    );
+    for i in 1..=6 {
+        let path = root.join(format!("s{i}.sh"));
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).expect("chmod 644");
+    }
+
+    let long = run_libra_command(&["status"], root);
+    let out = String::from_utf8_lossy(&long.stdout);
+    assert!(out.contains("6 tracked files"), "bulk count: {out}");
+    assert!(
+        out.contains("libra restore -- ."),
+        "bulk repair command: {out}"
+    );
+}

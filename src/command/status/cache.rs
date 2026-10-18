@@ -841,6 +841,7 @@ pub(super) async fn run_status_cache_mode(
         unstaged,
         unmerged: vec![],
         ignored_files: vec![],
+        mode_fix_candidates: vec![],
         stash_count,
         upstream,
         merge_state,

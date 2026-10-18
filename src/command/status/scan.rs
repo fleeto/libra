@@ -442,6 +442,7 @@ pub(super) async fn collect_status_data(
             warnings
         },
         quote_path: extras.quote_path,
+        mode_fix_candidates: worktree.mode_fix_candidates,
         io_blocked: {
             let mut events = io_blocked;
             events.sort_by_key(|event| raw_path_sort_key(&event.path));
@@ -452,6 +453,8 @@ pub(super) async fn collect_status_data(
         rename_scan_blocked,
     };
     filter_status_data_by_pathspec(&mut data, args)?;
+    data.mode_fix_candidates
+        .retain(|path| data.unstaged.modified.contains(path));
     Ok(data)
 }
 
@@ -519,6 +522,7 @@ impl StatusData {
         projected.staged = project_changes(&self.staged);
         projected.unstaged = project_changes(&self.unstaged);
         projected.ignored_files = project(&self.ignored_files);
+        projected.mode_fix_candidates = project(&self.mode_fix_candidates);
         projected.staged_rename_details = project_details(&self.staged_rename_details);
         projected.unstaged_rename_details = project_details(&self.unstaged_rename_details);
         for entry in &mut projected.unmerged {

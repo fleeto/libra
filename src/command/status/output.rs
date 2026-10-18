@@ -374,6 +374,38 @@ fn render_human_status(
         }
     }
 
+    // ADR-FM-06 (#470 FM-05): a legacy-materialization tree loses executable
+    // bits; FM-04 makes it visible as ` M`, this hint offers the one-shot
+    // repair. Human long format only — short/porcelain/JSON stay unchanged.
+    if !data.mode_fix_candidates.is_empty() {
+        let count = data.mode_fix_candidates.len();
+        let noun = if count == 1 { "file" } else { "files" };
+        writeln!(
+            buffer,
+            "Note: {count} tracked {noun} lost the executable bit (index records 100755)"
+        )
+        .map_err(write_error)?;
+        if count > 5 {
+            writeln!(
+                buffer,
+                "  use \"libra restore -- .\" to restore all executable bits"
+            )
+            .map_err(write_error)?;
+        } else {
+            let paths = data
+                .mode_fix_candidates
+                .iter()
+                .map(|path| {
+                    String::from_utf8_lossy(&quote_pathname_bytes(path, data.quote_path))
+                        .into_owned()
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            writeln!(buffer, "  use \"libra restore -- {paths}\" to restore it")
+                .map_err(write_error)?;
+        }
+    }
+
     if !data.unmerged.is_empty() {
         writeln!(buffer, "Unmerged paths:").map_err(write_error)?;
         writeln!(buffer, "  use \"libra add <file>...\" to mark resolution")

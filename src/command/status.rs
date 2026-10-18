@@ -431,6 +431,10 @@ pub struct StatusData {
     /// closed on any entry; JSON reports the partial result plus
     /// `data.io_blocked[]` with `is_clean = false`.
     io_blocked: Vec<crate::command::status_probe::IoBlockedEvent>,
+    /// ADR-FM-06 (#470 FM-05): legacy-materialization repair candidates —
+    /// index 100755, working tree not executable, content identical. Drives
+    /// the one human long-format hint only (short/porcelain/JSON unchanged).
+    mode_fix_candidates: Vec<PathBuf>,
     /// Whether the RENAME side (probe or candidate reads) was blocked, as
     /// opposed to the base scan. `rename_detection_complete` keys off this
     /// so a base-scan-only block does not also claim the rename pairing
@@ -2040,6 +2044,87 @@ mod test {
         assert!(
             worktree_failed.message.contains("5 candidate(s)"),
             "{worktree_failed:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod mode_fix_hint_test {
+    use std::os::unix::fs::PermissionsExt;
+
+    use git_internal::internal::index::IndexEntry;
+    use serial_test::serial;
+    use tempfile::tempdir;
+
+    use super::*;
+    use crate::utils::test::ChangeDirGuard;
+
+    /// FM-05 (M-HINT H1/H3/H5): candidate detection needs index 100755,
+    /// worktree non-exec, and identical content; reverse direction and
+    /// `core.fileMode=false` stay empty.
+    #[cfg(unix)]
+    #[test]
+    #[serial(cwd, env)]
+    fn mode_fix_candidates_track_legacy_shape_only() {
+        let repo = tempdir().expect("temp repo");
+        std::fs::create_dir_all(repo.path().join(".libra/objects")).expect("objects dir");
+        std::fs::write(repo.path().join(".libra/libra.db"), b"").expect("db marker");
+        let _guard = ChangeDirGuard::new(repo.path());
+
+        let run_content = b"x\n";
+        let plain_content = b"y\n";
+        std::fs::write(repo.path().join("run.sh"), run_content).expect("write run");
+        std::fs::write(repo.path().join("plain.txt"), plain_content).expect("write plain");
+
+        let mut index = Index::new();
+        for (name, mode) in [("run.sh", 0o100755u32), ("plain.txt", 0o100644)] {
+            let path = repo.path().join(name);
+            let mut entry = IndexEntry::new_from_blob(
+                name.to_string(),
+                calc_file_blob_hash(&path).expect("hash"),
+                0,
+            );
+            entry.mode = mode;
+            index.add(entry);
+        }
+        let index_path = repo.path().join(".libra/index");
+        index.save(&index_path).expect("save index");
+
+        // Legacy shape: run.sh lost exec, plain.txt gained it.
+        std::fs::set_permissions(
+            repo.path().join("run.sh"),
+            std::fs::Permissions::from_mode(0o644),
+        )
+        .expect("chmod run");
+        std::fs::set_permissions(
+            repo.path().join("plain.txt"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .expect("chmod plain");
+
+        let scan = status_untracked::collect_status_worktree_changes(
+            UntrackedFiles::No,
+            false,
+            false,
+            true,
+        )
+        .expect("scan");
+        assert_eq!(
+            scan.mode_fix_candidates,
+            vec![PathBuf::from("run.sh")],
+            "only the executable-bit-lost direction is a candidate"
+        );
+
+        let scan = status_untracked::collect_status_worktree_changes(
+            UntrackedFiles::No,
+            false,
+            false,
+            false,
+        )
+        .expect("scan fileMode=false");
+        assert!(
+            scan.mode_fix_candidates.is_empty(),
+            "fileMode=false yields no candidates"
         );
     }
 }

@@ -1469,8 +1469,7 @@ async fn cov2_macos_fake_exporter_candidate_live_partial_no_plaintext() {
                 .iter()
                 .position(|byte| *byte == b'{')
                 .expect("json object");
-            let value: Value =
-                serde_json::from_slice(&bytes[json_at..]).expect("transcript json");
+            let value: Value = serde_json::from_slice(&bytes[json_at..]).expect("transcript json");
             assert!(
                 value.get("messages").is_some(),
                 "unproven reasoning field left the transcript object"

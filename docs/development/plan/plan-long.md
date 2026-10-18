@@ -1,5 +1,7 @@
 # Libra 长期功能规划
 
+> **当前 thinking 数据获取基线（2026-10-18 16:23:55 UTC，用户明确授权）：** [DATA-CAP-20261019](plan-20260904.md#thinking-data-baseline-20261019) 替代下方 2026-10-18 四 provider 计划的隐私剥离/native 来源保存前置。以 OpenCode macOS 13段/4617 bytes、2个自动 checkpoint 原值一致为已证基线；系统 OpenCode 默认 Opus 5.5 medium + summarized 的无 --model 实测另得到131 bytes正文。Codex 29、Claude 9、Pi 11、Hermes 10 张仍全部 pending（0/59），本次只修订计划和配置事实；获取的数据可普通保留并标 Unproven/Partial，不把空壳当通过。四种工具 source/模型 smoke 均待实际执行，未授实施或 native grant。当前下一卡仍 CX-00 / CC-00 / PI-00 / HM-00；实现依原逐文件串行与 schema/cloud 数据正确性边界。旧 PASS/FAIL 与完成数保留历史；2026-10-18 16:39:27 UTC 本轮 fmt/strict、104/104 focused 与 Claude R2 实际 PASS 已登记于各计划；源数据获取/可读正文仍须未来真实测试，无版本发布。
+
 ## 文档职责与维护协议
 
 本文是 Libra 不绑定具体发布日期和版本号的长期能力组合路线图。它回答「哪些能力值得长期投资、为什么、依赖什么、何时具备进入日期计划的条件」，不是 release 承诺、owner 清单或逐项实施任务表。具体设计、迁移、拆分、发布和回滚只进入按日期计划或后续 RFC/ADR。上次审计基线为 2026-09-23（第十三次）；本轮只更新允许的审计快照与路线图状态。
@@ -757,13 +759,13 @@ MEM-03 → MEM-04；LR-09（plan-20260913 `FL-04/05` 收口）；LR-10；MEM-05 
 | [`plan-20260901.md`](plan-20260901.md) | 横切（SB-01 pkt-line fail-closed） | 已完成 | 原PKT01..14及FIX-PKT01..05全部done/complete；十六实际发布C/D完整，家族02/03/04由05覆盖，最新v0.22.47。所有卡D后新的无过滤默认全量10221/10221（231 binaries、零失败/重试）和原113具名门及FIX05四新增门通过，Codex/Claude最终PASS；同步/异步协议与CLI分类、SSH诊断/BatchMode、push ng净化、空仓库尾部帧校验及五恢复修复全部交付。失败历史与全部DEFER条目/具名P2如计划，不冒称历史SIGKILL根因已查明或已本地安装。 |
 | [`plan-20260902.md`](plan-20260902.md) | B（OpenCode ordinary capture / safe partial） | macOS范围完成（66/66） | v0.30.52已发布并安装；库存66/68，两原延期不变、六native卡withdrawn非PASS，SourceA未证；详见父计划最终C收口记录。 |
 | [`plan-20260903.md`](plan-20260903.md) | A（LR-05 merge） | 实施中 | MG-01..MG-21 已有代码、测试与发布提交；最终计划收口与 deferred 差异仍待完成 |
-| [`plan-20260904.md`](plan-20260904.md) | B（RG基础 / Codex capture） | 已排期 | 本轮Codex自审/Claude最终R5规划PASS；RG/scoped继承已交付事实；2026-10-18修订的29张CX pending，下一CX-00，当前审查见各计划。 |
-| [`plan-20260905.md`](plan-20260905.md) | B（Claude hooks/reasoning） | 已排期 | 本轮Codex自审/Claude最终R5规划PASS；2026-10-18修订9卡pending，下一CC-00；只安装已证纯观察项，不再等整份Codex计划完成。 |
+| [`plan-20260904.md`](plan-20260904.md) | B（RG基础 / Codex capture） | 已排期 | DATA-CAP-20261019：29张 CX pending；CX-00 先审 source/模型设置；thinking 原文及 encrypted_content 普通保留，native 缺证不阻塞获取；旧 R5 为历史；本次修订实际审查见计划 |
+| [`plan-20260905.md`](plan-20260905.md) | B（Claude hooks/reasoning） | 已排期 | DATA-CAP-20261019：9卡 pending；CC-00/04 审 event/实际 envelope 与 thinking 设置；CC-07/05 保留正文及 signature/data；native 认证不作前置，旧 R5 为历史；本次修订实际审查见计划 |
 | [`plan-20260906.md`](plan-20260906.md) | 横切（安全扫描） | 已排期 | 设计计划，任务卡尚未完成 |
 | [`plan-20260907.md`](plan-20260907.md) | 横切（BLAKE3 object format） | 已完成 | B3-00..B3-17 全部 `done`/`complete`（`v0.23.68`→`v0.29.0`）；最终 Codex/Claude R40 双 PASS；`DEP-B3-05` 已满足 |
 | [`plan-20260910.md`](plan-20260910.md) | 横切（数据库迁移作用域） | 已排期 | 设计计划，任务卡尚未执行 |
-| [`plan-20260911.md`](plan-20260911.md) | B（Pi hook/capture boundary） | 已排期 | 本轮Codex自审/Claude最终R5规划PASS；2026-10-18修订11卡pending，下一PI-00；云围栏先于Pi writer，source pin与本机1.1.0对应待证。 |
-| [`plan-20261018-hermes-capture.md`](plan-20261018-hermes-capture.md) | B（Hermes capture） | 已排期 | 本轮Codex自审/Claude最终R5规划PASS；2026-10-18新增10卡pending，下一HM-00；只规划本地ordinary采集，Hermes binary/live smoke仍为supported提升硬门。 |
+| [`plan-20260911.md`](plan-20260911.md) | B（Pi hook/capture boundary） | 已排期 | DATA-CAP-20261019：11卡 pending；PI-00 先核系统版本/模型；PI-08 保留 thinking/thoughtSignature；云围栏与 identity/schema 顺序不变，旧 R5 为历史；本次修订实际审查见计划 |
+| [`plan-20261018-hermes-capture.md`](plan-20261018-hermes-capture.md) | B（Hermes capture） | 已排期 | DATA-CAP-20261019：10卡 pending；HM-00 选含 thinking 的 export/文件/一致只读 SQLite；HM-08 最小 live 桥不要求新沙箱；真实非空数据门待验，旧 R5 为历史；本次修订实际审查见计划 |
 | [`plan-20261018-grok-capture.md`](plan-20261018-grok-capture.md) | B（Grok capture） | GK-00 HOLD 收口 | 2026-10-19：公开 grok-build `2bdd1d6a6369de0e8c68132ea4539e9abd9e14a8` 为 1.0.45，对不上本机 1.0.62。DEP-GK-PIN 与 GK-01..05 HOLD。GK-00 locally-accepted，Acceptance 空。 |
 | [`plan-20260912.md`](plan-20260912.md) | B（memory boundary） | 已排期 | 设计计划，任务卡尚未执行 |
 | [`plan-20260913.md`](plan-20260913.md) | A（LR-09 FastCDC Media） | 实施中 | FL-00/01/07/02/06/03 `done`/`complete`、FL-04 `in-progress`/`locally-accepted`、FL-05 待效果门；v0.30.0 家族发布（原「设计计划、FL-00 可开工」表述已过时，按计划头部状态更新） |

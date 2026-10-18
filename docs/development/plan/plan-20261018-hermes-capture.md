@@ -1,5 +1,9 @@
 # Hermes Agent 本地会话采集计划（2026-10-18）
 
+> **数据获取优先修订：2026-10-18 16:23:55 UTC（用户本次明确授权）。** 采用 [DATA-CAP-20261019](plan-20260904.md#thinking-data-baseline-20261019)：按 OpenCode 实测保留 thinking 正文及其未证明附带数据，不再以 native 来源认证或隐私剥离阻止普通 checkpoint 保存。下方旧日期 PASS/FAIL、版本与 source pin 仅作原时点证据；本次未运行这四种 provider 的模型，不增加已完成卡数。
+
+> **适用优先级：** 本次用户授权的 DATA-CAP-20261019 替代旧 GC/ADR 及任务卡中对 thinking 的隐私剥离和 native 认证保存前置；模板的工程正确性、数据库、测试与交付规则继续适用。证据中的 OpenCode 原值保留是已实现事实，这四份计划的等同行为仍待实现。
+
 > **起草与审计时间：2026-10-18 02:00:57 UTC；模板v2.14。** 全仓`rg -i hermes`仅找到旧SCAP删除说明与无关发布文档，无独立provider计划、AgentKind或adapter。本计划补齐缺失方案；当前未安装`hermes`，不宣称已完成本机/真实模型验收。
 
 > **基础依赖镜像 DEP-ACF-MIRROR：** 前置已由 ACF-09（`Lifecycle=done`、`Acceptance=complete`）交接；terminal work 必须注入共用 `CaptureFinalizePolicy`，不得私建 ledger/finalizer。本镜像只消费已完成机制，开工仍须逐文件复验当前接口。
@@ -24,11 +28,11 @@
 
 | DEP | direction / 产物与可用性 | Owner / 失败路径 |
 |---|---|---|
-| DEP-HM-01 | incoming upstream：完整commit、可安装版本、hook callsite/observer与实际source export形状由HM-00冻结 | HM-00审计者；pin/schema/ID无证则相关parser/installerHOLD，不换main猜测 |
+| DEP-HM-01 | incoming upstream：完整 commit、可安装版本、hook observer 与已选 export/session 文件/一致 SQLite shape 由 HM-00 冻结 | HM-00审计者；pin/schema/ID无证则相关parser/installerHOLD，不换main猜测 |
 | DEP-HM-02 | incoming cross-plan：plan-20260911 PI-05/09提供白名单/并发snapshot边界、PI-07提供安全CHECK runner，PI-01提供当时新增kind的role迁移经验；HM不复制fence owner | PI/HM交接者；PI-05未source-qualified前HM-02不写；HM-01保留当时所有kinds，不等整份Pi计划 |
 | DEP-HM-03 | incoming local：匹配冻结release的Hermes binary和隔离项目/profile，明确本机模型smoke与trust授权 | HM-06执行者；当前缺binary，只有supported提升阻塞，不让计划audit假PASS运行 |
 | DEP-HM-DB | incoming：plan-20260910 MIG-02/03已done/complete；当前role manifest与旧binary oracle | schema owner；role/旧reader无法复验，HM-01 blocked |
-| DEP-HM-LIVE | incoming：仅HM-00的export字段/argv/只读callsite语义GO；HM-08的trust/sandbox/lease/deadline是其实施验收，真实binary行为由HM-06另验，不构成HM-08自依赖 | HM-00审计者；语义缺证HOLD，HM-08不开工，HM-06不提升supported |
+| DEP-HM-LIVE | incoming：HM-00 的已选文件/一致只读 SQLite/export 字段与 session 语义；HM-08 的 reader/必要 trust/lease/deadline 是实施验收，真实数据由 HM-06 另验，不构成自依赖 | HM-00审计者；语义缺证HOLD，HM-08不开工，HM-06不提升supported |
 | DEP-HM-DOC | incoming website：原生Libra cf及agent/cloud页面clean，部署渠道可验 | 文档writer；按四provider契约交付，不能只写仓库文档 |
 | DEP-HM-RELEASE | incoming release：签名工具链与逐卡固定source C/D | 单一发布者；缺项locally-accepted/remote-pending |
 
@@ -38,10 +42,10 @@
 
 - ADR-HM-01：known observer与control/transform彻底区分，默认不注册pre_tool_call/pre_llm_call/transform；注册observer不返回控制值，不以异常/timeout改变provider行为。不抓整份conversation_history作为无界hook envelope。
 - ADR-HM-02：`on_session_end`按已证turn outcome映射TurnEnd/失败事实，不能过早关闭session；teardown/reset/finalize与new/resume分开。失败/中断缺终态时partial并由显式导入/既有owner recovery对账，不伪造complete。
-- ADR-HM-03：本轮仅接受HM-00证实的官方JSON export，不接受SQLite/db-only或“已关闭备份”，因为没有WAL时quick_check也不能证明历史完整。已核source出现`hermes sessions export`线索，但JSON选项、profile/cwd、只读性与预算仍须HM-00核callsite，不编造参数。历史import只用用户明确提供的已证官方export。实时内容须由LiveCaptureProvider::transcript_exporter经HM-08 Hermes专用受信任/沙箱导出桥及现有lease owner执行同一官方exporter；HM-00只判定fixed argv、只读callsite、不触发热库迁移、session/cwd/profile可绑定的语义GO/HOLD；trust/sandbox/lease/2s机制由HM-08实现验收，真实binary的2s实测由HM-06完成，不能反向作为HM-08开工前置。HOLD只允许无内容metadata观察，HM-06不能supported，不把静态import当live成功。
+- ADR-HM-03：HM-00 比较官方 export、session 文件和一致只读 SQLite 哪一种实际包含 thinking，选择一条最小可行 source。export 丢字段时允许只读事务或 SQLite backup API 的一致视图，不能分别复制热 db/WAL，不能以 immutable=1 忽略 live WAL，不能构造会迁移的 provider SessionDB。WAL 只读连接可能由 SQLite 创建/更新 -shm，此限于已授权源同目录的引擎协调文件；不写主 DB/WAL 或 schema、不视为迁移。源目录不允许协调写时用引擎支持的一致 backup/离线快照，无法建立一致视图就明确 unavailable；不得分别拷贝 db/WAL。HM-03 的 fixture 覆盖有 WAL、现成/缺失 shm 和只读目录。HM-03 实现已选 source 读取；HM-08 通过现有 snapshot/lease owner 接线。只有选择执行 exporter 才需要 fixed argv/子进程 trust/deadline；自建沙箱/解释器闭包不是 ordinary 获取前置。静态 schema、真实数据与支持提升分别验收，缺 native 认证仍保存 Unproven 数据。
 
 - ADR-HM-04：profile/host/session/turn/message/tool ID联合界定scope；本计划只绑定当前本地repo/worktree，缺cwd/identity则拒绝或partial，不合并不同profile、gateway或跨用户会话。稳定ID与去重由HM-00字段矩阵证明，不按时间或display title猜测。
-- ADR-HM-05：普通可读reasoning先typed redaction；unknown/encrypted-like字段剥离partial，无Hermes opaque或native issuer授权。新provider envelope不得绕过共享snapshot的原始读取限制。
+- ADR-HM-05：普通 reasoning 原文与关联 unknown/encrypted-like 数据保留并标 Unproven/Partial，无 native issuer 声明。snapshot/worker 的有界 Hermes carrier 在 HM-07 显式接线，不用隐私过滤删除数据。
 - ADR-HM-06：本地only支持先于任何writer发布cloud fence，复用PI-05的冻结generation/对象闭包并发边界及当前权限/tombstone/撤权复验；不能只在后置mirror拒绝，也不能因旧快照复活已擦除内容。Repository CHECK仅走ADR-CAP-CHECK/PI-07专用连接；新增唯一ID大于当前tip，CHECK保留Pi及所有已有值，Global/System/Derived零写，未来旧reader零写拒绝；只前滚，不drop用户数据。
 - 上限继承四provider契约：16MiB source、1MiB行/envelope、2s总budget、8in-flight、3次尝试共享deadline；单导入最多10000messages、1000sessions枚举上限，截断/超限有明确partial/拒绝，不悄悄完成。只写Libra-owned plugin asset/配置项，绝不替用户修改Hermes consent allowlist。
 
@@ -71,7 +75,7 @@
 
 ## 全局工程约束与执行检查必备需求
 
-完整采用plan-template.md的GC-01..GC-13、ER-01..ER-14及四provider契约，不删减强制门。ER-01记录基线/精确I/R，ER-02刷新source，ER-04双状态，ER-05逐卡Claude PASS，ER-06/06a逐文件文档/网站，ER-07同提交签名/DCO，ER-08每实现卡patch，ER-13/14双env nextest。ER-12唯一发布者为所选卡执行Agent，版本/tag/Release与网站cf窗口串行；未指派个人，不捏造姓名。D-CAP-STD固定workflow/job/event/ref/source取证。无REL/EX例外。
+完整采用plan-template.md的GC-01..GC-13、ER-01..ER-14及四provider契约，不删减强制门。ER-01记录基线/精确I/R，ER-02刷新source，ER-04双状态，ER-05逐卡Claude PASS，ER-06/06a逐文件文档/网站，ER-07同提交签名/DCO，ER-08每实现卡patch，ER-13/14双env nextest。ER-12唯一发布者为所选卡执行Agent，版本/tag/Release与网站cf窗口串行；未指派个人，不捏造姓名。D-CAP-STD固定workflow/job/event/ref/source取证。无 REL 批量发布例外；本次数据保留隐私豁免以 DATA-CAP-20261019 用户授权为准。
 
 ## Phase与发布分组窗口
 
@@ -79,8 +83,8 @@
 |---|---|---|
 | 0 source | HM-00 | 本轮规划PASS且选卡授权；退出各能力GO/HOLD |
 | 1 identity | HM-02→HM-01 | PI-05/09/07/01实际交接；退出白名单回归/无损CHECK/preview |
-| 2 ordinary | HM-03→HM-04→HM-07 | source GO；退出export/import/有界snapshot/worker |
-| 3 live/promotion | HM-08→HM-09→HM-05→HM-06 | LIVE_SOURCE GO/匹配binary；退出observer/本机smoke/支持提升 |
+| 2 ordinary | HM-03→HM-04→HM-07 | source GO；退出已选 source/import/有界 snapshot/worker |
+| 3 live/promotion | HM-08→HM-09→HM-05→HM-06 | LIVE_SOURCE GO/匹配binary；退出 observer/本机非空 thinking 比对/支持提升 |
 
 每实现卡independent release；审计no-release承载卡在卡内具名。版本面单写者，不把后继delta混入已冻结source；source-qualified后可开发下卡，formal complete仍等该卡实际C/D。失败前滚，不改已发布artifact。
 
@@ -92,7 +96,7 @@
 | DEP-HM-02 | PI-05白名单/PI-09 spool、PI-07 runner、PI-01 signed source/逐文件handoff | 未交接/dirty/in-progress即blocked |
 | DEP-HM-03 | HM-06 actual binary/version/场景/结果inline | 无binary/授权不运行，skip不通过 |
 | DEP-HM-DB | MIG-02/03实际完成与PI-07门 | role/oracle/child门红则blocked |
-| DEP-HM-LIVE | HM-00语义GO、HM-08 fake-exporter机制门与HM-06真实binary门 | 2s总deadline；无证metadata-only，HM-06 blocked |
+| DEP-HM-LIVE | HM-00 已选 source 语义、HM-08 fake-reader/exporter 机制门与 HM-06 真实数据门 | 2s总deadline；无证metadata-only，HM-06 blocked |
 | DEP-HM-DOC | cf文档postimage/sync/frontend/Claude/部署收据 | 任一失败不发布网站 |
 | DEP-HM-RELEASE | D-CAP-STD SHA/ref/run/job/安装inline | 未完remote-pending |
 
@@ -102,13 +106,13 @@
 
 | ID | type | axis | AC | VER | landing | prod-files | scope | deps | release |
 |---|---|---|---|---|---|---|---|---|---|
-| HM-00 | audit | Hermes版本、source与观察协议审计 | 5 | 2 | 0 | 0 | M | DEP-HM-01 | no-release |
+| HM-00 | audit | Hermes版本、source与观察协议审计 | 6 | 2 | 0 | 0 | M | DEP-HM-01 | no-release |
 | HM-02 | audit | 现有白名单的Hermes拒绝审计 | 3 | 1 | 0 | 0 | M | HM-00、DEP-HM-02 | no-release |
 | HM-01 | migration | Repository Hermes identity与role迁移 | 5 | 1 | 4 | 10 | M | HM-02、DEP-HM-DB、DEP-HM-02（PI-01 source交接） | independent |
 | HM-03 | implementation | 安全Hermes source adapter | 4 | 1 | 2 | 5 | M | HM-01 | independent |
 | HM-04 | implementation | Hermes普通内容归一化与显式import | 4 | 1 | 4 | 5 | M | HM-03 | independent |
 | HM-07 | implementation | Hermes有界普通采集能力 | 4 | 1 | 3 | 7 | M | HM-04、DEP-CAP-BASE、DEP-CAP-RG | independent |
-| HM-08 | implementation | Hermes受信任且沙箱化的导出桥 | 8 | 2 | 3 | 8 | M | HM-07、DEP-HM-LIVE | independent |
+| HM-08 | implementation | Hermes已选thinking来源的live读取桥 | 8 | 2 | 2 | 6 | M | HM-07、DEP-HM-LIVE | independent |
 | HM-09 | implementation | Hermes本地CLI与scope准入过滤 | 6 | 1 | 2 | 5 | M | HM-08 | independent |
 | HM-05 | implementation | Hermes observer plugin与现有ingress | 8 | 1 | 3 | 6 | M | HM-09、DEP-HM-LIVE | independent |
 | HM-06 | implementation | Hermes采集支持提升与交付 | 5 | 1 | 2 | 4 | M | HM-05、DEP-HM-03、DEP-HM-DOC、DEP-HM-LIVE | independent |
@@ -123,7 +127,7 @@
 | HM-03 | GAP01 export | hermes_source_ | agent source限制，前滚 |
 | HM-04 | GAP04 import | hermes_normalize_ | agent import/local-only，前滚 |
 | HM-07 | GAP04 worker | hermes_bounded_capture_ | agent readable/partial，前滚 |
-| HM-08 | GAP04受信导出 | hermes_exporter_及hermes_export_bridge_ | trust/doctor/agent/网站，前滚 |
+| HM-08 | GAP04已选 source live 接线 | hermes_exporter_及hermes_source_bridge_（覆盖文件/SQLite/exporter 所选分支） | 必要 trust/doctor/agent/网站，前滚 |
 | HM-09 | GAP04 scope | hermes_scope_admission_ | 内部策略，前滚 |
 | HM-05 | GAP04 observer | hermes_observe_含gateway/unknown负向 | agent协议/恢复，前滚 |
 | HM-06 | GAP04 supported | roster与实际本机binary smoke | agent/cloud/网站/安装，前滚 |
@@ -157,7 +161,7 @@
 
 **Lifecycle / Acceptance:** pending / 空
 
-**Description:** 冻结官方source与可安装release对应，给每项能力GO/HOLD；不安装Hermes、不读真实会话。
+**Description:** 冻结官方source与可安装release对应，给每项能力GO/HOLD；不安装Hermes、不读真实会话。 本卡同时核定系统版本支持的 model/effort/thinking 显示设置与具体 source 位置；不猜参数。审计不启动真实模型；真实数据 smoke 由后续实现/收口卡执行。
 
 **Current evidence:** `src/internal/ai/observed_agents/adapter.rs:26`、`preview.rs:31-65`、`capture/extraction.rs:426`、`src/internal/db/migration.rs:615-653`；官方hermes_state.py:123和hooks.md:457/471-472由HM-00补callsite证明。
 
@@ -167,9 +171,11 @@
 
 - [ ] 完整source/release/package映射或HOLD记录，当前未安装事实保留。
 - [ ] 逐callsite区分turn结束/真实session teardown/失败/中断/重置/子agent，核对identity和observer返回语义。
-- [ ] 逐callsite判定export的argv/JSON/只读性/无热库迁移/identity绑定语义GO-HOLD；HM-08负责沙箱/lease/2s机制，HM-06负责真实binary实测，不要求本审计证明尚未实现机制。
+- [ ] 逐 callsite 比较 export/session 文件/SQLite 实际字段，选一条含 thinking 的只读 source；给出 schema/session/一致性及所需 argv，HM-08 负责 lease/预算接线，HM-06 负责真实数据实测。
 - [ ] plugin发现/配置/consent/owner-only路径有精确source证据，observer注册不会更改tool/context/message。
 - [ ] source字段分ordinary/unknown opaque/unsupported并给合成fixture矩阵；缺证能力HOLD，后继不得凭名字实现。
+
+- [ ] 记录系统 Hermes 的模型/thinking 设置和启用方式；所选 source 必须能说明 thinking 字段是否存在，真实模型验证由 HM-06 完成。
 
 **Verification:**
 
@@ -194,7 +200,7 @@
 
 **Migration and rollback:** 撤回本卡文档/合成 fixture，不删除历史事实或用户数据。
 
-**Security and privacy / Performance budget:** 强制继承 [四 provider 执行契约](plan-20260904.md#capture-review-20261018) 的来源、脱敏、权限、预算与恢复边界；本卡 AC 收紧时取更严格值。
+**Security and privacy / Performance budget:** 继承 [数据获取基线 DATA-CAP-20261019](plan-20260904.md#thinking-data-baseline-20261019) 与已修订四 provider 契约。旧有未证明字段剥离、仅脱敏 worker、native 来源前置不再阻塞普通 thinking 保存；scope/consent、数据不损坏、资源预算与日志不回显继续适用。本卡未执行条款与新基线冲突时按新基线解释，不取旧隐私门的更严格值。
 
 **Estimated scope:** M（审计时间箱≤2人日，超时记录具名HOLD，不扩大为实现）
 
@@ -204,7 +210,7 @@
 
 **C/D coverage from:** HM-01（具体后继release承载文档渠道）；本audit/spike自身signed main/CI仍实际登记，不bump/tag/artifact。
 
-**Granularity:** `type=audit; axis=Hermes版本、source与观察协议审计; recovery=revert; complete=yes; self-contained=yes; AC=5; VER=2; landing=0; prod-files=0; scope=M; deps=DEP-HM-01; writeset=本计划链及DEP-CAP-WRITE逐文件串行; release=no-release; split-from=本轮G-09修订表; exception=N/A`
+**Granularity:** `type=audit; axis=Hermes版本、source与观察协议审计; recovery=revert; complete=yes; self-contained=yes; AC=6; VER=2; landing=0; prod-files=0; scope=M; deps=DEP-HM-01; writeset=本计划链及DEP-CAP-WRITE逐文件串行; release=no-release; split-from=本轮G-09修订表; exception=N/A`
 
 ### Task HM-02: 现有白名单的Hermes拒绝审计
 
@@ -246,7 +252,7 @@
 
 **Migration and rollback:** 保留已写 session、checkpoint、schema receipt 和旧格式读能力，停用新增入口后前滚修复；不得用 down/drop/重写 traces 消除用户事实。迁移卡还须执行本计划数据库角色合同。
 
-**Security and privacy / Performance budget:** 强制继承 [四 provider 执行契约](plan-20260904.md#capture-review-20261018) 的来源、脱敏、权限、预算与恢复边界；本卡 AC 收紧时取更严格值。
+**Security and privacy / Performance budget:** 继承 [数据获取基线 DATA-CAP-20261019](plan-20260904.md#thinking-data-baseline-20261019) 与已修订四 provider 契约。旧有未证明字段剥离、仅脱敏 worker、native 来源前置不再阻塞普通 thinking 保存；scope/consent、数据不损坏、资源预算与日志不回显继续适用。本卡未执行条款与新基线冲突时按新基线解释，不取旧隐私门的更严格值。
 
 **Estimated scope:** M
 
@@ -300,7 +306,7 @@
 
 **Migration and rollback:** 保留已写 session、checkpoint、schema receipt 和旧格式读能力，停用新增入口后前滚修复；不得用 down/drop/重写 traces 消除用户事实。迁移卡还须执行本计划数据库角色合同。
 
-**Security and privacy / Performance budget:** 强制继承 [四 provider 执行契约](plan-20260904.md#capture-review-20261018) 的来源、脱敏、权限、预算与恢复边界；本卡 AC 收紧时取更严格值。
+**Security and privacy / Performance budget:** 继承 [数据获取基线 DATA-CAP-20261019](plan-20260904.md#thinking-data-baseline-20261019) 与已修订四 provider 契约。旧有未证明字段剥离、仅脱敏 worker、native 来源前置不再阻塞普通 thinking 保存；scope/consent、数据不损坏、资源预算与日志不回显继续适用。本卡未执行条款与新基线冲突时按新基线解释，不取旧隐私门的更严格值。
 
 **Estimated scope:** M
 
@@ -320,7 +326,7 @@
 
 **Lifecycle / Acceptance:** pending / 空
 
-**Description:** 注册builtin/hermes.rs替换preview stub，只读取已证官方export，内部adapter不开放安装。
+**Description:** 注册 builtin/hermes.rs 替换 preview stub，读取 HM-00 选定且确含 thinking 的 export/session 文件或一致只读 SQLite source；内部 adapter 不开放安装。
 
 **Current evidence:** `src/internal/ai/observed_agents/adapter.rs:26`、`preview.rs:31-65`、`capture/extraction.rs:426`、`src/internal/db/migration.rs:615-653`；官方hermes_state.py:123和hooks.md:457/471-472由HM-00补callsite证明。
 
@@ -328,8 +334,8 @@
 
 **Acceptance criteria:**
 
-- [ ] 只接受HM-00 GO的格式与版本；无安全官方export则blocked，不尝试热db复制。
-- [ ] consent/root/no-follow/regular先于bytes，SQLite/db-only输入一律拒绝；export shape/identity/来源声明不合矩阵即拒绝。
+- [ ] 接受 HM-00 核定的 source shape/版本；官方 export 缺 thinking 时选文件或一致只读 SQLite，不因没有官方 exporter 停止全部获取。
+- [ ] consent/root/no-follow/regular 先于 bytes；SQLite 的数据库角色为外部 provider source，只读零 schema writer，不经过 Libra Repository/Global/System migration；用只读连接/事务或 backup API 保持含 WAL 的一致视图，禁止写主 DB/WAL/schema 或调用自动迁移构造器；必要 -shm 协调遵守 ADR-HM-03；shape/session 与矩阵一致。
 - [ ] profile/session/cwd当前repo/worktree匹配，gateway/remote/cross-user拒绝。
 - [ ] source/row/枚举预算受限，busy/oversize/漂移返回partial或拒绝，不显示原始SQL/body/path。
 
@@ -355,7 +361,7 @@
 
 **Migration and rollback:** 保留已写 session、checkpoint、schema receipt 和旧格式读能力，停用新增入口后前滚修复；不得用 down/drop/重写 traces 消除用户事实。迁移卡还须执行本计划数据库角色合同。
 
-**Security and privacy / Performance budget:** 强制继承 [四 provider 执行契约](plan-20260904.md#capture-review-20261018) 的来源、脱敏、权限、预算与恢复边界；本卡 AC 收紧时取更严格值。
+**Security and privacy / Performance budget:** 继承 [数据获取基线 DATA-CAP-20261019](plan-20260904.md#thinking-data-baseline-20261019) 与已修订四 provider 契约。旧有未证明字段剥离、仅脱敏 worker、native 来源前置不再阻塞普通 thinking 保存；scope/consent、数据不损坏、资源预算与日志不回显继续适用。本卡未执行条款与新基线冲突时按新基线解释，不取旧隐私门的更严格值。
 
 **Estimated scope:** M
 
@@ -384,7 +390,7 @@
 **Acceptance criteria:**
 
 - [ ] 消息按已证稳定ordinal/turn排序；镜像/重试/失败usage不重复，未知usage不是0。
-- [ ] prompt/assistant/tool先typed redaction；thinking在HM-07前显式unsupported/partial，unknown opaque剥离partial。
+- [ ] prompt/assistant/tool 沿用原规则；HM-04 不解释 thinking 但须保留 source 中的相关值交 HM-07，不能先剥离；未认证只降来源状态。
 - [ ] 同session/turn/branch重放与crash恢复不重复checkpoint，失败不false complete。
 - [ ] 跨profile/cwd/无证parent不关联，session/intent先提交再写对象/ref，导入不提升supported或launcher。
 
@@ -410,7 +416,7 @@
 
 **Migration and rollback:** 保留已写 session、checkpoint、schema receipt 和旧格式读能力，停用新增入口后前滚修复；不得用 down/drop/重写 traces 消除用户事实。迁移卡还须执行本计划数据库角色合同。
 
-**Security and privacy / Performance budget:** 强制继承 [四 provider 执行契约](plan-20260904.md#capture-review-20261018) 的来源、脱敏、权限、预算与恢复边界；本卡 AC 收紧时取更严格值。
+**Security and privacy / Performance budget:** 继承 [数据获取基线 DATA-CAP-20261019](plan-20260904.md#thinking-data-baseline-20261019) 与已修订四 provider 契约。旧有未证明字段剥离、仅脱敏 worker、native 来源前置不再阻塞普通 thinking 保存；scope/consent、数据不损坏、资源预算与日志不回显继续适用。本卡未执行条款与新基线冲突时按新基线解释，不取旧隐私门的更严格值。
 
 **Estimated scope:** M
 
@@ -439,9 +445,9 @@
 **Acceptance criteria:**
 
 - [ ] 注册Hermes readable tag/normalizer/worker封闭映射，旧provider wire不变，无opaque/decrypt能力。
-- [ ] snapshot只接已证export，先剥unknown opaque标partial再typed redaction，thinking不冒充assistant answer。
-- [ ] worker只接redacted bytes，预算/取消/坏frame安全，ingress/snapshot/coordinator/store保持单owner。
-- [ ] 同export的import/live-capability合成路径一致；无真实export GO则live HOLD，不开放supported。
+- [ ] snapshot 接 HM-03 已选 source，保留 thinking 与附带数据并标 Unproven/Partial，thinking 不冒充 assistant answer。
+- [ ] worker 的有界 Hermes frame 显式携带授权 thinking；预算/取消/坏 frame 安全，ingress/snapshot/coordinator/store 保持单 owner，普通 export 与源值一致。
+- [ ] 同 source 的 import/live 路径一致；缺真实 thinking 数据时获取门未通过，不用 export 命令成功或合成 fixture 替代真实数据。
 
 **Verification:**
 
@@ -465,7 +471,7 @@
 
 **Migration and rollback:** 保留已写 session、checkpoint、schema receipt 和旧格式读能力，停用新增入口后前滚修复；不得用 down/drop/重写 traces 消除用户事实。迁移卡还须执行本计划数据库角色合同。
 
-**Security and privacy / Performance budget:** 强制继承 [四 provider 执行契约](plan-20260904.md#capture-review-20261018) 的来源、脱敏、权限、预算与恢复边界；本卡 AC 收紧时取更严格值。
+**Security and privacy / Performance budget:** 继承 [数据获取基线 DATA-CAP-20261019](plan-20260904.md#thinking-data-baseline-20261019) 与已修订四 provider 契约。旧有未证明字段剥离、仅脱敏 worker、native 来源前置不再阻塞普通 thinking 保存；scope/consent、数据不损坏、资源预算与日志不回显继续适用。本卡未执行条款与新基线冲突时按新基线解释，不取旧隐私门的更严格值。
 
 **Estimated scope:** M
 
@@ -479,13 +485,13 @@
 
 **Granularity:** `type=implementation; axis=Hermes有界普通采集能力; recovery=forward-only; complete=yes; self-contained=yes; AC=4; VER=1; landing=3; prod-files=7; scope=M; deps=HM-04、DEP-CAP-BASE、DEP-CAP-RG; writeset=本计划链及DEP-CAP-WRITE逐文件串行; release=independent; split-from=本轮G-09修订表; exception=N/A`
 
-### Task HM-08: Hermes受信任且沙箱化的导出桥
+### Task HM-08: Hermes已选thinking来源的live读取桥
 
 **Task type:** implementation
 
 **Lifecycle / Acceptance:** pending / 空
 
-**Description:** 承接ADR-HM-03的真实执行边界；现有OpenCode专用导出桥不复用为Hermes授权。
+**Description:** 承接 ADR-HM-03 选定 source 的 live 读取与既有 snapshot/lease 接线；文件/SQLite 直接走 HM-03 reader，不另造 exporter，只有 exporter 分支使用已有 trust 机制。不借 OpenCode trust 冒充 Hermes 授权。
 
 **Current evidence:** `src/internal/ai/observed_agents/adapter.rs:26`、`preview.rs:31-65`、`capture/extraction.rs:426`、`src/internal/db/migration.rs:615-653`；官方hermes_state.py:123和hooks.md:457/471-472由HM-00补callsite证明。
 
@@ -493,19 +499,19 @@
 
 **Acceptance criteria:**
 
-- [ ] 显式Hermes exporter trust绑定闭合启动descriptor：canonical launcher、解释器/运行时、package/profile根与被测摘要；漂移拒绝，不借OpenCode信任。
-- [ ] Python启动环境按封闭allowlist重建，运行时加载覆盖不得继承。
-- [ ] 独立Hermes沙箱profile禁止网络和非scratch写入，仅允许已审package/profile数据根；不能放宽OpenCode profile。
-- [ ] 官方export只用HM-00核定的fixed argv与session，2s总deadline。
+- [ ] 记录所选文件/SQLite/export source 和当前 session；若执行系统 Hermes exporter，按现有机制取得该 executable trust，不要求额外解释器/package 闭包认证。
+- [ ] 只读 reader 不初始化/迁移 provider DB；exporter 分支使用 fixed argv、明确 cwd/PWD 和必要环境，不读取凭据文件作诊断。
+- [ ] 不要求建设专用 Hermes 沙箱才可获取 ordinary 数据；沿现有受信任本地用户边界读取当前会话，不放宽其它 provider profile。
+- [ ] source 读取或 exporter 采用 HM-00 核定的当前 session 和有界策略；live hook 2s 总 deadline，超时 partial 并可显式重试。
 - [ ] 通过既有LiveTranscriptExporter/lease owner运行，未持lease不启动。
 - [ ] 输出仅经授权source关联进入snapshot，stdout/stderr/log不泄露raw内容。
 - [ ] 公开trust/doctor的Hermes分支、Display、EN/zh/网站与compat同卡验证。
-- [ ] 真实live验收前只算机制source-qualified，受信任本地用户边界不等于native来源证明或same-UID攻击保证。
+- [ ] 真实 live 数据比对前只算机制 source-qualified；不承诺 native 来源或同 UID 防篡改，缺这些保证不删除已取得 thinking。
 
 **Verification:**
 
 - [ ] `source .env.test && cargo test --test command_test agent_rpc_trust_test::hermes_exporter_ -- --test-threads=1`（拟新增过滤名；须列出实际匹配并确认非零）
-- [ ] `source .env.test && cargo test --test agent_hook_crash_test hermes_export_bridge_ -- --test-threads=1`（拟新增过滤名；须列出实际匹配并确认非零）
+- [ ] `source .env.test && cargo test --test agent_hook_crash_test hermes_source_bridge_ -- --test-threads=1`（拟新增过滤名；须列出实际匹配并确认非零）
 
 **Full-suite trigger:** T-1/T-4（共享采集、存储、CLI 或测试契约）；执行四 provider 契约的完整双环境 nextest 门
 
@@ -515,7 +521,7 @@
 
 **Deliverables:** 下列路径中的本卡单一行为、回归测试及同卡文档；同名拟新增测试在实现时落地。
 
-**Implementation write set:** `src/internal/ai/observed_agents/hermes_export.rs`、`src/internal/ai/observed_agents/trust.rs`、`src/internal/ai/observed_agents/mod.rs`、`src/internal/ai/observed_agents/live_capture.rs`、`src/internal/ai/sandbox/hermes_export.rs`、`src/internal/ai/sandbox/mod.rs`、`src/command/agent/rpc.rs`、`src/command/agent/doctor.rs`、`tests/command/agent_rpc_trust_test.rs`、`tests/agent_hook_crash_test.rs`、`docs/commands/agent.md`、`docs/commands/zh-CN/agent.md`、`docs/development/commands/agent.md`、`docs/development/tracing/agent.md`、`COMPATIBILITY.md`、`/Volumes/Sea/libra-backend/apps/tanstack-app/content/docs/commands/agent.en.md`、`tests/INDEX.md`、`Cargo.toml`、`tests/compat/agent_docs_contract.rs`；本计划与 `docs/development/plan/plan-status.md` 仅更新本卡状态。
+**Implementation write set:** `src/internal/ai/observed_agents/hermes_export.rs`、`src/internal/ai/observed_agents/trust.rs`、`src/internal/ai/observed_agents/mod.rs`、`src/internal/ai/observed_agents/live_capture.rs`、`src/command/agent/rpc.rs`、`src/command/agent/doctor.rs`、`tests/command/agent_rpc_trust_test.rs`、`tests/agent_hook_crash_test.rs`、`docs/commands/agent.md`、`docs/commands/zh-CN/agent.md`、`docs/development/commands/agent.md`、`docs/development/tracing/agent.md`、`COMPATIBILITY.md`、`/Volumes/Sea/libra-backend/apps/tanstack-app/content/docs/commands/agent.en.md`、`tests/INDEX.md`、`Cargo.toml`、`tests/compat/agent_docs_contract.rs`；本计划与 `docs/development/plan/plan-status.md` 仅更新本卡状态。
 
 **Release write set:** Inherited：`compat_version_surface_sync` 权威集合 + 工具链生成的 `Cargo.lock` + release artifacts
 
@@ -525,7 +531,7 @@
 
 **Migration and rollback:** 保留已写 session、checkpoint、schema receipt 和旧格式读能力，停用新增入口后前滚修复；不得用 down/drop/重写 traces 消除用户事实。迁移卡还须执行本计划数据库角色合同。
 
-**Security and privacy / Performance budget:** 强制继承 [四 provider 执行契约](plan-20260904.md#capture-review-20261018) 的来源、脱敏、权限、预算与恢复边界；本卡 AC 收紧时取更严格值。
+**Security and privacy / Performance budget:** 继承 [数据获取基线 DATA-CAP-20261019](plan-20260904.md#thinking-data-baseline-20261019) 与已修订四 provider 契约。旧有未证明字段剥离、仅脱敏 worker、native 来源前置不再阻塞普通 thinking 保存；scope/consent、数据不损坏、资源预算与日志不回显继续适用。本卡未执行条款与新基线冲突时按新基线解释，不取旧隐私门的更严格值。
 
 **Estimated scope:** M
 
@@ -537,7 +543,7 @@
 
 **D 组:** `plan-20260904.md` D-CAP-STD；workflow/event/ref/source SHA与全部实际job逐卡取证，未完remote-pending。
 
-**Granularity:** `type=implementation; axis=Hermes受信任且沙箱化的导出桥; recovery=forward-only; complete=yes; self-contained=yes; AC=8; VER=2; landing=3; prod-files=8; scope=M; deps=HM-07、DEP-HM-LIVE; writeset=本计划链及DEP-CAP-WRITE逐文件串行; release=independent; split-from=本轮G-09修订表; exception=N/A`
+**Granularity:** `type=implementation; axis=Hermes已选thinking来源的live读取桥; recovery=forward-only; complete=yes; self-contained=yes; AC=8; VER=2; landing=2; prod-files=6; scope=M; deps=HM-07、DEP-HM-LIVE; writeset=本计划链及DEP-CAP-WRITE逐文件串行; release=independent; split-from=本轮G-09修订表; exception=N/A`
 
 ### Task HM-09: Hermes本地CLI与scope准入过滤
 
@@ -556,7 +562,7 @@
 - [ ] 仅HM-00已证的本地CLI platform可进入。
 - [ ] 缺cwd拒绝。
 - [ ] cwd必须等于现有CAP已验证的仓库/worktree事实。
-- [ ] profile必须等于HM-08受信descriptor所绑定profile，不从全局默认或event猜根。
+- [ ] profile 必须等于 HM-08 所选 source 已记录的当前 session/profile；不从全局默认或 event 猜根。
 - [ ] 拒绝路径不建立capture row。
 - [ ] producer与receiver的准入策略由同一fixture矩阵生成并一致。
 
@@ -582,7 +588,7 @@
 
 **Migration and rollback:** 保留已写 session、checkpoint、schema receipt 和旧格式读能力，停用新增入口后前滚修复；不得用 down/drop/重写 traces 消除用户事实。迁移卡还须执行本计划数据库角色合同。
 
-**Security and privacy / Performance budget:** 强制继承 [四 provider 执行契约](plan-20260904.md#capture-review-20261018) 的来源、脱敏、权限、预算与恢复边界；本卡 AC 收紧时取更严格值。
+**Security and privacy / Performance budget:** 继承 [数据获取基线 DATA-CAP-20261019](plan-20260904.md#thinking-data-baseline-20261019) 与已修订四 provider 契约。旧有未证明字段剥离、仅脱敏 worker、native 来源前置不再阻塞普通 thinking 保存；scope/consent、数据不损坏、资源预算与日志不回显继续适用。本卡未执行条款与新基线冲突时按新基线解释，不取旧隐私门的更严格值。
 
 **Estimated scope:** M
 
@@ -641,7 +647,7 @@
 
 **Migration and rollback:** 保留已写 session、checkpoint、schema receipt 和旧格式读能力，停用新增入口后前滚修复；不得用 down/drop/重写 traces 消除用户事实。迁移卡还须执行本计划数据库角色合同。
 
-**Security and privacy / Performance budget:** 强制继承 [四 provider 执行契约](plan-20260904.md#capture-review-20261018) 的来源、脱敏、权限、预算与恢复边界；本卡 AC 收紧时取更严格值。
+**Security and privacy / Performance budget:** 继承 [数据获取基线 DATA-CAP-20261019](plan-20260904.md#thinking-data-baseline-20261019) 与已修订四 provider 契约。旧有未证明字段剥离、仅脱敏 worker、native 来源前置不再阻塞普通 thinking 保存；scope/consent、数据不损坏、资源预算与日志不回显继续适用。本卡未执行条款与新基线冲突时按新基线解释，不取旧隐私门的更严格值。
 
 **Estimated scope:** M
 
@@ -671,7 +677,7 @@
 
 - [ ] install/update/remove仅marker+hash确认为Libra-owned asset，unmanaged/漂移文件不覆盖。
 - [ ] 缺binary/config时bare enable安全skip；unsupported时explicit enable无副作用。
-- [ ] 隔离本机真实普通session通过install/capture/checkpoint/doctor/disable，失败/中断恢复分别验证。
+- [ ] 隔离本机系统 Hermes 实现 TUI 贪吃蛇，验证 install/capture/自动 checkpoint/普通 export 与 source 非空 thinking 逐值一致，再 doctor/disable；失败/中断恢复分别验证。
 - [ ] supported/capability/roster/help与docs同批，review/investigate launchable保持false。
 - [ ] cloud-local-only、supported pin、覆盖缺口与恢复写入agent/cloud文档及网站；CI只用fake。
 
@@ -697,7 +703,7 @@
 
 **Migration and rollback:** 保留已写 session、checkpoint、schema receipt 和旧格式读能力，停用新增入口后前滚修复；不得用 down/drop/重写 traces 消除用户事实。迁移卡还须执行本计划数据库角色合同。
 
-**Security and privacy / Performance budget:** 强制继承 [四 provider 执行契约](plan-20260904.md#capture-review-20261018) 的来源、脱敏、权限、预算与恢复边界；本卡 AC 收紧时取更严格值。
+**Security and privacy / Performance budget:** 继承 [数据获取基线 DATA-CAP-20261019](plan-20260904.md#thinking-data-baseline-20261019) 与已修订四 provider 契约。旧有未证明字段剥离、仅脱敏 worker、native 来源前置不再阻塞普通 thinking 保存；scope/consent、数据不损坏、资源预算与日志不回显继续适用。本卡未执行条款与新基线冲突时按新基线解释，不取旧隐私门的更严格值。
 
 **Estimated scope:** M
 
@@ -729,10 +735,11 @@
 
 ## 非目标与延后项
 
-provider decryptor、寻找密钥、跨 provider 仿造 native issuer、来源不明的 opaque bytes 准入均不在本计划。缺来源的能力保留 HOLD 与 partial，不能据此撤销来源门或宣称完成。
+provider decryptor、寻找密钥、跨 provider 仿造 native issuer、把未证明字段认证为 native artifact 不在本轮。授权 assistant reasoning 中的附带数据可作为 Unproven 普通内容保留；native 认证另行规划，不阻塞数据获取。缺上游数据必须报告 unavailable，不能以空壳或仅统计冒充获取成功。
 
 ## 完成判据
 
+- [ ] 按 DATA-CAP-20261019 完成真实本机会话 → 自动 checkpoint → 普通导出逐字段比对；thinking 数据非空且未被隐私过滤丢弃。可读正文与仅附带 opaque 数据分别记账；空正文/空数据不算数据获取通过，Unproven/Partial 不单独阻塞保存。
 - [ ] HM-00, HM-02, HM-01, HM-03, HM-04, HM-07, HM-08, HM-09, HM-05, HM-06 均按本修订逐卡实际验收，Lifecycle=done / Acceptance=complete；本次计划审查不增加实现完成数。
 - [ ] 当前最终源码执行 `cargo +nightly fmt --all --check`、`cargo clippy --all-targets --all-features -- -D warnings`、`source .env.test && source .env.live-test && cargo nextest run --all --no-fail-fast --retries 2`；前滚修复发现的全部失败后重跑至绿。
 - [ ] 同一最终实现经 Claude Code PASS，逐卡签名/DCO main 交付、四平台 release、安装、网站及安全 CI 的实际 C/D 已记录；Source/本机合格与远端完成分开。
@@ -743,6 +750,16 @@ provider decryptor、寻找密钥、跨 provider 仿造 native issuer、来源�
 2026-10-18 02:00:57 UTC，本轮根 Agent 依据 OpenCode ordinary 最终范围、当前实现和一手 source 自审；已修订上游 pin、shared capture owner、来源门、执行顺序、可恢复性与文档交付。本轮对当前规范正文自审 `VERDICT: PASS`（规划可执行性）；内部DAG/AC-VER/原始已完成块保留已核验。来源GO、真实provider smoke、逐卡实现及C/D仍须后续实际验收；Claude本轮结论另列，不以本条代替。
 
 ## Claude review log
+
+### DATA-CAP-20261019 本次复审（2026-10-18 16:33:03 UTC）
+
+Claude Code 只读单审 session `c03a81c0-c8e3-43c7-b633-091279513515`，R1 实际 `VERDICT: FAIL`，raw SHA256 `e8b79091373ac5b54563205edfb050227cb5f58a8cf5b7a305e3de94f48ad9df`，report SHA256 `869943e0822aed7174bd7e2cc0c46db7f9408303b5c7f6bbbaec6e40b99b958f`。B1 旧 CC-06 隔离描述、B2 CX/CC 缺真实 smoke 卡 owner、B3 PI-03 前向依赖 carrier、B4 与 OpenCode 凭据扫描矛盾均已在计划正文修订；模型设置 AC、Pi pending、Hermes reader 测试/SHM 与 mirror 说明一并补齐。R1 原结论保持 FAIL；R2 最终结论和实际验证见下。此前 R4/R5 仅属历史修订。
+
+**本次修订最终复审与实际验证（2026-10-18 16:39:27 UTC）：** Claude Code R2 / `claude-opus-5-5` 实际 `VERDICT: PASS`，session `b56df99a-7fe2-45c7-9c6c-1fc747ad7dcf`，raw SHA256 `9c52c3e87051bb86acaca44d962a2b6c2c988932c00bec5b34259dfe16bb92b8`，report SHA256 `cb4d43a2db5ab560010bfb6a1c96d53672c641b633c9c0466dd6139c0f4591a3`；被审输入 SHA256 `fb5298e725306283489a20df83a883c07150481a4397d77a0c8b15ff6f99be06`。R2 复用 R1 已核的未变范围，只读复核修订，明确四个 blocker 全闭；root 已复核并采纳。三项非阻断措辞已窄补：CX-06 复用 CX-15 classifier、PI-03 public 文档仅格式/provenance/未支持说明、原 JSON 值条款交叉引用凭据扫描例外；不改任务范围/依赖或实现行为。R1 FAIL 原据保留，本条不把它覆盖为 PASS。
+
+本次 `cargo +nightly fmt --all --check` exit0；`cargo clippy --locked --all-targets --all-features -- -D warnings`（独立 target-dir）exit0，最终一轮 12.72s，仅依赖 `proc-macro-error2` 既有 future-incompat note。`cargo test --locked --test compat_agent_architecture_guard --test compat_agent_docs_contract --test session_capture_docs_contract`（同 target-dir）分别 **64/64、33/33、7/7，共 104/104**，0 fail/ignored，exit0。当前 59 张卡的 pending、DAG 无环、逐卡 AC/VER 与粒度表计数、链接锚点均核验通过；两 Rust 测试文件精确等于 HEAD 经 nightly rustfmt 的输出，未改断言/逻辑。源码只作排版、计划/索引只作本次授权修订，`Full-suite trigger: none`；未跑本次 Rust 全量、Linux、四 provider 新模型或 release/部署验收，不以旧全量替代。本机 OpenCode 的 13段/4617 bytes/两 checkpoint 与默认新会话131 bytes 均已与原收据重新核对。系统配置仅本机生效且未纳入提交；本轮无版本发布/网站变更。
+
+签推前已整合 main `7819590134c1cf158d8ce6455965c1be6114d42b` 的 Grok 文档更新；9 个自有 delta 在整合前后摘要相同，incoming Grok 计划原字节保留，8 个原有 stash 及无关 untracked 保留。末端提交自身 CI 仍按 v2.14 在下一次计划状态例行同步补记实际 SHA/run/conclusion/UTC；此处不预填推送后结果。
 
 实际Claude Code 2.1.300 / claude-opus-5-5；同一只读session `095e26d7-0019-4a37-9c97-527341b76e98`。仅Read/Glob/Grep，无文件修改/执行/委派/真实home读取。R1/R2/R3原始FAIL保留，绝不由后续PASS倒改。
 
@@ -771,6 +788,10 @@ R5输入manifest SHA256 `1fdd95bebb3fea118db887ed81c9c85f3742ff4fb8e39fd4b839371
 最终窄补后双env架构64/64＋文档33/33再次实际PASS（97/97，exit0，3.30s），raw SHA256 `6af0a8b4fa48b778ced0eb363fd65c8d1a8752efbd44c9a64ce4099b687187ea`。既有QA raw SHA256：strict clippy `9e45f0588de5e23828fb929df622c6146e99415aabafebbde927e33d9d0b9420`；完整nextest `f848cc543bddd50af116face20b03fb6840cda1e43a4ef49220b31cc7751634a`。本次只修改计划/索引文档，没有修改Rust/fixture/test源码；完整默认套件的LEAK/skip观察如上保留。
 
 ## 修订历史
+
+| UTC 时间 | 本次规范性调整 | 状态 |
+|---|---|---|
+| 2026-10-18 16:23:55 UTC | 用户要求以 OpenCode 获取 thinking 数据为底线；修订 ordinary 保留、未证明字段、legacy、source 路径和真实数据验收；native 认证退出本轮成功前置 | 仅规划；原卡号、依赖顺序与 pending 数保留，未取得四 provider 新模型实测 |
 
 | 时间 | 触发 | 拆分 | 协调范围 |
 |---|---|---|---|

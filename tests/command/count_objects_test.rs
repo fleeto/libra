@@ -337,3 +337,113 @@ fn count_objects_alternates_matrix() {
     // Local pack fields stay local: the alternate has no packs.
     assert_eq!(count_verbose_field(&output, "in-pack"), 0);
 }
+
+#[test]
+fn count_objects_alternate_json_keeps_raw_space_path() {
+    let repo = committed_repo();
+    let root = tempdir().expect("alternate fixture root");
+    let alternate = root.path().join("alternate repo");
+    fs::create_dir_all(&alternate).expect("alternate repo dir");
+    init_repo_via_cli(&alternate);
+    let alternate_objects = alternate
+        .join(".libra/objects")
+        .canonicalize()
+        .expect("alternate objects");
+    let info = repo.path().join(".libra/objects/info");
+    fs::create_dir_all(&info).expect("info dir");
+    fs::write(
+        info.join("alternates"),
+        format!("{}\n", alternate_objects.display()),
+    )
+    .expect("alternates");
+    let before = object_files(repo.path());
+    let out = run_libra_command(&["--json", "count-objects", "-v"], repo.path());
+    assert_cli_success(&out, "raw alternate JSON");
+    let body = parse_json_stdout(&out);
+    assert_eq!(
+        body["data"]["alternates"],
+        serde_json::json!([alternate_objects.to_str().expect("UTF-8 fixture")])
+    );
+    #[cfg(unix)]
+    {
+        let text = count_output(repo.path(), &["-v"]);
+        assert!(
+            text.lines()
+                .any(|line| line == format!("alternate: {}", alternate_objects.display())),
+            "Git leaves ordinary spaces unquoted: {text}"
+        );
+    }
+    assert_eq!(
+        object_files(repo.path()),
+        before,
+        "census must remain read-only"
+    );
+}
+
+#[test]
+fn count_objects_garbage_truncation_starts_after_one_hundred() {
+    let repo = committed_repo();
+    let pack = repo.path().join(".libra/objects/pack");
+    fs::create_dir_all(&pack).expect("pack fixture");
+    for n in 0..100 {
+        fs::write(pack.join(format!("garbage-{n}")), b"x").expect("garbage fixture");
+    }
+    let first = run_libra_command(&["--json", "count-objects", "-v"], repo.path());
+    assert_cli_success(&first, "exactly one hundred details");
+    let first = parse_json_stdout(&first);
+    assert_eq!(first["data"]["garbage"], 100);
+    assert_eq!(
+        first["data"]["garbage_entries"].as_array().unwrap().len(),
+        100
+    );
+    assert_eq!(first["data"]["garbage_entries_truncated"], false);
+    fs::write(pack.join("garbage-100"), b"x").expect("one more fixture");
+    let second = run_libra_command(&["--json", "count-objects", "-v"], repo.path());
+    assert_cli_success(&second, "one hundred and one details");
+    let second = parse_json_stdout(&second);
+    assert_eq!(second["data"]["garbage"], 101);
+    assert_eq!(
+        second["data"]["garbage_entries"].as_array().unwrap().len(),
+        100
+    );
+    assert_eq!(second["data"]["garbage_entries_truncated"], true);
+}
+
+#[test]
+fn count_objects_skips_corrupt_index_pack_totals() {
+    let repo = committed_repo();
+    let pack = repo.path().join(".libra/objects/pack");
+    fs::create_dir_all(&pack).expect("pack fixture");
+    fs::write(pack.join("pack-corrupt.pack"), b"not a pack").expect("pack fixture");
+    fs::write(pack.join("pack-corrupt.idx"), b"not an index").expect("index fixture");
+    let out = run_libra_command(&["--json", "count-objects", "-v"], repo.path());
+    assert_cli_success(&out, "bad index is skipped as documented");
+    let body = parse_json_stdout(&out);
+    assert_eq!(body["data"]["packs"], 0);
+    assert_eq!(body["data"]["in_pack"], 0);
+    assert_eq!(body["data"]["size_pack_bytes"], 0);
+}
+
+#[test]
+fn count_objects_orphan_pack_sidecar_keeps_git_reason() {
+    let repo = committed_repo();
+    let pack = repo.path().join(".libra/objects/pack");
+    fs::create_dir_all(&pack).expect("pack fixture");
+    fs::write(pack.join("pack-orphan.keep"), b"fixture").expect("orphan sidecar");
+    let out = run_libra_command(&["--json", "count-objects", "-v"], repo.path());
+    assert_cli_success(&out, "orphan sidecar JSON");
+    let body = parse_json_stdout(&out);
+    assert_eq!(body["data"]["garbage"], 1);
+    assert_eq!(
+        body["data"]["garbage_entries"][0]["reason"],
+        "no corresponding .idx or .pack"
+    );
+    let human = run_libra_command(&["count-objects", "-v"], repo.path());
+    assert_cli_success(&human, "orphan sidecar warning");
+    let stderr = String::from_utf8_lossy(&human.stderr);
+    assert!(
+        stderr.contains("warning: no corresponding .idx or .pack:")
+            && stderr.contains("pack-orphan.keep"),
+        "Git-compatible orphan warning: {stderr}"
+    );
+}

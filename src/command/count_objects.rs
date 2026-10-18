@@ -165,11 +165,6 @@ pub async fn execute_safe(args: CountObjectsArgs, output: &OutputConfig) -> CliR
     if args.verbose {
         scan_pack_dir(&objects_dir.join("pack"), true, &mut census)?;
         for alternate in &alternates {
-            census
-                .alternates
-                .as_mut()
-                .expect("verbose census has alternates")
-                .push(quote_c_style(&alternate.display().to_string()));
             scan_pack_dir(&alternate.join("pack"), false, &mut census)?;
         }
     }
@@ -181,11 +176,14 @@ pub async fn execute_safe(args: CountObjectsArgs, output: &OutputConfig) -> CliR
     if let Some(bytes) = census.size_garbage_bytes {
         census.size_garbage_kib = Some(bytes / 1024);
     }
-    if let Some(entries) = &census.garbage_entries {
-        census.garbage_entries_truncated = Some(entries.len() >= GARBAGE_ENTRY_LIMIT);
+    if let Some(count) = census.garbage {
+        census.garbage_entries_truncated = Some(count > GARBAGE_ENTRY_LIMIT as u64);
     }
 
     if output.is_json() {
+        if args.verbose {
+            census.alternates = Some(raw_alternate_paths(&alternates)?);
+        }
         return emit_json_data("count-objects", &census, output);
     }
 
@@ -195,11 +193,22 @@ pub async fn execute_safe(args: CountObjectsArgs, output: &OutputConfig) -> CliR
         }
     }
 
-    render_human(&census, args.human_readable);
+    render_human(&census, args.human_readable, &alternates);
     Ok(())
 }
 
-fn render_human(census: &Census, human_readable: bool) {
+fn raw_alternate_paths(paths: &[PathBuf]) -> CliResult<Vec<String>> {
+    paths
+        .iter()
+        .map(|path| {
+            path.to_str().map(str::to_owned).ok_or_else(|| {
+                CliError::io("alternate path is not valid UTF-8; use text output to inspect its escaped bytes")
+            })
+        })
+        .collect()
+}
+
+fn render_human(census: &Census, human_readable: bool, alternates: &[PathBuf]) {
     if census.verbose {
         println!("count: {}", census.count);
         println!("size: {}", render_size(census.size_bytes, human_readable));
@@ -215,8 +224,8 @@ fn render_human(census: &Census, human_readable: bool) {
             "size-garbage: {}",
             render_size(census.size_garbage_bytes.unwrap_or(0), human_readable)
         );
-        for alternate in census.alternates.as_deref().unwrap_or(&[]) {
-            println!("alternate: {alternate}");
+        for alternate in alternates {
+            println!("alternate: {}", quote_c_style(alternate));
         }
     } else if human_readable {
         println!(
@@ -237,23 +246,29 @@ fn render_size(bytes: u64, human_readable: bool) -> String {
     }
 }
 
-/// Byte size as Git's `strbuf_humanise_bytes` renders it (exact thresholds and
-/// hundredths divisors).
+/// Match Git's strict unit thresholds and integer hundredths calculation.
+/// Reference: Git 1630431f32, strbuf.c humanise_bytes and quote.c cq_lookup.
 fn humanise_bytes(bytes: u64) -> String {
     if bytes > 1 << 30 {
         format!(
             "{}.{:02} GiB",
             bytes >> 30,
-            (bytes & ((1 << 30) - 1)) / 10_737_418
+            (bytes & ((1 << 30) - 1)) / 10_737_419
         )
     } else if bytes > 1 << 20 {
+        let rounded = bytes + 5_243;
         format!(
             "{}.{:02} MiB",
-            bytes >> 20,
-            (bytes & ((1 << 20) - 1)) / 10_486
+            rounded >> 20,
+            ((rounded & ((1 << 20) - 1)) * 100) >> 20
         )
     } else if bytes > 1 << 10 {
-        format!("{}.{:02} KiB", bytes >> 10, (bytes & ((1 << 10) - 1)) / 10)
+        let rounded = bytes + 5;
+        format!(
+            "{}.{:02} KiB",
+            rounded >> 10,
+            ((rounded & ((1 << 10) - 1)) * 100) >> 10
+        )
     } else if bytes == 1 {
         "1 byte".to_string()
     } else {
@@ -261,30 +276,30 @@ fn humanise_bytes(bytes: u64) -> String {
     }
 }
 
-/// Git `quote_c_style`: quote only when the path contains specials, whitespace,
-/// controls, or non-ASCII; escape those bytes octally.
-fn quote_c_style(path: &str) -> String {
-    let needs_quote = path.chars().any(|c| {
-        c == '"' || c == '\\' || c.is_ascii_control() || c.is_whitespace() || !c.is_ascii()
-    });
-    if !needs_quote {
-        return path.to_string();
+/// Git's default C-style path escaping leaves ordinary spaces unquoted.
+/// Work from native bytes so Unix names never pass through a lossy display.
+fn quote_c_style(path: impl AsRef<std::ffi::OsStr>) -> String {
+    let bytes = path.as_ref().as_encoded_bytes();
+    if !bytes
+        .iter()
+        .any(|&b| b < 0x20 || b == 0x7f || b == b'"' || b == b'\\' || b >= 0x80)
+    {
+        return bytes.iter().map(|&b| char::from(b)).collect();
     }
     let mut out = String::from("\"");
-    for c in path.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\t' => out.push_str("\\t"),
-            '\r' => out.push_str("\\r"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\{:03o}", c as u32)),
-            c if !c.is_ascii() => {
-                for byte in c.to_string().as_bytes() {
-                    out.push_str(&format!("\\{byte:03o}"));
-                }
-            }
-            c => out.push(c),
+    for &byte in bytes {
+        match byte {
+            b'"' => out.push_str("\\\""),
+            b'\\' => out.push_str("\\\\"),
+            b'\x07' => out.push_str("\\a"),
+            b'\x08' => out.push_str("\\b"),
+            b'\t' => out.push_str("\\t"),
+            b'\n' => out.push_str("\\n"),
+            b'\x0b' => out.push_str("\\v"),
+            b'\x0c' => out.push_str("\\f"),
+            b'\r' => out.push_str("\\r"),
+            b if b < 0x20 || b == 0x7f || b >= 0x80 => out.push_str(&format!("\\{b:03o}")),
+            b => out.push(char::from(b)),
         }
     }
     out.push('"');
@@ -431,11 +446,11 @@ fn scan_pack_dir(pack_dir: &Path, local: bool, census: &mut Census) -> CliResult
         match (has_pack, has_idx) {
             (true, true) => {
                 if local {
-                    census.packs = Some(census.packs.unwrap_or(0) + 1);
                     let idx = &files["idx"];
                     if let Ok(count) =
                         crate::utils::storage::local::LocalStorage::pack_index_object_count(idx)
                     {
+                        census.packs = Some(census.packs.unwrap_or(0) + 1);
                         census.in_pack = Some(census.in_pack.unwrap_or(0) + count);
                         let pack_len = fs::metadata(&files["pack"]).map(|m| m.len()).unwrap_or(0);
                         let idx_len = fs::metadata(idx).map(|m| m.len()).unwrap_or(0);
@@ -476,13 +491,60 @@ mod tests {
         assert_eq!(humanise_bytes(1025), "1.00 KiB");
         assert_eq!(humanise_bytes(1048577), "1.00 MiB");
         assert_eq!(humanise_bytes(1073741825), "1.00 GiB");
-        assert_eq!(humanise_bytes(1536), "1.51 KiB");
+        assert_eq!(humanise_bytes(1536), "1.50 KiB");
     }
 
     #[test]
     fn quote_c_style_quotes_specials_and_plain_paths() {
         assert_eq!(quote_c_style("/tmp/plain"), "/tmp/plain");
-        assert_eq!(quote_c_style("/tmp/a b"), "\"/tmp/a b\"");
+        assert_eq!(quote_c_style("/tmp/a b"), "/tmp/a b");
         assert_eq!(quote_c_style("/tmp/a\"b"), "\"/tmp/a\\\"b\"");
+    }
+
+    #[test]
+    fn humanise_regressions_match_git_rounding() {
+        for (bytes, expected) in [
+            (1536, "1.50 KiB"),
+            (2047, "2.00 KiB"),
+            ((1 << 20) - 1, "1024.00 KiB"),
+            (1 << 20, "1024.00 KiB"),
+            ((1 << 30) - 1, "1024.00 MiB"),
+            (1 << 30, "1024.00 MiB"),
+            ((2 << 30) - 1, "1.99 GiB"),
+        ] {
+            assert_eq!(
+                humanise_bytes(bytes),
+                expected,
+                "Git byte-size input {bytes}"
+            );
+        }
+    }
+
+    #[test]
+    fn humanise_large_unsigned_input_is_overflow_safe() {
+        assert_eq!(humanise_bytes(u64::MAX), "17179869183.99 GiB");
+    }
+
+    #[test]
+    fn quote_c_style_uses_git_control_escapes() {
+        assert_eq!(
+            quote_c_style("/tmp/\x07\x08\t\n\x0b\x0c\r\x1b\x7f"),
+            r#""/tmp/\a\b\t\n\v\f\r\033\177""#
+        );
+        assert_eq!(quote_c_style("/tmp/é"), r#""/tmp/\303\251""#);
+        assert_eq!(quote_c_style("/tmp/a\\b"), r#""/tmp/a\\b""#);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn alternate_non_utf8_path_is_lossless_in_text_and_rejected_in_json() {
+        use std::{ffi::OsString, os::unix::ffi::OsStringExt, path::PathBuf};
+
+        let path = PathBuf::from(OsString::from_vec(vec![b'/', 0xff]));
+        assert_eq!(quote_c_style(&path), r#""/\377""#);
+        let error = super::raw_alternate_paths(&[path]).expect_err("no lossy JSON path");
+        assert!(error.to_string().contains(
+            "alternate path is not valid UTF-8; use text output to inspect its escaped bytes"
+        ));
     }
 }

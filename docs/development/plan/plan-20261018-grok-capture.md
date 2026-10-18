@@ -110,7 +110,7 @@
 
 - **Status:** Accepted（用户 2026-10-18 决定）
 - **Context:** 四 provider 契约第 2 条要求未证明字段不进入 transcript。plan-20260902 的 USER-OG-THINKING-RETAIN-20261018 已把普通副本改为保留助手 Thinking 和未证明字段，同时保持 `Unproven` / `Partial`，且不归档 native。用户要求本计划采用后者。
-- **Decision:** 普通 checkpoint transcript 保留：每条 thought chunk 的字符串 `content.text`；reasoning 行的字符串 `id`、`status`、`summary` 里 `type=summary_text` 的字符串 `text`，以及这份密文。Grok 把密文放在 reasoning 行的 `encrypted_content`。它按 retain 节对 `reasoningEncryptedContent` 的保留规则进入 transcript，不按 OpenAI 导出键处理。非字符串丢弃并标 partial。provider metadata 不复制。来源保持 `Unproven`，快照保持 `Partial`。不制造 native artifact、Complete coverage 或 ACK。metadata、日志、coverage digest、doctor JSON、类型化覆盖、Debug、safe projection 对上述明文零命中。普通导出仍删除键名 `encrypted_content`、`metadata.openai.reasoningEncryptedContent` 和 `metadata.anthropic.signature`，与 retain 节第 182 行的导出规则相同；这个删除只作用于导出字节，不从 checkpoint transcript 里拿走 Grok 的密文。保留文本仍做密钥扫描。已经落盘的 checkpoint 不因新代码回写。
+- **Decision:** 普通 checkpoint transcript 保留：每条 thought chunk 的字符串 `content.text`；reasoning 行的字符串 `id`、`status`、`summary` 里 `type=summary_text` 的字符串 `text`，以及这份密文。Grok 把密文放在 reasoning 行的 `encrypted_content`。它按 retain 节对 `reasoningEncryptedContent` 的保留规则进入 transcript，不按 OpenAI 导出键处理。非字符串丢弃并标 partial。provider metadata 不复制。来源保持 `Unproven`，快照保持 `Partial`。不制造 native artifact、Complete coverage 或 ACK。metadata、日志、coverage digest、doctor JSON、类型化覆盖、Debug、safe projection 对上述明文零命中。普通导出仍删除键名 `encrypted_content`、`metadata.openai.reasoningEncryptedContent` 和 `metadata.anthropic.signature`，与 retain 节第 182 行的导出规则相同；这个删除只作用于导出字节，不从 checkpoint transcript 里拿走 Grok 的密文。保留文本仍做密钥扫描。已经落盘的 checkpoint 不因新代码回写。Grok 源适配器采用 provider 解码后的 UTF-8 字符串，不保留 JSON 转义的词面拼写；转义与非 ASCII 用独立向量锁住。
 - **Alternatives considered:** 只保留 thought 流、把密文放在默认不可读的 sidecar。拒绝，因为用户要求的隐私降级是把未证明字段写入普通 transcript，而不是再发明一套归档。
 - **Consequences:** 本计划偏离四 provider 契约第 2 条的「不进入 transcript」一句。偏离只覆盖 Grok 普通 transcript 的这些具名字段。不放宽路径监狱、不解密、不从未知 blob 构造 `OpaqueEncryptedBytes`、不提高字节上限。
 - **Revisit when:** 用户恢复「未证明字段不得进入 transcript」，或 Grok 提供可验证的来源证明并另立 Source A 计划。
@@ -149,7 +149,7 @@
 1. **ER-01：** 开工先跑 `libra status --short --branch`。分支是 `main`。目标文件已有别人的改动就停。
 2. **ER-02：** 先刷新本卡锚点、测试名和 Grok pin，再写代码。
 3. **ER-03：** 开工前核对审计表与该卡 `Granularity`。范围变大就先改计划。
-4. **ER-04：** A 组是该卡 Verification 里的 focused 命令。B 组按 Task type。C 组由会发版的卡执行，顺序是：版本面 parity、`patch + 1`、工具链刷新 `Cargo.lock`、fmt、clippy、按 ER-13 的测试、`cargo build --release`、安装、精确 `libra add`、`libra commit -s`、推送 feature branch、`gh pr create`、同一 head SHA 上 `base.yml` 与 CodeQL 全绿、`gh pr merge --squash`、在 merge SHA 上 `gh release create v<version>` 从而触发 `release.yml`。D 组是推送之后的远端证据：`release.yml` 四平台与安装脚本、CodeQL、Homebrew、manifest，按 D-CAP-STD 登记 workflow、job、event/ref 和 SHA。`locally-accepted` 不是完成。有 D 组时先停在 `remote-pending`。
+4. **ER-04：** A 组是该卡 Verification 里的 focused 命令。B 组按 Task type。C 组由会发版的卡执行，顺序是：版本面 parity、`patch + 1`、工具链刷新 `Cargo.lock`、fmt、clippy、按 ER-13 的测试、`cargo build --release`、安装、精确 `libra add`、`libra commit -s`、推送 feature branch、`gh pr create`、同一 head SHA 上 `base.yml` 与 CodeQL 全绿、`gh pr merge --squash`、先 `libra fetch origin`，让 squash merge SHA 在本地可解析。再执行 `libra tag -s -m "Release v${VERSION}" "v${VERSION}" "$MERGE_SHA"`。`-m` 使它成为 annotated tag，`-s` 用仓库 vault 对它签名。`docs/commands/tag.md` 写明没有 `-a`/`-m`/`-F` 时只创建未签名的轻量 tag，且 `-s` 必须和 `-m` 一起用。然后 `libra tag -v "v${VERSION}"` 必须退出 0，再 `libra push origin "v${VERSION}"`，最后 `gh release create "v${VERSION}" --verify-tag`。不使用 GitHub API 创建的未签名轻量 tag。D 组是推送之后的远端证据：`release.yml` 四平台与安装脚本、CodeQL、Homebrew、manifest，按 D-CAP-STD 登记 workflow、job、event/ref 和 SHA。`locally-accepted` 不是完成。有 D 组时先停在 `remote-pending`。
 5. **ER-05：** 实现和本地验收之后做 Codex review，直到字面 PASS。P0/P1 必须关闭。
 6. **ER-06 / ER-06a：** 用户可见行为只在 GK-05 出现。该卡同批改 EN、zh-CN、开发文档、`COMPATIBILITY.md` 和网站 `agent.en.md`。网站写入前确认 `/Volumes/Sea/libra-backend` 的 VCS 与 `cf`。
 7. **ER-07：** `libra add <相关路径>` 然后 `libra commit -s`。提交后用同一 SHA 检查 `gpgsig` 与 `Signed-off-by`。不用 `commit -a`，本仓库没有 `git commit -S`。
@@ -195,7 +195,9 @@ G-01..G-11 与模板相同。本计划的取值如下。
 | DEP-GK-DOC | incoming | 外部仓库 | `/Volumes/Sea/libra-backend` 的 `cf` 与 `commands/agent.en.md` | 文档执行者 | 写入前按 ER-06a 记录 VCS 与 `cf`；typecheck/build 通过后才推 | 四 provider 契约第 10 条 | 分支或工作区不允许写入则该卡停在 locally-accepted，不假装网站已更新 |
 | DEP-GK-RELEASE | incoming | 发布 | D-CAP-STD 的签名 tag、base.yml、codeql、release.yml | 单一发布者 | 固定 source SHA 的 job 全绿才把 Acceptance 标 complete | plan-20260904 D-CAP-STD | 失败前滚；未触发不算通过 |
 
-计划内顺序不进本表：`GK-00 -> GK-01 -> GK-02 -> GK-03 -> GK-04 -> GK-05`。这条边表示前一张卡的交付物已经写入，不是要求前一张卡的 `Acceptance=complete`。GK-00 的 GO 矩阵写完后 GK-01 就可以开工。GK-00 自己的 `complete` 要等 GK-01 的 C/D，因此 GK-01 不得把 GK-00 的 `complete` 当作开工条件。
+## 实施顺序
+
+计划内顺序不进依赖登记表：`GK-00 -> GK-01 -> GK-02 -> GK-03 -> GK-04 -> GK-05`。这条边表示前一张卡的交付物已经写入，不是要求前一张卡的 `Acceptance=complete`。GK-00 的 GO 矩阵写完后 GK-01 就可以开工。GK-00 自己的 `complete` 要等 GK-01 的 C/D，因此 GK-01 不得把 GK-00 的 `complete` 当作开工条件。
 
 ## 发布分组与并发窗口
 
@@ -221,7 +223,7 @@ G-01..G-11 与模板相同。本计划的取值如下。
 
 **进入条件:** GK-00 对身份字段 GO，DEP-GK-DB 可用。
 
-**退出条件:** 新迁移后的库接受 `grok`，旧值仍在，Global/System 版本不变，supported 仍为 false。
+**退出条件:** 新迁移后的库接受 `grok`，旧值仍在，Global/System/Derived 版本不变，supported 仍为 false。
 
 ### Phase 2: 正文
 
@@ -262,11 +264,11 @@ G-01..G-11 与模板相同。本计划的取值如下。
 | 任务 | type | axis | recovery | complete | self-contained | AC | VER | landing / prod-files | scope | deps | writeset | release | split-from | exception |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | GK-00 | audit | 钉住 Grok 1.0.62 的日志与 hook 形状 | revert 本卡文档 | yes | yes | 5/20 | 2/20 | 0/0 | M | DEP-GK-PIN | no-overlap | no-release | N/A | N/A |
-| GK-01 | migration | Repository 接受 grok 身份且仍 unsupported | 前滚修复迁移，不删用户行 | yes | yes | 6/8 | 2/8 | 4/9 | M | GK-00, DEP-GK-DB, DEP-GK-WRITE | 序列化于共享 schema | independent | N/A | N/A |
-| GK-02 | implementation | 按序保留 thought chunk | revert 本卡提交 | yes | yes | 6/8 | 2/8 | 1/2 | M | GK-01, DEP-GK-BASE, DEP-GK-WRITE | 序列化于 GK-01 | independent | N/A | N/A |
+| GK-01 | migration | Repository 接受 grok 身份且仍 unsupported | 前滚修复迁移，不删用户行 | yes | yes | 7/8 | 2/8 | 4/8 | M | GK-00, DEP-GK-DB, DEP-GK-WRITE | 序列化于共享 schema | independent | N/A | N/A |
+| GK-02 | implementation | 按序保留 thought chunk | revert 本卡提交 | yes | yes | 8/8 | 4/8 | 1/2 | M | GK-01, DEP-GK-BASE, DEP-GK-WRITE | 序列化于 GK-01 | independent | N/A | N/A |
 | GK-03 | implementation | 未证明字段进入普通 transcript 且离开 sink | revert 本卡提交 | yes | yes | 7/8 | 2/8 | 1/2 | M | GK-02, DEP-GK-WRITE | 序列化于 GK-02 | independent | N/A | N/A |
-| GK-04 | implementation | 用户级只观察 hook | revert 本卡提交并卸标记 hook | yes | yes | 6/8 | 2/8 | 3/6 | M | GK-03, DEP-GK-PIN, DEP-GK-WRITE | 序列化于 GK-03 | independent | N/A | N/A |
-| GK-05 | implementation | 将 grok 升为 supported 且不开放 launcher | revert 本卡提交回到 preview | yes | yes | 6/8 | 2/8 | 2/3 | M | GK-04, DEP-GK-DOC, DEP-GK-RELEASE, DEP-GK-WRITE | 序列化于 GK-04 | independent | N/A | N/A |
+| GK-04 | implementation | 用户级只观察 hook | revert 本卡提交并卸标记 hook | yes | yes | 6/8 | 2/8 | 2/4 | M | GK-03, DEP-GK-PIN, DEP-GK-WRITE | 序列化于 GK-03 | independent | N/A | N/A |
+| GK-05 | implementation | 将 grok 升为 supported 且不开放 launcher | revert 本卡提交回到 preview | yes | yes | 7/8 | 3/8 | 2/5 | M | GK-04, DEP-GK-DOC, DEP-GK-RELEASE, DEP-GK-WRITE | 序列化于 GK-04 | independent | N/A | N/A |
 
 ## 任务卡
 
@@ -356,10 +358,11 @@ G-01..G-11 与模板相同。本计划的取值如下。
 
 - [ ] 新 migration id 大于开工时的 tip，只扩展 Repository 的 `agent_session.agent_kind` CHECK，保留全部旧值并加入 `grok`。
 - [ ] 迁移走 ADR-CAP-CHECK 的专用连接；失败丢弃该连接，不把 `foreign_keys=OFF` 还回池。
-- [ ] 隔离的 GlobalConfig 与 SystemConfig 临时库版本 receipt 和配置表不变。
-- [ ] `AgentKind::Grok` 的 db 值是 `grok`，slug 是 `grok`。`agent_for`、截断器、live capture 和两处提取臂把它当作无 hook、无 live、partial 空摘要。
+- [ ] 隔离的 GlobalConfig、SystemConfig 与 Derived 临时库版本 receipt 和配置表不变，且这三类库零写。`grok_agent_kind_round_trip_and_check` 覆盖本条。
+- [ ] `AgentKind::Grok` 的 db 值是 `grok`，slug 是 `grok`。`agent_for` 返回放在 `mod.rs` 里的 `PreviewAgent`，不加入 `PREVIEW_SPECS`。因此 `is_preview(Grok)` 在本卡为 false，这是有意的，不得为此去改 `preview.rs`。该类型没有 hooks 字段，`as_hooks()` 默认是 `None`。`agent_for_returns_matching_kind_for_every_variant` 对 Grok 的稳定性断言在本卡改为 `Preview`，GK-05 换上专用 struct 后再恢复为全部 `Stable`。`live_capture_for` 返回 `None`，因为 `hook_installable` 仍为 false。`live_capture.rs` 里「live 臂存在当且仅当 hook_installable」的断言保持成立。两处提取臂给出 partial 空摘要。
 - [ ] `supported_slugs()` 仍正好是 `claude-code`、`codex`、`opencode`。`enable grok` 返回 unsupported，不写 hook 文件，不写 `agent_session`。
 - [ ] 已有七个 kind 的行在迁移后仍可读。库里已有 `grok` 行时，down 拒绝执行并保留行。
+- [ ] 不含 `grok` 枚举的旧读取器打开含 `grok` 行的库时零写拒绝。这条也由 `grok_agent_kind_round_trip_and_check` 断言。
 
 **Verification:**
 
@@ -372,7 +375,7 @@ G-01..G-11 与模板相同。本计划的取值如下。
 
 **Deliverables:** N/A
 
-**Implementation write set:** 开工时命名的 `sql/migrations/<新id>_agent_kind_grok.sql` 与配对 down 文件；`sql/migrations/README.md` 的 Current registry 表加一行；`src/internal/db/migration.rs`；`src/internal/ai/observed_agents/adapter.rs`；`src/internal/ai/observed_agents/mod.rs`；`src/internal/ai/observed_agents/registry.rs`（新行 `supported=false`，不改首批三名断言）；`src/internal/ai/observed_agents/builtin/stable_promoted.rs`；`src/internal/ai/observed_agents/extract.rs`；`src/internal/ai/capture/extraction.rs`；`tests/grok_agent_kind_test.rs`；`tests/INDEX.md` 加一行。不改命令行为文档。本计划与 `plan-status.md` 只更新本卡状态。
+**Implementation write set:** 开工时命名的 `sql/migrations/<新id>_agent_kind_grok.sql` 与配对 down 文件；`sql/migrations/README.md` 的 Current registry 表加一行；`src/internal/db/migration.rs`；`src/internal/ai/observed_agents/adapter.rs`；`src/internal/ai/observed_agents/mod.rs`（Grok 用 `PreviewAgent` 静态，`as_hooks()` 保持默认 `None`，`live_capture_for` 为 `None`）；`src/internal/ai/observed_agents/registry.rs`（新行 `supported=false`、`hook_installable=false`，不改首批三名断言）；`src/internal/ai/observed_agents/extract.rs`；`src/internal/ai/capture/extraction.rs`；`tests/grok_agent_kind_test.rs`；`tests/INDEX.md` 加 `grok_agent_kind_test` 一行。不改 `stable_promoted.rs`，不改命令行为文档。本计划与 `plan-status.md` 只更新本卡状态。
 
 **Release write set:** Inherited
 
@@ -396,9 +399,9 @@ G-01..G-11 与模板相同。本计划的取值如下。
 
 **C/D coverage from:** self
 
-**Granularity:** `type=migration; axis=Repository 接受 grok 身份且仍 unsupported; recovery=前滚修复迁移，不删用户行; complete=yes; self-contained=yes; AC=6/8; VER=2/8; landing=4; prod-files=9; scope=M; deps=GK-00,DEP-GK-DB,DEP-GK-WRITE; writeset=序列化于共享 schema; release=independent; split-from=N/A; exception=N/A`
+**Granularity:** `type=migration; axis=Repository 接受 grok 身份且仍 unsupported; recovery=前滚修复迁移，不删用户行; complete=yes; self-contained=yes; AC=7/8; VER=2/8; landing=4; prod-files=8; scope=M; deps=GK-00,DEP-GK-DB,DEP-GK-WRITE; writeset=序列化于共享 schema; release=independent; split-from=N/A; exception=N/A`
 
-落地目录：`sql/migrations/`、`src/internal/db/`、`src/internal/ai/observed_agents/`、`src/internal/ai/capture/`。生产文件 9 个：两条 SQL、`migration.rs`、`adapter.rs`、`mod.rs`、`registry.rs`、`stable_promoted.rs`、`extract.rs`、`extraction.rs`。`README.md` 是迁移目录的说明，不计入这 9 个。
+落地目录四个：`sql/migrations/`、`src/internal/db/`、`src/internal/ai/observed_agents/`、`src/internal/ai/capture/`。生产文件 8 个：两条 SQL、`migration.rs`、`adapter.rs`、`mod.rs`、`registry.rs`、`extract.rs`、`extraction.rs`。`README.md` 不计入。不碰 `builtin/`。
 
 ### Task GK-02: updates.jsonl 的 Thought 保留
 
@@ -425,11 +428,15 @@ G-01..G-11 与模板相同。本计划的取值如下。
 - [ ] 未知 `sessionUpdate` 保留类型名和原始行哈希，不解释成 thought。
 - [ ] 单行超过 1 MiB 或整份 source 超过 16 MiB 时 partial 或拒绝，不报 complete。
 - [ ] 路径不是普通文件、是符号链接，或规范化后不在调用方给出的会话目录内，则拒绝读取。
+- [ ] 含 `\"`、`\u754c` 与非 ASCII 的 thought 以解码后的 UTF-8 进入 transcript。`grok_updates_decoded_utf8_escape_and_unicode` 覆盖本条。
+- [ ] 同一 `eventId` 再读一次不新增 thought。进程重启后从已记录偏移继续，不按时间戳合并。
 
 **Verification:**
 
 - [ ] `source .env.test && cargo test --test grok_capture_test grok_updates_keeps_three_thoughts_in_order -- --exact`（new）。输出含 `1 passed`，不含 `0 passed`。
-- [ ] `source .env.test && cargo test --test grok_capture_test grok_updates_string_chunks_are_not_concatenated -- --exact`（new，同一测试文件根上的第二个函数）。输出含 `1 passed`，不含 `0 passed`。
+- [ ] `source .env.test && cargo test --test grok_capture_test grok_updates_string_chunks_are_not_concatenated -- --exact`（new，同一测试文件根上）。输出含 `1 passed`，不含 `0 passed`。
+- [ ] `source .env.test && cargo test --test grok_capture_test grok_updates_decoded_utf8_escape_and_unicode -- --exact`（new）。输出含 `1 passed`，不含 `0 passed`。
+- [ ] `source .env.test && cargo test --test grok_capture_test grok_updates_repeat_event_id_is_idempotent -- --exact`（new）。输出含 `1 passed`，不含 `0 passed`。
 
 **Full-suite trigger:** T-1: 接入共享 `observed_agents` 模块树和 capture transcript。
 
@@ -437,7 +444,7 @@ G-01..G-11 与模板相同。本计划的取值如下。
 
 **Deliverables:** N/A
 
-**Implementation write set:** `src/internal/ai/observed_agents/grok_updates.rs`；`src/internal/ai/observed_agents/mod.rs` 只增加本模块声明和 Grok live 臂的读取入口；`tests/grok_capture_test.rs`；`tests/INDEX.md` 一行。本计划与 `plan-status.md` 只更新本卡状态。
+**Implementation write set:** `src/internal/ai/observed_agents/grok_updates.rs`；`src/internal/ai/observed_agents/mod.rs` 只增加 `pub mod grok_updates`。不改 `live_capture_for`。测试直接调用读取函数。`tests/grok_capture_test.rs`；`tests/INDEX.md` 加 `grok_capture_test` 一行。本计划与 `plan-status.md` 只更新本卡状态。
 
 **Release write set:** Inherited
 
@@ -461,9 +468,9 @@ G-01..G-11 与模板相同。本计划的取值如下。
 
 **C/D coverage from:** self
 
-**Granularity:** `type=implementation; axis=按序保留 thought chunk; recovery=revert 本卡提交; complete=yes; self-contained=yes; AC=6/8; VER=2/8; landing=1; prod-files=2; scope=M; deps=GK-01,DEP-GK-BASE,DEP-GK-WRITE; writeset=序列化于 GK-01; release=independent; split-from=N/A; exception=N/A`
+**Granularity:** `type=implementation; axis=按序保留 thought chunk; recovery=revert 本卡提交; complete=yes; self-contained=yes; AC=8/8; VER=4/8; landing=1; prod-files=2; scope=M; deps=GK-01,DEP-GK-BASE,DEP-GK-WRITE; writeset=序列化于 GK-01; release=independent; split-from=N/A; exception=N/A`
 
-落地目录只有 `src/internal/ai/observed_agents/`。生产文件是 `grok_updates.rs` 与 `mod.rs`。测试和 `tests/INDEX.md` 不计入。live 入口写在 `mod.rs` 已有的 Grok 臂上，不改 `live_capture.rs`。
+落地目录只有 `src/internal/ai/observed_agents/`。生产文件是 `grok_updates.rs` 与 `mod.rs`。测试和 `tests/INDEX.md` 不计入。不注册 `live_capture_for`。
 
 ### Task GK-03: 未证明字段保留与 sink 隔离
 
@@ -488,8 +495,8 @@ G-01..G-11 与模板相同。本计划的取值如下。
 - [ ] 字符串 `encrypted_content`、`id`、`status` 和 `summary_text` 出现在普通 transcript。
 - [ ] 与某一条 thought 完全相同的摘要不重复写正文，密文挂在该条上。连续 4 条拼接的那一个合成样例同样只挂接一次。对不上的摘要单独成条。空摘要保留密文、不补正文。
 - [ ] 非字符串 `text` 或非字符串 `encrypted_content` 丢弃，回合为 partial。
-- [ ] safe projection、doctor 诊断字符串、coverage digest 和日志夹具对一份固定 canary 零命中。
-- [ ] 普通导出字节不含键 `encrypted_content`、`metadata.openai.reasoningEncryptedContent`、`metadata.anthropic.signature`。checkpoint transcript 仍含 Grok reasoning 密文。
+- [ ] metadata、类型化覆盖、Debug、safe projection、doctor JSON、coverage digest 和日志夹具对一份固定 canary 零命中。
+- [ ] `grok_reasoning.rs` 的普通导出函数生成的字节不含键 `encrypted_content`、`metadata.openai.reasoningEncryptedContent`、`metadata.anthropic.signature`。checkpoint transcript 仍含 Grok reasoning 密文。不改 `opencode_export.rs`。
 - [ ] 密钥形状的 thought 文本被现有 redaction 替换，不能原文进入 sink。
 - [ ] 形状不在 GK-00 矩阵内的文件拒绝导入，不写成一份删掉 Thinking 的成功 checkpoint。
 
@@ -536,7 +543,7 @@ G-01..G-11 与模板相同。本计划的取值如下。
 
 **Lifecycle / Acceptance:** pending / 空
 
-**Description:** 在 `GROK_HOME/hooks/` 安装带标记的观察 hook。`Stop`、`StopCancelled`、`StopFailure` 和 `PreCompact` 读取 `transcript_path` 指向的日志并写 checkpoint。
+**Description:** 在 `GROK_HOME/hooks/` 安装带标记的观察 hook。测试直接调用该 provider 的处理函数。`Stop`、`StopCancelled`、`StopFailure` 和 `PreCompact` 是 hook 事件边界，所以压缩、截断和子会话分段放在本卡，而不是放在只解析字节的 GK-02。`live_capture_for` 保持 `None`，直到 GK-05 同时打开 `supported` 与 `hook_installable`。
 
 **Out of scope:** 不写项目级 `.grok/hooks`。不注册会返回 `decision` 或 `updatedInput` 的 hook。不把 Cursor 的 `afterAgentThought` 当作 Thinking 来源。子会话不并入父会话正文。review/investigate 仍关闭。
 
@@ -549,7 +556,7 @@ G-01..G-11 与模板相同。本计划的取值如下。
 
 **Acceptance criteria:**
 
-- [ ] enable 只原子更新带 `libra capture` 标记的用户级 matcher group；disable 只删除这些项；无标记文件保持原字节。
+- [ ] 直接调用的安装函数只原子更新带 `libra capture` 标记的用户级 matcher group；卸载函数只删除这些项；无标记文件保持原字节。CLI `enable` 仍由 GK-05 打开。
 - [ ] hook 进程退出码 0，stdout 不是 deny 或 block。读不完时写 durable pending，不把会话标成 complete。
 - [ ] `transcript_path` 规范化后必须是该 `sessionId` 目录下的 `updates.jsonl`。越界、符号链接和非普通文件拒绝。daemon 缺少 `transcript_path` 时只用事件里的 `cwd` 与 `sessionId` 按 GK-00 钉住的编码规则推导；缺一则只记生命周期。
 - [ ] `PreCompact` 先写 checkpoint。压缩后的文件是下一段。`updates.jsonl` 变短或 `eventId` 重复时封段，不删已捕获的 Thought。
@@ -567,7 +574,7 @@ G-01..G-11 与模板相同。本计划的取值如下。
 
 **Deliverables:** N/A
 
-**Implementation write set:** `src/internal/ai/hooks/providers/grok/mod.rs`；`src/internal/ai/hooks/providers/grok/parser.rs`；`src/internal/ai/hooks/providers/grok/settings.rs`；`src/internal/ai/hooks/providers/mod.rs`；`src/internal/ai/observed_agents/builtin/stable_promoted.rs` 只把 Grok spec 的 hooks 从 `None` 改为该 provider；`src/command/agent/hooks.rs` 只增加 grok 的 enable 分发且保持 unsupported 以外的写文件行为直到 GK-05。测试追加到 `tests/grok_capture_test.rs`。本计划与 `plan-status.md` 只更新本卡状态。
+**Implementation write set:** `src/internal/ai/hooks/providers/grok/mod.rs`；`src/internal/ai/hooks/providers/grok/parser.rs`；`src/internal/ai/hooks/providers/grok/settings.rs`；`src/internal/ai/hooks/providers/mod.rs`。不改 `command/agent/mod.rs` 的 enable 门（该门在 `mod.rs:485-540`，由 GK-05 打开）。不改 `live_capture_for`，不把 `as_hooks()` 设为 `Some`。测试直接调用 provider 函数，并追加到 `tests/grok_capture_test.rs`。本计划与 `plan-status.md` 只更新本卡状态。
 
 **Release write set:** Inherited
 
@@ -591,9 +598,9 @@ G-01..G-11 与模板相同。本计划的取值如下。
 
 **C/D coverage from:** self
 
-**Granularity:** `type=implementation; axis=用户级只观察 hook; recovery=revert 本卡提交并卸标记 hook; complete=yes; self-contained=yes; AC=6/8; VER=2/8; landing=3; prod-files=6; scope=M; deps=GK-03,DEP-GK-PIN,DEP-GK-WRITE; writeset=序列化于 GK-03; release=independent; split-from=N/A; exception=N/A`
+**Granularity:** `type=implementation; axis=用户级只观察 hook; recovery=revert 本卡提交并卸标记 hook; complete=yes; self-contained=yes; AC=6/8; VER=2/8; landing=2; prod-files=4; scope=M; deps=GK-03,DEP-GK-PIN,DEP-GK-WRITE; writeset=序列化于 GK-03; release=independent; split-from=N/A; exception=N/A`
 
-落地目录三个：`src/internal/ai/hooks/providers/`、`src/command/agent/`、`src/internal/ai/observed_agents/builtin/`。生产文件 6 个，如上。
+落地目录两个：`src/internal/ai/hooks/providers/` 与其子目录 `grok/`。按「一个具体目录」计为两个落地。生产文件 4 个：`providers/mod.rs` 与 `grok/` 下三个文件。
 
 ### Task GK-05: supported 提升与契约
 
@@ -620,11 +627,13 @@ G-01..G-11 与模板相同。本计划的取值如下。
 - [ ] 合成会话的 checkpoint transcript 含 thought 文本和未证明字段；默认 `checkpoint show` 不打印这些明文。显式 transcript 路径才输出脱敏后的正文。
 - [ ] tracing 第 116 行附近的「首批之外不得 supported」改为点名 `grok` 是 GK-05 之后的唯一追加，其余 slug 仍禁止。
 - [ ] EN、zh-CN、开发文档、`COMPATIBILITY.md` 和网站 `agent.en.md` 描述同一行为：本地日志、Thinking 保留、不解密、不作为 review/investigate 启动器。
+- [ ] `live_capture_for(Grok)` 为 `Some`，且与 `hook_installable`、`supported` 同为 true。GK-01 的 `PreviewAgent` 静态被 `mod.rs` 里的专用 struct 替换，该 struct 覆盖 `as_hooks()` 与 `stability()`。`command/agent/hooks.rs` 增加 grok 回调分发。enable 门仍在 `command/agent/mod.rs:485-540`，只放行 supported。不改 `preview.rs`。
 
 **Verification:**
 
 - [ ] `source .env.test && cargo test --test compat_agent_capability_matrix_pin grok_supported_wave_is_not_first_batch -- --exact`（new）。输出含 `1 passed`，不含 `0 passed`。
 - [ ] `source .env.test && cargo test --test compat_agent_docs_contract grok_docs_contract_mentions_thinking_retain -- --exact`（new）。输出含 `1 passed`，不含 `0 passed`。
+- [ ] `source .env.test && cargo test --test grok_capture_test grok_live_capture_matches_hook_installable -- --exact`（new）。输出含 `1 passed`，不含 `0 passed`。
 
 **Full-suite trigger:** T-1: 改变公开 agent 名单和 `registry.rs` 这一共享事实源。
 
@@ -632,13 +641,13 @@ G-01..G-11 与模板相同。本计划的取值如下。
 
 **Deliverables:** N/A
 
-**Implementation write set:** `src/internal/ai/observed_agents/registry.rs`（`supported=true`、`support_wave=grok`，并改写 `first_batch_roster_is_exactly_claude_code_codex_opencode` 里「凡 supported 必为 first_batch」的断言，使 `grok` 除外、原来三名不变）；`src/command/agent/list.rs`；`src/command/agent/mod.rs` 里把 supported 名单写死为三名的测试或分发；`docs/commands/agent.md`；`docs/commands/zh-CN/agent.md`；`docs/development/commands/agent.md`；`docs/development/tracing/agent.md`；`COMPATIBILITY.md`；`/Volumes/Sea/libra-backend/apps/tanstack-app/content/docs/commands/agent.en.md`；`tests/compat/agent_capability_matrix_pin.rs`；`tests/compat/agent_docs_contract.rs`。本计划与 `plan-status.md` 只更新本卡状态。
+**Implementation write set:** `src/internal/ai/observed_agents/registry.rs`（同一行把 `supported`、`hook_installable` 设为 true，`support_wave=grok`，并改写「凡 supported 必为 first_batch」的断言，使 `grok` 除外、原来三名不变）；`src/internal/ai/observed_agents/mod.rs` 用专用 struct 替换 GK-01 的 `PreviewAgent` 静态，覆盖 `as_hooks()` 与 `stability()`，并把 `live_capture_for` 设为 `Some`；不改 `preview.rs`；`src/command/agent/list.rs`；`src/command/agent/mod.rs` 的 enable 门与写死三名的测试；`src/command/agent/hooks.rs` 的 grok 回调分发；`docs/commands/agent.md`；`docs/commands/zh-CN/agent.md`；`docs/development/commands/agent.md`；`docs/development/tracing/agent.md`；`COMPATIBILITY.md`；`/Volumes/Sea/libra-backend/apps/tanstack-app/content/docs/commands/agent.en.md`；`tests/compat/agent_capability_matrix_pin.rs`；`tests/compat/agent_docs_contract.rs`；`tests/grok_capture_test.rs` 只追加 live 臂用例。本计划与 `plan-status.md` 只更新本卡状态。
 
 **Release write set:** Inherited
 
 **Files likely touched:** 上列文件。
 
-**Docs and compatibility impact:** `docs/commands/agent.md`；`docs/commands/zh-CN/agent.md`；`docs/development/commands/agent.md`；`docs/development/tracing/agent.md`；`COMPATIBILITY.md`；网站 `apps/tanstack-app/content/docs/commands/agent.en.md`。不改 `docs/error-codes.md`。网站写入前记录 VCS 与已验证的 `cf`。
+**Docs and compatibility impact:** `docs/commands/agent.md`；`docs/commands/zh-CN/agent.md`；`docs/development/commands/agent.md`；`docs/development/tracing/agent.md`；`COMPATIBILITY.md`；网站 `apps/tanstack-app/content/docs/commands/agent.en.md`。不改 `docs/error-codes.md`。网站写入前记录 VCS 与已验证的 `cf`。在该仓库执行 `python3 scripts/sync-libra-command-docs.py --libra-root <本仓库>`、`python3 scripts/test_sync_libra_command_docs.py`、`pnpm --filter @tinyship/tanstack-app typecheck` 和 `pnpm --filter @tinyship/tanstack-app build`。网站 diff 另需一次 Claude PASS 后才签推 `cf`。实现代码的 ER-05 仍是 Codex PASS。这两次审查对象不同。这些命令是 ER-06a 门，不计入 VER。
 
 **Rollback mode:** revert
 
@@ -656,19 +665,19 @@ G-01..G-11 与模板相同。本计划的取值如下。
 
 **C/D coverage from:** self
 
-**Granularity:** `type=implementation; axis=将 grok 升为 supported 且不开放 launcher; recovery=revert 本卡提交回到 preview; complete=yes; self-contained=yes; AC=6/8; VER=2/8; landing=2; prod-files=3; scope=M; deps=GK-04,DEP-GK-DOC,DEP-GK-RELEASE,DEP-GK-WRITE; writeset=序列化于 GK-04; release=independent; split-from=N/A; exception=N/A`
+**Granularity:** `type=implementation; axis=将 grok 升为 supported 且不开放 launcher; recovery=revert 本卡提交回到 preview; complete=yes; self-contained=yes; AC=7/8; VER=3/8; landing=2; prod-files=5; scope=M; deps=GK-04,DEP-GK-DOC,DEP-GK-RELEASE,DEP-GK-WRITE; writeset=序列化于 GK-04; release=independent; split-from=N/A; exception=N/A`
 
-落地目录：`src/internal/ai/observed_agents/`、`src/command/agent/`。生产文件 3 个：`registry.rs`、`list.rs`、`command/agent/mod.rs`。文档、网站和 compat 测试不计入。不改 `preview.rs`。
+落地目录：`src/internal/ai/observed_agents/`、`src/command/agent/`。生产文件 5 个：`registry.rs`、`mod.rs`、`list.rs`、`command/agent/mod.rs`、`command/agent/hooks.rs`。文档、网站和测试不计入。不改 `preview.rs`。
 
 ## 测试矩阵
 
 | 类别 | 必须覆盖 | Target / command |
 |---|---|---|
 | 单元 | kind 往返、chunk 顺序、挂接、sink 零命中、hook 标记 | 与各卡 Verification 相同的 `--test <target> <完整函数名> -- --exact`，不使用 `--lib` 裸函数名 |
-| 集成 | 合成 JSONL 到 transcript；enable/disable 文件字节 | `cargo test --test grok_capture_test grok_updates_keeps_three_thoughts_in_order -- --exact`，输出含 `1 passed` |
-| 兼容 | 首批三名仍在；grok 的 supported 位只在 GK-05 改变 | `known_agent_capability_matrix_matches_current_roster` 与 `grok_supported_wave_is_not_first_batch`，都带 `--exact` |
+| 集成 | 合成 JSONL 到 transcript；enable/disable 文件字节 | `source .env.test && cargo test --test grok_capture_test grok_updates_keeps_three_thoughts_in_order -- --exact`，输出含 `1 passed` |
+| 兼容 | 首批三名仍在；grok 的 supported 位只在 GK-05 改变 | `source .env.test && cargo test --test compat_agent_capability_matrix_pin known_agent_capability_matrix_matches_current_roster -- --exact` 与 `source .env.test && cargo test --test compat_agent_capability_matrix_pin grok_supported_wave_is_not_first_batch -- --exact` |
 | 迁移 | 新 CHECK、旧行仍在、Global/System 零写、down 有行则拒绝 | `source .env.test && cargo test --test grok_agent_kind_test grok_agent_kind_round_trip_and_check -- --exact`，输出含 `1 passed` |
-| 安全 | 路径越界、符号链接、canary 不进 sink、hook 不返回 deny | `grok_hook_marker_round_trip_keeps_user_bytes` 与 `grok_unproven_ciphertext_is_in_transcript_and_absent_from_projection`，都带 `--exact` |
+| 安全 | 路径越界、符号链接、canary 不进 sink、hook 不返回 deny | `source .env.test && cargo test --test grok_capture_test grok_hook_marker_round_trip_keeps_user_bytes -- --exact` 与 `source .env.test && cargo test --test grok_capture_test grok_unproven_ciphertext_is_in_transcript_and_absent_from_projection -- --exact` |
 | 性能 | 16 MiB、1 MiB 行、8 MiB thought、2 秒预算 | 同集成测试里的超限用例 |
 | live/gated | 不进 CI | 无。真实家目录不作为验收 |
 
@@ -729,7 +738,7 @@ G-01..G-11 与模板相同。本计划的取值如下。
 - [ ] `docs/commands/zh-CN/agent.md` 在 GK-05 同步。
 - [ ] `docs/development/commands/agent.md` 与 `docs/development/tracing/agent.md` 在 GK-05 同步。
 - [ ] `docs/error-codes.md` 为 N/A。本计划不新增 `StableErrorCode`。
-- [ ] `tests/INDEX.md` 在 GK-02 新增 target 时同步。
+- [ ] `tests/INDEX.md` 在 GK-01 增加 `grok_agent_kind_test`，在 GK-02 增加 `grok_capture_test`。
 - [ ] 不新增 `tests/compat/*` 文件，故不改 `Cargo.toml` 的 `[[test]]`。既有 compat 测试在 GK-05 更新。
 - [ ] `plan-long.md` 与 `plan-status.md` 在本计划建立时登记。
 
@@ -744,6 +753,9 @@ Result 只允许 `PASS` 或 `FAIL`。
 | R3 | R2 修订稿 | FAIL | P1：测试矩阵迁移行仍写 `--lib grok_agent_kind`。已改为完整 `--test grok_agent_kind_test` 函数名，追溯表前缀一并改成完整函数名 | 无 | Codex session `01a14fab-572d-7670-8867-f0ee5eb2d5b6`，2026-10-18 |
 | R4 | R3 修订稿 | FAIL | P1：把 retain 第 182 行的导出删除理解成 transcript 不得保留密文。ADR-GK-02 现写明 transcript 保留 Grok 密文，普通导出仍删除该键 | P2：GK-05 追溯行已改成两个完整函数名 | Codex session `01a14fad-188a-7d52-b3b6-5a34973ccbaa`，2026-10-18 |
 | R5 | R4 修订稿 | PASS | 无。R4 的导出与 transcript 区分已关闭 | 无 | Codex session `01a14faf-e652-73e1-a496-d9d10173a123`，2026-10-18 |
+| Claude R1 | Codex R5 之后的全文 | FAIL | P1 六项：live 臂与 hook_installable 错卡；GK-01 落地把 `builtin/` 漏计后改为不碰该目录并维持 4 个落地；发布 tag 改为 vault 签名 annotated tag；sink 清单补全；旧读取器与 Derived 零写；UTF-8 解码向量 | P2：实施顺序标题、测试矩阵命令、INDEX 两处、GK-04 的 grok 子目录、幂等 AC、网站 Claude PASS、导出函数落在 grok_reasoning.rs | Claude Code 2.1.302，2026-10-18 |
+| Claude R2 | Claude R1 修订稿 | FAIL | P1：`libra tag` 没有 `-s -m`，实际仍是未签名轻量 tag。已改为 `libra fetch origin` 后 `libra tag -s -m "Release v${VERSION}" "v${VERSION}" "$MERGE_SHA"`，再 `libra tag -v` | P2：PreviewAgent 没有 hooks 字段；GK-05 改为专用 struct 覆盖 `as_hooks`；旧读取器断言并入既有测试；去掉重复的零写句 | Claude Code 2.1.302，2026-10-18 |
+| Claude R3 | Claude R2 修订稿 | PASS | 无 | 非阻断说明已落：Phase 1 退出条件含 Derived；GK-01 的 PreviewAgent 不进 `PREVIEW_SPECS`，`is_preview` 保持 false；稳定性单测在本卡对 Grok 断言 Preview | Claude Code 2.1.302，2026-10-18 |
 
 ## 非目标与延后项
 

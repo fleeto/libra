@@ -764,7 +764,7 @@ MEM-03 → MEM-04；LR-09（plan-20260913 `FL-04/05` 收口）；LR-10；MEM-05 
 | [`plan-20260910.md`](plan-20260910.md) | 横切（数据库迁移作用域） | 已排期 | 设计计划，任务卡尚未执行 |
 | [`plan-20260911.md`](plan-20260911.md) | B（Pi hook/capture boundary） | 已排期 | 本轮Codex自审/Claude最终R5规划PASS；2026-10-18修订11卡pending，下一PI-00；云围栏先于Pi writer，source pin与本机1.1.0对应待证。 |
 | [`plan-20261018-hermes-capture.md`](plan-20261018-hermes-capture.md) | B（Hermes capture） | 已排期 | 本轮Codex自审/Claude最终R5规划PASS；2026-10-18新增10卡pending，下一HM-00；只规划本地ordinary采集，Hermes binary/live smoke仍为supported提升硬门。 |
-| [`plan-20261018-grok-capture.md`](plan-20261018-grok-capture.md) | B（Grok capture） | 已排期 | 2026-10-18 Codex 规划 R5 PASS。GK-00..05 均 pending。本地日志采集；checkpoint transcript 保留 Thinking 与未证明密文，普通导出删除三个指定键。执行须另选卡。 |
+| [`plan-20261018-grok-capture.md`](plan-20261018-grok-capture.md) | B（Grok capture） | 已排期 | 2026-10-18 Codex R5 与 Claude R3 规划 PASS。GK-00..05 均 pending。本地日志采集；checkpoint transcript 保留 Thinking 与未证明密文。执行须另选卡。 |
 | [`plan-20260912.md`](plan-20260912.md) | B（memory boundary） | 已排期 | 设计计划，任务卡尚未执行 |
 | [`plan-20260913.md`](plan-20260913.md) | A（LR-09 FastCDC Media） | 实施中 | FL-00/01/07/02/06/03 `done`/`complete`、FL-04 `in-progress`/`locally-accepted`、FL-05 待效果门；v0.30.0 家族发布（原「设计计划、FL-00 可开工」表述已过时，按计划头部状态更新） |
 | [`plan-20260916.md`](plan-20260916.md) | B（Mega agent capture-push） | 已排期 | `DEP-ACF-CAP` 的 ACF 侧必要条件已由 ACF-09（`Lifecycle=done`、`Acceptance=complete`）交接；此为必要而非充分条件。CAP-01..03 仍为 `pending`，仅可 zero-raw-persistence 重核；CAP-04..07 为 `blocked` / 空，须独立 security/privacy RFC。 |

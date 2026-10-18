@@ -1,6 +1,6 @@
 # 计划执行状况总表（plan-status.md）
 
-> **Grok 采集计划（2026-10-18，Codex R5 规划 PASS）：** [plan-20261018-grok-capture.md](plan-20261018-grok-capture.md) 的 GK-00..GK-05 仍为 pending。Codex 规划审查 R5 为 PASS（session `01a14faf-e652-73e1-a496-d9d10173a123`）。隐私沿用 USER-OG-THINKING-RETAIN：checkpoint transcript 保存 Thinking 和未证明密文，普通导出删除 `encrypted_content` 等三个键，不归档 native。规划 PASS 不授权开工。
+> **Grok 采集计划（2026-10-18，Codex R5 与 Claude R3 规划 PASS）：** [plan-20261018-grok-capture.md](plan-20261018-grok-capture.md) 的 GK-00..GK-05 仍为 pending。Codex R5 与 Claude Code 2.1.302 的 R3 均为 PASS。checkpoint transcript 保存 Thinking 和未证明密文，普通导出删除三个指定键。规划 PASS 不授权开工。
 
 > **USER-OG-THINKING-RETAIN-20261018（2026-10-18 07:36:52 UTC，工作区已实现，未提交、未发布）：** 用户要求把隐私要求降到能保存 thinking，并写入未证明字段。助手 reasoning 的字符串 `text` 与未证明 `state`、`time`、`originProof` 及顶层 `signature`、`redactedData`、`reasoningEncryptedContent`、`thoughtSignature` 进入普通 transcript。来源仍是 `Unproven` / `Partial`，不归档为 native artifact。本条只替代方案 C 当时的普通副本删除规则，不新增任务卡，不增加完成分子。历史 import 仍 `LBR-AGENT-020`。已发布 0.30.52 不含此行为。完整边界与本次测试见 [USER-OG-THINKING-RETAIN-20261018](plan-20260902.md#user-og-thinking-retain-20261018)。
 
@@ -246,7 +246,7 @@
 | [`plan-20260912.md`](plan-20260912.md) | B（memory boundary） | **已收口** | MB-01..MB-05、MB-07/08、MB-10/11 全部 `done/complete`（v0.23.37/.39/.40/.41/.42/.43/.44/.45/.46，各卡 ER-14 全量绿、D-MB-STD 远端 evidence 绿）；MB-06/09/12 墓碑 `done`（无对应子命令）；EX-MB-01/02（G-03）与 EX-MB-03（ER-07 签名）已登记；使用者 2026-09-21 双评审豁免已登记；完成判据全数勾选 |
 | [`plan-20260911.md`](plan-20260911.md) | B（Pi capture） | 未启动 | PI-00..10共11卡pending；PI-00→PI-05白名单→PI-09冻结spool→PI-07安全runner→PI-01配对identity/schema；本机1.1.0与source对应待证；本轮Codex自审/Claude最终R5规划PASS，旧429保留历史 |
 | [`plan-20261018-hermes-capture.md`](plan-20261018-hermes-capture.md) | B（Hermes capture） | 未启动 | HM-00..09共10卡pending；本轮Codex自审/Claude最终R5规划PASS；新计划补齐原缺口，先审计，消费PI-05云围栏边界；无本机Hermes，supported提升受真实smoke硬门阻塞 |
-| [`plan-20261018-grok-capture.md`](plan-20261018-grok-capture.md) | B（Grok capture） | 未启动 | GK-00..05 共 6 卡 pending。Codex 规划 R5 PASS（session `01a14faf-e652-73e1-a496-d9d10173a123`）。checkpoint transcript 保存 Thinking 与未证明密文，普通导出删除三个指定键。规划 PASS 不授权开工。 |
+| [`plan-20261018-grok-capture.md`](plan-20261018-grok-capture.md) | B（Grok capture） | 未启动 | GK-00..05 共 6 卡 pending。Codex R5 与 Claude R3 规划 PASS。checkpoint transcript 保存 Thinking 与未证明密文。规划 PASS 不授权开工。 |
 | [`plan-20260910.md`](plan-20260910.md) | 横切（数据库迁移作用域） | **已收口** | MIG-00..MIG-06、MIG-R01..R03 全部 `done/complete` |
 | [`plan-20260907.md`](plan-20260907.md) | 横切（BLAKE3 object format） | **已收口** | B3-00..B3-17 全部 `done`/`complete`（`v0.23.68`→`v0.29.0`；REL-B3-01/02 家族经 B3-15/B3-17）；最终 Codex/Claude R40 双 `PASS`（0×P0/0×P1）；GC-B3-01/GC-B3-02 收口守卫绿；`DEP-B3-05` 已满足，下游 FL-00 解锁；无 LR 编号 |
 | [`plan-20260906.md`](plan-20260906.md) | 横切（安全扫描） | 未启动 | SC-01..SC-07、SC-CLOSE 全部 `pending` |
@@ -316,7 +316,7 @@
 | [`plan-20260907.md`](plan-20260907.md) | B3-00..B3-17 | **已收口**（B3-00..B3-17 全部 `done`/`complete`；`DEP-B3-05` 已满足，不再阻塞 plan-20260913） |
 | [`plan-20260911.md`](plan-20260911.md) | PI-00..10（11卡pending） | 下一PI-00；本轮双规划审查PASS；PI-05围栏先于row writer，旧429历史不授本轮PASS |
 | [`plan-20261018-hermes-capture.md`](plan-20261018-hermes-capture.md) | HM-00..09（10卡pending） | 下一HM-00；本轮双规划审查PASS；后续云围栏消费PI-05、schema消费PI-01交接；本机Hermes/live gate待证 |
-| [`plan-20261018-grok-capture.md`](plan-20261018-grok-capture.md) | GK-00..05（6卡pending） | Codex 规划 R5 PASS。下一张 GK-00，执行仍须另选卡 |
+| [`plan-20261018-grok-capture.md`](plan-20261018-grok-capture.md) | GK-00..05（6卡pending） | Codex R5 与 Claude R3 规划 PASS。下一张 GK-00，执行仍须另选卡 |
 | [`plan-20260912.md`](plan-20260912.md) | MB-01..05、MB-07/08/10/11（MB-06/09/12 已取消） | 依赖 CAP（plan-20260916）等 |
 | [`plan-20260913.md`](plan-20260913.md) | FL-00..FL-07 | **前置 plan-20260907 已完整收口（DEP-FL-04 满足）**；FL-00/01/07/02/06/03/04/05 已全部 `done`/`complete`，仅剩计划级收口门 |
 | [`plan-20260916.md`](plan-20260916.md) | CAP-01..CAP-07 | 双评审已 PASS；CAP-01..03 仅按 ER-CAP-02 pin 作 zero-raw-persistence 重核；`DEP-ACF-CAP` 的 ACF 侧必要条件已由 ACF-09（`Lifecycle=done`、`Acceptance=complete`）交接；CAP-04..07 `blocked`，须独立 security/privacy RFC 与新卡 |
@@ -557,7 +557,7 @@ SBX-01..05 `done/locally-accepted`；**发布步按 DEFER-SBX-06 正式延后**�
 | [`plan-20260902`](plan-20260902.md) | OG-00 | OpenCode2.0.26 Hook/export当前契约审计 | 无；按具名main source与逐文件单写者 | 当前9/9审计门；Claude Code R2 semantic PASS，旧评审为历史 | 无新增完整RG前置，typed/native归档门仍保留 |  ✅ done/complete，具名产物在v0.30.43最终tree/site，实际FAST-OG-01 C/D继承 |
 | [`plan-20260911`](plan-20260911.md) | PI-00 | Pi版本/source/事件身份只读审计 | 无 | 本轮Codex自审/Claude最终R5规划PASS | 后继PI-05先围栏；PI-01再identity/schema配对 | 规划PASS；可选只读审计卡，执行仍须用户授权 |
 | [`plan-20261018-hermes-capture`](plan-20261018-hermes-capture.md) | HM-00 | Hermes版本/source/observer协议审计 | 无 | 本轮根Agent自审/Claude最终R5规划PASS | 后继HM-02消费PI-05，HM-01消费PI-01交接；缺binary只阻支持提升 | 规划PASS；可选只读审计卡，执行仍须用户授权 |
-| [`plan-20261018-grok-capture`](plan-20261018-grok-capture.md) | GK-00 | 钉住 Grok 1.0.62 的日志与 hook 形状 | 无 | Codex 规划 R5 PASS | DEP-GK-PIN 由 GK-00 自己冻结 | 规划 PASS；执行仍须另选该卡 |
+| [`plan-20261018-grok-capture`](plan-20261018-grok-capture.md) | GK-00 | 钉住 Grok 1.0.62 的日志与 hook 形状 | 无 | Codex R5 与 Claude R3 规划 PASS | DEP-GK-PIN 由 GK-00 自己冻结 | 规划 PASS；执行仍须另选该卡 |
 | [`plan-20260925`](plan-20260925.md) | SCAP-01 | AgentTraces ingest 改调 `decide`。`v0.23.55` / `fa3849e` D 组全绿 | SCAP-02（登记已核对） | R9 双 `PASS` | 已收口 | `done`/`complete` |
 | [`plan-20260907`](plan-20260907.md) | B3-00 | pin `git-internal`（保持 `=0.10.2`）并引入 `object_format` 事实源 | 无 | **双评审已 PASS**（R40 Codex/Claude 双 PASS） | `v0.23.68` 已发布；focused VER 绿 | `done`/`complete` |
 | [`issues/470`](issues/470.md) | FM-01 | 共享写入原语与 `restore` 系物化 | 无 | 尚未 Codex review | 关闭依赖 plan-20260918 FM-03/04（DEP-FM-06/07） | ❌ 禁止开工 |

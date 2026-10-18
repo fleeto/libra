@@ -88,6 +88,9 @@ async fn test_checkout_module_functions() {
         shared: None,
         object_format: None,
         ref_format: None,
+        separate_git_dir: None,
+        separate_libra_dir: None,
+        recurse_submodules: false,
         from_git_repository: None,
         vault: false,
     };
@@ -142,6 +145,9 @@ async fn test_checkout_module_functions_sha256() {
         shared: None,
         object_format: Some("sha256".to_string()),
         ref_format: None,
+        separate_git_dir: None,
+        separate_libra_dir: None,
+        recurse_submodules: false,
         from_git_repository: None,
         vault: false,
     };
@@ -198,6 +204,9 @@ async fn checkout_restore_rejects_sha1_hash_in_sha256_repo() {
         shared: None,
         object_format: Some("sha256".to_string()),
         ref_format: None,
+        separate_git_dir: None,
+        separate_libra_dir: None,
+        recurse_submodules: false,
         from_git_repository: None,
         vault: false,
     })

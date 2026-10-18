@@ -945,11 +945,12 @@ fn reinit_rejects_object_format_change() {
         &["init", "--vault", "false", "--object-format", "sha256"],
         &repo,
     );
-    assert_eq!(output.status.code(), Some(129));
+    assert_eq!(output.status.code(), Some(128));
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("LBR-CLI-002") && stderr.contains("cannot change object format"),
-        "reinit format change must be LBR-CLI-002: {stderr}"
+        stderr.contains("LBR-REPO-003")
+            && stderr.contains("attempt to reinitialize repository with different hash"),
+        "reinit format change must be LBR-REPO-003: {stderr}"
     );
     assert!(
         !pre_commit.exists(),
@@ -1059,4 +1060,285 @@ fn init_machine_blake3_object_format() {
     let parsed: serde_json::Value = serde_json::from_str(line).expect("machine JSON");
     assert_eq!(parsed["ok"], true);
     assert_eq!(parsed["data"]["object_format"].as_str(), Some("blake3"));
+}
+
+// ---------------------------------------------------------------------------
+// Issue #473 IN-01/IN-02/IN-03/IN-08/IN-09
+// ---------------------------------------------------------------------------
+
+/// IN-01 (M-TPL T1/T5): an empty `--template=` creates only the required
+/// structure (no built-in hooks/exclude, no current-dir recursion) and a
+/// reinit with it changes nothing existing.
+#[test]
+fn test_init_blank_template_matrix() {
+    let root = tempdir().unwrap();
+    let repo = root.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    // A stray file in the target: with empty template it must not be copied
+    // into the storage dir.
+    fs::write(repo.join("stray.txt"), "x").unwrap();
+
+    let out = run_libra_command(&["init", "--template="], &repo);
+    assert_cli_success(&out, "blank template init");
+    assert!(
+        !repo.join(".libra/info/exclude").exists(),
+        "no builtin exclude"
+    );
+    assert!(
+        !repo.join(".libra/hooks/pre-commit.sh").exists(),
+        "no builtin hook"
+    );
+    assert!(!repo.join(".libra/stray.txt").exists(), "no self-recursion");
+    assert!(
+        repo.join(".libra/objects/pack").exists(),
+        "required objects/pack"
+    );
+    assert!(
+        repo.join(".libra/objects/info").exists(),
+        "required objects/info"
+    );
+
+    let out = run_libra_command(&["init", "--template="], &repo);
+    assert_cli_success(&out, "blank template reinit");
+    assert!(repo.join(".libra/libra.db").exists(), "db preserved");
+    assert!(
+        !repo.join(".libra/stray.txt").exists(),
+        "still no recursion"
+    );
+    assert!(
+        !repo.join(".libra/info/exclude").exists(),
+        "no builtin exclude after reinit"
+    );
+}
+
+/// IN-01 (M-TPL T2): a template equal to the storage dir is refused, zero write.
+#[test]
+fn test_init_template_self_reference_guard() {
+    let root = tempdir().unwrap();
+    let repo = root.path().join("repo");
+    super::init_repo_via_cli(&repo);
+
+    let out = run_libra_command(&["init", "--template=.libra"], &repo);
+    assert_eq!(out.status.code(), Some(129));
+    let (_h, report) = super::parse_cli_error_stderr(&out.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-002");
+    assert!(repo.join(".libra/libra.db").exists(), "db untouched");
+}
+
+/// IN-02 (M-REINIT R1/R2/R3/R7): a different `--object-format` on reinit is a
+/// 128 repo-state failure with the Git wording, zero side effects; same format
+/// and bare reinit stay a top-up.
+#[test]
+fn test_init_reinit_object_format_mismatch_matrix() {
+    let root = tempdir().unwrap();
+    let sha1 = root.path().join("sha1");
+    super::init_repo_via_cli(&sha1);
+
+    let out = run_libra_command(&["init", "--object-format=sha256"], &sha1);
+    assert_eq!(out.status.code(), Some(128));
+    let (_h, report) = super::parse_cli_error_stderr(&out.stderr);
+    assert_eq!(report.error_code, "LBR-REPO-003");
+    assert!(
+        report
+            .message
+            .contains("attempt to reinitialize repository with different hash")
+    );
+    let stored = run_libra_command(&["config", "--local", "--get", "core.objectformat"], &sha1);
+    assert_eq!(String::from_utf8_lossy(&stored.stdout).trim(), "sha1");
+
+    let sha256 = root.path().join("sha256");
+    assert_cli_success(
+        &run_libra_command(&["init", "--object-format=sha256"], &sha256),
+        "sha256 init",
+    );
+    let out = run_libra_command(&["init", "--object-format=sha1"], &sha256);
+    assert_eq!(out.status.code(), Some(128));
+
+    // R3: same format and no-arg reinit succeed.
+    assert_cli_success(
+        &run_libra_command(&["init", "--object-format=sha1"], &sha1),
+        "same format reinit",
+    );
+    assert_cli_success(&run_libra_command(&["init"], &sha1), "no-arg reinit");
+
+    // R7: JSON envelope carries the stable code.
+    let out = run_libra_command(&["--json", "init", "--object-format=sha256"], &sha1);
+    assert_eq!(out.status.code(), Some(128));
+    let (_h, report) = super::parse_cli_error_stderr(&out.stderr);
+    assert_eq!(report.error_code, "LBR-REPO-003");
+}
+
+/// IN-02 (M-REINIT R4): an unknown stored `core.objectformat` is a 128
+/// repo-corrupt failure, not silently sha1.
+#[tokio::test]
+async fn test_init_reinit_unknown_stored_format() {
+    let root = tempdir().unwrap();
+    let repo = root.path().join("repo");
+    super::init_repo_via_cli(&repo);
+    // Overwrite the stored format with an unknown value.
+    let conn = open_repo_conn(&repo, false).await;
+    ConfigKv::set_with_conn(&conn, "core.objectformat", "sha999", false)
+        .await
+        .unwrap();
+    drop(conn);
+
+    let out = run_libra_command(&["init", "--object-format=sha256"], &repo);
+    assert_eq!(out.status.code(), Some(128));
+    let (_h, report) = super::parse_cli_error_stderr(&out.stderr);
+    assert_eq!(report.error_code, "LBR-REPO-002");
+}
+
+/// IN-03 (M-EXIST E1/E2/E6): a pre-existing FILE where storage is required
+/// fails with 128 LBR-REPO-002 before the reinit banner.
+#[test]
+fn test_init_storage_path_not_directory_matrix() {
+    let root = tempdir().unwrap();
+    let repo = root.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    fs::write(repo.join(".libra"), "x").unwrap();
+
+    let out = run_libra_command(&["init"], &repo);
+    assert_eq!(out.status.code(), Some(128));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("Reinitializing"),
+        "no reinit banner: {stderr}"
+    );
+    let (_h, report) = super::parse_cli_error_stderr(&out.stderr);
+    assert_eq!(report.error_code, "LBR-REPO-002");
+    assert_eq!(fs::read(repo.join(".libra")).unwrap(), b"x");
+
+    // E2: bare `objects` is a file.
+    let bare = root.path().join("bare");
+    fs::create_dir_all(&bare).unwrap();
+    fs::write(bare.join("objects"), "x").unwrap();
+    let out = run_libra_command(&["init", "--bare"], &bare);
+    assert_eq!(out.status.code(), Some(128));
+
+    // E6: JSON envelope.
+    let out = run_libra_command(&["--json", "init"], &repo);
+    assert_eq!(out.status.code(), Some(128));
+    let (_human, report) = super::parse_cli_error_stderr(&out.stderr);
+    assert_eq!(report.error_code, "LBR-REPO-002");
+}
+
+/// IN-08 (M-TPLSRC S1/S2/S4): template sources cascade env > config, and
+/// `--template` wins. The test harness isolates the global config DB per cwd,
+/// so the config source is set from the same directory the init runs in.
+#[test]
+fn test_init_template_sources_matrix() {
+    let root = tempdir().unwrap();
+    let env_tpl = root.path().join("envtpl");
+    fs::create_dir_all(env_tpl.join("hooks")).unwrap();
+    fs::write(env_tpl.join("hooks/env.sh"), "x").unwrap();
+    let cfg_tpl = root.path().join("cfgtpl");
+    fs::create_dir_all(cfg_tpl.join("hooks")).unwrap();
+    fs::write(cfg_tpl.join("hooks/cfg.sh"), "x").unwrap();
+
+    // S1: environment source.
+    let repo = root.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    let env = env_tpl.to_str().unwrap();
+    let out = super::run_libra_command_with_env(&["init"], &repo, &[("GIT_TEMPLATE_DIR", env)]);
+    assert_cli_success(&out, "env template");
+    assert!(repo.join(".libra/hooks/env.sh").exists());
+
+    // S2: config source (same cwd so the isolated global DB matches).
+    let repo2 = root.path().join("repo2");
+    fs::create_dir_all(&repo2).unwrap();
+    let out = run_libra_command(
+        &[
+            "config",
+            "--global",
+            "init.templateDir",
+            cfg_tpl.to_str().unwrap(),
+        ],
+        &repo2,
+    );
+    assert_cli_success(&out, "set init.templateDir");
+    let out = run_libra_command(&["init"], &repo2);
+    assert_cli_success(&out, "config template");
+    assert!(repo2.join(".libra/hooks/cfg.sh").exists());
+
+    // S4: `--template` beats the environment source.
+    let cli_tpl = root.path().join("clitpl");
+    fs::create_dir_all(cli_tpl.join("hooks")).unwrap();
+    fs::write(cli_tpl.join("hooks/cli.sh"), "x").unwrap();
+    let repo3 = root.path().join("repo3");
+    fs::create_dir_all(&repo3).unwrap();
+    let out = super::run_libra_command_with_env(
+        &["init", "--template", cli_tpl.to_str().unwrap()],
+        &repo3,
+        &[("GIT_TEMPLATE_DIR", env)],
+    );
+    assert_cli_success(&out, "cli template");
+    assert!(repo3.join(".libra/hooks/cli.sh").exists());
+    assert!(!repo3.join(".libra/hooks/env.sh").exists());
+}
+
+/// IN-09 (M-DEFHASH H1/H2/H4/H5): object-format sources cascade env > config;
+/// invalid env is 129, invalid config warns and falls back to sha1.
+#[test]
+fn test_init_default_object_format_sources_matrix() {
+    let root = tempdir().unwrap();
+
+    // H2: environment source.
+    let env_repo = root.path().join("env");
+    fs::create_dir_all(&env_repo).unwrap();
+    let out =
+        super::run_libra_command_with_env(&["init"], &env_repo, &[("GIT_DEFAULT_HASH", "sha256")]);
+    assert_cli_success(&out, "env hash");
+
+    // H3 (cli wins): explicit `--object-format` overrides the environment.
+    let cli_repo = root.path().join("cli");
+    fs::create_dir_all(&cli_repo).unwrap();
+    let out = super::run_libra_command_with_env(
+        &["init", "--object-format=sha256"],
+        &cli_repo,
+        &[("GIT_DEFAULT_HASH", "sha1")],
+    );
+    assert_cli_success(&out, "cli hash wins");
+
+    // H1: config source (same cwd so the isolated global DB matches).
+    let cfg_repo = root.path().join("cfg");
+    fs::create_dir_all(&cfg_repo).unwrap();
+    assert_cli_success(
+        &run_libra_command(
+            &["config", "--global", "init.defaultObjectFormat", "sha256"],
+            &cfg_repo,
+        ),
+        "set init.defaultObjectFormat",
+    );
+    let out = run_libra_command(&["init"], &cfg_repo);
+    assert_cli_success(&out, "config hash");
+
+    // H5: invalid env is a usage error with zero writes.
+    let bad = root.path().join("bad");
+    fs::create_dir_all(&bad).unwrap();
+    let out = super::run_libra_command_with_env(&["init"], &bad, &[("GIT_DEFAULT_HASH", "sha999")]);
+    assert_eq!(out.status.code(), Some(129));
+    assert!(!bad.join(".libra").exists());
+
+    // H4: invalid config warns and falls back to sha1.
+    let fallback = root.path().join("fallback");
+    fs::create_dir_all(&fallback).unwrap();
+    assert_cli_success(
+        &run_libra_command(
+            &["config", "--global", "init.defaultObjectFormat", "garbage"],
+            &fallback,
+        ),
+        "set invalid",
+    );
+    let out = run_libra_command(&["init"], &fallback);
+    assert_cli_success(&out, "fallback init");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("unknown hash algorithm"),
+        "warning: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stored = run_libra_command(
+        &["config", "--local", "--get", "core.objectformat"],
+        &fallback,
+    );
+    assert_eq!(String::from_utf8_lossy(&stored.stdout).trim(), "sha1");
 }

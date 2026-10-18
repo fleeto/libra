@@ -567,6 +567,9 @@ async fn setup_repo_with_hash(
         shared: None,
         object_format: Some(object_format.to_string()),
         ref_format: None,
+        separate_git_dir: None,
+        separate_libra_dir: None,
+        recurse_submodules: false,
         from_git_repository: None,
         vault: false,
     })

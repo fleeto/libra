@@ -211,10 +211,20 @@ pub async fn convert_from_git_repository(
 /// - Returns `InitError::Io` when `canonicalize` fails (path no longer exists,
 ///   permission denied, etc.).
 pub(crate) fn resolve_git_source_dir(git_repo: &Path) -> Result<PathBuf, InitError> {
-    let git_dir = if git_repo.join(".git").exists() {
+    let candidate = if git_repo.join(".git").exists() {
         git_repo.join(".git")
     } else {
         git_repo.to_path_buf()
+    };
+
+    // IN-10 (#473): a Git worktree that uses `--separate-git-dir` stores a
+    // regular `.git` FILE whose content is `gitdir: <path>` (absolute or
+    // relative to the pointer file). Resolve it before validating markers so
+    // the worktree path and the pointer path both convert.
+    let git_dir = if candidate.is_file() {
+        resolve_gitdir_pointer(&candidate)?
+    } else {
+        candidate
     };
 
     let valid = git_dir.join("HEAD").exists()
@@ -227,6 +237,43 @@ pub(crate) fn resolve_git_source_dir(git_repo: &Path) -> Result<PathBuf, InitErr
     }
 
     git_dir.canonicalize().map_err(InitError::Io)
+}
+
+/// Parse a Git `gitdir:` pointer file into the real git directory path.
+///
+/// Boundary conditions:
+/// - The content must be a single `gitdir: <path>` line (surrounding
+///   whitespace trimmed); relative targets resolve against the pointer file's
+///   parent directory.
+/// - A malformed pointer, or one whose target is not a directory, is an
+///   invalid Git repository with the pointer path named in the message.
+fn resolve_gitdir_pointer(pointer: &Path) -> Result<PathBuf, InitError> {
+    let content = fs::read_to_string(pointer).map_err(InitError::Io)?;
+    let Some(target) = content.trim().strip_prefix("gitdir:") else {
+        return Err(InitError::InvalidGitRepository {
+            path: pointer.to_path_buf(),
+        });
+    };
+    let target = target.trim();
+    if target.is_empty() {
+        return Err(InitError::InvalidGitRepository {
+            path: pointer.to_path_buf(),
+        });
+    }
+    let resolved = if Path::new(target).is_absolute() {
+        PathBuf::from(target)
+    } else {
+        pointer
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(target)
+    };
+    if !resolved.is_dir() {
+        return Err(InitError::InvalidGitRepository {
+            path: pointer.to_path_buf(),
+        });
+    }
+    resolved.canonicalize().map_err(InitError::Io)
 }
 
 /// Resolve the working-tree root of the source Git repository if one exists.

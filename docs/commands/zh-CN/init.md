@@ -122,7 +122,7 @@ libra init --shared 0770 shared-repo
 
 ### `--ref-format <FORMAT>`
 
-设置引用存储格式。可接受值：`strict`、`filesystem`。
+选择分支名校验规则。可选值：`strict`（默认）与 `filesystem`。Libra 的引用存于 SQLite，因此 Git 的存储后端 `files` 与 `reftable` 会被拒绝并给出提示（有意差异 D25）。
 
 ### `-q, --quiet`
 
@@ -213,6 +213,20 @@ Libra 将所有元数据（config、refs、reflogs、rebase state）存储在 `.
 ### 没有 `--separate-git-dir` / `--separate-libra-dir`
 
 Git 支持通过 `--separate-git-dir` 将 `.git` 目录与工作树解耦，创建一个 `gitdir:` 指针文件。该功能很少使用，却为每个路径解析例程增加复杂度，并在指针文件或目标目录被独立移动时造成微妙破坏。Libra 移除此功能，始终将 `.libra/` 与工作树根共址，简化仓库发现算法并消除一种用户困惑来源。
+
+两个选项仍会被**解析**：传入时返回 `LBR-CLI-002`（退出码 129）与迁移提示，而不是笼统的 “unexpected argument”（有意差异 D25）。**迁移使用 `--separate-git-dir` 的 Git 仓库**只需：
+
+```bash
+libra init --from-git-repository <worktree> <new-dir>
+# 或直接指向指针文件：
+libra init --from-git-repository <worktree>/.git <new-dir>
+```
+
+`--from-git-repository` 会先解析 `gitdir:` 指针（绝对路径，或相对于指针文件所在目录），再复制对象与引用到新的 Libra 仓库。
+
+### `--recurse-submodules`
+
+未实现（D25）：该选项会被解析并拒绝，返回 `LBR-CLI-002` 与「创建仓库后运行 `libra submodule init`」的提示，而不是解析错误。
 
 ### `--from-git-repository` 而不是 Git 缺失的导入
 

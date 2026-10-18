@@ -3788,6 +3788,16 @@ fn operation_error_to_cli(
 ) -> CliError {
     let detail = error.to_string();
     let lower = detail.to_ascii_lowercase();
+    // ADR-IN-02 (#473): corrupt stored repository metadata (a reference row or
+    // `core.objectformat` that cannot be parsed) is repository corruption, not
+    // an internal bug — report it with LBR-REPO-002 so scripts see a repo-state
+    // failure instead of LBR-INTERNAL-001.
+    if lower.contains("stored branch reference")
+        && (lower.contains("is corrupt") || lower.contains("unsupported repository object format"))
+    {
+        return CliError::fatal(detail)
+            .with_stable_code(crate::utils::error::StableErrorCode::RepoCorrupt);
+    }
     if lower.contains("failed to register its cloud object-index repair marker")
         || lower.contains("object-index repair lock")
         || lower.contains("readonly database")

@@ -561,6 +561,9 @@ async fn test_commit_sha256() {
         shared: None,
         object_format: Some("sha256".to_string()),
         ref_format: None,
+        separate_git_dir: None,
+        separate_libra_dir: None,
+        recurse_submodules: false,
         from_git_repository: None,
         vault: false,
     })

@@ -19,12 +19,16 @@ fn init_rejects_separate_libra_dir_flag() {
         &["init", "--separate-libra-dir", storage.to_str().unwrap()],
         &repo,
     );
-    assert_ne!(output.status.code(), Some(0));
+    assert_eq!(output.status.code(), Some(129));
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("unexpected argument '--separate-libra-dir'"),
-        "expected clap parse error, got: {stderr}"
+        stderr.contains("not implemented"),
+        "expected intentional-difference error, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("from-git-repository"),
+        "expected migration hint, got: {stderr}"
     );
     assert!(
         !repo.join(".libra").exists(),
@@ -43,12 +47,16 @@ fn init_rejects_separate_git_dir_alias() {
         &["init", "--separate-git-dir", storage.to_str().unwrap()],
         &repo,
     );
-    assert_ne!(output.status.code(), Some(0));
+    assert_eq!(output.status.code(), Some(129));
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("unexpected argument '--separate-git-dir'"),
-        "expected clap parse error, got: {stderr}"
+        stderr.contains("not implemented"),
+        "expected intentional-difference error, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("from-git-repository"),
+        "expected migration hint, got: {stderr}"
     );
     assert!(
         !repo.join(".libra").exists(),

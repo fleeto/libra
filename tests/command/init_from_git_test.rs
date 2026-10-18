@@ -6,7 +6,7 @@ use std::{fs, path::Path, process::Command};
 
 use tempfile::tempdir;
 
-use super::parse_cli_error_stderr;
+use super::{parse_cli_error_stderr, run_libra_command};
 
 /// Helper to create a simple local Git repository with a single commit and return its path.
 fn create_simple_git_repo() -> (tempfile::TempDir, std::path::PathBuf) {
@@ -1099,4 +1099,97 @@ fn init_from_git_source_config_parser_fixtures() {
         HashKind::Sha1,
         "include must not be followed"
     );
+}
+
+/// IN-10 (M-GITFILE G1/G2/G3/G4): a Git worktree whose `.git` is a `gitdir:`
+/// pointer file (and the pointer path itself) convert; relative pointers
+/// resolve against the pointer dir; malformed pointers are 129 LBR-CLI-003.
+#[test]
+fn test_init_from_git_gitdir_file_matrix() {
+    let root = tempdir().unwrap();
+    let worktree = root.path().join("wt");
+    let realgit = root.path().join("realgit");
+    fs::create_dir_all(&worktree).unwrap();
+    let status = Command::new("git")
+        .args([
+            "init",
+            "-q",
+            &format!("--separate-git-dir={}", realgit.display()),
+        ])
+        .current_dir(&worktree)
+        .status()
+        .unwrap();
+    assert!(status.success(), "git init --separate-git-dir");
+    fs::write(worktree.join("f"), "x\n").unwrap();
+    let status = Command::new("git")
+        .args(["-c", "user.email=a@b", "-c", "user.name=a", "add", "f"])
+        .current_dir(&worktree)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let status = Command::new("git")
+        .args([
+            "-c",
+            "user.email=a@b",
+            "-c",
+            "user.name=a",
+            "commit",
+            "-qm",
+            "x",
+        ])
+        .current_dir(&worktree)
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    // G1: worktree path.
+    let out = run_libra_command(
+        &[
+            "init",
+            "--from-git-repository",
+            worktree.to_str().unwrap(),
+            "conv",
+        ],
+        root.path(),
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(root.path().join("conv/f").exists());
+
+    // G2: pointer file path.
+    let out = run_libra_command(
+        &[
+            "init",
+            "--from-git-repository",
+            worktree.join(".git").to_str().unwrap(),
+            "conv2",
+        ],
+        root.path(),
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // G4: malformed pointer.
+    let bad = root.path().join("bad");
+    fs::create_dir_all(&bad).unwrap();
+    fs::write(bad.join(".git"), "not a pointer\n").unwrap();
+    let out = run_libra_command(
+        &[
+            "init",
+            "--from-git-repository",
+            bad.to_str().unwrap(),
+            "conv3",
+        ],
+        root.path(),
+    );
+    assert_eq!(out.status.code(), Some(129));
+    let (_h, report) = parse_cli_error_stderr(&out.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-003");
+    assert!(!root.path().join("conv3").join(".libra").exists());
 }

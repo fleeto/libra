@@ -3200,7 +3200,9 @@ async fn test_config_upgrade_mode_list_uses_file_and_suppresses_sqlite() {
         &["config", "--global", "--get-regexp", r"upgrade\.legacy"],
         p,
     );
-    assert_cli_success(&regexp, "non-matching --get-regexp");
+    // Git exits 1 when nothing matches; the point of this case is that the
+    // stale reserved row is suppressed (no output), not that the exit is 0.
+    assert_eq!(regexp.status.code(), Some(1));
     assert_eq!(
         String::from_utf8_lossy(&regexp.stdout).trim(),
         "",
@@ -3270,13 +3272,10 @@ fn test_config_upgrade_mode_json_spellings() {
         ],
         p,
     );
-    assert_cli_success(&regexp, "json get-regexp non-matching");
-    let doc: serde_json::Value = serde_json::from_slice(&regexp.stdout).unwrap();
-    assert_eq!(
-        doc["data"]["entries"].as_array().map(Vec::len),
-        Some(0),
-        "{doc}"
-    );
+    // Git exits 1 when a --get-regexp pattern matches nothing; the reserved
+    // row is still suppressed (empty stdout, error envelope on stderr).
+    assert_eq!(regexp.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&regexp.stdout).trim().is_empty());
 
     // JSON rejection envelope carries the usage stable code.
     let add = run_libra_command(
@@ -7247,4 +7246,193 @@ fn config_guard_does_not_block_sha256_init() {
         Some("sha256"),
         "sha256 init must write core.objectformat"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Issue #475: Git CLI-surface parity
+// ---------------------------------------------------------------------------
+
+/// `--get-regexp` accepts a dotless key pattern (the operand is a regexp, not a
+/// key), and a no-match still exits 1.
+#[test]
+#[serial(cwd)]
+fn test_config_get_regexp_dotless_pattern() {
+    let repo = tempdir().unwrap();
+    init_repo_via_cli(repo.path());
+    assert_cli_success(
+        &run_libra_command(&["config", "user.name", "a"], repo.path()),
+        "set user.name",
+    );
+    let out = run_libra_command(&["config", "--get-regexp", "^user"], repo.path());
+    assert_cli_success(&out, "dotless get-regexp must succeed");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("user.name"), "pattern matched: {stdout}");
+
+    let out = run_libra_command(&["config", "--get-regexp", "^zzz"], repo.path());
+    assert_eq!(out.status.code(), Some(1), "no match exits 1");
+}
+
+/// A dotless *key* read is an ordinary failure (exit 1, CLI class), never an
+/// internal-error category.
+#[test]
+#[serial(cwd)]
+fn test_config_dotless_key_is_cli_failure() {
+    let repo = tempdir().unwrap();
+    init_repo_via_cli(repo.path());
+    let out = run_libra_command(&["config", "--get-all", "nosuchkey"], repo.path());
+    assert_eq!(out.status.code(), Some(1));
+    let (_h, report) = parse_cli_error_stderr(&out.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-002");
+    assert_ne!(report.error_code, "LBR-INTERNAL-001");
+}
+
+/// `--replace-all` replaces every value; `--unset <key> <pattern>` removes only
+/// the matching value; `--get <key> <pattern>` selects by value.
+#[test]
+#[serial(cwd)]
+fn test_config_value_pattern_and_replace_all() {
+    let repo = tempdir().unwrap();
+    init_repo_via_cli(repo.path());
+    for value in ["one", "two"] {
+        assert_cli_success(
+            &run_libra_command(&["config", "--add", "multi.k", value], repo.path()),
+            "add value",
+        );
+    }
+
+    // get with a value pattern
+    let out = run_libra_command(&["config", "--get", "multi.k", "^two$"], repo.path());
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "two");
+
+    // unset with a value pattern removes only that value
+    assert_cli_success(
+        &run_libra_command(&["config", "--unset", "multi.k", "^one$"], repo.path()),
+        "patterned unset",
+    );
+    let left = run_libra_command(&["config", "--get-all", "multi.k"], repo.path());
+    assert_eq!(String::from_utf8_lossy(&left.stdout).trim(), "two");
+
+    // a pattern that matches nothing exits 5
+    let out = run_libra_command(&["config", "--unset", "multi.k", "zzz"], repo.path());
+    assert_eq!(out.status.code(), Some(5));
+
+    // --replace-all collapses every remaining value into one
+    assert_cli_success(
+        &run_libra_command(&["config", "--add", "multi.k", "three"], repo.path()),
+        "add third",
+    );
+    assert_cli_success(
+        &run_libra_command(&["config", "--replace-all", "multi.k", "only"], repo.path()),
+        "replace-all",
+    );
+    let all = run_libra_command(&["config", "--get-all", "multi.k"], repo.path());
+    assert_eq!(String::from_utf8_lossy(&all.stdout).trim(), "only");
+}
+
+/// `--show-origin` renders `file:<db>\t` and `--show-scope` renders `<scope>\t`
+/// for `--get` and `--list`.
+#[test]
+#[serial(cwd)]
+fn test_config_show_origin_and_scope_prefix() {
+    let repo = tempdir().unwrap();
+    init_repo_via_cli(repo.path());
+    assert_cli_success(
+        &run_libra_command(&["config", "user.name", "a"], repo.path()),
+        "set user.name",
+    );
+
+    let origin = run_libra_command(
+        &["config", "--show-origin", "--get", "user.name"],
+        repo.path(),
+    );
+    let origin_out = String::from_utf8_lossy(&origin.stdout);
+    assert!(
+        origin_out.starts_with("file:"),
+        "origin prefix: {origin_out}"
+    );
+    assert!(origin_out.contains('\t'));
+
+    let scope = run_libra_command(
+        &["config", "--show-scope", "--get", "user.name"],
+        repo.path(),
+    );
+    assert!(
+        String::from_utf8_lossy(&scope.stdout).starts_with("local\t"),
+        "scope prefix: {}",
+        String::from_utf8_lossy(&scope.stdout)
+    );
+
+    let list = run_libra_command(&["config", "--show-origin", "--list"], repo.path());
+    let list_out = String::from_utf8_lossy(&list.stdout);
+    assert!(
+        list_out
+            .lines()
+            .any(|line| line.starts_with("file:") && line.ends_with("\tuser.name=a")),
+        "list origin row for user.name: {list_out}"
+    );
+}
+
+/// `--file <path>` reads a Git-style INI file (read-only).
+#[test]
+#[serial(cwd)]
+fn test_config_file_read_only() {
+    let repo = tempdir().unwrap();
+    init_repo_via_cli(repo.path());
+    let path = repo.path().join("gitconfig");
+    std::fs::write(
+        &path,
+        "  [user]\n\tname = fileuser\n[core]\n\tbare = false\n",
+    )
+    .unwrap();
+    let file = path.to_str().unwrap();
+
+    let out = run_libra_command(
+        &["config", "--file", file, "--get", "user.name"],
+        repo.path(),
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "fileuser");
+
+    let list = run_libra_command(&["config", "--file", file, "--list"], repo.path());
+    let list_out = String::from_utf8_lossy(&list.stdout);
+    assert!(list_out.contains("core.bare=false"), "list: {list_out}");
+
+    let write = run_libra_command(&["config", "--file", file, "x.y", "z"], repo.path());
+    assert_eq!(write.status.code(), Some(129));
+}
+
+/// `--type=bool-or-str` / `bool-or-int` canonicalize like Git.
+#[test]
+#[serial(cwd)]
+fn test_config_type_bool_or_variants() {
+    let repo = tempdir().unwrap();
+    init_repo_via_cli(repo.path());
+    assert_cli_success(
+        &run_libra_command(&["config", "x.bool", "yes"], repo.path()),
+        "set bool",
+    );
+    let out = run_libra_command(
+        &["config", "--get", "--type=bool-or-str", "x.bool"],
+        repo.path(),
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "true");
+
+    assert_cli_success(
+        &run_libra_command(&["config", "x.text", "hello"], repo.path()),
+        "set text",
+    );
+    let out = run_libra_command(
+        &["config", "--get", "--type=bool-or-str", "x.text"],
+        repo.path(),
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "hello");
+
+    assert_cli_success(
+        &run_libra_command(&["config", "x.int", "1k"], repo.path()),
+        "set int",
+    );
+    let out = run_libra_command(
+        &["config", "--get", "--type=bool-or-int", "x.int"],
+        repo.path(),
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "1024");
 }

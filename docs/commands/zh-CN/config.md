@@ -315,7 +315,8 @@ libra config get --regexp "user\\..*"
 | 标志 | 说明 |
 |------|------|
 | `--name-only` | 只显示 key 名，不显示值 |
-| `--show-origin` | 为每个条目加上 scope 前缀（`local`、`global` 或 `system`） |
+| `--show-origin` | 为每个条目加上来源前缀 `file:<数据库路径>`（Libra 的配置存于 SQLite，而非 INI 文件） |
+| `--show-scope` | 为每个条目加上 `local`/`global`/`system` 作用域前缀 |
 | `--vault` | 只显示 `vault.env.*` 条目 |
 | `--ssh-keys` | 显示 SSH key 条目 |
 | `--gpg-keys` | 显示 GPG key 条目 |
@@ -487,9 +488,14 @@ libra config remove-gpg-key --force
 | `-l`, `--list` | `list` |
 | `--add` | `set --add <key> <value>` |
 | `--import` | `import` |
-| `--get-regexp` | `get --regexp <key>` |
-| `--show-origin` | `list --show-origin` |
-| `--type=<bool\|int\|path>`、`--bool`、`--int`、`--path` | 读取（`--get`/`--get-all`/`--get-regexp`）**与设置**时规范化值：bool 变体 → `true`/`false`；int 支持可选 k/m/g（1024 倍率）；path 展开开头的 `~`/`~/`。设置时在存储前校验+规范化（与 git `config --type` 一致：`yes` → `true`、`1k` → `1024`），非法值报错且不写入。非 get/set 模式会被拒绝（exit 129）。 |
+| `--get-regexp <pattern>` | `get --regexp <pattern>`——操作数是**正则**，因此 `^user` 这类不含点的模式合法；完全不匹配时退出码 1 |
+| `--get <key> [<value-pattern>]` | 给出 value-pattern 时按值（正则）筛选 |
+| `--unset <key> [<value-pattern>]` | 只删除匹配的值；无匹配时退出码 5 |
+| `--show-origin` | 读取/列表输出 `file:<数据库路径>` 前缀（Git 打印 `file:<配置文件路径>`；Libra 配置在 SQLite） |
+| `--show-scope` | 读取/列表输出 `local`/`global`/`system` 前缀（对齐 Git） |
+| `--replace-all <key> <value>` | 用单个值替换该 key 的所有既有值 |
+| `--file <path>` | 读取 Git 风格 INI 文件而非存储（只读：`--get`、`--get-all`、`--get-regexp`、`--list`） |
+| `--type=<bool\|int\|path\|bool-or-str\|bool-or-int>`、`--bool`、`--int`、`--path` | 读取（`--get`/`--get-all`/`--get-regexp`）**与设置**时规范化值：bool 变体 → `true`/`false`；int 支持可选 k/m/g（1024 倍率）；path 展开开头的 `~`/`~/`。设置时在存储前校验+规范化（与 git `config --type` 一致：`yes` → `true`、`1k` → `1024`），非法值报错且不写入。非 get/set 模式会被拒绝（exit 129）。 |
 | `--remove-section <name>` | 在一个事务内删除 section `<name>` 的 key，采用 Git 的 section/subsection 身份（`--remove-section branch` 删 `branch.<key>` 但不动 `branch.feature.*` 子节）。section 不存在 → exit 128。 |
 | `--rename-section <old> <new>` | 把 section `<old>` 的 key 搬到 `<new>`，保留每个值及其加密标志。源不存在 → exit 128；新旧同名 → exit 2；目标 section 已存在则拒绝 → exit 128。 |
 

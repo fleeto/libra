@@ -3,7 +3,11 @@
 //! Supports subcommand style (`libra config set/get/list/unset/import/path`)
 //! and Git-compatible flag style (`--get`, `--list`, etc.).
 
-use std::{io::IsTerminal, path::PathBuf, process::Command};
+use std::{
+    io::IsTerminal,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 use clap::{Parser, Subcommand};
 use once_cell::sync::Lazy;
@@ -342,6 +346,48 @@ impl ScopedConfig {
         Ok(removed)
     }
 
+    /// Remove only the values matching `matcher` (Git `--unset <key> <pattern>`).
+    pub async fn unset_matching(
+        scope: ConfigScope,
+        key: &str,
+        matcher: impl Fn(&str) -> bool,
+    ) -> Result<usize, String> {
+        if scope == ConfigScope::Local && is_core_objectformat_key(key) {
+            return Err(
+                "core.objectformat cannot be changed after init; the object format is fixed at fresh init"
+                    .to_string(),
+            );
+        }
+        let txn = Self::begin_mutation(scope).await?;
+        let removed = ConfigKv::unset_matching_with_conn(&txn, key, matcher)
+            .await
+            .map_err(|e| format!("failed to unset config '{key}': {e}"))?;
+        txn.commit()
+            .await
+            .map_err(|e| format!("failed to commit config update: {e}"))?;
+        Ok(removed)
+    }
+
+    /// Git `--replace-all`: drop every existing value for `key`, then store one.
+    pub async fn replace_all(scope: ConfigScope, key: &str, value: &str) -> Result<(), String> {
+        if scope == ConfigScope::Local && is_core_objectformat_key(key) {
+            return Err(
+                "core.objectformat cannot be changed after init; the object format is fixed at fresh init"
+                    .to_string(),
+            );
+        }
+        let txn = Self::begin_mutation(scope).await?;
+        ConfigKv::unset_all_with_conn(&txn, key)
+            .await
+            .map_err(|e| format!("failed to replace config '{key}': {e}"))?;
+        ConfigKv::set_with_conn(&txn, key, value, false)
+            .await
+            .map_err(|e| format!("failed to replace config '{key}': {e}"))?;
+        txn.commit()
+            .await
+            .map_err(|e| format!("failed to commit config update: {e}"))
+    }
+
     pub async fn unset_all(scope: ConfigScope, key: &str) -> Result<usize, String> {
         if scope == ConfigScope::Local && is_core_objectformat_key(key) {
             return Err(
@@ -419,6 +465,16 @@ pub struct ConfigArgs {
     /// Add a value (allows duplicates)
     #[clap(long, hide = true)]
     pub add: bool,
+    /// Replace all values for a key with a single value (`git config --replace-all`)
+    #[clap(long("replace-all"), hide = true)]
+    pub replace_all: bool,
+    /// Prefix each read/list record with its scope (`git config --show-scope`)
+    #[clap(long("show-scope"), hide = true)]
+    pub show_scope: bool,
+    /// Read configuration from a Git-style INI file instead of the stores
+    /// (`git config --file`). Read-only.
+    #[clap(long = "file", value_name = "PATH", hide = true)]
+    pub file: Option<String>,
     /// Import from Git config
     #[clap(long, hide = true)]
     pub import: bool,
@@ -773,6 +829,13 @@ async fn execute_inner(args: ConfigArgs, output: &OutputConfig) -> CliResult<()>
     // Resolve subcommand: either explicit or translated from Git-compat flags
     let cmd = resolve_command(&args)?;
 
+    // `--file <path>` reads a Git-style INI file instead of the stores
+    // (read-only; Git's one-off script form). Writes stay refused so the
+    // SQLite store never silently loses an update aimed at a file.
+    if let Some(path) = args.file.as_deref() {
+        return serve_config_file(path, &cmd, args.show_origin, args.show_scope, output);
+    }
+
     // Reserved `upgrade.*` namespace, step 2: route every resolved command
     // that targets it to `{LIBRA_HOME}/upgrade/settings.json`, never to the
     // SQLite store.
@@ -797,6 +860,8 @@ async fn execute_inner(args: ConfigArgs, output: &OutputConfig) -> CliResult<()>
             key,
             value,
             add,
+            replace_all,
+            value_pattern,
             encrypt,
             plaintext,
             stdin,
@@ -808,6 +873,8 @@ async fn execute_inner(args: ConfigArgs, output: &OutputConfig) -> CliResult<()>
                 &key,
                 value.as_deref(),
                 add,
+                replace_all,
+                value_pattern.as_deref(),
                 encrypt,
                 plaintext,
                 stdin,
@@ -825,6 +892,9 @@ async fn execute_inner(args: ConfigArgs, output: &OutputConfig) -> CliResult<()>
             all,
             reveal,
             regexp,
+            value_pattern,
+            show_origin,
+            show_scope,
             default,
             null,
             value_type,
@@ -834,6 +904,9 @@ async fn execute_inner(args: ConfigArgs, output: &OutputConfig) -> CliResult<()>
                 all,
                 reveal,
                 regexp,
+                value_pattern.as_deref(),
+                show_origin,
+                show_scope,
                 default.as_deref(),
                 scope,
                 use_cascade,
@@ -846,6 +919,7 @@ async fn execute_inner(args: ConfigArgs, output: &OutputConfig) -> CliResult<()>
         ResolvedCommand::List {
             name_only,
             show_origin,
+            show_scope,
             vault,
             ssh_keys,
             gpg_keys,
@@ -854,6 +928,7 @@ async fn execute_inner(args: ConfigArgs, output: &OutputConfig) -> CliResult<()>
             handle_list(
                 name_only,
                 show_origin,
+                show_scope,
                 vault,
                 ssh_keys,
                 gpg_keys,
@@ -864,7 +939,11 @@ async fn execute_inner(args: ConfigArgs, output: &OutputConfig) -> CliResult<()>
             )
             .await
         }
-        ResolvedCommand::Unset { key, all } => handle_unset(&key, all, scope, output).await,
+        ResolvedCommand::Unset {
+            key,
+            all,
+            value_pattern,
+        } => handle_unset(&key, all, value_pattern.as_deref(), scope, output).await,
         ResolvedCommand::RemoveSection { name } => {
             handle_remove_section(&name, scope, output).await
         }
@@ -1131,6 +1210,8 @@ async fn route_upgrade_namespace(
             // nor how a read would have been terminated.
             explicit_set: _,
             null: _,
+            replace_all: _,
+            value_pattern: _,
         } if is_upgrade_namespace_key(key) => Some(match guard_conflicts() {
             Err(err) => Err(err),
             Ok(()) => {
@@ -1176,7 +1257,7 @@ async fn route_upgrade_namespace(
                 "--get-regexp with a pattern matching the reserved upgrade.mode",
             )))
         }
-        ResolvedCommand::Unset { key, all } if is_upgrade_namespace_key(key) => {
+        ResolvedCommand::Unset { key, all, .. } if is_upgrade_namespace_key(key) => {
             Some(match guard_conflicts() {
                 Err(err) => Err(err),
                 Ok(()) => handle_upgrade_unset(args, key, *all, output).await,
@@ -1379,6 +1460,10 @@ enum ResolvedCommand {
         key: String,
         value: Option<String>,
         add: bool,
+        /// Git `--replace-all`: drop every existing value first.
+        replace_all: bool,
+        /// Git's value-pattern operand for a bare set (`git config k v pattern`).
+        value_pattern: Option<String>,
         encrypt: bool,
         plaintext: bool,
         stdin: bool,
@@ -1399,6 +1484,10 @@ enum ResolvedCommand {
         all: bool,
         reveal: bool,
         regexp: bool,
+        /// Git's value-pattern operand: keep only entries whose value matches.
+        value_pattern: Option<String>,
+        show_origin: bool,
+        show_scope: bool,
         default: Option<String>,
         /// NUL-terminate output records (`-z`/`--null`).
         null: bool,
@@ -1408,6 +1497,7 @@ enum ResolvedCommand {
     List {
         name_only: bool,
         show_origin: bool,
+        show_scope: bool,
         vault: bool,
         ssh_keys: bool,
         gpg_keys: bool,
@@ -1417,6 +1507,8 @@ enum ResolvedCommand {
     Unset {
         key: String,
         all: bool,
+        /// Git's value-pattern operand: remove only matching entries.
+        value_pattern: Option<String>,
     },
     /// Remove an entire section and every key under it.
     RemoveSection {
@@ -1497,6 +1589,8 @@ fn resolve_command_typed(args: &ConfigArgs) -> CliResult<ResolvedCommand> {
                 key: key.clone(),
                 value: value.clone(),
                 add: *add,
+                replace_all: false,
+                value_pattern: None,
                 encrypt: *encrypt,
                 plaintext: *plaintext,
                 stdin: *stdin,
@@ -1515,6 +1609,9 @@ fn resolve_command_typed(args: &ConfigArgs) -> CliResult<ResolvedCommand> {
                 all: *all,
                 reveal: *reveal,
                 regexp: *regexp,
+                value_pattern: None,
+                show_origin: false,
+                show_scope: false,
                 default: default.clone(),
                 null: args.null,
                 value_type,
@@ -1528,6 +1625,7 @@ fn resolve_command_typed(args: &ConfigArgs) -> CliResult<ResolvedCommand> {
             } => ResolvedCommand::List {
                 name_only: *name_only,
                 show_origin: *show_origin,
+                show_scope: false,
                 vault: *vault,
                 ssh_keys: *ssh_keys,
                 gpg_keys: *gpg_keys,
@@ -1536,6 +1634,7 @@ fn resolve_command_typed(args: &ConfigArgs) -> CliResult<ResolvedCommand> {
             ConfigCommand::Unset { key, all } => ResolvedCommand::Unset {
                 key: key.clone(),
                 all: *all,
+                value_pattern: None,
             },
             ConfigCommand::Import => ResolvedCommand::Import,
             ConfigCommand::Path => ResolvedCommand::Path,
@@ -1578,6 +1677,7 @@ fn resolve_command_typed(args: &ConfigArgs) -> CliResult<ResolvedCommand> {
         return Ok(ResolvedCommand::List {
             name_only: false,
             show_origin: args.show_origin,
+            show_scope: args.show_scope,
             vault: false,
             ssh_keys: false,
             gpg_keys: false,
@@ -1645,15 +1745,20 @@ fn resolve_command_typed(args: &ConfigArgs) -> CliResult<ResolvedCommand> {
         CliError::from_legacy_string("error: missing required argument: <key>").with_exit_code(2)
     })?;
 
-    // Validate key format (must contain at least one dot)
-    if !key.contains('.') {
-        let mut msg = format!("error: key does not contain a section: {key}");
+    // `--get-regexp`'s operand is a key PATTERN, not a key: a dotless regex
+    // like `^user` is valid (Git accepts it), so it skips key validation.
+    // Every other mode requires a section, and reports it as an ordinary
+    // failure (Git exits 1) rather than an internal-error category.
+    if !args.get_regexp && !key.contains('.') {
+        let mut msg = format!("key does not contain a section: {key}");
         if key == "init" || key == "clone" {
             msg.push_str(&format!(
                 "\n\nhint: `{key}` is a top-level command. Try `libra {key}`."
             ));
         }
-        return Err(CliError::from_legacy_string(msg).with_exit_code(1));
+        return Err(CliError::failure(msg)
+            .with_stable_code(StableErrorCode::CliInvalidArguments)
+            .with_exit_code(1));
     }
 
     // --default (-d) is only valid with --get, --get-all, or get-regexp
@@ -1670,6 +1775,9 @@ fn resolve_command_typed(args: &ConfigArgs) -> CliResult<ResolvedCommand> {
             all: false,
             reveal: false,
             regexp: true,
+            value_pattern: args.valuepattern.clone(),
+            show_origin: args.show_origin,
+            show_scope: args.show_scope,
             default: args.default.clone(),
             null: args.null,
             value_type,
@@ -1681,6 +1789,9 @@ fn resolve_command_typed(args: &ConfigArgs) -> CliResult<ResolvedCommand> {
             all: false,
             reveal: false,
             regexp: false,
+            value_pattern: args.valuepattern.clone(),
+            show_origin: args.show_origin,
+            show_scope: args.show_scope,
             default: args.default.clone(),
             null: args.null,
             value_type,
@@ -1692,6 +1803,9 @@ fn resolve_command_typed(args: &ConfigArgs) -> CliResult<ResolvedCommand> {
             all: true,
             reveal: false,
             regexp: false,
+            value_pattern: args.valuepattern.clone(),
+            show_origin: args.show_origin,
+            show_scope: args.show_scope,
             default: args.default.clone(),
             null: args.null,
             value_type,
@@ -1701,12 +1815,14 @@ fn resolve_command_typed(args: &ConfigArgs) -> CliResult<ResolvedCommand> {
         return Ok(ResolvedCommand::Unset {
             key: key.to_string(),
             all: false,
+            value_pattern: args.valuepattern.clone(),
         });
     }
     if args.unset_all {
         return Ok(ResolvedCommand::Unset {
             key: key.to_string(),
             all: true,
+            value_pattern: args.valuepattern.clone(),
         });
     }
     if args.add {
@@ -1718,6 +1834,8 @@ fn resolve_command_typed(args: &ConfigArgs) -> CliResult<ResolvedCommand> {
             key: key.to_string(),
             value: Some(value.to_string()),
             add: true,
+            replace_all: false,
+            value_pattern: None,
             encrypt: false,
             plaintext: false,
             stdin: false,
@@ -1734,6 +1852,8 @@ fn resolve_command_typed(args: &ConfigArgs) -> CliResult<ResolvedCommand> {
         key: key.to_string(),
         value: args.valuepattern.clone(),
         add: false,
+        replace_all: args.replace_all,
+        value_pattern: None,
         encrypt: false,
         plaintext: false,
         stdin: false,
@@ -1752,6 +1872,8 @@ async fn handle_set(
     key: &str,
     value: Option<&str>,
     add: bool,
+    replace_all: bool,
+    value_pattern: Option<&str>,
     encrypt: bool,
     plaintext: bool,
     stdin: bool,
@@ -1818,8 +1940,13 @@ async fn handle_set(
     }
 
     // Check encryption state inheritance from existing entries.
-    let assignment_selection =
-        !add && (value.is_some() || stdin || encrypt || (!plaintext && is_sensitive_key(key)));
+    // `--replace-all` and a value-pattern assignment deliberately target a
+    // multi-valued key, so they skip the single-value replacement pre-check
+    // (Git accepts them there).
+    let assignment_selection = !add
+        && !replace_all
+        && value_pattern.is_none()
+        && (value.is_some() || stdin || encrypt || (!plaintext && is_sensitive_key(key)));
     let existing_entries = if assignment_selection {
         ScopedConfig::get_set_replacement_entries(scope, key).await
     } else {
@@ -1827,7 +1954,17 @@ async fn handle_set(
     }
     .map_err(|e| {
         if assignment_selection && e.contains("values exist") {
-            return CliError::from_legacy_string(e).with_exit_code(5);
+            // Git refuses a single-value overwrite of a multi-valued key and
+            // names the escapes; the stable code stays CLI-class (the failure
+            // is user-correctable), with Git's exit 5.
+            return CliError::failure(
+                "cannot overwrite multiple values with a single value".to_string(),
+            )
+            .with_stable_code(StableErrorCode::CliInvalidArguments)
+            .with_hint(format!(
+                "Use a regexp, --add or --replace-all to change {key}."
+            ))
+            .with_exit_code(5);
         }
         config_read_cli_error(format!(
             "failed to read {} config while checking existing values for key '{}': {e}",
@@ -1932,6 +2069,9 @@ async fn handle_set(
                 false,
                 false,
                 None,
+                false,
+                false,
+                None,
                 scope,
                 use_cascade,
                 null,
@@ -1955,7 +2095,7 @@ async fn handle_set(
     // A protected-input assignment has now resolved a value; perform the same
     // multi-value/scope checks before accessing the vault. Ordinary bare reads
     // returned above and never enter this assignment path.
-    if !add && !assignment_selection {
+    if !add && !assignment_selection && !replace_all && value_pattern.is_none() {
         let replacements = ScopedConfig::get_set_replacement_entries(scope, key)
             .await
             .map_err(|error| {
@@ -2043,6 +2183,35 @@ async fn handle_set(
                 }
             })?;
         emit_set_ack("add", scope, key, should_encrypt, output)?;
+    } else if replace_all {
+        // Git `--replace-all`: every existing value is replaced by this one.
+        ScopedConfig::replace_all(scope, key, &store_value)
+            .await
+            .map_err(|e| {
+                if e.contains("core.objectformat cannot be changed") {
+                    core_objectformat_mutation_error("config --replace-all")
+                } else {
+                    CliError::from_legacy_string(e)
+                }
+            })?;
+        emit_set_ack("set", scope, key, should_encrypt, output)?;
+    } else if let Some(pattern) = value_pattern {
+        // Git `config <key> <value> <value-pattern>`: replace only the entries
+        // whose value matches, leaving the others alone.
+        let re = compile_config_regexp(pattern)?;
+        ScopedConfig::unset_matching(scope, key, |value| re.is_match(value))
+            .await
+            .map_err(CliError::from_legacy_string)?;
+        ScopedConfig::add(scope, key, &store_value, should_encrypt)
+            .await
+            .map_err(|e| {
+                if e.contains("core.objectformat cannot be changed") {
+                    core_objectformat_mutation_error("config set")
+                } else {
+                    CliError::from_legacy_string(e)
+                }
+            })?;
+        emit_set_ack("set", scope, key, should_encrypt, output)?;
     } else {
         ScopedConfig::set(scope, key, &store_value, should_encrypt)
             .await
@@ -2055,7 +2224,12 @@ async fn handle_set(
                 }
                 let err = CliError::from_legacy_string(&e);
                 if e.contains("values exist") {
-                    err.with_exit_code(5)
+                    CliError::failure("cannot overwrite multiple values with a single value")
+                        .with_stable_code(StableErrorCode::CliInvalidArguments)
+                        .with_hint(format!(
+                            "Use a regexp, --add or --replace-all to change {key}."
+                        ))
+                        .with_exit_code(5)
                 } else {
                     err
                 }
@@ -2191,6 +2365,10 @@ enum ConfigValueType {
     Bool,
     Int,
     Path,
+    /// `--type=bool-or-str`: canonicalize a boolean spelling, else keep the string.
+    BoolOrStr,
+    /// `--type=bool-or-int`: canonicalize an integer, else a boolean.
+    BoolOrInt,
 }
 
 /// Resolve the requested read type from `--type=<t>` or a `--bool`/`--int`/
@@ -2211,8 +2389,10 @@ fn resolve_value_type(args: &ConfigArgs) -> CliResult<Option<ConfigValueType>> {
         Some("bool") => Ok(Some(ConfigValueType::Bool)),
         Some("int") => Ok(Some(ConfigValueType::Int)),
         Some("path") => Ok(Some(ConfigValueType::Path)),
+        Some("bool-or-str") => Ok(Some(ConfigValueType::BoolOrStr)),
+        Some("bool-or-int") => Ok(Some(ConfigValueType::BoolOrInt)),
         Some(other) => Err(CliError::command_usage(format!(
-            "error: unsupported --type '{other}' (expected bool, int, or path)"
+            "error: unsupported --type '{other}' (expected bool, int, path, bool-or-str, or bool-or-int)"
         ))
         .with_stable_code(StableErrorCode::CliInvalidArguments)),
     }
@@ -2259,6 +2439,16 @@ fn canonicalize_typed_value(value: &str, ty: ConfigValueType) -> CliResult<Strin
             })?;
             Ok(scaled.to_string())
         }
+        ConfigValueType::BoolOrStr => {
+            match canonicalize_typed_value(value, ConfigValueType::Bool) {
+                Ok(canonical) => Ok(canonical),
+                Err(_) => Ok(value.to_string()),
+            }
+        }
+        ConfigValueType::BoolOrInt => match canonicalize_typed_value(value, ConfigValueType::Int) {
+            Ok(canonical) => Ok(canonical),
+            Err(_) => canonicalize_typed_value(value, ConfigValueType::Bool),
+        },
         ConfigValueType::Path => {
             // git --path: expand a leading `~`/`~/` to the home directory.
             // `~user` expansion is not supported (returned unchanged).
@@ -2291,6 +2481,9 @@ async fn handle_get(
     all: bool,
     reveal: bool,
     regexp: bool,
+    value_pattern: Option<&str>,
+    show_origin: bool,
+    show_scope: bool,
     default: Option<&str>,
     scope: ConfigScope,
     use_cascade: bool,
@@ -2346,6 +2539,31 @@ async fn handle_get(
         // so a pattern match can only hit stale legacy rows — suppress them
         // (§A.3; exact-key reads are routed to the settings file instead).
         entries.retain(|(e, _)| !is_upgrade_namespace_key(&e.key));
+        // Git's value-pattern operand filters matches by VALUE as well.
+        let value_re = value_pattern.map(compile_config_regexp).transpose()?;
+        if let Some(re) = &value_re {
+            entries.retain(|(e, _)| re.is_match(&e.value));
+        }
+
+        // Git exits 1 when a `--get-regexp` pattern matches nothing.
+        if entries.is_empty() {
+            if let Some(d) = default {
+                let d = apply_value_type(d.to_string(), value_type)?;
+                if !output.quiet {
+                    if null {
+                        print!("{d}\0");
+                    } else {
+                        println!("{d}");
+                    }
+                }
+                return Ok(());
+            }
+            return Err(
+                CliError::failure(format!("no matching config keys for '{key}'"))
+                    .with_stable_code(StableErrorCode::CliInvalidArguments)
+                    .with_exit_code(1),
+            );
+        }
 
         // Build display values with decryption support
         let mut display_entries = Vec::new();
@@ -2373,10 +2591,16 @@ async fn handle_get(
                 output,
             )?;
         } else if !output.quiet {
-            for (e, _, val) in &display_entries {
+            for (e, s, val) in &display_entries {
+                let prefix = read_record_prefix(**s, show_origin, show_scope);
                 if null {
-                    // `git config -z --get-regexp`: key\nvalue\0 per entry.
+                    // `git config -z --get-regexp`: [origin\0]key\nvalue\0.
+                    if !prefix.is_empty() {
+                        print!("{prefix}\0");
+                    }
                     print!("{}\n{val}\0", e.key);
+                } else if !prefix.is_empty() {
+                    println!("{prefix}\t{} {val}", e.key);
                 } else {
                     println!("{} = {val}", e.key);
                 }
@@ -2396,6 +2620,15 @@ async fn handle_get(
                 .into_iter()
                 .map(|e| (e, scope))
                 .collect()
+        };
+
+        let value_re = value_pattern.map(compile_config_regexp).transpose()?;
+        let entries: Vec<(ConfigKvEntry, ConfigScope)> = match &value_re {
+            Some(re) => entries
+                .into_iter()
+                .filter(|(e, _)| re.is_match(&e.value))
+                .collect(),
+            None => entries,
         };
 
         if entries.is_empty()
@@ -2450,17 +2683,38 @@ async fn handle_get(
                 output,
             )?;
         } else if !output.quiet {
-            for (_, _, val) in &display_entries {
+            for (e, s, val) in &display_entries {
+                let prefix = read_record_prefix(**s, show_origin, show_scope);
                 if null {
+                    if !prefix.is_empty() && show_origin {
+                        print!("{prefix}\0");
+                    }
                     print!("{val}\0");
+                } else if !prefix.is_empty() {
+                    println!("{prefix}\t{val}");
                 } else {
+                    let _ = e;
                     println!("{val}");
                 }
             }
         }
     } else {
-        // Get single value (last-one-wins)
-        let entry: Option<(ConfigKvEntry, ConfigScope)> = if use_cascade {
+        // Get single value (last-one-wins). With a value-pattern operand the
+        // pattern selects among the stored values, like Git.
+        let entry: Option<(ConfigKvEntry, ConfigScope)> = if let Some(pattern) = value_pattern {
+            let re = compile_config_regexp(pattern)?;
+            let candidates: Vec<(ConfigKvEntry, ConfigScope)> = if use_cascade {
+                get_all_cascaded(key).await.map_err(config_read_cli_error)?
+            } else {
+                ScopedConfig::get_all(scope, key)
+                    .await
+                    .map_err(CliError::from_legacy_string)?
+                    .into_iter()
+                    .map(|e| (e, scope))
+                    .collect()
+            };
+            candidates.into_iter().rfind(|(e, _)| re.is_match(&e.value))
+        } else if use_cascade {
             get_cascaded(key).await.map_err(config_read_cli_error)?
         } else {
             ScopedConfig::get(scope, key)
@@ -2546,8 +2800,16 @@ async fn handle_get(
                 output,
             )?;
         } else if !output.quiet {
+            let prefix = origin_scope
+                .map(|s| read_record_prefix(s, show_origin, show_scope))
+                .unwrap_or_default();
             if null {
+                if !prefix.is_empty() && show_origin {
+                    print!("{prefix}\0");
+                }
                 print!("{display_value}\0");
+            } else if !prefix.is_empty() {
+                println!("{prefix}\t{display_value}");
             } else {
                 println!("{display_value}");
             }
@@ -2556,10 +2818,278 @@ async fn handle_get(
     Ok(())
 }
 
+/// Read-only `--file <path>` support: parse a Git-style INI file and answer
+/// get/get-all/get-regexp/list from it. Writes are refused so a file target can
+/// never be silently redirected to the SQLite store.
+fn serve_config_file(
+    path: &str,
+    cmd: &ResolvedCommand,
+    show_origin: bool,
+    show_scope: bool,
+    output: &OutputConfig,
+) -> CliResult<()> {
+    let entries = read_git_config_file(Path::new(path))?;
+    let origin = format!("file:{path}");
+    let prefix = if show_scope {
+        "command line".to_string()
+    } else if show_origin {
+        origin.clone()
+    } else {
+        String::new()
+    };
+
+    let (key, all, regexp, value_pattern, default, value_type, list) = match cmd {
+        ResolvedCommand::Get {
+            key,
+            all,
+            regexp,
+            value_pattern,
+            default,
+            value_type,
+            ..
+        } => (
+            key.as_str(),
+            *all,
+            *regexp,
+            value_pattern.as_deref(),
+            default.as_deref(),
+            *value_type,
+            false,
+        ),
+        ResolvedCommand::List { .. } => ("", false, false, None, None, None, true),
+        _ => {
+            return Err(CliError::command_usage(
+                "--file supports read operations only (--get/--get-all/--get-regexp/--list)",
+            )
+            .with_stable_code(StableErrorCode::CliInvalidArguments));
+        }
+    };
+
+    let value_re = value_pattern.map(compile_config_regexp).transpose()?;
+    let mut matches: Vec<(String, String)> = if list {
+        entries
+    } else if regexp {
+        let re = compile_config_regexp(key)?;
+        entries
+            .into_iter()
+            .filter(|(k, _)| re.is_match(k))
+            .collect()
+    } else {
+        let lower = key.to_ascii_lowercase();
+        entries
+            .into_iter()
+            .filter(|(k, _)| k.to_ascii_lowercase() == lower)
+            .collect()
+    };
+    if let Some(re) = &value_re {
+        matches.retain(|(_, v)| re.is_match(v));
+    }
+
+    if matches.is_empty() {
+        if let Some(d) = default {
+            let d = apply_value_type(d.to_string(), value_type)?;
+            if output.is_json() {
+                return emit_json_data(
+                    "config",
+                    &serde_json::json!({
+                        "action": if list { "list" } else { "get" },
+                        "key": key,
+                        "value": d,
+                        "default_applied": true,
+                    }),
+                    output,
+                );
+            }
+            if !output.quiet {
+                println!("{d}");
+            }
+            return Ok(());
+        }
+        if list {
+            return Ok(());
+        }
+        return Err(CliError::failure(format!("key '{key}' not found"))
+            .with_stable_code(StableErrorCode::CliInvalidArguments)
+            .with_exit_code(1));
+    }
+
+    if output.is_json() {
+        return emit_json_data(
+            "config",
+            &serde_json::json!({
+                "action": if list { "list" } else if regexp { "get-regexp" } else { "get" },
+                "file": path,
+                "entries": matches.iter().map(|(k, v)| serde_json::json!({
+                    "key": k,
+                    "value": v,
+                    "origin": origin,
+                })).collect::<Vec<_>>(),
+            }),
+            output,
+        );
+    }
+    if output.quiet {
+        return Ok(());
+    }
+    if list {
+        for (k, v) in &matches {
+            if prefix.is_empty() {
+                println!("{k}={v}");
+            } else {
+                println!("{prefix}\t{k}={v}");
+            }
+        }
+    } else if regexp {
+        for (k, v) in &matches {
+            if prefix.is_empty() {
+                println!("{k} {v}");
+            } else {
+                println!("{prefix}\t{k} {v}");
+            }
+        }
+    } else {
+        let value = if all {
+            matches
+                .iter()
+                .map(|(_, v)| v.clone())
+                .collect::<Vec<_>>()
+                .join("\n")
+        } else {
+            matches.last().map(|(_, v)| v.clone()).unwrap_or_default()
+        };
+        if prefix.is_empty() {
+            println!("{value}");
+        } else {
+            println!("{prefix}\t{value}");
+        }
+    }
+    Ok(())
+}
+
+/// Minimal Git-config INI reader: `[section]`, `[section "sub"]`,
+/// `[section.sub]`, `key = value`, `#`/`;` comments, and simple quoting.
+fn read_git_config_file(path: &Path) -> CliResult<Vec<(String, String)>> {
+    let text = std::fs::read_to_string(path).map_err(|error| {
+        CliError::fatal(format!(
+            "failed to read config file '{}': {error}",
+            path.display()
+        ))
+        .with_stable_code(StableErrorCode::IoReadFailed)
+    })?;
+    let mut entries = Vec::new();
+    let mut section = String::new();
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix('[') {
+            let Some(inner) = rest.split(']').next() else {
+                continue;
+            };
+            section = parse_ini_section(inner);
+            continue;
+        }
+        let Some((name, value)) = line.split_once('=') else {
+            continue;
+        };
+        if section.is_empty() {
+            continue;
+        }
+        entries.push((
+            format!("{}.{}", section, name.trim().to_ascii_lowercase()),
+            unquote_ini_value(value.trim()),
+        ));
+    }
+    Ok(entries)
+}
+
+fn parse_ini_section(inner: &str) -> String {
+    let inner = inner.trim();
+    if let Some((head, rest)) = inner.split_once(char::is_whitespace) {
+        let sub = rest.trim().trim_matches('"');
+        if !sub.is_empty() {
+            return format!("{}.{}", head.trim().to_ascii_lowercase(), sub);
+        }
+        return head.trim().to_ascii_lowercase();
+    }
+    // `[section.sub]` keeps the subsection verbatim after the first dot.
+    match inner.split_once('.') {
+        Some((head, tail)) => format!("{}.{}", head.to_ascii_lowercase(), tail),
+        None => inner.to_ascii_lowercase(),
+    }
+}
+
+fn unquote_ini_value(value: &str) -> String {
+    let value = value.trim();
+    if let Some(stripped) = value.strip_prefix('"') {
+        let mut out = String::new();
+        let mut escaped = false;
+        for ch in stripped.chars() {
+            if escaped {
+                out.push(ch);
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                return out;
+            } else {
+                out.push(ch);
+            }
+        }
+        return out;
+    }
+    // Strip an unquoted trailing comment (`value ; comment`).
+    match value.find(['#', ';']) {
+        Some(index) => value[..index].trim_end().to_string(),
+        None => value.to_string(),
+    }
+}
+
+/// `git config --show-origin`/`--show-scope` record prefix.
+///
+/// `origin` renders `file:<database path>` (Libra stores config in SQLite, and
+/// the `upgrade.*` reserved entry already used this form); `scope` renders the
+/// bare scope name. Both are omitted when neither flag is set.
+fn read_record_prefix(scope: ConfigScope, show_origin: bool, show_scope: bool) -> String {
+    if show_scope {
+        return scope_name(scope).to_string();
+    }
+    if show_origin && let Some(path) = scope_origin_path(scope) {
+        return format!("file:{}", path.display());
+    }
+    String::new()
+}
+
+/// Database path backing `scope`, for `--show-origin` display only.
+///
+/// The local scope stores configuration in the repository database, which is
+/// resolved from the working directory (and is absent outside a repository),
+/// so this never panics and never influences store selection.
+fn scope_origin_path(scope: ConfigScope) -> Option<PathBuf> {
+    match scope {
+        ConfigScope::Local => crate::utils::util::try_get_storage_path(None)
+            .ok()
+            .map(|storage| storage.join(crate::utils::util::DATABASE)),
+        other => other.get_config_path(),
+    }
+}
+
+/// Compile a value-pattern / key-pattern operand with Git's POSIX-extended
+/// regexp semantics (the `regex` crate is the closest available engine).
+fn compile_config_regexp(pattern: &str) -> CliResult<regex::Regex> {
+    regex::Regex::new(pattern).map_err(|error| {
+        CliError::failure(format!("invalid pattern '{pattern}': {error}"))
+            .with_stable_code(StableErrorCode::CliInvalidArguments)
+            .with_exit_code(2)
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn handle_list(
     name_only: bool,
     show_origin: bool,
+    show_scope: bool,
     vault: bool,
     ssh_keys: bool,
     gpg_keys: bool,
@@ -2759,8 +3289,10 @@ async fn handle_list(
                         } else {
                             Some(format!("{}{plaintext_warning}", e.value))
                         },
-                        origin: if show_origin {
+                        origin: if show_scope {
                             Some(scope_name(s).to_string())
+                        } else if show_origin {
+                            scope_origin_path(s).map(|path| format!("file:{}", path.display()))
                         } else {
                             None
                         },
@@ -2800,6 +3332,15 @@ async fn handle_list(
                     (Some(origin), None) if null => print!("{origin}\0{}\0", e.key),
                     (None, Some(val)) if null => print!("{}\n{val}\0", e.key),
                     (None, None) if null => print!("{}\0", e.key),
+                    // `git config --show-origin`: `file:<path>\tkey=value`.
+                    (Some(origin), Some(val)) if show_origin => {
+                        println!("{origin}\t{}={val}", e.key)
+                    }
+                    (Some(origin), None) if show_origin => println!("{origin}\t{}", e.key),
+                    (Some(origin), Some(val)) if show_scope => {
+                        println!("{origin}\t{}={val}", e.key)
+                    }
+                    (Some(origin), None) if show_scope => println!("{origin}\t{}", e.key),
                     (Some(origin), Some(val)) => println!("  {:<8} {} = {val}", origin, e.key),
                     (Some(origin), None) => println!("  {:<8} {}", origin, e.key),
                     (None, Some(val)) => println!("{}={val}", e.key),
@@ -2813,6 +3354,13 @@ async fn handle_list(
             .await
             .map_err(CliError::from_legacy_string)?;
 
+        let single_origin = if show_scope {
+            Some(scope_name(scope).to_string())
+        } else if show_origin {
+            scope_origin_path(scope).map(|path| format!("file:{}", path.display()))
+        } else {
+            None
+        };
         let mut entries: Vec<ConfigListEntry> = scope_entries
             .into_iter()
             // Reserved namespace: suppress any legacy SQLite `upgrade.*` rows.
@@ -2832,7 +3380,7 @@ async fn handle_list(
                     } else {
                         Some(format!("{}{plaintext_warning}", e.value))
                     },
-                    origin: None,
+                    origin: single_origin.clone(),
                     encrypted: Some(e.encrypted),
                 }
             })
@@ -2858,12 +3406,23 @@ async fn handle_list(
             )?;
         } else if !output.quiet {
             for e in &entries {
-                match &e.value {
-                    // `git config -z --list`: key\nvalue\0 (key\0 with --name-only).
-                    Some(val) if null => print!("{}\n{val}\0", e.key),
-                    None if null => print!("{}\0", e.key),
-                    Some(val) => println!("{}={val}", e.key),
-                    None => println!("{}", e.key),
+                let prefix = match (&e.origin, show_scope || show_origin) {
+                    (Some(origin), true) => Some(origin.as_str()),
+                    _ => None,
+                };
+                match (&e.value, prefix) {
+                    // `git config -z --list`: [origin\0]key\nvalue\0.
+                    (Some(val), Some(prefix)) if null => {
+                        print!("{prefix}\0{}\n{val}\0", e.key)
+                    }
+                    (None, Some(prefix)) if null => print!("{prefix}\0{}\0", e.key),
+                    (Some(val), None) if null => print!("{}\n{val}\0", e.key),
+                    (None, None) if null => print!("{}\0", e.key),
+                    // `--show-origin`/`--show-scope`: prefix<TAB>key=value.
+                    (Some(val), Some(prefix)) => println!("{prefix}\t{}={val}", e.key),
+                    (None, Some(prefix)) => println!("{prefix}\t{}", e.key),
+                    (Some(val), None) => println!("{}={val}", e.key),
+                    (None, None) => println!("{}", e.key),
                 }
             }
         }
@@ -2975,6 +3534,7 @@ async fn list_gpg_key_entries(scope: ConfigScope) -> CliResult<Vec<ConfigGpgKeyE
 async fn handle_unset(
     key: &str,
     all: bool,
+    value_pattern: Option<&str>,
     scope: ConfigScope,
     output: &OutputConfig,
 ) -> CliResult<()> {
@@ -2987,7 +3547,13 @@ async fn handle_unset(
             "config --unset"
         },
     )?;
-    let count = if all {
+    let count = if let Some(pattern) = value_pattern {
+        // Git `--unset <key> <value-pattern>`: remove only the matching values.
+        let re = compile_config_regexp(pattern)?;
+        ScopedConfig::unset_matching(scope, key, |value| re.is_match(value))
+            .await
+            .map_err(CliError::from_legacy_string)?
+    } else if all {
         ScopedConfig::unset_all(scope, key)
             .await
             .map_err(CliError::from_legacy_string)?
@@ -3001,6 +3567,19 @@ async fn handle_unset(
             }
         })?
     };
+
+    // Git reports "no such key" (exit 5) when a value-pattern matches nothing
+    // and when a plain unset finds no entry; Libra keeps its existing lenient
+    // unset for the plain form but must not claim a patterned removal happened.
+    if count == 0
+        && let Some(pattern) = value_pattern
+    {
+        return Err(
+            CliError::failure(format!("no value of '{key}' matches '{pattern}'"))
+                .with_stable_code(StableErrorCode::CliInvalidArguments)
+                .with_exit_code(5),
+        );
+    }
 
     if output.is_json() {
         emit_json_data(

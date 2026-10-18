@@ -2709,7 +2709,7 @@ Incomplete，不产生新的 `SemanticRecord::Reasoning` 或 v1 digest claim；�
 留给 `DEFER-OG25-COVERAGE-V2` 进行全路径 schema bump。
 候选、未知状态、reasoning 上的同名 SDK metadata、重复 JSON key／消息／part ID
 或错误类型都保持 partial，
-候选或不支持的 reasoning part 同时删除 `text`，防止明文位置重复 opaque 值或片段；
+候选或不支持的 reasoning part 把字符串 `text` 和未证明的 `state`、`time`、`originProof` 写入普通副本，这些字段不是 native artifact；
 只给出固定且无载荷的状态／诊断；错误或不支持的 export 封套生成无正文 partial，
 使用现有通用 `SourceAuthorizationMismatch` 原因；`try_into_ordinary` 与 checkpoint consumer
 均拒绝未证实候选。
@@ -2927,8 +2927,8 @@ session。owning carrier 在绑定时记录 `repo_id`、Libra session、provider
 正确本身不验证 scope，也不证明 native 来源。generic ordinary consumer 继续拒绝
 `Unproven`。
 
-unsupported reasoning state（包括 `reasoningField`）连同关联 reasoning text/time
-全部删除。opaque hints 包括 `signature`、`redactedData`、
+unsupported reasoning state（包括 `reasoningField`）与可读的关联 reasoning text/time
+一并写入普通 transcript，包含 text、time 与 opaque state。opaque hints 包括 `signature`、`redactedData`、
 `reasoningEncryptedContent`、`thoughtSignature`、`originProof`。原始解析树任意
 位置出现 `originProof` key（包括错型或未知嵌套值）或 sealed candidate 都不能走
 该 fallback。只有完成擦除和 Redactor 的结果可入库，metadata flag 不能授此权限。
@@ -2984,9 +2984,9 @@ remains unproven.
 This ordinary baseline is scoped to automatic capture, a durable checkpoint and the
 ordinary redacted export of that checkpoint, with prompt, model and token
 projections compared to the authorized source. Unsupported reasoning state is
-discarded. The source/snapshot status pair is `Unproven` / `Partial`: `Unproven`
+retained with its text. The source/snapshot status pair is `Unproven` / `Partial`: `Unproven`
 is the internal source classification, while `Partial` is the persisted
-completeness value. The associated reasoning text/time is omitted. The model comparison uses `extraction.model` from the
+completeness value. Readable reasoning text is retained. Associated reasoning time is retained with the unproven fields. The model comparison uses `extraction.model` from the
 native assistant record. The top-level `model` is hook metadata and can differ.
 Token totals use distinct native assistant records without counting the session
 summary twice. A no-tool sample proves only empty-files consistency, not a

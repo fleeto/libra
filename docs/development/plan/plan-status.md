@@ -1,5 +1,7 @@
 # 计划执行状况总表（plan-status.md）
 
+> **USER-OG-THINKING-RETAIN-20261018（2026-10-18 07:36:52 UTC，工作区已实现，未提交、未发布）：** 用户要求把隐私要求降到能保存 thinking，并写入未证明字段。助手 reasoning 的字符串 `text` 与未证明 `state`、`time`、`originProof` 及顶层 `signature`、`redactedData`、`reasoningEncryptedContent`、`thoughtSignature` 进入普通 transcript。来源仍是 `Unproven` / `Partial`，不归档为 native artifact。本条只替代方案 C 当时的普通副本删除规则，不新增任务卡，不增加完成分子。历史 import 仍 `LBR-AGENT-020`。已发布 0.30.52 不含此行为。完整边界与本次测试见 [USER-OG-THINKING-RETAIN-20261018](plan-20260902.md#user-og-thinking-retain-20261018)。
+
 > **四 provider 计划复审（2026-10-18 02:00:57 UTC，当前修订）：** 以 OpenCode 方案 C 的 ordinary 采集、已交付 ACF/SCAP/RG/COV2 为基线，Codex 29 张未完成 CX 卡、Claude 9 卡、Pi 11 卡、Hermes 10 卡全部仍为 pending（规划审查不增加实现完成数）。本轮 Codex 自审PASS；Claude Code R4及最终R5对四份及总评均实际`VERDICT: PASS`，root已采纳（各计划review log登记实际raw/report SHA及七文件输入manifest）。旧PASS/429保留原时点历史。下一候选分别为 CX-00 / CC-00 / PI-00 / HM-00 的只读 source 审计；实现须先选卡授权、消费具体 GO 产物并完成 shared I 逐文件交接。fmt/strict clippy、最终97守卫及双env完整nextest10262/10262通过（12slow、1leaky、23skip），详细证据见各计划；不记未来卡验收完成。本次仅计划文档no-release，不bump/tag；本提交Actions在Push后查询并于下一次正常状态同步记账，不预填成功。Hermes 新计划见 [plan-20261018-hermes-capture.md](plan-20261018-hermes-capture.md)。
 
 

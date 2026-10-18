@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### OpenCode thinking capture
+
+- Write assistant reasoning text and unproven fields into the ordinary OpenCode
+  checkpoint transcript. Retained fields include `state` (`signature`, including
+  an empty abort signature, `redactedData`, `reasoningEncryptedContent`),
+  `originProof`, reasoning `time`, and top-level `signature`, `redactedData`,
+  `reasoningEncryptedContent`, and `thoughtSignature`. The checkpoint stays
+  `Unproven` / `Partial` and does not archive those fields as native artifacts.
+
 ## [0.30.51] — 2026-10-17
 
 ### Native installation challenge isolation

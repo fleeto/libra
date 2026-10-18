@@ -1019,10 +1019,11 @@ partial status. Same-named keys in free-form content are not native-origin evide
 `state.time` are outside the 2.0.26 native schema and are removed with partial
 status.
 Named opaque fields, unknown state shapes and malformed/ambiguous exports stay
-partial with no artifact. Candidate-bearing or unsupported reasoning also drops
-its `text` from the ordinary copy because it may repeat opaque bytes; unsupported envelopes may yield a content-free
+partial with no artifact. Assistant reasoning keeps its string `text` and unproven
+`state`, `time`, `originProof`, `signature`, `redactedData`, and
+`reasoningEncryptedContent` in the ordinary copy. Unsupported envelopes may yield a content-free
 partial snapshot with the existing generic `SourceAuthorizationMismatch`
-reason. Same-named SDK metadata on reasoning is also removed
+reason. Same-named SDK metadata on reasoning is still removed
 and kept partial; it never proves native origin.
 This does not change the public CLI or grant OpenCode native archive authority;
 real installed-model acceptance is local macOS only and remains outside CI.
@@ -1315,8 +1316,9 @@ session and agent kind at bind time and checks them against the actual checkpoin
 request. The HMAC is an opaque string; its format alone does not verify the scope
 or prove native origin. Generic ordinary consumers stay closed to `Unproven`.
 
-Unsupported reasoning state, including `reasoningField`, is removed together with
-its associated reasoning text and time. Opaque hints include `signature`,
+Unsupported reasoning state, including `reasoningField`, is written with the readable
+associated reasoning text and time. The ordinary transcript keeps that text, `time`,
+`state`, and the other unproven fields. Opaque hints include `signature`,
 `redactedData`, `reasoningEncryptedContent`, `thoughtSignature` and `originProof`.
 An original `originProof` key anywhere in the parsed source, including malformed
 or unfamiliar nested values, or a sealed candidate prevents this fallback.
@@ -1380,9 +1382,9 @@ remains unproven.
 This ordinary baseline is scoped to automatic capture, a durable checkpoint and the
 ordinary redacted export of that checkpoint, with prompt, model and token
 projections compared to the authorized source. Unsupported reasoning state is
-discarded. The source/snapshot status pair is `Unproven` / `Partial`: `Unproven`
+retained with its text. The source/snapshot status pair is `Unproven` / `Partial`: `Unproven`
 is the internal source classification, while `Partial` is the persisted
-completeness value. The associated reasoning text/time is omitted. The model comparison uses `extraction.model` from the
+completeness value. Readable reasoning text is retained. Associated reasoning time is retained with the unproven fields. The model comparison uses `extraction.model` from the
 native assistant record. The top-level `model` is hook metadata and can differ.
 Token totals use distinct native assistant records without counting the session
 summary twice. A no-tool sample proves only empty-files consistency, not a

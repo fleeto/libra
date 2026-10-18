@@ -77,7 +77,7 @@ libra agent checkpoint export <checkpoint-id> -o capture.json
 ```
 
 已授权源包含不支持的 reasoning state 时，可以将安全普通副本存为 `Unproven` / `Partial`，
-保留 prompt、model 和 token 投影，丢弃不支持的 reasoning state 及关联 text/time。
+保留 prompt、model、token 投影和可读 reasoning text，丢弃不支持的 reasoning state 及 time。
 这不授予 native artifact、Complete coverage claim 或 native ACK；原始任意 `originProof`
 或 sealed candidate 仍不能走此 fallback。含这类 state 的历史 import 仍报
 `LBR-AGENT-020`；普通采集不启用该 import 或 durable partial replay。真实 native
@@ -1018,8 +1018,8 @@ session。owning carrier 在绑定时记录 `repo_id`、Libra session、provider
 正确本身不验证 scope，也不证明 native 来源。generic ordinary consumer 继续拒绝
 `Unproven`。
 
-unsupported reasoning state（包括 `reasoningField`）连同关联 reasoning text/time
-全部删除。opaque hints 包括 `signature`、`redactedData`、
+unsupported reasoning state（包括 `reasoningField`）与可读的关联 reasoning text/time
+一并写入普通 transcript，包含 text、time 与 opaque state。opaque hints 包括 `signature`、`redactedData`、
 `reasoningEncryptedContent`、`thoughtSignature`、`originProof`。原始解析树任意
 位置出现 `originProof` key（包括错型或未知嵌套值）或 sealed candidate 都不能走
 该 fallback。只有完成擦除和 Redactor 的结果可入库，metadata flag 不能授此权限。
@@ -1071,7 +1071,7 @@ HTTP status；错型或敏感 error 保持 partial。adapter 的离线 synthetic
 普通脱敏 export，并将 prompt、model、token 投影与已授权源比较。删除
 unsupported reasoning state 后，来源/已存 snapshot 的状态对为 `Unproven` / `Partial`：
 `Unproven` 仅指内部 source 分类，`Partial` 才是持久化 completeness 值。
-关联 reasoning text/time 不保留。model 比较使用 native assistant record 的
+可读 reasoning text 保留。关联 reasoning time 与未证明字段一并保留。model 比较使用 native assistant record 的
 `extraction.model`；顶层 `model` 来自 hook metadata，可以不同。token 只累加
 不同 native assistant record，不重复累加 session summary。无工具调用的样本
 只证明 empty-files consistency（空文件一致性），不证明 write/edit/apply_patch 正例。

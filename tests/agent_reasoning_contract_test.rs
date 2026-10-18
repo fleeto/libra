@@ -219,9 +219,10 @@ fn cov2_production_typed_path_uses_v2_api() {
     }
 }
 
-/// In-memory persistence spies see only the actual preview's redacted outputs.
-/// Canaries deliberately do not match a secret regex: absence proves erasure,
-/// not a regex hiding a leaked candidate. No Session, exporter, DB or model.
+/// In-memory persistence spies see the actual preview's redacted outputs.
+/// Canaries deliberately do not match a secret regex. The ordinary transcript
+/// keeps unproven reasoning text and state. Typed coverage does not. No
+/// Session, exporter, DB or model.
 #[test]
 fn cov2_candidate_zero_plaintext_sinks() {
     use libra::internal::ai::capture::snapshot::{CaptureSnapshotPolicy, CaptureSnapshotService};
@@ -258,18 +259,17 @@ fn cov2_candidate_zero_plaintext_sinks() {
         assert_eq!(sinks.ordinary.len(), 1);
         assert_eq!(sinks.typed.len(), 1);
         assert!(!sinks.ordinary[0].is_empty());
+        let ordinary_text = String::from_utf8(sinks.ordinary[0].clone()).expect("UTF8");
         let decoded: serde_json::Value =
             serde_json::from_slice(&sinks.ordinary[0]).expect("ordinary JSON");
-        for output in [
-            String::from_utf8(sinks.ordinary[0].clone()).expect("UTF8"),
-            decoded.to_string(),
-            sinks.typed[0].to_string(),
-        ] {
-            assert!(
-                !output.contains(CANARY),
-                "candidate reached a plaintext sink"
-            );
-        }
+        assert!(
+            ordinary_text.contains(CANARY) && decoded.to_string().contains(CANARY),
+            "ordinary transcript dropped unproven reasoning fields"
+        );
+        assert!(
+            !sinks.typed[0].to_string().contains(CANARY),
+            "typed coverage retained an unproven reasoning field"
+        );
         let rows = sinks.typed[0]["turns"]
             .as_array()
             .expect("nonempty turn output");

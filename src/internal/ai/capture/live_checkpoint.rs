@@ -5557,9 +5557,9 @@ pub(crate) mod tests {
         assert!(!bytes.is_empty());
         let stored = String::from_utf8(bytes).expect("stored JSON is UTF-8");
         assert!(stored.contains(VERIFIED_PARTIAL_TEXT));
-        assert!(!stored.contains(VERIFIED_PARTIAL_CANARY));
-        assert!(!stored.contains("reasoningField"));
-        assert!(!stored.contains("PRIVATE_STATE_CANARY"));
+        assert!(stored.contains(VERIFIED_PARTIAL_CANARY));
+        assert!(stored.contains("reasoningField"));
+        assert!(stored.contains("PRIVATE_STATE_CANARY"));
         assert_eq!(metadata["transcript_snapshot"]["completeness"], "partial");
         assert_eq!(
             metadata["transcript_snapshot"]["partial_reason"],
@@ -5596,8 +5596,8 @@ pub(crate) mod tests {
         assert!(!bytes.is_empty());
         let stored = String::from_utf8(bytes).expect("stored terminal JSON is UTF-8");
         assert!(stored.contains(VERIFIED_PARTIAL_TEXT));
-        assert!(!stored.contains(VERIFIED_PARTIAL_CANARY));
-        assert!(!stored.contains("reasoningField"));
+        assert!(stored.contains(VERIFIED_PARTIAL_CANARY));
+        assert!(stored.contains("reasoningField"));
         assert_eq!(metadata["transcript_snapshot"]["completeness"], "partial");
         let completed = terminal.current().await.expect("terminal catalog state");
         assert_eq!(

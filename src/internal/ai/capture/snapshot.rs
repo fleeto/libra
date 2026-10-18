@@ -3427,7 +3427,8 @@ mod tests {
             .bytes();
         let visible = std::str::from_utf8(ordinary).expect("JSON remains UTF-8");
         assert!(visible.contains("messages"));
-        for forbidden in [
+        for required in [
+            "safe visible",
             "sig-",
             "red-",
             "enc-",
@@ -3436,8 +3437,8 @@ mod tests {
             "signature",
         ] {
             assert!(
-                !visible.contains(forbidden),
-                "ordinary output leaked {forbidden}"
+                visible.contains(required),
+                "ordinary output dropped unproven {required}"
             );
         }
         assert!(!format!("{snapshot:?}").contains("sig-"));
@@ -3584,7 +3585,10 @@ mod tests {
             "PRIVATE_ASSOCIATED_REASONING_CANARY",
             "PRIVATE_STATE_CANARY",
         ] {
-            assert!(!String::from_utf8_lossy(copy).contains(canary));
+            assert!(
+                String::from_utf8_lossy(copy).contains(canary),
+                "ordinary partial transcript dropped {canary}"
+            );
         }
         assert!(
             verified_partial_fixture_snapshot(capture, source, dir.path())

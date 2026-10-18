@@ -1,5 +1,7 @@
 # OpenCode coverage schema-v2 前置实施计划（2026-10-13）
 
+> **USER-OG-THINKING-RETAIN-20261018（2026-10-18 07:36:52 UTC，工作区已实现，未提交、未发布）：** 父计划普通 transcript 改为保留助手 thinking 与未证明字段。来源仍是 `Unproven` / `Partial`，类型化覆盖仍不含这些字段，不归档 native artifact，不增加本计划卡或完成分子。已发布 0.30.52 不含此行为。完整边界见 [USER-OG-THINKING-RETAIN-20261018](plan-20260902.md#user-og-thinking-retain-20261018)。
+
 > **现行最终范围：方案 C（USER-OG-FINAL-C-20261017；用户明确决定，随本次单 Claude PASS 与签名 main 交付采纳）。** 保留普通 OpenCode 采集、安全 ordinary 投影和字段审计；`signature`、`redactedData`、`reasoningEncryptedContent` 来源未获证明时保持 partial/不归档。本计划取消可信 native 启动补强、当前 `.3` producer 准入及三字段 native 归档的交付承诺，**不是延期等待，也不是 Source A PASS**。六张未完成卡撤出本轮范围，未修复/失败/UNRUN 原据保留；不把撤销计为完成。原始库存74卡，撤销6后范围库存68卡：正式 **66/68=97.06%**、source **66/68=97.06%**；其中 OG-15、FIX-OG-CP-01 仍维持此前用户延期/后验决定，本次不改，当前可执行 macOS 范围 **66/66=100%**，本轮任务卡及最终计划全量已全部通过。COV **26/26** 不变。OG-08、OG-06、OG-25、OG-26 与 FAST-OG-04 已继承实际 v0.30.52 / F `bc77500b8814c2f9f37ae29ba82ff43eff68055d` 的安全 CI、四平台8/8发布、稳定签名清单/CDN/Homebrew、网站及指定 curl 本机安装 C/D；Source A/三字段归档仍未获证明或启用。完整撤销表、现行依赖与完成定义见[方案 C 最终契约](plan-20260902.md#ordinary-final-c-20261017)。以下早期带“当前/下一张/延期/native 必须完成”的文字均为原时点历史；有冲突时以本契约为准。
 
 
@@ -250,6 +252,7 @@
 
 | 时间 | 触发 | 变更内容 | 原卡 → 新卡 | 受影响引用 |
 |---|---|---|---|---|
+| 2026-10-18 07:36:52 UTC | USER-OG-THINKING-RETAIN-20261018 镜像 | 父计划普通 transcript 保留助手 thinking 与未证明字段；本计划类型化覆盖仍排除这些字段 | 无新增卡；COV 26/26 不变 | 仅顶部现行说明与本行；不改已发布 COV AC/VER，不授 native |
 | 2026-10-17 15:57:12 UTC | USER-OG-FINAL-C-20261017镜像 | 父C方案成为最终范围，取消BOOT/OG24/27/28/29/05及native-only依赖/lease；初始环境延期关闭为未修复/非PASS | 父68库存（61done/5待交付/2原延期），可执行macOS66；COV26/26和全部原AC/VER不变 | 仅父scope/DEP/接收者/计数镜像；不重开已发布COV、不改F/tag/资产、不授native、不新增测试或运行时写权 |
 | 2026-10-16 05:41:51 UTC | SRC029候选scope66→68 | 采用fixed R2作为全来源待审输入；只授新successor三README编辑，TS保持固定；登记official29断言失败/R2修正通过；S1/S2/S5/S7/S8计数、canonical DEP及镜像同改 | 无新增/拆分任务；72/26与60/72、62/72不变；OG24仍6AC8VER | SRC029输入与原门、全部68范围/五TS delta、未来grant/无source或native GO；v050不变 |
 | 2026-10-16 02:13:58 UTC | release CODE R1/R2 FAIL；main f6ff整合后重新冻结 | R5加入CHANGELOG；恢复VER4及历史R4；新最终50 full/六manual，原visible-only观察按完整行为同一性映射；保留全部C/D与native边界 | COV2-REL-01不拆卡，12AC/12VER不变 | 本卡I/R、粒度、三plan镜像、freeze/测试/发布门；旧失败不改写 |

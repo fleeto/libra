@@ -95,6 +95,7 @@
 | 2026-10-18 16:05:00 UTC | Codex R1 FAIL | 补上 ER 与 G 规则节；Verification 改为完整函数名并要求非零；GK-04 落地改为 3；review log 去掉非法结果词 | 无新卡 | 执行检查、粒度规则、GK-01..05 Verification、审计表、review log |
 | 2026-10-18 16:20:00 UTC | Codex R2 FAIL | ER-04 补上 PR、同一 head 的 base.yml/CodeQL、squash merge 后再对 merge SHA 发布；GK-01 只消费 GK-00 的 GO 正文；单元测试改到集成测试根函数；审计命令不再被「必须 1 passed」套住 | 无新卡 | ER-04、ER-14、Verification 判定口径、GK-00/GK-01 依赖、四张卡的测试命令 |
 | 2026-10-19 | GK-00 审计 | 公开 grok-build HEAD `2bdd1d6a6369de0e8c68132ea4539e9abd9e14a8` 的 shell 是 1.0.45，对不上本机 1.0.62。DEP-GK-PIN 与 GK-01..GK-05 为 HOLD | 无新卡 | GK-00 审计结论、plan-status |
+| 2026-10-19 | 版本修订号 | `grok --version` 为 `1.0.62 (1474f9cbdd91)`，该前缀在公开仓库不存在，二进制无完整 SHA | 无新卡 | GK-00 审计结论 |
 
 ## 已决议设计决策
 
@@ -293,7 +294,7 @@ G-01..G-11 与模板相同。本计划的取值如下。
 
 ### GK-00 审计结论（2026-10-19）
 
-公开仓库 `xai-org/grok-build` 最新提交是 `2bdd1d6a6369de0e8c68132ea4539e9abd9e14a8`（2026-09-29，message `Synced from monorepo`）。该树的 `crates/codegen/xai-grok-shell/Cargo.toml` 版本是 `1.0.45`。根上 `SOURCE_REV` 是 `559751fdcec02d413e4c57c8832ab275e4f44980`，这是 1.0.45 同步时的 monorepo SHA，不是 1.0.62。公开历史 51 个提交都更早，最新 crate 版本仍是 1.0.45。本机安装版本是 `1.0.62`（2026-10-18 核对）。同一路径的用户指南 `17-sessions.md` 不相等：本机 SHA-256 `95c1893520877457aabcf9fa7286dd6f22c83d2dad792c020dd579e7ca520728`，公开 HEAD SHA-256 `eab0fe715f74f2e379d3ee4f68e68d095aee64d78348f9ac25629619caceafc5`。因此 **DEP-GK-PIN = HOLD**。不用浮动 `main` 冒充 1.0.62。
+公开仓库 `xai-org/grok-build` 最新提交是 `2bdd1d6a6369de0e8c68132ea4539e9abd9e14a8`（2026-09-29，message `Synced from monorepo`）。该树的 `crates/codegen/xai-grok-shell/Cargo.toml` 版本是 `1.0.45`。根上 `SOURCE_REV` 是 `559751fdcec02d413e4c57c8832ab275e4f44980`，这是 1.0.45 同步时的 monorepo SHA，不是 1.0.62。公开历史 51 个提交都更早，最新 crate 版本仍是 1.0.45。本机安装版本是 `1.0.62`（2026-10-18 核对）。同一路径的用户指南 `17-sessions.md` 不相等：本机 SHA-256 `95c1893520877457aabcf9fa7286dd6f22c83d2dad792c020dd579e7ca520728`，公开 HEAD SHA-256 `eab0fe715f74f2e379d3ee4f68e68d095aee64d78348f9ac25629619caceafc5`。本机 `grok --version` 打印 `grok 1.0.62 (1474f9cbdd91)`。二进制里只有这 12 位，没有 40 位完整 SHA。GitHub 对 `xai-org/grok-build` 查询 `1474f9cbdd91` 返回 “No commit found for SHA”。因此 **DEP-GK-PIN = HOLD**。不用浮动 `main` 冒充 1.0.62。要解开 HOLD，需要该仓库里出现与 1.0.62 对应的完整 commit，或提供能读到那棵树的权限。
 
 本机 1.0.62 的字段矩阵只作为未钉住的观察，不能当 parser 的 source pin：
 

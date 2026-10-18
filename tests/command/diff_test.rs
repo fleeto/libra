@@ -502,8 +502,8 @@ async fn test_diff_after_init() {
     let args = DiffArgs::parse_from(["diff", "--output", output_str]);
     diff::execute(args).await;
 
-    // Since P1-03 the default diff matches Git: the untracked .libraignore
-    // created by init is NOT part of it, and an empty repository diffs empty.
+    // Since P1-03 the default diff matches Git: untracked files are NOT part
+    // of it, and an empty repository diffs empty.
     let content = fs::read_to_string(&output_file).unwrap_or_default();
     assert!(
         content.trim().is_empty(),
@@ -512,10 +512,11 @@ async fn test_diff_after_init() {
     );
 
     // Once staged, the file appears with the /dev/null old header via --staged.
+    fs::write(test_dir.path().join("staged.txt"), "staged\n").unwrap();
     add::execute(AddArgs {
         intent_to_add: false,
         sparse: false,
-        pathspec: vec![String::from(".libraignore")],
+        pathspec: vec![String::from("staged.txt")],
         all: false,
         update: false,
         refresh: false,
@@ -540,12 +541,12 @@ async fn test_diff_after_init() {
     diff::execute(staged_args).await;
     let staged_content = fs::read_to_string(&staged_file).unwrap_or_default();
     assert!(
-        staged_content.contains("diff --git a/.libraignore b/.libraignore"),
-        "staged .libraignore must be visible in diff --staged, got: {staged_content}"
+        staged_content.contains("diff --git a/staged.txt b/staged.txt"),
+        "staged file must be visible in diff --staged, got: {staged_content}"
     );
     assert!(
-        staged_content.contains("# Libra ignore file"),
-        "default .libraignore contents expected in diff --staged, got: {staged_content}"
+        staged_content.contains("+staged"),
+        "staged content expected in diff --staged, got: {staged_content}"
     );
 }
 
@@ -3529,5 +3530,46 @@ fn test_diff_three_dot_positional_and_no_merge_base() {
         String::from_utf8_lossy(&three.stdout),
         String::from_utf8_lossy(&explicit.stdout),
         "A...B equals --old <merge-base> --new B"
+    );
+}
+
+/// WT-06 / issue #476 M-ITA-VIEW V4–V6: `add -N` is rendered as a NEW file by
+/// the worktree diff, is absent from `--cached`, and appears in `diff HEAD`.
+#[test]
+fn test_diff_intent_to_add_as_new_file() {
+    let repo = create_committed_repo_via_cli();
+    let root = repo.path();
+    fs::write(root.join("new.txt"), "new\n").expect("write new");
+    assert_cli_success(
+        &run_libra_command(&["add", "-N", "new.txt"], root),
+        "add -N",
+    );
+
+    // V4: the unstaged diff compares /dev/null with the worktree content.
+    let diff = run_libra_command(&["diff"], root);
+    assert_cli_success(&diff, "diff");
+    let text = String::from_utf8_lossy(&diff.stdout);
+    assert!(
+        text.contains("new file mode 100644"),
+        "V4 expected a new-file header: {text:?}"
+    );
+    assert!(text.contains("+new"), "V4 content: {text:?}");
+
+    // V5: the empty-blob placeholder is not staged content.
+    let cached = run_libra_command(&["diff", "--cached"], root);
+    assert_cli_success(&cached, "diff --cached");
+    assert!(
+        cached.stdout.is_empty(),
+        "V5 diff --cached must be empty: {:?}",
+        String::from_utf8_lossy(&cached.stdout)
+    );
+
+    // V6: HEAD-vs-worktree also reports the new file.
+    let head = run_libra_command(&["diff", "HEAD"], root);
+    assert_cli_success(&head, "diff HEAD");
+    let head_text = String::from_utf8_lossy(&head.stdout);
+    assert!(
+        head_text.contains("new file mode 100644") && head_text.contains("+new"),
+        "V6 diff HEAD: {head_text:?}"
     );
 }

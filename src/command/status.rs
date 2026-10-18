@@ -398,6 +398,12 @@ pub struct StatusData {
     has_commits: bool,
     staged: Changes,
     unstaged: Changes,
+    /// WT-06 (ADR-WT-05): index stage-0 entries carrying the v3
+    /// `intent_to_add` extended flag whose working-tree file exists. Git
+    /// renders these as the unstaged worktree side of a new file (` A` /
+    /// `new file:`), never as a staged `A` row: the index holds only the empty
+    /// blob placeholder. Paths are in the same display base as `unstaged`.
+    intent_to_add: Vec<PathBuf>,
     unmerged: Vec<UnmergedEntry>,
     ignored_files: Vec<PathBuf>,
     stash_count: Option<usize>,
@@ -431,6 +437,12 @@ pub struct StatusData {
     /// closed on any entry; JSON reports the partial result plus
     /// `data.io_blocked[]` with `is_clean = false`.
     io_blocked: Vec<crate::command::status_probe::IoBlockedEvent>,
+    /// WT-06 follow-up (t7508): the current directory relative to the
+    /// repository root. Display paths in `staged`/`unstaged`/`intent_to_add`
+    /// are cwd-relative, but Git orders short/porcelain rows by the
+    /// REPOSITORY-ROOT path. Renderers join this base before sorting (empty
+    /// at the root, where display order and root order already agree).
+    sort_base: PathBuf,
     /// ADR-FM-06 (#470 FM-05): legacy-materialization repair candidates —
     /// index 100755, working tree not executable, content identical. Drives
     /// the one human long-format hint only (short/porcelain/JSON unchanged).
@@ -989,7 +1001,21 @@ pub async fn changes_to_be_committed_safe() -> Result<Changes, StatusError> {
         source,
     })?;
     let head_commit = Head::current_commit().await;
-    let tracked_files = index.tracked_files();
+    // WT-06/WT-07 (ADR-WT-05): an intent-to-add entry is an empty-blob
+    // PLACEHOLDER for a new file, not staged content. Git never reports it as
+    // `A ` and never writes it into a tree; excluding it here is the single
+    // staged-side rule every consumer (status, commit, rm) shares.
+    let intent_to_add: HashSet<PathBuf> = index
+        .tracked_entries(0)
+        .into_iter()
+        .filter(|entry| entry.flags.intent_to_add)
+        .map(|entry| PathBuf::from(&entry.name))
+        .collect();
+    let tracked_files: Vec<PathBuf> = index
+        .tracked_files()
+        .into_iter()
+        .filter(|path| !intent_to_add.contains(path))
+        .collect();
 
     if head_commit.is_none() {
         changes.new = tracked_files;
@@ -1018,7 +1044,13 @@ pub async fn changes_to_be_committed_safe() -> Result<Changes, StatusError> {
         let Some(item_str) = item_path.to_str() else {
             continue;
         };
-        if index.tracked(item_str, 0) {
+        // WT-06 (t2203:18): Git treats an intent-to-add placeholder as ABSENT
+        // on the index side. If HEAD has the path, that is a staged DELETION
+        // (`D` in column 1) even though stage 0 holds the empty blob; the
+        // worktree side then supplies the `A` (`DA` when the file exists).
+        if intent_to_add.contains(item_path) {
+            changes.deleted.push(item_path.clone());
+        } else if index.tracked(item_str, 0) {
             // A staged change is either a content change (blob hash differs) OR a
             // mode change (e.g. `add --chmod=+x`): the index records 100755 while
             // the HEAD tree still has 100644, with the same blob.
@@ -1840,7 +1872,7 @@ mod test {
             mk("uu.txt", [true, true, true]),
         ];
         let empty = Changes::default();
-        let rows = generate_short_format_status_with_unmerged(&empty, &empty, &unmerged);
+        let rows = generate_short_format_status_with_unmerged(&empty, &empty, &unmerged, &[]);
         let by_path: std::collections::BTreeMap<_, _> = rows
             .into_iter()
             .map(|(path, x, y)| (path, (x, y)))

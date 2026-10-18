@@ -12,7 +12,11 @@ libra init [OPTIONS] [DIRECTORY]
 
 `libra init` 创建新的 Libra 仓库，在 `.libra/libra.db` 中初始化 SQLite-backed 元数据，配置 `HEAD`，并可选导入已有本地 Git 仓库。
 
-在已有目录中运行 `libra init` 会创建 `.libra` 子目录，其中包含对象存储、SQLite 数据库、默认配置、指向初始分支的 HEAD，以及（默认）vault-backed PGP 签名密钥。非 bare 仓库还会获得一个可见的根 `.libraignore` 文件用于 ignore 规则。如果给出 `DIRECTORY` 且该目录不存在，会先创建该目录。
+在已有目录中运行 `libra init` 会创建 `.libra` 子目录，其中包含对象存储、SQLite 数据库、默认配置、指向初始分支的 HEAD，以及（默认）vault-backed PGP 签名密钥。如果给出 `DIRECTORY` 且该目录不存在，会先创建该目录。
+
+与 Git 一致，`libra init` 会让新工作树保持干净：**不会**创建默认 `.libraignore`。需要
+Libra 专有 ignore 规则时请自行创建（或转换现有 `.gitignore`）；ignore 来源按需读取，
+无需初始化。
 
 提供 `--from-git-repository` 时，会从源 Git 仓库导入对象和 refs，并配置 `origin` 指向源分支布局。转换后的仓库会把源仓库实际 `HEAD` 分支报告为 `initial_branch`；不会使用 `init.defaultBranch` 重命名或错误报告导入分支。在源工作树或已 checkout 导入中发现的任何 `.gitignore` 文件都会复制为匹配的 `.libraignore` 文件。
 

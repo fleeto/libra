@@ -204,6 +204,12 @@ commit (create/copy files and use 'libra add' to track)`.
 libra commit -a -m "Fix typo"
 ```
 
+An intent-to-add entry (`libra add -N`) is a placeholder, not staged content:
+`commit` with only such entries refuses with `no changes added to commit`, and a
+commit that stages other paths never records the placeholder (the entry stays in
+the index). `commit -a` stages the file's real worktree content, clears the flag,
+and commits it — matching Git's `t2203` behavior.
+
 ### `-s, --signoff`
 
 Add a `Signed-off-by` trailer at the end of the commit message, using the committer's

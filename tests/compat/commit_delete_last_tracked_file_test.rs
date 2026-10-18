@@ -279,9 +279,8 @@ fn libra_deletes_last_tracked_file_via_add_all_and_commit() {
 
     fs::remove_file(fixture.repo.join("only.txt")).expect("remove only.txt");
     fixture.success(&fixture.repo, &["add", "-A"]);
-    // `add -A` may also pick up untracked files (the init-generated
-    // `.libraignore` lands in the commit, matching `git add -A`); the
-    // deletion itself must still land, so only.txt must be gone from HEAD.
+    // `add -A` may also pick up any other untracked files; the deletion
+    // itself must still land, so only.txt must be gone from HEAD.
     fixture.success(
         &fixture.repo,
         &["commit", "--no-verify", "-m", "delete last"],
@@ -305,8 +304,9 @@ fn libra_clean_repo_still_reports_nothing_to_commit() {
     fixture.init_repo();
 
     fs::write(fixture.repo.join("kept.txt"), "kept\n").expect("write kept.txt");
-    // Track `.libraignore` too so the repo is genuinely clean (no untracked files).
-    fixture.success(&fixture.repo, &["add", "kept.txt", ".libraignore"]);
+    // WT-03: `init` creates no default `.libraignore`, so kept.txt alone
+    // leaves the repository genuinely clean.
+    fixture.success(&fixture.repo, &["add", "kept.txt"]);
     fixture.success(&fixture.repo, &["commit", "--no-verify", "-m", "baseline"]);
 
     // No changes staged and no untracked leftovers: must be refused.
@@ -350,7 +350,7 @@ fn libra_unstaged_deletion_is_refused_by_plain_commit() {
     fixture.init_repo();
 
     fs::write(fixture.repo.join("only.txt"), "only\n").expect("write only.txt");
-    fixture.success(&fixture.repo, &["add", "only.txt", ".libraignore"]);
+    fixture.success(&fixture.repo, &["add", "only.txt"]);
     fixture.success(&fixture.repo, &["commit", "--no-verify", "-m", "baseline"]);
 
     // Filesystem-only deletion; nothing staged.

@@ -789,9 +789,11 @@ async fn run_init_internal(
     }
 
     let mut warnings = Vec::new();
-    if !args.bare {
-        ignore::ensure_root_libraignore(&target_dir)?;
-    }
+    // WT-03 (ADR-WT-04): do NOT create a comment-only root `.libraignore`.
+    // Git leaves a fresh worktree clean, and the stub carried no rules; a
+    // user-created `.libraignore` (or one produced by `.gitignore`
+    // conversion below) still works. The former `ensure_root_libraignore`
+    // call is intentionally gone so `libra init` matches Git's post-init UX.
 
     let target_guard_path = target_dir
         .canonicalize()

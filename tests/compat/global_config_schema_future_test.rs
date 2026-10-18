@@ -923,8 +923,7 @@ fn op_undo_keeps_traces_ref_advanced_by_agent_hooks() {
     let mut tips = Vec::new();
     for (index, content) in ["first\n", "second\n"].into_iter().enumerate() {
         fs::write(fixture.repo.join("tracked.txt"), content).expect("write tracked file");
-        // `init` writes `.libraignore`; tracking it keeps the tree clean.
-        fixture.success(&fixture.repo, &["add", "tracked.txt", ".libraignore"]);
+        fixture.success(&fixture.repo, &["add", "tracked.txt"]);
         let message = format!("commit {index}");
         fixture.success(
             &fixture.repo,

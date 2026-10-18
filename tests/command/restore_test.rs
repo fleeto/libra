@@ -1538,3 +1538,39 @@ fn test_restore_issue476_verified_surface_guard() {
         "G7 --source=HEAD restores HEAD content"
     );
 }
+
+/// WT-07 / issue #476 M-ITA-WRITE W5: `restore --staged <path>` removes an
+/// intent-to-add entry, leaving the worktree file untracked.
+#[test]
+fn test_restore_staged_removes_intent_to_add_entry() {
+    let repo = tempdir().expect("tempdir");
+    let root = repo.path();
+    init_repo_via_cli(root);
+    configure_identity_via_cli(root);
+    fs::write(root.join("tracked.txt"), "tracked\n").expect("write tracked");
+    assert_cli_success(&run_libra_command(&["add", "tracked.txt"], root), "add");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "init", "--no-verify"], root),
+        "commit",
+    );
+    fs::write(root.join("new.txt"), "new\n").expect("write new");
+    assert_cli_success(
+        &run_libra_command(&["add", "-N", "new.txt"], root),
+        "add -N",
+    );
+
+    assert_cli_success(
+        &run_libra_command(&["restore", "--staged", "new.txt"], root),
+        "restore --staged",
+    );
+    let files = libra_stdout(&["ls-files"], root);
+    assert!(
+        !files.contains("new.txt"),
+        "restore must drop the entry: {files}"
+    );
+    let status = libra_stdout(&["status", "-s"], root);
+    assert!(
+        status.contains("?? new.txt"),
+        "file is untracked again: {status}"
+    );
+}

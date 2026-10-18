@@ -268,6 +268,20 @@ async fn run_remove(args: RemoveArgs) -> CliResult<RemoveOutput> {
         // Check for both
         let mut buf = Vec::new();
         for path_str in remove_list.iter() {
+            // WT-07 (ADR-WT-05): `git rm --cached <intent-to-add>` succeeds —
+            // the empty-blob entry is only a placeholder, so there is no
+            // staged content to protect. A worktree `rm` (no --cached) is the
+            // "staged content different from both the file and the HEAD"
+            // refusal Git reports.
+            let is_intent_to_add = index
+                .get(path_str, 0)
+                .is_some_and(|entry| entry.flags.intent_to_add);
+            if is_intent_to_add {
+                if !args.cached {
+                    buf.push(path_str.clone());
+                }
+                continue;
+            }
             if changes_staged.contains(&PathBuf::from(&path_str))
                 && changes_committed.contains(&PathBuf::from(&path_str))
             {

@@ -21,6 +21,11 @@ libra rm [--json|--machine] --dry-run <pathspec>...
 
 Pathspec 使用 Libra 共享的 Git 风格匹配器：普通 pathspec 匹配文件或目录前缀，支持通配符，并支持高价值 magic 形式 `:(top)`、`:/`、`:(glob)`、`:(literal)`、`:(icase)`、`:(exclude)`、`:!`、`:^`。排除 pathspec 会从正向选择中扣除；启用 `core.ignorecase` 时，匹配会按忽略大小写处理。看起来像通配符的 pathspec 也会匹配同名的字面路径或目录前缀，以保留 Git 对 bracket 文件名和目录名的行为。
 
+intent-to-add 条目（`libra add -N`）只是占位，不是已暂存内容：对它可以成功执行
+`libra rm --cached <path>`；而工作树形式的 `libra rm <path>` 会按 Git 的
+`staged content different from both the file and the HEAD` 拒绝。两种形式都可用
+`--force` 覆盖。
+
 移除文件前，Libra 会检查未提交更改（包括已暂存和未暂存）。如果文件相对索引有本地修改，或索引与 HEAD 不同，除非传递 `--force` 或使用 `--cached`，否则命令会拒绝继续。此安全检查可防止文件有未保存工作时发生静默数据丢失。
 
 别名：`remove`、`delete`。三个名称都会调用同一命令。

@@ -21,6 +21,10 @@ refs、索引、工作区或对象存储。未提供状态筛选时，默认使�
 输出 NUL 分隔文本记录、通过 `-t` 输出状态标签，以及通过 `-u` / `--unmerged`
 只列出冲突条目。`--full-name` 作为 no-op 接受（Libra 始终输出仓库根相对路径）。
 
+intent-to-add 条目（`libra add -N`）在列表层面就是普通 stage-0 索引条目：
+`ls-files -s` 输出 mode `100644`、规范空 blob
+`e69de29bb2d1d6434b8b29ae775ad8c2e48c5391` 与 stage `0`，与 Git 一致。
+
 已跟踪符号链接在 `--deleted` 和 `--modified` 下按链接本身检查：dangling symlink 仍被视为存在，不会列为删除；链接目标变化会列为 modified。
 
 Pathspec 会相对于调用命令时的当前工作目录解析，而不是强制相对于仓库根目录。

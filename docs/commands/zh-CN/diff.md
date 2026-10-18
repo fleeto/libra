@@ -24,7 +24,9 @@ libra diff [--compact-summary] [--diff-filter=<FILTER>] [--full-index]
 
 ## 说明
 
-`libra diff` 显示仓库不同状态之间的更改。默认情况下，它比较索引和已跟踪工作树路径（未暂存更改）。未跟踪文件不属于默认 diff，因此不会影响 `--quiet`、`--exit-code`、`--name-status`、`--numstat` 或 `--shortstat`；请用 `libra status`、`libra ls-files --others` 或 `libra add` 检查或纳入未跟踪文件。使用 `--staged` 时，它比较 HEAD 和索引（已暂存更改）。使用 `--old` 和 `--new` 时，它比较两个任意提交。
+`libra diff` 显示仓库不同状态之间的更改。默认情况下，它比较索引和已跟踪工作树路径（未暂存更改）。未跟踪文件不属于默认 diff，因此不会影响 `--quiet`、`--exit-code`、`--name-status`、`--numstat` 或 `--shortstat`；请用 `libra status`、`libra ls-files --others` 或 `libra add` 检查或纳入未跟踪文件。
+
+intent-to-add 条目（`libra add -N`）是例外：Git 把它的索引侧视为不存在，因此工作树文件按新文件参与 diff（`new file mode 100644`，`--name-status` 下为 `A`），而 `diff --cached` 完全省略它，因为空 blob 只是占位。使用 `--staged` 时，它比较 HEAD 和索引（已暂存更改）。使用 `--old` 和 `--new` 时，它比较两个任意提交。
 
 非 squash 合并因冲突暂停时，位置参数 `AUTO_MERGE` 可作为包含冲突标记的自动结果 tree-ish。它只在 `merge --continue`、`--abort` 或 `--quit` 前可用；干净合并和 squash 合并不会创建它。六个历史伪引用仍会作为 diff revision 被拒绝。
 

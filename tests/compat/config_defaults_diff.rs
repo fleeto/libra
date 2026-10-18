@@ -251,11 +251,6 @@ fn diff_empty_blob_does_not_consume_the_comparison_budget() {
     let fixture = Fixture::new();
     let repo = fixture.path("diff-empty-blob-budget");
     fixture.init_repo(&repo);
-    // `init` leaves `.libraignore` untracked; commit it so the candidate set
-    // below is exactly what this test builds and the comparison count is
-    // deterministic.
-    fixture.success(&repo, &["add", ".libraignore"]);
-    fixture.success(&repo, &["commit", "-m", "track the ignore file"]);
     // One empty file and one genuine inexact candidate.
     fixture.commit_file(&repo, "empty.txt", "", "empty base");
     fixture.commit_file(

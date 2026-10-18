@@ -13,10 +13,7 @@ fn create_archive_test_repo() -> tempfile::TempDir {
     fs::write(repo.path().join("README.md"), "# Test\n").expect("failed to write README");
     fs::write(repo.path().join("src/main.rs"), "fn main() {}\n").expect("failed to write main.rs");
 
-    let output = run_libra_command(
-        &["add", ".libraignore", "README.md", "src/main.rs"],
-        repo.path(),
-    );
+    let output = run_libra_command(&["add", "README.md", "src/main.rs"], repo.path());
     assert_cli_success(&output, "failed to add archive fixture files");
 
     let output = run_libra_command(&["commit", "-m", "initial", "--no-verify"], repo.path());
@@ -401,7 +398,7 @@ fn archive_preserves_unicode_filenames() {
     fs::write(repo.path().join("你好世界.txt"), "unicode content\n")
         .expect("failed to write unicode file");
 
-    let output = run_libra_command(&["add", ".libraignore", "你好世界.txt"], repo.path());
+    let output = run_libra_command(&["add", "你好世界.txt"], repo.path());
     assert_cli_success(&output, "failed to add unicode file");
     let output = run_libra_command(&["commit", "-m", "unicode", "--no-verify"], repo.path());
     assert_cli_success(&output, "failed to commit unicode file");
@@ -430,10 +427,7 @@ fn archive_preserves_spaces_in_filenames() {
     )
     .expect("failed to write spaced filename");
 
-    let output = run_libra_command(
-        &["add", ".libraignore", "my docs/hello world.txt"],
-        repo.path(),
-    );
+    let output = run_libra_command(&["add", "my docs/hello world.txt"], repo.path());
     assert_cli_success(&output, "failed to add spaced filename");
     let output = run_libra_command(&["commit", "-m", "spaces", "--no-verify"], repo.path());
     assert_cli_success(&output, "failed to commit spaced filename");
@@ -459,7 +453,7 @@ fn archive_preserves_deeply_nested_paths() {
     fs::create_dir_all(&deep).expect("failed to create deep directory");
     fs::write(deep.join("deep.txt"), "bottom\n").expect("failed to write deep file");
 
-    let output = run_libra_command(&["add", ".libraignore", "a/"], repo.path());
+    let output = run_libra_command(&["add", "a/"], repo.path());
     assert_cli_success(&output, "failed to add deep path");
     let output = run_libra_command(&["commit", "-m", "deep", "--no-verify"], repo.path());
     assert_cli_success(&output, "failed to commit deep path");
@@ -483,7 +477,7 @@ fn archive_preserves_empty_files() {
     configure_identity_via_cli(repo.path());
     fs::write(repo.path().join("empty.txt"), "").expect("failed to write empty file");
 
-    let output = run_libra_command(&["add", ".libraignore", "empty.txt"], repo.path());
+    let output = run_libra_command(&["add", "empty.txt"], repo.path());
     assert_cli_success(&output, "failed to add empty file");
     let output = run_libra_command(&["commit", "-m", "empty", "--no-verify"], repo.path());
     assert_cli_success(&output, "failed to commit empty file");

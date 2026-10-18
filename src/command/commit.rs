@@ -2835,6 +2835,11 @@ async fn create_tree_with_persistence(
     let path_entries: Vec<PathBuf> = index
         .tracked_entries(0)
         .iter()
+        // WT-07 (ADR-WT-05): the intent-to-add empty blob is a placeholder,
+        // never tree content. Git's cache-tree skips these entries so a
+        // commit that also stages unrelated paths never records the empty
+        // file (and never loses the user's worktree content).
+        .filter(|file| !file.flags.intent_to_add)
         .map(|file| PathBuf::from(file.name.clone()))
         .filter(|path| path.starts_with(&current_root))
         .collect();
@@ -3022,6 +3027,23 @@ fn auto_stage_tracked_changes(
             }
         }
     }
+    // WT-07 (t2203:87): an intent-to-add entry is a PLACEHOLDER, not stat
+    // data. `commit -a` must rewrite it with the real worktree blob (and clear
+    // the flag) even when that blob is the same empty blob — otherwise the
+    // placeholder stays invisible to `changes_to_be_committed` and the commit
+    // fails as "nothing added".
+    for entry in index.tracked_entries(0) {
+        if !entry.flags.intent_to_add {
+            continue;
+        }
+        let candidate = PathBuf::from(&entry.name);
+        if workdir.join(&candidate).symlink_metadata().is_err()
+            || pending.modified.contains(&candidate)
+        {
+            continue;
+        }
+        pending.modified.push(candidate);
+    }
     if pending.modified.is_empty() && pending.deleted.is_empty() {
         return Ok(false);
     }
@@ -3062,7 +3084,14 @@ fn auto_stage_tracked_changes(
                 .map_err(|e| {
                     CommitError::AutoStage(format!("failed to create index entry: {}", e))
                 })?;
-        crate::utils::index_ext::update_preserving_file_mode(&mut index, entry, file_mode);
+        // WT-07: `commit -a` writes the path's REAL content, so the
+        // intent-to-add placeholder bit must be cleared (ADR-SW-03's
+        // "content write clears the bit" rule). Preserving it would leave a
+        // real blob invisible to `changes_to_be_committed` and to every tree
+        // writer — the commit would silently contain nothing.
+        crate::utils::index_ext::update_preserving_file_mode_except_intent(
+            &mut index, entry, file_mode,
+        );
         if let Some(path) = file.to_str() {
             for stage in 1..=3 {
                 index.remove(path, stage);

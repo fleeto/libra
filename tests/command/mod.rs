@@ -503,6 +503,15 @@ fn assert_cli_success(output: &Output, context: &str) {
     );
 }
 
+/// Run `libra <args>` and return its stdout as an owned UTF-8 string.
+///
+/// Binding the `Output` inside the helper avoids the E0716 temporary-borrow
+/// trap that an inline `from_utf8_lossy(&run_libra_command(..).stdout)` hits.
+fn libra_stdout(args: &[&str], cwd: &Path) -> String {
+    let output = run_libra_command(args, cwd);
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
 /// Split a structured CLI error into the human-readable block and the JSON report.
 fn parse_cli_error_stderr(stderr: &[u8]) -> (String, CliErrorReport) {
     let stderr = String::from_utf8_lossy(stderr).to_string();
@@ -691,7 +700,7 @@ fn create_committed_repo_via_cli() -> tempfile::TempDir {
 
     fs::write(repo.path().join("tracked.txt"), "tracked\n").expect("failed to create tracked file");
 
-    let output = run_libra_command(&["add", ".libraignore", "tracked.txt"], repo.path());
+    let output = run_libra_command(&["add", "tracked.txt"], repo.path());
     assert_cli_success(&output, "failed to add tracked file");
 
     let output = run_libra_command(&["commit", "-m", "base", "--no-verify"], repo.path());

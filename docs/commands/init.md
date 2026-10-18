@@ -15,9 +15,12 @@ libra init [OPTIONS] [DIRECTORY]
 
 Running `libra init` in an existing directory creates a `.libra` subdirectory with the
 object store, SQLite database, default configuration, HEAD pointing to the initial branch,
-and (by default) a vault-backed PGP signing key. Non-bare repositories also get a visible
-root `.libraignore` file for ignore rules. If `DIRECTORY` is given and does not exist, it is
-created first.
+and (by default) a vault-backed PGP signing key. If `DIRECTORY` is given and does not exist,
+it is created first.
+
+Like Git, `libra init` leaves the fresh worktree clean: it does **not** create a default
+`.libraignore`. Create one yourself (or convert an existing `.gitignore`) when you need
+Libra-specific ignore rules; ignore sources are read lazily and need no initialization.
 
 When `--from-git-repository` is supplied, objects and refs are imported from the source Git
 repository and `origin` is configured to point at the source branch layout. The converted

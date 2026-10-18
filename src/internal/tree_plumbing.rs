@@ -103,6 +103,13 @@ pub fn write_tree_from_index_with(
         let Some(entry) = index.get(key, 0) else {
             continue;
         };
+        // WT-07 (ADR-WT-05): Git's cache-tree never writes an intent-to-add
+        // entry into a tree — the empty blob is only a placeholder for a new
+        // file. Skipping it here is what keeps `write-tree` and every commit
+        // path from recording an empty file and losing the user's content.
+        if entry.flags.intent_to_add {
+            continue;
+        }
         let mode = index_mode_to_tree_mode(entry.mode, key)?;
         leaves.push((path, mode, entry.hash));
     }
@@ -128,7 +135,14 @@ pub fn validate_index_objects_with(
     missing_ok: bool,
 ) -> Result<(), TreePlumbingError> {
     let storage = util::objects_storage();
-    let entries = index.tracked_entries(0);
+    // Intent-to-add entries never reach a tree, so their placeholder object
+    // does not need to exist. Excluding them keeps the preflight aligned with
+    // `write_tree_from_leaves` (WT-07).
+    let entries: Vec<&IndexEntry> = index
+        .tracked_entries(0)
+        .into_iter()
+        .filter(|entry| !entry.flags.intent_to_add)
+        .collect();
 
     // Fast path: one batched type probe resolves every entry that is present and
     // correctly typed — in a healthy repository, the whole index. Local storage

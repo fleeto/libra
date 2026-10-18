@@ -172,3 +172,25 @@ fn diff_plumbing_outside_repository_is_an_error() {
     let out = run_libra_command(&["diff-files"], dir.path());
     assert_eq!(out.status.code(), Some(128));
 }
+
+/// WT-06 / issue #476 M-ITA-VIEW V4: `diff-files --name-status` reports an
+/// intent-to-add entry as `A` (the index holds only the empty-blob placeholder).
+#[test]
+fn diff_files_reports_intent_to_add() {
+    let repo = create_committed_repo_via_cli();
+    let root = repo.path();
+    fs::write(root.join("new.txt"), "new\n").expect("write new");
+    assert_cli_success(
+        &run_libra_command(&["add", "-N", "new.txt"], root),
+        "add -N",
+    );
+
+    let output = run_libra_command(&["diff-files", "--name-status"], root);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "plumbing differences exit 1: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(out_str(&output).trim(), "A\tnew.txt");
+}

@@ -912,6 +912,17 @@ fn test_stash_push_all_includes_ignored() {
 
     fs::write(repo.path().join(".libraignore"), "ignored.log\n")
         .expect("failed to update libraignore");
+    assert_cli_success(
+        &run_libra_command(&["add", ".libraignore"], repo.path()),
+        "stage ignore rules",
+    );
+    assert_cli_success(
+        &run_libra_command(
+            &["commit", "-m", "ignore rules", "--no-verify"],
+            repo.path(),
+        ),
+        "commit ignore rules",
+    );
     fs::write(repo.path().join("untracked.txt"), "untracked\n")
         .expect("failed to write untracked file");
     fs::write(repo.path().join("ignored.log"), "ignored\n").expect("failed to write ignored file");
@@ -2693,5 +2704,63 @@ fn test_stash_no_change_untracked_only_and_quiet_guards() {
         !String::from_utf8_lossy(&list.stdout).trim().is_empty(),
         "G6 must create a stash: {}",
         String::from_utf8_lossy(&list.stdout)
+    );
+}
+
+/// WT-07 / issue #476 M-ITA-WRITE W7: `stash push` refuses an index that
+/// contains an intent-to-add entry (Git: `Entry '<path>' not uptodate. Cannot
+/// merge.`), writes no stash entry, and leaves the index/worktree untouched.
+#[test]
+fn test_stash_push_refuses_intent_to_add_entry() {
+    const EMPTY_BLOB: &str = "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391";
+
+    let repo = tempdir().expect("tempdir");
+    let root = repo.path();
+    init_repo_via_cli(root);
+    configure_identity_via_cli(root);
+    fs::write(root.join("tracked.txt"), "tracked\n").expect("write tracked");
+    assert_cli_success(&run_libra_command(&["add", "tracked.txt"], root), "add");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "init", "--no-verify"], root),
+        "commit",
+    );
+    fs::write(root.join("new.txt"), "new\n").expect("write new");
+    assert_cli_success(
+        &run_libra_command(&["add", "-N", "new.txt"], root),
+        "add -N",
+    );
+
+    let refused = run_libra_command(&["stash", "push", "-m", "s"], root);
+    assert_eq!(
+        refused.status.code(),
+        Some(128),
+        "W7 exit: {}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        stderr.contains("Entry 'new.txt' not uptodate. Cannot merge."),
+        "W7 message: {stderr}"
+    );
+    assert!(
+        stderr.contains("LBR-CONFLICT-002"),
+        "W7 stable code: {stderr}"
+    );
+    let list = run_libra_command(&["stash", "list"], root);
+    assert_cli_success(&list, "stash list");
+    assert!(
+        list.stdout.is_empty(),
+        "W7 must not create a stash: {:?}",
+        String::from_utf8_lossy(&list.stdout)
+    );
+    let files = libra_stdout(&["ls-files", "-s"], root);
+    assert!(
+        files.contains(EMPTY_BLOB) && files.contains("new.txt"),
+        "W7 index must keep the placeholder: {files}"
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("new.txt")).expect("read new"),
+        "new\n",
+        "W7 worktree must be untouched"
     );
 }

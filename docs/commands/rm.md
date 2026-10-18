@@ -32,6 +32,11 @@ Wildcard-looking pathspecs also match an exact path or directory prefix with
 the same literal text, matching Git's bracket-file and bracket-directory
 behavior.
 
+An intent-to-add entry (`libra add -N`) is a placeholder, not staged content:
+`libra rm --cached <path>` succeeds for it, while a worktree `libra rm <path>`
+reports Git's `staged content different from both the file and the HEAD`
+refusal. `--force` overrides the refusal in both forms.
+
 Before removing a file, Libra checks for uncommitted changes (both staged and unstaged). If the file has local modifications relative to the index, or the index differs from HEAD, the command refuses to proceed unless `--force` is passed or `--cached` is used. This safety check prevents silent data loss when a file has unsaved work.
 
 Aliases: `remove`, `delete`. All three names invoke the same command.

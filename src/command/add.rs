@@ -68,6 +68,7 @@ EXAMPLES:
     libra add -u                       Update tracked files only (no new files)
     libra add --dry-run .              Preview what would be staged
     libra add -f ignored_file.log      Force-add an ignored file
+    libra add -N new_file.txt          Record intent-to-add (no content staged)
     libra add --refresh                Refresh index metadata without staging
     libra add --resolved               Stage resolved unmerged paths
     libra add -p                       Interactively stage hunks";
@@ -165,9 +166,10 @@ pub struct AddArgs {
 
     /// Record intent-to-add entries (empty blob plus the index v3
     /// `intent_to_add` extended flag) for the matched paths without staging
-    /// content. Mirrors Git's `add -N/--intent-to-add`; the flag stays hidden
-    /// until the follow-up card lands the full write surface.
-    #[clap(short = 'N', long = "intent-to-add", hide = true)]
+    /// content. Mirrors Git's `add -N/--intent-to-add`; the worktree file is
+    /// shown by `status`/`diff` as an unstaged new file until a later `add`
+    /// stages its real content.
+    #[clap(short = 'N', long = "intent-to-add")]
     pub intent_to_add: bool,
 
     /// Interactively choose hunks to stage (`add -p`).
@@ -1890,6 +1892,26 @@ pub async fn run_add(args: &AddArgs) -> CliResult<AddOutput> {
             if validated.pathspecs.matches_path(&candidate) && !files.contains(&candidate) {
                 files.push(candidate);
             }
+        }
+    }
+
+    // WT-07 (t2203:49): an intent-to-add entry is a placeholder, not stat
+    // data. `add -u` stages its real worktree content (and clears the flag)
+    // even when that content hashes to the same empty blob — the status
+    // comparison alone would report it unchanged.
+    if args.update && !args.renormalize {
+        for entry in index.tracked_entries(0) {
+            if !entry.flags.intent_to_add {
+                continue;
+            }
+            let candidate = PathBuf::from(&entry.name);
+            if !validated.pathspecs.matches_path(&candidate)
+                || files.contains(&candidate)
+                || workdir.join(&candidate).symlink_metadata().is_err()
+            {
+                continue;
+            }
+            files.push(candidate);
         }
     }
     // ADR-SW-04/05: without `--sparse` a skip-worktree path is never staged

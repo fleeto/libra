@@ -21,6 +21,11 @@ pub fn create_tree_from_index(index: &Index) -> Result<Tree, GitError> {
 
     // Convert IndexEntries to TreeItems
     for entry in index.tracked_entries(0) {
+        // WT-07 (ADR-WT-05): an intent-to-add entry is a placeholder for a
+        // new file and must never become tree content.
+        if entry.flags.intent_to_add {
+            continue;
+        }
         // Stage 0 for normal files
         let mode = match entry.mode & 0o170000 {
             // Check file type from mode

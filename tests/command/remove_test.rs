@@ -1338,3 +1338,53 @@ fn test_rm_dry_run_writes_no_objects() {
     assert_no_objects_written(p, &before, "rm --dry-run");
     assert!(p.join("f").exists(), "dry run keeps the working file");
 }
+
+/// WT-07 / issue #476 M-ITA-WRITE W7 / `t3600:809`: `rm --cached` succeeds for
+/// an intent-to-add entry (there is no staged content to protect), while a
+/// worktree `rm` reports Git's "staged content different" refusal.
+#[test]
+fn test_rm_cached_intent_to_add_entry() {
+    const EMPTY_BLOB: &str = "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391";
+
+    let repo = tempdir().expect("tempdir");
+    let root = repo.path();
+    init_repo_via_cli(root);
+    configure_identity_via_cli(root);
+    fs::write(root.join("tracked.txt"), "tracked\n").expect("write tracked");
+    assert_cli_success(&run_libra_command(&["add", "tracked.txt"], root), "add");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "init", "--no-verify"], root),
+        "commit",
+    );
+    fs::write(root.join("new.txt"), "new\n").expect("write new");
+    assert_cli_success(
+        &run_libra_command(&["add", "-N", "new.txt"], root),
+        "add -N",
+    );
+
+    let refused = run_libra_command(&["rm", "new.txt"], root);
+    assert_eq!(refused.status.code(), Some(128), "worktree rm refuses");
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("staged content different from both the"),
+        "worktree rm message: {}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    let files = libra_stdout(&["ls-files", "-s"], root);
+    assert!(
+        files.contains(EMPTY_BLOB) && files.contains("new.txt"),
+        "refused rm must keep the entry: {files}"
+    );
+
+    let removed = run_libra_command(&["rm", "--cached", "new.txt"], root);
+    assert_cli_success(&removed, "rm --cached");
+    let files = libra_stdout(&["ls-files"], root);
+    assert!(
+        !files.contains("new.txt"),
+        "rm --cached must drop it: {files}"
+    );
+    let status = libra_stdout(&["status", "-s"], root);
+    assert!(
+        status.contains("?? new.txt"),
+        "rm --cached keeps the worktree file untracked: {status}"
+    );
+}

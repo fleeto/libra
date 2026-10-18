@@ -88,8 +88,8 @@ async fn init_vault_false_writes_seed_keys_and_human_summary() {
     let output = run_libra_command(&["init", "--vault", "false"], &repo);
     assert_cli_success(&output, "init --vault false");
     assert!(
-        repo.join(".libraignore").exists(),
-        "non-bare init should create a visible root .libraignore"
+        !repo.join(".libraignore").exists(),
+        "WT-03: non-bare init must not create a default .libraignore"
     );
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -157,7 +157,7 @@ async fn init_vault_false_writes_seed_keys_and_human_summary() {
 }
 
 #[test]
-fn init_status_shows_root_libraignore_as_untracked() {
+fn init_leaves_status_clean_without_default_libraignore() {
     let temp = tempdir().unwrap();
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).unwrap();
@@ -165,12 +165,16 @@ fn init_status_shows_root_libraignore_as_untracked() {
     let output = run_libra_command(&["init", "--vault", "false"], &repo);
     assert_cli_success(&output, "init --vault false");
 
-    let status = run_libra_command(&["status", "--short"], &repo);
-    assert_cli_success(&status, "status --short");
-    let stdout = String::from_utf8_lossy(&status.stdout);
     assert!(
-        stdout.contains("?? .libraignore"),
-        "new repository should show .libraignore as an untracked project file, got: {stdout}"
+        !repo.join(".libraignore").exists(),
+        "WT-03: init must not create a default .libraignore"
+    );
+    let status = run_libra_command(&["status", "--porcelain"], &repo);
+    assert_cli_success(&status, "status --porcelain");
+    assert!(
+        status.stdout.is_empty(),
+        "WT-03: a fresh repository must be clean, got: {}",
+        String::from_utf8_lossy(&status.stdout)
     );
 }
 

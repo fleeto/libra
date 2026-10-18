@@ -113,6 +113,11 @@ libra commit -m "fix(auth): handle expired tokens" --conventional
 libra commit -a -m "Fix typo"
 ```
 
+intent-to-add 条目（`libra add -N`）只是占位，不是已暂存内容：只有这类条目时
+`commit` 以 `no changes added to commit` 拒绝；同时暂存了其它路径的提交也不会记录
+该占位（条目保留在索引中）。`commit -a` 会暂存文件的真实工作树内容、清除标志并提交，
+与 Git 的 `t2203` 行为一致。
+
 ### `-s, --signoff`
 
 使用 committer 身份在提交消息末尾添加 `Signed-off-by` trailer。

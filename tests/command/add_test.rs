@@ -2247,16 +2247,6 @@ fn test_add_batch_with_stale_lock_files() {
     for i in 0..131u32 {
         fs::write(locks_dir.join(format!("{i:04x}.lock")), b"").unwrap();
     }
-    // `libra init` leaves an untracked `.libraignore`; commit it so the staged
-    // assertion below counts exactly the 33 new files.
-    assert_cli_success(
-        &run_libra_command(&["add", ".libraignore"], p),
-        "stage init ignore file",
-    );
-    assert_cli_success(
-        &run_libra_command(&["commit", "-m", "base", "--no-verify"], p),
-        "commit base",
-    );
     for i in 0..33 {
         fs::write(p.join(format!("g{i:02}.txt")), format!("content {i}\n")).unwrap();
     }
@@ -4568,4 +4558,23 @@ fn test_add_dry_run_pathspec_writes_no_objects() {
     let out = run_libra_command(&["add", "--dry-run", "new.txt"], p);
     assert_cli_success(&out, "add --dry-run new.txt");
     super::assert_no_objects_written(p, &before, "add --dry-run <pathspec>");
+}
+
+/// WT-07 / issue #476 M-ITA-WRITE W8: the public `-N/--intent-to-add` switch is
+/// discoverable in `libra add --help` and its example list.
+#[test]
+fn test_add_intent_to_add_is_public_in_help() {
+    let repo = tempdir().expect("tempdir");
+    init_repo_via_cli(repo.path());
+    let help = run_libra_command(&["add", "--help"], repo.path());
+    assert_cli_success(&help, "add --help");
+    let text = String::from_utf8_lossy(&help.stdout);
+    assert!(
+        text.contains("-N, --intent-to-add"),
+        "W8 help must list -N: {text}"
+    );
+    assert!(
+        text.contains("libra add -N new_file.txt"),
+        "W8 examples must show -N: {text}"
+    );
 }

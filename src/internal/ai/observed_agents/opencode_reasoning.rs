@@ -4715,7 +4715,10 @@ mod tests {
                 serde_json::from_str(&visible).expect("ordinary transcript is JSON");
             let retained = &stored["messages"][1]["content"][0];
             assert_eq!(retained["text"], thinking);
-            assert!(retained.get("state").is_some(), "unproven state was dropped");
+            assert!(
+                retained.get("state").is_some(),
+                "unproven state was dropped"
+            );
             if part.contains("\"signature\"") {
                 assert!(visible.contains("\"signature\""));
             }
@@ -4759,7 +4762,9 @@ mod tests {
             let retained = &value["messages"][1]["content"][0];
             assert_eq!(retained["type"], "reasoning");
             assert!(
-                retained["text"].as_str().is_some_and(|text| !text.is_empty()),
+                retained["text"]
+                    .as_str()
+                    .is_some_and(|text| !text.is_empty()),
                 "{label} dropped thinking text"
             );
             assert!(retained.get("state").is_some(), "{label} dropped state");
@@ -5110,20 +5115,19 @@ mod tests {
                                 "reasoningEncryptedContent",
                                 "thoughtSignature",
                             ] {
-                                let present_in_source = value["messages"]
-                                    .as_array()
-                                    .into_iter()
-                                    .flatten()
-                                    .any(|message| {
-                                        ["content", "parts"].iter().any(|key| {
-                                            message[key].as_array().is_some_and(|parts| {
-                                                parts.iter().any(|source_part| {
-                                                    source_part["type"] == "reasoning"
-                                                        && source_part.get(name).is_some()
+                                let present_in_source =
+                                    value["messages"].as_array().into_iter().flatten().any(
+                                        |message| {
+                                            ["content", "parts"].iter().any(|key| {
+                                                message[key].as_array().is_some_and(|parts| {
+                                                    parts.iter().any(|source_part| {
+                                                        source_part["type"] == "reasoning"
+                                                            && source_part.get(name).is_some()
+                                                    })
                                                 })
                                             })
-                                        })
-                                    });
+                                        },
+                                    );
                                 if present_in_source {
                                     assert!(
                                         part.get(name).is_some(),

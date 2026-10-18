@@ -795,8 +795,26 @@ pub(super) async fn run_status_cache_mode(
     let head_oid_hash = Head::current_commit_result()
         .await
         .map_err(|error| status_branch_store_error("resolve HEAD commit", error))?;
+    let sort_base = util::cur_dir()
+        .strip_prefix(util::working_dir())
+        .map(Path::to_path_buf)
+        .unwrap_or_default();
     let staged = staged.to_relative();
     let mut unstaged = unstaged.to_relative();
+    // WT-06: intent-to-add entries are a worktree-side new file, never a
+    // staged addition or a modification of the empty-blob placeholder.
+    // Keep them in their own display list like the full-scan path.
+    let intent_to_add: Vec<PathBuf> = index
+        .tracked_entries(0)
+        .into_iter()
+        .filter(|entry| entry.flags.intent_to_add)
+        .filter(|entry| workdir.join(&entry.name).symlink_metadata().is_ok())
+        .map(|entry| util::workdir_to_current(PathBuf::from(&entry.name)))
+        .collect();
+    unstaged
+        .modified
+        .retain(|path| !intent_to_add.contains(path));
+    unstaged.new.retain(|path| !intent_to_add.contains(path));
     // Honor the resolved display defaults exactly like the full status
     // (P1-05d): `status.showUntrackedFiles=no`/`-uno` hides untracked
     // entries (the cache stores explicit paths, so `normal` and `all`
@@ -839,6 +857,8 @@ pub(super) async fn run_status_cache_mode(
         head_oid: head_oid_hash,
         staged,
         unstaged,
+        intent_to_add,
+        sort_base,
         unmerged: vec![],
         ignored_files: vec![],
         mode_fix_candidates: vec![],

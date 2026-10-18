@@ -334,7 +334,7 @@ async fn test_execute_commit() {
 
         let tree_id = commit.tree_id;
         let tree: Tree = load_object(&tree_id).unwrap();
-        assert_eq!(tree.tree_items.len(), 3); // .libraignore, a.txt, and bb/
+        assert_eq!(tree.tree_items.len(), 2); // a.txt and bb/
     }
     //modify new commit
     {
@@ -369,7 +369,7 @@ async fn test_execute_commit() {
 
         let tree_id = commit.tree_id;
         let tree: Tree = load_object(&tree_id).unwrap();
-        assert_eq!(tree.tree_items.len(), 3); // .libraignore, a.txt, and bb/
+        assert_eq!(tree.tree_items.len(), 2); // a.txt and bb/
     }
 }
 
@@ -2724,5 +2724,96 @@ fn test_commit_delete_last_tracked_file_via_add_all() {
     assert!(
         log_text.contains("delete last"),
         "commit should land: {log_text}"
+    );
+}
+
+/// WT-07 / issue #476 M-ITA-WRITE W2–W4: intent-to-add entries never enter a
+/// commit. Only-ITA refuses like Git's "no changes added"; unrelated staged
+/// commits leave the placeholder in the index; `commit -a` commits the real
+/// content and clears the flag.
+#[test]
+fn test_commit_intent_to_add_matrix() {
+    const EMPTY_BLOB: &str = "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391";
+
+    let repo = tempdir().expect("tempdir");
+    let root = repo.path();
+    init_repo_via_cli(root);
+    configure_identity_via_cli(root);
+    fs::write(root.join("tracked.txt"), "tracked\n").expect("write tracked");
+    assert_cli_success(&run_libra_command(&["add", "tracked.txt"], root), "add");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "init", "--no-verify"], root),
+        "commit init",
+    );
+    let init_head = libra_stdout(&["rev-parse", "HEAD"], root)
+        .trim()
+        .to_string();
+
+    // W2: only an intent-to-add entry — refuse, keep HEAD and the entry.
+    fs::write(root.join("new.txt"), "real content\n").expect("write new");
+    assert_cli_success(
+        &run_libra_command(&["add", "-N", "new.txt"], root),
+        "add -N",
+    );
+    let refused = run_libra_command(&["commit", "-m", "nope", "--no-verify"], root);
+    assert_eq!(
+        refused.status.code(),
+        Some(128),
+        "W2 exit: {}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("no changes added to commit"),
+        "W2 message: {}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    let head_after = libra_stdout(&["rev-parse", "HEAD"], root)
+        .trim()
+        .to_string();
+    assert_eq!(head_after, init_head, "W2 HEAD must not move");
+    let files = libra_stdout(&["ls-files", "-s"], root);
+    assert!(
+        files.contains(EMPTY_BLOB) && files.contains("new.txt"),
+        "W2 placeholder must remain: {files}"
+    );
+
+    // W3: an unrelated staged path commits, but the placeholder does not.
+    fs::write(root.join("other.txt"), "other\n").expect("write other");
+    assert_cli_success(&run_libra_command(&["add", "other.txt"], root), "add other");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "second", "--no-verify"], root),
+        "commit second",
+    );
+    let tree = libra_stdout(&["ls-tree", "-r", "--name-only", "HEAD"], root);
+    assert!(tree.contains("other.txt"), "W3 commit content: {tree}");
+    assert!(
+        !tree.contains("new.txt"),
+        "W3 must not commit the placeholder: {tree}"
+    );
+    let files = libra_stdout(&["ls-files", "-s"], root);
+    assert!(
+        files.contains(EMPTY_BLOB) && files.contains("new.txt"),
+        "W3 placeholder must survive the unrelated commit: {files}"
+    );
+
+    // W4: `commit -a` stages the real content and commits it.
+    fs::write(root.join("new.txt"), "updated content\n").expect("rewrite new");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-a", "-m", "auto", "--no-verify"], root),
+        "commit -a",
+    );
+    let tree = libra_stdout(&["ls-tree", "-r", "--name-only", "HEAD"], root);
+    assert!(tree.contains("new.txt"), "W4 tree: {tree}");
+    let blob = run_libra_command(&["show", "HEAD:new.txt"], root);
+    assert_cli_success(&blob, "show HEAD:new.txt");
+    assert_eq!(
+        String::from_utf8_lossy(&blob.stdout),
+        "updated content\n",
+        "W4 must commit the real worktree content"
+    );
+    let files = libra_stdout(&["ls-files", "-s"], root);
+    assert!(
+        !files.contains(EMPTY_BLOB),
+        "W4 must clear the intent-to-add flag: {files}"
     );
 }

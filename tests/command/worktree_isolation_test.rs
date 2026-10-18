@@ -2694,18 +2694,6 @@ fn repeated_bisect_controls_are_not_duplicate_rejected() {
     let repo = repo_with_feature();
     let main = repo.path();
     let (c1, _c2, c3) = grow_feature_history(main);
-    // `init` leaves `.libraignore` untracked, and bisect requires a clean tree.
-    assert_cli_success(&run_libra_command(&["add", "."], main), "stage the fixture");
-    let staged = run_libra_command(&["commit", "-m", "fixture", "--no-verify"], main);
-    if !staged.status.success() {
-        // Nothing to commit is fine; a real failure is not.
-        assert!(
-            String::from_utf8_lossy(&staged.stdout).contains("nothing")
-                || String::from_utf8_lossy(&staged.stderr).contains("nothing"),
-            "commit the fixture: {}",
-            String::from_utf8_lossy(&staged.stderr)
-        );
-    }
 
     let refused = |out: &std::process::Output| -> bool {
         let combined = format!(
@@ -9307,17 +9295,8 @@ fn bisect_and_sequencer_exclude_each_other() {
     let clean = repo_with_feature();
     let clean_main = clean.path();
     let feature_tip = head_sha_of_branch(clean_main, "feature");
-    // `init` leaves `.libraignore` untracked, and bisect requires a clean tree
-    // INCLUDING untracked files (a candidate commit tracking that path would
-    // overwrite it). Commit it so the fixture is genuinely clean.
-    assert_cli_success(
-        &run_libra_command(&["add", "."], clean_main),
-        "stage the fixture leftovers",
-    );
-    assert_cli_success(
-        &run_libra_command(&["commit", "-m", "fixture", "--no-verify"], clean_main),
-        "commit the fixture leftovers",
-    );
+    // WT-03: `init` leaves no default `.libraignore`, so this fixture is
+    // already clean for bisect.
     assert_cli_success(
         &run_libra_command(&["bisect", "start"], clean_main),
         "bisect starts once nothing else owns the scope",
@@ -9414,10 +9393,15 @@ fn ambiguous_legacy_refusal_names_rebase_apply() {
 fn a_converged_bisect_still_blocks_a_sequence_until_reset() {
     let repo = repo_with_feature();
     let main = repo.path();
-    assert_cli_success(&run_libra_command(&["add", "."], main), "stage leftovers");
+    // A second commit gives the converged bisect a `HEAD~1` good candidate.
+    fs::write(main.join("fixture.txt"), "fixture\n").unwrap();
+    assert_cli_success(
+        &run_libra_command(&["add", "fixture.txt"], main),
+        "stage fixture",
+    );
     assert_cli_success(
         &run_libra_command(&["commit", "-m", "fixture", "--no-verify"], main),
-        "commit leftovers",
+        "commit fixture",
     );
     let feature_tip = head_sha_of_branch(main, "feature");
 

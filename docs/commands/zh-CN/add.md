@@ -10,6 +10,7 @@ libra add -A
 libra add -u [PATHSPEC...]
 libra add --refresh [PATHSPEC...]
 libra add --resolved [PATHSPEC...]
+libra add -N [PATHSPEC...]
 ```
 
 ## 说明
@@ -61,6 +62,22 @@ libra add -u src/
 
 ```bash
 libra add --refresh
+```
+
+### `-N, --intent-to-add`
+
+把命中的未跟踪路径以 *intent to add* 形式记入索引，但不暂存内容：条目携带规范空
+blob 与索引 v3 的 `intent_to_add` 扩展位，与 Git 一致。`status` 将其显示为未暂存的
+新文件（` A`），`diff`/`diff-files`/`diff HEAD` 把工作树内容显示为新文件，
+`diff --cached` 则不包含它。之后执行 `libra add <path>` 会暂存真实内容并清除标志；
+`write-tree`/`commit` 永远不会记录该占位条目。
+
+已跟踪路径是成功的 no-op；未命中的 pathspec 保持常规的
+`pathspec '…' did not match any files` 错误；`--dry-run` 只预览将要记录的路径，不写索引。
+
+```bash
+libra add -N new_file.txt
+libra add --intent-to-add src/generated.rs
 ```
 
 ### `-f, --force`
@@ -283,6 +300,7 @@ Hint: use -f if you really want to add them.
     "refreshed": [],
     "ignored": [],
     "failed": [],
+    "intent_to_add": [],
     "dry_run": false
   }
 }
@@ -330,15 +348,18 @@ Dry-run：
 
 - `added` / `modified` / `removed` 对应已暂存的新文件、变更文件和删除文件
 - `refreshed` 仅在使用 `--refresh` 时填充
+- `intent_to_add` 列出 `add -N` 记录的路径（为空时省略）
 - `ignored` 列出被 ignore 规则跳过的路径
 - `failed` 列出暂存失败的路径，每个包含 `path` 和 `message`
 - 传递 `-n` / `--dry-run` 时 `dry_run` 为 `true`；不会实际暂存文件
 
 ## 设计理由
 
-### 没有 `--intent-to-add` / `-N`
+### `--intent-to-add` / `-N`
 
-Git 的 `--intent-to-add`（`-N`）会为未跟踪文件记录空 blob，使它们出现在 `git diff` 输出中，但不真正暂存其内容。这是为了在暂存前审查新文件的工作流便利。Libra 省略该标志，因为 `libra status` 已经清楚显示未跟踪文件，且 `libra diff` 设计为配合完整工作树状态工作。“intent 然后 stage”的两步工作流增加认知负担，却没有显著改善审查体验。想在提交前审查新文件的用户可以使用 `libra add --dry-run`，暂存后再使用 `libra diff --staged`。
+`libra add -N` 记录与 Git 字节兼容的 intent-to-add 形态：空 blob 加索引 v3 扩展位。
+`status`/`diff` 把工作树文件显示为未暂存的新文件，而所有写树路径（`write-tree`、
+普通 `commit` 与 `commit -a`）都会跳过该占位条目，空 blob 永远不会进入历史。
 
 ### `--patch` / `-p` 交互式暂存
 
@@ -361,7 +382,7 @@ Git 或双布局树还包括 `.git/info/exclude`——和 `core.excludesFile`）
 共享；见 [check-ignore.md](check-ignore.md)）。所有来源都使用 Git ignore
 模式语法。
 
-`libra init` 仍会在非 bare 仓库中创建根 `.libraignore`，以便保存 Libra 专用规则；Git 导入或非 bare clone 仍会把已有 `.gitignore` 文件复制为匹配的 `.libraignore` 文件，方便显式覆盖。
+`libra init` 不再创建默认 `.libraignore`；需要 Libra 专用规则时请自行创建，Git 导入或非 bare clone 仍会把已有 `.gitignore` 文件复制为匹配的 `.libraignore` 文件，方便显式覆盖。
 
 ## 参数对比：Libra vs Git vs jj
 
@@ -375,7 +396,7 @@ Git 或双布局树还包括 `.git/info/exclude`——和 `core.excludesFile`）
 | 刷新 stat 信息 | `git add --refresh` | N/A | `libra add --refresh` |
 | Verbose 输出 | `git add -v` | N/A | `libra add -v` |
 | 忽略错误 | `git add --ignore-errors` | N/A | `libra add --ignore-errors` |
-| Intent to add | `git add -N` / `--intent-to-add` | N/A | N/A（未实现） |
+| Intent to add | `git add -N` / `--intent-to-add` | N/A | `libra add -N` / `--intent-to-add` |
 | 交互式 patch | `git add -p` / `--patch` | N/A | `libra add -p` / `--patch` |
 | 交互式选择 | `git add -i` / `--interactive` | N/A | N/A（未实现） |
 | 暂存前编辑 diff | `git add -e` / `--edit` | N/A | N/A |

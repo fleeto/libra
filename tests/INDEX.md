@@ -241,7 +241,7 @@ dedicated feature-on steps.
 | target | wave | one-line purpose | relevant src |
 |---|---|---|---|
 | `cloud_storage_backup_test` | 5 | D1/R2 backup + restore round-trip, no-skip live gate and local preflight | `src/command/cloud.rs`, `src/utils/d1_client.rs`, `src/utils/client_storage.rs` |
-| `agent_cloud_tombstone_test` | 5 | RG-05 mandatory selected D1/R2 synthetic artifact CLI mirror/byte-equality/erase lifecycle gate (fails if credentials absent); A0-10 propagation guard: a local agent-capture erase publishes a fenced tombstone to D1, removes mirror rows, and keeps restore tombstone-first; only R2 payload physical deletion remains deferred (skips without `test-live-cloud` + `LIBRA_D1_*`) | `src/utils/d1_client.rs`, `src/internal/ai/history.rs` |
+| `agent_cloud_tombstone_test` | 5 | RG-05 mandatory selected D1/R2 synthetic artifact CLI mirror/byte-equality/erase lifecycle gate (fails if credentials absent); A0-10 propagation guard: a local agent-capture erase publishes a fenced tombstone to D1, removes mirror rows, and keeps restore tombstone-first; only R2 payload physical deletion remains deferred (skips without `test-live-cloud` + `LIBRA_D1_*`); `claude_legacy_` proves local append-only Claude revision repair, idempotent replay, mirror refs, and tombstone erasure without D1 | `src/utils/d1_client.rs`, `src/internal/ai/history.rs`, `src/command/agent/doctor.rs`, `src/command/cloud/agent_capture.rs` |
 | `cloud_live_resources_test` | 5 | plan-20260927 GC-CM-12 writer-slot / identity / manifest helper; runs in the default L1 suite (no real D1/R2) | `tests/helpers/cloud_live_resources.rs`, `tests/cloud_live_prepare.sh` |
 | `storage_r2_test` | 5 | Object store R2 path | `src/utils/client_storage.rs` |
 

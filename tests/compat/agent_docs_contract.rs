@@ -727,6 +727,7 @@ fn reasoning_type_docs_pin_metadata_only_and_five_states() {
         assert_contains(document, label, "reasoning.state");
         assert_contains(document, label, "content index");
         assert_contains(document, label, "native artifact");
+        assert_contains(document, label, "coverage revision");
     }
 }
 

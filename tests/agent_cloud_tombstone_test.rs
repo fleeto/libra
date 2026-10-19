@@ -858,3 +858,364 @@ async fn cloud_tombstone_propagates_for_agent_capture() {
         "cleanup removed the checkpoint mirror row"
     );
 }
+
+/// Append-only repair of one authorized legacy Claude checkpoint.
+///
+/// The revision key binds the old checkpoint and the ordinary transcript
+/// bytes. A second repair and a deleted claim do not add a row or rewrite
+/// the stored object. Mirror keeps the old tree reference. Erase writes the
+/// tombstone, drops the revision, and a later repair does not revive it.
+#[tokio::test]
+async fn claude_legacy_revision_repair_is_idempotent_and_erases_with_the_old_checkpoint() {
+    let canary = "CC08-THINKING-CANARY";
+    let signature = "CC08-SIG";
+    let transcript = format!(
+        "{{\"type\":\"assistant\",\"uuid\":\"cc08-1\",\"timestamp\":\"2026-10-19T00:00:00Z\",\"message\":{{\"role\":\"assistant\",\"content\":[{{\"type\":\"thinking\",\"thinking\":\"{canary}\",\"signature\":\"{signature}\"}}]}}}}\n"
+    );
+    let repo = tempfile::tempdir().expect("repo tempdir");
+    let init = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .arg("init")
+        .current_dir(repo.path())
+        .env("LIBRA_TEST", "1")
+        .status()
+        .expect("run libra init");
+    assert!(init.success(), "libra init must succeed");
+    let libra_dir = repo.path().join(".libra");
+    let transcript_oid =
+        libra::utils::object::write_git_object(&libra_dir, "blob", transcript.as_bytes())
+            .expect("write legacy transcript")
+            .to_string();
+    let metadata_oid = libra::utils::object::write_git_object(
+        &libra_dir,
+        "blob",
+        br#"{"agent_kind":"claude_code"}"#,
+    )
+    .expect("write metadata")
+    .to_string();
+    let checkpoint_id = "cc08ae75-d24c-465a-b890-a9f861a50cc8";
+    let session_id = "claude__cc08-legacy";
+    let transcript_tree = write_tree(&libra_dir, &[("100644", "claude_code", &transcript_oid)]);
+    let inner_tree = write_tree(
+        &libra_dir,
+        &[
+            ("100644", "metadata.json", &metadata_oid),
+            ("40000", "transcript", &transcript_tree),
+        ],
+    );
+    let prefix_tree = write_tree(&libra_dir, &[("40000", &checkpoint_id[2..], &inner_tree)]);
+    let checkpoint_tree = write_tree(&libra_dir, &[("40000", &checkpoint_id[..2], &prefix_tree)]);
+    let root_tree = write_tree(&libra_dir, &[("40000", "checkpoint", &checkpoint_tree)]);
+    let object_path = libra_dir
+        .join("objects")
+        .join(&transcript_oid[..2])
+        .join(&transcript_oid[2..]);
+    let before = std::fs::read(&object_path).expect("read stored transcript object");
+
+    let conn = connect_repo_db(repo.path()).await;
+    seed_local_session(&conn, session_id).await;
+    conn.execute_raw(Statement::from_sql_and_values(
+        conn.get_database_backend(),
+        "INSERT INTO agent_checkpoint (
+            checkpoint_id, session_id, scope, parent_commit, tree_oid,
+            metadata_blob_oid, traces_commit, created_at
+         ) VALUES (?, ?, 'committed', NULL, ?, ?, ?, 1783206712)",
+        vec![
+            Value::from(checkpoint_id),
+            Value::from(session_id),
+            Value::from(root_tree.clone()),
+            Value::from(metadata_oid.clone()),
+            Value::from(metadata_oid.clone()),
+        ],
+    ))
+    .await
+    .expect("seed legacy checkpoint");
+
+    let repair = run_libra(repo.path(), &["agent", "doctor", "--repair"]);
+    let repair_text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&repair.stdout),
+        String::from_utf8_lossy(&repair.stderr)
+    );
+    assert!(
+        !repair_text.contains(canary) && !repair_text.contains(signature),
+        "doctor repair expanded the thinking body: {repair_text}"
+    );
+    assert_eq!(
+        count(
+            &conn,
+            &format!(
+                "SELECT COUNT(*) AS n FROM agent_coverage_revision WHERE checkpoint_id = '{checkpoint_id}'"
+            )
+        )
+        .await,
+        1,
+        "doctor --repair should append one revision: {repair_text}"
+    );
+    let digest_row = conn
+        .query_one_raw(Statement::from_string(
+            conn.get_database_backend(),
+            format!(
+                "SELECT coverage_digest, completeness FROM agent_coverage_revision WHERE checkpoint_id = '{checkpoint_id}'"
+            ),
+        ))
+        .await
+        .expect("read revision")
+        .expect("revision row");
+    let stored_digest: String = digest_row.try_get_by("coverage_digest").expect("digest");
+    let completeness: String = digest_row.try_get_by("completeness").expect("completeness");
+    use sha2::Digest;
+    let expected_digest = hex::encode(sha2::Sha256::digest(transcript.as_bytes()));
+    assert_eq!(stored_digest, expected_digest);
+    assert_eq!(completeness, "incomplete");
+    assert_eq!(
+        std::fs::read(&object_path).expect("reread transcript object"),
+        before,
+        "repair must not rewrite the stored transcript object"
+    );
+
+    let show = run_libra(
+        repo.path(),
+        &["--json", "agent", "checkpoint", "show", checkpoint_id],
+    );
+    assert!(show.status.success(), "show failed: {}", cli_text(&show));
+    let show_json: serde_json::Value = serde_json::from_slice(&show.stdout).expect("show json");
+    assert_eq!(show_json["ok"], serde_json::json!(true));
+    assert_eq!(
+        show_json["data"]["reasoning"]["availability"],
+        serde_json::json!("unproven")
+    );
+    assert_eq!(
+        show_json["data"]["reasoning"]["readable"],
+        serde_json::json!([canary])
+    );
+    let show_text = String::from_utf8_lossy(&show.stdout);
+    assert!(
+        !show_text.contains("native_artifact"),
+        "ordinary show minted a native artifact: {show_text}"
+    );
+    for args in [
+        ["agent", "checkpoint", "list", "--json"],
+        ["agent", "session", "list", "--json"],
+        ["agent", "graph", session_id, "--json"],
+    ] {
+        let listed = run_libra(repo.path(), &args);
+        let text = cli_text(&listed);
+        assert!(
+            !text.contains(canary),
+            "list or graph expanded the body: {text}"
+        );
+    }
+
+    let again = run_libra(repo.path(), &["agent", "doctor", "--repair"]);
+    assert_eq!(
+        count(
+            &conn,
+            &format!(
+                "SELECT COUNT(*) AS n FROM agent_coverage_revision WHERE checkpoint_id = '{checkpoint_id}'"
+            )
+        )
+        .await,
+        1,
+        "a second repair must be idempotent: {}",
+        cli_text(&again)
+    );
+    assert_eq!(
+        std::fs::read(&object_path).expect("object after second repair"),
+        before
+    );
+
+    conn.execute_raw(Statement::from_string(
+        conn.get_database_backend(),
+        format!("DELETE FROM agent_coverage_claim WHERE session_id = '{session_id}'"),
+    ))
+    .await
+    .expect("drop the claim to simulate an interrupted repair");
+    let resumed = run_libra(repo.path(), &["agent", "doctor", "--repair"]);
+    assert_eq!(
+        count(
+            &conn,
+            &format!(
+                "SELECT COUNT(*) AS n FROM agent_coverage_revision WHERE checkpoint_id = '{checkpoint_id}'"
+            )
+        )
+        .await,
+        1,
+        "re-entry must not append another revision: {}",
+        cli_text(&resumed)
+    );
+    assert_eq!(
+        count(
+            &conn,
+            &format!(
+                "SELECT COUNT(*) AS n FROM agent_coverage_claim WHERE session_id = '{session_id}' AND state = 'catalog_committed'"
+            )
+        )
+        .await,
+        1,
+        "re-entry must restore the claim: {}",
+        cli_text(&resumed)
+    );
+
+    let mirrored = libra::command::cloud::claude_legacy_reasoning_mirror_refs(&conn)
+        .await
+        .expect("mirror refs");
+    assert_eq!(mirrored.len(), 1);
+    assert_eq!(mirrored[0].checkpoint_id, checkpoint_id);
+    assert_eq!(mirrored[0].session_id, session_id);
+    assert_eq!(mirrored[0].content_digest, expected_digest);
+    assert_eq!(mirrored[0].tree_oid, root_tree);
+
+    conn.execute_raw(Statement::from_string(
+        conn.get_database_backend(),
+        format!("DELETE FROM agent_checkpoint WHERE checkpoint_id = '{checkpoint_id}'"),
+    ))
+    .await
+    .expect("hide the old checkpoint");
+    let missing = libra::command::cloud::claude_legacy_reasoning_mirror_refs(&conn)
+        .await
+        .expect_err("replacement without the old checkpoint must be refused");
+    assert!(
+        missing.contains("old checkpoint"),
+        "unexpected mirror error: {missing}"
+    );
+    conn.execute_raw(Statement::from_sql_and_values(
+        conn.get_database_backend(),
+        "INSERT INTO agent_checkpoint (
+            checkpoint_id, session_id, scope, parent_commit, tree_oid,
+            metadata_blob_oid, traces_commit, created_at
+         ) VALUES (?, ?, 'committed', NULL, ?, ?, ?, 1783206712)",
+        vec![
+            Value::from(checkpoint_id),
+            Value::from(session_id),
+            Value::from(root_tree.clone()),
+            Value::from(metadata_oid.clone()),
+            Value::from(metadata_oid.clone()),
+        ],
+    ))
+    .await
+    .expect("restore the old checkpoint row");
+
+    let storage = Arc::new(ClientStorage::init(libra_dir.join("objects")));
+    let history = HistoryManager::new_with_ref(
+        storage,
+        libra_dir.clone(),
+        Arc::new(conn.clone()),
+        TRACES_BRANCH,
+    );
+    history
+        .erase_session_local(session_id)
+        .await
+        .expect("erase the legacy session");
+    assert_eq!(
+        count(
+            &conn,
+            &format!("SELECT COUNT(*) AS n FROM agent_session WHERE session_id = '{session_id}'")
+        )
+        .await,
+        0
+    );
+    assert_eq!(
+        count(
+            &conn,
+            &format!(
+                "SELECT COUNT(*) AS n FROM agent_checkpoint WHERE checkpoint_id = '{checkpoint_id}'"
+            )
+        )
+        .await,
+        0
+    );
+    assert_eq!(
+        count(
+            &conn,
+            &format!(
+                "SELECT COUNT(*) AS n FROM agent_coverage_revision WHERE checkpoint_id = '{checkpoint_id}'"
+            )
+        )
+        .await,
+        0,
+        "erase must drop the replacement revision with the old checkpoint"
+    );
+    assert_eq!(
+        count(
+            &conn,
+            "SELECT COUNT(*) AS n FROM agent_import_tombstone WHERE erased_session_id = 'claude__cc08-legacy'"
+        )
+        .await,
+        1,
+        "erase must keep the tombstone"
+    );
+    assert_eq!(
+        std::fs::read(&object_path).expect("loose object remains after erase"),
+        before,
+        "erase must not destroy the only stored transcript object"
+    );
+    let revived = conn
+        .execute_raw(Statement::from_sql_and_values(
+            conn.get_database_backend(),
+            "INSERT INTO agent_session (
+                session_id, agent_kind, provider_session_id, state, working_dir,
+                metadata_json, redaction_report, started_at, last_event_at, stopped_at
+             ) VALUES (?, 'claude_code', ?, 'stopped', '/tmp/agent-tombstone-guard', '{}', '{}', 1, 2, 3)",
+            vec![
+                Value::from(session_id),
+                Value::from(format!("provider-{session_id}")),
+            ],
+        ))
+        .await;
+    let revived_error = revived
+        .expect_err("tombstone must block session revival")
+        .to_string();
+    assert!(
+        revived_error.contains("agent session is protected by an erasure tombstone"),
+        "unexpected revival error: {revived_error}"
+    );
+    assert_eq!(
+        count(
+            &conn,
+            &format!(
+                "SELECT COUNT(*) AS n FROM agent_coverage_revision WHERE checkpoint_id = '{checkpoint_id}'"
+            )
+        )
+        .await,
+        0
+    );
+    let after_erase = libra::command::cloud::claude_legacy_reasoning_mirror_refs(&conn)
+        .await
+        .expect("mirror after erase");
+    assert!(
+        after_erase.is_empty(),
+        "erase must not leave a publishable replacement: {after_erase:?}"
+    );
+}
+
+fn run_libra(repo: &Path, args: &[&str]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_libra"))
+        .args(args)
+        .current_dir(repo)
+        .env("LIBRA_TEST", "1")
+        .output()
+        .expect("run libra")
+}
+
+fn cli_text(output: &std::process::Output) -> String {
+    format!(
+        "status {:?}\nstdout {}\nstderr {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
+}
+
+fn write_tree(libra_dir: &Path, entries: &[(&str, &str, &str)]) -> String {
+    let mut body = Vec::new();
+    for (mode, name, oid) in entries {
+        body.extend_from_slice(mode.as_bytes());
+        body.push(b' ');
+        body.extend_from_slice(name.as_bytes());
+        body.push(0);
+        body.extend_from_slice(&hex::decode(oid).expect("valid oid hex"));
+    }
+    libra::utils::object::write_git_object(libra_dir, "tree", &body)
+        .expect("write tree object")
+        .to_string()
+}

@@ -250,6 +250,7 @@ const CLASS_CONFLICTED_COVERAGE_CLAIM: &str = "conflicted_coverage_claim";
 const CLASS_UNRESOLVED_SUBAGENT_LINK: &str = "unresolved_subagent_link";
 const CLASS_INCONSISTENT_SUBAGENT_CONTENT: &str = "inconsistent_subagent_content";
 const CLASS_INCONSISTENT_REASONING_ARTIFACT: &str = "inconsistent_reasoning_artifact";
+const CLASS_CLAUDE_LEGACY_REASONING_REVISION: &str = "claude_legacy_reasoning_revision";
 /// A0-06: a run manifest's `findings_oid` points at a blob missing from the
 /// object store.
 const CLASS_MISSING_FINDINGS_OBJECT: &str = "missing_findings_object";
@@ -458,6 +459,9 @@ enum RepairPlan {
         recovery: CaptureCatalogFinalizerRecovery,
         observed_at_ms: i64,
     },
+    /// Append one coverage revision for an authorized legacy Claude checkpoint.
+    /// The stored objects stay in place.
+    AppendClaudeLegacyRevision { checkpoint_id: String },
     /// No automatic action is safe; a human must restore objects/rows.
     Manual,
 }
@@ -2783,6 +2787,17 @@ async fn scan_checkpoint_store(
         ),
     }
 
+    if table_exists(conn, "agent_coverage_revision").await? {
+        plan_claude_legacy_reasoning_revisions(
+            conn,
+            &repo_path,
+            &mut findings,
+            &mut plans,
+            &mut notes,
+        )
+        .await;
+    }
+
     // ---- Repair execution (idempotent; spans per attempt) ---------------
     if repair {
         let mut replay_batch = ArtifactReplayBatch::new();
@@ -3034,6 +3049,143 @@ fn is_permanent_pending_replay_failure(error: &anyhow::Error) -> bool {
     })
 }
 
+/// Queue append-only revisions for authorized legacy Claude checkpoints.
+///
+/// The scan reads at most 64 stored transcripts and never puts their bytes
+/// into a finding. A checkpoint that already has the same content-bound
+/// revision is left alone.
+async fn plan_claude_legacy_reasoning_revisions(
+    conn: &DatabaseConnection,
+    storage: &Path,
+    findings: &mut Vec<CheckpointFinding>,
+    plans: &mut Vec<RepairPlan>,
+    notes: &mut Vec<String>,
+) {
+    let rows = match conn
+        .query_all_raw(Statement::from_string(
+            conn.get_database_backend(),
+            "SELECT c.checkpoint_id, c.session_id, c.tree_oid
+             FROM agent_checkpoint c
+             JOIN agent_session s ON s.session_id = c.session_id
+             WHERE s.agent_kind = 'claude_code' AND c.scope = 'committed'
+             ORDER BY c.created_at, c.checkpoint_id
+             LIMIT 65"
+                .to_string(),
+        ))
+        .await
+    {
+        Ok(rows) => rows,
+        Err(_) => {
+            notes.push(
+                "Claude legacy reasoning revision scan could not read the catalog; unlisted checkpoints are not certified"
+                    .to_string(),
+            );
+            return;
+        }
+    };
+    let mut extra = false;
+    for (index, row) in rows.into_iter().enumerate() {
+        if index == 64 {
+            extra = true;
+            break;
+        }
+        let checkpoint_id: String = match row.try_get_by("checkpoint_id") {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        let session_id: String = match row.try_get_by("session_id") {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        let tree_oid: String = match row.try_get_by("tree_oid") {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        let bytes = match read_stored_claude_transcript(storage, &checkpoint_id, &tree_oid).await {
+            Ok(bytes) => bytes,
+            Err(_) => continue,
+        };
+        let needs = match crate::internal::ai::history::claude_legacy_revision_needs_repair(
+            conn,
+            &session_id,
+            &checkpoint_id,
+            &bytes,
+        )
+        .await
+        {
+            Ok(needs) => needs,
+            Err(_) => {
+                notes.push(
+                    "Claude legacy reasoning revision scan could not read one revision; that checkpoint is not certified"
+                        .to_string(),
+                );
+                continue;
+            }
+        };
+        if !needs {
+            continue;
+        }
+        findings.push(CheckpointFinding {
+            inconsistency_type: CLASS_CLAUDE_LEGACY_REASONING_REVISION.to_string(),
+            checkpoint_id: checkpoint_id.clone(),
+            detail: "authorized Claude checkpoint has ordinary thinking without a content-bound revision; `libra agent doctor --repair` appends that revision and leaves the stored objects unchanged"
+                .to_string(),
+            repaired: false,
+            manual_required: false,
+        });
+        plans.push(RepairPlan::AppendClaudeLegacyRevision { checkpoint_id });
+    }
+    if extra {
+        notes.push(
+            "Claude legacy reasoning revision scan reached its 64-checkpoint limit; unlisted checkpoints are not certified"
+                .to_string(),
+        );
+    }
+}
+
+async fn read_claude_legacy_transcript(
+    conn: &DatabaseConnection,
+    checkpoint_id: &str,
+) -> std::result::Result<Vec<u8>, &'static str> {
+    let storage = util::try_get_storage_path(None)
+        .map_err(|_| "; repository storage was unavailable, so the revision was not written")?;
+    let row = conn
+        .query_one_raw(Statement::from_sql_and_values(
+            conn.get_database_backend(),
+            "SELECT tree_oid FROM agent_checkpoint WHERE checkpoint_id = ? AND scope = 'committed'",
+            [checkpoint_id.to_string().into()],
+        ))
+        .await
+        .map_err(|_| "; the checkpoint row was not readable, so the revision was not written")?
+        .ok_or("; the checkpoint row was not readable, so the revision was not written")?;
+    let tree_oid: String = row
+        .try_get_by("tree_oid")
+        .map_err(|_| "; the checkpoint row was not readable, so the revision was not written")?;
+    read_stored_claude_transcript(&storage, checkpoint_id, &tree_oid).await
+}
+
+async fn read_stored_claude_transcript(
+    storage: &Path,
+    checkpoint_id: &str,
+    tree_oid: &str,
+) -> std::result::Result<Vec<u8>, &'static str> {
+    let cap = crate::internal::ai::observed_agents::compliance::max_transcript_read_bytes()
+        .await
+        .map_err(|_| "; the transcript read cap is unavailable, so the revision was not written")?;
+    match super::checkpoint::load_checkpoint_transcript_bytes_from_storage(
+        storage,
+        checkpoint_id,
+        tree_oid,
+        cap,
+    ) {
+        Ok((bytes, false)) => Ok(bytes),
+        Ok((_, true)) => {
+            Err("; the transcript exceeds the read cap, so no partial digest was recorded")
+        }
+        Err(_) => Err("; the stored transcript could not be read, so the revision was not written"),
+    }
+}
+
 /// Execute one repair plan, updating the finding in place. Repair failures
 /// never abort the run — they annotate the finding and leave it
 /// unrepaired so the operator sees exactly what happened.
@@ -3220,6 +3372,28 @@ async fn execute_repair(
                 finding.detail.push_str(
                     "; failed automatic candidate was retained in quarantine for operator inspection",
                 );
+            }
+        }
+        RepairPlan::AppendClaudeLegacyRevision { checkpoint_id } => {
+            match read_claude_legacy_transcript(conn, checkpoint_id).await {
+                Ok(bytes) => {
+                    match history
+                        .repair_claude_legacy_reasoning_revision(checkpoint_id, &bytes)
+                        .await
+                    {
+                        Ok(_) => finding.repaired = true,
+                        Err(_) => {
+                            finding.manual_required = true;
+                            finding.detail.push_str(
+                                "; legacy reasoning revision repair failed closed; rerun doctor",
+                            );
+                        }
+                    }
+                }
+                Err(reason) => {
+                    finding.manual_required = true;
+                    finding.detail.push_str(reason);
+                }
             }
         }
         RepairPlan::Manual => {}

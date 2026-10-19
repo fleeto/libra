@@ -673,6 +673,124 @@ pub(super) struct AgentCaptureSnapshot {
     pub(super) import_tombstones: Vec<AgentImportTombstoneRow>,
     pub(super) required_oids: HashSet<String>,
     pub(super) traces_head: Option<String>,
+    /// Local coverage revisions that bind an old Claude checkpoint to ordinary
+    /// transcript content. They are not a D1 table. Cloud sync still requires
+    /// each one to keep its old checkpoint reference, and refuses a tombstoned
+    /// session that still has the replacement.
+    pub(super) claude_legacy_revisions: Vec<ClaudeLegacyReasoningMirrorRef>,
+}
+
+pub(super) async fn validated_claude_legacy_reasoning_mirror_refs(
+    db_conn: &sea_orm::DatabaseConnection,
+) -> Result<Vec<ClaudeLegacyReasoningMirrorRef>, String> {
+    let rows = load_claude_legacy_revision_rows(db_conn)
+        .await
+        .map_err(cloud_error_text)?;
+    validate_claude_legacy_revision_mirror(&rows).map_err(cloud_error_text)
+}
+
+fn cloud_error_text(error: CloudError) -> String {
+    match error {
+        CloudError::PartialTransfer(detail)
+        | CloudError::Generic(detail)
+        | CloudError::D1(detail)
+        | CloudError::R2(detail)
+        | CloudError::NameAlreadyTaken(detail)
+        | CloudError::NameNotFound(detail)
+        | CloudError::AmbiguousObjectFormat(detail) => detail,
+        CloudError::MissingEnv { detail, .. } => detail,
+    }
+}
+
+async fn load_claude_legacy_revision_rows(
+    db_conn: &impl sea_orm::ConnectionTrait,
+) -> CloudResult<Vec<ClaudeLegacyRevisionMirrorRow>> {
+    use sea_orm::Statement;
+
+    let present = db_conn
+        .query_one_raw(Statement::from_string(
+            db_conn.get_database_backend(),
+            "SELECT 1 AS present FROM sqlite_master
+             WHERE type = 'table' AND name = 'agent_coverage_revision' LIMIT 1"
+                .to_string(),
+        ))
+        .await
+        .map_err(|error| {
+            local_agent_capture_failure("probe Claude legacy reasoning revision schema", error)
+        })?;
+    if present.is_none() {
+        return Ok(Vec::new());
+    }
+    let rows = db_conn
+        .query_all_raw(Statement::from_string(
+            db_conn.get_database_backend(),
+            "SELECT r.checkpoint_id, r.session_id, r.coverage_digest, c.tree_oid,
+                    CASE WHEN t.agent_kind IS NULL THEN 0 ELSE 1 END AS tombstoned
+             FROM agent_coverage_revision r
+             JOIN agent_session s ON s.session_id = r.session_id
+             LEFT JOIN agent_checkpoint c
+               ON c.checkpoint_id = r.checkpoint_id AND c.session_id = r.session_id
+             LEFT JOIN agent_import_tombstone t
+               ON t.agent_kind = s.agent_kind
+              AND t.provider_session_id = s.provider_session_id
+             WHERE r.logical_turn_key = 'claude-legacy:' || r.checkpoint_id
+               AND r.coverage_schema_version = 2
+             ORDER BY r.session_id, r.checkpoint_id, r.revision"
+                .to_string(),
+        ))
+        .await
+        .map_err(|error| {
+            local_agent_capture_failure("read Claude legacy reasoning revisions", error)
+        })?;
+    rows.into_iter()
+        .map(|row| {
+            Ok(ClaudeLegacyRevisionMirrorRow {
+                checkpoint_id: row.try_get_by("checkpoint_id")?,
+                session_id: row.try_get_by("session_id")?,
+                content_digest: row.try_get_by("coverage_digest")?,
+                tree_oid: row.try_get_by("tree_oid")?,
+                tombstoned: row.try_get_by::<i64, _>("tombstoned")? != 0,
+            })
+        })
+        .collect::<Result<Vec<_>, sea_orm::DbErr>>()
+        .map_err(|error| {
+            local_agent_capture_failure("decode Claude legacy reasoning revisions", error)
+        })
+}
+
+fn validate_claude_legacy_revision_mirror(
+    rows: &[ClaudeLegacyRevisionMirrorRow],
+) -> CloudResult<Vec<ClaudeLegacyReasoningMirrorRef>> {
+    let mut refs = Vec::with_capacity(rows.len());
+    for row in rows {
+        if row.tombstoned {
+            return Err(CloudError::PartialTransfer(
+                "a tombstoned Claude session still has a legacy reasoning revision; finish the erase before cloud sync"
+                    .to_string(),
+            ));
+        }
+        let Some(tree_oid) = row.tree_oid.clone().filter(|oid| !oid.is_empty()) else {
+            return Err(CloudError::PartialTransfer(
+                "a Claude legacy reasoning revision is missing its old checkpoint; refusing to mirror the replacement alone"
+                    .to_string(),
+            ));
+        };
+        refs.push(ClaudeLegacyReasoningMirrorRef {
+            checkpoint_id: row.checkpoint_id.clone(),
+            session_id: row.session_id.clone(),
+            content_digest: row.content_digest.clone(),
+            tree_oid,
+        });
+    }
+    Ok(refs)
+}
+
+struct ClaudeLegacyRevisionMirrorRow {
+    checkpoint_id: String,
+    session_id: String,
+    content_digest: String,
+    tree_oid: Option<String>,
+    tombstoned: bool,
 }
 
 /// PD-03: union local and remote session tombstones, keeping the newest
@@ -1259,6 +1377,8 @@ async fn load_agent_capture_catalog_snapshot(
         &snapshot.claims,
         "local",
     )?;
+    let legacy_rows = load_claude_legacy_revision_rows(&txn).await?;
+    snapshot.claude_legacy_revisions = validate_claude_legacy_revision_mirror(&legacy_rows)?;
     txn.commit()
         .await
         .map_err(|error| local_agent_capture_failure("commit local catalog snapshot", error))?;

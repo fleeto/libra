@@ -56,6 +56,22 @@ use object_format::REBACKUP_HINT;
 pub(crate) use restore::*;
 pub(crate) use sync::run_cloud_sync;
 
+/// One legacy Claude reasoning revision and the old checkpoint it cites.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct ClaudeLegacyReasoningMirrorRef {
+    pub checkpoint_id: String,
+    pub session_id: String,
+    pub content_digest: String,
+    pub tree_oid: String,
+}
+
+/// Read local Claude legacy reasoning revisions and require each old checkpoint.
+pub async fn claude_legacy_reasoning_mirror_refs(
+    db_conn: &sea_orm::DatabaseConnection,
+) -> Result<Vec<ClaudeLegacyReasoningMirrorRef>, String> {
+    agent_capture::validated_claude_legacy_reasoning_mirror_refs(db_conn).await
+}
+
 /// `--help` examples shown in `libra cloud --help` output.
 ///
 /// `cloud` exposes three sub-commands: `sync` (push local repo to

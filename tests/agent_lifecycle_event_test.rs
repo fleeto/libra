@@ -2059,6 +2059,8 @@ fn fail_closed_hooks_keep_repository_database_contract() {
 /// Every schema object's definition plus every table column of the database,
 /// so a migration's physical effect is observable independent of receipts.
 async fn physical_repository_schema(conn: &DatabaseConnection) -> Vec<String> {
+    let agent_kind_check = regex::Regex::new(r"CHECK\(`agent_kind` IN \(([^)]*)\)\)")
+        .expect("fixed agent_kind CHECK pattern");
     conn.query_all_raw(Statement::from_string(
         conn.get_database_backend(),
         "SELECT type || ':' || name || ':' || COALESCE(sql, '') FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' \
@@ -2071,8 +2073,24 @@ async fn physical_repository_schema(conn: &DatabaseConnection) -> Vec<String> {
     .expect("read physical repository schema")
     .into_iter()
     .map(|row| {
-        row.try_get_by_index::<String>(0)
+        // SQLite's table rebuild quotes the renamed table with double quotes;
+        // fresh init uses backticks and a multiline closed agent-kind list.
+        // Normalize those spellings while retaining every CHECK value.
+        let definition = row.try_get_by_index::<String>(0)
             .expect("decode schema object")
+            .replacen(
+                "table:agent_session:CREATE TABLE \"agent_session\"",
+                "table:agent_session:CREATE TABLE `agent_session`",
+                1,
+            );
+        agent_kind_check
+            .replace_all(&definition, |captures: &regex::Captures<'_>| {
+                format!(
+                    "CHECK(`agent_kind` IN ({}))",
+                    captures[1].split_whitespace().collect::<String>()
+                )
+            })
+            .into_owned()
     })
     .collect()
 }

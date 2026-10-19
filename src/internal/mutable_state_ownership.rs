@@ -657,7 +657,11 @@ mod tests {
         rest = rest.get(name.len()..).unwrap_or("");
         rest = rest.trim_start_matches(['`', '"']).trim_start();
         // A diagnostic such as "CREATE TABLE is missing a name" is not DDL.
-        if name.is_empty() || !rest.starts_with('(') {
+        // SQLite also permits CREATE TABLE name AS SELECT without columns.
+        let as_query = rest
+            .strip_prefix("as")
+            .is_some_and(|tail| tail.starts_with(char::is_whitespace) || tail.starts_with('('));
+        if name.is_empty() || !(rest.starts_with('(') || as_query) {
             return String::new();
         }
         name
@@ -786,18 +790,7 @@ mod tests {
         let mut created = BTreeSet::new();
         for chunk in sql.split("create table").skip(1) {
             let name = table_name_after(chunk);
-            let body = body_after_create_table(chunk).trim_start_matches(['`', '"']);
-            let tail = body
-                .strip_prefix(&name)
-                .unwrap_or("")
-                .trim_start_matches(['`', '"'])
-                .trim_start();
-            // A diagnostic such as "CREATE TABLE is missing a name" is not
-            // DDL. Require a column list or SQLite's CREATE TABLE AS form.
-            let as_query = tail
-                .strip_prefix("as")
-                .is_some_and(|rest| rest.starts_with(char::is_whitespace) || rest.starts_with('('));
-            if !name.is_empty() && (tail.starts_with('(') || as_query) {
+            if !name.is_empty() {
                 created.insert(name);
             }
         }

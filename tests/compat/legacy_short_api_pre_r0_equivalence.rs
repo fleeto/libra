@@ -33,9 +33,11 @@ fn unstaged_rename_decomposes_to_unstaged_delete_plus_untracked() {
         renamed: vec![(p("old.txt"), p("new.txt"))],
         ..Default::default()
     };
+    // Tracked ` D` rows precede untracked `??` rows, the same porcelain v1
+    // grouping Git uses (t7508) and the legacy tuple API now emits.
     assert_eq!(
         generate_short_format_status(&staged, &unstaged),
-        vec![(p("new.txt"), '?', '?'), (p("old.txt"), ' ', 'D')],
+        vec![(p("old.txt"), ' ', 'D'), (p("new.txt"), '?', '?')],
     );
 }
 

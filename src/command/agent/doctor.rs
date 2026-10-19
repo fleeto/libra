@@ -5194,10 +5194,15 @@ fn emit_report(report: &DoctorReport, output: &OutputConfig) -> CliResult<()> {
             (None, None) => println!("  {}{tier_tag}: not yet installable", ph.name),
         }
         for event in &ph.events {
-            let state = match event.installed {
-                Some(true) => "configured",
-                Some(false) => "not configured",
-                None => "unknown",
+            // Registry rows (Claude) say configured. Class-less managed
+            // templates (OpenCode) keep the historical "installed" wording.
+            let registry = event.class.is_some();
+            let state = match (event.installed, registry) {
+                (Some(true), false) => "installed",
+                (Some(false), false) => "not installed",
+                (Some(true), true) => "configured",
+                (Some(false), true) => "not configured",
+                (None, _) => "unknown",
             };
             let detail = event.reason.unwrap_or(match event.class {
                 Some(class) => class,

@@ -332,6 +332,12 @@ pub const CODE_AGENT_PROCESS_CACHES: &[ProcessCacheSurface] = &[
         discipline: "process-lifetime reaper thread handle; holds no repository state",
     },
     ProcessCacheSurface {
+        source_path: "src/internal/ai/hooks/providers/claude/events.rs",
+        static_name: "COUNTS",
+        discipline: "in-process MessageDisplay coalesce counts keyed by session id; capped at 128 \
+                     batches, holds no repository state, and is cleared by the test reset",
+    },
+    ProcessCacheSurface {
         source_path: "src/internal/ai/authorized_read.rs",
         static_name: "RUNNING_LIBRA_PROGRAM",
         discipline: "process-lifetime executable path registered only by Libra's main entrypoint; \

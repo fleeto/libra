@@ -9172,10 +9172,10 @@ fn public_signature_fingerprint(relative_path: &str, function: &str) -> String {
 #[test]
 fn capture_runtime_extraction_oracles_are_frozen() {
     // First digest: OG-01 input-only Contract A revision after fresh Claude
-    // design PASS. The three current digests include only the subsequent
-    // local-only #[ignore] test attribute required by OpenCode CI policy;
-    // oracle bodies, helpers, expectation tables, and harness signature are
-    // unchanged. ADR-ACF-10 records this bounded execution-scope revision.
+    // design PASS. The hook-contract digests moved again when Claude
+    // PermissionRequest, SubagentStart, and SubagentStop became ordinary
+    // observed events (receipts and subagent checkpoints). Helpers are
+    // unchanged. ADR-ACF-10 records this bounded contract revision.
     const FROZEN_ORACLES: [(&str, &str, &[&str], &str); 3] = [
         (
             "tests/agent_lifecycle_event_test.rs",
@@ -9195,7 +9195,7 @@ fn capture_runtime_extraction_oracles_are_frozen() {
                 "fn hook_contract_projection",
                 "struct HookRepo",
             ],
-            "92b101aa8079a041517adb95626f13cec2a366ef326bf24ea48846c0427bf206",
+            "29b407cb3de0a0472ae4af7117f8ed89a295e1fafd78ecb68848ce4c4d04f577",
         ),
         (
             "tests/agent_hook_crash_test.rs",
@@ -9263,7 +9263,7 @@ fn capture_runtime_extraction_oracles_are_frozen() {
                 "fn hook_contract_projection",
                 "struct HookRepo",
             ],
-            "d3826fda088310fb89c67b5df57ae0638477578c88b72da2d2de74399f621638",
+            "7e75ac2a8b3eb912d105ec9c11b1a6078f601b5a4890ac7cbf32efd4b73617c0",
         ),
         (
             "tests/agent_hook_crash_test.rs",

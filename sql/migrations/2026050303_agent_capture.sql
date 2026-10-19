@@ -10,12 +10,12 @@
 
 CREATE TABLE IF NOT EXISTS `agent_session` (
     `session_id`           TEXT PRIMARY KEY,
-    -- Closed enum mirrored by `AgentKind::as_db_str` in
-    -- `src/internal/ai/observed_agents/adapter.rs`. Adding a new value here
-    -- requires a paired migration that bumps the CHECK constraint.
+    -- Historical CHECK from capture introduction. `AgentKind::as_db_str`
+    -- can be wider: later kinds are added by a dedicated rebuild
+    -- (`2026101901` adds `grok`). Do not edit this list to match the enum.
     `agent_kind`           TEXT NOT NULL CHECK(`agent_kind` IN (
         'claude_code', 'cursor', 'codex', 'gemini',
-        'opencode', 'copilot', 'factory_ai', 'grok'
+        'opencode', 'copilot', 'factory_ai'
     )),
     `provider_session_id`  TEXT NOT NULL,
     -- Soft FK to `ai_thread(thread_id)`; ON DELETE SET NULL because losing the

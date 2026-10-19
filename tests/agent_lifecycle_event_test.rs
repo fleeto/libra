@@ -5546,3 +5546,109 @@ fn claude_observe_message_display_drops_after_the_coalesce_limit() {
     assert_eq!(kept, MESSAGE_DISPLAY_COALESCE_LIMIT);
     assert_eq!(dropped, 1);
 }
+
+/// CC-02 AC5: a malformed frame and a database that refuses writes are both
+/// controllable failures. Observe stays silent with exit 0, neither failure
+/// echoes the payload to stdout, stderr or the tracing log, and the session
+/// recorded before the failures is still listed afterwards.
+#[test]
+fn claude_observe_parse_and_database_failures_keep_existing_data() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let repo = HookRepo::init();
+    let session = "cc02-failures";
+    let canary = "CC02-FAILURE-CANARY";
+    let log_file = repo.home.join("observe.log");
+    let observe = |stdin: &[u8]| {
+        let mut cmd = repo.command_in(&repo.repo);
+        cmd.args(["agent", "hooks", "claude-code", "observe"])
+            .env("LIBRA_LOG", "debug")
+            .env("LIBRA_LOG_FILE", &log_file)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = cmd.spawn().expect("spawn libra observe");
+        child
+            .stdin
+            .take()
+            .expect("stdin piped")
+            .write_all(stdin)
+            .expect("write observe frame");
+        child.wait_with_output().expect("wait for libra observe")
+    };
+    let assert_silent = |out: &Output, case: &str| {
+        let (stdout, stderr) = claude_observe_text(out);
+        assert!(out.status.success(), "{case}: {}", describe(out));
+        assert!(stdout.is_empty(), "{case}: observe stdout must stay empty");
+        assert!(
+            !stderr.contains(canary) && !stderr.contains("panicked at"),
+            "{case}: stderr must not echo the payload or panic: {stderr}"
+        );
+    };
+    let session_listed = || {
+        let listed = repo.run(&["agent", "session", "list", "--json"], None);
+        String::from_utf8_lossy(&listed.stdout).contains(session)
+    };
+
+    let started = observe(
+        repo.envelope(
+            "SessionStart",
+            session,
+            None,
+            json!({ "source": "startup" }),
+        )
+        .as_bytes(),
+    );
+    assert_silent(&started, "baseline");
+    assert!(session_listed(), "baseline observe records the session");
+
+    let malformed = format!(
+        "{{\"hook_event_name\":\"UserPromptSubmit\",\"session_id\":\"{session}\",\"prompt\":\"{canary}\""
+    );
+    let parsed = observe(malformed.as_bytes());
+    assert_silent(&parsed, "malformed JSON");
+    assert!(
+        session_listed(),
+        "a parse failure must not delete the session"
+    );
+
+    let partials = || {
+        std::fs::read_to_string(&log_file)
+            .unwrap_or_default()
+            .matches("claude_observe_partial")
+            .count()
+    };
+    let before_refusal = partials();
+    let database = repo.repo.join(".libra").join("libra.db");
+    let original = std::fs::metadata(&database)
+        .expect("stat repository database")
+        .permissions();
+    let mut read_only = original.clone();
+    read_only.set_mode(0o444);
+    std::fs::set_permissions(&database, read_only).expect("make database read-only");
+    let refused = observe(
+        repo.envelope(
+            "UserPromptSubmit",
+            session,
+            None,
+            json!({ "prompt": canary }),
+        )
+        .as_bytes(),
+    );
+    std::fs::set_permissions(&database, original).expect("restore database permissions");
+    assert_silent(&refused, "read-only database");
+    assert!(
+        session_listed(),
+        "a database write failure must not delete the session"
+    );
+
+    assert!(
+        partials() > before_refusal,
+        "the read-only database must take the controllable failure path"
+    );
+    let log = std::fs::read_to_string(&log_file).unwrap_or_default();
+    assert!(
+        !log.contains(canary),
+        "the tracing log must not contain the payload body"
+    );
+}

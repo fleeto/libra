@@ -20,14 +20,25 @@ use crate::internal::ai::observed_agents::{
     transcript_source::{TRANSCRIPT_READ_HARD_CAP_BYTES, TranscriptReadError},
 };
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct GrokAttachedReasoning {
     pub id: String,
     pub status: String,
     pub encrypted_content: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+impl std::fmt::Debug for GrokAttachedReasoning {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("GrokAttachedReasoning")
+            .field("id_len", &self.id.len())
+            .field("status_len", &self.status.len())
+            .field("encrypted_content_len", &self.encrypted_content.len())
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
 pub enum GrokMergedEvent {
     Thought {
         text: String,
@@ -53,6 +64,61 @@ pub enum GrokMergedEvent {
         summary_text: Option<String>,
         encrypted_content: String,
     },
+}
+
+impl std::fmt::Debug for GrokMergedEvent {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Thought {
+                text,
+                prompt_id,
+                event_id,
+                reasoning,
+            } => formatter
+                .debug_struct("Thought")
+                .field("text_len", &text.len())
+                .field("prompt_id_len", &prompt_id.len())
+                .field("event_id_len", &event_id.len())
+                .field("reasoning", reasoning)
+                .finish(),
+            Self::Tool { name, event_id } => formatter
+                .debug_struct("Tool")
+                .field("name_len", &name.len())
+                .field("event_id_len", &event_id.len())
+                .finish(),
+            Self::Unknown {
+                session_update,
+                line_sha256,
+            } => formatter
+                .debug_struct("Unknown")
+                .field("session_update", session_update)
+                .field("line_sha256", line_sha256)
+                .finish(),
+            Self::Turn {
+                reasoning_tokens,
+                event_id,
+            } => formatter
+                .debug_struct("Turn")
+                .field("reasoning_tokens", reasoning_tokens)
+                .field("event_id_len", &event_id.len())
+                .finish(),
+            Self::Reasoning {
+                id,
+                status,
+                summary_text,
+                encrypted_content,
+            } => formatter
+                .debug_struct("Reasoning")
+                .field("id_len", &id.len())
+                .field("status_len", &status.len())
+                .field(
+                    "summary_len",
+                    &summary_text.as_ref().map(String::len).unwrap_or(0),
+                )
+                .field("encrypted_content_len", &encrypted_content.len())
+                .finish(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -10,8 +10,15 @@ use std::{
 };
 
 use libra::internal::ai::{
-    hooks::providers::grok::{
-        encode_grok_cwd, install_marked_grok_hooks, observe_grok_hook, uninstall_marked_grok_hooks,
+    hooks::{
+        lifecycle::SessionHookEnvelope,
+        providers::{
+            grok::{
+                encode_grok_cwd, install_marked_grok_hooks, observe_grok_hook,
+                uninstall_marked_grok_hooks,
+            },
+            grok_provider,
+        },
     },
     observed_agents::{
         AgentKind, AgentStability, agent_for,
@@ -1066,5 +1073,109 @@ fn grok_live_capture_matches_hook_installable() {
     assert_eq!(agent.stability(), AgentStability::Stable);
     for kind in AgentKind::all() {
         assert!(live_capture_matches_hook_installable(*kind));
+    }
+}
+
+#[test]
+fn grok_updates_foreign_method_is_refused() {
+    let session = tempfile::tempdir().expect("session");
+    let foreign = write_jsonl(
+        session.path(),
+        &[r#"{"method":"session/other","params":{"update":{"sessionUpdate":"agent_thought_chunk","content":{"type":"text","text":"dropped-thought"}}}}"#
+            .to_string()],
+    );
+    let error = read_grok_updates(session.path(), &foreign, &GrokReadCursor::default())
+        .expect_err("foreign method is refused");
+    let rendered = error.to_string();
+    assert!(
+        rendered.contains("outside the grok field matrix"),
+        "{rendered}"
+    );
+    assert!(!rendered.contains("dropped-thought"));
+}
+
+#[test]
+fn grok_debug_omits_plaintext() {
+    let thought = GrokTranscriptEvent::Thought {
+        text: "plain-thought-canary".to_string(),
+        prompt_id: "prompt-canary".to_string(),
+        event_id: "event-canary".to_string(),
+    };
+    let thought_debug = format!("{thought:?}");
+    assert!(!thought_debug.contains("plain-thought-canary"));
+    assert!(!thought_debug.contains("prompt-canary"));
+    let reasoning = GrokMergedEvent::Reasoning {
+        id: "id-canary".to_string(),
+        status: "completed".to_string(),
+        summary_text: Some("summary-canary".to_string()),
+        encrypted_content: "cipher-canary".to_string(),
+    };
+    let reasoning_debug = format!("{reasoning:?}");
+    assert!(!reasoning_debug.contains("summary-canary"));
+    assert!(!reasoning_debug.contains("cipher-canary"));
+    assert!(!reasoning_debug.contains("id-canary"));
+}
+
+#[test]
+fn grok_stop_path_observes_thoughts() {
+    let home = tempfile::tempdir().expect("grok home");
+    let _restore = RestoreGrokHome::set(home.path());
+    let cwd = home.path().join("work");
+    fs::create_dir_all(&cwd).expect("cwd");
+    let cwd_text = cwd.to_string_lossy().to_string();
+    let sessions = home.path().join("sessions");
+    for (session_id, event_name) in [
+        ("sess-stop", "Stop"),
+        ("sess-compact", "PreCompact"),
+        ("sess-end", "SessionEnd"),
+    ] {
+        write_session_updates(
+            &sessions,
+            &cwd_text,
+            session_id,
+            &format!(
+                "{}\n",
+                thought_line("e1", "p", &format!("body-{session_id}"), "t")
+            ),
+        );
+        let envelope = SessionHookEnvelope {
+            hook_event_name: event_name.to_string(),
+            session_id: session_id.to_string(),
+            cwd: cwd_text.clone(),
+            transcript_path: None,
+            extra: serde_json::Map::new(),
+        };
+        grok_provider()
+            .parse_hook_event(event_name, &envelope)
+            .expect("parse");
+        assert_eq!(
+            stored_thoughts(&home.path().join("libra-capture"), session_id),
+            [format!("body-{session_id}")]
+        );
+    }
+}
+
+struct RestoreGrokHome {
+    previous: Option<std::ffi::OsString>,
+}
+
+impl RestoreGrokHome {
+    fn set(path: &Path) -> Self {
+        let previous = std::env::var_os("GROK_HOME");
+        // SAFETY: the guard restores the previous process-local GROK_HOME when
+        // this test returns, including on panic. The path is a temp directory.
+        unsafe { std::env::set_var("GROK_HOME", path) };
+        Self { previous }
+    }
+}
+
+impl Drop for RestoreGrokHome {
+    fn drop(&mut self) {
+        unsafe {
+            match self.previous.take() {
+                Some(value) => std::env::set_var("GROK_HOME", value),
+                None => std::env::remove_var("GROK_HOME"),
+            }
+        }
     }
 }

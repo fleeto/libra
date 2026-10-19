@@ -25,7 +25,7 @@ pub struct GrokReadCursor {
     pub seen_event_ids: BTreeSet<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum GrokTranscriptEvent {
     Thought {
         text: String,
@@ -44,6 +44,44 @@ pub enum GrokTranscriptEvent {
         reasoning_tokens: u64,
         event_id: String,
     },
+}
+
+impl std::fmt::Debug for GrokTranscriptEvent {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Thought {
+                text,
+                prompt_id,
+                event_id,
+            } => formatter
+                .debug_struct("Thought")
+                .field("text_len", &text.len())
+                .field("prompt_id_len", &prompt_id.len())
+                .field("event_id_len", &event_id.len())
+                .finish(),
+            Self::Tool { name, event_id } => formatter
+                .debug_struct("Tool")
+                .field("name_len", &name.len())
+                .field("event_id_len", &event_id.len())
+                .finish(),
+            Self::Unknown {
+                session_update,
+                line_sha256,
+            } => formatter
+                .debug_struct("Unknown")
+                .field("session_update", session_update)
+                .field("line_sha256", line_sha256)
+                .finish(),
+            Self::Turn {
+                reasoning_tokens,
+                event_id,
+            } => formatter
+                .debug_struct("Turn")
+                .field("reasoning_tokens", reasoning_tokens)
+                .field("event_id_len", &event_id.len())
+                .finish(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -170,6 +208,12 @@ pub fn read_grok_updates(
                         }
                     }
                     LineEffect::Event(event) => events.push(event),
+                    LineEffect::Refuse => {
+                        return Err(GrokUpdatesError::Refused {
+                            path: path_text,
+                            reason: "line is outside the grok field matrix".to_string(),
+                        });
+                    }
                 }
             }
         }
@@ -227,21 +271,16 @@ enum LineEffect {
     Skip,
     Event(GrokTranscriptEvent),
     Partial(Option<GrokTranscriptEvent>),
+    Refuse,
 }
 
 fn interpret_line(bytes: &[u8], seen: &mut BTreeSet<String>) -> LineEffect {
     let Ok(value) = serde_json::from_slice::<Value>(bytes) else {
-        return LineEffect::Partial(Some(GrokTranscriptEvent::Unknown {
-            session_update: "unparsed".to_string(),
-            line_sha256: hex_sha256(bytes),
-        }));
+        return LineEffect::Refuse;
     };
     let method = value.get("method").and_then(Value::as_str).unwrap_or("");
     if method != "session/update" && method != "_x.ai/session/update" {
-        return LineEffect::Event(GrokTranscriptEvent::Unknown {
-            session_update: method.to_string(),
-            line_sha256: hex_sha256(bytes),
-        });
+        return LineEffect::Refuse;
     }
     let params = value.get("params");
     let event_id = params
@@ -258,7 +297,8 @@ fn interpret_line(bytes: &[u8], seen: &mut BTreeSet<String>) -> LineEffect {
         .and_then(|update| update.get("sessionUpdate"))
         .and_then(Value::as_str)
         .unwrap_or("");
-    match session_update {
+    let missing_event_id = event_id.is_empty();
+    let effect = match session_update {
         "agent_thought_chunk" => interpret_thought(update, &event_id),
         "tool_call" | "tool_call_update" => LineEffect::Event(GrokTranscriptEvent::Tool {
             name: tool_name(update),
@@ -279,7 +319,14 @@ fn interpret_line(bytes: &[u8], seen: &mut BTreeSet<String>) -> LineEffect {
             session_update: other.to_string(),
             line_sha256: hex_sha256(bytes),
         }),
+    };
+    if missing_event_id {
+        return match effect {
+            LineEffect::Event(event) => LineEffect::Partial(Some(event)),
+            other => other,
+        };
     }
+    effect
 }
 
 fn interpret_thought(update: Option<&Value>, event_id: &str) -> LineEffect {

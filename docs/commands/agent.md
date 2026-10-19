@@ -4,7 +4,7 @@
 
 Manage external-agent capture for Claude Code, Codex, OpenCode, and Grok.
 
-Grok capture reads the local session logs `updates.jsonl` and `chat_history.jsonl`. The ordinary checkpoint transcript retains Thinking text and unproven `encrypted_content`. Libra does not decrypt that field. `support_wave` is `grok`, not `first_batch`. Grok is not a `review` or `investigate` launcher. Default `checkpoint show` does not print Thinking plaintext; an explicit transcript path prints the redacted body.
+Grok is supported and hook-installable with `support_wave=grok`, not `first_batch`, and is not a `review` or `investigate` launcher. **Automatic Thinking capture is paused.** Hook lifecycle events are recorded through the shared pipeline; decoding does not read session logs or write `GROK_HOME/libra-capture`. Existing readers for local `updates.jsonl` and `chat_history.jsonl` are not yet connected to the authorized snapshot/checkpoint writer. Offline observer JSON is scratch state, not a Libra checkpoint. The intended transcript retains Thinking text and unproven `encrypted_content`; Libra does not decrypt it. Current synthetic reader tests do not prove that live checkpoints contain it. Default `checkpoint show` does not print Thinking plaintext; an explicit transcript path returns only content actually stored.
 
 ## Native Windows capture
 

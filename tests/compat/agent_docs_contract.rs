@@ -1616,6 +1616,14 @@ fn grok_docs_contract_mentions_thinking_retain() {
         }
         let lower = document.to_ascii_lowercase();
         assert!(
+            lower.contains("paused") || document.contains("暂停"),
+            "{label} must disclose that automatic Grok Thinking capture is paused"
+        );
+        assert!(
+            lower.contains("scratch") || document.contains("临时状态"),
+            "{label} must distinguish offline observer state from real checkpoints"
+        );
+        assert!(
             lower.contains("not decrypt")
                 || lower.contains("不解密")
                 || lower.contains("does not decrypt")

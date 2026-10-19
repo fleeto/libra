@@ -870,7 +870,7 @@ fn grok_hook_does_not_spawn_grok() {
         }
     }
     let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/internal/ai/hooks/providers/grok");
-    for name in ["mod.rs", "parser.rs", "settings.rs"] {
+    for name in ["mod.rs", "parser.rs", "session_files.rs", "settings.rs"] {
         let text = fs::read_to_string(source.join(name)).expect("source");
         assert!(
             !text.contains("std::process") && !text.contains("Command::new"),
@@ -1117,65 +1117,424 @@ fn grok_debug_omits_plaintext() {
 }
 
 #[test]
-fn grok_stop_path_observes_thoughts() {
-    let home = tempfile::tempdir().expect("grok home");
-    let _restore = RestoreGrokHome::set(home.path());
-    let cwd = home.path().join("work");
-    fs::create_dir_all(&cwd).expect("cwd");
-    let cwd_text = cwd.to_string_lossy().to_string();
-    let sessions = home.path().join("sessions");
-    for (session_id, event_name) in [
-        ("sess-stop", "Stop"),
-        ("sess-compact", "PreCompact"),
-        ("sess-end", "SessionEnd"),
+fn grok_provider_parse_is_lifecycle_only() {
+    use libra::internal::ai::hooks::lifecycle::LifecycleEventKind;
+
+    // These paths deliberately do not exist. Decoding needs neither source
+    // access nor any host HOME/env mutation; AST guards pin the delegate too.
+    let temp = tempfile::tempdir().expect("isolated paths");
+    let missing_cwd = temp.path().join("missing-cwd");
+    let missing_source = temp.path().join("missing-updates.jsonl");
+    for (event_name, expected) in [
+        ("Stop", LifecycleEventKind::TurnEnd),
+        ("StopCancelled", LifecycleEventKind::TurnEnd),
+        ("StopFailure", LifecycleEventKind::TurnEnd),
+        ("PreCompact", LifecycleEventKind::Compaction),
+        ("SessionEnd", LifecycleEventKind::SessionEnd),
     ] {
-        write_session_updates(
-            &sessions,
-            &cwd_text,
-            session_id,
-            &format!(
-                "{}\n",
-                thought_line("e1", "p", &format!("body-{session_id}"), "t")
-            ),
-        );
         let envelope = SessionHookEnvelope {
             hook_event_name: event_name.to_string(),
-            session_id: session_id.to_string(),
-            cwd: cwd_text.clone(),
-            transcript_path: None,
+            session_id: "synthetic-session".to_string(),
+            cwd: missing_cwd.to_string_lossy().into_owned(),
+            transcript_path: Some(missing_source.to_string_lossy().into_owned()),
             extra: serde_json::Map::new(),
         };
-        grok_provider()
+        let event = grok_provider()
             .parse_hook_event(event_name, &envelope)
-            .expect("parse");
+            .expect("pure parse");
+        assert_eq!(event.kind, expected);
+        assert_eq!(event.session_id, "synthetic-session");
+        assert!(event.assistant_message.is_none());
+        assert!(event.prompt.is_none());
         assert_eq!(
-            stored_thoughts(&home.path().join("libra-capture"), session_id),
-            [format!("body-{session_id}")]
+            fs::read_dir(temp.path())
+                .expect("unchanged temp dir")
+                .count(),
+            0
         );
     }
+    let unsafe_envelope = SessionHookEnvelope {
+        hook_event_name: "Stop".to_string(),
+        session_id: "../unsafe".to_string(),
+        cwd: String::new(),
+        transcript_path: None,
+        extra: serde_json::Map::new(),
+    };
+    assert!(
+        grok_provider()
+            .parse_hook_event("Stop", &unsafe_envelope)
+            .is_err()
+    );
+    let safe_envelope = SessionHookEnvelope {
+        session_id: "synthetic-session".to_string(),
+        ..unsafe_envelope
+    };
+    assert!(
+        grok_provider()
+            .parse_hook_event("Unknown", &safe_envelope)
+            .is_err()
+    );
 }
 
-struct RestoreGrokHome {
-    previous: Option<std::ffi::OsString>,
-}
+// GK-07 pure snapshot APIs. No real provider home, process or runtime wiring.
+mod pure_snapshot {
+    use std::time::{Duration, Instant};
 
-impl RestoreGrokHome {
-    fn set(path: &Path) -> Self {
-        let previous = std::env::var_os("GROK_HOME");
-        // SAFETY: the guard restores the previous process-local GROK_HOME when
-        // this test returns, including on panic. The path is a temp directory.
-        unsafe { std::env::set_var("GROK_HOME", path) };
-        Self { previous }
+    use libra::internal::ai::observed_agents::{
+        grok_reasoning::{
+            GROK_NORMALIZED_MAX_BYTES, GROK_THOUGHT_MAX_BYTES, GrokReasoningError,
+            normalize_grok_reasoning_bytes,
+        },
+        grok_updates::{GrokUpdatesError, parse_grok_updates_bytes},
+    };
+
+    use super::*;
+
+    fn bytes(lines: &[String]) -> Vec<u8> {
+        format!("{}\n", lines.join("\n")).into_bytes()
     }
-}
 
-impl Drop for RestoreGrokHome {
-    fn drop(&mut self) {
-        unsafe {
-            match self.previous.take() {
-                Some(value) => std::env::set_var("GROK_HOME", value),
-                None => std::env::remove_var("GROK_HOME"),
+    fn updates(
+        lines: &[String],
+    ) -> libra::internal::ai::observed_agents::grok_updates::GrokUpdatesRead {
+        parse_grok_updates_bytes(&bytes(lines), &GrokReadCursor::default(), None)
+            .expect("bounded synthetic updates")
+    }
+
+    #[test]
+    fn grok_pure_updates_matches_file_and_preserves_order_cursor_and_replay() {
+        let lines = [
+            thought_line("e1", "p", "left-", "t"),
+            thought_line("e1", "p", "duplicate", "t"),
+            tool_line("tool", "shell"),
+            thought_line("e2", "p", "middle-", "t"),
+            thought_line("e3", "p", "right", "t"),
+            turn_line("turn", 7),
+        ];
+        let snapshot = bytes(&lines);
+        let before = snapshot.clone();
+        let pure = parse_grok_updates_bytes(&snapshot, &GrokReadCursor::default(), None)
+            .expect("pure parse");
+        let temp = tempfile::tempdir().expect("synthetic session");
+        let path = write_jsonl(temp.path(), &lines);
+        let file = read_grok_updates(temp.path(), &path, &GrokReadCursor::default())
+            .expect("legacy file API");
+        assert_eq!(pure, file);
+        assert_eq!(thought_texts(&pure.events), ["left-", "middle-", "right"]);
+        assert!(!thought_texts(&pure.events).contains(&"left-middle-right"));
+        let cursor = GrokReadCursor {
+            offset: pure.next_offset,
+            seen_event_ids: pure.seen_event_ids.clone(),
+        };
+        assert!(
+            parse_grok_updates_bytes(&snapshot, &cursor, None)
+                .expect("resume")
+                .events
+                .is_empty()
+        );
+        let replay = GrokReadCursor {
+            offset: 0,
+            seen_event_ids: pure.seen_event_ids,
+        };
+        assert!(
+            parse_grok_updates_bytes(&snapshot, &replay, None)
+                .expect("replay")
+                .events
+                .is_empty()
+        );
+        assert_eq!(snapshot, before);
+    }
+
+    #[test]
+    fn grok_pure_summary_exact_four_chunk_unmatched_and_opaque_only() {
+        let read = updates(&[
+            thought_line("a", "p", "W1", "t"),
+            thought_line("b", "p", "W2", "t"),
+            thought_line("c", "p", "W3", "t"),
+            thought_line("d", "p", "W4", "t"),
+            thought_line("e", "p", "W5", "t"),
+            thought_line("x", "q", "界 café", "t"),
+        ]);
+        let history = bytes(&[
+            reasoning_line("four", "completed", &["W1W2W3W4"], "OPAQUE-FOUR"),
+            reasoning_line("exact", "completed", &["界 café"], "OPAQUE-EXACT"),
+            reasoning_line("five", "completed", &["W1W2W3W4W5"], "OPAQUE-FIVE"),
+            reasoning_line("unmatched", "completed", &["orphan"], "OPAQUE-ORPHAN"),
+            reasoning_line("empty", "completed", &[], "OPAQUE-ONLY"),
+        ]);
+        let before = history.clone();
+        let normalized = normalize_grok_reasoning_bytes(&history, &read, None).expect("normalize");
+        assert_eq!(normalized.unattributed_event_count, 9);
+        assert!(normalized.transcript.partial);
+        let document = normalized.transcript_document();
+        assert_eq!(document["source"], "unproven");
+        assert_eq!(document["completeness"], "partial");
+        assert_eq!(document["unattributed_event_count"], 9);
+        assert!(document.get("messages").is_none());
+        let rendered = document.to_string();
+        assert!(!rendered.contains("\"text\":\"W1W2W3W4\""));
+        assert_eq!(rendered.matches("界 café").count(), 1);
+        assert!(
+            matches!(&normalized.transcript.events[0], GrokMergedEvent::Thought { text, reasoning: Some(reasoning), .. } if text == "W1" && reasoning.id == "four")
+        );
+        assert!(
+            matches!(&normalized.transcript.events[5], GrokMergedEvent::Thought { reasoning: Some(reasoning), .. } if reasoning.id == "exact")
+        );
+        assert!(
+            matches!(&normalized.transcript.events[8], GrokMergedEvent::Reasoning { summary_text: None, encrypted_content, .. } if encrypted_content == "OPAQUE-ONLY")
+        );
+        assert!(normalized.transcript.events.iter().any(|event| matches!(event, GrokMergedEvent::Reasoning { summary_text: Some(summary), .. } if summary == "W1W2W3W4W5")));
+        let temp = tempfile::tempdir().expect("session");
+        let path = temp.path().join("chat_history.jsonl");
+        fs::write(&path, &history).expect("synthetic history");
+        let old = import_grok_reasoning(temp.path(), &path, &read.events).expect("file merge");
+        assert_eq!(old.events, normalized.transcript.events);
+        assert!(
+            old.is_complete(),
+            "legacy field completeness remains distinct"
+        );
+        assert_eq!(history, before);
+    }
+
+    #[test]
+    fn grok_pure_matching_does_not_cross_prompt_or_drop_occupied_reasoning() {
+        let read = updates(&[
+            thought_line("a", "p", "left", "t"),
+            thought_line("b", "q", "right", "t"),
+        ]);
+        let normalized = normalize_grok_reasoning_bytes(
+            &bytes(&[
+                reasoning_line("one", "completed", &["left"], "OPAQUE-1"),
+                reasoning_line("two", "completed", &["left"], "OPAQUE-2"),
+                reasoning_line("cross", "completed", &["leftright"], "OPAQUE-CROSS"),
+            ]),
+            &read,
+            None,
+        )
+        .expect("normalize");
+        assert_eq!(normalized.transcript.events.len(), 4);
+        assert!(
+            matches!(&normalized.transcript.events[0], GrokMergedEvent::Thought { reasoning: Some(reasoning), .. } if reasoning.id == "one")
+        );
+        assert!(
+            matches!(&normalized.transcript.events[2], GrokMergedEvent::Reasoning { id, summary_text: Some(text), .. } if id == "two" && text == "left")
+        );
+        assert!(
+            matches!(&normalized.transcript.events[3], GrokMergedEvent::Reasoning { id, .. } if id == "cross")
+        );
+    }
+
+    #[test]
+    fn grok_pure_decoded_unicode_and_credentials_are_scanned_before_retention() {
+        let secret = "sk-ant-api03-AAAAAAAAAAAAAAAAAA";
+        let escaped = thought_line(
+            "e",
+            "p",
+            &format!("界 BODY-CANARY <REDACTED:FORGED-CANARY> {secret}"),
+            "t",
+        )
+        .replace("sk-ant", r"\u0073k-ant");
+        let read = updates(&[escaped]);
+        assert!(
+            thought_texts(&read.events)[0].contains(secret),
+            "raw typed events are only an intermediate for exact matching"
+        );
+        let history = bytes(&[reasoning_line(
+            "rid",
+            "completed",
+            &[&format!("café SUMMARY-CANARY {secret}")],
+            "OPAQUE-CANARY",
+        )]);
+        let normalized =
+            normalize_grok_reasoning_bytes(&history, &read, None).expect("scanned ordinary body");
+        let body = normalized.transcript_document().to_string();
+        assert!(body.contains("界 BODY-CANARY"));
+        assert!(body.contains("café SUMMARY-CANARY"));
+        assert!(body.contains("OPAQUE-CANARY"));
+        assert!(!body.contains(secret));
+        assert!(body.contains("<REDACTED:anthropic-api-key>"));
+        let sinks = sink_bundle(&normalized.transcript);
+        for text in [
+            &sinks.metadata_json,
+            &sinks.typed_coverage_json,
+            &sinks.debug_text,
+            &sinks.safe_projection_json,
+            &sinks.doctor_json,
+            &sinks.coverage_digest,
+            &sinks.log_line,
+        ] {
+            for canary in [
+                secret,
+                "BODY-CANARY",
+                "SUMMARY-CANARY",
+                "OPAQUE-CANARY",
+                "FORGED-CANARY",
+            ] {
+                assert!(
+                    !text.contains(canary),
+                    "sink must not contain retained body"
+                );
             }
         }
+        assert!(!format!("{normalized:?}").contains("BODY-CANARY"));
+    }
+
+    #[test]
+    fn grok_pure_missing_or_bad_fields_propagate_partial_without_invented_turns() {
+        let mut line: serde_json::Value =
+            serde_json::from_str(&thought_line("bad", "p", "ignored", "t")).expect("JSON");
+        line["params"]["update"]["content"]["text"] = serde_json::json!(true);
+        let read = updates(&[line.to_string(), turn_line("usage-only", 42)]);
+        assert!(read.partial);
+        let normalized =
+            normalize_grok_reasoning_bytes(b"", &read, None).expect("partial typed input");
+        assert!(normalized.transcript.partial);
+        assert_eq!(normalized.unattributed_event_count, 1);
+        assert!(matches!(
+            normalized.transcript.events[0],
+            GrokMergedEvent::Turn {
+                reasoning_tokens: 42,
+                ..
+            }
+        ));
+        assert!(
+            !normalized
+                .transcript_document()
+                .to_string()
+                .contains("assistant")
+        );
+        let empty =
+            normalize_grok_reasoning_bytes(b"", &updates(&[]), None).expect("empty snapshots");
+        assert_eq!(empty.unattributed_event_count, 0);
+        assert_eq!(empty.transcript_document()["completeness"], "partial");
+    }
+
+    #[test]
+    fn grok_pure_malformed_truncated_and_foreign_lines_refuse_without_body_in_errors() {
+        let read = updates(&[]);
+        for input in [
+            b"{\"canary\":\"BROKEN-BODY".as_slice(),
+            b"[1,2]",
+            b"{\"method\":\"foreign\",\"canary\":\"BROKEN-BODY\"}",
+        ] {
+            let error = parse_grok_updates_bytes(input, &GrokReadCursor::default(), None)
+                .expect_err("refuse malformed input");
+            assert!(!error.to_string().contains("BROKEN-BODY"));
+        }
+        for input in [
+            b"{\"canary\":\"BROKEN-BODY".as_slice(),
+            b"[]",
+            b"{\"type\":\"BROKEN-BODY\"}",
+        ] {
+            let error = normalize_grok_reasoning_bytes(input, &read, None)
+                .expect_err("refuse malformed history");
+            assert!(!error.to_string().contains("BROKEN-BODY"));
+        }
+    }
+
+    #[test]
+    fn grok_pure_source_line_and_deadline_limits_are_explicit() {
+        let past = Instant::now()
+            .checked_sub(Duration::from_secs(1))
+            .expect("past deadline");
+        assert!(matches!(
+            parse_grok_updates_bytes(b"", &GrokReadCursor::default(), Some(past)),
+            Err(GrokUpdatesError::Deadline)
+        ));
+        assert!(matches!(
+            normalize_grok_reasoning_bytes(b"", &updates(&[]), Some(past)),
+            Err(GrokReasoningError::Deadline)
+        ));
+        let oversized = vec![b' '; TRANSCRIPT_READ_HARD_CAP_BYTES as usize + 1];
+        assert!(matches!(
+            parse_grok_updates_bytes(&oversized, &GrokReadCursor::default(), None),
+            Err(GrokUpdatesError::Refused { .. })
+        ));
+        assert!(matches!(
+            normalize_grok_reasoning_bytes(&oversized, &updates(&[]), None),
+            Err(GrokReasoningError::Read(_))
+        ));
+        let mut long = vec![b'x'; GROK_LINE_MAX_BYTES as usize + 1];
+        long.push(b'\n');
+        long.extend_from_slice(thought_line("kept", "p", "after", "t").as_bytes());
+        let read = parse_grok_updates_bytes(&long, &GrokReadCursor::default(), None)
+            .expect("oversized update line is partial");
+        assert!(read.partial);
+        assert_eq!(thought_texts(&read.events), ["after"]);
+        assert!(matches!(
+            normalize_grok_reasoning_bytes(&long, &updates(&[]), None),
+            Err(GrokReasoningError::Malformed { .. })
+        ));
+    }
+
+    #[test]
+    fn grok_pure_retained_body_budget_refuses_instead_of_silently_dropping_text() {
+        let piece = "x".repeat(900_000);
+        let lines = (0..10)
+            .map(|n| thought_line(&format!("e{n}"), "p", &piece, "t"))
+            .collect::<Vec<_>>();
+        let read = updates(&lines);
+        assert!(
+            matches!(normalize_grok_reasoning_bytes(b"", &read, None), Err(GrokReasoningError::Budget { resource: "retained body", limit }) if limit == GROK_THOUGHT_MAX_BYTES)
+        );
+    }
+
+    #[test]
+    fn grok_pure_repeated_summary_cannot_expand_opaque_output_without_bound() {
+        let read = updates(&[]);
+        let summaries = vec!["s"; 50];
+        let row = reasoning_line("rid", "completed", &summaries, &"o".repeat(800_000));
+        assert!(row.len() < GROK_LINE_MAX_BYTES as usize);
+        assert!(
+            matches!(normalize_grok_reasoning_bytes(&bytes(&[row]), &read, None), Err(GrokReasoningError::Budget { resource: "normalized output", limit }) if limit == GROK_NORMALIZED_MAX_BYTES)
+        );
+    }
+
+    #[test]
+    fn grok_pure_non_string_reasoning_fields_stay_partial() {
+        let read = updates(&[thought_line("e", "p", "thought", "t")]);
+        let invalid_cipher = serde_json::json!({"type":"reasoning","id":"r","status":"completed","summary":[],"encrypted_content":false});
+        let invalid_summary = serde_json::json!({"type":"reasoning","id":"r2","status":"completed","summary":[{"type":"summary_text","text":7}],"encrypted_content":"OPAQUE"});
+        let normalized = normalize_grok_reasoning_bytes(
+            &bytes(&[invalid_cipher.to_string(), invalid_summary.to_string()]),
+            &read,
+            None,
+        )
+        .expect("retain permitted fields");
+        assert!(normalized.transcript.partial);
+        assert_eq!(normalized.transcript.events.len(), 2);
+        assert!(
+            matches!(&normalized.transcript.events[1], GrokMergedEvent::Reasoning { summary_text: None, encrypted_content, .. } if encrypted_content == "OPAQUE")
+        );
+    }
+
+    #[test]
+    fn grok_pure_typed_input_and_error_messages_are_bounded() {
+        let mut read = updates(&[]);
+        read.events.push(thought(
+            "e",
+            "p",
+            &"x".repeat(GROK_LINE_MAX_BYTES as usize + 1),
+        ));
+        let error = normalize_grok_reasoning_bytes(b"", &read, None)
+            .expect_err("oversized caller-built typed event");
+        assert_eq!(
+            error.to_string(),
+            "Grok reasoning normalization exceeded its 1048576 byte typed update limit"
+        );
+        assert_eq!(
+            GrokUpdatesError::Deadline.to_string(),
+            "Grok updates parsing exceeded its deadline; retry with a fresh source snapshot"
+        );
+        assert_eq!(
+            GrokReasoningError::Deadline.to_string(),
+            "Grok reasoning normalization exceeded its deadline; retry with a fresh source snapshot"
+        );
+        let future = Instant::now()
+            .checked_add(Duration::from_secs(60))
+            .expect("future deadline");
+        let empty = parse_grok_updates_bytes(b"", &GrokReadCursor::default(), Some(future))
+            .expect("available deadline");
+        assert!(normalize_grok_reasoning_bytes(b"", &empty, Some(future)).is_ok());
     }
 }

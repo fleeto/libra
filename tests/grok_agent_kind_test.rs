@@ -1,4 +1,4 @@
-//! GK-01: Repository `agent_kind=grok` round-trips and stays unsupported.
+//! GK-01/GK-05: Repository `agent_kind=grok` round-trips with the supported Grok wave.
 
 use std::path::Path;
 

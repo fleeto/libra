@@ -2586,6 +2586,7 @@ fn live_capture_port_and_store_boundaries() {
         "gemini::GeminiProvider",
         "grok::GrokProvider",
         "opencode::OpenCodeProvider",
+        "grok::GrokProvider",
     ]
     .into_iter()
     .map(|self_type| {
@@ -5742,7 +5743,7 @@ fn live_capture_shared_runtime_is_provider_neutral() {
     assert_eq!(ratchet_fixture, 4, "AgentKind ratchet self-test");
     for (relative_path, baseline) in [
         ("src/internal/ai/capture/snapshot.rs", 1),
-        ("src/internal/ai/capture/extraction.rs", 19),
+        ("src/internal/ai/capture/extraction.rs", 15),
     ] {
         let source = fs::read_to_string(repo_root().join(relative_path))
             .unwrap_or_else(|error| panic!("read {relative_path}: {error}"));
@@ -8309,26 +8310,224 @@ fn external_agent_info_is_required_for_registration() {
     );
 }
 
+/// Grok decoding must not bypass ingress authorization through an observer
+/// hidden in mod.rs. Keep both the syntax-only parser scan and this delegate pin.
+#[test]
+fn grok_parser_delegates_without_observer_side_effects() {
+    use syn::visit::Visit;
+
+    let (_, file) = parse_rust_source("src/internal/ai/hooks/providers/grok/mod.rs");
+    let method = file.items.iter().find_map(|item| {
+        let syn::Item::Impl(implementation) = item else { return None };
+        if !matches!(&implementation.trait_, Some((_, path, _)) if path.is_ident("HookProvider")) {
+            return None;
+        }
+        implementation.items.iter().find_map(|item| match item {
+            syn::ImplItem::Fn(method) if method.sig.ident == "parse_hook_event" => Some(method),
+            _ => None,
+        })
+    }).expect("GrokProvider implements parse_hook_event");
+    let [syn::Stmt::Expr(syn::Expr::Call(call), None)] = method.block.stmts.as_slice() else {
+        panic!("Grok hook decoding must only delegate to its pure parser");
+    };
+    assert!(matches!(call.func.as_ref(), syn::Expr::Path(path)
+        if syn_path_text(&path.path) == "parser::parse_grok_hook_event"));
+    let args: Vec<_> = call
+        .args
+        .iter()
+        .map(|arg| match arg {
+            syn::Expr::Path(path) => syn_path_text(&path.path),
+            _ => panic!("parser arguments must pass through without side effects"),
+        })
+        .collect();
+    assert_eq!(args, ["hook_event_name", "envelope"]);
+
+    struct ObserverCalls {
+        violations: Vec<String>,
+        compatibility_exports: bool,
+    }
+    impl ObserverCalls {
+        fn macro_tokens(&mut self, tokens: proc_macro2::TokenStream) {
+            for token in tokens {
+                match token {
+                    proc_macro2::TokenTree::Group(group) => self.macro_tokens(group.stream()),
+                    proc_macro2::TokenTree::Ident(ident)
+                        if matches!(
+                            ident.to_string().as_str(),
+                            "observe_grok_hook" | "record_grok_boundary"
+                        ) =>
+                    {
+                        self.violations.push(ident.to_string());
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    impl<'ast> Visit<'ast> for ObserverCalls {
+        fn visit_macro(&mut self, item: &'ast syn::Macro) {
+            self.macro_tokens(item.tokens.clone());
+            syn::visit::visit_macro(self, item);
+        }
+        fn visit_item_use(&mut self, item: &'ast syn::ItemUse) {
+            let mut paths = Vec::new();
+            flatten_syn_use(&item.tree, "", &mut paths);
+            for path in paths {
+                if path.ends_with("::observe_grok_hook")
+                    || path.ends_with("grok::session_files")
+                    || path.ends_with("grok::session_files::*")
+                {
+                    let legacy_export = self.compatibility_exports
+                        && matches!(item.vis, syn::Visibility::Public(_))
+                        && path == "session_files::observe_grok_hook";
+                    if !legacy_export {
+                        self.violations.push(path);
+                    }
+                }
+            }
+            syn::visit::visit_item_use(self, item);
+        }
+        fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
+            if !has_exact_cfg_test(&item.attrs) {
+                syn::visit::visit_item_mod(self, item);
+            }
+        }
+        fn visit_item_fn(&mut self, item: &'ast syn::ItemFn) {
+            if !has_exact_cfg_test(&item.attrs) {
+                syn::visit::visit_item_fn(self, item);
+            }
+        }
+        fn visit_path(&mut self, path: &'ast syn::Path) {
+            // Check uses/references as well as direct calls, so aliasing the
+            // legacy observer cannot hide it from the production boundary.
+            if path.segments.last().is_some_and(|segment| {
+                matches!(
+                    segment.ident.to_string().as_str(),
+                    "observe_grok_hook" | "record_grok_boundary"
+                )
+            }) {
+                self.violations.push(syn_path_text(path));
+            }
+            syn::visit::visit_path(self, path);
+        }
+    }
+    // Negative fixtures pin the guard itself, including syntax hidden in
+    // macro token streams that syn does not expose as Expr::Path nodes.
+    for source in [
+        "fn f() { crate::grok::observe_grok_hook(); }",
+        "use crate::grok::observe_grok_hook as capture; fn f() { capture(); }",
+        "fn f() { let capture = crate::grok::observe_grok_hook; }",
+        "fn f() { invoke!(crate::grok::observe_grok_hook); }",
+        "macro_rules! capture { () => { crate::grok::observe_grok_hook() }; }",
+    ] {
+        let mut calls = ObserverCalls {
+            violations: Vec::new(),
+            compatibility_exports: false,
+        };
+        calls.visit_file(&syn::parse_file(source).expect("guard negative fixture"));
+        assert!(
+            !calls.violations.is_empty(),
+            "observer guard missed {source}"
+        );
+    }
+    for source in [
+        "fn f() { let message = \"observe_grok_hook\"; }",
+        "#[cfg(test)] mod tests { fn f() { crate::grok::observe_grok_hook(); } }",
+        "#[cfg(test)] fn f() { invoke!(crate::grok::observe_grok_hook); }",
+    ] {
+        let mut calls = ObserverCalls {
+            violations: Vec::new(),
+            compatibility_exports: false,
+        };
+        calls.visit_file(&syn::parse_file(source).expect("guard positive fixture"));
+        assert!(
+            calls.violations.is_empty(),
+            "observer guard rejected {source}"
+        );
+    }
+    let mut pending = vec![repo_root().join("src")];
+    while let Some(dir) = pending.pop() {
+        for entry in fs::read_dir(dir).expect("source directory") {
+            let path = entry.expect("source entry").path();
+            if path.is_dir() {
+                pending.push(path);
+                continue;
+            }
+            if path.extension().is_none_or(|extension| extension != "rs")
+                || path.ends_with("hooks/providers/grok/session_files.rs")
+            {
+                continue;
+            }
+            let text = fs::read_to_string(&path).expect("Rust source");
+            let ast = syn::parse_file(&text).expect("valid Rust source");
+            let mut calls = ObserverCalls {
+                violations: Vec::new(),
+                compatibility_exports: path.ends_with("hooks/providers/grok/mod.rs"),
+            };
+            calls.visit_file(&ast);
+            assert!(
+                calls.violations.is_empty(),
+                "production must not use the legacy Grok observer ({}): {:?}",
+                path.display(),
+                calls.violations
+            );
+        }
+    }
+}
+
 /// The `agent_session.agent_kind` SQL CHECK constraint, the Rust enum and
 /// the tracing/agent.md roster stay in sync.
-#[test]
-fn agent_kind_enum_sql_check_and_doc_roster_stay_in_sync() {
-    // Rust enum → db values.
+#[tokio::test]
+async fn agent_kind_enum_sql_check_and_doc_roster_stay_in_sync() {
+    use sea_orm::{ConnectionTrait, Database, Statement};
     let enum_values: BTreeSet<String> = AgentKind::all()
         .iter()
         .map(|kind| kind.as_db_str().to_string())
         .collect();
-
-    // SQL CHECK constraint values from the capture migration.
-    let migration =
-        fs::read_to_string(repo_root().join("sql/migrations/2026050303_agent_capture.sql"))
-            .expect("read agent capture migration");
-    let check_block = migration
-        .split("`agent_kind`           TEXT NOT NULL CHECK(`agent_kind` IN (")
-        .nth(1)
-        .and_then(|rest| rest.split("))").next())
-        .expect("agent_kind CHECK block present in migration");
-    let sql_values: BTreeSet<String> = check_block
+    // The bootstrap file intentionally remains historical. Check the current
+    // migrated database, including CHECK-only forward migrations.
+    let temp = tempfile::tempdir().expect("isolated current-schema repository");
+    let repo = temp.path().join("repo");
+    let home = temp.path().join("home");
+    fs::create_dir_all(&repo).unwrap();
+    fs::create_dir_all(&home).unwrap();
+    let init = std::process::Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(&repo)
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .env("LIBRA_TEST_HOME", &home)
+        .arg("init")
+        .output()
+        .unwrap();
+    assert!(
+        init.status.success(),
+        "isolated init failed: {}",
+        String::from_utf8_lossy(&init.stderr)
+    );
+    let conn = Database::connect(format!(
+        "sqlite://{}?mode=ro",
+        repo.join(".libra/libra.db").display()
+    ))
+    .await
+    .unwrap();
+    let ddl: String = conn
+        .query_one_raw(Statement::from_string(
+            conn.get_database_backend(),
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'agent_session'",
+        ))
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get_by("sql")
+        .unwrap();
+    conn.close().await.unwrap();
+    let check =
+        regex::Regex::new(r#"(?i)CHECK\s*\(\s*[`"\[]?agent_kind[`"\]]?\s+IN\s*\(([^)]*)\)"#)
+            .unwrap();
+    let captures = check
+        .captures(&ddl)
+        .expect("current agent_kind CHECK constraint");
+    let sql_values: BTreeSet<String> = captures[1]
         .split('\'')
         .skip(1)
         .step_by(2)
@@ -8349,16 +8548,16 @@ fn agent_kind_enum_sql_check_and_doc_roster_stay_in_sync() {
         .map(|row| row.slug)
         .collect();
     assert_eq!(supported, ["claude-code", "codex", "opencode", "grok"]);
-    let first_batch: Vec<&str> = registry()
+    let first_batch: Vec<_> = registry()
         .iter()
-        .filter(|row| row.support_wave == Some("first_batch"))
+        .filter(|row| row.supported && row.support_wave == Some("first_batch"))
         .map(|row| row.slug)
         .collect();
     assert_eq!(first_batch, ["claude-code", "codex", "opencode"]);
-    for slug in &first_batch {
+    for slug in &supported {
         assert!(
             agent_doc.contains(&format!("| `{slug}` |")),
-            "tracing/agent.md first-batch roster table must list {slug}"
+            "tracing/agent.md supported roster table must list {slug}"
         );
     }
     // The doc must keep declaring the frozen first-batch roster line.

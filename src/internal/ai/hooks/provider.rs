@@ -219,6 +219,9 @@ pub trait HookProvider: HookProviderIdentity + Sync {
     /// Hook commands this provider knows how to install and parse.
     fn supported_commands(&self) -> &'static [ProviderHookCommand];
     /// Translate a provider envelope into the canonical [`LifecycleEvent`].
+    /// This is an untrusted decoding boundary: do not read source files, persist
+    /// observer state, or acquire repository scope here. Content capture belongs
+    /// after ingress validation, through authorized snapshots and the shared writer.
     ///
     /// Returns an error when the envelope is malformed or names a hook event
     /// the provider does not support.

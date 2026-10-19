@@ -2,7 +2,9 @@
 
 > **当前 thinking 数据获取基线（2026-10-18 16:23:55 UTC，用户明确授权）：** [DATA-CAP-20261019](plan-20260904.md#thinking-data-baseline-20261019) 替代下方 2026-10-18 四 provider 计划的隐私剥离/native 来源保存前置。以 OpenCode macOS 13段/4617 bytes、2个自动 checkpoint 原值一致为已证基线；系统 OpenCode 默认 Opus 5.5 medium + summarized 的无 --model 实测另得到131 bytes正文。Codex CX-00 已于2026-10-19在 main 开工并完成本地source审计（Claude R2 PASS，首轮FAIL保留并已修复），CX-12亦已本地验收并经Claude单审PASS，其余27张CX及Claude 9/Pi 11/Hermes 10卡仍pending（正式complete仍0/59）；2026-10-18只修订计划和配置事实；获取的数据可普通保留并标 Unproven/Partial，不把空壳当通过。Codex source 审计与隔离hash-list已执行，四工具真实模型smoke均未执行；用户本次已授权Codex计划实施，没有native grant。Codex CX-00/CX-12 source-qualified、当前下一卡CX-15；另三工具下一卡CC-00 / PI-00 / HM-00；实现依原逐文件串行与 schema/cloud 数据正确性边界。旧 PASS/FAIL 与完成数保留历史；2026-10-18 16:39:27 UTC 本轮 fmt/strict、104/104 focused 与 Claude R2 实际 PASS 已登记于各计划；源数据获取/可读正文仍须未来真实测试，无版本发布。
 
-> **Grok 采集计划（2026-10-19）：** [plan-20261018-grok-capture.md](plan-20261018-grok-capture.md) 的 GK-00 为 `locally-accepted`，Acceptance 仍空，等 GK-01 的 C/D。GK-01 为 `locally-accepted`，Acceptance 仍空，等 v0.30.53 的 D-CAP-STD。GK-02 为 `locally-accepted`，Acceptance 仍空，等 v0.30.55 的 D-CAP-STD。GK-03 为 `locally-accepted`，Acceptance 仍空，等 v0.30.57 的 D-CAP-STD。GK-04 为 `locally-accepted`，Acceptance 仍空，等 v0.30.59 的 D-CAP-STD。GK-05 为 `locally-accepted`，Acceptance 仍空。v0.30.62 的 Check, Build and Test run 39218634651 失败：`compat-offline-core` 在 nextest 过滤式 `not binary(~^grok_)` 上报 no binary names matched（`~` 是包含匹配，不是正则）。CodeQL Advanced run 39218634806 与 Build and Release to R2 run 39218736253 成功。前滚 `6b089c4` / v0.30.63：CodeQL Advanced run 39226039130 成功，Build and Release to R2 run 39226204632 成功。Check run 39226039150 被后继 main `b57fdb6` 取消，`compat-offline-core` 未完成，不计通过。Acceptance 仍空。网站 `cf` `27a83d1` 已推，Claude 审查为 VERDICT PASS 且无未关闭 P0/P1。GK-01..GK-04 的 base.yml 与 CodeQL Advanced 仍是 cancelled；在当前 main Check 占用并发组时重跑会取消它，故尚未重跑。公开 grok-build 仍是 1.0.45，该事实不再停工。
+> **Grok 当前覆盖状态（2026-10-19 11:12:48 UTC）：** 功能采集暂停；GK-06架构修复locally-accepted/空，125项focused、35项Codex本机及矩阵、全量10325/10325 PASS。GK-07交接给`/root/grok_continue`，GK-08生产接入仍暂停；不提交/推送/发布。以下为先前交付门历史，不代表已获取thinking。
+
+> **Grok 采集计划历史（2026-10-19）：** [plan-20261018-grok-capture.md](plan-20261018-grok-capture.md) 的 GK-00 为 `locally-accepted`，Acceptance 仍空，等 GK-01 的 C/D。GK-01 为 `locally-accepted`，Acceptance 仍空，等 v0.30.53 的 D-CAP-STD。GK-02 为 `locally-accepted`，Acceptance 仍空，等 v0.30.55 的 D-CAP-STD。GK-03 为 `locally-accepted`，Acceptance 仍空，等 v0.30.57 的 D-CAP-STD。GK-04 为 `locally-accepted`，Acceptance 仍空，等 v0.30.59 的 D-CAP-STD。GK-05 为 `locally-accepted`，Acceptance 仍空。v0.30.62 的 Check, Build and Test run 39218634651 失败：`compat-offline-core` 在 nextest 过滤式 `not binary(~^grok_)` 上报 no binary names matched（`~` 是包含匹配，不是正则）。CodeQL Advanced run 39218634806 与 Build and Release to R2 run 39218736253 成功。前滚 `6b089c4` / v0.30.63：CodeQL Advanced run 39226039130 成功，Build and Release to R2 run 39226204632 成功。Check run 39226039150 被后继 main `b57fdb6` 取消，`compat-offline-core` 未完成，不计通过。Acceptance 仍空。网站 `cf` `27a83d1` 已推，Claude 审查为 VERDICT PASS 且无未关闭 P0/P1。GK-01..GK-04 的 base.yml 与 CodeQL Advanced 仍是 cancelled；在当前 main Check 占用并发组时重跑会取消它，故尚未重跑。公开 grok-build 仍是 1.0.45，该事实不再停工。
 
 > **USER-OG-THINKING-RETAIN-20261018（2026-10-18 07:36:52 UTC，工作区已实现，未提交、未发布）：** 用户要求把隐私要求降到能保存 thinking，并写入未证明字段。助手 reasoning 的字符串 `text` 与未证明 `state`、`time`、`originProof` 及顶层 `signature`、`redactedData`、`reasoningEncryptedContent`、`thoughtSignature` 进入普通 transcript。来源仍是 `Unproven` / `Partial`，不归档为 native artifact。本条只替代方案 C 当时的普通副本删除规则，不新增任务卡，不增加完成分子。历史 import 仍 `LBR-AGENT-020`。已发布 0.30.52 不含此行为。完整边界与本次测试见 [USER-OG-THINKING-RETAIN-20261018](plan-20260902.md#user-og-thinking-retain-20261018)。
 
@@ -248,7 +250,7 @@
 | [`plan-20260912.md`](plan-20260912.md) | B（memory boundary） | **已收口** | MB-01..MB-05、MB-07/08、MB-10/11 全部 `done/complete`（v0.23.37/.39/.40/.41/.42/.43/.44/.45/.46，各卡 ER-14 全量绿、D-MB-STD 远端 evidence 绿）；MB-06/09/12 墓碑 `done`（无对应子命令）；EX-MB-01/02（G-03）与 EX-MB-03（ER-07 签名）已登记；使用者 2026-09-21 双评审豁免已登记；完成判据全数勾选 |
 | [`plan-20260911.md`](plan-20260911.md) | B（Pi capture） | 未启动 | DATA-CAP-20261019：11卡 pending；PI-00 先核系统版本/模型；PI-08 保留 thinking/thoughtSignature；云围栏与 identity/schema 顺序不变，旧 R5 为历史；本次修订实际审查见计划 |
 | [`plan-20261018-hermes-capture.md`](plan-20261018-hermes-capture.md) | B（Hermes capture） | 未启动 | DATA-CAP-20261019：10卡 pending；HM-00 选含 thinking 的 export/文件/一致只读 SQLite；HM-08 最小 live 桥不要求新沙箱；真实非空数据门待验，旧 R5 为历史；本次修订实际审查见计划 |
-| [`plan-20261018-grok-capture.md`](plan-20261018-grok-capture.md) | B（Grok capture） | GK-05 本地已推 | GK-00..GK-05 `locally-accepted`，Acceptance 仍空。v0.30.63 CodeQL 39226039130 与 release 39226204632 成功；Check 39226039150 被 `b57fdb6` 取消。网站 `cf` `27a83d1` 已推。 |
+| [`plan-20261018-grok-capture.md`](plan-20261018-grok-capture.md) | B（Grok capture） | 功能暂停；GK-06本机通过，GK-07接续 | GK-00..GK-05 `locally-accepted`，Acceptance 仍空。v0.30.63 CodeQL 39226039130 与 release 39226204632 成功；Check 39226039150 被 `b57fdb6` 取消。网站 `cf` `27a83d1` 已推。 |
 | [`plan-20260910.md`](plan-20260910.md) | 横切（数据库迁移作用域） | **已收口** | MIG-00..MIG-06、MIG-R01..R03 全部 `done/complete` |
 | [`plan-20260907.md`](plan-20260907.md) | 横切（BLAKE3 object format） | **已收口** | B3-00..B3-17 全部 `done`/`complete`（`v0.23.68`→`v0.29.0`；REL-B3-01/02 家族经 B3-15/B3-17）；最终 Codex/Claude R40 双 `PASS`（0×P0/0×P1）；GC-B3-01/GC-B3-02 收口守卫绿；`DEP-B3-05` 已满足，下游 FL-00 解锁；无 LR 编号 |
 | [`plan-20260906.md`](plan-20260906.md) | 横切（安全扫描） | 未启动 | SC-01..SC-07、SC-CLOSE 全部 `pending` |
@@ -318,7 +320,7 @@
 | [`plan-20260907.md`](plan-20260907.md) | B3-00..B3-17 | **已收口**（B3-00..B3-17 全部 `done`/`complete`；`DEP-B3-05` 已满足，不再阻塞 plan-20260913） |
 | [`plan-20260911.md`](plan-20260911.md) | PI-00..10（11卡pending） | 下一PI-00；本轮双规划审查PASS；PI-05围栏先于row writer，旧429历史不授本轮PASS |
 | [`plan-20261018-hermes-capture.md`](plan-20261018-hermes-capture.md) | HM-00..09（10卡pending） | 下一HM-00；本轮双规划审查PASS；后续云围栏消费PI-05、schema消费PI-01交接；本机Hermes/live gate待证 |
-| [`plan-20261018-grok-capture.md`](plan-20261018-grok-capture.md) | GK-01..05 GO | GK-00 已审计。上游 commit SHA 检查已取消，后继卡可开工 |
+| [`plan-20261018-grok-capture.md`](plan-20261018-grok-capture.md) | GK-06本机通过；功能暂停 | GK-00字段审计保留；GK-07交给`/root/grok_continue`，GK-08仍暂停；旧GO不覆盖当前生产接入 |
 | [`plan-20260912.md`](plan-20260912.md) | MB-01..05、MB-07/08/10/11（MB-06/09/12 已取消） | 依赖 CAP（plan-20260916）等 |
 | [`plan-20260913.md`](plan-20260913.md) | FL-00..FL-07 | **前置 plan-20260907 已完整收口（DEP-FL-04 满足）**；FL-00/01/07/02/06/03/04/05 已全部 `done`/`complete`，仅剩计划级收口门 |
 | [`plan-20260916.md`](plan-20260916.md) | CAP-01..CAP-07 | 双评审已 PASS；CAP-01..03 仅按 ER-CAP-02 pin 作 zero-raw-persistence 重核；`DEP-ACF-CAP` 的 ACF 侧必要条件已由 ACF-09（`Lifecycle=done`、`Acceptance=complete`）交接；CAP-04..07 `blocked`，须独立 security/privacy RFC 与新卡 |
@@ -565,6 +567,9 @@ SBX-01..05 `done/locally-accepted`；**发布步按 DEFER-SBX-06 正式延后**�
 | [`plan-20261018-grok-capture`](plan-20261018-grok-capture.md) | GK-03 | reasoning 密文进入普通 transcript，sink 零命中 | GK-02；DEP-GK-WRITE | 本卡 focused 测试已过；正式评审未记 PASS | 不改 `opencode_export.rs` | `locally-accepted`；Acceptance 仍空，等 v0.30.57 的 D-CAP-STD |
 | [`plan-20261018-grok-capture`](plan-20261018-grok-capture.md) | GK-04 | 用户级只观察 hook，路径监狱 | GK-03；DEP-GK-PIN；DEP-GK-WRITE | 本卡 focused 测试已过；正式评审未记 PASS | 不打开 enable，`as_hooks()` 仍是 `None` | `locally-accepted`；Acceptance 仍空，等 v0.30.59 的 D-CAP-STD |
 | [`plan-20261018-grok-capture`](plan-20261018-grok-capture.md) | GK-05 | grok supported，wave 为 grok，launcher 仍关 | GK-04；DEP-GK-DOC；DEP-GK-RELEASE；DEP-GK-WRITE | 本卡 focused 测试已过；Codex 与网站 Claude PASS 未记 | 不改 `preview.rs`；review/investigate 仍关 | `locally-accepted`；Acceptance 仍空。v0.30.63 Check 被取消，CodeQL 与 release 成功，不计 complete |
+| [`plan-20261018-grok-capture`](plan-20261018-grok-capture.md) | GK-06 | 纯parser、禁生产observer、文档更正 | 最新main与用户授权 | focused125/125、35本机Codex+矩阵通过，Claude架构/网站PASS | 完整回归10325/10325 PASS；不交付 | locally-accepted / 空 |
+| [`plan-20261018-grok-capture`](plan-20261018-grok-capture.md) | GK-07 | 纯字节reader/normalizer接续 | GK-06本机门通过；已指派`/root/grok_continue` | 31Grok+65架构及静态门通过，独立review PASS | 后续交其他agent；不接生产 | locally-accepted / 空 |
+| [`plan-20261018-grok-capture`](plan-20261018-grok-capture.md) | GK-08 | 授权snapshot与共享writer接入 | GK-07及具体写集/选卡 | 方向草案 | 功能仍暂停 | planned / 空 |
 | [`plan-20260925`](plan-20260925.md) | SCAP-01 | AgentTraces ingest 改调 `decide`。`v0.23.55` / `fa3849e` D 组全绿 | SCAP-02（登记已核对） | R9 双 `PASS` | 已收口 | `done`/`complete` |
 | [`plan-20260907`](plan-20260907.md) | B3-00 | pin `git-internal`（保持 `=0.10.2`）并引入 `object_format` 事实源 | 无 | **双评审已 PASS**（R40 Codex/Claude 双 PASS） | `v0.23.68` 已发布；focused VER 绿 | `done`/`complete` |
 | [`issues/470`](issues/470.md) | FM-01 | 共享写入原语与 `restore` 系物化 | 无 | 尚未 Codex review | 关闭依赖 plan-20260918 FM-03/04（DEP-FM-06/07） | ❌ 禁止开工 |
@@ -3156,3 +3161,18 @@ Final macOS card delivery66of66=100percent; inventory66of68=97.06percent with2or
 **CX-12最终source-qualified：** legacy无ordinal修正后同一最终fixture bb1453259ac10a91c9bfd2529eb4b64ab1c963c70bf8e67fb5941d4d65b1fe69/12433bytes，focused12/12、fmt/严格clippy再跑exit0；Claude R1 PASS/51turn/raw42b15b9c4a224ba9667811e0fe9d0fe0c9b9a05a3d73912f552d262baa4af6af，无P0/P1。采用文档澄清，缺失的兼容变体和字节属性核验具名交CX-15/04，未伪称已有。当前唯一下一卡CX-15；正式complete仍0/59，真实Codex模型/数据及承载C-D未验。
 
 **CX-00提交CI后续实查：** 同一a6a62f0的base39203590342中fmt/clippy/Windows scoped/Linux export/redundancy已success，macOS owner仍in-progress，offline-core/network-remotes已cancelled；CodeQL39203590295为cancelled。未将取消或未结束记PASS，C/D仍未关闭；本地源矩阵与合成语料source-qualified不冒充远端全绿。
+
+
+**2026-10-19 10:45:31 UTC Grok架构修复授权：** 用户已暂停Grok功能采集，授权先更新main与架构/文档，随后交其他agent继续。当前fetch+ff至e270bfe/0.30.65，CX-15已备份三方恢复（保留新Claude附加字段和旧Codex retention），不提交/推送/发布。新增GK-06 in-progress/Acceptance空；GK-07纯字节normalizer planned，须GK-06本机门通过后由受派agent串行开工；GK-08生产接入仍暂停，未选卡。详见plan-20261018-grok-capture末尾ADR-GK-05，原GK-04/05历史勾选不代表生产thinking落库已验收。Codex测试继续仅本机、禁止加入CI。
+
+
+**2026-10-19 11:11:43 UTC GK-06最终本机门：** 完整nextest exit0，10325 PASS（13 slow、1 leaky）、23 skipped，846.440s；流SHA-256 `6c7e6d88ac2ecb930e7fead8700575eea0340a5d24ffdfcec6416b7d98db3d18`。2008非计划路径前后冻结MATCH，默认JUnit新增Codex手动case0。唯一未改fetch测试LEAK诊断保留；不是零泄漏声明。GK-06 locally-accepted/Acceptance空；125focused、35Codex本机+矩阵、网站本地门与只读审查已通过。GK-07交接`/root/grok_continue`，GK-08生产采集与真实模型继续暂停；后继源码变化必须独立验证。CX-15仍未交付，既有备份/stash保留；无提交、推送、发布或部署。
+
+
+**2026-10-19 11:12:48 UTC GK-07交接已发送：** `/root/grok_continue` 已收到正式实现任务并运行中，GK-07 in-progress/Acceptance空，仅两份纯字节reader与追加合成测试；GK-06本机收尾复验fmt/strict Clippy/diff实际exit0。GK-08生产Thinking接入仍暂停，无真实模型运行或任何交付操作。
+
+
+**2026-10-19 11:34:48 UTC Grok提交/开发分工：** GK-07 reader本机31/31+architecture65/65、fmt/strict Clippy/diff exit0，独立review PASS（无P0/P1/P2），locally-accepted/Acceptance空；GK-08仍暂停。用户授权单独本地提交Grok部分，后续Grok由其他agent，本会话仅继续Codex；Codex WIP保留未提交，Codex测试不入CI，不推送/发布。
+
+
+**2026-10-19 11:41:37 UTC Grok-only提交快照隔离验证：** 使用HEAD加所选index内容的临时源码快照（不含codex_reasoning.rs、Codex本机target、admission转发或Claude oracle覆盖）验证：Grok31/31、kind1/1、docs34/34、capability5/5实际PASS；nightly fmt和严格all-target/all-feature Clippy exit0。架构target初次63/65：Grok引入第20个AgentKind分支的问题用既有provider-neutral partial fallback及下降至15的guard修复纳入本提交；另一项capture_modules_do_not_import_hook_entry_layers来自HEAD原有Claude admission直接引用，ingress/Claude源码逐字节等于HEAD，修复继续保留在Codex WIP，不夹带。先前联合工作区的10325全量PASS不是本次独立commit的全量PASS。仅本地提交，不推送；其它已有非Grok工作保留。

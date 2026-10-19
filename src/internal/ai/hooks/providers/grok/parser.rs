@@ -1,7 +1,4 @@
-//! Parse one Grok hook envelope.
-//!
-//! Reading `updates.jsonl` and the session state files lives in
-//! `session_files`. This parser does not touch the filesystem.
+//! Pure Grok hook-envelope decoding. No source reads, state writes, or scope grants.
 
 use chrono::Utc;
 use sha2::{Digest, Sha256};
@@ -10,6 +7,7 @@ use super::super::super::{
     lifecycle::{LifecycleEvent, LifecycleEventKind, SessionHookEnvelope},
     provider::CANONICAL_DEDUP_IDENTITY_KEYS,
 };
+
 const SESSION_ID_MAX: usize = 128;
 const ENCODED_CWD_MAX: usize = 255;
 

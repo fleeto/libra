@@ -1,5 +1,10 @@
 # Grok 本地会话采集计划（2026-10-18）
 
+> **历史维护者指令（2026-10-19 10:45:31 UTC，提交/推送范围已由下条更新）：** Grok 功能采集任务暂停；授权先同步最新main，修复解析/存储架构并补齐文档，再交其他agent按后续卡继续开发。本指令覆盖旧卡中把旁路observer测试当正式checkpoint验收的勾选；保留历史事实但不追认生产采集成功。不提交、推送、发布；Codex新增/修订测试继续仅本机，禁止加入CI。
+
+> **当前交付指令（2026-10-19 11:50:58 UTC）：** 用户已明确授权将Grok独立提交推送到origin/main及网站origin/cf，并验证部署。后续Grok开发由其他Agent负责，本会话只继续Codex；Codex WIP与本机测试不纳入本次提交/推送，不发布版本或tag。
+
+
 > **起草时间：2026-10-18 15:45:00 UTC；模板 v2.14。** 本文只规划任务，不宣称实现完成。Grok 不进入 OpenCode 导出器或 Source A 状态机。采集读取 Grok 自己的会话日志。隐私策略采用 [USER-OG-THINKING-RETAIN-20261018](plan-20260902.md#user-og-thinking-retain-20261018)：普通 transcript 保存助手 Thinking 字符串，并写入未证明字段；来源保持 `Unproven` / `Partial`，不归档为 native artifact。四 provider 契约第 2 条里「未证明字段不进入 transcript」的句子，只在本计划由 ADR-GK-02 按该用户决定降级；契约的其余上限、路径、观察者、迁移和发布规则仍然有效。
 
 > **终止链预登记（v2.14）：** 本计划纯文档记账的最终登记提交，其 D 组 CI 只能在推送后观察。SHA、run ID、结论与观察 UTC 由下一次 `plan-status.md` 例行同步补记，不在该提交自身内填写，也不为本计划专设记账提交。
@@ -97,6 +102,7 @@
 | 2026-10-19 | GK-00 审计 | 公开 grok-build HEAD `2bdd1d6a6369de0e8c68132ea4539e9abd9e14a8` 的 shell 是 1.0.45，对不上本机 1.0.62。DEP-GK-PIN 与 GK-01..GK-05 为 HOLD | 无新卡 | GK-00 审计结论、plan-status |
 | 2026-10-19 | 版本修订号 | `grok --version` 为 `1.0.62 (1474f9cbdd91)`，该前缀在公开仓库不存在，二进制无完整 SHA | 无新卡 | GK-00 审计结论 |
 | 2026-10-19 | 用户取消上游 commit 哈希限制 | 外部软件的 commit 不可控，不再做该检查。DEP-GK-PIN 不再因缺少 SHA 而 HOLD。GK-01..GK-05 按本机 1.0.62 字段矩阵 GO | 无新卡 | DEP-GK-PIN、GK-00 结论、Phase 0、故障矩阵、plan-status、plan-long |
+| 2026-10-19 10:51:42 UTC | 用户暂停Grok功能并授权更新main/架构/文档再交其他agent | GK-06恢复纯解析和禁止生产observer，GK-07纯字节接续，GK-08接入仍暂停；明确旧scratch不等于checkpoint | GK-04/05历史结论 → GK-06/07/08 | ADR-GK-05、用户/开发/网站文档、守卫、状态 |
 
 ## 已决议设计决策
 
@@ -810,3 +816,143 @@ Result 只允许 `PASS` 或 `FAIL`。
 - [ ] GK-05 的文档与网站已同步。
 - [ ] GK-01 的迁移故障注入已做。其余卡的 `Rollback mode` 已核对。
 - [ ] 实现阶段的 Codex review 最终为 PASS，P0/P1 已关闭。规划审查 PASS 不等于这一条。
+
+
+## 架构修复与后续交接（GK-06 / GK-07 / GK-08）
+
+本节是维护者最新指令下的执行边界；原GK-00..05勾选仅代表当时测试结果，不证明真实hook已将thinking写入正式checkpoint。没有关联GitHub Issue，不创建远端Issue；本次范围由用户直接授权。当前main通过fetch/ff更新至 `e270bfe`（0.30.65），CX-15旧工作通过备份/三方恢复保留，不发布旧0.30.63候选。autostash `de4a9b786046c94b1909842d765afef83c4a64f7` 保留，索引恢复失败不记成功；实际恢复保留Codex retention和上游Claude attached-fields两条路径。
+
+### ADR-GK-05: 解析无I/O，正文只经授权snapshot和共享writer
+
+- **Status:** Accepted（维护者授权架构修复）。
+- **Context:** `e0b304c` 在 `GrokProvider::parse_hook_event` 内调用record/observer，解析尚未完成scope授权就读取日志并写 `GROK_HOME/libra-capture`，budget=None且结果忽略。旧文件级guard只扫描parser.rs，漏掉mod.rs新增调用。
+- **Decision:** 删除生产record调用，trait parse仅委托纯parser；保留原store-free guard并新增trait纯委托/生产observer引用守卫。独立observer移至 `hooks/providers/grok/session_files.rs`，仅保留离线兼容入口，不接生产runtime。生命周期可以走共享管线；thinking接入保持暂停，后续按GK-07/08串行推进。
+- **Compatibility:** `grok::encode_grok_cwd`、`grok::observe_grok_hook` 签名保持；`GrokObserveOutcome` 可从grok根或session_files模块取得。此前暴露的内部 `grok::parser::observe_grok_hook` / `GrokObserveOutcome` 路径迁至 `grok::session_files`；这是明确的Rust内部模块路径迁移，调用方更新import，不保留让纯parser重新暴露持久化handle的转发。CLI语法不变。现有scratch文件不删、不迁移、不导入为正式checkpoint。
+- **Persistence:** observer的store.json/checkpoint.json/pending.json/lifecycle.json不是 `agent_checkpoint`、catalog或trace ref。不得把这些文件存在当获取成功。禁止将legacy observer重新接入生产。它仍有静默读写失败、非原子/无锁状态、累计大小和重复扫描预算问题，都是生产接入阻断项；通过共享owner接入时不复用该持久化实现。
+- **Required chain:** validated ingress/repository scope → provider candidate（仅推导路径）→ source grant/snapshot授权、有界读取及脱敏 → 纯字节normalizer/reasoning合并 → shared checkpoint writer/catalog/ref。所有父子会话关联、pending和PreCompact遵循相同owner，不直接写独立JSON。
+- **No regression:** 不启动grok、无OpenCode export桥、无native证明或解密；保留Thought各段及opaque值，不弱化现有字节、路径、deadline和repository/session绑定。
+
+### Task GK-06: 恢复Grok纯解析架构
+
+**Task type:** implementation
+
+**Lifecycle / Acceptance:** locally-accepted / 空
+
+**Description:** 删除解析阶段旁路采集，分离纯parser与离线observer，补运行时入口guard、暂停状态和兼容文档。
+
+**Out of scope:** 不接真实Grok正文、不运行模型；不改CX-15功能、不将Codex测试加入CI；不提交、推送、发布或部署。
+
+**Current evidence:** main `e270bfe` 中 `grok/mod.rs` 的record调用及 `parser.rs` 混合I/O；原GK-05 supported/hook位不能证明实际checkpoint存在thinking。
+
+**Acceptance criteria:**
+
+- [x] trait parse仅委托纯parser，五种事件/未知事件/不安全session均有回归；不依赖全局GROK_HOME变更。
+- [x] parser无fs/path/store依赖，生产src不引用legacy observer（兼容导出除外）；原guard保留，新增guard防mod.rs/别名绕过。
+- [x] 离线observer合成测试继续通过，其根导出保持兼容；Rust内部路径迁移、已知限制和禁止生产接入写明。
+- [x] EN/zh/dev/tracing/COMPATIBILITY/网站说明暂停事实，名单表与registry一致；完整全量/格式/严格Clippy/只读复审如实登记。
+
+**Verification:** `source .env.test && cargo test --locked --test grok_capture_test`；`source .env.test && cargo test --locked --test compat_agent_architecture_guard`；`cargo +nightly fmt --all --check`；`cargo clippy --locked --all-targets --all-features -- -D warnings`。使用共享target-dir可显式追加，实际命令和非零用例数记在本节。网站按既有sync/check/fixture/typecheck/build门。本卡共享provider契约和守卫触发全量：`source .env.test && source .env.live-test && cargo nextest run --locked --all --no-fail-fast --retries 2`。Codex仅本机专项另跑，不加入默认测试。
+
+**Dependencies:** 用户本次架构修复授权；最新main已fetch并ff；GK功能实施暂停不阻本修复。
+
+**Implementation write set:** `src/internal/ai/hooks/providers/grok/{mod,parser,session_files}.rs`、`src/internal/ai/hooks/provider.rs`、`tests/grok_capture_test.rs`、`tests/compat/agent_architecture_guard.rs`、`tests/compat/agent_docs_contract.rs`（暂停/scratch文案契约）；EN/zh/dev同名agent文档、tracing/agent、COMPATIBILITY、网站agent.en、本计划和plan-status；恢复CX-15冲突仅合并旧retention与新Claude字段，不扩行为。
+
+**Release write set:** no-release，本次不bump、不签推/部署；保留上游0.30.65版本面。
+
+**Rollback mode:** revert（只撤本卡变更；禁止恢复未经授权的parse旁路写入）。
+
+**Docs and compatibility impact:** CLI不新增参数；声明thinking接入暂停，Rust旧parser helper路径迁移；旧正式checkpoint和scratch文件均不修改。
+
+### Task GK-07: 纯字节Grok transcript normalizer（交接给其他agent）
+
+**Task type:** implementation
+
+**Lifecycle / Acceptance:** locally-accepted / 空
+
+**Description:** 先建立不含I/O的Grok字节normalizer与合成契约，再由GK-08接授权读取。把已有updates/history字段映射整理为bytes→typed events→ordinary transcript/normalized turns，保留thought顺序、reasoning summary/id/status/opaque值，所有解码后正文继续凭据扫描。此卡不修改注册能力或启动器。
+
+**Out of scope:** 禁止hook/provider文件I/O、禁止调用legacy observer、禁止接生产source/capture writer、禁止真实模型、提交、推送、发布；不改任何Codex测试或CI。
+
+**Current evidence:** 现有 `grok_updates.rs` / `grok_reasoning.rs` 的文件读取和字段解释混合；必须保留原路径API的校验，并让新pure bytes API可在snapshot之后使用。
+
+**Acceptance criteria:**
+
+- [x] 为两份输入增加有界、deadline-aware的纯字节解析入口，复用同一字段解释；文件API保留且其路径/大小拒绝语义不弱化。
+- [x] 合成测试覆盖三段thought不拼接、summary精确/四段匹配、不匹配独立、opaque-only、重复eventId、坏/截断行、凭据和Unicode；不把summary当完整thinking，不伪造user/assistant正文。
+- [x] 没有真实可归属turn时明确partial/未归属，不从scratch文件制造完整coverage；输出供后续共享writer消费，无SQL/ref/FS副作用。
+- [x] focused Grok reader测试、fmt、strict Clippy与只读复审通过；更新本节实际结果，Acceptance在未交付时保持空。
+
+**Verification:** 既有 `cargo test --locked --test grok_capture_test`、`cargo test --locked --test compat_agent_architecture_guard grok_parser_delegates_without_observer_side_effects -- --exact`；新增pure parser用例加入既有target、在本节登记完整名称和非零计数；fmt/strict同GK-06。
+
+**Dependencies:** GK-06本机架构门和文档交接通过后开工；同一工作树串行，不覆盖CX-15或架构修复改动。Owner为主agent交接后明确指派的agent，尚未指派前不能声称已接单。
+
+**Implementation write set:** `src/internal/ai/observed_agents/grok_updates.rs`、`grok_reasoning.rs`、`tests/grok_capture_test.rs`（只追加pure parser cases）、本计划/plan-status。如必须增加共享coverage/注册/SQL/CLI文件，先停止该部分，提出下一卡，不自行扩大本卡。
+
+**Full-suite trigger:** 无共享owner或公共CLI改变时只focused；不能以此卡局部通过宣称计划完成；GK-08集成和最终全量另验。
+
+**Release write set:** no-release；本轮只本机开发，不bump/提交/推送。
+
+**Rollback mode:** revert。旧文件API与fixture断言保留；新增byte API不影响当前hook处理。
+
+### Task GK-08: 授权来源与共享checkpoint接入（仍暂停，后续选卡）
+
+**Lifecycle / Acceptance:** planned / 空
+
+接续方向而非本次已开工卡：在GK-07合格后，枚举snapshot候选/多源授权/预算、真实turn归属与typed coverage、共享writer、pending/compaction/fence/replay、正式checkpoint export正文验证。必须先形成满足粒度规则的具体I写集、AC和Verification，用户选卡后才接生产。禁止以legacy observer或文件式exporter绕过snapshot；禁止写 `GROK_HOME/libra-capture` 代替catalog。需要时拆成来源授权/turn normalizer/持久化三卡，保持依赖显式。真实模型测试仍需单独选择，不能从supported或合成测试推断已取到数据。
+
+### GK-06 实施证据汇总
+
+待实际运行后填入；旧失败保留为历史，不能预填通过。后续agent先读本节的最终交接状态，再执行GK-07。
+
+
+**阶段实测（尚非最终门）：** 最新main整合后Grok专项20/20实际通过，含五事件纯解析和独立observer旧合成测试；原文件级parser guard和supported roster guard实际通过。初次完整architecture target为64 PASS/1 FAIL，唯一失败是上游e270bfe新增Claude legacy mirror后RG-05 serializer旧SHA pin未更新；对应cloud生产文件无本地改动。此失败保留，先进行专门Claude scope review再决定是否更新pin，不弱化guard。上游Claude legacy revision的本地幂等/缺checkpoint拒绝/erase/mirror合成回归实际1/1通过。初次strict Clippy实际exit0；后续guard宏扫描、文档和边界断言修订需最终重验。
+
+Claude GK-06/网站只读审查实际exit0/is_error=false、36 turns、VERDICT PASS（仅架构/文档），raw stdout SHA-256 `ad2d0d8303e56d48150d9ca3a41cc151b43837a2372570c322a72cf891418c15`，无P0/P1/P2。非阻塞文案与安全session独立unknown-event断言已澄清。该审查读取到的guard无宏自检，独立agent另提出P2；已加递归TokenTree和5负/3正fixture，独立代码复核确认P2可关闭，最终实际运行仍随后登记。网站同步fixture7/7、typecheck/build实际exit0，文案澄清后已重跑同组全部exit0。未提交/推送/发布/部署；真实Grok模型仍UNRUN。
+
+
+**RG-05 上游指纹整合审查：** 最新main e270bfe仅增加Claude legacy revision镜像元数据和校验，生产cloud serializer本地未修改。专门Claude只读scope审查实际exit0/is_error=false、24 turns、VERDICT PASS，允许remainder pin从 `06b56c63413da64355910602a1bfb109d1ee2a8d546832edf75276029c5ed469` 更新为实际 `ea0378334c06aa458c7e9acdd3a81c88c00d5261b8590245d1deeea08920ce73`；prefix pin `1b477e373f2554623a8e7121896e09ed5a806a2174845750b6ebf903d7b03912` 保持。raw SHA-256 `a2abeed2b34dd7b146c47da2a19a897c1fcdbf7b4dbe281e5040a067adc0c2b7`。复核结论是元数据只读、无源opener、无新ref/D1写入、同snapshot事务和重检，缺旧checkpoint或现存tombstone拒绝。专门1/1本机合成测试已通过。未把pin更新当新cloud功能验收；审查另留五项非阻塞P2观察给原Claude/cloud owner：残留session+revision+tombstone分支、完整cloud-sync E2E未直接覆盖，孤儿revision依赖FK，错误logical key行过滤、新公开只读helper API。它们不属于Grok后续agent写集，不声称已修复。此次GK-06写集补充仅该既有guard的精确指纹整合，不改cloud生产owner。
+
+**CX-15整合复核：** 当前0.30.65合并树本机Codex集成23/23、私有11/11实际PASS；一次误选 `agent_reasoning_contract_test -- --ignored` 为0例，不能计foundation PASS，随后按真实 `agent_checkpoint_redaction_test::capture_foundation_codex_reasoning_boundaries_live_and_import` 单独重验。Codex目标仍required-feature+ignored，CI未改。
+
+
+**最终focused文案边界：** 新架构65/65与capability5/5已通过；docs target首轮33/34，Grok例因新英文使用“without decryption”未匹配既有“does not decrypt”断言而失败。保留断言、改正文案显式“Libra does not decrypt”，并在同一既有Grok契约追加paused/scratch披露断言，不弱化旧要求。随后重新执行focused与静态门，旧失败不追认为PASS。
+
+
+**最终focused/静态门（完整回归之前）：** 在0.30.65合并树执行 `source .env.test && cargo test --locked --target-dir /Volumes/Sea/validation/opencode-thinking-20261018-233523-3tfb_79x/build --test grok_capture_test --test grok_agent_kind_test --test compat_agent_architecture_guard --test compat_agent_docs_contract --test compat_agent_capability_matrix_pin` 实际exit0：20+1+65+34+5=125 PASS，无ignored/零匹配替代。新guard的宏扫描和5负/3正fixture已在这轮运行。随后的nightly fmt check与strict all-target/all-feature Clippy -D warnings均exit0。手动hook矩阵实际1/1 PASS，真实foundation用例在 `agent_checkpoint_redaction_test` 指定完整名称、feature+ignored+exact实际1/1 PASS；与23集成+11私有合计35本机Codex用例均PASS，不在默认CI执行。一次误选target的0例不计通过。模板要求的双环境nextest全量正在同一冻结非计划源码上运行，结果随后记录。
+
+
+### GK-06 最终本机验收与交接
+
+**记录时间：2026-10-19 11:11:43 UTC。** GK-06本机实现/测试/审查通过，Lifecycle改为locally-accepted，Acceptance仍空，不表示已提交、远端CI通过或发布。源码更新点为origin/main `e270bfe` / 0.30.65，没有安装或发布本地候选。
+
+| 门 | 实际结果 |
+|---|---|
+| Grok/架构/docs/capability focused | 125/125 PASS（Grok20、kind1、architecture65、docs34、capability5）；保留原守卫，宏/别名负例实际运行 |
+| CX-15恢复后本机用例 | 集成23/23、私有11/11、真实foundation1/1，共35 PASS；另手动hook字节矩阵1/1 PASS；feature+ignored，仅本机 |
+| 上游Claude镜像整合 | 本地repair/replay/缺checkpoint拒绝/erase测试1/1 PASS；RG-05精确指纹经专门Claude PASS后更新，cloud生产源码无本地修改 |
+| 网站 | cf本地sync/check：108命令、109导航、0 drift；fixture7/7、typecheck/build exit0；Claude架构/网站PASS；原14页未提交改动保留，只同步agent增量 |
+| 架构/网站审查 | Claude36 turns PASS，无P0/P1/P2；宏遗漏P2由独立agent复核关闭；普通文案及unknown安全session边界已补；cloud审查24 turns PASS，五项非阻塞观察留原owner |
+| 最终完整回归 | 双环境+子进程umask022：`cargo nextest run --locked --all --no-fail-fast --retries 2 --target-dir /Volumes/Sea/validation/opencode-thinking-20261018-233523-3tfb_79x/build` exit0，**10325/10325 PASS，13 slow、1 leaky、23 skipped，846.440s** |
+| 冻结与Codex隔离 | 2008个非计划文件的内容/模式聚合SHA-256 `d8e5172d9e1cd4810819fb48e15d9a98bdb4585b35206422ed276f4311a621fb`，全量前后MATCH；JUnit新增Codex手动cases选入0，workflow无本地改动 |
+
+完整回归stdout/stderr流SHA-256 `6c7e6d88ac2ecb930e7fead8700575eea0340a5d24ffdfcec6416b7d98db3d18`。本轮唯一LEAK为未修改的 `command::fetch::tests::fetch_prune_porcelain_and_fetch_head_layout`（0.214s）；测试断言PASS、全量exit0，保留诊断，不称零泄漏或已经修复。前述architecture pin旧FAIL、文案断言FAIL和误选0例均保留，不倒改。
+
+现有根导出保持，旧Rust内部parser helper路径迁移已明示；不删除/重写历史checkpoint或scratch，不读取用户Grok日志。legacy observer仍有已登记的离线限制，禁止生产调用。恢复后的autostash和逐字节备份仅为恢复锚点，工作已手工三方整合，后续agent不要再次apply/pop该autostash。
+
+后续受派agent `/root/grok_continue` 已完成只读准备：仅按GK-07两个reader文件/追加合成测试继续，不改生产hook、shared writer、SQL/CLI、Codex测试、CI或发布面。GK-08生产接入和真实Grok模型仍暂停，未授权开工。本机架构门通过后主agent发送正式开始指令；GK-07的代码变化须单独记录focused/审查结果，不能冒用以上GK-06冻结快照的全量PASS。当前无提交、推送、tag、release、网站推送或部署。
+
+
+**2026-10-19 11:12:48 UTC 正式开发交接：** 主agent最终重复nightly fmt check、严格all-target/all-feature Clippy -D warnings、diff check均实际exit0。已向`/root/grok_continue`发送“GK-06全量门完成，允许GK-07实现”，该agent运行中；GK-07改为in-progress/Acceptance空。其写集严格限两份reader及现有target追加测试，计划记账由主agent协调，生产hook/GK-08和真实模型仍暂停。后续GK-07源码不属于上述GK-06全量冻结快照，不得将那次PASS挪作新代码的验收。仍无提交/推送/发布/部署。
+
+
+**2026-10-19 11:34:48 UTC GK-07本机交接完成与Grok单独提交授权：** 用户明确要求仅提交Grok改动，后续Grok由另外的agent开发，本会话只继续Codex会话采集。GK-07仅两个reader+既有target追加11项：`parse_grok_updates_bytes`、`normalize_grok_reasoning_bytes`/`GrokNormalizedTranscript`；输入16MiB、行1MiB、正文8MiB、输出字符串32MiB，deadline协作检查，超预算显式Err，无静默截断/伪造turn。file wrapper保留jail/类型拒绝并加打开后cap+1读取；doctor只保留闭集脱敏标记，不含同句其它正文。执行agent实跑Grok31/31+architecture65/65、fmt、严格all-target/all-feature Clippy与diff check均exit0（Clippy42.41s）；独立只读复审PASS，P0/P1/P2均0。残余：单次有界JSON/脱敏操作不可抢占、旧updates wrapper全量有界读取后按cursor解释，不冒称增量成本；禁止把legacy observer接生产。GK-07 locally-accepted/Acceptance空，不借GK-06旧全量PASS验新源码。
+
+单独提交使用HEAD加Grok相关hunk构造index，保留全部Codex WIP原字节；包括Grok架构/reader/tests、相应的迁移/名单/状态库存回归和文档，排除Codex retention/admission/oracle写集。网站同样只提交agent页面Grok段，保留其它页及Codex段。只授权本地签名DCO提交，不推送/发布/部署；最终实际commit与隔离验证结果随后登记。GK-08仍暂停，后续Grok任务不再由本会话派发实现。
+
+
+**2026-10-19 11:41:37 UTC Grok-only提交快照隔离验证：** 使用HEAD加所选index内容的临时源码快照（不含codex_reasoning.rs、Codex本机target、admission转发或Claude oracle覆盖）验证：Grok31/31、kind1/1、docs34/34、capability5/5实际PASS；nightly fmt和严格all-target/all-feature Clippy exit0。架构target初次63/65：Grok引入第20个AgentKind分支的问题用既有provider-neutral partial fallback及下降至15的guard修复纳入本提交；另一项capture_modules_do_not_import_hook_entry_layers来自HEAD原有Claude admission直接引用，ingress/Claude源码逐字节等于HEAD，修复继续保留在Codex WIP，不夹带。先前联合工作区的10325全量PASS不是本次独立commit的全量PASS。仅本地提交，不推送；其它已有非Grok工作保留。
+
+
+**2026-10-19 11:50:58 UTC 独立推送前远端整合：** 原本地Grok提交ddd06bd与网站58e900c在推送前发现远端main已至feafdb3、cf已至4fb6e7e。保留其它Agent的Claude admission/oracle及Grok架构修复，分别rebase独立提交；冲突仅合并同一Grok行为轴。离线helper采用远端已公布的`grok::session_files`路径，不另建重复observer模块，根导出兼容；去除重复allowlist项，保留严格纯解析及生产调用守卫。Codex与其它WIP已逐字节备份并暂时移出验证快照，提交后通过三方合并恢复。先前Grok-only Claude admission失败已由远端feafdb3修复，本次将重新验证，不沿用旧PASS。网站整合后sync检查108命令/109导航零漂移、fixture7/7、typecheck和build实际exit0；Claude复审与最终Rust focused/strict门随后登记。
+
+**2026-10-19 11:53:09 UTC 推送前最终专项门：** 不含Codex WIP的整合快照实际执行Grok31、kind1、architecture65、docs34、capability5，共136/136 PASS；nightly fmt与严格all-target/all-feature Clippy -D warnings均exit0（59.02s，仅既有proc-macro-error2 future-incompat提示）。网站Claude Opus 5.5仅依据所提交差异及源文档复审PASS（无权限拒绝），cf提交经rebase为b77b548并已推送，Workers Builds自动部署运行中。首次Claude工具调用权限不足、未得到审查结果，不作为PASS依据。全量CI/网站上线属于后续远端门，不借之前联合工作区全量计数作本提交结果。

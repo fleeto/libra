@@ -84,6 +84,7 @@ async fn change_identity_prefix_index_repair_replays_after_old_receipt() {
             AI_TASK_RUN_BASE_COMMIT_REF,
             MEMORY_CORE,
             MEMORY_PATH_SEARCH,
+            2026101901,
         ]
     );
 
@@ -214,6 +215,7 @@ async fn operation_v2_branch_keeps_modern_rows_without_recopying() {
             AI_TASK_RUN_BASE_COMMIT_REF,
             MEMORY_CORE,
             MEMORY_PATH_SEARCH,
+            2026101901,
         ]
     );
     assert_eq!(operation_rows_without_boundary_columns(&conn).await, modern);

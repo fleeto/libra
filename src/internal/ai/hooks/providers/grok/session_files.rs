@@ -1,7 +1,9 @@
-//! Read one Grok session's `updates.jsonl` and local state files.
+//! Legacy offline Grok observer and scratch-state compatibility helper.
 //!
-//! Kept out of `parser.rs` so the provider parser stays free of filesystem
-//! imports.
+//! This is not the production capture path. Its JSON files are not Libra
+//! catalog checkpoints. Do not call it from hook parsing or the capture runtime;
+//! live content must use authorized snapshots and the shared checkpoint writer.
+//! Existing error/concurrency/budget limitations are tracked in ADR-GK-05.
 
 use std::{
     collections::BTreeSet,

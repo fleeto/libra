@@ -117,7 +117,17 @@ Libra **自己**的 `hooks.json`（`internal::ai::hooks::config::load_hook_confi
 | `codex` | `Codex` / `codex` | first-batch supported；hook-installable | hook install/uninstall/status、lifecycle ingest、transcript read、checkpoint/export、review evidence | 以上游实测为准：当前写入用户级 `$CODEX_HOME/hooks.json` 与 `config.toml` `[hooks.state]` trust 记录；不得假定项目级 `.codex/hooks.json` 是 Libra 新写入目标 |
 | `opencode` | `OpenCode` / `opencode` | first-batch supported；hook-installable | hook install/uninstall/status、lifecycle ingest、transcript read、checkpoint/export、review evidence | 以上游实测为准：当前写入 `.opencode/plugin/libra-hooks.js`（单数目录，上游 SDK 规范路径，与本文「OpenCode 安装流程契约」§3 一致）并保留用户配置；复数 `.opencode/plugins/` 仅作为携带 Libra-managed 标记的重复受管文件的检测/清理输入，不作为 Libra 新写入目标 |
 
-首批之外的 `gemini`、`cursor`、`copilot`、`factory-ai`、`pi`、`vogon`、未知 external slug 和历史/预览 adapter **不得作为 supported agent 暴露**：`list/status --json` 不能把它们标成 `supported=true`、`hook_installable=true`、`installed=true`、`launchable_review=true` 或 `launchable_investigate=true`；`add/enable` 必须返回 actionable unsupported / skipped diagnostic；hook ingest 不得为这些 slug 写入 `agent_session.agent_kind`。源码中已有的 `AgentKind`、SQL CHECK 或历史 provider 只能作为 migration/backward-compat 背景，不能扩大本文执行范围。GK-05 之后唯一的首批外追加是 `grok`：`supported=true`、`hook_installable=true`、`support_wave="grok"`（不是 `first_batch`），`launchable_review=false`、`launchable_investigate=false`。它读取本机 `updates.jsonl` 与 `chat_history.jsonl`。普通 checkpoint transcript 保留 Thinking 字符串和未证明 `encrypted_content`，不解密。默认 `checkpoint show` 不打印这些明文；显式 transcript 路径才输出脱敏后的正文。`grok` 不是 review 或 investigate 启动器。
+首批之外的 `gemini`、`cursor`、`copilot`、`factory-ai`、`pi`、`vogon`、未知 external slug 和历史/预览 adapter **不得作为 supported agent 暴露**：`list/status --json` 不能把它们标成 `supported=true`、`hook_installable=true`、`installed=true`、`launchable_review=true` 或 `launchable_investigate=true`；`add/enable` 必须返回 actionable unsupported / skipped diagnostic；hook ingest 不得为这些 slug 写入 `agent_session.agent_kind`。源码中已有的 `AgentKind`、SQL CHECK 或历史 provider 只能作为 migration/backward-compat 背景，不能扩大本文执行范围。GK-05 之后唯一的首批外追加是 `grok`：`supported=true`、`hook_installable=true`、`support_wave="grok"`（不是 `first_batch`），`launchable_review=false`、`launchable_investigate=false`。已有读取器面向本机 `updates.jsonl` 与 `chat_history.jsonl`；生产thinking接入暂停。后续普通 checkpoint transcript 的目标是保留 Thinking 字符串和未证明 `encrypted_content`，不解密。默认 `checkpoint show` 不打印这些明文；显式 transcript 路径只能返回实际已保存的脱敏内容。`grok` 不是 review 或 investigate 启动器。
+
+| slug | AgentKind / DB value | 追加状态 | 当前采集边界 | 安装配置面 |
+|---|---|---|---|---|
+| `grok` | `Grok` / `grok` | supported；hook-installable；support_wave=grok | 生命周期可接收；thinking生产接入暂停，不能由supported推断正文已保存 | 用户级 `GROK_HOME/hooks/` |
+
+### Grok 架构边界与暂停状态（GK-06）
+
+`GrokProvider::parse_hook_event` 只委托纯 `parser::parse_grok_hook_event`；不能读取日志、写入observer状态或授权路径。生产hook回调移除了 `record_grok_boundary`，不会在解析阶段写 `GROK_HOME/libra-capture`。`session_files.rs` 保留独立兼容的离线辅助函数，其 `checkpoint.json` 只是scratch状态，不是正式 `agent_checkpoint` 或trace ref；禁止从生产runtime重新调用它。根路径 `grok::observe_grok_hook` 保留；旧内部路径 `grok::parser::observe_grok_hook` / `GrokObserveOutcome` 迁至 `grok::session_files`，Outcome另从grok根导出。
+
+后续采集必须依次经过已验证的ingress/repository scope、仅推导路径的provider candidate、共享snapshot授权和有界读取、纯字节normalizer/reasoning合并、共享checkpoint writer/catalog/ref。pending和PreCompact也服从同一持久化owner，不以独立JSON冒充正式checkpoint。当前日志reader的合成测试不证明生产hook已保存thinking；真实Grok采集验证继续暂停，接续任务见 `plan-20261018-grok-capture.md` 的GK-07/GK-08。
 
 首批 capability matrix 必须固定这些字段：`slug`、`agent_kind`、`db_value`、`supported`、`support_wave="first_batch"`、`registered`、`transcript_readable`、`hook_installable`、`installed`、`launchable_review`、`launchable_investigate`、`external_binary`、`config_paths`、`capabilities`。新增首批外 agent 必须另开 PR 更新本节、E9、任务卡、用户文档和 compat schema pin test。
 

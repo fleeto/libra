@@ -431,9 +431,10 @@ fn extract_deadline_provider_once(
                 transcript, limits,
             )
         }
-        // First-batch providers are handled above. Every other kind,
-        // including grok, stays a partial empty summary. Naming each kind
-        // here would add a non-test `AgentKind::` path.
+        // `decode_extraction_request` accepts only the first-batch provider
+        // codes, so this arm is defensive and cannot carry an error string.
+        // Formats without a registered extractor stay explicitly partial.
+        // New unsupported identities do not add provider policy to this layer.
         _ => crate::internal::ai::observed_agents::extract::ExtractionSummary {
             partial: true,
             ..Default::default()

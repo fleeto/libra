@@ -2,7 +2,7 @@
 
 ## Grok capture (GK-05)
 
-`grok` is supported and hook-installable with `support_wave=grok`, not `first_batch`. Capture reads local `updates.jsonl` and `chat_history.jsonl`. The ordinary checkpoint transcript retains Thinking text and unproven `encrypted_content` and does not decrypt it. Default `checkpoint show` does not print that plaintext; an explicit transcript path prints the redacted body. `launchable_review` and `launchable_investigate` stay false, so Grok is not a review or investigate launcher.
+Grok is supported and hook-installable with `support_wave=grok`, not `first_batch`, and is not a `review` or `investigate` launcher. **Automatic Thinking capture is paused.** Hook lifecycle events are recorded through the shared pipeline; decoding does not read session logs or write `GROK_HOME/libra-capture`. Existing readers for local `updates.jsonl` and `chat_history.jsonl` are not yet connected to the authorized snapshot/checkpoint writer. Offline observer JSON is scratch state, not a Libra checkpoint. The intended transcript retains Thinking text and unproven `encrypted_content`; Libra does not decrypt it. Current synthetic reader tests do not prove that live checkpoints contain it. Default `checkpoint show` does not print Thinking plaintext; an explicit transcript path returns only content actually stored.
 
 ## Claude Code hook registry (CC-01)
 

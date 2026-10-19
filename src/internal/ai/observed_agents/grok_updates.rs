@@ -7,8 +7,9 @@
 use std::{
     collections::BTreeSet,
     fs::File,
-    io::{BufReader, Read, Seek, SeekFrom},
+    io::Read,
     path::{Path, PathBuf},
+    time::Instant,
 };
 
 use serde_json::Value;
@@ -102,6 +103,8 @@ impl GrokUpdatesRead {
 
 #[derive(Debug, thiserror::Error)]
 pub enum GrokUpdatesError {
+    #[error("Grok updates parsing exceeded its deadline; retry with a fresh source snapshot")]
+    Deadline,
     #[error("refusing to read '{path}': {reason}")]
     Refused { path: String, reason: String },
     #[error("failed to read '{path}': {detail}")]
@@ -165,106 +168,109 @@ pub fn read_grok_updates(
         });
     }
 
-    let mut file = File::open(&canonical_file).map_err(|error| GrokUpdatesError::Io {
+    let file = File::open(&canonical_file).map_err(|error| GrokUpdatesError::Io {
         path: path_text.clone(),
         detail: error.to_string(),
     })?;
-    let start = cursor.offset.min(file_meta.len());
-    file.seek(SeekFrom::Start(start))
+    // Recheck the bytes actually read: metadata alone does not bound a file
+    // that grows between inspection and opening it.
+    let mut bytes = Vec::new();
+    file.take(TRANSCRIPT_READ_HARD_CAP_BYTES + 1)
+        .read_to_end(&mut bytes)
         .map_err(|error| GrokUpdatesError::Io {
             path: path_text.clone(),
             detail: error.to_string(),
         })?;
+    parse_updates(&bytes, cursor, None, &path_text)
+}
 
-    let mut reader = BufReader::new(file);
-    let mut events = Vec::new();
+/// Interpret a complete, already authorized `updates.jsonl` snapshot.
+///
+/// This function performs no I/O. `cursor.offset` is an offset in the full
+/// snapshot, not in a pre-sliced suffix. Thought strings remain separate raw
+/// events for exact summary matching; use `normalize_grok_reasoning_bytes`
+/// before retaining ordinary text so credentials are scanned. A successful
+/// parse describes field completeness, never proven turn attribution.
+pub fn parse_grok_updates_bytes(
+    bytes: &[u8],
+    cursor: &GrokReadCursor,
+    deadline: Option<Instant>,
+) -> Result<GrokUpdatesRead, GrokUpdatesError> {
+    parse_updates(bytes, cursor, deadline, "Grok updates snapshot")
+}
+
+fn parse_updates(
+    bytes: &[u8],
+    cursor: &GrokReadCursor,
+    deadline: Option<Instant>,
+    label: &str,
+) -> Result<GrokUpdatesRead, GrokUpdatesError> {
+    check_deadline(deadline)?;
+    if bytes.len() as u64 > TRANSCRIPT_READ_HARD_CAP_BYTES {
+        return Err(GrokUpdatesError::Refused {
+            path: label.to_string(),
+            reason: format!("source is above the {TRANSCRIPT_READ_HARD_CAP_BYTES} byte limit"),
+        });
+    }
+    let mut cursor_bytes = 0_u64;
+    for id in &cursor.seen_event_ids {
+        check_deadline(deadline)?;
+        cursor_bytes = cursor_bytes.saturating_add(id.len() as u64 + 64);
+        if cursor_bytes > TRANSCRIPT_READ_HARD_CAP_BYTES {
+            return Err(GrokUpdatesError::Refused {
+                path: label.to_string(),
+                reason: "saved event identity state exceeds the source byte limit".to_string(),
+            });
+        }
+    }
+    let start = cursor.offset.min(bytes.len() as u64) as usize;
     let mut seen = cursor.seen_event_ids.clone();
+    check_deadline(deadline)?;
+    let mut events = Vec::new();
     let mut partial = false;
     let mut consumed = start;
-
-    loop {
-        match read_capped_line(&mut reader, GROK_LINE_MAX_BYTES).map_err(|error| {
-            GrokUpdatesError::Io {
-                path: path_text.clone(),
-                detail: error.to_string(),
-            }
-        })? {
-            CappedLine::Eof => break,
-            CappedLine::TooLong { skipped } => {
-                partial = true;
-                consumed = consumed.saturating_add(skipped);
-            }
-            CappedLine::Line { bytes, len } => {
-                consumed = consumed.saturating_add(len);
-                if bytes.is_empty() {
-                    continue;
+    for line in bytes[start..].split_inclusive(|byte| *byte == b'\n') {
+        check_deadline(deadline)?;
+        consumed += line.len();
+        let body = line.strip_suffix(b"\n").unwrap_or(line);
+        if body.len() as u64 > GROK_LINE_MAX_BYTES {
+            partial = true;
+            continue;
+        }
+        if !body.is_empty() {
+            match interpret_line(body, &mut seen) {
+                LineEffect::Skip => {}
+                LineEffect::Partial(event) => {
+                    partial = true;
+                    if let Some(event) = event {
+                        events.push(event);
+                    }
                 }
-                match interpret_line(&bytes, &mut seen) {
-                    LineEffect::Skip => {}
-                    LineEffect::Partial(event) => {
-                        partial = true;
-                        if let Some(event) = event {
-                            events.push(event);
-                        }
-                    }
-                    LineEffect::Event(event) => events.push(event),
-                    LineEffect::Refuse => {
-                        return Err(GrokUpdatesError::Refused {
-                            path: path_text,
-                            reason: "line is outside the grok field matrix".to_string(),
-                        });
-                    }
+                LineEffect::Event(event) => events.push(event),
+                LineEffect::Refuse => {
+                    return Err(GrokUpdatesError::Refused {
+                        path: label.to_string(),
+                        reason: "line is outside the grok field matrix".to_string(),
+                    });
                 }
             }
         }
+        check_deadline(deadline)?;
     }
-
+    check_deadline(deadline)?;
     Ok(GrokUpdatesRead {
         events,
         partial,
-        next_offset: consumed,
+        next_offset: consumed as u64,
         seen_event_ids: seen,
     })
 }
 
-enum CappedLine {
-    Eof,
-    Line { bytes: Vec<u8>, len: u64 },
-    TooLong { skipped: u64 },
-}
-
-fn read_capped_line(reader: &mut impl Read, max_bytes: u64) -> std::io::Result<CappedLine> {
-    let mut bytes = Vec::new();
-    let mut one = [0_u8; 1];
-    let mut seen = 0_u64;
-    loop {
-        let read = reader.read(&mut one)?;
-        if read == 0 {
-            if seen == 0 {
-                return Ok(CappedLine::Eof);
-            }
-            return Ok(CappedLine::Line { bytes, len: seen });
-        }
-        seen += 1;
-        if one[0] == b'\n' {
-            return Ok(CappedLine::Line { bytes, len: seen });
-        }
-        if seen > max_bytes {
-            let mut skipped = seen;
-            loop {
-                let read = reader.read(&mut one)?;
-                if read == 0 {
-                    break;
-                }
-                skipped += 1;
-                if one[0] == b'\n' {
-                    break;
-                }
-            }
-            return Ok(CappedLine::TooLong { skipped });
-        }
-        bytes.push(one[0]);
+fn check_deadline(deadline: Option<Instant>) -> Result<(), GrokUpdatesError> {
+    if deadline.is_some_and(|limit| Instant::now() >= limit) {
+        return Err(GrokUpdatesError::Deadline);
     }
+    Ok(())
 }
 
 enum LineEffect {

@@ -2056,12 +2056,12 @@ fn fail_closed_hooks_keep_repository_database_contract() {
     );
 }
 
-/// Every schema object plus every table column of the repository database,
+/// Every schema object's definition plus every table column of the database,
 /// so a migration's physical effect is observable independent of receipts.
 async fn physical_repository_schema(conn: &DatabaseConnection) -> Vec<String> {
     conn.query_all_raw(Statement::from_string(
         conn.get_database_backend(),
-        "SELECT type || ':' || name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' \
+        "SELECT type || ':' || name || ':' || COALESCE(sql, '') FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' \
          UNION ALL \
          SELECT 'column:' || m.name || '.' || p.name \
          FROM sqlite_master AS m, pragma_table_info(m.name) AS p WHERE m.type = 'table' \

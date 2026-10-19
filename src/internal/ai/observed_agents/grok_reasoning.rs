@@ -6,17 +6,19 @@
 //! `GROK_HOME`, and never edits OpenCode export.
 
 use std::{
+    collections::{BTreeMap, BTreeSet},
     fs::File,
-    io::{BufReader, Read},
+    io::Read,
     path::Path,
+    time::Instant,
 };
 
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
 use crate::internal::ai::observed_agents::{
-    grok_updates::{GROK_LINE_MAX_BYTES, GrokTranscriptEvent},
-    redaction::Redactor,
+    grok_updates::{GROK_LINE_MAX_BYTES, GrokTranscriptEvent, GrokUpdatesRead},
+    redaction::{Redactor, is_durable_default_rule_id},
     transcript_source::{TRANSCRIPT_READ_HARD_CAP_BYTES, TranscriptReadError},
 };
 
@@ -139,6 +141,12 @@ impl GrokReasoningImport {
 
 #[derive(Debug, thiserror::Error)]
 pub enum GrokReasoningError {
+    #[error(
+        "Grok reasoning normalization exceeded its deadline; retry with a fresh source snapshot"
+    )]
+    Deadline,
+    #[error("Grok reasoning normalization exceeded its {limit} byte {resource} limit")]
+    Budget { resource: &'static str, limit: u64 },
     #[error("{0}")]
     Read(#[from] TranscriptReadError),
     #[error("malformed transcript: {reason}")]
@@ -180,69 +188,237 @@ pub fn import_grok_reasoning(
     updates: &[GrokTranscriptEvent],
 ) -> Result<GrokReasoningImport, GrokReasoningError> {
     let rows = read_history(session_dir, chat_history)?;
-    let mut slots = Vec::new();
-    for event in updates {
-        if let GrokTranscriptEvent::Thought {
-            text,
-            prompt_id,
-            event_id,
-        } = event
-        {
-            let (stored, _) = scan_prose(text);
-            slots.push(ThoughtSlot {
-                text_raw: text.clone(),
-                text_stored: stored,
-                prompt_id: prompt_id.clone(),
-                event_id: event_id.clone(),
-                reasoning: None,
+    merge_reasoning(rows, updates, None, false)
+}
+
+/// Ordinary retained body budget for the new snapshot normalizer.
+pub const GROK_THOUGHT_MAX_BYTES: u64 = 8 * 1024 * 1024;
+/// Bound repeated reasoning attachments as well as their input sources.
+pub const GROK_NORMALIZED_MAX_BYTES: u64 = 2 * TRANSCRIPT_READ_HARD_CAP_BYTES;
+
+/// A pure interpretation result, without repository/session turn ownership.
+///
+/// Even `turn_completed` supplies usage, not a verified conversation turn.
+/// GK-08 must establish ownership before a shared checkpoint writer can use
+/// these events. This type never creates user/assistant messages or coverage.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GrokNormalizedTranscript {
+    pub transcript: GrokReasoningImport,
+    pub unattributed_event_count: usize,
+}
+
+impl GrokNormalizedTranscript {
+    pub fn transcript_document(&self) -> Value {
+        let mut value = self.transcript.transcript_document();
+        value["unattributed_event_count"] = self.unattributed_event_count.into();
+        value
+    }
+}
+
+/// Normalize authorized history bytes and already interpreted update bytes.
+///
+/// No file, environment, process, SQL, ref or checkpoint access occurs here.
+/// Each source is bounded to 16 MiB, each history line to 1 MiB, retained
+/// thought/summary text to 8 MiB and aggregate output strings to 32 MiB.
+/// Bounds or deadline expiry return an explicit error rather than silently
+/// dropping ordinary text. Body strings are credential-scanned after JSON
+/// decoding; opaque reasoning fields retain their existing uninterpreted
+/// representation and are never decrypted or promoted to native evidence.
+/// The old path API retains its field-completeness semantics; this new result
+/// additionally marks all events partial until GK-08 supplies real ownership.
+pub fn normalize_grok_reasoning_bytes(
+    history: &[u8],
+    updates: &GrokUpdatesRead,
+    deadline: Option<Instant>,
+) -> Result<GrokNormalizedTranscript, GrokReasoningError> {
+    check_deadline(deadline)?;
+    validate_updates(updates, deadline)?;
+    let rows = parse_history_bytes(history, deadline)?;
+    let mut transcript = merge_reasoning(rows, &updates.events, deadline, true)?;
+    let unattributed_event_count = transcript.events.len();
+    transcript.partial |= updates.partial || unattributed_event_count > 0;
+    check_deadline(deadline)?;
+    Ok(GrokNormalizedTranscript {
+        transcript,
+        unattributed_event_count,
+    })
+}
+
+fn validate_updates(
+    updates: &GrokUpdatesRead,
+    deadline: Option<Instant>,
+) -> Result<(), GrokReasoningError> {
+    let mut bytes = 0_u64;
+    for event in &updates.events {
+        check_deadline(deadline)?;
+        let fields = match event {
+            GrokTranscriptEvent::Thought {
+                text,
+                prompt_id,
+                event_id,
+            } => text
+                .len()
+                .saturating_add(prompt_id.len())
+                .saturating_add(event_id.len()),
+            GrokTranscriptEvent::Tool { name, event_id } => {
+                name.len().saturating_add(event_id.len())
+            }
+            GrokTranscriptEvent::Unknown {
+                session_update,
+                line_sha256,
+            } => session_update.len().saturating_add(line_sha256.len()),
+            GrokTranscriptEvent::Turn { event_id, .. } => event_id.len(),
+        };
+        if fields as u64 > GROK_LINE_MAX_BYTES {
+            return Err(GrokReasoningError::Budget {
+                resource: "typed update",
+                limit: GROK_LINE_MAX_BYTES,
+            });
+        }
+        bytes = bytes.saturating_add(fields as u64).saturating_add(64);
+        if bytes > TRANSCRIPT_READ_HARD_CAP_BYTES {
+            return Err(GrokReasoningError::Budget {
+                resource: "typed updates",
+                limit: TRANSCRIPT_READ_HARD_CAP_BYTES,
             });
         }
     }
+    Ok(())
+}
+
+struct RetainedBudget {
+    enabled: bool,
+    body: u64,
+    total: u64,
+}
+
+impl RetainedBudget {
+    fn charge(&mut self, body: usize, fields: usize) -> Result<(), GrokReasoningError> {
+        self.body = self.body.saturating_add(body as u64);
+        self.total = self.total.saturating_add(fields as u64).saturating_add(64);
+        if self.enabled && self.body > GROK_THOUGHT_MAX_BYTES {
+            return Err(GrokReasoningError::Budget {
+                resource: "retained body",
+                limit: GROK_THOUGHT_MAX_BYTES,
+            });
+        }
+        if self.enabled && self.total > GROK_NORMALIZED_MAX_BYTES {
+            return Err(GrokReasoningError::Budget {
+                resource: "normalized output",
+                limit: GROK_NORMALIZED_MAX_BYTES,
+            });
+        }
+        Ok(())
+    }
+}
+
+fn merge_reasoning(
+    rows: Vec<HistoryRow>,
+    updates: &[GrokTranscriptEvent],
+    deadline: Option<Instant>,
+    bounded: bool,
+) -> Result<GrokReasoningImport, GrokReasoningError> {
+    let mut budget = RetainedBudget {
+        enabled: bounded,
+        body: 0,
+        total: 0,
+    };
+    let mut slots = Vec::new();
+    for event in updates {
+        check_deadline(deadline)?;
+        match event {
+            GrokTranscriptEvent::Thought {
+                text,
+                prompt_id,
+                event_id,
+            } => {
+                let (stored, _) = scan_prose(text);
+                check_deadline(deadline)?;
+                budget.charge(
+                    stored.len(),
+                    stored
+                        .len()
+                        .saturating_add(prompt_id.len())
+                        .saturating_add(event_id.len()),
+                )?;
+                slots.push(ThoughtSlot {
+                    text_raw: text.clone(),
+                    text_stored: stored,
+                    prompt_id: prompt_id.clone(),
+                    event_id: event_id.clone(),
+                    reasoning: None,
+                });
+            }
+            GrokTranscriptEvent::Tool { name, event_id } => {
+                budget.charge(0, name.len().saturating_add(event_id.len()))?
+            }
+            GrokTranscriptEvent::Unknown {
+                session_update,
+                line_sha256,
+            } => budget.charge(0, session_update.len().saturating_add(line_sha256.len()))?,
+            GrokTranscriptEvent::Turn { event_id, .. } => budget.charge(0, event_id.len())?,
+        }
+    }
+    let index = AttachIndex::build(&slots, deadline)?;
     let mut partial = false;
     let mut standalone = Vec::new();
     for row in rows {
+        check_deadline(deadline)?;
         match row {
             HistoryRow::Partial => partial = true,
             HistoryRow::Reasoning(row) => {
                 if row.summaries.is_empty() {
+                    budget.charge(0, row.field_bytes())?;
                     standalone.push(ciphertext_only(row));
                     continue;
                 }
                 let mut kept_text = false;
                 for summary in &row.summaries {
+                    check_deadline(deadline)?;
                     let Some(summary_raw) = summary else {
                         partial = true;
                         continue;
                     };
                     kept_text = true;
-                    push_summary(&mut slots, &mut standalone, &row, summary_raw);
+                    push_summary(
+                        &mut slots,
+                        &index,
+                        &mut standalone,
+                        &row,
+                        summary_raw,
+                        &mut budget,
+                        deadline,
+                    )?;
                 }
                 if !kept_text {
+                    budget.charge(0, row.field_bytes())?;
                     standalone.push(ciphertext_only(row));
                 }
             }
         }
     }
     let mut events = Vec::new();
-    let mut slot_at = 0;
+    let mut slot_iter = slots.into_iter();
     for event in updates {
+        check_deadline(deadline)?;
         match event {
             GrokTranscriptEvent::Thought { .. } => {
-                let slot = &slots[slot_at];
-                slot_at += 1;
+                let slot = slot_iter
+                    .next()
+                    .ok_or_else(|| GrokReasoningError::Malformed {
+                        reason: "thought mapping is inconsistent".to_string(),
+                    })?;
                 events.push(GrokMergedEvent::Thought {
-                    text: slot.text_stored.clone(),
-                    prompt_id: slot.prompt_id.clone(),
-                    event_id: slot.event_id.clone(),
-                    reasoning: slot.reasoning.clone(),
+                    text: slot.text_stored,
+                    prompt_id: slot.prompt_id,
+                    event_id: slot.event_id,
+                    reasoning: slot.reasoning,
                 });
             }
-            GrokTranscriptEvent::Tool { name, event_id } => {
-                events.push(GrokMergedEvent::Tool {
-                    name: name.clone(),
-                    event_id: event_id.clone(),
-                });
-            }
+            GrokTranscriptEvent::Tool { name, event_id } => events.push(GrokMergedEvent::Tool {
+                name: name.clone(),
+                event_id: event_id.clone(),
+            }),
             GrokTranscriptEvent::Unknown {
                 session_update,
                 line_sha256,
@@ -260,6 +436,7 @@ pub fn import_grok_reasoning(
         }
     }
     events.extend(standalone);
+    check_deadline(deadline)?;
     Ok(GrokReasoningImport { events, partial })
 }
 
@@ -274,27 +451,34 @@ fn ciphertext_only(row: ReasoningRow) -> GrokMergedEvent {
 
 fn push_summary(
     slots: &mut [ThoughtSlot],
+    index: &AttachIndex,
     standalone: &mut Vec<GrokMergedEvent>,
     row: &ReasoningRow,
     summary_raw: &str,
-) {
-    if let Some(index) = attach_index(slots, summary_raw)
+    budget: &mut RetainedBudget,
+    deadline: Option<Instant>,
+) -> Result<(), GrokReasoningError> {
+    if let Some(index) = index.find(slots, summary_raw, deadline)?
         && slots[index].reasoning.is_none()
     {
+        budget.charge(0, row.field_bytes())?;
         slots[index].reasoning = Some(GrokAttachedReasoning {
             id: row.id.clone(),
             status: row.status.clone(),
             encrypted_content: row.encrypted_content.clone(),
         });
-        return;
+        return Ok(());
     }
     let (stored, _) = scan_prose(summary_raw);
+    check_deadline(deadline)?;
+    budget.charge(stored.len(), stored.len().saturating_add(row.field_bytes()))?;
     standalone.push(GrokMergedEvent::Reasoning {
         id: row.id.clone(),
         status: row.status.clone(),
         summary_text: Some(stored),
         encrypted_content: row.encrypted_content.clone(),
     });
+    Ok(())
 }
 
 /// Ordinary export bytes. The checkpoint transcript is left untouched.
@@ -309,18 +493,18 @@ pub fn export_grok_ordinary(document: &Value) -> Result<Vec<u8>, GrokReasoningEr
 }
 
 pub fn sink_bundle(import: &GrokReasoningImport) -> GrokSinkBundle {
-    let mut redacted_samples = Vec::new();
+    let mut redacted_samples = BTreeSet::new();
     for event in &import.events {
         match event {
             GrokMergedEvent::Thought { text, .. } => {
                 if text.contains("<REDACTED:") {
-                    redacted_samples.push(text.clone());
+                    redacted_samples.extend(redaction_markers(text));
                 }
             }
             GrokMergedEvent::Reasoning {
                 summary_text: Some(text),
                 ..
-            } if text.contains("<REDACTED:") => redacted_samples.push(text.clone()),
+            } if text.contains("<REDACTED:") => redacted_samples.extend(redaction_markers(text)),
             _ => {}
         }
     }
@@ -368,6 +552,22 @@ pub fn sink_bundle(import: &GrokReasoningImport) -> GrokSinkBundle {
         coverage_digest: digest,
         log_line,
     }
+}
+
+fn redaction_markers(text: &str) -> BTreeSet<String> {
+    let mut markers = BTreeSet::new();
+    let mut rest = text;
+    while let Some(at) = rest.find("<REDACTED:") {
+        rest = &rest[at..];
+        let Some(end) = rest.find('>') else {
+            break;
+        };
+        if is_durable_default_rule_id(&rest[10..end]) {
+            markers.insert(rest[..=end].to_string());
+        }
+        rest = &rest[end + 1..];
+    }
+    markers
 }
 
 fn projection_event(event: &GrokMergedEvent) -> Value {
@@ -498,34 +698,97 @@ fn strip_export_value(value: &mut Value) {
     }
 }
 
-fn attach_index(slots: &[ThoughtSlot], summary: &str) -> Option<usize> {
-    if let Some(index) = slots.iter().position(|slot| slot.text_raw == summary) {
-        return Some(index);
-    }
-    let mut start = 0;
-    while start < slots.len() {
-        let prompt = &slots[start].prompt_id;
-        let mut end = start + 1;
-        while end < slots.len() && slots[end].prompt_id == *prompt {
-            end += 1;
-        }
-        let run = &slots[start..end];
-        for window_start in 0..run.len() {
-            let mut joined = String::new();
-            for slot in run[window_start..].iter().take(4) {
-                let at_first = joined.is_empty();
-                joined.push_str(&slot.text_raw);
-                if at_first {
-                    continue;
+// Hash indexes avoid rescanning every thought for every history summary.
+// Candidate bytes are still checked, so a digest collision cannot misattach.
+type AttachKey = (usize, [u8; 32]);
+struct AttachIndex {
+    exact: BTreeMap<AttachKey, Vec<usize>>,
+    windows: BTreeMap<AttachKey, Vec<(usize, usize)>>,
+}
+
+impl AttachIndex {
+    fn build(slots: &[ThoughtSlot], deadline: Option<Instant>) -> Result<Self, GrokReasoningError> {
+        let mut index = Self {
+            exact: BTreeMap::new(),
+            windows: BTreeMap::new(),
+        };
+        for (start, first) in slots.iter().enumerate() {
+            check_deadline(deadline)?;
+            let mut hash = Sha256::new();
+            let mut len = 0_usize;
+            for (count, slot) in slots[start..].iter().take(4).enumerate() {
+                if slot.prompt_id != first.prompt_id {
+                    break;
                 }
-                if joined == summary {
-                    return Some(start + window_start);
+                for chunk in slot.text_raw.as_bytes().chunks(4096) {
+                    check_deadline(deadline)?;
+                    hash.update(chunk);
+                }
+                len = len.saturating_add(slot.text_raw.len());
+                let key = (len, hash.clone().finalize().into());
+                if count == 0 {
+                    index.exact.entry(key).or_default().push(start);
+                } else {
+                    index
+                        .windows
+                        .entry(key)
+                        .or_default()
+                        .push((start, count + 1));
                 }
             }
         }
-        start = end;
+        check_deadline(deadline)?;
+        Ok(index)
     }
-    None
+
+    fn find(
+        &self,
+        slots: &[ThoughtSlot],
+        summary: &str,
+        deadline: Option<Instant>,
+    ) -> Result<Option<usize>, GrokReasoningError> {
+        let mut hash = Sha256::new();
+        for chunk in summary.as_bytes().chunks(4096) {
+            check_deadline(deadline)?;
+            hash.update(chunk);
+        }
+        let key = (summary.len(), hash.finalize().into());
+        if let Some(candidates) = self.exact.get(&key) {
+            for &at in candidates {
+                check_deadline(deadline)?;
+                if slots[at].text_raw == summary {
+                    return Ok(Some(at));
+                }
+            }
+        }
+        if let Some(candidates) = self.windows.get(&key) {
+            for &(at, count) in candidates {
+                check_deadline(deadline)?;
+                let mut rest = summary.as_bytes();
+                let mut matches = true;
+                for slot in &slots[at..at + count] {
+                    if let Some(suffix) = rest.strip_prefix(slot.text_raw.as_bytes()) {
+                        rest = suffix;
+                    } else {
+                        matches = false;
+                        break;
+                    }
+                }
+                if matches && rest.is_empty() {
+                    return Ok(Some(at));
+                }
+            }
+        }
+        check_deadline(deadline)?;
+        Ok(None)
+    }
+}
+
+fn check_deadline(deadline: Option<Instant>) -> Result<(), GrokReasoningError> {
+    if deadline.is_some_and(|limit| Instant::now() >= limit) {
+        return Err(GrokReasoningError::Deadline);
+    }
+    Ok(())
 }
 
 fn scan_prose(text: &str) -> (String, bool) {
@@ -542,6 +805,15 @@ struct ReasoningRow {
     status: String,
     summaries: Vec<Option<String>>,
     encrypted_content: String,
+}
+
+impl ReasoningRow {
+    fn field_bytes(&self) -> usize {
+        self.id
+            .len()
+            .saturating_add(self.status.len())
+            .saturating_add(self.encrypted_content.len())
+    }
 }
 
 enum HistoryRow {
@@ -598,31 +870,53 @@ fn read_history(
         path: path_text.clone(),
         detail: error.to_string(),
     })?;
-    let mut reader = BufReader::new(file);
-    let mut rows = Vec::new();
-    loop {
-        match read_capped_line(&mut reader).map_err(|error| GrokReasoningError::Io {
-            path: path_text.clone(),
+    let mut bytes = Vec::new();
+    file.take(TRANSCRIPT_READ_HARD_CAP_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| GrokReasoningError::Io {
+            path: path_text,
             detail: error.to_string(),
-        })? {
-            Line::Eof => break,
-            Line::TooLong => {
-                return Err(GrokReasoningError::Malformed {
-                    reason: "a chat_history line exceeds 1 MiB".to_string(),
-                });
-            }
-            Line::Bytes(bytes) if bytes.is_empty() => {}
-            Line::Bytes(bytes) => rows.push(parse_history_line(&bytes)?),
+        })?;
+    parse_history_bytes(&bytes, None)
+}
+
+fn parse_history_bytes(
+    bytes: &[u8],
+    deadline: Option<Instant>,
+) -> Result<Vec<HistoryRow>, GrokReasoningError> {
+    check_deadline(deadline)?;
+    if bytes.len() as u64 > TRANSCRIPT_READ_HARD_CAP_BYTES {
+        return Err(GrokReasoningError::Read(TranscriptReadError::ExceedsCap {
+            cap: TRANSCRIPT_READ_HARD_CAP_BYTES,
+        }));
+    }
+    let mut rows = Vec::new();
+    for line in bytes.split_inclusive(|byte| *byte == b'\n') {
+        check_deadline(deadline)?;
+        let body = line.strip_suffix(b"\n").unwrap_or(line);
+        if body.len() as u64 > GROK_LINE_MAX_BYTES {
+            return Err(GrokReasoningError::Malformed {
+                reason: "a chat_history line exceeds 1 MiB".to_string(),
+            });
+        }
+        if !body.is_empty() {
+            rows.push(parse_history_line(body, deadline)?);
         }
     }
+    check_deadline(deadline)?;
     Ok(rows)
 }
 
-fn parse_history_line(bytes: &[u8]) -> Result<HistoryRow, GrokReasoningError> {
+fn parse_history_line(
+    bytes: &[u8],
+    deadline: Option<Instant>,
+) -> Result<HistoryRow, GrokReasoningError> {
+    check_deadline(deadline)?;
     let value: Value =
         serde_json::from_slice(bytes).map_err(|_| GrokReasoningError::Malformed {
             reason: "chat_history line is not JSON".to_string(),
         })?;
+    check_deadline(deadline)?;
     let Some(object) = value.as_object() else {
         return Err(GrokReasoningError::Malformed {
             reason: "chat_history line is not an object".to_string(),
@@ -631,7 +925,7 @@ fn parse_history_line(bytes: &[u8]) -> Result<HistoryRow, GrokReasoningError> {
     let kind = object.get("type").and_then(Value::as_str).unwrap_or("");
     if kind != "reasoning" {
         return Err(GrokReasoningError::Malformed {
-            reason: format!("chat_history type '{kind}' is outside the field matrix"),
+            reason: "chat_history type is outside the field matrix".to_string(),
         });
     }
     let Some(id) = object.get("id").and_then(Value::as_str) else {
@@ -656,6 +950,7 @@ fn parse_history_line(bytes: &[u8]) -> Result<HistoryRow, GrokReasoningError> {
     };
     let mut summaries = Vec::new();
     for item in summary {
+        check_deadline(deadline)?;
         let Some(item) = item.as_object() else {
             return Err(GrokReasoningError::Malformed {
                 reason: "summary item is not an object".to_string(),
@@ -680,33 +975,4 @@ fn parse_history_line(bytes: &[u8]) -> Result<HistoryRow, GrokReasoningError> {
         summaries,
         encrypted_content: encrypted.to_string(),
     }))
-}
-
-enum Line {
-    Eof,
-    Bytes(Vec<u8>),
-    TooLong,
-}
-
-fn read_capped_line(reader: &mut impl Read) -> std::io::Result<Line> {
-    let mut bytes = Vec::new();
-    let mut one = [0_u8; 1];
-    let mut seen = 0_u64;
-    loop {
-        let read = reader.read(&mut one)?;
-        if read == 0 {
-            if seen == 0 {
-                return Ok(Line::Eof);
-            }
-            return Ok(Line::Bytes(bytes));
-        }
-        seen += 1;
-        if one[0] == b'\n' {
-            return Ok(Line::Bytes(bytes));
-        }
-        if seen > GROK_LINE_MAX_BYTES {
-            return Ok(Line::TooLong);
-        }
-        bytes.push(one[0]);
-    }
 }

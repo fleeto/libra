@@ -786,11 +786,36 @@ mod tests {
         let mut created = BTreeSet::new();
         for chunk in sql.split("create table").skip(1) {
             let name = table_name_after(chunk);
-            if !name.is_empty() {
+            let body = body_after_create_table(chunk).trim_start_matches(['`', '"']);
+            let tail = body
+                .strip_prefix(&name)
+                .unwrap_or("")
+                .trim_start_matches(['`', '"'])
+                .trim_start();
+            // A diagnostic such as "CREATE TABLE is missing a name" is not
+            // DDL. Require a column list or SQLite's CREATE TABLE AS form.
+            let as_query = tail
+                .strip_prefix("as")
+                .is_some_and(|rest| rest.starts_with(char::is_whitespace) || rest.starts_with('('));
+            if !name.is_empty() && (tail.starts_with('(') || as_query) {
                 created.insert(name);
             }
         }
         created
+    }
+
+    #[test]
+    fn table_inventory_ignores_ddl_diagnostics_but_keeps_real_statements() {
+        let sql = "create table is missing a name\ncreate table name quote is not closed\ncreate table if not exists `real_table` (id text);create table copy_table as select * from real_table;create table newline_copy as\nselect 1;create table parenthesized_copy as(select 1);";
+        assert_eq!(
+            tables_in(sql),
+            BTreeSet::from([
+                "real_table".to_owned(),
+                "copy_table".to_owned(),
+                "newline_copy".to_owned(),
+                "parenthesized_copy".to_owned(),
+            ])
+        );
     }
 
     /// PRODUCTION Rust DDL across the whole `src/` tree, minus the explicit

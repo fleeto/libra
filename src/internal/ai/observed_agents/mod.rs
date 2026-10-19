@@ -72,11 +72,13 @@ pub use capability::{
     TranscriptCompactor, TranscriptPreparer,
 };
 pub use coverage::{
-    COVERAGE_SCHEMA_VERSION, CanonValue, Completeness, CoverageCodecError, CoverageSchemaVersion,
-    EncodedCoverageTurn, NormalizedTurn, SemanticRecord, canonical_turn_bytes, coverage_digest_hex,
-    encode_coverage_turn, encode_coverage_turn_for_schema, normalize_claude_transcript,
-    normalize_codex_rollout, normalize_opencode_export, parse_canon_value, redact_turns,
-    safe_turn_projection, safe_turn_projection_for_schema, select_coverage_schema,
+    COVERAGE_SCHEMA_VERSION, CanonValue, ClaudeOrdinaryAssessment, Completeness,
+    CoverageCodecError, CoverageSchemaVersion, EncodedCoverageTurn, NormalizedTurn, SemanticRecord,
+    assess_claude_ordinary_transcript, canonical_turn_bytes, claude_jsonl_session_matches,
+    coverage_digest_hex, encode_coverage_turn, encode_coverage_turn_for_schema,
+    normalize_claude_transcript, normalize_codex_rollout, normalize_opencode_export,
+    parse_canon_value, redact_turns, safe_turn_projection, safe_turn_projection_for_schema,
+    select_coverage_schema,
 };
 pub(crate) use coverage::{
     normalize_claude_transcript_until, normalize_codex_rollout_until,

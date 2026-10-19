@@ -804,6 +804,8 @@ a coherent restore snapshot.
 
 Libra keeps one Claude Code hook-event registry. A name is safely installable when empty stdout and exit 0 do not take over the host action. `WorktreeCreate`, `WorktreeRemove`, and `PreModelSwitch` are control-sensitive and are not installed. `SessionStop`, `ModelUpdate`, and `Compaction` are deprecated aliases and are not in the current installable set. An unknown event name or an unknown field is partial, and the diagnostic does not include the payload. `libra agent enable` still writes only the existing six forwarders (`SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop`, and `SessionEnd`). `libra agent hooks claude-code observe` accepts one JSON hook frame on stdin, records safely installable events through the existing capture coordinator, and prints nothing. Controllable success and failure both exit 0. `WorktreeCreate`, `WorktreeRemove`, and `PreModelSwitch` are not installed and produce no path or decision. MessageDisplay keeps at most 128 batches per session in the current process and drops the rest. This does not claim that every known event is installed.
 
+An authorized Claude Code transcript keeps a non-empty `thinking` string in the ordinary snapshot and in the coverage projection. `thinking.signature` and `redacted_thinking.data` stay in the ordinary transcript bytes and are labeled Unproven when they are not native proof. An empty thinking string is not a missing key, and an empty shell is not a successful read. The coverage schema version stays 1 for turns without reasoning and 2 when a readable thinking record is present. Session metadata and redaction reports do not include the thinking text.
+
 ## Examples
 
 ```bash

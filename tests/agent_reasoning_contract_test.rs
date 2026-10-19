@@ -634,3 +634,172 @@ fn opencode_unknown_reasoning_shape_partial_warning() {
     let warning = serde_json::to_string(&warning).expect("payload-free warning serializes");
     assert!(!warning.contains(canary));
 }
+
+/// CC-07: ordinary Claude thinking stays on the shared normalizer.
+/// The fixture is synthetic. It is not a 2.1.303 capture.
+#[test]
+fn claude_readable_ordinary_retention_matches_the_cc04_matrix() {
+    use libra::internal::ai::{
+        capture::snapshot::{CaptureSnapshotPolicy, CaptureSnapshotService},
+        observed_agents::{
+            COVERAGE_SCHEMA_VERSION, ClaudeOrdinaryAssessment, SemanticRecord,
+            assess_claude_ordinary_transcript, claude_jsonl_session_matches, coverage_digest_hex,
+            normalize_claude_transcript,
+        },
+    };
+
+    let path = "tests/fixtures/agent_transcripts/claude_code/reasoning.json";
+    let raw = std::fs::read_to_string(path).unwrap_or_else(|error| panic!("read {path}: {error}"));
+    let cases: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_str(&raw).unwrap_or_else(|error| panic!("parse {path}: {error}"));
+    let line = |name: &str| -> String {
+        cases
+            .get(name)
+            .and_then(|value| value.as_str())
+            .unwrap_or_else(|| panic!("missing case {name}"))
+            .to_owned()
+    };
+
+    assert_eq!(COVERAGE_SCHEMA_VERSION, 1);
+    assert!(!claude_jsonl_session_matches(
+        "other-session.jsonl",
+        "cc07-session"
+    ));
+    assert!(claude_jsonl_session_matches(
+        "/tmp/cc07/projects/work/cc07-session.jsonl",
+        "cc07-session"
+    ));
+    assert!(!claude_jsonl_session_matches("cc07-session.jsonl", ""));
+
+    let readable_line = line("readable");
+    let readable = assess_claude_ordinary_transcript(readable_line.as_bytes());
+    assert!(readable.readable_obtained());
+    assert_eq!(readable.readable, vec!["CC04-THINKING-CANARY".to_owned()]);
+    assert_eq!(readable.signatures, vec!["CC04-SIG".to_owned()]);
+    let (ordinary, preview) = CaptureSnapshotService::preview_redacted_coverage_v2(
+        "claude_code",
+        readable_line.as_bytes().to_vec(),
+        CaptureSnapshotPolicy::default(),
+    )
+    .expect("readable preview");
+    let ordinary_text = String::from_utf8(ordinary.bytes().to_vec()).expect("ordinary utf-8");
+    assert!(ordinary_text.contains("CC04-THINKING-CANARY"));
+    assert!(ordinary_text.contains("CC04-SIG"));
+    assert!(ordinary_text.contains("\"uuid\""));
+    let report = preview["redaction_report"].to_string();
+    assert!(!report.contains("CC04-THINKING-CANARY"));
+    assert!(!report.contains("CC04-SIG"));
+    let row = &preview["turns"][0];
+    assert_eq!(row["coverage_schema_version"], 2);
+    let projection = row["projection"].to_string();
+    assert!(projection.contains("CC04-THINKING-CANARY"));
+    let turns = normalize_claude_transcript(readable_line.as_bytes());
+    assert_eq!(turns.len(), 1);
+    let digest = coverage_digest_hex(&turns[0].records);
+    assert_eq!(row["digest"], digest);
+    assert!(matches!(
+        &turns[0].records[0],
+        SemanticRecord::Reasoning { text, .. } if text.as_str() == "CC04-THINKING-CANARY"
+    ));
+
+    let sig_line = line("sig_only");
+    let sig_only = assess_claude_ordinary_transcript(sig_line.as_bytes());
+    assert!(sig_only.data_obtained());
+    assert!(!sig_only.readable_obtained());
+    assert!(sig_only.empty_thinking);
+    assert_eq!(sig_only.signatures, vec!["CC04-SIG".to_owned()]);
+    let (sig_ordinary, sig_preview) = CaptureSnapshotService::preview_redacted_coverage_v2(
+        "claude_code",
+        sig_line.into_bytes(),
+        CaptureSnapshotPolicy::default(),
+    )
+    .expect("signature preview");
+    let sig_text = String::from_utf8(sig_ordinary.bytes().to_vec()).expect("signature utf-8");
+    assert!(sig_text.contains("CC04-SIG"));
+    assert!(!sig_preview.to_string().contains("CC04-SIG"));
+
+    let missing = assess_claude_ordinary_transcript(line("missing").as_bytes());
+    assert!(!missing.data_obtained());
+    assert!(missing.missing_block);
+    let (_ordinary, missing_preview) = CaptureSnapshotService::preview_redacted_coverage_v2(
+        "claude_code",
+        line("missing").into_bytes(),
+        CaptureSnapshotPolicy::default(),
+    )
+    .expect("text preview");
+    assert_eq!(missing_preview["turns"][0]["coverage_schema_version"], 1);
+
+    let redacted_line = line("redacted");
+    let redacted = assess_claude_ordinary_transcript(redacted_line.as_bytes());
+    assert!(redacted.data_obtained());
+    assert!(!redacted.readable_obtained());
+    assert_eq!(redacted.redacted_data, vec!["CC04-DATA".to_owned()]);
+    let redacted_turns = normalize_claude_transcript(redacted_line.as_bytes());
+    assert!(redacted_turns.is_empty());
+    let (redacted_ordinary, _) = CaptureSnapshotService::preview_redacted_coverage_v2(
+        "claude_code",
+        redacted_line.into_bytes(),
+        CaptureSnapshotPolicy::default(),
+    )
+    .expect("redacted preview");
+    let redacted_text =
+        String::from_utf8(redacted_ordinary.bytes().to_vec()).expect("redacted utf-8");
+    assert!(redacted_text.contains("CC04-DATA"));
+
+    let empty = assess_claude_ordinary_transcript(line("empty_shell").as_bytes());
+    assert!(!empty.data_obtained());
+    assert!(empty.empty_thinking);
+    assert!(empty.empty_attached);
+
+    let dup = assess_claude_ordinary_transcript(line("dup_key").as_bytes());
+    assert!(dup.duplicate_records >= 1);
+    assert!(!dup.data_obtained());
+    assert!(dup.readable.is_empty());
+
+    let escaped_line = line("escape");
+    let escaped = assess_claude_ordinary_transcript(escaped_line.as_bytes());
+    assert_eq!(escaped.readable, vec!["CC".to_owned()]);
+    assert!(escaped_line.contains("\\u0043"));
+    assert_ne!(escaped.readable[0], "\\u0043\\u0043");
+
+    let unknown_line = line("unknown_field");
+    let unknown = assess_claude_ordinary_transcript(unknown_line.as_bytes());
+    assert!(unknown.readable_obtained());
+    assert!(unknown.unknown_field);
+    assert!(unknown_line.contains("cc04_unknown"));
+    let unknown_turns = normalize_claude_transcript(unknown_line.as_bytes());
+    assert_eq!(
+        unknown_turns[0].completeness,
+        libra::internal::ai::observed_agents::Completeness::Incomplete
+    );
+
+    let string_content = assess_claude_ordinary_transcript(line("string_content").as_bytes());
+    assert!(!string_content.data_obtained());
+    assert!(string_content.missing_block);
+
+    let secret = "AKIAABCDEFGHIJKLMNOP";
+    let secret_line = format!(
+        "{{\"type\":\"assistant\",\"message\":{{\"role\":\"assistant\",\"content\":[{{\"type\":\"thinking\",\"thinking\":\"visible {secret}\",\"signature\":\"CC04-SIG\"}}]}}}}\n"
+    );
+    let (secret_ordinary, secret_preview) = CaptureSnapshotService::preview_redacted_coverage_v2(
+        "claude_code",
+        secret_line.into_bytes(),
+        CaptureSnapshotPolicy::default(),
+    )
+    .expect("credential preview");
+    let secret_export = format!(
+        "{}{}",
+        String::from_utf8(secret_ordinary.bytes().to_vec()).expect("secret ordinary utf-8"),
+        secret_preview
+    );
+    assert!(!secret_export.contains(secret));
+    assert!(
+        !secret_preview["redaction_report"]["matches"]
+            .as_array()
+            .expect("redaction matches")
+            .is_empty()
+    );
+    assert!(secret_export.contains("visible "));
+
+    let _typed: ClaudeOrdinaryAssessment = readable;
+}

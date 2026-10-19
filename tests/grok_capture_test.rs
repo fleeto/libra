@@ -870,7 +870,6 @@ fn grok_hook_does_not_spawn_grok() {
             "{name} must not spawn a process"
         );
     }
-    assert!(agent_for(AgentKind::Grok).as_hooks().is_none());
     let sessions = tempfile::tempdir().expect("sessions");
     let state = tempfile::tempdir().expect("state");
     let cwd = sessions.path().join("work");

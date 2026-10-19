@@ -412,9 +412,10 @@ jobs:
           #     | jq -r '...select(.kind[] == "test")|select(.name != "command_test")...' | sort -u)
           #   cargo test --lib --bins "${ARGS[@]}"
           #   cargo test --doc
-          # Grok tests under tests/grok_*.rs are local-only. This CI environment
-          # cannot run them. Developer machines run them with cargo test --test.
-          cargo nextest run --all --no-fail-fast --retries 2 -E 'not binary(~^grok_)'
+          # Do not exclude grok_* with `binary(~^grok_)`. In nextest, `~` is a
+          # contains match, so that expression looks for a binary name containing
+          # the literal "^grok_" and aborts the run before any test (exit 94).
+          cargo nextest run --all --no-fail-fast --retries 2
           cargo test --doc
 
       # REMOVED 2026-08-31 — the "Run Code UI automation scenarios" step is

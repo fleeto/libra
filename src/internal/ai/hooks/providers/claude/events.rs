@@ -62,6 +62,7 @@ const COMMON_FIELDS: &[&str] = &[
     "effort",
     "agent_id",
     "agent_type",
+    "thinking",
 ];
 
 const NONE: &[&str] = &[];
@@ -99,8 +100,8 @@ const MODEL_SWITCH: &[&str] = &[
 
 use ClaudeEventClass::{ControlSensitive, DeprecatedAlias, SafelyInstallable};
 use LifecycleEventKind::{
-    Compaction, ModelUpdate, PermissionRequest, SessionEnd, SessionStart, ToolUse, TurnEnd,
-    TurnStart,
+    Compaction, CompactionCompleted, ModelUpdate, PermissionRequest, SessionEnd, SessionStart,
+    SubagentEnd, SubagentStart, ToolUse, TurnEnd, TurnStart,
 };
 
 /// Frozen CC-00 names. Order is the registry order, not a cardinality contract.
@@ -112,7 +113,13 @@ pub static CLAUDE_EVENT_REGISTRY: &[ClaudeEventSpec] = &[
         Some(SessionStart),
         SOURCE_MODEL,
     ),
-    ev("Setup", SafelyInstallable, false, None, &["trigger"]),
+    ev(
+        "Setup",
+        SafelyInstallable,
+        true,
+        Some(SessionStart),
+        &["trigger"],
+    ),
     ev(
         "UserPromptSubmit",
         SafelyInstallable,
@@ -123,8 +130,8 @@ pub static CLAUDE_EVENT_REGISTRY: &[ClaudeEventSpec] = &[
     ev(
         "UserPromptExpansion",
         SafelyInstallable,
-        false,
-        None,
+        true,
+        Some(TurnStart),
         &[
             "expansion_type",
             "command_name",
@@ -137,7 +144,7 @@ pub static CLAUDE_EVENT_REGISTRY: &[ClaudeEventSpec] = &[
     ev(
         "PermissionRequest",
         SafelyInstallable,
-        false,
+        true,
         Some(PermissionRequest),
         &[
             "tool_name",
@@ -149,8 +156,8 @@ pub static CLAUDE_EVENT_REGISTRY: &[ClaudeEventSpec] = &[
     ev(
         "PermissionDenied",
         SafelyInstallable,
-        false,
-        None,
+        true,
+        Some(ToolUse),
         &[
             "tool_name",
             "tool_input",
@@ -160,40 +167,46 @@ pub static CLAUDE_EVENT_REGISTRY: &[ClaudeEventSpec] = &[
         ],
     ),
     ev("PostToolUse", SafelyInstallable, true, Some(ToolUse), TOOL),
-    ev("PostToolUseFailure", SafelyInstallable, false, None, TOOL),
+    ev(
+        "PostToolUseFailure",
+        SafelyInstallable,
+        true,
+        Some(ToolUse),
+        TOOL,
+    ),
     ev(
         "PostToolBatch",
         SafelyInstallable,
-        false,
-        None,
+        true,
+        Some(ToolUse),
         &["tool_calls"],
     ),
     ev(
         "Notification",
         SafelyInstallable,
-        false,
-        None,
+        true,
+        Some(ToolUse),
         &["message", "title", "notification_type"],
     ),
     ev(
         "MessageDisplay",
         SafelyInstallable,
-        false,
-        None,
+        true,
+        Some(ToolUse),
         &["turn_id", "message_id", "index", "final", "delta"],
     ),
     ev(
         "SubagentStart",
         SafelyInstallable,
-        false,
-        None,
+        true,
+        Some(SubagentStart),
         &["agent_id", "agent_type"],
     ),
     ev(
         "SubagentStop",
         SafelyInstallable,
-        false,
-        None,
+        true,
+        Some(SubagentEnd),
         &[
             "stop_hook_active",
             "agent_id",
@@ -205,8 +218,8 @@ pub static CLAUDE_EVENT_REGISTRY: &[ClaudeEventSpec] = &[
     ev(
         "TaskCreated",
         SafelyInstallable,
-        false,
-        None,
+        true,
+        Some(ToolUse),
         &[
             "task_id",
             "task_subject",
@@ -218,8 +231,8 @@ pub static CLAUDE_EVENT_REGISTRY: &[ClaudeEventSpec] = &[
     ev(
         "TaskCompleted",
         SafelyInstallable,
-        false,
-        None,
+        true,
+        Some(ToolUse),
         &[
             "task_id",
             "task_subject",
@@ -243,22 +256,22 @@ pub static CLAUDE_EVENT_REGISTRY: &[ClaudeEventSpec] = &[
     ev(
         "StopFailure",
         SafelyInstallable,
-        false,
-        None,
+        true,
+        Some(ToolUse),
         &["error", "error_details", "last_assistant_message"],
     ),
     ev(
         "TeammateIdle",
         SafelyInstallable,
-        false,
-        None,
+        true,
+        Some(ToolUse),
         &["teammate_name", "team_name"],
     ),
     ev(
         "InstructionsLoaded",
         SafelyInstallable,
-        false,
-        None,
+        true,
+        Some(SessionStart),
         &[
             "file_path",
             "memory_type",
@@ -271,29 +284,29 @@ pub static CLAUDE_EVENT_REGISTRY: &[ClaudeEventSpec] = &[
     ev(
         "ConfigChange",
         SafelyInstallable,
-        false,
-        None,
+        true,
+        Some(SessionStart),
         &["source", "file_path"],
     ),
     ev(
         "CwdChanged",
         SafelyInstallable,
-        false,
-        None,
+        true,
+        Some(SessionStart),
         &["old_cwd", "new_cwd"],
     ),
     ev(
         "DirectoryAdded",
         SafelyInstallable,
-        false,
-        None,
+        true,
+        Some(SessionStart),
         &["directory", "source"],
     ),
     ev(
         "FileChanged",
         SafelyInstallable,
-        false,
-        None,
+        true,
+        Some(SessionStart),
         &["file_path", "event"],
     ),
     ev("WorktreeCreate", ControlSensitive, false, None, &["name"]),
@@ -307,15 +320,15 @@ pub static CLAUDE_EVENT_REGISTRY: &[ClaudeEventSpec] = &[
     ev(
         "PreCompact",
         SafelyInstallable,
-        false,
-        None,
+        true,
+        Some(Compaction),
         &["trigger", "custom_instructions"],
     ),
     ev(
         "PostCompact",
         SafelyInstallable,
-        false,
-        None,
+        true,
+        Some(CompactionCompleted),
         &["trigger", "compact_summary"],
     ),
     ev(
@@ -328,15 +341,15 @@ pub static CLAUDE_EVENT_REGISTRY: &[ClaudeEventSpec] = &[
     ev(
         "PostModelSwitch",
         SafelyInstallable,
-        false,
-        None,
+        true,
+        Some(ModelUpdate),
         MODEL_SWITCH,
     ),
     ev(
         "Elicitation",
         SafelyInstallable,
-        false,
-        None,
+        true,
+        Some(ToolUse),
         &[
             "mcp_server_name",
             "message",
@@ -349,8 +362,8 @@ pub static CLAUDE_EVENT_REGISTRY: &[ClaudeEventSpec] = &[
     ev(
         "ElicitationResult",
         SafelyInstallable,
-        false,
-        None,
+        true,
+        Some(ToolUse),
         &[
             "mcp_server_name",
             "action",
@@ -405,6 +418,40 @@ pub fn deprecated_alias_names() -> Vec<&'static str> {
 
 pub fn on_current_ingress(name: &str) -> bool {
     spec(name).is_some_and(|spec| spec.on_current_ingress)
+}
+
+/// MessageDisplay is coalesced, not stored once per streamed batch.
+pub const MESSAGE_DISPLAY_COALESCE_LIMIT: u32 = 128;
+
+fn message_display_counts() -> &'static std::sync::Mutex<std::collections::HashMap<String, u32>> {
+    static COUNTS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, u32>>> =
+        std::sync::OnceLock::new();
+    COUNTS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Admit one MessageDisplay batch for `session_id`.
+///
+/// The first 128 batches in this process are kept. Later batches are dropped.
+/// This gate sits in front of the existing capture coordinator. It is not a
+/// second event ledger.
+pub fn admit_message_display(session_id: &str) -> bool {
+    let mut counts = message_display_counts()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let count = counts.entry(session_id.to_string()).or_insert(0);
+    if *count >= MESSAGE_DISPLAY_COALESCE_LIMIT {
+        return false;
+    }
+    *count += 1;
+    true
+}
+
+/// Test isolation for the in-process MessageDisplay capacity gate.
+pub fn reset_message_display_counts_for_test() {
+    let mut counts = message_display_counts()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    counts.clear();
 }
 
 /// Classify extra keys. Unknown events and unknown keys are partial.

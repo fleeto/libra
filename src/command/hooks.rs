@@ -152,6 +152,8 @@ pub enum ProviderHookSubcommand {
     SubagentStart,
     /// AG-19: nested sub-agent run finished (Codex `SubagentStop`).
     SubagentEnd,
+    /// Claude registry observe entry. Codex and Gemini reject it.
+    Observe,
 }
 
 impl ProviderHookSubcommand {
@@ -167,6 +169,7 @@ impl ProviderHookSubcommand {
             Self::SessionEnd => ProviderHookCommand::SessionEnd,
             Self::SubagentStart => ProviderHookCommand::SubagentStart,
             Self::SubagentEnd => ProviderHookCommand::SubagentEnd,
+            Self::Observe => ProviderHookCommand::Observe,
         }
     }
 }
@@ -186,15 +189,25 @@ pub async fn execute_safe(
         HooksProviderSubcommand::Claude { command } => {
             let cmd = command.as_command();
             let expected_kind = cmd.lifecycle_event_kind();
-            process_hook_event_with_target(
+            let captured = process_hook_event_with_target(
                 cmd,
                 expected_kind,
                 claude_provider(),
                 HookTarget::AgentTraces,
                 deadline,
             )
-            .await
-            .map_err(|err| {
+            .await;
+            if cmd == ProviderHookCommand::Observe {
+                if captured.is_err() {
+                    tracing::warn!(
+                        target: "agent.hook.ingest",
+                        reason = "claude_observe_partial",
+                        "claude observe did not record"
+                    );
+                }
+                return Ok(());
+            }
+            captured.map_err(|err| {
                 map_capture_ingest_error(
                     err,
                     "hook ingestion failed",
@@ -206,6 +219,11 @@ pub async fn execute_safe(
         // (`refs/libra/traces`) — the stable installed surface per the
         // Codex capture contract.
         HooksProviderSubcommand::Codex { command } => {
+            if matches!(command, ProviderHookSubcommand::Observe) {
+                return Err(CliError::fatal(
+                    "observe is a Claude Code hook entry and is not installed for Codex",
+                ));
+            }
             let cmd = command.as_command();
             let expected_kind = cmd.lifecycle_event_kind();
             let capture_result = process_hook_event_with_target(

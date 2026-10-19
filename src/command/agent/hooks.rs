@@ -22,7 +22,10 @@ use crate::{
             providers::{claude_provider, codex, codex_provider, opencode_provider},
         },
     },
-    utils::{error::CliResult, output::OutputConfig},
+    utils::{
+        error::{CliError, CliResult},
+        output::OutputConfig,
+    },
 };
 
 #[derive(Subcommand, Debug)]
@@ -67,6 +70,8 @@ pub enum HookCommandKind {
     SubagentStart,
     /// AG-19: nested sub-agent run finished (Codex `SubagentStop`).
     SubagentEnd,
+    /// Claude registry observe entry. Other providers reject it.
+    Observe,
 }
 
 impl HookCommandKind {
@@ -82,6 +87,7 @@ impl HookCommandKind {
             Self::SessionEnd => ProviderHookCommand::SessionEnd,
             Self::SubagentStart => ProviderHookCommand::SubagentStart,
             Self::SubagentEnd => ProviderHookCommand::SubagentEnd,
+            Self::Observe => ProviderHookCommand::Observe,
         }
     }
 }
@@ -93,6 +99,24 @@ pub async fn execute_safe(
 ) -> CliResult<()> {
     match cmd {
         AgentHooksSubcommand::ClaudeCode { command } => {
+            if matches!(command, HookCommandKind::Observe) {
+                let captured = process_hook_event_with_target(
+                    ProviderHookCommand::Observe,
+                    ProviderHookCommand::Observe.lifecycle_event_kind(),
+                    claude_provider(),
+                    HookTarget::AgentTraces,
+                    deadline,
+                )
+                .await;
+                if captured.is_err() {
+                    tracing::warn!(
+                        target: "agent.hook.ingest",
+                        reason = "claude_observe_partial",
+                        "claude observe did not record"
+                    );
+                }
+                return Ok(());
+            }
             run(claude_provider(), command, deadline).await
         }
         AgentHooksSubcommand::Codex { command } => {
@@ -132,6 +156,11 @@ async fn run(
     sub: HookCommandKind,
     deadline: Option<CaptureDeadline>,
 ) -> CliResult<()> {
+    if matches!(sub, HookCommandKind::Observe) {
+        return Err(CliError::fatal(
+            "observe is a Claude Code hook entry and is not installed for this provider",
+        ));
+    }
     let cmd = sub.as_command();
     let expected_kind = cmd.lifecycle_event_kind();
     process_hook_event_with_target(
@@ -157,6 +186,11 @@ async fn run(
 /// break a Codex task, but they still print its safe Unix-host remedy; a
 /// SessionEnd returns the same fatal capability diagnostic as `libra hooks`.
 async fn run_codex(sub: HookCommandKind, deadline: Option<CaptureDeadline>) -> CliResult<()> {
+    if matches!(sub, HookCommandKind::Observe) {
+        return Err(CliError::fatal(
+            "observe is a Claude Code hook entry and is not installed for Codex",
+        ));
+    }
     let cmd = sub.as_command();
     let expected_kind = cmd.lifecycle_event_kind();
     let result = process_hook_event_with_target(

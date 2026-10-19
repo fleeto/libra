@@ -13,7 +13,7 @@
 
 ## Claude Code hook registry (CC-01)
 
-Claude hook classification lives in one registry (`providers/claude/events.rs`). The parser does not copy that taxonomy. Control-sensitive `WorktreeCreate`, `WorktreeRemove`, and `PreModelSwitch` are known and are not on the current observe ingress. Deprecated aliases `SessionStop`, `ModelUpdate`, and `Compaction` still parse and are not installable. Unknown events and unknown fields are partial without a payload diagnostic. The installer still writes the existing six forwarders.
+Claude hook classification lives in one registry (`providers/claude/events.rs`). The parser does not copy that taxonomy. Control-sensitive `WorktreeCreate`, `WorktreeRemove`, and `PreModelSwitch` are known and are not on the current observe ingress. Deprecated aliases `SessionStop`, `ModelUpdate`, and `Compaction` still parse and are not installable. Unknown events and unknown fields are partial without a payload diagnostic. The installer still writes the existing six forwarders. `agent hooks claude-code observe` uses that registry and the existing capture coordinator, prints nothing, and exits 0 on controllable success or failure. MessageDisplay stops after 128 in-process batches.
 
 ## 捕获概念结构图（Session / turn / checkpoint / transcript）
 

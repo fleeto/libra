@@ -11,8 +11,9 @@ mod settings;
 
 use anyhow::Result;
 pub use events::{
-    ClaudeEventClass, ClaudeFieldReport, classify_claude_fields, control_sensitive_names,
-    deprecated_alias_names, event_class, known_event_names, safely_installable_names,
+    ClaudeEventClass, ClaudeFieldReport, MESSAGE_DISPLAY_COALESCE_LIMIT, admit_message_display,
+    classify_claude_fields, control_sensitive_names, deprecated_alias_names, event_class,
+    known_event_names, reset_message_display_counts_for_test, safely_installable_names,
 };
 
 use super::super::{

@@ -565,6 +565,13 @@ pub fn lower_in_process_capture_frame_for_test(
     })
 }
 
+fn observe_partial(frame_bytes: usize) -> ParsedCaptureIngressOutcome {
+    ParsedCaptureIngressOutcome::UnknownEvent {
+        frame_bytes,
+        event_name_len: 0,
+    }
+}
+
 fn parse_capture_ingress_payload(
     payload: &[u8],
     hook_command: ProviderHookCommand,
@@ -572,24 +579,47 @@ fn parse_capture_ingress_payload(
     provider: &dyn HookProvider,
     deadline: Option<CaptureDeadline>,
 ) -> Result<ParsedCaptureIngressOutcome> {
+    let observe = hook_command == ProviderHookCommand::Observe;
     if payload.len() > MAX_STDIN_BYTES {
+        if observe {
+            return Ok(observe_partial(payload.len()));
+        }
         return Err(hook_input_exceeds_limit().into());
     }
-    let stdin = std::str::from_utf8(payload)
-        .map_err(|error| HookEnvelopeInvalid(format!("hook input is not valid UTF-8: {error}")))?;
+    let stdin = match std::str::from_utf8(payload) {
+        Ok(stdin) => stdin,
+        Err(_) if observe => return Ok(observe_partial(payload.len())),
+        Err(error) => {
+            return Err(
+                HookEnvelopeInvalid(format!("hook input is not valid UTF-8: {error}")).into(),
+            );
+        }
+    };
     if stdin.trim().is_empty() {
+        if observe {
+            return Ok(observe_partial(payload.len()));
+        }
         return Err(HookEnvelopeInvalid("hook input is empty".to_string()).into());
     }
-    let envelope: SessionHookEnvelope = serde_json::from_str(stdin).map_err(|error| {
-        HookEnvelopeInvalid(format!(
-            "invalid hook JSON payload ({:?} at line {} column {})",
-            error.classify(),
-            error.line(),
-            error.column()
-        ))
-    })?;
-    validate_session_hook_envelope(&envelope, MAX_TRANSCRIPT_PATH_BYTES)
-        .map_err(|error| HookEnvelopeInvalid(error.to_string()))?;
+    let envelope: SessionHookEnvelope = match serde_json::from_str(stdin) {
+        Ok(envelope) => envelope,
+        Err(_) if observe => return Ok(observe_partial(payload.len())),
+        Err(error) => {
+            return Err(HookEnvelopeInvalid(format!(
+                "invalid hook JSON payload ({:?} at line {} column {})",
+                error.classify(),
+                error.line(),
+                error.column()
+            ))
+            .into());
+        }
+    };
+    if let Err(error) = validate_session_hook_envelope(&envelope, MAX_TRANSCRIPT_PATH_BYTES) {
+        if observe {
+            return Ok(observe_partial(payload.len()));
+        }
+        return Err(HookEnvelopeInvalid(error.to_string()).into());
+    }
     if envelope.cwd.len() > MAX_REPORTED_CWD_BYTES {
         return Err(HookEnvelopeInvalid(format!(
             "hook cwd exceeds {MAX_REPORTED_CWD_BYTES} bytes"
@@ -603,8 +633,17 @@ fn parse_capture_ingress_payload(
         });
     }
 
+    if provider.provider_name() == "claude"
+        && envelope.hook_event_name == "MessageDisplay"
+        && !crate::internal::ai::hooks::providers::claude::admit_message_display(
+            &envelope.session_id,
+        )
+    {
+        return Ok(observe_partial(payload.len()));
+    }
+
     let event = provider.parse_hook_event(&envelope.hook_event_name, &envelope)?;
-    if event.kind != expected_kind {
+    if hook_command != ProviderHookCommand::Observe && event.kind != expected_kind {
         // This is a bounded grammar mismatch between the selected CLI verb
         // and the already parsed event name; unlike a later runtime failure,
         // it contains no provider-controlled path or session content and is

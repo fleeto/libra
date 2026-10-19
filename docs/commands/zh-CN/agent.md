@@ -547,7 +547,7 @@ Codex 捕获会安装当前文档定义的全部生命周期事件：`SessionSta
 
 ## Claude Code hook 事件注册表
 
-Libra 只用一份 Claude Code hook 事件注册表。空 stdout 且 exit 0 不会接管宿主动作的名字才是可安全安装的。`WorktreeCreate`、`WorktreeRemove` 和 `PreModelSwitch` 是控制敏感项，不会安装。`SessionStop`、`ModelUpdate` 和 `Compaction` 是已废弃别名，不在当前可安装集合里。未知事件名或未知字段记为 partial，诊断不包含 payload。`libra agent enable` 仍然只写入既有六项转发（`SessionStart`、`UserPromptSubmit`、`PreToolUse`、`PostToolUse`、`Stop`、`SessionEnd`）。这不表示每个已知事件都已安装。
+Libra 只用一份 Claude Code hook 事件注册表。空 stdout 且 exit 0 不会接管宿主动作的名字才是可安全安装的。`WorktreeCreate`、`WorktreeRemove` 和 `PreModelSwitch` 是控制敏感项，不会安装。`SessionStop`、`ModelUpdate` 和 `Compaction` 是已废弃别名，不在当前可安装集合里。未知事件名或未知字段记为 partial，诊断不包含 payload。`libra agent enable` 仍然只写入既有六项转发（`SessionStart`、`UserPromptSubmit`、`PreToolUse`、`PostToolUse`、`Stop`、`SessionEnd`）。`libra agent hooks claude-code observe` 从 stdin 读一帧 JSON，把可安全安装的事件交给既有采集协调器，并且不打印内容。可控的成功和失败都是 exit 0。`WorktreeCreate`、`WorktreeRemove` 和 `PreModelSwitch` 不会安装，也不会输出路径或决定。MessageDisplay 在当前进程里每个会话最多保留 128 批，其余丢弃。这不表示每个已知事件都已安装。
 
 ## 示例
 

@@ -65,6 +65,9 @@ pub enum ProviderHookCommand {
     SubagentStart,
     /// AG-19: nested sub-agent run finished (Codex `SubagentStop`).
     SubagentEnd,
+    /// Claude registry observe entry. The lifecycle kind comes from the
+    /// event registry after the frame is parsed, not from this command.
+    Observe,
 }
 
 impl ProviderHookCommand {
@@ -84,6 +87,9 @@ impl ProviderHookCommand {
             ProviderHookCommand::SessionEnd => LifecycleEventKind::SessionEnd,
             ProviderHookCommand::SubagentStart => LifecycleEventKind::SubagentStart,
             ProviderHookCommand::SubagentEnd => LifecycleEventKind::SubagentEnd,
+            // Observe selects its kind from the parsed event. This placeholder
+            // is not the acceptance check.
+            ProviderHookCommand::Observe => LifecycleEventKind::SessionStart,
         }
     }
 }
@@ -101,6 +107,7 @@ impl fmt::Display for ProviderHookCommand {
             ProviderHookCommand::SessionEnd => "session-end",
             ProviderHookCommand::SubagentStart => "subagent-start",
             ProviderHookCommand::SubagentEnd => "subagent-end",
+            ProviderHookCommand::Observe => "observe",
         };
         write!(f, "{value}")
     }

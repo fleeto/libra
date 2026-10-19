@@ -5397,3 +5397,134 @@ await cleanup();
         "[executed] OG-02 unchanged installed module -> real Libra ingress, 260 prompts, model/reason/truncation/tool fields and durable stopped/checkpoints"
     );
 }
+
+fn claude_observe_text(output: &Output) -> (String, String) {
+    (
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+#[test]
+fn claude_observe_success_and_controllable_failure_are_silent() {
+    let repo = HookRepo::init();
+    let canary = "CC02-THINKING-CANARY";
+    let payload_canary = "CC02-PAYLOAD-CANARY";
+    let session = "cc02-observe";
+    let started = repo.hook(
+        "claude-code",
+        "observe",
+        &repo.envelope(
+            "SessionStart",
+            session,
+            None,
+            json!({ "thinking": canary, "source": "startup" }),
+        ),
+    );
+    assert!(started.status.success(), "{}", describe(&started));
+    let (stdout, stderr) = claude_observe_text(&started);
+    assert!(
+        stdout.is_empty(),
+        "observe stdout must stay empty: {stdout}"
+    );
+    assert!(!stdout.contains(canary) && !stderr.contains(canary));
+    assert!(!stdout.contains(payload_canary) && !stderr.contains(payload_canary));
+
+    let listed = repo.run(&["agent", "session", "list", "--json"], None);
+    let listed_text = String::from_utf8_lossy(&listed.stdout);
+    assert!(
+        !listed_text.contains(canary),
+        "session list metadata must not contain the thinking body"
+    );
+    let missing = repo.hook(
+        "claude-code",
+        "observe",
+        &json!({
+            "hook_event_name": "SessionStart",
+            "cwd": repo.repo.display().to_string(),
+            payload_canary: "secret"
+        })
+        .to_string(),
+    );
+    assert!(missing.status.success(), "{}", describe(&missing));
+    let (stdout, stderr) = claude_observe_text(&missing);
+    assert!(stdout.is_empty(), "partial observe stdout must stay empty");
+    assert!(!stdout.contains(payload_canary) && !stderr.contains(payload_canary));
+    let still = repo.run(&["agent", "session", "list", "--json"], None);
+    assert!(
+        String::from_utf8_lossy(&still.stdout).contains(session),
+        "a partial observe must not delete the session already recorded"
+    );
+
+    let oversize_marker = "CC02-OVERSIZE-CANARY";
+    let mut oversize = format!(
+        "{{\"hook_event_name\":\"SessionStart\",\"session_id\":\"{session}\",\"cwd\":\"{}\",\"note\":\"",
+        repo.repo.display()
+    );
+    oversize.push_str(oversize_marker);
+    oversize.push_str(&"x".repeat(libra::internal::ai::capture::ingress::MAX_STDIN_BYTES));
+    oversize.push_str("\"}");
+    let oversized = repo.run_bytes(
+        &["agent", "hooks", "claude-code", "observe"],
+        Some(oversize.as_bytes()),
+    );
+    assert!(oversized.status.success(), "{}", describe(&oversized));
+    let (stdout, stderr) = claude_observe_text(&oversized);
+    assert!(stdout.is_empty());
+    assert!(!stdout.contains(oversize_marker) && !stderr.contains(oversize_marker));
+
+    let hold = repo.hook(
+        "claude-code",
+        "observe",
+        &repo.envelope("WorktreeCreate", session, None, json!({ "name": "hold" })),
+    );
+    assert!(hold.status.success(), "{}", describe(&hold));
+    let (stdout, _) = claude_observe_text(&hold);
+    assert!(
+        stdout.is_empty(),
+        "WorktreeCreate must not receive a path from observe"
+    );
+}
+
+#[test]
+fn claude_observe_message_display_drops_after_the_coalesce_limit() {
+    use libra::internal::ai::{
+        capture::ingress::{CaptureIngressOutcome, lower_in_process_capture_frame_for_test},
+        hooks::{
+            LifecycleEventKind, ProviderHookCommand, claude_provider,
+            providers::claude::{
+                MESSAGE_DISPLAY_COALESCE_LIMIT, reset_message_display_counts_for_test,
+            },
+        },
+    };
+
+    reset_message_display_counts_for_test();
+    let provider = claude_provider();
+    let mut kept = 0_u32;
+    let mut dropped = 0_u32;
+    for index in 0..(MESSAGE_DISPLAY_COALESCE_LIMIT + 1) {
+        let payload = json!({
+            "hook_event_name": "MessageDisplay",
+            "session_id": "cc02-display",
+            "cwd": "/tmp/cc02",
+            "message_id": "m1",
+            "index": index,
+            "delta": "CC02-DISPLAY-CANARY"
+        })
+        .to_string();
+        let outcome = lower_in_process_capture_frame_for_test(
+            payload.as_bytes(),
+            ProviderHookCommand::Observe,
+            LifecycleEventKind::ToolUse,
+            provider,
+            None,
+        )
+        .expect("observe ingress accepts the frame");
+        match outcome {
+            CaptureIngressOutcome::Command(_) => kept += 1,
+            CaptureIngressOutcome::UnknownEvent { .. } => dropped += 1,
+        }
+    }
+    assert_eq!(kept, MESSAGE_DISPLAY_COALESCE_LIMIT);
+    assert_eq!(dropped, 1);
+}

@@ -36,7 +36,18 @@ pub(super) fn parse_claude_hook_event(
     let Some(kind) = spec.kind else {
         bail!("Claude hook event is not on the current observe ingress");
     };
-    Ok(build_lifecycle_event(kind, envelope))
+    let mut event = build_lifecycle_event(kind, envelope);
+    // DATA-CAP: a thinking string on the hook frame is ordinary content.
+    // It stays off the diagnostic. Callers that log metadata must not print it.
+    if event.assistant_message.is_none()
+        && let Some(thinking) = envelope
+            .extra
+            .get("thinking")
+            .and_then(|value| value.as_str())
+    {
+        event.assistant_message = Some(thinking.to_string());
+    }
+    Ok(event)
 }
 
 #[cfg(test)]

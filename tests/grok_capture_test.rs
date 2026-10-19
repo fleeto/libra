@@ -9,16 +9,22 @@ use std::{
     path::Path,
 };
 
-use libra::internal::ai::observed_agents::{
-    grok_reasoning::{
-        GrokMergedEvent, GrokReasoningError, export_grok_ordinary, import_grok_reasoning,
-        sink_bundle,
+use libra::internal::ai::{
+    hooks::providers::grok::{
+        encode_grok_cwd, install_marked_grok_hooks, observe_grok_hook, uninstall_marked_grok_hooks,
     },
-    grok_updates::{
-        GROK_LINE_MAX_BYTES, GrokReadCursor, GrokTranscriptEvent, GrokUpdatesError,
-        read_grok_updates, session_file,
+    observed_agents::{
+        AgentKind, agent_for,
+        grok_reasoning::{
+            GrokMergedEvent, GrokReasoningError, export_grok_ordinary, import_grok_reasoning,
+            sink_bundle,
+        },
+        grok_updates::{
+            GROK_LINE_MAX_BYTES, GrokReadCursor, GrokTranscriptEvent, GrokUpdatesError,
+            read_grok_updates, session_file,
+        },
+        transcript_source::TRANSCRIPT_READ_HARD_CAP_BYTES,
     },
-    transcript_source::TRANSCRIPT_READ_HARD_CAP_BYTES,
 };
 use sha2::{Digest, Sha256};
 
@@ -715,4 +721,333 @@ fn grok_reasoning_outside_matrix_is_refused() {
     let rendered = error.to_string();
     assert!(rendered.contains("malformed transcript"));
     assert!(!rendered.contains("dropped-thinking"));
+}
+
+const LIBRA_HOOK_COMMAND: &str = "libra agent hooks grok";
+
+fn hook_event(
+    name: &str,
+    session_id: &str,
+    cwd: &str,
+    transcript: Option<&str>,
+) -> serde_json::Value {
+    let mut event = serde_json::json!({
+        "hook_event_name": name,
+        "sessionId": session_id,
+        "cwd": cwd,
+    });
+    if let Some(transcript) = transcript {
+        event["transcript_path"] = serde_json::json!(transcript);
+    }
+    event
+}
+
+fn write_session_updates(
+    root: &Path,
+    cwd: &str,
+    session_id: &str,
+    body: &str,
+) -> std::path::PathBuf {
+    let path = root
+        .join(encode_grok_cwd(cwd))
+        .join(session_id)
+        .join("updates.jsonl");
+    fs::create_dir_all(path.parent().expect("session dir")).expect("mkdir");
+    fs::write(&path, body).expect("write updates");
+    path
+}
+
+fn stored_thoughts(state: &Path, session_id: &str) -> Vec<String> {
+    let bytes = fs::read(state.join(session_id).join("store.json")).expect("store");
+    let value: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+    value["thoughts"]
+        .as_array()
+        .expect("thoughts")
+        .iter()
+        .map(|item| item.as_str().expect("text").to_string())
+        .collect()
+}
+
+#[test]
+fn grok_hook_marker_round_trip_keeps_user_bytes() {
+    let hooks = tempfile::tempdir().expect("hooks");
+    let user_path = hooks.path().join("user.json");
+    let user_bytes = b"{\n  \"hooks\": {\n    \"Stop\": [{\"matcher\": \"user\", \"hooks\": [{\"type\": \"command\", \"command\": \"echo keep-me\"}]}]\n  }\n}\n";
+    fs::write(&user_path, user_bytes).expect("user file");
+    let mixed_path = hooks.path().join("mixed.json");
+    fs::write(
+        &mixed_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "note": "leave-me",
+            "hooks": {
+                "Stop": [
+                    {"matcher": "user", "hooks": [{"type": "command", "command": "echo keep-user"}]},
+                    {"statusMessage": "libra capture", "hooks": [{"type": "command", "command": "echo old-mark", "timeout": 10}]}
+                ]
+            }
+        }))
+        .expect("mixed"),
+    )
+    .expect("write mixed");
+    install_marked_grok_hooks(hooks.path(), LIBRA_HOOK_COMMAND).expect("install");
+    assert_eq!(fs::read(&user_path).expect("reread user"), user_bytes);
+    let mixed: serde_json::Value =
+        serde_json::from_slice(&fs::read(&mixed_path).expect("mixed")).expect("parse mixed");
+    let groups = mixed["hooks"]["Stop"].as_array().expect("groups");
+    assert_eq!(groups[0]["hooks"][0]["command"], "echo keep-user");
+    assert_eq!(groups[1]["hooks"][0]["command"], LIBRA_HOOK_COMMAND);
+    assert_eq!(mixed["note"], "leave-me");
+    let owned = fs::read_to_string(hooks.path().join("libra-grok-capture.json")).expect("owned");
+    assert!(owned.contains(LIBRA_HOOK_COMMAND));
+    assert!(owned.contains("libra capture"));
+    assert!(!owned.contains("\"command\": \"grok"));
+    uninstall_marked_grok_hooks(hooks.path()).expect("uninstall");
+    assert_eq!(fs::read(&user_path).expect("user after"), user_bytes);
+    assert!(!hooks.path().join("libra-grok-capture.json").exists());
+    let mixed: serde_json::Value =
+        serde_json::from_slice(&fs::read(&mixed_path).expect("mixed after")).expect("parse");
+    let groups = mixed["hooks"]["Stop"].as_array().expect("groups");
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0]["hooks"][0]["command"], "echo keep-user");
+    assert_eq!(mixed["note"], "leave-me");
+    assert!(
+        !serde_json::to_string(&mixed)
+            .expect("text")
+            .contains("libra capture")
+    );
+}
+
+#[test]
+fn grok_hook_does_not_spawn_grok() {
+    let hooks = tempfile::tempdir().expect("hooks");
+    let rejected = install_marked_grok_hooks(hooks.path(), "grok --serve");
+    assert!(rejected.is_err(), "install must refuse a grok program");
+    assert!(
+        fs::read_dir(hooks.path())
+            .map(|entries| entries.count())
+            .unwrap_or(0)
+            == 0
+    );
+    install_marked_grok_hooks(hooks.path(), LIBRA_HOOK_COMMAND).expect("install libra");
+    for entry in fs::read_dir(hooks.path()).expect("list") {
+        let path = entry.expect("entry").path();
+        let text = fs::read_to_string(&path).expect("hook file");
+        let value: serde_json::Value = serde_json::from_str(&text).expect("json");
+        let hooks_obj = value.get("hooks").and_then(|item| item.as_object());
+        let Some(hooks_obj) = hooks_obj else {
+            continue;
+        };
+        for groups in hooks_obj.values() {
+            for group in groups.as_array().into_iter().flatten() {
+                for hook in group
+                    .get("hooks")
+                    .and_then(|item| item.as_array())
+                    .into_iter()
+                    .flatten()
+                {
+                    let command = hook
+                        .get("command")
+                        .and_then(|item| item.as_str())
+                        .unwrap_or("");
+                    let program = command.split_whitespace().next().unwrap_or("");
+                    assert_ne!(
+                        Path::new(program)
+                            .file_name()
+                            .and_then(|name| name.to_str()),
+                        Some("grok"),
+                        "installed command must not be grok: {command}"
+                    );
+                }
+            }
+        }
+    }
+    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/internal/ai/hooks/providers/grok");
+    for name in ["mod.rs", "parser.rs", "settings.rs"] {
+        let text = fs::read_to_string(source.join(name)).expect("source");
+        assert!(
+            !text.contains("std::process") && !text.contains("Command::new"),
+            "{name} must not spawn a process"
+        );
+    }
+    assert!(agent_for(AgentKind::Grok).as_hooks().is_none());
+    let sessions = tempfile::tempdir().expect("sessions");
+    let state = tempfile::tempdir().expect("state");
+    let cwd = sessions.path().join("work");
+    fs::create_dir_all(&cwd).expect("cwd");
+    let cwd_text = cwd.to_string_lossy().to_string();
+    let encoded = encode_grok_cwd(&cwd_text);
+    assert!(encoded.len() <= 255);
+    assert!(encoded.contains("%2F") || encoded.contains('-'));
+    let updates = write_session_updates(
+        sessions.path(),
+        &cwd_text,
+        "sess-1",
+        &format!(
+            "{}\n",
+            thought_line("e1", "p", "alpha", "2026-10-18T00:00:00Z")
+        ),
+    );
+    let outcome = observe_grok_hook(
+        sessions.path(),
+        state.path(),
+        &hook_event("Stop", "sess-1", &cwd_text, None),
+        None,
+    );
+    assert_eq!(outcome.exit_code, 0);
+    assert_eq!(outcome.stdout, "{}");
+    assert!(!outcome.stdout.contains("deny"));
+    assert!(!outcome.stdout.contains("block"));
+    assert!(outcome.complete);
+    assert_eq!(stored_thoughts(state.path(), "sess-1"), ["alpha"]);
+    let link = updates.with_file_name("link.jsonl");
+    std::os::unix::fs::symlink(&updates, &link).expect("symlink");
+    let via_link = observe_grok_hook(
+        sessions.path(),
+        state.path(),
+        &hook_event("Stop", "sess-1", &cwd_text, Some(&link.to_string_lossy())),
+        None,
+    );
+    assert!(via_link.refused);
+    assert_eq!(stored_thoughts(state.path(), "sess-1"), ["alpha"]);
+    let outside = tempfile::tempdir().expect("outside");
+    let outside_file = outside.path().join("updates.jsonl");
+    fs::write(&outside_file, "{}\n").expect("outside");
+    let outside_outcome = observe_grok_hook(
+        sessions.path(),
+        state.path(),
+        &hook_event(
+            "Stop",
+            "sess-1",
+            &cwd_text,
+            Some(&outside_file.to_string_lossy()),
+        ),
+        None,
+    );
+    assert!(outside_outcome.refused);
+    let missing = observe_grok_hook(
+        sessions.path(),
+        state.path(),
+        &serde_json::json!({"hook_event_name": "Stop", "sessionId": "sess-1"}),
+        None,
+    );
+    assert!(missing.lifecycle_only);
+    assert!(!missing.complete);
+    let short = observe_grok_hook(
+        sessions.path(),
+        state.path(),
+        &hook_event("SessionEnd", "sess-1", &cwd_text, None),
+        Some(1_500),
+    );
+    assert_eq!(short.exit_code, 0);
+    assert!(short.pending);
+    assert!(!short.complete);
+    assert!(state.path().join("sess-1").join("pending.json").exists());
+}
+
+#[test]
+fn grok_hook_precompact_and_shrink_keep_captured_thoughts() {
+    let sessions = tempfile::tempdir().expect("sessions");
+    let state = tempfile::tempdir().expect("state");
+    let cwd = "/var/lib/grok-hook-synthetic";
+    let updates = write_session_updates(
+        sessions.path(),
+        cwd,
+        "sess-keep",
+        &format!(
+            "{}\n{}\n",
+            thought_line("e1", "p", "alpha", "t"),
+            thought_line("e2", "p", "gamma", "t")
+        ),
+    );
+    let stop = observe_grok_hook(
+        sessions.path(),
+        state.path(),
+        &hook_event("Stop", "sess-keep", cwd, None),
+        None,
+    );
+    assert!(stop.complete);
+    assert_eq!(
+        stored_thoughts(state.path(), "sess-keep"),
+        ["alpha", "gamma"]
+    );
+    let compact = observe_grok_hook(
+        sessions.path(),
+        state.path(),
+        &hook_event("PreCompact", "sess-keep", cwd, None),
+        None,
+    );
+    assert_eq!(compact.exit_code, 0);
+    let checkpoint = fs::read_to_string(state.path().join("sess-keep").join("checkpoint.json"))
+        .expect("checkpoint");
+    assert!(checkpoint.contains("alpha"));
+    assert!(checkpoint.contains("gamma"));
+    fs::write(
+        &updates,
+        format!("{}\n", thought_line("e3", "p", "beta", "t")),
+    )
+    .expect("shorter file");
+    let again = observe_grok_hook(
+        sessions.path(),
+        state.path(),
+        &hook_event("StopFailure", "sess-keep", cwd, None),
+        None,
+    );
+    assert!(again.complete);
+    let thoughts = stored_thoughts(state.path(), "sess-keep");
+    assert!(thoughts.contains(&"alpha".to_string()));
+    assert!(thoughts.contains(&"gamma".to_string()));
+    assert!(thoughts.contains(&"beta".to_string()));
+    let before = thoughts.len();
+    let mut repeated = fs::read_to_string(&updates).expect("current");
+    repeated.push_str(&thought_line("e3", "p", "beta-again", "t"));
+    repeated.push('\n');
+    fs::write(&updates, repeated).expect("repeat id");
+    observe_grok_hook(
+        sessions.path(),
+        state.path(),
+        &hook_event("StopCancelled", "sess-keep", cwd, None),
+        None,
+    );
+    let after = stored_thoughts(state.path(), "sess-keep");
+    assert!(after.starts_with(&thoughts));
+    assert_eq!(
+        after.iter().filter(|text| text.as_str() == "beta").count(),
+        1
+    );
+    assert!(!after.iter().any(|text| text.as_str() == "beta-again"));
+    assert!(after.len() >= before);
+
+    let child_cwd = "/var/lib/grok-hook-child";
+    write_session_updates(
+        sessions.path(),
+        child_cwd,
+        "child-1",
+        &format!("{}\n", thought_line("c1", "p", "child-thought", "t")),
+    );
+    let mut child_event = hook_event("Stop", "child-1", child_cwd, None);
+    child_event["parentSessionId"] = serde_json::json!("parent-1");
+    observe_grok_hook(sessions.path(), state.path(), &child_event, None);
+    assert_eq!(stored_thoughts(state.path(), "child-1"), ["child-thought"]);
+    let parent =
+        fs::read_to_string(state.path().join("parent-1").join("store.json")).expect("parent");
+    assert!(parent.contains("child-1"));
+    assert!(!parent.contains("child-thought"));
+
+    let huge = "x".repeat((GROK_LINE_MAX_BYTES as usize) + 8);
+    write_session_updates(sessions.path(), cwd, "sess-partial", &format!("{huge}\n"));
+    let partial = observe_grok_hook(
+        sessions.path(),
+        state.path(),
+        &hook_event("Stop", "sess-partial", cwd, None),
+        None,
+    );
+    assert!(partial.pending);
+    assert!(!partial.complete);
+    assert!(
+        state
+            .path()
+            .join("sess-partial")
+            .join("pending.json")
+            .exists()
+    );
 }

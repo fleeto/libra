@@ -573,7 +573,7 @@ Hook：`transcript_path` 是会话自己的 `updates.jsonl`。daemon 路由可�
 
 **Task type:** implementation
 
-**Lifecycle / Acceptance:** pending / 空
+**Lifecycle / Acceptance:** locally-accepted / 空
 
 **Description:** 在 `GROK_HOME/hooks/` 安装带标记的观察 hook。测试直接调用该 provider 的处理函数。`Stop`、`StopCancelled`、`StopFailure` 和 `PreCompact` 是 hook 事件边界，所以压缩、截断和子会话分段放在本卡，而不是放在只解析字节的 GK-02。`live_capture_for` 保持 `None`，直到 GK-05 同时打开 `supported` 与 `hook_installable`。
 
@@ -588,17 +588,17 @@ Hook：`transcript_path` 是会话自己的 `updates.jsonl`。daemon 路由可�
 
 **Acceptance criteria:**
 
-- [ ] 直接调用的安装函数只原子更新带 `libra capture` 标记的用户级 matcher group；卸载函数只删除这些项；无标记文件保持原字节。CLI `enable` 仍由 GK-05 打开。
-- [ ] hook 进程退出码 0，stdout 不是 deny 或 block。读不完时写 durable pending，不把会话标成 complete。
-- [ ] `transcript_path` 规范化后必须是该 `sessionId` 目录下的 `updates.jsonl`。越界、符号链接和非普通文件拒绝。daemon 缺少 `transcript_path` 时只用事件里的 `cwd` 与 `sessionId` 按 GK-00 钉住的编码规则推导；缺一则只记生命周期。
-- [ ] `PreCompact` 先写 checkpoint。压缩后的文件是下一段。`updates.jsonl` 变短或 `eventId` 重复时封段，不删已捕获的 Thought。
-- [ ] 子会话目录单独成 session，父会话只保留链接。
-- [ ] 不存在调用 `grok` 二进制的代码路径。
+- [x] 直接调用的安装函数只原子更新带 `libra capture` 标记的用户级 matcher group；卸载函数只删除这些项；无标记文件保持原字节。CLI `enable` 仍由 GK-05 打开。
+- [x] hook 进程退出码 0，stdout 不是 deny 或 block。读不完时写 durable pending，不把会话标成 complete。
+- [x] `transcript_path` 规范化后必须是该 `sessionId` 目录下的 `updates.jsonl`。越界、符号链接和非普通文件拒绝。daemon 缺少 `transcript_path` 时只用事件里的 `cwd` 与 `sessionId` 按 GK-00 钉住的编码规则推导；缺一则只记生命周期。
+- [x] `PreCompact` 先写 checkpoint。压缩后的文件是下一段。`updates.jsonl` 变短或 `eventId` 重复时封段，不删已捕获的 Thought。
+- [x] 子会话目录单独成 session，父会话只保留链接。
+- [x] 不存在调用 `grok` 二进制的代码路径。
 
 **Verification:**
 
-- [ ] `source .env.test && cargo test --test grok_capture_test grok_hook_marker_round_trip_keeps_user_bytes -- --exact`（new）。输出含 `1 passed`，不含 `0 passed`。
-- [ ] `source .env.test && cargo test --test grok_capture_test grok_hook_does_not_spawn_grok -- --exact`（new，同一测试文件根上）。输出含 `1 passed`，不含 `0 passed`。
+- [x] `source .env.test && cargo test --test grok_capture_test grok_hook_marker_round_trip_keeps_user_bytes -- --exact`（new）。输出含 `1 passed`，不含 `0 passed`。
+- [x] `source .env.test && cargo test --test grok_capture_test grok_hook_does_not_spawn_grok -- --exact`（new，同一测试文件根上）。输出含 `1 passed`，不含 `0 passed`。
 
 **Full-suite trigger:** T-1: hook provider 注册进共享 `hooks/providers/mod.rs`。
 

@@ -16,6 +16,7 @@
 pub mod claude;
 pub mod codex;
 pub mod gemini;
+pub mod grok;
 pub mod opencode;
 
 use super::provider::{HookProvider, HookProviderIdentity};
@@ -45,6 +46,12 @@ impl HookProviderIdentity for opencode::OpenCodeProvider {
     }
 }
 
+impl HookProviderIdentity for grok::GrokProvider {
+    fn agent_kind(&self) -> AgentKind {
+        AgentKind::Grok
+    }
+}
+
 /// Singleton accessor for the Claude hook provider.
 pub fn claude_provider() -> &'static dyn HookProvider {
     &claude::CLAUDE_PROVIDER
@@ -65,6 +72,14 @@ pub fn opencode_provider() -> &'static dyn HookProvider {
     &opencode::OPENCODE_PROVIDER
 }
 
+/// Singleton accessor for the Grok observe-only hook provider.
+///
+/// `AgentKind::Grok::as_hooks()` stays `None` until GK-05 opens
+/// `hook_installable`. Callers that already hold this provider use it directly.
+pub fn grok_provider() -> &'static dyn HookProvider {
+    &grok::GROK_PROVIDER
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -76,5 +91,9 @@ mod tests {
         assert_eq!(codex_provider().provider_name(), "codex");
         assert_eq!(gemini_provider().provider_name(), "gemini");
         assert_eq!(opencode_provider().provider_name(), "opencode");
+        assert_eq!(grok_provider().provider_name(), "grok");
+        assert!(grok_provider().install_hooks(&Default::default()).is_err());
+        assert!(grok_provider().uninstall_hooks().is_err());
+        assert!(!grok_provider().hooks_are_installed().expect("status"));
     }
 }

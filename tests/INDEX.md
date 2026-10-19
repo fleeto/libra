@@ -183,6 +183,7 @@ automation / session / safety contract suites:
 | `code_provider_resolution_test` | 2 | RC-16: `libra code` provider/boot flags are unknown commands, including `--resume` | `src/cli.rs` |
 | `ai_automation_test` | 2 | `.libra/automations.toml` rule execution | `src/internal/ai/automation/`, `src/command/automation.rs` |
 | `agent_capture_migration_test` | 2 | `agent_capture` / checkpoint-paging and W4 capture-workspace-scope migrations, including legacy bootstrap and guarded down→up compatibility via `MigrationRunner` | `src/internal/db.rs`, `sql/migrations/2026050303_agent_capture.sql`, `sql/migrations/2026080401_agent_capture_workspace_scope.sql` |
+| `grok_agent_kind_test` | 1 | GK-01 Repository `grok` identity stays unsupported: CHECK round-trip, role isolation, old-reader refusal, and partial extraction | `src/internal/db/migration.rs`, `src/internal/ai/observed_agents/`, `sql/migrations/2026101901_agent_kind_grok.sql` |
 | `ai_command_safety_test` | 2 | CEX-01 command safety contract tests | `src/internal/ai/command_safety.rs`, `src/internal/ai/hardening.rs` |
 | `ai_concurrency_lock_test` | 2 | Session-level advisory lock and CAS conflict tests | `src/internal/ai/session/` |
 | `ai_file_undo_test` | 2 | CEX-10 file-level undo contract tests | `src/internal/ai/session/file_history.rs` |

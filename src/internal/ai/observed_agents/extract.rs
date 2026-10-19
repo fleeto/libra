@@ -116,7 +116,11 @@ pub fn skill_registry_for(kind: super::adapter::AgentKind) -> &'static [&'static
         AgentKind::ClaudeCode => CLAUDE_CODE_SKILL_REGISTRY,
         AgentKind::Codex => CODEX_SKILL_REGISTRY,
         AgentKind::OpenCode => OPENCODE_SKILL_REGISTRY,
-        AgentKind::Gemini | AgentKind::Cursor | AgentKind::Copilot | AgentKind::FactoryAi => &[],
+        AgentKind::Gemini
+        | AgentKind::Cursor
+        | AgentKind::Copilot
+        | AgentKind::FactoryAi
+        | AgentKind::Grok => &[],
     }
 }
 

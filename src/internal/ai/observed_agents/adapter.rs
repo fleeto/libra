@@ -35,6 +35,9 @@ pub enum AgentKind {
     OpenCode,
     Copilot,
     FactoryAi,
+    /// External Grok sessions. GK-01 accepts the db tag while the agent
+    /// stays unsupported; capture and hooks land in later cards.
+    Grok,
 }
 
 impl AgentKind {
@@ -49,6 +52,7 @@ impl AgentKind {
             Self::OpenCode => "opencode",
             Self::Copilot => "copilot",
             Self::FactoryAi => "factory_ai",
+            Self::Grok => "grok",
         }
     }
 
@@ -75,6 +79,7 @@ impl AgentKind {
             "opencode" => Some(Self::OpenCode),
             "copilot" => Some(Self::Copilot),
             "factory_ai" => Some(Self::FactoryAi),
+            "grok" => Some(Self::Grok),
             _ => None,
         }
     }
@@ -90,6 +95,7 @@ impl AgentKind {
             Self::OpenCode => "opencode",
             Self::Copilot => "copilot",
             Self::FactoryAi => "factory-ai",
+            Self::Grok => "grok",
         }
     }
 
@@ -105,6 +111,7 @@ impl AgentKind {
             "opencode" | "open-code" => Some(Self::OpenCode),
             "copilot" | "github-copilot" => Some(Self::Copilot),
             "factory-ai" | "factory_ai" | "factory" => Some(Self::FactoryAi),
+            "grok" => Some(Self::Grok),
             _ => None,
         }
     }
@@ -120,6 +127,7 @@ impl AgentKind {
             Self::OpenCode,
             Self::Copilot,
             Self::FactoryAi,
+            Self::Grok,
         ]
     }
 }
@@ -412,6 +420,7 @@ mod tests {
             (AgentKind::OpenCode, "opencode"),
             (AgentKind::Copilot, "copilot"),
             (AgentKind::FactoryAi, "factory_ai"),
+            (AgentKind::Grok, "grok"),
         ] {
             assert_eq!(kind.as_db_str(), expected);
         }
@@ -430,6 +439,7 @@ mod tests {
             (AgentKind::OpenCode, "opencode"),
             (AgentKind::Copilot, "copilot"),
             (AgentKind::FactoryAi, "factory-ai"),
+            (AgentKind::Grok, "grok"),
         ] {
             assert_eq!(kind.as_cli_slug(), expected);
         }
@@ -455,20 +465,19 @@ mod tests {
         );
     }
 
-    /// `AgentKind::all()` returns exactly the 7 documented variants
-    /// in registration order. Adding an 8th variant must force a
-    /// test update.
+    /// `AgentKind::all()` returns the documented variants in registration
+    /// order. Adding another variant must force a test update.
     #[test]
-    fn agent_kind_all_returns_seven_variants_in_registration_order() {
+    fn agent_kind_all_returns_variants_in_registration_order() {
         let all = AgentKind::all();
-        assert_eq!(all.len(), 7);
+        assert_eq!(all.len(), 8);
         assert_eq!(all[0], AgentKind::ClaudeCode);
         assert_eq!(all[6], AgentKind::FactoryAi);
+        assert_eq!(all[7], AgentKind::Grok);
 
-        // All 7 must be distinct via HashSet.
         use std::collections::HashSet;
         let set: HashSet<AgentKind> = all.iter().copied().collect();
-        assert_eq!(set.len(), 7);
+        assert_eq!(set.len(), 8);
     }
 
     /// `AgentStability` serde-serialises as snake_case — the

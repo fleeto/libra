@@ -152,6 +152,14 @@ pub fn agent_for(kind: AgentKind) -> &'static dyn ObservedAgent {
     static FACTORY_AI: StablePromotedAgent = StablePromotedAgent(&FACTORY_AI_STABLE_PROMOTED_SPEC);
     static CLAUDE_CODE: ClaudeCodeObservedAgent = ClaudeCodeObservedAgent::new();
     static GEMINI: GeminiObservedAgent = GeminiObservedAgent::new();
+    // GK-01: a preview stub that is intentionally absent from PREVIEW_SPECS,
+    // so `is_preview(Grok)` stays false. GK-05 replaces this static.
+    static GROK_PREVIEW: PreviewSpec = PreviewSpec {
+        kind: AgentKind::Grok,
+        provider_name: "Grok",
+        protected_dirs: &[".grok"],
+    };
+    static GROK: PreviewAgent = PreviewAgent(&GROK_PREVIEW);
 
     match kind {
         AgentKind::ClaudeCode => &CLAUDE_CODE,
@@ -161,6 +169,7 @@ pub fn agent_for(kind: AgentKind) -> &'static dyn ObservedAgent {
         AgentKind::OpenCode => &OPENCODE,
         AgentKind::Copilot => &COPILOT,
         AgentKind::FactoryAi => &FACTORY_AI,
+        AgentKind::Grok => &GROK,
     }
 }
 
@@ -192,7 +201,8 @@ pub fn truncator_for(kind: AgentKind) -> Option<&'static dyn TranscriptTruncator
         | AgentKind::Gemini
         | AgentKind::OpenCode
         | AgentKind::Copilot
-        | AgentKind::FactoryAi => None,
+        | AgentKind::FactoryAi
+        | AgentKind::Grok => None,
     }
 }
 
@@ -217,7 +227,11 @@ pub(crate) fn live_capture_for(
         AgentKind::ClaudeCode => Some(&CLAUDE_CODE_LIVE),
         AgentKind::Codex => Some(&CODEX_LIVE),
         AgentKind::OpenCode => Some(&OPENCODE_LIVE),
-        AgentKind::Cursor | AgentKind::Gemini | AgentKind::Copilot | AgentKind::FactoryAi => None,
+        AgentKind::Cursor
+        | AgentKind::Gemini
+        | AgentKind::Copilot
+        | AgentKind::FactoryAi
+        | AgentKind::Grok => None,
     }
 }
 
@@ -240,11 +254,17 @@ mod registry_tests {
                 *kind,
                 "agent_for({kind:?}) returned wrong kind",
             );
+            let expected = if *kind == AgentKind::Grok {
+                // GK-01 keeps Grok on the in-module PreviewAgent. GK-05
+                // replaces that static and this arm returns to Stable.
+                AgentStability::Preview
+            } else {
+                AgentStability::Stable
+            };
             assert_eq!(
                 agent.stability(),
-                AgentStability::Stable,
-                "agent_for({kind:?}) must report Stable tier — \
-                 preview specs are not registered here",
+                expected,
+                "agent_for({kind:?}) stability drifted",
             );
         }
     }

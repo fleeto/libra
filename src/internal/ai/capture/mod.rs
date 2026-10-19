@@ -11,6 +11,7 @@ pub(crate) mod catalog;
 pub(crate) mod checkpoint;
 pub(crate) mod coordinator;
 pub(crate) mod extraction;
+pub use extraction::deadline_provider_extraction_summary;
 pub(crate) mod finalizer;
 pub mod ingress;
 pub(crate) mod key;

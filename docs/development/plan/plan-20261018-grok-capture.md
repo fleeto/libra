@@ -371,7 +371,7 @@ Hook：`transcript_path` 是会话自己的 `updates.jsonl`。daemon 路由可�
 
 **Task type:** migration
 
-**Lifecycle / Acceptance:** pending / 空
+**Lifecycle / Acceptance:** locally-accepted / 空
 
 **Description:** 让 Repository 库接受 `agent_kind=grok`，CLI slug `grok` 能解析，但 list/enable 仍报告 unsupported。
 
@@ -388,18 +388,18 @@ Hook：`transcript_path` 是会话自己的 `updates.jsonl`。daemon 路由可�
 
 **Acceptance criteria:**
 
-- [ ] 新 migration id 大于开工时的 tip，只扩展 Repository 的 `agent_session.agent_kind` CHECK，保留全部旧值并加入 `grok`。
-- [ ] 迁移走 ADR-CAP-CHECK 的专用连接；失败丢弃该连接，不把 `foreign_keys=OFF` 还回池。
-- [ ] 隔离的 GlobalConfig、SystemConfig 与 Derived 临时库版本 receipt 和配置表不变，且这三类库零写。`grok_agent_kind_round_trip_and_check` 覆盖本条。
-- [ ] `AgentKind::Grok` 的 db 值是 `grok`，slug 是 `grok`。`agent_for` 返回放在 `mod.rs` 里的 `PreviewAgent`，不加入 `PREVIEW_SPECS`。因此 `is_preview(Grok)` 在本卡为 false，这是有意的，不得为此去改 `preview.rs`。该类型没有 hooks 字段，`as_hooks()` 默认是 `None`。`agent_for_returns_matching_kind_for_every_variant` 对 Grok 的稳定性断言在本卡改为 `Preview`，GK-05 换上专用 struct 后再恢复为全部 `Stable`。`live_capture_for` 返回 `None`，因为 `hook_installable` 仍为 false。`live_capture.rs` 里「live 臂存在当且仅当 hook_installable」的断言保持成立。两处提取臂给出 partial 空摘要。
-- [ ] `supported_slugs()` 仍正好是 `claude-code`、`codex`、`opencode`。`enable grok` 返回 unsupported，不写 hook 文件，不写 `agent_session`。
-- [ ] 已有七个 kind 的行在迁移后仍可读。库里已有 `grok` 行时，down 拒绝执行并保留行。
-- [ ] 不含 `grok` 枚举的旧读取器打开含 `grok` 行的库时零写拒绝。这条也由 `grok_agent_kind_round_trip_and_check` 断言。
+- [x] 新 migration id 大于开工时的 tip，只扩展 Repository 的 `agent_session.agent_kind` CHECK，保留全部旧值并加入 `grok`。
+- [x] 迁移走 ADR-CAP-CHECK 的专用连接；失败丢弃该连接，不把 `foreign_keys=OFF` 还回池。
+- [x] 隔离的 GlobalConfig、SystemConfig 与 Derived 临时库版本 receipt 和配置表不变，且这三类库零写。`grok_agent_kind_round_trip_and_check` 覆盖本条。
+- [x] `AgentKind::Grok` 的 db 值是 `grok`，slug 是 `grok`。`agent_for` 返回放在 `mod.rs` 里的 `PreviewAgent`，不加入 `PREVIEW_SPECS`。因此 `is_preview(Grok)` 在本卡为 false，这是有意的，不得为此去改 `preview.rs`。该类型没有 hooks 字段，`as_hooks()` 默认是 `None`。`agent_for_returns_matching_kind_for_every_variant` 对 Grok 的稳定性断言在本卡改为 `Preview`，GK-05 换上专用 struct 后再恢复为全部 `Stable`。`live_capture_for` 返回 `None`，因为 `hook_installable` 仍为 false。`live_capture.rs` 里「live 臂存在当且仅当 hook_installable」的断言保持成立。两处提取臂给出 partial 空摘要。
+- [x] `supported_slugs()` 仍正好是 `claude-code`、`codex`、`opencode`。`enable grok` 返回 unsupported，不写 hook 文件，不写 `agent_session`。
+- [x] 已有七个 kind 的行在迁移后仍可读。库里已有 `grok` 行时，down 拒绝执行并保留行。
+- [x] 不含 `grok` 枚举的旧读取器打开含 `grok` 行的库时零写拒绝。这条也由 `grok_agent_kind_round_trip_and_check` 断言。
 
 **Verification:**
 
-- [ ] `source .env.test && cargo test --test grok_agent_kind_test grok_agent_kind_round_trip_and_check -- --exact`（new，函数写在 `tests/grok_agent_kind_test.rs` 根上）。输出含 `1 passed`，不含 `0 passed`。
-- [ ] `source .env.test && cargo test --test compat_agent_capability_matrix_pin known_agent_capability_matrix_matches_current_roster -- --exact`。输出含 `1 passed`，不含 `0 passed`。
+- [x] `source .env.test && cargo test --test grok_agent_kind_test grok_agent_kind_round_trip_and_check -- --exact`（new，函数写在 `tests/grok_agent_kind_test.rs` 根上）。输出含 `1 passed`，不含 `0 passed`。
+- [x] `source .env.test && cargo test --test compat_agent_capability_matrix_pin known_agent_capability_matrix_matches_current_roster -- --exact`。输出含 `1 passed`，不含 `0 passed`。
 
 **Full-suite trigger:** T-1: 本卡修改 `sql/migrations/**` 与共享 `AgentKind` 事实源。
 

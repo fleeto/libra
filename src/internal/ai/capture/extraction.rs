@@ -398,6 +398,16 @@ fn build_deadline_extraction_projection(
     value
 }
 
+/// Run the deadline extraction arm for one kind. Non-first-batch kinds,
+/// including `grok`, return a partial empty summary and do not copy the
+/// transcript into warnings or prompts.
+pub fn deadline_provider_extraction_summary(
+    kind: AgentKind,
+    transcript: &[u8],
+) -> crate::internal::ai::observed_agents::extract::ExtractionSummary {
+    extract_deadline_provider_once(kind, transcript)
+}
+
 fn extract_deadline_provider_once(
     agent_kind: AgentKind,
     transcript: &[u8],
@@ -423,12 +433,14 @@ fn extract_deadline_provider_once(
         }
         // `decode_extraction_request` accepts only the first-batch provider
         // codes, so this arm is defensive and cannot carry an error string.
-        AgentKind::Gemini | AgentKind::Cursor | AgentKind::Copilot | AgentKind::FactoryAi => {
-            crate::internal::ai::observed_agents::extract::ExtractionSummary {
-                partial: true,
-                ..Default::default()
-            }
-        }
+        AgentKind::Gemini
+        | AgentKind::Cursor
+        | AgentKind::Copilot
+        | AgentKind::FactoryAi
+        | AgentKind::Grok => crate::internal::ai::observed_agents::extract::ExtractionSummary {
+            partial: true,
+            ..Default::default()
+        },
     }
 }
 

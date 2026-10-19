@@ -113,7 +113,7 @@ const HOOKS_AND_TOKENS: DeclaredAgentCaps = DeclaredAgentCaps {
 
 /// The frozen static matrix, one row per [`AgentKind`] variant, in
 /// registration order. Guarded by `compat_agent_capability_matrix_pin`.
-static REGISTRY: [AgentRegistration; 7] = [
+static REGISTRY: [AgentRegistration; 8] = [
     AgentRegistration {
         slug: "claude-code",
         agent_kind: "claude_code",
@@ -235,6 +235,24 @@ static REGISTRY: [AgentRegistration; 7] = [
         support_wave: None,
         registered: true,
         transcript_readable: true,
+        hook_installable: false,
+        installed: false,
+        launchable_review: false,
+        launchable_investigate: false,
+        external_binary: false,
+        config_paths: &[],
+        capabilities: NO_CAPS,
+    },
+    AgentRegistration {
+        slug: "grok",
+        agent_kind: "grok",
+        db_value: "grok",
+        // GK-01 preview identity. GK-05 is the only card that may set
+        // supported and hook_installable.
+        supported: false,
+        support_wave: None,
+        registered: true,
+        transcript_readable: false,
         hook_installable: false,
         installed: false,
         launchable_review: false,

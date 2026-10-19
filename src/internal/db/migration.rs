@@ -43,7 +43,10 @@ use std::collections::BTreeSet;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use sea_orm::{ConnectionTrait, DatabaseConnection, DbErr, Statement, TransactionTrait};
+use sea_orm::{
+    ConnectOptions, ConnectionTrait, Database, DatabaseConnection, DbErr, Statement,
+    TransactionTrait,
+};
 use thiserror::Error;
 
 use self::copy_validation::validate_copy;
@@ -333,7 +336,10 @@ impl MigrationRunner {
             // would be a TOCTOU race with concurrent processes (Codex r1
             // P1#2). `apply_one_migration` uses `INSERT OR IGNORE` and
             // reports whether this call actually wrote the row.
-            let inserted = if HISTORY_GUARDED_VERSIONS.contains(&migration.version) {
+            let inserted = if migration.version == AGENT_KIND_GROK_VERSION {
+                // ADR-CAP-CHECK: rebuild the CHECK outside the caller's pool.
+                apply_agent_kind_grok_dedicated(conn, true).await?
+            } else if HISTORY_GUARDED_VERSIONS.contains(&migration.version) {
                 // §C.4.1.1/§C.4.3 fail-closed: the scope migrations' SQL guards
                 // see only a LIVE non-main `reference` row, and removing a
                 // linked worktree deletes that row — so old linked layer/sparse
@@ -385,7 +391,12 @@ impl MigrationRunner {
             {
                 continue;
             }
-            if apply_one_migration(conn, migration).await? {
+            let inserted = if migration.version == AGENT_KIND_GROK_VERSION {
+                apply_agent_kind_grok_dedicated(conn, true).await?
+            } else {
+                apply_one_migration(conn, migration).await?
+            };
+            if inserted {
                 applied.push(migration.version);
                 applied_versions.insert(migration.version);
             }
@@ -481,7 +492,11 @@ impl MigrationRunner {
         // semantics.
         let mut rolled_back = Vec::new();
         for (migration, down) in plan {
-            let owned = apply_down_migration(conn, migration.version, down).await?;
+            let owned = if migration.version == AGENT_KIND_GROK_VERSION {
+                apply_agent_kind_grok_dedicated(conn, false).await?
+            } else {
+                apply_down_migration(conn, migration.version, down).await?
+            };
             if owned {
                 rolled_back.push(migration.version);
             }
@@ -552,6 +567,489 @@ async fn applied_schema_versions(
             })
         })
         .collect()
+}
+
+/// GK-01: Repository `agent_session.agent_kind` CHECK gains `grok`.
+const AGENT_KIND_GROK_VERSION: i64 = 2026101901;
+const AGENT_KIND_WITH_GROK: &[&str] = &[
+    "claude_code",
+    "cursor",
+    "codex",
+    "gemini",
+    "opencode",
+    "copilot",
+    "factory_ai",
+    "grok",
+];
+const AGENT_KIND_WITHOUT_GROK: &[&str] = &[
+    "claude_code",
+    "cursor",
+    "codex",
+    "gemini",
+    "opencode",
+    "copilot",
+    "factory_ai",
+];
+
+/// Rebuild `agent_session`'s CHECK on a connection that is not returned to
+/// the caller's pool while `foreign_keys` is off.
+///
+/// `expand` records the GK-01 receipt and adds `grok`. The reverse refuses
+/// while any `grok` row exists, keeps those rows, and otherwise restores the
+/// previous CHECK. File databases use a dedicated connection that is always
+/// closed here. In-memory databases have no second file to open, so the
+/// caller's single connection is used and `foreign_keys` is restored before
+/// return; a failed restore closes that connection.
+async fn apply_agent_kind_grok_dedicated(
+    caller: &DatabaseConnection,
+    expand: bool,
+) -> Result<bool, MigrationError> {
+    let Some(path) = sqlite_database_file(caller).await else {
+        return apply_agent_kind_grok_on(caller, expand).await;
+    };
+    let dedicated = open_dedicated_check_connection(&path).await?;
+    let result = apply_agent_kind_grok_on(&dedicated, expand).await;
+    let close_error = dedicated.close().await.err();
+    match (result, close_error) {
+        (Ok(applied), None) => Ok(applied),
+        (Ok(_applied), Some(error)) => {
+            // The receipt and table rebuild already committed. Closing the
+            // dedicated pool failed after that; the caller's pool never saw
+            // foreign_keys=OFF. Report the close so the operator can reopen.
+            Err(MigrationError::Other(anyhow::anyhow!(
+                "agent_kind grok CHECK migration committed on '{}', but closing the dedicated connection failed: {error}. Reopen the repository and run 'libra doctor'; do not retry by editing schema_versions",
+                path.display()
+            )))
+        }
+        (Err(error), _) => Err(error),
+    }
+}
+
+async fn open_dedicated_check_connection(
+    path: &std::path::Path,
+) -> Result<DatabaseConnection, MigrationError> {
+    let filename = std::path::absolute(path).map_err(|error| {
+        MigrationError::Other(anyhow::anyhow!(
+            "cannot resolve repository database '{}': {error}",
+            path.display()
+        ))
+    })?;
+    if filename.to_str().is_none() {
+        return Err(MigrationError::Other(anyhow::anyhow!(
+            "repository database '{}' is not valid UTF-8",
+            path.display()
+        )));
+    }
+    let mut options = ConnectOptions::new("sqlite://dedicated-agent-kind-check");
+    options.max_connections(1);
+    options.sqlx_logging(false);
+    options.connect_timeout(std::time::Duration::from_secs(30));
+    options.map_sqlx_sqlite_pool_opts(super::sqlite_pool_options);
+    options.map_sqlx_sqlite_opts(move |opts| {
+        opts.filename(&filename)
+            .read_only(false)
+            .create_if_missing(false)
+            .busy_timeout(std::time::Duration::from_secs(30))
+            .synchronous(sea_orm::sqlx::sqlite::SqliteSynchronous::Full)
+    });
+    Database::connect(options).await.map_err(|error| {
+        MigrationError::Other(anyhow::anyhow!(
+            "failed to open a dedicated connection for the agent_kind CHECK migration on '{}': {error}. The repository pool was not changed",
+            path.display()
+        ))
+    })
+}
+
+async fn apply_agent_kind_grok_on(
+    conn: &DatabaseConnection,
+    expand: bool,
+) -> Result<bool, MigrationError> {
+    let previous = pragma_foreign_keys(conn).await?;
+    set_foreign_keys(conn, false).await?;
+    let disabled = pragma_foreign_keys(conn).await?;
+    if disabled != 0 {
+        let _ = set_foreign_keys(conn, previous != 0).await;
+        return Err(MigrationError::Other(anyhow::anyhow!(
+            "could not turn foreign_keys off before rebuilding agent_session; the CHECK was not changed"
+        )));
+    }
+    let result = conn
+        .transaction::<_, _, DbErr>(|txn| {
+            Box::pin(async move {
+                let backend = txn.get_database_backend();
+                if expand {
+                    txn.execute_raw(Statement::from_sql_and_values(
+                        backend,
+                        "INSERT OR IGNORE INTO schema_versions (version, name, applied_at) VALUES (?, ?, ?)",
+                        [
+                            AGENT_KIND_GROK_VERSION.into(),
+                            "agent_kind_grok".into(),
+                            Utc::now().to_rfc3339().into(),
+                        ],
+                    ))
+                    .await?;
+                    if changes(txn).await? == 0 {
+                        return Ok::<bool, DbErr>(false);
+                    }
+                    rebuild_agent_kind_check(txn, true).await?;
+                    Ok(true)
+                } else {
+                    let grok_rows = count_matching(
+                        txn,
+                        "SELECT COUNT(*) FROM agent_session WHERE agent_kind = 'grok'",
+                    )
+                    .await?;
+                    if grok_rows > 0 {
+                        return Err(DbErr::Custom(format!(
+                            "cannot roll back agent_kind grok: {grok_rows} agent_session row(s) use agent_kind 'grok' and were kept. Delete or migrate those rows before rolling back"
+                        )));
+                    }
+                    txn.execute_raw(Statement::from_sql_and_values(
+                        backend,
+                        "DELETE FROM schema_versions WHERE version = ?",
+                        [AGENT_KIND_GROK_VERSION.into()],
+                    ))
+                    .await?;
+                    if changes(txn).await? == 0 {
+                        return Ok::<bool, DbErr>(false);
+                    }
+                    rebuild_agent_kind_check(txn, false).await?;
+                    Ok(true)
+                }
+            })
+        })
+        .await
+        .map_err(|err| match err {
+            sea_orm::TransactionError::Connection(db) => MigrationError::Database(db),
+            sea_orm::TransactionError::Transaction(db) => MigrationError::Database(db),
+        });
+    let restored = set_foreign_keys(conn, previous != 0).await;
+    let after = pragma_foreign_keys(conn).await;
+    match (result, restored, after) {
+        (Ok(applied), Ok(()), Ok(value)) if value == previous => Ok(applied),
+        (Ok(_), _, _) => {
+            let _ = conn.clone().close().await;
+            Err(MigrationError::Other(anyhow::anyhow!(
+                "agent_kind grok CHECK migration committed, but foreign_keys could not be restored on this connection. The connection was closed; reopen the database and verify with PRAGMA foreign_key_check and PRAGMA integrity_check"
+            )))
+        }
+        (Err(error), Ok(()), Ok(value)) if value == previous => Err(error),
+        (Err(error), _, _) => {
+            let _ = conn.clone().close().await;
+            Err(MigrationError::Other(anyhow::anyhow!(
+                "agent_kind grok CHECK migration failed ({error}) and foreign_keys could not be restored. The connection was closed and was not returned to the pool"
+            )))
+        }
+    }
+}
+
+async fn rebuild_agent_kind_check(
+    txn: &sea_orm::DatabaseTransaction,
+    include_grok: bool,
+) -> Result<(), DbErr> {
+    let backend = txn.get_database_backend();
+    let create = query_optional_text(
+        txn,
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'agent_session'",
+    )
+    .await?;
+    let Some(create) = create else {
+        return Err(DbErr::Custom(
+            "agent_session is missing; apply the agent capture migration before extending its CHECK"
+                .to_string(),
+        ));
+    };
+    let values = if include_grok {
+        AGENT_KIND_WITH_GROK
+    } else {
+        AGENT_KIND_WITHOUT_GROK
+    };
+    let already = create.contains("'grok'");
+    if include_grok && already {
+        return Ok(());
+    }
+    if !include_grok && !already {
+        return Ok(());
+    }
+    let session_count = count_matching(txn, "SELECT COUNT(*) FROM agent_session").await?;
+    let child_tables = query_text_list(
+        txn,
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name != 'agent_session' AND sql LIKE '%agent_session%' ORDER BY name",
+    )
+    .await?;
+    let mut child_counts = Vec::with_capacity(child_tables.len());
+    for name in &child_tables {
+        if !safe_sql_ident(name) {
+            return Err(DbErr::Custom(format!(
+                "refusing to rebuild agent_session: related table name '{name}' is not a plain identifier"
+            )));
+        }
+        let count = count_matching(txn, &format!("SELECT COUNT(*) FROM `{name}`")).await?;
+        child_counts.push((name.clone(), count));
+    }
+    let dependents = query_text_list(
+        txn,
+        "SELECT sql FROM sqlite_master WHERE tbl_name = 'agent_session' AND sql IS NOT NULL AND type IN ('index', 'trigger') ORDER BY type, name",
+    )
+    .await?;
+    let columns =
+        query_text_list(txn, "SELECT name FROM pragma_table_info('agent_session')").await?;
+    if columns.is_empty() || columns.iter().any(|name| !safe_sql_ident(name)) {
+        return Err(DbErr::Custom(
+            "agent_session column names could not be copied safely".to_string(),
+        ));
+    }
+    let column_list = columns
+        .iter()
+        .map(|name| format!("`{name}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let rewritten = replace_agent_kind_check_list(&create, values).map_err(DbErr::Custom)?;
+    let staging =
+        rename_create_table(&rewritten, "agent_session__gk_new").map_err(DbErr::Custom)?;
+    txn.execute_raw(Statement::from_string(backend, staging))
+        .await?;
+    txn.execute_raw(Statement::from_string(
+        backend,
+        format!(
+            "INSERT INTO `agent_session__gk_new` ({column_list}) SELECT {column_list} FROM `agent_session`"
+        ),
+    ))
+    .await?;
+    let copied = count_matching(txn, "SELECT COUNT(*) FROM `agent_session__gk_new`").await?;
+    if copied != session_count {
+        return Err(DbErr::Custom(format!(
+            "agent_session rebuild copied {copied} rows but the original table has {session_count}; the transaction will roll back"
+        )));
+    }
+    txn.execute_raw(Statement::from_string(
+        backend,
+        "DROP TABLE `agent_session`".to_string(),
+    ))
+    .await?;
+    txn.execute_raw(Statement::from_string(
+        backend,
+        "ALTER TABLE `agent_session__gk_new` RENAME TO `agent_session`".to_string(),
+    ))
+    .await?;
+    for sql in dependents {
+        txn.execute_raw(Statement::from_string(backend, sql))
+            .await?;
+    }
+    let after = count_matching(txn, "SELECT COUNT(*) FROM agent_session").await?;
+    if after != session_count {
+        return Err(DbErr::Custom(format!(
+            "agent_session row count changed from {session_count} to {after} during the CHECK rebuild"
+        )));
+    }
+    for (name, before) in child_counts {
+        let count = count_matching(txn, &format!("SELECT COUNT(*) FROM `{name}`")).await?;
+        if count != before {
+            return Err(DbErr::Custom(format!(
+                "related table '{name}' changed from {before} rows to {count} during the agent_session CHECK rebuild"
+            )));
+        }
+    }
+    let fk_rows = txn
+        .query_all_raw(Statement::from_string(
+            backend,
+            "PRAGMA foreign_key_check".to_string(),
+        ))
+        .await?;
+    if !fk_rows.is_empty() {
+        return Err(DbErr::Custom(format!(
+            "PRAGMA foreign_key_check reported {} violation(s) after rebuilding agent_session",
+            fk_rows.len()
+        )));
+    }
+    let integrity = query_optional_text(txn, "PRAGMA integrity_check").await?;
+    if integrity.as_deref() != Some("ok") {
+        return Err(DbErr::Custom(format!(
+            "PRAGMA integrity_check failed after rebuilding agent_session: {}",
+            integrity.unwrap_or_else(|| "<no row>".to_string())
+        )));
+    }
+    Ok(())
+}
+
+fn replace_agent_kind_check_list(sql: &str, values: &[&str]) -> Result<String, String> {
+    let lower = sql.to_ascii_lowercase();
+    let kind_at = lower
+        .find("agent_kind")
+        .ok_or_else(|| "agent_session DDL has no agent_kind column".to_string())?;
+    let in_rel = lower[kind_at..]
+        .find(" in (")
+        .or_else(|| lower[kind_at..].find(" in("))
+        .ok_or_else(|| "agent_kind CHECK has no IN list".to_string())?;
+    let open = sql[kind_at + in_rel..]
+        .find('(')
+        .ok_or_else(|| "agent_kind IN list is missing '('".to_string())?
+        + kind_at
+        + in_rel;
+    let mut depth = 0;
+    let mut close = None;
+    for (index, byte) in sql.as_bytes().iter().enumerate().skip(open) {
+        match byte {
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    close = Some(index);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let close = close.ok_or_else(|| "agent_kind IN list is missing ')'".to_string())?;
+    let list = values
+        .iter()
+        .map(|value| format!("'{value}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut rewritten = String::with_capacity(sql.len() + list.len());
+    rewritten.push_str(&sql[..=open]);
+    rewritten.push_str(&list);
+    rewritten.push_str(&sql[close..]);
+    Ok(rewritten)
+}
+
+fn rename_create_table(sql: &str, new_name: &str) -> Result<String, String> {
+    let lower = sql.to_ascii_lowercase();
+    let create = lower
+        .find("create table")
+        .ok_or_else(|| "agent_session DDL is not a CREATE TABLE".to_string())?;
+    let after = create + "create table".len();
+    let name_off = sql[after..]
+        .find(|ch: char| !ch.is_whitespace())
+        .ok_or_else(|| "CREATE TABLE is missing a name".to_string())?;
+    let name_start = after + name_off;
+    let rest = &sql[name_start..];
+    let name_end = if rest.starts_with('`') || rest.starts_with('"') {
+        let quote = rest.as_bytes()[0] as char;
+        1 + rest[1..]
+            .find(quote)
+            .ok_or_else(|| "CREATE TABLE name quote is not closed".to_string())?
+            + 1
+    } else if let Some(stripped) = rest.strip_prefix('[') {
+        1 + stripped
+            .find(']')
+            .ok_or_else(|| "CREATE TABLE name bracket is not closed".to_string())?
+            + 1
+    } else {
+        rest.find(|ch: char| ch.is_whitespace() || ch == '(')
+            .ok_or_else(|| "CREATE TABLE name has no terminator".to_string())?
+    } + name_start;
+    let mut rewritten = String::with_capacity(sql.len() + new_name.len());
+    rewritten.push_str(&sql[..name_start]);
+    rewritten.push('`');
+    rewritten.push_str(new_name);
+    rewritten.push('`');
+    rewritten.push_str(&sql[name_end..]);
+    Ok(rewritten)
+}
+
+fn safe_sql_ident(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+}
+
+async fn pragma_foreign_keys(conn: &DatabaseConnection) -> Result<i64, MigrationError> {
+    let row = conn
+        .query_one_raw(Statement::from_string(
+            conn.get_database_backend(),
+            "PRAGMA foreign_keys".to_string(),
+        ))
+        .await?
+        .ok_or_else(|| {
+            MigrationError::Database(DbErr::Custom(
+                "PRAGMA foreign_keys returned no row".to_string(),
+            ))
+        })?;
+    row.try_get_by_index(0).map_err(|error| {
+        MigrationError::Database(DbErr::Custom(format!(
+            "PRAGMA foreign_keys could not be read: {error}"
+        )))
+    })
+}
+
+async fn set_foreign_keys(conn: &DatabaseConnection, enabled: bool) -> Result<(), MigrationError> {
+    let sql = if enabled {
+        "PRAGMA foreign_keys = ON"
+    } else {
+        "PRAGMA foreign_keys = OFF"
+    };
+    conn.execute_raw(Statement::from_string(conn.get_database_backend(), sql))
+        .await?;
+    Ok(())
+}
+
+async fn changes(conn: &impl ConnectionTrait) -> Result<i64, DbErr> {
+    let row = conn
+        .query_one_raw(Statement::from_string(
+            conn.get_database_backend(),
+            "SELECT changes()".to_string(),
+        ))
+        .await?
+        .ok_or_else(|| DbErr::Custom("SELECT changes() returned no row".to_string()))?;
+    row.try_get_by_index(0)
+        .map_err(|error| DbErr::Custom(format!("changes() decode failed: {error}")))
+}
+
+async fn count_matching(conn: &impl ConnectionTrait, sql: &str) -> Result<i64, DbErr> {
+    let row = conn
+        .query_one_raw(Statement::from_string(conn.get_database_backend(), sql))
+        .await?
+        .ok_or_else(|| DbErr::Custom(format!("count query returned no row: {sql}")))?;
+    row.try_get_by_index(0)
+        .map_err(|error| DbErr::Custom(format!("count decode failed: {error}")))
+}
+
+async fn query_optional_text(
+    conn: &impl ConnectionTrait,
+    sql: &str,
+) -> Result<Option<String>, DbErr> {
+    let Some(row) = conn
+        .query_one_raw(Statement::from_string(conn.get_database_backend(), sql))
+        .await?
+    else {
+        return Ok(None);
+    };
+    row.try_get_by_index(0)
+        .map(Some)
+        .map_err(|error| DbErr::Custom(format!("text decode failed: {error}")))
+}
+
+async fn query_text_list(conn: &impl ConnectionTrait, sql: &str) -> Result<Vec<String>, DbErr> {
+    let rows = conn
+        .query_all_raw(Statement::from_string(conn.get_database_backend(), sql))
+        .await?;
+    rows.into_iter()
+        .map(|row| {
+            row.try_get_by_index(0)
+                .map_err(|error| DbErr::Custom(format!("text list decode failed: {error}")))
+        })
+        .collect()
+}
+
+/// The SQLite file behind `conn`, via `PRAGMA database_list`. `None` for
+/// `:memory:` and anything path-less.
+async fn sqlite_database_file(conn: &DatabaseConnection) -> Option<std::path::PathBuf> {
+    let row = conn
+        .query_one_raw(Statement::from_string(
+            conn.get_database_backend(),
+            "PRAGMA database_list".to_string(),
+        ))
+        .await
+        .ok()??;
+    let file: String = row.try_get_by_index(2).ok()?;
+    if file.is_empty() {
+        None
+    } else {
+        Some(std::path::PathBuf::from(file))
+    }
 }
 
 /// Apply one migration atomically. Returns `true` when this call inserted
@@ -1920,6 +2418,16 @@ pub(crate) fn repository_migrations() -> Vec<Migration> {
             include_str!("../../../sql/migrations/2026092902_memory_path_search.sql"),
             include_str!("../../../sql/migrations/2026092902_memory_path_search_down.sql"),
         ),
+        // GK-01: Repository agent_session.agent_kind CHECK gains 'grok'.
+        // The SQL body aborts if executed raw; the runner rebuilds the table
+        // on a dedicated connection (ADR-CAP-CHECK). Down refuses while any
+        // grok row exists and keeps those rows.
+        sql_migration(
+            AGENT_KIND_GROK_VERSION,
+            "agent_kind_grok",
+            include_str!("../../../sql/migrations/2026101901_agent_kind_grok.sql"),
+            include_str!("../../../sql/migrations/2026101901_agent_kind_grok_down.sql"),
+        ),
     ]
 }
 
@@ -2380,9 +2888,12 @@ mod tests {
         // `builtin_migrations()` so silent registry regressions surface
         // here in addition to `tests/db_migration_test.rs`.
         let runner = builtin_runner().expect("CEX-12.5 builtin registry must build clean");
-        assert_eq!(runner.len(), 68);
+        assert_eq!(runner.len(), 69);
         assert!(!runner.is_empty());
-        assert_eq!(runner.max_registered_version(), Some(2026092902));
+        assert_eq!(
+            runner.max_registered_version(),
+            Some(AGENT_KIND_GROK_VERSION)
+        );
     }
 
     #[test]

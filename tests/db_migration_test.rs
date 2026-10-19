@@ -5603,8 +5603,8 @@ async fn memory_core_down_drops_all() {
         .expect("rollback to pre-memory tip");
     assert_eq!(
         rolled,
-        vec![2026092902, 2026092901],
-        "both memory migrations are above the target tip"
+        vec![2026101901, 2026092902, 2026092901],
+        "memory migrations and the grok CHECK migration are above the target tip"
     );
 
     assert!(!table_exists(&conn, "memory_episode").await);
@@ -5800,8 +5800,8 @@ async fn memory_path_search_down_drops_all() {
         .expect("rollback to the DM-01 tip");
     assert_eq!(
         rolled,
-        vec![2026092902],
-        "only DM-10 is above the target tip"
+        vec![2026101901, 2026092902],
+        "the grok CHECK migration and DM-10 are above the DM-01 tip"
     );
 
     assert!(!table_exists(&conn, "memory_episode_path").await);
@@ -5832,8 +5832,8 @@ async fn memory_path_search_simulated_old_runner_rejects_future_schema() {
             .current_version_readonly(&conn)
             .await
             .expect("read current"),
-        Some(2026092902),
-        "the full-resolved binary sees the repository at the DM-10 tip"
+        Some(2026101901),
+        "the full-resolved binary sees the repository at the current tip"
     );
 
     // The pretend old binary: registry truncated to the pre-memory tip.
@@ -5852,7 +5852,7 @@ async fn memory_path_search_simulated_old_runner_rejects_future_schema() {
     let latest = old
         .max_registered_version()
         .expect("old binary registry tip");
-    assert_eq!(current, 2026092902);
+    assert_eq!(current, 2026101901);
     assert_eq!(latest, 2026092701);
 
     // The old binary's future-schema predicate (current > latest) is exactly
@@ -5872,7 +5872,7 @@ async fn memory_path_search_simulated_old_runner_rejects_future_schema() {
         matches!(
             compatibility,
             SchemaCompatibility::UnsupportedFuture {
-                current_version: 2026092902,
+                current_version: 2026101901,
                 latest_version: Some(2026092701)
             }
         ),

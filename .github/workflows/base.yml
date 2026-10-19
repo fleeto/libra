@@ -412,7 +412,9 @@ jobs:
           #     | jq -r '...select(.kind[] == "test")|select(.name != "command_test")...' | sort -u)
           #   cargo test --lib --bins "${ARGS[@]}"
           #   cargo test --doc
-          cargo nextest run --all --no-fail-fast --retries 2
+          # Grok tests under tests/grok_*.rs are local-only. This CI environment
+          # cannot run them. Developer machines run them with cargo test --test.
+          cargo nextest run --all --no-fail-fast --retries 2 -E 'not binary(~^grok_)'
           cargo test --doc
 
       # REMOVED 2026-08-31 — the "Run Code UI automation scenarios" step is

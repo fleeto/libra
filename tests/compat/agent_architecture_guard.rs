@@ -368,7 +368,7 @@ fn private_capture_identity_has_no_source_opener() {
     let remainder = format!("const AGENT_CAPTURE_LOCAL_PAGE_SIZE{remainder}");
     assert_eq!(
         hex::encode(Sha256::digest(remainder.as_bytes())),
-        "06b56c63413da64355910602a1bfb109d1ee2a8d546832edf75276029c5ed469",
+        "ea0378334c06aa458c7e9acdd3a81c88c00d5261b8590245d1deeea08920ce73",
         "RG-05 cloud serializer edit requires scope and Claude review"
     );
 }

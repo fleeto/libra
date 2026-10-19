@@ -76,6 +76,12 @@
 //! transcript blobs.
 //! Detection-only runs emit no repair spans (nothing was attempted).
 //!
+//! Managed task workspaces are inspected against their durable allocation
+//! records. Unknown directories, incomplete intents, and replaced workspace
+//! leaves are reported without deleting files, including with `--repair`.
+//! Findings-object repair accepts only known review/investigate manifest
+//! versions; unsupported manifests require manual action.
+//!
 //! Without `--repair` the command is strictly read-only; findings report
 //! what `--repair` would do (`repaired` stays `false`, `manual_required`
 //! is already accurate). All repairs are idempotent: a second run finds a
@@ -257,6 +263,8 @@ const CLASS_MISSING_FINDINGS_OBJECT: &str = "missing_findings_object";
 /// A0-06: a run's findings blob exists but has no (or a drifted)
 /// `object_index` row (invisible to cloud sync / retention).
 const CLASS_MISSING_FINDINGS_OBJECT_INDEX: &str = "missing_findings_object_index";
+/// A run manifest whose format or identity cannot authorize object repair.
+const CLASS_INVALID_RUN_MANIFEST: &str = "invalid_run_manifest";
 
 #[derive(Debug, Serialize)]
 struct ProviderHookStatus {
@@ -299,6 +307,9 @@ struct DoctorReport {
     checkpoint_store: CheckpointStoreReport,
     /// A0-06 review/investigate findings-object scan (detection + repair).
     findings_store: FindingsStoreReport,
+    /// Managed task workspaces and their durable ownership records. Report-only,
+    /// including when `--repair` was requested.
+    task_workspaces: TaskWorkspaceReport,
     /// RC-31: frozen Code-era residue (read-only existence check).
     legacy_code_residue: LegacyCodeResidue,
 }
@@ -335,7 +346,7 @@ struct FindingsStoreReport {
 
 #[derive(Debug, Serialize)]
 struct FindingsObjectFinding {
-    /// `missing_findings_object` or `missing_findings_object_index`.
+    /// Stable run-manifest or findings-object inconsistency class.
     inconsistency_type: String,
     /// Review/investigate run id (the `agent-runs/<run_id>` name), emitted
     /// only after `is_valid_run_id` so `review show <run_id>` can act on it.
@@ -344,6 +355,60 @@ struct FindingsObjectFinding {
     detail: String,
     repaired: bool,
     manual_required: bool,
+}
+
+#[derive(Debug, Default, Serialize)]
+struct TaskWorkspaceReport {
+    scanned: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    note: Option<String>,
+    validated_attempts: usize,
+    manual_required: usize,
+    findings: Vec<TaskWorkspaceFinding>,
+}
+
+#[derive(Debug, Serialize)]
+struct TaskWorkspaceFinding {
+    inconsistency_type: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    run_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    attempt_id: Option<String>,
+    detail: &'static str,
+    repaired: bool,
+    manual_required: bool,
+}
+
+impl TaskWorkspaceReport {
+    fn note(&mut self, note: &'static str) {
+        match self.note.as_mut() {
+            Some(existing) if !existing.contains(note) => {
+                existing.push_str("; ");
+                existing.push_str(note);
+            }
+            Some(_) => {}
+            None => self.note = Some(note.to_string()),
+        }
+    }
+
+    fn finding(
+        &mut self,
+        inconsistency_type: &'static str,
+        run_id: Option<uuid::Uuid>,
+        attempt_id: Option<uuid::Uuid>,
+        detail: &'static str,
+        manual_required: bool,
+    ) {
+        self.manual_required += usize::from(manual_required);
+        self.findings.push(TaskWorkspaceFinding {
+            inconsistency_type,
+            run_id: run_id.map(|id| id.to_string()),
+            attempt_id: attempt_id.map(|id| id.to_string()),
+            detail,
+            repaired: false,
+            manual_required,
+        });
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -689,6 +754,7 @@ pub async fn execute_safe(args: DoctorArgs, output: &OutputConfig) -> CliResult<
 
     let checkpoint_store = scan_checkpoint_store(&conn, schema_present, args.repair).await?;
     let findings_store = scan_agent_findings(&conn, schema_present, args.repair).await?;
+    let task_workspaces = scan_task_workspaces(&storage);
     let legacy_code_residue = scan_legacy_code_residue(&conn).await?;
 
     emit_report(
@@ -701,6 +767,7 @@ pub async fn execute_safe(args: DoctorArgs, output: &OutputConfig) -> CliResult<
             gemini_hooks_remnant,
             checkpoint_store,
             findings_store,
+            task_workspaces,
             legacy_code_residue,
         },
         output,
@@ -1101,7 +1168,7 @@ fn doctor_storage_resolution_error(error: std::io::Error) -> CliError {
     }
     CliError::fatal(
         "agent doctor could not resolve repository storage; from the main worktree run \
-         `libra worktree repair --confirm <worktree-path>` (or re-add the worktree), then \
+         `libra worktree repair --confirm --path <worktree-path>` (or re-add the worktree), then \
          rerun doctor",
     )
     .with_stable_code(StableErrorCode::RepoStateInvalid)
@@ -4251,6 +4318,214 @@ fn append_findings_store_note(report: &mut FindingsStoreReport, note: &'static s
     }
 }
 
+/// List one held directory with the same bound as the run-manifest scan. The
+/// task scan stops at attempt directories; it never enters workspace contents.
+fn task_directory_names(
+    directory: &std::fs::File,
+    entries_remaining: &mut usize,
+) -> std::io::Result<Vec<std::ffi::OsString>> {
+    let mut entries = directory
+        .try_clone()
+        .and_then(crate::utils::beneath::read_dir_fd)?;
+    let mut names = Vec::new();
+    while *entries_remaining > 0 {
+        let Some(entry) = entries.next() else {
+            return Ok(names);
+        };
+        *entries_remaining -= 1;
+        names.push(entry?.name);
+    }
+    Err(std::io::Error::other(
+        "task workspace scan reached the doctor entry limit",
+    ))
+}
+
+fn task_uuid_name(name: &std::ffi::OsStr) -> Option<uuid::Uuid> {
+    let name = name.to_str()?;
+    let id = uuid::Uuid::parse_str(name).ok()?;
+    (id.to_string() == name).then_some(id)
+}
+
+/// Unknown directories and incomplete lifecycle records are diagnostic input,
+/// never deletion authority. Even `doctor --repair` leaves every task artifact
+/// and intent intact for the run's ownership-checked cleanup path.
+fn scan_task_workspaces(storage: &Path) -> TaskWorkspaceReport {
+    use crate::internal::ai::workspace_isolation::{
+        TaskWorkspaceState, read_task_workspace_descriptors_bounded, verify_task_workspace,
+    };
+
+    let mut report = TaskWorkspaceReport::default();
+    if !cfg!(any(unix, windows)) {
+        report.note("task workspace scan is unavailable because secure descriptor-relative reads are unsupported");
+        return report;
+    }
+    let storage_dir = match crate::utils::object::open_directory_tree_no_follow(storage) {
+        Ok(directory) => directory,
+        Err(_) => {
+            report.note(
+                "repository storage could not be opened safely; task workspaces were not inspected",
+            );
+            return report;
+        }
+    };
+    report.scanned = true;
+    let mut owned = BTreeSet::new();
+    let mut entries_remaining = DOCTOR_AGENT_RUN_ENTRY_CAP;
+    let runs = crate::utils::beneath::open_beneath(&storage_dir, Path::new("sessions/agent-runs"));
+    match runs {
+        Ok(runs) => match task_directory_names(&runs, &mut entries_remaining) {
+            Ok(names) => {
+                for name in names {
+                    let Some(run_id) = task_uuid_name(&name) else {
+                        // Historical run names remain legal but never own the
+                        // UUID-addressed managed task layout.
+                        continue;
+                    };
+                    if entries_remaining == 0 {
+                        report.note("task workspace scan reached its total entry limit; remaining entries require manual review");
+                        break;
+                    }
+                    let run = match crate::utils::object::open_directory_at_no_follow(&runs, &name) {
+                        Ok(directory) => directory,
+                        Err(_) => {
+                            report.finding("unverified_task_intent", Some(run_id), None, "run metadata could not be opened safely; no files were removed", true);
+                            continue;
+                        }
+                    };
+                    let intents = match crate::utils::object::open_directory_at_no_follow(&run, std::ffi::OsStr::new("workspace-intents")) {
+                        Ok(directory) => directory,
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                        Err(_) => {
+                            report.finding("unverified_task_intent", Some(run_id), None, "workspace intents could not be opened safely; no files were removed", true);
+                            continue;
+                        }
+                    };
+                    drop(intents);
+                    let run_dir = storage.join("sessions/agent-runs").join(&name);
+                    match read_task_workspace_descriptors_bounded(
+                        storage,
+                        &run_dir,
+                        run_id,
+                        &mut entries_remaining,
+                    ) {
+                        Ok(descriptors) => {
+                            for descriptor in descriptors {
+                                if descriptor.state == TaskWorkspaceState::Active
+                                    && verify_task_workspace(storage, &run_dir, &descriptor).is_err()
+                                {
+                                    report.finding(
+                                        "unverified_task_workspace",
+                                        Some(run_id),
+                                        Some(descriptor.attempt_id),
+                                        "workspace directory is missing, replaced, or cannot be verified against its active ownership record; keep its metadata and inspect it manually; no files were removed",
+                                        true,
+                                    );
+                                    continue;
+                                }
+                                owned.insert((run_id, descriptor.attempt_id));
+                                report.validated_attempts += 1;
+                                if descriptor.state != TaskWorkspaceState::Active {
+                                    report.finding(
+                                        "pending_task_workspace",
+                                        Some(run_id),
+                                        Some(descriptor.attempt_id),
+                                        "workspace provisioning or cleanup is incomplete; rerun doctor after the run settles; no files were removed",
+                                        false,
+                                    );
+                                }
+                            }
+                        }
+                        Err(_) => report.finding(
+                            "unverified_task_intent",
+                            Some(run_id),
+                            None,
+                            "workspace intent or ownership could not be verified; keep the run metadata and inspect it after active lifecycle work finishes; no files were removed",
+                            true,
+                        ),
+                    }
+                }
+            }
+            Err(_) => report.note("run metadata could not be enumerated within the secure scan limit; task ownership is incomplete"),
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => report.note("run metadata could not be opened safely; task ownership is incomplete"),
+    }
+
+    if entries_remaining == 0 {
+        report.note("task workspace scan reached its total entry limit; remaining entries require manual review");
+        return report;
+    }
+
+    let tasks = match crate::utils::beneath::open_beneath(&storage_dir, Path::new("worktree/tasks"))
+    {
+        Ok(directory) => directory,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return report,
+        Err(_) => {
+            report.note("managed task container could not be opened safely; no workspace entries were traversed or removed");
+            return report;
+        }
+    };
+    let runs = match task_directory_names(&tasks, &mut entries_remaining) {
+        Ok(names) => names,
+        Err(_) => {
+            report.note("managed task container exceeds the secure scan limit or could not be listed; manual review is required");
+            return report;
+        }
+    };
+    for run_name in runs {
+        if entries_remaining == 0 {
+            report.note("task workspace scan reached its total entry limit; remaining entries require manual review");
+            break;
+        }
+        let run_id = task_uuid_name(&run_name);
+        let Some(run_id) = run_id else {
+            report.finding("unowned_task_workspace", None, None, "managed task container has an unrecognized entry; inspect it manually; no files were removed", true);
+            continue;
+        };
+        let run = match crate::utils::object::open_directory_at_no_follow(&tasks, &run_name) {
+            Ok(directory) => directory,
+            Err(_) => {
+                report.finding(
+                    "unowned_task_workspace",
+                    Some(run_id),
+                    None,
+                    "managed task run entry could not be opened safely; no files were removed",
+                    true,
+                );
+                continue;
+            }
+        };
+        let attempts = match task_directory_names(&run, &mut entries_remaining) {
+            Ok(names) => names,
+            Err(_) => {
+                report.note("task attempts could not be enumerated within the secure scan limit; manual review is required");
+                if entries_remaining == 0 {
+                    return report;
+                }
+                continue;
+            }
+        };
+        for attempt_name in attempts {
+            if entries_remaining == 0 {
+                report.note("task workspace scan reached its total entry limit; remaining entries require manual review");
+                break;
+            }
+            let attempt_id = task_uuid_name(&attempt_name);
+            if attempt_id.is_some_and(|attempt_id| owned.contains(&(run_id, attempt_id))) {
+                continue;
+            }
+            report.finding(
+                "unowned_task_workspace",
+                Some(run_id),
+                attempt_id,
+                "managed task entry has no validated ownership record; it may be an orphan or an in-progress allocation; keep its metadata and inspect it manually; no files were removed",
+                true,
+            );
+        }
+    }
+    report
+}
+
 /// Minimal parse of a run manifest's non-null `findings_oid` (avoids pulling
 /// the review/investigate manifest structs into doctor). A damaged manifest
 /// must never reflect its arbitrary string back into a diagnostic.
@@ -4258,10 +4533,11 @@ enum ManifestFindingsOid {
     Absent,
     Valid(String),
     Invalid,
+    InvalidManifest,
     Unavailable,
 }
 
-fn manifest_findings_oid(run_dir: &std::fs::File) -> ManifestFindingsOid {
+fn manifest_findings_oid(run_dir: &std::fs::File, run_id: &str) -> ManifestFindingsOid {
     let bytes = match read_agent_run_sidecar(run_dir, "manifest.json") {
         AgentRunSidecar::Bytes(bytes) => bytes,
         AgentRunSidecar::Absent => return ManifestFindingsOid::Absent,
@@ -4270,10 +4546,21 @@ fn manifest_findings_oid(run_dir: &std::fs::File) -> ManifestFindingsOid {
         }
     };
     let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
-        return ManifestFindingsOid::Absent;
+        return ManifestFindingsOid::InvalidManifest;
     };
-    let Some(value) = value.get("findings_oid").and_then(|value| value.as_str()) else {
-        return ManifestFindingsOid::Absent;
+    if !matches!(value["schema_version"].as_u64(), Some(1 | 2))
+        || !matches!(value["kind"].as_str(), Some("review" | "investigate"))
+        || value["run_id"].as_str() != Some(run_id)
+    {
+        return ManifestFindingsOid::InvalidManifest;
+    }
+    let value = match value.get("findings_oid") {
+        Some(value) if value.is_null() => return ManifestFindingsOid::Absent,
+        Some(value) => match value.as_str() {
+            Some(value) => value,
+            None => return ManifestFindingsOid::Invalid,
+        },
+        None => return ManifestFindingsOid::InvalidManifest,
     };
     crate::internal::object_format::parse_repo_oid(value)
         .ok()
@@ -4397,14 +4684,29 @@ async fn scan_agent_findings(
                 continue;
             }
         };
-        let findings_oid = manifest_findings_oid(&run_dir);
+        let findings_oid = manifest_findings_oid(&run_dir, &run_id);
         if matches!(findings_oid, ManifestFindingsOid::Absent) {
             continue;
         }
-        report.runs_with_findings += 1;
         let findings_oid = match findings_oid {
-            ManifestFindingsOid::Valid(oid) => oid,
+            ManifestFindingsOid::Valid(oid) => {
+                report.runs_with_findings += 1;
+                oid
+            }
+            ManifestFindingsOid::InvalidManifest => {
+                report.manual_required += 1;
+                report.findings.push(FindingsObjectFinding {
+                    inconsistency_type: CLASS_INVALID_RUN_MANIFEST.to_string(),
+                    run_id,
+                    detail: "run manifest has an unsupported schema or invalid identity/shape; no repairs were applied; use a compatible Libra version or restore the manifest"
+                        .to_string(),
+                    repaired: false,
+                    manual_required: true,
+                });
+                continue;
+            }
             ManifestFindingsOid::Invalid => {
+                report.runs_with_findings += 1;
                 report.manual_required += 1;
                 report.findings.push(FindingsObjectFinding {
                     inconsistency_type: CLASS_MISSING_FINDINGS_OBJECT.to_string(),
@@ -5279,6 +5581,30 @@ fn emit_report(report: &DoctorReport, output: &OutputConfig) -> CliResult<()> {
             );
         }
         if let Some(note) = &findings.note {
+            println!("  Note: {note}");
+        }
+    }
+
+    let tasks = &report.task_workspaces;
+    println!("Task workspaces:");
+    if !tasks.scanned {
+        println!(
+            "  not scanned ({})",
+            tasks.note.as_deref().unwrap_or("unavailable")
+        );
+    } else {
+        println!("  Validated attempts    : {}", tasks.validated_attempts);
+        println!("  Inconsistencies       : {}", tasks.findings.len());
+        for finding in &tasks.findings {
+            println!(
+                "    [{}] run {} / attempt {}: {}",
+                finding.inconsistency_type,
+                finding.run_id.as_deref().unwrap_or("unrecognized"),
+                finding.attempt_id.as_deref().unwrap_or("unrecognized"),
+                finding.detail,
+            );
+        }
+        if let Some(note) = &tasks.note {
             println!("  Note: {note}");
         }
     }
@@ -6346,6 +6672,91 @@ mod tests {
         assert!(
             !names.iter().any(|name| name == "attacker-run"),
             "pinned listing must not follow the replacement directory: {names:?}"
+        );
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn task_workspace_directory_listing_shares_a_total_budget() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        for directory in ["first", "second"] {
+            std::fs::create_dir(temp.path().join(directory)).expect("create directory");
+            for name in ["one", "two"] {
+                std::fs::write(temp.path().join(directory).join(name), b"entry")
+                    .expect("write entry");
+            }
+        }
+        let first = crate::utils::object::open_directory_tree_no_follow(&temp.path().join("first"))
+            .expect("open first");
+        let second =
+            crate::utils::object::open_directory_tree_no_follow(&temp.path().join("second"))
+                .expect("open second");
+        let mut remaining = 3;
+        assert_eq!(
+            task_directory_names(&first, &mut remaining)
+                .expect("first fits")
+                .len(),
+            2
+        );
+        assert_eq!(remaining, 1);
+        assert!(
+            task_directory_names(&second, &mut remaining).is_err(),
+            "second directory cannot reset the shared budget"
+        );
+        assert_eq!(remaining, 0);
+        assert!(
+            task_directory_names(&first, &mut remaining).is_err(),
+            "an exhausted scan cannot start another directory"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn task_workspace_scan_does_not_follow_container_or_intent_symlinks() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let storage = temp.path().join(".libra");
+        std::fs::create_dir_all(storage.join("worktree")).expect("create managed parent");
+        let external = temp.path().join("PRIVATE_EXTERNAL_TASK_CONTENT");
+        std::fs::create_dir(&external).expect("create external directory");
+        std::fs::write(external.join("sentinel"), b"external content remains")
+            .expect("write external sentinel");
+        std::os::unix::fs::symlink(&external, storage.join("worktree/tasks"))
+            .expect("plant container symlink");
+        let report = scan_task_workspaces(&storage);
+        assert_eq!(report.validated_attempts, 0);
+        assert!(
+            report
+                .note
+                .as_deref()
+                .is_some_and(|note| note.contains("could not be opened safely"))
+        );
+        assert!(
+            !serde_json::to_string(&report)
+                .expect("serialize report")
+                .contains("PRIVATE_EXTERNAL_TASK_CONTENT")
+        );
+
+        std::fs::remove_file(storage.join("worktree/tasks")).expect("remove fixture symlink");
+        let run_id = uuid::Uuid::new_v4();
+        let run_dir = storage.join("sessions/agent-runs").join(run_id.to_string());
+        std::fs::create_dir_all(&run_dir).expect("create metadata run");
+        std::os::unix::fs::symlink(&external, run_dir.join("workspace-intents"))
+            .expect("plant intent symlink");
+        let report = scan_task_workspaces(&storage);
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|finding| finding.inconsistency_type == "unverified_task_intent")
+        );
+        assert_eq!(
+            std::fs::read(external.join("sentinel")).expect("external sentinel remains"),
+            b"external content remains"
+        );
+        assert!(
+            std::fs::symlink_metadata(run_dir.join("workspace-intents"))
+                .expect("intent symlink remains")
+                .is_symlink()
         );
     }
 }

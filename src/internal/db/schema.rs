@@ -362,7 +362,11 @@ pub async fn inspect_schema_for_connection<C: ConnectionTrait>(
 ) -> io::Result<SchemaCompatibility> {
     let current = current_schema_version_for_role(conn, role).await?;
     let latest = latest_schema_version_for_role(role)?;
-    Ok(match (current, latest) {
+    Ok(classify_schema_versions(current, latest))
+}
+
+fn classify_schema_versions(current: Option<i64>, latest: Option<i64>) -> SchemaCompatibility {
+    match (current, latest) {
         (Some(current), latest) if latest.is_none_or(|latest| current > latest) => {
             SchemaCompatibility::UnsupportedFuture {
                 current_version: current,
@@ -379,7 +383,7 @@ pub async fn inspect_schema_for_connection<C: ConnectionTrait>(
             current_version: current,
             latest_version: latest,
         },
-    })
+    }
 }
 
 fn reject_future(role: DatabaseRole, compatibility: &SchemaCompatibility) -> io::Result<()> {
@@ -982,4 +986,79 @@ pub async fn create_database_for_role(
     }
     upgrade_connection_for_role(&conn, role).await?;
     Ok(conn)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::internal::db::migration::{MigrationRunner, WORKTREE_LAYOUT_CAPABILITY_VERSION};
+
+    #[tokio::test]
+    async fn worktree_layout_capability_rejects_simulated_old_binary() {
+        let conn = Database::connect("sqlite::memory:").await.unwrap();
+        conn.execute_unprepared(
+            "CREATE TABLE schema_versions (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL); \
+             INSERT INTO schema_versions VALUES (2026101902, 'worktree_layout_capability', 'fixture')",
+        )
+        .await
+        .unwrap();
+
+        let mut old_runner = MigrationRunner::new();
+        old_runner
+            .extend(
+                migrations_for_role(DatabaseRole::Repository)
+                    .into_iter()
+                    .filter(|migration| migration.version < WORKTREE_LAYOUT_CAPABILITY_VERSION),
+            )
+            .unwrap();
+        let current = old_runner.current_version_readonly(&conn).await.unwrap();
+        let old_latest = old_runner.max_registered_version();
+        assert_eq!(old_latest, Some(2026101901));
+        let compatibility = classify_schema_versions(current, old_latest);
+        let error = reject_future(DatabaseRole::Repository, &compatibility).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "repository database schema version 2026101902 is newer than this Libra binary supports (latest supported: 2026101901); install a newer Libra binary"
+        );
+        assert!(matches!(
+            inspect_schema_for_connection(&conn, DatabaseRole::Repository)
+                .await
+                .unwrap(),
+            SchemaCompatibility::Compatible {
+                current_version: Some(WORKTREE_LAYOUT_CAPABILITY_VERSION),
+                latest_version: Some(WORKTREE_LAYOUT_CAPABILITY_VERSION),
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn worktree_layout_capability_is_repository_only() {
+        let version = WORKTREE_LAYOUT_CAPABILITY_VERSION;
+        assert_eq!(
+            registered_receipts(SchemaLedger::Repository).get(&version),
+            Some(&"worktree_layout_capability")
+        );
+        assert!(!registered_receipts(SchemaLedger::Configuration).contains_key(&version));
+        for role in [DatabaseRole::GlobalConfig, DatabaseRole::SystemConfig] {
+            assert!(
+                migrations_for_role(role)
+                    .iter()
+                    .all(|migration| migration.version != version)
+            );
+            let conn = Database::connect("sqlite::memory:").await.unwrap();
+            upgrade_connection_for_role(&conn, role).await.unwrap();
+            assert_eq!(
+                current_schema_version_for_role(&conn, role).await.unwrap(),
+                Some(CONFIGURATION_BASE_VERSION)
+            );
+            let forbidden = conn
+                .query_all_raw(Statement::from_string(
+                    conn.get_database_backend(),
+                    "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('schema_versions', 'worktree_registry_capability')",
+                ))
+                .await
+                .unwrap();
+            assert!(forbidden.is_empty());
+        }
+    }
 }

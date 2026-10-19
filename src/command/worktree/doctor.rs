@@ -182,7 +182,7 @@ pub(crate) async fn collect_worktree_scope_report(
             "legacy-symlink" => findings.push(
                 "uses the pre-isolation shared-`.libra` symlink layout; mutations here are \
                   refused because they would move the MAIN worktree's HEAD/index. Migrate with \
-                  `libra worktree repair --migrate-layout --confirm <path>` from the main \
+                  `libra worktree repair --migrate-layout --confirm --path <path>` from the main \
                   worktree."
                     .to_string(),
             ),
@@ -193,7 +193,7 @@ pub(crate) async fn collect_worktree_scope_report(
             ),
             "corrupt" => findings.push(
                 "the worktree's `.libra` metadata could not be read; `libra worktree repair \
-                  --confirm <path>` restores its identity from the registry."
+                  --confirm --path <path>` restores its identity from the registry."
                     .to_string(),
             ),
             _ => {}
@@ -201,15 +201,15 @@ pub(crate) async fn collect_worktree_scope_report(
         if !identity_registered && entry.layout != "missing" {
             findings.push(
                 "this worktree's identity is not one the registry knows, so mutations here are \
-                  refused; `libra worktree repair --confirm <path>` restores it from the \
+                  refused; `libra worktree repair --confirm --path <path>` restores it from the \
                   registry's persisted id."
                     .to_string(),
             );
         }
         if entry.state == "detached_from_registry" {
             findings.push(
-                "detached from the registry: re-attach with `libra worktree add <path>`, or \
-                  finish the removal with `libra worktree remove --delete-dir <path>`."
+                "detached from the registry: re-attach with `libra worktree add <name> --path <path>`, or \
+                  finish the removal with `libra worktree remove --delete-dir --path <path>`."
                     .to_string(),
             );
         }
@@ -296,7 +296,7 @@ pub(crate) async fn collect_worktree_scope_report(
             findings.push(format!(
                 "this identity ('{id}') is claimed by {} entries ({}); every worktree MUTATION \
                   is refused until one is unregistered — \
-                  `libra worktree repair <path> --resolve-identity --yes` on the one you do not \
+                  `libra worktree repair --path <path> --resolve-identity --yes` on the one you do not \
                   want. Ordinary remove cannot do it: it needs the same loader that is refusing.",
                 other.len(),
                 other.join(", ")
@@ -426,6 +426,10 @@ pub(crate) async fn list_worktrees(
             line.push_str("main ");
         } else {
             line.push_str("worktree ");
+        }
+        if let Some(name) = &w.name {
+            line.push_str(name);
+            line.push(' ');
         }
         line.push_str(&w.path);
         if w.locked {
@@ -1376,34 +1380,6 @@ pub(crate) fn print_scope_diagnostics(findings: &[ScopeDiagnostic]) {
     }
 }
 
-pub(crate) fn restore_marker_on_refusal(
-    entry_is_detached: bool,
-    target: &Path,
-    worktree_id: Option<&str>,
-) -> bool {
-    // Restore UNCONDITIONALLY for detached entries: the marker may have
-    // been lifted for the dirty check, or may have been missing already
-    // (a crash between registry publication and marker creation) — either
-    // way, a refused delete must leave the directory frozen again.
-    if !entry_is_detached {
-        return true;
-    }
-    let Some(id) = worktree_id else {
-        return false;
-    };
-    match write_detached_marker(target, id) {
-        Ok(()) => true,
-        Err(error) => {
-            tracing::warn!(
-                %error,
-                "could not restore the detached marker after a refused delete; the \
-                 pending journal row lets `worktree repair` re-freeze the directory"
-            );
-            false
-        }
-    }
-}
-
 #[derive(Debug, Serialize)]
 pub(crate) struct MigrateLayoutOutput {
     dry_run: bool,
@@ -1416,6 +1392,18 @@ pub(crate) async fn migrate_layout_run(
     filter: Option<String>,
     dry_run: bool,
 ) -> WorktreeResult<MigrateLayoutOutput> {
+    let _registry_lock = if dry_run {
+        None
+    } else {
+        Some(acquire_registry_lock_async().await?)
+    };
+    migrate_layout_run_locked(filter, dry_run).await
+}
+
+pub(crate) async fn migrate_layout_run_locked(
+    filter: Option<String>,
+    dry_run: bool,
+) -> WorktreeResult<MigrateLayoutOutput> {
     if util::current_worktree_id().is_some() || util::is_legacy_symlink_worktree() {
         return Err(WorktreeError::OperationBlocked(
             "run `worktree repair --migrate-layout --confirm` from the MAIN worktree".to_string(),
@@ -1425,12 +1413,10 @@ pub(crate) async fn migrate_layout_run(
     // upgrade, and NO database open at all — the lockless reader is enough to
     // enumerate layouts, and even a migration-applying connection would be a
     // write on the repository being previewed (§C.11, Codex R20).
-    let (_registry_lock, state) = if dry_run {
-        (None, load_state_readonly()?)
+    let state = if dry_run {
+        load_state_readonly()?
     } else {
-        let guard = acquire_registry_lock_async().await?;
-        let state = load_state()?;
-        (Some(guard), state)
+        load_state()?
     };
     let filter_path = match &filter {
         Some(raw) => Some(resolve_path(raw, "worktree path")?),
@@ -2047,10 +2033,9 @@ pub(crate) struct WorktreeRepairIdentityOutput {
     commondir_restored: bool,
 }
 
-pub(crate) async fn repair_worktree_identity(
+pub(crate) async fn repair_worktree_identity_locked(
     path: String,
 ) -> WorktreeResult<WorktreeRepairIdentityOutput> {
-    let _registry_lock = acquire_registry_lock_async().await?;
     // A legacy v1 registry carries NO persisted identities — refuse before
     // the locked loader would durably upgrade it (backfilling ids from the
     // possibly-damaged gitdirs this command is meant to repair). The no-arg
@@ -2106,7 +2091,7 @@ pub(crate) async fn repair_worktree_identity(
     if detect_entry_layout(&target, false) == "legacy-symlink" {
         return Err(WorktreeError::OperationBlocked(format!(
             "'{}' uses the legacy shared-.libra symlink layout; run `libra worktree \
-              repair --migrate-layout --confirm {}` first",
+              repair --migrate-layout --confirm --path {}` first",
             target.display(),
             target.display()
         )));
@@ -2256,6 +2241,10 @@ pub(crate) fn render_repair_identity(
 
 pub(crate) async fn repair_worktrees() -> WorktreeResult<WorktreeRepairOutput> {
     let _registry_lock = acquire_registry_lock_async().await?;
+    repair_worktrees_locked().await
+}
+
+pub(crate) async fn repair_worktrees_locked() -> WorktreeResult<WorktreeRepairOutput> {
     // The healing loader may itself rewrite the file (v1 upgrade, identity
     // invariants); report that as a change too.
     let bytes_before = fs::read(state_path()).ok();
@@ -2432,7 +2421,7 @@ pub(crate) async fn recover_pending_intents(
                                 "interrupted detach of '{path}' NOT rolled forward: the \
                                   worktree has in-progress sequencer/bisect state that \
                                   started after the crash; finish or abort it, rerun \
-                                  `libra worktree remove {path}`, then repair"
+                                  `libra worktree remove --path {path}`, then repair"
                             ));
                         } else if let Some(id_str) = entry_id.as_deref().or(worktree_id.as_deref())
                         {
@@ -2529,7 +2518,7 @@ pub(crate) async fn recover_pending_intents(
                                 notes.push(format!(
                                     "stale re-attach intent for '{path}' rolled back — \
                                       the entry is (still or again) detached and stays \
-                                      frozen; rerun `libra worktree add {path}` to \
+                                      frozen; rerun `libra worktree add <name> --path {path}` to \
                                       re-attach it"
                                 ));
                             }

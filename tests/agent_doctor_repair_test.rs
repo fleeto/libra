@@ -3617,6 +3617,255 @@ async fn findings_object_repair() {
     );
 }
 
+/// A future run format must never authorize findings repair. Both supported
+/// generations retain the same object repair behavior once the format is known.
+#[tokio::test]
+async fn findings_repair_gates_unknown_manifest_schema_and_supports_v1_v2() {
+    use libra::internal::ai::review::{
+        ReviewRunStore, ReviewTerminalState, store::RedactionReportSummary,
+    };
+
+    let repo = DoctorRepo::init();
+    let store = ReviewRunStore::new(repo.repo.join(".libra/sessions"));
+    let run_id = "schema-gated-findings-run";
+    store
+        .create_run(run_id, &["codex".to_string()], "sha", "HEAD~1..HEAD")
+        .expect("create run");
+    store
+        .write_findings(
+            run_id,
+            "findings whose manifest version authorizes repair\n",
+        )
+        .expect("write findings");
+    store
+        .finalize_run(
+            run_id,
+            ReviewTerminalState::Success,
+            &[],
+            RedactionReportSummary::default(),
+        )
+        .expect("finalize findings");
+    let manifest_path = repo
+        .repo
+        .join(".libra/sessions/agent-runs")
+        .join(run_id)
+        .join("manifest.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&manifest_path).expect("read manifest"))
+            .expect("parse manifest");
+    let oid = manifest["findings_oid"]
+        .as_str()
+        .expect("findings oid")
+        .to_string();
+    let object_path = repo
+        .repo
+        .join(".libra/objects")
+        .join(&oid[..2])
+        .join(&oid[2..]);
+    std::fs::remove_file(&object_path).expect("remove findings object");
+    manifest["schema_version"] = serde_json::json!(99);
+    let unsupported = serde_json::to_vec(&manifest).expect("encode unsupported manifest");
+    std::fs::write(&manifest_path, &unsupported).expect("write unsupported manifest");
+
+    let report = repo.doctor_json(true);
+    assert!(
+        report["findings_store"]["findings"]
+            .as_array()
+            .expect("findings array")
+            .iter()
+            .any(|finding| {
+                finding["run_id"] == run_id
+                    && finding["inconsistency_type"] == "invalid_run_manifest"
+                    && finding["manual_required"] == true
+                    && finding["repaired"] == false
+            }),
+        "unknown schema must be reported without repair: {report}"
+    );
+    assert!(
+        !object_path.exists(),
+        "unknown schema must not authorize object writes"
+    );
+    assert_eq!(
+        std::fs::read(&manifest_path).expect("manifest remains"),
+        unsupported
+    );
+
+    for schema_version in [1, 2] {
+        manifest["schema_version"] = serde_json::json!(schema_version);
+        std::fs::write(
+            &manifest_path,
+            serde_json::to_vec(&manifest).expect("encode known manifest"),
+        )
+        .expect("write known manifest");
+        let report = repo.doctor_json(true);
+        assert!(
+            object_path.exists(),
+            "schema {schema_version} must retain findings repair: {report}"
+        );
+        if schema_version == 1 {
+            std::fs::remove_file(&object_path).expect("remove object for the v2 repair check");
+        }
+    }
+}
+
+/// Managed task artifacts without verified ownership are reported, including
+/// incomplete creation intents. Doctor never turns this diagnosis into deletion.
+#[test]
+fn managed_task_workspace_doctor_reports_orphans_without_removing_files() {
+    use libra::internal::ai::{
+        review::ReviewRunStore,
+        workspace_isolation::{TaskWorkspaceKind, create_task_workspace},
+    };
+
+    let repo = DoctorRepo::init();
+    let common = repo
+        .repo
+        .join(".libra")
+        .canonicalize()
+        .expect("canonical storage");
+    let store = ReviewRunStore::new(common.join("sessions"));
+    let owned_run = uuid::Uuid::new_v4();
+    store
+        .create_run(
+            &owned_run.to_string(),
+            &["codex".to_string()],
+            "sha",
+            "scope",
+        )
+        .expect("create owned run");
+    let owned_run_dir = common
+        .join("sessions/agent-runs")
+        .join(owned_run.to_string());
+    let owned = create_task_workspace(
+        &common,
+        &owned_run_dir,
+        owned_run,
+        TaskWorkspaceKind::Workspace,
+    )
+    .expect("create owned workspace");
+    let owned_sentinel = owned.canonical_path.join("owned.txt");
+    std::fs::write(&owned_sentinel, b"owned content remains").expect("write owned sentinel");
+
+    let orphan_run = uuid::Uuid::new_v4();
+    let orphan_attempt = uuid::Uuid::new_v4();
+    let orphan_root = common
+        .join("worktree/tasks")
+        .join(orphan_run.to_string())
+        .join(orphan_attempt.to_string());
+    std::fs::create_dir_all(orphan_root.join("workspace")).expect("create unowned workspace");
+    let orphan_sentinel = orphan_root.join("workspace/unowned.txt");
+    std::fs::write(&orphan_sentinel, b"unowned content remains").expect("write orphan sentinel");
+    let orphan_metadata = common
+        .join("sessions/agent-runs")
+        .join(orphan_run.to_string());
+    let intent_dir = orphan_metadata.join("workspace-intents");
+    std::fs::create_dir_all(&intent_dir).expect("create incomplete intent directory");
+    let intent_path = intent_dir.join(format!("{orphan_attempt}.intent.json"));
+    let unknown_intent = br#"{"layout_version":99}"#;
+    std::fs::write(&intent_path, unknown_intent).expect("write unknown intent");
+    let private_marker = "PRIVATE_UNRECOGNIZED_TASK_ENTRY";
+    std::fs::create_dir_all(common.join("worktree/tasks").join(private_marker))
+        .expect("create unrecognized task entry");
+
+    for repair in [false, true] {
+        let report = repo.doctor_json(repair);
+        let tasks = &report["task_workspaces"];
+        assert_eq!(tasks["validated_attempts"], 1, "{report}");
+        let findings = tasks["findings"].as_array().expect("task findings");
+        assert!(
+            findings.iter().any(|finding| {
+                finding["inconsistency_type"] == "unverified_task_intent"
+                    && finding["run_id"] == orphan_run.to_string()
+            }),
+            "incomplete intent must be visible: {report}"
+        );
+        assert!(
+            findings.iter().any(|finding| {
+                finding["inconsistency_type"] == "unowned_task_workspace"
+                    && finding["attempt_id"] == orphan_attempt.to_string()
+            }),
+            "unowned workspace must be visible: {report}"
+        );
+        assert!(findings.iter().all(|finding| finding["repaired"] == false));
+        assert!(
+            !report.to_string().contains(private_marker),
+            "unrecognized names must not leak into diagnostics"
+        );
+        assert_eq!(
+            std::fs::read(&owned_sentinel).expect("owned sentinel remains"),
+            b"owned content remains"
+        );
+        assert_eq!(
+            std::fs::read(&orphan_sentinel).expect("orphan sentinel remains"),
+            b"unowned content remains"
+        );
+        assert_eq!(
+            std::fs::read(&intent_path).expect("intent remains"),
+            unknown_intent
+        );
+    }
+
+    // A still-valid attempt directory is insufficient when its active
+    // workspace leaf has disappeared or changed identity.
+    let displaced = owned.attempt_root().join("retained-original-workspace");
+    std::fs::rename(&owned.canonical_path, &displaced).expect("retain original workspace");
+    let assert_damaged_workspace_is_reported = || {
+        let report = repo.doctor_json(true);
+        assert_eq!(
+            report["task_workspaces"]["validated_attempts"], 0,
+            "{report}"
+        );
+        assert!(
+            report["task_workspaces"]["findings"]
+                .as_array()
+                .expect("task findings")
+                .iter()
+                .any(|finding| {
+                    finding["inconsistency_type"] == "unverified_task_workspace"
+                        && finding["run_id"] == owned_run.to_string()
+                        && finding["attempt_id"] == owned.attempt_id.to_string()
+                        && finding["repaired"] == false
+                }),
+            "active workspace leaf damage must not be reported healthy: {report}"
+        );
+        assert_eq!(
+            std::fs::read(displaced.join("owned.txt")).expect("original content remains"),
+            b"owned content remains"
+        );
+    };
+    assert_damaged_workspace_is_reported();
+    assert!(
+        !owned.canonical_path.exists(),
+        "doctor must not recreate the missing workspace"
+    );
+    std::fs::create_dir(&owned.canonical_path).expect("replace workspace leaf");
+    assert_damaged_workspace_is_reported();
+    assert!(
+        owned.canonical_path.is_dir(),
+        "doctor must retain the replacement directory"
+    );
+    #[cfg(unix)]
+    {
+        std::fs::remove_dir(&owned.canonical_path)
+            .expect("remove empty replacement for symlink fixture");
+        let outside = tempfile::tempdir().expect("outside workspace");
+        std::fs::write(outside.path().join("outside.txt"), b"outside remains")
+            .expect("write outside sentinel");
+        std::os::unix::fs::symlink(outside.path(), &owned.canonical_path)
+            .expect("replace workspace with symlink");
+        assert_damaged_workspace_is_reported();
+        assert_eq!(
+            std::fs::read(outside.path().join("outside.txt")).expect("outside sentinel remains"),
+            b"outside remains"
+        );
+        assert!(
+            std::fs::symlink_metadata(&owned.canonical_path)
+                .expect("symlink remains")
+                .is_symlink()
+        );
+    }
+}
+
 /// A0-06 (codex P1-1): a findings blob already indexed under a different
 /// `agent_*` tag (e.g. `agent_transcript`, because identical bytes were first
 /// seen as a transcript) with the correct size must NOT be flagged as

@@ -37,6 +37,15 @@ files such as `.env.test` never enter it) — with a minimal read-only
 CLI invocation and an environment cleared down to a documented
 allowlist. Reviewers never run in the repository worktree itself.
 
+New workspaces are created at the common storage root
+`.libra/worktree/tasks/<run-id>/<attempt-id>/workspace/`, including when the
+command starts from a linked worktree. A raw task snapshot is not a linked
+repository: an ordinary `libra` command launched from that directory cannot
+implicitly discover the main repository. Repository access requires an
+explicitly validated scope supplied by the runtime. Libra does not apply its
+internal OS sandbox to the external reviewer CLI; that CLI's own sandbox
+settings determine whether it can access sibling workspaces or common storage.
+
 A run blocks in the foreground until every reviewer reaches an outcome
 and ends in exactly one of five terminal states: `success`, `error`,
 `cancelled`, `timeout`, or `partial`. Pressing Ctrl-C (or sending
@@ -56,6 +65,24 @@ always strips ANSI/terminal control sequences before rendering
 `findings.md`, so a hostile reviewer cannot forge terminal output, and
 the JSON output carries the same sanitized rendering.
 
+### Workspace retention
+
+Run metadata remains under `.libra/sessions/agent-runs/<run_id>/`. New
+`state.json` and `manifest.json` records use schema version 2 and retain the
+workspace ownership descriptor. Known version-1 records remain readable without
+moving old directories or bulk rewriting saved runs. Unknown versions are
+refused for writes and cleanup.
+
+`review clean` removes only terminal runs of its own kind. It validates the
+saved descriptor and directory identity, then removes owned workspaces before
+run metadata. A link, replaced directory, ownership conflict or cleanup error
+keeps the recovery record for a later retry. A directory name alone never
+proves ownership; preserve reported orphan directories for diagnosis.
+If orphaned-run cancellation cannot clean a proven workspace, it still marks
+the run `cancelled` and reports `workspace_action: cleanup_failed` with the
+error. The ownership intents remain, so `review clean --run <run_id>` can
+retry after the underlying problem is fixed.
+
 ### Scope selection
 
 The recorded `target_scope` labels what the reviewers were asked to
@@ -67,16 +94,17 @@ review:
   `libra agent checkpoint list`). The reviewers' workspace is the
   checkpoint's own captured content — `metadata.json`, an optional
   `manifest.json`, and the transcript files — materialized READ-ONLY
-  under the run directory (`<run_dir>/checkpoint-input/`). It is never
+  at `.libra/worktree/tasks/<run-id>/<attempt-id>/checkpoint-input/`. It is never
   disguised as a worktree diff: no repository snapshot is materialized
   at all, so a scoped run can only consume the named checkpoint, and the
   scoped prompt tells reviewers they are looking at a captured
   transcript whose content is untrusted data. A missing checkpoint, a
   malformed checkpoint tree, or content that is not present in the local
   object store fails closed BEFORE any run is created (no run residue).
-  The materialization lives inside the run directory, so it shares the
-  run's retention exactly (`review clean` removes it with the run) and
-  `agent doctor` needs no new orphan class.
+  The run records ownership of the separate input directory. `review clean`
+  verifies and removes owned input before deleting run metadata; a cleanup
+  failure preserves the record for retry. `agent doctor` reports unowned
+  managed task directories without deleting them.
 
 ### Pagination
 
@@ -114,7 +142,7 @@ libra review show <run_id> --json
 # Cancel a running review (same cleanup as Ctrl-C)
 libra review cancel <run_id>
 
-# Remove run directories
+# Remove a finished run and its owned workspace
 libra review clean --run <run_id>
 libra review clean --all
 ```

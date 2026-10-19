@@ -734,6 +734,7 @@ MEM-03 → MEM-04；LR-09（plan-20260913 `FL-04/05` 收口）；LR-10；MEM-05 
 
 | 日期计划 | 主要归属 | 当前状态 | 说明 |
 |---|---|---|---|
+| [`plan-20261019-worktree-layout.md`](plan-20261019-worktree-layout.md) | 横切（worktree 默认目录与任务生命周期） | 实施中 | WD-01..08 与 WD-02G 已授权；正式 0/9，REL-WD01 待最终验证及发布；旧数据不迁移。 |
 | [`plan-20260926.md`](plan-20260926.md) | C（MEM-01/02） | 实施中 | 取代 plan-20260819：`DM-00/01/02/03/10/13` `done`/`complete`、`DM-11` locally-accepted，`libra memory` 命令面/Episode 投影/新鲜度窗口已合入；`DM-04..09/12` 待办；文件头状态与卡内状态不一致，以卡与提交为准 |
 | [`plan-20261013-coverage-schema.md`](plan-20261013-coverage-schema.md) | B（OpenCode coverage schema-v2 前置） | 实施中 | COV2-05/09 执行中：signed+DCO push 已记录（`b1443c9`）；COV source 16/26，最终事实复核与 signed 交付待本次 main |
 | [`plan-20260927-closeout.md`](plan-20260927-closeout.md) | 横切（plan-20260927 收尾） | 实施中 | 临时跟踪计划：核心六命令模块拆分已实现、全量 8274/8274 绿、`v0.30.8` 已发布；剩余 gap 修复逐项验收，不 bump/不发新版 |

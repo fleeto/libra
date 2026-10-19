@@ -500,7 +500,13 @@ async fn doctor_recovery_uses_pinned_main_scope_from_linked_cwd() {
         );
     }
     let output = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .args(["worktree", "add", linked.to_str().expect("linked path")])
+        .args([
+            "worktree",
+            "add",
+            "linked",
+            "--path",
+            linked.to_str().expect("linked path"),
+        ])
         .current_dir(&main)
         .output()
         .expect("create linked worktree");

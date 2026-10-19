@@ -498,7 +498,16 @@ fn linked_dirty_cache_rows_and_meta_isolated() {
     let wt_root = tempdir().expect("wt root");
     let wt = wt_root.path().join("dirty-wt");
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &[
+                "worktree",
+                "add",
+                "dirty-wt",
+                "--path",
+                wt.to_str().unwrap(),
+            ],
+            main,
+        ),
         "worktree add",
     );
 
@@ -559,7 +568,16 @@ fn linked_dirty_mark_is_scoped() {
     let wt_root = tempdir().expect("wt root");
     let wt = wt_root.path().join("dirty-mark-wt");
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &[
+                "worktree",
+                "add",
+                "dirty-mark-wt",
+                "--path",
+                wt.to_str().unwrap(),
+            ],
+            main,
+        ),
         "worktree add",
     );
     assert_cli_success(&run_libra_command(&["status", "--scan"], main), "main scan");

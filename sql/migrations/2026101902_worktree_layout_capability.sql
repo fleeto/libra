@@ -1,0 +1,15 @@
+-- Repository capability barrier for named worktree registry v4 and task
+-- manifest/state v2, including workspaces beneath .libra/worktree/.
+--
+-- Older agent cleanup can remove run metadata without reading its manifest,
+-- so JSON schema versions alone cannot protect managed task workspaces. The
+-- schema_versions receipt causes those binaries to refuse repository opening
+-- before cleanup, registry mutation, or garbage collection can start.
+--
+-- This is metadata only: do not move directories, rewrite registry entries,
+-- assign names to old worktrees, or transform task data. GlobalConfig and
+-- SystemConfig never apply Repository migrations.
+--
+-- The registered migration has no down DDL. Removing its receipt would admit
+-- old writers while filesystem state may still require the new layout.
+INSERT OR IGNORE INTO `worktree_registry_capability` (`version`) VALUES (4);

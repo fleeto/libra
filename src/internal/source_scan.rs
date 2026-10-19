@@ -335,7 +335,7 @@ fn collect(dir: &Path, root: &Path, excludes: &[&str], into: &mut Vec<(String, s
 /// the repository.
 pub fn storage_rooted_join_literals() -> std::collections::BTreeSet<String> {
     #[derive(Default)]
-    struct Joins(std::collections::BTreeSet<String>);
+    struct Joins(std::collections::BTreeSet<String>, bool);
     struct Idents(Vec<String>);
 
     impl<'ast> syn::visit::Visit<'ast> for Idents {
@@ -363,7 +363,10 @@ pub fn storage_rooted_join_literals() -> std::collections::BTreeSet<String> {
                 let mut idents = Idents(Vec::new());
                 syn::visit::visit_expr(&mut idents, &call.receiver);
                 let named_root = idents.0.iter().any(|ident| {
-                    ident.contains("gitdir") || ident.contains("storage") || ident == "libradir"
+                    ident.contains("gitdir")
+                        || ident.contains("storage")
+                        || ident == "libradir"
+                        || (self.1 && ident == "common")
                 });
                 // …or the receiver IS the storage root, spelled out:
                 // `working_dir.join(".libra").join("automations.toml")` —
@@ -394,8 +397,20 @@ pub fn storage_rooted_join_literals() -> std::collections::BTreeSet<String> {
     }
 
     let mut found = Joins::default();
-    for (_label, file) in production_files(&[]) {
-        syn::visit::Visit::visit_file(&mut found, &file);
+    for (label, file) in production_files(&[]) {
+        // The worktree layout modules call the repository storage root
+        // `common`. Recognize that alias only there; a generic `common`
+        // elsewhere may refer to an arbitrary workdir or temporary path.
+        let common_storage_alias = matches!(
+            label.as_str(),
+            "src/utils/worktree_layout.rs"
+                | "src/command/worktree/lock.rs"
+                | "src/command/worktree/registry.rs"
+                | "src/command/worktree-fuse.rs"
+        );
+        let mut per_file = Joins(std::collections::BTreeSet::new(), common_storage_alias);
+        syn::visit::Visit::visit_file(&mut per_file, &file);
+        found.0.extend(per_file.0);
     }
     found.0
 }

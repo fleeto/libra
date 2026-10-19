@@ -52,6 +52,36 @@ pub const MAX_REPORTED_CWD_BYTES: usize = 4096;
 /// used to derive this preimage.
 pub(crate) const CAPTURE_DEDUP_PREIMAGE_BYTES: usize = 32;
 
+/// MessageDisplay is coalesced before capture, not stored once per batch.
+pub const MESSAGE_DISPLAY_COALESCE_LIMIT: u32 = 128;
+
+fn message_display_counts() -> &'static std::sync::Mutex<std::collections::HashMap<String, u32>> {
+    static COUNTS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, u32>>> =
+        std::sync::OnceLock::new();
+    COUNTS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Admit the first 128 MessageDisplay batches in this process per session.
+pub fn admit_message_display(session_id: &str) -> bool {
+    let mut counts = message_display_counts()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let count = counts.entry(session_id.to_string()).or_insert(0);
+    if *count >= MESSAGE_DISPLAY_COALESCE_LIMIT {
+        return false;
+    }
+    *count += 1;
+    true
+}
+
+/// Test isolation for the in-process MessageDisplay capacity gate.
+pub fn reset_message_display_counts_for_test() {
+    message_display_counts()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clear();
+}
+
 // Production never re-anchors a host deadline. This narrow test seam waits
 // until a fixture has actually forked its pipe-holding descendant, then gives
 // that established process group a short deadline. It prevents the reaping

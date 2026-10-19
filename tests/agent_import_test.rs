@@ -3403,7 +3403,13 @@ async fn agent_import_accepts_sibling_linked_worktree_of_same_repository() {
     let fixture = ImportRepo::init();
     let sibling = fixture._tmp.path().join("sibling-worktree");
     let sibling_arg = path_arg(&sibling);
-    let added = fixture.run(&["worktree", "add", sibling_arg.as_str()]);
+    let added = fixture.run(&[
+        "worktree",
+        "add",
+        "sibling-worktree",
+        "--path",
+        sibling_arg.as_str(),
+    ]);
     assert!(
         added.status.success(),
         "create sibling linked worktree: {}",

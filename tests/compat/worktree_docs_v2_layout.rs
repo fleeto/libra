@@ -71,3 +71,24 @@ fn worktree_docs_match_v2_layout() {
         }
     }
 }
+
+/// The named CLI and centralized default are public behavior in both languages.
+#[test]
+fn worktree_docs_describe_named_managed_layout() {
+    for (page, text) in PAGES {
+        for required in [".libra/worktree/linked", "--path"] {
+            assert!(
+                text.contains(required),
+                "{page} must document the named-worktree contract `{required}`"
+            );
+        }
+    }
+    for (page, text) in &PAGES[..2] {
+        for required in ["--from-path", "detached_from_registry", "schema_version"] {
+            assert!(
+                text.contains(required),
+                "{page} must explain `{required}` for named worktree operations"
+            );
+        }
+    }
+}

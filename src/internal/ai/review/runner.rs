@@ -43,7 +43,7 @@
 use std::{
     collections::HashMap,
     io,
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -75,8 +75,9 @@ use crate::internal::ai::{
     agent_run::AgentRunId,
     checkpoint_input::ValidatedMaterializeError,
     workspace_isolation::{
-        FuseProvisionState, SubAgentWorkspace, WorkspaceIsolationConfig,
-        materialize_isolated_workspace,
+        FuseProvisionState, SubAgentWorkspace, TaskWorkspaceBackend, TaskWorkspaceDescriptor,
+        WorkspaceIsolationConfig, cleanup_task_workspace, has_task_workspace_intents,
+        materialize_isolated_workspace, verify_task_workspace,
     },
 };
 
@@ -202,7 +203,7 @@ pub struct ReviewRunRequest {
     pub allow_full_copy: bool,
     pub claude_max_budget_usd: String,
     /// PD-02 checkpoint scope: when set, the reviewers' workspace is the
-    /// checkpoint's materialized content (`<run_dir>/checkpoint-input/`)
+    /// checkpoint's materialized content in a fresh managed task attempt
     /// instead of an isolated worktree snapshot — the run consumes ONLY
     /// the named checkpoint. The spec was validated by the command layer
     /// before any run side effect.
@@ -396,13 +397,23 @@ async fn run_review_inner(
     // through an ignore-aware walk, so gitignored secret files never
     // enter the workspace. (FUSE would need its own exposure proof
     // first.) Checkpoint scope (PD-02): the reviewers' workspace is the
-    // checkpoint's own materialized content inside the run directory —
+    // checkpoint's own materialized content in its managed task attempt —
     // no worktree snapshot exists at all, so a scoped run can only
     // consume the named checkpoint.
     let mut workspace_guard;
     let workspace_root;
+    let workspace_descriptor;
+    let common_storage = store
+        .sessions_root()
+        .parent()
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "review sessions root has no common storage parent",
+            )
+        })?
+        .to_path_buf();
     if let Some(spec) = &request.checkpoint_input {
-        let storage = request.repo_root.join(crate::utils::util::ROOT_DIR);
         let phase_started = Instant::now();
         let store_for_cancel = store.clone();
         let run_for_cancel = run_id_str.clone();
@@ -411,7 +422,7 @@ async fn run_review_inner(
             cancel_probe.is_cancelled() || store_for_cancel.cancel_requested(&run_for_cancel)
         });
         match crate::internal::ai::checkpoint_input::materialize_validated_checkpoint_input(
-            &storage,
+            &common_storage,
             spec,
             &run_dir,
             phase_started + request.reviewer_timeout,
@@ -419,9 +430,18 @@ async fn run_review_inner(
         )
         .await
         {
-            Ok(root) => {
-                workspace_guard = ReviewWorkspaceGuard { workspace: None };
-                workspace_root = root;
+            Ok(descriptor) => {
+                workspace_root = descriptor.canonical_path.clone();
+                workspace_guard = ReviewWorkspaceGuard {
+                    store: store.clone(),
+                    run_id: run_id_str.clone(),
+                    workspace: Some(ReviewWorkspaceResource::Checkpoint {
+                        common_storage: common_storage.clone(),
+                        run_dir: run_dir.clone(),
+                        descriptor: descriptor.clone(),
+                    }),
+                };
+                workspace_descriptor = descriptor;
             }
             Err(err) => {
                 // Setup expiry stays the infrastructure error. Cancel, including
@@ -469,7 +489,8 @@ async fn run_review_inner(
         let _ = fuse_state.disable_first_time();
         let isolation = WorkspaceIsolationConfig {
             fuse_state,
-            sessions_root: store.sessions_root().to_path_buf(),
+            common_storage,
+            run_dir: run_dir.clone(),
             allow_full_copy: request.allow_full_copy,
         };
         let repo_root = request.repo_root.clone();
@@ -515,20 +536,17 @@ async fn run_review_inner(
                 return Ok(outcome);
             }
         };
+        workspace_root = workspace.root().to_path_buf();
+        workspace_descriptor = workspace.descriptor().clone();
         workspace_guard = ReviewWorkspaceGuard {
-            workspace: Some(workspace),
+            store: store.clone(),
+            run_id: run_id_str.clone(),
+            workspace: Some(ReviewWorkspaceResource::Snapshot(workspace)),
         };
-        workspace_root = workspace_guard
-            .workspace
-            .as_ref()
-            .map(|ws| ws.root().to_path_buf())
-            .unwrap_or_default();
     }
     // Record the workspace root so an orphaned-run cancel (this process
     // dies without finalizing) can still release the directory.
-    store.update_state(&run_id_str, |state| {
-        state.workspace_root = Some(workspace_root.display().to_string());
-    })?;
+    store.record_workspace(&run_id_str, &workspace_descriptor)?;
 
     // ---- Build the final commands against the workspace. ----
     let plan = ReviewerLaunchPlan {
@@ -607,8 +625,18 @@ async fn run_review_inner(
         let cancel = cancel.clone();
         let sink_tx = sink_tx.clone();
         let workspace_root = workspace_root.clone();
+        let workspace_descriptor = workspace_descriptor.clone();
         handles.push(tokio::spawn(async move {
-            run_one_reviewer(index, command, workspace_root, semaphore, cancel, sink_tx).await
+            run_one_reviewer(
+                index,
+                command,
+                workspace_root,
+                workspace_descriptor,
+                semaphore,
+                cancel,
+                sink_tx,
+            )
+            .await
         }));
     }
     drop(sink_tx);
@@ -716,8 +744,17 @@ fn finalize(
     mut redaction: RedactionReportSummary,
     request: &ReviewRunRequest,
     started: Instant,
-    infra_error: Option<String>,
+    mut infra_error: Option<String>,
 ) -> Result<ReviewRunOutcome, ReviewRunError> {
+    if let Err(error) = store.cleanup_workspaces(run_id) {
+        let cleanup_error = format!(
+            "workspace cleanup failed: {error}; run metadata was retained so cleanup can be retried"
+        );
+        infra_error = Some(match infra_error {
+            Some(previous) => format!("{previous}; {cleanup_error}"),
+            None => cleanup_error,
+        });
+    }
     let outcomes: Vec<ReviewerOutcome> = reports.iter().map(|report| report.outcome).collect();
     let terminal = if infra_error.is_some() {
         ReviewTerminalState::Error
@@ -814,19 +851,15 @@ pub enum OrphanedWorkspaceAction {
     /// The run never recorded a workspace (the runner died before
     /// materialization).
     NoneRecorded,
-    /// The recorded workspace directory existed, resolved (after
-    /// symlink canonicalization) to a `libra-task-worktree-*` directory
-    /// INSIDE this repo's task-worktree base, and was removed.
+    /// The run's durable intent and ownership proof authorized removal.
     Removed,
     /// The recorded workspace directory no longer exists (the dead
     /// runner — or a previous cancel — already released it).
     AlreadyGone,
-    /// The recorded path was NOT touched: it does not carry the Libra
-    /// task-worktree shape, or it does not canonicalize to a location
-    /// inside this repo's task-worktree base. A corrupted `state.json`
-    /// must never delete arbitrary directories — not even a same-named
-    /// `libra-task-worktree-*` directory somewhere else.
+    /// The old recorded path has no managed ownership proof and was kept.
     RefusedSuspiciousPath,
+    /// A proven attempt could not be cleaned; its intent remains for retry.
+    CleanupFailed,
 }
 
 /// Honest report of an orphaned-run cancel: exactly what was released
@@ -857,13 +890,15 @@ pub struct OrphanedRunCancel {
     /// The path the workspace action refers to (the removable cleanup
     /// root, or the recorded path verbatim when refused).
     pub workspace_path: Option<String>,
+    /// Why cleanup failed, when `workspace_action` is `cleanup_failed`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_error: Option<String>,
 }
 
 /// Cancel a run whose owning runner is gone (crashed or SIGKILLed
 /// before finalizing): kill the recorded reviewer process groups that
 /// are still alive AND provably ours (pid start-time provenance),
-/// remove the recorded isolated-workspace directory (only when it
-/// canonicalizes into this repo's task-worktree base), and stamp the
+/// remove the isolated workspace using its durable ownership intent, and stamp the
 /// run `cancelled` — then report exactly what happened.
 ///
 /// This is the honest counterpart of the live-run cancel (the marker +
@@ -880,12 +915,10 @@ pub struct OrphanedRunCancel {
 ///   ([`process_start_ticks`]). Mismatch, missing recorded provenance
 ///   (old runs), or an unverifiable platform (no `/proc`) →
 ///   `stale_unsafe_pgids`, never a kill.
-/// - **Workspace**: the recorded path must both carry the
-///   `libra-task-worktree-*` shape AND canonicalize (symlinks resolved)
-///   to a path inside this repo's own task-worktree base
-///   (`<storage>/worktrees/tasks`, derived from the store — the same
-///   base the engine materializes under). Anything else is refused.
+/// - **Workspace**: a managed attempt requires a matching durable intent and
+///   allocation proof. A path prefix alone never authorizes deletion.
 pub fn cancel_orphaned_run(store: &ReviewRunStore, run_id: &str) -> io::Result<OrphanedRunCancel> {
+    store.validate_mutation(run_id)?;
     let state = store.load_state(run_id)?.ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::NotFound,
@@ -901,6 +934,7 @@ pub fn cancel_orphaned_run(store: &ReviewRunStore, run_id: &str) -> io::Result<O
             had_recorded_processes: false,
             workspace_action: OrphanedWorkspaceAction::NoneRecorded,
             workspace_path: None,
+            workspace_error: None,
         });
     }
 
@@ -943,28 +977,51 @@ pub fn cancel_orphaned_run(store: &ReviewRunStore, run_id: &str) -> io::Result<O
         }
     }
 
-    // (b) Release the recorded workspace, confined to this repo's own
-    // task-worktree base.
-    let allowed_base = task_worktree_base_for_store(store);
-    let (workspace_action, workspace_path) = match state.workspace_root.as_deref() {
-        None => (OrphanedWorkspaceAction::NoneRecorded, None),
-        Some(recorded) => {
-            match resolve_orphaned_workspace(Path::new(recorded), allowed_base.as_deref()) {
-                OrphanedWorkspaceResolution::Remove(cleanup_root) => {
-                    let display = cleanup_root.display().to_string();
-                    std::fs::remove_dir_all(&cleanup_root)?;
-                    (OrphanedWorkspaceAction::Removed, Some(display))
+    // (b) An intent can exist even if the runner crashed before recording the
+    // descriptor in state. The shared allocator is the cleanup authority.
+    let workspace_path = state
+        .workspace_descriptor
+        .as_ref()
+        .map(|descriptor| descriptor.canonical_path.display().to_string())
+        .or_else(|| state.workspace_root.clone());
+    let cleanup = (|| -> io::Result<OrphanedWorkspaceAction> {
+        let has_intents = has_task_workspace_intents(&store.run_dir(run_id)?)?;
+        let existed = match workspace_path.as_deref().map(std::fs::symlink_metadata) {
+            None => false,
+            Some(Ok(_)) => true,
+            Some(Err(error)) if error.kind() == io::ErrorKind::NotFound => false,
+            Some(Err(error)) => return Err(error),
+        };
+        if has_intents || state.workspace_descriptor.is_some() {
+            store.cleanup_workspaces(run_id)?;
+            if let Some(path) = workspace_path.as_deref() {
+                match std::fs::symlink_metadata(path) {
+                    Ok(_) => return Ok(OrphanedWorkspaceAction::RefusedSuspiciousPath),
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error),
                 }
-                OrphanedWorkspaceResolution::AlreadyGone(cleanup_root) => (
-                    OrphanedWorkspaceAction::AlreadyGone,
-                    Some(cleanup_root.display().to_string()),
-                ),
-                OrphanedWorkspaceResolution::Refused => (
-                    OrphanedWorkspaceAction::RefusedSuspiciousPath,
-                    Some(recorded.to_string()),
-                ),
             }
+            if existed || has_intents {
+                Ok(OrphanedWorkspaceAction::Removed)
+            } else {
+                Ok(OrphanedWorkspaceAction::AlreadyGone)
+            }
+        } else if workspace_path.is_some() {
+            if existed {
+                Ok(OrphanedWorkspaceAction::RefusedSuspiciousPath)
+            } else {
+                Ok(OrphanedWorkspaceAction::AlreadyGone)
+            }
+        } else {
+            Ok(OrphanedWorkspaceAction::NoneRecorded)
         }
+    })();
+    let (workspace_action, workspace_error) = match cleanup {
+        Ok(action) => (action, None),
+        Err(error) => (
+            OrphanedWorkspaceAction::CleanupFailed,
+            Some(error.to_string()),
+        ),
     };
 
     // (c) Stamp the terminal state (pending reviewers → cancelled).
@@ -978,130 +1035,8 @@ pub fn cancel_orphaned_run(store: &ReviewRunStore, run_id: &str) -> io::Result<O
         had_recorded_processes,
         workspace_action,
         workspace_path,
+        workspace_error,
     })
-}
-
-/// The canonical base this repo's isolated workspaces are materialized
-/// under: `<storage>/worktrees/tasks`, where `<storage>` is the
-/// `.libra` directory the store's `sessions` root lives in (same
-/// layout as isolated task worktrees). `None` when the
-/// store has no parent (degenerate root path) — every removal is then
-/// refused.
-fn task_worktree_base_for_store(store: &ReviewRunStore) -> Option<PathBuf> {
-    store
-        .sessions_root()
-        .parent()
-        .map(|storage| storage.join("worktrees").join("tasks"))
-}
-
-/// Outcome of resolving a recorded workspace path against the allowed
-/// base.
-#[derive(Debug, PartialEq, Eq)]
-enum OrphanedWorkspaceResolution {
-    /// Shape and confinement verified; remove this directory.
-    Remove(PathBuf),
-    /// Nothing on disk to remove (and the location is attributable to
-    /// our base).
-    AlreadyGone(PathBuf),
-    /// Do not touch anything.
-    Refused,
-}
-
-/// Resolve the removable cleanup root for a recorded workspace path,
-/// fail-closed on BOTH the name shape and the location:
-///
-/// 1. **Shape**: the runner records
-///    `<base>/libra-task-worktree-<...>/workspace`; the removable unit
-///    is the parent `libra-task-worktree-*` directory (it also holds
-///    copy/lower/upper bookkeeping). A path that already names the
-///    `libra-task-worktree-*` directory is accepted as-is. Any other
-///    shape is refused.
-/// 2. **Confinement**: the candidate must canonicalize (symlinks
-///    resolved) to a strict descendant of the canonicalized
-///    `allowed_base` — the task-worktree base the engine itself
-///    materializes under. A same-named directory anywhere else (a
-///    corrupted or attacker-written `state.json`) is refused, as is a
-///    candidate that is a symlink pointing outside the base.
-///
-/// A candidate that no longer exists is `AlreadyGone` when its parent
-/// canonicalizes to the allowed base (attributable to us; nothing to
-/// remove), otherwise refused.
-fn resolve_orphaned_workspace(
-    recorded: &Path,
-    allowed_base: Option<&Path>,
-) -> OrphanedWorkspaceResolution {
-    const PREFIX: &str = "libra-task-worktree-";
-    let file_name = |path: &Path| {
-        path.file_name()
-            .and_then(|name| name.to_str())
-            .map(str::to_string)
-    };
-
-    // 1. Shape check → candidate cleanup root.
-    let Some(name) = file_name(recorded) else {
-        return OrphanedWorkspaceResolution::Refused;
-    };
-    let cleanup_root = if name.starts_with(PREFIX) {
-        recorded.to_path_buf()
-    } else if name == "workspace" {
-        let Some(parent) = recorded.parent() else {
-            return OrphanedWorkspaceResolution::Refused;
-        };
-        match file_name(parent) {
-            Some(parent_name) if parent_name.starts_with(PREFIX) => parent.to_path_buf(),
-            _ => return OrphanedWorkspaceResolution::Refused,
-        }
-    } else {
-        return OrphanedWorkspaceResolution::Refused;
-    };
-
-    // 2. Confinement check against the canonicalized allowed base.
-    let Some(allowed_base) = allowed_base else {
-        return OrphanedWorkspaceResolution::Refused;
-    };
-    let Ok(canonical_base) = std::fs::canonicalize(allowed_base) else {
-        // The base does not exist: nothing we materialized can live in
-        // it. If the candidate is gone too there is nothing to do;
-        // anything still on disk cannot be attributed to us — refuse.
-        return if cleanup_root.exists() {
-            OrphanedWorkspaceResolution::Refused
-        } else {
-            OrphanedWorkspaceResolution::AlreadyGone(cleanup_root)
-        };
-    };
-    // A symlinked cleanup root is refused OUTRIGHT before any
-    // canonicalization: a link inside the base pointing at another
-    // workspace inside the base would pass the confinement check yet
-    // delete the victim, not the recorded run's directory. Only a real
-    // directory that the engine itself materialized is removable.
-    if std::fs::symlink_metadata(&cleanup_root)
-        .map(|meta| meta.file_type().is_symlink())
-        .unwrap_or(false)
-    {
-        return OrphanedWorkspaceResolution::Refused;
-    }
-    if cleanup_root.exists() {
-        match std::fs::canonicalize(&cleanup_root) {
-            Ok(canonical)
-                if canonical.starts_with(&canonical_base) && canonical != canonical_base =>
-            {
-                OrphanedWorkspaceResolution::Remove(canonical)
-            }
-            _ => OrphanedWorkspaceResolution::Refused,
-        }
-    } else {
-        // Leaf gone: attribute via the parent (per the leaf-may-not-
-        // exist canonicalization rule).
-        match cleanup_root
-            .parent()
-            .and_then(|p| std::fs::canonicalize(p).ok())
-        {
-            Some(parent) if parent.starts_with(&canonical_base) => {
-                OrphanedWorkspaceResolution::AlreadyGone(cleanup_root)
-            }
-            _ => OrphanedWorkspaceResolution::Refused,
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1201,7 +1136,7 @@ async fn run_sink(
             StreamKind::Stdout => stdout_log,
             StreamKind::Stderr => stderr_log,
         };
-        if let Err(err) = store.append_reviewer_log(path, &log_text) {
+        if let Err(err) = store.append_reviewer_log(&run_id, path, &log_text) {
             tracing::warn!(
                 error = %err,
                 reviewer_index = capture.index,
@@ -1238,6 +1173,7 @@ async fn run_one_reviewer(
     index: usize,
     command: ReviewerCommand,
     workspace_root: PathBuf,
+    workspace_descriptor: TaskWorkspaceDescriptor,
     semaphore: Arc<Semaphore>,
     cancel: ReviewCancelHandle,
     sink_tx: mpsc::UnboundedSender<SinkEvent>,
@@ -1264,6 +1200,30 @@ async fn run_one_reviewer(
         return (index, report(ReviewerOutcome::Cancelled, None, None));
     }
 
+    // The directory is inside common metadata. Recheck its durable identity
+    // immediately before handing its pathname to the external reviewer.
+    let run_dir = workspace_descriptor
+        .common_storage()
+        .join("sessions/agent-runs")
+        .join(workspace_descriptor.run_id.to_string());
+    if workspace_root != workspace_descriptor.canonical_path {
+        return (
+            index,
+            report(
+                ReviewerOutcome::Failed,
+                None,
+                Some("reviewer workspace path differs from its owned task record".to_string()),
+            ),
+        );
+    }
+    if let Err(error) = verify_task_workspace(
+        workspace_descriptor.common_storage(),
+        &run_dir,
+        &workspace_descriptor,
+    ) {
+        let (clean, _) = super::sink::redact_for_log(error.to_string().as_bytes());
+        return (index, report(ReviewerOutcome::Failed, None, Some(clean)));
+    }
     let mut spawned = match spawn_reviewer(&command, &workspace_root).await {
         Ok(spawned) => spawned,
         Err(err) => {
@@ -1435,11 +1395,46 @@ fn take_buffer(
 /// inline); a FUSE teardown must not block the runtime thread, so it is
 /// routed to the blocking pool when a runtime exists.
 struct ReviewWorkspaceGuard {
-    workspace: Option<SubAgentWorkspace>,
+    store: ReviewRunStore,
+    run_id: String,
+    workspace: Option<ReviewWorkspaceResource>,
+}
+
+enum ReviewWorkspaceResource {
+    Snapshot(SubAgentWorkspace),
+    Checkpoint {
+        common_storage: PathBuf,
+        run_dir: PathBuf,
+        descriptor: TaskWorkspaceDescriptor,
+    },
+}
+
+impl ReviewWorkspaceResource {
+    fn backend(&self) -> TaskWorkspaceBackend {
+        match self {
+            Self::Snapshot(workspace) => workspace.backend(),
+            Self::Checkpoint { .. } => TaskWorkspaceBackend::Copy,
+        }
+    }
+
+    fn cleanup(self) -> io::Result<()> {
+        match self {
+            Self::Snapshot(workspace) => workspace.cleanup(),
+            Self::Checkpoint {
+                common_storage,
+                run_dir,
+                descriptor,
+            } => cleanup_task_workspace(&common_storage, &run_dir, &descriptor),
+        }
+    }
 }
 
 impl ReviewWorkspaceGuard {
     async fn release(&mut self) {
+        if let Err(error) = self.store.validate_mutation(&self.run_id) {
+            tracing::warn!(%error, "kept review workspace because run metadata cannot authorize cleanup");
+            return;
+        }
         if let Some(workspace) = self.workspace.take() {
             match tokio::task::spawn_blocking(move || workspace.cleanup()).await {
                 Ok(Ok(())) => {}
@@ -1456,8 +1451,10 @@ impl ReviewWorkspaceGuard {
 
 impl Drop for ReviewWorkspaceGuard {
     fn drop(&mut self) {
-        use crate::internal::ai::workspace_isolation::TaskWorkspaceBackend;
-
+        if let Err(error) = self.store.validate_mutation(&self.run_id) {
+            tracing::warn!(%error, "kept review workspace because run metadata cannot authorize unwind cleanup");
+            return;
+        }
         let Some(workspace) = self.workspace.take() else {
             return;
         };
@@ -1485,10 +1482,13 @@ mod tests {
 
     fn test_store() -> (tempfile::TempDir, ReviewRunStore, PathBuf) {
         let dir = tempfile::tempdir().expect("tempdir");
-        let repo = dir.path().join("repo");
+        // macOS spells the temp root through /var, while run cleanup pins
+        // every ancestor with no-follow handles.
+        let physical = std::fs::canonicalize(dir.path()).expect("physical temp root");
+        let repo = physical.join("repo");
         std::fs::create_dir_all(&repo).expect("repo dir");
         std::fs::write(repo.join("README.md"), "hello\n").expect("seed file");
-        let store = ReviewRunStore::new(dir.path().join(".libra").join("sessions"));
+        let store = ReviewRunStore::new(physical.join(".libra").join("sessions"));
         (dir, store, repo)
     }
 
@@ -1835,17 +1835,6 @@ mod tests {
         decoy_cmd.spawn().expect("spawn decoy sleeper")
     }
 
-    /// Seed a fake recorded workspace INSIDE the store's task-worktree
-    /// base (the only location the orphan cancel will agree to remove)
-    /// and return its cleanup root + recorded workspace path.
-    fn seed_confined_workspace(store: &ReviewRunStore, name: &str) -> (PathBuf, PathBuf) {
-        let base = task_worktree_base_for_store(store).expect("store has a storage parent");
-        let cleanup_root = base.join(format!("libra-task-worktree-{name}"));
-        let workspace = cleanup_root.join("workspace");
-        std::fs::create_dir_all(&workspace).expect("fake workspace");
-        (cleanup_root, workspace)
-    }
-
     /// Orphaned-run cancel (codex review P1 + R2 provenance): with no
     /// live runner, a recorded pgid whose start-time provenance still
     /// matches is killed, the recorded workspace is removed, the run is
@@ -1856,8 +1845,9 @@ mod tests {
     #[tokio::test]
     async fn orphaned_run_cancel_kills_verified_pgids_and_removes_workspace() {
         let (_dir, store, _repo) = test_store();
+        let run_id = uuid::Uuid::now_v7().to_string();
         store
-            .create_run("orphan-run", &["decoy".to_string()], "sha", "scope")
+            .create_run(&run_id, &["decoy".to_string()], "sha", "scope")
             .expect("create");
 
         let mut decoy = spawn_decoy_sleeper();
@@ -1865,9 +1855,18 @@ mod tests {
         let decoy_ticks = process_start_ticks(decoy_pid);
         assert!(decoy_ticks.is_some(), "decoy /proc stat must parse");
 
-        let (cleanup_root, workspace) = seed_confined_workspace(&store, "orphan-test");
+        let descriptor = crate::internal::ai::workspace_isolation::create_task_workspace(
+            store.sessions_root().parent().unwrap(),
+            &store.run_dir(&run_id).unwrap(),
+            uuid::Uuid::parse_str(&run_id).unwrap(),
+            crate::internal::ai::workspace_isolation::TaskWorkspaceKind::Workspace,
+        )
+        .unwrap();
+        let workspace = descriptor.canonical_path.clone();
+        let cleanup_root = workspace.parent().unwrap().to_path_buf();
+        store.record_workspace(&run_id, &descriptor).unwrap();
         store
-            .update_state("orphan-run", |state| {
+            .update_state(&run_id, |state| {
                 state.agents[0].pid = Some(decoy_pid);
                 state.agents[0].pgid = Some(decoy_pid);
                 state.agents[0].proc_start_ticks = decoy_ticks;
@@ -1875,7 +1874,7 @@ mod tests {
             })
             .expect("seed orphan state");
 
-        let released = cancel_orphaned_run(&store, "orphan-run").expect("orphan cancel");
+        let released = cancel_orphaned_run(&store, &run_id).expect("orphan cancel");
         assert!(released.transitioned);
         assert!(released.had_recorded_processes);
         assert_eq!(
@@ -1897,15 +1896,12 @@ mod tests {
         let status = decoy.wait().expect("reap decoy");
         assert!(!status.success(), "decoy must have been killed");
 
-        let state = store
-            .load_state("orphan-run")
-            .expect("load")
-            .expect("state");
+        let state = store.load_state(&run_id).expect("load").expect("state");
         assert_eq!(state.terminal_state, Some(ReviewTerminalState::Cancelled));
         assert_eq!(state.agents[0].outcome, Some(ReviewerOutcome::Cancelled));
 
         // Idempotent: already terminal — nothing further is touched.
-        let again = cancel_orphaned_run(&store, "orphan-run").expect("second orphan cancel");
+        let again = cancel_orphaned_run(&store, &run_id).expect("second orphan cancel");
         assert!(!again.transitioned);
         assert!(again.killed_pgids.is_empty());
     }
@@ -1970,102 +1966,236 @@ mod tests {
         }
     }
 
-    /// A corrupted workspace_root must never delete arbitrary paths:
-    /// the shape must match AND the path must canonicalize into the
-    /// store's own task-worktree base — a same-named directory outside
-    /// the base is refused; inside it is removed.
+    /// A path that happens to resemble a task workspace is not proof of
+    /// ownership. Legacy and forged paths remain available for inspection.
     #[test]
-    fn orphaned_workspace_resolution_confines_to_the_task_worktree_base() {
+    fn orphaned_workspace_without_intent_is_preserved() {
         let (dir, store, _repo) = test_store();
-        let base = task_worktree_base_for_store(&store).expect("base");
+        let run_id = uuid::Uuid::now_v7().to_string();
+        store.create_run(&run_id, &[], "sha", "scope").unwrap();
+        let workspace = dir.path().join("libra-task-worktree-unowned/workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(workspace.join("sentinel"), "keep").unwrap();
+        store
+            .update_state(&run_id, |state| {
+                state.workspace_root = Some(workspace.display().to_string());
+            })
+            .unwrap();
 
-        // Inside the base: removable.
-        let (inside_root, inside_workspace) = seed_confined_workspace(&store, "inside");
-        match resolve_orphaned_workspace(&inside_workspace, Some(&base)) {
-            OrphanedWorkspaceResolution::Remove(resolved) => {
-                assert_eq!(
-                    resolved,
-                    std::fs::canonicalize(&inside_root).expect("canonicalize inside root")
-                );
-            }
-            other => panic!("inside-base workspace must be removable, got {other:?}"),
-        }
-
-        // Same shape, same basename — but OUTSIDE the base: refused.
-        let outside_root = dir.path().join("libra-task-worktree-outside");
-        let outside_workspace = outside_root.join("workspace");
-        std::fs::create_dir_all(&outside_workspace).expect("outside dir");
+        let result = cancel_orphaned_run(&store, &run_id).unwrap();
         assert_eq!(
-            resolve_orphaned_workspace(&outside_workspace, Some(&base)),
-            OrphanedWorkspaceResolution::Refused,
-            "a same-named dir outside the base must be refused"
+            result.workspace_action,
+            OrphanedWorkspaceAction::RefusedSuspiciousPath
         );
-        assert!(outside_root.exists());
-
-        // Shape violations: refused regardless of location.
-        for suspicious in ["/", "/home/user", "/etc/workspace"] {
-            assert_eq!(
-                resolve_orphaned_workspace(Path::new(suspicious), Some(&base)),
-                OrphanedWorkspaceResolution::Refused,
-                "{suspicious} must be refused"
-            );
-        }
-        let inside_but_wrong_shape = base.join("not-a-task-worktree");
-        std::fs::create_dir_all(&inside_but_wrong_shape).expect("wrong-shape dir");
         assert_eq!(
-            resolve_orphaned_workspace(&inside_but_wrong_shape, Some(&base)),
-            OrphanedWorkspaceResolution::Refused
+            std::fs::read_to_string(workspace.join("sentinel")).unwrap(),
+            "keep"
         );
-
-        // No base at all: nothing is removable.
-        assert_eq!(
-            resolve_orphaned_workspace(&inside_workspace, None),
-            OrphanedWorkspaceResolution::Refused
+        assert!(
+            store.clean_run(&run_id).is_err(),
+            "metadata must retain the unresolved workspace reference"
         );
+        assert!(store.run_dir(&run_id).unwrap().exists());
+    }
 
-        // Already-gone leaf inside the base: attributable, nothing to do.
-        let gone = base.join("libra-task-worktree-gone");
-        assert_eq!(
-            resolve_orphaned_workspace(&gone.join("workspace"), Some(&base)),
-            OrphanedWorkspaceResolution::AlreadyGone(gone)
+    #[test]
+    fn orphaned_cancel_recovers_intent_before_state_records_workspace() {
+        let (_dir, store, _repo) = test_store();
+        let run_uuid = uuid::Uuid::now_v7();
+        let run_id = run_uuid.to_string();
+        store.create_run(&run_id, &[], "sha", "scope").unwrap();
+        let descriptor = crate::internal::ai::workspace_isolation::create_task_workspace(
+            store.sessions_root().parent().unwrap(),
+            &store.run_dir(&run_id).unwrap(),
+            run_uuid,
+            crate::internal::ai::workspace_isolation::TaskWorkspaceKind::Workspace,
+        )
+        .unwrap();
+        std::fs::write(descriptor.canonical_path.join("sentinel"), "owned").unwrap();
+        assert!(
+            store
+                .load_state(&run_id)
+                .unwrap()
+                .unwrap()
+                .workspace_descriptor
+                .is_none()
         );
 
-        // A symlink inside the base pointing OUTSIDE it: refused (the
-        // canonicalized target escapes the base).
-        #[cfg(unix)]
-        {
-            let victim = dir.path().join("libra-task-worktree-victim");
-            std::fs::create_dir_all(&victim).expect("victim dir");
-            let link = base.join("libra-task-worktree-link");
-            std::os::unix::fs::symlink(&victim, &link).expect("symlink");
-            assert_eq!(
-                resolve_orphaned_workspace(&link, Some(&base)),
-                OrphanedWorkspaceResolution::Refused,
-                "a symlink escaping the base must be refused"
-            );
-            assert!(victim.exists(), "the symlink target must not be touched");
-        }
+        let result = cancel_orphaned_run(&store, &run_id).unwrap();
+        assert_eq!(result.workspace_action, OrphanedWorkspaceAction::Removed);
+        assert!(result.workspace_path.is_none());
+        assert!(!descriptor.canonical_path.exists());
+        assert!(store.load_state(&run_id).unwrap().unwrap().is_terminal());
+        assert!(store.clean_run(&run_id).unwrap());
+    }
 
-        // A symlink inside the base pointing at ANOTHER workspace inside
-        // the base: the canonical target passes confinement, so only the
-        // pre-canonicalization symlink refusal protects the victim
-        // (codex A7 R3): removal through the link would delete the
-        // victim's workspace, not the recorded run's.
-        #[cfg(unix)]
-        {
-            let victim = base.join("libra-task-worktree-inside-victim");
-            std::fs::create_dir_all(&victim).expect("inside victim dir");
-            let link = base.join("libra-task-worktree-inside-link");
-            std::os::unix::fs::symlink(&victim, &link).expect("inside symlink");
-            assert_eq!(
-                resolve_orphaned_workspace(&link, Some(&base)),
-                OrphanedWorkspaceResolution::Refused,
-                "an inside-base symlink to an inside-base victim must be refused"
-            );
+    #[test]
+    fn orphaned_cancel_stamps_terminal_when_workspace_cleanup_is_refused() {
+        let (_dir, store, _repo) = test_store();
+        let run_uuid = uuid::Uuid::now_v7();
+        let run_id = run_uuid.to_string();
+        store.create_run(&run_id, &[], "sha", "scope").unwrap();
+        let descriptor = crate::internal::ai::workspace_isolation::create_task_workspace(
+            store.sessions_root().parent().unwrap(),
+            &store.run_dir(&run_id).unwrap(),
+            run_uuid,
+            crate::internal::ai::workspace_isolation::TaskWorkspaceKind::Workspace,
+        )
+        .unwrap();
+        let attempt = descriptor.attempt_root();
+        let retained = attempt.with_extension("retained");
+        std::fs::rename(&attempt, &retained).unwrap();
+        std::fs::create_dir(&attempt).unwrap();
+
+        let result = cancel_orphaned_run(&store, &run_id).unwrap();
+        assert!(result.transitioned);
+        assert_eq!(
+            result.workspace_action,
+            OrphanedWorkspaceAction::CleanupFailed
+        );
+        assert!(result.workspace_error.is_some());
+        assert!(store.load_state(&run_id).unwrap().unwrap().is_terminal());
+        assert!(store.clean_run(&run_id).is_err());
+
+        std::fs::remove_dir(&attempt).unwrap();
+        std::fs::rename(&retained, &attempt).unwrap();
+        assert!(store.clean_run(&run_id).unwrap());
+    }
+
+    #[tokio::test]
+    async fn workspace_guard_preserves_owned_data_when_metadata_schema_changes() {
+        let (_dir, store, repo) = test_store();
+        for checkpoint in [false, true] {
+            let run_uuid = uuid::Uuid::now_v7();
+            let run_id = run_uuid.to_string();
+            store.create_run(&run_id, &[], "sha", "scope").unwrap();
+            let common = store.sessions_root().parent().unwrap().to_path_buf();
+            let run_dir = store.run_dir(&run_id).unwrap();
+            let resource = if checkpoint {
+                let descriptor = crate::internal::ai::workspace_isolation::create_task_workspace(
+                    &common,
+                    &run_dir,
+                    run_uuid,
+                    crate::internal::ai::workspace_isolation::TaskWorkspaceKind::CheckpointInput,
+                )
+                .unwrap();
+                ReviewWorkspaceResource::Checkpoint {
+                    common_storage: common,
+                    run_dir,
+                    descriptor,
+                }
+            } else {
+                let isolation = WorkspaceIsolationConfig {
+                    common_storage: common,
+                    run_dir,
+                    fuse_state: FuseProvisionState::default(),
+                    allow_full_copy: true,
+                };
+                ReviewWorkspaceResource::Snapshot(
+                    materialize_isolated_workspace(
+                        &repo,
+                        run_uuid,
+                        AgentRunId(run_uuid),
+                        &isolation,
+                    )
+                    .unwrap(),
+                )
+            };
+            let descriptor = match &resource {
+                ReviewWorkspaceResource::Snapshot(workspace) => workspace.descriptor().clone(),
+                ReviewWorkspaceResource::Checkpoint { descriptor, .. } => descriptor.clone(),
+            };
+            store.record_workspace(&run_id, &descriptor).unwrap();
+            let manifest_path = store.manifest_path(&run_id).unwrap();
+            let before = std::fs::read(&manifest_path).unwrap();
+            let mut future: serde_json::Value = serde_json::from_slice(&before).unwrap();
+            future["schema_version"] = 99.into();
+            std::fs::write(&manifest_path, serde_json::to_vec(&future).unwrap()).unwrap();
+            let mut guard = ReviewWorkspaceGuard {
+                store: store.clone(),
+                run_id: run_id.clone(),
+                workspace: Some(resource),
+            };
+            guard.release().await;
+            drop(guard);
             assert!(
-                victim.exists(),
-                "the inside-base symlink target must not be touched"
+                descriptor.canonical_path.exists(),
+                "unknown metadata must retain its owned workspace"
             );
+            assert!(has_task_workspace_intents(&store.run_dir(&run_id).unwrap()).unwrap());
+            std::fs::write(&manifest_path, before).unwrap();
+            store.cleanup_workspaces(&run_id).unwrap();
+            assert!(!descriptor.canonical_path.exists());
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cleanup_failure_is_reported_and_retains_retryable_run_metadata() {
+        let (_dir, store, repo) = test_store();
+        let run_uuid = uuid::Uuid::now_v7();
+        let run_id = run_uuid.to_string();
+        let mut request = ReviewRunRequest::new(
+            repo,
+            "review",
+            "scope",
+            "sha",
+            vec![sh_reviewer(
+                "brief-review",
+                "sleep 1; echo reviewed",
+                Duration::from_secs(10),
+            )],
+        );
+        request.run_id = Some(AgentRunId(run_uuid));
+        let task_store = store.clone();
+        let task = tokio::spawn(async move {
+            run_review(&task_store, request, ReviewCancelHandle::new()).await
+        });
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let descriptor = loop {
+            if let Ok(Some(state)) = store.load_state(&run_id)
+                && let Some(descriptor) = state.workspace_descriptor
+            {
+                break descriptor;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "review did not publish its workspace descriptor"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+        // Simulate a concurrent filesystem replacement without granting the
+        // reviewer permission to modify the managed attempt's parent.
+        let saved = descriptor.canonical_path.with_extension("saved");
+        std::fs::rename(&descriptor.canonical_path, &saved).unwrap();
+        std::fs::create_dir(&descriptor.canonical_path).unwrap();
+        std::fs::write(descriptor.canonical_path.join("sentinel"), "replacement").unwrap();
+        let outcome = tokio::time::timeout(Duration::from_secs(20), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(outcome.terminal_state, ReviewTerminalState::Error);
+        assert!(
+            outcome
+                .infra_error
+                .as_deref()
+                .unwrap()
+                .contains("workspace cleanup failed")
+        );
+        assert!(store.run_dir(&run_id).unwrap().exists());
+        assert!(has_task_workspace_intents(&store.run_dir(&run_id).unwrap()).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(descriptor.canonical_path.join("sentinel")).unwrap(),
+            "replacement"
+        );
+
+        std::fs::remove_dir_all(&descriptor.canonical_path).unwrap();
+        std::fs::rename(&saved, &descriptor.canonical_path).unwrap();
+        assert!(
+            store.clean_run(&run_id).unwrap(),
+            "restored ownership permits a safe retry"
+        );
+        assert!(!descriptor.canonical_path.exists());
     }
 }

@@ -699,7 +699,13 @@ fn fetch_rejects_branch_checked_out_in_another_worktree() {
     let linked = fixture.path("target-worktree-linked");
     fixture.success(
         &target,
-        &["worktree", "add", linked.to_str().expect("utf8 linked")],
+        &[
+            "worktree",
+            "add",
+            "target-worktree-linked",
+            "--path",
+            linked.to_str().expect("utf8 linked"),
+        ],
     );
     fixture.success(&linked, &["switch", "protected"]);
     fixture.success(

@@ -11,6 +11,666 @@ use super::util;
 
 const FUSE_TASK_WORKTREE_PREFIX: &str = "libra-task-worktree-fuse-";
 
+/// Descriptor-pinned filesystem operations for user-created overlay worktrees.
+/// Keep these separate from legacy task-worktree sweeping: those directories
+/// have a different ownership and cleanup contract.
+#[cfg(feature = "worktree-fuse")]
+pub(crate) mod managed {
+    use std::{
+        ffi::{CString, OsString},
+        fs, io,
+        os::unix::{ffi::OsStrExt, fs::MetadataExt, io::AsRawFd},
+        path::{Component, Path, PathBuf},
+    };
+
+    use crate::utils::beneath;
+
+    pub(crate) struct Target {
+        pub(crate) path: PathBuf,
+        anchor_path: PathBuf,
+        anchor: fs::File,
+        suffix: PathBuf,
+    }
+
+    pub(crate) struct Directory {
+        pub(crate) path: PathBuf,
+        pub(crate) file: fs::File,
+        anchor_path: PathBuf,
+        anchor: fs::File,
+        suffix: PathBuf,
+        parent: fs::File,
+        name: OsString,
+        owned: bool,
+        created_parents: Vec<(fs::File, OsString, fs::File)>,
+    }
+
+    fn component_name(name: &std::ffi::OsStr) -> io::Result<CString> {
+        CString::new(name.as_bytes()).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidInput, "FUSE path contains a NUL byte")
+        })
+    }
+
+    fn same_directory(left: &fs::File, right: &fs::File) -> io::Result<bool> {
+        let a = left.metadata()?;
+        let b = right.metadata()?;
+        Ok(a.dev() == b.dev() && a.ino() == b.ino())
+    }
+
+    impl Target {
+        /// Resolve aliases above the deepest existing parent once. The final
+        /// component and all subsequently created components are no-follow.
+        /// Resolution never creates directories, so every overlap check can
+        /// run before any filesystem or branch mutation.
+        pub(crate) fn resolve(path: &Path, invoking_workdir: &Path) -> io::Result<Self> {
+            let absolute = if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                invoking_workdir.join(path)
+            };
+            if !absolute.is_absolute() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "FUSE target requires an absolute pinned invocation directory",
+                ));
+            }
+            let absolute = super::normalize_abs_path(&absolute);
+            let name = absolute.file_name().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "FUSE target cannot be a filesystem root",
+                )
+            })?;
+            let mut suffix = vec![name.to_os_string()];
+            let mut ancestor = absolute.parent().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "FUSE target has no parent directory",
+                )
+            })?;
+            loop {
+                match fs::symlink_metadata(ancestor) {
+                    Ok(_) => break,
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                        let part = ancestor.file_name().ok_or_else(|| {
+                            io::Error::new(
+                                io::ErrorKind::NotFound,
+                                "FUSE target has no existing ancestor",
+                            )
+                        })?;
+                        suffix.push(part.to_os_string());
+                        ancestor = ancestor.parent().ok_or_else(|| {
+                            io::Error::new(
+                                io::ErrorKind::NotFound,
+                                "FUSE target has no existing ancestor",
+                            )
+                        })?;
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            let anchor_path = fs::canonicalize(ancestor)?;
+            let anchor = beneath::open_root(&anchor_path)?;
+            let suffix: PathBuf = suffix.into_iter().rev().collect();
+            let path = anchor_path.join(&suffix);
+            Self {
+                path,
+                anchor_path,
+                anchor,
+                suffix,
+            }
+            .inspect()
+        }
+
+        /// Pin managed paths at common storage before descending; do not
+        /// canonicalize an intermediate managed component into a symlink.
+        pub(crate) fn beneath(anchor_path: &Path, path: &Path) -> io::Result<Self> {
+            let suffix = path
+                .strip_prefix(anchor_path)
+                .map_err(io::Error::other)?
+                .to_path_buf();
+            if suffix.as_os_str().is_empty()
+                || suffix
+                    .components()
+                    .any(|part| !matches!(part, Component::Normal(_)))
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "FUSE managed target is outside its pinned root",
+                ));
+            }
+            Self {
+                path: path.to_path_buf(),
+                anchor_path: anchor_path.to_path_buf(),
+                anchor: beneath::open_root(anchor_path)?,
+                suffix,
+            }
+            .inspect()
+        }
+
+        fn inspect(self) -> io::Result<Self> {
+            match beneath::lstat_beneath(&self.anchor, &self.suffix) {
+                Ok(stat) if stat.is_symlink || !stat.is_dir => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "FUSE target '{}' must be a real directory, not a symlink or file",
+                            self.path.display()
+                        ),
+                    ));
+                }
+                Ok(_) => {
+                    let dir = beneath::open_beneath(&self.anchor, &self.suffix)?;
+                    if beneath::read_dir_fd(dir)?.next().transpose()?.is_some() {
+                        return Err(io::Error::new(
+                            io::ErrorKind::AlreadyExists,
+                            format!("FUSE target '{}' is not empty", self.path.display()),
+                        ));
+                    }
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+            Ok(self)
+        }
+
+        pub(crate) fn create(self, require_new: bool) -> io::Result<Directory> {
+            let components: Vec<OsString> = self
+                .suffix
+                .components()
+                .map(|component| match component {
+                    Component::Normal(name) => Ok(name.to_os_string()),
+                    _ => Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "non-canonical FUSE target",
+                    )),
+                })
+                .collect::<io::Result<_>>()?;
+            let mut parent = self.anchor.try_clone()?;
+            let mut created_parents = Vec::new();
+            let outcome = (|| {
+                for (index, name) in components.iter().enumerate() {
+                    let final_component = index + 1 == components.len();
+                    let mut owned = false;
+                    let directory = match beneath::open_beneath(&parent, Path::new(name)) {
+                        Ok(_) if final_component && require_new => {
+                            return Err(io::Error::new(
+                                io::ErrorKind::AlreadyExists,
+                                format!(
+                                    "FUSE worktree directory '{}' already exists; choose another name",
+                                    self.path.display()
+                                ),
+                            ));
+                        }
+                        Ok(directory) => directory,
+                        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                            let name_c = component_name(name)?;
+                            // SAFETY: parent is a live directory descriptor and
+                            // name_c is a single checked, NUL-terminated component.
+                            if unsafe { libc::mkdirat(parent.as_raw_fd(), name_c.as_ptr(), 0o700) }
+                                != 0
+                            {
+                                return Err(io::Error::last_os_error());
+                            }
+                            owned = true;
+                            beneath::open_beneath(&parent, Path::new(name))?
+                        }
+                        Err(error) => return Err(error),
+                    };
+                    if final_component {
+                        return Ok(Directory {
+                            path: self.path,
+                            file: directory,
+                            anchor_path: self.anchor_path,
+                            anchor: self.anchor,
+                            suffix: self.suffix,
+                            parent,
+                            name: name.clone(),
+                            owned,
+                            created_parents: std::mem::take(&mut created_parents),
+                        });
+                    }
+                    if owned {
+                        created_parents.push((
+                            parent.try_clone()?,
+                            name.clone(),
+                            directory.try_clone()?,
+                        ));
+                    }
+                    parent = directory;
+                }
+                Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "FUSE target has no final component",
+                ))
+            })();
+            if outcome.is_err() {
+                for (parent, name, directory) in created_parents.iter().rev() {
+                    remove_empty_owned_directory(parent, name, directory)?;
+                }
+            }
+            outcome
+        }
+    }
+
+    impl Directory {
+        pub(crate) fn child_target(&self, relative: &Path) -> io::Result<Target> {
+            if relative.as_os_str().is_empty()
+                || relative
+                    .components()
+                    .any(|part| !matches!(part, Component::Normal(_)))
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "non-canonical FUSE child directory",
+                ));
+            }
+            Target {
+                path: self.path.join(relative),
+                anchor_path: self.path.clone(),
+                anchor: self.file.try_clone()?,
+                suffix: relative.to_path_buf(),
+            }
+            .inspect()
+        }
+
+        /// Confirm the mount API's pathname still refers to the pinned tree.
+        pub(crate) fn validate_path(&self) -> io::Result<()> {
+            let current_anchor = beneath::open_root(&self.anchor_path)?;
+            let current = beneath::open_beneath(&self.anchor, &self.suffix)?;
+            if !same_directory(&current_anchor, &self.anchor)?
+                || !same_directory(&current, &self.file)?
+            {
+                return Err(io::Error::other(format!(
+                    "FUSE directory '{}' changed during creation; retry after stopping concurrent directory moves",
+                    self.path.display()
+                )));
+            }
+            Ok(())
+        }
+
+        pub(crate) fn is_empty(&self) -> io::Result<bool> {
+            Ok(beneath::read_dir_fd(self.file.try_clone()?)?
+                .next()
+                .transpose()?
+                .is_none())
+        }
+
+        /// Roll back only the leaf we created. Never traverse a replacement
+        /// symlink or remove a caller-owned, pre-existing mountpoint.
+        pub(crate) fn rollback(&self) -> io::Result<()> {
+            if self.owned {
+                remove_owned_directory(&self.parent, &self.name, &self.file)?;
+            }
+            for (parent, name, directory) in self.created_parents.iter().rev() {
+                remove_empty_owned_directory(parent, name, directory)?;
+            }
+            Ok(())
+        }
+    }
+
+    fn remove_empty_owned_directory(
+        parent: &fs::File,
+        name: &std::ffi::OsStr,
+        directory: &fs::File,
+    ) -> io::Result<()> {
+        let current = beneath::open_beneath(parent, Path::new(name))?;
+        if !same_directory(&current, directory)? {
+            return Err(io::Error::other(
+                "refusing FUSE parent cleanup: the directory was replaced",
+            ));
+        }
+        let name = component_name(name)?;
+        // SAFETY: rmdir removes only the empty owned entry beneath this fd.
+        if unsafe { libc::unlinkat(parent.as_raw_fd(), name.as_ptr(), libc::AT_REMOVEDIR) } != 0 {
+            let error = io::Error::last_os_error();
+            if matches!(error.raw_os_error(), Some(libc::ENOTEMPTY | libc::EEXIST)) {
+                return Ok(());
+            }
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    fn remove_owned_directory(
+        parent: &fs::File,
+        name: &std::ffi::OsStr,
+        directory: &fs::File,
+    ) -> io::Result<()> {
+        let current = beneath::open_beneath(parent, Path::new(name))?;
+        if !same_directory(&current, directory)? {
+            return Err(io::Error::other(
+                "refusing FUSE cleanup: the owned directory was replaced",
+            ));
+        }
+        for entry in beneath::read_dir_fd(directory.try_clone()?)? {
+            let entry = entry?;
+            let relative = Path::new(&entry.name);
+            let stat = beneath::lstat_beneath(directory, relative)?;
+            if stat.is_dir && !stat.is_symlink {
+                let child = beneath::open_beneath(directory, relative)?;
+                remove_owned_directory(directory, &entry.name, &child)?;
+            } else {
+                let name = component_name(&entry.name)?;
+                // SAFETY: unlinkat only removes the named entry relative to
+                // this pinned descriptor; it never follows a symlink.
+                if unsafe { libc::unlinkat(directory.as_raw_fd(), name.as_ptr(), 0) } != 0 {
+                    return Err(io::Error::last_os_error());
+                }
+            }
+        }
+        let name = component_name(name)?;
+        // SAFETY: the directory identity was checked above. AT_REMOVEDIR
+        // cannot follow a replacement symlink out of the pinned parent.
+        if unsafe { libc::unlinkat(parent.as_raw_fd(), name.as_ptr(), libc::AT_REMOVEDIR) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    /// Remove a registry-validated directory under a pinned storage boundary.
+    /// Callers must establish ownership before passing the relative path.
+    pub(crate) fn remove_registered_tree(root: &fs::File, relative: &Path) -> io::Result<()> {
+        let parent_path = relative
+            .parent()
+            .ok_or_else(|| io::Error::other("FUSE cleanup path has no parent"))?;
+        let name = relative
+            .file_name()
+            .ok_or_else(|| io::Error::other("FUSE cleanup path has no final component"))?;
+        let parent = match beneath::open_beneath(root, parent_path) {
+            Ok(parent) => parent,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        let directory = match beneath::open_beneath(&parent, Path::new(name)) {
+            Ok(directory) => directory,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        remove_owned_directory(&parent, name, &directory)
+    }
+
+    /// Remove only an empty managed mountpoint/container. An unexpected file
+    /// keeps both the directory and its registration available for recovery.
+    pub(crate) fn remove_empty_registered_directory(
+        root: &fs::File,
+        relative: &Path,
+    ) -> io::Result<()> {
+        let parent_path = relative
+            .parent()
+            .ok_or_else(|| io::Error::other("FUSE cleanup path has no parent"))?;
+        let name = relative
+            .file_name()
+            .ok_or_else(|| io::Error::other("FUSE cleanup path has no final component"))?;
+        let parent = match beneath::open_beneath(root, parent_path) {
+            Ok(parent) => parent,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        match beneath::open_beneath(&parent, Path::new(name)) {
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
+        }
+        let name = component_name(name)?;
+        // SAFETY: rmdir is descriptor-relative and refuses non-empty trees or
+        // symlinks; unlike recursive cleanup it cannot delete unexpected data.
+        if unsafe { libc::unlinkat(parent.as_raw_fd(), name.as_ptr(), libc::AT_REMOVEDIR) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    /// Hide only the managed container, preserving existing overlay metadata
+    /// semantics. Without this opaque directory the lower tree exposes the
+    /// mountpoint and upper directory back into their own overlay.
+    pub(crate) fn prepare_worktree_mask(upper: &Directory) -> io::Result<()> {
+        let mask = upper
+            .child_target(Path::new(".libra/worktree"))?
+            .create(true)?;
+        mask.validate_path()?;
+        if !mask.is_empty()? {
+            return Err(io::Error::other(
+                "FUSE worktree opacity mask must be empty before mounting",
+            ));
+        }
+        let name = c"user.fuseoverlayfs.opaque";
+        let value = b"y";
+        #[cfg(target_os = "linux")]
+        // SAFETY: the directory fd and both byte buffers remain valid for the call.
+        let set_result = unsafe {
+            libc::fsetxattr(
+                mask.file.as_raw_fd(),
+                name.as_ptr(),
+                value.as_ptr().cast(),
+                value.len(),
+                0,
+            )
+        };
+        #[cfg(target_os = "macos")]
+        // SAFETY: macOS adds position/options to the descriptor xattr API.
+        let set_result = unsafe {
+            libc::fsetxattr(
+                mask.file.as_raw_fd(),
+                name.as_ptr(),
+                value.as_ptr().cast(),
+                value.len(),
+                0,
+                0,
+            )
+        };
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "FUSE managed worktrees require descriptor-based opaque xattr support",
+        ));
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            if set_result != 0 {
+                return Err(io::Error::other(format!(
+                    "cannot protect FUSE worktree against recursive mounts: opaque xattr is unavailable on '{}': {}",
+                    mask.path.display(),
+                    io::Error::last_os_error()
+                )));
+            }
+            let mut observed = [0_u8; 2];
+            #[cfg(target_os = "linux")]
+            // SAFETY: observed is a writable buffer with the advertised length.
+            let length = unsafe {
+                libc::fgetxattr(
+                    mask.file.as_raw_fd(),
+                    name.as_ptr(),
+                    observed.as_mut_ptr().cast(),
+                    observed.len(),
+                )
+            };
+            #[cfg(target_os = "macos")]
+            // SAFETY: observed is a writable buffer; position/options are zero.
+            let length = unsafe {
+                libc::fgetxattr(
+                    mask.file.as_raw_fd(),
+                    name.as_ptr(),
+                    observed.as_mut_ptr().cast(),
+                    observed.len(),
+                    0,
+                    0,
+                )
+            };
+            if length != 1 || observed[0] != b'y' {
+                return Err(io::Error::other(
+                    "cannot verify FUSE worktree opaque xattr; refusing to mount",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Bind the mounted metadata to the registered upper directory. Exclusive
+    /// creation refuses a marker injected or left by another worktree.
+    pub(crate) fn prepare_mount_binding(upper: &Directory, mount_id: &str) -> io::Result<()> {
+        use std::{io::Write, os::unix::io::FromRawFd};
+
+        uuid::Uuid::parse_str(mount_id)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+        let metadata = beneath::open_beneath(&upper.file, Path::new(".libra"))?;
+        // SAFETY: metadata is a live directory descriptor; the fixed leaf is
+        // exclusively created without following a pre-existing link.
+        let raw = unsafe {
+            libc::openat(
+                metadata.as_raw_fd(),
+                c"worktree-mount-id".as_ptr(),
+                libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                0o600,
+            )
+        };
+        if raw < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: openat returned a new owned file descriptor.
+        let mut file = unsafe { fs::File::from_raw_fd(raw) };
+        writeln!(file, "{mount_id}")?;
+        file.sync_all()?;
+        metadata.sync_all()
+    }
+    #[cfg(test)]
+    mod tests {
+        use std::os::unix::fs::symlink;
+
+        use tempfile::tempdir;
+
+        use super::*;
+
+        #[test]
+        fn managed_target_blocks_an_intermediate_symlink_swap() {
+            let temp = tempdir().expect("tempdir");
+            let root = temp.path().canonicalize().expect("canonical root");
+            fs::create_dir(root.join("parent")).expect("parent");
+            fs::create_dir(root.join("outside")).expect("outside");
+            let target =
+                Target::beneath(&root, &root.join("parent/workspace")).expect("pin target");
+            fs::rename(root.join("parent"), root.join("retained")).expect("rename parent");
+            symlink(root.join("outside"), root.join("parent")).expect("swap symlink");
+            assert!(
+                target.create(true).is_err(),
+                "creation must not follow the replacement parent"
+            );
+            assert!(!root.join("outside/workspace").exists());
+        }
+
+        #[test]
+        fn rollback_preserves_preexisting_target_and_removes_only_owned_parents() {
+            let temp = tempdir().expect("tempdir");
+            let existing = temp.path().join("existing");
+            fs::create_dir(&existing).expect("existing target");
+            Target::resolve(&existing, temp.path())
+                .expect("resolve")
+                .create(false)
+                .expect("pin existing")
+                .rollback()
+                .expect("rollback existing");
+            assert!(existing.is_dir());
+            let created = Target::resolve(Path::new("new/parent/workspace"), temp.path())
+                .expect("resolve missing ancestors")
+                .create(true)
+                .expect("create");
+            assert_eq!(
+                created.path,
+                temp.path()
+                    .canonicalize()
+                    .expect("pinned base")
+                    .join("new/parent/workspace"),
+                "relative targets use the invoking workdir rather than process cwd"
+            );
+            fs::write(created.path.join("owned.txt"), b"owned").expect("owned contents");
+            created.rollback().expect("rollback owned");
+            assert!(!temp.path().join("new").exists());
+            assert!(existing.is_dir());
+        }
+
+        #[test]
+        fn rollback_does_not_follow_a_replacement_or_nested_symlink() {
+            let temp = tempdir().expect("tempdir");
+            let outside = temp.path().join("outside");
+            fs::create_dir(&outside).expect("outside");
+            fs::write(outside.join("keep"), b"keep").expect("keep");
+            let created = Target::resolve(&temp.path().join("owned"), temp.path())
+                .expect("resolve")
+                .create(true)
+                .expect("create");
+            symlink(&outside, created.path.join("nested")).expect("nested symlink");
+            created.rollback().expect("unlink owned nested symlink");
+            assert_eq!(
+                fs::read(outside.join("keep")).expect("outside intact"),
+                b"keep"
+            );
+            let replaced = Target::resolve(&temp.path().join("replaced"), temp.path())
+                .expect("resolve")
+                .create(true)
+                .expect("create");
+            fs::rename(&replaced.path, temp.path().join("retained")).expect("move owned dir");
+            symlink(&outside, &replaced.path).expect("replacement symlink");
+            assert!(replaced.rollback().is_err());
+            assert_eq!(
+                fs::read(outside.join("keep")).expect("outside intact"),
+                b"keep"
+            );
+        }
+
+        #[test]
+        fn registered_cleanup_stays_under_the_original_storage_descriptor() {
+            let temp = tempdir().expect("tempdir");
+            let common = temp.path().join("common");
+            fs::create_dir_all(common.join("owned/upper")).expect("original storage");
+            fs::write(common.join("owned/upper/data"), b"owned").expect("owned data");
+            let root = beneath::open_root(&common).expect("pin storage");
+            let retained = temp.path().join("retained");
+            fs::rename(&common, &retained).expect("rename original storage");
+            fs::create_dir_all(common.join("owned/upper")).expect("replacement storage");
+            fs::write(common.join("owned/upper/keep"), b"keep").expect("replacement data");
+
+            remove_registered_tree(&root, Path::new("owned/upper")).expect("remove owned upper");
+            remove_empty_registered_directory(&root, Path::new("owned"))
+                .expect("remove owned container");
+            assert!(!retained.join("owned").exists());
+            assert_eq!(
+                fs::read(common.join("owned/upper/keep")).expect("replacement preserved"),
+                b"keep"
+            );
+        }
+
+        #[test]
+        fn opacity_mask_is_empty_and_verified_before_mounting() {
+            let temp = tempdir().expect("tempdir");
+            let upper = Target::resolve(&temp.path().join("upper"), temp.path())
+                .expect("resolve")
+                .create(true)
+                .expect("create upper");
+            prepare_worktree_mask(&upper).expect("set and read back opaque xattr");
+            let mount_id = uuid::Uuid::new_v4().to_string();
+            prepare_mount_binding(&upper, &mount_id).expect("write mount binding");
+            assert_eq!(
+                fs::read_to_string(upper.path.join(".libra/worktree-mount-id"))
+                    .expect("mount binding"),
+                format!("{mount_id}\n")
+            );
+            assert!(
+                prepare_mount_binding(&upper, &uuid::Uuid::new_v4().to_string()).is_err(),
+                "a mount binding must never overwrite an existing marker"
+            );
+            assert!(
+                fs::read_dir(upper.path.join(".libra/worktree"))
+                    .expect("mask")
+                    .next()
+                    .is_none()
+            );
+            assert!(
+                !upper.path.join(".libra/commondir").exists(),
+                "the mask must not invent a new worktree identity"
+            );
+            upper.rollback().expect("rollback");
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FuseTaskWorktreeSweepReport {
     pub scanned: usize,
@@ -140,6 +800,22 @@ pub fn fuse_task_worktree_cleanup_root(mountpoint: &Path) -> Option<PathBuf> {
         return None;
     }
     let cleanup_root = mountpoint.parent()?;
+    // Managed named FUSE worktrees share this historical prefix space, but
+    // their upper layer and registry must only be removed by `worktree remove`.
+    let fuse_container = cleanup_root.parent()?;
+    if fuse_container
+        .file_name()
+        .is_some_and(|name| name == "fuse")
+        && fuse_container
+            .parent()
+            .is_some_and(|path| path.file_name().is_some_and(|name| name == "worktree"))
+        && fuse_container
+            .parent()
+            .and_then(Path::parent)
+            .is_some_and(|path| path.file_name().is_some_and(|name| name == ".libra"))
+    {
+        return None;
+    }
     if is_fuse_task_worktree_cleanup_root(cleanup_root) {
         Some(cleanup_root.to_path_buf())
     } else {
@@ -446,6 +1122,13 @@ mod tests {
         assert_eq!(
             fuse_task_worktree_cleanup_root(Path::new("/tmp/workspace")),
             None
+        );
+        assert_eq!(
+            fuse_task_worktree_cleanup_root(Path::new(
+                "/repo/.libra/worktree/fuse/libra-task-worktree-fuse-collision/workspace"
+            )),
+            None,
+            "legacy cleanup must not classify managed named FUSE storage"
         );
     }
 

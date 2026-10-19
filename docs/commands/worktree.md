@@ -7,18 +7,19 @@ Manage multiple working trees attached to this repository.
 ## Synopsis
 
 ```
-libra worktree add <path>
-libra worktree list
-libra worktree doctor
-libra worktree lock <path> [--reason <text>]
-libra worktree unlock <path>
-libra worktree move <src> <dest>
+libra worktree add <NAME> [TARGET] [--path <PATH>]
+libra worktree list [--porcelain]
+libra worktree lock <NAME> [--reason <text>]
+libra worktree lock --path <PATH> [--reason <text>]
+libra worktree unlock (<NAME> | --path <PATH>)
+libra worktree move <NAME> --path <DEST>
+libra worktree move --from-path <SRC> --path <DEST>
 libra worktree prune
-libra worktree remove <path>
+libra worktree remove (<NAME> | --path <PATH>) [--delete-dir]
 libra worktree umount <path> [--cleanup]
-libra worktree repair --confirm [<path>]
-libra worktree repair --migrate-layout [--dry-run] [--confirm] [<path>]
-libra worktree repair <path> --resolve-identity --yes
+libra worktree repair [<NAME> | --path <PATH>] --confirm
+libra worktree repair [<NAME> | --path <PATH>] --migrate-layout [--dry-run] [--confirm]
+libra worktree repair (<NAME> | --path <PATH>) --resolve-identity --yes
 libra worktree doctor [<workspace-id>] [--limit <n>] [--cursor <cursor>]
 ```
 
@@ -26,45 +27,65 @@ libra worktree doctor [<workspace-id>] [--limit <n>] [--cursor <cursor>]
 
 `libra worktree` manages multiple working trees that share a single repository database and object store. This allows you to have several checkouts of the same repository simultaneously, which is useful for working on multiple branches at once, running builds while editing code, or testing changes in isolation.
 
-Each linked worktree is a directory containing its own real `.libra` gitdir — a local directory (not a symlink) that holds the worktree's private `HEAD`, index, and `HEAD` reflog, plus a `commondir` pointer to the shared storage and a stable `worktree_id`. The main worktree is the original repository directory. All worktrees share the same SQLite database, object store, branch/tag/remote refs, and configuration, but each keeps its own checked-out branch and staging state. (A worktree created by an older Libra version may still use the legacy shared-`.libra` symlink layout; `libra worktree doctor` reports it, and `libra worktree repair --migrate-layout --dry-run` previews the migration read-only.) The registry file `worktrees.json` is versioned (`schema_version: 3`; v2 since v0.19.57): each linked entry persists its stable `worktree_id`, a legacy v1 file is upgraded in place by the first mutating worktree command (ids backfilled from each worktree's gitdir; lockless readers like `worktree list` read a v1 file without rewriting it), and older binaries are refused at the database layer before they can misread or rewrite the file. v3 adds a durable registration GENERATION — `epoch_counter` on the registry and `epoch` on each entry, reported by `worktree list`. Instance ids are path-derived, so a worktree removed and re-added in the same place has the same id and path as its predecessor; the generation is what tells the two registrations apart, and the `libra service` dirty-mark endpoint requires it as a fence. A v2-era binary would parse a v3 file and drop the generations on rewrite, so the v3 capability marker refuses those binaries at connect time; for the same reason this migration does not roll back while any generation is live.
+New worktrees have a stable **name**. By default, ordinary linked worktrees live at `<common-storage>/worktree/linked/<NAME>`: normally `.libra/worktree/linked/<NAME>` in the main repository. The common storage is shared by all linked worktrees, so invoking `add` from a linked worktree or a subdirectory uses the same default root. The main worktree stays in its original directory. `--path <PATH>` selects an explicit complete destination instead; relative paths are resolved from the caller's current directory.
 
-**Resolving an ambiguous registry.** A registry written by an older binary can end up with two entries claiming one path-derived identity (`add A` → `move A B` → `add A`). Every worktree MUTATION is refused while that holds — including the `remove` that would fix it, because it goes through the same loader. `libra worktree doctor` names the colliding entries, and `libra worktree repair <path> --resolve-identity --yes` is the one action that runs against the ambiguous registry: it DETACHES the named entry (files and scoped state kept, every command inside that directory fails closed) so the remaining claimant owns the identity again. Finish with `worktree remove --delete-dir <path>`, or `worktree add <path>` to re-attach it.
+Names are 1–64 lowercase ASCII characters matching `[a-z0-9][a-z0-9._-]{0,63}`. A name must not end in a dot or use a reserved Windows device name, including device names with an extension. Paths may contain spaces and Unicode. Names share one repository namespace across ordinary and FUSE worktrees, including detached entries and entries awaiting cleanup. An existing name always resolves to its stored path, even after a move; supplying a different `--path` is refused.
 
-Worktree metadata is persisted in a `worktrees.json` file inside the `.libra` storage directory. Each entry tracks the filesystem path, whether it is the main worktree, its lock status, and an optional lock reason. The state file is written atomically via a temporary file rename to prevent corruption.
+Each linked worktree contains its own real `.libra` gitdir — a local directory (not a symlink) holding its own `HEAD`, index and `HEAD` reflog, plus a `commondir` pointer to shared storage and a stable `worktree_id`. Worktrees share the database, object store, branch/tag/remote refs and configuration while retaining separate checkout and staging state. Main-worktree file operations exclude its `.libra` metadata, while commands inside a managed linked worktree operate on that worktree's files. A missing or invalid local identity inside the managed container is refused rather than resolving upward into the main worktree.
 
-When a new worktree is added and HEAD points to a commit, the worktree is automatically populated with the committed content from HEAD (not staged index changes).
+The on-disk `worktrees.json` registry uses `schema_version: 4`, with optional `name` fields. Existing v2/v3 registries remain readable; a normal mutation writes the current format while preserving stored identities and v3 registration generations (`epoch_counter` and each entry's `epoch`). Existing unnamed entries and the main entry have no assigned name. This change does not move existing directories, assign names in bulk, or add a directory-migration command. Use `--path` to select an existing unnamed worktree. Registry files are written atomically. The public `worktree list` JSON schema is version 2, independently of the disk registry version.
+
+Older shared-`.libra` symlink layouts retain their existing diagnosis and explicit `repair --migrate-layout` workflow; that operation repairs gitdir isolation and does not relocate a worktree into the new default directory. Older binaries must not rewrite the new registry format; keep a compatible Libra version after creating named worktrees.
+
+**Resolving an ambiguous registry.** An older registry may contain two entries claiming one path-derived identity. Mutating worktree operations refuse this ambiguity. `libra worktree doctor` identifies the entries; `libra worktree repair --path <PATH> --resolve-identity --yes` detaches the selected entry while preserving its files and scoped state. Complete removal with `worktree remove --path <PATH> --delete-dir`, or reattach a named entry with `worktree add <NAME>`.
+
+A newly created worktree is populated from its selected commit (HEAD by default), not from staged index changes. Reattaching a detached worktree does not perform checkout or replace its files, HEAD or index.
 
 ## Options
 
 ### Subcommand: `add`
 
-Create a new linked worktree at the given filesystem path.
+Create a named linked worktree in the managed directory, or at an explicit destination.
 
 | Argument / Flag | Description |
 |-----------------|-------------|
-| `<path>` | Filesystem path for the new worktree. Can be relative or absolute. The directory is created if it does not exist. Must not be inside `.libra` storage, must not already be registered, and must be empty if it exists. |
-| `<branch-or-commit>` | Optional target. An existing branch is checked out ATTACHED (refused before any side effect if any worktree — including the invoking one — already has it out). Anything else must resolve as a commit-ish and seeds a DETACHED worktree populated from that commit. A nonexistent branch fails closed: Git's remote-branch DWIM, `worktree.guessRemote`, and `--track`/`--no-track` are deferred. |
-| `--detach` | Detach HEAD even when the target names a branch (the branch stays free for checkout elsewhere). |
-| `-b, --create-branch <NEW_BRANCH>` | Create `NEW_BRANCH` at `<branch-or-commit>` (default: the source worktree's HEAD) and check it out. Refused if the branch already exists (`-B`/`--force` are deferred); any later failure rolls the branch back — no branch-only residue. |
+| `<NAME>` | Stable worktree name. By default creates `.libra/worktree/linked/<NAME>` under common storage. |
+| `[TARGET]` | Optional branch or commit-ish. An existing branch is checked out attached, unless any worktree already has it checked out. Other commit-ish targets create a detached worktree. Unknown targets fail before creation; remote-branch guessing and `--track`/`--no-track` are not supported. |
+| `--path <PATH>` | Complete external destination, absolute or relative to the caller. It must be absent or an empty directory, cannot be a symlink, and may enter common storage only at this name's own managed default. It is not a parent directory to which the name is appended. |
+| `--detach` | Detach HEAD even when `TARGET` names a branch. |
+| `-b, --new-branch <NEW_BRANCH>` | Create and check out a new branch at `TARGET`, or the source HEAD when omitted. An existing branch is refused; a later creation failure rolls the new branch back. |
 
-Without a target the new worktree is created **detached at the source
-commit** — intentionally different from Git's default (which creates a
-branch named after the path basename). `--lock`, `--orphan`, and
-`--no-checkout` are deferred; use the separate `worktree lock` subcommand.
+`--create-branch` is an alias for `--new-branch`. Without a target the worktree is **detached at the source commit**. The name does not implicitly create a branch. `--lock`, `--orphan`, `--no-checkout`, remote guessing and `-B`/`--force` are not supported; use `worktree lock` after creation.
+
+For a detached registry entry, `add <NAME>` verifies the saved identity and common-storage pointer, then reattaches its existing files and staging state. `TARGET`, `-b` and `--detach` are refused during reattachment. An optional `--path` must match the registered path. A tombstoned entry remains reserved until cleanup succeeds.
 
 ```bash
-# Detached at the source commit (Libra's default)
-libra worktree add ../my-feature
-libra --json worktree add ../my-feature
+# Detached at the source commit in .libra/worktree/linked/my-feature
+libra worktree add my-feature
+libra --json worktree add my-feature
 
-# Check an existing branch out
-libra worktree add ../fix-1 hotfix
+# Check out an existing branch
+libra worktree add fix-1 hotfix
 
-# Detached at a commit-ish (tag, sha, branch tip)
-libra worktree add --detach ../probe v1.2.0
+# Detached at a tag or commit
+libra worktree add --detach probe v1.2.0
 
-# Create a new branch from a start point and check it out
-libra worktree add -b topic ../topic main
+# Create a branch explicitly
+libra worktree add -b topic topic main
+
+# Use this exact external destination, including spaces or Unicode
+libra worktree add experiment --path "../实验 workspace"
+```
+
+#### FUSE worktrees
+
+On Unix builds with `worktree-fuse`, `add <NAME> --fuse` uses `.libra/worktree/fuse/<NAME>/workspace` as its mountpoint and the sibling `upper/` as its writable overlay. An explicit `--path` selects an external mountpoint; targets inside a lower tree, upper tree, common metadata or another managed workspace are refused before creation. The internal default is protected by an opaque `.libra/worktree` directory in the overlay, so it cannot recursively expose its own mountpoint, upper directory or sibling workspaces. Mount setup refuses a filesystem that cannot establish this mask.
+
+FUSE and ordinary worktrees cannot claim the same name. The FUSE registry uses `{ "schema_version": 1, "entries": [...] }`; known older records remain readable without relocating their directories. FUSE worktrees do not support `move` or scoped identity repair (`repair <NAME>` / `repair --path <PATH>`). Use `worktree repair --confirm` for global registry repair; FUSE does not have the ordinary linked-worktree private identity layout. Their `remove` behavior remains unmounting and deleting the upper layer, rather than ordinary keep-dir detachment. For the managed default, it also removes the empty mountpoint and container; a nonempty directory or cleanup failure keeps the registration and name for retry. Existing legacy and external mountpoint directories are kept. `umount` continues to take an actual path rather than a worktree name.
+
+```bash
+libra worktree add overlay --fuse
+libra worktree umount /repo/.libra/worktree/fuse/overlay/workspace
 ```
 
 ### Subcommand: `list`
@@ -72,7 +93,8 @@ libra worktree add -b topic ../topic main
 List all registered worktrees and their state. `--porcelain` emits a stable,
 machine-readable format: for each worktree a `worktree <path>` line, that
 worktree's own `HEAD <sha>` line and either a `branch <ref>` or a `detached`
-line (each worktree owns its HEAD), and a `locked [<reason>]` line when locked,
+line (each worktree owns its HEAD), an optional `name <name>` line after the
+`worktree` line, and a `locked [<reason>]` line when locked,
 with a blank line between worktrees. A worktree whose HEAD cannot be resolved
 (a legacy shared-`.libra` layout, or a missing/corrupt scope) omits the HEAD
 lines rather than being mislabeled with another worktree's commit.
@@ -84,10 +106,13 @@ libra --json worktree list
 libra --machine worktree list
 ```
 
-Structured output uses the `worktree.list` command envelope. Each entry reports
-`kind`, `path`, `is_main`, `locked`, `lock_reason`, whether the path currently
-exists on disk, the persisted `worktree_id`, and the lifecycle `state`
-(`active`, `detached_from_registry`, or `tombstone` — see `remove`), and the on-disk `layout` (`main`, `linked-v2`, `legacy-symlink`, `missing`, `corrupt`; porcelain adds a matching `layout` line per entry). In a `legacy-symlink` worktree (pre-isolation shared `.libra`), read-only commands keep working but state-mutating commands refuse with `LBR-REPO-003` — run `libra worktree repair --migrate-layout --confirm <path>` from the main worktree. Target-oriented lifecycle commands (`worktree remove <path>` in both modes and `worktree repair <path>`) also refuse a legacy-symlink target — the shared symlink would route their writes into MAIN storage — until the migration completes.
+Structured output uses the `worktree.list` command envelope with
+`data.schema_version: 2`. Each entry reports optional `name`, its actual absolute
+`path`, `kind`, `is_main`, `locked`, `lock_reason`, whether the path currently
+exists on disk, the persisted `worktree_id`, registration `epoch`, and the lifecycle `state`
+(`active`, `detached_from_registry`, or `tombstone` — see `remove`), and the on-disk `layout` (`main`, `linked-v2`, `legacy-symlink`, `missing`, `corrupt`; porcelain adds a matching `layout` line per entry). In a `legacy-symlink` worktree (pre-isolation shared `.libra`), read-only commands keep working but state-mutating commands refuse with `LBR-REPO-003` — run `libra worktree repair --migrate-layout --confirm --path <PATH>` from the main worktree. Target-oriented lifecycle commands (`worktree remove --path <PATH>` in both modes and `worktree repair --path <PATH>`) also refuse a legacy-symlink target — the shared symlink would route their writes into MAIN storage — until the migration completes.
+
+Unnamed entries, including the main worktree, omit `name` from JSON and omit the porcelain `name` line. Named human-readable entries use `worktree <name> <actual-path>`.
 
 ### Subcommand: `repair`
 
@@ -98,20 +123,20 @@ refused with `LBR-CONFLICT-002` before any registry lock, database write or
 filesystem touch (zero side effects); with it the action runs inside one
 operation-log audit boundary, recording exactly one row per executed action
 (inspect with `libra op log`). The read-only `--migrate-layout --dry-run`
-preview never needs confirmation, and `repair <path> --resolve-identity` keeps
+preview never needs confirmation, and `repair --path <PATH> --resolve-identity` keeps
 its own dedicated `--yes` confirmation.
 
-Without an argument, the confirmed action removes duplicate registry entries (same canonical path), ensures exactly one main worktree entry exists, and runs the W3 lifecycle recovery engine: stale intent-journal rows (from an interrupted add/move/remove/prune) are rolled forward or back deterministically (recovery never deletes directories), tombstone entries get their scoped cleanup retried, and detached markers plus the SQL lifecycle mirror are reconciled with the registry. The state file is only rewritten when something actually changed.
+Without a name or `--path`, the confirmed action removes duplicate registry entries (same canonical path), ensures exactly one main worktree entry exists, and runs the W3 lifecycle recovery engine: stale intent-journal rows (from an interrupted add/move/remove/prune) are rolled forward or back deterministically (recovery never deletes directories), tombstone entries get their scoped cleanup retried, and detached markers plus the SQL lifecycle mirror are reconciled with the registry. The state file is only rewritten when something actually changed.
 
 With `--migrate-layout`, migrates legacy shared-`.libra` symlink worktrees to the isolated layout (run from the MAIN worktree; `--dry-run` reports without writing; without a path every legacy entry is migrated). The migration installs a fresh journaled gitdir by atomic renames (the legacy link is kept as a backup until verification passes), seeds a DETACHED HEAD at the shared snapshot, and rebuilds the private index from that commit: working files are never touched (they show as dirty/untracked afterwards) and shared STAGED state is never copied — commit or stash it in the main worktree first. An unmerged shared index or an in-progress main rebase/cherry-pick/bisect refuses before any rename; an interrupted migration is recovered by the next `worktree repair --confirm`.
 
-With a path, restores that **linked** worktree's gitdir identity from the registry (registry v2): rewrites a missing or corrupt `.libra/worktree_id` from the entry's persisted stable id and restores a missing or corrupt (empty/unreadable) `commondir` pointer to this repository's shared storage. The identity always comes from the registry — never from a guess — so the repaired worktree maps back to its own scoped state (HEAD, index, stash snapshots) instead of a fresh scope or the main worktree's. A `commondir` that validly points at a **different** storage is refused (repair never silently re-homes a worktree onto another repository), and the refusal is side-effect free — neither gitdir file is touched. Unregistered paths and the main worktree are refused, and so is a registry still in the legacy v1 format (it carries no persisted identities) — run the no-argument `libra worktree repair --confirm` once to upgrade it, then retry.
+With a name or `--path`, restores that **linked** worktree's gitdir identity from the registry (registry v2): rewrites a missing or corrupt `.libra/worktree_id` from the entry's persisted stable id and restores a missing or corrupt (empty/unreadable) `commondir` pointer to this repository's shared storage. The identity always comes from the registry — never from a guess — so the repaired worktree maps back to its own scoped state (HEAD, index, stash snapshots) instead of a fresh scope or the main worktree's. A `commondir` that validly points at a **different** storage is refused (repair never silently re-homes a worktree onto another repository), and the refusal is side-effect free — neither gitdir file is touched. Unregistered paths and the main worktree are refused, and so is a registry still in the legacy v1 format (it carries no persisted identities) — run the no-argument `libra worktree repair --confirm` once to upgrade it, then retry.
 
 ```bash
 libra worktree repair --confirm
 libra --json worktree repair --confirm
-libra worktree repair --confirm <path>
-libra --json worktree repair --confirm ../experiment
+libra worktree repair experiment --confirm
+libra --json worktree repair --path ../experiment --confirm
 libra worktree repair --migrate-layout --dry-run   # preview, no --confirm needed
 libra worktree repair --migrate-layout --confirm
 ```
@@ -235,47 +260,36 @@ same one-row operation-log audit boundary. `--json` envelopes are
 
 ### Subcommand: `lock`
 
-Mark a worktree as locked to prevent it from being pruned or removed.
-
-| Argument / Flag | Description |
-|-----------------|-------------|
-| `<path>` | Filesystem path of the worktree to lock. |
-| `--reason` | Optional human-readable explanation for why the worktree is locked. |
+Lock a worktree to prevent prune, move or removal. Select it with either a name or `--path`, never both. `--reason <text>` records an optional explanation shown by `list`.
 
 ```bash
-# Lock a worktree
-libra worktree lock ../my-feature
-
-# Lock with a reason
-libra worktree lock ../my-feature --reason "long-running experiment"
-libra --json worktree lock ../my-feature --reason "long-running experiment"
+libra worktree lock my-feature
+libra worktree lock my-feature --reason "long-running experiment"
+libra --json worktree lock --path ../existing-tree --reason "long-running experiment"
 ```
 
 ### Subcommand: `unlock`
 
-Remove the lock from a previously locked worktree. Idempotent: unlocking an already-unlocked worktree is a no-op.
-
-| Argument | Description |
-|----------|-------------|
-| `<path>` | Filesystem path of the worktree to unlock. |
+Unlock a named worktree or one selected by `--path`. Unlocking an already-unlocked worktree is a no-op.
 
 ```bash
-libra worktree unlock ../my-feature
-libra --machine worktree unlock ../my-feature
+libra worktree unlock my-feature
+libra --machine worktree unlock --path ../existing-tree
 ```
 
 ### Subcommand: `move`
 
-Move or rename an existing linked worktree. The directory is renamed on disk and the registry is updated. Cannot move the main worktree or a locked worktree.
+Move an ordinary linked worktree to an explicit destination on the same filesystem. Its name and stable identity remain unchanged; later name-based commands resolve to the new stored path. A cross-filesystem move is refused before copying any files, and the source and its registration remain in place. Choose a destination on the same filesystem, or create a separate worktree on the other filesystem and transfer changes explicitly. The main worktree, locked worktrees and FUSE worktrees cannot be moved.
 
-| Argument | Description |
-|----------|-------------|
-| `<src>` | Current filesystem path of the worktree. |
-| `<dest>` | New filesystem path. Must not already exist on disk or in the registry. Cannot be inside `.libra` storage. |
+| Argument / Flag | Description |
+|-----------------|-------------|
+| `<NAME>` | Registered source name; mutually exclusive with `--from-path`. |
+| `--from-path <SRC>` | Select a source by its actual path, including existing unnamed worktrees. |
+| `--path <DEST>` | Complete destination path. Must not already exist or be registered. Inside common storage, only this name's own managed default is allowed. |
 
 ```bash
-libra worktree move ../my-feature ../my-feature-v2
-libra --json worktree move ../my-feature ../my-feature-v2
+libra worktree move my-feature --path ../my-feature-v2
+libra --json worktree move --from-path ../existing-tree --path ../existing-tree-v2
 ```
 
 ### Subcommand: `prune`
@@ -295,41 +309,26 @@ libra --machine worktree prune
 
 ### Subcommand: `remove`
 
-Remove a worktree. By default (keep-dir) the directory on disk is
-intentionally left untouched — since v0.19.58 this DETACHES the worktree:
-the registry entry moves to the `detached_from_registry` state, its scoped
-database state (HEAD, index metadata, reflog, layer/sparse/dirty rows) is
-preserved, and a marker in the worktree's gitdir makes every command run
-inside the directory fail closed with a re-add/delete hint. Re-attach it
-with `libra worktree add <path>` (the directory's identity is verified
-against the registry's persisted id) or finish the removal with
-`--delete-dir`.
+Remove an ordinary worktree by name or `--path`. By default the directory remains on disk and the registry entry moves to `detached_from_registry`. The **name stays reserved**, and its private HEAD, index, working files and scoped database state are preserved. Commands inside the detached directory refuse until it is reattached or removed completely.
 
-Pass `--delete-dir` for Git-style behavior — the directory is removed only
-after a dirty-state check passes, the parent directory entry is fsynced,
-and only then the scoped database state is cleaned. If that cleanup fails,
-a `tombstone` entry remains and `libra worktree repair --confirm` retries it. Cannot
-remove the main worktree, a locked worktree, or one with an in-progress
-rebase/cherry-pick/bisect.
+Reattach a named entry with `libra worktree add <NAME>`. The command verifies the directory identity and common-storage pointer; it does not check out a commit or overwrite staged and unstaged work. Do not supply `TARGET`, `-b` or `--detach`; an optional `--path` must equal the stored path.
+
+Use `--delete-dir` to complete removal. It checks for uncommitted changes and verifies that the directory still belongs to the registered worktree before deletion. A replacement directory, symlink or invalid identity is refused. Only a confirmed missing path is treated as absent; inspection errors do not authorize deletion. Scoped cleanup follows directory deletion. If cleanup fails, the `tombstone` entry and its name remain reserved for `libra worktree repair --confirm`; the name is released only when cleanup finishes. Main, locked and active-sequencer worktrees cannot be removed.
 
 | Argument / Flag | Description |
 |-----------------|-------------|
-| `<path>` | Filesystem path of the worktree to unregister. |
-| `--delete-dir` | After unregistering, also delete the directory on disk. Refused when the worktree contains uncommitted changes (staged or unstaged). |
+| `<NAME>` | Registered worktree name; mutually exclusive with `--path`. |
+| `--path <PATH>` | Select an existing worktree by its actual path. |
+| `--delete-dir` | Delete a clean, verified directory and its scoped state, then release the registration and name. |
 
 ```bash
-# Default — keep the directory on disk
-libra worktree remove ../my-feature
-libra --json worktree remove ../my-feature
+# Keep files, staging state and the reserved name
+libra worktree remove my-feature
+libra worktree add my-feature
 
-# Git-style — also delete the directory (clean worktree only)
-libra worktree remove --delete-dir ../my-feature
-libra --machine worktree remove --delete-dir ../my-feature
-
-# Refused when dirty:
-$ libra worktree remove --delete-dir ../dirty-feature
-fatal: cannot delete dirty worktree '../dirty-feature' (uncommitted changes)
-       Hint: commit or stash changes, or remove without --delete-dir to keep the directory
+# Delete a clean worktree and release its name
+libra worktree remove my-feature --delete-dir
+libra --machine worktree remove --path ../existing-tree --delete-dir
 ```
 
 Behavior intentionally differs from Git: Git's default deletes the directory.
@@ -344,8 +343,12 @@ for the rationale.
 
 Unmount a FUSE worktree mountpoint. This is primarily useful for cleaning up
 stale Agent task worktrees when the operating system reports a path as busy.
-The command also accepts a Libra task worktree root and resolves its
-`workspace` mountpoint automatically.
+The command also accepts a historical Libra task FUSE root and resolves its
+`workspace` mountpoint automatically. `--cleanup` supports only those historical
+`libra-task-worktree-fuse-*` roots; it does not delete new named FUSE containers or
+new task attempts. Use `worktree remove <NAME>` for a named FUSE worktree and the
+run cleanup commands for review/investigation attempts.
+The cleanup target is checked before unmounting; a managed named worktree is refused even if its name begins with `libra-task-worktree-fuse-`.
 
 Alias: `unmount`
 
@@ -379,31 +382,31 @@ JSON / machine output envelope:
 
 ```bash
 # Create a new worktree
-libra worktree add ../experiment
+libra worktree add experiment
 
 # List all worktrees
 libra wt list
 
 # Lock a worktree to protect it
-libra wt lock ../experiment --reason "production hotfix in progress"
+libra wt lock experiment --reason "production hotfix in progress"
 
 # Unlock when done
-libra wt unlock ../experiment
+libra wt unlock experiment
 
 # Move a worktree to a new location
-libra wt move ../experiment ../experiment-v2
+libra wt move experiment --path ../experiment-v2
 
 # Clean up worktrees whose directories were deleted
 libra wt prune
 
 # Unregister a worktree (keeps files on disk)
-libra wt remove ../experiment-v2
+libra wt remove experiment
 
 # Fix inconsistent worktree metadata
-libra wt repair
+libra wt repair --confirm
 
 # Restore a linked worktree's gitdir identity from the registry
-libra wt repair ../experiment
+libra wt repair experiment --confirm
 
 # Read-only diagnosis of every Agent workspace scope
 libra wt doctor
@@ -414,15 +417,15 @@ libra wt doctor
 **`worktree add`**:
 
 ```text
-/Users/alice/projects/my-feature
+/Users/alice/projects/my-repo/.libra/worktree/linked/my-feature
 ```
 
 **`worktree list`**:
 
 ```text
 main /Users/alice/projects/my-repo
-worktree /Users/alice/projects/my-feature
-worktree /Users/alice/projects/hotfix [locked: production hotfix in progress]
+worktree my-feature /Users/alice/projects/my-repo/.libra/worktree/linked/my-feature
+worktree hotfix /Users/alice/projects/my-repo/.libra/worktree/linked/hotfix [locked: production hotfix in progress]
 ```
 
 **`worktree remove`**:
@@ -473,6 +476,7 @@ single-line JSON.
   "ok": true,
   "command": "worktree.list",
   "data": {
+    "schema_version": 2,
     "worktrees": [
       {
         "kind": "main",
@@ -678,16 +682,16 @@ When creating a linked worktree, Libra restores content from the HEAD commit rat
 
 | Operation | Libra | Git | jj |
 |-----------|-------|-----|----|
-| Create worktree | `worktree add <path> [<branch-or-commit>]` (no target: detached at source commit) | `worktree add <path> [<branch>]` | `workspace add <path>` |
-| Create on branch | `worktree add <path> <branch>` (attached; refused if checked out anywhere; no DWIM) | `worktree add <path> <branch>` | `workspace add <path>` (then `jj edit`) |
-| Create detached | `worktree add --detach <path> [<commit>]` (also `add <path> <commit>`) | `worktree add --detach <path> <commit>` | N/A |
+| Create worktree | `worktree add <NAME> [TARGET] [--path <PATH>]` (no target: detached at source commit) | `worktree add <path> [<branch>]` | `workspace add <path>` |
+| Create on branch | `worktree add <NAME> <branch>` (attached; refused if checked out anywhere; no DWIM) | `worktree add <path> <branch>` | `workspace add <path>` (then `jj edit`) |
+| Create detached | `worktree add --detach <NAME> [<commit>]` (also `add <NAME> <commit>`) | `worktree add --detach <path> <commit>` | N/A |
 | List worktrees | `worktree list` | `worktree list [--porcelain]` | `workspace list` |
-| Lock | `worktree lock <path> [--reason]` | `worktree lock [--reason] <worktree>` | N/A |
-| Unlock | `worktree unlock <path>` | `worktree unlock <worktree>` | N/A |
-| Move | `worktree move <src> <dest>` | `worktree move <worktree> <new-path>` | N/A |
+| Lock | `worktree lock <NAME> [--reason]` | `worktree lock [--reason] <worktree>` | N/A |
+| Unlock | `worktree unlock <NAME>` | `worktree unlock <worktree>` | N/A |
+| Move | `worktree move <NAME> --path <DEST>` | `worktree move <worktree> <new-path>` | N/A |
 | Prune | `worktree prune` | `worktree prune [--dry-run]` | N/A (automatic) |
-| Remove | `worktree remove <path>` (detaches — directory + state kept, frozen) | `worktree remove [--force] <worktree>` (deletes dir) | `workspace forget <name>` |
-| Repair | `worktree repair --confirm [<path>]` | `worktree repair [<path>...]` | N/A |
+| Remove | `worktree remove <NAME>` (detaches — directory + state kept, frozen) | `worktree remove [--force] <worktree>` (deletes dir) | `workspace forget <name>` |
+| Repair | `worktree repair [<NAME>] --confirm` | `worktree repair [<path>...]` | N/A |
 | Alias | `wt` | N/A | N/A |
 | Branch per worktree | `-b <new> [<start>]` explicit (full rollback; no basename default) | Automatic (new branch or existing) | Automatic (new working copy commit) |
 | Storage | JSON file (`worktrees.json`) | Filesystem structure (`.git/worktrees/`) | Operation log |
@@ -701,7 +705,7 @@ Note: jj uses the term "workspace" instead of "worktree". Each workspace automat
 |------|-----------|
 | `LBR-REPO-001` | Not a libra repository |
 | `LBR-REPO-002` | `worktrees.json` is corrupt |
-| `LBR-CLI-003` | Worktree path cannot be inside `.libra` storage |
+| `LBR-CLI-003` | Invalid name or explicit destination enters protected metadata or another managed workspace |
 | `LBR-CLI-003` | Target exists and is not a directory |
 | `LBR-CLI-003` | No such worktree (for lock, unlock, move, remove) |
 | `LBR-CLI-003` | Cannot move or remove main worktree |
@@ -719,3 +723,5 @@ Note: jj uses the term "workspace" instead of "worktree". Each workspace automat
 | `LBR-CLI-003` | `worktree doctor <workspace-id>` names an unknown workspace |
 | `LBR-WORKTREE-001` | `worktree doctor --cursor` was given a cursor this command did not issue (or one that expired) |
 | `LBR-WORKTREE-002` | `worktree doctor` cannot read a scope (unparseable registry, unreadable record, missing repository identity) and refuses to report a partial diagnosis |
+
+A build that supports managed worktrees records repository capability 4 when it first opens a repository. After that, Libra 0.30.x refuses every command in that repository, including commands unrelated to worktrees. Upgrade the installed Libra binary to 0.31.0 or later to continue. Existing worktree directories are not moved.

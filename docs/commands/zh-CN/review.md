@@ -33,6 +33,13 @@ CLI，并把它们的 findings 记录为一次可审计的 run。首批可启动
 的 CLI 形态，环境变量只注入 allowlist。reviewer 永远不会在仓库工作树本身
 运行。
 
+新工作区位于共享存储根目录的
+`.libra/worktree/tasks/<run-id>/<attempt-id>/workspace/`，从 linked worktree
+发起也采用同一根目录。原始 task 快照不是 linked 仓库；在该目录直接启动普通
+`libra` 命令不会向上自动发现主仓库。访问仓库需要 runtime 显式提供已验证的
+scope。Libra 不会把内部 OS 沙箱施加给外部 reviewer CLI；该 CLI 自身的沙箱设置
+决定它能否访问兄弟工作区或共享存储。
+
 run 在前台阻塞直到每个 reviewer 得到结果，并恰好落在五个 terminal state
 之一：`success`、`error`、`cancelled`、`timeout`、`partial`。按 Ctrl-C（或
 发送 SIGTERM）取消 run 时走与 `libra review cancel` 完全相同的 cleanup 路径：
@@ -49,6 +56,19 @@ reviewer findings 是**不可信自由文本**。`libra review show` 在渲染
 `findings.md` 之前总是剥离 ANSI/终端控制序列，恶意 reviewer 无法伪造终端
 输出；JSON 输出携带的也是同样经过消毒的渲染结果。
 
+### 工作区保留与清理
+
+运行元数据仍在 `.libra/sessions/agent-runs/<run_id>/`。新 `state.json` 和
+`manifest.json` 使用 schema version 2，并保存工作区所有权描述。已知 version-1
+记录仍可读取，不搬迁旧目录、不批量改写保存的 run。未知版本拒绝写入与清理。
+
+`review clean` 只删除属于自身类型的终态 run。它校验保存的描述与目录身份，
+先清理所属工作区，再删除运行元数据。链接、目录被替换、所有权冲突或清理错误
+均保留恢复记录供重试。仅有目录名称不能证明所有权；应保留报告的无主目录供诊断。
+孤儿 run 取消时若无法清理已证明归属的工作区，仍会把 run 标记为 `cancelled`，
+并报告 `workspace_action: cleanup_failed` 及错误。所有权 intent 会保留，
+修复原因后可用 `review clean --run <run_id>` 重试。
+
 ### 范围选择
 
 记录在 run 里的 `target_scope` 标注了 reviewer 被要求 review 的范围：
@@ -58,13 +78,14 @@ reviewer findings 是**不可信自由文本**。`libra review show` 在渲染
 - `--checkpoint <id>`：`checkpoint:<id>`（来自
   `libra agent checkpoint list` 的 agent checkpoint）。reviewer 的工作区就是该
   checkpoint 自身捕获的内容——`metadata.json`、可选的 `manifest.json` 与
-  transcript 文件——以**只读**形式物化在 run 目录下
-  （`<run_dir>/checkpoint-input/`）。它绝不伪装成 worktree diff：完全不物化仓库
+  transcript 文件——以**只读**形式物化在
+  `.libra/worktree/tasks/<run-id>/<attempt-id>/checkpoint-input/`。它绝不伪装成 worktree diff：完全不物化仓库
   快照，因此 scoped run 只可能消费指定的 checkpoint，scoped prompt 也会明确告知
   reviewer 面对的是捕获的 transcript、其内容属于不可信数据。checkpoint 缺失、
   tree 非法、或内容不在本地对象库时，在创建任何 run 之前即 fail-closed（无 run
-  残留）。物化产物位于 run 目录内，与 run 共享同一 retention 生命周期
-  （`review clean` 随 run 一并移除），`agent doctor` 无需新增孤儿类别。
+  残留）。run 记录独立输入目录的所有权；`review clean` 验证并删除所属输入后
+  才删除运行元数据，失败时保留记录供重试。`agent doctor` 只读报告无主托管 task
+  目录，不删除它们。
 
 ### 分页
 
@@ -102,7 +123,7 @@ libra review show <run_id> --json
 # 取消一个正在运行的 review（与 Ctrl-C 相同的 cleanup）
 libra review cancel <run_id>
 
-# 删除 run 目录
+# 删除已结束 run 及其拥有的工作区
 libra review clean --run <run_id>
 libra review clean --all
 ```

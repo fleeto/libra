@@ -1180,7 +1180,7 @@ async fn worktree_doctor_mutations_require_confirmation_and_emit_audit() {
     }
 
     let table = [
-        (RepairAction::IdentityPath, "worktree repair <path>"),
+        (RepairAction::IdentityPath, "worktree repair --path <path>"),
         (RepairAction::RegistryAll, "worktree repair"),
         (
             RepairAction::MigrateLayout,
@@ -1205,7 +1205,10 @@ async fn worktree_doctor_mutations_require_confirmation_and_emit_audit() {
         let target = main.join("wt-target");
         let bystander = main.join("wt-bystander");
         assert_cli_success(
-            &run_libra_command(&["worktree", "add", "wt-bystander"], main),
+            &run_libra_command(
+                &["worktree", "add", "wt-bystander", "--path", "wt-bystander"],
+                main,
+            ),
             "add bystander worktree",
         );
 
@@ -1213,16 +1216,27 @@ async fn worktree_doctor_mutations_require_confirmation_and_emit_audit() {
         let argv: Vec<String> = match action {
             RepairAction::IdentityPath => {
                 assert_cli_success(
-                    &run_libra_command(&["worktree", "add", "wt-target"], main),
+                    &run_libra_command(
+                        &["worktree", "add", "wt-target", "--path", "wt-target"],
+                        main,
+                    ),
                     "add target worktree",
                 );
                 fs::remove_file(target.join(".libra").join("worktree_id"))
                     .expect("damage the target's gitdir identity");
-                vec!["worktree".into(), "repair".into(), "wt-target".into()]
+                vec![
+                    "worktree".into(),
+                    "repair".into(),
+                    "--path".into(),
+                    "wt-target".into(),
+                ]
             }
             RepairAction::RegistryAll => {
                 assert_cli_success(
-                    &run_libra_command(&["worktree", "add", "wt-target"], main),
+                    &run_libra_command(
+                        &["worktree", "add", "wt-target", "--path", "wt-target"],
+                        main,
+                    ),
                     "add target worktree",
                 );
                 // A duplicated registry entry: exactly what the no-arg
@@ -1231,17 +1245,20 @@ async fn worktree_doctor_mutations_require_confirmation_and_emit_audit() {
                 let mut doc: serde_json::Value =
                     serde_json::from_slice(&fs::read(&registry).expect("read registry"))
                         .expect("registry json");
-                let duplicate = doc["entries"]
-                    .as_array()
+                // Global repair may deduplicate a legacy unnamed entry;
+                // duplicate named reservations must instead fail closed.
+                let target_entry = doc["entries"]
+                    .as_array_mut()
                     .expect("entries")
-                    .iter()
+                    .iter_mut()
                     .find(|entry| {
                         entry["path"]
                             .as_str()
                             .is_some_and(|path| path.ends_with("wt-target"))
                     })
-                    .expect("target entry")
-                    .clone();
+                    .expect("target entry");
+                target_entry["name"] = serde_json::Value::Null;
+                let duplicate = target_entry.clone();
                 doc["entries"]
                     .as_array_mut()
                     .expect("entries")
@@ -1295,7 +1312,10 @@ async fn worktree_doctor_mutations_require_confirmation_and_emit_audit() {
             // confirmation + single-audit-row contract as the repairs.
             RepairAction::DoctorAdoptInfo => {
                 assert_cli_success(
-                    &run_libra_command(&["worktree", "add", "wt-target"], main),
+                    &run_libra_command(
+                        &["worktree", "add", "wt-target", "--path", "wt-target"],
+                        main,
+                    ),
                     "add target worktree",
                 );
                 let info_dir = main.join(".libra").join("info");
@@ -1310,7 +1330,10 @@ async fn worktree_doctor_mutations_require_confirmation_and_emit_audit() {
             }
             RepairAction::DoctorClearInfo => {
                 assert_cli_success(
-                    &run_libra_command(&["worktree", "add", "wt-target"], main),
+                    &run_libra_command(
+                        &["worktree", "add", "wt-target", "--path", "wt-target"],
+                        main,
+                    ),
                     "add target worktree",
                 );
                 let info_dir = main.join(".libra").join("info");

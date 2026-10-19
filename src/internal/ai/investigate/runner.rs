@@ -54,8 +54,8 @@ use crate::internal::ai::{
         findings_section, redact_for_log, redact_untrusted, scrub_controls, spawn_reviewer,
     },
     workspace_isolation::{
-        FuseProvisionState, SubAgentWorkspace, WorkspaceIsolationConfig,
-        materialize_isolated_workspace,
+        FuseProvisionState, SubAgentWorkspace, TaskWorkspaceDescriptor, WorkspaceIsolationConfig,
+        cleanup_task_workspace, materialize_isolated_workspace, verify_task_workspace,
     },
 };
 
@@ -155,7 +155,7 @@ pub struct InvestigateRunRequest {
     pub allow_full_copy: bool,
     pub claude_max_budget_usd: String,
     /// PD-02 checkpoint scope: when set, every drive pass materializes
-    /// the checkpoint's content (`<run_dir>/checkpoint-input/`) as the
+    /// the checkpoint's content (a managed `checkpoint-input/` attempt) as the
     /// investigators' whole workspace instead of a worktree snapshot.
     /// Persisted into the run state so resumes keep the scope.
     pub checkpoint_input: Option<crate::internal::ai::checkpoint_input::CheckpointInputSpec>,
@@ -579,6 +579,7 @@ async fn drive(
         .ok_or_else(|| InvestigateRunError::NotFound {
             run_id: run_id.to_string(),
         })?;
+    store.ensure_mutable_run(run_id)?;
 
     // ---- TOCTOU re-validation UNDER the lock (P1). ----
     // The `continue` precheck (`load_continuable_state`) ran BEFORE the
@@ -661,13 +662,14 @@ async fn drive(
 
     // ---- Mandatory isolated workspace (copy backend pinned). ----
     // Checkpoint scope (PD-02): the investigators' workspace is the
-    // checkpoint's own materialized content inside the run directory —
+    // checkpoint's own materialized content inside a managed attempt —
     // no worktree snapshot exists at all, and resumes re-materialize
     // from the persisted spec.
     let mut guard;
     let workspace_root;
+    let workspace_descriptor;
     if let Some(spec) = state.checkpoint_input.clone() {
-        let storage = repo_root.join(crate::utils::util::ROOT_DIR);
+        let storage = store.libra_dir()?;
         let store_for_cancel = store.clone();
         let run_for_cancel = run_id.to_string();
         let cancel_probe = cancel.clone();
@@ -683,9 +685,15 @@ async fn drive(
         )
         .await
         {
-            Ok(root) => {
-                guard = InvestigateWorkspaceGuard { workspace: None };
-                workspace_root = root;
+            Ok(descriptor) => {
+                guard = InvestigateWorkspaceGuard {
+                    store: store.clone(),
+                    run_id: run_id.to_string(),
+                    workspace: None,
+                    managed_input: Some((storage, run_dir.clone(), descriptor.clone())),
+                };
+                workspace_root = descriptor.canonical_path.clone();
+                workspace_descriptor = descriptor;
             }
             Err(ValidatedMaterializeError::Catalog(message)) if state.pending_turn.is_some() => {
                 // A paused continue must surface a catalog transport failure
@@ -726,14 +734,21 @@ async fn drive(
         let _ = fuse_state.disable_first_time();
         let isolation = WorkspaceIsolationConfig {
             fuse_state,
-            sessions_root: store.sessions_root().to_path_buf(),
+            common_storage: store.libra_dir()?,
+            run_dir: run_dir.clone(),
             allow_full_copy,
         };
         let repo_root = repo_root.to_path_buf();
-        let ws_key = AgentRunId::new();
-        let ws_thread = ws_key.0;
+        let run_uuid = uuid::Uuid::parse_str(run_id).map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "investigate run '{run_id}' needs a UUID to create a managed workspace: {error}"
+                ),
+            )
+        })?;
         let materialized = tokio::task::spawn_blocking(move || {
-            materialize_isolated_workspace(&repo_root, ws_thread, ws_key, &isolation)
+            materialize_isolated_workspace(&repo_root, run_uuid, AgentRunId(run_uuid), &isolation)
         })
         .await;
         let workspace = match materialized {
@@ -765,14 +780,14 @@ async fn drive(
                 );
             }
         };
+        workspace_root = workspace.root().to_path_buf();
+        workspace_descriptor = workspace.descriptor().clone();
         guard = InvestigateWorkspaceGuard {
+            store: store.clone(),
+            run_id: run_id.to_string(),
             workspace: Some(workspace),
+            managed_input: None,
         };
-        workspace_root = guard
-            .workspace
-            .as_ref()
-            .map(|ws| ws.root().to_path_buf())
-            .unwrap_or_default();
     }
     // Record on BOTH the persisted file (so an orphaned-run cancel can
     // release the directory mid-run) and the in-memory state this drive
@@ -780,9 +795,9 @@ async fn drive(
     // finalization would hide the materialized root from post-run
     // consumers).
     state.workspace_root = Some(workspace_root.display().to_string());
-    store.update_state(run_id, |state| {
-        state.workspace_root = Some(workspace_root.display().to_string());
-    })?;
+    state.workspace_descriptor = Some(workspace_descriptor.clone());
+    state.schema_version = super::store::INVESTIGATE_MANIFEST_SCHEMA_VERSION;
+    store.record_workspace(run_id, &workspace_descriptor)?;
 
     // ---- Cross-process cancel marker poller. ----
     let poller = {
@@ -876,6 +891,7 @@ async fn drive(
         let outcome = run_one_turn(
             &command,
             &workspace_root,
+            &workspace_descriptor,
             investigator_timeout,
             remaining_budget.saturating_sub(started.elapsed()),
             &cancel,
@@ -947,8 +963,29 @@ async fn drive(
     };
 
     // ---- Teardown: workspace + poller. ----
-    guard.release().await;
+    let release = guard.release().await;
     poller.abort();
+    if let Err(error) = store.cleanup_workspaces(run_id) {
+        let detail = match release {
+            Ok(()) => format!("investigate workspace cleanup failed: {error}"),
+            Err(release_error) => format!(
+                "investigate workspace cleanup failed: {error}; initial release also failed: {release_error}"
+            ),
+        };
+        return finalize_terminal(
+            store,
+            run_id,
+            &run_dir,
+            &mut state,
+            InvestigateTerminalState::Error,
+            redaction,
+            Some(detail),
+            started,
+        );
+    }
+    if let Err(error) = release {
+        tracing::warn!(%error, "investigate workspace release needed a successful cleanup retry");
+    }
 
     match end {
         LoopEnd::Terminal(terminal) => finalize_terminal(
@@ -994,11 +1031,24 @@ fn finalize_terminal(
     run_id: &str,
     run_dir: &Path,
     state: &mut InvestigateRunState,
-    terminal: InvestigateTerminalState,
+    mut terminal: InvestigateTerminalState,
     redaction: RedactionReportSummary,
-    infra_error: Option<String>,
+    mut infra_error: Option<String>,
     started: Instant,
 ) -> Result<InvestigateRunOutcome, InvestigateRunError> {
+    // Early cancellation and materialization failure can leave an owned
+    // attempt even before a workspace guard exists. Never report terminal
+    // success while an attempt cleanup failed; retain its retry metadata.
+    if let Err(error) = store.cleanup_workspaces(run_id) {
+        terminal = InvestigateTerminalState::Error;
+        let cleanup_error = format!(
+            "investigate workspace cleanup failed; retain the run and retry with `libra investigate clean {run_id}`: {error}"
+        );
+        infra_error = Some(match infra_error {
+            Some(previous) => format!("{previous}; {cleanup_error}"),
+            None => cleanup_error,
+        });
+    }
     state.pending_turn = None;
     state.terminal_state = Some(terminal);
     state.updated_at = super::store_now();
@@ -1169,6 +1219,7 @@ enum WaitKind {
 async fn run_one_turn(
     command: &ReviewerCommand,
     workspace_root: &Path,
+    workspace_descriptor: &TaskWorkspaceDescriptor,
     per_turn_timeout: Duration,
     remaining_run_budget: Duration,
     cancel: &InvestigateCancelHandle,
@@ -1179,6 +1230,31 @@ async fn run_one_turn(
             kind: TurnKind::Cancelled,
             stdout_log: String::new(),
             stderr_log: String::new(),
+            stdout_redaction: empty(),
+            stderr_redaction: empty(),
+        };
+    }
+
+    // An attempt may be replaced between materialization and a later turn.
+    // The reviewer must never follow that pathname without its owned proof.
+    let run_dir = workspace_descriptor
+        .common_storage()
+        .join("sessions/agent-runs")
+        .join(workspace_descriptor.run_id.to_string());
+    if workspace_root != workspace_descriptor.canonical_path
+        || verify_task_workspace(
+            workspace_descriptor.common_storage(),
+            &run_dir,
+            workspace_descriptor,
+        )
+        .is_err()
+    {
+        return TurnOutcome {
+            kind: TurnKind::Failed {
+                detail: "investigate task workspace ownership changed before launch; inspect the retained run before retrying".to_string(),
+            },
+            stdout_log: String::new(),
+            stderr_log: "investigate task workspace ownership changed before launch\n".to_string(),
             stdout_redaction: empty(),
             stderr_redaction: empty(),
         };
@@ -1392,28 +1468,53 @@ fn build_investigator_command(
 // ---------------------------------------------------------------------------
 
 struct InvestigateWorkspaceGuard {
+    store: InvestigateRunStore,
+    run_id: String,
     workspace: Option<SubAgentWorkspace>,
+    managed_input: Option<(PathBuf, PathBuf, TaskWorkspaceDescriptor)>,
 }
 
 impl InvestigateWorkspaceGuard {
-    async fn release(&mut self) {
+    async fn release(&mut self) -> io::Result<()> {
+        self.store.ensure_mutable_run(&self.run_id)?;
         if let Some(workspace) = self.workspace.take() {
             match tokio::task::spawn_blocking(move || workspace.cleanup()).await {
                 Ok(Ok(())) => {}
                 Ok(Err(err)) => {
-                    tracing::warn!(error = %err, "failed to clean up investigate workspace");
+                    return Err(io::Error::other(format!(
+                        "failed to clean up investigate workspace; keep the run and retry cleanup: {err}"
+                    )));
                 }
                 Err(join_err) => {
-                    tracing::warn!(error = %join_err, "investigate workspace cleanup task panicked");
+                    return Err(io::Error::other(format!(
+                        "investigate workspace cleanup task failed; keep the run and retry cleanup: {join_err}"
+                    )));
                 }
             }
         }
+        if let Some((common, run_dir, descriptor)) = self.managed_input.take() {
+            cleanup_task_workspace(&common, &run_dir, &descriptor).map_err(|error| {
+                io::Error::other(format!(
+                    "failed to clean up investigate checkpoint input; keep the run and retry cleanup: {error}"
+                ))
+            })?;
+        }
+        Ok(())
     }
 }
 
 impl Drop for InvestigateWorkspaceGuard {
     fn drop(&mut self) {
         use crate::internal::ai::workspace_isolation::TaskWorkspaceBackend;
+        if let Err(error) = self.store.ensure_mutable_run(&self.run_id) {
+            tracing::warn!(%error, "investigate workspace cleanup refused an unsupported run format; retained its cleanup intent");
+            return;
+        }
+        if let Some((common, run_dir, descriptor)) = self.managed_input.take()
+            && let Err(error) = cleanup_task_workspace(&common, &run_dir, &descriptor)
+        {
+            tracing::warn!(%error, "failed to clean up investigate checkpoint input on unwind; retained its cleanup intent");
+        }
         let Some(workspace) = self.workspace.take() else {
             return;
         };
@@ -1444,11 +1545,136 @@ mod tests {
 
     fn test_store() -> (tempfile::TempDir, InvestigateRunStore, PathBuf) {
         let dir = tempfile::tempdir().expect("tempdir");
-        let repo = dir.path().join("repo");
+        let physical = std::fs::canonicalize(dir.path()).expect("physical temp root");
+        let repo = physical.join("repo");
         std::fs::create_dir_all(&repo).expect("repo dir");
         std::fs::write(repo.join("README.md"), "hello\n").expect("seed file");
-        let store = InvestigateRunStore::new(dir.path().join(".libra").join("sessions"));
+        let store = InvestigateRunStore::new(physical.join(".libra").join("sessions"));
         (dir, store, repo)
+    }
+
+    #[tokio::test]
+    async fn workspace_guard_preserves_attempt_when_run_format_changes() {
+        use crate::internal::ai::workspace_isolation::{
+            TaskWorkspaceKind, create_task_workspace, has_task_workspace_intents,
+        };
+
+        for checkpoint in [false, true] {
+            let (_temp, store, repo) = test_store();
+            let run_id = AgentRunId::new();
+            let id = run_id.0.to_string();
+            store
+                .create_run(&id, "topic", &["codex".into()], 4, 1, "sha")
+                .unwrap();
+            let run_dir = store.run_dir(&id).unwrap();
+            let common = store.libra_dir().unwrap();
+            let (workspace, managed_input, descriptor) = if checkpoint {
+                let descriptor = create_task_workspace(
+                    &common,
+                    &run_dir,
+                    run_id.0,
+                    TaskWorkspaceKind::CheckpointInput,
+                )
+                .unwrap();
+                (
+                    None,
+                    Some((common.clone(), run_dir.clone(), descriptor.clone())),
+                    descriptor,
+                )
+            } else {
+                let workspace = materialize_isolated_workspace(
+                    &repo,
+                    run_id.0,
+                    run_id,
+                    &WorkspaceIsolationConfig {
+                        fuse_state: FuseProvisionState::default(),
+                        common_storage: common,
+                        run_dir: run_dir.clone(),
+                        allow_full_copy: true,
+                    },
+                )
+                .unwrap();
+                let descriptor = workspace.descriptor().clone();
+                (Some(workspace), None, descriptor)
+            };
+            store.record_workspace(&id, &descriptor).unwrap();
+            let mut guard = InvestigateWorkspaceGuard {
+                store: store.clone(),
+                run_id: id.clone(),
+                workspace,
+                managed_input,
+            };
+            let path = store.manifest_path(&id).unwrap();
+            let original = std::fs::read(&path).unwrap();
+            let mut manifest: serde_json::Value = serde_json::from_slice(&original).unwrap();
+            manifest["schema_version"] = serde_json::json!(99);
+            std::fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+            assert!(guard.release().await.is_err());
+            assert!(descriptor.canonical_path.exists());
+            drop(guard);
+            assert!(
+                descriptor.canonical_path.exists(),
+                "drop must honor schema refusal"
+            );
+            assert!(has_task_workspace_intents(&run_dir).unwrap());
+            std::fs::write(&path, original).unwrap();
+            store.cleanup_workspaces(&id).unwrap();
+            assert!(!descriptor.attempt_root().exists());
+        }
+    }
+
+    #[test]
+    fn terminal_finalization_records_cleanup_failure_for_retry() {
+        use crate::internal::ai::workspace_isolation::{
+            TaskWorkspaceKind, create_task_workspace, has_task_workspace_intents,
+        };
+
+        let (_dir, store, _repo) = test_store();
+        let run_uuid = AgentRunId::new().0;
+        let run_id = run_uuid.to_string();
+        store
+            .create_run(&run_id, "topic", &["codex".into()], 4, 1, "sha")
+            .unwrap();
+        let run_dir = store.run_dir(&run_id).unwrap();
+        let common = store.libra_dir().unwrap();
+        let descriptor =
+            create_task_workspace(&common, &run_dir, run_uuid, TaskWorkspaceKind::Workspace)
+                .unwrap();
+        store.record_workspace(&run_id, &descriptor).unwrap();
+        let attempt = descriptor.attempt_root();
+        let retained = attempt.with_extension("retained");
+        std::fs::rename(&attempt, &retained).unwrap();
+        std::fs::create_dir(&attempt).unwrap();
+
+        let mut state = store.load_state(&run_id).unwrap().unwrap();
+        let outcome = finalize_terminal(
+            &store,
+            &run_id,
+            &run_dir,
+            &mut state,
+            InvestigateTerminalState::Quorum,
+            RedactionReportSummary::default(),
+            None,
+            Instant::now(),
+        )
+        .unwrap();
+        assert_eq!(
+            outcome.terminal_state,
+            Some(InvestigateTerminalState::Error)
+        );
+        assert!(
+            outcome
+                .infra_error
+                .as_deref()
+                .is_some_and(|error| error.contains("cleanup"))
+        );
+        assert!(store.load_state(&run_id).unwrap().unwrap().is_terminal());
+        assert!(has_task_workspace_intents(&run_dir).unwrap());
+        assert!(store.clean_run(&run_id).is_err());
+
+        std::fs::remove_dir(&attempt).unwrap();
+        std::fs::rename(&retained, &attempt).unwrap();
+        assert!(store.clean_run(&run_id).unwrap());
     }
 
     #[cfg(unix)]

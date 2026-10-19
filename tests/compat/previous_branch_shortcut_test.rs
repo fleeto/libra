@@ -310,6 +310,8 @@ fn linked_worktree_does_not_consume_main_worktree_navigation_history() {
         &[
             "worktree",
             "add",
+            "linked",
+            "--path",
             linked.to_str().expect("utf8 linked path"),
         ],
     );

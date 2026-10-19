@@ -2428,6 +2428,16 @@ pub(crate) fn repository_migrations() -> Vec<Migration> {
             include_str!("../../../sql/migrations/2026101901_agent_kind_grok.sql"),
             include_str!("../../../sql/migrations/2026101901_agent_kind_grok_down.sql"),
         ),
+        // Named registry v4 and task manifest v2 need a repository-wide
+        // compatibility barrier: older agent cleanup can delete run metadata
+        // without reading either format. The receipt is forward-only because
+        // SQL cannot establish that no new-layout filesystem state survives.
+        Migration {
+            version: WORKTREE_LAYOUT_CAPABILITY_VERSION,
+            name: "worktree_layout_capability",
+            up: include_str!("../../../sql/migrations/2026101902_worktree_layout_capability.sql"),
+            down: None,
+        },
     ]
 }
 
@@ -2556,6 +2566,7 @@ async fn sqlite_database_dir(conn: &DatabaseConnection) -> Option<std::path::Pat
 
 /// The version whose rollback needs a check SQL cannot express.
 const REGISTRY_V3_CAPABILITY_VERSION: i64 = 2026073005;
+pub(super) const WORKTREE_LAYOUT_CAPABILITY_VERSION: i64 = 2026101902;
 
 /// Refuse to roll back registry v3 while the registry carries live
 /// registration generations (plan-20260714 §C.4.1.1).
@@ -2888,11 +2899,11 @@ mod tests {
         // `builtin_migrations()` so silent registry regressions surface
         // here in addition to `tests/db_migration_test.rs`.
         let runner = builtin_runner().expect("CEX-12.5 builtin registry must build clean");
-        assert_eq!(runner.len(), 69);
+        assert_eq!(runner.len(), 70);
         assert!(!runner.is_empty());
         assert_eq!(
             runner.max_registered_version(),
-            Some(AGENT_KIND_GROK_VERSION)
+            Some(WORKTREE_LAYOUT_CAPABILITY_VERSION)
         );
     }
 

@@ -6,7 +6,7 @@
 
 use std::{
     collections::HashMap,
-    io::{Seek, SeekFrom, Write},
+    io::{self, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     process::Stdio,
 };
@@ -20,6 +20,9 @@ use super::{
     NetworkAccessMode, NetworkProxy, NetworkProxySelection, NetworkService, ProxyEnforcement,
     SandboxEnforcement, SandboxPermissions, SandboxPolicy, SandboxPolicyError,
     allowlist_proxy_from_policy, select_network_proxy,
+};
+use crate::internal::ai::workspace_isolation::{
+    TaskWorkspaceDescriptor, validated_task_attempt_root, verify_task_workspace,
 };
 #[cfg(unix)]
 use crate::utils::fuse;
@@ -63,6 +66,46 @@ pub struct CommandSpec {
 }
 
 impl CommandSpec {
+    /// Bind task-local environment paths to an explicitly verified attempt.
+    /// This does not widen sandbox policy; the caller must grant only this
+    /// workspace and its own cache directories.
+    pub fn with_task_workspace(mut self, descriptor: &TaskWorkspaceDescriptor) -> io::Result<Self> {
+        let run_dir = descriptor
+            .common_storage()
+            .join("sessions")
+            .join("agent-runs")
+            .join(descriptor.run_id.to_string());
+        verify_task_workspace(descriptor.common_storage(), &run_dir, descriptor)?;
+        let cwd = self.cwd.canonicalize()?;
+        if !cwd.starts_with(&descriptor.canonical_path) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "command working directory is outside the explicitly bound task workspace",
+            ));
+        }
+        let attempt = descriptor.attempt_root();
+        for name in [
+            "home",
+            "xdg-config",
+            "xdg-cache",
+            "cargo-home",
+            "logs",
+            "target",
+        ] {
+            crate::utils::worktree_layout::open_managed_directory(
+                descriptor.common_storage(),
+                &attempt.join(name),
+            )?;
+        }
+        apply_explicit_task_environment(
+            &attempt,
+            &mut self.env,
+            std::env::var_os(RUSTUP_HOME_ENV_VAR).is_some(),
+            dirs::home_dir().as_deref(),
+        );
+        Ok(self)
+    }
+
     pub fn shell(
         command: impl Into<String>,
         cwd: PathBuf,
@@ -167,7 +210,15 @@ fn apply_task_worktree_env_overrides_from_home(
     let Some(worktree_root) = enclosing_task_worktree_root(cwd) else {
         return;
     };
+    apply_explicit_task_environment(&worktree_root, env, rustup_home_is_set, original_home);
+}
 
+fn apply_explicit_task_environment(
+    worktree_root: &Path,
+    env: &mut HashMap<String, String>,
+    rustup_home_is_set: bool,
+    original_home: Option<&Path>,
+) {
     // Unix rustup otherwise follows the task-local HOME and loses the installed
     // toolchains. Keep the original root without selecting a toolchain or
     // changing sandbox permissions; Cargo's writable cache stays task-local.
@@ -189,6 +240,7 @@ fn apply_task_worktree_env_overrides_from_home(
     );
     insert_path_env(env, XDG_CACHE_HOME_ENV_VAR, worktree_root.join("xdg-cache"));
     insert_path_env(env, CARGO_HOME_ENV_VAR, worktree_root.join("cargo-home"));
+    insert_path_env(env, CARGO_TARGET_DIR_ENV_VAR, worktree_root.join("target"));
     insert_path_env(
         env,
         LIBRA_LOG_FILE_ENV_VAR,
@@ -209,51 +261,10 @@ fn insert_path_env(env: &mut HashMap<String, String>, key: &str, path: PathBuf) 
 }
 
 fn enclosing_task_worktree_root(path: &Path) -> Option<PathBuf> {
-    let normalized = path
-        .canonicalize()
-        .unwrap_or_else(|_| normalize_abs_path(path));
-    for ancestor in normalized.ancestors() {
-        if ancestor.file_name().and_then(|name| name.to_str()) != Some("workspace") {
-            continue;
-        }
-        let parent = ancestor.parent()?;
-        if parent
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.starts_with("libra-task-worktree-"))
-        {
-            return Some(parent.to_path_buf());
-        }
-    }
-    None
-}
-
-fn normalize_abs_path(path: &Path) -> PathBuf {
-    #[cfg(unix)]
-    {
-        fuse::normalize_abs_path(path)
-    }
-
-    #[cfg(not(unix))]
-    {
-        use std::path::Component;
-
-        let mut out = PathBuf::new();
-        for comp in path.components() {
-            match comp {
-                Component::Prefix(prefix) => out.push(prefix.as_os_str()),
-                Component::RootDir => out.push(Path::new(comp.as_os_str())),
-                Component::CurDir => {}
-                Component::ParentDir => {
-                    if matches!(out.components().next_back(), Some(Component::Normal(_))) {
-                        out.pop();
-                    }
-                }
-                Component::Normal(part) => out.push(part),
-            }
-        }
-        out
-    }
+    // The implicit shell constructor cannot return an ownership error. It only
+    // injects paths when durable proof succeeds; explicit task execution uses
+    // with_task_workspace and propagates validation errors before spawn.
+    validated_task_attempt_root(path).ok().flatten()
 }
 
 /// Inject env-var overrides for commands launched inside FUSE-backed task
@@ -2602,11 +2613,136 @@ mod tests {
         assert!(env.is_empty());
     }
 
+    fn owned_task_fixture() -> (tempfile::TempDir, TaskWorkspaceDescriptor) {
+        use crate::internal::ai::workspace_isolation::{TaskWorkspaceKind, create_task_workspace};
+        let temp = tempfile::tempdir().unwrap();
+        let common = temp.path().canonicalize().unwrap().join(".libra");
+        let run_id = uuid::Uuid::new_v4();
+        let run = common.join("sessions/agent-runs").join(run_id.to_string());
+        std::fs::create_dir_all(&run).unwrap();
+        let descriptor =
+            create_task_workspace(&common, &run, run_id, TaskWorkspaceKind::Workspace).unwrap();
+        std::fs::create_dir(descriptor.canonical_path.join("src")).unwrap();
+        (temp, descriptor)
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn wd_native_task_sandbox_allows_owned_write_and_denies_metadata() {
+        let (_temp, descriptor) = owned_task_fixture();
+        let common = descriptor.common_storage();
+        let metadata = common.join("libra.db");
+        std::fs::write(&metadata, b"secret sentinel").unwrap();
+        let workspace_file = descriptor.canonical_path.join("owned-write.txt");
+        let forbidden_file = common.join("unowned-write.txt");
+        let policy = SandboxPolicy::new_workspace_write_policy()
+            .for_task_workspace(&descriptor)
+            .unwrap();
+        let denied_reads = SandboxPolicy::task_workspace_sensitive_read_paths(&descriptor).unwrap();
+        let manager = SandboxManager::new();
+        let run = |script: &str, target: &Path| {
+            let mut spec = CommandSpec::shell(
+                script,
+                descriptor.canonical_path.clone(),
+                Some(5_000),
+                SandboxPermissions::UseDefault,
+                None,
+            )
+            .with_task_workspace(&descriptor)
+            .unwrap();
+            spec.env
+                .insert("TARGET".to_string(), target.to_string_lossy().into_owned());
+            let transformed = manager
+                .transform(SandboxTransformRequest {
+                    spec,
+                    policy: Some(&policy),
+                    sandbox_policy_cwd: &descriptor.canonical_path,
+                    linux_sandbox_exe: None,
+                    use_linux_sandbox_bwrap: false,
+                    enforcement: SandboxEnforcement::Required,
+                    deny_read_paths: &denied_reads,
+                    extra_ro_bind_paths: &[],
+                    writable_binds: &[],
+                    trusted_bwrap_exe: None,
+                    seccomp_policy_path: None,
+                })
+                .unwrap();
+            assert_eq!(transformed.sandbox, SandboxType::MacosSeatbelt);
+            let mut child = std::process::Command::new(&transformed.command[0]);
+            child
+                .args(&transformed.command[1..])
+                .current_dir(&transformed.spawn_cwd)
+                .envs(&transformed.env);
+            if transformed.clear_env {
+                child.env_clear();
+                child.envs(&transformed.env);
+            }
+            child.output().unwrap()
+        };
+        let owned = run("printf owned > \"$TARGET\"", &workspace_file);
+        assert!(
+            owned.status.success(),
+            "owned write: {}",
+            String::from_utf8_lossy(&owned.stderr)
+        );
+        assert_eq!(std::fs::read(&workspace_file).unwrap(), b"owned");
+        let forbidden = run("printf no > \"$TARGET\"", &forbidden_file);
+        assert!(
+            !forbidden.status.success(),
+            "metadata write unexpectedly succeeded"
+        );
+        assert!(!forbidden_file.exists());
+        let sensitive = run("cat \"$TARGET\"", &metadata);
+        assert!(
+            !sensitive.status.success(),
+            "metadata read unexpectedly succeeded"
+        );
+    }
+
+    #[test]
+    fn wd_explicit_workspace_environment() {
+        let (_temp, descriptor) = owned_task_fixture();
+        let spec = CommandSpec::shell(
+            "cargo build",
+            descriptor.canonical_path.clone(),
+            None,
+            SandboxPermissions::UseDefault,
+            None,
+        )
+        .with_task_workspace(&descriptor)
+        .unwrap();
+        assert_eq!(
+            spec.env[HOME_ENV_VAR],
+            descriptor.attempt_root().join("home").to_string_lossy()
+        );
+        assert_eq!(
+            spec.env[CARGO_TARGET_DIR_ENV_VAR],
+            descriptor.attempt_root().join("target").to_string_lossy()
+        );
+        let outside = CommandSpec::shell(
+            "echo no",
+            descriptor.common_storage().to_path_buf(),
+            None,
+            SandboxPermissions::UseDefault,
+            None,
+        );
+        assert!(outside.with_task_workspace(&descriptor).is_err());
+    }
+
+    #[test]
+    fn wd_unowned_name_does_not_inject_task_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let fake = temp.path().join("libra-task-worktree-copy-fake/workspace");
+        std::fs::create_dir_all(&fake).unwrap();
+        let spec = CommandSpec::shell("echo ok", fake, None, SandboxPermissions::UseDefault, None);
+        assert!(!spec.env.contains_key(HOME_ENV_VAR));
+    }
+
     #[test]
     #[serial_test::serial(cwd)]
     fn shell_command_spec_uses_task_local_home_cargo_and_log_paths() {
-        let cwd =
-            Path::new("/repo/.libra/worktrees/tasks/libra-task-worktree-copy-9-019e/workspace/src");
+        let (_temp, descriptor) = owned_task_fixture();
+        let cwd = descriptor.canonical_path.join("src");
         let spec = CommandSpec::shell_inner(
             "libra status && cargo build",
             cwd.to_path_buf(),
@@ -2615,7 +2751,8 @@ mod tests {
             None,
             false,
         );
-        let root = "/repo/.libra/worktrees/tasks/libra-task-worktree-copy-9-019e";
+        let root = descriptor.attempt_root();
+        let root = root.to_string_lossy();
         let home = format!("{root}/home");
         let cargo_home = format!("{root}/cargo-home");
         let log_file = format!("{root}/logs/libra.log");
@@ -2666,7 +2803,8 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let rustup_home = home.path().join(".rustup");
         std::fs::create_dir(&rustup_home).unwrap();
-        let root = Path::new("/repo/.libra/worktrees/tasks/libra-task-worktree-copy-test");
+        let (_task, descriptor) = owned_task_fixture();
+        let root = descriptor.attempt_root();
         for cwd in [root.join("workspace"), root.join("workspace/src")] {
             let mut env = HashMap::new();
             apply_task_worktree_env_overrides_from_home(&cwd, &mut env, false, Some(home.path()));
@@ -2705,7 +2843,8 @@ mod tests {
     fn task_shell_preserves_explicit_rustup_environment() {
         let home = tempfile::tempdir().unwrap();
         std::fs::create_dir(home.path().join(".rustup")).unwrap();
-        let cwd = Path::new("/repo/.libra/worktrees/tasks/libra-task-worktree-copy-test/workspace");
+        let (_task, descriptor) = owned_task_fixture();
+        let cwd = descriptor.canonical_path.as_path();
         for ambient_is_set in [false, true] {
             for explicit in ["/configured/toolchains", "relative/root", ""] {
                 let mut env = HashMap::from([
@@ -2743,7 +2882,8 @@ mod tests {
         // invalid UTF-8 filename, but its in-memory path still must be rejected.
         assert!(rustup_home_candidate(&non_unicode_home).is_none());
         assert!(rustup_home_candidate(Path::new("relative-home")).is_none());
-        let cwd = Path::new("/repo/.libra/worktrees/tasks/libra-task-worktree-copy-test/workspace");
+        let (_task, descriptor) = owned_task_fixture();
+        let cwd = descriptor.canonical_path.as_path();
         for original in [
             None,
             Some(Path::new("relative-home")),

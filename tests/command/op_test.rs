@@ -234,7 +234,10 @@ fn test_op_restore_refuses_branch_checked_out_in_another_worktree() {
     let parent = tempdir().unwrap();
     let wt = parent.path().join("wt");
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap()], p),
+        &run_libra_command(
+            &["worktree", "add", "wt", "--path", wt.to_str().unwrap()],
+            p,
+        ),
         "worktree add",
     );
     assert_cli_success(

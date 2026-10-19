@@ -486,7 +486,7 @@ pub(crate) fn worktree_common_storage(gitdir: &Path) -> io::Result<PathBuf> {
                 io::ErrorKind::InvalidData,
                 format!(
                     "cannot inspect worktree lifecycle marker '{}/{name}': {err}; treat the \
-                     worktree as frozen — run `libra worktree repair --confirm \
+                     worktree as frozen — run `libra worktree repair --confirm --path \
                      <worktree-path>` from the main worktree",
                     gitdir.display()
                 ),
@@ -508,8 +508,8 @@ pub(crate) fn worktree_common_storage(gitdir: &Path) -> io::Result<PathBuf> {
             io::ErrorKind::PermissionDenied,
             format!(
                 "this worktree was removed from the registry (detached); from the main \
-                 worktree run `libra worktree add {}` to re-attach it, or `libra worktree \
-                 remove --delete-dir {}` to delete it",
+                 worktree run `libra worktree add <name> --path \"{}\"` to re-attach it, or \
+                 `libra worktree remove --delete-dir --path \"{}\"` to delete it",
                 gitdir.parent().unwrap_or(gitdir).display(),
                 gitdir.parent().unwrap_or(gitdir).display()
             ),
@@ -535,7 +535,7 @@ pub(crate) fn worktree_common_storage(gitdir: &Path) -> io::Result<PathBuf> {
                     format!(
                         "worktree gitdir '{}' carries a `worktree_id` but no `commondir` \
                          pointer; the linked worktree is corrupt — run `libra worktree \
-                         repair --confirm <worktree-path>` from the main worktree",
+                         repair --confirm --path <worktree-path>` from the main worktree",
                         gitdir.display()
                     ),
                 ));
@@ -547,7 +547,7 @@ pub(crate) fn worktree_common_storage(gitdir: &Path) -> io::Result<PathBuf> {
                 io::ErrorKind::InvalidData,
                 format!(
                     "cannot inspect worktree commondir marker at '{}': {err}; the linked \
-                     worktree is corrupt — run `libra worktree repair --confirm \
+                     worktree is corrupt — run `libra worktree repair --confirm --path \
                      <worktree-path>` from the main worktree",
                     commondir_file.display()
                 ),
@@ -558,7 +558,7 @@ pub(crate) fn worktree_common_storage(gitdir: &Path) -> io::Result<PathBuf> {
                 io::ErrorKind::InvalidData,
                 format!(
                     "worktree commondir marker at '{}' is not a regular file; the linked \
-                     worktree is corrupt — run `libra worktree repair --confirm \
+                     worktree is corrupt — run `libra worktree repair --confirm --path \
                      <worktree-path>` from the main worktree",
                     commondir_file.display()
                 ),
@@ -566,7 +566,11 @@ pub(crate) fn worktree_common_storage(gitdir: &Path) -> io::Result<PathBuf> {
         }
         Ok(_) => {}
     }
-    match fs::read_to_string(&commondir_file) {
+    match super::worktree_layout::read_regular_metadata(gitdir, Path::new("commondir"), 65_536)
+        .and_then(|bytes| {
+            String::from_utf8(bytes)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+        }) {
         Ok(contents) => {
             let raw = contents
                 .lines()
@@ -578,7 +582,7 @@ pub(crate) fn worktree_common_storage(gitdir: &Path) -> io::Result<PathBuf> {
                     io::ErrorKind::InvalidData,
                     format!(
                         "worktree commondir pointer at '{}' is empty; the linked worktree is \
-                         corrupt — run `libra worktree repair --confirm <worktree-path>` from the main \
+                         corrupt — run `libra worktree repair --confirm --path <worktree-path>` from the main \
                          worktree",
                         commondir_file.display()
                     ),
@@ -602,7 +606,7 @@ pub(crate) fn worktree_common_storage(gitdir: &Path) -> io::Result<PathBuf> {
                     format!(
                         "worktree commondir pointer at '{}' targets '{}', which cannot be \
                          resolved: {err}; the linked worktree is corrupt — run `libra worktree \
-                         repair --confirm <worktree-path>` from the main worktree",
+                         repair --confirm --path <worktree-path>` from the main worktree",
                         commondir_file.display(),
                         resolved.display()
                     ),
@@ -616,7 +620,7 @@ pub(crate) fn worktree_common_storage(gitdir: &Path) -> io::Result<PathBuf> {
                          repository's TERMINAL common storage (it is missing the repository \
                          database, or carries a commondir pointer of its own — chains, \
                          self-pointers, and pointers at another worktree's gitdir are \
-                         corruption, not indirection); run `libra worktree repair --confirm \
+                         corruption, not indirection); run `libra worktree repair --confirm --path \
                          <worktree-path>` from the main worktree",
                         commondir_file.display(),
                         canonical.display()
@@ -634,7 +638,7 @@ pub(crate) fn worktree_common_storage(gitdir: &Path) -> io::Result<PathBuf> {
             format!(
                 "worktree commondir marker at '{}' disappeared while being read; the \
                  linked worktree is corrupt or being mutated — run `libra worktree \
-                 repair --confirm <worktree-path>` from the main worktree",
+                 repair --confirm --path <worktree-path>` from the main worktree",
                 commondir_file.display()
             ),
         )),
@@ -643,7 +647,7 @@ pub(crate) fn worktree_common_storage(gitdir: &Path) -> io::Result<PathBuf> {
             io::ErrorKind::InvalidData,
             format!(
                 "cannot read worktree commondir pointer at '{}': {err}; the linked worktree \
-                 is corrupt — run `libra worktree repair --confirm <worktree-path>` from the main \
+                 is corrupt — run `libra worktree repair --confirm --path <worktree-path>` from the main \
                  worktree",
                 commondir_file.display()
             ),
@@ -670,11 +674,99 @@ pub(crate) struct GlobalHomeNotRepository {
 /// - `common_storage`: the SHARED `.libra` (db / objects / hooks). Equals the
 ///   gitdir for the main worktree; the `commondir` target for a linked one.
 fn try_get_paths_full(path: Option<PathBuf>) -> Result<(PathBuf, PathBuf, PathBuf), io::Error> {
-    let mut path = path.clone().unwrap_or_else(cur_dir);
+    try_get_paths_full_with_storage_lookup(path, false)
+}
+
+/// Only the storage-only API permits an explicitly supplied metadata root.
+/// Discovery for commands must not climb out of an internal workspace into
+/// common storage and accidentally bind to the main worktree.
+fn try_get_paths_full_with_storage_lookup(
+    path: Option<PathBuf>,
+    explicit_storage_lookup: bool,
+) -> Result<(PathBuf, PathBuf, PathBuf), io::Error> {
+    let mut path = path.unwrap_or_else(cur_dir);
+    if !path.is_absolute() {
+        path = env::current_dir()?.join(path);
+    }
+    // Preserve ordinary workdir spellings, but inspect metadata aliases by
+    // their physical path. Otherwise `main/alias -> .libra/worktree/linked`
+    // would let a damaged alias/topic climb to main instead of meeting the
+    // managed-container fence below.
+    let physical = canonicalize_deepest_existing(&path)?;
+    if physical.ancestors().any(|ancestor| {
+        (ancestor.file_name() == Some(OsStr::new(ROOT_DIR)) && !is_global_libra_home(ancestor))
+            || managed_common_ancestor(ancestor).is_some()
+    }) {
+        path = physical;
+    }
     let orig = path.clone();
     let mut skipped_home = None;
 
     loop {
+        let metadata_boundary = path.file_name() == Some(OsStr::new(ROOT_DIR))
+            && !is_global_libra_home(&path)
+            && (path != orig || is_valid_storage_dir(&path))
+            && !(!is_valid_storage_dir(&path) && is_valid_storage_dir(&path.join(ROOT_DIR)))
+            || path != orig && is_terminal_common_storage(&path);
+        let managed_boundary = path.file_name() == Some(OsStr::new("worktree"))
+            && path.parent().is_some_and(|parent| {
+                (parent.file_name() == Some(OsStr::new(ROOT_DIR)) && !is_global_libra_home(parent))
+                    || is_terminal_common_storage(parent)
+            });
+        if metadata_boundary || managed_boundary {
+            if metadata_boundary
+                && path != orig
+                && path.file_name() != Some(OsStr::new(ROOT_DIR))
+                && is_terminal_common_storage(&path)
+            {
+                // A bare repository's own hooks/objects directories are
+                // legitimate command cwd values. A normal `.libra` metadata
+                // child still cannot climb to the enclosing main worktree.
+                resolve_managed_workspace_common(&path, &path, &path)?;
+                return Ok((path.clone(), path.clone(), path.clone()));
+            }
+            // The exact metadata root is a legitimate storage cwd (including
+            // a bare repository named `.libra` and a linked gitdir). Never
+            // climb into it from a child path. Managed task workspaces still
+            // pass the local-identity check in the resolver below.
+            if metadata_boundary
+                && path == orig
+                && path.file_name() == Some(OsStr::new(ROOT_DIR))
+                && is_valid_storage_dir(&path)
+            {
+                let gitdir = fs::canonicalize(&path)?;
+                let common = worktree_common_storage(&gitdir)?;
+                if let Some(workdir) = path.parent() {
+                    let common = resolve_managed_workspace_common(workdir, &gitdir, &common)?;
+                    return Ok((common, workdir.to_path_buf(), gitdir));
+                }
+            }
+            if metadata_boundary
+                && explicit_storage_lookup
+                && path == orig
+                && is_valid_storage_dir(&path)
+            {
+                let gitdir = fs::canonicalize(&path)?;
+                let common = worktree_common_storage(&gitdir)?;
+                let common = if let Some(workdir) = path.parent() {
+                    resolve_managed_workspace_common(workdir, &gitdir, &common)?
+                } else {
+                    common
+                };
+                return Ok((common, path.clone(), gitdir));
+            }
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "cannot discover a worktree from '{}' across repository metadata '{}'; \
+                     the local .libra workspace identity is missing or invalid — run \
+                     `libra worktree repair --confirm --path <worktree-path>` from the \
+                     main worktree, or recreate an isolated task workspace",
+                    orig.display(),
+                    path.display()
+                ),
+            ));
+        }
         let standard_repo = path.join(ROOT_DIR);
         if standard_repo.join(DATABASE).exists() && is_global_libra_home(&standard_repo) {
             skipped_home = Some(standard_repo.clone());
@@ -685,6 +777,7 @@ fn try_get_paths_full(path: Option<PathBuf>) -> Result<(PathBuf, PathBuf, PathBu
             // unwrap_or is safe here: if canonicalize fails, we use the original path
             let gitdir = fs::canonicalize(&standard_repo).unwrap_or(standard_repo);
             let common = worktree_common_storage(&gitdir)?;
+            let common = resolve_managed_workspace_common(&path, &gitdir, &common)?;
             return Ok((common, path.clone(), gitdir));
         }
 
@@ -692,6 +785,7 @@ fn try_get_paths_full(path: Option<PathBuf>) -> Result<(PathBuf, PathBuf, PathBu
             && path.join("objects").exists()
             && !is_global_libra_home(&path)
         {
+            resolve_managed_workspace_common(&path, &path, &path)?;
             return Ok((path.clone(), path.clone(), path.clone()));
         }
 
@@ -711,6 +805,243 @@ fn try_get_paths_full(path: Option<PathBuf>) -> Result<(PathBuf, PathBuf, PathBu
             });
         }
     }
+}
+
+fn managed_common_ancestor(workdir: &Path) -> Option<&Path> {
+    workdir.ancestors().find_map(|ancestor| {
+        if ancestor.file_name() != Some(OsStr::new("worktree")) {
+            return None;
+        }
+        ancestor.parent().filter(|parent| {
+            (parent.file_name() == Some(OsStr::new(ROOT_DIR)) && !is_global_libra_home(parent))
+                || is_terminal_common_storage(parent)
+        })
+    })
+}
+
+/// An internal workspace may resolve only its enclosing common storage and a
+/// real local identity. A copied main gitdir or a linked gitdir pointing at a
+/// different repository must not bypass the managed-container discovery fence.
+fn resolve_managed_workspace_common(
+    workdir: &Path,
+    gitdir: &Path,
+    resolved_common: &Path,
+) -> io::Result<PathBuf> {
+    if let Some(enclosing) = managed_common_ancestor(workdir) {
+        let expected_common = fs::canonicalize(enclosing)?;
+        super::worktree_layout::validate_managed_path(enclosing, workdir)?;
+        if resolved_common == gitdir
+            && is_nested_repository_in_managed_workspace(enclosing, workdir)
+        {
+            // A repository initialized inside a managed worktree has its own
+            // local common storage. The enclosing worktree's identity does
+            // not apply to that independent child repository. Missing local
+            // metadata still meets the managed-container fence above.
+            return Ok(resolved_common.to_path_buf());
+        }
+        if workdir.starts_with(enclosing.join("worktree/fuse")) {
+            verify_registered_fuse_source(workdir, gitdir, &expected_common)?;
+            return Ok(expected_common);
+        }
+        let local = workdir.join(ROOT_DIR);
+        let identity_is_nonempty = super::worktree_layout::read_regular_metadata(
+            workdir,
+            &Path::new(ROOT_DIR).join("worktree_id"),
+            4096,
+        )
+        .is_ok_and(|bytes| {
+            std::str::from_utf8(&bytes).is_ok_and(|identity| !identity.trim().is_empty())
+        });
+        let local_is_directory =
+            fs::symlink_metadata(&local).is_ok_and(|metadata| metadata.file_type().is_dir());
+        if resolved_common != expected_common
+            || !local_is_directory
+            || !identity_is_nonempty
+            || gitdir == resolved_common
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "managed worktree '{}' has no valid local identity for common storage \
+                     '{}'; run `libra worktree repair --confirm --path <worktree-path>` \
+                     from the main worktree or recreate the task workspace",
+                    workdir.display(),
+                    expected_common.display()
+                ),
+            ));
+        }
+    }
+    Ok(resolved_common.to_path_buf())
+}
+
+fn is_nested_repository_in_managed_workspace(enclosing: &Path, workdir: &Path) -> bool {
+    let Ok(relative) = workdir.strip_prefix(enclosing.join("worktree")) else {
+        return false;
+    };
+    let parts: Vec<_> = relative.components().map(|part| part.as_os_str()).collect();
+    match parts.as_slice() {
+        [kind, _, _, ..] if *kind == OsStr::new("linked") => true,
+        [kind, _, workspace, _, ..]
+            if *kind == OsStr::new("fuse") && *workspace == OsStr::new("workspace") =>
+        {
+            true
+        }
+        [kind, _, _, workspace, _, ..]
+            if *kind == OsStr::new("tasks")
+                && (*workspace == OsStr::new("workspace")
+                    || *workspace == OsStr::new("checkpoint-input")) =>
+        {
+            true
+        }
+        _ => false,
+    }
+}
+
+/// FUSE retains its source's metadata identity. Bind that exception to the
+/// persisted mount and source, rather than accepting a copied main gitdir.
+fn verify_registered_fuse_source(
+    workdir: &Path,
+    gitdir: &Path,
+    common: &Path,
+) -> io::Result<PathBuf> {
+    let invalid = |detail: &str| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "cannot resolve managed FUSE worktree '{}': {detail}; restore its registry/source metadata or recreate the mount",
+                workdir.display()
+            ),
+        )
+    };
+    let binding = crate::command::worktree::registered_fuse_worktree_at(common, workdir)
+        .map_err(|error| invalid(&format!("cannot validate its registry binding: {error}")))?
+        .ok_or_else(|| invalid("the mount has no registered FUSE binding"))?;
+    let name = binding
+        .name
+        .as_deref()
+        .ok_or_else(|| invalid("the managed mount has no stable name"))?;
+    let expected_path = super::worktree_layout::fuse_workspace(common, name)?;
+    let expected_upper = super::worktree_layout::fuse_upper(common, name)?;
+    let managed = workdir.starts_with(common.join("worktree/fuse"));
+    if (managed && binding.path != expected_path)
+        || binding.path != workdir
+        || binding.upper_dir != expected_upper
+        || binding.lower_dirs.len() != 1
+    {
+        return Err(invalid(
+            "its path, upper directory, or source list does not match the managed layout",
+        ));
+    }
+    let mount_id = binding
+        .mount_id
+        .as_deref()
+        .ok_or_else(|| invalid("the managed mount has no persisted mount identity"))?;
+    uuid::Uuid::parse_str(mount_id).map_err(|_| invalid("the mount identity is not a UUID"))?;
+    super::worktree_layout::open_managed_directory(common, &binding.upper_dir)?;
+    // The overlay must expose real local metadata, including the opacity
+    // container that prevents the source from exposing this mount recursively.
+    let workspace = if managed {
+        super::worktree_layout::open_managed_directory(common, workdir)?
+    } else {
+        super::beneath::open_root(workdir)?
+    };
+    let local = super::beneath::open_beneath(&workspace, Path::new(ROOT_DIR))?;
+    super::beneath::open_beneath(&local, Path::new("worktree"))?;
+    for root in [&binding.upper_dir, workdir] {
+        let marker = super::worktree_layout::read_regular_metadata(
+            root,
+            Path::new(".libra/worktree-mount-id"),
+            128,
+        )?;
+        if std::str::from_utf8(&marker).map(str::trim).ok() != Some(mount_id) {
+            return Err(invalid(
+                "the mounted filesystem does not expose the registered upper-directory identity",
+            ));
+        }
+    }
+    let source = &binding.lower_dirs[0];
+    let source_gitdir = source.join(ROOT_DIR);
+    let source_common = worktree_common_storage(&source_gitdir)?;
+    if fs::canonicalize(&source_common)? != common || !is_terminal_common_storage(common) {
+        return Err(invalid(
+            "its original source belongs to a different or invalid common storage",
+        ));
+    }
+    let read_identity = |local_gitdir: &Path| -> io::Result<Option<Vec<u8>>> {
+        match super::worktree_layout::read_regular_metadata(
+            local_gitdir,
+            Path::new("worktree_id"),
+            4096,
+        ) {
+            Ok(bytes) if bytes.iter().any(|byte| !byte.is_ascii_whitespace()) => Ok(Some(bytes)),
+            Ok(_) => Err(invalid("the source or overlay worktree identity is empty")),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
+    };
+    let source_gitdir = fs::canonicalize(source_gitdir)?;
+    let source_identity = read_identity(&source_gitdir)?;
+    if source_common != source_gitdir && source_identity.is_none() {
+        return Err(invalid(
+            "the linked source is missing its worktree identity",
+        ));
+    }
+    if read_identity(gitdir)? != source_identity {
+        return Err(invalid(
+            "its overlay identity no longer matches the registered source",
+        ));
+    }
+    let overlay_common = worktree_common_storage(gitdir)?;
+    if overlay_common != gitdir && overlay_common != common {
+        return Err(invalid(
+            "its overlay common-storage pointer targets another repository",
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let parent = workdir
+            .parent()
+            .ok_or_else(|| invalid("the mountpoint has no parent"))?;
+        // A FUSE filesystem has a distinct device identity. Unlike invoking
+        // `mount`, this check adds no process creation to repository discovery.
+        if workspace.metadata()?.dev() == fs::metadata(parent)?.dev() {
+            return Err(invalid("the registered workspace is not mounted"));
+        }
+    }
+    #[cfg(not(unix))]
+    return Err(invalid("FUSE worktrees require a supported Unix mount"));
+    #[cfg(unix)]
+    Ok(source.to_path_buf())
+}
+
+/// A FUSE mount borrowing a linked source's scope is registered against that
+/// source identity. Only this complete provenance proof permits the alias.
+pub(crate) fn verified_fuse_source(common: &Path, workdir: &Path) -> io::Result<Option<PathBuf>> {
+    if !workdir.starts_with(common.join("worktree/fuse")) {
+        if workdir.starts_with(common) {
+            return Ok(None);
+        }
+        let binding = crate::command::worktree::registered_fuse_worktree_at(common, workdir)
+            .map_err(|error| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("cannot inspect FUSE source identity: {error}"),
+                )
+            })?;
+        match binding {
+            None => return Ok(None),
+            Some(binding) if binding.name.is_none() && binding.mount_id.is_none() => {
+                // Legacy external FUSE registrations predate managed names and
+                // mount identity. They never qualify as a linked-source alias,
+                // but they must remain a definite non-match for old layouts.
+                return Ok(None);
+            }
+            Some(_) => {}
+        }
+    }
+    let gitdir = fs::canonicalize(workdir.join(ROOT_DIR))?;
+    verify_registered_fuse_source(workdir, &gitdir, common).map(Some)
 }
 
 /// `(common_storage, workdir)` — db/objects/hooks storage + the working dir.
@@ -845,7 +1176,13 @@ pub fn worktree_id_for_base(base: Option<PathBuf>) -> Option<String> {
 /// scope key paired with worktree B's gitdir — the exact mismatch the pin
 /// exists to prevent.
 pub fn worktree_id_for_gitdir(gitdir: &Path) -> Option<String> {
-    if let Ok(id) = fs::read_to_string(gitdir.join("worktree_id")) {
+    if let Ok(id) =
+        super::worktree_layout::read_regular_metadata(gitdir, Path::new("worktree_id"), 4096)
+            .and_then(|bytes| {
+                String::from_utf8(bytes)
+                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+            })
+    {
         let id = id.trim();
         if !id.is_empty() {
             return Some(id.to_string());
@@ -890,7 +1227,8 @@ pub fn worktree_instance_id(canonical_path: &Path) -> String {
 /// Try to get the storage path of the repository, which is the path of the `.libra` directory
 /// - if the current directory or given path is not a repository, return an error
 pub fn try_get_storage_path(path: Option<PathBuf>) -> Result<PathBuf, io::Error> {
-    let (storage, _) = try_get_paths(path)?;
+    let explicit_storage_lookup = path.is_some();
+    let (storage, _, _) = try_get_paths_full_with_storage_lookup(path, explicit_storage_lookup)?;
     Ok(storage)
 }
 
@@ -4169,6 +4507,309 @@ mod test {
         assert!(
             result.is_err(),
             ".libra with only objects/ should not be treated as a valid repository"
+        );
+    }
+
+    fn managed_discovery_fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let temp = tempdir().unwrap();
+        let main = temp.path().join("main");
+        let common = main.join(ROOT_DIR);
+        fs::create_dir_all(common.join("objects")).unwrap();
+        fs::write(common.join(DATABASE), b"fixture").unwrap();
+        (temp, main, common)
+    }
+
+    #[test]
+    fn managed_discovery_rejects_missing_or_damaged_workspace_identity() {
+        let (_temp, _main, common) = managed_discovery_fixture();
+        for suffix in [
+            "linked/topic",
+            "tasks/run/attempt/workspace",
+            "tasks/run/attempt/checkpoint-input",
+        ] {
+            let root = common.join("worktree").join(suffix);
+            let nested = root.join("src/nested");
+            fs::create_dir_all(&nested).unwrap();
+            for damaged in [false, true] {
+                if damaged {
+                    fs::create_dir_all(root.join(ROOT_DIR)).unwrap();
+                    fs::write(root.join(ROOT_DIR).join("commondir"), b"").unwrap();
+                }
+                let error = try_get_storage_path(Some(nested.clone())).unwrap_err();
+                assert_eq!(
+                    error.kind(),
+                    io::ErrorKind::InvalidData,
+                    "{suffix}: {error}"
+                );
+                assert!(error.to_string().contains("worktree repair"), "{error}");
+            }
+        }
+    }
+
+    #[test]
+    fn managed_discovery_accepts_local_identity_and_common_storage() {
+        let (_temp, main, common) = managed_discovery_fixture();
+        let root = common.join("worktree/linked/topic");
+        let gitdir = root.join(ROOT_DIR);
+        fs::create_dir_all(&gitdir).unwrap();
+        fs::write(
+            gitdir.join("commondir"),
+            common.to_string_lossy().as_bytes(),
+        )
+        .unwrap();
+        fs::write(gitdir.join("worktree_id"), b"topic-identity\n").unwrap();
+        fs::create_dir(root.join("src")).unwrap();
+        let (storage, workdir, local) = try_get_paths_full(Some(root.join("src"))).unwrap();
+        assert_eq!(storage, common.canonicalize().unwrap());
+        assert_eq!(workdir, root.canonicalize().unwrap());
+        assert_eq!(local, gitdir.canonicalize().unwrap());
+        assert_eq!(try_get_paths_full(Some(main.clone())).unwrap().1, main);
+        assert_eq!(
+            try_get_storage_path(Some(common.clone())).unwrap(),
+            common.canonicalize().unwrap()
+        );
+        assert_eq!(
+            try_get_storage_path(Some(gitdir)).unwrap(),
+            common.canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn managed_discovery_accepts_nested_independent_repositories() {
+        let (_temp, _main, common) = managed_discovery_fixture();
+        for suffix in [
+            "linked/topic/vendor",
+            "tasks/run/attempt/workspace/vendor",
+            "fuse/topic/workspace/vendor",
+        ] {
+            let nested = common.join("worktree").join(suffix);
+            let local = nested.join(ROOT_DIR);
+            fs::create_dir_all(local.join("objects")).unwrap();
+            fs::write(local.join(DATABASE), b"independent repository").unwrap();
+            let (storage, workdir, gitdir) = try_get_paths_full(Some(nested.join("src"))).unwrap();
+            assert_eq!(storage, local.canonicalize().unwrap(), "{suffix}");
+            assert_eq!(workdir, nested.canonicalize().unwrap(), "{suffix}");
+            assert_eq!(gitdir, local.canonicalize().unwrap(), "{suffix}");
+        }
+    }
+
+    #[test]
+    fn bare_repository_children_remain_discoverable_outside_managed_storage() {
+        let temp = tempdir().unwrap();
+        let bare = temp.path().join("bare");
+        fs::create_dir_all(bare.join("objects")).unwrap();
+        fs::create_dir_all(bare.join("hooks")).unwrap();
+        fs::write(bare.join(DATABASE), b"fixture").unwrap();
+        for child in ["objects", "hooks"] {
+            let (storage, workdir, gitdir) = try_get_paths_full(Some(bare.join(child))).unwrap();
+            assert_eq!(storage, bare);
+            assert_eq!(workdir, bare);
+            assert_eq!(gitdir, bare);
+        }
+    }
+
+    #[test]
+    fn legacy_external_fuse_binding_is_a_definite_non_alias() {
+        let (temp, _main, common) = managed_discovery_fixture();
+        let mount = temp.path().join("legacy-mount");
+        let upper = temp.path().join("legacy-upper");
+        let document = serde_json::json!({"worktrees": [{
+            "path": mount.to_string_lossy(),
+            "branch": "main",
+            "upper_dir": upper.to_string_lossy(),
+            "lower_dirs": [temp.path().join("main").to_string_lossy()],
+            "locked": false
+        }]});
+        fs::write(
+            common.join("worktrees-fuse.json"),
+            serde_json::to_vec(&document).unwrap(),
+        )
+        .unwrap();
+        assert!(verified_fuse_source(&common, &mount).unwrap().is_none());
+    }
+
+    #[test]
+    fn managed_discovery_refuses_copied_main_or_wrong_common_identity() {
+        let (temp, _main, common) = managed_discovery_fixture();
+        let root = common.join("worktree/linked/topic");
+        let local = root.join(ROOT_DIR);
+        fs::create_dir_all(&local).unwrap();
+        fs::write(local.join(DATABASE), b"copied main database").unwrap();
+        assert!(try_get_paths_full(Some(root.clone())).is_err());
+        fs::remove_file(local.join(DATABASE)).unwrap();
+        let other = temp.path().join("other/.libra");
+        fs::create_dir_all(&other).unwrap();
+        fs::write(other.join(DATABASE), b"other database").unwrap();
+        fs::write(local.join("worktree_id"), b"topic-identity\n").unwrap();
+        fs::write(local.join("commondir"), other.to_string_lossy().as_bytes()).unwrap();
+        assert!(try_get_paths_full(Some(root.clone())).is_err());
+        assert!(try_get_storage_path(Some(local.clone())).is_err());
+        fs::write(local.join("commondir"), common.to_string_lossy().as_bytes()).unwrap();
+        fs::remove_file(local.join("worktree_id")).unwrap();
+        assert!(try_get_paths_full(Some(root)).is_err());
+    }
+
+    #[test]
+    fn managed_discovery_accepts_exact_storage_root_but_not_metadata_children() {
+        let (temp, _main, common) = managed_discovery_fixture();
+        assert_eq!(
+            try_get_paths_full(Some(common.clone())).unwrap().0,
+            fs::canonicalize(&common).unwrap()
+        );
+        assert!(try_get_storage_path(Some(common.join("objects"))).is_err());
+        assert!(try_get_paths_full(Some(common.join("worktree"))).is_err());
+        let bare = temp.path().join("bare-repository");
+        fs::create_dir_all(bare.join("objects")).unwrap();
+        fs::write(bare.join(DATABASE), b"bare database").unwrap();
+        assert_eq!(try_get_paths_full(Some(bare.clone())).unwrap().0, bare);
+    }
+
+    #[test]
+    fn managed_discovery_nonstandard_common_and_fake_bare_remain_isolated() {
+        let temp = tempdir().unwrap();
+        let common = temp.path().join("bare.git");
+        fs::create_dir_all(common.join("objects")).unwrap();
+        fs::write(common.join(DATABASE), b"common database").unwrap();
+        let root = common.join("worktree/linked/topic");
+        fs::create_dir_all(&root).unwrap();
+        assert!(try_get_storage_path(Some(root.clone())).is_err());
+        fs::create_dir(root.join("objects")).unwrap();
+        fs::write(root.join(DATABASE), b"fake bare database").unwrap();
+        assert!(try_get_storage_path(Some(root)).is_err());
+        assert_eq!(try_get_storage_path(Some(common.clone())).unwrap(), common);
+    }
+
+    #[test]
+    fn managed_discovery_fuse_requires_registration_and_a_live_mount() {
+        let (_temp, main, common) = managed_discovery_fixture();
+        let common = common.canonicalize().unwrap();
+        let main = main.canonicalize().unwrap();
+        let workspace = common.join("worktree/fuse/topic/workspace");
+        let upper = common.join("worktree/fuse/topic/upper");
+        fs::create_dir_all(workspace.join(".libra/worktree")).unwrap();
+        fs::create_dir_all(upper.join(".libra/worktree")).unwrap();
+        fs::write(workspace.join(".libra").join(DATABASE), b"overlay database").unwrap();
+        let unknown = try_get_storage_path(Some(workspace.clone())).unwrap_err();
+        assert!(
+            unknown.to_string().contains("no registered FUSE binding"),
+            "{unknown}"
+        );
+        fs::write(common.join("worktrees-fuse.json"), b"{broken").unwrap();
+        let corrupt = try_get_storage_path(Some(workspace.clone())).unwrap_err();
+        assert!(
+            corrupt.to_string().contains("registry binding"),
+            "{corrupt}"
+        );
+        let mount_id = uuid::Uuid::new_v4().to_string();
+        fs::write(
+            upper.join(".libra/worktree-mount-id"),
+            format!("{mount_id}\n"),
+        )
+        .unwrap();
+        fs::write(
+            workspace.join(".libra/worktree-mount-id"),
+            format!("{}\n", uuid::Uuid::new_v4()),
+        )
+        .unwrap();
+        fs::write(common.join("worktrees-fuse.json"), serde_json::to_vec(&serde_json::json!({
+            "schema_version":1,"entries":[{
+                "name":"topic","path":workspace,"upper_dir":upper,"lower_dirs":[main],"mount_id":mount_id,
+                "branch":"main","locked":false,"lock_reason":null,"privileged":false,"allow_other":false
+            }]
+        })).unwrap()).unwrap();
+        let wrong_mount = try_get_storage_path(Some(workspace.clone())).unwrap_err();
+        assert!(
+            wrong_mount
+                .to_string()
+                .contains("registered upper-directory identity"),
+            "{wrong_mount}"
+        );
+        fs::write(
+            workspace.join(".libra/worktree-mount-id"),
+            format!("{mount_id}\n"),
+        )
+        .unwrap();
+        let stale = try_get_storage_path(Some(workspace.clone())).unwrap_err();
+        assert!(
+            stale.to_string().contains("not mounted")
+                || stale.to_string().contains("supported Unix"),
+            "{stale}"
+        );
+        fs::remove_file(workspace.join(".libra").join(DATABASE)).unwrap();
+        assert!(try_get_storage_path(Some(workspace)).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_discovery_rejects_symlinked_local_gitdir() {
+        let (_temp, _main, common) = managed_discovery_fixture();
+        let root = common.join("worktree/linked/topic");
+        fs::create_dir_all(&root).unwrap();
+        std::os::unix::fs::symlink(&common, root.join(ROOT_DIR)).unwrap();
+        assert!(try_get_storage_path(Some(root)).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_discovery_rejects_fifo_identity_without_blocking() {
+        use std::{ffi::CString, os::unix::ffi::OsStrExt};
+        let (_temp, _main, common) = managed_discovery_fixture();
+        let root = common.join("worktree/linked/topic");
+        let local = root.join(ROOT_DIR);
+        fs::create_dir_all(&local).unwrap();
+        fs::write(local.join("commondir"), common.to_string_lossy().as_bytes()).unwrap();
+        let fifo = CString::new(local.join("worktree_id").as_os_str().as_bytes()).unwrap();
+        // SAFETY: fifo is a valid NUL-terminated fixture path.
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        assert!(try_get_storage_path(Some(root)).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_discovery_alias_cannot_escape_to_main() {
+        let (_temp, main, common) = managed_discovery_fixture();
+        let linked = common.join("worktree/linked");
+        fs::create_dir_all(linked.join("damaged/src")).unwrap();
+        let alias = main.join("alias");
+        std::os::unix::fs::symlink(&linked, &alias).unwrap();
+        assert!(try_get_paths_full(Some(alias.join("damaged/src"))).is_err());
+        let metadata_alias = main.join("metadata-alias");
+        std::os::unix::fs::symlink(&common, &metadata_alias).unwrap();
+        assert!(try_get_paths_full(Some(metadata_alias.join("objects"))).is_err());
+        assert_eq!(
+            try_get_storage_path(Some(metadata_alias)).unwrap(),
+            common.canonicalize().unwrap()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_discovery_symlinked_common_storage_preserves_boundary() {
+        let temp = tempdir().unwrap();
+        let main = temp.path().join("main");
+        let common = temp.path().join("shared-storage");
+        fs::create_dir(&main).unwrap();
+        fs::create_dir_all(common.join("objects")).unwrap();
+        fs::write(common.join(DATABASE), b"shared database").unwrap();
+        std::os::unix::fs::symlink(&common, main.join(ROOT_DIR)).unwrap();
+        let root = common.join("worktree/linked/topic");
+        fs::create_dir_all(&root).unwrap();
+        let alias_root = main.join(".libra/worktree/linked/topic");
+        assert!(try_get_paths_full(Some(alias_root.clone())).is_err());
+        fs::create_dir(root.join(ROOT_DIR)).unwrap();
+        fs::write(
+            root.join(ROOT_DIR).join("commondir"),
+            common.to_string_lossy().as_bytes(),
+        )
+        .unwrap();
+        fs::write(root.join(ROOT_DIR).join("worktree_id"), b"linked-id\n").unwrap();
+        assert_eq!(
+            try_get_storage_path(Some(alias_root)).unwrap(),
+            common.canonicalize().unwrap()
+        );
+        assert_eq!(
+            try_get_storage_path(Some(main)).unwrap(),
+            common.canonicalize().unwrap()
         );
     }
 

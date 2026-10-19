@@ -1,9 +1,8 @@
 //! Registry mutation lock; callers hold it through registry and SQLite writes.
 
-use std::fs;
+use std::{fs, path::PathBuf};
 
 use super::{WorktreeError, WorktreeResult};
-use crate::utils::util;
 
 /// RAII guard over the worktree REGISTRY mutation lock (`worktrees.lock` in
 /// the common storage). Serializes every registry mutator's
@@ -31,8 +30,8 @@ impl Drop for RegistryLockGuard {
 /// crate, sync or async, goes through that helper, so the
 /// blocking-on-a-runtime-worker deadlock cannot be reintroduced from
 /// another module by accident.
-fn acquire_registry_lock() -> WorktreeResult<RegistryLockGuard> {
-    let lock_path = util::storage_path().join("worktrees.lock");
+fn acquire_registry_lock(common: PathBuf) -> WorktreeResult<RegistryLockGuard> {
+    let lock_path = common.join("worktrees.lock");
     let file = fs::OpenOptions::new()
         .create(true)
         .read(true)
@@ -73,7 +72,12 @@ fn acquire_registry_lock() -> WorktreeResult<RegistryLockGuard> {
 /// (validate and write under one hold). Only the ACQUISITION must leave the
 /// runtime worker.
 pub(crate) async fn acquire_registry_lock_async() -> WorktreeResult<RegistryLockGuard> {
-    match tokio::task::spawn_blocking(acquire_registry_lock).await {
+    // RequestScope is task-local: resolve before leaving this async task so
+    // the blocking worker cannot lock a different ambient repository.
+    let common = crate::utils::worktree_layout::current_common_storage().map_err(|error| {
+        WorktreeError::IoRead(format!("cannot resolve common worktree storage: {error}"))
+    })?;
+    match tokio::task::spawn_blocking(move || acquire_registry_lock(common)).await {
         Ok(result) => result,
         Err(error) => Err(WorktreeError::IoWrite(format!(
             "the worktree registry lock task failed: {error}"

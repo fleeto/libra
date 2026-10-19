@@ -319,7 +319,7 @@ mod tests {
                     "agent hook ingestion failed: could not resolve the active repository storage"
                 ) && error
                     .render()
-                    .contains("`libra worktree repair --confirm <worktree-path>`"),
+                    .contains("`libra worktree repair --confirm --path <worktree-path>`"),
                 "{cmd}: the legacy alias must render the fixed worktree remedy: {error}"
             );
 

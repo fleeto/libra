@@ -67,9 +67,9 @@ fn test_worktree_move_cross_device_error_is_portable() {
     assert!(
         sources.iter().any(|(_, source)| {
             let compact: String = source.split_whitespace().collect();
-            compact.contains("error.kind()!=io::ErrorKind::CrossesDevices")
+            compact.contains("io::ErrorKind::CrossesDevices|io::ErrorKind::Unsupported")
         }),
-        "worktree move must check io::ErrorKind::CrossesDevices"
+        "worktree move must refuse cross-device and unsupported atomic renames"
     );
     for (path, source) in &sources {
         assert!(
@@ -134,25 +134,43 @@ fn test_worktree_help_header_is_user_facing() {
     );
 }
 
-/// Mirror of the on-disk `WorktreeEntry` used only in tests (registry v2).
+/// Mirror of the on-disk `WorktreeEntry` used only in tests (registry v4).
 ///
 /// This type allows tests to deserialize `worktrees.json` without depending
 /// on internal, non-public structs from the main crate.
 #[derive(Clone, Deserialize, Serialize)]
 struct TestWorktreeEntry {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
     path: String,
     is_main: bool,
     locked: bool,
     lock_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     worktree_id: Option<String>,
+    #[serde(default = "active_worktree_state")]
+    state: String,
+    #[serde(default)]
+    epoch: u64,
 }
 
-/// Mirror of the on-disk `WorktreeState` used only in tests (registry v2).
+fn active_worktree_state() -> String {
+    "active".to_string()
+}
+
+fn no_linked_history() -> String {
+    "never".to_string()
+}
+
+/// Preserve every lifecycle/identity field when a test edits the registry.
 #[derive(Deserialize, Serialize)]
 struct TestWorktreeState {
     schema_version: u32,
     entries: Vec<TestWorktreeEntry>,
+    #[serde(default = "no_linked_history")]
+    linked_history: String,
+    #[serde(default)]
+    epoch_counter: u64,
 }
 
 /// Loads the current `worktrees.json` into a test-friendly `TestWorktreeState`.
@@ -210,7 +228,10 @@ async fn test_worktree_list_schema_version_surface() {
     let repo_dir = tempdir().unwrap();
     test::setup_with_new_libra_in(repo_dir.path()).await;
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", "wt_sv"], repo_dir.path()),
+        &run_libra_command(
+            &["worktree", "add", "wt_sv", "--path", "wt_sv"],
+            repo_dir.path(),
+        ),
         "worktree add",
     );
 
@@ -260,10 +281,15 @@ async fn test_worktree_list_json_outputs_structured_entries() {
     test::setup_with_new_libra_in(repo_dir.path()).await;
     let wt_path = repo_dir.path().join("wt_json");
 
-    let add = run_libra_command(&["worktree", "add", "wt_json"], repo_dir.path());
+    let add = run_libra_command(
+        &["worktree", "add", "wt_json", "--path", "wt_json"],
+        repo_dir.path(),
+    );
     assert_cli_success(&add, "worktree add");
     let lock = run_libra_command(
-        &["worktree", "lock", "wt_json", "--reason", "review"],
+        &[
+            "worktree", "lock", "--path", "wt_json", "--reason", "review",
+        ],
         repo_dir.path(),
     );
     assert_cli_success(&lock, "worktree lock");
@@ -338,7 +364,14 @@ async fn test_worktree_add_json_reports_created_path() {
     test::setup_with_new_libra_in(repo_dir.path()).await;
 
     let output = run_libra_command(
-        &["--json", "worktree", "add", "wt_add_json"],
+        &[
+            "--json",
+            "worktree",
+            "add",
+            "wt_add_json",
+            "--path",
+            "wt_add_json",
+        ],
         repo_dir.path(),
     );
     assert_cli_success(&output, "json worktree add");
@@ -361,7 +394,10 @@ async fn test_worktree_add_json_reports_created_path() {
 async fn test_worktree_lock_unlock_structured_outputs_report_state() {
     let repo_dir = tempdir().unwrap();
     test::setup_with_new_libra_in(repo_dir.path()).await;
-    let add = run_libra_command(&["worktree", "add", "wt_lock_json"], repo_dir.path());
+    let add = run_libra_command(
+        &["worktree", "add", "wt_lock_json", "--path", "wt_lock_json"],
+        repo_dir.path(),
+    );
     assert_cli_success(&add, "worktree add");
 
     let lock = run_libra_command(
@@ -369,6 +405,7 @@ async fn test_worktree_lock_unlock_structured_outputs_report_state() {
             "--json",
             "worktree",
             "lock",
+            "--path",
             "wt_lock_json",
             "--reason",
             "review",
@@ -390,7 +427,7 @@ async fn test_worktree_lock_unlock_structured_outputs_report_state() {
     assert_eq!(locked["data"]["changed"], true);
 
     let unlock = run_libra_command(
-        &["--machine", "worktree", "unlock", "wt_lock_json"],
+        &["--machine", "worktree", "unlock", "--path", "wt_lock_json"],
         repo_dir.path(),
     );
     assert_cli_success(&unlock, "machine worktree unlock");
@@ -421,7 +458,10 @@ async fn test_worktree_lock_unlock_structured_outputs_report_state() {
 async fn test_worktree_move_json_reports_source_and_destination() {
     let repo_dir = tempdir().unwrap();
     test::setup_with_new_libra_in(repo_dir.path()).await;
-    let add = run_libra_command(&["worktree", "add", "wt_move_json"], repo_dir.path());
+    let add = run_libra_command(
+        &["worktree", "add", "wt_move_json", "--path", "wt_move_json"],
+        repo_dir.path(),
+    );
     assert_cli_success(&add, "worktree add");
 
     let source = repo_dir.path().join("wt_move_json").canonicalize().unwrap();
@@ -431,7 +471,9 @@ async fn test_worktree_move_json_reports_source_and_destination() {
             "--json",
             "worktree",
             "move",
+            "--from-path",
             "wt_move_json",
+            "--path",
             "wt_move_json_dest",
         ],
         repo_dir.path(),
@@ -462,7 +504,16 @@ async fn test_worktree_move_json_reports_source_and_destination() {
 async fn test_worktree_prune_machine_reports_pruned_paths() {
     let repo_dir = tempdir().unwrap();
     test::setup_with_new_libra_in(repo_dir.path()).await;
-    let add = run_libra_command(&["worktree", "add", "wt_prune_machine"], repo_dir.path());
+    let add = run_libra_command(
+        &[
+            "worktree",
+            "add",
+            "wt_prune_machine",
+            "--path",
+            "wt_prune_machine",
+        ],
+        repo_dir.path(),
+    );
     assert_cli_success(&add, "worktree add");
     let wt_path = repo_dir.path().join("wt_prune_machine");
     let canonical = wt_path.canonicalize().unwrap();
@@ -498,11 +549,17 @@ async fn test_worktree_repair_json_reports_changed_state() {
     test::setup_with_new_libra_in(repo_dir.path()).await;
     let _guard = test::ChangeDirGuard::new(repo_dir.path());
 
-    exec_worktree(&["add", "wt_repair_json"])
+    exec_worktree(&["add", "wt_repair_json", "--path", "wt_repair_json"])
         .await
         .expect("worktree add should succeed");
 
     let mut state = read_worktree_state();
+    // Legacy unnamed duplicates can be repaired without discarding a logical
+    // name. Named collisions must instead fail closed for operator review.
+    state.schema_version = 3;
+    for entry in &mut state.entries {
+        entry.name = None;
+    }
     let duplicate = state
         .entries
         .iter()
@@ -592,7 +649,7 @@ async fn test_worktree_lock_json_no_such_worktree_reports_invalid_target() {
     let before_paths = worktree_paths();
 
     let output = run_libra_command(
-        &["--json", "worktree", "lock", "missing-worktree"],
+        &["--json", "worktree", "lock", "--path", "missing-worktree"],
         repo_dir.path(),
     );
 
@@ -625,7 +682,13 @@ async fn test_worktree_remove_machine_rejects_main_with_stable_error() {
     let main_arg = main_path.to_string_lossy().to_string();
 
     let output = run_libra_command(
-        &["--machine", "worktree", "remove", main_arg.as_str()],
+        &[
+            "--machine",
+            "worktree",
+            "remove",
+            "--path",
+            main_arg.as_str(),
+        ],
         repo_dir.path(),
     );
 
@@ -649,17 +712,17 @@ async fn test_worktree_remove_json_rejects_locked_with_stable_error() {
     let repo_dir = tempdir().unwrap();
     test::setup_with_new_libra_in(repo_dir.path()).await;
     let _guard = test::ChangeDirGuard::new(repo_dir.path());
-    exec_worktree(&["add", "wt_locked_error"])
+    exec_worktree(&["add", "wt_locked_error", "--path", "wt_locked_error"])
         .await
         .expect("worktree add should succeed");
-    exec_worktree(&["lock", "wt_locked_error"])
+    exec_worktree(&["lock", "--path", "wt_locked_error"])
         .await
         .expect("worktree lock should succeed");
     let wt_path = repo_dir.path().join("wt_locked_error");
     let before_paths = worktree_paths();
 
     let output = run_libra_command(
-        &["--json", "worktree", "remove", "wt_locked_error"],
+        &["--json", "worktree", "remove", "--path", "wt_locked_error"],
         repo_dir.path(),
     );
 
@@ -683,7 +746,7 @@ async fn test_worktree_move_machine_destination_exists_reports_conflict() {
     let repo_dir = tempdir().unwrap();
     test::setup_with_new_libra_in(repo_dir.path()).await;
     let _guard = test::ChangeDirGuard::new(repo_dir.path());
-    exec_worktree(&["add", "wt_move_error"])
+    exec_worktree(&["add", "wt_move_error", "--path", "wt_move_error"])
         .await
         .expect("worktree add should succeed");
     let src_path = repo_dir.path().join("wt_move_error");
@@ -696,7 +759,9 @@ async fn test_worktree_move_machine_destination_exists_reports_conflict() {
             "--machine",
             "worktree",
             "move",
+            "--from-path",
             "wt_move_error",
+            "--path",
             "wt_move_dest_exists",
         ],
         repo_dir.path(),
@@ -735,15 +800,21 @@ async fn test_worktree_add_json_rejects_storage_path_as_invalid_target() {
     let inside_arg = inside_storage.to_string_lossy().to_string();
 
     let output = run_libra_command(
-        &["--json", "worktree", "add", inside_arg.as_str()],
+        &[
+            "--json",
+            "worktree",
+            "add",
+            "inside-storage",
+            "--path",
+            inside_arg.as_str(),
+        ],
         repo_dir.path(),
     );
 
     let report = assert_worktree_error(&output, "LBR-CLI-003");
     assert!(
-        report
-            .message
-            .contains("worktree path cannot be inside .libra storage"),
+        report.message.contains("reserved repository metadata")
+            && report.message.contains("--path outside .libra"),
         "error should identify storage path refusal: {}",
         report.message
     );
@@ -795,7 +866,7 @@ async fn test_worktree_add_creates_linked_directory() {
     test::setup_with_new_libra_in(repo_dir.path()).await;
     let _guard = test::ChangeDirGuard::new(repo_dir.path());
 
-    let result = exec_worktree(&["add", "wt1"]).await;
+    let result = exec_worktree(&["add", "wt1", "--path", "wt1"]).await;
     assert!(result.is_ok(), "worktree add failed: {:?}", result.err());
 
     let wt_path = repo_dir.path().join("wt1");
@@ -821,7 +892,7 @@ async fn test_worktree_add_normalizes_missing_parent_with_dotdot() {
     test::setup_with_new_libra_in(repo_dir.path()).await;
     let _guard = test::ChangeDirGuard::new(repo_dir.path());
 
-    exec_worktree(&["add", "missing_parent/../wt_norm"])
+    exec_worktree(&["add", "wt_norm", "--path", "missing_parent/../wt_norm"])
         .await
         .expect("worktree add should succeed");
 
@@ -838,13 +909,13 @@ async fn test_worktree_add_normalizes_missing_parent_with_dotdot() {
         "stored worktree path should be canonical and normalized"
     );
 
-    exec_worktree(&["lock", "wt_norm"])
+    exec_worktree(&["lock", "--path", "wt_norm"])
         .await
         .expect("worktree lock should succeed");
-    exec_worktree(&["unlock", "wt_norm"])
+    exec_worktree(&["unlock", "--path", "wt_norm"])
         .await
         .expect("worktree unlock should succeed");
-    exec_worktree(&["remove", "wt_norm"])
+    exec_worktree(&["remove", "--path", "wt_norm"])
         .await
         .expect("worktree remove should succeed");
 }
@@ -871,7 +942,7 @@ async fn test_worktree_add_resolves_dotdot_through_symlinked_parent() {
     )
     .unwrap();
 
-    exec_worktree(&["add", "a/link/../wt_symlink"])
+    exec_worktree(&["add", "wt_symlink", "--path", "a/link/../wt_symlink"])
         .await
         .expect("worktree add should succeed");
 
@@ -907,19 +978,19 @@ async fn test_worktree_add_parent_relative_then_operate_with_dot_from_linked_wor
     test::setup_with_new_libra_in(&repo_path).await;
 
     let _guard_repo = test::ChangeDirGuard::new(&repo_path);
-    exec_worktree(&["add", "../wt_lock_dot"])
+    exec_worktree(&["add", "wt_lock_dot", "--path", "../wt_lock_dot"])
         .await
         .expect("worktree add with parent-relative path should succeed");
 
     let linked = root_dir.path().join("wt_lock_dot");
     let _guard_linked = test::ChangeDirGuard::new(&linked);
-    exec_worktree(&["lock", "."])
+    exec_worktree(&["lock", "--path", "."])
         .await
         .expect("worktree lock with '.' should resolve the registered entry");
-    exec_worktree(&["unlock", "."])
+    exec_worktree(&["unlock", "--path", "."])
         .await
         .expect("worktree unlock with '.' should resolve the registered entry");
-    exec_worktree(&["remove", "."])
+    exec_worktree(&["remove", "--path", "."])
         .await
         .expect("worktree remove with '.' should resolve the registered entry");
 }
@@ -934,14 +1005,14 @@ async fn test_worktree_add_parent_relative_and_absolute_path_are_equivalent() {
     test::setup_with_new_libra_in(&repo_path).await;
     let _guard = test::ChangeDirGuard::new(&repo_path);
 
-    exec_worktree(&["add", "../wt_rel_abs"])
+    exec_worktree(&["add", "wt_rel_abs", "--path", "../wt_rel_abs"])
         .await
         .expect("first worktree add should succeed");
 
     let abs_target = root_dir.path().join("wt_rel_abs").canonicalize().unwrap();
     let abs_target_str = abs_target.to_string_lossy().to_string();
 
-    exec_worktree(&["add", abs_target_str.as_str()])
+    exec_worktree(&["add", "wt_rel_abs", "--path", abs_target_str.as_str()])
         .await
         .expect("second worktree add with absolute path should succeed");
 
@@ -972,7 +1043,7 @@ async fn test_worktree_add_symlink_path_is_canonicalized_to_real_path() {
     let symlink_path = repo_path.join("wt_link");
     symlink(&real_target, &symlink_path).expect("failed to create symlink for test");
 
-    exec_worktree(&["add", "wt_link"])
+    exec_worktree(&["add", "wt_link", "--path", "wt_link"])
         .await
         .expect("worktree add through symlink should succeed");
 
@@ -991,13 +1062,13 @@ async fn test_worktree_add_symlink_path_is_canonicalized_to_real_path() {
         "state should store canonical real path instead of symlink path"
     );
 
-    exec_worktree(&["lock", "wt_link"])
+    exec_worktree(&["lock", "--path", "wt_link"])
         .await
         .expect("lock by symlink path should resolve the registered entry");
-    exec_worktree(&["unlock", "wt_link"])
+    exec_worktree(&["unlock", "--path", "wt_link"])
         .await
         .expect("unlock by symlink path should resolve the registered entry");
-    exec_worktree(&["remove", "wt_link"])
+    exec_worktree(&["remove", "--path", "wt_link"])
         .await
         .expect("remove by symlink path should resolve the registered entry");
 }
@@ -1023,10 +1094,10 @@ async fn test_worktree_add_symlink_and_real_path_are_deduplicated() {
     let via_symlink_str = via_symlink.to_string_lossy().to_string();
     let via_real_str = via_real.to_string_lossy().to_string();
 
-    exec_worktree(&["add", via_symlink_str.as_str()])
+    exec_worktree(&["add", "symlink-parent", "--path", via_symlink_str.as_str()])
         .await
         .expect("add via symlinked parent should succeed");
-    exec_worktree(&["add", via_real_str.as_str()])
+    exec_worktree(&["add", "symlink-parent", "--path", via_real_str.as_str()])
         .await
         .expect("add via real parent should not fail");
 
@@ -1083,7 +1154,9 @@ async fn test_worktree_add_rejects_existing_non_empty_directory() {
         .expect("failed to seed pre-existing target content");
 
     assert!(
-        exec_worktree(&["add", "wt_non_empty"]).await.is_err(),
+        exec_worktree(&["add", "wt_non_empty", "--path", "wt_non_empty"])
+            .await
+            .is_err(),
         "adding worktree to non-empty directory should fail"
     );
 
@@ -1116,7 +1189,7 @@ async fn test_worktree_add_duplicate_registered_path_does_not_create_directory()
     test::setup_with_new_libra_in(repo_dir.path()).await;
     let _guard = test::ChangeDirGuard::new(repo_dir.path());
 
-    exec_worktree(&["add", "wt_dup"])
+    exec_worktree(&["add", "wt_dup", "--path", "wt_dup"])
         .await
         .expect("initial worktree add should succeed");
 
@@ -1127,7 +1200,7 @@ async fn test_worktree_add_duplicate_registered_path_does_not_create_directory()
     assert!(!wt_path.exists(), "worktree directory should be missing");
 
     let before_paths = worktree_paths();
-    exec_worktree(&["add", "wt_dup"])
+    exec_worktree(&["add", "wt_dup", "--path", "wt_dup"])
         .await
         .expect("duplicate worktree add command itself should not fail");
     let after_paths = worktree_paths();
@@ -1183,7 +1256,9 @@ async fn test_worktree_add_rolls_back_link_on_restore_failure() {
         .expect("failed to create conflicting path in target");
 
     assert!(
-        exec_worktree(&["add", "wt_restore_fail"]).await.is_err(),
+        exec_worktree(&["add", "wt_restore_fail", "--path", "wt_restore_fail"])
+            .await
+            .is_err(),
         "adding worktree with conflicting file should fail"
     );
 
@@ -1272,7 +1347,9 @@ async fn test_worktree_add_rolls_back_populated_files_when_state_save_fails() {
         .expect("failed to set storage directory read-only");
 
     assert!(
-        exec_worktree(&["add", "wt_state_save_fail"]).await.is_err(),
+        exec_worktree(&["add", "wt_state_save_fail", "--path", "wt_state_save_fail"])
+            .await
+            .is_err(),
         "adding worktree with unwritable state should fail"
     );
 
@@ -1308,13 +1385,13 @@ async fn test_worktree_add_rolls_back_populated_files_when_state_save_fails() {
 #[cfg(unix)]
 #[tokio::test]
 #[serial(cwd)]
-/// Cross-filesystem moves should complete through the copy fallback when test env provides separate devices.
-async fn test_worktree_move_across_filesystems_rolls_back_when_supported() {
+/// Cross-filesystem moves refuse without copying or unregistering the source.
+async fn test_worktree_move_across_filesystems_is_refused() {
     let repo_dir = tempdir().unwrap();
     test::setup_with_new_libra_in(repo_dir.path()).await;
     let _guard = test::ChangeDirGuard::new(repo_dir.path());
 
-    exec_worktree(&["add", "wt_cross_src"])
+    exec_worktree(&["add", "wt_cross_src", "--path", "wt_cross_src"])
         .await
         .expect("worktree add should succeed");
     let src_path = repo_dir.path().join("wt_cross_src");
@@ -1333,29 +1410,96 @@ async fn test_worktree_move_across_filesystems_rolls_back_when_supported() {
 
     let dest_path = other_fs_dir.path().join("wt_cross_dest");
     let dest_str = dest_path.to_string_lossy().to_string();
-    exec_worktree(&["move", "wt_cross_src", dest_str.as_str()])
-        .await
-        .expect("worktree move command should complete across filesystems");
+    let result = exec_worktree(&[
+        "move",
+        "--from-path",
+        "wt_cross_src",
+        "--path",
+        dest_str.as_str(),
+    ])
+    .await;
+    assert!(result.is_err(), "cross-filesystem move must be refused");
 
     let canonical_repo = repo_dir.path().canonicalize().unwrap();
-    let canonical_destination = dest_path.canonicalize().unwrap();
+    let canonical_source = src_path.canonicalize().unwrap();
     let after_paths = worktree_paths();
     assert_eq!(
         vec![
             canonical_repo.to_string_lossy().to_string(),
-            canonical_destination.to_string_lossy().to_string(),
+            canonical_source.to_string_lossy().to_string(),
         ],
         after_paths,
-        "cross-filesystem move should update the worktree registry"
+        "cross-filesystem refusal must keep the source registration"
     );
-    assert!(
-        !src_path.exists(),
-        "source directory should be removed after a successful cross-filesystem move"
+    assert!(src_path.exists());
+    assert!(!dest_path.exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[serial(cwd)]
+async fn wd_umount_cleanup_rejects_managed_prefix_before_unmount() {
+    let repo_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo_dir.path());
+    let managed = repo_dir
+        .path()
+        .join(".libra/worktree/fuse/libra-task-worktree-fuse-collision");
+    let workspace = managed.join("workspace");
+    let upper = managed.join("upper");
+    fs::create_dir_all(&workspace).unwrap();
+    fs::create_dir_all(&upper).unwrap();
+    fs::write(upper.join("sentinel"), b"keep").unwrap();
+
+    let result = exec_worktree(&["umount", workspace.to_str().unwrap(), "--cleanup"]).await;
+    assert!(result.is_err(), "named FUSE storage must fail preflight");
+    assert_eq!(fs::read(upper.join("sentinel")).unwrap(), b"keep");
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+#[serial(cwd)]
+async fn wd_move_cross_device_refuses_without_copy() {
+    use std::os::unix::fs::symlink;
+
+    let repo_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo_dir.path());
+    exec_worktree(&["add", "wt_partial_src", "--path", "wt_partial_src"])
+        .await
+        .unwrap();
+    let source = repo_dir.path().join("wt_partial_src");
+    let Ok(other) = tempfile::tempdir_in("/dev/shm") else {
+        return;
+    };
+    if fs::metadata(repo_dir.path()).unwrap().dev() == fs::metadata(other.path()).unwrap().dev() {
+        return;
+    }
+    let destination = other.path().join("wt_destination");
+    let sibling = other.path().join("wt_partial_src");
+    fs::create_dir(&sibling).unwrap();
+    fs::write(sibling.join("sentinel"), b"unrelated").unwrap();
+    let outside = repo_dir.path().join("outside.txt");
+    fs::write(&outside, b"outside").unwrap();
+    symlink(&outside, source.join("tracked-link")).unwrap();
+
+    let result = exec_worktree(&[
+        "move",
+        "--from-path",
+        "wt_partial_src",
+        "--path",
+        destination.to_str().unwrap(),
+    ])
+    .await;
+    assert!(result.is_err(), "cross-device rename must refuse safely");
+    assert!(!destination.exists(), "refusal must not publish a copy");
+    assert_eq!(fs::read(sibling.join("sentinel")).unwrap(), b"unrelated");
+    assert_eq!(fs::read_dir(&sibling).unwrap().count(), 1);
+    assert_eq!(
+        worktree_paths()[1],
+        source.canonicalize().unwrap().to_string_lossy().to_string()
     );
-    assert!(
-        dest_path.exists(),
-        "destination directory should exist after a successful cross-filesystem move"
-    );
+    assert_eq!(fs::read_link(source.join("tracked-link")).unwrap(), outside);
 }
 
 #[tokio::test]
@@ -1388,7 +1532,9 @@ async fn test_worktree_corrupted_state_file_is_handled_without_side_effects() {
     let new_path = repo_dir.path().join("wt_from_corrupt");
     assert!(!new_path.exists());
     assert!(
-        exec_worktree(&["add", "wt_from_corrupt"]).await.is_err(),
+        exec_worktree(&["add", "wt_from_corrupt", "--path", "wt_from_corrupt"])
+            .await
+            .is_err(),
         "adding worktree with corrupt state should fail"
     );
     assert!(
@@ -1405,19 +1551,19 @@ async fn test_worktree_lock_unlock_and_remove() {
     test::setup_with_new_libra_in(repo_dir.path()).await;
     let _guard = test::ChangeDirGuard::new(repo_dir.path());
 
-    exec_worktree(&["add", "wt2"])
+    exec_worktree(&["add", "wt2", "--path", "wt2"])
         .await
         .expect("worktree add should succeed");
 
-    exec_worktree(&["lock", "wt2"])
+    exec_worktree(&["lock", "--path", "wt2"])
         .await
         .expect("worktree lock should succeed");
 
-    exec_worktree(&["unlock", "wt2"])
+    exec_worktree(&["unlock", "--path", "wt2"])
         .await
         .expect("worktree unlock should succeed");
 
-    exec_worktree(&["remove", "wt2"])
+    exec_worktree(&["remove", "--path", "wt2"])
         .await
         .expect("worktree remove should succeed");
 }
@@ -1491,7 +1637,7 @@ async fn test_worktree_add_does_not_reset_index() {
         "tracked.txt should be staged before worktree add"
     );
 
-    exec_worktree(&["add", "wt_index"])
+    exec_worktree(&["add", "wt_index", "--path", "wt_index"])
         .await
         .expect("worktree add should succeed even when index has staged changes");
 
@@ -1564,7 +1710,7 @@ async fn test_worktree_add_populates_from_head_not_staged_index() {
     })
     .await;
 
-    exec_worktree(&["add", "wt_head_content"])
+    exec_worktree(&["add", "wt_head_content", "--path", "wt_head_content"])
         .await
         .expect("worktree add should succeed");
 
@@ -1584,7 +1730,7 @@ async fn test_worktree_list_includes_main_and_added_worktrees() {
     test::setup_with_new_libra_in(repo_dir.path()).await;
     let _guard = test::ChangeDirGuard::new(repo_dir.path());
 
-    exec_worktree(&["add", "wt_list"])
+    exec_worktree(&["add", "wt_list", "--path", "wt_list"])
         .await
         .expect("worktree add should succeed");
 
@@ -1616,7 +1762,7 @@ async fn test_worktree_move_moves_unlocked_non_main_worktree() {
 
     let src = repo_dir.path().join("wt_move_src");
     let dest = repo_dir.path().join("wt_move_dest");
-    exec_worktree(&["add", "wt_move_src"])
+    exec_worktree(&["add", "wt_move_src", "--path", "wt_move_src"])
         .await
         .expect("worktree add should succeed");
 
@@ -1628,9 +1774,15 @@ async fn test_worktree_move_moves_unlocked_non_main_worktree() {
 
     let src_canonical = src.canonicalize().unwrap();
 
-    exec_worktree(&["move", "wt_move_src", "wt_move_dest"])
-        .await
-        .expect("worktree move should succeed");
+    exec_worktree(&[
+        "move",
+        "--from-path",
+        "wt_move_src",
+        "--path",
+        "wt_move_dest",
+    ])
+    .await
+    .expect("worktree move should succeed");
 
     assert!(!src.exists(), "source directory should be moved away");
     assert!(dest.is_dir(), "destination directory should be created");
@@ -1676,7 +1828,9 @@ async fn test_worktree_move_main_is_rejected_without_side_effects() {
     assert!(!dest.exists());
 
     assert!(
-        exec_worktree(&["move", ".", "moved_main"]).await.is_err(),
+        exec_worktree(&["move", "--from-path", ".", "--path", "moved_main"])
+            .await
+            .is_err(),
         "moving main worktree should fail"
     );
 
@@ -1710,11 +1864,11 @@ async fn test_worktree_move_locked_is_rejected_without_side_effects() {
 
     let src = repo_dir.path().join("wt_locked");
     let dest = repo_dir.path().join("wt_locked_moved");
-    exec_worktree(&["add", "wt_locked"])
+    exec_worktree(&["add", "wt_locked", "--path", "wt_locked"])
         .await
         .expect("worktree add should succeed");
 
-    exec_worktree(&["lock", "wt_locked"])
+    exec_worktree(&["lock", "--path", "wt_locked"])
         .await
         .expect("worktree lock should succeed");
 
@@ -1724,9 +1878,15 @@ async fn test_worktree_move_locked_is_rejected_without_side_effects() {
     let src_canonical = src.canonicalize().unwrap();
 
     assert!(
-        exec_worktree(&["move", "wt_locked", "wt_locked_moved"])
-            .await
-            .is_err(),
+        exec_worktree(&[
+            "move",
+            "--from-path",
+            "wt_locked",
+            "--path",
+            "wt_locked_moved"
+        ])
+        .await
+        .is_err(),
         "moving locked worktree should fail"
     );
 
@@ -1756,10 +1916,10 @@ async fn test_worktree_move_rejects_duplicate_destination() {
     test::setup_with_new_libra_in(repo_dir.path()).await;
     let _guard = test::ChangeDirGuard::new(repo_dir.path());
 
-    exec_worktree(&["add", "wt_a"])
+    exec_worktree(&["add", "wt_a", "--path", "wt_a"])
         .await
         .expect("first worktree add should succeed");
-    exec_worktree(&["add", "wt_b"])
+    exec_worktree(&["add", "wt_b", "--path", "wt_b"])
         .await
         .expect("second worktree add should succeed");
 
@@ -1771,7 +1931,9 @@ async fn test_worktree_move_rejects_duplicate_destination() {
     let before_paths = worktree_paths();
 
     assert!(
-        exec_worktree(&["move", "wt_a", "wt_b"]).await.is_err(),
+        exec_worktree(&["move", "--from-path", "wt_a", "--path", "wt_b"])
+            .await
+            .is_err(),
         "moving worktree to occupied path should fail"
     );
 
@@ -1797,7 +1959,7 @@ async fn test_worktree_move_rejects_destination_inside_storage() {
     test::setup_with_new_libra_in(repo_dir.path()).await;
     let _guard = test::ChangeDirGuard::new(repo_dir.path());
 
-    exec_worktree(&["add", "wt_storage_src"])
+    exec_worktree(&["add", "wt_storage_src", "--path", "wt_storage_src"])
         .await
         .expect("worktree add should succeed");
 
@@ -1809,9 +1971,15 @@ async fn test_worktree_move_rejects_destination_inside_storage() {
     let before_paths = worktree_paths();
 
     assert!(
-        exec_worktree(&["move", "wt_storage_src", ".libra/moved_inside_storage",])
-            .await
-            .is_err(),
+        exec_worktree(&[
+            "move",
+            "--from-path",
+            "wt_storage_src",
+            "--path",
+            ".libra/moved_inside_storage"
+        ])
+        .await
+        .is_err(),
         "moving worktree into storage should fail"
     );
 
@@ -1839,7 +2007,7 @@ async fn test_worktree_prune_removes_missing_non_main_worktrees() {
     test::setup_with_new_libra_in(repo_dir.path()).await;
     let _guard = test::ChangeDirGuard::new(repo_dir.path());
 
-    exec_worktree(&["add", "wt_prune"])
+    exec_worktree(&["add", "wt_prune", "--path", "wt_prune"])
         .await
         .expect("worktree add should succeed");
 
@@ -1873,10 +2041,10 @@ async fn test_worktree_prune_keeps_locked_worktrees() {
     test::setup_with_new_libra_in(repo_dir.path()).await;
     let _guard = test::ChangeDirGuard::new(repo_dir.path());
 
-    exec_worktree(&["add", "wt_locked_prune"])
+    exec_worktree(&["add", "wt_locked_prune", "--path", "wt_locked_prune"])
         .await
         .expect("worktree add should succeed");
-    exec_worktree(&["lock", "wt_locked_prune"])
+    exec_worktree(&["lock", "--path", "wt_locked_prune"])
         .await
         .expect("worktree lock should succeed");
 
@@ -1909,10 +2077,10 @@ async fn test_worktree_remove_locked_is_rejected_without_side_effects() {
     test::setup_with_new_libra_in(repo_dir.path()).await;
     let _guard = test::ChangeDirGuard::new(repo_dir.path());
 
-    exec_worktree(&["add", "wt_for_remove"])
+    exec_worktree(&["add", "wt_for_remove", "--path", "wt_for_remove"])
         .await
         .expect("worktree add should succeed");
-    exec_worktree(&["lock", "wt_for_remove"])
+    exec_worktree(&["lock", "--path", "wt_for_remove"])
         .await
         .expect("worktree lock should succeed");
 
@@ -1922,7 +2090,9 @@ async fn test_worktree_remove_locked_is_rejected_without_side_effects() {
     let before_paths = worktree_paths();
 
     assert!(
-        exec_worktree(&["remove", "wt_for_remove"]).await.is_err(),
+        exec_worktree(&["remove", "--path", "wt_for_remove"])
+            .await
+            .is_err(),
         "removing locked worktree should fail"
     );
 
@@ -1941,17 +2111,21 @@ async fn test_worktree_remove_locked_is_rejected_without_side_effects() {
 
 #[tokio::test]
 #[serial(cwd)]
-/// `worktree repair` removes duplicate entries that point to the same path.
+/// `worktree repair` removes legacy unnamed duplicates of the same path.
 async fn test_worktree_repair_deduplicates_entries() {
     let repo_dir = tempdir().unwrap();
     test::setup_with_new_libra_in(repo_dir.path()).await;
     let _guard = test::ChangeDirGuard::new(repo_dir.path());
 
-    exec_worktree(&["add", "wt_repair"])
+    exec_worktree(&["add", "wt_repair", "--path", "wt_repair"])
         .await
         .expect("worktree add should succeed");
 
     let mut state = read_worktree_state();
+    state.schema_version = 3;
+    for entry in &mut state.entries {
+        entry.name = None;
+    }
     let duplicate = state
         .entries
         .iter()
@@ -1990,7 +2164,7 @@ async fn test_worktree_repair_persists_main_flag_fix_without_duplicates() {
     test::setup_with_new_libra_in(repo_dir.path()).await;
     let _guard = test::ChangeDirGuard::new(repo_dir.path());
 
-    exec_worktree(&["add", "wt_main_fix"])
+    exec_worktree(&["add", "wt_main_fix", "--path", "wt_main_fix"])
         .await
         .expect("worktree add should succeed");
 
@@ -2030,7 +2204,7 @@ async fn test_worktree_main_flag_remains_single_and_stable() {
     test::setup_with_new_libra_in(repo_dir.path()).await;
 
     let _guard = test::ChangeDirGuard::new(repo_dir.path());
-    exec_worktree(&["add", "wt_main"])
+    exec_worktree(&["add", "wt_main", "--path", "wt_main"])
         .await
         .expect("worktree add should succeed");
 
@@ -2066,14 +2240,14 @@ async fn test_worktree_remove_default_keeps_disk_directory() {
     test::setup_with_new_libra_in(repo_dir.path()).await;
     let _guard = test::ChangeDirGuard::new(repo_dir.path());
 
-    exec_worktree(&["add", "wt_keep"])
+    exec_worktree(&["add", "wt_keep", "--path", "wt_keep"])
         .await
         .expect("worktree add should succeed");
 
     let wt_path = repo_dir.path().join("wt_keep");
     assert!(wt_path.is_dir());
 
-    exec_worktree(&["remove", "wt_keep"])
+    exec_worktree(&["remove", "--path", "wt_keep"])
         .await
         .expect("worktree remove (default) should succeed");
 
@@ -2107,14 +2281,14 @@ async fn test_worktree_remove_json_reports_kept_directory() {
     test::setup_with_new_libra_in(repo_dir.path()).await;
     let _guard = test::ChangeDirGuard::new(repo_dir.path());
 
-    exec_worktree(&["add", "wt_keep_json"])
+    exec_worktree(&["add", "wt_keep_json", "--path", "wt_keep_json"])
         .await
         .expect("worktree add should succeed");
 
     let wt_path = repo_dir.path().join("wt_keep_json");
     let canonical = wt_path.canonicalize().expect("worktree should exist");
     let output = run_libra_command(
-        &["--json", "worktree", "remove", "wt_keep_json"],
+        &["--json", "worktree", "remove", "--path", "wt_keep_json"],
         repo_dir.path(),
     );
     assert_cli_success(&output, "json worktree remove");
@@ -2148,14 +2322,14 @@ async fn test_worktree_remove_with_delete_dir_clean_path() {
     test::setup_with_new_libra_in(repo_dir.path()).await;
     let _guard = test::ChangeDirGuard::new(repo_dir.path());
 
-    exec_worktree(&["add", "wt_delete"])
+    exec_worktree(&["add", "wt_delete", "--path", "wt_delete"])
         .await
         .expect("worktree add should succeed");
 
     let wt_path = repo_dir.path().join("wt_delete");
     assert!(wt_path.is_dir());
 
-    exec_worktree(&["remove", "--delete-dir", "wt_delete"])
+    exec_worktree(&["remove", "--delete-dir", "--path", "wt_delete"])
         .await
         .expect("worktree remove --delete-dir on a clean worktree should succeed");
 
@@ -2178,7 +2352,7 @@ async fn test_worktree_remove_machine_reports_deleted_directory() {
     test::setup_with_new_libra_in(repo_dir.path()).await;
     let _guard = test::ChangeDirGuard::new(repo_dir.path());
 
-    exec_worktree(&["add", "wt_delete_machine"])
+    exec_worktree(&["add", "wt_delete_machine", "--path", "wt_delete_machine"])
         .await
         .expect("worktree add should succeed");
 
@@ -2190,6 +2364,7 @@ async fn test_worktree_remove_machine_reports_deleted_directory() {
             "worktree",
             "remove",
             "--delete-dir",
+            "--path",
             "wt_delete_machine",
         ],
         repo_dir.path(),
@@ -2227,7 +2402,7 @@ async fn test_worktree_remove_with_delete_dir_dirty_path_is_rejected() {
     test::setup_with_new_libra_in(repo_dir.path()).await;
     let _guard = test::ChangeDirGuard::new(repo_dir.path());
 
-    exec_worktree(&["add", "wt_dirty_delete"])
+    exec_worktree(&["add", "wt_dirty_delete", "--path", "wt_dirty_delete"])
         .await
         .expect("worktree add should succeed");
 
@@ -2240,6 +2415,7 @@ async fn test_worktree_remove_with_delete_dir_dirty_path_is_rejected() {
             "worktree",
             "remove",
             "--delete-dir",
+            "--path",
             "wt_dirty_delete",
         ],
         repo_dir.path(),
@@ -2332,7 +2508,10 @@ async fn test_worktree_add_preserves_executable_bit() {
         "commit script",
     );
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", "wt_mode"], repo_dir.path()),
+        &run_libra_command(
+            &["worktree", "add", "wt_mode", "--path", "wt_mode"],
+            repo_dir.path(),
+        ),
         "worktree add",
     );
 
@@ -2356,5 +2535,679 @@ async fn test_worktree_add_preserves_executable_bit() {
             & 0o777,
         0o755,
         "worktree add must materialize the execute bit"
+    );
+}
+
+/// Default destinations are anchored to common storage even when creation
+/// starts in a source subdirectory or another linked worktree.
+#[test]
+fn named_worktree_defaults_use_common_storage_from_every_scope() {
+    let repo = create_committed_repo_with_format("sha1");
+    let main = repo.path();
+    let nested = main.join("source/subdirectory");
+    fs::create_dir_all(&nested).expect("source subdirectory");
+    assert_cli_success(
+        &run_libra_command(&["worktree", "add", "from-main"], main),
+        "default add from main",
+    );
+    let first = main.join(".libra/worktree/linked/from-main");
+    assert_cli_success(
+        &run_libra_command(&["worktree", "add", "from-subdirectory"], &nested),
+        "default add from a source subdirectory",
+    );
+    assert_cli_success(
+        &run_libra_command(&["worktree", "add", "from-linked"], &first),
+        "default add from another linked worktree",
+    );
+    for name in ["from-main", "from-subdirectory", "from-linked"] {
+        let expected = main.join(".libra/worktree/linked").join(name);
+        assert!(expected.join(".libra/commondir").is_file());
+        assert_eq!(
+            fs::read_to_string(expected.join("tracked.txt")).unwrap(),
+            "tracked\n"
+        );
+        assert!(
+            !main.join(name).exists(),
+            "no cwd-relative destination for {name}"
+        );
+        assert!(!nested.join(name).exists());
+        assert!(!first.join(".libra/worktree/linked").join(name).exists());
+    }
+    let listed = run_libra_command(&["--json", "worktree", "list"], main);
+    assert_cli_success(&listed, "named worktree list");
+    let data = parse_json_stdout(&listed);
+    assert_eq!(data["data"]["schema_version"], 2);
+    for name in ["from-main", "from-subdirectory", "from-linked"] {
+        let entry = data["data"]["worktrees"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["name"] == name)
+            .expect("named list entry");
+        let expected = main
+            .join(".libra/worktree/linked")
+            .join(name)
+            .canonicalize()
+            .unwrap();
+        assert_eq!(entry["path"], expected.to_string_lossy().as_ref());
+        assert_eq!(entry["is_main"], false);
+    }
+    let branch = run_libra_command(&["branch", "--list"], main);
+    assert_cli_success(&branch, "branch list");
+    assert!(
+        !String::from_utf8_lossy(&branch.stdout).contains("from-main"),
+        "a worktree name does not create a branch"
+    );
+}
+
+#[test]
+fn named_worktree_explicit_path_and_move_keep_logical_identity() {
+    let repo = create_committed_repo_with_format("sha1");
+    let main = repo.path();
+    let external = tempdir().unwrap();
+    let destination = external.path().join("工作 目录");
+    let destination_arg = destination.to_str().unwrap();
+    assert_cli_success(
+        &run_libra_command(
+            &["worktree", "add", "review", "--path", destination_arg],
+            main,
+        ),
+        "explicit Unicode destination",
+    );
+    let identity = fs::read(destination.join(".libra/worktree_id")).unwrap();
+    let registry = main.join(".libra/worktrees.json");
+    let before = fs::read(&registry).unwrap();
+    assert_cli_success(
+        &run_libra_command(&["worktree", "add", "review"], main),
+        "the existing name resolves its registered external path",
+    );
+    assert_eq!(fs::read(&registry).unwrap(), before);
+    assert!(!main.join(".libra/worktree/linked/review").exists());
+    let alias = run_libra_command(
+        &["worktree", "add", "alias", "--path", destination_arg],
+        main,
+    );
+    assert!(
+        !alias.status.success(),
+        "a registered path cannot acquire a second name"
+    );
+    assert_eq!(fs::read(&registry).unwrap(), before);
+    let wrong = external.path().join("wrong");
+    let refused = run_libra_command(
+        &[
+            "worktree",
+            "add",
+            "review",
+            "--path",
+            wrong.to_str().unwrap(),
+        ],
+        main,
+    );
+    assert!(!refused.status.success(), "a name cannot be rebound by add");
+    assert_eq!(fs::read(&registry).unwrap(), before);
+    assert!(!wrong.exists());
+
+    let moved = external.path().join("moved workspace");
+    assert_cli_success(
+        &run_libra_command(
+            &[
+                "worktree",
+                "move",
+                "review",
+                "--path",
+                moved.to_str().unwrap(),
+            ],
+            main,
+        ),
+        "move by stable name",
+    );
+    assert!(!destination.exists());
+    assert_eq!(
+        fs::read(moved.join(".libra/worktree_id")).unwrap(),
+        identity
+    );
+    assert_cli_success(
+        &run_libra_command(&["worktree", "lock", "review"], main),
+        "lock moved name",
+    );
+    assert_cli_success(
+        &run_libra_command(&["worktree", "unlock", "review"], main),
+        "unlock moved name",
+    );
+    let listed = run_libra_command(&["--json", "worktree", "list"], main);
+    assert_cli_success(&listed, "list moved name");
+    let value = parse_json_stdout(&listed);
+    let entry = value["data"]["worktrees"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["name"] == "review")
+        .expect("stable name survives move");
+    assert_eq!(
+        entry["path"],
+        moved.canonicalize().unwrap().to_string_lossy().as_ref()
+    );
+}
+
+#[test]
+fn named_worktree_detach_reattach_preserves_head_index_and_files() {
+    let repo = create_committed_repo_with_format("sha1");
+    let main = repo.path();
+    assert_cli_success(
+        &run_libra_command(&["worktree", "add", "retained"], main),
+        "add retained worktree",
+    );
+    let linked = main.join(".libra/worktree/linked/retained");
+    fs::write(linked.join("tracked.txt"), "staged contents\n").unwrap();
+    assert_cli_success(
+        &run_libra_command(&["add", "tracked.txt"], &linked),
+        "stage linked edit",
+    );
+    fs::write(linked.join("tracked.txt"), "unstaged contents\n").unwrap();
+    fs::write(linked.join("untracked.txt"), "untracked contents\n").unwrap();
+    let index = fs::read(linked.join(".libra/index")).unwrap();
+    let identity = fs::read(linked.join(".libra/worktree_id")).unwrap();
+    let head = run_libra_command(&["rev-parse", "HEAD"], &linked);
+    assert_cli_success(&head, "linked HEAD before detach");
+    let status = run_libra_command(&["status", "--porcelain"], &linked);
+    assert_cli_success(&status, "linked status before detach");
+    assert_cli_success(
+        &run_libra_command(&["worktree", "remove", "retained"], main),
+        "keep-directory removal",
+    );
+    let state: serde_json::Value =
+        serde_json::from_slice(&fs::read(main.join(".libra/worktrees.json")).unwrap()).unwrap();
+    let entry = state["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["name"] == "retained")
+        .unwrap();
+    assert_eq!(entry["state"], "detached_from_registry");
+    let elsewhere = main.join("elsewhere");
+    let conflict = run_libra_command(
+        &[
+            "worktree",
+            "add",
+            "retained",
+            "--path",
+            elsewhere.to_str().unwrap(),
+        ],
+        main,
+    );
+    assert!(!conflict.status.success(), "detached names remain reserved");
+    assert!(!elsewhere.exists());
+    for options in [vec!["HEAD"], vec!["--detach"], vec!["-b", "replacement"]] {
+        let mut args = vec!["worktree", "add", "retained"];
+        args.extend(options);
+        let refused = run_libra_command(&args, main);
+        assert!(
+            !refused.status.success(),
+            "reattach cannot repopulate user files: {args:?}"
+        );
+        assert_eq!(fs::read(linked.join(".libra/index")).unwrap(), index);
+    }
+    assert_cli_success(
+        &run_libra_command(&["worktree", "add", "retained"], main),
+        "reattach preserved worktree",
+    );
+    assert_eq!(fs::read(linked.join(".libra/index")).unwrap(), index);
+    assert_eq!(
+        fs::read(linked.join(".libra/worktree_id")).unwrap(),
+        identity
+    );
+    assert_eq!(
+        fs::read_to_string(linked.join("tracked.txt")).unwrap(),
+        "unstaged contents\n"
+    );
+    assert_eq!(
+        fs::read_to_string(linked.join("untracked.txt")).unwrap(),
+        "untracked contents\n"
+    );
+    let head_after = run_libra_command(&["rev-parse", "HEAD"], &linked);
+    assert_cli_success(&head_after, "HEAD after reattach");
+    assert_eq!(head_after.stdout, head.stdout);
+    let status_after = run_libra_command(&["status", "--porcelain"], &linked);
+    assert_cli_success(&status_after, "status after reattach");
+    assert_eq!(status_after.stdout, status.stdout);
+}
+
+#[test]
+fn named_worktree_rejects_invalid_names_without_creating_destinations() {
+    let repo = create_committed_repo_with_format("sha1");
+    let main = repo.path();
+    let external = tempdir().unwrap();
+    let destination = external.path().join("must-not-exist");
+    let too_long = "a".repeat(65);
+    for name in [
+        "UPPER",
+        "with space",
+        "中文",
+        ".hidden",
+        "../escape",
+        "a/b",
+        "a\\b",
+        "trailing.",
+        "con",
+        "con.txt",
+        "prn",
+        "aux",
+        "nul",
+        "com1",
+        "lpt9",
+        too_long.as_str(),
+    ] {
+        let refused = run_libra_command(
+            &[
+                "worktree",
+                "add",
+                name,
+                "--path",
+                destination.to_str().unwrap(),
+            ],
+            main,
+        );
+        assert!(!refused.status.success(), "invalid name accepted: {name:?}");
+        assert!(
+            !destination.exists(),
+            "invalid name created its destination: {name:?}"
+        );
+    }
+    let longest = "a".repeat(64);
+    assert_cli_success(
+        &run_libra_command(&["worktree", "add", &longest], main),
+        "64-byte portable name",
+    );
+    assert!(main.join(".libra/worktree/linked").join(longest).is_dir());
+}
+
+#[test]
+fn named_worktree_v3_read_is_unchanged_and_mutation_preserves_identity_history() {
+    let repo = create_committed_repo_with_format("sha1");
+    let main = repo.path();
+    let external = tempdir().unwrap();
+    let linked = external.path().join("legacy");
+    assert_cli_success(
+        &run_libra_command(
+            &[
+                "worktree",
+                "add",
+                "legacy",
+                "--path",
+                linked.to_str().unwrap(),
+            ],
+            main,
+        ),
+        "seed legacy state",
+    );
+    let registry = main.join(".libra/worktrees.json");
+    let mut state: serde_json::Value =
+        serde_json::from_slice(&fs::read(&registry).unwrap()).unwrap();
+    state["schema_version"] = serde_json::json!(3);
+    state["linked_history"] = serde_json::json!("existed");
+    state["epoch_counter"] = serde_json::json!(37);
+    for entry in state["entries"].as_array_mut().unwrap() {
+        entry.as_object_mut().unwrap().remove("name");
+        if entry["is_main"] == false {
+            entry["epoch"] = serde_json::json!(23);
+        }
+    }
+    let legacy = serde_json::to_vec_pretty(&state).unwrap();
+    fs::write(&registry, &legacy).unwrap();
+    assert_cli_success(
+        &run_libra_command(&["worktree", "list"], main),
+        "read existing v3 registry",
+    );
+    assert_eq!(
+        fs::read(&registry).unwrap(),
+        legacy,
+        "reads do not rewrite old registry data"
+    );
+    assert_cli_success(
+        &run_libra_command(
+            &["worktree", "lock", "--path", linked.to_str().unwrap()],
+            main,
+        ),
+        "normal mutation of unnamed entry",
+    );
+    let updated: serde_json::Value = serde_json::from_slice(&fs::read(&registry).unwrap()).unwrap();
+    assert_eq!(updated["schema_version"], 4);
+    assert_eq!(updated["linked_history"], "existed");
+    assert_eq!(updated["epoch_counter"], 37);
+    let entry = updated["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["is_main"] == false)
+        .unwrap();
+    let original = state["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["is_main"] == false)
+        .unwrap();
+    assert_eq!(entry["worktree_id"], original["worktree_id"]);
+    assert_eq!(entry["path"], original["path"]);
+    assert_eq!(entry["epoch"], 23);
+    assert!(
+        entry.get("name").is_none_or(serde_json::Value::is_null),
+        "legacy entries are not assigned names"
+    );
+}
+
+#[test]
+fn named_worktree_nested_files_stage_and_survive_gc_while_metadata_stays_hidden() {
+    let repo = create_committed_repo_with_format("sha1");
+    let main = repo.path();
+    assert_cli_success(
+        &run_libra_command(&["worktree", "add", "nested-index"], main),
+        "managed linked worktree",
+    );
+    let linked = main.join(".libra/worktree/linked/nested-index");
+    fs::write(
+        linked.join("staged-only.txt"),
+        "precious managed worktree contents\n",
+    )
+    .unwrap();
+    fs::write(linked.join(".libra/private-sentinel"), "private metadata\n").unwrap();
+    assert_cli_success(
+        &run_libra_command(&["add", "."], &linked),
+        "stage ordinary files below common storage",
+    );
+    let index = run_libra_command(&["ls-files"], &linked);
+    assert_cli_success(&index, "linked index listing");
+    let index_text = String::from_utf8_lossy(&index.stdout);
+    assert!(
+        index_text.lines().any(|line| line == "staged-only.txt"),
+        "nested worktree files must be stageable: {index_text}"
+    );
+    assert!(
+        !index_text.contains("private-sentinel"),
+        "local metadata must stay excluded"
+    );
+    let hash = run_libra_command(&["hash-object", "staged-only.txt"], &linked);
+    assert_cli_success(&hash, "staged blob hash");
+    let oid = String::from_utf8(hash.stdout).unwrap().trim().to_string();
+    super::worktree_isolation_test::backdate_loose_objects(main);
+    assert_cli_success(
+        &run_libra_command(&["maintenance", "run", "--task", "gc"], main),
+        "GC with nested private index",
+    );
+    let ledger_path = main.join(".libra/gc-prune-candidates.json");
+    if ledger_path.exists() {
+        let ledger: serde_json::Value =
+            serde_json::from_slice(&fs::read(&ledger_path).unwrap()).unwrap();
+        assert!(
+            ledger.get(&oid).is_none(),
+            "staged blob must never be quarantined: {ledger}"
+        );
+    }
+    let cat = run_libra_command(&["cat-file", "-p", &oid], main);
+    assert_cli_success(&cat, "nested staged blob remains readable");
+    assert_eq!(
+        String::from_utf8(cat.stdout).unwrap(),
+        "precious managed worktree contents\n"
+    );
+    assert_cli_success(
+        &run_libra_command(&["add", "."], main),
+        "main add excludes managed container",
+    );
+    let main_status = run_libra_command(&["status", "--porcelain"], main);
+    assert_cli_success(&main_status, "main status excludes managed container");
+    assert!(
+        main_status.stdout.is_empty(),
+        "managed worktree files must not enter main status: {}",
+        String::from_utf8_lossy(&main_status.stdout)
+    );
+    assert_cli_success(
+        &run_libra_command(&["clean", "-fd"], main),
+        "main clean excludes managed container",
+    );
+    assert!(linked.join("staged-only.txt").is_file());
+    assert!(linked.join(".libra/private-sentinel").is_file());
+}
+
+#[test]
+fn named_worktree_delete_dir_releases_a_detached_name_only_after_cleanup() {
+    let repo = create_committed_repo_with_format("sha1");
+    let main = repo.path();
+    let linked = main.join(".libra/worktree/linked/reusable");
+    assert_cli_success(
+        &run_libra_command(&["worktree", "add", "reusable"], main),
+        "create worktree",
+    );
+    assert_cli_success(
+        &run_libra_command(&["worktree", "remove", "reusable"], main),
+        "detach clean worktree",
+    );
+    assert!(linked.is_dir());
+    assert_cli_success(
+        &run_libra_command(&["worktree", "remove", "reusable", "--delete-dir"], main),
+        "delete retained directory",
+    );
+    assert!(!linked.exists());
+    let state: serde_json::Value =
+        serde_json::from_slice(&fs::read(main.join(".libra/worktrees.json")).unwrap()).unwrap();
+    assert!(
+        state["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|entry| entry["name"] != "reusable")
+    );
+    assert_cli_success(
+        &run_libra_command(&["worktree", "add", "reusable"], main),
+        "reuse released name",
+    );
+    assert!(linked.join("tracked.txt").is_file());
+}
+
+#[test]
+fn named_worktree_delete_dir_refuses_replaced_directory_without_identity() {
+    let repo = create_committed_repo_with_format("sha1");
+    let main = repo.path();
+    let linked = main.join(".libra/worktree/linked/guarded");
+    assert_cli_success(
+        &run_libra_command(&["worktree", "add", "guarded"], main),
+        "create guarded worktree",
+    );
+    let registry = main.join(".libra/worktrees.json");
+    let before = fs::read(&registry).unwrap();
+    let original = main.join(".libra/worktree/linked/saved-original");
+    fs::rename(&linked, &original).unwrap();
+    fs::create_dir(&linked).unwrap();
+    fs::write(
+        linked.join("user-data.txt"),
+        "replacement directory must survive\n",
+    )
+    .unwrap();
+    let refused = run_libra_command(&["worktree", "remove", "guarded", "--delete-dir"], main);
+    assert!(
+        !refused.status.success(),
+        "name alone is not proof of directory ownership"
+    );
+    assert_eq!(
+        fs::read(&registry).unwrap(),
+        before,
+        "failed identity verification keeps the name reserved"
+    );
+    assert_eq!(
+        fs::read_to_string(linked.join("user-data.txt")).unwrap(),
+        "replacement directory must survive\n"
+    );
+    assert!(original.join(".libra/worktree_id").is_file());
+}
+
+/// The ordinary command must honor FUSE name reservations even in builds
+/// where the mount backend is unavailable.
+#[test]
+fn named_worktree_namespace_includes_fuse_entries_without_mounting() {
+    let repo = create_committed_repo_with_format("sha1");
+    let main = repo.path();
+    let common = main.join(".libra");
+    let fuse_path = common.join("worktrees-fuse.json");
+    let fixture = serde_json::json!({
+        "schema_version": 1,
+        "entries": [{
+            "name": "reserved-overlay",
+            "path": common.join("worktree/fuse/reserved-overlay/workspace"),
+            "branch": "main",
+            "upper_dir": common.join("worktree/fuse/reserved-overlay/upper"),
+            "lower_dirs": [main],
+            "locked": false,
+            "lock_reason": null,
+            "privileged": false,
+            "allow_other": false
+        }]
+    });
+    let original = serde_json::to_vec_pretty(&fixture).unwrap();
+    fs::write(&fuse_path, &original).unwrap();
+    let refused = run_libra_command(
+        &[
+            "worktree",
+            "add",
+            "reserved-overlay",
+            "-b",
+            "must-not-be-created",
+        ],
+        main,
+    );
+    assert!(
+        !refused.status.success(),
+        "ordinary and FUSE names share one namespace"
+    );
+    assert!(!common.join("worktree/linked/reserved-overlay").exists());
+    assert_eq!(fs::read(&fuse_path).unwrap(), original);
+    let branch = run_libra_command(&["branch", "--list"], main);
+    assert_cli_success(&branch, "branch listing after namespace conflict");
+    assert!(
+        !String::from_utf8_lossy(&branch.stdout).contains("must-not-be-created"),
+        "name conflicts must fail before branch creation"
+    );
+
+    let mut future = fixture;
+    future["schema_version"] = serde_json::json!(99);
+    let future_bytes = serde_json::to_vec_pretty(&future).unwrap();
+    fs::write(&fuse_path, &future_bytes).unwrap();
+    let refused = run_libra_command(&["worktree", "add", "otherwise-free"], main);
+    assert!(
+        !refused.status.success(),
+        "unknown FUSE schemas cannot be ignored by ordinary add"
+    );
+    assert!(!common.join("worktree/linked/otherwise-free").exists());
+    assert_eq!(fs::read(&fuse_path).unwrap(), future_bytes);
+}
+
+#[test]
+fn named_worktree_adopts_unnamed_v3_detached_entry_only_at_explicit_path() {
+    let repo = create_committed_repo_with_format("sha1");
+    let main = repo.path();
+    let external = tempdir().unwrap();
+    let linked = external.path().join("existing legacy directory");
+    assert_cli_success(
+        &run_libra_command(
+            &[
+                "worktree",
+                "add",
+                "historical",
+                "--path",
+                linked.to_str().unwrap(),
+                "-b",
+                "legacy-private-head",
+            ],
+            main,
+        ),
+        "seed legacy worktree with its own branch",
+    );
+    fs::write(linked.join("tracked.txt"), "legacy staged edit\n").unwrap();
+    assert_cli_success(
+        &run_libra_command(&["add", "tracked.txt"], &linked),
+        "stage legacy edit",
+    );
+    fs::write(linked.join("tracked.txt"), "legacy unstaged edit\n").unwrap();
+    fs::write(linked.join("untracked.txt"), "legacy untracked contents\n").unwrap();
+    let index = fs::read(linked.join(".libra/index")).unwrap();
+    let identity = fs::read(linked.join(".libra/worktree_id")).unwrap();
+    let head = run_libra_command(&["rev-parse", "HEAD"], &linked);
+    assert_cli_success(&head, "legacy HEAD");
+    let branch = run_libra_command(&["rev-parse", "--abbrev-ref", "HEAD"], &linked);
+    assert_cli_success(&branch, "legacy branch");
+    let status = run_libra_command(&["status", "--porcelain"], &linked);
+    assert_cli_success(&status, "legacy status");
+    assert_cli_success(
+        &run_libra_command(
+            &["worktree", "remove", "--path", linked.to_str().unwrap()],
+            main,
+        ),
+        "detach legacy worktree while preserving its directory",
+    );
+
+    let registry = main.join(".libra/worktrees.json");
+    let mut legacy: serde_json::Value =
+        serde_json::from_slice(&fs::read(&registry).unwrap()).unwrap();
+    legacy["schema_version"] = serde_json::json!(3);
+    for entry in legacy["entries"].as_array_mut().unwrap() {
+        entry.as_object_mut().unwrap().remove("name");
+    }
+    fs::write(&registry, serde_json::to_vec_pretty(&legacy).unwrap()).unwrap();
+    assert_cli_success(
+        &run_libra_command(
+            &[
+                "worktree",
+                "add",
+                "adopted",
+                "--path",
+                linked.to_str().unwrap(),
+            ],
+            main,
+        ),
+        "explicitly name and reattach one existing v3 entry",
+    );
+    assert!(
+        !main.join(".libra/worktree/linked/adopted").exists(),
+        "adoption preserves the existing external location"
+    );
+    assert_eq!(fs::read(linked.join(".libra/index")).unwrap(), index);
+    assert_eq!(
+        fs::read(linked.join(".libra/worktree_id")).unwrap(),
+        identity
+    );
+    assert_eq!(
+        fs::read_to_string(linked.join("tracked.txt")).unwrap(),
+        "legacy unstaged edit\n"
+    );
+    assert_eq!(
+        fs::read_to_string(linked.join("untracked.txt")).unwrap(),
+        "legacy untracked contents\n"
+    );
+    assert!(!linked.join(".libra/detached_from_registry").exists());
+    let after_head = run_libra_command(&["rev-parse", "HEAD"], &linked);
+    assert_cli_success(&after_head, "adopted HEAD");
+    assert_eq!(after_head.stdout, head.stdout);
+    let after_branch = run_libra_command(&["rev-parse", "--abbrev-ref", "HEAD"], &linked);
+    assert_cli_success(&after_branch, "adopted branch");
+    assert_eq!(after_branch.stdout, branch.stdout);
+    let after_status = run_libra_command(&["status", "--porcelain"], &linked);
+    assert_cli_success(&after_status, "adopted status");
+    assert_eq!(after_status.stdout, status.stdout);
+    let updated: serde_json::Value = serde_json::from_slice(&fs::read(&registry).unwrap()).unwrap();
+    assert_eq!(updated["schema_version"], 4);
+    assert_eq!(updated["linked_history"], legacy["linked_history"]);
+    let entries = updated["entries"].as_array().unwrap();
+    let adopted = entries
+        .iter()
+        .find(|entry| entry["name"] == "adopted")
+        .unwrap();
+    assert_eq!(
+        adopted["path"],
+        linked.canonicalize().unwrap().to_string_lossy().as_ref()
+    );
+    assert!(adopted.get("state").is_none_or(|state| state == "active"));
+    assert_eq!(
+        entries
+            .iter()
+            .filter(|entry| entry["is_main"] == false)
+            .count(),
+        1
     );
 }

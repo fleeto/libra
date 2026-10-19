@@ -200,22 +200,22 @@ async fn drain_review_object_index_updates(context: &str) {
     );
 }
 
-/// Assert no `libra-task-worktree-*` workspace is left under the repo's
-/// task-worktree base after a run — the workspace lease was released.
+/// Every managed run directory may remain as an empty parent; no attempt
+/// workspace is allowed to survive a terminal review run.
 fn assert_no_leaked_workspace(repo: &Path) {
-    let tasks_dir = repo.join(".libra").join("worktrees").join("tasks");
+    let tasks_dir = repo.join(".libra/worktree/tasks");
     if !tasks_dir.exists() {
         return;
     }
-    let leaked: Vec<String> = std::fs::read_dir(&tasks_dir)
-        .expect("read task worktree dir")
-        .filter_map(|entry| entry.ok())
-        .map(|entry| entry.file_name().to_string_lossy().into_owned())
-        .filter(|name| name.starts_with("libra-task-worktree-"))
+    let leaked: Vec<_> = walkdir::WalkDir::new(&tasks_dir)
+        .min_depth(2)
+        .into_iter()
+        .map(|entry| entry.expect("read task workspace tree"))
+        .map(|entry| entry.path().to_path_buf())
         .collect();
     assert!(
         leaked.is_empty(),
-        "review run leaked isolated workspaces: {leaked:?}"
+        "review run leaked isolated workspace attempts: {leaked:?}"
     );
 }
 
@@ -404,8 +404,8 @@ async fn review_sink_is_not_blocked_by_high_frequency_reviewer() {
 // Pinned scenario 3: E8 findings/manifest/manual_attach wire
 // ---------------------------------------------------------------------------
 
-/// A read-only run persists the E8-libra run wire exactly:
-/// `manifest.json` with EXACTLY the 12 E8 keys and the empty
+/// A read-only run persists the schema-2 E8-libra run wire:
+/// `manifest.json` with the E8 keys plus its workspace descriptor and the empty
 /// `manual_attach` placeholder, `findings.md` with spotlighting
 /// delimiters around redacted reviewer text, and both
 /// `reviewers/<slug>.{stdout,stderr}.redacted.log` files.
@@ -432,7 +432,7 @@ async fn review_read_only_emits_findings_manifest_and_manual_attach() {
     let outcome = run_bounded(&store, request, ReviewCancelHandle::new(), 120).await;
     assert_eq!(outcome.terminal_state, ReviewTerminalState::Success);
 
-    // ---- manifest.json: exactly the 12 E8 keys (agent.md:876/:1321). ----
+    // ---- manifest.json: the E8 keys plus managed workspace ownership (agent.md:876/:1321). ----
     let manifest_path = store.manifest_path(&outcome.run_id).expect("manifest path");
     let manifest: serde_json::Value =
         serde_json::from_slice(&std::fs::read(manifest_path).expect("read manifest"))
@@ -457,13 +457,14 @@ async fn review_read_only_emits_findings_manifest_and_manual_attach() {
         "findings_oid",
         "redaction_report",
         "manual_attach",
+        "workspace_descriptor",
     ];
     expected.sort_unstable();
     assert_eq!(
         keys, expected,
-        "manifest.json must carry exactly the E8 keys"
+        "schema-2 manifest must carry the E8 keys and managed workspace descriptor"
     );
-    assert_eq!(manifest["schema_version"], 1);
+    assert_eq!(manifest["schema_version"], 2);
     assert_eq!(manifest["run_id"], outcome.run_id.as_str());
     assert_eq!(manifest["kind"], "review");
     assert_eq!(manifest["agents"], serde_json::json!(["fake-success"]));
@@ -699,9 +700,10 @@ async fn cancel_releases_reviewer_processes_and_locks() {
     // recorded pgid (only under verified start-time provenance — pid
     // reuse must never murder an unrelated process), remove the
     // recorded workspace, and report exactly what it did. ----
-    let orphan_id = "orphan-run-decoy";
+    let orphan_uuid = uuid::Uuid::now_v7();
+    let orphan_id = orphan_uuid.to_string();
     store
-        .create_run(orphan_id, &["decoy".to_string()], "sha-orphan", "scope")
+        .create_run(&orphan_id, &["decoy".to_string()], "sha-orphan", "scope")
         .expect("create orphan run");
     // Live decoy sleeper in its own process group — stands in for a
     // reviewer left behind by a crashed runner.
@@ -713,18 +715,18 @@ async fn cancel_releases_reviewer_processes_and_locks() {
     // Process provenance, exactly as the runner records it at spawn
     // (`/proc/<pid>/stat` field 22; `None` on non-Linux platforms).
     let decoy_ticks = process_start_ticks(decoy_pid);
-    // Fake recorded workspace with the task-worktree naming, INSIDE the
-    // repo's own worktrees/tasks base (the only location the orphan
-    // cancel will agree to remove).
-    let orphan_cleanup_root = repo
-        .join(".libra")
-        .join("worktrees")
-        .join("tasks")
-        .join("libra-task-worktree-orphan-decoy");
-    let orphan_workspace = orphan_cleanup_root.join("workspace");
-    std::fs::create_dir_all(&orphan_workspace).expect("fake orphan workspace");
+    let descriptor = libra::internal::ai::workspace_isolation::create_task_workspace(
+        &repo.join(".libra"),
+        &store.run_dir(&orphan_id).unwrap(),
+        orphan_uuid,
+        libra::internal::ai::workspace_isolation::TaskWorkspaceKind::Workspace,
+    )
+    .expect("owned orphan workspace");
+    let orphan_workspace = descriptor.canonical_path.clone();
+    let orphan_cleanup_root = orphan_workspace.parent().unwrap().to_path_buf();
+    store.record_workspace(&orphan_id, &descriptor).unwrap();
     store
-        .update_state(orphan_id, |state| {
+        .update_state(&orphan_id, |state| {
             state.agents[0].pid = Some(decoy_pid);
             state.agents[0].pgid = Some(decoy_pid);
             state.agents[0].proc_start_ticks = decoy_ticks;
@@ -732,7 +734,7 @@ async fn cancel_releases_reviewer_processes_and_locks() {
         })
         .expect("seed orphan state");
 
-    let output = run_libra(&["review", "cancel", orphan_id, "--json"], &repo, &[]);
+    let output = run_libra(&["review", "cancel", &orphan_id, "--json"], &repo, &[]);
     assert_cli_success(&output, "orphaned `review cancel` must succeed");
     let payload: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("cancel --json emits JSON");
@@ -785,7 +787,7 @@ async fn cancel_releases_reviewer_processes_and_locks() {
         "the recorded orphan workspace must be removed"
     );
     let state = store
-        .load_state(orphan_id)
+        .load_state(&orphan_id)
         .expect("load orphan state")
         .expect("orphan state exists");
     assert_eq!(state.terminal_state, Some(ReviewTerminalState::Cancelled));
@@ -1340,7 +1342,7 @@ async fn seed_v1_checkpoint(
 
 /// PD-02 acceptance: a checkpoint-scoped review consumes ONLY the named
 /// checkpoint. End-to-end via the CLI: the run's workspace is the
-/// materialized checkpoint content (read-only, inside the run dir), the
+/// materialized checkpoint content in a managed task attempt, the
 /// manifest records `checkpoint:<id>`, no worktree snapshot is
 /// materialized at all, and the engine's reviewers see exactly the
 /// checkpoint files. A missing checkpoint fails closed with NO run
@@ -1354,6 +1356,16 @@ async fn review_checkpoint_scoped() {
     let transcript = b"{\"role\":\"user\",\"text\":\"captured turn\"}\n";
     let (_metadata_oid, transcript_oid) =
         seed_v1_checkpoint(&repo, checkpoint_id, metadata, transcript).await;
+    let linked = repo.join(".libra/worktree/linked/checkpoint-review");
+    let added = run_libra(
+        &["worktree", "add", "checkpoint-review", "--detach"],
+        &repo,
+        &[],
+    );
+    assert_cli_success(
+        &added,
+        "linked worktree for common-storage checkpoint review",
+    );
 
     // ---- CLI end-to-end (codex is absent on PATH, so the run terminates
     // as error, but scope resolution + materialization are real). ----
@@ -1366,7 +1378,7 @@ async fn review_checkpoint_scoped() {
             "--checkpoint",
             checkpoint_id,
         ],
-        &repo,
+        &linked,
         &[],
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -1382,33 +1394,9 @@ async fn review_checkpoint_scoped() {
         .expect("run_id")
         .to_string();
     let run_dir = repo.join(".libra/sessions/agent-runs").join(&run_id);
-    let input_root = run_dir.join("checkpoint-input");
-    assert_eq!(
-        std::fs::read(input_root.join("metadata.json")).expect("materialized metadata"),
-        metadata.to_vec(),
-        "metadata materialized byte-identical"
-    );
-    assert_eq!(
-        std::fs::read(input_root.join("transcript/claude_code")).expect("materialized transcript"),
-        transcript.to_vec(),
-        "transcript materialized byte-identical"
-    );
-    let mode = std::fs::metadata(input_root.join("metadata.json"))
-        .expect("input metadata stat")
-        .permissions()
-        .mode();
-    assert_eq!(mode & 0o222, 0, "materialized input is read-only");
-    // Only the checkpoint content: no repo file ever enters the workspace.
-    let mut entries: Vec<String> = std::fs::read_dir(&input_root)
-        .expect("list input root")
-        .filter_map(|e| e.ok())
-        .map(|e| e.file_name().to_string_lossy().into_owned())
-        .collect();
-    entries.sort();
-    assert_eq!(
-        entries,
-        vec!["metadata.json", "transcript"],
-        "checkpoint files only"
+    assert!(
+        !run_dir.join("checkpoint-input").exists(),
+        "metadata and workspace roots stay separate"
     );
     // The scoped run must not have materialized a worktree snapshot.
     assert_no_leaked_workspace(&repo);
@@ -1419,6 +1407,20 @@ async fn review_checkpoint_scoped() {
     assert!(
         ws.ends_with("checkpoint-input"),
         "the run's workspace IS the checkpoint input: {ws}"
+    );
+    assert_eq!(state["schema_version"], 2);
+    assert_eq!(state["workspace_descriptor"]["run_id"], run_id);
+    assert!(
+        Path::new(ws).starts_with(
+            std::fs::canonicalize(&repo)
+                .expect("physical repository root")
+                .join(".libra/worktree/tasks")
+        ),
+        "{ws}"
+    );
+    assert!(
+        !Path::new(ws).exists(),
+        "terminal checkpoint workspace must be released"
     );
     let manifest: serde_json::Value = serde_json::from_slice(
         &std::fs::read(run_dir.join("manifest.json")).expect("manifest.json"),
@@ -1436,14 +1438,17 @@ async fn review_checkpoint_scoped() {
     use libra::internal::ai::checkpoint_input::{CheckpointInputFile, CheckpointInputSpec};
     let store = store_for(&repo);
     let mut request = ReviewRunRequest::new(
-        repo.clone(),
+        linked,
         "list the workspace",
         format!("checkpoint:{checkpoint_id}"),
         "0000000000000000000000000000000000000000",
         vec![fake_reviewer(
             "lister",
             Path::new("/bin/sh"),
-            &["-c", "ls {workspace} {workspace}/transcript"],
+            &[
+                "-c",
+                "ls {workspace} {workspace}/transcript; cat {workspace}/metadata.json {workspace}/transcript/claude_code",
+            ],
             Duration::from_secs(30),
         )],
     );
@@ -1465,6 +1470,8 @@ async fn review_checkpoint_scoped() {
     drain_review_object_index_updates("the separate agent doctor process").await;
     let findings =
         std::fs::read_to_string(outcome.run_dir.join("findings.md")).expect("scoped findings");
+    assert!(findings.contains("captured turn"), "{findings}");
+    assert!(findings.contains("agent_kind"), "{findings}");
     assert!(findings.contains("metadata.json"), "{findings}");
     assert!(findings.contains("claude_code"), "{findings}");
     assert!(
@@ -1587,16 +1594,16 @@ async fn fix_rg_scoped_02_review_revalidation() {
     let outcome = run_bounded(&store, request, ReviewCancelHandle::new(), 60).await;
     assert_eq!(outcome.terminal_state, ReviewTerminalState::Success);
     drain_review_object_index_updates("removing the checkpoint catalog").await;
-    assert_eq!(
-        std::fs::read(
-            outcome
-                .run_dir
-                .join("checkpoint-input")
-                .join("metadata.json")
-        )
-        .unwrap(),
-        metadata.to_vec()
+    let state = store.load_state(&outcome.run_id).unwrap().unwrap();
+    let descriptor = state
+        .workspace_descriptor
+        .as_ref()
+        .expect("managed checkpoint descriptor");
+    assert!(
+        !descriptor.canonical_path.exists(),
+        "finished input is cleaned before finalization"
     );
+    assert_no_leaked_workspace(&repo);
     assert_eq!(std::fs::read(&outside).unwrap(), b"UNTOUCHED");
 
     std::fs::remove_file(repo.join(".libra").join("libra.db")).expect("remove catalog");
@@ -1709,7 +1716,8 @@ async fn fix_rg_scoped_02_review_revalidation_setup_stop() {
     assert_no_leaked_workspace(&repo);
 }
 
-/// Actual synthetic binary firstpass completes with genuine 0555 scoped input.
+/// A synthetic firstpass releases its input; a retained owned 0555 attempt
+/// then exercises recovery when terminal cleanup was interrupted.
 async fn scoped03_completed_fixture(root: &Path) -> (PathBuf, String, PathBuf) {
     let repo = init_committed_repo(root);
     let id = "cafe75d2-4c53-465a-b890-a9f861a50cc7";
@@ -1733,20 +1741,31 @@ async fn scoped03_completed_fixture(root: &Path) -> (PathBuf, String, PathBuf) {
     assert_eq!(output["data"]["terminal_state"], "success");
     let id = output["data"]["run_id"].as_str().unwrap().to_owned();
     let run_root = repo.join(".libra/sessions/agent-runs").join(&id);
-    let input = run_root.join("checkpoint-input");
-    assert_eq!(
-        std::fs::metadata(&input).unwrap().permissions().mode() & 0o777,
-        0o555
-    );
-    assert_eq!(
-        std::fs::read(input.join("metadata.json")).unwrap(),
-        metadata
-    );
-    assert_eq!(
-        std::fs::read(input.join("transcript/claude_code")).unwrap(),
-        transcript
-    );
     assert_no_leaked_workspace(&repo);
+    // Simulate terminal cleanup interrupted after finalization: a durable
+    // owned read-only attempt remains, and `clean` must release it first.
+    let store = store_for(&repo);
+    let descriptor = libra::internal::ai::workspace_isolation::create_task_workspace(
+        &repo.join(".libra"),
+        &run_root,
+        uuid::Uuid::parse_str(&id).unwrap(),
+        libra::internal::ai::workspace_isolation::TaskWorkspaceKind::CheckpointInput,
+    )
+    .unwrap();
+    let input = &descriptor.canonical_path;
+    std::fs::create_dir(input.join("transcript")).unwrap();
+    std::fs::write(input.join("metadata.json"), metadata).unwrap();
+    std::fs::write(input.join("transcript/claude_code"), transcript).unwrap();
+    for path in [
+        input.join("metadata.json"),
+        input.join("transcript/claude_code"),
+    ] {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o444)).unwrap();
+    }
+    for path in [input.join("transcript"), input.clone()] {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o555)).unwrap();
+    }
+    store.record_workspace(&id, &descriptor).unwrap();
     (repo, id, run_root)
 }
 

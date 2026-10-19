@@ -47,7 +47,13 @@ fn test_fsck_heal_refused_with_linked_worktrees() {
 
     // With a linked worktree: fail closed with the W0 refusal.
     let add = run_libra_command(
-        &["worktree", "add", linked.path().to_str().unwrap()],
+        &[
+            "worktree",
+            "add",
+            "linked",
+            "--path",
+            linked.path().to_str().unwrap(),
+        ],
         main.path(),
     );
     assert_cli_success(&add, "add a linked worktree");
@@ -71,6 +77,7 @@ fn test_fsck_heal_refused_with_linked_worktrees() {
             "worktree",
             "remove",
             "--delete-dir",
+            "--path",
             linked.path().to_str().unwrap(),
         ],
         main.path(),

@@ -1,5 +1,7 @@
 # 计划执行状况总表（plan-status.md）
 
+> **Worktree 默认目录统一（2026-10-19）：** 用户已授权实施 [WD-01..08 与 WD-02G](plan-20261019-worktree-layout.md)。新建目录使用 `.libra/worktree`，不迁移旧数据；0.31.0 本地实现、专项测试、OrbStack 真 FUSE 与网站七页同步已完成，Claude 计划和分区源码复审有实际 PASS。最终 `cargo test --all` 和 nextest 重跑、原生 Windows CI、发布与网站部署尚待，九卡正式验收仍为 **0/9**；失败轮次和修复证据见计划正文。
+
 > **plan-20261015 现场（2026-10-19 15:30:59 UTC）：** Mega2 的 G-13 修复聚合已退出；FIX-MTR-03 和 FIX-MTR-01 各自发布，FIX-MTR-04 不发布。旧 B8 FAIL、8/8 STOP 与 FIX-MTR-03 AC-1/VER-5 未勾选保持原记录。Mega2 MTR-87 已完成 `v0.42.55` 的实际 Docker D；MTR-10 在工作区实施中，四条 focused VER 已在 Docker 测试服务下通过，完整 C/双审/发布仍待。Libra handoff `976091c` 已是远端 main 祖先；本地 17033b9、5e55635 两笔计划文档历史在本次合并中保留。LTR-00 仍 in-progress/locally-accepted，formal 0/26，LTR-01 未开工。本次整合本身不计功能验收、版本发布或新 D。
 
 > **plan-20261015 历史快照（2026-10-16 04:11:08 UTC）：** 当时本地 main 位于 `deabb37`、Mega2 main 位于 `b784111`；FIX-MTR-03 恢复窗已执行而 AC-1 未勾选。当时 `0.30.50` 的本机验收不外推至目前上游版本。
@@ -236,6 +238,7 @@
 
 | 计划 | 类别 | 状态 | 一句话进度（卡片状态） |
 |---|---|---|---|
+| [`plan-20261019-worktree-layout.md`](plan-20261019-worktree-layout.md) | 横切（worktree 默认目录与任务生命周期） | 实施中 | WD-01..08 与 WD-02G 已授权；正式 0/9，REL-WD01 待最终验证及发布；旧数据不迁移。 |
 | [`plan-20261015.md`](plan-20261015.md) | B（外部Agent traces）+ 横切（Mega2 Agent 历史检索） | 实施中；Mega2 MTR-10 in-progress，Libra LTR-00 locally-accepted | 2026-10-19 15:38:49 UTC：Mega2 G-13 已退出，FIX-MTR-03/01 分别完成独立发布；FIX-MTR-04 不发布。旧 B8 FAIL、8/8 STOP 及 FIX-MTR-03 AC-1/VER-5 未勾选保持历史。MTR-87 `v0.42.55` Docker D 成功；MTR-10 四项专有 VER 通过，Git 协议 smoke 与双审仍待，本卡完整 C/D 未完成。Libra 合并候选保留 handoff 两笔文档提交及上游 COV/OG，当前 H0 尚未取得 PASS，待最新两仓联合复审；LTR-00 formal 0/26、LTR-01 未开工。原交接见[WIP 交接段](plan-20261015.md#wip-migration-checkpoint-20261016)。 |
 | [`plan-20261001-mega-browser-noninteractive.md`](plan-20261001-mega-browser-noninteractive.md) | 横切（Mega2 browser 非交互操作 / 黑盒驱动） | **已收口** | **2026-10-04 21:11:16 UTC**：MN-01..MN-12 全部 `done`/`complete`，v0.30.27 与 `DEP-MN-03` 已交付；PR #609 以原 head `adb9b59` 合并，后续修复基于 main `622bed5` 移至 `fix/opencode-exporter-cancel-ci`；全量本地测试、格式与 workflow lint 通过；PR #612 首轮 run `37230096807` 的 Linux Clippy 检出未使用的 `linux_pidfd_supported`，已删除，run `37231625328` 又发现通用 runner 错误要求 `NSpid=1`；现仅 trusted-bwrap runner 捕获 namespace pidfd，本地 exporter 模块 15/15、Clippy/fmt/actionlint 通过；run `37233480909` 的 sandbox gates 通过，Clippy 与 bridge 编译均遇到 `run_bounded_exporter` `dead_code`，现已限定 wrapper 为 `cfg(test)`；待新 run 验收 Clippy 与 bridge E2E。原实现基线 `faae20c`、Codex R19/R20/R22 与版本信息见计划正文；无 LR 编号|
 | [`plan-20260924.md`](plan-20260924.md) | B（Agent Capture 通用架构前置） | **已收口** | 2026-10-03 14:56:26 UTC：ACF-01..20 与 FIX-ACF-01 `done`/`complete`；R91 `VERDICT: PASS`；ACF-09 已交接 `DEP-ACF-MIRROR`／ACF 侧 `DEP-ACF-CAP`／`DEP-ACF-DM06`。CAP-04..07 仍受独立 RFC `blocked`；DM-05 仍 `pending`。 |

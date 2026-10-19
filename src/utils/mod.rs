@@ -48,3 +48,4 @@ pub(crate) mod windows_fs;
 pub(crate) mod windows_process;
 pub mod worktree;
 pub mod worktree_blob;
+pub mod worktree_layout;

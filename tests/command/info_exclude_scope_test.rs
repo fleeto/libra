@@ -76,7 +76,10 @@ fn info_exclude_is_scoped_per_worktree() {
     let parent = tempfile::tempdir().expect("wt parent");
     let wt = parent.path().join("wt");
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &["worktree", "add", "wt", "--path", wt.to_str().unwrap()],
+            main,
+        ),
         "worktree add",
     );
 
@@ -137,7 +140,10 @@ fn info_attributes_resolve_from_the_local_gitdir() {
     let parent = tempfile::tempdir().expect("wt parent");
     let wt = parent.path().join("wt");
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &["worktree", "add", "wt", "--path", wt.to_str().unwrap()],
+            main,
+        ),
         "worktree add",
     );
     fs::write(wt.join("f.dat"), b"x").unwrap();
@@ -160,7 +166,10 @@ fn doctor_reports_common_info_scope_and_actions() {
     let parent = tempfile::tempdir().expect("wt parent");
     let wt = parent.path().join("wt");
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &["worktree", "add", "wt", "--path", wt.to_str().unwrap()],
+            main,
+        ),
         "worktree add",
     );
     let info_dir = main.join(".libra").join("info");
@@ -208,7 +217,10 @@ fn doctor_adopt_info_requires_confirm_and_copies_once() {
     let parent = tempfile::tempdir().expect("wt parent");
     let wt = parent.path().join("wt");
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &["worktree", "add", "wt", "--path", wt.to_str().unwrap()],
+            main,
+        ),
         "worktree add",
     );
     let info_dir = main.join(".libra").join("info");
@@ -261,7 +273,10 @@ fn doctor_ignores_comment_only_info_files() {
     let parent = tempfile::tempdir().expect("wt parent");
     let wt = parent.path().join("wt");
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &["worktree", "add", "wt", "--path", wt.to_str().unwrap()],
+            main,
+        ),
         "worktree add",
     );
     let info_dir = main.join(".libra").join("info");
@@ -308,7 +323,10 @@ fn doctor_effective_rule_detection_matches_engine_parsers() {
     let parent = tempfile::tempdir().expect("wt parent");
     let wt = parent.path().join("wt");
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &["worktree", "add", "wt", "--path", wt.to_str().unwrap()],
+            main,
+        ),
         "worktree add",
     );
     let info_dir = main.join(".libra").join("info");
@@ -352,7 +370,10 @@ fn doctor_info_mutations_emit_json_envelopes() {
     let parent = tempfile::tempdir().expect("wt parent");
     let wt = parent.path().join("wt");
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &["worktree", "add", "wt", "--path", wt.to_str().unwrap()],
+            main,
+        ),
         "worktree add",
     );
     let info_dir = main.join(".libra").join("info");
@@ -448,7 +469,10 @@ fn worktree_add_warns_on_case_probe_mismatch() {
             "set ignorecase",
         );
         let wt = parent.path().join(name);
-        let add = run_libra_command(&["worktree", "add", wt.to_str().unwrap()], main);
+        let add = run_libra_command(
+            &["worktree", "add", name, "--path", wt.to_str().unwrap()],
+            main,
+        );
         assert_cli_success(&add, "worktree add");
         if String::from_utf8_lossy(&add.stderr).contains("case-collision guards") {
             warnings += 1;
@@ -475,7 +499,10 @@ fn doctor_adopt_info_failure_leaves_no_partial_destination() {
     let parent = tempfile::tempdir().expect("wt parent");
     let wt = parent.path().join("wt");
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &["worktree", "add", "wt", "--path", wt.to_str().unwrap()],
+            main,
+        ),
         "worktree add",
     );
     let info_dir = main.join(".libra").join("info");

@@ -3205,12 +3205,12 @@ fn test_reset_warns_when_a_stopped_state_cannot_be_read() {
             let linked = parent.path().join("linked");
             let linked_name = linked.to_str().expect("test path is UTF-8");
             assert_cli_success(
-                &run_libra_command(&["worktree", "add", linked_name], p),
+                &run_libra_command(&["worktree", "add", "linked", "--path", linked_name], p),
                 "register linked history",
             );
             if removed_link {
                 assert_cli_success(
-                    &run_libra_command(&["worktree", "remove", linked_name], p),
+                    &run_libra_command(&["worktree", "remove", "--path", linked_name], p),
                     "retain removed linked history",
                 );
             }

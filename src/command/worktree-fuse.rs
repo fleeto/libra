@@ -9,14 +9,14 @@ use std::{
     fs, io,
     path::{Path, PathBuf},
     sync::{Mutex, OnceLock},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use clap::{Parser, Subcommand};
 use libfuse_fs::overlayfs::{OverlayArgs, mount_fs};
 use rfuse3::raw::MountHandle;
 use serde::{Deserialize, Serialize};
-use tokio::time::{Instant, sleep, timeout};
+use tokio::time::{sleep, timeout};
 use uuid::Uuid;
 
 #[path = "worktree.rs"]
@@ -29,13 +29,15 @@ mod legacy;
 pub use legacy::WORKTREE_EXAMPLES;
 pub(crate) use legacy::{
     WorktreeError, WorktreeState, acquire_registry_lock_async, local_gitdir_for_scope,
-    registry_knows_linked_worktree, registry_knows_linked_worktree_in_storage,
-    reject_bare_repository, run_list_worktrees, run_list_worktrees_at,
+    registered_fuse_worktree_at, registered_fuse_worktree_paths, registry_knows_linked_worktree,
+    registry_knows_linked_worktree_in_storage, reject_bare_repository, run_list_worktrees,
+    run_list_worktrees_at,
 };
 
 const FUSE_MOUNT_TIMEOUT: Duration = Duration::from_secs(15);
 const FUSE_UNMOUNT_TIMEOUT: Duration = Duration::from_secs(15);
 const FUSE_HEALTH_TIMEOUT: Duration = Duration::from_secs(5);
+const FUSE_REGISTRY_MAX_BYTES: usize = 16 * 1024 * 1024;
 
 use crate::{
     command::{
@@ -44,10 +46,11 @@ use crate::{
     },
     internal::head::Head,
     utils::{
+        beneath,
         error::{CliError, CliResult, StableErrorCode},
         fuse as fuse_utils,
         output::{OutputConfig, emit_json_data},
-        util,
+        util, worktree_layout,
     },
 };
 
@@ -60,8 +63,11 @@ pub struct WorktreeArgs {
 #[derive(Subcommand, Debug)]
 pub enum WorktreeSubcommand {
     Add {
-        /// Filesystem path at which to create the new worktree.
-        path: String,
+        /// Repository-wide name for the new worktree.
+        name: String,
+        /// Create the worktree at an explicit filesystem path.
+        #[clap(long)]
+        path: Option<String>,
         /// Existing branch to check out, or a commit-ish for a detached
         /// HEAD (canonical non-FUSE surface, W3 §C.7).
         target: Option<String>,
@@ -75,13 +81,14 @@ pub enum WorktreeSubcommand {
         branch: Option<String>,
         #[clap(
             short = 'b',
-            long = "create-branch",
+            long = "new-branch",
+            visible_alias = "create-branch",
             help = "Create and checkout a new branch"
         )]
         create_branch: Option<String>,
         #[clap(
             long,
-            conflicts_with = "create_branch",
+            requires = "create_branch",
             help = "Base ref for --create-branch (FUSE mode)"
         )]
         from: Option<String>,
@@ -174,26 +181,41 @@ pub enum WorktreeSubcommand {
         confirm: bool,
     },
     Lock {
-        /// Filesystem path of the worktree to lock.
-        path: String,
+        /// Registered worktree name.
+        #[clap(required_unless_present = "path", conflicts_with = "path")]
+        name: Option<String>,
+        /// Select an existing worktree by its explicit filesystem path.
+        #[clap(long)]
+        path: Option<String>,
         /// Optional explanation shown in `worktree list` while the worktree is locked.
         #[clap(long)]
         reason: Option<String>,
     },
     Unlock {
-        /// Filesystem path of the worktree to unlock.
-        path: String,
+        /// Registered worktree name.
+        #[clap(required_unless_present = "path", conflicts_with = "path")]
+        name: Option<String>,
+        #[clap(long)]
+        path: Option<String>,
     },
     Move {
-        /// Current filesystem path of the worktree.
-        src: String,
-        /// New filesystem path for the worktree.
-        dest: String,
+        /// Registered worktree name.
+        #[clap(required_unless_present = "from_path", conflicts_with = "from_path")]
+        name: Option<String>,
+        /// Select the source by explicit filesystem path.
+        #[clap(long)]
+        from_path: Option<String>,
+        /// New filesystem path (ordinary linked worktrees only).
+        #[clap(long)]
+        path: String,
     },
     Prune,
     Remove {
-        /// Filesystem path of the worktree to unregister.
-        path: String,
+        /// Registered worktree name.
+        #[clap(required_unless_present = "path", conflicts_with = "path")]
+        name: Option<String>,
+        #[clap(long)]
+        path: Option<String>,
         #[clap(long, help = "Also delete the worktree directory on disk")]
         delete_dir: bool,
     },
@@ -214,6 +236,9 @@ pub enum WorktreeSubcommand {
     Repair {
         /// Linked worktree whose gitdir identity should be restored (or,
         /// with --migrate-layout, the single legacy worktree to migrate).
+        #[clap(conflicts_with = "path")]
+        name: Option<String>,
+        #[clap(long)]
         path: Option<String>,
         /// Migrate legacy shared-`.libra` symlink worktrees to the isolated
         /// layout (W3-s3 §C.6.2).
@@ -233,6 +258,10 @@ pub enum WorktreeSubcommand {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct FuseWorktreeEntry {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mount_id: Option<String>,
     path: String,
     branch: String,
     upper_dir: String,
@@ -243,9 +272,100 @@ struct FuseWorktreeEntry {
     allow_other: bool,
 }
 
-#[derive(Serialize, Deserialize, Debug, Default, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 struct FuseWorktreeState {
+    schema_version: u32,
+    #[serde(rename = "entries")]
     worktrees: Vec<FuseWorktreeEntry>,
+}
+
+impl Default for FuseWorktreeState {
+    fn default() -> Self {
+        Self {
+            schema_version: 1,
+            worktrees: Vec::new(),
+        }
+    }
+}
+
+impl FuseWorktreeState {
+    fn parse(bytes: &[u8]) -> io::Result<Self> {
+        let value: serde_json::Value = serde_json::from_slice(bytes)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        let object = value.as_object().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "FUSE registry must be a JSON object",
+            )
+        })?;
+        if object.contains_key("entries") && !object.contains_key("schema_version")
+            || object.contains_key("schema_version") && object.contains_key("worktrees")
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "FUSE registry contains mixed or unversioned entries",
+            ));
+        }
+        let state = if let Some(version) = value.get("schema_version") {
+            if version.as_u64() != Some(1) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("unsupported FUSE worktree registry version {version}; upgrade Libra"),
+                ));
+            }
+            serde_json::from_value::<Self>(value)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?
+        } else {
+            #[derive(Deserialize)]
+            struct LegacyState {
+                worktrees: Vec<FuseWorktreeEntry>,
+            }
+            let legacy: LegacyState = serde_json::from_value(value)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+            Self {
+                schema_version: 1,
+                worktrees: legacy.worktrees,
+            }
+        };
+        let mut names = std::collections::HashSet::new();
+        let mut paths = HashMap::new();
+        for entry in &state.worktrees {
+            if let Some(mount_id) = &entry.mount_id {
+                Uuid::parse_str(mount_id).map_err(|error| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("FUSE registry entry has an invalid mount binding: {error}"),
+                    )
+                })?;
+            }
+            if !Path::new(&entry.path).is_absolute() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "FUSE registry entry has a non-absolute path",
+                ));
+            }
+            if let Some(previous_named) =
+                paths.insert(PathBuf::from(&entry.path), entry.name.is_some())
+                && (previous_named || entry.name.is_some())
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "multiple FUSE entries share a named worktree path; restore an unambiguous registry before continuing",
+                ));
+            }
+            if let Some(name) = &entry.name {
+                if !names.insert(name) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("FUSE worktree name '{name}' is registered more than once"),
+                    ));
+                }
+                crate::utils::worktree_layout::validate_name(name)
+                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+            }
+        }
+        Ok(state)
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -417,6 +537,7 @@ pub async fn execute_safe(args: WorktreeArgs, output: &OutputConfig) -> CliResul
 
     match command {
         WorktreeSubcommand::Add {
+            name,
             path,
             target,
             detach,
@@ -436,6 +557,7 @@ pub async fn execute_safe(args: WorktreeArgs, output: &OutputConfig) -> CliResul
                 legacy::execute_safe(
                     legacy::WorktreeArgs {
                         command: legacy::WorktreeSubcommand::Add {
+                            name,
                             path,
                             target,
                             detach,
@@ -452,9 +574,37 @@ pub async fn execute_safe(args: WorktreeArgs, output: &OutputConfig) -> CliResul
                          with --fuse; use --branch/--create-branch/--from",
                     ));
                 }
-                add_fuse_worktree(path, branch, create_branch, from, privileged, allow_other)
+                let common = worktree_layout::current_common_storage()
+                    .map_err(|error| CliError::fatal(error.to_string()))?;
+                let _registry_guard = legacy::acquire_registry_lock_async()
                     .await
-                    .map_err(|e| CliError::fatal(e.to_string()))
+                    .map_err(legacy::WorktreeError::into_cli_error)?;
+                let target = add_fuse_worktree(
+                    &common,
+                    FuseAddOptions {
+                        name,
+                        path,
+                        branch_name: branch,
+                        create_branch_name: create_branch,
+                        from,
+                        privileged,
+                        allow_other,
+                    },
+                )
+                .await
+                .map_err(|error| CliError::fatal(error.to_string()))?;
+                if output.is_json() {
+                    emit_json_data(
+                        "worktree.add",
+                        &serde_json::json!({"path":target, "fuse":true}),
+                        output,
+                    )
+                } else {
+                    if !output.quiet {
+                        println!("{}", target.display());
+                    }
+                    Ok(())
+                }
             }
         }
         WorktreeSubcommand::List {
@@ -493,46 +643,70 @@ pub async fn execute_safe(args: WorktreeArgs, output: &OutputConfig) -> CliResul
             )
             .await
         }
-        WorktreeSubcommand::Lock { path, reason } => {
-            if lock_fuse_worktree(&path, reason.clone())
-                .map_err(|e| CliError::fatal(e.to_string()))?
-            {
-                return Ok(());
-            }
-            legacy::execute_safe(
-                legacy::WorktreeArgs {
-                    command: legacy::WorktreeSubcommand::Lock { path, reason },
-                },
-                output,
-            )
-            .await
-        }
-        WorktreeSubcommand::Unlock { path } => {
-            if unlock_fuse_worktree(&path).map_err(|e| CliError::fatal(e.to_string()))? {
-                return Ok(());
-            }
-            legacy::execute_safe(
-                legacy::WorktreeArgs {
-                    command: legacy::WorktreeSubcommand::Unlock { path },
-                },
-                output,
-            )
-            .await
-        }
-        WorktreeSubcommand::Remove { path, delete_dir } => {
-            if remove_fuse_worktree(&path)
+        WorktreeSubcommand::Lock { name, path, reason } => {
+            let common = worktree_layout::current_common_storage()
+                .map_err(|error| CliError::fatal(error.to_string()))?;
+            let _registry_guard = legacy::acquire_registry_lock_async()
                 .await
-                .map_err(|e| CliError::fatal(e.to_string()))?
-            {
-                return Ok(());
+                .map_err(legacy::WorktreeError::into_cli_error)?;
+            let location = legacy::resolve_worktree_selector(name.as_deref(), path.as_deref())
+                .map_err(legacy::WorktreeError::into_cli_error)?;
+            let target = location.path.to_string_lossy().to_string();
+            if location.is_fuse {
+                lock_fuse_worktree(&common, &target, reason)
+                    .map_err(|error| CliError::fatal(error.to_string()))?;
+                Ok(())
+            } else {
+                let result = legacy::lock_worktree_locked(target, reason)
+                    .await
+                    .map_err(legacy::WorktreeError::into_cli_error)?;
+                legacy::render_lock_worktree(&result, output)
             }
-            legacy::execute_safe(
-                legacy::WorktreeArgs {
-                    command: legacy::WorktreeSubcommand::Remove { path, delete_dir },
-                },
-                output,
-            )
-            .await
+        }
+        WorktreeSubcommand::Unlock { name, path } => {
+            let common = worktree_layout::current_common_storage()
+                .map_err(|error| CliError::fatal(error.to_string()))?;
+            let _registry_guard = legacy::acquire_registry_lock_async()
+                .await
+                .map_err(legacy::WorktreeError::into_cli_error)?;
+            let location = legacy::resolve_worktree_selector(name.as_deref(), path.as_deref())
+                .map_err(legacy::WorktreeError::into_cli_error)?;
+            let target = location.path.to_string_lossy().to_string();
+            if location.is_fuse {
+                unlock_fuse_worktree(&common, &target)
+                    .map_err(|error| CliError::fatal(error.to_string()))?;
+                Ok(())
+            } else {
+                let result = legacy::unlock_worktree_locked(target)
+                    .await
+                    .map_err(legacy::WorktreeError::into_cli_error)?;
+                legacy::render_unlock_worktree(&result, output)
+            }
+        }
+        WorktreeSubcommand::Remove {
+            name,
+            path,
+            delete_dir,
+        } => {
+            let common = worktree_layout::current_common_storage()
+                .map_err(|error| CliError::fatal(error.to_string()))?;
+            let _registry_guard = legacy::acquire_registry_lock_async()
+                .await
+                .map_err(legacy::WorktreeError::into_cli_error)?;
+            let location = legacy::resolve_worktree_selector(name.as_deref(), path.as_deref())
+                .map_err(legacy::WorktreeError::into_cli_error)?;
+            let target = location.path.to_string_lossy().to_string();
+            if location.is_fuse {
+                remove_fuse_worktree(&common, &target)
+                    .await
+                    .map_err(|error| CliError::fatal(error.to_string()))?;
+                Ok(())
+            } else {
+                let result = legacy::remove_worktree_locked(target, delete_dir)
+                    .await
+                    .map_err(legacy::WorktreeError::into_cli_error)?;
+                legacy::render_remove_worktree(&result, output)
+            }
         }
         WorktreeSubcommand::Umount { path, cleanup } => {
             let result = umount_fuse_path(path, cleanup)
@@ -540,26 +714,43 @@ pub async fn execute_safe(args: WorktreeArgs, output: &OutputConfig) -> CliResul
                 .map_err(FuseUmountError::into_cli_error)?;
             render_umount_fuse_path(&result, output)
         }
-        WorktreeSubcommand::Move { src, dest } => {
-            legacy::execute_safe(
-                legacy::WorktreeArgs {
-                    command: legacy::WorktreeSubcommand::Move { src, dest },
-                },
-                output,
-            )
-            .await
+        WorktreeSubcommand::Move {
+            name,
+            from_path,
+            path,
+        } => {
+            let _registry_guard = legacy::acquire_registry_lock_async()
+                .await
+                .map_err(legacy::WorktreeError::into_cli_error)?;
+            let location = legacy::resolve_worktree_selector(name.as_deref(), from_path.as_deref())
+                .map_err(legacy::WorktreeError::into_cli_error)?;
+            if location.is_fuse {
+                return Err(CliError::fatal(
+                    "moving a FUSE worktree is not supported; remove it and create a new worktree at the desired path",
+                ));
+            }
+            let result =
+                legacy::move_worktree_locked(location.path.to_string_lossy().to_string(), path)
+                    .await
+                    .map_err(legacy::WorktreeError::into_cli_error)?;
+            legacy::render_move_worktree(&result, output)
         }
         WorktreeSubcommand::Prune => {
-            prune_fuse_worktrees().map_err(|e| CliError::fatal(e.to_string()))?;
-            legacy::execute_safe(
-                legacy::WorktreeArgs {
-                    command: legacy::WorktreeSubcommand::Prune,
-                },
-                output,
-            )
-            .await
+            let common = worktree_layout::current_common_storage()
+                .map_err(|error| CliError::fatal(error.to_string()))?;
+            let _registry_guard = legacy::acquire_registry_lock_async()
+                .await
+                .map_err(legacy::WorktreeError::into_cli_error)?;
+            legacy::registered_worktree_locations()
+                .map_err(legacy::WorktreeError::into_cli_error)?;
+            let result = legacy::prune_worktrees_locked()
+                .await
+                .map_err(legacy::WorktreeError::into_cli_error)?;
+            prune_fuse_worktrees(&common).map_err(|error| CliError::fatal(error.to_string()))?;
+            legacy::render_prune_worktrees(&result, output)
         }
         WorktreeSubcommand::Repair {
+            name,
             path,
             migrate_layout,
             dry_run,
@@ -567,7 +758,7 @@ pub async fn execute_safe(args: WorktreeArgs, output: &OutputConfig) -> CliResul
         } => {
             // Core registry first: a corrupt/zero-byte core registry must
             // fail the command BEFORE any fuse metadata is mutated.
-            let run_fuse_repair = path.is_none() && !migrate_layout;
+            let run_fuse_repair = name.is_none() && path.is_none() && !migrate_layout;
             if run_fuse_repair {
                 // W0 §C.11: ONE audit boundary covering BOTH repairs — the
                 // core registry repair and the FUSE state repair. Delegating
@@ -576,21 +767,36 @@ pub async fn execute_safe(args: WorktreeArgs, output: &OutputConfig) -> CliResul
                 // closed as successful, and a FUSE success would go
                 // unrecorded.
                 legacy::require_repair_confirmation(confirm, "worktree repair")?;
+                let common = worktree_layout::current_common_storage()
+                    .map_err(|error| CliError::fatal(error.to_string()))?;
+                let _registry_guard = legacy::acquire_registry_lock_async()
+                    .await
+                    .map_err(legacy::WorktreeError::into_cli_error)?;
                 let boundary = legacy::begin_repair_operation("worktree repair", None).await?;
-                let result = legacy::repair_worktrees()
+                let result = legacy::repair_worktrees_locked()
                     .await
                     .map_err(|e| e.into_cli_error())
                     .and_then(|repaired| {
-                        repair_fuse_worktrees()
+                        repair_fuse_worktrees(&common)
                             .map(|()| repaired)
                             .map_err(|e| CliError::fatal(e.to_string()))
                     });
                 let result = legacy::finish_repair_operation(boundary, result).await?;
                 return legacy::render_repair_worktrees(&result, output);
             }
+            if name.is_some() || path.is_some() {
+                let location = legacy::resolve_worktree_selector(name.as_deref(), path.as_deref())
+                    .map_err(legacy::WorktreeError::into_cli_error)?;
+                if location.is_fuse {
+                    return Err(CliError::fatal(
+                        "scoped identity repair is not supported for FUSE worktrees; use 'worktree repair --confirm' to repair the registries",
+                    ));
+                }
+            }
             legacy::execute_safe(
                 legacy::WorktreeArgs {
                     command: legacy::WorktreeSubcommand::Repair {
+                        name,
                         path,
                         migrate_layout,
                         dry_run,
@@ -623,256 +829,452 @@ fn canonicalize_like_worktree<P: AsRef<Path>>(path: P) -> io::Result<PathBuf> {
     }
 }
 
-fn fuse_state_path() -> PathBuf {
-    util::storage_path().join("worktrees-fuse.json")
+fn fuse_state_path(common: &Path) -> PathBuf {
+    common.join("worktrees-fuse.json")
 }
 
-fn fuse_data_root() -> PathBuf {
-    util::storage_path().join("worktrees-fuse")
+fn load_fuse_state(common: &Path) -> io::Result<FuseWorktreeState> {
+    let root = beneath::open_root(common)?;
+    load_fuse_state_from(&root)
 }
 
-fn load_fuse_state() -> io::Result<FuseWorktreeState> {
-    let path = fuse_state_path();
-    if !path.exists() {
-        return Ok(FuseWorktreeState::default());
+fn load_fuse_state_from(root: &fs::File) -> io::Result<FuseWorktreeState> {
+    match worktree_layout::read_regular_metadata_from(
+        root,
+        Path::new("worktrees-fuse.json"),
+        FUSE_REGISTRY_MAX_BYTES,
+    ) {
+        Ok(data) => FuseWorktreeState::parse(&data),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(FuseWorktreeState::default()),
+        Err(error) => Err(error),
     }
-    let data = fs::read(&path)?;
-    if data.is_empty() {
-        return Ok(FuseWorktreeState::default());
-    }
-    let state: FuseWorktreeState = serde_json::from_slice(&data)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
-    Ok(state)
 }
 
-fn save_fuse_state(state: &FuseWorktreeState) -> io::Result<()> {
-    let path = fuse_state_path();
-    let tmp = path.with_extension("json.tmp");
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
+fn save_fuse_state_to(root: &fs::File, state: &FuseWorktreeState) -> io::Result<()> {
+    use std::{ffi::CString, os::unix::io::AsRawFd};
+
+    let data = serde_json::to_vec_pretty(state).map_err(io::Error::other)?;
+    if data.len() > FUSE_REGISTRY_MAX_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "FUSE registry exceeds the 16 MiB metadata limit; remove stale entries before adding another worktree",
+        ));
     }
-    let data = serde_json::to_vec_pretty(state).map_err(|e| io::Error::other(e.to_string()))?;
-    fs::write(&tmp, data)?;
-    #[cfg(windows)]
-    {
-        if path.exists() {
-            let _ = fs::remove_file(&path);
-        }
+    let temporary = format!("worktrees-fuse.{}.tmp", Uuid::new_v4().simple());
+    let temporary_c = CString::new(temporary.as_str()).map_err(io::Error::other)?;
+    beneath::write_regular_file_beneath(root, Path::new(&temporary), &data, true)?;
+    beneath::open_file_beneath(root, Path::new(&temporary))?.sync_all()?;
+    // SAFETY: both names are fixed/UUID-derived single components and root
+    // stays open throughout the atomic replacement. No pathname is followed.
+    let renamed = unsafe {
+        libc::renameat(
+            root.as_raw_fd(),
+            temporary_c.as_ptr(),
+            root.as_raw_fd(),
+            c"worktrees-fuse.json".as_ptr(),
+        )
+    };
+    if renamed != 0 {
+        let error = io::Error::last_os_error();
+        // SAFETY: remove only our unique temporary entry beneath the pinned root.
+        unsafe { libc::unlinkat(root.as_raw_fd(), temporary_c.as_ptr(), 0) };
+        return Err(error);
     }
-    fs::rename(tmp, path)
+    root.sync_all()
 }
 
-async fn verify_mount_health(mountpoint: &Path) -> io::Result<()> {
-    let mountpoint = mountpoint.to_path_buf();
+async fn verify_mount_health(mountpoint: &Path, mount_id: &str) -> io::Result<()> {
     let deadline = Instant::now() + FUSE_HEALTH_TIMEOUT;
-
     loop {
-        let probe_path = mountpoint.clone();
-        match timeout(
-            FUSE_HEALTH_TIMEOUT,
-            tokio::task::spawn_blocking(move || fs::read_dir(probe_path)),
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "FUSE mount did not become ready within five seconds",
+            ));
+        }
+        let mountpoint = mountpoint.to_path_buf();
+        let mount_id = mount_id.to_owned();
+        let result = timeout(
+            remaining,
+            tokio::task::spawn_blocking(move || verify_mount_health_once(&mountpoint, &mount_id)),
         )
         .await
-        {
-            Ok(Ok(Ok(_))) => return Ok(()),
-            Ok(Ok(Err(err))) => {
-                if Instant::now() >= deadline {
-                    return Err(io::Error::new(
-                        io::ErrorKind::TimedOut,
-                        format!(
-                            "FUSE mount did not become ready within {} seconds: {err}",
-                            FUSE_HEALTH_TIMEOUT.as_secs()
-                        ),
-                    ));
-                }
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "FUSE health check timed out"))?
+        .map_err(|error| io::Error::other(format!("FUSE health check worker failed: {error}")))?;
+        match result {
+            Ok(()) => return Ok(()),
+            Err(error)
+                if error.kind() == io::ErrorKind::NotFound
+                    || matches!(error.raw_os_error(), Some(libc::ENOTCONN | libc::ENXIO)) =>
+            {
+                sleep(Duration::from_millis(50)).await;
             }
-            Ok(Err(err)) => {
-                return Err(io::Error::other(format!(
-                    "FUSE mount health check task failed: {err}"
-                )));
-            }
-            Err(_) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    format!(
-                        "FUSE mount health check timed out after {} seconds",
-                        FUSE_HEALTH_TIMEOUT.as_secs()
-                    ),
-                ));
-            }
+            Err(error) => return Err(error),
         }
-
-        sleep(Duration::from_millis(50)).await;
     }
 }
 
-async fn add_fuse_worktree(
-    path: String,
+fn verify_mount_health_once(mountpoint: &Path, mount_id: &str) -> io::Result<()> {
+    use std::{
+        ffi::CString,
+        io::{Read, Write},
+        os::unix::io::{AsRawFd, FromRawFd},
+    };
+    let expected_binding = format!("{mount_id}\n").into_bytes();
+
+    let root = beneath::open_root(mountpoint)?;
+    if worktree_layout::read_regular_metadata_from(
+        &root,
+        Path::new(".libra/worktree-mount-id"),
+        128,
+    )? != expected_binding
+    {
+        return Err(io::Error::other(
+            "FUSE mounted metadata does not match its registered upper directory",
+        ));
+    }
+    let mask = beneath::open_beneath(&root, Path::new(".libra/worktree"))?;
+    if beneath::read_dir_fd(mask)?.next().transpose()?.is_some() {
+        return Err(io::Error::other(
+            "FUSE worktree opacity mask exposed the managed container; refusing recursive mount",
+        ));
+    }
+    let probe = format!(".libra-fuse-health-{}", Uuid::new_v4().simple());
+    let probe_c = CString::new(probe.as_str()).map_err(io::Error::other)?;
+    // SAFETY: the probe is a UUID-derived single component and root is
+    // pinned. O_EXCL/O_NOFOLLOW prevent touching an existing user file.
+    let raw = unsafe {
+        libc::openat(
+            root.as_raw_fd(),
+            probe_c.as_ptr(),
+            libc::O_RDWR | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            0o600,
+        )
+    };
+    if raw < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: openat returned a new owned descriptor.
+    let mut file = unsafe { fs::File::from_raw_fd(raw) };
+    let result = (|| {
+        file.write_all(b"libra-fuse-health")?;
+        let mut read = beneath::open_file_beneath(&root, Path::new(&probe))?;
+        let mut bytes = Vec::new();
+        read.read_to_end(&mut bytes)?;
+        if bytes != b"libra-fuse-health" {
+            return Err(io::Error::other(
+                "FUSE worktree normal-file I/O health check failed",
+            ));
+        }
+        Ok(())
+    })();
+    // SAFETY: unlink the owned probe through the same pinned directory.
+    let removed = unsafe { libc::unlinkat(root.as_raw_fd(), probe_c.as_ptr(), 0) };
+    result?;
+    if removed != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+fn validate_fuse_target(
+    target: &Path,
+    lower_dirs: &[PathBuf],
+    upper: &Path,
+    common: &Path,
+    managed: bool,
+) -> io::Result<()> {
+    let container = worktree_layout::managed_root(common);
+    if target == upper || target.starts_with(upper) || upper.starts_with(target) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "FUSE mountpoint and writable upper directory must not overlap",
+        ));
+    }
+    if !managed
+        && (target.starts_with(&container)
+            || container.starts_with(target)
+            || target.starts_with(common)
+            || lower_dirs
+                .iter()
+                .any(|lower| target.starts_with(lower) || lower.starts_with(target)))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "explicit FUSE --path must be outside every source worktree, the upper directory, and .libra/worktree; omit --path to use the protected managed layout",
+        ));
+    }
+    Ok(())
+}
+
+struct FuseAddOptions {
+    name: String,
+    path: Option<String>,
     branch_name: Option<String>,
     create_branch_name: Option<String>,
     from: Option<String>,
     privileged: bool,
     allow_other: bool,
-) -> io::Result<()> {
-    let storage = util::storage_path();
-    let target = canonicalize_like_worktree(&path)?;
+}
 
-    if util::is_sub_path(&target, &storage) {
-        return Err(io::Error::other(
-            "worktree path cannot be inside .libra storage",
+async fn add_fuse_worktree(common: &Path, options: FuseAddOptions) -> io::Result<PathBuf> {
+    let FuseAddOptions {
+        name,
+        path,
+        branch_name,
+        create_branch_name,
+        from,
+        privileged,
+        allow_other,
+    } = options;
+    worktree_layout::validate_name(&name)?;
+    let registry_root = beneath::open_root(common)?;
+    let locations = legacy::registered_worktree_locations().map_err(io::Error::other)?;
+    if locations
+        .iter()
+        .any(|entry| entry.name.as_deref() == Some(name.as_str()))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!("worktree name '{name}' is already registered; choose another name"),
         ));
     }
-
-    let target_exists = target.exists();
-    if target_exists && !target.is_dir() {
-        return Err(io::Error::other("target exists and is not a directory"));
+    let source_scope = match crate::internal::worktree_scope::WorktreeScope::request_scope() {
+        Some(scope) => scope,
+        None => crate::internal::worktree_scope::RequestScope::try_resolve(util::cur_dir())?
+            .ok_or_else(|| io::Error::other("cannot resolve the invoking FUSE source worktree"))?,
+    };
+    if source_scope.storage != common {
+        return Err(io::Error::other(
+            "FUSE source and registry belong to different repositories",
+        ));
     }
-    if target_exists && fs::read_dir(&target)?.next().transpose()?.is_some() {
-        return Err(io::Error::other("target directory exists and is not empty"));
+    let managed = path.is_none();
+    let desired = match path {
+        Some(path) => PathBuf::from(path),
+        None => worktree_layout::fuse_workspace(common, &name)?,
+    };
+    let root_path = worktree_layout::fuse_root(common, &name)?;
+    let upper_path = worktree_layout::fuse_upper(common, &name)?;
+    worktree_layout::validate_managed_path(common, &root_path)?;
+    let target_spec = if managed {
+        fuse_utils::managed::Target::beneath(common, &desired)?
+    } else {
+        fuse_utils::managed::Target::resolve(&desired, &source_scope.workdir)?
+    };
+    let root_spec = fuse_utils::managed::Target::beneath(common, &root_path)?;
+    let target = target_spec.path.clone();
+    if fs::symlink_metadata(&root_spec.path).is_ok() {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!(
+                "managed FUSE directory '{}' already exists; choose another name or inspect the retained directory",
+                root_spec.path.display()
+            ),
+        ));
     }
-
-    let state = load_fuse_state()?;
-    if state.worktrees.iter().any(|w| Path::new(&w.path) == target) {
-        println!("worktree already exists at {}", target.display());
-        return Ok(());
+    let lower_dir = fs::canonicalize(&source_scope.worktree_root)?;
+    let lower_root = beneath::open_root(&lower_dir)?;
+    let lower_dirs = vec![lower_dir.clone()];
+    validate_fuse_target(&target, &lower_dirs, &upper_path, common, managed)?;
+    if locations.iter().any(|entry| entry.path == target) {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!("FUSE target '{}' is already registered", target.display()),
+        ));
     }
-
-    if let Some(new_branch) = create_branch_name.as_ref() {
-        branch::create_branch_safe(new_branch.clone(), from.clone())
+    // This v4 gate also protects names introduced only in the FUSE registry
+    // from older ordinary builds that would otherwise miss their occupancy.
+    legacy::ensure_registry_v4_locked().map_err(io::Error::other)?;
+    let mount_id = Uuid::new_v4().to_string();
+    let root = root_spec.create(true)?;
+    let setup = (|| {
+        let upper = root.child_target(Path::new("upper"))?.create(true)?;
+        fuse_utils::managed::prepare_worktree_mask(&upper)?;
+        fuse_utils::managed::prepare_mount_binding(&upper, &mount_id)?;
+        let mount = if managed {
+            root.child_target(Path::new("workspace"))?.create(true)?
+        } else {
+            target_spec.create(false)?
+        };
+        let checked = (|| {
+            root.validate_path()?;
+            upper.validate_path()?;
+            mount.validate_path()?;
+            if !mount.is_empty()? {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    "FUSE target changed and is no longer empty",
+                ));
+            }
+            Ok(())
+        })();
+        if let Err(error) = checked {
+            if !managed {
+                mount.rollback()?;
+            }
+            return Err(error);
+        }
+        Ok((upper, mount))
+    })();
+    let (upper, mount) = match setup {
+        Ok(directories) => directories,
+        Err(error) => {
+            root.rollback().map_err(|rollback| {
+                io::Error::other(format!("{error}; FUSE setup rollback failed: {rollback}"))
+            })?;
+            return Err(error);
+        }
+    };
+    let creation = async {
+        if let Some(new_branch) = create_branch_name.as_ref() {
+            branch::create_branch_safe(new_branch.clone(), from.clone())
+                .await
+                .map_err(|error| io::Error::other(format!("failed to create branch: {error}")))?;
+        }
+        let explicit_branch = branch_name.is_some() || create_branch_name.is_some();
+        let checkout_branch = if let Some(name) = create_branch_name.clone().or(branch_name) {
+            name
+        } else {
+            match Head::current().await {
+                Head::Branch(name) => name,
+                _ => "HEAD".to_string(),
+            }
+        };
+        // Hold source and destination directory descriptors through mounting.
+        // Check their pathname identities immediately before the external
+        // mount API, which necessarily consumes filesystem paths.
+        let lower_now = beneath::open_root(&lower_dir)?;
+        use std::os::unix::fs::MetadataExt;
+        if lower_root.metadata()?.dev() != lower_now.metadata()?.dev()
+            || lower_root.metadata()?.ino() != lower_now.metadata()?.ino()
+        {
+            return Err(io::Error::other(
+                "FUSE source worktree changed during creation",
+            ));
+        }
+        root.validate_path()?;
+        upper.validate_path()?;
+        mount.validate_path()?;
+        let mount_args = OverlayArgs {
+            mountpoint: &target,
+            upperdir: &upper.path,
+            lowerdir: lower_dirs.clone(),
+            privileged,
+            mapping: None::<&str>,
+            name: Some("libra-worktree-fuse"),
+            allow_other,
+        };
+        let mount_handle = timeout(FUSE_MOUNT_TIMEOUT, mount_fs(mount_args))
             .await
-            .map_err(|e| io::Error::other(format!("failed to create branch: {e}")))?;
-    }
-
-    let checkout_branch = if let Some(name) = create_branch_name.clone().or(branch_name) {
-        name
-    } else {
-        match Head::current().await {
-            Head::Branch(name) => name,
-            _ => "HEAD".to_string(),
-        }
-    };
-
-    let mut created_target = false;
-    if !target.exists() {
-        fs::create_dir_all(&target)?;
-        created_target = true;
-    }
-
-    let id = Uuid::new_v4().simple().to_string();
-    let upper_dir = fuse_data_root().join(id).join("upper");
-    fs::create_dir_all(&upper_dir)?;
-
-    let lower_dir = canonicalize_like_worktree(util::working_dir())?;
-    let mount_args = OverlayArgs {
-        mountpoint: &target,
-        upperdir: &upper_dir,
-        lowerdir: vec![lower_dir.clone()],
-        privileged,
-        mapping: None::<&str>,
-        name: Some("libra-worktree-fuse"),
-        allow_other,
-    };
-    let mount_handle = timeout(FUSE_MOUNT_TIMEOUT, mount_fs(mount_args))
-        .await
-        .map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::TimedOut,
-                format!(
-                    "FUSE mount timed out after {} seconds for {}",
-                    FUSE_MOUNT_TIMEOUT.as_secs(),
-                    target.display()
-                ),
+            .map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!("FUSE mount timed out for '{}'", target.display()),
+                )
+            })?
+            .into_mount_handle_result()?;
+        active_mounts()
+            .lock()
+            .map_err(|_| io::Error::other("FUSE active-mount lock is poisoned"))?
+            .insert(target.to_string_lossy().to_string(), mount_handle);
+        verify_mount_health(&target, &mount_id).await?;
+        if explicit_branch
+            || Head::current_commit_result()
+                .await
+                .map_err(io::Error::other)?
+                .is_some()
+        {
+            // Bind only the file destination to the overlay. Source HEAD,
+            // index, database and object reads retain the invoking scope;
+            // this does not create or change a persistent FUSE identity.
+            let mut destination_scope = source_scope.clone();
+            destination_scope.workdir = target.clone();
+            destination_scope.worktree_root = target.clone();
+            crate::internal::worktree_scope::with_request_scope(
+                Some(destination_scope),
+                restore::execute_checked_typed(RestoreArgs {
+                    overlay: false,
+                    no_overlay: false,
+                    ours: false,
+                    theirs: false,
+                    ignore_unmerged: false,
+                    merge: false,
+                    conflict: None,
+                    pathspec: vec![target.to_string_lossy().to_string()],
+                    source: Some(checkout_branch.clone()),
+                    worktree: true,
+                    staged: false,
+                    pathspec_from_file: None,
+                    pathspec_file_nul: false,
+                    no_progress: false,
+                }),
             )
-        })?
-        .into_mount_handle_result()?;
-
-    if let Err(err) = verify_mount_health(&target).await {
-        let _ = timeout(FUSE_UNMOUNT_TIMEOUT, mount_handle.unmount()).await;
-        let _ = fs::remove_dir_all(&upper_dir);
-        if created_target {
-            let _ = fs::remove_dir_all(&target);
+            .await
+            .map_err(|error| {
+                io::Error::other(format!(
+                    "failed to populate FUSE worktree from '{checkout_branch}': {error}"
+                ))
+            })?;
         }
-        return Err(io::Error::other(format!(
-            "FUSE mount health check failed: {err}"
-        )));
-    }
-
-    let mut rollback_needed = true;
-    if Head::current_commit().await.is_some()
-        && let Err(err) = restore::execute_checked(RestoreArgs {
-            overlay: false,
-            no_overlay: false,
-            ours: false,
-            theirs: false,
-            ignore_unmerged: false,
-            merge: false,
-            conflict: None,
-            pathspec: vec![target.to_string_lossy().to_string()],
-            source: Some(checkout_branch.clone()),
-            worktree: true,
-            staged: false,
-            pathspec_from_file: None,
-            pathspec_file_nul: false,
-            no_progress: false,
-        })
-        .await
-    {
-        let _ = timeout(FUSE_UNMOUNT_TIMEOUT, mount_handle.unmount()).await;
-        let _ = fs::remove_dir_all(&upper_dir);
-        if created_target {
-            let _ = fs::remove_dir_all(&target);
-        }
-        return Err(io::Error::other(format!(
-            "failed to populate FUSE worktree from '{}': {err}",
-            checkout_branch
-        )));
-    }
-
-    if let Ok(mut mounts) = active_mounts().lock() {
-        mounts.insert(target.to_string_lossy().to_string(), mount_handle);
-    } else {
-        rollback_needed = false;
-    }
-
-    let save_result = {
+        root.validate_path()?;
         let _guard = fuse_state_lock()
             .lock()
-            .map_err(|_| io::Error::other("fuse state lock poisoned"))?;
-        let mut current = load_fuse_state()?;
-        if current
-            .worktrees
-            .iter()
-            .any(|w| Path::new(&w.path) == target)
-        {
-            Ok(())
-        } else {
-            current.worktrees.push(FuseWorktreeEntry {
-                path: target.to_string_lossy().to_string(),
-                branch: checkout_branch,
-                upper_dir: upper_dir.to_string_lossy().to_string(),
-                lower_dirs: vec![lower_dir.to_string_lossy().to_string()],
-                locked: false,
-                lock_reason: None,
-                privileged,
-                allow_other,
-            });
-            save_fuse_state(&current)
-        }
-    };
-
-    if let Err(err) = save_result {
-        if rollback_needed {
-            let _ = unmount_path(&target).await;
-        }
-        let _ = fs::remove_dir_all(&upper_dir);
-        if created_target {
-            let _ = fs::remove_dir_all(&target);
-        }
-        return Err(err);
+            .map_err(|_| io::Error::other("FUSE state lock is poisoned"))?;
+        let mut current = load_fuse_state_from(&registry_root)?;
+        current.worktrees.push(FuseWorktreeEntry {
+            name: Some(name.clone()),
+            mount_id: Some(mount_id),
+            path: target.to_string_lossy().to_string(),
+            branch: checkout_branch,
+            upper_dir: upper.path.to_string_lossy().to_string(),
+            lower_dirs: lower_dirs
+                .iter()
+                .map(|path| path.to_string_lossy().to_string())
+                .collect(),
+            locked: false,
+            lock_reason: None,
+            privileged,
+            allow_other,
+        });
+        save_fuse_state_to(&registry_root, &current)?;
+        Ok::<_, io::Error>(())
     }
-
-    println!("{}", target.display());
-    Ok(())
+    .await;
+    if let Err(error) = creation {
+        // A directory fsync may fail after atomic registry replacement. Keep
+        // its live mount and data if the entry is already visible on disk.
+        if load_fuse_state_from(&registry_root).is_ok_and(|state| {
+            state.worktrees.iter().any(|entry| {
+                entry.name.as_deref() == Some(name.as_str()) && Path::new(&entry.path) == target
+            })
+        }) {
+            return Err(io::Error::other(format!(
+                "FUSE worktree was registered at '{}', but durability could not be confirmed: {error}",
+                target.display()
+            )));
+        }
+        if let Err(unmount) = unmount_path(&target).await {
+            return Err(io::Error::other(format!(
+                "{error}; cannot safely roll back the mounted worktree: {unmount}"
+            )));
+        }
+        if !managed {
+            mount.rollback().map_err(|rollback| {
+                io::Error::other(format!(
+                    "{error}; external target cleanup failed: {rollback}"
+                ))
+            })?;
+        }
+        root.rollback().map_err(|rollback| {
+            io::Error::other(format!(
+                "{error}; managed worktree cleanup failed: {rollback}"
+            ))
+        })?;
+        return Err(error);
+    }
+    Ok(target)
 }
 
 async fn list_all_worktrees(
@@ -889,10 +1291,13 @@ async fn list_all_worktrees(
         .with_stable_code(StableErrorCode::CliInvalidArguments));
     }
     let mut result = legacy::run_list_worktrees().map_err(legacy::WorktreeError::into_cli_error)?;
-    let state = load_fuse_state().map_err(fuse_state_read_error)?;
+    let common = worktree_layout::current_common_storage()
+        .map_err(|error| CliError::fatal(error.to_string()))?;
+    let state = load_fuse_state(&common).map_err(|error| fuse_state_read_error(&common, error))?;
     if output.is_json() {
         for entry in state.worktrees {
             result.worktrees.push(legacy::WorktreeListEntry {
+                name: entry.name.clone(),
                 kind: "worktree",
                 worktree_id: legacy::resolve_entry_worktree_id(&entry.path, false),
                 path: entry.path.clone(),
@@ -926,6 +1331,7 @@ async fn list_all_worktrees(
         let mut all = result.worktrees;
         for entry in &state.worktrees {
             all.push(legacy::WorktreeListEntry {
+                name: entry.name.clone(),
                 kind: "worktree",
                 worktree_id: legacy::resolve_entry_worktree_id(&entry.path, false),
                 path: entry.path.clone(),
@@ -981,6 +1387,9 @@ async fn list_all_worktrees(
             "worktree {} [branch: {}] [fuse: {}]",
             entry.path, entry.branch, mounted
         );
+        if let Some(name) = &entry.name {
+            line.push_str(&format!(" [name: {name}]"));
+        }
         if entry.locked {
             line.push_str(" [locked");
             if let Some(reason) = entry.lock_reason.as_ref()
@@ -997,8 +1406,8 @@ async fn list_all_worktrees(
     Ok(())
 }
 
-fn fuse_state_read_error(source: io::Error) -> CliError {
-    let path = fuse_state_path();
+fn fuse_state_read_error(common: &Path, source: io::Error) -> CliError {
+    let path = fuse_state_path(common);
     let message = if source.kind() == io::ErrorKind::InvalidData {
         format!(
             "FUSE worktree state '{}' is corrupt: {source}",
@@ -1018,12 +1427,13 @@ fn fuse_state_read_error(source: io::Error) -> CliError {
     CliError::fatal(message).with_stable_code(code)
 }
 
-fn lock_fuse_worktree(path: &str, reason: Option<String>) -> io::Result<bool> {
+fn lock_fuse_worktree(common: &Path, path: &str, reason: Option<String>) -> io::Result<bool> {
+    let registry_root = beneath::open_root(common)?;
     let _state_guard = fuse_state_lock()
         .lock()
         .map_err(|_| io::Error::other("fuse state lock poisoned"))?;
-    let target = canonicalize_like_worktree(path)?;
-    let mut state = load_fuse_state()?;
+    let target = PathBuf::from(path);
+    let mut state = load_fuse_state_from(&registry_root)?;
     let mut changed = false;
     let mut found = false;
     for worktree in &mut state.worktrees {
@@ -1038,17 +1448,18 @@ fn lock_fuse_worktree(path: &str, reason: Option<String>) -> io::Result<bool> {
         }
     }
     if found && changed {
-        save_fuse_state(&state)?;
+        save_fuse_state_to(&registry_root, &state)?;
     }
     Ok(found)
 }
 
-fn unlock_fuse_worktree(path: &str) -> io::Result<bool> {
+fn unlock_fuse_worktree(common: &Path, path: &str) -> io::Result<bool> {
+    let registry_root = beneath::open_root(common)?;
     let _state_guard = fuse_state_lock()
         .lock()
         .map_err(|_| io::Error::other("fuse state lock poisoned"))?;
-    let target = canonicalize_like_worktree(path)?;
-    let mut state = load_fuse_state()?;
+    let target = PathBuf::from(path);
+    let mut state = load_fuse_state_from(&registry_root)?;
     let mut changed = false;
     let mut found = false;
     for worktree in &mut state.worktrees {
@@ -1063,18 +1474,19 @@ fn unlock_fuse_worktree(path: &str) -> io::Result<bool> {
         }
     }
     if found && changed {
-        save_fuse_state(&state)?;
+        save_fuse_state_to(&registry_root, &state)?;
     }
     Ok(found)
 }
 
-async fn remove_fuse_worktree(path: &str) -> io::Result<bool> {
-    let target = canonicalize_like_worktree(path)?;
+async fn remove_fuse_worktree(common: &Path, path: &str) -> io::Result<bool> {
+    let registry_root = beneath::open_root(common)?;
+    let target = PathBuf::from(path);
     let entry = {
         let _state_guard = fuse_state_lock()
             .lock()
             .map_err(|_| io::Error::other("fuse state lock poisoned"))?;
-        let state = load_fuse_state()?;
+        let state = load_fuse_state_from(&registry_root)?;
         let Some(found) = state
             .worktrees
             .iter()
@@ -1089,53 +1501,157 @@ async fn remove_fuse_worktree(path: &str) -> io::Result<bool> {
     if entry.locked {
         return Err(io::Error::other("cannot remove locked worktree"));
     }
+    // Stored paths are canonical. A symlink introduced at any component
+    // after registration must not redirect an unmount to another worktree.
+    let filesystem_root = beneath::open_root(Path::new("/"))?;
+    let relative_target = target.strip_prefix("/").map_err(io::Error::other)?;
+    match beneath::open_beneath(&filesystem_root, relative_target) {
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error)
+            if error.raw_os_error() == Some(libc::ENOTCONN)
+                && fuse_utils::is_mount_active(&target) =>
+        {
+            // A disconnected FUSE root cannot be opened, but still needs
+            // unmounting. NOFOLLOW traversal above rejects a symlink instead.
+        }
+        Err(error) => {
+            return Err(io::Error::other(format!(
+                "cannot safely access registered FUSE mountpoint '{}': {error}; restore its original directory path before removing it",
+                target.display()
+            )));
+        }
+    }
 
     if let Err(err) = unmount_path(&target).await
         && fuse_utils::is_mount_active(&target)
     {
         return Err(err);
     }
-    if Path::new(&entry.upper_dir).exists() {
-        fs::remove_dir_all(&entry.upper_dir)?;
+    // Mount-table strings can miss path aliases. Prove that the pinned
+    // workspace is back on its parent's device and empty before deleting
+    // its upper layer; a live overlay must never lose its writable data.
+    use std::os::unix::fs::MetadataExt;
+    let parent_relative = relative_target
+        .parent()
+        .ok_or_else(|| io::Error::other("FUSE mountpoint has no parent"))?;
+    let parent = beneath::open_beneath(&filesystem_root, parent_relative)?;
+    let workspace = beneath::open_beneath(&filesystem_root, relative_target).map_err(|error| {
+        io::Error::other(format!(
+            "cannot verify the unmounted FUSE workspace '{}': {error}; retain its upper directory and registration",
+            target.display()
+        ))
+    })?;
+    if workspace.metadata()?.dev() != parent.metadata()?.dev() {
+        return Err(io::Error::other(format!(
+            "FUSE workspace '{}' is still mounted; refusing to delete its upper directory",
+            target.display()
+        )));
+    }
+    if beneath::read_dir_fd(workspace)?
+        .next()
+        .transpose()?
+        .is_some()
+    {
+        return Err(io::Error::other(format!(
+            "FUSE workspace '{}' is not empty after unmount; retain its upper directory and inspect it",
+            target.display()
+        )));
+    }
+    let upper = Path::new(&entry.upper_dir);
+    let upper_relative = upper.strip_prefix(common).map_err(|_| io::Error::other(
+        "refusing to delete FUSE upper directory outside the invoking repository; repair its registration first"))?;
+    let managed_root = if let Some(name) = &entry.name {
+        let expected_upper = worktree_layout::fuse_upper(common, name)?;
+        if upper != expected_upper {
+            return Err(io::Error::other(
+                "FUSE upper directory does not match its registered name; refusing cleanup",
+            ));
+        }
+        worktree_layout::validate_managed_path(common, upper)?;
+        Some(worktree_layout::fuse_root(common, name)?)
+    } else {
+        let parts: Vec<_> = upper_relative.components().collect();
+        if parts.len() != 3
+            || parts[0].as_os_str() != "worktrees-fuse"
+            || parts[2].as_os_str() != "upper"
+            || !matches!(parts[1], std::path::Component::Normal(_))
+        {
+            return Err(io::Error::other(
+                "legacy FUSE upper directory is outside its owned worktrees-fuse container; refusing cleanup",
+            ));
+        }
+        None
+    };
+    fuse_utils::managed::remove_registered_tree(&registry_root, upper_relative)?;
+    if let Some(root) = managed_root {
+        let default_workspace = root.join("workspace");
+        if target == default_workspace {
+            let relative = default_workspace
+                .strip_prefix(common)
+                .map_err(io::Error::other)?;
+            fuse_utils::managed::remove_empty_registered_directory(&registry_root, relative)?;
+        }
+        let relative = root.strip_prefix(common).map_err(io::Error::other)?;
+        fuse_utils::managed::remove_empty_registered_directory(&registry_root, relative)?;
     }
     {
         let _state_guard = fuse_state_lock()
             .lock()
             .map_err(|_| io::Error::other("fuse state lock poisoned"))?;
-        let mut state = load_fuse_state()?;
+        let mut state = load_fuse_state_from(&registry_root)?;
         if let Some(index) = state
             .worktrees
             .iter()
             .position(|w| Path::new(&w.path) == target)
         {
             state.worktrees.remove(index);
-            save_fuse_state(&state)?;
+            save_fuse_state_to(&registry_root, &state)?;
         }
     }
     Ok(true)
 }
 
-fn prune_fuse_worktrees() -> io::Result<()> {
+fn prune_fuse_worktrees(common: &Path) -> io::Result<()> {
+    let registry_root = beneath::open_root(common)?;
     let _state_guard = fuse_state_lock()
         .lock()
         .map_err(|_| io::Error::other("fuse state lock poisoned"))?;
-    let mut state = load_fuse_state()?;
+    let mut state = load_fuse_state_from(&registry_root)?;
+    for entry in &state.worktrees {
+        if !Path::new(&entry.path).exists()
+            && !entry.locked
+            && let Some(name) = &entry.name
+        {
+            let root = worktree_layout::fuse_root(common, name)?;
+            match fs::symlink_metadata(&root) {
+                Ok(_) => {
+                    return Err(io::Error::other(format!(
+                        "FUSE worktree '{name}' is missing its mountpoint but its owned container remains; use `libra worktree remove {name}` to finish cleanup before pruning"
+                    )));
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+        }
+    }
     let before = state.worktrees.len();
     state.worktrees.retain(|entry| {
         let path = Path::new(&entry.path);
         path.exists() || entry.locked
     });
     if state.worktrees.len() != before {
-        save_fuse_state(&state)?;
+        save_fuse_state_to(&registry_root, &state)?;
     }
     Ok(())
 }
 
-fn repair_fuse_worktrees() -> io::Result<()> {
+fn repair_fuse_worktrees(common: &Path) -> io::Result<()> {
+    let registry_root = beneath::open_root(common)?;
     let _state_guard = fuse_state_lock()
         .lock()
         .map_err(|_| io::Error::other("fuse state lock poisoned"))?;
-    let mut state = load_fuse_state()?;
+    let mut state = load_fuse_state_from(&registry_root)?;
     let mut seen = std::collections::HashSet::<PathBuf>::new();
     let before = state.worktrees.len();
     state.worktrees.retain(|entry| {
@@ -1143,7 +1659,7 @@ fn repair_fuse_worktrees() -> io::Result<()> {
         seen.insert(p)
     });
     if state.worktrees.len() != before {
-        save_fuse_state(&state)?;
+        save_fuse_state_to(&registry_root, &state)?;
     }
     Ok(())
 }
@@ -1167,9 +1683,15 @@ async fn unmount_path(path: &Path) -> io::Result<()> {
                         return Ok(());
                     }
                 } else {
-                    return Err(io::Error::other(format!(
-                        "failed to unmount FUSE worktree: {ioe}"
-                    )));
+                    // The in-process handle may keep the mount busy until
+                    // its failed unmount has consumed and dropped the handle.
+                    // Retry through the platform unmount command only after
+                    // that ownership has been released.
+                    return fuse_utils::force_unmount_path(&path).map_err(|fallback| {
+                        io::Error::other(format!(
+                            "failed to unmount FUSE worktree: {ioe}; retry after releasing its handle also failed: {fallback}"
+                        ))
+                    });
                 }
             }
             Err(_) => {
@@ -1202,6 +1724,16 @@ async fn umount_fuse_path(
         ))
     })?;
     let mountpoint = fuse_utils::resolve_task_worktree_mountpoint_arg(&target);
+    let planned_cleanup_root = if cleanup {
+        Some(fuse_utils::fuse_task_worktree_cleanup_root(&mountpoint).ok_or_else(|| {
+            FuseUmountError::InvalidTarget(format!(
+                "--cleanup only supports legacy Libra task FUSE paths ending in '/workspace', not managed named worktrees: {}",
+                mountpoint.display()
+            ))
+        })?)
+    } else {
+        None
+    };
     unmount_path(&mountpoint).await.map_err(|source| {
         FuseUmountError::IoWrite(format!(
             "failed to unmount FUSE path {}: {source}",
@@ -1211,13 +1743,7 @@ async fn umount_fuse_path(
 
     let mut cleanup_root = None;
     let mut cleanup_root_removed = false;
-    if cleanup {
-        let root = fuse_utils::fuse_task_worktree_cleanup_root(&mountpoint).ok_or_else(|| {
-            FuseUmountError::InvalidTarget(format!(
-                "--cleanup only supports Libra task FUSE worktree paths ending in '/workspace': {}",
-                mountpoint.display()
-            ))
-        })?;
+    if let Some(root) = planned_cleanup_root {
         if root.exists() {
             fs::remove_dir_all(&root).map_err(|source| {
                 FuseUmountError::IoWrite(format!(
@@ -1256,6 +1782,171 @@ fn render_umount_fuse_path(result: &WorktreeUmountOutput, output: &OutputConfig)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn registry_entry() -> serde_json::Value {
+        serde_json::json!({"path":"/tmp/fuse", "branch":"main", "upper_dir":"/repo/.libra/worktrees-fuse/id/upper", "lower_dirs":["/repo"], "locked":false, "lock_reason":null, "privileged":false, "allow_other":false})
+    }
+
+    #[test]
+    fn fuse_registry_reads_legacy_and_writes_versioned_entries() {
+        let legacy = serde_json::json!({"worktrees":[registry_entry()]});
+        let parsed =
+            FuseWorktreeState::parse(&serde_json::to_vec(&legacy).expect("json")).expect("legacy");
+        assert!(parsed.worktrees[0].name.is_none());
+        let written = serde_json::to_value(&parsed).expect("serialize");
+        assert_eq!(written["schema_version"], 1);
+        assert!(
+            written.get("worktrees").is_none(),
+            "legacy writers must not silently rewrite named entries"
+        );
+        assert_eq!(written["entries"].as_array().expect("entries").len(), 1);
+        assert!(FuseWorktreeState::parse(&serde_json::to_vec(&written).expect("json")).is_ok());
+    }
+
+    #[test]
+    fn fuse_registry_rejects_unknown_mixed_or_missing_schema_arrays() {
+        for malformed in [
+            serde_json::json!({"schema_version":2, "entries":[]}),
+            serde_json::json!({"schema_version":1, "worktrees":[]}),
+            serde_json::json!({"schema_version":1, "entries":[], "worktrees":[]}),
+            serde_json::json!({"entries":[]}),
+            serde_json::json!({}),
+        ] {
+            assert!(
+                FuseWorktreeState::parse(&serde_json::to_vec(&malformed).expect("json")).is_err(),
+                "accepted {malformed}"
+            );
+        }
+        assert!(FuseWorktreeState::parse(b"").is_err());
+        let mut invalid_binding = registry_entry();
+        invalid_binding["mount_id"] = serde_json::json!("not-a-uuid");
+        let document = serde_json::json!({"schema_version":1, "entries":[invalid_binding]});
+        assert!(FuseWorktreeState::parse(&serde_json::to_vec(&document).expect("json")).is_err());
+    }
+
+    #[test]
+    fn fuse_registry_preserves_names_when_legacy_paths_alias_named_entries() {
+        for alias in ["/tmp/fuse", "/tmp/fuse/", "/tmp/./fuse"] {
+            let mut unnamed = registry_entry();
+            unnamed["path"] = serde_json::json!(alias);
+            let mut named = registry_entry();
+            named["name"] = serde_json::json!("topic");
+            for entries in [vec![unnamed.clone(), named.clone()], vec![named, unnamed]] {
+                let state = serde_json::json!({"schema_version":1, "entries":entries});
+                assert!(
+                    FuseWorktreeState::parse(&serde_json::to_vec(&state).expect("json")).is_err(),
+                    "repair must not silently discard either a named or aliased registration"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn fuse_registry_reader_rejects_symlinks_fifos_and_oversized_files() {
+        use std::{
+            ffi::CString,
+            os::unix::{ffi::OsStrExt, fs::symlink},
+        };
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = beneath::open_root(temp.path()).expect("pin storage");
+        let registry = temp.path().join("worktrees-fuse.json");
+        symlink(temp.path().join("missing"), &registry).expect("dangling registry link");
+        assert!(
+            load_fuse_state_from(&root).is_err(),
+            "a symlink is never an absent registry"
+        );
+        fs::remove_file(&registry).expect("remove symlink");
+
+        let path = CString::new(registry.as_os_str().as_bytes()).expect("fifo path");
+        // SAFETY: path is a valid NUL-terminated path in our isolated tempdir.
+        assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+        assert!(
+            load_fuse_state_from(&root).is_err(),
+            "FIFO metadata must fail without waiting for a writer"
+        );
+        fs::remove_file(&registry).expect("remove FIFO");
+
+        fs::File::create(&registry)
+            .expect("oversized registry")
+            .set_len(FUSE_REGISTRY_MAX_BYTES as u64 + 1)
+            .expect("sparse size");
+        assert!(
+            load_fuse_state_from(&root).is_err(),
+            "metadata size limit must precede allocation"
+        );
+    }
+
+    #[test]
+    fn fuse_explicit_paths_cannot_overlap_lower_upper_or_managed_container() {
+        let common = Path::new("/repo/.libra");
+        let upper = Path::new("/repo/.libra/worktree/fuse/topic/upper");
+        let lower = vec![PathBuf::from("/repo"), PathBuf::from("/other-source")];
+        for path in [
+            "/repo",
+            "/repo/nested",
+            "/other-source/child",
+            "/repo/.libra/worktree/fuse/topic/upper",
+            "/repo/.libra/worktree/fuse/topic/workspace",
+            "/",
+        ] {
+            assert!(
+                validate_fuse_target(Path::new(path), &lower, upper, common, false).is_err(),
+                "accepted unsafe target {path}"
+            );
+        }
+        assert!(
+            validate_fuse_target(Path::new("/outside/topic"), &lower, upper, common, false).is_ok()
+        );
+        assert!(
+            validate_fuse_target(
+                Path::new("/repo/.libra/worktree/fuse/topic/workspace"),
+                &lower,
+                upper,
+                common,
+                true
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn fuse_cli_accepts_named_controls_and_branch_alias() {
+        for flag in ["--new-branch", "--create-branch"] {
+            assert!(
+                WorktreeArgs::try_parse_from([
+                    "worktree",
+                    "add",
+                    "topic",
+                    "--fuse",
+                    flag,
+                    "feature/topic",
+                    "--path",
+                    "/outside/topic"
+                ])
+                .is_ok()
+            );
+        }
+        assert!(WorktreeArgs::try_parse_from(["worktree", "remove", "topic"]).is_ok());
+        assert!(
+            WorktreeArgs::try_parse_from(["worktree", "remove", "--path", "/outside/topic"])
+                .is_ok()
+        );
+        assert!(
+            WorktreeArgs::try_parse_from(["worktree", "move", "topic", "--path", "/outside/moved"])
+                .is_ok()
+        );
+        assert!(
+            WorktreeArgs::try_parse_from([
+                "worktree",
+                "remove",
+                "topic",
+                "--path",
+                "/outside/topic"
+            ])
+            .is_err()
+        );
+    }
 
     /// Pin the `stable_code()` mapping for every variant of
     /// [`FuseUmountError`]. JSON consumers branch on the

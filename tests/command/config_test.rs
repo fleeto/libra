@@ -528,6 +528,7 @@ async fn assert_configuration_role_writer(scope: config::ConfigScope, flag: &str
     use sea_orm::{ConnectionTrait, Statement};
 
     let fixture = ConfigDbFixture::new().expect("isolate configuration paths");
+    let _cwd_guard = test::ChangeDirGuard::new(fixture.root());
     let role = scope.database_role();
     assert_eq!(
         role,
@@ -624,13 +625,13 @@ async fn assert_configuration_role_writer(scope: config::ConfigScope, flag: &str
 }
 
 #[tokio::test]
-#[serial(env)]
+#[serial(env, cwd)]
 async fn global_config_create_uses_global_role() {
     assert_configuration_role_writer(config::ConfigScope::Global, "--global").await;
 }
 
 #[tokio::test]
-#[serial(env)]
+#[serial(env, cwd)]
 async fn system_config_create_uses_system_role() {
     assert_configuration_role_writer(config::ConfigScope::System, "--system").await;
 }
@@ -2407,10 +2408,11 @@ async fn get_best_effort_returns_err_outside_repository() {
 /// value just like `get`, confirming the non-panicking wrapper still resolves
 /// the per-repo database correctly.
 #[tokio::test]
-#[serial(cwd)]
+#[serial(cwd, env)]
 async fn get_best_effort_reads_value_inside_repository() {
     use libra::internal::config::ConfigKv;
 
+    let _config_fixture = test::ConfigDbFixture::new().expect("isolate configuration paths");
     let temp_path = tempdir().unwrap();
     test::setup_with_new_libra_in(temp_path.path()).await;
     let _guard = test::ChangeDirGuard::new(temp_path.path());

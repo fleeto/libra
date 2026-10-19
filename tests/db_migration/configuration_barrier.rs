@@ -231,6 +231,8 @@ pub fn sole_writer() {
         "set",
         "add",
         "unset",
+        "unset_matching",
+        "replace_all",
         "unset_all",
         "handle_remove_section",
         "handle_rename_section",
@@ -242,7 +244,8 @@ pub fn sole_writer() {
             "missing mutation {name}"
         );
     }
-    assert_eq!(source.matches("Self::begin_mutation(scope)").count(), 4);
+    // `set`, `add`, `unset`, `unset_matching`, `replace_all`, `unset_all`.
+    assert_eq!(source.matches("Self::begin_mutation(scope)").count(), 6);
     assert_eq!(
         source
             .matches("ScopedConfig::begin_mutation(scope)")

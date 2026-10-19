@@ -2,7 +2,7 @@
 
 > **当前 thinking 数据获取基线（2026-10-18 16:23:55 UTC，用户明确授权）：** [DATA-CAP-20261019](plan-20260904.md#thinking-data-baseline-20261019) 替代下方 2026-10-18 四 provider 计划的隐私剥离/native 来源保存前置。以 OpenCode macOS 13段/4617 bytes、2个自动 checkpoint 原值一致为已证基线；系统 OpenCode 默认 Opus 5.5 medium + summarized 的无 --model 实测另得到131 bytes正文。Codex 29、Claude 9、Pi 11、Hermes 10 张仍全部 pending（0/59），本次只修订计划和配置事实；获取的数据可普通保留并标 Unproven/Partial，不把空壳当通过。四种工具 source/模型 smoke 均待实际执行，未授实施或 native grant。当前下一卡仍 CX-00 / CC-00 / PI-00 / HM-00；实现依原逐文件串行与 schema/cloud 数据正确性边界。旧 PASS/FAIL 与完成数保留历史；2026-10-18 16:39:27 UTC 本轮 fmt/strict、104/104 focused 与 Claude R2 实际 PASS 已登记于各计划；源数据获取/可读正文仍须未来真实测试，无版本发布。
 
-> **Grok 采集计划（2026-10-19，GK-00 HOLD）：** [plan-20261018-grok-capture.md](plan-20261018-grok-capture.md) 的 GK-00 为 `locally-accepted`，Acceptance 仍空。公开 `xai-org/grok-build` `2bdd1d6a6369de0e8c68132ea4539e9abd9e14a8` 的 shell 版本是 1.0.45，对不上本机 1.0.62。DEP-GK-PIN 与 GK-01..GK-05 为 HOLD，不开工。
+> **Grok 采集计划（2026-10-19，SHA 检查已取消）：** [plan-20261018-grok-capture.md](plan-20261018-grok-capture.md) 的 GK-00 为 `locally-accepted`，Acceptance 仍空。用户取消上游 commit 哈希限制。GK-01..GK-05 按本机 1.0.62 字段矩阵 GO，可以开工。公开 grok-build 仍是 1.0.45，该事实不再停工。
 
 > **USER-OG-THINKING-RETAIN-20261018（2026-10-18 07:36:52 UTC，工作区已实现，未提交、未发布）：** 用户要求把隐私要求降到能保存 thinking，并写入未证明字段。助手 reasoning 的字符串 `text` 与未证明 `state`、`time`、`originProof` 及顶层 `signature`、`redactedData`、`reasoningEncryptedContent`、`thoughtSignature` 进入普通 transcript。来源仍是 `Unproven` / `Partial`，不归档为 native artifact。本条只替代方案 C 当时的普通副本删除规则，不新增任务卡，不增加完成分子。历史 import 仍 `LBR-AGENT-020`。已发布 0.30.52 不含此行为。完整边界与本次测试见 [USER-OG-THINKING-RETAIN-20261018](plan-20260902.md#user-og-thinking-retain-20261018)。
 
@@ -248,7 +248,7 @@
 | [`plan-20260912.md`](plan-20260912.md) | B（memory boundary） | **已收口** | MB-01..MB-05、MB-07/08、MB-10/11 全部 `done/complete`（v0.23.37/.39/.40/.41/.42/.43/.44/.45/.46，各卡 ER-14 全量绿、D-MB-STD 远端 evidence 绿）；MB-06/09/12 墓碑 `done`（无对应子命令）；EX-MB-01/02（G-03）与 EX-MB-03（ER-07 签名）已登记；使用者 2026-09-21 双评审豁免已登记；完成判据全数勾选 |
 | [`plan-20260911.md`](plan-20260911.md) | B（Pi capture） | 未启动 | DATA-CAP-20261019：11卡 pending；PI-00 先核系统版本/模型；PI-08 保留 thinking/thoughtSignature；云围栏与 identity/schema 顺序不变，旧 R5 为历史；本次修订实际审查见计划 |
 | [`plan-20261018-hermes-capture.md`](plan-20261018-hermes-capture.md) | B（Hermes capture） | 未启动 | DATA-CAP-20261019：10卡 pending；HM-00 选含 thinking 的 export/文件/一致只读 SQLite；HM-08 最小 live 桥不要求新沙箱；真实非空数据门待验，旧 R5 为历史；本次修订实际审查见计划 |
-| [`plan-20261018-grok-capture.md`](plan-20261018-grok-capture.md) | B（Grok capture） | GK-00 审计结束 | GK-00 `locally-accepted`，Acceptance 空。公开 grok-build `2bdd1d6a6369de0e8c68132ea4539e9abd9e14a8` 是 1.0.45，对不上本机 1.0.62。GK-01..05 HOLD，不开工。 |
+| [`plan-20261018-grok-capture.md`](plan-20261018-grok-capture.md) | B（Grok capture） | GK-01 可开工 | GK-00 `locally-accepted`，Acceptance 空。上游 commit SHA 检查已取消。GK-01..05 按本机 1.0.62 字段矩阵 GO。 |
 | [`plan-20260910.md`](plan-20260910.md) | 横切（数据库迁移作用域） | **已收口** | MIG-00..MIG-06、MIG-R01..R03 全部 `done/complete` |
 | [`plan-20260907.md`](plan-20260907.md) | 横切（BLAKE3 object format） | **已收口** | B3-00..B3-17 全部 `done`/`complete`（`v0.23.68`→`v0.29.0`；REL-B3-01/02 家族经 B3-15/B3-17）；最终 Codex/Claude R40 双 `PASS`（0×P0/0×P1）；GC-B3-01/GC-B3-02 收口守卫绿；`DEP-B3-05` 已满足，下游 FL-00 解锁；无 LR 编号 |
 | [`plan-20260906.md`](plan-20260906.md) | 横切（安全扫描） | 未启动 | SC-01..SC-07、SC-CLOSE 全部 `pending` |
@@ -318,7 +318,7 @@
 | [`plan-20260907.md`](plan-20260907.md) | B3-00..B3-17 | **已收口**（B3-00..B3-17 全部 `done`/`complete`；`DEP-B3-05` 已满足，不再阻塞 plan-20260913） |
 | [`plan-20260911.md`](plan-20260911.md) | PI-00..10（11卡pending） | 下一PI-00；本轮双规划审查PASS；PI-05围栏先于row writer，旧429历史不授本轮PASS |
 | [`plan-20261018-hermes-capture.md`](plan-20261018-hermes-capture.md) | HM-00..09（10卡pending） | 下一HM-00；本轮双规划审查PASS；后续云围栏消费PI-05、schema消费PI-01交接；本机Hermes/live gate待证 |
-| [`plan-20261018-grok-capture.md`](plan-20261018-grok-capture.md) | GK-01..05 HOLD | GK-00 已审计。DEP-GK-PIN HOLD，后继卡不开工 |
+| [`plan-20261018-grok-capture.md`](plan-20261018-grok-capture.md) | GK-01..05 GO | GK-00 已审计。上游 commit SHA 检查已取消，后继卡可开工 |
 | [`plan-20260912.md`](plan-20260912.md) | MB-01..05、MB-07/08/10/11（MB-06/09/12 已取消） | 依赖 CAP（plan-20260916）等 |
 | [`plan-20260913.md`](plan-20260913.md) | FL-00..FL-07 | **前置 plan-20260907 已完整收口（DEP-FL-04 满足）**；FL-00/01/07/02/06/03/04/05 已全部 `done`/`complete`，仅剩计划级收口门 |
 | [`plan-20260916.md`](plan-20260916.md) | CAP-01..CAP-07 | 双评审已 PASS；CAP-01..03 仅按 ER-CAP-02 pin 作 zero-raw-persistence 重核；`DEP-ACF-CAP` 的 ACF 侧必要条件已由 ACF-09（`Lifecycle=done`、`Acceptance=complete`）交接；CAP-04..07 `blocked`，须独立 security/privacy RFC 与新卡 |
@@ -559,7 +559,7 @@ SBX-01..05 `done/locally-accepted`；**发布步按 DEFER-SBX-06 正式延后**�
 | [`plan-20260902`](plan-20260902.md) | OG-00 | OpenCode2.0.26 Hook/export当前契约审计 | 无；按具名main source与逐文件单写者 | 当前9/9审计门；Claude Code R2 semantic PASS，旧评审为历史 | 无新增完整RG前置，typed/native归档门仍保留 |  ✅ done/complete，具名产物在v0.30.43最终tree/site，实际FAST-OG-01 C/D继承 |
 | [`plan-20260911`](plan-20260911.md) | PI-00 | Pi版本/source/事件身份只读审计 | 无 | DATA-CAP-20261019 本次 Claude R2 实际 PASS；旧 R5 是历史 | 后继PI-05先围栏；PI-01再identity/schema配对 | pending；未实施，选卡授权及具体依赖仍须核验 |
 | [`plan-20261018-hermes-capture`](plan-20261018-hermes-capture.md) | HM-00 | Hermes版本/source/observer协议审计 | 无 | DATA-CAP-20261019 本次 Claude R2 实际 PASS；旧 R5 是历史 | 后继HM-02消费PI-05，HM-01消费PI-01交接；缺binary只阻支持提升 | pending；未实施，选卡授权及具体依赖仍须核验 |
-| [`plan-20261018-grok-capture`](plan-20261018-grok-capture.md) | GK-00 | 钉住 Grok 1.0.62 的日志与 hook 形状 | 无 | 审计已写入计划 | 公开 HEAD 是 1.0.45，DEP-GK-PIN HOLD | 后继卡不开工；GK-00 Acceptance 仍空 |
+| [`plan-20261018-grok-capture`](plan-20261018-grok-capture.md) | GK-00 | 记录已安装 Grok 1.0.62 的日志与 hook 形状 | 无 | 审计已写入计划；SHA 检查已取消 | 公开 HEAD 仍是 1.0.45，该事实不再停工 | GK-01..05 GO；GK-00 Acceptance 仍空，等 GK-01 的 C/D |
 | [`plan-20260925`](plan-20260925.md) | SCAP-01 | AgentTraces ingest 改调 `decide`。`v0.23.55` / `fa3849e` D 组全绿 | SCAP-02（登记已核对） | R9 双 `PASS` | 已收口 | `done`/`complete` |
 | [`plan-20260907`](plan-20260907.md) | B3-00 | pin `git-internal`（保持 `=0.10.2`）并引入 `object_format` 事实源 | 无 | **双评审已 PASS**（R40 Codex/Claude 双 PASS） | `v0.23.68` 已发布；focused VER 绿 | `done`/`complete` |
 | [`issues/470`](issues/470.md) | FM-01 | 共享写入原语与 `restore` 系物化 | 无 | 尚未 Codex review | 关闭依赖 plan-20260918 FM-03/04（DEP-FM-06/07） | ❌ 禁止开工 |

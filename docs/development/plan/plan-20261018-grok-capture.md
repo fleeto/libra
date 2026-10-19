@@ -42,7 +42,7 @@
 | 支持名单 | 首批 supported 只有 `claude-code`、`codex`、`opencode`。首批之外不得标 `supported=true` | `docs/development/tracing/agent.md:108-116`；`src/internal/ai/observed_agents/registry.rs:338-339` |
 | 实时采集 | live capture 只有 Claude、Codex、OpenCode | `src/internal/ai/observed_agents/mod.rs:217-220` |
 | 防御性提取 | 非首批 kind 走 partial 空摘要 | `src/internal/ai/capture/extraction.rs:424-431` |
-| Grok 版本 | 本机安装版本 `1.0.62`。用户指南在安装树内，不是已钉住的上游 commit | 安装元数据 `version` 字段，核对日 2026-10-18 |
+| Grok 版本 | 本机安装版本 `1.0.62`。外部 CLI 不要求、也不检查上游 commit SHA | `grok --version`，核对日 2026-10-18 |
 | 会话布局 | `updates.jsonl` 是恢复会话的权威日志；`chat_history.jsonl` 是发给模型的原始消息 | Grok 1.0.62 user-guide `17-sessions.md` Storage Layout |
 | Thinking 流 | ACP `sessionUpdate=agent_thought_chunk`，`content.type=text`，`content.text` 为字符串 | user-guide `15-agent-mode.md` Streaming updates；本机四个 `updates.jsonl` 的键统计 |
 | Hook | 事件含 `Stop`、`StopCancelled`、`StopFailure`、`PreCompact`、`PostCompact`、`SessionEnd`。`transcript_path` 指向该会话的 `updates.jsonl`。daemon 路由可以不给该字段 | user-guide `10-hooks.md` Hook Events；`25-status-line.md` 对 `transcript_path` 的说明 |
@@ -52,7 +52,7 @@
 
 | ID | 缺口 | 影响 | 证据 | 计划动作 |
 |---|---|---|---|---|
-| GAP-GK-01 | 没有钉住的上游 commit，本机指南不能代替 source pin | 后继 parser 会跟着安装树漂移 | 事实基线 Grok 版本行 | GK-00 |
+| GAP-GK-01 | 外部 Grok 的上游 commit 不可控，不能当作开工条件 | 用安装版本和字段矩阵识别；形状超出矩阵则拒绝导入 | 事实基线 Grok 版本行 | GK-00 |
 | GAP-GK-02 | CHECK 与 `AgentKind` 拒绝 `grok` | 不能写入 `agent_session` | `adapter.rs:30-38`、迁移 `:16-19` | GK-01 |
 | GAP-GK-03 | 没有 `updates.jsonl` 读取器，Thought chunk 会丢 | 只保存摘要会丢掉未进入 `chat_history` 的 Thinking | 180 对 12 的统计 | GK-02 |
 | GAP-GK-04 | 未证明密文没有普通 transcript 落点，也没有 sink 隔离 | 要么丢掉用户要求保存的字段，要么漏进 safe projection | plan-20260902 retain 节 | GK-03 |
@@ -75,7 +75,7 @@
 | 维度 | 结论 | 修订动作 |
 |---|---|---|
 | 合理性 | 本机已有 Grok 会话和 Thinking 流，Libra 尚不能采集 | 单独立项，不塞进 OpenCode 计划 |
-| 可行性 | 日志已在磁盘上，不需要导出子进程 | GK-00 仍须钉上游 commit；钉不住则 parser HOLD |
+| 可行性 | 日志已在磁盘上，不需要导出子进程 | 不检查上游 commit SHA。形状超出 GK-00 矩阵则拒绝导入 |
 | 任务卡粒度 | 六张卡各一个行为轴，生产文件按 M 上限拆开 | 共享文件只串行，不并发 |
 | 依赖与顺序 | GK-00 到 GK-05 一条链，无环 | 见实施顺序 |
 | 完整性 | 实现卡自带测试和命令文档；审计卡只写本计划 | 网站页只在改变用户可见行为的卡交付 |
@@ -96,6 +96,7 @@
 | 2026-10-18 16:20:00 UTC | Codex R2 FAIL | ER-04 补上 PR、同一 head 的 base.yml/CodeQL、squash merge 后再对 merge SHA 发布；GK-01 只消费 GK-00 的 GO 正文；单元测试改到集成测试根函数；审计命令不再被「必须 1 passed」套住 | 无新卡 | ER-04、ER-14、Verification 判定口径、GK-00/GK-01 依赖、四张卡的测试命令 |
 | 2026-10-19 | GK-00 审计 | 公开 grok-build HEAD `2bdd1d6a6369de0e8c68132ea4539e9abd9e14a8` 的 shell 是 1.0.45，对不上本机 1.0.62。DEP-GK-PIN 与 GK-01..GK-05 为 HOLD | 无新卡 | GK-00 审计结论、plan-status |
 | 2026-10-19 | 版本修订号 | `grok --version` 为 `1.0.62 (1474f9cbdd91)`，该前缀在公开仓库不存在，二进制无完整 SHA | 无新卡 | GK-00 审计结论 |
+| 2026-10-19 | 用户取消上游 commit 哈希限制 | 外部软件的 commit 不可控，不再做该检查。DEP-GK-PIN 不再因缺少 SHA 而 HOLD。GK-01..GK-05 按本机 1.0.62 字段矩阵 GO | 无新卡 | DEP-GK-PIN、GK-00 结论、Phase 0、故障矩阵、plan-status、plan-long |
 
 ## 已决议设计决策
 
@@ -124,7 +125,7 @@
 - **Decision:** 每条字符串 chunk 单独成为一条 thought 事件，按文件顺序保留。摘要文本只在两种情况下挂到已有事件而不再写第二份正文：与某一条 chunk 完全相同，或与同一 `promptId` 内连续最多 4 条 chunk 的顺序拼接完全相同。对不上的摘要单独成条。空摘要只留下密文字段。禁止按时间戳猜测对应关系。
 - **Alternatives considered:** 总是拼接一个 prompt 的全部 chunk。拒绝，统计已经证明这样会制造会话里不存在的文本。
 - **Consequences:** GK-02 不读 `chat_history.jsonl`。挂接只在 GK-03。
-- **Revisit when:** GK-00 钉住的上游版本证明 chunk 是增量 delta。在该证明写入本计划之前，实现不得拼接。
+- **Revisit when:** 以后的已安装版本证明 chunk 是增量 delta。在该证明写入本计划之前，实现不得拼接。
 
 ### ADR-GK-04: 身份先 preview，支持最后提升
 
@@ -190,7 +191,7 @@ G-01..G-11 与模板相同。本计划的取值如下。
 
 | ID | direction | 类型 | 对象 | Owner | 产物与可用性判据 | 证据 | 超时与失败策略 |
 |---|---|---|---|---|---|---|---|
-| DEP-GK-PIN | incoming | 上游 release | Grok 1.0.62 与 `xai-org/grok-build` 中对应 commit 的会话日志和 hook 文档 | GK-00 审计者 | 计划内写出 commit SHA、版本号和字段矩阵；对不上则 HOLD | 本机 1.0.62 指南与结构统计，2026-10-18 | 2 人日内钉不住则 parser/hook HOLD，不改用浮动 main |
+| DEP-GK-PIN | incoming | 上游 release | 已安装 Grok 的版本字符串和本机 1.0.62 字段矩阵。不要求、也不检查 `xai-org/grok-build` 的 commit SHA | GK-00 审计者 | 计划内写出版本字符串和字段矩阵。缺少上游 SHA 不是 HOLD | 本机 `grok --version` 与 1.0.62 结构统计，2026-10-18 | 用户 2026-10-19 取消哈希限制。形状超出矩阵时由 GK-02 拒绝导入，不改用浮动 main 冒充另一份源码 |
 | DEP-GK-BASE | incoming | 跨计划 | plan-20260924 ACF-09 与 plan-20260925 SCAP-01/02 | 选中卡的执行者 | 开工时两卡仍为 done/complete，且 `CaptureFinalizePolicy` 可注入 | plan-status 对应行 | 缺失则 GK-02 及之后 blocked；GK-00/GK-01 仍可做 |
 | DEP-GK-DB | incoming | 跨计划 | plan-20260910 MIG-02/03 的 role manifest，以及 ADR-CAP-CHECK 的专用连接是否已在源码可用 | schema 执行者 | Repository-only、Global/System 零写可被现有测试证明 | `src/internal/db/migration.rs:615-653` 一带的 runner；开工重读 | 专用 CHECK 路径不存在则 GK-01 blocked，不在池内事务里 DROP 父表 |
 | DEP-GK-WRITE | incoming | 跨计划 | plan-20260904、plan-20260905、plan-20260911、plan-20261018-hermes-capture 的共享 capture / registry / agent 文档写集 | 选中卡的执行者 | `libra status --short --branch` 显示目标文件没有别人的未交接改动 | 上述计划的写集节 | 脏或 in-progress 则停。对方计划正文未列出本计划时，本计划仍然避让 |
@@ -213,11 +214,11 @@ G-01..G-11 与模板相同。本计划的取值如下。
 
 ### Phase 0: 来源钉死
 
-**目标:** 把 1.0.62 的字段矩阵写成 GO/HOLD。
+**目标:** 把已安装 1.0.62 的字段矩阵写成后继卡的合同。不检查上游 commit SHA。
 
 **进入条件:** 本计划规划审查 PASS，并且用户选中 GK-00。
 
-**退出条件:** DEP-GK-PIN 有 SHA，或相关能力 HOLD。
+**退出条件:** 版本字符串和字段矩阵已写入本计划，GK-01..GK-05 为 GO。
 
 ### Phase 1: 身份
 
@@ -265,7 +266,7 @@ G-01..G-11 与模板相同。本计划的取值如下。
 
 | 任务 | type | axis | recovery | complete | self-contained | AC | VER | landing / prod-files | scope | deps | writeset | release | split-from | exception |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| GK-00 | audit | 钉住 Grok 1.0.62 的日志与 hook 形状 | revert 本卡文档 | yes | yes | 5/20 | 2/20 | 0/0 | M | DEP-GK-PIN | no-overlap | no-release | N/A | N/A |
+| GK-00 | audit | 记录已安装 Grok 1.0.62 的日志与 hook 形状，不检查上游 commit | revert 本卡文档 | yes | yes | 5/20 | 2/20 | 0/0 | M | DEP-GK-PIN | no-overlap | no-release | N/A | N/A |
 | GK-01 | migration | Repository 接受 grok 身份且仍 unsupported | 前滚修复迁移，不删用户行 | yes | yes | 7/8 | 2/8 | 4/8 | M | GK-00, DEP-GK-DB, DEP-GK-WRITE | 序列化于共享 schema | independent | N/A | N/A |
 | GK-02 | implementation | 按序保留 thought chunk | revert 本卡提交 | yes | yes | 8/8 | 4/8 | 1/2 | M | GK-01, DEP-GK-BASE, DEP-GK-WRITE | 序列化于 GK-01 | independent | N/A | N/A |
 | GK-03 | implementation | 未证明字段进入普通 transcript 且离开 sink | revert 本卡提交 | yes | yes | 7/8 | 2/8 | 1/2 | M | GK-02, DEP-GK-WRITE | 序列化于 GK-02 | independent | N/A | N/A |
@@ -280,7 +281,7 @@ G-01..G-11 与模板相同。本计划的取值如下。
 
 **Lifecycle / Acceptance:** locally-accepted / 空
 
-**Description:** 把本机 1.0.62 的会话日志和 hook 字段钉到一个上游 commit，并给每个后继能力 GO 或 HOLD。2026-10-19 的审计结论是 DEP-GK-PIN = HOLD，后继卡不开工。Acceptance 仍空，因为 C/D 要等 GK-01，而 GK-01 已 HOLD。
+**Description:** 记录本机 1.0.62 的会话日志和 hook 字段，并给每个后继能力 GO 或 HOLD。2026-10-19 用户取消上游 commit 哈希检查。后继卡按字段矩阵 GO。Acceptance 仍空，因为 C/D 要等 GK-01。
 
 **Out of scope:** 不改生产代码；不读真实会话正文；不安装新的 Grok；解密永久非目标。
 
@@ -294,9 +295,9 @@ G-01..G-11 与模板相同。本计划的取值如下。
 
 ### GK-00 审计结论（2026-10-19）
 
-公开仓库 `xai-org/grok-build` 最新提交是 `2bdd1d6a6369de0e8c68132ea4539e9abd9e14a8`（2026-09-29，message `Synced from monorepo`）。该树的 `crates/codegen/xai-grok-shell/Cargo.toml` 版本是 `1.0.45`。根上 `SOURCE_REV` 是 `559751fdcec02d413e4c57c8832ab275e4f44980`，这是 1.0.45 同步时的 monorepo SHA，不是 1.0.62。公开历史 51 个提交都更早，最新 crate 版本仍是 1.0.45。本机安装版本是 `1.0.62`（2026-10-18 核对）。同一路径的用户指南 `17-sessions.md` 不相等：本机 SHA-256 `95c1893520877457aabcf9fa7286dd6f22c83d2dad792c020dd579e7ca520728`，公开 HEAD SHA-256 `eab0fe715f74f2e379d3ee4f68e68d095aee64d78348f9ac25629619caceafc5`。本机 `grok --version` 打印 `grok 1.0.62 (1474f9cbdd91)`。二进制里只有这 12 位，没有 40 位完整 SHA。GitHub 对 `xai-org/grok-build` 查询 `1474f9cbdd91` 返回 “No commit found for SHA”。因此 **DEP-GK-PIN = HOLD**。不用浮动 `main` 冒充 1.0.62。要解开 HOLD，需要该仓库里出现与 1.0.62 对应的完整 commit，或提供能读到那棵树的权限。
+公开仓库 `xai-org/grok-build` 最新提交是 `2bdd1d6a6369de0e8c68132ea4539e9abd9e14a8`（2026-09-29，message `Synced from monorepo`）。该树的 `crates/codegen/xai-grok-shell/Cargo.toml` 版本是 `1.0.45`。根上 `SOURCE_REV` 是 `559751fdcec02d413e4c57c8832ab275e4f44980`，这是 1.0.45 同步时的 monorepo SHA，不是 1.0.62。公开历史 51 个提交都更早，最新 crate 版本仍是 1.0.45。本机安装版本是 `1.0.62`（2026-10-18 核对）。同一路径的用户指南 `17-sessions.md` 不相等：本机 SHA-256 `95c1893520877457aabcf9fa7286dd6f22c83d2dad792c020dd579e7ca520728`，公开 HEAD SHA-256 `eab0fe715f74f2e379d3ee4f68e68d095aee64d78348f9ac25629619caceafc5`。本机 `grok --version` 打印 `grok 1.0.62 (1474f9cbdd91)`。二进制里只有这 12 位，没有 40 位完整 SHA。GitHub 对 `xai-org/grok-build` 查询 `1474f9cbdd91` 返回 “No commit found for SHA”。这些事实只说明公开仓库落后于已安装版本。2026-10-19 用户取消「必须钉住 `xai-org/grok-build` commit SHA」的限制：外部软件的提交哈希不可控，Libra 不检查它。不用浮动 `main` 冒充 1.0.62，也不再因为缺少 SHA 而 HOLD。
 
-本机 1.0.62 的字段矩阵只作为未钉住的观察，不能当 parser 的 source pin：
+本机 1.0.62 的字段矩阵是 parser 和 hook 的合同：
 
 | 表面 | 键 | 本机 1.0.62 观察 |
 |---|---|---|
@@ -311,19 +312,19 @@ G-01..G-11 与模板相同。本计划的取值如下。
 
 相邻 chunk 不是前缀。一个 `promptId` 下全部拼接对不上摘要。结论保持 **不拼接**。公开 1.0.45 没有被用来推翻 ADR-GK-03。
 
-Hook：`transcript_path` 是会话自己的 `updates.jsonl`。daemon 路由可以缺该字段。用户级 `GROK_HOME/hooks/*.json` 始终运行；项目级 `.grok/hooks` 还要目录信任。这些句子来自本机 1.0.62 指南，不是已钉住的公开 commit。
+Hook：`transcript_path` 是会话自己的 `updates.jsonl`。daemon 路由可以缺该字段。用户级 `GROK_HOME/hooks/*.json` 始终运行；项目级 `.grok/hooks` 还要目录信任。这些句子来自本机 1.0.62 指南。
 
 | 后继卡 | 结论 | 原因 |
 |---|---|---|
-| GK-01 | HOLD | pin 失败后停止。身份迁移不拿未钉住的 1.0.62 当 producer |
-| GK-02 | HOLD | parser。DEP-GK-PIN 未钉住 |
-| GK-03 | HOLD | parser。同上 |
-| GK-04 | HOLD | hook。同上 |
-| GK-05 | HOLD | 依赖 hook 的 GO |
+| GK-01 | GO | 身份迁移只消费字段矩阵里的 kind 名，不依赖上游 SHA |
+| GK-02 | GO | parser 按本表实现。形状超出本表则拒绝导入 |
+| GK-03 | GO | 同上 |
+| GK-04 | GO | hook 事件名和 `transcript_path` 规则已写入本表 |
+| GK-05 | GO | 依赖 hook 的 GO |
 
 **Acceptance criteria:**
 
-- [x] 计划内记下 `xai-org/grok-build` 的完整 commit SHA、与 1.0.62 的对应关系；对不上则 DEP-GK-PIN 为 HOLD。
+- [x] 上游 commit SHA 检查已取消。计划记录已安装版本字符串和字段矩阵，不因缺少 `xai-org/grok-build` SHA 而 HOLD。
 - [x] 字段矩阵覆盖 `updates.jsonl` 行包装、`agent_thought_chunk`、`_meta.eventId`、`promptId`、`turn_completed.usage.reasoningTokens`、compact 事件，以及 `chat_history` 的 reasoning 键。
 - [x] chunk 是否为 delta 有结论。在新证据推翻 ADR-GK-03 之前，结论保持「不拼接」。
 - [x] hook 的 `transcript_path`、daemon 缺字段、用户级与项目级信任差异分开记录。
@@ -331,14 +332,14 @@ Hook：`transcript_path` 是会话自己的 `updates.jsonl`。daemon 路由可�
 
 **Verification:**
 
-- [x] 对照公开 HEAD `2bdd1d6a6369de0e8c68132ea4539e9abd9e14a8` 与本机 1.0.62，SHA 和 HOLD 矩阵已写入本节，不新建证据文件。
+- [x] 公开 HEAD `2bdd1d6a6369de0e8c68132ea4539e9abd9e14a8` 与本机 1.0.62 的差异，以及用户取消 SHA 检查后的 GO 矩阵，已写入本节。
 - [ ] `libra status --short --branch` 证明本卡只改本计划与 `plan-status.md` 的本卡状态。推送后的证据写在审计记录里，不在提交前勾选。
 
 **Full-suite trigger:** N/A（no-release 审计，不执行 C 组）
 
 **Dependencies:** DEP-GK-PIN
 
-**Deliverables:** 本计划中的 SHA、字段矩阵、GO/HOLD 表。
+**Deliverables:** 本计划中的版本字符串、字段矩阵、GO/HOLD 表。不交付上游 commit SHA。
 
 **Implementation write set:** `docs/development/plan/plan-20261018-grok-capture.md`；`docs/development/plan/plan-status.md` 仅本卡状态。
 
@@ -364,7 +365,7 @@ Hook：`transcript_path` 是会话自己的 `updates.jsonl`。daemon 路由可�
 
 **C/D coverage from:** GK-01
 
-**Granularity:** `type=audit; axis=钉住 Grok 1.0.62 的日志与 hook 形状; recovery=revert 本卡文档; complete=yes; self-contained=yes; AC=5/20; VER=2/20; landing=0; prod-files=0; scope=M; deps=DEP-GK-PIN; writeset=no-overlap; release=no-release; split-from=N/A; exception=N/A`
+**Granularity:** `type=audit; axis=记录已安装 Grok 1.0.62 的日志与 hook 形状，不检查上游 commit; recovery=revert 本卡文档; complete=yes; self-contained=yes; AC=5/20; VER=2/20; landing=0; prod-files=0; scope=M; deps=DEP-GK-PIN; writeset=no-overlap; release=no-release; split-from=N/A; exception=N/A`
 
 ### Task GK-01: Repository grok 身份迁移
 
@@ -736,7 +737,7 @@ Hook：`transcript_path` 是会话自己的 `updates.jsonl`。daemon 路由可�
 
 | 故障点 | 可接受残留 | 恢复动作 | 禁止结果 |
 |---|---|---|---|
-| 上游 SHA 钉不住 | HOLD | 停在 GK-00 | 用浮动 main 写 parser |
+| 上游 SHA 不可得 | 不 HOLD。按已安装版本的字段矩阵实现 | 形状超出矩阵则拒绝导入 | 用浮动 main 冒充 1.0.62，或把缺少 SHA 当成停工条件 |
 | CHECK 迁移失败 | 旧库未改 | 丢弃专用连接 | 把 foreign_keys=OFF 还回池，或删用户行 |
 | 日志超限或读超时 | durable pending，partial | 下一轮从偏移续读 | 报 complete，或删掉已写入的 Thought |
 | rewind 或 compact | 旧段保留 | 新段另记 | 回写旧 checkpoint |

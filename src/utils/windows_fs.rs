@@ -253,6 +253,28 @@ pub(crate) fn open_tree(path: &Path) -> io::Result<File> {
         .ok_or_else(|| invalid("capture directory is empty"))
 }
 
+/// Open a directory for handle-relative workspace mutations. The strict pin
+/// proves the final identity before the mutable handle permits child writes;
+/// deletion sharing remains denied so the directory itself cannot be renamed.
+pub(crate) fn open_mutable_tree(path: &Path) -> io::Result<File> {
+    let pinned = open_tree(path)?;
+    let resolved = handle_path(&pinned)?;
+    let mutable = open_with_share(
+        &resolved,
+        true,
+        GENERIC_READ,
+        OPEN_EXISTING,
+        null(),
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+    )?;
+    if identity(&mutable)? != identity(&pinned)? {
+        return Err(io::Error::other(
+            "workspace directory changed while opening; retry the command",
+        ));
+    }
+    Ok(mutable)
+}
+
 pub(crate) struct PinnedParent {
     _ancestry: Vec<File>,
     path: PathBuf,
@@ -290,6 +312,18 @@ pub(crate) fn open_at(parent: &File, name: &OsStr, directory: bool) -> io::Resul
         GENERIC_READ,
         FILE_OPEN,
         FILE_SHARE_READ,
+        null(),
+    )
+}
+
+pub(crate) fn open_mutable_at(parent: &File, name: &OsStr) -> io::Result<File> {
+    open_relative(
+        parent,
+        name,
+        true,
+        GENERIC_READ,
+        FILE_OPEN,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
         null(),
     )
 }
@@ -539,9 +573,13 @@ pub(crate) fn create_directory_at(parent: &File, name: &OsStr, private: bool) ->
     Ok(file)
 }
 
-/// Create a new owned workspace directory. Unlike `create_directory_at`, an
-/// existing entry is always an error; no unrelated directory can be adopted.
-pub(crate) fn exclusive_create_directory_at(parent: &File, name: &OsStr) -> io::Result<File> {
+/// Reserve a new owned workspace directory; an existing entry is always an
+/// error. Child writes are allowed, while renaming or deleting the held
+/// directory remains denied.
+pub(crate) fn exclusive_create_mutable_directory_at(
+    parent: &File,
+    name: &OsStr,
+) -> io::Result<File> {
     let descriptor = private_descriptor()?;
     let directory = open_relative(
         parent,
@@ -549,7 +587,7 @@ pub(crate) fn exclusive_create_directory_at(parent: &File, name: &OsStr) -> io::
         true,
         GENERIC_READ,
         FILE_CREATE,
-        FILE_SHARE_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
         descriptor.0.cast(),
     )?;
     validate_private(&directory)?;
@@ -1380,11 +1418,11 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let parent = open_tree(root.path()).unwrap();
         let name = OsStr::new("workspace");
-        let directory = exclusive_create_directory_at(&parent, name).unwrap();
+        let directory = exclusive_create_mutable_directory_at(&parent, name).unwrap();
         validate_private(&directory).unwrap();
         let expected = identity(&directory).unwrap();
         assert_eq!(
-            exclusive_create_directory_at(&parent, name)
+            exclusive_create_mutable_directory_at(&parent, name)
                 .unwrap_err()
                 .kind(),
             io::ErrorKind::AlreadyExists
@@ -1417,7 +1455,7 @@ mod tests {
         use std::io::Write;
 
         let root = tempfile::tempdir().unwrap();
-        let parent = open_tree(root.path()).unwrap();
+        let parent = open_mutable_tree(root.path()).unwrap();
         let mut staged = create_private_file_at(&parent, OsStr::new("staged.json")).unwrap();
         staged.write_all(b"complete proof").unwrap();
         staged.sync_all().unwrap();
@@ -1474,7 +1512,7 @@ mod tests {
     #[test]
     fn workspace_cleanup_refuses_a_replacement_identity() {
         let root = tempfile::tempdir().unwrap();
-        let parent = open_tree(root.path()).unwrap();
+        let parent = open_mutable_tree(root.path()).unwrap();
         let name = OsStr::new("owned.txt");
         std::fs::write(root.path().join(name), b"owned").unwrap();
         let original = inspect_entry_at(&parent, name).unwrap();
@@ -1499,8 +1537,8 @@ mod tests {
     #[test]
     fn worktree_move_checks_source_identity_and_never_replaces_destination() {
         let root = tempfile::tempdir().unwrap();
-        let parent = open_tree(root.path()).unwrap();
-        let source = exclusive_create_directory_at(&parent, OsStr::new("source")).unwrap();
+        let parent = open_mutable_tree(root.path()).unwrap();
+        let source = exclusive_create_mutable_directory_at(&parent, OsStr::new("source")).unwrap();
         let source_id = identity(&source).unwrap();
         drop(source);
         std::fs::write(root.path().join("source/sentinel"), b"source").unwrap();
@@ -1512,7 +1550,8 @@ mod tests {
             OsStr::new("previous"),
         )
         .unwrap();
-        let replacement = exclusive_create_directory_at(&parent, OsStr::new("source")).unwrap();
+        let replacement =
+            exclusive_create_mutable_directory_at(&parent, OsStr::new("source")).unwrap();
         let replacement_id = identity(&replacement).unwrap();
         drop(replacement);
         assert_eq!(
@@ -1563,8 +1602,9 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let outside = root.path().join("outside");
         std::fs::write(&outside, b"unchanged").unwrap();
-        let parent = open_tree(root.path()).unwrap();
-        let workspace = exclusive_create_directory_at(&parent, OsStr::new("workspace")).unwrap();
+        let parent = open_mutable_tree(root.path()).unwrap();
+        let workspace =
+            exclusive_create_mutable_directory_at(&parent, OsStr::new("workspace")).unwrap();
         let link = root.path().join("workspace/link");
         std::fs::hard_link(&outside, &link).unwrap();
         let original_permissions = std::fs::metadata(&outside).unwrap().permissions();
@@ -1674,11 +1714,18 @@ mod tests {
             .unwrap();
         assert!(status.success(), "create junction fixture");
         assert!(open_tree(&junction).is_err());
+        assert!(open_mutable_tree(&junction).is_err());
         let parent = open_tree(root.path()).unwrap();
         assert!(open_at(&parent, OsStr::new("junction"), true).is_err());
+        assert!(open_mutable_at(&parent, OsStr::new("junction")).is_err());
+        std::fs::write(root.path().join("file"), b"ordinary file").unwrap();
+        assert!(open_mutable_at(&parent, OsStr::new("file")).is_err());
         assert!(std::fs::rename(root.path(), root.path().with_extension("moved")).is_err());
         assert!(open_at(&parent, OsStr::new("../outside"), false).is_err());
         drop(parent);
+        let mutable = open_mutable_tree(root.path()).unwrap();
+        assert!(std::fs::rename(root.path(), root.path().with_extension("moved")).is_err());
+        drop(mutable);
         std::fs::remove_dir(&junction).unwrap();
     }
 }

@@ -1376,13 +1376,13 @@ mod owned_fs {
         use super::*;
         use crate::utils::windows_fs;
         pub fn open_directory(path: &Path) -> io::Result<File> {
-            windows_fs::open_tree(path)
+            windows_fs::open_mutable_tree(path)
         }
         pub fn open_child_directory(parent: &File, name: &OsStr) -> io::Result<File> {
-            windows_fs::open_at(parent, name, true)
+            windows_fs::open_mutable_at(parent, name)
         }
         pub fn create_directory(parent: &File, name: &OsStr) -> io::Result<File> {
-            windows_fs::exclusive_create_directory_at(parent, name)
+            windows_fs::exclusive_create_mutable_directory_at(parent, name)
         }
         pub fn create_file(parent: &File, name: &OsStr) -> io::Result<File> {
             windows_fs::create_private_file_at(parent, name)
@@ -1427,9 +1427,8 @@ mod owned_fs {
             Ok(())
         }
         pub fn sync_directory(_directory: &File) -> io::Result<()> {
-            // Windows directory pins deny write sharing, so FlushFileBuffers is
-            // unavailable here. Namespace calls are synchronous; the regular-file
-            // intent is flushed before allocation and retained until cleanup ends.
+            // Windows namespace calls are synchronous; the regular-file intent
+            // is flushed before allocation and retained until cleanup ends.
             Ok(())
         }
     }

@@ -233,7 +233,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $false
-          foreach ($filter in @('utils::windows_fs::tests::', 'internal::ai::capture::key::windows::tests::', 'internal::ai::workspace_isolation::tests::wd_full_copy_refuses_junction_to_outside_directory')) {
+          foreach ($filter in @('utils::windows_fs::tests::', 'internal::ai::capture::key::windows::tests::', 'internal::ai::workspace_isolation::tests::')) {
             $executed = @(& cargo test --locked --lib $filter -- --nocapture --color never --test-threads=1)
             $testExit = $LASTEXITCODE
             $executed | Write-Output

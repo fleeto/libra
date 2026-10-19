@@ -274,7 +274,7 @@ fn create_directory_at(
     exclusive: bool,
 ) -> io::Result<fs::File> {
     if exclusive {
-        crate::utils::windows_fs::exclusive_create_directory_at(parent, name)
+        crate::utils::windows_fs::exclusive_create_mutable_directory_at(parent, name)
     } else {
         crate::utils::windows_fs::ensure_directory_at(parent, name)
     }

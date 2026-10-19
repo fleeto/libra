@@ -15,6 +15,12 @@ pub use events::{
     classify_claude_fields, control_sensitive_names, deprecated_alias_names, event_class,
     known_event_names, reset_message_display_counts_for_test, safely_installable_names,
 };
+pub use settings::ClaudeHookDoctorEvent;
+
+/// Event-level Claude hook report for `libra agent doctor`.
+pub fn claude_hook_doctor_events() -> Result<Vec<ClaudeHookDoctorEvent>> {
+    settings::claude_hook_doctor_events()
+}
 
 use super::super::{
     lifecycle::{LifecycleEvent, SessionHookEnvelope},

@@ -275,6 +275,12 @@ struct ProviderHookStatus {
 struct ProviderHookEventStatus {
     event: &'static str,
     installed: Option<bool>,
+    /// `installable` or `excluded`. Omitted for providers that do not report a class.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    class: Option<&'static str>,
+    /// Static reason. It does not include a hook command or payload.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<&'static str>,
 }
 
 #[derive(Debug, Serialize)]
@@ -4862,6 +4868,44 @@ fn check_provider(
             }
         }
     };
+    if name == "claude-code" {
+        return match crate::internal::ai::hooks::providers::claude::claude_hook_doctor_events() {
+            Ok(rows) => {
+                let installable_count = rows.iter().filter(|row| row.class == "installable").count();
+                let configured_count = rows
+                    .iter()
+                    .filter(|row| row.class == "installable" && row.configured)
+                    .count();
+                let installed = installable_count > 0 && configured_count == installable_count;
+                let events = rows
+                    .into_iter()
+                    .map(|row| ProviderHookEventStatus {
+                        event: row.event,
+                        installed: Some(row.configured),
+                        class: Some(row.class),
+                        reason: Some(row.reason),
+                    })
+                    .collect();
+                ProviderHookStatus {
+                    name,
+                    tier,
+                    installed: Some(installed),
+                    error: None,
+                    events,
+                }
+            }
+            Err(_) => ProviderHookStatus {
+                name,
+                tier,
+                installed: None,
+                error: Some(
+                    "Claude hook settings could not be inspected; verify the settings file and rerun doctor"
+                        .to_string(),
+                ),
+                events: Vec::new(),
+            },
+        };
+    }
     let events = if name == "opencode" {
         use crate::internal::ai::hooks::providers::opencode::events::{
             OPENCODE_HOOK_EVENT_SPECS, OPENCODE_LEGACY_EVENT_SPECS, OpenCodeForwarding,
@@ -4873,6 +4917,8 @@ fn check_provider(
             .map(|event| ProviderHookEventStatus {
                 event: event.name,
                 installed,
+                class: None,
+                reason: None,
             })
             .collect()
     } else {
@@ -4975,11 +5021,15 @@ fn emit_report(report: &DoctorReport, output: &OutputConfig) -> CliResult<()> {
         }
         for event in &ph.events {
             let state = match event.installed {
-                Some(true) => "installed",
-                Some(false) => "NOT installed",
+                Some(true) => "configured",
+                Some(false) => "not configured",
                 None => "unknown",
             };
-            println!("    {}: {state} (managed template)", event.event);
+            let detail = event.reason.unwrap_or(match event.class {
+                Some(class) => class,
+                None => "managed template",
+            });
+            println!("    {}: {state} ({detail})", event.event);
         }
     }
 

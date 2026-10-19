@@ -9,7 +9,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -26,6 +26,9 @@ use super::super::super::{
 const DEFAULT_HOOK_TIMEOUT_SECS: u64 = 10;
 const CLAUDE_SETTINGS_DIR: &str = ".claude";
 const CLAUDE_SETTINGS_FILE: &str = "settings.json";
+/// Read and write budget for one Claude settings file. A larger file is refused
+/// before any rewrite so a failure cannot truncate it.
+const CLAUDE_SETTINGS_MAX_BYTES: u64 = 1_048_576;
 /// Durable marker attached to current Libra-owned command handlers.
 ///
 /// Claude supports `statusMessage` on command hooks.  Unlike an arbitrary
@@ -43,7 +46,8 @@ const LIBRA_CLAUDE_STATUS_MESSAGE: &str = "libra capture";
 // `Subagent*` boundary event is registered here: Claude does not emit stable
 // sub-agent boundaries, so its on-disk sub-agent content stays `unresolved` (DR-06
 // premise). Keep in sync with the installed config in `docs/commands/hooks.md`.
-const CLAUDE_HOOK_FORWARD_MAP: &[(&str, &str)] = &[
+/// Historical verbs for the original six events. Later safe events use `observe`.
+const CLAUDE_LEGACY_FORWARD_MAP: &[(&str, &str)] = &[
     ("SessionStart", "session-start"),
     ("UserPromptSubmit", "prompt"),
     ("PreToolUse", "tool-use"),
@@ -51,6 +55,36 @@ const CLAUDE_HOOK_FORWARD_MAP: &[(&str, &str)] = &[
     ("Stop", "stop"),
     ("SessionEnd", "session-end"),
 ];
+
+struct ClaudeInstallTarget {
+    event: &'static str,
+    subcommand: &'static str,
+    /// SessionEnd omits the host timeout so it cannot raise the shared
+    /// SessionEnd budget. Every other safe event keeps the normal timeout.
+    set_host_timeout: bool,
+}
+
+fn claude_install_targets() -> Vec<ClaudeInstallTarget> {
+    let mut targets = Vec::new();
+    for (event, subcommand) in CLAUDE_LEGACY_FORWARD_MAP {
+        targets.push(ClaudeInstallTarget {
+            event,
+            subcommand,
+            set_host_timeout: *event != "SessionEnd",
+        });
+    }
+    for event in super::events::safely_installable_names() {
+        if targets.iter().any(|target| target.event == event) {
+            continue;
+        }
+        targets.push(ClaudeInstallTarget {
+            event,
+            subcommand: "observe",
+            set_host_timeout: true,
+        });
+    }
+    targets
+}
 
 #[derive(Debug, Serialize, Deserialize, Default)]
 struct ClaudeSettings {
@@ -99,6 +133,7 @@ pub(super) fn install_claude_hooks(options: &ProviderInstallOptions) -> Result<(
 /// the same installer flow with precise provider timeout values without
 /// changing the process working directory.
 fn install_claude_hooks_at(settings_path: &Path, binary_path: &str, timeout: u64) -> Result<()> {
+    reject_unsafe_claude_settings(settings_path)?;
     let capture_budget_millis = capture_budget_millis_for_host_timeout(timeout)?;
     let mut settings = load_claude_settings(settings_path)?;
     let changed = upsert_claude_hooks(&mut settings, binary_path, timeout, capture_budget_millis);
@@ -120,13 +155,17 @@ fn install_claude_hooks_at(settings_path: &Path, binary_path: &str, timeout: u64
 
 pub(super) fn uninstall_claude_hooks() -> Result<()> {
     let settings_path = claude_settings_path()?;
-    if !settings_path.exists() {
-        println!(
-            "Claude hook settings not found at {}",
-            settings_path.display()
-        );
-        return Ok(());
+    match std::fs::symlink_metadata(&settings_path) {
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            println!(
+                "Claude hook settings not found at {}",
+                settings_path.display()
+            );
+            return Ok(());
+        }
+        _ => {}
     }
+    reject_unsafe_claude_settings(&settings_path)?;
 
     let mut settings = load_claude_settings(&settings_path)?;
     let changed = remove_libra_claude_hooks(&mut settings);
@@ -147,12 +186,119 @@ pub(super) fn uninstall_claude_hooks() -> Result<()> {
 
 pub(super) fn claude_hooks_are_installed() -> Result<bool> {
     let settings_path = claude_settings_path()?;
-    if !settings_path.exists() {
-        return Ok(false);
+    match std::fs::symlink_metadata(&settings_path) {
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        _ => {}
     }
+    reject_unsafe_claude_settings(&settings_path)?;
     let settings = load_claude_settings(&settings_path)?;
     let binary_path = resolve_hook_binary_path(None)?;
     Ok(all_claude_specs_installed(&settings, &binary_path))
+}
+
+/// One registry row for `libra agent doctor`.
+///
+/// `class` is `installable` or `excluded`. `reason` is a static sentence and
+/// does not include a hook command or payload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaudeHookDoctorEvent {
+    pub event: &'static str,
+    pub class: &'static str,
+    pub configured: bool,
+    pub reason: &'static str,
+}
+
+pub(super) fn claude_hook_doctor_events() -> Result<Vec<ClaudeHookDoctorEvent>> {
+    let settings_path = claude_settings_path()?;
+    reject_unsafe_claude_settings(&settings_path)?;
+    let settings = match std::fs::symlink_metadata(&settings_path) {
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => ClaudeSettings::default(),
+        _ => load_claude_settings(&settings_path)?,
+    };
+    let binary_path = resolve_hook_binary_path(None)?;
+    let targets = claude_install_targets();
+    let mut rows = Vec::new();
+    for event in super::events::known_event_names() {
+        let Some(class) = super::events::event_class(event) else {
+            continue;
+        };
+        let row = match class {
+            super::events::ClaudeEventClass::SafelyInstallable => {
+                let configured = targets.iter().any(|target| {
+                    target.event == event && event_has_owned_hook(&settings, target, &binary_path)
+                });
+                ClaudeHookDoctorEvent {
+                    event,
+                    class: "installable",
+                    configured,
+                    reason: if configured {
+                        "libra-owned observer"
+                    } else {
+                        "not configured"
+                    },
+                }
+            }
+            super::events::ClaudeEventClass::ControlSensitive => ClaudeHookDoctorEvent {
+                event,
+                class: "excluded",
+                configured: false,
+                reason: "control-sensitive; not installed",
+            },
+            super::events::ClaudeEventClass::DeprecatedAlias => ClaudeHookDoctorEvent {
+                event,
+                class: "excluded",
+                configured: false,
+                reason: "deprecated alias; not in the installable set",
+            },
+        };
+        rows.push(row);
+    }
+    Ok(rows)
+}
+
+fn reject_unsafe_claude_settings(path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        match std::fs::symlink_metadata(parent) {
+            Ok(meta) if meta.file_type().is_symlink() || !meta.is_dir() => {
+                anyhow::bail!(
+                    "Claude settings directory '{}' is not a regular directory; refusing to follow it",
+                    parent.display()
+                );
+            }
+            Ok(_) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => {
+                return Err(err).with_context(|| {
+                    format!(
+                        "failed to inspect Claude settings directory '{}'",
+                        parent.display()
+                    )
+                });
+            }
+        }
+    }
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() || !meta.is_file() => {
+            anyhow::bail!(
+                "Claude settings file '{}' is not a regular file; refusing to follow it",
+                path.display()
+            );
+        }
+        Ok(meta) if meta.len() > CLAUDE_SETTINGS_MAX_BYTES => {
+            anyhow::bail!(
+                "Claude settings file '{}' exceeds the 1 MiB read budget",
+                path.display()
+            );
+        }
+        Ok(_) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err).with_context(|| {
+            format!(
+                "failed to inspect Claude settings file '{}'",
+                path.display()
+            )
+        }),
+    }
 }
 
 fn claude_settings_path() -> Result<PathBuf> {
@@ -173,16 +319,25 @@ fn upsert_claude_hooks(
 ) -> bool {
     let mut changed = false;
 
-    for (event_name, subcommand) in CLAUDE_HOOK_FORWARD_MAP {
+    let session_end_budget = capture_budget_millis_for_host_timeout(DEFAULT_HOOK_TIMEOUT_SECS)
+        .unwrap_or(capture_budget_millis);
+    for target in claude_install_targets() {
+        let event_name = target.event;
+        let subcommand = target.subcommand;
+        let budget = if target.set_host_timeout {
+            capture_budget_millis
+        } else {
+            session_end_budget
+        };
         let desired_entry = ClaudeHookEntry {
             entry_type: "command".to_string(),
-            command: claude_hook_command(binary_path, subcommand, capture_budget_millis),
-            timeout: Some(timeout),
+            command: claude_hook_command(binary_path, subcommand, budget),
+            timeout: target.set_host_timeout.then_some(timeout),
             status_message: Some(LIBRA_CLAUDE_STATUS_MESSAGE.to_string()),
             extra: BTreeMap::new(),
         };
 
-        let original_matchers = settings.hooks.remove(*event_name).unwrap_or_default();
+        let original_matchers = settings.hooks.remove(event_name).unwrap_or_default();
         let mut rebuilt_matchers = Vec::with_capacity(original_matchers.len() + 1);
         let mut has_desired_entry = false;
 
@@ -222,7 +377,7 @@ fn upsert_claude_hooks(
 
         settings
             .hooks
-            .insert((*event_name).to_string(), rebuilt_matchers);
+            .insert(event_name.to_string(), rebuilt_matchers);
     }
 
     changed
@@ -233,9 +388,9 @@ fn remove_libra_claude_hooks(settings: &mut ClaudeSettings) -> bool {
     let mut changed = false;
 
     for key in keys {
-        let Some((_, subcommand)) = CLAUDE_HOOK_FORWARD_MAP
-            .iter()
-            .find(|(event_name, _)| *event_name == key)
+        let Some(target) = claude_install_targets()
+            .into_iter()
+            .find(|target| target.event == key)
         else {
             // Unknown event names were never installed by Libra. Preserve
             // their groups verbatim even if a user command resembles ours.
@@ -250,7 +405,7 @@ fn remove_libra_claude_hooks(settings: &mut ClaudeSettings) -> bool {
             if matcher.matcher.is_none() {
                 matcher
                     .hooks
-                    .retain(|hook| !is_managed_claude_hook_for_subcommand(hook, subcommand));
+                    .retain(|hook| !is_managed_claude_hook_for_subcommand(hook, target.subcommand));
             }
         }
         matchers.retain(|matcher| !matcher.hooks.is_empty());
@@ -267,34 +422,71 @@ fn remove_libra_claude_hooks(settings: &mut ClaudeSettings) -> bool {
 }
 
 fn all_claude_specs_installed(settings: &ClaudeSettings, binary_path: &str) -> bool {
-    CLAUDE_HOOK_FORWARD_MAP
+    claude_install_targets()
         .iter()
-        .all(|(event_name, subcommand)| {
-            settings.hooks.get(*event_name).is_some_and(|matchers| {
-                matchers.iter().any(|matcher| {
-                    matcher.matcher.is_none()
-                        && matcher.hooks.iter().any(|hook| {
-                            let Some(timeout) = hook.timeout else {
-                                return false;
-                            };
-                            let Ok(capture_budget_millis) =
-                                capture_budget_millis_for_host_timeout(timeout)
-                            else {
-                                return false;
-                            };
-                            hook.entry_type == "command"
-                                && hook.status_message.as_deref()
-                                    == Some(LIBRA_CLAUDE_STATUS_MESSAGE)
-                                && hook.command
-                                    == claude_hook_command(
-                                        binary_path,
-                                        subcommand,
-                                        capture_budget_millis,
-                                    )
-                        })
-                })
-            })
+        .all(|target| event_has_owned_hook(settings, target, binary_path))
+}
+
+fn event_has_owned_hook(
+    settings: &ClaudeSettings,
+    target: &ClaudeInstallTarget,
+    binary_path: &str,
+) -> bool {
+    settings.hooks.get(target.event).is_some_and(|matchers| {
+        matchers.iter().any(|matcher| {
+            matcher.matcher.is_none()
+                && matcher
+                    .hooks
+                    .iter()
+                    .any(|hook| hook_matches_install_target(hook, target, binary_path))
         })
+    })
+}
+
+fn hook_matches_install_target(
+    hook: &ClaudeHookEntry,
+    target: &ClaudeInstallTarget,
+    binary_path: &str,
+) -> bool {
+    if hook.entry_type != "command"
+        || hook.status_message.as_deref() != Some(LIBRA_CLAUDE_STATUS_MESSAGE)
+    {
+        return false;
+    }
+    let budget = if target.set_host_timeout {
+        let Some(timeout) = hook.timeout else {
+            return false;
+        };
+        match capture_budget_millis_for_host_timeout(timeout) {
+            Ok(budget) => budget,
+            Err(_) => return false,
+        }
+    } else if hook.timeout.is_some() {
+        return false;
+    } else {
+        match capture_budget_millis_for_host_timeout(DEFAULT_HOOK_TIMEOUT_SECS) {
+            Ok(budget) => budget,
+            Err(_) => return false,
+        }
+    };
+    hook.command == claude_hook_command(binary_path, target.subcommand, budget)
+}
+
+fn hook_matches_session_end_without_timeout(hook: &ClaudeHookEntry) -> bool {
+    if hook.timeout.is_some() || hook.status_message.as_deref() != Some(LIBRA_CLAUDE_STATUS_MESSAGE)
+    {
+        return false;
+    }
+    let Ok(budget) = capture_budget_millis_for_host_timeout(DEFAULT_HOOK_TIMEOUT_SECS) else {
+        return false;
+    };
+    matches!(
+        parse_managed_claude_command_for_subcommand(&hook.command, "session-end"),
+        Some(ManagedClaudeCommand::Canonical {
+            capture_budget_millis,
+            ..
+        }) if capture_budget_millis == budget
+    )
 }
 
 fn claude_hook_command(binary_path: &str, subcommand: &str, capture_budget_millis: u64) -> String {
@@ -333,6 +525,9 @@ fn is_replaced_managed_claude_hook(
 fn is_managed_claude_hook_for_subcommand(hook: &ClaudeHookEntry, subcommand: &str) -> bool {
     if hook.entry_type != "command" {
         return false;
+    }
+    if subcommand == "session-end" && hook_matches_session_end_without_timeout(hook) {
+        return true;
     }
     match parse_managed_claude_command_for_subcommand(&hook.command, subcommand) {
         // `statusMessage` was introduced with the budget-bearing canonical
@@ -515,26 +710,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn claude_hook_forward_map_pins_events_and_has_no_subagent_boundary() {
-        // DR-00: `PreToolUse` is registered alongside `PostToolUse`, both routed to
-        // the `tool-use` verb. DR-06 premise preserved: no `Subagent*` boundary event
-        // is forwarded for Claude, so its on-disk sub-agent content stays `unresolved`.
+    fn claude_install_targets_cover_safe_events_and_hold_control_sensitive() {
+        let targets = claude_install_targets();
         assert_eq!(
-            CLAUDE_HOOK_FORWARD_MAP,
-            [
-                ("SessionStart", "session-start"),
-                ("UserPromptSubmit", "prompt"),
-                ("PreToolUse", "tool-use"),
-                ("PostToolUse", "tool-use"),
-                ("Stop", "stop"),
-                ("SessionEnd", "session-end"),
-            ]
+            targets.len(),
+            super::super::events::safely_installable_names().len()
         );
-        assert!(
-            CLAUDE_HOOK_FORWARD_MAP
-                .iter()
-                .all(|(event, _)| !event.starts_with("Subagent"))
-        );
+        for (event, subcommand) in CLAUDE_LEGACY_FORWARD_MAP {
+            assert!(
+                targets.iter().any(|target| {
+                    target.event == *event
+                        && target.subcommand == *subcommand
+                        && target.set_host_timeout == (*event != "SessionEnd")
+                }),
+                "{event} must keep its historical verb"
+            );
+        }
+        assert!(targets.iter().any(|target| {
+            target.event == "FileChanged"
+                && target.subcommand == "observe"
+                && target.set_host_timeout
+        }));
+        for held in ["WorktreeCreate", "WorktreeRemove", "PreModelSwitch"] {
+            assert!(
+                targets.iter().all(|target| target.event != held),
+                "{held} must stay out of the install set"
+            );
+        }
     }
 
     #[test]
@@ -786,15 +988,21 @@ mod tests {
                 .expect("install Claude hooks");
 
             let settings = load_claude_settings(&settings_path).expect("read installed settings");
-            for (event_name, subcommand) in CLAUDE_HOOK_FORWARD_MAP {
-                let expected = claude_hook_command("/opt/libra", subcommand, capture_budget_millis);
-                let installed = settings.hooks.get(*event_name).is_some_and(|matchers| {
+            for target in claude_install_targets() {
+                let (expected_timeout, expected_budget) = if target.set_host_timeout {
+                    (Some(timeout_secs), capture_budget_millis)
+                } else {
+                    (None, 9_000)
+                };
+                let expected =
+                    claude_hook_command("/opt/libra", target.subcommand, expected_budget);
+                let installed = settings.hooks.get(target.event).is_some_and(|matchers| {
                     matchers.iter().any(|matcher| {
                         matcher.matcher.is_none()
                             && matcher.hooks.iter().any(|hook| {
                                 hook.entry_type == "command"
                                     && hook.command == expected
-                                    && hook.timeout == Some(timeout_secs)
+                                    && hook.timeout == expected_timeout
                                     && hook.status_message.as_deref()
                                         == Some(LIBRA_CLAUDE_STATUS_MESSAGE)
                             })
@@ -802,7 +1010,8 @@ mod tests {
                 });
                 assert!(
                     installed,
-                    "{event_name} must retain {timeout_secs}s and emit '{expected}': {settings:?}"
+                    "{} must retain timeout {expected_timeout:?} and emit '{expected}'",
+                    target.event
                 );
             }
         }

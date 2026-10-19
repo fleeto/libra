@@ -618,10 +618,9 @@ fn claude_disable_preserves_unverified_legacy_commands_and_user_hook() {
                 }
             }
         }
-        assert_eq!(
-            legacy_commands,
-            CLAUDE_FORWARDED_EVENTS.len(),
-            "every managed Claude command must exercise the no-budget legacy shape"
+        assert!(
+            legacy_commands > CLAUDE_FORWARDED_EVENTS.len(),
+            "enable must write the safe set, including the historical six: {legacy_commands}"
         );
         hooks
             .get_mut("SessionStart")
@@ -773,6 +772,214 @@ fn enable_and_disable_preserve_scoped_or_unmarked_renamed_user_hook_commands() {
                 })
         }),
         "enable/disable must preserve the unmarked Codex user hook: {codex_after}"
+    );
+}
+
+/// Enable writes every safe Claude event, leaves the three control-sensitive
+/// events untouched, omits a SessionEnd timeout, and does not give FileChanged
+/// a matcher or watchPaths. Doctor reports the same split. A symlink settings
+/// file is refused without a write.
+#[test]
+fn claude_safe_install_excludes_hold_events_and_doctor_lists_them() {
+    let repo = HookRepo::init();
+    let settings_path = repo.repo.join(".claude/settings.json");
+    std::fs::create_dir_all(settings_path.parent().expect("settings parent"))
+        .expect("create .claude");
+    let user_observe = format!(
+        "{} hooks claude observe --capture-budget-ms 9000",
+        canonical_binary_path()
+    );
+    let hold = json!({
+        "WorktreeCreate": [{
+            "matcher": "user-worktree",
+            "hooks": [{"type": "command", "command": "echo create-worktree", "timeout": 3}]
+        }],
+        "WorktreeRemove": [{
+            "hooks": [{"type": "command", "command": "echo remove-worktree"}]
+        }],
+        "PreModelSwitch": [{
+            "matcher": "user-model",
+            "hooks": [{"type": "command", "command": "echo block-switch", "timeout": 30}]
+        }],
+        "SessionStart": [{
+            "matcher": "user-owned",
+            "hooks": [{
+                "type": "command",
+                "command": user_observe,
+                "timeout": 10,
+                "statusMessage": "libra capture"
+            }]
+        }]
+    });
+    std::fs::write(
+        &settings_path,
+        serde_json::to_string_pretty(&json!({"hooks": hold})).expect("seed settings"),
+    )
+    .expect("write seeded settings");
+    let seeded: Value =
+        serde_json::from_str(&std::fs::read_to_string(&settings_path).expect("read seed"))
+            .expect("seed json");
+
+    let out = repo.run(&["agent", "enable", "--agent", "claude"], None, &[]);
+    assert!(out.status.success(), "enable Claude: {}", describe(&out));
+    assert!(
+        !String::from_utf8_lossy(&out.stdout).contains("CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS"),
+        "enable must not set the SessionEnd timeout override"
+    );
+    let installed_text = std::fs::read_to_string(&settings_path).expect("read installed settings");
+    assert!(!installed_text.contains("CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS"));
+    let installed: Value = serde_json::from_str(&installed_text).expect("installed json");
+    for name in ["WorktreeCreate", "WorktreeRemove", "PreModelSwitch"] {
+        assert_eq!(
+            installed["hooks"][name], seeded["hooks"][name],
+            "{name} must stay the user's configuration"
+        );
+    }
+    let session_end = &installed["hooks"]["SessionEnd"];
+    let libra_session_end = session_end
+        .as_array()
+        .expect("SessionEnd groups")
+        .iter()
+        .flat_map(|group| group["hooks"].as_array().into_iter().flatten())
+        .find(|hook| hook["statusMessage"] == json!("libra capture"))
+        .expect("Libra SessionEnd entry");
+    assert!(libra_session_end.get("timeout").is_none());
+    assert!(
+        libra_session_end["command"]
+            .as_str()
+            .expect("command")
+            .contains(" hooks claude session-end ")
+    );
+    let file_changed = &installed["hooks"]["FileChanged"];
+    assert!(file_changed.get("watchPaths").is_none());
+    let file_changed_text = file_changed.to_string();
+    assert!(!file_changed_text.contains("watchPaths"));
+    assert!(
+        file_changed
+            .as_array()
+            .expect("FileChanged groups")
+            .iter()
+            .any(|group| {
+                group.get("matcher").is_none()
+                    && group["hooks"].as_array().is_some_and(|hooks| {
+                        hooks.iter().any(|hook| {
+                            hook["statusMessage"] == json!("libra capture")
+                                && hook["command"].as_str().is_some_and(|command| {
+                                    command.contains(" hooks claude observe ")
+                                })
+                        })
+                    })
+            }),
+        "FileChanged must be a matcher-less observe entry: {file_changed}"
+    );
+    assert!(
+        installed["hooks"]["SessionStart"]
+            .as_array()
+            .expect("SessionStart groups")
+            .iter()
+            .any(|group| group["matcher"] == json!("user-owned")),
+        "the similar user command must stay"
+    );
+
+    let again = repo.run(&["agent", "enable", "--agent", "claude"], None, &[]);
+    assert!(again.status.success(), "re-enable: {}", describe(&again));
+    assert_eq!(
+        std::fs::read_to_string(&settings_path).expect("read after re-enable"),
+        installed_text,
+        "re-enable must be idempotent"
+    );
+
+    let doctor = repo.run(&["agent", "doctor", "--json"], None, &[]);
+    assert!(doctor.status.success(), "doctor: {}", describe(&doctor));
+    let doctor_json: Value =
+        serde_json::from_str(&String::from_utf8_lossy(&doctor.stdout)).expect("doctor json");
+    let hooks = doctor_json["data"]["provider_hooks"]
+        .as_array()
+        .expect("provider hooks");
+    let claude = hooks
+        .iter()
+        .find(|row| row["name"] == json!("claude-code"))
+        .expect("claude doctor row");
+    assert_eq!(claude["installed"], json!(true));
+    let events = claude["events"].as_array().expect("claude events");
+    for name in ["WorktreeCreate", "WorktreeRemove", "PreModelSwitch"] {
+        let row = events
+            .iter()
+            .find(|row| row["event"] == json!(name))
+            .unwrap_or_else(|| panic!("{name} missing from doctor"));
+        assert_eq!(row["class"], json!("excluded"));
+        assert_eq!(row["installed"], json!(false));
+        assert!(
+            row["reason"]
+                .as_str()
+                .expect("reason")
+                .contains("control-sensitive"),
+            "{name} reason: {row}"
+        );
+    }
+    assert!(events.iter().any(|row| {
+        row["event"] == json!("FileChanged")
+            && row["class"] == json!("installable")
+            && row["installed"] == json!(true)
+    }));
+    assert!(
+        events
+            .iter()
+            .any(|row| row["class"] == json!("installable"))
+    );
+    assert!(events.iter().any(|row| row["class"] == json!("excluded")));
+
+    let disabled = repo.run(&["agent", "disable", "--agent", "claude"], None, &[]);
+    assert!(
+        disabled.status.success(),
+        "disable: {}",
+        describe(&disabled)
+    );
+    let after: Value = serde_json::from_str(
+        &std::fs::read_to_string(&settings_path).expect("settings after disable"),
+    )
+    .expect("json after disable");
+    for name in ["WorktreeCreate", "WorktreeRemove", "PreModelSwitch"] {
+        assert_eq!(after["hooks"][name], seeded["hooks"][name]);
+    }
+    assert!(
+        after["hooks"]["SessionStart"]
+            .as_array()
+            .expect("SessionStart remains")
+            .iter()
+            .any(|group| group["matcher"] == json!("user-owned"))
+    );
+    assert!(
+        !after["hooks"]["SessionEnd"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .flat_map(|group| group["hooks"].as_array().into_iter().flatten())
+            .any(|hook| hook["statusMessage"] == json!("libra capture")),
+        "disable must remove the Libra SessionEnd entry"
+    );
+
+    let linked = HookRepo::init();
+    let link_settings = linked.repo.join(".claude/settings.json");
+    std::fs::create_dir_all(link_settings.parent().expect("link parent")).expect("link dir");
+    let target = linked.repo.join("real-settings.json");
+    let original = "{\"hooks\":{\"WorktreeCreate\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"echo stay\"}]}]}}\n";
+    std::fs::write(&target, original).expect("write link target");
+    std::os::unix::fs::symlink(&target, &link_settings).expect("symlink settings");
+    let refused = linked.run(&["agent", "enable", "--agent", "claude"], None, &[]);
+    assert!(
+        !refused.status.success(),
+        "symlink settings must fail closed: {}",
+        describe(&refused)
+    );
+    assert!(
+        !String::from_utf8_lossy(&refused.stdout).contains("Installed Claude hook"),
+        "a refused install must not report success"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&target).expect("target remains"),
+        original,
+        "refusing a symlink must not write through it"
     );
 }
 

@@ -43,7 +43,8 @@ printing panic/backtrace or `Broken pipe` diagnostics.
 | `--patch-with-stat` | | Show the diffstat block followed by the full patch (Git's legacy synonym for `-p --stat`). |
 | `--summary` | | Show a condensed summary of created and deleted files (their mode and path), like `git show --summary`. Created/deleted files only — no rename/copy detection. |
 | `--no-expand-tabs` | | Do not expand tabs in the commit message. Accepted no-op: Libra's show prints tabs verbatim. |
-| `--no-notes` | | Do not show commit notes. Accepted no-op: Libra's show never displays notes inline. |
+| `--no-notes` | | Do not show commit notes, countermanding an earlier `--notes`. |
+| `--notes[=<ref>]` | | Show commit notes as a `Notes:` block (and through `%N` in `--format`). An optional `=<ref>` selects a notes ref; default `refs/notes/commits`. |
 | `--no-mailmap` | | Do not apply a `.mailmap`. Accepted no-op: Libra's show shows the raw recorded identities. |
 | `--no-show-signature` | | Do not display the GPG signature of signed commits. Accepted no-op: Libra's show never displays commit signatures inline. (Git's `--show-signature` is not implemented.) |
 | `<PATHS>...` | | Limit output to matching paths (pathspec filter for commit diffs). Matches through the shared pathspec engine (plain prefixes, wildcards, and `:(glob)`/`:(literal)`/`:(icase)`/`:(exclude)`); with `--` and no revision, `HEAD` is implied. |
@@ -59,6 +60,10 @@ libra show --no-patch v1.0.0
 
 # Show a specific file from a revision
 libra show HEAD:src/main.rs
+
+# Peel a revision to its tree (same expressions as rev-parse)
+libra show HEAD^{tree}
+libra show HEAD^{commit}
 
 # One-line summary of a commit
 libra show --oneline abc1234

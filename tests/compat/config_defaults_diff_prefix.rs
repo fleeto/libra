@@ -96,7 +96,7 @@ fn diff_mnemonic_commit_pairs_and_plumbing_delegates() {
         "commit/commit mnemonic pair: {commits}"
     );
 
-    let tree = fixture.run(&repo, &["diff-tree", "HEAD~1", "HEAD"]);
+    let tree = fixture.run(&repo, &["diff-tree", "-p", "HEAD~1", "HEAD"]);
     assert_eq!(tree.status.code(), Some(1));
     assert!(
         text(&tree).contains("diff --git c/tracked.txt c/tracked.txt"),
@@ -104,7 +104,7 @@ fn diff_mnemonic_commit_pairs_and_plumbing_delegates() {
         text(&tree)
     );
 
-    let index = fixture.run(&repo, &["diff-index", "HEAD~1"]);
+    let index = fixture.run(&repo, &["diff-index", "-p", "HEAD~1"]);
     assert_eq!(index.status.code(), Some(1));
     assert!(
         text(&index).contains("diff --git c/tracked.txt w/tracked.txt"),
@@ -113,7 +113,7 @@ fn diff_mnemonic_commit_pairs_and_plumbing_delegates() {
     );
 
     fs::write(repo.join("tracked.txt"), "three\n").expect("modify worktree");
-    let files = fixture.run(&repo, &["diff-files"]);
+    let files = fixture.run(&repo, &["diff-files", "-p"]);
     assert_eq!(files.status.code(), Some(1));
     assert!(
         text(&files).contains("diff --git i/tracked.txt w/tracked.txt"),

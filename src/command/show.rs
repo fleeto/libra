@@ -143,8 +143,12 @@ pub struct ShowArgs {
     #[clap(long = "no-expand-tabs")]
     pub no_expand_tabs: bool,
 
-    /// Do not show commit notes. Accepted for Git parity and is a no-op: Libra's
-    /// show never displays notes inline. (Use `libra notes show <commit>`.)
+    /// Show commit notes (Git's `--notes[=<ref>]`). An optional value selects a
+    /// notes ref; the default is `refs/notes/commits`.
+    #[clap(long, value_name = "REF", num_args = 0..=1, default_missing_value = "", require_equals = true)]
+    pub notes: Option<String>,
+
+    /// Do not show commit notes, countermanding an earlier `--notes`.
     #[clap(long = "no-notes")]
     pub no_notes: bool,
 
@@ -197,6 +201,9 @@ pub struct ShowCommitData {
     pub parents: Vec<String>,
     pub refs: Vec<String>,
     pub files: Vec<ShowFileChange>,
+    /// Note text attached to the commit when `--notes` (or `%N`) is active.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -366,6 +373,17 @@ async fn show_target_uses_commit_display(args: &ShowArgs) -> CliResult<bool> {
         return Ok(matches!(object_type, ObjectType::Commit | ObjectType::Tag));
     }
 
+    if object_ref.contains("^{") {
+        let hash = util::resolve_object_spec_typed(object_ref)
+            .await
+            .map_err(|_| show_bad_revision_error(object_ref))?;
+        let storage = ClientStorage::init(path::objects());
+        let object_type = storage
+            .get_object_type(&hash)
+            .map_err(|error| show_object_load_error(hash, error))?;
+        return Ok(matches!(object_type, ObjectType::Commit | ObjectType::Tag));
+    }
+
     Ok(util::get_commit_base(object_ref).await.is_ok())
 }
 
@@ -375,6 +393,15 @@ async fn render_show_human(args: &ShowArgs, color_enabled: bool) -> CliResult<St
     // Handle `<revision>:<path>` lookups before generic revision resolution.
     if let Some((rev, path)) = object_ref.split_once(':') {
         return show_commit_file(rev, path).await;
+    }
+
+    // Peel suffixes (`^{tree}`, `^{commit}`, `^{}`) resolve through the shared
+    // object-spec parser so `show` accepts the same expressions as `rev-parse`.
+    if object_ref.contains("^{") {
+        let hash = util::resolve_object_spec_typed(object_ref)
+            .await
+            .map_err(|_| show_bad_revision_error(object_ref))?;
+        return show_object_by_hash(&hash, args, color_enabled).await;
     }
 
     // Raw object IDs should keep their native schema, including annotated tag
@@ -411,6 +438,13 @@ async fn validate_show_quiet(args: &ShowArgs) -> CliResult<()> {
 
     if let Some((rev, path)) = object_ref.split_once(':') {
         return validate_commit_file(rev, path).await;
+    }
+
+    if object_ref.contains("^{") {
+        let hash = util::resolve_object_spec_typed(object_ref)
+            .await
+            .map_err(|_| show_bad_revision_error(object_ref))?;
+        return validate_object_by_hash(&hash, args).await;
     }
 
     if let Some(hash) = resolve_existing_object_hash(object_ref) {
@@ -491,7 +525,8 @@ async fn show_commit(
         load_object::<Commit>(commit_hash).map_err(|e| show_object_load_error(commit_hash, e))?;
 
     let mut output = String::new();
-    display_commit_info(&mut output, &commit, args, color_enabled);
+    let notes = show_note_text(&commit, args).await;
+    display_commit_info(&mut output, &commit, args, color_enabled, &notes);
 
     // Render patch-style details when requested.
     if !args.no_patch {
@@ -900,8 +935,42 @@ async fn validate_commit_file(rev: &str, file_path: &str) -> CliResult<()> {
     }
 }
 
+/// Load the note text for `commit` when `--notes` is active or the custom
+/// format expands `%N`. Returns newline-terminated text, or an empty string.
+async fn show_note_text(commit: &Commit, args: &ShowArgs) -> String {
+    let enabled = args.notes.is_some() && !args.no_notes;
+    let uses_placeholder = args
+        .pretty
+        .as_ref()
+        .or(args.format.as_ref())
+        .is_some_and(|template| template.contains("%N"));
+    if !enabled && !uses_placeholder {
+        return String::new();
+    }
+    let notes_ref = match args.notes.as_deref() {
+        Some(raw) if !raw.is_empty() => crate::internal::notes::normalize_notes_ref(raw)
+            .unwrap_or_else(|_| crate::internal::notes::DEFAULT_NOTES_REF.to_string()),
+        _ => crate::internal::notes::DEFAULT_NOTES_REF.to_string(),
+    };
+    let text = crate::internal::notes::show(&notes_ref, Some(&commit.id.to_string()))
+        .await
+        .map(|(_, _, text)| text)
+        .unwrap_or_default();
+    if text.is_empty() || text.ends_with('\n') {
+        text
+    } else {
+        format!("{text}\n")
+    }
+}
+
 /// Renders the commit header using the selected format.
-fn display_commit_info(output: &mut String, commit: &Commit, args: &ShowArgs, color_enabled: bool) {
+fn display_commit_info(
+    output: &mut String,
+    commit: &Commit,
+    args: &ShowArgs,
+    color_enabled: bool,
+    notes: &str,
+) {
     // `--format` is Git's alias for `--pretty` (mutually exclusive in clap).
     if let Some(pretty) = args
         .pretty
@@ -919,6 +988,7 @@ fn display_commit_info(output: &mut String, commit: &Commit, args: &ShowArgs, co
             decoration: "",
             abbrev_len: 7,
             extra_hashes: "",
+            notes,
         };
         output.push_str(&formatter.format(commit, &ctx));
         output.push('\n');
@@ -959,6 +1029,9 @@ fn display_commit_info(output: &mut String, commit: &Commit, args: &ShowArgs, co
         let (msg, _) = parse_commit_msg(&commit.message);
         for line in msg.lines() {
             output.push_str(&format!("    {}\n", line));
+        }
+        if args.notes.is_some() && !args.no_notes {
+            output.push_str(&crate::internal::log::formatter::notes_block(notes));
         }
     }
 }
@@ -1047,10 +1120,17 @@ async fn run_show(args: &ShowArgs) -> CliResult<ShowOutput> {
         return collect_commit_file_output(rev, path).await;
     }
 
+    if object_ref.contains("^{") {
+        let hash = util::resolve_object_spec_typed(object_ref)
+            .await
+            .map_err(|_| show_bad_revision_error(object_ref))?;
+        return collect_object_output(&hash, &paths, path_specs.as_ref(), args).await;
+    }
+
     // Raw object IDs should keep their native schema, including annotated tag
     // objects, but hash-like ref names must still fall back to ref resolution.
     if let Some(hash) = resolve_existing_object_hash(object_ref) {
-        return collect_object_output(&hash, &paths, path_specs.as_ref()).await;
+        return collect_object_output(&hash, &paths, path_specs.as_ref(), args).await;
     }
 
     if let Ok(commit_hash) = util::get_commit_base(object_ref).await {
@@ -1061,10 +1141,11 @@ async fn run_show(args: &ShowArgs) -> CliResult<ShowOutput> {
                 } else {
                     commit_hash
                 };
-                return collect_tag_output(&tag_hash, &paths, path_specs.as_ref()).await;
+                return collect_tag_output(&tag_hash, &paths, path_specs.as_ref(), args).await;
             }
             _ => {
-                return collect_commit_output(&commit_hash, &paths, path_specs.as_ref()).await;
+                return collect_commit_output(&commit_hash, &paths, path_specs.as_ref(), args)
+                    .await;
             }
         }
     }
@@ -1076,6 +1157,7 @@ async fn collect_object_output(
     hash: &ObjectHash,
     paths: &[PathBuf],
     path_specs: Option<&PathspecSet>,
+    args: &ShowArgs,
 ) -> CliResult<ShowOutput> {
     let storage = ClientStorage::init(path::objects());
     let obj_type = storage
@@ -1083,8 +1165,8 @@ async fn collect_object_output(
         .map_err(|e| show_object_load_error(hash, e))?;
 
     match obj_type {
-        ObjectType::Commit => collect_commit_output(hash, paths, path_specs).await,
-        ObjectType::Tag => collect_tag_output(hash, paths, path_specs).await,
+        ObjectType::Commit => collect_commit_output(hash, paths, path_specs, args).await,
+        ObjectType::Tag => collect_tag_output(hash, paths, path_specs, args).await,
         ObjectType::Tree => collect_tree_output(hash).await,
         ObjectType::Blob => collect_blob_output(hash).await,
         _ => Err(show_unsupported_object_type_error(format!("{obj_type:?}"))),
@@ -1101,6 +1183,7 @@ async fn collect_commit_output(
     commit_hash: &ObjectHash,
     paths: &[PathBuf],
     path_specs: Option<&PathspecSet>,
+    args: &ShowArgs,
 ) -> CliResult<ShowOutput> {
     let commit =
         load_object::<Commit>(commit_hash).map_err(|e| show_object_load_error(commit_hash, e))?;
@@ -1123,6 +1206,10 @@ async fn collect_commit_output(
         committer_date: format_timestamp(commit.committer.timestamp as i64),
         subject,
         body,
+        notes: {
+            let text = show_note_text(&commit, args).await;
+            (!text.is_empty()).then_some(text)
+        },
         parents: commit
             .parent_commit_ids
             .iter()
@@ -1143,6 +1230,7 @@ async fn collect_tag_output(
     hash: &ObjectHash,
     paths: &[PathBuf],
     path_specs: Option<&PathspecSet>,
+    args: &ShowArgs,
 ) -> CliResult<ShowOutput> {
     match tag::load_object_trait(hash).await {
         Ok(tag::TagObject::Tag(tag_obj)) => {
@@ -1166,7 +1254,7 @@ async fn collect_tag_output(
             }))
         }
         Ok(tag::TagObject::Commit(commit)) => {
-            collect_commit_output(&commit.id, paths, path_specs).await
+            collect_commit_output(&commit.id, paths, path_specs, args).await
         }
         Ok(_) => Err(show_unsupported_object_type_error("tag target")),
         Err(e) => Err(show_object_load_error(hash, e)),

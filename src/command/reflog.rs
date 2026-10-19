@@ -56,6 +56,40 @@ EXAMPLES:
 pub struct ReflogArgs {
     #[clap(subcommand)]
     command: Option<Subcommands>,
+
+    /// Bare-command form: ref to show (default `HEAD`).
+    #[clap(value_name = "REF")]
+    ref_name: Option<String>,
+    /// Bare-command form of `show --number`.
+    #[clap(short = 'n', long = "number")]
+    number: Option<usize>,
+    /// Bare-command form of `show --grep`.
+    #[clap(long)]
+    grep: Option<String>,
+    /// Bare-command form of `show --since`.
+    #[clap(long)]
+    since: Option<String>,
+    /// Bare-command form of `show --until`.
+    #[clap(long)]
+    until: Option<String>,
+    /// Bare-command form of `show --author`.
+    #[clap(long)]
+    author: Option<String>,
+    /// Bare-command form of `show --date`.
+    #[clap(long = "date", value_name = "MODE")]
+    date: Option<String>,
+    /// Bare-command form of `show --pretty`.
+    #[clap(long = "pretty")]
+    pretty: Option<FormatterKind>,
+    /// Bare-command form of `show --patch`.
+    #[clap(short = 'p', long = "patch")]
+    patch: bool,
+    /// Bare-command form of `show --stat`.
+    #[clap(long)]
+    stat: bool,
+    /// Bare-command form of `show --no-abbrev`.
+    #[clap(long = "no-abbrev")]
+    no_abbrev: bool,
 }
 
 fn reflog_subcommand_is_read_only(cmd: &Subcommands) -> bool {
@@ -89,7 +123,30 @@ fn default_reflog_command() -> Subcommands {
         number: None,
         patch: false,
         stat: false,
+        date: None,
         no_abbrev: false,
+    }
+}
+
+/// Build the effective sub-command: an explicit sub-command wins; otherwise the
+/// bare-command flags are folded into the default `show` (Git's `reflog -3`,
+/// `reflog --grep X`, `reflog main`).
+fn resolve_reflog_command(args: ReflogArgs) -> Subcommands {
+    match args.command {
+        Some(command) => command,
+        None => Subcommands::Show {
+            ref_name: args.ref_name.unwrap_or_else(|| "HEAD".to_string()),
+            pretty: args.pretty.unwrap_or_default(),
+            since: args.since,
+            until: args.until,
+            grep: args.grep,
+            author: args.author,
+            number: args.number,
+            patch: args.patch,
+            stat: args.stat,
+            date: args.date,
+            no_abbrev: args.no_abbrev,
+        },
     }
 }
 
@@ -123,6 +180,10 @@ enum Subcommands {
         /// Show diffstat for each reflog entry
         #[arg(long)]
         stat: bool,
+        /// Date rendering mode (`default` / `short` / `iso` / `iso-strict` /
+        /// `rfc` / `unix` / `raw`)
+        #[arg(long = "date", value_name = "MODE")]
+        date: Option<String>,
         /// Print full object names instead of the abbreviated 7-char prefix
         #[arg(long = "no-abbrev")]
         no_abbrev: bool,
@@ -179,7 +240,7 @@ pub async fn execute(args: ReflogArgs) {
 /// for reflog management.
 pub async fn execute_safe(args: ReflogArgs, output: &OutputConfig) -> CliResult<()> {
     // Same default as [`reflog_is_read_only_query`]: bare reflog is `show HEAD`.
-    match args.command.unwrap_or_else(default_reflog_command) {
+    match resolve_reflog_command(args) {
         Subcommands::Show {
             ref_name,
             pretty,
@@ -190,6 +251,7 @@ pub async fn execute_safe(args: ReflogArgs, output: &OutputConfig) -> CliResult<
             number,
             patch,
             stat,
+            date,
             no_abbrev,
         } => {
             let options = ReflogShowOptions {
@@ -201,6 +263,7 @@ pub async fn execute_safe(args: ReflogArgs, output: &OutputConfig) -> CliResult<
                 number,
                 patch,
                 stat,
+                date,
                 no_abbrev,
             };
             handle_show(&ref_name, options, output).await
@@ -257,6 +320,7 @@ struct ReflogShowOptions {
     number: Option<usize>,
     patch: bool,
     stat: bool,
+    date: Option<String>,
     no_abbrev: bool,
 }
 
@@ -388,6 +452,7 @@ async fn handle_show(
         kind: options.pretty,
         patch: options.patch,
         stat: options.stat,
+        date: options.date.clone(),
         no_abbrev: options.no_abbrev,
     };
 
@@ -470,7 +535,12 @@ fn build_reflog_entry(
         new_oid: log.new_oid.clone(),
         short_new_oid: short_oid(&log.new_oid),
         timestamp: log.timestamp,
-        datetime: format_datetime_checked(log.timestamp)?,
+        datetime: match &options.date {
+            Some(mode) => {
+                crate::internal::log::formatter::format_timestamp_with(log.timestamp, mode)
+            }
+            None => format_datetime_checked(log.timestamp)?,
+        },
         committer: ReflogIdentityOutput {
             name: log.committer_name.clone(),
             email: log.committer_email.clone(),
@@ -963,6 +1033,8 @@ struct ReflogFormatter<'a> {
     kind: FormatterKind,
     patch: bool,
     stat: bool,
+    /// `--date=<mode>`: timestamp rendering mode (empty = default).
+    date: Option<String>,
     /// `--no-abbrev`: print the full object name instead of the 7-char prefix.
     no_abbrev: bool,
 }
@@ -987,7 +1059,13 @@ impl Display for ReflogFormatter<'_> {
                 let author = format!("{} <{}>", commit.author.name, commit.author.email);
                 let committer = format!("{} <{}>", log.committer_name, log.committer_email);
                 let commit_msg = &commit.message.trim();
-                let datetime = format_datetime(log.timestamp);
+                let datetime = match &self.date {
+                    Some(mode) => crate::internal::log::formatter::format_timestamp_with(
+                        log.timestamp,
+                        mode,
+                    ),
+                    None => format_datetime(log.timestamp),
+                };
 
                 let mut output = match self.kind {
                     FormatterKind::Oneline => format!(
@@ -1224,6 +1302,7 @@ mod tests {
             until,
             grep,
             author: _,
+            date: _,
             number: _,
             patch: _,
             stat: _,

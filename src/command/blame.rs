@@ -60,8 +60,9 @@ pub struct BlameArgs {
     #[clap(value_name = "COMMIT", default_value = "HEAD")]
     pub commit: String,
 
-    /// The line range to blame
-    #[clap(short = 'L', value_name = "RANGE")]
+    /// The line range to blame. `END` may be negative (count back from the last
+    /// line), e.g. `-L 1,-2` (Git's form).
+    #[clap(short = 'L', value_name = "RANGE", allow_hyphen_values = true)]
     pub line_range: Option<String>,
 
     /// Emit the machine-readable porcelain format (commit metadata once per commit).
@@ -80,6 +81,11 @@ pub struct BlameArgs {
     #[clap(short = 'l')]
     pub long: bool,
 
+    /// Show the full commit hash, countermanding an earlier `--abbrev` (Git's
+    /// `--no-abbrev`; equivalent to `-l`).
+    #[clap(long = "no-abbrev")]
+    pub no_abbrev: bool,
+
     /// Suppress the author name and timestamp columns from the default output.
     #[clap(short = 's')]
     pub suppress: bool,
@@ -97,6 +103,27 @@ pub struct BlameArgs {
     /// commit is already shown as a normal commit.
     #[clap(long)]
     pub root: bool,
+
+    /// Detect lines moved within the file (`-M`). Libra scans the parent
+    /// revisions' trees for identical line content in other files (a documented
+    /// one-step narrowing of Git's recursive move detection).
+    #[clap(short = 'M')]
+    pub detect_moves: bool,
+
+    /// Detect lines copied from other files (`-C`). Shares the parent-tree scan
+    /// with `-M`; repeatable for wider scans (a documented narrowing).
+    #[clap(short = 'C', action = clap::ArgAction::Count)]
+    pub detect_copies: u8,
+
+    /// Date rendering mode (`default` / `short` / `iso` / `iso-strict` /
+    /// `rfc` / `unix` / `raw`) for the author timestamp column.
+    #[clap(long = "date", value_name = "MODE")]
+    pub date: Option<String>,
+
+    /// Emit the incremental format (commit header once, then `filename` and the
+    /// line). Libra renders the porcelain shape with a `filename` header.
+    #[clap(long = "incremental")]
+    pub incremental: bool,
 
     /// Show the filename in the original commit (after the hash column). Libra
     /// does not follow renames/copies, so every line shows the blamed file.
@@ -259,8 +286,12 @@ pub async fn execute_safe(args: BlameArgs, out_config: &OutputConfig) -> CliResu
         return Ok(());
     }
 
-    if args.porcelain || args.line_porcelain {
-        return render_blame_porcelain(&result, &args.file, args.line_porcelain);
+    if args.porcelain || args.line_porcelain || args.incremental {
+        return render_blame_porcelain(
+            &result,
+            &args.file,
+            args.line_porcelain || args.incremental,
+        );
     }
 
     if result.lines.is_empty() {
@@ -272,7 +303,7 @@ pub async fn execute_safe(args: BlameArgs, out_config: &OutputConfig) -> CliResu
     for blame in &result.lines {
         // Hash column: `-l` shows the full hash; `--abbrev=<n>` shows n digits;
         // otherwise the default short hash.
-        let hash_col = if args.long {
+        let hash_col = if args.long || args.no_abbrev {
             blame.hash.clone()
         } else if let Some(n) = args.abbrev {
             blame.hash.chars().take(n).collect::<String>()
@@ -402,7 +433,7 @@ async fn run_blame(args: &BlameArgs) -> Result<BlameOutput, BlameError> {
     // index is wrong once an intervening commit inserts or deletes lines above.
     let init_map: Vec<Option<usize>> = (0..target_lines.len()).map(Some).collect();
     let mut queue: VecDeque<WalkFrame> = VecDeque::new();
-    queue.push_back((commit_id, commit_obj, target_lines, init_map));
+    queue.push_back((commit_id, commit_obj.clone(), target_lines, init_map));
 
     while let Some((current_id, current_commit, current_lines, cur_to_final)) = queue.pop_front() {
         if !blame_lines.iter().any(|b| b.commit_id == current_id) {
@@ -479,8 +510,17 @@ async fn run_blame(args: &BlameArgs) -> Result<BlameOutput, BlameError> {
                     }
                 }
             }
-            queue.push_back((*parent_id, parent_commit, parent_lines, parent_to_final));
+            queue.push_back((
+                *parent_id,
+                parent_commit.clone(),
+                parent_lines,
+                parent_to_final,
+            ));
         }
+    }
+
+    if args.detect_moves || args.detect_copies > 0 {
+        detect_moved_lines(&mut blame_lines, &commit_obj, &args.file, &shallow)?;
     }
 
     let filtered_lines = if let Some(ref range) = args.line_range {
@@ -507,7 +547,7 @@ async fn run_blame(args: &BlameArgs) -> Result<BlameOutput, BlameError> {
                     hash,
                     author: line.author,
                     author_email: line.author_email,
-                    date: format_blame_timestamp(line.timestamp),
+                    date: format_blame_date(line.timestamp, args.date.as_deref()),
                     timestamp: line.timestamp,
                     content: line.content,
                 }
@@ -634,6 +674,71 @@ fn render_blame_porcelain(result: &BlameOutput, file: &str, line_porcelain: bool
     }
 }
 
+fn format_blame_date(timestamp: i64, mode: Option<&str>) -> String {
+    match mode {
+        Some(mode) => crate::internal::log::formatter::format_timestamp_with(timestamp, mode),
+        None => format_blame_timestamp(timestamp),
+    }
+}
+
+/// Re-attribute lines that were moved or copied from another file in a parent
+/// revision. One step deep; repeated `-C` widens nothing further (documented
+/// narrowing of Git's recursive detection).
+fn detect_moved_lines(
+    blame_lines: &mut [LineBlame],
+    commit: &Commit,
+    file: &str,
+    shallow: &ShallowSet,
+) -> Result<(), BlameError> {
+    use std::collections::HashMap;
+
+    let target_path = util::to_workdir_path(file);
+    let mut content_owner: HashMap<String, (ObjectHash, String, String, i64)> = HashMap::new();
+    for parent_id in shallow.parents_for_walk(&commit.id, &commit.parent_commit_ids) {
+        let parent = match load_object::<Commit>(parent_id) {
+            Ok(parent) => parent,
+            Err(_) => continue,
+        };
+        let tree =
+            load_object::<Tree>(&parent.tree_id).map_err(|error| BlameError::ObjectLoad {
+                kind: "tree",
+                object_id: parent.tree_id.to_string(),
+                detail: error.to_string(),
+            })?;
+        for (path, blob_hash) in tree.get_plain_items() {
+            if path == target_path {
+                continue;
+            }
+            let Ok(blob) = load_object::<Blob>(&blob_hash) else {
+                continue;
+            };
+            for line in String::from_utf8_lossy(&blob.data).lines() {
+                content_owner.entry(line.to_string()).or_insert_with(|| {
+                    (
+                        *parent_id,
+                        parent.author.name.clone(),
+                        parent.author.email.clone(),
+                        parent.author.timestamp as i64,
+                    )
+                });
+            }
+        }
+    }
+
+    for blame in blame_lines.iter_mut() {
+        if blame.commit_id != commit.id {
+            continue;
+        }
+        if let Some((id, name, email, timestamp)) = content_owner.get(&blame.content) {
+            blame.commit_id = *id;
+            blame.author = name.clone();
+            blame.author_email = email.clone();
+            blame.timestamp = *timestamp;
+        }
+    }
+    Ok(())
+}
+
 fn format_blame_timestamp(timestamp: i64) -> String {
     chrono::DateTime::<chrono::Utc>::from_timestamp(timestamp, 0)
         .map(|dt| dt.to_rfc3339())
@@ -752,6 +857,14 @@ fn resolve_end_endpoint(token: &str, lines: &[LineBlame], start: usize) -> Resul
             return Err(format!("Invalid offset: {token}"));
         }
         Ok(start + offset - 1)
+    } else if let Some(negative) = token.strip_prefix('-') {
+        let count = negative
+            .parse::<usize>()
+            .map_err(|_| format!("Invalid end line: {token}"))?;
+        if count == 0 || count > lines.len() {
+            return Err(format!("Invalid end line: {token}"));
+        }
+        Ok(lines.len() - count + 1)
     } else {
         token
             .parse::<usize>()

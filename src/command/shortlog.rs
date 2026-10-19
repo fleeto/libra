@@ -505,6 +505,7 @@ fn aggregate_shortlog(
                     decoration: "",
                     abbrev_len,
                     extra_hashes: "",
+                    notes: "",
                 };
                 formatter.format(&commit, &ctx)
             }
@@ -789,16 +790,56 @@ async fn get_commits_for_shortlog(
     use crate::command::log::get_reachable_commits;
 
     let revision = revision.unwrap_or("HEAD");
-    let commit_hash = util::get_commit_base_typed(revision)
-        .await
-        .map_err(|error| shortlog_commit_base_error(revision, error))?
-        .to_string();
 
-    let mut commits: Vec<Commit> = get_reachable_commits(commit_hash, None)
-        .await?
-        .into_iter()
-        .filter(|c| passes_filter(c, since_ts, until_ts))
-        .collect();
+    let mut commits: Vec<Commit> = if let Some((left, right)) = revision.split_once("...") {
+        // Symmetric difference: both sides reachable, minus their merge base.
+        let left_spec = if left.is_empty() { "HEAD" } else { left };
+        let right_spec = if right.is_empty() { "HEAD" } else { right };
+        let left_hash = util::get_commit_base_typed(left_spec)
+            .await
+            .map_err(|error| shortlog_commit_base_error(revision, error))?;
+        let right_hash = util::get_commit_base_typed(right_spec)
+            .await
+            .map_err(|error| shortlog_commit_base_error(revision, error))?;
+        let mut selected = get_reachable_commits(right_hash.to_string(), None).await?;
+        selected.extend(get_reachable_commits(left_hash.to_string(), None).await?);
+        if let Ok(Some(base)) = crate::internal::merge_base::merge_base(&left_hash, &right_hash) {
+            let excluded: std::collections::HashSet<String> =
+                get_reachable_commits(base.to_string(), None)
+                    .await?
+                    .iter()
+                    .map(|commit| commit.id.to_string())
+                    .collect();
+            selected.retain(|commit| !excluded.contains(&commit.id.to_string()));
+        }
+        selected
+    } else if let Some((left, right)) = revision.split_once("..") {
+        let left_spec = if left.is_empty() { "HEAD" } else { left };
+        let right_spec = if right.is_empty() { "HEAD" } else { right };
+        let right_hash = util::get_commit_base_typed(right_spec)
+            .await
+            .map_err(|error| shortlog_commit_base_error(revision, error))?;
+        let mut selected = get_reachable_commits(right_hash.to_string(), None).await?;
+        let left_hash = util::get_commit_base_typed(left_spec)
+            .await
+            .map_err(|error| shortlog_commit_base_error(revision, error))?;
+        let excluded: std::collections::HashSet<String> =
+            get_reachable_commits(left_hash.to_string(), None)
+                .await?
+                .iter()
+                .map(|commit| commit.id.to_string())
+                .collect();
+        selected.retain(|commit| !excluded.contains(&commit.id.to_string()));
+        selected
+    } else {
+        let commit_hash = util::get_commit_base_typed(revision)
+            .await
+            .map_err(|error| shortlog_commit_base_error(revision, error))?
+            .to_string();
+        get_reachable_commits(commit_hash, None).await?
+    };
+
+    commits.retain(|commit| passes_filter(commit, since_ts, until_ts));
 
     // newest first
     commits.sort_by_key(|c| std::cmp::Reverse(c.committer.timestamp));

@@ -82,6 +82,7 @@ pub(super) async fn resolve_revision_selection(
     specs: &[String],
     first_parent: bool,
     default_to_head: bool,
+    no_walk: bool,
 ) -> CliResult<RevListSelection> {
     let input_terms = normalized_inputs(specs, default_to_head);
     let mut included = Vec::<Commit>::new();
@@ -92,14 +93,27 @@ pub(super) async fn resolve_revision_selection(
     for input in &input_terms {
         match parse_revision_term(input) {
             RevisionTerm::Include(spec) => {
-                include_reachable(spec, first_parent, &mut included, &mut included_ids).await?
+                if no_walk {
+                    include_tip(spec, &mut included, &mut included_ids).await?
+                } else {
+                    include_reachable(spec, first_parent, &mut included, &mut included_ids).await?
+                }
             }
             RevisionTerm::Exclude(spec) => {
-                exclude_reachable(spec, first_parent, &mut excluded).await?
+                if no_walk {
+                    exclude_tip(spec, &mut excluded).await?
+                } else {
+                    exclude_reachable(spec, first_parent, &mut excluded).await?
+                }
             }
             RevisionTerm::Range { start, end } => {
-                include_reachable(end, first_parent, &mut included, &mut included_ids).await?;
-                exclude_reachable(start, first_parent, &mut excluded).await?;
+                if no_walk {
+                    include_tip(end, &mut included, &mut included_ids).await?;
+                    exclude_tip(start, &mut excluded).await?;
+                } else {
+                    include_reachable(end, first_parent, &mut included, &mut included_ids).await?;
+                    exclude_reachable(start, first_parent, &mut excluded).await?;
+                }
             }
             RevisionTerm::Symmetric { left, right } => {
                 let left_commits = reachable_commits(left, first_parent).await?;
@@ -186,6 +200,28 @@ fn split_range<'a>(input: &'a str, separator: &str) -> Option<(&'a str, &'a str)
 
 fn default_head(input: &str) -> &str {
     if input.is_empty() { "HEAD" } else { input }
+}
+
+/// `--no-walk`: insert only the tip commit itself, never its ancestors.
+async fn include_tip(
+    spec: &str,
+    included: &mut Vec<Commit>,
+    included_ids: &mut HashSet<String>,
+) -> CliResult<()> {
+    let hash = resolve_commit(spec).await?;
+    if included_ids.insert(hash.to_string()) {
+        let commit = load_object::<Commit>(&hash).map_err(|error| {
+            rev_list_target_error(spec, CommitBaseError::ReadFailure(error.to_string()))
+        })?;
+        included.push(commit);
+    }
+    Ok(())
+}
+
+/// `--no-walk`: exclude only the named tip, not its ancestry.
+async fn exclude_tip(spec: &str, excluded: &mut HashSet<String>) -> CliResult<()> {
+    excluded.insert(resolve_commit(spec).await?.to_string());
+    Ok(())
 }
 
 async fn include_reachable(

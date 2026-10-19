@@ -143,6 +143,31 @@ pub struct GrepArgs {
     #[clap(short = 'v', long)]
     invert_match: bool,
 
+    /// Require every pattern to match the same line (Git's `--and`).
+    #[clap(long, overrides_with = "or")]
+    and: bool,
+
+    /// Match when any pattern matches the line (Git's `--or`; the default).
+    #[clap(long, overrides_with = "and")]
+    or: bool,
+
+    /// Negate the whole pattern set (Git's `--not`).
+    #[clap(long)]
+    not: bool,
+
+    /// Print the 1-based byte column of the first match on each line.
+    #[clap(long)]
+    column: bool,
+
+    /// Recurse into submodules. Accepted for Git parity and is a no-op until
+    /// submodule search lands.
+    #[clap(long = "recurse-submodules")]
+    recurse_submodules: bool,
+
+    /// Do not recurse into submodules (the default; accepted for Git parity).
+    #[clap(long = "no-recurse-submodules")]
+    no_recurse_submodules: bool,
+
     /// Show the 0-based byte offset of the first match on each line.
     #[clap(short = 'b', long)]
     byte_offset: bool,
@@ -407,11 +432,6 @@ async fn run_grep(args: &GrepArgs) -> CliResult<GrepOutput> {
 
     let patterns = collect_patterns(args)?;
     let matcher = build_matcher(&patterns, args)?;
-    let all_matchers = if args.all_match && patterns.len() > 1 {
-        Some(build_individual_matchers(&patterns, args)?)
-    } else {
-        None
-    };
 
     // Resolve the search context (working tree, index, specific tree, or no-index)
     let context_label = if args.no_index {
@@ -484,14 +504,14 @@ async fn run_grep(args: &GrepArgs) -> CliResult<GrepOutput> {
             }
             file_matches = truncated;
         }
-        let all_patterns_match = all_matchers.as_ref().is_none_or(|matchers| {
-            matchers.iter().all(|pattern_matcher| {
+        let all_patterns_match = !args.all_match
+            || matcher.len() <= 1
+            || matcher.iter().all(|pattern_matcher| {
                 content
                     .split(|&byte| byte == b'\n')
                     .map(String::from_utf8_lossy)
                     .any(|line| pattern_matcher.is_match(&line))
-            })
-        });
+            });
         // Count only real matches, not the surrounding -A/-B/-C context lines.
         let actual_match_count = file_matches.iter().filter(|entry| !entry.3).count();
         let match_count = if all_patterns_match {
@@ -520,7 +540,7 @@ async fn run_grep(args: &GrepArgs) -> CliResult<GrepOutput> {
                     if is_ctx {
                         continue;
                     }
-                    for m in matcher.find_iter(&line) {
+                    for m in matcher.iter().flat_map(|re| re.find_iter(&line)) {
                         matches.push(GrepMatch {
                             path: search_file.path.display().to_string(),
                             line_number: line_num,
@@ -602,30 +622,9 @@ fn collect_patterns(args: &GrepArgs) -> CliResult<Vec<String>> {
     Ok(patterns)
 }
 
-/// Build a regex matcher based on command arguments.
-fn build_matcher(patterns: &[String], args: &GrepArgs) -> CliResult<regex::Regex> {
-    let compiled_patterns = normalize_patterns(patterns, args);
-
-    let combined = if compiled_patterns.len() == 1 {
-        compiled_patterns[0].clone()
-    } else {
-        format!("(?:{})", compiled_patterns.join(")|(?:"))
-    };
-
-    RegexBuilder::new(&combined)
-        .case_insensitive(args.ignore_case)
-        .build()
-        .map_err(|e| {
-            CliError::command_usage(format!(
-                "invalid regex pattern '{}': {}",
-                patterns.join(", "),
-                e
-            ))
-            .with_stable_code(StableErrorCode::CliInvalidArguments)
-        })
-}
-
-fn build_individual_matchers(patterns: &[String], args: &GrepArgs) -> CliResult<Vec<regex::Regex>> {
+/// Build one matcher per pattern (the boolean combination is applied per line
+/// by [`line_matches`], so `--and`/`--or`/`--not` compose correctly).
+fn build_matcher(patterns: &[String], args: &GrepArgs) -> CliResult<Vec<regex::Regex>> {
     normalize_patterns(patterns, args)
         .into_iter()
         .map(|pattern| {
@@ -638,6 +637,18 @@ fn build_individual_matchers(patterns: &[String], args: &GrepArgs) -> CliResult<
                 })
         })
         .collect()
+}
+
+/// Evaluate the pattern set against one line: `--and` requires every pattern,
+/// otherwise any pattern; `-v`/`--not` then negate the result.
+fn line_matches(matchers: &[regex::Regex], args: &GrepArgs, line: &str) -> bool {
+    // `--all-match` is file-level (handled by the caller); `--and` is line-level.
+    let matched = if args.and {
+        matchers.iter().all(|matcher| matcher.is_match(line))
+    } else {
+        matchers.iter().any(|matcher| matcher.is_match(line))
+    };
+    matched != (args.invert_match || args.not)
 }
 
 fn normalize_patterns(patterns: &[String], args: &GrepArgs) -> Vec<String> {
@@ -1248,7 +1259,7 @@ fn context_window(args: &GrepArgs) -> (usize, usize) {
 /// for actual match lines.
 fn search_in_content(
     content: &[u8],
-    matcher: &regex::Regex,
+    matchers: &[regex::Regex],
     args: &GrepArgs,
 ) -> Vec<(usize, String, usize, bool)> {
     let content_str = String::from_utf8_lossy(content);
@@ -1259,16 +1270,18 @@ fn search_in_content(
     let match_indices: Vec<usize> = lines
         .iter()
         .enumerate()
-        .filter(|(_, line)| {
-            let m = matcher.is_match(line);
-            if args.invert_match { !m } else { m }
-        })
+        .filter(|(_, line)| line_matches(matchers, args, line))
         .map(|(idx, _)| idx)
         .collect();
 
     let byte_off_of = |idx: usize| -> usize {
-        if args.byte_offset {
-            matcher.find(lines[idx]).map(|m| m.start()).unwrap_or(0)
+        if args.byte_offset || args.column {
+            matchers
+                .iter()
+                .filter_map(|re| re.find(lines[idx]))
+                .map(|m| m.start())
+                .min()
+                .unwrap_or(0)
         } else {
             0
         }
@@ -1425,7 +1438,9 @@ fn render_grep_output(
             };
             let rendered = if match_item.is_context {
                 match_item.line.clone()
-            } else if let Some(matcher) = matcher.as_ref().filter(|_| !args.invert_match) {
+            } else if let Some(matcher) =
+                matcher.as_ref().filter(|_| !args.invert_match && !args.not)
+            {
                 colorize_match(&match_item.line, matcher)
             } else {
                 match_item.line.clone()
@@ -1437,7 +1452,17 @@ fn render_grep_output(
             } else {
                 format!("{displayed}{sep}")
             };
-            let formatted = if args.byte_offset && !match_item.is_context {
+            let formatted = if args.column && !match_item.is_context {
+                let column = match_item.byte_offset.unwrap_or(0) + 1;
+                if args.line_number || args.byte_offset {
+                    format!(
+                        "{prefix}{}{sep}{}{sep}{rendered}",
+                        match_item.line_number, column
+                    )
+                } else {
+                    format!("{prefix}{}{sep}{rendered}", column)
+                }
+            } else if args.byte_offset && !match_item.is_context {
                 format!(
                     "{prefix}{}{sep}{}{sep}{rendered}",
                     match_item.line_number,
@@ -1459,16 +1484,24 @@ fn render_grep_output(
 }
 
 /// Colorize matching portions of a line using the actual matcher spans.
-fn colorize_match(line: &str, matcher: &regex::Regex) -> String {
+fn colorize_match(line: &str, matchers: &[regex::Regex]) -> String {
+    let mut spans: Vec<(usize, usize)> = matchers
+        .iter()
+        .flat_map(|re| re.find_iter(line))
+        .map(|matched| (matched.start(), matched.end()))
+        .collect();
+    spans.sort_unstable();
+
     let mut result = String::new();
     let mut last_end = 0;
-
-    for matched in matcher.find_iter(line) {
-        result.push_str(&line[last_end..matched.start()]);
-        result.push_str(&matched.as_str().red().bold().to_string());
-        last_end = matched.end();
+    for (start, end) in spans {
+        if start < last_end {
+            continue;
+        }
+        result.push_str(&line[last_end..start]);
+        result.push_str(&line[start..end].red().bold().to_string());
+        last_end = end;
     }
-
     result.push_str(&line[last_end..]);
     result
 }
@@ -1612,8 +1645,8 @@ mod tests {
         let args = GrepArgs::parse_from(["grep", "test"]);
         let patterns = collect_patterns(&args).unwrap();
         let matcher = build_matcher(&patterns, &args).unwrap();
-        assert!(matcher.is_match("this is a test"));
-        assert!(!matcher.is_match("no match here"));
+        assert!(matcher[0].is_match("this is a test"));
+        assert!(!matcher[0].is_match("no match here"));
     }
 
     #[test]
@@ -1621,9 +1654,9 @@ mod tests {
         let args = GrepArgs::parse_from(["grep", "-F", "foo.bar"]);
         let patterns = collect_patterns(&args).unwrap();
         let matcher = build_matcher(&patterns, &args).unwrap();
-        assert!(matcher.is_match("this is foo.bar"));
+        assert!(matcher[0].is_match("this is foo.bar"));
         // With fixed string, the dot should not match any character
-        assert!(!matcher.is_match("this is fooXbar"));
+        assert!(!matcher[0].is_match("this is fooXbar"));
     }
 
     #[test]
@@ -1631,9 +1664,9 @@ mod tests {
         let args = GrepArgs::parse_from(["grep", "-i", "HELLO"]);
         let patterns = collect_patterns(&args).unwrap();
         let matcher = build_matcher(&patterns, &args).unwrap();
-        assert!(matcher.is_match("hello world"));
-        assert!(matcher.is_match("HELLO WORLD"));
-        assert!(matcher.is_match("HeLLo WoRLd"));
+        assert!(matcher[0].is_match("hello world"));
+        assert!(matcher[0].is_match("HELLO WORLD"));
+        assert!(matcher[0].is_match("HeLLo WoRLd"));
     }
 
     #[test]
@@ -1641,10 +1674,10 @@ mod tests {
         let args = GrepArgs::parse_from(["grep", "-w", "test"]);
         let patterns = collect_patterns(&args).unwrap();
         let matcher = build_matcher(&patterns, &args).unwrap();
-        assert!(matcher.is_match("this is a test"));
-        assert!(matcher.is_match("test case"));
-        assert!(!matcher.is_match("testing"));
-        assert!(!matcher.is_match("atestb"));
+        assert!(matcher[0].is_match("this is a test"));
+        assert!(matcher[0].is_match("test case"));
+        assert!(!matcher[0].is_match("testing"));
+        assert!(!matcher[0].is_match("atestb"));
     }
 
     #[test]
@@ -1741,7 +1774,7 @@ mod tests {
         colored::control::set_override(true);
         let line = "hello world hello";
         let matcher = regex::Regex::new("hello").unwrap();
-        let colored = colorize_match(line, &matcher);
+        let colored = colorize_match(line, std::slice::from_ref(&matcher));
         let plain = regex::Regex::new(r"\x1b\[[0-9;]*m")
             .unwrap()
             .replace_all(&colored, "");
@@ -1756,7 +1789,7 @@ mod tests {
         colored::control::set_override(true);
         let line = "foo123bar baz";
         let matcher = regex::Regex::new(r"foo\d+bar").unwrap();
-        let colored = colorize_match(line, &matcher);
+        let colored = colorize_match(line, std::slice::from_ref(&matcher));
         let plain = regex::Regex::new(r"\x1b\[[0-9;]*m")
             .unwrap()
             .replace_all(&colored, "");
@@ -1774,7 +1807,7 @@ mod tests {
             .case_insensitive(true)
             .build()
             .unwrap();
-        let colored = colorize_match(line, &matcher);
+        let colored = colorize_match(line, std::slice::from_ref(&matcher));
         let plain = regex::Regex::new(r"\x1b\[[0-9;]*m")
             .unwrap()
             .replace_all(&colored, "");
@@ -1786,7 +1819,7 @@ mod tests {
     fn test_colorize_match_preserves_content() {
         let line = "hello world";
         let matcher = regex::Regex::new("hello").unwrap();
-        let colored = colorize_match(line, &matcher);
+        let colored = colorize_match(line, std::slice::from_ref(&matcher));
         // Remove ANSI codes and check content is preserved
         let plain = regex::Regex::new(r"\x1b\[[0-9;]*m")
             .unwrap()

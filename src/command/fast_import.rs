@@ -80,6 +80,15 @@ pub struct FastImportArgs {
     #[clap(long, value_name = "FILE")]
     pub input: Option<PathBuf>,
 
+    /// Positional stream file (Git's `git fast-import <file>`); equivalent to
+    /// `--input`.
+    #[clap(value_name = "FILE")]
+    pub file: Option<PathBuf>,
+
+    /// Parse the stream and report what would be imported without updating refs.
+    #[clap(long = "dry-run")]
+    pub dry_run: bool,
+
     /// Set the maximum number of top-level blobs, commits, and tags to create.
     #[clap(long, value_name = "N")]
     pub max_count: Option<u64>,
@@ -102,7 +111,8 @@ pub async fn execute_safe(args: FastImportArgs, _output: &OutputConfig) -> CliRe
     let max_input = configured_max_input().await?;
     let max_objects = args.max_count.unwrap_or(DEFAULT_MAX_OBJECTS);
 
-    let reader: Box<dyn Read> = match &args.input {
+    let input_path = args.input.as_ref().or(args.file.as_ref());
+    let reader: Box<dyn Read> = match input_path {
         Some(path) => Box::new(fs::File::open(path).map_err(|error| {
             CliError::fatal(format!("cannot open '{}': {error}", path.display()))
                 .with_exit_code(128)
@@ -112,12 +122,15 @@ pub async fn execute_safe(args: FastImportArgs, _output: &OutputConfig) -> CliRe
     };
 
     let mut importer = Importer::new(BufReader::new(reader), max_input, max_objects);
+    importer.dry_run = args.dry_run;
     let stats = importer.run().await?;
 
     if !args.quiet {
         println!(
-            "fast-import: {} objects, {} ref(s) updated",
-            stats.objects, stats.refs
+            "fast-import: {} objects, {} ref(s) {}",
+            stats.objects,
+            stats.refs,
+            if args.dry_run { "planned" } else { "updated" }
         );
     }
     Ok(())
@@ -178,6 +191,8 @@ struct Importer<R: BufRead> {
     refs_written: u64,
     /// One-line push-back buffer for lookahead during a `commit` body.
     pending_line: Option<Vec<u8>>,
+    /// `--dry-run`: parse and report without updating refs.
+    dry_run: bool,
 }
 
 impl<R: BufRead> Importer<R> {
@@ -195,6 +210,7 @@ impl<R: BufRead> Importer<R> {
             pending_note_replacements: HashSet::new(),
             refs_written: 0,
             pending_line: None,
+            dry_run: false,
         }
     }
 
@@ -773,6 +789,13 @@ impl<R: BufRead> Importer<R> {
                     "cannot import into branch '{branch}': it is checked out at worktree '{other}'"
                 )));
             }
+        }
+        if self.dry_run {
+            self.refs_written += pending_refs.len() as u64 + pending_notes.len() as u64;
+            self.pending_refs.clear();
+            self.pending_notes.clear();
+            self.pending_note_replacements.clear();
+            return Ok(());
         }
         let db = get_db_conn_instance().await;
         let written = crate::internal::db::write_transaction(&db, |txn| {

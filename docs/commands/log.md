@@ -125,14 +125,16 @@ CLI format bypasses the matching config key.
 
 Select the human-readable author/committer date mode. Supported modes are
 `default`, `short`, `iso`/`iso8601`, `iso-strict`/`iso8601-strict`,
-`rfc`/`rfc2822`, `unix`, and `raw`. `log.date` supplies the default for human
-`log` and `show` output; an explicit `--date` wins. Valid Git modes that this
-renderer does not yet implement (`relative`, `human`, `local`, `format:*`, and
-`auto:*`) are rejected when configured instead of being silently ignored.
-Dates in structured JSON keep their schema-defined RFC3339 representation.
+`rfc`/`rfc2822`, `unix`, `raw`, and `format:<strftime>` (the spec passes through
+verbatim, case-sensitively). `log.date` supplies the default for human `log` and
+`show` output; an explicit `--date` wins. Valid Git modes that this renderer does
+not yet implement (`relative`, `human`, `local`, and `auto:*`) are rejected when
+configured instead of being silently ignored. Dates in structured JSON keep
+their schema-defined RFC3339 representation.
 
 ```bash
 libra log --date=iso-strict
+libra log --date='format:%Y-%m-%d'
 libra log --pretty='format:%ad %s' --date=unix
 ```
 
@@ -144,6 +146,14 @@ the diff to specific files.
 ```bash
 libra log -p
 libra log -p -- src/main.rs
+```
+
+### `-s, --no-patch`
+
+Suppress diff output (patch/stat/shortstat), countermanding an earlier `-p`.
+
+```bash
+libra log -s -1
 ```
 
 ### `--name-only`
@@ -212,10 +222,13 @@ libra log --author "alice@example.com"
 
 ### `--grep <PATTERN>` / `-i` / `--invert-grep`
 
-Filter commits by message. `--grep` keeps commits whose message contains the
-(case-sensitive) substring. `-i` / `--regexp-ignore-case` makes the match
-case-insensitive (author/committer matching is already case-insensitive in
-Libra). `--invert-grep` keeps commits whose message does *not* match.
+Filter commits by message. The default dialect is POSIX basic regex (Git's
+default), so plain text matches literally and `+`, `(`/`)`, `.` behave as Git's
+BRE does. `--fixed-strings` treats the pattern as a literal, `--extended-regexp`
+uses POSIX ERE, and `--basic-regexp` selects the default dialect explicitly
+(last flag wins). `-i` / `--regexp-ignore-case` makes the match case-insensitive
+(author/committer matching is already case-insensitive in Libra).
+`--invert-grep` keeps commits whose message does *not* match.
 
 The search covers the commit subject, body, and trailers. PGP or SSH signatures in
 a `gpgsig` or `gpgsig-sha256` header immediately after `committer` are excluded, including with `-i` and `--invert-grep`; text in
@@ -229,6 +242,8 @@ existing parsing behavior.
 libra log --grep "fix(" -n 20
 libra log --grep fix -i              # case-insensitive
 libra log --grep WIP --invert-grep   # hide WIP commits
+libra log --extended-regexp --grep 'fix\([0-9]+\)'   # ERE dialect
+libra log --fixed-strings --grep 'c++ (fix)'           # literal pattern
 ```
 
 ### `--trailer <KEY[=VALUE]>` / `--only-trailers` (Libra extensions)
@@ -315,6 +330,16 @@ Do not print ref names. Overrides `--decorate`.
 
 ```bash
 libra log --no-decorate
+```
+
+### `--decorate-refs <PATTERN>` / `--decorate-refs-exclude <PATTERN>`
+
+Restrict decorations to refs matching any comma-separated fnmatch pattern, or
+hide matching refs. Both match against the full ref name and the short name.
+
+```bash
+libra log --decorate --decorate-refs='refs/tags/*'
+libra log --decorate --decorate-refs-exclude='origin/*'
 ```
 
 ### `--graph`
@@ -404,14 +429,16 @@ matches the default. (Git's opposite `--expand-tabs[=<n>]` is not implemented.)
 libra log --no-expand-tabs
 ```
 
-### `--no-notes`
+### `--notes[=<ref>]` / `--no-notes`
 
-Do not show commit notes. Accepted no-op for Git parity: Libra's log never
-displays notes inline, so this already matches the default. (Git's opposite
-`--notes[=<ref>]` is not implemented; use `libra notes show <commit>` to read a
-note.)
+Show commit notes. Notes are appended as a `Notes:` block for preset formats and
+expanded through the `%N` placeholder in `--format` templates. An optional
+`=<ref>` selects a notes ref (short names expand to `refs/notes/<name>`; default
+`refs/notes/commits`). `--no-notes` countermands an earlier `--notes`.
 
 ```bash
+libra log -1 --notes
+libra log -1 --notes=review --format='%h %s%n%N'
 libra log --no-notes
 ```
 

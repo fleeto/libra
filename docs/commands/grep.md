@@ -35,6 +35,9 @@ Exit codes follow Git's grep contract: matches exit 0, no selected matches exit 
 | Regexp | `-e` | `--regexp <PATTERN>` | Add a pattern to search for. Can be specified multiple times. |
 | Pattern file | `-f` | `--file <FILE>` | Read patterns from a file, one per line. Can be specified multiple times. |
 | All match | | `--all-match` | Require all patterns to match at least once in a file for that file to be included. |
+| And | | `--and` | Require every pattern to match the *same line*. |
+| Or | | `--or` | Match when any pattern matches the line (the default). |
+| Not | | `--not` | Negate the whole pattern set. |
 | Fixed string | `-F` | `--fixed-string` | Treat the pattern as a literal string, not a regular expression. |
 | Ignore case | `-i` | `--ignore-case` | Perform case-insensitive matching. |
 | Count | `-c` | `--count` | Show only the number of matching lines for each file. |
@@ -44,10 +47,12 @@ Exit codes follow Git's grep contract: matches exit 0, no selected matches exit 
 | Word regexp | `-w` | `--word-regexp` | Match only lines where the pattern forms a complete word (surrounded by word boundaries). |
 | Invert match | `-v` | `--invert-match` | Select non-matching lines instead of matching lines. |
 | Byte offset | `-b` | `--byte-offset` | Show the 0-based byte offset of the first match on each line. |
+| Column | | `--column` | Show the 1-based byte column of the first match on each line. |
 | Max count | `-m` | `--max-count <NUM>` | Stop after NUM matching lines per file. |
 | Only matching | `-o` | `--only-matching` | Print only the matched parts of a line, one match per output line (context lines are suppressed). |
 | Pathspec | | positional (trailing) | Restrict search to files matching the given paths. |
 | Tree | | `--tree <REVISION>` | Search in the specified revision or commit tree instead of the working tree. |
+| Recurse submodules | | `--recurse-submodules` / `--no-recurse-submodules` | Accepted for Git parity; submodule recursion is a documented narrowing (no-op). |
 | Cached | | `--cached` | Search in the index (staging area) instead of the working tree. |
 | Untracked | | `--untracked` | In addition to tracked files, also search untracked, non-ignored files in the working tree. With `--no-exclude-standard`, ignored files are included too. Cannot be combined with `--cached` or `--tree`. |
 | No index | | `--no-index` | Search the filesystem directly (the given paths, or the current directory) without a repository or index. Works outside a repository, recurses every file including ignored ones (skipping `.git`/`.libra`), and shows paths relative to the current directory. With `--exclude-standard`, standard ignore rules are applied (see below). Cannot be combined with `--cached`, `--untracked`, or `--tree`. |

@@ -46,6 +46,9 @@ pub struct FormatContext<'a> {
     /// space-joined) appended after the commit hash for `--parents`/`--children`
     /// in the full and oneline formats. Empty when neither flag is set.
     pub extra_hashes: &'a str,
+    /// Note text attached to the commit (Git's `%N`), newline-terminated when
+    /// non-empty. Empty when the commit has no note.
+    pub notes: &'a str,
 }
 
 pub struct CommitFormatter {
@@ -412,6 +415,8 @@ impl CommitFormatter {
                 Some((1, body.as_str()))
             } else if rest.starts_with("B") {
                 Some((1, raw_body.as_str()))
+            } else if rest.starts_with("N") {
+                Some((1, ctx.notes))
             } else if rest.starts_with("n") {
                 Some((1, "\n"))
             } else if rest.starts_with('%') {
@@ -574,6 +579,22 @@ fn ensure_trailing_newline(text: &str) -> String {
     output
 }
 
+/// Render the Git `Notes:` block appended after a commit message when
+/// `--notes` is active. Returns an empty string when `notes` is empty, so
+/// callers can append unconditionally.
+pub fn notes_block(notes: &str) -> String {
+    if notes.is_empty() {
+        return String::new();
+    }
+    let mut block = String::from("\nNotes:\n");
+    for line in notes.lines() {
+        block.push_str("    ");
+        block.push_str(line);
+        block.push('\n');
+    }
+    block
+}
+
 fn format_strict_iso_with_timezone(timestamp: i64, timezone: &str) -> String {
     let Some(utc) = DateTime::<Utc>::from_timestamp(timestamp, 0) else {
         return timestamp.to_string();
@@ -618,6 +639,17 @@ pub fn format_timestamp(timestamp: i64) -> String {
 /// entry point does not receive).
 pub fn format_timestamp_with(timestamp: i64, mode: &str) -> String {
     let dt = DateTime::<Utc>::from_timestamp(timestamp, 0).unwrap_or(chrono::DateTime::UNIX_EPOCH);
+    if let Some(spec) = mode.strip_prefix("format:") {
+        // Git's `--date=format:<strftime>` passes the spec through verbatim
+        // (case-sensitive, unlike the named modes). A bad specifier falls back
+        // to the default form rather than panicking.
+        if chrono::format::StrftimeItems::new(spec)
+            .any(|item| matches!(item, chrono::format::Item::Error))
+        {
+            return format_timestamp(timestamp);
+        }
+        return dt.format(spec).to_string();
+    }
     match mode {
         "short" => dt.format("%Y-%m-%d").to_string(),
         "iso" | "iso8601" => dt.format("%Y-%m-%d %H:%M:%S %z").to_string(),
@@ -658,6 +690,7 @@ mod tests {
             graph_prefix: "",
             decoration: "",
             abbrev_len: 7,
+            notes: "",
             extra_hashes: "",
         };
         let out = formatter.format(&commit, &ctx);
@@ -677,6 +710,7 @@ mod tests {
             graph_prefix: "",
             decoration: "",
             abbrev_len: 8,
+            notes: "",
             extra_hashes: "",
         };
 
@@ -703,6 +737,7 @@ mod tests {
             graph_prefix: "",
             decoration: "",
             abbrev_len: 7,
+            notes: "",
             extra_hashes: "",
         };
         let raw = CommitFormatter::new(FormatType::Preset(LogPreset::Raw));
@@ -754,6 +789,7 @@ mod tests {
             graph_prefix: "* ",
             decoration: "tag: v1.0",
             abbrev_len: 8,
+            notes: "",
             extra_hashes: "",
         };
 

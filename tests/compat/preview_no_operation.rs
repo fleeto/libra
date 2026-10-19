@@ -38,6 +38,7 @@ const CLASSIFIED: &[(&str, &str)] = &[
 /// preview path already writes nothing.
 const ACCEPTED: &[&str] = &[
     "agent",
+    "fast_import",
     "fetch",
     "file",
     "hydrate",

@@ -169,8 +169,19 @@ pub struct LogArgs {
     pub children: bool,
 
     /// Show diffs for each commit (like git -p)
-    #[clap(short = 'p', long = "patch")]
+    #[clap(short = 'p', long = "patch", overrides_with = "no_patch")]
     pub patch: bool,
+    /// Suppress diff output (`-s`/`--no-patch`), countermanding an earlier `-p`.
+    #[clap(short = 's', long = "no-patch", overrides_with = "patch")]
+    pub no_patch: bool,
+    /// Restrict decorations to refs matching any comma-separated pattern
+    /// (Git's `--decorate-refs`).
+    #[clap(long = "decorate-refs", value_name = "PATTERN")]
+    pub decorate_refs: Option<String>,
+    /// Hide decorations for refs matching any comma-separated pattern
+    /// (Git's `--decorate-refs-exclude`).
+    #[clap(long = "decorate-refs-exclude", value_name = "PATTERN")]
+    pub decorate_refs_exclude: Option<String>,
     /// Show only names of changed files
     #[clap(long)]
     pub name_only: bool,
@@ -236,9 +247,24 @@ pub struct LogArgs {
     #[clap(value_name = "REVISION_OR_PATH", num_args = 0..)]
     pathspec: Vec<String>,
 
-    /// Filter commits whose message contains PATTERN (case-sensitive substring match)
+    /// Filter commits whose message matches PATTERN. The default dialect is
+    /// POSIX basic regex (Git's default), so plain text matches literally.
     #[clap(long, value_name = "PATTERN")]
     pub grep: Option<String>,
+
+    /// Treat `--grep` as a literal fixed string (Git's `--fixed-strings`).
+    #[clap(long = "fixed-strings", overrides_with_all = ["grep_extended", "grep_basic"])]
+    pub grep_fixed: bool,
+
+    /// Use POSIX extended regular expressions for `--grep` (Git's
+    /// `--extended-regexp`).
+    #[clap(long = "extended-regexp", overrides_with_all = ["grep_fixed", "grep_basic"])]
+    pub grep_extended: bool,
+
+    /// Use POSIX basic regular expressions for `--grep` (the default dialect;
+    /// accepted for Git parity).
+    #[clap(long = "basic-regexp", overrides_with_all = ["grep_fixed", "grep_extended"])]
+    pub grep_basic: bool,
 
     /// Only list commits whose trailer block carries this trailer (Libra
     /// extension — Git has no such flag; nearest is a fragile
@@ -325,10 +351,14 @@ pub struct LogArgs {
     #[clap(long = "no-expand-tabs")]
     pub no_expand_tabs: bool,
 
-    /// Do not show commit notes. Accepted for Git parity and is a no-op: Libra's
-    /// log never displays notes inline, so this already matches the default.
-    /// (Git's opposite `--notes[=<ref>]` is not implemented; use `libra notes
-    /// show <commit>` to read a note.)
+    /// Show commit notes (Git's `--notes[=<ref>]`). An optional value selects a
+    /// notes ref (short names expand to `refs/notes/<name>`); the default ref is
+    /// `refs/notes/commits`. Notes are appended as a `Notes:` block for preset
+    /// formats and expanded through `%N` in custom formats.
+    #[clap(long, value_name = "REF", num_args = 0..=1, default_missing_value = "", require_equals = true)]
+    pub notes: Option<String>,
+
+    /// Do not show commit notes, countermanding an earlier `--notes`.
     #[clap(long = "no-notes")]
     pub no_notes: bool,
 
@@ -465,8 +495,8 @@ struct CommitFilter {
     /// (wildcards and `:(magic)` supported). `None` keeps prefix matching.
     path_specs: Option<PathspecSet>,
     grep: Option<String>,
-    /// `-i`/`--regexp-ignore-case`: case-insensitive `--grep` message match.
-    grep_ignore_case: bool,
+    /// Compiled `--grep` matcher (dialect translated at build time).
+    grep_regex: Option<regex::Regex>,
     /// `--invert-grep`: keep commits whose message does NOT match `--grep`.
     invert_grep: bool,
     min_parents: Option<usize>,
@@ -509,6 +539,95 @@ fn parse_trailer_filters(specs: &[String]) -> Result<Vec<TrailerFilter>, CliErro
         .collect()
 }
 
+/// The `--grep` pattern dialect. Git's default is POSIX basic regex; the
+/// explicit selector flags pick a different dialect (last flag wins).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GrepDialect {
+    Basic,
+    Extended,
+    Fixed,
+}
+
+/// Whether a ref passes the `--decorate-refs` / `--decorate-refs-exclude`
+/// filters (comma-separated fnmatch patterns).
+fn decorate_ref_allowed(reference: &Reference, args: &LogArgs) -> bool {
+    let full = match reference.kind {
+        ReferenceKind::Tag => format!("refs/tags/{}", reference.name),
+        ReferenceKind::Remote => format!("refs/remotes/{}", reference.name),
+        ReferenceKind::Local => format!("refs/heads/{}", reference.name),
+    };
+    if let Some(include) = &args.decorate_refs
+        && !include.split(',').any(|pattern| {
+            ref_glob_match(pattern.trim(), &full) || ref_glob_match(pattern.trim(), &reference.name)
+        })
+    {
+        return false;
+    }
+    if let Some(exclude) = &args.decorate_refs_exclude
+        && exclude.split(',').any(|pattern| {
+            ref_glob_match(pattern.trim(), &full) || ref_glob_match(pattern.trim(), &reference.name)
+        })
+    {
+        return false;
+    }
+    true
+}
+
+fn ref_glob_match(pattern: &str, name: &str) -> bool {
+    let mut builder = ignore::gitignore::GitignoreBuilder::new("");
+    if builder.add_line(None, pattern).is_err() {
+        return false;
+    }
+    match builder.build() {
+        Ok(gi) => {
+            gi.matched_path_or_any_parents(std::path::Path::new(name), false)
+                .is_ignore()
+                || gi
+                    .matched_path_or_any_parents(std::path::Path::new(name), false)
+                    .is_whitelist()
+        }
+        Err(_) => false,
+    }
+}
+
+/// Resolve the requested `--grep` dialect (last selector flag wins, basic is
+/// the default).
+fn grep_dialect(args: &LogArgs) -> GrepDialect {
+    if args.grep_fixed {
+        GrepDialect::Fixed
+    } else if args.grep_extended {
+        GrepDialect::Extended
+    } else {
+        GrepDialect::Basic
+    }
+}
+
+/// Translate POSIX basic regex to the extended dialect the `regex` crate
+/// speaks: unescaped ERE operators become escaped literals, while the BRE
+/// escaped forms (`\(`, `\+`, …) become their ERE operators.
+pub(crate) fn bre_to_ere(pattern: &str) -> String {
+    let mut out = String::with_capacity(pattern.len());
+    let mut chars = pattern.chars();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\\' => match chars.next() {
+                Some(next @ ('(' | ')' | '{' | '}' | '+' | '?' | '|')) => out.push(next),
+                Some(other) => {
+                    out.push('\\');
+                    out.push(other);
+                }
+                None => out.push('\\'),
+            },
+            '(' | ')' | '{' | '}' | '+' | '?' | '|' => {
+                out.push('\\');
+                out.push(ch);
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
 /// The two pickaxe modes. `StringCount` matches when a commit changes the number
 /// of occurrences of the literal string in the files it touches (`-S`).
 /// `DiffRegex` matches when an added/removed diff line matches the regex (`-G`).
@@ -538,7 +657,7 @@ impl CommitFilter {
             paths,
             path_specs: None,
             grep,
-            grep_ignore_case: false,
+            grep_regex: None,
             invert_grep: false,
             min_parents,
             max_parents,
@@ -576,13 +695,40 @@ impl CommitFilter {
         }
     }
 
-    /// Apply `-i`/`--regexp-ignore-case` and `--invert-grep` to the `--grep`
-    /// message filter. Author/committer matching is already case-insensitive
-    /// (both sides are lower-cased), so `-i` only affects `--grep` here.
-    fn with_grep_options(mut self, ignore_case: bool, invert_grep: bool) -> Self {
-        self.grep_ignore_case = ignore_case;
+    /// Apply `-i`/`--regexp-ignore-case`, `--invert-grep` and the `--grep`
+    /// dialect to the message filter. Author/committer matching is already
+    /// case-insensitive (both sides are lower-cased), so `-i` only affects
+    /// `--grep` here.
+    fn with_grep_options(
+        mut self,
+        ignore_case: bool,
+        invert_grep: bool,
+        dialect: GrepDialect,
+    ) -> CliResult<Self> {
         self.invert_grep = invert_grep;
-        self
+        self.grep_regex = match &self.grep {
+            // An empty `--grep` leaves message filtering disabled (Git parity).
+            Some(pattern) if !pattern.is_empty() => {
+                let translated = match dialect {
+                    GrepDialect::Fixed => regex::escape(pattern),
+                    GrepDialect::Extended => pattern.clone(),
+                    GrepDialect::Basic => bre_to_ere(pattern),
+                };
+                Some(
+                    regex::RegexBuilder::new(&translated)
+                        .case_insensitive(ignore_case)
+                        .build()
+                        .map_err(|error| {
+                            CliError::fatal(format!("invalid --grep pattern '{pattern}': {error}"))
+                                .with_exit_code(129)
+                                .with_stable_code(StableErrorCode::CliInvalidArguments)
+                        })?,
+                )
+            }
+            None => None,
+            _ => None,
+        };
+        Ok(self)
     }
 
     fn passes_non_path_filters(&self, commit: &Commit) -> bool {
@@ -648,9 +794,7 @@ impl CommitFilter {
             return false;
         }
 
-        if let Some(pattern) = &self.grep
-            && !pattern.is_empty()
-        {
+        if let Some(re) = &self.grep_regex {
             // Recognize the embedded signature with the shared parser, but keep
             // actual message whitespace: its display slice uses trim_start().
             let message = if let Some(signature) = parse_commit_msg(&commit.message).1 {
@@ -665,11 +809,9 @@ impl CommitFilter {
             } else {
                 commit.message.strip_prefix('\n').unwrap_or(&commit.message)
             };
-            let matches = if self.grep_ignore_case {
-                message.to_lowercase().contains(&pattern.to_lowercase())
-            } else {
-                message.contains(pattern.as_str())
-            };
+            // Git matches `--grep` against the whole message buffer; `.` never
+            // crosses a newline (no `(?s)`), so multi-line patterns still work.
+            let matches = re.is_match(message);
             // `--invert-grep` keeps the non-matching commits: exclude exactly
             // when `matches == invert_grep` (matches & !invert, or !matches & invert).
             if matches == self.invert_grep {
@@ -1678,7 +1820,8 @@ pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()>
     let name_only = args.name_only && !name_status;
     // `--patch-with-stat` is Git's synonym for `-p --stat`, so it enables the
     // patch view. The name flags still take precedence over any diff output.
-    let patch = (args.patch || args.patch_with_stat) && !name_only && !name_status;
+    let patch =
+        (args.patch || args.patch_with_stat) && !name_only && !name_status && !args.no_patch;
     // Emit the diffstat block before the patch when both are requested — via
     // `--patch-with-stat` or an explicit `-p --stat` combination.
     let stat_before_patch = patch && (args.stat || args.patch_with_stat);
@@ -1723,7 +1866,7 @@ pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()>
         max_parents,
         pickaxe,
     )
-    .with_grep_options(args.ignore_case, args.invert_grep)
+    .with_grep_options(args.ignore_case, args.invert_grep, grep_dialect(&args))?
     .with_trailer_filters(parse_trailer_filters(&args.trailers)?)
     .with_pathspec(path_specs);
 
@@ -1784,7 +1927,7 @@ pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()>
             patch,
             // `--shortstat` reads the same per-commit stats as `--stat`, so it
             // must trigger the same quiet-mode validation of blob data.
-            args.stat || args.shortstat,
+            (args.stat || args.shortstat) && !args.no_patch,
         )
         .await;
     }
@@ -1810,6 +1953,18 @@ pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()>
     } else {
         FormatType::Full
     };
+    // `--notes[=<ref>]` renders note text. `%N` expands notes for any format;
+    // the `Notes:` block is only appended for non-custom formats, matching Git.
+    let notes_enabled = args.notes.is_some() && !args.no_notes;
+    let notes_ref = match args.notes.as_deref() {
+        Some(raw) if !raw.is_empty() => crate::internal::notes::normalize_notes_ref(raw)
+            .map_err(|error| CliError::fatal(format!("invalid notes ref '{raw}': {error}")))?,
+        _ => crate::internal::notes::DEFAULT_NOTES_REF.to_string(),
+    };
+    let format_uses_notes_placeholder =
+        matches!(&format_type, FormatType::Custom(template) if template.contains("%N"));
+    let load_notes = notes_enabled || format_uses_notes_placeholder;
+    let append_notes_block = notes_enabled && !matches!(format_type, FormatType::Custom(_));
     let color_enabled = match output.color {
         ColorChoice::Always => true,
         ColorChoice::Never => false,
@@ -1909,6 +2064,9 @@ pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()>
                 &mut refs
                     .iter()
                     .filter_map(|r| {
+                        if !decorate_ref_allowed(r, &args) {
+                            return None;
+                        }
                         if r.kind == ReferenceKind::Local && Some(r.name.to_owned()) == branch_name
                         {
                             None
@@ -1989,13 +2147,33 @@ pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()>
             String::new()
         };
 
+        let note_text = if load_notes {
+            crate::internal::notes::show(&notes_ref, Some(&commit.id.to_string()))
+                .await
+                .map(|(_, _, text)| text)
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+        let note_text = if note_text.is_empty() {
+            String::new()
+        } else if note_text.ends_with('\n') {
+            note_text
+        } else {
+            format!("{note_text}\n")
+        };
+
         let ctx = FormatContext {
             graph_prefix: &graph_prefix,
             decoration: &ref_msg,
             abbrev_len,
             extra_hashes: &extra_hashes,
+            notes: &note_text,
         };
         let mut message = formatter.format(&commit, &ctx);
+        if append_notes_block {
+            message.push_str(&crate::internal::log::formatter::notes_block(&note_text));
+        }
 
         if name_only || name_status {
             let changes = cached_changes.take().unwrap_or_default();
@@ -2021,7 +2199,7 @@ pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()>
                 }
                 message.push_str(&block);
             }
-        } else if args.stat {
+        } else if args.stat && !args.no_patch {
             let stats = compute_commit_stat(&commit, commit_path_filters.clone()).await?;
             let stat_output = format_stat_output(&stats);
             if !stat_output.is_empty() {
@@ -2030,7 +2208,7 @@ pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()>
                 }
                 message.push_str(&stat_output);
             }
-        } else if args.shortstat {
+        } else if args.shortstat && !args.no_patch {
             let stats = compute_commit_stat(&commit, commit_path_filters).await?;
             let shortstat_output = format_shortstat_output(&stats);
             if !shortstat_output.is_empty() {
@@ -2096,7 +2274,7 @@ async fn run_log(args: &LogArgs, log_config: &ResolvedLogConfig) -> CliResult<Lo
         max_parents,
         pickaxe,
     )
-    .with_grep_options(args.ignore_case, args.invert_grep)
+    .with_grep_options(args.ignore_case, args.invert_grep, grep_dialect(args))?
     .with_trailer_filters(parse_trailer_filters(&args.trailers)?)
     .with_pathspec(path_specs);
 
@@ -3201,7 +3379,8 @@ mod tests {
                     None,
                     None,
                 )
-                .with_grep_options(ignore_case, invert);
+                .with_grep_options(ignore_case, invert, GrepDialect::Basic)
+                .unwrap();
                 assert_eq!(
                     filter.passes_non_path_filters(&commit),
                     expected,
@@ -3239,7 +3418,8 @@ mod tests {
                         None,
                         None,
                     )
-                    .with_grep_options(false, invert);
+                    .with_grep_options(false, invert, GrepDialect::Basic)
+                    .unwrap();
                     assert_eq!(
                         filter.passes_non_path_filters(&commit),
                         !invert,

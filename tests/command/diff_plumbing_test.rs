@@ -143,14 +143,22 @@ fn diff_plumbing_index_ignores_porcelain_rename_config() {
 }
 
 #[test]
-fn diff_plumbing_index_cached_is_unsupported() {
+fn diff_plumbing_index_cached_diffs_tree_against_index() {
     let (repo, _c1, _c2) = repo_with_two_commits();
+    // Stage a change; the index then differs from HEAD.
+    fs::write(repo.path().join("tracked.txt"), "staged-edit\n").unwrap();
+    assert_cli_success(
+        &run_libra_command(&["add", "tracked.txt"], repo.path()),
+        "stage edit",
+    );
     let out = run_libra_command(&["diff-index", "--cached", "HEAD"], repo.path());
     assert_eq!(
         out.status.code(),
-        Some(128),
-        "diff-index --cached is not yet supported"
+        Some(1),
+        "diff-index --cached exits 1 on differences: {}",
+        String::from_utf8_lossy(&out.stderr)
     );
+    assert!(out_str(&out).contains("tracked.txt"));
 }
 
 #[test]

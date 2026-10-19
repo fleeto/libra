@@ -832,12 +832,17 @@ async fn blame_runs_with_sha1() {
         line_porcelain: false,
         show_email: false,
         long: false,
+        no_abbrev: false,
         suppress: false,
         raw_timestamp: false,
         abbrev: None,
         root: false,
         show_name: false,
         ignore_whitespace: false,
+        detect_moves: false,
+        detect_copies: 0,
+        date: None,
+        incremental: false,
     })
     .await;
 }
@@ -861,12 +866,17 @@ async fn blame_runs_with_sha256() {
         line_porcelain: false,
         show_email: false,
         long: false,
+        no_abbrev: false,
         suppress: false,
         raw_timestamp: false,
         abbrev: None,
         root: false,
         show_name: false,
         ignore_whitespace: false,
+        detect_moves: false,
+        detect_copies: 0,
+        date: None,
+        incremental: false,
     })
     .await;
 }
@@ -972,12 +982,17 @@ async fn blame_root_flag_is_accepted_noop() {
         line_porcelain: false,
         show_email: false,
         long: false,
+        no_abbrev: false,
         suppress: false,
         raw_timestamp: false,
         abbrev: None,
         root: true,
         show_name: false,
         ignore_whitespace: false,
+        detect_moves: false,
+        detect_copies: 0,
+        date: None,
+        incremental: false,
     })
     .await;
 }

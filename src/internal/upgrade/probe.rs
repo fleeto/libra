@@ -289,8 +289,11 @@ mod tests {
     #[tokio::test]
     async fn passing_probe_reports_healthy() {
         let (_g, path) = script("exit 0");
+        // Generous timeout: the full lib suite runs this in parallel with
+        // hundreds of other process-spawning tests, so 10s can be exceeded on
+        // a loaded machine even though the probe itself is instant.
         let out =
-            run_phase_a_probe(&path, ProbeKind::Version, "1.2.3", DEFAULT_PROBE_TIMEOUT).await;
+            run_phase_a_probe(&path, ProbeKind::Version, "1.2.3", Duration::from_secs(60)).await;
         assert_eq!(out, ProbeOutcome::Passed);
         assert!(out.is_healthy());
     }

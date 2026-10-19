@@ -88,11 +88,29 @@ pub(super) fn rev_list_message_filter(
         .grep
         .iter()
         .map(|pattern| {
-            Regex::new(pattern).map_err(|error| {
-                CliError::fatal(format!("invalid --grep pattern '{pattern}': {error}"))
-                    .with_stable_code(StableErrorCode::CliInvalidArguments)
-                    .with_hint("use a valid regular expression or escape metacharacters")
-            })
+            let translated = if args.grep_fixed {
+                regex::escape(pattern)
+            } else if args.grep_extended {
+                pattern.clone()
+            } else {
+                crate::command::log::bre_to_ere(pattern)
+            };
+            Regex::new(&translated)
+                .map_err(|error| {
+                    CliError::fatal(format!("invalid --grep pattern '{pattern}': {error}"))
+                        .with_stable_code(StableErrorCode::CliInvalidArguments)
+                        .with_hint("use a valid regular expression or escape metacharacters")
+                })
+                .map(|re| {
+                    if args.grep_ignore_case {
+                        regex::RegexBuilder::new(&translated)
+                            .case_insensitive(true)
+                            .build()
+                            .unwrap_or(re)
+                    } else {
+                        re
+                    }
+                })
         })
         .collect::<CliResult<Vec<_>>>()?;
 

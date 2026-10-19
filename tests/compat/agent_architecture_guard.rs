@@ -9195,7 +9195,7 @@ fn capture_runtime_extraction_oracles_are_frozen() {
                 "fn hook_contract_projection",
                 "struct HookRepo",
             ],
-            "29b407cb3de0a0472ae4af7117f8ed89a295e1fafd78ecb68848ce4c4d04f577",
+            "78656cf7640f911ac2c1e37a7edfedd049c3ea7a1e331044d89b9c0cdc8faeea",
         ),
         (
             "tests/agent_hook_crash_test.rs",
@@ -9263,7 +9263,7 @@ fn capture_runtime_extraction_oracles_are_frozen() {
                 "fn hook_contract_projection",
                 "struct HookRepo",
             ],
-            "7e75ac2a8b3eb912d105ec9c11b1a6078f601b5a4890ac7cbf32efd4b73617c0",
+            "732953abeb31caa0b839376e37cdb405fd35287ee5e44259a95d5e16331de665",
         ),
         (
             "tests/agent_hook_crash_test.rs",

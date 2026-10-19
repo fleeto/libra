@@ -211,14 +211,20 @@ fn apply_check_clean_deletion_exits_0() {
 }
 
 #[test]
-fn apply_requires_check_flag() {
+fn apply_without_check_writes_the_patch() {
     let repo = init_repo();
+    fs::write(repo.path().join("f.txt"), "a\nb\nc\n").unwrap();
     fs::write(repo.path().join("p.diff"), MODIFY_PATCH).unwrap();
     let out = run_libra_command(&["apply", "p.diff"], repo.path());
     assert_eq!(
         out.status.code(),
-        Some(128),
-        "without --check this version errors out"
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(repo.path().join("f.txt")).unwrap(),
+        "a\nB\nc\n"
     );
 }
 

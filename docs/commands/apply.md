@@ -1,33 +1,35 @@
 # `libra apply`
 
-Check whether a patch applies cleanly — an MVP of
-`git apply --check`. This version validates only: it parses the patch,
-safety-checks every target path, and test-applies each file's hunks against the
-current working tree **without writing anything**.
+Apply a unified-diff patch to the working tree, or validate it — a
+Git-compatible subset of `git apply`.
 
 ## Synopsis
 
 ```
-libra apply --check [-p<n>] [<patch>...]
+libra apply [--check] [--stat] [-R] [--3way] [--index]
+            [--include=<pat>...] [--exclude=<pat>...] [--directory=<dir>]
+            [-p<n>] [<patch>...]
 ```
 
 ## Description
 
-`apply --check` reads one or more patches (from the named files, or
-from stdin when none are given), splits them into per-file sections, and for
-each file:
+`apply` reads one or more patches (from the named files, or from stdin when none
+are given), splits them into per-file sections, and for each file:
 
 1. parses the hunks (a malformed patch is a fatal error);
 2. resolves the target path, stripping `<n>` leading components (`-p<n>`,
-   default 1) and rejecting any path that is absolute, contains an empty, `.`,
-   or `..` component or NUL, points inside `.libra/`, or traverses an existing
-   symlink component;
-3. test-applies the hunks to the current file content (an empty base for a
-   new-file patch whose source is `/dev/null`).
+   default 1) and rejecting any path that is absolute, contains NUL, or escapes
+   the worktree;
+3. prepares the patched bytes in memory (so a multi-file patch fails before the
+   first write), then atomically replaces each target.
 
-If every file applies, the exit code is 0; if any file does not apply, it is 1.
-The working tree is never modified. Actually applying a patch (with an atomic
-temp-file + rename) is a planned future extension; `--check` is required today.
+Without `--check` the working tree is written. `--check` validates only.
+A patch that does not apply reports the first failing target and exits 1 without
+writing.
+
+Extended git sections are supported: `GIT binary patch` (literal and delta),
+`rename from`/`to`, `copy from`/`to`, mode-only changes, and
+`new file mode`/`deleted file mode` annotations.
 
 Patches larger than 64 MiB are rejected.
 
@@ -35,26 +37,42 @@ Patches larger than 64 MiB are rejected.
 
 | Option | Description | Example |
 |--------|-------------|---------|
-| `--check` | Validate without writing (required in this version). | `libra apply --check fix.patch` |
-| `-p<n>` | Strip `<n>` leading path components from each path (default 1). | `libra apply --check -p0 fix.patch` |
-| `--json` / `--machine` | Structured output: `{ applies, files }`. | `libra --json apply --check fix.patch` |
+| `--check` | Validate without writing. | `libra apply --check fix.patch` |
+| `--stat` | Print a diffstat and exit without applying. | `libra apply --stat fix.patch` |
+| `-R`, `--reverse` | Apply the patch in reverse (swap old/new sides). | `libra apply -R fix.patch` |
+| `--3way` | Three-way fallback using the patch's `index` blobs when a hunk does not apply; conflicting merges leave markers and warn. | `libra apply --3way fix.patch` |
+| `--index` | Stage the patched paths after writing. | `libra apply --index fix.patch` |
+| `--include=<pat>` | Only apply sections whose target matches the pattern. | `libra apply --include='src/*' fix.patch` |
+| `--exclude=<pat>` | Skip sections whose target matches the pattern. | `libra apply --exclude='docs/*' fix.patch` |
+| `--directory=<dir>` | Prepend a directory to every patched path (it must exist). | `libra apply --directory=build fix.patch` |
+| `-p<n>` | Strip `<n>` leading path components (default 1). | `libra apply -p0 fix.patch` |
+| `--json` / `--machine` | Structured output: `{ applies, files, applied }`. | `libra --json apply --check fix.patch` |
 
 ## Exit codes
 
 | Code | Meaning |
 |------|---------|
-| `0` | The patch applies cleanly. |
+| `0` | The patch applied (or validated cleanly). |
 | `1` | The patch does not apply (conflicting context or a missing target). |
-| `128` | Not inside a repository, `--check` was omitted, the patch is malformed/oversized/non-UTF-8, or a target path is unsafe. |
+| `128` | Not inside a repository, the patch is malformed/oversized/non-UTF-8, or a target path is unsafe. |
 
 ## Examples
 
 ```bash
-# Will this patch apply to the current tree?
+# Apply a patch
+libra apply fix.patch
+
+# Validate first
 libra apply --check fix.patch && echo "clean"
 
+# Reverse an already-applied patch
+libra apply -R fix.patch
+
+# Three-way fallback, then stage the result
+libra apply --3way --index fix.patch
+
 # Patch made without a/ b/ prefixes
-libra apply --check -p0 fix.patch
+libra apply -p0 fix.patch
 
 # From a pipeline
 git format-patch -1 --stdout | libra apply --check
@@ -64,10 +82,11 @@ git format-patch -1 --stdout | libra apply --check
 
 | Task | Libra | Git |
 |------|-------|-----|
+| Apply a patch | `libra apply p` | `git apply p` |
 | Check a patch | `libra apply --check p` | `git apply --check p` |
-| Path strip | `libra apply --check -p0 p` | `git apply --check -p0 p` |
+| Reverse-apply | `libra apply -R p` | `git apply -R p` |
+| Three-way fallback | `libra apply --3way p` | `git apply --3way p` |
 
-Differences and deferred features: actually applying the patch (without
-`--check`), `--index` / `--cached`, `--3way`, `--reverse`, `--unidiff-zero`,
-binary patches, and rename/mode hunks are not yet supported. Conflict markers
-are never written — `--check` only reports.
+Deferred: `--unidiff-zero`, `--recount`, and `--allow-empty`. Libra's `--3way`
+does not pre-check that the index matches (Git refuses first), and conflict
+markers are written with a warning + exit 1 like Git.

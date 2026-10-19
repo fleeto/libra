@@ -15,9 +15,10 @@ use crate::{
     command::{load_object, log},
     internal::{branch::Branch, config::ConfigKv, head::Head, tag},
     utils::{
+        client_storage::ClientStorage,
         error::{CliError, CliResult, StableErrorCode},
         output::{OutputConfig, emit_json_data},
-        util,
+        path, util,
     },
 };
 
@@ -114,9 +115,28 @@ pub struct RevListArgs {
     #[clap(long, value_name = "PATTERN")]
     pub committer: Option<String>,
 
-    /// Filter commits by message using a regular expression
+    /// Filter commits by message. The default dialect is POSIX basic regex
+    /// (Git's default), so plain text matches literally.
     #[clap(long, value_name = "PATTERN")]
     pub grep: Vec<String>,
+
+    /// Treat `--grep` as a literal fixed string (Git's `--fixed-strings`).
+    #[clap(long = "fixed-strings", overrides_with_all = ["grep_extended", "grep_basic"])]
+    pub grep_fixed: bool,
+
+    /// Use POSIX extended regular expressions for `--grep` (Git's
+    /// `--extended-regexp`).
+    #[clap(long = "extended-regexp", overrides_with_all = ["grep_fixed", "grep_basic"])]
+    pub grep_extended: bool,
+
+    /// Use POSIX basic regular expressions for `--grep` (the default dialect;
+    /// accepted for Git parity).
+    #[clap(long = "basic-regexp", overrides_with_all = ["grep_fixed", "grep_extended"])]
+    pub grep_basic: bool,
+
+    /// Match `--grep` case-insensitively (Git's `--regexp-ignore-case`).
+    #[clap(short = 'i', long = "regexp-ignore-case")]
+    pub grep_ignore_case: bool,
 
     /// Prefix symmetric-difference commits with '<' or '>'
     #[clap(long = "left-right")]
@@ -195,9 +215,82 @@ pub struct RevListArgs {
     #[clap(value_name = "SPEC")]
     pub specs: Vec<String>,
 
+    /// Print only the named tips without walking their ancestors (Git's
+    /// `--no-walk`).
+    #[clap(long = "no-walk")]
+    pub no_walk: bool,
+
+    /// Print the disk usage of the reachable objects instead of the commit list.
+    /// Value is `human` (default) or `raw` bytes.
+    #[clap(long = "disk-usage", value_name = "FORMAT", num_args = 0..=1, default_missing_value = "human", require_equals = true)]
+    pub disk_usage: Option<String>,
+
     /// Paths to limit the commit list after an explicit `--` separator
     #[clap(last = true, value_name = "PATH")]
     pub pathspecs: Vec<String>,
+}
+
+/// Total on-disk size of the commits and their reachable trees/blobs.
+async fn disk_usage_bytes(commit_ids: &[String]) -> CliResult<u64> {
+    let storage = ClientStorage::init(path::objects());
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut total = 0u64;
+    for id in commit_ids {
+        let hash = crate::internal::object_format::parse_repo_oid(id)
+            .map_err(|error| CliError::fatal(format!("bad object id '{id}': {error}")))?;
+        if !seen.insert(hash.to_string()) {
+            continue;
+        }
+        if let Ok(data) = storage.get(&hash) {
+            total += data.len() as u64;
+        }
+        let commit = load_object::<Commit>(&hash)
+            .map_err(|error| CliError::fatal(format!("failed to load commit {id}: {error}")))?;
+        collect_tree_bytes(&storage, &commit.tree_id, &mut seen, &mut total)?;
+    }
+    Ok(total)
+}
+
+fn collect_tree_bytes(
+    storage: &ClientStorage,
+    tree_id: &ObjectHash,
+    seen: &mut HashSet<String>,
+    total: &mut u64,
+) -> CliResult<()> {
+    if !seen.insert(tree_id.to_string()) {
+        return Ok(());
+    }
+    if let Ok(data) = storage.get(tree_id) {
+        *total += data.len() as u64;
+    }
+    let tree = load_object::<Tree>(tree_id)
+        .map_err(|error| CliError::fatal(format!("failed to load tree {tree_id}: {error}")))?;
+    for item in &tree.tree_items {
+        if item.mode == TreeItemMode::Tree {
+            collect_tree_bytes(storage, &item.id, seen, total)?;
+        } else if seen.insert(item.id.to_string())
+            && let Ok(data) = storage.get(&item.id)
+        {
+            *total += data.len() as u64;
+        }
+    }
+    Ok(())
+}
+
+/// Render bytes in Git's human form (`KiB`/`MiB`/…, one decimal).
+fn human_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut value = bytes as f64;
+    let mut unit = 0usize;
+    while value >= 1024.0 && unit + 1 < UNITS.len() {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
 }
 
 pub async fn execute(args: RevListArgs) -> Result<(), String> {
@@ -224,6 +317,26 @@ pub async fn execute_safe(args: RevListArgs, output: &OutputConfig) -> CliResult
     }
 
     let result = resolve_rev_list(&args).await?;
+
+    if let Some(format) = &args.disk_usage {
+        let bytes = disk_usage_bytes(&result.commits).await?;
+        let rendered = match format.as_str() {
+            "raw" => bytes.to_string(),
+            "human" => human_bytes(bytes),
+            other => {
+                return Err(CliError::command_usage(format!(
+                    "invalid --disk-usage format '{other}'; use 'human' or 'raw'"
+                ))
+                .with_stable_code(StableErrorCode::CliInvalidArguments));
+            }
+        };
+        if output.is_json() {
+            emit_json_data("rev-list.disk-usage", &rendered, output)?;
+        } else {
+            println!("{rendered}");
+        }
+        return Ok(());
+    }
 
     if output.is_json() {
         emit_json_data("rev-list", &result, output)
@@ -256,7 +369,7 @@ async fn resolve_rev_list(args: &RevListArgs) -> CliResult<RevListOutput> {
         collect_date_priority_selection(&tip, args.first_parent, args.skip, args.max_count).await?
     } else {
         let mut selection =
-            resolve_revision_selection(&specs, args.first_parent, !args.all).await?;
+            resolve_revision_selection(&specs, args.first_parent, !args.all, args.no_walk).await?;
         sort_rev_list_commits(&mut selection.commits);
         selection
     };

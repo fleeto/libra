@@ -5,7 +5,8 @@ Manage the log of reference changes (HEAD, branches).
 ## Synopsis
 
 ```
-libra reflog show [<ref_name>] [--pretty <format>] [--since <date>] [--until <date>] [--grep <pattern>] [--author <pattern>] [-n <N>] [-p/--patch] [--stat] [--no-abbrev]
+libra reflog [<ref_name>] [--pretty <format>] [--since <date>] [--until <date>] [--grep <pattern>] [--author <pattern>] [--date <mode>] [-n <N>] [-p/--patch] [--stat] [--no-abbrev]
+libra reflog show [<ref_name>] [same flags]
 libra reflog delete <selector>...
 libra reflog exists <ref_name>
 ```
@@ -17,6 +18,10 @@ libra reflog exists <ref_name>
 Reflog entries are stored in the SQLite `reflog` table, providing transactional safety and queryable history. This contrasts with Git's flat-file approach where each ref has a separate reflog file under `.git/logs/`.
 
 The `show` subcommand is the primary interface for inspecting reflog history, with filtering by time range, message content, and author. The `delete` subcommand removes specific entries, and `exists` is a plumbing command for scripts to check whether a reference has any reflog entries.
+
+Bare `libra reflog` behaves like `reflog show HEAD` and accepts the same flags
+(`libra reflog -3`, `libra reflog --grep <pattern>`, `libra reflog main`), matching
+Git.
 
 Bare `libra reflog`, `reflog show`, `reflog exists`, and `reflog expire --dry-run` do not record an Operation v2 entry. `reflog delete` and `reflog expire` without `--dry-run` still record one (`libra op log --command reflog`). Bare `reflog expire --dry-run` without a ref or `--all` is still a usage error.
 
@@ -38,6 +43,7 @@ Display reflog entries for a reference.
 | Patch | `-p` | `--patch` | Show the diff introduced by the commit referenced in each reflog entry. |
 | Stat | | `--stat` | Show diffstat (files changed, insertions, deletions) for each reflog entry. |
 | No abbrev | | `--no-abbrev` | Print full object names instead of the abbreviated 7-char prefix (applies to every `--pretty` format). |
+| Date mode | | `--date=<MODE>` | Timestamp rendering mode (`default` / `short` / `iso` / `iso-strict` / `rfc` / `unix` / `raw`). |
 
 ```bash
 # Show HEAD reflog (default)

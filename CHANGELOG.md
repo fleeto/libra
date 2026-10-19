@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+### Issue #478 plumbing/porcelain parity
+
+- `log`/`show`/`rev-list` `--grep` now defaults to POSIX BRE (literal for plain
+  text) with `--fixed-strings`/`--extended-regexp`/`--basic-regexp` selectors and
+  `-i`; `log`/`show` render `--notes[=<ref>]` as a `Notes:` block and expand `%N`.
+- `show` accepts `^{tree}`/`^{commit}` peel suffixes through the shared
+  object-spec parser; `diff-tree` defaults to raw plumbing output and gains
+  `-p`/`--raw`/`--name-only`/`--name-status`/`-s`/`-r`/`-c`; `diff-files` and
+  `diff-index` likewise default to raw and gain patch/name/no-patch modes and
+  `diff-index --cached`; `diff` gains `--dirstat` and `--no-index`.
+- `apply` actually applies patches (not only `--check`) and adds `--stat`, `-R`,
+  `--3way`, `--index`, `--include`/`--exclude`, and `--directory`.
+- `shortlog` accepts revision ranges; bare `reflog` accepts `-n`/`-<digits>`,
+  `--grep`, `--date`, and a positional ref; `blame` gains `-M`/`-C`, `--date`,
+  and `--incremental`; `rev-list` gains `--no-walk` and `--disk-usage`;
+  `fast-import` accepts a positional file and `--dry-run`.
+
 ### OpenCode thinking capture
 
 - Write assistant reasoning text and unproven fields into the ordinary OpenCode

@@ -4270,7 +4270,14 @@ fn acquire_passphrase(
                 path.display()
             ))
         })?;
-        let mut text = zeroize::Zeroizing::new(String::new());
+        // Pre-size to the file length so `read_to_string` does not realloc: a
+        // realloc would free the OLD buffer without wiping, leaking a copy of
+        // the passphrase into the allocator (plan-20260921 GC-VG-01).
+        let capacity = std::fs::metadata(path)
+            .map(|meta| meta.len() as usize)
+            .unwrap_or(64)
+            .max(1);
+        let mut text = zeroize::Zeroizing::new(String::with_capacity(capacity));
         file.read_to_string(&mut text).map_err(|e| {
             gpg_io_error(format!(
                 "failed to read passphrase file '{}': {e}",

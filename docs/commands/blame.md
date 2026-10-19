@@ -29,12 +29,17 @@ For large files, the `-L` option restricts output to a specific line range, redu
 | Line range | `-L` | `-L <RANGE>` | Restrict blame to a line range. See formats below. |
 | Show email | `-e` | `--show-email` | Show the author email (as `<email>`) instead of the author name in the default output. |
 | Long hash | `-l` | | Show the full commit hash instead of the abbreviated one. |
+| No abbrev | | `--no-abbrev` | Show the full commit hash (countermands `--abbrev`; equivalent to `-l`). |
 | Suppress | `-s` | | Suppress the author name and timestamp columns (show only hash + line). |
 | Show name | `-f` | `--show-name` | Show the filename after the hash column on each line. Libra does not follow renames/copies, so it is the blamed file on every line. Human output only (porcelain already prints `filename`). |
 | Raw time | `-t` | | Show the raw author timestamp (epoch seconds) instead of a formatted date. |
 | Abbrev | | `--abbrev <N>` | Use N hex digits for the abbreviated commit hash (ignored with `-l`). |
 | Root | | `--root` | Do not treat root commits as boundaries. Accepted no-op: Libra's blame never prefixes boundary/root commits with `^`, so root commits already appear as normal commits. |
 | Ignore whitespace | `-w` | `--ignore-whitespace` | Ignore whitespace when comparing the parent's and child's versions of a line, so a whitespace-only change is attributed to the older commit. Matches Git's `-w` (ignore-all-whitespace) semantics. |
+| Detect moves | `-M` | | Re-attribute lines that moved from another file in a parent revision (one-step scan of parent trees; a documented narrowing of Git's recursive detection). |
+| Detect copies | `-C` | | Detect lines copied from other files. Shares the parent-tree scan with `-M`; repeatable (each extra `-C` widens nothing further today). |
+| Date mode | | `--date=<MODE>` | Date rendering mode for the author column (`default` / `short` / `iso` / `iso-strict` / `rfc` / `unix` / `raw` / `format:<strftime>`). |
+| Incremental | | `--incremental` | Emit the incremental format (porcelain shape with per-line headers). |
 | Porcelain | `-p` | `--porcelain` | Machine-readable porcelain output (commit metadata once per commit). |
 | JSON | | `--json` | Emit structured JSON output. |
 | Quiet | | `--quiet` | Validate inputs but suppress all blame output. |
@@ -48,6 +53,7 @@ the end of the file (matching Git):
 |--------|---------|---------|
 | `N` | From line N to the end of the file | `-L 10` |
 | `N,M` | Lines N through M (inclusive) | `-L 10,20` |
+| `N,-M` | Lines N through M lines before the last line (negative end) | `-L 1,-2` |
 | `N,+C` | C lines starting at line N | `-L 10,+5` (lines 10-14) |
 | `/regex/` | From the first line matching the regex to the end of the file | `-L '/fn main/'` |
 | `/start/,/end/` | From the first `/start/` match to the first `/end/` match at or after it | `-L '/fn main/,/^}/'` |
@@ -168,6 +174,7 @@ The commit argument is positional (second argument after the file path) rather t
 | Reverse blame | Not supported | `--reverse` | N/A |
 | Show email | `-e` / `--show-email` (default human output) | `-e` / `--show-email` | N/A |
 | Long hash | `-l` | `-l` | N/A |
+| No abbrev | `--no-abbrev` | `--no-abbrev` | N/A |
 | Suppress author/date | `-s` | `-s` | N/A |
 | Show filename | `-f` / `--show-name` | `-f` / `--show-name` | N/A |
 | Show timestamp | `-t` (raw epoch; formatted by default) | `-t` (raw timestamp) | N/A |

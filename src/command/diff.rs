@@ -10,7 +10,7 @@ use std::os::unix::fs::MetadataExt;
 use std::sync::Arc;
 use std::{
     cell::RefCell,
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     fmt::Write as _,
     io::{self, IsTerminal},
     ops::Range,
@@ -86,7 +86,7 @@ EXAMPLES:
     libra diff -R                           Reverse diff (swap additions and deletions)
     libra --json diff --staged              Structured JSON output for agents";
 
-#[derive(Parser, Debug, Default)]
+#[derive(Parser, Debug, Default, Clone)]
 #[command(after_help = DIFF_EXAMPLES)]
 pub struct DiffArgs {
     /// Old commit, default is HEAD
@@ -282,6 +282,18 @@ pub struct DiffArgs {
     /// pickaxe `-G`). The regex is validated before scanning the working tree.
     #[clap(short = 'G', value_name = "REGEX")]
     pub pickaxe_regex: Option<String>,
+
+    /// Diff two filesystem paths directly, without using the index or a
+    /// repository (Git's `--no-index`). Works outside a repository; recurses
+    /// directories and exits 1 when anything differs.
+    #[clap(long = "no-index")]
+    pub no_index: bool,
+
+    /// Show a per-directory change distribution (`--dirstat[=<param>,...]`, `-X`).
+    /// Parameters: `changes` (default), `lines`, `files`, `noncumulative`,
+    /// `cumulative`, and a percentage threshold (default 3%).
+    #[clap(short = 'X', long, value_name = "PARAM", num_args = 0..=1, default_missing_value = "", require_equals = true)]
+    pub dirstat: Option<String>,
 
     /// Output only the last line of `--stat`: the files-changed / insertions /
     /// deletions summary.
@@ -716,6 +728,9 @@ pub async fn execute(args: DiffArgs) {
 }
 
 pub async fn execute_safe(args: DiffArgs, output: &OutputConfig) -> CliResult<()> {
+    if args.no_index {
+        return execute_no_index_safe(&args, output).await;
+    }
     if util::require_repo().is_err() {
         return Err(CliError::from(DiffError::NotInRepo));
     }
@@ -764,6 +779,208 @@ pub async fn execute_safe(args: DiffArgs, output: &OutputConfig) -> CliResult<()
         apply_diff_prefixes(&mut result, &config.prefixes);
     }
     render_diff_output(&args, &result, output)
+}
+
+/// `--no-index`: diff two filesystem paths directly, outside any repository.
+///
+/// Recurses directories, pairs same-named entries, and exits 1 when anything
+/// differs (Git's `--no-index` implies `--exit-code`).
+async fn execute_no_index_safe(args: &DiffArgs, output: &OutputConfig) -> CliResult<()> {
+    let mut paths = args.pathspec.clone();
+    paths.extend(args.after_dashdash.iter().cloned());
+    if paths.len() != 2 {
+        return Err(CliError::command_usage(format!(
+            "--no-index requires exactly two paths (got {})",
+            paths.len()
+        ))
+        .with_stable_code(StableErrorCode::CliInvalidArguments));
+    }
+    let diff_algorithm = resolve_diff_algorithm(args).map_err(CliError::from)?;
+    let context = args.unified.unwrap_or(3);
+    let left = PathBuf::from(&paths[0]);
+    let right = PathBuf::from(&paths[1]);
+
+    let mut pairs: BTreeMap<String, (Option<PathBuf>, Option<PathBuf>)> = BTreeMap::new();
+    collect_no_index_pairs(Some(&left), Some(&right), Path::new(""), &mut pairs)?;
+
+    let mut result = DiffOutput {
+        old_ref: paths[0].clone(),
+        new_ref: paths[1].clone(),
+        files: Vec::new(),
+        total_insertions: 0,
+        total_deletions: 0,
+        files_changed: 0,
+        external_diff_applied: false,
+        binary_patch: false,
+    };
+    for (label, (a, b)) in pairs {
+        let a_bytes = a
+            .as_deref()
+            .map(std::fs::read)
+            .transpose()
+            .map_err(|error| {
+                CliError::fatal(format!(
+                    "cannot read '{}': {error}",
+                    a.as_deref().unwrap_or(Path::new("")).display()
+                ))
+            })?;
+        let b_bytes = b
+            .as_deref()
+            .map(std::fs::read)
+            .transpose()
+            .map_err(|error| {
+                CliError::fatal(format!(
+                    "cannot read '{}': {error}",
+                    b.as_deref().unwrap_or(Path::new("")).display()
+                ))
+            })?;
+        let a_bytes = a_bytes.unwrap_or_default();
+        let b_bytes = b_bytes.unwrap_or_default();
+        let status = match (&a, &b) {
+            (Some(_), None) => "deleted",
+            (None, Some(_)) => "added",
+            _ => "modified",
+        };
+        let binary = a_bytes.contains(&0) || b_bytes.contains(&0);
+        let (raw, insertions, deletions) = if binary {
+            (
+                format!(
+                    "diff --git a/{label} b/{label}\nBinary files a/{label} and b/{label} differ\n"
+                ),
+                0,
+                0,
+            )
+        } else {
+            let a_text = String::from_utf8_lossy(&a_bytes);
+            let b_text = String::from_utf8_lossy(&b_bytes);
+            let hunks = compute_unified_hunks(&a_text, &b_text, context, &diff_algorithm);
+            let mut raw = format!("diff --git a/{label} b/{label}\n");
+            if a.is_none() {
+                raw.push_str("new file mode 100644\n");
+            }
+            if b.is_none() {
+                raw.push_str("deleted file mode 100644\n");
+            }
+            raw.push_str(&format!(
+                "--- {}\n+++ {}\n",
+                if a.is_some() {
+                    format!("a/{label}")
+                } else {
+                    "/dev/null".to_string()
+                },
+                if b.is_some() {
+                    format!("b/{label}")
+                } else {
+                    "/dev/null".to_string()
+                }
+            ));
+            raw.push_str(&hunks);
+            let (insertions, deletions) = count_body_changes(&hunks);
+            (raw, insertions, deletions)
+        };
+        result.total_insertions += insertions;
+        result.total_deletions += deletions;
+        result.files_changed += 1;
+        result.files.push(DiffFileStat {
+            path: label,
+            status: status.to_string(),
+            insertions,
+            deletions,
+            hunks: parse_diff_hunks(&raw),
+            raw_diff: raw,
+            rename_from: None,
+            similarity: None,
+            binary: None,
+            check_trailing_blank_start: None,
+            old_id: None,
+            new_id: None,
+            old_mode: None,
+            new_mode: None,
+        });
+    }
+
+    let mut local_args = args.clone();
+    local_args.exit_code = true;
+    render_diff_output(&local_args, &result, output)
+}
+
+/// Recursively pair entries of two `--no-index` roots. A file paired with a
+/// directory maps onto the directory's same-named child; a missing side yields
+/// an add/delete pair.
+fn collect_no_index_pairs(
+    left: Option<&Path>,
+    right: Option<&Path>,
+    rel: &Path,
+    pairs: &mut BTreeMap<String, (Option<PathBuf>, Option<PathBuf>)>,
+) -> CliResult<()> {
+    let left_meta = left.and_then(|path| std::fs::symlink_metadata(path).ok());
+    let right_meta = right.and_then(|path| std::fs::symlink_metadata(path).ok());
+    let left_dir = left_meta.as_ref().is_some_and(|meta| meta.is_dir());
+    let right_dir = right_meta.as_ref().is_some_and(|meta| meta.is_dir());
+
+    if left_dir || right_dir {
+        // A plain file against a directory pairs with the directory child.
+        if !left_dir && left_meta.is_some() {
+            let name = left.and_then(Path::file_name).unwrap_or_default();
+            let label = no_index_label(rel, name);
+            let right_child = right.map(|path| path.join(name));
+            pairs.insert(label, (left.map(Path::to_path_buf), right_child));
+            return Ok(());
+        }
+        if !right_dir && right_meta.is_some() {
+            let name = right.and_then(Path::file_name).unwrap_or_default();
+            let label = no_index_label(rel, name);
+            let left_child = left.map(|path| path.join(name));
+            pairs.insert(label, (left_child, right.map(Path::to_path_buf)));
+            return Ok(());
+        }
+        let mut names: std::collections::BTreeSet<std::ffi::OsString> =
+            std::collections::BTreeSet::new();
+        for side in [left_dir.then_some(left), right_dir.then_some(right)]
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
+            let entries = std::fs::read_dir(side).map_err(|error| {
+                CliError::fatal(format!("cannot list '{}': {error}", side.display()))
+            })?;
+            for entry in entries {
+                let entry = entry.map_err(|error| {
+                    CliError::fatal(format!("cannot list '{}': {error}", side.display()))
+                })?;
+                names.insert(entry.file_name());
+            }
+        }
+        for name in names {
+            let child_rel = rel.join(&name);
+            let left_child = left.map(|path| path.join(&name));
+            let right_child = right.map(|path| path.join(&name));
+            collect_no_index_pairs(
+                left_child.as_deref(),
+                right_child.as_deref(),
+                &child_rel,
+                pairs,
+            )?;
+        }
+        return Ok(());
+    }
+
+    let name = right.or(left).and_then(Path::file_name);
+    let label = no_index_label(rel, name.unwrap_or_default());
+    pairs.insert(
+        label,
+        (left.map(Path::to_path_buf), right.map(Path::to_path_buf)),
+    );
+    Ok(())
+}
+
+fn no_index_label(rel: &Path, name: &std::ffi::OsStr) -> String {
+    let joined = if rel.as_os_str().is_empty() {
+        PathBuf::from(name)
+    } else {
+        rel.join(name)
+    };
+    joined.to_string_lossy().replace('\\', "/")
 }
 
 /// Run the diff pipeline for an in-process service caller and return the
@@ -1090,6 +1307,7 @@ fn apply_word_diff(
         || args.compact_summary
         || args.shortstat
         || args.summary
+        || args.dirstat.is_some()
         || args.raw
         || args.no_patch
         || output.is_json()
@@ -2739,6 +2957,7 @@ fn patch_body_is_shown(args: &DiffArgs) -> bool {
         || args.name_only
         || args.name_status
         || args.summary
+        || args.dirstat.is_some()
         || args.raw
         || args.no_patch
         || args.check)
@@ -3198,7 +3417,7 @@ fn apply_textconv(
 /// zlib-deflate `data` (for `--binary` literal chunks). Uses `flate2` at the
 /// default level; the bytes are valid zlib but NOT byte-identical to Git's own
 /// `zlib` output (a documented divergence).
-fn zlib_deflate(data: &[u8]) -> Vec<u8> {
+pub(crate) fn zlib_deflate(data: &[u8]) -> Vec<u8> {
     use std::io::Write as _;
     let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
     let _ = encoder.write_all(data);
@@ -3208,7 +3427,7 @@ fn zlib_deflate(data: &[u8]) -> Vec<u8> {
 /// Encode `data` with Git's base85 (the `binary-patch` line format): each line
 /// carries up to 52 bytes, prefixed by a length char (`A`-`Z` for 1-26 bytes,
 /// `a`-`z` for 27-52), then 5 base85 digits per 4 bytes (zero-padded), big-endian.
-fn git_base85(data: &[u8]) -> String {
+pub(crate) fn git_base85(data: &[u8]) -> String {
     const ALPHABET: &[u8] =
         b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz!#$%&()*+-;<=>?@^_`{|}~";
     let mut out = String::new();
@@ -4851,6 +5070,7 @@ pub(crate) async fn staged_diff_text() -> Result<String, DiffError> {
         old: None,
         new: None,
         staged: true,
+        no_index: false,
         pathspec: Vec::new(),
         algorithm: None,
         minimal: false,
@@ -4874,6 +5094,7 @@ pub(crate) async fn staged_diff_text() -> Result<String, DiffError> {
         after_dashdash: Vec::new(),
         ignore_blank_lines: false,
         summary: false,
+        dirstat: None,
         raw: false,
         compact_summary: false,
         diff_filter: None,

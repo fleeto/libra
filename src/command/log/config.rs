@@ -100,14 +100,24 @@ pub(crate) async fn configured_date() -> CliResult<Option<String>> {
         return Err(invalid_config(
             "log.date",
             &value,
-            "supported modes: default, short, iso, iso-strict, rfc, unix, raw",
+            "supported modes: default, short, iso, iso-strict, rfc, unix, raw, format:<strftime>",
         ));
     };
     Ok(Some(normalized))
 }
 
 fn supported_date_mode(value: &str) -> Option<String> {
-    let normalized = value.trim().to_ascii_lowercase();
+    let raw = value.trim();
+    if let Some(spec) = raw.strip_prefix("format:") {
+        // Validate the strftime spec eagerly so a bad format fails at parse.
+        if chrono::format::StrftimeItems::new(spec)
+            .any(|item| matches!(item, chrono::format::Item::Error))
+        {
+            return None;
+        }
+        return Some(format!("format:{spec}"));
+    }
+    let normalized = raw.to_ascii_lowercase();
     matches!(
         normalized.as_str(),
         "default"
@@ -128,7 +138,7 @@ pub(crate) fn resolve_cli_date(value: &str) -> CliResult<String> {
     supported_date_mode(value).ok_or_else(|| {
         CliError::command_usage(format!("invalid --date option: '{value}'"))
             .with_stable_code(StableErrorCode::CliInvalidArguments)
-            .with_hint("supported modes: default, short, iso, iso-strict, rfc, unix, raw")
+            .with_hint("supported modes: default, short, iso, iso-strict, rfc, unix, raw, format:<strftime>")
     })
 }
 

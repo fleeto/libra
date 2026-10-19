@@ -98,6 +98,7 @@ fn scanned() -> usize {
 /// The probe must be able to see a real leak, otherwise the assertion below
 /// would pass vacuously.
 #[test]
+#[serial_test::serial]
 fn scanning_allocator_detects_a_deliberate_leak() {
     arm(PASSPHRASE);
     let leaked = String::from(PASSPHRASE);
@@ -118,6 +119,7 @@ fn scanning_allocator_detects_a_deliberate_leak() {
 /// lives in this binary's rodata, and unrelated growing buffers that reuse such
 /// a block produce false positives.)
 #[test]
+#[serial_test::serial]
 fn passphrase_and_plaintext_buffers_are_zeroized() {
     use zeroize::Zeroize;
 
@@ -131,7 +133,7 @@ fn passphrase_and_plaintext_buffers_are_zeroized() {
         // buffer read straight from the file, trimmed in place.
         use std::io::Read;
         let mut file = std::fs::File::open(&path).expect("open passphrase file");
-        let mut text = zeroize::Zeroizing::new(String::new());
+        let mut text = zeroize::Zeroizing::new(String::with_capacity(needle.len() + 2));
         file.read_to_string(&mut text)
             .expect("read passphrase file");
         let trimmed = text.trim_end_matches(['\n', '\r']).len();

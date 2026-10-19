@@ -35,6 +35,29 @@ EXAMPLES:
 #[derive(Parser, Debug)]
 #[command(after_help = DIFF_TREE_EXAMPLES)]
 pub struct DiffTreeArgs {
+    /// Recurse into sub-trees. Libra always recurses, so this is accepted for
+    /// Git plumbing parity and is a no-op.
+    #[clap(short = 'r')]
+    pub recurse: bool,
+    /// Emit a patch instead of the default raw record.
+    #[clap(short = 'p', long = "patch")]
+    pub patch: bool,
+    /// Suppress the diff body (raw/patch) entirely.
+    #[clap(short = 's', long = "no-patch")]
+    pub no_patch: bool,
+    /// Force the raw record (the default when no output-mode flag is given).
+    #[clap(long = "raw")]
+    pub raw: bool,
+    /// Show only changed path names.
+    #[clap(long = "name-only")]
+    pub name_only: bool,
+    /// Show changed path names with status letters.
+    #[clap(long = "name-status")]
+    pub name_status: bool,
+    /// Combined-diff spelling. Libra renders the unmerged/combined form for
+    /// merge commits through the shared engine; the flag is otherwise accepted.
+    #[clap(short = 'c', long = "cc")]
+    pub cc: bool,
     /// The "old" tree-ish.
     #[clap(value_name = "TREE-A")]
     pub tree_a: String,
@@ -50,10 +73,24 @@ pub struct DiffTreeArgs {
 #[derive(Parser, Debug)]
 #[command(after_help = DIFF_INDEX_EXAMPLES)]
 pub struct DiffIndexArgs {
-    /// Compare against the index instead of the working tree. Not yet
-    /// supported — use `diff --staged` for HEAD vs the index.
+    /// Compare against the index instead of the working tree.
     #[clap(long, visible_alias = "cached")]
     pub cached: bool,
+    /// Emit a patch instead of the default raw record.
+    #[clap(short = 'p', long = "patch")]
+    pub patch: bool,
+    /// Suppress the diff body (raw/patch) entirely.
+    #[clap(short = 's', long = "no-patch")]
+    pub no_patch: bool,
+    /// Force the raw record (the default when no output-mode flag is given).
+    #[clap(long = "raw")]
+    pub raw: bool,
+    /// Show only changed path names.
+    #[clap(long = "name-only")]
+    pub name_only: bool,
+    /// Show changed path names with status letters.
+    #[clap(long = "name-status")]
+    pub name_status: bool,
     /// The tree-ish to compare.
     #[clap(value_name = "TREE")]
     pub tree: String,
@@ -66,12 +103,52 @@ pub struct DiffIndexArgs {
 #[derive(Parser, Debug)]
 #[command(after_help = DIFF_FILES_EXAMPLES)]
 pub struct DiffFilesArgs {
+    /// Emit a patch instead of the default raw record.
+    #[clap(short = 'p', long = "patch")]
+    pub patch: bool,
+    /// Suppress the diff body (raw/patch) entirely.
+    #[clap(short = 's', long = "no-patch")]
+    pub no_patch: bool,
+    /// Force the raw record (the default when no output-mode flag is given).
+    #[clap(long = "raw")]
+    pub raw: bool,
+    /// Show changed file names only.
+    #[clap(long = "name-only")]
+    pub name_only: bool,
     /// Show changed file names with their status letter (`A`/`M`/`D`/`R`).
     #[clap(long = "name-status")]
     pub name_status: bool,
     /// Optional path limiters.
     #[clap(value_name = "PATH", last = true)]
     pub paths: Vec<String>,
+}
+
+/// Append the output-mode flags shared by the diff plumbing wrappers. Git's
+/// plumbing default is raw, so raw is selected unless an explicit mode flag
+/// asks for patch, names, or no output at all.
+fn push_output_mode(
+    argv: &mut Vec<String>,
+    patch: bool,
+    no_patch: bool,
+    raw: bool,
+    name_only: bool,
+    name_status: bool,
+) {
+    if name_only {
+        argv.push("--name-only".to_string());
+    } else if name_status {
+        argv.push("--name-status".to_string());
+    } else if no_patch {
+        argv.push("--no-patch".to_string());
+    } else if patch {
+        // Patch is the shared engine's default; `--raw` must be absent.
+    } else {
+        argv.push("--raw".to_string());
+    }
+    // An explicit `--raw` alongside `-p` appends a raw record after the patch.
+    if raw && !name_only && !name_status && !no_patch {
+        argv.push("--raw".to_string());
+    }
 }
 
 /// Build a `DiffArgs` from a synthetic argv and run the shared diff engine.
@@ -131,6 +208,14 @@ pub async fn execute_tree_safe(args: DiffTreeArgs, output: &OutputConfig) -> Cli
         "--new".to_string(),
         args.tree_b,
     ];
+    push_output_mode(
+        &mut argv,
+        args.patch,
+        args.no_patch,
+        args.raw,
+        args.name_only,
+        args.name_status,
+    );
     push_paths(&mut argv, &args.paths);
     run_via_diff(argv, output).await
 }
@@ -143,16 +228,19 @@ pub async fn execute_index(args: DiffIndexArgs) {
 }
 
 pub async fn execute_index_safe(args: DiffIndexArgs, output: &OutputConfig) -> CliResult<()> {
-    if args.cached {
-        return Err(CliError::command_usage(
-            "diff-index --cached is not yet supported; use `diff --staged` for HEAD vs the index"
-                .to_string(),
-        )
-        .with_stable_code(StableErrorCode::Unsupported)
-        .with_exit_code(128));
-    }
-    // Compare the tree to the working tree: `diff --old <tree>`.
+    // Compare the tree to the index (`--cached`) or the working tree.
     let mut argv = vec!["diff".to_string(), "--old".to_string(), args.tree];
+    if args.cached {
+        argv.push("--staged".to_string());
+    }
+    push_output_mode(
+        &mut argv,
+        args.patch,
+        args.no_patch,
+        args.raw,
+        args.name_only,
+        args.name_status,
+    );
     push_paths(&mut argv, &args.paths);
     run_via_diff(argv, output).await
 }
@@ -167,9 +255,14 @@ pub async fn execute_files(args: DiffFilesArgs) {
 pub async fn execute_files_safe(args: DiffFilesArgs, output: &OutputConfig) -> CliResult<()> {
     // The default `diff` already compares the index to the working tree.
     let mut argv = vec!["diff".to_string()];
-    if args.name_status {
-        argv.push("--name-status".to_string());
-    }
+    push_output_mode(
+        &mut argv,
+        args.patch,
+        args.no_patch,
+        args.raw,
+        args.name_only,
+        args.name_status,
+    );
     push_paths(&mut argv, &args.paths);
     run_via_diff(argv, output).await
 }

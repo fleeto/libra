@@ -982,13 +982,16 @@ fn canonical_command_name(args: Option<&[&str]>) -> Option<String> {
 /// See: [`tests::clap_alias_br_resolves_to_branch`] and friends for related parser
 /// behaviour. The exact rewrite is exercised end-to-end by the integration tests in
 /// `tests/command/log_test.rs`.
-fn rewrite_log_short_number_args(args: Vec<std::ffi::OsString>) -> Vec<std::ffi::OsString> {
+fn rewrite_short_number_args(
+    args: Vec<std::ffi::OsString>,
+    command: &str,
+) -> Vec<std::ffi::OsString> {
     // Detect the real subcommand position to avoid rewriting positional args for other commands.
     let subcommand = find_subcommand_index(&args);
     let Some((log_index, from_double_dash)) = subcommand else {
         return args;
     };
-    if !matches!(args.get(log_index), Some(name) if name == "log") {
+    if !matches!(args.get(log_index), Some(name) if name == command) {
         return args;
     }
 
@@ -3172,7 +3175,8 @@ fn reject_unsupported_single_dash_control(utf8_argv: &[String]) -> CliResult<()>
 }
 
 async fn parse_async_scoped(argv: Vec<std::ffi::OsString>) -> CliResult<()> {
-    let argv = rewrite_log_short_number_args(argv);
+    let argv = rewrite_short_number_args(argv, "log");
+    let argv = rewrite_short_number_args(argv, "reflog");
     let argv = rewrite_index_pack_progress_args(argv);
     let argv = rewrite_reset_pathspec_separator_args(argv);
     let argv = rewrite_show_pathspec_separator_args(argv);

@@ -9867,7 +9867,11 @@ mod tests {
                 // The writer lock prevents a competing workspace mutation;
                 // expiry is clock based, so this deterministically exercises
                 // the recheck after the initial transaction fence passed.
-                sleep(Duration::from_millis(1_200)).await;
+                // Generous margin: the full lib suite runs this under heavy
+                // load, so the pre-companion work can take seconds. Expiry is
+                // clock based and must land inside this sleep, while the lease
+                // stays valid long enough for the initial fence to pass.
+                sleep(Duration::from_millis(3_500)).await;
                 Ok(())
             }
         }
@@ -9917,7 +9921,7 @@ mod tests {
         // Pick the next exact second boundary so the initial check is live
         // and the companion delay deterministically crosses its rejection
         // boundary without relying on scheduler timing.
-        let lease_expires_at = (chrono::Utc::now().timestamp() + 1) * 1_000;
+        let lease_expires_at = (chrono::Utc::now().timestamp() + 3) * 1_000;
         db_conn
             .execute_raw(Statement::from_sql_and_values(
                 db_conn.get_database_backend(),

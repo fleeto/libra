@@ -6,7 +6,7 @@ point that reuses the one `diff` engine (see [`diff`](diff.md)).
 ## Synopsis
 
 ```
-libra diff-files [--name-status] [-- <path>...]
+libra diff-files [-p] [-s] [--raw] [--name-only] [--name-status] [-- <path>...]
 ```
 
 ## Description
@@ -16,46 +16,49 @@ changes (index vs working tree). Path limiters go after `--`; as Git plumbing it
 ignores porcelain `diff.renames`. Global output flags such as
 `libra --json diff-files` still apply.
 
-`--name-status` prints Git's `A`/`M`/`D`/`R` letters (for example `A\tnew.txt`
-for an intent-to-add entry). The rest of the porcelain flag surface is
-intentionally limited; use the shared `libra diff` command for the documented
-patch and status options.
+Like Git's plumbing, the **default output is raw**. `--name-status` prints Git's
+`A`/`M`/`D`/`R` letters (for example `A\tnew.txt` for an intent-to-add entry).
 
 ## Options
 
 | Option | Description | Example |
 |--------|-------------|---------|
+| `-p`, `--patch` | Emit a patch instead of raw records. | `libra diff-files -p` |
+| `--raw` | Force raw records (the default). | `libra diff-files --raw` |
+| `--name-only` | Print changed path names only. | `libra diff-files --name-only` |
 | `--name-status` | Print the status letter for each changed path. | `libra diff-files --name-status` |
+| `-s`, `--no-patch` | Suppress the diff body entirely. | `libra diff-files -s` |
 | `-- <path>...` | Limit the diff to paths. | `libra diff-files -- src/` |
 | `--json` / `--machine` | Structured diff output. | `libra --json diff-files` |
-| porcelain flag surface | Intentionally limited; use `libra diff` for the documented patch and status options. | `libra diff --no-patch` |
+
+The remaining porcelain flag surface (`-1`/`-2`/`-3` stage selection) is not exposed.
 
 ## Exit codes
 
 | Code | Meaning |
 |------|---------|
 | `0` | No differences. |
-| `1` | There are differences (the diff is printed) — Git plumbing exit convention. |
+| `1` | There are differences — Git plumbing exit convention. |
 | `128` | Not inside a repository. |
 
 ## Examples
 
 ```bash
-# Show unstaged changes
+# Raw unstaged records
 libra diff-files
 
-# Limit to a directory
-libra diff-files -- src/
+# Patch form
+libra diff-files -p
 
-# Machine-readable status letters
-libra diff-files --name-status
+# Names only
+libra diff-files --name-only
 ```
 
 ## Comparison with Git
 
 | Task | Libra | Git |
 |------|-------|-----|
-| Unstaged changes | `libra diff-files` | `git diff-files` |
+| Unstaged changes (raw) | `libra diff-files` | `git diff-files` |
+| Patch form | `libra diff-files -p` | `git diff-files -p` |
 
-Deferred: `-1`/`-2`/`-3` stage selection and raw output. Use `libra diff` for
-richer options.
+Deferred: `-1`/`-2`/`-3` stage selection. Use `libra diff` for richer options.

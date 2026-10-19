@@ -6,7 +6,7 @@ counterpart to [`fast-export`](fast-export.md).
 ## Synopsis
 
 ```text
-libra fast-import [--input <file>] [--max-count <n>] [--quiet]
+libra fast-import [<file>] [--input <file>] [--dry-run] [--max-count <n>] [--quiet]
 ```
 
 ## Description
@@ -54,7 +54,9 @@ A `checkpoint` intentionally makes the preceding batch durable.
 
 | Option | Description |
 |---|---|
+| `<file>` | Positional stream file, equivalent to `--input` (Git's `git fast-import <file>`). |
 | `--input <file>` | Read from a file instead of stdin. |
+| `--dry-run` | Parse and report what would be imported without updating refs (objects are still written). |
 | `--max-count <n>` | Set the top-level imported-object ceiling. |
 | `--quiet` | Suppress the final human summary. |
 

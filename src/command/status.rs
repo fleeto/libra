@@ -2080,7 +2080,7 @@ mod test {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod mode_fix_hint_test {
     use std::os::unix::fs::PermissionsExt;
 
@@ -2094,7 +2094,6 @@ mod mode_fix_hint_test {
     /// FM-05 (M-HINT H1/H3/H5): candidate detection needs index 100755,
     /// worktree non-exec, and identical content; reverse direction and
     /// `core.fileMode=false` stay empty.
-    #[cfg(unix)]
     #[test]
     #[serial(cwd, env)]
     fn mode_fix_candidates_track_legacy_shape_only() {

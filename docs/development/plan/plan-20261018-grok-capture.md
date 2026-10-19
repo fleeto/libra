@@ -439,7 +439,7 @@ Hook：`transcript_path` 是会话自己的 `updates.jsonl`。daemon 路由可�
 
 **Task type:** implementation
 
-**Lifecycle / Acceptance:** pending / 空
+**Lifecycle / Acceptance:** locally-accepted / 空
 
 **Description:** 读取一份合成 `updates.jsonl`，把每条 `agent_thought_chunk` 的字符串正文按出现顺序放进普通 transcript。
 
@@ -454,21 +454,21 @@ Hook：`transcript_path` 是会话自己的 `updates.jsonl`。daemon 路由可�
 
 **Acceptance criteria:**
 
-- [ ] 合成文件里三条 thought 在 transcript 里保持三条，文本与顺序一致，中间的 tool 事件仍在原位。
-- [ ] 同一 `promptId` 的多条 chunk 不会被拼成一条。
-- [ ] 非字符串 `content.text` 丢弃，该回合 partial，其余字符串 thought 仍在。
-- [ ] 未知 `sessionUpdate` 保留类型名和原始行哈希，不解释成 thought。
-- [ ] 单行超过 1 MiB 或整份 source 超过 16 MiB 时 partial 或拒绝，不报 complete。
-- [ ] 路径不是普通文件、是符号链接，或规范化后不在调用方给出的会话目录内，则拒绝读取。
-- [ ] 含 `\"`、`\u754c` 与非 ASCII 的 thought 以解码后的 UTF-8 进入 transcript。`grok_updates_decoded_utf8_escape_and_unicode` 覆盖本条。
-- [ ] 同一 `eventId` 再读一次不新增 thought。进程重启后从已记录偏移继续，不按时间戳合并。
+- [x] 合成文件里三条 thought 在 transcript 里保持三条，文本与顺序一致，中间的 tool 事件仍在原位。
+- [x] 同一 `promptId` 的多条 chunk 不会被拼成一条。
+- [x] 非字符串 `content.text` 丢弃，该回合 partial，其余字符串 thought 仍在。
+- [x] 未知 `sessionUpdate` 保留类型名和原始行哈希，不解释成 thought。
+- [x] 单行超过 1 MiB 或整份 source 超过 16 MiB 时 partial 或拒绝，不报 complete。
+- [x] 路径不是普通文件、是符号链接，或规范化后不在调用方给出的会话目录内，则拒绝读取。
+- [x] 含 `\"`、`\u754c` 与非 ASCII 的 thought 以解码后的 UTF-8 进入 transcript。`grok_updates_decoded_utf8_escape_and_unicode` 覆盖本条。
+- [x] 同一 `eventId` 再读一次不新增 thought。进程重启后从已记录偏移继续，不按时间戳合并。
 
 **Verification:**
 
-- [ ] `source .env.test && cargo test --test grok_capture_test grok_updates_keeps_three_thoughts_in_order -- --exact`（new）。输出含 `1 passed`，不含 `0 passed`。
-- [ ] `source .env.test && cargo test --test grok_capture_test grok_updates_string_chunks_are_not_concatenated -- --exact`（new，同一测试文件根上）。输出含 `1 passed`，不含 `0 passed`。
-- [ ] `source .env.test && cargo test --test grok_capture_test grok_updates_decoded_utf8_escape_and_unicode -- --exact`（new）。输出含 `1 passed`，不含 `0 passed`。
-- [ ] `source .env.test && cargo test --test grok_capture_test grok_updates_repeat_event_id_is_idempotent -- --exact`（new）。输出含 `1 passed`，不含 `0 passed`。
+- [x] `source .env.test && cargo test --test grok_capture_test grok_updates_keeps_three_thoughts_in_order -- --exact`（new）。输出含 `1 passed`，不含 `0 passed`。
+- [x] `source .env.test && cargo test --test grok_capture_test grok_updates_string_chunks_are_not_concatenated -- --exact`（new，同一测试文件根上）。输出含 `1 passed`，不含 `0 passed`。
+- [x] `source .env.test && cargo test --test grok_capture_test grok_updates_decoded_utf8_escape_and_unicode -- --exact`（new）。输出含 `1 passed`，不含 `0 passed`。
+- [x] `source .env.test && cargo test --test grok_capture_test grok_updates_repeat_event_id_is_idempotent -- --exact`（new）。输出含 `1 passed`，不含 `0 passed`。
 
 **Full-suite trigger:** T-1: 接入共享 `observed_agents` 模块树和 capture transcript。
 

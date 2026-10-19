@@ -1421,12 +1421,12 @@ mod tests {
         let mut staged = create_private_file_at(&parent, OsStr::new("staged.json")).unwrap();
         staged.write_all(b"complete proof").unwrap();
         staged.sync_all().unwrap();
-        let identity = identity(&staged).unwrap();
+        let staged_identity = identity(&staged).unwrap();
         drop(staged);
         rename_file_at(
             &parent,
             OsStr::new("staged.json"),
-            identity,
+            staged_identity,
             &parent,
             OsStr::new("owned.json"),
         )

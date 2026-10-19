@@ -36,16 +36,14 @@ const CLAUDE_SETTINGS_MAX_BYTES: u64 = 1_048_576;
 /// distinguish a renamed canonical Libra executable from a user command that
 /// merely happens to use the public hook grammar.
 const LIBRA_CLAUDE_STATUS_MESSAGE: &str = "libra capture";
-// Every event forwarded here must be a name the Claude parser recognizes — this is
-// a deliberate *subset* of `parser::CLAUDE_HOOK_EVENT_NAMES` (the installer forwards
-// these 6; the parser understands more). `PreToolUse` and `PostToolUse` both forward
-// to the `tool-use` verb (parser maps both to `LifecycleEventKind::ToolUse`), giving
-// an earlier liveness signal at the start of a tool call in addition to the
-// completed-call event; a `ToolUse` event refreshes `agent_session` liveness on the
-// AgentTraces path and does not write a checkpoint (only Stop/SessionEnd do). No
-// `Subagent*` boundary event is registered here: Claude does not emit stable
-// sub-agent boundaries, so its on-disk sub-agent content stays `unresolved` (DR-06
-// premise). Keep in sync with the installed config in `docs/commands/hooks.md`.
+// The original six events keep their own verbs; every other safely installable
+// registry event (`events::safely_installable_names`) forwards to `observe`.
+// `PreToolUse` and `PostToolUse` both forward to `tool-use` (the parser maps both
+// to `LifecycleEventKind::ToolUse`), giving an earlier liveness signal at the
+// start of a tool call; a `ToolUse` event refreshes `agent_session` liveness on
+// the AgentTraces path and does not write a checkpoint. `SubagentStart` /
+// `SubagentStop` are installed through `observe` and reach the capture runtime as
+// subagent boundaries. Keep in sync with `docs/commands/hooks.md`.
 /// Historical verbs for the original six events. Later safe events use `observe`.
 const CLAUDE_LEGACY_FORWARD_MAP: &[(&str, &str)] = &[
     ("SessionStart", "session-start"),

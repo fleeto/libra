@@ -362,6 +362,16 @@ pub(crate) async fn ingest_agent_traces(
         CaptureScope::resolve(&conn, &repo_root),
     )
     .await?;
+    if !admit_display_batch(&conn, &ingress_command).await? {
+        ingest_span.record("partial", true);
+        tracing::warn!(
+            target: "agent.hook.ingest",
+            provider = ingress_command.provider_kind(),
+            reason = "display_batch_dropped",
+            "coalesced display batch exceeded the per-session budget"
+        );
+        return Ok(());
+    }
     if ingress_command.event_kind() == LifecycleEventKind::SessionStart {
         match await_agent_traces_pure_read_until(
             setup_read_deadline,
@@ -407,6 +417,22 @@ pub(crate) async fn ingest_agent_traces(
     .await
 }
 
+/// Take one slot of a provider-declared, per-session display-batch budget.
+///
+/// Every hook call is its own process, so the budget lives in the repository
+/// database ([`crate::internal::metadata::take_display_batch_slot`]). Once it
+/// is spent the caller skips the catalog, so no revision or receipt is written
+/// for that batch.
+async fn admit_display_batch(
+    conn: &sea_orm::DatabaseConnection,
+    command: &CaptureIngressCommand,
+) -> Result<bool> {
+    let Some((session_id, limit)) = command.display_batch_budget() else {
+        return Ok(true);
+    };
+    crate::internal::metadata::take_display_batch_slot(conn, &session_id, limit).await
+}
+
 /// Consume an already-lowered in-process ingress outcome. This exists solely
 /// to let span/integration tests drive the same typed runtime as production;
 /// unlike the retired helper it never accepts a raw hook frame.
@@ -423,6 +449,10 @@ pub(crate) async fn ingest_agent_traces_ingress_outcome_for_test(
         CaptureIngressOutcome::Command(ingress_command) => {
             ingest_span.record("validated", true);
             ingest_span.record("frame_bytes", ingress_command.frame_bytes() as u64);
+            if !admit_display_batch(conn, &ingress_command).await? {
+                ingest_span.record("partial", true);
+                return Ok(());
+            }
             let scope = CaptureScope::main_for_connection(conn).await?;
             ingest_agent_traces_payload_with_scope(
                 ingress_command,

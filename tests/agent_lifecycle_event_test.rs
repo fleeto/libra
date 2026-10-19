@@ -5652,3 +5652,98 @@ fn claude_observe_parse_and_database_failures_keep_existing_data() {
         "the tracing log must not contain the payload body"
     );
 }
+
+/// CC-02 AC4 forward fix: every Claude hook call is a new process, so the
+/// MessageDisplay cap must survive across processes. Separate observe
+/// processes keep the first `MESSAGE_DISPLAY_COALESCE_LIMIT` batches, write no
+/// catalog revision for later ones and only count them as dropped. Erase
+/// removes the counts with the session.
+#[tokio::test]
+async fn claude_observe_message_display_limit_holds_across_processes() {
+    use libra::internal::ai::hooks::providers::claude::MESSAGE_DISPLAY_COALESCE_LIMIT;
+
+    let repo = HookRepo::init();
+    let session = "cc02-display-durable";
+    let libra_session = format!("claude__{session}");
+    let limit = i64::from(MESSAGE_DISPLAY_COALESCE_LIMIT);
+    let total = limit + 2;
+    let display = |index: i64| {
+        let out = repo.hook(
+            "claude-code",
+            "observe",
+            &repo.envelope(
+                "MessageDisplay",
+                session,
+                None,
+                json!({ "message_id": format!("m{index}"), "index": 0 }),
+            ),
+        );
+        assert!(out.status.success(), "batch {index}: {}", describe(&out));
+        assert!(
+            out.stdout.is_empty(),
+            "batch {index}: stdout must stay empty"
+        );
+    };
+    for index in 0..limit {
+        display(index);
+    }
+    let at_limit = repo.durable_session(&libra_session).await.sync_revision;
+    for index in limit..total {
+        display(index);
+    }
+    let state = repo.durable_session(&libra_session).await;
+    assert_eq!(
+        state.sync_revision, at_limit,
+        "batches past the budget must not reserve a catalog revision"
+    );
+
+    let counts = || async {
+        let conn = repo.db().await;
+        let rows = conn
+            .query_all_raw(Statement::from_sql_and_values(
+                conn.get_database_backend(),
+                "SELECT key, value FROM metadata_kv \
+                 WHERE scope = 'agent_display_batch_count' AND target = ? ORDER BY key",
+                [libra_session.clone().into()],
+            ))
+            .await
+            .expect("query display-batch counts");
+        rows.iter()
+            .map(|row| {
+                (
+                    row.try_get_by::<String, _>("key").expect("decode key"),
+                    row.try_get_by::<String, _>("value").expect("decode value"),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        counts().await,
+        vec![
+            ("dropped".to_string(), (total - limit).to_string()),
+            ("kept".to_string(), limit.to_string()),
+        ],
+        "the budget and dropped count must persist across observe processes"
+    );
+
+    let storage = repo.repo.join(".libra");
+    let conn = repo.db().await;
+    libra::internal::ai::history::HistoryManager::new_with_ref(
+        std::sync::Arc::new(
+            libra::utils::client_storage::ClientStorage::init_local_existing(
+                storage.join("objects"),
+            ),
+        ),
+        storage,
+        std::sync::Arc::new(conn.clone()),
+        libra::internal::branch::TRACES_BRANCH,
+    )
+    .erase_session_local(&libra_session)
+    .await
+    .expect("erase the display-batch session");
+    conn.close().await.expect("close erasure database");
+    assert!(
+        counts().await.is_empty(),
+        "erase must remove the display-batch counts"
+    );
+}

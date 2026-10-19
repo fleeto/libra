@@ -37,6 +37,11 @@ pub(super) fn parse_claude_hook_event(
         bail!("Claude hook event is not on the current observe ingress");
     };
     let mut event = build_lifecycle_event(kind, envelope);
+    // MessageDisplay carries no tool name. Name its entry so the bounded
+    // tool list stays readable and the durable display gate can count it.
+    if hook_event_name == "MessageDisplay" && event.tool_name.is_none() {
+        event.tool_name = Some(hook_event_name.to_string());
+    }
     // DATA-CAP: a thinking string on the hook frame is ordinary content.
     // It stays off the diagnostic. Callers that log metadata must not print it.
     if event.assistant_message.is_none()

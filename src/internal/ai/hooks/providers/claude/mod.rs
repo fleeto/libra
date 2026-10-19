@@ -81,6 +81,10 @@ impl HookProvider for ClaudeProvider {
         }
     }
 
+    fn display_batch_limit(&self, hook_event_name: &str) -> Option<u32> {
+        (hook_event_name == "MessageDisplay").then_some(events::MESSAGE_DISPLAY_COALESCE_LIMIT)
+    }
+
     fn dedup_identity_keys(&self) -> &'static [&'static str] {
         CANONICAL_DEDUP_IDENTITY_KEYS
     }

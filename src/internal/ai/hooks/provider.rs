@@ -252,6 +252,15 @@ pub trait HookProvider: HookProviderIdentity + Sync {
     fn admit_ingress_frame(&self, _hook_event_name: &str, _session_id: &str) -> bool {
         true
     }
+    /// Per-session cap on coalesced display batches for this event, if any.
+    ///
+    /// Each hook call is its own process, so the in-process
+    /// [`Self::admit_ingress_frame`] gate cannot hold a session-wide budget.
+    /// The capture runtime enforces this limit against the repository
+    /// database before any catalog revision is reserved.
+    fn display_batch_limit(&self, _hook_event_name: &str) -> Option<u32> {
+        None
+    }
     /// Identity field names this provider checks when building dedup keys.
     fn dedup_identity_keys(&self) -> &'static [&'static str];
     /// Native identity priority for one particular callback.  Tool-use

@@ -432,8 +432,9 @@ fn message_display_counts() -> &'static std::sync::Mutex<std::collections::HashM
 /// Admit one MessageDisplay batch for `session_id`.
 ///
 /// The first 128 batches in this process are kept. Later batches are dropped.
-/// This gate sits in front of the existing capture coordinator. It is not a
-/// second event ledger.
+/// This only bounds one process. The session-wide budget that survives
+/// separate hook processes is `HookProvider::display_batch_limit`, enforced
+/// by the capture runtime. Neither gate is a second event ledger.
 pub fn admit_message_display(session_id: &str) -> bool {
     let mut counts = message_display_counts()
         .lock()

@@ -290,6 +290,9 @@ pub struct CaptureIngressCommand {
     context: CaptureEventContext,
     /// Canonical lifecycle event lowered by the provider adapter.
     event: LifecycleEvent,
+    /// Session-wide display-batch cap declared by the provider for this
+    /// observe event. `None` for every other callback.
+    display_batch_limit: Option<u32>,
 }
 
 /// Ingress either yields a canonical command or an explicit safe no-op for a
@@ -317,6 +320,7 @@ struct ParsedCaptureIngress {
     deadline: Option<CaptureDeadline>,
     envelope: SessionHookEnvelope,
     event: LifecycleEvent,
+    display_batch_limit: Option<u32>,
 }
 
 enum ParsedCaptureIngressOutcome {
@@ -497,6 +501,20 @@ impl CaptureIngressCommand {
         self.event.kind
     }
 
+    /// Libra session id and session-wide cap for a coalesced display batch.
+    /// `None` unless the provider declared a limit for this observe event.
+    pub(crate) fn display_batch_budget(&self) -> Option<(String, u32)> {
+        self.display_batch_limit.map(|limit| {
+            (
+                format!(
+                    "{}__{}",
+                    self.provider_kind, self.context.provider_session_id
+                ),
+                limit,
+            )
+        })
+    }
+
     /// The runtime worktree pin selected before this command was created.
     /// It is intentionally crate-private: callers outside the capture runtime
     /// must resolve their own request scope rather than reuse hook state.
@@ -661,6 +679,11 @@ fn parse_capture_ingress_payload(
         deadline.ensure_before_mutation("binding hook runtime scope")?;
     }
 
+    let display_batch_limit = if observe {
+        provider.display_batch_limit(&envelope.hook_event_name)
+    } else {
+        None
+    };
     Ok(ParsedCaptureIngressOutcome::Command(Box::new(
         ParsedCaptureIngress {
             frame_bytes: payload.len(),
@@ -670,6 +693,7 @@ fn parse_capture_ingress_payload(
             deadline,
             envelope,
             event,
+            display_batch_limit,
         },
     )))
 }
@@ -691,6 +715,7 @@ fn finish_capture_ingress(
         deadline,
         envelope,
         mut event,
+        display_batch_limit,
     } = parsed;
     let CaptureIngressBinding {
         verified_cwd,
@@ -752,6 +777,7 @@ fn finish_capture_ingress(
             dedup_key: dedup.map(|identity| identity.key),
             context,
             event,
+            display_batch_limit,
         },
     )))
 }

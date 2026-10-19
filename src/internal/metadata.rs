@@ -79,6 +79,9 @@ pub enum MetadataScope {
     /// Local authenticated per-turn reasoning commitments; never a generic
     /// OID root, cloud projection, or public checkpoint metadata surface.
     AgentReasoningIdentity,
+    /// Per-session `kept` / `dropped` counts for coalesced display batches
+    /// (Claude MessageDisplay). Counts only; never content.
+    AgentDisplayBatchCount,
 }
 
 impl MetadataScope {
@@ -92,8 +95,56 @@ impl MetadataScope {
             MetadataScope::AgentCapturePendingChunk => "agent_capture_pending_chunk",
             MetadataScope::AgentCaptureSessionAlias => "agent_capture_session_alias",
             MetadataScope::AgentReasoningIdentity => "agent_reasoning_identity",
+            MetadataScope::AgentDisplayBatchCount => "agent_display_batch_count",
         }
     }
+}
+
+/// Take one slot of a per-session display-batch budget.
+///
+/// One conditional UPSERT bumps `kept` while it is below `limit` and returns
+/// `true`. Once the budget is spent only `dropped` grows and the call returns
+/// `false`. Rows live under [`MetadataScope::AgentDisplayBatchCount`] with
+/// `target` = the Libra session id; they hold counts only and session erase
+/// deletes them.
+pub(crate) async fn take_display_batch_slot<C: ConnectionTrait>(
+    conn: &C,
+    session_id: &str,
+    limit: u32,
+) -> Result<bool> {
+    let now = Utc::now().to_rfc3339();
+    let bump = |key: &'static str, cap: Option<u32>| {
+        let mut sql = "INSERT INTO metadata_kv \
+             (scope, target, key, value, value_type, created_at, updated_at) \
+             VALUES (?, ?, ?, '1', 'integer', ?, ?) \
+             ON CONFLICT(scope, target, key) DO UPDATE SET \
+             value = CAST(CAST(value AS INTEGER) + 1 AS TEXT), \
+             updated_at = excluded.updated_at"
+            .to_string();
+        let mut values: Vec<sea_orm::Value> = vec![
+            MetadataScope::AgentDisplayBatchCount.as_str().into(),
+            session_id.into(),
+            key.into(),
+            now.clone().into(),
+            now.clone().into(),
+        ];
+        if let Some(cap) = cap {
+            sql.push_str(" WHERE CAST(value AS INTEGER) < ?");
+            values.push(i64::from(cap).into());
+        }
+        sea_orm::Statement::from_sql_and_values(conn.get_database_backend(), sql, values)
+    };
+    let kept = conn
+        .execute_raw(bump("kept", Some(limit)))
+        .await
+        .context("count a coalesced display batch in the repository database")?;
+    if kept.rows_affected() > 0 {
+        return Ok(true);
+    }
+    conn.execute_raw(bump("dropped", None))
+        .await
+        .context("count a dropped display batch in the repository database")?;
+    Ok(false)
 }
 
 /// This codec is local comparison metadata, never native-origin evidence.

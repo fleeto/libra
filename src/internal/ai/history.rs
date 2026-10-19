@@ -5261,6 +5261,18 @@ impl HistoryManager {
         ))
         .await
         .context("delete import object-index repair marker for erased session")?;
+        txn.execute_raw(Statement::from_sql_and_values(
+            backend,
+            "DELETE FROM metadata_kv WHERE scope = ? AND target = ?",
+            [
+                crate::internal::metadata::MetadataScope::AgentDisplayBatchCount
+                    .as_str()
+                    .into(),
+                session_id.into(),
+            ],
+        ))
+        .await
+        .context("delete display-batch counts for erased session")?;
         if let Some((agent_kind, provider_session_id)) = provider_identity {
             txn.execute_raw(Statement::from_sql_and_values(
                 backend,

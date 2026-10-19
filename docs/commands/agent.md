@@ -2,7 +2,9 @@
 
 > **Coverage-v2 source version:** The coverage-v2 descriptions below refer to the Libra 0.30.50 source line and later compatible versions. This is not a stable-release announcement; check the [official releases](https://github.com/libra-tools/libra/releases) and `libra --version` for installed support. Other sections retain their own version requirements. Coverage-v2 does not prove native origin or authorize native reasoning artifacts.
 
-Manage external-agent capture for Claude Code, Codex, and OpenCode.
+Manage external-agent capture for Claude Code, Codex, OpenCode, and Grok.
+
+Grok capture reads the local session logs `updates.jsonl` and `chat_history.jsonl`. The ordinary checkpoint transcript retains Thinking text and unproven `encrypted_content`. Libra does not decrypt that field. `support_wave` is `grok`, not `first_batch`. Grok is not a `review` or `investigate` launcher. Default `checkpoint show` does not print Thinking plaintext; an explicit transcript path prints the redacted body.
 
 ## Native Windows capture
 

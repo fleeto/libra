@@ -92,8 +92,6 @@ mod tests {
         assert_eq!(gemini_provider().provider_name(), "gemini");
         assert_eq!(opencode_provider().provider_name(), "opencode");
         assert_eq!(grok_provider().provider_name(), "grok");
-        assert!(grok_provider().install_hooks(&Default::default()).is_err());
-        assert!(grok_provider().uninstall_hooks().is_err());
-        assert!(!grok_provider().hooks_are_installed().expect("status"));
+        assert_eq!(grok_provider().agent_kind(), AgentKind::Grok);
     }
 }

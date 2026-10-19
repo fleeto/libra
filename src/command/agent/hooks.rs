@@ -19,7 +19,7 @@ use crate::{
         hooks::{
             HookTarget, process_hook_event_with_target,
             provider::ProviderHookCommand,
-            providers::{claude_provider, codex, codex_provider, opencode_provider},
+            providers::{claude_provider, codex, codex_provider, grok_provider, opencode_provider},
         },
     },
     utils::{
@@ -51,6 +51,12 @@ pub enum AgentHooksSubcommand {
     /// `libra agent hooks opencode <subcommand>` family (AG-19).
     #[command(about = "OpenCode hook entry points")]
     Opencode {
+        #[command(subcommand)]
+        command: HookCommandKind,
+    },
+    /// `libra agent hooks grok <subcommand>` family (GK-05).
+    #[command(about = "Grok observe-only hook entry points")]
+    Grok {
         #[command(subcommand)]
         command: HookCommandKind,
     },
@@ -148,6 +154,7 @@ pub async fn execute_safe(
         AgentHooksSubcommand::Opencode { command } => {
             run(opencode_provider(), command, deadline).await
         }
+        AgentHooksSubcommand::Grok { command } => run(grok_provider(), command, deadline).await,
     }
 }
 

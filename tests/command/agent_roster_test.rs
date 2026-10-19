@@ -36,7 +36,7 @@ fn agent_list_add_remove_aliases_parse() {
     let enable_err = String::from_utf8_lossy(&enable.stderr);
     assert_eq!(add_err, enable_err, "add/enable diagnostics must match");
     assert!(add_err.contains("unknown agent 'bogus'"));
-    assert!(add_err.contains("claude-code, codex, opencode"));
+    assert!(add_err.contains("claude-code, codex, opencode, grok"));
 
     let remove = run_libra_command(&["agent", "remove", "bogus"], &repo);
     let disable = run_libra_command(&["agent", "disable", "--agent", "bogus"], &repo);
@@ -82,8 +82,8 @@ fn agent_list_json_contains_capability_fields() {
     let agents = data["agents"].as_array().expect("agents array");
     assert_eq!(
         agents.len(),
-        3,
-        "listing surfaces only the supported roster"
+        4,
+        "listing surfaces the supported roster, including grok"
     );
 
     let supported: Vec<&str> = agents
@@ -91,7 +91,7 @@ fn agent_list_json_contains_capability_fields() {
         .filter(|row| row["supported"] == true)
         .map(|row| row["slug"].as_str().unwrap())
         .collect();
-    assert_eq!(supported, ["claude-code", "codex", "opencode"]);
+    assert_eq!(supported, ["claude-code", "codex", "opencode", "grok"]);
 
     for row in agents {
         // Frozen wire keys (AG-17): missing keys are a schema break.
@@ -123,7 +123,13 @@ fn agent_list_json_contains_capability_fields() {
             "row {} missing frozen key support_wave",
             row["slug"]
         );
-        if row["supported"] == true {
+        if row["slug"] == "grok" {
+            assert_eq!(row["support_wave"], "grok");
+            assert_eq!(row["supported"], true);
+            assert_eq!(row["hook_installable"], true);
+            assert_eq!(row["launchable_review"], false);
+            assert_eq!(row["launchable_investigate"], false);
+        } else if row["supported"] == true {
             assert_eq!(row["support_wave"], "first_batch", "{}", row["slug"]);
         } else {
             assert!(row["support_wave"].is_null(), "{}", row["slug"]);
@@ -148,7 +154,7 @@ fn agent_list_json_contains_capability_fields() {
     // supported roster is shown. Their unsupported registry classification is
     // pinned separately against the static registry by
     // tests/compat/agent_capability_matrix_pin.rs.
-    for slug in ["gemini", "cursor", "copilot", "factory-ai", "grok"] {
+    for slug in ["gemini", "cursor", "copilot", "factory-ai"] {
         assert!(
             !agents.iter().any(|row| row["slug"] == slug),
             "{slug} must not appear in the supported-only listing"
@@ -185,8 +191,8 @@ fn agent_roster_surface() {
         .collect();
     assert_eq!(
         slugs,
-        ["claude-code", "codex", "opencode"],
-        "listing must surface exactly the first-batch trio"
+        ["claude-code", "codex", "opencode", "grok"],
+        "listing must surface the first-batch trio plus grok"
     );
 
     // Every listed row is supported (the unsupported agents are omitted).
@@ -202,12 +208,19 @@ fn agent_roster_surface() {
     // fully-closed unsupported classification (supported/hook_installable/
     // launchable_*/capabilities.hooks all false) stays pinned against the
     // static registry by tests/compat/agent_capability_matrix_pin.rs.
-    for slug in ["gemini", "cursor", "copilot", "factory-ai", "grok"] {
+    for slug in ["gemini", "cursor", "copilot", "factory-ai"] {
         assert!(
             !agents.iter().any(|row| row["slug"] == slug),
             "{slug} must not appear in the supported-only listing"
         );
     }
+    let grok = agents
+        .iter()
+        .find(|row| row["slug"] == "grok")
+        .expect("grok row");
+    assert_eq!(grok["support_wave"], "grok");
+    assert_eq!(grok["launchable_review"], false);
+    assert_eq!(grok["launchable_investigate"], false);
 }
 
 /// Enabling anything outside the supported roster is an actionable error
@@ -224,7 +237,7 @@ fn agent_add_non_hook_installable_returns_actionable_unsupported() {
     assert!(!cursor.status.success());
     let cursor_err = String::from_utf8_lossy(&cursor.stderr);
     assert!(cursor_err.contains("not in the supported roster"));
-    assert!(cursor_err.contains("claude-code, codex, opencode"));
+    assert!(cursor_err.contains("claude-code, codex, opencode, grok"));
     assert!(
         !repo.join(".cursor").exists(),
         "unsupported add must not write hooks"

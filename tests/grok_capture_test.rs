@@ -14,7 +14,7 @@ use libra::internal::ai::{
         encode_grok_cwd, install_marked_grok_hooks, observe_grok_hook, uninstall_marked_grok_hooks,
     },
     observed_agents::{
-        AgentKind, agent_for,
+        AgentKind, AgentStability, agent_for,
         grok_reasoning::{
             GrokMergedEvent, GrokReasoningError, export_grok_ordinary, import_grok_reasoning,
             sink_bundle,
@@ -23,6 +23,7 @@ use libra::internal::ai::{
             GROK_LINE_MAX_BYTES, GrokReadCursor, GrokTranscriptEvent, GrokUpdatesError,
             read_grok_updates, session_file,
         },
+        live_capture_matches_hook_installable, registration_for,
         transcript_source::TRANSCRIPT_READ_HARD_CAP_BYTES,
     },
 };
@@ -1050,4 +1051,21 @@ fn grok_hook_precompact_and_shrink_keep_captured_thoughts() {
             .join("pending.json")
             .exists()
     );
+}
+
+#[test]
+fn grok_live_capture_matches_hook_installable() {
+    let row = registration_for(AgentKind::Grok);
+    assert!(live_capture_matches_hook_installable(AgentKind::Grok));
+    assert!(row.supported);
+    assert!(row.hook_installable);
+    assert_eq!(row.support_wave, Some("grok"));
+    assert!(!row.launchable_review);
+    assert!(!row.launchable_investigate);
+    let agent = agent_for(AgentKind::Grok);
+    assert!(agent.as_hooks().is_some());
+    assert_eq!(agent.stability(), AgentStability::Stable);
+    for kind in AgentKind::all() {
+        assert!(live_capture_matches_hook_installable(*kind));
+    }
 }

@@ -656,7 +656,12 @@ mod tests {
         let resolved = resolve_agent_kinds(&[]).expect("empty resolves cleanly");
         assert_eq!(
             resolved,
-            vec![AgentKind::ClaudeCode, AgentKind::Codex, AgentKind::OpenCode]
+            vec![
+                AgentKind::ClaudeCode,
+                AgentKind::Codex,
+                AgentKind::OpenCode,
+                AgentKind::Grok
+            ]
         );
     }
 
@@ -679,7 +684,7 @@ mod tests {
         let err = resolve_agent_kinds(&["bogus".to_string()]).unwrap_err();
         let message = err.to_string();
         assert!(message.contains("unknown agent 'bogus'"));
-        assert!(message.contains("claude-code, codex, opencode"));
+        assert!(message.contains("claude-code, codex, opencode, grok"));
     }
 
     #[test]

@@ -26,6 +26,54 @@ pub enum GrokHookSettingsError {
     Malformed { path: String, detail: String },
 }
 
+pub fn grok_user_hooks_dir() -> Option<PathBuf> {
+    let home = std::env::var_os("GROK_HOME")
+        .map(PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|path| path.join(".grok")))?;
+    Some(home.join("hooks"))
+}
+
+pub fn grok_hook_command(binary: &str, event: &str) -> String {
+    let verb = match event {
+        "PreCompact" => "compaction",
+        "SessionEnd" => "session-end",
+        _ => "stop",
+    };
+    format!("{binary} agent hooks grok {verb}")
+}
+
+pub fn install_grok_boundary_hooks(
+    hooks_dir: &Path,
+    binary: &str,
+) -> Result<(), GrokHookSettingsError> {
+    if command_program_is_grok(binary) {
+        return Err(GrokHookSettingsError::GrokCommand);
+    }
+    fs::create_dir_all(hooks_dir).map_err(|error| io_error(hooks_dir, error))?;
+    for path in json_files(hooks_dir)? {
+        let bytes = fs::read(&path).map_err(|error| io_error(&path, error))?;
+        if !bytes_have_marker(&bytes) {
+            continue;
+        }
+        let updated = rewrite_marked(&path, &bytes, |value| {
+            update_marked_commands_for_binary(value, binary);
+        })?;
+        atomic_write(&path, &updated)?;
+    }
+    let owned = hooks_dir.join(OWNED_FILE_NAME);
+    if !owned.exists() {
+        atomic_write(&owned, &owned_file_bytes_for_binary(binary)?)?;
+    }
+    Ok(())
+}
+
+pub fn marked_hooks_present(hooks_dir: &Path) -> bool {
+    let owned = hooks_dir.join(OWNED_FILE_NAME);
+    fs::read(&owned)
+        .ok()
+        .is_some_and(|bytes| bytes_have_marker(&bytes))
+}
+
 pub fn install_marked_grok_hooks(
     hooks_dir: &Path,
     command: &str,
@@ -180,6 +228,55 @@ fn file_has_no_hooks(bytes: &[u8]) -> bool {
         .is_none_or(|hooks| hooks.is_empty());
     let extra = object.keys().any(|key| key != "hooks");
     hooks_empty && !extra
+}
+
+fn update_marked_commands_for_binary(value: &mut Value, binary: &str) {
+    let Some(groups_by_event) = value.get_mut("hooks").and_then(Value::as_object_mut) else {
+        return;
+    };
+    let events: Vec<String> = groups_by_event.keys().cloned().collect();
+    for event in events {
+        let command = grok_hook_command(binary, &event);
+        let Some(groups) = groups_by_event
+            .get_mut(&event)
+            .and_then(Value::as_array_mut)
+        else {
+            continue;
+        };
+        for group in groups {
+            if !group_is_marked(group) {
+                continue;
+            }
+            let Some(entries) = group.get_mut("hooks").and_then(Value::as_array_mut) else {
+                continue;
+            };
+            for entry in entries {
+                if entry.get("type").and_then(Value::as_str) == Some("command") {
+                    entry["command"] = Value::String(command.clone());
+                }
+            }
+        }
+    }
+}
+
+fn owned_file_bytes_for_binary(binary: &str) -> Result<Vec<u8>, GrokHookSettingsError> {
+    let mut hooks = Map::new();
+    for event in BOUNDARY_EVENTS {
+        hooks.insert(
+            (*event).to_string(),
+            Value::Array(vec![Value::Object(marked_group(&grok_hook_command(
+                binary, event,
+            )))]),
+        );
+    }
+    let mut root = Map::new();
+    root.insert("hooks".to_string(), Value::Object(hooks));
+    serde_json::to_vec_pretty(&Value::Object(root)).map_err(|error| {
+        GrokHookSettingsError::Malformed {
+            path: OWNED_FILE_NAME.to_string(),
+            detail: error.to_string(),
+        }
+    })
 }
 
 fn owned_file_bytes(command: &str) -> Result<Vec<u8>, GrokHookSettingsError> {

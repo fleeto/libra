@@ -9,7 +9,10 @@ pub mod settings;
 
 use anyhow::{Result, bail};
 pub use parser::{encode_grok_cwd, observe_grok_hook};
-pub use settings::{install_marked_grok_hooks, uninstall_marked_grok_hooks};
+pub use settings::{
+    grok_hook_command, grok_user_hooks_dir, install_grok_boundary_hooks, install_marked_grok_hooks,
+    marked_hooks_present, uninstall_marked_grok_hooks,
+};
 
 use super::super::{
     lifecycle::{LifecycleEvent, SessionHookEnvelope},
@@ -58,19 +61,26 @@ impl HookProvider for GrokProvider {
         CANONICAL_DEDUP_IDENTITY_KEYS
     }
 
-    fn install_hooks(&self, _options: &ProviderInstallOptions) -> Result<()> {
-        bail!(
-            "grok hook installation stays closed until hook_installable is enabled; call install_marked_grok_hooks with an explicit directory"
-        )
+    fn install_hooks(&self, options: &ProviderInstallOptions) -> Result<()> {
+        let binary = super::super::setup::resolve_hook_binary_path(options.binary_path.as_deref())?;
+        let Some(dir) = settings::grok_user_hooks_dir() else {
+            bail!("GROK_HOME is unset and the user home directory is unavailable");
+        };
+        settings::install_grok_boundary_hooks(&dir, &binary)?;
+        Ok(())
     }
 
     fn uninstall_hooks(&self) -> Result<()> {
-        bail!(
-            "grok hook removal stays closed until hook_installable is enabled; call uninstall_marked_grok_hooks with an explicit directory"
-        )
+        let Some(dir) = settings::grok_user_hooks_dir() else {
+            return Ok(());
+        };
+        settings::uninstall_marked_grok_hooks(&dir)?;
+        Ok(())
     }
 
     fn hooks_are_installed(&self) -> Result<bool> {
-        Ok(false)
+        Ok(settings::grok_user_hooks_dir()
+            .as_deref()
+            .is_some_and(settings::marked_hooks_present))
     }
 }

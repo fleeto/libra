@@ -163,10 +163,10 @@ pub async fn execute_safe(args: ListArgs, output: &OutputConfig) -> CliResult<()
     let mut agents = Vec::with_capacity(AgentKind::all().len());
     for kind in AgentKind::all() {
         let row = registration_for(*kind);
-        // Only the supported roster (claude-code / codex / opencode) is
-        // surfaced. Unsupported agents stay in the static registry so
-        // historical sessions remain readable and doctor can still reason
-        // about residual hooks, but they are omitted from this listing.
+        // Only supported agents are surfaced. `grok` uses support_wave
+        // `grok`, not `first_batch`. Unsupported agents stay in the static
+        // registry so historical sessions remain readable, but they are
+        // omitted from this listing.
         if !row.supported {
             continue;
         }

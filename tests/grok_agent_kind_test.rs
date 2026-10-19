@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use libra::{
-    command::agent::{AgentArgs, AgentSubcommand, EnableArgs, execute_safe},
+    command::agent::{AgentArgs, AgentSubcommand, DisableArgs, EnableArgs, execute_safe},
     internal::{
         ai::{
             capture::deadline_provider_extraction_summary,
@@ -170,15 +170,18 @@ async fn grok_agent_kind_round_trip_and_check() {
     assert!(!is_preview(AgentKind::Grok));
     let agent = agent_for(AgentKind::Grok);
     assert_eq!(agent.provider_kind(), AgentKind::Grok);
-    assert_eq!(agent.stability(), AgentStability::Preview);
-    assert!(agent.as_hooks().is_none());
+    assert_eq!(agent.stability(), AgentStability::Stable);
+    assert!(agent.as_hooks().is_some());
     assert_eq!(agent.protected_dirs(), &[".grok"]);
     let row = registration_for(AgentKind::Grok);
-    assert!(!row.supported);
-    assert!(!row.hook_installable);
+    assert!(row.supported);
+    assert!(row.hook_installable);
     assert!(!row.launchable_review);
     assert!(!row.launchable_investigate);
-    assert_eq!(supported_slugs(), vec!["claude-code", "codex", "opencode"]);
+    assert_eq!(
+        supported_slugs(),
+        vec!["claude-code", "codex", "opencode", "grok"]
+    );
 
     let summary = deadline_provider_extraction_summary(AgentKind::Grok, b"thought-canary");
     assert!(summary.partial);
@@ -200,6 +203,11 @@ async fn grok_agent_kind_round_trip_and_check() {
         progress: ProgressMode::None,
         progress_preference: ProgressPreference::None,
     };
+    let home = root.path().join("grok-home");
+    let previous_home = std::env::var_os("GROK_HOME");
+    // SAFETY: this test owns the process-local GROK_HOME override and restores it
+    // before returning. The enable path must not touch a real Grok home.
+    unsafe { std::env::set_var("GROK_HOME", &home) };
     let enable = execute_safe(
         AgentArgs {
             command: AgentSubcommand::Enable(EnableArgs {
@@ -210,12 +218,31 @@ async fn grok_agent_kind_round_trip_and_check() {
         None,
     )
     .await;
-    let enable_error = enable.expect_err("enable grok is unsupported");
-    let enable_text = enable_error.to_string();
-    assert!(
-        enable_text.contains("not in the supported roster"),
-        "{enable_text}"
-    );
+    let enable_text = format!("{enable:?}");
+    assert!(enable.is_ok(), "{enable_text}");
+    let installed = home.join("hooks").join("libra-grok-capture.json");
+    let installed_text = std::fs::read_to_string(&installed).expect("marked hook file");
+    assert!(installed_text.contains("libra capture"));
+    assert!(installed_text.contains("agent hooks grok"));
+    assert!(installed_text.starts_with('{') || installed_text.contains('/'));
+    let disable = execute_safe(
+        AgentArgs {
+            command: AgentSubcommand::Disable(DisableArgs {
+                agents: vec!["grok".to_string()],
+            }),
+        },
+        &output,
+        None,
+    )
+    .await;
+    assert!(disable.is_ok(), "{disable:?}");
+    assert!(!installed.exists(), "disable removes the marked hook file");
+    unsafe {
+        match previous_home {
+            Some(value) => std::env::set_var("GROK_HOME", value),
+            None => std::env::remove_var("GROK_HOME"),
+        }
+    }
     assert!(!root.path().join(".libra").exists());
     assert_eq!(
         count(&conn, "SELECT COUNT(*) FROM agent_session").await,

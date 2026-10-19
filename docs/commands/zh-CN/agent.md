@@ -1,5 +1,7 @@
 # `libra agent`
 
+Grok 采集读取本机 `updates.jsonl` 与 `chat_history.jsonl`。普通 checkpoint transcript 保留 Thinking 正文和未证明的 `encrypted_content`，不解密。`support_wave` 是 `grok`，不是 `first_batch`。Grok 不是 `review` 或 `investigate` 启动器。默认 `checkpoint show` 不打印这些明文；显式 transcript 路径才输出脱敏后的正文。
+
 > **coverage-v2 源码版本：** 下文 coverage-v2 说明对应 Libra 0.30.50 源码线及后续兼容版本，不宣告稳定版已发布；可用性以[官方发布](https://github.com/libra-tools/libra/releases)及 `libra --version` 为准。其它章节保留各自的版本要求；coverage-v2 不证明 native 来源，也不准入原生 reasoning artifact。
 
 管理 Claude Code、Codex 与 OpenCode 的外部代理捕获。

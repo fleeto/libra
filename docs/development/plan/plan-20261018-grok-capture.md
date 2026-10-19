@@ -638,7 +638,7 @@ Hook：`transcript_path` 是会话自己的 `updates.jsonl`。daemon 路由可�
 
 **Task type:** implementation
 
-**Lifecycle / Acceptance:** pending / 空
+**Lifecycle / Acceptance:** locally-accepted / 空
 
 **Description:** 在 GK-04 的合成采集可用之后，把 `grok` 标为 supported 和 hook_installable，并更新首批之外的契约句，使它成为允许的例外而不是偷偷扩表。
 
@@ -653,19 +653,19 @@ Hook：`transcript_path` 是会话自己的 `updates.jsonl`。daemon 路由可�
 
 **Acceptance criteria:**
 
-- [ ] `supported_slugs()` 包含 `grok`，且 `launchable_review` 与 `launchable_investigate` 的名单仍只有原来的首批三项。
-- [ ] `libra agent list --json` 里 `grok` 的 `supported=true`、`hook_installable=true`、`support_wave` 不是冒充 `first_batch` 的三名之一；使用新的 `grok` wave 值，并在 tracing 文档写明。
-- [ ] enable 后的用户级 hook 文件含标记和绝对命令路径；disable 后标记项消失。
-- [ ] 合成会话的 checkpoint transcript 含 thought 文本和未证明字段；默认 `checkpoint show` 不打印这些明文。显式 transcript 路径才输出脱敏后的正文。
-- [ ] tracing 第 116 行附近的「首批之外不得 supported」改为点名 `grok` 是 GK-05 之后的唯一追加，其余 slug 仍禁止。
-- [ ] EN、zh-CN、开发文档、`COMPATIBILITY.md` 和网站 `agent.en.md` 描述同一行为：本地日志、Thinking 保留、不解密、不作为 review/investigate 启动器。
-- [ ] `live_capture_for(Grok)` 为 `Some`，且与 `hook_installable`、`supported` 同为 true。GK-01 的 `PreviewAgent` 静态被 `mod.rs` 里的专用 struct 替换，该 struct 覆盖 `as_hooks()` 与 `stability()`。`command/agent/hooks.rs` 增加 grok 回调分发。enable 门仍在 `command/agent/mod.rs:485-540`，只放行 supported。不改 `preview.rs`。
+- [x] `supported_slugs()` 包含 `grok`，且 `launchable_review` 与 `launchable_investigate` 的名单仍只有原来的首批三项。
+- [x] `libra agent list --json` 里 `grok` 的 `supported=true`、`hook_installable=true`、`support_wave` 不是冒充 `first_batch` 的三名之一；使用新的 `grok` wave 值，并在 tracing 文档写明。
+- [x] enable 后的用户级 hook 文件含标记和绝对命令路径；disable 后标记项消失。
+- [x] 合成会话的 checkpoint transcript 含 thought 文本和未证明字段；默认 `checkpoint show` 不打印这些明文。显式 transcript 路径才输出脱敏后的正文。
+- [x] tracing 第 116 行附近的「首批之外不得 supported」改为点名 `grok` 是 GK-05 之后的唯一追加，其余 slug 仍禁止。
+- [x] EN、zh-CN、开发文档、`COMPATIBILITY.md` 和网站 `agent.en.md` 描述同一行为：本地日志、Thinking 保留、不解密、不作为 review/investigate 启动器。
+- [x] `live_capture_for(Grok)` 为 `Some`，且与 `hook_installable`、`supported` 同为 true。GK-01 的 `PreviewAgent` 静态被 `mod.rs` 里的专用 struct 替换，该 struct 覆盖 `as_hooks()` 与 `stability()`。`command/agent/hooks.rs` 增加 grok 回调分发。enable 门仍在 `command/agent/mod.rs:485-540`，只放行 supported。不改 `preview.rs`。
 
 **Verification:**
 
-- [ ] `source .env.test && cargo test --test compat_agent_capability_matrix_pin grok_supported_wave_is_not_first_batch -- --exact`（new）。输出含 `1 passed`，不含 `0 passed`。
-- [ ] `source .env.test && cargo test --test compat_agent_docs_contract grok_docs_contract_mentions_thinking_retain -- --exact`（new）。输出含 `1 passed`，不含 `0 passed`。
-- [ ] `source .env.test && cargo test --test grok_capture_test grok_live_capture_matches_hook_installable -- --exact`（new）。输出含 `1 passed`，不含 `0 passed`。
+- [x] `source .env.test && cargo test --test compat_agent_capability_matrix_pin grok_supported_wave_is_not_first_batch -- --exact`（new）。输出含 `1 passed`，不含 `0 passed`。
+- [x] `source .env.test && cargo test --test compat_agent_docs_contract grok_docs_contract_mentions_thinking_retain -- --exact`（new）。输出含 `1 passed`，不含 `0 passed`。
+- [x] `source .env.test && cargo test --test grok_capture_test grok_live_capture_matches_hook_installable -- --exact`（new）。输出含 `1 passed`，不含 `0 passed`。
 
 **Full-suite trigger:** T-1: 改变公开 agent 名单和 `registry.rs` 这一共享事实源。
 

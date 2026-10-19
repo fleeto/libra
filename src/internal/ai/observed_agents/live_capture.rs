@@ -311,6 +311,12 @@ fn codex_live_coverage(transcript: &RedactedBytes) -> Vec<NormalizedTurn> {
 /// `opencode export` bridge (DR-04b).
 pub(super) struct OpenCodeLiveCapture;
 
+/// Grok is hook-installable, so the live lookup must be `Some`. It does not
+/// derive a transcript candidate, export, or coverage normalizer here.
+pub(super) struct GrokLiveCapture;
+
+impl LiveCaptureProvider for GrokLiveCapture {}
+
 impl LiveCaptureProvider for OpenCodeLiveCapture {
     fn missing_host_capture_budget(&self) -> Option<Duration> {
         Some(ExportLimits::default().deadline)

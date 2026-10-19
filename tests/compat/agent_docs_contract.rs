@@ -1591,3 +1591,41 @@ fn opencode29_ordinary_extension_is_distinct_from_frozen_native_source() {
         }
     }
 }
+
+#[test]
+fn grok_docs_contract_mentions_thinking_retain() {
+    for (label, document) in [
+        ("docs/commands/agent.md", AGENT_CMD_DOC_EN),
+        ("docs/commands/zh-CN/agent.md", AGENT_CMD_DOC_ZH),
+        ("docs/development/commands/agent.md", AGENT_DEV_DOC),
+        ("docs/development/tracing/agent.md", AGENT_DOC),
+        ("COMPATIBILITY.md", COMPATIBILITY_DOC),
+    ] {
+        for required in [
+            "updates.jsonl",
+            "Thinking",
+            "encrypted_content",
+            "support_wave",
+            "grok",
+            "checkpoint show",
+        ] {
+            assert_contains(document, label, required);
+        }
+        let lower = document.to_ascii_lowercase();
+        assert!(
+            lower.contains("not decrypt")
+                || lower.contains("不解密")
+                || lower.contains("does not decrypt")
+                || document.contains("不解密"),
+            "{label} must say the ciphertext is not decrypted"
+        );
+        assert!(
+            lower.contains("not a review")
+                || lower.contains("not a `review`")
+                || document.contains("不是 review")
+                || document.contains("不是 `review`")
+                || document.contains("not a review or investigate"),
+            "{label} must say grok is not a review or investigate launcher"
+        );
+    }
+}

@@ -95,7 +95,7 @@ pub use redaction::{
     RedactionRule, Redactor,
 };
 pub use registry::{
-    AgentRegistration, FIRST_BATCH_WAVE, SlugLookup, launchable_investigate_slugs,
+    AgentRegistration, FIRST_BATCH_WAVE, GROK_WAVE, SlugLookup, launchable_investigate_slugs,
     launchable_review_slugs, lookup_cli_slug, registration_for, registry, supported_slugs,
 };
 pub use rpc::{
@@ -156,14 +156,7 @@ pub fn agent_for(kind: AgentKind) -> &'static dyn ObservedAgent {
     static FACTORY_AI: StablePromotedAgent = StablePromotedAgent(&FACTORY_AI_STABLE_PROMOTED_SPEC);
     static CLAUDE_CODE: ClaudeCodeObservedAgent = ClaudeCodeObservedAgent::new();
     static GEMINI: GeminiObservedAgent = GeminiObservedAgent::new();
-    // GK-01: a preview stub that is intentionally absent from PREVIEW_SPECS,
-    // so `is_preview(Grok)` stays false. GK-05 replaces this static.
-    static GROK_PREVIEW: PreviewSpec = PreviewSpec {
-        kind: AgentKind::Grok,
-        provider_name: "Grok",
-        protected_dirs: &[".grok"],
-    };
-    static GROK: PreviewAgent = PreviewAgent(&GROK_PREVIEW);
+    static GROK: GrokObservedAgent = GrokObservedAgent;
 
     match kind {
         AgentKind::ClaudeCode => &CLAUDE_CODE,
@@ -226,16 +219,49 @@ pub(crate) fn live_capture_for(
     static CLAUDE_CODE_LIVE: live_capture::ClaudeLiveCapture = live_capture::ClaudeLiveCapture;
     static CODEX_LIVE: live_capture::CodexLiveCapture = live_capture::CodexLiveCapture;
     static OPENCODE_LIVE: live_capture::OpenCodeLiveCapture = live_capture::OpenCodeLiveCapture;
+    static GROK_LIVE: live_capture::GrokLiveCapture = live_capture::GrokLiveCapture;
 
     match kind {
         AgentKind::ClaudeCode => Some(&CLAUDE_CODE_LIVE),
         AgentKind::Codex => Some(&CODEX_LIVE),
         AgentKind::OpenCode => Some(&OPENCODE_LIVE),
-        AgentKind::Cursor
-        | AgentKind::Gemini
-        | AgentKind::Copilot
-        | AgentKind::FactoryAi
-        | AgentKind::Grok => None,
+        AgentKind::Cursor | AgentKind::Gemini | AgentKind::Copilot | AgentKind::FactoryAi => None,
+        AgentKind::Grok => Some(&GROK_LIVE),
+    }
+}
+
+/// Whether the live-capture arm exists exactly when the registry says the
+/// kind is hook-installable. Integration tests call this instead of the
+/// crate-private lookup.
+pub fn live_capture_matches_hook_installable(kind: AgentKind) -> bool {
+    live_capture_for(kind).is_some() == registration_for(kind).hook_installable
+}
+
+struct GrokObservedAgent;
+
+impl ObservedAgent for GrokObservedAgent {
+    fn provider_kind(&self) -> AgentKind {
+        AgentKind::Grok
+    }
+
+    fn provider_name(&self) -> &'static str {
+        "grok"
+    }
+
+    fn stability(&self) -> AgentStability {
+        AgentStability::Stable
+    }
+
+    fn read_transcript(&self, _session: &AgentSessionCtx) -> anyhow::Result<Option<Vec<u8>>> {
+        Ok(None)
+    }
+
+    fn protected_dirs(&self) -> &'static [&'static str] {
+        &[".grok"]
+    }
+
+    fn as_hooks(&self) -> Option<&dyn crate::internal::ai::hooks::provider::HookProvider> {
+        Some(crate::internal::ai::hooks::providers::grok_provider())
     }
 }
 
@@ -258,16 +284,9 @@ mod registry_tests {
                 *kind,
                 "agent_for({kind:?}) returned wrong kind",
             );
-            let expected = if *kind == AgentKind::Grok {
-                // GK-01 keeps Grok on the in-module PreviewAgent. GK-05
-                // replaces that static and this arm returns to Stable.
-                AgentStability::Preview
-            } else {
-                AgentStability::Stable
-            };
             assert_eq!(
                 agent.stability(),
-                expected,
+                AgentStability::Stable,
                 "agent_for({kind:?}) stability drifted",
             );
         }

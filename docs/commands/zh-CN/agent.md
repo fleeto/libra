@@ -545,6 +545,10 @@ Codex 捕获会安装当前文档定义的全部生命周期事件：`SessionSta
 
 云端镜像在 token-fenced generation 下按依赖顺序发布 catalog 批次（`session → checkpoint → revision → link → claim`）。session、checkpoint、link 与可变 claim 投影各自使用独立单调 sync generation，因此 prune 回退 current 子节点时不会制造同代冲突，retained traces 链的重写也不会被旧 clone 写回。显式 `--restore-erased` import 会为 session 与 opaque child-source namespace 启动新的耐久复制 incarnation；仅 R2 payload 物理删除仍 deferred 时也不会复用旧 key；D1 tombstone 传播已生效。generation 同时绑定远端 object index 的 canonical digest；sync 会在 D1 与 R2 复验每个 checkpoint 对象，restore 只有在读取前后 manifest 与 object-index digest 均未变化时才接受 catalog。当前客户端只使用版本化的 v2 远端 session/checkpoint 表；v2 激活后，D1 trigger 会以升级提示拒绝旧客户端的无 fence 写入，避免其破坏一致恢复快照。
 
+## Claude Code hook 事件注册表
+
+Libra 只用一份 Claude Code hook 事件注册表。空 stdout 且 exit 0 不会接管宿主动作的名字才是可安全安装的。`WorktreeCreate`、`WorktreeRemove` 和 `PreModelSwitch` 是控制敏感项，不会安装。`SessionStop`、`ModelUpdate` 和 `Compaction` 是已废弃别名，不在当前可安装集合里。未知事件名或未知字段记为 partial，诊断不包含 payload。`libra agent enable` 仍然只写入既有六项转发（`SessionStart`、`UserPromptSubmit`、`PreToolUse`、`PostToolUse`、`Stop`、`SessionEnd`）。这不表示每个已知事件都已安装。
+
 ## 示例
 
 ```bash

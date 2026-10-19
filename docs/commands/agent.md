@@ -800,6 +800,10 @@ session/checkpoint tables. Once v2 is activated, D1 triggers reject legacy
 unfenced writers with an upgrade error rather than allowing them to invalidate
 a coherent restore snapshot.
 
+## Claude Code hook event registry
+
+Libra keeps one Claude Code hook-event registry. A name is safely installable when empty stdout and exit 0 do not take over the host action. `WorktreeCreate`, `WorktreeRemove`, and `PreModelSwitch` are control-sensitive and are not installed. `SessionStop`, `ModelUpdate`, and `Compaction` are deprecated aliases and are not in the current installable set. An unknown event name or an unknown field is partial, and the diagnostic does not include the payload. `libra agent enable` still writes only the existing six forwarders (`SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop`, and `SessionEnd`). This does not claim that every known event is installed.
+
 ## Examples
 
 ```bash

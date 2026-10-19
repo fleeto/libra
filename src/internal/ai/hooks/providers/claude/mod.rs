@@ -5,10 +5,15 @@
 //! decoding logic lives in those submodules; this module contains only the
 //! singleton plumbing.
 
+mod events;
 mod parser;
 mod settings;
 
 use anyhow::Result;
+pub use events::{
+    ClaudeEventClass, ClaudeFieldReport, classify_claude_fields, control_sensitive_names,
+    deprecated_alias_names, event_class, known_event_names, safely_installable_names,
+};
 
 use super::super::{
     lifecycle::{LifecycleEvent, SessionHookEnvelope},
@@ -58,7 +63,7 @@ impl HookProvider for ClaudeProvider {
     }
 
     fn recognizes_event(&self, hook_event_name: &str) -> bool {
-        parser::CLAUDE_HOOK_EVENT_NAMES.contains(&hook_event_name)
+        events::on_current_ingress(hook_event_name)
     }
 
     fn dedup_identity_keys(&self) -> &'static [&'static str] {

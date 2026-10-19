@@ -1,5 +1,9 @@
 # Agent Command Development
 
+## Claude Code hook registry (CC-01)
+
+`src/internal/ai/hooks/providers/claude/events.rs` is the only Claude event taxonomy. The parser reads lifecycle kinds from that table and does not keep a second name list. Safely installable names match the CC-00 freeze. `WorktreeCreate`, `WorktreeRemove`, and `PreModelSwitch` are control-sensitive, stay off the current ingress, and are not installed. `SessionStop`, `ModelUpdate`, and `Compaction` remain parsable deprecated aliases and are excluded from the installable set. Unknown names and unknown extra keys are partial; diagnostics are static and do not echo the payload. `agent enable` still forwards only the existing six events.
+
 > **Coverage-v2 source version:** The coverage-v2 descriptions below refer to the Libra 0.30.50 source line and later compatible versions. This is not a stable-release announcement; check the [official releases](https://github.com/libra-tools/libra/releases) and `libra --version` for installed support. Other sections retain their own version requirements. Coverage-v2 does not prove native origin or authorize native reasoning artifacts.
 
 ## Final OpenCode delivery scope (2026-10-18)

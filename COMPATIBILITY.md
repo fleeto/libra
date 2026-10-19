@@ -429,7 +429,7 @@ key files with the fixed path-free Unix-host remedy (`LBR-UNSUPPORTED-001`):
 nonterminal Codex callbacks print it and exit 0, while Codex `SessionEnd`, the
 installed Claude surface and the hidden Claude Code / OpenCode alias exit
 non-zero with it. The hook budget is cooperative, not a strict wall-clock
-guarantee.
+guarantee. Claude Code hook names come from one registry: safely installable events are distinct from the control-sensitive holds `WorktreeCreate`, `WorktreeRemove`, and `PreModelSwitch`, and from the deprecated aliases `SessionStop`, `ModelUpdate`, and `Compaction`. Unknown names and unknown fields are partial and the diagnostic does not include the payload. `libra agent enable` still installs only the existing six Claude forwarders.
 
 Native Windows managed capture supports local NTFS storage with no-follow
 handles, protected current-user/SYSTEM key ACLs, exclusive initializer locks,

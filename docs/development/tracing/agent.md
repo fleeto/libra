@@ -11,6 +11,10 @@
 
 > **术语与特性边界澄清**：本文档中的 "SubagentStart / SubagentEnd" 与 checkpoint `scope = 'subagent'` 专指**被观测的外部 Agent**（Claude Code 等）在其 transcript 中产生的子代理事件，由 `libra agent` 捕获。**与此正交**的是 Cargo feature `subagent-scaffold`（CEX-S2-10，Step 2 子代理契约 schema-only 脚手架），它用于 `src/internal/ai/agent/`、`goal/` 等内部 AgentRuntime 的子代理合约定义，当前受 CP-4 gate 保护。Cargo.toml 中的注释引用本文档 "Step 2 audit closure" 应理解为外部捕获计划为整体子代理事件面提供上下文；内部 scaffold 的实际实现与审计位于内部 AI 模块与 `docs/development/internal/code-agent-runtime.md`。新增/修改任一 "subagent" 语义时，必须同步更新 Cargo 注释与两份文档。
 
+## Claude Code hook registry (CC-01)
+
+Claude hook classification lives in one registry (`providers/claude/events.rs`). The parser does not copy that taxonomy. Control-sensitive `WorktreeCreate`, `WorktreeRemove`, and `PreModelSwitch` are known and are not on the current observe ingress. Deprecated aliases `SessionStop`, `ModelUpdate`, and `Compaction` still parse and are not installable. Unknown events and unknown fields are partial without a payload diagnostic. The installer still writes the existing six forwarders.
+
 ## 捕获概念结构图（Session / turn / checkpoint / transcript）
 
 下图说明外部 Agent 捕获各概念之间的关联：生命周期事件如何驱动写入、`agent_session` 与 `agent_checkpoint` 的从属关系、checkpoint 如何落到 `refs/libra/traces` 上的 commit/tree/blob，以及 transcript 快照、usage、辅助日志和 cloud 可见性的位置。事实源：schema `sql/migrations/2026050303_agent_capture.sql`、写入器 `src/internal/ai/capture/live_pipeline.rs`（`ingest_agent_traces_payload_with_scope`）与 `src/internal/ai/capture/live_checkpoint.rs`（`write_committed_checkpoint`），hook 入口 `src/internal/ai/hooks/runtime.rs`。

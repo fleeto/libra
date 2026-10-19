@@ -1,56 +1,40 @@
 //! Claude Code hook envelope parser.
 //!
-//! Maps each Claude `hook_event_name` to a canonical [`LifecycleEventKind`] and
-//! delegates the rest of the field extraction to [`build_lifecycle_event`]. The
-//! provider's hook taxonomy is intentionally hard-coded here: silently
-//! forwarding unknown events would let breaking upstream changes go undetected.
+//! Event names come from [`super::events`]. This module does not keep a second
+//! name table. Unknown names and events that are not on the current observe
+//! ingress return a fixed diagnostic that does not include the payload.
 
 use anyhow::{Result, bail};
 
-use super::super::super::lifecycle::{
-    LifecycleEvent, LifecycleEventKind, SessionHookEnvelope, build_lifecycle_event,
+use super::{
+    super::super::lifecycle::{LifecycleEvent, SessionHookEnvelope, build_lifecycle_event},
+    events,
 };
-
-/// Every Claude hook event name [`parse_claude_hook_event`] understands.
-/// Keep in sync with its `match`; the dispatcher consults this via
-/// `HookProvider::recognizes_event` to skip-and-log names a newer Claude
-/// Code emits that this build does not know yet (AG-19).
-pub(super) const CLAUDE_HOOK_EVENT_NAMES: &[&str] = &[
-    "SessionStart",
-    "UserPromptSubmit",
-    "PostToolUse",
-    "PreToolUse",
-    "Stop",
-    "SessionStop",
-    "ModelUpdate",
-    "Compaction",
-    "SessionEnd",
-];
 
 /// Translate a Claude hook event name into a canonical lifecycle event.
 ///
-/// Functional scope: routes each known Claude hook (SessionStart,
-/// UserPromptSubmit, PreToolUse/PostToolUse, Stop, ModelUpdate, Compaction,
-/// SessionEnd) through [`build_lifecycle_event`], which extracts the standard
-/// fields from `envelope.extra`.
+/// Functional scope: names on the current ingress take their lifecycle kind
+/// from the single registry and then [`build_lifecycle_event`] extracts the
+/// standard fields from `envelope.extra`.
 ///
-/// Boundary conditions: unknown event names produce a hard error so that
-/// upstream changes are surfaced immediately rather than silently dropped.
+/// Boundary conditions: an unknown name, or a known name that is not on the
+/// current ingress, is an error whose text does not include the supplied name
+/// or any field value. Unknown extra keys stay out of that error; callers
+/// classify them with [`events::classify_claude_fields`].
 ///
 /// See: `tests::parser_maps_canonical_hooks`, `tests::parser_rejects_unknown_hook`.
 pub(super) fn parse_claude_hook_event(
     hook_event_name: &str,
     envelope: &SessionHookEnvelope,
 ) -> Result<LifecycleEvent> {
-    let kind = match hook_event_name {
-        "SessionStart" => LifecycleEventKind::SessionStart,
-        "UserPromptSubmit" => LifecycleEventKind::TurnStart,
-        "PostToolUse" | "PreToolUse" => LifecycleEventKind::ToolUse,
-        "Stop" | "SessionStop" => LifecycleEventKind::TurnEnd,
-        "ModelUpdate" => LifecycleEventKind::ModelUpdate,
-        "Compaction" => LifecycleEventKind::Compaction,
-        "SessionEnd" => LifecycleEventKind::SessionEnd,
-        other => bail!("unknown Claude Code hook event: '{other}'"),
+    let Some(spec) = events::spec(hook_event_name) else {
+        bail!("unknown Claude Code hook event");
+    };
+    if !spec.on_current_ingress {
+        bail!("Claude hook event is not on the current observe ingress");
+    }
+    let Some(kind) = spec.kind else {
+        bail!("Claude hook event is not on the current observe ingress");
     };
     Ok(build_lifecycle_event(kind, envelope))
 }
@@ -59,7 +43,7 @@ pub(super) fn parse_claude_hook_event(
 mod tests {
     use serde_json::{Map, Value};
 
-    use super::*;
+    use super::{super::super::super::lifecycle::LifecycleEventKind, *};
 
     fn canonical_envelope() -> SessionHookEnvelope {
         SessionHookEnvelope {

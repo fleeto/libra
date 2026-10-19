@@ -558,6 +558,125 @@ async fn v1_fixture_show_preserves_safe_summary_without_layout_contract() {
     );
 }
 
+/// Authorized show and ordinary export return a legacy Claude thinking body.
+/// List, graph, and doctor do not. The stored objects stay byte-identical.
+#[tokio::test]
+async fn claude_legacy_show_and_export_keep_thinking_out_of_list_and_graph() {
+    let canary = "CC06-THINKING-CANARY";
+    let signature = "CC06-SIG";
+    let transcript = format!(
+        "{{\"type\":\"assistant\",\"uuid\":\"cc06-1\",\"timestamp\":\"2026-10-19T00:00:00Z\",\"message\":{{\"role\":\"assistant\",\"content\":[{{\"type\":\"thinking\",\"thinking\":\"{canary}\",\"signature\":\"{signature}\"}}]}}}}\n"
+    );
+    let repo = ReaderRepo::init();
+    let libra_dir = repo.libra_dir();
+    let transcript_oid =
+        libra::utils::object::write_git_object(&libra_dir, "blob", transcript.as_bytes())
+            .expect("write legacy transcript")
+            .to_string();
+    let metadata = b"{\"agent_kind\":\"claude_code\"}";
+    let metadata_oid = libra::utils::object::write_git_object(&libra_dir, "blob", metadata)
+        .expect("write metadata")
+        .to_string();
+    let checkpoint_id = "cc06ae75-d24c-465a-b890-a9f861a50cc7";
+    let transcript_tree = write_tree(&libra_dir, &[("100644", "claude_code", &transcript_oid)]);
+    let inner_tree = write_tree(
+        &libra_dir,
+        &[
+            ("100644", "metadata.json", &metadata_oid),
+            ("40000", "transcript", &transcript_tree),
+        ],
+    );
+    let prefix_tree = write_tree(&libra_dir, &[("40000", &checkpoint_id[2..], &inner_tree)]);
+    let checkpoint_tree = write_tree(&libra_dir, &[("40000", &checkpoint_id[..2], &prefix_tree)]);
+    let root_tree = write_tree(&libra_dir, &[("40000", "checkpoint", &checkpoint_tree)]);
+    let object_path = libra_dir
+        .join("objects")
+        .join(&transcript_oid[..2])
+        .join(&transcript_oid[2..]);
+    let before = std::fs::read(&object_path).expect("read stored transcript object");
+
+    let session_id = "claude__cc06-legacy";
+    let conn = repo.db().await;
+    seed_session(&conn, session_id, 1).await;
+    let backend = conn.get_database_backend();
+    conn.execute_raw(Statement::from_sql_and_values(
+        backend,
+        "UPDATE agent_session SET metadata_json = ? WHERE session_id = ?",
+        [
+            format!("{{\"raw_hook_events\":[{{\"body\":\"{canary}\"}}]}}").into(),
+            session_id.into(),
+        ],
+    ))
+    .await
+    .expect("seed raw hook metadata");
+    conn.execute_raw(Statement::from_sql_and_values(
+        backend,
+        "INSERT INTO agent_checkpoint (checkpoint_id, session_id, scope, parent_commit, \
+         tree_oid, metadata_blob_oid, traces_commit, created_at) \
+         VALUES (?, ?, 'committed', NULL, ?, ?, ?, 1783206712)",
+        [
+            checkpoint_id.into(),
+            session_id.into(),
+            root_tree.into(),
+            metadata_oid.into(),
+            "64c851d2df4228ecd86e0d7aa54d1ba8c4fa4efc".into(),
+        ],
+    ))
+    .await
+    .expect("seed legacy checkpoint");
+    drop(conn);
+
+    let show = repo.run(
+        &["agent", "checkpoint", "show", checkpoint_id, "--json"],
+        None,
+        &[],
+    );
+    let data = json_data(&show);
+    assert_eq!(data["reasoning"]["availability"], json!("unproven"));
+    assert_eq!(data["reasoning"]["readable"], json!([canary]));
+    assert_eq!(data["reasoning"]["signatures"], json!([signature]));
+    assert_eq!(data["reasoning"]["readable_obtained"], json!(true));
+
+    let export = repo.run(&["agent", "checkpoint", "export", checkpoint_id], None, &[]);
+    assert!(export.status.success(), "export: {}", describe(&export));
+    let exported = String::from_utf8_lossy(&export.stdout);
+    assert!(
+        exported.contains(canary),
+        "export dropped thinking: {exported}"
+    );
+    assert!(
+        exported.contains(signature),
+        "export dropped signature: {exported}"
+    );
+
+    for (label, args) in [
+        (
+            "checkpoint list",
+            vec!["agent", "checkpoint", "list", "--json"],
+        ),
+        ("session list", vec!["agent", "session", "list", "--json"]),
+        ("graph", vec!["agent", "graph", session_id, "--json"]),
+        ("doctor", vec!["agent", "doctor", "--json"]),
+    ] {
+        let out = repo.run(&args, None, &[]);
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            !text.contains(canary) && !text.contains(signature),
+            "{label} expanded the legacy body: {text}"
+        );
+    }
+
+    let after = std::fs::read(&object_path).expect("reread stored transcript object");
+    assert_eq!(
+        before, after,
+        "show and export must not rewrite the stored object"
+    );
+}
+
 /// `checkpoint show` is a deliberately narrow public read surface.  A local
 /// catalog or legacy metadata blob may contain source locators, commitments,
 /// redaction details, or internal object identities; neither human nor JSON

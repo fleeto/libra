@@ -339,7 +339,7 @@ async fn show(args: CheckpointShowArgs, output: &OutputConfig) -> CliResult<()> 
     let row = conn
         .query_one_raw(Statement::from_sql_and_values(
             backend,
-            "SELECT scope, parent_commit, created_at, tree_oid \
+            "SELECT scope, parent_commit, created_at, tree_oid, session_id \
              FROM agent_checkpoint WHERE checkpoint_id = ? LIMIT 1",
             [args.checkpoint_id.clone().into()],
         ))
@@ -382,6 +382,11 @@ async fn show(args: CheckpointShowArgs, output: &OutputConfig) -> CliResult<()> 
                 } else {
                     None
                 };
+            let reasoning = if output.is_json() {
+                claude_checkpoint_reasoning(&conn, &row, &args.checkpoint_id).await
+            } else {
+                None
+            };
             let summary = CheckpointShowSummary {
                 // The command's positional identifier is the only identity
                 // deliberately echoed by this read operation.  Do not take
@@ -394,7 +399,7 @@ async fn show(args: CheckpointShowArgs, output: &OutputConfig) -> CliResult<()> 
                 created_at,
                 parent_snapshot_recorded: parent_commit.is_some_and(|value| !value.is_empty()),
             };
-            emit_one(&summary, artifacts.as_ref(), output)
+            emit_one(&summary, artifacts.as_ref(), reasoning.as_ref(), output)
         }
         None => Err(CliError::fatal(format!(
             "no checkpoint matches id '{}'",
@@ -1285,12 +1290,10 @@ pub(super) fn load_checkpoint_transcript_bytes_from_storage(
 
     let artifacts = reasoning_artifact_tree_oids(storage, &inner)?;
     let ordinary = checkpoint_plain_files(storage, &inner, &artifacts)?;
-    let manifest =
-        checkpoint_plain_manifest(storage, &inner, &artifacts, &ordinary)?.ok_or_else(|| {
-            CliError::fatal(
-                "checkpoint has no manifest.json (legacy layout not exportable)".to_string(),
-            )
-        })?;
+    let manifest = match checkpoint_plain_manifest(storage, &inner, &artifacts, &ordinary)? {
+        Some(manifest) => manifest,
+        None => return read_legacy_v1_transcript(storage, &inner, cap),
+    };
     let oids = checkpoint_transcript_oids(storage, &inner, &manifest, &artifacts)?;
 
     let mut bytes: Vec<u8> = Vec::new();
@@ -1313,6 +1316,100 @@ pub(super) fn load_checkpoint_transcript_bytes_from_storage(
         }
     }
     Ok((bytes, truncated))
+}
+
+/// Pre-manifest checkpoints store the transcript as `transcript/<file>`.
+/// Read those regular files in name order. A missing transcript tree keeps
+/// the historical not-exportable error and does not echo file bytes.
+fn read_legacy_v1_transcript(
+    storage: &Path,
+    inner: &Tree,
+    cap: u64,
+) -> Result<(Vec<u8>, bool), CliError> {
+    let transcript_tree = subtree(storage, inner, "transcript").map_err(|_| {
+        CliError::fatal(
+            "checkpoint has no manifest.json (legacy layout not exportable)".to_string(),
+        )
+    })?;
+    let mut files: Vec<_> = transcript_tree
+        .tree_items
+        .iter()
+        .filter(|item| item.mode == TreeItemMode::Blob)
+        .collect();
+    files.sort_by(|left, right| left.name.cmp(&right.name));
+    if files.is_empty() {
+        return Err(CliError::fatal(
+            "checkpoint has no manifest.json (legacy layout not exportable)".to_string(),
+        ));
+    }
+    let mut bytes = Vec::new();
+    let mut truncated = false;
+    for item in files {
+        let remaining = cap.saturating_sub(bytes.len() as u64);
+        if remaining == 0 {
+            truncated = true;
+            break;
+        }
+        let (part, part_truncated) = read_checkpoint_object_bounded(storage, &item.id, remaining)
+            .map_err(|_| {
+            CliError::fatal(
+                "legacy checkpoint transcript could not be read; run `libra agent doctor`"
+                    .to_string(),
+            )
+        })?;
+        bytes.extend_from_slice(&part);
+        if part_truncated {
+            truncated = true;
+            break;
+        }
+    }
+    Ok((bytes, truncated))
+}
+
+async fn claude_checkpoint_reasoning(
+    conn: &DatabaseConnection,
+    row: &sea_orm::QueryResult,
+    checkpoint_id: &str,
+) -> Option<serde_json::Value> {
+    let session_id = row.try_get_by::<String, _>("session_id").ok()?;
+    let session = conn
+        .query_one_raw(Statement::from_sql_and_values(
+            conn.get_database_backend(),
+            "SELECT agent_kind FROM agent_session WHERE session_id = ?",
+            [session_id.into()],
+        ))
+        .await
+        .ok()
+        .flatten()?;
+    let kind = session.try_get_by::<String, _>("agent_kind").ok()?;
+    if kind != "claude_code" {
+        return None;
+    }
+    let tree_oid = row.try_get_by::<String, _>("tree_oid").ok()?;
+    let cap = crate::internal::ai::observed_agents::compliance::max_transcript_read_bytes()
+        .await
+        .unwrap_or(1_048_576);
+    let storage = util::try_get_storage_path(None).ok()?;
+    let (bytes, _) =
+        load_checkpoint_transcript_bytes_from_storage(&storage, checkpoint_id, &tree_oid, cap)
+            .ok()?;
+    claude_show_reasoning(&bytes)
+}
+
+fn claude_show_reasoning(bytes: &[u8]) -> Option<serde_json::Value> {
+    let (redacted, _) = crate::internal::ai::observed_agents::Redactor::new_default().redact(bytes);
+    let assessment =
+        crate::internal::ai::observed_agents::assess_claude_ordinary_transcript(redacted.bytes());
+    if !assessment.data_obtained() {
+        return None;
+    }
+    Some(serde_json::json!({
+        "availability": "unproven",
+        "readable": assessment.readable,
+        "signatures": assessment.signatures,
+        "redacted_data": assessment.redacted_data,
+        "readable_obtained": assessment.readable_obtained(),
+    }))
 }
 
 /// Append one `agent_audit_log` row for a raw checkpoint export (or its
@@ -1558,6 +1655,7 @@ fn emit_list(page: &CheckpointListPage, output: &OutputConfig) -> CliResult<()> 
 fn emit_one(
     summary: &CheckpointShowSummary,
     artifacts: Option<&serde_json::Value>,
+    reasoning: Option<&serde_json::Value>,
     output: &OutputConfig,
 ) -> CliResult<()> {
     if output.is_json() {
@@ -1566,6 +1664,9 @@ fn emit_one(
         });
         if let Some(artifacts) = artifacts {
             payload["reasoning_artifacts"] = artifacts.clone();
+        }
+        if let Some(reasoning) = reasoning {
+            payload["reasoning"] = reasoning.clone();
         }
         return emit_json_data("agent_checkpoint", &payload, output);
     }

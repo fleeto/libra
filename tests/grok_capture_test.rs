@@ -10,6 +10,10 @@ use std::{
 };
 
 use libra::internal::ai::observed_agents::{
+    grok_reasoning::{
+        GrokMergedEvent, GrokReasoningError, export_grok_ordinary, import_grok_reasoning,
+        sink_bundle,
+    },
     grok_updates::{
         GROK_LINE_MAX_BYTES, GrokReadCursor, GrokTranscriptEvent, GrokUpdatesError,
         read_grok_updates, session_file,
@@ -416,4 +420,299 @@ fn grok_updates_symlink_directory_and_outside_path_are_refused() {
         matches!(outside_error, GrokUpdatesError::Refused { ref reason, .. } if reason.contains("outside")),
         "got {outside_error}"
     );
+}
+
+fn reasoning_line(id: &str, status: &str, summaries: &[&str], encrypted: &str) -> String {
+    let summary = summaries
+        .iter()
+        .map(|text| serde_json::json!({"type": "summary_text", "text": text}))
+        .collect::<Vec<_>>();
+    serde_json::json!({
+        "type": "reasoning",
+        "id": id,
+        "status": status,
+        "summary": summary,
+        "encrypted_content": encrypted,
+    })
+    .to_string()
+}
+
+fn thought(event_id: &str, prompt_id: &str, text: &str) -> GrokTranscriptEvent {
+    GrokTranscriptEvent::Thought {
+        text: text.to_string(),
+        prompt_id: prompt_id.to_string(),
+        event_id: event_id.to_string(),
+    }
+}
+
+fn write_history(dir: &Path, lines: &[String]) -> std::path::PathBuf {
+    let path = session_file(dir, "chat_history.jsonl");
+    let mut body = String::new();
+    for line in lines {
+        body.push_str(line);
+        body.push('\n');
+    }
+    fs::write(&path, body).expect("write chat history");
+    path
+}
+
+#[test]
+fn grok_unproven_ciphertext_is_in_transcript_and_absent_from_projection() {
+    let session = tempfile::tempdir().expect("session dir");
+    let secret = "sk-ant-api03-AAAAAAAAAAAAAAAAAA";
+    let canary = "GROK-CANARY-7c1e";
+    let exact_cipher = "CIPHER-EXACT-7c1e";
+    let join_cipher = "CIPHER-JOIN-7c1e";
+    let orphan_cipher = "CIPHER-ORPHAN-7c1e";
+    let reasoning_id = "rid-7c1e";
+    let updates = vec![
+        thought("e1", "p-join", "W1"),
+        thought("e2", "p-join", "W2"),
+        thought("e3", "p-join", "W3"),
+        thought("e4", "p-join", "W4"),
+        GrokTranscriptEvent::Tool {
+            name: "shell".to_string(),
+            event_id: "e-tool".to_string(),
+        },
+        thought("e-exact", "p-exact", canary),
+        thought("e-secret", "p-secret", secret),
+    ];
+    let history = write_history(
+        session.path(),
+        &[
+            reasoning_line("rid-join", "completed", &["W1W2W3W4"], join_cipher),
+            reasoning_line(reasoning_id, "completed", &[canary], exact_cipher),
+            reasoning_line(
+                "rid-orphan",
+                "completed",
+                &["orphan-summary"],
+                orphan_cipher,
+            ),
+        ],
+    );
+    let import = import_grok_reasoning(session.path(), &history, &updates).expect("import");
+    assert!(import.is_complete());
+    let document = import.transcript_document();
+    let transcript = document.to_string();
+    assert!(transcript.contains(canary));
+    assert!(transcript.contains(exact_cipher));
+    assert!(transcript.contains(join_cipher));
+    assert!(transcript.contains(orphan_cipher));
+    assert!(transcript.contains(reasoning_id));
+    assert!(transcript.contains("completed"));
+    assert!(transcript.contains("orphan-summary"));
+    assert!(transcript.contains("encrypted_content"));
+    assert!(
+        !transcript.contains("W1W2W3W4"),
+        "a four-chunk join is not stored as a second body"
+    );
+    assert_eq!(
+        transcript.matches(canary).count(),
+        1,
+        "exact summary is not duplicated"
+    );
+    assert!(transcript.contains("<REDACTED:anthropic-api-key>"));
+    assert!(!transcript.contains(secret));
+
+    let mut attached_join = 0;
+    let mut attached_exact = 0;
+    for event in &import.events {
+        match event {
+            GrokMergedEvent::Thought {
+                event_id,
+                text,
+                reasoning,
+                ..
+            } => {
+                if event_id == "e1" {
+                    let reasoning = reasoning
+                        .as_ref()
+                        .expect("join ciphertext hangs on the first chunk");
+                    assert_eq!(reasoning.encrypted_content, join_cipher);
+                    attached_join += 1;
+                    assert_eq!(text, "W1");
+                }
+                if event_id == "e-exact" {
+                    let reasoning = reasoning
+                        .as_ref()
+                        .expect("exact ciphertext hangs on that thought");
+                    assert_eq!(reasoning.encrypted_content, exact_cipher);
+                    assert_eq!(reasoning.id, reasoning_id);
+                    assert_eq!(reasoning.status, "completed");
+                    attached_exact += 1;
+                }
+                assert_ne!(text, "W1W2W3W4");
+            }
+            GrokMergedEvent::Reasoning {
+                summary_text,
+                encrypted_content,
+                ..
+            } => {
+                assert_eq!(summary_text.as_deref(), Some("orphan-summary"));
+                assert_eq!(encrypted_content, orphan_cipher);
+            }
+            GrokMergedEvent::Tool { name, .. } => assert_eq!(name, "shell"),
+            other => panic!("unexpected event {other:?}"),
+        }
+    }
+    assert_eq!(attached_join, 1);
+    assert_eq!(attached_exact, 1);
+    let tool_at = import
+        .events
+        .iter()
+        .position(|event| matches!(event, GrokMergedEvent::Tool { .. }))
+        .expect("tool");
+    assert!(matches!(
+        &import.events[tool_at - 1],
+        GrokMergedEvent::Thought { event_id, .. } if event_id == "e4"
+    ));
+    assert!(matches!(
+        &import.events[tool_at + 1],
+        GrokMergedEvent::Thought { text, .. } if text == canary
+    ));
+
+    let sinks = sink_bundle(&import);
+    for (name, body) in [
+        ("metadata", sinks.metadata_json.as_str()),
+        ("coverage", sinks.typed_coverage_json.as_str()),
+        ("debug", sinks.debug_text.as_str()),
+        ("projection", sinks.safe_projection_json.as_str()),
+        ("doctor", sinks.doctor_json.as_str()),
+        ("digest", sinks.coverage_digest.as_str()),
+        ("log", sinks.log_line.as_str()),
+    ] {
+        for secret_text in [
+            canary,
+            exact_cipher,
+            join_cipher,
+            orphan_cipher,
+            reasoning_id,
+            secret,
+            "orphan-summary",
+        ] {
+            assert!(
+                !body.contains(secret_text),
+                "{name} contains {secret_text}: {body}"
+            );
+        }
+    }
+    assert!(sinks.doctor_json.contains("<REDACTED:anthropic-api-key>"));
+
+    let mut with_metadata = document;
+    with_metadata["metadata"] = serde_json::json!({
+        "openai": {"reasoningEncryptedContent": "OPENAI-CANARY-7c1e", "itemId": "keep-id"},
+        "anthropic": {"signature": "ANTHROPIC-CANARY-7c1e"}
+    });
+    let exported = export_grok_ordinary(&with_metadata).expect("export");
+    let export_text = String::from_utf8(exported).expect("utf8 export");
+    assert!(!export_text.contains("encrypted_content"));
+    assert!(!export_text.contains("reasoningEncryptedContent"));
+    assert!(!export_text.contains("\"signature\""));
+    assert!(!export_text.contains(exact_cipher));
+    assert!(export_text.contains("keep-id"));
+    assert!(transcript.contains(exact_cipher));
+}
+
+#[test]
+fn grok_reasoning_empty_summary_keeps_ciphertext() {
+    let session = tempfile::tempdir().expect("session dir");
+    let history = write_history(
+        session.path(),
+        &[reasoning_line(
+            "rid-empty",
+            "completed",
+            &[],
+            "CIPHER-EMPTY-7c1e",
+        )],
+    );
+    let import = import_grok_reasoning(
+        session.path(),
+        &history,
+        &[thought("e", "p", "visible-thought")],
+    )
+    .expect("import");
+    assert!(import.is_complete());
+    match &import.events[..] {
+        [
+            GrokMergedEvent::Thought {
+                text, reasoning, ..
+            },
+            GrokMergedEvent::Reasoning {
+                id,
+                status,
+                summary_text,
+                encrypted_content,
+            },
+        ] => {
+            assert_eq!(text, "visible-thought");
+            assert!(reasoning.is_none());
+            assert_eq!(id, "rid-empty");
+            assert_eq!(status, "completed");
+            assert_eq!(summary_text, &None);
+            assert_eq!(encrypted_content, "CIPHER-EMPTY-7c1e");
+        }
+        other => panic!("expected thought plus ciphertext-only reasoning, got {other:?}"),
+    }
+    let transcript = import.transcript_document().to_string();
+    assert!(transcript.contains("CIPHER-EMPTY-7c1e"));
+    assert!(!transcript.contains("summary_text\":\""));
+}
+
+#[test]
+fn grok_reasoning_non_string_ciphertext_is_partial() {
+    let session = tempfile::tempdir().expect("session dir");
+    let bad = serde_json::json!({
+        "type": "reasoning",
+        "id": "rid-bad",
+        "status": "completed",
+        "summary": [{"type": "summary_text", "text": "kept-out"}],
+        "encrypted_content": {"blob": true}
+    })
+    .to_string();
+    let history = write_history(
+        session.path(),
+        &[
+            reasoning_line("rid-good", "completed", &["visible-thought"], "CIPHER-GOOD"),
+            bad,
+        ],
+    );
+    let import = import_grok_reasoning(
+        session.path(),
+        &history,
+        &[thought("e", "p", "visible-thought")],
+    )
+    .expect("partial import");
+    assert!(import.partial);
+    assert!(!import.is_complete());
+    let transcript = import.transcript_document().to_string();
+    assert!(transcript.contains("CIPHER-GOOD"));
+    assert!(transcript.contains("visible-thought"));
+    assert!(!transcript.contains("rid-bad"));
+    assert!(!transcript.contains("kept-out"));
+    assert!(!transcript.contains("blob"));
+}
+
+#[test]
+fn grok_reasoning_outside_matrix_is_refused() {
+    let session = tempfile::tempdir().expect("session dir");
+    let history = write_history(
+        session.path(),
+        &[
+            reasoning_line("rid-good", "completed", &["visible-thought"], "CIPHER-GOOD"),
+            r#"{"type":"reasoning","id":"rid-x","status":"completed","summary":[],"cipher":"dropped-thinking"}"#.to_string(),
+        ],
+    );
+    let error = import_grok_reasoning(
+        session.path(),
+        &history,
+        &[thought("e", "p", "visible-thought")],
+    )
+    .expect_err("shape outside the matrix is refused");
+    assert!(
+        matches!(error, GrokReasoningError::Malformed { ref reason } if reason.contains("encrypted_content")),
+        "got {error}"
+    );
+    let rendered = error.to_string();
+    assert!(rendered.contains("malformed transcript"));
+    assert!(!rendered.contains("dropped-thinking"));
 }

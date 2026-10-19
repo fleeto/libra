@@ -36,6 +36,7 @@ pub mod compliance;
 pub mod coverage;
 pub mod derived;
 pub mod extract;
+pub mod grok_reasoning;
 pub mod grok_updates;
 pub(crate) mod live_capture;
 pub mod native_origin;

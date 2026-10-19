@@ -508,7 +508,7 @@ Hook：`transcript_path` 是会话自己的 `updates.jsonl`。daemon 路由可�
 
 **Task type:** implementation
 
-**Lifecycle / Acceptance:** pending / 空
+**Lifecycle / Acceptance:** locally-accepted / 空
 
 **Description:** 把合成 `chat_history.jsonl` 的 reasoning 字符串字段并入 GK-02 的 transcript，并保证 safe projection 等 sink 看不到这些明文。
 
@@ -524,18 +524,18 @@ Hook：`transcript_path` 是会话自己的 `updates.jsonl`。daemon 路由可�
 
 **Acceptance criteria:**
 
-- [ ] 字符串 `encrypted_content`、`id`、`status` 和 `summary_text` 出现在普通 transcript。
-- [ ] 与某一条 thought 完全相同的摘要不重复写正文，密文挂在该条上。连续 4 条拼接的那一个合成样例同样只挂接一次。对不上的摘要单独成条。空摘要保留密文、不补正文。
-- [ ] 非字符串 `text` 或非字符串 `encrypted_content` 丢弃，回合为 partial。
-- [ ] metadata、类型化覆盖、Debug、safe projection、doctor JSON、coverage digest 和日志夹具对一份固定 canary 零命中。
-- [ ] `grok_reasoning.rs` 的普通导出函数生成的字节不含键 `encrypted_content`、`metadata.openai.reasoningEncryptedContent`、`metadata.anthropic.signature`。checkpoint transcript 仍含 Grok reasoning 密文。不改 `opencode_export.rs`。
-- [ ] 密钥形状的 thought 文本被现有 redaction 替换，不能原文进入 sink。
-- [ ] 形状不在 GK-00 矩阵内的文件拒绝导入，不写成一份删掉 Thinking 的成功 checkpoint。
+- [x] 字符串 `encrypted_content`、`id`、`status` 和 `summary_text` 出现在普通 transcript。
+- [x] 与某一条 thought 完全相同的摘要不重复写正文，密文挂在该条上。连续 4 条拼接的那一个合成样例同样只挂接一次。对不上的摘要单独成条。空摘要保留密文、不补正文。
+- [x] 非字符串 `text` 或非字符串 `encrypted_content` 丢弃，回合为 partial。
+- [x] metadata、类型化覆盖、Debug、safe projection、doctor JSON、coverage digest 和日志夹具对一份固定 canary 零命中。
+- [x] `grok_reasoning.rs` 的普通导出函数生成的字节不含键 `encrypted_content`、`metadata.openai.reasoningEncryptedContent`、`metadata.anthropic.signature`。checkpoint transcript 仍含 Grok reasoning 密文。不改 `opencode_export.rs`。
+- [x] 密钥形状的 thought 文本被现有 redaction 替换，不能原文进入 sink。
+- [x] 形状不在 GK-00 矩阵内的文件拒绝导入，不写成一份删掉 Thinking 的成功 checkpoint。
 
 **Verification:**
 
-- [ ] `source .env.test && cargo test --test grok_capture_test grok_unproven_ciphertext_is_in_transcript_and_absent_from_projection -- --exact`（new）。输出含 `1 passed`，不含 `0 passed`。
-- [ ] `source .env.test && cargo test --test grok_capture_test grok_reasoning_empty_summary_keeps_ciphertext -- --exact`（new，同一测试文件根上）。输出含 `1 passed`，不含 `0 passed`。
+- [x] `source .env.test && cargo test --test grok_capture_test grok_unproven_ciphertext_is_in_transcript_and_absent_from_projection -- --exact`（new）。输出含 `1 passed`，不含 `0 passed`。
+- [x] `source .env.test && cargo test --test grok_capture_test grok_reasoning_empty_summary_keeps_ciphertext -- --exact`（new，同一测试文件根上）。输出含 `1 passed`，不含 `0 passed`。
 
 **Full-suite trigger:** T-1: 普通 transcript 与 safe projection 是共享 capture 事实源。
 

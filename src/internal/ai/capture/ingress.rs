@@ -633,12 +633,7 @@ fn parse_capture_ingress_payload(
         });
     }
 
-    if provider.provider_name() == "claude"
-        && envelope.hook_event_name == "MessageDisplay"
-        && !crate::internal::ai::hooks::providers::claude::admit_message_display(
-            &envelope.session_id,
-        )
-    {
+    if !provider.admit_ingress_frame(&envelope.hook_event_name, &envelope.session_id) {
         return Ok(observe_partial(payload.len()));
     }
 

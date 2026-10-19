@@ -431,13 +431,10 @@ fn extract_deadline_provider_once(
                 transcript, limits,
             )
         }
-        // `decode_extraction_request` accepts only the first-batch provider
-        // codes, so this arm is defensive and cannot carry an error string.
-        AgentKind::Gemini
-        | AgentKind::Cursor
-        | AgentKind::Copilot
-        | AgentKind::FactoryAi
-        | AgentKind::Grok => crate::internal::ai::observed_agents::extract::ExtractionSummary {
+        // First-batch providers are handled above. Every other kind,
+        // including grok, stays a partial empty summary. Naming each kind
+        // here would add a non-test `AgentKind::` path.
+        _ => crate::internal::ai::observed_agents::extract::ExtractionSummary {
             partial: true,
             ..Default::default()
         },

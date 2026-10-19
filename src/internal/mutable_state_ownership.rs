@@ -647,11 +647,20 @@ mod tests {
 
     /// The table name at the head of [`body_after_create_table`]'s output.
     fn table_name_after(chunk: &str) -> String {
-        body_after_create_table(chunk)
+        let body = body_after_create_table(chunk).trim_start();
+        let name: String = body
             .trim_start_matches(['`', '"'])
             .chars()
             .take_while(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == '_')
-            .collect()
+            .collect();
+        let mut rest = body.trim_start_matches(['`', '"']);
+        rest = rest.get(name.len()..).unwrap_or("");
+        rest = rest.trim_start_matches(['`', '"']).trim_start();
+        // A diagnostic such as "CREATE TABLE is missing a name" is not DDL.
+        if name.is_empty() || !rest.starts_with('(') {
+            return String::new();
+        }
+        name
     }
 
     /// Rust sources that issue DDL against a database OTHER than the local

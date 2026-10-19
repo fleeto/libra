@@ -73,6 +73,14 @@ impl HookProvider for ClaudeProvider {
         events::on_current_ingress(hook_event_name)
     }
 
+    fn admit_ingress_frame(&self, hook_event_name: &str, session_id: &str) -> bool {
+        if hook_event_name == "MessageDisplay" {
+            events::admit_message_display(session_id)
+        } else {
+            true
+        }
+    }
+
     fn dedup_identity_keys(&self) -> &'static [&'static str] {
         CANONICAL_DEDUP_IDENTITY_KEYS
     }

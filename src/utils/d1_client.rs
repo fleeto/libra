@@ -1388,7 +1388,7 @@ impl D1Client {
                 repo_id TEXT NOT NULL,
                 agent_kind TEXT NOT NULL CHECK(agent_kind IN (
                     'claude_code', 'cursor', 'codex', 'gemini',
-                    'opencode', 'copilot', 'factory_ai'
+                    'opencode', 'copilot', 'factory_ai', 'grok'
                 )),
                 provider_session_id TEXT NOT NULL,
                 state TEXT NOT NULL,
@@ -1432,7 +1432,7 @@ impl D1Client {
                 repo_id TEXT NOT NULL,
                 agent_kind TEXT NOT NULL CHECK(agent_kind IN (
                     'claude_code', 'cursor', 'codex', 'gemini',
-                    'opencode', 'copilot', 'factory_ai'
+                    'opencode', 'copilot', 'factory_ai', 'grok'
                 )),
                 provider_session_id TEXT NOT NULL,
                 state TEXT NOT NULL,

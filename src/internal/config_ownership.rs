@@ -430,6 +430,11 @@ mod tests {
     /// workdir config surfaces are single names directly under `.libra/`.
     const NON_CONFIG_ALLOWLIST: &[&str] = &[
         "state.json",               // runtime session state, not configuration
+        "checkpoint.json",          // Grok session state file, not a .libra config surface
+        "store.json",               // Grok capture cursor, not a .libra config surface
+        "pending.json",             // Grok capture pending marker, not a .libra config surface
+        "lifecycle.json",           // Grok capture lifecycle marker, not a .libra config surface
+        "libra-grok-capture.json",  // Libra-owned file in the external Grok hooks directory
         "metadata.json",            // capture metadata written by the runtime
         "package.json",             // embedded web frontend asset
         "manifest.json",            // web asset manifest

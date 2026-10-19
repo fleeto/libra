@@ -2584,6 +2584,7 @@ fn live_capture_port_and_store_boundaries() {
         "claude::ClaudeProvider",
         "codex::CodexProvider",
         "gemini::GeminiProvider",
+        "grok::GrokProvider",
         "opencode::OpenCodeProvider",
     ]
     .into_iter()
@@ -8347,8 +8348,14 @@ fn agent_kind_enum_sql_check_and_doc_roster_stay_in_sync() {
         .filter(|row| row.supported)
         .map(|row| row.slug)
         .collect();
-    assert_eq!(supported, ["claude-code", "codex", "opencode"]);
-    for slug in &supported {
+    assert_eq!(supported, ["claude-code", "codex", "opencode", "grok"]);
+    let first_batch: Vec<&str> = registry()
+        .iter()
+        .filter(|row| row.support_wave == Some("first_batch"))
+        .map(|row| row.slug)
+        .collect();
+    assert_eq!(first_batch, ["claude-code", "codex", "opencode"]);
+    for slug in &first_batch {
         assert!(
             agent_doc.contains(&format!("| `{slug}` |")),
             "tracing/agent.md first-batch roster table must list {slug}"

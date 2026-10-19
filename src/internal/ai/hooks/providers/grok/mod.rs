@@ -5,10 +5,12 @@
 //! export through the OpenCode bridge and does not start `grok`.
 
 pub mod parser;
+pub mod session_files;
 pub mod settings;
 
 use anyhow::{Result, bail};
-pub use parser::{encode_grok_cwd, observe_grok_hook};
+pub use parser::encode_grok_cwd;
+pub use session_files::observe_grok_hook;
 pub use settings::{
     grok_hook_command, grok_user_hooks_dir, install_grok_boundary_hooks, install_marked_grok_hooks,
     marked_hooks_present, uninstall_marked_grok_hooks,
@@ -38,7 +40,7 @@ fn record_grok_boundary(envelope: &SessionHookEnvelope) {
     if let Some(path) = &envelope.transcript_path {
         event["transcript_path"] = serde_json::Value::String(path.clone());
     }
-    parser::observe_grok_hook(
+    session_files::observe_grok_hook(
         &home.join("sessions"),
         &home.join("libra-capture"),
         &event,

@@ -1208,7 +1208,10 @@ mod tests {
         // present here. The two original stable kinds (ClaudeCode,
         // Gemini) must NOT — they have dedicated structs.
         for kind in AgentKind::all() {
-            let is_dedicated_stable = matches!(kind, AgentKind::ClaudeCode | AgentKind::Gemini);
+            let is_dedicated_stable = matches!(
+                kind,
+                AgentKind::ClaudeCode | AgentKind::Gemini | AgentKind::Grok
+            );
             assert_eq!(
                 stable_promoted_spec_for(*kind).is_some(),
                 !is_dedicated_stable,

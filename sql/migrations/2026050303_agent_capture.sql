@@ -15,7 +15,7 @@ CREATE TABLE IF NOT EXISTS `agent_session` (
     -- requires a paired migration that bumps the CHECK constraint.
     `agent_kind`           TEXT NOT NULL CHECK(`agent_kind` IN (
         'claude_code', 'cursor', 'codex', 'gemini',
-        'opencode', 'copilot', 'factory_ai'
+        'opencode', 'copilot', 'factory_ai', 'grok'
     )),
     `provider_session_id`  TEXT NOT NULL,
     -- Soft FK to `ai_thread(thread_id)`; ON DELETE SET NULL because losing the

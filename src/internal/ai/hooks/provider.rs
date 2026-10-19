@@ -241,6 +241,14 @@ pub trait HookProvider: HookProviderIdentity + Sync {
     fn recognizes_event(&self, _hook_event_name: &str) -> bool {
         false
     }
+    /// Whether this frame may enter the capture coordinator.
+    ///
+    /// The default admits every recognized frame. Claude's MessageDisplay
+    /// gate lives on the provider so capture ingress does not import
+    /// `hooks::providers`.
+    fn admit_ingress_frame(&self, _hook_event_name: &str, _session_id: &str) -> bool {
+        true
+    }
     /// Identity field names this provider checks when building dedup keys.
     fn dedup_identity_keys(&self) -> &'static [&'static str];
     /// Native identity priority for one particular callback.  Tool-use

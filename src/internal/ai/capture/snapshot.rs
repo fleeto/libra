@@ -29,8 +29,10 @@ use crate::internal::ai::{
             CoverageRedactionLimits, NormalizedTurn, prepare_authorized_reasoning_coverage,
         },
         reasoning::{
-            OpenCodeOrdinaryPartialPermit, ReasoningCoverageFragment, ReasoningFieldError,
-            ReasoningSourceDisposition, take_authorized_reasoning_coverage,
+            ClaudeAttachedProjection, OpenCodeOrdinaryPartialPermit, ReasoningCoverageFragment,
+            ReasoningFieldError, ReasoningSourceDisposition,
+            authorize_claude_attached_fields as authorize_claude_attached_source,
+            project_claude_attached_fields, take_authorized_reasoning_coverage,
         },
         resolve_live_transcript_source_until,
         transcript_source::InMemoryTranscriptOrigin,
@@ -942,6 +944,24 @@ impl CaptureSnapshotService {
             serde_json::json!({"schema_version":1,"partial":partial,
             "turns":turns,"redaction_report":prepared.report}),
         ))
+    }
+
+    /// Index ordinary Claude signature and redacted `data` fields.
+    ///
+    /// The caller keeps the original JSONL. This view does not create a native
+    /// artifact and does not delete retained bytes when a line is rejected.
+    pub fn claude_attached_projection(bytes: &[u8]) -> ClaudeAttachedProjection {
+        project_claude_attached_fields(bytes)
+    }
+
+    /// Re-check the session file leaf before associating attached fields.
+    /// A wrong leaf returns no fields on every call.
+    pub fn authorize_claude_attached_fields(
+        file_name: &str,
+        session_id: &str,
+        bytes: &[u8],
+    ) -> ClaudeAttachedProjection {
+        authorize_claude_attached_source(file_name, session_id, bytes)
     }
 
     /// Build extraction metadata over already-redacted parent/child snapshots

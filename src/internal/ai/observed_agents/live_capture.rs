@@ -28,9 +28,11 @@ use async_trait::async_trait;
 
 use super::{
     AgentKind, NormalizedTurn, ObservedAgent, RedactedBytes, TRANSCRIPT_READ_HARD_CAP_BYTES,
-    TranscriptSource, agent_for, claude_session_file_candidate, live_capture_for,
-    normalize_claude_transcript, normalize_codex_rollout, normalize_opencode_export,
+    TranscriptSource, agent_for, claude_jsonl_session_matches, claude_session_file_candidate,
+    live_capture_for, normalize_claude_transcript, normalize_codex_rollout,
+    normalize_opencode_export,
     opencode_export::{ExportLimits, authorized_trusted_sandboxed_export_until},
+    reasoning::note_claude_attached_duplicates,
 };
 use crate::internal::ai::{
     hooks::provider::HookProvider,
@@ -255,8 +257,20 @@ impl LiveCaptureProvider for ClaudeLiveCapture {
         &self,
         context: &LiveCaptureContext<'_>,
     ) -> Result<Option<PathBuf>, LiveCandidateUnavailable> {
-        claude_session_file_candidate(context.verified_cwd, context.provider_session_id)
-            .map_err(|_| LiveCandidateUnavailable)
+        let candidate =
+            claude_session_file_candidate(context.verified_cwd, context.provider_session_id)
+                .map_err(|_| LiveCandidateUnavailable)?;
+        match candidate {
+            Some(path)
+                if !claude_jsonl_session_matches(
+                    &path.to_string_lossy(),
+                    context.provider_session_id,
+                ) =>
+            {
+                Ok(None)
+            }
+            other => Ok(other),
+        }
     }
 
     fn live_coverage_normalizer(&self) -> Option<LiveCoverageNormalizer> {
@@ -287,7 +301,9 @@ impl LiveSubagentDiscovery for ClaudeLiveCapture {
 }
 
 fn claude_live_coverage(transcript: &RedactedBytes) -> Vec<NormalizedTurn> {
-    normalize_claude_transcript(transcript.bytes())
+    let mut turns = normalize_claude_transcript(transcript.bytes());
+    note_claude_attached_duplicates(&mut turns, transcript.bytes());
+    turns
 }
 
 /// Codex keeps its rollout normalizer for exactness; with no live candidate

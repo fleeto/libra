@@ -54,7 +54,10 @@ use super::{
         coverage::{RedactedImportCoverageRuntimeDto, encode_redacted_import_runtime},
         encode_coverage_turn_for_schema, normalize_claude_transcript_until,
         normalize_codex_rollout_until, normalize_opencode_export_until, parse_canon_value,
-        reasoning::{NativeProvenReasoning, ReasoningSourceDisposition},
+        reasoning::{
+            NativeProvenReasoning, ReasoningSourceDisposition,
+            note_claude_attached_duplicates_until,
+        },
         redact_turns_with_report, safe_turn_projection, safe_turn_projection_for_schema,
         select_coverage_schema,
     },
@@ -1473,6 +1476,23 @@ pub async fn read_import_source(
     }
 }
 
+/// Re-read ordinary Claude attachments on the authorized transcript. A
+/// duplicate-key line adds no field. The transcript bytes stay in place.
+fn retain_claude_attached_fields(
+    agent_kind: AgentKind,
+    transcript: &[u8],
+    turns: &mut [NormalizedTurn],
+    deadline: Instant,
+) -> Result<()> {
+    if agent_kind != AgentKind::ClaudeCode {
+        return Ok(());
+    }
+    ensure_before_deadline(deadline)?;
+    note_claude_attached_duplicates_until(turns, transcript, deadline)
+        .ok_or(ImportError::DeadlineExceeded)?;
+    Ok(())
+}
+
 /// Parse authorized, already-budgeted bytes and build the transient import
 /// request. The returned request contains no raw provider payload or path.
 pub fn prepare_import_request(
@@ -1544,6 +1564,7 @@ pub fn prepare_import_request(
         ),
     }
     .ok_or(ImportError::DeadlineExceeded)?;
+    retain_claude_attached_fields(agent_kind, transcript.bytes(), &mut turns, deadline)?;
     ensure_before_deadline(deadline)?;
     let typed_redaction_report = redact_turns_with_report(&mut turns);
     ensure_before_deadline(deadline)?;
@@ -1707,6 +1728,7 @@ pub(crate) fn prepare_import_projection_with_reasoning(
         ),
     }
     .ok_or(ImportError::DeadlineExceeded)?;
+    retain_claude_attached_fields(agent_kind, transcript.bytes(), &mut turns, deadline)?;
     ensure_before_deadline(deadline)?;
     let typed_redaction_report = redact_turns_with_report(&mut turns);
     ensure_before_deadline(deadline)?;

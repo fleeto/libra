@@ -644,10 +644,23 @@ async fn reserve_reasoning_coverage(
                 "export" => CaptureReservationExecution::export(deadline),
                 _ => bail!("unsupported reasoning coverage channel"),
             };
-            coverage_gate::reserve_turn_claims_with_reasoning(
-                conn, scope, session_id, turns, owner, now_ms, execution, input,
-            )
-            .await
+            // Readable Claude thinking selects coverage schema 2. The automatic
+            // reservation stamps schema 1 and then rejects that typed turn, so
+            // the checkpoint write never keeps the ordinary transcript.
+            if turns.iter().any(|turn| {
+                crate::internal::ai::observed_agents::select_coverage_schema(turn)
+                    == crate::internal::ai::observed_agents::CoverageSchemaVersion::V2
+            }) {
+                coverage_gate::reserve_runtime_turn_claims_with_reasoning(
+                    conn, scope, session_id, turns, owner, now_ms, execution, input, false,
+                )
+                .await
+            } else {
+                coverage_gate::reserve_turn_claims_with_reasoning(
+                    conn, scope, session_id, turns, owner, now_ms, execution, input,
+                )
+                .await
+            }
         }
         None => {
             coverage_gate::reserve_turn_claims_with_reasoning_no_deadline(
@@ -815,6 +828,7 @@ async fn reserve_live_coverage(
     if reasoning_outcome.skipped_incomplete_reasoning != 0 {
         bail!("reasoning coverage is partial; run libra agent doctor before retrying capture");
     }
+    let versioned_claims = reasoning_outcome.versioned_reserved;
     let outcome = reasoning_outcome.ordinary;
     // A claim transaction can finish just before its final internal
     // check while the clock expires before this writer acts on the
@@ -938,7 +952,7 @@ async fn reserve_live_coverage(
             owner,
             now_ms,
             claims: outcome.reserved,
-            versioned_claims: Vec::new(),
+            versioned_claims,
             reasoning: identity_plan.map(Box::new),
         }),
     })

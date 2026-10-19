@@ -1087,3 +1087,26 @@ fn test_mv_issue476_verified_surface_guard() {
         "G7 -k lands the valid source"
     );
 }
+
+/// Issue #483: `mv -n` writes no objects.
+#[test]
+#[serial_test::serial(cwd)]
+fn test_mv_dry_run_writes_no_objects() {
+    let repo = tempdir().unwrap();
+    let p = repo.path();
+    init_repo_via_cli(p);
+    configure_identity_via_cli(p);
+    fs::write(p.join("f"), "base\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "f"], p), "add f");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "base", "--no-verify"], p),
+        "commit base",
+    );
+
+    let before = count_objects_snapshot(p);
+    let out = run_libra_command(&["mv", "-n", "f", "g"], p);
+    assert_cli_success(&out, "mv -n f g");
+    assert_no_objects_written(p, &before, "mv -n");
+    assert!(p.join("f").exists(), "dry run keeps the source");
+    assert!(!p.join("g").exists(), "dry run creates no destination");
+}

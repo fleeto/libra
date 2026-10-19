@@ -68,7 +68,7 @@ fn ls_remote_local_sha256_repo_lists_refs_outside_repo() {
 
     std::fs::write(remote.path().join("tracked.txt"), "tracked\n")
         .expect("failed to create tracked file");
-    let output = run_libra_command(&["add", ".libraignore", "tracked.txt"], remote.path());
+    let output = run_libra_command(&["add", "tracked.txt"], remote.path());
     assert_cli_success(&output, "failed to add tracked file");
     let output = run_libra_command(&["commit", "-m", "base", "--no-verify"], remote.path());
     assert_cli_success(&output, "failed to create initial commit");

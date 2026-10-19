@@ -2,9 +2,10 @@
 //! proves key/binary association only; it creates no receipt or artifact.
 
 use std::{
+    ffi::OsString,
     fs,
     path::{Path, PathBuf},
-    process::Stdio,
+    process::{ExitStatus, Stdio},
     time::Duration,
 };
 #[cfg(unix)]
@@ -21,6 +22,7 @@ use ring::{
 use sea_orm::ConnectionTrait;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
+use tempfile::TempDir;
 use tokio::{
     io::{AsyncRead, AsyncReadExt},
     process::{Child, Command},
@@ -31,7 +33,7 @@ use super::{
     registry::{IssuerRecord, IssuerState, NativeOriginError, decode_owned, lower_hex},
 };
 use crate::internal::ai::observed_agents::{
-    rpc::{RPC_ENV_PASSTHROUGH_ALLOWLIST, RPC_MAX_STDERR_BYTES},
+    rpc::RPC_MAX_STDERR_BYTES,
     trust::{self, TrustRecord},
 };
 
@@ -247,22 +249,269 @@ async fn bounded_read<R: AsyncRead + Unpin>(mut reader: R, cap: usize) -> Result
     }
 }
 
+const LAUNCH_DIRECTORIES: [&str; 6] = ["home", "tmp", "config", "data", "cache", "state"];
+
+struct AttestLaunch {
+    directory: TempDir,
+    canonical: PathBuf,
+    #[cfg(test)]
+    fail_cleanup: bool,
+}
+
+impl AttestLaunch {
+    fn new(key_dir: &Path) -> Result<Self> {
+        Self::new_inner(
+            key_dir,
+            #[cfg(test)]
+            None,
+        )
+    }
+
+    fn new_inner(key_dir: &Path, #[cfg(test)] fail_after_directory: Option<usize>) -> Result<Self> {
+        #[cfg(not(unix))]
+        {
+            let _ = key_dir;
+            #[cfg(test)]
+            let _ = fail_after_directory;
+            Err(NativeOriginError::Challenge.into())
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+
+            let metadata =
+                fs::symlink_metadata(key_dir).map_err(|_| NativeOriginError::Challenge)?;
+            if metadata.file_type().is_symlink() {
+                return Err(NativeOriginError::Challenge.into());
+            }
+            let parent = key_dir
+                .canonicalize()
+                .map_err(|_| NativeOriginError::Challenge)?;
+            Self::validate_directory(&parent, false)?;
+            let directory = tempfile::Builder::new()
+                .prefix(".libra-native-attest-")
+                .permissions(fs::Permissions::from_mode(0o700))
+                .tempdir_in(parent)
+                .map_err(|_| NativeOriginError::Challenge)?;
+            let canonical = directory
+                .path()
+                .canonicalize()
+                .map_err(|_| NativeOriginError::Challenge)?;
+            for name in LAUNCH_DIRECTORIES {
+                fs::DirBuilder::new()
+                    .mode(0o700)
+                    .create(canonical.join(name))
+                    .map_err(|_| NativeOriginError::Challenge)?;
+                #[cfg(test)]
+                if fail_after_directory
+                    == Some(
+                        LAUNCH_DIRECTORIES
+                            .iter()
+                            .position(|candidate| *candidate == name)
+                            .ok_or(NativeOriginError::Challenge)?,
+                    )
+                {
+                    return Err(NativeOriginError::Challenge.into());
+                }
+            }
+            let launch = Self {
+                directory,
+                canonical,
+                #[cfg(test)]
+                fail_cleanup: false,
+            };
+            launch.validate()?;
+            Ok(launch)
+        }
+    }
+
+    fn validate_directory(path: &Path, empty: bool) -> Result<()> {
+        #[cfg(not(unix))]
+        {
+            let _ = (path, empty);
+            Err(NativeOriginError::Challenge.into())
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+            let metadata = fs::symlink_metadata(path).map_err(|_| NativeOriginError::Challenge)?;
+            // SAFETY: geteuid has no pointer arguments and reads this process's uid.
+            let uid = unsafe { libc::geteuid() };
+            if !metadata.is_dir()
+                || metadata.file_type().is_symlink()
+                || metadata.uid() != uid
+                || metadata.permissions().mode() & 0o7777 != 0o700
+                || path
+                    .canonicalize()
+                    .map_err(|_| NativeOriginError::Challenge)?
+                    != path
+            {
+                return Err(NativeOriginError::Challenge.into());
+            }
+            if empty
+                && fs::read_dir(path)
+                    .map_err(|_| NativeOriginError::Challenge)?
+                    .next()
+                    .transpose()
+                    .map_err(|_| NativeOriginError::Challenge)?
+                    .is_some()
+            {
+                return Err(NativeOriginError::Challenge.into());
+            }
+            Ok(())
+        }
+    }
+
+    fn validate(&self) -> Result<()> {
+        Self::validate_directory(&self.canonical, false)?;
+        let mut count = 0;
+        for entry in fs::read_dir(&self.canonical)
+            .map_err(|_| NativeOriginError::Challenge)?
+            .take(LAUNCH_DIRECTORIES.len() + 1)
+        {
+            let entry = entry.map_err(|_| NativeOriginError::Challenge)?;
+            if !LAUNCH_DIRECTORIES
+                .iter()
+                .any(|name| entry.file_name() == *name)
+            {
+                return Err(NativeOriginError::Challenge.into());
+            }
+            count += 1;
+        }
+        if count != LAUNCH_DIRECTORIES.len() {
+            return Err(NativeOriginError::Challenge.into());
+        }
+        for name in LAUNCH_DIRECTORIES {
+            Self::validate_directory(&self.canonical.join(name), true)?;
+        }
+        Ok(())
+    }
+
+    fn environment(&self, key_dir: &Path, command: &Path) -> [(&'static str, OsString); 15] {
+        [
+            ("PATH", OsString::from("/usr/bin:/bin:/usr/sbin:/sbin")),
+            ("HOME", self.canonical.join("home").into_os_string()),
+            ("TMPDIR", self.canonical.join("tmp").into_os_string()),
+            (
+                "XDG_CONFIG_HOME",
+                self.canonical.join("config").into_os_string(),
+            ),
+            (
+                "XDG_DATA_HOME",
+                self.canonical.join("data").into_os_string(),
+            ),
+            (
+                "XDG_CACHE_HOME",
+                self.canonical.join("cache").into_os_string(),
+            ),
+            (
+                "XDG_STATE_HOME",
+                self.canonical.join("state").into_os_string(),
+            ),
+            ("LANG", OsString::from("C.UTF-8")),
+            ("LC_ALL", OsString::from("C.UTF-8")),
+            ("TERM", OsString::from("dumb")),
+            ("NO_COLOR", OsString::from("1")),
+            ("DO_NOT_TRACK", OsString::from("1")),
+            ("OPENCODE_LIBRA_NATIVE_ORIGIN", OsString::from("1")),
+            (
+                "OPENCODE_LIBRA_NATIVE_KEY_DIR",
+                key_dir.as_os_str().to_owned(),
+            ),
+            ("OPENCODE_LIBRA_COMMAND", command.as_os_str().to_owned()),
+        ]
+    }
+}
+
+async fn close_launch(launch: AttestLaunch) -> Result<()> {
+    tokio::task::spawn_blocking(move || {
+        let result = launch.directory.close();
+        #[cfg(test)]
+        if launch.fail_cleanup {
+            return Err(std::io::Error::other("synthetic cleanup failure"));
+        }
+        result
+    })
+    .await
+    .map_err(|_| NativeOriginError::Challenge)?
+    .map_err(|_| NativeOriginError::Challenge)?;
+    Ok(())
+}
+
 struct AttestChild {
     child: Child,
     process_group: Option<i32>,
+    launch: Option<AttestLaunch>,
 }
 
 impl AttestChild {
     fn terminate(&mut self) {
         #[cfg(unix)]
-        if let Some(pid) = self.process_group {
+        if let Some(pid) = self.process_group.take() {
             // SAFETY: this positive pid is the newly spawned child's private
             // process group (process_group(0)); no caller-supplied pid is used.
             unsafe {
                 libc::kill(-pid, libc::SIGKILL);
             }
+            let _ = self.child.start_kill();
         }
+        #[cfg(not(unix))]
         let _ = self.child.start_kill();
+    }
+
+    async fn wait_owned(&mut self) -> Result<ExitStatus> {
+        #[cfg(unix)]
+        {
+            let pid = self.process_group.ok_or(NativeOriginError::Challenge)?;
+            loop {
+                let (result, exited) = {
+                    // SAFETY: siginfo_t is a plain C output record; zero marks
+                    // WNOHANG. Keep its non-Send pointers outside every await.
+                    let mut information: libc::siginfo_t = unsafe { std::mem::zeroed() };
+                    // SAFETY: pid belongs to this unreaped child, and the output
+                    // pointer is valid. WNOHANG prevents blocking this thread.
+                    let result = unsafe {
+                        libc::waitid(
+                            libc::P_PID,
+                            pid as libc::id_t,
+                            &mut information,
+                            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+                        )
+                    };
+                    (result, information.si_signo != 0)
+                };
+                if result < 0 {
+                    let error = std::io::Error::last_os_error();
+                    if error.raw_os_error() == Some(libc::EINTR) {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                        continue;
+                    }
+                    if error.raw_os_error() == Some(libc::ECHILD) {
+                        self.process_group = None;
+                    }
+                    return Err(NativeOriginError::Challenge.into());
+                }
+                if exited {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            // Kill inherited descendants while the unreaped leader still
+            // reserves the PGID, including on a successful challenge.
+            self.terminate();
+        }
+        let status = self
+            .child
+            .wait()
+            .await
+            .context("wait for native-origin challenge")?;
+        self.process_group = None;
+        Ok(status)
+    }
+
+    async fn close_launch(&mut self) -> Result<()> {
+        close_launch(self.launch.take().ok_or(NativeOriginError::Challenge)?).await
     }
 
     async fn terminate_and_reap(&mut self) -> Result<()> {
@@ -283,6 +532,15 @@ impl Drop for AttestChild {
         }
         // Tokio's kill_on_drop additionally covers cancellation on platforms
         // without process groups, and its child owner reaps a dropped child.
+        if let Some(launch) = self.launch.take() {
+            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                runtime.spawn_blocking(move || {
+                    let _ = launch.directory.close();
+                });
+            } else {
+                drop(launch);
+            }
+        }
     }
 }
 
@@ -294,35 +552,64 @@ async fn run_child(
     challenge: &str,
     deadline: Duration,
 ) -> Result<Vec<u8>> {
+    let parent = key_dir.to_owned();
+    let launch = tokio::task::spawn_blocking(move || AttestLaunch::new(&parent))
+        .await
+        .map_err(|_| NativeOriginError::Challenge)??;
+    run_prepared_child(
+        binary,
+        worktree,
+        key_dir,
+        command_path,
+        challenge,
+        deadline,
+        launch,
+    )
+    .await
+}
+
+async fn run_prepared_child(
+    binary: &Path,
+    worktree: &Path,
+    key_dir: &Path,
+    command_path: &Path,
+    challenge: &str,
+    deadline: Duration,
+    launch: AttestLaunch,
+) -> Result<Vec<u8>> {
+    let launch = tokio::task::spawn_blocking(move || -> Result<AttestLaunch> {
+        launch.validate()?;
+        Ok(launch)
+    })
+    .await
+    .map_err(|_| NativeOriginError::Challenge)??;
     let mut command = Command::new(binary);
     command
         .args(["native-origin", "attest", "--challenge", challenge])
         .current_dir(worktree)
         .env_clear()
-        .env("OPENCODE_LIBRA_NATIVE_ORIGIN", "1")
-        .env("OPENCODE_LIBRA_NATIVE_KEY_DIR", key_dir)
-        .env("OPENCODE_LIBRA_COMMAND", command_path)
+        .envs(launch.environment(key_dir, command_path))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    for name in RPC_ENV_PASSTHROUGH_ALLOWLIST {
-        if let Some(value) = std::env::var_os(name) {
-            command.env(name, value);
-        }
-    }
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
         command.as_std_mut().process_group(0);
     }
-    let child = command
-        .spawn()
-        .context("start reviewed private producer challenge")?;
+    let child = match command.spawn() {
+        Ok(child) => child,
+        Err(_) => {
+            let _ = close_launch(launch).await;
+            return Err(NativeOriginError::Challenge.into());
+        }
+    };
     let group = child.id().and_then(|pid| i32::try_from(pid).ok());
     let mut owner = AttestChild {
         child,
         process_group: group,
+        launch: Some(launch),
     };
     let stdout = owner
         .child
@@ -338,13 +625,7 @@ async fn run_child(
         let (stdout, _stderr, status) = tokio::try_join!(
             bounded_read(stdout, ATTEST_BYTE_CAP),
             bounded_read(stderr, RPC_MAX_STDERR_BYTES),
-            async {
-                owner
-                    .child
-                    .wait()
-                    .await
-                    .context("wait for native-origin challenge")
-            },
+            owner.wait_owned(),
         )?;
         if !status.success() {
             return Err(NativeOriginError::Challenge.into());
@@ -352,26 +633,25 @@ async fn run_child(
         Ok(stdout)
     })
     .await;
-    match result {
-        Ok(Ok(bytes)) => {
-            owner.process_group = None;
-            Ok(bytes)
-        }
+    let outcome = match result {
+        Ok(Ok(bytes)) => Ok(bytes),
         other => {
             let error = match other {
                 Ok(Err(error)) => error,
                 Err(_) => NativeOriginError::ChildBounds.into(),
                 Ok(Ok(_)) => return Err(NativeOriginError::Challenge.into()),
             };
-            owner
-                .terminate_and_reap()
-                .await
-                .with_context(|| format!("native-origin challenge refused: {error}"))?;
+            if owner.terminate_and_reap().await.is_err() {
+                owner.close_launch().await?;
+                return Err(NativeOriginError::Challenge.into());
+            }
             // Captured stderr never reaches output, even on failure. The
             // fixed actionable diagnostic is the only surfaced child text.
             Err(error)
         }
-    }
+    };
+    owner.close_launch().await?;
+    outcome
 }
 
 fn verify_challenge(bytes: &[u8], challenge: &str, local: &LocalBinding) -> Result<IssuerRecord> {
@@ -504,10 +784,391 @@ mod tests {
     use super::*;
 
     fn script(root: &Path, text: &str) -> PathBuf {
+        fs::set_permissions(root, fs::Permissions::from_mode(0o700)).unwrap();
         let path = root.join("synthetic-attest-child.sh");
         fs::write(&path, format!("#!/bin/sh\n{text}\n")).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
         path
+    }
+
+    fn launch_directories(root: &Path) -> Vec<PathBuf> {
+        fs::read_dir(root)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with(".libra-native-attest-")
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn native_attest_private_launch_environment() {
+        use std::{collections::BTreeMap, os::unix::fs::MetadataExt};
+
+        let root = tempfile::tempdir().unwrap();
+        let stat = if cfg!(target_os = "linux") {
+            "/usr/bin/stat -c '%a:%u'"
+        } else {
+            "/usr/bin/stat -f '%Lp:%u'"
+        };
+        let child = script(
+            root.path(),
+            &format!(
+                r#"expected_uid=$(/usr/bin/id -u); for directory in "$HOME" "$TMPDIR" "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_CACHE_HOME" "$XDG_STATE_HOME"; do [ -d "$directory" ] && [ ! -L "$directory" ] && [ -z "$(/bin/ls -A "$directory")" ] && [ "$(cd "$directory" && pwd -P)" = "$directory" ] && [ "$({stat} "$directory")" = "700:$expected_uid" ] || exit 23; printf 'checked=%s\n' "$directory"; done; exec /usr/bin/env"#
+            ),
+        );
+        let prepared = AttestLaunch::new(root.path()).unwrap();
+        let expected_names = [
+            "PATH",
+            "HOME",
+            "TMPDIR",
+            "XDG_CONFIG_HOME",
+            "XDG_DATA_HOME",
+            "XDG_CACHE_HOME",
+            "XDG_STATE_HOME",
+            "LANG",
+            "LC_ALL",
+            "TERM",
+            "NO_COLOR",
+            "DO_NOT_TRACK",
+            "OPENCODE_LIBRA_NATIVE_ORIGIN",
+            "OPENCODE_LIBRA_NATIVE_KEY_DIR",
+            "OPENCODE_LIBRA_COMMAND",
+        ]
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>();
+        let actual = prepared.environment(root.path(), Path::new("/bin/sh"));
+        assert_eq!(
+            actual
+                .iter()
+                .map(|(name, _)| *name)
+                .collect::<std::collections::BTreeSet<_>>(),
+            expected_names
+        );
+        for name in ["home", "tmp", "config", "data", "cache", "state"] {
+            let path = prepared.canonical.join(name);
+            let metadata = fs::symlink_metadata(&path).unwrap();
+            assert!(metadata.is_dir());
+            assert!(!metadata.file_type().is_symlink());
+            assert_eq!(metadata.permissions().mode() & 0o7777, 0o700);
+            // SAFETY: geteuid has no arguments and reads this test process's uid.
+            assert_eq!(metadata.uid(), unsafe { libc::geteuid() });
+            assert_eq!(path.canonicalize().unwrap(), path);
+            assert_eq!(fs::read_dir(path).unwrap().count(), 0);
+        }
+        close_launch(prepared).await.unwrap();
+        let mut prior_tmp = None;
+        for _ in 0..2 {
+            let bytes = run_child(
+                &child,
+                root.path(),
+                root.path(),
+                Path::new("/bin/sh"),
+                &"0".repeat(64),
+                Duration::from_secs(2),
+            )
+            .await
+            .unwrap();
+            let text = String::from_utf8(bytes).unwrap();
+            let mut lines = text.lines();
+            let checked = lines
+                .by_ref()
+                .take(6)
+                .map(|line| PathBuf::from(line.strip_prefix("checked=").unwrap()))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                checked.len(),
+                6,
+                "the child must verify all six directories"
+            );
+            let environment = lines
+                .map(|line| line.split_once('=').unwrap())
+                .filter(|(name, _)| !["PWD", "SHLVL", "_"].contains(name))
+                .collect::<BTreeMap<_, _>>();
+            assert_eq!(
+                environment
+                    .keys()
+                    .copied()
+                    .collect::<std::collections::BTreeSet<_>>(),
+                expected_names
+            );
+            assert_eq!(environment["PATH"], "/usr/bin:/bin:/usr/sbin:/sbin");
+            assert_eq!(environment["LANG"], "C.UTF-8");
+            assert_eq!(environment["LC_ALL"], "C.UTF-8");
+            assert_eq!(environment["TERM"], "dumb");
+            assert_eq!(environment["NO_COLOR"], "1");
+            assert_eq!(environment["DO_NOT_TRACK"], "1");
+            assert_eq!(environment["OPENCODE_LIBRA_NATIVE_ORIGIN"], "1");
+            assert_eq!(
+                environment["OPENCODE_LIBRA_NATIVE_KEY_DIR"],
+                root.path().to_str().unwrap()
+            );
+            assert_eq!(environment["OPENCODE_LIBRA_COMMAND"], "/bin/sh");
+            let tmp = PathBuf::from(environment["TMPDIR"]);
+            assert!(tmp.starts_with(root.path().canonicalize().unwrap()));
+            let scratch = tmp.parent().unwrap();
+            for (key, directory) in [
+                ("HOME", "home"),
+                ("TMPDIR", "tmp"),
+                ("XDG_CONFIG_HOME", "config"),
+                ("XDG_DATA_HOME", "data"),
+                ("XDG_CACHE_HOME", "cache"),
+                ("XDG_STATE_HOME", "state"),
+            ] {
+                assert_eq!(Path::new(environment[key]), scratch.join(directory));
+                assert!(checked.contains(&scratch.join(directory)));
+            }
+            assert!(
+                !tmp.exists(),
+                "completed challenge must remove its private TMPDIR"
+            );
+            assert_ne!(prior_tmp.as_ref(), Some(&tmp));
+            prior_tmp = Some(tmp);
+        }
+        assert!(launch_directories(root.path()).is_empty());
+    }
+
+    #[tokio::test]
+    async fn native_attest_rejects_unsafe_launch_before_spawn() {
+        let root = tempfile::tempdir().unwrap();
+        let child = script(root.path(), "echo executed > ./executed");
+        let challenge = "0".repeat(64);
+        let not_directory = root.path().join("not-a-directory");
+        fs::write(&not_directory, b"not a directory").unwrap();
+        assert_eq!(
+            run_child(
+                &child,
+                root.path(),
+                &not_directory,
+                Path::new("/bin/sh"),
+                &challenge,
+                Duration::from_secs(2)
+            )
+            .await
+            .unwrap_err()
+            .downcast_ref(),
+            Some(&NativeOriginError::Challenge)
+        );
+        let alias = root.path().join("key-directory-alias");
+        std::os::unix::fs::symlink(root.path(), &alias).unwrap();
+        assert_eq!(
+            run_child(
+                &child,
+                root.path(),
+                &alias,
+                Path::new("/bin/sh"),
+                &challenge,
+                Duration::from_secs(2)
+            )
+            .await
+            .unwrap_err()
+            .downcast_ref(),
+            Some(&NativeOriginError::Challenge)
+        );
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(
+            run_child(
+                &child,
+                root.path(),
+                root.path(),
+                Path::new("/bin/sh"),
+                &challenge,
+                Duration::from_secs(2)
+            )
+            .await
+            .unwrap_err()
+            .downcast_ref(),
+            Some(&NativeOriginError::Challenge)
+        );
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        for case in 0..3 {
+            let launch = AttestLaunch::new(root.path()).unwrap();
+            let path = launch.canonical.clone();
+            let tmp = path.join("tmp");
+            match case {
+                0 => fs::write(tmp.join(".bun-planted"), b"wrong native library").unwrap(),
+                1 => fs::set_permissions(&tmp, fs::Permissions::from_mode(0o755)).unwrap(),
+                _ => {
+                    fs::remove_dir(&tmp).unwrap();
+                    std::os::unix::fs::symlink(root.path(), &tmp).unwrap();
+                }
+            }
+            assert_eq!(
+                run_prepared_child(
+                    &child,
+                    root.path(),
+                    root.path(),
+                    Path::new("/bin/sh"),
+                    &challenge,
+                    Duration::from_secs(2),
+                    launch
+                )
+                .await
+                .unwrap_err()
+                .downcast_ref(),
+                Some(&NativeOriginError::Challenge)
+            );
+            assert!(!path.exists());
+            assert!(!root.path().join("executed").exists());
+        }
+        assert!(!root.path().join("executed").exists());
+    }
+
+    #[tokio::test]
+    async fn native_attest_launch_cleanup() {
+        let root = tempfile::tempdir().unwrap();
+        let challenge = "0".repeat(64);
+        for (body, expected, budget) in [
+            ("printf '{}\\n'", None, Duration::from_secs(2)),
+            (
+                "exit 7",
+                Some(NativeOriginError::Challenge),
+                Duration::from_secs(2),
+            ),
+            (
+                "exec /usr/bin/head -c 4097 /dev/zero",
+                Some(NativeOriginError::ChildBounds),
+                Duration::from_secs(2),
+            ),
+            (
+                "exec /bin/sleep 10",
+                Some(NativeOriginError::ChildBounds),
+                Duration::from_millis(150),
+            ),
+        ] {
+            let child = script(root.path(), body);
+            let result = run_child(
+                &child,
+                root.path(),
+                root.path(),
+                Path::new("/bin/sh"),
+                &challenge,
+                budget,
+            )
+            .await;
+            if let Some(expected) = expected {
+                assert_eq!(result.unwrap_err().downcast_ref(), Some(&expected));
+            } else {
+                assert_eq!(result.unwrap(), b"{}\n");
+            }
+            assert!(
+                launch_directories(root.path()).is_empty(),
+                "every completed failure/success path must remove scratch"
+            );
+        }
+        let missing = root.path().join("missing-executable");
+        assert_eq!(
+            run_child(
+                &missing,
+                root.path(),
+                root.path(),
+                Path::new("/bin/sh"),
+                &challenge,
+                Duration::from_secs(2)
+            )
+            .await
+            .unwrap_err()
+            .downcast_ref(),
+            Some(&NativeOriginError::Challenge)
+        );
+        assert!(launch_directories(root.path()).is_empty());
+        for count in 0..6 {
+            assert!(AttestLaunch::new_inner(root.path(), Some(count)).is_err());
+            assert!(launch_directories(root.path()).is_empty());
+        }
+        let child = script(root.path(), "printf '{}\\n'");
+        let mut launch = AttestLaunch::new(root.path()).unwrap();
+        launch.fail_cleanup = true;
+        assert_eq!(
+            run_prepared_child(
+                &child,
+                root.path(),
+                root.path(),
+                Path::new("/bin/sh"),
+                &challenge,
+                Duration::from_secs(2),
+                launch
+            )
+            .await
+            .unwrap_err()
+            .downcast_ref(),
+            Some(&NativeOriginError::Challenge)
+        );
+        assert!(launch_directories(root.path()).is_empty());
+        let child = script(
+            root.path(),
+            "echo \"$TMPDIR\" > \"$OPENCODE_LIBRA_NATIVE_KEY_DIR/observed-tmp\"; exec /bin/sleep 10",
+        );
+        let path = child.clone();
+        let cwd = root.path().to_owned();
+        let task = tokio::spawn(async move {
+            run_child(
+                &path,
+                &cwd,
+                &cwd,
+                Path::new("/bin/sh"),
+                &"0".repeat(64),
+                Duration::from_secs(30),
+            )
+            .await
+        });
+        let observed = root.path().join("observed-tmp");
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !observed.exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let tmp = PathBuf::from(fs::read_to_string(observed).unwrap().trim());
+        assert!(tmp.is_dir(), "scratch must live while child is active");
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while tmp.exists() || !launch_directories(root.path()).is_empty() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let child = script(
+            root.path(),
+            "(/bin/sleep 10 </dev/null >/dev/null 2>&1 & echo $! > \"$OPENCODE_LIBRA_NATIVE_KEY_DIR/descendant-pid\"); printf '{}\\n'",
+        );
+        assert_eq!(
+            run_child(
+                &child,
+                root.path(),
+                root.path(),
+                Path::new("/bin/sh"),
+                &challenge,
+                Duration::from_secs(2)
+            )
+            .await
+            .unwrap(),
+            b"{}\n"
+        );
+        let pid: i32 = fs::read_to_string(root.path().join("descendant-pid"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                // SAFETY: signal 0 probes only this fixture's recorded descendant.
+                if unsafe { libc::kill(pid, 0) } != 0 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("successful challenge must terminate its inherited group");
+        assert!(launch_directories(root.path()).is_empty());
     }
 
     // These fixtures exercise the private runner's mechanics only. Their

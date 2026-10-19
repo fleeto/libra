@@ -250,6 +250,7 @@ const CLASS_CONFLICTED_COVERAGE_CLAIM: &str = "conflicted_coverage_claim";
 const CLASS_UNRESOLVED_SUBAGENT_LINK: &str = "unresolved_subagent_link";
 const CLASS_INCONSISTENT_SUBAGENT_CONTENT: &str = "inconsistent_subagent_content";
 const CLASS_INCONSISTENT_REASONING_ARTIFACT: &str = "inconsistent_reasoning_artifact";
+const CLASS_CLAUDE_LEGACY_REASONING_REVISION: &str = "claude_legacy_reasoning_revision";
 /// A0-06: a run manifest's `findings_oid` points at a blob missing from the
 /// object store.
 const CLASS_MISSING_FINDINGS_OBJECT: &str = "missing_findings_object";
@@ -266,6 +267,21 @@ struct ProviderHookStatus {
     tier: AgentStability,
     installed: Option<bool>,
     error: Option<String>,
+    /// Managed-template mappings, not evidence that the host emitted an event.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    events: Vec<ProviderHookEventStatus>,
+}
+
+#[derive(Debug, Serialize)]
+struct ProviderHookEventStatus {
+    event: &'static str,
+    installed: Option<bool>,
+    /// `installable` or `excluded`. Omitted for providers that do not report a class.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    class: Option<&'static str>,
+    /// Static reason. It does not include a hook command or payload.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<&'static str>,
 }
 
 #[derive(Debug, Serialize)]
@@ -344,6 +360,8 @@ struct CheckpointStoreReport {
     /// Pre-AG-20 layout checkpoints (no `manifest.json`). Exempt from the
     /// checkpoint-object inconsistency classes and from `--repair` by contract.
     legacy_v1_checkpoints: usize,
+    /// Read-only absence diagnosis, never a completeness/native-origin claim.
+    opencode_legacy_reasoning_checkpoints: Vec<String>,
     /// LIVE traces-writer in-flight markers (window A/B guards). Commits
     /// they name are writers mid-flight and are excluded from class 2.
     live_inflight_markers: usize,
@@ -441,6 +459,9 @@ enum RepairPlan {
         recovery: CaptureCatalogFinalizerRecovery,
         observed_at_ms: i64,
     },
+    /// Append one coverage revision for an authorized legacy Claude checkpoint.
+    /// The stored objects stay in place.
+    AppendClaudeLegacyRevision { checkpoint_id: String },
     /// No automatic action is safe; a human must restore objects/rows.
     Manual,
 }
@@ -696,6 +717,8 @@ pub async fn execute_safe(args: DoctorArgs, output: &OutputConfig) -> CliResult<
 #[derive(Debug, Clone)]
 struct CatalogRow {
     checkpoint_id: String,
+    session_id: String,
+    agent_kind: Option<String>,
     tree_oid: String,
     metadata_blob_oid: String,
     traces_commit: String,
@@ -1860,6 +1883,7 @@ async fn scan_checkpoint_store(
         catalog_rows: 0,
         ref_reachable_checkpoints: 0,
         legacy_v1_checkpoints: 0,
+        opencode_legacy_reasoning_checkpoints: Vec::new(),
         live_inflight_markers: 0,
         repair_applied: repair,
         repaired: 0,
@@ -2257,6 +2281,65 @@ async fn scan_checkpoint_store(
         }
     }
     report.legacy_v1_checkpoints = legacy_ids.len();
+
+    // This optional absence scan has its own 64 * 64 KiB worst-case bound.
+    // It reads only validated local metadata blobs, never transcript/artifact bodies.
+    let mut skipped_opencode_metadata = false;
+    let mut opencode_rows = rows
+        .iter()
+        .filter(|row| row.agent_kind.as_deref() == Some("opencode"));
+    for row in opencode_rows.by_ref().take(64) {
+        let metadata_oid = ref_map
+            .get(&row.checkpoint_id)
+            .and_then(|checkpoint| checkpoint.metadata_blob.as_deref())
+            .unwrap_or(&row.metadata_blob_oid);
+        let metadata = (|| -> anyhow::Result<serde_json::Value> {
+            let oid = crate::internal::object_format::parse_repo_oid(metadata_oid)?;
+            let file = reader.open_loose(&oid)?;
+            let (kind, bytes) = crate::utils::object::read_git_object_bounded_validated_file(
+                file,
+                &oid,
+                64 * 1024,
+            )?;
+            anyhow::ensure!(kind == "blob", "not checkpoint metadata");
+            let value: serde_json::Value = serde_json::from_slice(&bytes)?;
+            anyhow::ensure!(
+                value
+                    .get("checkpoint_id")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(row.checkpoint_id.as_str())
+                    && value.get("session_id").and_then(serde_json::Value::as_str)
+                        == Some(row.session_id.as_str())
+                    && value.get("agent_kind").and_then(serde_json::Value::as_str)
+                        == Some("opencode"),
+                "unbound checkpoint metadata"
+            );
+            Ok(value)
+        })();
+        match metadata {
+            Ok(value)
+                if canonical_checkpoint_id(&row.checkpoint_id).as_deref()
+                    == Some(row.checkpoint_id.as_str()) =>
+            {
+                // Presence is not validated provenance; doctor never promotes it to Complete.
+                if value
+                    .get("reasoning_state")
+                    .is_none_or(serde_json::Value::is_null)
+                {
+                    report
+                        .opencode_legacy_reasoning_checkpoints
+                        .push(row.checkpoint_id.clone());
+                }
+            }
+            _ => skipped_opencode_metadata = true,
+        }
+    }
+    if skipped_opencode_metadata {
+        notes.push("OpenCode reasoning-state diagnosis skipped unavailable, oversized or unbound metadata; unlisted checkpoints are not certified complete".to_string());
+    }
+    if opencode_rows.next().is_some() {
+        notes.push("OpenCode reasoning-state diagnosis reached its 64-checkpoint limit; unlisted checkpoints are not certified complete".to_string());
+    }
 
     // Only rows with an UNRECOVERABLE class-1 finding (`missing_objects`)
     // are excluded from class 3 ("unrecoverable falls back to class-1
@@ -2704,6 +2787,17 @@ async fn scan_checkpoint_store(
         ),
     }
 
+    if table_exists(conn, "agent_coverage_revision").await? {
+        plan_claude_legacy_reasoning_revisions(
+            conn,
+            &repo_path,
+            &mut findings,
+            &mut plans,
+            &mut notes,
+        )
+        .await;
+    }
+
     // ---- Repair execution (idempotent; spans per attempt) ---------------
     if repair {
         let mut replay_batch = ArtifactReplayBatch::new();
@@ -2955,6 +3049,143 @@ fn is_permanent_pending_replay_failure(error: &anyhow::Error) -> bool {
     })
 }
 
+/// Queue append-only revisions for authorized legacy Claude checkpoints.
+///
+/// The scan reads at most 64 stored transcripts and never puts their bytes
+/// into a finding. A checkpoint that already has the same content-bound
+/// revision is left alone.
+async fn plan_claude_legacy_reasoning_revisions(
+    conn: &DatabaseConnection,
+    storage: &Path,
+    findings: &mut Vec<CheckpointFinding>,
+    plans: &mut Vec<RepairPlan>,
+    notes: &mut Vec<String>,
+) {
+    let rows = match conn
+        .query_all_raw(Statement::from_string(
+            conn.get_database_backend(),
+            "SELECT c.checkpoint_id, c.session_id, c.tree_oid
+             FROM agent_checkpoint c
+             JOIN agent_session s ON s.session_id = c.session_id
+             WHERE s.agent_kind = 'claude_code' AND c.scope = 'committed'
+             ORDER BY c.created_at, c.checkpoint_id
+             LIMIT 65"
+                .to_string(),
+        ))
+        .await
+    {
+        Ok(rows) => rows,
+        Err(_) => {
+            notes.push(
+                "Claude legacy reasoning revision scan could not read the catalog; unlisted checkpoints are not certified"
+                    .to_string(),
+            );
+            return;
+        }
+    };
+    let mut extra = false;
+    for (index, row) in rows.into_iter().enumerate() {
+        if index == 64 {
+            extra = true;
+            break;
+        }
+        let checkpoint_id: String = match row.try_get_by("checkpoint_id") {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        let session_id: String = match row.try_get_by("session_id") {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        let tree_oid: String = match row.try_get_by("tree_oid") {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        let bytes = match read_stored_claude_transcript(storage, &checkpoint_id, &tree_oid).await {
+            Ok(bytes) => bytes,
+            Err(_) => continue,
+        };
+        let needs = match crate::internal::ai::history::claude_legacy_revision_needs_repair(
+            conn,
+            &session_id,
+            &checkpoint_id,
+            &bytes,
+        )
+        .await
+        {
+            Ok(needs) => needs,
+            Err(_) => {
+                notes.push(
+                    "Claude legacy reasoning revision scan could not read one revision; that checkpoint is not certified"
+                        .to_string(),
+                );
+                continue;
+            }
+        };
+        if !needs {
+            continue;
+        }
+        findings.push(CheckpointFinding {
+            inconsistency_type: CLASS_CLAUDE_LEGACY_REASONING_REVISION.to_string(),
+            checkpoint_id: checkpoint_id.clone(),
+            detail: "authorized Claude checkpoint has ordinary thinking without a content-bound revision; `libra agent doctor --repair` appends that revision and leaves the stored objects unchanged"
+                .to_string(),
+            repaired: false,
+            manual_required: false,
+        });
+        plans.push(RepairPlan::AppendClaudeLegacyRevision { checkpoint_id });
+    }
+    if extra {
+        notes.push(
+            "Claude legacy reasoning revision scan reached its 64-checkpoint limit; unlisted checkpoints are not certified"
+                .to_string(),
+        );
+    }
+}
+
+async fn read_claude_legacy_transcript(
+    conn: &DatabaseConnection,
+    checkpoint_id: &str,
+) -> std::result::Result<Vec<u8>, &'static str> {
+    let storage = util::try_get_storage_path(None)
+        .map_err(|_| "; repository storage was unavailable, so the revision was not written")?;
+    let row = conn
+        .query_one_raw(Statement::from_sql_and_values(
+            conn.get_database_backend(),
+            "SELECT tree_oid FROM agent_checkpoint WHERE checkpoint_id = ? AND scope = 'committed'",
+            [checkpoint_id.to_string().into()],
+        ))
+        .await
+        .map_err(|_| "; the checkpoint row was not readable, so the revision was not written")?
+        .ok_or("; the checkpoint row was not readable, so the revision was not written")?;
+    let tree_oid: String = row
+        .try_get_by("tree_oid")
+        .map_err(|_| "; the checkpoint row was not readable, so the revision was not written")?;
+    read_stored_claude_transcript(&storage, checkpoint_id, &tree_oid).await
+}
+
+async fn read_stored_claude_transcript(
+    storage: &Path,
+    checkpoint_id: &str,
+    tree_oid: &str,
+) -> std::result::Result<Vec<u8>, &'static str> {
+    let cap = crate::internal::ai::observed_agents::compliance::max_transcript_read_bytes()
+        .await
+        .map_err(|_| "; the transcript read cap is unavailable, so the revision was not written")?;
+    match super::checkpoint::load_checkpoint_transcript_bytes_from_storage(
+        storage,
+        checkpoint_id,
+        tree_oid,
+        cap,
+    ) {
+        Ok((bytes, false)) => Ok(bytes),
+        Ok((_, true)) => {
+            Err("; the transcript exceeds the read cap, so no partial digest was recorded")
+        }
+        Err(_) => Err("; the stored transcript could not be read, so the revision was not written"),
+    }
+}
+
 /// Execute one repair plan, updating the finding in place. Repair failures
 /// never abort the run — they annotate the finding and leave it
 /// unrepaired so the operator sees exactly what happened.
@@ -3141,6 +3372,28 @@ async fn execute_repair(
                 finding.detail.push_str(
                     "; failed automatic candidate was retained in quarantine for operator inspection",
                 );
+            }
+        }
+        RepairPlan::AppendClaudeLegacyRevision { checkpoint_id } => {
+            match read_claude_legacy_transcript(conn, checkpoint_id).await {
+                Ok(bytes) => {
+                    match history
+                        .repair_claude_legacy_reasoning_revision(checkpoint_id, &bytes)
+                        .await
+                    {
+                        Ok(_) => finding.repaired = true,
+                        Err(_) => {
+                            finding.manual_required = true;
+                            finding.detail.push_str(
+                                "; legacy reasoning revision repair failed closed; rerun doctor",
+                            );
+                        }
+                    }
+                }
+                Err(reason) => {
+                    finding.manual_required = true;
+                    finding.detail.push_str(reason);
+                }
             }
         }
         RepairPlan::Manual => {}
@@ -3851,8 +4104,10 @@ async fn load_catalog_rows(conn: &DatabaseConnection) -> CliResult<Vec<CatalogRo
     let rows = conn
         .query_all_raw(Statement::from_sql_and_values(
             backend,
-            "SELECT checkpoint_id, tree_oid, metadata_blob_oid, traces_commit \
-             FROM agent_checkpoint ORDER BY created_at ASC, checkpoint_id ASC",
+            "SELECT cp.checkpoint_id, cp.session_id, s.agent_kind, cp.tree_oid,
+                    cp.metadata_blob_oid, cp.traces_commit
+             FROM agent_checkpoint cp LEFT JOIN agent_session s ON s.session_id = cp.session_id
+             ORDER BY cp.created_at ASC, cp.checkpoint_id ASC",
             [],
         ))
         .await
@@ -3865,6 +4120,12 @@ async fn load_catalog_rows(conn: &DatabaseConnection) -> CliResult<Vec<CatalogRo
     rows.into_iter()
         .map(|row| {
             Ok(CatalogRow {
+                session_id: row.try_get_by("session_id").map_err(|_| {
+                    CliError::fatal("agent doctor could not decode checkpoint session identity; check the repository database and rerun doctor".to_string())
+                })?,
+                agent_kind: row.try_get_by("agent_kind").map_err(|_| {
+                    CliError::fatal("agent doctor could not decode checkpoint agent kind; check the repository database and rerun doctor".to_string())
+                })?,
                 checkpoint_id: row.try_get_by("checkpoint_id").map_err(|_| {
                     CliError::fatal(
                         "agent doctor could not decode a checkpoint catalog row; check the repository database and rerun doctor"
@@ -4763,33 +5024,134 @@ fn check_provider(
     tier: AgentStability,
     provider: Option<&dyn crate::internal::ai::hooks::provider::HookProvider>,
 ) -> ProviderHookStatus {
-    let Some(provider) = provider else {
-        // Preview adapters don't carry a HookProvider yet. Surface them
-        // explicitly as preview/unknown so the report is still complete.
-        return ProviderHookStatus {
-            name,
-            tier,
-            installed: None,
-            error: None,
-        };
+    let (installed, error) = match provider {
+        None => (None, None),
+        Some(provider) => {
+            let path_error = if name == "opencode" {
+                opencode_config_path_error()
+            } else {
+                None
+            };
+            if let Some(error) = path_error {
+                (None, Some(error))
+            } else {
+                match provider.hooks_are_installed() {
+                    Ok(installed) => (Some(installed), None),
+                    Err(_) => (None, Some("provider hook settings could not be inspected; verify the provider configuration and rerun doctor".to_string())),
+                }
+            }
+        }
     };
-    match provider.hooks_are_installed() {
-        Ok(installed) => ProviderHookStatus {
-            name,
-            tier,
-            installed: Some(installed),
-            error: None,
-        },
-        Err(_) => ProviderHookStatus {
-            name,
-            tier,
-            installed: None,
-            error: Some(
-                "provider hook settings could not be inspected; verify the provider configuration and rerun doctor"
-                    .to_string(),
-            ),
-        },
+    if name == "claude-code" {
+        return match crate::internal::ai::hooks::providers::claude::claude_hook_doctor_events() {
+            Ok(rows) => {
+                let installable_count = rows.iter().filter(|row| row.class == "installable").count();
+                let configured_count = rows
+                    .iter()
+                    .filter(|row| row.class == "installable" && row.configured)
+                    .count();
+                let installed = installable_count > 0 && configured_count == installable_count;
+                let events = rows
+                    .into_iter()
+                    .map(|row| ProviderHookEventStatus {
+                        event: row.event,
+                        installed: Some(row.configured),
+                        class: Some(row.class),
+                        reason: Some(row.reason),
+                    })
+                    .collect();
+                ProviderHookStatus {
+                    name,
+                    tier,
+                    installed: Some(installed),
+                    error: None,
+                    events,
+                }
+            }
+            Err(_) => ProviderHookStatus {
+                name,
+                tier,
+                installed: None,
+                error: Some(
+                    "Claude hook settings could not be inspected; verify the settings file and rerun doctor"
+                        .to_string(),
+                ),
+                events: Vec::new(),
+            },
+        };
     }
+    let events = if name == "opencode" {
+        use crate::internal::ai::hooks::providers::opencode::events::{
+            OPENCODE_HOOK_EVENT_SPECS, OPENCODE_LEGACY_EVENT_SPECS, OpenCodeForwarding,
+        };
+        OPENCODE_HOOK_EVENT_SPECS
+            .iter()
+            .chain(OPENCODE_LEGACY_EVENT_SPECS)
+            .filter(|event| event.forwarding != OpenCodeForwarding::Skip)
+            .map(|event| ProviderHookEventStatus {
+                event: event.name,
+                installed,
+                class: None,
+                reason: None,
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    ProviderHookStatus {
+        name,
+        tier,
+        installed,
+        error,
+        events,
+    }
+}
+
+/// Diagnose known slots before the provider can open them. Directory-name races
+/// retain the existing installer limitation; this is not a new ownership proof.
+fn opencode_config_path_error() -> Option<String> {
+    let root = match util::try_working_dir() {
+        Ok(root) => root,
+        Err(_) => return Some("OpenCode configuration could not be located; run doctor inside the intended repository".to_string()),
+    };
+    for (relative, directory) in [
+        (".opencode", true),
+        (".opencode/plugin", true),
+        (".opencode/plugins", true),
+        (".opencode/plugin/libra-hooks.js", false),
+        (".opencode/plugins/libra-hooks.js", false),
+    ] {
+        let metadata = match std::fs::symlink_metadata(root.join(relative)) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => {
+                return Some(format!(
+                    "OpenCode config slot {relative} could not be inspected; check its permissions and rerun doctor"
+                ));
+            }
+        };
+        let kind = metadata.file_type();
+        if kind.is_symlink() || (directory && !kind.is_dir()) || (!directory && !kind.is_file()) {
+            let reason = if kind.is_symlink() {
+                "symlink"
+            } else if kind.is_file() {
+                "regular file instead of directory"
+            } else if kind.is_dir() {
+                "directory instead of regular file"
+            } else {
+                "special file (FIFO/socket/device)"
+            };
+            return Some(format!(
+                "OpenCode config slot {relative} is a {reason}; replace it with a {} and rerun doctor",
+                if directory {
+                    "directory"
+                } else {
+                    "regular file"
+                }
+            ));
+        }
+    }
+    None
 }
 
 fn emit_report(report: &DoctorReport, output: &OutputConfig) -> CliResult<()> {
@@ -4831,6 +5193,23 @@ fn emit_report(report: &DoctorReport, output: &OutputConfig) -> CliResult<()> {
             (None, Some(err)) => println!("  {}{tier_tag}: error — {err}", ph.name),
             (None, None) => println!("  {}{tier_tag}: not yet installable", ph.name),
         }
+        for event in &ph.events {
+            // Registry rows (Claude) say configured. Class-less managed
+            // templates (OpenCode) keep the historical "installed" wording.
+            let registry = event.class.is_some();
+            let state = match (event.installed, registry) {
+                (Some(true), false) => "installed",
+                (Some(false), false) => "not installed",
+                (Some(true), true) => "configured",
+                (Some(false), true) => "not configured",
+                (None, _) => "unknown",
+            };
+            let detail = event.reason.unwrap_or(match event.class {
+                Some(class) => class,
+                None => "managed template",
+            });
+            println!("    {}: {state} ({detail})", event.event);
+        }
     }
 
     let store = &report.checkpoint_store;
@@ -4847,6 +5226,11 @@ fn emit_report(report: &DoctorReport, output: &OutputConfig) -> CliResult<()> {
             store.ref_reachable_checkpoints
         );
         println!("  Legacy-v1 checkpoints : {}", store.legacy_v1_checkpoints);
+        for checkpoint in &store.opencode_legacy_reasoning_checkpoints {
+            println!(
+                "  OpenCode {checkpoint}: legacy/unrecorded reasoning state; not evidence of complete capture or native origin"
+            );
+        }
         println!("  Live in-flight markers: {}", store.live_inflight_markers);
         println!("  Inconsistencies       : {}", store.findings.len());
         for finding in &store.findings {

@@ -42,5 +42,9 @@ pub mod thin_pack;
 pub mod tree;
 pub mod tree_attributes;
 pub mod util;
+#[cfg(windows)]
+pub(crate) mod windows_fs;
+#[cfg(windows)]
+pub(crate) mod windows_process;
 pub mod worktree;
 pub mod worktree_blob;

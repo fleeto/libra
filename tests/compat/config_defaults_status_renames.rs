@@ -336,8 +336,11 @@ fn status_rename_limit_cascade_and_invalid_fail_closed() {
     let repo = staged_inexact_rename_repo(&fixture, "rename-limit");
 
     // A GLOBAL diff.renameLimit is inherited when the status key is unset.
-    // The staged new side holds TWO candidates (.libraignore + the renamed
-    // file), so limit=1 gates the exhaustive stage with the warning…
+    // `libra init` no longer plants a comment-only `.libraignore` (WT-03),
+    // so add a second staged destination. limit=1 then gates the exhaustive
+    // stage for the two-candidate new side, and the warning names the limit.
+    fs::write(repo.join("extra-new.txt"), "unrelated extra\n").expect("write extra new file");
+    fixture.success(&repo, &["add", "extra-new.txt"]);
     fixture.success(
         Path::new("/"),
         &["config", "--global", "diff.renameLimit", "1"],

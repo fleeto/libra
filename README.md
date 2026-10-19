@@ -73,6 +73,11 @@ cargo build --release --locked
 The source build writes `target/release/libra`; run that binary directly, or use
 `cargo install --path . --locked` to install it in Cargo's binary directory.
 
+Current main source builds support native Windows Agent Session Capture on
+local NTFS drives with OpenCode 2.x. This support is not included in the
+v0.30.50 release binaries. See the [Windows capture setup](docs/commands/agent.md#native-windows-capture)
+for exporter trust and the Windows sandbox limitations.
+
 The script installer also creates the optional shorthand
 `~/.libra/bin/lba -> libra` as a relative symlink. Re-running the same version
 repairs a missing alias without replacing the binary. Use `--no-alias` or
@@ -196,7 +201,7 @@ chooses a destination, and the second Enter confirms; Esc goes back or cancels.
 
 The supported capture roster is **Claude Code**, **Codex**, and **OpenCode**. Use `libra agent list --schema-version 2 --json` to inspect installation state and import/export capabilities.
 
-The current macOS ordinary OpenCode capture baseline is official **OpenCode 2.0.29** with **Libra 0.30.49**. Session-directory filtering, native executable selection behind supported package-manager launchers, and the empty metadata-only export warning require **Libra 0.30.50 or later**. Follow the [exporter-trust and capture-plugin setup](docs/commands/agent.md#opencode-ordinary-capture-on-macos-libra-03049); `opencode --pure` disables capture. Unsupported reasoning state and its associated text/time are omitted from a safe ordinary checkpoint, which remains `Unproven` / `Partial`. Historical imports containing unsupported reasoning state still fail with `LBR-AGENT-020`. This ordinary path does not admit native `signature`, `redactedData` or `reasoningEncryptedContent` artifacts or prove complete reasoning coverage; native source proof remains unproven.
+The current macOS ordinary OpenCode capture baseline is official **OpenCode 2.0.29** with **Libra 0.30.49**. Session-directory filtering, native executable selection behind supported package-manager launchers, and the empty metadata-only export warning require **Libra 0.30.50 or later**. Follow the [exporter-trust and capture-plugin setup](docs/commands/agent.md#opencode-ordinary-capture-on-macos-libra-03049); `opencode --pure` disables capture. Unsupported reasoning state, its timing, and readable reasoning text are retained in a safe ordinary checkpoint. The checkpoint remains `Unproven` / `Partial`. Historical imports containing unsupported reasoning state still fail with `LBR-AGENT-020`. This ordinary path does not admit native `signature`, `redactedData` or `reasoningEncryptedContent` artifacts or prove complete reasoning coverage; native source proof remains unproven.
 
 > See the [agent command guide](docs/commands/agent.md) for provider setup, capture boundaries, and session management.
 

@@ -1229,6 +1229,25 @@ impl LocalStorage {
         idxs
     }
 
+    /// Read-only object count of a pack index, from its fanout tail. Used by
+    /// `count-objects -v`; does not load the name table.
+    pub(crate) fn pack_index_object_count(idx_file: &Path) -> Result<u64, io::Error> {
+        let mut idx_file = fs::File::open(idx_file)?;
+        let (_version, fanout) = Self::read_idx_fanout_from_open(&mut idx_file)?;
+        Ok(u64::from(fanout[255]))
+    }
+
+    /// Read-only membership probe against a pack index via the existing binary
+    /// search. Used by `count-objects -v` prune-packable.
+    pub(crate) fn pack_index_contains(
+        idx_file: &Path,
+        obj_id: &ObjectHash,
+    ) -> Result<bool, io::Error> {
+        let mut idx_file = fs::File::open(idx_file)?;
+        let (version, fanout) = Self::read_idx_fanout_from_open(&mut idx_file)?;
+        Ok(Self::read_idx_from_open_binary(&mut idx_file, version, &fanout, obj_id)?.is_some())
+    }
+
     fn read_idx_version(file: &mut fs::File) -> Result<IdxVersion, io::Error> {
         let mut header = [0u8; 4];
         file.read_exact(&mut header)?;

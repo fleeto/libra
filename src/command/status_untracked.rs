@@ -17,8 +17,19 @@ use crate::utils::{path, util};
 
 pub(crate) struct StatusWorktreeChanges {
     pub(crate) unstaged: Changes,
+    /// Index v3 intent-to-add entries whose working-tree file still exists.
+    /// Git reports these as an UNSTAGED new file (` A`), not as a staged
+    /// addition plus a worktree modification: the empty blob in the index is a
+    /// placeholder, not content (WT-06, ADR-WT-05). A path whose worktree file
+    /// is gone stays in `unstaged.deleted`, matching Git's ` D` row.
+    pub(crate) intent_to_add: Vec<PathBuf>,
     pub(crate) ignored_files: Vec<PathBuf>,
     pub(crate) index: Index,
+    /// ADR-FM-06 (#470 FM-05): tracked regular files whose index mode is
+    /// executable (100755), whose working-tree owner execute bit is missing,
+    /// and whose content matches the index — the legacy-materialization shape
+    /// that only a human `status` long output repairs with a hint.
+    pub(crate) mode_fix_candidates: Vec<PathBuf>,
     /// §B.3.3 accumulator protocol: paths the scan could not inspect
     /// (workdir-relative). Text formats fail closed on any entry; JSON
     /// reports the partial result plus `data.io_blocked[]`.
@@ -76,18 +87,20 @@ pub(crate) fn collect_status_worktree_changes(
     })?;
     let tracked = TrackedPaths::from_index(&index, ignore_case);
     let mut io_blocked: Vec<crate::command::status_probe::IoBlockedEvent> = Vec::new();
+    let mut mode_fix_candidates: Vec<PathBuf> = Vec::new();
     // The index file's own mtime anchors the racily-clean guard: a stat
     // triple is only trusted for files strictly older than this snapshot.
     let index_file_mtime = std::fs::metadata(&index_path)
         .ok()
         .and_then(|meta| meta.modified().ok());
-    let mut unstaged = collect_tracked_worktree_changes(
+    let (mut unstaged, intent_to_add) = collect_tracked_worktree_changes(
         &workdir,
         &index,
         tracked.files(),
         &mut io_blocked,
         index_file_mtime,
         file_mode,
+        &mut mode_fix_candidates,
     )?;
     let mut ignored_files = Vec::new();
 
@@ -110,8 +123,10 @@ pub(crate) fn collect_status_worktree_changes(
     io_blocked.dedup_by(|a, b| a.path == b.path);
     Ok(StatusWorktreeChanges {
         unstaged,
+        intent_to_add,
         ignored_files,
         index,
+        mode_fix_candidates,
         io_blocked,
     })
 }
@@ -202,8 +217,10 @@ fn collect_tracked_worktree_changes(
     io_blocked: &mut Vec<crate::command::status_probe::IoBlockedEvent>,
     index_file_mtime: Option<std::time::SystemTime>,
     file_mode: bool,
-) -> Result<Changes, StatusError> {
+    mode_fix_candidates: &mut Vec<PathBuf>,
+) -> Result<(Changes, Vec<PathBuf>), StatusError> {
     let mut changes = Changes::default();
+    let mut intent_to_add: Vec<PathBuf> = Vec::new();
     for file in tracked_files {
         // §B.6.1: an index key is a UTF-8 string by construction, so this
         // only fires if a path arrives from somewhere else. Skip the KEYED
@@ -261,6 +278,18 @@ fn collect_tracked_worktree_changes(
             }
             Ok(metadata) => metadata,
         };
+        // WT-06: an intent-to-add entry is a placeholder for a NEW file, not
+        // staged content. Git's `.A` row means "worktree addition, index
+        // untouched", so it must not be compared against the empty blob as a
+        // modification. A missing worktree file was already classified as a
+        // deletion above (Git's `.D`).
+        if index
+            .get(file_str, 0)
+            .is_some_and(|entry| entry.flags.intent_to_add)
+        {
+            intent_to_add.push(file.clone());
+            continue;
+        }
         // ADR-FM-05: with core.fileMode=true a regular file whose owner
         // execute bit differs from the index is a mode-only modification.
         if file_mode
@@ -272,6 +301,17 @@ fn collect_tracked_worktree_changes(
             })
         {
             changes.modified.push(file.clone());
+            // ADR-FM-06: the executable-bit-lost direction with identical
+            // content is the legacy-materialization repair candidate.
+            if let Some(entry) = index.get(file_str, 0)
+                && entry.mode & 0o111 != 0
+                && metadata.mode & 0o111 == 0
+                && let Ok(Ok(hash)) =
+                    crate::command::status_io_worker::deadline_file_blob_hash(&file_abs, workdir)
+                && index.verify_hash(file_str, 0, &hash)
+            {
+                mode_fix_candidates.push(file.clone());
+            }
             continue;
         }
         // Compare against the metadata we ALREADY hold rather than calling
@@ -302,7 +342,9 @@ fn collect_tracked_worktree_changes(
             }
         }
     }
-    Ok(changes)
+    intent_to_add.sort();
+    intent_to_add.dedup();
+    Ok((changes, intent_to_add))
 }
 
 fn scan_workdir(

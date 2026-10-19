@@ -1206,9 +1206,13 @@ mod tests {
     fn promoted_specs_cover_every_v1_preview_kind() {
         // The five agents that were `Preview` in Phase 1 must all be
         // present here. The two original stable kinds (ClaudeCode,
-        // Gemini) must NOT — they have dedicated structs.
+        // Gemini and Grok) must NOT — they have dedicated structs and must
+        // not acquire a promoted adapter implicitly.
         for kind in AgentKind::all() {
-            let is_dedicated_stable = matches!(kind, AgentKind::ClaudeCode | AgentKind::Gemini);
+            let is_dedicated_stable = matches!(
+                kind,
+                AgentKind::ClaudeCode | AgentKind::Gemini | AgentKind::Grok
+            );
             assert_eq!(
                 stable_promoted_spec_for(*kind).is_some(),
                 !is_dedicated_stable,

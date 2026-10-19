@@ -112,6 +112,14 @@ pub enum InitError {
         hint: Option<String>,
     },
 
+    /// Reinit with a different object format: Git refuses loudly (#473).
+    #[error("attempt to reinitialize repository with different hash")]
+    ReinitObjectFormatMismatch { stored: String, requested: String },
+
+    /// A storage path exists but is not a directory (#473 IN-03).
+    #[error("'{}' exists but is not a directory", path.display())]
+    StoragePathNotDirectory { path: PathBuf },
+
     /// Stored or source `core.objectformat` / Git extensions.objectformat is unknown.
     #[error("{message}")]
     UnknownObjectFormat { message: String },
@@ -202,6 +210,32 @@ impl From<InitError> for CliError {
                     cli = cli.with_hint(hint);
                 }
                 cli
+            }
+            InitError::ReinitObjectFormatMismatch { stored, requested } => {
+                // Intent: repository state conflict, not CLI usage — Git exits
+                // 128 here; scripts keying on the exit code must see a repo
+                // failure, matching ADR-IN-02.
+                CliError::fatal(format!(
+                    "attempt to reinitialize repository with different hash: stored '{stored}', requested '{requested}'"
+                ))
+                .with_stable_code(StableErrorCode::RepoStateInvalid)
+                .with_hint(
+                    "create a new repository with `libra init --object-format <format>` instead"
+                        .to_string(),
+                )
+            }
+            InitError::StoragePathNotDirectory { path } => {
+                // Intent: the target is a pre-existing file where a directory
+                // is required; fail before any layout or database write.
+                CliError::fatal(format!(
+                    "'{}' exists but is not a directory",
+                    path.display()
+                ))
+                .with_stable_code(StableErrorCode::RepoCorrupt)
+                .with_hint(
+                    "remove or relocate the file, or choose a different target directory"
+                        .to_string(),
+                )
             }
             InitError::UnknownObjectFormat { message } => CliError::fatal(message)
                 .with_stable_code(StableErrorCode::RepoCorrupt),
@@ -304,9 +338,22 @@ pub struct InitArgs {
     #[clap(long = "object-format", name = "format", required = false)]
     pub object_format: Option<String>,
 
-    /// Ref name validation strategy: `strict` (default) or `filesystem`
-    #[clap(long = "ref-format", value_enum, required = false)]
-    pub ref_format: Option<RefFormat>,
+    /// Ref name validation strategy: `strict` (default) or `filesystem`. Git's
+    /// `files`/`reftable` backends are not implemented and are refused with a hint
+    #[clap(long = "ref-format", value_name = "FORMAT", required = false)]
+    pub ref_format: Option<String>,
+
+    /// Git `--separate-git-dir` layout (not implemented; refused with a migration hint)
+    #[clap(long = "separate-git-dir", value_name = "PATH", required = false)]
+    pub separate_git_dir: Option<String>,
+
+    /// Libra's legacy `--separate-libra-dir` layout (not implemented; refused)
+    #[clap(long = "separate-libra-dir", value_name = "PATH", required = false)]
+    pub separate_libra_dir: Option<String>,
+
+    /// Git `--recurse-submodules` init (not implemented; refused with a hint)
+    #[clap(long = "recurse-submodules", required = false)]
+    pub recurse_submodules: bool,
 
     /// Convert an existing Git repository at `path` into a Libra repository (copies objects, refs, config)
     #[clap(long = "from-git-repository", value_name = "path", required = false)]
@@ -561,11 +608,54 @@ async fn run_init_internal(
     let current_dir = cur_dir();
     let target_dir = resolve_cli_path(&current_dir, &args.repo_directory);
     let root_dir = storage_root(&target_dir, args.bare);
-    let template_dir = args
-        .template
-        .as_ref()
-        .map(|path| resolve_template_path(&current_dir, path))
-        .transpose()?;
+
+    // Git layout/storage options that are documented intentional differences
+    // (ADR-IN-07/ADR-IN-08, D25): refuse at the parse boundary with a migration
+    // hint instead of the generic clap "unexpected argument" message.
+    if args.separate_git_dir.is_some() || args.separate_libra_dir.is_some() {
+        return Err(invalid_argument(
+            "--separate-git-dir/--separate-libra-dir is not implemented; Libra stores the \
+             repository database inside the target's own '.libra/'"
+                .to_string(),
+            Some(
+                "migrate a Git repository that uses a gitdir pointer with \
+                 'libra init --from-git-repository <worktree>'"
+                    .to_string(),
+            ),
+        ));
+    }
+    if args.recurse_submodules {
+        return Err(invalid_argument(
+            "--recurse-submodules is not implemented; submodule init is a separate step"
+                .to_string(),
+            Some("run 'libra submodule init' after creating the repository".to_string()),
+        ));
+    }
+    let ref_format = resolve_ref_format(args.ref_format.as_deref())?;
+
+    // Empty `--template=` means "no template": only the repository-required
+    // structure is created, and the built-in hooks/exclude defaults are skipped.
+    let template_dir = match args.template.as_deref() {
+        Some("") => None,
+        Some(path) => Some(resolve_template_path(&current_dir, path)?),
+        // Boxed: keeps the init future's layout depth bounded for callers.
+        None => Box::pin(resolve_template_from_sources()).await?,
+    };
+    // Self-reference guard (ADR-IN-03): a template equal to the storage root
+    // would recurse; an ancestor template must skip the storage subtree.
+    let template_skip = match template_dir.as_deref() {
+        Some(template) if template == root_dir => {
+            return Err(invalid_argument(
+                format!(
+                    "template directory '{}' is the target storage directory itself",
+                    template.display()
+                ),
+                Some("use the parent directory as --template, or pick another target".to_string()),
+            ));
+        }
+        Some(template) if root_dir.starts_with(template) => Some(root_dir.clone()),
+        _ => None,
+    };
     let shared_mode = parse_shared_mode(args.shared.as_deref())?;
 
     // The Libra home (`$LIBRA_HOME`, default `~/.libra`) holds per-user state
@@ -586,6 +676,11 @@ async fn run_init_internal(
         ));
     }
 
+    // Storage path type preflight (ADR-IN-02 IN-03): a pre-existing FILE where
+    // a storage directory is required must fail before the reinit check and any
+    // write, with LBR-REPO-002/128 rather than a misleading "Reinitializing".
+    ensure_storage_paths_are_directories(&target_dir, args.bare)?;
+
     if is_reinit(&target_dir, args.bare) {
         // Git-style safe re-initialization: top-up the standard layout and re-apply
         // `--shared`, but PRESERVE the existing database (config, HEAD, refs, objects,
@@ -596,6 +691,7 @@ async fn run_init_internal(
             &args,
             &root_dir,
             template_dir.as_deref(),
+            template_skip.as_deref(),
             shared_mode.as_ref(),
             progress,
         )
@@ -613,7 +709,11 @@ async fn run_init_internal(
         convert::validate_source_head(source)?;
     }
     let is_git_conversion = from_git.is_some();
-    let object_format = resolve_object_format(args.object_format.as_deref())?;
+    // Boxed: keeps the init future's layout depth bounded for callers.
+    let object_format = Box::pin(resolve_object_format_from_sources(
+        args.object_format.as_deref(),
+    ))
+    .await?;
     // ADR-B3-01: Convert is SHA-1→SHA-1 only. Refuse sha256/blake3 targets (and
     // sha256 Git sources) before create_dir_all / layout / DB.
     if is_git_conversion {
@@ -622,7 +722,6 @@ async fn run_init_internal(
             &object_format,
         )?;
     }
-    let ref_format = args.ref_format.clone().unwrap_or(RefFormat::Strict);
     let initial_branch_name = if is_git_conversion {
         // Git conversion selects HEAD from the source repository's branch layout;
         // use a harmless placeholder until `clone::setup_repository` installs it.
@@ -639,7 +738,17 @@ async fn run_init_internal(
 
     progress.emit("Creating repository layout ...");
     fs::create_dir_all(&root_dir)?;
-    prepare_repository_layout(&root_dir, template_dir.as_deref())?;
+    if let Err(error) = prepare_repository_layout(
+        &root_dir,
+        template_dir.as_deref(),
+        template_skip.as_deref(),
+        args.template.as_deref() != Some(""),
+    ) {
+        // ADR-IN-03 item 6: a fresh-repo template/layout failure rolls back the
+        // storage directory this run created, restoring the pre-run snapshot.
+        let _ = fs::remove_dir_all(&root_dir);
+        return Err(InitError::Io(error));
+    }
 
     progress.emit("Initializing database ...");
     let database_path = root_dir.join(DATABASE);
@@ -680,9 +789,11 @@ async fn run_init_internal(
     }
 
     let mut warnings = Vec::new();
-    if !args.bare {
-        ignore::ensure_root_libraignore(&target_dir)?;
-    }
+    // WT-03 (ADR-WT-04): do NOT create a comment-only root `.libraignore`.
+    // Git leaves a fresh worktree clean, and the stub carried no rules; a
+    // user-created `.libraignore` (or one produced by `.gitignore`
+    // conversion below) still works. The former `ensure_root_libraignore`
+    // call is intentionally gone so `libra init` matches Git's post-init UX.
 
     let target_guard_path = target_dir
         .canonicalize()
@@ -767,6 +878,7 @@ async fn reinitialize_existing(
     args: &InitArgs,
     root_dir: &Path,
     template_dir: Option<&Path>,
+    template_skip: Option<&Path>,
     shared_mode: Option<&SharedMode>,
     progress: &InitProgress,
 ) -> Result<InitOutput, InitError> {
@@ -787,7 +899,7 @@ async fn reinitialize_existing(
         });
     }
     if let Some(requested) = args.initial_branch.as_deref() {
-        let requested_ref_format = args.ref_format.clone().unwrap_or(RefFormat::Strict);
+        let requested_ref_format = resolve_ref_format(args.ref_format.as_deref())?;
         validate_branch_name(requested, &requested_ref_format)?;
     }
     let requested_object_format = args
@@ -816,21 +928,20 @@ async fn reinitialize_existing(
     if let Some(requested) = &requested_object_format
         && requested != &stored_object_format
     {
-        return Err(InitError::ConvertObjectFormatForbidden {
-            message: format!(
-                "cannot change object format from '{stored_object_format}' to '{requested}' on re-initialization"
-            ),
-            hint: Some(
-                "object format is fixed at fresh init; create a new repository with \
-                 `libra init --object-format <format>` instead"
-                    .to_string(),
-            ),
+        return Err(InitError::ReinitObjectFormatMismatch {
+            stored: stored_object_format.clone(),
+            requested: requested.clone(),
         });
     }
 
     progress.emit("Reinitializing existing repository ...");
     fs::create_dir_all(root_dir)?;
-    prepare_repository_layout(root_dir, template_dir)?;
+    prepare_repository_layout(
+        root_dir,
+        template_dir,
+        template_skip,
+        args.template.as_deref() != Some(""),
+    )?;
     set_dir_hidden(root_dir)?;
     if let Some(shared_mode) = shared_mode {
         // `apply_shared` skips the vault database/sidecars, so private signing
@@ -966,6 +1077,119 @@ fn resolve_template_path(base: &Path, raw: &str) -> Result<PathBuf, InitError> {
     path.canonicalize().map_err(InitError::Io)
 }
 
+/// ADR-IN-03 item 3: `--template` > `GIT_TEMPLATE_DIR` > `init.templateDir`
+/// (strict local→global→system cascade) > built-in defaults. `~` expands to HOME.
+/// Only reached when no `--template` was given; an empty `--template=` never
+/// falls through to these sources.
+async fn resolve_template_from_sources() -> Result<Option<PathBuf>, InitError> {
+    if let Some(env) = std::env::var_os("GIT_TEMPLATE_DIR").filter(|value| !value.is_empty()) {
+        return resolve_template_path(&cur_dir(), &env.to_string_lossy()).map(Some);
+    }
+    match read_cascaded_config_value_strict(LocalIdentityTarget::CurrentRepo, "init.templateDir")
+        .await
+    {
+        Ok(Some(raw)) => {
+            let expanded = expand_home(&raw);
+            resolve_template_path(&cur_dir(), &expanded).map(Some)
+        }
+        Ok(None) => Ok(None),
+        Err(error) => Err(InitError::ConfigRead {
+            key: "init.templateDir".to_string(),
+            detail: format!("{error:#}"),
+        }),
+    }
+}
+
+fn expand_home(raw: &str) -> String {
+    if let Some(rest) = raw.strip_prefix("~/")
+        && let Some(home) = dirs::home_dir()
+    {
+        return home.join(rest).to_string_lossy().into_owned();
+    }
+    raw.to_string()
+}
+
+/// ADR-IN-02 item 1: ref-format values are a CLI usage choice; Git's storage
+/// backends `files`/`reftable` are documented intentional differences (D25).
+fn resolve_ref_format(raw: Option<&str>) -> Result<RefFormat, InitError> {
+    match raw {
+        None | Some("strict") => Ok(RefFormat::Strict),
+        Some("filesystem") => Ok(RefFormat::Filesystem),
+        Some("files") | Some("reftable") => Err(invalid_argument(
+            format!(
+                "--ref-format={} is not implemented; Libra refs live in SQLite and \
+                 --ref-format only selects branch-name validation",
+                raw.unwrap_or_default()
+            ),
+            Some("use --ref-format=strict (default) or --ref-format=filesystem".to_string()),
+        )),
+        Some(other) => Err(invalid_argument(
+            format!("unknown ref format '{other}'"),
+            Some("supported values: strict, filesystem".to_string()),
+        )),
+    }
+}
+
+/// ADR-IN-02 item 2: a storage path that exists but is not a directory is a
+/// repository-state conflict (LBR-REPO-002/128), detected before any write.
+fn ensure_storage_paths_are_directories(target_dir: &Path, bare: bool) -> Result<(), InitError> {
+    // The bare database file is a FILE by design, so only the directory-like
+    // layout paths are type-checked.
+    let paths = if bare {
+        vec![
+            target_dir.join("objects"),
+            target_dir.join("info"),
+            target_dir.join("hooks"),
+        ]
+    } else {
+        vec![target_dir.join(ROOT_DIR)]
+    };
+    for path in paths {
+        if let Ok(metadata) = fs::symlink_metadata(&path)
+            && !metadata.is_dir()
+        {
+            return Err(InitError::StoragePathNotDirectory { path });
+        }
+    }
+    Ok(())
+}
+
+/// ADR-IN-06 source cascade: `--object-format`, then `GIT_DEFAULT_HASH`, then
+/// `init.defaultObjectFormat`, then `sha1`. Invalid config falls back with a
+/// warning; invalid env is a usage error. Not used on reinit or
+/// `--from-git-repository`.
+async fn resolve_object_format_from_sources(cli: Option<&str>) -> Result<String, InitError> {
+    if let Some(raw) = cli {
+        return resolve_object_format(Some(raw));
+    }
+    if let Some(env) = std::env::var_os("GIT_DEFAULT_HASH").filter(|value| !value.is_empty()) {
+        return resolve_object_format(Some(&env.to_string_lossy()));
+    }
+    match read_cascaded_config_value_strict(
+        LocalIdentityTarget::CurrentRepo,
+        "init.defaultObjectFormat",
+    )
+    .await
+    {
+        Ok(Some(raw)) => {
+            if crate::internal::object_format::parse_config_value(&raw.to_ascii_lowercase())
+                .is_err()
+            {
+                crate::utils::error::emit_warning(format!(
+                    "unknown hash algorithm '{raw}'; falling back to sha1"
+                ));
+                return Ok("sha1".to_string());
+            }
+            resolve_object_format(Some(&raw))
+        }
+        Ok(None) => Ok("sha1".to_string()),
+        Err(error) => Err(InitError::ConfigRead {
+            key: "init.defaultObjectFormat".to_string(),
+            detail: format!("{error:#}"),
+        }),
+    }
+}
+
 fn storage_root(target_dir: &Path, bare: bool) -> PathBuf {
     if bare {
         target_dir.to_path_buf()
@@ -1094,10 +1318,15 @@ fn is_writable(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn prepare_repository_layout(root_dir: &Path, template_dir: Option<&Path>) -> io::Result<()> {
+fn prepare_repository_layout(
+    root_dir: &Path,
+    template_dir: Option<&Path>,
+    template_skip: Option<&Path>,
+    builtin_defaults: bool,
+) -> io::Result<()> {
     if let Some(template_dir) = template_dir {
-        copy_template(template_dir, root_dir)?;
-    } else {
+        copy_template(template_dir, root_dir, template_skip)?;
+    } else if builtin_defaults {
         // Refuse to top up through a symlinked layout directory: writing into it would
         // follow the link and escape the repository. (A legitimately symlinked `.libra`
         // worktree root still contains REAL `info`/`hooks` directories in its shared
@@ -1162,23 +1391,30 @@ fn refuse_symlinked_layout_path(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn copy_template(src: &Path, dst: &Path) -> io::Result<()> {
+fn copy_template(src: &Path, dst: &Path, skip: Option<&Path>) -> io::Result<()> {
     for entry in fs::read_dir(src)? {
         let entry = entry?;
         let file_type = entry.file_type()?;
+        let source_path = entry.path();
         let dest_path = dst.join(entry.file_name());
+
+        // ADR-IN-03 item 2: when the template is an ANCESTOR of the storage
+        // root, the storage subtree would recurse into itself. Skip it.
+        if skip.is_some_and(|skip| source_path == skip || dest_path == skip) {
+            continue;
+        }
 
         if file_type.is_dir() {
             // Never recurse through a symlinked destination directory: it would follow
             // the link and write template files outside the repository.
             refuse_symlinked_layout_path(&dest_path)?;
             fs::create_dir_all(&dest_path)?;
-            copy_template(&entry.path(), &dest_path)?;
+            copy_template(&source_path, &dest_path, skip)?;
         } else if fs::symlink_metadata(&dest_path).is_err() {
             // `symlink_metadata` does not follow links, so a symlinked destination is
             // left untouched rather than written through; only truly-absent files are
             // copied (Git-style top-up that preserves customized files).
-            fs::copy(entry.path(), &dest_path)?;
+            fs::copy(&source_path, &dest_path)?;
         }
     }
     Ok(())
@@ -1873,6 +2109,9 @@ mod tests {
             shared: None,
             object_format: None,
             ref_format: None,
+            separate_git_dir: None,
+            separate_libra_dir: None,
+            recurse_submodules: false,
             from_git_repository: None,
             vault: false,
         })

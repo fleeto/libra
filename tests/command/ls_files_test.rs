@@ -1206,3 +1206,35 @@ fn test_ls_files_tags_skip_worktree() {
         "json must still list the marked entry: {parsed}"
     );
 }
+
+/// WT-06 / issue #476 M-ITA-VIEW V7: `ls-files -s` shows the intent-to-add
+/// entry as the canonical empty blob at stage 0.
+#[test]
+fn ls_files_short_shows_intent_to_add_empty_blob() {
+    const EMPTY_BLOB: &str = "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391";
+
+    let repo = tempdir().expect("tempdir");
+    let root = repo.path();
+    init_repo_via_cli(root);
+    configure_identity_via_cli(root);
+    fs::write(root.join("tracked.txt"), "tracked\n").expect("write tracked");
+    assert_cli_success(&run_libra_command(&["add", "tracked.txt"], root), "add");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "init", "--no-verify"], root),
+        "commit",
+    );
+    fs::write(root.join("new.txt"), "new\n").expect("write new");
+    assert_cli_success(
+        &run_libra_command(&["add", "-N", "new.txt"], root),
+        "add -N",
+    );
+
+    let output = run_libra_command(&["ls-files", "-s"], root);
+    assert_cli_success(&output, "ls-files -s");
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        text.lines()
+            .any(|line| line == format!("100644 {EMPTY_BLOB} 0\tnew.txt")),
+        "V7 expected empty-blob entry: {text:?}"
+    );
+}

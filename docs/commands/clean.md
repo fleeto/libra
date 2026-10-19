@@ -60,7 +60,7 @@ ignored files only.
 **`-n` / `--dry-run`**
 
 Preview mode. Lists every untracked path that *would* be deleted without
-touching the filesystem:
+touching the filesystem. No objects are written and no operation is recorded:
 
 ```bash
 $ libra clean -n

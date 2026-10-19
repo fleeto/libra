@@ -77,19 +77,14 @@ async fn configure_identity() {
 /// Create a linear chain of `count` commits, each modifying `file.txt`.
 ///
 /// Returns the commit hashes ordered newest-first: `hashes[0]` is HEAD and
-/// `hashes[count - 1]` is the root commit. The first commit also stages
-/// `.libraignore` so subsequent runs see a clean tree. Assumes the caller
-/// already holds a `ChangeDirGuard` rooted in a fresh repo.
+/// `hashes[count - 1]` is the root commit. Assumes the caller already holds a
+/// `ChangeDirGuard` rooted in a fresh repo.
 async fn create_linear_commits(count: usize) -> Vec<String> {
     let mut hashes = Vec::new();
 
     for i in 0..count {
         test::ensure_file("file.txt", Some(&format!("content_{i}\n")));
-        let pathspec = if i == 0 {
-            vec![String::from(".libraignore"), String::from("file.txt")]
-        } else {
-            vec![String::from("file.txt")]
-        };
+        let pathspec = vec![String::from("file.txt")];
 
         add::execute(AddArgs {
             intent_to_add: false,
@@ -888,13 +883,8 @@ fn bisect_first_parent_shrinks_candidate_set() {
         "config email"
     );
 
-    // First commit also tracks the auto-created `.libraignore`, otherwise it
-    // lingers as an untracked file and trips bisect's clean-tree guard.
     std::fs::write(p.join("base.txt"), "base\n").unwrap();
-    assert!(
-        run(&["add", ".libraignore", "base.txt"]).status.success(),
-        "add base"
-    );
+    assert!(run(&["add", "base.txt"]).status.success(), "add base");
     assert!(
         run(&["commit", "-m", "c0", "--no-verify"]).status.success(),
         "commit c0"

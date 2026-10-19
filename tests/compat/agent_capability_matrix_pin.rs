@@ -8,9 +8,9 @@
 use std::collections::BTreeSet;
 
 use libra::internal::ai::observed_agents::{
-    AgentKind, DeclaredAgentCaps, FIRST_BATCH_WAVE, SlugLookup, agent_for, discover_skills,
-    launchable_investigate_slugs, launchable_review_slugs, lookup_cli_slug, registration_for,
-    registry, supported_slugs,
+    AgentKind, DeclaredAgentCaps, FIRST_BATCH_WAVE, GROK_WAVE, SlugLookup, agent_for,
+    discover_skills, launchable_investigate_slugs, launchable_review_slugs, lookup_cli_slug,
+    registration_for, registry, supported_slugs,
 };
 
 /// E1: `DeclaredAgentCaps` serializes to exactly the 8 frozen snake_case
@@ -73,8 +73,16 @@ fn known_agent_capability_matrix_matches_current_roster() {
     }
 
     // Frozen first-batch roster.
-    assert_eq!(supported_slugs(), ["claude-code", "codex", "opencode"]);
+    assert_eq!(
+        supported_slugs(),
+        ["claude-code", "codex", "opencode", "grok"]
+    );
     for row in registry() {
+        if row.slug == "grok" {
+            assert_eq!(row.support_wave, Some("grok"), "grok");
+            assert!(row.transcript_readable, "grok");
+            continue;
+        }
         if row.supported {
             assert_eq!(row.support_wave, Some(FIRST_BATCH_WAVE), "{}", row.slug);
             assert!(row.transcript_readable, "{}", row.slug);
@@ -152,8 +160,8 @@ fn known_agent_capability_matrix_matches_current_roster() {
         }
     }
 
-    // Non-first-batch agents must never be exposed as installable or
-    // launchable (E9 quarantine/unsupported rule).
+    // Non-first-batch agents other than grok must never be exposed as
+    // installable or launchable (E9 quarantine/unsupported rule).
     for kind in [
         AgentKind::Gemini,
         AgentKind::Cursor,
@@ -232,6 +240,7 @@ fn skill_discovery_registry_matches_roster() {
         AgentKind::Cursor,
         AgentKind::Copilot,
         AgentKind::FactoryAi,
+        AgentKind::Grok,
     ] {
         assert!(
             discover_skills(kind).is_empty(),
@@ -273,4 +282,25 @@ fn unsupported_external_agent_kind_is_quarantined() {
             panic!("gemini stays registered (read-only/uninstall channel)")
         }
     }
+}
+
+#[test]
+fn grok_supported_wave_is_not_first_batch() {
+    let row = registration_for(AgentKind::Grok);
+    assert!(row.supported);
+    assert!(row.hook_installable);
+    assert_eq!(row.support_wave, Some(GROK_WAVE));
+    assert_ne!(row.support_wave, Some(FIRST_BATCH_WAVE));
+    assert!(!row.launchable_review);
+    assert!(!row.launchable_investigate);
+    assert_eq!(
+        launchable_review_slugs(),
+        ["claude-code", "codex", "opencode"]
+    );
+    assert_eq!(
+        launchable_investigate_slugs(),
+        ["claude-code", "codex", "opencode"]
+    );
+    assert!(supported_slugs().contains(&"grok"));
+    assert!(agent_for(AgentKind::Grok).as_hooks().is_some());
 }

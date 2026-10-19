@@ -436,6 +436,32 @@ impl ConfigKv {
         }
     }
 
+    /// Delete only the entries whose value matches `matcher` (Git's
+    /// `--unset <key> <value-pattern>`). Returns the removed count.
+    pub async fn unset_matching_with_conn<C: ConnectionTrait>(
+        db: &C,
+        key: &str,
+        matcher: impl Fn(&str) -> bool,
+    ) -> Result<usize> {
+        let rows = config_kv::Entity::find()
+            .filter(config_kv::Column::Key.eq(key))
+            .all(db)
+            .await
+            .context("failed to query config_kv for unset")?;
+
+        let mut removed = 0usize;
+        for row in rows {
+            if !matcher(&row.value) {
+                continue;
+            }
+            row.delete(db)
+                .await
+                .context("failed to delete config_kv entry")?;
+            removed += 1;
+        }
+        Ok(removed)
+    }
+
     /// Delete all matching entries for a key.
     /// Returns the number of rows deleted (0 if none matched).
     pub async fn unset_all_with_conn<C: ConnectionTrait>(db: &C, key: &str) -> Result<usize> {

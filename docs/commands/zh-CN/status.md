@@ -22,6 +22,10 @@ libra status [OPTIONS] [pathspec]...
 
 当 `core.filemode=true`（Unix 默认）时，已跟踪普通文件的 owner-execute 位与索引不同而内容未变，属于仅 mode 变化，会在所有输出格式（short、long、porcelain v2、JSON）中被报告为修改；当 `core.filemode=false` 时忽略仅 mode 的差异，但条目类型变化（如普通文件被替换为符号链接）始终会被报告。非法的 `core.filemode` 值会在任何输出前使 `status` fail-closed。
 
+### 旧工作树可执行位修复提示
+
+由 mode-aware 物化之前的 Libra（< v0.23.17）创建的工作树，会丢掉已跟踪 `100755` 文件的可执行位。在上述 mode 检测之后，这类工作树会把这些文件显示为 ` M`；因此人类 long 格式会追加一次提示，给出候选数量与修复命令（`libra restore -- <file>...`，超过五个文件时用 `libra restore -- .`）。`--short`、`--porcelain`、`--json` 与 `core.filemode=false` 不输出该提示。执行提示的 `libra restore` 会重新应用可执行位，工作树随之干净。
+
 skip-worktree 条目（用 [`update-index --skip-worktree`](update-index.md) 标记）永远不会被报告为删除或修改：其工作树副本被视为完好，与 Git 对稀疏检出索引的行为一致。`core.sparseCheckout=true` 时 Libra 不评估稀疏模式（稀疏规则与物化延后——见兼容表），行为与 `false` 相同，外加每进程一次的提示警告。
 
 ### 显示相关的 config 默认值（`status.*`）
@@ -201,6 +205,9 @@ libra status -u                    # 等同 -uall（递归未跟踪目录）
 libra status --untracked-files=all
 ```
 
+intent-to-add 条目（`libra add -N`）是*已跟踪*的索引条目，因此 `-uno` 不会隐藏它：
+它保持 Git 的未暂存新文件行（` A <path>`），因为索引里只有空 blob 占位。
+
 ### `--show-stash` / `--no-show-stash`
 
 在长格式 status 之后显示 stash 条目数量（"Your stash currently has N entries"）。只有长格式渲染该提示（short 和 porcelain 不受影响）。`status.showStash=true` 默认启用它；`--no-show-stash` 覆盖该配置（以及先前的 `--show-stash`；最后出现者生效）。
@@ -254,6 +261,7 @@ Changes to be committed:
         modified:   src/lib.rs
 
 Changes not staged for commit:
+        new file:   src/generated.rs
         modified:   README.md
 
 Untracked files:
@@ -316,6 +324,8 @@ UU conflict.txt
       "deleted": []
     },
     "unstaged": {
+      "new": [],
+      "intent_to_add": [],
       "modified": ["README.md"],
       "deleted": []
     },
@@ -345,6 +355,8 @@ UU conflict.txt
       "deleted": []
     },
     "unstaged": {
+      "new": [],
+      "intent_to_add": [],
       "modified": [],
       "deleted": []
     },
@@ -385,7 +397,10 @@ Detached HEAD：
 - 远程 tracking 分支不再存在时，`upstream.gone` 为 `true`
 - `gone` 为 `true`、处于 unborn 分支，或计数无法计算（任一侧历史中有提交读不到，此时 `data.warnings[]` 含 `upstream_counts_unavailable` warning）时，`upstream.ahead` / `upstream.behind` 为 `null`；其余情况下两者等于 `libra rev-list --left-right --count <upstream>...HEAD` 的输出（先右后左）
 - 只有 staged、unstaged、untracked、unmerged 列表都为空、没有全局 merge
-  状态、**且** `io_blocked` 为空时，`is_clean` 才为 `true`（「无法检查」永远不是干净）
+  状态、**且** `io_blocked` 为空时，`is_clean` 才为 `true`（「无法检查」永远不是干净）；
+  intent-to-add 条目计为未暂存改动
+- `unstaged.new` 列出 intent-to-add 路径（Git 的 `.A` 工作树侧）；
+  `unstaged.intent_to_add` 再次显式列出它们，消费者无需根据「没有 staged 条目」推断标志
 - 新初始化且无提交的仓库中，`has_commits` 为 `false`
 - `staged.renamed` / `unstaged.renamed` 以 `{from, to}` 对象列出 rename 对（路径字符串，
   仓库根相对）；顶层 `renames[]` 数组承载结构化记录（`{from, to, score, exact, staged,
@@ -489,6 +504,10 @@ Git 的 porcelain v1 不包含 upstream tracking 信息；porcelain v2 会添加
 ## 兼容性说明
 
 - `--porcelain v2` 输出真实的 v2 行语法（带 mode/hash 列的 `1`/`2`/`u`/`?`/`!` 记录）；`--json` 仍是更丰富的结构化表面
+- intent-to-add 条目（`add -N`）与 Git 完全一致：v1/短格式为 ` A`；v2 为
+  `1 .A N... 000000 000000 <mode> <zero-hash> <zero-hash>`；长格式位于
+  “Changes not staged” 下的 `new file:`；JSON 在 `unstaged.new`/`unstaged.intent_to_add` 中；
+  绝不进入 `staged.new`
 - `-z` 下 Unix porcelain v1/v2 写出 RAW OS 路径字节（不 quote，非 UTF-8 名字无损）；非 `-z` 格式按 `core.quotePath` 处理 `0x7F` 以上字节——默认 `true` 时八进制转义，`false` 时原样写出。非 UTF-8 名字绝不使 status 失败——它保留基础 `??` 行，仅不参与 rename 评分（附 `rename_path_encoding_unsupported` 警告）
 - jj 的 `jj status` 始终使用短格式，并且不区分已暂存与未暂存更改（jj 没有暂存区）
 - 通过 Git 的 `-M[<n>]` / `--find-renames[=<n>]` 及 `--renames`/`--no-renames` 开关支持重命名检测；四种拼写共享同一 argv last-one-wins 顺序

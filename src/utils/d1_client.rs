@@ -330,6 +330,18 @@ struct D1CatalogGeneration {
     generation: i64,
 }
 
+/// Loopback D1 endpoints are local mocks and must not use the OS proxy.
+fn api_base_is_loopback(url: &Url) -> bool {
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    host.parse::<std::net::IpAddr>()
+        .is_ok_and(|ip| ip.is_loopback())
+}
+
 /// Cloudflare D1 REST API client.
 ///
 /// `Clone` is cheap (HTTP client is `Arc` internally). Construct via
@@ -452,6 +464,11 @@ impl D1Client {
             .timeout(D1_REQUEST_TIMEOUT);
         if https_only {
             builder = builder.https_only(true);
+        }
+        if api_base_is_loopback(&api_base_url) {
+            // Feature unification re-enables reqwest's system-proxy. A macOS
+            // proxy such as Clash answers loopback mocks with HTTP 502.
+            builder = builder.no_proxy();
         }
         let client = builder.build().unwrap_or_else(|_| Client::new());
         Self {
@@ -1350,8 +1367,11 @@ impl D1Client {
     /// Mirrors a subset of the local SQLite schema (see
     /// `sql/migrations/2026050303_agent_capture.sql`) — only the columns
     /// `libra cloud sync` needs to round-trip a session listing on a fresh
-    /// machine. The `agent_kind` CHECK matches the local CHECK so a
-    /// future widening migration on either side stays in lock-step.
+    /// machine. The `agent_kind` CHECK matches the effective local CHECK
+    /// after `2026101901` (`AGENT_KIND_WITH_GROK`). The historical
+    /// `2026050303` CREATE stays the pre-grok list; GK-01 adds `grok`
+    /// on SQLite. D1 has no CHECK rebuild, so new D1 tables carry the
+    /// expanded list directly.
     ///
     /// **Intentional divergences from the local schema** (operators
     /// debugging cloud-vs-local drift should know about these). Each
@@ -1388,7 +1408,7 @@ impl D1Client {
                 repo_id TEXT NOT NULL,
                 agent_kind TEXT NOT NULL CHECK(agent_kind IN (
                     'claude_code', 'cursor', 'codex', 'gemini',
-                    'opencode', 'copilot', 'factory_ai'
+                    'opencode', 'copilot', 'factory_ai', 'grok'
                 )),
                 provider_session_id TEXT NOT NULL,
                 state TEXT NOT NULL,
@@ -1432,7 +1452,7 @@ impl D1Client {
                 repo_id TEXT NOT NULL,
                 agent_kind TEXT NOT NULL CHECK(agent_kind IN (
                     'claude_code', 'cursor', 'codex', 'gemini',
-                    'opencode', 'copilot', 'factory_ai'
+                    'opencode', 'copilot', 'factory_ai', 'grok'
                 )),
                 provider_session_id TEXT NOT NULL,
                 state TEXT NOT NULL,

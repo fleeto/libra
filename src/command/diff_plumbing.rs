@@ -66,6 +66,9 @@ pub struct DiffIndexArgs {
 #[derive(Parser, Debug)]
 #[command(after_help = DIFF_FILES_EXAMPLES)]
 pub struct DiffFilesArgs {
+    /// Show changed file names with their status letter (`A`/`M`/`D`/`R`).
+    #[clap(long = "name-status")]
+    pub name_status: bool,
     /// Optional path limiters.
     #[clap(value_name = "PATH", last = true)]
     pub paths: Vec<String>,
@@ -164,6 +167,9 @@ pub async fn execute_files(args: DiffFilesArgs) {
 pub async fn execute_files_safe(args: DiffFilesArgs, output: &OutputConfig) -> CliResult<()> {
     // The default `diff` already compares the index to the working tree.
     let mut argv = vec!["diff".to_string()];
+    if args.name_status {
+        argv.push("--name-status".to_string());
+    }
     push_paths(&mut argv, &args.paths);
     run_via_diff(argv, output).await
 }

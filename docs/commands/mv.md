@@ -39,7 +39,7 @@ Renaming old.rs to new.rs
 
 **`-n` / `--dry-run`**
 
-Previews the rename operations without performing them:
+Previews the rename operations without performing them. No objects are written and no operation is recorded:
 
 ```bash
 $ libra mv -n old.rs new.rs

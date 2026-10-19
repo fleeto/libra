@@ -135,6 +135,9 @@ async fn test_status_rejects_bare_repository() {
         shared: None,
         object_format: None,
         ref_format: None,
+        separate_git_dir: None,
+        separate_libra_dir: None,
+        recurse_submodules: false,
         from_git_repository: None,
         vault: false,
     })
@@ -4077,4 +4080,243 @@ fn test_status_uall_expands_nested_untracked_matrix() {
         !nested_text.contains("inner/file.txt") && !nested_text.contains("gitnest/file.txt"),
         "G2 must not expand a nested repository: {nested_text}"
     );
+}
+
+/// FM-05 (M-HINT H1–H5, issues/470): a legacy-materialization tree (index
+/// 100755, worktree not executable, content identical) gets one human
+/// long-format repair hint; machine formats and `core.fileMode=false` stay
+/// unchanged, the reverse direction does not hint, and the hinted command
+/// actually repairs.
+#[cfg(unix)]
+#[test]
+fn test_status_hints_missing_executable_bit_from_old_checkout() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let repo = tempdir().expect("tempdir");
+    let root = repo.path();
+    init_repo_via_cli(root);
+    configure_identity_via_cli(root);
+    let run = root.join("run.sh");
+    fs::write(&run, "#!/bin/sh\n").expect("write run");
+    fs::set_permissions(&run, fs::Permissions::from_mode(0o755)).expect("chmod run");
+    assert_cli_success(&run_libra_command(&["add", "run.sh"], root), "add");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "init", "--no-verify"], root),
+        "commit",
+    );
+
+    // H1: the legacy shape (index 755, worktree 644, content unchanged).
+    fs::set_permissions(&run, fs::Permissions::from_mode(0o644)).expect("chmod 644");
+    let long = run_libra_command(&["status"], root);
+    assert_cli_success(&long, "status long");
+    let long_out = String::from_utf8_lossy(&long.stdout);
+    assert!(
+        long_out.contains("lost the executable bit"),
+        "H1 hint text: {long_out}"
+    );
+    assert!(
+        long_out.contains("libra restore -- run.sh"),
+        "H1 repair command: {long_out}"
+    );
+
+    // H2: machine/short formats carry no hint.
+    for args in [
+        vec!["status", "--short"],
+        vec!["status", "--porcelain=v2"],
+        vec!["--json", "status"],
+    ] {
+        let out = run_libra_command(&args, root);
+        assert_cli_success(&out, "machine status");
+        assert!(
+            !String::from_utf8_lossy(&out.stdout).contains("lost the executable bit"),
+            "H2 {args:?} must not hint"
+        );
+    }
+
+    // H4: the hinted command repairs and the tree goes clean.
+    assert_cli_success(
+        &run_libra_command(&["restore", "--", "run.sh"], root),
+        "restore",
+    );
+    assert_eq!(
+        fs::metadata(&run).expect("stat run").permissions().mode() & 0o777,
+        0o755,
+        "H4 restore applies the executable bit"
+    );
+    let short = run_libra_command(&["status", "--short"], root);
+    assert!(
+        !String::from_utf8_lossy(&short.stdout).contains("run.sh"),
+        "H4 run.sh is clean: {}",
+        String::from_utf8_lossy(&short.stdout)
+    );
+
+    // H3: the reverse direction (index 644, worktree 755) does not hint.
+    let plain = root.join("plain.txt");
+    fs::write(&plain, "plain\n").expect("write plain");
+    fs::set_permissions(&plain, fs::Permissions::from_mode(0o644)).expect("chmod plain");
+    assert_cli_success(&run_libra_command(&["add", "plain.txt"], root), "add plain");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "plain", "--no-verify"], root),
+        "commit plain",
+    );
+    fs::set_permissions(&plain, fs::Permissions::from_mode(0o755)).expect("chmod 755 plain");
+    let long = run_libra_command(&["status"], root);
+    assert!(
+        !String::from_utf8_lossy(&long.stdout).contains("lost the executable bit"),
+        "H3 reverse direction must not hint: {}",
+        String::from_utf8_lossy(&long.stdout)
+    );
+
+    // H5: `core.fileMode=false` suppresses the hint.
+    fs::set_permissions(&run, fs::Permissions::from_mode(0o644)).expect("chmod 644 again");
+    assert_cli_success(
+        &run_libra_command(&["config", "core.fileMode", "false"], root),
+        "disable fileMode",
+    );
+    let long = run_libra_command(&["status"], root);
+    assert!(
+        !String::from_utf8_lossy(&long.stdout).contains("lost the executable bit"),
+        "H5 fileMode=false must not hint"
+    );
+}
+
+/// FM-05: more than five candidates switch the hint to the bulk `restore -- .`
+/// form.
+#[cfg(unix)]
+#[test]
+fn test_status_hint_bulk_form_over_five_candidates() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let repo = tempdir().expect("tempdir");
+    let root = repo.path();
+    init_repo_via_cli(root);
+    configure_identity_via_cli(root);
+    for i in 1..=6 {
+        let path = root.join(format!("s{i}.sh"));
+        fs::write(&path, "x\n").expect("write");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("chmod");
+    }
+    assert_cli_success(&run_libra_command(&["add", "."], root), "add");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "many", "--no-verify"], root),
+        "commit",
+    );
+    for i in 1..=6 {
+        let path = root.join(format!("s{i}.sh"));
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).expect("chmod 644");
+    }
+
+    let long = run_libra_command(&["status"], root);
+    let out = String::from_utf8_lossy(&long.stdout);
+    assert!(out.contains("6 tracked files"), "bulk count: {out}");
+    assert!(
+        out.contains("libra restore -- ."),
+        "bulk repair command: {out}"
+    );
+}
+
+/// WT-06 / issue #476 M-ITA-VIEW V1–V3, V8: `add -N` produces Git's
+/// unstaged-new (`.A`) view on every status format, never a staged `A`.
+#[test]
+fn test_status_intent_to_add_matrix() {
+    let repo = tempdir().expect("tempdir");
+    let root = repo.path();
+    init_repo_via_cli(root);
+    configure_identity_via_cli(root);
+    fs::write(root.join("tracked.txt"), "tracked\n").expect("write tracked");
+    assert_cli_success(
+        &run_libra_command(&["add", "tracked.txt"], root),
+        "add tracked",
+    );
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "init", "--no-verify"], root),
+        "commit init",
+    );
+    fs::write(root.join("new.txt"), "new\n").expect("write new");
+    assert_cli_success(
+        &run_libra_command(&["add", "-N", "new.txt"], root),
+        "add -N",
+    );
+
+    // V1: porcelain v1 and short both spell the worktree side ` A`.
+    for args in [["status", "--porcelain"], ["status", "-s"]] {
+        let output = run_libra_command(&args, root);
+        assert_cli_success(&output, "status v1/short");
+        let text = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            text.lines().any(|line| line == " A new.txt"),
+            "V1 expected ` A new.txt` in {text:?}"
+        );
+        assert!(
+            !text.contains("A  new.txt"),
+            "V1 must not report staged addition: {text:?}"
+        );
+    }
+
+    // `-uno` hides untracked files but NOT a tracked intent-to-add entry.
+    let uno = run_libra_command(&["status", "-s", "-uno"], root);
+    assert_cli_success(&uno, "status -uno");
+    assert!(
+        String::from_utf8_lossy(&uno.stdout)
+            .lines()
+            .any(|line| line == " A new.txt"),
+        "-uno must keep the intent-to-add row: {}",
+        String::from_utf8_lossy(&uno.stdout)
+    );
+
+    // V2: Git's exact `1 .A N...` record; both index mode and hash are absent.
+    let zero = "0".repeat(40);
+    let v2 = run_libra_command(&["status", "--porcelain=v2"], root);
+    assert_cli_success(&v2, "status --porcelain=v2");
+    let v2_text = String::from_utf8_lossy(&v2.stdout);
+    let record = v2_text
+        .lines()
+        .find(|line| line.ends_with(" new.txt"))
+        .unwrap_or_else(|| panic!("V2 missing new.txt record: {v2_text:?}"));
+    assert_eq!(
+        record,
+        format!("1 .A N... 000000 000000 100644 {zero} {zero} new.txt"),
+        "V2 record"
+    );
+
+    // V3: long format lists it as an unstaged `new file:`, never staged.
+    let long = run_libra_command(&["status"], root);
+    assert_cli_success(&long, "status long");
+    let long_text = String::from_utf8_lossy(&long.stdout);
+    assert!(
+        !long_text.contains("Changes to be committed"),
+        "V3 must not claim a staged change: {long_text:?}"
+    );
+    let unstaged_at = long_text
+        .find("Changes not staged for commit")
+        .unwrap_or_else(|| panic!("V3 missing unstaged section: {long_text:?}"));
+    assert!(
+        long_text[unstaged_at..].contains("new file: new.txt"),
+        "V3 expected `new file: new.txt`: {long_text:?}"
+    );
+
+    // V8: JSON puts it in `unstaged` and marks it explicitly.
+    let json = run_libra_command(&["status", "--json"], root);
+    assert_cli_success(&json, "status --json");
+    let parsed = parse_json_stdout(&json);
+    assert_eq!(
+        parsed["data"]["staged"]["new"],
+        serde_json::json!([]),
+        "V8 staged.new must stay empty"
+    );
+    let unstaged_new = parsed["data"]["unstaged"]["new"]
+        .as_array()
+        .expect("unstaged.new array");
+    assert!(
+        unstaged_new.iter().any(|path| path == "new.txt"),
+        "V8 unstaged.new: {unstaged_new:?}"
+    );
+    let intent = parsed["data"]["unstaged"]["intent_to_add"]
+        .as_array()
+        .expect("unstaged.intent_to_add array");
+    assert!(
+        intent.iter().any(|path| path == "new.txt"),
+        "V8 unstaged.intent_to_add: {intent:?}"
+    );
+    assert_eq!(parsed["data"]["is_clean"], false, "V8 is_clean");
 }

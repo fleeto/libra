@@ -53,6 +53,7 @@ impl StatusData {
     pub(super) fn is_dirty(&self) -> bool {
         !self.staged.is_empty()
             || !self.unstaged.is_empty()
+            || !self.intent_to_add.is_empty()
             || self.merge_state.is_some()
             || !self.unmerged.is_empty()
             // §B.6.0.1: "cannot inspect" must never report clean.
@@ -85,6 +86,10 @@ pub(super) async fn collect_status_data(
         })?;
     let ignore_case = effective_ignore_case_for_status().await?;
 
+    let sort_base = util::cur_dir()
+        .strip_prefix(util::working_dir())
+        .map(Path::to_path_buf)
+        .unwrap_or_default();
     let head = Head::current_result()
         .await
         .map_err(|error| status_branch_store_error("resolve HEAD", error))?;
@@ -108,6 +113,11 @@ pub(super) async fn collect_status_data(
     )
     .map_err(CliError::from)?;
     let mut unstaged = status_untracked::changes_to_current_directory(worktree.unstaged);
+    let intent_to_add: Vec<PathBuf> = worktree
+        .intent_to_add
+        .into_iter()
+        .map(|path| util::workdir_to_current(&path))
+        .collect();
     let unmerged = unmerged::collect(&worktree.index)
         .into_iter()
         .map(|entry| {
@@ -394,6 +404,8 @@ pub(super) async fn collect_status_data(
         has_commits,
         staged,
         unstaged,
+        intent_to_add,
+        sort_base,
         unmerged,
         ignored_files,
         stash_count,
@@ -442,6 +454,7 @@ pub(super) async fn collect_status_data(
             warnings
         },
         quote_path: extras.quote_path,
+        mode_fix_candidates: worktree.mode_fix_candidates,
         io_blocked: {
             let mut events = io_blocked;
             events.sort_by_key(|event| raw_path_sort_key(&event.path));
@@ -452,6 +465,8 @@ pub(super) async fn collect_status_data(
         rename_scan_blocked,
     };
     filter_status_data_by_pathspec(&mut data, args)?;
+    data.mode_fix_candidates
+        .retain(|path| data.unstaged.modified.contains(path));
     Ok(data)
 }
 
@@ -518,7 +533,9 @@ impl StatusData {
         let mut projected = self.clone();
         projected.staged = project_changes(&self.staged);
         projected.unstaged = project_changes(&self.unstaged);
+        projected.intent_to_add = project(&self.intent_to_add);
         projected.ignored_files = project(&self.ignored_files);
+        projected.mode_fix_candidates = project(&self.mode_fix_candidates);
         projected.staged_rename_details = project_details(&self.staged_rename_details);
         projected.unstaged_rename_details = project_details(&self.unstaged_rename_details);
         for entry in &mut projected.unmerged {

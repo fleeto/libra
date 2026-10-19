@@ -1560,6 +1560,9 @@ async fn clone_into_destination(
         shared: None,
         object_format: Some(object_format.clone()),
         ref_format: None,
+        separate_git_dir: None,
+        separate_libra_dir: None,
+        recurse_submodules: false,
         from_git_repository: None,
         vault: true,
     })

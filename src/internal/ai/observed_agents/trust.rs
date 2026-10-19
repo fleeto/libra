@@ -141,7 +141,17 @@ pub fn compute_provenance(path: &Path) -> Result<Provenance> {
         use std::os::unix::fs::MetadataExt;
         (meta.dev(), meta.ino(), meta.mtime())
     };
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    let (device, inode, mtime) = {
+        let (device, inode) = crate::utils::windows_fs::identity(&file)
+            .context("inspect Windows external agent binary identity")?;
+        let mtime = meta
+            .modified()?
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs() as i64;
+        (device, inode, mtime)
+    };
+    #[cfg(not(any(unix, windows)))]
     let (device, inode, mtime) = {
         let mtime = meta
             .modified()
@@ -180,7 +190,15 @@ pub fn ensure_parent_not_world_writable(path: &Path) -> Result<()> {
             );
         }
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        let parent = path
+            .parent()
+            .context("trusted Windows binary has no parent directory")?;
+        crate::utils::windows_fs::ensure_directory_not_publicly_writable(parent)
+            .context("validate trusted Windows binary parent ACL")?;
+    }
+    #[cfg(not(any(unix, windows)))]
     let _ = path;
     Ok(())
 }
@@ -204,7 +222,10 @@ pub fn ensure_dir_not_world_writable(path: &Path) -> Result<()> {
             );
         }
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    crate::utils::windows_fs::ensure_directory_not_publicly_writable(path)
+        .context("validate trusted Windows directory ACL")?;
+    #[cfg(not(any(unix, windows)))]
     let _ = path;
     Ok(())
 }
@@ -212,6 +233,15 @@ pub fn ensure_dir_not_world_writable(path: &Path) -> Result<()> {
 /// Expand a single leading `~` against `$HOME` (best-effort; returns the path
 /// unchanged when there is no HOME or no leading `~`).
 fn expand_tilde(raw: &str) -> PathBuf {
+    #[cfg(windows)]
+    if let Some(home) = dirs::home_dir() {
+        if raw == "~" {
+            return home;
+        }
+        if let Some(rest) = raw.strip_prefix("~/").or_else(|| raw.strip_prefix("~\\")) {
+            return home.join(rest);
+        }
+    }
     if let Some(rest) = raw.strip_prefix("~/")
         && let Some(home) = std::env::var_os("HOME")
     {
@@ -444,6 +474,9 @@ pub async fn resolve_exporter_binary(slug: &str) -> Result<ResolvedExporter> {
     let dirs = read_trusted_dirs().await?;
     let mut refusals = Vec::new();
     for dir in &dirs {
+        #[cfg(windows)]
+        let candidate = dir.join(format!("{slug}.exe"));
+        #[cfg(not(windows))]
         let candidate = dir.join(slug);
         if !fs::metadata(&candidate)
             .map(|m| m.is_file())

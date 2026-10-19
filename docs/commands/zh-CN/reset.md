@@ -36,6 +36,9 @@ libra reset [<target>] --pathspec-from-file=<file> [--pathspec-file-nul]
 
 工作树物化按条目 mode 语义执行（plan issues/470 FM-02）：文件按条目权限位创建（`100755`→`0777`、`100644`→`0666`）并受进程 `umask` 约束，经同目录临时文件原子替换；索引/树条目保留 mode（`100755`/`100644`/`120000`）。
 
+带 pathspec 的 reset 会把 intent-to-add 条目（`libra add -N`）从索引中移除，
+工作树文件回到未跟踪状态，与 Git 的 `reset <path>` 一致；`libra restore --staged` 同理。
+
 ## 选项
 
 | 标志 | 长选项 | 值 | 说明 |

@@ -1,6 +1,48 @@
 # Agent Command Development
 
+## Grok capture (GK-05)
+
+Grok is supported and hook-installable with `support_wave=grok`, not `first_batch`, and is not a `review` or `investigate` launcher. **Automatic Thinking capture is paused.** Hook lifecycle events are recorded through the shared pipeline; decoding does not read session logs or write `GROK_HOME/libra-capture`. Existing readers for local `updates.jsonl` and `chat_history.jsonl` are not yet connected to the authorized snapshot/checkpoint writer. Offline observer JSON is scratch state, not a Libra checkpoint. The intended transcript retains Thinking text and unproven `encrypted_content`; Libra does not decrypt it. Current synthetic reader tests do not prove that live checkpoints contain it. Default `checkpoint show` does not print Thinking plaintext; an explicit transcript path returns only content actually stored.
+
+## Claude Code hook registry (CC-01)
+
+`src/internal/ai/hooks/providers/claude/events.rs` is the only Claude event taxonomy. The parser reads lifecycle kinds from that table and does not keep a second name list. Safely installable names match the CC-00 freeze. `WorktreeCreate`, `WorktreeRemove`, and `PreModelSwitch` are control-sensitive, stay off the current ingress, and are not installed. `SessionStop`, `ModelUpdate`, and `Compaction` remain parsable deprecated aliases and are excluded from the installable set. Unknown names and unknown extra keys are partial; diagnostics are static and do not echo the payload. `agent enable` writes every safely installable event. `SessionEnd` omits the host timeout. `FileChanged` omits the matcher and does not emit `watchPaths`. `agent doctor` lists known events as installable or excluded and whether a Libra-owned entry is configured. `agent hooks claude-code observe` feeds safely installable names through the existing capture coordinator, prints nothing, and exits 0 for controllable success and failure. MessageDisplay admits 128 batches per session in-process and then drops. Control-sensitive names stay off that ingress. `normalize_claude_transcript` is the live and import reader for Claude thinking: a non-empty decoded `thinking` string becomes one `SemanticRecord::Reasoning`, while `thinking.signature` and `redacted_thinking.data` remain in the ordinary transcript bytes and are Unproven without native proof. Empty and missing stay distinct. Duplicate keys reject that line. Coverage schema stays v1 unless a readable reasoning record selects the existing v2. Authorized `checkpoint show --json` and ordinary export return the redacted thinking text and signature. List and graph do not. Live capture, import, and snapshot recovery read those attached fields from the original JSONL, with provider, session, turn, record, and content index. A duplicate key rejects that record and leaves retained bytes in place. A mismatched session file is not associated. Ordinary retention does not create a native artifact. An explicit `libra agent doctor --repair` appends one coverage revision for an authorized legacy Claude checkpoint. The revision key binds that checkpoint and the ordinary transcript content. Repeating the repair with the same content leaves the revision and the stored objects in place. Erase and the cloud mirror keep that replacement together with the old checkpoint reference, and a tombstone blocks revival.
+
 > **Coverage-v2 source version:** The coverage-v2 descriptions below refer to the Libra 0.30.50 source line and later compatible versions. This is not a stable-release announcement; check the [official releases](https://github.com/libra-tools/libra/releases) and `libra --version` for installed support. Other sections retain their own version requirements. Coverage-v2 does not prove native origin or authorize native reasoning artifacts.
+
+## Final OpenCode delivery scope (2026-10-18)
+
+[plan-20260902 final C](../plan/plan-20260902.md#ordinary-final-c-20261017)
+closes this wave around ordinary OpenCode capture and safe partial results.
+The current ordinary source reference is official OpenCode **2.0.29**, commit
+`042d0832f5f3a73eaa039a58a7d565776f6d4290`; the frozen 2.0.26 fixtures and
+private `.1`/`.2` registration recipes retain their historical applicability.
+Neither those fixtures nor one successful session establish support for every
+export shape or model. The actual current CLI and
+[ordinary source limitations](../../commands/agent.md#current-official-opencode-ordinary-source-baseline)
+remain authoritative, including rejected unsupported-state historical imports
+(`LBR-AGENT-020`) and bounded structural/deadline failures.
+
+Ordinary events, prompt/model/tokens/files and supported provider-visible
+reasoning use the existing typed redaction and coverage projection. An
+unproven `signature`, `redactedData` or `reasoningEncryptedContent` is a private
+candidate: retain partial/Incomplete classification, remove its content from
+ordinary sinks and create **zero native artifacts**. A safe ordinary partial
+checkpoint is possible only where the existing consumer permits it; a refused
+source or pending receipt is not a successful empty checkpoint. Source A
+remains UNPROVEN. No producer install, new issuer or real native-field archive
+is promised by this plan. Previously published verifier/carrier and legacy
+registration compatibility remain available under their existing constraints.
+
+The native startup issue was **closed-by-scope-decision, unfixed and non-PASS**,
+not rescheduled. See the [gap ledger](../gap/agent-trace.md#opencode-final-c-ledger)
+for all six withdrawn cards and the original deferred inventory. Native work
+requires a new explicit product decision; it has no automatic restart queue.
+Linux functional acceptance remains with the user. Installed OpenCode,
+exporter/hook-to-Session and account/model acceptance, including controlled
+fake-exporter Session tests, run manually on macOS outside CI. Pure parser,
+codec, cryptographic and sandbox/static safety tests remain eligible for CI.
+
 
 `libra agent` is an intentionally different external-agent capture extension,
 not a Git-compatible command.
@@ -341,9 +383,10 @@ the disposable project before requesting a single fixed file write. The gate
 checks captured prompt/model/tokens/files against the source projection,
 persisted file metadata, stopped sessions, doctor and uninstall retention.
 A failed or timed-out preflight is a failure, with no model request started.
-On the current acceptance machine, OpenCode's private server did not report
-readiness; real content acceptance is deferred as `DEFER-OG-OPENCODE-BOOT-01`.
-The harness and synthetic tests do not prove real content or native reasoning.
+The historical 2.0.26 run failed server readiness and remains recorded as
+`DEFER-OG-OPENCODE-BOOT-01`, not a passing content gate. Current 2.0.29 ordinary
+automatic-capture evidence has its own source/version boundaries in the plan;
+it does not retroactively pass that old smoke or prove native reasoning.
 
 ### Scoped run cleanup consumers
 
@@ -367,7 +410,7 @@ A sealed native carrier moves original opaque bytes and their source-bound proof
 
 The authenticated private import transport carries a native-proven typed collection from the authorized descriptor helper to the parent. A one-request key binds the helper response to the request, authorized source, repository scope and collection; the parent verifies that binding and retains the complete native proof before assigning owned items to reserved turns and the shared checkpoint store. An unauthenticated or unproved nonempty collection fails closed, without treating a wire DTO as native authority or returning candidate bytes to the ordinary transcript. Empty preparation keeps its existing response and source projection bytes. Pending v1 still refuses nonordinary payloads before writing an envelope; pending v2 accepts only a validated borrowed native carrier and its prepared identity plan under the existing receipt, fence and lease rules. For an enabled Claude deadline-FD route, preparation is rejected before source resolution, without an ordinary fallback. An existing Pending receipt prevents the wrapper failure diagnostic; NotTracked retains only its existing bounded diagnostic attempt and does not advance sync_revision.
 
-Production provider capabilities remain disabled and no production native issuer is admitted. Synthetic positive fixtures prove the carrier and import transport mechanism only. Source A remains UNPROVEN and real native field admission is deferred; unproved OpenCode fields are not archived. Durable reasoning replay still requires its later gate. This mechanism adds no decryption capability or public metadata enum value.
+Production provider capabilities remain disabled and no production native issuer is admitted. Synthetic positive fixtures prove the carrier and import transport mechanism only. Source A remains UNPROVEN and real native field admission is outside this plan’s final scope; unproved OpenCode fields are not archived. Durable reasoning replay still requires its later gate. This mechanism adds no decryption capability or public metadata enum value.
 
 
 ### Pending reasoning v2 codec (OG-17)

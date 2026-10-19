@@ -1025,6 +1025,9 @@ async fn test_cherry_pick_sha256_hash_handling() {
         shared: None,
         object_format: Some("sha256".to_string()),
         ref_format: None,
+        separate_git_dir: None,
+        separate_libra_dir: None,
+        recurse_submodules: false,
         from_git_repository: None,
         vault: false,
     })

@@ -21,6 +21,10 @@ repository's hash kind.
 An empty index produces the canonical empty tree
 (`4b825dc642cb6eb9a060e54bf8d69288fbee4904` for SHA-1).
 
+Intent-to-add entries (`libra add -N`) are skipped: their empty blob is only a
+placeholder and never becomes tree content, so `write-tree` matches Git's
+cache-tree behavior (`t2203:94`, `:114`).
+
 This is a read-only plumbing command: it writes tree objects but does not move
 any ref or change the index or working tree.
 

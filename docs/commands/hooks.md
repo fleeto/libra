@@ -135,13 +135,19 @@ phase, and a recovery fence) plus domain-separated file fingerprints, never
 raw settings snapshots; an unknown fingerprint state is deliberately zero-write
 rather than an automatic repair.
 
-Managed Session Capture currently requires a Unix host to initialize its
-repository-private deduplication key with secure descriptor-relative,
-no-replace publication. On non-Unix platforms capture refuses before creating
-any key file and reports an actionable diagnostic instead of weakening that
-boundary. This fixed capability result is never silent for Codex: a
-nonterminal `libra hooks codex` callback (and the legacy `libra agent hooks
-codex` alias) prints the path-free Unix-host remedy to stderr and exits `0`,
+Managed Session Capture supports Unix and native Windows secure
+repository-private deduplication-key initialization. Unix uses descriptor-relative,
+no-replace publication; Windows uses no-follow local NTFS handles, a current-user/SYSTEM
+ACL and handle-relative no-replace publication. Native Windows support requires
+current main source builds and is not included in v0.30.50 release binaries;
+see [Windows capture](agent.md#native-windows-capture).
+
+When the platform cannot provide secure initialization, capture refuses before
+creating a key file and reports an actionable, path-free platform remedy.
+Unsupported non-Windows platforms use the Unix-host remedy; Windows failures
+point to the matching `libra.exe` helper and local storage. This fixed capability
+result is never silent for Codex: a nonterminal `libra hooks codex` callback
+(and the legacy `libra agent hooks codex` alias) prints a path-free platform remedy to stderr and exits `0`,
 while `SessionEnd` returns non-zero with the same remedy. The fail-closed
 installed Claude surface and the hidden `libra agent hooks` Claude Code /
 OpenCode alias return non-zero for every event with that same path-free remedy
@@ -186,7 +192,7 @@ codes the repository preflight of every other command uses, never the generic
 | `core.objectformat` is unsupported | `LBR-REPO-002` | repair `core.objectformat` |
 
 Precedence is: a malformed frame (`LBR-AGENT-008`) and an invocation outside
-any repository (`LBR-REPO-001`), then the non-Unix capability refusal
+any repository (`LBR-REPO-001`), then the unsupported-platform capability refusal
 (`LBR-UNSUPPORTED-001`), then these repository classes, then the generic
 capture failure. The installed Codex surface keeps its own exit policy: a
 nonterminal callback is acknowledged (exit `0`) and a trusted `SessionEnd`

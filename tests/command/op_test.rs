@@ -2411,3 +2411,42 @@ fn repository_output_notes_matches_inline_expected() {
     );
     assert_eq!(repository_op_total(repo.path(), "notes"), before);
 }
+
+fn op_count(p: &Path) -> usize {
+    let out = run_libra_command(&["--json", "op", "log"], p);
+    assert_cli_success(&out, "op log");
+    let json = parse_json_stdout(&out);
+    json["data"]["operations"]
+        .as_array()
+        .map(|a| a.len())
+        .unwrap_or(0)
+}
+
+/// Issue #483: the preview exemption is narrow — real worktree mutations still
+/// record an operation, while the `-n` form does not.
+#[test]
+#[serial_test::serial(cwd)]
+fn test_worktree_mutations_still_record_operations() {
+    let repo = tempdir().unwrap();
+    let p = repo.path();
+    init_repo_via_cli(p);
+    configure_identity_via_cli(p);
+    fs::write(p.join("f"), "base\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "f"], p), "add f");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "base", "--no-verify"], p),
+        "commit base",
+    );
+    fs::write(p.join("f"), "changed\n").unwrap();
+
+    let before = op_count(p);
+    assert_cli_success(&run_libra_command(&["add", "-u"], p), "add -u");
+    let after = op_count(p);
+    assert!(after > before, "real mutation records an operation");
+
+    // A subsequent preview does not.
+    fs::write(p.join("f"), "changed again\n").unwrap();
+    let before_preview = op_count(p);
+    assert_cli_success(&run_libra_command(&["add", "-n", "-u"], p), "add -n -u");
+    assert_eq!(op_count(p), before_preview, "preview records no operation");
+}

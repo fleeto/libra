@@ -374,9 +374,20 @@ fn init_default_branch_config_read_failure_is_io_error_before_creating_repo() {
         .expect("create unreadable config-db directory");
     let repo = fixture.path("config-read-failure");
 
+    // Template and object-format resolution now precede the branch read.
+    // Pin those sources on the command line so this case still fails on
+    // `init.defaultBranch`, before any repository directory is created.
     let output = fixture.run(
         &fixture.root,
-        &["init", "--vault", "false", path_str(&repo)],
+        &[
+            "init",
+            "--vault",
+            "false",
+            "--template=",
+            "--object-format",
+            "sha1",
+            path_str(&repo),
+        ],
     );
 
     assert_eq!(output.status.code(), Some(128));
@@ -396,9 +407,19 @@ fn init_default_branch_permission_failure_is_io_error_before_creating_repo() {
         .expect("make config dir inaccessible");
     let repo = fixture.path("permission-failure");
 
+    // Same source pins as the unreadable-database case: reach the
+    // default-branch read instead of failing first on `init.templateDir`.
     let output = fixture.run(
         &fixture.root,
-        &["init", "--vault", "false", path_str(&repo)],
+        &[
+            "init",
+            "--vault",
+            "false",
+            "--template=",
+            "--object-format",
+            "sha1",
+            path_str(&repo),
+        ],
     );
 
     fs::set_permissions(&config_dir, fs::Permissions::from_mode(0o700))
@@ -743,10 +764,13 @@ fn path_str(path: &Path) -> &str {
     path.to_str().expect("fixture path is utf8")
 }
 
+/// Drop trailing whitespace only. Short and porcelain lines use a leading
+/// space for an unstaged change (` M path`); trimming the whole string would
+/// erase that index column on the first line.
 fn stdout_trim(output: &Output) -> String {
     String::from_utf8(output.stdout.clone())
         .expect("stdout should be utf8")
-        .trim()
+        .trim_end()
         .to_string()
 }
 

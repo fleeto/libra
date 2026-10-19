@@ -647,11 +647,24 @@ mod tests {
 
     /// The table name at the head of [`body_after_create_table`]'s output.
     fn table_name_after(chunk: &str) -> String {
-        body_after_create_table(chunk)
+        let body = body_after_create_table(chunk).trim_start();
+        let name: String = body
             .trim_start_matches(['`', '"'])
             .chars()
             .take_while(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == '_')
-            .collect()
+            .collect();
+        let mut rest = body.trim_start_matches(['`', '"']);
+        rest = rest.get(name.len()..).unwrap_or("");
+        rest = rest.trim_start_matches(['`', '"']).trim_start();
+        // A diagnostic such as "CREATE TABLE is missing a name" is not DDL.
+        // SQLite also permits CREATE TABLE name AS SELECT without columns.
+        let as_query = rest
+            .strip_prefix("as")
+            .is_some_and(|tail| tail.starts_with(char::is_whitespace) || tail.starts_with('('));
+        if name.is_empty() || !(rest.starts_with('(') || as_query) {
+            return String::new();
+        }
+        name
     }
 
     /// Rust sources that issue DDL against a database OTHER than the local
@@ -782,6 +795,20 @@ mod tests {
             }
         }
         created
+    }
+
+    #[test]
+    fn table_inventory_ignores_ddl_diagnostics_but_keeps_real_statements() {
+        let sql = "create table is missing a name\ncreate table name quote is not closed\ncreate table if not exists `real_table` (id text);create table copy_table as select * from real_table;create table newline_copy as\nselect 1;create table parenthesized_copy as(select 1);";
+        assert_eq!(
+            tables_in(sql),
+            BTreeSet::from([
+                "real_table".to_owned(),
+                "copy_table".to_owned(),
+                "newline_copy".to_owned(),
+                "parenthesized_copy".to_owned(),
+            ])
+        );
     }
 
     /// PRODUCTION Rust DDL across the whole `src/` tree, minus the explicit

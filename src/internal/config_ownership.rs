@@ -332,6 +332,12 @@ pub const CODE_AGENT_PROCESS_CACHES: &[ProcessCacheSurface] = &[
         discipline: "process-lifetime reaper thread handle; holds no repository state",
     },
     ProcessCacheSurface {
+        source_path: "src/internal/ai/hooks/providers/claude/events.rs",
+        static_name: "COUNTS",
+        discipline: "in-process MessageDisplay coalesce counts keyed by session id; capped at 128 \
+                     batches, holds no repository state, and is cleared by the test reset",
+    },
+    ProcessCacheSurface {
         source_path: "src/internal/ai/authorized_read.rs",
         static_name: "RUNNING_LIBRA_PROGRAM",
         discipline: "process-lifetime executable path registered only by Libra's main entrypoint; \
@@ -430,6 +436,11 @@ mod tests {
     /// workdir config surfaces are single names directly under `.libra/`.
     const NON_CONFIG_ALLOWLIST: &[&str] = &[
         "state.json",               // runtime session state, not configuration
+        "checkpoint.json",          // Grok session state file, not a .libra config surface
+        "store.json",               // Grok capture cursor, not a .libra config surface
+        "pending.json",             // Grok capture pending marker, not a .libra config surface
+        "lifecycle.json",           // Grok capture lifecycle marker, not a .libra config surface
+        "libra-grok-capture.json",  // Libra-owned file in the external Grok hooks directory
         "metadata.json",            // capture metadata written by the runtime
         "package.json",             // embedded web frontend asset
         "manifest.json",            // web asset manifest

@@ -1513,6 +1513,9 @@ mod tests {
             shared: None,
             object_format: None,
             ref_format: None,
+            separate_git_dir: None,
+            separate_libra_dir: None,
+            recurse_submodules: false,
             from_git_repository: None,
             vault: false,
         })

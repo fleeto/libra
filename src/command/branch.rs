@@ -1370,9 +1370,12 @@ async fn remote_tracking_exists(remote: &str, branch: &str) -> Result<bool, Bran
 }
 
 /// ADR-HF-08 parse order: configured `remote/branch` (preferring an existing
-/// tracking ref), then a local `refs/heads/<upstream>`, otherwise missing.
+/// tracking ref, accepting a fully-qualified `refs/remotes/...` spec and a bare
+/// remote name resolved through its cached HEAD), then a local
+/// `refs/heads/<upstream>`, otherwise missing.
 async fn resolve_upstream_spec(upstream: &str) -> Result<ResolvedUpstream, BranchError> {
-    if let Some((remote, branch)) = split_remote_tracking_name(upstream) {
+    let short = upstream.strip_prefix("refs/remotes/").unwrap_or(upstream);
+    if let Some((remote, branch)) = split_remote_tracking_name(short) {
         let configured = ConfigKv::remote_config(remote)
             .await
             .map_err(|e| branch_config_read_error(format!("remote '{remote}' configuration"), e))?
@@ -1388,12 +1391,40 @@ async fn resolve_upstream_spec(upstream: &str) -> Result<ResolvedUpstream, Branc
             }
         }
     }
+    if !short.contains('/')
+        && let Some(branch) = remote_head_branch(short).await?
+    {
+        return Ok(ResolvedUpstream::Remote {
+            remote: short.to_string(),
+            merge: branch,
+        });
+    }
     if local_branch_exists(upstream).await? {
         return Ok(ResolvedUpstream::Local {
             name: upstream.to_string(),
         });
     }
     Err(BranchError::UpstreamMissing(upstream.to_string()))
+}
+
+/// Resolve a bare remote name to the branch its cached HEAD
+/// (`refs/remotes/<remote>/HEAD`) points at, or `None` when the remote is
+/// unknown or its HEAD is detached.
+async fn remote_head_branch(remote: &str) -> Result<Option<String>, BranchError> {
+    let configured = ConfigKv::remote_config(remote)
+        .await
+        .map_err(|e| branch_config_read_error(format!("remote '{remote}' configuration"), e))?
+        .is_some();
+    if !configured {
+        return Ok(None);
+    }
+    match Head::remote_current_result(remote)
+        .await
+        .map_err(map_head_commit_store_error)?
+    {
+        Some(Head::Branch(name)) => Ok(Some(name)),
+        _ => Ok(None),
+    }
 }
 
 fn format_upstream_ref(remote: &str, merge_branch: &str) -> String {

@@ -10,6 +10,7 @@ libra add -A
 libra add -u [PATHSPEC...]
 libra add --refresh [PATHSPEC...]
 libra add --resolved [PATHSPEC...]
+libra add -N [PATHSPEC...]
 ```
 
 ## Description
@@ -93,6 +94,26 @@ adding new files or removing entries. Mutually exclusive with `-A` and `-u`.
 libra add --refresh
 ```
 
+### `-N, --intent-to-add`
+
+Record the matched untracked paths in the index as *intent to add* without staging
+their content: the entry carries the canonical empty blob plus the index v3
+`intent_to_add` extended flag, exactly like Git. `status` reports it as an unstaged
+new file (` A`), `diff`/`diff-files`/`diff HEAD` show the worktree content as a new
+file, and `diff --cached` omits it. A later `libra add <path>` stages the real
+content and clears the flag; `write-tree`/`commit` never record the placeholder.
+
+Already-tracked paths are a successful no-op. A pathspec that matches nothing keeps
+the ordinary `pathspec '…' did not match any files` error, and `--dry-run` previews
+the recorded paths without writing the index. The flag is mutually exclusive with
+nothing in Git, so combinations such as `-N` + a real staging mode follow the normal
+last-mode behavior of `add`.
+
+```bash
+libra add -N new_file.txt
+libra add --intent-to-add src/generated.rs
+```
+
 ### `-f, --force`
 
 Allow adding files that are otherwise ignored by Git/Libra ignore rules.
@@ -103,7 +124,7 @@ libra add -f ignored_file.log
 
 ### `-n, --dry-run`
 
-Preview what would be staged without actually modifying the index. Output shows which
+Preview what would be staged without actually modifying the index. No objects are written and no operation is recorded. Output shows which
 files would be added, modified, or removed. `-n` matches Git; `-d` is also accepted
 as a Libra-compatible short alias.
 
@@ -372,6 +393,7 @@ Example:
     "refreshed": [],
     "ignored": [],
     "failed": [],
+    "intent_to_add": [],
     "dry_run": false
   }
 }
@@ -419,22 +441,20 @@ Partial failure with `--ignore-errors`:
 
 - `added` / `modified` / `removed` correspond to new, changed, and deleted files staged
 - `refreshed` is populated only when `--refresh` is used
+- `intent_to_add` lists the paths recorded by `add -N` (omitted when empty)
 - `ignored` lists paths skipped by Git/Libra ignore rules
 - `failed` lists paths that failed to stage, each with `path` and `message`
 - `dry_run` is `true` when `-n` / `--dry-run` is passed; no files are actually staged
 
 ## Design Rationale
 
-### No `--intent-to-add` / `-N`
+### `--intent-to-add` / `-N`
 
-Git's `--intent-to-add` (`-N`) records an empty blob for untracked files so that they
-appear in `git diff` output without actually staging their content. This is a workflow
-convenience for reviewing new files before staging them. Libra omits this flag because
-`libra status` already shows untracked files clearly, and `libra diff` is designed to
-work with the full working tree state. The two-step "intent then stage" workflow adds
-cognitive overhead without meaningfully improving the review experience. Users who want
-to review new files before committing can use `libra add --dry-run` followed by
-`libra diff --staged` after staging.
+`libra add -N` records the Git intent-to-add shape byte-compatibly: an empty blob
+plus the index v3 extended flag, with `status`/`diff` rendering the worktree file as
+an unstaged new file and every tree writer (`write-tree`, `commit`, both normal and
+`-a`) skipping the placeholder. This preserves Git's "intent, review with `diff`,
+then stage" workflow while keeping the empty blob out of history.
 
 ### `--patch` / `-p` interactive staging
 
@@ -462,7 +482,7 @@ fallbacks. `info/exclude` is per-worktree (never shared via `commondir`; see
 [check-ignore.md](check-ignore.md)). All sources use Git ignore pattern
 syntax.
 
-`libra init` still creates a root `.libraignore` in non-bare repositories for
+`libra init` no longer creates a default `.libraignore`; create one for
 Libra-specific rules, and Git imports or non-bare clones may copy existing
 `.gitignore` files to matching `.libraignore` files for explicit Libra
 overrides.
@@ -479,7 +499,7 @@ overrides.
 | Refresh stat info | `git add --refresh` | N/A | `libra add --refresh` |
 | Verbose output | `git add -v` | N/A | `libra add -v` |
 | Ignore errors | `git add --ignore-errors` | N/A | `libra add --ignore-errors` |
-| Intent to add | `git add -N` / `--intent-to-add` | N/A | N/A (not implemented) |
+| Intent to add | `git add -N` / `--intent-to-add` | N/A | `libra add -N` / `--intent-to-add` |
 | Interactive patch | `git add -p` / `--patch` | N/A | `libra add -p` / `--patch` |
 | Interactive select | `git add -i` / `--interactive` | N/A | N/A |
 | Edit diff before staging | `git add -e` / `--edit` | N/A | N/A |

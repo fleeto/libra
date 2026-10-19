@@ -14,6 +14,9 @@ libra write-tree [--index-file <path>]
 
 空 index 产生规范空 tree（SHA-1 下为 `4b825dc642cb6eb9a060e54bf8d69288fbee4904`）。
 
+intent-to-add 条目（`libra add -N`）会被跳过：其空 blob 只是占位，永远不会成为
+tree 内容，因此 `write-tree` 与 Git 的 cache-tree 行为一致（`t2203:94`、`:114`）。
+
 这是只读底层命令：它写入 tree 对象，但不移动任何 ref，也不修改 index 或工作树。
 
 写入任何 tree 对象前，`write-tree` 会校验每个 stage-0 index 条目中指向本仓库对象的

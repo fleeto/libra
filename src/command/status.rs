@@ -398,6 +398,12 @@ pub struct StatusData {
     has_commits: bool,
     staged: Changes,
     unstaged: Changes,
+    /// WT-06 (ADR-WT-05): index stage-0 entries carrying the v3
+    /// `intent_to_add` extended flag whose working-tree file exists. Git
+    /// renders these as the unstaged worktree side of a new file (` A` /
+    /// `new file:`), never as a staged `A` row: the index holds only the empty
+    /// blob placeholder. Paths are in the same display base as `unstaged`.
+    intent_to_add: Vec<PathBuf>,
     unmerged: Vec<UnmergedEntry>,
     ignored_files: Vec<PathBuf>,
     stash_count: Option<usize>,
@@ -431,6 +437,16 @@ pub struct StatusData {
     /// closed on any entry; JSON reports the partial result plus
     /// `data.io_blocked[]` with `is_clean = false`.
     io_blocked: Vec<crate::command::status_probe::IoBlockedEvent>,
+    /// WT-06 follow-up (t7508): the current directory relative to the
+    /// repository root. Display paths in `staged`/`unstaged`/`intent_to_add`
+    /// are cwd-relative, but Git orders short/porcelain rows by the
+    /// REPOSITORY-ROOT path. Renderers join this base before sorting (empty
+    /// at the root, where display order and root order already agree).
+    sort_base: PathBuf,
+    /// ADR-FM-06 (#470 FM-05): legacy-materialization repair candidates —
+    /// index 100755, working tree not executable, content identical. Drives
+    /// the one human long-format hint only (short/porcelain/JSON unchanged).
+    mode_fix_candidates: Vec<PathBuf>,
     /// Whether the RENAME side (probe or candidate reads) was blocked, as
     /// opposed to the base scan. `rename_detection_complete` keys off this
     /// so a base-scan-only block does not also claim the rename pairing
@@ -985,7 +1001,21 @@ pub async fn changes_to_be_committed_safe() -> Result<Changes, StatusError> {
         source,
     })?;
     let head_commit = Head::current_commit().await;
-    let tracked_files = index.tracked_files();
+    // WT-06/WT-07 (ADR-WT-05): an intent-to-add entry is an empty-blob
+    // PLACEHOLDER for a new file, not staged content. Git never reports it as
+    // `A ` and never writes it into a tree; excluding it here is the single
+    // staged-side rule every consumer (status, commit, rm) shares.
+    let intent_to_add: HashSet<PathBuf> = index
+        .tracked_entries(0)
+        .into_iter()
+        .filter(|entry| entry.flags.intent_to_add)
+        .map(|entry| PathBuf::from(&entry.name))
+        .collect();
+    let tracked_files: Vec<PathBuf> = index
+        .tracked_files()
+        .into_iter()
+        .filter(|path| !intent_to_add.contains(path))
+        .collect();
 
     if head_commit.is_none() {
         changes.new = tracked_files;
@@ -1014,7 +1044,13 @@ pub async fn changes_to_be_committed_safe() -> Result<Changes, StatusError> {
         let Some(item_str) = item_path.to_str() else {
             continue;
         };
-        if index.tracked(item_str, 0) {
+        // WT-06 (t2203:18): Git treats an intent-to-add placeholder as ABSENT
+        // on the index side. If HEAD has the path, that is a staged DELETION
+        // (`D` in column 1) even though stage 0 holds the empty blob; the
+        // worktree side then supplies the `A` (`DA` when the file exists).
+        if intent_to_add.contains(item_path) {
+            changes.deleted.push(item_path.clone());
+        } else if index.tracked(item_str, 0) {
             // A staged change is either a content change (blob hash differs) OR a
             // mode change (e.g. `add --chmod=+x`): the index records 100755 while
             // the HEAD tree still has 100644, with the same blob.
@@ -1836,7 +1872,7 @@ mod test {
             mk("uu.txt", [true, true, true]),
         ];
         let empty = Changes::default();
-        let rows = generate_short_format_status_with_unmerged(&empty, &empty, &unmerged);
+        let rows = generate_short_format_status_with_unmerged(&empty, &empty, &unmerged, &[]);
         let by_path: std::collections::BTreeMap<_, _> = rows
             .into_iter()
             .map(|(path, x, y)| (path, (x, y)))
@@ -2040,6 +2076,86 @@ mod test {
         assert!(
             worktree_failed.message.contains("5 candidate(s)"),
             "{worktree_failed:?}"
+        );
+    }
+}
+
+#[cfg(all(test, unix))]
+mod mode_fix_hint_test {
+    use std::os::unix::fs::PermissionsExt;
+
+    use git_internal::internal::index::IndexEntry;
+    use serial_test::serial;
+    use tempfile::tempdir;
+
+    use super::*;
+    use crate::utils::test::ChangeDirGuard;
+
+    /// FM-05 (M-HINT H1/H3/H5): candidate detection needs index 100755,
+    /// worktree non-exec, and identical content; reverse direction and
+    /// `core.fileMode=false` stay empty.
+    #[test]
+    #[serial(cwd, env)]
+    fn mode_fix_candidates_track_legacy_shape_only() {
+        let repo = tempdir().expect("temp repo");
+        std::fs::create_dir_all(repo.path().join(".libra/objects")).expect("objects dir");
+        std::fs::write(repo.path().join(".libra/libra.db"), b"").expect("db marker");
+        let _guard = ChangeDirGuard::new(repo.path());
+
+        let run_content = b"x\n";
+        let plain_content = b"y\n";
+        std::fs::write(repo.path().join("run.sh"), run_content).expect("write run");
+        std::fs::write(repo.path().join("plain.txt"), plain_content).expect("write plain");
+
+        let mut index = Index::new();
+        for (name, mode) in [("run.sh", 0o100755u32), ("plain.txt", 0o100644)] {
+            let path = repo.path().join(name);
+            let mut entry = IndexEntry::new_from_blob(
+                name.to_string(),
+                calc_file_blob_hash(&path).expect("hash"),
+                0,
+            );
+            entry.mode = mode;
+            index.add(entry);
+        }
+        let index_path = repo.path().join(".libra/index");
+        index.save(&index_path).expect("save index");
+
+        // Legacy shape: run.sh lost exec, plain.txt gained it.
+        std::fs::set_permissions(
+            repo.path().join("run.sh"),
+            std::fs::Permissions::from_mode(0o644),
+        )
+        .expect("chmod run");
+        std::fs::set_permissions(
+            repo.path().join("plain.txt"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .expect("chmod plain");
+
+        let scan = status_untracked::collect_status_worktree_changes(
+            UntrackedFiles::No,
+            false,
+            false,
+            true,
+        )
+        .expect("scan");
+        assert_eq!(
+            scan.mode_fix_candidates,
+            vec![PathBuf::from("run.sh")],
+            "only the executable-bit-lost direction is a candidate"
+        );
+
+        let scan = status_untracked::collect_status_worktree_changes(
+            UntrackedFiles::No,
+            false,
+            false,
+            false,
+        )
+        .expect("scan fileMode=false");
+        assert!(
+            scan.mode_fix_candidates.is_empty(),
+            "fileMode=false yields no candidates"
         );
     }
 }

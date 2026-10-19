@@ -503,6 +503,15 @@ fn assert_cli_success(output: &Output, context: &str) {
     );
 }
 
+/// Run `libra <args>` and return its stdout as an owned UTF-8 string.
+///
+/// Binding the `Output` inside the helper avoids the E0716 temporary-borrow
+/// trap that an inline `from_utf8_lossy(&run_libra_command(..).stdout)` hits.
+fn libra_stdout(args: &[&str], cwd: &Path) -> String {
+    let output = run_libra_command(args, cwd);
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
 /// Split a structured CLI error into the human-readable block and the JSON report.
 fn parse_cli_error_stderr(stderr: &[u8]) -> (String, CliErrorReport) {
     let stderr = String::from_utf8_lossy(stderr).to_string();
@@ -656,6 +665,24 @@ pub(crate) fn create_committed_repo_with_format(object_format: &str) -> tempfile
     repo
 }
 
+/// Snapshot the object database via `count-objects -v --json` (issue #483):
+/// byte-exact, so a preview that writes any object changes it.
+pub(crate) fn count_objects_snapshot(repo: &Path) -> Vec<u8> {
+    let out = run_libra_command(&["--json", "count-objects", "-v"], repo);
+    assert_cli_success(&out, "count-objects snapshot");
+    out.stdout
+}
+
+/// Assert a preview command wrote no objects.
+pub(crate) fn assert_no_objects_written(repo: &Path, before: &[u8], context: &str) {
+    let after = count_objects_snapshot(repo);
+    assert_eq!(
+        String::from_utf8_lossy(before),
+        String::from_utf8_lossy(&after),
+        "{context} must not write objects"
+    );
+}
+
 /// Configure a stable local identity for commands that require commits.
 fn configure_identity_via_cli(repo: &Path) {
     let output = run_libra_command(&["config", "user.name", "Test User"], repo);
@@ -673,7 +700,7 @@ fn create_committed_repo_via_cli() -> tempfile::TempDir {
 
     fs::write(repo.path().join("tracked.txt"), "tracked\n").expect("failed to create tracked file");
 
-    let output = run_libra_command(&["add", ".libraignore", "tracked.txt"], repo.path());
+    let output = run_libra_command(&["add", "tracked.txt"], repo.path());
     assert_cli_success(&output, "failed to add tracked file");
 
     let output = run_libra_command(&["commit", "-m", "base", "--no-verify"], repo.path());
@@ -912,6 +939,7 @@ mod commit_test;
 mod commit_tree_test;
 mod completions_test;
 mod config_test;
+mod count_objects_test;
 mod credential_test;
 mod deps_test;
 mod deps_travel_test;

@@ -432,6 +432,12 @@ impl Head {
             .expect("remote HEAD row in reference table is corrupt")
     }
 
+    /// Pool-acquiring counterpart of [`Head::remote_current_result_with_conn`].
+    pub async fn remote_current_result(remote: &str) -> Result<Option<Head>, BranchStoreError> {
+        let db_conn = get_db_conn_instance().await;
+        Self::remote_current_result_with_conn(&db_conn, remote).await
+    }
+
     pub async fn remote_current_result_with_conn<C>(
         db: &C,
         remote: &str,

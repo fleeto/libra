@@ -15,9 +15,12 @@ libra init [OPTIONS] [DIRECTORY]
 
 Running `libra init` in an existing directory creates a `.libra` subdirectory with the
 object store, SQLite database, default configuration, HEAD pointing to the initial branch,
-and (by default) a vault-backed PGP signing key. Non-bare repositories also get a visible
-root `.libraignore` file for ignore rules. If `DIRECTORY` is given and does not exist, it is
-created first.
+and (by default) a vault-backed PGP signing key. If `DIRECTORY` is given and does not exist,
+it is created first.
+
+Like Git, `libra init` leaves the fresh worktree clean: it does **not** create a default
+`.libraignore`. Create one yourself (or convert an existing `.gitignore`) when you need
+Libra-specific ignore rules; ignore sources are read lazily and need no initialization.
 
 When `--from-git-repository` is supplied, objects and refs are imported from the source Git
 repository and `origin` is configured to point at the source branch layout. The converted
@@ -204,7 +207,9 @@ libra init --shared 0770 shared-repo
 
 ### `--ref-format <FORMAT>`
 
-Set the reference storage format. Accepted values: `strict`, `filesystem`.
+Select the branch-name validation rules. Accepted values: `strict` (default) and
+`filesystem`. Libra stores refs in SQLite, so Git's storage backends `files` and
+`reftable` are rejected with a hint (intentional difference, D25).
 
 ### `-q, --quiet`
 
@@ -313,6 +318,24 @@ path-resolution routine, and creates subtle breakage when the pointer file or ta
 directory is moved independently. Libra removed this feature in favor of always co-locating
 `.libra/` with the worktree root, simplifying the repository discovery algorithm and
 eliminating a source of user confusion.
+
+Both flags are still *parsed*: passing them fails with `LBR-CLI-002` (exit 129) and a
+migration hint instead of a generic "unexpected argument" error (intentional difference
+D25). **Migrating a Git repository that uses `--separate-git-dir`** only needs:
+
+```bash
+libra init --from-git-repository <worktree> <new-dir>
+# or point directly at the pointer file:
+libra init --from-git-repository <worktree>/.git <new-dir>
+```
+
+`--from-git-repository` resolves the `gitdir:` pointer (absolute, or relative to the
+pointer file) before converting, copying objects and refs into the new Libra repository.
+
+### `--recurse-submodules`
+
+Not implemented (D25): the flag is parsed and refused with `LBR-CLI-002` and a hint to
+run `libra submodule init` after creating the repository, instead of a parse error.
 
 ### `--from-git-repository` instead of Git's lack of import
 

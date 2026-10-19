@@ -40,7 +40,7 @@ impl TestRepo {
         repo.success(&["config", "user.name", "Conflict Test"]);
         repo.success(&["config", "user.email", "conflict@example.com"]);
         repo.write("conflict.txt", "base\n");
-        repo.success(&["add", ".libraignore", "conflict.txt"]);
+        repo.success(&["add", "conflict.txt"]);
         repo.success(&["commit", "-s", "-m", "base"]);
         repo
     }

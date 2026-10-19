@@ -279,3 +279,12 @@ unsupported 子面。
 D15 拒绝诊断（HF-14）
 D16 拒绝诊断（HF-14）
 D-empty-message 已由 HF-06 实现
+
+## D25: `init` 的 Git 布局与引用存储选项（issue #473）
+
+- 拒绝项：`--separate-git-dir`、Libra 旧版 `--separate-libra-dir`、`--ref-format=files|reftable`、`--recurse-submodules`。
+- 行为：解析层返回 `LBR-CLI-002`（129）并给出可执行的迁移或替代 hint，零写入。
+- 原因：Libra 的仓库元数据在目标目录自身的 `.libra/libra.db`（SQLite），引用也存于 SQLite；`gitdir:` 指针布局需要仓库发现、worktree 共享与元数据分离的整体改造，`reftable` 则是另一种引用后端。`--ref-format` 在 Libra 只选择分支名校验规则（`strict`/`filesystem`）。
+- 迁移：使用 Git `--separate-git-dir` 的仓库可直接转换——`libra init --from-git-repository <worktree>`（或 `<worktree>/.git` 指针文件路径）已支持 `gitdir:` 指针解析。
+- 测试证据：`cargo test --test command_test init_separate_libra_dir_test`、`cargo test --test command_test init_from_git_test::test_init_from_git_gitdir_file_matrix`。
+- 重启条件：产品决定支持分离布局或另一种引用后端时一并重启。

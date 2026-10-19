@@ -1,8 +1,10 @@
 //! OpenCode's bounded, pre-redaction reasoning classifier.
 //!
 //! The official export is an ordinary source. A same-named SDK metadata key
-//! never proves native origin. This stage removes the closed opaque window
-//! before the shared Redactor and deliberately discards unverified candidates.
+//! never proves native origin. This stage runs before the shared Redactor.
+//! Readable assistant reasoning text is kept together with unproven `state`,
+//! `time`, `originProof`, and the named signature fields. Those stored fields
+//! do not become native proof.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -2120,18 +2122,24 @@ fn scrub_parts(
         if !visible_only {
             *unproven = true;
         }
-        let visible_text = visible_only && matches!(fields.get("text"), Some(CanonValue::Str(_)));
-        // The owning carrier has already copied the original decoded values.
-        // Erase the parsed private branch before the ordinary projection drops
-        // it; neither a denied nor a malformed proof is kept in that copy.
-        for name in ["state", "originProof"] {
-            if take_wiping(fields, name).is_some() {
-                *removed = true;
-            }
-        }
+        // String thinking and the part's unproven payload are ordinary capture
+        // content, including an empty abort signature. A non-string `text` is
+        // not thinking. Unknown siblings, such as provider metadata, stay out
+        // of the copy. Keeping these fields does not clear `unproven` or mint
+        // a native artifact.
         let prior_len = fields.len();
-        retain_wiping(fields, |name, _| {
-            matches!(name.as_str(), "id" | "type") || (name == "text" && visible_text)
+        retain_wiping(fields, |name, value| {
+            matches!(
+                name.as_str(),
+                "id" | "type"
+                    | "time"
+                    | "state"
+                    | "originProof"
+                    | "signature"
+                    | "redactedData"
+                    | "reasoningEncryptedContent"
+                    | "thoughtSignature"
+            ) || (name == "text" && matches!(value, CanonValue::Str(_)))
         });
         *removed |= fields.len() != prior_len;
     }
@@ -3257,10 +3265,10 @@ mod tests {
             assert!(matches!(state, ReasoningSourceState::Unproven));
             let ordinary = String::from_utf8(ordinary).expect("ordinary copy is UTF-8");
             assert!(ordinary.contains("prompt"));
-            assert!(!ordinary.contains("private-signature"));
-            assert!(!ordinary.contains("private-proof"));
-            assert!(!ordinary.contains("originProof"));
-            assert!(!ordinary.contains("\"state\""));
+            assert!(ordinary.contains("private-signature"));
+            assert!(ordinary.contains("private-proof"));
+            assert!(ordinary.contains("originProof"));
+            assert!(ordinary.contains("\"state\""));
         }
     }
 
@@ -3508,22 +3516,39 @@ mod tests {
             );
             if !expected_ordinary {
                 let ordinary = String::from_utf8(ordinary).expect("JSON is UTF-8");
-                assert!(
-                    !ordinary.contains(r#""text":"visible""#),
-                    "candidate or unsupported reasoning retained its text"
-                );
+                if part.contains(r#""text":"visible""#) {
+                    assert!(
+                        ordinary.contains(r#""text":"visible""#),
+                        "readable thinking was dropped from the ordinary copy"
+                    );
+                } else {
+                    assert!(
+                        !ordinary.contains(r#""text":"visible""#),
+                        "non-string reasoning text was retained"
+                    );
+                }
+                if part.contains("CIPHER_TEXT_OBJECT") {
+                    assert!(
+                        !ordinary.contains("CIPHER_TEXT_OBJECT"),
+                        "non-string reasoning text was retained"
+                    );
+                }
                 for canary in [
                     "CIPHER_SIG",
                     "CIPHER_REDACTED",
                     "CIPHER_ENCRYPTED",
                     "CIPHER_EXTRA",
                     "CIPHER_STATE",
-                    "CIPHER_TEXT_OBJECT",
                     "CIPHER_TIME_HINT",
                     "UNPROVEN_TIME",
                     "originProof",
                 ] {
-                    assert!(!ordinary.contains(canary), "normal copy retained {canary}");
+                    if part.contains(canary) {
+                        assert!(
+                            ordinary.contains(canary),
+                            "unproven field {canary} was dropped"
+                        );
+                    }
                 }
             }
         }
@@ -3639,7 +3664,7 @@ mod tests {
         );
         let (ordinary, state) = prepare(&with_metadata).expect("classic SDK metadata is partial");
         assert!(matches!(state, ReasoningSourceState::Unproven));
-        assert!(!String::from_utf8_lossy(&ordinary).contains("visible"));
+        assert!(String::from_utf8_lossy(&ordinary).contains("visible"));
         assert!(!String::from_utf8_lossy(&ordinary).contains("CLASSIC_CIPHER"));
     }
 
@@ -3752,10 +3777,17 @@ mod tests {
                 "CIPHER_CLASSIC_ERROR_TITLE",
                 "CIPHER_REASONING_TIME",
             ] {
-                assert!(
-                    !ordinary.contains(canary),
-                    "ordinary copy retained {canary}"
-                );
+                if canary == "CIPHER_REASONING_TIME" && source.contains(canary) {
+                    assert!(
+                        ordinary.contains(canary),
+                        "ordinary copy dropped unproven reasoning time"
+                    );
+                } else {
+                    assert!(
+                        !ordinary.contains(canary),
+                        "ordinary copy retained {canary}"
+                    );
+                }
             }
 
             let bytes = source.as_bytes().to_vec();
@@ -3826,7 +3858,14 @@ mod tests {
                 "CIPHER_CLASSIC_ERROR_TITLE",
                 "CIPHER_REASONING_TIME",
             ] {
-                assert!(!visible.contains(canary), "transcript retained {canary}");
+                if canary == "CIPHER_REASONING_TIME" && source.contains(canary) {
+                    assert!(
+                        visible.contains(canary),
+                        "transcript dropped unproven reasoning time"
+                    );
+                } else {
+                    assert!(!visible.contains(canary), "transcript retained {canary}");
+                }
                 assert!(!projection.contains(canary), "projection retained {canary}");
                 assert!(!debug.contains(canary), "debug retained {canary}");
             }
@@ -4434,8 +4473,12 @@ mod tests {
         let (ordinary, state) = prepare(classic).expect("classic export remains safe partial");
         assert!(matches!(state, ReasoningSourceState::Unproven));
         let ordinary = String::from_utf8(ordinary).expect("JSON is UTF-8");
-        assert!(!ordinary.contains("visible"));
-        assert!(!ordinary.contains("CLASSIC_CIPHER"));
+        assert!(ordinary.contains("visible"));
+        assert!(
+            ordinary.contains("CLASSIC_CIPHER"),
+            "classic reasoning state.signature was dropped"
+        );
+        assert!(ordinary.contains("\"state\""));
 
         for (part, canary) in [
             (r#""CIPHER_PART_STRING""#, "CIPHER_PART_STRING"),
@@ -4587,17 +4630,25 @@ mod tests {
         let projection =
             serde_json::to_string(&snapshot.safe_projection()).expect("safe projection serializes");
         let debug = format!("{snapshot:?}");
+        assert!(
+            !visible.contains("CIPHER_WINDOW"),
+            "user provider context was retained"
+        );
         for canary in [
-            "CIPHER_WINDOW",
             "CIPHER_SIG",
             "CIPHER_REDACTED",
             "CIPHER_ENCRYPTED",
             "CIPHER_PROOF",
         ] {
-            assert!(!visible.contains(canary), "transcript retained {canary}");
+            assert!(
+                visible.contains(canary),
+                "transcript dropped unproven {canary}"
+            );
             assert!(!projection.contains(canary), "metadata retained {canary}");
             assert!(!debug.contains(canary), "debug retained {canary}");
         }
+        assert!(!projection.contains("CIPHER_WINDOW"));
+        assert!(!debug.contains("CIPHER_WINDOW"));
         assert!(snapshot.try_into_ordinary().is_err());
         for kind in [
             AgentKind::ClaudeCode,
@@ -4623,10 +4674,19 @@ mod tests {
             },
         };
 
-        for part in [
-            r#"{"id":"part_1","type":"reasoning","text":"CIPHER_IDENTICAL","state":{"signature":"CIPHER_IDENTICAL"}}"#,
-            r#"{"id":"part_1","type":"reasoning","text":"visible CIPHER_FRAGMENT tail","state":{"signature":"CIPHER_FRAGMENT"}}"#,
-            r#"{"id":"part_1","type":"reasoning","text":"CIPHER_UNKNOWN","state":{"future":"CIPHER_UNKNOWN"}}"#,
+        for (part, thinking) in [
+            (
+                r#"{"id":"part_1","type":"reasoning","text":"CIPHER_IDENTICAL","state":{"signature":"CIPHER_IDENTICAL"}}"#,
+                "CIPHER_IDENTICAL",
+            ),
+            (
+                r#"{"id":"part_1","type":"reasoning","text":"visible CIPHER_FRAGMENT tail","state":{"signature":"CIPHER_FRAGMENT"}}"#,
+                "visible CIPHER_FRAGMENT tail",
+            ),
+            (
+                r#"{"id":"part_1","type":"reasoning","text":"CIPHER_UNKNOWN","state":{"future":"CIPHER_UNKNOWN"}}"#,
+                "CIPHER_UNKNOWN",
+            ),
         ] {
             let bytes = export(part).into_bytes();
             let auth = ExportAuthorized::issue("opencode", "ses_capture", &bytes);
@@ -4651,15 +4711,73 @@ mod tests {
                     .bytes(),
             )
             .into_owned();
+            let stored: serde_json::Value =
+                serde_json::from_str(&visible).expect("ordinary transcript is JSON");
+            let retained = &stored["messages"][1]["content"][0];
+            assert_eq!(retained["text"], thinking);
+            assert!(
+                retained.get("state").is_some(),
+                "unproven state was dropped"
+            );
+            if part.contains("\"signature\"") {
+                assert!(visible.contains("\"signature\""));
+            }
+            if part.contains("\"future\"") {
+                assert!(visible.contains("\"future\""));
+            }
             let projection = serde_json::to_string(&snapshot.safe_projection())
                 .expect("safe projection serializes");
             let debug = format!("{snapshot:?}");
-            for canary in ["CIPHER_IDENTICAL", "CIPHER_FRAGMENT", "CIPHER_UNKNOWN"] {
-                assert!(!visible.contains(canary), "transcript retained {canary}");
-                assert!(!projection.contains(canary), "projection retained {canary}");
-                assert!(!debug.contains(canary), "debug retained {canary}");
+            for sink in [projection.as_str(), debug.as_str()] {
+                assert!(!sink.contains("\"signature\""));
+                assert!(!sink.contains("\"future\""));
+                assert!(!sink.contains(thinking));
             }
             assert!(snapshot.try_into_ordinary().is_err());
+        }
+    }
+
+    #[test]
+    fn signed_and_aborted_opencode_thinking_text_is_captured() {
+        for (label, part) in [
+            (
+                "anthropic signature",
+                r#"{"type":"reasoning","text":"plan the snake game","state":{"signature":"anthropic-signature"},"time":{"created":1,"completed":2}}"#,
+            ),
+            (
+                "empty abort signature",
+                r#"{"type":"reasoning","text":"interrupted thought","state":{"signature":""},"time":{"created":3,"completed":4}}"#,
+            ),
+        ] {
+            let input = format!(
+                r#"{{"info":{{"id":"ses_think"}},"messages":[{{"id":"u1","type":"user","text":"prompt"}},{{"id":"a1","type":"assistant","content":[{part}]}}]}}"#
+            );
+            let (ordinary, state) = prepare(&input).expect(label);
+            assert!(
+                matches!(state, ReasoningSourceState::Unproven),
+                "{label} must stay unproven"
+            );
+            let value: serde_json::Value =
+                serde_json::from_slice(&ordinary).expect("ordinary JSON");
+            let retained = &value["messages"][1]["content"][0];
+            assert_eq!(retained["type"], "reasoning");
+            assert!(
+                retained["text"]
+                    .as_str()
+                    .is_some_and(|text| !text.is_empty()),
+                "{label} dropped thinking text"
+            );
+            assert!(retained.get("state").is_some(), "{label} dropped state");
+            assert!(retained.get("time").is_some(), "{label} dropped time");
+            if label == "anthropic signature" {
+                assert_eq!(retained["state"]["signature"], "anthropic-signature");
+                assert_eq!(retained["time"]["created"], 1);
+                assert_eq!(retained["time"]["completed"], 2);
+            } else {
+                assert_eq!(retained["state"]["signature"], "");
+                assert_eq!(retained["time"]["created"], 3);
+                assert_eq!(retained["time"]["completed"], 4);
+            }
         }
     }
 
@@ -4972,28 +5090,69 @@ mod tests {
                 )
                 .expect("verified matching mapping");
             assert!(!disposition.has_capture_consumer());
-            assert!(!String::from_utf8_lossy(&ordinary).contains("PRIVATE_REASONING_CANARY"));
-            assert!(!String::from_utf8_lossy(&ordinary).contains("PRIVATE_STATE_CANARY"));
+            let ordinary_text = String::from_utf8_lossy(&ordinary);
             let safe: serde_json::Value =
                 serde_json::from_slice(&ordinary).expect("safe projection");
-            if let Some(parts) = safe["messages"][1]["content"].as_array() {
-                for part in parts {
-                    if part["type"] == "reasoning" {
-                        for erased in [
-                            "text",
-                            "time",
-                            "state",
-                            "signature",
-                            "redactedData",
-                            "reasoningEncryptedContent",
-                        ] {
-                            assert!(
-                                part.get(erased).is_none(),
-                                "associated {erased} was retained"
-                            );
+            let mut saw_reasoning = false;
+            if let Some(messages) = safe["messages"].as_array() {
+                for message in messages {
+                    for key in ["content", "parts"] {
+                        let Some(parts) = message[key].as_array() else {
+                            continue;
+                        };
+                        for part in parts {
+                            if part["type"] != "reasoning" {
+                                continue;
+                            }
+                            saw_reasoning = true;
+                            assert_eq!(part["text"], "PRIVATE_REASONING_CANARY");
+                            for name in [
+                                "time",
+                                "state",
+                                "originProof",
+                                "signature",
+                                "redactedData",
+                                "reasoningEncryptedContent",
+                                "thoughtSignature",
+                            ] {
+                                let present_in_source =
+                                    value["messages"].as_array().into_iter().flatten().any(
+                                        |message| {
+                                            ["content", "parts"].iter().any(|key| {
+                                                message[key].as_array().is_some_and(|parts| {
+                                                    parts.iter().any(|source_part| {
+                                                        source_part["type"] == "reasoning"
+                                                            && source_part.get(name).is_some()
+                                                    })
+                                                })
+                                            })
+                                        },
+                                    );
+                                if present_in_source {
+                                    assert!(
+                                        part.get(name).is_some(),
+                                        "unproven {name} was dropped"
+                                    );
+                                }
+                            }
                         }
                     }
                 }
+            }
+            if saw_reasoning {
+                assert!(
+                    ordinary_text.contains("PRIVATE_STATE_CANARY"),
+                    "unproven reasoning payload was dropped"
+                );
+            } else {
+                assert!(
+                    !ordinary_text.contains("PRIVATE_STATE_CANARY"),
+                    "non-reasoning envelope retained an unproven field"
+                );
+                assert!(
+                    !ordinary_text.contains("PRIVATE_REASONING_CANARY"),
+                    "unrecognized message retained reasoning text"
+                );
             }
             permit.is_some()
         }
@@ -5012,7 +5171,7 @@ mod tests {
             value["messages"][1]["content"][0][field] = serde_json::json!("PRIVATE_STATE_CANARY");
             assert!(
                 has_permit(value),
-                "top-level {field} must be erased before eligibility"
+                "top-level {field} must stay eligible when it is written"
             );
         }
         for path in ["root", "info", "nested", "part"] {

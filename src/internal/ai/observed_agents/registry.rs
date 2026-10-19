@@ -30,6 +30,8 @@ use super::{adapter::AgentKind, capability::DeclaredAgentCaps};
 
 /// Wave tag carried by every supported roster row.
 pub const FIRST_BATCH_WAVE: &str = "first_batch";
+/// GK-05 support wave. It is not `first_batch`.
+pub const GROK_WAVE: &str = "grok";
 
 /// One frozen capability-matrix row (AG-16 field set).
 ///
@@ -79,6 +81,17 @@ impl AgentRegistration {
 
 /// All-false capability set for rows whose optional capabilities have not
 /// been wired yet (they converge in AG-19/AG-21).
+const HOOKS_ONLY: DeclaredAgentCaps = DeclaredAgentCaps {
+    hooks: true,
+    transcript_analyzer: false,
+    transcript_preparer: false,
+    token_calculator: false,
+    compact_transcript: false,
+    text_generator: false,
+    hook_response_writer: false,
+    subagent_aware_extractor: false,
+};
+
 const NO_CAPS: DeclaredAgentCaps = DeclaredAgentCaps {
     hooks: false,
     transcript_analyzer: false,
@@ -113,7 +126,7 @@ const HOOKS_AND_TOKENS: DeclaredAgentCaps = DeclaredAgentCaps {
 
 /// The frozen static matrix, one row per [`AgentKind`] variant, in
 /// registration order. Guarded by `compat_agent_capability_matrix_pin`.
-static REGISTRY: [AgentRegistration; 7] = [
+static REGISTRY: [AgentRegistration; 8] = [
     AgentRegistration {
         slug: "claude-code",
         agent_kind: "claude_code",
@@ -243,6 +256,24 @@ static REGISTRY: [AgentRegistration; 7] = [
         config_paths: &[],
         capabilities: NO_CAPS,
     },
+    AgentRegistration {
+        slug: "grok",
+        agent_kind: "grok",
+        db_value: "grok",
+        // GK-05: supported and hook-installable, but not a first-batch
+        // launcher. Review and investigate stay closed.
+        supported: true,
+        support_wave: Some(GROK_WAVE),
+        registered: true,
+        transcript_readable: true,
+        hook_installable: true,
+        installed: false,
+        launchable_review: false,
+        launchable_investigate: false,
+        external_binary: false,
+        config_paths: &[],
+        capabilities: HOOKS_ONLY,
+    },
 ];
 
 /// Borrow the full static matrix in registration order.
@@ -336,8 +367,23 @@ mod tests {
 
     #[test]
     fn first_batch_roster_is_exactly_claude_code_codex_opencode() {
-        assert_eq!(supported_slugs(), ["claude-code", "codex", "opencode"]);
+        let first_batch: Vec<_> = registry()
+            .iter()
+            .filter(|row| row.support_wave == Some(FIRST_BATCH_WAVE))
+            .map(|row| row.slug)
+            .collect();
+        assert_eq!(first_batch, ["claude-code", "codex", "opencode"]);
+        assert_eq!(
+            supported_slugs(),
+            ["claude-code", "codex", "opencode", "grok"]
+        );
+        let grok = registration_for(AgentKind::Grok);
+        assert_eq!(grok.support_wave, Some(GROK_WAVE));
+        assert_ne!(grok.support_wave, Some(FIRST_BATCH_WAVE));
         for row in registry() {
+            if row.slug == "grok" {
+                continue;
+            }
             if row.supported {
                 assert_eq!(row.support_wave, Some(FIRST_BATCH_WAVE), "{}", row.slug);
             } else {

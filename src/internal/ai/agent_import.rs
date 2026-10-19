@@ -5,7 +5,7 @@
 //! they are strictly parsed into typed turns, redacted field-by-field, and
 //! re-serialized as an allowlist-only per-turn projection before persistence.
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use std::process::Stdio;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use super::authorized_read::{
     AUTHORIZED_READ_HELPER_ARG, AUTHORIZED_READ_HELPER_CAP_ENV, CancellationSafeChild,
     configure_private_helper_process_group, read_async_strictly_bounded, registered_helper_command,
@@ -54,7 +54,10 @@ use super::{
         coverage::{RedactedImportCoverageRuntimeDto, encode_redacted_import_runtime},
         encode_coverage_turn_for_schema, normalize_claude_transcript_until,
         normalize_codex_rollout_until, normalize_opencode_export_until, parse_canon_value,
-        reasoning::{NativeProvenReasoning, ReasoningSourceDisposition},
+        reasoning::{
+            NativeProvenReasoning, ReasoningSourceDisposition,
+            note_claude_attached_duplicates_until,
+        },
         redact_turns_with_report, safe_turn_projection, safe_turn_projection_for_schema,
         select_coverage_schema,
     },
@@ -387,12 +390,28 @@ mod import_path_serde {
         Vec::<u8>::deserialize(deserializer).map(|bytes| PathBuf::from(OsString::from_vec(bytes)))
     }
 
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    pub fn serialize<S: Serializer>(path: &Path, serializer: S) -> Result<S::Ok, S::Error> {
+        use std::os::windows::ffi::OsStrExt;
+        path.as_os_str()
+            .encode_wide()
+            .collect::<Vec<_>>()
+            .serialize(serializer)
+    }
+
+    #[cfg(windows)]
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<PathBuf, D::Error> {
+        use std::{ffi::OsString, os::windows::ffi::OsStringExt};
+        Vec::<u16>::deserialize(deserializer)
+            .map(|units| PathBuf::from(OsString::from_wide(&units)))
+    }
+
+    #[cfg(not(any(unix, windows)))]
     pub fn serialize<S: Serializer>(path: &Path, serializer: S) -> Result<S::Ok, S::Error> {
         path.to_string_lossy().serialize(serializer)
     }
 
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<PathBuf, D::Error> {
         String::deserialize(deserializer).map(PathBuf::from)
     }
@@ -1230,7 +1249,7 @@ async fn read_authorized_descriptor_until(
     read_cap: u64,
     deadline: Instant,
 ) -> (Result<Vec<u8>>, u64) {
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = (file, read_cap, deadline);
         // The raw descriptor reader relies on Unix process-group containment
@@ -1239,7 +1258,7 @@ async fn read_authorized_descriptor_until(
         return (Err(ImportError::AuthorizedReaderUnavailable.into()), 0);
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     {
         if let Err(error) = ensure_before_deadline(deadline) {
             return (Err(error), 0);
@@ -1261,11 +1280,18 @@ async fn read_authorized_descriptor_until(
             .stderr(Stdio::null())
             .kill_on_drop(true);
         configure_private_helper_process_group(&mut command);
+        #[cfg(unix)]
         let child = match command.spawn() {
             Ok(child) => child,
             Err(_) => return (Err(ImportError::AuthorizedReaderFailed.into()), 0),
         };
+        #[cfg(unix)]
         let mut child = CancellationSafeChild::new_process_group(child);
+        #[cfg(windows)]
+        let mut child = match CancellationSafeChild::spawn_windows(&mut command) {
+            Ok(child) => child,
+            Err(_) => return (Err(ImportError::AuthorizedReaderFailed.into()), 0),
+        };
         let Some(mut stdout) = child.child_mut().and_then(|child| child.stdout.take()) else {
             let _ = child.terminate_and_reap_checked();
             return (Err(ImportError::AuthorizedReaderFailed.into()), 0);
@@ -1450,6 +1476,23 @@ pub async fn read_import_source(
     }
 }
 
+/// Re-read ordinary Claude attachments on the authorized transcript. A
+/// duplicate-key line adds no field. The transcript bytes stay in place.
+fn retain_claude_attached_fields(
+    agent_kind: AgentKind,
+    transcript: &[u8],
+    turns: &mut [NormalizedTurn],
+    deadline: Instant,
+) -> Result<()> {
+    if agent_kind != AgentKind::ClaudeCode {
+        return Ok(());
+    }
+    ensure_before_deadline(deadline)?;
+    note_claude_attached_duplicates_until(turns, transcript, deadline)
+        .ok_or(ImportError::DeadlineExceeded)?;
+    Ok(())
+}
+
 /// Parse authorized, already-budgeted bytes and build the transient import
 /// request. The returned request contains no raw provider payload or path.
 pub fn prepare_import_request(
@@ -1521,6 +1564,7 @@ pub fn prepare_import_request(
         ),
     }
     .ok_or(ImportError::DeadlineExceeded)?;
+    retain_claude_attached_fields(agent_kind, transcript.bytes(), &mut turns, deadline)?;
     ensure_before_deadline(deadline)?;
     let typed_redaction_report = redact_turns_with_report(&mut turns);
     ensure_before_deadline(deadline)?;
@@ -1684,6 +1728,7 @@ pub(crate) fn prepare_import_projection_with_reasoning(
         ),
     }
     .ok_or(ImportError::DeadlineExceeded)?;
+    retain_claude_attached_fields(agent_kind, transcript.bytes(), &mut turns, deadline)?;
     ensure_before_deadline(deadline)?;
     let typed_redaction_report = redact_turns_with_report(&mut turns);
     ensure_before_deadline(deadline)?;

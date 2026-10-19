@@ -666,6 +666,192 @@ fn user_content_has_human_text(content: &CanonValue) -> bool {
     }
 }
 
+/// One Claude assistant line's ordinary reasoning fields.
+///
+/// Readable text is the decoded JSON string. Lexical escape sequences are not
+/// retained here. Empty strings are counted separately and are not payloads.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ClaudeOrdinaryAssessment {
+    /// Lines whose JSON object repeats a key. Those lines contribute no fields.
+    pub duplicate_records: u32,
+    /// Lines that are not JSON. They contribute no fields.
+    pub malformed_records: u32,
+    /// Non-empty decoded `thinking` strings, in source order.
+    pub readable: Vec<String>,
+    /// Non-empty decoded `signature` strings, in source order.
+    pub signatures: Vec<String>,
+    /// Non-empty decoded `redacted_thinking.data` strings, in source order.
+    pub redacted_data: Vec<String>,
+    /// A `thinking` key was present and its string was empty.
+    pub empty_thinking: bool,
+    /// A `signature` or `data` key was present and its string was empty.
+    pub empty_attached: bool,
+    /// No `thinking` or `redacted_thinking` block was present on a parsed line.
+    pub missing_block: bool,
+    /// A reasoning block contained a key outside its declared set.
+    pub unknown_field: bool,
+    /// A declared reasoning field was present with a non-string value.
+    pub wrong_type: bool,
+}
+
+impl ClaudeOrdinaryAssessment {
+    /// A non-empty thinking string, signature, or redacted `data` value.
+    /// An empty shell is not data.
+    pub fn data_obtained(&self) -> bool {
+        self.readable.iter().any(|text| !text.is_empty())
+            || self.signatures.iter().any(|text| !text.is_empty())
+            || self.redacted_data.iter().any(|text| !text.is_empty())
+    }
+
+    /// Data was obtained and at least one thinking string is non-empty.
+    pub fn readable_obtained(&self) -> bool {
+        self.data_obtained() && self.readable.iter().any(|text| !text.is_empty())
+    }
+}
+
+/// Whether `file_name` is the JSONL leaf for `session_id`.
+///
+/// The official locator is `<session-id>.jsonl`. A different leaf is a
+/// different session and must not be associated.
+pub fn claude_jsonl_session_matches(file_name: &str, session_id: &str) -> bool {
+    if session_id.is_empty() || session_id.contains(['/', '\\']) {
+        return false;
+    }
+    let leaf = file_name.rsplit(['/', '\\']).next().unwrap_or(file_name);
+    leaf == format!("{session_id}.jsonl")
+}
+
+struct ClaudeBlockFields {
+    readable: Option<String>,
+    signature: Option<String>,
+    redacted_data: Option<String>,
+    empty_thinking: bool,
+    empty_attached: bool,
+    unknown_field: bool,
+    wrong_type: bool,
+}
+
+fn allowed_block_keys(block: &CanonValue, allowed: &[&str]) -> bool {
+    let CanonValue::Object(map) = block else {
+        return false;
+    };
+    map.keys().all(|key| allowed.contains(&key.as_str()))
+}
+
+fn string_field(block: &CanonValue, key: &str) -> Result<Option<String>, ()> {
+    match block.get(key) {
+        Some(CanonValue::Str(text)) => Ok(Some(text.clone())),
+        None => Ok(None),
+        Some(_) => Err(()),
+    }
+}
+
+/// Read one content block. `None` means the block is not a reasoning block.
+fn read_claude_reasoning_block(block: &CanonValue) -> Option<ClaudeBlockFields> {
+    let kind = block.get("type").and_then(CanonValue::as_str)?;
+    let mut fields = ClaudeBlockFields {
+        readable: None,
+        signature: None,
+        redacted_data: None,
+        empty_thinking: false,
+        empty_attached: false,
+        unknown_field: false,
+        wrong_type: false,
+    };
+    match kind {
+        "thinking" => {
+            fields.unknown_field = !allowed_block_keys(block, &["type", "thinking", "signature"]);
+            match string_field(block, "thinking") {
+                Ok(Some(text)) if text.is_empty() => fields.empty_thinking = true,
+                Ok(Some(text)) => fields.readable = Some(text),
+                Ok(None) => {}
+                Err(()) => fields.wrong_type = true,
+            }
+            match string_field(block, "signature") {
+                Ok(Some(text)) if text.is_empty() => fields.empty_attached = true,
+                Ok(Some(text)) => fields.signature = Some(text),
+                Ok(None) => {}
+                Err(()) => fields.wrong_type = true,
+            }
+            Some(fields)
+        }
+        "redacted_thinking" => {
+            fields.unknown_field = !allowed_block_keys(block, &["type", "data"]);
+            match string_field(block, "data") {
+                Ok(Some(text)) if text.is_empty() => fields.empty_attached = true,
+                Ok(Some(text)) => fields.redacted_data = Some(text),
+                Ok(None) => {}
+                Err(()) => fields.wrong_type = true,
+            }
+            Some(fields)
+        }
+        _ => None,
+    }
+}
+
+fn absorb_claude_block(assessment: &mut ClaudeOrdinaryAssessment, fields: ClaudeBlockFields) {
+    assessment.missing_block = false;
+    assessment.empty_thinking |= fields.empty_thinking;
+    assessment.empty_attached |= fields.empty_attached;
+    assessment.unknown_field |= fields.unknown_field;
+    assessment.wrong_type |= fields.wrong_type;
+    if let Some(text) = fields.readable {
+        assessment.readable.push(text);
+    }
+    if let Some(text) = fields.signature {
+        assessment.signatures.push(text);
+    }
+    if let Some(text) = fields.redacted_data {
+        assessment.redacted_data.push(text);
+    }
+}
+
+/// Classify ordinary Claude thinking fields in a JSONL transcript.
+///
+/// Duplicate-key and malformed lines are counted and skipped. Other lines
+/// still contribute. This is the same block reader the Claude normalizer uses.
+pub fn assess_claude_ordinary_transcript(data: &[u8]) -> ClaudeOrdinaryAssessment {
+    let mut assessment = ClaudeOrdinaryAssessment {
+        missing_block: true,
+        ..ClaudeOrdinaryAssessment::default()
+    };
+    let mut saw_line = false;
+    for line in data.split(|byte| *byte == b'\n') {
+        if line.iter().all(u8::is_ascii_whitespace) {
+            continue;
+        }
+        saw_line = true;
+        let entry = match parse_canon_value(line) {
+            Ok(value) => value,
+            Err(error) => {
+                if error.to_string().contains("duplicate") {
+                    assessment.duplicate_records = assessment.duplicate_records.saturating_add(1);
+                } else {
+                    assessment.malformed_records = assessment.malformed_records.saturating_add(1);
+                }
+                continue;
+            }
+        };
+        let Some(content) = entry
+            .get("message")
+            .and_then(|message| message.get("content"))
+        else {
+            continue;
+        };
+        if let CanonValue::Array(blocks) = content {
+            for block in blocks {
+                if let Some(fields) = read_claude_reasoning_block(block) {
+                    absorb_claude_block(&mut assessment, fields);
+                }
+            }
+        }
+    }
+    if !saw_line {
+        assessment.missing_block = true;
+    }
+    assessment
+}
+
 /// Split a Claude Code session JSONL transcript into normalized turns.
 ///
 /// Line shapes follow the live envelope observed by `extract_claude_code`:
@@ -828,6 +1014,26 @@ fn normalize_claude_transcript_inner(
                 }
                 if let CanonValue::Array(blocks) = content {
                     for block in blocks {
+                        if let Some(fields) = read_claude_reasoning_block(block) {
+                            if fields.unknown_field || fields.wrong_type {
+                                current_or_open(&mut turns).completeness = Completeness::Incomplete;
+                            }
+                            if let Some(text) = fields.readable {
+                                let (_record, visible) =
+                                    reasoning::classify_provider_visible_reasoning(
+                                        reasoning::ReasoningProvider::ClaudeCode,
+                                        reasoning::ReasoningSourceKind::Thinking,
+                                        text,
+                                    );
+                                current_or_open(&mut turns).records.push(
+                                    SemanticRecord::Reasoning {
+                                        provider: reasoning::ReasoningProvider::ClaudeCode,
+                                        source_kind: Some(reasoning::ReasoningSourceKind::Thinking),
+                                        text: visible,
+                                    },
+                                );
+                            }
+                        }
                         if block.get("type").and_then(CanonValue::as_str) == Some("tool_use") {
                             let mut violation = false;
                             let name =

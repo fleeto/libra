@@ -87,6 +87,7 @@ pub(super) async fn render_status_to_writer(
                 &data.staged,
                 &data.unstaged,
                 &data.unmerged,
+                &data.intent_to_add,
                 &data.ignored_files,
                 data.porcelain_v2.as_deref(),
                 &data.staged_rename_details,
@@ -112,6 +113,7 @@ pub(super) async fn render_status_to_writer(
                 &data.staged,
                 &data.unstaged,
                 &data.unmerged,
+                &data.intent_to_add,
                 args.null_terminated,
                 data.quote_path,
                 &mut buffer,
@@ -159,10 +161,16 @@ pub(super) async fn render_status_to_writer(
                 &mut buffer,
             )?;
         }
+        // `data` is cwd-relative for the default relativePaths mode; the
+        // porcelain/`--no-relative` path passed above was root-relative, so
+        // its renderers use the already-root sort key.
+        let sort_base = args.relative_paths.then_some(data.sort_base.as_path());
         output_short_format_with_config(
             &data.staged,
             &data.unstaged,
             &data.unmerged,
+            &data.intent_to_add,
+            sort_base,
             output,
             args.null_terminated,
             data.quote_path,
@@ -224,6 +232,7 @@ fn data_with_repo_root_paths(data: &StatusData) -> StatusData {
     let mut rooted = data.clone();
     rooted.staged = changes(&data.staged);
     rooted.unstaged = changes(&data.unstaged);
+    rooted.intent_to_add = data.intent_to_add.iter().map(|p| convert(p)).collect();
     // Keep the score/exactness lookup keys aligned with the converted rename
     // pairs, or JSON emission from a subdirectory would miss every detail.
     rooted.staged_rename_details = details(&data.staged_rename_details);
@@ -262,7 +271,7 @@ fn render_human_status(
 
     // Upstream tracking info
     if let Some(upstream) = &data.upstream {
-        render_upstream_human(upstream, buffer)?;
+        render_upstream_human(upstream, args.show_ahead_behind(), buffer)?;
     }
 
     if let Some(notice) = &data.sequence_notice {
@@ -299,6 +308,7 @@ fn render_human_status(
     if data.merge_state.is_none()
         && data.staged.is_empty()
         && data.unstaged.is_empty()
+        && data.intent_to_add.is_empty()
         && data.unmerged.is_empty()
     {
         writeln!(buffer, "nothing to commit, working tree clean").map_err(write_error)?;
@@ -335,11 +345,13 @@ fn render_human_status(
         }
     }
 
-    // Unstaged changes (modified + deleted + renamed — a probe-paired
-    // unstaged rename can be the section's ONLY content, §B.3.1)
+    // Unstaged changes (modified + deleted + renamed + intent-to-add new
+    // files — a probe-paired unstaged rename can be the section's ONLY
+    // content, §B.3.1)
     if !data.unstaged.deleted.is_empty()
         || !data.unstaged.modified.is_empty()
         || !data.unstaged.renamed.is_empty()
+        || !data.intent_to_add.is_empty()
     {
         writeln!(buffer, "Changes not staged for commit:").map_err(write_error)?;
         writeln!(
@@ -357,8 +369,8 @@ fn render_human_status(
             "deleted:",
             &data.unstaged.modified,
             "modified:",
-            &[],
-            "",
+            &data.intent_to_add,
+            "new file:",
             &data.unstaged.renamed,
             "renamed:",
             data.quote_path,
@@ -371,6 +383,38 @@ fn render_human_status(
                 line.extend_from_slice(&path);
                 push_colored_line(buffer, &colored::Color::BrightRed.to_fg_str(), &line);
             }
+        }
+    }
+
+    // ADR-FM-06 (#470 FM-05): a legacy-materialization tree loses executable
+    // bits; FM-04 makes it visible as ` M`, this hint offers the one-shot
+    // repair. Human long format only — short/porcelain/JSON stay unchanged.
+    if !data.mode_fix_candidates.is_empty() {
+        let count = data.mode_fix_candidates.len();
+        let noun = if count == 1 { "file" } else { "files" };
+        writeln!(
+            buffer,
+            "Note: {count} tracked {noun} lost the executable bit (index records 100755)"
+        )
+        .map_err(write_error)?;
+        if count > 5 {
+            writeln!(
+                buffer,
+                "  use \"libra restore -- .\" to restore all executable bits"
+            )
+            .map_err(write_error)?;
+        } else {
+            let paths = data
+                .mode_fix_candidates
+                .iter()
+                .map(|path| {
+                    String::from_utf8_lossy(&quote_pathname_bytes(path, data.quote_path))
+                        .into_owned()
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            writeln!(buffer, "  use \"libra restore -- {paths}\" to restore it")
+                .map_err(write_error)?;
         }
     }
 
@@ -620,7 +664,11 @@ fn render_merge_state_human(merge_state: &MergeStatusInfo, buffer: &mut Vec<u8>)
     Ok(())
 }
 
-fn render_upstream_human(upstream: &UpstreamInfo, buffer: &mut Vec<u8>) -> CliResult<()> {
+fn render_upstream_human(
+    upstream: &UpstreamInfo,
+    show_counts: bool,
+    buffer: &mut Vec<u8>,
+) -> CliResult<()> {
     let write_error =
         |err: io::Error| crate::utils::output::stdout_write_error("write status output", err);
 
@@ -651,31 +699,42 @@ fn render_upstream_human(upstream: &UpstreamInfo, buffer: &mut Vec<u8>) -> CliRe
         )
         .map_err(write_error)?;
     } else if ahead > 0 && behind == 0 {
-        writeln!(
-            buffer,
-            "Your branch is ahead of '{}' by {} commit{}.",
-            upstream.remote_ref,
-            ahead,
-            if ahead == 1 { "" } else { "s" }
-        )
-        .map_err(write_error)?;
+        // Git drops the numeric count under `--no-ahead-behind`.
+        if show_counts {
+            writeln!(
+                buffer,
+                "Your branch is ahead of '{}' by {} commit{}.",
+                upstream.remote_ref,
+                ahead,
+                if ahead == 1 { "" } else { "s" }
+            )
+            .map_err(write_error)?;
+        } else {
+            writeln!(buffer, "Your branch is ahead of '{}'.", upstream.remote_ref)
+                .map_err(write_error)?;
+        }
         writeln!(
             buffer,
             "  (use \"libra push\" to publish your local commits)"
         )
         .map_err(write_error)?;
     } else if ahead == 0 && behind > 0 {
-        writeln!(
-            buffer,
-            "Your branch is behind '{}' by {} commit{}.",
-            upstream.remote_ref,
-            behind,
-            if behind == 1 { "" } else { "s" }
-        )
-        .map_err(write_error)?;
+        if show_counts {
+            writeln!(
+                buffer,
+                "Your branch is behind '{}' by {} commit{}.",
+                upstream.remote_ref,
+                behind,
+                if behind == 1 { "" } else { "s" }
+            )
+            .map_err(write_error)?;
+        } else {
+            writeln!(buffer, "Your branch is behind '{}'.", upstream.remote_ref)
+                .map_err(write_error)?;
+        }
         writeln!(buffer, "  (use \"libra pull\" to update your local branch)")
             .map_err(write_error)?;
-    } else {
+    } else if show_counts {
         writeln!(
             buffer,
             "Your branch and '{}' have diverged,",
@@ -685,6 +744,18 @@ fn render_upstream_human(upstream: &UpstreamInfo, buffer: &mut Vec<u8>) -> CliRe
         writeln!(
             buffer,
             "and have {ahead} and {behind} different commits each, respectively."
+        )
+        .map_err(write_error)?;
+        writeln!(
+            buffer,
+            "  (use \"libra pull\" to merge the remote branch into yours)"
+        )
+        .map_err(write_error)?;
+    } else {
+        writeln!(
+            buffer,
+            "Your branch and '{}' refer to different commits.",
+            upstream.remote_ref
         )
         .map_err(write_error)?;
         writeln!(
@@ -1034,6 +1105,8 @@ pub fn build_status_json(data: &StatusData, _args: &StatusArgs) -> serde_json::V
             "renamed": renamed_to_json(&data.staged.renamed),
         },
         "unstaged": {
+            "new": paths_to_json(&data.intent_to_add),
+            "intent_to_add": paths_to_json(&data.intent_to_add),
             "modified": paths_to_json(&data.unstaged.modified),
             "deleted": paths_to_json(&data.unstaged.deleted),
             "renamed": renamed_to_json(&data.unstaged.renamed),
@@ -1087,13 +1160,14 @@ pub fn output_porcelain(
     null_terminated: bool,
     writer: &mut impl Write,
 ) -> CliResult<()> {
-    output_porcelain_with_unmerged(staged, unstaged, &[], null_terminated, true, writer)
+    output_porcelain_with_unmerged(staged, unstaged, &[], &[], null_terminated, true, writer)
 }
 
 fn output_porcelain_with_unmerged(
     staged: &Changes,
     unstaged: &Changes,
     unmerged: &[UnmergedEntry],
+    intent_to_add: &[PathBuf],
     null_terminated: bool,
     quote_path: bool,
     writer: &mut impl Write,
@@ -1105,7 +1179,9 @@ fn output_porcelain_with_unmerged(
     // §B.6.3), never as two `R` endpoint rows. Under `-z` the record is
     // `XY SP <new> NUL <old> NUL` (raw path bytes, new before old, matching
     // Git); non-`-z` paths go through `quote_pathname` (§B.6.6).
-    for entry in generate_short_status_entries_with_unmerged(staged, unstaged, unmerged) {
+    for entry in
+        generate_short_status_entries_with_unmerged(staged, unstaged, unmerged, intent_to_add, None)
+    {
         match entry {
             ShortStatusEntry::Path {
                 path,
@@ -1460,6 +1536,7 @@ fn output_porcelain_v2(
     staged: &Changes,
     unstaged: &Changes,
     unmerged: &[UnmergedEntry],
+    intent_to_add: &[PathBuf],
     ignored: &[PathBuf],
     metadata: Option<&PorcelainV2Data>,
     staged_rename_details: &RenameDetails,
@@ -1569,7 +1646,8 @@ fn output_porcelain_v2(
     // duplicate `1 D.` row for it (2026-08-06 R0-5 review).
     let unmerged_paths: std::collections::HashSet<&std::path::Path> =
         unmerged.iter().map(|entry| entry.path.as_path()).collect();
-    let status_list = generate_short_format_status(staged, unstaged);
+    let status_list =
+        generate_short_format_status_with_unmerged(staged, unstaged, &[], intent_to_add);
     for (file, staged_status, unstaged_status) in status_list {
         if endpoints.contains(&file) {
             continue;
@@ -1603,7 +1681,14 @@ fn output_porcelain_v2(
         let workdir_path = file.clone();
         let file_str = workdir_path.to_str().unwrap_or_default();
 
-        let (mode_index, hash_index) = if let Some(entry) = metadata.index.get(file_str, 0) {
+        // WT-06: Git treats an intent-to-add entry as ABSENT on the index
+        // side of a porcelain v2 record (`1 .A N... 000000 000000 100644
+        // <zero> <zero> path`), even though stage 0 holds the empty-blob
+        // placeholder.
+        let is_intent_to_add = intent_to_add.iter().any(|path| path == &file);
+        let (mode_index, hash_index) = if is_intent_to_add {
+            (0, zero_hash.clone())
+        } else if let Some(entry) = metadata.index.get(file_str, 0) {
             (entry.mode, entry.hash.to_string())
         } else if staged_status == 'D' {
             // Semantically absent: the deletion is staged, so stage 0 has
@@ -1788,7 +1873,7 @@ pub fn generate_short_format_status(
     staged: &Changes,
     unstaged: &Changes,
 ) -> Vec<(std::path::PathBuf, char, char)> {
-    generate_short_format_status_with_unmerged(staged, unstaged, &[])
+    generate_short_format_status_with_unmerged(staged, unstaged, &[], &[])
 }
 
 fn process_unstaged_changes(
@@ -1842,6 +1927,7 @@ pub(crate) fn generate_short_format_status_with_unmerged(
     staged: &Changes,
     unstaged: &Changes,
     unmerged: &[UnmergedEntry],
+    intent_to_add: &[PathBuf],
 ) -> Vec<(std::path::PathBuf, char, char)> {
     let mut file_status: HashMap<PathBuf, (char, char)> = HashMap::new();
 
@@ -1876,12 +1962,31 @@ pub(crate) fn generate_short_format_status_with_unmerged(
     for (_old, new) in &unstaged.renamed {
         file_status.insert(new.clone(), ('?', '?'));
     }
+    // WT-06: intent-to-add entries are Git's `.A` worktree side. The placeholder
+    // itself contributes no staged content, but an ITA path that HEAD still has
+    // is a staged DELETION (`DA`, t2203:18) — preserve any existing X column.
+    for file in intent_to_add {
+        let staged_status = file_status
+            .get(file)
+            .map(|(staged, _)| *staged)
+            .unwrap_or(' ');
+        file_status.insert(file.clone(), (staged_status, 'A'));
+    }
     for entry in unmerged {
         file_status.insert(entry.path.clone(), entry.xy());
     }
 
     let mut sorted_files: Vec<_> = file_status.iter().collect();
-    sorted_files.sort_by(|a, b| a.0.cmp(b.0));
+    // Git's short/porcelain v1 list is grouped: every TRACKED change (X or Y
+    // is not `?`) sorted by path, then every untracked `??` row sorted by
+    // path. A single global path sort interleaves `?? dir1/x` ahead of
+    // `A  dir2/y`, which is not byte-compatible (t7508).
+    sorted_files.sort_by(|a, b| {
+        let untracked = |(staged, unstaged): (char, char)| staged == '?' && unstaged == '?';
+        untracked(*a.1)
+            .cmp(&untracked(*b.1))
+            .then_with(|| a.0.cmp(b.0))
+    });
 
     sorted_files
         .into_iter()
@@ -1917,6 +2022,33 @@ impl ShortStatusEntry {
             ShortStatusEntry::Rename { new, .. } => new,
         }
     }
+
+    /// Whether this entry is the untracked `??` group. Git emits every
+    /// tracked change first, then the sorted untracked rows (t7508).
+    fn is_untracked(&self) -> bool {
+        matches!(
+            self,
+            ShortStatusEntry::Path {
+                staged: '?',
+                unstaged: '?',
+                ..
+            }
+        )
+    }
+}
+
+/// Ordering key for short/porcelain rows: Git sorts by the repository-root
+/// path even when the display paths are cwd-relative (`status` from a
+/// subdirectory). `sort_base` is the cwd relative to the root; `None` means
+/// the paths are already root-relative (porcelain, `status.relativePaths=false`)
+/// or the caller wants the legacy display-path order (public API tests).
+fn short_order_key(path: &Path, sort_base: Option<&Path>) -> PathBuf {
+    match sort_base {
+        Some(base) if !base.as_os_str().is_empty() => {
+            crate::utils::util::normalize_abs_path(&base.join(path))
+        }
+        _ => path.to_path_buf(),
+    }
 }
 
 /// Build the shared short-format / porcelain-v1 entry list (§B.6.1): rename
@@ -1928,13 +2060,15 @@ pub fn generate_short_status_entries(
     staged: &Changes,
     unstaged: &Changes,
 ) -> Vec<ShortStatusEntry> {
-    generate_short_status_entries_with_unmerged(staged, unstaged, &[])
+    generate_short_status_entries_with_unmerged(staged, unstaged, &[], &[], None)
 }
 
 pub(crate) fn generate_short_status_entries_with_unmerged(
     staged: &Changes,
     unstaged: &Changes,
     unmerged: &[UnmergedEntry],
+    intent_to_add: &[PathBuf],
+    sort_base: Option<&Path>,
 ) -> Vec<ShortStatusEntry> {
     let mut entries: Vec<ShortStatusEntry> = Vec::new();
     let mut endpoints: HashSet<PathBuf> = HashSet::new();
@@ -1980,9 +2114,14 @@ pub(crate) fn generate_short_status_entries_with_unmerged(
         });
     }
 
-    let mut base: Vec<_> = short_xy_base(staged, unstaged, unmerged)
-        .into_iter()
-        .collect();
+    let mut xy = short_xy_base(staged, unstaged, unmerged);
+    // WT-06: `.A` for an intent-to-add path, merged with any staged component
+    // the same path already has (an ITA path that HEAD tracks is `DA`).
+    for path in intent_to_add {
+        let staged_char = xy.get(path).map(|(staged, _)| *staged).unwrap_or(' ');
+        xy.insert(path.clone(), (staged_char, 'A'));
+    }
+    let mut base: Vec<_> = xy.into_iter().collect();
     base.sort_by(|a, b| a.0.cmp(&b.0));
     for (path, (staged_char, unstaged_char)) in base {
         if endpoints.contains(&path) {
@@ -1994,7 +2133,11 @@ pub(crate) fn generate_short_status_entries_with_unmerged(
             unstaged: unstaged_char,
         });
     }
-    entries.sort_by(|a, b| a.sort_key().cmp(b.sort_key()));
+    entries.sort_by(|a, b| {
+        a.is_untracked().cmp(&b.is_untracked()).then_with(|| {
+            short_order_key(a.sort_key(), sort_base).cmp(&short_order_key(b.sort_key(), sort_base))
+        })
+    });
     entries
 }
 
@@ -2008,6 +2151,8 @@ pub async fn output_short_format(
         staged,
         unstaged,
         &[],
+        &[],
+        None,
         &OutputConfig::default(),
         false,
         true,
@@ -2121,10 +2266,13 @@ pub fn quote_pathname_bytes(path: &Path, quote_path: bool) -> Vec<u8> {
 /// rename form), not as two separate `R` rows (§B.6.1). Under `-z` the record
 /// is `XY SP <new> NUL <old> NUL` (new before old, matching Git) with RAW
 /// unquoted paths; non-`-z` paths go through [`quote_pathname`] (§B.6.6).
+#[allow(clippy::too_many_arguments)]
 async fn output_short_format_with_config(
     staged: &Changes,
     unstaged: &Changes,
     unmerged: &[UnmergedEntry],
+    intent_to_add: &[PathBuf],
+    sort_base: Option<&Path>,
     output: &OutputConfig,
     null_terminated: bool,
     quote_path: bool,
@@ -2134,7 +2282,13 @@ async fn output_short_format_with_config(
     let write_err =
         |e: io::Error| crate::utils::output::stdout_write_error("write status output", e);
 
-    for entry in generate_short_status_entries_with_unmerged(staged, unstaged, unmerged) {
+    for entry in generate_short_status_entries_with_unmerged(
+        staged,
+        unstaged,
+        unmerged,
+        intent_to_add,
+        sort_base,
+    ) {
         match entry {
             ShortStatusEntry::Path {
                 path,

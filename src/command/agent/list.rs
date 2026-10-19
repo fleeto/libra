@@ -121,7 +121,7 @@ fn methods_for(
             unavailable_reason: if file_backed && !secure_file_import_available {
                 Some("secure provider-root file opening is unavailable on this platform")
             } else if export_backed && !opencode_available {
-                Some("trusted OpenCode exporter or required offline sandbox unavailable")
+                Some(opencode_unavailable_reason())
             } else {
                 None
             },
@@ -131,7 +131,7 @@ fn methods_for(
             supported: export_backed,
             available: export_backed && opencode_available,
             unavailable_reason: if export_backed && !opencode_available {
-                Some("trusted OpenCode exporter or required offline sandbox unavailable")
+                Some(opencode_unavailable_reason())
             } else if !export_backed {
                 Some("agent uses an authorized transcript file")
             } else {
@@ -139,6 +139,17 @@ fn methods_for(
             },
         },
     ]
+}
+
+fn opencode_unavailable_reason() -> &'static str {
+    #[cfg(windows)]
+    {
+        "trusted OpenCode 2.x exporter unavailable; register its directory and binary with libra agent rpc trust"
+    }
+    #[cfg(not(windows))]
+    {
+        "trusted OpenCode exporter or required offline sandbox unavailable"
+    }
 }
 
 pub async fn execute_safe(args: ListArgs, output: &OutputConfig) -> CliResult<()> {
@@ -152,10 +163,10 @@ pub async fn execute_safe(args: ListArgs, output: &OutputConfig) -> CliResult<()
     let mut agents = Vec::with_capacity(AgentKind::all().len());
     for kind in AgentKind::all() {
         let row = registration_for(*kind);
-        // Only the supported roster (claude-code / codex / opencode) is
-        // surfaced. Unsupported agents stay in the static registry so
-        // historical sessions remain readable and doctor can still reason
-        // about residual hooks, but they are omitted from this listing.
+        // Only supported agents are surfaced. `grok` uses support_wave
+        // `grok`, not `first_batch`. Unsupported agents stay in the static
+        // registry so historical sessions remain readable, but they are
+        // omitted from this listing.
         if !row.supported {
             continue;
         }
@@ -205,8 +216,8 @@ pub async fn execute_safe(args: ListArgs, output: &OutputConfig) -> CliResult<()
             let opencode_available = crate::internal::ai::observed_agents::opencode_export::trusted_opencode_binary()
                 .await
                 .is_ok()
-                && crate::internal::ai::observed_agents::opencode_export::required_export_sandbox_available()
-                    .await;
+                && (cfg!(windows) || crate::internal::ai::observed_agents::opencode_export::required_export_sandbox_available()
+                    .await);
             let agents = payload
                 .agents
                 .iter()
@@ -216,7 +227,7 @@ pub async fn execute_safe(args: ListArgs, output: &OutputConfig) -> CliResult<()
                         CliError::internal("agent list registry emitted an unknown db kind")
                     })?;
                     Ok(ListAgentRowV2 {
-                        methods: methods_for(kind, cfg!(unix), opencode_available),
+                        methods: methods_for(kind, cfg!(any(unix, windows)), opencode_available),
                         base,
                     })
                 })

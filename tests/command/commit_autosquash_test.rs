@@ -276,6 +276,9 @@ fn dry_run_all_excludes_untracked_from_would_commit() {
 
     // An untracked file is advisory only; `-a` never stages it.
     fs::write(repo.join("untracked.txt"), "u\n").unwrap();
+    let index_path = repo.join(".libra/index");
+    let before_index = fs::read(&index_path).unwrap();
+    let before_head = head_commit(&repo);
     let out = run_libra(&["commit", "--dry-run", "-a", "-m", "preview"], &repo);
     assert_eq!(
         out.status.code(),
@@ -283,15 +286,32 @@ fn dry_run_all_excludes_untracked_from_would_commit() {
         "untracked-only with --dry-run -a should be nothing to commit (128): {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let combined = format!(
-        "{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
+    // The long status snapshot still reports advisory untracked files. The
+    // porcelain preview distinguishes them from files auto-staged by `-a`.
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("Untracked files:"), "{stdout}");
+    assert!(stdout.contains("untracked.txt"), "{stdout}");
+    assert_eq!(fs::read(&index_path).unwrap(), before_index);
+    assert_eq!(head_commit(&repo), before_head);
+
+    fs::write(repo.join("a.txt"), "modified\n").unwrap();
+    let preview = run_libra(&["commit", "--porcelain", "-a", "-m", "preview"], &repo);
+    assert!(
+        preview.status.success(),
+        "{}",
+        String::from_utf8_lossy(&preview.stderr)
+    );
+    let porcelain = String::from_utf8_lossy(&preview.stdout);
+    assert!(
+        porcelain.lines().any(|line| line == "M  a.txt"),
+        "tracked modifications must be auto-staged in the preview: {porcelain}"
     );
     assert!(
-        !combined.contains("untracked.txt"),
-        "untracked file must not appear in the would-commit set"
+        porcelain.lines().any(|line| line == "?? untracked.txt"),
+        "untracked files must remain advisory in the preview: {porcelain}"
     );
+    assert_eq!(fs::read(&index_path).unwrap(), before_index);
+    assert_eq!(head_commit(&repo), before_head);
 }
 
 // ---------------------------------------------------------------------------

@@ -124,3 +124,95 @@ shape: required string type/message, optional integer status 100..599 and
 optional response body. Response/unknown/malformed/opaque error branches stay
 partial after safe projection. These synthetic mechanism cases are not
 provider or account evidence; real Session/model checks stay macOS local.
+
+
+## CX-12 Codex 0.162.1 source-pinned synthetic corpus (2026-10-19)
+
+codex_current_source_pin: 0.162.1
+codex_current_source_commit: 092d3acd6bec3e3a14bdc7e7a2810ab628ab759d
+
+`codex-rollout-01621.jsonl` is **synthetic**, hand-authored against the fixed
+source matrix in `docs/development/plan/plan-20260904.md#cx00-source-audit-20261019`.
+It is a corpus of independent source slices and explicit fault cases, **not a
+single natural or import-ready model session**. It contains no account output,
+credentials, cryptographic provenance, or evidence of a live Codex hook/model.
+The original `codex.jsonl` and its old table row above remain historical generic
+parser fixtures; this additive section does not relabel or rewrite them.
+The original 8725-byte OpenCode provenance prefix stays byte-for-byte frozen.
+
+The first segment declares paginated mode. The later session_meta begins an
+independent legacy-mode segment. Lines 41-44 omit ordinal, following
+rollout/ordinal.rs:23-42 for new legacy files. A legacy mirror deliberately placed in the
+paginated segment is a compatibility/fault case, not a claim that the current
+writer naturally persists both mirror forms. Duplicate replay, wrong types,
+unknown variants, duplicate keys, and the incomplete final line are deliberate.
+The last line has no trailing newline; do not repair it. Valid preceding records
+remain evidence when a bounded reader reports the corrupt tail as partial.
+Reasoning `content` positive data contains reasoning_text; pure text-only arrays
+are not presented as natural writer output. Compaction encrypted values are
+negative thinking-classification cases, not substitutes for reasoning data.
+Every CX12-SYNTHETIC string and opaque value is a canary, never a real token,
+signature, authenticated envelope, or complete internal reasoning.
+
+Corpus SHA-256: `bb1453259ac10a91c9bfd2529eb4b64ab1c963c70bf8e67fb5941d4d65b1fe69`; 12433 bytes; 46 physical lines.
+
+| Physical line | Scenario / expected contract |
+|---|---|
+| 1 | session identity and synthetic source pin |
+| 2 | world baseline is not thinking |
+| 3 | turn context summary none is not effective request setting |
+| 4 | turn start |
+| 5 | literal AGENTS prefix user prompt must survive |
+| 6 | harness developer message has the same visible prefix |
+| 7 | client-authored developer provenance |
+| 8 | inherited user input is not child authorization |
+| 9 | canonical readable reasoning Unicode escapes and opaque |
+| 10 | identical ordinal8/record replay: deduplicate; next record deliberately jumps to ordinal10 (gap9), allowed by recorder_tests.rs:1029 |
+| 11 | same reasoning as typed item-completed mirror |
+| 12 | legacy mirror shape in paginated segment is a compatibility fault, not natural output |
+| 13 | legitimate repeated text with distinct item identity |
+| 14 | synthetic forward-extension reasoning JSON fields stay ordinary; not actual provider-source evidence |
+| 15 | nonempty opaque only is data but not readable |
+| 16 | empty summary and empty encrypted string are empty shell |
+| 17 | null encrypted differs from empty and absent |
+| 18 | absent encrypted field stays absent |
+| 19 | malformed nonstring encrypted must be retained as unsupported |
+| 20 | missing required summary is unsupported shape, not invented text |
+| 21 | exact completed-response usage record |
+| 22 | cumulative token_count persists in both modes and is not additive |
+| 23 | cumulative token rollback marks partial |
+| 24 | missing usage is unknown rather than zero |
+| 25 | compaction retains reasoning and aligned metadata |
+| 26 | compaction encrypted string is not reasoning data |
+| 27 | context compaction encrypted string is not reasoning data |
+| 28 | world patch does not manufacture prompt or thinking |
+| 29 | unknown response variant is partial |
+| 30 | unknown event variant is partial |
+| 31 | unknown rollout variant is partial |
+| 32 | error-bearing terminal is not successful completion |
+| 33 | effective settings snapshot, not turn_context legacy placeholder |
+| 34 | durable interrupted terminal with turn id |
+| 35 | non-Interrupt aborted reason replaced |
+| 36 | non-Interrupt aborted reason review_ended |
+| 37 | non-Interrupt aborted reason budget_limited |
+| 38 | durable aborted terminal without turn id must remain partial |
+| 39 | rollback changes active turn projection without deleting source |
+| 40 | camelCase goal state is neither user prompt nor thinking |
+| 41 | independent legacy-mode session segment begins |
+| 42 | legacy persisted reasoning mirror |
+| 43 | legacy persisted raw mirror requires show_raw_agent_reasoning |
+| 44 | legacy missing ordinal counterexample: physical offset locator, partial mixed corpus |
+| 45 | duplicate summary key must be detected, never silently last-wins |
+| 46 | intentionally incomplete final JSON record: preserve complete prefix and report partial |
+
+Source mapping: history/lib.rs:64-123 (metadata), :362 (envelope/optional ordinal),
+history/rollout_payload.rs:33,239 (metadata and replacement_history),
+protocol/models.rs:1050,1229,1245,1626,1986-1995 (reasoning/compaction/content/tags),
+protocol/items.rs:192 (typed Reasoning mirror), protocol/protocol.rs:794,
+1424-1434,2229,2293,2305,2372,3159,3303,3324,3699,4134,4250 (modes, task aliases, settings, usage,
+identity, world/turn context, rollback, goals and aborted turns), and
+rollout/policy.rs:21-100,127-283 (persistence filtering, including Other), rollout/ordinal.rs:23-42
+(legacy omits ordinals). All paths refer to codex-rs
+at the full commit above, not a moving branch. Unknown/fault inputs stay
+explicitly unsupported/partial. Downstream parser tests must select the listed
+case/slice rather than treating this mixed corpus as one complete session.

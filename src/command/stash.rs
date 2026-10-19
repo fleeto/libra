@@ -124,6 +124,9 @@ pub(crate) enum StashError {
     #[error("failed to reset working directory: {0}")]
     ResetFailed(String),
 
+    #[error("Entry '{0}' not uptodate. Cannot merge.\nCannot save the current worktree state")]
+    IntentToAdd(String),
+
     #[error("pathspec '{0}' did not match any tracked files")]
     PathspecNoMatch(String),
 
@@ -143,6 +146,7 @@ impl StashError {
             Self::InvalidStashRef(_) => StableErrorCode::CliInvalidArguments,
             Self::StashNotExist(_) => StableErrorCode::CliInvalidTarget,
             Self::MergeConflict(_) | Self::IndexConflict => StableErrorCode::ConflictUnresolved,
+            Self::IntentToAdd(_) => StableErrorCode::ConflictOperationBlocked,
             Self::BranchExists(_) => StableErrorCode::ConflictOperationBlocked,
             Self::BranchLookupFailed { .. } => StableErrorCode::IoReadFailed,
             Self::ClearRequiresForce => StableErrorCode::CliInvalidArguments,
@@ -186,6 +190,11 @@ impl From<StashError> for CliError {
             StashError::IndexConflict => CliError::failure(message)
                 .with_stable_code(stable_code)
                 .with_hint("retry without --index, or restore the index to match HEAD first"),
+            // WT-07 (ADR-WT-05/WT-02): an intent-to-add entry means the
+            // worktree copy is not yet in the index. Git refuses to save a
+            // worktree state it cannot merge back, and writes nothing.
+            StashError::IntentToAdd(_) => CliError::conflict(message)
+                .with_hint("run 'libra add <path>' to stage the file content before stashing"),
             StashError::BranchExists(_) => CliError::fatal(message)
                 .with_stable_code(stable_code)
                 .with_hint("use a different branch name or delete the existing branch first"),
@@ -466,6 +475,21 @@ fn format_stash_push_message(
     }
 }
 
+/// WT-07 (ADR-WT-05): Git refuses to stash when any index entry is
+/// intent-to-add — the worktree copy is not in the index, so a later
+/// `stash pop` cannot merge it back. Checked after the initial-commit
+/// precheck (Git's order) and before any object/tree write.
+fn ensure_no_intent_to_add(index: &Index) -> Result<(), StashError> {
+    if let Some(entry) = index
+        .tracked_entries(0)
+        .iter()
+        .find(|entry| entry.flags.intent_to_add)
+    {
+        return Err(StashError::IntentToAdd(entry.name.clone()));
+    }
+    Ok(())
+}
+
 async fn run_push(options: StashPushOptions) -> Result<StashOutput, StashError> {
     // `stash push -- <pathspec>` stashes only the changes to the named paths and
     // leaves the rest of the working tree intact — a distinct, self-contained
@@ -486,6 +510,7 @@ async fn run_push(options: StashPushOptions) -> Result<StashOutput, StashError> 
     let head_commit_hash = Head::current_commit()
         .await
         .ok_or(StashError::NoInitialCommit)?;
+    ensure_no_intent_to_add(&index)?;
 
     if !has_changes().await && included_untracked_paths.is_empty() {
         return Ok(StashOutput::Noop {
@@ -774,6 +799,7 @@ async fn run_push_pathspec(options: StashPushOptions) -> Result<StashOutput, Sta
     let head_commit_hash = Head::current_commit()
         .await
         .ok_or(StashError::NoInitialCommit)?;
+    ensure_no_intent_to_add(&index)?;
     let head_commit: Commit =
         load_object(&head_commit_hash).map_err(|e| StashError::ReadObject(e.to_string()))?;
     let head_tree: Tree =

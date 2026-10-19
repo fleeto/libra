@@ -60,7 +60,7 @@ use sea_orm::{
 use serde::{Deserialize, Serialize};
 use tokio::time::sleep;
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use crate::internal::ai::authorized_read::{
     RegisteredHelperOutput, registered_helper_command, run_registered_bounded_helper_until,
 };
@@ -882,7 +882,24 @@ fn read_cleanup_regular_file_inner<F: FnOnce()>(
             .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW | libc::O_CLOEXEC)
             .open(path)
     };
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    let opened = (|| {
+        let parent = path.parent().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "cleanup source has no parent",
+            )
+        })?;
+        let name = path.file_name().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "cleanup source has no filename",
+            )
+        })?;
+        let directory = crate::utils::windows_fs::open_tree(parent)?;
+        crate::utils::windows_fs::open_at(&directory, name, false)
+    })();
+    #[cfg(not(any(unix, windows)))]
     let opened = fs::File::open(path);
     let mut file = match opened {
         Ok(file) => file,
@@ -1170,7 +1187,17 @@ fn encode_checkpoint_object_path(path: &Path) -> Result<String> {
 
         Ok(STANDARD.encode(path.as_os_str().as_bytes()))
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        let bytes: Vec<_> = path
+            .as_os_str()
+            .encode_wide()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        Ok(STANDARD.encode(bytes))
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let text = path
             .to_str()
@@ -1191,7 +1218,21 @@ fn decode_checkpoint_object_path(encoded: &str) -> Result<PathBuf> {
 
         Ok(PathBuf::from(OsString::from_vec(bytes)))
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        use std::{ffi::OsString, os::windows::ffi::OsStringExt};
+        if !bytes.len().is_multiple_of(2) {
+            bail!("checkpoint object store path has invalid Windows UTF-16 bytes");
+        }
+        let units: Vec<_> = bytes
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect();
+        Ok(PathBuf::from(OsString::from_wide(&units)))
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let text =
             String::from_utf8(bytes).context("checkpoint object store path is not valid UTF-8")?;
@@ -1365,7 +1406,7 @@ async fn invoke_checkpoint_object_helper(
     operation: CheckpointObjectIoOperation<'_>,
     deadline: Instant,
 ) -> Result<CheckpointObjectIoHelperResponse> {
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = (repo_path, operation, deadline);
         // The central private-helper runner intentionally has no raw-pipe
@@ -1374,7 +1415,7 @@ async fn invoke_checkpoint_object_helper(
         bail!("checkpoint object-I/O helper is unavailable on this platform");
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     {
         let request = CheckpointObjectIoHelperRequest {
             repo_path_base64: encode_checkpoint_object_path(repo_path)?,
@@ -1483,6 +1524,96 @@ pub struct HistoryManager {
     /// window that must be fenced by the transactional write.
     #[cfg(test)]
     pub(crate) test_before_checkpoint_ref_cas: Option<TestBeforeCheckpointRefCas>,
+}
+
+/// One append-only revision recorded for an old Claude checkpoint.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaudeLegacyRevisionRepair {
+    pub checkpoint_id: String,
+    pub revision: i64,
+    pub content_digest: String,
+    pub inserted: bool,
+}
+
+struct ClaudeLegacyRevisionIdentity {
+    logical_turn_key: String,
+    content_digest: String,
+}
+
+/// Bind a legacy Claude checkpoint to the ordinary transcript bytes.
+///
+/// `None` means the bytes are not obtained data. An empty shell is not data.
+fn claude_legacy_revision_identity(
+    checkpoint_id: &str,
+    ordinary_bytes: &[u8],
+) -> Option<ClaudeLegacyRevisionIdentity> {
+    if checkpoint_id.is_empty()
+        || checkpoint_id
+            .chars()
+            .any(|ch| ch.is_control() || ch == '/' || ch == '\\')
+    {
+        return None;
+    }
+    let assessment =
+        crate::internal::ai::observed_agents::assess_claude_ordinary_transcript(ordinary_bytes);
+    if !assessment.data_obtained() {
+        return None;
+    }
+    use sha2::Digest;
+    let content_digest = hex::encode(sha2::Sha256::digest(ordinary_bytes));
+    Some(ClaudeLegacyRevisionIdentity {
+        logical_turn_key: format!("claude-legacy:{checkpoint_id}"),
+        content_digest,
+    })
+}
+
+/// Whether doctor should append or finish the claim for this content.
+pub async fn claude_legacy_revision_needs_repair(
+    conn: &impl ConnectionTrait,
+    session_id: &str,
+    checkpoint_id: &str,
+    ordinary_bytes: &[u8],
+) -> Result<bool> {
+    let Some(identity) = claude_legacy_revision_identity(checkpoint_id, ordinary_bytes) else {
+        return Ok(false);
+    };
+    let backend = conn.get_database_backend();
+    let revision = conn
+        .query_one_raw(Statement::from_sql_and_values(
+            backend,
+            "SELECT 1 AS present FROM agent_coverage_revision
+             WHERE session_id = ? AND logical_turn_key = ?
+               AND coverage_schema_version = 2 AND checkpoint_id = ?
+               AND coverage_digest = ?
+             LIMIT 1",
+            [
+                session_id.to_string().into(),
+                identity.logical_turn_key.clone().into(),
+                checkpoint_id.to_string().into(),
+                identity.content_digest.clone().into(),
+            ],
+        ))
+        .await
+        .context("read the Claude legacy reasoning revision")?;
+    let claim = conn
+        .query_one_raw(Statement::from_sql_and_values(
+            backend,
+            "SELECT 1 AS present FROM agent_coverage_claim
+             WHERE session_id = ? AND logical_turn_key = ?
+               AND coverage_schema_version = 2 AND state = 'catalog_committed'
+               AND checkpoint_id = ? AND coverage_digest = ?
+               AND completeness = 'incomplete'
+             LIMIT 1",
+            [
+                session_id.to_string().into(),
+                identity.logical_turn_key.into(),
+                checkpoint_id.to_string().into(),
+                identity.content_digest.into(),
+            ],
+        ))
+        .await
+        .context("read the Claude legacy reasoning revision claim")?;
+    Ok(revision.is_none() || claim.is_none())
 }
 
 impl HistoryManager {
@@ -4675,6 +4806,202 @@ impl HistoryManager {
         }
 
         unreachable!("checkpoint prune retry loop must return on success or terminal error")
+    }
+
+    /// Append one coverage revision for an authorized legacy Claude checkpoint.
+    ///
+    /// The idempotency key is the old checkpoint id plus the SHA-256 of the
+    /// ordinary transcript bytes. A matching row is left in place. This writes
+    /// no Git object and does not mint a native artifact. A tombstoned session
+    /// is refused so an erase cannot be revived.
+    pub async fn repair_claude_legacy_reasoning_revision(
+        &self,
+        checkpoint_id: &str,
+        ordinary_bytes: &[u8],
+    ) -> Result<ClaudeLegacyRevisionRepair> {
+        let identity = claude_legacy_revision_identity(checkpoint_id, ordinary_bytes)
+            .context("this checkpoint has no ordinary Claude thinking data to repair")?;
+        let backend = self.db_conn.get_database_backend();
+        let txn = self
+            .db_conn
+            .begin()
+            .await
+            .context("begin Claude legacy reasoning revision repair")?;
+        let row = txn
+            .query_one_raw(Statement::from_sql_and_values(
+                backend,
+                "SELECT c.session_id, c.traces_commit, s.agent_kind
+                 FROM agent_checkpoint c
+                 JOIN agent_session s ON s.session_id = c.session_id
+                 WHERE c.checkpoint_id = ? AND c.scope = 'committed'",
+                [checkpoint_id.to_string().into()],
+            ))
+            .await
+            .context("read the legacy Claude checkpoint for revision repair")?
+            .context(
+                "checkpoint is not associated with a committed session in this repository; rerun doctor from the repository that owns it",
+            )?;
+        let session_id: String = row
+            .try_get_by("session_id")
+            .context("read the session associated with the legacy Claude checkpoint")?;
+        let traces_commit: String = row
+            .try_get_by("traces_commit")
+            .context("read the stored traces commit of the legacy Claude checkpoint")?;
+        let agent_kind: String = row
+            .try_get_by("agent_kind")
+            .context("read the provider of the legacy Claude checkpoint")?;
+        if agent_kind != "claude_code" {
+            bail!(
+                "checkpoint is not an authorized Claude session; refusing to append a reasoning revision"
+            );
+        }
+        let tombstoned = txn
+            .query_one_raw(Statement::from_sql_and_values(
+                backend,
+                "SELECT 1 AS present
+                 FROM agent_import_tombstone t
+                 JOIN agent_session s
+                   ON s.agent_kind = t.agent_kind
+                  AND s.provider_session_id = t.provider_session_id
+                 WHERE s.session_id = ?
+                 LIMIT 1",
+                [session_id.clone().into()],
+            ))
+            .await
+            .context("check the Claude session tombstone before revision repair")?;
+        if tombstoned.is_some() {
+            bail!("this Claude session is tombstoned; refusing to revive its reasoning revision");
+        }
+        let existing = txn
+            .query_one_raw(Statement::from_sql_and_values(
+                backend,
+                "SELECT revision FROM agent_coverage_revision
+                 WHERE session_id = ? AND logical_turn_key = ?
+                   AND coverage_schema_version = 2 AND checkpoint_id = ?
+                   AND coverage_digest = ?",
+                [
+                    session_id.clone().into(),
+                    identity.logical_turn_key.clone().into(),
+                    checkpoint_id.to_string().into(),
+                    identity.content_digest.clone().into(),
+                ],
+            ))
+            .await
+            .context("read an existing Claude legacy reasoning revision")?;
+        let (revision, inserted) = if let Some(existing) = existing {
+            let revision: i64 = existing
+                .try_get_by("revision")
+                .context("read the existing Claude legacy reasoning revision number")?;
+            (revision, false)
+        } else {
+            let max_row = txn
+                .query_one_raw(Statement::from_sql_and_values(
+                    backend,
+                    "SELECT COALESCE(MAX(revision), 0) AS revision
+                     FROM agent_coverage_revision
+                     WHERE session_id = ? AND logical_turn_key = ?
+                       AND coverage_schema_version = 2",
+                    [
+                        session_id.clone().into(),
+                        identity.logical_turn_key.clone().into(),
+                    ],
+                ))
+                .await
+                .context("read the Claude legacy reasoning revision high-water")?
+                .context("Claude legacy reasoning revision high-water returned no row")?;
+            let max_revision: i64 = max_row
+                .try_get_by("revision")
+                .context("decode the Claude legacy reasoning revision high-water")?;
+            let revision = max_revision
+                .checked_add(1)
+                .context("Claude legacy reasoning revision number overflowed")?;
+            let now_ms = chrono::Utc::now().timestamp_millis();
+            txn.execute_raw(Statement::from_sql_and_values(
+                backend,
+                "INSERT INTO agent_coverage_revision (
+                    session_id, logical_turn_key, coverage_schema_version, revision,
+                    checkpoint_id, coverage_digest, completeness, source_channel, created_at
+                 ) VALUES (?, ?, 2, ?, ?, ?, 'incomplete', 'import', ?)",
+                [
+                    session_id.clone().into(),
+                    identity.logical_turn_key.clone().into(),
+                    revision.into(),
+                    checkpoint_id.to_string().into(),
+                    identity.content_digest.clone().into(),
+                    now_ms.into(),
+                ],
+            ))
+            .await
+            .context("append the Claude legacy reasoning revision")?;
+            (revision, true)
+        };
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        txn.execute_raw(Statement::from_sql_and_values(
+            backend,
+            "INSERT INTO agent_coverage_claim (
+                session_id, logical_turn_key, coverage_schema_version, coverage_digest,
+                completeness, revision, state, checkpoint_id, traces_commit,
+                source_channel, created_at, updated_at
+             ) VALUES (?, ?, 2, ?, 'incomplete', ?, 'catalog_committed', ?, ?, 'import', ?, ?)
+             ON CONFLICT(session_id, logical_turn_key, coverage_schema_version) DO UPDATE SET
+                coverage_digest = excluded.coverage_digest,
+                completeness = 'incomplete',
+                revision = excluded.revision,
+                state = 'catalog_committed',
+                checkpoint_id = excluded.checkpoint_id,
+                traces_commit = excluded.traces_commit,
+                owner = NULL,
+                lease_expires_at = NULL,
+                updated_at = excluded.updated_at",
+            [
+                session_id.clone().into(),
+                identity.logical_turn_key.clone().into(),
+                identity.content_digest.clone().into(),
+                revision.into(),
+                checkpoint_id.to_string().into(),
+                traces_commit.into(),
+                now_ms.into(),
+                now_ms.into(),
+            ],
+        ))
+        .await
+        .context("record the Claude legacy reasoning revision claim")?;
+        let recorded = txn
+            .query_one_raw(Statement::from_sql_and_values(
+                backend,
+                "SELECT revision, coverage_digest FROM agent_coverage_claim
+                 WHERE session_id = ? AND logical_turn_key = ?
+                   AND coverage_schema_version = 2 AND state = 'catalog_committed'
+                   AND checkpoint_id = ?",
+                [
+                    session_id.into(),
+                    identity.logical_turn_key.into(),
+                    checkpoint_id.to_string().into(),
+                ],
+            ))
+            .await
+            .context("reread the Claude legacy reasoning revision claim")?
+            .context("Claude legacy reasoning revision claim was not recorded; rerun `libra agent doctor --repair`")?;
+        let recorded_revision: i64 = recorded
+            .try_get_by("revision")
+            .context("decode the recorded Claude legacy reasoning revision")?;
+        let recorded_digest: String = recorded
+            .try_get_by("coverage_digest")
+            .context("decode the recorded Claude legacy reasoning digest")?;
+        if recorded_revision != revision || recorded_digest != identity.content_digest {
+            bail!(
+                "Claude legacy reasoning revision was not recorded; rerun `libra agent doctor --repair`"
+            );
+        }
+        txn.commit()
+            .await
+            .context("commit Claude legacy reasoning revision repair")?;
+        Ok(ClaudeLegacyRevisionRepair {
+            checkpoint_id: checkpoint_id.to_string(),
+            revision,
+            content_digest: identity.content_digest,
+            inserted,
+        })
     }
 
     /// AG-24a local erasure for one session (plan.md Task A8.5): make the

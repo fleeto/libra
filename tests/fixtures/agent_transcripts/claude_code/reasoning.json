@@ -1,0 +1,11 @@
+{
+  "readable": "{\"type\":\"assistant\",\"uuid\":\"cc07-1\",\"timestamp\":\"2026-10-19T00:00:00Z\",\"message\":{\"role\":\"assistant\",\"model\":\"claude-sonnet-5\",\"content\":[{\"type\":\"thinking\",\"thinking\":\"CC04-THINKING-CANARY\",\"signature\":\"CC04-SIG\"}]}}\n",
+  "sig_only": "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"thinking\",\"thinking\":\"\",\"signature\":\"CC04-SIG\"}]}}\n",
+  "missing": "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"hello\"}]}}\n",
+  "redacted": "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"redacted_thinking\",\"data\":\"CC04-DATA\"}]}}\n",
+  "empty_shell": "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"thinking\",\"thinking\":\"\",\"signature\":\"\"}]}}\n",
+  "dup_key": "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"thinking\",\"thinking\":\"CC04-THINKING-CANARY\",\"thinking\":\"other\",\"signature\":\"CC04-SIG\"}]}}\n",
+  "escape": "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"thinking\",\"thinking\":\"\\u0043\\u0043\",\"signature\":\"CC04-SIG\"}]}}\n",
+  "unknown_field": "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"thinking\",\"thinking\":\"CC04-THINKING-CANARY\",\"signature\":\"CC04-SIG\",\"cc04_unknown\":\"x\"}]}}\n",
+  "string_content": "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":\"plain\"}}\n"
+}

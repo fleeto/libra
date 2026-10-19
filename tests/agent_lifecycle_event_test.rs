@@ -2056,12 +2056,14 @@ fn fail_closed_hooks_keep_repository_database_contract() {
     );
 }
 
-/// Every schema object plus every table column of the repository database,
+/// Every schema object's definition plus every table column of the database,
 /// so a migration's physical effect is observable independent of receipts.
 async fn physical_repository_schema(conn: &DatabaseConnection) -> Vec<String> {
+    let agent_kind_check = regex::Regex::new(r"CHECK\(`agent_kind` IN \(([^)]*)\)\)")
+        .expect("fixed agent_kind CHECK pattern");
     conn.query_all_raw(Statement::from_string(
         conn.get_database_backend(),
-        "SELECT type || ':' || name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' \
+        "SELECT type || ':' || name || ':' || COALESCE(sql, '') FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' \
          UNION ALL \
          SELECT 'column:' || m.name || '.' || p.name \
          FROM sqlite_master AS m, pragma_table_info(m.name) AS p WHERE m.type = 'table' \
@@ -2071,8 +2073,24 @@ async fn physical_repository_schema(conn: &DatabaseConnection) -> Vec<String> {
     .expect("read physical repository schema")
     .into_iter()
     .map(|row| {
-        row.try_get_by_index::<String>(0)
+        // SQLite's table rebuild quotes the renamed table with double quotes;
+        // fresh init uses backticks and a multiline closed agent-kind list.
+        // Normalize those spellings while retaining every CHECK value.
+        let definition = row.try_get_by_index::<String>(0)
             .expect("decode schema object")
+            .replacen(
+                "table:agent_session:CREATE TABLE \"agent_session\"",
+                "table:agent_session:CREATE TABLE `agent_session`",
+                1,
+            );
+        agent_kind_check
+            .replace_all(&definition, |captures: &regex::Captures<'_>| {
+                format!(
+                    "CHECK(`agent_kind` IN ({}))",
+                    captures[1].split_whitespace().collect::<String>()
+                )
+            })
+            .into_owned()
     })
     .collect()
 }
@@ -4457,13 +4475,13 @@ hooks-claude cwd-outside-worktree session-start exit=Some(128) stdout="" stderr=
 hooks-claude SessionStart session-start exit=Some(0) stdout="" stderr="" | sessions=[claude__contract-hooks-claude:claude_code:active:stopped_at=none:checkpoints=[]:receipts=1(pending=0)[]] artifacts=0
 hooks-claude UserPromptSubmit prompt exit=Some(0) stdout="" stderr="" | sessions=[claude__contract-hooks-claude:claude_code:active:stopped_at=none:checkpoints=[]:receipts=2(pending=0)[]] artifacts=0
 hooks-claude PostToolUse tool-use exit=Some(0) stdout="" stderr="" | sessions=[claude__contract-hooks-claude:claude_code:active:stopped_at=none:checkpoints=[]:receipts=3(pending=0)[]] artifacts=0
-hooks-claude PermissionRequest permission-request exit=Some(0) stdout="" stderr="" | sessions=[claude__contract-hooks-claude:claude_code:active:stopped_at=none:checkpoints=[]:receipts=3(pending=0)[]] artifacts=0
-hooks-claude ModelUpdate model-update exit=Some(0) stdout="" stderr="" | sessions=[claude__contract-hooks-claude:claude_code:active:stopped_at=none:checkpoints=[]:receipts=4(pending=0)[]] artifacts=0
-hooks-claude Compaction compaction exit=Some(0) stdout="" stderr="" | sessions=[claude__contract-hooks-claude:claude_code:condensed:stopped_at=none:checkpoints=[]:receipts=5(pending=0)[]] artifacts=0
-hooks-claude Stop stop exit=Some(0) stdout="" stderr="" | sessions=[claude__contract-hooks-claude:claude_code:active:stopped_at=none:checkpoints=[committed]:receipts=6(pending=0)[committed/active/complete]] artifacts=0
-hooks-claude SubagentStart subagent-start exit=Some(0) stdout="" stderr="" | sessions=[claude__contract-hooks-claude:claude_code:active:stopped_at=none:checkpoints=[committed]:receipts=6(pending=0)[committed/active/complete]] artifacts=0
-hooks-claude SubagentStop subagent-end exit=Some(0) stdout="" stderr="" | sessions=[claude__contract-hooks-claude:claude_code:active:stopped_at=none:checkpoints=[committed]:receipts=6(pending=0)[committed/active/complete]] artifacts=0
-hooks-claude SessionEnd session-end exit=Some(0) stdout="" stderr="" | sessions=[claude__contract-hooks-claude:claude_code:stopped:stopped_at=set:checkpoints=[committed,committed]:receipts=7(pending=0)[committed/active/complete,committed/stopped/complete]] artifacts=0
+hooks-claude PermissionRequest permission-request exit=Some(0) stdout="" stderr="" | sessions=[claude__contract-hooks-claude:claude_code:active:stopped_at=none:checkpoints=[]:receipts=4(pending=0)[]] artifacts=0
+hooks-claude ModelUpdate model-update exit=Some(0) stdout="" stderr="" | sessions=[claude__contract-hooks-claude:claude_code:active:stopped_at=none:checkpoints=[]:receipts=5(pending=0)[]] artifacts=0
+hooks-claude Compaction compaction exit=Some(0) stdout="" stderr="" | sessions=[claude__contract-hooks-claude:claude_code:condensed:stopped_at=none:checkpoints=[]:receipts=6(pending=0)[]] artifacts=0
+hooks-claude Stop stop exit=Some(0) stdout="" stderr="" | sessions=[claude__contract-hooks-claude:claude_code:active:stopped_at=none:checkpoints=[committed]:receipts=7(pending=0)[committed/active/complete]] artifacts=0
+hooks-claude SubagentStart subagent-start exit=Some(0) stdout="" stderr="" | sessions=[claude__contract-hooks-claude:claude_code:active:stopped_at=none:checkpoints=[committed,subagent]:receipts=8(pending=0)[committed/active/complete,subagent_boundary/active/complete]] artifacts=0
+hooks-claude SubagentStop subagent-end exit=Some(0) stdout="" stderr="" | sessions=[claude__contract-hooks-claude:claude_code:active:stopped_at=none:checkpoints=[committed,subagent,subagent]:receipts=9(pending=0)[committed/active/complete,subagent_boundary/active/complete,subagent_boundary/active/complete]] artifacts=0
+hooks-claude SessionEnd session-end exit=Some(0) stdout="" stderr="" | sessions=[claude__contract-hooks-claude:claude_code:stopped:stopped_at=set:checkpoints=[committed,subagent,subagent,committed]:receipts=10(pending=0)[committed/active/complete,subagent_boundary/active/complete,subagent_boundary/active/complete,committed/stopped/complete]] artifacts=0
 hooks-codex envelope-invalid session-start exit=Some(0) stdout="" stderr="" | sessions=[] artifacts=0
 hooks-codex unknown-event stop exit=Some(0) stdout="" stderr="" | sessions=[] artifacts=0
 hooks-codex cwd-outside-worktree session-start exit=Some(0) stdout="" stderr="" | sessions=[] artifacts=0
@@ -4483,13 +4501,13 @@ agent-hooks-claude-code cwd-outside-worktree session-start exit=Some(128) stdout
 agent-hooks-claude-code SessionStart session-start exit=Some(0) stdout="" stderr="" | sessions=[claude__contract-agent-hooks-claude-code:claude_code:active:stopped_at=none:checkpoints=[]:receipts=1(pending=0)[]] artifacts=0
 agent-hooks-claude-code UserPromptSubmit prompt exit=Some(0) stdout="" stderr="" | sessions=[claude__contract-agent-hooks-claude-code:claude_code:active:stopped_at=none:checkpoints=[]:receipts=2(pending=0)[]] artifacts=0
 agent-hooks-claude-code PostToolUse tool-use exit=Some(0) stdout="" stderr="" | sessions=[claude__contract-agent-hooks-claude-code:claude_code:active:stopped_at=none:checkpoints=[]:receipts=3(pending=0)[]] artifacts=0
-agent-hooks-claude-code PermissionRequest permission-request exit=Some(0) stdout="" stderr="" | sessions=[claude__contract-agent-hooks-claude-code:claude_code:active:stopped_at=none:checkpoints=[]:receipts=3(pending=0)[]] artifacts=0
-agent-hooks-claude-code ModelUpdate model-update exit=Some(0) stdout="" stderr="" | sessions=[claude__contract-agent-hooks-claude-code:claude_code:active:stopped_at=none:checkpoints=[]:receipts=4(pending=0)[]] artifacts=0
-agent-hooks-claude-code Compaction compaction exit=Some(0) stdout="" stderr="" | sessions=[claude__contract-agent-hooks-claude-code:claude_code:condensed:stopped_at=none:checkpoints=[]:receipts=5(pending=0)[]] artifacts=0
-agent-hooks-claude-code Stop stop exit=Some(0) stdout="" stderr="" | sessions=[claude__contract-agent-hooks-claude-code:claude_code:active:stopped_at=none:checkpoints=[committed]:receipts=6(pending=0)[committed/active/complete]] artifacts=0
-agent-hooks-claude-code SubagentStart subagent-start exit=Some(0) stdout="" stderr="" | sessions=[claude__contract-agent-hooks-claude-code:claude_code:active:stopped_at=none:checkpoints=[committed]:receipts=6(pending=0)[committed/active/complete]] artifacts=0
-agent-hooks-claude-code SubagentStop subagent-end exit=Some(0) stdout="" stderr="" | sessions=[claude__contract-agent-hooks-claude-code:claude_code:active:stopped_at=none:checkpoints=[committed]:receipts=6(pending=0)[committed/active/complete]] artifacts=0
-agent-hooks-claude-code SessionEnd session-end exit=Some(0) stdout="" stderr="" | sessions=[claude__contract-agent-hooks-claude-code:claude_code:stopped:stopped_at=set:checkpoints=[committed,committed]:receipts=7(pending=0)[committed/active/complete,committed/stopped/complete]] artifacts=0
+agent-hooks-claude-code PermissionRequest permission-request exit=Some(0) stdout="" stderr="" | sessions=[claude__contract-agent-hooks-claude-code:claude_code:active:stopped_at=none:checkpoints=[]:receipts=4(pending=0)[]] artifacts=0
+agent-hooks-claude-code ModelUpdate model-update exit=Some(0) stdout="" stderr="" | sessions=[claude__contract-agent-hooks-claude-code:claude_code:active:stopped_at=none:checkpoints=[]:receipts=5(pending=0)[]] artifacts=0
+agent-hooks-claude-code Compaction compaction exit=Some(0) stdout="" stderr="" | sessions=[claude__contract-agent-hooks-claude-code:claude_code:condensed:stopped_at=none:checkpoints=[]:receipts=6(pending=0)[]] artifacts=0
+agent-hooks-claude-code Stop stop exit=Some(0) stdout="" stderr="" | sessions=[claude__contract-agent-hooks-claude-code:claude_code:active:stopped_at=none:checkpoints=[committed]:receipts=7(pending=0)[committed/active/complete]] artifacts=0
+agent-hooks-claude-code SubagentStart subagent-start exit=Some(0) stdout="" stderr="" | sessions=[claude__contract-agent-hooks-claude-code:claude_code:active:stopped_at=none:checkpoints=[committed,subagent]:receipts=8(pending=0)[committed/active/complete,subagent_boundary/active/complete]] artifacts=0
+agent-hooks-claude-code SubagentStop subagent-end exit=Some(0) stdout="" stderr="" | sessions=[claude__contract-agent-hooks-claude-code:claude_code:active:stopped_at=none:checkpoints=[committed,subagent,subagent]:receipts=9(pending=0)[committed/active/complete,subagent_boundary/active/complete,subagent_boundary/active/complete]] artifacts=0
+agent-hooks-claude-code SessionEnd session-end exit=Some(0) stdout="" stderr="" | sessions=[claude__contract-agent-hooks-claude-code:claude_code:stopped:stopped_at=set:checkpoints=[committed,subagent,subagent,committed]:receipts=10(pending=0)[committed/active/complete,subagent_boundary/active/complete,subagent_boundary/active/complete,committed/stopped/complete]] artifacts=0
 agent-hooks-codex envelope-invalid session-start exit=Some(128) stdout="" stderr="fatal: agent hook ingestion failed: hook callback ended before trusted terminal capture ingress: invalid hook JSON payload (Syntax at line 1 column 2)\nError-Code: LBR-AGENT-008\n{\"ok\":false,\"error_code\":\"LBR-AGENT-008\",\"category\":\"internal\",\"exit_code\":128,\"severity\":\"fatal\",\"message\":\"agent hook ingestion failed: hook callback ended before trusted terminal capture ingress: invalid hook JSON payload (Syntax at line 1 column 2)\"}\n" | sessions=[] artifacts=0
 agent-hooks-codex unknown-event stop exit=Some(0) stdout="" stderr="" | sessions=[] artifacts=0
 agent-hooks-codex cwd-outside-worktree session-start exit=Some(128) stdout="" stderr="fatal: agent hook ingestion failed: hook callback ended before trusted terminal capture ingress: hook cwd is outside the active worktree\nError-Code: LBR-AGENT-008\n{\"ok\":false,\"error_code\":\"LBR-AGENT-008\",\"category\":\"internal\",\"exit_code\":128,\"severity\":\"fatal\",\"message\":\"agent hook ingestion failed: hook callback ended before trusted terminal capture ingress: hook cwd is outside the active worktree\"}\n" | sessions=[] artifacts=0
@@ -5395,5 +5413,242 @@ await cleanup();
     );
     println!(
         "[executed] OG-02 unchanged installed module -> real Libra ingress, 260 prompts, model/reason/truncation/tool fields and durable stopped/checkpoints"
+    );
+}
+
+fn claude_observe_text(output: &Output) -> (String, String) {
+    (
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+#[test]
+fn claude_observe_success_and_controllable_failure_are_silent() {
+    let repo = HookRepo::init();
+    let canary = "CC02-THINKING-CANARY";
+    let payload_canary = "CC02-PAYLOAD-CANARY";
+    let session = "cc02-observe";
+    let started = repo.hook(
+        "claude-code",
+        "observe",
+        &repo.envelope(
+            "SessionStart",
+            session,
+            None,
+            json!({ "thinking": canary, "source": "startup" }),
+        ),
+    );
+    assert!(started.status.success(), "{}", describe(&started));
+    let (stdout, stderr) = claude_observe_text(&started);
+    assert!(
+        stdout.is_empty(),
+        "observe stdout must stay empty: {stdout}"
+    );
+    assert!(!stdout.contains(canary) && !stderr.contains(canary));
+    assert!(!stdout.contains(payload_canary) && !stderr.contains(payload_canary));
+
+    let listed = repo.run(&["agent", "session", "list", "--json"], None);
+    let listed_text = String::from_utf8_lossy(&listed.stdout);
+    assert!(
+        !listed_text.contains(canary),
+        "session list metadata must not contain the thinking body"
+    );
+    let missing = repo.hook(
+        "claude-code",
+        "observe",
+        &json!({
+            "hook_event_name": "SessionStart",
+            "cwd": repo.repo.display().to_string(),
+            payload_canary: "secret"
+        })
+        .to_string(),
+    );
+    assert!(missing.status.success(), "{}", describe(&missing));
+    let (stdout, stderr) = claude_observe_text(&missing);
+    assert!(stdout.is_empty(), "partial observe stdout must stay empty");
+    assert!(!stdout.contains(payload_canary) && !stderr.contains(payload_canary));
+    let still = repo.run(&["agent", "session", "list", "--json"], None);
+    assert!(
+        String::from_utf8_lossy(&still.stdout).contains(session),
+        "a partial observe must not delete the session already recorded"
+    );
+
+    let oversize_marker = "CC02-OVERSIZE-CANARY";
+    let mut oversize = format!(
+        "{{\"hook_event_name\":\"SessionStart\",\"session_id\":\"{session}\",\"cwd\":\"{}\",\"note\":\"",
+        repo.repo.display()
+    );
+    oversize.push_str(oversize_marker);
+    oversize.push_str(&"x".repeat(libra::internal::ai::capture::ingress::MAX_STDIN_BYTES));
+    oversize.push_str("\"}");
+    let oversized = repo.run_bytes(
+        &["agent", "hooks", "claude-code", "observe"],
+        Some(oversize.as_bytes()),
+    );
+    assert!(oversized.status.success(), "{}", describe(&oversized));
+    let (stdout, stderr) = claude_observe_text(&oversized);
+    assert!(stdout.is_empty());
+    assert!(!stdout.contains(oversize_marker) && !stderr.contains(oversize_marker));
+
+    let hold = repo.hook(
+        "claude-code",
+        "observe",
+        &repo.envelope("WorktreeCreate", session, None, json!({ "name": "hold" })),
+    );
+    assert!(hold.status.success(), "{}", describe(&hold));
+    let (stdout, _) = claude_observe_text(&hold);
+    assert!(
+        stdout.is_empty(),
+        "WorktreeCreate must not receive a path from observe"
+    );
+}
+
+#[test]
+fn claude_observe_message_display_drops_after_the_coalesce_limit() {
+    use libra::internal::ai::{
+        capture::ingress::{CaptureIngressOutcome, lower_in_process_capture_frame_for_test},
+        hooks::{
+            LifecycleEventKind, ProviderHookCommand, claude_provider,
+            providers::claude::{
+                MESSAGE_DISPLAY_COALESCE_LIMIT, reset_message_display_counts_for_test,
+            },
+        },
+    };
+
+    reset_message_display_counts_for_test();
+    let provider = claude_provider();
+    let mut kept = 0_u32;
+    let mut dropped = 0_u32;
+    for index in 0..(MESSAGE_DISPLAY_COALESCE_LIMIT + 1) {
+        let payload = json!({
+            "hook_event_name": "MessageDisplay",
+            "session_id": "cc02-display",
+            "cwd": "/tmp/cc02",
+            "message_id": "m1",
+            "index": index,
+            "delta": "CC02-DISPLAY-CANARY"
+        })
+        .to_string();
+        let outcome = lower_in_process_capture_frame_for_test(
+            payload.as_bytes(),
+            ProviderHookCommand::Observe,
+            LifecycleEventKind::ToolUse,
+            provider,
+            None,
+        )
+        .expect("observe ingress accepts the frame");
+        match outcome {
+            CaptureIngressOutcome::Command(_) => kept += 1,
+            CaptureIngressOutcome::UnknownEvent { .. } => dropped += 1,
+        }
+    }
+    assert_eq!(kept, MESSAGE_DISPLAY_COALESCE_LIMIT);
+    assert_eq!(dropped, 1);
+}
+
+/// CC-02 AC5: a malformed frame and a database that refuses writes are both
+/// controllable failures. Observe stays silent with exit 0, neither failure
+/// echoes the payload to stdout, stderr or the tracing log, and the session
+/// recorded before the failures is still listed afterwards.
+#[test]
+fn claude_observe_parse_and_database_failures_keep_existing_data() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let repo = HookRepo::init();
+    let session = "cc02-failures";
+    let canary = "CC02-FAILURE-CANARY";
+    let log_file = repo.home.join("observe.log");
+    let observe = |stdin: &[u8]| {
+        let mut cmd = repo.command_in(&repo.repo);
+        cmd.args(["agent", "hooks", "claude-code", "observe"])
+            .env("LIBRA_LOG", "debug")
+            .env("LIBRA_LOG_FILE", &log_file)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = cmd.spawn().expect("spawn libra observe");
+        child
+            .stdin
+            .take()
+            .expect("stdin piped")
+            .write_all(stdin)
+            .expect("write observe frame");
+        child.wait_with_output().expect("wait for libra observe")
+    };
+    let assert_silent = |out: &Output, case: &str| {
+        let (stdout, stderr) = claude_observe_text(out);
+        assert!(out.status.success(), "{case}: {}", describe(out));
+        assert!(stdout.is_empty(), "{case}: observe stdout must stay empty");
+        assert!(
+            !stderr.contains(canary) && !stderr.contains("panicked at"),
+            "{case}: stderr must not echo the payload or panic: {stderr}"
+        );
+    };
+    let session_listed = || {
+        let listed = repo.run(&["agent", "session", "list", "--json"], None);
+        String::from_utf8_lossy(&listed.stdout).contains(session)
+    };
+
+    let started = observe(
+        repo.envelope(
+            "SessionStart",
+            session,
+            None,
+            json!({ "source": "startup" }),
+        )
+        .as_bytes(),
+    );
+    assert_silent(&started, "baseline");
+    assert!(session_listed(), "baseline observe records the session");
+
+    let malformed = format!(
+        "{{\"hook_event_name\":\"UserPromptSubmit\",\"session_id\":\"{session}\",\"prompt\":\"{canary}\""
+    );
+    let parsed = observe(malformed.as_bytes());
+    assert_silent(&parsed, "malformed JSON");
+    assert!(
+        session_listed(),
+        "a parse failure must not delete the session"
+    );
+
+    let partials = || {
+        std::fs::read_to_string(&log_file)
+            .unwrap_or_default()
+            .matches("claude_observe_partial")
+            .count()
+    };
+    let before_refusal = partials();
+    let database = repo.repo.join(".libra").join("libra.db");
+    let original = std::fs::metadata(&database)
+        .expect("stat repository database")
+        .permissions();
+    let mut read_only = original.clone();
+    read_only.set_mode(0o444);
+    std::fs::set_permissions(&database, read_only).expect("make database read-only");
+    let refused = observe(
+        repo.envelope(
+            "UserPromptSubmit",
+            session,
+            None,
+            json!({ "prompt": canary }),
+        )
+        .as_bytes(),
+    );
+    std::fs::set_permissions(&database, original).expect("restore database permissions");
+    assert_silent(&refused, "read-only database");
+    assert!(
+        session_listed(),
+        "a database write failure must not delete the session"
+    );
+
+    assert!(
+        partials() > before_refusal,
+        "the read-only database must take the controllable failure path"
+    );
+    let log = std::fs::read_to_string(&log_file).unwrap_or_default();
+    assert!(
+        !log.contains(canary),
+        "the tracing log must not contain the payload body"
     );
 }

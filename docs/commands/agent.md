@@ -2,7 +2,56 @@
 
 > **Coverage-v2 source version:** The coverage-v2 descriptions below refer to the Libra 0.30.50 source line and later compatible versions. This is not a stable-release announcement; check the [official releases](https://github.com/libra-tools/libra/releases) and `libra --version` for installed support. Other sections retain their own version requirements. Coverage-v2 does not prove native origin or authorize native reasoning artifacts.
 
-Manage external-agent capture for Claude Code, Codex, and OpenCode.
+Manage external-agent capture for Claude Code, Codex, OpenCode, and Grok.
+
+Grok is supported and hook-installable with `support_wave=grok`, not `first_batch`, and is not a `review` or `investigate` launcher. **Automatic Thinking capture is paused.** Hook lifecycle events are recorded through the shared pipeline; decoding does not read session logs or write `GROK_HOME/libra-capture`. Existing readers for local `updates.jsonl` and `chat_history.jsonl` are not yet connected to the authorized snapshot/checkpoint writer. Offline observer JSON is scratch state, not a Libra checkpoint. The intended transcript retains Thinking text and unproven `encrypted_content`; Libra does not decrypt it. Current synthetic reader tests do not prove that live checkpoints contain it. Default `checkpoint show` does not print Thinking plaintext; an explicit transcript path returns only content actually stored.
+
+## Native Windows capture
+
+This support is available in **current main source builds** and is not included
+in the **v0.30.50 release binaries**. Until a published release includes it, use
+the [source build instructions](../../README.md#install).
+
+Windows builds support Session Capture on local NTFS drives, without WSL.
+Install **OpenCode 2.x** (the GitHub 1.19.0 CLI has an incompatible plugin API),
+and place its configuration in `%USERPROFILE%\.config\opencode\opencode.json`.
+The native CLI is available from
+<https://opencode.ai/update/api/latest/cli/opencode/opencode-windows-x64.zip>.
+In PowerShell, with `libra.exe` and `opencode.exe` on PATH:
+
+```powershell
+libra init
+libra agent add opencode
+libra agent rpc trust --dir C:\path\to\verified-opencode2
+libra agent rpc trust opencode
+opencode run --standalone "Reply with a short greeting."
+libra agent session list
+libra agent checkpoint list
+libra agent checkpoint export <checkpoint-id>
+```
+
+Windows validates local paths with no-follow `CreateFileW` handles and rejects
+reparse points (including junctions), alternate streams, device names, and UNC
+capture storage. Repository-private keys use a current-user/SYSTEM ACL,
+`LockFileEx` exclusion, and atomic no-replace publication. A missing or damaged
+key is never silently replaced during authentication or recovery.
+
+The Windows OpenCode exporter runs **without an OS filesystem/network sandbox**.
+Only an explicitly trusted `opencode.exe` can run; its bytes and file identity
+are revalidated, and the executable is held against replacement. A Windows Job
+Object contains the process tree, with a 30-second deadline and a 16 MiB accepted
+output limit. Output is held in an ACL-protected temporary file and removed
+after reading; stderr and ambient credential variables are not forwarded.
+The size is checked while the process runs and after it exits; Windows has no
+Unix `RLIMIT_FSIZE` write-time limit, so temporary output can exceed the accepted
+limit between checks. Linux bubblewrap and macOS Seatbelt requirements are
+unchanged. Windows capability availability requires trusted exporter bytes;
+it does not claim that an OS sandbox is present.
+
+Windows checkpoint listing and ordinary transcript export are available.
+Owner-only raw reasoning artifact export and the object/findings scans in
+`libra agent doctor` remain unavailable on Windows; doctor reports these scans
+as unavailable and applies no repairs to them.
 
 ## OpenCode ordinary capture on macOS (Libra 0.30.49)
 
@@ -43,8 +92,10 @@ libra agent checkpoint export <checkpoint-id> -o capture.json
 ```
 
 An authorized source with unsupported reasoning state may save its safe ordinary
-copy as `Unproven` / `Partial`. This includes prompt, model and token projections;
-unsupported reasoning state and associated text/time are omitted. It grants no
+copy as `Unproven` / `Partial`. This includes prompt, model, token projections,
+readable reasoning text, and unproven reasoning fields. Unsupported reasoning
+state and timing are written into that copy.
+It grants no
 native artifact, Complete coverage claim or native ACK. Any original `originProof`
 or sealed candidate remains outside this fallback. Historical imports containing
 unsupported reasoning state still fail with `LBR-AGENT-020`; ordinary capture
@@ -353,8 +404,9 @@ The default OpenCode export budget is 30 seconds; the export lease and plugin
 forwarding timeout derive a 15-second margin (45 seconds). Run
 `libra agent add opencode` again to refresh an older installed plugin. Schema v2
 `importable` and `export_bridge` require a trusted exporter and a successful
-platform sandbox probe: Seatbelt on macOS, the existing trusted bwrap probe on
-Linux. Availability reports those prerequisites; it does not prove that OpenCode
+platform sandbox probe on Unix: Seatbelt on macOS, the existing trusted bwrap probe on
+Linux. Windows requires the trusted native exporter and uses the Job Object
+boundary described above, without an OS sandbox. Availability reports those prerequisites; it does not prove that OpenCode
 boots, that a session exports successfully, or that reasoning fields have a
 trusted native origin. Timeout still rejects partial output and preserves the
 existing metadata-only fallback; the 16 MiB export cap is unchanged.
@@ -750,6 +802,12 @@ session/checkpoint tables. Once v2 is activated, D1 triggers reject legacy
 unfenced writers with an upgrade error rather than allowing them to invalidate
 a coherent restore snapshot.
 
+## Claude Code hook event registry
+
+Libra keeps one Claude Code hook-event registry. A name is safely installable when empty stdout and exit 0 do not take over the host action. `WorktreeCreate`, `WorktreeRemove`, and `PreModelSwitch` are control-sensitive and are not installed. `SessionStop`, `ModelUpdate`, and `Compaction` are deprecated aliases and are not in the current installable set. An unknown event name or an unknown field is partial, and the diagnostic does not include the payload. `libra agent enable` writes every safely installable event. `SessionEnd` has no timeout. `FileChanged` has no matcher and does not emit `watchPaths`. `libra agent doctor` lists each known event as installable or excluded, and whether a Libra-owned entry is configured. `libra agent hooks claude-code observe` accepts one JSON hook frame on stdin, records safely installable events through the existing capture coordinator, and prints nothing. Controllable success and failure both exit 0. `WorktreeCreate`, `WorktreeRemove`, and `PreModelSwitch` are not installed and produce no path or decision. MessageDisplay keeps at most 128 batches per session in the current process and drops the rest. This does not claim that every known event is installed.
+
+An authorized Claude Code transcript keeps a non-empty `thinking` string in the ordinary snapshot and in the coverage projection. `thinking.signature` and `redacted_thinking.data` stay in the ordinary transcript bytes and are labeled Unproven when they are not native proof. An empty thinking string is not a missing key, and an empty shell is not a successful read. The coverage schema version stays 1 for turns without reasoning and 2 when a readable thinking record is present. Session metadata and redaction reports do not include the thinking text. `libra agent checkpoint show --json` and the ordinary checkpoint export return that thinking text and `thinking.signature` for an authorized Claude checkpoint, labeled unproven. `checkpoint list`, `session list`, and `agent graph` do not print the body. Live capture, import, and snapshot recovery read those attached fields from the original JSONL, with provider, session, turn, record, and content index. A duplicate key rejects that record and leaves retained bytes in place. A mismatched session file is not associated. Ordinary retention does not create a native artifact. An explicit `libra agent doctor --repair` appends one coverage revision for an authorized legacy Claude checkpoint. The revision key binds that checkpoint and the ordinary transcript content. Repeating the repair with the same content leaves the revision and the stored objects in place. Erase and the cloud mirror keep that replacement together with the old checkpoint reference, and a tombstone blocks revival.
+
 ## Examples
 
 ```bash
@@ -946,13 +1004,15 @@ on them:
   store — a catalog row whose `parent_commit` is malformed or points at a
   missing traces object — fails with `LBR-AGENT-009` (exit 128); run `libra
   agent doctor` to inspect the store.
-- Managed Session Capture currently requires Unix for secure repository-private
-  deduplication-key initialization. On non-Unix platforms it fails closed
+- Managed Session Capture supports Unix and native Windows secure repository-private
+  deduplication-key initialization. On other platforms it fails closed
   before creating key files, with an actionable diagnostic, rather than using
   a weaker path-based publication fallback. The fixed capability diagnostic is
   explicit for both Codex entry points: nonterminal `hooks codex` callbacks
-  (including the hidden legacy alias) print the path-free Unix-host remedy to
+  (including the hidden legacy alias) print a path-free platform remedy to
   stderr but exit `0`; `SessionEnd` returns non-zero with that same remedy.
+  Unsupported non-Windows platforms use the Unix-host remedy; a native Windows
+  initialization failure points to the matching `libra.exe` helper and local storage.
   The fail-closed installed Claude surface and the hidden `agent hooks`
   Claude Code / OpenCode alias return non-zero for every event with that same
   remedy and `LBR-UNSUPPORTED-001`. This exception does not change the alias's fail-closed malformed-envelope
@@ -969,6 +1029,41 @@ on them:
 `libra agent doctor` scans the checkpoint store and writer-marker registry
 (AG-20 repair matrix); without `--repair` it is strictly read-only
 and reports what `--repair` would do:
+
+
+OpenCode hook status now includes `provider_hooks[].events[]` in JSON. Each
+entry has an `event` and the same nullable `installed` status as the managed
+plugin: `true` means the exact current template is installed, `false` means it
+is missing/outdated, and `null` means inspection was unavailable. Human output
+lists these mappings as `(managed template)`. The native bus, merged inbox and
+accepted compatibility mappings come from the existing event registry;
+`session.error` is skipped. This describes installed mappings, not proof that
+OpenCode ran or emitted each event. Reinstall an outdated managed template with
+`libra agent add opencode` before starting a new session.
+
+Before opening plugin files, doctor checks `.opencode`, both `plugin`/`plugins`
+parents and both managed leaves with no-follow metadata checks. A symlink,
+FIFO/socket/device, file parent or directory leaf produces a fixed slot/type
+reason and unknown installation status. It does not open or modify that node,
+print its contents or target, or mark it installed, including with `--repair`.
+These checks retain the existing stable-directory-name assumption; they do not
+resolve the deferred concurrent directory-relocation problem.
+
+`checkpoint_store.opencode_legacy_reasoning_checkpoints` lists canonical IDs
+whose bound local OpenCode metadata has no non-null `reasoning_state` field.
+Human output marks them `legacy/unrecorded reasoning state; not evidence of
+complete capture or native origin`. This is an absence diagnostic, not a date
+or schema classification: current checkpoints can also lack that field, and
+its presence alone proves neither valid reasoning nor native provenance.
+Existing coverage completeness is not promoted or rewritten. The scan examines
+at most 64 OpenCode catalog rows and 64 KiB of validated metadata per row
+(4 MiB worst-case payload). Unavailable, oversized/unbound metadata or excess
+rows produce a content-free incomplete-scan note; an empty list does not
+certify complete capture. It reads no transcript or reasoning-artifact bodies.
+The marker is read-time only, unchanged by `--repair`; removing this diagnostic
+requires no data migration. These diagnostics first ship in the release
+containing OG-06; the source change alone is not a release announcement.
+
 
 | `inconsistency_type` | Meaning | `--repair` action |
 |----------------------|---------|-------------------|
@@ -1235,6 +1330,10 @@ The harness and synthetic tests do not prove real content or native reasoning.
 
 ### Private native-origin issuer registration (macOS)
 
+The installation challenge runs with fresh, owner-only home, configuration, data, cache, state and temporary directories inside the owned private installation. Its initial environment is constructed explicitly; caller `TMPDIR`, runtime-loading overrides and host HOME/XDG settings are not inherited. The temporary directory must be canonical, owned by the current user, mode 0700 and empty before the producer starts. A failed precondition or cleanup refuses registration with the existing fixed challenge error.
+
+Scratch is retained for the child lifetime and cleaned after normal exit, failure or timeout; cancellation cleanup is best effort. Inherited process-group descendants are terminated while the leader PID is still reserved. A parent crash or SIGKILL can leave an owner-only scratch directory, which later challenges never reuse. This isolation applies to the Libra-launched installation challenge. Separately launched OpenCode sessions retain their own runtime requirements, and the current `.3` SOURCE/Source A and real-field archive gates remain unproven.
+
 Ordinary `agent rpc trust opencode` pins an exporter binary; it does not register an issuer or prove native reasoning. The historical native path requires a separately installed, reviewed macOS arm64 `2.0.26-libra-native.1` or `.2` producer and its exact frozen v1 observer recipe, rendered for the current canonical Libra executable path. Prepare that observer using the reviewed private bundle's instructions in an isolated owned setup. Global OpenCode remains independent.
 
 The immutable catalog also pins a separate `2.0.26-libra-native.2` candidate (build `78c1f19e9249da8d0143a079f90aec9a`, macOS arm64 binary SHA-256 `28174e893a2b63b75f58af4c77212747f6e1eebce5dd0252cfe64847b342615c`). Its additional endpoint descriptor v2 permits only the first-party `anthropic-messages` route to the exact URL `https://api.anthropic.com/v1/messages?beta=true`; the receipt and Ed25519 attestation remain v1. Anthropic-compatible providers, proxies and changed URLs do not match this endpoint. Selecting `.2` still requires separately measured binary bytes, a fresh private installation/key, explicit exporter trust and explicit epoch-checked issuer registration. The `.1` issuer can remain historical verify-only; no key is automatically promoted. The `.1` build remains the frozen NPR-18 harness baseline, not the current official29 ordinary baseline. A catalog match or synthetic test does not prove real `signature`/`redactedData` source bytes or allow their archival; `reasoningEncryptedContent` remains deferred. Provider/account/model checks stay local manual gates, outside CI.
@@ -1396,8 +1495,9 @@ session and agent kind at bind time and checks them against the actual checkpoin
 request. The HMAC is an opaque string; its format alone does not verify the scope
 or prove native origin. Generic ordinary consumers stay closed to `Unproven`.
 
-Unsupported reasoning state, including `reasoningField`, is removed together with
-its associated reasoning text and time. Opaque hints include `signature`,
+Unsupported reasoning state, including `reasoningField`, is written with the readable
+associated reasoning text and time. The ordinary transcript keeps that text, `time`,
+`state`, and the other unproven fields. Opaque hints include `signature`,
 `redactedData`, `reasoningEncryptedContent`, `thoughtSignature` and `originProof`.
 An original `originProof` key anywhere in the parsed source, including malformed
 or unfamiliar nested values, or a sealed candidate prevents this fallback.
@@ -1461,9 +1561,9 @@ remains unproven.
 This ordinary baseline is scoped to automatic capture, a durable checkpoint and the
 ordinary redacted export of that checkpoint, with prompt, model and token
 projections compared to the authorized source. Unsupported reasoning state is
-discarded. The source/snapshot status pair is `Unproven` / `Partial`: `Unproven`
+retained with its text. The source/snapshot status pair is `Unproven` / `Partial`: `Unproven`
 is the internal source classification, while `Partial` is the persisted
-completeness value. The associated reasoning text/time is omitted. The model comparison uses `extraction.model` from the
+completeness value. Readable reasoning text is retained. Associated reasoning time is retained with the unproven fields. The model comparison uses `extraction.model` from the
 native assistant record. The top-level `model` is hook metadata and can differ.
 Token totals use distinct native assistant records without counting the session
 summary twice. A no-tool sample proves only empty-files consistency, not a

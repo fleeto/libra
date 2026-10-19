@@ -57,7 +57,7 @@ enough: an absent borrower path is indistinguishable from an unmounted one, and
 guessing wrong deletes objects a borrower still needs the moment its mount
 comes back.
 Run `libra alternates prune` IN THE BASE to retire registrations whose path does
-not exist — the flag `--dry-run` lists them first. When a registration cannot be
+not exist — the flag `--dry-run` lists them first and writes no objects or operation. When a registration cannot be
 checked at all (an unreachable mount, a permission-denied parent), name it:
 `libra alternates prune /path/to/gone/.libra/objects` retires that one exact
 registration whatever the filesystem says, because there the user is the only

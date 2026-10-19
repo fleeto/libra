@@ -128,6 +128,7 @@
 | [`symbolic-ref`](symbolic-ref.md) | `partial` | Supports local `HEAD` only; other symbolic refs are rejected because Libra stores refs in SQLite |
 | [`tag`](tag.md) | `partial` | lightweight/message/annotated tags, `-F`/`--file` (message from file or stdin), force/delete/list/`-n`, points-at, contains/no-contains, merged/no-merged, sort, `--column` (always/auto/never; `--no-column` countermands it, last wins), vault-PGP `-s`/`--sign` (`--no-sign` countermands it; last wins)/`-v`/`--verify`, and `-e`/`--edit` (editor-composed annotated message) supported; Git GPG interop not exposed |
 | [`verify-pack`](verify-pack.md) | `partial` | validates one or more `.idx` files against matching `.pack` siblings; `-s` / `--stat-only` supported; `--pack` is available for a single explicit pack path |
+| [`count-objects`](count-objects.md) | `partial` | read-only loose/pack census with Git's field set and order (`-v`, `-H`, JSON); zero-write, no idx rebuild, no schema migration; absolute garbage/alternate paths, fail-closed unreadable dirs (`LBR-IO-001`), Operation Log snapshots counted, local tier only |
 | [`worktree`](worktree.md) | `intentionally-different` | `remove` keeps disk dir by default (no implicit data loss). Use `--delete-dir` for Git-style behavior; the flag refuses on a dirty worktree. `list --porcelain` emits Git-style machine-readable output |
 
 ## 未公开或未纳入用户承诺的命令资料

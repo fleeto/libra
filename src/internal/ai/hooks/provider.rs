@@ -65,6 +65,9 @@ pub enum ProviderHookCommand {
     SubagentStart,
     /// AG-19: nested sub-agent run finished (Codex `SubagentStop`).
     SubagentEnd,
+    /// Claude registry observe entry. The lifecycle kind comes from the
+    /// event registry after the frame is parsed, not from this command.
+    Observe,
 }
 
 impl ProviderHookCommand {
@@ -84,6 +87,9 @@ impl ProviderHookCommand {
             ProviderHookCommand::SessionEnd => LifecycleEventKind::SessionEnd,
             ProviderHookCommand::SubagentStart => LifecycleEventKind::SubagentStart,
             ProviderHookCommand::SubagentEnd => LifecycleEventKind::SubagentEnd,
+            // Observe selects its kind from the parsed event. This placeholder
+            // is not the acceptance check.
+            ProviderHookCommand::Observe => LifecycleEventKind::SessionStart,
         }
     }
 }
@@ -101,6 +107,7 @@ impl fmt::Display for ProviderHookCommand {
             ProviderHookCommand::SessionEnd => "session-end",
             ProviderHookCommand::SubagentStart => "subagent-start",
             ProviderHookCommand::SubagentEnd => "subagent-end",
+            ProviderHookCommand::Observe => "observe",
         };
         write!(f, "{value}")
     }
@@ -212,6 +219,9 @@ pub trait HookProvider: HookProviderIdentity + Sync {
     /// Hook commands this provider knows how to install and parse.
     fn supported_commands(&self) -> &'static [ProviderHookCommand];
     /// Translate a provider envelope into the canonical [`LifecycleEvent`].
+    /// This is an untrusted decoding boundary: do not read source files, persist
+    /// observer state, or acquire repository scope here. Content capture belongs
+    /// after ingress validation, through authorized snapshots and the shared writer.
     ///
     /// Returns an error when the envelope is malformed or names a hook event
     /// the provider does not support.
@@ -233,6 +243,14 @@ pub trait HookProvider: HookProviderIdentity + Sync {
     /// must opt in by publishing their supported name table.
     fn recognizes_event(&self, _hook_event_name: &str) -> bool {
         false
+    }
+    /// Whether this frame may enter the capture coordinator.
+    ///
+    /// The default admits every recognized frame. Claude's MessageDisplay
+    /// gate lives on the provider so capture ingress does not import
+    /// `hooks::providers`.
+    fn admit_ingress_frame(&self, _hook_event_name: &str, _session_id: &str) -> bool {
+        true
     }
     /// Identity field names this provider checks when building dedup keys.
     fn dedup_identity_keys(&self) -> &'static [&'static str];

@@ -32,7 +32,7 @@ where `<subject>` is the first non-empty line of the HEAD commit message after
 stripping a vault `gpgsig` header. `-m <message>` (and rebase/merge autostash)
 records `On <branch>: <message>`. Detached HEAD uses `(no branch)` in place of
 the branch name. Older stash reflog entries that lack these prefixes still
-list, show, apply, and pop. If `stash push` is run on a clean working tree and no requested untracked files exist, it exits successfully as a no-op and reports that there are no local changes to save.
+list, show, apply, and pop. If `stash push` is run on a clean working tree and no requested untracked files exist, it exits successfully as a no-op and reports that there are no local changes to save. If the index contains an intent-to-add entry (`libra add -N`), `stash push` refuses with 128 / `LBR-CONFLICT-002` and Git's message `Entry '<path>' not uptodate. Cannot merge.` / `Cannot save the current worktree state`, writing no stash entry and leaving the index and worktree untouched.
 
 Stash entries are stored as specially-structured commit objects under `.libra/refs/stash`, with a flat-file list tracking the stash stack. Each stash captures both the index state and worktree state at the time of creation.
 

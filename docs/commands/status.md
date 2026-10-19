@@ -51,6 +51,17 @@ ignored; entry-type changes (for example a regular file replaced by a symlink)
 are always reported. An invalid `core.filemode` value fails `status` closed
 before any output.
 
+### Legacy executable-bit repair hint
+
+A working tree created by a Libra version before mode-aware materialization
+(< v0.23.17) lost the execute bit on tracked `100755` files. After the mode
+detection above, such a tree shows the files as ` M`; the human long format
+therefore adds a one-shot note with the candidate count and the repair
+command (`libra restore -- <file>...`, or `libra restore -- .` when more than
+five files are affected). `--short`, `--porcelain`, `--json` and
+`core.filemode=false` do not print it. Running the suggested `libra restore`
+re-applies the executable bit and the tree goes clean.
+
 Skip-worktree entries (marked with
 [`update-index --skip-worktree`](update-index.md)) are never reported as
 deleted or modified: the working-tree copy is assumed good, matching Git's
@@ -419,6 +430,10 @@ libra status -u                    # same as -uall (recurse into untracked dirs)
 libra status --untracked-files=all
 ```
 
+An intent-to-add entry (`libra add -N`) is a *tracked* index entry, so `-uno` never
+hides it: it keeps Git's unstaged-new row (` A <path>`), because the index holds only
+the empty-blob placeholder.
+
 ### `--show-stash` / `--no-show-stash`
 
 Show the number of stash entries after the long-format status ("Your stash
@@ -477,6 +492,7 @@ Changes to be committed:
         modified:   src/lib.rs
 
 Changes not staged for commit:
+        new file:   src/generated.rs
         modified:   README.md
 
 Untracked files:
@@ -541,6 +557,8 @@ Example:
       "deleted": []
     },
     "unstaged": {
+      "new": [],
+      "intent_to_add": [],
       "modified": ["README.md"],
       "deleted": []
     },
@@ -570,6 +588,8 @@ Clean working tree:
       "deleted": []
     },
     "unstaged": {
+      "new": [],
+      "intent_to_add": [],
       "modified": [],
       "deleted": []
     },
@@ -617,7 +637,11 @@ Detached HEAD:
   equal `libra rev-list --left-right --count <upstream>...HEAD` (right, then left)
 - `is_clean` is `true` only when staged, unstaged, untracked, and unmerged
   lists are empty, no global merge state is active, **and** `io_blocked` is
-  empty ("cannot inspect" is never clean)
+  empty ("cannot inspect" is never clean). Intent-to-add entries count as
+  unstaged changes.
+- `unstaged.new` lists intent-to-add paths (Git's `.A` worktree side);
+  `unstaged.intent_to_add` repeats them explicitly so consumers do not have
+  to infer the flag from the absence of a staged entry
 - `has_commits` is `false` in a freshly initialized repository with no commits
 - `staged.renamed` / `unstaged.renamed` list rename pairs as `{from, to}`
   objects (path strings, repo-root-relative), and the top-level `renames[]`
@@ -766,6 +790,10 @@ Every `StatusError` variant maps to an explicit `StableErrorCode`.
 
 - `--porcelain v2` emits the real v2 line grammar (`1`/`2`/`u`/`?`/`!` records with
   mode/hash columns); `--json` remains the richer structured surface
+- An intent-to-add entry (`add -N`) renders exactly like Git: ` A` in v1/short,
+  `1 .A N... 000000 000000 <mode> <zero-hash> <zero-hash>` in v2, `new file:` under
+  "Changes not staged", and `unstaged.new`/`unstaged.intent_to_add` in JSON. It is
+  never reported in `staged.new`
 - Under `-z`, Unix porcelain v1/v2 write RAW OS path bytes (no quoting, lossless for
   non-UTF-8 names); non-`-z` formats follow `core.quotePath` for bytes above
   `0x7F` — octal-escaped when `true` (the default), written raw when `false`.

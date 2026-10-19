@@ -565,6 +565,13 @@ pub fn lower_in_process_capture_frame_for_test(
     })
 }
 
+fn observe_partial(frame_bytes: usize) -> ParsedCaptureIngressOutcome {
+    ParsedCaptureIngressOutcome::UnknownEvent {
+        frame_bytes,
+        event_name_len: 0,
+    }
+}
+
 fn parse_capture_ingress_payload(
     payload: &[u8],
     hook_command: ProviderHookCommand,
@@ -572,24 +579,47 @@ fn parse_capture_ingress_payload(
     provider: &dyn HookProvider,
     deadline: Option<CaptureDeadline>,
 ) -> Result<ParsedCaptureIngressOutcome> {
+    let observe = hook_command == ProviderHookCommand::Observe;
     if payload.len() > MAX_STDIN_BYTES {
+        if observe {
+            return Ok(observe_partial(payload.len()));
+        }
         return Err(hook_input_exceeds_limit().into());
     }
-    let stdin = std::str::from_utf8(payload)
-        .map_err(|error| HookEnvelopeInvalid(format!("hook input is not valid UTF-8: {error}")))?;
+    let stdin = match std::str::from_utf8(payload) {
+        Ok(stdin) => stdin,
+        Err(_) if observe => return Ok(observe_partial(payload.len())),
+        Err(error) => {
+            return Err(
+                HookEnvelopeInvalid(format!("hook input is not valid UTF-8: {error}")).into(),
+            );
+        }
+    };
     if stdin.trim().is_empty() {
+        if observe {
+            return Ok(observe_partial(payload.len()));
+        }
         return Err(HookEnvelopeInvalid("hook input is empty".to_string()).into());
     }
-    let envelope: SessionHookEnvelope = serde_json::from_str(stdin).map_err(|error| {
-        HookEnvelopeInvalid(format!(
-            "invalid hook JSON payload ({:?} at line {} column {})",
-            error.classify(),
-            error.line(),
-            error.column()
-        ))
-    })?;
-    validate_session_hook_envelope(&envelope, MAX_TRANSCRIPT_PATH_BYTES)
-        .map_err(|error| HookEnvelopeInvalid(error.to_string()))?;
+    let envelope: SessionHookEnvelope = match serde_json::from_str(stdin) {
+        Ok(envelope) => envelope,
+        Err(_) if observe => return Ok(observe_partial(payload.len())),
+        Err(error) => {
+            return Err(HookEnvelopeInvalid(format!(
+                "invalid hook JSON payload ({:?} at line {} column {})",
+                error.classify(),
+                error.line(),
+                error.column()
+            ))
+            .into());
+        }
+    };
+    if let Err(error) = validate_session_hook_envelope(&envelope, MAX_TRANSCRIPT_PATH_BYTES) {
+        if observe {
+            return Ok(observe_partial(payload.len()));
+        }
+        return Err(HookEnvelopeInvalid(error.to_string()).into());
+    }
     if envelope.cwd.len() > MAX_REPORTED_CWD_BYTES {
         return Err(HookEnvelopeInvalid(format!(
             "hook cwd exceeds {MAX_REPORTED_CWD_BYTES} bytes"
@@ -603,8 +633,12 @@ fn parse_capture_ingress_payload(
         });
     }
 
+    if !provider.admit_ingress_frame(&envelope.hook_event_name, &envelope.session_id) {
+        return Ok(observe_partial(payload.len()));
+    }
+
     let event = provider.parse_hook_event(&envelope.hook_event_name, &envelope)?;
-    if event.kind != expected_kind {
+    if hook_command != ProviderHookCommand::Observe && event.kind != expected_kind {
         // This is a bounded grammar mismatch between the selected CLI verb
         // and the already parsed event name; unlike a later runtime failure,
         // it contains no provider-controlled path or session content and is
@@ -1081,6 +1115,53 @@ async fn read_stdin_unbounded() -> Result<Vec<u8>> {
 
 #[cfg(windows)]
 async fn read_stdin_bounded(deadline: CaptureDeadline) -> Result<Vec<u8>> {
+    use std::os::windows::io::{AsRawHandle, BorrowedHandle};
+
+    use crate::internal::ai::authorized_read::{
+        AUTHORIZED_READ_HELPER_ARG, AUTHORIZED_READ_HELPER_CAP_ENV, RegisteredHelperOutput,
+        registered_helper_command, run_registered_descriptor_helper_until,
+    };
+    let stdin = std::io::stdin();
+    // SAFETY: the standard input handle is live and only queried here.
+    if unsafe { windows_sys::Win32::Storage::FileSystem::GetFileType(stdin.as_raw_handle()) }
+        == windows_sys::Win32::Storage::FileSystem::FILE_TYPE_DISK
+    {
+        // SAFETY: stdin lives until its borrowed handle has been duplicated.
+        let owned =
+            unsafe { BorrowedHandle::borrow_raw(stdin.as_raw_handle()) }.try_clone_to_owned()?;
+        let mut command = registered_helper_command(AUTHORIZED_READ_HELPER_ARG)
+            .context("bounded Windows hook stdin helper is unavailable")?;
+        command.env(AUTHORIZED_READ_HELPER_CAP_ENV, MAX_STDIN_BYTES.to_string());
+        let output = match run_registered_descriptor_helper_until(
+            command,
+            owned.into(),
+            MAX_STDIN_BYTES as u64 + 9,
+            deadline.monotonic(),
+        )
+        .await
+        {
+            RegisteredHelperOutput::Output(output) => output,
+            RegisteredHelperOutput::DeadlineExceeded => {
+                bail!("capture ingress deadline expired while reading stdin")
+            }
+            RegisteredHelperOutput::Failed => bail!("bounded Windows hook stdin reader failed"),
+        };
+        if output.len() < 9 {
+            bail!("bounded Windows hook stdin reader returned an invalid frame");
+        }
+        let count = u64::from_le_bytes(
+            output[1..9]
+                .try_into()
+                .context("invalid Windows hook stdin byte count")?,
+        );
+        return match output[0] {
+            0 if count <= MAX_STDIN_BYTES as u64 && count == (output.len() - 9) as u64 => {
+                Ok(output[9..].to_vec())
+            }
+            1 if count > MAX_STDIN_BYTES as u64 => Err(hook_input_exceeds_limit().into()),
+            _ => bail!("bounded Windows hook stdin reader returned an invalid response"),
+        };
+    }
     tokio::task::spawn_blocking(move || read_stdin_bounded_blocking(deadline))
         .await
         .context("bounded hook stdin reader task terminated")?

@@ -7,6 +7,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
+    time::Instant,
 };
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
@@ -24,7 +25,7 @@ use thiserror::Error;
 use zeroize::{Zeroize, Zeroizing};
 
 use super::{
-    coverage::SemanticRecord,
+    coverage::{CanonValue, Completeness, NormalizedTurn, SemanticRecord, parse_canon_value},
     native_origin::codec::{FieldName, RECEIPT_BYTE_CAP},
     transcript_source::TRANSCRIPT_READ_HARD_CAP_BYTES,
 };
@@ -2317,6 +2318,241 @@ fn json_string_field_bytes(raw: &RawValue) -> Option<&[u8]> {
         return None;
     }
     Some(&bytes[1..bytes.len() - 1])
+}
+
+/// One ordinary Claude attached field recovered from original JSONL bytes.
+///
+/// `value` is the decoded JSON string. `availability` stays `unproven`:
+/// this projection is not a native artifact and is not lexical ciphertext.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaudeAttachedField {
+    pub provider: &'static str,
+    pub session_id: String,
+    pub turn_key: String,
+    pub line_ordinal: u32,
+    pub record_ordinal: u32,
+    pub content_index: u32,
+    pub field: &'static str,
+    pub value: String,
+    pub availability: &'static str,
+}
+
+/// Indexed view of ordinary Claude thinking attachments.
+///
+/// The durable carrier is the original JSONL. This view does not re-serialize
+/// the line and does not construct `OpaqueEncryptedBytes`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ClaudeAttachedProjection {
+    pub fields: Vec<ClaudeAttachedField>,
+    pub readable: Vec<String>,
+    pub duplicate_rejected: u32,
+    /// The file leaf was not the authorized session, so no field is associated.
+    pub refused: bool,
+}
+
+impl ClaudeAttachedProjection {
+    /// A non-empty thinking string or a non-empty attached field.
+    pub fn data_obtained(&self) -> bool {
+        self.readable.iter().any(|text| !text.is_empty())
+            || self.fields.iter().any(|field| !field.value.is_empty())
+    }
+
+    /// Data was obtained and at least one thinking string is non-empty.
+    pub fn readable_obtained(&self) -> bool {
+        self.data_obtained() && self.readable.iter().any(|text| !text.is_empty())
+    }
+}
+
+const CLAUDE_ATTACHED_PROVIDER: &str = "claude_code";
+const CLAUDE_ATTACHED_AVAILABILITY: &str = "unproven";
+
+/// Project signature and redacted `data` from original Claude JSONL bytes.
+///
+/// Extra outer keys stay on the source. Empty strings are not payloads.
+/// Duplicate-key lines contribute no fields and increment `duplicate_rejected`.
+pub fn project_claude_attached_fields(source: &[u8]) -> ClaudeAttachedProjection {
+    project_claude_attached_fields_until(source, None).unwrap_or_default()
+}
+
+/// Same reader as [`project_claude_attached_fields`]. `None` means the deadline
+/// elapsed before the scan finished. No retained bytes are deleted.
+pub fn project_claude_attached_fields_until(
+    source: &[u8],
+    deadline: Option<Instant>,
+) -> Option<ClaudeAttachedProjection> {
+    project_claude_attached_fields_for(source, "", deadline)
+}
+
+/// Associate fields only when `file_name` is the JSONL leaf for `session_id`.
+/// A mismatch returns no fields. Calling it again still refuses.
+pub fn authorize_claude_attached_fields(
+    file_name: &str,
+    session_id: &str,
+    source: &[u8],
+) -> ClaudeAttachedProjection {
+    if !super::coverage::claude_jsonl_session_matches(file_name, session_id) {
+        return ClaudeAttachedProjection {
+            refused: true,
+            ..ClaudeAttachedProjection::default()
+        };
+    }
+    project_claude_attached_fields_for(source, session_id, None).unwrap_or_default()
+}
+
+fn project_claude_attached_fields_for(
+    source: &[u8],
+    session_id: &str,
+    deadline: Option<Instant>,
+) -> Option<ClaudeAttachedProjection> {
+    let mut projection = ClaudeAttachedProjection::default();
+    let mut line_ordinal: u32 = 0;
+    for line in source.split(|byte| *byte == b'\n') {
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            return None;
+        }
+        if line.iter().all(u8::is_ascii_whitespace) {
+            continue;
+        }
+        let entry = match parse_canon_value(line) {
+            Ok(value) => value,
+            Err(error) => {
+                if error.to_string().contains("duplicate") {
+                    projection.duplicate_rejected = projection.duplicate_rejected.saturating_add(1);
+                }
+                line_ordinal = line_ordinal.saturating_add(1);
+                continue;
+            }
+        };
+        let turn_key = entry
+            .get("uuid")
+            .and_then(CanonValue::as_str)
+            .filter(|uuid| !uuid.is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| line_ordinal.to_string());
+        if let Some(CanonValue::Array(blocks)) = entry
+            .get("message")
+            .and_then(|message| message.get("content"))
+        {
+            for (record_ordinal, block) in blocks.iter().enumerate() {
+                absorb_claude_attached_block(
+                    &mut projection,
+                    session_id,
+                    &turn_key,
+                    line_ordinal,
+                    u32::try_from(record_ordinal).unwrap_or(u32::MAX),
+                    block,
+                );
+            }
+        }
+        line_ordinal = line_ordinal.saturating_add(1);
+    }
+    Some(projection)
+}
+
+fn non_empty_string(block: &CanonValue, key: &str) -> Option<String> {
+    match block.get(key) {
+        Some(CanonValue::Str(text)) if !text.is_empty() => Some(text.clone()),
+        _ => None,
+    }
+}
+
+fn absorb_claude_attached_block(
+    projection: &mut ClaudeAttachedProjection,
+    session_id: &str,
+    turn_key: &str,
+    line_ordinal: u32,
+    record_ordinal: u32,
+    block: &CanonValue,
+) {
+    let Some(kind) = block.get("type").and_then(CanonValue::as_str) else {
+        return;
+    };
+    match kind {
+        "thinking" => {
+            if let Some(text) = non_empty_string(block, "thinking") {
+                projection.readable.push(text);
+            }
+            if let Some(value) = non_empty_string(block, "signature") {
+                push_attached_field(
+                    projection,
+                    session_id,
+                    turn_key,
+                    line_ordinal,
+                    record_ordinal,
+                    "signature",
+                    value,
+                );
+            }
+        }
+        "redacted_thinking" => {
+            if let Some(value) = non_empty_string(block, "data") {
+                push_attached_field(
+                    projection,
+                    session_id,
+                    turn_key,
+                    line_ordinal,
+                    record_ordinal,
+                    "data",
+                    value,
+                );
+            }
+        }
+        _ => {}
+    }
+}
+
+fn push_attached_field(
+    projection: &mut ClaudeAttachedProjection,
+    session_id: &str,
+    turn_key: &str,
+    line_ordinal: u32,
+    record_ordinal: u32,
+    field: &'static str,
+    value: String,
+) {
+    let content_index = u32::try_from(projection.fields.len()).unwrap_or(u32::MAX);
+    projection.fields.push(ClaudeAttachedField {
+        provider: CLAUDE_ATTACHED_PROVIDER,
+        session_id: session_id.to_owned(),
+        turn_key: turn_key.to_owned(),
+        line_ordinal,
+        record_ordinal,
+        content_index,
+        field,
+        value,
+        availability: CLAUDE_ATTACHED_AVAILABILITY,
+    });
+}
+
+/// Run the ordinary attached-field reader. A duplicate-key line that did not
+/// already poison a turn marks the tail incomplete. Retained bytes stay put.
+pub(crate) fn note_claude_attached_duplicates(turns: &mut [NormalizedTurn], source: &[u8]) {
+    if project_claude_attached_fields(source).duplicate_rejected > 0 {
+        poison_unmarked_claude_tail(turns);
+    }
+}
+
+/// Deadline-bound form of [`note_claude_attached_duplicates`].
+pub(crate) fn note_claude_attached_duplicates_until(
+    turns: &mut [NormalizedTurn],
+    source: &[u8],
+    deadline: Instant,
+) -> Option<()> {
+    let projection = project_claude_attached_fields_until(source, Some(deadline))?;
+    if projection.duplicate_rejected > 0 {
+        poison_unmarked_claude_tail(turns);
+    }
+    Some(())
+}
+
+fn poison_unmarked_claude_tail(turns: &mut [NormalizedTurn]) {
+    if turns
+        .iter()
+        .all(|turn| turn.completeness == Completeness::Complete)
+        && let Some(turn) = turns.last_mut()
+    {
+        turn.completeness = Completeness::Incomplete;
+    }
 }
 
 /// Verify a single encrypted field in an authorized Claude assistant JSONL record.

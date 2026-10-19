@@ -42,7 +42,6 @@ fn setup_ls_tree_repo() -> tempfile::TempDir {
 
     let add_args = vec![
         "add",
-        ".libraignore",
         "README.md",
         "src/lib.rs",
         "src/nested/deep.txt",

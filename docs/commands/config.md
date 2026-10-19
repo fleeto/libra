@@ -404,7 +404,8 @@ List all configuration entries in the active scope.
 | Flag | Description |
 |------|-------------|
 | `--name-only` | Show only key names, not values |
-| `--show-origin` | Prefix each entry with its scope (`local`, `global`, or `system`) |
+| `--show-origin` | Prefix each entry with its origin: `file:<database path>` (config lives in SQLite, not INI files) |
+| `--show-scope` | Prefix each entry with its scope (`local`, `global`, or `system`) |
 | `--vault` | Show only `vault.env.*` entries |
 | `--ssh-keys` | Show SSH key entries |
 | `--gpg-keys` | Show GPG key entries |
@@ -576,9 +577,14 @@ These flags provide backward compatibility with `git config` invocation patterns
 | `-l`, `--list` | `list` |
 | `--add` | `set --add <key> <value>` |
 | `--import` | `import` |
-| `--get-regexp` | `get --regexp <key>` |
-| `--show-origin` | `list --show-origin` |
-| `--type=<bool\|int\|path>`, `--bool`, `--int`, `--path` | Canonicalize a value when reading (`--get`/`--get-all`/`--get-regexp`) **and when setting**: bool variants → `true`/`false`; int with optional k/m/g (1024-based) multiplier; path expands a leading `~`/`~/`. On a set the value is validated/canonicalized before storage (matching `git config --type`: `yes` → `true`, `1k` → `1024`), and an invalid value errors without storing. A non-get/non-set mode is rejected (exit 129). |
+| `--get-regexp <pattern>` | `get --regexp <pattern>` — the operand is a **regexp**, so a dotless pattern such as `^user` is valid; a pattern that matches nothing exits 1 |
+| `--get <key> [<value-pattern>]` | Select by value when a pattern is given (a regexp over stored values) |
+| `--unset <key> [<value-pattern>]` | Remove only the values matching the pattern; no match exits 5 |
+| `--show-origin` | Prefix reads/lists with `file:<database path>` (Git prints `file:<config path>`; Libra stores config in SQLite) |
+| `--show-scope` | Prefix reads/lists with `local`/`global`/`system` (Git parity) |
+| `--replace-all <key> <value>` | Replace every existing value of `<key>` with one value |
+| `--file <path>` | Read a Git-style INI file instead of the stores (read-only: `--get`, `--get-all`, `--get-regexp`, `--list`) |
+| `--type=<bool\|int\|path\|bool-or-str\|bool-or-int>`, `--bool`, `--int`, `--path` | Canonicalize a value when reading (`--get`/`--get-all`/`--get-regexp`) **and when setting**: bool variants → `true`/`false`; int with optional k/m/g (1024-based) multiplier; path expands a leading `~`/`~/`. On a set the value is validated/canonicalized before storage (matching `git config --type`: `yes` → `true`, `1k` → `1024`), and an invalid value errors without storing. A non-get/non-set mode is rejected (exit 129). |
 | `--remove-section <name>` | Delete the keys in section `<name>` in one transaction, using Git's section/subsection identity (so `--remove-section branch` removes `branch.<key>` but not the `branch.feature.*` subsection). Missing section → exit 128. |
 | `--rename-section <old> <new>` | Move section `<old>`'s keys to `<new>`, preserving each value and its encryption flag. Missing source → exit 128; identical names → exit 2; an already-existing destination section is refused → exit 128. |
 

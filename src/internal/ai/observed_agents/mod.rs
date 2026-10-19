@@ -36,6 +36,8 @@ pub mod compliance;
 pub mod coverage;
 pub mod derived;
 pub mod extract;
+pub mod grok_reasoning;
+pub mod grok_updates;
 pub(crate) mod live_capture;
 pub mod native_origin;
 pub mod opencode_export;
@@ -70,11 +72,13 @@ pub use capability::{
     TranscriptCompactor, TranscriptPreparer,
 };
 pub use coverage::{
-    COVERAGE_SCHEMA_VERSION, CanonValue, Completeness, CoverageCodecError, CoverageSchemaVersion,
-    EncodedCoverageTurn, NormalizedTurn, SemanticRecord, canonical_turn_bytes, coverage_digest_hex,
-    encode_coverage_turn, encode_coverage_turn_for_schema, normalize_claude_transcript,
-    normalize_codex_rollout, normalize_opencode_export, parse_canon_value, redact_turns,
-    safe_turn_projection, safe_turn_projection_for_schema, select_coverage_schema,
+    COVERAGE_SCHEMA_VERSION, CanonValue, ClaudeOrdinaryAssessment, Completeness,
+    CoverageCodecError, CoverageSchemaVersion, EncodedCoverageTurn, NormalizedTurn, SemanticRecord,
+    assess_claude_ordinary_transcript, canonical_turn_bytes, claude_jsonl_session_matches,
+    coverage_digest_hex, encode_coverage_turn, encode_coverage_turn_for_schema,
+    normalize_claude_transcript, normalize_codex_rollout, normalize_opencode_export,
+    parse_canon_value, redact_turns, safe_turn_projection, safe_turn_projection_for_schema,
+    select_coverage_schema,
 };
 pub(crate) use coverage::{
     normalize_claude_transcript_until, normalize_codex_rollout_until,
@@ -91,7 +95,7 @@ pub use redaction::{
     RedactionRule, Redactor,
 };
 pub use registry::{
-    AgentRegistration, FIRST_BATCH_WAVE, SlugLookup, launchable_investigate_slugs,
+    AgentRegistration, FIRST_BATCH_WAVE, GROK_WAVE, SlugLookup, launchable_investigate_slugs,
     launchable_review_slugs, lookup_cli_slug, registration_for, registry, supported_slugs,
 };
 pub use rpc::{
@@ -102,10 +106,9 @@ pub use skill_projection::{
     DiscoveredSkill, IndexedSkillEvent, SKILL_PROJECTION_SCHEMA_VERSION, SkillEventProjection,
     SkillQuery, discover_skills,
 };
-// fd-pinned directory reads are Unix-only (dup/fdopendir). On non-Unix
-// targets the pinned reader does not exist and the provider-directory
-// discovery path fails closed (no std::fs fallback is implemented).
-#[cfg(unix)]
+// Unix uses dup/fdopendir; Windows retains no-reparse directory handles and
+// pins the complete ancestry while enumerating provider entries.
+#[cfg(any(unix, windows))]
 pub(crate) use transcript_source::read_dir_pinned_provider_directory;
 pub use transcript_source::{
     AuthorizedTranscriptFile, ExportAuthorized, ProviderRootAuthorized,
@@ -153,6 +156,7 @@ pub fn agent_for(kind: AgentKind) -> &'static dyn ObservedAgent {
     static FACTORY_AI: StablePromotedAgent = StablePromotedAgent(&FACTORY_AI_STABLE_PROMOTED_SPEC);
     static CLAUDE_CODE: ClaudeCodeObservedAgent = ClaudeCodeObservedAgent::new();
     static GEMINI: GeminiObservedAgent = GeminiObservedAgent::new();
+    static GROK: GrokObservedAgent = GrokObservedAgent;
 
     match kind {
         AgentKind::ClaudeCode => &CLAUDE_CODE,
@@ -162,6 +166,7 @@ pub fn agent_for(kind: AgentKind) -> &'static dyn ObservedAgent {
         AgentKind::OpenCode => &OPENCODE,
         AgentKind::Copilot => &COPILOT,
         AgentKind::FactoryAi => &FACTORY_AI,
+        AgentKind::Grok => &GROK,
     }
 }
 
@@ -193,7 +198,8 @@ pub fn truncator_for(kind: AgentKind) -> Option<&'static dyn TranscriptTruncator
         | AgentKind::Gemini
         | AgentKind::OpenCode
         | AgentKind::Copilot
-        | AgentKind::FactoryAi => None,
+        | AgentKind::FactoryAi
+        | AgentKind::Grok => None,
     }
 }
 
@@ -213,12 +219,49 @@ pub(crate) fn live_capture_for(
     static CLAUDE_CODE_LIVE: live_capture::ClaudeLiveCapture = live_capture::ClaudeLiveCapture;
     static CODEX_LIVE: live_capture::CodexLiveCapture = live_capture::CodexLiveCapture;
     static OPENCODE_LIVE: live_capture::OpenCodeLiveCapture = live_capture::OpenCodeLiveCapture;
+    static GROK_LIVE: live_capture::GrokLiveCapture = live_capture::GrokLiveCapture;
 
     match kind {
         AgentKind::ClaudeCode => Some(&CLAUDE_CODE_LIVE),
         AgentKind::Codex => Some(&CODEX_LIVE),
         AgentKind::OpenCode => Some(&OPENCODE_LIVE),
         AgentKind::Cursor | AgentKind::Gemini | AgentKind::Copilot | AgentKind::FactoryAi => None,
+        AgentKind::Grok => Some(&GROK_LIVE),
+    }
+}
+
+/// Whether the live-capture arm exists exactly when the registry says the
+/// kind is hook-installable. Integration tests call this instead of the
+/// crate-private lookup.
+pub fn live_capture_matches_hook_installable(kind: AgentKind) -> bool {
+    live_capture_for(kind).is_some() == registration_for(kind).hook_installable
+}
+
+struct GrokObservedAgent;
+
+impl ObservedAgent for GrokObservedAgent {
+    fn provider_kind(&self) -> AgentKind {
+        AgentKind::Grok
+    }
+
+    fn provider_name(&self) -> &'static str {
+        "grok"
+    }
+
+    fn stability(&self) -> AgentStability {
+        AgentStability::Stable
+    }
+
+    fn read_transcript(&self, _session: &AgentSessionCtx) -> anyhow::Result<Option<Vec<u8>>> {
+        Ok(None)
+    }
+
+    fn protected_dirs(&self) -> &'static [&'static str] {
+        &[".grok"]
+    }
+
+    fn as_hooks(&self) -> Option<&dyn crate::internal::ai::hooks::provider::HookProvider> {
+        Some(crate::internal::ai::hooks::providers::grok_provider())
     }
 }
 
@@ -244,8 +287,7 @@ mod registry_tests {
             assert_eq!(
                 agent.stability(),
                 AgentStability::Stable,
-                "agent_for({kind:?}) must report Stable tier — \
-                 preview specs are not registered here",
+                "agent_for({kind:?}) stability drifted",
             );
         }
     }

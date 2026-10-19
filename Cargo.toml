@@ -1,6 +1,6 @@
 [package]
 name = "libra"
-version = "0.30.50"
+version = "0.30.65"
 edition = "2024"
 license = "MIT"
 description = "AI agent-native version control system with Git on-disk compatibility, SQLite-backed metadata, and tiered cloud storage"
@@ -153,7 +153,7 @@ rfuse3 = { version = "0.0.8", features = ["tokio-runtime", "unprivileged"] }
 seccompiler = { version = "0.5.0", features = ["json"] }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61.2", features = ["Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_Threading", "Win32_System_Pipes", "Win32_Foundation"] }
+windows-sys = { version = "0.61.2", features = ["Wdk_Foundation", "Wdk_Storage_FileSystem", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_Threading", "Win32_System_Pipes", "Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_System_IO", "Win32_System_JobObjects", "Win32_System_Diagnostics_ToolHelp"] }
 
 [dev-dependencies]
 serial_test = { version = "3.4.0", default-features = false, features = ["async"] }
@@ -637,6 +637,12 @@ path = "tests/code_provider_resolution_test.rs"
 [[test]]
 name = "compat_serial_registry"
 path = "tests/compat/serial_registry.rs"
+
+# issue #483 / ADR-CO-05: every clap `dry_run` field under src/command must be
+# a registered ReadOnly preview or an accepted exception.
+[[test]]
+name = "compat_preview_no_operation"
+path = "tests/compat/preview_no_operation.rs"
 
 # plan-20260822 OL-00: Change ID header vs sidecar compatibility spike.
 [[test]]

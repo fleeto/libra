@@ -11,6 +11,10 @@
 
 > **术语与特性边界澄清**：本文档中的 "SubagentStart / SubagentEnd" 与 checkpoint `scope = 'subagent'` 专指**被观测的外部 Agent**（Claude Code 等）在其 transcript 中产生的子代理事件，由 `libra agent` 捕获。**与此正交**的是 Cargo feature `subagent-scaffold`（CEX-S2-10，Step 2 子代理契约 schema-only 脚手架），它用于 `src/internal/ai/agent/`、`goal/` 等内部 AgentRuntime 的子代理合约定义，当前受 CP-4 gate 保护。Cargo.toml 中的注释引用本文档 "Step 2 audit closure" 应理解为外部捕获计划为整体子代理事件面提供上下文；内部 scaffold 的实际实现与审计位于内部 AI 模块与 `docs/development/internal/code-agent-runtime.md`。新增/修改任一 "subagent" 语义时，必须同步更新 Cargo 注释与两份文档。
 
+## Claude Code hook registry (CC-01)
+
+Claude hook classification lives in one registry (`providers/claude/events.rs`). The parser does not copy that taxonomy. Control-sensitive `WorktreeCreate`, `WorktreeRemove`, and `PreModelSwitch` are known and are not on the current observe ingress. Deprecated aliases `SessionStop`, `ModelUpdate`, and `Compaction` still parse and are not installable. Unknown events and unknown fields are partial without a payload diagnostic. The installer writes every safely installable event. `SessionEnd` omits the host timeout. `FileChanged` omits the matcher and does not emit `watchPaths`. `agent doctor` lists each known event as installable or excluded. `agent hooks claude-code observe` uses that registry and the existing capture coordinator, prints nothing, and exits 0 on controllable success or failure. MessageDisplay stops after 128 in-process batches. Live capture and import both call `normalize_claude_transcript`. A non-empty decoded `thinking` string is kept as readable reasoning. `thinking.signature` and `redacted_thinking.data` stay on the ordinary transcript bytes and are Unproven without native proof. An empty shell is not data-obtained. Metadata and redaction reports omit the thinking text. Authorized checkpoint show and ordinary export return the redacted thinking text and signature. List and graph do not. Live capture, import, and snapshot recovery read those attached fields from the original JSONL, with provider, session, turn, record, and content index. A duplicate key rejects that record and leaves retained bytes in place. A mismatched session file is not associated. Ordinary retention does not create a native artifact. An explicit `libra agent doctor --repair` appends one coverage revision for an authorized legacy Claude checkpoint. The revision key binds that checkpoint and the ordinary transcript content. Repeating the repair with the same content leaves the revision and the stored objects in place. Erase and the cloud mirror keep that replacement together with the old checkpoint reference, and a tombstone blocks revival.
+
 ## 捕获概念结构图（Session / turn / checkpoint / transcript）
 
 下图说明外部 Agent 捕获各概念之间的关联：生命周期事件如何驱动写入、`agent_session` 与 `agent_checkpoint` 的从属关系、checkpoint 如何落到 `refs/libra/traces` 上的 commit/tree/blob，以及 transcript 快照、usage、辅助日志和 cloud 可见性的位置。事实源：schema `sql/migrations/2026050303_agent_capture.sql`、写入器 `src/internal/ai/capture/live_pipeline.rs`（`ingest_agent_traces_payload_with_scope`）与 `src/internal/ai/capture/live_checkpoint.rs`（`write_committed_checkpoint`），hook 入口 `src/internal/ai/hooks/runtime.rs`。
@@ -113,7 +117,17 @@ Libra **自己**的 `hooks.json`（`internal::ai::hooks::config::load_hook_confi
 | `codex` | `Codex` / `codex` | first-batch supported；hook-installable | hook install/uninstall/status、lifecycle ingest、transcript read、checkpoint/export、review evidence | 以上游实测为准：当前写入用户级 `$CODEX_HOME/hooks.json` 与 `config.toml` `[hooks.state]` trust 记录；不得假定项目级 `.codex/hooks.json` 是 Libra 新写入目标 |
 | `opencode` | `OpenCode` / `opencode` | first-batch supported；hook-installable | hook install/uninstall/status、lifecycle ingest、transcript read、checkpoint/export、review evidence | 以上游实测为准：当前写入 `.opencode/plugin/libra-hooks.js`（单数目录，上游 SDK 规范路径，与本文「OpenCode 安装流程契约」§3 一致）并保留用户配置；复数 `.opencode/plugins/` 仅作为携带 Libra-managed 标记的重复受管文件的检测/清理输入，不作为 Libra 新写入目标 |
 
-首批之外的 `gemini`、`cursor`、`copilot`、`factory-ai`、`pi`、`vogon`、未知 external slug 和历史/预览 adapter **不得作为 supported agent 暴露**：`list/status --json` 不能把它们标成 `supported=true`、`hook_installable=true`、`installed=true`、`launchable_review=true` 或 `launchable_investigate=true`；`add/enable` 必须返回 actionable unsupported / skipped diagnostic；hook ingest 不得为这些 slug 写入 `agent_session.agent_kind`。源码中已有的 `AgentKind`、SQL CHECK 或历史 provider 只能作为 migration/backward-compat 背景，不能扩大本文执行范围。
+首批之外的 `gemini`、`cursor`、`copilot`、`factory-ai`、`pi`、`vogon`、未知 external slug 和历史/预览 adapter **不得作为 supported agent 暴露**：`list/status --json` 不能把它们标成 `supported=true`、`hook_installable=true`、`installed=true`、`launchable_review=true` 或 `launchable_investigate=true`；`add/enable` 必须返回 actionable unsupported / skipped diagnostic；hook ingest 不得为这些 slug 写入 `agent_session.agent_kind`。源码中已有的 `AgentKind`、SQL CHECK 或历史 provider 只能作为 migration/backward-compat 背景，不能扩大本文执行范围。GK-05 之后唯一的首批外追加是 `grok`：`supported=true`、`hook_installable=true`、`support_wave="grok"`（不是 `first_batch`），`launchable_review=false`、`launchable_investigate=false`。已有读取器面向本机 `updates.jsonl` 与 `chat_history.jsonl`；生产thinking接入暂停。后续普通 checkpoint transcript 的目标是保留 Thinking 字符串和未证明 `encrypted_content`，不解密。默认 `checkpoint show` 不打印这些明文；显式 transcript 路径只能返回实际已保存的脱敏内容。`grok` 不是 review 或 investigate 启动器。
+
+| slug | AgentKind / DB value | 追加状态 | 当前采集边界 | 安装配置面 |
+|---|---|---|---|---|
+| `grok` | `Grok` / `grok` | supported；hook-installable；support_wave=grok | 生命周期可接收；thinking生产接入暂停，不能由supported推断正文已保存 | 用户级 `GROK_HOME/hooks/` |
+
+### Grok 架构边界与暂停状态（GK-06）
+
+`GrokProvider::parse_hook_event` 只委托纯 `parser::parse_grok_hook_event`；不能读取日志、写入observer状态或授权路径。生产hook回调移除了 `record_grok_boundary`，不会在解析阶段写 `GROK_HOME/libra-capture`。`session_files.rs` 保留独立兼容的离线辅助函数，其 `checkpoint.json` 只是scratch状态，不是正式 `agent_checkpoint` 或trace ref；禁止从生产runtime重新调用它。根路径 `grok::observe_grok_hook` 保留；旧内部路径 `grok::parser::observe_grok_hook` / `GrokObserveOutcome` 迁至 `grok::session_files`，Outcome另从grok根导出。
+
+后续采集必须依次经过已验证的ingress/repository scope、仅推导路径的provider candidate、共享snapshot授权和有界读取、纯字节normalizer/reasoning合并、共享checkpoint writer/catalog/ref。pending和PreCompact也服从同一持久化owner，不以独立JSON冒充正式checkpoint。当前日志reader的合成测试不证明生产hook已保存thinking；真实Grok采集验证继续暂停，接续任务见 `plan-20261018-grok-capture.md` 的GK-07/GK-08。
 
 首批 capability matrix 必须固定这些字段：`slug`、`agent_kind`、`db_value`、`supported`、`support_wave="first_batch"`、`registered`、`transcript_readable`、`hook_installable`、`installed`、`launchable_review`、`launchable_investigate`、`external_binary`、`config_paths`、`capabilities`。新增首批外 agent 必须另开 PR 更新本节、E9、任务卡、用户文档和 compat schema pin test。
 
@@ -2709,7 +2723,7 @@ Incomplete，不产生新的 `SemanticRecord::Reasoning` 或 v1 digest claim；�
 留给 `DEFER-OG25-COVERAGE-V2` 进行全路径 schema bump。
 候选、未知状态、reasoning 上的同名 SDK metadata、重复 JSON key／消息／part ID
 或错误类型都保持 partial，
-候选或不支持的 reasoning part 同时删除 `text`，防止明文位置重复 opaque 值或片段；
+候选或不支持的 reasoning part 把字符串 `text` 和未证明的 `state`、`time`、`originProof` 写入普通副本，这些字段不是 native artifact；
 只给出固定且无载荷的状态／诊断；错误或不支持的 export 封套生成无正文 partial，
 使用现有通用 `SourceAuthorizationMismatch` 原因；`try_into_ordinary` 与 checkpoint consumer
 均拒绝未证实候选。
@@ -2781,6 +2795,10 @@ OpenCode 2.0.26并选择`volcengine-agent-plan/glm-5.3-flash`，先核对临时�
 
 
 ### Private native-origin issuer registration (macOS)
+
+The installation challenge runs with fresh, owner-only home, configuration, data, cache, state and temporary directories inside the owned private installation. Its initial environment is constructed explicitly; caller `TMPDIR`, runtime-loading overrides and host HOME/XDG settings are not inherited. The temporary directory must be canonical, owned by the current user, mode 0700 and empty before the producer starts. A failed precondition or cleanup refuses registration with the existing fixed challenge error.
+
+Scratch is retained for the child lifetime and cleaned after normal exit, failure or timeout; cancellation cleanup is best effort. Inherited process-group descendants are terminated while the leader PID is still reserved. A parent crash or SIGKILL can leave an owner-only scratch directory, which later challenges never reuse. This isolation applies to the Libra-launched installation challenge. Separately launched OpenCode sessions retain their own runtime requirements, and the current `.3` SOURCE/Source A and real-field archive gates remain unproven.
 
 Ordinary `agent rpc trust opencode` pins an exporter binary; it does not register an issuer or prove native reasoning. The historical native path requires a separately installed, reviewed macOS arm64 `2.0.26-libra-native.1` or `.2` producer and its exact frozen v1 observer recipe, rendered for the current canonical Libra executable path. Prepare that observer using the reviewed private bundle's instructions in an isolated owned setup. Global OpenCode remains independent.
 
@@ -2923,8 +2941,8 @@ session。owning carrier 在绑定时记录 `repo_id`、Libra session、provider
 正确本身不验证 scope，也不证明 native 来源。generic ordinary consumer 继续拒绝
 `Unproven`。
 
-unsupported reasoning state（包括 `reasoningField`）连同关联 reasoning text/time
-全部删除。opaque hints 包括 `signature`、`redactedData`、
+unsupported reasoning state（包括 `reasoningField`）与可读的关联 reasoning text/time
+一并写入普通 transcript，包含 text、time 与 opaque state。opaque hints 包括 `signature`、`redactedData`、
 `reasoningEncryptedContent`、`thoughtSignature`、`originProof`。原始解析树任意
 位置出现 `originProof` key（包括错型或未知嵌套值）或 sealed candidate 都不能走
 该 fallback。只有完成擦除和 Redactor 的结果可入库，metadata flag 不能授此权限。
@@ -2980,9 +2998,9 @@ remains unproven.
 This ordinary baseline is scoped to automatic capture, a durable checkpoint and the
 ordinary redacted export of that checkpoint, with prompt, model and token
 projections compared to the authorized source. Unsupported reasoning state is
-discarded. The source/snapshot status pair is `Unproven` / `Partial`: `Unproven`
+retained with its text. The source/snapshot status pair is `Unproven` / `Partial`: `Unproven`
 is the internal source classification, while `Partial` is the persisted
-completeness value. The associated reasoning text/time is omitted. The model comparison uses `extraction.model` from the
+completeness value. Readable reasoning text is retained. Associated reasoning time is retained with the unproven fields. The model comparison uses `extraction.model` from the
 native assistant record. The top-level `model` is hook metadata and can differ.
 Token totals use distinct native assistant records without counting the session
 summary twice. A no-tool sample proves only empty-files consistency, not a

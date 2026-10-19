@@ -653,3 +653,28 @@ fn alternates_rejects_unknown_base_format() {
         "must refuse unknown base format: {stderr}"
     );
 }
+
+/// Issue #483: `alternates prune --dry-run` writes no objects.
+#[test]
+#[serial_test::serial(cwd)]
+fn test_alternates_prune_dry_run_writes_no_objects() {
+    let repo = tempfile::tempdir().unwrap();
+    let p = repo.path();
+    super::init_repo_via_cli(p);
+    super::configure_identity_via_cli(p);
+    let alt = tempfile::tempdir().unwrap();
+    super::init_repo_via_cli(alt.path());
+
+    assert_cli_success(
+        &run_libra_command(
+            &["alternates", "add", alt.path().to_str().expect("utf8")],
+            p,
+        ),
+        "alternates add",
+    );
+
+    let before = super::count_objects_snapshot(p);
+    let out = run_libra_command(&["alternates", "prune", "--dry-run"], p);
+    assert_cli_success(&out, "alternates prune --dry-run");
+    super::assert_no_objects_written(p, &before, "alternates prune --dry-run");
+}

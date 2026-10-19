@@ -25,13 +25,7 @@ impl TestRepo {
         repo.write("trailing.txt", "base\n");
         repo.write("blank.txt", "base\n");
         repo.write("middle.txt", "top\nbottom\nend\n");
-        repo.success(&[
-            "add",
-            ".libraignore",
-            "trailing.txt",
-            "blank.txt",
-            "middle.txt",
-        ]);
+        repo.success(&["add", "trailing.txt", "blank.txt", "middle.txt"]);
         repo.success(&["commit", "-s", "-m", "base"]);
         repo
     }

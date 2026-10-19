@@ -838,6 +838,11 @@ pub(crate) fn get_index_side(
     let entries = index
         .tracked_entries(0)
         .into_iter()
+        // WT-06 (ADR-WT-05): an intent-to-add entry is an empty-blob
+        // PLACEHOLDER for a new file, not index content. Git never shows it
+        // on the index side: `diff`/`diff-files`/`diff HEAD` render it as a
+        // new file, and `diff --cached` omits it entirely.
+        .filter(|entry| !entry.flags.intent_to_add)
         // ADR-SW-04 item 1: a skip-worktree path is intentionally absent or
         // stale in the worktree and must not appear on the index side of a
         // WORKING-DIRECTORY diff. A staged diff (`--cached`) still shows the

@@ -39,6 +39,10 @@ Skip-worktree entries (see [`update-index`](update-index.md)) are visible in
 plain, `-t`, and `-v` listings — tagged `S` — but are excluded from `-d` and
 `-m` (Git never consults the working tree for them).
 
+Intent-to-add entries (`libra add -N`) are ordinary stage-0 index entries for
+listing purposes: `ls-files -s` prints mode `100644`, the canonical empty blob
+`e69de29bb2d1d6434b8b29ae775ad8c2e48c5391`, and stage `0`, matching Git.
+
 When stdout is piped and the downstream command exits early, `libra ls-files` exits quietly
 without printing panic/backtrace or `Broken pipe` diagnostics.
 

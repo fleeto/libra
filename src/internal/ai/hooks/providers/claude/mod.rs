@@ -5,10 +5,22 @@
 //! decoding logic lives in those submodules; this module contains only the
 //! singleton plumbing.
 
+mod events;
 mod parser;
 mod settings;
 
 use anyhow::Result;
+pub use events::{
+    ClaudeEventClass, ClaudeFieldReport, MESSAGE_DISPLAY_COALESCE_LIMIT, admit_message_display,
+    classify_claude_fields, control_sensitive_names, deprecated_alias_names, event_class,
+    known_event_names, reset_message_display_counts_for_test, safely_installable_names,
+};
+pub use settings::ClaudeHookDoctorEvent;
+
+/// Event-level Claude hook report for `libra agent doctor`.
+pub fn claude_hook_doctor_events() -> Result<Vec<ClaudeHookDoctorEvent>> {
+    settings::claude_hook_doctor_events()
+}
 
 use super::super::{
     lifecycle::{LifecycleEvent, SessionHookEnvelope},
@@ -58,7 +70,15 @@ impl HookProvider for ClaudeProvider {
     }
 
     fn recognizes_event(&self, hook_event_name: &str) -> bool {
-        parser::CLAUDE_HOOK_EVENT_NAMES.contains(&hook_event_name)
+        events::on_current_ingress(hook_event_name)
+    }
+
+    fn admit_ingress_frame(&self, hook_event_name: &str, session_id: &str) -> bool {
+        if hook_event_name == "MessageDisplay" {
+            events::admit_message_display(session_id)
+        } else {
+            true
+        }
     }
 
     fn dedup_identity_keys(&self) -> &'static [&'static str] {

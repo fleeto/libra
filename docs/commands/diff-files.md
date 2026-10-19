@@ -6,7 +6,7 @@ point that reuses the one `diff` engine (see [`diff`](diff.md)).
 ## Synopsis
 
 ```
-libra diff-files [-- <path>...]
+libra diff-files [--name-status] [-- <path>...]
 ```
 
 ## Description
@@ -16,13 +16,16 @@ changes (index vs working tree). Path limiters go after `--`; as Git plumbing it
 ignores porcelain `diff.renames`. Global output flags such as
 `libra --json diff-files` still apply.
 
-The unsupported porcelain flag surface is intentional; use the shared
-`libra diff` command for the documented patch and status options.
+`--name-status` prints Git's `A`/`M`/`D`/`R` letters (for example `A\tnew.txt`
+for an intent-to-add entry). The rest of the porcelain flag surface is
+intentionally limited; use the shared `libra diff` command for the documented
+patch and status options.
 
 ## Options
 
 | Option | Description | Example |
 |--------|-------------|---------|
+| `--name-status` | Print the status letter for each changed path. | `libra diff-files --name-status` |
 | `-- <path>...` | Limit the diff to paths. | `libra diff-files -- src/` |
 | `--json` / `--machine` | Structured diff output. | `libra --json diff-files` |
 | porcelain flag surface | Intentionally limited; use `libra diff` for the documented patch and status options. | `libra diff --no-patch` |
@@ -43,6 +46,9 @@ libra diff-files
 
 # Limit to a directory
 libra diff-files -- src/
+
+# Machine-readable status letters
+libra diff-files --name-status
 ```
 
 ## Comparison with Git

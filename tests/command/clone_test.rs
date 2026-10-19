@@ -2454,7 +2454,7 @@ fn committed_named_repo(parent: &std::path::Path, name: &str) -> std::path::Path
     configure_identity_via_cli(&src);
     fs::write(src.join("tracked.txt"), "tracked\n").expect("tracked");
     assert_cli_success(
-        &run_libra_command(&["add", ".libraignore", "tracked.txt"], &src),
+        &run_libra_command(&["add", "tracked.txt"], &src),
         "add named repo",
     );
     assert_cli_success(

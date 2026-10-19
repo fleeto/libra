@@ -1055,8 +1055,9 @@ async fn run_commit_with_index(
     let skip_conventional_check = args.no_verify;
     // `commit.status` only controls an editor template. Avoid reading it when no
     // editor can open or cleanup would retain comments; explicit CLI toggles
-    // still bypass the config reader on applicable paths.
-    let include_status = if message_settings.status_template_applicable() {
+    // still bypass the config reader on applicable paths. `--dry-run` also
+    // prints the status snapshot for Git parity, regardless of the editor.
+    let include_status = if args.dry_run || message_settings.status_template_applicable() {
         config::status_in_editor_template(args.status, args.no_status).await?
     } else {
         false
@@ -1068,6 +1069,9 @@ async fn run_commit_with_index(
         Some(
             status::resolve_config_defaults(status::StatusArgs {
                 long_format: true,
+                // Git's editor template and `--dry-run` snapshot always name the
+                // branch and its upstream; enable it explicitly.
+                branch: true,
                 ..status::StatusArgs::default()
             })
             .await
@@ -1138,24 +1142,6 @@ async fn run_commit_with_index(
             .await
             .map_err(|e| CommitError::StagedChanges(e.to_string()))?;
 
-        // Skip empty commit check for --amend operations. "No files have ever
-        // been staged" must be distinguished from "staged but unchanged": the
-        // former is only true when the index is empty AND there is nothing to
-        // commit relative to HEAD. An empty index that still carries staged
-        // deletions (removing the final tracked file) must proceed to commit.
-        if tracked_entries.is_empty()
-            && staged_changes.is_empty()
-            && !args.allow_empty
-            && !is_amend
-            && !auto_stage_applied
-        {
-            return Err(CommitError::NothingToCommitNoTracked);
-        }
-
-        if staged_changes.is_empty() && !args.allow_empty && !is_amend {
-            return Err(classify_nothing_to_commit()?);
-        }
-
         // Complete status collection before the pre-commit hook or commit/tree/ref
         // writes. A real `-a` has already materialized its staged blobs so the
         // persisted index never points at missing objects; dry runs keep those
@@ -1168,6 +1154,49 @@ async fn run_commit_with_index(
             Some(status_args) => build_status_section(status_args).await?,
             None => None,
         };
+
+        // `--porcelain` snapshot of the would-be-committed state: taken AFTER `-a`
+        // auto-staging and the staged recompute above so it reflects what would be
+        // committed. Inert under `--json`. `.take()` below hands it to whichever
+        // build_commit_output branch (amend/normal dry-run) runs.
+        let porcelain_text = if args.porcelain && !output.is_json() {
+            Some(gather_commit_porcelain().await?)
+        } else {
+            None
+        };
+
+        // Git's `commit --dry-run` still prints the status snapshot before
+        // refusing, so emit it here for parity; scripted consumers (e.g. the
+        // tracking-info assertions) read the branch/upstream line.
+        let emit_refusal_preview = || {
+            if args.porcelain {
+                if let Some(text) = porcelain_text.as_deref() {
+                    print!("{text}");
+                }
+            } else if dry_run && let Some(section) = status_section.as_deref() {
+                print!("{section}");
+            }
+        };
+
+        // Skip empty commit check for --amend operations. "No files have ever
+        // been staged" must be distinguished from "staged but unchanged": the
+        // former is only true when the index is empty AND there is nothing to
+        // commit relative to HEAD. An empty index that still carries staged
+        // deletions (removing the final tracked file) must proceed to commit.
+        if tracked_entries.is_empty()
+            && staged_changes.is_empty()
+            && !args.allow_empty
+            && !is_amend
+            && !auto_stage_applied
+        {
+            emit_refusal_preview();
+            return Err(CommitError::NothingToCommitNoTracked);
+        }
+
+        if staged_changes.is_empty() && !args.allow_empty && !is_amend {
+            emit_refusal_preview();
+            return Err(classify_nothing_to_commit()?);
+        }
 
         // `lfs.lockEnforce` gate (lore.md 2.8): staged new+modified+DELETED
         // paths (deletions never reach the push-time OID check — this is the
@@ -1189,16 +1218,6 @@ async fn run_commit_with_index(
                 .await
                 .map_err(CommitError::LockPolicy)?;
         }
-
-        // `--porcelain` snapshot of the would-be-committed state: taken AFTER `-a`
-        // auto-staging and the staged recompute above so it reflects what would be
-        // committed. Inert under `--json`. `.take()` below hands it to whichever
-        // build_commit_output branch (amend/normal dry-run) runs.
-        let porcelain_text = if args.porcelain && !output.is_json() {
-            Some(gather_commit_porcelain().await?)
-        } else {
-            None
-        };
 
         Ok::<_, CommitError>((
             index,
@@ -2816,6 +2835,11 @@ async fn create_tree_with_persistence(
     let path_entries: Vec<PathBuf> = index
         .tracked_entries(0)
         .iter()
+        // WT-07 (ADR-WT-05): the intent-to-add empty blob is a placeholder,
+        // never tree content. Git's cache-tree skips these entries so a
+        // commit that also stages unrelated paths never records the empty
+        // file (and never loses the user's worktree content).
+        .filter(|file| !file.flags.intent_to_add)
         .map(|file| PathBuf::from(file.name.clone()))
         .filter(|path| path.starts_with(&current_root))
         .collect();
@@ -3003,6 +3027,23 @@ fn auto_stage_tracked_changes(
             }
         }
     }
+    // WT-07 (t2203:87): an intent-to-add entry is a PLACEHOLDER, not stat
+    // data. `commit -a` must rewrite it with the real worktree blob (and clear
+    // the flag) even when that blob is the same empty blob — otherwise the
+    // placeholder stays invisible to `changes_to_be_committed` and the commit
+    // fails as "nothing added".
+    for entry in index.tracked_entries(0) {
+        if !entry.flags.intent_to_add {
+            continue;
+        }
+        let candidate = PathBuf::from(&entry.name);
+        if workdir.join(&candidate).symlink_metadata().is_err()
+            || pending.modified.contains(&candidate)
+        {
+            continue;
+        }
+        pending.modified.push(candidate);
+    }
     if pending.modified.is_empty() && pending.deleted.is_empty() {
         return Ok(false);
     }
@@ -3043,7 +3084,14 @@ fn auto_stage_tracked_changes(
                 .map_err(|e| {
                     CommitError::AutoStage(format!("failed to create index entry: {}", e))
                 })?;
-        crate::utils::index_ext::update_preserving_file_mode(&mut index, entry, file_mode);
+        // WT-07: `commit -a` writes the path's REAL content, so the
+        // intent-to-add placeholder bit must be cleared (ADR-SW-03's
+        // "content write clears the bit" rule). Preserving it would leave a
+        // real blob invisible to `changes_to_be_committed` and to every tree
+        // writer — the commit would silently contain nothing.
+        crate::utils::index_ext::update_preserving_file_mode_except_intent(
+            &mut index, entry, file_mode,
+        );
         if let Some(path) = file.to_str() {
             for stage in 1..=3 {
                 index.remove(path, stage);

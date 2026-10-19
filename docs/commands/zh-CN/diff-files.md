@@ -5,17 +5,21 @@
 ## 用法
 
 ```
-libra diff-files [-- <path>...]
+libra diff-files [--name-status] [-- <path>...]
 ```
 
 ## 说明
 
 `diff-files` 等价于 `libra diff --no-renames`：显示未暂存改动（index 对工作树）。路径限定写在 `--` 之后。作为 Git plumbing，它忽略 porcelain `diff.renames`；`libra --json diff-files` 等全局输出标志仍可用。
 
+`--name-status` 打印 Git 的 `A`/`M`/`D`/`R` 状态字母（例如 intent-to-add 条目为
+`A\tnew.txt`）。其余 porcelain 标志面仍有意保持精简；完整补丁与状态选项请使用共享的 `libra diff`。
+
 ## 选项
 
 | 选项 | 说明 | 示例 |
 |------|------|------|
+| `--name-status` | 为每个变更路径打印状态字母。 | `libra diff-files --name-status` |
 | `-- <path>...` | 将 diff 限定到路径。 | `libra diff-files -- src/` |
 | `--json` / `--machine` | 结构化 diff 输出。 | `libra --json diff-files` |
 
@@ -35,6 +39,9 @@ libra diff-files
 
 # 限定到目录
 libra diff-files -- src/
+
+# 机器可读的状态字母
+libra diff-files --name-status
 ```
 
 ## 与 Git 对比

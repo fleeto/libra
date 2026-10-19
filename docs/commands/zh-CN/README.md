@@ -161,6 +161,7 @@ porcelain 输出、冲突处理或 plumbing 语法等特定 Git-compatible 表�
 | `libra update-index` | | 直接修改 index（add/remove/cacheinfo） | [update-index.md](update-index.md) |
 | `libra update-ref` | | 安全地更新、创建或删除 refs/heads/<branch> ref | [update-ref.md](update-ref.md) |
 | `libra verify-pack` | | 对照 pack archives 验证 pack index files | [verify-pack.md](verify-pack.md) |
+| `libra count-objects` | | 清点松散对象及磁盘占用（`-v`、`-H`） | [count-objects.md](count-objects.md) |
 | `libra show-ref` | | 列出本地 refs（branches、tags、HEAD）及其 object IDs | [show-ref.md](show-ref.md) |
 | `libra symbolic-ref` | | 读取或更新 symbolic HEAD ref | [symbolic-ref.md](symbolic-ref.md) |
 | `libra index-pack` | | 为现有 `.pack` archive 构建 `.idx` pack index 文件（隐藏） | [index-pack.md](index-pack.md) |

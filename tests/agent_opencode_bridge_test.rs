@@ -1131,6 +1131,17 @@ async fn cov2_macos_fake_exporter_candidate_live_partial_no_plaintext() {
         }
     }
 
+    fn assert_present(bytes: &[u8], canaries: &[&str], sink: &str) {
+        for canary in canaries {
+            assert!(
+                bytes
+                    .windows(canary.len())
+                    .any(|part| part == canary.as_bytes()),
+                "unproven reasoning field missing from {sink}"
+            );
+        }
+    }
+
     fn read_object(repo: &BridgeRepo, oid: &str) -> Vec<u8> {
         let hash = ObjectHash::from_str(oid).expect("actual loose object id");
         libra::utils::object::read_git_object(&repo.repo.join(".libra"), &hash)
@@ -1240,7 +1251,7 @@ async fn cov2_macos_fake_exporter_candidate_live_partial_no_plaintext() {
         )
         .expect("bounded data-only candidate preview");
         assert_eq!(typed["partial"], true);
-        assert_absent(ordinary.bytes(), &canaries, "ordinary plaintext preview");
+        assert_present(ordinary.bytes(), &canaries, "ordinary plaintext preview");
         let ordinary_json: Value = serde_json::from_slice(ordinary.bytes()).unwrap();
         assert_eq!(ordinary_json["messages"][0]["text"], "cov15 safe request");
         assert_eq!(
@@ -1380,7 +1391,11 @@ async fn cov2_macos_fake_exporter_candidate_live_partial_no_plaintext() {
             let blobs = checkpoint_blobs(repo, &id, &tree);
             assert!(blobs.len() >= 6, "actual checkpoint roles are inspected");
             for (path, bytes) in &blobs {
-                assert_absent(bytes, &canaries, "decoded persisted checkpoint objects");
+                if path.contains("transcript") {
+                    assert_present(bytes, &canaries, "decoded transcript");
+                } else {
+                    assert_absent(bytes, &canaries, "non-transcript checkpoint object");
+                }
                 assert!(
                     !path.starts_with("reasoning/"),
                     "no opaque reasoning object path"
@@ -1417,7 +1432,7 @@ async fn cov2_macos_fake_exporter_candidate_live_partial_no_plaintext() {
                 exported.status.success(),
                 "actual ordinary transcript readback"
             );
-            assert_absent(&exported.stdout, &canaries, "persisted ordinary plaintext");
+            assert_present(&exported.stdout, &canaries, "persisted ordinary plaintext");
             assert_absent(&exported.stderr, &canaries, "checkpoint public errors");
             let actual: Value = serde_json::from_slice(&exported.stdout).unwrap();
             assert_eq!(actual["messages"][0]["text"], "cov15 safe request");
@@ -1425,8 +1440,11 @@ async fn cov2_macos_fake_exporter_candidate_live_partial_no_plaintext() {
                 actual["messages"][1]["content"][1]["text"],
                 "cov15 safe reply"
             );
+            assert!(actual["messages"][1]["content"][0].get("state").is_some());
         }
         // Decode every loose object, including anything not catalog-reachable.
+        // A stored ordinary transcript is allowed to contain the unproven fields.
+        let mut transcript_objects = 0usize;
         for path in repo.object_files() {
             let relative = path.strip_prefix(repo.repo.join(".libra/objects")).unwrap();
             let oid = relative
@@ -1434,10 +1452,34 @@ async fn cov2_macos_fake_exporter_candidate_live_partial_no_plaintext() {
                 .map(|part| part.as_os_str().to_str().unwrap())
                 .collect::<String>();
             assert_eq!(oid.len(), 40, "fixture only publishes loose SHA-1 objects");
-            assert_absent(
-                &read_object(repo, &oid),
-                &canaries,
-                "all published decoded objects",
+            let bytes = read_object(repo, &oid);
+            let hit = canaries.iter().any(|canary| {
+                bytes
+                    .windows(canary.len())
+                    .any(|part| part == canary.as_bytes())
+            });
+            if !hit {
+                continue;
+            }
+            assert!(
+                !proof_bearing,
+                "rejected proof published an unproven reasoning field"
+            );
+            let json_at = bytes
+                .iter()
+                .position(|byte| *byte == b'{')
+                .expect("json object");
+            let value: Value = serde_json::from_slice(&bytes[json_at..]).expect("transcript json");
+            assert!(
+                value.get("messages").is_some(),
+                "unproven reasoning field left the transcript object"
+            );
+            transcript_objects += 1;
+        }
+        if !proof_bearing {
+            assert!(
+                transcript_objects >= 1,
+                "stored transcript omitted unproven fields"
             );
         }
         let jobs = repo
@@ -1479,6 +1521,17 @@ async fn cov2_macos_fake_exporter_candidate_import_partial_no_plaintext() {
                     .windows(canary.len())
                     .any(|part| part == canary.as_bytes()),
                 "candidate canary reached {sink}"
+            );
+        }
+    }
+
+    fn assert_present(bytes: &[u8], canaries: &[&str], sink: &str) {
+        for canary in canaries {
+            assert!(
+                bytes
+                    .windows(canary.len())
+                    .any(|part| part == canary.as_bytes()),
+                "unproven reasoning field missing from {sink}"
             );
         }
     }
@@ -1608,7 +1661,7 @@ async fn cov2_macos_fake_exporter_candidate_import_partial_no_plaintext() {
         )
         .expect("bounded data-only candidate preview");
         assert_eq!(typed["partial"], true);
-        assert_absent(ordinary.bytes(), &canaries, "ordinary plaintext preview");
+        assert_present(ordinary.bytes(), &canaries, "ordinary plaintext preview");
         let ordinary_json: Value = serde_json::from_slice(ordinary.bytes()).unwrap();
         assert_eq!(ordinary_json["messages"][0]["text"], "cov18 safe request");
         assert_eq!(

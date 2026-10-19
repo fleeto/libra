@@ -80,18 +80,6 @@ pub enum IgnorePolicy {
     OnlyIgnored,
 }
 
-/// Creates the root `.libraignore` for a non-bare worktree if the user has not already provided one.
-pub fn ensure_root_libraignore(worktree: &Path) -> Result<(), IgnoreFileError> {
-    let target = worktree.join(LIBRAIGNORE_FILE);
-    if target.exists() {
-        return Ok(());
-    }
-    fs::write(&target, DEFAULT_LIBRAIGNORE_CONTENT).map_err(|source| IgnoreFileError::Write {
-        path: target,
-        source,
-    })
-}
-
 /// Summary returned by [`convert_gitignore_files_to_libraignore`].
 pub struct IgnoreConversionSummary {
     /// Worktree-relative paths of `.libraignore` files that were newly written

@@ -18,6 +18,44 @@ const COMPATIBILITY_DOC: &str = include_str!("../../COMPATIBILITY.md");
 const ERROR_CODES_DOC: &str = include_str!("../../docs/error-codes.md");
 
 #[test]
+fn native_attestation_launch_docs_disclose_isolation_and_limits() {
+    for (label, document) in [
+        ("EN", AGENT_CMD_DOC_EN),
+        ("compatibility", COMPATIBILITY_DOC),
+        ("tracing", AGENT_DOC),
+        (
+            "native-origin design",
+            include_str!("../../docs/development/internal/opencode-native-origin.md"),
+        ),
+    ] {
+        for required in [
+            "caller `TMPDIR`",
+            "mode 0700 and empty before the producer starts",
+            "cleanup refuses registration",
+            "cancellation cleanup is best effort",
+            "while the leader PID is still reserved",
+            "later challenges never reuse",
+            "Libra-launched installation challenge",
+            "real-field archive gates remain unproven",
+        ] {
+            assert_contains(document, label, required);
+        }
+    }
+    for required in [
+        "不继承调用者的 `TMPDIR`",
+        "0700 且为空",
+        "显式清理失败",
+        "取消时尽力清理",
+        "leader PID 仍保留",
+        "后续挑战绝不重用",
+        "仅覆盖 Libra 发起的安装挑战",
+        "真实字段归档门保持未放行",
+    ] {
+        assert_contains(AGENT_CMD_DOC_ZH, "zh-CN", required);
+    }
+}
+
+#[test]
 fn reasoning_artifact_lifecycle_docs_match_current_contract() {
     for (label, document) in [
         ("EN", AGENT_CMD_DOC_EN),
@@ -344,12 +382,12 @@ fn hook_docs_pin_marker_ownership_and_malformed_ingress_exit_policy() {
     assert_contains(
         HOOKS_CMD_DOC_EN,
         "docs/commands/hooks.md",
-        "requires a Unix host to initialize",
+        "supports Unix and native Windows",
     );
     assert_contains(
         HOOKS_CMD_DOC_EN,
         "docs/commands/hooks.md",
-        "prints the path-free Unix-host remedy to stderr and exits `0`",
+        "prints a path-free platform remedy to stderr and exits `0`",
     );
     assert_contains(
         HOOKS_CMD_DOC_EN,
@@ -409,7 +447,7 @@ fn hook_docs_pin_marker_ownership_and_malformed_ingress_exit_policy() {
         "docs/commands/zh-CN/hooks.md",
         "在 Libra 仓库之外被调用（`LBR-REPO-001`）",
     );
-    // The non-Unix capability result is scoped to in-repository callbacks;
+    // The unsupported-platform capability result is scoped to in-repository callbacks;
     // the outside-repository contract holds on every platform.
     assert_contains(
         HOOKS_CMD_DOC_EN,
@@ -460,7 +498,7 @@ fn hook_docs_pin_marker_ownership_and_malformed_ingress_exit_policy() {
     assert_contains(
         HOOKS_CMD_DOC_ZH,
         "docs/commands/zh-CN/hooks.md",
-        "当前要求 Unix host",
+        "支持 Unix 和原生 Windows",
     );
     assert_contains(
         HOOKS_CMD_DOC_ZH,
@@ -687,6 +725,9 @@ fn reasoning_type_docs_pin_metadata_only_and_five_states() {
         assert_contains(document, label, "thinking.signature");
         assert_contains(document, label, "redacted_thinking.data");
         assert_contains(document, label, "reasoning.state");
+        assert_contains(document, label, "content index");
+        assert_contains(document, label, "native artifact");
+        assert_contains(document, label, "coverage revision");
     }
 }
 
@@ -1551,5 +1592,51 @@ fn opencode29_ordinary_extension_is_distinct_from_frozen_native_source() {
         ] {
             assert_contains(&readable, label, required);
         }
+    }
+}
+
+#[test]
+fn grok_docs_contract_mentions_thinking_retain() {
+    for (label, document) in [
+        ("docs/commands/agent.md", AGENT_CMD_DOC_EN),
+        ("docs/commands/zh-CN/agent.md", AGENT_CMD_DOC_ZH),
+        ("docs/development/commands/agent.md", AGENT_DEV_DOC),
+        ("docs/development/tracing/agent.md", AGENT_DOC),
+        ("COMPATIBILITY.md", COMPATIBILITY_DOC),
+    ] {
+        for required in [
+            "updates.jsonl",
+            "Thinking",
+            "encrypted_content",
+            "support_wave",
+            "grok",
+            "checkpoint show",
+        ] {
+            assert_contains(document, label, required);
+        }
+        let lower = document.to_ascii_lowercase();
+        assert!(
+            lower.contains("paused") || document.contains("暂停"),
+            "{label} must disclose that automatic Grok Thinking capture is paused"
+        );
+        assert!(
+            lower.contains("scratch") || document.contains("临时状态"),
+            "{label} must distinguish offline observer state from real checkpoints"
+        );
+        assert!(
+            lower.contains("not decrypt")
+                || lower.contains("不解密")
+                || lower.contains("does not decrypt")
+                || document.contains("不解密"),
+            "{label} must say the ciphertext is not decrypted"
+        );
+        assert!(
+            lower.contains("not a review")
+                || lower.contains("not a `review`")
+                || document.contains("不是 review")
+                || document.contains("不是 `review`")
+                || document.contains("not a review or investigate"),
+            "{label} must say grok is not a review or investigate launcher"
+        );
     }
 }

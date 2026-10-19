@@ -252,6 +252,7 @@ impl CapturedStat {
 }
 
 #[cfg(not(unix))]
+#[cfg_attr(windows, allow(dead_code))]
 fn system_time_parts(time: Option<std::time::SystemTime>) -> (i64, i64) {
     use std::time::UNIX_EPOCH;
     let Some(time) = time else {
@@ -520,14 +521,16 @@ fn validate_absolute_root_units(bytes: &[u8], kind: &str) -> io::Result<()> {
     }
     #[cfg(windows)]
     {
-        if bytes.len() % 2 != 0 {
+        if !bytes.len().is_multiple_of(2) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!("{kind} capability root has invalid platform path encoding"),
             ));
         }
         let units: Vec<u16> = bytes
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
             .collect();
         let is_separator = |unit: u16| unit == u16::from(b'\\') || unit == u16::from(b'/');
@@ -752,8 +755,7 @@ pub(crate) fn bytes_to_path(bytes: &[u8]) -> PathBuf {
     {
         use std::os::windows::ffi::OsStringExt;
         let mut wide = Vec::with_capacity(bytes.len() / 2);
-        let mut chunks = bytes.chunks_exact(2);
-        for chunk in &mut chunks {
+        for chunk in bytes.as_chunks::<2>().0 {
             wide.push(u16::from_le_bytes([chunk[0], chunk[1]]));
         }
         PathBuf::from(OsString::from_wide(&wide))

@@ -105,3 +105,38 @@ fn write_tree_outside_repository_is_an_error() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+/// WT-07 / issue #476 M-ITA-WRITE W1: an intent-to-add entry is a placeholder
+/// and must never enter a tree (`t2203:94`, `:114`).
+#[test]
+fn test_write_tree_skips_intent_to_add() {
+    let repo = init_repo();
+    let root = repo.path();
+    fs::write(root.join("tracked.txt"), "tracked\n").expect("write tracked");
+    let add = run_libra_command(&["add", "tracked.txt"], root);
+    assert!(
+        add.status.success(),
+        "add: {}",
+        String::from_utf8_lossy(&add.stderr)
+    );
+    fs::write(root.join("new.txt"), "new\n").expect("write new");
+    let add_n = run_libra_command(&["add", "-N", "new.txt"], root);
+    assert!(
+        add_n.status.success(),
+        "add -N: {}",
+        String::from_utf8_lossy(&add_n.stderr)
+    );
+
+    let tree = stdout_trimmed(&run_libra_command(&["write-tree"], root));
+    let listing = run_libra_command(&["ls-tree", "-r", "--name-only", &tree], root);
+    assert!(
+        listing.status.success(),
+        "ls-tree: {}",
+        String::from_utf8_lossy(&listing.stderr)
+    );
+    assert_eq!(
+        stdout_trimmed(&listing),
+        "tracked.txt",
+        "write-tree must omit the intent-to-add entry"
+    );
+}

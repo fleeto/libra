@@ -24,7 +24,12 @@ libra diff [--compact-summary] [--diff-filter=<FILTER>] [--full-index]
 
 ## Description
 
-`libra diff` shows changes between different states of the repository. By default it compares the index against tracked working-tree paths (unstaged changes). Untracked files are not part of the default diff and therefore do not affect `--quiet`, `--exit-code`, `--name-status`, `--numstat`, or `--shortstat`; use `libra status`, `libra ls-files --others`, or `libra add` to inspect or promote untracked files. With `--staged`, it compares HEAD against the index (staged changes). With `--old` and `--new`, it compares two arbitrary commits.
+`libra diff` shows changes between different states of the repository. By default it compares the index against tracked working-tree paths (unstaged changes). Untracked files are not part of the default diff and therefore do not affect `--quiet`, `--exit-code`, `--name-status`, `--numstat`, or `--shortstat`; use `libra status`, `libra ls-files --others`, or `libra add` to inspect or promote untracked files.
+
+An intent-to-add entry (`libra add -N`) is the exception: Git treats its index side
+as absent, so the worktree file is diffed as a new file (`new file mode 100644`,
+`A` under `--name-status`) and `diff --cached` omits it entirely because the empty
+blob is only a placeholder. With `--staged`, it compares HEAD against the index (staged changes). With `--old` and `--new`, it compares two arbitrary commits.
 
 During a non-squash merge paused on conflicts, a positional `AUTO_MERGE` is a
 tree-ish for the automatic result, including conflict markers. It is available

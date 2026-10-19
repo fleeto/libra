@@ -51,7 +51,9 @@
 //! because its WAL-mode SQLite store needs write access even for reads. macOS uses a separate Required Seatbelt
 //! server/export pair: both deny process-fork, communicate on one authenticated
 //! loopback port, and keep their owned process groups guarded until reaped.
-//! Invalid containment, trust, readiness or shutdown refuses content. There is never an unsandboxed fallback.
+//! Invalid containment, trust, readiness or shutdown refuses content. Unix has
+//! no unsandboxed fallback. Windows uses its explicit trusted-exporter path
+//! with a Job Object and no OS filesystem/network sandbox.
 
 use std::{
     path::{Component, Path, PathBuf},
@@ -303,7 +305,7 @@ async fn trusted_opencode_provenance_from(
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos", test))]
+#[cfg(any(target_os = "linux", target_os = "macos", windows, test))]
 fn valid_session_id(session_id: &str) -> bool {
     !session_id.is_empty()
         && session_id.len() <= 64
@@ -2054,7 +2056,9 @@ async fn run_macos_opencode_export_until(
 /// stays in `run_bounded_exporter` (file-backed stdout, `RLIMIT_FSIZE`,
 /// `RLIMIT_CORE=0`, process group, wall clock, 16 MiB). Linux uses trusted
 /// bwrap. macOS uses a fork-denying Required Seatbelt server/export pair,
-/// each with a private process group and one absolute capture deadline. No platform has a degraded unsandboxed run (GC-DR-14).
+/// each with a private process group and one absolute capture deadline. Unix
+/// never degrades to an unsandboxed run (GC-DR-14); Windows uses the explicitly
+/// trusted native exporter in a Job Object, without an OS sandbox.
 pub async fn run_export_subprocess_sandboxed(
     binary: &std::path::Path,
     session_id: &str,
@@ -2079,11 +2083,15 @@ pub async fn run_export_subprocess_sandboxed_until(
     limits: ExportLimits,
     deadline: std::time::Instant,
 ) -> Result<Vec<u8>> {
+    #[cfg(windows)]
+    {
+        run_windows_opencode_export_until(Some(binary), session_id, limits, deadline).await
+    }
     #[cfg(target_os = "macos")]
     {
         run_macos_opencode_export_until(Some(binary), session_id, limits, deadline).await
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     {
         let _ = (binary, session_id, limits, deadline);
         bail!(
@@ -2175,11 +2183,15 @@ async fn run_trusted_export_subprocess_sandboxed_until(
     limits: ExportLimits,
     deadline: std::time::Instant,
 ) -> Result<Vec<u8>> {
+    #[cfg(windows)]
+    {
+        run_windows_opencode_export_until(None, session_id, limits, deadline).await
+    }
     #[cfg(target_os = "macos")]
     {
         run_macos_opencode_export_until(None, session_id, limits, deadline).await
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     {
         let _ = (session_id, limits, deadline);
         bail!(
@@ -2208,6 +2220,165 @@ async fn run_trusted_export_subprocess_sandboxed_until(
         })
         .await
     }
+}
+
+/// Native Windows has no OS sandbox for this bridge. The explicitly trusted
+/// exporter runs in a kill-on-close job with bounded output, an empty environment
+/// plus the store/system paths it needs, and no inherited credentials. The held
+/// executable denies write/delete sharing through spawn and exit.
+#[cfg(windows)]
+async fn run_windows_opencode_export_until(
+    requested_binary: Option<&Path>,
+    session_id: &str,
+    limits: ExportLimits,
+    deadline: std::time::Instant,
+) -> Result<Vec<u8>> {
+    use std::{
+        ffi::OsStr,
+        io::{Read, Seek, SeekFrom},
+        process::Stdio,
+    };
+
+    use sha2::{Digest, Sha256};
+
+    use crate::{internal::ai::authorized_read::CancellationSafeChild, utils::windows_fs};
+
+    if !valid_session_id(session_id) {
+        bail!("invalid OpenCode session id (expected alnum/dash/underscore, ≤64 chars)");
+    }
+    if limits.max_bytes > EXPORT_MAX_BYTES {
+        bail!("Windows OpenCode export exceeds its fixed byte cap");
+    }
+    let operation_deadline = deadline.min(std::time::Instant::now() + limits.deadline);
+    let provenance = tokio::time::timeout_at(
+        tokio::time::Instant::from_std(operation_deadline),
+        trusted_opencode_provenance(),
+    )
+    .await
+    .context("Windows OpenCode trust check exceeded the capture deadline")??;
+    if let Some(requested) = requested_binary
+        && requested.canonicalize()? != provenance.canonical_path
+    {
+        bail!("requested Windows OpenCode exporter does not match the trusted binary");
+    }
+    let parent = provenance
+        .canonical_path
+        .parent()
+        .context("trusted Windows OpenCode binary has no parent")?;
+    let parent = windows_fs::open_tree(parent)?;
+    // CreateProcessW addresses a filename, so retain every ancestor through
+    // process exit as well as holding the executable itself against replacement.
+    let _executable_path_pin = windows_fs::PinnedParent::new(&parent)?;
+    let name = provenance
+        .canonical_path
+        .file_name()
+        .context("trusted Windows OpenCode binary has no filename")?;
+    let mut executable = windows_fs::open_at(&parent, name, false)
+        .context("pin trusted Windows OpenCode executable")?;
+    if windows_fs::identity(&executable)? != (provenance.device, provenance.inode) {
+        bail!("trusted Windows OpenCode executable changed; trust it again before capture");
+    }
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        if std::time::Instant::now() >= operation_deadline {
+            bail!("Windows OpenCode binary verification exceeded the capture deadline");
+        }
+        let size = executable.read(&mut buffer)?;
+        if size == 0 {
+            break;
+        }
+        hasher.update(&buffer[..size]);
+    }
+    if hex::encode(hasher.finalize()) != provenance.sha256 {
+        bail!("trusted Windows OpenCode executable bytes changed; trust it again before capture");
+    }
+    let temporary = tempfile::Builder::new()
+        .prefix("libra-opencode-export-")
+        .tempdir()?;
+    // Supply the protected ACL at creation, before any config or transcript
+    // bytes exist. TempDir's inherited Windows ACL is not a private boundary.
+    let scratch = temporary.path().join("private");
+    windows_fs::create_private_directory(&scratch)?;
+    let directory = windows_fs::open_tree(&scratch)?;
+    windows_fs::validate_private(&directory)?;
+    let _scratch_path_pin = windows_fs::PinnedParent::new(&directory)?;
+    let mut output = windows_fs::create_private_file_at(&directory, OsStr::new("export.json"))?;
+    let mut command = tokio::process::Command::new(&provenance.canonical_path);
+    command
+        .args(["session", "export", session_id, "--standalone"])
+        .current_dir(&scratch)
+        .env_clear()
+        .env("XDG_CONFIG_HOME", &scratch)
+        .env("OPENCODE_CONFIG_DIR", &scratch)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(output.try_clone()?))
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    for name in [
+        "USERPROFILE",
+        "HOME",
+        "LOCALAPPDATA",
+        "APPDATA",
+        "SystemRoot",
+        "WINDIR",
+        "TEMP",
+        "TMP",
+        "XDG_DATA_HOME",
+        "XDG_STATE_HOME",
+        "XDG_CACHE_HOME",
+    ] {
+        if let Some(value) = std::env::var_os(name) {
+            command.env(name, value);
+        }
+    }
+    if std::time::Instant::now() >= operation_deadline {
+        bail!("Windows OpenCode export capture deadline already elapsed");
+    }
+    tracing::debug!(
+        sandbox = "none",
+        containment = "windows_job",
+        "running explicitly trusted Windows OpenCode exporter without an OS sandbox"
+    );
+    let mut child = CancellationSafeChild::spawn_windows(&mut command)
+        .context("start contained Windows OpenCode exporter")?;
+    loop {
+        if std::time::Instant::now() >= operation_deadline {
+            bail!("Windows OpenCode export exceeded the capture deadline; content skipped");
+        }
+        if output.metadata()?.len() > limits.max_bytes {
+            bail!("Windows OpenCode export exceeded its byte cap; content skipped");
+        }
+        let status = child
+            .child_mut()
+            .context("Windows OpenCode exporter ownership was lost")?
+            .try_wait()?;
+        if let Some(status) = status {
+            child.finish();
+            if !status.success() {
+                bail!(
+                    "Windows OpenCode exporter failed; verify OpenCode 2.x is installed and the session exists"
+                );
+            }
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    output.seek(SeekFrom::Start(0))?;
+    let mut bytes = Vec::new();
+    (&mut output)
+        .take(limits.max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > limits.max_bytes {
+        bail!("Windows OpenCode export exceeded its byte cap; content skipped");
+    }
+    if std::time::Instant::now() >= operation_deadline {
+        bail!("Windows OpenCode export exceeded the capture deadline; content skipped");
+    }
+    // Close child-inherited files and directory pins before TempDir cleanup.
+    drop(output);
+    drop(directory);
+    Ok(bytes)
 }
 
 /// Test-only seam for sandbox integration fixtures. Production never reaches

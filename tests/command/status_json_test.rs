@@ -30,7 +30,7 @@ fn create_committed_repo() -> tempfile::TempDir {
     configure_identity_via_cli(repo.path());
 
     fs::write(repo.path().join("tracked.txt"), "tracked\n").unwrap();
-    let out = run_libra_command(&["add", ".libraignore", "tracked.txt"], repo.path());
+    let out = run_libra_command(&["add", "tracked.txt"], repo.path());
     assert_cli_success(&out, "add base files");
     let out = run_libra_command(&["commit", "-m", "initial", "--no-verify"], repo.path());
     assert_cli_success(&out, "initial commit");

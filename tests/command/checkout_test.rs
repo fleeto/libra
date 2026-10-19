@@ -88,6 +88,9 @@ async fn test_checkout_module_functions() {
         shared: None,
         object_format: None,
         ref_format: None,
+        separate_git_dir: None,
+        separate_libra_dir: None,
+        recurse_submodules: false,
         from_git_repository: None,
         vault: false,
     };
@@ -142,6 +145,9 @@ async fn test_checkout_module_functions_sha256() {
         shared: None,
         object_format: Some("sha256".to_string()),
         ref_format: None,
+        separate_git_dir: None,
+        separate_libra_dir: None,
+        recurse_submodules: false,
         from_git_repository: None,
         vault: false,
     };
@@ -198,6 +204,9 @@ async fn checkout_restore_rejects_sha1_hash_in_sha256_repo() {
         shared: None,
         object_format: Some("sha256".to_string()),
         ref_format: None,
+        separate_git_dir: None,
+        separate_libra_dir: None,
+        recurse_submodules: false,
         from_git_repository: None,
         vault: false,
     })
@@ -1315,5 +1324,88 @@ fn test_checkout_restores_entry_mode() {
             & 0o777,
         0o755,
         "checkout must restore the execute bit"
+    );
+}
+
+/// Issue #464 companion fix: a bare remote start point must resolve through the
+/// cached remote HEAD (`refs/remotes/<remote>/HEAD`), and `checkout -b` from a
+/// remote-tracking start point must configure upstream tracking like Git's
+/// default `branch.autoSetupMerge`.
+#[tokio::test]
+#[serial(cwd, env)]
+async fn checkout_b_resolves_bare_remote_start_point_and_sets_tracking() {
+    let temp = tempdir().unwrap();
+    let repo_dir = temp.path().join("repo");
+    std::fs::create_dir_all(&repo_dir).unwrap();
+    test::setup_clean_testing_env_in(&repo_dir);
+    let _guard = test::ChangeDirGuard::new(&repo_dir);
+    assert_cli_success(
+        &run_libra_command(&["init", "-q", "--initial-branch=main"], &repo_dir),
+        "init repo",
+    );
+    configure_identity_via_cli(&repo_dir);
+
+    std::fs::write("tracked.txt", "tracked\n").unwrap();
+    assert_cli_success(
+        &run_libra_command(&["add", "tracked.txt"], &repo_dir),
+        "stage tracked.txt",
+    );
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "base", "--no-verify"], &repo_dir),
+        "commit base",
+    );
+
+    let head = Head::current_commit()
+        .await
+        .expect("expected committed HEAD");
+    let db = libra::internal::db::get_db_conn_instance().await;
+    use libra::internal::model::reference;
+    use sea_orm::{ActiveModelTrait, Set};
+
+    // Cached remote HEAD (symbolic row) and the fully-qualified tracking branch,
+    // exactly the shape clone writes.
+    reference::ActiveModel {
+        name: Set(Some("main".to_string())),
+        kind: Set(reference::ConfigKind::Head),
+        commit: Set(Some(head.to_string())),
+        remote: Set(Some("origin".to_string())),
+        ..Default::default()
+    }
+    .insert(&db)
+    .await
+    .expect("failed to insert cached remote HEAD");
+    reference::ActiveModel {
+        name: Set(Some("refs/remotes/origin/main".to_string())),
+        kind: Set(reference::ConfigKind::Branch),
+        commit: Set(Some(head.to_string())),
+        remote: Set(Some("origin".to_string())),
+        ..Default::default()
+    }
+    .insert(&db)
+    .await
+    .expect("failed to insert tracking branch");
+    ConfigKv::set("remote.origin.url", "https://example.com/repo.git", false)
+        .await
+        .unwrap();
+
+    assert_cli_success(
+        &run_libra_command(&["checkout", "-b", "topic", "origin"], &repo_dir),
+        "checkout -b topic origin",
+    );
+
+    assert!(matches!(Head::current().await, Head::Branch(name) if name == "topic"));
+    assert_eq!(
+        ConfigKv::get("branch.topic.remote")
+            .await
+            .unwrap()
+            .map(|entry| entry.value),
+        Some("origin".to_string())
+    );
+    assert_eq!(
+        ConfigKv::get("branch.topic.merge")
+            .await
+            .unwrap()
+            .map(|entry| entry.value),
+        Some("refs/heads/main".to_string())
     );
 }

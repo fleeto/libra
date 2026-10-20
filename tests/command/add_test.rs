@@ -4646,3 +4646,72 @@ fn test_add_refresh_with_pathspec_tc0021() {
         "stat-dirty baz must be listed: {listed}"
     );
 }
+
+/// issues/484 + t3705#13 shape with a DIRECTORY pathspec: a skip-worktree
+/// entry whose worktree copy is gone must be diagnosed as a sparse pathspec,
+/// never staged as a deletion. Before this fix the deleted index entry landed
+/// in the change candidates, the pathspec looked "matched", and `add` silently
+/// reported `remove: sparse_entry/a` (or, in dry-run, staged nothing and exited
+/// 0) instead of the sparse diagnostic.
+#[test]
+fn test_add_sparse_directory_pathspec_when_worktree_copy_deleted() {
+    let repo = tempdir().expect("tempdir");
+    let root = repo.path();
+    init_repo_via_cli(root);
+    configure_identity_via_cli(root);
+
+    fs::create_dir(root.join("sparse_entry")).expect("mkdir sparse_entry");
+    fs::write(root.join("sparse_entry").join("a"), "sparse content\n").expect("write entry");
+    fs::write(root.join("top.txt"), "top\n").expect("write top.txt");
+    assert_cli_success(&run_libra_command(&["add", "."], root), "stage the tree");
+    assert_cli_success(
+        &run_libra_command(&["update-index", "--skip-worktree", "sparse_entry/a"], root),
+        "mark skip-worktree",
+    );
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "base", "--no-verify"], root),
+        "commit",
+    );
+    fs::remove_dir_all(root.join("sparse_entry")).expect("delete the worktree copy");
+
+    let dry = run_libra_command(
+        &["add", "--dry-run", "--ignore-missing", "sparse_entry"],
+        root,
+    );
+    let stderr = String::from_utf8_lossy(&dry.stderr).to_string();
+    assert_eq!(
+        dry.status.code(),
+        Some(1),
+        "t3705#13 expects a sparse-path failure: {stderr}"
+    );
+    assert!(
+        stderr.contains("outside of your sparse-checkout definition")
+            && stderr.contains("--sparse"),
+        "the sparse diagnostic must be reported: {stderr}"
+    );
+    assert!(
+        !String::from_utf8_lossy(&dry.stdout).contains("remove:"),
+        "a sparse pathspec must never be reported as a removal: {}",
+        String::from_utf8_lossy(&dry.stdout)
+    );
+
+    // A real (non-dry-run) invocation behaves the same and leaves the index
+    // entry untouched.
+    let real = run_libra_command(&["add", "sparse_entry"], root);
+    assert_eq!(
+        real.status.code(),
+        Some(1),
+        "plain add must also refuse a sparse pathspec: {}",
+        String::from_utf8_lossy(&real.stderr)
+    );
+    assert!(
+        super::skip_worktree_set(root, "sparse_entry/a"),
+        "the skip-worktree bit must survive"
+    );
+    let staged = run_libra_command(&["diff", "--staged", "--", "sparse_entry"], root);
+    assert!(
+        String::from_utf8_lossy(&staged.stdout).trim().is_empty(),
+        "the sparse entry must stay unstaged: {}",
+        String::from_utf8_lossy(&staged.stdout)
+    );
+}

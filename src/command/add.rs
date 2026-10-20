@@ -2628,7 +2628,20 @@ fn validate_pathspecs(
     let mut sparse_pathspecs = Vec::new();
     if !sparse && !skip_worktree_paths.is_empty() {
         let skip_candidates: Vec<PathBuf> = skip_worktree_paths.iter().cloned().collect();
-        let unmatched_without_skip = pathspecs.unmatched_positive_specs(&all_candidates);
+        // "Matches ONLY skip-worktree entries": unmatched once every skip
+        // path is removed from the candidate universe, but matched among the
+        // skip paths themselves. Comparing against `all_candidates` instead
+        // would miss the common case where the sparse entry's worktree copy is
+        // absent — its index entry then lands in `changes.deleted` and the
+        // spec looks matched, so `add <sparse-path>` would silently stage a
+        // deletion instead of reporting the sparse diagnostic (t3705-add-
+        // sparse-checkout.sh#13).
+        let non_skip_candidates: Vec<PathBuf> = all_candidates
+            .iter()
+            .filter(|path| !skip_worktree_paths.contains(*path))
+            .cloned()
+            .collect();
+        let unmatched_without_skip = pathspecs.unmatched_positive_specs(&non_skip_candidates);
         let unmatched_with_skip = pathspecs.unmatched_positive_specs(&skip_candidates);
         for raw in unmatched_without_skip {
             if !unmatched_with_skip.contains(&raw) {

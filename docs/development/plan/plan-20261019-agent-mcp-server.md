@@ -206,6 +206,7 @@
 | 2026-10-20 12:40:00 UTC | 使用者要求保持 0.30.xx，且 stable manifest 仍是 0.30.66 | 工作区版本面是未发布的 0.31.1（本地 tag `v0.31.0` 存在，stable `manifest-v1.json` 的 `version` 为 `0.30.66`，control_revision 167）。发布端点拒绝 `version_regression`，因此不把版本面升到 0.31.2，也不改写已发布 tag。MC-01 起把三个版本面从 0.31.1 调回 0.30.67（相对已发布 stable 单调 +1）。 | — | 版本面 |
 | 2026-10-20 13:05:00 UTC | `v0.30.67` 的 Linux 产物已上传，Windows 库测试缺少 Tokio `io-std` | `72450c6` 的 arm64/amd64 Linux 对象已在 CDN（HTTP 200），前缀不可覆盖。Windows `cargo test --locked --lib` 在 `mcp.rs` 报 `E0432`（`tokio::io::stdin` 仅由 Unix 依赖间接打开）。取消未完成的 darwin/windows 上传，版本面改为 `0.30.68`，并在 `Cargo.toml` 直接启用 `io-std`。不改写 `v0.30.67`。 | — | 版本面、`Cargo.toml` |
 | 2026-10-20 14:05:00 UTC | MC-01 D 组通过 | `v0.30.68` 的 `release.yml` 39427212730 success。main `e4d843d` 的 `base.yml` 39427673509 attempt 2 与 `codeql.yml` 39427673357 success。Codex 与 Claude Code 均为 P0=0、P1=0。MC-01 `done` / `complete`。 | — | MC-01 |
+| 2026-10-20 17:50:00 UTC | MC-22 D 组通过 | `v0.30.69` 的 `release.yml` 39440601807 success。main `3b1200a` 的 `base.yml` 39459099628 与 `codeql.yml` 39459099663 success。Codex `VERDICT: PASS`，`P0=0`，`P1=0`。MC-22 `done` / `complete`。 | — | MC-22 |
 
 ## 已决议设计决策
 
@@ -2688,7 +2689,7 @@ ER-01 至 ER-14 按模板原文对本计划全部任务生效（见 [`plan-templ
 
 **Task type:** `implementation`
 
-**Lifecycle / Acceptance:** `in-progress` / 空
+**Lifecycle / Acceptance:** `done` / `complete`
 
 **Description:** 自 MC-01 拆出。每个请求发出一个 `agent.mcp.request` tracing span，字段只取服务端可控或已净化的值：`method`（仅当属于已知方法集合时记原名，否则记 `"unknown"`）、`id_hash`（JSON-RPC `id` 规范化后 SHA-256 的前 16 位十六进制，不记原值）、`repository_id`；`tools/call` 另带 `tool`（仅当属于已注册工具名时记原名，否则 `"unknown"`）；不记 `clientInfo`、`params` 与结果内容。唯一行为轴：「MCP 请求 tracing」。
 
@@ -2701,6 +2702,7 @@ ER-01 至 ER-14 按模板原文对本计划全部任务生效（见 [`plan-templ
 | bridge 请求 span 的结构先例——注意它直接记录原始 `method` 与 `id`，本卡**不得**照搬，必须按本卡规则净化 | `src/command/agent/bridge.rs:61-72`；`tests/agent_bridge_span_test.rs:1-40`（全局订阅者捕获方式可复用） |
 | 协议核心（MC-01 交付） | `src/internal/ai/mcp_server/stdio.rs` |
 | 版本面 | `0.30.69`。八个 `agent_mcp_span_test` `--exact` 均通过（`cargo test --test agent_mcp_span_test`：8 passed）。`cargo clippy --all-targets --all-features -- -D warnings` exit 0。`cargo nextest run --all --no-fail-fast --retries 2`：`Summary [ 605.838s] 10644 tests run: 10644 passed (12 slow, 1 flaky), 21 skipped`，exit 0。 |
+| D 组 | tag `v0.30.69` 指向 `b915419b7d98d606404499f70da2f7193dbd84ec`。`release.yml` [39440601807](https://github.com/libra-tools/libra/actions/runs/39440601807) success。四个平台产物 HTTP 200。安装脚本 `DEFAULT_VERSION="v0.30.69"`。含该提交的 main `3b1200a80e00e8d1a8866ab07aa790c27f8a17a9` 上 `base.yml` [39459099628](https://github.com/libra-tools/libra/actions/runs/39459099628) success（八个 job 全 success）与 `codeql.yml` [39459099663](https://github.com/libra-tools/libra/actions/runs/39459099663) success。中间几次 `base.yml` 被后续 main 提交取消，最终这次跑完。 |
 
 **Acceptance criteria:**
 
@@ -2712,7 +2714,7 @@ ER-01 至 ER-14 按模板原文对本计划全部任务生效（见 [`plan-templ
 - [x] AC-6 请求 `params` 中的标记字符串不出现在该 span 的任何字段中。
 - [x] AC-7 `tools/call libra_test_echo` 的 span 的 `tool` 字段等于 `"libra_test_echo"`。
 - [x] AC-8 `tools/call` 以含标记字符串的未注册工具名调用时，span 的 `tool` 字段等于 `"unknown"`。
-- [ ] ER-06/ER-06a 同卡强制门：下方「同卡文档门」逐文件全部通过；网站页另按 GC-MC-05 ①–⑥ 交付（不计入 AC 上限）。
+- [x] ER-06/ER-06a 同卡强制门：下方「同卡文档门」逐文件全部通过；网站页另按 GC-MC-05 ①–⑥ 交付（不计入 AC 上限）。
 
 **Verification:**（本卡特有判据，计入 G-03；`--exact` 门按 GC-MC-07 执行）
 
@@ -2729,7 +2731,7 @@ ER-01 至 ER-14 按模板原文对本计划全部任务生效（见 [`plan-templ
 
 - [x] `docs/development/commands/agent.md`：`rg -qF -- 'agent.mcp.request' docs/development/commands/agent.md && rg -qF -- 'id_hash' docs/development/commands/agent.md`
 - [x] 测试索引：`rg -q '^\| `agent_mcp_span_test` ' tests/INDEX.md && rg -q 'name = "agent_mcp_span_test"' Cargo.toml`
-- [ ] 语义复核：本卡 ER-05 Codex review 的输入包含上列每个文档文件的 diff，评审结论须逐文件确认其内容与本卡 `Docs and compatibility impact` 的内容说明一致（网站页另由 GC-MC-05 ④ 的 Claude Code PASS 覆盖）
+- [x] 语义复核：本卡 ER-05 Codex review 的输入包含上列每个文档文件的 diff，评审结论须逐文件确认其内容与本卡 `Docs and compatibility impact` 的内容说明一致（网站页另由 GC-MC-05 ④ 的 Claude Code PASS 覆盖）。Codex：`VERDICT: PASS`，`P0=0`，`P1=0`。本卡无网站页。
 
 **Full-suite trigger:** `T-1: Cargo.toml 新增 [[test]] 行`
 

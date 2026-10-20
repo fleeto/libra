@@ -797,6 +797,7 @@ pub(crate) fn remove_entry_at(
 
 /// Enumerate through the held directory handle. The caller must serialize scans
 /// of this handle and recheck each child's identity before acting on a result.
+#[cfg(test)]
 pub(crate) fn read_directory_names(directory: &File) -> io::Result<Vec<OsString>> {
     read_directory_names_bounded(directory, 1_000_000)
 }

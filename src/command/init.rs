@@ -16,6 +16,7 @@ use sea_orm::{ActiveModelTrait, DbConn, DbErr, Set, TransactionTrait};
 use serde::Serialize;
 
 use crate::{
+    command::init_conversion,
     internal::{
         config::{
             ConfigKv, LocalIdentityTarget, read_cascaded_config_value_strict,
@@ -77,6 +78,15 @@ const DOUBLE_DOT: &str = "..";
 
 #[derive(thiserror::Error, Debug)]
 pub enum InitError {
+    /// A retry of an interrupted conversion was refused with a specific
+    /// stable code (ADR-IG-03 item 2).
+    #[error("{message}")]
+    ConversionRetryRefused {
+        code: StableErrorCode,
+        message: String,
+        hint: String,
+    },
+
     #[error("{message}")]
     InvalidArgument {
         message: String,
@@ -140,6 +150,13 @@ pub enum InitError {
 impl From<InitError> for CliError {
     fn from(error: InitError) -> Self {
         match error {
+            InitError::ConversionRetryRefused {
+                code,
+                message,
+                hint,
+            } => CliError::fatal(message)
+                .with_stable_code(code)
+                .with_hint(hint),
             InitError::InvalidArgument { message, hint } => {
                 // Intent: invalid init flags are user-correctable CLI usage
                 // errors, not repository or filesystem failures.
@@ -596,6 +613,49 @@ async fn resolve_initial_branch_name(
     }
 }
 
+/// Resolve the conversion retry BEFORE the central operation boundary runs.
+///
+/// A half-converted repository has no `libra.repoid`, so the operation-log
+/// layer cannot open it; the retry must therefore move the residue aside in
+/// the CLI preflight, exactly like the in-command path does for a target the
+/// operation layer can still open (ADR-IG-03 item 2). Returns the aside path
+/// when a residue was moved.
+pub fn preflight_conversion_retry(args: &InitArgs) -> Result<Option<PathBuf>, InitError> {
+    let Some(raw_source) = args.from_git_repository.as_deref() else {
+        return Ok(None);
+    };
+    let current_dir = cur_dir();
+    let target_dir = resolve_cli_path(&current_dir, &args.repo_directory);
+    let root_dir = storage_root(&target_dir, args.bare);
+    if init_conversion::read_marker(&root_dir).is_none() {
+        return Ok(None);
+    }
+    // The marker exists: the same validation the command path performs decides
+    // whether this run may adopt the target.
+    let source = resolve_existing_cli_path(&current_dir, raw_source)?;
+    let canonical_source = convert::resolve_git_source_dir(&source)?;
+    match init_conversion::decide_retry(&root_dir, &canonical_source) {
+        init_conversion::RetryDecision::Proceed => Ok(None),
+        init_conversion::RetryDecision::MoveAside(aside) => init_conversion::move_aside(&root_dir)
+            .map_err(|error| {
+                InitError::Io(std::io::Error::other(format!(
+                    "cannot move the interrupted conversion aside to '{}': {error}",
+                    aside.display()
+                )))
+            })
+            .map(Some),
+        init_conversion::RetryDecision::Refuse {
+            code,
+            message,
+            hint,
+        } => Err(InitError::ConversionRetryRefused {
+            code,
+            message,
+            hint,
+        }),
+    }
+}
+
 async fn run_init_internal(
     args: InitArgs,
     progress: &InitProgress,
@@ -703,6 +763,37 @@ async fn run_init_internal(
         .as_ref()
         .map(|path| resolve_existing_cli_path(&current_dir, path))
         .transpose()?;
+    // ADR-IG-03 item 2: a previous conversion that was hard-killed leaves a
+    // marker. Decide BEFORE any write whether this run may adopt that target.
+    let mut conversion_residue: Option<PathBuf> = None;
+    if let Some(source) = from_git.as_deref() {
+        let canonical_source = convert::resolve_git_source_dir(source)?;
+        match init_conversion::decide_retry(&root_dir, &canonical_source) {
+            init_conversion::RetryDecision::Proceed => {}
+            init_conversion::RetryDecision::MoveAside(aside) => {
+                // Never delete the residue: it may hold user-owned data. Moving
+                // it aside makes the target retryable and reports where it went.
+                init_conversion::move_aside(&root_dir).map_err(|error| {
+                    InitError::Io(std::io::Error::other(format!(
+                        "cannot move the interrupted conversion aside to '{}': {error}",
+                        aside.display()
+                    )))
+                })?;
+                conversion_residue = Some(aside);
+            }
+            init_conversion::RetryDecision::Refuse {
+                code,
+                message,
+                hint,
+            } => {
+                return Err(InitError::ConversionRetryRefused {
+                    code,
+                    message,
+                    hint,
+                });
+            }
+        }
+    }
     if let Some(source) = from_git.as_deref() {
         // Conversion validation must precede every target write. Keep the same
         // validation inside the converter as defense in depth for direct callers.
@@ -736,6 +827,10 @@ async fn run_init_internal(
         is_writable(&target_dir)?;
     }
 
+    let target_dir_existed = target_dir.exists();
+    let target_guard_path = target_dir
+        .canonicalize()
+        .unwrap_or_else(|_| target_dir.clone());
     progress.emit("Creating repository layout ...");
     fs::create_dir_all(&root_dir)?;
     if let Err(error) = prepare_repository_layout(
@@ -750,123 +845,218 @@ async fn run_init_internal(
         return Err(InitError::Io(error));
     }
 
-    progress.emit("Initializing database ...");
-    let database_path = root_dir.join(DATABASE);
-    // INVARIANT: the database must exist before refs, config, conversion, or
-    // vault setup run; those later stages persist their durable state through
-    // this connection/path and assume schema bootstrap has completed.
-    let conn = create_database_connection(&database_path).await?;
-    // Probe the actual filesystem (root_dir already exists at this point):
-    // non-bare repos probe the parent of `.libra`; bare repos have no
-    // worktree, so case handling is moot — record false.
-    let ignore_case = if args.bare {
-        false
-    } else {
-        root_dir
-            .parent()
-            .map(crate::utils::path_case::probe_dir_ignore_case)
-            .unwrap_or(false)
-    };
-    let repo_id = init_config(
-        &conn,
-        args.bare,
-        &object_format,
-        &ref_format,
-        ignore_case,
-        shared_mode.as_ref(),
-    )
-    .await?;
-
-    progress.emit("Setting up refs ...");
-    // INVARIANT: refs are initialized after core config so HEAD/branch rows are
-    // tied to the repository identity and hash/ref-format choices already stored
-    // in config.
-    initialize_refs(&conn, &initial_branch_name).await?;
-
-    set_dir_hidden(&root_dir)?;
-    if let Some(shared_mode) = shared_mode.as_ref() {
-        apply_shared(&root_dir, shared_mode)?;
-    }
-
-    let mut warnings = Vec::new();
-    // WT-03 (ADR-WT-04): do NOT create a comment-only root `.libraignore`.
-    // Git leaves a fresh worktree clean, and the stub carried no rules; a
-    // user-created `.libraignore` (or one produced by `.gitignore`
-    // conversion below) still works. The former `ensure_root_libraignore`
-    // call is intentionally gone so `libra init` matches Git's post-init UX.
-
-    let target_guard_path = target_dir
-        .canonicalize()
-        .unwrap_or_else(|_| target_dir.clone());
-
-    let converted_from = if let Some(source) = from_git {
-        let source_git_dir = convert::resolve_git_source_dir(&source)?;
-        progress.emit(format!(
-            "Converting from Git repository at {} ...",
-            source_git_dir.display()
-        ));
-        // INVARIANT: conversion helpers read/write paths relative to the target
-        // worktree, so the temporary cwd switch must be active for the full
-        // conversion call and must be dropped before later stages continue.
-        let _guard = CurrentDirGuard::change_to(&target_guard_path)?;
-        let report = convert::convert_from_git_repository(&source, args.bare).await?;
-        warnings.extend(report.warnings);
-        Some(report.source_git_dir)
-    } else {
-        None
-    };
-
-    let initial_branch_name = if converted_from.is_some() {
-        let _guard = CurrentDirGuard::change_to(&target_guard_path)?;
-        match Head::current_result().await.map_err(|error| {
-            InitError::Database(DbErr::Custom(format!(
-                "failed to read converted HEAD: {error}"
-            )))
-        })? {
-            Head::Branch(name) => name,
-            Head::Detached(_) => "HEAD".to_string(),
-        }
-    } else {
-        initial_branch_name
-    };
-
-    if args.vault {
-        progress.emit("Generating PGP signing key ...");
-        // INVARIANT: vault bootstrap runs after DB/config/ref initialization
-        // because it records signing state in the repo DB and must roll back its
-        // own vault files if credential or key generation fails.
-        let _guard = CurrentDirGuard::change_to(&target_guard_path)?;
-        init_vault_for_repo(&root_dir, &database_path).await?;
-    } else {
-        set_vault_signing_value(&database_path, false).await?;
-    }
-
-    set_hash_kind(
-        crate::internal::object_format::parse_config_value(&object_format).map_err(|_| {
-            InitError::UnknownObjectFormat {
-                message: format!("unsupported object format '{object_format}'"),
+    // ADR-IG-02: the marker lands before any further target write and is
+    // removed as the final write of a successful conversion. Everything from
+    // here to the end of this function is rollback-protected: an ordinary
+    // error, and (via the listener below) SIGINT/SIGTERM, undo exactly what
+    // this run created.
+    let mut conversion_guard = match from_git.as_deref() {
+        Some(source) => {
+            let canonical_source = convert::resolve_git_source_dir(source)?;
+            let mut guard = init_conversion::ConversionGuard::begin(&root_dir, &canonical_source)
+                .map_err(|error| {
+                InitError::Io(std::io::Error::other(format!(
+                    "cannot record the Git conversion marker in '{}': {error}",
+                    root_dir.display()
+                )))
+            })?;
+            if target_dir_existed {
+                guard
+                    .record_created(&root_dir, true)
+                    .map_err(InitError::Io)?;
+                let root_ignore = target_guard_path.join(".libraignore");
+                if !root_ignore.exists() {
+                    guard
+                        .record_created(&root_ignore, false)
+                        .map_err(InitError::Io)?;
+                }
+            } else {
+                guard
+                    .record_created(&target_guard_path, true)
+                    .map_err(InitError::Io)?;
             }
-        })?,
-    );
+            init_conversion::install_signal_rollback(root_dir.clone());
+            Some(guard)
+        }
+        None => None,
+    };
 
-    let path = root_dir
-        .canonicalize()
-        .unwrap_or_else(|_| root_dir.clone())
-        .to_string_lossy()
-        .to_string();
-    Ok(InitOutput {
-        path,
-        bare: args.bare,
-        initial_branch: initial_branch_name,
-        ref_format: ref_format.as_str().to_string(),
-        object_format,
-        repo_id,
-        vault_signing: args.vault,
-        converted_from,
-        ssh_key_detected: detect_system_ssh_key(),
-        warnings,
-        reinitialized: false,
-    })
+    // Everything below runs under the conversion guard: an ordinary error (or a
+    // signal, via `install_signal_rollback`) rolls this run's target state back
+    // so the conversion can be retried immediately (ADR-IG-02/03).
+    let init_result: Result<InitOutput, InitError> = async {
+        progress.emit("Initializing database ...");
+        let database_path = root_dir.join(DATABASE);
+        // INVARIANT: the database must exist before refs, config, conversion, or
+        // vault setup run; those later stages persist their durable state through
+        // this connection/path and assume schema bootstrap has completed.
+        let conn = create_database_connection(&database_path).await?;
+        conversion_gate(init_conversion::ConversionStage::AfterDatabase)?;
+        // Probe the actual filesystem (root_dir already exists at this point):
+        // non-bare repos probe the parent of `.libra`; bare repos have no
+        // worktree, so case handling is moot — record false.
+        let ignore_case = if args.bare {
+            false
+        } else {
+            root_dir
+                .parent()
+                .map(crate::utils::path_case::probe_dir_ignore_case)
+                .unwrap_or(false)
+        };
+        let repo_id = init_config(
+            &conn,
+            args.bare,
+            &object_format,
+            &ref_format,
+            ignore_case,
+            shared_mode.as_ref(),
+        )
+        .await?;
+
+        progress.emit("Setting up refs ...");
+        // INVARIANT: refs are initialized after core config so HEAD/branch rows are
+        // tied to the repository identity and hash/ref-format choices already stored
+        // in config.
+        initialize_refs(&conn, &initial_branch_name).await?;
+
+        set_dir_hidden(&root_dir)?;
+        if let Some(shared_mode) = shared_mode.as_ref() {
+            apply_shared(&root_dir, shared_mode)?;
+        }
+
+        let mut warnings = Vec::new();
+        // WT-03 (ADR-WT-04): do NOT create a comment-only root `.libraignore`.
+        // Git leaves a fresh worktree clean, and the stub carried no rules; a
+        // user-created `.libraignore` (or one produced by `.gitignore`
+        // conversion below) still works. The former `ensure_root_libraignore`
+        // call is intentionally gone so `libra init` matches Git's post-init UX.
+
+        let converted_from = if let Some(source) = from_git {
+            let source_git_dir = convert::resolve_git_source_dir(&source)?;
+            progress.emit(format!(
+                "Converting from Git repository at {} ...",
+                source_git_dir.display()
+            ));
+            // INVARIANT: conversion helpers read/write paths relative to the target
+            // worktree, so the temporary cwd switch must be active for the full
+            // conversion call and must be dropped before later stages continue.
+            let _guard = CurrentDirGuard::change_to(&target_guard_path)?;
+            let report = convert::convert_from_git_repository(&source, args.bare).await?;
+            warnings.extend(report.warnings);
+            Some(report.source_git_dir)
+        } else {
+            None
+        };
+
+        let initial_branch_name = if converted_from.is_some() {
+            let _guard = CurrentDirGuard::change_to(&target_guard_path)?;
+            match Head::current_result().await.map_err(|error| {
+                InitError::Database(DbErr::Custom(format!(
+                    "failed to read converted HEAD: {error}"
+                )))
+            })? {
+                Head::Branch(name) => name,
+                Head::Detached(_) => "HEAD".to_string(),
+            }
+        } else {
+            initial_branch_name
+        };
+
+        if args.vault {
+            progress.emit("Generating PGP signing key ...");
+            // INVARIANT: vault bootstrap runs after DB/config/ref initialization
+            // because it records signing state in the repo DB and must roll back its
+            // own vault files if credential or key generation fails.
+            let _guard = CurrentDirGuard::change_to(&target_guard_path)?;
+            init_vault_for_repo(&root_dir, &database_path).await?;
+        } else {
+            set_vault_signing_value(&database_path, false).await?;
+        }
+
+        set_hash_kind(
+            crate::internal::object_format::parse_config_value(&object_format).map_err(|_| {
+                InitError::UnknownObjectFormat {
+                    message: format!("unsupported object format '{object_format}'"),
+                }
+            })?,
+        );
+
+        let path = root_dir
+            .canonicalize()
+            .unwrap_or_else(|_| root_dir.clone())
+            .to_string_lossy()
+            .to_string();
+        Ok(InitOutput {
+            path,
+            bare: args.bare,
+            initial_branch: initial_branch_name,
+            ref_format: ref_format.as_str().to_string(),
+            object_format,
+            repo_id,
+            vault_signing: args.vault,
+            converted_from,
+            ssh_key_detected: detect_system_ssh_key(),
+            warnings,
+            reinitialized: false,
+        })
+    }
+    .await;
+
+    match init_result {
+        Ok(mut output) => {
+            if let Some(guard) = conversion_guard.take() {
+                guard.finish().map_err(|error| {
+                    InitError::Io(std::io::Error::other(format!(
+                        "cannot clear the Git conversion marker in '{}': {error}",
+                        root_dir.display()
+                    )))
+                })?;
+            }
+            if let Some(aside) = conversion_residue.as_deref() {
+                output.warnings.push(format!(
+                    "the interrupted conversion was moved aside to '{}' (review it, then delete it when it holds nothing you need)",
+                    aside.display()
+                ));
+            }
+            Ok(output)
+        }
+        Err(error) => {
+            if let Some(mut guard) = conversion_guard.take() {
+                let failures = guard.rollback();
+                if !failures.is_empty() {
+                    let detail = failures
+                        .iter()
+                        .map(|(path, why)| format!("{}: {why}", path.display()))
+                        .collect::<Vec<_>>()
+                        .join("; ");
+                    return Err(InitError::ConversionRetryRefused {
+                        code: StableErrorCode::RepoStateInvalid,
+                        message: format!(
+                            "{error}; rolling back the partially converted repository failed ({detail})"
+                        ),
+                        hint: init_conversion::manual_recovery_hint(&root_dir),
+                    });
+                }
+            }
+            Err(error)
+        }
+    }
+}
+
+/// Test-only conversion gate (ADR-IG-05). Inert unless `LIBRA_TEST=1`.
+fn conversion_gate(stage: init_conversion::ConversionStage) -> Result<(), InitError> {
+    match init_conversion::conversion_failpoint(stage) {
+        init_conversion::ConversionFailpoint::Proceed => Ok(()),
+        init_conversion::ConversionFailpoint::Fail => Err(InitError::Io(std::io::Error::other(
+            format!("injected Git conversion failure at '{}'", stage.key()),
+        ))),
+        // Simulates a hard kill: the marker must let the next run recover.
+        init_conversion::ConversionFailpoint::Abort => std::process::abort(),
+        init_conversion::ConversionFailpoint::Pause => {
+            init_conversion::wait_for_resume_file();
+            Ok(())
+        }
+    }
 }
 
 /// Git-style safe re-initialization of an existing repository: top up the standard

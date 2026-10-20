@@ -63,6 +63,7 @@ mod index_pack_support;
 mod index_pack_v1;
 pub mod index_pack_v2;
 pub mod init;
+pub mod init_conversion;
 pub mod layer;
 pub mod lfs;
 pub mod lfs_schema;

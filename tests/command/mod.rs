@@ -1063,6 +1063,7 @@ mod index_pack_progress_test;
 mod index_pack_stdin_test;
 mod index_pack_test;
 mod info_exclude_scope_test;
+mod init_conversion_test;
 mod init_from_git_test;
 mod init_json_test;
 mod init_separate_libra_dir_test;

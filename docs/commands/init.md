@@ -163,6 +163,24 @@ warnings in structured output.
 libra init --from-git-repository ../old-project
 ```
 
+**Interruption and recovery.** The conversion is protected by a marker written before the
+first target write (`CONVERSION_IN_PROGRESS` in the storage root) and removed only after
+everything succeeded:
+
+- an ordinary error, or a SIGINT/SIGTERM, rolls back exactly what this run created (the
+  storage root, and the root `.libraignore` when the target directory already existed), so
+  the conversion can be retried immediately. User files and the source `.git` are never
+  touched;
+- a hard kill (SIGKILL, OOM, power loss) leaves the marker behind. Until it is cleared,
+  every other command in that repository refuses with `LBR-REPO-003` ("incomplete Git
+  conversion") instead of presenting the repository as empty;
+- retrying `libra init --from-git-repository <same-source>` after a hard kill verifies that
+  the recorded owner process is gone and that the source still matches, renames the
+  incomplete storage root to a sibling `<storage>.incomplete-<timestamp>` (**never
+  deletes it**), and converts from scratch. The aside path is reported in the warnings;
+- a retry is refused when the conversion owner is still running (`LBR-CONFLICT-002`), and
+  when the recorded source differs from the one being converted (`LBR-REPO-003`).
+
 ### `--vault <BOOL>`
 
 Enable or disable vault-backed PGP signing. Defaults to `true`. When enabled, Libra

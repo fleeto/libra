@@ -1549,6 +1549,42 @@ impl CommandPreflight {
     }
 }
 
+/// Refuse to run in a repository whose `init --from-git-repository` never
+/// finished (ADR-IG-04, issue #487). One `stat`: the marker is only present
+/// while a conversion is in progress or after it was hard-killed.
+fn interrupted_conversion_refusal(storage: &std::path::Path) -> Option<CliError> {
+    let marker = command::init_conversion::read_marker(storage)?;
+    let hint = command::init_conversion::manual_recovery_hint(storage);
+    let live_hint = "wait for the running conversion to finish, then retry";
+    match marker {
+        Ok(marker) if marker.owner.is_live() => Some(
+            CliError::fatal(format!(
+                "a Git conversion is in progress (pid {}); this repository is not ready",
+                marker.owner.pid
+            ))
+            .with_stable_code(utils::error::StableErrorCode::ConflictOperationBlocked)
+            .with_hint(live_hint),
+        ),
+        Ok(marker) => Some(
+            CliError::fatal(format!(
+                "this repository holds an incomplete Git conversion from '{}'; it has no imported history",
+                marker.source
+            ))
+            .with_stable_code(utils::error::StableErrorCode::RepoStateInvalid)
+            .with_hint(format!(
+                "retry the conversion with 'libra init --from-git-repository {}', or recover manually",
+                marker.source
+            ))
+            .with_hint(hint),
+        ),
+        Err(error) => Some(
+            CliError::fatal(error.message(storage))
+                .with_stable_code(utils::error::StableErrorCode::RepoStateInvalid)
+                .with_hint(hint),
+        ),
+    }
+}
+
 /// plan-20260714 Part C W0 (§C.11, Codex R19 follow-up): an unconfirmed
 /// mutating repair is refused before any side effect, so it must not take
 /// the migration-applying preflight. Mirrors
@@ -3282,6 +3318,19 @@ async fn parse_async_scoped(argv: Vec<std::ffi::OsString>) -> CliResult<()> {
     // must never receive one of those diagnostics on stderr before the
     // command has a chance to render its structured envelope.
     utils::output::set_structured_output(args.json.is_some() || args.machine);
+    // ADR-IG-03 item 2: a hard-killed `init --from-git-repository` leaves a
+    // repository that cannot be opened by the operation boundary (no
+    // `libra.repoid`). Resolve the retry here, before any of that machinery,
+    // so a retry is possible at all.
+    if let Commands::Init(init_args) = &args.command
+        && let Some(aside) =
+            command::init::preflight_conversion_retry(init_args).map_err(CliError::from)?
+    {
+        eprintln!(
+            "warning: the interrupted Git conversion was moved aside to '{}'",
+            aside.display()
+        );
+    }
     if is_agent_hook_entry {
         apply_global_runtime_flags(&args)?;
         let color = if args.no_color {
@@ -3368,6 +3417,15 @@ async fn parse_async_scoped(argv: Vec<std::ffi::OsString>) -> CliResult<()> {
     }
     let require_complete_object_index = command_requires_complete_object_index(&args.command);
     let preflight = command_preflight(&args.command, args.json.is_some() || args.machine)?;
+    // ADR-IG-04 (issue #487): an interrupted Git conversion leaves a
+    // valid-looking but history-less repository. Refuse every command except
+    // `init` (which owns the retry) instead of presenting it as empty.
+    if let Some(storage) = preflight.storage.as_deref()
+        && !matches!(args.command, Commands::Init(_))
+        && let Some(refusal) = interrupted_conversion_refusal(storage)
+    {
+        return Err(refusal);
+    }
     if let Some(storage) = preflight.storage.as_deref() {
         if preflight.set_hash_kind {
             if preflight.upgrade_schema {

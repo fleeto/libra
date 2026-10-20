@@ -2228,7 +2228,7 @@ ER-01 至 ER-14 按模板原文对本计划全部任务生效（见 [`plan-templ
 |---|---|
 | 脱敏函数 | `src/internal/ai/agent_bridge/redaction.rs:20-53`（`review::redact_untrusted`、`scrub_controls`） |
 | 协议核心与 `libra_test_echo`（MC-01 交付） | `src/internal/ai/mcp_server/{protocol,stdio}.rs` |
-| 本地门 | `0.30.70`。`agent_mcp_envelope_test` 两个 `--exact` 通过。clippy `-D warnings` exit 0。nextest：`Summary [ 621.783s] 10660 tests run: 10660 passed (12 slow, 1 flaky), 21 skipped`，exit 0。 |
+| 本地门 | `0.30.70`（tag `474b034`）把 `content[0].text` 留成脱敏前的 JSON：客户端再解析会还原 ESC，且 `\u001b` 的尾部字母会粘住后续 secret，redactor 词边界匹配不到。前滚修复 `0.30.71`：先清洗 `structuredContent`，再 `redact_untrusted`、重解析、再清洗，并重建文本副本。`envelope_redacts_secret` 与 `envelope_scrubs_control_chars` 均为 `test result: ok. 1 passed; 0 failed`。clippy `-D warnings` exit 0。nextest：`Summary [ 568.129s] 10661 tests run: 10661 passed (11 slow, 1 flaky), 21 skipped`，exit 0。Codex 与 D 组尚未通过，本卡仍为 in-progress。 |
 
 **Acceptance criteria:**
 

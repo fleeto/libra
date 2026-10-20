@@ -6,6 +6,8 @@ use std::{
     process::{Command, Output, Stdio},
 };
 
+use serde_json::Value;
+
 fn isolated_command(args: &[&str], cwd: &Path) -> Command {
     let home = cwd.join(".libra-test-home");
     let config_home = home.join(".config");
@@ -64,12 +66,31 @@ fn session(call: &str) -> String {
     )
 }
 
+fn response_with_id(stdout: &str, id: i64) -> Value {
+    stdout
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|message| message.get("id") == Some(&Value::from(id)))
+        .expect("jsonrpc response")
+}
+
+fn contains_esc(value: &Value) -> bool {
+    match value {
+        Value::String(text) => text.chars().any(|c| c == '\u{001b}'),
+        Value::Array(items) => items.iter().any(contains_esc),
+        Value::Object(map) => {
+            map.keys().any(|key| key.contains('\u{001b}')) || map.values().any(contains_esc)
+        }
+        _ => false,
+    }
+}
+
 #[test]
 fn envelope_redacts_secret() {
     let secret = format!("{}_{}", "ghp", "abcdefghijklmnopqrstuvwxyz0123456789");
     let repo = init_repo();
     let call = format!(
-        r#"{{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{{"name":"libra_test_echo","arguments":{{"text":"{secret}"}}}}}}"#
+        r#"{{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{{"name":"libra_test_echo","arguments":{{"text":"\u001b{secret}"}}}}}}"#
     );
     let output = run_mcp(repo.path(), &session(&call));
     assert!(
@@ -85,6 +106,28 @@ fn envelope_redacts_secret() {
     assert!(
         stdout.contains("\"id\":2"),
         "tools/call was not answered: {stdout}"
+    );
+    let message = response_with_id(&stdout, 2);
+    let result = &message["result"];
+    let text = result["content"][0]["text"].as_str().expect("content text");
+    assert!(
+        !text.contains(&secret),
+        "text copy still contains the secret"
+    );
+    let decoded: Value = serde_json::from_str(text).expect("text copy is json");
+    assert_eq!(&decoded, &result["structuredContent"]);
+    assert!(
+        !contains_esc(&decoded),
+        "decoded text copy still contains ESC: {decoded}"
+    );
+    let echoed = decoded["text"].as_str().expect("echo text");
+    assert!(
+        echoed.contains('\u{FFFD}'),
+        "ESC was not replaced with U+FFFD: {echoed}"
+    );
+    assert!(
+        !echoed.contains(&secret),
+        "decoded text still contains the secret"
     );
 }
 
@@ -107,5 +150,24 @@ fn envelope_scrubs_control_chars() {
     assert!(
         !stdout.contains('\u{001b}'),
         "ESC character survived in the tool result: {stdout}"
+    );
+    let message = response_with_id(&stdout, 2);
+    let result = &message["result"];
+    let structured = &result["structuredContent"];
+    let text = result["content"][0]["text"].as_str().expect("content text");
+    let decoded: Value = serde_json::from_str(text).expect("text copy is json");
+    assert_eq!(&decoded, structured);
+    assert!(
+        !contains_esc(structured),
+        "structuredContent still contains ESC: {structured}"
+    );
+    assert!(
+        !contains_esc(&decoded),
+        "decoded text copy still contains ESC: {decoded}"
+    );
+    let echoed = structured["text"].as_str().expect("echo text");
+    assert!(
+        echoed.contains('\u{FFFD}'),
+        "ESC was not replaced with U+FFFD: {echoed}"
     );
 }

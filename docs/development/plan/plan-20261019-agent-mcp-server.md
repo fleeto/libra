@@ -204,6 +204,7 @@
 | 2026-10-20 10:17:45 UTC | Codex R63 FAIL（3×P1、1×P2） | 卡数不变（41）：MC-13 改为只服务 HTTP/1.1（`hyper::server::conn::http1::Builder`，不启用 `server-auto`），HTTP/2 前言被关闭并加一门；MC-02/08/11/13/38/41/43 中「成功且 X」的复合判据改写为以成功为前提的单一谓词（MC-15 同步）；ADR-MC-03 改为「不引入 MCP SDK」并列明允许的直接依赖 | — | ADR-MC-03、MC-02/08/11/13/15/38/41/43 |
 | 2026-10-20 10:30:15 UTC | Codex R64 PASS（0×P1、1×P2） | 卡数不变（41）：按 R64 唯一的 P2 修正 MC-13 的 HTTP 内存预算表述——计入 Hyper 连接读缓冲（默认约 400 KiB，hyper#4081 的超额读分配不当作严格上限），改为每连接 ≤ 1 MiB、合计 ≤ 64 MiB 的容量估计；不新增判据（R65 曾尝试以 `max_buf_size` 封顶，被确认在 Hyper 1.8.1 下不可靠，已撤回）；该改动经 R66 确认 | — | MC-13 |
 | 2026-10-20 12:40:00 UTC | 使用者要求保持 0.30.xx，且 stable manifest 仍是 0.30.66 | 工作区版本面是未发布的 0.31.1（本地 tag `v0.31.0` 存在，stable `manifest-v1.json` 的 `version` 为 `0.30.66`，control_revision 167）。发布端点拒绝 `version_regression`，因此不把版本面升到 0.31.2，也不改写已发布 tag。MC-01 起把三个版本面从 0.31.1 调回 0.30.67（相对已发布 stable 单调 +1）。 | — | 版本面 |
+| 2026-10-20 13:05:00 UTC | `v0.30.67` 的 Linux 产物已上传，Windows 库测试缺少 Tokio `io-std` | `72450c6` 的 arm64/amd64 Linux 对象已在 CDN（HTTP 200），前缀不可覆盖。Windows `cargo test --locked --lib` 在 `mcp.rs` 报 `E0432`（`tokio::io::stdin` 仅由 Unix 依赖间接打开）。取消未完成的 darwin/windows 上传，版本面改为 `0.30.68`，并在 `Cargo.toml` 直接启用 `io-std`。不改写 `v0.30.67`。 | — | 版本面、`Cargo.toml` |
 
 ## 已决议设计决策
 
@@ -503,8 +504,8 @@ ER-01 至 ER-14 按模板原文对本计划全部任务生效（见 [`plan-templ
 | 脱敏函数 | `src/internal/ai/agent_bridge/redaction.rs:20-53`（`review::redact_untrusted`、`scrub_controls`） |
 | bridge 稳定码 | `src/internal/ai/agent_bridge/protocol.rs:271-390` |
 | 规范 stdio 规则、tools 错误处理 | 规范 `2025-11-25/basic/transports.mdx` 第 28-34 行；`2025-11-25/server/tools.mdx`「Error Handling」（pin `1155ca46`） |
-| 版本面 | `Cargo.toml` `0.30.67`；`install.sh` `DEFAULT_VERSION="v0.30.67"`；`install.ps1` `$DefaultVersion = "v0.30.67"`。stable manifest 仍是 `0.30.66`，本卡从该线上单调 +1。 |
-| 门二进制 | `command -v libra` = `/mnt/data/libra/target/debug/libra`；`libra --version` = `libra 0.30.67` |
+| 版本面 | `Cargo.toml` `0.30.68`；`install.sh` `DEFAULT_VERSION="v0.30.68"`；`install.ps1` `$DefaultVersion = "v0.30.68"`。`v0.30.67` 只发布了 Linux 对象，stable manifest 仍是 `0.30.66`。 |
+| 门二进制 | `command -v libra` = `/mnt/data/libra/target/debug/libra`；`libra --version` 在 `0.30.68` 提交后复测。 |
 | jsonschema | dev-dependency `jsonschema` `=0.59.0`（`default-features = false`） |
 | A/B 门 | `agent_mcp_stdio_test` 22 个 `--exact` 与 `agent_mcp_conformance_test` 7 个 `--exact` 均 `test result: ok. 1 passed; 0 failed`（`source .env.test && source .env.live-test`）。两次真实 `libra agent mcp --stdio`：`initialize` 的 `protocolVersion` 为 `2025-11-25`，`serverInfo.name` 为 `libra`，`serverInfo.version` 为 `0.30.67`；`tools/list` 无 `libra_test_`。 |
 | C 组全量 | `source .env.test && source .env.live-test && cargo nextest run --all --no-fail-fast --retries 2`：`Summary [ 554.824s] 10576 tests run: 10576 passed (11 slow, 1 flaky), 21 skipped`，exit 0。首轮唯一失败是 `compat_serial_registry` 的外部组计数（自定义 `mcp_registry` 车道），已改为 `#[serial(env)]` 并重跑至绿。 |

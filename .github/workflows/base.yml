@@ -243,8 +243,8 @@ jobs:
               throw "Native Windows capture primitive tests failed or matched no tests: $filter"
             }
           }
-          $releaseFilter = 'command::worktree_isolation_test::wd_renamed_release_binary_can_start_status_io_worker'
-          $releaseTest = @(& cargo test --locked --test command_test $releaseFilter -- --exact --nocapture --color never --test-threads=1)
+          $releaseFilter = 'renamed_release_binary_can_start_status_io_worker'
+          $releaseTest = @(& cargo test --locked --test release_binary_name_test $releaseFilter -- --exact --nocapture --color never --test-threads=1)
           $releaseExit = $LASTEXITCODE
           $releaseTest | Write-Output
           if ($releaseExit -ne 0 -or @($releaseTest | Where-Object {

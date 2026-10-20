@@ -44,37 +44,6 @@ fn abbrev_head(dir: &std::path::Path) -> String {
 }
 
 #[test]
-fn wd_renamed_release_binary_can_start_status_io_worker() {
-    let repo = repo_with_feature();
-    let release_dir = tempfile::tempdir().expect("release binary directory");
-    let binary_name = if cfg!(windows) {
-        "libra-darwin-arm64.exe"
-    } else {
-        "libra-darwin-arm64"
-    };
-    let release_binary = release_dir.path().join(binary_name);
-    fs::copy(env!("CARGO_BIN_EXE_libra"), &release_binary).expect("copy release binary");
-    fs::write(repo.path().join("renamed.txt"), "renamed binary\n").expect("write fixture");
-
-    let home = repo.path().join(".libra-test-home");
-    let output = std::process::Command::new(&release_binary)
-        .args(["add", "renamed.txt"])
-        .current_dir(repo.path())
-        .env("HOME", &home)
-        .env("USERPROFILE", &home)
-        .env("XDG_CONFIG_HOME", home.join(".config"))
-        .env("LIBRA_CONFIG_GLOBAL_DB", home.join(".libra/config.db"))
-        .env(
-            "LIBRA_CONFIG_SYSTEM_DB",
-            home.join(".libra/system-config.db"),
-        )
-        .env("LIBRA_TEST", "1")
-        .output()
-        .expect("run renamed release binary");
-    assert_cli_success(&output, "renamed release binary add");
-}
-
-#[test]
 fn linked_worktree_has_isolated_head_and_index() {
     let repo = repo_with_feature();
     let main = repo.path();

@@ -925,6 +925,9 @@ libra agent rpc invoke <slug> <method> --params '<json>'
 # feed it a fixture and read one frame per response on stdout
 libra agent bridge --stdio < bridge-initialize.ndjson
 
+# Serve legacy MCP on stdio. stdout carries only JSON-RPC.
+libra agent mcp --stdio
+
 # Structured JSON envelope for agents
 libra agent --json status
 ```

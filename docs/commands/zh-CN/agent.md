@@ -670,6 +670,9 @@ libra agent rpc invoke <slug> <method> --params '<json>'
 # 喂入一个 fixture，stdout 每条响应恰好一帧
 libra agent bridge --stdio < bridge-initialize.ndjson
 
+# 在 stdio 上提供 legacy MCP。stdout 只含 JSON-RPC。
+libra agent mcp --stdio
+
 # 面向代理的结构化 JSON 信封
 libra agent --json status
 ```

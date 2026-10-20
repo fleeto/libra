@@ -25,6 +25,7 @@ mod capture_source;
 pub(crate) mod checkpoint;
 mod clean;
 mod doctor;
+pub mod mcp;
 #[cfg(test)]
 #[cfg_attr(windows, allow(unused_imports))]
 pub(crate) use doctor::scan_checkpoint_store_with_replay_budget_for_test;
@@ -141,6 +142,7 @@ EXAMPLES:
     libra agent rpc untrust <slug>                  Revoke trust (binary returns to quarantine)
     libra agent rpc invoke <slug> <method>          Invoke a single JSON-RPC method (use --params '<json>' for arguments)
     libra agent bridge --stdio                      Run the DeepSeek Harness bridge over stdio (JSON-RPC 2.0 NDJSON)
+    libra agent mcp --stdio                         Serve repository MCP tools over stdio (JSON-RPC 2.0 NDJSON)
     libra --json agent status                       Structured JSON output for agents";
 
 #[derive(Args, Debug)]
@@ -231,6 +233,10 @@ pub enum AgentSubcommand {
     /// and is a plain JSON-RPC 2.0 NDJSON transport.
     #[command(about = "Run the DeepSeek Harness bridge over stdio (JSON-RPC 2.0 NDJSON)")]
     Bridge(bridge::BridgeArgs),
+
+    /// Repository MCP server (legacy stdio). Not the DeepSeek Harness bridge.
+    #[command(about = "Serve repository tools over the Model Context Protocol")]
+    Mcp(mcp::McpArgs),
 }
 
 /// Arguments scoped exclusively to the hidden legacy hook alias.
@@ -449,6 +455,7 @@ pub async fn execute_safe(
         }
         AgentSubcommand::Rpc(cmd) => rpc::execute_safe(cmd, output).await,
         AgentSubcommand::Bridge(args) => bridge::execute_safe(args, output).await,
+        AgentSubcommand::Mcp(args) => mcp::execute_safe(args, output).await,
     }
 }
 

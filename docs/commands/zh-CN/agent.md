@@ -107,6 +107,7 @@ libra agent workspace show <workspace-id>
 libra agent push [--remote <name>] [--force-rewrite]
 libra agent rpc <subcommand>
 libra agent bridge --stdio
+libra agent mcp --stdio
 ```
 
 ## 说明
@@ -250,6 +251,17 @@ OpenCode 提取对空输入、非法 JSON 和非法 export 形状显式标记
 | `rpc untrust <slug>` | 撤销 binary trust；OpenCode 同时原子吊销 native issuer，详见下方轮换与撤销章节（始终可用，不受开关限制） |
 | `rpc invoke` | 在**已信任**的 `libra-agent-*` 二进制上调用一个 JSON-RPC 方法 |
 | `bridge --stdio` | 在 stdin/stdout 上运行仓库级 DeepSeek Harness 桥接（JSON-RPC 2.0 NDJSON）。这是 Harness 的**唯一**标准入站写入传输；它不是 `libra code --control`。stdout 每条只承载一个协议帧；诊断只写 stderr。协议 v1：20 个 method 的 allowlist、256 KiB 帧上限、64 个 in-flight 请求、默认 30 秒 deadline。20 个 method 全部已实现：`initialize` 握手；session/event ingress `session.open`、`event.append`（batch ack / 幂等 / digest conflict / 服务端脱敏）、`session.flush`、`session.close`、`evidence.append`、`provenance.append`；只读方法 `context.get`、`status.get`、`history.search`、`checkpoint.list`、`checkpoint.show` 与 `diff.get`；mutation `checkpoint.create`、`commit.create`、`checkpoint.restore` 与 `review.run`（均带 `operation_id` 幂等、actor binding 与 approval 门禁）；以及 workspace lease `workspace.claim` / `workspace.renew` / `workspace.release`（owner 从已认证的 bridge session 派生）。`diff.get` 只接受封闭的 `mode`（`worktree` / `staged` / `checkpoint`）加上经校验的仓库相对 `paths`——绝不接受自由形式的 revision 或 pathspec——并强制 `--no-ext-diff` / `--no-textconv`，使仓库配置无法转化为进程执行。`commit.create` 只提交当前 index（无 `-a`、无 pathspec、无 amend、无 author 覆盖），关联图写入 `agent_bridge_link` 而不是拼进 commit message。`checkpoint.restore` 必须携带显式 `expected_head` fence 且要求 index/worktree 干净，并且绝不移动 HEAD。`review.run` 启动只读 review 并返回 `run_id`；用同一个 `operation_id` 重放会返回该 run 的当前状态，而不会启动第二个 run。HEAD 漂移或 worktree 脏在任何写入之前以 `LBR-AGENT-038` 拒绝。ack 只表示脱敏 projection 已 durable，不代表 Harness 原始 transcript 已迁移到 Libra。不是 Git 命令。 |
+| `mcp --stdio` | 在 stdin/stdout 上提供仓库 MCP 服务（JSON-RPC 2.0，每行一条）。legacy 协议版本 `2025-11-25` 与 `2025-06-18` 支持 `initialize`、`notifications/initialized`、`ping`、`tools/list` 与 `tools/call`。协议失败是 JSON-RPC 错误；参数不符合工具输入 schema 时返回工具错误 `LBR-AGENT-027`（`isError: true`）。stdout 只写 JSON-RPC 消息。这不是 `libra agent bridge`，也不是已删除的 `libra code` MCP。 |
+
+## MCP server
+
+`libra agent mcp --stdio` 是给外部客户端用的仓库 MCP 服务。客户端配置形状为 `command` = `libra`，`args` = `["agent", "mcp", "--stdio"]`，`"cwd"` 为仓库目录：
+
+```json
+{"command":"libra","args":["agent","mcp","--stdio"],"cwd":"/path/to/repo"}
+```
+
+服务端使用 legacy MCP `2025-11-25` 与 `2025-06-18`。无法识别的 `protocolVersion` 按 `2025-11-25` 应答。`capabilities` 只有 `tools`（`listChanged: false`）。JSON-RPC batch 会被拒绝。不符合工具 schema 的输入返回工具错误 `LBR-AGENT-027`。
 
 ## 常用选项
 
@@ -1130,4 +1142,4 @@ reasoning 一次，之后重复采集会去重；原 v1 对象、digest 和 clai
 reasoning 不能将这种失败变为 complete coverage。这些改动不增加命令参数，要求 Libra 0.30.50 或后续版本；依赖 OpenCode Session／exporter／模型的验收只在 macOS
 本机执行，不进入 CI 集成测试。
 
-Libra 0.31.1 或更新版本打开的仓库带有能力标记 4。Libra 0.30.x 会拒绝该仓库中的所有命令，包括 `agent clean`；继续操作前请升级到 0.31.1 或更新版本。现有 Agent 工作目录不迁移。
+Libra 0.30.67 或更新版本打开的仓库带有能力标记 4。已发布的 0.30.66 及更早版本会拒绝该仓库中的所有命令，包括 `agent clean`；继续操作前请升级到 0.30.67 或更新版本。现有 Agent 工作目录不迁移。

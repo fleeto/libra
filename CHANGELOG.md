@@ -28,7 +28,11 @@
   `reasoningEncryptedContent`, and `thoughtSignature`. The checkpoint stays
   `Unproven` / `Partial` and does not archive those fields as native artifacts.
 
-## [0.31.1] — 2026-10-20
+## [0.30.67] — 2026-10-20
+
+### MCP server
+
+- `libra agent mcp --stdio` serves legacy MCP `2025-11-25` and `2025-06-18` (`initialize`, `ping`, `tools/list`, `tools/call`). Protocol failures are JSON-RPC errors. A tool argument that fails its input schema is tool error `LBR-AGENT-027`.
 
 ### Managed worktree layout
 

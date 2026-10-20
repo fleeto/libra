@@ -125,6 +125,7 @@ libra agent workspace show <workspace-id>
 libra agent push [--remote <name>] [--force-rewrite]
 libra agent rpc <subcommand>
 libra agent bridge --stdio
+libra agent mcp --stdio
 ```
 
 ## Description
@@ -324,6 +325,17 @@ native-origin gates remain required.
 | `rpc untrust <slug>` | Revoke binary trust; OpenCode also revokes native issuers atomically (see native-origin rotation and revocation below). Always available, even while external agents are disabled |
 | `rpc invoke` | Invoke one JSON-RPC method on a trusted `libra-agent-*` binary |
 | `bridge --stdio` | Run the repository-scoped DeepSeek Harness bridge over stdin/stdout (JSON-RPC 2.0 NDJSON). The **only** standard inbound write transport for Harness; it is not `libra code --control`. stdout carries exactly one protocol frame per response; diagnostics go to stderr. Protocol v1: 20-method allowlist, 256 KiB frame cap, 64 in-flight requests, 30 s default deadline. All 20 methods are implemented: the `initialize` handshake; session/event ingress `session.open`, `event.append` (batch ack / idempotent / digest-conflict / server-side redaction), `session.flush`, `session.close`, `evidence.append`, `provenance.append`; the read methods `context.get`, `status.get`, `history.search`, `checkpoint.list`, `checkpoint.show` and `diff.get`; the mutations `checkpoint.create`, `commit.create`, `checkpoint.restore` and `review.run` (each with `operation_id` idempotency, actor binding and approval gating); and workspace lease `workspace.claim` / `workspace.renew` / `workspace.release` (owner derived from the authenticated bridge session). `diff.get` takes a closed `mode` (`worktree` / `staged` / `checkpoint`) plus validated repository-relative `paths` — never a free-form revision or pathspec — and forces `--no-ext-diff` / `--no-textconv` so repository config cannot become process execution. `commit.create` commits the current index only (no `-a`, no pathspec, no amend, no author override) and records its association graph in `agent_bridge_link` rather than in the commit message. `checkpoint.restore` requires an explicit `expected_head` fence plus a clean index/worktree and never moves HEAD. `review.run` starts a read-only review and returns its `run_id`; replaying the same `operation_id` reports that run's state instead of starting a second one. A stale HEAD or dirty worktree is refused with `LBR-AGENT-038` before any write. An ack only means the redacted projection is durable, never that the Harness raw transcript has been migrated. Not a Git command. |
+| `mcp --stdio` | Serve the repository Model Context Protocol endpoint on stdin/stdout (JSON-RPC 2.0, one message per line). Legacy protocol versions `2025-11-25` and `2025-06-18` answer `initialize`, `notifications/initialized`, `ping`, `tools/list`, and `tools/call`. Protocol failures are JSON-RPC errors (`-32700` parse, `-32600` invalid request or batch, `-32601` unknown method, `-32602` invalid params or unknown tool). A tool argument that fails the tool's input schema is a tool error `LBR-AGENT-027` (`isError: true`), not a protocol error. stdout carries only JSON-RPC messages. This is not `libra agent bridge` and not the removed `libra code` MCP. |
+
+## MCP server
+
+`libra agent mcp --stdio` is the repository MCP server for external clients. The client configuration shape is `command` = `libra`, `args` = `["agent", "mcp", "--stdio"]`, and `"cwd"` set to the repository directory:
+
+```json
+{"command":"libra","args":["agent","mcp","--stdio"],"cwd":"/path/to/repo"}
+```
+
+The server speaks legacy MCP `2025-11-25` and `2025-06-18`. An unrecognized `protocolVersion` is answered as `2025-11-25`. `capabilities` is only `tools` with `listChanged: false`. JSON-RPC batches are rejected. Input that does not match a tool's schema returns tool error `LBR-AGENT-027`.
 
 ## Common Options
 
@@ -1626,4 +1638,4 @@ unverified reasoning source cannot turn this failure into complete coverage.
 These changes add no command flags and require Libra 0.30.50 or later. OpenCode Session/exporter/model acceptance runs locally on
 macOS; it is not a CI integration test.
 
-Repositories opened by Libra 0.31.1 or later carry repository capability 4. Libra 0.30.x refuses every command on those repositories, including `agent clean`; install 0.31.1 or later before continuing. No existing agent workspace directories are migrated.
+Repositories opened by Libra 0.30.67 or later carry repository capability 4. Released binaries through 0.30.66 refuse every command on those repositories, including `agent clean`; install 0.30.67 or later before continuing. No existing agent workspace directories are migrated.

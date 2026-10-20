@@ -92,7 +92,7 @@ unsupported 子面。
 
 | 范围 | 全局未实现项 | 代码核对 | 最后确认/处理 |
 |---|---|---|---|
-| 命令接入治理 | `gc`、`package`、`prune`、`stats` 的开发文档或源码文件存在，但用户可见 CLI 与 `COMPATIBILITY.md` 未公开。 | `for-each-ref`、`ls-files`、`ls-tree`、`archive` 和 `notes` 已在 `src/cli.rs::Commands`、`COMPATIBILITY.md` 和命令开发文档中公开，不能再列为未公开命令。其余命令仍需按当前 CLI surface 核对是否返回 `LBR-CLI-001` 或应降级为内部资料。 | 作为全局未收口项保留；后续必须二选一：接入 CLI 并同步 `COMPATIBILITY.md`、命令文档和集成场景，或把对应命令文档降级为内部/历史资料。 |
+| 命令接入治理 | `package`、`prune`、`stats` 的开发文档或源码文件存在，但用户可见 CLI 与 `COMPATIBILITY.md` 未公开。 | `for-each-ref`、`ls-files`、`ls-tree`、`archive` 和 `notes` 已在 `src/cli.rs::Commands`、`COMPATIBILITY.md` 和命令开发文档中公开，`gc` 已随 MX-07（#481）接入公开 CLI 并同步 `COMPATIBILITY.md`、命令文档与集成场景，不能再列为未公开命令。其余命令仍需按当前 CLI surface 核对是否返回 `LBR-CLI-001` 或应降级为内部资料。 | 作为全局未收口项保留；后续必须二选一：接入 CLI 并同步 `COMPATIBILITY.md`、命令文档和集成场景，或把对应命令文档降级为内部/历史资料。 |
 | 兼容证据治理 | 参数级缺口不能只停留在文字说明；需要在命令开发文档、用户文档和 compat/integration 测试之间闭环。 | 删除独立参数 YAML 后，不再存在 `test_evidence`/`last_verified` 字段；证据必须落到具体测试、脚本或 D 编号说明中。 | 不允许把未验证参数当作完成承诺；新增兼容项时补测试证据，或把状态改为拒绝、延后、有意差异并给出 D 编号。 |
 | 拒绝/延后决策 | submodule family（含三路合并中的 gitlink 内容合并，D24）、Git hooks bridge、clone recurse-submodules、Git LFS filter/hooks bridge、bisect replay/terms、stash create/store、sparse checkout、patch mode、interactive rebase/todo、empty commit message、跨网/foreign-Git/push 侧 notes travel、依赖过滤克隆的工作树磁盘收窄（本地路径 push 已实现，仅目标侧 `updateInstead`/hook 延后，见 D2）。（clean pathspec 的共享 magic 已随 PD-07 落地，D-clean-pathspec 于 2026-08-08 收口，不再是活跃延后项。） | 对应 D1-D10、D15、D16、D17、D18、D24、D-empty-message；源码/CLI 未暴露或显式拒绝这些 surface。 | 维持 D 编号；只有出现明确需求、设计和测试方案时再重启。 |
 | staging/worktree Git surface | `add --intent-to-add`、`clean -i`、`checkout -p` 以及跨命令 patch mode。（`clean <pathspec>` 已随 PD-07 经共享 `PathspecSet` 落地；`reset --merge/--keep` 与 `restore --overlay`/`--ours`/`--theirs`/`--merge`/`--conflict` 已实现；`restore --progress` 是全局 `--progress` 冲突，DEAD。） | `mv -k` / `--skip-errors` 已实现，`mv --sparse` 与 `rm --sparse` 均已作为 no-op 暴露；`add`、`clean` 的参数结构仍未暴露这些剩余 flag；patch mode 由 D15 拒绝；`switch --detach` 已实现，不能再把 detached HEAD 作为全局缺口。 | 作为命令级 Git 兼容缺口保留；实现时同步命令文档、`COMPATIBILITY.md` 和 integration scenarios。 |
@@ -160,8 +160,7 @@ unsupported 子面。
 
 ### D7：`bisect terms`
 
-- 状态：延后。自定义 good/bad 术语不影响核心定位能力。
-- 重启条件：用户明确请求且 `bisect run` 已稳定。
+- 状态：已实现。`bisect start` 支持 `--term-old`/`--term-good` 与 `--term-new`/`--term-bad`；新增 `bisect terms [--term-good|--term-bad]`，以及 `new`/`old` 与自定义术语作为标记子命令；术语持久化到仓库配置（`config_kv`，按 worktree 作用域键），`bisect log` 与 `bisect view` 显示当前术语。
 
 ### D8：`stash create`
 

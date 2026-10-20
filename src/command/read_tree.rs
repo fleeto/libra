@@ -121,6 +121,9 @@ pub(crate) async fn resolve_tree_ish(tree_ish: &str) -> CliResult<ObjectHash> {
                     .with_exit_code(128)
                     .with_stable_code(StableErrorCode::CliInvalidTarget)
             }
+            util::CommitBaseError::Ambiguous { name, candidates } => {
+                util::ambiguous_short_oid_error(&name, &candidates)
+            }
             util::CommitBaseError::ReadFailure(detail) => {
                 CliError::fatal(format!("failed to read tree-ish '{tree_ish}': {detail}"))
                     .with_stable_code(StableErrorCode::IoReadFailed)

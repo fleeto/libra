@@ -5,11 +5,14 @@
 ## 概要
 
 ```
-libra bisect start [<bad>] [--good <commit>] [--first-parent]
+libra bisect start [<bad> [<good>...]] [--term-old <term>] [--term-new <term>] [--first-parent]
 libra bisect bad [<rev>]
 libra bisect good [<rev>]
+libra bisect new [<rev>]
+libra bisect old [<rev>]
 libra bisect reset [<rev>]
 libra bisect skip [<rev>]
+libra bisect terms [--term-good | --term-bad]
 libra bisect log
 libra bisect run <cmd> [<args>...]
 libra bisect view
@@ -23,9 +26,15 @@ Bisect 会话以 `bisect start` 开始，它保存当前 HEAD 和分支，以便
 
 Bisect 状态持久化在 SQLite 数据库的 `bisect_state` 表中，使会话能跨进程重启存活。该状态跟踪原始 HEAD、bad 提交、所有 good 提交、skipped 提交、当前测试提交、估计剩余步骤以及会话是否已完成。
 
-当 bisect 识别出罪魁提交时，它会打印提交详情并将会话标记为完成。然后用户必须运行 `bisect reset` 结束会话，并将 HEAD 恢复到原始位置。
+当 bisect 识别出罪魁提交时，它会打印提交详情并将会话标记为完成。然后用户必须运行 `bisect reset` 结束会话，并将 HEAD 恢复到原始位置。收敛后再次标记 `good` 或 `bad` 不是错误：该步骤 exit 0 并重新输出罪魁（`<oid> is the first bad commit`，后接提交主题）。罪魁主题取自提交消息正文，因此 vault 签名的 `gpgsig` / `gpgsig-sha256` 头块永远不会被当作主题显示。
 
-Libra 不管理子模块内容。如果 checkout bisect 候选或 reset 目标需要移除或替换已跟踪的 gitlink（模式 `160000`），且对应目录非空，命令会在更改 HEAD、索引或工作树前以 `LBR-CONFLICT-002` 拒绝。请先将目录内文件安全移到其他位置再重试；Libra 创建的空目录占位符可以正常移除。初次 `bisect start` 仍要求工作树干净，嵌套的未跟踪或忽略文件也在检查范围内，因此可能在此前置检查之前就被干净性检查拒绝，且不会创建会话。在已有会话中，`good`、`bad`、`skip` 或 `reset` 操作被此前置检查拒绝时，已保存的 bisect 状态也保持不变。
+Libra 不管理子模块内容。如果 checkout bisect 候选或 reset 目标需要移除或替换已跟踪的 gitlink（模式 `160000`），且对应目录非空，命令会在更改 HEAD、索引或工作树前以 `LBR-CONFLICT-002` 拒绝。请先将目录内文件安全移到其他位置再重试；Libra 创建的空目录占位符可以正常移除。初次 `bisect start` 仅要求**已跟踪**文件（暂存或未暂存）干净；未跟踪和忽略文件（包括根目录 `.libraignore`）不再阻止开始（ADR-MX-05 §2），与其同名的候选 checkout 会在写入任何状态之前被每步 restore 预检拒绝。在已有会话中，`good`、`bad` 或 `skip` 步骤是原子的：restore 预检在标记持久化之前完成，因此被此预检拒绝的步骤不会改动已保存的 bisect 状态（`current` 不前进，`bisect log` 不变）——解决冲突后重试该步骤即可。`reset` 按设计不同（ADR-MX-03）：被拒绝的 restore 绝不会卡死会话。`reset` 仍会结束会话——它清除状态行，打印包含原始 HEAD 目标的警告，并让 HEAD 停留在当前候选上，以便把嵌套文件移开后手动重试 checkout。
+
+支持自定义 good/bad 术语（ADR-MX-11）：`bisect start --term-old <term> --term-new <term>` 重命名两侧（例如 `fast`/`slow`），术语在会话期间持久化，自定义名称成为标记子命令（`libra bisect slow`），而该会话中 `bad`/`good` 会被拒绝。`new`/`old` 是将未绑定会话固定为 `new`/`old` 术语的别名，`bisect terms` 报告当前术语。
+
+### 会话安全与统一错误
+
+每个 `good`/`bad`/`skip` 步骤都会在写入会话状态之前计算下一个候选并预检其 checkout，因此失败的步骤（例如候选跟踪的路径当前是未跟踪目录）不会推进 `current`，也不会卡死会话。`bisect reset` 总能结束会话：它恢复原始 HEAD（分支或分离提交），即使恢复失败也仍会清除状态行并打印包含目标的警告，以便手动重试 checkout。没有会话时，`bad`、`good`、`skip`、`log`、`view`/`visualize` 和 `run` 均以稳定错误 `LBR-BISECT-001` 失败（exit 128，`not in an active bisect`）；没有会话的 `reset` 输出 `We are not bisecting.` 并 exit 0。
 
 ## 选项
 
@@ -36,21 +45,30 @@ Libra 不管理子模块内容。如果 checkout bisect 候选或 reset 目标�
 | 参数 / 标志 | 说明 |
 |-----------------|-------------|
 | `<bad>` | 可选的立即标记为 bad 的提交。省略时，稍后使用 `bisect bad`。 |
-| `--good` / `-g` | 可选的立即标记为 good 的提交。省略时，稍后使用 `bisect good`。 |
+| `<good>...` | 可选的立即标记为 good 的位置提交（Git 兼容）。省略时，稍后使用 `bisect good`。 |
+| `--good` / `-g` | 可选的立即标记为 good 的提交（第一个位置 good 的兼容别名）。 |
+| `--term-old` / `--term-good` | old/good 侧的自定义术语（默认 `good`）。 |
+| `--term-new` / `--term-bad` | new/bad 侧的自定义术语（默认 `bad`）。 |
 | `--first-parent` | 遇到合并提交时仅沿首父前进，将 bisect 限制在主线历史（合并入的侧分支不贡献可测提交）。 |
 
 ```bash
 # 不带初始标记开始
 libra bisect start
 
-# 使用已知 bad（当前 HEAD）和 good 提交开始
-libra bisect start HEAD --good v1.0
+# 使用已知 bad（当前 HEAD）和 good 提交开始（位置参数，Git 兼容）
+libra bisect start HEAD v1.0
 
-# 使用特定 bad 提交开始
+# 使用多个已知 good 提交开始
+libra bisect start HEAD v1.0 v1.1
+
+# 使用特定 bad 提交和 --good 兼容别名开始
 libra bisect start abc1234 --good def5678
 
 # 仅在首父（主线）历史上 bisect，忽略合并入的侧分支
 libra bisect start HEAD --good v1.0 --first-parent
+
+# 使用自定义术语（fast = old/good，slow = new/bad）
+libra bisect start --term-old fast --term-new slow HEAD v1.0
 ```
 
 ### 子命令：`bad`
@@ -83,6 +101,35 @@ libra bisect good
 
 # 将特定提交标记为 good
 libra bisect good def5678
+```
+
+### 子命令：`terms`
+
+报告会话的术语。无选项时打印 git 的两行形式，列出 old/good 和 new/bad 术语；`--term-good`/`--term-old` 只打印 old/good 术语，`--term-bad`/`--term-new` 只打印 new/bad 术语。没有会话时以 `LBR-BISECT-001`（exit 128）失败；会话存在但术语尚未固定（无界 `bisect start` 且未标记）时报告 `no terms defined`。
+
+```bash
+# 显示两个术语
+libra bisect terms
+
+# 只显示 old/good 术语
+libra bisect terms --term-good
+
+# 只显示 new/bad 术语
+libra bisect terms --term-bad
+```
+
+### 子命令：`new` / `old`（及自定义术语）
+
+`new` 和 `old` 是 `bad` 和 `good` 的别名。在无界 `bisect start` 之后，第一个 `new`/`old` 标记会把会话固定为 `new`/`old` 术语；在术语已固定的会话中，`new`/`old`（以及 `bad`/`good`）只有在与会话术语匹配时才被接受——不匹配的标记是用法错误。当会话以 `--term-old fast --term-new slow` 开始时，自定义名称成为标记子命令（`libra bisect slow`、`libra bisect fast`），且 `bisect log`/`bisect view` 会渲染它们。
+
+```bash
+# 将无界会话固定为 new/old 术语
+libra bisect new HEAD
+libra bisect old v1.0
+
+# 自定义术语会话：用自定义名称标记
+libra bisect slow
+libra bisect fast
 ```
 
 ### 子命令：`reset`
@@ -166,7 +213,7 @@ libra bisect view
 libra bisect visualize   # view 的别名
 ```
 
-如果没有进行中的 bisect，返回致命错误（`NOT_IN_BISECT`）。
+如果没有进行中的 bisect，返回统一致命错误 `LBR-BISECT-001`（`NOT_IN_BISECT`，exit 128）——与 `bad`/`good`/`skip`/`log`/`run` 的无会话错误一致。
 
 ## JSON / Machine 输出
 
@@ -181,6 +228,7 @@ libra bisect visualize   # view 的别名
 | `bad` / `good` / `current` | 当前 bisect 边界和候选的完整提交 ID。 |
 | `remaining` / `steps` | 已知时的候选数量和估计剩余搜索步骤。 |
 | `first_bad` | 会话收敛时的完整提交 ID。 |
+| `term_good` / `term_bad` | 会话固定后的 old/good 和 new/bad 术语。 |
 
 示例：
 
@@ -256,13 +304,12 @@ Bisecting: N revisions left to test (roughly M steps)
 **`bisect bad`** / **`bisect good`**（找到罪魁）：
 
 ```text
-abc1234def5678901234567890abcdef12345678 is the first bad commit
-commit abc1234def5678901234567890abcdef12345678
-Author: Alice <alice@example.com>
-Date:   Mon Jan 15 10:30:00 2024 -0800
-
-    introduce the bug here
+Marked abc1234 as bad
+abc1234 is the first bad commit
+introduce the bug here
 ```
+
+收敛后再次标记 `good` 或 `bad` 会 exit 0 并重新输出同一罪魁块。
 
 **`bisect skip`**：
 
@@ -274,15 +321,40 @@ Bisecting: N revisions left to test (roughly M steps)
 **`bisect log`**：
 
 ```text
-# bad: [abc1234] broken commit message
-# good: [def5678] working commit message
-# skip: [ghi9012] untestable commit
+Bisect log:
+  bad: abc1234
+  good: def5678
+  Current: 901abcd
+  Skipped: 0 commits
+  Steps remaining: Some(2)
 ```
+
+**`bisect terms`**：
+
+```text
+Your current terms are 'good' for the old state
+and 'bad' for the new state.
+```
+
+自定义术语会话会在 `log`/`view` 中渲染自定义名称（例如用 `slow:`/`fast:` 代替 `bad:`/`good:`），收敛时输出 `<oid> is the first 'slow' commit`。
 
 **`bisect reset`**：
 
 ```text
-Bisect session reset. HEAD restored to original position.
+HEAD is now at 4f8789d (on branch main)
+Bisect session ended, HEAD restored to 4f8789d
+```
+
+没有会话时：
+
+```text
+We are not bisecting.
+```
+
+如果 restore 被拒绝（例如非空 gitlink 目录），`reset` 仍会清除会话，并在 stderr 打印包含原始目标的警告，随后输出：
+
+```text
+Bisect session ended; original HEAD 4f8789d could not be restored
 ```
 
 **`bisect run`**（收敛）：
@@ -342,7 +414,7 @@ Bisect 会话可能跨越数小时或数天，因为用户要测试每个候选�
 
 | 参数 | Libra | Git | jj |
 |-----------|-------|-----|----|
-| 开始会话 | `bisect start [<bad>] [--good <commit>]` | `bisect start [<bad> [<good>...]]` | N/A |
+| 开始会话 | `bisect start [<bad> [<good>...]]` | `bisect start [<bad> [<good>...]]` | N/A |
 | 标记 bad | `bisect bad [<rev>]` | `bisect bad [<rev>]` | N/A |
 | 标记 good | `bisect good [<rev>]` | `bisect good [<rev>]` | N/A |
 | Reset | `bisect reset [<rev>]` | `bisect reset [<commit>]` | N/A |
@@ -350,11 +422,11 @@ Bisect 会话可能跨越数小时或数天，因为用户要测试每个候选�
 | 显示 log | `bisect log` | `bisect log` | N/A |
 | 自动 run | `bisect run <cmd> [<args>...]` | `bisect run <script>` | N/A |
 | 显示当前状态 | `bisect view` / `bisect visualize` | `bisect visualize`（GUI / log） | N/A |
-| 自定义术语 | 不支持（已延后，见 compatibility/declined.md D7） | `bisect terms` / `--term-old` / `--term-new` | N/A |
+| 自定义术语 | `bisect terms` / `--term-old` / `--term-new` / `new` / `old` | `bisect terms` / `--term-old` / `--term-new` | N/A |
 | 重放会话 | 不支持（已延后，见 compatibility/declined.md D6） | `bisect replay <logfile>` | N/A |
 | 可视化（GUI） | `bisect visualize`（`view` 的别名；打印文本状态，无 GUI） | `bisect visualize` | N/A |
 | 仅 first-parent | `bisect start --first-parent` | `--first-parent` | N/A |
-| 多个 good commits | 通过重复 `bisect good` | `start` 的位置参数 | N/A |
+| 多个 good commits | 通过 `start` 的位置参数或重复 `bisect good` | `start` 的位置参数 | N/A |
 | 状态存储 | SQLite（`bisect_state` 表） | 扁平文件（`.git/BISECT_*`） | N/A |
 
 注意：jj 没有 bisect 命令。需要二分调试的 jj 用户必须使用外部工具或手动 checkout commits。这是 jj 功能集中的空白，Libra 对此进行了补足。
@@ -367,7 +439,6 @@ Bisect 会话可能跨越数小时或数天，因为用户要测试每个候选�
 | `LBR-REPO-003` | 仓库中没有提交 |
 | `LBR-REPO-003` | `bisect run` 在 good/bad 边界选择候选前调用 |
 | `LBR-CLI-002` | Bisect 会话已在进行中（用于 `start`） |
-| `LBR-CLI-002` | 没有进行中的 bisect 会话（用于 `bad`、`good`、`skip`、`log`） |
 | `LBR-CLI-003` | 找不到提交（无效 rev 参数） |
 | `LBR-CLI-003` | Bad 提交是 good 提交的祖先（无效范围） |
 | `LBR-CONFLICT-001` | 未提交更改会被 checkout 覆盖 |
@@ -375,6 +446,6 @@ Bisect 会话可能跨越数小时或数天，因为用户要测试每个候选�
 | `LBR-IO-001` | 无法从数据库读取 bisect 状态 |
 | `LBR-IO-002` | 无法将 bisect 状态保存到数据库 |
 | `LBR-IO-002` | 无法创建 bisect_state 表 |
-| `LBR-BISECT-001` | 在活动 bisect 会话外调用 `bisect view` 或 `bisect run`（`NOT_IN_BISECT`） |
+| `LBR-BISECT-001` | 在没有 bisect 会话时调用 `bad`、`good`、`skip`、`log`、`view`、`run` 或 `terms`（`NOT_IN_BISECT`）；exit 128。没有会话的 `reset` 不是错误：它输出 `We are not bisecting.` 并 exit 0。 |
 | `LBR-BISECT-002` | `bisect run` 命令退出码 >= 128 或被信号杀死（`BISECT_RUN_FAILED`） |
 | `LBR-BISECT-003` | `bisect run` 因没有候选提交而无法推进（`BISECT_NO_CANDIDATES`） |

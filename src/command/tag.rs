@@ -285,6 +285,9 @@ enum TagError {
     #[error("Failed to resolve '{0}' as a valid ref.")]
     InvalidTarget(String),
 
+    #[error("{0}")]
+    AmbiguousTarget(#[source] crate::utils::error::CliError),
+
     #[error("cannot tag '{spec}': it resolves to a {kind} object, not a commit")]
     NonCommitTarget { spec: String, kind: String },
 
@@ -443,6 +446,7 @@ impl From<TagError> for CliError {
             TagError::InvalidTarget(_) => CliError::fatal(message)
                 .with_stable_code(StableErrorCode::CliInvalidTarget)
                 .with_hint("use 'libra log --oneline' to see available commits."),
+            TagError::AmbiguousTarget(error) => error,
             TagError::NonCommitTarget { .. } => CliError::fatal(message)
                 .with_stable_code(StableErrorCode::CliInvalidTarget)
                 .with_hint("only a commit, or a tag that peels to a commit, can be tagged"),
@@ -828,6 +832,18 @@ async fn resolve_tag_target(spec: &str) -> Result<tag::TagTarget, TagError> {
         CommitBaseError::InvalidReference(detail) => {
             tracing::debug!(tag_target = %spec, %detail, "tag target does not resolve");
             TagError::InvalidTarget(spec.to_string())
+        }
+        CommitBaseError::Ambiguous { name, candidates } => {
+            tracing::debug!(tag_target = %spec, %name, "tag target is ambiguous");
+            // Surface the shared Git-style ambiguity diagnostic verbatim (the
+            // `short object ID <p> is ambiguous` message, the
+            // `The candidates are:` hint, and `details.candidates`); wrapping it
+            // in "Failed to resolve" would bury the candidates behind a
+            // misleading sentence (issues/481 MX-02).
+            TagError::AmbiguousTarget(crate::utils::util::ambiguous_short_oid_error(
+                &name,
+                &candidates,
+            ))
         }
         CommitBaseError::ReadFailure(detail) => {
             tracing::warn!(tag_target = %spec, %detail, "failed to read tag target");

@@ -265,7 +265,7 @@ libra log --oneline --graph
 - `^A`（排除）配合一个 include，例如 `^A B`。
 - 单个引用，例如 `main` 或 `HEAD~3`。
 
-位置式下，前导参数按解析结果作为 revision，直到第一个非 revision，其后均作 pathspec，故 `log A..B path/` 把范围限定到改动 `path/` 的提交。既是有效 revision 又是现有 path 的裸名会被判为歧义并报错——用 `--range <rev>` 选定 revision。
+位置式下，前导参数按解析结果作为 revision，直到第一个非 revision，其后均作 pathspec，故 `log A..B path/` 把范围限定到改动 `path/` 的提交。既是有效 revision 又是现有 path 的裸名会被判为歧义并报错——用 `--range <rev>` 选定 revision。解析不出任何对象、不是现有 path、且不带 pathspec 语法（`:`/`:(...)` magic 或 glob 通配符）的裸 token 视为拼错的 revision：以 `ambiguous argument '<x>': unknown revision or path not in the working tree`（`LBR-CLI-002`，退出码 129）失败，而不是静默退出 0。真实歧义的短对象名以 `short object ID <p> is ambiguous` 加 `The candidates are:` 候选提示失败（`LBR-CLI-003`，退出码 129）。`--` 之后的 token 一律是 pathspec，绝不报错（`log -- <不存在>` 无输出退出 0；`log -- HEAD` 把 `HEAD` 当作路径）。
 
 ```bash
 libra log main..feature            # 位置式范围
@@ -471,7 +471,7 @@ Graph 格式：
 
 ### 位置式修订范围与 `--range` 备选
 
-Git 接受 `git log A..B` 这种位置修订表达式（其后可跟 pathspec）。Libra 已支持该位置形式：前导参数按解析结果分流为 revision，直到第一个非 revision，其后为 pathspec。由于 Libra 看不到 `--` 分隔符（在命令前已被消费），分流按解析进行：range 语法 token（`A..B`/`A...B`/`^A`）能解析时为 revision，不能解析但命中现有 path（如 `../file`）时为 pathspec，否则报错（把拼错的 revision 报为未知 revision/path，而非按不存在的 path 静默过滤）。裸 token 仅在能解析为提交时才是 revision；既是 revision 又是现有 path 的裸名会报歧义。显式 `--range A..B` 标志作为无歧义备选保留，也是强制把与 path 同名的名字当作 revision 的方式。
+Git 接受 `git log A..B` 这种位置修订表达式（其后可跟 pathspec）。Libra 已支持该位置形式：`--` 之后的 token 一律是 pathspec——即使命名不了任何文件也绝不报错（`log -- <不存在>` 无输出退出 0），且原本会被当作 revision 的名字在这里只是普通路径（`log -- HEAD`）。`--` 之前，前导参数按解析结果分流为 revision，直到第一个非 revision，其后为 pathspec。分流按解析进行：range 语法 token（`A..B`/`A...B`/`^A`）能解析时为 revision，不能解析但命中现有 path（如 `../file`）或携带 pathspec magic/glob 语法时为 pathspec，否则报错（把拼错的 revision 报为未知 revision/path 并非零退出，而非按不存在的 path 静默过滤）。裸 token 仅在能解析为提交时才是 revision；真实歧义的短对象名直接报出共享歧义诊断而不是被重分类为 path；既是 revision 又是现有 path 的裸名会报歧义。显式 `--range A..B` 标志作为无歧义备选保留，也是强制把与 path 同名的名字当作 revision 的方式。
 
 ### `--all` 实现
 
@@ -566,6 +566,8 @@ Libra 将 `--graph` 实现为基于文本的 ASCII/Unicode 图渲染器，类似
 | 无效日期参数 | `LBR-CLI-002` | 129 | -- |
 | 无效 `--decorate` 选项 | `LBR-CLI-002` | 129 | -- |
 | 无效对象名 | `LBR-CLI-003` | 129 | "check the revision name and try again" |
+| 无法解析的位置 revision（拼写护栏） | `LBR-CLI-002` | 129 | "unknown revision or path not in the working tree" |
+| 歧义短对象名 | `LBR-CLI-003` | 129 | "The candidates are: ..."（每个候选一行 `<abbrev> <type>`） |
 | 损坏的 commit/tree/blob | `LBR-REPO-002` | 128 | -- |
 | 无法读取历史对象 | `LBR-REPO-002` | 128 | -- |
 
@@ -573,7 +575,7 @@ Libra 将 `--graph` 实现为基于文本的 ASCII/Unicode 图渲染器，类似
 
 - `--branches` 和 `--remotes` 尚未实现
 - `--all` 遍历本地分支和轻量标签；远程跟踪引用和 stash 不包含在内
-- 修订范围语法支持位置式 `git log A..B`/`A...B`/`^A`（以及显式 `--range A..B`/`A...B`）
+- 修订范围语法支持位置式 `git log A..B`/`A...B`/`^A`（以及显式 `--range A..B`/`A...B`）。`--` 之后的 token 一律是 pathspec、绝不报错；`--` 之前按解析结果分流：解析不出任何对象、不是现有 path、且不带 pathspec 语法的 token 视为拼错的 revision，以退出码 129（`LBR-CLI-002`）失败，绝不再静默退出 0；真实歧义的短对象名报共享候选诊断（`LBR-CLI-003`，129）
 - `--follow` 使用 best-effort 重命名检测，可能遗漏复杂重命名
 - `-L` 已被接受，但尚未提供 blame 级行精度
 - `--reverse` 已支持

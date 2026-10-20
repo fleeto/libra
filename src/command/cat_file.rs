@@ -966,11 +966,8 @@ async fn resolve_object_safe(object_ref: &str, _storage: &ClientStorage) -> CliR
     util::resolve_object_spec_with_auto_merge_typed(object_ref)
         .await
         .map_err(|error| match error {
-            util::CommitBaseError::InvalidReference(detail)
-                if detail.starts_with("ambiguous argument:") =>
-            {
-                CliError::command_usage(detail)
-                    .with_stable_code(StableErrorCode::CliInvalidArguments)
+            util::CommitBaseError::Ambiguous { name, candidates } => {
+                util::ambiguous_short_oid_error(&name, &candidates)
             }
             util::CommitBaseError::HeadUnborn | util::CommitBaseError::InvalidReference(_) => {
                 invalid_object_name_error(object_ref)

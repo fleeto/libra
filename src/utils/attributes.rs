@@ -300,6 +300,120 @@ pub fn attribute_state_for_path(attr: &str, path: &Path) -> Option<AttributeStat
     })
 }
 
+/// Where `check-attr` reads its `.gitattributes`/`.libraattributes` sources
+/// from (issues/481 MX-11).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttributeSourceKind<'a> {
+    /// The working tree (the default).
+    Worktree,
+    /// The index, as staged right now (`check-attr --cached`).
+    Index,
+    /// One tree object (`check-attr --source=<tree>`).
+    Tree(&'a git_internal::hash::ObjectHash),
+}
+
+/// Read every attribute source that applies to `path` from `kind` and merge
+/// them, mirroring [`all_attribute_states_for_path`] but for a non-worktree
+/// source. Used by `check-attr --cached` / `--source=<tree>`.
+pub fn all_attribute_states_for_path_from(
+    path: &Path,
+    kind: AttributeSourceKind<'_>,
+) -> BTreeMap<String, AttributeState> {
+    if kind == AttributeSourceKind::Worktree {
+        return all_attribute_states_for_path(path);
+    }
+    let Ok(workdir) = util::try_working_dir() else {
+        return BTreeMap::new();
+    };
+    let Some(absolute) = absolute_in_workdir(path, &workdir) else {
+        return BTreeMap::new();
+    };
+    // `.git/info/attributes` and the configured global file are still read from
+    // disk (they are not part of any tree), matching Git's resolution order.
+    let mut sources = Vec::new();
+    if let Some(configured) =
+        util::optional_cascaded_config_path(CORE_ATTRIBUTES_FILE_KEY, &workdir)
+    {
+        push_attribute_source(&mut sources, configured, workdir.to_path_buf());
+    }
+    for info_attributes in util::worktree_info_file_paths(&workdir, "attributes") {
+        push_attribute_source(&mut sources, info_attributes, workdir.to_path_buf());
+    }
+    let mut states = BTreeMap::new();
+    for source in &sources {
+        for rule in cached_attribute_file(&source.path, &source.base).iter() {
+            if !attribute_rule_matches(rule, &absolute) {
+                continue;
+            }
+            for assignment in &rule.assignments {
+                if matches!(assignment.state, AttributeState::Unspecified) {
+                    states.remove(&assignment.name);
+                } else {
+                    states.insert(assignment.name.clone(), assignment.state.clone());
+                }
+            }
+        }
+    }
+    // Tree/index attribute files, outermost directory first so a deeper file
+    // wins (Git's precedence).
+    for dir in attribute_dirs(&workdir, &absolute) {
+        for name in [GIT_ATTRIBUTES_FILE, LIBRA_ATTRIBUTES_FILE] {
+            let Some(relative) = dir
+                .strip_prefix(&workdir)
+                .ok()
+                .map(|prefix| prefix.join(name))
+            else {
+                continue;
+            };
+            let key = relative.to_string_lossy().replace('\\', "/");
+            let Some(contents) = read_attribute_source_contents(&key, kind) else {
+                continue;
+            };
+            for rule in parse_attribute_contents(&contents, &dir) {
+                if !attribute_rule_matches(&rule, &absolute) {
+                    continue;
+                }
+                for assignment in &rule.assignments {
+                    if matches!(assignment.state, AttributeState::Unspecified) {
+                        states.remove(&assignment.name);
+                    } else {
+                        states.insert(assignment.name.clone(), assignment.state.clone());
+                    }
+                }
+            }
+        }
+    }
+    states
+}
+
+/// One attribute file's text from a non-worktree source, or `None` when the
+/// path is not present there.
+fn read_attribute_source_contents(key: &str, kind: AttributeSourceKind<'_>) -> Option<String> {
+    let storage = util::objects_storage();
+    let oid = match kind {
+        AttributeSourceKind::Worktree => None?,
+        AttributeSourceKind::Index => {
+            let index =
+                git_internal::internal::index::Index::load(crate::utils::path::index()).ok()?;
+            index.get(key, 0).map(|entry| entry.hash)
+        }
+        AttributeSourceKind::Tree(tree) => {
+            use crate::utils::object_ext::TreeExt;
+            let loaded = git_internal::internal::object::tree::Tree::try_load(tree)?;
+            loaded
+                .get_plain_items_with_mode()
+                .into_iter()
+                .find(|(path, _, mode)| {
+                    path.to_string_lossy() == key
+                        && *mode == git_internal::internal::object::tree::TreeItemMode::Blob
+                })
+                .map(|(_, id, _)| id)
+        }
+    }?;
+    let bytes = storage.get(&oid).ok()?;
+    String::from_utf8(bytes).ok()
+}
+
 pub fn all_attribute_states_for_path(path: &Path) -> BTreeMap<String, AttributeState> {
     let Ok(workdir) = util::try_working_dir() else {
         return BTreeMap::new();

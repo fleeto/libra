@@ -130,6 +130,8 @@ main
 
 `--` 分隔符在所有模式下都把 revision 与 path 分开（`rev-parse <rev> -- <path>`）：`--` 之后的参数一律是 path 而非 revision，且在有 path 输出的模式下会回显 `--`。单 revision 模式 `--verify`、`--short` 只打印解析出的那一个对象（不打印 path）。
 
+匹配到多个**不同**对象的短对象名会以 `error: short object ID <p> is ambiguous` 失败，并给出 `The candidates are:` 提示，每个候选一行 `<abbrev> <type>`（按完整对象 id 排序），退出码 129（`LBR-CLI-003`；git 为 128）。`--json` 时错误 envelope 的 `details.candidates` 携带每个候选的完整 `oid`、`type` 与最短唯一 `abbrev`。同一对象的重复命中（如松散对象同时存在于 pack）会先合并，不计为歧义。
+
 > **与 git 的有意差异**：`--verify` 或 `--short` 与任一输出过滤标志（`--flags`/`--no-flags`/`--revs-only`/`--no-revs`）组合会以用法错误（`LBR-CLI-002`，退出码 129）被拒绝。git 在该组合下行为不确定，Libra 选择拒绝而非猜测。
 
 ## 错误处理
@@ -137,6 +139,7 @@ main
 | 场景 | StableErrorCode | 退出码 |
 |----------|-----------------|------|
 | 无效目标引用 | `LBR-CLI-003` | 129 |
+| 歧义短对象名 | `LBR-CLI-003` | 129 |
 | `--verify`/`--short` 与输出过滤标志组合 | `LBR-CLI-002` | 129 |
 | 无效工作树状态 | `LBR-REPO-003` | 128 |
 | 无法读取仓库元数据 | `LBR-IO-001` | 128 |

@@ -63,6 +63,8 @@ Because attributes and pathnames are both positional, they are disambiguated as:
 | `<pathname>...` | Paths to test (after `--`, or following the attribute). | `libra check-attr filter -- a.bin b.c` |
 | `-a`, `--all` | Report every attribute set on each path. | `libra check-attr --all data.bin` |
 | `--stdin` | Read pathnames from standard input. | `libra check-attr filter --stdin` |
+| `--cached` | Read attribute files from the index instead of the working tree | `libra check-attr --cached diff f.txt` |
+| `--source=<tree>` | Read attribute files from `<tree>` (a tree-ish is peeled to its tree) | `libra check-attr --source=HEAD diff f.txt` |
 | `-z` | NUL-delimit `--stdin` input and output. | `libra check-attr -z filter --stdin` |
 | `--json` / `--machine` | Structured output: `{ results: [{ path, attr, value }] }`. | `libra check-attr --json filter a.bin` |
 

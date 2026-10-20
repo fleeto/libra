@@ -74,7 +74,13 @@ libra diff main...feature
 | All merge bases | `libra merge-base --all a b` | `git merge-base --all a b` |
 | Ancestry test | `libra merge-base --is-ancestor a b` | `git merge-base --is-ancestor a b` |
 
-Deferred (not yet exposed): more than two commits and `--octopus` /
-`--independent` / `--fork-point`. `merge`, `rebase`, `am` and `diff A...B` all
+`--octopus` prints the best common ancestor of all given commits;
+`--independent` prints those given commits that no other given commit reaches;
+`--fork-point <commit> <ref>` walks `<ref>`'s reflog and prints the newest
+entry whose commit is an ancestor of `<commit>` (the branch's fork point).
+These three modes are mutually exclusive with each other and with
+`--all`/`--is-ancestor`.
+
+Deferred (not yet exposed): nothing beyond the above. `merge`, `rebase`, `am` and `diff A...B` all
 compute through this shared LCA; only `log A...B` still has its own reachable-set
 implementation, and migrating it is a tracked follow-up.

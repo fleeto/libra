@@ -46,6 +46,7 @@ impl From<CommitBaseError> for DescribeError {
         match error {
             CommitBaseError::HeadUnborn => Self::HeadUnborn,
             CommitBaseError::InvalidReference(message) => Self::InvalidReference(message),
+            error @ CommitBaseError::Ambiguous { .. } => Self::InvalidReference(error.to_string()),
             CommitBaseError::ReadFailure(message) => Self::ReadFailure(message),
             CommitBaseError::CorruptReference(message) => Self::CorruptReference(message),
         }

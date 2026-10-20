@@ -325,6 +325,65 @@ async fn test_log_quiet_does_not_initialize_pager() {
     );
 }
 
+/// M-AMB A3: a revision that cannot be resolved (a genuinely ambiguous short
+/// object name, or a nonexistent hex/name) makes `log` exit non-zero with an
+/// error instead of silently exiting 0; tokens after `--` and tokens that name
+/// existing paths or carry pathspec syntax stay silent pathspecs (Git parity).
+#[test]
+fn test_log_unresolvable_revision_fails() {
+    let repo = create_committed_repo_via_cli();
+    let fixture = create_ambiguous_prefix_fixture(repo.path());
+    let prefix = fixture.prefix.clone();
+
+    // A3: ambiguous short object name — git-style diagnostic, non-zero exit.
+    let output = run_libra_command(&["log", "--oneline", "-1", &prefix], repo.path());
+    assert_eq!(
+        output.status.code(),
+        Some(129),
+        "log <ambiguous> must fail: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let (human, report) = parse_cli_error_stderr(&output.stderr);
+    assert!(human.contains(&format!("short object ID {prefix} is ambiguous")));
+    assert!(human.contains("The candidates are:"));
+    assert_eq!(report.error_code, "LBR-CLI-003");
+    assert!(output.stdout.is_empty());
+
+    // A3: nonexistent hex revision — non-zero exit with an error.
+    let output = run_libra_command(&["log", "--oneline", "-1", "deadbeef1234"], repo.path());
+    assert_ne!(
+        output.status.code(),
+        Some(0),
+        "log <nonexistent hex> must not silently exit 0"
+    );
+    let (human, _) = parse_cli_error_stderr(&output.stderr);
+    assert!(
+        human.contains("unknown revision or path"),
+        "unexpected stderr: {human}"
+    );
+    assert!(output.stdout.is_empty());
+
+    // A3: nonexistent bare name — same strictness (this used to exit 0, N1).
+    let output = run_libra_command(&["log", "--oneline", "-1", "no-such-rev"], repo.path());
+    assert_ne!(output.status.code(), Some(0));
+    assert!(output.stdout.is_empty());
+
+    // Parity controls: an existing path and `--`-separated nonexistent tokens
+    // stay silent pathspecs (Git exits 0 without output for both).
+    let output = run_libra_command(&["log", "--oneline", "-1", "tracked.txt"], repo.path());
+    assert_cli_success(&output, "log <existing path> must stay a pathspec");
+
+    let output = run_libra_command(
+        &["log", "--oneline", "-1", "--", "no-such-file.zzz"],
+        repo.path(),
+    );
+    assert_cli_success(&output, "log -- <nonexistent> must stay a silent pathspec");
+
+    // A pathspec-glob token before `--` is also a silent pathspec, never an error.
+    let output = run_libra_command(&["log", "--oneline", "-1", "*.zzz"], repo.path());
+    assert_cli_success(&output, "log '*.zzz' must stay a silent pathspec");
+}
+
 #[test]
 fn test_log_invalid_since_uses_command_usage_error() {
     let repo = create_committed_repo_via_cli();

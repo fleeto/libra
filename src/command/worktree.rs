@@ -124,6 +124,10 @@ pub enum WorktreeSubcommand {
         /// already exists (no -B/--force).
         #[arg(short = 'b', long, visible_alias = "create-branch")]
         new_branch: Option<String>,
+        /// Reuse an existing non-empty directory (Git's `worktree add -f`).
+        /// Without it a non-empty destination is refused.
+        #[arg(short = 'f', long = "force")]
+        force: bool,
     },
     /// List all known worktrees and their state.
     List {
@@ -186,9 +190,14 @@ pub enum WorktreeSubcommand {
         #[arg(long, value_name = "PATH")]
         path: Option<String>,
         /// Also delete the worktree directory on disk after unregistering it.
-        /// Refuses on a dirty worktree (uncommitted changes).
+        /// Refuses on a dirty worktree (uncommitted changes) unless `--force`.
         #[arg(long)]
         delete_dir: bool,
+        /// Force the removal: delete a DIRTY worktree's directory anyway
+        /// (Git's `worktree remove -f`). Without `--delete-dir` this only
+        /// affects the dirty-state refusal.
+        #[arg(short = 'f', long = "force")]
+        force: bool,
     },
     /// Unmount a FUSE task worktree mountpoint.
     #[cfg(unix)]
@@ -736,11 +745,12 @@ pub async fn execute_safe(args: WorktreeArgs, output: &OutputConfig) -> CliResul
             target,
             detach,
             new_branch,
+            force,
         } => {
             let _registry_lock = acquire_registry_lock_async()
                 .await
                 .map_err(WorktreeError::into_cli_error)?;
-            let result = add_worktree_locked(name, path, target, detach, new_branch)
+            let result = add_worktree_locked(name, path, target, detach, new_branch, force)
                 .await
                 .map_err(WorktreeError::into_cli_error)?;
             render_add_worktree(&result, output)
@@ -796,13 +806,14 @@ pub async fn execute_safe(args: WorktreeArgs, output: &OutputConfig) -> CliResul
             name,
             path,
             delete_dir,
+            force,
         } => {
             let _registry_lock = acquire_registry_lock_async()
                 .await
                 .map_err(WorktreeError::into_cli_error)?;
             let path = resolve_linked_worktree_selector(name.as_deref(), path.as_deref())
                 .map_err(WorktreeError::into_cli_error)?;
-            let result = remove_worktree_locked(path, delete_dir)
+            let result = remove_worktree_locked(path, delete_dir, force)
                 .await
                 .map_err(WorktreeError::into_cli_error)?;
             render_remove_worktree(&result, output)

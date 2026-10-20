@@ -33,7 +33,7 @@ an existing `TREEISH`. `export-subst` is not implemented.
 | `[TREEISH]` | | Commit, branch, tag, or abbreviated commit hash to archive | `HEAD` |
 | `[PATH]...` | | Limit the archive to matching files or directories inside `TREEISH` | all files |
 | `--list` | `-l` | List supported archive formats and exit | false |
-| `--format <FMT>` | `-f` | Archive format: `tar`, `tar.gz`, `tgz`, `tar.bz2`, `tbz2`, `tbz`, or `zip` | `tar` |
+| `--format <FMT>` | `-f` | Archive format: `tar`, `tar.gz`, `tgz`, `tar.bz2`, `tbz2`, `tbz`, or `zip`. Omitted: inferred from the `-o` extension (`out.zip` → zip, `out.tar.gz` → tar.gz), falling back to `tar` | inferred from `-o` |
 | `--output <FILE>` | `-o` | Write archive bytes to a file instead of stdout | stdout |
 | `--prefix <PREFIX>` | | Prepend a relative directory prefix to each archived path | none |
 | `--verbose` | `-v` | Report each archived path (prefix applied) to stderr as progress | false |

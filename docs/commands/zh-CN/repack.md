@@ -5,7 +5,8 @@
 ## 概要
 
 ```
-libra repack [-a|--all] [-d|--delete] [-q|--quiet]
+libra repack [-a|--all] [-d|--delete] [-l|--local] [-q|--quiet]
+             [--window <N>] [--depth <N>]
 ```
 
 ## 说明
@@ -16,15 +17,20 @@ libra repack [-a|--all] [-d|--delete] [-q|--quiet]
 
 可达性从 refs、reflogs 和 index 计算 — 与 `libra maintenance run --task gc` 完全相同 — 因此仅被 reflog 引用的对象永远不会被丢弃。
 
+未给 `--window`/`--depth` 时，取值来自 `pack.window` / `pack.depth` 配置，默认为 10 / 50（与 Git 一致）。window 作为滑动 delta 搜索窗口转发给共享 pack 编码器：`0` 禁用 delta 压缩，更大的值会花更多时间寻找更小的 delta。`--depth` 被接受并校验以对齐 Git CLI；上游编码器应用固定的链长上限 50（已登记的上游依赖 ER-MX-03），因此任何被接受的值都会产出合法 pack。
+
 ## 选项
 
 | 选项 | 说明 |
 |------|------|
 | `-a`, `--all` | 把所有可达对象（包括已存储在 pack 中的对象）打包进一个新的单一 pack。 |
-| `-d`, `--delete` | 打包后删除现在已位于新 pack 中的 loose objects。只删除 object id 位于新 pack 中的文件；现有 packs 永不删除，因此不会留下未被引用的对象。 |
+| `-d`, `--delete` | 打包后删除现在已位于新 pack 中的 loose objects。只删除 object id 位于新 pack 中的文件。与 `-a` 组合时，对象全部被新 pack 覆盖的旧 pack 也会被删除 — 但只在新 pack 与索引写入并同步落盘之后，且删除前会逐个 pack 重新确认覆盖（任一对象未被覆盖则保留该 pack）。有其他仓库通过 alternates 借用本对象库时拒绝删除（`LBR-CONFLICT-002`）。 |
+| `-l`, `--local` | 跳过仅存在于 alternate 对象目录中的对象（`pack-objects --local` 语义）；alternate 专属对象保持原位。 |
 | `-q`, `--quiet` | 抑制信息摘要。 |
+| `--window <N>` | delta 压缩窗口大小（默认：`pack.window`，再默认 10；`0` 禁用 delta）。 |
+| `--depth <N>` | 最大 delta 链深度（默认：`pack.depth`，再默认 50）。 |
 
-带 `--json` / `--machine` 时，命令输出一个信封，其 `data` 对象包含 `pack`（新 pack 名称）、`objects_packed` 和 `loose_removed`。
+带 `--json` / `--machine` 时，命令输出一个信封，其 `data` 对象包含 `pack`（新 pack 名称）、`objects_packed`、`loose_removed`、`packs_removed`，以及解析后的 `window` / `depth`。
 
 ## 退出状态
 
@@ -33,7 +39,7 @@ libra repack [-a|--all] [-d|--delete] [-q|--quiet]
 
 ## 兼容性
 
-这是 Git `git repack` 的聚焦子集。Libra 总是通过共享 writer 写出单个未 delta 压缩的 pack；delta compression、`--window`/`--depth` 调优、geometric repacking（`--geometric`）、保留/写入 bitmaps，以及删除冗余 *packs*（区别于 loose objects）均未实现。见 [`COMPATIBILITY.md`](../../../COMPATIBILITY.md)。
+这是 Git `git repack` 的聚焦子集。Libra 每次运行通过共享 writer 写出一个新 pack，支持 `--window`/`--depth` delta 调优（以及 `-a -d` 的冗余 *pack* 删除）；geometric repacking（`--geometric`）、bitmap 生成与 `.keep` 处理未实现。见 [`COMPATIBILITY.md`](../../../COMPATIBILITY.md)。
 
 ## 示例
 
@@ -44,8 +50,17 @@ libra repack
 # 把每个可达对象合并进一个 pack。
 libra repack -a
 
-# 重新打包所有内容，并删除现在已打包的 loose copies。
+# 重新打包所有内容，删除已打包的 loose copies 和被完全覆盖的旧 packs。
 libra repack -a -d
+
+# 同上，但跳过仅存在于 alternate 中的对象。
+libra repack -a -d -l
+
+# 不做 delta 压缩地合并（CPU 开销更小，pack 更大）。
+libra repack -a -d --window=0
+
+# 花更多时间做 delta 搜索，得到更小的 pack。
+libra repack -a -d --window=50 --depth=100
 
 # 机器可读摘要。
 libra --json repack -a -d

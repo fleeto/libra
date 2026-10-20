@@ -38,7 +38,13 @@ use crate::{
         reflog::Reflog,
         tag,
     },
-    utils::{client_storage::ClientStorage, path, path_ext::PathExt},
+    utils::{
+        client_storage::ClientStorage,
+        error::{CliError, StableErrorCode},
+        path,
+        path_ext::PathExt,
+        text::SHORT_HASH_LEN,
+    },
 };
 
 // SAFETY: The unwrap() and expect() calls in this module are documented with safety
@@ -1857,12 +1863,30 @@ pub fn path_to_string(path: &Path) -> String {
     path.to_string_lossy().to_string()
 }
 
+/// A single object matched by an ambiguous short object-name prefix, resolved
+/// to its Git object type and shortest unique abbreviation (≥ [`SHORT_HASH_LEN`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AmbiguousCandidate {
+    /// Full object id.
+    pub oid: ObjectHash,
+    /// Git object type (`blob` / `tree` / `commit` / `tag`).
+    pub object_type: ObjectType,
+    /// Shortest prefix (≥ 7 hex chars) that uniquely identifies this object.
+    pub abbrev: String,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum CommitBaseError {
     #[error("HEAD does not point to a commit")]
     HeadUnborn,
     #[error("{0}")]
     InvalidReference(String),
+    /// A short object-name prefix matched multiple DISTINCT objects.
+    #[error("short object ID {name} is ambiguous")]
+    Ambiguous {
+        name: String,
+        candidates: Vec<AmbiguousCandidate>,
+    },
     #[error("{0}")]
     ReadFailure(String),
     #[error("{0}")]
@@ -1906,6 +1930,46 @@ impl CommitBaseError {
             Self::CorruptReference(message)
         }
     }
+}
+
+/// Build the shared Git-style [`CliError`] for a short object-name prefix that
+/// matched multiple DISTINCT objects: `error: short object ID <p> is
+/// ambiguous`, a `The candidates are:` hint listing `<abbrev> <type>` lines,
+/// and `details.candidates` (full OID + type + unique abbreviation) for
+/// `--json`. Every revision consumer maps [`CommitBaseError::Ambiguous`]
+/// through this so the diagnostic family is identical across commands.
+pub fn ambiguous_short_oid_error(name: &str, candidates: &[AmbiguousCandidate]) -> CliError {
+    CliError::failure(format!("short object ID {name} is ambiguous"))
+        .with_stable_code(StableErrorCode::CliInvalidTarget)
+        .with_hint(ambiguity_hint_text(candidates))
+        .with_detail("candidates", ambiguity_details_value(candidates))
+}
+
+/// `The candidates are:` plus one `  <abbrev> <type>` line per candidate,
+/// matching Git's `show_ambiguous_object` ordering (by full OID).
+fn ambiguity_hint_text(candidates: &[AmbiguousCandidate]) -> String {
+    let mut lines = Vec::with_capacity(candidates.len() + 1);
+    lines.push("The candidates are:".to_string());
+    for candidate in candidates {
+        lines.push(format!("  {} {}", candidate.abbrev, candidate.object_type));
+    }
+    lines.join("\n")
+}
+
+/// JSON array of `{ "oid", "type", "abbrev" }` objects for `details.candidates`.
+fn ambiguity_details_value(candidates: &[AmbiguousCandidate]) -> serde_json::Value {
+    serde_json::Value::Array(
+        candidates
+            .iter()
+            .map(|candidate| {
+                serde_json::json!({
+                    "oid": candidate.oid.to_string(),
+                    "type": candidate.object_type.to_string(),
+                    "abbrev": candidate.abbrev,
+                })
+            })
+            .collect(),
+    )
 }
 
 async fn resolve_branch_commit_typed(
@@ -2199,20 +2263,65 @@ async fn resolve_hash_atom_typed(name: &str) -> Result<ResolvedAtom, CommitBaseE
             "failed to search objects while resolving '{name}': {error}"
         ))
     })?;
-    let matches = matches
+    let mut matches = matches
         .into_iter()
         .filter(|object_id| object_id.kind() == hash_kind)
         .collect::<Vec<_>>();
+    // Defensive dedup: storage layers already collapse identical OIDs, but a
+    // duplicate must never surface as a false `ambiguous argument` error.
+    matches.sort_unstable();
+    matches.dedup();
     match matches.as_slice() {
         [object_id] => Ok(ResolvedAtom {
             object_id: *object_id,
             reflog_ref: None,
         }),
         [] => Err(invalid_reference(name)),
-        _ => Err(CommitBaseError::InvalidReference(format!(
-            "ambiguous argument: {name}"
-        ))),
+        ambiguous => {
+            // Genuine ambiguity: resolve each DISTINCT candidate's type and
+            // unique abbreviation so the shared diagnostic can list them
+            // (Git's `show_ambiguous_object`). Types are only read here — on
+            // the rare ambiguous path — per the MX-02 performance budget.
+            let mut candidates = Vec::with_capacity(ambiguous.len());
+            for object_id in ambiguous {
+                let object_type = object_type_typed(&storage, object_id, name)?;
+                let abbrev = find_unique_abbrev_typed(&storage, object_id, expected_len).await?;
+                candidates.push(AmbiguousCandidate {
+                    oid: *object_id,
+                    object_type,
+                    abbrev,
+                });
+            }
+            Err(CommitBaseError::Ambiguous {
+                name: name.to_string(),
+                candidates,
+            })
+        }
     }
+}
+
+/// Compute the shortest unique abbreviation (≥ [`SHORT_HASH_LEN`]) for
+/// `object_id` by probing the object store with progressively longer prefixes,
+/// mirroring Git's `find_unique_abbrev`. Called only while reporting an
+/// ambiguity, so the per-candidate probing cost is paid on the rare path.
+async fn find_unique_abbrev_typed(
+    storage: &ClientStorage,
+    object_id: &ObjectHash,
+    expected_len: usize,
+) -> Result<String, CommitBaseError> {
+    let full = object_id.to_string();
+    for len in SHORT_HASH_LEN.max(1)..=expected_len.min(full.len()) {
+        let prefix = &full[..len];
+        let matches = storage.search_result(prefix).await.map_err(|error| {
+            CommitBaseError::classify_storage_failure(format!(
+                "failed to search objects while disambiguating '{prefix}': {error}"
+            ))
+        })?;
+        if matches.len() == 1 && matches[0] == *object_id {
+            return Ok(prefix.to_string());
+        }
+    }
+    Ok(full)
 }
 
 async fn resolve_object_atom_typed(name: &str) -> Result<ResolvedAtom, CommitBaseError> {
@@ -5881,5 +5990,58 @@ mod test {
         // Git's `get_oid_oneline` skips empty patterns: `:/` resolves nothing.
         let err = resolve_object_spec_typed(":/").await.unwrap_err();
         assert!(matches!(err, CommitBaseError::InvalidReference(_)));
+    }
+
+    /// MX-02: the shared ambiguity diagnostic formats Git-style candidate hint
+    /// text (`The candidates are:` + `<abbrev> <type>` lines) and carries full
+    /// OID/type/abbrev details for `--json`, with LBR-CLI-003 / exit 129.
+    #[test]
+    fn ambiguous_short_oid_error_formats_candidates_and_json_details() {
+        let sha1_hex = |hex: &str| {
+            ObjectHash::from_hex_for_kind(git_internal::hash::HashKind::Sha1, hex)
+                .expect("valid sha1 object hash")
+        };
+        let candidates = vec![
+            AmbiguousCandidate {
+                oid: sha1_hex("1f2aa3bd5a96f8c1e2b0d9a7c4f5e6b1a2c3d4e5"),
+                object_type: ObjectType::Blob,
+                abbrev: "1f2aa3b".to_string(),
+            },
+            AmbiguousCandidate {
+                oid: sha1_hex("1f2ae0c7d8b9a6f5e4c3b2a19088776655443322"),
+                object_type: ObjectType::Blob,
+                abbrev: "1f2ae0c".to_string(),
+            },
+        ];
+        let error = ambiguous_short_oid_error("1f2a", &candidates);
+
+        assert_eq!(error.message(), "short object ID 1f2a is ambiguous");
+        assert_eq!(error.stable_code(), StableErrorCode::CliInvalidTarget);
+        assert_eq!(error.exit_code(), 129);
+        let hints = error.hints();
+        assert_eq!(hints.len(), 1);
+        assert_eq!(
+            hints[0].as_str(),
+            "The candidates are:\n  1f2aa3b blob\n  1f2ae0c blob"
+        );
+        let details = error.details();
+        let candidates_json = details
+            .get("candidates")
+            .expect("details.candidates")
+            .as_array()
+            .expect("candidates array");
+        assert_eq!(candidates_json.len(), 2);
+        assert_eq!(
+            candidates_json[0]["oid"],
+            "1f2aa3bd5a96f8c1e2b0d9a7c4f5e6b1a2c3d4e5"
+        );
+        assert_eq!(candidates_json[0]["type"], "blob");
+        assert_eq!(candidates_json[0]["abbrev"], "1f2aa3b");
+        assert_eq!(
+            candidates_json[1]["oid"],
+            "1f2ae0c7d8b9a6f5e4c3b2a19088776655443322"
+        );
+        assert_eq!(candidates_json[1]["type"], "blob");
+        assert_eq!(candidates_json[1]["abbrev"], "1f2ae0c");
     }
 }

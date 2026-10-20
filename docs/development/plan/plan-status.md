@@ -296,7 +296,7 @@
 | [`issues/478.md`](issues/478.md) | log/show/diff/grep/blame/notes/reflog 命令族 | 未启动 | LG-01..LG-25（25 卡） |
 | [`issues/479.md`](issues/479.md) | plumbing 与 Git 对齐 | 未启动 | EC-01、RV-01/02、UI-01..03、DF-01、SR-01、UR-01（9 卡） |
 | [`issues/480.md`](issues/480.md) | remote/fetch/pull/push/credential/rerere 对齐 | 未启动 | HP-01..HP-17（17 卡；HP-17 为 SSH 传输入口 host-key 校验，issue #560） |
-| [`issues/481.md`](issues/481.md) | 维护与杂项命令族对齐 | 未启动 | MX-01..MX-16（16 卡） |
+| [`issues/481.md`](issues/481.md) | 维护与杂项命令族对齐 | **实施中** | MX-01、MX-02、MX-03、MX-06 `done`/`complete`（实现完成，2026-10-20；C 组 bump 与 D 组 release 证据待用户授权）；MX-04、MX-05、MX-07..MX-16 待开工 |
 | [`issues/483.md`](issues/483.md) | `count-objects` 与预览命令零对象写入 | 未启动 | CO-01..CO-04（4 卡；CO-03/04 受 DEP-CO-04 / DEP-CLI-mirror `src/cli.rs` 实际写者串行约束） |
 | [`issues/486.md`](issues/486.md) | upstream ahead/behind 计数 | **已收口** | AB-01 `done/complete`（v0.22.31，已关闭） |
 | [`issues/487.md`](issues/487.md) | 本地 Git 转换挂死与中断恢复 | 未启动 | IG-01..IG-05（5 卡） |
@@ -588,7 +588,10 @@ SBX-01..05 `done/locally-accepted`；**发布步按 DEFER-SBX-06 正式延后**�
 | [`issues/478`](issues/478.md) | LG-01 | `log`/`rev-list` `--grep` 模式类型与匹配范围 | 无 | 尚未 Codex review | 无 | ❌ 禁止开工 |
 | [`issues/479`](issues/479.md) | EC-01 | plumbing 退出码契约守卫 | 无 | 尚未 Codex review | DEP-PL-04：与 plan-20260918 `add.rs` 串行 | ❌ 禁止开工 |
 | [`issues/480`](issues/480.md) | HP-01 / HP-02 | `remote add` 默认 refspec 与 `--mirror` / `remote rename` 改写推送目标 | 无 | 尚未 Codex review | 无 | ❌ 禁止开工 |
-| [`issues/481`](issues/481.md) | MX-01 | 短对象名候选去重 | 无 | 尚未 Codex review | 无 | ❌ 禁止开工 |
+| [`issues/481`](issues/481.md) | MX-01 | 短对象名候选去重 | 无 | 尚未 Codex review | 实现完成；lib 76/76、rev_parse 49/49、repack 7/7、restore 47/47、bisect 29/29、compat_ledger_schema 43/43；fmt/clippy 绿；C 组 bump 与 D 组 release 证据待用户授权 | 实施中 |
+| [`issues/481`](issues/481.md) | MX-02 | 歧义短对象名诊断与解析失败退出 | MX-01 | 尚未 Codex review | 实现完成；lib utils::util 70/70、rev_parse 50/50、log 141/141、checkout 34/34、compat_ledger_schema 43/43；fmt/clippy 绿；C 组 bump 与 D 组 release 证据待用户授权；网站文档同步在 `../libra-backend`（协调方） | 实施中 |
+| [`issues/481`](issues/481.md) | MX-03 | bisect 会话安全与统一错误 | MX-01 | 尚未 Codex review | 实现完成；lib command::bisect 3/3、command_test bisect_test 33/33、compat_serial_registry 26/26、compat_ledger_schema 43/43；fmt/clippy 绿；C 组 bump 与 D 组 release 证据待用户授权；网站文档同步在 `../libra-backend`（协调方） | 实施中 |
+| [`issues/481`](issues/481.md) | MX-06 | fsck 消息严重级别 | DEP-MX-04 | 尚未 Codex review | 实现完成；lib command::fsck 9/9、command_test fsck_test 53/53、compat_ledger_schema 43/43；fmt/clippy 绿；C 组 bump 与 D 组 release 证据待用户授权；网站文档同步在 `../libra-backend`（协调方） | 实施中 |
 | [`issues/483`](issues/483.md) | CO-01 | `count-objects` 无参数形式与命令契约 | 无 | 尚未 Codex review | CO-03/04 受 DEP-CO-04（`src/cli.rs`） | ❌ 禁止开工 |
 | [`issues/487`](issues/487.md) | IG-01 | 本地传输复用已修复的 pack 编码器 | 无（必最先完成） | 尚未 Codex review | 无 | ❌ 禁止开工 |
 | [`issues/488`](issues/488.md) | GR-01 | `grep --exclude-standard` / `--no-exclude-standard` | 无 | Codex R1 `PASS`（2026-10-06）；DEP-GR-01/02 未满足，发布步因 `gh` 未认证阻塞 | 实现完成；E1-E9 矩阵与 git 实跑一致；测试 48/48；`compat_ledger_schema` 43/43 | 实施中 |

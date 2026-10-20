@@ -6,7 +6,7 @@
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。对象、refs、索引、reflog 和 connectivity 检查已支持；`--strict` 已支持（commit email/timezone、commit tree/parent 存在性与类型、tree 条目存在性/类型/排序检查，刻意窄于 Git：未实现 `.gitmodules`/pathname-charset 检查与 `fsck.<msg-id>` 严重级别配置）；`--full`/`--no-full` pack 校验已公开（默认开启，与 git 一致；逐个校验 `.pack` 的尾部校验和 + 经 `verify_pack_index::parse_index` 校验 `.idx`，**不解码 pack 对象**故对 body-corrupt pack 报错而非 panic）；JSON/machine 输出已公开。
+- 兼容级别：`partial`。对象、refs、索引、reflog 和 connectivity 检查已支持；`--strict` 已支持（commit email/timezone、commit tree/parent 存在性与类型、tree 条目存在性/类型/排序检查，刻意窄于 Git：未实现 `.gitmodules`/pathname-charset 检查与 `fsck.<msg-id>` 严重级别配置）；严重级别按 Git msg-id 表：零填充文件模式（`zeroPaddedFilemode`）为警告（默认 exit 0，`--strict` 提升为错误），时区只校验 `±HHMM` 格式不校验取值范围，`--json` 每条消息带 `severity`；`--full`/`--no-full` pack 校验已公开（默认开启，与 git 一致；逐个校验 `.pack` 的尾部校验和 + 经 `verify_pack_index::parse_index` 校验 `.idx`，**不解码 pack 对象**故对 body-corrupt pack 报错而非 panic）；JSON/machine 输出已公开。
 
 - 当前矩阵承诺常用 Git 行为已支持；新增语义必须同步矩阵、用户文档和测试。
 

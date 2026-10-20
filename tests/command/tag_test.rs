@@ -3306,12 +3306,17 @@ fn tag_target_ambiguous_prefix_e1_human() {
     let fx = tag_target_fixture();
     let p = fx.repo.path();
     let out = run_libra_command(&["tag", "t", "5978"], p);
-    assert_eq!(
-        error_human(&out.stderr),
-        format!(
-            "fatal: Failed to resolve '{x}' as a valid ref.\nError-Code: LBR-CLI-003\n\nHint: use 'libra log --oneline' to see available commits.\n",
-            x = "5978"
-        )
+    // issues/481 MX-02: an ambiguous short object name now surfaces the shared
+    // Git-style diagnostic (message + candidate list) instead of the generic
+    // "Failed to resolve" wrapper.
+    let stderr = error_human(&out.stderr);
+    assert!(
+        stderr.starts_with("error: short object ID 5978 is ambiguous\nError-Code: LBR-CLI-003\n"),
+        "ambiguous tag target must use the shared ambiguity diagnostic: {stderr}"
+    );
+    assert!(
+        stderr.contains("Hint: The candidates are:"),
+        "the candidates must be listed: {stderr}"
     );
 }
 
@@ -3325,7 +3330,7 @@ fn tag_target_ambiguous_prefix_e1_json() {
         (
             "LBR-CLI-003".to_string(),
             129,
-            format!("Failed to resolve '{x}' as a valid ref.", x = "5978")
+            "short object ID 5978 is ambiguous".to_string()
         )
     );
 }
@@ -3340,7 +3345,7 @@ fn tag_target_ambiguous_prefix_e1_machine() {
         (
             "LBR-CLI-003".to_string(),
             129,
-            format!("Failed to resolve '{x}' as a valid ref.", x = "5978")
+            "short object ID 5978 is ambiguous".to_string()
         )
     );
 }

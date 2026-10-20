@@ -60,6 +60,218 @@ fn test_rev_parse_short_head_returns_non_ambiguous_hash() {
     assert_eq!(String::from_utf8_lossy(&resolved.stdout).trim(), full_hash);
 }
 
+/// Create a repo with two commits so the object database has several objects.
+fn repo_with_two_commits() -> tempfile::TempDir {
+    let repo = create_committed_repo_via_cli();
+    fs::write(repo.path().join("second.txt"), "second\n").expect("write second file");
+    let add = run_libra_command(&["add", "second.txt"], repo.path());
+    assert_cli_success(&add, "add second file");
+    let commit = run_libra_command(&["commit", "-m", "second", "--no-verify"], repo.path());
+    assert_cli_success(&commit, "commit second file");
+    repo
+}
+
+/// M-OID O1/O2: after `repack` the same object exists both as a loose object
+/// and in a pack (or, after two `repack -a -d`, in two packs). A unique short
+/// prefix must still resolve instead of being reported as ambiguous.
+#[test]
+fn test_short_oid_after_repack_matrix() {
+    let repo = repo_with_two_commits();
+    let head = run_libra_command(&["rev-parse", "HEAD"], repo.path());
+    assert_cli_success(&head, "rev-parse HEAD");
+    let full_hash = String::from_utf8_lossy(&head.stdout).trim().to_string();
+
+    // O1: loose + pack coexistence (`repack` without `-d` keeps loose objects).
+    let repack = run_libra_command(&["repack"], repo.path());
+    assert_cli_success(&repack, "repack (loose + pack)");
+
+    for prefix in [&full_hash[..10], &full_hash[..4]] {
+        let out = run_libra_command(&["rev-parse", prefix], repo.path());
+        assert_cli_success(&out, &format!("rev-parse {prefix} after loose+pack repack"));
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).trim(),
+            full_hash,
+            "short prefix {prefix} must resolve to {full_hash}"
+        );
+    }
+
+    // O2: two `repack -a -d` runs leave the same objects in two packs.
+    let first = run_libra_command(&["repack", "-a", "-d"], repo.path());
+    assert_cli_success(&first, "repack -a -d (first)");
+    let second = run_libra_command(&["repack", "-a", "-d"], repo.path());
+    assert_cli_success(&second, "repack -a -d (second)");
+
+    for prefix in [&full_hash[..10], &full_hash[..4]] {
+        let out = run_libra_command(&["rev-parse", prefix], repo.path());
+        assert_cli_success(&out, &format!("rev-parse {prefix} after multi-pack repack"));
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).trim(),
+            full_hash,
+            "short prefix {prefix} must resolve to {full_hash} after multi-pack repack"
+        );
+    }
+}
+
+/// M-OID O5: the same loose+pack dedup holds for a SHA-256 repository.
+#[test]
+fn test_short_oid_after_repack_sha256() {
+    let repo = create_committed_repo_with_format("sha256");
+    fs::write(repo.path().join("second.txt"), "second\n").expect("write second file");
+    let add = run_libra_command(&["add", "second.txt"], repo.path());
+    assert_cli_success(&add, "add second file (sha256)");
+    let commit = run_libra_command(&["commit", "-m", "second", "--no-verify"], repo.path());
+    assert_cli_success(&commit, "commit second file (sha256)");
+
+    let head = run_libra_command(&["rev-parse", "HEAD"], repo.path());
+    assert_cli_success(&head, "rev-parse HEAD (sha256)");
+    let full_hash = String::from_utf8_lossy(&head.stdout).trim().to_string();
+    assert_eq!(full_hash.len(), 64, "sha256 full hash must be 64 hex chars");
+
+    let repack = run_libra_command(&["repack"], repo.path());
+    assert_cli_success(&repack, "repack (sha256 loose + pack)");
+
+    for prefix in [&full_hash[..10], &full_hash[..4]] {
+        let out = run_libra_command(&["rev-parse", prefix], repo.path());
+        assert_cli_success(&out, &format!("rev-parse {prefix} (sha256 after repack)"));
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).trim(),
+            full_hash,
+            "sha256 short prefix {prefix} must resolve to {full_hash}"
+        );
+    }
+}
+
+/// M-AMB A1/A2/A4/A5: two DISTINCT blobs sharing a 4-hex prefix produce the
+/// shared Git-style ambiguity diagnostic (`error: short object ID <p> is
+/// ambiguous` + `The candidates are:` hint with `<abbrev> <type>` lines);
+/// `--json` exposes full OID/type/abbrev details; after `repack -a -d` the
+/// candidate list is unchanged (no duplicates); `cat-file` and `show` emit the
+/// same diagnostic family. Exit code 129 + LBR-CLI-003 per ADR-MX-02.
+#[test]
+fn test_ambiguous_short_oid_hint_matrix() {
+    let repo = create_committed_repo_via_cli();
+    let fixture = create_ambiguous_prefix_fixture(repo.path());
+    let prefix = fixture.prefix.clone();
+
+    // A1: human diagnostic with git-style message and candidate list.
+    let output = run_libra_command(&["rev-parse", &prefix], repo.path());
+    assert_eq!(
+        output.status.code(),
+        Some(129),
+        "ambiguous rev-parse must exit 129, got {:?} / {} / {}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let (human, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-003");
+    assert_eq!(report.exit_code, 129);
+    assert!(
+        human.contains(&format!("error: short object ID {prefix} is ambiguous")),
+        "unexpected human stderr: {human}"
+    );
+    assert!(
+        human.contains("Hint: The candidates are:"),
+        "stderr: {human}"
+    );
+
+    let candidates = report.details["candidates"]
+        .as_array()
+        .expect("details.candidates must be an array");
+    assert!(
+        candidates.len() >= 2,
+        "expected at least the two colliding blobs, got {candidates:?}"
+    );
+    // Storage-order (ascending OID) candidate lines, one per distinct object.
+    let mut candidate_oids = Vec::with_capacity(candidates.len());
+    for candidate in candidates {
+        let oid = candidate["oid"]
+            .as_str()
+            .expect("candidate oid")
+            .to_string();
+        let object_type = candidate["type"].as_str().expect("candidate type");
+        let abbrev = candidate["abbrev"].as_str().expect("candidate abbrev");
+        assert_eq!(oid.len(), 40, "candidate oid must be a full hash");
+        assert!(oid.starts_with(&prefix), "{oid} must share prefix {prefix}");
+        assert!(
+            oid.starts_with(abbrev) && abbrev.len() >= 7,
+            "abbrev {abbrev} must be a >= 7-char prefix of {oid}"
+        );
+        assert!(
+            ["blob", "tree", "commit", "tag"].contains(&object_type),
+            "unexpected candidate type {object_type}"
+        );
+        // The hint lists `<abbrev> <type>` lines exactly like Git's
+        // show_ambiguous_object (Libra renders the `Hint:` prefix house-style).
+        assert!(
+            human.contains(&format!("  {abbrev} {object_type}")),
+            "hint must list {abbrev} {object_type}, stderr: {human}"
+        );
+        candidate_oids.push(oid);
+    }
+    assert!(
+        candidate_oids.windows(2).all(|pair| pair[0] <= pair[1]),
+        "candidates must be sorted by OID: {candidate_oids:?}"
+    );
+    // The two colliding fixture blobs must both appear.
+    for oid in &fixture.oids {
+        assert!(
+            candidate_oids.iter().any(|candidate| candidate == oid),
+            "fixture blob {oid} missing from candidates {candidate_oids:?}"
+        );
+    }
+
+    // A2: after `repack -a -d` the same candidates appear with no duplicates.
+    let repack = run_libra_command(&["repack", "-a", "-d"], repo.path());
+    assert_cli_success(&repack, "repack -a -d for M-AMB A2");
+    let output = run_libra_command(&["rev-parse", &prefix], repo.path());
+    assert_eq!(output.status.code(), Some(129));
+    let (_, report_after) = parse_cli_error_stderr(&output.stderr);
+    let candidates_after = report_after.details["candidates"]
+        .as_array()
+        .expect("details.candidates must be an array after repack");
+    assert_eq!(
+        candidates_after.len(),
+        candidates.len(),
+        "repack must not duplicate or drop candidates"
+    );
+
+    // A4: `--json` puts the same candidates in the error envelope details.
+    let output = run_libra_command(&["rev-parse", "--json", &prefix], repo.path());
+    assert_eq!(output.status.code(), Some(129));
+    let (_, json_report) = parse_cli_error_stderr(&output.stderr);
+    let json_candidates = json_report.details["candidates"]
+        .as_array()
+        .expect("json details.candidates must be an array");
+    assert_eq!(json_candidates.len(), candidates.len());
+    for candidate in json_candidates {
+        let oid = candidate["oid"].as_str().expect("candidate oid");
+        assert!(
+            ["blob", "tree", "commit", "tag"]
+                .contains(&candidate["type"].as_str().expect("candidate type")),
+            "unexpected json candidate: {candidate:?}"
+        );
+        assert!(candidate_oids.iter().any(|candidate| candidate == oid));
+    }
+
+    // A5: cat-file and show emit the same diagnostic family.
+    for args in [vec!["cat-file", "-t", &prefix], vec!["show", &prefix]] {
+        let output = run_libra_command(&args, repo.path());
+        assert_eq!(
+            output.status.code(),
+            Some(129),
+            "{} must exit 129 on ambiguity",
+            args.join(" ")
+        );
+        let (human, _) = parse_cli_error_stderr(&output.stderr);
+        assert!(
+            human.contains(&format!("error: short object ID {prefix} is ambiguous")),
+            "{} stderr: {human}",
+            args.join(" ")
+        );
+    }
+}
+
 #[test]
 fn test_rev_parse_abbrev_ref_head_returns_branch_name() {
     let repo = tempdir().expect("failed to create repository root");

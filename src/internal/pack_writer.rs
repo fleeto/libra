@@ -48,6 +48,17 @@ use crate::{
     utils::client_storage::ClientStorage,
 };
 
+/// Git's default `pack.window` — the delta-compression window size, in objects
+/// (0 disables delta compression entirely). Shared by `repack`, `gc`'s
+/// aggressive mapping, and the `maintenance` pack writers (ADR-MX-09).
+pub const DEFAULT_WINDOW: usize = 10;
+
+/// Git's default `pack.depth` — the maximum delta chain depth. Validated and
+/// reported by `repack`, but the upstream git-internal encoder applies its own
+/// fixed chain cap (`MAX_CHAIN_LEN = 50`) regardless of the requested value
+/// (ER-MX-03 upstream dependency, `docs/development/plan/issues/481.md`).
+pub const DEFAULT_DEPTH: usize = 50;
+
 /// Load one object from storage and wrap it as a pack [`Entry`].
 ///
 /// Reads the object body and its type, then reconstructs the typed object so the
@@ -83,12 +94,29 @@ fn entry_from_storage(storage: &ClientStorage, hash: &ObjectHash) -> io::Result<
 /// [`PackEncoder::new_with_hash_kind`] so a Tokio worker thread does not need a
 /// matching thread-local.
 pub async fn encode_pack_bytes(entries: Vec<Entry>, hash_kind: HashKind) -> io::Result<Vec<u8>> {
+    encode_pack_bytes_with_window(entries, hash_kind, 0).await
+}
+
+/// [`encode_pack_bytes`] with an explicit delta-compression window.
+///
+/// `window == 0` selects independent zlib encoding (no delta objects); a
+/// non-zero window enables the encoder's sliding-window delta search with the
+/// given candidate-window size. The upstream encoder applies a fixed delta
+/// chain cap of 50 (git-internal `MAX_CHAIN_LEN`) regardless of any depth
+/// value, so depth capping is an upstream dependency (ER-MX-03 in
+/// `docs/development/plan/issues/481.md`); packs stay valid either way.
+pub async fn encode_pack_bytes_with_window(
+    entries: Vec<Entry>,
+    hash_kind: HashKind,
+    window: usize,
+) -> io::Result<Vec<u8>> {
     let (entry_tx, entry_rx) = tokio::sync::mpsc::channel::<MetaAttached<Entry, EntryMeta>>(1_000);
     let (stream_tx, mut stream_rx) = tokio::sync::mpsc::channel(1_000);
 
     let total_objects = entries.len();
     let encode_handle = tokio::spawn(async move {
-        let mut encoder = PackEncoder::new_with_hash_kind(hash_kind, total_objects, 0, stream_tx);
+        let mut encoder =
+            PackEncoder::new_with_hash_kind(hash_kind, total_objects, window, stream_tx);
         encoder.encode(entry_rx).await
     });
 
@@ -98,11 +126,25 @@ pub async fn encode_pack_bytes(entries: Vec<Entry>, hash_kind: HashKind) -> io::
     // encoder mid-encode — while this side is still blocked sending into the
     // (also bounded) input channel: a deadlock.
     let feed_handle = tokio::spawn(async move {
-        for entry in entries {
-            let meta_entry = MetaAttached {
-                inner: entry,
-                meta: EntryMeta::default(),
+        for (i, entry) in entries.into_iter().enumerate() {
+            // Upstream git-internal's `magic_sort` computes `content_sort_key`
+            // for path-less entries, shifting the first 8 bytes into a u64 by
+            // `(8 - len) * 8` — 64 for a 0-byte payload, i.e. a left-shift
+            // overflow panic in overflow-checked builds. Empty blobs and trees
+            // are common, so with deltas enabled they get a synthetic path
+            // that routes them into the path-aware ordering branch instead.
+            // The path is sort metadata only — it is never written into the
+            // pack — and empty payloads can neither serve as nor become delta
+            // objects (the similarity pre-filter rejects size-0 pairs).
+            let meta = if window > 0 && entry.data.is_empty() {
+                EntryMeta {
+                    file_path: Some(format!("empty/{i}")),
+                    ..EntryMeta::default()
+                }
+            } else {
+                EntryMeta::default()
             };
+            let meta_entry = MetaAttached { inner: entry, meta };
             if entry_tx.send(meta_entry).await.is_err() {
                 break; // the encoder went away; stop feeding
             }
@@ -136,6 +178,16 @@ pub async fn encode_hashes_to_pack(
     hashes: &[ObjectHash],
     hash_kind: HashKind,
 ) -> io::Result<Option<Vec<u8>>> {
+    encode_hashes_to_pack_with_window(storage, hashes, hash_kind, 0).await
+}
+
+/// [`encode_hashes_to_pack`] with an explicit delta-compression window.
+pub async fn encode_hashes_to_pack_with_window(
+    storage: &ClientStorage,
+    hashes: &[ObjectHash],
+    hash_kind: HashKind,
+    window: usize,
+) -> io::Result<Option<Vec<u8>>> {
     if hashes.is_empty() {
         return Ok(None);
     }
@@ -143,7 +195,9 @@ pub async fn encode_hashes_to_pack(
     for hash in hashes {
         entries.push(entry_from_storage(storage, hash)?);
     }
-    Ok(Some(encode_pack_bytes(entries, hash_kind).await?))
+    Ok(Some(
+        encode_pack_bytes_with_window(entries, hash_kind, window).await?,
+    ))
 }
 
 /// Encode `hashes` into a new pack under `pack_dir`, writing both the `.pack`
@@ -314,7 +368,21 @@ pub async fn write_pack_with_index(
     pack_dir: &Path,
     hash_kind: HashKind,
 ) -> io::Result<Option<PackPublication>> {
-    let Some(pack_bytes) = encode_hashes_to_pack(storage, hashes, hash_kind).await? else {
+    write_pack_with_index_with_window(storage, hashes, pack_dir, hash_kind, 0).await
+}
+
+/// [`write_pack_with_index`] with an explicit delta-compression window
+/// (0 = no deltas). `repack` forwards the resolved `--window` value here.
+pub async fn write_pack_with_index_with_window(
+    storage: &ClientStorage,
+    hashes: &[ObjectHash],
+    pack_dir: &Path,
+    hash_kind: HashKind,
+    window: usize,
+) -> io::Result<Option<PackPublication>> {
+    let Some(pack_bytes) =
+        encode_hashes_to_pack_with_window(storage, hashes, hash_kind, window).await?
+    else {
         return Ok(None);
     };
 
@@ -518,11 +586,14 @@ fn fsync_dir(dir: &std::path::Path) -> io::Result<bool> {
 #[cfg(test)]
 mod tests {
     use git_internal::{
-        hash::{HashKind, set_hash_kind},
+        hash::{HashKind, ObjectHash, set_hash_kind},
         internal::{object::blob::Blob, pack::entry::Entry},
     };
 
-    use super::{PackInstallLock, encode_pack_bytes, publish_pack_bytes, try_lock_pack_install};
+    use super::{
+        PackInstallLock, encode_pack_bytes, encode_pack_bytes_with_window, publish_pack_bytes,
+        try_lock_pack_install,
+    };
 
     fn valid_pack_bytes() -> Vec<u8> {
         set_hash_kind(HashKind::Sha1);
@@ -658,6 +729,120 @@ mod tests {
         assert!(publish_pack_bytes(&bytes, dir.path(), HashKind::Sha1).is_err());
         assert!(!dir.path().join(format!("pack-{checksum}.pack")).exists());
         assert!(!dir.path().join(format!("pack-{checksum}.idx")).exists());
+    }
+
+    /// A pack entry for the canonical empty tree (0-byte payload).
+    pub(super) fn empty_tree_entry() -> Entry {
+        use git_internal::internal::object::{ObjectTrait, tree::Tree};
+        let hash = ObjectHash::from_bytes(&[0u8; 20]).expect("zero placeholder sha1 hash");
+        Entry::from(Tree::from_bytes(&[], hash).expect("empty tree parses"))
+    }
+
+    /// A non-zero window enables delta compression: several near-identical
+    /// blobs encode to fewer bytes than the same set at window 0 (independent
+    /// zlib). This pins the window forwarding contract (ADR-MX-09): the window
+    /// value reaches the encoder rather than always selecting the no-delta
+    /// path.
+    #[test]
+    fn nonzero_window_enables_delta_compression() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+
+        // Long common prefix with a tiny per-object tail: a delta base can
+        // represent ~99% of each sibling, so window > 0 must select deltas.
+        let contents: Vec<String> = (0..6)
+            .map(|i| {
+                let mut body = String::new();
+                for _ in 0..120 {
+                    body.push_str("the quick brown fox jumps over the lazy dog\n");
+                }
+                body.push_str(&format!("unique tail marker {i}\n"));
+                body
+            })
+            .collect();
+        let build = |contents: &[String]| {
+            contents
+                .iter()
+                .map(|content| Entry::from(Blob::from_content(content)))
+                .collect::<Vec<_>>()
+        };
+
+        let no_delta = runtime
+            .block_on(encode_pack_bytes_with_window(
+                build(&contents),
+                HashKind::Sha1,
+                0,
+            ))
+            .expect("window 0 encode");
+        let delta = runtime
+            .block_on(encode_pack_bytes_with_window(
+                build(&contents),
+                HashKind::Sha1,
+                10,
+            ))
+            .expect("window 10 encode");
+
+        assert!(
+            no_delta.len() > delta.len(),
+            "window > 0 must delta-compress near-identical blobs (no-delta {} bytes vs delta {} bytes)",
+            no_delta.len(),
+            delta.len()
+        );
+        assert_eq!(&no_delta[..4], b"PACK");
+        assert_eq!(&delta[..4], b"PACK");
+    }
+
+    /// Empty blobs/trees must not crash the windowed encoder. Upstream
+    /// git-internal's `magic_sort` computes `content_sort_key` for path-less
+    /// entries with a left shift of `(8 - len) * 8` — 64 for a 0-byte payload,
+    /// a shift-overflow panic in overflow-checked builds. The writer gives
+    /// empty payloads a synthetic path when deltas are enabled, so the pack
+    /// encodes cleanly and still delta-compresses its non-empty neighbors.
+    #[test]
+    fn windowed_encoding_handles_empty_objects_without_panic() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+
+        let mut contents: Vec<String> = (0..6)
+            .map(|i| {
+                let mut body = String::new();
+                for _ in 0..120 {
+                    body.push_str("the quick brown fox jumps over the lazy dog\n");
+                }
+                body.push_str(&format!("unique tail marker {i}\n"));
+                body
+            })
+            .collect();
+        // The canonical empty blob and an empty tree: common in real history.
+        contents.push(String::new());
+        contents.push(String::new());
+        let mut entries: Vec<Entry> = contents
+            .iter()
+            .map(|content| Entry::from(Blob::from_content(content)))
+            .collect();
+        let empty_tree = crate::internal::pack_writer::tests::empty_tree_entry();
+        entries.push(empty_tree);
+
+        let no_delta = runtime
+            .block_on(encode_pack_bytes_with_window(
+                entries.clone(),
+                HashKind::Sha1,
+                0,
+            ))
+            .expect("window 0 encode with empty blobs");
+        let delta = runtime
+            .block_on(encode_pack_bytes_with_window(entries, HashKind::Sha1, 10))
+            .expect("window 10 encode with empty blobs must not panic");
+
+        assert!(
+            no_delta.len() > delta.len(),
+            "window > 0 must still delta-compress the non-empty blobs"
+        );
+        assert_eq!(&delta[..4], b"PACK");
     }
 
     /// Regression guard for ADR-CLH-01 / ADR-IG-01: encoding more entries than

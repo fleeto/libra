@@ -431,23 +431,29 @@ async fn render_show_human(args: &ShowArgs, color_enabled: bool) -> CliResult<St
     }
 
     // Resolve refs first so tags keep their custom rendering.
-    if let Ok(commit_hash) = util::get_commit_base(object_ref).await {
-        // Use find_tag_and_commit to check if it's a tag and get tag info
-        match tag::find_tag_and_commit(object_ref).await {
-            Ok(Some((object, _))) if object.get_type() == ObjectType::Tag => {
-                // For annotated tags, show tag details
-                let tag_hash = if let tag::TagObject::Tag(tag_obj) = &object {
-                    tag_obj.id
-                } else {
-                    commit_hash
-                };
-                return show_tag_by_hash(&tag_hash, args, color_enabled).await;
-            }
-            _ => {
-                // Not a tag, lightweight tag, or tag doesn't exist: show as commit.
-                return show_commit(&commit_hash, args, color_enabled).await;
+    match util::get_commit_base_typed(object_ref).await {
+        Ok(commit_hash) => {
+            // Use find_tag_and_commit to check if it's a tag and get tag info
+            match tag::find_tag_and_commit(object_ref).await {
+                Ok(Some((object, _))) if object.get_type() == ObjectType::Tag => {
+                    // For annotated tags, show tag details
+                    let tag_hash = if let tag::TagObject::Tag(tag_obj) = &object {
+                        tag_obj.id
+                    } else {
+                        commit_hash
+                    };
+                    return show_tag_by_hash(&tag_hash, args, color_enabled).await;
+                }
+                _ => {
+                    // Not a tag, lightweight tag, or tag doesn't exist: show as commit.
+                    return show_commit(&commit_hash, args, color_enabled).await;
+                }
             }
         }
+        Err(util::CommitBaseError::Ambiguous { name, candidates }) => {
+            return Err(util::ambiguous_short_oid_error(&name, &candidates));
+        }
+        Err(_) => {}
     }
 
     Err(show_bad_revision_error(object_ref))
@@ -481,8 +487,8 @@ async fn validate_show_quiet(args: &ShowArgs) -> CliResult<()> {
         return validate_object_by_hash(&hash, args).await;
     }
 
-    if let Ok(commit_hash) = util::get_commit_base(object_ref).await {
-        match tag::find_tag_and_commit(object_ref).await {
+    match util::get_commit_base_typed(object_ref).await {
+        Ok(commit_hash) => match tag::find_tag_and_commit(object_ref).await {
             Ok(Some((object, _))) if object.get_type() == ObjectType::Tag => {
                 let tag_hash = if let tag::TagObject::Tag(tag_obj) = &object {
                     tag_obj.id
@@ -494,7 +500,11 @@ async fn validate_show_quiet(args: &ShowArgs) -> CliResult<()> {
             _ => {
                 return validate_commit_output(&commit_hash, args).await;
             }
+        },
+        Err(util::CommitBaseError::Ambiguous { name, candidates }) => {
+            return Err(util::ambiguous_short_oid_error(&name, &candidates));
         }
+        Err(_) => {}
     }
 
     Err(show_bad_revision_error(object_ref))

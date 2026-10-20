@@ -177,3 +177,52 @@ fn path_outside_worktree_is_unspecified_not_a_panic() {
     );
     assert_eq!(stdout_of(&out), "../escape.bin: filter: unspecified\n");
 }
+
+/// MX-11 (issues/481): `--cached` reads attribute files from the index and
+/// `--source=<tree>` from a tree, while the default stays on the working tree.
+#[test]
+fn check_attr_cached_and_source_matrix() {
+    let repo = super::create_committed_repo_via_cli();
+    let root = repo.path();
+    fs::write(root.join(".gitattributes"), "*.txt diff=csv\n").expect("write attributes");
+    fs::write(root.join("a.txt"), "a\n").expect("write a.txt");
+    super::assert_cli_success(
+        &run_libra_command(&["add", ".gitattributes", "a.txt"], root),
+        "stage attributes",
+    );
+    super::assert_cli_success(
+        &run_libra_command(&["commit", "-m", "attrs", "--no-verify"], root),
+        "commit attributes",
+    );
+    // Change the worktree copy without staging: the three sources now differ.
+    fs::write(root.join(".gitattributes"), "*.txt diff=inline\n").expect("dirty attributes");
+
+    let worktree = run_libra_command(&["check-attr", "diff", "a.txt"], root);
+    assert_eq!(
+        String::from_utf8_lossy(&worktree.stdout).trim(),
+        "a.txt: diff: inline",
+        "the default source is the working tree"
+    );
+
+    let cached = run_libra_command(&["check-attr", "--cached", "diff", "a.txt"], root);
+    assert_eq!(
+        String::from_utf8_lossy(&cached.stdout).trim(),
+        "a.txt: diff: csv",
+        "--cached reads the staged attribute file"
+    );
+
+    let source = run_libra_command(&["check-attr", "--source=HEAD", "diff", "a.txt"], root);
+    assert_eq!(
+        String::from_utf8_lossy(&source.stdout).trim(),
+        "a.txt: diff: csv",
+        "--source=HEAD reads the committed attribute file (tree-ish peels to its tree)"
+    );
+
+    // `--all` honours the same source.
+    let all_cached = run_libra_command(&["check-attr", "--cached", "--all", "a.txt"], root);
+    assert!(
+        String::from_utf8_lossy(&all_cached.stdout).contains("a.txt: diff: csv"),
+        "--all --cached must report the staged value: {}",
+        String::from_utf8_lossy(&all_cached.stdout)
+    );
+}

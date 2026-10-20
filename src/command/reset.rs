@@ -2800,6 +2800,9 @@ fn map_commit_base_error(error: util::CommitBaseError) -> ResetError {
     match error {
         util::CommitBaseError::HeadUnborn => ResetError::HeadUnborn,
         util::CommitBaseError::InvalidReference(message) => ResetError::InvalidRevision(message),
+        error @ util::CommitBaseError::Ambiguous { .. } => {
+            ResetError::InvalidRevision(error.to_string())
+        }
         util::CommitBaseError::ReadFailure(message) => ResetError::RevisionRead(message),
         util::CommitBaseError::CorruptReference(message) => ResetError::RevisionCorrupt(message),
     }

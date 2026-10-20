@@ -432,6 +432,10 @@ async fn run_rev_parse_filter(args: &RevParseArgs, output: &OutputConfig) -> Cli
                 Ok(object_id) => Some(object_id),
                 // Expected "not a revision" → treat as a path.
                 Err(CommitBaseError::InvalidReference(_) | CommitBaseError::HeadUnborn) => None,
+                // Genuine ambiguity is a revision error, never reclassified as a path.
+                Err(error @ CommitBaseError::Ambiguous { .. }) => {
+                    return Err(rev_parse_target_error(arg, error));
+                }
                 // Real I/O / corruption failures surface with their own code.
                 Err(CommitBaseError::ReadFailure(detail)) => {
                     return Err(
@@ -814,6 +818,9 @@ async fn resolve_symbolic_full_name(spec: &str) -> CliResult<String> {
             );
         }
         Err(CommitBaseError::HeadUnborn | CommitBaseError::InvalidReference(_)) => {}
+        Err(error @ CommitBaseError::Ambiguous { .. }) => {
+            return Err(rev_parse_target_error(spec, error));
+        }
     }
 
     Err(unresolvable_symbolic_spec(spec))
@@ -997,6 +1004,9 @@ fn rev_parse_target_error(spec: &str, error: CommitBaseError) -> CliError {
         CommitBaseError::InvalidReference(detail) => {
             CliError::failure(format!("not a valid object name: '{spec}' ({detail})"))
                 .with_stable_code(StableErrorCode::CliInvalidTarget)
+        }
+        CommitBaseError::Ambiguous { name, candidates } => {
+            util::ambiguous_short_oid_error(&name, &candidates)
         }
         CommitBaseError::ReadFailure(detail) => {
             CliError::fatal(format!("failed to resolve '{spec}': {detail}"))

@@ -302,6 +302,9 @@ fn treeish_resolution_error(treeish: &str, error: CommitBaseError) -> CliError {
             CliError::failure(format!("not a valid tree-ish: '{treeish}' ({detail})"))
                 .with_stable_code(StableErrorCode::CliInvalidTarget)
         }
+        CommitBaseError::Ambiguous { name, candidates } => {
+            util::ambiguous_short_oid_error(&name, &candidates)
+        }
         CommitBaseError::ReadFailure(detail) => {
             CliError::fatal(format!("failed to resolve '{treeish}': {detail}"))
                 .with_stable_code(StableErrorCode::IoReadFailed)

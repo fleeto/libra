@@ -1,4 +1,9 @@
 //! Bisect navigation must preserve repository/session state on gitlink refusal.
+//!
+//! ADR-MX-03 §2 carve-out: a MARK refused by the gitlink preflight keeps the
+//! saved session untouched (atomic step), but a RESET refused by it still ends
+//! the session — reset clears the row, warns with the original target, and
+//! leaves HEAD at the candidate so the user can move nested files and retry.
 
 use std::{fs, path::Path};
 
@@ -100,13 +105,15 @@ fn assert_gitlink_refusal(output: &std::process::Output) {
 }
 
 #[test]
-fn bisect_start_with_nonempty_gitlink_keeps_existing_cleanliness_refusal() {
+fn bisect_start_with_nonempty_gitlink_gets_preflight_refusal_before_session() {
     for converged in [false, true] {
         // Given: a materialized gitlink has untracked nested user content.
         let (repo, commits) = gitlink_history();
         let path = repo.path();
         fs::write(path.join("vendor/inner.txt"), "nested user bytes\n").unwrap();
         let head = successful_stdout(path, &["rev-parse", "HEAD"]);
+        let refs = successful_stdout(path, &["show-ref"]);
+        let reflog = successful_stdout(path, &["reflog", "show", "HEAD"]);
         let index = fs::read(path.join(".libra/index")).unwrap();
         let (bad, good) = if converged { (2, 1) } else { (4, 0) };
 
@@ -116,27 +123,29 @@ fn bisect_start_with_nonempty_gitlink_keeps_existing_cleanliness_refusal() {
             path,
         );
 
-        // Then: the existing IncludeIgnored cleanliness gate creates no session.
-        assert_eq!(output.status.code(), Some(128));
-        assert!(
-            String::from_utf8_lossy(&output.stderr)
-                .contains("working tree contains uncommitted changes")
-        );
+        // Then: ADR-MX-05 §2 — the untracked file passes the start gate
+        // (only tracked changes are counted); the restore preflight refuses
+        // the candidate checkout before any session state is claimed.
+        assert_gitlink_refusal(&output);
         assert_eq!(successful_stdout(path, &["rev-parse", "HEAD"]), head);
         assert_eq!(
             successful_stdout(path, &["symbolic-ref", "HEAD"]),
             "refs/heads/main"
         );
+        assert_eq!(successful_stdout(path, &["show-ref"]), refs);
+        assert_eq!(successful_stdout(path, &["reflog", "show", "HEAD"]), reflog);
         assert_eq!(fs::read(path.join(".libra/index")).unwrap(), index);
         assert_eq!(
             fs::read(path.join("vendor/inner.txt")).unwrap(),
             b"nested user bytes\n"
         );
+        let view = run_libra_command(&["bisect", "view"], path);
         assert!(
-            !run_libra_command(&["bisect", "view"], path)
-                .status
-                .success()
+            !view.status.success(),
+            "refused start must not claim a session"
         );
+        let (stderr, _) = parse_cli_error_stderr(&view.stderr);
+        assert!(stderr.contains("not in an active bisect"));
     }
 }
 

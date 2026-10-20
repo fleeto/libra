@@ -25,9 +25,9 @@ through it — `log`, `show`, `rev-parse` peeling, and so on — not just one co
 - **delete** (`-d <object>...`) — remove the replacement(s); deleting a
   replacement that does not exist is an error.
 - **list** (`-l [<pattern>]`, the default with no create arguments) — print the
-  ids of replaced objects, one per line (Git's default short format), optionally
-  filtered by a substring. (`--format=medium/long`, which also shows the
-  replacement oid, and glob `<pattern>` matching are deferred.)
+  ids of replaced objects, one per line (Git's default `short` format),
+  optionally filtered by a substring. `--format=medium/long` also shows the
+  replacement oid with its type. Glob `<pattern>` matching is deferred.)
 
 Replacements are stored as loose refs under `.libra/refs/replace/<oid>` (Git's
 `refs/replace/` namespace).
@@ -38,6 +38,10 @@ Replacements are stored as loose refs under `.libra/refs/replace/<oid>` (Git's
 |--------|-------------|
 | `-f`, `--force` | Overwrite an existing replacement and allow a type mismatch. |
 | `-d`, `--delete` | Delete the replacement(s) for the given object(s). |
+| `--format=<short\|medium\|long>` | `-l` output format: `short` (replaced oid), `medium` (`<replaced> -> <replacement>`), `long` (both with object types) | `libra replace -l --format=medium` |
+| `--graft` | Create a replacement commit with the given parents: `replace --graft <commit> [<parent>...]` (none = parentless) | `libra replace --graft HEAD` |
+| `--edit` | Accepted for Git parity: behaves like `--graft` when parents are given, otherwise a no-op (Libra never opens an editor) | `libra replace --edit HEAD` |
+| `--convert-graft-file` | Convert `.libra/info/grafts` into replace refs and remove the file | `libra replace --convert-graft-file` |
 | `-l`, `--list` | List replaced object ids (optionally filtered by `<pattern>`). |
 
 ## Exit codes

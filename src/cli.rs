@@ -62,7 +62,7 @@ Command Groups:
   Commit And Branching    commit, branch, switch, checkout, tag, merge, mergetool, rebase, reset, cherry-pick, revert, am, rerere, metadata
   Remote And Cloud        remote, fetch, pull, push, open, cloud, cache, credential, bundle, auth, login, logout, whoami, mega2
   AI And Automation       automation, memory, sandbox, agent, review, investigate, service
-  Maintenance And Plumbing fsck, maintenance, repack, logfile, upgrade, cat-file, hash-object, write-tree, read-tree, update-index, update-ref, merge-file, merge-base, apply, mailinfo, diff-tree, diff-index, diff-files, fast-export, fast-import, replace, verify-pack, count-objects, rev-parse, rev-list, symbolic-ref, reflog, bisect, for-each-ref, commit-tree, file, alternates, deps
+  Maintenance And Plumbing fsck, gc, maintenance, repack, logfile, upgrade, cat-file, hash-object, write-tree, read-tree, update-index, update-ref, merge-file, merge-base, apply, mailinfo, diff-tree, diff-index, diff-files, fast-export, fast-import, replace, verify-pack, count-objects, rev-parse, rev-list, symbolic-ref, reflog, bisect, for-each-ref, commit-tree, file, alternates, deps
 
 Help Topics:
   error-codes  Print the stable CLI error code table (`libra help error-codes`)
@@ -683,6 +683,11 @@ enum Commands {
     #[command(about = "Verify the integrity of objects, refs, and index")]
     Fsck(command::fsck::FsckArgs),
     #[command(
+        about = "Clean up repository objects and refs (git gc)",
+        after_help = command::gc::GC_EXAMPLES
+    )]
+    Gc(command::gc::GcArgs),
+    #[command(
         about = "Run tasks to optimize Git repository data",
         after_help = command::maintenance::MAINTENANCE_EXAMPLES
     )]
@@ -858,13 +863,34 @@ pub enum Bisect {
     Start {
         #[arg(help = "Bad commit to start from")]
         bad: Option<String>,
-        #[arg(long, short, help = "Good commit to mark")]
-        good: Option<String>,
+        #[arg(help = "Good commits to start from (positional)", value_name = "GOOD")]
+        good: Vec<String>,
+        #[arg(
+            long = "good",
+            short,
+            value_name = "GOOD",
+            help = "Good commit to mark (compatibility alias for the first positional good)"
+        )]
+        good_opt: Option<String>,
         #[arg(
             long = "first-parent",
             help = "Follow only the first parent of merge commits while bisecting"
         )]
         first_parent: bool,
+        #[arg(
+            long = "term-old",
+            visible_alias = "term-good",
+            value_name = "TERM",
+            help = "Custom term for the old/good state (repeatable; last one wins)"
+        )]
+        term_old: Vec<String>,
+        #[arg(
+            long = "term-new",
+            visible_alias = "term-bad",
+            value_name = "TERM",
+            help = "Custom term for the new/bad state (repeatable; last one wins)"
+        )]
+        term_new: Vec<String>,
     },
     #[command(about = "Mark the current or given commit as bad")]
     Bad {
@@ -903,6 +929,28 @@ pub enum Bisect {
         visible_alias = "visualize"
     )]
     View,
+    #[command(about = "Show the current bisect terms")]
+    Terms {
+        #[arg(
+            long = "term-good",
+            visible_alias = "term-old",
+            conflicts_with = "term_bad",
+            help = "Print only the old/good term"
+        )]
+        term_good: bool,
+        #[arg(
+            long = "term-bad",
+            visible_alias = "term-new",
+            conflicts_with = "term_good",
+            help = "Print only the new/bad term"
+        )]
+        term_bad: bool,
+    },
+    #[command(
+        about = "Custom bisect term mark (e.g. 'fast'/'slow' from --term-old/--term-new)",
+        external_subcommand
+    )]
+    Term(Vec<String>),
 }
 
 /// Synchronous CLI entry — used by both the `libra` binary and embedders that cannot
@@ -1897,6 +1945,7 @@ fn command_scope(command: &Commands) -> CommandScope {
         | Commands::Push(_)
         | Commands::Repack(_)
         | Commands::Maintenance(_)
+        | Commands::Gc(_)
         | Commands::Fsck(_)
         | Commands::Cache(_)
         | Commands::File(_)
@@ -2126,6 +2175,7 @@ fn command_has_existing_operation_boundary(command: &Commands) -> bool {
             | Commands::ReadTree(_)
             | Commands::Repack(_)
             | Commands::Maintenance(_)
+            | Commands::Gc(_)
             | Commands::File(_)
             | Commands::HashObject(_)
             | Commands::IndexPack(_)
@@ -2272,7 +2322,11 @@ fn command_holds_shared_maintenance_lock(command: &Commands) -> bool {
     // not upgrade, so they would defer against themselves forever.
     if matches!(
         command,
-        Commands::Maintenance(_) | Commands::Repack(_) | Commands::Cache(_) | Commands::File(_)
+        Commands::Maintenance(_)
+            | Commands::Repack(_)
+            | Commands::Gc(_)
+            | Commands::Cache(_)
+            | Commands::File(_)
     ) {
         return false;
     }
@@ -2672,7 +2726,9 @@ async fn sequencer_control_for(
         }
         Commands::Bisect(bisect) => Some(match bisect {
             Bisect::Start { .. } => SequencerControl::BisectStart,
-            Bisect::Bad { .. } | Bisect::Good { .. } => SequencerControl::BisectMark,
+            Bisect::Bad { .. } | Bisect::Good { .. } | Bisect::Term(_) => {
+                SequencerControl::BisectMark
+            }
             Bisect::Skip { .. } => SequencerControl::BisectSkip,
             Bisect::Reset { .. } => SequencerControl::BisectReset,
             Bisect::Run { .. } => SequencerControl::BisectRun,
@@ -3698,6 +3754,7 @@ async fn parse_async_scoped(argv: Vec<std::ffi::OsString>) -> CliResult<()> {
             }
             Commands::Fetch(cmd_args) => command::fetch::execute_safe(cmd_args, &output).await?,
             Commands::Fsck(cmd_args) => command::fsck::execute_safe(cmd_args, &output).await?,
+            Commands::Gc(cmd_args) => command::gc::execute_safe(cmd_args, &output).await?,
             Commands::Maintenance(cmd_args) => {
                 command::maintenance::execute_safe(cmd_args, &output).await?
             }

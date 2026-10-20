@@ -6,7 +6,7 @@ use clap::Parser;
 use serde::Serialize;
 
 use crate::{
-    internal::merge_base,
+    internal::{merge_base, reflog::Reflog},
     utils::{
         error::{CliError, CliResult, StableErrorCode},
         output::{OutputConfig, emit_json_data},
@@ -35,9 +35,45 @@ pub struct MergeBaseArgs {
     #[clap(long = "is-ancestor")]
     pub is_ancestor: bool,
 
-    /// The two commits (branch, tag, `HEAD`, or object id).
+    /// Print the best common ancestor of all the given commits (Git's
+    /// `--octopus`).
+    #[clap(long, conflicts_with_all = ["all", "is_ancestor", "independent", "fork_point"])]
+    pub octopus: bool,
+
+    /// Print those given commits that do not have another given commit as an
+    /// ancestor, newest-first order preserved (Git's `--independent`).
+    #[clap(long, conflicts_with_all = ["all", "is_ancestor", "octopus", "fork_point"])]
+    pub independent: bool,
+
+    /// Find the best common ancestor of `<commit> <ref>` using `<ref>`'s
+    /// reflog, ignoring history older than that (Git's `--fork-point`).
+    #[clap(long = "fork-point", conflicts_with_all = ["all", "is_ancestor", "octopus", "independent"])]
+    pub fork_point: bool,
+
+    /// The commits (branch, tag, `HEAD`, or object id). Two for a plain
+    /// query, two or more for `--octopus`/`--independent`, exactly two for
+    /// `--fork-point`.
     #[clap(value_name = "COMMIT")]
     pub commits: Vec<String>,
+}
+
+/// Print a base list in human or JSON form (shared by every mode).
+fn emit_bases(printed: &[String], output: &OutputConfig) -> CliResult<()> {
+    if output.is_json() {
+        emit_json_data(
+            "merge-base",
+            &MergeBaseOutput {
+                bases: Some(printed.to_vec()),
+                is_ancestor: None,
+            },
+            output,
+        )?;
+    } else {
+        for id in printed {
+            println!("{id}");
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Serialize)]
@@ -46,6 +82,50 @@ struct MergeBaseOutput {
     bases: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     is_ancestor: Option<bool>,
+}
+
+/// Git's `merge-base --fork-point <commit> <ref>`: walk `<ref>`'s reflog
+/// newest-first and return the first entry whose commit is an ancestor of
+/// `<commit>`.
+pub(crate) async fn fork_point_base(
+    commit: &git_internal::hash::ObjectHash,
+    reference: &str,
+) -> CliResult<Option<git_internal::hash::ObjectHash>> {
+    let fatal = |message: String| {
+        CliError::fatal(message)
+            .with_exit_code(128)
+            .with_stable_code(StableErrorCode::RepoStateInvalid)
+    };
+    let ref_name = if reference == "HEAD" || reference.starts_with("refs/") {
+        reference.to_string()
+    } else {
+        format!("refs/heads/{reference}")
+    };
+    let db = crate::internal::db::get_db_conn_instance().await;
+    let logs = Reflog::find_all(&db, &ref_name)
+        .await
+        .map_err(|error| fatal(format!("failed to read reflog for '{ref_name}': {error}")))?;
+    let internal_err = |error: merge_base::MergeBaseError| match &error {
+        merge_base::MergeBaseError::Shallow(shallow) => CliError::fatal(error.to_string())
+            .with_exit_code(128)
+            .with_stable_code(StableErrorCode::RepoCorrupt)
+            .with_hint(shallow.hint()),
+        merge_base::MergeBaseError::Load(_) => CliError::fatal(error.to_string())
+            .with_exit_code(128)
+            .with_stable_code(StableErrorCode::RepoStateInvalid),
+    };
+    for entry in logs {
+        let Ok(candidate) = crate::internal::object_format::parse_repo_oid(&entry.new_oid) else {
+            continue;
+        };
+        if candidate == *commit {
+            return Ok(Some(candidate));
+        }
+        if merge_base::is_ancestor(&candidate, commit).map_err(internal_err)? {
+            return Ok(Some(candidate));
+        }
+    }
+    Ok(None)
 }
 
 pub async fn execute(args: MergeBaseArgs) {
@@ -67,20 +147,38 @@ pub async fn execute_safe(args: MergeBaseArgs, output: &OutputConfig) -> CliResu
             .with_exit_code(128)
     };
 
+    // Mode exclusivity (`--all`/`--is-ancestor`/`--octopus`/`--independent`/
+    // `--fork-point` are alternatives; clap rejects the flag pairs, this guard
+    // catches the argument-count rules).
     if args.is_ancestor && args.all {
         return Err(usage(
             "--is-ancestor and --all cannot be combined".to_string(),
         ));
     }
-    if args.commits.len() != 2 {
+    if args.commits.len() < 2 {
+        return Err(usage(if args.octopus || args.independent {
+            format!(
+                "merge-base {} requires at least two commits, got {}",
+                if args.octopus {
+                    "--octopus"
+                } else {
+                    "--independent"
+                },
+                args.commits.len()
+            )
+        } else {
+            format!(
+                "merge-base requires exactly two commits, got {}",
+                args.commits.len()
+            )
+        }));
+    }
+    if !args.octopus && !args.independent && args.commits.len() != 2 {
         return Err(usage(format!(
             "merge-base requires exactly two commits, got {}",
             args.commits.len()
         )));
     }
-
-    let a = resolve_commit(&args.commits[0]).await?;
-    let b = resolve_commit(&args.commits[1]).await?;
 
     let internal_err = |error: merge_base::MergeBaseError| match &error {
         merge_base::MergeBaseError::Shallow(shallow) => CliError::fatal(error.to_string())
@@ -91,6 +189,56 @@ pub async fn execute_safe(args: MergeBaseArgs, output: &OutputConfig) -> CliResu
             .with_exit_code(128)
             .with_stable_code(StableErrorCode::RepoStateInvalid),
     };
+
+    if args.independent {
+        let mut resolved = Vec::with_capacity(args.commits.len());
+        for commit in &args.commits {
+            resolved.push(resolve_commit(commit).await?);
+        }
+        // Git's `reduce_heads`: drop any tip that another given tip reaches.
+        let independent = merge_base::reduce_heads(&resolved).map_err(internal_err)?;
+        // Preserve the caller's order (git prints in argv order).
+        let printed: Vec<String> = resolved
+            .iter()
+            .filter(|candidate| independent.iter().any(|kept| kept == *candidate))
+            .map(|id| id.to_string())
+            .collect();
+        emit_bases(&printed, output)?;
+        return Ok(());
+    }
+
+    if args.octopus {
+        let mut resolved = Vec::with_capacity(args.commits.len());
+        for commit in &args.commits {
+            resolved.push(resolve_commit(commit).await?);
+        }
+        let bases = merge_base::octopus_merge_bases(&resolved).map_err(internal_err)?;
+        let printed: Vec<String> = if args.all {
+            bases.iter().map(|id| id.to_string()).collect()
+        } else {
+            bases.iter().take(1).map(|id| id.to_string()).collect()
+        };
+        emit_bases(&printed, output)?;
+        if printed.is_empty() {
+            return Err(CliError::silent_exit(1));
+        }
+        return Ok(());
+    }
+
+    if args.fork_point {
+        let a = resolve_commit(&args.commits[0]).await?;
+        let fork = crate::command::merge_base::fork_point_base(&a, &args.commits[1]).await?;
+        match fork {
+            Some(id) => {
+                emit_bases(&[id.to_string()], output)?;
+                return Ok(());
+            }
+            None => return Err(CliError::silent_exit(1)),
+        }
+    }
+
+    let a = resolve_commit(&args.commits[0]).await?;
+    let b = resolve_commit(&args.commits[1]).await?;
 
     if args.is_ancestor {
         let yes = merge_base::is_ancestor(&a, &b).map_err(internal_err)?;
@@ -118,20 +266,7 @@ pub async fn execute_safe(args: MergeBaseArgs, output: &OutputConfig) -> CliResu
         bases.iter().take(1).map(|id| id.to_string()).collect()
     };
 
-    if output.is_json() {
-        emit_json_data(
-            "merge-base",
-            &MergeBaseOutput {
-                bases: Some(printed.clone()),
-                is_ancestor: None,
-            },
-            output,
-        )?;
-    } else {
-        for id in &printed {
-            println!("{id}");
-        }
-    }
+    emit_bases(&printed, output)?;
 
     // No common ancestor: Git exits 1 with no output (128 is reserved for bad
     // revisions / usage errors).

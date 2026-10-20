@@ -93,9 +93,12 @@ pub struct ArchiveArgs {
     #[arg(value_name = "PATH", num_args = 0.., trailing_var_arg = true)]
     pub paths: Vec<String>,
 
-    /// Archive format: tar, tar.gz, tar.bz2, or zip.
-    #[arg(short = 'f', long, default_value = "tar", value_name = "FMT")]
-    pub format: String,
+    /// Archive format: tar, tar.gz, tar.bz2, or zip. Omitted (the default) means
+    /// infer from the `-o` extension (`out.zip` → zip, `out.tar.gz` → tar.gz),
+    /// falling back to uncompressed `tar` when the extension says nothing
+    /// (Git's `--format` inference, ADR-MX-10).
+    #[arg(short = 'f', long, value_name = "FMT")]
+    pub format: Option<String>,
 
     /// Write archive bytes to a file instead of stdout.
     #[arg(short = 'o', long, value_name = "FILE")]
@@ -667,6 +670,36 @@ fn write_zip_archive<W: Write + Seek>(
     Ok(())
 }
 
+/// Resolve the archive format: an explicit `--format` wins; otherwise infer
+/// from the `-o` file name's extension(s) like Git (ADR-MX-10), falling back
+/// to uncompressed `tar`.
+///
+/// Recognised suffixes: `.zip`, `.tar`, `.tar.gz`/`.tgz`, `.tar.bz2`/`.tbz2`/
+/// `.tbz`. Anything else (no `-o`, stdout, or an unknown suffix) stays `tar`.
+fn resolve_format(args: &ArchiveArgs) -> String {
+    if let Some(format) = args.format.as_deref() {
+        return format.to_string();
+    }
+    let Some(output) = args.output.as_deref() else {
+        return "tar".to_string();
+    };
+    let lower = output.to_ascii_lowercase();
+    let by_suffix = [
+        (".tar.gz", "tar.gz"),
+        (".tgz", "tar.gz"),
+        (".tar.bz2", "tar.bz2"),
+        (".tbz2", "tar.bz2"),
+        (".tbz", "tar.bz2"),
+        (".zip", "zip"),
+        (".tar", "tar"),
+    ];
+    by_suffix
+        .iter()
+        .find_map(|(suffix, format)| lower.ends_with(suffix).then_some(*format))
+        .unwrap_or("tar")
+        .to_string()
+}
+
 /// Create a buffered output file.
 fn create_output_file(path: &str) -> Result<BufWriter<File>, CliError> {
     let file = File::create(path).map_err(|error| {
@@ -753,7 +786,7 @@ pub async fn execute_safe(args: ArchiveArgs, _output: &OutputConfig) -> CliResul
         return Ok(());
     }
 
-    let format = ArchiveFormat::parse_strict(&args.format).map_err(|message| {
+    let format = ArchiveFormat::parse_strict(&resolve_format(&args)).map_err(|message| {
         CliError::command_usage(message).with_stable_code(StableErrorCode::CliInvalidArguments)
     })?;
     let prefix = validate_prefix(args.prefix.as_deref())?;

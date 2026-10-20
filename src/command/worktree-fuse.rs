@@ -562,6 +562,7 @@ pub async fn execute_safe(args: WorktreeArgs, output: &OutputConfig) -> CliResul
                             target,
                             detach,
                             new_branch: create_branch,
+                            force: false,
                         },
                     },
                     output,
@@ -702,7 +703,7 @@ pub async fn execute_safe(args: WorktreeArgs, output: &OutputConfig) -> CliResul
                     .map_err(|error| CliError::fatal(error.to_string()))?;
                 Ok(())
             } else {
-                let result = legacy::remove_worktree_locked(target, delete_dir)
+                let result = legacy::remove_worktree_locked(target, delete_dir, false)
                     .await
                     .map_err(legacy::WorktreeError::into_cli_error)?;
                 legacy::render_remove_worktree(&result, output)

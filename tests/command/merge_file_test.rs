@@ -336,3 +336,130 @@ fn backup_is_worktree_local() {
         "the linked worktree's same-named backup survives main's cleanup"
     );
 }
+
+/// MX-13 (issues/481, ADR-MX-13): `-L` labels, `--ours`/`--theirs`, `--union`,
+/// `--marker-size`, and Git's default label rule (file names, not
+/// ours/original/theirs).
+#[test]
+fn merge_file_labels_and_conflict_preferences() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    fs::write(root.join("base.txt"), "a\nb\nc\n").unwrap();
+    fs::write(root.join("ours.txt"), "a\nOURS\nc\n").unwrap();
+    fs::write(root.join("theirs.txt"), "a\nTHEIRS\nc\n").unwrap();
+
+    let reset_ours = || fs::write(root.join("ours.txt"), "a\nOURS\nc\n").unwrap();
+
+    // Default labels are the FILE NAMES (Git's rule), not ours/original/theirs.
+    let out = run_libra_command(
+        &["merge-file", "-p", "ours.txt", "base.txt", "theirs.txt"],
+        root,
+    );
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(
+        text.contains("<<<<<<< ours.txt") && text.contains(">>>>>>> theirs.txt"),
+        "default labels must be the file names: {text}"
+    );
+
+    // `-L` overrides each label in order.
+    reset_ours();
+    let out = run_libra_command(
+        &[
+            "merge-file",
+            "-p",
+            "-L",
+            "mine",
+            "-L",
+            "ancestor",
+            "-L",
+            "yours",
+            "ours.txt",
+            "base.txt",
+            "theirs.txt",
+        ],
+        root,
+    );
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(
+        text.contains("<<<<<<< mine") && text.contains(">>>>>>> yours"),
+        "-L labels must replace the defaults: {text}"
+    );
+
+    // `--ours` keeps our side, `--theirs` keeps theirs, both clean.
+    reset_ours();
+    let out = run_libra_command(
+        &[
+            "merge-file",
+            "-p",
+            "--ours",
+            "ours.txt",
+            "base.txt",
+            "theirs.txt",
+        ],
+        root,
+    );
+    assert!(out.status.success(), "--ours must be clean");
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(
+        text.contains("OURS") && !text.contains("THEIRS"),
+        "--ours: {text}"
+    );
+
+    reset_ours();
+    let out = run_libra_command(
+        &[
+            "merge-file",
+            "-p",
+            "--theirs",
+            "ours.txt",
+            "base.txt",
+            "theirs.txt",
+        ],
+        root,
+    );
+    assert!(out.status.success(), "--theirs must be clean");
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(
+        text.contains("THEIRS") && !text.contains("OURS"),
+        "--theirs: {text}"
+    );
+
+    // `--union` concatenates both sides and never reports a conflict.
+    reset_ours();
+    let out = run_libra_command(
+        &[
+            "merge-file",
+            "-p",
+            "--union",
+            "ours.txt",
+            "base.txt",
+            "theirs.txt",
+        ],
+        root,
+    );
+    assert_eq!(out.status.code(), Some(0), "--union must exit 0");
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(
+        text.contains("OURS") && text.contains("THEIRS") && !text.contains("<<<<<<<"),
+        "--union concatenates both sides: {text}"
+    );
+
+    // `--marker-size` widens the marker lines.
+    reset_ours();
+    let out = run_libra_command(
+        &[
+            "merge-file",
+            "-p",
+            "--marker-size=10",
+            "ours.txt",
+            "base.txt",
+            "theirs.txt",
+        ],
+        root,
+    );
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(
+        text.contains("<<<<<<<<<< ") && text.contains("=========="),
+        "--marker-size=10 must widen the markers: {text}"
+    );
+}

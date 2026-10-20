@@ -137,7 +137,8 @@ Apply additional format and graph checks (these are reported as errors, so they
 cause a non-zero exit):
 
 - commit author/committer emails must contain `@`, and their timezones must be a
-  well-formed `±HHMM` offset within ±1400;
+  well-formed `±HHMM` offset (format only — the numeric range is not checked,
+  matching Git, which accepts e.g. `+9999`);
 - a commit's tree and parents must exist with the expected object types
   (existence is also checked without `--strict`; `--strict` adds type checks);
 - a tree's entries must exist with object types matching their mode, and be in
@@ -153,6 +154,20 @@ libra fsck --strict
 Note: this is an intentionally narrowed subset of `git fsck --strict`. The
 `.gitmodules`/HFS+/NTFS pathname checks and per-message `fsck.<msg-id>` severity
 configuration are not implemented.
+
+### Severity: warnings vs errors
+
+Every finding carries a severity from Git's message-id table. Errors (reported
+as `error in ...`) cause a non-zero exit; warnings (reported as `warning in
+...`) do not — unless `--strict` escalates them to errors:
+
+- trees with zero-padded file modes (e.g. `040000` instead of `40000`) are a
+  warning by default: `warning in tree <oid>: zeroPaddedFilemode: contains
+  zero-padded file modes`, exit 0; `fsck --strict` reports the same finding as
+  `error in ...` with a non-zero exit.
+
+`--json` reports each finding with a `severity` field (`warning` / `error`);
+the exit decision follows the same rule (only errors count).
 
 ### `--full` / `--no-full`
 

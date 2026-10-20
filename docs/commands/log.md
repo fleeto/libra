@@ -365,7 +365,14 @@ Positionally, leading arguments are revisions until the first one that is not;
 everything after is treated as a pathspec, so `log A..B path/` filters the range
 to commits touching `path/`. A bare name that is **both** a valid revision and an
 existing path is rejected as ambiguous — use `--range <rev>` to select the
-revision.
+revision. A bare token that resolves no revision, names no existing path, and
+carries no pathspec syntax (`:`/`:(...)` magic or glob wildcards) is a typoed
+revision: it fails with `ambiguous argument '<x>': unknown revision or path not
+in the working tree` (`LBR-CLI-002`, exit 129) instead of silently exiting 0. A
+genuinely ambiguous short object name fails with `short object ID <p> is
+ambiguous` plus a `The candidates are:` hint (`LBR-CLI-003`, exit 129). Tokens
+after `--` are always pathspecs and never errors (`log -- <nonexistent>` exits 0
+with no output; `log -- HEAD` treats `HEAD` as a path).
 
 ```bash
 libra log main..feature            # positional range
@@ -605,18 +612,22 @@ Graph format:
 ### Positional revision ranges and the `--range` alternative
 
 Git accepts `git log A..B` where the revision expression is a positional argument,
-optionally followed by pathspecs. Libra supports this positional form: leading
-arguments are classified as revisions (by resolving them) until the first
-non-revision, after which the rest are pathspecs. Because Libra cannot rely on a
-`--` separator (it is consumed before the command sees it), the split is by
+optionally followed by pathspecs. Libra supports this positional form: tokens
+after `--` are always pathspecs — they never error, even when they name nothing
+(`log -- <nonexistent>` exits 0 with no output), and even a name that would
+otherwise be a revision is a plain path here (`log -- HEAD`). Before `--`,
+leading arguments are classified as revisions (by resolving them) until the
+first non-revision, after which the rest are pathspecs. The split is by
 resolution: a range-syntax token (`A..B`/`A...B`/`^A`) is a revision when it
 resolves, a pathspec when it does not resolve but names an existing path (e.g.
-`../file`), and otherwise an error (a typoed revision is reported as an unknown
-revision/path rather than silently filtering by a missing path). A bare token is
-a revision only if it resolves to a commit; a bare name that is *both* a revision
-and an existing path is rejected as ambiguous. The explicit `--range A..B` flag
-remains as an unambiguous alternative and is the way to force a name that also
-matches a path to be treated as a revision.
+`../file`) or carries pathspec magic/glob syntax, and otherwise an error (a
+typoed revision exits non-zero as an unknown revision/path rather than silently
+filtering by a missing path). A bare token is a revision only if it resolves to
+a commit; a genuinely ambiguous short object name surfaces the shared ambiguity
+diagnostic instead of being reclassified as a path; a bare name that is *both*
+a revision and an existing path is rejected as ambiguous. The explicit
+`--range A..B` flag remains as an unambiguous alternative and is the way to
+force a name that also matches a path to be treated as a revision.
 
 ### `--all` implementation
 
@@ -760,6 +771,8 @@ flag only affects the human rendering layer.
 | Invalid date argument | `LBR-CLI-002` | 129 | -- |
 | Invalid `--decorate` option | `LBR-CLI-002` | 129 | -- |
 | Invalid object name | `LBR-CLI-003` | 129 | "check the revision name and try again" |
+| Unresolvable positional revision (typo guard) | `LBR-CLI-002` | 129 | "unknown revision or path not in the working tree" |
+| Ambiguous short object name | `LBR-CLI-003` | 129 | "The candidates are: ..." (one `<abbrev> <type>` line per candidate) |
 | Corrupted commit/tree/blob | `LBR-REPO-002` | 128 | -- |
 | Failed to read historical objects | `LBR-REPO-002` | 128 | -- |
 
@@ -769,12 +782,14 @@ flag only affects the human rendering layer.
 - `--all` traverses local branches and lightweight tags; remote tracking refs and
   stashes are not included
 - Revision range syntax is available both positionally (`libra log A..B` /
-  `A...B` / `^A`) and via the explicit `--range A..B` flag; because the `--`
-  separator is consumed before the command, the positional rev/path split is by
-  resolution. A range-syntax token that neither resolves nor names an existing
-  path is reported as an unknown revision/path (typo guard); a bare name that is
-  both a revision and a path is rejected as ambiguous (use `--range` to force the
-  revision)
+  `A...B` / `^A`) and via the explicit `--range A..B` flag. Tokens after `--`
+  are always pathspecs and never errors; before `--` the positional rev/path
+  split is by resolution: a token that resolves no revision, names no existing
+  path, and carries no pathspec syntax is a typoed revision and fails with exit
+  129 (`LBR-CLI-002`) — it never silently exits 0; a genuinely ambiguous short
+  object name fails with the shared candidates diagnostic (`LBR-CLI-003`, 129);
+  a bare name that is both a revision and a path is rejected as ambiguous (use
+  `--range` to force the revision)
 - `--follow` uses best-effort rename detection and may miss complex renames
 - `-L` is accepted but does not yet provide blame-level line precision
 - `--reverse` is supported

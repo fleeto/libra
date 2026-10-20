@@ -128,7 +128,7 @@ libra fsck --connectivity-only
 
 额外的格式与图检查（作为错误报告，会导致非零退出）：
 
-- 提交的 author/committer 邮箱必须包含 `@`，时区必须是合法的 `±HHMM` 且在 ±1400 内；
+- 提交的 author/committer 邮箱必须包含 `@`，时区必须是合法的 `±HHMM`（仅校验格式，不校验取值范围——与 Git 一致，如 `+9999` 不会被报错）；
 - 提交的树与父提交必须存在且类型正确（存在性检查在不加 `--strict` 时也会做；`--strict` 额外检查类型）；
 - 树条目必须存在、类型与 mode 匹配，并按 Git 规范排序。
 
@@ -139,6 +139,14 @@ libra fsck --strict
 ```
 
 注意：这是 `git fsck --strict` 的有意收窄子集。`.gitmodules` / HFS+ / NTFS 路径检查以及按消息的 `fsck.<msg-id>` 严重级别配置尚未实现。
+
+### 严重级别：警告与错误
+
+每条发现按 Git 消息 ID 表携带严重级别。错误（`error in ...`）导致非零退出；警告（`warning in ...`）不导致非零退出——除非 `--strict` 将其提升为错误：
+
+- 零填充文件模式的树（如目录用 `040000` 而非 `40000`）默认是警告：`warning in tree <oid>: zeroPaddedFilemode: contains zero-padded file modes`，exit 0；`fsck --strict` 将同一发现报告为 `error in ...` 并非零退出。
+
+`--json` 为每条发现输出 `severity` 字段（`warning` / `error`）；退出决策规则相同（只计错误）。
 
 ### `--full` / `--no-full`
 

@@ -35,7 +35,7 @@ use crate::{
     cli::Bisect,
     command::{
         load_object, restore,
-        status::{changes_to_be_committed_safe, changes_to_be_staged_with_policy},
+        status::{Changes, changes_to_be_committed_safe, changes_to_be_staged},
     },
     internal::{
         branch::{Branch, BranchStoreError},
@@ -44,7 +44,6 @@ use crate::{
     },
     utils::{
         error::{CliError, CliResult, StableErrorCode},
-        ignore::IgnorePolicy,
         output::{OutputConfig, emit_json_data},
         util,
     },
@@ -386,16 +385,187 @@ impl BisectState {
     }
 }
 
+/// The user-facing terms of a bisect session (ADR-MX-11).
+///
+/// `good`/`bad` (aliases `old`/`new`) are the defaults. Custom terms are
+/// supplied at `bisect start --term-old/--term-new` and must survive the whole
+/// session so `bisect terms`, `bisect log`, `bisect view` and the custom-term
+/// mark subcommands can read them back.
+///
+/// ER-MX-04: terms are persisted in the repo config store (`config_kv`) under
+/// worktree-scoped keys, NOT as new `bisect_state` columns — so no schema
+/// migration is required. Keys are cleared by `bisect reset`; a stale key left
+/// by an abandoned session is overwritten by the next `bisect start`.
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct BisectTerms {
+    /// Old/good term (default `good`, alias `old`).
+    good: String,
+    /// New/bad term (default `bad`, alias `new`).
+    bad: String,
+}
+
+impl BisectTerms {
+    fn default_terms() -> Self {
+        Self {
+            good: "good".to_string(),
+            bad: "bad".to_string(),
+        }
+    }
+
+    /// `config_kv` keys for this worktree's terms. The empty main-worktree
+    /// scope key yields the bare `bisect.term.<role>` key; a linked worktree
+    /// appends its id so concurrent sessions keep independent terms.
+    fn config_key(role: &str) -> String {
+        let scope = BisectState::scope_key();
+        if scope.is_empty() {
+            format!("bisect.term.{role}")
+        } else {
+            format!("bisect.term.{role}.{scope}")
+        }
+    }
+
+    /// Load this worktree's terms. `None` means the terms are NOT fixed yet
+    /// (a session started without bounds or term options; git's missing
+    /// `BISECT_TERMS` file) — the first `bad`/`good`/`new`/`old` mark fixes
+    /// them. A partial key set (older binary) falls back per role.
+    async fn load() -> Result<Option<Self>, String> {
+        let good = ConfigKv::get(&Self::config_key("good"))
+            .await
+            .map_err(|e| format!("failed to read bisect term-good: {e}"))?;
+        let bad = ConfigKv::get(&Self::config_key("bad"))
+            .await
+            .map_err(|e| format!("failed to read bisect term-bad: {e}"))?;
+        Ok(match (good, bad) {
+            (None, None) => None,
+            (good, bad) => Some(Self {
+                good: good
+                    .map(|entry| entry.value)
+                    .unwrap_or_else(|| "good".to_string()),
+                bad: bad
+                    .map(|entry| entry.value)
+                    .unwrap_or_else(|| "bad".to_string()),
+            }),
+        })
+    }
+
+    async fn save(&self) -> Result<(), String> {
+        ConfigKv::set(&Self::config_key("good"), &self.good, false)
+            .await
+            .map_err(|e| format!("failed to save bisect term-good: {e}"))?;
+        ConfigKv::set(&Self::config_key("bad"), &self.bad, false)
+            .await
+            .map_err(|e| format!("failed to save bisect term-bad: {e}"))
+    }
+
+    async fn clear() -> Result<(), String> {
+        for role in ["good", "bad"] {
+            ConfigKv::unset(&Self::config_key(role))
+                .await
+                .map_err(|e| format!("failed to clear bisect term-{role}: {e}"))?;
+        }
+        Ok(())
+    }
+}
+
+/// Bisect subcommands that can never be reused as custom terms (git
+/// `bisect.c::check_term_format`). `bad`/`good`/`new`/`old` are deliberately
+/// absent: they are mark subcommands whose meaning is protected separately.
+const BISECT_BUILTIN_COMMANDS: &[&str] = &[
+    "start",
+    "skip",
+    "next",
+    "reset",
+    "visualize",
+    "view",
+    "replay",
+    "log",
+    "run",
+    "terms",
+    "help",
+];
+
+/// Which side of the bisect a candidate term is being validated for.
+#[derive(Clone, Copy)]
+enum TermSide {
+    /// The old/good side.
+    Good,
+    /// The new/bad side.
+    Bad,
+}
+
+/// Validate one custom term against git's `check_term_format` rules
+/// (ADR-MX-11 §4 / M-BTERMS T5). Returns a user-facing error string.
+fn validate_term(term: &str, side: TermSide) -> Result<(), String> {
+    // git validates `refs/bisect/<term>` with check_refname_format; reuse the
+    // shared refname checker (matches git's check-ref-format rules) so terms
+    // like `fa st`, `a..b` or control characters are refused.
+    if term.is_empty() || !util::is_valid_refname(&format!("refs/bisect/{term}")) {
+        return Err(format!("'{term}' is not a valid term"));
+    }
+    if BISECT_BUILTIN_COMMANDS.contains(&term) {
+        return Err(format!("can't use the builtin command '{term}' as a term"));
+    }
+    // Swapping the meaning wholesale is forbidden (git keeps this
+    // untested-on-purpose). The old side must not steal `bad`/`new`, the
+    // new side must not steal `good`/`old`.
+    match side {
+        TermSide::Good => {
+            if term == "bad" || term == "new" {
+                return Err(format!("can't change the meaning of the term '{term}'"));
+            }
+        }
+        TermSide::Bad => {
+            if term == "good" || term == "old" {
+                return Err(format!("can't change the meaning of the term '{term}'"));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Resolve `--term-old/--term-new` into a [`BisectTerms`], validating both
+/// (git rejects identical terms with "please use two different terms").
+fn resolve_bisect_terms(term_old: Option<&str>, term_new: Option<&str>) -> CliResult<BisectTerms> {
+    let terms = BisectTerms {
+        good: term_old.unwrap_or("good").to_string(),
+        bad: term_new.unwrap_or("bad").to_string(),
+    };
+    if terms.good == terms.bad {
+        return Err(CliError::command_usage("please use two different terms"));
+    }
+    validate_term(&terms.good, TermSide::Good).map_err(CliError::command_usage)?;
+    validate_term(&terms.bad, TermSide::Bad).map_err(CliError::command_usage)?;
+    Ok(terms)
+}
+
+/// ADR-MX-05 §2: whether the start gate must refuse, given the two status
+/// snapshots. Only TRACKED files count: staged changes of any kind plus
+/// unstaged tracked modifications (modified/deleted/renamed). Untracked and
+/// ignored files are deliberately excluded — a candidate whose checkout would
+/// overwrite them is refused by the per-step restore preflight instead.
+fn tracked_changes_block_start(staged: &Changes, unstaged: &Changes) -> bool {
+    !staged.is_empty()
+        || !unstaged.modified.is_empty()
+        || !unstaged.deleted.is_empty()
+        || !unstaged.renamed.is_empty()
+}
+
 /// `--help` examples shown in `libra bisect --help` output.
 pub const BISECT_EXAMPLES: &str = "\
 EXAMPLES:
     libra bisect start                         Begin a session; mark bad/good in subsequent steps
     libra bisect start <bad>                   Begin a session with the bad commit pre-marked
-    libra bisect start <bad> --good <good>     Begin a session with both bounds pre-marked
+    libra bisect start <bad> <good>            Begin a session with both bounds pre-marked
+    libra bisect start <bad> --good <good>     Compatibility form of the positional <good>
     libra bisect start <bad> --first-parent    Bisect only the first-parent (mainline) history
+    libra bisect start --term-old fast --term-new slow <bad> <good>
+                                               Use custom terms 'fast'/'slow'
     libra bisect bad                           Mark the current HEAD as bad
+    libra bisect new                           Mark the current HEAD as new (sets new/old terms)
     libra bisect good                          Mark the current HEAD as good
+    libra bisect old                           Mark the current HEAD as old (sets new/old terms)
     libra bisect skip                          Skip the current commit and continue
+    libra bisect terms                         Show the current old/new terms
     libra bisect view                          Show current state and remaining candidates
     libra bisect visualize                     Alias for 'view' (text state; Libra has no gitk GUI)
     libra bisect run cargo test                Auto-bisect by running a test command
@@ -422,6 +592,8 @@ enum BisectOutput {
         remaining: Option<usize>,
         #[serde(skip_serializing_if = "Option::is_none")]
         steps: Option<usize>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        term_bad: Option<String>,
     },
     Mark {
         mark: String,
@@ -437,6 +609,8 @@ enum BisectOutput {
         remaining: Option<usize>,
         #[serde(skip_serializing_if = "Option::is_none")]
         steps: Option<usize>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        term_bad: Option<String>,
     },
     Skip {
         commit: String,
@@ -467,6 +641,16 @@ enum BisectOutput {
         #[serde(skip_serializing_if = "Option::is_none")]
         steps: Option<usize>,
         completed: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        term_good: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        term_bad: Option<String>,
+    },
+    Terms {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        good: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        bad: Option<String>,
     },
     View {
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -481,6 +665,10 @@ enum BisectOutput {
         #[serde(skip_serializing_if = "Vec::is_empty")]
         skipped: Vec<String>,
         completed: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        term_good: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        term_bad: Option<String>,
     },
     Run {
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -551,8 +739,20 @@ async fn run_bisect(bisect_cmd: Bisect) -> CliResult<BisectOutput> {
         Bisect::Start {
             bad,
             good,
+            good_opt,
             first_parent,
-        } => run_bisect_start(bad, good, first_parent).await,
+            term_old,
+            term_new,
+        } => {
+            let mut goods = good;
+            if let Some(good) = good_opt {
+                goods.push(good);
+            }
+            // Repeatable term options: last one wins (git `t6030:1289`).
+            let term_old = term_old.last().cloned();
+            let term_new = term_new.last().cloned();
+            run_bisect_start(bad, goods, first_parent, term_old, term_new).await
+        }
         Bisect::Bad { rev } => run_bisect_bad(rev).await,
         Bisect::Good { rev } => run_bisect_good(rev).await,
         Bisect::Reset { rev } => run_bisect_reset(rev).await,
@@ -560,6 +760,11 @@ async fn run_bisect(bisect_cmd: Bisect) -> CliResult<BisectOutput> {
         Bisect::Log => run_bisect_log().await,
         Bisect::Run { cmd } => run_bisect_run(cmd).await,
         Bisect::View => run_bisect_view().await,
+        Bisect::Terms {
+            term_good,
+            term_bad,
+        } => run_bisect_terms(term_good, term_bad).await,
+        Bisect::Term(args) => run_bisect_custom_term(args).await,
     }
 }
 
@@ -578,10 +783,18 @@ fn render_bisect_output(result: &BisectOutput, output: &OutputConfig) -> CliResu
             first_bad,
             subject,
             remaining,
+            term_bad,
             ..
         } => {
             println!("Bisect session started");
-            render_bisect_progress(status, current, first_bad, subject, *remaining);
+            render_bisect_progress(
+                status,
+                current,
+                first_bad,
+                subject,
+                *remaining,
+                term_bad.as_deref(),
+            );
         }
         BisectOutput::Mark {
             mark,
@@ -591,10 +804,18 @@ fn render_bisect_output(result: &BisectOutput, output: &OutputConfig) -> CliResu
             first_bad,
             subject,
             remaining,
+            term_bad,
             ..
         } => {
             println!("Marked {} as {mark}", short_hash_str(commit));
-            render_bisect_progress(status, current, first_bad, subject, *remaining);
+            render_bisect_progress(
+                status,
+                current,
+                first_bad,
+                subject,
+                *remaining,
+                term_bad.as_deref(),
+            );
         }
         BisectOutput::Skip {
             commit,
@@ -604,27 +825,36 @@ fn render_bisect_output(result: &BisectOutput, output: &OutputConfig) -> CliResu
             ..
         } => {
             println!("Skipped {}", short_hash_str(commit));
-            render_bisect_progress(status, current, &None, &None, *remaining);
+            render_bisect_progress(status, current, &None, &None, *remaining, None);
         }
         BisectOutput::Reset {
             restored,
             commit,
             branch,
         } => {
-            if !restored {
-                println!("No bisect in progress");
-            } else if let Some(commit) = commit {
-                if let Some(branch) = branch {
+            if *restored {
+                if let Some(commit) = commit {
+                    if let Some(branch) = branch {
+                        println!(
+                            "HEAD is now at {} (on branch {})",
+                            short_hash_str(commit),
+                            branch
+                        );
+                    } else {
+                        println!("HEAD is now at {}", short_hash_str(commit));
+                    }
                     println!(
-                        "HEAD is now at {} (on branch {})",
-                        short_hash_str(commit),
-                        branch
+                        "Bisect session ended, HEAD restored to {}",
+                        short_hash_str(commit)
                     );
-                } else {
-                    println!("HEAD is now at {}", short_hash_str(commit));
                 }
+            } else if commit.is_none() {
+                println!("We are not bisecting.");
+            } else if let Some(commit) = commit {
+                // The session row was cleared but the original HEAD could not
+                // be restored; the recovery hint was already emitted on stderr.
                 println!(
-                    "Bisect session ended, HEAD restored to {}",
+                    "Bisect session ended; original HEAD {} could not be restored",
                     short_hash_str(commit)
                 );
             }
@@ -635,11 +865,15 @@ fn render_bisect_output(result: &BisectOutput, output: &OutputConfig) -> CliResu
             current,
             skipped,
             steps,
+            term_good,
+            term_bad,
             ..
         } => {
+            let term_bad = term_bad.as_deref().unwrap_or("bad");
+            let term_good = term_good.as_deref().unwrap_or("good");
             println!("Bisect log:");
             println!(
-                "  Bad: {}",
+                "  {term_bad}: {}",
                 bad.as_deref().map(short_hash_str).unwrap_or("not set")
             );
             let good = if good.is_empty() {
@@ -650,7 +884,7 @@ fn render_bisect_output(result: &BisectOutput, output: &OutputConfig) -> CliResu
                     .collect::<Vec<_>>()
                     .join(", ")
             };
-            println!("  Good: {good}");
+            println!("  {term_good}: {good}");
             println!(
                 "  Current: {}",
                 current.as_deref().map(short_hash_str).unwrap_or("not set")
@@ -658,14 +892,27 @@ fn render_bisect_output(result: &BisectOutput, output: &OutputConfig) -> CliResu
             println!("  Skipped: {} commits", skipped.len());
             println!("  Steps remaining: {steps:?}");
         }
+        BisectOutput::Terms { good, bad } => match (good, bad) {
+            (Some(good), Some(bad)) => {
+                println!("Your current terms are '{good}' for the old state");
+                println!("and '{bad}' for the new state.");
+            }
+            (Some(good), None) => println!("{good}"),
+            (None, Some(bad)) => println!("{bad}"),
+            (None, None) => {}
+        },
         BisectOutput::View {
             head,
             good,
             bad,
             remaining,
             skipped,
+            term_good,
+            term_bad,
             ..
         } => {
+            let term_good = term_good.as_deref().unwrap_or("good");
+            let term_bad = term_bad.as_deref().unwrap_or("bad");
             let good = good
                 .first()
                 .map(|hash| short_hash_str(hash).to_string())
@@ -675,7 +922,7 @@ fn render_bisect_output(result: &BisectOutput, output: &OutputConfig) -> CliResu
                 .map(short_hash_str)
                 .unwrap_or("(unset)")
                 .to_string();
-            println!("Bisecting between {good} (good) and {bad} (bad)");
+            println!("Bisecting between {good} ({term_good}) and {bad} ({term_bad})");
             println!(
                 "HEAD: {}",
                 head.as_deref().map(short_hash_str).unwrap_or("(none)")
@@ -717,6 +964,7 @@ fn render_bisect_progress(
     first_bad: &Option<String>,
     subject: &Option<String>,
     remaining: Option<usize>,
+    term_bad: Option<&str>,
 ) {
     match status {
         "waiting_for_good" => println!("Status: waiting for good commit(s)"),
@@ -731,7 +979,16 @@ fn render_bisect_progress(
         }
         "converged" => {
             if let Some(first_bad) = first_bad {
-                println!("{} is the first bad commit", short_hash_str(first_bad));
+                // Custom-term sessions print git's quoted culprit line
+                // ("<oid> is the first 'slow' commit", t6030:1188); the
+                // default bad/good form keeps the legacy unquoted message
+                // pinned by the MX-03 tests.
+                match term_bad {
+                    Some(term) if term != "bad" => {
+                        println!("{} is the first '{term}' commit", short_hash_str(first_bad));
+                    }
+                    _ => println!("{} is the first bad commit", short_hash_str(first_bad)),
+                }
             }
             if let Some(subject) = subject {
                 println!("{subject}");
@@ -752,6 +1009,50 @@ fn hash_to_string_opt(hash: Option<ObjectHash>) -> Option<String> {
 
 fn hashes_to_strings(hashes: &[ObjectHash]) -> Vec<String> {
     hashes.iter().map(ToString::to_string).collect()
+}
+
+/// Extract the human-readable subject line for culprit display.
+///
+/// Vault-signed commits prepend a `gpgsig`/`gpgsig-sha256` header block to the
+/// raw commit message, so `commit.message.lines().next()` would render
+/// `gpgsig -----BEGIN PGP SIGNATURE-----` as the culprit subject (issue #481
+/// N4). [`Commit::format_message`] already skips that block and returns the
+/// first non-empty body line; this wrapper keeps the call sites
+/// self-documenting and unit-testable (ADR-MX-03 §4).
+fn culprit_subject(commit: &Commit) -> String {
+    commit.format_message()
+}
+
+/// Build the `converged` [`BisectOutput::Mark`] for a session that has found
+/// (or already found) the first bad commit.
+///
+/// Shared by the normal convergence path and by re-marking after convergence
+/// (ADR-MX-03 §3): once the search has converged, `bisect good`/`bisect bad`
+/// re-print the culprit instead of surfacing an internal "already found"
+/// error.
+async fn converged_mark(mark: &str, state: &BisectState) -> CliResult<BisectOutput> {
+    let bad = state
+        .bad
+        .ok_or_else(|| CliError::fatal("No bad commit set"))?;
+    let commit = load_object::<Commit>(&bad)
+        .map_err(|e| CliError::fatal(format!("Failed to load commit: {e}")))?;
+    let subject = culprit_subject(&commit);
+    // The culprit line names the session's new/bad term (ADR-MX-11 §3).
+    let term_bad = BisectTerms::load()
+        .await
+        .map_err(CliError::fatal)?
+        .map(|terms| terms.bad);
+    Ok(BisectOutput::Mark {
+        mark: mark.to_string(),
+        commit: bad.to_string(),
+        status: "converged".to_string(),
+        current: hash_to_string_opt(state.current),
+        first_bad: Some(bad.to_string()),
+        subject: Some(subject),
+        remaining: Some(0),
+        steps: state.steps,
+        term_bad,
+    })
 }
 
 /// Read `core.bare` and decide whether the repository has a working tree.
@@ -785,10 +1086,16 @@ async fn is_bare_repository() -> CliResult<bool> {
 /// Handle `bisect start` — initialise a new search session.
 ///
 /// Functional scope:
-/// - Refuses to run on bare repos and on dirty worktrees (staged or unstaged
-///   changes, ignored files included — see [`IgnorePolicy::IncludeIgnored`]).
+/// - Refuses to run on bare repos and when TRACKED files carry staged or
+///   unstaged changes. Untracked and ignored files no longer block the start
+///   (ADR-MX-05 §2): the per-step restore preflight still rejects a candidate
+///   whose checkout would overwrite a colliding untracked/ignored path.
 /// - Captures the original branch (or detached commit) and stores it inside
 ///   [`BisectState`] so `reset` can recover it.
+/// - Accepts Git's positional form `<bad> [<good>...]`; `--good` is retained
+///   as a compatibility alias and merged into the positional goods.
+/// - Persists custom terms (ADR-MX-11) so `bisect terms`, `bisect log` and
+///   `bisect view` can render them; `reset` clears them.
 /// - When both `bad` and `good` are supplied, validates the bounds via
 ///   [`find_next_bisect_point`] *before* persisting state to avoid orphaned
 ///   rows on invalid input.
@@ -806,8 +1113,10 @@ async fn is_bare_repository() -> CliResult<bool> {
 /// tests/command/bisect_test.rs:370.
 async fn run_bisect_start(
     bad: Option<String>,
-    good: Option<String>,
+    goods: Vec<String>,
     first_parent: bool,
+    term_old: Option<String>,
+    term_new: Option<String>,
 ) -> CliResult<BisectOutput> {
     // Bare repositories have no working tree - bisect requires checkout operations
     if is_bare_repository().await? {
@@ -827,22 +1136,38 @@ async fn run_bisect_start(
     // to commit conflict markers.
     crate::internal::sequencer::ensure_none_for_bisect().await?;
 
-    // Require a clean working tree to prevent data loss: each bisect checkout
-    // resets tracked paths in the index and working tree to the candidate
-    // commit (uncommitted tracked changes would be lost), and a candidate that
-    // TRACKS a path currently present as an untracked/ignored file would
-    // overwrite it — so IncludeIgnored still catches .env/cache-dir collisions.
+    // ADR-MX-05 §2: the start gate only considers TRACKED files (staged plus
+    // tracked worktree modifications). Untracked and ignored files no longer
+    // block the start — a candidate that tracks a colliding path is instead
+    // refused by the per-step restore preflight before any state is written.
     let staged = changes_to_be_committed_safe()
         .await
         .map_err(|e| CliError::fatal(format!("Failed to check staged changes: {e}")))?;
-    let unstaged = changes_to_be_staged_with_policy(IgnorePolicy::IncludeIgnored)
+    let unstaged = changes_to_be_staged()
         .map_err(|e| CliError::fatal(format!("Failed to check unstaged changes: {e}")))?;
-    if !staged.is_empty() || !unstaged.is_empty() {
+    if tracked_changes_block_start(&staged, &unstaged) {
         return Err(CliError::fatal(
-            "working tree contains uncommitted changes",
+            "working tree contains uncommitted changes to tracked files",
         )
-        .with_hint("commit or stash your changes before running bisect. Note: each 'bisect good/bad/skip' step resets tracked files in the index and working tree to the candidate commit, so uncommitted tracked changes would be lost — and an untracked/ignored file would be overwritten if a candidate commit tracks a path with the same name"));
+        .with_hint("commit or stash your changes before running bisect. Note: each 'bisect good/bad/skip' step resets tracked files in the index and working tree to the candidate commit, so uncommitted tracked changes would be lost."));
     }
+
+    // ADR-MX-11 §4: validate the custom terms BEFORE touching any state so an
+    // invalid term is rejected with zero writes (M-BTERMS T5).
+    //
+    // git fixes the terms at start when term options OR bounds are given
+    // (it creates `refs/bisect/<term>` for the bounds immediately); a
+    // bound-less `bisect start` leaves them unfixed until the first mark.
+    let term_given = term_old.is_some() || term_new.is_some();
+    let bounds_given = bad.is_some() || !goods.is_empty();
+    let terms = if term_given || bounds_given {
+        Some(resolve_bisect_terms(
+            term_old.as_deref(),
+            term_new.as_deref(),
+        )?)
+    } else {
+        None
+    };
 
     // Check if there's any existing bisect state (active or completed)
     // Must use has_state to prevent overwriting preserved orig_head from a completed session
@@ -869,17 +1194,16 @@ async fn run_bisect_start(
         None
     };
 
-    let good_hash = if let Some(good_ref) = good {
-        Some(resolve_ref(&good_ref).await?)
-    } else {
-        None
-    };
+    let mut good_hashes = Vec::with_capacity(goods.len());
+    for good_ref in goods {
+        good_hashes.push(resolve_ref(&good_ref).await?);
+    }
 
     let mut state = BisectState {
         orig_head,
         orig_head_name,
         bad: bad_hash,
-        good: good_hash.map(|h| vec![h]).unwrap_or_default(),
+        good: good_hashes,
         current: None,
         skipped: vec![],
         steps: None,
@@ -889,29 +1213,42 @@ async fn run_bisect_start(
 
     // Validate the initial checkout before claiming the session, so a known
     // restore refusal cannot leave an orphaned bisect row behind.
-    let initial_next = if let (Some(bad), Some(_)) = (bad_hash, good_hash) {
-        let next = find_next_bisect_point(&state)
-            .await
-            .map_err(CliError::fatal)?;
-        match &next {
-            BisectNext::Next(candidate) => {
-                restore::preflight_worktree_restore_to_commit(candidate).await?;
+    let initial_next = match (bad_hash, state.good.is_empty()) {
+        (Some(bad), false) => {
+            let next = find_next_bisect_point(&state)
+                .await
+                .map_err(CliError::fatal)?;
+            match &next {
+                BisectNext::Next(candidate) => {
+                    restore::preflight_worktree_restore_to_commit(candidate).await?;
+                }
+                BisectNext::Converged => {
+                    restore::preflight_worktree_restore_to_commit(&bad).await?;
+                }
+                BisectNext::AllSkipped => {}
             }
-            BisectNext::Converged => {
-                restore::preflight_worktree_restore_to_commit(&bad).await?;
-            }
-            BisectNext::AllSkipped => {}
+            Some(next)
         }
-        Some(next)
-    } else {
-        None
+        _ => None,
     };
 
     // The first write of a STARTING session is a claim, not an upsert
     // (§C.4.4) — see `BisectState::claim_start`.
     state.claim_start().await.map_err(CliError::fatal)?;
 
-    if bad_hash.is_some() && good_hash.is_none() {
+    // ADR-MX-11 §3: persist the terms AFTER the session claim wins, so a
+    // refused claim cannot leave stale term keys behind (M-BTERMS T5). A
+    // bound-less start without term options leaves them unfixed; the first
+    // mark then fixes them (git's `BISECT_TERMS` semantics).
+    match terms.as_ref() {
+        Some(terms) => terms.save().await.map_err(CliError::fatal)?,
+        None => clear_bisect_terms_best_effort().await,
+    };
+    // The bad/new term for culprit lines in Start outputs (None when the
+    // session is bound-less and terms are unfixed).
+    let term_bad_out = terms.as_ref().map(|terms| terms.bad.clone());
+
+    if state.bad.is_some() && state.good.is_empty() {
         return Ok(BisectOutput::Start {
             status: "waiting_for_good".to_string(),
             bad: hash_to_string_opt(state.bad),
@@ -921,11 +1258,12 @@ async fn run_bisect_start(
             subject: None,
             remaining: None,
             steps: state.steps,
+            term_bad: term_bad_out.clone(),
         });
     }
 
     // If good is provided but no bad, wait for bad
-    if good_hash.is_some() && bad_hash.is_none() {
+    if !state.good.is_empty() && state.bad.is_none() {
         return Ok(BisectOutput::Start {
             status: "waiting_for_bad".to_string(),
             bad: hash_to_string_opt(state.bad),
@@ -935,6 +1273,7 @@ async fn run_bisect_start(
             subject: None,
             remaining: None,
             steps: state.steps,
+            term_bad: term_bad_out.clone(),
         });
     }
 
@@ -952,6 +1291,7 @@ async fn run_bisect_start(
                     subject: None,
                     remaining,
                     steps: state.steps,
+                    term_bad: term_bad_out.clone(),
                 });
             }
             BisectNext::Converged => {
@@ -959,7 +1299,7 @@ async fn run_bisect_start(
                 let bad_commit = state.bad.ok_or_else(|| CliError::fatal("No bad commit"))?;
                 let commit = load_object::<Commit>(&bad_commit)
                     .map_err(|e| CliError::fatal(format!("Failed to load commit: {e}")))?;
-                let subject = commit.message.lines().next().unwrap_or("");
+                let subject = culprit_subject(&commit);
                 // Move HEAD to the culprit commit, mark completed but keep state for reset
                 checkout_to_commit(bad_commit).await?;
                 state.current = Some(bad_commit);
@@ -974,6 +1314,7 @@ async fn run_bisect_start(
                     subject: Some(subject.to_string()),
                     remaining: Some(0),
                     steps: state.steps,
+                    term_bad: term_bad_out.clone(),
                 });
             }
             BisectNext::AllSkipped => {
@@ -989,6 +1330,7 @@ async fn run_bisect_start(
                     subject: None,
                     remaining: Some(0),
                     steps: state.steps,
+                    term_bad: term_bad_out.clone(),
                 });
             }
         }
@@ -1003,7 +1345,55 @@ async fn run_bisect_start(
         subject: None,
         remaining: None,
         steps: state.steps,
+        term_bad: term_bad_out.clone(),
     })
+}
+
+/// git `bisect.c::check_and_set_terms` equivalent for mark subcommands.
+///
+/// - Terms FIXED (persisted by `start` with bounds or `--term-*`, or by an
+///   earlier mark): the subcommand must be exactly the term for its side —
+///   a `slow`/`fast` session refuses `bad`/`good`/`new`/`old`, a `bad`/`good`
+///   session refuses `new`/`old`/custom marks, and a `new`/`old` session
+///   refuses `bad`/`good` (git prints `Invalid command: you're currently in
+///   a %s/%s bisect` + usage).
+/// - Terms UNFIXED (bound-less `bisect start`): the first mark fixes them to
+///   `bad`/`good` (or `new`/`old` when the mark was `new`/`old`).
+async fn ensure_mark_terms(cmd_name: &str, side: TermSide) -> CliResult<()> {
+    match BisectTerms::load().await.map_err(CliError::fatal)? {
+        Some(terms) => {
+            let expected = match side {
+                TermSide::Good => &terms.good,
+                TermSide::Bad => &terms.bad,
+            };
+            if expected != cmd_name {
+                return Err(invalid_bisect_term_command(&terms, cmd_name));
+            }
+        }
+        None => {
+            // Custom terms can never be unfixed: `start --term-*` persists
+            // them, so only bad/good/new/old reach this branch.
+            let terms = if cmd_name == "new" || cmd_name == "old" {
+                BisectTerms {
+                    good: "old".to_string(),
+                    bad: "new".to_string(),
+                }
+            } else {
+                BisectTerms::default_terms()
+            };
+            terms.save().await.map_err(CliError::fatal)?;
+        }
+    }
+    Ok(())
+}
+
+/// The git `Invalid command: you're currently in a %s/%s bisect` usage error
+/// for a mark subcommand that does not match the session's fixed terms.
+fn invalid_bisect_term_command(terms: &BisectTerms, cmd_name: &str) -> CliError {
+    CliError::command_usage(format!(
+        "Invalid command: you're currently in a {}/{} bisect\nunknown command: '{cmd_name}'",
+        terms.bad, terms.good,
+    ))
 }
 
 /// Handle `bisect bad` — mark `rev` (or HEAD) as containing the bug.
@@ -1023,14 +1413,27 @@ async fn run_bisect_start(
 /// tests::test_bisect_find_first_bad_commit in
 /// tests/command/bisect_test.rs:211.
 async fn run_bisect_bad(rev: Option<String>) -> CliResult<BisectOutput> {
+    // ADR-MX-03 §5: no-session `bad` shares the stable `LBR-BISECT-001`
+    // error with `good`/`skip`/`log`/`view`/`run` instead of surfacing an
+    // internal "No bisect in progress" load failure.
+    if !BisectState::has_state().await.map_err(CliError::fatal)? {
+        return Err(BisectError::NotActive.into());
+    }
+    // ADR-MX-11 §2: `bad` is only accepted while the session's terms are
+    // still bad/good (or unfixed — this fixes them to bad/good).
+    ensure_mark_terms("bad", TermSide::Bad).await?;
+    run_bisect_bad_mark(rev, "bad").await
+}
+
+/// [`run_bisect_bad`] body, parameterised by the subcommand name the user
+/// typed (`bad`, `new`, or a custom term) for output and terms enforcement.
+async fn run_bisect_bad_mark(rev: Option<String>, cmd_name: &str) -> CliResult<BisectOutput> {
     let mut state = BisectState::load().await.map_err(CliError::fatal)?;
 
-    // Block operations on completed sessions - user must reset first
+    // ADR-MX-03 §3: after convergence, re-marking re-prints the culprit
+    // (exit 0) instead of erroring with an internal "already found" message.
     if state.completed {
-        return Err(
-            CliError::fatal("bisect session has already found the culprit")
-                .with_hint("run 'bisect reset' to end the session and restore your original HEAD"),
-        );
+        return converged_mark(cmd_name, &state).await;
     }
 
     let bad_hash = if let Some(rev) = rev {
@@ -1048,7 +1451,7 @@ async fn run_bisect_bad(rev: Option<String>) -> CliResult<BisectOutput> {
         // No good commits yet - just save and wait for good
         state.save().await.map_err(CliError::fatal)?;
         return Ok(BisectOutput::Mark {
-            mark: "bad".to_string(),
+            mark: cmd_name.to_string(),
             commit: bad_hash.to_string(),
             status: "waiting_for_good".to_string(),
             current: hash_to_string_opt(state.current),
@@ -1056,6 +1459,7 @@ async fn run_bisect_bad(rev: Option<String>) -> CliResult<BisectOutput> {
             subject: None,
             remaining: None,
             steps: state.steps,
+            term_bad: None,
         });
     }
 
@@ -1067,7 +1471,7 @@ async fn run_bisect_bad(rev: Option<String>) -> CliResult<BisectOutput> {
         BisectNext::Next(next) => {
             let remaining = checkout_to_bisect_point(next, &mut state).await?;
             Ok(BisectOutput::Mark {
-                mark: "bad".to_string(),
+                mark: cmd_name.to_string(),
                 commit: bad_hash.to_string(),
                 status: "testing".to_string(),
                 current: hash_to_string_opt(state.current),
@@ -1075,6 +1479,7 @@ async fn run_bisect_bad(rev: Option<String>) -> CliResult<BisectOutput> {
                 subject: None,
                 remaining,
                 steps: state.steps,
+                term_bad: None,
             })
         }
         BisectNext::Converged => {
@@ -1082,30 +1487,18 @@ async fn run_bisect_bad(rev: Option<String>) -> CliResult<BisectOutput> {
             let bad = state
                 .bad
                 .ok_or_else(|| CliError::fatal("No bad commit set"))?;
-            let commit = load_object::<Commit>(&bad)
-                .map_err(|e| CliError::fatal(format!("Failed to load commit: {e}")))?;
-            let subject = commit.message.lines().next().unwrap_or("");
             // Move HEAD to the culprit commit, mark completed but keep state for reset
             checkout_to_commit(bad).await?;
             state.current = Some(bad);
             state.completed = true;
             state.save().await.map_err(CliError::fatal)?;
-            Ok(BisectOutput::Mark {
-                mark: "bad".to_string(),
-                commit: bad_hash.to_string(),
-                status: "converged".to_string(),
-                current: hash_to_string_opt(state.current),
-                first_bad: Some(bad.to_string()),
-                subject: Some(subject.to_string()),
-                remaining: Some(0),
-                steps: state.steps,
-            })
+            converged_mark(cmd_name, &state).await
         }
         BisectNext::AllSkipped => {
             // Bounds valid but all candidates skipped - mark is saved
             state.save().await.map_err(CliError::fatal)?;
             Ok(BisectOutput::Mark {
-                mark: "bad".to_string(),
+                mark: cmd_name.to_string(),
                 commit: bad_hash.to_string(),
                 status: "all_skipped".to_string(),
                 current: hash_to_string_opt(state.current),
@@ -1113,6 +1506,7 @@ async fn run_bisect_bad(rev: Option<String>) -> CliResult<BisectOutput> {
                 subject: None,
                 remaining: Some(0),
                 steps: state.steps,
+                term_bad: None,
             })
         }
     }
@@ -1127,14 +1521,24 @@ async fn run_bisect_bad(rev: Option<String>) -> CliResult<BisectOutput> {
 /// Boundary conditions:
 /// - Refuses to run on a completed session (the user must `bisect reset`).
 async fn run_bisect_good(rev: Option<String>) -> CliResult<BisectOutput> {
+    // ADR-MX-03 §5: see `run_bisect_bad` — unify the no-session error.
+    if !BisectState::has_state().await.map_err(CliError::fatal)? {
+        return Err(BisectError::NotActive.into());
+    }
+    // ADR-MX-11 §2: `good` is only accepted while the session's terms are
+    // still bad/good (or unfixed — this fixes them to bad/good).
+    ensure_mark_terms("good", TermSide::Good).await?;
+    run_bisect_good_mark(rev, "good").await
+}
+
+/// [`run_bisect_good`] body, parameterised by the subcommand name the user
+/// typed (`good`, `old`, or a custom term) for output and terms enforcement.
+async fn run_bisect_good_mark(rev: Option<String>, cmd_name: &str) -> CliResult<BisectOutput> {
     let mut state = BisectState::load().await.map_err(CliError::fatal)?;
 
-    // Block operations on completed sessions - user must reset first
+    // ADR-MX-03 §3: after convergence, re-marking re-prints the culprit.
     if state.completed {
-        return Err(
-            CliError::fatal("bisect session has already found the culprit")
-                .with_hint("run 'bisect reset' to end the session and restore your original HEAD"),
-        );
+        return converged_mark(cmd_name, &state).await;
     }
 
     let good_hash = if let Some(rev) = rev {
@@ -1152,7 +1556,7 @@ async fn run_bisect_good(rev: Option<String>) -> CliResult<BisectOutput> {
         // No bad commit yet - just save and wait for bad
         state.save().await.map_err(CliError::fatal)?;
         return Ok(BisectOutput::Mark {
-            mark: "good".to_string(),
+            mark: cmd_name.to_string(),
             commit: good_hash.to_string(),
             status: "waiting_for_bad".to_string(),
             current: hash_to_string_opt(state.current),
@@ -1160,6 +1564,7 @@ async fn run_bisect_good(rev: Option<String>) -> CliResult<BisectOutput> {
             subject: None,
             remaining: None,
             steps: state.steps,
+            term_bad: None,
         });
     }
 
@@ -1171,7 +1576,7 @@ async fn run_bisect_good(rev: Option<String>) -> CliResult<BisectOutput> {
         BisectNext::Next(next) => {
             let remaining = checkout_to_bisect_point(next, &mut state).await?;
             Ok(BisectOutput::Mark {
-                mark: "good".to_string(),
+                mark: cmd_name.to_string(),
                 commit: good_hash.to_string(),
                 status: "testing".to_string(),
                 current: hash_to_string_opt(state.current),
@@ -1179,6 +1584,7 @@ async fn run_bisect_good(rev: Option<String>) -> CliResult<BisectOutput> {
                 subject: None,
                 remaining,
                 steps: state.steps,
+                term_bad: None,
             })
         }
         BisectNext::Converged => {
@@ -1186,30 +1592,18 @@ async fn run_bisect_good(rev: Option<String>) -> CliResult<BisectOutput> {
             let bad = state
                 .bad
                 .ok_or_else(|| CliError::fatal("No bad commit set"))?;
-            let commit = load_object::<Commit>(&bad)
-                .map_err(|e| CliError::fatal(format!("Failed to load commit: {e}")))?;
-            let subject = commit.message.lines().next().unwrap_or("");
             // Move HEAD to the culprit commit, mark completed but keep state for reset
             checkout_to_commit(bad).await?;
             state.current = Some(bad);
             state.completed = true;
             state.save().await.map_err(CliError::fatal)?;
-            Ok(BisectOutput::Mark {
-                mark: "good".to_string(),
-                commit: good_hash.to_string(),
-                status: "converged".to_string(),
-                current: hash_to_string_opt(state.current),
-                first_bad: Some(bad.to_string()),
-                subject: Some(subject.to_string()),
-                remaining: Some(0),
-                steps: state.steps,
-            })
+            converged_mark(cmd_name, &state).await
         }
         BisectNext::AllSkipped => {
             // Bounds valid but all candidates skipped - mark is saved
             state.save().await.map_err(CliError::fatal)?;
             Ok(BisectOutput::Mark {
-                mark: "good".to_string(),
+                mark: cmd_name.to_string(),
                 commit: good_hash.to_string(),
                 status: "all_skipped".to_string(),
                 current: hash_to_string_opt(state.current),
@@ -1217,6 +1611,7 @@ async fn run_bisect_good(rev: Option<String>) -> CliResult<BisectOutput> {
                 subject: None,
                 remaining: Some(0),
                 steps: state.steps,
+                term_bad: None,
             })
         }
     }
@@ -1232,8 +1627,11 @@ async fn run_bisect_good(rev: Option<String>) -> CliResult<BisectOutput> {
 /// - Always cleans up the bisect-state row last.
 ///
 /// Boundary conditions:
-/// - With no state row at all, prints "No bisect in progress" and returns
+/// - With no state row at all, prints "We are not bisecting." and returns
 ///   `Ok(())` — `reset` is the supported escape hatch for stale state.
+/// - If restoring the original HEAD fails, the session row is STILL cleared
+///   (ADR-MX-03 §2) and a recovery hint naming the original branch/commit is
+///   emitted so the user can retry the checkout manually.
 ///
 /// See: tests::test_bisect_reset in tests/command/bisect_test.rs:264.
 async fn run_bisect_reset(rev: Option<String>) -> CliResult<BisectOutput> {
@@ -1303,21 +1701,56 @@ async fn run_bisect_reset(rev: Option<String>) -> CliResult<BisectOutput> {
         None => None,
     };
 
-    // Restore original HEAD - use branch if available to avoid detached state
-    if let Some(branch_name) = target_branch.clone() {
-        restore_to_branch(branch_name, target_hash).await?;
+    // Restore original HEAD - use branch if available to avoid detached state.
+    // ADR-MX-03 §2: a restore failure must NOT leave the session wedged —
+    // clear the row anyway, and preserve the original branch/commit record in
+    // a recovery hint so the user can retry the checkout manually.
+    let restore_result = if let Some(branch_name) = target_branch.clone() {
+        restore_to_branch(branch_name, target_hash).await
     } else {
-        checkout_to_commit(target_hash).await?;
+        checkout_to_commit(target_hash).await
+    };
+
+    match restore_result {
+        Ok(()) => {
+            // Clean up bisect state
+            BisectState::cleanup().await.map_err(CliError::fatal)?;
+            clear_bisect_terms_best_effort().await;
+            Ok(BisectOutput::Reset {
+                restored: true,
+                commit: Some(target_hash.to_string()),
+                branch: target_branch,
+            })
+        }
+        Err(error) => {
+            let target = target_branch
+                .as_deref()
+                .map(|name| format!("branch '{name}' ({target_hash})"))
+                .unwrap_or_else(|| target_hash.to_string());
+            crate::utils::error::emit_warning(format!(
+                "failed to restore original HEAD {target}: {error}; clearing the bisect \
+                 session so it is not wedged — restore manually with 'libra switch' or \
+                 'libra checkout'"
+            ));
+            BisectState::cleanup().await.map_err(CliError::fatal)?;
+            clear_bisect_terms_best_effort().await;
+            Ok(BisectOutput::Reset {
+                restored: false,
+                commit: Some(target_hash.to_string()),
+                branch: target_branch,
+            })
+        }
     }
+}
 
-    // Clean up bisect state
-    BisectState::cleanup().await.map_err(CliError::fatal)?;
-
-    Ok(BisectOutput::Reset {
-        restored: true,
-        commit: Some(target_hash.to_string()),
-        branch: target_branch,
-    })
+/// Clear the persisted bisect terms after a session ends. Best-effort: terms
+/// are never read without a session (`log`/`view`/`terms` all check
+/// `BisectState::has_state` first), so a stale key is harmless and the next
+/// `bisect start` overwrites it.
+async fn clear_bisect_terms_best_effort() {
+    if let Err(error) = BisectTerms::clear().await {
+        crate::utils::error::emit_warning(format!("failed to clear bisect terms: {error}"));
+    }
 }
 
 fn map_bisect_branch_store_error(branch_name: &str, error: BranchStoreError) -> CliError {
@@ -1417,6 +1850,11 @@ async fn restore_to_branch(branch_name: String, commit_hash: ObjectHash) -> CliR
 ///
 /// See: tests::test_bisect_skip in tests/command/bisect_test.rs:309.
 async fn run_bisect_skip(rev: Option<String>) -> CliResult<BisectOutput> {
+    // ADR-MX-03 §5: unify the no-session error with the rest of the family.
+    if !BisectState::has_state().await.map_err(CliError::fatal)? {
+        return Err(BisectError::NotActive.into());
+    }
+
     let mut state = BisectState::load().await.map_err(CliError::fatal)?;
 
     // Block operations on completed sessions - user must reset first
@@ -1485,7 +1923,17 @@ async fn run_bisect_skip(rev: Option<String>) -> CliResult<BisectOutput> {
 ///
 /// See: tests::test_bisect_log in tests/command/bisect_test.rs:347.
 async fn run_bisect_log() -> CliResult<BisectOutput> {
+    // ADR-MX-03 §5: `log` without a session reports `LBR-BISECT-001` like
+    // the other session-requiring subcommands, instead of a raw load failure.
+    if !BisectState::has_state().await.map_err(CliError::fatal)? {
+        return Err(BisectError::NotActive.into());
+    }
+
     let state = BisectState::load().await.map_err(CliError::fatal)?;
+    let terms = BisectTerms::load()
+        .await
+        .map_err(CliError::fatal)?
+        .unwrap_or_else(BisectTerms::default_terms);
 
     Ok(BisectOutput::Log {
         bad: hash_to_string_opt(state.bad),
@@ -1494,6 +1942,8 @@ async fn run_bisect_log() -> CliResult<BisectOutput> {
         skipped: hashes_to_strings(&state.skipped),
         steps: state.steps,
         completed: state.completed,
+        term_good: Some(terms.good),
+        term_bad: Some(terms.bad),
     })
 }
 
@@ -1513,6 +1963,10 @@ async fn run_bisect_view() -> CliResult<BisectOutput> {
     let state = BisectState::load().await.map_err(CliError::fatal)?;
     let head = Head::current_commit().await.map(|h| h.to_string());
     let remaining = count_commits_to_test(&state).await.unwrap_or(0);
+    let terms = BisectTerms::load()
+        .await
+        .map_err(CliError::fatal)?
+        .unwrap_or_else(BisectTerms::default_terms);
 
     Ok(BisectOutput::View {
         head,
@@ -1522,7 +1976,106 @@ async fn run_bisect_view() -> CliResult<BisectOutput> {
         remaining,
         skipped: hashes_to_strings(&state.skipped),
         completed: state.completed,
+        term_good: Some(terms.good),
+        term_bad: Some(terms.bad),
     })
+}
+
+/// Handle `bisect terms [--term-good|--term-bad]` — report the session's terms.
+///
+/// Behavior (ADR-MX-11 §2):
+/// - No option: prints git's two-line "Your current terms are ..." text.
+/// - `--term-good`/`--term-old`: prints only the old/good term.
+/// - `--term-bad`/`--term-new`: prints only the new/bad term.
+/// - No session: unifies with the rest of the family (`LBR-BISECT-001`, 128),
+///   matching M-BTERMS T3's "无会话按 S5".
+/// - Session without fixed terms (bound-less start, no mark yet): mirrors
+///   git's `error: no terms defined`.
+async fn run_bisect_terms(term_good: bool, term_bad: bool) -> CliResult<BisectOutput> {
+    if !BisectState::has_state().await.map_err(CliError::fatal)? {
+        return Err(BisectError::NotActive.into());
+    }
+
+    let terms = match BisectTerms::load().await.map_err(CliError::fatal)? {
+        Some(terms) => terms,
+        // Mid-session state, not an internal failure: the session exists but
+        // no mark has fixed the terms yet (git: `error: no terms defined`).
+        None => {
+            return Err(CliError::fatal("no terms defined")
+                .with_stable_code(StableErrorCode::RepoStateInvalid));
+        }
+    };
+
+    if term_good {
+        return Ok(BisectOutput::Terms {
+            good: Some(terms.good),
+            bad: None,
+        });
+    }
+    if term_bad {
+        return Ok(BisectOutput::Terms {
+            good: None,
+            bad: Some(terms.bad),
+        });
+    }
+    Ok(BisectOutput::Terms {
+        good: Some(terms.good),
+        bad: Some(terms.bad),
+    })
+}
+
+/// Handle a custom bisect term mark (ADR-MX-11 §2).
+///
+/// `new`/`old` arrive here too (they are not static aliases — see git's
+/// `check_and_set_terms`): with FIXED terms they are accepted only when they
+/// match the session's terms, and with UNFIXED terms (bound-less start) the
+/// first `new`/`old` mark fixes the session to new/old terms. A name that
+/// matches neither is git's `unknown command` usage error (129).
+async fn run_bisect_custom_term(args: Vec<String>) -> CliResult<BisectOutput> {
+    let Some(name) = args.first() else {
+        return Err(CliError::command_usage("bisect requires a subcommand"));
+    };
+
+    // Custom terms only exist inside a session: without one we cannot tell a
+    // term apart from an unknown command, and git reports the latter (129).
+    if !BisectState::has_state().await.map_err(CliError::fatal)? {
+        return Err(CliError::command_usage(format!(
+            "unknown command: '{name}'"
+        )));
+    }
+
+    if args.len() > 2 {
+        return Err(CliError::command_usage(format!(
+            "too many arguments for 'bisect {name}'"
+        )));
+    }
+
+    let rev = args.get(1).cloned();
+    match BisectTerms::load().await.map_err(CliError::fatal)? {
+        Some(terms) => {
+            if name == &terms.bad {
+                return run_bisect_bad_mark(rev, name).await;
+            }
+            if name == &terms.good {
+                return run_bisect_good_mark(rev, name).await;
+            }
+            Err(invalid_bisect_term_command(&terms, name))
+        }
+        None => {
+            // First mark in a bound-less session fixes the terms.
+            if name == "new" {
+                ensure_mark_terms("new", TermSide::Bad).await?;
+                return run_bisect_bad_mark(rev, name).await;
+            }
+            if name == "old" {
+                ensure_mark_terms("old", TermSide::Good).await?;
+                return run_bisect_good_mark(rev, name).await;
+            }
+            Err(CliError::command_usage(format!(
+                "unknown command: '{name}'"
+            )))
+        }
+    }
 }
 
 /// Handle `bisect run <cmd> [args...]` — execute the script for each commit
@@ -1554,6 +2107,14 @@ async fn run_bisect_run(cmd: Vec<String>) -> CliResult<BisectOutput> {
         .split_first()
         .ok_or_else(|| CliError::fatal("`bisect run` requires a command to execute"))?;
 
+    // Marks must use the session's term names so a custom-term session
+    // (`fast`/`slow`) keeps converging instead of hitting the `bad`/`good`
+    // term-mismatch refusal (ADR-MX-11 §2).
+    let terms = BisectTerms::load()
+        .await
+        .map_err(CliError::fatal)?
+        .unwrap_or_else(BisectTerms::default_terms);
+
     let mut steps = 0usize;
     let mut session_skipped: Vec<String> = Vec::new();
 
@@ -1582,7 +2143,7 @@ async fn run_bisect_run(cmd: Vec<String>) -> CliResult<BisectOutput> {
         match status.code() {
             Some(0) => {
                 steps += 1;
-                run_bisect_good(None).await?;
+                run_bisect_good_mark(None, &terms.good).await?;
             }
             Some(125) => {
                 steps += 1;
@@ -1591,7 +2152,7 @@ async fn run_bisect_run(cmd: Vec<String>) -> CliResult<BisectOutput> {
             }
             Some(code) if (1..=127).contains(&code) => {
                 steps += 1;
-                run_bisect_bad(None).await?;
+                run_bisect_bad_mark(None, &terms.bad).await?;
             }
             Some(code) => {
                 return Err(BisectError::RunCommandFailed { exit_code: code }.into());
@@ -1925,4 +2486,244 @@ pub(crate) async fn orig_head_for_scope(
     Ok(BisectState::load_for_scope(scope)
         .await?
         .map(|state| state.orig_head.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use git_internal::{
+        hash::HashKind,
+        internal::object::signature::{Signature, SignatureType},
+    };
+
+    use super::*;
+
+    fn signed_commit(message: &str) -> Commit {
+        let sig = Signature {
+            signature_type: SignatureType::Author,
+            name: "Tester".to_string(),
+            email: "t@t.test".to_string(),
+            timestamp: 0,
+            timezone: "+0000".to_string(),
+        };
+        Commit {
+            id: ObjectHash::zero_for_kind(HashKind::Sha1),
+            tree_id: ObjectHash::zero_for_kind(HashKind::Sha1),
+            parent_commit_ids: vec![],
+            author: sig.clone(),
+            committer: sig,
+            message: message.to_string(),
+        }
+    }
+
+    /// Vault-signed commits prepend a `gpgsig` header block to the raw commit
+    /// message; `culprit_subject` must return the first body line after the
+    /// signature, never the `gpgsig -----BEGIN PGP SIGNATURE-----` header
+    /// (issue #481 N4 / ADR-MX-03 §4).
+    #[test]
+    fn culprit_subject_skips_gpgsig_header() {
+        let commit = signed_commit(
+            "gpgsig -----BEGIN PGP SIGNATURE-----\n iQFixture\n -----END PGP SIGNATURE-----\n\nintroduce the bug\n\nbody\n",
+        );
+        assert_eq!(culprit_subject(&commit), "introduce the bug");
+    }
+
+    /// A plain (unsigned) commit message keeps its first non-empty line as the
+    /// subject.
+    #[test]
+    fn culprit_subject_returns_first_body_line_without_signature() {
+        let commit = signed_commit("fix the thing\n\nlonger body\n");
+        assert_eq!(culprit_subject(&commit), "fix the thing");
+    }
+
+    fn changes(
+        new: &[&str],
+        modified: &[&str],
+        deleted: &[&str],
+        renamed: &[(&str, &str)],
+    ) -> Changes {
+        Changes {
+            new: new.iter().map(std::path::PathBuf::from).collect(),
+            modified: modified.iter().map(std::path::PathBuf::from).collect(),
+            deleted: deleted.iter().map(std::path::PathBuf::from).collect(),
+            renamed: renamed
+                .iter()
+                .map(|(a, b)| (std::path::PathBuf::from(a), std::path::PathBuf::from(b)))
+                .collect(),
+        }
+    }
+
+    /// ADR-MX-05 §2 (M-BSTART B2/B4): the start gate only refuses TRACKED
+    /// changes. Untracked (`new`) files — including `init`'s `.libraignore` —
+    /// and ignored files never block `bisect start`.
+    #[test]
+    fn start_gate_counts_only_tracked_changes() {
+        let clean = changes(&[], &[], &[], &[]);
+        let untracked_only = changes(&[".libraignore", "notes.txt"], &[], &[], &[]);
+        let unstaged_tracked = changes(&["notes.txt"], &["tracked.txt"], &[], &[]);
+        let deleted_tracked = changes(&[], &[], &["tracked.txt"], &[]);
+        let renamed_tracked = changes(&[], &[], &[], &[("a.txt", "b.txt")]);
+        let staged = changes(&["added.txt"], &[], &[], &[]);
+
+        assert!(!tracked_changes_block_start(&clean, &clean));
+        assert!(!tracked_changes_block_start(&clean, &untracked_only));
+        assert!(tracked_changes_block_start(&clean, &unstaged_tracked));
+        assert!(tracked_changes_block_start(&clean, &deleted_tracked));
+        assert!(tracked_changes_block_start(&clean, &renamed_tracked));
+        assert!(tracked_changes_block_start(&staged, &clean));
+    }
+
+    /// ADR-MX-11 §4 (M-BTERMS T5): term validation mirrors git's
+    /// `check_term_format` — builtin subcommand names, swapped meanings and
+    /// invalid refnames are all refused.
+    #[test]
+    fn validate_term_matches_git_check_term_format() {
+        // Builtin commands can never be terms.
+        for builtin in BISECT_BUILTIN_COMMANDS {
+            assert!(
+                validate_term(builtin, TermSide::Good).is_err(),
+                "builtin {builtin} must be refused"
+            );
+        }
+        // Swapping meanings is forbidden (git keeps it untested-on-purpose).
+        assert!(validate_term("bad", TermSide::Good).is_err());
+        assert!(validate_term("new", TermSide::Good).is_err());
+        assert!(validate_term("good", TermSide::Bad).is_err());
+        assert!(validate_term("old", TermSide::Bad).is_err());
+        // Same-meaning renames are allowed (git accepts `--term-old=old`).
+        assert!(validate_term("good", TermSide::Good).is_ok());
+        assert!(validate_term("old", TermSide::Good).is_ok());
+        assert!(validate_term("bad", TermSide::Bad).is_ok());
+        assert!(validate_term("new", TermSide::Bad).is_ok());
+        // Refname-format rejection (git validates `refs/bisect/<term>`).
+        assert!(validate_term("fa st", TermSide::Bad).is_err());
+        assert!(validate_term("invalid..term", TermSide::Bad).is_err());
+        assert!(validate_term("", TermSide::Bad).is_err());
+        // Free-form terms are fine.
+        assert!(validate_term("fast", TermSide::Good).is_ok());
+        assert!(validate_term("slow", TermSide::Bad).is_ok());
+    }
+
+    /// M-BTERMS T5: identical terms are refused before any state write.
+    #[test]
+    fn resolve_bisect_terms_rejects_identical_terms() {
+        let error = resolve_bisect_terms(Some("slow"), Some("slow")).unwrap_err();
+        assert!(error.to_string().contains("two different terms"));
+        // Defaults stay bad/good when no term is given.
+        let terms = resolve_bisect_terms(None, None).unwrap();
+        assert_eq!(terms, BisectTerms::default_terms());
+        // Partial custom terms fill the other side with the default.
+        let terms = resolve_bisect_terms(Some("fast"), None).unwrap();
+        assert_eq!(terms.good, "fast");
+        assert_eq!(terms.bad, "bad");
+    }
+
+    /// ADR-MX-03 §1 (step atomicity): when a `good` step's restore preflight
+    /// is refused — the candidate tracks a path that currently exists as a
+    /// non-empty untracked directory — the `good` mark must NOT be persisted:
+    /// `current` does not advance and the saved state is byte-for-byte the
+    /// pre-failure state.
+    #[tokio::test]
+    #[serial_test::serial(cwd)]
+    async fn failed_good_step_does_not_modify_bisect_state() {
+        use crate::command::{add, commit};
+
+        let temp_path = tempfile::tempdir().unwrap();
+        crate::utils::test::setup_with_new_libra_in(temp_path.path()).await;
+        let _guard = crate::utils::test::ChangeDirGuard::new(temp_path.path());
+
+        // 4 commits (newest first after reverse): C3 removes `blocked` (HEAD),
+        // C2/C1 track `blocked` as a file, C0 (good) does not track it.
+        let mut hashes = Vec::new();
+        for i in 0..4 {
+            crate::utils::test::ensure_file("file.txt", Some(&format!("content_{i}\n")));
+            if i == 1 || i == 2 {
+                crate::utils::test::ensure_file("blocked", Some(&format!("blocked_{i}\n")));
+            } else {
+                let p = std::path::Path::new("blocked");
+                if p.exists() {
+                    std::fs::remove_file(p).unwrap();
+                }
+            }
+            add::execute(add::AddArgs {
+                intent_to_add: false,
+                sparse: false,
+                pathspec: vec![],
+                all: true,
+                update: false,
+                refresh: false,
+                force: false,
+                verbose: false,
+                dry_run: false,
+                ignore_errors: false,
+                pathspec_from_file: None,
+                pathspec_file_nul: false,
+                chmod: None,
+                renormalize: false,
+                ignore_missing: false,
+                resolved: false,
+                patch: false,
+                auto_advance: false,
+                no_auto_advance: false,
+            })
+            .await;
+            commit::execute(commit::CommitArgs {
+                message: Some(format!("Commit {i}")),
+                file: None,
+                allow_empty: false,
+                conventional: false,
+                no_edit: false,
+                amend: false,
+                signoff: false,
+                disable_pre: true,
+                all: false,
+                no_verify: false,
+                author: None,
+                ..Default::default()
+            })
+            .await;
+            hashes.push(Head::current_commit().await.unwrap().to_string());
+        }
+        hashes.reverse(); // hashes[0] = newest (C3, HEAD); hashes[3] = oldest (C0)
+
+        // Start with no bounds: HEAD stays at C3, which does not track `blocked`.
+        run_bisect_start(None, vec![], false, None, None)
+            .await
+            .unwrap();
+
+        // Introduce the conflict AFTER start (start refuses a dirty tree): a
+        // non-empty untracked directory at a path the midpoint tracks as a file.
+        std::fs::create_dir_all("blocked/sub").unwrap();
+        std::fs::write("blocked/sub/keep.txt", "x").unwrap();
+
+        // Mark bad = HEAD (C3); no checkout, just records the bound.
+        run_bisect_bad(None).await.unwrap();
+
+        let before = BisectState::load().await.unwrap();
+        assert!(before.good.is_empty());
+        assert!(before.current.is_none());
+
+        // Mark good = C0. The midpoint is C2, which tracks `blocked` as a file;
+        // the untracked `blocked/` directory makes the restore preflight refuse.
+        let result = run_bisect_good(Some(hashes[3].clone())).await;
+        assert!(
+            result.is_err(),
+            "good step must fail on the blocked restore"
+        );
+
+        let after = BisectState::load().await.unwrap();
+        assert!(
+            after.good.is_empty(),
+            "a failed step must not persist the good mark"
+        );
+        assert_eq!(after.bad.as_ref().unwrap().to_string(), hashes[0]);
+        assert!(
+            after.current.is_none(),
+            "current must not advance on a failed step"
+        );
+
+        // The session is not wedged: reset recovers the original HEAD.
+        run_bisect_reset(None).await.unwrap();
+        assert_eq!(Head::current_commit().await.unwrap().to_string(), hashes[0]);
+        assert!(!BisectState::has_state().await.unwrap());
+    }
 }

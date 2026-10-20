@@ -245,3 +245,84 @@ fn diff_three_dot_uses_merge_base() {
         "A...B should NOT include the default branch's change (it is on the A side): {diff}"
     );
 }
+
+/// MX-12 (issues/481, ADR-MX-13 §2): `--octopus`, `--independent`, and
+/// `--fork-point` query modes; the modes are mutually exclusive with the
+/// existing ones.
+#[test]
+fn merge_base_multiple_query_modes() {
+    let repo = super::create_committed_repo_via_cli();
+    let root = repo.path();
+    let add_commit = |name: &str, body: &str| {
+        fs::write(root.join(name), body).unwrap();
+        super::assert_cli_success(
+            &run_libra_command(&["add", name], root),
+            "stage fixture file",
+        );
+        super::assert_cli_success(
+            &run_libra_command(&["commit", "-m", name, "--no-verify"], root),
+            "commit fixture",
+        );
+    };
+    add_commit("c2.txt", "two\n");
+    add_commit("c3.txt", "three\n");
+
+    let head = String::from_utf8_lossy(&run_libra_command(&["rev-parse", "HEAD"], root).stdout)
+        .trim()
+        .to_string();
+    let parent = String::from_utf8_lossy(&run_libra_command(&["rev-parse", "HEAD~1"], root).stdout)
+        .trim()
+        .to_string();
+
+    // `--octopus` over a linear history is the oldest tip itself.
+    let octopus = run_libra_command(
+        &["merge-base", "--octopus", "HEAD", "HEAD~1", "HEAD~2"],
+        root,
+    );
+    assert!(
+        octopus.status.success(),
+        "--octopus failed: {}",
+        String::from_utf8_lossy(&octopus.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&octopus.stdout).trim(),
+        String::from_utf8_lossy(&run_libra_command(&["rev-parse", "HEAD~2"], root).stdout).trim(),
+        "--octopus of a linear chain is its oldest commit"
+    );
+
+    // `--independent` drops the tips another given tip reaches.
+    let independent = run_libra_command(
+        &["merge-base", "--independent", "HEAD~2", "HEAD~1", "HEAD"],
+        root,
+    );
+    assert!(independent.status.success(), "--independent failed");
+    assert_eq!(
+        String::from_utf8_lossy(&independent.stdout).trim(),
+        head,
+        "--independent keeps only the unreachable-from-others tip"
+    );
+
+    // `--fork-point <commit> <ref>` resolves through `ref`'s reflog.
+    let fork = run_libra_command(&["merge-base", "--fork-point", "HEAD", "main"], root);
+    assert!(
+        fork.status.success(),
+        "--fork-point failed: {}",
+        String::from_utf8_lossy(&fork.stderr)
+    );
+    assert!(
+        !String::from_utf8_lossy(&fork.stdout).trim().is_empty(),
+        "--fork-point must print a commit"
+    );
+    assert!(!parent.is_empty());
+
+    // The modes are mutually exclusive.
+    let conflict = run_libra_command(
+        &["merge-base", "--octopus", "--all", "HEAD", "HEAD~1"],
+        root,
+    );
+    assert_eq!(
+        conflict.status.code(),
+        Some(129),
+        "mutually exclusive modes"
+    );
+}

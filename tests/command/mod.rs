@@ -709,6 +709,99 @@ fn create_committed_repo_via_cli() -> tempfile::TempDir {
     repo
 }
 
+/// Two DISTINCT blobs whose full object ids share `prefix` (4 hex chars), the
+/// first such collision found by writing real blob objects.
+#[derive(Debug, Clone)]
+pub(crate) struct AmbiguousPrefixFixture {
+    /// The shared 4-hex-char prefix (the ambiguous input token).
+    pub(crate) prefix: String,
+    /// Full object ids of the colliding blobs, sorted ascending (storage order).
+    pub(crate) oids: Vec<String>,
+}
+
+/// Write distinct blobs into `repo`'s object database until two of them share a
+/// 4-hex-char prefix, returning the ambiguous prefix and both full object ids.
+/// Mirrors Git's own ambiguity tests (t1512): a prefix this short collides for
+/// ~thousands of random objects, so a few hundred per round finds one with
+/// overwhelming probability (birthday bound for 16 bits is ~256). All candidates
+/// are plain blobs so every consumer (rev-parse/cat-file/log/show/checkout) can
+/// probe the same fixture.
+pub(crate) fn create_ambiguous_prefix_fixture(repo: &Path) -> AmbiguousPrefixFixture {
+    const BLOBS_PER_ROUND: usize = 400;
+    const MAX_ROUNDS: usize = 10;
+    let objects_dir = repo.join(".libra").join("objects");
+
+    let scan_for_collision = |objects_dir: &Path| -> Option<(String, Vec<String>)> {
+        let mut by_prefix: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        let entries = match fs::read_dir(objects_dir) {
+            Ok(entries) => entries,
+            Err(_) => return None,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let dir_name = match entry.file_name().to_str() {
+                Some(name) if name.len() == 2 && name.chars().all(|c| c.is_ascii_hexdigit()) => {
+                    name.to_string()
+                }
+                _ => continue,
+            };
+            for file in fs::read_dir(&path).into_iter().flatten().flatten() {
+                let file_name = match file.file_name().to_str() {
+                    Some(name) => name.to_string(),
+                    None => continue,
+                };
+                let full = format!("{dir_name}{file_name}");
+                if full.len() != 40 || !full.chars().all(|c| c.is_ascii_hexdigit()) {
+                    continue;
+                }
+                by_prefix
+                    .entry(full[..4].to_string())
+                    .or_default()
+                    .push(full);
+            }
+        }
+        let mut collision = by_prefix
+            .into_iter()
+            .filter(|(_, oids)| oids.len() >= 2)
+            .map(|(prefix, mut oids)| {
+                oids.sort_unstable();
+                (prefix, oids)
+            })
+            .collect::<Vec<_>>();
+        collision.sort();
+        collision
+            .into_iter()
+            .next()
+            .map(|(prefix, oids)| (prefix, oids[..2].to_vec()))
+    };
+
+    for round in 0..MAX_ROUNDS {
+        let mut paths = Vec::with_capacity(BLOBS_PER_ROUND);
+        for index in 0..BLOBS_PER_ROUND {
+            let file_name = format!("amb-blob-{round}-{index}.txt");
+            let content = format!("ambiguity fixture round {round} blob {index}\n");
+            fs::write(repo.join(&file_name), content)
+                .expect("failed to write ambiguity fixture blob");
+            paths.push(file_name);
+        }
+        let mut args: Vec<&str> = vec!["hash-object", "-w"];
+        args.extend(paths.iter().map(String::as_str));
+        let output = run_libra_command(&args, repo);
+        assert_cli_success(&output, "hash-object -w ambiguity fixture blobs");
+        if let Some((prefix, oids)) = scan_for_collision(&objects_dir) {
+            return AmbiguousPrefixFixture { prefix, oids };
+        }
+    }
+    panic!(
+        "no 4-hex-prefix collision after {MAX_ROUNDS} rounds of {BLOBS_PER_ROUND} blobs; \
+         probability of this failure is astronomically small"
+    );
+}
+
 /// M-BOUND gdeep Git source: `c1←c2←c3`(main), `c2←dev1`(dev), tag `v1`→c1, `refs/mr/1`→c2.
 struct GdeepGitRepo {
     dir: tempfile::TempDir,
@@ -956,6 +1049,7 @@ mod file_obliterate_test;
 mod for_each_ref_test;
 mod format_patch_test;
 mod fsck_test;
+mod gc_test;
 mod grep_test;
 mod hash_object_test;
 #[path = "../helpers/historical_schema.rs"]

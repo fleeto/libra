@@ -94,6 +94,7 @@ const VISIBLE_COMMANDS: &[&str] = &[
     "fetch",
     "pull",
     "fsck",
+    "gc",
     "revert",
     "reflog",
     "bisect",

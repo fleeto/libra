@@ -6,12 +6,15 @@ use std::{
     collections::HashSet,
     fs, io,
     io::{Read, Seek},
-    sync::atomic::{AtomicBool, Ordering},
+    sync::{
+        Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use clap::Parser;
 use git_internal::{
-    hash::ObjectHash,
+    hash::{HashKind, ObjectHash},
     internal::{
         index::Index,
         object::{
@@ -47,8 +50,55 @@ use crate::{
 /// stays clean on stdout. Error messages still go to stderr.
 static SUPPRESS_STDOUT: AtomicBool = AtomicBool::new(false);
 
+/// When true, `--strict` is active: fsck warnings escalate to errors
+/// (ADR-MX-06 / M-FSCK F2).
+static STRICT: AtomicBool = AtomicBool::new(false);
+
+/// Every severity-carrying fsck finding emitted by [`report`] (M-FSCK F6).
+static MESSAGES: Mutex<Vec<FsckMessage>> = Mutex::new(Vec::new());
+
 fn stdout_suppressed() -> bool {
     SUPPRESS_STDOUT.load(Ordering::Relaxed)
+}
+
+fn strict_enabled() -> bool {
+    STRICT.load(Ordering::Relaxed)
+}
+
+fn clear_messages() {
+    MESSAGES
+        .lock()
+        .expect("fsck message buffer poisoned")
+        .clear();
+}
+
+fn take_messages() -> Vec<FsckMessage> {
+    std::mem::take(&mut *MESSAGES.lock().expect("fsck message buffer poisoned"))
+}
+
+/// Severity of an fsck message (ADR-MX-06). Mirrors Git's msg-id table:
+/// warnings do not fail fsck unless `--strict` escalates them to errors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FsckSeverity {
+    Error,
+    Warning,
+}
+
+impl FsckSeverity {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FsckSeverity::Error => "error",
+            FsckSeverity::Warning => "warning",
+        }
+    }
+}
+
+/// A single severity-carrying fsck finding (ADR-MX-06 / M-FSCK F6).
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct FsckMessage {
+    pub severity: FsckSeverity,
+    pub message: String,
 }
 
 /// Fsck message types - diagnostic messages go to stdout, errors to stderr
@@ -99,6 +149,11 @@ pub enum FsckMsgId {
     HasDotlibra, // Libra-specific: renamed from hasDotgit
     EmptyName,
     FullPathname,
+    // ===== Warnings (do not fail fsck unless `--strict` escalates) =====
+    /// Tree entries with zero-padded file modes (e.g. `040000` instead of
+    /// `40000`). Git reports this as a WARN (`zeroPaddedFilemode`); `--strict`
+    /// escalates it to an error (ADR-MX-06).
+    ZeroPaddedFilemode,
     // ===== Error messages - Libra specific =====
     IndexCorruption,
     InvalidIndexMode,
@@ -107,6 +162,15 @@ pub enum FsckMsgId {
 }
 
 impl FsckMsgId {
+    /// Severity from the Git msg-id table (ADR-MX-06). Only
+    /// `zeroPaddedFilemode` is a warning; every other id is an error.
+    pub fn severity(&self) -> FsckSeverity {
+        match self {
+            FsckMsgId::ZeroPaddedFilemode => FsckSeverity::Warning,
+            _ => FsckSeverity::Error,
+        }
+    }
+
     /// Check if this message is an error (stderr) or diagnostic (stdout)
     /// All diagnostic messages (missing, hash_mismatch, dangling, unreachable) go to stdout
     pub fn is_error(&self) -> bool {
@@ -171,6 +235,13 @@ impl FsckMsgId {
             FsckMsgId::HasDotlibra => format!("has .libra: {}", obj_id),
             FsckMsgId::EmptyName => format!("empty name: {}", obj_id),
             FsckMsgId::FullPathname => format!("full pathname: {}", obj_id),
+            // Warnings render through `report`, which adds the severity prefix
+            // (`warning in ...` / `error in ...`) and `zeroPaddedFilemode` id.
+            FsckMsgId::ZeroPaddedFilemode => {
+                format!(
+                    "warning in {obj_type} {obj_id}: zeroPaddedFilemode: contains zero-padded file modes"
+                )
+            }
             FsckMsgId::IndexCorruption => format!("index corruption: {}", obj_id),
             FsckMsgId::InvalidIndexMode => format!("invalid index mode: {} {}", obj_type, obj_id),
             FsckMsgId::InvalidIndexStage => format!("invalid index stage: {} {}", obj_type, obj_id),
@@ -185,16 +256,45 @@ impl FsckMsgId {
 ///
 /// - Diagnostic messages (missing, hash_mismatch, dangling, unreachable) -> stdout
 /// - Error messages -> stderr
+/// - Warning messages (zeroPaddedFilemode) -> stderr, do not fail fsck unless
+///   `--strict` escalates them to errors (ADR-MX-06)
 ///
 /// Returns true if this is an error (for exit code tracking)
 pub fn report(msg_id: FsckMsgId, obj_type: &str, obj_id: &str) -> bool {
-    let output = msg_id.format(obj_type, obj_id);
+    // ADR-MX-06: warnings do not fail fsck unless `--strict` escalates them.
+    let severity = if strict_enabled() {
+        FsckSeverity::Error
+    } else {
+        msg_id.severity()
+    };
+    let output = match msg_id {
+        FsckMsgId::ZeroPaddedFilemode => format!(
+            "{} in {obj_type} {obj_id}: zeroPaddedFilemode: contains zero-padded file modes",
+            severity.as_str()
+        ),
+        _ => msg_id.format(obj_type, obj_id),
+    };
     if msg_id.is_error() {
         eprintln!("{}", output);
     } else if !stdout_suppressed() {
         println!("{}", output);
     }
-    msg_id.causes_failure()
+    // Structured output carries every severity-carrying finding (M-FSCK F6).
+    if msg_id.is_error() {
+        MESSAGES
+            .lock()
+            .expect("fsck message buffer poisoned")
+            .push(FsckMessage {
+                severity,
+                message: output,
+            });
+    }
+    if msg_id == FsckMsgId::ZeroPaddedFilemode {
+        // A warning flips the exit code only when `--strict` escalates it.
+        strict_enabled()
+    } else {
+        msg_id.causes_failure()
+    }
 }
 
 /// lore.md 2.5: report a referenced object that is ABSENT from storage as
@@ -501,9 +601,11 @@ pub struct FsckArgs {
     pub connectivity_only: bool,
 
     /// Enable stricter format checks: commit author/committer emails must
-    /// contain `@` and carry a well-formed timezone within ±1400; a commit's
-    /// tree/parents and a tree's entries must exist with matching object types;
-    /// and tree entries must be in Git's canonical sort order.
+    /// contain `@` and carry a well-formed `[+-]HHMM` timezone (format only,
+    /// no range check — ADR-MX-06); a commit's tree/parents and a tree's
+    /// entries must exist with matching object types; tree entries must be in
+    /// Git's canonical sort order; and warnings (zero-padded file modes)
+    /// escalate to errors.
     #[arg(long)]
     pub strict: bool,
 
@@ -622,6 +724,10 @@ pub struct FsckResult {
     pub cross_ref_issues: usize,
     pub overall_status: CheckStatus,
     pub has_errors: bool, // Track if any error was printed to stderr
+    /// Severity-carrying findings (ADR-MX-06 / M-FSCK F6): every warning and
+    /// error emitted by the checks, each with its severity. Empty when clean.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub messages: Vec<FsckMessage>,
     /// Repair outcome, present only when `--heal` was requested.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub heal: Option<HealReport>,
@@ -672,6 +778,9 @@ pub async fn execute(args: FsckArgs) {
 }
 
 async fn run_fsck(args: &FsckArgs) -> CliResult<FsckResult> {
+    // ADR-MX-06: publish the `--strict` state so `report` can escalate warnings.
+    STRICT.store(args.strict, Ordering::Relaxed);
+    clear_messages();
     // lore.md 2.5: load the intentional-absence (obliteration) tombstone
     // snapshot so every seam below distinguishes obliterated objects from
     // corruption and does NOT flip the exit code (empty set = no-op).
@@ -750,6 +859,7 @@ async fn run_fsck(args: &FsckArgs) -> CliResult<FsckResult> {
             result.overall_status = CheckStatus::Missing;
         }
     }
+    result.messages = take_messages();
     Ok(result)
 }
 
@@ -1029,7 +1139,11 @@ async fn check_single_object(
 
     let overall_status = match check_result.status {
         CheckStatus::Ok => {
-            println!("Object {} is valid", object_id);
+            // Silent under `--json` so stdout stays a single JSON document
+            // (ADR-MX-06 / M-FSCK F6).
+            if !stdout_suppressed() {
+                println!("Object {} is valid", object_id);
+            }
             CheckStatus::Ok
         }
         CheckStatus::Missing => {
@@ -1064,6 +1178,7 @@ async fn check_single_object(
         cross_ref_issues: 0,
         overall_status,
         has_errors,
+        messages: Vec::new(),
         heal: None,
         broken_links: Vec::new(),
         missing_objects: Vec::new(),
@@ -1084,6 +1199,7 @@ async fn check_all_objects(args: &FsckArgs, storage: &ClientStorage) -> CliResul
         cross_ref_issues: 0,
         overall_status: CheckStatus::Ok,
         has_errors: false,
+        messages: Vec::new(),
         heal: None,
         broken_links: Vec::new(),
         missing_objects: Vec::new(),
@@ -2169,20 +2285,15 @@ async fn check_and_fix_refs(
     Ok(())
 }
 
-/// Whether a signature timezone is a well-formed `±HHMM` offset within ±1400
-/// (the widest real-world UTC offset). Used by `--strict`.
+/// Whether a signature timezone is a well-formed `[+-]HHMM` offset.
+///
+/// ADR-MX-06 / M-FSCK F3: only the FORMAT is validated — the numeric range is
+/// NOT checked, matching Git (which accepts e.g. `+9999`).
 fn is_valid_timezone(tz: &str) -> bool {
     let bytes = tz.as_bytes();
-    if bytes.len() != 5 || (bytes[0] != b'+' && bytes[0] != b'-') {
-        return false;
-    }
-    let digits = &tz[1..];
-    if !digits.bytes().all(|b| b.is_ascii_digit()) {
-        return false;
-    }
-    let hours: i32 = digits[0..2].parse().unwrap_or(99);
-    let minutes: i32 = digits[2..4].parse().unwrap_or(99);
-    minutes < 60 && hours * 100 + minutes <= 1400
+    bytes.len() == 5
+        && (bytes[0] == b'+' || bytes[0] == b'-')
+        && bytes[1..].iter().all(u8::is_ascii_digit)
 }
 
 /// The object type a tree entry of the given mode must resolve to (used by
@@ -2208,6 +2319,54 @@ fn tree_entries_sorted(items: &[git_internal::internal::object::tree::TreeItem])
     items
         .windows(2)
         .all(|pair| sort_key(&pair[0]) <= sort_key(&pair[1]))
+}
+
+/// If `mode` is a canonical tree mode with extra leading zero(s) (e.g. `040000`
+/// for `40000`, or `0100644` for `100644`), return the unpadded canonical mode.
+pub(crate) fn zero_padded_mode(mode: &[u8]) -> Option<&[u8]> {
+    if mode.first() != Some(&b'0') || mode.len() <= 1 {
+        return None;
+    }
+    let first_non_zero = mode.iter().position(|b| *b != b'0')?;
+    let unpadded = &mode[first_non_zero..];
+    if TreeItemMode::tree_item_type_from_bytes(unpadded).is_ok() {
+        Some(unpadded)
+    } else {
+        None
+    }
+}
+
+/// Whether a raw tree body contains zero-padded file modes (ADR-MX-06 /
+/// M-FSCK F1). Mirrors Git `fsck.c`, which flags any entry whose mode starts
+/// with `0`. Returns `false` (so the tree stays a hard `bad tree` error) unless
+/// every entry is structurally well-formed and each non-canonical mode is a
+/// zero-padded form of a valid mode.
+fn tree_has_zero_padded_filemodes(data: &[u8], kind: HashKind) -> bool {
+    let id_len = kind.size();
+    let mut zero_padded = false;
+    let mut i = 0;
+    while i < data.len() {
+        let Some(space) = data[i..].iter().position(|&b| b == b' ') else {
+            return false;
+        };
+        let mode = &data[i..i + space];
+        let Some(nul) = data[i + space + 1..].iter().position(|&b| b == 0) else {
+            return false;
+        };
+        let next = i + space + 1 + nul + 1 + id_len;
+        if next > data.len() {
+            return false;
+        }
+        if TreeItemMode::tree_item_type_from_bytes(mode).is_err() {
+            if zero_padded_mode(mode).is_none() {
+                // A genuinely malformed mode: report the tree as bad.
+                return false;
+            }
+            zero_padded = true;
+        }
+        i = next;
+    }
+    zero_padded
 }
 
 /// Verify a single object's integrity
@@ -2421,6 +2580,25 @@ async fn verify_object(
                     }
                 }
                 Err(_) => {
+                    // ADR-MX-06 / M-FSCK F1/F2: a tree whose only defect is
+                    // zero-padded file modes is a warning (an error under
+                    // `--strict`), not a hard `bad tree` error — matching Git.
+                    if tree_has_zero_padded_filemodes(&data, hash.kind()) {
+                        if report_errors {
+                            has_error |=
+                                report(FsckMsgId::ZeroPaddedFilemode, "tree", &hash.to_string());
+                        }
+                        return Ok((
+                            ObjectCheckResult {
+                                object_id: hash.to_string(),
+                                object_type: obj_type.to_string(),
+                                status: CheckStatus::Ok,
+                                error_message: None,
+                                size,
+                            },
+                            has_error,
+                        ));
+                    }
                     if report_errors {
                         has_error |=
                             report(FsckMsgId::BadTree, &obj_type.to_string(), &hash.to_string());
@@ -2466,7 +2644,8 @@ async fn verify_object(
                         {
                             has_error |= report(FsckMsgId::BadEmail, "commit", &hash.to_string());
                         }
-                        // Timezones must be well-formed and within range.
+                        // Timezones must be well-formed `[+-]HHMM`; the
+                        // range is deliberately NOT validated (ADR-MX-06 F3).
                         if !is_valid_timezone(&commit.author.timezone)
                             || !is_valid_timezone(&commit.committer.timezone)
                         {
@@ -2860,15 +3039,87 @@ mod tests {
     }
 
     #[test]
-    fn is_valid_timezone_accepts_in_range_and_rejects_invalid() {
+    fn is_valid_timezone_validates_format_not_range() {
         assert!(super::is_valid_timezone("+0000"));
         assert!(super::is_valid_timezone("-0800"));
         assert!(super::is_valid_timezone("+1400"));
-        assert!(!super::is_valid_timezone("+9900"), "hours out of range");
-        assert!(!super::is_valid_timezone("+0060"), "minutes must be < 60");
+        // ADR-MX-06 / M-FSCK F3: range is NOT validated (Git accepts these).
+        assert!(super::is_valid_timezone("+9999"));
+        assert!(super::is_valid_timezone("+9900"));
+        assert!(super::is_valid_timezone("+2500"));
         assert!(!super::is_valid_timezone("0000"), "missing sign");
         assert!(!super::is_valid_timezone("+00:0"), "non-digit");
         assert!(!super::is_valid_timezone("+000"), "wrong length");
+        assert!(!super::is_valid_timezone("+"), "too short");
+    }
+
+    #[test]
+    fn severity_table_matches_git_msg_id_table() {
+        use super::FsckSeverity;
+        assert_eq!(
+            FsckMsgId::ZeroPaddedFilemode.severity(),
+            FsckSeverity::Warning,
+            "zeroPaddedFilemode is a WARN in Git"
+        );
+        assert_eq!(
+            FsckMsgId::BadTimezone.severity(),
+            FsckSeverity::Error,
+            "badTimezone is an ERROR in Git"
+        );
+        assert_eq!(
+            FsckMsgId::BadEmail.severity(),
+            FsckSeverity::Error,
+            "badEmail is an ERROR in Git"
+        );
+        assert_eq!(
+            FsckMsgId::TreeNotSorted.severity(),
+            FsckSeverity::Error,
+            "treeNotSorted is an ERROR in Git"
+        );
+        assert_eq!(
+            FsckMsgId::BadTree.severity(),
+            FsckSeverity::Error,
+            "badTree is an ERROR in Git"
+        );
+    }
+
+    #[test]
+    fn zero_padded_mode_strips_leading_zeros_of_valid_modes() {
+        assert_eq!(super::zero_padded_mode(b"040000"), Some(&b"40000"[..]));
+        assert_eq!(super::zero_padded_mode(b"0100644"), Some(&b"100644"[..]));
+        assert_eq!(super::zero_padded_mode(b"40000"), None, "already canonical");
+        assert_eq!(super::zero_padded_mode(b"12345"), None, "not zero-padded");
+        assert_eq!(super::zero_padded_mode(b"0"), None, "only a zero");
+        assert_eq!(super::zero_padded_mode(b"00"), None, "all zeros");
+    }
+
+    #[test]
+    fn tree_has_zero_padded_filemodes_detects_only_zero_padding() {
+        let kind = HashKind::Sha1;
+        let id = [0x11u8; 20];
+        // `040000 <name>\0<20-byte id>` — zero-padded directory mode.
+        let mut tree = Vec::new();
+        tree.extend_from_slice(b"040000 dir\0");
+        tree.extend_from_slice(&id);
+        assert!(super::tree_has_zero_padded_filemodes(&tree, kind));
+
+        // Canonical modes are not flagged.
+        let mut canonical = Vec::new();
+        canonical.extend_from_slice(b"40000 dir\0");
+        canonical.extend_from_slice(&id);
+        assert!(!super::tree_has_zero_padded_filemodes(&canonical, kind));
+
+        // A genuinely malformed mode stays a bad tree, not a zero-pad warning.
+        let mut bad = Vec::new();
+        bad.extend_from_slice(b"12345 file\0");
+        bad.extend_from_slice(&id);
+        assert!(!super::tree_has_zero_padded_filemodes(&bad, kind));
+
+        // Truncated id is malformed, not a zero-pad warning.
+        let mut truncated = Vec::new();
+        truncated.extend_from_slice(b"040000 dir\0");
+        truncated.extend_from_slice(&[0x11u8; 19]);
+        assert!(!super::tree_has_zero_padded_filemodes(&truncated, kind));
     }
 
     #[test]

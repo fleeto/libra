@@ -386,6 +386,7 @@ pub(crate) fn merge_bytes_with_input_normalization(
     })
 }
 
+#[allow(dead_code)] // retained as the label-defaulting wrapper for callers
 pub(crate) fn merge_bytes_with_driver(
     driver: BuiltinMergeDriver,
     base: &[u8],

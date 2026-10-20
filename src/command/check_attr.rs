@@ -67,6 +67,16 @@ pub struct CheckAttrArgs {
     /// Use NUL (`\0`) as the delimiter for `--stdin` input and for output.
     #[clap(short = 'z')]
     pub null: bool,
+
+    /// Read the attribute files from the index instead of the working tree
+    /// (Git's `--cached`).
+    #[clap(long = "cached", conflicts_with = "source")]
+    pub cached: bool,
+
+    /// Read the attribute files from the given tree object instead of the
+    /// working tree (Git's `--source=<tree>`).
+    #[clap(long = "source", value_name = "TREE")]
+    pub source: Option<String>,
 }
 
 /// One `(path, attr, value)` triple of structured output.
@@ -142,12 +152,51 @@ pub async fn execute_safe(args: CheckAttrArgs, output: &OutputConfig) -> CliResu
     }
 
     let workdir = util::working_dir();
+    // MX-11 (issues/481): `--cached` reads the attribute files staged in the
+    // index; `--source=<tree>` reads them from that tree. Both keep the
+    // repository-level sources (info/attributes, core.attributesFile) and the
+    // path list on the working tree, like Git.
+    let resolved_source = match args.source.as_deref() {
+        Some(tree_spec) => {
+            let resolved = util::resolve_object_spec_typed(tree_spec)
+                .await
+                .map_err(|error| {
+                    CliError::fatal(format!("cannot resolve --source '{tree_spec}': {error}"))
+                        .with_stable_code(StableErrorCode::CliInvalidTarget)
+                        .with_exit_code(128)
+                })?;
+            // `--source` accepts a tree-ish: peel a commit/tag to its tree
+            // through the shared revision syntax (`<spec>^{tree}`), like
+            // `ls-tree <commit>` does.
+            let peeled = util::resolve_object_spec_typed(&format!("{tree_spec}^{{tree}}"))
+                .await
+                .map_err(|error| {
+                    CliError::fatal(format!(
+                        "cannot use --source '{tree_spec}': it does not resolve to a tree: {error}"
+                    ))
+                    .with_stable_code(StableErrorCode::CliInvalidTarget)
+                    .with_exit_code(128)
+                })?;
+            let _ = resolved;
+            Some(peeled)
+        }
+        None => None,
+    };
+    let source_kind = if args.cached {
+        attributes::AttributeSourceKind::Index
+    } else if let Some(tree_id) = resolved_source.as_ref() {
+        attributes::AttributeSourceKind::Tree(tree_id)
+    } else {
+        attributes::AttributeSourceKind::Worktree
+    };
     let mut results = Vec::new();
     for path_str in &paths {
         let absolute = resolve_workdir_path(path_str, &workdir);
         if args.all {
             // Report only the attributes that are actually set.
-            for (attr, state) in attributes::all_attribute_states_for_path(&absolute) {
+            for (attr, state) in
+                attributes::all_attribute_states_for_path_from(&absolute, source_kind)
+            {
                 if let Some(value) = state.check_attr_value() {
                     results.push(CheckAttrEntry {
                         path: path_str.clone(),
@@ -161,7 +210,7 @@ pub async fn execute_safe(args: CheckAttrArgs, output: &OutputConfig) -> CliResu
                 results.push(CheckAttrEntry {
                     path: path_str.clone(),
                     attr: attr.clone(),
-                    value: attribute_value(attr, &absolute),
+                    value: attribute_value(attr, &absolute, source_kind),
                 });
             }
         }
@@ -173,8 +222,19 @@ pub async fn execute_safe(args: CheckAttrArgs, output: &OutputConfig) -> CliResu
 /// The value of `attr` for a path. `None` / `!attr` reports Git's
 /// `unspecified`; bare attrs report `set`; `-attr` reports `unset`; valued attrs
 /// report their value.
-fn attribute_value(attr: &str, absolute: &Path) -> String {
-    attributes::attribute_state_for_path(attr, absolute)
+fn attribute_value(
+    attr: &str,
+    absolute: &Path,
+    source_kind: attributes::AttributeSourceKind<'_>,
+) -> String {
+    let state = if source_kind == attributes::AttributeSourceKind::Worktree {
+        attributes::attribute_state_for_path(attr, absolute)
+    } else {
+        attributes::all_attribute_states_for_path_from(absolute, source_kind)
+            .get(attr)
+            .cloned()
+    };
+    state
         .and_then(|state| match state {
             AttributeState::Unspecified => None,
             other => other.check_attr_value(),

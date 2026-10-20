@@ -906,3 +906,46 @@ fn test_archive_literal_pathspecs_global() {
     assert_cli_success(&out, "archive literal");
     assert!(tar.exists(), "archive written");
 }
+
+/// MX-10 (issues/481, ADR-MX-10): an omitted `--format` is inferred from the
+/// `-o` extension, like Git. `out.zip` must be a ZIP; `--format` still wins.
+#[test]
+fn archive_infers_format_from_output_extension() {
+    let repo = super::create_committed_repo_via_cli();
+    let root = repo.path();
+
+    let zip = run_libra_command(&["archive", "-o", "out.zip", "HEAD"], root);
+    assert!(
+        zip.status.success(),
+        "archive -o out.zip: {}",
+        String::from_utf8_lossy(&zip.stderr)
+    );
+    let bytes = fs::read(root.join("out.zip")).expect("read out.zip");
+    assert_eq!(
+        bytes.get(..2),
+        Some(&[0x50, 0x4b][..]),
+        "out.zip must start with the ZIP magic (PK)"
+    );
+
+    let tgz = run_libra_command(&["archive", "-o", "out.tar.gz", "HEAD"], root);
+    assert!(tgz.status.success(), "archive -o out.tar.gz");
+    let bytes = fs::read(root.join("out.tar.gz")).expect("read out.tar.gz");
+    assert_eq!(
+        bytes.get(..2),
+        Some(&[0x1f, 0x8b][..]),
+        "out.tar.gz must be gzip-compressed"
+    );
+
+    // An explicit --format still wins over the extension.
+    let explicit = run_libra_command(
+        &["archive", "--format=tar", "-o", "explicit.zip", "HEAD"],
+        root,
+    );
+    assert!(explicit.status.success(), "--format=tar with a .zip name");
+    let bytes = fs::read(root.join("explicit.zip")).expect("read explicit.zip");
+    assert_ne!(
+        bytes.get(..2),
+        Some(&[0x50, 0x4b][..]),
+        "the explicit --format=tar must produce a TAR, not a ZIP"
+    );
+}

@@ -168,6 +168,29 @@ pub struct ReplaceArgs {
     #[clap(short = 'l', long)]
     pub list: bool,
 
+    /// List format for `-l`: `short` (the default, replaced oid only),
+    /// `medium` (`<replaced> -> <replacement>`), or `long` (both oids with
+    /// their object types).
+    #[clap(long = "format", value_name = "FORMAT", value_parser = ["short", "medium", "long"])]
+    pub format: Option<String>,
+
+    /// Create a replacement commit whose parents are the given ones (Git's
+    /// `--graft`): `replace --graft <commit> [<parent>...]`. With no parents
+    /// the commit becomes parentless.
+    #[clap(long = "graft")]
+    pub graft: bool,
+
+    /// Convert `.libra/info/grafts` (the legacy parent-rewriting file) into
+    /// replace refs.
+    #[clap(long = "convert-graft-file")]
+    pub convert_graft_file: bool,
+
+    /// Accepted for Git parity: `--edit` produces the same graft replacement
+    /// as `--graft` when parents are supplied and is otherwise a no-op, since
+    /// Libra never opens an editor for it.
+    #[clap(long = "edit")]
+    pub edit: bool,
+
     /// Objects / replacement (see EXAMPLES).
     #[clap(value_name = "ARG")]
     pub args: Vec<String>,
@@ -294,6 +317,19 @@ pub async fn execute_safe(args: ReplaceArgs, _output: &OutputConfig) -> CliResul
 }
 
 async fn run(args: ReplaceArgs) -> CliResult<()> {
+    if args.convert_graft_file {
+        return convert_graft_file().await;
+    }
+    if args.graft || args.edit {
+        // `--graft <commit> [<parent>...]` / `--edit <commit> [<parent>...]`:
+        // the first positional is the commit, the rest are its new parents.
+        if args.args.is_empty() {
+            return Err(usage("--graft/--edit needs a commit to replace"));
+        }
+        let object = args.args[0].clone();
+        let parents = args.args[1..].to_vec();
+        return create_graft(&object, &parents, args.force).await;
+    }
     if args.delete {
         if args.args.is_empty() {
             return Err(usage("`replace -d` needs at least one object"));
@@ -301,7 +337,10 @@ async fn run(args: ReplaceArgs) -> CliResult<()> {
         return delete(&args.args).await;
     }
     if args.list || args.args.len() <= 1 {
-        return list(args.args.first().map(String::as_str));
+        return list(
+            args.args.first().map(String::as_str),
+            args.format.as_deref(),
+        );
     }
     if args.args.len() == 2 {
         return create(&args.args[0], &args.args[1], args.force).await;
@@ -356,7 +395,7 @@ async fn delete(objects: &[String]) -> CliResult<()> {
         let obj = resolve_any(spec).await?;
         let path = dir.join(obj.to_string());
         match fs::remove_file(&path) {
-            Ok(()) => {}
+            Ok(()) => println!("Deleted replace ref '{obj}'"),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 return Err(fatal(format!("no replacement for {obj}")));
             }
@@ -366,7 +405,92 @@ async fn delete(objects: &[String]) -> CliResult<()> {
     Ok(())
 }
 
-fn list(pattern: Option<&str>) -> CliResult<()> {
+/// `replace --graft <commit> [<parent>...]`: build a replacement commit with
+/// the given parents (none = parentless) and register it, like Git.
+async fn create_graft(object: &str, parents: &[String], force: bool) -> CliResult<()> {
+    use git_internal::internal::object::{commit::Commit, types::ObjectType};
+
+    let obj = resolve_any(object).await?;
+    let storage = util::objects_storage();
+    if storage
+        .get_object_type(&obj)
+        .map_err(|error| fatal(format!("cannot read object {obj}: {error}")))?
+        != ObjectType::Commit
+    {
+        return Err(fatal(format!(
+            "cannot graft {obj}: only commits can be grafted"
+        )));
+    }
+    let original = crate::command::load_object::<Commit>(&obj)
+        .map_err(|error| fatal(format!("cannot read commit {obj}: {error}")))?;
+    let mut new_parents = Vec::with_capacity(parents.len());
+    for parent in parents {
+        let resolved = resolve_any(parent).await?;
+        if storage
+            .get_object_type(&resolved)
+            .map_err(|error| fatal(format!("cannot read object {resolved}: {error}")))?
+            != ObjectType::Commit
+        {
+            return Err(fatal(format!("{parent} is not a commit")));
+        }
+        new_parents.push(resolved);
+    }
+    // A graft keeps every other field intact; only the parent list changes.
+    let grafted = Commit::new(
+        original.author.clone(),
+        original.committer.clone(),
+        original.tree_id,
+        new_parents,
+        &original.message,
+    );
+    crate::command::save_object(&grafted, &grafted.id)
+        .map_err(|error| fatal(format!("cannot write the grafted commit: {error}")))?;
+    let new_id = grafted.id;
+
+    let dir = replace_dir().ok_or_else(CliError::repo_not_found)?;
+    let path = dir.join(obj.to_string());
+    if path.exists() && !force {
+        return Err(fatal(format!(
+            "replacement for {obj} already exists; pass -f to overwrite"
+        )));
+    }
+    fs::create_dir_all(&dir).map_err(write_err)?;
+    fs::write(&path, format!("{new_id}\n")).map_err(write_err)?;
+    Ok(())
+}
+
+/// `replace --convert-graft-file`: turn each `.libra/info/grafts` line
+/// (`<commit> [<parent>...]`) into a graft replacement, then remove the file
+/// (Git's behavior).
+async fn convert_graft_file() -> CliResult<()> {
+    let grafts = util::try_get_storage_path(None)
+        .map_err(|_| CliError::repo_not_found())?
+        .join("info")
+        .join("grafts");
+    let contents = match fs::read_to_string(&grafts) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(fatal(format!("no graft file at {}", grafts.display())));
+        }
+        Err(error) => return Err(read_err(error)),
+    };
+    for line in contents.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut fields = line.split_whitespace();
+        let Some(commit) = fields.next() else {
+            continue;
+        };
+        let parents: Vec<String> = fields.map(str::to_string).collect();
+        create_graft(commit, &parents, true).await?;
+    }
+    fs::remove_file(&grafts).map_err(write_err)?;
+    Ok(())
+}
+
+fn list(pattern: Option<&str>, format: Option<&str>) -> CliResult<()> {
     let Some(dir) = replace_dir() else {
         return Ok(());
     };
@@ -386,8 +510,33 @@ fn list(pattern: Option<&str>) -> CliResult<()> {
         }
     }
     names.sort();
+    let map = load_replace_map(&dir);
+    let storage = util::objects_storage();
     for name in names {
-        println!("{name}");
+        let Ok(replaced) = crate::internal::object_format::parse_repo_oid(&name) else {
+            continue;
+        };
+        let Some(replacement) = map.get(&replaced) else {
+            println!("{name}");
+            continue;
+        };
+        match format.unwrap_or("short") {
+            "medium" => println!("{replaced} -> {replacement}"),
+            "long" => {
+                let kind = |hash: &ObjectHash| {
+                    storage
+                        .get_object_type(hash)
+                        .map(|t| t.to_string())
+                        .unwrap_or_else(|_| "unknown".to_string())
+                };
+                println!(
+                    "{replaced} ({}) -> {replacement} ({})",
+                    kind(&replaced),
+                    kind(replacement)
+                );
+            }
+            _ => println!("{replaced}"),
+        }
     }
     Ok(())
 }

@@ -338,6 +338,9 @@ fn rev_list_target_error(spec: &str, error: CommitBaseError) -> CliError {
             CliError::failure(format!("not a valid object name: '{spec}' ({detail})"))
                 .with_stable_code(StableErrorCode::CliInvalidTarget)
         }
+        CommitBaseError::Ambiguous { name, candidates } => {
+            util::ambiguous_short_oid_error(&name, &candidates)
+        }
         CommitBaseError::ReadFailure(detail) => {
             CliError::fatal(format!("failed to resolve '{spec}': {detail}"))
                 .with_stable_code(StableErrorCode::IoReadFailed)

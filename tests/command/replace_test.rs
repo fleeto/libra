@@ -135,3 +135,96 @@ fn replace_outside_repository_is_an_error() {
     let result = run_libra_command(&["replace", "-l"], dir.path());
     assert_eq!(result.status.code(), Some(128));
 }
+
+/// MX-14/MX-15 (issues/481): `-l --format=short|medium|long`, `--graft`,
+/// `--convert-graft-file`, and the `-d` "Deleted replace ref" line.
+#[test]
+fn replace_formats_graft_and_convert_graft_file() {
+    let repo = super::create_committed_repo_via_cli();
+    let root = repo.path();
+    fs::write(root.join("second.txt"), "second\n").expect("write second file");
+    super::assert_cli_success(&run_libra_command(&["add", "second.txt"], root), "stage");
+    super::assert_cli_success(
+        &run_libra_command(&["commit", "-m", "second", "--no-verify"], root),
+        "commit",
+    );
+    let head = String::from_utf8_lossy(&run_libra_command(&["rev-parse", "HEAD"], root).stdout)
+        .trim()
+        .to_string();
+    let parent = String::from_utf8_lossy(&run_libra_command(&["rev-parse", "HEAD~1"], root).stdout)
+        .trim()
+        .to_string();
+
+    super::assert_cli_success(
+        &run_libra_command(&["replace", &parent, &head], root),
+        "create replacement",
+    );
+    let short = String::from_utf8_lossy(&run_libra_command(&["replace", "-l"], root).stdout)
+        .trim()
+        .to_string();
+    assert_eq!(short, parent, "default -l prints the replaced oid");
+    let medium = String::from_utf8_lossy(
+        &run_libra_command(&["replace", "-l", "--format=medium"], root).stdout,
+    )
+    .trim()
+    .to_string();
+    assert_eq!(medium, format!("{parent} -> {head}"), "--format=medium");
+    let long = String::from_utf8_lossy(
+        &run_libra_command(&["replace", "-l", "--format=long"], root).stdout,
+    )
+    .trim()
+    .to_string();
+    assert_eq!(
+        long,
+        format!("{parent} (commit) -> {head} (commit)"),
+        "--format=long"
+    );
+
+    // `-d` prints Git's "Deleted replace ref" line.
+    let deleted = run_libra_command(&["replace", "-d", &parent], root);
+    assert!(deleted.status.success(), "replace -d failed");
+    assert_eq!(
+        String::from_utf8_lossy(&deleted.stdout).trim(),
+        format!("Deleted replace ref '{parent}'"),
+        "-d output line"
+    );
+
+    // `--convert-graft-file` turns `.libra/info/grafts` into replace refs.
+    fs::create_dir_all(root.join(".libra").join("info")).expect("mkdir info");
+    fs::write(
+        root.join(".libra").join("info").join("grafts"),
+        format!("{head}\n"),
+    )
+    .expect("write grafts");
+    let converted = run_libra_command(&["replace", "--convert-graft-file"], root);
+    assert!(
+        converted.status.success(),
+        "--convert-graft-file failed: {}",
+        String::from_utf8_lossy(&converted.stderr)
+    );
+    assert!(
+        !root.join(".libra").join("info").join("grafts").exists(),
+        "the graft file is removed after conversion"
+    );
+    let listed = String::from_utf8_lossy(&run_libra_command(&["replace", "-l"], root).stdout)
+        .trim()
+        .to_string();
+    assert_eq!(listed, head, "the graft became a replace ref");
+
+    // `--graft <commit>` (no parents) makes the commit parentless.
+    let grafted = run_libra_command(&["replace", "--graft", &head, "-f"], root);
+    assert!(
+        grafted.status.success(),
+        "--graft failed: {}",
+        String::from_utf8_lossy(&grafted.stderr)
+    );
+    let medium = String::from_utf8_lossy(
+        &run_libra_command(&["replace", "-l", "--format=medium"], root).stdout,
+    )
+    .trim()
+    .to_string();
+    assert!(
+        medium.starts_with(&head) && medium.contains(" -> "),
+        "--graft registered a replacement: {medium}"
+    );
+}

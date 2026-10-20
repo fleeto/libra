@@ -671,9 +671,38 @@ pub fn parse_expire_cutoff(raw: &str) -> Option<ExpireCutoff> {
     if let Ok(days) = trimmed.parse::<i64>() {
         return Some(ExpireCutoff::Before(now_seconds() - days * 86_400));
     }
+    // Git's approxidate dotted form — the default `gc.pruneExpire` spelling
+    // (`2.weeks.ago`, `3.days.ago`, …).
+    if let Some(ts) = parse_dotted_ago(trimmed) {
+        return Some(ExpireCutoff::Before(ts));
+    }
     crate::internal::log::date_parser::parse_date(trimmed)
         .ok()
         .map(ExpireCutoff::Before)
+}
+
+/// Parse Git's `<n>.<unit>.ago` relative date into an absolute Unix timestamp
+/// (units per Git's approxidate table: second/minute/hour/day/week/month/year,
+/// month = 30 days and year = 365 days, matching [`crate::internal::log::date_parser`]).
+fn parse_dotted_ago(raw: &str) -> Option<i64> {
+    let lower = raw.to_ascii_lowercase();
+    let mut parts = lower.split('.');
+    let value: i64 = parts.next()?.parse().ok()?;
+    let unit = parts.next()?;
+    if parts.next()? != "ago" || parts.next().is_some() {
+        return None;
+    }
+    let unit_secs = match unit {
+        u if u.starts_with("second") => 1,
+        u if u.starts_with("minute") || u == "min" => 60,
+        u if u.starts_with("hour") => 3_600,
+        u if u.starts_with("day") => 86_400,
+        u if u.starts_with("week") => 7 * 86_400,
+        u if u.starts_with("month") => 30 * 86_400,
+        u if u.starts_with("year") => 365 * 86_400,
+        _ => return None,
+    };
+    Some(now_seconds() - value * unit_secs)
 }
 
 fn now_seconds() -> i64 {

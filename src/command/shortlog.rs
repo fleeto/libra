@@ -890,6 +890,9 @@ fn shortlog_commit_base_error(revision: &str, error: CommitBaseError) -> CliErro
             "failed to resolve revision '{revision}': {message}"
         ))
         .with_stable_code(StableErrorCode::CliInvalidTarget),
+        CommitBaseError::Ambiguous { name, candidates } => {
+            util::ambiguous_short_oid_error(&name, &candidates)
+        }
         CommitBaseError::ReadFailure(message) => {
             CliError::fatal(message).with_stable_code(StableErrorCode::IoReadFailed)
         }

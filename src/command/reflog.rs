@@ -799,6 +799,53 @@ async fn handle_expire(options: ExpireCliOptions, output: &OutputConfig) -> CliR
     render_expire(&results, options.verbose, output)
 }
 
+/// Expire every ref's reflog using the default `gc.reflogExpire` /
+/// `gc.reflogExpireUnreachable` policy (90/30-day defaults), without `--rewrite`,
+/// `--updateref`, or `--stale-fix` — the reflog step of `libra gc` (ADR-MX-07).
+///
+/// Returns the per-ref results and renders nothing; the caller owns the output
+/// contract (a `gc` JSON envelope or a human summary).
+pub(crate) async fn expire_all_reflogs() -> CliResult<Vec<ExpireResult>> {
+    let db = get_db_conn_instance().await;
+    let (default_expire, default_unreachable) = expire_defaults_with_conn(&db)
+        .await
+        .map_err(map_reflog_error)?;
+    let expire_options = ExpireOptions {
+        expire: default_expire,
+        expire_unreachable: default_unreachable,
+        rewrite: false,
+        updateref: false,
+        stale_fix: false,
+        dry_run: false,
+    };
+    let cli_options = ExpireCliOptions {
+        all: true,
+        expire: None,
+        expire_unreachable: None,
+        rewrite: false,
+        updateref: false,
+        stale_fix: false,
+        dry_run: false,
+        verbose: false,
+        refs: Vec::new(),
+    };
+    let refs = resolve_expire_refs(&db, &cli_options).await?;
+    let mut results = Vec::new();
+    for ref_name in &refs {
+        let result = expire_reflog(
+            &db,
+            ref_name,
+            &expire_options,
+            load_commit_parents,
+            oid_is_commit,
+        )
+        .await
+        .map_err(map_reflog_error)?;
+        results.push(result);
+    }
+    Ok(results)
+}
+
 fn render_expire(results: &[ExpireResult], verbose: bool, output: &OutputConfig) -> CliResult<()> {
     if output.is_json() {
         return emit_json_data("reflog.expire", &results.to_vec(), output);

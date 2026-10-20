@@ -84,4 +84,9 @@ libra merge-file --diff3 -p ours.txt base.txt theirs.txt
 Differences and deferred options: conflict markers are labelled `ours` / `theirs`
 (consistent with `libra merge`), not the file names; the conflict exit code is
 fixed at `1` (Git reports the conflict count); and `-L <label>`, `--ours` /
-`--theirs` / `--union`, and `--marker-size` are not yet exposed.
+`--theirs` / `--union`, and `--marker-size` are supported:
+`--ours`/`--theirs` resolve every conflict toward one side (clean result),
+`--union` concatenates both sides of a conflicting hunk (never reports a
+conflict), `-L <label>` (up to three times) renames the ours/base/theirs
+marker labels — the default labels are the FILE NAMES, matching Git — and
+`--marker-size <n>` widens the marker lines (default 7).

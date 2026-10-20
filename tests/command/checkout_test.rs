@@ -1409,3 +1409,56 @@ async fn checkout_b_resolves_bare_remote_start_point_and_sets_tracking() {
         Some("refs/heads/main".to_string())
     );
 }
+
+/// ADR-MX-04 §3: a genuinely ambiguous short object name is a revision error —
+/// `checkout` must surface the shared ambiguity diagnostic instead of silently
+/// falling back to pathspec interpretation — while a revision that truly does
+/// not resolve still falls through to the pathspec-style diagnostic.
+#[test]
+fn test_checkout_ambiguous_revision_is_not_pathspec() {
+    use super::{
+        assert_cli_success, create_ambiguous_prefix_fixture, create_committed_repo_via_cli,
+        parse_cli_error_stderr, run_libra_command,
+    };
+
+    let repo = create_committed_repo_via_cli();
+    let fixture = create_ambiguous_prefix_fixture(repo.path());
+    let prefix = fixture.prefix.clone();
+
+    // Ambiguous prefix: shared ambiguity diagnostic, NOT a pathspec message.
+    let output = run_libra_command(&["checkout", &prefix], repo.path());
+    assert_eq!(
+        output.status.code(),
+        Some(129),
+        "checkout <ambiguous> must fail with the ambiguity diagnostic, got: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let (human, report) = parse_cli_error_stderr(&output.stderr);
+    assert!(
+        human.contains(&format!("short object ID {prefix} is ambiguous")),
+        "unexpected stderr: {human}"
+    );
+    assert!(human.contains("The candidates are:"), "stderr: {human}");
+    assert!(
+        !human.contains("did not match any files"),
+        "ambiguous revision must not fall back to a pathspec message: {human}"
+    );
+    assert_eq!(report.error_code, "LBR-CLI-003");
+
+    // Truly unresolvable name: falls back to the pathspec-style diagnostic.
+    let output = run_libra_command(&["checkout", "no-such-branch-or-path"], repo.path());
+    assert_eq!(output.status.code(), Some(129));
+    let (human, _) = parse_cli_error_stderr(&output.stderr);
+    assert!(
+        human.contains("pathspec 'no-such-branch-or-path' did not match any files known to libra"),
+        "unexpected stderr: {human}"
+    );
+
+    // Control: a full commit id still detaches normally (the fallback does
+    // not break plain OID checkouts).
+    let head = run_libra_command(&["rev-parse", "HEAD"], repo.path());
+    assert_cli_success(&head, "rev-parse HEAD");
+    let head_oid = String::from_utf8_lossy(&head.stdout).trim().to_string();
+    let output = run_libra_command(&["checkout", &head_oid], repo.path());
+    assert_cli_success(&output, "checkout <full commit id>");
+}

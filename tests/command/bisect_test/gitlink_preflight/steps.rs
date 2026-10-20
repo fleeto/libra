@@ -41,7 +41,7 @@ fn bisect_marks_preserve_head_index_and_session_when_gitlink_restore_is_refused(
 }
 
 #[test]
-fn bisect_reset_preserves_head_index_and_session_when_gitlink_restore_is_refused() {
+fn bisect_reset_clears_session_when_gitlink_restore_is_refused() {
     for reattach in [false, true] {
         // Given: an active session and a reset target without the materialized gitlink.
         let (repo, commits) = gitlink_history();
@@ -62,9 +62,41 @@ fn bisect_reset_preserves_head_index_and_session_when_gitlink_restore_is_refused
         // When: reset attempts an attached or detached restore across the gitlink.
         let output = run_libra_command(&args, path);
 
-        // Then: failed reset retains the session and the previous candidate intact.
-        assert_gitlink_refusal(&output);
-        assert_eq!(snapshot(path), before, "reattach={reattach}");
+        // Then: ADR-MX-03 §2 — a refused restore must NOT wedge the session.
+        // `reset` exits 0, warns with the original target for a manual retry,
+        // and clears the session row; HEAD, refs, index and worktree stay at
+        // the pre-reset candidate untouched.
+        assert_cli_success(&output, "refused reset still ends the session");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("failed to restore original HEAD"),
+            "reset must warn about the failed restore: {stderr}"
+        );
+        assert!(
+            stderr.contains("clearing the bisect session"),
+            "reset must explain the cleared session: {stderr}"
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("could not be restored"),
+            "reset stdout must note the unrestored HEAD: {stdout}"
+        );
+        assert_eq!(successful_stdout(path, &["rev-parse", "HEAD"]), before.head);
+        assert_eq!(successful_stdout(path, &["show-ref"]), before.refs);
+        assert_eq!(
+            successful_stdout(path, &["reflog", "show", "HEAD"]),
+            before.reflog
+        );
+        assert_eq!(fs::read(path.join(".libra/index")).unwrap(), before.index);
+        assert_eq!(fs::read(path.join("tracked.txt")).unwrap(), before.tracked);
+        assert_eq!(
+            fs::read(path.join("vendor/inner.txt")).unwrap(),
+            before.nested
+        );
+        let view = run_libra_command(&["bisect", "view"], path);
+        assert_eq!(view.status.code(), Some(128));
+        let (_, report) = parse_cli_error_stderr(&view.stderr);
+        assert_eq!(report.error_code, "LBR-BISECT-001");
     }
 }
 

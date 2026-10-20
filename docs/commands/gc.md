@@ -1,159 +1,152 @@
 # `libra gc`
 
-Historical design for pruning unreachable loose objects and cleaning stale pack sidecar files.
-
-> Status: unpublished. `libra gc` is not registered in the public CLI in the
-> current release. Running it returns the standard unknown-command error
-> (`LBR-CLI-001`). Use `libra maintenance run --dry-run --task gc` for the
-> currently published maintenance entry point. The notes below describe preserved
-> design material, not a user-visible `gc` command contract.
+Clean up repository objects and refs, like `git gc`.
 
 ## Synopsis
 
 ```bash
-libra gc [--dry-run] [--prune=<date> | --no-prune] [--aggressive] [--auto] [--force]
+libra gc [--prune=<date>] [--no-prune] [--aggressive] [--auto]
 ```
 
 ## Description
 
-The unpublished design first expires reflogs using the default `gc.reflogExpire` and
-`gc.reflogExpireUnreachable` policy, then traces objects reachable from
-repository references, both endpoints of remaining reflogs, annotated-tag targets,
-every index stage, every file-backed stash reflog entry, held merge/rebase autostash
-sidecars, in-progress operation state, and local AI catalogs. Root read/parse failures
-or missing/corrupt reachable objects stop deletion. It prunes unreachable loose objects that match the
-configured prune cutoff. When cloud backup is configured, unsynced
-`object_index` rows retain matching loose objects as pending backup data; they
-are reported as retained unreachable objects rather than counted as reachable
-graph roots. It also
-inspects `.libra/objects/pack/` and removes stale sidecar files such as orphan
-`.idx` files when they are old enough and not protected by a matching `.keep`
-file.
+`libra gc` runs the same maintenance steps Git's `gc` performs, in order, by
+reusing the existing maintenance primitives rather than re-implementing a
+reachability traversal:
 
-Valid `.pack` + `.idx` pairs are verified through Libra's existing
-`verify-pack`/pack decoding path. Malformed pack groups are retained and
-reported instead of blocking unrelated cleanup. If reachable-object traversal is
-incomplete, non-dry-run loose-object pruning is skipped for that invocation and
-the reason is emitted in `warnings[]`. Libra currently does not rewrite valid
-packs, perform delta compression, create cruft packs, or repack loose reachable
-objects.
+1. **`pack-refs`** — collapse loose refs into `packed-refs`;
+2. **reflog expiry** — expire reflog entries past the default
+   `gc.reflogExpire` / `gc.reflogExpireUnreachable` policy (90/30-day defaults);
+3. **`repack -a -d`** — pack all reachable objects into a fresh pack and drop
+   the now-packed loose copies;
+4. **unreachable loose-object pruning** — delete unreachable loose objects
+   past the prune expiry, using the shared maintenance reachability inventory
+   (refs, reflogs, every index stage, stash/autostash sidecars, sequencer
+   state) and the alternates borrow protection;
+5. **`worktree prune`** — retire worktree registry entries whose path
+   vanished.
+
+Reachable objects are never deleted. The deletion steps refuse while another
+repository borrows this object store through alternates (a borrowed object is
+reachable to the borrower, not to this repository's walk), and re-verify
+reachability under an exclusive maintenance hold immediately before unlinking.
+
+The human summary prints one `gc <step>:` line per executed step;
+`--json`/`--machine` emit a `gc` envelope whose `data.steps[]` summarizes each
+step (task, success, and per-step counters such as `objects_removed`,
+`refs_packed`, and `reflog_entries_pruned`).
 
 ## Options
 
-| Flag | Short | Description | Default |
-|------|-------|-------------|---------|
-| `--dry-run` | `-n` | Report objects and pack sidecars that would be removed without deleting them | Off |
-| `--prune <DATE>` | | Prune unreachable loose objects older than `<DATE>`; supports `now`, `never`, Unix timestamps, RFC3339 timestamps, `YYYY-MM-DD`, and `N.seconds.ago`, `N.minutes.ago`, `N.hours.ago`, `N.days.ago`, `N.weeks.ago`, `N.months.ago`, `N.years.ago` | `2.weeks.ago` |
-| `--no-prune` | | Disable pruning and only inspect reachability and pack hygiene | Off |
-| `--aggressive` | | Accepted for Git compatibility; Libra does not repack or delta-compress yet | Off |
-| `--auto` | | Accepted for Git compatibility; Libra still runs one deterministic local pass | Off |
-| `--force` | | Replace an existing `gc.lock` only when it contains a valid PID that is no longer running | Off |
-| `--json` | | Emit a structured JSON envelope | Off |
-| `--machine` | | Emit the same envelope as one compact JSON line | Off |
+### `--prune <DATE>`
+
+Prune unreachable loose objects older than `<DATE>`. Defaults to the
+`gc.pruneExpire` config value, falling back to `2.weeks.ago`. Accepts
+`now` (delete immediately), `never` (disable pruning), bare integers (days),
+Git's dotted approxidate forms (`N.seconds.ago`, `N.minutes.ago`,
+`N.hours.ago`, `N.days.ago`, `N.weeks.ago`, `N.months.ago`, `N.years.ago`),
+and the shared date parser's absolute forms (Unix timestamps, RFC3339,
+`YYYY-MM-DD`). An invalid value fails with `LBR-CLI-002` / exit 129 before
+any step writes.
+
+```bash
+libra gc --prune=now
+libra gc --prune=3.days.ago
+```
+
+### `--no-prune`
+
+Do not prune any unreachable loose objects; the other steps still run.
+
+```bash
+libra gc --no-prune
+```
+
+### `--aggressive`
+
+Spend more time optimizing the pack (a larger delta-compression window). The
+enlarged window (`gc.aggressiveWindow`/`gc.aggressiveDepth`, Git's 250/50
+defaults) lands with `repack --window`/`--depth` (MX-09); until then the flag
+is accepted and reported in the `--json` envelope (`data.aggressive`) without
+changing pack parameters.
+
+```bash
+libra gc --aggressive
+```
+
+### `--auto`
+
+Only run when the loose-object count is at least `gc.auto` (default 6700).
+Below the threshold the command exits 0 with **zero writes** and reports
+`Auto gc skipped`. A non-positive `gc.auto` disables auto-gc entirely,
+matching Git's `too_many_loose_objects`.
+
+```bash
+libra gc --auto
+libra config set gc.auto 2000 && libra gc --auto
+```
 
 ## Examples
 
 ```bash
-libra gc
-libra gc --dry-run --prune=now
-libra gc --prune=now
-libra gc --prune=never --json
+libra gc                              # default policy: prune past 2.weeks.ago
+libra gc --prune=now                  # delete unreachable loose objects immediately
+libra gc --no-prune                   # clean up without deleting any object
+libra gc --auto                       # no-op below gc.auto (6700)
+libra gc --aggressive                 # optimize the pack (reported; window lands with MX-09)
+libra gc --quiet                      # suppress the step summary
+libra --json gc                       # structured per-step summary
 ```
 
 ## Human Output
 
-Human mode prints a loose-object summary and pack-directory statistics:
-
 ```text
-Enumerating loose objects: 3 scanned, 2 reachable, 1 unreachable.
-Expired 1 reflog entry across 2 ref(s).
-Pruned 1 loose object(s).
-Checked 1 pack(s), containing 42 indexed object(s).
-Cleaned 0 stale pack file(s).
+gc pack-refs: packed 2 refs into packed-refs
+gc reflog-expire: expired 0 reflog entries across 4 ref(s)
+gc repack: repacked all reachable objects and removed the now-packed loose copies
+gc prune: removed 1 unreachable loose objects
+gc worktree-prune: pruned worktree registry entries whose paths vanished
 ```
 
-`--dry-run` switches deletion lines to `Would prune` / `Would clean`.
-`--quiet` suppresses stdout while preserving errors and warnings on stderr.
+`--quiet` suppresses the summary while keeping warnings and errors on stderr.
 
 ## Structured Output
-
-If this command is published in a future release, `--json` should return a `gc` envelope containing:
-
-- `loose_objects.scanned`, `reachable`, `unreachable`, `pruned`, and `retained`
-- `reflogs.refs_scanned`, `entries_scanned`, `pruned`, and `rewritten`
-- `reachable_objects`
-- `unreachable_objects[]` with object id, type, action, and reason
-- `pack_files.packs_verified`, `objects_in_packs`, and `stale_files[]`
-- `warnings[]` for accepted compatibility flags, stale roots, incomplete traversal, and forced locks
 
 ```json
 {
   "ok": true,
   "command": "gc",
   "data": {
-    "prune": "now",
-    "dry_run": false,
-    "loose_objects": {
-      "scanned": 3,
-      "reachable": 2,
-      "unreachable": 1,
-      "pruned": 1,
-      "retained": 0
-    },
-    "reflogs": {
-      "refs_scanned": 2,
-      "entries_scanned": 12,
-      "pruned": 1,
-      "rewritten": 0
-    },
-    "reachable_objects": 2,
-    "unreachable_objects": [
-      {
-        "oid": "0123456789abcdef0123456789abcdef01234567",
-        "object_type": "blob",
-        "action": "pruned",
-        "reason": "unreachable loose object matched prune policy"
-      }
-    ],
-    "pack_files": {
-      "directory_exists": true,
-      "packs_verified": 1,
-      "objects_in_packs": 42,
-      "stale_files": []
-    },
-    "warnings": []
+    "auto": false,
+    "auto_skipped": false,
+    "aggressive": false,
+    "prune": "2.weeks.ago",
+    "steps": [
+      { "task": "pack-refs", "success": true, "refs_packed": 2, "message": "..." },
+      { "task": "reflog-expire", "success": true, "reflog_entries_pruned": 0, "message": "..." },
+      { "task": "repack", "success": true, "message": "..." },
+      { "task": "prune", "success": true, "objects_removed": 1, "message": "..." },
+      { "task": "worktree-prune", "success": true, "message": "..." }
+    ]
   }
 }
 ```
 
+A skipped `--auto` run reports `auto_skipped: true` with an empty `steps[]`.
+
 ## Compatibility
 
-The unpublished design aligns with Git's core safety rule: reachable objects are retained,
-and unreachable loose objects are pruned only when the prune policy allows it.
-Before pruning objects, Libra runs the same default policy as
-`libra reflog expire --all` without `--rewrite`, `--updateref`, or
-`--stale-fix`. The implementation is intentionally narrower than `git gc`: it
-does not perform full repacking, bitmap generation, commit-graph maintenance, or
-cruft-pack creation.
-
-`.libra/gc.lock` serializes concurrent `libra gc` runs. It is not a repository-wide
-write lock: commands that write new objects or update refs do not currently acquire
-this lock, so `--prune=now` should be used when no other writer is active. `--force`
-only replaces a stale lock when Libra can verify that the recorded PID is no longer
-running.
-
-| Feature | Libra | Git | jj |
-|---------|-------|-----|----|
-| Keep reachable objects | Supported | Supported | N/A |
-| Prune old unreachable loose objects | `--prune <date>` | `--prune=<date>` | N/A |
-| Dry run | `-n` / `--dry-run` | `--dry-run` | N/A |
-| Disable pruning | `--no-prune` | `--no-prune` | N/A |
-| Pack verification | Reuses `verify-pack` for valid pack/index pairs | Repack/verify as part of maintenance | N/A |
-| GC lock | `.libra/gc.lock` for concurrent `gc` runs only | Supported | N/A |
-| Repack valid objects | Unsupported | Supported | N/A |
-| Cruft packs | Unsupported | Supported | N/A |
-| Reflog expiration | Default `gc.reflogExpire` / `gc.reflogExpireUnreachable` policy | Supported | N/A |
-| JSON output | `--json` / `--machine` | N/A | N/A |
+| Feature | Libra | Git |
+|---------|-------|-----|
+| Keep reachable objects | Supported (shared maintenance reachability inventory) | Supported |
+| pack-refs + reflog expire + worktree prune | Supported (same order as `git gc`) | Supported |
+| Repack reachable loose objects (`repack -a -d`) | Supported (single undeltified pack; redundant-*pack* removal lands with MX-08) | Supported |
+| Prune old unreachable loose objects | `--prune=<date>` / `--no-prune` (default `gc.pruneExpire` = `2.weeks.ago`) | `--prune=<date>` / `--no-prune` |
+| Auto mode | `--auto` (zero writes below `gc.auto` = 6700; `gc.auto <= 0` disables) | `--auto` |
+| Aggressive repack | Accepted and reported; enlarged window lands with MX-09 | Larger delta window |
+| Alternates borrow protection | Deletion refuses while a live borrower exists (`LBR-CONFLICT-002`) | N/A (Libra extension) |
+| Cruft packs / commit-graph / bitmaps | Unsupported | Supported |
+| JSON output | `--json` / `--machine` step summary | N/A |
 
 ## Error Handling
 
@@ -161,7 +154,7 @@ running.
 |----------|-----------------|------|
 | Not inside a Libra repository | `LBR-REPO-001` | 128 |
 | Invalid prune date | `LBR-CLI-002` | 129 |
+| `--prune` combined with `--no-prune` | `LBR-CLI-002` | 129 |
+| A live repository borrows this object store (alternates) | `LBR-CONFLICT-002` | 128 |
 | Object storage cannot be read | `LBR-IO-001` | 128 |
-| Object directory is a symlink or not a directory | `LBR-REPO-002` | 128 |
-| Another GC run holds `gc.lock` | `LBR-CONFLICT-002` | 2 |
-| Object or pack sidecar deletion fails | `LBR-IO-002` | 128 |
+| Object deletion fails | `LBR-IO-002` (message-inferred) | 128 |

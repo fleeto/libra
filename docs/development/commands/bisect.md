@@ -48,6 +48,7 @@ flowchart TD
 - 用户文档：`docs/commands/bisect.md`。
 - Synopsis：`libra bisect start [<bad>] [--good <commit>] [--first-parent]`。
 - 公开参数/子命令包括：`start [<bad>] [-g, --good <good>] [--first-parent]`、`bad [<rev>]`、`good [<rev>]`、`reset [<rev>]`、`skip [<rev>]`、`log`、`run <cmd>...`、`view`（`visible_alias = "visualize"`——git 的 `visualize` 在 Libra 里是 `view` 的别名，显示文本状态而非 gitk GUI，终端原生的有意差异）。`--first-parent` 持久化到 `bisect_state.first_parent` 列（带 `ALTER TABLE` 迁移），`get_testable_commits` 在 BFS 时仅入队 `parent_commit_ids.first()`（good 祖先集合仍用全祖先，因为某提交若是 good 的任意祖先即为 good）。
+- 会话安全与统一错误（ADR-MX-03，2026-10-20）：每个 `good`/`bad`/`skip` 步骤先经 `checkout_to_commit` → `restore::preflight_worktree_restore_to_commit` 预检、再写 `bisect_state`（`checkout_to_bisect_point` 中 `save` 在 checkout 之后），被拒绝的步骤不持久化标记、`current` 不前进；`reset` 的恢复失败不阻止 `cleanup`，先输出含原始分支/提交目标的恢复提示再清行；收敛后再 `good`/`bad` 经 `converged_mark` exit 0 重印 culprit；culprit 主题经 `culprit_subject`（`Commit::format_message`）跳过 vault `gpgsig`/`gpgsig-sha256` 头块；无会话时 `bad`/`good`/`skip`/`log`/`view`/`run` 统一为 `BisectError::NotActive` → `LBR-BISECT-001`（exit 128），无会话 `reset` 输出 `We are not bisecting.` exit 0。
 
 
 ## 还未实现的功能
@@ -59,6 +60,7 @@ flowchart TD
 | 兼容差异项 | Replay session | 原始对照：不支持 (延后 — see compatibility/declined.md D6)；相关参数/替代：bisect replay <logfile>；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 | ✅ 已实现（有意差异） | `bisect visualize` | `visualize` 作为 `view` 的 clap `visible_alias`：两者路由到同一 `run_bisect_view` 处理器，输出文本状态（HEAD/good/bad/current/remaining + 候选）。Libra 无 gitk，故不启动 GUI（git 的 `visualize` 启 gitk/log）——这是终端原生的有意差异。带集成测试（`bisect_visualize_aliases_view`：与 `view` 退出码/输出一致，`--help` 列出别名）。 |
 | ✅ 已实现 | First-parent only `--first-parent` | `bisect start --first-parent` 将候选枚举限制在首父历史：状态持久化到 `bisect_state.first_parent`（列 + 迁移），`get_testable_commits` 仅沿 `parent_commit_ids.first()` 走，使合并入的侧分支不贡献可测提交。带集成测试（合并历史下候选集严格小于全父模式）。 |
+| ✅ 已实现（ADR-MX-03） | 步骤原子性与统一错误 | 每步先 restore 预检再写状态（失败步骤不卡死会话）；`reset` 恢复失败仍清行并提示；收敛后再标记 exit 0 重印 culprit；主题跳过 `gpgsig` 头；无会话错误统一 `LBR-BISECT-001`（128）。带集成测试（`test_bisect_full_cycle_object_states_matrix`、`test_bisect_failed_step_keeps_state_and_reset_recovers`、`test_bisect_converged_mark_reprints_culprit`、`test_bisect_no_session_uses_stable_bisect_not_active` 与 lib 单测 `culprit_subject_*`/`failed_good_step_does_not_modify_bisect_state`）。 |
 
 ## 维护要求
 

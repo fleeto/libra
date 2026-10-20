@@ -158,6 +158,8 @@ With a **single** `<SPEC>`, `data` is one such object (the shape above). With **
 
 A `--` separator splits revisions from paths in every mode (`rev-parse <rev> -- <path>`): arguments after `--` are paths, never revisions, and the `--` is echoed where path output applies. The single-revision modes `--verify` and `--short` print only the one resolved object (never the paths).
 
+A short object name that matches multiple **distinct** objects fails with `error: short object ID <p> is ambiguous` and a `The candidates are:` hint listing one `<abbrev> <type>` line per candidate (sorted by full object id), exit 129 (`LBR-CLI-003`; Git exits 128). With `--json` the error envelope's `details.candidates` carries each candidate's full `oid`, `type`, and shortest unique `abbrev`. Duplicate hits for the *same* object (a loose object that also exists in one or more packs) are merged first and do not count as ambiguity.
+
 > **Intentional divergence from Git:** combining `--verify` or `--short` with any output-filter flag (`--flags`/`--no-flags`/`--revs-only`/`--no-revs`) is rejected with a usage error (`LBR-CLI-002`, exit 129). Git's behavior for that combination is ill-defined, so Libra refuses it rather than guessing.
 
 ## Error Handling
@@ -165,6 +167,7 @@ A `--` separator splits revisions from paths in every mode (`rev-parse <rev> -- 
 | Scenario | StableErrorCode | Exit |
 |----------|-----------------|------|
 | Invalid target ref | `LBR-CLI-003` | 129 |
+| Ambiguous short object name | `LBR-CLI-003` | 129 |
 | `--verify`/`--short` combined with an output-filter flag | `LBR-CLI-002` | 129 |
 | Invalid work tree state | `LBR-REPO-003` | 128 |
 | Failed to read repository metadata | `LBR-IO-001` | 128 |

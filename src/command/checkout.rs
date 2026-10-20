@@ -19,7 +19,9 @@ use crate::{
     utils::{
         error::{CliError, CliResult, StableErrorCode},
         output::{OutputConfig, emit_json_data},
-        util::get_commit_base,
+        util::{
+            CommitBaseError, ambiguous_short_oid_error, get_commit_base, get_commit_base_typed,
+        },
     },
 };
 
@@ -547,10 +549,19 @@ async fn run_checkout(
         {
             Some(branch.commit)
         } else {
-            get_commit_base(branch_name)
-                .await
-                .ok()
-                .or_else(|| crate::internal::object_format::parse_repo_oid(branch_name).ok())
+            match get_commit_base_typed(branch_name).await {
+                Ok(commit) => Some(commit),
+                // Genuine short-object-name ambiguity is a revision error, not a
+                // pathspec: only a revision that truly does not resolve falls
+                // through to the pathspec-style `InvalidObjectName` diagnostic.
+                Err(CommitBaseError::Ambiguous { name, candidates }) => {
+                    return Err(CheckoutError::DelegatedCli(ambiguous_short_oid_error(
+                        &name,
+                        &candidates,
+                    )));
+                }
+                Err(_) => crate::internal::object_format::parse_repo_oid(branch_name).ok(),
+            }
         }
     } else {
         None

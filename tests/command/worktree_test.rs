@@ -3211,3 +3211,75 @@ fn named_worktree_adopts_unnamed_v3_detached_entry_only_at_explicit_path() {
         1
     );
 }
+
+/// MX-16 (issues/481, ADR-MX-12): `worktree add -f` reuses a non-empty target
+/// directory and `worktree remove -f` deletes a dirty worktree's directory.
+#[test]
+fn worktree_add_and_remove_force() {
+    let repo = super::create_committed_repo_via_cli();
+    let root = repo.path();
+    let worktrees = tempfile::tempdir().expect("worktree parent");
+
+    // A pre-existing, non-empty destination: refused without -f, accepted with.
+    let occupied = worktrees.path().join("occupied");
+    fs::create_dir_all(&occupied).expect("create occupied dir");
+    fs::write(occupied.join("stray.txt"), "stray\n").expect("write stray file");
+
+    let refused = run_libra_command(
+        &[
+            "worktree",
+            "add",
+            "occupied",
+            "--path",
+            &occupied.to_string_lossy(),
+            "--detach",
+        ],
+        root,
+    );
+    assert!(
+        !refused.status.success(),
+        "a non-empty destination must be refused without --force"
+    );
+
+    let forced = run_libra_command(
+        &[
+            "worktree",
+            "add",
+            "occupied",
+            "--path",
+            &occupied.to_string_lossy(),
+            "--detach",
+            "--force",
+        ],
+        root,
+    );
+    assert!(
+        forced.status.success(),
+        "worktree add --force failed: {}",
+        String::from_utf8_lossy(&forced.stderr)
+    );
+
+    // Make the worktree dirty, then remove it with --delete-dir --force.
+    fs::write(occupied.join("stray.txt"), "dirty later\n").expect("dirty the worktree");
+    let strict = run_libra_command(&["worktree", "remove", "occupied", "--delete-dir"], root);
+    assert!(
+        !strict.status.success(),
+        "a dirty worktree must refuse --delete-dir without --force: {}",
+        String::from_utf8_lossy(&strict.stdout)
+    );
+
+    let forced_remove = run_libra_command(
+        &["worktree", "remove", "occupied", "--delete-dir", "--force"],
+        root,
+    );
+    assert!(
+        forced_remove.status.success(),
+        "worktree remove --delete-dir --force failed: {}\n{}",
+        String::from_utf8_lossy(&forced_remove.stdout),
+        String::from_utf8_lossy(&forced_remove.stderr)
+    );
+    assert!(
+        !occupied.exists(),
+        "the forced removal must delete the directory"
+    );
+}

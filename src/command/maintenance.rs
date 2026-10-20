@@ -1122,11 +1122,12 @@ async fn run_loose_objects(
         .filter_map(|(hash_str, _)| parse_object_hash(hash_str))
         .collect();
 
-    let publication = match pack_writer::write_pack_with_index(
+    let publication = match pack_writer::write_pack_with_index_with_window(
         &storage,
         &hashes,
         &pack_dir,
         git_internal::hash::get_hash_kind(),
+        pack_writer::DEFAULT_WINDOW,
     )
     .await
     {
@@ -1272,7 +1273,7 @@ async fn run_loose_objects(
 // Pack-refs task
 // ---------------------------------------------------------------------------
 
-async fn run_pack_refs(
+pub(crate) async fn run_pack_refs(
     repo_path: &Path,
     dry_run: bool,
     _quiet: bool,
@@ -1491,11 +1492,12 @@ async fn run_incremental_repack(
         .into_iter()
         .collect();
 
-    let new_publication = match pack_writer::write_pack_with_index(
+    let new_publication = match pack_writer::write_pack_with_index_with_window(
         &storage,
         &all_hashes,
         &pack_dir,
         git_internal::hash::get_hash_kind(),
+        pack_writer::DEFAULT_WINDOW,
     )
     .await
     {
@@ -4491,7 +4493,7 @@ pub fn parse_object_hash(hex_str: &str) -> Option<ObjectHash> {
 }
 
 /// Remove empty directories under the given path.
-fn cleanup_empty_dirs(dir: &Path) -> io::Result<()> {
+pub(crate) fn cleanup_empty_dirs(dir: &Path) -> io::Result<()> {
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
@@ -5332,6 +5334,10 @@ mod tests {
             (
                 "checkpoint-input",
                 "ephemeral materialized task input beneath worktree/tasks; its object graph is rooted by the run manifest",
+            ),
+            (
+                "grafts",
+                "legacy parent-rewriting file at info/grafts: read once by `replace --convert-graft-file` (which converts each line into a refs/replace entry) and removed; Git likewise does not treat it as a GC root",
             ),
             (
                 "linked",

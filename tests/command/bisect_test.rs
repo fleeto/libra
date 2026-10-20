@@ -151,7 +151,10 @@ async fn test_bisect_start_creates_state() {
     // Start bisect
     let args = Bisect::Start {
         bad: None,
-        good: None,
+        good: vec![],
+        good_opt: None,
+        term_old: vec![],
+        term_new: vec![],
         first_parent: false,
     };
     execute_safe(args, &OutputConfig::default()).await.unwrap();
@@ -185,7 +188,10 @@ async fn test_bisect_start_with_bad_and_good() {
 
     let args = Bisect::Start {
         bad: Some(bad.clone()),
-        good: Some(good.clone()),
+        good: vec![good.clone()],
+        good_opt: None,
+        term_old: vec![],
+        term_new: vec![],
         first_parent: false,
     };
     execute_safe(args, &OutputConfig::default()).await.unwrap();
@@ -216,7 +222,10 @@ async fn test_bisect_mark_bad_then_good() {
     // Start bisect
     let args = Bisect::Start {
         bad: None,
-        good: None,
+        good: vec![],
+        good_opt: None,
+        term_old: vec![],
+        term_new: vec![],
         first_parent: false,
     };
     execute_safe(args, &OutputConfig::default()).await.unwrap();
@@ -265,7 +274,10 @@ async fn test_bisect_find_first_bad_commit() {
 
     let args = Bisect::Start {
         bad: Some(bad),
-        good: Some(good),
+        good: vec![good],
+        good_opt: None,
+        term_old: vec![],
+        term_new: vec![],
         first_parent: false,
     };
     execute_safe(args, &OutputConfig::default()).await.unwrap();
@@ -299,6 +311,358 @@ async fn test_bisect_find_first_bad_commit() {
     assert!(!BisectState::is_in_progress().await.unwrap());
 }
 
+/// MX-01 smoke (M-BSAFE S1, packed state): after `repack` leaves every
+/// reachable object both as a loose object and in a pack index, a full bisect
+/// session must still converge and terminate instead of failing with
+/// `failed to resolve checkout source`.
+#[tokio::test]
+#[serial(cwd)]
+async fn test_bisect_session_after_repack_smoke() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    configure_identity().await;
+
+    // 7 commits: hashes[0] = latest (Commit 6), hashes[6] = oldest (Commit 0).
+    let hashes = create_linear_commits(7).await;
+
+    // `repack` without `-d` keeps the loose objects alongside the new pack, so
+    // every OID is now duplicated between the two object sources (issue #481).
+    let output = run_libra_command(&["repack"], temp_path.path());
+    assert!(
+        output.status.success(),
+        "repack should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // bad = Commit 6, good = Commit 3, so the first bad commit is hashes[2].
+    let bad = hashes[0].clone();
+    let good = hashes[3].clone();
+    let args = Bisect::Start {
+        bad: Some(bad),
+        good: vec![good],
+        good_opt: None,
+        term_old: vec![],
+        term_new: vec![],
+        first_parent: false,
+    };
+    execute_safe(args, &OutputConfig::default()).await.unwrap();
+
+    loop {
+        if !BisectState::is_in_progress().await.unwrap() {
+            break;
+        }
+        let state = BisectState::load().await.unwrap();
+        let current = state.current.unwrap().to_string();
+        let current_idx = hashes.iter().position(|h| h == &current).unwrap();
+
+        if current_idx <= 2 {
+            execute_safe(Bisect::Bad { rev: None }, &OutputConfig::default())
+                .await
+                .unwrap();
+        } else {
+            execute_safe(Bisect::Good { rev: None }, &OutputConfig::default())
+                .await
+                .unwrap();
+        }
+    }
+
+    assert!(!BisectState::is_in_progress().await.unwrap());
+}
+
+/// Drive the standard 7-commit scenario (bad = hashes[0], good = hashes[3]) to
+/// convergence by marking any commit at index `<= 2` bad and the rest good.
+/// Returns the converged [`BisectState`].
+async fn converge_7_commit_session(hashes: &[String]) -> BisectState {
+    let args = Bisect::Start {
+        bad: Some(hashes[0].clone()),
+        good: vec![hashes[3].clone()],
+        good_opt: None,
+        term_old: vec![],
+        term_new: vec![],
+        first_parent: false,
+    };
+    execute_safe(args, &OutputConfig::default()).await.unwrap();
+
+    loop {
+        if !BisectState::is_in_progress().await.unwrap() {
+            break;
+        }
+        let state = BisectState::load().await.unwrap();
+        let current = state.current.unwrap().to_string();
+        let current_idx = hashes.iter().position(|h| h == &current).unwrap();
+
+        if current_idx <= 2 {
+            execute_safe(Bisect::Bad { rev: None }, &OutputConfig::default())
+                .await
+                .unwrap();
+        } else {
+            execute_safe(Bisect::Good { rev: None }, &OutputConfig::default())
+                .await
+                .unwrap();
+        }
+    }
+
+    BisectState::load().await.unwrap()
+}
+
+/// M-BSAFE S1: a full bad -> good -> converge -> reset cycle must complete on
+/// all three object-store shapes — loose only, loose + pack (`repack`), and a
+/// single pack with loose objects deleted (`repack -a -d`).
+#[tokio::test]
+#[serial(cwd)]
+async fn test_bisect_full_cycle_object_states_matrix() {
+    let shapes: &[(&str, &[&str])] = &[
+        ("loose", &[]),
+        ("repack", &["repack"]),
+        ("repack-a-d", &["repack", "-a", "-d"]),
+    ];
+
+    for (name, repack_args) in shapes {
+        let temp_path = tempdir().unwrap();
+        test::setup_with_new_libra_in(temp_path.path()).await;
+        let _guard = ChangeDirGuard::new(temp_path.path());
+
+        configure_identity().await;
+        let hashes = create_linear_commits(7).await;
+
+        if !repack_args.is_empty() {
+            let output = run_libra_command(repack_args, temp_path.path());
+            assert!(
+                output.status.success(),
+                "{name}: repack failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        let state = converge_7_commit_session(&hashes).await;
+        assert!(state.completed, "{name}: session should converge");
+        assert_eq!(
+            state.bad.as_ref().unwrap().to_string(),
+            hashes[2],
+            "{name}: first bad commit should be Commit 4"
+        );
+
+        execute_safe(Bisect::Reset { rev: None }, &OutputConfig::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            Head::current_commit().await.unwrap().to_string(),
+            hashes[0],
+            "{name}: reset should restore the original HEAD"
+        );
+        assert!(
+            !BisectState::has_state().await.unwrap(),
+            "{name}: state should be cleared"
+        );
+    }
+}
+
+/// M-BSAFE S4: a step whose restore preflight is refused (a candidate tracks a
+/// path that currently exists as a non-empty untracked directory) must leave
+/// the saved bisect state untouched — `current` does not advance, `bisect log`
+/// is byte-identical to the pre-failure state — and a subsequent `bisect reset`
+/// still restores the original HEAD and clears the session.
+#[tokio::test]
+#[serial(cwd)]
+async fn test_bisect_failed_step_keeps_state_and_reset_recovers() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    configure_identity().await;
+
+    // 4 commits, newest first after reverse:
+    //   hashes[3] C0 (good): file.txt only
+    //   hashes[2] C1:        file.txt + `blocked` (file)
+    //   hashes[1] C2:        file.txt + `blocked` (file)
+    //   hashes[0] C3 (HEAD): file.txt only (removed `blocked`)
+    let mut hashes = Vec::new();
+    for i in 0..4 {
+        test::ensure_file("file.txt", Some(&format!("content_{i}\n")));
+        if i == 1 || i == 2 {
+            test::ensure_file("blocked", Some(&format!("blocked_{i}\n")));
+        } else {
+            let p = std::path::Path::new("blocked");
+            if p.exists() {
+                std::fs::remove_file(p).unwrap();
+            }
+        }
+        add::execute(AddArgs {
+            all: true,
+            ..Default::default()
+        })
+        .await;
+        commit::execute(commit::CommitArgs {
+            message: Some(format!("Commit {i}")),
+            disable_pre: true,
+            ..Default::default()
+        })
+        .await;
+        hashes.push(Head::current_commit().await.unwrap().to_string());
+    }
+    hashes.reverse();
+
+    // Start with no bounds: HEAD stays at C3, which does not track `blocked`.
+    execute_safe(
+        Bisect::Start {
+            bad: None,
+            good: vec![],
+            good_opt: None,
+            term_old: vec![],
+            term_new: vec![],
+            first_parent: false,
+        },
+        &OutputConfig::default(),
+    )
+    .await
+    .unwrap();
+
+    // Introduce the conflict AFTER start (start refuses a dirty tree): a
+    // non-empty untracked directory at the path the midpoint tracks as a file.
+    std::fs::create_dir_all("blocked/sub").unwrap();
+    std::fs::write("blocked/sub/keep.txt", "x").unwrap();
+
+    // Mark bad = HEAD (C3); no checkout, just records the bound.
+    execute_safe(Bisect::Bad { rev: None }, &OutputConfig::default())
+        .await
+        .unwrap();
+
+    let log_before = run_libra_command(&["bisect", "log"], temp_path.path());
+    assert!(
+        log_before.status.success(),
+        "log before the failed step should succeed: {}",
+        String::from_utf8_lossy(&log_before.stderr)
+    );
+
+    // Mark good = C0. The midpoint is C2, which tracks `blocked` as a file;
+    // the untracked `blocked/` directory makes the restore preflight refuse.
+    let result = execute_safe(
+        Bisect::Good {
+            rev: Some(hashes[3].clone()),
+        },
+        &OutputConfig::default(),
+    )
+    .await;
+    assert!(
+        result.is_err(),
+        "good step must fail on the blocked restore"
+    );
+
+    let state = BisectState::load().await.unwrap();
+    assert!(
+        state.good.is_empty(),
+        "a failed step must not persist the good mark"
+    );
+    assert_eq!(state.bad.as_ref().unwrap().to_string(), hashes[0]);
+    assert!(
+        state.current.is_none(),
+        "current must not advance on a failed step"
+    );
+
+    let log_after = run_libra_command(&["bisect", "log"], temp_path.path());
+    assert!(
+        log_after.status.success(),
+        "log after the failed step should succeed: {}",
+        String::from_utf8_lossy(&log_after.stderr)
+    );
+    assert_eq!(
+        log_before.stdout, log_after.stdout,
+        "bisect log must be identical before and after a failed step"
+    );
+
+    // The session is not wedged: reset restores the original HEAD.
+    execute_safe(Bisect::Reset { rev: None }, &OutputConfig::default())
+        .await
+        .unwrap();
+    assert_eq!(Head::current_commit().await.unwrap().to_string(), hashes[0]);
+    assert!(!BisectState::has_state().await.unwrap());
+}
+
+/// M-BSAFE S2/S3: after the search converges, marking again (`good` or `bad`)
+/// must exit 0 and re-print the culprit instead of surfacing an internal
+/// "already found" error; the subject must be the commit body (no `gpgsig`).
+#[tokio::test]
+#[serial(cwd)]
+async fn test_bisect_converged_mark_reprints_culprit() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    configure_identity().await;
+    let hashes = create_linear_commits(7).await;
+
+    let state = converge_7_commit_session(&hashes).await;
+    assert!(state.completed);
+    assert_eq!(state.bad.as_ref().unwrap().to_string(), hashes[2]);
+
+    for subcommand in ["good", "bad"] {
+        let output = run_libra_command(&["bisect", subcommand], temp_path.path());
+        assert!(
+            output.status.success(),
+            "bisect {subcommand} after convergence must exit 0: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("is the first bad commit"),
+            "bisect {subcommand} must re-print the culprit: {stdout}"
+        );
+        assert!(
+            stdout.contains("Commit 4"),
+            "bisect {subcommand} must print the culprit subject: {stdout}"
+        );
+        assert!(
+            !stdout.contains("gpgsig") && !stdout.contains("already found"),
+            "bisect {subcommand} must not leak the signature header or an internal error: {stdout}"
+        );
+    }
+
+    execute_safe(Bisect::Reset { rev: None }, &OutputConfig::default())
+        .await
+        .unwrap();
+}
+
+/// M-BSAFE S5: every session-requiring subcommand reports `LBR-BISECT-001`
+/// (exit 128) when no bisect session exists; `reset` stays a no-op that exits
+/// 0 with `We are not bisecting.`
+#[::std::prelude::rust_2024::test]
+fn test_bisect_no_session_uses_stable_bisect_not_active() {
+    let repo = tempdir().unwrap();
+    init_repo_via_cli(repo.path());
+
+    for subcommand in ["bad", "good", "skip", "log", "view", "run"] {
+        let mut args: Vec<&str> = vec!["bisect", subcommand];
+        if subcommand == "run" {
+            args.push("true");
+        }
+        let output = run_libra_command(&args, repo.path());
+        assert_eq!(
+            output.status.code(),
+            Some(128),
+            "bisect {subcommand} without a session must exit 128"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("LBR-BISECT-001"),
+            "bisect {subcommand} without a session must use LBR-BISECT-001: {stderr}"
+        );
+    }
+
+    let output = run_libra_command(&["bisect", "reset"], repo.path());
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "bisect reset without a session must exit 0"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("We are not bisecting."),
+        "bisect reset without a session must print 'We are not bisecting.': {stdout}"
+    );
+}
+
 /// Scenario: `bisect reset` must clear the in-progress state and return
 /// HEAD to its pre-bisect commit. Pins both the state-cleanup and the
 /// HEAD-restore behaviour after a session is started and `bad`/`good`
@@ -318,7 +682,10 @@ async fn test_bisect_reset() {
     // Start bisect
     let args = Bisect::Start {
         bad: None,
-        good: None,
+        good: vec![],
+        good_opt: None,
+        term_old: vec![],
+        term_new: vec![],
         first_parent: false,
     };
     execute_safe(args, &OutputConfig::default()).await.unwrap();
@@ -366,7 +733,10 @@ async fn test_bisect_reset_surfaces_corrupt_original_branch_storage() {
     execute_safe(
         Bisect::Start {
             bad: None,
-            good: None,
+            good: vec![],
+            good_opt: None,
+            term_old: vec![],
+            term_new: vec![],
             first_parent: false,
         },
         &OutputConfig::default(),
@@ -404,7 +774,10 @@ async fn test_bisect_skip() {
 
     let args = Bisect::Start {
         bad: Some(bad),
-        good: Some(good),
+        good: vec![good],
+        good_opt: None,
+        term_old: vec![],
+        term_new: vec![],
         first_parent: false,
     };
     execute_safe(args, &OutputConfig::default()).await.unwrap();
@@ -442,7 +815,10 @@ async fn test_bisect_log() {
     // Start bisect and mark some commits
     let args = Bisect::Start {
         bad: Some(hashes[0].clone()),
-        good: Some(hashes[2].clone()),
+        good: vec![hashes[2].clone()],
+        good_opt: None,
+        term_old: vec![],
+        term_new: vec![],
         first_parent: false,
     };
     execute_safe(args, &OutputConfig::default()).await.unwrap();
@@ -468,7 +844,10 @@ async fn test_bisect_start_already_in_progress_fails() {
     // Start first bisect
     let args = Bisect::Start {
         bad: None,
-        good: None,
+        good: vec![],
+        good_opt: None,
+        term_old: vec![],
+        term_new: vec![],
         first_parent: false,
     };
     execute_safe(args, &OutputConfig::default()).await.unwrap();
@@ -476,7 +855,10 @@ async fn test_bisect_start_already_in_progress_fails() {
     // Try to start again - should fail
     let args = Bisect::Start {
         bad: None,
-        good: None,
+        good: vec![],
+        good_opt: None,
+        term_old: vec![],
+        term_new: vec![],
         first_parent: false,
     };
     let result = execute_safe(args, &OutputConfig::default()).await;
@@ -606,7 +988,10 @@ async fn test_bisect_view_inside_active_session() {
     execute_safe(
         Bisect::Start {
             bad: Some(hashes[0].clone()),
-            good: Some(hashes[4].clone()),
+            good: vec![hashes[4].clone()],
+            good_opt: None,
+            term_old: vec![],
+            term_new: vec![],
             first_parent: false,
         },
         &OutputConfig::default(),
@@ -638,7 +1023,10 @@ async fn test_bisect_json_view_outputs_clean_envelope() {
     execute_safe(
         Bisect::Start {
             bad: Some(hashes[0].clone()),
-            good: Some(hashes[4].clone()),
+            good: vec![hashes[4].clone()],
+            good_opt: None,
+            term_old: vec![],
+            term_new: vec![],
             first_parent: false,
         },
         &OutputConfig::default(),
@@ -708,7 +1096,10 @@ async fn test_bisect_run_without_bounds_does_not_spawn_command() {
     execute_safe(
         Bisect::Start {
             bad: None,
-            good: None,
+            good: vec![],
+            good_opt: None,
+            term_old: vec![],
+            term_new: vec![],
             first_parent: false,
         },
         &OutputConfig::default(),
@@ -753,7 +1144,10 @@ async fn test_bisect_run_propagates_fatal_exit_code() {
     execute_safe(
         Bisect::Start {
             bad: Some(hashes[0].clone()),
-            good: Some(hashes[4].clone()),
+            good: vec![hashes[4].clone()],
+            good_opt: None,
+            term_old: vec![],
+            term_new: vec![],
             first_parent: false,
         },
         &OutputConfig::default(),
@@ -792,7 +1186,10 @@ async fn test_bisect_machine_run_outputs_single_json_line() {
     execute_safe(
         Bisect::Start {
             bad: Some(hashes[0].clone()),
-            good: Some(hashes[4].clone()),
+            good: vec![hashes[4].clone()],
+            good_opt: None,
+            term_old: vec![],
+            term_new: vec![],
             first_parent: false,
         },
         &OutputConfig::default(),
@@ -976,4 +1373,538 @@ fn bisect_visualize_aliases_view() {
         String::from_utf8_lossy(&help.stdout).contains("visualize"),
         "bisect --help lists the visualize alias"
     );
+}
+
+/// M-BSTART B1/B6: `bisect start <bad> <good1> <good2>` must accept Git's
+/// positional form and record every good bound, while `--good` remains a
+/// compatible alias for a single good. Exercised through the real clap parser
+/// so the positional/option grammar is what is under test.
+#[tokio::test]
+#[serial(cwd)]
+async fn test_bisect_start_positional_goods() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    configure_identity().await;
+    let hashes = create_linear_commits(5).await;
+    let bad = hashes[0].clone(); // newest
+    let good1 = hashes[4].clone(); // oldest
+    let good2 = hashes[2].clone(); // middle
+
+    // B1: two positional goods.
+    let output = run_libra_command(
+        &[
+            "bisect",
+            "start",
+            bad.as_str(),
+            good1.as_str(),
+            good2.as_str(),
+        ],
+        temp_path.path(),
+    );
+    assert!(
+        output.status.success(),
+        "positional start failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let state = BisectState::load().await.unwrap();
+    assert_eq!(state.bad.unwrap().to_string(), bad);
+    assert_eq!(
+        state.good.len(),
+        2,
+        "both positional goods must be recorded"
+    );
+    assert!(state.good.iter().any(|h| h.to_string() == good1));
+    assert!(state.good.iter().any(|h| h.to_string() == good2));
+    execute_safe(Bisect::Reset { rev: None }, &OutputConfig::default())
+        .await
+        .unwrap();
+
+    // B6: `--good` stays a compatibility alias for the first positional good.
+    let output = run_libra_command(
+        &["bisect", "start", bad.as_str(), "--good", good1.as_str()],
+        temp_path.path(),
+    );
+    assert!(
+        output.status.success(),
+        "compat --good start failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let state = BisectState::load().await.unwrap();
+    assert_eq!(state.bad.unwrap().to_string(), bad);
+    assert_eq!(state.good.len(), 1);
+    assert_eq!(state.good[0].to_string(), good1);
+    execute_safe(Bisect::Reset { rev: None }, &OutputConfig::default())
+        .await
+        .unwrap();
+
+    // B6: `--first-parent` composes with both the positional and the `--good`
+    // compatibility forms (t6030's option/rev order tolerance).
+    let output = run_libra_command(
+        &[
+            "bisect",
+            "start",
+            "--first-parent",
+            bad.as_str(),
+            good1.as_str(),
+        ],
+        temp_path.path(),
+    );
+    assert!(
+        output.status.success(),
+        "--first-parent positional start failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let state = BisectState::load().await.unwrap();
+    assert_eq!(state.bad.unwrap().to_string(), bad);
+    assert_eq!(state.good.len(), 1);
+    assert_eq!(state.good[0].to_string(), good1);
+    execute_safe(Bisect::Reset { rev: None }, &OutputConfig::default())
+        .await
+        .unwrap();
+
+    let output = run_libra_command(
+        &[
+            "bisect",
+            "start",
+            "--first-parent",
+            bad.as_str(),
+            "--good",
+            good1.as_str(),
+        ],
+        temp_path.path(),
+    );
+    assert!(
+        output.status.success(),
+        "--first-parent with --good start failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let state = BisectState::load().await.unwrap();
+    assert_eq!(state.bad.unwrap().to_string(), bad);
+    assert_eq!(state.good.len(), 1);
+    assert_eq!(state.good[0].to_string(), good1);
+    execute_safe(Bisect::Reset { rev: None }, &OutputConfig::default())
+        .await
+        .unwrap();
+}
+
+/// M-BSTART B2/B4: untracked and ignored files (including a root
+/// `.libraignore`) must not block `bisect start` (ADR-MX-05 §2); only tracked
+/// staged/unstaged modifications refuse the start.
+#[tokio::test]
+#[serial(cwd)]
+async fn test_bisect_start_allows_untracked_files() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    configure_identity().await;
+    let hashes = create_linear_commits(5).await;
+    let bad = hashes[0].clone();
+    let good = hashes[4].clone();
+
+    // B2: untracked + ignored files are present, none of which the candidate
+    // commits track — the start must succeed.
+    fs::write(temp_path.path().join(".libraignore"), "*.log\n").unwrap();
+    fs::write(temp_path.path().join("notes.txt"), "untracked\n").unwrap();
+    fs::write(temp_path.path().join("debug.log"), "ignored\n").unwrap();
+
+    let output = run_libra_command(
+        &["bisect", "start", bad.as_str(), good.as_str()],
+        temp_path.path(),
+    );
+    assert!(
+        output.status.success(),
+        "untracked files must not block start: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let state = BisectState::load().await.unwrap();
+    assert!(state.bad.is_some());
+    assert!(!state.good.is_empty());
+    execute_safe(Bisect::Reset { rev: None }, &OutputConfig::default())
+        .await
+        .unwrap();
+
+    // B4: a tracked modification still refuses the start (intentionally
+    // stricter than Git, ADR-MX-05 §3), and leaves no session behind.
+    fs::write(temp_path.path().join("file.txt"), "modified tracked\n").unwrap();
+    let output = run_libra_command(
+        &["bisect", "start", bad.as_str(), good.as_str()],
+        temp_path.path(),
+    );
+    assert!(
+        !output.status.success(),
+        "a tracked modification must block start"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("uncommitted changes"),
+        "start refusal must name the reason: {stderr}"
+    );
+    assert!(
+        !BisectState::has_state().await.unwrap(),
+        "a refused start must not leave a session"
+    );
+}
+
+/// M-BSTART B5: `bisect start` with an unresolvable revision (git t6030:136's
+/// "junk instead of revs" shape) fails without creating a session — for the
+/// bad and the good side — and a valid start still works afterwards.
+#[tokio::test]
+#[serial(cwd)]
+async fn test_bisect_start_rejects_invalid_revs() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    configure_identity().await;
+    let hashes = create_linear_commits(5).await;
+    let bad = hashes[0].clone();
+    let good = hashes[4].clone();
+
+    // Junk bad rev with the explicit `--` separator (t6030:136 shape).
+    let output = run_libra_command(
+        &["bisect", "start", "foo", good.as_str(), "--"],
+        temp_path.path(),
+    );
+    assert!(
+        !output.status.success(),
+        "a junk bad rev must fail the start"
+    );
+    assert!(
+        !BisectState::has_state().await.unwrap(),
+        "a refused start must not create a session"
+    );
+
+    // Junk good rev.
+    let output = run_libra_command(&["bisect", "start", bad.as_str(), "bar"], temp_path.path());
+    assert!(
+        !output.status.success(),
+        "a junk good rev must fail the start"
+    );
+    assert!(
+        !BisectState::has_state().await.unwrap(),
+        "a refused start must not create a session"
+    );
+
+    // The repo is not wedged: a valid start still succeeds.
+    let output = run_libra_command(
+        &["bisect", "start", bad.as_str(), good.as_str()],
+        temp_path.path(),
+    );
+    assert!(
+        output.status.success(),
+        "a valid start after junk revs must succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let state = BisectState::load().await.unwrap();
+    assert_eq!(state.bad.unwrap().to_string(), bad);
+    assert_eq!(state.good.len(), 1);
+    assert_eq!(state.good[0].to_string(), good);
+    execute_safe(Bisect::Reset { rev: None }, &OutputConfig::default())
+        .await
+        .unwrap();
+}
+
+/// M-BSTART B3: an untracked directory that collides with a path a later
+/// candidate tracks as a file must not block the positional start (ADR-MX-05
+/// §2 — untracked files are the per-step preflight's job); the step that
+/// reaches the conflicting candidate is refused and leaves the saved state
+/// untouched (same S4 semantics), and `reset` still restores the original
+/// HEAD.
+#[tokio::test]
+#[serial(cwd)]
+async fn test_bisect_untracked_collision_refused_at_step() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    configure_identity().await;
+
+    // 8 commits C0..C7 (newest first): C5 and C6 track `blocked` as a file;
+    // C7 (HEAD, bad) removed it again. C0 is the good bound.
+    let mut hashes = Vec::new();
+    for i in 0..7 {
+        test::ensure_file("file.txt", Some(&format!("content_{i}\n")));
+        if i == 5 {
+            test::ensure_file("blocked", Some("blocked_content\n"));
+        }
+        add::execute(AddArgs {
+            all: true,
+            ..Default::default()
+        })
+        .await;
+        commit::execute(commit::CommitArgs {
+            message: Some(format!("Commit {i}")),
+            disable_pre: true,
+            ..Default::default()
+        })
+        .await;
+        hashes.push(Head::current_commit().await.unwrap().to_string());
+    }
+    std::fs::remove_file("blocked").unwrap();
+    add::execute(AddArgs {
+        all: true,
+        ..Default::default()
+    })
+    .await;
+    commit::execute(commit::CommitArgs {
+        message: Some("Commit 7".to_string()),
+        disable_pre: true,
+        ..Default::default()
+    })
+    .await;
+    hashes.push(Head::current_commit().await.unwrap().to_string());
+    hashes.reverse();
+
+    // The collision exists BEFORE start: a non-empty untracked directory at
+    // the path C5/C6 track as a file.
+    std::fs::create_dir_all("blocked/sub").unwrap();
+    std::fs::write("blocked/sub/keep.txt", "x").unwrap();
+
+    // The midpoint of C0..C7 is in the clean half, so the positional start
+    // succeeds despite the collision (ADR-MX-05 §2).
+    let output = run_libra_command(
+        &["bisect", "start", hashes[0].as_str(), hashes[7].as_str()],
+        temp_path.path(),
+    );
+    assert!(
+        output.status.success(),
+        "start with a colliding untracked dir must succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let midpoint = Head::current_commit().await.unwrap().to_string();
+
+    let log_before = run_libra_command(&["bisect", "log"], temp_path.path());
+    assert!(
+        log_before.status.success(),
+        "log before the refused step should succeed"
+    );
+
+    // Marking the clean midpoint good moves the search toward C5/C6, whose
+    // checkout would replace the untracked `blocked/` directory — the restore
+    // preflight refuses and nothing is persisted (S4 semantics).
+    let result = execute_safe(Bisect::Good { rev: None }, &OutputConfig::default()).await;
+    assert!(
+        result.is_err(),
+        "the step to the colliding candidate must be refused"
+    );
+    assert!(
+        std::fs::metadata("blocked/sub/keep.txt").is_ok(),
+        "the refused step must leave the untracked file in place"
+    );
+
+    let state = BisectState::load().await.unwrap();
+    assert_eq!(
+        state.good.len(),
+        1,
+        "the refused good mark must not be persisted"
+    );
+    assert_eq!(state.good[0].to_string(), hashes[7]);
+    assert_eq!(
+        state.current.as_ref().unwrap().to_string(),
+        midpoint,
+        "current must not advance on a refused step"
+    );
+
+    let log_after = run_libra_command(&["bisect", "log"], temp_path.path());
+    assert!(
+        log_after.status.success(),
+        "log after the refused step should succeed"
+    );
+    assert_eq!(
+        log_before.stdout, log_after.stdout,
+        "bisect log must be identical before and after the refused step"
+    );
+
+    // The session is not wedged: reset restores the original HEAD.
+    execute_safe(Bisect::Reset { rev: None }, &OutputConfig::default())
+        .await
+        .unwrap();
+    assert_eq!(Head::current_commit().await.unwrap().to_string(), hashes[0]);
+    assert!(!BisectState::has_state().await.unwrap());
+}
+
+/// M-BTERMS T1-T7: custom terms, `old`/`new` aliases, `bisect terms` output,
+/// invalid-term rejection with zero writes, and custom-term rendering in
+/// `log`/`view`.
+#[tokio::test]
+#[serial(cwd)]
+async fn test_bisect_terms_matrix() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    configure_identity().await;
+    let hashes = create_linear_commits(7).await;
+    let bad = hashes[0].clone();
+    let good = hashes[3].clone();
+
+    // T3: no session — `bisect terms` follows S5 (LBR-BISECT-001, exit 128),
+    // and `bisect terms a b` is a usage error (129).
+    let output = run_libra_command(&["bisect", "terms"], temp_path.path());
+    assert_eq!(
+        output.status.code(),
+        Some(128),
+        "no-session terms must exit 128"
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("LBR-BISECT-001"));
+    let output = run_libra_command(&["bisect", "terms", "a", "b"], temp_path.path());
+    assert_eq!(
+        output.status.code(),
+        Some(129),
+        "terms with two positional args must be a usage error"
+    );
+
+    // T1 + T6: custom-term start with the options AFTER the positional bounds
+    // (git accepts options and revisions in any order, t6030:1290).
+    let output = run_libra_command(
+        &[
+            "bisect",
+            "start",
+            bad.as_str(),
+            good.as_str(),
+            "--term-old=fast",
+            "--term-new=slow",
+        ],
+        temp_path.path(),
+    );
+    assert!(
+        output.status.success(),
+        "custom-term start failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // T2: `bisect terms` output text matches git's two-line form.
+    let output = run_libra_command(&["bisect", "terms"], temp_path.path());
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Your current terms are 'fast' for the old state"),
+        "terms output mismatch: {stdout}"
+    );
+    assert!(
+        stdout.contains("and 'slow' for the new state."),
+        "terms output mismatch: {stdout}"
+    );
+
+    let output = run_libra_command(&["bisect", "terms", "--term-good"], temp_path.path());
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "fast");
+    let output = run_libra_command(&["bisect", "terms", "--term-old"], temp_path.path());
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "fast");
+    let output = run_libra_command(&["bisect", "terms", "--term-bad"], temp_path.path());
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "slow");
+    let output = run_libra_command(&["bisect", "terms", "--term-new"], temp_path.path());
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "slow");
+
+    // T1/T7: custom term marks are accepted and drive the session; `log` and
+    // `view` render the custom terms.
+    let output = run_libra_command(&["bisect", "slow"], temp_path.path());
+    assert!(
+        output.status.success(),
+        "bisect slow must be accepted: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let output = run_libra_command(&["bisect", "fast"], temp_path.path());
+    assert!(
+        output.status.success(),
+        "bisect fast must be accepted: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let output = run_libra_command(&["bisect", "log"], temp_path.path());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("slow:"),
+        "log must use the new term: {stdout}"
+    );
+    assert!(
+        stdout.contains("fast:"),
+        "log must use the old term: {stdout}"
+    );
+    let output = run_libra_command(&["bisect", "view"], temp_path.path());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("(fast)") && stdout.contains("(slow)"),
+        "view must use custom terms: {stdout}"
+    );
+
+    // A fixed custom-term session refuses the default marks.
+    let output = run_libra_command(&["bisect", "bad"], temp_path.path());
+    assert!(!output.status.success(), "bisect bad must be refused");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Invalid command"));
+
+    execute_safe(Bisect::Reset { rev: None }, &OutputConfig::default())
+        .await
+        .unwrap();
+
+    // T4: a bound-less start leaves terms unfixed; the first `new`/`old` mark
+    // fixes them to new/old (git's check_and_set_terms semantics).
+    execute_safe(
+        Bisect::Start {
+            bad: None,
+            good: vec![],
+            good_opt: None,
+            term_old: vec![],
+            term_new: vec![],
+            first_parent: false,
+        },
+        &OutputConfig::default(),
+    )
+    .await
+    .unwrap();
+    let output = run_libra_command(&["bisect", "new", bad.as_str()], temp_path.path());
+    assert!(
+        output.status.success(),
+        "bisect new must be accepted after a bound-less start: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let output = run_libra_command(&["bisect", "terms"], temp_path.path());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("'old'") && stdout.contains("'new'"),
+        "new/old must fix the terms: {stdout}"
+    );
+    let output = run_libra_command(&["bisect", "old", good.as_str()], temp_path.path());
+    assert!(
+        output.status.success(),
+        "bisect old must be accepted: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    execute_safe(Bisect::Reset { rev: None }, &OutputConfig::default())
+        .await
+        .unwrap();
+
+    // T5: invalid terms are rejected with zero writes (no session, no terms).
+    let output = run_libra_command(
+        &[
+            "bisect",
+            "start",
+            "--term-old=start",
+            "--term-new=slow",
+            bad.as_str(),
+            good.as_str(),
+        ],
+        temp_path.path(),
+    );
+    assert!(
+        !output.status.success(),
+        "a builtin subcommand name must be refused as a term"
+    );
+    assert!(!BisectState::has_state().await.unwrap());
+
+    let output = run_libra_command(
+        &[
+            "bisect",
+            "start",
+            "--term-old=slow",
+            "--term-new=slow",
+            bad.as_str(),
+            good.as_str(),
+        ],
+        temp_path.path(),
+    );
+    assert!(!output.status.success(), "identical terms must be refused");
+    assert!(!BisectState::has_state().await.unwrap());
 }

@@ -1042,6 +1042,9 @@ fn resolver_error(error: CommitBaseError, value: &str, ref_name: &str) -> CliErr
                 "cannot update '{ref_name}': '{value}' is not a valid revision in this repository"
             ))
         }
+        CommitBaseError::Ambiguous { name, candidates } => {
+            util::ambiguous_short_oid_error(&name, &candidates)
+        }
         CommitBaseError::ReadFailure(detail) => {
             CliError::fatal(format!("cannot update '{ref_name}': {detail}"))
                 .with_exit_code(128)

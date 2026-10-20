@@ -2672,7 +2672,13 @@ impl ClientStorage {
             }
         }
 
-        Ok(self.storage.search(obj_id).await)
+        let mut matches = self.storage.search(obj_id).await;
+        // The same object may exist in a loose object and one or more pack
+        // indexes; collapse duplicates before returning so callers that count
+        // matches never mistake a duplicate for genuine ambiguity (ADR-MX-04).
+        matches.sort_unstable();
+        matches.dedup();
+        Ok(matches)
     }
 
     /// Walk parent commits according to a Git revision suffix.

@@ -51,6 +51,7 @@ pub(crate) async fn add_worktree_locked(
     target_spec: Option<String>,
     detach: bool,
     new_branch: Option<String>,
+    force: bool,
 ) -> WorktreeResult<WorktreeAddOutput> {
     use crate::utils::worktree_layout;
     worktree_layout::validate_name(&name).map_err(|error| {
@@ -199,7 +200,8 @@ pub(crate) async fn add_worktree_locked(
         }
     }
 
-    if target_exists
+    if !force
+        && target_exists
         && fs::read_dir(&target)
             .map_err(|source| {
                 WorktreeError::IoRead(format!(
@@ -218,7 +220,7 @@ pub(crate) async fn add_worktree_locked(
             .is_some()
     {
         return Err(WorktreeError::OperationBlocked(format!(
-            "target directory exists and is not empty: {}",
+            "target directory exists and is not empty: {} (use --force to reuse it)",
             target.display()
         )));
     }
@@ -365,16 +367,19 @@ pub(crate) async fn add_worktree_locked(
         .map_err(|error| {
             WorktreeError::IoRead(format!("cannot inspect pinned worktree directory: {error}"))
         })?;
-    if target_entries
-        .next()
-        .transpose()
-        .map_err(|error| {
-            WorktreeError::IoRead(format!("cannot inspect pinned worktree directory: {error}"))
-        })?
-        .is_some()
+    // `--force` (Git's `worktree add -f`) lets an existing non-empty
+    // destination through; a `.libra` entry inside it is still refused below.
+    if !force
+        && target_entries
+            .next()
+            .transpose()
+            .map_err(|error| {
+                WorktreeError::IoRead(format!("cannot inspect pinned worktree directory: {error}"))
+            })?
+            .is_some()
     {
         return Err(WorktreeError::OperationBlocked(format!(
-            "target directory is no longer empty: {}",
+            "target directory is no longer empty: {} (use --force to reuse it)",
             target.display()
         )));
     }
@@ -2394,6 +2399,7 @@ fn clear_pinned_worktree(
 pub(crate) async fn remove_worktree_locked(
     path: String,
     delete_dir: bool,
+    force: bool,
 ) -> WorktreeResult<WorktreeRemoveOutput> {
     let _repository_ref_lease = acquire_worktree_ref_lease().await?;
     let mut state = load_state()?;
@@ -2527,6 +2533,7 @@ pub(crate) async fn remove_worktree_locked(
             &target,
             worktree_id_for_gc,
             entry_state,
+            force,
         )
         .await
     } else {
@@ -2609,13 +2616,15 @@ async fn remove_worktree_detach(
     })
 }
 
-pub(crate) async fn remove_worktree_delete_dir(
+#[allow(clippy::too_many_arguments)]
+async fn remove_worktree_delete_dir(
     db: &sea_orm::DatabaseConnection,
     state: &mut WorktreeState,
     index: usize,
     target: &Path,
     worktree_id: Option<String>,
     entry_state: WorktreeEntryState,
+    force: bool,
 ) -> WorktreeResult<WorktreeRemoveOutput> {
     let mut directory_guard = RegisteredDirectoryGuard::open(target, worktree_id.as_deref())?;
     let payload = serde_json::json!({
@@ -2641,7 +2650,12 @@ pub(crate) async fn remove_worktree_delete_dir(
         false
     };
 
-    let dirty = worktree_is_dirty(target).await;
+    let dirty = if force {
+        // `--force` skips the dirty-state gate (Git's `worktree remove -f`).
+        Ok(false)
+    } else {
+        worktree_is_dirty(target).await
+    };
     match dirty {
         Ok(false) => {}
         Ok(true) => {

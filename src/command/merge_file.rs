@@ -20,8 +20,8 @@ use serde::Serialize;
 
 use crate::{
     command::merge::{
-        self, BuiltinMergeDriver, BuiltinMergeOutcome, builtin_merge_driver_for_path,
-        merge_bytes_with_driver,
+        self, BuiltinMergeDriver, BuiltinMergeOutcome, ConflictMarkerLabels, MergeFavor,
+        builtin_merge_driver_for_path, merge_bytes_with_driver_impl,
     },
     utils::{
         error::{CliError, CliResult, StableErrorCode},
@@ -53,6 +53,28 @@ pub struct MergeFileArgs {
     /// Do not warn about conflicts on stderr.
     #[clap(short = 'q', long = "quiet")]
     pub quiet: bool,
+
+    /// Take all changes from ours on a conflict instead of writing markers.
+    #[clap(long = "ours", conflicts_with_all = ["theirs", "union"])]
+    pub ours: bool,
+
+    /// Take all changes from theirs on a conflict instead of writing markers.
+    #[clap(long = "theirs", conflicts_with_all = ["ours", "union"])]
+    pub theirs: bool,
+
+    /// On conflicting hunks, concatenate ours then theirs instead of writing
+    /// markers (Git's `--union`).
+    #[clap(long = "union", conflicts_with_all = ["ours", "theirs"])]
+    pub union: bool,
+
+    /// Conflict-marker labels, in order: current/ours, base, other/theirs.
+    /// Repeatable up to three times (`-L <label>`), like Git.
+    #[clap(short = 'L', value_name = "LABEL", action = clap::ArgAction::Append)]
+    pub labels: Vec<String>,
+
+    /// Marker line width in characters (Git's `--marker-size`, default 7).
+    #[clap(long = "marker-size", value_name = "N", default_value_t = 7)]
+    pub marker_size: usize,
 
     /// The "current"/ours file (overwritten with the result unless `-p`).
     #[clap(value_name = "CURRENT")]
@@ -129,8 +151,53 @@ pub async fn execute_safe(args: MergeFileArgs, output: &OutputConfig) -> CliResu
     } else {
         ConflictStyle::Merge
     };
-    let (merged, conflict) = match merge_bytes_with_driver(
-        driver, &base, &current, &other, None, style, 0,
+    // MX-13 (issues/481): `--ours`/`--theirs`/`--union` pick a conflict
+    // resolution; `-L` renames the marker labels (Git defaults to the file
+    // NAMES, not ours/original/theirs); `--marker-size` widens the markers.
+    let favor = if args.ours {
+        Some(MergeFavor::Ours)
+    } else if args.theirs {
+        Some(MergeFavor::Theirs)
+    } else {
+        None
+    };
+    let extra_marker_size = args.marker_size.saturating_sub(7);
+    let labels = [
+        args.labels
+            .first()
+            .map(String::as_str)
+            .unwrap_or(&args.current),
+        args.labels.get(1).map(String::as_str).unwrap_or(&args.base),
+        args.labels
+            .get(2)
+            .map(String::as_str)
+            .unwrap_or(&args.other),
+    ];
+    // `--union` selects the shared Union driver (concatenate both sides of a
+    // conflicting hunk, never report a conflict); otherwise the resolved
+    // text/binary driver runs with the chosen conflict resolution.
+    let effective_driver = if args.union {
+        BuiltinMergeDriver::Union
+    } else {
+        driver
+    };
+    let (merged, conflict) = match merge_bytes_with_driver_impl(
+        effective_driver,
+        &base,
+        &current,
+        &other,
+        favor,
+        style.into(),
+        extra_marker_size,
+        // merge-file always renders its own marker labels (Git defaults to the
+        // file names, `-L` overrides them), so the refined renderer — which
+        // honors `labels` — is used in addition to xdiff's zealous refinement.
+        true,
+        ConflictMarkerLabels {
+            ours: labels[0],
+            base: labels[1],
+            theirs: labels[2],
+        },
     )
     .map_err(|detail| {
         CliError::fatal(format!("failed to merge '{}': {detail}", args.current))

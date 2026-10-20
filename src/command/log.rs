@@ -239,13 +239,23 @@ pub struct LogArgs {
     #[clap(long = "patch-with-stat")]
     pub patch_with_stat: bool,
 
-    /// Positional `[<revision-range>...] [<path>...]`: leading arguments are
-    /// revisions (a single rev, or a range `A..B` / `A...B` / `^A`) until the
-    /// first one that is not, after which the rest are pathspecs limiting diff
-    /// output. A bare name that is both a valid revision and an existing path is
-    /// rejected as ambiguous — use `--range` to force the revision.
+    /// Positional `[<revision-range>...] [<path>...]` BEFORE `--`: leading
+    /// arguments are revisions (a single rev, or a range `A..B` / `A...B` /
+    /// `^A`) until the first one that is not, after which the rest are
+    /// pathspecs limiting diff output. A bare name that is both a valid
+    /// revision and an existing path is rejected as ambiguous — use `--range`
+    /// to force the revision. A bare token that resolves nothing, names no
+    /// path, and carries no pathspec syntax is a typoed revision and errors
+    /// (`log <nonexistent>` never silently exits 0).
     #[clap(value_name = "REVISION_OR_PATH", num_args = 0..)]
     pathspec: Vec<String>,
+
+    /// Positional pathspecs AFTER `--`. Unlike pre-`--` tokens these are always
+    /// paths even when they name nothing (`log -- <nonexistent>` exits 0 with
+    /// no output, matching Git), and a name that is normally a revision is a
+    /// plain path here (`log -- HEAD`).
+    #[clap(last = true, value_name = "pathspec", num_args = 0..)]
+    after_double_dash: Vec<String>,
 
     /// Filter commits whose message matches PATTERN. The default dialect is
     /// POSIX basic regex (Git's default), so plain text matches literally.
@@ -999,11 +1009,16 @@ pub async fn execute(args: LogArgs) {
 
 /// Resolve a commit-ish string to an ObjectHash.
 async fn resolve_commitish(spec: &str) -> CliResult<ObjectHash> {
-    util::get_commit_base_typed(spec).await.map_err(|e| {
-        CliError::fatal(format!("invalid revision '{spec}': {e}"))
-            .with_stable_code(StableErrorCode::CliInvalidTarget)
-            .with_hint("use a commit hash, branch name, tag, or HEAD")
-    })
+    util::get_commit_base_typed(spec)
+        .await
+        .map_err(|e| match e {
+            util::CommitBaseError::Ambiguous { name, candidates } => {
+                util::ambiguous_short_oid_error(&name, &candidates)
+            }
+            other => CliError::fatal(format!("invalid revision '{spec}': {other}"))
+                .with_stable_code(StableErrorCode::CliInvalidTarget)
+                .with_hint("use a commit hash, branch name, tag, or HEAD"),
+        })
 }
 
 /// Parsed revision expression.
@@ -1121,6 +1136,15 @@ async fn revision_syntax_resolves(arg: &str) -> bool {
     resolve_commitish(arg).await.is_ok()
 }
 
+/// Whether a bare `log` positional token can only be a pathspec, never a
+/// revision: pathspec magic (`:(...)`), short index/exclude magic (`:`, `:!`,
+/// `:^`), or glob wildcards. Such tokens must stay silent pathspecs even when
+/// they match nothing (`git log '*.zzz'` exits 0), unlike a typoed revision
+/// name.
+fn is_pathspec_token(token: &str) -> bool {
+    token.starts_with(':') || token.contains(['*', '?', '['])
+}
+
 /// Split positional `log` arguments into revision specs and pathspecs, matching
 /// Git's `log [<revision>...] [[--] <path>...]`. Leading arguments are revisions
 /// until the first one that is not; from there everything remaining is a path.
@@ -1162,8 +1186,13 @@ async fn split_log_positionals(positionals: &[String]) -> CliResult<(Vec<String>
             continue;
         }
 
-        // A bare token is a revision only if it resolves to a commit.
-        match resolve_commitish(arg).await {
+        // A bare token is a revision only if it resolves to a commit. A genuine
+        // short-object-name ambiguity must surface (Git: `short object ID <p>
+        // is ambiguous`), not be silently reclassified as a pathspec. A token
+        // that does not resolve and neither names an existing path nor carries
+        // pathspec magic / glob wildcards is a typoed revision — error, so
+        // `log <nonexistent>` no longer silently exits 0.
+        match util::get_commit_base_typed(arg).await {
             Ok(_) => {
                 if std::path::Path::new(arg).exists() {
                     return Err(CliError::command_usage(format!(
@@ -1174,9 +1203,19 @@ async fn split_log_positionals(positionals: &[String]) -> CliResult<(Vec<String>
                 }
                 revisions.push(arg.clone());
             }
+            Err(util::CommitBaseError::Ambiguous { name, candidates }) => {
+                return Err(util::ambiguous_short_oid_error(&name, &candidates));
+            }
             Err(_) => {
-                in_paths = true;
-                paths.push(arg.clone());
+                if std::path::Path::new(arg).exists() || is_pathspec_token(arg) {
+                    in_paths = true;
+                    paths.push(arg.clone());
+                } else {
+                    return Err(CliError::command_usage(format!(
+                        "ambiguous argument '{arg}': unknown revision or path not in the working tree"
+                    ))
+                    .with_stable_code(StableErrorCode::CliInvalidArguments));
+                }
             }
         }
     }
@@ -1187,7 +1226,10 @@ async fn split_log_positionals(positionals: &[String]) -> CliResult<(Vec<String>
 /// The effective revision specs (`--range` plus positional revisions) and the
 /// effective pathspecs, after splitting positional arguments Git-style.
 async fn resolve_log_inputs(args: &LogArgs) -> CliResult<(Vec<String>, Vec<String>)> {
-    let (positional_revisions, paths) = split_log_positionals(&args.pathspec).await?;
+    let (positional_revisions, mut paths) = split_log_positionals(&args.pathspec).await?;
+    // Tokens after `--` are always pathspecs: they never error, even when they
+    // name nothing (`git log -- nonexistent` exits 0 silently).
+    paths.extend(args.after_double_dash.iter().cloned());
     let mut ranges = args.ranges.clone();
     ranges.extend(positional_revisions);
     Ok((ranges, paths))
@@ -3517,6 +3559,20 @@ mod tests {
         assert!(args.name_only);
         // Update expected pathspec value to include "log"
         assert_eq!(args.pathspec, vec!["src/main.rs", "src/lib.rs"]);
+    }
+
+    #[test]
+    fn test_double_dash_positionals_are_always_pathspecs() {
+        // Tokens before `--` keep the mixed revision/path treatment; tokens
+        // after `--` land in the dedicated pathspec field even when the name
+        // would otherwise be a revision (e.g. `log -- HEAD`).
+        let args = LogArgs::parse_from(["libra", "HEAD", "--", "HEAD", "-2"]);
+        assert_eq!(args.pathspec, vec!["HEAD"]);
+        assert_eq!(args.after_double_dash, vec!["HEAD", "-2"]);
+
+        let args = LogArgs::parse_from(["libra", "--", "no-such-file"]);
+        assert!(args.pathspec.is_empty());
+        assert_eq!(args.after_double_dash, vec!["no-such-file"]);
     }
 
     #[test]

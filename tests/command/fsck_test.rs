@@ -8,13 +8,14 @@ use git_internal::{
     hash::{HashKind, ObjectHash, set_hash_kind_for_test},
     internal::object::{
         ObjectTrait,
+        blob::Blob,
         commit::Commit,
         signature::{Signature, SignatureType},
         tree::{Tree, TreeItem, TreeItemMode},
         types::ObjectType,
     },
 };
-use libra::utils::client_storage::ClientStorage;
+use libra::{internal::object_format::digest, utils::client_storage::ClientStorage};
 use serial_test::serial;
 use tempfile::tempdir;
 
@@ -954,13 +955,36 @@ fn strict_signature(email: &str, tz: &str, ty: SignatureType) -> Signature {
 
 /// Store an in-process commit with the given author/committer email and
 /// timezone into the repo's object store, returning its object id (hex).
+/// The commit references a real (blob + tree) so `--strict` graph checks stay
+/// silent and only the caller-chosen signature defect is reported.
 fn store_strict_commit(repo: &std::path::Path, email: &str, tz: &str) -> String {
     let _kind = set_hash_kind_for_test(HashKind::Sha1);
     let storage = ClientStorage::init(repo.join(".libra/objects"));
+    let blob = Blob::from_content("strict fixture blob");
+    storage
+        .put(
+            &blob.id,
+            &blob.to_data().expect("serialize blob"),
+            ObjectType::Blob,
+        )
+        .expect("store blob");
+    let tree = Tree::from_tree_items(vec![TreeItem {
+        mode: TreeItemMode::Blob,
+        id: blob.id,
+        name: "f".to_string(),
+    }])
+    .expect("build tree");
+    storage
+        .put(
+            &tree.id,
+            &tree.to_data().expect("serialize tree"),
+            ObjectType::Tree,
+        )
+        .expect("store tree");
     let commit = Commit::new(
         strict_signature(email, tz, SignatureType::Author),
         strict_signature(email, tz, SignatureType::Committer),
-        ObjectHash::default(),
+        tree.id,
         vec![],
         "strict fixture",
     );
@@ -998,28 +1022,59 @@ fn test_strict_commit_bad_email() {
     assert_eq!(strict.status.code(), Some(1));
 }
 
-/// `--strict` flags a commit whose timezone is out of range; the default check
-/// does not.
+/// ADR-MX-06 / M-FSCK F3/F4: timezone checks are FORMAT-only. A format-valid
+/// out-of-range offset (`+9999`) passes both `fsck` and `fsck --strict` (F3).
+/// A malformed offset (no leading sign) can never be parsed as a commit, so
+/// libra rejects it as `bad object sha1` in BOTH modes — an error either way.
+/// (git 实跑: git flags the same object as `badTimezone` in both modes, exit
+/// 1; `badTimezone` is ERROR-level, so libra's parse-time rejection matches
+/// the severity contract.)
 #[test]
 #[serial(cwd, env, hash_kind)]
 fn test_strict_commit_bad_timezone() {
     let repo = tempdir().expect("temp repo");
     init_repo_via_cli(repo.path());
-    let id = store_strict_commit(repo.path(), "test@example.com", "+9900");
 
+    // F3: Git accepts `+9999` in both modes — only the format is validated.
+    let id = store_strict_commit(repo.path(), "test@example.com", "+9999");
     let plain = run_libra_command(&["fsck", &id], repo.path());
     assert!(
         !String::from_utf8_lossy(&plain.stderr).contains("bad timezone"),
-        "non-strict fsck must not flag the timezone"
+        "non-strict fsck must not flag a format-valid timezone"
     );
-
     let strict = run_libra_command(&["fsck", "--strict", &id], repo.path());
     let stderr = String::from_utf8_lossy(&strict.stderr);
     assert!(
-        stderr.contains("bad timezone"),
-        "strict must flag a bad timezone: {stderr}"
+        !stderr.contains("bad timezone"),
+        "strict must not flag a format-valid timezone: {stderr}"
     );
-    assert_eq!(strict.status.code(), Some(1));
+    assert_eq!(
+        strict.status.code(),
+        Some(0),
+        "format-valid timezone must pass --strict: {stderr}"
+    );
+
+    // A malformed timezone (no leading sign) fails commit parsing up front:
+    // `bad object sha1` is an error in both modes, matching the git 实跑
+    // severity of `badTimezone` (ERROR, reported by git in both modes).
+    let bad = store_strict_commit(repo.path(), "test@example.com", "9900");
+    for strict_flag in [false, true] {
+        let output = if strict_flag {
+            run_libra_command(&["fsck", "--strict", &bad], repo.path())
+        } else {
+            run_libra_command(&["fsck", &bad], repo.path())
+        };
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("bad object sha1"),
+            "malformed timezone must be rejected: {stderr}"
+        );
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "malformed timezone fails both modes: {stderr}"
+        );
+    }
 }
 
 /// `--strict` flags a tree whose entries are not in Git's canonical sort order;
@@ -1070,6 +1125,100 @@ fn test_strict_tree_unsorted() {
         "strict must flag an unsorted tree: {stderr}"
     );
     assert_eq!(strict.status.code(), Some(1));
+}
+
+/// Store a raw tree body whose only defect is a zero-padded file mode
+/// (`040000 dir`), returning its object id (hex). The id is computed the way
+/// `fsck` verifies it: over the git object header `tree <len>\0<body>`.
+fn store_zero_padded_tree(repo: &std::path::Path) -> String {
+    let _kind = set_hash_kind_for_test(HashKind::Sha1);
+    let mut body = Vec::new();
+    body.extend_from_slice(b"040000 dir\0");
+    body.extend_from_slice(&[0x11u8; 20]);
+    let header = format!("tree {}\0", body.len());
+    let mut payload = header.into_bytes();
+    payload.extend_from_slice(&body);
+    let id = digest(HashKind::Sha1, &payload);
+    let storage = ClientStorage::init(repo.join(".libra/objects"));
+    storage
+        .put(&id, &body, ObjectType::Tree)
+        .expect("store zero-padded tree");
+    id.to_string()
+}
+
+/// M-FSCK F1/F2/F6: a zero-padded file mode is a WARNING by default (exit 0)
+/// and escalates to an ERROR under `--strict` (non-zero exit); `--json` carries
+/// the per-message severity and only errors decide the exit code.
+#[test]
+#[serial(cwd, env, hash_kind)]
+fn test_fsck_severity_matrix() {
+    let repo = tempdir().expect("temp repo");
+    init_repo_via_cli(repo.path());
+    let id = store_zero_padded_tree(repo.path());
+
+    // F1: default — warning on stderr, exit 0.
+    let plain = run_libra_command(&["fsck", &id], repo.path());
+    let stderr = String::from_utf8_lossy(&plain.stderr);
+    assert!(
+        stderr.contains(&format!(
+            "warning in tree {id}: zeroPaddedFilemode: contains zero-padded file modes"
+        )),
+        "F1: zero-padded mode must be a warning: {stderr}"
+    );
+    assert_eq!(
+        plain.status.code(),
+        Some(0),
+        "F1: a warning must not fail fsck: {stderr}"
+    );
+
+    // F2: `--strict` escalates the warning to an error, exit non-zero.
+    let strict = run_libra_command(&["fsck", "--strict", &id], repo.path());
+    let stderr = String::from_utf8_lossy(&strict.stderr);
+    assert!(
+        stderr.contains(&format!(
+            "error in tree {id}: zeroPaddedFilemode: contains zero-padded file modes"
+        )),
+        "F2: --strict must escalate to an error: {stderr}"
+    );
+    assert_eq!(
+        strict.status.code(),
+        Some(1),
+        "F2: --strict must fail fsck: {stderr}"
+    );
+
+    // F6: JSON carries the per-message severity; only errors decide the exit.
+    let json_out = run_libra_command(&["--json", "fsck", &id], repo.path());
+    assert_eq!(
+        json_out.status.code(),
+        Some(0),
+        "F6: a warning must not fail --json fsck: {}",
+        fsck_combined(&json_out)
+    );
+    let json = parse_json_stdout(&json_out);
+    let messages = json["data"]["messages"]
+        .as_array()
+        .expect("messages array in JSON report");
+    assert_eq!(messages.len(), 1, "exactly one severity finding: {json}");
+    assert_eq!(messages[0]["severity"], serde_json::json!("warning"));
+    assert!(
+        messages[0]["message"]
+            .as_str()
+            .expect("message is a string")
+            .contains("zeroPaddedFilemode")
+    );
+
+    let json_strict = run_libra_command(&["--json", "fsck", "--strict", &id], repo.path());
+    assert_eq!(
+        json_strict.status.code(),
+        Some(1),
+        "F6: --strict must fail --json fsck"
+    );
+    let json = parse_json_stdout(&json_strict);
+    let messages = json["data"]["messages"]
+        .as_array()
+        .expect("messages array in JSON report");
+    assert_eq!(messages.len(), 1, "exactly one severity finding: {json}");
+    assert_eq!(messages[0]["severity"], serde_json::json!("error"));
 }
 
 // ---------------------------------------------------------------------------

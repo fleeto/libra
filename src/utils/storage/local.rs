@@ -2163,6 +2163,14 @@ impl Storage for LocalStorage {
                     }
                 }
             }
+
+            // The same object can be reachable both as a loose object and from
+            // one or more pack indexes (e.g. after `repack` without `-d`, or
+            // several consecutive `repack -a -d` runs that each kept the prior
+            // pack). A duplicate candidate must never be reported as ambiguity,
+            // so sort and collapse identical OIDs before returning (ADR-MX-04).
+            objects.sort_unstable();
+            objects.dedup();
             objects
         })
         .await
@@ -2291,6 +2299,45 @@ mod tests {
         assert!(
             matches!(&err, GitError::InvalidObjectInfo(detail) if detail.contains("non-UTF-8 header bytes")),
             "unexpected err: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(hash_kind)]
+    async fn search_dedupes_identical_loose_and_pack_candidates() {
+        let _kind = git_internal::hash::set_hash_kind_for_test(HashKind::Sha1);
+        let dir = tempfile::tempdir().expect("temporary object store");
+        let storage = LocalStorage::new(dir.path().to_path_buf());
+
+        // One object that exists both as a loose object and in a pack index
+        // (the post-`repack` shape that used to be reported as ambiguous).
+        let hash = ObjectHash::Sha1([0x1a; 20]);
+        storage
+            .put(&hash, b"payload", ObjectType::Blob)
+            .await
+            .expect("write loose object");
+
+        // Pack-index copy: a minimal v1 idx listing the same OID. `search` only
+        // reads the idx (not the pack body), so a placeholder pack is enough.
+        let pack_dir = dir.path().join("pack");
+        fs::create_dir_all(&pack_dir).expect("create pack dir");
+        fs::write(pack_dir.join("dummy.pack"), b"placeholder pack").expect("write pack");
+
+        let mut idx = Vec::new();
+        let first_byte = hash.as_ref()[0] as u32;
+        for slot in 0..256u32 {
+            let count = u32::from(slot >= first_byte);
+            idx.extend_from_slice(&count.to_be_bytes());
+        }
+        idx.extend_from_slice(&12u32.to_be_bytes());
+        idx.extend_from_slice(hash.as_ref());
+        fs::write(pack_dir.join("dummy.idx"), idx).expect("write v1 idx");
+
+        let matches = <LocalStorage as Storage>::search(&storage, &hash.to_string()[..4]).await;
+        assert_eq!(
+            matches,
+            vec![hash],
+            "identical loose and pack candidates must collapse to one"
         );
     }
 

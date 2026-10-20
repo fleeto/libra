@@ -36,6 +36,7 @@ where
             Some(line) => line,
         };
         if let Some(response) = protocol::handle_message(&mut session, &inbound) {
+            let response = super::output::finalize_tool_result(response);
             write_message(&mut writer, &response).await?;
         }
     }

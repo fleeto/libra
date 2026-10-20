@@ -1,6 +1,8 @@
 # Libra 长期功能规划
 
-> **执行登记：** 当前 2026-10-20 08:43:28 UTC：H0 R5a真实Claude/Codex双PASS；MTR-91自身双PASS、签名+DCO本地提交`3723200180b914f20af7152968438009cac373fe`已核，source-qualified；MTR-01本轮A/B已核、in-progress/locally-accepted，自身ER05及两仓精确本地提交待取得，之后才放行MTR-38。91/01均未C/D完成；Libra已原生快进141de9ab，LTR-10仍等H1/LIVE。
+> **当前交接登记：** 2026-10-20 09:04:04 UTC：MTR01自身Claude/Codex均exit0、VERDICT: PASS，P0/P1=0；Mega2五文档签名提交1385f58604f4bdb46419231edf9344dc1e0dafbd、Libra三文档签名提交32287f7e1633db0301a80d09e07f78e65ff0bc33均DCO和GPG验签通过，现source-qualified。91/01均locally-accepted、未C/D；MTR38已按新前驱开始源码实现，验收/Review/发布尚待。Libra LTR10仍等H1/LIVE，无提前push。
+
+> **历史执行登记：** 当前 2026-10-20 08:43:28 UTC：H0 R5a真实Claude/Codex双PASS；MTR-91自身双PASS、签名+DCO本地提交`3723200180b914f20af7152968438009cac373fe`已核，source-qualified；MTR-01本轮A/B已核、in-progress/locally-accepted，自身ER05及两仓精确本地提交待取得，之后才放行MTR-38。91/01均未C/D完成；Libra已原生快进141de9ab，LTR-10仍等H1/LIVE。
 
 > **plan-20261015 当前前滚（2026-10-20 08:12:36 UTC）：** 两仓root现行治理H0前滚R1 Claude FAIL/Codex PASS、R2 Claude PASS/Codex FAIL、R3/R4 Claude FAIL/Codex PASS，谓词计数及承载方法修订后待现行冻结输入真实双审，MTR-01登记；取消的FIX3/LTR-00仍blocked/空，旧FAIL/STOP保留。Mega2当前路线MTR-91→MTR-01→MTR-38→11→40→13→39→92→12/H1；91/01各自A/B、自身双审、精确签名本地提交先交来源，Mega侧C/D由38承载；01的Libra治理文档由LTR-01承载，两仓各自精确签名/DCO本地提交、不提前push。Libra LTR-10的前驱改为H0/H1/逐卡WRITERS/LIVE，当前pending/缺H1，01仍等完整小家族。逐卡协调目标写集，不要求整仓永久让窗；G-10实际重叠禁止，live与完整C/D不减。Mega97/活动96、Libra26/活动25；基线74ce530d/6003a0c，未预填新PASS或发布。 MTR-92显式承接真实HTTP v0/v2/SSH discovery能力、scope/server_id与授权不泄漏黑盒门；91不提交唯一契约。 LTR-01/REL-LTR-PUSH具名承载01的Libra三文档C/D，root实获后回填Mega；91原生构造仅审计收据cached blob，01后提交余下治理。
 

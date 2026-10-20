@@ -94,6 +94,8 @@ pub fn registered_tools() -> Vec<Tool> {
     #[cfg(debug_assertions)]
     if std::env::var("LIBRA_TEST").ok().as_deref() == Some("1") {
         tools.push(echo_tool());
+        tools.push(blob_tool());
+        tools.push(sleep_tool());
     }
     tools.sort_by(|left, right| left.name.cmp(right.name));
     tools
@@ -133,9 +135,21 @@ pub fn call_tool(name: &str, arguments: &Value) -> Result<Value, String> {
             false,
         ));
     }
-    match tool.invoke(arguments) {
-        Ok(structured) => Ok(tool_success_result(&structured)),
-        Err(message) => Ok(tool_error_result("LBR-AGENT-027", &message, false)),
+    let invoke = tool.invoke;
+    let arguments = arguments.clone();
+    match super::output::with_read_deadline(move || invoke(&arguments)) {
+        Ok(Ok(structured)) => Ok(tool_success_result(&structured)),
+        Ok(Err(message)) => Ok(tool_error_result("LBR-AGENT-027", &message, false)),
+        Err(super::output::ReadStop::Deadline) => Ok(tool_error_result(
+            "LBR-AGENT-036",
+            "read tool exceeded the 30 s deadline",
+            true,
+        )),
+        Err(super::output::ReadStop::Stopped) => Ok(tool_error_result(
+            "LBR-AGENT-027",
+            "tool stopped before producing a result",
+            false,
+        )),
     }
 }
 
@@ -172,4 +186,96 @@ fn echo_fixture(_repo: &Path) -> ToolFixture {
 #[cfg(debug_assertions)]
 fn echo_invoke(arguments: &Value) -> Result<Value, String> {
     Ok(arguments.clone())
+}
+
+#[cfg(debug_assertions)]
+fn blob_tool() -> Tool {
+    Tool::declare(
+        "libra_test_blob",
+        "Test-only tool that returns a string of the requested length. Hidden unless LIBRA_TEST=1.",
+        serde_json::json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["bytes"],
+            "properties": {"bytes": {"type": "integer"}}
+        }),
+        serde_json::json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["len", "data"],
+            "properties": {
+                "len": {"type": "integer"},
+                "data": {"type": "string"}
+            }
+        }),
+        blob_fixture,
+        blob_invoke,
+    )
+}
+
+#[cfg(debug_assertions)]
+fn blob_fixture(_repo: &Path) -> ToolFixture {
+    ToolFixture::new(
+        serde_json::json!({"bytes": 1}),
+        serde_json::json!({"bytes": -1}),
+    )
+}
+
+#[cfg(debug_assertions)]
+fn blob_invoke(arguments: &Value) -> Result<Value, String> {
+    let bytes = arguments
+        .get("bytes")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| "bytes must be an integer".to_string())?;
+    if !(0..=200_000).contains(&bytes) {
+        return Err("bytes must be from 0 through 200000".to_string());
+    }
+    let len =
+        usize::try_from(bytes).map_err(|_| "bytes must be from 0 through 200000".to_string())?;
+    Ok(serde_json::json!({
+        "len": bytes,
+        "data": "a".repeat(len),
+    }))
+}
+
+#[cfg(debug_assertions)]
+fn sleep_tool() -> Tool {
+    Tool::declare(
+        "libra_test_sleep",
+        "Test-only tool that sleeps for the requested milliseconds. Hidden unless LIBRA_TEST=1.",
+        serde_json::json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["ms"],
+            "properties": {"ms": {"type": "integer"}}
+        }),
+        serde_json::json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["slept_ms"],
+            "properties": {"slept_ms": {"type": "integer"}}
+        }),
+        sleep_fixture,
+        sleep_invoke,
+    )
+}
+
+#[cfg(debug_assertions)]
+fn sleep_fixture(_repo: &Path) -> ToolFixture {
+    ToolFixture::new(serde_json::json!({"ms": 0}), serde_json::json!({"ms": -1}))
+}
+
+#[cfg(debug_assertions)]
+fn sleep_invoke(arguments: &Value) -> Result<Value, String> {
+    let ms = arguments
+        .get("ms")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| "ms must be an integer".to_string())?;
+    if !(0..=120_000).contains(&ms) {
+        return Err("ms must be from 0 through 120000".to_string());
+    }
+    let duration_ms =
+        u64::try_from(ms).map_err(|_| "ms must be from 0 through 120000".to_string())?;
+    std::thread::sleep(std::time::Duration::from_millis(duration_ms));
+    Ok(serde_json::json!({"slept_ms": ms}))
 }

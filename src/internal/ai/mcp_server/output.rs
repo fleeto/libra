@@ -24,7 +24,7 @@ pub fn finalize_tool_result(message: Value) -> Value {
         return message;
     }
     let id = message.get("id").cloned().unwrap_or(Value::Null);
-    match redact_tool_result(&result) {
+    let finished = match redact_tool_result(&result) {
         Ok(clean) => {
             let mut message = message;
             let Some(object) = message.as_object_mut() else {
@@ -40,10 +40,55 @@ pub fn finalize_tool_result(message: Value) -> Value {
             object.insert("result".to_string(), clean);
             message
         }
-        Err(reason) => protocol::jsonrpc_result(
+        Err(reason) => {
+            return protocol::jsonrpc_result(
+                id,
+                protocol::tool_error_result("LBR-AGENT-034", &reason, false),
+            );
+        }
+    };
+    if response_exceeds_limit(&finished) {
+        return protocol::jsonrpc_result(
             id,
-            protocol::tool_error_result("LBR-AGENT-034", &reason, false),
-        ),
+            protocol::tool_error_result("LBR-AGENT-028", "MCP tool result exceeds 256 KiB", false),
+        );
+    }
+    finished
+}
+
+/// Full JSON-RPC responses larger than 256 KiB are refused. The measurement
+/// includes both `structuredContent` and the rebuilt `content[0].text`.
+pub const MAX_RESPONSE_BYTES: usize = 256 * 1024;
+
+/// Read tools stop after 30 seconds. The caller returns `LBR-AGENT-036`.
+pub const READ_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
+
+pub enum ReadStop {
+    Deadline,
+    Stopped,
+}
+
+/// Run `work` on another thread and stop waiting at [`READ_DEADLINE`].
+///
+/// The worker is not cancelled. The caller must not return its output.
+pub fn with_read_deadline<T: Send + 'static>(
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, ReadStop> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = sender.send(work());
+    });
+    match receiver.recv_timeout(READ_DEADLINE) {
+        Ok(value) => Ok(value),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(ReadStop::Deadline),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(ReadStop::Stopped),
+    }
+}
+
+fn response_exceeds_limit(message: &Value) -> bool {
+    match serde_json::to_vec(message) {
+        Ok(bytes) => bytes.len() > MAX_RESPONSE_BYTES,
+        Err(_) => true,
     }
 }
 

@@ -1,6 +1,10 @@
 # Libra 长期功能规划
 
-> **当前Libra环境资格（2026-10-20 16:33:49 UTC）：** 独立ENV-LTR-UPSTREAM-022 R4真实Claude/Codex三项均PASS后，唯一受控022恢复已结束：focused16/16、full10636/10636（43slow、21既有ignored）、network3/3，三门及root协调器均exit0；2244冻结输入至终态逐项相同。仅选定上游e4d843d整合树的本机环境资格PASS；root新观察远端main已到e3eaff1ac3fee92be0ad83f8db21062f98d8b2d0，尚未fetch/整合/复验，不称最新上游通过；旧0002的16项各三次FAIL、旧恢复审查FAIL及STOP全部保留。源码未改，LTR00验收仍取消，H1/WRITERS/LIVE及LTR01完整C/D仍未满足，正式完成0/26不变。Mega94一次120分钟完整C总窗口已由用户授权，失败STOP且旧预算不重置；C3预算v3真实Claude/Codex各三项PASS后，已于2026-10-20 16:36:57 UTC启动原一次窗口；完整C仍运行中，未称通过。本次三文档后置新字节另作B/真实双审，尚未提交或推送；[完整终态与限定范围](plan-20261015.md#libra独立环境恢复r4实际终态与后置文档记账)。
+> **当前资格终态（2026-10-20T18:09:42.087157+00:00）：** 选定上游`3b1200a80e00e8d1a8866ab07aa790c27f8a17a9`、本地验收HEAD`3eec95934e5862f2528c6fb181fcd5da3b7a4ab3`、版本0.30.69的新树首次资格已实际结束：fmt/clippy/CLI build/full/network均exit0，full 10658项、network 3项终态通过；21既有ignored不计通过。full保留1次失败重试事件、1次重试后通过，不称全程零失败；Cargo依赖proc-macro-error2 v2.0.1 future-incompat警告保留，不称零警告。本次仅资格与MTR01三文档事实跟进，最终三文档自身B/双审/精确signed+DCO本地提交待；H1/LIVE/WRITERS及Worktree冻结、LTR01唯一发布点不变，正式完成仍0/26，无push/tag/Release/CI-D。
+
+> **当前跨仓阻塞：** Mega94仍blocked/locally-accepted，源码/A-B/自身R2双PASS保留；原C3一次120分钟已FAIL/STOP并消费claim，full lib1349PASS/1337FAIL/3ignored，后续targets/build/build-tests未到，历史C2原因未证。新C4恢复方案实际Claude/Codex各3项PASS、P0/P1=0、root13项P2具名处置；新一次120分钟授权待；不执行C4。不重用原C3剩余时间，不重置FIX3/LTR00原3/3诊断与8/8 A/B STOP/取消。93→94→100及跨仓H1仍阻塞。
+
+> **历史整合入场快照（2026-10-20T16:56:43.319120+00:00）：** 已原生整合选定最新远端3b1200a80e00e8d1a8866ab07aa790c27f8a17a9（含e3eaff1源码变更），本地HEAD 3eec95934e5862f2528c6fb181fcd5da3b7a4ab3；5本地文档提交逐条重放重签、DCO/GPG核同，源与上游相同仅3计划文档本地差异。版本四面0.30.69；新CLI/新树完整资格待，不继承旧10636集合。原e4d树022恢复16/full10636/network3真实PASS及后置双审签名870aec0保留为历史选定树资格。未push/tag/Release/D，H1/LIVE/LTR01仍待。 Mega94原一次120分钟C3已FAIL/STOP并消费claim：fmt/clippy0、lib1349PASS/1337FAIL/3ignored，build未到；源码/A-B/R2双PASS保留，blocked/locally-accepted。新C4仅修正执行启动资源parity，实际15类入口/每gate child限制拒绝门，另一次7200秒候选，真实双审与新用户授权待；不自动重跑、不重用剩余时间，旧C2因果仍未证。
 
 > **历史发布执行状态（2026-10-20T15:45:39.735347+00:00）：** MTR94源码/A-B及修复后自身R2双PASS保留；最终C2失败、原因未证，blocked/locally-accepted。C3条件方案R3 Claude PASS/Codex FAIL，输入路径集合与超时进程清理两P1待修；新候选未获审、更未获用户60分钟窗口，禁止执行。未提交/push/tag/Release/D，93覆盖与100前驱仍待。
 
@@ -23,7 +27,7 @@
 <!-- traces-forward-93-100-20261020 -->
 > **历史前滚登记（2026-10-20 12:05:48 UTC；两仓治理amendment已签名本地提交，93自身B已PASS/ER05待）：** MTR-38/MTR-91已done/complete；MTR-01的Mega旧输入已获C/D、Libra三文档仍待LTR-01，整卡未完成；LTR-10仍pending/缺H1与LIVE。Mega2总108/活动107；Libra总26/活动25、正式完成0/26、活动正式完成0/25；联合总134/活动132。Mega2 `eca629866fb9763f2c8126ca858c43732bf6a44e` / `v0.42.57`；annotated tag对象`01473a9c1b58eca860d8d59aa54994e2ad512b2a`解引用同提交；Release https://github.com/gitmono-dev/mega2/releases/tag/v0.42.57 。tag Docker run `39405703760` 的arm64 job `118570980098`、amd64 job `118570980580`、manifest job `118577609288`均success；main Harbor run `39405661929` / job `118570839354`亦success。本轮108/26治理R2真实Claude与隔离Codex均exit0、VERDICT: PASS；联合H0与MTR01本治理增量自身ER05均PASS，P0/P1=0；两仓精确signed+DCO本地amendment已提交并实际验签；MTR93已正式核17AC/17VER，自身B/ER05及signed source提交待，只提出94/100拒绝路径受限资格候选。旧R5a及91/01/38自身审查只保留原输入归属。Libra不提前push。
 
-> 当前Libra本地HEAD=`e2509aa91f51434399156c0a2be2b29c4a4fdab0`，已获取origin/main=`e4d843d1c6591f7064c9e1a8478e046f503c1978`。共享唯一契约当前源码说明SHA256=`7794d82f6a34eb7741fc2f17eeeb6789464db29a405c506ffdfe36544d0fb4b4`；MTR94修复后R2自身/联合双PASS已取得；GET/POST文案澄清后的最终元数据补审待。历史771fb/R2双PASS只绑定旧治理字节，协议语义及卡依赖/发布边界未改。
+> **历史选定树快照（2026-10-20 13:37 UTC；现态见顶部）：** 当前Libra本地HEAD=`e2509aa91f51434399156c0a2be2b29c4a4fdab0`，已获取origin/main=`e4d843d1c6591f7064c9e1a8478e046f503c1978`。共享唯一契约当前源码说明SHA256=`7794d82f6a34eb7741fc2f17eeeb6789464db29a405c506ffdfe36544d0fb4b4`；MTR94修复后R2自身/联合双PASS已取得；GET/POST文案澄清后的最终元数据补审待。历史771fb/R2双PASS只绑定旧治理字节，协议语义及卡依赖/发布边界未改。
 
 > **历史治理绑定：** Libra当前本地HEAD=`c2c76b3e1f926ebfaa8dd3d276b564adbbeecf3b`（父`3433d7703752a581355293ec2d361a09b232e2c4`），已获取origin/main=`5f0e80823b6994575af33eacf9946df55bcc6648`；实际整合/重放映射、签名、复测及远端核验见下列具名收据；不以重放前旧签名代替新提交验签。共享唯一契约SHA256=`771fb2807909aa0b282fa11f3c4f51b8c7bf4b9998d5d4d6c0f3dc17920cecc6`。 本轮新增Mega治理C/D=94，Libra三文档C/D=LTR01。
 
@@ -787,7 +791,7 @@ MEM-03 → MEM-04；LR-09（plan-20260913 `FL-04/05` 收口）；LR-10；MEM-05 
 | [`plan-20261013-coverage-schema.md`](plan-20261013-coverage-schema.md) | B（OpenCode coverage schema-v2 前置） | 实施中 | COV2-05/09 执行中：signed+DCO push 已记录（`b1443c9`）；COV source 16/26，最终事实复核与 signed 交付待本次 main |
 | [`plan-20260927-closeout.md`](plan-20260927-closeout.md) | 横切（plan-20260927 收尾） | 实施中 | 临时跟踪计划：核心六命令模块拆分已实现、全量 8274/8274 绿、`v0.30.8` 已发布；剩余 gap 修复逐项验收，不 bump/不发新版 |
 | [CX-00 历史探测（并入主计划）](plan-20260904.md#cx00-probe-20261010) | B（CX-00 codex-cli probe 记录） | 已完成 | 2026-10-10 记录的 probe 数据（版本普查/隔离 `CODEX_HOME`），只读事实记录、无实现任务；不 bump 版本 |
-| [`plan-20261015.md`](plan-20261015.md) | B（外部Agent traces）+ 横切（Mega2 Agent 历史检索） | 环境资格PASS；计划实施中/待H1；LTR10 pending，正式完成0/26、活动0/25 | 选定e4d843d→本地e2509aa，原4文档提交精确重放/重签；独立ENV恢复R4真实双PASS后focused16/16、完整full10636/10636（43slow、21既有ignored）、network3/3，均exit0、2244输入同一。源码未改，COV/OG/MX保留。MTR38/91已done/complete；93自身B/ER05及signed2320e95已核，仅94/100来源资格，C/D94待；94最终C/D仍未闭合。MTR01本仓三文档后置新字节自身B/双审/签名提交待，C/D=LTR01、不提前push；LTR10→11→12→01仍等H1/WRITERS/LIVE与Worktree发布边界。总108/26、活动107/25不变；47 rebind与06 move风险仍阻塞后继identity消费。详见[实际终态与限制](plan-20261015.md#libra独立环境恢复r4实际终态与后置文档记账)；本环境结果不是卡验收、发布或历史C2根因证明。 |
+| [`plan-20261015.md`](plan-20261015.md) | B（外部Agent traces）+ 横切（Mega2 Agent 历史检索） | 新树资格实际终态；计划待H1，正式0/26、活动0/25 | 选定上游`3b1200a80e00e8d1a8866ab07aa790c27f8a17a9`、本地验收HEAD`3eec95934e5862f2528c6fb181fcd5da3b7a4ab3`、版本0.30.69的新树首次资格已实际结束：fmt/clippy/CLI build/full/network均exit0，full 10658项、network 3项终态通过；21既有ignored不计通过。full保留1次失败重试事件、1次重试后通过，不称全程零失败；Cargo依赖proc-macro-error2 v2.0.1 future-incompat警告保留，不称零警告。本次仅资格与MTR01三文档事实跟进，最终三文档自身B/双审/精确signed+DCO本地提交待；H1/LIVE/WRITERS及Worktree冻结、LTR01唯一发布点不变，正式完成仍0/26，无push/tag/Release/CI-D。 Mega94仍blocked/locally-accepted，源码/A-B/自身R2双PASS保留；原C3一次120分钟已FAIL/STOP并消费claim，full lib1349PASS/1337FAIL/3ignored，后续targets/build/build-tests未到，历史C2原因未证。新C4恢复方案实际Claude/Codex各3项PASS、P0/P1=0、root13项P2具名处置；新一次120分钟授权待；不执行C4。不重用原C3剩余时间，不重置FIX3/LTR00原3/3诊断与8/8 A/B STOP/取消。93→94→100及跨仓H1仍阻塞。 总108/26、活动107/25不变；47 rebind与06 move风险仍阻塞后继identity消费。 |
 | [`plan-20261001-mega-browser-noninteractive.md`](plan-20261001-mega-browser-noninteractive.md) | 横切（Mega2 browser 非交互操作） | 已完成 | MN-01..MN-12 全部 `done`/`complete`，真实 live 12/12、`DEP-MN-03` 已交付；原基线全量 8839/8839 与 R19/R20/R22 评审结果保持为历史证据。PR #609 于 2026-10-04 14:27 UTC 以原 head `adb9b59` 合并；PR #612 run `37230096807` / `37231625328` 暴露的 Linux Clippy 与 sandbox gate 问题已修复；run `37233480909` 的 sandbox gates 通过，但 Clippy 与 bridge 编译发现测试 wrapper 在生产 Linux 构建中 unused，已改为 `cfg(test)`，待新 CI 验收真实 bridge E2E。无 LR 编号；详见计划正文|
 | [`plan-20260925.md`](plan-20260925.md) | B（Session Capture 决策中层） | 已完成 | SCAP-02 / SCAP-01 `done`/`complete`（`v0.23.55` / `fa3849e`；D 组全绿）。2026-09-28 最终合并树的本地门为 8241/8241 passed；本轮不 bump 版本。下一卡为 B3-00 |
 | [`plan-20260927.md`](plan-20260927.md) | 横切（命令实现模块拆分） | 实施中 | 计划评审未放行；13 张 CM + 9 张 FIX 共 22 张独立卡；2026-09-26 用户指示六个 WIP 工作树及计划分支直接并入 `main`，集成不等于验收或 D 发布；CM-01/04 与 FIX-CM-WT-MOVE blocked，CM-06/10 in-progress，其余 17 张 pending，Acceptance 均空。FIX-CM-01 发布后其它卡才可进入 C/T-5。worktree 链为 CM-04 → FIX-CM-WT-MOVE → CM-05 → CM-13；DEP-CM-WT-COMPAT 尚无 patch 兼容证明，不预设 minor。Cloud 链为 CM-03/CM-13 → LIVE-GATE → RECOVERY-AUTH → RECOVERY-CLEANUP → REPO-SCOPE → LIVE-SAFETY → CM-10 → CM-11；恢复认证与受限执行独立发布。22 项 G-03 EX 均未生效，R14 Codex/Claude FAIL，R15 Claude FAIL（13 项 P1），R16 Claude FAIL（14 项 P1），R17 待同版双评审与字面 Claude PASS。真实 L3 只在受保护 release-SHA CI dispatch；live workflow 283278914 disabled_manually，DEP-CM-05.vars-ready 4/4 已通过，premerge/postrelease 未通过，七项 secret 迁移、恢复环境及三个独立首写证据未完成。用户已确认仅 `libra-testing` D1 数据库与 `libra-action` R2 桶专用测试，同一 D1 account 的其它库属别的项目；账号级 D1 建删库/远端整库导入禁止，备份在 fresh local D1 演练；用户担任 CI 外私钥保管人；用户已决定 Cloud live 环境不设独立审批人，`genedna` 可兼任调度与 grant owner；写前身份、备份和签名清单门仍强制。S21 预算按修订卡的 300 分钟窗口核验，旧 120 分钟假设作废。DEFER-CM-OP-01/WT-01/CLOUD-STATUS 未交付；旧版 PASS 不放行本版。 |
@@ -916,3 +920,29 @@ Final macOS card delivery66of66=100percent; inventory66of68=97.06percent with2or
 **历史主表快照（本次事实更新前）：**
 
 > | [`plan-20261015.md`](plan-20261015.md) | B（外部Agent traces）+ 横切（Mega2 Agent 历史检索） | MTR-38/MTR-91已done/complete；MTR-01的Mega旧输入已获C/D、Libra三文档仍待LTR-01，整卡未完成；LTR-10仍pending/缺H1与LIVE；实施中/待H1 | Mega2总108/活动107；Libra总26/活动25、正式完成0/26、活动正式完成0/25；联合总134/活动132。本轮H0及MTR01增量自身ER05已R2真实双PASS，两仓本地amendment及验签已完成；93已正式核17AC/17VER，自身B已PASS，ER05与signed source提交待；`MTR-38完整C/D → 本轮治理H0双审 → MTR-93自身A/B+双审+签名本地source-qualified → MTR-94完整C/D（覆盖93）→ MTR-100完整C/D → FIX-MTR-06完整C/D → MTR-95 → MTR-96 → MTR-97 → FIX-MTR-07完整C/D → MTR-98 → MTR-101 → MTR-99 → MTR-11 → MTR-40 → MTR-13 → MTR-39 → MTR-92 → MTR-12/H1`；客户端LTR10→11→12→01仍等H1/WRITERS/LIVE。93含87后续来源；93～101实现与11/39/92真实wire不能提前等同H1。root整合来源HEAD `3433d7703752a581355293ec2d361a09b232e2c4`，上游 `5f0e80823b6994575af33eacf9946df55bcc6648`；MTR01既有治理提交已重签、本轮增量自身ER05已双PASS、精确signed+DCO本地提交c2c76b3及验签已完成，后置事实收据本地提交待root，C/D=LTR01，不提前push；47 rebind与06 move恢复风险仍阻塞95及后继identity消费，须ER03具名处理，FIX06单独完成不够。 |
+
+## 2026-10-20T16:56:43.319120+00:00 后置状态
+
+已原生整合选定最新远端3b1200a80e00e8d1a8866ab07aa790c27f8a17a9（含e3eaff1源码变更），本地HEAD 3eec95934e5862f2528c6fb181fcd5da3b7a4ab3；5本地文档提交逐条重放重签、DCO/GPG核同，源与上游相同仅3计划文档本地差异。版本四面0.30.69；新CLI/新树完整资格待，不继承旧10636集合。原e4d树022恢复16/full10636/network3真实PASS及后置双审签名870aec0保留为历史选定树资格。未push/tag/Release/D，H1/LIVE/LTR01仍待。
+
+Mega94原一次120分钟C3已FAIL/STOP并消费claim：fmt/clippy0、lib1349PASS/1337FAIL/3ignored，build未到；源码/A-B/R2双PASS保留，blocked/locally-accepted。新C4仅修正执行启动资源parity，实际15类入口/每gate child限制拒绝门，另一次7200秒候选，真实双审与新用户授权待；不自动重跑、不重用剩余时间，旧C2因果仍未证。
+
+完整ER03、新源资格门与无授权C4条件方案见[日期计划](plan-20261015.md#upstream-c3-stop-20261021)。正式完成仍0/26、活动0/25，未push/发布。
+
+## 新上游资格实际终态（2026-10-20T18:09:42.087157+00:00）
+
+选定上游`3b1200a80e00e8d1a8866ab07aa790c27f8a17a9`、本地验收HEAD`3eec95934e5862f2528c6fb181fcd5da3b7a4ab3`、版本0.30.69的新树首次资格已实际结束：fmt/clippy/CLI build/full/network均exit0，full 10658项、network 3项终态通过；21既有ignored不计通过。full保留1次失败重试事件、1次重试后通过，不称全程零失败；Cargo依赖proc-macro-error2 v2.0.1 future-incompat警告保留，不称零警告。本次仅资格与MTR01三文档事实跟进，最终三文档自身B/双审/精确signed+DCO本地提交待；H1/LIVE/WRITERS及Worktree冻结、LTR01唯一发布点不变，正式完成仍0/26，无push/tag/Release/CI-D。
+
+Mega94仍blocked/locally-accepted，源码/A-B/自身R2双PASS保留；原C3一次120分钟已FAIL/STOP并消费claim，full lib1349PASS/1337FAIL/3ignored，后续targets/build/build-tests未到，历史C2原因未证。新C4恢复方案实际Claude/Codex各3项PASS、P0/P1=0、root13项P2具名处置；新一次120分钟授权待；不执行C4。不重用原C3剩余时间，不重置FIX3/LTR00原3/3诊断与8/8 A/B STOP/取消。93→94→100及跨仓H1仍阻塞。
+
+计数、逐门UTC/exit/原始SHA与重试/警告处置见[日期计划的实际终态登记](plan-20261015.md#upstream-qualification-20261021)。
+
+### 本次更新前的历史索引快照（保留，不作当前状态）
+
+```text
+| [`plan-20261015.md`](plan-20261015.md) | B（外部Agent traces）+ 横切（Mega2 Agent 历史检索） | 环境资格PASS；计划实施中/待H1；LTR10 pending，正式完成0/26、活动0/25 | 选定e4d843d→本地e2509aa，原4文档提交精确重放/重签；独立ENV恢复R4真实双PASS后focused16/16、完整full10636/10636（43slow、21既有ignored）、network3/3，均exit0、2244输入同一。源码未改，COV/OG/MX保留。MTR38/91已done/complete；93自身B/ER05及signed2320e95已核，仅94/100来源资格，C/D94待；94最终C/D仍未闭合。MTR01本仓三文档后置新字节自身B/双审/签名提交待，C/D=LTR01、不提前push；LTR10→11→12→01仍等H1/WRITERS/LIVE与Worktree发布边界。总108/26、活动107/25不变；47 rebind与06 move风险仍阻塞后继identity消费。详见[实际终态与限制](plan-20261015.md#libra独立环境恢复r4实际终态与后置文档记账)；本环境结果不是卡验收、发布或历史C2根因证明。 |
+```
+
+### 新上游资格后置文档审查与剩余项（2026-10-20T18:25:37.046924+00:00）
+
+R1真实Claude/Codex各两项PASS、exit0、P0/P1=0；root修复稳定锚点/修订行及精确本地提交防护，新字节须R2实际双审。唯一flaky及future-incompat警告由root与LTR-01执行者具名承接，在LTR-01完整C/计划最终全量门重新核验，本记录不授豁免或额外诊断。提交前快照、R1原始报告与后续事实同步责任见[日期计划P2处置](plan-20261015.md#qualification-r1-disposition-20261021)。无新源码、卡/依赖/版本或发布变更，正式完成0/26保持。

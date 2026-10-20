@@ -28,6 +28,12 @@
   `reasoningEncryptedContent`, and `thoughtSignature`. The checkpoint stays
   `Unproven` / `Partial` and does not archive those fields as native artifacts.
 
+## [0.30.68] — 2026-10-20
+
+### MCP server
+
+- Windows builds enable Tokio `io-std` directly, so `libra agent mcp --stdio` compiles on every release target. `v0.30.67` published Linux artifacts only.
+
 ## [0.30.67] — 2026-10-20
 
 ### MCP server

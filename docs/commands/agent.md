@@ -1626,4 +1626,4 @@ unverified reasoning source cannot turn this failure into complete coverage.
 These changes add no command flags and require Libra 0.30.50 or later. OpenCode Session/exporter/model acceptance runs locally on
 macOS; it is not a CI integration test.
 
-Repositories opened by Libra 0.31.0 or later carry repository capability 4. Libra 0.30.x refuses every command on those repositories, including `agent clean`; install 0.31.0 or later before continuing. No existing agent workspace directories are migrated.
+Repositories opened by Libra 0.31.1 or later carry repository capability 4. Libra 0.30.x refuses every command on those repositories, including `agent clean`; install 0.31.1 or later before continuing. No existing agent workspace directories are migrated.

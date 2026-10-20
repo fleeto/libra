@@ -273,11 +273,8 @@ fn open_repository_files(
         }
         #[cfg(not(unix))]
         {
-            OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(path)
-                .map_err(|error| storage_error("open", path, error))?
+            // Windows file locks reject append-only handles; open read/write.
+            open_leaf(&parent, path, permissions.creation_mode())?
         }
     };
     if !metadata(&file, path)?.is_file() {
@@ -430,3 +427,18 @@ mod error_tests;
 
 #[cfg(test)]
 mod first_open_tests;
+
+#[cfg(all(test, windows))]
+mod windows_repository_lock_tests {
+    use super::{LeaseFilePermissions, open_repository_files};
+
+    #[test]
+    fn repository_lease_file_can_be_locked() {
+        let directory = tempfile::tempdir().expect("repository lease fixture");
+        let path = directory.path().join("operation-v2-repository.lock");
+        let (file, _parent) =
+            open_repository_files(directory.path(), &path, LeaseFilePermissions::Umask)
+                .expect("open repository lease file");
+        file.try_lock().expect("acquire repository lease");
+    }
+}

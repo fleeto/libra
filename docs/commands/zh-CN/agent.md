@@ -1130,4 +1130,4 @@ reasoning 一次，之后重复采集会去重；原 v1 对象、digest 和 clai
 reasoning 不能将这种失败变为 complete coverage。这些改动不增加命令参数，要求 Libra 0.30.50 或后续版本；依赖 OpenCode Session／exporter／模型的验收只在 macOS
 本机执行，不进入 CI 集成测试。
 
-Libra 0.31.0 或更新版本打开的仓库带有能力标记 4。Libra 0.30.x 会拒绝该仓库中的所有命令，包括 `agent clean`；继续操作前请升级到 0.31.0 或更新版本。现有 Agent 工作目录不迁移。
+Libra 0.31.1 或更新版本打开的仓库带有能力标记 4。Libra 0.30.x 会拒绝该仓库中的所有命令，包括 `agent clean`；继续操作前请升级到 0.31.1 或更新版本。现有 Agent 工作目录不迁移。

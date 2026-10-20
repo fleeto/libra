@@ -523,6 +523,7 @@ fn run_capture_scope_binding_helper_if_requested() -> Option<i32> {
 ///   [`CliError::exit_code`] so each error class has a stable code.
 fn main() {
     libra::internal::ai::authorized_read::register_running_program();
+    libra::internal::worktree_io::executor::register_cli_entrypoint();
     if let Some(exit_code) = run_checkpoint_object_io_helper_if_requested() {
         if exit_code != 0 {
             std::process::exit(exit_code);

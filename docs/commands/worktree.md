@@ -724,4 +724,4 @@ Note: jj uses the term "workspace" instead of "worktree". Each workspace automat
 | `LBR-WORKTREE-001` | `worktree doctor --cursor` was given a cursor this command did not issue (or one that expired) |
 | `LBR-WORKTREE-002` | `worktree doctor` cannot read a scope (unparseable registry, unreadable record, missing repository identity) and refuses to report a partial diagnosis |
 
-A build that supports managed worktrees records repository capability 4 when it first opens a repository. After that, Libra 0.30.x refuses every command in that repository, including commands unrelated to worktrees. Upgrade the installed Libra binary to 0.31.0 or later to continue. Existing worktree directories are not moved.
+A build that supports managed worktrees records repository capability 4 when it first opens a repository. After that, Libra 0.30.x refuses every command in that repository, including commands unrelated to worktrees. Upgrade the installed Libra binary to 0.31.1 or later to continue. Existing worktree directories are not moved.

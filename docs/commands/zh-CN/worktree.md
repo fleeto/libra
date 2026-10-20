@@ -666,4 +666,4 @@ Git 的 `git worktree lock` 也支持 `--reason`，Libra 保留了这一点。�
 | `LBR-WORKTREE-001` | `worktree doctor --cursor` 收到非本命令签发（或已过期）的 cursor |
 | `LBR-WORKTREE-002` | `worktree doctor` 无法读取某个 scope（registry 无法解析、记录不可读、仓库身份缺失），拒绝给出残缺诊断 |
 
-支持统一 worktree 目录的版本首次打开仓库时，会写入仓库能力标记 4。此后 Libra 0.30.x 会拒绝该仓库中的所有命令，包括与 worktree 无关的命令；请升级到 Libra 0.31.0 或更新版本。现有 worktree 目录不会移动。
+支持统一 worktree 目录的版本首次打开仓库时，会写入仓库能力标记 4。此后 Libra 0.30.x 会拒绝该仓库中的所有命令，包括与 worktree 无关的命令；请升级到 Libra 0.31.1 或更新版本。现有 worktree 目录不会移动。

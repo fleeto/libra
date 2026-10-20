@@ -37,7 +37,7 @@ The new binary takes effect on the next `libra` command.
 Starting with Libra 0.31.0, the first repository command run by the new binary
 records a forward-only worktree-layout capability marker, even if the repository
 has no additional worktrees. Libra 0.30.x then refuses **all** commands in that
-repository at database open. Keep the 0.31.0-or-newer binary installed to use
+repository at database open. Use the stable 0.31.1-or-newer binary to access
 repositories opened by it; installing 0.30.x again does not undo the marker.
 `worktree move` also requires a destination on the same filesystem: a
 cross-filesystem request keeps the source and registration unchanged instead

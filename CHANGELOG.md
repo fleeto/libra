@@ -28,6 +28,20 @@
   `reasoningEncryptedContent`, and `thoughtSignature`. The checkpoint stays
   `Unproven` / `Partial` and does not archive those fields as native artifacts.
 
+## [0.31.1] — 2026-10-20
+
+### Managed worktree layout
+
+- New named linked, FUSE, and agent task worktrees use the shared
+  `.libra/worktree/{linked,fuse,tasks}` layout. `worktree add NAME` chooses an
+  internal destination by default; `--path` keeps explicit external placement.
+  Existing worktree directories are not moved.
+- Opening a repository records the forward-only worktree layout capability.
+  Libra 0.30.x refuses that repository; use 0.31.1 or newer to continue.
+- The released CLI starts its status I/O worker when run directly under a
+  platform asset filename such as `libra-darwin-arm64`, as well as when
+  installed under the name `libra`.
+
 ## [0.30.51] — 2026-10-17
 
 ### Native installation challenge isolation

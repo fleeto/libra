@@ -9,7 +9,7 @@ use std::{
     io::{self, Read},
     process::{Child, ChildStdin, ChildStdout, Command, Stdio},
     sync::{
-        Arc, Condvar, Mutex, OnceLock,
+        Arc, Condvar, Mutex,
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         mpsc,
     },
@@ -24,6 +24,13 @@ use super::protocol::{
 pub(crate) const MAX_INFLIGHT: usize = 8;
 pub(crate) const MAX_PENDING: usize = 64;
 const CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(10);
+static CLI_ENTRYPOINT_REGISTERED: AtomicBool = AtomicBool::new(false);
+
+/// Mark that this process entered Libra's CLI main, which supports the private
+/// status I/O worker argument regardless of its installed filename.
+pub fn register_cli_entrypoint() {
+    CLI_ENTRYPOINT_REGISTERED.store(true, Ordering::Relaxed);
+}
 
 type InProcessHandler = fn(IoRequest, &mut Vec<u8>) -> io::Result<bool>;
 
@@ -561,24 +568,7 @@ fn dispatcher_loop(pool: Arc<Pool>) {
 }
 
 fn helper_exe_is_cli(_config: WorkerConfig) -> bool {
-    static CLI: OnceLock<bool> = OnceLock::new();
-    *CLI.get_or_init(|| {
-        let Ok(exe) = std::env::current_exe() else {
-            return false;
-        };
-        // Cargo test harnesses live in `target/.../deps/`; the installed /
-        // `cargo run` CLI is `…/libra` (or `libra.exe`).
-        let in_deps = exe
-            .parent()
-            .and_then(|p| p.file_name())
-            .is_some_and(|name| name == "deps");
-        if in_deps {
-            return false;
-        }
-        exe.file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name == "libra" || name.eq_ignore_ascii_case("libra.exe"))
-    })
+    CLI_ENTRYPOINT_REGISTERED.load(Ordering::Relaxed)
 }
 
 fn run_job(pool: &Pool, job: Arc<Job>) {

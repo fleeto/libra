@@ -226,7 +226,7 @@ jobs:
             }
           }
 
-      - name: Verify native Windows capture and task workspace filesystem primitives
+      - name: Verify native Windows capture, task workspace, and release binary
         shell: pwsh
         env:
           RUSTFLAGS: "-D warnings -C link-arg=/IGNORE:4099"
@@ -242,6 +242,15 @@ jobs:
             }).Count -ne 1) {
               throw "Native Windows capture primitive tests failed or matched no tests: $filter"
             }
+          }
+          $releaseFilter = 'command::worktree_isolation_test::wd_renamed_release_binary_can_start_status_io_worker'
+          $releaseTest = @(& cargo test --locked --test command_test $releaseFilter -- --exact --nocapture --color never --test-threads=1)
+          $releaseExit = $LASTEXITCODE
+          $releaseTest | Write-Output
+          if ($releaseExit -ne 0 -or @($releaseTest | Where-Object {
+            $_ -cmatch '^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out; finished in .+$'
+          }).Count -ne 1) {
+            throw "Native Windows renamed release binary test failed or matched no tests: $releaseFilter"
           }
 
   redundancy:

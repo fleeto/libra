@@ -4,6 +4,7 @@
 //! the frame cap, and `TOOL_ERROR_SCHEMA` are defined (GC-MC-02).
 
 use serde_json::{Map, Value};
+use sha2::{Digest, Sha256};
 
 /// Legacy handshake versions this server accepts (ADR-MC-04).
 pub const LEGACY_PROTOCOL_VERSIONS: &[&str] = &["2025-11-25", "2025-06-18"];
@@ -220,13 +221,35 @@ pub enum InboundLine {
     TooLarge,
 }
 
+/// Methods whose names may be copied onto a span. Anything else is `unknown`.
+const KNOWN_METHODS: &[&str] = &[
+    "initialize",
+    "notifications/initialized",
+    "notifications/cancelled",
+    "ping",
+    "tools/list",
+    "tools/call",
+];
+
 pub struct Session {
     pub initialized: bool,
+    repository_id: String,
 }
 
 impl Session {
     pub fn new() -> Self {
-        Self { initialized: false }
+        Self {
+            initialized: false,
+            repository_id: "unavailable".to_string(),
+        }
+    }
+
+    /// `repository_id` is the server-side `libra.repoid`, never a client field.
+    pub fn with_repository_id(repository_id: impl Into<String>) -> Self {
+        Self {
+            initialized: false,
+            repository_id: repository_id.into(),
+        }
     }
 }
 
@@ -239,15 +262,122 @@ impl Default for Session {
 /// Handle one accepted line. `None` means the client gets no stdout line
 /// (empty input or a notification).
 pub fn handle_message(session: &mut Session, line: &InboundLine) -> Option<Value> {
+    if matches!(line, InboundLine::Empty) {
+        return None;
+    }
+    let fields = span_fields(line);
+    let span = tracing::info_span!(
+        "agent.mcp.request",
+        method = fields.method,
+        id_hash = %fields.id_hash,
+        repository_id = %session.repository_id,
+        tool = tracing::field::Empty,
+    );
+    if let Some(tool) = fields.tool {
+        span.record("tool", tool);
+    }
+    let _entered = span.enter();
     match line {
-        InboundLine::Empty => None,
         InboundLine::TooLarge => Some(jsonrpc_error(
             Value::Null,
             JSONRPC_INVALID_REQUEST,
             "MCP message exceeds 256 KiB; send a shorter line",
         )),
         InboundLine::Message(bytes) => handle_bytes(session, bytes),
+        InboundLine::Empty => None,
     }
+}
+
+struct SpanFields {
+    method: &'static str,
+    id_hash: String,
+    tool: Option<&'static str>,
+}
+
+/// Fields safe to put on `agent.mcp.request`. Client-controlled strings are
+/// either replaced with `unknown` or reduced to a hash prefix.
+fn span_fields(line: &InboundLine) -> SpanFields {
+    let InboundLine::Message(bytes) = line else {
+        return SpanFields {
+            method: "unknown",
+            id_hash: id_hash(&Value::Null),
+            tool: None,
+        };
+    };
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return SpanFields {
+            method: "unknown",
+            id_hash: id_hash(&Value::Null),
+            tool: None,
+        };
+    };
+    let Ok(parsed) = serde_json::from_str::<Value>(text) else {
+        return SpanFields {
+            method: "unknown",
+            id_hash: id_hash(&Value::Null),
+            tool: None,
+        };
+    };
+    let Some(message) = parsed.as_object() else {
+        return SpanFields {
+            method: "unknown",
+            id_hash: id_hash(&Value::Null),
+            tool: None,
+        };
+    };
+    let method = message
+        .get("method")
+        .and_then(Value::as_str)
+        .map(sanitized_method)
+        .unwrap_or("unknown");
+    let id_hash = message
+        .get("id")
+        .map(id_hash)
+        .unwrap_or_else(|| id_hash(&Value::Null));
+    let tool = if method == "tools/call" {
+        let name = message
+            .get("params")
+            .and_then(|params| params.get("name"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        Some(sanitized_tool(name))
+    } else {
+        None
+    };
+    SpanFields {
+        method,
+        id_hash,
+        tool,
+    }
+}
+
+fn sanitized_method(method: &str) -> &'static str {
+    KNOWN_METHODS
+        .iter()
+        .copied()
+        .find(|known| *known == method)
+        .unwrap_or("unknown")
+}
+
+fn sanitized_tool(name: &str) -> &'static str {
+    crate::internal::ai::mcp_server::tools::registered_tools()
+        .into_iter()
+        .find(|tool| tool.name == name)
+        .map(|tool| tool.name)
+        .unwrap_or("unknown")
+}
+
+/// First 16 hex characters of SHA-256 over the canonical JSON encoding of `id`.
+fn id_hash(id: &Value) -> String {
+    let canonical = serde_json::to_vec(id).unwrap_or_else(|_| b"null".to_vec());
+    let digest = Sha256::digest(&canonical);
+    let mut encoded = String::with_capacity(16);
+    for byte in digest.iter().take(8) {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        encoded.push(HEX[(*byte >> 4) as usize] as char);
+        encoded.push(HEX[(*byte & 0x0f) as usize] as char);
+    }
+    encoded
 }
 
 fn handle_bytes(session: &mut Session, bytes: &[u8]) -> Option<Value> {

@@ -9,13 +9,26 @@ use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 
 use super::protocol::{self, InboundLine, MAX_LINE_BYTES, Session};
 
+async fn repository_id() -> String {
+    match crate::internal::config::ConfigKv::get_best_effort("libra.repoid").await {
+        Ok(Some(entry))
+            if !entry.encrypted
+                && !entry.value.trim().is_empty()
+                && entry.value != "unknown-repo" =>
+        {
+            entry.value
+        }
+        _ => "unavailable".to_string(),
+    }
+}
+
 pub async fn serve<R, W>(reader: R, mut writer: W) -> std::io::Result<()>
 where
     R: AsyncBufRead + Unpin,
     W: AsyncWrite + Unpin,
 {
     let mut reader = reader;
-    let mut session = Session::new();
+    let mut session = Session::with_repository_id(repository_id().await);
     loop {
         let inbound = read_line_capped(&mut reader, MAX_LINE_BYTES).await?;
         let inbound = match inbound {

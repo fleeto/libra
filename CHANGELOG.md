@@ -28,6 +28,12 @@
   `reasoningEncryptedContent`, and `thoughtSignature`. The checkpoint stays
   `Unproven` / `Partial` and does not archive those fields as native artifacts.
 
+## [0.30.69] — 2026-10-20
+
+### MCP server
+
+- Each `libra agent mcp` request emits an `agent.mcp.request` span. The span records a known method name or `unknown`, a SHA-256 prefix of the JSON-RPC id (`id_hash`), the repository id, and, for `tools/call`, a registered tool name or `unknown`. Client info, parameters, and the raw id are not span fields.
+
 ## [0.30.68] — 2026-10-20
 
 ### MCP server

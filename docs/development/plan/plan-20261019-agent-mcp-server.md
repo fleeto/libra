@@ -205,6 +205,7 @@
 | 2026-10-20 10:30:15 UTC | Codex R64 PASS（0×P1、1×P2） | 卡数不变（41）：按 R64 唯一的 P2 修正 MC-13 的 HTTP 内存预算表述——计入 Hyper 连接读缓冲（默认约 400 KiB，hyper#4081 的超额读分配不当作严格上限），改为每连接 ≤ 1 MiB、合计 ≤ 64 MiB 的容量估计；不新增判据（R65 曾尝试以 `max_buf_size` 封顶，被确认在 Hyper 1.8.1 下不可靠，已撤回）；该改动经 R66 确认 | — | MC-13 |
 | 2026-10-20 12:40:00 UTC | 使用者要求保持 0.30.xx，且 stable manifest 仍是 0.30.66 | 工作区版本面是未发布的 0.31.1（本地 tag `v0.31.0` 存在，stable `manifest-v1.json` 的 `version` 为 `0.30.66`，control_revision 167）。发布端点拒绝 `version_regression`，因此不把版本面升到 0.31.2，也不改写已发布 tag。MC-01 起把三个版本面从 0.31.1 调回 0.30.67（相对已发布 stable 单调 +1）。 | — | 版本面 |
 | 2026-10-20 13:05:00 UTC | `v0.30.67` 的 Linux 产物已上传，Windows 库测试缺少 Tokio `io-std` | `72450c6` 的 arm64/amd64 Linux 对象已在 CDN（HTTP 200），前缀不可覆盖。Windows `cargo test --locked --lib` 在 `mcp.rs` 报 `E0432`（`tokio::io::stdin` 仅由 Unix 依赖间接打开）。取消未完成的 darwin/windows 上传，版本面改为 `0.30.68`，并在 `Cargo.toml` 直接启用 `io-std`。不改写 `v0.30.67`。 | — | 版本面、`Cargo.toml` |
+| 2026-10-20 14:05:00 UTC | MC-01 D 组通过 | `v0.30.68` 的 `release.yml` 39427212730 success。main `e4d843d` 的 `base.yml` 39427673509 attempt 2 与 `codeql.yml` 39427673357 success。Codex 与 Claude Code 均为 P0=0、P1=0。MC-01 `done` / `complete`。 | — | MC-01 |
 
 ## 已决议设计决策
 
@@ -489,7 +490,7 @@ ER-01 至 ER-14 按模板原文对本计划全部任务生效（见 [`plan-templ
 
 **Task type:** `implementation`
 
-**Lifecycle / Acceptance:** `in-progress` / 空
+**Lifecycle / Acceptance:** `done` / `complete`
 
 **Description:** 新增 `libra agent mcp --stdio`：在当前仓库内按 legacy 纪元（`2025-11-25`/`2025-06-18`）提供 `initialize`、`notifications/initialized`、`ping`、`tools/list`、`tools/call`，以及 ADR-MC-08 的错误分层（协议错误与工具错误）。本卡不提供任何生产工具（`tools/list` 为空）；为验证工具错误路径，注册仅在 `cfg(debug_assertions)` 且 `LIBRA_TEST=1` 时存在的测试工具 `libra_test_echo`（原样返回参数对象）；建立工具注册契约（GC-MC-10）：每个工具注册时必须给出 `outputSchema = {"type": "object", "anyOf": [<成功结构>, TOOL_ERROR_SCHEMA]}`（`TOOL_ERROR_SCHEMA` 在 `protocol.rs` 单点定义）以及一个一致性夹具（在独立的临时仓库中完成该工具的前置条件——如 `--allow-write` 会话、暂存改动与 `expected_head`、先行 claim 取得的 fence——并返回一组成功参数与一组工具错误参数，结束时清理），缺任一项无法编译注册（根上的 `"type": "object"` 为 2025 两个 legacy 版本 wire schema 对 `Tool.outputSchema` 的要求）；新增注册表级一致性测试，逐个工具运行其夹具后以两组参数调用并用 dev-dependency `jsonschema`（以 `cargo add --dev jsonschema` 加入并写成精确版本 `=x.y.z`，版本号记入本卡证据）校验 `structuredContent`。请求 tracing span 由 MC-22 承接。结果信封由 MC-16（脱敏）与 MC-19（大小上限、读 deadline）承接。唯一行为轴：「stdio 上的 MCP 握手、错误分层与帧」。
 
@@ -505,11 +506,12 @@ ER-01 至 ER-14 按模板原文对本计划全部任务生效（见 [`plan-templ
 | bridge 稳定码 | `src/internal/ai/agent_bridge/protocol.rs:271-390` |
 | 规范 stdio 规则、tools 错误处理 | 规范 `2025-11-25/basic/transports.mdx` 第 28-34 行；`2025-11-25/server/tools.mdx`「Error Handling」（pin `1155ca46`） |
 | 版本面 | `Cargo.toml` `0.30.68`；`install.sh` `DEFAULT_VERSION="v0.30.68"`；`install.ps1` `$DefaultVersion = "v0.30.68"`。`v0.30.67` 只发布了 Linux 对象，stable manifest 仍是 `0.30.66`。 |
-| 门二进制 | `command -v libra` = `/mnt/data/libra/target/debug/libra`；`libra --version` 在 `0.30.68` 提交后复测。 |
+| 门二进制 | `command -v libra` = `/mnt/data/libra/target/debug/libra`；`libra --version` = `libra 0.30.68` |
 | jsonschema | dev-dependency `jsonschema` `=0.59.0`（`default-features = false`） |
-| A/B 门 | `agent_mcp_stdio_test` 22 个 `--exact` 与 `agent_mcp_conformance_test` 7 个 `--exact` 均 `test result: ok. 1 passed; 0 failed`（`source .env.test && source .env.live-test`）。两次真实 `libra agent mcp --stdio`：`initialize` 的 `protocolVersion` 为 `2025-11-25`，`serverInfo.name` 为 `libra`，`serverInfo.version` 为 `0.30.67`；`tools/list` 无 `libra_test_`。 |
+| A/B 门 | `agent_mcp_stdio_test` 22 个 `--exact` 与 `agent_mcp_conformance_test` 7 个 `--exact` 均 `test result: ok. 1 passed; 0 failed`（`source .env.test && source .env.live-test`）。`0.30.68` 上两次真实 `libra agent mcp --stdio`：`protocolVersion` 为 `2025-11-25`，`serverInfo.name` 为 `libra`，`serverInfo.version` 为 `0.30.68`；`tools/list` 无 `libra_test_`。 |
 | C 组全量 | `source .env.test && source .env.live-test && cargo nextest run --all --no-fail-fast --retries 2`：`Summary [ 554.824s] 10576 tests run: 10576 passed (11 slow, 1 flaky), 21 skipped`，exit 0。首轮唯一失败是 `compat_serial_registry` 的外部组计数（自定义 `mcp_registry` 车道），已改为 `#[serial(env)]` 并重跑至绿。 |
-| 网站 | `agent.en.md` 已由 sync `--write --only agent` 写入（13 行）。全库 `--check` 仍报 9 个非本卡页面漂移（cat-file、diff-files、hash-object、rev-parse、symbolic-ref、update-index、update-ref、upgrade、worktree），未同步、未提交。线上页与 Codex 语义复核未完成。 |
+| 网站 | `cf` `e3a18c80c692a68c6b824022f39b730c357ce25a` 只改 `agent.en.md`。源文件与 `https://libra.tools/en/docs/commands/agent` 都含 `agent mcp --stdio`、`2025-11-25`、`2025-06-18`、`LBR-AGENT-027`、`"cwd"`。Claude Code：`CLAUDE_VERDICT: PASS`，`P0=0`，`P1=0`。全库 `--check` 仍有 9 个非本卡页面漂移，未同步。GC-MC-05 ⓪ 演练在临时库通过（本机无 `shasum`，摘要用 `sha256sum`）。 |
+| D 组 | tag `v0.30.68` 指向 `e418297e8d94e6edd7d263963ed0eb4bbc2603f3`。`release.yml` [39427212730](https://github.com/libra-tools/libra/actions/runs/39427212730) success；四个平台产物 HTTP 200；安装脚本 `DEFAULT_VERSION="v0.30.68"`。main `e4d843d1c6591f7064c9e1a8478e046f503c1978` 的 `base.yml` [39427673509](https://github.com/libra-tools/libra/actions/runs/39427673509) attempt 2 success（attempt 1 仅 `compat-redundancy` 在下载 `actions/checkout` 时 SSL 失败，重跑成功）。`codeql.yml` [39427673357](https://github.com/libra-tools/libra/actions/runs/39427673357) success。Codex：`VERDICT: PASS`，`P0=0`，`P1=0`（P2 是 Examples 代码块缺命令，本收口已补）。 |
 
 **Acceptance criteria:**
 
@@ -542,7 +544,7 @@ ER-01 至 ER-14 按模板原文对本计划全部任务生效（见 [`plan-templ
 - [x] AC-27 同一错误结果的 `structuredContent` 通过 `TOOL_ERROR_SCHEMA` 校验。
 - [x] AC-28 `tools/list` 结果通过固定提交 `1155ca46` 的 `schema/2025-11-25/schema.json` 中 `ListToolsResult` 定义的 JSON Schema 校验（schema 副本存于测试 fixture）。
 - [x] AC-29 同一结果通过同一提交 `schema/2025-06-18/schema.json` 中 `ListToolsResult` 的校验。
-- [ ] ER-06/ER-06a 同卡强制门：下方「同卡文档门」逐文件全部通过；网站页另按 GC-MC-05 ①–⑥ 交付（不计入 AC 上限）。
+- [x] ER-06/ER-06a 同卡强制门：下方「同卡文档门」逐文件全部通过；网站页另按 GC-MC-05 ①–⑥ 交付（不计入 AC 上限）。
 
 **判据规范（非计数正文）:** 门族（29 个，逐一列名；第 i 个门只判定 AC-i 一个谓词，失败即整卡不达标，`--exact` 门按 GC-MC-07 执行）：AC-1=`agent_mcp_stdio_test::initialize_echoes_2025_11_25`；AC-2=`agent_mcp_stdio_test::initialize_echoes_2025_06_18`；AC-3=`agent_mcp_stdio_test::initialize_unknown_version_falls_back`；AC-4=`agent_mcp_stdio_test::initialize_server_name`；AC-5=`agent_mcp_stdio_test::initialize_server_version`；AC-6=`agent_mcp_stdio_test::initialize_capabilities_tools_only`；AC-7=`agent_mcp_stdio_test::request_before_initialize_is_error`；AC-8=`agent_mcp_stdio_test::ping_after_initialize`；AC-9=`agent_mcp_stdio_test::initialized_notification_is_silent`；AC-10=`agent_mcp_stdio_test::batch_is_rejected`；AC-11=`agent_mcp_stdio_test::unknown_method_is_32601`；AC-12=`agent_mcp_stdio_test::invalid_json_is_32700`；AC-13=`agent_mcp_stdio_test::test_tools_hidden_in_production`；AC-14=`agent_mcp_stdio_test::unknown_tool_is_32602`；AC-15=`agent_mcp_stdio_test::schema_violation_is_tool_error`；AC-16=`agent_mcp_stdio_test::stdout_is_only_jsonrpc`；AC-17=`agent_mcp_stdio_test::oversized_line_is_32600`；AC-18=`agent_mcp_stdio_test::server_survives_oversized_line`；AC-19=`agent_mcp_stdio_test::eof_exits_zero`；AC-20=`agent_mcp_stdio_test::outside_repository_fails`；AC-21=`agent_mcp_stdio_test::outside_repository_exits_without_eof`；AC-22=`agent_mcp_stdio_test::missing_transport_is_usage_error`；AC-23=`agent_mcp_conformance_test::every_tool_schema_includes_error_shape`；AC-24=`agent_mcp_conformance_test::every_tool_success_example_is_success`；AC-25=`agent_mcp_conformance_test::every_tool_success_matches_success_branch`；AC-26=`agent_mcp_conformance_test::every_tool_error_example_is_error`；AC-27=`agent_mcp_conformance_test::every_tool_error_matches_error_schema`；AC-28=`agent_mcp_conformance_test::tools_list_matches_2025_11_25_schema`；AC-29=`agent_mcp_conformance_test::tools_list_matches_2025_06_18_schema`。
 
@@ -585,10 +587,10 @@ ER-01 至 ER-14 按模板原文对本计划全部任务生效（见 [`plan-templ
 - [x] `docs/commands/zh-CN/agent.md`：`rg -qF -- 'agent mcp --stdio' docs/commands/zh-CN/agent.md && rg -qF -- '2025-11-25' docs/commands/zh-CN/agent.md && rg -qF -- '2025-06-18' docs/commands/zh-CN/agent.md && rg -qF -- 'LBR-AGENT-027' docs/commands/zh-CN/agent.md && rg -qF -- '"cwd"' docs/commands/zh-CN/agent.md`
 - [x] `docs/development/commands/agent.md`：`rg -qF -- 'mcp_server' docs/development/commands/agent.md && rg -qF -- 'BridgeRequest' docs/development/commands/agent.md`
 - [x] `COMPATIBILITY.md`：`sed -n '252p' COMPATIBILITY.md | rg -qF -- 'agent mcp --stdio'`；行数不变：`test "$(libra diff --numstat -- COMPATIBILITY.md | cut -f1-2)" = "$(printf '1\t1')"`（提交前执行）
-- [ ] 网站源文件 `agent`：`rg -qF -- 'agent mcp --stdio' ../libra-backend/apps/tanstack-app/content/docs/commands/agent.en.md && rg -qF -- '2025-11-25' ../libra-backend/apps/tanstack-app/content/docs/commands/agent.en.md && rg -qF -- '2025-06-18' ../libra-backend/apps/tanstack-app/content/docs/commands/agent.en.md && rg -qF -- 'LBR-AGENT-027' ../libra-backend/apps/tanstack-app/content/docs/commands/agent.en.md && rg -qF -- '"cwd"' ../libra-backend/apps/tanstack-app/content/docs/commands/agent.en.md`；GC-MC-05 ①–⑤ 交付后线上页面：`PAGE="$(curl -fsS https://libra.tools/en/docs/commands/agent)" && printf '%s' "$PAGE" | rg -qF -- 'agent mcp --stdio' && printf '%s' "$PAGE" | rg -qF -- '2025-11-25' && printf '%s' "$PAGE" | rg -qF -- '2025-06-18' && printf '%s' "$PAGE" | rg -qF -- 'LBR-AGENT-027' && printf '%s' "$PAGE" | rg -qF -- '"cwd"'`（GC-MC-05 ⑥）
+- [x] 网站源文件 `agent`：`rg -qF -- 'agent mcp --stdio' ../libra-backend/apps/tanstack-app/content/docs/commands/agent.en.md && rg -qF -- '2025-11-25' ../libra-backend/apps/tanstack-app/content/docs/commands/agent.en.md && rg -qF -- '2025-06-18' ../libra-backend/apps/tanstack-app/content/docs/commands/agent.en.md && rg -qF -- 'LBR-AGENT-027' ../libra-backend/apps/tanstack-app/content/docs/commands/agent.en.md && rg -qF -- '"cwd"' ../libra-backend/apps/tanstack-app/content/docs/commands/agent.en.md`；GC-MC-05 ①–⑤ 交付后线上页面：`PAGE="$(curl -fsS https://libra.tools/en/docs/commands/agent)" && printf '%s' "$PAGE" | rg -qF -- 'agent mcp --stdio' && printf '%s' "$PAGE" | rg -qF -- '2025-11-25' && printf '%s' "$PAGE" | rg -qF -- '2025-06-18' && printf '%s' "$PAGE" | rg -qF -- 'LBR-AGENT-027' && printf '%s' "$PAGE" | rg -qF -- '"cwd"'`（GC-MC-05 ⑥）
 - [x] 测试索引：`rg -q '^\| `agent_mcp_stdio_test` ' tests/INDEX.md && rg -q 'name = "agent_mcp_stdio_test"' Cargo.toml`
 - [x] 测试索引：`rg -q '^\| `agent_mcp_conformance_test` ' tests/INDEX.md && rg -q 'name = "agent_mcp_conformance_test"' Cargo.toml`
-- [ ] 语义复核：本卡 ER-05 Codex review 的输入包含上列每个文档文件的 diff，评审结论须逐文件确认其内容与本卡 `Docs and compatibility impact` 的内容说明一致（网站页另由 GC-MC-05 ④ 的 Claude Code PASS 覆盖）
+- [x] 语义复核：本卡 ER-05 Codex review 的输入包含上列每个文档文件的 diff，评审结论须逐文件确认其内容与本卡 `Docs and compatibility impact` 的内容说明一致（网站页另由 GC-MC-05 ④ 的 Claude Code PASS 覆盖）
 
 **Full-suite trigger:** `T-1: 新增 agent 子命令注册与 help EXAMPLES 合同，并在 Cargo.toml 新增 [[test]] 行`
 
@@ -2686,7 +2688,7 @@ ER-01 至 ER-14 按模板原文对本计划全部任务生效（见 [`plan-templ
 
 **Task type:** `implementation`
 
-**Lifecycle / Acceptance:** `pending` / 空
+**Lifecycle / Acceptance:** `in-progress` / 空
 
 **Description:** 自 MC-01 拆出。每个请求发出一个 `agent.mcp.request` tracing span，字段只取服务端可控或已净化的值：`method`（仅当属于已知方法集合时记原名，否则记 `"unknown"`）、`id_hash`（JSON-RPC `id` 规范化后 SHA-256 的前 16 位十六进制，不记原值）、`repository_id`；`tools/call` 另带 `tool`（仅当属于已注册工具名时记原名，否则 `"unknown"`）；不记 `clientInfo`、`params` 与结果内容。唯一行为轴：「MCP 请求 tracing」。
 
@@ -2698,34 +2700,35 @@ ER-01 至 ER-14 按模板原文对本计划全部任务生效（见 [`plan-templ
 |---|---|
 | bridge 请求 span 的结构先例——注意它直接记录原始 `method` 与 `id`，本卡**不得**照搬，必须按本卡规则净化 | `src/command/agent/bridge.rs:61-72`；`tests/agent_bridge_span_test.rs:1-40`（全局订阅者捕获方式可复用） |
 | 协议核心（MC-01 交付） | `src/internal/ai/mcp_server/stdio.rs` |
+| 版本面 | `0.30.69`。八个 `agent_mcp_span_test` `--exact` 均通过（`cargo test --test agent_mcp_span_test`：8 passed）。`cargo clippy --all-targets --all-features -- -D warnings` exit 0。`cargo nextest run --all --no-fail-fast --retries 2`：`Summary [ 605.838s] 10644 tests run: 10644 passed (12 slow, 1 flaky), 21 skipped`，exit 0。 |
 
 **Acceptance criteria:**
 
-- [ ] AC-1 一次 `ping` 请求产生的名为 `agent.mcp.request` 的 span 数量为 1。
-- [ ] AC-2 该 span 的 `method` 字段等于 `"ping"`。
-- [ ] AC-3 以含标记字符串的未知方法名发出请求时，span 的 `method` 字段等于 `"unknown"`。
-- [ ] AC-4 以含标记字符串的 `id` 发出请求时，该标记不出现在 span 的任何字段中。
-- [ ] AC-5 握手时 `clientInfo.name` 中的标记字符串不出现在任何 span 字段中。
-- [ ] AC-6 请求 `params` 中的标记字符串不出现在该 span 的任何字段中。
-- [ ] AC-7 `tools/call libra_test_echo` 的 span 的 `tool` 字段等于 `"libra_test_echo"`。
-- [ ] AC-8 `tools/call` 以含标记字符串的未注册工具名调用时，span 的 `tool` 字段等于 `"unknown"`。
+- [x] AC-1 一次 `ping` 请求产生的名为 `agent.mcp.request` 的 span 数量为 1。
+- [x] AC-2 该 span 的 `method` 字段等于 `"ping"`。
+- [x] AC-3 以含标记字符串的未知方法名发出请求时，span 的 `method` 字段等于 `"unknown"`。
+- [x] AC-4 以含标记字符串的 `id` 发出请求时，该标记不出现在 span 的任何字段中。
+- [x] AC-5 握手时 `clientInfo.name` 中的标记字符串不出现在任何 span 字段中。
+- [x] AC-6 请求 `params` 中的标记字符串不出现在该 span 的任何字段中。
+- [x] AC-7 `tools/call libra_test_echo` 的 span 的 `tool` 字段等于 `"libra_test_echo"`。
+- [x] AC-8 `tools/call` 以含标记字符串的未注册工具名调用时，span 的 `tool` 字段等于 `"unknown"`。
 - [ ] ER-06/ER-06a 同卡强制门：下方「同卡文档门」逐文件全部通过；网站页另按 GC-MC-05 ①–⑥ 交付（不计入 AC 上限）。
 
 **Verification:**（本卡特有判据，计入 G-03；`--exact` 门按 GC-MC-07 执行）
 
-- [ ] AC-1：`source .env.test && cargo test --test agent_mcp_span_test one_request_span_per_request -- --exact`（new）
-- [ ] AC-2：`source .env.test && cargo test --test agent_mcp_span_test request_span_method_field -- --exact`（new）
-- [ ] AC-3：`source .env.test && cargo test --test agent_mcp_span_test unknown_method_is_not_recorded -- --exact`（new）
-- [ ] AC-4：`source .env.test && cargo test --test agent_mcp_span_test request_id_is_not_recorded -- --exact`（new）
-- [ ] AC-5：`source .env.test && cargo test --test agent_mcp_span_test client_info_is_not_recorded -- --exact`（new）
-- [ ] AC-6：`source .env.test && cargo test --test agent_mcp_span_test request_span_excludes_params -- --exact`（new）
-- [ ] AC-7：`source .env.test && cargo test --test agent_mcp_span_test tools_call_span_has_tool_name -- --exact`（new）
-- [ ] AC-8：`source .env.test && cargo test --test agent_mcp_span_test unknown_tool_name_is_not_recorded -- --exact`（new）
+- [x] AC-1：`source .env.test && cargo test --test agent_mcp_span_test one_request_span_per_request -- --exact`（new）
+- [x] AC-2：`source .env.test && cargo test --test agent_mcp_span_test request_span_method_field -- --exact`（new）
+- [x] AC-3：`source .env.test && cargo test --test agent_mcp_span_test unknown_method_is_not_recorded -- --exact`（new）
+- [x] AC-4：`source .env.test && cargo test --test agent_mcp_span_test request_id_is_not_recorded -- --exact`（new）
+- [x] AC-5：`source .env.test && cargo test --test agent_mcp_span_test client_info_is_not_recorded -- --exact`（new）
+- [x] AC-6：`source .env.test && cargo test --test agent_mcp_span_test request_span_excludes_params -- --exact`（new）
+- [x] AC-7：`source .env.test && cargo test --test agent_mcp_span_test tools_call_span_has_tool_name -- --exact`（new）
+- [x] AC-8：`source .env.test && cargo test --test agent_mcp_span_test unknown_tool_name_is_not_recorded -- --exact`（new）
 
 **同卡文档门（ER-06/ER-06a，全局强制，不计入 G-03；判定命令退出码 0 为通过）:**
 
-- [ ] `docs/development/commands/agent.md`：`rg -qF -- 'agent.mcp.request' docs/development/commands/agent.md && rg -qF -- 'id_hash' docs/development/commands/agent.md`
-- [ ] 测试索引：`rg -q '^\| `agent_mcp_span_test` ' tests/INDEX.md && rg -q 'name = "agent_mcp_span_test"' Cargo.toml`
+- [x] `docs/development/commands/agent.md`：`rg -qF -- 'agent.mcp.request' docs/development/commands/agent.md && rg -qF -- 'id_hash' docs/development/commands/agent.md`
+- [x] 测试索引：`rg -q '^\| `agent_mcp_span_test` ' tests/INDEX.md && rg -q 'name = "agent_mcp_span_test"' Cargo.toml`
 - [ ] 语义复核：本卡 ER-05 Codex review 的输入包含上列每个文档文件的 diff，评审结论须逐文件确认其内容与本卡 `Docs and compatibility impact` 的内容说明一致（网站页另由 GC-MC-05 ④ 的 Claude Code PASS 覆盖）
 
 **Full-suite trigger:** `T-1: Cargo.toml 新增 [[test]] 行`

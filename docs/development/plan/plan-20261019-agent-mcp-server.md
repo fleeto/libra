@@ -2688,7 +2688,7 @@ ER-01 至 ER-14 按模板原文对本计划全部任务生效（见 [`plan-templ
 
 **Task type:** `implementation`
 
-**Lifecycle / Acceptance:** `pending` / 空
+**Lifecycle / Acceptance:** `in-progress` / 空
 
 **Description:** 自 MC-01 拆出。每个请求发出一个 `agent.mcp.request` tracing span，字段只取服务端可控或已净化的值：`method`（仅当属于已知方法集合时记原名，否则记 `"unknown"`）、`id_hash`（JSON-RPC `id` 规范化后 SHA-256 的前 16 位十六进制，不记原值）、`repository_id`；`tools/call` 另带 `tool`（仅当属于已注册工具名时记原名，否则 `"unknown"`）；不记 `clientInfo`、`params` 与结果内容。唯一行为轴：「MCP 请求 tracing」。
 
@@ -2700,34 +2700,35 @@ ER-01 至 ER-14 按模板原文对本计划全部任务生效（见 [`plan-templ
 |---|---|
 | bridge 请求 span 的结构先例——注意它直接记录原始 `method` 与 `id`，本卡**不得**照搬，必须按本卡规则净化 | `src/command/agent/bridge.rs:61-72`；`tests/agent_bridge_span_test.rs:1-40`（全局订阅者捕获方式可复用） |
 | 协议核心（MC-01 交付） | `src/internal/ai/mcp_server/stdio.rs` |
+| 版本面 | `0.30.69`。八个 `agent_mcp_span_test` `--exact` 均通过（`cargo test --test agent_mcp_span_test`：8 passed）。`cargo clippy --all-targets --all-features -- -D warnings` exit 0。`cargo nextest run --all --no-fail-fast --retries 2`：`Summary [ 605.838s] 10644 tests run: 10644 passed (12 slow, 1 flaky), 21 skipped`，exit 0。 |
 
 **Acceptance criteria:**
 
-- [ ] AC-1 一次 `ping` 请求产生的名为 `agent.mcp.request` 的 span 数量为 1。
-- [ ] AC-2 该 span 的 `method` 字段等于 `"ping"`。
-- [ ] AC-3 以含标记字符串的未知方法名发出请求时，span 的 `method` 字段等于 `"unknown"`。
-- [ ] AC-4 以含标记字符串的 `id` 发出请求时，该标记不出现在 span 的任何字段中。
-- [ ] AC-5 握手时 `clientInfo.name` 中的标记字符串不出现在任何 span 字段中。
-- [ ] AC-6 请求 `params` 中的标记字符串不出现在该 span 的任何字段中。
-- [ ] AC-7 `tools/call libra_test_echo` 的 span 的 `tool` 字段等于 `"libra_test_echo"`。
-- [ ] AC-8 `tools/call` 以含标记字符串的未注册工具名调用时，span 的 `tool` 字段等于 `"unknown"`。
+- [x] AC-1 一次 `ping` 请求产生的名为 `agent.mcp.request` 的 span 数量为 1。
+- [x] AC-2 该 span 的 `method` 字段等于 `"ping"`。
+- [x] AC-3 以含标记字符串的未知方法名发出请求时，span 的 `method` 字段等于 `"unknown"`。
+- [x] AC-4 以含标记字符串的 `id` 发出请求时，该标记不出现在 span 的任何字段中。
+- [x] AC-5 握手时 `clientInfo.name` 中的标记字符串不出现在任何 span 字段中。
+- [x] AC-6 请求 `params` 中的标记字符串不出现在该 span 的任何字段中。
+- [x] AC-7 `tools/call libra_test_echo` 的 span 的 `tool` 字段等于 `"libra_test_echo"`。
+- [x] AC-8 `tools/call` 以含标记字符串的未注册工具名调用时，span 的 `tool` 字段等于 `"unknown"`。
 - [ ] ER-06/ER-06a 同卡强制门：下方「同卡文档门」逐文件全部通过；网站页另按 GC-MC-05 ①–⑥ 交付（不计入 AC 上限）。
 
 **Verification:**（本卡特有判据，计入 G-03；`--exact` 门按 GC-MC-07 执行）
 
-- [ ] AC-1：`source .env.test && cargo test --test agent_mcp_span_test one_request_span_per_request -- --exact`（new）
-- [ ] AC-2：`source .env.test && cargo test --test agent_mcp_span_test request_span_method_field -- --exact`（new）
-- [ ] AC-3：`source .env.test && cargo test --test agent_mcp_span_test unknown_method_is_not_recorded -- --exact`（new）
-- [ ] AC-4：`source .env.test && cargo test --test agent_mcp_span_test request_id_is_not_recorded -- --exact`（new）
-- [ ] AC-5：`source .env.test && cargo test --test agent_mcp_span_test client_info_is_not_recorded -- --exact`（new）
-- [ ] AC-6：`source .env.test && cargo test --test agent_mcp_span_test request_span_excludes_params -- --exact`（new）
-- [ ] AC-7：`source .env.test && cargo test --test agent_mcp_span_test tools_call_span_has_tool_name -- --exact`（new）
-- [ ] AC-8：`source .env.test && cargo test --test agent_mcp_span_test unknown_tool_name_is_not_recorded -- --exact`（new）
+- [x] AC-1：`source .env.test && cargo test --test agent_mcp_span_test one_request_span_per_request -- --exact`（new）
+- [x] AC-2：`source .env.test && cargo test --test agent_mcp_span_test request_span_method_field -- --exact`（new）
+- [x] AC-3：`source .env.test && cargo test --test agent_mcp_span_test unknown_method_is_not_recorded -- --exact`（new）
+- [x] AC-4：`source .env.test && cargo test --test agent_mcp_span_test request_id_is_not_recorded -- --exact`（new）
+- [x] AC-5：`source .env.test && cargo test --test agent_mcp_span_test client_info_is_not_recorded -- --exact`（new）
+- [x] AC-6：`source .env.test && cargo test --test agent_mcp_span_test request_span_excludes_params -- --exact`（new）
+- [x] AC-7：`source .env.test && cargo test --test agent_mcp_span_test tools_call_span_has_tool_name -- --exact`（new）
+- [x] AC-8：`source .env.test && cargo test --test agent_mcp_span_test unknown_tool_name_is_not_recorded -- --exact`（new）
 
 **同卡文档门（ER-06/ER-06a，全局强制，不计入 G-03；判定命令退出码 0 为通过）:**
 
-- [ ] `docs/development/commands/agent.md`：`rg -qF -- 'agent.mcp.request' docs/development/commands/agent.md && rg -qF -- 'id_hash' docs/development/commands/agent.md`
-- [ ] 测试索引：`rg -q '^\| `agent_mcp_span_test` ' tests/INDEX.md && rg -q 'name = "agent_mcp_span_test"' Cargo.toml`
+- [x] `docs/development/commands/agent.md`：`rg -qF -- 'agent.mcp.request' docs/development/commands/agent.md && rg -qF -- 'id_hash' docs/development/commands/agent.md`
+- [x] 测试索引：`rg -q '^\| `agent_mcp_span_test` ' tests/INDEX.md && rg -q 'name = "agent_mcp_span_test"' Cargo.toml`
 - [ ] 语义复核：本卡 ER-05 Codex review 的输入包含上列每个文档文件的 diff，评审结论须逐文件确认其内容与本卡 `Docs and compatibility impact` 的内容说明一致（网站页另由 GC-MC-05 ④ 的 Claude Code PASS 覆盖）
 
 **Full-suite trigger:** `T-1: Cargo.toml 新增 [[test]] 行`

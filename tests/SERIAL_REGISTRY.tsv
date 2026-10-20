@@ -950,4 +950,5 @@ writer_emits_all_six_e4_libra_entries	lane:cwd+env+hash_kind	fail-closed body (T
 every_tool_error_example_is_error	lane:env	sets LIBRA_TEST so the in-process MCP registry includes the debug echo tool while the error example runs
 every_tool_error_matches_error_schema	lane:env	sets LIBRA_TEST so the in-process MCP registry includes the debug echo tool while the error schema runs
 every_tool_success_example_is_success	lane:env	sets LIBRA_TEST so the in-process MCP registry includes the debug echo tool while the success example runs
+tools_call_span_has_tool_name	lane:env	sets LIBRA_TEST so the MCP request span can name the debug echo tool
 every_tool_success_matches_success_branch	lane:env	sets LIBRA_TEST so the in-process MCP registry includes the debug echo tool while the success schema runs

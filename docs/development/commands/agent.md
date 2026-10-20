@@ -247,6 +247,8 @@ same identity count by simulating coverage removal in a rolled-back transaction.
 
 Production tool calls are translated into an internal `BridgeRequest` built by the server. Client parameters enter only allowlisted `params` fields; the client does not choose repository scope. MC-01 registers no production tool. The debug-only `libra_test_echo` tool exists when `LIBRA_TEST=1` so the tool-error path and `outputSchema` fixture can be checked. Each tool's `outputSchema` is `{"type":"object","anyOf":[<success>, TOOL_ERROR_SCHEMA]}`.
 
+Each MCP request emits one `agent.mcp.request` span (MC-22). `method` is the original name only when it is in the server's known set, otherwise `unknown`. `id_hash` is the first 16 hex characters of SHA-256 over the canonical JSON encoding of the JSON-RPC id; the raw id is not recorded. `repository_id` is `libra.repoid`. A `tools/call` span also has `tool`, the registered tool name or `unknown`. `clientInfo`, `params`, and result content are not span fields. This is not the bridge span, which records the raw method and id.
+
 ## Bridge (plan-20260818 LB-01)
 
 `libra agent bridge --stdio` is the repository-scoped DeepSeek Harness ingress.

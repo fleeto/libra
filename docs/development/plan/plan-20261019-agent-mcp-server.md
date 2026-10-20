@@ -3225,7 +3225,7 @@ ER-01 至 ER-14 按模板原文对本计划全部任务生效（见 [`plan-templ
 
 **Task type:** `implementation`
 
-**Lifecycle / Acceptance:** `pending` / 空
+**Lifecycle / Acceptance:** `in-progress` / 空
 
 **Description:** 自 MC-19 拆出。新增读执行器 `mcp_server/exec.rs`：每次读工具调用由服务进程派生一个隐藏的读子进程 `libra agent mcp --read-worker`（`#[arg(hide = true)]`，不出现在 help；只从 stdin 读取一个由服务端构造的内部请求、向 stdout 写一个结果；在 `src/cli.rs` 中先于常规预检被分派到**只读预检**：只做仓库发现并以只读方式读取 `core.objectformat` 设置 hash kind（SHA-1/SHA-256 仓库都正确），不执行数据库迁移（schema 不是当前版本即以 `LBR-AGENT-037` 失败）、不修复对象索引、不启动自动升级检查或任何启动维护；以发起进程的工作目录启动，只读访问仓库），容量 4 的信号量限制同时存在的读子进程数。读 deadline 到期时服务立即回复 `LBR-AGENT-036`，并在 Unix 上向读子进程的进程组发送 `SIGKILL`、在 Windows 上 `TerminateProcess`，**回收（wait）完成后才归还槽位**（≤ 1 s）。因此任何读路径（status、diff 含 rename 检测、checkpoint、workspace、trace）的阻塞计算、I/O 与内存都随子进程一起被强制终止，超时的读工作不会继续占用槽位或资源。另注册仅在 `cfg(debug_assertions)` 且 `LIBRA_TEST=1` 时存在的 `libra_test_block`（在读子进程内阻塞并写 PID 文件）与 `libra_test_hash_kind`（在读子进程内返回当前 hash kind），以及 debug-only 读 deadline 覆盖 `LIBRA_MCP_TEST_READ_DEADLINE_MS`。唯一行为轴：「读工具子进程执行器」。
 
@@ -3237,37 +3237,38 @@ ER-01 至 ER-14 按模板原文对本计划全部任务生效（见 [`plan-templ
 |---|---|
 | bridge 的读超时先例 | `src/internal/ai/agent_bridge/protocol.rs:374`（`LBR-AGENT-036`） |
 | 读 deadline（MC-19 交付） | `src/internal/ai/mcp_server/tools/mod.rs` |
+| 本地门 | `0.30.73`。八个 `agent_mcp_exec_test` `--exact` 均为 `test result: ok. 1 passed; 0 failed`。clippy `-D warnings` exit 0。nextest：`Summary [ 567.818s] 10675 tests run: 10675 passed (12 slow), 21 skipped`，exit 0。 |
 
 **Acceptance criteria:**
 
-- [ ] AC-1 读 deadline 覆盖为 2 s 时，`libra_test_block` 调用在 5 s 内得到工具错误 `LBR-AGENT-036`。
-- [ ] AC-2 同一超时后 1 s 内，`libra_test_block` 的读子进程（PID 文件所列）已不存在。
-- [ ] AC-3 4 个并发 `libra_test_block` 全部超时后 2 s 内，第 5 个读工具调用 `libra_test_sleep {"ms": 10}` 成功（槽位已随子进程回收归还）。
-- [ ] AC-4 在 `libra init --object-format sha256` 的仓库中，`libra_test_hash_kind` 返回 `"sha256"`。
-- [ ] AC-5 仓库数据库 schema 版本低于本二进制要求（测试把版本记录回退一级模拟）时，读工具调用得到工具错误 `LBR-AGENT-037`。
-- [ ] AC-6 同一调用后数据库记录的 schema 版本不变（读子进程不执行迁移）。
-- [ ] AC-7 对象索引处于需修复状态的仓库中调用读工具后，对象索引文件的内容与修改时间不变（读子进程不修复）。
-- [ ] AC-8 读工具调用后 `LIBRA_HOME/upgrade/` 下没有新增或修改的文件（读子进程不启动自动升级检查）。
+- [x] AC-1 读 deadline 覆盖为 2 s 时，`libra_test_block` 调用在 5 s 内得到工具错误 `LBR-AGENT-036`。
+- [x] AC-2 同一超时后 1 s 内，`libra_test_block` 的读子进程（PID 文件所列）已不存在。
+- [x] AC-3 4 个并发 `libra_test_block` 全部超时后 2 s 内，第 5 个读工具调用 `libra_test_sleep {"ms": 10}` 成功（槽位已随子进程回收归还）。
+- [x] AC-4 在 `libra init --object-format sha256` 的仓库中，`libra_test_hash_kind` 返回 `"sha256"`。
+- [x] AC-5 仓库数据库 schema 版本低于本二进制要求（测试把版本记录回退一级模拟）时，读工具调用得到工具错误 `LBR-AGENT-037`。
+- [x] AC-6 同一调用后数据库记录的 schema 版本不变（读子进程不执行迁移）。
+- [x] AC-7 对象索引处于需修复状态的仓库中调用读工具后，对象索引文件的内容与修改时间不变（读子进程不修复）。
+- [x] AC-8 读工具调用后 `LIBRA_HOME/upgrade/` 下没有新增或修改的文件（读子进程不启动自动升级检查）。
 - [ ] ER-06/ER-06a 同卡强制门：下方「同卡文档门」逐文件全部通过；网站页另按 GC-MC-05 ①–⑥ 交付（不计入 AC 上限）。
 
 **Verification:**（本卡特有判据，计入 G-03；`--exact` 门按 GC-MC-07 执行）
 
-- [ ] AC-1：`source .env.test && cargo test --test agent_mcp_exec_test blocking_read_times_out -- --exact`（new）
-- [ ] AC-2：`source .env.test && cargo test --test agent_mcp_exec_test timed_out_worker_is_killed -- --exact`（new）
-- [ ] AC-3：`source .env.test && cargo test --test agent_mcp_exec_test slots_return_after_workers_killed -- --exact`（new）
-- [ ] AC-4：`source .env.test && cargo test --test agent_mcp_exec_test read_worker_uses_repo_hash_kind -- --exact`（new）
-- [ ] AC-5：`source .env.test && cargo test --test agent_mcp_exec_test read_worker_refuses_outdated_schema -- --exact`（new）
-- [ ] AC-6：`source .env.test && cargo test --test agent_mcp_exec_test read_worker_does_not_migrate -- --exact`（new）
-- [ ] AC-7：`source .env.test && cargo test --test agent_mcp_exec_test read_worker_does_not_repair_object_index -- --exact`（new）
-- [ ] AC-8：`source .env.test && cargo test --test agent_mcp_exec_test read_worker_skips_upgrade_check -- --exact`（new）
+- [x] AC-1：`source .env.test && cargo test --test agent_mcp_exec_test blocking_read_times_out -- --exact`（new）
+- [x] AC-2：`source .env.test && cargo test --test agent_mcp_exec_test timed_out_worker_is_killed -- --exact`（new）
+- [x] AC-3：`source .env.test && cargo test --test agent_mcp_exec_test slots_return_after_workers_killed -- --exact`（new）
+- [x] AC-4：`source .env.test && cargo test --test agent_mcp_exec_test read_worker_uses_repo_hash_kind -- --exact`（new）
+- [x] AC-5：`source .env.test && cargo test --test agent_mcp_exec_test read_worker_refuses_outdated_schema -- --exact`（new）
+- [x] AC-6：`source .env.test && cargo test --test agent_mcp_exec_test read_worker_does_not_migrate -- --exact`（new）
+- [x] AC-7：`source .env.test && cargo test --test agent_mcp_exec_test read_worker_does_not_repair_object_index -- --exact`（new）
+- [x] AC-8：`source .env.test && cargo test --test agent_mcp_exec_test read_worker_skips_upgrade_check -- --exact`（new）
 
 **同卡文档门（ER-06/ER-06a，全局强制，不计入 G-03；判定命令退出码 0 为通过）:**
 
-- [ ] `docs/commands/agent.md`：`rg -qF -- 'LBR-AGENT-036' docs/commands/agent.md && rg -qF -- '4 个并发读子进程' docs/commands/agent.md`
-- [ ] `docs/commands/zh-CN/agent.md`：`rg -qF -- 'LBR-AGENT-036' docs/commands/zh-CN/agent.md && rg -qF -- '4 个并发读子进程' docs/commands/zh-CN/agent.md`
-- [ ] `docs/development/commands/agent.md`：`rg -qF -- '--read-worker' docs/development/commands/agent.md && rg -qF -- 'SIGKILL' docs/development/commands/agent.md`
+- [x] `docs/commands/agent.md`：`rg -qF -- 'LBR-AGENT-036' docs/commands/agent.md && rg -qF -- '4 个并发读子进程' docs/commands/agent.md`
+- [x] `docs/commands/zh-CN/agent.md`：`rg -qF -- 'LBR-AGENT-036' docs/commands/zh-CN/agent.md && rg -qF -- '4 个并发读子进程' docs/commands/zh-CN/agent.md`
+- [x] `docs/development/commands/agent.md`：`rg -qF -- '--read-worker' docs/development/commands/agent.md && rg -qF -- 'SIGKILL' docs/development/commands/agent.md`
 - [ ] 网站源文件 `agent`：`rg -qF -- 'LBR-AGENT-036' ../libra-backend/apps/tanstack-app/content/docs/commands/agent.en.md && rg -qF -- '4 concurrent read workers' ../libra-backend/apps/tanstack-app/content/docs/commands/agent.en.md`；GC-MC-05 ①–⑤ 交付后线上页面：`PAGE="$(curl -fsS https://libra.tools/en/docs/commands/agent)" && printf '%s' "$PAGE" | rg -qF -- 'LBR-AGENT-036' && printf '%s' "$PAGE" | rg -qF -- '4 concurrent read workers'`（GC-MC-05 ⑥）
-- [ ] 测试索引：`rg -q '^\| `agent_mcp_exec_test` ' tests/INDEX.md && rg -q 'name = "agent_mcp_exec_test"' Cargo.toml`
+- [x] 测试索引：`rg -q '^\| `agent_mcp_exec_test` ' tests/INDEX.md && rg -q 'name = "agent_mcp_exec_test"' Cargo.toml`
 - [ ] 语义复核：本卡 ER-05 Codex review 的输入包含上列每个文档文件的 diff，评审结论须逐文件确认其内容与本卡 `Docs and compatibility impact` 的内容说明一致（网站页另由 GC-MC-05 ④ 的 Claude Code PASS 覆盖）
 
 **Full-suite trigger:** `T-1: src/cli.rs 全局预检分派与 Cargo.toml [[test]] 行`

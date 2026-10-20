@@ -338,6 +338,11 @@ pub const CODE_AGENT_PROCESS_CACHES: &[ProcessCacheSurface] = &[
         discipline: "process-lifetime reaper thread handle; holds no repository state",
     },
     ProcessCacheSurface {
+        source_path: "src/internal/ai/mcp_server/exec.rs",
+        static_name: "SLOTS",
+        discipline: "process-local count of free MCP read-worker slots; holds no repository state",
+    },
+    ProcessCacheSurface {
         source_path: "src/internal/ai/authorized_read.rs",
         static_name: "RUNNING_LIBRA_PROGRAM",
         discipline: "process-lifetime executable path registered only by Libra's main entrypoint; \

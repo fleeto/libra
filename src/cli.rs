@@ -1759,6 +1759,18 @@ fn command_preflight(command: &Commands, structured_output: bool) -> CliResult<C
         // shared `LBR-REPO-001` / `LBR-REPO-003` contract (including the
         // `libra init`, Git-conversion and worktree remedies) of every other
         // repository command.
+        // MCP read tools observe the repository without upgrading it. The
+        // read worker reports an outdated schema as LBR-AGENT-037.
+        Commands::Agent(command::agent::AgentArgs {
+            command: command::agent::AgentSubcommand::Mcp(_),
+            ..
+        }) => {
+            let storage = utils::util::try_get_storage_path(None)
+                .map_err(|error| repo_resolution_error(error, None))?;
+            Ok(CommandPreflight::repo_hash_kind_without_schema_guard(
+                storage,
+            ))
+        }
         Commands::Agent(command::agent::AgentArgs {
             command: command::agent::AgentSubcommand::Doctor(_),
             ..
@@ -3194,6 +3206,12 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
             ));
         }
         return command::agent::run_capture_recovery_worker().await;
+    }
+    // MCP read worker (MC-29): before clap, schema migration, object-index
+    // repair, and the auto-upgrade check. It only reads one server-built
+    // request and writes one result.
+    if crate::internal::ai::mcp_server::exec::is_read_worker_argv(&argv) {
+        return crate::internal::ai::mcp_server::exec::run_read_worker().await;
     }
     let _invocation_guard = CLI_INVOCATION_LOCK.lock().await;
     // Keep the large dispatcher out of the generic task-local wrapper's state

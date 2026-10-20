@@ -1,6 +1,6 @@
 [package]
 name = "libra"
-version = "0.30.66"
+version = "0.31.0"
 edition = "2024"
 license = "MIT"
 description = "AI agent-native version control system with Git on-disk compatibility, SQLite-backed metadata, and tiered cloud storage"
@@ -38,7 +38,6 @@ clap = { version = "4.6.1", features = ["derive"] }
 clap_complete = "4.6.6"
 colored = "3.1.1"
 fastrand = "2.3.0"
-fs_extra = "1.3.0"
 flate2 = "1.1.9"  # add features = ["zlib"] if slow
 tar = "0.4"
 zip = "0.6"
@@ -147,6 +146,7 @@ keyring = { version = "3", optional = true, default-features = false, features =
 libfuse-fs = "0.1.13"
 pager = "0.16.1"
 libc = "0.2"
+errno = "0.3"
 rfuse3 = { version = "0.0.8", features = ["tokio-runtime", "unprivileged"] }
 
 [target.'cfg(target_os = "linux")'.dependencies] # Linux-only seccomp BPF compiler

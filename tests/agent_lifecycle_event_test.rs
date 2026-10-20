@@ -840,7 +840,16 @@ fn sibling_linked_worktree_is_rejected_without_capture_side_effects() {
         .expect("repo has temporary parent")
         .join("sibling-worktree");
     let sibling_arg = sibling.to_string_lossy().into_owned();
-    let added = repo.run(&["worktree", "add", &sibling_arg], None);
+    let added = repo.run(
+        &[
+            "worktree",
+            "add",
+            "sibling-worktree",
+            "--path",
+            &sibling_arg,
+        ],
+        None,
+    );
     assert!(
         added.status.success(),
         "create sibling linked worktree: {}",
@@ -1719,7 +1728,10 @@ fn codex_terminal_broken_active_commondir_is_nonzero() {
         .expect("repo has temporary parent")
         .join("broken-active-commondir-worktree");
     let linked_arg = linked.to_string_lossy().into_owned();
-    let added = repo.run(&["worktree", "add", &linked_arg], None);
+    let added = repo.run(
+        &["worktree", "add", "linked-worktree", "--path", &linked_arg],
+        None,
+    );
     assert!(
         added.status.success(),
         "create linked active-worktree fixture: {}",
@@ -1872,7 +1884,10 @@ fn fail_closed_hooks_keep_repository_state_contract_for_broken_linked_worktree()
         .expect("repo has temporary parent")
         .join("broken-commondir-fail-closed-worktree");
     let linked_arg = linked.to_string_lossy().into_owned();
-    let added = repo.run(&["worktree", "add", &linked_arg], None);
+    let added = repo.run(
+        &["worktree", "add", "linked-worktree", "--path", &linked_arg],
+        None,
+    );
     assert!(
         added.status.success(),
         "create linked worktree fixture: {}",
@@ -1897,7 +1912,8 @@ fn fail_closed_hooks_keep_repository_state_contract_for_broken_linked_worktree()
     let paths = path_spellings(&[&linked, &repo.repo, &repo.home, root]);
     let mut forbidden: Vec<&str> = paths.iter().map(String::as_str).collect();
     forbidden.extend([marker, "missing-fail-closed-storage", "commondir pointer"]);
-    let remedy = "from the main worktree run `libra worktree repair --confirm <worktree-path>`";
+    let remedy =
+        "from the main worktree run `libra worktree repair --confirm --path <worktree-path>`";
     for (args, context) in FAIL_CLOSED_DAMAGED_REPOSITORY_SURFACES {
         let payload = repo.envelope_at(
             &linked,
@@ -2145,32 +2161,31 @@ fn latest_repository_schema_version() -> i64 {
         .expect("at least one built-in migration")
 }
 
-/// Physical schema of a freshly initialized (current) repository and of the
-/// same repository after its newest migration was rolled back.
+/// Physical schema of a freshly initialized repository and of the same
+/// disposable repository after its latest reversible migration was rolled back.
 struct StaleSchemaFixture {
     current: Vec<String>,
     stale: Vec<String>,
 }
 
-/// A freshly initialized repository whose newest built-in migration has been
-/// rolled back — effect and ledger receipt — exactly as a repository last
-/// migrated by the previous Libra release looks.
+/// A disposable repository with the forward-only layout capability receipt
+/// removed, then the latest reversible migration rolled back. This models an
+/// older repository without asking the production rollback API to undo the
+/// capability gate.
 async fn stale_hook_repo() -> (HookRepo, StaleSchemaFixture) {
     let repo = HookRepo::init();
     let migrations = builtin_migrations();
     let newest = migrations.last().expect("at least one built-in migration");
     assert!(
-        newest.down.is_some(),
-        "the stale-schema fixture rolls back the newest built-in migration ({}); \
-         give it a down migration or roll back to an older reversible tip",
-        newest.name
+        newest.down.is_none() && newest.name == "worktree_layout_capability",
+        "the disposable fixture must explicitly model the forward-only layout capability"
     );
     let previous = migrations
         .iter()
         .rev()
-        .nth(1)
+        .nth(2)
         .map(|migration| migration.version)
-        .expect("a previous built-in migration");
+        .expect("an older reversible migration");
     let conn = repo.db().await;
     assert_eq!(
         max_repository_schema_receipt(&conn).await,
@@ -2178,15 +2193,27 @@ async fn stale_hook_repo() -> (HookRepo, StaleSchemaFixture) {
         "fixture precondition: init writes the current schema"
     );
     let current = physical_repository_schema(&conn).await;
+    // This fixture is disposable. The capability table and v2/v3 rows already
+    // existed before this release; remove only the new v4 marker and receipt,
+    // then roll back the older reversible schema migration.
+    conn.execute_unprepared("DELETE FROM worktree_registry_capability WHERE version = 4")
+        .await
+        .expect("remove disposable layout capability marker");
+    conn.execute_unprepared(&format!(
+        "DELETE FROM schema_versions WHERE version = {}",
+        newest.version
+    ))
+    .await
+    .expect("remove disposable layout capability receipt");
     builtin_runner()
         .expect("built-in migration registry")
         .rollback_to(&conn, previous)
         .await
-        .expect("roll the newest built-in migration back");
+        .expect("roll the latest reversible migration back");
     assert_eq!(
         max_repository_schema_receipt(&conn).await,
         Some(previous),
-        "fixture precondition: the newest receipt is gone"
+        "fixture precondition: the two newest receipts are gone"
     );
     let stale = physical_repository_schema(&conn).await;
     assert_ne!(

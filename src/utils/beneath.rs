@@ -65,6 +65,13 @@ pub fn open_root(root: &Path) -> io::Result<fs::File> {
         std::env::current_dir()?.join(root)
     };
     let abs = lexical_normalize(&abs);
+    // A cached descriptor into a live FUSE workspace pins the mount, making
+    // `worktree remove` fail with EBUSY even after callers drop their handles.
+    // Keep these roots transient; the common metadata root is still cached.
+    #[cfg(unix)]
+    if inside_managed_fuse_workspace(&abs) {
+        return open_root_uncached(&abs);
+    }
     CACHED_ROOT.with(|slot| {
         let mut slot = slot.borrow_mut();
         if let Some((cached, identity, file)) = slot.as_ref()
@@ -78,6 +85,28 @@ pub fn open_root(root: &Path) -> io::Result<fs::File> {
         let dup = dup_file(&opened)?;
         *slot = Some((abs, identity, opened));
         Ok(dup)
+    })
+}
+
+#[cfg(unix)]
+fn inside_managed_fuse_workspace(path: &Path) -> bool {
+    path.ancestors().any(|ancestor| {
+        ancestor.file_name().is_some_and(|name| name == "workspace")
+            && ancestor
+                .parent()
+                .and_then(Path::parent)
+                .is_some_and(|fuse| fuse.file_name().is_some_and(|name| name == "fuse"))
+            && ancestor
+                .parent()
+                .and_then(Path::parent)
+                .and_then(Path::parent)
+                .is_some_and(|worktree| worktree.file_name().is_some_and(|name| name == "worktree"))
+            && ancestor
+                .parent()
+                .and_then(Path::parent)
+                .and_then(Path::parent)
+                .and_then(Path::parent)
+                .is_some_and(|common| common.file_name().is_some_and(|name| name == ".libra"))
     })
 }
 
@@ -1765,6 +1794,20 @@ mod tests {
     use std::fs;
 
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_fuse_workspace_roots_do_not_enter_the_thread_cache() {
+        let workspace = Path::new("/repo/.libra/worktree/fuse/topic/workspace");
+        assert!(inside_managed_fuse_workspace(workspace));
+        assert!(inside_managed_fuse_workspace(&workspace.join("subdir")));
+        assert!(!inside_managed_fuse_workspace(Path::new(
+            "/repo/.libra/worktree/fuse/topic/upper"
+        )));
+        assert!(!inside_managed_fuse_workspace(Path::new(
+            "/repo/.libra/worktree/linked/topic"
+        )));
+    }
 
     #[cfg(unix)]
     #[test]

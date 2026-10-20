@@ -79,6 +79,11 @@ struct CleanReport {
     /// findings blobs are content-addressed, so one can share an oid with a
     /// blob history genuinely needs.
     findings_runs_pruned: u64,
+    /// Eligible aged runs kept because their own cleanup was refused.
+    findings_runs_skipped: u64,
+    /// First bounded set of per-run cleanup failures for operator retry.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    findings_gc_warnings: Vec<String>,
     /// plan-20260713 DR-04b (GC-DR-12): expired `agent_export_job` rows
     /// scavenged by TTL under `--gc`.
     export_jobs_pruned: u64,
@@ -237,6 +242,8 @@ pub async fn execute_safe(args: CleanArgs, output: &OutputConfig) -> CliResult<(
                 stderr_logs_pruned: 0,
                 stderr_runs_pruned: 0,
                 findings_runs_pruned: 0,
+                findings_runs_skipped: 0,
+                findings_gc_warnings: Vec::new(),
                 export_jobs_pruned: 0,
                 import_identities_pruned: 0,
                 dry_run: args.dry_run,
@@ -423,6 +430,8 @@ pub async fn execute_safe(args: CleanArgs, output: &OutputConfig) -> CliResult<(
             stderr_logs_pruned,
             stderr_runs_pruned,
             findings_runs_pruned,
+            findings_runs_skipped: findings_gc.runs_skipped,
+            findings_gc_warnings: findings_gc.warnings,
             export_jobs_pruned,
             import_identities_pruned,
             dry_run: args.dry_run,
@@ -499,6 +508,15 @@ fn emit_report(report: &CleanReport, output: &OutputConfig) -> CliResult<()> {
         "Findings runs pruned          : {}",
         report.findings_runs_pruned
     );
+    if report.findings_runs_skipped > 0 {
+        println!(
+            "Findings runs retained        : {} (cleanup refused)",
+            report.findings_runs_skipped
+        );
+        for warning in &report.findings_gc_warnings {
+            println!("  {warning}");
+        }
+    }
     if report.dry_run {
         println!("Mode                          : dry-run (nothing was deleted)");
     }
@@ -579,6 +597,8 @@ fn read_run_retention_meta(run_dir: &Path) -> Option<RunRetentionMeta> {
     #[derive(Deserialize)]
     struct ManifestMeta {
         #[serde(default)]
+        schema_version: Option<u32>,
+        #[serde(default)]
         kind: Option<String>,
         /// Exactly one of the five snake_case terminal states while terminal,
         /// `null` while running. Typed as `String` on purpose: a non-string
@@ -595,6 +615,9 @@ fn read_run_retention_meta(run_dir: &Path) -> Option<RunRetentionMeta> {
     }
     let bytes = fs::read(run_dir.join("manifest.json")).ok()?;
     let meta: ManifestMeta = serde_json::from_slice(&bytes).ok()?;
+    if !matches!(meta.schema_version, None | Some(1 | 2)) {
+        return None;
+    }
     // Only the review/investigate run manifests own reviewer stderr logs; any
     // other/absent `kind` is out of scope for this GC and is skipped. And
     // `terminal_state` must be one of that kind's REAL terminal states — a
@@ -619,6 +642,96 @@ fn read_run_retention_meta(run_dir: &Path) -> Option<RunRetentionMeta> {
         updated_at,
         findings_oid: meta.findings_oid,
     })
+}
+
+/// Retention must not discard the only ownership proof for an external task
+/// workspace. Legacy runs without intents retain their existing cleanup path.
+fn cleanup_retained_task_workspaces(
+    sessions_root: &Path,
+    run_dir: &Path,
+    run_id: &str,
+) -> CliResult<()> {
+    use crate::internal::ai::workspace_isolation::{
+        cleanup_task_workspaces, has_task_workspace_intents,
+    };
+
+    let context = |error: std::io::Error| {
+        CliError::fatal(format!(
+            "cannot clean task workspaces for run '{run_id}': {error}; run metadata at {} was retained for retry",
+            run_dir.display()
+        ))
+    };
+    let mut recorded_paths = Vec::new();
+    for file in ["state.json", "manifest.json"] {
+        let value = match fs::read(run_dir.join(file)) {
+            Ok(bytes) => Some(serde_json::from_slice::<serde_json::Value>(&bytes).map_err(
+                |error| {
+                    context(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("cannot parse {file} to verify workspace ownership: {error}"),
+                    ))
+                },
+            )?),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(context(error)),
+        };
+        let Some(value) = value else { continue };
+        if let Some(version) = value.get("schema_version")
+            && !matches!(version.as_u64(), Some(1 | 2))
+        {
+            return Err(context(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("unsupported task {file} schema_version {version}"),
+            )));
+        }
+        let path = value
+            .get("workspace_descriptor")
+            .and_then(|descriptor| descriptor.get("canonical_path"))
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| {
+                value
+                    .get("workspace_root")
+                    .and_then(serde_json::Value::as_str)
+            });
+        if let Some(path) = path {
+            recorded_paths.push(path.to_owned());
+        }
+    }
+    if has_task_workspace_intents(run_dir).map_err(context)? {
+        let run_uuid = uuid::Uuid::parse_str(run_id).map_err(|error| {
+            context(std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+        })?;
+        let common = sessions_root.parent().ok_or_else(|| {
+            context(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "sessions root has no common storage parent",
+            ))
+        })?;
+        cleanup_task_workspaces(common, run_dir, run_uuid).map_err(context)?;
+    }
+    // A surviving recorded workspace without a lifecycle intent is not safe
+    // to delete or forget. This also preserves pre-layout orphan diagnostics.
+    for path in recorded_paths {
+        // Pre-layout checkpoint input was a child of the run metadata. The
+        // caller removes that directory itself, without following links.
+        // This exact legacy leaf needs no external ownership intent.
+        if Path::new(&path) == run_dir.join("checkpoint-input") {
+            continue;
+        }
+        match fs::symlink_metadata(&path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(context(error)),
+            Ok(_) => {
+                return Err(context(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    format!(
+                        "recorded workspace '{path}' still exists without completed owned cleanup"
+                    ),
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Delete every `*.stderr.redacted.log` regular file directly under
@@ -784,6 +897,8 @@ async fn gc_expired_findings_runs(
     };
 
     let mut runs_pruned = 0u64;
+    let mut runs_skipped = 0u64;
+    let mut warnings = Vec::new();
     for entry in entries {
         let Ok(entry) = entry else { continue };
         let Ok(file_type) = entry.file_type() else {
@@ -843,18 +958,17 @@ async fn gc_expired_findings_runs(
             if !abandoned {
                 continue;
             }
-            runs_pruned += 1;
             if dry_run {
+                runs_pruned += 1;
                 continue;
             }
-            match fs::remove_dir_all(&run_dir) {
-                Ok(()) => {}
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-                Err(err) => {
-                    return Err(CliError::fatal(format!(
-                        "failed to remove abandoned run dir {}: {err}",
-                        run_dir.display()
-                    )));
+            match retire_findings_run(sessions_root, &run_dir, &run_id) {
+                Ok(()) => runs_pruned += 1,
+                Err(error) => {
+                    runs_skipped += 1;
+                    if warnings.len() < 32 {
+                        warnings.push(format!("run '{run_id}' retained: {error}"));
+                    }
                 }
             }
             continue;
@@ -869,21 +983,22 @@ async fn gc_expired_findings_runs(
             continue; // within the retention window
         }
 
-        runs_pruned += 1;
-        if let Some(oid) = meta.findings_oid.clone() {
-            pruned_oids.insert(oid);
-        }
         if dry_run {
+            runs_pruned += 1;
             continue; // preview: count without removing
         }
-        match fs::remove_dir_all(&run_dir) {
-            Ok(()) => {}
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-            Err(err) => {
-                return Err(CliError::fatal(format!(
-                    "failed to remove expired run dir {}: {err}",
-                    run_dir.display()
-                )));
+        match retire_findings_run(sessions_root, &run_dir, &run_id) {
+            Ok(()) => {
+                runs_pruned += 1;
+                if let Some(oid) = meta.findings_oid {
+                    pruned_oids.insert(oid);
+                }
+            }
+            Err(error) => {
+                runs_skipped += 1;
+                if warnings.len() < 32 {
+                    warnings.push(format!("run '{run_id}' retained: {error}"));
+                }
             }
         }
     }
@@ -896,14 +1011,30 @@ async fn gc_expired_findings_runs(
     Ok(FindingsGcOutcome {
         runs_pruned,
         objects_pruned,
+        runs_skipped,
+        warnings,
     })
 }
 
+fn retire_findings_run(sessions_root: &Path, run_dir: &Path, run_id: &str) -> CliResult<()> {
+    cleanup_retained_task_workspaces(sessions_root, run_dir, run_id)?;
+    match fs::remove_dir_all(run_dir) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(CliError::fatal(format!(
+            "failed to remove expired run dir {}: {error}",
+            run_dir.display()
+        ))),
+    }
+}
+
 /// What one findings GC pass reclaimed.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 struct FindingsGcOutcome {
     runs_pruned: u64,
     objects_pruned: u64,
+    runs_skipped: u64,
+    warnings: Vec<String>,
 }
 
 /// Reclaim the findings blobs the pruned runs owned (A0-09 / PD-04).
@@ -1029,6 +1160,188 @@ mod stderr_gc_tests {
             .join(run_id)
             .join("reviewers/a.stderr.redacted.log")
             .exists()
+    }
+
+    #[test]
+    fn retention_accepts_known_manifest_versions_and_preserves_future_state() {
+        let tmp = tempdir().unwrap();
+        let sessions = tmp.path().join("sessions");
+        write_run(&sessions, "known", true, "2000-01-01T00:00:00Z");
+        let run = sessions.join("agent-runs/known");
+        for version in [1, 2, 3] {
+            let mut manifest: serde_json::Value =
+                serde_json::from_slice(&fs::read(run.join("manifest.json")).unwrap()).unwrap();
+            manifest["schema_version"] = version.into();
+            fs::write(
+                run.join("manifest.json"),
+                serde_json::to_vec(&manifest).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(read_run_retention_meta(&run).is_some(), version <= 2);
+        }
+        let before = fs::read(run.join("manifest.json")).unwrap();
+        assert!(cleanup_retained_task_workspaces(&sessions, &run, "known").is_err());
+        assert_eq!(fs::read(run.join("manifest.json")).unwrap(), before);
+        assert!(stderr_exists(&sessions, "known"));
+    }
+
+    #[test]
+    fn retention_cleans_owned_workspace_before_forgetting_its_metadata() {
+        use crate::internal::ai::workspace_isolation::{TaskWorkspaceKind, create_task_workspace};
+
+        let tmp = tempdir().unwrap();
+        let common = tmp.path().join(".libra");
+        let sessions = common.join("sessions");
+        let run_id = uuid::Uuid::new_v4();
+        let run_name = run_id.to_string();
+        write_run(&sessions, &run_name, true, "2000-01-01T00:00:00Z");
+        let run = sessions.join("agent-runs").join(&run_name);
+        let workspace =
+            create_task_workspace(&common, &run, run_id, TaskWorkspaceKind::Workspace).unwrap();
+        fs::write(workspace.canonical_path.join("sentinel"), "owned").unwrap();
+        fs::write(
+            run.join("state.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "schema_version": 2,
+                "workspace_descriptor": workspace,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        cleanup_retained_task_workspaces(&sessions, &run, &run_name).unwrap();
+        assert!(!workspace.canonical_path.exists());
+        assert!(
+            run.join("state.json").is_file(),
+            "caller still owns metadata removal"
+        );
+        cleanup_retained_task_workspaces(&sessions, &run, &run_name).unwrap();
+    }
+
+    #[test]
+    fn retention_keeps_metadata_for_unowned_surviving_workspace() {
+        let tmp = tempdir().unwrap();
+        let sessions = tmp.path().join("sessions");
+        write_run(&sessions, "legacy", true, "2000-01-01T00:00:00Z");
+        let run = sessions.join("agent-runs/legacy");
+        let workspace = tmp.path().join("unowned");
+        fs::create_dir(&workspace).unwrap();
+        fs::write(workspace.join("sentinel"), "keep").unwrap();
+        fs::write(
+            run.join("state.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "schema_version": 1, "workspace_root": workspace,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(cleanup_retained_task_workspaces(&sessions, &run, "legacy").is_err());
+        assert_eq!(
+            fs::read_to_string(workspace.join("sentinel")).unwrap(),
+            "keep"
+        );
+        assert!(run.join("state.json").is_file());
+    }
+
+    #[test]
+    fn retention_preserves_malformed_state_and_continues_other_runs() {
+        let tmp = tempdir().unwrap();
+        let sessions = tmp.path().join("sessions");
+        for run_id in ["corrupt-state", "healthy"] {
+            write_run(&sessions, run_id, true, "2000-01-01T00:00:00Z");
+        }
+        let corrupt = sessions.join("agent-runs/corrupt-state");
+        fs::write(corrupt.join("state.json"), b"{\"workspace_root\":").unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let outcome = rt
+            .block_on(gc_expired_findings_runs(
+                &sessions,
+                Utc::now() - chrono::Duration::days(30),
+                false,
+            ))
+            .unwrap();
+        assert_eq!(outcome.runs_pruned, 1);
+        assert_eq!(outcome.runs_skipped, 1);
+        assert!(corrupt.join("manifest.json").is_file());
+        assert!(corrupt.join("state.json").is_file());
+        assert!(!sessions.join("agent-runs/healthy").exists());
+    }
+
+    #[test]
+    fn retention_recognizes_legacy_manifest_without_schema_version() {
+        let tmp = tempdir().unwrap();
+        let sessions = tmp.path().join("sessions");
+        let run = sessions.join("agent-runs/legacy-versionless");
+        fs::create_dir_all(&run).unwrap();
+        fs::write(
+            run.join("manifest.json"),
+            br#"{"kind":"review","terminal_state":"success","updated_at":"2000-01-01T00:00:00Z"}"#,
+        )
+        .unwrap();
+        assert!(read_run_retention_meta(&run).is_some_and(|meta| meta.is_terminal));
+    }
+
+    #[test]
+    fn retention_accepts_legacy_checkpoint_input_inside_run_metadata() {
+        let tmp = tempdir().unwrap();
+        let sessions = tmp.path().join("sessions");
+        write_run(&sessions, "legacy-checkpoint", true, "2000-01-01T00:00:00Z");
+        let run = sessions.join("agent-runs/legacy-checkpoint");
+        let input = run.join("checkpoint-input");
+        fs::create_dir(&input).unwrap();
+        fs::write(input.join("sentinel"), "retained until run removal").unwrap();
+        fs::write(
+            run.join("state.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "schema_version": 1, "workspace_root": input,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        cleanup_retained_task_workspaces(&sessions, &run, "legacy-checkpoint").unwrap();
+        assert_eq!(
+            fs::read_to_string(input.join("sentinel")).unwrap(),
+            "retained until run removal"
+        );
+        fs::remove_dir_all(&run).unwrap();
+        assert!(!input.exists());
+    }
+
+    #[tokio::test]
+    async fn findings_gc_continues_after_one_run_refuses_workspace_cleanup() {
+        let tmp = tempdir().unwrap();
+        let sessions = tmp.path().join("sessions");
+        let old = "2000-01-01T00:00:00.000000Z";
+        write_run(&sessions, "a-stuck", true, old);
+        write_run(&sessions, "z-healthy", true, old);
+        let stuck = sessions.join("agent-runs/a-stuck");
+        let external = tmp.path().join("unowned-workspace");
+        fs::create_dir(&external).unwrap();
+        fs::write(external.join("sentinel"), "keep").unwrap();
+        fs::write(
+            stuck.join("state.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "schema_version": 1, "workspace_root": external,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let outcome =
+            gc_expired_findings_runs(&sessions, Utc::now() - chrono::Duration::days(30), false)
+                .await
+                .unwrap();
+        assert_eq!(outcome.runs_pruned, 1);
+        assert_eq!(outcome.runs_skipped, 1);
+        assert_eq!(outcome.warnings.len(), 1);
+        assert!(stuck.exists());
+        assert!(!sessions.join("agent-runs/z-healthy").exists());
+        assert_eq!(
+            fs::read_to_string(external.join("sentinel")).unwrap(),
+            "keep"
+        );
     }
 
     #[test]
@@ -1350,7 +1663,7 @@ mod stderr_gc_tests {
             &sessions,
             "aged-investigate",
             &format!(
-                "{{\"kind\":\"investigate\",\"terminal_state\":\"quorum\",\"updated_at\":\"{old}\"}}"
+                "{{\"schema_version\":1,\"kind\":\"investigate\",\"terminal_state\":\"quorum\",\"updated_at\":\"{old}\"}}"
             ),
         );
         let cutoff = Utc::now() - chrono::Duration::days(30);

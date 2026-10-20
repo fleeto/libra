@@ -50,7 +50,16 @@ fn linked_worktree_has_isolated_head_and_index() {
     let parent = tempfile::tempdir().expect("wt parent");
     let wt = parent.path().join("wt");
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &[
+                "worktree",
+                "add",
+                wt.file_name().unwrap().to_str().unwrap(),
+                "--path",
+                wt.to_str().unwrap(),
+            ],
+            main,
+        ),
         "worktree add",
     );
 
@@ -117,7 +126,16 @@ fn porcelain_reports_per_worktree_head() {
     let parent = tempfile::tempdir().expect("wt parent");
     let wt = parent.path().join("wt");
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &[
+                "worktree",
+                "add",
+                wt.file_name().unwrap().to_str().unwrap(),
+                "--path",
+                wt.to_str().unwrap(),
+            ],
+            main,
+        ),
         "worktree add",
     );
 
@@ -155,7 +173,16 @@ fn corrupt_commondir_fails_closed_not_phantom_repo() {
     let parent = tempfile::tempdir().expect("wt parent");
     let wt = parent.path().join("wt");
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &[
+                "worktree",
+                "add",
+                wt.file_name().unwrap().to_str().unwrap(),
+                "--path",
+                wt.to_str().unwrap(),
+            ],
+            main,
+        ),
         "worktree add",
     );
 
@@ -195,7 +222,16 @@ fn rev_parse_git_dir_is_worktree_local() {
     let parent = tempfile::tempdir().expect("wt parent");
     let wt = parent.path().join("wt");
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &[
+                "worktree",
+                "add",
+                wt.file_name().unwrap().to_str().unwrap(),
+                "--path",
+                wt.to_str().unwrap(),
+            ],
+            main,
+        ),
         "worktree add",
     );
 
@@ -239,7 +275,16 @@ fn same_branch_is_refused_across_worktrees() {
     let parent = tempfile::tempdir().expect("wt parent");
     let wt = parent.path().join("wt");
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &[
+                "worktree",
+                "add",
+                wt.file_name().unwrap().to_str().unwrap(),
+                "--path",
+                wt.to_str().unwrap(),
+            ],
+            main,
+        ),
         "worktree add",
     );
     // The wt cannot switch to `feature` (checked out in main).
@@ -269,7 +314,16 @@ fn formerly_guarded_commands_run_in_linked_worktree() {
     let parent = tempfile::tempdir().expect("wt parent");
     let wt = parent.path().join("wt");
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &[
+                "worktree",
+                "add",
+                wt.file_name().unwrap().to_str().unwrap(),
+                "--path",
+                wt.to_str().unwrap(),
+            ],
+            main,
+        ),
         "worktree add",
     );
 
@@ -334,7 +388,16 @@ fn gc_from_linked_worktree_keeps_main_staged_blob() {
     let parent = tempfile::tempdir().expect("wt parent");
     let wt = parent.path().join("gc-from-wt");
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &[
+                "worktree",
+                "add",
+                wt.file_name().unwrap().to_str().unwrap(),
+                "--path",
+                wt.to_str().unwrap(),
+            ],
+            main,
+        ),
         "worktree add",
     );
 
@@ -416,7 +479,16 @@ fn a_linked_held_autostash_and_unmerged_stages_survive_gc() {
     let parent = tempfile::tempdir().expect("wt parent");
     let wt = parent.path().join("autostash-wt");
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &[
+                "worktree",
+                "add",
+                wt.file_name().unwrap().to_str().unwrap(),
+                "--path",
+                wt.to_str().unwrap(),
+            ],
+            main,
+        ),
         "worktree add",
     );
 
@@ -619,7 +691,16 @@ fn a_corrupt_sidecar_root_fails_the_prune_closed() {
     let parent = tempfile::tempdir().expect("wt parent");
     let wt = parent.path().join("corrupt-root-wt");
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &[
+                "worktree",
+                "add",
+                wt.file_name().unwrap().to_str().unwrap(),
+                "--path",
+                wt.to_str().unwrap(),
+            ],
+            main,
+        ),
         "worktree add",
     );
 
@@ -734,7 +815,16 @@ fn worktree_remove_refuses_a_pending_stash_branch_journal() {
     let parent = tempfile::tempdir().expect("wt parent");
     let wt = parent.path().join("journaled-wt");
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &[
+                "worktree",
+                "add",
+                wt.file_name().unwrap().to_str().unwrap(),
+                "--path",
+                wt.to_str().unwrap(),
+            ],
+            main,
+        ),
         "worktree add",
     );
 
@@ -752,7 +842,10 @@ fn worktree_remove_refuses_a_pending_stash_branch_journal() {
     )
     .unwrap();
 
-    let out = run_libra_command(&["worktree", "remove", wt.to_str().unwrap()], main);
+    let out = run_libra_command(
+        &["worktree", "remove", "--path", wt.to_str().unwrap()],
+        main,
+    );
     let text = format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),
@@ -774,7 +867,10 @@ fn worktree_remove_refuses_a_pending_stash_branch_journal() {
     );
     // …after which removal succeeds.
     assert_cli_success(
-        &run_libra_command(&["worktree", "remove", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &["worktree", "remove", "--path", wt.to_str().unwrap()],
+            main,
+        ),
         "remove succeeds once the journal is recovered",
     );
 }
@@ -968,7 +1064,16 @@ fn a_foreign_marked_autostash_is_refused_in_a_linked_worktree() {
     let parent = tempfile::tempdir().expect("wt parent");
     let wt = parent.path().join("foreign-autostash-wt");
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &[
+                "worktree",
+                "add",
+                wt.file_name().unwrap().to_str().unwrap(),
+                "--path",
+                wt.to_str().unwrap(),
+            ],
+            main,
+        ),
         "worktree add",
     );
     assert_cli_success(&run_libra_command(&["branch", "other"], main), "branch");
@@ -1094,7 +1199,16 @@ fn worktree_remove_refuses_an_in_progress_merge() {
     let parent = tempfile::tempdir().expect("wt parent");
     let wt = parent.path().join("mid-merge-wt");
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &[
+                "worktree",
+                "add",
+                wt.file_name().unwrap().to_str().unwrap(),
+                "--path",
+                wt.to_str().unwrap(),
+            ],
+            main,
+        ),
         "worktree add",
     );
 
@@ -1120,8 +1234,14 @@ fn worktree_remove_refuses_an_in_progress_merge() {
     assert!(!merged.status.success(), "the merge must conflict");
 
     for args in [
-        vec!["worktree", "remove", wt.to_str().unwrap()],
-        vec!["worktree", "remove", "--delete-dir", wt.to_str().unwrap()],
+        vec!["worktree", "remove", "--path", wt.to_str().unwrap()],
+        vec![
+            "worktree",
+            "remove",
+            "--delete-dir",
+            "--path",
+            wt.to_str().unwrap(),
+        ],
     ] {
         let out = run_libra_command(&args, main);
         let text = format!(
@@ -1146,7 +1266,10 @@ fn worktree_remove_refuses_an_in_progress_merge() {
     // Aborting the merge lifts the refusal.
     assert_cli_success(&run_libra_command(&["merge", "--abort"], &wt), "abort");
     assert_cli_success(
-        &run_libra_command(&["worktree", "remove", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &["worktree", "remove", "--path", wt.to_str().unwrap()],
+            main,
+        ),
         "remove succeeds once the merge is gone",
     );
 }
@@ -1166,7 +1289,16 @@ fn concurrent_linked_merge_and_revert_conflicts_do_not_cross() {
     let parent = tempfile::tempdir().expect("wt parent");
     let wt = parent.path().join("conflict-wt");
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &[
+                "worktree",
+                "add",
+                wt.file_name().unwrap().to_str().unwrap(),
+                "--path",
+                wt.to_str().unwrap(),
+            ],
+            main,
+        ),
         "worktree add",
     );
 
@@ -1367,7 +1499,16 @@ fn concurrent_stash_pop_single_cas_winner() {
     let two = parent.path().join("pop-two");
     for path in [&one, &two] {
         assert_cli_success(
-            &run_libra_command(&["worktree", "add", path.to_str().unwrap()], main),
+            &run_libra_command(
+                &[
+                    "worktree",
+                    "add",
+                    path.file_name().unwrap().to_str().unwrap(),
+                    "--path",
+                    path.to_str().unwrap(),
+                ],
+                main,
+            ),
             "worktree add",
         );
     }
@@ -1479,7 +1620,16 @@ fn linked_stash_pop_apply_failure_keeps_shared_entry() {
     let parent = tempfile::tempdir().expect("wt parent");
     let wt = parent.path().join("pop-failure-wt");
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &[
+                "worktree",
+                "add",
+                wt.file_name().unwrap().to_str().unwrap(),
+                "--path",
+                wt.to_str().unwrap(),
+            ],
+            main,
+        ),
         "worktree add",
     );
 
@@ -1545,7 +1695,16 @@ fn stash_stack_is_shared_with_scoped_snapshots() {
     let parent = tempfile::tempdir().expect("wt parent");
     let wt = parent.path().join("stash-wt");
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &[
+                "worktree",
+                "add",
+                wt.file_name().unwrap().to_str().unwrap(),
+                "--path",
+                wt.to_str().unwrap(),
+            ],
+            main,
+        ),
         "worktree add",
     );
 
@@ -1688,7 +1847,16 @@ fn status_cache_modes_run_in_linked_worktree() {
     let parent = tempfile::tempdir().expect("wt parent");
     let wt = parent.path().join("wt");
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &[
+                "worktree",
+                "add",
+                wt.file_name().unwrap().to_str().unwrap(),
+                "--path",
+                wt.to_str().unwrap(),
+            ],
+            main,
+        ),
         "worktree add",
     );
 
@@ -1725,7 +1893,16 @@ fn branch_writers_refuse_branch_checked_out_in_another_worktree() {
     let parent = tempfile::tempdir().expect("wt parent");
     let wt = parent.path().join("wt");
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &[
+                "worktree",
+                "add",
+                wt.file_name().unwrap().to_str().unwrap(),
+                "--path",
+                wt.to_str().unwrap(),
+            ],
+            main,
+        ),
         "worktree add",
     );
     // The linked worktree checks out `feature`.
@@ -1774,7 +1951,16 @@ fn update_ref_refuses_branch_checked_out_elsewhere() {
     let parent = tempfile::tempdir().expect("wt parent");
     let wt = parent.path().join("wt");
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &[
+                "worktree",
+                "add",
+                wt.file_name().unwrap().to_str().unwrap(),
+                "--path",
+                wt.to_str().unwrap(),
+            ],
+            main,
+        ),
         "worktree add",
     );
     assert_cli_success(
@@ -1816,7 +2002,16 @@ fn symbolic_ref_refuses_branch_checked_out_elsewhere() {
     let parent = tempfile::tempdir().expect("wt parent");
     let wt = parent.path().join("wt");
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &[
+                "worktree",
+                "add",
+                wt.file_name().unwrap().to_str().unwrap(),
+                "--path",
+                wt.to_str().unwrap(),
+            ],
+            main,
+        ),
         "worktree add",
     );
     assert_cli_success(
@@ -1854,7 +2049,16 @@ fn ignore_other_worktrees_flag_cannot_bypass_in_multi_worktree() {
     let parent = tempfile::tempdir().expect("wt parent");
     let wt = parent.path().join("wt");
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &[
+                "worktree",
+                "add",
+                wt.file_name().unwrap().to_str().unwrap(),
+                "--path",
+                wt.to_str().unwrap(),
+            ],
+            main,
+        ),
         "worktree add",
     );
     // main is on `main`; the linked worktree takes `feature`.
@@ -1915,7 +2119,16 @@ fn reflog_expire_updateref_refuses_branch_checked_out_elsewhere() {
     let parent = tempfile::tempdir().expect("wt parent");
     let wt = parent.path().join("wt");
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &[
+                "worktree",
+                "add",
+                wt.file_name().unwrap().to_str().unwrap(),
+                "--path",
+                wt.to_str().unwrap(),
+            ],
+            main,
+        ),
         "worktree add",
     );
     assert_cli_success(
@@ -1965,7 +2178,16 @@ fn fast_import_refuses_branch_checked_out_elsewhere() {
     let parent = tempfile::tempdir().expect("wt parent");
     let wt = parent.path().join("wt");
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &[
+                "worktree",
+                "add",
+                wt.file_name().unwrap().to_str().unwrap(),
+                "--path",
+                wt.to_str().unwrap(),
+            ],
+            main,
+        ),
         "worktree add",
     );
     assert_cli_success(
@@ -2003,7 +2225,16 @@ fn gc_and_repack_run_in_multi_worktree_repo_keeping_private_roots() {
     let parent = tempfile::tempdir().expect("wt parent");
     let wt = parent.path().join("wt");
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &[
+                "worktree",
+                "add",
+                wt.file_name().unwrap().to_str().unwrap(),
+                "--path",
+                wt.to_str().unwrap(),
+            ],
+            main,
+        ),
         "worktree add",
     );
 
@@ -2124,7 +2355,16 @@ fn editor_buffers_are_worktree_local_not_shared() {
     let parent = tempfile::tempdir().expect("wt parent");
     let wt = parent.path().join("wt");
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &[
+                "worktree",
+                "add",
+                wt.file_name().unwrap().to_str().unwrap(),
+                "--path",
+                wt.to_str().unwrap(),
+            ],
+            main,
+        ),
         "worktree add",
     );
 
@@ -2464,7 +2704,16 @@ fn linked_merge_file_backup_isolated() {
     let parent = tempfile::tempdir().expect("wt parent");
     let wt = parent.path().join("mf-wt");
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &[
+                "worktree",
+                "add",
+                wt.file_name().unwrap().to_str().unwrap(),
+                "--path",
+                wt.to_str().unwrap(),
+            ],
+            main,
+        ),
         "worktree add",
     );
 
@@ -2599,7 +2848,16 @@ fn two_conflicting_worktrees(
     let parent = tempfile::tempdir().expect("wt parent");
     let wt = parent.path().join(slug);
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap()], &main),
+        &run_libra_command(
+            &[
+                "worktree",
+                "add",
+                wt.file_name().unwrap().to_str().unwrap(),
+                "--path",
+                wt.to_str().unwrap(),
+            ],
+            &main,
+        ),
         "worktree add",
     );
     assert_cli_success(
@@ -2654,7 +2912,16 @@ fn fetch_uses_worktree_local_fetch_head() {
     let parent = tempfile::tempdir().expect("wt parent");
     let wt = parent.path().join("wt");
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &[
+                "worktree",
+                "add",
+                wt.file_name().unwrap().to_str().unwrap(),
+                "--path",
+                wt.to_str().unwrap(),
+            ],
+            main,
+        ),
         "worktree add",
     );
 
@@ -2766,7 +3033,17 @@ fn concurrent_update_refs_rebases_keep_independent_plans() {
         );
         let wt = parent.path().join(name);
         assert_cli_success(
-            &run_libra_command(&["worktree", "add", wt.to_str().unwrap(), name], main),
+            &run_libra_command(
+                &[
+                    "worktree",
+                    "add",
+                    wt.file_name().unwrap().to_str().unwrap(),
+                    "--path",
+                    wt.to_str().unwrap(),
+                    name,
+                ],
+                main,
+            ),
             "worktree add",
         );
         fs::write(wt.join(format!("{name}.txt")), "x\n").unwrap();
@@ -2856,7 +3133,17 @@ fn stale_rebase_recovery_does_not_cross_worktrees() {
         );
         let wt = parent.path().join(name);
         assert_cli_success(
-            &run_libra_command(&["worktree", "add", wt.to_str().unwrap(), name], main),
+            &run_libra_command(
+                &[
+                    "worktree",
+                    "add",
+                    wt.file_name().unwrap().to_str().unwrap(),
+                    "--path",
+                    wt.to_str().unwrap(),
+                    name,
+                ],
+                main,
+            ),
             "worktree add",
         );
         fs::write(wt.join("a.txt"), format!("{name}-edit\n")).unwrap();
@@ -2932,7 +3219,16 @@ fn linked_fetch_head_isolated() {
     let parent = tempfile::tempdir().expect("wt parent");
     let wt = parent.path().join("wt");
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &[
+                "worktree",
+                "add",
+                wt.file_name().unwrap().to_str().unwrap(),
+                "--path",
+                wt.to_str().unwrap(),
+            ],
+            main,
+        ),
         "worktree add",
     );
 
@@ -2988,7 +3284,16 @@ fn linked_fetch_append_does_not_touch_main_fetch_head() {
     let parent = tempfile::tempdir().expect("wt parent");
     let wt = parent.path().join("wt");
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &[
+                "worktree",
+                "add",
+                wt.file_name().unwrap().to_str().unwrap(),
+                "--path",
+                wt.to_str().unwrap(),
+            ],
+            main,
+        ),
         "worktree add",
     );
     assert_cli_success(
@@ -3057,7 +3362,17 @@ fn linked_cherry_pick_edit_message_isolated() {
     );
     let wt = parent.path().join("msg-wt");
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap(), "msg-wt"], main),
+        &run_libra_command(
+            &[
+                "worktree",
+                "add",
+                wt.file_name().unwrap().to_str().unwrap(),
+                "--path",
+                wt.to_str().unwrap(),
+                "msg-wt",
+            ],
+            main,
+        ),
         "worktree add",
     );
     fs::write(wt.join("a.txt"), "linked-side\n").unwrap();
@@ -3180,7 +3495,14 @@ fn linked_pull_rebase_uses_scoped_state() {
     );
     assert_cli_success(
         &run_libra_command(
-            &["worktree", "add", wt.to_str().unwrap(), "wt-branch"],
+            &[
+                "worktree",
+                "add",
+                wt.file_name().unwrap().to_str().unwrap(),
+                "--path",
+                wt.to_str().unwrap(),
+                "wt-branch",
+            ],
             main,
         ),
         "worktree add",
@@ -3288,7 +3610,16 @@ fn pull_merges_in_linked_worktree() {
     let parent = tempfile::tempdir().expect("wt parent");
     let wt = parent.path().join("wt");
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &[
+                "worktree",
+                "add",
+                wt.file_name().unwrap().to_str().unwrap(),
+                "--path",
+                wt.to_str().unwrap(),
+            ],
+            main,
+        ),
         "worktree add",
     );
     assert_cli_success(
@@ -3371,7 +3702,16 @@ fn linked_conflicting_pull_state_not_adopted_by_main() {
     let parent = tempfile::tempdir().expect("wt parent");
     let wt = parent.path().join("conflict-pull-wt");
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &[
+                "worktree",
+                "add",
+                wt.file_name().unwrap().to_str().unwrap(),
+                "--path",
+                wt.to_str().unwrap(),
+            ],
+            main,
+        ),
         "worktree add",
     );
     assert_cli_success(
@@ -3485,7 +3825,16 @@ fn cherry_pick_runs_concurrently_in_worktrees() {
     let parent = tempfile::tempdir().expect("wt parent");
     let wt = parent.path().join("wt");
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &[
+                "worktree",
+                "add",
+                wt.file_name().unwrap().to_str().unwrap(),
+                "--path",
+                wt.to_str().unwrap(),
+            ],
+            main,
+        ),
         "worktree add",
     );
     assert_cli_success(
@@ -3565,7 +3914,16 @@ fn am_applies_in_linked_worktree() {
     let parent = tempfile::tempdir().expect("wt parent");
     let wt = parent.path().join("wt");
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &[
+                "worktree",
+                "add",
+                wt.file_name().unwrap().to_str().unwrap(),
+                "--path",
+                wt.to_str().unwrap(),
+            ],
+            main,
+        ),
         "worktree add",
     );
     assert_cli_success(
@@ -3602,7 +3960,16 @@ fn revert_runs_in_linked_worktree() {
     let parent = tempfile::tempdir().expect("wt parent");
     let wt = parent.path().join("wt");
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &[
+                "worktree",
+                "add",
+                wt.file_name().unwrap().to_str().unwrap(),
+                "--path",
+                wt.to_str().unwrap(),
+            ],
+            main,
+        ),
         "worktree add",
     );
     // Give the linked worktree its own branch with a commit to revert.
@@ -3657,7 +4024,16 @@ fn merge_runs_in_linked_worktree() {
     let parent = tempfile::tempdir().expect("wt parent");
     let wt = parent.path().join("wt");
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &[
+                "worktree",
+                "add",
+                wt.file_name().unwrap().to_str().unwrap(),
+                "--path",
+                wt.to_str().unwrap(),
+            ],
+            main,
+        ),
         "worktree add",
     );
     assert_cli_success(
@@ -3735,7 +4111,16 @@ fn bisect_runs_in_linked_worktree() {
     let parent = tempfile::tempdir().expect("wt parent");
     let wt = parent.path().join("wt");
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &[
+                "worktree",
+                "add",
+                wt.file_name().unwrap().to_str().unwrap(),
+                "--path",
+                wt.to_str().unwrap(),
+            ],
+            main,
+        ),
         "worktree add",
     );
     let (c1, c2, c3) = grow_feature_history(&wt);
@@ -3808,7 +4193,16 @@ fn readded_worktree_does_not_inherit_bisect_session() {
     let parent = tempfile::tempdir().expect("wt parent");
     let wt = parent.path().join("wt");
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &[
+                "worktree",
+                "add",
+                wt.file_name().unwrap().to_str().unwrap(),
+                "--path",
+                wt.to_str().unwrap(),
+            ],
+            main,
+        ),
         "worktree add",
     );
     let (c1, _c2, _c3) = grow_feature_history(&wt);
@@ -3820,7 +4214,10 @@ fn readded_worktree_does_not_inherit_bisect_session() {
     // W3-s1b (§C.7): a worktree with an ACTIVE bisect refuses BOTH remove
     // modes — detaching would strand the session behind the fail-closed
     // gate, deleting would destroy it.
-    let refused = run_libra_command(&["worktree", "remove", wt.to_str().unwrap()], main);
+    let refused = run_libra_command(
+        &["worktree", "remove", "--path", wt.to_str().unwrap()],
+        main,
+    );
     assert!(
         !refused.status.success(),
         "remove must refuse mid-bisect: {}",
@@ -3832,13 +4229,28 @@ fn readded_worktree_does_not_inherit_bisect_session() {
     );
     assert_cli_success(
         &run_libra_command(
-            &["worktree", "remove", "--delete-dir", wt.to_str().unwrap()],
+            &[
+                "worktree",
+                "remove",
+                "--delete-dir",
+                "--path",
+                wt.to_str().unwrap(),
+            ],
             main,
         ),
         "worktree remove --delete-dir",
     );
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &[
+                "worktree",
+                "add",
+                wt.file_name().unwrap().to_str().unwrap(),
+                "--path",
+                wt.to_str().unwrap(),
+            ],
+            main,
+        ),
         "worktree re-add",
     );
 
@@ -3868,7 +4280,16 @@ fn bisect_reset_does_not_steal_branch_attached_elsewhere() {
     let parent = tempfile::tempdir().expect("wt parent");
     let wt = parent.path().join("wt");
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &[
+                "worktree",
+                "add",
+                wt.file_name().unwrap().to_str().unwrap(),
+                "--path",
+                wt.to_str().unwrap(),
+            ],
+            main,
+        ),
         "worktree add",
     );
     let (c1, _c2, c3) = grow_feature_history(&wt);
@@ -4175,7 +4596,17 @@ fn concurrent_control_slots_are_held_per_worktree() {
         );
         let wt = parent.path().join(branch);
         assert_cli_success(
-            &run_libra_command(&["worktree", "add", wt.to_str().unwrap(), branch], main),
+            &run_libra_command(
+                &[
+                    "worktree",
+                    "add",
+                    wt.file_name().unwrap().to_str().unwrap(),
+                    "--path",
+                    wt.to_str().unwrap(),
+                    branch,
+                ],
+                main,
+            ),
             "worktree add",
         );
         fs::write(wt.join("a.txt"), format!("{branch}-edit\n")).unwrap();
@@ -4395,7 +4826,14 @@ fn linked_rebase_conflict_does_not_block_main_cherry_pick() {
     let wt = parent.path().join("linked");
     assert_cli_success(
         &run_libra_command(
-            &["worktree", "add", wt.to_str().unwrap(), "linked-rebase"],
+            &[
+                "worktree",
+                "add",
+                wt.file_name().unwrap().to_str().unwrap(),
+                "--path",
+                wt.to_str().unwrap(),
+                "linked-rebase",
+            ],
             main,
         ),
         "worktree add",
@@ -4459,7 +4897,14 @@ fn linked_bisect_reset_restores_only_originating_head() {
     let wt = parent.path().join("bisect-wt");
     assert_cli_success(
         &run_libra_command(
-            &["worktree", "add", wt.to_str().unwrap(), "bisect-wt"],
+            &[
+                "worktree",
+                "add",
+                wt.file_name().unwrap().to_str().unwrap(),
+                "--path",
+                wt.to_str().unwrap(),
+                "bisect-wt",
+            ],
             main,
         ),
         "worktree add",
@@ -4524,7 +4969,17 @@ fn wrong_scope_abort_never_clears_other_sequence() {
     );
     let wt = parent.path().join("abort-wt");
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap(), "abort-wt"], main),
+        &run_libra_command(
+            &[
+                "worktree",
+                "add",
+                wt.file_name().unwrap().to_str().unwrap(),
+                "--path",
+                wt.to_str().unwrap(),
+                "abort-wt",
+            ],
+            main,
+        ),
         "worktree add",
     );
     fs::write(wt.join("a.txt"), "linked-side\n").unwrap();
@@ -4565,7 +5020,16 @@ fn legacy_rebase_merge_dir_not_auto_adopted_by_linked() {
     let parent = tempfile::tempdir().expect("wt parent");
     let wt = parent.path().join("legacy-wt");
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &[
+                "worktree",
+                "add",
+                wt.file_name().unwrap().to_str().unwrap(),
+                "--path",
+                wt.to_str().unwrap(),
+            ],
+            main,
+        ),
         "worktree add",
     );
 
@@ -4772,7 +5236,16 @@ fn legacy_rebase_merge_dir_not_auto_adopted_with_linked_worktrees() {
     let parent = tempfile::tempdir().expect("wt parent");
     let wt = parent.path().join("wt");
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &[
+                "worktree",
+                "add",
+                wt.file_name().unwrap().to_str().unwrap(),
+                "--path",
+                wt.to_str().unwrap(),
+            ],
+            main,
+        ),
         "worktree add",
     );
 
@@ -4821,7 +5294,16 @@ fn rebase_runs_in_linked_worktree_and_conflict_does_not_block_main() {
     let parent = tempfile::tempdir().expect("wt parent");
     let wt = parent.path().join("wt");
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &[
+                "worktree",
+                "add",
+                wt.file_name().unwrap().to_str().unwrap(),
+                "--path",
+                wt.to_str().unwrap(),
+            ],
+            main,
+        ),
         "worktree add",
     );
 
@@ -4911,7 +5393,16 @@ fn remove_gcs_private_head_rows() {
     let parent = tempfile::tempdir().expect("wt parent");
     let wt = parent.path().join("wt");
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &[
+                "worktree",
+                "add",
+                wt.file_name().unwrap().to_str().unwrap(),
+                "--path",
+                wt.to_str().unwrap(),
+            ],
+            main,
+        ),
         "worktree add",
     );
     let id = fs::read_to_string(wt.join(".libra/worktree_id"))
@@ -4923,7 +5414,13 @@ fn remove_gcs_private_head_rows() {
     // Remove the worktree (and its dir); its private HEAD row is GC'd.
     assert_cli_success(
         &run_libra_command(
-            &["worktree", "remove", wt.to_str().unwrap(), "--delete-dir"],
+            &[
+                "worktree",
+                "remove",
+                "--path",
+                wt.to_str().unwrap(),
+                "--delete-dir",
+            ],
             main,
         ),
         "worktree remove",
@@ -4932,7 +5429,16 @@ fn remove_gcs_private_head_rows() {
     // not inheriting a stale HEAD row.
     fs::create_dir_all(&wt).ok();
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &[
+                "worktree",
+                "add",
+                wt.file_name().unwrap().to_str().unwrap(),
+                "--path",
+                wt.to_str().unwrap(),
+            ],
+            main,
+        ),
         "re-add worktree",
     );
     assert_eq!(
@@ -4954,7 +5460,16 @@ fn worktree_remove_keep_dir_preserves_or_tombstones_scope() {
     let wt_root = tempfile::tempdir().expect("wt root");
     let wt = wt_root.path().join("purge-wt");
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &[
+                "worktree",
+                "add",
+                wt.file_name().unwrap().to_str().unwrap(),
+                "--path",
+                wt.to_str().unwrap(),
+            ],
+            main,
+        ),
         "worktree add",
     );
     std::fs::write(wt.join("dirt.txt"), "x\n").unwrap();
@@ -4971,7 +5486,10 @@ fn worktree_remove_keep_dir_preserves_or_tombstones_scope() {
     // rows are preserved (deleting the rows would leave a directory that
     // still operates but lost its HEAD); `--delete-dir` purges them.
     assert_cli_success(
-        &run_libra_command(&["worktree", "remove", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &["worktree", "remove", "--path", wt.to_str().unwrap()],
+            main,
+        ),
         "worktree remove (detach)",
     );
     assert!(
@@ -5001,7 +5519,16 @@ fn worktree_remove_keep_dir_preserves_or_tombstones_scope() {
 
     // Re-add then --delete-dir: the destructive path purges the rows.
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &[
+                "worktree",
+                "add",
+                wt.file_name().unwrap().to_str().unwrap(),
+                "--path",
+                wt.to_str().unwrap(),
+            ],
+            main,
+        ),
         "re-attach",
     );
     // The re-attached worktree is dirty (dirt.txt); clean it so --delete-dir
@@ -5009,7 +5536,13 @@ fn worktree_remove_keep_dir_preserves_or_tombstones_scope() {
     std::fs::remove_file(wt.join("dirt.txt")).expect("drop dirt");
     assert_cli_success(
         &run_libra_command(
-            &["worktree", "remove", "--delete-dir", wt.to_str().unwrap()],
+            &[
+                "worktree",
+                "remove",
+                "--delete-dir",
+                "--path",
+                wt.to_str().unwrap(),
+            ],
             main,
         ),
         "worktree remove --delete-dir",
@@ -5044,7 +5577,16 @@ fn layer_registry_is_worktree_scoped() {
     let wt_root = tempfile::tempdir().expect("wt root");
     let wt = wt_root.path().join("layer-wt");
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &[
+                "worktree",
+                "add",
+                wt.file_name().unwrap().to_str().unwrap(),
+                "--path",
+                wt.to_str().unwrap(),
+            ],
+            main,
+        ),
         "worktree add",
     );
 
@@ -5133,7 +5675,16 @@ fn sparse_view_is_worktree_scoped() {
     let wt_root = tempfile::tempdir().expect("wt root");
     let wt = wt_root.path().join("sparse-wt");
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &[
+                "worktree",
+                "add",
+                wt.file_name().unwrap().to_str().unwrap(),
+                "--path",
+                wt.to_str().unwrap(),
+            ],
+            main,
+        ),
         "worktree add",
     );
     // Two tracked files exist from the fixture; add distinct view scopes.
@@ -5233,11 +5784,20 @@ fn registry_mutators_serialize_on_worktrees_lock() {
     lock_file.lock().expect("test takes the registry lock");
     let spawn_add = |wt: &std::path::Path| {
         ChildGuard(
-            base_libra_command(&["worktree", "add", wt.to_str().unwrap()], main)
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn()
-                .expect("spawn add"),
+            base_libra_command(
+                &[
+                    "worktree",
+                    "add",
+                    wt.file_name().unwrap().to_str().unwrap(),
+                    "--path",
+                    wt.to_str().unwrap(),
+                ],
+                main,
+            )
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn add"),
         )
     };
     let targets = [
@@ -5343,7 +5903,16 @@ fn worktree_add_sweeps_stale_scope_rows() {
     }
 
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &[
+                "worktree",
+                "add",
+                wt.file_name().unwrap().to_str().unwrap(),
+                "--path",
+                wt.to_str().unwrap(),
+            ],
+            main,
+        ),
         "worktree add sweeps the stale scope",
     );
 
@@ -5379,7 +5948,16 @@ fn worktree_remove_purges_layer_scope_rows() {
 
     let add_layer_and_apply = |wt: &std::path::Path| {
         assert_cli_success(
-            &run_libra_command(&["worktree", "add", wt.to_str().unwrap()], main),
+            &run_libra_command(
+                &[
+                    "worktree",
+                    "add",
+                    wt.file_name().unwrap().to_str().unwrap(),
+                    "--path",
+                    wt.to_str().unwrap(),
+                ],
+                main,
+            ),
             "worktree add",
         );
         assert_cli_success(
@@ -5420,7 +5998,10 @@ fn worktree_remove_purges_layer_scope_rows() {
     let wt_kept = wt_root.path().join("layer-kept-wt");
     add_layer_and_apply(&wt_kept);
     assert_cli_success(
-        &run_libra_command(&["worktree", "remove", wt_kept.to_str().unwrap()], main),
+        &run_libra_command(
+            &["worktree", "remove", "--path", wt_kept.to_str().unwrap()],
+            main,
+        ),
         "default worktree remove",
     );
     assert!(wt_kept.join("ov.txt").exists(), "overlay file retained");
@@ -5450,6 +6031,7 @@ fn worktree_remove_purges_layer_scope_rows() {
         &[
             "worktree",
             "remove",
+            "--path",
             wt_gone.to_str().unwrap(),
             "--delete-dir",
         ],
@@ -5466,6 +6048,7 @@ fn worktree_remove_purges_layer_scope_rows() {
             &[
                 "worktree",
                 "remove",
+                "--path",
                 wt_gone.to_str().unwrap(),
                 "--delete-dir",
             ],
@@ -5501,7 +6084,7 @@ fn worktree_remove_purges_layer_scope_rows() {
 
 /// Registry v2 (plan-20260714 §C.7): a legacy v1 `{ worktrees: [...] }` file
 /// is durably upgraded on first touch — rewritten as
-/// `{ schema_version: 3, entries: [...] }` with each linked entry's STABLE id
+/// `{ schema_version: 4, entries: [...] }` with each linked entry's STABLE id
 /// backfilled from its gitdir — while preserving every v1 field.
 #[test]
 fn registry_v1_file_upgrades_to_v2_with_backfilled_ids() {
@@ -5509,7 +6092,16 @@ fn registry_v1_file_upgrades_to_v2_with_backfilled_ids() {
     let main = dir.path();
     let wt = main.join("wt-v1up");
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &[
+                "worktree",
+                "add",
+                wt.file_name().unwrap().to_str().unwrap(),
+                "--path",
+                wt.to_str().unwrap(),
+            ],
+            main,
+        ),
         "worktree add",
     );
     let gitdir_id = std::fs::read_to_string(wt.join(".libra").join("worktree_id"))
@@ -5522,8 +6114,8 @@ fn registry_v1_file_upgrades_to_v2_with_backfilled_ids() {
     let v2: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&registry).expect("read registry")).expect("v2 json");
     assert_eq!(
-        v2["schema_version"], 3,
-        "a fresh registry is written at the CURRENT version (v3 adds the service-fence \
+        v2["schema_version"], 4,
+        "a fresh registry is written at the CURRENT version (v4 adds names, preserving the v3 service-fence \
          generations); the v2 shape is still read and upgraded in place"
     );
     let v1_entries: Vec<serde_json::Value> = v2["entries"]
@@ -5583,7 +6175,7 @@ fn registry_v1_file_upgrades_to_v2_with_backfilled_ids() {
         serde_json::from_slice(&std::fs::read(&registry).expect("read upgraded registry"))
             .expect("upgraded json");
     assert_eq!(
-        upgraded["schema_version"], 3,
+        upgraded["schema_version"], 4,
         "a v1 file is rewritten at the current version"
     );
     let upgraded_entries = upgraded["entries"].as_array().expect("v2 entries");
@@ -5624,7 +6216,16 @@ fn corrupt_linked_identity_refuses_mutations_and_points_at_repair() {
     let main = dir.path();
     let wt = main.join("wt-corrupt-id");
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &[
+                "worktree",
+                "add",
+                wt.file_name().unwrap().to_str().unwrap(),
+                "--path",
+                wt.to_str().unwrap(),
+            ],
+            main,
+        ),
         "worktree add",
     );
 
@@ -5686,7 +6287,13 @@ fn corrupt_linked_identity_refuses_mutations_and_points_at_repair() {
     // classified as repository scope (it manages the registry, not this
     // worktree's HEAD/index).
     let repair = run_libra_command(
-        &["worktree", "repair", wt.to_str().unwrap(), "--confirm"],
+        &[
+            "worktree",
+            "repair",
+            "--path",
+            wt.to_str().unwrap(),
+            "--confirm",
+        ],
         main,
     );
     assert!(
@@ -5711,7 +6318,16 @@ fn worktree_repair_path_restores_identity_from_registry() {
     let main = dir.path();
     let wt = main.join("wt-repair");
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &[
+                "worktree",
+                "add",
+                wt.file_name().unwrap().to_str().unwrap(),
+                "--path",
+                wt.to_str().unwrap(),
+            ],
+            main,
+        ),
         "worktree add",
     );
     assert_cli_success(
@@ -5734,6 +6350,7 @@ fn worktree_repair_path_restores_identity_from_registry() {
         &[
             "worktree",
             "repair",
+            "--path",
             wt.to_str().unwrap(),
             "--json",
             "--confirm",
@@ -5780,6 +6397,7 @@ fn worktree_repair_path_restores_identity_from_registry() {
         &[
             "worktree",
             "repair",
+            "--path",
             wt.to_str().unwrap(),
             "--json",
             "--confirm",
@@ -5798,6 +6416,7 @@ fn worktree_repair_path_restores_identity_from_registry() {
         &[
             "worktree",
             "repair",
+            "--path",
             wt.to_str().unwrap(),
             "--json",
             "--confirm",
@@ -5818,6 +6437,7 @@ fn worktree_repair_path_restores_identity_from_registry() {
         &[
             "worktree",
             "repair",
+            "--path",
             wt.to_str().unwrap(),
             "--json",
             "--confirm",
@@ -5839,7 +6459,13 @@ fn worktree_repair_path_restores_identity_from_registry() {
     std::fs::write(gitdir.join("commondir"), &foreign_pointer).expect("foreign commondir");
     std::fs::write(gitdir.join("worktree_id"), "stale-or-corrupt\n").expect("stale id");
     let refused = run_libra_command(
-        &["worktree", "repair", wt.to_str().unwrap(), "--confirm"],
+        &[
+            "worktree",
+            "repair",
+            "--path",
+            wt.to_str().unwrap(),
+            "--confirm",
+        ],
         main,
     );
     assert!(
@@ -5866,7 +6492,13 @@ fn worktree_repair_path_refuses_main_and_unregistered() {
     let main = dir.path();
 
     let main_refused = run_libra_command(
-        &["worktree", "repair", main.to_str().unwrap(), "--confirm"],
+        &[
+            "worktree",
+            "repair",
+            "--path",
+            main.to_str().unwrap(),
+            "--confirm",
+        ],
         main,
     );
     assert!(
@@ -5880,6 +6512,7 @@ fn worktree_repair_path_refuses_main_and_unregistered() {
         &[
             "worktree",
             "repair",
+            "--path",
             stranger.to_str().unwrap(),
             "--confirm",
         ],
@@ -5942,7 +6575,7 @@ async fn worktree_commands_apply_capability_marker_before_registry_io() {
         .into_iter()
         .map(|row| row.try_get_by_index(0).expect("capability version"))
         .collect();
-    assert_eq!(markers, [2, 3]);
+    assert_eq!(markers, [2, 3, 4]);
     conn.close().await.expect("close upgraded repository db");
 }
 
@@ -5959,7 +6592,16 @@ fn resolve_identity_detaches_one_claimant_and_mirrors_the_lifecycle() {
     let wt_b = main.join("wt-collide-b");
     for wt in [&wt_a, &wt_b] {
         assert_cli_success(
-            &run_libra_command(&["worktree", "add", wt.to_str().unwrap()], main),
+            &run_libra_command(
+                &[
+                    "worktree",
+                    "add",
+                    wt.file_name().unwrap().to_str().unwrap(),
+                    "--path",
+                    wt.to_str().unwrap(),
+                ],
+                main,
+            ),
             "worktree add",
         );
     }
@@ -5987,7 +6629,14 @@ fn resolve_identity_detaches_one_claimant_and_mirrors_the_lifecycle() {
 
     // Mutations refuse while the collision holds.
     let refused = run_libra_command(
-        &["worktree", "lock", wt_a.to_str().unwrap(), "--reason", "x"],
+        &[
+            "worktree",
+            "lock",
+            "--path",
+            wt_a.to_str().unwrap(),
+            "--reason",
+            "x",
+        ],
         main,
     );
     assert!(
@@ -6005,6 +6654,7 @@ fn resolve_identity_detaches_one_claimant_and_mirrors_the_lifecycle() {
             &[
                 "worktree",
                 "repair",
+                "--path",
                 wt_b.to_str().unwrap(),
                 "--resolve-identity",
                 "--yes",
@@ -6017,7 +6667,14 @@ fn resolve_identity_detaches_one_claimant_and_mirrors_the_lifecycle() {
     // The survivor mutates again; the detached directory fails closed.
     assert_cli_success(
         &run_libra_command(
-            &["worktree", "lock", wt_a.to_str().unwrap(), "--reason", "x"],
+            &[
+                "worktree",
+                "lock",
+                "--path",
+                wt_a.to_str().unwrap(),
+                "--reason",
+                "x",
+            ],
             main,
         ),
         "the surviving claimant owns the identity again",
@@ -6066,7 +6723,16 @@ fn registry_v2_old_binary_refuses_before_rewrite() {
     let main = dir.path();
     let wt = main.join("wt-future");
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &[
+                "worktree",
+                "add",
+                wt.file_name().unwrap().to_str().unwrap(),
+                "--path",
+                wt.to_str().unwrap(),
+            ],
+            main,
+        ),
         "worktree add",
     );
     let registry = main.join(".libra").join("worktrees.json");
@@ -6085,7 +6751,13 @@ fn registry_v2_old_binary_refuses_before_rewrite() {
     );
 
     let refused = run_libra_command(
-        &["worktree", "add", main.join("wt-refused").to_str().unwrap()],
+        &[
+            "worktree",
+            "add",
+            "wt-refused",
+            "--path",
+            main.join("wt-refused").to_str().unwrap(),
+        ],
         main,
     );
     assert!(
@@ -6114,7 +6786,16 @@ fn remove_is_lease_gated_and_expiry_unblocks() {
     let main = dir.path();
     let wt = main.join("wt-leased");
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &[
+                "worktree",
+                "add",
+                wt.file_name().unwrap().to_str().unwrap(),
+                "--path",
+                wt.to_str().unwrap(),
+            ],
+            main,
+        ),
         "worktree add",
     );
     let wt_canonical = wt.canonicalize().expect("canonical wt");
@@ -6144,7 +6825,10 @@ fn remove_is_lease_gated_and_expiry_unblocks() {
         "plant the live lease"
     );
 
-    let refused = run_libra_command(&["worktree", "remove", wt.to_str().unwrap()], main);
+    let refused = run_libra_command(
+        &["worktree", "remove", "--path", wt.to_str().unwrap()],
+        main,
+    );
     assert!(
         !refused.status.success(),
         "an unexpired agent lease refuses remove"
@@ -6165,18 +6849,33 @@ fn remove_is_lease_gated_and_expiry_unblocks() {
         "expire the lease"
     );
     assert_cli_success(
-        &run_libra_command(&["worktree", "remove", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &["worktree", "remove", "--path", wt.to_str().unwrap()],
+            main,
+        ),
         "an expired lease no longer blocks",
     );
 
     // The human path: a second worktree with NO lease removes untouched.
     let wt2 = main.join("wt-unleased");
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt2.to_str().unwrap()], main),
+        &run_libra_command(
+            &[
+                "worktree",
+                "add",
+                wt2.file_name().unwrap().to_str().unwrap(),
+                "--path",
+                wt2.to_str().unwrap(),
+            ],
+            main,
+        ),
         "worktree add 2",
     );
     assert_cli_success(
-        &run_libra_command(&["worktree", "remove", wt2.to_str().unwrap()], main),
+        &run_libra_command(
+            &["worktree", "remove", "--path", wt2.to_str().unwrap()],
+            main,
+        ),
         "no lease, no refusal",
     );
 }
@@ -6191,7 +6890,16 @@ fn v2_identity_invariant_violations_refuse_until_explicit_repair() {
     let main = dir.path();
     let wt = main.join("wt-invariant");
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &[
+                "worktree",
+                "add",
+                wt.file_name().unwrap().to_str().unwrap(),
+                "--path",
+                wt.to_str().unwrap(),
+            ],
+            main,
+        ),
         "worktree add",
     );
     let gitdir_id = std::fs::read_to_string(wt.join(".libra").join("worktree_id"))
@@ -6222,7 +6930,14 @@ fn v2_identity_invariant_violations_refuse_until_explicit_repair() {
         "list refuses the corrupt v2 registry"
     );
     let lock = run_libra_command(
-        &["worktree", "lock", wt.to_str().unwrap(), "--reason", "x"],
+        &[
+            "worktree",
+            "lock",
+            "--path",
+            wt.to_str().unwrap(),
+            "--reason",
+            "x",
+        ],
         main,
     );
     assert!(
@@ -6262,7 +6977,14 @@ fn v2_identity_invariant_violations_refuse_until_explicit_repair() {
     // Mutators work again.
     assert_cli_success(
         &run_libra_command(
-            &["worktree", "lock", wt.to_str().unwrap(), "--reason", "x"],
+            &[
+                "worktree",
+                "lock",
+                "--path",
+                wt.to_str().unwrap(),
+                "--reason",
+                "x",
+            ],
             main,
         ),
         "mutators run after the heal",
@@ -6278,7 +7000,16 @@ fn zero_byte_registry_fails_closed_everywhere() {
     let main = dir.path();
     let wt = main.join("wt-torn");
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &[
+                "worktree",
+                "add",
+                wt.file_name().unwrap().to_str().unwrap(),
+                "--path",
+                wt.to_str().unwrap(),
+            ],
+            main,
+        ),
         "worktree add",
     );
     let registry = main.join(".libra").join("worktrees.json");
@@ -6286,9 +7017,22 @@ fn zero_byte_registry_fails_closed_everywhere() {
 
     for argv in [
         vec!["worktree", "list"],
-        vec!["worktree", "lock", wt.to_str().unwrap(), "--reason", "x"],
+        vec![
+            "worktree",
+            "lock",
+            "--path",
+            wt.to_str().unwrap(),
+            "--reason",
+            "x",
+        ],
         vec!["worktree", "repair", "--confirm"],
-        vec!["worktree", "repair", wt.to_str().unwrap(), "--confirm"],
+        vec![
+            "worktree",
+            "repair",
+            "--path",
+            wt.to_str().unwrap(),
+            "--confirm",
+        ],
     ] {
         let out = run_libra_command(&argv, main);
         assert!(
@@ -6315,7 +7059,16 @@ fn worktree_repair_path_refuses_v1_registry_until_upgrade() {
     let main = dir.path();
     let wt = main.join("wt-v1-repair");
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &[
+                "worktree",
+                "add",
+                wt.file_name().unwrap().to_str().unwrap(),
+                "--path",
+                wt.to_str().unwrap(),
+            ],
+            main,
+        ),
         "worktree add",
     );
 
@@ -6344,7 +7097,13 @@ fn worktree_repair_path_refuses_v1_registry_until_upgrade() {
     .expect("write v1 registry");
 
     let refused = run_libra_command(
-        &["worktree", "repair", wt.to_str().unwrap(), "--confirm"],
+        &[
+            "worktree",
+            "repair",
+            "--path",
+            wt.to_str().unwrap(),
+            "--confirm",
+        ],
         main,
     );
     assert!(
@@ -6364,7 +7123,13 @@ fn worktree_repair_path_refuses_v1_registry_until_upgrade() {
     );
     assert_cli_success(
         &run_libra_command(
-            &["worktree", "repair", wt.to_str().unwrap(), "--confirm"],
+            &[
+                "worktree",
+                "repair",
+                "--path",
+                wt.to_str().unwrap(),
+                "--confirm",
+            ],
             main,
         ),
         "path repair works on the upgraded registry",
@@ -6382,7 +7147,16 @@ fn v1_upgrade_never_crowns_a_linked_entry_as_main() {
     let canonical_main = main.canonicalize().expect("canonical main");
     let wt = main.join("wt-crown");
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &[
+                "worktree",
+                "add",
+                wt.file_name().unwrap().to_str().unwrap(),
+                "--path",
+                wt.to_str().unwrap(),
+            ],
+            main,
+        ),
         "worktree add",
     );
     let gitdir_id = std::fs::read_to_string(wt.join(".libra").join("worktree_id"))
@@ -6453,7 +7227,13 @@ fn bare_repository_refuses_worktree_family() {
     let wt_target = dir.path().join("wt-from-bare");
     for argv in [
         vec!["worktree", "list"],
-        vec!["worktree", "add", wt_target.to_str().unwrap()],
+        vec![
+            "worktree",
+            "add",
+            wt_target.file_name().unwrap().to_str().unwrap(),
+            "--path",
+            wt_target.to_str().unwrap(),
+        ],
         vec!["worktree", "repair"],
     ] {
         let out = run_libra_command(&argv, &bare);
@@ -6566,7 +7346,16 @@ fn detached_worktree_fails_closed_until_reattach() {
     let main = dir.path();
     let wt = main.join("wt-detach");
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &[
+                "worktree",
+                "add",
+                wt.file_name().unwrap().to_str().unwrap(),
+                "--path",
+                wt.to_str().unwrap(),
+            ],
+            main,
+        ),
         "worktree add",
     );
     assert_cli_success(
@@ -6575,7 +7364,10 @@ fn detached_worktree_fails_closed_until_reattach() {
     );
 
     assert_cli_success(
-        &run_libra_command(&["worktree", "remove", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &["worktree", "remove", "--path", wt.to_str().unwrap()],
+            main,
+        ),
         "detach",
     );
 
@@ -6598,11 +7390,24 @@ fn detached_worktree_fails_closed_until_reattach() {
     }
 
     // Repeat keep-dir remove refuses (already detached).
-    let again = run_libra_command(&["worktree", "remove", wt.to_str().unwrap()], main);
+    let again = run_libra_command(
+        &["worktree", "remove", "--path", wt.to_str().unwrap()],
+        main,
+    );
     assert!(!again.status.success(), "double detach refused");
 
     // Re-attach restores the SAME scope: HEAD is still `feature`.
-    let readd = run_libra_command(&["--json", "worktree", "add", wt.to_str().unwrap()], main);
+    let readd = run_libra_command(
+        &[
+            "--json",
+            "worktree",
+            "add",
+            wt.file_name().unwrap().to_str().unwrap(),
+            "--path",
+            wt.to_str().unwrap(),
+        ],
+        main,
+    );
     assert_cli_success(&readd, "re-attach");
     let payload = parse_json_stdout(&readd);
     assert_eq!(payload["data"]["reattached"], true);
@@ -6626,22 +7431,43 @@ fn reattach_refuses_identity_mismatch() {
     let main = dir.path();
     let wt = main.join("wt-swap");
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &[
+                "worktree",
+                "add",
+                wt.file_name().unwrap().to_str().unwrap(),
+                "--path",
+                wt.to_str().unwrap(),
+            ],
+            main,
+        ),
         "worktree add",
     );
     assert_cli_success(
-        &run_libra_command(&["worktree", "remove", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &["worktree", "remove", "--path", wt.to_str().unwrap()],
+            main,
+        ),
         "detach",
     );
     std::fs::write(wt.join(".libra").join("worktree_id"), "someone-else\n").expect("swap identity");
-    let refused = run_libra_command(&["worktree", "add", wt.to_str().unwrap()], main);
+    let refused = run_libra_command(
+        &[
+            "worktree",
+            "add",
+            wt.file_name().unwrap().to_str().unwrap(),
+            "--path",
+            wt.to_str().unwrap(),
+        ],
+        main,
+    );
     assert!(
         !refused.status.success(),
         "re-attach must refuse a swapped identity"
     );
     let stderr = String::from_utf8_lossy(&refused.stderr);
     assert!(
-        stderr.contains("does not match"),
+        stderr.contains("no longer carries the registered worktree identity"),
         "identity mismatch explained: {stderr}"
     );
 }
@@ -6658,7 +7484,16 @@ async fn worktree_remove_delete_crash_repair() {
     let main = dir.path();
     let wt = main.join("wt-crash");
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &[
+                "worktree",
+                "add",
+                wt.file_name().unwrap().to_str().unwrap(),
+                "--path",
+                wt.to_str().unwrap(),
+            ],
+            main,
+        ),
         "worktree add",
     );
     assert_cli_success(
@@ -6754,7 +7589,16 @@ fn prune_does_not_treat_permission_error_as_missing() {
     let parent = tempfile::tempdir().expect("wt parent");
     let wt = parent.path().join("guarded");
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &[
+                "worktree",
+                "add",
+                wt.file_name().unwrap().to_str().unwrap(),
+                "--path",
+                wt.to_str().unwrap(),
+            ],
+            main,
+        ),
         "worktree add",
     );
 
@@ -6789,7 +7633,7 @@ fn nix_effective_root() -> bool {
     unsafe { libc::geteuid() == 0 }
 }
 
-/// `worktree remove --delete-dir .` run from INSIDE the target: the command
+/// `worktree remove --delete-dir --path .` run from INSIDE the target: the command
 /// must move its own cwd out before deleting, complete cleanly, and leave
 /// no journal/lifecycle residue.
 #[tokio::test]
@@ -6800,11 +7644,20 @@ async fn remove_delete_dir_dot_from_inside_worktree() {
     let main = dir.path();
     let wt = main.join("wt-self-delete");
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &[
+                "worktree",
+                "add",
+                wt.file_name().unwrap().to_str().unwrap(),
+                "--path",
+                wt.to_str().unwrap(),
+            ],
+            main,
+        ),
         "worktree add",
     );
 
-    let out = run_libra_command(&["worktree", "remove", "--delete-dir", "."], &wt);
+    let out = run_libra_command(&["worktree", "remove", "--delete-dir", "--path", "."], &wt);
     assert!(
         out.status.success(),
         "remove --delete-dir . from inside the worktree: {}",
@@ -6850,7 +7703,16 @@ async fn move_crash_ambiguous_states_keep_journal() {
     let main = dir.path();
     let wt = main.join("wt-move-src");
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &[
+                "worktree",
+                "add",
+                wt.file_name().unwrap().to_str().unwrap(),
+                "--path",
+                wt.to_str().unwrap(),
+            ],
+            main,
+        ),
         "worktree add",
     );
     let canonical_wt = wt.canonicalize().expect("canonical src");
@@ -6970,7 +7832,16 @@ async fn move_crash_recovery_never_adopts_foreign_destination_entry() {
     let y = main.join("wt-move-y");
     for wt in [&x, &y] {
         assert_cli_success(
-            &run_libra_command(&["worktree", "add", wt.to_str().unwrap()], main),
+            &run_libra_command(
+                &[
+                    "worktree",
+                    "add",
+                    wt.file_name().unwrap().to_str().unwrap(),
+                    "--path",
+                    wt.to_str().unwrap(),
+                ],
+                main,
+            ),
             "worktree add",
         );
     }
@@ -7066,7 +7937,16 @@ async fn stale_reattach_journal_does_not_unfreeze_later_detach() {
     let main = dir.path();
     let wt = main.join("wt-stale-reattach");
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &[
+                "worktree",
+                "add",
+                wt.file_name().unwrap().to_str().unwrap(),
+                "--path",
+                wt.to_str().unwrap(),
+            ],
+            main,
+        ),
         "worktree add",
     );
     let canonical_wt = wt.canonicalize().expect("canonical wt");
@@ -7078,7 +7958,10 @@ async fn stale_reattach_journal_does_not_unfreeze_later_detach() {
     // The worktree is CURRENTLY detached (a later detach the stale journal
     // must not betray).
     assert_cli_success(
-        &run_libra_command(&["worktree", "remove", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &["worktree", "remove", "--path", wt.to_str().unwrap()],
+            main,
+        ),
         "detach",
     );
 
@@ -7145,7 +8028,7 @@ async fn stale_reattach_journal_does_not_unfreeze_later_detach() {
     assert_eq!(count, 0, "stale reattach intent resolved as rolled back");
 }
 
-/// W3-s2 (§C.7): `worktree add <path> <branch>` checks the branch out in
+/// W3-s2 (§C.7): `worktree add <name> <branch> --path <path>` checks the branch out in
 /// the new worktree (attached HEAD), and the branch is then held — no
 /// other worktree can switch to it.
 #[test]
@@ -7154,8 +8037,18 @@ fn worktree_add_with_branch_attaches() {
     let main = dir.path();
     let wt = main.join("wt-branch");
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap(), "feature"], main),
-        "worktree add <path> <branch>",
+        &run_libra_command(
+            &[
+                "worktree",
+                "add",
+                wt.file_name().unwrap().to_str().unwrap(),
+                "--path",
+                wt.to_str().unwrap(),
+                "feature",
+            ],
+            main,
+        ),
+        "worktree add <name> <branch> --path <path>",
     );
     let head = String::from_utf8_lossy(
         &run_libra_command(&["rev-parse", "--abbrev-ref", "HEAD"], &wt).stdout,
@@ -7196,7 +8089,14 @@ fn worktree_add_branch_collision_has_zero_side_effects() {
     // Checking out the branch the CURRENT worktree holds is refused.
     let wt = main.join("wt-collision");
     let refused = run_libra_command(
-        &["worktree", "add", wt.to_str().unwrap(), &main_branch],
+        &[
+            "worktree",
+            "add",
+            wt.file_name().unwrap().to_str().unwrap(),
+            "--path",
+            wt.to_str().unwrap(),
+            &main_branch,
+        ],
         main,
     );
     assert!(!refused.status.success(), "current-branch target refused");
@@ -7204,7 +8104,15 @@ fn worktree_add_branch_collision_has_zero_side_effects() {
 
     // `-b` with an existing branch name is refused (no -B/--force).
     let refused = run_libra_command(
-        &["worktree", "add", "-b", "feature", wt.to_str().unwrap()],
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "feature",
+            wt.file_name().unwrap().to_str().unwrap(),
+            "--path",
+            wt.to_str().unwrap(),
+        ],
         main,
     );
     assert!(!refused.status.success(), "-b collision refused");
@@ -7222,7 +8130,14 @@ fn worktree_add_branch_collision_has_zero_side_effects() {
 
     // A nonexistent target fails closed (no DWIM) with zero side effects.
     let refused = run_libra_command(
-        &["worktree", "add", wt.to_str().unwrap(), "no-such-thing"],
+        &[
+            "worktree",
+            "add",
+            wt.file_name().unwrap().to_str().unwrap(),
+            "--path",
+            wt.to_str().unwrap(),
+            "no-such-thing",
+        ],
         main,
     );
     assert!(!refused.status.success(), "unknown target fails closed");
@@ -7236,6 +8151,8 @@ fn worktree_add_branch_collision_has_zero_side_effects() {
             "--detach",
             "-b",
             "brand-new",
+            wt.file_name().unwrap().to_str().unwrap(),
+            "--path",
             wt.to_str().unwrap(),
         ],
         main,
@@ -7243,7 +8160,7 @@ fn worktree_add_branch_collision_has_zero_side_effects() {
     assert!(!refused.status.success(), "-b with --detach refused");
 }
 
-/// `worktree add <path> <commit>` and `--detach <path> <branch>` both seed
+/// `worktree add <name> <commit> --path <path>` and `--detach <name> <branch> --path <path>` both seed
 /// a DETACHED worktree at the resolved commit; a detached branch target is
 /// NOT held (other worktrees can still check the branch out).
 #[test]
@@ -7267,10 +8184,17 @@ fn worktree_add_commit_and_detach_are_detached() {
     let wt_commit = main.join("wt-at-commit");
     assert_cli_success(
         &run_libra_command(
-            &["worktree", "add", wt_commit.to_str().unwrap(), &feature_tip],
+            &[
+                "worktree",
+                "add",
+                wt_commit.file_name().unwrap().to_str().unwrap(),
+                "--path",
+                wt_commit.to_str().unwrap(),
+                &feature_tip,
+            ],
             main,
         ),
-        "worktree add <path> <commit>",
+        "worktree add <name> <commit> --path <path>",
     );
     let head =
         String::from_utf8_lossy(&run_libra_command(&["rev-parse", "HEAD"], &wt_commit).stdout)
@@ -7290,12 +8214,14 @@ fn worktree_add_commit_and_detach_are_detached() {
                 "worktree",
                 "add",
                 "--detach",
+                wt_detach.file_name().unwrap().to_str().unwrap(),
+                "--path",
                 wt_detach.to_str().unwrap(),
                 "feature",
             ],
             main,
         ),
-        "worktree add --detach <path> <branch>",
+        "worktree add --detach <name> <branch> --path <path>",
     );
     let abbrev = String::from_utf8_lossy(
         &run_libra_command(&["rev-parse", "--abbrev-ref", "HEAD"], &wt_detach).stdout,
@@ -7309,7 +8235,7 @@ fn worktree_add_commit_and_detach_are_detached() {
     );
 }
 
-/// `worktree add -b <new> <path> [<start>]` creates the branch at the
+/// `worktree add -b <new> <name> [<start>] --path <path>` creates the branch at the
 /// start point and attaches the new worktree to it.
 #[test]
 fn worktree_add_new_branch_from_start_point() {
@@ -7328,12 +8254,14 @@ fn worktree_add_new_branch_from_start_point() {
                 "add",
                 "-b",
                 "topic-x",
+                wt.file_name().unwrap().to_str().unwrap(),
+                "--path",
                 wt.to_str().unwrap(),
                 "feature",
             ],
             main,
         ),
-        "worktree add -b <new> <path> <start>",
+        "worktree add -b <new> <name> <start> --path <path>",
     );
     let head = String::from_utf8_lossy(
         &run_libra_command(&["rev-parse", "--abbrev-ref", "HEAD"], &wt).stdout,
@@ -7376,6 +8304,8 @@ fn worktree_add_new_branch_rolls_back_on_populate_failure() {
             "add",
             "-b",
             "doomed-topic",
+            wt.file_name().unwrap().to_str().unwrap(),
+            "--path",
             wt.to_str().unwrap(),
             "feature",
         ],
@@ -7431,6 +8361,8 @@ fn concurrent_add_same_new_branch_single_winner() {
                 "add",
                 "-b",
                 "raced-topic",
+                wt.file_name().unwrap().to_str().unwrap(),
+                "--path",
                 wt.to_str().unwrap(),
                 "feature",
             ])
@@ -7640,7 +8572,14 @@ fn injected_probe_fault_refuses_attach_and_switch() {
 
     let wt = main.join("wt-probe-fault");
     let add = std::process::Command::new(libra)
-        .args(["worktree", "add", wt.to_str().unwrap(), "feature"])
+        .args([
+            "worktree",
+            "add",
+            wt.file_name().unwrap().to_str().unwrap(),
+            "--path",
+            wt.to_str().unwrap(),
+            "feature",
+        ])
         .env("LIBRA_TEST_FAULT", "branch-attach-probe")
         .current_dir(main)
         .output()
@@ -7650,7 +8589,16 @@ fn injected_probe_fault_refuses_attach_and_switch() {
 
     // A detached worktree trying to switch onto the branch under the fault.
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &[
+                "worktree",
+                "add",
+                wt.file_name().unwrap().to_str().unwrap(),
+                "--path",
+                wt.to_str().unwrap(),
+            ],
+            main,
+        ),
         "detached worktree add",
     );
     let switch = std::process::Command::new(libra)
@@ -7782,8 +8730,14 @@ fn legacy_symlink_mutation_fails_closed() {
     let registry = main.join(".libra").join("worktrees.json");
     let registry_before = std::fs::read(&registry).expect("registry bytes");
     for argv in [
-        vec!["worktree", "remove", wt.to_str().unwrap()],
-        vec!["worktree", "repair", wt.to_str().unwrap(), "--confirm"],
+        vec!["worktree", "remove", "--path", wt.to_str().unwrap()],
+        vec![
+            "worktree",
+            "repair",
+            "--path",
+            wt.to_str().unwrap(),
+            "--confirm",
+        ],
     ] {
         let out = run_libra_command(&argv, main);
         assert!(
@@ -8292,7 +9246,17 @@ async fn layout_migration_crash_matrix() {
     // must NOT be adopted and re-seeded from the old snapshot.
     let wt3 = main.join("wt-crash-stale");
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt3.to_str().unwrap(), "feature"], main),
+        &run_libra_command(
+            &[
+                "worktree",
+                "add",
+                wt3.file_name().unwrap().to_str().unwrap(),
+                "--path",
+                wt3.to_str().unwrap(),
+                "feature",
+            ],
+            main,
+        ),
         "fresh worktree at the contested path",
     );
     let wt3_canonical = wt3.canonicalize().expect("canonical wt3");
@@ -8332,6 +9296,7 @@ async fn layout_migration_crash_matrix() {
             "repair",
             "--migrate-layout",
             "--confirm",
+            "--path",
             wt3.to_str().unwrap(),
         ],
         main,
@@ -8351,7 +9316,16 @@ async fn layout_migration_crash_matrix() {
     // it, unfreezing the worktree.
     let wt4 = main.join("wt-stray-marker");
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt4.to_str().unwrap()], main),
+        &run_libra_command(
+            &[
+                "worktree",
+                "add",
+                wt4.file_name().unwrap().to_str().unwrap(),
+                "--path",
+                wt4.to_str().unwrap(),
+            ],
+            main,
+        ),
         "fresh worktree",
     );
     std::fs::write(
@@ -8380,7 +9354,16 @@ async fn layout_migration_crash_matrix() {
     // still-unmigrated state).
     let wt5 = main.join("wt-move-pending");
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt5.to_str().unwrap()], main),
+        &run_libra_command(
+            &[
+                "worktree",
+                "add",
+                wt5.file_name().unwrap().to_str().unwrap(),
+                "--path",
+                wt5.to_str().unwrap(),
+            ],
+            main,
+        ),
         "worktree for move guard",
     );
     let wt5_canonical = wt5.canonicalize().expect("canonical wt5");
@@ -8400,7 +9383,9 @@ async fn layout_migration_crash_matrix() {
         &[
             "worktree",
             "move",
+            "--from-path",
             wt5.to_str().unwrap(),
+            "--path",
             main.join("wt-moved-away").to_str().unwrap(),
         ],
         main,
@@ -8429,7 +9414,16 @@ fn worktree_doctor_default_invocation_is_readonly() {
     let main = dir.path();
     let wt = main.join("wt-doctor");
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &[
+                "worktree",
+                "add",
+                wt.file_name().unwrap().to_str().unwrap(),
+                "--path",
+                wt.to_str().unwrap(),
+            ],
+            main,
+        ),
         "worktree add",
     );
 
@@ -8509,7 +9503,16 @@ fn worktree_doctor_reports_scope_diagnostics_without_repairing() {
     let main = dir.path();
     let wt = main.join("wt-doctor-damaged");
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &[
+                "worktree",
+                "add",
+                wt.file_name().unwrap().to_str().unwrap(),
+                "--path",
+                wt.to_str().unwrap(),
+            ],
+            main,
+        ),
         "worktree add",
     );
     let id_file = wt.join(".libra").join("worktree_id");
@@ -8677,7 +9680,17 @@ fn op_restore_cross_worktree_scope_rejected() {
 
     let wt = parent.path().join("linked");
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap(), "feature"], main),
+        &run_libra_command(
+            &[
+                "worktree",
+                "add",
+                wt.file_name().unwrap().to_str().unwrap(),
+                "--path",
+                wt.to_str().unwrap(),
+                "feature",
+            ],
+            main,
+        ),
         "worktree add",
     );
     let head_before = run_libra_command(&["rev-parse", "HEAD"], &wt);
@@ -8723,7 +9736,17 @@ fn seam_checkout_collision_reports_a_conflict_not_corruption() {
     let main = dir.path();
     let wt = main.join("wt-collide");
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap(), "feature"], main),
+        &run_libra_command(
+            &[
+                "worktree",
+                "add",
+                wt.file_name().unwrap().to_str().unwrap(),
+                "--path",
+                wt.to_str().unwrap(),
+                "feature",
+            ],
+            main,
+        ),
         "worktree add on 'feature'",
     );
 
@@ -8791,7 +9814,17 @@ fn seam_branch_tip_collision_reports_a_conflict_not_a_write_fault() {
     let main = dir.path();
     let wt = main.join("wt-tip");
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap(), "feature"], main),
+        &run_libra_command(
+            &[
+                "worktree",
+                "add",
+                wt.file_name().unwrap().to_str().unwrap(),
+                "--path",
+                wt.to_str().unwrap(),
+                "feature",
+            ],
+            main,
+        ),
         "worktree add on 'feature'",
     );
     fs::write(main.join("b.txt"), "b\n").unwrap();
@@ -8879,7 +9912,17 @@ fn two_linked_rebases_keep_independent_todo_and_abort() {
         );
         let wt = parent.path().join(branch);
         assert_cli_success(
-            &run_libra_command(&["worktree", "add", wt.to_str().unwrap(), branch], main),
+            &run_libra_command(
+                &[
+                    "worktree",
+                    "add",
+                    wt.file_name().unwrap().to_str().unwrap(),
+                    "--path",
+                    wt.to_str().unwrap(),
+                    branch,
+                ],
+                main,
+            ),
             "worktree add",
         );
         fs::write(wt.join("a.txt"), content).unwrap();
@@ -8988,7 +10031,16 @@ fn dirty_cache_rows_are_invisible_across_worktrees() {
     let parent = tempfile::tempdir().expect("wt parent");
     let wt = parent.path().join("wt");
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &[
+                "worktree",
+                "add",
+                wt.file_name().unwrap().to_str().unwrap(),
+                "--path",
+                wt.to_str().unwrap(),
+            ],
+            main,
+        ),
         "worktree add",
     );
 
@@ -9067,7 +10119,17 @@ fn linked_rebase_auxiliary_state_is_per_worktree() {
         );
         let wt = parent.path().join(branch);
         assert_cli_success(
-            &run_libra_command(&["worktree", "add", wt.to_str().unwrap(), branch], main),
+            &run_libra_command(
+                &[
+                    "worktree",
+                    "add",
+                    wt.file_name().unwrap().to_str().unwrap(),
+                    "--path",
+                    wt.to_str().unwrap(),
+                    branch,
+                ],
+                main,
+            ),
             "worktree add",
         );
         fs::write(wt.join("a.txt"), content).unwrap();
@@ -9126,7 +10188,17 @@ fn linked_rebase_auxiliary_state_is_per_worktree() {
         );
         let wt = parent.path().join(branch);
         assert_cli_success(
-            &run_libra_command(&["worktree", "add", wt.to_str().unwrap(), branch], main),
+            &run_libra_command(
+                &[
+                    "worktree",
+                    "add",
+                    wt.file_name().unwrap().to_str().unwrap(),
+                    "--path",
+                    wt.to_str().unwrap(),
+                    branch,
+                ],
+                main,
+            ),
             "worktree add",
         );
         fs::write(wt.join(file), "own file\n").unwrap();
@@ -9342,7 +10414,16 @@ fn ambiguous_legacy_refusal_names_rebase_apply() {
     let parent = tempfile::tempdir().expect("wt parent");
     let wt = parent.path().join("wt");
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &[
+                "worktree",
+                "add",
+                wt.file_name().unwrap().to_str().unwrap(),
+                "--path",
+                wt.to_str().unwrap(),
+            ],
+            main,
+        ),
         "worktree add",
     );
 
@@ -9506,7 +10587,17 @@ fn concurrent_identical_control_actions_in_two_worktrees_not_deduped() {
         );
         let wt = parent.path().join(branch);
         assert_cli_success(
-            &run_libra_command(&["worktree", "add", wt.to_str().unwrap(), branch], main),
+            &run_libra_command(
+                &[
+                    "worktree",
+                    "add",
+                    wt.file_name().unwrap().to_str().unwrap(),
+                    "--path",
+                    wt.to_str().unwrap(),
+                    branch,
+                ],
+                main,
+            ),
             "worktree add",
         );
         fs::write(wt.join("a.txt"), "same-edit\n").unwrap();

@@ -1345,7 +1345,13 @@ async fn test_pull_rebase_autostash_in_linked_worktree_pops_only_its_own_entry()
     let wt = wt_root.path().join("autostash-wt");
     assert_cli_success(
         &run_libra_command(
-            &["worktree", "add", wt.to_str().unwrap()],
+            &[
+                "worktree",
+                "add",
+                "autostash-wt",
+                "--path",
+                wt.to_str().unwrap(),
+            ],
             local_repo.path(),
         ),
         "worktree add",
@@ -1498,7 +1504,13 @@ async fn test_incremental_repack_consolidates_with_linked_worktree_roots() {
     let wt = wt_root.path().join("repack-wt");
     assert_cli_success(
         &run_libra_command(
-            &["worktree", "add", wt.to_str().unwrap()],
+            &[
+                "worktree",
+                "add",
+                "repack-wt",
+                "--path",
+                wt.to_str().unwrap(),
+            ],
             local_repo.path(),
         ),
         "worktree add",

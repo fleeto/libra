@@ -260,7 +260,10 @@ fn dirty_mark_rejected_in_multi_worktree_repo() {
     let wt_root = tempdir().expect("wt root");
     let wt = wt_root.path().join("svc-wt");
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &["worktree", "add", "svc-wt", "--path", wt.to_str().unwrap()],
+            main,
+        ),
         "worktree add",
     );
     let (_guard, base_url, token) = spawn_service(main);
@@ -351,7 +354,10 @@ fn linked_service_dirty_mark_is_scoped() {
     let parent = tempfile::tempdir().expect("wt parent");
     let wt = parent.path().join("svc-wt");
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &["worktree", "add", "svc-wt", "--path", wt.to_str().unwrap()],
+            main,
+        ),
         "worktree add",
     );
     let worktree_id = std::fs::read_to_string(wt.join(".libra").join("worktree_id"))
@@ -519,7 +525,17 @@ fn repo_with_linked(branch: &str) -> (tempfile::TempDir, tempfile::TempDir, std:
     );
     let wt = parent.path().join(branch);
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap(), branch], main),
+        &run_libra_command(
+            &[
+                "worktree",
+                "add",
+                branch,
+                branch,
+                "--path",
+                wt.to_str().unwrap(),
+            ],
+            main,
+        ),
         "worktree add",
     );
     (repo, parent, wt)
@@ -717,13 +733,29 @@ fn service_dirty_mark_stale_epoch_rejected() {
     // Remove and re-add at the SAME path: same id, same path, new generation.
     assert_cli_success(
         &run_libra_command(
-            &["worktree", "remove", "--delete-dir", wt.to_str().unwrap()],
+            &[
+                "worktree",
+                "remove",
+                "--delete-dir",
+                "--path",
+                wt.to_str().unwrap(),
+            ],
             main,
         ),
         "worktree remove",
     );
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap(), "fence-wt"], main),
+        &run_libra_command(
+            &[
+                "worktree",
+                "add",
+                "fence-wt",
+                "fence-wt",
+                "--path",
+                wt.to_str().unwrap(),
+            ],
+            main,
+        ),
         "worktree re-add",
     );
     let fresh_epoch = registered_epoch(main, &worktree_id);
@@ -1503,7 +1535,13 @@ fn service_restarts_over_its_own_legacy_record_in_a_linked_repository() {
     // adoptable under the OLD rule too, and this test would prove nothing.
     let linked = main.join("linked-wt");
     let added = run_libra_command(
-        &["worktree", "add", linked.to_str().expect("utf-8 path")],
+        &[
+            "worktree",
+            "add",
+            "linked-wt",
+            "--path",
+            linked.to_str().expect("utf-8 path"),
+        ],
         main,
     );
     assert!(

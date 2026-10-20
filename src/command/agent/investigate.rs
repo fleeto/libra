@@ -212,6 +212,9 @@ async fn attach(args: InvestigateAttachArgs, output: &OutputConfig) -> CliResult
         .load_state(&args.run_id)
         .map_err(|e| map_store_error("failed to read investigate run state", e))?
         .ok_or_else(|| run_not_found(&args.run_id))?;
+    store
+        .ensure_mutable_run(&args.run_id)
+        .map_err(|e| map_store_error("investigate run format cannot be modified", e))?;
 
     // Sanitize the record/display name FIRST, so a hostile path never reaches
     // the read-error either.
@@ -831,24 +834,7 @@ async fn cancel(args: InvestigateCancelArgs, output: &OutputConfig) -> CliResult
         .map_err(|e| map_store_error("failed to read investigate run state", e))?
         .ok_or_else(|| run_not_found(&args.run_id))?;
     if state.is_terminal() {
-        let terminal = terminal_label(state.terminal_state, None);
-        if output.is_json() {
-            let payload = serde_json::json!({
-                "schema_version": PAGE_SCHEMA_VERSION,
-                "run_id": args.run_id,
-                "cancelled": false,
-                "mode": "already-terminal",
-                "terminal_state": terminal,
-            });
-            return emit_json_data("investigate_cancel", &payload, output);
-        }
-        if !output.quiet {
-            println!(
-                "investigate run {} is already terminal ({terminal}); nothing to cancel",
-                args.run_id
-            );
-        }
-        return Ok(());
+        return emit_already_terminal_cancel(&args.run_id, state.terminal_state, output);
     }
 
     // Drop the cross-process cancel marker a live driver polls; the owning
@@ -867,12 +853,30 @@ async fn cancel(args: InvestigateCancelArgs, output: &OutputConfig) -> CliResult
             break;
         }
     }
-    // No live driver answered (crashed / never running / paused): the OS
-    // run lock is already released (it drops with the driver process), so
-    // stamp the terminal state directly.
+    // An unanswered marker does not prove the driver stopped. Acquire the
+    // same run lock before orphan cleanup or changing its lifecycle state.
     let mode = if acknowledged {
         "live"
     } else {
+        let _run_lock = store.try_lock_run(&args.run_id).map_err(|error| {
+            map_store_error(
+                "investigate driver has not released its run lock; wait for cancellation before retrying",
+                error,
+            )
+        })?;
+        let state = store
+            .load_state(&args.run_id)
+            .map_err(|error| map_store_error("failed to re-read investigate run state", error))?
+            .ok_or_else(|| run_not_found(&args.run_id))?;
+        if state.is_terminal() {
+            return emit_already_terminal_cancel(&args.run_id, state.terminal_state, output);
+        }
+        store.cleanup_workspaces(&args.run_id).map_err(|error| {
+            map_store_error(
+                "failed to clean up investigate workspaces; the run was retained for retry",
+                error,
+            )
+        })?;
         store
             .mark_cancelled(&args.run_id)
             .map_err(|e| map_store_error("failed to cancel the investigate run", e))?;
@@ -898,6 +902,28 @@ async fn cancel(args: InvestigateCancelArgs, output: &OutputConfig) -> CliResult
                 args.run_id
             ),
         }
+    }
+    Ok(())
+}
+
+fn emit_already_terminal_cancel(
+    run_id: &str,
+    terminal_state: Option<InvestigateTerminalState>,
+    output: &OutputConfig,
+) -> CliResult<()> {
+    let terminal = terminal_label(terminal_state, None);
+    if output.is_json() {
+        let payload = serde_json::json!({
+            "schema_version": PAGE_SCHEMA_VERSION,
+            "run_id": run_id,
+            "cancelled": false,
+            "mode": "already-terminal",
+            "terminal_state": terminal,
+        });
+        return emit_json_data("investigate_cancel", &payload, output);
+    }
+    if !output.quiet {
+        println!("investigate run {run_id} is already terminal ({terminal}); nothing to cancel");
     }
     Ok(())
 }

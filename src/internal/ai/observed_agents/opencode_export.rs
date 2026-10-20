@@ -1392,7 +1392,11 @@ async fn run_macos_bounded_process(
             let terminated = child.terminate_and_reap();
             let _ = stderr_reader.await;
             if !terminated {
-                bail!("opencode export termination could not be confirmed; content skipped");
+                bail!(
+                    "opencode export exceeded the {} byte cap (observed {observed} bytes), \
+                     but termination could not be confirmed; content skipped",
+                    limits.max_bytes
+                );
             }
             bail!(
                 "opencode export exceeded the {} byte cap while running \
@@ -5728,22 +5732,29 @@ printf 'tty=detached'"#,
         let exact = macos_test_process(
             root.path(),
             "printf complete".into(),
-            Duration::from_secs(2),
+            Duration::from_secs(10),
         )
         .await
         .expect("a contained successful output is accepted");
         assert_eq!(exact, b"complete");
         let overflow = macos_test_process(
             root.path(),
-            "i=0; while [ \"$i\" -lt 2000 ]; do printf x; i=$((i + 1)); done".into(),
-            Duration::from_secs(2),
+            "printf '%02048d' 0".into(),
+            Duration::from_secs(10),
         )
         .await
         .expect_err("stdout beyond the cap must fail rather than truncate");
-        assert!(format!("{overflow:#}").contains("byte cap"));
-        let stderr = macos_test_process(root.path(),
-            "i=0; while [ \"$i\" -lt 1000 ]; do printf SECRET >&2; i=$((i + 1)); done; printf output".into(), Duration::from_secs(2))
-            .await.expect_err("oversize stderr must reject otherwise successful stdout");
+        assert!(
+            format!("{overflow:#}").contains("byte cap"),
+            "unexpected stdout rejection: {overflow:#}"
+        );
+        let stderr = macos_test_process(
+            root.path(),
+            "printf SECRET >&2; printf '%04084d' 0 >&2; printf SECRET >&2; printf '%01000d' 0 >&2; printf output".into(),
+            Duration::from_secs(10),
+        )
+        .await
+        .expect_err("oversize stderr must reject otherwise successful stdout");
         let rendered = format!("{stderr:#}");
         assert!(rendered.contains("stderr"));
         assert!(!rendered.contains("SECRET"));
@@ -5775,6 +5786,7 @@ printf 'tty=detached'"#,
     }
 
     #[cfg(target_os = "macos")]
+    #[serial_test::serial(cwd, env)]
     #[tokio::test]
     async fn macos_export_requires_trusted_binary_before_spawn() {
         let dir = tempfile::tempdir().expect("create fake exporter directory");

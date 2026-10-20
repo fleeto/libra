@@ -33,9 +33,13 @@ mod registry;
 pub(crate) use doctor::*;
 pub(crate) use lock::acquire_registry_lock_async;
 pub(crate) use operations::*;
+#[cfg(all(unix, feature = "worktree-fuse"))]
+pub(crate) use registry::ensure_registry_v4_locked;
 pub(crate) use registry::{
     DETACHED_MARKER, WorktreeEntry, WorktreeEntryState, WorktreeState, local_gitdir_for_scope,
+    registered_fuse_worktree_at, registered_fuse_worktree_paths, registered_worktree_locations,
     registry_knows_linked_worktree, registry_knows_linked_worktree_in_storage,
+    resolve_worktree_selector,
 };
 #[cfg(all(test, unix))]
 use registry::{REGISTRY_SCHEMA_VERSION, WorktreeStateV1};
@@ -47,24 +51,26 @@ use registry::{
 /// `--help` examples shown in `libra worktree --help` output.
 pub const WORKTREE_EXAMPLES: &str = "\
  EXAMPLES:
-     libra worktree add ../feature-x                Create a linked worktree (detached at
+     libra worktree add feature-x                Create a linked worktree (detached at
                                                     the source commit)
-     libra worktree add ../fix-1 hotfix             Check the existing branch `hotfix` out
-     libra worktree add --detach ../probe v1.2.0    Detached worktree at a commit-ish
-     libra worktree add -b topic ../topic main      Create branch `topic` from `main` and
+     libra worktree add fix-1 hotfix             Check the existing branch `hotfix` out
+     libra worktree add --detach probe v1.2.0    Detached worktree at a commit-ish
+     libra worktree add -b topic topic main      Create branch `topic` from `main` and
                                                     check it out
+     libra worktree add feature-y --path ../feature-y
+                                                    Create at an explicit external path
      libra worktree list                            List every registered worktree
      libra worktree list --porcelain                Machine-readable worktree list
-     libra worktree lock ../feature-x --reason wip  Lock a worktree to prevent prune/remove
-     libra worktree unlock ../feature-x             Release the lock
-     libra worktree move ../old ../new              Rename a worktree
+     libra worktree lock feature-x --reason wip  Lock a worktree to prevent prune/remove
+     libra worktree unlock feature-x             Release the lock
+     libra worktree move feature-x --path ../new              Move a worktree without renaming it
      libra worktree prune                           Drop entries whose paths vanished
-     libra worktree remove ../feature-x             Unregister, keep the directory on disk
-     libra worktree remove ../feature-x --delete-dir
+     libra worktree remove feature-x             Unregister, keep the directory on disk
+     libra worktree remove feature-x --delete-dir
                                                     Unregister and delete the directory
                                                     (refused on a dirty worktree)
      libra worktree repair --confirm                Fix stale or duplicate registry rows
-     libra worktree repair --confirm ../feature-x   Restore that worktree's gitdir identity
+     libra worktree repair --confirm feature-x   Restore that worktree's gitdir identity
                                                     from the registry (registry v2)
      libra worktree repair --migrate-layout --confirm
                                                     Migrate every legacy shared-.libra
@@ -96,10 +102,13 @@ pub struct WorktreeArgs {
 /// semantics (for example, `remove` does not delete directories on disk).
 #[derive(Debug, Clone, Subcommand)]
 pub enum WorktreeSubcommand {
-    /// Create a new linked worktree at the given path.
+    /// Create a named linked worktree under the common .libra/worktree directory.
     Add {
-        /// Filesystem path at which to create the new worktree.
-        path: String,
+        /// Unique lowercase worktree name, independent of the checked-out branch.
+        name: String,
+        /// Exact destination path, relative to the current directory when not absolute.
+        #[arg(long, value_name = "PATH")]
+        path: Option<String>,
         /// Existing branch to check out in the new worktree, or a
         /// commit-ish for a detached HEAD. Omitted: detached at the source
         /// worktree's current commit (intentionally different from Git's
@@ -113,7 +122,7 @@ pub enum WorktreeSubcommand {
         /// Create NEW_BRANCH (from <BRANCH-OR-COMMIT> or the source HEAD)
         /// and check it out in the new worktree. Refused if the branch
         /// already exists (no -B/--force).
-        #[arg(short = 'b', long)]
+        #[arg(short = 'b', long, visible_alias = "create-branch")]
         new_branch: Option<String>,
     },
     /// List all known worktrees and their state.
@@ -133,23 +142,36 @@ pub enum WorktreeSubcommand {
     },
     /// Mark a worktree as locked to prevent it from being pruned or removed.
     Lock {
-        /// Filesystem path of the worktree to lock.
-        path: String,
+        /// Registered worktree name.
+        #[arg(required_unless_present = "path", conflicts_with = "path")]
+        name: Option<String>,
+        /// Select an existing worktree by its exact filesystem path.
+        #[arg(long, value_name = "PATH")]
+        path: Option<String>,
         /// Optional free-form explanation for why this worktree is locked (shown in `worktree list`)
         #[arg(long)]
         reason: Option<String>,
     },
     /// Remove the lock from a previously locked worktree.
     Unlock {
-        /// Filesystem path of the worktree to unlock.
-        path: String,
+        /// Registered worktree name.
+        #[arg(required_unless_present = "path", conflicts_with = "path")]
+        name: Option<String>,
+        /// Select an existing worktree by its exact filesystem path.
+        #[arg(long, value_name = "PATH")]
+        path: Option<String>,
     },
     /// Move or rename an existing worktree.
     Move {
-        /// Current filesystem path of the worktree.
-        src: String,
-        /// New filesystem path for the worktree.
-        dest: String,
+        /// Registered name to move; its logical name remains unchanged.
+        #[arg(required_unless_present = "from_path", conflicts_with = "from_path")]
+        name: Option<String>,
+        /// Select an existing worktree by its exact source path.
+        #[arg(long, value_name = "SOURCE")]
+        from_path: Option<String>,
+        /// Exact destination filesystem path.
+        #[arg(long, value_name = "DESTINATION")]
+        path: String,
     },
     /// Prune worktrees that are no longer valid or reachable.
     Prune,
@@ -157,8 +179,12 @@ pub enum WorktreeSubcommand {
     /// pass `--delete-dir` for Git-style behavior that also removes the
     /// directory after a dirty-state check.
     Remove {
-        /// Filesystem path of the worktree to unregister.
-        path: String,
+        /// Registered worktree name.
+        #[arg(required_unless_present = "path", conflicts_with = "path")]
+        name: Option<String>,
+        /// Select an existing worktree by its exact filesystem path.
+        #[arg(long, value_name = "PATH")]
+        path: Option<String>,
         /// Also delete the worktree directory on disk after unregistering it.
         /// Refuses on a dirty worktree (uncommitted changes).
         #[arg(long)]
@@ -264,8 +290,11 @@ pub enum WorktreeSubcommand {
     /// (`.libra/worktree_id` + `commondir`) from the registry's persisted
     /// stable id (registry v2, W3 §C.7).
     Repair {
-        /// Linked worktree whose gitdir identity should be restored (or,
-        /// with --migrate-layout, the single legacy worktree to migrate).
+        /// Registered worktree name; omitted with --path to select by path.
+        #[arg(conflicts_with = "path")]
+        name: Option<String>,
+        /// Exact path of the worktree to repair; omit both selectors for global repair.
+        #[arg(long, value_name = "PATH")]
         path: Option<String>,
         /// Migrate legacy shared-`.libra` symlink worktrees to the isolated
         /// layout (W3-s3 §C.6.2). Runs from the MAIN worktree; without a
@@ -277,7 +306,7 @@ pub enum WorktreeSubcommand {
         #[arg(long)]
         dry_run: bool,
         /// Confirm a MUTATING repair action (W0 §C.11, Codex R16/R17).
-        /// Required for the no-arg registry repair, `repair <path>`, and a
+        /// Required for the no-arg registry repair, `repair <name>`, and a
         /// non-dry-run `--migrate-layout`: without it the command refuses
         /// before any registry lock, database write, or filesystem touch
         /// (zero side effects), and with it the action records exactly one
@@ -318,6 +347,8 @@ pub(crate) struct WorktreeListOutput {
 /// document consumers already parse.
 #[derive(Debug, Serialize)]
 pub(crate) struct WorktreeListEntry {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) name: Option<String>,
     pub(crate) kind: &'static str,
     pub(crate) path: String,
     pub(crate) is_main: bool,
@@ -700,12 +731,16 @@ pub async fn execute_safe(args: WorktreeArgs, output: &OutputConfig) -> CliResul
 
     match command {
         WorktreeSubcommand::Add {
+            name,
             path,
             target,
             detach,
             new_branch,
         } => {
-            let result = add_worktree(path, target, detach, new_branch)
+            let _registry_lock = acquire_registry_lock_async()
+                .await
+                .map_err(WorktreeError::into_cli_error)?;
+            let result = add_worktree_locked(name, path, target, detach, new_branch)
                 .await
                 .map_err(WorktreeError::into_cli_error)?;
             render_add_worktree(&result, output)
@@ -714,20 +749,39 @@ pub async fn execute_safe(args: WorktreeArgs, output: &OutputConfig) -> CliResul
             porcelain,
             schema_version,
         } => list_worktrees(output, porcelain, schema_version).await,
-        WorktreeSubcommand::Lock { path, reason } => {
-            let result = lock_worktree(path, reason)
+        WorktreeSubcommand::Lock { name, path, reason } => {
+            let _registry_lock = acquire_registry_lock_async()
+                .await
+                .map_err(WorktreeError::into_cli_error)?;
+            let path = resolve_linked_worktree_selector(name.as_deref(), path.as_deref())
+                .map_err(WorktreeError::into_cli_error)?;
+            let result = lock_worktree_locked(path, reason)
                 .await
                 .map_err(WorktreeError::into_cli_error)?;
             render_lock_worktree(&result, output)
         }
-        WorktreeSubcommand::Unlock { path } => {
-            let result = unlock_worktree(path)
+        WorktreeSubcommand::Unlock { name, path } => {
+            let _registry_lock = acquire_registry_lock_async()
+                .await
+                .map_err(WorktreeError::into_cli_error)?;
+            let path = resolve_linked_worktree_selector(name.as_deref(), path.as_deref())
+                .map_err(WorktreeError::into_cli_error)?;
+            let result = unlock_worktree_locked(path)
                 .await
                 .map_err(WorktreeError::into_cli_error)?;
             render_unlock_worktree(&result, output)
         }
-        WorktreeSubcommand::Move { src, dest } => {
-            let result = move_worktree(src, dest)
+        WorktreeSubcommand::Move {
+            name,
+            from_path,
+            path,
+        } => {
+            let _registry_lock = acquire_registry_lock_async()
+                .await
+                .map_err(WorktreeError::into_cli_error)?;
+            let src = resolve_linked_worktree_selector(name.as_deref(), from_path.as_deref())
+                .map_err(WorktreeError::into_cli_error)?;
+            let result = move_worktree_locked(src, path)
                 .await
                 .map_err(WorktreeError::into_cli_error)?;
             render_move_worktree(&result, output)
@@ -738,8 +792,17 @@ pub async fn execute_safe(args: WorktreeArgs, output: &OutputConfig) -> CliResul
                 .map_err(WorktreeError::into_cli_error)?;
             render_prune_worktrees(&result, output)
         }
-        WorktreeSubcommand::Remove { path, delete_dir } => {
-            let result = remove_worktree(path, delete_dir)
+        WorktreeSubcommand::Remove {
+            name,
+            path,
+            delete_dir,
+        } => {
+            let _registry_lock = acquire_registry_lock_async()
+                .await
+                .map_err(WorktreeError::into_cli_error)?;
+            let path = resolve_linked_worktree_selector(name.as_deref(), path.as_deref())
+                .map_err(WorktreeError::into_cli_error)?;
+            let result = remove_worktree_locked(path, delete_dir)
                 .await
                 .map_err(WorktreeError::into_cli_error)?;
             render_remove_worktree(&result, output)
@@ -824,6 +887,7 @@ pub async fn execute_safe(args: WorktreeArgs, output: &OutputConfig) -> CliResul
             }
         }
         WorktreeSubcommand::Repair {
+            name,
             path,
             migrate_layout,
             dry_run,
@@ -831,6 +895,36 @@ pub async fn execute_safe(args: WorktreeArgs, output: &OutputConfig) -> CliResul
             resolve_identity,
             yes,
         } => {
+            let selected = name.is_some() || path.is_some();
+            let readonly_preview = migrate_layout && dry_run && !resolve_identity;
+            if selected && !readonly_preview {
+                if resolve_identity {
+                    if !yes {
+                        return Err(CliError::command_usage(
+                            "worktree repair --resolve-identity requires --yes before any mutation",
+                        ));
+                    }
+                } else {
+                    require_repair_confirmation(confirm, "worktree repair")?;
+                }
+            }
+            let _selector_lock = if selected && !readonly_preview {
+                Some(
+                    acquire_registry_lock_async()
+                        .await
+                        .map_err(WorktreeError::into_cli_error)?,
+                )
+            } else {
+                None
+            };
+            let path = if selected {
+                Some(
+                    resolve_linked_worktree_selector(name.as_deref(), path.as_deref())
+                        .map_err(WorktreeError::into_cli_error)?,
+                )
+            } else {
+                None
+            };
             if resolve_identity {
                 let Some(path) = path else {
                     return Err(WorktreeError::OperationBlocked(
@@ -852,7 +946,7 @@ pub async fn execute_safe(args: WorktreeArgs, output: &OutputConfig) -> CliResul
                 // one-row operation-log audit boundary as every other
                 // mutating repair, closed with the action's outcome.
                 let boundary = begin_repair_operation(
-                    &format!("worktree repair {path} --resolve-identity"),
+                    &format!("worktree repair --path {path} --resolve-identity"),
                     Some(&path),
                 )
                 .await?;
@@ -881,17 +975,20 @@ pub async fn execute_safe(args: WorktreeArgs, output: &OutputConfig) -> CliResul
                 let boundary =
                     begin_repair_operation("worktree repair --migrate-layout", path.as_deref())
                         .await?;
-                let result = migrate_layout_run(path, dry_run)
-                    .await
-                    .map_err(WorktreeError::into_cli_error);
+                let result = if selected {
+                    migrate_layout_run_locked(path, dry_run).await
+                } else {
+                    migrate_layout_run(path, dry_run).await
+                }
+                .map_err(WorktreeError::into_cli_error);
                 let result = finish_repair_operation(boundary, result).await?;
                 return render_migrate_layout(&result, output);
             }
             if let Some(path) = path {
-                require_repair_confirmation(confirm, &format!("worktree repair {path}"))?;
+                require_repair_confirmation(confirm, &format!("worktree repair --path {path}"))?;
                 let boundary =
-                    begin_repair_operation("worktree repair <path>", Some(&path)).await?;
-                let result = repair_worktree_identity(path)
+                    begin_repair_operation("worktree repair --path <path>", Some(&path)).await?;
+                let result = repair_worktree_identity_locked(path)
                     .await
                     .map_err(WorktreeError::into_cli_error);
                 let result = finish_repair_operation(boundary, result).await?;
@@ -997,7 +1094,6 @@ async fn adopted_scope_settings_present(
 /// touched — only the registry entry and that scope's rows go, so the user can
 /// re-add it afterwards and get a fresh identity and generation.
 async fn resolve_identity_collision(path: &str) -> WorktreeResult<String> {
-    let _lock = acquire_registry_lock_async().await?;
     let mut state = load_state_for_repair()?;
     let target = resolve_path(path, "worktree path")?;
     let target_key = target.to_string_lossy().to_string();
@@ -1087,11 +1183,29 @@ async fn resolve_identity_collision(path: &str) -> WorktreeResult<String> {
         "Detached '{target_key}' from the registry (identity '{identity}'). Its files and \
           scoped state are kept and every command inside it now fails closed; the remaining \
           claimant owns the identity again. Finish with `libra worktree remove --delete-dir \
-          {target_key}`, or `libra worktree add {target_key}` to re-attach it."
+          {target_key}`, or `libra worktree add <name> --path {target_key}` to re-attach it."
     ))
 }
 
-/// Returns the path to the on-disk worktree state file.
+fn resolve_linked_worktree_selector(
+    name: Option<&str>,
+    path: Option<&str>,
+) -> WorktreeResult<String> {
+    let selected = resolve_worktree_selector(name, path)?;
+    if selected.is_fuse {
+        #[cfg(feature = "worktree-fuse")]
+        let guidance = "use `libra worktree remove <name>` from a FUSE-enabled build";
+        #[cfg(not(feature = "worktree-fuse"))]
+        let guidance = "use a Libra build with worktree-fuse enabled";
+        return Err(WorktreeError::OperationBlocked(format!(
+            "'{}' is a FUSE worktree; {guidance}",
+            selected.path.display(),
+        )));
+    }
+    Ok(selected.path.to_string_lossy().into_owned())
+}
+
+/// Resolve an explicit filesystem path without interpreting it as a name.
 fn resolve_path(path: impl AsRef<Path>, role: &'static str) -> WorktreeResult<PathBuf> {
     let path = path.as_ref();
     canonicalize(path).map_err(|source| {
@@ -1102,7 +1216,7 @@ fn resolve_path(path: impl AsRef<Path>, role: &'static str) -> WorktreeResult<Pa
     })
 }
 
-/// Implements `worktree add <path>`.
+/// Implements `worktree add <name> --path <path>`.
 ///
 /// This command:
 /// - validates the requested path is outside `.libra` storage,
@@ -1421,16 +1535,16 @@ impl ScopeDiagnostic {
 ///
 /// Deliberately the strict resolver: minting an identity would be a write, and
 /// the doctor's default invocation is read-only.
-/// Implements `worktree lock <path> [--reason <msg>]`.
+/// Implements `worktree lock <name> [--reason <msg>]`.
 ///
 /// Marks the specified worktree entry as locked and persists an optional
 /// human-readable reason. Locking is a state-only operation and does not
 /// alter directories on disk.
-/// Implements `worktree unlock <path>`.
+/// Implements `worktree unlock <name>`.
 ///
 /// Clears the lock flag and reason for the specified worktree entry if it is
 /// currently locked. Unlocking is idempotent and leaves the filesystem untouched.
-/// Implements `worktree move <src> <dest>`.
+/// Implements `worktree move <name> --path <dest>`.
 ///
 /// This command:
 /// - resolves both source and destination paths,
@@ -1595,17 +1709,16 @@ mod tests {
 
     #[test]
     fn registry_parse_refuses_future_schema_version() {
-        // 3 is CURRENT since the service-fence generations (migration
-        // 2026073005); 4 is the future one. A version this binary does not know
+        // 4 is CURRENT for named worktrees; 5 is the future one. A version this binary does not know
         // is refused rather than reinterpreted — the whole point of the field.
-        let data = br#"{"schema_version": 4, "entries": []}"#;
+        let data = br#"{"schema_version": 5, "entries": []}"#;
         let err = WorktreeState::parse(data).expect_err("future version fails closed");
-        assert!(err.contains("schema_version 4"), "{err}");
+        assert!(err.contains("schema_version 5"), "{err}");
 
         // The refusal is about the VERSION, not the shape: the same document
         // at the current version gets past it and fails on the main-entry
         // invariant instead.
-        let current = br#"{"schema_version": 3, "entries": []}"#;
+        let current = br#"{"schema_version": 4, "entries": []}"#;
         let err = WorktreeState::parse(current).expect_err("no main entry");
         assert!(
             !err.contains("schema_version"),
@@ -1638,6 +1751,7 @@ mod tests {
             linked_history: LinkedHistory::Never,
             schema_version: REGISTRY_SCHEMA_VERSION,
             entries: vec![WorktreeEntry {
+                name: None,
                 epoch: 0,
                 path: "/w".to_string(),
                 is_main: false,
@@ -1743,7 +1857,92 @@ mod tests {
         assert!(callers[0].0.ends_with("worktree/lock.rs"));
         assert_eq!(
             callers[0].1,
-            "match tokio::task::spawn_blocking(acquire_registry_lock).await {"
+            "match tokio::task::spawn_blocking(move || acquire_registry_lock(common)).await {"
+        );
+    }
+}
+
+#[cfg(test)]
+mod named_cli_tests {
+    use clap::Parser;
+
+    use super::{WorktreeArgs, WorktreeSubcommand};
+
+    #[test]
+    fn add_separates_name_destination_and_branch() {
+        let args = WorktreeArgs::try_parse_from([
+            "worktree",
+            "add",
+            "feature-x",
+            "main",
+            "--path",
+            "../custom",
+            "-b",
+            "topic",
+        ])
+        .unwrap();
+        assert!(
+            matches!(args.command, WorktreeSubcommand::Add { name, path: Some(path), target: Some(target), new_branch: Some(branch), .. }
+            if name == "feature-x" && path == "../custom" && target == "main" && branch == "topic")
+        );
+        assert!(
+            WorktreeArgs::try_parse_from([
+                "worktree",
+                "add",
+                "feature-x",
+                "--create-branch",
+                "topic"
+            ])
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn controls_require_exactly_one_name_or_path() {
+        for command in ["lock", "unlock", "remove"] {
+            assert!(WorktreeArgs::try_parse_from(["worktree", command, "feature-x"]).is_ok());
+            assert!(
+                WorktreeArgs::try_parse_from(["worktree", command, "--path", "../old"]).is_ok()
+            );
+            assert!(WorktreeArgs::try_parse_from(["worktree", command]).is_err());
+            assert!(
+                WorktreeArgs::try_parse_from([
+                    "worktree",
+                    command,
+                    "feature-x",
+                    "--path",
+                    "../old"
+                ])
+                .is_err()
+            );
+        }
+        assert!(
+            WorktreeArgs::try_parse_from(["worktree", "move", "feature-x", "--path", "../new"])
+                .is_ok()
+        );
+        assert!(
+            WorktreeArgs::try_parse_from([
+                "worktree",
+                "move",
+                "--from-path",
+                "../old",
+                "--path",
+                "../new"
+            ])
+            .is_ok()
+        );
+        assert!(WorktreeArgs::try_parse_from(["worktree", "move", "feature-x", "../new"]).is_err());
+        assert!(WorktreeArgs::try_parse_from(["worktree", "repair", "--confirm"]).is_ok());
+        assert!(
+            WorktreeArgs::try_parse_from([
+                "worktree",
+                "repair",
+                "feature-x",
+                "--path",
+                "../old",
+                "--confirm"
+            ])
+            .is_err()
         );
     }
 }

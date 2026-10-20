@@ -918,9 +918,20 @@ fn report_orphaned_release(released: &OrphanedRunCancel) {
         }
         (OrphanedWorkspaceAction::RefusedSuspiciousPath, Some(path)) => {
             println!(
-                "  refused to remove recorded workspace path {path}: it is not a libra \
-                 task worktree inside this repo's own worktrees/tasks base — remove it \
-                 manually after inspecting it"
+                "  kept recorded workspace {path}: no managed ownership proof authorizes \
+                 removal; inspect it before removing it manually (run metadata is retained)"
+            );
+        }
+        (OrphanedWorkspaceAction::Removed, None) => {
+            println!("  removed owned workspace attempts recovered from durable intents");
+        }
+        (OrphanedWorkspaceAction::CleanupFailed, _) => {
+            println!(
+                "  kept owned workspace attempts for cleanup retry: {}",
+                released
+                    .workspace_error
+                    .as_deref()
+                    .unwrap_or("cleanup was refused")
             );
         }
         _ => {
@@ -1038,6 +1049,9 @@ async fn attach(args: ReviewAttachArgs, output: &OutputConfig) -> CliResult<()> 
         .load_state(&args.run_id)
         .map_err(|e| map_store_error("failed to read review run state", e))?
         .ok_or_else(|| run_not_found(&args.run_id))?;
+    store
+        .validate_mutation(&args.run_id)
+        .map_err(|e| map_store_error("review run cannot accept an attachment", e))?;
 
     // Sanitize the record/display name FIRST, so a hostile path (token or
     // control char in the filename) never reaches the read-error either.

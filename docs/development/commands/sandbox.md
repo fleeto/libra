@@ -62,3 +62,5 @@ flowchart TD
 - 改进本命令前，必须先阅读并遵循 [docs/development/commands/_general.md](_general.md)；这是命令设计、实现、测试和文档同步的强制要求。
 - 任何行为变更都要先核对实现源码，再同步 `COMPATIBILITY.md`、`docs/commands/<cmd>.md` 和相关测试。
 - 新增 Git 兼容参数时必须明确 tier、错误码、JSON/机器输出契约和回归测试。
+
+Managed task sandbox binding is an internal API that uses a verified attempt descriptor. When applied by a caller, its writable roots are the task workspace plus six cache/log directories under the same attempt; shared storage and sibling attempts stay outside the grant. Metadata read denials are appended to inherited policy. Live internal-sandbox execution must verify the owned workspace leaf immediately before launch. Review and investigate spawn external agent CLIs without this internal OS sandbox; their own sandbox settings govern filesystem access.

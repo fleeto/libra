@@ -185,7 +185,7 @@ codes the repository preflight of every other command uses, never the generic
 
 | Damaged active repository | Stable code (exit 128) | Remedy in the message |
 |---------------------------|------------------------|-----------------------|
-| Storage cannot be resolved (detached, migrating or corrupt linked worktree) | `LBR-REPO-003` | from the main worktree run `libra worktree repair --confirm <worktree-path>` (or re-add the worktree) |
+| Storage cannot be resolved (detached, migrating or corrupt linked worktree) | `LBR-REPO-003` | from the main worktree run `libra worktree repair --confirm --path <worktree-path>` (or re-add the worktree) |
 | Repository database missing | `LBR-REPO-002` | restore the repository's `.libra` storage |
 | Repository database cannot be opened | `LBR-IO-001` | install a newer Libra if a newer one wrote it, otherwise restore repository storage |
 | `core.objectformat` cannot be read | `LBR-IO-001` | repair the repository database |

@@ -44,49 +44,99 @@ use crate::{
 // liner in both the top-level command list and `worktree --help`'s
 // header, instead of leaking the previous "CLI arguments for the
 // `worktree` subcommand. This type is wired into..." rustdoc body.
-pub(crate) async fn add_worktree(
-    path: String,
+/// The caller holds the common registry lock through resolution and publication.
+pub(crate) async fn add_worktree_locked(
+    name: String,
+    path: Option<String>,
     target_spec: Option<String>,
     detach: bool,
     new_branch: Option<String>,
 ) -> WorktreeResult<WorktreeAddOutput> {
-    // Registry mutation lock: the whole precheck → sweep → seed → registry
-    // write sequence runs under it (a concurrent add's sweep must not
-    // delete this add's freshly seeded rows).
-    let _registry_lock = acquire_registry_lock_async().await?;
+    use crate::utils::worktree_layout;
+    worktree_layout::validate_name(&name).map_err(|error| {
+        WorktreeError::InvalidTarget(format!("invalid worktree name '{name}': {error}; use `libra worktree add <name> --path <path>` with a valid name to specify a filesystem destination"))
+    })?;
+    let storage = worktree_layout::current_common_storage().map_err(|error| {
+        WorktreeError::IoRead(format!("cannot resolve common worktree storage: {error}"))
+    })?;
+    let locations = registered_worktree_locations()?;
+    let named = locations
+        .iter()
+        .find(|entry| entry.name.as_deref() == Some(name.as_str()));
+    if named.is_some_and(|entry| entry.is_fuse) {
+        return Err(WorktreeError::OperationBlocked(format!(
+            "worktree name '{name}' belongs to a FUSE worktree; use its existing backend"
+        )));
+    }
+    let requested = path
+        .as_deref()
+        .map(|path| resolve_path(path, "worktree destination"))
+        .transpose()?;
+    let target = match (named, requested) {
+        (Some(entry), Some(requested)) if entry.path != requested => {
+            return Err(WorktreeError::OperationBlocked(format!(
+                "worktree name '{name}' is already registered at '{}'; use worktree move to change its path",
+                entry.path.display()
+            )));
+        }
+        (Some(entry), _) => entry.path.clone(),
+        (None, Some(requested)) => requested,
+        (None, None) => worktree_layout::linked_root(&storage, &name).map_err(|error| {
+            WorktreeError::InvalidTarget(format!(
+                "cannot resolve the default worktree destination: {error}"
+            ))
+        })?,
+    };
+    worktree_layout::validate_linked_destination(&storage, &name, &target).map_err(|error| {
+        WorktreeError::InvalidTarget(format!(
+            "invalid worktree destination '{}': {error}",
+            target.display()
+        ))
+    })?;
+    if let Some(existing) = locations.iter().find(|entry| entry.path == target)
+        && (existing.is_fuse
+            || existing
+                .name
+                .as_deref()
+                .is_some_and(|existing| existing != name)
+            || (existing.name.is_none() && path.is_none()))
+    {
+        return Err(WorktreeError::OperationBlocked(format!(
+            "destination '{}' is already registered under another name or backend; use its registered name or select it with --path",
+            target.display()
+        )));
+    }
+    let target_exists = match fs::symlink_metadata(&target) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => true,
+        Ok(_) => {
+            return Err(WorktreeError::InvalidTarget(format!(
+                "worktree destination '{}' must be a real directory, not a symlink or file",
+                target.display()
+            )));
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+        Err(error) => {
+            return Err(WorktreeError::IoRead(format!(
+                "cannot inspect worktree destination '{}': {error}",
+                target.display()
+            )));
+        }
+    };
+    let canonical_target = target.clone();
     let _repository_ref_lease = acquire_worktree_ref_lease().await?;
-    let storage = util::storage_path();
-    let target = resolve_path(&path, "worktree path")?;
-
-    if util::is_sub_path(&target, &storage) {
-        return Err(WorktreeError::InvalidTarget(format!(
-            "worktree path cannot be inside .libra storage: {}",
-            target.display()
-        )));
-    }
-
-    let target_exists = target.exists();
-    if target_exists && !target.is_dir() {
-        return Err(WorktreeError::InvalidTarget(format!(
-            "target exists and is not a directory: {}",
-            target.display()
-        )));
-    }
-
-    let canonical_target = resolve_path(&target, "worktree path")?;
-    if util::is_sub_path(&canonical_target, &storage) {
-        return Err(WorktreeError::InvalidTarget(format!(
-            "worktree path cannot be inside .libra storage: {}",
-            canonical_target.display()
-        )));
-    }
-
     let mut state = load_state()?;
     if let Some(existing_index) = state
         .entries
         .iter()
         .position(|w| Path::new(&w.path) == canonical_target)
     {
+        if state.entries[existing_index].is_main {
+            return Err(WorktreeError::MainWorktree {
+                action: "name",
+                path: target.to_string_lossy().into_owned(),
+            });
+        }
+        let adopting_name = state.entries[existing_index].name.is_none();
         match state.entries[existing_index].state {
             // W3-s1b (§C.7): re-adding a DETACHED worktree re-attaches it —
             // the frozen directory resumes with ITS OWN scoped state, so a
@@ -99,6 +149,15 @@ pub(crate) async fn add_worktree(
                         canonical_target.display()
                     )));
                 }
+                if adopting_name {
+                    RegisteredDirectoryGuard::open(
+                        &canonical_target,
+                        state.entries[existing_index].worktree_id.as_deref(),
+                    )?;
+                    // Deliberate NAME + --path adoption only. Reattachment's
+                    // identity/common checks run before its registry write.
+                    state.entries[existing_index].name = Some(name.clone());
+                }
                 return reattach_worktree(&mut state, existing_index, &canonical_target).await;
             }
             WorktreeEntryState::Tombstone => {
@@ -109,12 +168,27 @@ pub(crate) async fn add_worktree(
                 )));
             }
             WorktreeEntryState::Active => {
+                if !target_exists && adopting_name {
+                    return Err(WorktreeError::OperationBlocked(format!(
+                        "worktree '{name}' is registered at '{}', but its directory is missing; restore it or run worktree prune before reusing the name",
+                        target.display()
+                    )));
+                }
                 if target_spec.is_some() || detach || new_branch.is_some() {
                     return Err(WorktreeError::InvalidTarget(format!(
                         "'{}' is already a registered worktree; switch branches inside \
                           it instead",
                         canonical_target.display()
                     )));
+                }
+                if adopting_name {
+                    let guard = RegisteredDirectoryGuard::open(
+                        &canonical_target,
+                        state.entries[existing_index].worktree_id.as_deref(),
+                    )?;
+                    guard.verify()?;
+                    state.entries[existing_index].name = Some(name.clone());
+                    write_state(&state)?;
                 }
                 return Ok(WorktreeAddOutput {
                     path: canonical_target.to_string_lossy().to_string(),
@@ -171,7 +245,7 @@ pub(crate) async fn add_worktree(
         {
             return Err(WorktreeError::OperationBlocked(format!(
                 "branch '{name}' already exists; -B/--force are not supported — pick a new \
-                  name or check the existing branch out with `worktree add <path> {name}`"
+                  name or check the existing branch out with `worktree add <name> --path <path> {name}`"
             )));
         }
         let start = match &target_spec {
@@ -252,23 +326,74 @@ pub(crate) async fn add_worktree(
         }
     }
 
-    let mut created_target = false;
-    if !target.exists() {
-        fs::create_dir_all(&target).map_err(|source| {
-            WorktreeError::IoWrite(format!(
-                "failed to create worktree directory '{}': {source}",
-                target.display()
-            ))
-        })?;
-        created_target = true;
+    let created_target = !target_exists;
+    let target_directory = if created_target {
+        if target.starts_with(worktree_layout::managed_root(&storage)) {
+            worktree_layout::create_managed_directory(&storage, &target)
+        } else {
+            let parent = target.parent().ok_or_else(|| {
+                WorktreeError::InvalidTarget("worktree destination has no parent directory".into())
+            })?;
+            fs::create_dir_all(parent)
+                .and_then(|_| fs::create_dir(&target))
+                .and_then(|_| crate::utils::beneath::open_root(&target))
+        }
+    } else if target.starts_with(worktree_layout::managed_root(&storage)) {
+        worktree_layout::open_managed_directory(&storage, &target)
+    } else {
+        crate::utils::beneath::open_root(&target)
     }
-
-    let link_path = target.join(util::ROOT_DIR);
-    if link_path.exists() {
+    .map_err(|source| {
+        WorktreeError::IoWrite(format!(
+            "cannot create or pin worktree directory '{}': {source}",
+            target.display()
+        ))
+    })?;
+    let target_identity =
+        crate::utils::beneath::entry_identity_beneath(&target_directory, Path::new("")).map_err(
+            |source| {
+                WorktreeError::IoRead(format!(
+                    "cannot identify new worktree '{}': {source}",
+                    target.display()
+                ))
+            },
+        )?;
+    let mut target_entries =
+        crate::utils::beneath::read_dir_fd(target_directory.try_clone().map_err(|error| {
+            WorktreeError::IoRead(format!("cannot inspect pinned worktree directory: {error}"))
+        })?)
+        .map_err(|error| {
+            WorktreeError::IoRead(format!("cannot inspect pinned worktree directory: {error}"))
+        })?;
+    if target_entries
+        .next()
+        .transpose()
+        .map_err(|error| {
+            WorktreeError::IoRead(format!("cannot inspect pinned worktree directory: {error}"))
+        })?
+        .is_some()
+    {
         return Err(WorktreeError::OperationBlocked(format!(
-            "target already contains a .libra entry: {}",
-            link_path.display()
+            "target directory is no longer empty: {}",
+            target.display()
         )));
+    }
+    drop(target_entries);
+    let link_path = target.join(util::ROOT_DIR);
+    match crate::utils::beneath::lstat_beneath(&target_directory, Path::new(util::ROOT_DIR)) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Ok(_) => {
+            return Err(WorktreeError::OperationBlocked(format!(
+                "target already contains a .libra entry: {}",
+                link_path.display()
+            )));
+        }
+        Err(error) => {
+            return Err(WorktreeError::IoRead(format!(
+                "cannot inspect worktree metadata '{}': {error}",
+                link_path.display()
+            )));
+        }
     }
 
     let worktree_id = util::worktree_instance_id(&canonical_target);
@@ -310,28 +435,33 @@ pub(crate) async fn add_worktree(
     )
     .await
     .map_err(WorktreeError::OperationBlocked)?;
-    create_worktree_gitdir(&storage, &link_path, &worktree_id).map_err(|source| {
-        WorktreeError::IoWrite(format!(
-            "failed to create per-worktree .libra gitdir in '{}': {source}",
-            link_path.display()
-        ))
-    })?;
-
-    let rollback_partial_add = || {
-        let _ = remove_worktree_storage_link(&link_path);
-        if created_target {
-            let _ = fs::remove_dir_all(&target);
-        } else if let Ok(entries) = fs::read_dir(&target) {
-            for entry in entries.flatten() {
-                let entry_path = entry.path();
-                let _ = if entry_path.is_dir() {
-                    fs::remove_dir_all(&entry_path)
-                } else {
-                    fs::remove_file(&entry_path)
-                };
-            }
+    let mut target_guard = RegisteredDirectoryGuard {
+        target: target.clone(),
+        common: storage.clone(),
+        directory: Some(target_directory),
+        identity: target_identity,
+        worktree_id: worktree_id.clone(),
+    };
+    let rollback_partial_add = |guard: &mut RegisteredDirectoryGuard| {
+        if let Err(error) = clear_pinned_worktree(guard, created_target) {
+            tracing::warn!(path = %target.display(), %error, "partial worktree cleanup refused; the original directory may have moved");
         }
     };
+    let metadata_created = target_guard
+        .directory()
+        .and_then(|directory| create_worktree_gitdir(&storage, directory, &worktree_id))
+        .map_err(|source| {
+            WorktreeError::IoWrite(format!(
+                "failed to create per-worktree .libra gitdir in '{}': {source}",
+                link_path.display()
+            ))
+        })
+        .and_then(|()| target_guard.verify());
+    if let Err(error) = metadata_created {
+        rollback_partial_add(&mut target_guard);
+        let _ = journal_resolve(&db, add_journal_id).await;
+        return Err(error);
+    }
 
     // W3-s2: the seed HEAD per resolved checkout mode. `source_commit` was
     // read via the RESULT-returning API before any side effect — only a
@@ -347,7 +477,7 @@ pub(crate) async fn add_worktree(
         match util::acquire_branch_attach_lock() {
             Ok(guard) => Some(guard),
             Err(error) => {
-                rollback_partial_add();
+                rollback_partial_add(&mut target_guard);
                 // A HANDLED failure fully rolled back — resolve the intent row
                 // too, or repair keeps sweeping a scope that no longer exists.
                 // Best-effort: an unresolved row is the crash contract anyway.
@@ -373,7 +503,7 @@ pub(crate) async fn add_worktree(
                 // branch), and fail-closed on query errors.
                 match Head::branch_checked_out_anywhere_result(name).await {
                     Err(error) => {
-                        rollback_partial_add();
+                        rollback_partial_add(&mut target_guard);
                         // A HANDLED failure fully rolled back — resolve the intent row
                         // too, or repair keeps sweeping a scope that no longer exists.
                         // Best-effort: an unresolved row is the crash contract anyway.
@@ -383,7 +513,7 @@ pub(crate) async fn add_worktree(
                         )));
                     }
                     Ok(Some(scope)) => {
-                        rollback_partial_add();
+                        rollback_partial_add(&mut target_guard);
                         // A HANDLED failure fully rolled back — resolve the intent row
                         // too, or repair keeps sweeping a scope that no longer exists.
                         // Best-effort: an unresolved row is the crash contract anyway.
@@ -398,7 +528,7 @@ pub(crate) async fn add_worktree(
                 let branch = match Branch::find_branch_result(name, None).await {
                     Ok(Some(branch)) => branch,
                     Ok(None) => {
-                        rollback_partial_add();
+                        rollback_partial_add(&mut target_guard);
                         // A HANDLED failure fully rolled back — resolve the intent row
                         // too, or repair keeps sweeping a scope that no longer exists.
                         // Best-effort: an unresolved row is the crash contract anyway.
@@ -408,7 +538,7 @@ pub(crate) async fn add_worktree(
                         )));
                     }
                     Err(e) => {
-                        rollback_partial_add();
+                        rollback_partial_add(&mut target_guard);
                         // A HANDLED failure fully rolled back — resolve the intent row
                         // too, or repair keeps sweeping a scope that no longer exists.
                         // Best-effort: an unresolved row is the crash contract anyway.
@@ -428,7 +558,7 @@ pub(crate) async fn add_worktree(
                 match Branch::find_branch_result(name, None).await {
                     Ok(None) => {}
                     Ok(Some(_)) => {
-                        rollback_partial_add();
+                        rollback_partial_add(&mut target_guard);
                         // A HANDLED failure fully rolled back — resolve the intent row
                         // too, or repair keeps sweeping a scope that no longer exists.
                         // Best-effort: an unresolved row is the crash contract anyway.
@@ -438,7 +568,7 @@ pub(crate) async fn add_worktree(
                         )));
                     }
                     Err(e) => {
-                        rollback_partial_add();
+                        rollback_partial_add(&mut target_guard);
                         // A HANDLED failure fully rolled back — resolve the intent row
                         // too, or repair keeps sweeping a scope that no longer exists.
                         // Best-effort: an unresolved row is the crash contract anyway.
@@ -452,7 +582,7 @@ pub(crate) async fn add_worktree(
                 // worktree); every failure below deletes it back
                 // tip-conditionally — no branch-only residue.
                 if let Err(e) = Branch::update_branch(name, &start.to_string(), None).await {
-                    rollback_partial_add();
+                    rollback_partial_add(&mut target_guard);
                     // A HANDLED failure fully rolled back — resolve the intent row
                     // too, or repair keeps sweeping a scope that no longer exists.
                     // Best-effort: an unresolved row is the crash contract anyway.
@@ -487,7 +617,7 @@ pub(crate) async fn add_worktree(
         let _guard = match DirGuard::change_to(&target) {
             Ok(g) => g,
             Err(e) => {
-                rollback_partial_add();
+                rollback_partial_add(&mut target_guard);
                 rollback_created_branch(created_branch).await;
                 // A HANDLED failure fully rolled back — resolve the intent row
                 // too, or repair keeps sweeping a scope that no longer exists.
@@ -517,7 +647,7 @@ pub(crate) async fn add_worktree(
             // rollbacks: those act on the invoking repository's rows.
             drop(_scope);
             drop(_guard);
-            rollback_partial_add();
+            rollback_partial_add(&mut target_guard);
             rollback_created_branch(created_branch).await;
             // A HANDLED failure fully rolled back — resolve the intent row
             // too, or repair keeps sweeping a scope that no longer exists.
@@ -558,7 +688,7 @@ pub(crate) async fn add_worktree(
             // removed dir).
             drop(_scope);
             drop(_guard);
-            rollback_partial_add();
+            rollback_partial_add(&mut target_guard);
             rollback_created_branch(created_branch).await;
             // A HANDLED failure fully rolled back — resolve the intent row
             // too, or repair keeps sweeping a scope that no longer exists.
@@ -571,12 +701,18 @@ pub(crate) async fn add_worktree(
         }
     }
 
+    if let Err(error) = target_guard.verify() {
+        rollback_partial_add(&mut target_guard);
+        rollback_created_branch(created_branch).await;
+        return Err(error);
+    }
     let registration_epoch = state.next_epoch();
     // A linked worktree exists from here on, and that fact must OUTLIVE its
     // entry: the ambiguous-sidecar rules ask "did one ever exist", and a later
     // removal deletes the entry (§C.4.3).
     state.linked_history = LinkedHistory::Existed;
     state.entries.push(WorktreeEntry {
+        name: Some(name),
         path: canonical_target.to_string_lossy().to_string(),
         is_main: false,
         locked: false,
@@ -591,7 +727,7 @@ pub(crate) async fn add_worktree(
         epoch: registration_epoch,
     });
     if let Err(e) = write_state(&state) {
-        rollback_partial_add();
+        rollback_partial_add(&mut target_guard);
         // A HANDLED failure fully rolled back — resolve the intent row
         // too, or repair keeps sweeping a scope that no longer exists.
         // Best-effort: an unresolved row is the crash contract anyway.
@@ -644,53 +780,7 @@ pub(crate) async fn reattach_worktree(
             target.display()
         )));
     };
-    let gitdir = target.join(util::ROOT_DIR);
-    let current_id = fs::read_to_string(gitdir.join("worktree_id"))
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty());
-    if current_id.as_deref() != Some(expected_id.as_str()) {
-        return Err(WorktreeError::OperationBlocked(format!(
-            "cannot re-attach '{}': its gitdir identity ({}) does not match the registry's \
-              persisted id ({expected_id}); run `libra worktree repair --confirm {}` first",
-            target.display(),
-            current_id.as_deref().unwrap_or("missing"),
-            target.display()
-        )));
-    }
-    // The commondir must point at THIS repository's storage: a directory
-    // whose (mutable) id happens to match but whose commondir targets
-    // another repo must never be re-attached into this one. Missing or
-    // corrupt pointers are repair's job, not re-attach's.
-    let storage = util::storage_path();
-    let commondir_ok = fs::read_to_string(gitdir.join("commondir"))
-        .ok()
-        .and_then(|contents| {
-            contents
-                .lines()
-                .next()
-                .map(str::trim)
-                .filter(|line| !line.is_empty())
-                .map(PathBuf::from)
-        })
-        .map(|existing| {
-            let existing_abs = if existing.is_absolute() {
-                existing
-            } else {
-                gitdir.join(existing)
-            };
-            fs::canonicalize(&existing_abs).unwrap_or(existing_abs)
-                == fs::canonicalize(&storage).unwrap_or_else(|_| storage.clone())
-        })
-        .unwrap_or(false);
-    if !commondir_ok {
-        return Err(WorktreeError::OperationBlocked(format!(
-            "cannot re-attach '{}': its commondir pointer is missing, corrupt, or targets a \
-              different repository's storage; run `libra worktree repair --confirm {}` first",
-            target.display(),
-            target.display()
-        )));
-    }
+    let directory_guard = RegisteredDirectoryGuard::open(target, Some(&expected_id))?;
 
     let payload = serde_json::json!({
         "path": target.to_string_lossy(),
@@ -727,25 +817,14 @@ pub(crate) async fn reattach_worktree(
         return Err(WorktreeError::OperationBlocked(format!(
             "cannot re-attach '{}': identity '{identity}' is already claimed by another ACTIVE \
               worktree. Run `libra worktree doctor`, then \
-              `libra worktree repair <path> --resolve-identity --yes` on the one you do not want",
+              `libra worktree repair --path <path> --resolve-identity --yes` on the one you do not want",
             state.entries[index].path
         )));
     }
+    directory_guard.verify()?;
     state.entries[index].state = WorktreeEntryState::Active;
     write_state(state)?;
-    let marker = gitdir.join(DETACHED_MARKER);
-    match fs::remove_file(&marker) {
-        Ok(()) => {}
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => {
-            // Journal kept: repair finishes lifting the marker.
-            return Err(WorktreeError::IoWrite(format!(
-                "cannot remove the detached marker '{}' (run `libra worktree repair \
-                  --confirm` to finish the re-attach): {error}",
-                marker.display()
-            )));
-        }
-    }
+    directory_guard.remove_detached_marker()?;
     if let Err(error) = lifecycle_delete(&db, &expected_id).await {
         tracing::warn!(
             error,
@@ -1041,27 +1120,40 @@ pub(crate) async fn gc_worktree_scoped_rows_strict(
 
 pub(crate) fn create_worktree_gitdir(
     common_storage: &Path,
-    gitdir: &Path,
+    worktree_directory: &fs::File,
     worktree_id: &str,
 ) -> io::Result<()> {
-    fs::create_dir_all(gitdir)?;
-    fs::write(
-        gitdir.join("commondir"),
-        format!("{}\n", common_storage.display()),
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        let name = c".libra";
+        // SAFETY: mkdirat creates one exclusive child of the held worktree;
+        // an existing directory or symlink is an error, never adopted.
+        if unsafe { libc::mkdirat(worktree_directory.as_raw_fd(), name.as_ptr(), 0o755) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    #[cfg(windows)]
+    {
+        crate::utils::windows_fs::create_directory_at(
+            worktree_directory,
+            std::ffi::OsStr::new(".libra"),
+            false,
+        )?;
+    }
+    let gitdir = crate::utils::beneath::open_beneath(worktree_directory, Path::new(".libra"))?;
+    crate::utils::beneath::write_regular_file_beneath(
+        &gitdir,
+        Path::new("commondir"),
+        format!("{}\n", common_storage.display()).as_bytes(),
+        true,
     )?;
-    fs::write(gitdir.join("worktree_id"), format!("{worktree_id}\n"))?;
-    Ok(())
-}
-
-pub(crate) fn remove_worktree_storage_link(link_path: &Path) -> io::Result<()> {
-    let metadata = fs::symlink_metadata(link_path)?;
-    if metadata.file_type().is_symlink() {
-        return fs::remove_file(link_path);
-    }
-    if metadata.is_dir() {
-        return fs::remove_dir_all(link_path);
-    }
-    fs::remove_file(link_path)
+    crate::utils::beneath::write_regular_file_beneath(
+        &gitdir,
+        Path::new("worktree_id"),
+        format!("{worktree_id}\n").as_bytes(),
+        true,
+    )
 }
 
 pub(crate) fn run_list_worktrees() -> WorktreeResult<WorktreeListOutput> {
@@ -1085,6 +1177,7 @@ pub(crate) fn run_list_worktrees_at(
                 .or_else(|| resolve_entry_worktree_id(&w.path, w.is_main));
             let layout = detect_entry_layout(Path::new(&w.path), w.is_main);
             WorktreeListEntry {
+                name: w.name,
                 kind: if w.is_main { "main" } else { "worktree" },
                 exists: Path::new(&w.path).exists(),
                 worktree_id,
@@ -1168,6 +1261,9 @@ pub(crate) async fn format_worktree_porcelain(
         out.push_str("worktree ");
         out.push_str(&w.path);
         out.push('\n');
+        if let Some(name) = &w.name {
+            out.push_str(&format!("name {name}\n"));
+        }
         match Head::head_for_worktree_scope(w.worktree_id.as_deref()).await {
             Ok(Some((head, commit))) => {
                 if let Some(sha) = commit {
@@ -1365,13 +1461,13 @@ pub(crate) fn clear_common_info_files() -> CliResult<String> {
     }
 }
 
-pub(crate) async fn lock_worktree(
+/// Caller holds the common registry lock; path selectors are already resolved.
+pub(crate) async fn lock_worktree_locked(
     path: String,
     reason: Option<String>,
 ) -> WorktreeResult<WorktreeLockOutput> {
-    let _registry_lock = acquire_registry_lock_async().await?;
     let mut state = load_state()?;
-    let target = resolve_path(&path, "worktree path")?;
+    let target = PathBuf::from(&path);
     let entry = match find_entry_mut(&mut state, &target) {
         Some(e) => e,
         None => return Err(WorktreeError::NoSuchWorktree { path }),
@@ -1406,10 +1502,10 @@ pub(crate) fn render_lock_worktree(
     Ok(())
 }
 
-pub(crate) async fn unlock_worktree(path: String) -> WorktreeResult<WorktreeUnlockOutput> {
-    let _registry_lock = acquire_registry_lock_async().await?;
+/// Caller holds the common registry lock; path selectors are already resolved.
+pub(crate) async fn unlock_worktree_locked(path: String) -> WorktreeResult<WorktreeUnlockOutput> {
     let mut state = load_state()?;
-    let target = resolve_path(&path, "worktree path")?;
+    let target = PathBuf::from(&path);
     let entry = match find_entry_mut(&mut state, &target) {
         Some(e) => e,
         None => return Err(WorktreeError::NoSuchWorktree { path }),
@@ -1441,19 +1537,15 @@ pub(crate) fn render_unlock_worktree(
     Ok(())
 }
 
-pub(crate) async fn move_worktree(src: String, dest: String) -> WorktreeResult<WorktreeMoveOutput> {
-    let _registry_lock = acquire_registry_lock_async().await?;
+/// Caller holds the common registry lock; path selectors are already resolved.
+pub(crate) async fn move_worktree_locked(
+    src: String,
+    dest: String,
+) -> WorktreeResult<WorktreeMoveOutput> {
     let mut state = load_state()?;
-    let src_path = resolve_path(&src, "source worktree path")?;
+    let src_path = PathBuf::from(&src);
     let dest_path = resolve_path(&dest, "destination worktree path")?;
     let storage = util::storage_path();
-
-    if util::is_sub_path(&dest_path, &storage) {
-        return Err(WorktreeError::InvalidTarget(format!(
-            "destination cannot be inside .libra storage: {}",
-            dest_path.display()
-        )));
-    }
 
     if find_entry(&state, &dest_path).is_some() {
         return Err(WorktreeError::OperationBlocked(format!(
@@ -1468,6 +1560,29 @@ pub(crate) async fn move_worktree(src: String, dest: String) -> WorktreeResult<W
         .position(|w| Path::new(&w.path) == src_path)
         .ok_or(WorktreeError::NoSuchWorktree { path: src })?;
 
+    if let Some(name) = state.entries[index].name.as_deref() {
+        crate::utils::worktree_layout::validate_linked_destination(&storage, name, &dest_path)
+            .map_err(|error| {
+                WorktreeError::InvalidTarget(format!(
+                    "invalid worktree destination '{}': {error}",
+                    dest_path.display()
+                ))
+            })?;
+    } else if util::is_sub_path(&dest_path, &storage) || util::is_sub_path(&storage, &dest_path) {
+        return Err(WorktreeError::InvalidTarget(
+            "unnamed worktrees cannot be moved into repository metadata; select an external --path"
+                .into(),
+        ));
+    }
+    if registered_worktree_locations()?
+        .iter()
+        .any(|entry| entry.path == dest_path)
+    {
+        return Err(WorktreeError::OperationBlocked(format!(
+            "destination is already registered: {}",
+            dest_path.display()
+        )));
+    }
     if state.entries[index].is_main {
         return Err(WorktreeError::MainWorktree {
             action: "move",
@@ -1481,6 +1596,15 @@ pub(crate) async fn move_worktree(src: String, dest: String) -> WorktreeResult<W
         });
     }
 
+    if detect_entry_layout(&src_path, false) == "legacy-symlink" {
+        return Err(WorktreeError::OperationBlocked(format!(
+            "legacy worktree '{}' uses shared .libra metadata; run `libra worktree repair --confirm --migrate-layout --path {}` before moving it",
+            src_path.display(),
+            src_path.display()
+        )));
+    }
+    let mut directory_guard =
+        RegisteredDirectoryGuard::open(&src_path, state.entries[index].worktree_id.as_deref())?;
     if dest_path.exists() {
         return Err(WorktreeError::OperationBlocked(format!(
             "destination already exists: {}",
@@ -1516,6 +1640,18 @@ pub(crate) async fn move_worktree(src: String, dest: String) -> WorktreeResult<W
             )));
         }
     }
+    if dest_path.starts_with(crate::utils::worktree_layout::managed_root(&storage))
+        && let Some(parent) = dest_path.parent()
+    {
+        crate::utils::worktree_layout::ensure_managed_directory(&storage, parent).map_err(
+            |error| {
+                WorktreeError::IoWrite(format!(
+                    "cannot create worktree destination parent '{}': {error}",
+                    parent.display()
+                ))
+            },
+        )?;
+    }
     let payload = serde_json::json!({
         "src": src_path.to_string_lossy(),
         "dest": dest_path.to_string_lossy(),
@@ -1530,6 +1666,7 @@ pub(crate) async fn move_worktree(src: String, dest: String) -> WorktreeResult<W
     .await
     .map_err(WorktreeError::OperationBlocked)?;
 
+    directory_guard.verify()?;
     let old_path = state.entries[index].path.clone();
     state.entries[index].path = dest_path.to_string_lossy().to_string();
     if let Err(e) = write_state(&state) {
@@ -1538,40 +1675,35 @@ pub(crate) async fn move_worktree(src: String, dest: String) -> WorktreeResult<W
         return Err(e);
     }
 
-    let move_result = fs::rename(&src_path, &dest_path).or_else(|error| {
-        if error.kind() != io::ErrorKind::CrossesDevices {
-            return Err(error);
-        }
-
-        // `rename(2)` cannot cross filesystems. Copy first, then remove the
-        // source only after the destination is complete; this preserves the
-        // worktree if either phase fails.
-        let mut options = fs_extra::dir::CopyOptions::new();
-        options.overwrite = false;
-        options.copy_inside = false;
-        let destination_parent = dest_path.parent().unwrap_or_else(|| Path::new("."));
-        fs_extra::dir::copy(&src_path, destination_parent, &options)
-            .map_err(|copy_error| io::Error::other(copy_error.to_string()))?;
-        let copied_path = destination_parent.join(
-            src_path
-                .file_name()
-                .ok_or_else(|| io::Error::other("worktree source has no directory name"))?,
-        );
-        if copied_path != dest_path {
-            fs::rename(&copied_path, &dest_path)?;
-        }
-        if let Err(remove_error) = fs::remove_dir_all(&src_path) {
-            let _ = fs::remove_dir_all(&dest_path);
-            return Err(remove_error);
-        }
-        Ok(())
-    });
+    // A cross-filesystem copy cannot preserve symlinks and unrelated sibling
+    // directories safely through the old fs_extra fallback. Keep the source
+    // authoritative when an atomic rename is unavailable.
+    let move_result = rename_pinned_worktree(&mut directory_guard, &dest_path);
     if let Err(e) = move_result {
-        state.entries[index].path = old_path;
-        write_state(&state)?;
-        let _ = journal_resolve(&db, journal_id).await;
+        let source_unchanged = crate::utils::beneath::open_root(&src_path)
+            .and_then(|directory| {
+                crate::utils::beneath::entry_identity_beneath(&directory, Path::new(""))
+            })
+            .is_ok_and(|identity| identity == directory_guard.identity);
+        // A failed rename never copied data. Restore the original registration
+        // only while the pinned source still has its original identity.
+        if source_unchanged {
+            state.entries[index].path = old_path;
+            write_state(&state)?;
+            let _ = journal_resolve(&db, journal_id).await;
+            if matches!(
+                e.kind(),
+                io::ErrorKind::CrossesDevices | io::ErrorKind::Unsupported
+            ) {
+                return Err(WorktreeError::OperationBlocked(format!(
+                    "cannot atomically move worktree '{}' to '{}' across filesystems; the source and registration were kept. Choose a destination on the same filesystem, or create a separate worktree at the destination and transfer changes explicitly",
+                    src_path.display(),
+                    dest_path.display()
+                )));
+            }
+        }
         return Err(WorktreeError::IoWrite(format!(
-            "failed to move worktree directory '{}' to '{}': {e}",
+            "failed to move worktree directory '{}' to '{}': {e}; inspect both paths and run `libra worktree repair --confirm` if the source directory changed",
             src_path.display(),
             dest_path.display()
         )));
@@ -1603,6 +1735,11 @@ pub(crate) fn render_move_worktree(
 
 pub(crate) async fn prune_worktrees() -> WorktreeResult<WorktreePruneOutput> {
     let _registry_lock = acquire_registry_lock_async().await?;
+    prune_worktrees_locked().await
+}
+
+/// Caller holds the common registry lock; path selectors are already resolved.
+pub(crate) async fn prune_worktrees_locked() -> WorktreeResult<WorktreePruneOutput> {
     let _repository_ref_lease = acquire_worktree_ref_lease().await?;
     let mut state = load_state()?;
 
@@ -1783,14 +1920,484 @@ pub(crate) fn render_prune_worktrees(
     Ok(())
 }
 
-pub(crate) async fn remove_worktree(
+/// Pins the directory identity while a lifecycle action awaits database or
+/// dirty-state checks. Never treat a failed metadata read as a missing tree.
+struct RegisteredDirectoryGuard {
+    target: PathBuf,
+    common: PathBuf,
+    directory: Option<fs::File>,
+    identity: crate::utils::beneath::EntryIdentity,
+    worktree_id: String,
+}
+
+impl RegisteredDirectoryGuard {
+    fn metadata_directory(&self) -> WorktreeResult<fs::File> {
+        self.verify()?;
+        self.directory()
+            .and_then(|directory| {
+                crate::utils::beneath::open_beneath(directory, Path::new(".libra"))
+            })
+            .and_then(|gitdir| {
+                self.verify_metadata(&gitdir)?;
+                Ok(gitdir)
+            })
+            .map_err(|error| {
+                WorktreeError::IoRead(format!(
+                    "cannot pin worktree metadata '{}': {error}",
+                    self.target.display()
+                ))
+            })
+    }
+
+    fn write_detached_marker(&self) -> WorktreeResult<()> {
+        use std::io::Write;
+        let gitdir = self.metadata_directory()?;
+        let name = Path::new(DETACHED_MARKER);
+        let create = || -> io::Result<fs::File> {
+            #[cfg(unix)]
+            {
+                use std::os::fd::{AsRawFd, FromRawFd};
+                let name = std::ffi::CString::new(DETACHED_MARKER)
+                    .map_err(|_| io::Error::other("invalid worktree marker name"))?;
+                // SAFETY: the held gitdir and single component remain live;
+                // exclusive no-follow creation never truncates an existing file.
+                let fd = unsafe {
+                    libc::openat(
+                        gitdir.as_raw_fd(),
+                        name.as_ptr(),
+                        libc::O_WRONLY
+                            | libc::O_CREAT
+                            | libc::O_EXCL
+                            | libc::O_NOFOLLOW
+                            | libc::O_CLOEXEC,
+                        0o600,
+                    )
+                };
+                if fd < 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                // SAFETY: openat returned an owned file descriptor.
+                Ok(unsafe { fs::File::from_raw_fd(fd) })
+            }
+            #[cfg(windows)]
+            {
+                crate::utils::windows_fs::create_private_file_at(&gitdir, name.as_os_str())
+            }
+        };
+        let result = match create() {
+            Ok(mut file) => file.write_all(format!("{}\nremoved from the worktree registry; re-add or delete this directory\n", self.worktree_id).as_bytes())
+                .and_then(|()| file.sync_all()),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                crate::utils::worktree_layout::read_regular_metadata_from(&gitdir, name, 4096)
+                    .and_then(|bytes| {
+                        if std::str::from_utf8(&bytes).ok().and_then(|text| text.lines().next()) == Some(self.worktree_id.as_str()) {
+                            Ok(())
+                        } else { Err(io::Error::other("existing detached marker has another identity; run worktree repair --confirm")) }
+                    })
+            }
+            Err(error) => Err(error),
+        };
+        #[cfg(unix)]
+        let result = result.and_then(|()| gitdir.sync_all());
+        result.map_err(|error| {
+            WorktreeError::IoWrite(format!(
+                "cannot write detached marker for '{}': {error}",
+                self.target.display()
+            ))
+        })
+    }
+
+    fn remove_detached_marker(&self) -> WorktreeResult<bool> {
+        use crate::utils::beneath;
+        let gitdir = self.metadata_directory()?;
+        let name = Path::new(DETACHED_MARKER);
+        let result = (|| -> io::Result<bool> {
+            let identity = match beneath::entry_identity_beneath(&gitdir, name) {
+                Ok(identity) => identity,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+                Err(error) => return Err(error),
+            };
+            if identity.kind != beneath::EntryKind::File {
+                return Err(io::Error::other("detached marker is not a regular file"));
+            }
+            #[cfg(unix)]
+            {
+                use std::os::fd::AsRawFd;
+                let name = std::ffi::CString::new(DETACHED_MARKER)
+                    .map_err(|_| io::Error::other("invalid worktree marker name"))?;
+                // SAFETY: unlink only the marker beneath the held gitdir.
+                if unsafe { libc::unlinkat(gitdir.as_raw_fd(), name.as_ptr(), 0) } != 0 {
+                    return Err(io::Error::last_os_error());
+                }
+            }
+            #[cfg(windows)]
+            {
+                let entry = crate::utils::windows_fs::inspect_entry_at(&gitdir, name.as_os_str())?;
+                crate::utils::windows_fs::remove_entry_at(
+                    &gitdir,
+                    name.as_os_str(),
+                    entry.identity,
+                    false,
+                )?;
+            }
+            #[cfg(unix)]
+            gitdir.sync_all()?;
+            Ok(true)
+        })();
+        result.map_err(|error| {
+            WorktreeError::IoWrite(format!(
+                "cannot remove detached marker for '{}': {error}; run worktree repair --confirm",
+                self.target.display()
+            ))
+        })
+    }
+
+    fn directory(&self) -> io::Result<&fs::File> {
+        self.directory.as_ref().ok_or_else(|| {
+            io::Error::other("the directory identity pin was released for final removal")
+        })
+    }
+
+    fn open(target: &Path, worktree_id: Option<&str>) -> WorktreeResult<Self> {
+        use crate::utils::{beneath, worktree_layout};
+        let worktree_id = worktree_id.ok_or_else(|| WorktreeError::OperationBlocked(format!(
+            "cannot change worktree '{}': its persisted identity is missing; run worktree repair --confirm first", target.display()
+        )))?;
+        let metadata = fs::symlink_metadata(target).map_err(|error| {
+            WorktreeError::IoRead(format!("cannot inspect registered worktree '{}': {error}; restore it or use worktree prune if it is gone", target.display()))
+        })?;
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            return Err(WorktreeError::OperationBlocked(format!(
+                "registered worktree '{}' was replaced by a symlink or non-directory; refusing to change it",
+                target.display()
+            )));
+        }
+        let common = worktree_layout::current_common_storage().map_err(|error| {
+            WorktreeError::IoRead(format!("cannot resolve common worktree storage: {error}"))
+        })?;
+        let directory = if target.starts_with(worktree_layout::managed_root(&common)) {
+            worktree_layout::open_managed_directory(&common, target)
+        } else {
+            beneath::open_root(target)
+        }
+        .map_err(|error| {
+            WorktreeError::IoRead(format!(
+                "cannot pin registered worktree '{}': {error}",
+                target.display()
+            ))
+        })?;
+        let identity =
+            beneath::entry_identity_beneath(&directory, Path::new("")).map_err(|error| {
+                WorktreeError::IoRead(format!(
+                    "cannot identify worktree '{}': {error}",
+                    target.display()
+                ))
+            })?;
+        let guard = Self {
+            target: target.to_path_buf(),
+            common,
+            directory: Some(directory),
+            identity,
+            worktree_id: worktree_id.into(),
+        };
+        guard.verify()?;
+        Ok(guard)
+    }
+
+    fn verify_metadata(&self, gitdir: &fs::File) -> io::Result<()> {
+        let id = crate::utils::worktree_layout::read_regular_metadata_from(
+            gitdir,
+            Path::new("worktree_id"),
+            1024,
+        )?;
+        let id = std::str::from_utf8(&id)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        if id.trim() != self.worktree_id {
+            return Err(io::Error::other(
+                "the directory no longer carries the registered worktree identity",
+            ));
+        }
+        let common = crate::utils::worktree_layout::read_regular_metadata_from(
+            gitdir,
+            Path::new("commondir"),
+            65_536,
+        )?;
+        let common = std::str::from_utf8(&common)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        if common.trim().is_empty() {
+            return Err(io::Error::other(
+                "the worktree common-storage pointer is invalid",
+            ));
+        }
+        let pointer = Path::new(common.trim());
+        let pointer = if pointer.is_absolute() {
+            pointer.to_path_buf()
+        } else {
+            self.target.join(".libra").join(pointer)
+        };
+        if fs::canonicalize(pointer)? != fs::canonicalize(&self.common)? {
+            return Err(io::Error::other(
+                "the worktree common-storage pointer belongs to another repository",
+            ));
+        }
+        Ok(())
+    }
+
+    fn verify(&self) -> WorktreeResult<()> {
+        use crate::utils::beneath;
+        let current = beneath::open_root(&self.target).and_then(|directory| {
+            let identity = beneath::entry_identity_beneath(&directory, Path::new(""))?;
+            let pinned = beneath::entry_identity_beneath(self.directory()?, Path::new(""))?;
+            if identity != self.identity || pinned != self.identity {
+                return Err(io::Error::other(
+                    "the directory identity changed during the operation",
+                ));
+            }
+            let gitdir = beneath::open_beneath(&directory, Path::new(".libra"))?;
+            self.verify_metadata(&gitdir)?;
+            Ok(())
+        });
+        current.map_err(|error| WorktreeError::OperationBlocked(format!("refusing to change worktree '{}': {error}; restore its original directory or repair its metadata", self.target.display())))
+    }
+}
+
+fn rename_pinned_worktree(
+    guard: &mut RegisteredDirectoryGuard,
+    destination: &Path,
+) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::{fd::AsRawFd, unix::ffi::OsStrExt};
+
+        use crate::utils::beneath;
+        let source_parent = guard
+            .target
+            .parent()
+            .ok_or_else(|| io::Error::other("worktree source has no parent"))?;
+        let source_name = guard
+            .target
+            .file_name()
+            .ok_or_else(|| io::Error::other("worktree source has no directory name"))?;
+        let destination_parent = destination
+            .parent()
+            .ok_or_else(|| io::Error::other("worktree destination has no parent"))?;
+        let destination_name = destination
+            .file_name()
+            .ok_or_else(|| io::Error::other("worktree destination has no directory name"))?;
+        let source_parent = beneath::open_root(source_parent)?;
+        let destination_parent = beneath::open_root(destination_parent)?;
+        if beneath::entry_identity_beneath(&source_parent, Path::new(source_name))?
+            != guard.identity
+        {
+            return Err(io::Error::other("worktree source changed before move"));
+        }
+        let source_component = std::ffi::CString::new(source_name.as_bytes())
+            .map_err(|_| io::Error::other("worktree source contains a NUL byte"))?;
+        let destination_component = std::ffi::CString::new(destination_name.as_bytes())
+            .map_err(|_| io::Error::other("worktree destination contains a NUL byte"))?;
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        // SAFETY: both directory descriptors and single component strings are
+        // live. RENAME_NOREPLACE atomically refuses any destination entry.
+        let result = unsafe {
+            libc::renameat2(
+                source_parent.as_raw_fd(),
+                source_component.as_ptr(),
+                destination_parent.as_raw_fd(),
+                destination_component.as_ptr(),
+                libc::RENAME_NOREPLACE,
+            )
+        };
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
+        // SAFETY: same held-parent contract; RENAME_EXCL never replaces a leaf.
+        let result = unsafe {
+            libc::renameatx_np(
+                source_parent.as_raw_fd(),
+                source_component.as_ptr(),
+                destination_parent.as_raw_fd(),
+                destination_component.as_ptr(),
+                libc::RENAME_EXCL,
+            )
+        };
+        #[cfg(not(any(
+            target_os = "linux",
+            target_os = "android",
+            target_os = "macos",
+            target_os = "ios"
+        )))]
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "this platform does not support exclusive worktree moves",
+        ));
+        #[cfg(any(
+            target_os = "linux",
+            target_os = "android",
+            target_os = "macos",
+            target_os = "ios"
+        ))]
+        {
+            if result != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            if beneath::entry_identity_beneath(&destination_parent, Path::new(destination_name))?
+                != guard.identity
+            {
+                return Err(io::Error::other("worktree destination changed during move"));
+            }
+            Ok(())
+        }
+    }
+    #[cfg(windows)]
+    {
+        use crate::utils::{beneath, windows_fs};
+        let source_parent = guard
+            .target
+            .parent()
+            .ok_or_else(|| io::Error::other("worktree source has no parent"))?;
+        let source_name = guard
+            .target
+            .file_name()
+            .ok_or_else(|| io::Error::other("worktree source has no directory name"))?;
+        let destination_parent = destination
+            .parent()
+            .ok_or_else(|| io::Error::other("worktree destination has no parent"))?;
+        let destination_name = destination
+            .file_name()
+            .ok_or_else(|| io::Error::other("worktree destination has no directory name"))?;
+        let source_parent = beneath::open_root(source_parent)?;
+        let destination_parent = beneath::open_root(destination_parent)?;
+        let identity = windows_fs::identity(guard.directory()?)?;
+        drop(guard.directory.take());
+        windows_fs::rename_entry_at(
+            &source_parent,
+            source_name,
+            identity,
+            &destination_parent,
+            destination_name,
+        )
+    }
+}
+
+/// Remove entries through pinned directory handles; a path swap can never make
+/// cleanup recursively traverse a different directory or follow a symlink.
+fn delete_pinned_worktree(guard: &mut RegisteredDirectoryGuard) -> io::Result<()> {
+    clear_pinned_worktree(guard, true)
+}
+
+fn clear_pinned_worktree(
+    guard: &mut RegisteredDirectoryGuard,
+    remove_root: bool,
+) -> io::Result<()> {
+    use crate::utils::beneath;
+    fn remove_entry(
+        parent: &fs::File,
+        name: &std::ffi::OsStr,
+        expected: beneath::EntryIdentity,
+    ) -> io::Result<()> {
+        if beneath::entry_identity_beneath(parent, Path::new(name))? != expected {
+            return Err(io::Error::other("worktree entry changed before removal"));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::{fd::AsRawFd, unix::ffi::OsStrExt};
+            let name = std::ffi::CString::new(name.as_bytes()).map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "worktree entry contains a NUL byte",
+                )
+            })?;
+            let flags = if expected.kind == beneath::EntryKind::Directory {
+                libc::AT_REMOVEDIR
+            } else {
+                0
+            };
+            // SAFETY: unlinkat removes only this entry beneath the pinned
+            // parent. It cannot follow a replacement symlink during cleanup.
+            if unsafe { libc::unlinkat(parent.as_raw_fd(), name.as_ptr(), flags) } != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        }
+        #[cfg(windows)]
+        {
+            let entry = crate::utils::windows_fs::inspect_entry_at(parent, name)?;
+            if beneath::entry_identity_beneath(parent, Path::new(name))? != expected {
+                return Err(io::Error::other("worktree entry changed before removal"));
+            }
+            crate::utils::windows_fs::remove_entry_at(parent, name, entry.identity, entry.directory)
+        }
+    }
+    fn verify_root(guard: &RegisteredDirectoryGuard) -> io::Result<()> {
+        let named = beneath::open_root(&guard.target)?;
+        if beneath::entry_identity_beneath(&named, Path::new(""))? != guard.identity {
+            return Err(io::Error::other(
+                "registered worktree directory changed during cleanup",
+            ));
+        }
+        Ok(())
+    }
+    fn remove_contents(
+        directory: &fs::File,
+        depth: usize,
+        guard: &RegisteredDirectoryGuard,
+    ) -> io::Result<()> {
+        verify_root(guard)?;
+        if depth > 256 {
+            return Err(io::Error::other(
+                "worktree exceeds the safe cleanup depth; remove its deepest directories and retry",
+            ));
+        }
+        for entry in beneath::read_dir_fd(directory.try_clone()?)? {
+            let entry = entry?;
+            let relative = Path::new(&entry.name);
+            let expected = beneath::entry_identity_beneath(directory, relative)?;
+            if expected.kind == beneath::EntryKind::Directory {
+                let child = beneath::open_beneath(directory, relative)?;
+                if beneath::entry_identity_beneath(&child, Path::new(""))? != expected {
+                    return Err(io::Error::other(
+                        "worktree directory changed during removal",
+                    ));
+                }
+                remove_contents(&child, depth + 1, guard)?;
+            }
+            verify_root(guard)?;
+            remove_entry(directory, &entry.name, expected)?;
+        }
+        Ok(())
+    }
+    let parent_path = guard
+        .target
+        .parent()
+        .ok_or_else(|| io::Error::other("worktree has no parent directory"))?;
+    let name = guard
+        .target
+        .file_name()
+        .ok_or_else(|| io::Error::other("worktree has no directory name"))?;
+    let parent = beneath::open_root(parent_path)?;
+    if beneath::entry_identity_beneath(&parent, Path::new(name))? != guard.identity {
+        return Err(io::Error::other(
+            "registered worktree directory was replaced before cleanup",
+        ));
+    }
+    remove_contents(guard.directory()?, 0, guard)?;
+    verify_root(guard)?;
+    if remove_root {
+        // Windows directory pins deny DELETE sharing. Release this last child
+        // handle before the parent-relative identity-checked unlink.
+        drop(guard.directory.take());
+        remove_entry(&parent, name, guard.identity)
+    } else {
+        Ok(())
+    }
+}
+
+/// Caller holds the common registry lock; path selectors are already resolved.
+pub(crate) async fn remove_worktree_locked(
     path: String,
     delete_dir: bool,
 ) -> WorktreeResult<WorktreeRemoveOutput> {
-    let _registry_lock = acquire_registry_lock_async().await?;
     let _repository_ref_lease = acquire_worktree_ref_lease().await?;
     let mut state = load_state()?;
-    let target = resolve_path(&path, "worktree path")?;
+    let target = PathBuf::from(&path);
 
     let index = state
         .entries
@@ -1817,11 +2424,12 @@ pub(crate) async fn remove_worktree(
     if detect_entry_layout(&target, false) == "legacy-symlink" {
         return Err(WorktreeError::OperationBlocked(format!(
             "'{}' uses the legacy shared-.libra symlink layout; run `libra worktree \
-              repair --migrate-layout --confirm {}` first",
+              repair --migrate-layout --confirm --path {}` first",
             target.display(),
             target.display()
         )));
     }
+    let directory_guard = RegisteredDirectoryGuard::open(&target, entry.worktree_id.as_deref())?;
     // §C.7: a worktree an AGENT holds a live workspace lease on is not the
     // human's to detach or delete out from under it — the lease's fenced
     // owner is mid-work there. Release or let the lease lapse first.
@@ -1909,7 +2517,9 @@ pub(crate) async fn remove_worktree(
     // held autostash live in the target's gitdir, not in DB rows.
     refuse_active_sidecar_state(&target.join(util::ROOT_DIR), "removing the worktree")?;
 
+    directory_guard.verify()?;
     if delete_dir {
+        drop(directory_guard);
         remove_worktree_delete_dir(
             &db,
             &mut state,
@@ -1920,16 +2530,25 @@ pub(crate) async fn remove_worktree(
         )
         .await
     } else {
-        remove_worktree_detach(&db, &mut state, index, &target, worktree_id_for_gc).await
+        remove_worktree_detach(
+            &db,
+            &mut state,
+            index,
+            &target,
+            worktree_id_for_gc,
+            directory_guard,
+        )
+        .await
     }
 }
 
-pub(crate) async fn remove_worktree_detach(
+async fn remove_worktree_detach(
     db: &sea_orm::DatabaseConnection,
     state: &mut WorktreeState,
     index: usize,
     target: &Path,
     worktree_id: Option<String>,
+    directory_guard: RegisteredDirectoryGuard,
 ) -> WorktreeResult<WorktreeRemoveOutput> {
     let Some(worktree_id) = worktree_id else {
         return Err(WorktreeError::OperationBlocked(format!(
@@ -1966,13 +2585,14 @@ pub(crate) async fn remove_worktree_detach(
     )
     .await
     .map_err(WorktreeError::OperationBlocked)?;
+    directory_guard.verify()?;
     state.entries[index].state = WorktreeEntryState::DetachedFromRegistry;
     write_state(state)?;
     // Marker BEFORE resolving the journal: if the marker write fails, the
     // pending row makes `worktree repair` re-freeze the directory. The DB
     // handle was resolved before the marker exists, so the resolve below
     // cannot trip the gate even when cwd is inside the target.
-    write_detached_marker(target, &worktree_id)?;
+    directory_guard.write_detached_marker()?;
     if let Err(error) = journal_resolve(db, journal_id).await {
         tracing::warn!(
             error,
@@ -1997,6 +2617,7 @@ pub(crate) async fn remove_worktree_delete_dir(
     worktree_id: Option<String>,
     entry_state: WorktreeEntryState,
 ) -> WorktreeResult<WorktreeRemoveOutput> {
+    let mut directory_guard = RegisteredDirectoryGuard::open(target, worktree_id.as_deref())?;
     let payload = serde_json::json!({
         "path": target.to_string_lossy(),
         "delete_dir": true,
@@ -2015,17 +2636,7 @@ pub(crate) async fn remove_worktree_delete_dir(
     // lock, and journaled, so a crash mid-window is rolled forward by
     // repair (the registry entry still says detached).
     let _marker_lifted = if entry_state == WorktreeEntryState::DetachedFromRegistry {
-        let marker = target.join(util::ROOT_DIR).join(DETACHED_MARKER);
-        match fs::remove_file(&marker) {
-            Ok(()) => true,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => false,
-            Err(error) => {
-                let _ = journal_resolve(db, journal_id).await;
-                return Err(WorktreeError::IoWrite(format!(
-                    "cannot lift the detached marker for the dirty check: {error}"
-                )));
-            }
-        }
+        directory_guard.remove_detached_marker()?
     } else {
         false
     };
@@ -2034,11 +2645,9 @@ pub(crate) async fn remove_worktree_delete_dir(
     match dirty {
         Ok(false) => {}
         Ok(true) => {
-            let restored = restore_marker_on_refusal(
-                entry_state == WorktreeEntryState::DetachedFromRegistry,
-                target,
-                worktree_id.as_deref(),
-            );
+            let restored = directory_guard.verify().is_ok()
+                && (entry_state != WorktreeEntryState::DetachedFromRegistry
+                    || directory_guard.write_detached_marker().is_ok());
             if restored {
                 let _ = journal_resolve(db, journal_id).await;
             }
@@ -2047,11 +2656,9 @@ pub(crate) async fn remove_worktree_delete_dir(
             });
         }
         Err(error) => {
-            let restored = restore_marker_on_refusal(
-                entry_state == WorktreeEntryState::DetachedFromRegistry,
-                target,
-                worktree_id.as_deref(),
-            );
+            let restored = directory_guard.verify().is_ok()
+                && (entry_state != WorktreeEntryState::DetachedFromRegistry
+                    || directory_guard.write_detached_marker().is_ok());
             if restored {
                 let _ = journal_resolve(db, journal_id).await;
             }
@@ -2059,6 +2666,9 @@ pub(crate) async fn remove_worktree_delete_dir(
         }
     }
 
+    // A swapped directory must never receive our detached marker or have
+    // its contents removed. Leave the journal for explicit recovery.
+    directory_guard.verify()?;
     {
         // `remove --delete-dir .` runs with cwd INSIDE the target: move out
         // before deleting it, or every later cwd-based lookup (and the user's
@@ -2074,15 +2684,15 @@ pub(crate) async fn remove_worktree_delete_dir(
             let _ = env::set_current_dir(parent);
         }
     }
-    if let Err(e) = fs::remove_dir_all(target) {
+    if let Err(e) = delete_pinned_worktree(&mut directory_guard) {
         // Re-freeze a detached entry before surfacing the error — the
         // journal row stays pending either way (no resolve on this path),
         // so repair re-establishes whatever this restore could not.
-        let _ = restore_marker_on_refusal(
-            entry_state == WorktreeEntryState::DetachedFromRegistry,
-            target,
-            worktree_id.as_deref(),
-        );
+        if directory_guard.verify().is_ok()
+            && entry_state == WorktreeEntryState::DetachedFromRegistry
+        {
+            let _ = directory_guard.write_detached_marker();
+        }
         return Err(WorktreeError::IoWrite(format!(
             "failed to delete worktree directory '{}': {e}",
             target.display()
@@ -2202,6 +2812,16 @@ pub(crate) fn umount_fuse_path(
 ) -> WorktreeResult<WorktreeUmountOutput> {
     let target = resolve_path(&path, "FUSE worktree path")?;
     let mountpoint = fuse_utils::resolve_task_worktree_mountpoint_arg(&target);
+    let planned_cleanup_root = if cleanup {
+        Some(fuse_utils::fuse_task_worktree_cleanup_root(&mountpoint).ok_or_else(|| {
+            WorktreeError::InvalidTarget(format!(
+                "--cleanup only supports legacy Libra task FUSE paths ending in '/workspace', not managed named worktrees: {}",
+                mountpoint.display()
+            ))
+        })?)
+    } else {
+        None
+    };
     fuse_utils::force_unmount_path(&mountpoint).map_err(|source| {
         WorktreeError::IoWrite(format!(
             "failed to unmount FUSE path {}: {source}",
@@ -2211,13 +2831,7 @@ pub(crate) fn umount_fuse_path(
 
     let mut cleanup_root = None;
     let mut cleanup_root_removed = false;
-    if cleanup {
-        let root = fuse_utils::fuse_task_worktree_cleanup_root(&mountpoint).ok_or_else(|| {
-            WorktreeError::InvalidTarget(format!(
-                "--cleanup only supports Libra task FUSE worktree paths ending in '/workspace': {}",
-                mountpoint.display()
-            ))
-        })?;
+    if let Some(root) = planned_cleanup_root {
         if root.exists() {
             fs::remove_dir_all(&root).map_err(|source| {
                 WorktreeError::IoWrite(format!(
@@ -2255,4 +2869,213 @@ pub(crate) fn render_umount_fuse_path(
         println!("removed {}", cleanup_root);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod named_delete_tests {
+    use std::{fs, path::Path};
+
+    use super::{
+        RegisteredDirectoryGuard, clear_pinned_worktree, delete_pinned_worktree,
+        rename_pinned_worktree,
+    };
+    use crate::utils::beneath;
+
+    fn pin(path: &Path) -> RegisteredDirectoryGuard {
+        fs::create_dir_all(path.join(".libra")).unwrap();
+        fs::write(path.join(".libra/worktree_id"), "test-worktree\n").unwrap();
+        fs::write(
+            path.join(".libra/commondir"),
+            format!("{}\n", path.join(".libra").display()),
+        )
+        .unwrap();
+        let directory = beneath::open_root(path).unwrap();
+        let identity = beneath::entry_identity_beneath(&directory, Path::new("")).unwrap();
+        RegisteredDirectoryGuard {
+            target: path.to_path_buf(),
+            common: path.join(".libra"),
+            directory: Some(directory),
+            identity,
+            worktree_id: "test-worktree".into(),
+        }
+    }
+
+    #[test]
+    fn rollback_cleans_partial_metadata_and_preserves_an_existing_empty_root() {
+        let temp = tempfile::tempdir().unwrap();
+        for owned_root in [false, true] {
+            let target = temp
+                .path()
+                .join(if owned_root { "owned" } else { "existing" });
+            let mut guard = pin(&target);
+            fs::remove_file(target.join(".libra/worktree_id")).unwrap();
+            assert!(guard.verify().is_err());
+            clear_pinned_worktree(&mut guard, owned_root).unwrap();
+            assert_eq!(target.exists(), !owned_root);
+            if !owned_root {
+                assert!(fs::read_dir(target).unwrap().next().is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn lifecycle_marker_uses_the_pinned_metadata_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let guard = pin(&temp.path().join("worktree"));
+        guard.write_detached_marker().unwrap();
+        guard.write_detached_marker().unwrap();
+        assert!(guard.remove_detached_marker().unwrap());
+        assert!(!guard.remove_detached_marker().unwrap());
+    }
+
+    #[test]
+    fn move_never_overwrites_an_existing_destination() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let destination = temp.path().join("destination");
+        let mut guard = pin(&source);
+        fs::create_dir(&destination).unwrap();
+        fs::write(destination.join("user-file"), "keep").unwrap();
+        assert!(rename_pinned_worktree(&mut guard, &destination).is_err());
+        assert!(source.join(".libra/worktree_id").is_file());
+        assert_eq!(
+            fs::read_to_string(destination.join("user-file")).unwrap(),
+            "keep"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn move_refuses_a_replacement_source_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let destination = temp.path().join("destination");
+        let mut guard = pin(&source);
+        fs::rename(&source, temp.path().join("original")).unwrap();
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("user-file"), "keep").unwrap();
+        assert!(rename_pinned_worktree(&mut guard, &destination).is_err());
+        assert!(!destination.exists());
+        assert_eq!(
+            fs::read_to_string(source.join("user-file")).unwrap(),
+            "keep"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn marker_creation_does_not_truncate_a_preexisting_hardlink() {
+        let temp = tempfile::tempdir().unwrap();
+        let guard = pin(&temp.path().join("worktree"));
+        let outside = temp.path().join("outside");
+        fs::write(&outside, "test-worktree\nkeep original data\n").unwrap();
+        fs::hard_link(
+            &outside,
+            guard.target.join(".libra").join(super::DETACHED_MARKER),
+        )
+        .unwrap();
+        guard.write_detached_marker().unwrap();
+        assert_eq!(
+            fs::read_to_string(outside).unwrap(),
+            "test-worktree\nkeep original data\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lifecycle_markers_refuse_a_replaced_metadata_symlink() {
+        let temp = tempfile::tempdir().unwrap();
+        let guard = pin(&temp.path().join("worktree"));
+        let original = temp.path().join("original-metadata");
+        fs::rename(guard.target.join(".libra"), &original).unwrap();
+        std::os::unix::fs::symlink(&original, guard.target.join(".libra")).unwrap();
+        assert!(guard.write_detached_marker().is_err());
+        assert!(guard.remove_detached_marker().is_err());
+        assert!(!original.join(super::DETACHED_MARKER).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn identity_checks_refuse_fifo_markers() {
+        use std::os::unix::ffi::OsStrExt;
+        let temp = tempfile::tempdir().unwrap();
+        let guard = pin(&temp.path().join("worktree"));
+        guard.verify().unwrap();
+        let marker = guard.target.join(".libra/worktree_id");
+        fs::remove_file(&marker).unwrap();
+        let marker = std::ffi::CString::new(marker.as_os_str().as_bytes()).unwrap();
+        // SAFETY: the temporary path is a valid C string and names a new FIFO.
+        assert_eq!(unsafe { libc::mkfifo(marker.as_ptr(), 0o600) }, 0);
+        assert!(guard.verify().is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn deletion_refuses_a_replacement_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("worktree");
+        let original = temp.path().join("original");
+        let mut guard = pin(&target);
+        fs::rename(&target, &original).unwrap();
+        fs::create_dir(&target).unwrap();
+        fs::write(target.join("user-file"), "keep").unwrap();
+        assert!(guard.verify().is_err());
+        assert!(delete_pinned_worktree(&mut guard).is_err());
+        assert_eq!(
+            fs::read_to_string(target.join("user-file")).unwrap(),
+            "keep"
+        );
+        assert!(original.join(".libra/worktree_id").exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn deletion_releases_the_pin_before_unlinking_the_owned_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("worktree");
+        let mut guard = pin(&target);
+        assert!(fs::rename(&target, temp.path().join("replacement")).is_err());
+        guard.verify().unwrap();
+        delete_pinned_worktree(&mut guard).unwrap();
+        assert!(!target.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn deletion_unlinks_content_symlinks_without_visiting_their_targets() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("worktree");
+        let outside = temp.path().join("outside");
+        fs::create_dir(&outside).unwrap();
+        fs::write(outside.join("user-file"), "keep").unwrap();
+        let mut guard = pin(&target);
+        fs::create_dir(target.join("nested")).unwrap();
+        fs::write(target.join("nested/tracked"), "content").unwrap();
+        std::os::unix::fs::symlink(&outside, target.join("outside-link")).unwrap();
+        delete_pinned_worktree(&mut guard).unwrap();
+        assert!(!target.exists());
+        assert_eq!(
+            fs::read_to_string(outside.join("user-file")).unwrap(),
+            "keep"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn deletion_refuses_a_replacement_root_symlink() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("worktree");
+        let mut guard = pin(&target);
+        fs::rename(&target, temp.path().join("original")).unwrap();
+        let outside = temp.path().join("outside");
+        fs::create_dir(&outside).unwrap();
+        fs::write(outside.join("user-file"), "keep").unwrap();
+        std::os::unix::fs::symlink(&outside, &target).unwrap();
+        assert!(guard.verify().is_err());
+        assert!(delete_pinned_worktree(&mut guard).is_err());
+        assert_eq!(
+            fs::read_to_string(outside.join("user-file")).unwrap(),
+            "keep"
+        );
+    }
 }

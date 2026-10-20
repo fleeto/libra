@@ -40,10 +40,14 @@ use crate::internal::ai::{
         open_scoped_run_root, read_run_metadata,
     },
     review::store::{AGENT_FINDINGS_OTYPE, read_json_opt, utc_timestamp},
+    workspace_isolation::{
+        TaskWorkspaceDescriptor, cleanup_task_workspaces, cleanup_task_workspaces_until,
+        has_task_workspace_intents, validate_task_workspace_descriptor, verify_task_workspace,
+    },
 };
 
 /// `manifest.json` schema version (E8-libra manifest contract).
-pub const INVESTIGATE_MANIFEST_SCHEMA_VERSION: u32 = 1;
+pub const INVESTIGATE_MANIFEST_SCHEMA_VERSION: u32 = 2;
 
 /// The `kind` value investigate runs stamp into `state.json` /
 /// `manifest.json` (`review|investigate` per E8-libra; review owns
@@ -213,10 +217,8 @@ pub struct PendingTurn {
 // Manifest (E8 exact key set) — kind = "investigate"
 // ---------------------------------------------------------------------------
 
-/// `manifest.json` — **exactly** the E8-libra 12-key set
-/// (`agent.md:876` / `agent.md:1321`), with `kind = "investigate"`. The
-/// key-set exactness is pinned by a unit test below; do not add or rename
-/// fields without updating the E8 spec first.
+/// `manifest.json` — the E8-libra fields plus the optional v2 managed
+/// workspace descriptor. Legacy v1 documents remain readable.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InvestigateManifest {
     pub schema_version: u32,
@@ -245,6 +247,8 @@ pub struct InvestigateManifest {
     /// attach`. Empty until the first attach; attached bytes are redacted and
     /// object_index-tagged like findings.
     pub manual_attach: Vec<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_descriptor: Option<TaskWorkspaceDescriptor>,
 }
 
 // ---------------------------------------------------------------------------
@@ -295,6 +299,9 @@ pub struct InvestigateRunState {
     /// investigators spawn so an orphaned run can be cleaned up).
     #[serde(default)]
     pub workspace_root: Option<String>,
+    /// Durable ownership information for this drive pass's workspace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_descriptor: Option<TaskWorkspaceDescriptor>,
     /// PD-02 checkpoint scope: when set, every drive pass (including
     /// `investigate continue` resumes) materializes THIS checkpoint's
     /// content as the investigators' whole workspace instead of a
@@ -516,6 +523,7 @@ impl InvestigateRunStore {
             terminal_state: None,
             cancel_requested: false,
             workspace_root: None,
+            workspace_descriptor: None,
             checkpoint_input: None,
         };
         let manifest = InvestigateManifest {
@@ -531,6 +539,7 @@ impl InvestigateRunStore {
             findings_oid: None,
             redaction_report: RedactionReportSummary::default(),
             manual_attach: Vec::new(),
+            workspace_descriptor: None,
         };
         self.write_state(&state)?;
         self.write_manifest(&manifest)?;
@@ -567,6 +576,18 @@ impl InvestigateRunStore {
 
     /// Whole-file overwrite of `state.json`.
     pub fn write_state(&self, state: &InvestigateRunState) -> io::Result<()> {
+        validate_document(
+            state.schema_version,
+            &state.run_id,
+            &state.kind,
+            "state.json",
+        )?;
+        self.validate_workspace_descriptor(
+            state.schema_version,
+            &state.run_id,
+            state.workspace_descriptor.as_ref(),
+        )?;
+        self.ensure_mutable_run(&state.run_id)?;
         let path = self.state_path(&state.run_id)?;
         let json = serde_json::to_vec_pretty(state).map_err(io::Error::other)?;
         fs::write(path, json)
@@ -588,6 +609,18 @@ impl InvestigateRunStore {
     }
 
     pub fn write_manifest(&self, manifest: &InvestigateManifest) -> io::Result<()> {
+        validate_document(
+            manifest.schema_version,
+            &manifest.run_id,
+            &manifest.kind,
+            "manifest.json",
+        )?;
+        self.validate_workspace_descriptor(
+            manifest.schema_version,
+            &manifest.run_id,
+            manifest.workspace_descriptor.as_ref(),
+        )?;
+        self.ensure_mutable_run(&manifest.run_id)?;
         let path = self.manifest_path(&manifest.run_id)?;
         let json = serde_json::to_vec_pretty(manifest).map_err(io::Error::other)?;
         fs::write(path, json)
@@ -601,9 +634,146 @@ impl InvestigateRunStore {
         read_json_opt(&self.manifest_path(run_id)?)
     }
 
+    /// Refuse mutations of unknown or foreign run formats, including writes
+    /// whose in-memory state was loaded before another process changed disk.
+    pub fn ensure_mutable_run(&self, run_id: &str) -> io::Result<()> {
+        for (path, label) in [
+            (self.state_path(run_id)?, "state.json"),
+            (self.manifest_path(run_id)?, "manifest.json"),
+        ] {
+            let Some(document) = read_json_opt::<serde_json::Value>(&path)? else {
+                continue;
+            };
+            let schema = document["schema_version"].as_u64();
+            if !matches!(schema, Some(1 | 2))
+                || document["run_id"].as_str() != Some(run_id)
+                || document["kind"].as_str() != Some(INVESTIGATE_RUN_KIND)
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "investigate run '{run_id}' has an unsupported schema or identity in {label}; keep the run and use a compatible Libra version"
+                    ),
+                ));
+            }
+            if let Some(value) = document
+                .get("workspace_descriptor")
+                .filter(|value| !value.is_null())
+            {
+                let descriptor = serde_json::from_value(value.clone()).map_err(|error| {
+                    io::Error::new(io::ErrorKind::InvalidData, format!(
+                        "investigate run '{run_id}' has an unsupported workspace descriptor in {label}: {error}; keep its metadata and use a compatible Libra version"
+                    ))
+                })?;
+                self.validate_workspace_descriptor(
+                    schema.unwrap_or_default() as u32,
+                    run_id,
+                    Some(&descriptor),
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_workspace_descriptor(
+        &self,
+        schema: u32,
+        run_id: &str,
+        descriptor: Option<&TaskWorkspaceDescriptor>,
+    ) -> io::Result<()> {
+        let Some(descriptor) = descriptor else {
+            return Ok(());
+        };
+        if schema != INVESTIGATE_MANIFEST_SCHEMA_VERSION {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "managed investigate workspace descriptors require schema version 2",
+            ));
+        }
+        let run_id = uuid::Uuid::parse_str(run_id).map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("managed investigate workspace requires a UUID run id: {error}"),
+            )
+        })?;
+        validate_task_workspace_descriptor(&self.libra_dir()?, run_id, descriptor)
+    }
+
+    /// Record the newly created attempt in both lifecycle documents. The
+    /// shared creator has already persisted its cleanup intent at this point.
+    pub fn record_workspace(
+        &self,
+        run_id: &str,
+        descriptor: &TaskWorkspaceDescriptor,
+    ) -> io::Result<()> {
+        self.ensure_mutable_run(run_id)?;
+        if descriptor.run_id.to_string() != run_id {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "investigate workspace descriptor belongs to a different run",
+            ));
+        }
+        verify_task_workspace(&self.libra_dir()?, &self.run_dir(run_id)?, descriptor)?;
+        self.update_state(run_id, |state| {
+            state.schema_version = INVESTIGATE_MANIFEST_SCHEMA_VERSION;
+            state.workspace_root = Some(descriptor.canonical_path.display().to_string());
+            state.workspace_descriptor = Some(descriptor.clone());
+        })?;
+        let mut manifest = self.load_manifest(run_id)?.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "investigate run manifest is missing",
+            )
+        })?;
+        manifest.schema_version = INVESTIGATE_MANIFEST_SCHEMA_VERSION;
+        manifest.workspace_descriptor = Some(descriptor.clone());
+        self.write_manifest(&manifest)
+    }
+
+    /// Remove only workspace attempts proven by this run's durable intents.
+    /// Retain metadata and intents on refusal so cleanup can be retried.
+    pub fn cleanup_workspaces(&self, run_id: &str) -> io::Result<()> {
+        self.ensure_mutable_run(run_id)?;
+        self.cleanup_proven_workspaces(run_id, None)
+    }
+
+    fn cleanup_proven_workspaces(&self, run_id: &str, deadline: Option<Instant>) -> io::Result<()> {
+        let run_dir = self.run_dir(run_id)?;
+        let run_uuid = match uuid::Uuid::parse_str(run_id) {
+            Ok(id) => id,
+            Err(_) => {
+                // Explicit clean may rely on a valid terminal manifest when
+                // state.json is corrupt. Lifecycle proof is checked before
+                // this helper; malformed JSON does not grant workspace rights.
+                let has_descriptor = [self.state_path(run_id)?, self.manifest_path(run_id)?]
+                    .iter()
+                    .filter_map(|path| read_json_opt::<serde_json::Value>(path).ok().flatten())
+                    .any(|document| {
+                        document
+                            .get("workspace_descriptor")
+                            .is_some_and(|value| !value.is_null())
+                    });
+                if has_descriptor || has_task_workspace_intents(&run_dir)? {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "managed investigate workspace requires a UUID run id; keep its metadata and inspect the cleanup intents",
+                    ));
+                }
+                return Ok(());
+            }
+        };
+        match deadline {
+            Some(deadline) => {
+                cleanup_task_workspaces_until(&self.libra_dir()?, &run_dir, run_uuid, deadline)
+            }
+            None => cleanup_task_workspaces(&self.libra_dir()?, &run_dir, run_uuid),
+        }
+    }
+
     /// Overwrite `findings.md` (single-writer snapshot of already-redacted
     /// content — the runner is the sole producer).
     pub fn write_findings(&self, run_id: &str, content: &str) -> io::Result<()> {
+        self.ensure_mutable_run(run_id)?;
         fs::write(self.findings_path(run_id)?, content.as_bytes())
     }
 
@@ -633,7 +803,7 @@ impl InvestigateRunStore {
     /// flight).
     /// A0-06: the `.libra` dir (git object-store root) derived from the
     /// store's `<.libra>/sessions` root.
-    fn libra_dir(&self) -> io::Result<PathBuf> {
+    pub(crate) fn libra_dir(&self) -> io::Result<PathBuf> {
         self.sessions_root()
             .parent()
             .map(Path::to_path_buf)
@@ -687,6 +857,7 @@ impl InvestigateRunStore {
         terminal: Option<InvestigateTerminalState>,
         redaction: RedactionReportSummary,
     ) -> io::Result<()> {
+        self.ensure_mutable_run(run_id)?;
         let mut manifest = self.load_manifest(run_id)?.ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::NotFound,
@@ -719,6 +890,7 @@ impl InvestigateRunStore {
         if !dir.is_dir() {
             return Ok(false);
         }
+        self.ensure_mutable_run(run_id)?;
         fs::write(dir.join(CANCEL_REQUESTED_FILE), b"")?;
         Ok(true)
     }
@@ -734,6 +906,7 @@ impl InvestigateRunStore {
     /// Returns `Ok(true)` when it transitioned, `Ok(false)` when already
     /// terminal, and [`io::ErrorKind::NotFound`] when it does not exist.
     pub fn mark_cancelled(&self, run_id: &str) -> io::Result<bool> {
+        self.ensure_mutable_run(run_id)?;
         let mut state = self.load_state(run_id)?.ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::NotFound,
@@ -888,6 +1061,22 @@ impl InvestigateRunStore {
                 ),
             ));
         }
+        for document in [&metadata.state, &metadata.manifest].into_iter().flatten() {
+            if let Ok(value) = serde_json::from_slice::<serde_json::Value>(document)
+                && let Some(descriptor) = value
+                    .get("workspace_descriptor")
+                    .filter(|value| !value.is_null())
+            {
+                let descriptor: TaskWorkspaceDescriptor =
+                    serde_json::from_value(descriptor.clone())
+                        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+                self.validate_workspace_descriptor(
+                    value["schema_version"].as_u64().unwrap_or_default() as u32,
+                    run_id,
+                    Some(&descriptor),
+                )?;
+            }
+        }
         // Public investigate clean already holds its original run lock. The
         // direct library bulk entry acquires its own lock after lifecycle proof.
         let _bulk_lock = if bulk {
@@ -903,6 +1092,9 @@ impl InvestigateRunStore {
         // The immutable helper owns all no-follow reads and input cleanup.
         metadata.state = None;
         metadata.manifest = None;
+        // Managed attempts live outside the metadata directory. Remove them
+        // first; failure must leave the run and its retry proof in place.
+        self.cleanup_proven_workspaces(run_id, Some(budget.deadline))?;
         cleanup_checkpoint_input(&root, budget).map_err(io::Error::other)?;
         let current = read_run_metadata(&root, budget).map_err(io::Error::other)?;
         if metadata.root_identity != current.root_identity
@@ -955,6 +1147,21 @@ impl InvestigateRunStore {
     }
 }
 
+fn validate_document(schema: u32, run_id: &str, kind: &str, label: &str) -> io::Result<()> {
+    if !matches!(schema, 1 | INVESTIGATE_MANIFEST_SCHEMA_VERSION)
+        || kind != INVESTIGATE_RUN_KIND
+        || !is_valid_run_id(run_id)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "cannot write investigate {label} with an unsupported schema or identity; keep the run and use a compatible Libra version"
+            ),
+        ));
+    }
+    Ok(())
+}
+
 /// A parseable foreign, incomplete or nonterminal document vetoes cleanup.
 /// Only a specifically requested corrupt/missing state may use a valid
 /// same-root own-kind terminal manifest; bulk never sweeps that fallback.
@@ -979,16 +1186,20 @@ fn cleanup_metadata_is_terminal(metadata: &RunMetadataBytes, run_id: &str, bulk:
         None => None,
     };
     if let Some(state) = &state
-        && (state.schema_version != INVESTIGATE_MANIFEST_SCHEMA_VERSION
-            || state.run_id != run_id
+        && (!matches!(
+            state.schema_version,
+            1 | INVESTIGATE_MANIFEST_SCHEMA_VERSION
+        ) || state.run_id != run_id
             || state.kind != INVESTIGATE_RUN_KIND
             || !state.is_terminal())
     {
         return false;
     }
     if let Some(manifest) = &manifest
-        && (manifest.schema_version != INVESTIGATE_MANIFEST_SCHEMA_VERSION
-            || manifest.run_id != run_id
+        && (!matches!(
+            manifest.schema_version,
+            1 | INVESTIGATE_MANIFEST_SCHEMA_VERSION
+        ) || manifest.run_id != run_id
             || manifest.kind != INVESTIGATE_RUN_KIND)
     {
         return false;
@@ -1089,6 +1300,171 @@ mod tests {
         (dir, store)
     }
 
+    #[test]
+    fn legacy_run_is_readable_without_bulk_format_changes() {
+        let (_dir, store) = store();
+        store
+            .create_run("legacy-run", "topic", &["codex".into()], 4, 1, "sha")
+            .unwrap();
+        for path in [
+            store.state_path("legacy-run").unwrap(),
+            store.manifest_path("legacy-run").unwrap(),
+        ] {
+            let mut value: serde_json::Value =
+                serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            value["schema_version"] = serde_json::json!(1);
+            value
+                .as_object_mut()
+                .unwrap()
+                .remove("workspace_descriptor");
+            fs::write(path, serde_json::to_vec(&value).unwrap()).unwrap();
+        }
+        let before = fs::read(store.state_path("legacy-run").unwrap()).unwrap();
+        assert_eq!(
+            store
+                .load_state("legacy-run")
+                .unwrap()
+                .unwrap()
+                .schema_version,
+            1
+        );
+        assert_eq!(
+            fs::read(store.state_path("legacy-run").unwrap()).unwrap(),
+            before
+        );
+        assert!(store.mark_cancelled("legacy-run").unwrap());
+        let state = store.load_state("legacy-run").unwrap().unwrap();
+        assert_eq!(state.schema_version, 1);
+        assert!(state.workspace_descriptor.is_none());
+        assert!(store.clean_run("legacy-run").unwrap());
+    }
+
+    #[test]
+    fn unknown_run_versions_refuse_every_mutation_and_cleanup() {
+        for label in ["state.json", "manifest.json"] {
+            let (_dir, store) = store();
+            store
+                .create_run("future-run", "topic", &["codex".into()], 4, 1, "sha")
+                .unwrap();
+            assert!(store.mark_cancelled("future-run").unwrap());
+            let mut stale_state = store.load_state("future-run").unwrap().unwrap();
+            let stale_manifest = store.load_manifest("future-run").unwrap().unwrap();
+            let run_dir = store.run_dir("future-run").unwrap();
+            let path = run_dir.join(label);
+            let mut value: serde_json::Value =
+                serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            value["schema_version"] = serde_json::json!(99);
+            fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+            let state_before = fs::read(store.state_path("future-run").unwrap()).unwrap();
+            let manifest_before = fs::read(store.manifest_path("future-run").unwrap()).unwrap();
+            assert!(
+                store.load_state("future-run").unwrap().is_some(),
+                "show remains readable"
+            );
+            stale_state.topic = "stale overwrite".into();
+            assert!(store.write_state(&stale_state).is_err());
+            assert!(store.write_manifest(&stale_manifest).is_err());
+            assert!(store.write_findings("future-run", "changed").is_err());
+            assert!(store.mark_cancel_requested("future-run").is_err());
+            assert!(store.mark_cancelled("future-run").is_err());
+            assert!(store.cleanup_workspaces("future-run").is_err());
+            assert!(store.clean_run("future-run").is_err());
+            assert_eq!(store.clean_all().unwrap(), 0);
+            assert!(!run_dir.join(CANCEL_REQUESTED_FILE).exists());
+            assert_eq!(
+                fs::read(store.state_path("future-run").unwrap()).unwrap(),
+                state_before
+            );
+            assert_eq!(
+                fs::read(store.manifest_path("future-run").unwrap()).unwrap(),
+                manifest_before
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replaced_managed_attempt_keeps_retry_metadata_and_outside_files() {
+        use std::os::unix::fs::symlink;
+
+        use crate::internal::ai::workspace_isolation::{TaskWorkspaceKind, create_task_workspace};
+
+        let (dir, store) = store();
+        let run_id = uuid::Uuid::new_v4();
+        let id = run_id.to_string();
+        store
+            .create_run(&id, "topic", &["codex".into()], 4, 1, "sha")
+            .unwrap();
+        let run_dir = store.run_dir(&id).unwrap();
+        let descriptor = create_task_workspace(
+            &store.libra_dir().unwrap(),
+            &run_dir,
+            run_id,
+            TaskWorkspaceKind::Workspace,
+        )
+        .unwrap();
+        store.record_workspace(&id, &descriptor).unwrap();
+        assert!(store.mark_cancelled(&id).unwrap());
+        let attempt = descriptor.attempt_root();
+        let moved_attempt = attempt.with_file_name(format!("{}-saved", descriptor.attempt_id));
+        fs::rename(&attempt, &moved_attempt).unwrap();
+        let outside = dir.path().join("outside");
+        fs::create_dir(&outside).unwrap();
+        fs::write(outside.join("sentinel"), b"keep outside").unwrap();
+        symlink(&outside, &attempt).unwrap();
+        let state_before = fs::read(store.state_path(&id).unwrap()).unwrap();
+        assert!(store.clean_run(&id).is_err());
+        assert!(has_task_workspace_intents(&run_dir).unwrap());
+        assert_eq!(
+            fs::read(store.state_path(&id).unwrap()).unwrap(),
+            state_before
+        );
+        assert_eq!(fs::read(outside.join("sentinel")).unwrap(), b"keep outside");
+        fs::remove_file(&attempt).unwrap();
+        fs::rename(&moved_attempt, &attempt).unwrap();
+        assert!(
+            store.clean_run(&id).unwrap(),
+            "owned cleanup can be retried"
+        );
+        assert!(!attempt.exists());
+        assert!(!run_dir.exists());
+        assert_eq!(fs::read(outside.join("sentinel")).unwrap(), b"keep outside");
+    }
+
+    #[test]
+    fn unknown_workspace_layout_refuses_mutation_and_cleanup() {
+        use crate::internal::ai::workspace_isolation::{TaskWorkspaceKind, create_task_workspace};
+
+        let (_dir, store) = store();
+        let run_id = uuid::Uuid::new_v4();
+        let id = run_id.to_string();
+        store
+            .create_run(&id, "topic", &["codex".into()], 4, 1, "sha")
+            .unwrap();
+        let run_dir = store.run_dir(&id).unwrap();
+        let descriptor = create_task_workspace(
+            &store.libra_dir().unwrap(),
+            &run_dir,
+            run_id,
+            TaskWorkspaceKind::Workspace,
+        )
+        .unwrap();
+        store.record_workspace(&id, &descriptor).unwrap();
+        assert!(store.mark_cancelled(&id).unwrap());
+        let path = store.state_path(&id).unwrap();
+        let mut state: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        state["workspace_descriptor"]["layout_version"] = serde_json::json!(99);
+        fs::write(&path, serde_json::to_vec(&state).unwrap()).unwrap();
+        let before = fs::read(&path).unwrap();
+        assert!(store.mark_cancel_requested(&id).is_err());
+        assert!(store.cleanup_workspaces(&id).is_err());
+        assert!(store.clean_run(&id).is_err());
+        assert!(descriptor.canonical_path.exists());
+        assert!(has_task_workspace_intents(&run_dir).unwrap());
+        assert_eq!(fs::read(&path).unwrap(), before);
+    }
+
     /// §C.4.3: publishing an objectized blob holds the repository
     /// maintenance lock across the manifest write that roots it — the
     /// investigate store's own copy of the invariant, not the review one's.
@@ -1159,6 +1535,7 @@ mod tests {
             findings_oid: None,
             redaction_report: RedactionReportSummary::default(),
             manual_attach: Vec::new(),
+            workspace_descriptor: None,
         };
         let value = serde_json::to_value(&manifest).expect("manifest to json");
         let keys: BTreeSet<String> = value

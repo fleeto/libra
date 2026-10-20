@@ -420,40 +420,9 @@ pub fn on_current_ingress(name: &str) -> bool {
     spec(name).is_some_and(|spec| spec.on_current_ingress)
 }
 
-/// MessageDisplay is coalesced, not stored once per streamed batch.
-pub const MESSAGE_DISPLAY_COALESCE_LIMIT: u32 = 128;
-
-fn message_display_counts() -> &'static std::sync::Mutex<std::collections::HashMap<String, u32>> {
-    static COUNTS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, u32>>> =
-        std::sync::OnceLock::new();
-    COUNTS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
-}
-
-/// Admit one MessageDisplay batch for `session_id`.
-///
-/// The first 128 batches in this process are kept. Later batches are dropped.
-/// This only bounds one process. The session-wide budget that survives
-/// separate hook processes is `HookProvider::display_batch_limit`, enforced
-/// by the capture runtime. Neither gate is a second event ledger.
-pub fn admit_message_display(session_id: &str) -> bool {
-    let mut counts = message_display_counts()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let count = counts.entry(session_id.to_string()).or_insert(0);
-    if *count >= MESSAGE_DISPLAY_COALESCE_LIMIT {
-        return false;
-    }
-    *count += 1;
-    true
-}
-
-/// Test isolation for the in-process MessageDisplay capacity gate.
-pub fn reset_message_display_counts_for_test() {
-    let mut counts = message_display_counts()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    counts.clear();
-}
+pub use crate::internal::ai::capture::ingress::{
+    MESSAGE_DISPLAY_COALESCE_LIMIT, admit_message_display, reset_message_display_counts_for_test,
+};
 
 /// Classify extra keys. Unknown events and unknown keys are partial.
 /// The report never copies `keys` or their values into `diagnostic`.

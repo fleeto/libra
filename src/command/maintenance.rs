@@ -3926,6 +3926,19 @@ fn collect_agent_run_manifest_roots(
                   should contain), then re-run",
             ));
         }
+        if !matches!(
+            document
+                .get("schema_version")
+                .and_then(serde_json::Value::as_u64),
+            Some(1 | 2)
+        ) {
+            return Err(CliError::fatal(format!(
+                "agent-run manifest '{}' has an unsupported or missing schema version; its roots cannot be enumerated safely",
+                manifest.display()
+            ))
+            .with_stable_code(StableErrorCode::RepoCorrupt)
+            .with_hint("use a Libra version that supports this manifest before running garbage collection"));
+        }
 
         // Structural, not a generic scan: these two fields ARE the contract.
         let mut oids: Vec<String> = Vec::new();
@@ -5313,6 +5326,34 @@ mod tests {
         /// reason. Listed by name so adding one is a reviewed decision.
         const NOT_AN_OBJECT_SOURCE: &[(&str, &str)] = &[
             (
+                "agent-runs",
+                "directory component beneath sessions; run manifests are classified separately as object roots",
+            ),
+            (
+                "checkpoint-input",
+                "ephemeral materialized task input beneath worktree/tasks; its object graph is rooted by the run manifest",
+            ),
+            (
+                "linked",
+                "named linked checkout container beneath worktree; object reachability comes from registered scopes",
+            ),
+            (
+                "fuse",
+                "named FUSE checkout container beneath worktree; mount contents are not object-root metadata",
+            ),
+            (
+                "tasks",
+                "agent task-attempt container beneath worktree; run manifests carry the object references",
+            ),
+            (
+                "workspace",
+                "worktree or task working-file directory; its files are not object-root metadata",
+            ),
+            (
+                "upper",
+                "FUSE copy-up directory; working files are not object-root metadata",
+            ),
+            (
                 "HEAD",
                 "the HEAD pointer file (dual-layout compatibility); ref OIDs are inventoried in the DB half (reference)",
             ),
@@ -5387,7 +5428,11 @@ mod tests {
             ("commondir", "worktree layout pointer"),
             ("worktree_id", "worktree identity marker"),
             ("migrate-marker", "layout-migration lifecycle marker"),
-            ("worktrees", "linked worktree gitdir container"),
+            ("worktrees", "legacy linked worktree gitdir container"),
+            (
+                "worktree",
+                "managed linked, FUSE, and task workspace container",
+            ),
             ("worktrees.json", "the worktree registry"),
             ("worktrees.lock", "registry advisory lock"),
             ("worktrees-fuse", "FUSE worktree container"),
@@ -5459,7 +5504,16 @@ mod tests {
             })
             .collect();
 
-        let found = crate::internal::source_scan::storage_rooted_join_literals();
+        let mut found = crate::internal::source_scan::storage_rooted_join_literals();
+        // New FUSE worktrees live under worktree/fuse, but old registrations
+        // may still own an upper under worktrees-fuse. The cleaner validates
+        // that exact legacy component before deletion; it no longer creates
+        // a new storage-root join for the old container.
+        assert!(
+            include_str!("worktree-fuse.rs").contains("parts[0].as_os_str() != \"worktrees-fuse\""),
+            "legacy FUSE upper-directory boundary was removed"
+        );
+        found.insert("worktrees-fuse".to_string());
         // Self-check: an empty or broken scan would make the loop vacuous.
         assert!(
             found.contains("merge-state.json") && found.len() > 30,

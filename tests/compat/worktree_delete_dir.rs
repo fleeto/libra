@@ -39,6 +39,10 @@ fn worktree_remove_help_lists_delete_dir() {
         stdout.contains("--delete-dir"),
         "worktree remove --help must list `--delete-dir`; stdout: {stdout}"
     );
+    assert!(
+        stdout.contains("--path <PATH>") && stdout.contains("[NAME]"),
+        "remove help must offer a registered name or explicit path: {stdout}"
+    );
 }
 
 #[test]
@@ -53,5 +57,39 @@ fn worktree_help_mentions_delete_dir_example() {
     assert!(
         stdout.contains("--delete-dir"),
         "worktree --help EXAMPLES must reference `--delete-dir`; stdout: {stdout}"
+    );
+}
+
+#[test]
+fn worktree_add_help_distinguishes_name_from_explicit_destination() {
+    let output = run(&["worktree", "add", "--help"]);
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("<NAME>"),
+        "add requires a logical name: {stdout}"
+    );
+    assert!(
+        stdout.contains("--path <PATH>"),
+        "external destinations are explicit: {stdout}"
+    );
+}
+
+#[test]
+fn worktree_move_help_distinguishes_name_and_source_path() {
+    let output = run(&["worktree", "move", "--help"]);
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("[NAME]"),
+        "move accepts a registered name: {stdout}"
+    );
+    assert!(
+        stdout.contains("--from-path"),
+        "unnamed worktrees have an explicit source selector: {stdout}"
+    );
+    assert!(
+        stdout.contains("--path"),
+        "move requires an explicit destination: {stdout}"
     );
 }

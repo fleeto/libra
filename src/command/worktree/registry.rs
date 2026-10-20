@@ -15,7 +15,7 @@ use crate::utils::util;
 ///
 /// `path` is always stored as a canonical absolute path. `worktree_id` is
 /// the STABLE per-worktree identity (None for main, whose scope is NULL) —
-/// persisted so `worktree repair <path>` can restore a corrupt/missing
+/// persisted so `worktree repair --path <path>` can restore a corrupt/missing
 /// `.libra/worktree_id` from the registry instead of guessing.
 ///
 /// `pub(crate)` so the service dirty-mark gate deserializes the registry with
@@ -23,6 +23,9 @@ use crate::utils::util;
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub(crate) struct WorktreeEntry {
     pub(super) path: String,
+    /// Stable CLI name; older entries remain unnamed until explicitly registered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) name: Option<String>,
     pub(super) is_main: bool,
     pub(super) locked: bool,
     pub(super) lock_reason: Option<String>,
@@ -122,8 +125,9 @@ pub(crate) const DETACHED_MARKER: &str = "detached_from_registry";
 /// drop the counter on rewrite, and the next registration would reissue a
 /// generation a live client is still fenced on. Migration 2026073005 records
 /// the matching capability marker so those binaries refuse the repository at
-/// connect time instead.
-pub(super) const REGISTRY_SCHEMA_VERSION: u32 = 3;
+/// connect time instead. v4 adds stable CLI names: a v3 writer rejects the
+/// new version instead of silently dropping those names on a later mutation.
+pub(super) const REGISTRY_SCHEMA_VERSION: u32 = 4;
 
 /// Top-level registry v2 persisted in `worktrees.json` (plan-20260714 §C.7).
 ///
@@ -214,14 +218,14 @@ impl WorktreeState {
             // v2 files are READ as-is and upgraded in place by the mutation
             // loader: their entries simply have no generations yet, which is
             // what `epoch = 0` means. A version we do not know is refused.
-            if state.schema_version != REGISTRY_SCHEMA_VERSION && state.schema_version != 2 {
+            if !matches!(state.schema_version, 2 | 3 | REGISTRY_SCHEMA_VERSION) {
                 return Err(format!(
                     "unsupported registry schema_version {}",
                     state.schema_version
                 ));
             }
             let mut state = state;
-            if state.schema_version != REGISTRY_SCHEMA_VERSION {
+            if state.schema_version < 3 {
                 // Promoting a PRE-v3 registry: whether this repository ever had
                 // a linked worktree is unknowable from it — a worktree removed
                 // before v3 left no entry and no generation. Recording that
@@ -233,6 +237,9 @@ impl WorktreeState {
                 state.linked_history = LinkedHistory::Unknown;
             }
             state.schema_version = REGISTRY_SCHEMA_VERSION;
+            // Repair may heal old identity fields, but must never deduplicate
+            // a named registration or silently discard its reservation.
+            state.validate_names()?;
             return Ok((state, RegistryShape::V2));
         }
         if has_v1_keys {
@@ -245,6 +252,7 @@ impl WorktreeState {
                         .worktrees
                         .into_iter()
                         .map(|entry| WorktreeEntry {
+                            name: None,
                             path: entry.path,
                             is_main: entry.is_main,
                             locked: entry.locked,
@@ -291,6 +299,7 @@ impl WorktreeState {
     /// silently patched from the mutable gitdir.
     fn validate_v2(&self) -> Result<(), String> {
         self.validate_main_count()?;
+        self.validate_names()?;
         for entry in &self.entries {
             if entry.is_main {
                 if entry.worktree_id.is_some() {
@@ -313,6 +322,32 @@ impl WorktreeState {
             {
                 return Err(format!(
                     "linked worktree entry '{}' is missing its persisted worktree_id",
+                    entry.path
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_names(&self) -> Result<(), String> {
+        let mut names = std::collections::HashSet::new();
+        let mut paths = std::collections::HashMap::new();
+        for entry in &self.entries {
+            if let Some(name) = &entry.name {
+                if entry.is_main {
+                    return Err("the main worktree cannot carry a linked worktree name".into());
+                }
+                crate::utils::worktree_layout::validate_name(name)
+                    .map_err(|error| format!("invalid worktree name '{name}': {error}"))?;
+                if !names.insert(name) {
+                    return Err(format!("duplicate registered worktree name '{name}'"));
+                }
+            }
+            if let Some(previous_named) = paths.insert(Path::new(&entry.path), entry.name.is_some())
+                && (previous_named || entry.name.is_some())
+            {
+                return Err(format!(
+                    "named worktree path '{}' has more than one registration",
                     entry.path
                 ));
             }
@@ -491,7 +526,7 @@ pub(super) fn load_state() -> WorktreeResult<WorktreeState> {
         return Err(WorktreeError::OperationBlocked(format!(
             "the worktree registry is ambiguous: {conflict}. Run `libra worktree doctor` to see \
               which entries collide, then \
-              `libra worktree repair <path> --resolve-identity --yes` to unregister the one you \
+              `libra worktree repair --path <path> --resolve-identity --yes` to unregister the one you \
               do not want (the directory is left on disk)"
         )));
     }
@@ -606,6 +641,13 @@ pub(crate) fn registry_knows_linked_worktree_in_storage(
     let state = load_state_readonly_at(&storage.join("worktrees.json")).ok()?;
     let Some(requested_root) = worktree_root.and_then(|path| canonicalize(path).ok()) else {
         return Some(false);
+    };
+    // A verified overlay retains its source's identity. The proof binds the
+    // mount, upper directory, UUID marker, and common storage before allowing
+    // this one path alias; copied worktree_id files remain insufficient.
+    let requested_root = match util::verified_fuse_source(storage, &requested_root).ok()? {
+        Some(source) => canonicalize(source).ok()?,
+        None => requested_root,
     };
     Some(state.entries.iter().any(|entry| {
         if entry.is_main || !entry.state.is_active() {
@@ -831,6 +873,7 @@ pub(super) fn ensure_main_entry(state: &mut WorktreeState) -> io::Result<bool> {
             w.is_main = false;
         }
         state.entries.push(WorktreeEntry {
+            name: None,
             path: root.to_string_lossy().to_string(),
             is_main: true,
             locked: false,
@@ -873,6 +916,7 @@ pub(super) fn ensure_main_entry(state: &mut WorktreeState) -> io::Result<bool> {
             w.is_main = false;
         }
         state.entries.push(WorktreeEntry {
+            name: None,
             path: inferred_main.to_string_lossy().to_string(),
             is_main: true,
             locked: false,
@@ -915,4 +959,389 @@ pub(super) fn resolve_worktree_id(target: &Path) -> Option<String> {
         .ok()
         .map(|c| util::worktree_instance_id(&c))
         .or_else(|| Some(util::worktree_instance_id(target)))
+}
+
+/// A registered location in the common ordinary/FUSE name namespace.
+#[derive(Clone, Debug)]
+pub(crate) struct RegisteredWorktreeLocation {
+    pub(crate) name: Option<String>,
+    pub(crate) path: PathBuf,
+    pub(crate) is_fuse: bool,
+}
+
+/// Read both registries even in builds without FUSE. Mutating callers hold the
+/// common registry lock through this read and their eventual write.
+pub(crate) fn registered_worktree_locations() -> WorktreeResult<Vec<RegisteredWorktreeLocation>> {
+    let common = crate::utils::worktree_layout::current_common_storage().map_err(|error| {
+        WorktreeError::IoRead(format!("cannot resolve common worktree storage: {error}"))
+    })?;
+    let state = load_state_readonly_at(&common.join("worktrees.json"))?;
+    let mut locations: Vec<_> = state
+        .entries
+        .into_iter()
+        .map(|entry| RegisteredWorktreeLocation {
+            name: entry.name,
+            path: PathBuf::from(entry.path),
+            is_fuse: false,
+        })
+        .collect();
+    locations.extend(
+        read_fuse_worktree_bindings(&common)?
+            .into_iter()
+            .map(|binding| RegisteredWorktreeLocation {
+                name: binding.name,
+                path: binding.path,
+                is_fuse: true,
+            }),
+    );
+    let mut names = std::collections::HashSet::new();
+    let mut paths = std::collections::HashSet::new();
+    for entry in &locations {
+        if !paths.insert(&entry.path) {
+            return Err(WorktreeError::OperationBlocked(format!(
+                "worktree path '{}' appears more than once across the registries; restore an unambiguous registry",
+                entry.path.display()
+            )));
+        }
+        if let Some(name) = &entry.name {
+            crate::utils::worktree_layout::validate_name(name)
+                .map_err(|error| WorktreeError::OperationBlocked(format!("invalid registered worktree name '{name}': {error}; repair the registry before continuing")))?;
+            if !names.insert(name) {
+                return Err(WorktreeError::OperationBlocked(format!(
+                    "worktree name '{name}' is registered more than once; restore an unambiguous registry before continuing"
+                )));
+            }
+        }
+    }
+    Ok(locations)
+}
+
+/// Resolve one CLI selector under the caller's common registry lock. Names never
+/// fall back to cwd paths; explicit paths are the only access to unnamed entries.
+pub(crate) fn resolve_worktree_selector(
+    name: Option<&str>,
+    path: Option<&str>,
+) -> WorktreeResult<RegisteredWorktreeLocation> {
+    let locations = registered_worktree_locations()?;
+    match (name, path) {
+        (Some(name), None) => {
+            crate::utils::worktree_layout::validate_name(name).map_err(|error| {
+                WorktreeError::InvalidTarget(format!(
+                    "invalid worktree name '{name}': {error}; use --path for a filesystem path"
+                ))
+            })?;
+            locations
+                .into_iter()
+                .find(|entry| entry.name.as_deref() == Some(name))
+                .ok_or_else(|| WorktreeError::NoSuchWorktree {
+                    path: format!("named '{name}'"),
+                })
+        }
+        (None, Some(raw)) => {
+            let path = canonicalize(raw).map_err(|error| {
+                WorktreeError::IoRead(format!("cannot resolve worktree path '{raw}': {error}"))
+            })?;
+            locations
+                .into_iter()
+                .find(|entry| entry.path == path)
+                .ok_or_else(|| WorktreeError::NoSuchWorktree { path: raw.into() })
+        }
+        _ => Err(WorktreeError::InvalidTarget(
+            "specify exactly one worktree name or --path".into(),
+        )),
+    }
+}
+
+/// Publish the named-worktree capability before a FUSE registration. Older
+/// ordinary writers reject v4 instead of ignoring the common name namespace.
+#[cfg(all(unix, feature = "worktree-fuse"))]
+pub(crate) fn ensure_registry_v4_locked() -> WorktreeResult<()> {
+    let state = load_state()?;
+    write_state(&state)
+}
+
+#[cfg(test)]
+mod named_registry_tests {
+    #[cfg(unix)]
+    use super::read_fuse_worktree_bindings;
+    use super::{LinkedHistory, WorktreeState};
+
+    fn document(version: u32, name: Option<&str>) -> serde_json::Value {
+        let mut linked = serde_json::json!({"path":"/repo/.libra/worktree/linked/topic","is_main":false,"locked":false,"lock_reason":null,"worktree_id":"linked-id","epoch":7});
+        if let Some(name) = name {
+            linked["name"] = serde_json::json!(name);
+        }
+        serde_json::json!({"schema_version":version,"epoch_counter":10,"linked_history":"existed","entries":[
+            {"path":"/repo","is_main":true,"locked":false,"lock_reason":null}, linked
+        ]})
+    }
+
+    #[test]
+    fn v3_read_preserves_history_epochs_and_unnamed_entries() {
+        let value = document(3, None);
+        let (state, _) =
+            WorktreeState::parse_document(&serde_json::to_vec(&value).unwrap()).unwrap();
+        assert_eq!(state.schema_version, 4);
+        assert_eq!(state.epoch_counter, 10);
+        assert_eq!(state.entries[1].epoch, 7);
+        assert_eq!(state.linked_history, LinkedHistory::Existed);
+        assert!(state.entries.iter().all(|entry| entry.name.is_none()));
+    }
+
+    #[test]
+    fn v4_names_round_trip_without_changing_identity() {
+        let value = document(4, Some("topic"));
+        let state = WorktreeState::parse(&serde_json::to_vec(&value).unwrap()).unwrap();
+        state.validate_v2().unwrap();
+        assert_eq!(state.entries[1].name.as_deref(), Some("topic"));
+        assert_eq!(state.entries[1].worktree_id.as_deref(), Some("linked-id"));
+        let written = serde_json::to_value(&state).unwrap();
+        assert_eq!(written["schema_version"], 4);
+        assert!(written["entries"][0].get("name").is_none());
+    }
+
+    #[test]
+    fn invalid_or_duplicate_names_are_not_mutable() {
+        let invalid = document(4, Some("../escape"));
+        assert!(WorktreeState::parse(&serde_json::to_vec(&invalid).unwrap()).is_err());
+        let mut duplicate = document(4, Some("topic"));
+        let mut second = duplicate["entries"][1].clone();
+        second["path"] = serde_json::json!("/elsewhere");
+        second["worktree_id"] = serde_json::json!("another-id");
+        duplicate["entries"].as_array_mut().unwrap().push(second);
+        assert!(WorktreeState::parse(&serde_json::to_vec(&duplicate).unwrap()).is_err());
+    }
+
+    #[test]
+    fn repair_refuses_alias_paths_that_would_drop_a_name() {
+        for alias in [
+            "/repo/.libra/worktree/linked/topic/",
+            "/repo/.libra/worktree/linked/./topic",
+        ] {
+            for named_first in [true, false] {
+                let mut value = document(4, Some("topic"));
+                let mut unnamed = value["entries"][1].clone();
+                unnamed.as_object_mut().unwrap().remove("name");
+                unnamed["path"] = serde_json::json!(alias);
+                let entries = value["entries"].as_array_mut().unwrap();
+                entries.insert(if named_first { 2 } else { 1 }, unnamed);
+                assert!(
+                    WorktreeState::parse_document(&serde_json::to_vec(&value).unwrap()).is_err()
+                );
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fuse_name_reader_refuses_dangling_links_and_fifos() {
+        use std::{fs, os::unix::ffi::OsStrExt};
+        let temp = tempfile::tempdir().unwrap();
+        let registry = temp.path().join("worktrees-fuse.json");
+        assert!(read_fuse_worktree_bindings(temp.path()).unwrap().is_empty());
+        std::os::unix::fs::symlink("missing-registry", &registry).unwrap();
+        assert!(read_fuse_worktree_bindings(temp.path()).is_err());
+        fs::remove_file(&registry).unwrap();
+        let fifo = std::ffi::CString::new(registry.as_os_str().as_bytes()).unwrap();
+        // SAFETY: the temporary path is a valid C string and names a new FIFO.
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        assert!(read_fuse_worktree_bindings(temp.path()).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fuse_reader_refuses_duplicate_unnamed_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let entry = serde_json::json!({
+            "path": "/outside/legacy-mount",
+            "branch": "main",
+            "upper_dir": "/outside/legacy-upper",
+            "lower_dirs": ["/source"],
+            "locked": false
+        });
+        let document = serde_json::json!({"worktrees": [entry.clone(), entry]});
+        std::fs::write(
+            temp.path().join("worktrees-fuse.json"),
+            serde_json::to_vec(&document).unwrap(),
+        )
+        .unwrap();
+        let error = read_fuse_worktree_bindings(temp.path()).unwrap_err();
+        assert!(
+            error.to_string().contains("repeats worktree path"),
+            "{error}"
+        );
+    }
+}
+
+/// Metadata needed to prove that a managed mount is this repository's FUSE
+/// worktree. This reader is available without the FUSE compilation feature.
+#[derive(Clone, Debug)]
+pub(crate) struct FuseWorktreeBinding {
+    pub(crate) name: Option<String>,
+    pub(crate) path: PathBuf,
+    pub(crate) upper_dir: PathBuf,
+    pub(crate) lower_dirs: Vec<PathBuf>,
+    pub(crate) mount_id: Option<String>,
+}
+
+/// Never follow registry links or block on a FIFO; only an absent directory
+/// entry means there is no registry. Bound corrupt input before allocating it.
+fn read_registry_bytes(common: &Path, name: &str) -> io::Result<Option<Vec<u8>>> {
+    match crate::utils::worktree_layout::read_regular_metadata(
+        common,
+        Path::new(name),
+        16 * 1024 * 1024,
+    ) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn read_fuse_worktree_bindings(common: &Path) -> WorktreeResult<Vec<FuseWorktreeBinding>> {
+    let mut bindings = Vec::new();
+    let fuse_path = common.join("worktrees-fuse.json");
+    let raw = read_registry_bytes(common, "worktrees-fuse.json").map_err(|source| {
+        WorktreeError::StateRead {
+            path: fuse_path.clone(),
+            source,
+        }
+    })?;
+    if let Some(raw) = raw {
+        let corrupt = |source: String| WorktreeError::StateCorrupt {
+            path: fuse_path.clone(),
+            source,
+        };
+        let document: serde_json::Value = serde_json::from_slice(&raw)
+            .map_err(|error| corrupt(format!("cannot read FUSE worktree names: {error}")))?;
+        let object = document
+            .as_object()
+            .ok_or_else(|| corrupt("FUSE registry must be an object".into()))?;
+        let entries = if object.contains_key("schema_version") || object.contains_key("entries") {
+            if object.get("schema_version").and_then(serde_json::Value::as_u64) != Some(1)
+                || object.contains_key("worktrees") {
+                return Err(corrupt("unsupported or mixed FUSE registry schema; upgrade Libra or restore the registry".into()));
+            }
+            object.get("entries")
+        } else {
+            object.get("worktrees")
+        }.and_then(serde_json::Value::as_array)
+            .ok_or_else(|| corrupt("FUSE registry is missing its entry array".into()))?;
+        for entry in entries {
+            let path = entry
+                .get("path")
+                .and_then(serde_json::Value::as_str)
+                .filter(|path| !path.is_empty())
+                .ok_or_else(|| corrupt("FUSE registry entry has no valid path".into()))?;
+            let name = match entry.get("name") {
+                None | Some(serde_json::Value::Null) => None,
+                Some(serde_json::Value::String(name)) => Some(name.clone()),
+                _ => return Err(corrupt("FUSE registry entry has an invalid name".into())),
+            };
+            let mount_id = match entry.get("mount_id") {
+                None | Some(serde_json::Value::Null) => None,
+                Some(serde_json::Value::String(id)) if uuid::Uuid::parse_str(id).is_ok() => {
+                    Some(id.clone())
+                }
+                _ => {
+                    return Err(corrupt(
+                        "FUSE registry entry has an invalid mount identity".into(),
+                    ));
+                }
+            };
+            bindings.push(FuseWorktreeBinding {
+                mount_id,
+                name,
+                path: PathBuf::from(path),
+                upper_dir: entry
+                    .get("upper_dir")
+                    .and_then(serde_json::Value::as_str)
+                    .map(PathBuf::from)
+                    .ok_or_else(|| corrupt("FUSE registry entry has no upper directory".into()))?,
+                lower_dirs: entry
+                    .get("lower_dirs")
+                    .and_then(serde_json::Value::as_array)
+                    .ok_or_else(|| corrupt("FUSE registry entry has no lower directories".into()))?
+                    .iter()
+                    .map(|value| {
+                        value.as_str().map(PathBuf::from).ok_or_else(|| {
+                            corrupt("FUSE registry lower directory is not a path".into())
+                        })
+                    })
+                    .collect::<WorktreeResult<Vec<_>>>()?,
+            });
+        }
+    }
+    let mut paths = std::collections::HashSet::new();
+    let mut names = std::collections::HashSet::new();
+    for binding in &bindings {
+        for path in std::iter::once(&binding.path)
+            .chain(std::iter::once(&binding.upper_dir))
+            .chain(binding.lower_dirs.iter())
+        {
+            if !path.is_absolute()
+                || path.components().any(|part| {
+                    matches!(
+                        part,
+                        std::path::Component::CurDir | std::path::Component::ParentDir
+                    )
+                })
+            {
+                return Err(WorktreeError::OperationBlocked(format!(
+                    "FUSE registry contains a non-canonical absolute path '{}'; restore its metadata before continuing",
+                    path.display()
+                )));
+            }
+        }
+        if !paths.insert(&binding.path) {
+            return Err(WorktreeError::OperationBlocked(format!(
+                "FUSE registry repeats worktree path '{}'",
+                binding.path.display()
+            )));
+        }
+        if let Some(name) = &binding.name {
+            crate::utils::worktree_layout::validate_name(name).map_err(|error| {
+                WorktreeError::OperationBlocked(format!(
+                    "invalid registered FUSE worktree name '{name}': {error}"
+                ))
+            })?;
+            if !names.insert(name) {
+                return Err(WorktreeError::OperationBlocked(format!(
+                    "FUSE registry repeats worktree name '{name}'"
+                )));
+            }
+        }
+    }
+    Ok(bindings)
+}
+
+pub(crate) fn registered_fuse_worktree_paths(common: &Path) -> WorktreeResult<Vec<PathBuf>> {
+    read_fuse_worktree_bindings(common)
+        .map(|bindings| bindings.into_iter().map(|binding| binding.path).collect())
+}
+
+pub(crate) fn registered_fuse_worktree_at(
+    common: &Path,
+    path: &Path,
+) -> WorktreeResult<Option<FuseWorktreeBinding>> {
+    let mut found = None;
+    for binding in read_fuse_worktree_bindings(common)? {
+        if let Some(name) = &binding.name {
+            crate::utils::worktree_layout::validate_name(name).map_err(|error| {
+                WorktreeError::OperationBlocked(format!(
+                    "invalid registered FUSE worktree name '{name}': {error}"
+                ))
+            })?;
+        }
+        if binding.path == path {
+            if found.is_some() {
+                return Err(WorktreeError::OperationBlocked(format!(
+                    "FUSE worktree path '{}' is registered more than once",
+                    path.display()
+                )));
+            }
+            found = Some(binding);
+        }
+    }
+    Ok(found)
 }

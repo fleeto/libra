@@ -302,6 +302,115 @@ fn builtin_migrations_register_current_schema_migrations() {
     assert_eq!(runner.max_registered_version(), versions.last().copied());
 }
 
+#[tokio::test]
+async fn worktree_layout_capability_upgrade_is_metadata_only_and_idempotent() {
+    let (_dir, url, _path) = fresh_db_url();
+    let conn = connect(&url).await;
+    let runner = all_builtin_runner().expect("builtin runner");
+    runner
+        .run_pending_up_to(&conn, 2026101901)
+        .await
+        .expect("initialize the prior repository schema");
+    conn.execute_unprepared(
+        "CREATE TABLE worktree_capability_fixture (value TEXT NOT NULL); \
+         INSERT INTO worktree_capability_fixture VALUES ('retain old ownership')",
+    )
+    .await
+    .expect("seed existing repository data");
+
+    assert_eq!(runner.run_pending(&conn).await.unwrap(), [2026101902]);
+    assert!(runner.run_pending(&conn).await.unwrap().is_empty());
+    let versions: Vec<i64> = conn
+        .query_all_raw(Statement::from_string(
+            conn.get_database_backend(),
+            "SELECT version FROM worktree_registry_capability ORDER BY version",
+        ))
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|row| row.try_get_by_index(0).unwrap())
+        .collect();
+    assert_eq!(versions, [2, 3, 4]);
+    let value: String = conn
+        .query_one_raw(Statement::from_string(
+            conn.get_database_backend(),
+            "SELECT value FROM worktree_capability_fixture",
+        ))
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get_by_index(0)
+        .unwrap();
+    assert_eq!(value, "retain old ownership");
+    assert!(matches!(
+        db::schema::inspect_schema_for_connection(&conn, DatabaseRole::Repository)
+            .await
+            .unwrap(),
+        SchemaCompatibility::Compatible {
+            current_version: Some(2026101902),
+            latest_version: Some(2026101902),
+        }
+    ));
+}
+
+#[tokio::test]
+async fn worktree_layout_capability_refuses_rollback_before_any_mutation() {
+    let (_dir, url, _path) = fresh_db_url();
+    let conn = connect(&url).await;
+    run_all_builtin_migrations(&conn).await.unwrap();
+    let runner = all_builtin_runner().unwrap();
+    let error = runner.rollback_to(&conn, 2026092701).await.unwrap_err();
+    assert!(matches!(
+        error,
+        MigrationError::IrreversibleMigration {
+            version: 2026101902,
+            name: "worktree_layout_capability",
+        }
+    ));
+    assert_eq!(
+        runner.current_version_readonly(&conn).await.unwrap(),
+        Some(2026101902)
+    );
+    assert!(table_exists(&conn, "memory_episode").await);
+    assert!(table_exists(&conn, "memory_episode_path").await);
+    let marker: i64 = conn
+        .query_one_raw(Statement::from_string(
+            conn.get_database_backend(),
+            "SELECT COUNT(*) FROM worktree_registry_capability WHERE version = 4",
+        ))
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get_by_index(0)
+        .unwrap();
+    assert_eq!(
+        marker, 1,
+        "rollback must preserve the compatibility barrier"
+    );
+}
+
+#[tokio::test]
+async fn worktree_layout_capability_is_present_in_a_fresh_repository() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("repository.db");
+    let conn = db::create_database_for_role(path.to_str().unwrap(), DatabaseRole::Repository)
+        .await
+        .unwrap();
+    assert_eq!(
+        db::schema::current_schema_version_for_role(&conn, DatabaseRole::Repository)
+            .await
+            .unwrap(),
+        Some(2026101902)
+    );
+    conn.close().await.unwrap();
+    let reopened =
+        db::establish_connection_for_role(path.to_str().unwrap(), DatabaseRole::Repository)
+            .await
+            .expect("the current binary must reopen the capability-marked repository");
+    assert!(table_exists(&reopened, "worktree_registry_capability").await);
+    reopened.close().await.unwrap();
+}
+
 // ---------------------------------------------------------------------------
 // run_pending on a fresh database: applies every registered migration
 // ---------------------------------------------------------------------------
@@ -5589,22 +5698,25 @@ async fn memory_core_second_run_is_noop() {
 async fn memory_core_down_drops_all() {
     let (_dir, url, _path) = fresh_db_url();
     let conn = connect(&url).await;
-    run_all_builtin_migrations(&conn).await.expect("migrations");
+    let runner = all_builtin_runner().expect("builtin registry must build clean");
+    runner
+        .run_pending_up_to(&conn, 2026092902)
+        .await
+        .expect("migrations through the memory schema window");
     assert!(table_exists(&conn, "memory_episode").await);
     assert!(table_exists(&conn, "memory_episode_evidence").await);
     assert!(table_exists(&conn, "memory_projection_state").await);
 
     // Rolling back to the pre-memory tip (2026092701) applies the DM-10 down
     // first (2026092902) then the DM-01 down (2026092901), both above the tip.
-    let runner = all_builtin_runner().expect("builtin registry must build clean");
     let rolled = runner
         .rollback_to(&conn, 2026092701)
         .await
         .expect("rollback to pre-memory tip");
     assert_eq!(
         rolled,
-        vec![2026101901, 2026092902, 2026092901],
-        "memory migrations and the grok CHECK migration are above the target tip"
+        vec![2026092902, 2026092901],
+        "only the memory migrations were applied above the target tip"
     );
 
     assert!(!table_exists(&conn, "memory_episode").await);
@@ -5787,21 +5899,24 @@ async fn memory_path_search_second_run_is_noop() {
 async fn memory_path_search_down_drops_all() {
     let (_dir, url, _path) = fresh_db_url();
     let conn = connect(&url).await;
-    run_all_builtin_migrations(&conn).await.expect("migrations");
+    let runner = all_builtin_runner().expect("builtin registry must build clean");
+    runner
+        .run_pending_up_to(&conn, 2026092902)
+        .await
+        .expect("migrations through the memory schema window");
     assert!(table_exists(&conn, "memory_episode_path").await);
     assert!(table_exists(&conn, "memory_episode_search_doc").await);
 
     // The DM-10 migration is registered immediately above the DM-01 tip
     // (2026092901); rolling back to that tip applies only the DM-10 down.
-    let runner = all_builtin_runner().expect("builtin registry must build clean");
     let rolled = runner
         .rollback_to(&conn, 2026092901)
         .await
         .expect("rollback to the DM-01 tip");
     assert_eq!(
         rolled,
-        vec![2026101901, 2026092902],
-        "the grok CHECK migration and DM-10 are above the DM-01 tip"
+        vec![2026092902],
+        "only DM-10 was applied above the DM-01 tip"
     );
 
     assert!(!table_exists(&conn, "memory_episode_path").await);
@@ -5825,15 +5940,19 @@ async fn memory_path_search_down_drops_all() {
 async fn memory_path_search_simulated_old_runner_rejects_future_schema() {
     let (_dir, url, _path) = fresh_db_url();
     let conn = connect(&url).await;
-    run_all_builtin_migrations(&conn).await.expect("migrations");
+    all_builtin_runner()
+        .expect("full runner")
+        .run_pending_up_to(&conn, 2026092902)
+        .await
+        .expect("migrations through the memory schema window");
     assert_eq!(
         all_builtin_runner()
             .expect("full runner")
             .current_version_readonly(&conn)
             .await
             .expect("read current"),
-        Some(2026101901),
-        "the full-resolved binary sees the repository at the current tip"
+        Some(2026092902),
+        "the full-resolved binary sees the repository at the DM-10 tip"
     );
 
     // The pretend old binary: registry truncated to the pre-memory tip.
@@ -5852,7 +5971,7 @@ async fn memory_path_search_simulated_old_runner_rejects_future_schema() {
     let latest = old
         .max_registered_version()
         .expect("old binary registry tip");
-    assert_eq!(current, 2026101901);
+    assert_eq!(current, 2026092902);
     assert_eq!(latest, 2026092701);
 
     // The old binary's future-schema predicate (current > latest) is exactly
@@ -5872,7 +5991,7 @@ async fn memory_path_search_simulated_old_runner_rejects_future_schema() {
         matches!(
             compatibility,
             SchemaCompatibility::UnsupportedFuture {
-                current_version: 2026101901,
+                current_version: 2026092902,
                 latest_version: Some(2026092701)
             }
         ),

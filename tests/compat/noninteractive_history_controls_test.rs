@@ -433,7 +433,13 @@ fn rebase_update_refs_moves_rewritten_branches_but_excludes_checked_out_branches
     let linked = fixture.root.join("update-refs-linked");
     fixture.success(
         &repo,
-        &["worktree", "add", linked.to_str().expect("utf8 linked")],
+        &[
+            "worktree",
+            "add",
+            "update-refs-linked",
+            "--path",
+            linked.to_str().expect("utf8 linked"),
+        ],
     );
     fixture.success(&linked, &["switch", "checked-out"]);
 

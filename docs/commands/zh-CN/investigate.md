@@ -33,15 +33,25 @@ manifest 的 `manual_attach` 列表；永不修改 findings 或 run 状态。
 （`.env.test` 等被 gitignore 的 secret 文件不会进入镜像），使用最小权限只读的
 CLI 形态，环境变量只注入 allowlist。investigator 永远不会在仓库工作树本身运行。
 
+新工作区位于共享存储根目录的
+`.libra/worktree/tasks/<run-id>/<attempt-id>/workspace/`，从 linked worktree
+发起也采用同一根目录。原始 task 快照不是 linked 仓库；在该目录直接启动普通
+`libra` 命令不会向上自动发现主仓库。访问仓库需要 runtime 显式提供已验证的
+scope。Libra 不会把内部 OS 沙箱施加给外部 investigator CLI；该 CLI 自身的沙箱设置
+决定它能否访问兄弟工作区或共享存储。
+
 使用 `start --checkpoint <id>` 时，调查范围改为一个已捕获的 agent checkpoint：
 investigator 的工作区就是该 checkpoint 自身的内容——`metadata.json`、可选的
-`manifest.json` 与 transcript 文件——以**只读**形式物化在 run 目录下
-（`<run_dir>/checkpoint-input/`）。完全不物化仓库快照，因此 scoped run 只可能
+`manifest.json` 与 transcript 文件——以**只读**形式物化在
+`.libra/worktree/tasks/<run-id>/<attempt-id>/checkpoint-input/`。完全不物化仓库快照，因此 scoped run 只可能
 消费指定的 checkpoint；该 scope 持久化在 run 状态里，`investigate continue`
 恢复时会重新物化**同一个** checkpoint，绝不会回落到当前工作树。checkpoint
 缺失、tree 非法、或内容不在本地对象库时，在创建任何 run 之前即 fail-closed
-（无 run 残留）。物化产物与 run 共享 retention 生命周期（`investigate clean`
-随 run 一并移除），`agent doctor` 无需新增孤儿类别。
+（无 run 残留）。run 记录独立输入目录的所有权；`investigate clean` 验证并删除
+所属输入后才删除运行元数据，失败时保留记录供重试。`agent doctor` 只读报告无主
+托管 task 目录，不删除它们。
+drive pass 结束时若工作区清理失败，run 会以 `error` 终态结束并保留所有权
+intent。修复报告的原因后，可用 `investigate clean --run <run_id>` 重试清理。
 
 每一轮从 investigator 的 stdout 收集其 stance（经 redaction），追加到 run 的
 `stances` 列表与单写 `findings.md`，并推进轮询位置
@@ -65,6 +75,7 @@ investigator 的工作区就是该 checkpoint 自身的内容——`metadata.jso
   - `agent_failure` —— investigator 启动失败、非零退出或超过 per-turn 截止。
 
 `libra investigate continue <run_id>` 从 pending turn 续跑一个 paused run。
+每次驱动分配新的 attempt 目录，不覆盖之前的工作区或 checkpoint 输入。
 OS 级 run lock 使同一 run 的并发 `continue` fail-closed 并给出可操作错误，
 因此一个 run 永不被两个进程同时驱动。
 
@@ -74,6 +85,16 @@ run 状态持久化在 `.libra/sessions/agent-runs/<run_id>/`：`state.json`
 `reviewers/<slug>.stdout.redacted.log` / `.stderr.redacted.log`。所有落盘的
 investigator 输出都经过 secret redaction 管线；每条流上限 64 KiB（刷屏的
 investigator 会被截断并打上标记）。
+
+### 工作区保留与清理
+
+运行元数据仍在 `.libra/sessions/agent-runs/<run_id>/`。新 `state.json` 和
+`manifest.json` 使用 schema version 2，并保存工作区所有权描述。已知 version-1
+记录仍可读取，不搬迁旧目录、不批量改写保存的 run。未知版本拒绝写入与清理。
+
+`investigate clean` 只删除属于自身类型的终态 run。它校验保存的描述与目录身份，
+先清理所属工作区，再删除运行元数据。链接、目录被替换、所有权冲突或清理错误
+均保留恢复记录供重试。仅有目录名称不能证明所有权；应保留报告的无主目录供诊断。
 
 ### Untrusted seed 与 findings
 
@@ -125,7 +146,7 @@ libra investigate continue <run_id>
 # 取消一个正在运行的调查（与 Ctrl-C 相同的 cleanup）
 libra investigate cancel <run_id>
 
-# 删除 run 目录
+# 删除已结束 run 及其拥有的工作区
 libra investigate clean --run <run_id>
 libra investigate clean --all
 ```

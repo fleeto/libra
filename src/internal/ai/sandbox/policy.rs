@@ -6,10 +6,25 @@
 
 use std::{
     ffi::OsStr,
+    io,
     path::{Component, Path, PathBuf},
 };
 
 use serde::{Deserialize, Serialize};
+
+use crate::{
+    internal::ai::workspace_isolation::{TaskWorkspaceDescriptor, verify_task_workspace},
+    utils::worktree_layout,
+};
+
+const TASK_CACHE_DIRECTORIES: [&str; 6] = [
+    "home",
+    "xdg-config",
+    "xdg-cache",
+    "cargo-home",
+    "logs",
+    "target",
+];
 
 /// Controls whether command execution uses the configured sandbox policy
 /// or bypasses it for an escalated run.
@@ -498,6 +513,8 @@ pub fn sensitive_read_paths(home: Option<&Path>) -> Vec<PathBuf> {
             ".config/hub",
             ".kube",
             ".config/libra/vault",
+            ".libra/vault-keys",
+            ".libra/vault-unseal-key",
             ".mozilla/firefox",
             ".config/google-chrome",
             ".config/chromium",
@@ -597,6 +614,122 @@ impl SandboxPolicy {
 
     pub fn new_workspace_write_policy() -> Self {
         Self::default()
+    }
+
+    /// Restrict writes to a verified task workspace and its own cache folders.
+    /// Host temporary directories and inherited main-worktree roots are excluded.
+    /// Explicit full-access/external policies and read-only policies retain their
+    /// original posture; ownership must still be valid before using the attempt.
+    pub fn for_task_workspace(&self, descriptor: &TaskWorkspaceDescriptor) -> io::Result<Self> {
+        verify_task_descriptor(descriptor)?;
+        let attempt = descriptor.attempt_root();
+        let mut roots = vec![descriptor.canonical_path.clone()];
+        for name in TASK_CACHE_DIRECTORIES {
+            let path = attempt.join(name);
+            // Existing cache directories are opened without following links.
+            // An unexpected file/link is not converted into a writable root.
+            worktree_layout::open_managed_directory(descriptor.common_storage(), &path).map_err(
+                |error| {
+                    io::Error::new(
+                        error.kind(),
+                        format!(
+                            "cannot authorize task cache '{}': {error}; inspect the task attempt before retrying",
+                            path.display()
+                        ),
+                    )
+                },
+            )?;
+            roots.push(path);
+        }
+        match self {
+            Self::WorkspaceWrite { network_access, .. } => Ok(Self::WorkspaceWrite {
+                writable_roots: roots,
+                network_access: network_access.clone(),
+                exclude_tmpdir_env_var: true,
+                exclude_slash_tmp: true,
+                allow_metadata_writes: false,
+            }),
+            Self::ReadOnly | Self::DangerFullAccess | Self::ExternalSandbox { .. } => {
+                Ok(self.clone())
+            }
+        }
+    }
+
+    /// Extra read denials to append to the caller's inherited runtime denials.
+    /// Denying the common storage directory itself would also hide the nested
+    /// workspace. Deny its metadata children individually, excluding `worktree`.
+    pub fn task_workspace_sensitive_read_paths(
+        descriptor: &TaskWorkspaceDescriptor,
+    ) -> io::Result<Vec<PathBuf>> {
+        verify_task_descriptor(descriptor)?;
+        let common = descriptor.common_storage();
+        let mut paths = Vec::new();
+        // Pin known sensitive files even if a concurrent host operation has not
+        // created them yet. The database contains repository configuration.
+        for name in [
+            "libra.db",
+            "libra.db-wal",
+            "libra.db-shm",
+            "vault.db",
+            "vault.db-wal",
+            "vault.db-shm",
+            "vault-keys",
+            "vault-unseal-key",
+            "sessions",
+        ] {
+            paths.push(common.join(name));
+        }
+        let entries = std::fs::read_dir(common).map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!(
+                    "cannot inspect repository metadata '{}' for task read restrictions: {error}",
+                    common.display()
+                ),
+            )
+        })?;
+        for (count, entry) in entries.enumerate() {
+            if count >= 4096 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "repository metadata has too many entries to build a bounded task sandbox; inspect the metadata directory before retrying",
+                ));
+            }
+            let entry = entry?;
+            if entry.file_name() != OsStr::new("worktree") {
+                paths.push(common.join(entry.file_name()));
+            }
+        }
+        // A FUSE overlay exposes the lower repository's metadata through a new
+        // path. Mask managed mounts and explicit external aliases as well as
+        // the original storage paths; none is an ancestor of this task.
+        paths.push(worktree_layout::managed_root(common).join("fuse"));
+        let fuse_paths = crate::command::worktree::registered_fuse_worktree_paths(common)
+            .map_err(|error| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "cannot verify FUSE metadata aliases for the task sandbox: {error}; repair the worktree registry before retrying"
+                    ),
+                )
+            })?;
+        for mount in fuse_paths {
+            let metadata = mount.join(".libra");
+            if descriptor.canonical_path.starts_with(&metadata)
+                || descriptor.attempt_root().starts_with(&metadata)
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "a FUSE metadata alias overlaps the task workspace; repair the worktree registry before retrying",
+                ));
+            }
+            paths.push(metadata);
+        }
+        paths.sort();
+        paths.dedup();
+        // Recheck after enumeration before granting anything to the child.
+        verify_task_descriptor(descriptor)?;
+        Ok(paths)
     }
 
     /// Return a copy of this policy with its writable roots rebased onto
@@ -809,6 +942,15 @@ impl SandboxPolicy {
     }
 }
 
+fn verify_task_descriptor(descriptor: &TaskWorkspaceDescriptor) -> io::Result<()> {
+    let run_dir = descriptor
+        .common_storage()
+        .join("sessions")
+        .join("agent-runs")
+        .join(descriptor.run_id.to_string());
+    verify_task_workspace(descriptor.common_storage(), &run_dir, descriptor)
+}
+
 fn resolve_root(root: &Path, cwd: &Path) -> PathBuf {
     if root.is_absolute() {
         root.to_path_buf()
@@ -903,6 +1045,201 @@ fn protected_subpaths(root: &Path) -> Vec<PathBuf> {
 mod tests {
     use super::*;
 
+    fn task_fixture() -> (tempfile::TempDir, TaskWorkspaceDescriptor) {
+        use crate::internal::ai::workspace_isolation::{TaskWorkspaceKind, create_task_workspace};
+
+        let temp = tempfile::tempdir().unwrap();
+        let common = temp.path().canonicalize().unwrap().join(".libra");
+        let run_id = uuid::Uuid::new_v4();
+        let run = common.join("sessions/agent-runs").join(run_id.to_string());
+        std::fs::create_dir_all(&run).unwrap();
+        let descriptor =
+            create_task_workspace(&common, &run, run_id, TaskWorkspaceKind::Workspace).unwrap();
+        (temp, descriptor)
+    }
+
+    #[test]
+    fn task_workspace_policy_allows_only_owned_workspace_and_cache_directories() {
+        let (temp, descriptor) = task_fixture();
+        let inherited = SandboxPolicy::WorkspaceWrite {
+            writable_roots: vec![temp.path().to_path_buf()],
+            network_access: NetworkAccess::Full,
+            exclude_tmpdir_env_var: false,
+            exclude_slash_tmp: false,
+            allow_metadata_writes: true,
+        };
+        let narrowed = inherited.for_task_workspace(&descriptor).unwrap();
+        let SandboxPolicy::WorkspaceWrite {
+            network_access,
+            exclude_tmpdir_env_var,
+            exclude_slash_tmp,
+            allow_metadata_writes,
+            ..
+        } = &narrowed
+        else {
+            panic!("expected a workspace-write task policy");
+        };
+        assert_eq!(*network_access, NetworkAccess::Full);
+        assert!(*exclude_tmpdir_env_var && *exclude_slash_tmp);
+        assert!(!allow_metadata_writes);
+        let roots = narrowed.get_writable_roots_with_cwd(&descriptor.canonical_path);
+        assert_eq!(roots.len(), 7);
+        let mut expected = vec![descriptor.canonical_path.clone()];
+        expected.extend(TASK_CACHE_DIRECTORIES.map(|name| descriptor.attempt_root().join(name)));
+        assert_eq!(
+            roots
+                .iter()
+                .map(|root| root.root.clone())
+                .collect::<Vec<_>>(),
+            expected
+        );
+        for root in &roots {
+            assert!(!root.is_path_writable(descriptor.common_storage()));
+            assert!(!root.is_path_writable(&descriptor.attempt_root()));
+            assert!(!root.is_path_writable(&descriptor.common_storage().join("vault.db")));
+            assert!(!root.is_path_writable(&root.root.join(".libra/config")));
+            assert!(!root.is_path_writable(&descriptor.attempt_root().with_file_name("sibling")));
+        }
+        assert!(roots[0].is_path_writable(&descriptor.canonical_path.join("src/lib.rs")));
+    }
+
+    #[test]
+    fn task_workspace_policy_preserves_explicit_policy_postures() {
+        let (_temp, descriptor) = task_fixture();
+        for policy in [
+            SandboxPolicy::ReadOnly,
+            SandboxPolicy::DangerFullAccess,
+            SandboxPolicy::ExternalSandbox {
+                network_access: NetworkAccess::Denied,
+            },
+        ] {
+            assert_eq!(policy.for_task_workspace(&descriptor).unwrap(), policy);
+        }
+    }
+
+    #[test]
+    fn task_workspace_policy_refuses_tampered_or_unowned_descriptors() {
+        let (temp, descriptor) = task_fixture();
+        let mut changed = descriptor.clone();
+        changed.canonical_path = temp.path().canonicalize().unwrap();
+        assert!(
+            SandboxPolicy::default()
+                .for_task_workspace(&changed)
+                .is_err()
+        );
+        assert!(
+            SandboxPolicy::DangerFullAccess
+                .for_task_workspace(&changed)
+                .is_err()
+        );
+        changed = descriptor.clone();
+        changed.layout_version = u32::MAX;
+        assert!(
+            SandboxPolicy::default()
+                .for_task_workspace(&changed)
+                .is_err()
+        );
+        std::fs::rename(
+            &descriptor.canonical_path,
+            descriptor.attempt_root().join("replaced-workspace"),
+        )
+        .unwrap();
+        std::fs::create_dir(&descriptor.canonical_path).unwrap();
+        assert!(
+            SandboxPolicy::default()
+                .for_task_workspace(&descriptor)
+                .is_err()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn task_workspace_policy_refuses_cache_symlinks_outside_the_attempt() {
+        let (_temp, descriptor) = task_fixture();
+        let outside = tempfile::tempdir().unwrap();
+        let cache = descriptor.attempt_root().join("cargo-home");
+        std::fs::remove_dir(&cache).unwrap();
+        std::os::unix::fs::symlink(outside.path(), &cache).unwrap();
+        let error = SandboxPolicy::default()
+            .for_task_workspace(&descriptor)
+            .unwrap_err();
+        assert!(error.to_string().contains("cannot authorize task cache"));
+        assert!(error.to_string().contains("cargo-home"));
+    }
+
+    #[test]
+    fn task_workspace_read_denials_protect_metadata_without_hiding_workspace() {
+        let (_temp, descriptor) = task_fixture();
+        std::fs::write(
+            descriptor.common_storage().join("private-config"),
+            b"secret",
+        )
+        .unwrap();
+        let paths = SandboxPolicy::task_workspace_sensitive_read_paths(&descriptor).unwrap();
+        for name in [
+            "private-config",
+            "sessions",
+            "libra.db",
+            "vault.db",
+            "vault.db-wal",
+        ] {
+            assert!(paths.contains(&descriptor.common_storage().join(name)));
+        }
+        assert!(!paths.contains(&descriptor.common_storage().join("worktree")));
+        for path in paths {
+            assert!(!descriptor.canonical_path.starts_with(&path));
+            assert!(!descriptor.attempt_root().join("home").starts_with(&path));
+        }
+    }
+
+    #[test]
+    fn task_workspace_read_denials_cover_managed_and_external_fuse_aliases() {
+        let (temp, descriptor) = task_fixture();
+        let common = descriptor.common_storage();
+        let managed_mount = worktree_layout::fuse_workspace(common, "managed").unwrap();
+        let external_mount = temp.path().canonicalize().unwrap().join("external-mount");
+        let entries =
+            [("managed", &managed_mount), ("external", &external_mount)].map(|(name, path)| {
+                serde_json::json!({
+                    "name": name,
+                    "path": path,
+                    "upper_dir": worktree_layout::fuse_upper(common, name).unwrap(),
+                    "lower_dirs": [temp.path().canonicalize().unwrap()],
+                })
+            });
+        std::fs::write(
+            common.join("worktrees-fuse.json"),
+            serde_json::to_vec(&serde_json::json!({"schema_version": 1, "entries": entries}))
+                .unwrap(),
+        )
+        .unwrap();
+        let paths = SandboxPolicy::task_workspace_sensitive_read_paths(&descriptor).unwrap();
+        assert!(paths.contains(&worktree_layout::managed_root(common).join("fuse")));
+        assert!(paths.contains(&managed_mount.join(".libra")));
+        assert!(paths.contains(&external_mount.join(".libra")));
+        assert!(
+            paths
+                .iter()
+                .all(|path| !descriptor.canonical_path.starts_with(path))
+        );
+    }
+
+    #[test]
+    fn task_workspace_read_denials_refuse_unknown_fuse_registry_versions() {
+        let (_temp, descriptor) = task_fixture();
+        std::fs::write(
+            descriptor.common_storage().join("worktrees-fuse.json"),
+            br#"{"schema_version":999,"entries":[]}"#,
+        )
+        .unwrap();
+        let error = SandboxPolicy::task_workspace_sensitive_read_paths(&descriptor).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("cannot verify FUSE metadata aliases")
+        );
+    }
+
     /// CEX-S2-12 / S2-INV-03: rebasing a `WorkspaceWrite` policy onto a
     /// sub-agent workspace must replace `writable_roots` with exactly
     /// the workspace root while preserving the network / tmpdir knobs,
@@ -992,6 +1329,8 @@ mod tests {
         assert!(paths.contains(&PathBuf::from("/home/tester/.config/gh")));
         assert!(paths.contains(&PathBuf::from("/home/tester/.docker")));
         assert!(paths.contains(&PathBuf::from("/home/tester/.cargo/credentials.toml")));
+        assert!(paths.contains(&PathBuf::from("/home/tester/.libra/vault-keys")));
+        assert!(paths.contains(&PathBuf::from("/home/tester/.libra/vault-unseal-key")));
         assert!(paths.contains(&PathBuf::from("/home/tester/.config/google-chrome")));
         assert!(paths.contains(&PathBuf::from("/home/tester/.mozilla/firefox")));
         assert!(paths.contains(&PathBuf::from("/home/tester/Library/Cookies")));

@@ -79,7 +79,7 @@ Codex 回调在存在可信终态边界之前对宿主 Agent 属于辅助采集�
 
 | 已损坏的活动仓库 | 稳定错误码（退出码 128） | 消息中的修复建议 |
 |------------------|--------------------------|------------------|
-| 无法解析 storage（detached、迁移中或损坏的 linked worktree） | `LBR-REPO-003` | 在主 worktree 运行 `libra worktree repair --confirm <worktree-path>`（或重新添加该 worktree） |
+| 无法解析 storage（detached、迁移中或损坏的 linked worktree） | `LBR-REPO-003` | 在主 worktree 运行 `libra worktree repair --confirm --path <worktree-path>`（或重新添加该 worktree） |
 | 仓库数据库缺失 | `LBR-REPO-002` | 恢复仓库的 `.libra` storage |
 | 仓库数据库无法打开 | `LBR-IO-001` | 若由更新版本的 Libra 写入则安装更新的 Libra，否则恢复仓库 storage |
 | 无法读取 `core.objectformat` | `LBR-IO-001` | 修复仓库数据库 |

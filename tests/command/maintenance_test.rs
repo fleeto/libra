@@ -808,7 +808,10 @@ fn gc_runs_multi_worktree_and_keeps_private_and_registered_roots() {
     let wt_root = tempfile::tempdir().expect("wt root");
     let wt = wt_root.path().join("gc-wt");
     super::assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &["worktree", "add", "gc-wt", "--path", wt.to_str().unwrap()],
+            main,
+        ),
         "worktree add",
     );
 
@@ -1416,6 +1419,128 @@ fn gc_refuses_a_manifest_that_is_not_a_json_object() {
         combined.contains("not a JSON object"),
         "and must say why: {combined}"
     );
+}
+
+/// Both supported run-manifest generations keep findings and attachment
+/// blobs reachable even when an old prune ledger lists them as candidates.
+#[test]
+fn gc_preserves_v1_and_v2_agent_run_manifest_roots() {
+    let repo = create_committed_repo_via_cli();
+    let mut roots = Vec::new();
+    for (name, contents) in [
+        ("findings.md", "run findings kept by the manifest\n"),
+        ("attachment.txt", "manual attachment kept by the manifest\n"),
+    ] {
+        fs::write(repo.path().join(name), contents).expect("write root blob");
+        let hashed = run_libra_command(&["hash-object", "-w", name], repo.path());
+        assert_cli_success(&hashed, "hash manifest root");
+        let oid = String::from_utf8_lossy(&hashed.stdout).trim().to_string();
+        fs::remove_file(repo.path().join(name)).expect("remove untracked source");
+        fs::File::open(loose_object_file(repo.path(), &oid))
+            .expect("open root object")
+            .set_times(fs::FileTimes::new().set_modified(std::time::SystemTime::UNIX_EPOCH))
+            .expect("age root object");
+        roots.push(oid);
+    }
+    let run_dir = repo.path().join(".libra/sessions/agent-runs/versioned-run");
+    fs::create_dir_all(&run_dir).expect("create run directory");
+    for schema_version in [1, 2] {
+        for kind in ["review", "investigate"] {
+            fs::write(
+                run_dir.join("manifest.json"),
+                serde_json::to_vec(&serde_json::json!({
+                    "schema_version": schema_version,
+                    "run_id": "versioned-run",
+                    "kind": kind,
+                    "terminal_state": "success",
+                    "findings_oid": roots[0],
+                    "manual_attach": [{"oid": roots[1]}]
+                }))
+                .expect("serialize manifest"),
+            )
+            .expect("write manifest");
+            let candidates: serde_json::Map<String, serde_json::Value> = roots
+                .iter()
+                .map(|oid| (oid.clone(), serde_json::json!(0)))
+                .collect();
+            fs::write(
+                repo.path().join(".libra/gc-prune-candidates.json"),
+                serde_json::to_vec(&candidates).expect("serialize candidates"),
+            )
+            .expect("write aged candidates");
+
+            let gc = run_libra_command(&["maintenance", "run", "--task", "gc"], repo.path());
+            assert_cli_success(&gc, "GC supports known run-manifest schemas");
+            for oid in &roots {
+                assert_cli_success(
+                    &run_libra_command(&["cat-file", "-e", oid], repo.path()),
+                    "manifest findings and attachment roots survive GC",
+                );
+            }
+        }
+    }
+}
+
+/// An unknown or malformed version cannot authorize a partial root scan.
+#[test]
+fn gc_refuses_unknown_agent_run_manifest_schemas_without_pruning() {
+    let repo = create_committed_repo_via_cli();
+    fs::write(
+        repo.path().join("owned.md"),
+        "possibly owned by a future manifest\n",
+    )
+    .expect("write object source");
+    let hashed = run_libra_command(&["hash-object", "-w", "owned.md"], repo.path());
+    assert_cli_success(&hashed, "hash protected object");
+    let oid = String::from_utf8_lossy(&hashed.stdout).trim().to_string();
+    fs::remove_file(repo.path().join("owned.md")).expect("remove untracked source");
+    let object_path = loose_object_file(repo.path(), &oid);
+    fs::File::open(&object_path)
+        .expect("open protected object")
+        .set_times(fs::FileTimes::new().set_modified(std::time::SystemTime::UNIX_EPOCH))
+        .expect("age protected object");
+    fs::write(
+        repo.path().join(".libra/gc-prune-candidates.json"),
+        serde_json::to_vec(&std::collections::BTreeMap::from([(oid, 0)]))
+            .expect("serialize aged candidate"),
+    )
+    .expect("write aged candidate");
+    let run_dir = repo.path().join(".libra/sessions/agent-runs/unknown-run");
+    fs::create_dir_all(&run_dir).expect("create run directory");
+    for version in [
+        serde_json::json!(99),
+        serde_json::json!("2"),
+        serde_json::Value::Null,
+    ] {
+        fs::write(
+            run_dir.join("manifest.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "schema_version": version,
+                "findings_oid": null,
+                "manual_attach": []
+            }))
+            .expect("serialize manifest"),
+        )
+        .expect("write unknown manifest");
+        let gc = run_libra_command(&["maintenance", "run", "--task", "gc"], repo.path());
+        let output = format!(
+            "{}{}",
+            String::from_utf8_lossy(&gc.stdout),
+            String::from_utf8_lossy(&gc.stderr)
+        );
+        assert!(
+            !gc.status.success(),
+            "unknown manifest must block GC: {output}"
+        );
+        assert!(
+            output.contains("unsupported or missing schema version"),
+            "{output}"
+        );
+        assert!(
+            object_path.exists(),
+            "GC must retain objects when roots are unknown"
+        );
+    }
 }
 
 /// B3-13: blake3 repositories must never create/update a Git-compatible CGPH.

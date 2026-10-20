@@ -1,4 +1,4 @@
-//! Windows capture filesystem capabilities. Every component is opened without
+//! Windows filesystem capabilities. Every component is opened without
 //! following reparse points. Ordinary directory pins deny write/delete sharing;
 //! private mutation directories use handle-relative operations and deny deletion.
 
@@ -18,16 +18,20 @@ use windows_sys::{
     Wdk::{
         Foundation::OBJECT_ATTRIBUTES,
         Storage::FileSystem::{
-            FILE_CREATE, FILE_DIRECTORY_FILE, FILE_DISPOSITION_INFORMATION,
-            FILE_NON_DIRECTORY_FILE, FILE_OPEN, FILE_OPEN_REPARSE_POINT, FILE_RENAME_INFORMATION,
-            FILE_SYNCHRONOUS_IO_NONALERT, FileDispositionInformation, FileRenameInformation,
-            NtCreateFile, NtSetInformationFile,
+            FILE_CREATE, FILE_DIRECTORY_FILE, FILE_DISPOSITION_DELETE,
+            FILE_DISPOSITION_IGNORE_READONLY_ATTRIBUTE, FILE_DISPOSITION_INFORMATION,
+            FILE_DISPOSITION_INFORMATION_EX, FILE_DISPOSITION_POSIX_SEMANTICS,
+            FILE_NAMES_INFORMATION, FILE_NON_DIRECTORY_FILE, FILE_OPEN, FILE_OPEN_REPARSE_POINT,
+            FILE_RENAME_INFORMATION, FILE_SYNCHRONOUS_IO_NONALERT, FileDispositionInformation,
+            FileDispositionInformationEx, FileNamesInformation, FileRenameInformation,
+            NtCreateFile, NtQueryDirectoryFile, NtSetInformationFile,
         },
     },
     Win32::{
         Foundation::{
             ERROR_LOCK_VIOLATION, GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE, LocalFree,
-            OBJ_CASE_INSENSITIVE, OBJ_DONT_REPARSE, RtlNtStatusToDosError, UNICODE_STRING,
+            OBJ_CASE_INSENSITIVE, OBJ_DONT_REPARSE, RtlNtStatusToDosError, STATUS_BUFFER_OVERFLOW,
+            STATUS_NO_MORE_FILES, UNICODE_STRING,
         },
         Security::{
             ACCESS_ALLOWED_ACE, ACE_HEADER, ACL,
@@ -42,11 +46,11 @@ use windows_sys::{
         },
         Storage::FileSystem::{
             BY_HANDLE_FILE_INFORMATION, CreateDirectoryW, CreateFileW, DELETE,
-            FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-            FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TYPE_DISK,
-            GetFileInformationByHandle, GetFileType, GetFinalPathNameByHandleW,
-            LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY, LockFileEx, OPEN_EXISTING,
-            SYNCHRONIZE,
+            FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
+            FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
+            FILE_SHARE_WRITE, FILE_TYPE_DISK, GetFileInformationByHandle, GetFileType,
+            GetFinalPathNameByHandleW, LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY,
+            LockFileEx, OPEN_EXISTING, SYNCHRONIZE,
         },
         System::{
             IO::{IO_STATUS_BLOCK, OVERLAPPED},
@@ -249,6 +253,28 @@ pub(crate) fn open_tree(path: &Path) -> io::Result<File> {
         .ok_or_else(|| invalid("capture directory is empty"))
 }
 
+/// Open a directory for handle-relative workspace mutations. The strict pin
+/// proves the final identity before the mutable handle permits child writes;
+/// deletion sharing remains denied so the directory itself cannot be renamed.
+pub(crate) fn open_mutable_tree(path: &Path) -> io::Result<File> {
+    let pinned = open_tree(path)?;
+    let resolved = handle_path(&pinned)?;
+    let mutable = open_with_share(
+        &resolved,
+        true,
+        GENERIC_READ,
+        OPEN_EXISTING,
+        null(),
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+    )?;
+    if identity(&mutable)? != identity(&pinned)? {
+        return Err(io::Error::other(
+            "workspace directory changed while opening; retry the command",
+        ));
+    }
+    Ok(mutable)
+}
+
 pub(crate) struct PinnedParent {
     _ancestry: Vec<File>,
     path: PathBuf,
@@ -290,6 +316,18 @@ pub(crate) fn open_at(parent: &File, name: &OsStr, directory: bool) -> io::Resul
     )
 }
 
+pub(crate) fn open_mutable_at(parent: &File, name: &OsStr) -> io::Result<File> {
+    open_relative(
+        parent,
+        name,
+        true,
+        GENERIC_READ,
+        FILE_OPEN,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+        null(),
+    )
+}
+
 // RootDirectory is a capability, not a pathname. This also keeps private
 // mutations safe while their parent permits write sharing for atomic rename.
 #[allow(clippy::too_many_arguments)]
@@ -302,7 +340,51 @@ fn open_relative(
     sharing: u32,
     descriptor: *const windows_sys::Win32::Security::SECURITY_DESCRIPTOR,
 ) -> io::Result<File> {
+    let file = open_relative_handle(
+        parent,
+        name,
+        access,
+        disposition,
+        sharing,
+        descriptor,
+        if directory {
+            FILE_DIRECTORY_FILE
+        } else {
+            FILE_NON_DIRECTORY_FILE
+        },
+        true,
+    )?;
+    if information(&file)?.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+        || file.metadata()?.is_dir() != directory
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "capture source must be a disk file/directory, without reparse points",
+        ));
+    }
+    Ok(file)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn open_relative_handle(
+    parent: &File,
+    name: &OsStr,
+    access: u32,
+    disposition: u32,
+    sharing: u32,
+    descriptor: *const windows_sys::Win32::Security::SECURITY_DESCRIPTOR,
+    type_options: u32,
+    reject_reparse: bool,
+) -> io::Result<File> {
     validate_component(name)?;
+    let parent_info = information(parent)?;
+    if parent_info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY == 0
+        || parent_info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    {
+        return Err(invalid(
+            "Windows parent must be an ordinary pinned directory",
+        ));
+    }
     let mut name = wide(name)?;
     let length = u16::try_from((name.len() - 1) * 2)
         .map_err(|_| invalid("Windows child name exceeds its length limit"))?;
@@ -315,7 +397,7 @@ fn open_relative(
         Length: std::mem::size_of::<OBJECT_ATTRIBUTES>() as u32,
         RootDirectory: parent.as_raw_handle(),
         ObjectName: &unicode,
-        Attributes: OBJ_CASE_INSENSITIVE | OBJ_DONT_REPARSE,
+        Attributes: OBJ_CASE_INSENSITIVE | if reject_reparse { OBJ_DONT_REPARSE } else { 0 },
         SecurityDescriptor: descriptor,
         SecurityQualityOfService: null(),
     };
@@ -333,13 +415,7 @@ fn open_relative(
             0,
             sharing,
             disposition,
-            FILE_OPEN_REPARSE_POINT
-                | FILE_SYNCHRONOUS_IO_NONALERT
-                | if directory {
-                    FILE_DIRECTORY_FILE
-                } else {
-                    FILE_NON_DIRECTORY_FILE
-                },
+            FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT | type_options,
             null(),
             0,
         )
@@ -349,13 +425,11 @@ fn open_relative(
     }
     // SAFETY: the successful call transferred one fresh handle to us.
     let file = unsafe { File::from_raw_handle(handle) };
-    if information(&file)?.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
-        || file.metadata()?.is_dir() != directory
-        || unsafe { GetFileType(file.as_raw_handle()) } != FILE_TYPE_DISK
-    {
+    // SAFETY: GetFileType only inspects the live handle returned above.
+    if unsafe { GetFileType(file.as_raw_handle()) } != FILE_TYPE_DISK {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "capture source must be a disk file/directory, without reparse points",
+            "Windows child must be a disk file or directory",
         ));
     }
     Ok(file)
@@ -497,6 +571,349 @@ pub(crate) fn create_directory_at(parent: &File, name: &OsStr, private: bool) ->
     }
     let file = open(&path, true, GENERIC_READ, OPEN_EXISTING, null())?;
     Ok(file)
+}
+
+/// Reserve a new owned workspace directory; an existing entry is always an
+/// error. Child writes are allowed, while renaming or deleting the held
+/// directory remains denied.
+pub(crate) fn exclusive_create_mutable_directory_at(
+    parent: &File,
+    name: &OsStr,
+) -> io::Result<File> {
+    let descriptor = private_descriptor()?;
+    let directory = open_relative(
+        parent,
+        name,
+        true,
+        GENERIC_READ,
+        FILE_CREATE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+        descriptor.0.cast(),
+    )?;
+    validate_private(&directory)?;
+    Ok(directory)
+}
+
+/// Create or open a shared managed container without reconstructing its path.
+/// Existing files and reparse points are rejected, including on network shares.
+pub(crate) fn ensure_directory_at(parent: &File, name: &OsStr) -> io::Result<File> {
+    let open_directory = |disposition| {
+        open_relative(
+            parent,
+            name,
+            true,
+            GENERIC_READ,
+            disposition,
+            FILE_SHARE_READ,
+            null(),
+        )
+    };
+    match open_directory(FILE_CREATE) {
+        Ok(directory) => Ok(directory),
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => open_directory(FILE_OPEN),
+        Err(error) => Err(error),
+    }
+}
+
+/// Identity of the directory entry itself, including a junction or symlink.
+/// Reparse entries may be unlinked, but must never be traversed as directories.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct EntryIdentity {
+    pub(crate) identity: (u64, u64),
+    pub(crate) directory: bool,
+    pub(crate) reparse_point: bool,
+}
+
+pub(crate) fn inspect_entry_at(parent: &File, name: &OsStr) -> io::Result<EntryIdentity> {
+    let file = open_relative_handle(
+        parent,
+        name,
+        FILE_READ_ATTRIBUTES,
+        FILE_OPEN,
+        FILE_SHARE_READ,
+        null(),
+        0,
+        false,
+    )?;
+    let info = information(&file)?;
+    Ok(EntryIdentity {
+        identity: identity(&file)?,
+        directory: info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0,
+        reparse_point: info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0,
+    })
+}
+
+/// Move the authorized directory between held parents without replacement.
+/// Callers must release earlier source pins before requesting DELETE access.
+pub(crate) fn rename_entry_at(
+    source_parent: &File,
+    source_name: &OsStr,
+    expected_identity: (u64, u64),
+    destination_parent: &File,
+    destination_name: &OsStr,
+) -> io::Result<()> {
+    rename_entry_kind_at(
+        source_parent,
+        source_name,
+        expected_identity,
+        destination_parent,
+        destination_name,
+        true,
+    )
+}
+
+/// Publish a complete private proof file under a new name without replacing
+/// any existing record. The caller closes its staging write handle first.
+pub(crate) fn rename_file_at(
+    source_parent: &File,
+    source_name: &OsStr,
+    expected_identity: (u64, u64),
+    destination_parent: &File,
+    destination_name: &OsStr,
+) -> io::Result<()> {
+    rename_entry_kind_at(
+        source_parent,
+        source_name,
+        expected_identity,
+        destination_parent,
+        destination_name,
+        false,
+    )
+}
+
+fn rename_entry_kind_at(
+    source_parent: &File,
+    source_name: &OsStr,
+    expected_identity: (u64, u64),
+    destination_parent: &File,
+    destination_name: &OsStr,
+    directory: bool,
+) -> io::Result<()> {
+    validate_component(destination_name)?;
+    let destination_info = information(destination_parent)?;
+    if destination_info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY == 0
+        || destination_info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    {
+        return Err(invalid(
+            "rename destination must be an ordinary pinned directory",
+        ));
+    }
+    let source = open_relative(
+        source_parent,
+        source_name,
+        directory,
+        FILE_READ_ATTRIBUTES | DELETE,
+        FILE_OPEN,
+        FILE_SHARE_READ,
+        null(),
+    )?;
+    if identity(&source)? != expected_identity {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "workspace entry changed before moving; inspect both locations and retry",
+        ));
+    }
+    let name: Vec<_> = destination_name.encode_wide().collect();
+    let length = std::mem::size_of::<FILE_RENAME_INFORMATION>() + name.len() * 2;
+    let mut buffer = vec![0usize; length.div_ceil(std::mem::size_of::<usize>())];
+    let info = buffer.as_mut_ptr().cast::<FILE_RENAME_INFORMATION>();
+    let mut status_block = IO_STATUS_BLOCK::default();
+    // SAFETY: the aligned buffer holds the complete variable-length name. The
+    // checked source and destination handles remain held, and the zeroed
+    // ReplaceIfExists field forbids replacing any existing destination entry.
+    let status = unsafe {
+        (*info).RootDirectory = destination_parent.as_raw_handle();
+        (*info).FileNameLength = (name.len() * 2) as u32;
+        std::ptr::copy_nonoverlapping(name.as_ptr(), (*info).FileName.as_mut_ptr(), name.len());
+        NtSetInformationFile(
+            source.as_raw_handle(),
+            &mut status_block,
+            info.cast(),
+            length as u32,
+            FileRenameInformation,
+        )
+    };
+    if status < 0 {
+        return Err(nt_error(status));
+    }
+    Ok(())
+}
+
+/// Delete only the entry with the identity previously authorized by the caller.
+/// The parent is a capability and the final component is opened without reparse
+/// processing, so removing a junction never visits or deletes its target.
+/// Drop any earlier child pin before calling: pins deliberately deny deletion.
+pub(crate) fn remove_entry_at(
+    parent: &File,
+    name: &OsStr,
+    expected_identity: (u64, u64),
+    directory: bool,
+) -> io::Result<()> {
+    let file = open_relative_handle(
+        parent,
+        name,
+        FILE_READ_ATTRIBUTES | DELETE,
+        FILE_OPEN,
+        FILE_SHARE_READ,
+        null(),
+        0,
+        false,
+    )?;
+    let info = information(&file)?;
+    if identity(&file)? != expected_identity
+        || (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0) != directory
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "workspace entry changed before removal; retain its ownership record and retry cleanup",
+        ));
+    }
+    // Ignore the entry's readonly bit without changing attributes on an outside
+    // hard link to the same file. This matches scoped checkpoint-input cleanup.
+    let disposition = FILE_DISPOSITION_INFORMATION_EX {
+        Flags: FILE_DISPOSITION_DELETE
+            | FILE_DISPOSITION_POSIX_SEMANTICS
+            | FILE_DISPOSITION_IGNORE_READONLY_ATTRIBUTE,
+    };
+    let mut status_block = IO_STATUS_BLOCK::default();
+    // SAFETY: the held no-follow handle identifies the checked entry and denies
+    // write/delete sharing until close. Windows itself rejects nonempty folders.
+    let status = unsafe {
+        NtSetInformationFile(
+            file.as_raw_handle(),
+            &mut status_block,
+            (&disposition as *const FILE_DISPOSITION_INFORMATION_EX).cast(),
+            std::mem::size_of_val(&disposition) as u32,
+            FileDispositionInformationEx,
+        )
+    };
+    if status < 0 {
+        return Err(nt_error(status));
+    }
+    // No further operations are allowed on a handle after delete disposition.
+    drop(file);
+    Ok(())
+}
+
+/// Enumerate through the held directory handle. The caller must serialize scans
+/// of this handle and recheck each child's identity before acting on a result.
+pub(crate) fn read_directory_names(directory: &File) -> io::Result<Vec<OsString>> {
+    read_directory_names_bounded(directory, 1_000_000)
+}
+
+pub(crate) fn read_directory_names_bounded(
+    directory: &File,
+    max_entries: usize,
+) -> io::Result<Vec<OsString>> {
+    let info = information(directory)?;
+    if info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY == 0
+        || info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    {
+        return Err(invalid(
+            "workspace listing requires an ordinary pinned directory",
+        ));
+    }
+    // usize storage supplies the native structure alignment. A bounded resize
+    // also accommodates a provider returning an unusually long component.
+    let mut buffer = vec![0usize; 65_536 / std::mem::size_of::<usize>()];
+    let mut restart = true;
+    let mut names = Vec::new();
+    loop {
+        let mut status_block = IO_STATUS_BLOCK::default();
+        // SAFETY: the synchronous directory handle and aligned output storage
+        // remain live; no pathname is reconstructed or resolved for this query.
+        let status = unsafe {
+            NtQueryDirectoryFile(
+                directory.as_raw_handle(),
+                null_mut(),
+                None,
+                null(),
+                &mut status_block,
+                buffer.as_mut_ptr().cast(),
+                std::mem::size_of_val(buffer.as_slice()) as u32,
+                FileNamesInformation,
+                false,
+                null(),
+                restart,
+            )
+        };
+        if status == STATUS_NO_MORE_FILES {
+            return Ok(names);
+        }
+        let written = status_block.Information;
+        if (status == STATUS_BUFFER_OVERFLOW || (status >= 0 && written == 0))
+            && std::mem::size_of_val(buffer.as_slice()) < 131_072
+        {
+            buffer.resize(buffer.len() * 2, 0);
+            continue;
+        }
+        if status < 0 {
+            return Err(nt_error(status));
+        }
+        if written == 0 || written > std::mem::size_of_val(buffer.as_slice()) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Windows directory enumeration returned an invalid buffer length",
+            ));
+        }
+        // SAFETY: the kernel initialized exactly Information bytes, bounded by
+        // our allocation above. Parsing below bounds every variable-length name.
+        let bytes = unsafe { std::slice::from_raw_parts(buffer.as_ptr().cast::<u8>(), written) };
+        append_directory_names(bytes, &mut names, max_entries)?;
+        restart = false;
+    }
+}
+
+fn append_directory_names(
+    mut bytes: &[u8],
+    names: &mut Vec<OsString>,
+    limit: usize,
+) -> io::Result<()> {
+    const NAME_OFFSET: usize = std::mem::offset_of!(FILE_NAMES_INFORMATION, FileName);
+    loop {
+        if bytes.len() < NAME_OFFSET {
+            return Err(invalid("Windows directory entry header is truncated"));
+        }
+        let read_u32 = |offset: usize| {
+            // SAFETY: the complete fixed-size header was bounded above. Reading
+            // unaligned handles any alignment of this borrowed byte slice.
+            unsafe { bytes.as_ptr().add(offset).cast::<u32>().read_unaligned() }
+        };
+        let next = read_u32(std::mem::offset_of!(
+            FILE_NAMES_INFORMATION,
+            NextEntryOffset
+        )) as usize;
+        let length =
+            read_u32(std::mem::offset_of!(FILE_NAMES_INFORMATION, FileNameLength)) as usize;
+        if length == 0 || !length.is_multiple_of(2) || length > bytes.len() - NAME_OFFSET {
+            return Err(invalid("Windows directory entry name is truncated"));
+        }
+        let end = NAME_OFFSET + length;
+        if next != 0 && (next < end || next > bytes.len() || !next.is_multiple_of(4)) {
+            return Err(invalid("Windows directory entry offset is invalid"));
+        }
+        let units: Vec<_> = bytes[NAME_OFFSET..end]
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|unit| u16::from_ne_bytes(*unit))
+            .collect();
+        let name = OsString::from_wide(&units);
+        if name != "." && name != ".." {
+            validate_component(&name)?;
+            if names.len() >= limit {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "workspace directory exceeds the cleanup entry limit; reduce its contents and retry",
+                ));
+            }
+            names.push(name);
+        }
+        if next == 0 {
+            return Ok(());
+        }
+        bytes = &bytes[next..];
+    }
 }
 
 struct LocalAllocation(*mut std::ffi::c_void);
@@ -997,6 +1414,293 @@ mod tests {
     }
 
     #[test]
+    fn workspace_creation_is_exclusive_and_pins_its_identity() {
+        let root = tempfile::tempdir().unwrap();
+        let parent = open_tree(root.path()).unwrap();
+        let name = OsStr::new("workspace");
+        let directory = exclusive_create_mutable_directory_at(&parent, name).unwrap();
+        validate_private(&directory).unwrap();
+        let expected = identity(&directory).unwrap();
+        assert_eq!(
+            exclusive_create_mutable_directory_at(&parent, name)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::AlreadyExists
+        );
+        assert!(std::fs::rename(root.path().join(name), root.path().join("swapped")).is_err());
+        assert!(remove_entry_at(&parent, name, expected, true).is_err());
+
+        let mut file = create_private_file_at(&directory, OsStr::new("intent.json")).unwrap();
+        std::io::Write::write_all(&mut file, b"owned").unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+        let contents = inspect_entry_at(&directory, OsStr::new("intent.json")).unwrap();
+        drop(directory);
+        assert!(remove_entry_at(&parent, name, expected, true).is_err());
+        let directory = open_at(&parent, name, true).unwrap();
+        remove_entry_at(
+            &directory,
+            OsStr::new("intent.json"),
+            contents.identity,
+            false,
+        )
+        .unwrap();
+        drop(directory);
+        remove_entry_at(&parent, name, expected, true).unwrap();
+        assert!(read_directory_names(&parent).unwrap().is_empty());
+    }
+
+    #[test]
+    fn workspace_proof_file_publish_is_atomic_and_no_replace() {
+        use std::io::Write;
+
+        let root = tempfile::tempdir().unwrap();
+        let parent = open_mutable_tree(root.path()).unwrap();
+        let mut staged = create_private_file_at(&parent, OsStr::new("staged.json")).unwrap();
+        staged.write_all(b"complete proof").unwrap();
+        staged.sync_all().unwrap();
+        let staged_identity = identity(&staged).unwrap();
+        drop(staged);
+        rename_file_at(
+            &parent,
+            OsStr::new("staged.json"),
+            staged_identity,
+            &parent,
+            OsStr::new("owned.json"),
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read(root.path().join("owned.json")).unwrap(),
+            b"complete proof"
+        );
+
+        let mut second = create_private_file_at(&parent, OsStr::new("second.json")).unwrap();
+        second.write_all(b"replacement").unwrap();
+        let second_identity = identity(&second).unwrap();
+        drop(second);
+        assert!(
+            rename_file_at(
+                &parent,
+                OsStr::new("second.json"),
+                second_identity,
+                &parent,
+                OsStr::new("owned.json"),
+            )
+            .is_err()
+        );
+        assert_eq!(
+            std::fs::read(root.path().join("owned.json")).unwrap(),
+            b"complete proof"
+        );
+    }
+
+    #[test]
+    fn managed_container_creation_is_idempotent_and_refuses_files() {
+        let root = tempfile::tempdir().unwrap();
+        let parent = open_tree(root.path()).unwrap();
+        let first = ensure_directory_at(&parent, OsStr::new("container")).unwrap();
+        let second = ensure_directory_at(&parent, OsStr::new("container")).unwrap();
+        assert_eq!(identity(&first).unwrap(), identity(&second).unwrap());
+        std::fs::write(root.path().join("file"), b"preserved").unwrap();
+        assert!(ensure_directory_at(&parent, OsStr::new("file")).is_err());
+        assert_eq!(
+            std::fs::read(root.path().join("file")).unwrap(),
+            b"preserved"
+        );
+    }
+
+    #[test]
+    fn workspace_cleanup_refuses_a_replacement_identity() {
+        let root = tempfile::tempdir().unwrap();
+        let parent = open_mutable_tree(root.path()).unwrap();
+        let name = OsStr::new("owned.txt");
+        std::fs::write(root.path().join(name), b"owned").unwrap();
+        let original = inspect_entry_at(&parent, name).unwrap();
+        std::fs::rename(root.path().join(name), root.path().join("previous.txt")).unwrap();
+        std::fs::write(root.path().join(name), b"replacement").unwrap();
+        assert_eq!(
+            remove_entry_at(&parent, name, original.identity, false)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert_eq!(
+            std::fs::read(root.path().join(name)).unwrap(),
+            b"replacement"
+        );
+        assert_eq!(
+            std::fs::read(root.path().join("previous.txt")).unwrap(),
+            b"owned"
+        );
+    }
+
+    #[test]
+    fn worktree_move_checks_source_identity_and_never_replaces_destination() {
+        let root = tempfile::tempdir().unwrap();
+        let parent = open_mutable_tree(root.path()).unwrap();
+        let source = exclusive_create_mutable_directory_at(&parent, OsStr::new("source")).unwrap();
+        let source_id = identity(&source).unwrap();
+        drop(source);
+        std::fs::write(root.path().join("source/sentinel"), b"source").unwrap();
+        rename_entry_at(
+            &parent,
+            OsStr::new("source"),
+            source_id,
+            &parent,
+            OsStr::new("previous"),
+        )
+        .unwrap();
+        let replacement =
+            exclusive_create_mutable_directory_at(&parent, OsStr::new("source")).unwrap();
+        let replacement_id = identity(&replacement).unwrap();
+        drop(replacement);
+        assert_eq!(
+            rename_entry_at(
+                &parent,
+                OsStr::new("source"),
+                source_id,
+                &parent,
+                OsStr::new("target")
+            )
+            .unwrap_err()
+            .kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert!(
+            rename_entry_at(
+                &parent,
+                OsStr::new("source"),
+                replacement_id,
+                &parent,
+                OsStr::new("previous")
+            )
+            .is_err()
+        );
+        assert_eq!(
+            std::fs::read(root.path().join("previous/sentinel")).unwrap(),
+            b"source"
+        );
+        rename_entry_at(
+            &parent,
+            OsStr::new("source"),
+            replacement_id,
+            &parent,
+            OsStr::new("target"),
+        )
+        .unwrap();
+        assert_eq!(
+            inspect_entry_at(&parent, OsStr::new("target"))
+                .unwrap()
+                .identity,
+            replacement_id
+        );
+        assert!(root.path().join("previous/sentinel").exists());
+    }
+
+    #[test]
+    fn workspace_cleanup_preserves_readonly_outside_hard_link() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = root.path().join("outside");
+        std::fs::write(&outside, b"unchanged").unwrap();
+        let parent = open_mutable_tree(root.path()).unwrap();
+        let workspace =
+            exclusive_create_mutable_directory_at(&parent, OsStr::new("workspace")).unwrap();
+        let link = root.path().join("workspace/link");
+        std::fs::hard_link(&outside, &link).unwrap();
+        let original_permissions = std::fs::metadata(&outside).unwrap().permissions();
+        let mut permissions = original_permissions.clone();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&outside, permissions).unwrap();
+        let entry = inspect_entry_at(&workspace, OsStr::new("link")).unwrap();
+        remove_entry_at(&workspace, OsStr::new("link"), entry.identity, false).unwrap();
+        assert!(!link.exists());
+        assert_eq!(std::fs::read(&outside).unwrap(), b"unchanged");
+        assert!(
+            std::fs::metadata(&outside)
+                .unwrap()
+                .permissions()
+                .readonly()
+        );
+        std::fs::set_permissions(&outside, original_permissions).unwrap();
+    }
+
+    #[test]
+    fn workspace_listing_uses_multiple_batches_and_restarts_the_held_handle() {
+        let root = tempfile::tempdir().unwrap();
+        let parent = open_tree(root.path()).unwrap();
+        let mut expected = Vec::new();
+        for index in 0..400 {
+            let name = OsString::from(format!("{index:04}-{}-文件", "x".repeat(180)));
+            std::fs::write(root.path().join(&name), []).unwrap();
+            expected.push(name);
+        }
+        expected.sort();
+        for _ in 0..2 {
+            let mut listed = read_directory_names(&parent).unwrap();
+            listed.sort();
+            assert_eq!(listed, expected);
+        }
+    }
+
+    #[test]
+    fn directory_name_parser_rejects_truncated_and_nonprogressing_records() {
+        fn record(next: u32, length: u32, name: &[u16]) -> Vec<u8> {
+            let mut bytes = Vec::new();
+            bytes.extend_from_slice(&next.to_ne_bytes());
+            bytes.extend_from_slice(&0u32.to_ne_bytes());
+            bytes.extend_from_slice(&length.to_ne_bytes());
+            for unit in name {
+                bytes.extend_from_slice(&unit.to_ne_bytes());
+            }
+            bytes
+        }
+        for malformed in [
+            vec![0; 11],
+            record(0, 1, &[97]),
+            record(0, 4, &[97]),
+            record(4, 2, &[97]),
+            record(16, 2, &[97]),
+            record(0, 2, &[0]),
+        ] {
+            assert!(append_directory_names(&malformed, &mut Vec::new(), 10).is_err());
+        }
+        let mut names = Vec::new();
+        append_directory_names(&record(0, 2, &[97]), &mut names, 1).unwrap();
+        assert_eq!(names, vec![OsString::from("a")]);
+        append_directory_names(&record(0, 2, &[46]), &mut names, 1).unwrap();
+        assert_eq!(names, vec![OsString::from("a")]);
+        assert!(append_directory_names(&record(0, 2, &[98]), &mut names, 1).is_err());
+        assert_eq!(names, vec![OsString::from("a")]);
+    }
+
+    #[test]
+    fn workspace_cleanup_unlinks_junction_without_visiting_its_target() {
+        let root = tempfile::tempdir().unwrap();
+        let external = tempfile::tempdir().unwrap();
+        std::fs::write(external.path().join("sentinel"), b"untouched").unwrap();
+        let junction = root.path().join("junction");
+        let status = std::process::Command::new("cmd.exe")
+            .args(["/C", "mklink", "/J"])
+            .arg(&junction)
+            .arg(external.path())
+            .stdout(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success(), "create junction fixture");
+        let parent = open_tree(root.path()).unwrap();
+        assert!(open_at(&parent, OsStr::new("junction"), true).is_err());
+        assert!(ensure_directory_at(&parent, OsStr::new("junction")).is_err());
+        let entry = inspect_entry_at(&parent, OsStr::new("junction")).unwrap();
+        assert!(entry.directory && entry.reparse_point);
+        remove_entry_at(&parent, OsStr::new("junction"), entry.identity, true).unwrap();
+        assert!(std::fs::symlink_metadata(&junction).is_err());
+        assert_eq!(
+            std::fs::read(external.path().join("sentinel")).unwrap(),
+            b"untouched"
+        );
+    }
+
+    #[test]
     fn rejects_junction_and_pins_parent_against_rename() {
         let root = tempfile::tempdir().unwrap();
         let external = tempfile::tempdir().unwrap();
@@ -1010,11 +1714,18 @@ mod tests {
             .unwrap();
         assert!(status.success(), "create junction fixture");
         assert!(open_tree(&junction).is_err());
+        assert!(open_mutable_tree(&junction).is_err());
         let parent = open_tree(root.path()).unwrap();
         assert!(open_at(&parent, OsStr::new("junction"), true).is_err());
+        assert!(open_mutable_at(&parent, OsStr::new("junction")).is_err());
+        std::fs::write(root.path().join("file"), b"ordinary file").unwrap();
+        assert!(open_mutable_at(&parent, OsStr::new("file")).is_err());
         assert!(std::fs::rename(root.path(), root.path().with_extension("moved")).is_err());
         assert!(open_at(&parent, OsStr::new("../outside"), false).is_err());
         drop(parent);
+        let mutable = open_mutable_tree(root.path()).unwrap();
+        assert!(std::fs::rename(root.path(), root.path().with_extension("moved")).is_err());
+        drop(mutable);
         std::fs::remove_dir(&junction).unwrap();
     }
 }

@@ -348,7 +348,7 @@ fn active_repository_failure_error(class: ActiveRepositoryFailureClass, context:
         ActiveRepositoryFailureClass::StorageUnresolved => CliError::fatal(format!(
             "{context}: could not resolve the active repository storage (detached, migrating \
              or corrupt linked worktree); from the main worktree run `libra worktree repair \
-             --confirm <worktree-path>` (or re-add the worktree), then retry the hook"
+             --confirm --path <worktree-path>` (or re-add the worktree), then retry the hook"
         ))
         .with_stable_code(StableErrorCode::RepoStateInvalid),
         ActiveRepositoryFailureClass::DatabaseMissing => CliError::fatal(format!(
@@ -828,7 +828,7 @@ mod tests {
             ActiveRepositoryFailureClass::StorageUnresolved,
             StableErrorCode::RepoStateInvalid,
             "could not resolve the active repository storage",
-            "from the main worktree run `libra worktree repair --confirm <worktree-path>`",
+            "from the main worktree run `libra worktree repair --confirm --path <worktree-path>`",
         ),
         (
             ActiveRepositoryFailureClass::DatabaseMissing,
@@ -1076,18 +1076,15 @@ mod tests {
         let conn = crate::internal::db::create_database(database_str)
             .await
             .expect("create stale probe database");
-        let runner =
-            crate::internal::db::migration::builtin_runner().expect("built-in migration runner");
-        let previous = crate::internal::db::migration::builtin_migrations()
-            .iter()
-            .rev()
-            .nth(1)
-            .map(|migration| migration.version)
-            .expect("a previous built-in migration");
-        runner
-            .rollback_to(&conn, previous)
-            .await
-            .expect("roll the newest migration back");
+        // The newest worktree capability receipt is intentionally
+        // irreversible. Construct a disposable pre-receipt fixture directly
+        // instead of asking the production rollback API to remove it.
+        conn.execute_unprepared(
+            "DELETE FROM worktree_registry_capability WHERE version = 4; \
+             DELETE FROM schema_versions WHERE version = 2026101902",
+        )
+        .await
+        .expect("seed a pre-capability repository fixture");
         let _ = conn.close().await;
         assert_eq!(
             probe_active_repository_database(&storage).await,

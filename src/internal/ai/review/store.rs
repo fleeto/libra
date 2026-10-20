@@ -29,6 +29,10 @@ use crate::internal::ai::{
         open_scoped_run_root, read_run_metadata,
     },
     observed_agents::RedactionReport,
+    workspace_isolation::{
+        TaskWorkspaceDescriptor, cleanup_task_workspaces_until, has_task_workspace_intents,
+        validate_task_workspace_descriptor, verify_task_workspace,
+    },
 };
 
 /// `object_index` o_type tag for objectized review/investigate findings +
@@ -38,7 +42,7 @@ use crate::internal::ai::{
 pub const AGENT_FINDINGS_OTYPE: &str = "agent_findings";
 
 /// `manifest.json` schema version (E8-libra manifest contract).
-pub const REVIEW_MANIFEST_SCHEMA_VERSION: u32 = 1;
+pub const REVIEW_MANIFEST_SCHEMA_VERSION: u32 = 2;
 
 /// The `kind` value review runs stamp into `state.json` / `manifest.json`
 /// (`review|investigate` per E8-libra; AG-23 owns `investigate`).
@@ -172,12 +176,9 @@ impl RedactionReportSummary {
     }
 }
 
-/// `manifest.json` — **exactly** the E8-libra key set
-/// (`agent.md:876` / `agent.md:1321`): `schema_version`, `run_id`,
-/// `kind`, `agents`, `starting_sha`, `target_scope`, `terminal_state`,
-/// `created_at`, `updated_at`, `findings_oid`, `redaction_report`,
-/// `manual_attach`. The key-set exactness is pinned by a unit test below;
-/// do not add or rename fields without updating the E8 spec first.
+/// `manifest.json` — the E8-libra manifest with a versioned workspace
+/// descriptor in schema 2. Schema 1 remains readable without assigning a
+/// managed path or rewriting old runs.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ReviewManifest {
     pub schema_version: u32,
@@ -209,6 +210,10 @@ pub struct ReviewManifest {
     /// Empty until the first attach; the attached bytes are redacted and
     /// object_index-tagged like findings.
     pub manual_attach: Vec<serde_json::Value>,
+    /// Managed workspace ownership is proved by the durable attempt intent;
+    /// this descriptor lets readers identify the run's current attempt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_descriptor: Option<TaskWorkspaceDescriptor>,
 }
 
 // ---------------------------------------------------------------------------
@@ -277,6 +282,8 @@ pub struct ReviewRunState {
     /// path checks existence before acting.
     #[serde(default)]
     pub workspace_root: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_descriptor: Option<TaskWorkspaceDescriptor>,
 }
 
 impl ReviewRunState {
@@ -437,6 +444,7 @@ impl ReviewRunStore {
             updated_at: now.clone(),
             cancel_requested: false,
             workspace_root: None,
+            workspace_descriptor: None,
         };
         let manifest = ReviewManifest {
             schema_version: REVIEW_MANIFEST_SCHEMA_VERSION,
@@ -451,6 +459,7 @@ impl ReviewRunStore {
             findings_oid: None,
             redaction_report: RedactionReportSummary::default(),
             manual_attach: Vec::new(),
+            workspace_descriptor: None,
         };
         self.write_state(&state)?;
         self.write_manifest(&manifest)?;
@@ -461,6 +470,9 @@ impl ReviewRunStore {
     /// Whole-file overwrite of `state.json` (snapshot-writer pattern —
     /// the latest write supersedes earlier ones).
     pub fn write_state(&self, state: &ReviewRunState) -> io::Result<()> {
+        validate_run_document(state.schema_version, &state.run_id, &state.kind)?;
+        self.validate_recorded_descriptor(&state.run_id, state.workspace_descriptor.as_ref())?;
+        self.validate_mutation(&state.run_id)?;
         let path = self.state_path(&state.run_id)?;
         let json = serde_json::to_vec_pretty(state).map_err(io::Error::other)?;
         fs::write(path, json)
@@ -486,6 +498,12 @@ impl ReviewRunStore {
 
     /// Whole-file overwrite of `manifest.json`.
     pub fn write_manifest(&self, manifest: &ReviewManifest) -> io::Result<()> {
+        validate_run_document(manifest.schema_version, &manifest.run_id, &manifest.kind)?;
+        self.validate_recorded_descriptor(
+            &manifest.run_id,
+            manifest.workspace_descriptor.as_ref(),
+        )?;
+        self.validate_mutation(&manifest.run_id)?;
         let path = self.manifest_path(&manifest.run_id)?;
         let json = serde_json::to_vec_pretty(manifest).map_err(io::Error::other)?;
         fs::write(path, json)
@@ -505,6 +523,7 @@ impl ReviewRunStore {
     /// runner is the sole producer and passes text through the sink's
     /// redaction pipeline first).
     pub fn write_findings(&self, run_id: &str, content: &str) -> io::Result<()> {
+        self.validate_mutation(run_id)?;
         fs::write(self.findings_path(run_id)?, content.as_bytes())
     }
 
@@ -519,7 +538,8 @@ impl ReviewRunStore {
 
     /// Append one redacted block to a reviewer log (serial-sink writer
     /// only).
-    pub fn append_reviewer_log(&self, path: &Path, content: &str) -> io::Result<()> {
+    pub fn append_reviewer_log(&self, run_id: &str, path: &Path, content: &str) -> io::Result<()> {
+        self.validate_mutation(run_id)?;
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -542,6 +562,183 @@ impl ReviewRunStore {
                     "review sessions root has no parent .libra directory",
                 )
             })
+    }
+
+    /// Refuse writes before they can downgrade a newer schema or mutate a
+    /// foreign run sharing the sessions directory.
+    pub(crate) fn validate_mutation(&self, run_id: &str) -> io::Result<()> {
+        if let Some(state) = self.load_state(run_id)? {
+            validate_run_document(state.schema_version, &state.run_id, &state.kind)?;
+            self.validate_recorded_descriptor(run_id, state.workspace_descriptor.as_ref())?;
+            if state.run_id != run_id {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "review state run id does not match its directory; inspect the run before retrying",
+                ));
+            }
+        }
+        if let Some(manifest) = self.load_manifest(run_id)? {
+            validate_run_document(manifest.schema_version, &manifest.run_id, &manifest.kind)?;
+            self.validate_recorded_descriptor(run_id, manifest.workspace_descriptor.as_ref())?;
+            if manifest.run_id != run_id {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "review manifest run id does not match its directory; inspect the run before retrying",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_recorded_descriptor(
+        &self,
+        run_id: &str,
+        descriptor: Option<&TaskWorkspaceDescriptor>,
+    ) -> io::Result<()> {
+        validate_workspace_descriptor(run_id, descriptor)?;
+        if let Some(descriptor) = descriptor {
+            validate_task_workspace_descriptor(&self.libra_dir()?, descriptor.run_id, descriptor)?;
+        }
+        Ok(())
+    }
+
+    /// Record the same current attempt in state and manifest. The intent has
+    /// already been persisted by the allocator, so either write can be retried
+    /// after a crash without losing the cleanup authority.
+    pub fn record_workspace(
+        &self,
+        run_id: &str,
+        descriptor: &TaskWorkspaceDescriptor,
+    ) -> io::Result<()> {
+        self.validate_mutation(run_id)?;
+        if descriptor.run_id.to_string() != run_id {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "review workspace belongs to a different run; inspect its ownership descriptor",
+            ));
+        }
+        verify_task_workspace(&self.libra_dir()?, &self.run_dir(run_id)?, descriptor)?;
+        if !self.update_state(run_id, |state| {
+            state.schema_version = REVIEW_MANIFEST_SCHEMA_VERSION;
+            state.workspace_root = Some(descriptor.canonical_path.display().to_string());
+            state.workspace_descriptor = Some(descriptor.clone());
+        })? {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "review state is missing while recording its workspace; keep the run metadata and inspect it",
+            ));
+        }
+        let mut manifest = self.load_manifest(run_id)?.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "review manifest is missing while recording its workspace",
+            )
+        })?;
+        manifest.schema_version = REVIEW_MANIFEST_SCHEMA_VERSION;
+        manifest.workspace_descriptor = Some(descriptor.clone());
+        manifest.updated_at = utc_timestamp();
+        self.write_manifest(&manifest)
+    }
+
+    /// Remove only attempts whose durable intents and allocation proofs belong
+    /// to this run. Run metadata remains available if cleanup cannot finish.
+    pub fn cleanup_workspaces(&self, run_id: &str) -> io::Result<()> {
+        self.validate_mutation(run_id)?;
+        let state = self.load_state(run_id)?;
+        let manifest = self.load_manifest(run_id)?;
+        self.cleanup_recorded_workspaces(
+            run_id,
+            state
+                .as_ref()
+                .and_then(|state| state.workspace_descriptor.as_ref())
+                .or_else(|| {
+                    manifest
+                        .as_ref()
+                        .and_then(|manifest| manifest.workspace_descriptor.as_ref())
+                }),
+            state
+                .as_ref()
+                .and_then(|state| state.workspace_root.as_deref()),
+            Instant::now() + Duration::from_secs(30),
+        )
+    }
+
+    fn cleanup_recorded_workspaces(
+        &self,
+        run_id: &str,
+        descriptor: Option<&TaskWorkspaceDescriptor>,
+        recorded_path: Option<&str>,
+        deadline: Instant,
+    ) -> io::Result<()> {
+        if Instant::now() >= deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "review workspace cleanup reached its deadline; keep the run and retry cleanup",
+            ));
+        }
+        let run_dir = self.run_dir(run_id)?;
+        let has_intents = has_task_workspace_intents(&run_dir)?;
+        let parsed_id = match uuid::Uuid::parse_str(run_id) {
+            Ok(id) => Some(id),
+            Err(_) if !has_intents && descriptor.is_none() => None,
+            Err(error) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "review workspace intents have an invalid run id '{run_id}': {error}; keep the run for inspection"
+                    ),
+                ));
+            }
+        };
+        validate_workspace_descriptor(run_id, descriptor)?;
+        if let Some(parsed_id) = parsed_id
+            && (has_intents || descriptor.is_some())
+        {
+            if let Some(descriptor) = descriptor {
+                validate_task_workspace_descriptor(&self.libra_dir()?, parsed_id, descriptor)?;
+            }
+            cleanup_task_workspaces_until(&self.libra_dir()?, &run_dir, parsed_id, deadline)?;
+        }
+        // The old path field never authorizes deletion. A surviving unowned
+        // path must keep its run metadata, so later inspection remains possible.
+        if let Some(path) = descriptor
+            .map(|item| item.canonical_path.as_path())
+            .or_else(|| recorded_path.map(Path::new))
+        {
+            // Legacy checkpoint input is independently confined by the existing
+            // no-follow run-root cleanup; it needs no migration or new intent.
+            if descriptor.is_none() {
+                let canonical_input = fs::canonicalize(self.libra_dir()?)?
+                    .join("sessions/agent-runs")
+                    .join(run_id)
+                    .join("checkpoint-input");
+                if path == run_dir.join("checkpoint-input") || path == canonical_input {
+                    return Ok(());
+                }
+            }
+            match fs::symlink_metadata(path) {
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(io::Error::new(
+                        error.kind(),
+                        format!(
+                            "cannot verify cleanup of review workspace '{}': {error}; keep the run and inspect filesystem access",
+                            path.display()
+                        ),
+                    ));
+                }
+                Ok(_) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        format!(
+                            "review workspace '{}' has no removable ownership proof; keep the run and inspect the workspace before retrying cleanup",
+                            path.display()
+                        ),
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// §C.4.3 writer-vs-deleter: objectize `bytes` and publish the manifest
@@ -590,6 +787,7 @@ impl ReviewRunStore {
         agents: &[ReviewerStateEntry],
         redaction: RedactionReportSummary,
     ) -> io::Result<()> {
+        self.validate_mutation(run_id)?;
         let now = utc_timestamp();
         let mut state = self.load_state(run_id)?.ok_or_else(|| {
             io::Error::new(
@@ -631,6 +829,7 @@ impl ReviewRunStore {
     /// Cross-process cancel request: drop a marker file the owning
     /// runner polls. Returns `false` when the run does not exist.
     pub fn mark_cancel_requested(&self, run_id: &str) -> io::Result<bool> {
+        self.validate_mutation(run_id)?;
         let dir = self.run_dir(run_id)?;
         if !dir.is_dir() {
             return Ok(false);
@@ -806,6 +1005,29 @@ impl ReviewRunStore {
                 ),
             ));
         }
+        let recorded_state = metadata
+            .state
+            .as_deref()
+            .and_then(|bytes| serde_json::from_slice::<ReviewRunState>(bytes).ok());
+        let recorded_manifest = metadata
+            .manifest
+            .as_deref()
+            .and_then(|bytes| serde_json::from_slice::<ReviewManifest>(bytes).ok());
+        self.cleanup_recorded_workspaces(
+            run_id,
+            recorded_state
+                .as_ref()
+                .and_then(|state| state.workspace_descriptor.as_ref())
+                .or_else(|| {
+                    recorded_manifest
+                        .as_ref()
+                        .and_then(|manifest| manifest.workspace_descriptor.as_ref())
+                }),
+            recorded_state
+                .as_ref()
+                .and_then(|state| state.workspace_root.as_deref()),
+            budget.deadline,
+        )?;
         // Drop metadata bodies before taking the second bounded snapshot.
         // The immutable helper owns all no-follow reads and input cleanup.
         metadata.state = None;
@@ -886,17 +1108,20 @@ fn cleanup_metadata_is_terminal(metadata: &RunMetadataBytes, run_id: &str, bulk:
         None => None,
     };
     if let Some(state) = &state
-        && (state.schema_version != REVIEW_MANIFEST_SCHEMA_VERSION
+        && (!supported_run_schema(state.schema_version)
             || state.run_id != run_id
             || state.kind != REVIEW_RUN_KIND
+            || validate_workspace_descriptor(run_id, state.workspace_descriptor.as_ref()).is_err()
             || !state.is_terminal())
     {
         return false;
     }
     if let Some(manifest) = &manifest
-        && (manifest.schema_version != REVIEW_MANIFEST_SCHEMA_VERSION
+        && (!supported_run_schema(manifest.schema_version)
             || manifest.run_id != run_id
-            || manifest.kind != REVIEW_RUN_KIND)
+            || manifest.kind != REVIEW_RUN_KIND
+            || validate_workspace_descriptor(run_id, manifest.workspace_descriptor.as_ref())
+                .is_err())
     {
         return false;
     }
@@ -906,6 +1131,9 @@ fn cleanup_metadata_is_terminal(metadata: &RunMetadataBytes, run_id: &str, bulk:
             // An interrupted second write leaves None, which is not a conflict
             // with this already-proved own-kind terminal state.
             (manifest.terminal_state.is_none() || state.terminal_state == manifest.terminal_state)
+                && (state.workspace_descriptor.is_none()
+                    || manifest.workspace_descriptor.is_none()
+                    || state.workspace_descriptor == manifest.workspace_descriptor)
                 && state.starting_sha == manifest.starting_sha
                 // Infrastructure finalization has no reviewer reports and
                 // writes an empty state list, retaining the requested manifest
@@ -922,6 +1150,37 @@ fn cleanup_metadata_is_terminal(metadata: &RunMetadataBytes, run_id: &str, bulk:
         (None, Some(manifest)) => manifest.terminal_state.is_some(),
         (None, None) => false,
     }
+}
+
+fn supported_run_schema(version: u32) -> bool {
+    matches!(version, 1 | REVIEW_MANIFEST_SCHEMA_VERSION)
+}
+
+fn validate_run_document(version: u32, run_id: &str, kind: &str) -> io::Result<()> {
+    if !supported_run_schema(version) || kind != REVIEW_RUN_KIND {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "review run '{run_id}' has unsupported schema {version} or kind '{kind}'; use a compatible Libra version and keep its metadata unchanged"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_workspace_descriptor(
+    run_id: &str,
+    descriptor: Option<&TaskWorkspaceDescriptor>,
+) -> io::Result<()> {
+    if let Some(descriptor) = descriptor
+        && (descriptor.run_id.to_string() != run_id || descriptor.layout_version != 1)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "review workspace descriptor has an unsupported layout or belongs to a different run; keep the run for inspection",
+        ));
+    }
+    Ok(())
 }
 
 /// Run ids are uuid-shaped in production; the guard exists so a
@@ -1025,6 +1284,116 @@ mod tests {
         (dir, store)
     }
 
+    #[test]
+    fn legacy_schema_is_preserved_and_future_schema_refuses_mutation() {
+        let (_dir, store) = store();
+        store.create_run("legacy", &[], "sha", "scope").unwrap();
+        for path in [
+            store.state_path("legacy").unwrap(),
+            store.manifest_path("legacy").unwrap(),
+        ] {
+            let mut value: serde_json::Value =
+                serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            value["schema_version"] = 1.into();
+            fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        }
+        assert!(store.mark_cancelled("legacy").unwrap());
+        assert_eq!(
+            store.load_state("legacy").unwrap().unwrap().schema_version,
+            1
+        );
+        assert_eq!(
+            store
+                .load_manifest("legacy")
+                .unwrap()
+                .unwrap()
+                .schema_version,
+            1
+        );
+        assert!(store.clean_run("legacy").unwrap());
+
+        store.create_run("future", &[], "sha", "scope").unwrap();
+        let manifest_path = store.manifest_path("future").unwrap();
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        value["schema_version"] = 99.into();
+        fs::write(&manifest_path, serde_json::to_vec(&value).unwrap()).unwrap();
+        let state_before = fs::read(store.state_path("future").unwrap()).unwrap();
+        let manifest_before = fs::read(&manifest_path).unwrap();
+        assert!(
+            store.load_manifest("future").unwrap().is_some(),
+            "future metadata can still be inspected"
+        );
+        assert!(store.mark_cancel_requested("future").is_err());
+        assert!(store.mark_cancelled("future").is_err());
+        assert!(
+            store
+                .write_findings("future", "must not be written")
+                .is_err()
+        );
+        assert!(store.clean_run("future").is_err());
+        assert!(!store.cancel_requested("future"));
+        assert_eq!(
+            fs::read(store.state_path("future").unwrap()).unwrap(),
+            state_before
+        );
+        assert_eq!(fs::read(&manifest_path).unwrap(), manifest_before);
+        assert_eq!(store.read_findings("future").unwrap().unwrap(), "");
+    }
+
+    #[test]
+    fn managed_cleanup_preserves_metadata_until_ownership_is_proven() {
+        use crate::internal::ai::workspace_isolation::{TaskWorkspaceKind, create_task_workspace};
+
+        let (_dir, store) = store();
+        let run_id = uuid::Uuid::now_v7();
+        let id = run_id.to_string();
+        store.create_run(&id, &[], "sha", "scope").unwrap();
+        let descriptor = create_task_workspace(
+            &store.libra_dir().unwrap(),
+            &store.run_dir(&id).unwrap(),
+            run_id,
+            TaskWorkspaceKind::Workspace,
+        )
+        .unwrap();
+        store.record_workspace(&id, &descriptor).unwrap();
+        store.mark_cancelled(&id).unwrap();
+        fs::write(descriptor.canonical_path.join("sentinel"), "owned").unwrap();
+
+        // A future manifest layout must veto cleanup even if the state carries
+        // a valid descriptor. Neither workspace nor metadata may be removed.
+        let manifest_path = store.manifest_path(&id).unwrap();
+        let before = fs::read(&manifest_path).unwrap();
+        let mut future: serde_json::Value = serde_json::from_slice(&before).unwrap();
+        future["workspace_descriptor"]["layout_version"] = 99.into();
+        fs::write(&manifest_path, serde_json::to_vec(&future).unwrap()).unwrap();
+        assert!(store.clean_run(&id).is_err());
+        assert_eq!(
+            fs::read_to_string(descriptor.canonical_path.join("sentinel")).unwrap(),
+            "owned"
+        );
+        assert!(store.run_dir(&id).unwrap().exists());
+        fs::write(&manifest_path, before).unwrap();
+
+        // Replacing an owned directory with another one must not turn a valid
+        // path string into authority to delete the replacement.
+        let saved = descriptor.canonical_path.with_extension("saved");
+        fs::rename(&descriptor.canonical_path, &saved).unwrap();
+        fs::create_dir(&descriptor.canonical_path).unwrap();
+        fs::write(descriptor.canonical_path.join("sentinel"), "replacement").unwrap();
+        assert!(store.clean_run(&id).is_err());
+        assert_eq!(
+            fs::read_to_string(descriptor.canonical_path.join("sentinel")).unwrap(),
+            "replacement"
+        );
+        assert!(store.run_dir(&id).unwrap().exists());
+        fs::remove_dir_all(&descriptor.canonical_path).unwrap();
+        fs::rename(&saved, &descriptor.canonical_path).unwrap();
+        assert!(store.clean_run(&id).unwrap());
+        assert!(!descriptor.canonical_path.exists());
+        assert!(!store.run_dir(&id).unwrap().exists());
+    }
+
     /// E8-libra manifest contract: exactly these keys, no more, no less
     /// (`agent.md:876` / `agent.md:1321`).
     #[test]
@@ -1042,6 +1411,7 @@ mod tests {
             findings_oid: None,
             redaction_report: RedactionReportSummary::default(),
             manual_attach: Vec::new(),
+            workspace_descriptor: None,
         };
         let value = serde_json::to_value(&manifest).expect("manifest to json");
         let keys: BTreeSet<String> = value
@@ -1655,6 +2025,24 @@ mod tests {
             fs::metadata(&outside).unwrap().permissions().mode() & 0o777,
             0o444
         );
+    }
+
+    #[test]
+    fn legacy_checkpoint_workspace_path_is_cleaned_with_run_metadata() {
+        let (_temp, store) = store();
+        let run_id = "legacy-checkpoint-workspace";
+        store
+            .create_run(run_id, &["codex".into()], "sha", "scope")
+            .unwrap();
+        assert!(store.mark_cancelled(run_id).unwrap());
+        let input = store.run_dir(run_id).unwrap().join("checkpoint-input");
+        fs::create_dir(&input).unwrap();
+        fs::write(input.join("ordinary.txt"), b"checkpoint").unwrap();
+        let mut state = store.load_state(run_id).unwrap().unwrap();
+        state.workspace_root = Some(input.display().to_string());
+        store.write_state(&state).unwrap();
+        assert!(store.clean_run(run_id).unwrap());
+        assert!(!input.exists());
     }
 
     #[test]

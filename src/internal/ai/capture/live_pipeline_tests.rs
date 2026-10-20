@@ -802,7 +802,7 @@ async fn in_process_subagent_content_fault_keeps_child_evidence_before_parent_ch
     assert_eq!(
         crate::utils::util::try_get_storage_path(Some(storage_path.clone()))
             .expect("subagent fixture repository storage"),
-        storage_path,
+        std::fs::canonicalize(&storage_path).expect("physical storage root"),
         "the in-process fixture must expose the same storage root to the child capability"
     );
     let session = "S-subagent-post-content-fault";

@@ -2320,7 +2320,7 @@ fn sandbox_config_path(cwd: &Path) -> Result<PathBuf, String> {
         Err(error) => Err(format!(
             "cannot resolve the repository storage root for the sandbox policy of '{}': \
              {error}; refusing to run with the default sandbox config — run `libra \
-             worktree repair --confirm <worktree-path>` from the main worktree and retry",
+             worktree repair --confirm --path <worktree-path>` from the main worktree and retry",
             cwd.display()
         )),
     }
@@ -3058,6 +3058,21 @@ mod tests {
 
     use super::*;
     use crate::utils::test::ScopedEnvVar;
+
+    #[test]
+    fn corrupt_worktree_sandbox_hint_uses_current_repair_selector() {
+        let root = tempfile::tempdir().expect("temporary repository");
+        let local = root.path().join(".libra");
+        fs::create_dir(&local).expect("local worktree metadata");
+        fs::write(local.join("worktree_id"), b"missing-commondir\n")
+            .expect("seed corrupt linked identity");
+        let error =
+            sandbox_config_path(root.path()).expect_err("corrupt identity must fail closed");
+        assert!(
+            error.contains("worktree repair --confirm --path <worktree-path>"),
+            "error must show the current repair selector: {error}"
+        );
+    }
 
     #[test]
     fn sandbox_enforcement_env_defaults_to_best_effort() {

@@ -24,6 +24,7 @@ use sea_orm::{ConnectionTrait, Database, DatabaseConnection, Statement};
 use sha2::{Digest, Sha256};
 
 const PREVIOUS_TIP: i64 = 2026092902;
+const GROK_TIP: i64 = 2026101901;
 
 #[tokio::test]
 async fn grok_agent_kind_round_trip_and_check() {
@@ -69,7 +70,7 @@ async fn grok_agent_kind_round_trip_and_check() {
     assert_eq!(before_checkpoints, 1);
 
     let applied = runner
-        .run_pending(&conn)
+        .run_pending_up_to(&conn, GROK_TIP)
         .await
         .expect("apply grok CHECK migration");
     assert!(
@@ -158,7 +159,7 @@ async fn grok_agent_kind_round_trip_and_check() {
     );
 
     runner
-        .run_pending(&conn)
+        .run_pending_up_to(&conn, GROK_TIP)
         .await
         .expect("re-apply grok migration");
     insert_session(&conn, "sess-grok", "grok").await;

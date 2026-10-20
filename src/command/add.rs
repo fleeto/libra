@@ -907,7 +907,6 @@ fn stage_resolved_path(
     file: &str,
     index: &mut Index,
     workdir: &Path,
-    storage_path: &Path,
     file_mode: bool,
 ) -> Result<StagedAction, AddError> {
     let rel = Path::new(file);
@@ -918,7 +917,7 @@ fn stage_resolved_path(
             repo_root: workdir.to_path_buf(),
         });
     }
-    if util::is_sub_path(&file_abs, storage_path) {
+    if crate::utils::worktree_layout::is_worktree_metadata(&file_abs, workdir) {
         return Ok(StagedAction::Unchanged);
     }
 
@@ -1234,7 +1233,7 @@ async fn run_add_patch(
 
     let mut candidates = Vec::new();
     for file in &files {
-        if util::is_sub_path(workdir.join(file), storage_path) {
+        if crate::utils::worktree_layout::is_worktree_metadata(&workdir.join(file), workdir) {
             continue;
         }
         if let Some(candidate) = collect_patch_candidate(file, &index, workdir)? {
@@ -1350,7 +1349,6 @@ async fn run_add_resolved(
     args: &AddArgs,
     workdir: &Path,
     index_path: &Path,
-    storage_path: &Path,
     layer_scope: &crate::internal::worktree_scope::WorktreeScope,
     pathspec_ctx: PathspecMatchContext<'_>,
     mut index: Index,
@@ -1439,7 +1437,7 @@ async fn run_add_resolved(
     }
 
     for file in &files {
-        match stage_resolved_path(file, &mut index, workdir, storage_path, file_mode) {
+        match stage_resolved_path(file, &mut index, workdir, file_mode) {
             Ok(action) => match action {
                 StagedAction::Modified => add_output.modified.push(file.clone()),
                 StagedAction::Removed => add_output.removed.push(file.clone()),
@@ -1520,7 +1518,6 @@ async fn run_add_intent_to_add(
     args: &AddArgs,
     workdir: &Path,
     index_path: &Path,
-    storage_path: &Path,
     layer_scope: &crate::internal::worktree_scope::WorktreeScope,
     pathspec_ctx: PathspecMatchContext<'_>,
     mut index: Index,
@@ -1603,7 +1600,7 @@ async fn run_add_intent_to_add(
     let mut wrote_entries = false;
     for file in &files {
         let file_abs = workdir.join(file);
-        if util::is_sub_path(&file_abs, storage_path) {
+        if crate::utils::worktree_layout::is_worktree_metadata(&file_abs, workdir) {
             continue;
         }
         let path_str = file.display().to_string();
@@ -1766,7 +1763,6 @@ pub async fn run_add(args: &AddArgs) -> CliResult<AddOutput> {
             args,
             &workdir,
             &index_path,
-            &storage_path,
             &layer_scope,
             pathspec_ctx,
             index,
@@ -1780,7 +1776,6 @@ pub async fn run_add(args: &AddArgs) -> CliResult<AddOutput> {
             args,
             &workdir,
             &index_path,
-            &storage_path,
             &layer_scope,
             pathspec_ctx,
             index,
@@ -2143,7 +2138,7 @@ pub async fn run_add(args: &AddArgs) -> CliResult<AddOutput> {
         let staged = if args.renormalize {
             renormalize_entry(file, &mut index, &workdir, file_mode)
         } else {
-            stage_a_file(file, &mut index, &workdir, &storage_path, file_mode).await
+            stage_a_file(file, &mut index, &workdir, file_mode).await
         };
         match staged {
             Ok(action) => {
@@ -2768,8 +2763,8 @@ fn filter_out_current_executable(files: &mut Vec<PathBuf>) {
 ///   mutation: writes a new blob and inserts an [`IndexEntry`] for `New`,
 ///   updates the entry only when the on-disk hash differs for `Modified`,
 ///   and removes the entry for `Deleted`.
-/// - Skips files that live inside `storage_path` (the `.libra/` storage
-///   directory) by returning `Unchanged` without touching the index.
+/// - Skips files that live inside the current worktree's `.libra/` metadata
+///   directory by returning `Unchanged` without touching the index.
 ///
 /// Boundary conditions:
 /// - `file` must be relative to `workdir`. Absolute paths or paths that
@@ -2781,7 +2776,6 @@ async fn stage_a_file(
     file: &Path,
     index: &mut Index,
     workdir: &Path,
-    storage_path: &Path,
     file_mode: bool,
 ) -> Result<StagedAction, AddError> {
     let file_abs = workdir.join(file);
@@ -2791,7 +2785,7 @@ async fn stage_a_file(
             repo_root: workdir.to_path_buf(),
         });
     }
-    if util::is_sub_path(&file_abs, storage_path) {
+    if crate::utils::worktree_layout::is_worktree_metadata(&file_abs, workdir) {
         return Ok(StagedAction::Unchanged);
     }
 

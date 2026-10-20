@@ -376,7 +376,10 @@ fn merge_rr_is_worktree_scoped_and_cache_is_shared() {
     let wt_root = tempdir().expect("wt root");
     let wt = wt_root.path().join("rr-wt");
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &["worktree", "add", "rr-wt", "--path", wt.to_str().unwrap()],
+            main,
+        ),
         "worktree add",
     );
 
@@ -453,7 +456,16 @@ fn legacy_merge_rr_migrates_for_single_main_and_stays_ambiguous_with_linked() {
     let wt_root = tempdir().expect("wt root");
     let wt = wt_root.path().join("legacy-wt");
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &[
+                "worktree",
+                "add",
+                "legacy-wt",
+                "--path",
+                wt.to_str().unwrap(),
+            ],
+            main,
+        ),
         "worktree add",
     );
     let status = run_libra_command(&["rerere", "status"], main);

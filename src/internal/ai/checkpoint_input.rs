@@ -4,19 +4,18 @@
 //! `libra investigate --checkpoint <id>` run does NOT review the working
 //! tree: the reviewers'/investigators' whole workspace is the checkpoint's
 //! captured content — metadata, manifest, transcript parts — materialized
-//! as READ-ONLY files inside the run directory
-//! (`<run_dir>/checkpoint-input/`). This is deliberately not disguised as
+//! as READ-ONLY files in a fresh managed task attempt
+//! (`<common>/worktree/tasks/<run>/<attempt>/checkpoint-input/`). This is deliberately not disguised as
 //! a worktree diff: the materialized files preserve the checkpoint's proven
 //! ordinary-role bytes, and the scoped prompt tells the agent it is
 //! looking at a captured transcript, not a repository snapshot.
 //!
-//! Lifecycle / retention: the materialization lives inside the run
-//! directory, so it shares the run's lifecycle exactly — `review clean` /
-//! `investigate clean` remove it with the run, the orphaned-run cancel
-//! path releases it through the recorded `workspace_root`, and
-//! `agent doctor` needs no new orphan class (there is no storage outside
-//! the run directory; the durable source of truth remains the checkpoint
-//! objects themselves).
+//! Lifecycle / retention: run metadata remains in `sessions/agent-runs`.
+//! A versioned descriptor and durable creation intent bind the separate input
+//! directory to its run. Cleanup verifies that ownership before removing input,
+//! and retains the intent when cleanup fails so cancellation and clean can retry.
+//! Every production materialization allocates a new attempt; resumes never overwrite input
+//! from an earlier attempt.
 //!
 //! The spec is produced by the command layer (which owns checkpoint
 //! layout knowledge and fails closed BEFORE any run exists when the
@@ -34,11 +33,17 @@ use std::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    internal::ai::checkpoint_reader::{self, CheckpointReadBudget, CheckpointReaderError},
+    internal::ai::{
+        checkpoint_reader::{self, CheckpointReadBudget, CheckpointReaderError},
+        workspace_isolation::{
+            TaskWorkspaceDescriptor, TaskWorkspaceKind, create_task_workspace_for_run_handle,
+            verify_task_workspace, verify_task_workspace_handle,
+        },
+    },
     utils::object::read_git_object_bounded_validated,
 };
 
-/// Directory name of the materialized input inside the run directory.
+/// Directory name of the materialized input inside its managed task attempt.
 pub const CHECKPOINT_INPUT_DIR: &str = "checkpoint-input";
 
 /// Per-file byte cap. A transcript part larger than this fails the
@@ -221,17 +226,18 @@ fn map_scoped_io(error: scoped_io::CheckpointInputIoError) -> ValidatedMateriali
 }
 
 /// Production entry for investigate and review. Re-reads every blob from the
-/// explicit absolute object store, clears any previous input through the
-/// confined cleanup API, then writes the ordinary payload. A relative store
+/// explicit absolute object store, allocates a fresh owned task attempt, then
+/// writes its ordinary payload through pinned directory handles. `run_dir`
+/// always names the metadata run, never the output directory. A relative store
 /// path is refused so a changed cwd cannot choose the bytes. An already
-/// expired deadline or a raised cancel stops before that cleanup.
+/// expired deadline or a raised cancel stops before any task allocation.
 pub async fn materialize_validated_checkpoint_input(
     storage: &Path,
     spec: &CheckpointInputSpec,
     run_dir: &Path,
     deadline: std::time::Instant,
     cancelled: std::sync::Arc<dyn Fn() -> bool + Send + Sync>,
-) -> Result<PathBuf, ValidatedMaterializeError> {
+) -> Result<TaskWorkspaceDescriptor, ValidatedMaterializeError> {
     if !storage.is_absolute() {
         return Err(ValidatedMaterializeError::Refused(
             "checkpoint input storage path must be absolute; refusing a cwd-relative store"
@@ -294,7 +300,7 @@ pub async fn materialize_validated_checkpoint_input(
             loaded.push((rel, bytes));
         }
         stop_if_inactive(deadline, cancelled.as_ref())?;
-        let run_id = run_dir
+        let run_name = run_dir
             .file_name()
             .and_then(|name| name.to_str())
             .ok_or_else(|| {
@@ -302,6 +308,11 @@ pub async fn materialize_validated_checkpoint_input(
                     "checkpoint input run directory name is not valid".into(),
                 )
             })?;
+        let run_id = uuid::Uuid::parse_str(run_name).map_err(|_| {
+            ValidatedMaterializeError::Refused(
+                "checkpoint input run directory must name its actual run UUID".into(),
+            )
+        })?;
         let runs_root = run_dir
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
@@ -310,37 +321,71 @@ pub async fn materialize_validated_checkpoint_input(
                     "checkpoint input run directory has no trusted runs root".into(),
                 )
             })?;
-        // Resolve only the caller's trusted anchor (including macOS /var).
-        // The run leaf itself is opened no-follow by the confined helper.
+        // Resolve only the caller's trusted metadata anchor (including macOS
+        // /var). The metadata run leaf and the separate output attempt are
+        // opened no-follow. Metadata is never read from the task directory.
         let runs_root = std::fs::canonicalize(runs_root).map_err(|error| {
             ValidatedMaterializeError::Refused(format!(
                 "checkpoint input runs root is not a real directory: {error}"
             ))
         })?;
-        let run_dir = runs_root.join(run_id);
+        let run_dir = runs_root.join(run_name);
         let budget = scoped_io::ScopedIoBudget {
             deadline,
             cancelled,
         };
-        let root_handle =
-            scoped_io::open_scoped_run_root(&runs_root, run_id, &budget).map_err(map_scoped_io)?;
-        scoped_io::cleanup_checkpoint_input(&root_handle, &budget).map_err(map_scoped_io)?;
+        let metadata_root =
+            scoped_io::open_scoped_run_root(&runs_root, run_name, &budget).map_err(map_scoped_io)?;
+        scoped_io::verify_scoped_root(&metadata_root, &budget).map_err(map_scoped_io)?;
+        let descriptor = create_task_workspace_for_run_handle(
+            &storage,
+            &run_dir,
+            run_id,
+            TaskWorkspaceKind::CheckpointInput,
+            scoped_io::scoped_run_file(&metadata_root),
+        )
+                .map_err(|error| {
+                    ValidatedMaterializeError::Refused(format!(
+                        "failed to reserve checkpoint input attempt; keep the run and retry cleanup: {error}"
+                    ))
+                })?;
+        // Any following failure deliberately retains its durable intent. Shared
+        // run cleanup owns retries and must remove the input before metadata.
         stop_if_inactive(deadline, budget.cancelled.as_ref())?;
-        let root = run_dir.join(CHECKPOINT_INPUT_DIR);
-        std::fs::create_dir_all(&root).map_err(|error| {
+        verify_task_workspace(&storage, &run_dir, &descriptor).map_err(|error| {
             ValidatedMaterializeError::Refused(format!(
-                "failed to create checkpoint input dir: {error}"
+                "checkpoint input attempt ownership could not be verified: {error}"
             ))
         })?;
-        write_loaded_checkpoint_files(&ordinary_spec, &root, &loaded, Some(&budget)).map_err(
-            |message| {
-                stop_if_inactive(deadline, budget.cancelled.as_ref())
-                    .err()
-                    .unwrap_or(ValidatedMaterializeError::Refused(message))
-            },
-        )?;
+        let attempt_dir = descriptor.canonical_path.parent().ok_or_else(|| {
+            ValidatedMaterializeError::Refused("checkpoint input attempt has no parent".into())
+        })?;
+        let task_run_root = attempt_dir.parent().ok_or_else(|| {
+            ValidatedMaterializeError::Refused("checkpoint input attempt has no run root".into())
+        })?;
+        let attempt_root = scoped_io::open_scoped_run_root(
+            task_run_root,
+            &descriptor.attempt_id.to_string(),
+            &budget,
+        )
+        .map_err(map_scoped_io)?;
+        scoped_io::write_checkpoint_input(&attempt_root, &loaded, &budget, &|input| {
+            verify_task_workspace_handle(&storage, &run_dir, &descriptor, input).map_err(|source| {
+                scoped_io::CheckpointInputIoError::Io {
+                    action: "verifying the owned checkpoint input handle",
+                    source,
+                }
+            })
+        })
+        .map_err(map_scoped_io)?;
+        scoped_io::verify_scoped_root(&metadata_root, &budget).map_err(map_scoped_io)?;
+        verify_task_workspace(&storage, &run_dir, &descriptor).map_err(|error| {
+            ValidatedMaterializeError::Refused(format!(
+                "checkpoint input attempt ownership changed during materialization: {error}"
+            ))
+        })?;
         stop_if_inactive(deadline, budget.cancelled.as_ref())?;
-        Ok(root)
+        Ok(descriptor)
     })
     .await
     .map_err(|error| {
@@ -605,6 +650,7 @@ pub(crate) fn sanitize_rel_path(rel: &str) -> Result<PathBuf, String> {
 
 #[cfg(test)]
 mod tests {
+    const TEST_RUN_ID: &str = "00000000-0000-4000-8000-000000000001";
     use std::{collections::BTreeMap, str::FromStr as _};
 
     use git_internal::{
@@ -956,6 +1002,7 @@ mod tests {
                 std::time::Instant::now() + std::time::Duration::from_secs(5),
                 std::sync::Arc::new(|| false),
             ))
+            .map(|descriptor| descriptor.canonical_path)
             .map_err(|error| error.to_string())
     }
 
@@ -964,7 +1011,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let base = std::fs::canonicalize(dir.path()).unwrap();
         let storage = base.join("storage");
-        let run_dir = base.join("runs").join("run-1");
+        let run_dir = storage.join("sessions/agent-runs").join(TEST_RUN_ID);
         std::fs::create_dir_all(&run_dir).unwrap();
         let missing_id = CheckpointInputSpec {
             checkpoint_id: String::new(),
@@ -1172,7 +1219,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let base = std::fs::canonicalize(dir.path()).unwrap();
         let storage = base.join("storage");
-        let run_dir = base.join("runs").join("run-1");
+        let run_dir = storage.join("sessions/agent-runs").join(TEST_RUN_ID);
         std::fs::create_dir_all(&run_dir).unwrap();
         let spec = CheckpointInputSpec {
             checkpoint_id: "ckpt-stop".to_string(),
@@ -1211,7 +1258,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let base = std::fs::canonicalize(dir.path()).unwrap();
         let storage = base.join("storage");
-        let run_dir = base.join("runs").join("run-1");
+        let run_dir = storage.join("sessions/agent-runs").join(TEST_RUN_ID);
         std::fs::create_dir_all(&run_dir).unwrap();
         let spec = CheckpointInputSpec {
             checkpoint_id: "ckpt-missing-catalog".to_string(),
@@ -1240,7 +1287,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let base = std::fs::canonicalize(dir.path()).unwrap();
         let storage = base.join("storage");
-        let run_dir = base.join("runs").join("run-1");
+        let run_dir = storage.join("sessions/agent-runs").join(TEST_RUN_ID);
         std::fs::create_dir_all(&run_dir).unwrap();
         let file = write_blob(&storage, "metadata.json", b"ORDINARY");
         let checkpoint_id = "ckpt-mismatch";
@@ -1263,7 +1310,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let base = std::fs::canonicalize(dir.path()).unwrap();
         let storage = base.join("storage");
-        let run_dir = base.join("runs").join("run-1");
+        let run_dir = storage.join("sessions/agent-runs").join(TEST_RUN_ID);
         std::fs::create_dir_all(&run_dir).unwrap();
         let ordinary = write_blob(&storage, "metadata.json", b"ORDINARY");
         use sha2::{Digest, Sha256};
@@ -1345,7 +1392,7 @@ mod tests {
                 observed_ordinary.load(Ordering::SeqCst),
                 "actual ordinary body observed"
             );
-            result
+            result.map(|descriptor| descriptor.canonical_path)
         };
         let root = materialize_without_artifact_reads(&spec, &run_dir).expect("ordinary leaves");
         assert_eq!(
@@ -1360,7 +1407,9 @@ mod tests {
 
         // Legacy saved specs named every leaf. Only the exact manifest/tree
         // artifact tuple is excluded; the missing body remains a real trap.
-        let legacy_dir = base.join("runs").join("run-legacy");
+        let legacy_dir = storage
+            .join("sessions/agent-runs")
+            .join(uuid::Uuid::new_v4().to_string());
         std::fs::create_dir_all(&legacy_dir).unwrap();
         let legacy = CheckpointInputSpec {
             checkpoint_id: checkpoint_id.into(),
@@ -1384,7 +1433,9 @@ mod tests {
         );
         let mut altered = legacy.clone();
         altered.files.last_mut().unwrap().oid = ordinary.oid.clone();
-        let altered_dir = base.join("runs").join("run-altered");
+        let altered_dir = storage
+            .join("sessions/agent-runs")
+            .join(uuid::Uuid::new_v4().to_string());
         std::fs::create_dir_all(&altered_dir).unwrap();
         assert!(
             validated_materialize(&storage, &altered, &altered_dir).is_err(),
@@ -1392,7 +1443,9 @@ mod tests {
         );
         assert!(!altered_dir.join(CHECKPOINT_INPUT_DIR).exists());
 
-        let refused_dir = base.join("runs").join("run-2");
+        let refused_dir = storage
+            .join("sessions/agent-runs")
+            .join(uuid::Uuid::new_v4().to_string());
         std::fs::create_dir_all(&refused_dir).unwrap();
         let refused = CheckpointInputSpec {
             checkpoint_id: checkpoint_id.to_string(),
@@ -1408,11 +1461,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let base = std::fs::canonicalize(dir.path()).unwrap();
         let storage = base.join("storage");
-        let run_dir = base.join("runs").join("run-1");
+        let run_dir = storage.join("sessions/agent-runs").join(TEST_RUN_ID);
         std::fs::create_dir_all(&run_dir).unwrap();
         let spec = CheckpointInputSpec {
             checkpoint_id: "ckpt-second".to_string(),
-            files: vec![write_blob(&storage, "metadata.json", b"ORDINARY")],
+            files: vec![
+                write_blob(&storage, "metadata.json", b"ORDINARY"),
+                write_blob(&storage, "transcript/nested/part", b"NESTED ORDINARY"),
+            ],
         };
         seed_catalog(&storage, "ckpt-second", &spec.files);
         let first = validated_materialize(&storage, &spec, &run_dir).expect("first");
@@ -1426,6 +1482,185 @@ mod tests {
             std::fs::read(second.join("metadata.json")).unwrap(),
             b"ORDINARY"
         );
+        assert_eq!(
+            std::fs::read(second.join("transcript/nested/part")).unwrap(),
+            b"NESTED ORDINARY"
+        );
+        assert_ne!(first, second, "each resume receives a fresh attempt");
+        assert!(first.starts_with(storage.join("worktree/tasks").join(TEST_RUN_ID)));
+        assert!(second.starts_with(storage.join("worktree/tasks").join(TEST_RUN_ID)));
+        assert_eq!(
+            std::fs::read(first.join("metadata.json")).unwrap(),
+            b"ORDINARY"
+        );
+        assert!(!run_dir.join(CHECKPOINT_INPUT_DIR).exists());
+    }
+
+    #[test]
+    fn managed_checkpoint_cancelled_write_keeps_retryable_intent() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let storage = std::fs::canonicalize(dir.path()).unwrap().join("storage");
+        let run_dir = storage.join("sessions/agent-runs").join(TEST_RUN_ID);
+        std::fs::create_dir_all(&run_dir).unwrap();
+        std::fs::write(run_dir.join("retention-sentinel"), b"metadata remains").unwrap();
+        let spec = CheckpointInputSpec {
+            checkpoint_id: "ckpt-cancel-write".into(),
+            files: vec![write_blob(&storage, "metadata.json", b"ORDINARY")],
+        };
+        seed_catalog(&storage, &spec.checkpoint_id, &spec.files);
+        let tasks = storage.join("worktree/tasks").join(TEST_RUN_ID);
+        let tasks_for_probe = tasks.clone();
+        let write_started = Arc::new(AtomicBool::new(false));
+        let probe_started = write_started.clone();
+        let probe = Arc::new(move || {
+            let has_file = std::fs::read_dir(&tasks_for_probe).is_ok_and(|entries| {
+                entries.filter_map(Result::ok).any(|entry| {
+                    entry
+                        .path()
+                        .join(CHECKPOINT_INPUT_DIR)
+                        .join("metadata.json")
+                        .exists()
+                })
+            });
+            if has_file {
+                probe_started.store(true, Ordering::SeqCst);
+            }
+            has_file
+        });
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let result = runtime.block_on(materialize_validated_checkpoint_input(
+            &storage,
+            &spec,
+            &run_dir,
+            Instant::now() + std::time::Duration::from_secs(5),
+            probe,
+        ));
+        assert!(matches!(result, Err(ValidatedMaterializeError::Cancelled)));
+        assert!(write_started.load(Ordering::SeqCst));
+        assert!(std::fs::read_dir(&tasks).unwrap().next().is_some());
+        crate::internal::ai::workspace_isolation::cleanup_task_workspaces(
+            &storage,
+            &run_dir,
+            uuid::Uuid::parse_str(TEST_RUN_ID).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            !tasks.exists() || std::fs::read_dir(&tasks).unwrap().next().is_none(),
+            "the durable attempt authorizes cleanup after a cancelled partial write"
+        );
+        assert_eq!(
+            std::fs::read(run_dir.join("retention-sentinel")).unwrap(),
+            b"metadata remains"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_checkpoint_rejects_replaced_metadata_run() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let base = std::fs::canonicalize(dir.path()).unwrap();
+        let storage = base.join("storage");
+        let run_dir = storage.join("sessions/agent-runs").join(TEST_RUN_ID);
+        std::fs::create_dir_all(&run_dir).unwrap();
+        let spec = CheckpointInputSpec {
+            checkpoint_id: "ckpt-run-link".into(),
+            files: vec![write_blob(&storage, "metadata.json", b"ORDINARY")],
+        };
+        seed_catalog(&storage, &spec.checkpoint_id, &spec.files);
+        let outside = base.join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(outside.join("sentinel"), b"untouched").unwrap();
+        std::fs::remove_dir(&run_dir).unwrap();
+        symlink(&outside, &run_dir).unwrap();
+        assert!(validated_materialize(&storage, &spec, &run_dir).is_err());
+        assert!(!storage.join("worktree/tasks").exists());
+        assert_eq!(
+            std::fs::read(outside.join("sentinel")).unwrap(),
+            b"untouched"
+        );
+        assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_checkpoint_writer_refuses_replaced_input_before_mutation() {
+        use std::{
+            os::unix::fs::symlink,
+            sync::{
+                Arc,
+                atomic::{AtomicBool, Ordering},
+            },
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let base = std::fs::canonicalize(dir.path()).unwrap();
+        let attempt = base.join("attempt");
+        let input = attempt.join(CHECKPOINT_INPUT_DIR);
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&input).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(outside.join("sentinel"), b"untouched").unwrap();
+        let replaced = Arc::new(AtomicBool::new(false));
+        let probe_replaced = replaced.clone();
+        let probe_input = input.clone();
+        let probe_outside = outside.clone();
+        let moved = base.join("moved-input");
+        let budget = scoped_io::ScopedIoBudget {
+            deadline: Instant::now() + std::time::Duration::from_secs(5),
+            cancelled: Arc::new(move || {
+                if probe_input.join("metadata.json").exists()
+                    && !probe_replaced.swap(true, Ordering::SeqCst)
+                {
+                    std::fs::rename(&probe_input, &moved).unwrap();
+                    symlink(&probe_outside, &probe_input).unwrap();
+                }
+                false
+            }),
+        };
+        let root = scoped_io::open_scoped_run_root(&base, "attempt", &budget).unwrap();
+        let result = scoped_io::write_checkpoint_input(
+            &root,
+            &[(PathBuf::from("metadata.json"), b"ORDINARY".to_vec())],
+            &budget,
+            &|_| Ok(()),
+        );
+        assert!(result.is_err());
+        assert!(replaced.load(Ordering::SeqCst));
+        assert_eq!(
+            std::fs::read(outside.join("sentinel")).unwrap(),
+            b"untouched"
+        );
+        assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn managed_checkpoint_writer_refuses_traversal() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = std::fs::canonicalize(dir.path()).unwrap();
+        std::fs::create_dir_all(base.join("attempt").join(CHECKPOINT_INPUT_DIR)).unwrap();
+        let budget = scoped_io::ScopedIoBudget {
+            deadline: Instant::now() + std::time::Duration::from_secs(5),
+            cancelled: std::sync::Arc::new(|| false),
+        };
+        let root = scoped_io::open_scoped_run_root(&base, "attempt", &budget).unwrap();
+        let result = scoped_io::write_checkpoint_input(
+            &root,
+            &[(PathBuf::from("../escape"), b"refused".to_vec())],
+            &budget,
+            &|_| Ok(()),
+        );
+        assert!(result.is_err());
+        assert!(!base.join("attempt/escape").exists());
     }
 
     #[test]
@@ -1439,7 +1674,7 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let base = std::fs::canonicalize(dir.path()).unwrap();
             let storage = base.join("storage");
-            let run_dir = base.join("runs/run-1");
+            let run_dir = storage.join("sessions/agent-runs").join(TEST_RUN_ID);
             std::fs::create_dir_all(&run_dir).unwrap();
             let ordinary = write_blob(&storage, "metadata.json", b"ORDINARY");
             let spec = CheckpointInputSpec {
@@ -1507,9 +1742,8 @@ mod tests {
     }
 }
 
-// Callers arrive in FIX-RG-SCOPED-02 and FIX-RG-SCOPED-03. This card
-// delivers the API before those consumers exist, so production builds do
-// not reference it yet.
+// Store validation, legacy input cleanup, and managed attempt writes share
+// the same bounded, descriptor-relative filesystem primitives.
 #[allow(dead_code)]
 mod scoped_io {
     //! Confined, bounded filesystem API, delivered before validating consumers.
@@ -1518,7 +1752,7 @@ mod scoped_io {
         collections::BTreeMap,
         ffi::{OsStr, OsString},
         fs::File,
-        io::{self, Read},
+        io::{self, Read, Write},
         path::{Component, Path, PathBuf},
         sync::Arc,
         time::Instant,
@@ -1668,6 +1902,17 @@ mod scoped_io {
         let anchor = scoped_fs::open_anchor(trusted_runs_root, run_id, budget)?;
         scoped_fs::verify_anchor(&anchor, budget)?;
         Ok(RunRootHandle { anchor })
+    }
+
+    pub(super) fn scoped_run_file(root: &RunRootHandle) -> &File {
+        &root.anchor.directory
+    }
+
+    pub(super) fn verify_scoped_root(
+        root: &RunRootHandle,
+        budget: &ScopedIoBudget,
+    ) -> Result<(), CheckpointInputIoError> {
+        scoped_fs::verify_anchor(&root.anchor, budget)
     }
 
     fn checked_child(
@@ -2109,6 +2354,127 @@ mod scoped_io {
         Ok(())
     }
 
+    /// Writes only into the exclusively reserved, empty checkpoint leaf. Every
+    /// parent is opened relative to a retained no-follow handle. A substituted
+    /// directory or symlink is an error, never a path through which to write.
+    pub(super) fn write_checkpoint_input(
+        root: &RunRootHandle,
+        loaded: &[(PathBuf, Vec<u8>)],
+        budget: &ScopedIoBudget,
+        verify_owned_input: &dyn Fn(&File) -> Result<(), CheckpointInputIoError>,
+    ) -> Result<(), CheckpointInputIoError> {
+        scoped_fs::verify_anchor(&root.anchor, budget)?;
+        let name = OsStr::new(super::CHECKPOINT_INPUT_DIR);
+        let snapshot = checked_child(&root.anchor.directory, name, budget)?
+            .ok_or_else(|| refused("a missing newly reserved checkpoint input"))?;
+        if snapshot.identity.kind != EntryKind::Directory {
+            return Err(refused(
+                "a checkpoint input reservation that is not a directory",
+            ));
+        }
+        let input = scoped_fs::open_directory(&root.anchor.directory, name)?;
+        if scoped_fs::snapshot_handle(&input)?.identity != snapshot.identity {
+            return Err(CheckpointInputIoError::Changed {
+                action: "pinning the reserved checkpoint input",
+            });
+        }
+        verify_owned_input(&input)?;
+        if !directory_names(&input, budget)?.is_empty() {
+            return Err(refused("a checkpoint input reservation that is not empty"));
+        }
+        let mut plan = InputPlan {
+            root: snapshot,
+            entries: BTreeMap::new(),
+            child_counts: BTreeMap::new(),
+        };
+        for (relative, bytes) in loaded {
+            budget.check()?;
+            let parent = relative
+                .parent()
+                .ok_or_else(|| refused("an input without a parent"))?;
+            let mut prefix = PathBuf::new();
+            for component in parent.components() {
+                let Component::Normal(name) = component else {
+                    return Err(refused("a non-normal checkpoint input ancestor"));
+                };
+                let child_path = prefix.join(name);
+                if !plan.entries.contains_key(&child_path) {
+                    let chain = open_plan_directory(&input, &prefix, &plan, budget)?;
+                    budget.check()?;
+                    verify_mutation_bindings(root, &snapshot, Some(&chain), budget)?;
+                    let child = scoped_fs::create_directory(&chain.leaf, name)?;
+                    let child_snapshot = scoped_fs::snapshot_handle(&child)?;
+                    if scoped_fs::snapshot_child(&chain.leaf, name)?.map(|s| s.identity)
+                        != Some(child_snapshot.identity)
+                    {
+                        return Err(CheckpointInputIoError::Changed {
+                            action: "creating an input directory",
+                        });
+                    }
+                    verify_mutation_bindings(root, &snapshot, Some(&chain), budget)?;
+                    plan.entries.insert(child_path.clone(), child_snapshot);
+                    *plan.child_counts.entry(prefix.clone()).or_default() += 1;
+                }
+                prefix = child_path;
+            }
+            let chain = open_plan_directory(&input, parent, &plan, budget)?;
+            let name = relative
+                .file_name()
+                .ok_or_else(|| refused("an input without a name"))?;
+            budget.check()?;
+            verify_mutation_bindings(root, &snapshot, Some(&chain), budget)?;
+            let mut file = scoped_fs::create_regular(&chain.leaf, name)?;
+            let file_identity = scoped_fs::snapshot_handle(&file)?.identity;
+            for chunk in bytes.chunks(16 * 1024) {
+                budget.check()?;
+                verify_mutation_bindings(root, &snapshot, Some(&chain), budget)?;
+                if scoped_fs::snapshot_child(&chain.leaf, name)?.map(|s| s.identity)
+                    != Some(file_identity)
+                {
+                    return Err(CheckpointInputIoError::Changed {
+                        action: "writing a checkpoint input file",
+                    });
+                }
+                file.write_all(chunk)
+                    .map_err(|error| io_error("writing a checkpoint input file", error))?;
+            }
+            budget.check()?;
+            verify_mutation_bindings(root, &snapshot, Some(&chain), budget)?;
+            if scoped_fs::snapshot_child(&chain.leaf, name)?.map(|s| s.identity)
+                != Some(file_identity)
+            {
+                return Err(CheckpointInputIoError::Changed {
+                    action: "sealing a checkpoint input file",
+                });
+            }
+            scoped_fs::seal_readonly(&file, false)?;
+            plan.entries
+                .insert(relative.clone(), scoped_fs::snapshot_handle(&file)?);
+            *plan.child_counts.entry(parent.to_path_buf()).or_default() += 1;
+        }
+        verify_input_plan(&input, &plan, budget)?;
+        let mut directories: Vec<PathBuf> = plan
+            .entries
+            .iter()
+            .filter_map(|(path, snapshot)| {
+                (snapshot.identity.kind == EntryKind::Directory).then_some(path.clone())
+            })
+            .collect();
+        directories.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
+        directories.push(PathBuf::new());
+        for relative in directories {
+            let chain = open_plan_directory(&input, &relative, &plan, budget)?;
+            budget.check()?;
+            verify_mutation_bindings(root, &snapshot, Some(&chain), budget)?;
+            scoped_fs::seal_readonly(&chain.leaf, true)?;
+            verify_mutation_bindings(root, &snapshot, Some(&chain), budget)?;
+        }
+        scoped_fs::verify_anchor(&root.anchor, budget)?;
+        verify_input_plan(&input, &plan, budget)?;
+        verify_owned_input(&input)?;
+        verify_mutation_bindings(root, &snapshot, None, budget)
+    }
+
     pub(crate) fn cleanup_checkpoint_input(
         root: &RunRootHandle,
         budget: &ScopedIoBudget,
@@ -2283,10 +2649,10 @@ mod scoped_io {
                 FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE,
                 FILE_DISPOSITION_FLAG_POSIX_SEMANTICS, FILE_DISPOSITION_INFO_EX,
                 FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ,
-                FILE_ID_128, FILE_ID_INFO, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES,
-                FILE_SHARE_READ, FILE_SHARE_WRITE, FileBasicInfo, FileDispositionInfoEx,
-                FileIdInfo, GetFileInformationByHandleEx, OPEN_EXISTING, SYNCHRONIZE,
-                SetFileInformationByHandle,
+                FILE_GENERIC_WRITE, FILE_ID_128, FILE_ID_INFO, FILE_LIST_DIRECTORY,
+                FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE, FileBasicInfo,
+                FileDispositionInfoEx, FileIdInfo, GetFileInformationByHandleEx, OPEN_EXISTING,
+                SYNCHRONIZE, SetFileInformationByHandle,
             },
         };
 
@@ -2402,6 +2768,17 @@ mod scoped_io {
             refuse_reparse: bool,
             share_access: u32,
         ) -> Result<File, CheckpointInputIoError> {
+            child_handle(parent, name, access, refuse_reparse, share_access, None)
+        }
+
+        fn child_handle(
+            parent: &File,
+            name: &OsStr,
+            access: u32,
+            refuse_reparse: bool,
+            share_access: u32,
+            create_directory: Option<bool>,
+        ) -> Result<File, CheckpointInputIoError> {
             let path = Path::new(name);
             let mut components = path.components();
             if !matches!(components.next(), Some(Component::Normal(_)))
@@ -2446,12 +2823,26 @@ mod scoped_io {
             };
             let mut raw: HANDLE = ptr::null_mut();
             const FILE_OPEN: u32 = 1;
+            const FILE_CREATE: u32 = 2;
+            const FILE_DIRECTORY_FILE: u32 = 1;
+            const FILE_NON_DIRECTORY_FILE: u32 = 0x40;
+            let create_disposition = if create_directory.is_some() {
+                FILE_CREATE
+            } else {
+                FILE_OPEN
+            };
+            let kind_option = match create_directory {
+                Some(true) => FILE_DIRECTORY_FILE,
+                Some(false) => FILE_NON_DIRECTORY_FILE,
+                None => 0,
+            };
             const FILE_SYNCHRONOUS_IO_NONALERT: u32 = 0x20;
             const FILE_OPEN_REPARSE_POINT: u32 = 0x20_0000;
             // SAFETY: every pointer refers to a live, correctly aligned C layout
             // with checked byte lengths. RootDirectory is a retained directory
             // handle; the name is one component, so no ancestor path is resolved.
-            // FILE_OPEN does not create. IRP_MJ_CREATE is synchronous: the I/O
+            // FILE_CREATE exclusively reserves a new child; FILE_OPEN never creates.
+            // IRP_MJ_CREATE is synchronous: the I/O
             // manager waits inside create/open even when a driver pends an oplock
             // request (Microsoft "Breaking Oplocks"). NONALERT plus SYNCHRONIZE
             // preserves that synchronous contract; there is no invented pending
@@ -2467,8 +2858,8 @@ mod scoped_io {
                     ptr::null(),
                     0,
                     share_access,
-                    FILE_OPEN,
-                    FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_REPARSE_POINT,
+                    create_disposition,
+                    FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_REPARSE_POINT | kind_option,
                     ptr::null(),
                     0,
                 )
@@ -2501,6 +2892,51 @@ mod scoped_io {
                 ));
             }
             Ok(file)
+        }
+
+        pub(super) fn create_directory(
+            parent: &File,
+            name: &OsStr,
+        ) -> Result<File, CheckpointInputIoError> {
+            let file = child_handle(
+                parent,
+                name,
+                FILE_READ_ATTRIBUTES | FILE_LIST_DIRECTORY,
+                true,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                Some(true),
+            )?;
+            if snapshot_handle(&file)?.identity.kind != EntryKind::Directory {
+                return Err(refused("a newly created input that is not a directory"));
+            }
+            Ok(file)
+        }
+
+        pub(super) fn create_regular(
+            parent: &File,
+            name: &OsStr,
+        ) -> Result<File, CheckpointInputIoError> {
+            let file = child_handle(
+                parent,
+                name,
+                FILE_GENERIC_WRITE | FILE_READ_ATTRIBUTES,
+                true,
+                FILE_SHARE_READ,
+                Some(false),
+            )?;
+            if snapshot_handle(&file)?.identity.kind != EntryKind::File {
+                return Err(refused("a newly created input that is not a regular file"));
+            }
+            Ok(file)
+        }
+
+        pub(super) fn seal_readonly(
+            _file: &File,
+            _directory: bool,
+        ) -> Result<(), CheckpointInputIoError> {
+            // Windows input access is constrained by the caller's sandbox. The
+            // previous materializer likewise changed permissions only on Unix.
+            Ok(())
         }
 
         pub(super) fn snapshot_handle(file: &File) -> Result<Snapshot, CheckpointInputIoError> {
@@ -2855,6 +3291,67 @@ mod scoped_io {
                 return Err(refused("a no-follow file handle with a non-regular kind"));
             }
             Ok(file)
+        }
+
+        pub(super) fn create_directory(
+            parent: &File,
+            name: &OsStr,
+        ) -> Result<File, CheckpointInputIoError> {
+            let component = name_cstring(name)?;
+            // SAFETY: parent and the one-component C string remain live. mkdirat
+            // refuses every occupied entry; it never traverses a child symlink.
+            if unsafe { libc::mkdirat(parent.as_raw_fd(), component.as_ptr(), 0o700) } < 0 {
+                return Err(io_error(
+                    "creating a new confined input directory",
+                    std::io::Error::last_os_error(),
+                ));
+            }
+            open_directory(parent, name)
+        }
+
+        pub(super) fn create_regular(
+            parent: &File,
+            name: &OsStr,
+        ) -> Result<File, CheckpointInputIoError> {
+            let component = name_cstring(name)?;
+            // SAFETY: the checked parent and component remain live; mode is
+            // supplied with O_CREAT. O_EXCL and O_NOFOLLOW forbid replacement.
+            let descriptor = unsafe {
+                libc::openat(
+                    parent.as_raw_fd(),
+                    component.as_ptr(),
+                    libc::O_WRONLY
+                        | libc::O_CREAT
+                        | libc::O_EXCL
+                        | libc::O_NOFOLLOW
+                        | libc::O_CLOEXEC,
+                    0o600,
+                )
+            };
+            if descriptor < 0 {
+                return Err(io_error(
+                    "creating a new confined input file",
+                    std::io::Error::last_os_error(),
+                ));
+            }
+            // SAFETY: openat returned a newly owned descriptor checked above.
+            Ok(unsafe { File::from_raw_fd(descriptor) })
+        }
+
+        pub(super) fn seal_readonly(
+            file: &File,
+            directory: bool,
+        ) -> Result<(), CheckpointInputIoError> {
+            let mode = if directory { 0o555 } else { 0o444 };
+            // SAFETY: the descriptor remains owned and live; callers recheck its
+            // named ancestry immediately before this handle-based mutation.
+            if unsafe { libc::fchmod(file.as_raw_fd(), mode) } < 0 {
+                return Err(io_error(
+                    "sealing a confined input read-only",
+                    std::io::Error::last_os_error(),
+                ));
+            }
+            Ok(())
         }
 
         fn identity(device: u64, inode: u64, kind: EntryKind) -> EntryIdentity {

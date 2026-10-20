@@ -318,7 +318,12 @@ fn built_scope_binding_helper_classifies_a_damaged_active_worktree() {
     );
     let linked = root.path().join("linked");
     let linked_arg = linked.to_string_lossy().into_owned();
-    let added = run_libra(&repo, &home, &["worktree", "add", &linked_arg], None);
+    let added = run_libra(
+        &repo,
+        &home,
+        &["worktree", "add", "linked", "--path", &linked_arg],
+        None,
+    );
     assert!(
         added.status.success(),
         "create linked worktree: {}",

@@ -39,19 +39,33 @@ files such as `.env.test` never enter it) — with a minimal read-only CLI
 invocation and an environment cleared down to a documented allowlist.
 Investigators never run in the repository worktree itself.
 
+New workspaces are created at the common storage root
+`.libra/worktree/tasks/<run-id>/<attempt-id>/workspace/`, including when the
+command starts from a linked worktree. A raw task snapshot is not a linked
+repository: an ordinary `libra` command launched from that directory cannot
+implicitly discover the main repository. Repository access requires an
+explicitly validated scope supplied by the runtime. Libra does not apply its
+internal OS sandbox to the external investigator CLI; that CLI's own sandbox
+settings determine whether it can access sibling workspaces or common storage.
+
 With `start --checkpoint <id>` the investigation is scoped to a captured
 agent checkpoint instead: the investigators' workspace is the
 checkpoint's own content — `metadata.json`, an optional `manifest.json`,
-and the transcript files — materialized READ-ONLY under the run
-directory (`<run_dir>/checkpoint-input/`). No repository snapshot is
+and the transcript files — materialized READ-ONLY at
+`.libra/worktree/tasks/<run-id>/<attempt-id>/checkpoint-input/`. No repository snapshot is
 materialized at all, so a scoped run can only consume the named
 checkpoint; the scope is persisted in the run state, so an
 `investigate continue` resume re-materializes the SAME checkpoint and
 can never fall back to the current worktree. A missing checkpoint, a
 malformed checkpoint tree, or content absent from the local object store
 fails closed BEFORE any run is created (no run residue). The
-materialization shares the run's retention (`investigate clean` removes
-it with the run) and `agent doctor` needs no new orphan class.
+run records ownership of the separate input directory. `investigate clean`
+verifies and removes owned input before deleting run metadata; a cleanup failure
+preserves the record for retry. `agent doctor` reports unowned managed task
+directories without deleting them.
+If workspace cleanup fails at the end of a drive pass, the run ends in
+`error` with its ownership intents retained. After fixing the reported cause,
+`investigate clean --run <run_id>` retries cleanup.
 
 Each turn collects the investigator's stance from its stdout (redacted),
 appends it to the run's `stances` list and single-writer `findings.md`,
@@ -80,7 +94,8 @@ A drive pass ends either **terminal** or **paused**:
     or hit its per-turn deadline.
 
 `libra investigate continue <run_id>` resumes a paused run from its
-pending turn. An OS-level run lock makes a concurrent `continue` on the
+pending turn. Each drive pass allocates a fresh attempt directory and never
+overwrites the previous workspace or checkpoint input. An OS-level run lock makes a concurrent `continue` on the
 same run fail closed with an actionable error, so a run is never driven
 by two processes at once.
 
@@ -92,6 +107,20 @@ Run state is persisted under `.libra/sessions/agent-runs/<run_id>/`:
 persisted investigator output goes through the secret-redaction pipeline;
 output is capped at 64 KiB per stream (a flooding investigator is
 truncated with a marker).
+
+### Workspace retention
+
+Run metadata remains under `.libra/sessions/agent-runs/<run_id>/`. New
+`state.json` and `manifest.json` records use schema version 2 and retain the
+workspace ownership descriptor. Known version-1 records remain readable without
+moving old directories or bulk rewriting saved runs. Unknown versions are
+refused for writes and cleanup.
+
+`investigate clean` removes only terminal runs of its own kind. It validates the
+saved descriptor and directory identity, then removes owned workspaces before
+run metadata. A link, replaced directory, ownership conflict or cleanup error
+keeps the recovery record for a later retry. A directory name alone never
+proves ownership; preserve reported orphan directories for diagnosis.
 
 ### Untrusted seed and findings
 
@@ -149,7 +178,7 @@ libra investigate continue <run_id>
 # Cancel a running investigation (same cleanup as Ctrl-C)
 libra investigate cancel <run_id>
 
-# Remove run directories
+# Remove a finished run and its owned workspace
 libra investigate clean --run <run_id>
 libra investigate clean --all
 ```

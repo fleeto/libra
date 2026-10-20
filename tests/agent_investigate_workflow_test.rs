@@ -46,6 +46,7 @@ use libra::internal::ai::{
         StanceDisposition, continue_investigate_with_sources, run_investigate,
     },
     review::{ReviewerCommand, UNTRUSTED_FINDINGS_CLOSE, UNTRUSTED_FINDINGS_OPEN_PREFIX},
+    workspace_isolation::{TaskWorkspaceDescriptor, TaskWorkspaceKind, create_task_workspace},
 };
 
 /// The fake `sk-` credential `investigator-secret.sh` assembles at run
@@ -194,23 +195,103 @@ async fn run_bounded(
     .expect("investigate run reaches a terminal state or pause")
 }
 
-/// Assert no `libra-task-worktree-*` workspace is left under the repo's
-/// task-worktree base after a run — the workspace lease was released.
+/// Assert all attempts were removed; empty run grouping directories may remain.
+/// Do not follow symlinks while examining the managed container.
 fn assert_no_leaked_workspace(repo: &Path) {
-    let tasks_dir = repo.join(".libra").join("worktrees").join("tasks");
-    if !tasks_dir.exists() {
-        return;
+    let tasks_dir = repo.join(".libra/worktree/tasks");
+    let metadata = match std::fs::symlink_metadata(&tasks_dir) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+        Err(error) => panic!("inspect managed task root: {error}"),
+    };
+    assert!(metadata.is_dir(), "task container must be a real directory");
+    for run in std::fs::read_dir(&tasks_dir).expect("read task worktree dir") {
+        let run = run.expect("read task run entry");
+        assert!(
+            run.file_type().unwrap().is_dir(),
+            "unexpected task run entry: {:?}",
+            run.path()
+        );
+        let remaining: Vec<_> = std::fs::read_dir(run.path())
+            .expect("read task run directory")
+            .map(|entry| entry.expect("read task attempt entry").path())
+            .collect();
+        assert!(
+            remaining.is_empty(),
+            "investigate run leaked task attempts: {remaining:?}"
+        );
     }
-    let leaked: Vec<String> = std::fs::read_dir(&tasks_dir)
-        .expect("read task worktree dir")
-        .filter_map(|entry| entry.ok())
-        .map(|entry| entry.file_name().to_string_lossy().into_owned())
-        .filter(|name| name.starts_with("libra-task-worktree-"))
-        .collect();
-    assert!(
-        leaked.is_empty(),
-        "investigate run leaked isolated workspaces: {leaked:?}"
+}
+
+fn workspace_descriptor(
+    store: &InvestigateRunStore,
+    repo: &Path,
+    run_id: &str,
+) -> TaskWorkspaceDescriptor {
+    let state = store.load_state(run_id).unwrap().unwrap();
+    let manifest = store.load_manifest(run_id).unwrap().unwrap();
+    assert_eq!(state.schema_version, 2);
+    assert_eq!(manifest.schema_version, 2);
+    let descriptor = state
+        .workspace_descriptor
+        .expect("persisted workspace descriptor");
+    assert_eq!(manifest.workspace_descriptor.as_ref(), Some(&descriptor));
+    assert_eq!(descriptor.run_id.to_string(), run_id);
+    let leaf = match descriptor.kind {
+        TaskWorkspaceKind::Workspace => "workspace",
+        TaskWorkspaceKind::CheckpointInput => "checkpoint-input",
+    };
+    assert_eq!(
+        descriptor.canonical_path,
+        std::fs::canonicalize(repo.join(".libra"))
+            .unwrap()
+            .join("worktree/tasks")
+            .join(run_id)
+            .join(descriptor.attempt_id.to_string())
+            .join(leaf)
     );
+    assert_eq!(
+        state.workspace_root.as_deref(),
+        descriptor.canonical_path.to_str()
+    );
+    assert_eq!(
+        std::fs::symlink_metadata(descriptor.attempt_root())
+            .expect_err("finished or paused attempt must be removed")
+            .kind(),
+        std::io::ErrorKind::NotFound
+    );
+    descriptor
+}
+
+/// Exact checkpoint byte checks run while the scoped input still exists.
+/// A silent successful probe pauses; a concluding probe persists its inventory.
+fn checkpoint_probe(conclude: bool) -> String {
+    let proof = r#"printf '%s' '{"schema_version":1,"agent_kind":"claude_code"}' | cmp - metadata.json && printf '%s\n' '{"role":"user","text":"captured turn"}' | cmp - transcript/claude_code && test ! -e tracked.txt && test ! -e reasoning && test "$(ls -ld . | cut -c1-10)" = dr-xr-xr-x"#;
+    if conclude {
+        format!(
+            "{proof} && ls . transcript && cat metadata.json transcript/claude_code && echo 'Concluding: exact checkpoint bytes verified'"
+        )
+    } else {
+        proof.to_string()
+    }
+}
+
+/// Legacy readonly input remains a cleanable fixture, never a new creation path.
+fn seed_legacy_checkpoint_input(run_dir: &Path, metadata: &[u8], transcript: &[u8]) -> PathBuf {
+    let input = run_dir.join("checkpoint-input");
+    std::fs::create_dir_all(input.join("transcript")).unwrap();
+    std::fs::write(input.join("metadata.json"), metadata).unwrap();
+    std::fs::write(input.join("transcript/claude_code"), transcript).unwrap();
+    for path in [
+        input.join("metadata.json"),
+        input.join("transcript/claude_code"),
+    ] {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o444)).unwrap();
+    }
+    for path in [input.join("transcript"), input.clone()] {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o555)).unwrap();
+    }
+    input
 }
 
 // ---------------------------------------------------------------------------
@@ -387,6 +468,10 @@ async fn stalled_cancelled_paused_and_continue_resume_are_pinned() {
     assert_eq!(pending.agent_idx, 0);
     assert_eq!(state.turn, 0, "the stalled turn produced no stance");
     assert_no_leaked_workspace(&repo);
+    let previous_attempt = workspace_descriptor(&store, &repo, &stall_run_id);
+    std::fs::create_dir_all(&previous_attempt.canonical_path).unwrap();
+    let old_sentinel = previous_attempt.canonical_path.join("unowned-sentinel.txt");
+    std::fs::write(&old_sentinel, b"do not overwrite a former attempt path").unwrap();
 
     // ---- Continue resumes from the pending turn → terminal quorum. ----
     let resumed = continue_investigate_with_sources(
@@ -417,6 +502,17 @@ async fn stalled_cancelled_paused_and_continue_resume_are_pinned() {
         .expect("state exists");
     assert!(state.pending_turn.is_none(), "resume clears pending_turn");
     assert_eq!(state.terminal_state, Some(InvestigateTerminalState::Quorum));
+    let resumed_attempt = workspace_descriptor(&store, &repo, &stall_run_id);
+    assert_ne!(resumed_attempt.attempt_id, previous_attempt.attempt_id);
+    assert_ne!(
+        resumed_attempt.canonical_path,
+        previous_attempt.canonical_path
+    );
+    assert_eq!(
+        std::fs::read(&old_sentinel).unwrap(),
+        b"do not overwrite a former attempt path"
+    );
+    std::fs::remove_dir_all(previous_attempt.attempt_root()).unwrap();
     assert_no_leaked_workspace(&repo);
 
     // ---- Agent failure (non-zero exit) → paused (agent_failure). ----
@@ -507,7 +603,8 @@ async fn stalled_cancelled_paused_and_continue_resume_are_pinned() {
 // ---------------------------------------------------------------------------
 
 /// A read-only investigate run persists the E8-libra run wire exactly:
-/// `manifest.json` with EXACTLY the 12 E8 keys and `kind = "investigate"`,
+/// `manifest.json` with the E8 keys plus the schema-2 workspace descriptor,
+/// `kind = "investigate"`,
 /// `state.json` carrying every round-robin field, and a `findings.md`
 /// whose per-stance excerpts are spotlighting-delimited (provenance=
 /// untrusted) and redacted — a fake `sk-` credential seeded into a stance
@@ -545,7 +642,7 @@ async fn investigate_read_only_persists_state_and_findings_doc() {
     );
     let run_id = outcome.run_id.clone();
 
-    // ---- manifest.json: exactly the 12 E8 keys, kind = investigate. ----
+    // ---- manifest.json: schema-2 E8 fields plus workspace ownership. ----
     let manifest_path = store.manifest_path(&run_id).expect("manifest path");
     let manifest: serde_json::Value =
         serde_json::from_slice(&std::fs::read(manifest_path).expect("read manifest"))
@@ -570,13 +667,15 @@ async fn investigate_read_only_persists_state_and_findings_doc() {
         "findings_oid",
         "redaction_report",
         "manual_attach",
+        "workspace_descriptor",
     ];
     expected.sort_unstable();
     assert_eq!(
         keys, expected,
-        "manifest.json must carry exactly the E8 keys"
+        "manifest.json must carry exactly the schema-2 E8 keys"
     );
-    assert_eq!(manifest["schema_version"], 1);
+    assert_eq!(manifest["schema_version"], 2);
+    workspace_descriptor(&store, &repo, &run_id);
     assert_eq!(manifest["run_id"], run_id.as_str());
     assert_eq!(manifest["kind"], "investigate");
     assert_eq!(
@@ -1109,6 +1208,128 @@ async fn investigate_clean_refuses_unfinished_runs_and_all_skips_them() {
         "investigate clean --run after cancel",
     );
     assert!(store.load_state(&paused.run_id).unwrap().is_none());
+}
+
+#[test]
+fn investigate_orphan_cancel_cleans_proven_managed_attempt() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = init_committed_repo(temp.path());
+    let store = store_for(&repo);
+    let run_uuid = uuid::Uuid::new_v4();
+    let run_id = run_uuid.to_string();
+    store
+        .create_run(
+            &run_id,
+            "interrupted driver",
+            &["codex".into()],
+            4,
+            1,
+            "sha",
+        )
+        .unwrap();
+    let run_dir = store.run_dir(&run_id).unwrap();
+    let descriptor = create_task_workspace(
+        &repo.join(".libra"),
+        &run_dir,
+        run_uuid,
+        TaskWorkspaceKind::Workspace,
+    )
+    .unwrap();
+    std::fs::write(descriptor.canonical_path.join("copied.txt"), b"owned copy").unwrap();
+    store.record_workspace(&run_id, &descriptor).unwrap();
+
+    let cancelled = run_libra(&["investigate", "cancel", &run_id], &repo, &[]);
+    assert_cli_success(&cancelled, "orphan investigate cancel");
+    assert_eq!(
+        store.load_state(&run_id).unwrap().unwrap().terminal_state,
+        Some(InvestigateTerminalState::Cancelled)
+    );
+    assert!(run_dir.exists(), "cancel preserves the run record");
+    workspace_descriptor(&store, &repo, &run_id);
+    assert_eq!(
+        std::fs::read_dir(run_dir.join("workspace-intents"))
+            .unwrap()
+            .count(),
+        0
+    );
+    assert_no_leaked_workspace(&repo);
+}
+
+#[test]
+fn investigate_orphan_cancel_refuses_substituted_attempt_and_preserves_retry_intent() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = init_committed_repo(temp.path());
+    let store = store_for(&repo);
+    let run_uuid = uuid::Uuid::new_v4();
+    let run_id = run_uuid.to_string();
+    store
+        .create_run(
+            &run_id,
+            "interrupted driver",
+            &["codex".into()],
+            4,
+            1,
+            "sha",
+        )
+        .unwrap();
+    let run_dir = store.run_dir(&run_id).unwrap();
+    let descriptor = create_task_workspace(
+        &repo.join(".libra"),
+        &run_dir,
+        run_uuid,
+        TaskWorkspaceKind::Workspace,
+    )
+    .unwrap();
+    store.record_workspace(&run_id, &descriptor).unwrap();
+    let state_before = std::fs::read(run_dir.join("state.json")).unwrap();
+    let manifest_before = std::fs::read(run_dir.join("manifest.json")).unwrap();
+    let intent_path = run_dir
+        .join("workspace-intents")
+        .join(format!("{}.intent.json", descriptor.attempt_id));
+    let intent_before = std::fs::read(&intent_path).unwrap();
+    let saved_attempt = temp.path().join("saved-owned-attempt");
+    std::fs::rename(descriptor.attempt_root(), &saved_attempt).unwrap();
+    let outside = temp.path().join("outside-sentinel");
+    std::fs::create_dir(&outside).unwrap();
+    std::fs::write(outside.join("keep.txt"), b"outside data survives").unwrap();
+    std::os::unix::fs::symlink(&outside, descriptor.attempt_root()).unwrap();
+
+    let cancelled = run_libra(&["investigate", "cancel", &run_id], &repo, &[]);
+    assert!(
+        !cancelled.status.success(),
+        "substituted attempt must refuse cancel cleanup"
+    );
+    assert_eq!(
+        std::fs::read(outside.join("keep.txt")).unwrap(),
+        b"outside data survives"
+    );
+    assert_eq!(
+        std::fs::read(run_dir.join("state.json")).unwrap(),
+        state_before
+    );
+    assert_eq!(
+        std::fs::read(run_dir.join("manifest.json")).unwrap(),
+        manifest_before
+    );
+    assert_eq!(std::fs::read(&intent_path).unwrap(), intent_before);
+    assert!(
+        std::fs::symlink_metadata(descriptor.attempt_root())
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+
+    std::fs::remove_file(descriptor.attempt_root()).unwrap();
+    std::fs::rename(&saved_attempt, descriptor.attempt_root()).unwrap();
+    assert_cli_success(
+        &run_libra(&["investigate", "cancel", &run_id], &repo, &[]),
+        "retry cancellation after restoring the proven attempt",
+    );
+    assert_eq!(
+        std::fs::read(outside.join("keep.txt")).unwrap(),
+        b"outside data survives"
+    );
+    assert_no_leaked_workspace(&repo);
 }
 
 // ---------------------------------------------------------------------------
@@ -1878,6 +2099,7 @@ async fn investigate_checkpoint_scoped() {
     // workspace and concludes; the stance shows exactly the checkpoint
     // files and never the repo's tracked content. ----
     let store = store_for(&repo);
+    let probe = checkpoint_probe(true);
     let mut request = InvestigateRunRequest::new(
         repo.clone(),
         "review the captured transcript",
@@ -1885,10 +2107,7 @@ async fn investigate_checkpoint_scoped() {
         vec![fake_investigator(
             "lister",
             Path::new("/bin/sh"),
-            &[
-                "-c",
-                "ls {workspace} {workspace}/transcript && echo concluding: inventory done",
-            ],
+            &["-c", &probe],
             Duration::from_secs(30),
         )],
         2,
@@ -1914,15 +2133,9 @@ async fn investigate_checkpoint_scoped() {
         "the concluding lister reaches quorum: {outcome:?}"
     );
     let run_dir = outcome.run_dir.clone();
-    let input_root = run_dir.join("checkpoint-input");
-    assert_eq!(
-        std::fs::read(input_root.join("metadata.json")).expect("materialized metadata"),
-        metadata.to_vec(),
-    );
-    assert_eq!(
-        std::fs::read(input_root.join("transcript/claude_code")).expect("materialized transcript"),
-        transcript.to_vec(),
-    );
+    let descriptor = workspace_descriptor(&store, &repo, &outcome.run_id);
+    assert_eq!(descriptor.kind, TaskWorkspaceKind::CheckpointInput);
+    assert!(!run_dir.join("checkpoint-input").exists());
     let state: serde_json::Value =
         serde_json::from_slice(&std::fs::read(run_dir.join("state.json")).expect("state.json"))
             .expect("state json");
@@ -1942,6 +2155,11 @@ async fn investigate_checkpoint_scoped() {
         .expect("stance summary");
     assert!(summary.contains("metadata.json"), "{summary}");
     assert!(summary.contains("claude_code"), "{summary}");
+    assert!(
+        summary.contains("exact checkpoint bytes verified"),
+        "{summary}"
+    );
+    assert!(summary.contains("captured turn"), "{summary}");
     assert!(
         !summary.contains("tracked.txt"),
         "no repo content leaks into a scoped workspace: {summary}"
@@ -2031,17 +2249,16 @@ async fn fix_rg_scoped_02_persisted_spec_resume() {
         .join(&artifact_oid[2..]);
     std::fs::remove_file(&artifact_loose).expect("drop the closed artifact object");
     let store = store_for(&repo);
-    let fixtures = temp.path().join("fixtures");
-    let silent = stage_fixture(&fixtures, "investigator-silent.sh");
-    let conclude = stage_fixture(&fixtures, "investigator-conclude.sh");
+    let silent_probe = checkpoint_probe(false);
+    let concluding_probe = checkpoint_probe(true);
     let mut request = InvestigateRunRequest::new(
         repo.clone(),
         "review the captured transcript",
         "0000000000000000000000000000000000000000",
         vec![fake_investigator(
             "inv-a",
-            &silent,
-            &[],
+            Path::new("/bin/sh"),
+            &["-c", &silent_probe],
             Duration::from_secs(30),
         )],
         4,
@@ -2067,57 +2284,64 @@ async fn fix_rg_scoped_02_persisted_spec_resume() {
     let paused = run_bounded(&store, request, InvestigateCancelHandle::new(), 60).await;
     assert_eq!(paused.terminal_state, None, "silent investigator pauses");
     assert_eq!(paused.pause_reason, Some(PauseReason::Stalled));
-    let input = paused
-        .run_dir
-        .join("checkpoint-input")
-        .join("metadata.json");
-    assert_eq!(
-        std::fs::read(&input).expect("first materialize"),
-        metadata.to_vec()
-    );
-    assert!(
-        !paused
-            .run_dir
-            .join("checkpoint-input")
-            .join("reasoning")
-            .exists(),
-        "the missing closed artifact is not materialized"
-    );
+    let first_attempt = workspace_descriptor(&store, &repo, &paused.run_id);
+    assert_eq!(first_attempt.kind, TaskWorkspaceKind::CheckpointInput);
+    assert!(!paused.run_dir.join("checkpoint-input").exists());
+    std::fs::create_dir_all(&first_attempt.canonical_path).unwrap();
+    let old_sentinel = first_attempt
+        .canonical_path
+        .join("previous-attempt-sentinel");
+    std::fs::write(&old_sentinel, b"never overwrite an old attempt").unwrap();
     assert!(
         !artifact_loose.exists(),
         "the loose artifact object stays absent"
     );
-    let resumed = continue_investigate_with_sources(
-        &store,
-        &paused.run_id,
-        vec![fake_investigator(
-            "inv-a",
-            &conclude,
-            &[],
-            Duration::from_secs(30),
-        )],
-        &repo,
-        DEFAULT_INVESTIGATOR_TIMEOUT,
-        true,
-        DEFAULT_CLAUDE_REVIEW_MAX_BUDGET_USD,
-        InvestigateCancelHandle::new(),
-    )
-    .await
-    .expect("continue re-materializes the persisted spec");
+    let mut catalog_retries = 0;
+    let resumed = loop {
+        let result = continue_investigate_with_sources(
+            &store,
+            &paused.run_id,
+            vec![fake_investigator(
+                "inv-a",
+                Path::new("/bin/sh"),
+                &["-c", &concluding_probe],
+                Duration::from_secs(30),
+            )],
+            &repo,
+            DEFAULT_INVESTIGATOR_TIMEOUT,
+            true,
+            DEFAULT_CLAUDE_REVIEW_MAX_BUDGET_USD,
+            InvestigateCancelHandle::new(),
+        )
+        .await;
+        match result {
+            Ok(outcome) => break outcome,
+            Err(InvestigateRunError::Store(error))
+                if error
+                    .to_string()
+                    .contains("checkpoint catalog is unavailable")
+                    && catalog_retries < 8 =>
+            {
+                // The readonly catalog deliberately uses a zero SQLite busy
+                // timeout. A concurrent repository writer is retryable here:
+                // this continue path leaves the paused run unchanged.
+                catalog_retries += 1;
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Err(error) => panic!("continue re-materializes the persisted spec: {error}"),
+        }
+    };
     assert_eq!(
         resumed.terminal_state,
         Some(InvestigateTerminalState::Quorum)
     );
+    let second_attempt = workspace_descriptor(&store, &repo, &paused.run_id);
+    assert_ne!(first_attempt.attempt_id, second_attempt.attempt_id);
     assert_eq!(
-        std::fs::read(
-            resumed
-                .run_dir
-                .join("checkpoint-input")
-                .join("metadata.json")
-        )
-        .expect("second materialize"),
-        metadata.to_vec()
+        std::fs::read(&old_sentinel).unwrap(),
+        b"never overwrite an old attempt"
     );
+    std::fs::remove_dir_all(first_attempt.attempt_root()).unwrap();
     let state: serde_json::Value = serde_json::from_slice(
         &std::fs::read(resumed.run_dir.join("state.json")).expect("state.json"),
     )
@@ -2136,6 +2360,12 @@ async fn fix_rg_scoped_02_persisted_spec_resume() {
     assert!(
         !artifact_loose.exists(),
         "continue does not read the artifact"
+    );
+    assert!(
+        state["stances"][0]["summary"]
+            .as_str()
+            .unwrap()
+            .contains("exact checkpoint bytes verified")
     );
     assert_no_leaked_workspace(&repo);
 }
@@ -2168,13 +2398,10 @@ async fn fix_rg_scoped_02_binary_legacy_full_list_resume() {
         .join(&artifact_oid[..2])
         .join(&artifact_oid[2..]);
     std::fs::remove_file(&loose).expect("real missing-artifact-body trap");
-    let fixtures = temp.path().join("fixtures");
-    let silent = stage_fixture(&fixtures, "investigator-silent.sh");
-    let conclude = stage_fixture(&fixtures, "investigator-conclude.sh");
     let fake_bin = temp.path().join("only-synthetic-bin");
     std::fs::create_dir(&fake_bin).unwrap();
     let codex = fake_bin.join("codex");
-    std::fs::copy(&silent, &codex).unwrap();
+    std::fs::write(&codex, format!("#!/bin/sh\n{}\n", checkpoint_probe(false))).unwrap();
     std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o755)).unwrap();
     let path = format!("{}:/usr/bin:/bin:/usr/sbin:/sbin", fake_bin.display());
     let started = run_libra(
@@ -2206,7 +2433,12 @@ async fn fix_rg_scoped_02_binary_legacy_full_list_resume() {
     assert_eq!(row["pause_reason"], "stalled");
     let run_id = row["run_id"].as_str().unwrap();
     let run_dir = PathBuf::from(row["run_dir"].as_str().unwrap());
-    let input = run_dir.join("checkpoint-input");
+    let store = store_for(&repo);
+    let first_attempt = workspace_descriptor(&store, &repo, run_id);
+    assert!(!run_dir.join("checkpoint-input").exists());
+    // Reconstruct a legacy readonly input to prove resume neither adopts nor
+    // mutates it; the newly materialized attempt lives in the managed root.
+    let input = seed_legacy_checkpoint_input(&run_dir, metadata, transcript);
     assert_eq!(
         std::fs::metadata(&input).unwrap().permissions().mode() & 0o777,
         0o555
@@ -2231,7 +2463,7 @@ async fn fix_rg_scoped_02_binary_legacy_full_list_resume() {
     std::fs::write(&state_path, serde_json::to_vec_pretty(&state).unwrap()).unwrap();
     // Only the synthetic executable changes. The prior readonly input and
     // all ordinary captured objects stay untouched before continue.
-    std::fs::copy(conclude, &codex).unwrap();
+    std::fs::write(&codex, format!("#!/bin/sh\n{}\n", checkpoint_probe(true))).unwrap();
     std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o755)).unwrap();
     let continued = run_libra(
         &["--json", "investigate", "continue", run_id],
@@ -2265,7 +2497,10 @@ async fn fix_rg_scoped_02_binary_legacy_full_list_resume() {
         serde_json::from_slice(&std::fs::read(state_path).unwrap()).unwrap();
     assert_eq!(state["checkpoint_input"]["checkpoint_id"], checkpoint_id);
     assert!(state["checkpoint_input"].get("root_oid").is_none());
+    let second_attempt = workspace_descriptor(&store, &repo, run_id);
+    assert_ne!(first_attempt.attempt_id, second_attempt.attempt_id);
     let findings = std::fs::read_to_string(run_dir.join("findings.md")).unwrap();
+    assert!(findings.contains("exact checkpoint bytes verified"));
     assert!(!findings.contains(std::str::from_utf8(artifact).unwrap()));
     assert_no_leaked_workspace(&repo);
 }
@@ -2315,10 +2550,9 @@ async fn fix_rg_scoped_02_persisted_spec_resume_catalog_unavailable() {
     });
     let paused = run_bounded(&store, request, InvestigateCancelHandle::new(), 60).await;
     assert_eq!(paused.terminal_state, None, "silent investigator pauses");
-    let input = paused
-        .run_dir
-        .join("checkpoint-input")
-        .join("metadata.json");
+    workspace_descriptor(&store, &repo, &paused.run_id);
+    let input =
+        seed_legacy_checkpoint_input(&paused.run_dir, metadata, transcript).join("metadata.json");
     let state_before = std::fs::read(paused.run_dir.join("state.json")).expect("state");
     let bytes_before = std::fs::read(&input).expect("input");
     let mode_before = std::fs::metadata(&input)
@@ -2363,20 +2597,21 @@ async fn fix_rg_scoped_02_persisted_spec_resume_catalog_unavailable() {
             .mode(),
         mode_before
     );
+    assert_no_leaked_workspace(&repo);
 }
 
-/// Actual synthetic binary firstpass completes with genuine 0555 scoped input.
+/// A real synthetic run proves managed input consumption and cleanup, then an
+/// explicit schema-1 readonly fixture exercises legacy run-directory cleanup.
 async fn scoped03_completed_fixture(root: &Path) -> (PathBuf, String, PathBuf) {
     let repo = init_committed_repo(root);
     let id = "cafe75d2-4c53-465a-b890-a9f861a50cc7";
     let metadata = br#"{"schema_version":1,"agent_kind":"claude_code"}"#;
     let transcript = b"{\"role\":\"user\",\"text\":\"captured turn\"}\n";
     seed_v1_checkpoint(&repo, id, metadata, transcript).await;
-    let script = stage_fixture(&root.join("fixtures"), "investigator-conclude.sh");
     let bin = root.join("only-synthetic-bin");
     std::fs::create_dir(&bin).unwrap();
     let codex = bin.join("codex");
-    std::fs::copy(&script, &codex).unwrap();
+    std::fs::write(&codex, format!("#!/bin/sh\n{}\n", checkpoint_probe(true))).unwrap();
     std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o755)).unwrap();
     let path = format!("{}:/usr/bin:/bin:/usr/sbin:/sbin", bin.display());
     let output = run_libra(
@@ -2403,7 +2638,23 @@ async fn scoped03_completed_fixture(root: &Path) -> (PathBuf, String, PathBuf) {
     assert_eq!(output["data"]["terminal_state"], "quorum");
     let id = output["data"]["run_id"].as_str().unwrap().to_owned();
     let run_root = repo.join(".libra/sessions/agent-runs").join(&id);
-    let input = run_root.join("checkpoint-input");
+    workspace_descriptor(&store_for(&repo), &repo, &id);
+    assert!(!run_root.join("checkpoint-input").exists());
+    let input = seed_legacy_checkpoint_input(&run_root, metadata, transcript);
+    for name in ["state.json", "manifest.json"] {
+        let path = run_root.join(name);
+        let mut document: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        document["schema_version"] = serde_json::json!(1);
+        document
+            .as_object_mut()
+            .unwrap()
+            .remove("workspace_descriptor");
+        if name == "state.json" {
+            document["workspace_root"] = serde_json::json!(input);
+        }
+        std::fs::write(path, serde_json::to_vec_pretty(&document).unwrap()).unwrap();
+    }
     assert_eq!(
         std::fs::metadata(&input).unwrap().permissions().mode() & 0o777,
         0o555

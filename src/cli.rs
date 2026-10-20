@@ -3346,7 +3346,7 @@ async fn parse_async_scoped(argv: Vec<std::ffi::OsString>) -> CliResult<()> {
         // code. What it must never be is a generic "unsupported".
         .with_stable_code(utils::error::StableErrorCode::RepoStateInvalid)
         .with_hint(
-            "run `libra worktree repair --migrate-layout --confirm <this-path>` from the \
+            "run `libra worktree repair --migrate-layout --confirm --path <this-path>` from the \
              main worktree to migrate it to the isolated layout (read-only commands still \
              work; `--dry-run` previews it without confirmation)",
         ));
@@ -3385,7 +3385,7 @@ async fn parse_async_scoped(argv: Vec<std::ffi::OsString>) -> CliResult<()> {
                 // LBR-REPO-002.
                 .with_stable_code(utils::error::StableErrorCode::RepoCorrupt)
                 .with_hint(
-                    "run `libra worktree repair <this-worktree-path> --confirm` from the main \
+                    "run `libra worktree repair --confirm --path <this-worktree-path>` from the main \
                      worktree to restore this worktree's identity from the registry \
                      (read-only commands still work)",
                 ));

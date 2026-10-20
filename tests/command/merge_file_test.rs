@@ -286,7 +286,10 @@ fn backup_is_worktree_local() {
     let wt_root = tempfile::tempdir().expect("wt root");
     let wt = wt_root.path().join("mf-wt");
     assert_cli_success(
-        &run_libra_command(&["worktree", "add", wt.to_str().unwrap()], main),
+        &run_libra_command(
+            &["worktree", "add", "mf-wt", "--path", wt.to_str().unwrap()],
+            main,
+        ),
         "worktree add",
     );
 

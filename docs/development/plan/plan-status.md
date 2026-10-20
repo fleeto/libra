@@ -238,6 +238,7 @@
 
 | 计划 | 类别 | 状态 | 一句话进度（卡片状态） |
 |---|---|---|---|
+| [`plan-20261019-agent-mcp-server.md`](plan-20261019-agent-mcp-server.md) | B（外部 Agent 标准 MCP 接入） | 未启动 | 41 卡（MC-01..MC-08、MC-10..MC-41、MC-43；MC-09 已撤销，MC-42 已并入 MC-06），全部 pending；`libra agent mcp` 标准 MCP 入口（stdio 供 WorkBuddy；loopback HTTP 经 HTTPS 终端供 Grok Bot 客户端工具——不是 Grok 模型），bridge 对外契约不变、只服务 DeepSeek Harness；计划级 review：Codex R64 PASS（R66 差异确认 PASS）。 |
 | [`plan-20261019-worktree-layout.md`](plan-20261019-worktree-layout.md) | 横切（worktree 默认目录与任务生命周期） | 实施中 | WD-01..08 与 WD-02G 已授权；正式 0/9，REL-WD01 待最终验证及发布；旧数据不迁移。 |
 | [`plan-20261015.md`](plan-20261015.md) | B（外部Agent traces）+ 横切（Mega2 Agent 历史检索） | 实施中；Mega2 MTR-10 in-progress，Libra LTR-00 locally-accepted | 2026-10-19 15:38:49 UTC：Mega2 G-13 已退出，FIX-MTR-03/01 分别完成独立发布；FIX-MTR-04 不发布。旧 B8 FAIL、8/8 STOP 及 FIX-MTR-03 AC-1/VER-5 未勾选保持历史。MTR-87 `v0.42.55` Docker D 成功；MTR-10 四项专有 VER 通过，Git 协议 smoke 与双审仍待，本卡完整 C/D 未完成。Libra 合并候选保留 handoff 两笔文档提交及上游 COV/OG，当前 H0 尚未取得 PASS，待最新两仓联合复审；LTR-00 formal 0/26、LTR-01 未开工。原交接见[WIP 交接段](plan-20261015.md#wip-migration-checkpoint-20261016)。 |
 | [`plan-20261001-mega-browser-noninteractive.md`](plan-20261001-mega-browser-noninteractive.md) | 横切（Mega2 browser 非交互操作 / 黑盒驱动） | **已收口** | **2026-10-04 21:11:16 UTC**：MN-01..MN-12 全部 `done`/`complete`，v0.30.27 与 `DEP-MN-03` 已交付；PR #609 以原 head `adb9b59` 合并，后续修复基于 main `622bed5` 移至 `fix/opencode-exporter-cancel-ci`；全量本地测试、格式与 workflow lint 通过；PR #612 首轮 run `37230096807` 的 Linux Clippy 检出未使用的 `linux_pidfd_supported`，已删除，run `37231625328` 又发现通用 runner 错误要求 `NSpid=1`；现仅 trusted-bwrap runner 捕获 namespace pidfd，本地 exporter 模块 15/15、Clippy/fmt/actionlint 通过；run `37233480909` 的 sandbox gates 通过，Clippy 与 bridge 编译均遇到 `run_bounded_exporter` `dead_code`，现已限定 wrapper 为 `cfg(test)`；待新 run 验收 Clippy 与 bridge E2E。原实现基线 `faae20c`、Codex R19/R20/R22 与版本信息见计划正文；无 LR 编号|
@@ -319,6 +320,7 @@
 
 | 计划 | 全部待执行卡 | 开工前置条件 |
 |---|---|---|
+| [`plan-20261019-agent-mcp-server.md`](plan-20261019-agent-mcp-server.md) | MC-01..MC-08、MC-10..MC-41、MC-43（41 卡 pending；MC-09 撤销，MC-42 并入 MC-06） | 计划级 review：Codex R64 PASS（R66 差异确认 PASS）；DEP-MC-01（grok 计划 migration.rs 写集）、DEP-MC-03（并发未提交改动）按卡核对 |
 | [`plan-20260924.md`](plan-20260924.md) | ACF-01..20 与 FIX-ACF-01 `done`/`complete` | **已收口**（ACF-09 `Lifecycle=done`、`Acceptance=complete`）；`DEP-ACF-MIRROR` 已交接 |
 | [`plan-20260926.md`](plan-20260926.md) | DM-00..DM-13（14 卡；`DM-00` `done`/`complete`，`DM-01` `done`/`complete`，`DM-10` `done`/`complete`，`DM-02` `done`/`complete`，其余 pending） | R11 字面 `VERDICT: PASS`（`P0=0` / `P1=0`）。`DM-00` 已于 2026-10-07 `done`/`complete`（#456 取材清单、远端事实冻结、plan-20260819 退役）。`DM-01` 已于 2026-10-07 `done`/`complete`（迁移 A `2026092901_memory_core` 交付，REL-DM-01 独立发布至 v0.30.31 / PR #614 / merge `603bad3` / release run `37588423715`；本地 nextest（umask 0022）9549/9549 + D 组 base.yml/CodeQL 全绿；ER-05 评审待记录）。`DM-10` 已于 2026-10-07 `done`/`complete`（迁移 B `2026092902_memory_path_search` 交付，REL-DM-01 独立发布至 v0.30.35 / PR #618 / merge `c384bc7` / 版本面补丁 `b51f5c3`；D 组 base.yml/CodeQL + compat-offline-core 全绿；ER-05 评审待记录）。`DM-02` 已于 2026-10-08 `done`/`complete`（`src/internal/ai/memory/` commit/change 派生实现，REL-DM-01 独立发布至 v0.30.37 / PR #620 / merge `125657b`；D 组 base.yml/CodeQL + compat-offline-core 全绿；含 `parse_repo_oid`（object_format）修复；ER-05 待记录）。`DEP-DM-06` 正式 handoff 已由 ACF-09（`Lifecycle=done`、`Acceptance=complete`）完成；DM-05 仍 `pending` 并须在开工日按 ER-02 重核（经 DEP-DM-06） |
 | [`plan-20260905.md`](plan-20260905.md) | CC-00..CC-08 done / complete | 见计划[最终 C/D 与完成](plan-20260905.md#cc-closeout-20261019)；v0.30.66 已发布 |
@@ -554,6 +556,7 @@ SBX-01..05 `done/locally-accepted`；**发布步按 DEFER-SBX-06 正式延后**�
 
 | 计划 | 入口卡 | 卡要做什么（简述） | 内部前置 | 计划级 review 门 | 外部/跨计划门控 | 可立即开工 |
 |---|---|---|---|---|---|---|
+| [`plan-20261019-agent-mcp-server`](plan-20261019-agent-mcp-server.md) | MC-01 | stdio 上的 legacy MCP 协议核心（`libra agent mcp --stdio`） | 无 | Codex R64 PASS（R66 差异确认 PASS） | DEP-MC-03（并发未提交改动写集核对） | ✅ |
 | [`plan-20260822`](plan-20260822.md) | （PR #503 收口；OL-14 已取消、OL-15 `remote-pending`） | — | — | — | — | ⏳ 等待 compat-offline-core 远端门禁 |
 | [`plan-20260926`](plan-20260926.md) | DM-00 | 冻结 #456 事实基线、编制取材清单并登记 R30 退役 | 无 | **已过**（R11 字面 `VERDICT: PASS`，`P0=0` / `P1=0`） | **DEP-DM-03**（#456 只读 clone，`/tmp/libra-pr456` 降级路径）+ **DEP-DM-05**（R30 退役登记）均已满足 | ✅ `done`/`complete`（2026-10-07：取材清单 + 冻结远端事实 + R30 退役） |
 | [`plan-20260919`](plan-20260919.md) | GCX-02 | legacy 全局 config DB 首次使用自动迁移（锁+快照+校验+原子提交） | GCX-01（已 `done/complete`） | **本轮按操作者指示未评审** | DEP-GCX-02：与 plan-20260918 串行写 `COMPATIBILITY.md`/网站页（0918 未开工，写集 clean） | ✅ `done/complete`（v0.30.32，PR #615） |

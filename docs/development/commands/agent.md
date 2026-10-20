@@ -239,6 +239,14 @@ Retention GC physically deletes terminal ownerless import identities once no
 coverage claim remains, including zero-checkpoint rows. Dry-run obtains the
 same identity count by simulating coverage removal in a rolled-back transaction.
 
+## MCP server (plan-20261019 MC-01)
+
+`src/internal/ai/mcp_server/` is a second front end beside the Harness bridge (ADR-MC-02). It does not change the bridge allowlist, protocol version, limits, error catalog, NDJSON transport, or `agent_bridge_*` tables. MCP protocol versions, JSON-RPC codes, the 256 KiB line cap, and the tool registry live only in `mcp_server` (ADR-MC-03, ADR-MC-08).
+
+`libra agent mcp --stdio` speaks legacy MCP `2025-11-25` and `2025-06-18`: `initialize`, `notifications/initialized`, `ping`, `tools/list`, and `tools/call`. An unknown `protocolVersion` falls back to `2025-11-25`. Batches are rejected. Unknown tools are protocol errors. Arguments that fail a tool's input schema are tool error `LBR-AGENT-027`. stdout is JSON-RPC only.
+
+Production tool calls are translated into an internal `BridgeRequest` built by the server. Client parameters enter only allowlisted `params` fields; the client does not choose repository scope. MC-01 registers no production tool. The debug-only `libra_test_echo` tool exists when `LIBRA_TEST=1` so the tool-error path and `outputSchema` fixture can be checked. Each tool's `outputSchema` is `{"type":"object","anyOf":[<success>, TOOL_ERROR_SCHEMA]}`.
+
 ## Bridge (plan-20260818 LB-01)
 
 `libra agent bridge --stdio` is the repository-scoped DeepSeek Harness ingress.

@@ -203,6 +203,7 @@
 | 2026-10-20 10:09:01 UTC | Codex R62 FAIL（4×P1） | 卡数不变（41）：MC-13 接收改为连接准入（64 个连接许可，耗尽即 503）+ `hyper-util` 连接层 `header_read_timeout(10 s)` + 自头部读完起不重置的 10 s 请求体绝对期限（408），不再依赖 `tower_http`；`hyper`/`hyper-util` 加为直接依赖并入写集；滴流请求体、停滞头部、连接上限三门；令牌锁文件名统一为父目录中的 `sha256(文件名)` | — | MC-13/17 |
 | 2026-10-20 10:17:45 UTC | Codex R63 FAIL（3×P1、1×P2） | 卡数不变（41）：MC-13 改为只服务 HTTP/1.1（`hyper::server::conn::http1::Builder`，不启用 `server-auto`），HTTP/2 前言被关闭并加一门；MC-02/08/11/13/38/41/43 中「成功且 X」的复合判据改写为以成功为前提的单一谓词（MC-15 同步）；ADR-MC-03 改为「不引入 MCP SDK」并列明允许的直接依赖 | — | ADR-MC-03、MC-02/08/11/13/15/38/41/43 |
 | 2026-10-20 10:30:15 UTC | Codex R64 PASS（0×P1、1×P2） | 卡数不变（41）：按 R64 唯一的 P2 修正 MC-13 的 HTTP 内存预算表述——计入 Hyper 连接读缓冲（默认约 400 KiB，hyper#4081 的超额读分配不当作严格上限），改为每连接 ≤ 1 MiB、合计 ≤ 64 MiB 的容量估计；不新增判据（R65 曾尝试以 `max_buf_size` 封顶，被确认在 Hyper 1.8.1 下不可靠，已撤回）；该改动经 R66 确认 | — | MC-13 |
+| 2026-10-20 12:40:00 UTC | 使用者要求保持 0.30.xx，且 stable manifest 仍是 0.30.66 | 工作区版本面是未发布的 0.31.1（本地 tag `v0.31.0` 存在，stable `manifest-v1.json` 的 `version` 为 `0.30.66`，control_revision 167）。发布端点拒绝 `version_regression`，因此不把版本面升到 0.31.2，也不改写已发布 tag。MC-01 起把三个版本面从 0.31.1 调回 0.30.67（相对已发布 stable 单调 +1）。 | — | 版本面 |
 
 ## 已决议设计决策
 
@@ -487,7 +488,7 @@ ER-01 至 ER-14 按模板原文对本计划全部任务生效（见 [`plan-templ
 
 **Task type:** `implementation`
 
-**Lifecycle / Acceptance:** `pending` / 空
+**Lifecycle / Acceptance:** `in-progress` / 空
 
 **Description:** 新增 `libra agent mcp --stdio`：在当前仓库内按 legacy 纪元（`2025-11-25`/`2025-06-18`）提供 `initialize`、`notifications/initialized`、`ping`、`tools/list`、`tools/call`，以及 ADR-MC-08 的错误分层（协议错误与工具错误）。本卡不提供任何生产工具（`tools/list` 为空）；为验证工具错误路径，注册仅在 `cfg(debug_assertions)` 且 `LIBRA_TEST=1` 时存在的测试工具 `libra_test_echo`（原样返回参数对象）；建立工具注册契约（GC-MC-10）：每个工具注册时必须给出 `outputSchema = {"type": "object", "anyOf": [<成功结构>, TOOL_ERROR_SCHEMA]}`（`TOOL_ERROR_SCHEMA` 在 `protocol.rs` 单点定义）以及一个一致性夹具（在独立的临时仓库中完成该工具的前置条件——如 `--allow-write` 会话、暂存改动与 `expected_head`、先行 claim 取得的 fence——并返回一组成功参数与一组工具错误参数，结束时清理），缺任一项无法编译注册（根上的 `"type": "object"` 为 2025 两个 legacy 版本 wire schema 对 `Tool.outputSchema` 的要求）；新增注册表级一致性测试，逐个工具运行其夹具后以两组参数调用并用 dev-dependency `jsonschema`（以 `cargo add --dev jsonschema` 加入并写成精确版本 `=x.y.z`，版本号记入本卡证据）校验 `structuredContent`。请求 tracing span 由 MC-22 承接。结果信封由 MC-16（脱敏）与 MC-19（大小上限、读 deadline）承接。唯一行为轴：「stdio 上的 MCP 握手、错误分层与帧」。
 
@@ -502,84 +503,90 @@ ER-01 至 ER-14 按模板原文对本计划全部任务生效（见 [`plan-templ
 | 脱敏函数 | `src/internal/ai/agent_bridge/redaction.rs:20-53`（`review::redact_untrusted`、`scrub_controls`） |
 | bridge 稳定码 | `src/internal/ai/agent_bridge/protocol.rs:271-390` |
 | 规范 stdio 规则、tools 错误处理 | 规范 `2025-11-25/basic/transports.mdx` 第 28-34 行；`2025-11-25/server/tools.mdx`「Error Handling」（pin `1155ca46`） |
+| 版本面 | `Cargo.toml` `0.30.67`；`install.sh` `DEFAULT_VERSION="v0.30.67"`；`install.ps1` `$DefaultVersion = "v0.30.67"`。stable manifest 仍是 `0.30.66`，本卡从该线上单调 +1。 |
+| 门二进制 | `command -v libra` = `/mnt/data/libra/target/debug/libra`；`libra --version` = `libra 0.30.67` |
+| jsonschema | dev-dependency `jsonschema` `=0.59.0`（`default-features = false`） |
+| A/B 门 | `agent_mcp_stdio_test` 22 个 `--exact` 与 `agent_mcp_conformance_test` 7 个 `--exact` 均 `test result: ok. 1 passed; 0 failed`（`source .env.test && source .env.live-test`）。两次真实 `libra agent mcp --stdio`：`initialize` 的 `protocolVersion` 为 `2025-11-25`，`serverInfo.name` 为 `libra`，`serverInfo.version` 为 `0.30.67`；`tools/list` 无 `libra_test_`。 |
+| C 组全量 | `source .env.test && source .env.live-test && cargo nextest run --all --no-fail-fast --retries 2`：`Summary [ 554.824s] 10576 tests run: 10576 passed (11 slow, 1 flaky), 21 skipped`，exit 0。首轮唯一失败是 `compat_serial_registry` 的外部组计数（自定义 `mcp_registry` 车道），已改为 `#[serial(env)]` 并重跑至绿。 |
+| 网站 | `agent.en.md` 已由 sync `--write --only agent` 写入（13 行）。全库 `--check` 仍报 9 个非本卡页面漂移（cat-file、diff-files、hash-object、rev-parse、symbolic-ref、update-index、update-ref、upgrade、worktree），未同步、未提交。线上页与 Codex 语义复核未完成。 |
 
 **Acceptance criteria:**
 
-- [ ] AC-1 `initialize` 请求 `2025-11-25` 时结果 `protocolVersion` 等于 `"2025-11-25"`。
-- [ ] AC-2 `initialize` 请求 `2025-06-18` 时结果 `protocolVersion` 等于 `"2025-06-18"`。
-- [ ] AC-3 `initialize` 请求 `1900-01-01` 时结果 `protocolVersion` 等于 `"2025-11-25"`。
-- [ ] AC-4 `initialize` 结果 `serverInfo.name` 等于 `"libra"`。
-- [ ] AC-5 `initialize` 结果 `serverInfo.version` 等于 `Cargo.toml` 的 `[package].version`。
-- [ ] AC-6 `initialize` 结果 `capabilities` 等于 `{"tools":{"listChanged":false}}`。
-- [ ] AC-7 成功 `initialize` 之前发送不带 `_meta` 的 `tools/list` 得到 JSON-RPC 错误响应（具体错误码：MC-01 时为 `-32600`，MC-14 起为 `-32602`，由 MC-14 的门判定）。
-- [ ] AC-8 `initialize` 之后 `ping` 的结果等于 `{}`。
-- [ ] AC-9 `initialize` 之后发送 `notifications/initialized` 再发送 `ping`，stdout 新增的行恰为该 `ping` 的响应（通知不产生任何输出）。
-- [ ] AC-10 JSON 数组形式的 batch 得到协议错误 `-32600`。
-- [ ] AC-11 未知方法得到协议错误 `-32601`。
-- [ ] AC-12 不是合法 JSON 的输入行得到协议错误 `-32700`。
-- [ ] AC-13 未设置 `LIBRA_TEST` 时 `tools/list` 中没有名称以 `libra_test_` 开头的工具（MC-01 发布时列表为空，后续卡新增生产工具不影响本门）。
-- [ ] AC-14 `tools/call` 未知工具名得到协议错误 `-32602`。
-- [ ] AC-15 `libra_test_echo` 传入 schema 未声明的字段得到工具错误 `LBR-AGENT-027`。
-- [ ] AC-16 一次会话中 stdout 的每一行都能解析为 JSON-RPC 消息。
-- [ ] AC-17 超过 256 KiB 的输入行得到协议错误 `-32600`。
-- [ ] AC-18 超长输入行之后的下一个 `ping` 得到 `{}`。
-- [ ] AC-19 stdin EOF 后进程退出码为 0。
-- [ ] AC-20 在非仓库目录启动时进程退出码非 0。
-- [ ] AC-21 在非仓库目录启动且 stdin 保持打开时，进程在 5 s 内自行退出。
-- [ ] AC-22 不带 `--stdio`/`--transport` 时以用法拒绝 `LBR-CLI-002` 结束。
-- [ ] AC-23 注册表中每个工具的 `outputSchema.anyOf` 都包含 `TOOL_ERROR_SCHEMA`。
-- [ ] AC-24 注册表中每个工具以其成功示例参数调用时，结果的 `isError` 不为 `true`。
-- [ ] AC-25 同一成功结果的 `structuredContent` 通过该工具 `outputSchema.anyOf` 的成功分支校验。
-- [ ] AC-26 注册表中每个工具以其工具错误示例参数调用时，结果的 `isError` 为 `true`。
-- [ ] AC-27 同一错误结果的 `structuredContent` 通过 `TOOL_ERROR_SCHEMA` 校验。
-- [ ] AC-28 `tools/list` 结果通过固定提交 `1155ca46` 的 `schema/2025-11-25/schema.json` 中 `ListToolsResult` 定义的 JSON Schema 校验（schema 副本存于测试 fixture）。
-- [ ] AC-29 同一结果通过同一提交 `schema/2025-06-18/schema.json` 中 `ListToolsResult` 的校验。
+- [x] AC-1 `initialize` 请求 `2025-11-25` 时结果 `protocolVersion` 等于 `"2025-11-25"`。
+- [x] AC-2 `initialize` 请求 `2025-06-18` 时结果 `protocolVersion` 等于 `"2025-06-18"`。
+- [x] AC-3 `initialize` 请求 `1900-01-01` 时结果 `protocolVersion` 等于 `"2025-11-25"`。
+- [x] AC-4 `initialize` 结果 `serverInfo.name` 等于 `"libra"`。
+- [x] AC-5 `initialize` 结果 `serverInfo.version` 等于 `Cargo.toml` 的 `[package].version`。
+- [x] AC-6 `initialize` 结果 `capabilities` 等于 `{"tools":{"listChanged":false}}`。
+- [x] AC-7 成功 `initialize` 之前发送不带 `_meta` 的 `tools/list` 得到 JSON-RPC 错误响应（具体错误码：MC-01 时为 `-32600`，MC-14 起为 `-32602`，由 MC-14 的门判定）。
+- [x] AC-8 `initialize` 之后 `ping` 的结果等于 `{}`。
+- [x] AC-9 `initialize` 之后发送 `notifications/initialized` 再发送 `ping`，stdout 新增的行恰为该 `ping` 的响应（通知不产生任何输出）。
+- [x] AC-10 JSON 数组形式的 batch 得到协议错误 `-32600`。
+- [x] AC-11 未知方法得到协议错误 `-32601`。
+- [x] AC-12 不是合法 JSON 的输入行得到协议错误 `-32700`。
+- [x] AC-13 未设置 `LIBRA_TEST` 时 `tools/list` 中没有名称以 `libra_test_` 开头的工具（MC-01 发布时列表为空，后续卡新增生产工具不影响本门）。
+- [x] AC-14 `tools/call` 未知工具名得到协议错误 `-32602`。
+- [x] AC-15 `libra_test_echo` 传入 schema 未声明的字段得到工具错误 `LBR-AGENT-027`。
+- [x] AC-16 一次会话中 stdout 的每一行都能解析为 JSON-RPC 消息。
+- [x] AC-17 超过 256 KiB 的输入行得到协议错误 `-32600`。
+- [x] AC-18 超长输入行之后的下一个 `ping` 得到 `{}`。
+- [x] AC-19 stdin EOF 后进程退出码为 0。
+- [x] AC-20 在非仓库目录启动时进程退出码非 0。
+- [x] AC-21 在非仓库目录启动且 stdin 保持打开时，进程在 5 s 内自行退出。
+- [x] AC-22 不带 `--stdio`/`--transport` 时以用法拒绝 `LBR-CLI-002` 结束。
+- [x] AC-23 注册表中每个工具的 `outputSchema.anyOf` 都包含 `TOOL_ERROR_SCHEMA`。
+- [x] AC-24 注册表中每个工具以其成功示例参数调用时，结果的 `isError` 不为 `true`。
+- [x] AC-25 同一成功结果的 `structuredContent` 通过该工具 `outputSchema.anyOf` 的成功分支校验。
+- [x] AC-26 注册表中每个工具以其工具错误示例参数调用时，结果的 `isError` 为 `true`。
+- [x] AC-27 同一错误结果的 `structuredContent` 通过 `TOOL_ERROR_SCHEMA` 校验。
+- [x] AC-28 `tools/list` 结果通过固定提交 `1155ca46` 的 `schema/2025-11-25/schema.json` 中 `ListToolsResult` 定义的 JSON Schema 校验（schema 副本存于测试 fixture）。
+- [x] AC-29 同一结果通过同一提交 `schema/2025-06-18/schema.json` 中 `ListToolsResult` 的校验。
 - [ ] ER-06/ER-06a 同卡强制门：下方「同卡文档门」逐文件全部通过；网站页另按 GC-MC-05 ①–⑥ 交付（不计入 AC 上限）。
 
 **判据规范（非计数正文）:** 门族（29 个，逐一列名；第 i 个门只判定 AC-i 一个谓词，失败即整卡不达标，`--exact` 门按 GC-MC-07 执行）：AC-1=`agent_mcp_stdio_test::initialize_echoes_2025_11_25`；AC-2=`agent_mcp_stdio_test::initialize_echoes_2025_06_18`；AC-3=`agent_mcp_stdio_test::initialize_unknown_version_falls_back`；AC-4=`agent_mcp_stdio_test::initialize_server_name`；AC-5=`agent_mcp_stdio_test::initialize_server_version`；AC-6=`agent_mcp_stdio_test::initialize_capabilities_tools_only`；AC-7=`agent_mcp_stdio_test::request_before_initialize_is_error`；AC-8=`agent_mcp_stdio_test::ping_after_initialize`；AC-9=`agent_mcp_stdio_test::initialized_notification_is_silent`；AC-10=`agent_mcp_stdio_test::batch_is_rejected`；AC-11=`agent_mcp_stdio_test::unknown_method_is_32601`；AC-12=`agent_mcp_stdio_test::invalid_json_is_32700`；AC-13=`agent_mcp_stdio_test::test_tools_hidden_in_production`；AC-14=`agent_mcp_stdio_test::unknown_tool_is_32602`；AC-15=`agent_mcp_stdio_test::schema_violation_is_tool_error`；AC-16=`agent_mcp_stdio_test::stdout_is_only_jsonrpc`；AC-17=`agent_mcp_stdio_test::oversized_line_is_32600`；AC-18=`agent_mcp_stdio_test::server_survives_oversized_line`；AC-19=`agent_mcp_stdio_test::eof_exits_zero`；AC-20=`agent_mcp_stdio_test::outside_repository_fails`；AC-21=`agent_mcp_stdio_test::outside_repository_exits_without_eof`；AC-22=`agent_mcp_stdio_test::missing_transport_is_usage_error`；AC-23=`agent_mcp_conformance_test::every_tool_schema_includes_error_shape`；AC-24=`agent_mcp_conformance_test::every_tool_success_example_is_success`；AC-25=`agent_mcp_conformance_test::every_tool_success_matches_success_branch`；AC-26=`agent_mcp_conformance_test::every_tool_error_example_is_error`；AC-27=`agent_mcp_conformance_test::every_tool_error_matches_error_schema`；AC-28=`agent_mcp_conformance_test::tools_list_matches_2025_11_25_schema`；AC-29=`agent_mcp_conformance_test::tools_list_matches_2025_06_18_schema`。
 
 **Verification:**（本卡特有判据，计入 G-03；`--exact` 门按 GC-MC-07 执行）
 
-- [ ] AC-1：`source .env.test && cargo test --test agent_mcp_stdio_test initialize_echoes_2025_11_25 -- --exact`（new）
-- [ ] AC-2：`source .env.test && cargo test --test agent_mcp_stdio_test initialize_echoes_2025_06_18 -- --exact`（new）
-- [ ] AC-3：`source .env.test && cargo test --test agent_mcp_stdio_test initialize_unknown_version_falls_back -- --exact`（new）
-- [ ] AC-4：`source .env.test && cargo test --test agent_mcp_stdio_test initialize_server_name -- --exact`（new）
-- [ ] AC-5：`source .env.test && cargo test --test agent_mcp_stdio_test initialize_server_version -- --exact`（new）
-- [ ] AC-6：`source .env.test && cargo test --test agent_mcp_stdio_test initialize_capabilities_tools_only -- --exact`（new）
-- [ ] AC-7：`source .env.test && cargo test --test agent_mcp_stdio_test request_before_initialize_is_error -- --exact`（new）
-- [ ] AC-8：`source .env.test && cargo test --test agent_mcp_stdio_test ping_after_initialize -- --exact`（new）
-- [ ] AC-9：`source .env.test && cargo test --test agent_mcp_stdio_test initialized_notification_is_silent -- --exact`（new）
-- [ ] AC-10：`source .env.test && cargo test --test agent_mcp_stdio_test batch_is_rejected -- --exact`（new）
-- [ ] AC-11：`source .env.test && cargo test --test agent_mcp_stdio_test unknown_method_is_32601 -- --exact`（new）
-- [ ] AC-12：`source .env.test && cargo test --test agent_mcp_stdio_test invalid_json_is_32700 -- --exact`（new）
-- [ ] AC-13：`source .env.test && cargo test --test agent_mcp_stdio_test test_tools_hidden_in_production -- --exact`（new）
-- [ ] AC-14：`source .env.test && cargo test --test agent_mcp_stdio_test unknown_tool_is_32602 -- --exact`（new）
-- [ ] AC-15：`source .env.test && cargo test --test agent_mcp_stdio_test schema_violation_is_tool_error -- --exact`（new）
-- [ ] AC-16：`source .env.test && cargo test --test agent_mcp_stdio_test stdout_is_only_jsonrpc -- --exact`（new）
-- [ ] AC-17：`source .env.test && cargo test --test agent_mcp_stdio_test oversized_line_is_32600 -- --exact`（new）
-- [ ] AC-18：`source .env.test && cargo test --test agent_mcp_stdio_test server_survives_oversized_line -- --exact`（new）
-- [ ] AC-19：`source .env.test && cargo test --test agent_mcp_stdio_test eof_exits_zero -- --exact`（new）
-- [ ] AC-20：`source .env.test && cargo test --test agent_mcp_stdio_test outside_repository_fails -- --exact`（new）
-- [ ] AC-21：`source .env.test && cargo test --test agent_mcp_stdio_test outside_repository_exits_without_eof -- --exact`（new）
-- [ ] AC-22：`source .env.test && cargo test --test agent_mcp_stdio_test missing_transport_is_usage_error -- --exact`（new）
-- [ ] AC-23：`source .env.test && cargo test --test agent_mcp_conformance_test every_tool_schema_includes_error_shape -- --exact`（new）
-- [ ] AC-24：`source .env.test && cargo test --test agent_mcp_conformance_test every_tool_success_example_is_success -- --exact`（new）
-- [ ] AC-25：`source .env.test && cargo test --test agent_mcp_conformance_test every_tool_success_matches_success_branch -- --exact`（new）
-- [ ] AC-26：`source .env.test && cargo test --test agent_mcp_conformance_test every_tool_error_example_is_error -- --exact`（new）
-- [ ] AC-27：`source .env.test && cargo test --test agent_mcp_conformance_test every_tool_error_matches_error_schema -- --exact`（new）
-- [ ] AC-28：`source .env.test && cargo test --test agent_mcp_conformance_test tools_list_matches_2025_11_25_schema -- --exact`（new）
-- [ ] AC-29：`source .env.test && cargo test --test agent_mcp_conformance_test tools_list_matches_2025_06_18_schema -- --exact`（new）
+- [x] AC-1：`source .env.test && cargo test --test agent_mcp_stdio_test initialize_echoes_2025_11_25 -- --exact`（new）
+- [x] AC-2：`source .env.test && cargo test --test agent_mcp_stdio_test initialize_echoes_2025_06_18 -- --exact`（new）
+- [x] AC-3：`source .env.test && cargo test --test agent_mcp_stdio_test initialize_unknown_version_falls_back -- --exact`（new）
+- [x] AC-4：`source .env.test && cargo test --test agent_mcp_stdio_test initialize_server_name -- --exact`（new）
+- [x] AC-5：`source .env.test && cargo test --test agent_mcp_stdio_test initialize_server_version -- --exact`（new）
+- [x] AC-6：`source .env.test && cargo test --test agent_mcp_stdio_test initialize_capabilities_tools_only -- --exact`（new）
+- [x] AC-7：`source .env.test && cargo test --test agent_mcp_stdio_test request_before_initialize_is_error -- --exact`（new）
+- [x] AC-8：`source .env.test && cargo test --test agent_mcp_stdio_test ping_after_initialize -- --exact`（new）
+- [x] AC-9：`source .env.test && cargo test --test agent_mcp_stdio_test initialized_notification_is_silent -- --exact`（new）
+- [x] AC-10：`source .env.test && cargo test --test agent_mcp_stdio_test batch_is_rejected -- --exact`（new）
+- [x] AC-11：`source .env.test && cargo test --test agent_mcp_stdio_test unknown_method_is_32601 -- --exact`（new）
+- [x] AC-12：`source .env.test && cargo test --test agent_mcp_stdio_test invalid_json_is_32700 -- --exact`（new）
+- [x] AC-13：`source .env.test && cargo test --test agent_mcp_stdio_test test_tools_hidden_in_production -- --exact`（new）
+- [x] AC-14：`source .env.test && cargo test --test agent_mcp_stdio_test unknown_tool_is_32602 -- --exact`（new）
+- [x] AC-15：`source .env.test && cargo test --test agent_mcp_stdio_test schema_violation_is_tool_error -- --exact`（new）
+- [x] AC-16：`source .env.test && cargo test --test agent_mcp_stdio_test stdout_is_only_jsonrpc -- --exact`（new）
+- [x] AC-17：`source .env.test && cargo test --test agent_mcp_stdio_test oversized_line_is_32600 -- --exact`（new）
+- [x] AC-18：`source .env.test && cargo test --test agent_mcp_stdio_test server_survives_oversized_line -- --exact`（new）
+- [x] AC-19：`source .env.test && cargo test --test agent_mcp_stdio_test eof_exits_zero -- --exact`（new）
+- [x] AC-20：`source .env.test && cargo test --test agent_mcp_stdio_test outside_repository_fails -- --exact`（new）
+- [x] AC-21：`source .env.test && cargo test --test agent_mcp_stdio_test outside_repository_exits_without_eof -- --exact`（new）
+- [x] AC-22：`source .env.test && cargo test --test agent_mcp_stdio_test missing_transport_is_usage_error -- --exact`（new）
+- [x] AC-23：`source .env.test && cargo test --test agent_mcp_conformance_test every_tool_schema_includes_error_shape -- --exact`（new）
+- [x] AC-24：`source .env.test && cargo test --test agent_mcp_conformance_test every_tool_success_example_is_success -- --exact`（new）
+- [x] AC-25：`source .env.test && cargo test --test agent_mcp_conformance_test every_tool_success_matches_success_branch -- --exact`（new）
+- [x] AC-26：`source .env.test && cargo test --test agent_mcp_conformance_test every_tool_error_example_is_error -- --exact`（new）
+- [x] AC-27：`source .env.test && cargo test --test agent_mcp_conformance_test every_tool_error_matches_error_schema -- --exact`（new）
+- [x] AC-28：`source .env.test && cargo test --test agent_mcp_conformance_test tools_list_matches_2025_11_25_schema -- --exact`（new）
+- [x] AC-29：`source .env.test && cargo test --test agent_mcp_conformance_test tools_list_matches_2025_06_18_schema -- --exact`（new）
 
 **同卡文档门（ER-06/ER-06a，全局强制，不计入 G-03；判定命令退出码 0 为通过）:**
 
-- [ ] `docs/error-codes.md`：`rg -qF -- 'libra agent mcp' docs/error-codes.md`
-- [ ] `docs/commands/agent.md`：`rg -qF -- 'agent mcp --stdio' docs/commands/agent.md && rg -qF -- '2025-11-25' docs/commands/agent.md && rg -qF -- '2025-06-18' docs/commands/agent.md && rg -qF -- 'LBR-AGENT-027' docs/commands/agent.md && rg -qF -- '"cwd"' docs/commands/agent.md`
-- [ ] `docs/commands/zh-CN/agent.md`：`rg -qF -- 'agent mcp --stdio' docs/commands/zh-CN/agent.md && rg -qF -- '2025-11-25' docs/commands/zh-CN/agent.md && rg -qF -- '2025-06-18' docs/commands/zh-CN/agent.md && rg -qF -- 'LBR-AGENT-027' docs/commands/zh-CN/agent.md && rg -qF -- '"cwd"' docs/commands/zh-CN/agent.md`
-- [ ] `docs/development/commands/agent.md`：`rg -qF -- 'mcp_server' docs/development/commands/agent.md && rg -qF -- 'BridgeRequest' docs/development/commands/agent.md`
-- [ ] `COMPATIBILITY.md`：`sed -n '252p' COMPATIBILITY.md | rg -qF -- 'agent mcp --stdio'`；行数不变：`test "$(libra diff --numstat -- COMPATIBILITY.md | cut -f1-2)" = "$(printf '1\t1')"`（提交前执行）
+- [x] `docs/error-codes.md`：`rg -qF -- 'libra agent mcp' docs/error-codes.md`
+- [x] `docs/commands/agent.md`：`rg -qF -- 'agent mcp --stdio' docs/commands/agent.md && rg -qF -- '2025-11-25' docs/commands/agent.md && rg -qF -- '2025-06-18' docs/commands/agent.md && rg -qF -- 'LBR-AGENT-027' docs/commands/agent.md && rg -qF -- '"cwd"' docs/commands/agent.md`
+- [x] `docs/commands/zh-CN/agent.md`：`rg -qF -- 'agent mcp --stdio' docs/commands/zh-CN/agent.md && rg -qF -- '2025-11-25' docs/commands/zh-CN/agent.md && rg -qF -- '2025-06-18' docs/commands/zh-CN/agent.md && rg -qF -- 'LBR-AGENT-027' docs/commands/zh-CN/agent.md && rg -qF -- '"cwd"' docs/commands/zh-CN/agent.md`
+- [x] `docs/development/commands/agent.md`：`rg -qF -- 'mcp_server' docs/development/commands/agent.md && rg -qF -- 'BridgeRequest' docs/development/commands/agent.md`
+- [x] `COMPATIBILITY.md`：`sed -n '252p' COMPATIBILITY.md | rg -qF -- 'agent mcp --stdio'`；行数不变：`test "$(libra diff --numstat -- COMPATIBILITY.md | cut -f1-2)" = "$(printf '1\t1')"`（提交前执行）
 - [ ] 网站源文件 `agent`：`rg -qF -- 'agent mcp --stdio' ../libra-backend/apps/tanstack-app/content/docs/commands/agent.en.md && rg -qF -- '2025-11-25' ../libra-backend/apps/tanstack-app/content/docs/commands/agent.en.md && rg -qF -- '2025-06-18' ../libra-backend/apps/tanstack-app/content/docs/commands/agent.en.md && rg -qF -- 'LBR-AGENT-027' ../libra-backend/apps/tanstack-app/content/docs/commands/agent.en.md && rg -qF -- '"cwd"' ../libra-backend/apps/tanstack-app/content/docs/commands/agent.en.md`；GC-MC-05 ①–⑤ 交付后线上页面：`PAGE="$(curl -fsS https://libra.tools/en/docs/commands/agent)" && printf '%s' "$PAGE" | rg -qF -- 'agent mcp --stdio' && printf '%s' "$PAGE" | rg -qF -- '2025-11-25' && printf '%s' "$PAGE" | rg -qF -- '2025-06-18' && printf '%s' "$PAGE" | rg -qF -- 'LBR-AGENT-027' && printf '%s' "$PAGE" | rg -qF -- '"cwd"'`（GC-MC-05 ⑥）
-- [ ] 测试索引：`rg -q '^\| `agent_mcp_stdio_test` ' tests/INDEX.md && rg -q 'name = "agent_mcp_stdio_test"' Cargo.toml`
-- [ ] 测试索引：`rg -q '^\| `agent_mcp_conformance_test` ' tests/INDEX.md && rg -q 'name = "agent_mcp_conformance_test"' Cargo.toml`
+- [x] 测试索引：`rg -q '^\| `agent_mcp_stdio_test` ' tests/INDEX.md && rg -q 'name = "agent_mcp_stdio_test"' Cargo.toml`
+- [x] 测试索引：`rg -q '^\| `agent_mcp_conformance_test` ' tests/INDEX.md && rg -q 'name = "agent_mcp_conformance_test"' Cargo.toml`
 - [ ] 语义复核：本卡 ER-05 Codex review 的输入包含上列每个文档文件的 diff，评审结论须逐文件确认其内容与本卡 `Docs and compatibility impact` 的内容说明一致（网站页另由 GC-MC-05 ④ 的 Claude Code PASS 覆盖）
 
 **Full-suite trigger:** `T-1: 新增 agent 子命令注册与 help EXAMPLES 合同，并在 Cargo.toml 新增 [[test]] 行`

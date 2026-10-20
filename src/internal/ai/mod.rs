@@ -7,6 +7,7 @@
 
 /// DeepSeek Harness bridge protocol/transport authority (plan-20260818 LB-01).
 pub mod agent_bridge;
+pub mod mcp_server;
 // Rule-driven automation MVP for hooks, cron, and source-triggered workflows.
 pub mod automation;
 // Step 2 sub-agent contracts. Runtime wiring lived in `agent/runtime` (RC-23).

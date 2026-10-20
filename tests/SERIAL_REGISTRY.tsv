@@ -937,3 +937,7 @@ wd_move_cross_device_refuses_without_copy	lane:cwd	changes the process working d
 wd_umount_cleanup_rejects_managed_prefix_before_unmount	lane:cwd	changes the process working directory for the default-build FUSE cleanup refusal test
 passphrase_and_plaintext_buffers_are_zeroized	global	shares the process-global scanning allocator needle with the leak-calibration test
 scanning_allocator_detects_a_deliberate_leak	global	shares the process-global scanning allocator needle with the passphrase test
+every_tool_error_example_is_error	lane:env	sets LIBRA_TEST so the in-process MCP registry includes the debug echo tool while the error example runs
+every_tool_error_matches_error_schema	lane:env	sets LIBRA_TEST so the in-process MCP registry includes the debug echo tool while the error schema runs
+every_tool_success_example_is_success	lane:env	sets LIBRA_TEST so the in-process MCP registry includes the debug echo tool while the success example runs
+every_tool_success_matches_success_branch	lane:env	sets LIBRA_TEST so the in-process MCP registry includes the debug echo tool while the success schema runs

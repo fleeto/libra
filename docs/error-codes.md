@@ -61,6 +61,8 @@ Set `LIBRA_FINE_EXIT_CODES=1` to re-enable the legacy fine-grained exit codes (2
 
 - `branch -d` / `--delete` refusals (not fully merged, missing branch, currently checked-out branch) exit **1**. Codes stay `LBR-REPO-003` or `LBR-CLI-003`.
 
+The MCP front end (`libra agent mcp`) reuses `LBR-AGENT-022..038` as tool errors (`result.isError` with `structuredContent.stable_code`). It does not allocate new stable codes. The trigger for each code under MCP is in the agent command docs.
+
 Bridge `LBR-AGENT-024..038` errors are **frame errors**: `libra agent bridge --stdio` answers them as JSON-RPC 2.0 error frames on stdout and keeps serving the next NDJSON line — the bridge process does not exit with `128`. Their exit-code column is marked `frame` accordingly. `LBR-AGENT-039..040` remain in `StableErrorCode` for retired controlled-fix outcomes; the removed `review --fix` and `investigate fix` paths no longer emit them. Their former CLI exit mapping was `128`.
 
 ## Migration From Fine-Grained Exit Codes

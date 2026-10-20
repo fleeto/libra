@@ -55,16 +55,26 @@ async fn https_upload_pack_returns_pack_data() {
         .await
         .expect("upload-pack request should succeed");
 
+    // The wire check only needs the pack signature, not a complete download
+    // of a public repository whose pack size grows over time.
+    const MAX_PACK_PREFIX: usize = 1024 * 1024;
     let mut buffer = Vec::new();
     while let Some(item) = result_stream.next().await {
-        buffer.extend(item.expect("pack stream chunk should be readable"));
+        let chunk = item.expect("pack stream chunk should be readable");
+        let remaining = MAX_PACK_PREFIX - buffer.len();
+        buffer.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+        if buffer
+            .windows(8)
+            .any(|window| window == b"PACK\0\0\0\x02" || window == b"PACK\0\0\0\x03")
+        {
+            return;
+        }
+        assert!(
+            buffer.len() < MAX_PACK_PREFIX,
+            "upload-pack response did not contain a PACK v2/v3 header in its first {MAX_PACK_PREFIX} bytes"
+        );
     }
-
-    let pack_pos = buffer
-        .windows(4)
-        .position(|window| window == b"PACK")
-        .expect("upload-pack response should contain pack data");
-    assert_eq!(&buffer[pack_pos..pack_pos + 4], b"PACK");
+    panic!("upload-pack response should contain a PACK v2/v3 header");
 }
 
 #[tokio::test]

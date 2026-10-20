@@ -88,7 +88,9 @@ impl Tool {
 }
 
 pub fn registered_tools() -> Vec<Tool> {
-    let mut tools = Vec::new();
+    // The only push is `cfg(debug_assertions)`. A release build leaves this
+    // empty, and `sort_by` then cannot infer the element type (E0282).
+    let mut tools: Vec<Tool> = Vec::new();
     #[cfg(debug_assertions)]
     if std::env::var("LIBRA_TEST").ok().as_deref() == Some("1") {
         tools.push(echo_tool());

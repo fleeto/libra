@@ -131,6 +131,9 @@ ownership lock，因此迟到的排队
 | 无法写入对象 | `LBR-IO-002` | 128 | 检查对象存储权限和磁盘空间；若原因为云索引 repair marker 注册失败，负载已安全写入，直接重试即可复用（hash-object 不暂存任何路径，也无需锁文件清理） |
 | 对象已写入但云索引修复仍待处理，且使用 `--exit-code-on-warning` | `LBR-WARN-001` | 9 | 修复警告中的仓库数据库/marker 问题；下一条仓库命令会自动重试 |
 
+> 退出码说明：格式错误的类型化内容与不支持的类型字符串退出 `129`（`LBR-CLI-002`），
+> 这是与 Git `128` 的有意差异（ADR-PL-02）。
+
 ## Blake3 repositories
 
 In a repository initialized with `libra init --object-format blake3`, hashes are 64-hex Blake3 object IDs.

@@ -26,6 +26,24 @@ suffixes cannot silently degrade to a different object. Reflog date selectors,
 `@{-N}`, `@{upstream}`/`@{push}`, and relative `./`/`../` tree paths remain
 unsupported and fail explicitly.
 
+Index-path specs resolve the current worktree index: `:<path>` reads the
+stage-0 entry, `:<n>:<path>` (n = 0–3) reads that merge stage (`:0:p` ≡ `:p`),
+and a leading `./` or `../` resolves relative to the current directory; every
+other path is repository-relative. A path absent from the index, a path whose
+requested stage is missing while another stage exists, and a `./`/`../` path
+escaping the worktree all fail with `LBR-CLI-003` (exit 129).
+
+Message-search specs find a commit by its message body (everything after the
+blank line that ends the commit header): `:/<regex>` starts from HEAD plus
+every local branch, remote-tracking branch, and tag; `<rev>^{/<regex>}` starts
+from `<rev>`. Both walk ancestors newest-first by committer timestamp and
+return the first match. A leading `!-` negates the match, `!!` keeps a literal
+leading `!`, and any other leading `!` is an error; an invalid regex, an
+oversized pattern, or no match is `LBR-CLI-003` (exit 129). Patterns use the
+Rust `regex` crate — a linear-time engine without backreferences or
+lookaround — so some POSIX-ERE-only patterns do not compile; matching is
+case-sensitive and only commit objects are read during the walk.
+
 `AUTO_MERGE` is the sole pseudo-ref accepted by this command: during a
 non-squash merge paused on conflicts, it resolves to the automatic result
 tree, including conflict markers. It disappears after `merge --continue`,
@@ -52,7 +70,7 @@ six historical pseudo-refs (`ORIG_HEAD`, `MERGE_HEAD`, `CHERRY_PICK_HEAD`,
 | `--is-shallow-repository` | Print `true` when `.libra/shallow` contains at least one shallow boundary, `false` otherwise. |
 | `--git-dir` | Print the path to the `.libra` directory (Libra's `$GIT_DIR`). In Libra this is always absolute. |
 | `--absolute-git-dir` | Like `--git-dir`, but always the canonicalized absolute path. (In Libra `--git-dir` is already absolute, so the two coincide.) |
-| `<SPEC>` | Object/revision spec to resolve. Supports typed peel, numeric reflog selectors, and `REV:path`; defaults to `HEAD` when omitted. |
+| `<SPEC>` | Object/revision spec to resolve. Supports typed peel, numeric reflog selectors, `REV:path`, index paths (`:<path>`, `:<n>:<path>`), and commit-message search (`:/<regex>`, `<rev>^{/<regex>}`); defaults to `HEAD` when omitted. |
 
 ## Common Commands
 
@@ -61,6 +79,10 @@ libra rev-parse
 libra rev-parse HEAD~1
 libra rev-parse 'HEAD^{tree}'
 libra rev-parse 'HEAD:src/main.rs'
+libra rev-parse :src/main.rs
+libra rev-parse :2:src/main.rs
+libra rev-parse ':/fix: crash'
+libra rev-parse 'HEAD^{/fix}'
 libra rev-parse 'main@{1}'
 libra rev-parse --short HEAD
 libra rev-parse --abbrev-ref HEAD
@@ -122,6 +144,8 @@ With a **single** `<SPEC>`, `data` is one such object (the shape above). With **
 | Resolve full object ID | `rev-parse <spec>` | `git rev-parse <spec>` | `jj log -r <rev> --no-graph -T commit_id` |
 | Typed/recursive peel | `^{commit/tree/blob/tag/object}` / `^{}` | same | N/A |
 | Tree path | `REV:path` | same | `jj file show -r REV path` |
+| Index path | `:<path>` / `:<n>:<path>` | same | N/A |
+| Message search | `:/<regex>`, `<rev>^{/<regex>}` | same (POSIX ERE) | N/A |
 | Reflog selector | numeric `ref@{N}` | numeric/date/upstream/push/checkout forms | N/A |
 | Abbreviated object ID | `--short` | `--short` | `jj log -r <rev> -T change_id.short()` |
 | Symbolic branch name | `--abbrev-ref` | `--abbrev-ref` | N/A |

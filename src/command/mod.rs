@@ -101,6 +101,9 @@ pub mod remove;
 // budget independence) that no CLI path can construct today.
 pub mod rename_detect;
 pub mod repack;
+// Shared index stat-refresh and executable-bit helpers (issues/479 UI-02/03),
+// used by both `add` and `update-index`.
+pub mod refresh;
 pub mod replace;
 pub mod rerere;
 pub mod reset;

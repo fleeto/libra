@@ -1842,16 +1842,37 @@ pub async fn run_add(args: &AddArgs) -> CliResult<AddOutput> {
 
     // --- Refresh mode ---
     if args.refresh {
-        let tracked_modified =
-            filter_refresh_candidates(&visible_changes.modified, &validated.pathspecs);
+        // git's `add --refresh` refreshes the stat of every tracked path
+        // under the pathspecs — including stat-dirty files whose content
+        // still matches (the racy entries refresh exists to clear). The
+        // content-based status diff would miss exactly those, so the
+        // candidates are the tracked-file set itself.
+        let tracked_files: Vec<PathBuf> = index
+            .tracked_files()
+            .iter()
+            .filter_map(|path| path.to_str().map(PathBuf::from))
+            .collect();
+        let tracked_modified = crate::command::refresh::filter_refresh_candidates(
+            &tracked_files,
+            &validated.pathspecs,
+        );
         if args.dry_run {
             add_output.refreshed = tracked_modified
                 .iter()
                 .map(|f| f.display().to_string())
                 .collect();
         } else {
-            let refreshed = do_refresh_files(&mut index, &tracked_modified, &workdir)?;
-            add_output.refreshed = refreshed.iter().map(|f| f.display().to_string()).collect();
+            let report = crate::command::refresh::refresh_candidates(
+                &mut index,
+                &tracked_modified,
+                &workdir,
+                &crate::command::refresh::RefreshOptions::for_add_refresh(file_mode),
+            );
+            add_output.refreshed = report
+                .refreshed
+                .iter()
+                .map(|f| f.display().to_string())
+                .collect();
             let batch_storage = util::objects_storage();
             let stored_objects = batch_storage.pending_object_index_batch_count();
             batch_storage.flush_object_index_batch().map_err(|source| {
@@ -2200,7 +2221,9 @@ fn chmod_flip(target_mode: u32) -> &'static str {
 /// Symlinks and gitlinks carry no executable bit and are refused (recorded in
 /// [`AddOutput::chmod_rejected`]). A path whose mode already matches is left
 /// untouched; a real change is reported as `modified`. In `dry_run` the index
-/// is not mutated, only the report.
+/// is not mutated, only the report. The mode flip itself is the shared
+/// `crate::command::refresh::chmod_entry` primitive (issues/479 UI-03) — the
+/// same implementation `update-index --chmod` uses.
 fn apply_chmod(
     index: &mut Index,
     target_mode: u32,
@@ -2214,11 +2237,7 @@ fn apply_chmod(
         let file_str = file
             .to_str()
             .ok_or_else(|| AddError::InvalidPathEncoding { path: file.clone() })?;
-        // Read the current mode + blob id + size without holding the index
-        // borrow (`IndexEntry` is not `Clone`).
-        let Some((current_mode, hash, entry_size)) =
-            index.get(file_str, 0).map(|e| (e.mode, e.hash, e.size))
-        else {
+        let Some(current_mode) = index.get(file_str, 0).map(|e| e.mode) else {
             continue;
         };
         // Non-regular index entries (symlinks `120000`, gitlinks `160000`)
@@ -2245,16 +2264,12 @@ fn apply_chmod(
             continue;
         }
         if !dry_run {
-            // Keep the existing blob and force the requested mode, but do
-            // NOT record the CURRENT worktree stat: `new_from_file` here
-            // paired a possibly-modified file's fresh stat with the stale
-            // staged hash, making the modification invisible to status's
-            // stat shortcut over an unbounded window (2026-08-06 R0-8
-            // review). Zeroed stat fields (the `new_from_blob` shape)
-            // force the next status to content-compare this entry.
-            let mut updated = IndexEntry::new_from_blob(file_str.to_string(), hash, entry_size);
-            updated.mode = target_mode;
-            crate::utils::index_ext::update_preserving_flags(index, updated);
+            crate::command::refresh::chmod_entry(index, file_str, target_mode).map_err(
+                |message| AddError::CreateIndexEntry {
+                    path: file.to_path_buf(),
+                    source: io::Error::other(message),
+                },
+            )?;
         }
         let path_str = file.display().to_string();
         if !out.added.contains(&path_str) && !out.modified.contains(&path_str) {
@@ -2720,13 +2735,6 @@ fn filter_candidates(files: &[PathBuf], pathspecs: &PathspecSet) -> Vec<PathBuf>
         .collect()
 }
 
-/// Alias of [`filter_candidates`] used in `--refresh` mode. Kept separate so
-/// future divergence in semantics (e.g. submodule handling) only needs to
-/// touch one branch.
-fn filter_refresh_candidates(files: &[PathBuf], pathspecs: &PathspecSet) -> Vec<PathBuf> {
-    filter_candidates(files, pathspecs)
-}
-
 /// Remove the running `libra` binary from the candidate list.
 ///
 /// Functional scope:
@@ -2751,37 +2759,6 @@ fn filter_out_current_executable(files: &mut Vec<PathBuf>) {
                 .is_none_or(|abs| abs != exe_path)
         });
     }
-}
-
-/// Refresh files and return the list of files actually refreshed.
-///
-/// Functional scope:
-/// - Calls `Index::refresh` for each file. The underlying call returns
-///   `true` only when the index entry's stat info actually changed; entries
-///   whose mtime/size still match are silently skipped (and not added to the
-///   returned vector).
-///
-/// Boundary conditions:
-/// - The first refresh failure short-circuits the loop with
-///   [`AddError::RefreshFailed`]; no rollback is performed on the index.
-fn do_refresh_files(
-    index: &mut Index,
-    files: &[PathBuf],
-    workdir: &Path,
-) -> Result<Vec<PathBuf>, AddError> {
-    let mut refreshed = Vec::new();
-    for file in files {
-        if index
-            .refresh(file, workdir)
-            .map_err(|source| AddError::RefreshFailed {
-                path: file.clone(),
-                source,
-            })?
-        {
-            refreshed.push(file.clone());
-        }
-    }
-    Ok(refreshed)
 }
 
 /// Stage a single file and return the action taken.

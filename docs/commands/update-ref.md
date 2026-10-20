@@ -10,6 +10,7 @@ transaction, so a failed compare-and-swap rolls everything back atomically.
 ```
 libra update-ref [-m <reason>] refs/heads/<branch> <newvalue> [<oldvalue>]
 libra update-ref -d [-m <reason>] refs/heads/<branch> [<oldvalue>]
+libra update-ref --stdin [-z] [--no-deref] [-m <reason>]
 ```
 
 ## Description
@@ -34,6 +35,27 @@ Every successful update writes an `update-ref` reflog entry for the ref. The
 `<oldvalue>` you pass for the compare-and-swap is **never** recorded in the
 reflog message; only the actual before/after object ids are.
 
+### Batch transactions (`--stdin`)
+
+`--stdin` reads git's batch protocol, one command per line (`-z` for
+NUL-terminated records):
+
+- `update <ref> <newvalue> [<oldvalue>]` — update with optional CAS;
+- `create <ref> <newvalue>` — create-only (the ref must not exist);
+- `delete <ref> [<oldvalue>]` — delete with optional CAS;
+- `verify <ref> [<oldvalue>]` — assert the current value without writing;
+- `option no-deref` — accepted no-op (no symbolic refs exist in scope);
+- `start` / `prepare` / `commit` / `abort` — git's transaction protocol.
+
+Every update in the batch applies atomically inside ONE SQLite transaction:
+a CAS mismatch, an invalid command, two updates of the same ref (git's rule),
+or an out-of-scope ref leaves every ref and reflog byte-identical. The
+`start`/`prepare`/`commit`/`abort` commands print `<cmd>: ok` on stdout as
+they are processed (like git); `abort` applies nothing. An `-m <reason>`
+applies to every ref the batch updates. `--no-deref` and `option no-deref`
+are accepted and never change the outcome — Libra stores no symbolic refs
+inside `refs/heads/*`.
+
 ## Options
 
 | Option | Description | Example |
@@ -42,7 +64,10 @@ reflog message; only the actual before/after object ids are.
 | `-m <reason>` | Reflog reason recorded with the update. | `libra update-ref -m "reset tip" refs/heads/main <oid>` |
 | `<newvalue>` | The new commit, as an object id or any revision expression (omit with `-d`). | `libra update-ref refs/heads/main HEAD~1` |
 | `<oldvalue>` | Expected current value for a compare-and-swap, as an id or revision (`0{40}` = must not exist). | `libra update-ref -d refs/heads/topic HEAD` |
-| `--json` / `--machine` | Structured output: `{ ref, old, new, deleted }`. | `libra --json update-ref refs/heads/main <oid>` |
+| `--stdin` | Read a batch of `update`/`create`/`delete`/`verify`/`option`/`start`/`prepare`/`commit`/`abort` commands from stdin; all updates commit atomically in one transaction. | `printf 'create refs/heads/x <oid>\n' \| libra update-ref --stdin` |
+| `-z`, `--null` | With `--stdin`, records are NUL-terminated. | `libra update-ref -z --stdin` |
+| `--no-deref` | Accepted for git parity; never changes the outcome (no symbolic refs in scope). | `libra update-ref --no-deref refs/heads/x <oid>` |
+| `--json` / `--machine` | Structured output: `{ ref, old, new, deleted }` (stdin: `{ refs, committed }`). | `libra --json update-ref refs/heads/main <oid>` |
 
 A symbolic value (`ref:refs/heads/…`) and the null object id as `<newvalue>` are
 rejected — use `symbolic-ref`, or `-d` to delete.
@@ -106,5 +131,5 @@ libra update-ref -d refs/heads/old <oldoid>
 | Compare-and-swap | `libra update-ref refs/heads/b <new> <old>` | `git update-ref refs/heads/b <new> <old>` |
 | Delete a ref | `libra update-ref -d refs/heads/b` | `git update-ref -d refs/heads/b` |
 
-Deferred (not exposed): non-`refs/heads/*` namespaces, `HEAD`, `--stdin` batch
-updates, `--create-reflog`, and `--no-deref`.
+Deferred (not exposed): non-`refs/heads/*` namespaces, `HEAD`, and
+`--create-reflog`.

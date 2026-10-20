@@ -12,6 +12,9 @@ libra update-index --add <path>...
 libra update-index --remove <path>...
 libra update-index --cacheinfo <mode>,<object>,<path>...
 libra update-index --skip-worktree <path>...
+libra update-index --refresh
+libra update-index --index-info < <(printf '100644 <oid>\t<path>\n')
+libra update-index --chmod=+x <path>...
 ```
 
 ## Description
@@ -78,6 +81,14 @@ agent cleanup fail closed while repair remains pending. With
 | `--no-skip-worktree` | Clear the skip-worktree bit again; the index returns to v2 when no extended flags remain. | `libra update-index --no-skip-worktree s.txt` |
 | `--add --remove` | Both permissions at once: stage what exists, drop what is gone. | `libra update-index --add --remove a.txt gone.txt` |
 | `--cacheinfo <mode>,<object>,<path>` | Register an entry from an object id (repeatable). | `libra update-index --cacheinfo 100644,<oid>,dir/f.txt` |
+| `--refresh` | Re-stat the index against the working tree: stat-only drift is refreshed silently; a modified or missing file prints `<path>: needs update` and exits 1. Unmerged entries print `<path>: needs merge`. Options `-q` (suppress output and the exit code), `--ignore-missing`, and `--unmerged` must precede `--refresh`. | `libra update-index --refresh` |
+| `--really-refresh` | Same as `--refresh` (Libra has no assume-unchanged bit). | `libra update-index --really-refresh` |
+| `--chmod=(+\|-)-x` | Flip the executable bit on the positional (and `--stdin`) paths that follow it until overridden. The working-tree file is untouched. | `libra update-index --chmod=+x a.sh` |
+| `--info-only` | Record object ids without storing the blobs through the staging path. | `libra update-index --add --info-only new.txt` |
+| `--verbose` | Report each action on stdout: `add '<path>'`, `remove '<path>'`, `chmod +x '<path>'` / `chmod -x '<path>'`. | `libra update-index --add --verbose a.txt` |
+| `--index-info` | Read index records from stdin (NUL with `-z`), must be the last argument. Accepts `<mode> SP <oid> TAB <path>`, `<mode> SP <type> SP <oid> TAB <path>`, or `<mode> SP <oid> SP <stage> TAB <path>`; `mode 0` removes every stage. A malformed line exits 128 with the index unchanged. | `printf '100644 <oid> 3\tfoo\n' \| libra update-index --index-info` |
+| `--stdin` | Read one path per record from stdin (NUL with `-z`), must be the last argument, processed like positional paths under the current flags. | `printf 'a.txt\n' \| libra update-index --add --stdin` |
+| `-z` / `--null` | With `--index-info`/`--stdin`, records are NUL-terminated. | `libra update-index -z --add --stdin` |
 | `--json` / `--machine` | Structured output: `{ updated: <n>, removed: <n> }`. | `libra --json update-index --add a.txt` |
 
 ## Exit codes
@@ -85,8 +96,9 @@ agent cleanup fail closed while repair remains pending. With
 | Code | Meaning |
 |------|---------|
 | `0` | The index was updated and saved. |
+| `1` | `--refresh` found entries needing update/merge; the index (with refreshed stat fields) was saved. |
 | `9` / `LBR-WARN-001` | The local index was saved, but cloud index repair remains pending and `--exit-code-on-warning` was used. |
-| `128` | Not inside a repository, a usage error (bad `--cacheinfo`, untracked path without `--add`), a missing working-tree file, or `--skip-worktree`/`--no-skip-worktree` on a path that is not in the index. |
+| `128` | Not inside a repository, a usage error (bad `--cacheinfo`, untracked path without `--add`, malformed `--index-info` line), a missing working-tree file, or `--skip-worktree`/`--no-skip-worktree` on a path that is not in the index. |
 | `128` / `LBR-IO-002` | Working-tree blob or durable cloud index-marker persistence failed; fix storage permissions and retry. |
 
 ## Examples
@@ -110,6 +122,18 @@ libra update-index --skip-worktree s.txt
 libra ls-files -v          # `S s.txt`
 libra update-index --no-skip-worktree s.txt
 
+# Refresh the index stat cache against the working tree
+libra update-index --refresh
+libra update-index -q --refresh        # never exits 1
+
+# Write unmerged stage entries straight from stdin
+printf '100644 %s 3\tfoo\n' "$OID" | libra update-index --index-info
+printf 'foo\0bar\0' | libra update-index -z --add --stdin
+
+# Flip the executable bit without touching the working tree
+libra update-index --chmod=+x script.sh
+libra update-index --add --info-only staged-later.txt   # index entry only
+
 # Stage a working-tree symlink as a 120000 link-target blob
 libra update-index --add link-to-target
 ```
@@ -123,9 +147,13 @@ libra update-index --add link-to-target
 | Remove a path even when the file is gone | `libra update-index --force-remove f` | `git update-index --force-remove f` |
 | Mark a path skip-worktree | `libra update-index --skip-worktree f` | `git update-index --skip-worktree f` |
 | Register by id | `libra update-index --cacheinfo m,oid,p` | `git update-index --cacheinfo m,oid,p` |
+| Refresh stat cache | `libra update-index --refresh` | `git update-index --refresh` |
+| Batch stdin records | `libra update-index --index-info` / `--stdin [-z]` | `git update-index --index-info` / `--stdin [-z]` |
+| Flip executable bit | `libra update-index --chmod=(+\|-)-x` | `git update-index --chmod=(+\|-)-x` |
+| Index entry without storing the object | `libra update-index --add --info-only f` | `git update-index --add --info-only f` |
 
-Deferred (not exposed): bare-path stat refresh, `--chmod`,
-`--assume-unchanged`, `--index-info`, and other Git flags.
+Deferred (not exposed): `--assume-unchanged`/`--no-assume-unchanged`,
+`--unresolve`, `--again`, and other Git flags.
 
 ### Index v3 and downgrade note
 

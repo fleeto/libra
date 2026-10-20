@@ -24,7 +24,14 @@ const STAGING_MODULES: &[&str] = &[
 /// - `mv.rs` copies `skip_worktree`/`intent_to_add` from the removed source
 ///   entry onto the destination entry, so calling the helper (which looks up
 ///   the *destination*) would be wrong.
-const ALLOWED: &[(&str, &str)] = &[("src/command/mv.rs", "index.add(entry);")];
+/// - `update_index.rs` `--index-info` builds a FRESH entry from the record
+///   (git's `add_index_entry` semantics: the record carries its own mode/oid/
+///   stage and no extended flags survive) — the helper would wrongly keep the
+///   replaced entry's `skip_worktree`/`intent_to_add` bits (issues/479 UI-01).
+const ALLOWED: &[(&str, &str)] = &[
+    ("src/command/mv.rs", "index.add(entry);"),
+    ("src/command/update_index.rs", "index.add(entry);"),
+];
 
 /// SW-04 history-rewrite modules whose whole-index rebuild must carry
 /// `skip_worktree` over from the previous index.

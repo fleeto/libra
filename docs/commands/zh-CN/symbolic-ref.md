@@ -5,7 +5,7 @@
 ## 概要
 
 ```bash
-libra symbolic-ref [--short] [--quiet] [HEAD]
+libra symbolic-ref [--short] [--quiet] [-d] [HEAD]
 libra symbolic-ref HEAD refs/heads/<branch>
 ```
 
@@ -23,6 +23,7 @@ libra symbolic-ref HEAD refs/heads/<branch>
 |--------|-------------|
 | `--short` | 只打印分支名，例如 `main` |
 | `-q`, `--quiet` | 当 `HEAD` 不是符号引用时抑制额外指导 |
+| `-d`, `--delete` | 为 Git `t1401` 契约接受，但永不删除任何东西：`-d HEAD` 以 128 退出并报 `deleting 'HEAD' is not allowed`；其它名称以 128 退出并报 `Cannot delete <name>, not a symbolic ref` |
 | `HEAD` | 要检查或更新的符号引用。省略时默认为 `HEAD` |
 | `refs/heads/<branch>` | `HEAD` 的新符号目标 |
 

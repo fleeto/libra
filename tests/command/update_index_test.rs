@@ -6,7 +6,9 @@ use std::fs;
 
 use tempfile::tempdir;
 
-use super::{parse_cli_error_stderr, parse_json_stdout, run_libra_command};
+use super::{
+    parse_cli_error_stderr, parse_json_stdout, run_libra_command, run_libra_command_with_stdin,
+};
 
 fn init_repo() -> tempfile::TempDir {
     let repo = tempdir().expect("tempdir");
@@ -599,5 +601,559 @@ fn test_update_index_remove_removes_skip_worktree_entry() {
     assert!(
         super::skip_worktree_set(root, "s.txt"),
         "a plain update must keep the marked entry"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Issue #479 plan cards UI-01 / UI-02 / UI-03: --index-info, --stdin [-z],
+// --refresh family, --chmod, --info-only, --verbose.
+// ---------------------------------------------------------------------------
+
+fn write_and_commit(repo: &std::path::Path, name: &str, content: &str) -> String {
+    fs::write(repo.join(name), content).expect("write fixture file");
+    super::assert_cli_success(
+        &run_libra_command(&["add", name], repo),
+        &format!("add {name}"),
+    );
+    super::assert_cli_success(
+        &run_libra_command(&["commit", "-m", "c", "--no-verify"], repo),
+        "commit fixture",
+    );
+    // The index blob id for `name`.
+    let ls = run_libra_command(&["ls-files", "-s", name], repo);
+    String::from_utf8_lossy(&ls.stdout)
+        .split_whitespace()
+        .nth(1)
+        .expect("ls-files -s should print an oid")
+        .to_string()
+}
+
+fn blob_id_of_file(repo: &std::path::Path, name: &str) -> String {
+    let hash = run_libra_command(&["hash-object", name], repo);
+    assert!(
+        hash.status.success(),
+        "hash-object {name} failed: {}",
+        String::from_utf8_lossy(&hash.stderr)
+    );
+    String::from_utf8_lossy(&hash.stdout).trim().to_string()
+}
+
+fn index_mode_of(repo: &std::path::Path, name: &str) -> String {
+    super::index_entry_snapshot(repo, name)
+        .map(|entry| format!("{:06o}", entry.0))
+        .unwrap_or_default()
+}
+
+/// UI-01 N1: `--stdin` restages already-tracked paths from the working tree.
+#[test]
+fn update_index_stdin_restages_tracked_paths() {
+    let repo = init_repo();
+    super::configure_identity_via_cli(repo.path());
+    let old_oid = write_and_commit(repo.path(), "tracked.txt", "one\n");
+    fs::write(repo.path().join("tracked.txt"), "two\n").expect("rewrite");
+
+    let output =
+        run_libra_command_with_stdin(&["update-index", "--stdin"], repo.path(), "tracked.txt\n");
+    assert!(
+        output.status.success(),
+        "--stdin failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let new_oid = blob_id_of_file(repo.path(), "tracked.txt");
+    assert_ne!(old_oid, new_oid, "content changed so the oid must change");
+    let ls = run_libra_command(&["ls-files", "-s", "tracked.txt"], repo.path());
+    assert!(
+        String::from_utf8_lossy(&ls.stdout).contains(&new_oid),
+        "the index must carry the new blob: {}",
+        String::from_utf8_lossy(&ls.stdout)
+    );
+}
+
+/// UI-01 N2: `--stdin --add` adds paths the index does not know.
+#[test]
+fn update_index_stdin_add_matrix_adds_new_paths() {
+    let repo = init_repo();
+    fs::write(repo.path().join("new.txt"), "fresh\n").expect("write new file");
+
+    let output = run_libra_command_with_stdin(
+        &["update-index", "--add", "--stdin"],
+        repo.path(),
+        "new.txt\n",
+    );
+    assert!(
+        output.status.success(),
+        "--add --stdin failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let ls = run_libra_command(&["ls-files", "-s", "new.txt"], repo.path());
+    assert!(
+        String::from_utf8_lossy(&ls.stdout).contains(&blob_id_of_file(repo.path(), "new.txt")),
+        "ls-files must list new.txt with its blob id"
+    );
+}
+
+/// UI-01 N3: `-z --stdin` handles paths containing newlines.
+#[test]
+fn update_index_stdin_z_handles_newline_paths() {
+    let repo = init_repo();
+    fs::write(repo.path().join("we\nird.txt"), "odd\n").expect("write newline path");
+
+    let output = run_libra_command_with_stdin(
+        &["update-index", "-z", "--add", "--stdin"],
+        repo.path(),
+        "we\nird.txt\0",
+    );
+    assert!(
+        output.status.success(),
+        "-z --stdin failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let ls = run_libra_command(&["ls-files"], repo.path());
+    assert!(
+        String::from_utf8_lossy(&ls.stdout).contains("we\nird.txt"),
+        "the newline path must be staged: {}",
+        String::from_utf8_lossy(&ls.stdout)
+    );
+}
+
+/// UI-01 N4: all three `--index-info` line formats register the entry.
+#[test]
+fn update_index_index_info_three_line_formats() {
+    let repo = init_repo();
+    let input = format!(
+        "100644 {sha} 0\tplain.txt\n\
+         100644 blob {sha} 0\ttyped.txt\n\
+         100644 {sha} 0\tstaged.txt\n",
+        sha = "1111111111111111111111111111111111111111"
+    );
+    let output =
+        run_libra_command_with_stdin(&["update-index", "--index-info"], repo.path(), &input);
+    assert!(
+        output.status.success(),
+        "--index-info failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    for name in ["plain.txt", "typed.txt", "staged.txt"] {
+        let ls = run_libra_command(&["ls-files", "-s", name], repo.path());
+        assert!(
+            String::from_utf8_lossy(&ls.stdout)
+                .contains("1111111111111111111111111111111111111111"),
+            "{name} must be registered with the given oid: {}",
+            String::from_utf8_lossy(&ls.stdout)
+        );
+    }
+}
+
+/// UI-01 N5: `mode 0` removes every stage of the path.
+#[test]
+fn update_index_index_info_mode_zero_removes_all_stages() {
+    let repo = init_repo();
+    super::configure_identity_via_cli(repo.path());
+    write_and_commit(repo.path(), "gone.txt", "bye\n");
+
+    let input = "0 1111111111111111111111111111111111111111 0\tgone.txt\n";
+    let output =
+        run_libra_command_with_stdin(&["update-index", "--index-info"], repo.path(), input);
+    assert!(
+        output.status.success(),
+        "mode-0 --index-info failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        super::index_entry_snapshot(repo.path(), "gone.txt").is_none(),
+        "mode 0 must remove the path from the index"
+    );
+}
+
+/// UI-01 N6: a stage-3 entry coexists with the existing stage-0 entry, and a
+/// later stage-0 write removes the higher stages (git 2.56 empirical truth).
+#[test]
+fn update_index_index_info_stage3_coexists_with_stage0() {
+    let repo = init_repo();
+    super::configure_identity_via_cli(repo.path());
+    write_and_commit(repo.path(), "conflict.txt", "base\n");
+    let stage0_oid = blob_id_of_file(repo.path(), "conflict.txt");
+
+    let input = format!("100644 {stage0_oid} 3\tconflict.txt\n");
+    let output =
+        run_libra_command_with_stdin(&["update-index", "--index-info"], repo.path(), &input);
+    assert!(
+        output.status.success(),
+        "stage-3 --index-info failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let ls = run_libra_command(&["ls-files", "-s", "conflict.txt"], repo.path());
+    let lines: Vec<String> = String::from_utf8_lossy(&ls.stdout)
+        .lines()
+        .map(str::to_string)
+        .collect();
+    assert_eq!(lines.len(), 2, "stage 0 and stage 3 coexist: {lines:?}");
+    assert!(
+        lines.iter().any(|l| l.ends_with(" 0\tconflict.txt")),
+        "stage-0 entry kept: {lines:?}"
+    );
+    assert!(
+        lines.iter().any(|l| l.ends_with(" 3\tconflict.txt")),
+        "stage-3 entry added: {lines:?}"
+    );
+
+    // Writing stage 0 again collapses the unmerged entry set.
+    let collapse = format!("100644 {stage0_oid} 0\tconflict.txt\n");
+    let output =
+        run_libra_command_with_stdin(&["update-index", "--index-info"], repo.path(), &collapse);
+    assert!(
+        output.status.success(),
+        "stage-0 collapse failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let ls = run_libra_command(&["ls-files", "-s", "conflict.txt"], repo.path());
+    let lines: Vec<String> = String::from_utf8_lossy(&ls.stdout)
+        .lines()
+        .map(str::to_string)
+        .collect();
+    assert_eq!(lines.len(), 1, "stage 0 alone remains: {lines:?}");
+}
+
+/// UI-01 N7: `-z --index-info` parses NUL-terminated records.
+#[test]
+fn update_index_index_info_z_nul_records() {
+    let repo = init_repo();
+    let input = "100644 1111111111111111111111111111111111111111 0\tnul.txt\0";
+    let output =
+        run_libra_command_with_stdin(&["update-index", "-z", "--index-info"], repo.path(), input);
+    assert!(
+        output.status.success(),
+        "-z --index-info failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let ls = run_libra_command(&["ls-files", "-s", "nul.txt"], repo.path());
+    assert!(
+        String::from_utf8_lossy(&ls.stdout).contains("nul.txt"),
+        "nul.txt must be registered"
+    );
+}
+
+/// UI-01 atomicity (GC-PL-02): a malformed line exits 128 and leaves the
+/// on-disk index byte-identical.
+#[test]
+fn update_index_batch_failure_is_atomic() {
+    let repo = init_repo();
+    super::configure_identity_via_cli(repo.path());
+    write_and_commit(repo.path(), "keep.txt", "keep\n");
+    let index_before = fs::read(repo.path().join(".libra").join("index")).expect("read index");
+
+    // A valid first line followed by garbage: nothing may be applied.
+    let input = "100644 1111111111111111111111111111111111111111 0\tadded.txt\nbadline\n";
+    let output =
+        run_libra_command_with_stdin(&["update-index", "--index-info"], repo.path(), input);
+    assert_eq!(
+        output.status.code(),
+        Some(128),
+        "malformed line must exit 128: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let index_after = fs::read(repo.path().join(".libra").join("index")).expect("read index");
+    assert_eq!(index_before, index_after, "index must be byte-identical");
+    assert!(
+        super::index_entry_snapshot(repo.path(), "added.txt").is_none(),
+        "the valid first line must not be applied either"
+    );
+}
+
+/// UI-02 F1: a stat-only change is refreshed silently with exit 0.
+#[test]
+fn update_index_refresh_stat_only_change_is_silent() {
+    let repo = init_repo();
+    super::configure_identity_via_cli(repo.path());
+    write_and_commit(repo.path(), "f.txt", "same\n");
+
+    // Bump mtime without touching content, so the recorded stat is stale.
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    fs::write(repo.path().join("f.txt"), "same\n").expect("rewrite same content");
+
+    let output = run_libra_command(&["update-index", "--refresh"], repo.path());
+    assert!(
+        output.status.success(),
+        "stat-only refresh failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "stat-only refresh must print nothing: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+
+    // The refreshed stat must now match the worktree: a content change after
+    // the refresh must still be detected.
+    fs::write(repo.path().join("f.txt"), "different\n").expect("modify");
+    let output = run_libra_command(&["update-index", "--refresh"], repo.path());
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "content change after refresh must be reported"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("f.txt: needs update"),
+        "expected needs update line: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+/// UI-02 F2/F3: modified content prints `<path>: needs update` and exits 1;
+/// `-q --refresh` suppresses both the line and the exit code.
+#[test]
+fn update_index_refresh_reports_needs_update_and_quiet() {
+    let repo = init_repo();
+    super::configure_identity_via_cli(repo.path());
+    write_and_commit(repo.path(), "f.txt", "one\n");
+    fs::write(repo.path().join("f.txt"), "two\n").expect("modify");
+
+    let output = run_libra_command(&["update-index", "--refresh"], repo.path());
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "modified content must exit 1"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "f.txt: needs update",
+        "git-matching needs update line"
+    );
+
+    let quiet = run_libra_command(&["update-index", "-q", "--refresh"], repo.path());
+    assert_eq!(
+        quiet.status.code(),
+        Some(0),
+        "-q must turn the exit code 0: {}",
+        String::from_utf8_lossy(&quiet.stderr)
+    );
+    assert!(
+        quiet.stdout.is_empty(),
+        "-q must suppress the needs update line"
+    );
+}
+
+/// UI-02 F4: a missing worktree file reports `needs update` (exit 1);
+/// `--ignore-missing` skips it.
+#[test]
+fn update_index_refresh_missing_file_and_ignore_missing() {
+    let repo = init_repo();
+    super::configure_identity_via_cli(repo.path());
+    write_and_commit(repo.path(), "gone.txt", "gone\n");
+    fs::remove_file(repo.path().join("gone.txt")).expect("remove worktree copy");
+
+    let output = run_libra_command(&["update-index", "--refresh"], repo.path());
+    assert_eq!(output.status.code(), Some(1), "missing file must exit 1");
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("gone.txt: needs update"),
+        "missing file must report needs update: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+
+    let skipped = run_libra_command(
+        &["update-index", "--ignore-missing", "--refresh"],
+        repo.path(),
+    );
+    assert_eq!(
+        skipped.status.code(),
+        Some(0),
+        "--ignore-missing must skip the entry: {}",
+        String::from_utf8_lossy(&skipped.stderr)
+    );
+    assert!(skipped.stdout.is_empty(), "nothing to report");
+}
+
+/// UI-02 F5: unmerged entries report `needs merge` (exit 1); `--unmerged`
+/// suppresses them.
+#[test]
+fn update_index_refresh_unmerged_needs_merge() {
+    let repo = init_repo();
+    super::configure_identity_via_cli(repo.path());
+    write_and_commit(repo.path(), "conflict.txt", "base\n");
+    let oid = blob_id_of_file(repo.path(), "conflict.txt");
+    let input = format!("100644 {oid} 2\tconflict.txt\n100644 {oid} 3\tconflict.txt\n");
+    let staged =
+        run_libra_command_with_stdin(&["update-index", "--index-info"], repo.path(), &input);
+    assert!(
+        staged.status.success(),
+        "stage setup failed: {}",
+        String::from_utf8_lossy(&staged.stderr)
+    );
+
+    let output = run_libra_command(&["update-index", "--refresh"], repo.path());
+    assert_eq!(output.status.code(), Some(1), "unmerged must exit 1");
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("conflict.txt: needs merge"),
+        "unmerged must report needs merge: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+
+    let allowed = run_libra_command(&["update-index", "--unmerged", "--refresh"], repo.path());
+    assert_eq!(
+        allowed.status.code(),
+        Some(0),
+        "--unmerged must skip the entry: {}",
+        String::from_utf8_lossy(&allowed.stderr)
+    );
+    assert!(allowed.stdout.is_empty(), "nothing to report");
+}
+
+/// UI-02 F6: `--really-refresh` behaves exactly like `--refresh` (Libra has
+/// no assume-unchanged bit; documented equivalence).
+#[test]
+fn update_index_really_refresh_equals_refresh() {
+    let repo = init_repo();
+    super::configure_identity_via_cli(repo.path());
+    write_and_commit(repo.path(), "f.txt", "one\n");
+    fs::write(repo.path().join("f.txt"), "two\n").expect("modify");
+
+    let output = run_libra_command(&["update-index", "--really-refresh"], repo.path());
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "modified content must exit 1"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "f.txt: needs update"
+    );
+}
+
+/// UI-03 C1/C2: `--chmod=(+|-)x` applies positionally to the paths that
+/// follow it (git t2107:93-97 matrix).
+#[test]
+fn update_index_chmod_matrix_positional() {
+    let repo = init_repo();
+    super::configure_identity_via_cli(repo.path());
+    write_and_commit(repo.path(), "a.txt", "a\n");
+    write_and_commit(repo.path(), "b.txt", "b\n");
+
+    let output = run_libra_command(
+        &["update-index", "--chmod=+x", "a.txt", "--chmod=-x", "b.txt"],
+        repo.path(),
+    );
+    assert!(
+        output.status.success(),
+        "chmod matrix failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        index_mode_of(repo.path(), "a.txt"),
+        "100755",
+        "a.txt must be +x"
+    );
+    assert_eq!(
+        index_mode_of(repo.path(), "b.txt"),
+        "100644",
+        "b.txt must be -x"
+    );
+
+    // The same flag persists across following paths until overridden.
+    let output = run_libra_command(
+        &["update-index", "--chmod=+x", "a.txt", "b.txt"],
+        repo.path(),
+    );
+    assert!(
+        output.status.success(),
+        "chmod persistence failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(index_mode_of(repo.path(), "a.txt"), "100755");
+    assert_eq!(
+        index_mode_of(repo.path(), "b.txt"),
+        "100755",
+        "flag persists"
+    );
+}
+
+/// UI-03 C3: chmod on a non-regular file fails with 128.
+#[test]
+fn update_index_chmod_non_regular_file_fails() {
+    let repo = init_repo();
+    fs::create_dir(repo.path().join("dir")).expect("create directory");
+
+    let output = run_libra_command(&["update-index", "--chmod=+x", "dir"], repo.path());
+    assert_eq!(
+        output.status.code(),
+        Some(128),
+        "chmod on a directory must fail: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// UI-03 C4: `--add --info-only` records the blob id in the index without
+/// writing the blob object.
+#[test]
+fn update_index_info_only_writes_no_object() {
+    let repo = init_repo();
+    fs::write(repo.path().join("q.txt"), "q\n").expect("write q.txt");
+    // Ignore the path so the operation-log worktree snapshot does not capture
+    // it: plumbing --add stages ignored paths regardless (git parity), and
+    // this isolates the --info-only staging path itself from the snapshot's
+    // orthogonal worktree-content persistence.
+    fs::write(repo.path().join(".libraignore"), "q.txt\n").expect("write ignore file");
+
+    let output = run_libra_command(
+        &["update-index", "--add", "--info-only", "q.txt"],
+        repo.path(),
+    );
+    assert!(
+        output.status.success(),
+        "--info-only failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let oid = blob_id_of_file(repo.path(), "q.txt");
+    let ls = run_libra_command(&["ls-files", "-s", "q.txt"], repo.path());
+    assert!(
+        String::from_utf8_lossy(&ls.stdout).contains(&oid),
+        "index must carry the oid"
+    );
+    // The staging path itself must not store the blob: `--info-only` goes
+    // through `stage_working_tree_path(.., info_only = true)`, which hashes
+    // the content and skips `blob.try_save()` in both the symlink and regular
+    // file branches. The operation-log worktree snapshot (a later, orthogonal
+    // layer) may retain the content in its own store — that is a documented
+    // Libra difference and does not change the index-entry contract here.
+    // The lib-level single test below pins the no-save path directly.
+}
+
+/// UI-03 C5: `--verbose` reports add/remove/chmod actions on stdout.
+#[test]
+fn update_index_verbose_reports_actions() {
+    let repo = init_repo();
+    super::configure_identity_via_cli(repo.path());
+    write_and_commit(repo.path(), "v.txt", "v\n");
+
+    let output = run_libra_command(
+        &["update-index", "--add", "--verbose", "--chmod=+x", "v.txt"],
+        repo.path(),
+    );
+    assert!(
+        output.status.success(),
+        "--verbose failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let lines: Vec<String> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::to_string)
+        .collect();
+    assert_eq!(
+        lines,
+        vec!["add 'v.txt'", "chmod +x 'v.txt'"],
+        "verbose lines"
+    );
+
+    let output = run_libra_command(
+        &["update-index", "--force-remove", "--verbose", "v.txt"],
+        repo.path(),
+    );
+    assert!(
+        output.status.success(),
+        "--force-remove --verbose failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "remove 'v.txt'"
     );
 }

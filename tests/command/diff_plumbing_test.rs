@@ -47,11 +47,11 @@ fn configure_invalid_diff_renames(repo: &TempDir) {
 fn diff_plumbing_tree_diffs_two_trees() {
     let (repo, c1, c2) = repo_with_two_commits();
     let out = run_libra_command(&["diff-tree", &c1, &c2], repo.path());
-    // Plumbing diff exits 1 when there are differences.
+    // Plumbing diff exits 0 by default even with differences (ADR-PL-09).
     assert_eq!(
         out.status.code(),
-        Some(1),
-        "diff-tree should exit 1 on differences: {}",
+        Some(0),
+        "diff-tree should exit 0 on differences: {}",
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(
@@ -68,7 +68,7 @@ fn diff_plumbing_tree_ignores_porcelain_rename_config() {
     let out = run_libra_command(&["diff-tree", &c1, &c2], repo.path());
     assert_eq!(
         out.status.code(),
-        Some(1),
+        Some(0),
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
@@ -83,8 +83,8 @@ fn diff_plumbing_files_shows_unstaged_changes() {
     let out = run_libra_command(&["diff-files"], repo.path());
     assert_eq!(
         out.status.code(),
-        Some(1),
-        "diff-files should exit 1 on differences: {}",
+        Some(0),
+        "diff-files should exit 0 on differences: {}",
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(
@@ -102,7 +102,7 @@ fn diff_plumbing_files_ignores_porcelain_rename_config() {
     let out = run_libra_command(&["diff-files"], repo.path());
     assert_eq!(
         out.status.code(),
-        Some(1),
+        Some(0),
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
@@ -116,8 +116,8 @@ fn diff_plumbing_index_diffs_tree_against_worktree() {
     let out = run_libra_command(&["diff-index", "HEAD"], repo.path());
     assert_eq!(
         out.status.code(),
-        Some(1),
-        "diff-index should exit 1 on differences: {}",
+        Some(0),
+        "diff-index should exit 0 on differences: {}",
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(
@@ -135,7 +135,7 @@ fn diff_plumbing_index_ignores_porcelain_rename_config() {
     let out = run_libra_command(&["diff-index", "HEAD"], repo.path());
     assert_eq!(
         out.status.code(),
-        Some(1),
+        Some(0),
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
@@ -154,8 +154,8 @@ fn diff_plumbing_index_cached_diffs_tree_against_index() {
     let out = run_libra_command(&["diff-index", "--cached", "HEAD"], repo.path());
     assert_eq!(
         out.status.code(),
-        Some(1),
-        "diff-index --cached exits 1 on differences: {}",
+        Some(0),
+        "diff-index --cached exits 0 on differences: {}",
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(out_str(&out).contains("tracked.txt"));
@@ -196,9 +196,114 @@ fn diff_files_reports_intent_to_add() {
     let output = run_libra_command(&["diff-files", "--name-status"], root);
     assert_eq!(
         output.status.code(),
-        Some(1),
-        "plumbing differences exit 1: {}",
+        Some(0),
+        "plumbing differences exit 0 by default: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(out_str(&output).trim(), "A\tnew.txt");
+}
+
+/// DF-01 M-DF: `--exit-code` turns differences into exit 1 (0 when clean);
+/// `--quiet` suppresses all output and also exits 1 on differences.
+#[test]
+fn diff_plumbing_exit_code_and_quiet_matrix() {
+    let (repo, c1, c2) = repo_with_two_commits();
+
+    // Clean tree: --exit-code and --quiet both exit 0.
+    let clean = run_libra_command(&["diff-files", "--exit-code"], repo.path());
+    assert_eq!(
+        clean.status.code(),
+        Some(0),
+        "clean --exit-code should exit 0: {}",
+        String::from_utf8_lossy(&clean.stderr)
+    );
+    let quiet_clean = run_libra_command(&["diff-files", "--quiet"], repo.path());
+    assert_eq!(quiet_clean.status.code(), Some(0));
+    assert!(out_str(&quiet_clean).is_empty(), "--quiet prints nothing");
+
+    // Dirty tree: --exit-code exits 1, --quiet exits 1 with no output.
+    fs::write(repo.path().join("tracked.txt"), "dirty-edit\n").unwrap();
+    let dirty = run_libra_command(&["diff-files", "--exit-code"], repo.path());
+    assert_eq!(
+        dirty.status.code(),
+        Some(1),
+        "dirty --exit-code should exit 1: {}",
+        String::from_utf8_lossy(&dirty.stderr)
+    );
+    let quiet_dirty = run_libra_command(&["diff-files", "--quiet"], repo.path());
+    assert_eq!(quiet_dirty.status.code(), Some(1));
+    assert!(out_str(&quiet_dirty).is_empty(), "--quiet prints nothing");
+
+    // diff-tree / diff-index accept both flags too.
+    let tree_ec = run_libra_command(&["diff-tree", "--exit-code", &c1, &c2], repo.path());
+    assert_eq!(tree_ec.status.code(), Some(1));
+    let index_q = run_libra_command(&["diff-index", "--quiet", "HEAD"], repo.path());
+    assert_eq!(index_q.status.code(), Some(1));
+    assert!(out_str(&index_q).is_empty());
+}
+
+/// issues/479 TC-0044 — the stat-raciness contract behind `t/t3700-add.sh#24`:
+/// `read-tree` leaves index entries with stat data the worktree cannot match,
+/// and the plumbing `diff-index` (worktree comparison, default raw) must then
+/// report the unchanged file as modified with an all-zero worktree sha —
+/// WITHOUT hashing. `add --refresh` clears it again.
+#[test]
+fn diff_index_reports_read_tree_stat_raciness_with_zero_sha() {
+    let repo = create_committed_repo_via_cli();
+    let root = repo.path();
+
+    let read = run_libra_command(&["read-tree", "HEAD"], root);
+    assert_cli_success(&read, "read-tree HEAD");
+
+    let out = run_libra_command(&["diff-index", "HEAD", "--", "tracked.txt"], root);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "diff-index exits 0 by default: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let record = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    assert!(
+        record.starts_with(":100644 100644 ") && record.ends_with(" M\ttracked.txt"),
+        "raw record must report the stat-dirty entry as M: {record}"
+    );
+    assert!(
+        record.contains(" 0000000 M"),
+        "the worktree sha must be all zeros without hashing: {record}"
+    );
+
+    // `add --refresh` clears the racy entry; diff-index is then empty.
+    let refresh = run_libra_command(&["add", "--refresh", "--", "tracked.txt"], root);
+    assert_cli_success(&refresh, "add --refresh");
+    let after = run_libra_command(&["diff-index", "HEAD", "--", "tracked.txt"], root);
+    assert_eq!(
+        after.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&after.stderr)
+    );
+    assert!(
+        after.stdout.is_empty(),
+        "the refreshed entry must produce no record: {}",
+        String::from_utf8_lossy(&after.stdout)
+    );
+}
+
+/// The same stat-based contract applies to plain `diff-files`: a stat-dirty
+/// file with unchanged content is reported modified with a zero worktree sha.
+#[test]
+fn diff_files_reports_stat_dirty_entry_with_zero_sha() {
+    let repo = create_committed_repo_via_cli();
+    let root = repo.path();
+
+    // Identical content, bumped stat: only the stat differs from the index.
+    fs::write(root.join("tracked.txt"), "tracked\n").expect("stat-dirty rewrite");
+
+    let out = run_libra_command(&["diff-files", "--", "tracked.txt"], root);
+    assert_eq!(out.status.code(), Some(0));
+    let record = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    assert!(
+        record.contains(" 0000000 M\ttracked.txt"),
+        "stat-dirty entry must report M with all-zero worktree sha: {record}"
+    );
 }

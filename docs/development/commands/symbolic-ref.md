@@ -37,7 +37,8 @@ flowchart TD
 
 - 本节依据本地 main 分支提交历史重写，筛选与该命令实现、测试或文档路径直接相关的提交；以下是归纳后的实现脉络。
 - 2026-05-07 `5e35e112`（`feat(commands): support symbolic-ref (#360)`）：基础实现节点：support symbolic-ref (#360)；当前实现的主要轮廓可追溯到该提交。
-- 2026-06-06 `66d34f39`（`feat(symbolic-ref): parse and reject -d/--delete (HEAD-only intentional difference)`）：该提交曾尝试加入 `-d`/`--delete` 解析与拒绝；但当前 main 代码的 `SymbolicRefArgs` 已不含该标志，命令仅暴露 `--quiet`/`--short` 与 `<NAME>`/`<REF>` 两个位置参数，故此节点对当前行为无实际影响。
+- 2026-10-20（issues/479 SR-01）：`-d`/`--delete` 落地（ADR-PL-08）：`-d HEAD` → 128 `deleting 'HEAD' is not allowed`；`-d <其它名称>` → 128 `Cannot delete <name>, not a symbolic ref`；`-q -d` 保持 fatal（git 实跑口径）；任何删除请求都不写状态。测试 `symbolic_ref_test::symbolic_ref_delete_matrix` + EC-01 契约行；COMPATIBILITY.md `:203` 原行追加。
+- 2026-06-06 `66d34f39`（`feat(symbolic-ref): parse and reject -d/--delete (HEAD-only intentional difference)`）：该提交曾尝试加入 `-d`/`--delete` 解析与拒绝；2026-10-20 SR-01 按 ADR-PL-08 重新落地为可解析的 128 拒绝（git t1401 契约）。
 - 2026-05-08 `19b28be6`（`fix(symbolic-ref): handle repository and quiet errors (#362)`）：实现修正：handle repository and quiet errors (#362)；该节点把边界行为、错误处理或兼容差异纳入当前实现约束。
 - 历史结论：当前文档应以这些提交之后的代码、测试和兼容矩阵为准；更早的迁移式文档只保留为背景，不再作为事实来源。
 
@@ -46,7 +47,7 @@ flowchart TD
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/symbolic-ref.md`。
 - Synopsis：`libra symbolic-ref [-q | --quiet] [--short] [HEAD [<ref>]]`。
-- 公开参数/子命令包括：`-q, --quiet`、`--short`、`<NAME>`（读取/更新的 symbolic ref，当前仅支持 HEAD）、`<REF>`（新的 symbolic 目标，必须为 refs/heads/<branch>）。
+- 公开参数/子命令包括：`-q, --quiet`、`--short`、`-d, --delete`（git t1401 契约：永不删除，128 拒绝）、`<NAME>`（读取/更新的 symbolic ref，当前仅支持 HEAD）、`<REF>`（新的 symbolic 目标，必须为 refs/heads/<branch>）。
 
 
 ## 还未实现的功能

@@ -9,6 +9,9 @@ libra update-index --add <path>...
 libra update-index --remove <path>...
 libra update-index --cacheinfo <mode>,<object>,<path>...
 libra update-index --skip-worktree <path>...
+libra update-index --refresh
+libra update-index --index-info < <(printf '100644 <oid>\t<path>\n')
+libra update-index --chmod=+x <path>...
 ```
 
 ## 说明
@@ -42,6 +45,14 @@ payload。
 | `--no-skip-worktree` | 清除 skip-worktree 位；无扩展标志时 index 回到 v2。 | `libra update-index --no-skip-worktree s.txt` |
 | `--add --remove` | 同时给出两项许可：存在的暂存、消失的移除。 | `libra update-index --add --remove a.txt gone.txt` |
 | `--cacheinfo <mode>,<object>,<path>` | 按对象 id 注册条目（可重复）。 | `libra update-index --cacheinfo 100644,<oid>,dir/f.txt` |
+| `--refresh` | 对照工作树重新 stat index：仅 stat 漂移的条目静默刷新；内容已修改或文件缺失的条目输出 `<path>: needs update` 并退出 1；未合并条目输出 `<path>: needs merge`。`-q`（抑制输出与退出码）、`--ignore-missing`、`--unmerged` 必须位于 `--refresh` 之前。 | `libra update-index --refresh` |
+| `--really-refresh` | 与 `--refresh` 相同（Libra 无 assume-unchanged 位）。 | `libra update-index --really-refresh` |
+| `--chmod=(+\|-)-x` | 对随后（直至被覆盖）的位置路径与 `--stdin` 路径翻转可执行位；不触碰工作树文件。 | `libra update-index --chmod=+x a.sh` |
+| `--info-only` | 记录对象 id，但暂存路径不写入 blob。 | `libra update-index --add --info-only new.txt` |
+| `--verbose` | 在 stdout 逐条报告动作：`add '<path>'`、`remove '<path>'`、`chmod +x '<path>'` / `chmod -x '<path>'`。 | `libra update-index --add --verbose a.txt` |
+| `--index-info` | 从 stdin 读取 index 记录（`-z` 为 NUL 分隔），必须是最后一个参数。接受 `<mode> SP <oid> TAB <path>`、`<mode> SP <type> SP <oid> TAB <path>` 或 `<mode> SP <oid> SP <stage> TAB <path>`；`mode 0` 删除全部 stage。非法行退出 128 且 index 不变。 | `printf '100644 <oid> 3\tfoo\n' \| libra update-index --index-info` |
+| `--stdin` | 从 stdin 逐行读取路径（`-z` 为 NUL 分隔），必须是最后一个参数，按当前位置路径的相同规则处理。 | `printf 'a.txt\n' \| libra update-index --add --stdin` |
+| `-z` / `--null` | 配合 `--index-info`/`--stdin` 使用 NUL 分隔记录。 | `libra update-index -z --add --stdin` |
 | `--json` / `--machine` | 结构化输出：`{ updated: <n>, removed: <n> }`。 | `libra --json update-index --add a.txt` |
 
 ## 退出码
@@ -49,6 +60,7 @@ payload。
 | 退出码 | 含义 |
 |--------|------|
 | `0` | index 已更新并保存。 |
+| `1` | `--refresh` 发现需更新/需合并的条目；index（含刷新后的 stat 字段）已保存。 |
 | `9` / `LBR-WARN-001` | 本地 index 已保存，但云索引修复仍待处理，且使用了 `--exit-code-on-warning`。 |
 | `128` | 不在仓库内、用法错误（`--cacheinfo` 非法、未跟踪路径且无 `--add`）、工作树文件缺失，或 `--skip-worktree`/`--no-skip-worktree` 作用于索引中不存在的路径。 |
 | `128` / `LBR-IO-002` | 工作树 blob 或耐久云索引 marker 持久化失败；修复存储权限后重试。失败文案为规范口径：对象负载已安全写入、未暂存任何路径，直接重试复用已存储负载、无需锁文件清理（锁超时另附持有者说明，锁文件永不删除）。 |
@@ -74,6 +86,18 @@ libra update-index --no-skip-worktree s.txt
 libra update-index --add src/new.rs
 libra update-index --add link-to-target   # 符号链接以 mode 120000 暂存
 libra update-index --remove src/old.rs
+
+# 对照工作树刷新 index 的 stat 缓存
+libra update-index --refresh
+libra update-index -q --refresh        # 永不退出 1
+
+# 从 stdin 直接写入未合并 stage 条目
+printf '100644 %s 3\tfoo\n' "$OID" | libra update-index --index-info
+printf 'foo\0bar\0' | libra update-index -z --add --stdin
+
+# 不触碰工作树地翻转可执行位
+libra update-index --chmod=+x script.sh
+libra update-index --add --info-only staged-later.txt   # 仅 index 条目
 ```
 
 ## 与 Git 对比
@@ -84,8 +108,12 @@ libra update-index --remove src/old.rs
 | 删除路径 | `libra update-index --remove f` | `git update-index --remove f` |
 | 标记 skip-worktree | `libra update-index --skip-worktree f` | `git update-index --skip-worktree f` |
 | 按 id 注册 | `libra update-index --cacheinfo m,oid,p` | `git update-index --cacheinfo m,oid,p` |
+| 刷新 stat 缓存 | `libra update-index --refresh` | `git update-index --refresh` |
+| stdin 批量记录 | `libra update-index --index-info` / `--stdin [-z]` | `git update-index --index-info` / `--stdin [-z]` |
+| 翻转可执行位 | `libra update-index --chmod=(+\|-)-x` | `git update-index --chmod=(+\|-)-x` |
+| 仅登记对象 id 不存对象 | `libra update-index --add --info-only f` | `git update-index --add --info-only f` |
 
-延后（未公开）：裸路径 stat 刷新、`--chmod`、`--assume-unchanged`、`--index-info` 等 Git 标志。
+延后（未公开）：`--assume-unchanged`/`--no-assume-unchanged`、`--unresolve`、`--again` 等 Git 标志。
 
 ### index v3 与降级说明
 

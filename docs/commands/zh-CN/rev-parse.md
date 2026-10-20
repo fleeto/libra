@@ -20,6 +20,10 @@ libra rev-parse [OPTIONS] [SPEC]...
 
 共享的严格对象 spec 解析器支持：`@` 作为 `HEAD`、完整 tag ref、`^N`/`~N`、`^{commit|tree|blob|tag|object}` 与递归 `^{}` peel、数字 reflog selector（`main@{1}`、`HEAD@{0}`，以及表示当前分支的 `@{1}`）和 `<tree-ish>:<path>`。解析必须消费完整输入，非法后缀不会静默退化到另一个对象。reflog 日期 selector、`@{-N}`、`@{upstream}`/`@{push}` 与相对 `./`/`../` tree path 仍不支持，并会明确失败。
 
+Index path spec 解析当前 worktree 的 index：`:<path>` 读取 stage-0 条目，`:<n>:<path>`（n = 0–3）读取对应 merge stage（`:0:p` ≡ `:p`）；以 `./` 或 `../` 开头时相对当前目录解析，其它路径按仓库相对路径处理。路径不在 index、所请求 stage 缺失但其它 stage 存在、以及 `./`/`../` 越出工作树时均以 `LBR-CLI-003`（退出 129）失败。
+
+提交消息搜索 spec 按提交消息正文（头区空行之后的全部内容）查找提交：`:/<regex>` 以 HEAD 加上所有本地分支、远程跟踪分支与 tag 为起点，`<rev>^{/<regex>}` 以 `<rev>` 为起点，均按提交时间从新到旧遍历祖先并返回第一个匹配。前缀 `!-` 取反匹配，`!!` 保留字面 `!`，其它 `!` 开头为错误；无效正则、正则超限或无匹配均为 `LBR-CLI-003`（退出 129）。正则使用 Rust `regex` crate（线性时间引擎，不支持反向引用与 lookaround），部分仅 POSIX ERE 可编译的模式无法使用；匹配区分大小写，遍历期间只读提交对象。
+
 `AUTO_MERGE` 是本命令唯一接受的伪引用：非 squash 合并因冲突暂停时，它解析为包含冲突标记的自动结果 tree。`merge --continue`、`--abort` 或 `--quit` 后会消失；干净合并和 squash 合并时不可用。六个历史伪引用（`ORIG_HEAD`、`MERGE_HEAD`、`CHERRY_PICK_HEAD`、`REVERT_HEAD`、`REBASE_HEAD`、`FETCH_HEAD`）仍会作为 revision 被拒绝。
 
 ## 选项
@@ -41,7 +45,7 @@ libra rev-parse [OPTIONS] [SPEC]...
 | `--is-shallow-repository` | 当 `.libra/shallow` 至少包含一个 shallow boundary 时打印 `true`，否则打印 `false`。 |
 | `--git-dir` | 打印 `.libra` 目录路径（Libra 的 `$GIT_DIR`）；在 Libra 中始终为绝对路径。 |
 | `--absolute-git-dir` | 同 `--git-dir`，但始终为规范化后的绝对路径。（Libra 中 `--git-dir` 已是绝对路径，故两者一致。） |
-| `<SPEC>...` | 要解析的对象/修订 spec（可多个），支持 typed peel、数字 reflog selector 与 `REV:path`。省略时默认为 `HEAD`；多个时各自解析。 |
+| `<SPEC>...` | 要解析的对象/修订 spec（可多个），支持 typed peel、数字 reflog selector、`REV:path`、index path（`:<path>`、`:<n>:<path>`）与提交消息搜索（`:/<regex>`、`<rev>^{/<regex>}`）。省略时默认为 `HEAD`；多个时各自解析。 |
 
 ## 常用命令
 
@@ -50,6 +54,10 @@ libra rev-parse
 libra rev-parse HEAD~1
 libra rev-parse 'HEAD^{tree}'
 libra rev-parse 'HEAD:src/main.rs'
+libra rev-parse :src/main.rs
+libra rev-parse :2:src/main.rs
+libra rev-parse ':/fix: crash'
+libra rev-parse 'HEAD^{/fix}'
 libra rev-parse 'main@{1}'
 libra rev-parse --short HEAD
 libra rev-parse --abbrev-ref HEAD

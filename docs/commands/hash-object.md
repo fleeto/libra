@@ -152,6 +152,9 @@ recreate a row after replay and destructive cleanup have consumed its marker.
 | Object cannot be written | `LBR-IO-002` | 128 | Check object storage permissions and disk space; when the cause is cloud object-index marker registration, payloads were stored safely and a direct retry reuses them (no paths are staged by `hash-object` and no lock-file cleanup is needed) |
 | Object stored but cloud index repair remains pending, with `--exit-code-on-warning` | `LBR-WARN-001` | 9 | Fix the reported repository database/marker error; the next repo command retries automatically |
 
+> Exit-code note: malformed typed content and unsupported type strings exit
+> `129` (`LBR-CLI-002`), intentionally different from Git's `128` (ADR-PL-02).
+
 ## Blake3 repositories
 
 In a repository initialized with `libra init --object-format blake3`, hashes are 64-hex Blake3 object IDs.

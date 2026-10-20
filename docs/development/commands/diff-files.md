@@ -7,17 +7,18 @@
 ## 对比 Git 与兼容性
 
 - 兼容级别：`partial`。
-- 已支持：`diff-files [-- <path>...]`（= 裸 `diff`，index 对工作树），所有 `diff` 全局标志与 `--json`。
-- 未公开（延后）：`-1`/`-2`/`-3` 阶段选择、raw 输出。
+- 已支持：`diff-files [-- <path>...]`（= 裸 `diff`，index 对工作树）、`-p`/`--patch`、`-s`/`--no-patch`、`--raw`（默认）、`--name-only`、`--name-status`、`--exit-code`、`--quiet`，所有 `diff` 全局标志与 `--json`；工作树一侧为 stat-based（issues/479 DF-01：stat 漂移条目按 `M` + 全零 worktree sha 报告，不哈希；`read-tree` 零 stat 的 racy 条目同理）。ADR-PL-09 退出契约：默认有差异也 0，`--exit-code`/`--quiet` 才转 1。
+- 未公开（延后）：`-1`/`-2`/`-3` 阶段选择。
 
 ## 设计方案
 
 - 入口与分发：`src/cli.rs::Commands::DiffFiles` → `command::diff_plumbing::execute_files_safe`。
-- 源码分层：`src/command/diff_plumbing.rs`：`DiffFilesArgs`（`paths`）→ 合成 `["diff","--",paths...]` → `DiffArgs::try_parse_from` → `command::diff::execute_safe`。复用唯一 diff 引擎。
+- 源码分层：`src/command/diff_plumbing.rs`：`DiffFilesArgs`（`paths`/`patch`/`no_patch`/`raw`/`name_only`/`name_status`/`exit_code`/`quiet`）→ 合成 argv（`--no-renames`、可选 `--exit-code`、worktree 比较时 `--plumbing-stat-only`）→ `DiffArgs::try_parse_from` → `command::diff::execute_safe`。复用唯一 diff 引擎；`--plumbing-stat-only`（隐藏）让 `resolve_worktree_side` 走 `get_files_blobs_stat_only`：stat 匹配复用 index hash，stat 漂移记全零 sha 不读内容（intent-to-add 占位条目仍哈希）。
 - 底层操作对象：index + 工作树（经 diff 引擎读）。无写入。
 
 ## 实现历史
 
+- 2026-10-20（issues/479 DF-01）：默认退出码 1→0，新增 `--exit-code`/`--quiet`；worktree 侧改 stat-based（全零 sha 不哈希）；TC-0021 移植测试 `add_test::test_add_refresh_with_pathspec_tc0021` 与 TC-0044 stat-raciness 测试入 `diff_plumbing_test`。
 - 2026-06-30（GGT-11 diff-plumbing 部分）：与 `diff-tree`/`diff-index` 同批新增。
 
 ## 当前状态
@@ -30,7 +31,7 @@
 
 | 类别 | 未完成项 | 当前处理 |
 |---|---|---|
-| 兼容差异项 | `-1`/`-2`/`-3` 阶段选择、raw 输出 | 延后；更多用 `libra diff`。 |
+| 兼容差异项 | `-1`/`-2`/`-3` 阶段选择；未合并路径在 raw 记录渲染为 `D`（git 为 `U`，P2 residual 已登记） | 延后；更多用 `libra diff`。 |
 
 ## 维护要求
 

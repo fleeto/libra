@@ -1275,3 +1275,262 @@ fn test_rev_parse_default_with_dashdash() {
         vec![sha.clone(), "--".to_string()]
     );
 }
+
+// ── RV-01: `:<path>` / `:<n>:<path>` index-path specs (M-IDX I1–I8) ──
+
+/// Assert a failing rev-parse produced `LBR-CLI-003` (exit 129) with the
+/// expected explanation substring in stderr.
+fn assert_invalid_index_spec(repo: &std::path::Path, spec: &str, explanation: &str) {
+    let output = run_libra_command(&["rev-parse", spec], repo);
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(output.status.code(), Some(129), "{spec}: {stderr}");
+    assert_eq!(report.error_code, "LBR-CLI-003", "{spec}: {stderr}");
+    assert!(
+        stderr.contains(explanation),
+        "{spec}: expected {explanation:?} in stderr: {stderr}"
+    );
+}
+
+#[test]
+fn test_rev_parse_index_path_matrix() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+
+    // I1: `:foo` returns the INDEX blob even when the worktree moved on.
+    fs::write(p.join("tracked.txt"), "index version\n").expect("restage tracked.txt");
+    let add = run_libra_command(&["add", "tracked.txt"], p);
+    assert_cli_success(&add, "re-stage tracked.txt");
+    let index_oid = run_libra_command(&["rev-parse", ":tracked.txt"], p);
+    assert_cli_success(&index_oid, "I1 rev-parse :tracked.txt");
+    let index_oid = String::from_utf8_lossy(&index_oid.stdout)
+        .trim()
+        .to_string();
+    fs::write(p.join("tracked.txt"), "worktree version\n").expect("dirty worktree");
+    let i1 = run_libra_command(&["rev-parse", ":tracked.txt"], p);
+    assert_cli_success(&i1, "I1 rev-parse :tracked.txt (dirty worktree)");
+    assert_eq!(
+        String::from_utf8_lossy(&i1.stdout).trim(),
+        index_oid,
+        "I1: :tracked.txt must keep returning the index blob after a worktree edit"
+    );
+    // The returned OID is really the staged content, not the worktree edit.
+    let blob = run_libra_command(&["cat-file", "-p", &index_oid], p);
+    assert_cli_success(&blob, "I1 cat-file staged blob");
+    assert_eq!(
+        String::from_utf8_lossy(&blob.stdout),
+        "index version\n",
+        "I1: the resolved object must hold the INDEX content"
+    );
+
+    // I2: `--verify :foo` succeeds and prints the same OID.
+    let i2 = run_libra_command(&["rev-parse", "--verify", ":tracked.txt"], p);
+    assert_cli_success(&i2, "I2 rev-parse --verify :tracked.txt");
+    assert_eq!(String::from_utf8_lossy(&i2.stdout).trim(), index_oid);
+
+    // I3: `:0:foo` is `:foo`.
+    let i3 = run_libra_command(&["rev-parse", ":0:tracked.txt"], p);
+    assert_cli_success(&i3, "I3 rev-parse :0:tracked.txt");
+    assert_eq!(String::from_utf8_lossy(&i3.stdout).trim(), index_oid);
+
+    // I5: nested paths.
+    fs::create_dir_all(p.join("sub")).expect("mkdir sub");
+    fs::write(p.join("sub").join("s.txt"), "nested\n").expect("write sub/s.txt");
+    let add = run_libra_command(&["add", "sub/s.txt"], p);
+    assert_cli_success(&add, "add sub/s.txt");
+    let commit = run_libra_command(&["commit", "-m", "add nested", "--no-verify"], p);
+    assert_cli_success(&commit, "commit nested path");
+    let i5 = run_libra_command(&["rev-parse", ":sub/s.txt"], p);
+    assert_cli_success(&i5, "I5 rev-parse :sub/s.txt");
+    let head_path = run_libra_command(&["rev-parse", "HEAD:sub/s.txt"], p);
+    assert_cli_success(&head_path, "I5 rev-parse HEAD:sub/s.txt");
+    assert_eq!(
+        String::from_utf8_lossy(&i5.stdout).trim(),
+        String::from_utf8_lossy(&head_path.stdout).trim(),
+        "I5: :sub/s.txt and HEAD:sub/s.txt must resolve the same blob"
+    );
+
+    // I6: `./` / `../` resolve relative to the CURRENT directory.
+    let sub = p.join("sub");
+    let i6_here = run_libra_command(&["rev-parse", ":./s.txt"], &sub);
+    assert_cli_success(&i6_here, "I6 rev-parse :./s.txt from sub/");
+    assert_eq!(
+        String::from_utf8_lossy(&i6_here.stdout).trim(),
+        String::from_utf8_lossy(&i5.stdout).trim(),
+        "I6: :./s.txt from sub/ must resolve sub/s.txt"
+    );
+    let i6_up = run_libra_command(&["rev-parse", ":../tracked.txt"], &sub);
+    assert_cli_success(&i6_up, "I6 rev-parse :../tracked.txt from sub/");
+    assert_eq!(
+        String::from_utf8_lossy(&i6_up.stdout).trim(),
+        index_oid,
+        "I6: :../tracked.txt from sub/ must resolve tracked.txt"
+    );
+
+    // I7: a path absent from the index is LBR-CLI-003 / exit 129.
+    assert_invalid_index_spec(p, ":not-in-index.txt", "is not in the index");
+
+    // I4: `:1:` / `:2:` / `:3:` return the matching conflict stages.
+    let blob_oid = |content: &str| -> String {
+        let out = run_libra_command_with_stdin(&["hash-object", "-w", "--stdin"], p, content);
+        assert_cli_success(&out, "hash-object -w --stdin");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    let stages = [
+        (1, blob_oid("stage 1\n"), "stage 1\n"),
+        (2, blob_oid("stage 2\n"), "stage 2\n"),
+        (3, blob_oid("stage 3\n"), "stage 3\n"),
+    ];
+    {
+        use git_internal::{
+            hash::HashKind,
+            internal::index::{Index, IndexEntry},
+        };
+        let index_path = p.join(".libra/index");
+        let mut index =
+            Index::load_with_hash_kind(HashKind::Sha1, &index_path).expect("load index");
+        for (stage, oid, content) in &stages {
+            let hash: ObjectHash = oid.parse().expect("stage blob oid");
+            let mut entry =
+                IndexEntry::new_from_blob("conflict.txt".to_string(), hash, content.len() as u32);
+            entry.flags.stage = *stage;
+            index.add(entry);
+        }
+        index
+            .save_with_hash_kind(HashKind::Sha1, &index_path)
+            .expect("save conflicted index");
+    }
+    for (stage, oid, _) in &stages {
+        let spec = format!(":{stage}:conflict.txt");
+        let out = run_libra_command(&["rev-parse", &spec], p);
+        assert_cli_success(&out, &format!("I4 rev-parse {spec}"));
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).trim(),
+            *oid,
+            "I4: {spec} must return the stage-{stage} blob"
+        );
+    }
+
+    // I8: stage 0 missing but higher stages present → LBR-CLI-003 with the
+    // stage-0 explanation.
+    assert_invalid_index_spec(p, ":conflict.txt", "in the index, but not at stage 0");
+}
+
+#[test]
+fn test_cat_file_and_show_accept_index_path() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    fs::write(p.join("tracked.txt"), "index content\n").expect("restage tracked.txt");
+    let add = run_libra_command(&["add", "tracked.txt"], p);
+    assert_cli_success(&add, "re-stage tracked.txt");
+
+    let cat = run_libra_command(&["cat-file", "-p", ":tracked.txt"], p);
+    assert_cli_success(&cat, "cat-file -p :tracked.txt");
+    assert_eq!(
+        String::from_utf8_lossy(&cat.stdout),
+        "index content\n",
+        "cat-file -p :tracked.txt must print the index content"
+    );
+
+    let show = run_libra_command(&["show", ":tracked.txt"], p);
+    assert_cli_success(&show, "show :tracked.txt");
+    assert!(
+        String::from_utf8_lossy(&show.stdout).contains("index content\n"),
+        "show :tracked.txt must print the index content: {}",
+        String::from_utf8_lossy(&show.stdout)
+    );
+}
+
+// ── RV-02: `:/<regex>` and `<rev>^{/<regex>}` message search (M-MSG M1–M9) ──
+
+#[test]
+fn test_rev_parse_message_search_matrix() {
+    let repo = tempdir().expect("tempdir");
+    init_repo_via_cli(repo.path());
+    configure_identity_via_cli(repo.path());
+    let p = repo.path();
+
+    // Controlled dates keep the newest-first walk deterministic:
+    //   t1 "base: no match"          (main, root)
+    //   t2 "common-old"              (main)
+    //   t3 "side-only !boom marker"  (side branch from t1; not on main)
+    //   t4 "common-new"              (main, HEAD)
+    let commit = |file: &str, content: &str, message: &str, stamp: &str| {
+        fs::write(p.join(file), content).expect("write commit file");
+        let add = run_libra_command(&["add", file], p);
+        assert_cli_success(&add, &format!("add {file}"));
+        let env = [("GIT_COMMITTER_DATE", stamp), ("GIT_AUTHOR_DATE", stamp)];
+        let out = run_libra_command_with_env(&["commit", "-m", message, "--no-verify"], p, &env);
+        assert_cli_success(&out, &format!("commit {message}"));
+    };
+    let oid_of = |spec: &str| -> String {
+        let out = run_libra_command(&["rev-parse", spec], p);
+        assert_cli_success(&out, &format!("rev-parse {spec}"));
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+
+    commit(
+        "base.txt",
+        "base\n",
+        "base: no match",
+        "2020-01-01T00:00:00Z",
+    );
+    let base = oid_of("HEAD");
+    commit("old.txt", "old\n", "common-old", "2020-01-02T00:00:00Z");
+    let common_old = oid_of("HEAD");
+    let branch = run_libra_command(&["branch", "side"], p);
+    assert_cli_success(&branch, "branch side");
+    commit(
+        "side.txt",
+        "side\n",
+        "side-only !boom marker",
+        "2020-01-03T00:00:00Z",
+    );
+    let side_tip = oid_of("HEAD");
+    let switch = run_libra_command(&["switch", "main"], p);
+    assert_cli_success(&switch, "switch back to main");
+    commit("new.txt", "new\n", "common-new", "2020-01-04T00:00:00Z");
+    let common_new = oid_of("HEAD");
+    assert_ne!(base, common_old);
+    assert_ne!(common_old, side_tip);
+    assert_ne!(side_tip, common_new);
+
+    // M1 / M2: newer of the two matching commits wins for `:/` and `^{/}`.
+    assert_eq!(oid_of(":/common"), common_new, "M1: :/common");
+    assert_eq!(oid_of("HEAD^{/common}"), common_new, "M2: HEAD^{{/common}}");
+
+    // M3: `!-` negates: the newest commit whose message does NOT match.
+    assert_eq!(oid_of(":/!-common"), side_tip, "M3: :/!-common");
+
+    // M4: `!!` keeps a literal leading `!` in the pattern.
+    assert_eq!(oid_of(":/!!boom"), side_tip, "M4: :/!!boom");
+
+    // M5: a bare leading `!` is an error.
+    assert_invalid_index_spec(p, ":/!x", "leading '!'");
+    // M6: an invalid regex is an error.
+    assert_invalid_index_spec(p, ":/(unclosed", "invalid message-search pattern");
+    // M7: no matching commit is an error.
+    assert_invalid_index_spec(p, ":/no-such-message-anywhere", "invalid reference");
+
+    // M8: a commit reachable only from a non-current branch is findable.
+    assert_eq!(
+        oid_of(":/side-only"),
+        side_tip,
+        "M8: :/side-only must find the side-branch-only commit from main"
+    );
+
+    // M9: the result is a commit-ish usable by `log` and `show`.
+    let log = run_libra_command(&["log", ":/common"], p);
+    assert_cli_success(&log, "M9 log :/common");
+    assert!(
+        String::from_utf8_lossy(&log.stdout).contains(&common_new),
+        "M9: log :/common must print the newer matching commit: {}",
+        String::from_utf8_lossy(&log.stdout)
+    );
+    let show = run_libra_command(&["show", ":/common"], p);
+    assert_cli_success(&show, "M9 show :/common");
+    assert!(
+        String::from_utf8_lossy(&show.stdout).contains(&common_new),
+        "M9: show :/common must print the newer matching commit: {}",
+        String::from_utf8_lossy(&show.stdout)
+    );
+}

@@ -188,3 +188,83 @@ fn test_symbolic_ref_help_lists_examples_banner() {
         );
     }
 }
+
+/// issues/479 SR-01 M-SYMDEL: `-d`/`--delete` is accepted for the git t1401
+/// contract and never deletes anything — `HEAD` is refused with git's
+/// `deleting 'HEAD' is not allowed`, any other name with `Cannot delete
+/// <name>, not a symbolic ref`; both exit 128 and leave state untouched.
+#[test]
+fn symbolic_ref_delete_matrix() {
+    let repo = tempdir().expect("failed to create repository root");
+    init_repo_via_cli(repo.path());
+    let root = repo.path();
+
+    let head_before = run_libra_command(&["symbolic-ref", "HEAD"], root);
+    assert!(
+        head_before.status.success(),
+        "read HEAD before delete: {}",
+        String::from_utf8_lossy(&head_before.stderr)
+    );
+    let head_target = String::from_utf8_lossy(&head_before.stdout)
+        .trim()
+        .to_string();
+
+    for args in [
+        vec!["symbolic-ref", "-d", "HEAD"],
+        vec!["symbolic-ref", "--delete", "HEAD"],
+    ] {
+        let out = run_libra_command(&args, root);
+        assert_eq!(
+            out.status.code(),
+            Some(128),
+            "{args:?} must exit 128: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("deleting 'HEAD' is not allowed"),
+            "{args:?} must print git's message: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    // S3: a branch ref name gets the "not a symbolic ref" form (128).
+    let branch = run_libra_command(&["symbolic-ref", "-d", "refs/heads/main"], root);
+    assert_eq!(branch.status.code(), Some(128));
+    assert!(
+        String::from_utf8_lossy(&branch.stderr)
+            .contains("Cannot delete refs/heads/main, not a symbolic ref"),
+        "branch-name message: {}",
+        String::from_utf8_lossy(&branch.stderr)
+    );
+
+    // S2: an arbitrary name gets the same form.
+    let other = run_libra_command(&["symbolic-ref", "--delete", "FOO"], root);
+    assert_eq!(other.status.code(), Some(128));
+    assert!(
+        String::from_utf8_lossy(&other.stderr).contains("Cannot delete FOO, not a symbolic ref"),
+        "FOO message: {}",
+        String::from_utf8_lossy(&other.stderr)
+    );
+
+    // S4: `-q -d` keeps the fatal (git prints it regardless of -q).
+    let quiet = run_libra_command(&["symbolic-ref", "-q", "-d", "FOO"], root);
+    assert_eq!(quiet.status.code(), Some(128));
+    assert!(
+        String::from_utf8_lossy(&quiet.stderr).contains("Cannot delete FOO, not a symbolic ref"),
+        "-q -d keeps the fatal: {}",
+        String::from_utf8_lossy(&quiet.stderr)
+    );
+
+    // HEAD is unchanged after every refusal.
+    let head_after = run_libra_command(&["symbolic-ref", "HEAD"], root);
+    assert!(
+        head_after.status.success(),
+        "read HEAD after delete: {}",
+        String::from_utf8_lossy(&head_after.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&head_after.stdout).trim(),
+        head_target,
+        "HEAD must be unchanged"
+    );
+}

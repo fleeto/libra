@@ -1004,6 +1004,7 @@ mod notes_test;
 mod op_test;
 mod open_test;
 mod output_flags_test;
+mod plumbing_exit_contract_test;
 mod pull_json_test;
 mod pull_test;
 mod push_error_test;

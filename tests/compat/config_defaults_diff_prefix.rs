@@ -97,7 +97,7 @@ fn diff_mnemonic_commit_pairs_and_plumbing_delegates() {
     );
 
     let tree = fixture.run(&repo, &["diff-tree", "-p", "HEAD~1", "HEAD"]);
-    assert_eq!(tree.status.code(), Some(1));
+    assert_eq!(tree.status.code(), Some(0));
     assert!(
         text(&tree).contains("diff --git c/tracked.txt c/tracked.txt"),
         "diff-tree delegates commit/commit prefixes: {}",
@@ -105,7 +105,7 @@ fn diff_mnemonic_commit_pairs_and_plumbing_delegates() {
     );
 
     let index = fixture.run(&repo, &["diff-index", "-p", "HEAD~1"]);
-    assert_eq!(index.status.code(), Some(1));
+    assert_eq!(index.status.code(), Some(0));
     assert!(
         text(&index).contains("diff --git c/tracked.txt w/tracked.txt"),
         "diff-index delegates commit/worktree prefixes: {}",
@@ -114,7 +114,7 @@ fn diff_mnemonic_commit_pairs_and_plumbing_delegates() {
 
     fs::write(repo.join("tracked.txt"), "three\n").expect("modify worktree");
     let files = fixture.run(&repo, &["diff-files", "-p"]);
-    assert_eq!(files.status.code(), Some(1));
+    assert_eq!(files.status.code(), Some(0));
     assert!(
         text(&files).contains("diff --git i/tracked.txt w/tracked.txt"),
         "diff-files delegates index/worktree prefixes: {}",

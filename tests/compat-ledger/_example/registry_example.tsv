@@ -1,4 +1,5 @@
 diff	--numstat	git-compatible	docs/commands/diff.md#description
 diff	--word-diff	git-compatible	docs/commands/diff.md#description
 diff	--word-diff-regex	git-compatible	docs/commands/diff.md#description
-update-ref	--stdin	deferred	docs/commands/update-ref.md#comparison-with-git
+update-ref	--stdin	git-compatible	docs/commands/update-ref.md#synopsis
+update-ref	--create-reflog	deferred	docs/commands/update-ref.md#comparison-with-git

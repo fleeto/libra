@@ -360,6 +360,13 @@ pub struct DiffArgs {
     #[clap(long = "no-ext-diff")]
     pub no_ext_diff: bool,
 
+    /// Hidden plumbing mode: `diff-files`/`diff-index` (worktree comparison)
+    /// are stat-based like git — a stat-dirty entry is reported modified with
+    /// an all-zero worktree sha WITHOUT hashing its content (issues/479
+    /// DF-01 / TC-0044 contract).
+    #[clap(long = "plumbing-stat-only", hide = true)]
+    pub plumbing_stat_only: bool,
+
     /// Color moved lines (lines deleted in one place and added in another) with a
     /// distinct color in terminal output. Bare `--color-moved` and the
     /// block-significance modes (`default`/`zebra`/`blocks`/`dimmed-zebra`) are
@@ -2576,6 +2583,45 @@ fn get_files_blobs(
                 detail: e.to_string(),
             })?;
             Ok((p.to_owned(), calculate_object_hash(ObjectType::Blob, &data)))
+        })
+        .collect()
+}
+
+/// Stat-based worktree side for the plumbing `diff-files`/`diff-index`
+/// (issues/479 DF-01, TC-0044): git's plumbing never hashes the worktree.
+/// A stat-dirty entry is reported modified with an all-zero worktree sha;
+/// a clean entry reuses the index hash; an intent-to-add placeholder (no
+/// trustworthy stat) falls back to hashing its content.
+fn get_files_blobs_stat_only(
+    files: &[PathBuf],
+    index: &Index,
+    policy: IgnorePolicy,
+) -> Result<Vec<(PathBuf, ObjectHash)>, DiffError> {
+    let index_file_mtime = crate::utils::path::try_index()
+        .ok()
+        .and_then(|index_path| std::fs::metadata(index_path).ok())
+        .and_then(|meta| meta.modified().ok());
+    let zero = ObjectHash::zero_for_kind(git_internal::hash::get_hash_kind());
+    files
+        .iter()
+        .filter(|path| !ignore::should_ignore(path, policy, index))
+        .map(|p| {
+            if let Some(hash) = index_hash_if_worktree_stat_matches(p, index, index_file_mtime) {
+                return Ok((p.to_owned(), hash));
+            }
+            if let Some(entry) = p.to_str().and_then(|name| index.get(name, 0))
+                && entry.flags.intent_to_add
+            {
+                let absolute = util::workdir_to_absolute(p);
+                let data =
+                    read_worktree_blob_bytes(&absolute).map_err(|e| DiffError::FileRead {
+                        path: absolute.display().to_string(),
+                        detail: e.to_string(),
+                    })?;
+                return Ok((p.to_owned(), calculate_object_hash(ObjectType::Blob, &data)));
+            }
+            // Stat differs: report the all-zero worktree sha without hashing.
+            Ok((p.to_owned(), zero))
         })
         .collect()
 }
@@ -5124,6 +5170,7 @@ pub(crate) async fn staged_diff_text() -> Result<String, DiffError> {
         textconv: false,
         no_textconv: false,
         ext_diff: false,
+        plumbing_stat_only: false,
     };
     let config = resolve_diff_config(&args).await?;
     let mut result = run_diff(

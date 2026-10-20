@@ -1254,7 +1254,7 @@ fn ledger_rejects_dangling_surface_evidence() {
 fn ledger_rejects_surface_evidence_text_mismatch() {
     assert_rejected_with_lock(
         "surface_evidence_text_mismatch",
-        "does not mention '--stdin'",
+        "does not mention '--create-reflog'",
     );
 }
 
@@ -1349,13 +1349,13 @@ fn ledger_anchor_resolution_agrees_with_the_generator() {
             "docs/commands/update-ref.md#comparison-with-git",
             "update-ref",
             "--stdin",
-            true,
+            false,
         ),
         // Resolves, but the cited text never mentions the surface.
         (
             "docs/commands/update-ref.md#synopsis",
             "update-ref",
-            "--stdin",
+            "--create-reflog",
             false,
         ),
         // No such section.

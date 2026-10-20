@@ -44,6 +44,14 @@ pub struct SymbolicRefArgs {
     #[clap(long)]
     pub short: bool,
 
+    /// Request deleting the symbolic ref. In Libra the only symbolic ref is
+    /// `HEAD`, and Git refuses to delete it, so `-d HEAD` always fails with
+    /// `deleting 'HEAD' is not allowed` (128); any other name fails with
+    /// `Cannot delete <name>, not a symbolic ref` (128). Nothing is ever
+    /// deleted — the flag exists for the git `t1401` contract.
+    #[clap(short = 'd', long = "delete", conflicts_with = "target")]
+    pub delete: bool,
+
     /// Symbolic ref to read or update. Libra currently supports HEAD.
     #[clap(value_name = "NAME")]
     pub name: Option<String>,
@@ -90,6 +98,19 @@ async fn run_symbolic_ref(
     quiet_detached_head_is_silent: bool,
 ) -> CliResult<SymbolicRefOutput> {
     let name = args.name.as_deref().unwrap_or(HEAD_REF);
+    if args.delete {
+        // ADR-PL-08: `-d` is accepted for git parity and never deletes
+        // anything. The messages match git's `builtin/symbolic-ref.c`; the
+        // name is reported as typed (HEAD is the only symbolic ref Libra
+        // supports, so every other name is "not a symbolic ref").
+        return Err(CliError::fatal(if name == HEAD_REF {
+            "deleting 'HEAD' is not allowed".to_string()
+        } else {
+            format!("Cannot delete {name}, not a symbolic ref")
+        })
+        .with_exit_code(128)
+        .with_stable_code(StableErrorCode::CliInvalidTarget));
+    }
     validate_name(name)?;
 
     if let Some(target) = args.target.as_deref() {

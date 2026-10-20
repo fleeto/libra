@@ -4578,3 +4578,71 @@ fn test_add_intent_to_add_is_public_in_help() {
         "W8 examples must show -N: {text}"
     );
 }
+
+/// issues/479 DF-01 — TC-0021 port of `t/t3700-add.sh#25`
+/// (`git add --refresh with pathspec`): stage foo/bar/baz, record the index
+/// blob of `:foo`, remove foo from the worktree, write a stage-3 entry via
+/// `--index-info`, make bar/baz stat-dirty, then `add --refresh bar` must
+/// refresh only bar — `diff-files --name-only` exits 0 and lists baz (still
+/// stat-dirty) and foo (stage-3), but NOT bar.
+#[test]
+fn test_add_refresh_with_pathspec_tc0021() {
+    let repo = tempdir().unwrap();
+    super::init_repo_via_cli(repo.path());
+    let root = repo.path();
+    super::configure_identity_via_cli(root);
+
+    for name in ["foo", "bar", "baz"] {
+        fs::write(root.join(name), "\n").expect("write fixture file");
+    }
+    super::assert_cli_success(
+        &run_libra_command(&["add", "foo", "bar", "baz"], root),
+        "stage foo bar baz",
+    );
+    let rev = run_libra_command(&["rev-parse", ":foo"], root);
+    assert!(
+        rev.status.success(),
+        "rev-parse :foo failed: {}",
+        String::from_utf8_lossy(&rev.stderr)
+    );
+    let oid = String::from_utf8_lossy(&rev.stdout).trim().to_string();
+    assert_eq!(oid.len(), 40, "index blob oid for :foo");
+
+    fs::remove_file(root.join("foo")).expect("rm -f foo");
+    let info = format!("100644 {oid} 3\tfoo\n");
+    let index_info = run_libra_command_with_stdin(&["update-index", "--index-info"], root, &info);
+    assert!(
+        index_info.status.success(),
+        "--index-info stage-3 failed: {}",
+        String::from_utf8_lossy(&index_info.stderr)
+    );
+
+    // chmtime -60 bar baz: same content, older stat than the index records.
+    fs::write(root.join("bar"), "\n").expect("stat-dirty bar");
+    fs::write(root.join("baz"), "\n").expect("stat-dirty baz");
+
+    let refresh = run_libra_command(&["add", "--refresh", "bar"], root);
+    assert_eq!(
+        refresh.status.code(),
+        Some(0),
+        "add --refresh bar must exit 0: {}",
+        String::from_utf8_lossy(&refresh.stderr)
+    );
+
+    let names = run_libra_command(&["diff-files", "--name-only"], root);
+    assert_eq!(
+        names.status.code(),
+        Some(0),
+        "diff-files --name-only must exit 0: {}",
+        String::from_utf8_lossy(&names.stderr)
+    );
+    let listed = String::from_utf8_lossy(&names.stdout);
+    assert!(
+        !listed.lines().any(|l| l == "bar"),
+        "bar was refreshed and must not be listed: {listed}"
+    );
+    assert!(
+        listed.lines().any(|l| l == "baz"),
+        "stat-dirty baz must be listed: {listed}"
+    );
+}

@@ -54,6 +54,14 @@ pub struct DiffTreeArgs {
     /// Show changed path names with status letters.
     #[clap(long = "name-status")]
     pub name_status: bool,
+    /// Exit 1 when there are differences instead of the plumbing default 0
+    /// (git's `--exit-code`).
+    #[clap(long = "exit-code")]
+    pub exit_code: bool,
+    /// Suppress all output and exit 1 when there are differences (git's
+    /// `--quiet`).
+    #[clap(long)]
+    pub quiet: bool,
     /// Combined-diff spelling. Libra renders the unmerged/combined form for
     /// merge commits through the shared engine; the flag is otherwise accepted.
     #[clap(short = 'c', long = "cc")]
@@ -91,6 +99,12 @@ pub struct DiffIndexArgs {
     /// Show changed path names with status letters.
     #[clap(long = "name-status")]
     pub name_status: bool,
+    /// Exit 1 when there are differences instead of the plumbing default 0.
+    #[clap(long = "exit-code")]
+    pub exit_code: bool,
+    /// Suppress all output and exit 1 when there are differences.
+    #[clap(long)]
+    pub quiet: bool,
     /// The tree-ish to compare.
     #[clap(value_name = "TREE")]
     pub tree: String,
@@ -118,6 +132,12 @@ pub struct DiffFilesArgs {
     /// Show changed file names with their status letter (`A`/`M`/`D`/`R`).
     #[clap(long = "name-status")]
     pub name_status: bool,
+    /// Exit 1 when there are differences instead of the plumbing default 0.
+    #[clap(long = "exit-code")]
+    pub exit_code: bool,
+    /// Suppress all output and exit 1 when there are differences.
+    #[clap(long)]
+    pub quiet: bool,
     /// Optional path limiters.
     #[clap(value_name = "PATH", last = true)]
     pub paths: Vec<String>,
@@ -153,14 +173,25 @@ fn push_output_mode(
 
 /// Build a `DiffArgs` from a synthetic argv and run the shared diff engine.
 ///
-/// Plumbing diff commands follow Git's plumbing exit convention — exit 1 when
-/// there are differences, 0 when clean — so `--exit-code` is always on (unlike
-/// the porcelain `diff`, which exits 0 unless `--exit-code` is requested).
-async fn run_via_diff(mut argv: Vec<String>, output: &OutputConfig) -> CliResult<()> {
+/// Plumbing diff commands follow Git's plumbing exit convention: exit 0 by
+/// default even with differences; `--exit-code`/`--quiet` turn differences
+/// into exit 1 (ADR-PL-09, issues/479 DF-01). The porcelain `diff` keeps its
+/// own 0-unless-requested convention.
+async fn run_via_diff(
+    mut argv: Vec<String>,
+    output: &OutputConfig,
+    differences_exit_one: bool,
+    stat_only: bool,
+) -> CliResult<()> {
     // `diff.renames` is porcelain-only in Git. Keep the shared engine's default
     // rename detection out of plumbing, and bypass invalid porcelain config.
     argv.insert(1, "--no-renames".to_string());
-    argv.insert(1, "--exit-code".to_string());
+    if differences_exit_one {
+        argv.insert(1, "--exit-code".to_string());
+    }
+    if stat_only {
+        argv.insert(1, "--plumbing-stat-only".to_string());
+    }
     // Plumbing keeps its historical 128 override on argv parse failures.
     delegate_to_diff(argv, output, Some(128)).await
 }
@@ -211,13 +242,14 @@ pub async fn execute_tree_safe(args: DiffTreeArgs, output: &OutputConfig) -> Cli
     push_output_mode(
         &mut argv,
         args.patch,
-        args.no_patch,
+        args.no_patch || args.quiet,
         args.raw,
         args.name_only,
         args.name_status,
     );
     push_paths(&mut argv, &args.paths);
-    run_via_diff(argv, output).await
+    // diff-tree compares two tree-ishes: no worktree side, content-based.
+    run_via_diff(argv, output, args.exit_code || args.quiet, false).await
 }
 
 pub async fn execute_index(args: DiffIndexArgs) {
@@ -236,13 +268,13 @@ pub async fn execute_index_safe(args: DiffIndexArgs, output: &OutputConfig) -> C
     push_output_mode(
         &mut argv,
         args.patch,
-        args.no_patch,
+        args.no_patch || args.quiet,
         args.raw,
         args.name_only,
         args.name_status,
     );
     push_paths(&mut argv, &args.paths);
-    run_via_diff(argv, output).await
+    run_via_diff(argv, output, args.exit_code || args.quiet, !args.cached).await
 }
 
 pub async fn execute_files(args: DiffFilesArgs) {
@@ -258,11 +290,11 @@ pub async fn execute_files_safe(args: DiffFilesArgs, output: &OutputConfig) -> C
     push_output_mode(
         &mut argv,
         args.patch,
-        args.no_patch,
+        args.no_patch || args.quiet,
         args.raw,
         args.name_only,
         args.name_status,
     );
     push_paths(&mut argv, &args.paths);
-    run_via_diff(argv, output).await
+    run_via_diff(argv, output, args.exit_code || args.quiet, true).await
 }

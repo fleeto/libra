@@ -1,7 +1,7 @@
 //! Core utility toolbox for repo detection, path conversion, ignore checking, storage access, hashing helpers, and miscellaneous formatting/time utilities.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BinaryHeap, HashMap, HashSet},
     env,
     ffi::OsStr,
     fs, io,
@@ -14,7 +14,10 @@ use std::{
 use git_internal::{
     errors::GitError,
     hash::ObjectHash,
-    internal::object::{commit::Commit, tag::Tag as GitTag, tree::Tree, types::ObjectType},
+    internal::{
+        index::Index,
+        object::{commit::Commit, tag::Tag as GitTag, tree::Tree, types::ObjectType},
+    },
 };
 use ignore::{
     Match,
@@ -23,6 +26,7 @@ use ignore::{
 use indicatif::{ProgressBar, ProgressStyle};
 use once_cell::sync::Lazy;
 use path_absolutize::*;
+use regex::RegexBuilder;
 
 use crate::{
     command::load_object,
@@ -1874,6 +1878,19 @@ async fn resolve_hash_atom_typed(name: &str) -> Result<ResolvedAtom, CommitBaseE
 }
 
 async fn resolve_object_atom_typed(name: &str) -> Result<ResolvedAtom, CommitBaseError> {
+    if let Some(pattern) = name.strip_prefix(":/") {
+        // Git's `get_oid_oneline` skips empty patterns, so `:/` resolves
+        // nothing; only `<rev>^{/}` (empty pattern, explicit start) is a match.
+        if pattern.is_empty() {
+            return Err(invalid_reference(name));
+        }
+        let object_id = resolve_message_search_typed(None, pattern, name).await?;
+        return Ok(ResolvedAtom {
+            object_id,
+            reflog_ref: None,
+        });
+    }
+
     if name == "HEAD" || name == "@" {
         let object_id = match Head::current_commit_result().await {
             Ok(Some(commit_id)) => commit_id,
@@ -2139,6 +2156,16 @@ async fn resolve_revision_expression_typed(spec: &str) -> Result<ObjectHash, Com
             .ok_or_else(|| invalid_reference(spec))?;
         if let Some(peel) = rest.strip_prefix("^{") {
             let close = peel.find('}').ok_or_else(|| invalid_reference(spec))?;
+            // `<rev>^{/<pattern>}` commit-message search (RV-02).
+            if let Some(pattern) = peel[..close].strip_prefix('/') {
+                let object_id = resolve_message_search_typed(Some(current), pattern, spec).await?;
+                atom = Some(ResolvedAtom {
+                    object_id,
+                    reflog_ref: None,
+                });
+                rest = &peel[close + 1..];
+                continue;
+            }
             let expected = match &peel[..close] {
                 "" => None,
                 "object" => Some(object_type_typed(&objects_storage(), &current, spec)?),
@@ -2235,6 +2262,275 @@ fn resolve_tree_path_typed(
     Ok(current)
 }
 
+/// Parse a `:<path>` / `:<n>:<path>` index-path spec into `(stage, path)`.
+///
+/// `rest` is the input after the leading `:` (so the spec's second character is
+/// `rest[0]`). A leading `[0-3]:` selects that merge stage; any other shape
+/// selects stage 0 with the whole remainder as the path (`:0:p` ≡ `:p`).
+fn parse_index_path_spec(rest: &str) -> (u8, &str) {
+    let bytes = rest.as_bytes();
+    if bytes.len() >= 2 && bytes[0].is_ascii_digit() && bytes[0] <= b'3' && bytes[1] == b':' {
+        (bytes[0] - b'0', &rest[2..])
+    } else {
+        (0, rest)
+    }
+}
+
+/// Resolve a `:<path>` / `:<n>:<path>` object spec against the current worktree
+/// index (ADR-PL-03). `name` is the full spec including the leading `:`.
+///
+/// `./` / `../` prefixes are resolved relative to the current directory; every
+/// other path is already repository-relative (Git's `resolve_relative_path`).
+async fn resolve_index_path_typed(name: &str) -> Result<ObjectHash, CommitBaseError> {
+    let rest = &name[1..];
+    let (stage, path_spec) = parse_index_path_spec(rest);
+
+    let repo_relative = if path_spec.starts_with("./") || path_spec.starts_with("../") {
+        let worktree = working_dir();
+        let absolute = normalize_abs_path(&cur_dir().join(path_spec));
+        // Git's `resolve_relative_path` contract: `./` / `../` specs that
+        // escape the worktree are rejected, never resolved against the index.
+        if !is_sub_path(&absolute, &worktree) {
+            return Err(CommitBaseError::InvalidReference(format!(
+                "'{path_spec}' is outside repository at '{}'",
+                worktree.display()
+            )));
+        }
+        to_relative(absolute, worktree)
+    } else {
+        PathBuf::from(path_spec)
+    };
+    let path_name = repo_relative.to_string_lossy().into_owned();
+
+    let index_file = path::index();
+    let hash_kind = git_internal::hash::get_hash_kind();
+    let index = Index::load_with_hash_kind(hash_kind, &index_file).map_err(|error| {
+        CommitBaseError::classify_storage_failure(format!(
+            "failed to read the index while resolving '{name}': {error}"
+        ))
+    })?;
+
+    if let Some(object_id) = index.get_hash(&path_name, stage) {
+        return Ok(object_id);
+    }
+    // Git reports `path '<p>' is in the index, but not at stage <n>` when the
+    // requested stage is absent but any other stage of the path exists.
+    if (0u8..=3).any(|other| other != stage && index.get_hash(&path_name, other).is_some()) {
+        return Err(CommitBaseError::InvalidReference(format!(
+            "path '{path_name}' is in the index, but not at stage {stage}"
+        )));
+    }
+    Err(CommitBaseError::InvalidReference(format!(
+        "path '{path_name}' is not in the index"
+    )))
+}
+
+/// Parse a `:/<pattern>` / `^{/<pattern>}` message-search pattern prefix.
+///
+/// Returns `(negated, regex_text)`: `!-` negates the match, `!!` keeps a
+/// literal leading `!` in the regex, and any other leading `!` is an error
+/// (matching Git's `get_oid_oneline`).
+fn parse_message_search_pattern<'a>(
+    pattern: &'a str,
+    display_name: &str,
+) -> Result<(bool, &'a str), CommitBaseError> {
+    match pattern.strip_prefix('!') {
+        None => Ok((false, pattern)),
+        Some(rest) => {
+            if let Some(negated) = rest.strip_prefix('-') {
+                Ok((true, negated))
+            } else if rest.starts_with('!') {
+                // `!!` is a literal `!`: the first `!` is the escape marker and
+                // the second stays in the regex (where `!` is a literal byte).
+                Ok((false, rest))
+            } else {
+                Err(CommitBaseError::InvalidReference(format!(
+                    "invalid message-search pattern in '{display_name}': a leading '!' must be followed by '-' or '!'"
+                )))
+            }
+        }
+    }
+}
+
+/// Upper bound on the compiled regex size (a linear-time, backtracking-free
+/// engine, so a size cap is the memory guard; ADR-PL-04).
+const MESSAGE_SEARCH_REGEX_SIZE_LIMIT: usize = 10 * 1024 * 1024;
+
+fn compile_message_search_regex(
+    pattern: &str,
+    display_name: &str,
+) -> Result<regex::Regex, CommitBaseError> {
+    RegexBuilder::new(pattern)
+        .size_limit(MESSAGE_SEARCH_REGEX_SIZE_LIMIT)
+        .build()
+        .map_err(|error| {
+            CommitBaseError::InvalidReference(format!(
+                "invalid message-search pattern in '{display_name}': {error}"
+            ))
+        })
+}
+
+/// A commit queued for the message-search walk, ordered newest-first by
+/// committer timestamp (ties broken by object id for determinism).
+#[derive(Eq, PartialEq)]
+struct PendingCommit {
+    timestamp: usize,
+    object_id: ObjectHash,
+}
+
+impl Ord for PendingCommit {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.timestamp
+            .cmp(&other.timestamp)
+            .then_with(|| self.object_id.to_string().cmp(&other.object_id.to_string()))
+    }
+}
+
+impl PartialOrd for PendingCommit {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+/// Load `object_id` and enqueue it once (deduplicated by object id).
+fn push_pending_commit(
+    pending: &mut BinaryHeap<PendingCommit>,
+    seen: &mut HashSet<ObjectHash>,
+    object_id: ObjectHash,
+    display_name: &str,
+) -> Result<(), CommitBaseError> {
+    if !seen.insert(object_id) {
+        return Ok(());
+    }
+    let commit: Commit = load_object(&object_id).map_err(|error| {
+        CommitBaseError::classify_storage_failure(format!(
+            "failed to load commit {object_id} while resolving '{display_name}': {error}"
+        ))
+    })?;
+    pending.push(PendingCommit {
+        timestamp: commit.committer.timestamp,
+        object_id,
+    });
+    Ok(())
+}
+
+/// The start points for a `:/<pattern>` search: HEAD plus every local branch
+/// and tag (peeled to a commit). Non-commit tags are skipped.
+async fn message_search_start_points(
+    display_name: &str,
+) -> Result<Vec<ObjectHash>, CommitBaseError> {
+    let mut tips = Vec::new();
+
+    match Head::current_commit_result().await {
+        Ok(Some(commit)) => tips.push(commit),
+        Ok(None) => {}
+        Err(error) => {
+            return Err(CommitBaseError::from_branch_store_error(
+                format!("failed to resolve HEAD while resolving '{display_name}'"),
+                error,
+            ));
+        }
+    }
+
+    let branches = Branch::list_branches_result(None).await.map_err(|error| {
+        CommitBaseError::from_branch_store_error(
+            format!("failed to list local branches while resolving '{display_name}'"),
+            error,
+        )
+    })?;
+    tips.extend(branches.into_iter().map(|branch| branch.commit));
+
+    // Git's `for_each_ref` start set includes `refs/remotes/*`, so a commit
+    // reachable only from a remote-tracking branch is findable too.
+    let remotes = ConfigKv::all_remote_configs().await.map_err(|error| {
+        CommitBaseError::ReadFailure(format!(
+            "failed to list remotes while resolving '{display_name}': {error}"
+        ))
+    })?;
+    for remote in remotes {
+        let remote_branches = Branch::list_branches_result(Some(&remote.name))
+            .await
+            .map_err(|error| {
+                CommitBaseError::from_branch_store_error(
+                    format!(
+                        "failed to list remote-tracking branches for '{}' while resolving \
+                         '{display_name}'",
+                        remote.name
+                    ),
+                    error,
+                )
+            })?;
+        tips.extend(remote_branches.into_iter().map(|branch| branch.commit));
+    }
+
+    let tags = tag::list().await.map_err(|error| {
+        CommitBaseError::ReadFailure(format!(
+            "failed to list tags while resolving '{display_name}': {error}"
+        ))
+    })?;
+    for entry in tags {
+        let target = match entry.object {
+            tag::TagObject::Commit(commit) => commit.id,
+            tag::TagObject::Tag(tag_object) => tag_object.object_hash,
+            // Tree/Blob tags are not commit tips.
+            tag::TagObject::Tree(_) | tag::TagObject::Blob(_) => continue,
+        };
+        match peel_object_to_type_typed(target, Some(ObjectType::Commit), &entry.name) {
+            Ok(commit) => tips.push(commit),
+            // A tag that does not peel to a commit is not a start point.
+            Err(_) => continue,
+        }
+    }
+
+    Ok(tips)
+}
+
+/// Resolve a commit-message search (ADR-PL-04): `:/<pattern>` (start from all
+/// local refs + HEAD) or `<rev>^{/<pattern>}` (start from `start`).
+///
+/// Traverses ancestors newest-first by committer timestamp and returns the
+/// first commit whose message matches (or, with `!-`, does not match). Only
+/// commit objects are read — trees and blobs are never loaded. Invalid regex,
+/// size-limit overflow, and no-match all report `invalid_reference`.
+async fn resolve_message_search_typed(
+    start: Option<ObjectHash>,
+    pattern: &str,
+    display_name: &str,
+) -> Result<ObjectHash, CommitBaseError> {
+    let (negated, regex_text) = parse_message_search_pattern(pattern, display_name)?;
+    let regex = compile_message_search_regex(regex_text, display_name)?;
+
+    let starts = match start {
+        Some(object_id) => vec![object_id],
+        None => message_search_start_points(display_name).await?,
+    };
+
+    let mut pending = BinaryHeap::new();
+    let mut seen = HashSet::new();
+    for object_id in starts {
+        push_pending_commit(&mut pending, &mut seen, object_id, display_name)?;
+    }
+
+    while let Some(PendingCommit { object_id, .. }) = pending.pop() {
+        let commit: Commit = load_object(&object_id).map_err(|error| {
+            CommitBaseError::classify_storage_failure(format!(
+                "failed to load commit {object_id} while resolving '{display_name}': {error}"
+            ))
+        })?;
+        // Git matches against the whole message block (everything after the
+        // blank line that ends the commit header), which is exactly
+        // `Commit::message` here.
+        if regex.is_match(&commit.message) != negated {
+            return Ok(object_id);
+        }
+        for parent in commit.parent_commit_ids {
+            push_pending_commit(&mut pending, &mut seen, parent, display_name)?;
+        }
+    }
+
+    Err(invalid_reference(display_name))
+}
+
 /// Resolve one strict Git object specification to its concrete object id.
 ///
 /// Supported forms include refs, unique object-id prefixes, `@`, numeric reflog
@@ -2242,6 +2538,16 @@ fn resolve_tree_path_typed(
 /// `<tree-ish>:<path>`. Parsing consumes the entire input; trailing garbage is
 /// never ignored.
 pub async fn resolve_object_spec_typed(name: &str) -> Result<ObjectHash, CommitBaseError> {
+    // `:<path>` / `:<n>:<path>` (RV-01): the second character is not `/`.
+    if let Some(rest) = name.strip_prefix(':')
+        && !rest.starts_with('/')
+    {
+        return resolve_index_path_typed(name).await;
+    }
+    // `:/<pattern>` (RV-02) has no `<rev>:` part — it is a revision atom.
+    if name.starts_with(":/") {
+        return resolve_revision_expression_typed(name).await;
+    }
     if let Some((revision, tree_path)) = name.split_once(':') {
         if revision.is_empty() {
             return Err(invalid_reference(name));
@@ -3291,7 +3597,7 @@ pub fn is_valid_refname(refname: &str) -> bool {
 
 #[cfg(test)]
 mod test {
-    use std::{env, path::PathBuf};
+    use std::{env, fs, path::PathBuf};
 
     use git_internal::internal::object::{
         signature::{Signature, SignatureType},
@@ -3306,7 +3612,7 @@ mod test {
         command::{
             add::{self, AddArgs},
             commit::{self, CommitArgs},
-            save_object,
+            load_object, save_object,
         },
         internal::{db::get_db_conn_instance, head::Head, model::reference, tag as internal_tag},
         utils::test,
@@ -4709,5 +5015,230 @@ mod test {
             !ignore_read_failed(),
             "late latch from a finished epoch must not poison the next walk"
         );
+    }
+
+    // ── RV-01 / RV-02 resolver parity unit tests ──
+
+    /// Stage `path` with `content` (no commit) for index-path resolver tests.
+    async fn stage_file_for_resolver_test(path: &str, content: &str) {
+        test::ensure_file(path, Some(content));
+        add::execute(AddArgs {
+            intent_to_add: false,
+            sparse: false,
+            pathspec: vec![path.into()],
+            all: false,
+            update: false,
+            refresh: false,
+            verbose: false,
+            force: false,
+            dry_run: false,
+            ignore_errors: false,
+            pathspec_from_file: None,
+            pathspec_file_nul: false,
+            chmod: None,
+            renormalize: false,
+            ignore_missing: false,
+            resolved: false,
+            patch: false,
+            auto_advance: false,
+            no_auto_advance: false,
+        })
+        .await;
+    }
+
+    /// Stage and commit `path` with `content` under `message`.
+    async fn commit_file_for_resolver_test(path: &str, content: &str, message: &str) -> ObjectHash {
+        stage_file_for_resolver_test(path, content).await;
+        commit::execute(CommitArgs {
+            message: Some(message.into()),
+            disable_pre: true,
+            no_verify: true,
+            ..Default::default()
+        })
+        .await;
+        Head::current_commit().await.expect("committed HEAD")
+    }
+
+    #[test]
+    fn parse_index_path_spec_selects_stage_and_path() {
+        assert_eq!(parse_index_path_spec("foo"), (0, "foo"));
+        assert_eq!(parse_index_path_spec("0:foo"), (0, "foo"));
+        assert_eq!(parse_index_path_spec("1:foo"), (1, "foo"));
+        assert_eq!(parse_index_path_spec("3:foo"), (3, "foo"));
+        // A stage digit must be followed by `:`; otherwise the whole text is the path.
+        assert_eq!(parse_index_path_spec("4:foo"), (0, "4:foo"));
+        assert_eq!(parse_index_path_spec("12:foo"), (0, "12:foo"));
+    }
+
+    #[test]
+    fn parse_message_search_pattern_prefixes() {
+        assert_eq!(
+            parse_message_search_pattern("pat", "s").unwrap(),
+            (false, "pat")
+        );
+        assert_eq!(
+            parse_message_search_pattern("!-pat", "s").unwrap(),
+            (true, "pat")
+        );
+        assert_eq!(
+            parse_message_search_pattern("!!pat", "s").unwrap(),
+            (false, "!pat")
+        );
+        assert!(parse_message_search_pattern("!x", "s").is_err());
+        assert!(parse_message_search_pattern("!", "s").is_err());
+    }
+
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn index_path_spec_resolves_staged_blob() {
+        let repo = tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = test::ChangeDirGuard::new(repo.path());
+
+        stage_file_for_resolver_test("foo.txt", "hello\n").await;
+
+        let index = Index::load(path::index()).expect("load index");
+        let expected = index.get_hash("foo.txt", 0).expect("staged entry");
+
+        assert_eq!(
+            resolve_object_spec_typed(":foo.txt").await.unwrap(),
+            expected
+        );
+        assert_eq!(
+            resolve_object_spec_typed(":0:foo.txt").await.unwrap(),
+            expected
+        );
+
+        let err = resolve_object_spec_typed(":missing.txt").await.unwrap_err();
+        assert!(
+            err.to_string().contains("is not in the index"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn index_path_spec_rejects_paths_outside_worktree() {
+        let repo = tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = test::ChangeDirGuard::new(repo.path());
+
+        let err = resolve_object_spec_typed(":../escaped.txt")
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("outside repository"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn non_colon_spec_does_not_read_index() {
+        let repo = tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = test::ChangeDirGuard::new(repo.path());
+        let head = commit_tracked_file_for_peel_test().await;
+
+        // Corrupt the index: a non-`:` spec must resolve without touching it.
+        fs::write(path::index(), b"not an index").expect("corrupt index");
+        assert_eq!(resolve_object_spec_typed("HEAD").await.unwrap(), head);
+        assert_eq!(resolve_object_spec_typed("main").await.unwrap(), head);
+
+        // A `:` spec DOES read the index, so it fails against the corrupt file.
+        assert!(resolve_object_spec_typed(":tracked.txt").await.is_err());
+    }
+
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn message_search_favors_newer_matching_commit() {
+        let repo = tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = test::ChangeDirGuard::new(repo.path());
+
+        // Two commits whose messages both match `common`, with controlled
+        // increasing committer dates: the newer one must win for both the
+        // `:/` and the `^{/}` syntax (t1500-rev-parse.sh shape).
+        // SAFETY: this test holds the `serial(env)` key, so no other test
+        // reads these variables while they are set.
+        unsafe {
+            env::set_var("GIT_COMMITTER_DATE", "2020-01-01T00:00:00Z");
+            env::set_var("GIT_AUTHOR_DATE", "2020-01-01T00:00:00Z");
+        }
+        commit_file_for_resolver_test("old.txt", "old\n", "common-old").await;
+        unsafe {
+            env::set_var("GIT_COMMITTER_DATE", "2020-01-02T00:00:00Z");
+            env::set_var("GIT_AUTHOR_DATE", "2020-01-02T00:00:00Z");
+        }
+        let newer = commit_file_for_resolver_test("new.txt", "new\n", "common-new").await;
+        unsafe {
+            env::remove_var("GIT_COMMITTER_DATE");
+            env::remove_var("GIT_AUTHOR_DATE");
+        }
+
+        assert_eq!(
+            resolve_object_spec_typed("HEAD").await.unwrap(),
+            newer,
+            "fixture: HEAD must be the newer commit"
+        );
+        assert_eq!(resolve_object_spec_typed(":/common").await.unwrap(), newer);
+        assert_eq!(
+            resolve_object_spec_typed("HEAD^{/common}").await.unwrap(),
+            newer
+        );
+        // Empty pattern with an explicit start matches the start commit itself
+        // (Git's `^{/}` quirk), while the `:/` empty-pattern form resolves
+        // nothing (asserted in the invalid-reference test below).
+        assert_eq!(resolve_object_spec_typed("HEAD^{/}").await.unwrap(), newer);
+    }
+
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn message_search_does_not_load_trees_or_blobs() {
+        let repo = tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = test::ChangeDirGuard::new(repo.path());
+        let head =
+            commit_file_for_resolver_test("tracked.txt", "tracked\n", "searchable base").await;
+
+        // Delete the commit's tree and blob objects. The message search only
+        // reads commit objects, so it must still resolve.
+        let commit: Commit = load_object(&head).expect("load commit");
+        let tree: Tree = load_object(&commit.tree_id).expect("load tree");
+        let blob_id = tree.tree_items[0].id;
+
+        let blob_hex = blob_id.to_string();
+        let blob_path = path::objects().join(&blob_hex[..2]).join(&blob_hex[2..]);
+        fs::remove_file(&blob_path).expect("delete blob object");
+
+        let tree_hex = commit.tree_id.to_string();
+        let tree_path = path::objects().join(&tree_hex[..2]).join(&tree_hex[2..]);
+        fs::remove_file(&tree_path).expect("delete tree object");
+
+        assert_eq!(
+            resolve_object_spec_typed(":/searchable").await.unwrap(),
+            head
+        );
+    }
+
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn message_search_invalid_regex_and_no_match_are_invalid_reference() {
+        let repo = tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = test::ChangeDirGuard::new(repo.path());
+        commit_file_for_resolver_test("tracked.txt", "tracked\n", "searchable base").await;
+
+        let err = resolve_object_spec_typed(":/[invalid").await.unwrap_err();
+        assert!(matches!(err, CommitBaseError::InvalidReference(_)));
+
+        let err = resolve_object_spec_typed(":/no-such-message")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, CommitBaseError::InvalidReference(_)));
+
+        // Git's `get_oid_oneline` skips empty patterns: `:/` resolves nothing.
+        let err = resolve_object_spec_typed(":/").await.unwrap_err();
+        assert!(matches!(err, CommitBaseError::InvalidReference(_)));
     }
 }

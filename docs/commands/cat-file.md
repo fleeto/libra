@@ -309,3 +309,8 @@ hard error (`LBR-CLI-003`, exit 129) that emits no envelope.
 | Invalid object / revision | `LBR-CLI-003` | 129 |
 | Unsupported argument combination | `LBR-CLI-002` | 129 |
 | Failed to read object data | `LBR-IO-001` / `LBR-REPO-002` | 128 |
+
+> Exit-code note: unresolvable object names and invalid argument combinations
+> exit `129` (`LBR-CLI-003` / `LBR-CLI-002`), intentionally different from
+> Git's `128` (ADR-PL-02). The `-e` existence probe keeps Git's exact contract:
+> present `0`, well-formed-but-absent `1` (silent), malformed name `129`.

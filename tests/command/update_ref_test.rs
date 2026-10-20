@@ -1018,3 +1018,224 @@ fn update_ref_policy_delete_storage_error() {
     let after = run_libra_command(&["rev-parse", "refs/heads/policy"], repo.path());
     assert!(after.status.success(), "the ref survived");
 }
+
+// ---------------------------------------------------------------------------
+// issues/479 UR-01: `--stdin [-z]` batch transactions and `--no-deref`.
+// ---------------------------------------------------------------------------
+
+fn ref_exists(repo: &TempDir, full_ref: &str) -> bool {
+    rev_parse(repo, full_ref).status.success()
+}
+
+fn stdin_batch(repo: &TempDir, extra_args: &[&str], body: &str) -> Output {
+    let mut args: Vec<&str> = vec!["update-ref"];
+    args.extend_from_slice(extra_args);
+    args.push("--stdin");
+    super::run_libra_command_with_stdin(&args, repo.path(), body)
+}
+
+/// UR-01 B1: `create`/`update`/`delete`/`verify` each work, one line per ref.
+#[test]
+fn update_ref_stdin_basic_matrix() {
+    let (repo, c1, c2) = repo_with_two_commits();
+    // One command per ref per batch (git rejects multiple updates of one ref,
+    // verify included — libra mirrors that, see the B3 test).
+    let first = format!(
+        "create refs/heads/b1 {c1}\nupdate refs/heads/b2 {c1}\nverify refs/heads/main {c2}\n"
+    );
+    let out = stdin_batch(&repo, &[], &first);
+    assert!(
+        out.status.success(),
+        "stdin batch failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(ref_exists(&repo, "refs/heads/b1"), "b1 created");
+    assert_eq!(
+        stdout_trimmed(&rev_parse(&repo, "refs/heads/b2")),
+        c1,
+        "b2 created at c1"
+    );
+
+    let second = format!("update refs/heads/b2 {c2} {c1}\ndelete refs/heads/b1 {c1}\n");
+    let out = stdin_batch(&repo, &[], &second);
+    assert!(
+        out.status.success(),
+        "second stdin batch failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!ref_exists(&repo, "refs/heads/b1"), "b1 deleted");
+    assert_eq!(
+        stdout_trimmed(&rev_parse(&repo, "refs/heads/b2")),
+        c2,
+        "b2 CAS-updated to c2"
+    );
+}
+
+/// UR-01 B2: an old-value mismatch fails the WHOLE batch atomically.
+#[test]
+fn update_ref_stdin_failure_is_atomic() {
+    let (repo, c1, _c2) = repo_with_two_commits();
+    // new2 does not exist, so expecting c1 is a CAS mismatch (the zero id
+    // would be "must not exist" and pass).
+    let body = format!("update refs/heads/new1 {c1}\nupdate refs/heads/new2 {c1} {c1}\n");
+    let out = stdin_batch(&repo, &[], &body);
+    assert_eq!(
+        out.status.code(),
+        Some(128),
+        "CAS mismatch must fail the batch: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!ref_exists(&repo, "refs/heads/new1"), "new1 must not exist");
+    assert!(!ref_exists(&repo, "refs/heads/new2"), "new2 must not exist");
+}
+
+/// UR-01 B3: two updates of the same ref are refused (git's message shape).
+#[test]
+fn update_ref_stdin_rejects_multiple_updates_of_one_ref() {
+    let (repo, c1, _c2) = repo_with_two_commits();
+    let body = format!("update refs/heads/x {c1}\nupdate refs/heads/x {c1}\n");
+    let out = stdin_batch(&repo, &[], &body);
+    assert_eq!(out.status.code(), Some(128));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("multiple updates for ref 'refs/heads/x'"),
+        "multiple-updates message: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!ref_exists(&repo, "refs/heads/x"));
+}
+
+/// UR-01 B4: `-z` NUL-terminated input applies exactly like the LF form.
+#[test]
+fn update_ref_stdin_z_nul_records() {
+    let (repo, c1, _c2) = repo_with_two_commits();
+    let body = format!("create refs/heads/z1 {c1}\0");
+    let out = stdin_batch(&repo, &["-z"], &body);
+    assert!(
+        out.status.success(),
+        "-z batch failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(ref_exists(&repo, "refs/heads/z1"));
+}
+
+/// UR-01 T1/T2/T3: the start/prepare/commit/abort state machine prints
+/// `<cmd>: ok` and commit/abort control whether anything is applied.
+#[test]
+fn update_ref_stdin_transaction_matrix() {
+    let (repo, c1, _c2) = repo_with_two_commits();
+
+    let committed = stdin_batch(
+        &repo,
+        &[],
+        &format!("start\nprepare\ncreate refs/heads/t1 {c1}\ncommit\n"),
+    );
+    assert!(
+        committed.status.success(),
+        "commit transaction failed: {}",
+        String::from_utf8_lossy(&committed.stderr)
+    );
+    let out = stdout_trimmed(&committed);
+    assert_eq!(out, "start: ok\nprepare: ok\ncommit: ok", "ok lines: {out}");
+    assert!(ref_exists(&repo, "refs/heads/t1"));
+
+    let aborted = stdin_batch(
+        &repo,
+        &[],
+        &format!("start\ncreate refs/heads/t2 {c1}\nabort\n"),
+    );
+    assert!(
+        aborted.status.success(),
+        "abort transaction failed: {}",
+        String::from_utf8_lossy(&aborted.stderr)
+    );
+    assert_eq!(
+        stdout_trimmed(&aborted),
+        "start: ok\nabort: ok",
+        "abort lines"
+    );
+    assert!(!ref_exists(&repo, "refs/heads/t2"), "abort applies nothing");
+
+    // T3: an update after commit is refused ("transaction is closed").
+    let after = stdin_batch(
+        &repo,
+        &[],
+        &format!("start\ncommit\nupdate refs/heads/t3 {c1}\n"),
+    );
+    assert_eq!(after.status.code(), Some(128), "closed transaction");
+    assert!(
+        String::from_utf8_lossy(&after.stderr).contains("transaction is closed"),
+        "closed message: {}",
+        String::from_utf8_lossy(&after.stderr)
+    );
+
+    // A nested start is refused.
+    let nested = stdin_batch(&repo, &[], "start\nstart\n");
+    assert_eq!(nested.status.code(), Some(128));
+    assert!(
+        String::from_utf8_lossy(&nested.stderr).contains("cannot restart ongoing transaction"),
+        "nested start message: {}",
+        String::from_utf8_lossy(&nested.stderr)
+    );
+}
+
+/// UR-01: out-of-scope refs and `symref-*` commands fail the whole batch with
+/// the invalid-target class (129 / `LBR-CLI-003`) and apply nothing.
+#[test]
+fn update_ref_stdin_out_of_scope_ref_aborts_batch() {
+    let (repo, c1, _c2) = repo_with_two_commits();
+    let body = format!("create refs/heads/ok {c1}\ncreate refs/tags/v1 {c1}\n");
+    let out = stdin_batch(&repo, &[], &body);
+    assert_eq!(
+        out.status.code(),
+        Some(129),
+        "out-of-scope ref must be 129: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("Error-Code: LBR-CLI-003"),
+        "stable code: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !ref_exists(&repo, "refs/heads/ok"),
+        "nothing may be applied"
+    );
+
+    let symref = stdin_batch(&repo, &[], "symref-update HEAD refs/heads/main\n");
+    assert_eq!(symref.status.code(), Some(129));
+    assert!(
+        String::from_utf8_lossy(&symref.stderr).contains("symbolic refs are not supported"),
+        "symref message: {}",
+        String::from_utf8_lossy(&symref.stderr)
+    );
+}
+
+/// UR-01: `--no-deref` and `option no-deref` are accepted and change nothing
+/// (no symbolic refs exist inside the `refs/heads/*` scope).
+#[test]
+fn update_ref_no_deref_accepted() {
+    let (repo, c1, _c2) = repo_with_two_commits();
+    let out = stdin_batch(
+        &repo,
+        &["--no-deref"],
+        &format!("option no-deref\ncreate refs/heads/nd1 {c1}\n"),
+    );
+    assert!(
+        out.status.success(),
+        "--no-deref batch failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(ref_exists(&repo, "refs/heads/nd1"));
+
+    // The argv form accepts the flag as a no-op too.
+    let argv = run_libra_command(
+        &["update-ref", "--no-deref", "refs/heads/nd2", &c1],
+        repo.path(),
+    );
+    assert!(
+        argv.status.success(),
+        "--no-deref argv form failed: {}",
+        String::from_utf8_lossy(&argv.stderr)
+    );
+    assert!(ref_exists(&repo, "refs/heads/nd2"));
+}

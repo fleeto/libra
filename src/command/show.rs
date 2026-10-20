@@ -387,11 +387,31 @@ async fn show_target_uses_commit_display(args: &ShowArgs) -> CliResult<bool> {
     Ok(util::get_commit_base(object_ref).await.is_ok())
 }
 
+/// Whether `object_ref` is a `:<path>` / `:<n>:<path>` index-path spec: a
+/// leading `:` whose second character is not `/` (so `:/<regex>` stays out).
+fn is_index_path_spec(object_ref: &str) -> bool {
+    object_ref
+        .strip_prefix(':')
+        .is_some_and(|rest| !rest.is_empty() && !rest.starts_with('/'))
+}
+
 async fn render_show_human(args: &ShowArgs, color_enabled: bool) -> CliResult<String> {
     let object_ref = args.object.as_deref().unwrap_or("HEAD");
 
+    // `:<path>` / `:<n>:<path>` read the blob straight from the index.
+    if is_index_path_spec(object_ref) {
+        let hash = util::resolve_object_spec_typed(object_ref)
+            .await
+            .map_err(|_| show_bad_revision_error(object_ref))?;
+        return show_object_by_hash(&hash, args, color_enabled).await;
+    }
+
     // Handle `<revision>:<path>` lookups before generic revision resolution.
-    if let Some((rev, path)) = object_ref.split_once(':') {
+    // (Skip `:...` specs — index paths and `:/<regex>` have no revision part.)
+    if let Some((rev, path)) = object_ref
+        .split_once(':')
+        .filter(|(rev, _)| !rev.is_empty())
+    {
         return show_commit_file(rev, path).await;
     }
 
@@ -436,7 +456,17 @@ async fn render_show_human(args: &ShowArgs, color_enabled: bool) -> CliResult<St
 async fn validate_show_quiet(args: &ShowArgs) -> CliResult<()> {
     let object_ref = args.object.as_deref().unwrap_or("HEAD");
 
-    if let Some((rev, path)) = object_ref.split_once(':') {
+    if is_index_path_spec(object_ref) {
+        let hash = util::resolve_object_spec_typed(object_ref)
+            .await
+            .map_err(|_| show_bad_revision_error(object_ref))?;
+        return validate_object_by_hash(&hash, args).await;
+    }
+
+    if let Some((rev, path)) = object_ref
+        .split_once(':')
+        .filter(|(rev, _)| !rev.is_empty())
+    {
         return validate_commit_file(rev, path).await;
     }
 
@@ -1116,7 +1146,17 @@ async fn run_show(args: &ShowArgs) -> CliResult<ShowOutput> {
     // `FIX-AD-01`: the JSON path also matches through the shared pathspec engine.
     let path_specs = show_pathspec_set(&args.pathspec)?;
 
-    if let Some((rev, path)) = object_ref.split_once(':') {
+    if is_index_path_spec(object_ref) {
+        let hash = util::resolve_object_spec_typed(object_ref)
+            .await
+            .map_err(|_| show_bad_revision_error(object_ref))?;
+        return collect_object_output(&hash, &paths, path_specs.as_ref(), args).await;
+    }
+
+    if let Some((rev, path)) = object_ref
+        .split_once(':')
+        .filter(|(rev, _)| !rev.is_empty())
+    {
         return collect_commit_file_output(rev, path).await;
     }
 

@@ -6,7 +6,7 @@
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。共享严格对象解析器支持 branch/tag/remote/full ref、`@`、`^N`/`~N`、`^{commit|tree|blob|tag|object}`、递归 `^{}`、数字 reflog selector（`HEAD@{N}`/`@{N}`/`branch@{N}`）和 `REV:path`，并在 SHA-1/SHA-256 仓库按当前 hash kind 校验对象 ID；plain、`--verify`/`--short`、symbolic 模式与输出过滤共用该语义。`--abbrev-ref`、`--symbolic-full-name`、`--symbolic`、`--show-toplevel`、`--default`、`--sq`、仓库状态查询及 `--flags`/`--no-flags`/`--revs-only`/`--no-revs` 已支持；日期 reflog selector、`@{-N}`、`@{upstream}`/`@{push}`、相对 tree path、`--abbrev=<n>` 与 parseopt 子模式尚未公开。
+- 兼容级别：`partial`。共享严格对象解析器支持 branch/tag/remote/full ref、`@`、`^N`/`~N`、`^{commit|tree|blob|tag|object}`、递归 `^{}`、数字 reflog selector（`HEAD@{N}`/`@{N}`/`branch@{N}`）、`REV:path`、index path（`:<path>`/`:<n>:<path>`，`./`/`../` 相对 cwd，越出工作树拒绝）与提交消息搜索（`:/<regex>`/`<rev>^{/<regex>}`，按提交时间最新优先，`!-` 取反/`!!` 字面 `!`），并在 SHA-1/SHA-256 仓库按当前 hash kind 校验对象 ID；plain、`--verify`/`--short`、symbolic 模式与输出过滤共用该语义。`--abbrev-ref`、`--symbolic-full-name`、`--symbolic`、`--show-toplevel`、`--default`、`--sq`、仓库状态查询及 `--flags`/`--no-flags`/`--revs-only`/`--no-revs` 已支持；日期 reflog selector、`@{-N}`、`@{upstream}`/`@{push}`、相对 tree path、`--abbrev=<n>` 与 parseopt 子模式尚未公开。
 - MG-21 仅为本命令接入 `resolve_object_spec_with_auto_merge_typed`：`AUTO_MERGE` 在非 squash 冲突 merge state 存在时解析为 automatic-result tree（含 markers），state cleanup 后立即拒绝。其余六个历史伪引用仍拒绝；默认 resolver 不变，因此不把该例外扩散给写引用或其它消费者。
 
 - 当前矩阵承诺常用 Git 行为已支持；新增语义必须同步矩阵、用户文档和测试。
@@ -42,6 +42,7 @@ flowchart TD
 - 2026-04-26 `1e60c68c`（`feat(rev): rev-list and rev-parse (#349)`）：功能演进：rev-list and rev-parse (#349)；该节点扩展了当前命令可用的参数或行为。
 - 2026-07-09 P0-03：新增 `--is-shallow-repository`，只读 `.libra/shallow` 并在存在非空 shallow boundary 时打印 `true`，否则 `false`；测试 `compat_clone_shallow_integrity::rev_parse_reports_shallow_repository_boolean`。
 - 2026-07-14 P1-09：新增共享严格 revision/object resolver，覆盖 `@`、数字 reflog selector、typed/recursive peel、完整 tag ref、`REV:path` 与 SHA-256；`cat-file`/`read-tree`/`commit-tree` 和 commit-ish 消费者共用同一错误分类，回归目标为 `compat_rev_parse_peel_selectors`。
+- 2026-10-20 RV-01/RV-02（issue #479）：共享解析器新增 index path spec（`:<path>`/`:<n>:<path>`，stage 0–3，`./`/`../` 相对 cwd，越出工作树拒绝；缺失路径或 stage-0 缺失 → `LBR-CLI-003`/129）与提交消息搜索（`:/<regex>`/`<rev>^{/<regex>}`，全部本地 ref + HEAD 为起点、按提交时间最新优先、`!-`/`!!`/裸 `!` 前缀语义、`regex` crate 线性时间 + 10 MiB 编译上限，只读提交对象）；矩阵回归为 `rev_parse_test::test_rev_parse_index_path_matrix`（M-IDX I1–I8）、`test_rev_parse_message_search_matrix`（M-MSG M1–M9）、`test_cat_file_and_show_accept_index_path`，退出码契约行追加进 `plumbing_exit_contract_test`（I7、I8、M5–M7）。
 - 历史结论：当前文档应以这些提交之后的代码、测试和兼容矩阵为准；更早的迁移式文档只保留为背景，不再作为事实来源。
 
 ## 当前状态
@@ -60,7 +61,7 @@ flowchart TD
 | ✅ 已实现（仓库状态查询） | `--show-toplevel`、`--show-prefix`、`--show-cdup`、`--is-inside-work-tree`、`--is-inside-git-dir`、`--is-bare-repository`、`--is-shallow-repository`、`--git-dir`、`--absolute-git-dir` 均已支持。 | `--is-inside-git-dir` 带单元测试与集成测试（worktree→`false`，`.libra` 内→`true`）；`--absolute-git-dir` 带集成测试（绝对路径、以 `.libra` 结尾、与 `--git-dir` 一致、与 `--git-dir` 互斥）；`--is-shallow-repository` 由 `compat_clone_shallow_integrity` 覆盖 false/true。 |
 | ✅ 已实现（symbolic 模式） | `--symbolic-full-name` 展开 ref 名；`--symbolic` 对可解析 spec 原样回显。两者的有效性门控共用严格 resolver，接受 `@`、typed peel、完整 ref 导航、tree/blob/tag 对象和 `REV:path`。 | 不可解析 spec 仍在 stderr 报错并退出 128，而 Git 部分模式会把原始 spec 回显到 stdout；这是既有有意差异。 |
 | ✅ 已实现（输出过滤） | `--flags`/`--no-flags`/`--revs-only`/`--no-revs` 用 `resolve_object_spec_typed` 分类任意类型对象 revision；`--` 后一律为 path，读失败/引用损坏会上抛。 | 已知选项必须位于位置 SPEC 之前；`--verify`/`--short` 与过滤标志组合以 LBR-CLI-002 拒绝；无参数 `--verify`/`--short` 仍默认 HEAD。 |
-| revision selector（仍缺口） | 日期 reflog selector、`@{-N}`、`@{upstream}`/`@{push}`、相对 tree path（`./`/`../`）尚未实现。 | 数字 reflog selector、`@`、parent/ancestor、typed/recursive peel 与仓库根 `REV:path` 已由 `compat_rev_parse_peel_selectors` 覆盖。 |
+| revision selector（仍缺口） | 日期 reflog selector、`@{-N}`、`@{upstream}`/`@{push}`、相对 tree path（`./`/`../`）尚未实现。 | 数字 reflog selector、`@`、parent/ancestor、typed/recursive peel、仓库根 `REV:path`、index path（`:<path>`/`:<n>:<path>`）与提交消息搜索（`:/<regex>`/`<rev>^{/<regex>}`）已由 `compat_rev_parse_peel_selectors` 与 `rev_parse_test` 的 M-IDX/M-MSG 矩阵覆盖；`./`/`../` 仅对 index path 相对 cwd 解析，tree path 形态仍拒绝。 |
 | 输出过滤（仍缺口） | Git `--abbrev=<n>` 输出选项与 parseopt 子模式。（`--short[=<n>]`、`--sq`、`--abbrev-ref`、`--symbolic-full-name`、`--symbolic`、`--flags`/`--no-flags`/`--revs-only`/`--no-revs` 已实现，不再列为缺口。） | 后续以新增测试、兼容矩阵或用户命令文档变更为准。 |
 | 参数解析模式 | Git `--parseopt`、`--keep-dashdash`、`--stuck-long`、`--sq-quote` 等 `--parseopt` 子模式；当前未实现。 | 后续以新增测试、兼容矩阵或用户命令文档变更为准。 |
 

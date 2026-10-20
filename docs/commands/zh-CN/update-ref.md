@@ -7,6 +7,7 @@
 ```
 libra update-ref [-m <reason>] refs/heads/<branch> <newvalue> [<oldvalue>]
 libra update-ref -d [-m <reason>] refs/heads/<branch> [<oldvalue>]
+libra update-ref --stdin [-z] [--no-deref] [-m <reason>]
 ```
 
 ## 说明
@@ -22,6 +23,19 @@ libra update-ref -d [-m <reason>] refs/heads/<branch> [<oldvalue>]
 
 每次成功更新都会为该 ref 写入一条 `update-ref` 的 reflog 记录。你为比较并交换传入的 `<oldvalue>` **绝不会**写入 reflog 消息；只记录真实的前后对象 id。
 
+### 批量事务（`--stdin`）
+
+`--stdin` 读取 git 的批量协议，每行一条命令（`-z` 为 NUL 分隔记录）：
+
+- `update <ref> <newvalue> [<oldvalue>]` —— 更新，可带 CAS；
+- `create <ref> <newvalue>` —— 仅创建（ref 必须不存在）；
+- `delete <ref> [<oldvalue>]` —— 删除，可带 CAS；
+- `verify <ref> [<oldvalue>]` —— 只读校验当前值；
+- `option no-deref` —— 接受（范围内没有符号 ref，结果不变）；
+- `start` / `prepare` / `commit` / `abort` —— git 的事务协议。
+
+批内所有更新在**一个 SQLite 事务**内原子生效：CAS 不匹配、非法命令、同一 ref 被多次更新（git 规则）或范围外 ref 都会让所有 ref 与 reflog 保持字节不变。`start`/`prepare`/`commit`/`abort` 在处理到时向 stdout 输出 `<cmd>: ok`（与 git 一致）；`abort` 不产生任何效果。`-m <reason>` 作用于批内每个被更新的 ref。`--no-deref` 与 `option no-deref` 被接受且永不改变结果。
+
 ## 选项
 
 | 选项 | 说明 | 示例 |
@@ -30,7 +44,10 @@ libra update-ref -d [-m <reason>] refs/heads/<branch> [<oldvalue>]
 | `-m <reason>` | 随更新记录的 reflog 原因。 | `libra update-ref -m "重置 tip" refs/heads/main <oid>` |
 | `<newvalue>` | 新提交，可写对象 id 或任意 revision 表达式（`-d` 时省略）。 | `libra update-ref refs/heads/main HEAD~1` |
 | `<oldvalue>` | 比较并交换的期望当前值，可写 id 或 revision（`0{40}` = 必须不存在）。 | `libra update-ref -d refs/heads/topic HEAD` |
-| `--json` / `--machine` | 结构化输出：`{ ref, old, new, deleted }`。 | `libra --json update-ref refs/heads/main <oid>` |
+| `--stdin` | 从 stdin 读取 `update`/`create`/`delete`/`verify`/`option`/`start`/`prepare`/`commit`/`abort` 批量命令；所有更新在单个事务内原子提交。 | `printf 'create refs/heads/x <oid>\n' \| libra update-ref --stdin` |
+| `-z`, `--null` | 配合 `--stdin` 使用 NUL 分隔记录。 | `libra update-ref -z --stdin` |
+| `--no-deref` | 为 git 兼容而接受；永不改变结果（范围内无符号 ref）。 | `libra update-ref --no-deref refs/heads/x <oid>` |
+| `--json` / `--machine` | 结构化输出：`{ ref, old, new, deleted }`（stdin 为 `{ refs, committed }`）。 | `libra --json update-ref refs/heads/main <oid>` |
 
 符号值（`ref:refs/heads/…`）以及把全零对象 id 作为 `<newvalue>` 都会被拒绝 —— 请用 `symbolic-ref`，或用 `-d` 删除。
 
@@ -80,4 +97,4 @@ libra update-ref -d refs/heads/old <oldoid>
 | 比较并交换 | `libra update-ref refs/heads/b <new> <old>` | `git update-ref refs/heads/b <new> <old>` |
 | 删除 ref | `libra update-ref -d refs/heads/b` | `git update-ref -d refs/heads/b` |
 
-延后（未公开）：非 `refs/heads/*` 命名空间、`HEAD`、`--stdin` 批量更新、`--create-reflog`、`--no-deref`。
+延后（未公开）：非 `refs/heads/*` 命名空间、`HEAD`、`--create-reflog`。

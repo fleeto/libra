@@ -5,7 +5,7 @@ Read or update Libra's symbolic `HEAD` reference.
 ## Synopsis
 
 ```bash
-libra symbolic-ref [--short] [--quiet] [HEAD]
+libra symbolic-ref [--short] [--quiet] [-d] [HEAD]
 libra symbolic-ref HEAD refs/heads/<branch>
 ```
 
@@ -29,6 +29,7 @@ The update form is silent in human output when it succeeds.
 |--------|-------------|
 | `--short` | Print only the branch name, for example `main` |
 | `-q`, `--quiet` | Suppress extra guidance when `HEAD` is not symbolic |
+| `-d`, `--delete` | Accepted for Git's `t1401` contract; never deletes anything. `-d HEAD` exits 128 with `deleting 'HEAD' is not allowed`; any other name exits 128 with `Cannot delete <name>, not a symbolic ref` |
 | `HEAD` | The symbolic ref to inspect or update. Omitted defaults to `HEAD` |
 | `refs/heads/<branch>` | New symbolic target for `HEAD` |
 

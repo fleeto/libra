@@ -108,7 +108,8 @@ pub(crate) async fn run_diff(
     // the hint mid-scan, and the SAME handle is awaited afterwards — the
     // scan runs exactly once and a huge tree is never truncated (#466,
     // cf. #372). `finish()` erases the hint when the scan completes.
-    let old_side = resolve_diff_side(&args.old, args.staged, false, &index, file_mode).await?;
+    let old_side =
+        resolve_diff_side(&args.old, args.staged, false, &index, file_mode, false).await?;
     let (new_side, index) = if scan_hint.enabled {
         // `Index` is not `Clone`; move it into the blocking task through an
         // `Arc` and take it back out afterwards.
@@ -118,6 +119,7 @@ pub(crate) async fn run_diff(
         // re-seed it inside the task, or SHA-256 repositories would have
         // every stat-miss file re-hashed with the wrong algorithm.
         let hash_kind = git_internal::hash::get_hash_kind();
+        let plumbing_stat_only = args.plumbing_stat_only;
         let shared_index = Arc::new(index);
         let mut scan_handle = {
             let index = Arc::clone(&shared_index);
@@ -130,7 +132,7 @@ pub(crate) async fn run_diff(
                     previous: git_internal::hash::get_hash_kind(),
                 };
                 set_hash_kind(hash_kind);
-                resolve_worktree_side(&index, file_mode)
+                resolve_worktree_side(&index, file_mode, plumbing_stat_only)
             })
         };
         let side =
@@ -153,7 +155,15 @@ pub(crate) async fn run_diff(
         };
         (side, index)
     } else {
-        let side = resolve_diff_side(&args.new, args.staged, true, &index, file_mode).await?;
+        let side = resolve_diff_side(
+            &args.new,
+            args.staged,
+            true,
+            &index,
+            file_mode,
+            args.plumbing_stat_only,
+        )
+        .await?;
         (side, index)
     };
 
@@ -874,9 +884,17 @@ pub(crate) fn get_worktree_modes(files: &[PathBuf]) -> Result<HashMap<PathBuf, u
         .collect()
 }
 
-pub(crate) fn resolve_worktree_side(index: &Index, file_mode: bool) -> Result<DiffSide, DiffError> {
+pub(crate) fn resolve_worktree_side(
+    index: &Index,
+    file_mode: bool,
+    stat_only: bool,
+) -> Result<DiffSide, DiffError> {
     let files = get_worktree_diff_files(index)?;
-    let blobs = get_files_blobs(&files, index, IgnorePolicy::Respect)?;
+    let blobs = if stat_only {
+        get_files_blobs_stat_only(&files, index, IgnorePolicy::Respect)?
+    } else {
+        get_files_blobs(&files, index, IgnorePolicy::Respect)?
+    };
     // ADR-FM-05: with core.fileMode=false the worktree mode comparison is
     // disabled; the index's recorded mode is used so only content (and entry
     // type) changes surface.
@@ -910,6 +928,7 @@ pub(crate) async fn resolve_diff_side(
     is_new: bool,
     index: &Index,
     file_mode: bool,
+    stat_only: bool,
 ) -> Result<DiffSide, DiffError> {
     if let Some(source) = source {
         let (blobs, modes) = get_treeish_entries(source).await?;
@@ -933,7 +952,7 @@ pub(crate) async fn resolve_diff_side(
                 is_worktree: false,
             })
         } else {
-            resolve_worktree_side(index, file_mode)
+            resolve_worktree_side(index, file_mode, stat_only)
         }
     } else if staged {
         match Head::current_commit().await {

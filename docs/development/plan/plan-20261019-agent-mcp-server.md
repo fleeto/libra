@@ -2216,7 +2216,7 @@ ER-01 至 ER-14 按模板原文对本计划全部任务生效（见 [`plan-templ
 
 **Task type:** `implementation`
 
-**Lifecycle / Acceptance:** `in-progress` / 空
+**Lifecycle / Acceptance:** `done` / `complete`
 
 **Description:** 自 MC-01 拆出。新增 GC-MC-03 ① 的唯一结果信封 `mcp_server/output.rs`：所有工具结果在返回前序列化后经 `review::redact_untrusted` 脱敏、重解析并清洗控制字符（失败为工具错误 `LBR-AGENT-034`，不回退原文）。大小上限与读 deadline 由 MC-19 承接。唯一行为轴：「MCP 工具结果脱敏」。
 
@@ -2228,13 +2228,16 @@ ER-01 至 ER-14 按模板原文对本计划全部任务生效（见 [`plan-templ
 |---|---|
 | 脱敏函数 | `src/internal/ai/agent_bridge/redaction.rs:20-53`（`review::redact_untrusted`、`scrub_controls`） |
 | 协议核心与 `libra_test_echo`（MC-01 交付） | `src/internal/ai/mcp_server/{protocol,stdio}.rs` |
-| 本地门 | `0.30.70`（tag `474b034`）把 `content[0].text` 留成脱敏前的 JSON：客户端再解析会还原 ESC，且 `\u001b` 的尾部字母会粘住后续 secret，redactor 词边界匹配不到。前滚修复 `0.30.71`：先清洗 `structuredContent`，再 `redact_untrusted`、重解析、再清洗，并重建文本副本。`envelope_redacts_secret` 与 `envelope_scrubs_control_chars` 均为 `test result: ok. 1 passed; 0 failed`。clippy `-D warnings` exit 0。nextest：`Summary [ 568.129s] 10661 tests run: 10661 passed (11 slow, 1 flaky), 21 skipped`，exit 0。Codex 与 D 组尚未通过，本卡仍为 in-progress。 |
+| 本地门 | `0.30.70`（tag `474b034`）把 `content[0].text` 留成脱敏前的 JSON。前滚修复 `0.30.71`（`d1c28a4`）：先清洗 `structuredContent`，再 `redact_untrusted`、重解析、再清洗，并重建文本副本。`envelope_redacts_secret` 与 `envelope_scrubs_control_chars` 均为 `test result: ok. 1 passed; 0 failed`。clippy `-D warnings` exit 0。nextest：`Summary [ 568.129s] 10661 tests run: 10661 passed (11 slow, 1 flaky), 21 skipped`，exit 0。 |
+| D 组 | tag `v0.30.71` 指向 `d1c28a452a298d0fce592bffd2c57a4f3cad2a63`。`release.yml` [39488255544](https://github.com/libra-tools/libra/actions/runs/39488255544) success。四个平台产物 HTTP 200。安装脚本 `DEFAULT_VERSION="v0.30.71"`。同一提交上 `base.yml` [39488106338](https://github.com/libra-tools/libra/actions/runs/39488106338) success（八个 job 全 success）与 `codeql.yml` [39488106268](https://github.com/libra-tools/libra/actions/runs/39488106268) success。`v0.30.70` 不改标签。 |
+| 网站 | `cf` `519c03902a34c3dac5350df19585e816fe31f6d0` 只改 `agent.en.md`。源文件与 `https://libra.tools/en/docs/commands/agent` 都含 `LBR-AGENT-034` 与 `redact`。Claude Code：`CLAUDE_VERDICT: PASS`，`P0=0`，`P1=0`。 |
+| Codex | 对 `d1c28a4`：`VERDICT: PASS`，`P0=0`，`P1=0`。对 `474b034` 的评审是 `VERDICT: FAIL`，`P0=0`，`P1=1`（未写出 finding）；缺陷由 `0.30.71` 修复。 |
 
 **Acceptance criteria:**
 
 - [x] AC-1 `libra_test_echo` 返回含 fixture secret（与 `agent_bridge_redaction_test` 同类的 token）的对象时，响应全文不含该 token 字面量。
 - [x] AC-2 `libra_test_echo` 返回含 ESC（`\u001b`）字符的字符串时，响应全文不含 ESC 字符。
-- [ ] ER-06/ER-06a 同卡强制门：下方「同卡文档门」逐文件全部通过；网站页另按 GC-MC-05 ①–⑥ 交付（不计入 AC 上限）。
+- [x] ER-06/ER-06a 同卡强制门：下方「同卡文档门」逐文件全部通过；网站页另按 GC-MC-05 ①–⑥ 交付（不计入 AC 上限）。
 
 **Verification:**（本卡特有判据，计入 G-03；`--exact` 门按 GC-MC-07 执行）
 
@@ -2246,9 +2249,9 @@ ER-01 至 ER-14 按模板原文对本计划全部任务生效（见 [`plan-templ
 - [x] `docs/commands/agent.md`：`rg -qF -- 'LBR-AGENT-034' docs/commands/agent.md && rg -qF -- 'redact' docs/commands/agent.md`
 - [x] `docs/commands/zh-CN/agent.md`：`rg -qF -- 'LBR-AGENT-034' docs/commands/zh-CN/agent.md && rg -qF -- 'redact' docs/commands/zh-CN/agent.md`
 - [x] `docs/development/commands/agent.md`：`rg -qF -- 'output.rs' docs/development/commands/agent.md && rg -qF -- 'redact_untrusted' docs/development/commands/agent.md`
-- [ ] 网站源文件 `agent`：`rg -qF -- 'LBR-AGENT-034' ../libra-backend/apps/tanstack-app/content/docs/commands/agent.en.md && rg -qF -- 'redact' ../libra-backend/apps/tanstack-app/content/docs/commands/agent.en.md`；GC-MC-05 ①–⑤ 交付后线上页面：`PAGE="$(curl -fsS https://libra.tools/en/docs/commands/agent)" && printf '%s' "$PAGE" | rg -qF -- 'LBR-AGENT-034' && printf '%s' "$PAGE" | rg -qF -- 'redact'`（GC-MC-05 ⑥）
+- [x] 网站源文件 `agent`：`rg -qF -- 'LBR-AGENT-034' ../libra-backend/apps/tanstack-app/content/docs/commands/agent.en.md && rg -qF -- 'redact' ../libra-backend/apps/tanstack-app/content/docs/commands/agent.en.md`；GC-MC-05 ①–⑤ 交付后线上页面：`PAGE="$(curl -fsS https://libra.tools/en/docs/commands/agent)" && printf '%s' "$PAGE" | rg -qF -- 'LBR-AGENT-034' && printf '%s' "$PAGE" | rg -qF -- 'redact'`（GC-MC-05 ⑥）
 - [x] 测试索引：`rg -q '^\| `agent_mcp_envelope_test` ' tests/INDEX.md && rg -q 'name = "agent_mcp_envelope_test"' Cargo.toml`
-- [ ] 语义复核：本卡 ER-05 Codex review 的输入包含上列每个文档文件的 diff，评审结论须逐文件确认其内容与本卡 `Docs and compatibility impact` 的内容说明一致（网站页另由 GC-MC-05 ④ 的 Claude Code PASS 覆盖）
+- [x] 语义复核：本卡 ER-05 Codex review 的输入包含上列每个文档文件的 diff，评审结论须逐文件确认其内容与本卡 `Docs and compatibility impact` 的内容说明一致（网站页另由 GC-MC-05 ④ 的 Claude Code PASS 覆盖）。Codex：`VERDICT: PASS`，`P0=0`，`P1=0`。Claude Code：`CLAUDE_VERDICT: PASS`，`P0=0`，`P1=0`。
 
 **Full-suite trigger:** `T-1: Cargo.toml 新增 [[test]] 行`
 

@@ -3583,7 +3583,7 @@ ER-01 至 ER-14 按模板原文对本计划全部任务生效（见 [`plan-templ
 
 **Task type:** `implementation`
 
-**Lifecycle / Acceptance:** `in-progress` / `locally-accepted`
+**Lifecycle / Acceptance:** `done` / `complete`（`v0.30.82` / `24fabae`。v0.30.81 的 macOS `extern` 构建失败已前滚。release.yml 39591913788 八项 success，四平台产物 HTTP 200。codeql 39591846433 success。该提交的 base.yml 被后续 main 取消；含该提交的 `f0ea585` 上 base.yml 39629633740 八项 success，codeql 39629633747 success。）
 
 **Description:** 自 MC-29 拆出（R29）。为每个读子进程施加内存上限（默认 512 MiB；仅在 `cfg(debug_assertions)` 且 `LIBRA_TEST=1` 时可由 `LIBRA_MCP_TEST_WORKER_MEM_MB` 覆盖）：Linux 上在子进程 `exec` 前以 `setrlimit(RLIMIT_AS)` 设硬上限；macOS（无可靠的地址空间硬上限）由父进程每 50 ms 采样子进程常驻内存（`proc_pid_rusage`），超过上限即 `SIGKILL` 其进程组；Windows 以 Job Object 的 `JOB_OBJECT_LIMIT_PROCESS_MEMORY` 设硬上限。超过上限时服务回复工具错误 `LBR-AGENT-028`（`structuredContent.reason = "worker_memory_limit"`），回收后归还槽位。本卡是**纵深防御**：读路径的主要内存上限来自算法预算（MC-31/MC-37 的 diff 预算、MC-33 的 status 扫描与输出预算），本卡防御未预见的分配。保证范围如实限定：Linux 的 `RLIMIT_AS` 与 Windows 的进程级限制作用于读子进程本身，macOS 为采样上限（两次采样之间可超出）；读子进程的只读预检把 worktree I/O 执行器配置为**纯进程内模式**（`src/internal/worktree_io/executor.rs` 的 `WorkerConfig` 新增 `in_process_only`，所有请求走既有的 `run_in_process` 路径，不派生 I/O 辅助进程），因此读子进程内的 status 不产生任何后代进程：超时终止与内存上限都作用于完整的读工作进程树（CLI 的 status 仍使用辅助进程池，行为不变）。另注册仅在 debug 且 `LIBRA_TEST=1` 时存在的 `libra_test_alloc`（在读子进程内逐步分配 `mb` MiB 并保持）。唯一行为轴：「读子进程内存上限」。
 

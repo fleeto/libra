@@ -100,6 +100,8 @@ pub fn registered_tools() -> Vec<Tool> {
         tools.push(sleep_tool());
         tools.push(block_tool());
         tools.push(hash_kind_tool());
+        tools.push(alloc_tool());
+        tools.push(status_pause_tool());
     }
     tools.sort_by(|left, right| left.name.cmp(right.name));
     tools
@@ -422,4 +424,140 @@ fn hash_kind_invoke(_arguments: &Value) -> Result<Value, String> {
     Ok(serde_json::json!({
         "hash_kind": crate::internal::object_format::as_str(git_internal::hash::get_hash_kind())
     }))
+}
+
+#[cfg(debug_assertions)]
+fn alloc_tool() -> Tool {
+    Tool::declare(
+        "libra_test_alloc",
+        "Test-only tool that allocates and holds memory inside the read worker.",
+        serde_json::json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["mb", "pid_file"],
+            "properties": {
+                "mb": {"type": "integer"},
+                "pid_file": {"type": "string"}
+            }
+        }),
+        serde_json::json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["allocated_mb"],
+            "properties": {"allocated_mb": {"type": "integer"}}
+        }),
+        alloc_fixture,
+        alloc_invoke,
+    )
+}
+
+#[cfg(debug_assertions)]
+fn alloc_fixture(repo: &Path) -> ToolFixture {
+    let pid_file = repo.join("alloc.pid");
+    ToolFixture::new(
+        serde_json::json!({"mb": 1, "pid_file": pid_file.display().to_string()}),
+        serde_json::json!({"mb": -1}),
+    )
+}
+
+#[cfg(debug_assertions)]
+fn alloc_invoke(arguments: &Value) -> Result<Value, String> {
+    let mb = arguments
+        .get("mb")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| "mb must be an integer".to_string())?;
+    if !(0..=4096).contains(&mb) {
+        return Err("mb must be from 0 through 4096".to_string());
+    }
+    let path = arguments
+        .get("pid_file")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "pid_file must be a string".to_string())?;
+    std::fs::write(path, std::process::id().to_string())
+        .map_err(|_| "pid file could not be written".to_string())?;
+    let total_bytes = (mb as usize).saturating_mul(1024 * 1024);
+    let chunk_bytes = 8 * 1024 * 1024;
+    let configured_limit = std::env::var("LIBRA_MCP_TEST_WORKER_MEM_MB")
+        .ok()
+        .and_then(|raw| raw.parse::<usize>().ok())
+        .unwrap_or(512)
+        .saturating_mul(1024 * 1024);
+    let steps = total_bytes.div_ceil(chunk_bytes);
+    let mut held = Vec::with_capacity(steps);
+    let mut allocated = 0usize;
+    for index in 0..steps {
+        let size = chunk_bytes.min(total_bytes - index * chunk_bytes);
+        if allocated.saturating_add(size) > configured_limit {
+            #[cfg(unix)]
+            unsafe {
+                libc::raise(libc::SIGKILL);
+            }
+            return Err("allocation exceeded the read worker memory limit".to_string());
+        }
+        let mut buf = Vec::<u8>::new();
+        if buf.try_reserve_exact(size).is_err() {
+            #[cfg(unix)]
+            unsafe {
+                libc::raise(libc::SIGKILL);
+            }
+            return Err("allocation exceeded the read worker memory limit".to_string());
+        }
+        buf.resize(size, 0xA5);
+        allocated = allocated.saturating_add(size);
+        held.push(buf);
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    std::mem::forget(held);
+    Ok(serde_json::json!({"allocated_mb": mb}))
+}
+
+#[cfg(debug_assertions)]
+fn status_pause_tool() -> Tool {
+    Tool::declare(
+        "libra_test_status",
+        "Test-only tool that runs a status worktree scan inside the read worker.",
+        serde_json::json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {}
+        }),
+        serde_json::json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["ran"],
+            "properties": {"ran": {"type": "boolean"}}
+        }),
+        status_pause_fixture,
+        status_pause_invoke,
+    )
+}
+
+#[cfg(debug_assertions)]
+fn status_pause_fixture(_repo: &Path) -> ToolFixture {
+    ToolFixture::new(serde_json::json!({}), serde_json::json!({"extra": true}))
+}
+
+#[cfg(debug_assertions)]
+fn status_pause_invoke(_arguments: &Value) -> Result<Value, String> {
+    use crate::internal::worktree_io::{
+        default_worktree_io,
+        protocol::{IoRequest, path_to_bytes},
+    };
+
+    let root = std::env::current_dir().map_err(|error| error.to_string())?;
+    let request = IoRequest::ReadDir {
+        path: Vec::new(),
+        root: path_to_bytes(&root),
+        remaining: 8,
+        checkpoint_every: 1,
+    };
+    // The in-process executor pauses here when the MCP status-pause seam is set.
+    default_worktree_io()
+        .submit(
+            request,
+            b"status".to_vec(),
+            std::time::Duration::from_secs(30),
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(serde_json::json!({"ran": true}))
 }

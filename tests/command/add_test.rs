@@ -2083,20 +2083,136 @@ fn test_add_resolves_unmerged_entries_matrix() {
     }
 }
 
-/// AU-02 N5: deleting a bystander during a conflict does not rename-pair.
+/// AU-02 N5 / issue #493: deleting a bystander during a conflict does not
+/// rename-pair, and `add -u` is silent. Ports `t2200-add-update.sh#18`
+/// verbatim: `git add -u >out && test_must_be_empty out`, then `ls-files -u`
+/// empty, only `conflict.txt` tracked, and `diff-files --name-only` empty.
 #[test]
 fn test_t2200_add_u_avoids_rename_pairing_on_unmerged_paths() {
     let repo = one_file_conflict_repo();
     let p = repo.path();
     fs::write(p.join("c.txt"), "resolved\n").unwrap();
     fs::remove_file(p.join("bystander.txt")).unwrap();
-    assert_cli_success(&run_libra_command(&["add", "-u"], p), "N5 add -u");
+    let add = run_libra_command(&["add", "-u"], p);
+    assert_cli_success(&add, "N5 add -u");
+    // #493 AC 1: `test_must_be_empty out` — a removed non-merged path must not
+    // be reported, and the resolution must not print anything.
+    assert!(
+        add.stdout.is_empty(),
+        "add -u must emit no stdout while resolving unmerged paths: {}",
+        String::from_utf8_lossy(&add.stdout)
+    );
     assert!(ls_unmerged(p, "").trim().is_empty(), "N5 no unmerged");
     let listed = run_libra_command(&["ls-files", "bystander.txt", "c.txt"], p);
     assert_cli_success(&listed, "ls-files");
     let text = String::from_utf8_lossy(&listed.stdout);
     assert!(text.contains("c.txt"), "{text}");
     assert!(!text.contains("bystander.txt"), "{text}");
+}
+
+/// Issue #493 AC 3: the faithful `t2200-add-update.sh#18` shape — two files
+/// with IDENTICAL content, a conflicting edit on one, the other deleted during
+/// the merge — so that `add -u` has a rename-pairing opportunity. Ports the
+/// upstream tail verbatim: `add -u` silent, `ls-files -u` empty, only
+/// `conflict.txt` tracked, `diff-files --name-only` empty.
+#[test]
+fn test_t2200_18_add_u_silent_and_clean_after_unmerged_resolution() {
+    let repo = tempdir().unwrap();
+    let p = repo.path();
+    init_repo_via_cli(p);
+    configure_identity_via_cli(p);
+
+    // 100 identical lines in both files, so delete-vs-modify is rename-shaped.
+    let identical: String = (1..=100)
+        .map(|line| format!("line {line}: same text\n"))
+        .collect();
+    fs::write(p.join("conflict.txt"), &identical).unwrap();
+    fs::write(p.join("bystander.txt"), &identical).unwrap();
+    assert_cli_success(
+        &run_libra_command(&["add", "conflict.txt", "bystander.txt"], p),
+        "stage the identical pair",
+    );
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "initial", "--no-verify"], p),
+        "initial commit",
+    );
+
+    let edit_line_50 = |replacement: &str| {
+        let edited: String = identical
+            .lines()
+            .map(|line| {
+                if line.starts_with("line 50:") {
+                    format!("line 50: {replacement}")
+                } else {
+                    line.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(p.join("conflict.txt"), format!("{edited}\n")).unwrap();
+    };
+
+    assert_cli_success(
+        &run_libra_command(&["checkout", "-b", "feature"], p),
+        "new branch",
+    );
+    edit_line_50("FEATURE");
+    assert_cli_success(
+        &run_libra_command(&["add", "conflict.txt"], p),
+        "stage feature",
+    );
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "feature", "--no-verify"], p),
+        "feature commit",
+    );
+
+    assert_cli_success(&run_libra_command(&["checkout", "main"], p), "back to main");
+    edit_line_50("MAIN");
+    assert_cli_success(
+        &run_libra_command(&["add", "conflict.txt"], p),
+        "stage main",
+    );
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "main", "--no-verify"], p),
+        "main commit",
+    );
+
+    let merge = run_libra_command(&["merge", "feature"], p);
+    assert!(
+        !merge.status.success(),
+        "the merge must conflict: {}",
+        String::from_utf8_lossy(&merge.stdout)
+    );
+
+    fs::remove_file(p.join("bystander.txt")).unwrap();
+    let add = run_libra_command(&["add", "-u"], p);
+    assert_cli_success(&add, "add -u");
+    // AC 1: `test_must_be_empty out`.
+    assert!(
+        add.stdout.is_empty(),
+        "add -u must emit no stdout: {}",
+        String::from_utf8_lossy(&add.stdout)
+    );
+    // AC 2/3: no rename pairing, nothing unmerged, only conflict.txt tracked.
+    assert!(
+        ls_unmerged(p, "").trim().is_empty(),
+        "no unmerged entries may remain: {}",
+        ls_unmerged(p, "")
+    );
+    let listed = run_libra_command(&["ls-files", "bystander.txt", "conflict.txt"], p);
+    assert_cli_success(&listed, "ls-files paths");
+    assert_eq!(
+        String::from_utf8_lossy(&listed.stdout).trim(),
+        "conflict.txt",
+        "only conflict.txt stays tracked"
+    );
+    let diff = run_libra_command(&["diff-files", "--name-only"], p);
+    assert_cli_success(&diff, "diff-files --name-only");
+    assert!(
+        String::from_utf8_lossy(&diff.stdout).trim().is_empty(),
+        "diff-files --name-only must be empty: {}",
+        String::from_utf8_lossy(&diff.stdout)
+    );
 }
 
 /// AU-03 / M-OUT: default add is silent when stdout is not a terminal.
@@ -4713,5 +4829,88 @@ fn test_add_sparse_directory_pathspec_when_worktree_copy_deleted() {
         String::from_utf8_lossy(&staged.stdout).trim().is_empty(),
         "the sparse entry must stay unstaged: {}",
         String::from_utf8_lossy(&staged.stdout)
+    );
+}
+
+/// Issue #493 N10 (`t2200-add-update.sh:165-201`): `add -u` resolves every
+/// stage combination it is handed — 1+2+3, 1-only, 3-only — noticing removals
+/// regardless of which stages the colliding entries sit in. This was the
+/// plan's last `pending-external` row (it needed `update-index --index-info`,
+/// delivered by issues/479 UI-01).
+#[test]
+fn test_t2200_n10_add_u_resolves_all_stage_combinations() {
+    let repo = tempdir().unwrap();
+    let root = repo.path();
+    super::init_repo_via_cli(root);
+    super::configure_identity_via_cli(root);
+    fs::write(root.join("base.txt"), "base\n").expect("write base");
+    super::assert_cli_success(&run_libra_command(&["add", "base.txt"], root), "stage base");
+    super::assert_cli_success(
+        &run_libra_command(&["commit", "-m", "base", "--no-verify"], root),
+        "commit base",
+    );
+
+    let blob = |body: &str| {
+        let output = run_libra_command_with_stdin(&["hash-object", "-w", "--stdin"], root, body);
+        assert!(
+            output.status.success(),
+            "hash-object failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    };
+    let one = blob("1\n");
+    let two = blob("2\n");
+    let three = blob("3\n");
+
+    let mut info = String::new();
+    for path in ["path1", "path2"] {
+        info.push_str(&format!("100644 {one} 1\t{path}\n"));
+        info.push_str(&format!("100644 {two} 2\t{path}\n"));
+        info.push_str(&format!("100644 {three} 3\t{path}\n"));
+    }
+    info.push_str(&format!("100644 {one} 1\tpath3\n"));
+    info.push_str(&format!("100644 {one} 1\tpath4\n"));
+    info.push_str(&format!("100644 {one} 3\tpath5\n"));
+    info.push_str(&format!("100644 {one} 3\tpath6\n"));
+    let seeded = run_libra_command_with_stdin(&["update-index", "--index-info"], root, &info);
+    assert!(
+        seeded.status.success(),
+        "update-index --index-info failed: {}",
+        String::from_utf8_lossy(&seeded.stderr)
+    );
+
+    // Worktree: path1 carries `3`, path3/path5 carry `2`; path2/path4/path6 are
+    // absent, so `add -u` must treat them as removals.
+    fs::write(root.join("path1"), "3\n").expect("write path1");
+    fs::write(root.join("path3"), "2\n").expect("write path3");
+    fs::write(root.join("path5"), "2\n").expect("write path5");
+
+    // Upstream asserts these two are refused: an explicitly removed path cannot
+    // be resolved with `add` (only `add -u` notices removals).
+    for path in ["path4", "path6"] {
+        let refused = run_libra_command(&["add", "--no-all", path], root);
+        assert!(
+            !refused.status.success(),
+            "add --no-all {path} must fail: {}",
+            String::from_utf8_lossy(&refused.stdout)
+        );
+    }
+
+    super::assert_cli_success(&run_libra_command(&["add", "-u"], root), "add -u");
+
+    let listed = run_libra_command(
+        &[
+            "ls-files", "-s", "path1", "path2", "path3", "path4", "path5", "path6",
+        ],
+        root,
+    );
+    super::assert_cli_success(&listed, "ls-files -s");
+    let expected =
+        format!("100644 {three} 0\tpath1\n100644 {two} 0\tpath3\n100644 {two} 0\tpath5\n");
+    assert_eq!(
+        String::from_utf8_lossy(&listed.stdout),
+        expected,
+        "only the three resolvable paths survive, at stage 0, with the worktree content"
     );
 }

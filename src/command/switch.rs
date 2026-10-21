@@ -1032,6 +1032,7 @@ async fn run_switch(args: SwitchArgs, output: &OutputConfig) -> Result<SwitchOut
             previous_branch,
             previous_commit,
             NavigationCommand::Switch,
+            force,
             output,
         )
         .await;
@@ -1270,6 +1271,7 @@ pub(crate) async fn switch_to_orphan_branch(
     previous_branch: Option<String>,
     previous_commit: Option<String>,
     navigation_command: NavigationCommand,
+    force: bool,
     output: &OutputConfig,
 ) -> Result<SwitchOutput, SwitchError> {
     validate_new_branch_request(&new_branch_name, None, false).await?;
@@ -1302,7 +1304,13 @@ pub(crate) async fn switch_to_orphan_branch(
             .with_hint("choose a different orphan branch name"),
         ));
     }
-    ensure_clean_status(output).await?;
+    // `checkout --orphan` never switches the working tree, so Git carries the
+    // dirty state over untouched (and `-f` is irrelevant there). `switch
+    // --orphan` DOES reset the index/worktree to empty, so it keeps Git's
+    // clean-tree requirement — unless `-f` discards the changes (issue #522).
+    if !matches!(navigation_command, NavigationCommand::Checkout) && !force {
+        ensure_clean_status(output).await?;
+    }
     switch_head_to_unborn_branch(&new_branch_name, navigation_command).await?;
 
     Ok(SwitchOutput {

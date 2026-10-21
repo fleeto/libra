@@ -106,7 +106,15 @@ pub struct CheckoutArgs {
     #[clap(long = "no-overlay")]
     no_overlay: bool,
 
-    /// Paths to restore after an explicit `--` separator
+    /// Paths written WITHOUT the `--` separator (`checkout <rev> <path>`),
+    /// which Git also accepts. These follow the revision-first grammar, so a
+    /// lone token that names a revision keeps its branch meaning; see
+    /// `disambiguate_path_argument`.
+    #[clap(value_name = "pathspec")]
+    trailing_paths: Vec<String>,
+
+    /// Paths after an explicit `--` separator. These ALWAYS mean paths, even
+    /// when the token also names a branch (Git's separator contract).
     #[clap(last = true, value_name = "pathspec")]
     pathspec: Vec<String>,
 }
@@ -329,6 +337,17 @@ async fn run_checkout(
     mut args: CheckoutArgs,
     output: &OutputConfig,
 ) -> Result<CheckoutOutput, CheckoutError> {
+    // Git accepts `checkout <path>` and `checkout <rev> <path>` without the
+    // `--` separator; a lone token that names no revision but does match the
+    // index is a pathspec (issue #522 scenario 3: `checkout file0` used to be
+    // read as a branch and refused with "local changes would be overwritten").
+    disambiguate_path_argument(&mut args).await;
+    // The two spellings converge here: `--`-separated paths are unconditional
+    // pathspecs, while `checkout <rev> <path>` carries the same meaning.
+    if args.pathspec.is_empty() && !args.trailing_paths.is_empty() {
+        args.pathspec = std::mem::take(&mut args.trailing_paths);
+    }
+
     if !args.pathspec.is_empty() {
         return restore_checkout_paths(args).await;
     }
@@ -454,6 +473,7 @@ async fn run_checkout(
             previous_branch,
             previous_commit,
             switch::NavigationCommand::Checkout,
+            args.force,
             output,
         )
         .await
@@ -511,11 +531,12 @@ async fn run_checkout(
             switch::ensure_switch_clean_or_force(args.force, target_commit, output).await;
         map_switch_preflight(clean_status)?;
 
-        if let Some(prev) = previous_branch.as_deref()
-            && prev == new_branch
-        {
-            return Err(CheckoutError::CreatingBranchBlocked(new_branch));
-        }
+        // `-B <current-branch>` is legal in Git: it re-points the checked-out
+        // branch at the start point (default HEAD) and prints "Switched to a
+        // new branch". Refusing it broke the extremely common
+        // `git checkout -B main` reset idiom used as test setup (issue #522
+        // scenario 1: "local changes would be overwritten" cascades), so the
+        // same-branch case falls through to the ordinary reset+switch path.
         reset_and_switch_branch(&new_branch, target_commit, &silent_child_output(output)).await?;
         maybe_set_startpoint_upstream(
             &new_branch,
@@ -633,6 +654,53 @@ async fn run_checkout(
         }
         None => show_current_branch(previous_branch, previous_commit).await,
     }
+}
+
+/// Git's `checkout <token>` disambiguation (issues/522): a token that resolves
+/// to no revision but matches an index entry is a PATHSPEC, so
+/// `checkout <path>` restores that path from the index instead of failing as an
+/// unresolvable branch. A token that DOES resolve keeps the branch meaning
+/// (Git prefers the branch and reports the dual meaning separately).
+async fn disambiguate_path_argument(args: &mut CheckoutArgs) {
+    if !args.pathspec.is_empty()
+        || !args.trailing_paths.is_empty()
+        || args.detach
+        || args.new_branch.is_some()
+        || args.force_new_branch.is_some()
+        || args.orphan_branch.is_some()
+    {
+        return;
+    }
+    let Some(token) = args.branch.clone() else {
+        return;
+    };
+    // `-` is the previous-checkout-target shorthand, never a path.
+    if token == "-" || token.is_empty() {
+        return;
+    }
+    if crate::utils::util::resolve_object_spec_typed(&token)
+        .await
+        .is_ok()
+    {
+        return;
+    }
+    if !index_matches_path(&token) {
+        return;
+    }
+    args.branch = None;
+    args.pathspec = vec![token];
+}
+
+/// Whether `token` names an index entry (exactly, or as a directory prefix).
+fn index_matches_path(token: &str) -> bool {
+    let Ok(index) = git_internal::internal::index::Index::load(crate::utils::path::index()) else {
+        return false;
+    };
+    let prefix = format!("{}/", token.trim_end_matches('/'));
+    index
+        .tracked_entries(0)
+        .into_iter()
+        .any(|entry| entry.name == token || entry.name.starts_with(&prefix))
 }
 
 async fn restore_checkout_paths(args: CheckoutArgs) -> Result<CheckoutOutput, CheckoutError> {

@@ -11,7 +11,7 @@ libra checkout -
 libra checkout -b <name> [<start-point>]
 libra checkout -B <name> [<start-point>]
 libra checkout --orphan <name>
-libra checkout [<tree-ish>] -- <pathspec>...
+libra checkout [<tree-ish>] [--] <pathspec>...
 ```
 
 ## Description
@@ -26,7 +26,14 @@ This command exists so that developers migrating from Git can use familiar muscl
 
 When checking out a branch name that does not exist locally but matches a remote-tracking branch (e.g., `origin/feature`), Libra automatically creates a local tracking branch, sets upstream, and pulls -- going further than Git's auto-track by also synchronizing content immediately.
 
-Path restoration is only enabled by an explicit `--` separator. Without `--`, `libra checkout <name>` is always branch mode, even when a file has the same name. The pathspecs after `--` use the same shared Git-style matcher as `libra restore`: plain prefixes, wildcard pathspecs, and `:(top)`/`:/`/`:(glob)`/`:(literal)`/`:(icase)`/`:(exclude)`/`:!`/`:^` magic are honored. Wildcard-looking pathspecs also match an exact path or directory prefix with the same literal text.
+Path restoration works with **or** without the `--` separator, like Git:
+
+- `libra checkout <path>` restores that path from the index when `<path>` names no branch,
+  tag, or commit but does match a tracked index entry (Git's disambiguation). A token that
+  *does* resolve to a branch keeps the branch meaning.
+- `libra checkout <tree-ish> <path>` restores the path from that revision (index + worktree).
+- `libra checkout -- <path>` **always** means a path, even when a branch of the same name
+  exists — that is what the separator is for. The pathspecs after `--` use the same shared Git-style matcher as `libra restore`: plain prefixes, wildcard pathspecs, and `:(top)`/`:/`/`:(glob)`/`:(literal)`/`:(icase)`/`:(exclude)`/`:!`/`:^` magic are honored. Wildcard-looking pathspecs also match an exact path or directory prefix with the same literal text.
 
 When path restoration materializes a tracked symlink, Libra writes a real
 symlink on Unix using the stored link target bytes. Platforms without symlink
@@ -48,15 +55,15 @@ Checking out branches or paths materializes entries with their mode's permission
 |------|------|-------|-------------|
 | | `<branch>` | positional (optional) | Target branch, or `-` for the previous checkout target. Omit to show current branch. |
 | `-b` | | `<name>` | Create a new branch from `[<start-point>]` or the current HEAD and switch to it |
-| `-B` | | `<name>` | Force-create a branch from `[<start-point>]` or the current HEAD and switch to it; resets an existing branch to that commit |
+| `-B` | | `<name>` | Force-create a branch from `[<start-point>]` or the current HEAD and switch to it; resets an existing branch to that commit. `-B <current-branch>` is accepted like Git: it re-points the branch you are on (at HEAD with no start-point, or at the given start-point) and prints `Switched to a new branch`. |
 | | `[<start-point>]` | positional | Optional commit, tag, or branch used with `-b` / `-B` as the new branch tip |
-| | `--orphan` | `<name>` | Create an unborn orphan branch, preserve the index/worktree, and switch HEAD to it. A separate start-point is not supported. |
+| | `--orphan` | `<name>` | Create an unborn orphan branch, preserve the index/worktree, and switch HEAD to it. A separate start-point is not supported. A dirty worktree is carried over untouched (Git never switches the tree for `--orphan`), so no clean-tree check is performed and `-f` is accepted but unneeded. |
 | `-d` | `--detach` | | Detach HEAD at the named commit even when it is a branch. With no target, detach at the current HEAD instead of showing the current branch (unborn HEAD is refused: `You are on a branch yet to be born`, `LBR-REPO-003`, exit 128) |
 | `-t` | `--track` | | Set up upstream tracking for the new `-b` / `-B` branch. A remote-tracking start point is tracked by default (DWIM); `--track` additionally tracks a local-branch start point, matching Git's explicit request. A start point that only names a tag or commit is not a valid tracking branch. A tracking error can occur after `-b` has created the branch or `-B` has reset and switched to it; those effects are not rolled back. |
 | | `--ignore-other-worktrees` | | Accepted for CLI compatibility, but **does NOT** bypass Libra's other-worktree safety guard (intentionally-different from Git): Libra never allows the same shared branch checked out in two worktrees. It is a silent no-op in a single-worktree repo; against a real collision the checkout is still refused. |
 | | `--no-progress` | | Do not show a progress meter. Accepted as a no-op: Libra's checkout never renders a progress meter. |
 | | `--no-overlay` | | Do not check out paths in overlay mode (paths missing from the source are still removed). Accepted as a no-op: Libra's checkout is never in overlay mode, matching the Git default. (Git's `--overlay` is not implemented.) |
-| | `[<tree-ish>] -- <pathspec>...` | positional | Restore paths with shared pathspec magic. Without `<tree-ish>`, restores the worktree from the index. With `<tree-ish>`, restores both index and worktree from that source. |
+| | `[<tree-ish>] [--] <pathspec>...` | positional | Restore paths with shared pathspec magic. Without `<tree-ish>`, restores the worktree from the index. With `<tree-ish>`, restores both index and worktree from that source. The `--` separator is optional; `--` forces path meaning when the token also names a branch. |
 
 ### Flag examples
 

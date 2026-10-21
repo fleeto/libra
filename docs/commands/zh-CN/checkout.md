@@ -11,7 +11,7 @@ libra checkout -
 libra checkout -b <name> [<start-point>]
 libra checkout -B <name> [<start-point>]
 libra checkout --orphan <name>
-libra checkout [<tree-ish>] -- <pathspec>...
+libra checkout [<tree-ish>] [--] <pathspec>...
 ```
 
 ## 说明
@@ -26,7 +26,11 @@ libra checkout [<tree-ish>] -- <pathspec>...
 
 当 checkout 一个本地不存在、但匹配远程跟踪分支（例如 `origin/feature`）的分支名时，Libra 会自动创建本地 tracking 分支，设置 upstream，并执行 pull；这比 Git 的 auto-track 更进一步，会立即同步内容。
 
-路径恢复只有在显式 `--` 分隔符存在时才启用。没有 `--` 时，`libra checkout <name>` 始终是分支模式，即使存在同名文件。`--` 后的 pathspec 使用与 `libra restore` 相同的共享 Git 风格匹配器：普通前缀、通配符 pathspec，以及 `:(top)`/`:/`/`:(glob)`/`:(literal)`/`:(icase)`/`:(exclude)`/`:!`/`:^` magic 都会生效；看起来像通配符的 pathspec 也会匹配同名的字面路径或目录前缀。
+路径恢复**有、无** `--` 分隔符都可以，与 Git 一致：
+
+- `libra checkout <path>`：当 `<path>` 不是分支/tag/提交、但命中已跟踪的索引条目时，按 Git 的消歧规则从索引恢复该路径；能解析为分支的 token 仍然按分支处理。
+- `libra checkout <tree-ish> <path>`：从该版本同时恢复索引与工作树。
+- `libra checkout -- <path>`：**始终**按路径处理，即使存在同名分支（这正是分隔符的作用）。`--` 后的 pathspec 使用与 `libra restore` 相同的共享 Git 风格匹配器：普通前缀、通配符 pathspec，以及 `:(top)`/`:/`/`:(glob)`/`:(literal)`/`:(icase)`/`:(exclude)`/`:!`/`:^` magic 都会生效；看起来像通配符的 pathspec 也会匹配同名的字面路径或目录前缀。
 
 如果恢复的路径在来源 tree 中是符号链接，Libra 会在支持 symlink 的平台上恢复为真正的 symlink，而不是写入一个普通文件。链接内容按 blob 字节作为目标路径保存；不会跟随或打开该目标。
 
@@ -46,13 +50,13 @@ libra checkout [<tree-ish>] -- <pathspec>...
 | `-b` | | `<name>` | 从 `[<start-point>]` 或当前 HEAD 创建新分支并切换到它 |
 | `-B` | | `<name>` | 从 `[<start-point>]` 或当前 HEAD 强制创建/重置分支并切换到它；已有分支会被重置到该提交 |
 | | `[<start-point>]` | 位置参数 | 与 `-b` / `-B` 搭配使用的可选提交、标签或分支，作为新分支 tip |
-| | `--orphan` | `<name>` | 创建 unborn orphan 分支，保留索引/工作树，并把 HEAD 切到该分支。不支持额外 start-point。 |
+| | `--orphan` | `<name>` | 创建 unborn orphan 分支，保留索引/工作树，并把 HEAD 切到该分支。不支持额外 start-point。工作树有本地修改时原样带过去（Git 的 `--orphan` 不会切换工作树，因此不做 clean 检查；`-f` 被接受但非必需）。 |
 | `-d` | `--detach` | | 即使目标是分支也在其提交处 detach HEAD。不给目标时在当前 HEAD 处分离，而不是显示当前分支（未诞生 HEAD 拒绝：`You are on a branch yet to be born`，`LBR-REPO-003`，退出码 128） |
 | `-t` | `--track` | | 为通过 `-b` / `-B` 创建的分支配置 upstream。远程跟踪 start-point 默认通过 DWIM 建立跟踪；显式 `--track` 也可跟踪本地分支 start-point。仅指向标签或 commit 的 start-point 不是有效的跟踪分支。跟踪配置报错前，`-b` 可能已创建分支，`-B` 可能已重置并切换到该分支；这些操作不会随报错自动回滚。 |
 | | `--ignore-other-worktrees` | | 为 CLI 兼容而接受，但**不会**绕过 Libra 的 other-worktree 安全保护（有意与 Git 不同）：Libra 绝不允许同一共享分支在两个 worktree 同时 checkout。单 worktree 仓库中为静默 no-op；存在真实冲突时 checkout 仍被拒绝。 |
 | | `--no-progress` | | 不显示进度条。接受式 no-op：Libra 的 checkout 从不渲染进度条。 |
 | | `--no-overlay` | | 不以 overlay 模式检出路径（source 中缺失的路径仍会被移除）。接受式 no-op：Libra 的 checkout 从不处于 overlay 模式，已是 Git 默认。（Git 的 `--overlay` 未实现。） |
-| | `[<tree-ish>] -- <pathspec>...` | 位置参数 | 用共享 pathspec magic 恢复路径。没有 `<tree-ish>` 时，从索引恢复工作树。带 `<tree-ish>` 时，从该来源同时恢复索引和工作树。 |
+| | `[<tree-ish>] [--] <pathspec>...` | 位置参数 | 用共享 pathspec magic 恢复路径。没有 `<tree-ish>` 时，从索引恢复工作树。带 `<tree-ish>` 时，从该来源同时恢复索引和工作树。`--` 分隔符可省略；给出 `--` 时强制按路径解释。 |
 
 ### 标志示例
 

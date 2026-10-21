@@ -1462,3 +1462,184 @@ fn test_checkout_ambiguous_revision_is_not_pathspec() {
     let output = run_libra_command(&["checkout", &head_oid], repo.path());
     assert_cli_success(&output, "checkout <full commit id>");
 }
+
+// ---------------------------------------------------------------------------
+// issue #522: no-`--` pathspec disambiguation, `-B` on the current branch, and
+// `--orphan` on a dirty worktree.
+// ---------------------------------------------------------------------------
+
+/// #522 scenario 3: `checkout <path>` and `checkout <rev> <path>` work without
+/// the `--` separator, restoring from the index / the given revision. A token
+/// that also names a branch keeps the branch meaning.
+#[test]
+fn test_checkout_pathspec_without_separator() {
+    let repo = tempdir().expect("tempdir");
+    let root = repo.path();
+    init_repo_via_cli(root);
+    configure_identity_via_cli(root);
+    fs::write(root.join("f.txt"), "one\n").expect("write f.txt");
+    fs::create_dir_all(root.join("d")).expect("mkdir d");
+    fs::write(root.join("d/x.txt"), "x\n").expect("write d/x.txt");
+    assert_cli_success(&run_libra_command(&["add", "."], root), "stage the tree");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "c1", "--no-verify"], root),
+        "commit c1",
+    );
+
+    // Index restore: `checkout <path>`.
+    fs::write(root.join("f.txt"), "two\n").expect("dirty f.txt");
+    let out = run_libra_command(&["checkout", "f.txt"], root);
+    assert_cli_success(&out, "checkout f.txt");
+    assert_eq!(
+        fs::read_to_string(root.join("f.txt")).expect("read f.txt"),
+        "one\n",
+        "checkout <path> restores from the index"
+    );
+
+    // Directory prefix.
+    fs::write(root.join("d/x.txt"), "y\n").expect("dirty d/x.txt");
+    let out = run_libra_command(&["checkout", "d"], root);
+    assert_cli_success(&out, "checkout d");
+    assert_eq!(
+        fs::read_to_string(root.join("d/x.txt")).expect("read d/x.txt"),
+        "x\n",
+        "a directory token is a pathspec prefix"
+    );
+
+    // Revision + path: `checkout <rev> <path>`.
+    fs::write(root.join("f.txt"), "three\n").expect("write three");
+    assert_cli_success(&run_libra_command(&["add", "f.txt"], root), "stage three");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "c2", "--no-verify"], root),
+        "commit c2",
+    );
+    fs::write(root.join("f.txt"), "four\n").expect("dirty four");
+    let out = run_libra_command(&["checkout", "HEAD~1", "f.txt"], root);
+    assert_cli_success(&out, "checkout HEAD~1 f.txt");
+    assert_eq!(
+        fs::read_to_string(root.join("f.txt")).expect("read f.txt"),
+        "one\n",
+        "the named revision supplies the restored content"
+    );
+
+    // The explicit `--` form keeps working. It restores from the INDEX, which
+    // the previous `checkout HEAD~1 f.txt` set to that revision's blob, so the
+    // restored content is the HEAD~1 version ("one"), not the current tip.
+    fs::write(root.join("f.txt"), "five\n").expect("dirty five");
+    let out = run_libra_command(&["checkout", "--", "f.txt"], root);
+    assert_cli_success(&out, "checkout -- f.txt");
+    assert_eq!(
+        fs::read_to_string(root.join("f.txt")).expect("read f.txt"),
+        "one\n",
+        "the `--` form restores the index content"
+    );
+
+    // A token that names a branch still switches (branch meaning wins).
+    // Commit the restored state first: a staged modification left behind makes
+    // the switch refuse (Git refuses identically).
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "after restores", "--no-verify"], root),
+        "commit the restored state",
+    );
+    assert_cli_success(
+        &run_libra_command(&["branch", "side"], root),
+        "create side branch",
+    );
+    let out = run_libra_command(&["checkout", "side"], root);
+    assert_cli_success(&out, "checkout side");
+    let head = run_libra_command(&["symbolic-ref", "--short", "HEAD"], root);
+    assert_eq!(
+        String::from_utf8_lossy(&head.stdout).trim(),
+        "side",
+        "a resolvable branch token must switch branches, not restore a path"
+    );
+}
+
+/// #522 scenario 1 (dominant shape): `checkout -B <current-branch>` is legal
+/// and re-points the branch, instead of refusing with
+/// "creating/switching … is not allowed".
+#[test]
+fn test_checkout_force_new_branch_on_the_current_branch() {
+    let repo = tempdir().expect("tempdir");
+    let root = repo.path();
+    init_repo_via_cli(root);
+    configure_identity_via_cli(root);
+    fs::write(root.join("a.txt"), "a\n").expect("write a");
+    assert_cli_success(&run_libra_command(&["add", "a.txt"], root), "stage a");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "c1", "--no-verify"], root),
+        "commit c1",
+    );
+    let first = String::from_utf8_lossy(&run_libra_command(&["rev-parse", "HEAD"], root).stdout)
+        .trim()
+        .to_string();
+    fs::write(root.join("b.txt"), "b\n").expect("write b");
+    assert_cli_success(&run_libra_command(&["add", "b.txt"], root), "stage b");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "c2", "--no-verify"], root),
+        "commit c2",
+    );
+    let second = String::from_utf8_lossy(&run_libra_command(&["rev-parse", "HEAD"], root).stdout)
+        .trim()
+        .to_string();
+
+    // `-B <current>` at HEAD is a no-op reset that Git accepts.
+    let out = run_libra_command(&["checkout", "-B", "main"], root);
+    assert_cli_success(&out, "checkout -B main on main");
+    assert_eq!(
+        String::from_utf8_lossy(&run_libra_command(&["rev-parse", "HEAD"], root).stdout).trim(),
+        second,
+        "-B at HEAD keeps the tip"
+    );
+
+    // `-B <current> <start>` moves the checked-out branch.
+    let out = run_libra_command(&["checkout", "-B", "main", &first], root);
+    assert_cli_success(&out, "checkout -B main <oid>");
+    assert_eq!(
+        String::from_utf8_lossy(&run_libra_command(&["rev-parse", "main"], root).stdout).trim(),
+        first,
+        "-B <start> re-points the current branch"
+    );
+}
+
+/// #522 scenario 2 (orphan shape): `checkout --orphan` carries a dirty
+/// worktree over (Git never switches the tree there) and `-f` is accepted;
+/// `switch --orphan` keeps its clean-tree requirement unless forced.
+#[test]
+fn test_checkout_orphan_on_dirty_worktree_matches_git() {
+    let repo = tempdir().expect("tempdir");
+    let root = repo.path();
+    init_repo_via_cli(root);
+    configure_identity_via_cli(root);
+    fs::write(root.join("a.txt"), "a\n").expect("write a");
+    assert_cli_success(&run_libra_command(&["add", "a.txt"], root), "stage a");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "c1", "--no-verify"], root),
+        "commit c1",
+    );
+    fs::write(root.join("a.txt"), "dirty\n").expect("dirty a.txt");
+
+    // checkout --orphan: succeeds and preserves the dirty content.
+    let out = run_libra_command(&["checkout", "--orphan", "orph1"], root);
+    assert_cli_success(&out, "checkout --orphan on a dirty tree");
+    assert_eq!(
+        fs::read_to_string(root.join("a.txt")).expect("read a.txt"),
+        "dirty\n",
+        "checkout --orphan must carry the worktree over untouched"
+    );
+
+    // checkout -f --orphan: also succeeds.
+    let out = run_libra_command(&["checkout", "-f", "--orphan", "orph2"], root);
+    assert_cli_success(&out, "checkout -f --orphan on a dirty tree");
+
+    // switch --orphan still refuses a dirty tree…
+    let out = run_libra_command(&["switch", "--orphan", "orph3"], root);
+    assert!(
+        !out.status.success(),
+        "switch --orphan must still refuse dirty changes: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    // …and -f discards them.
+    let out = run_libra_command(&["switch", "-f", "--orphan", "orph4"], root);
+    assert_cli_success(&out, "switch -f --orphan on a dirty tree");
+}

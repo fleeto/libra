@@ -534,8 +534,7 @@ fn worker_memory_limit_is_tool_error() {
     let stdout = String::from_utf8(output.stdout).expect("utf-8");
     let message = response_with_id(&stdout, 2);
     assert_eq!(
-        message["result"]["structuredContent"]["stable_code"],
-        "LBR-AGENT-028",
+        message["result"]["structuredContent"]["stable_code"], "LBR-AGENT-028",
         "{message}"
     );
 }
@@ -641,8 +640,7 @@ fn slots_return_after_memory_kills() {
     for id in 2..=5 {
         let message = response_with_id(&stdout, id);
         assert_eq!(
-            message["result"]["structuredContent"]["stable_code"],
-            "LBR-AGENT-028",
+            message["result"]["structuredContent"]["stable_code"], "LBR-AGENT-028",
             "{message}"
         );
     }
@@ -728,8 +726,7 @@ fn read_worker_status_tree_gone_after_timeout() {
     let stdout = String::from_utf8(output.stdout).expect("utf-8");
     let message = response_with_id(&stdout, 2);
     assert_eq!(
-        message["result"]["structuredContent"]["stable_code"],
-        "LBR-AGENT-036",
+        message["result"]["structuredContent"]["stable_code"], "LBR-AGENT-036",
         "{message}"
     );
     let worker: u32 = fs::read_to_string(&pause_file)

@@ -2993,6 +2993,102 @@ fn create_wide_git_repo(file_count: usize) -> tempfile::TempDir {
     dir
 }
 
+/// Build a DEEP local source: `commit_count` linear commits written through
+/// `fast-import`, i.e. two objects per commit (blob + commit). 1 200 commits is
+/// 2 400 objects, which already crosses the > ~2 000 channel-capacity sum that
+/// deadlocked the pre-fix encoder (ADR-CLH-01), while staying fast enough for a
+/// normal integration run.
+fn create_deep_git_repo(commit_count: usize) -> tempfile::TempDir {
+    assert!(commit_count > 1_000, "must exceed both channel capacities");
+    let dir = tempdir().expect("deep git tempdir");
+    let repo = dir.path();
+    // The reported reproduction is a LIBRA source (`libra init` + `libra
+    // fast-import`), so the clone exercises the Libra local transport where the
+    // encoder deadlock lived.
+    super::assert_cli_success(
+        &super::run_libra_command(&["init", "--quiet", "."], repo),
+        "init the deep source repository",
+    );
+
+    let mut stream = String::new();
+    for i in 1..=commit_count {
+        let timestamp = 1_700_000_000 + (i as i64) * 60;
+        stream.push_str(&format!(
+            "blob\nmark :{blob}\ndata {len}\n{i}\n\n\
+             commit refs/heads/main\nmark :{commit}\n\
+             author T <t@example.com> {timestamp} +0000\n\
+             committer T <t@example.com> {timestamp} +0000\n\
+             data {msg_len}\nc{i}\n",
+            blob = i * 2 - 1,
+            commit = i * 2,
+            len = i.to_string().len() + 1,
+            msg_len = format!("c{i}").len() + 1,
+        ));
+        if i > 1 {
+            stream.push_str(&format!("from :{}\n", (i - 1) * 2));
+        }
+        stream.push_str(&format!("M 100644 :{} f.txt\n\n", i * 2 - 1));
+    }
+    let stream_path = dir.path().join("stream.fi");
+    fs::write(&stream_path, stream).expect("write fast-import stream");
+
+    super::assert_cli_success(
+        &super::run_libra_command(
+            &[
+                "fast-import",
+                "--quiet",
+                "--input",
+                stream_path.to_str().expect("stream path"),
+            ],
+            repo,
+        ),
+        "fast-import the deep history",
+    );
+    dir
+}
+
+/// Issue #496 regression guard (deep-history shape): the reported reproduction
+/// is a LOCAL clone of a 3 200-commit linear history, which hung at "Fetching
+/// objects" with 0% CPU. The wide fixture above covers the object-count
+/// trigger; this one covers the reported history shape end to end, including
+/// the post-clone rev walk and working-tree checkout.
+#[test]
+fn test_clone_local_deep_history_completes_in_budget() {
+    let commit_count = 1_200;
+    let deep = create_deep_git_repo(commit_count);
+    let source = deep.path().to_str().expect("source path").to_string();
+    let dest_root = tempdir().expect("dest root");
+    let dest = dest_root.path().join("deep-clone");
+    let dest_str = dest.to_str().expect("dest path").to_string();
+
+    let (out, timed_out) = run_libra_command_with_timeout(
+        &["clone", &source, &dest_str],
+        dest_root.path(),
+        Duration::from_secs(60),
+    );
+    assert!(
+        !timed_out,
+        "local clone of a {commit_count}-commit history hung at Fetching objects: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    super::assert_cli_success(&out, "deep local clone should complete");
+
+    let count = super::run_libra_command(&["rev-list", "--count", "HEAD"], &dest);
+    super::assert_cli_success(&count, "rev-list --count on the clone");
+    assert_eq!(
+        String::from_utf8_lossy(&count.stdout).trim(),
+        commit_count.to_string(),
+        "every commit was transferred"
+    );
+    let status = super::run_libra_command(&["status", "--porcelain"], &dest);
+    super::assert_cli_success(&status, "status on the clone");
+    assert!(
+        String::from_utf8_lossy(&status.stdout).trim().is_empty(),
+        "the checked-out working tree must be clean: {}",
+        String::from_utf8_lossy(&status.stdout)
+    );
+}
+
 /// Run the Libra binary via `base_libra_command`'s isolated HOME, but poll it
 /// with a hard deadline: return `(output, timed_out)`. If the clone deadlocks
 /// (the ADR-CLH-01 regression), the child never exits, `timed_out` becomes

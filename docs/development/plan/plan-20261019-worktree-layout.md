@@ -6,6 +6,10 @@
 
 **当前发布决议（覆盖下文旧冻结与 minor 目标）：** 2026-10-21 用户要求基于上游最新已发布版本 patch + 1 发布。11:25 UTC 上游 `24fabae` 已打 `v0.30.82` tag 并创建 GitHub Latest Release；其 release.yml 仍运行、资产与 stable 不据此假定完成。此前候选 `v0.30.80` 未打 tag、`v0.30.81` 发布工作流因 macOS Rust 2024 编译错误失败，本计划目标随用户规则前滚为 **`v0.30.83`**。先前“不发布 `0.31.1`”继续有效；旧 Worktree tag `v0.31.0` 不复用。WD-08 须在最终源码、远端 CI、四平台资产/stable 与网站内容门完成后才能收口。公开 NAME/--path 行为变化写入升级说明；不迁移旧目录。
 
+**并发合流补充（2026-10-21 15:27 UTC）：** 上游在 `6d50c5a` 后推进到 `81eff71`，净新增 Issue #525 的 `commit` CLI/双语命令文档/兼容测试和 MCP 文件格式化；Worktree 实现及版本面不变。上游 push 取消了 `6d50c5a` 的网络 CI 重跑，所以该 run 的七个成功作业不能组成最终全绿。按工作区常驻交付指令，网站同步范围在原八张 Worktree 相关页之外增加一张 `commit` 英文命令页；这不增加第十张 Worktree 任务卡。`0.30.83` release notes 补记 Issue #525；最终源码 SHA 的本地与远端门重新核验后才发布。
+
+**合流审查前滚（2026-10-21 15:42 UTC）：** Claude Code 对新上游 `commit` 行为的只读审查为 `VERDICT: FAIL`：`-S` 被解析却未强制签名，可能静默生成未签名提交；位置路径/`-o` 与文档承诺不符；`-u` 被忽略；`--short` 的预览语义和旧文案互相矛盾。发布前须前滚 `commit` 源码、双语命令/开发文档、兼容表、回归测试及网站 commit 页，再取得复审 PASS；原 FAIL 与首次 focused 两项失败保留为历史证据，不计最终门。上游最新 Release 已实时复查仍为 `v0.30.82`。
+
 ## 文档职责
 
 统一新建 linked、FUSE 和 review/investigate 工作区的默认布局到 common storage 的 `worktree/`，保持工作文件、工作区身份与共享元数据边界正确。本文是执行契约，不是实现或验收完成声明。
@@ -113,6 +117,7 @@
 | 2026-10-21 11:35 UTC | 上游再次发布与合流 | 上游 `24fabae` 创建 `v0.30.82` GitHub Latest，用户规则使未 tag 的本地 `.82` 前滚至 `v0.30.83`；本地 `.82` 全量因最终树变化主动中断 exit130。`f23e022` 签名+DCO 保存 `.82` 准备性修改，`8472d0f` 与 `24fabae` 冲突合流：唯一 `exec.rs` 冲突取上游同样的 `unsafe extern` 加 release peak 修复；最终 `.83` 版本面、双语/网站文档、全量、macFUSE、原生 Windows/CI 均重跑。源码审查曾指 `.81` macOS 无可用资产，已移除对 `.81` Mac 构建的文档肯定语；低端口夹具恢复 5 秒 Windows 连接超时，其他 MCP P2 边界需最终审查具名处理 | 九卡仍 pending，`.82` 本地门不计最终 C/D | WD-08 发布前滚与复审 |
 | 2026-10-21 12:00 UTC | `.83` 首轮最终 SHA Windows 编译门前滚 | `a45a1c6` 签名+DCO 推送并对应 base run `39594805304`；四项 active exact、`windows_fs` 17/17、capture 2/2、workspace 10/10、lease、Windows SQLite 单元及重命名发行二进制通过。六项 init exact 开始前，`command_test` 严格 `-D warnings` 仅因 `tests/command/merge_test/message_options.rs` 的 `SIGNOFF` 常量只在 Unix 测试使用而报 `dead_code`。为此加 `#[cfg(unix)]`，最终树需重新 fmt/Clippy/Windows 原生 CI 与双全量；已运行的 `.83` 本地 cargo 全量主动中断 exit130，不将 6000+ 无失败的部分结果记为 PASS | 九卡仍 pending，首轮 `.83` Windows D 门失败 | FIX-WD-08b、WD-08 最终 SHA 门 |
 | 2026-10-21 12:17 UTC | `.83` 二轮 Windows 转换回滚缺陷 | `27a72b3` 签名+DCO 推送并对应 base run `39596846832`；Windows 四项 exact、17 项 `windows_fs`、capture/workspace/lease、SQLite 路径单元、重命名发行二进制及前两项 init exact 通过，第三项 `init_bare_conversion_failure_preserves_existing_target_contents` 失败：失败回滚后新 `libra.db` 仍在。`init` 的 SeaORM 直连与共享缓存连接池在 Windows 上可能仍持有 SQLite 文件，故在转换错误回滚前显式且限时关闭两者；关闭失败则保留转换标记、返回具名人工恢复错误，不尝试部分删除。双语 init/网站页、CHANGELOG 同步；本地旧树全量主动中断 exit130，不计 C 门 | 九卡仍 pending，二轮 `.83` Windows D 门失败，新生产修复须全量/原生复验 | FIX-WD-08e、WD-08 最终 SHA 门 |
+| 2026-10-21 15:50 UTC | 上游 #525 提交选项前滚复审 | 在 `81eff71` 树上修正 `-S` 的显式强制签名、`-S`/`--no-gpg-sign` 最后标志优先、`-u` 三种实际预览模式、`-o`/位置路径的稳定拒绝及 `--short` 只预览；英文/中文命令页、开发文档、兼容表、CHANGELOG 和网站第九张 commit 页同步。首次 focused 59/61，失败为新测试目录前缀误判与旧 MC7 仍预期 exit129；修正后 `commit_test` 61/61、`compat_config_history_defaults` 13/13、fmt、严格全目标全特性 Clippy 通过。Claude Code 第一轮 18 turns 耗尽不计，第二轮审查字面 `VERDICT: PASS`、P0/P1/P2=0；四项 P3（`-u foo` 错误文案、显式 `-S` 绕过坏配置、旧 porcelain 不读 untracked 配置、内部直接调 run_commit 绕过 partial 拒绝）按已知边界接受。网站限定九页 drift=0、同步器 8/8、Vitest 11/11、typecheck/build exit0；全量、最终 SHA CI、发布和线上验收仍待 | 九卡仍 pending，不以局部门代替发布 | WD-08 并发合流前滚、最终 C/D 门 |
 
 ## 已决议设计决策
 
@@ -186,7 +191,7 @@
 2. A 组按写集运行单元/集成/feature gates；B 组按任务类型；ER-05 Codex 和 Claude Code reviewer 必须实际读最终差异，最终 `VERDICT: PASS`。
 3. 每个会推送的树运行 fmt/clippy。子卡相关 T-1/T-3 风险由家族发布点包含最终变更的全量承担；WD-08 T-2 恒定全量。
 4. `0.30.83` 的 C/D 使用模板完整发布协议：版本面 parity、工具链 lockfile、bump 树 nextest、release build/install/版本检查、签名+DCO、精确暂存、native push、tag/release.yml、远端产物与 stable 清单证据。任何外部门失败保留 remote-pending。
-5. 新布局网站必需门在最终 CLI/仓库文档就绪后，于现有 native cf 的 backend cwd 执行：先只读全库检查并记录基线漂移，再以 `--only worktree agent review investigate sandbox hooks upgrade init` 分别运行同步器 `--write` 与检查；`python3 scripts/test_sync_libra_command_docs.py`；`pnpm exec vitest run tests/unit/docs-manifest.test.ts tests/unit/docs-search.test.ts`；`pnpm typecheck`；`pnpm build`。原七张 Worktree 命令页加 FIX-WD-05 的 init 页共八张；网站只存 EN 命令页，zh-CN 在渲染时镜像，不新增不存在的中文源文件。
+5. 新布局网站必需门在最终 CLI/仓库文档就绪后，于现有 native cf 的 backend cwd 执行：先只读全库检查并记录基线漂移，再以 `--only worktree agent review investigate sandbox hooks upgrade init commit` 分别运行同步器 `--write` 与检查；`python3 scripts/test_sync_libra_command_docs.py`；`pnpm exec vitest run tests/unit/docs-manifest.test.ts tests/unit/docs-search.test.ts`；`pnpm typecheck`；`pnpm build`。原七张 Worktree 命令页加 FIX-WD-05 的 init 页共八张，另有上游 Issue #525 的 commit 页共九张；网站只存 EN 命令页，zh-CN 在渲染时镜像，不新增不存在的中文源文件。
 6. 最终提交前重新读取本地 HEAD、origin/main 和 backend cf/origin/cf，核对远端没有部分 WD 变更，重新检查精确写集和当前 dirty diff。若上游发生变化，先保存当前工作字节并人工合并到最新源码，重新审查/运行受影响门；禁止自动 rebase/reset 或推送无关变更。该核验失败则保持 dirty 未提交，不尝试绕过。
 7. 原生 Windows D 门是 `.github/workflows/base.yml` 的 `compat-scoped-input-windows`：最终 main SHA 对应的四个 active exact scoped-input fixture 与 windows_fs 单元组均需通过，cross-check/Windows artifact 编译均不能替代。旧 `cc8f437` 的门已通过，但合流后的最终 SHA 必须重新通过才可触发 tag/artifact release；现有并发 relocation DEFER 仍不算 PASS。
 8. COMPATIBILITY 仅增加本行为所需记录，不无关重排现有 ledger 锚点；实际触及的守卫测试通过才作兼容证据，不把未测试文字当限制。

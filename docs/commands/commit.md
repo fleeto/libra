@@ -60,8 +60,8 @@ applied. `--amend` during a merge is refused (exit 128). `--dry-run` writes
 nothing, keeps merge state, and prints a preview instead of a fake
 `[branch hash]` line. After `merge --squash`, the following commit is
 single-parent, prefills `SQUASH_MSG`, and deletes that file. Partial
-`commit <path>` / `commit -o <path>` remains a usage error (exit 129; Git
-exits 128).
+`commit <path>` / `commit -o <path>` is recognised but refused with
+`LBR-UNSUPPORTED-001` (exit 128); stage only the intended paths first.
 
 For a deleted conflict, use `commit -a` only when all tracked changes belong in
 the commit. A parent replaced by a file or symlink makes its tracked children
@@ -160,22 +160,23 @@ Read the commit message from `<file>`; `-F -` reads it from **standard input**
 
 ### `-S` / `--gpg-sign[=<keyid>]`
 
-Sign the commit. Libra already signs every commit with the repository vault key
-by default, so the flag simply selects that default; the optional key id is
-accepted for Git parity and ignored (one vault key per repository). Use
-`--no-gpg-sign` to force an unsigned commit.
+Force signing with the repository vault key, even when `commit.gpgSign=false`
+or `vault.signing=false`. Signing fails if no vault key can be unlocked. The
+optional key id is accepted for Git parity and ignored (one vault key per
+repository). If combined with `--no-gpg-sign`, the last flag wins.
 
 ### `--short`
 
-Print the short status summary (`A  path`, `M  path`, …) for the commit, with or
-without `--dry-run`. This is the same short format as `--porcelain`.
+Print the short status preview (`A  path`, `M  path`, …). Like `--porcelain`,
+`--short` implies `--dry-run`: it does not create a commit or change HEAD/index.
 
 ### `-u[=<mode>]` / `--untracked-files[=<mode>]`
 
-Accepted for parity: it selects whether the change summary includes untracked
-files (`no` hides them; the default lists them separately from the staged set).
+Control untracked paths in the status preview: `no` hides them, `normal`
+collapses untracked directories (the default), and `all` lists individual
+files. A bare `-u` or `--untracked-files` means `all`; invalid modes fail.
 
-### Partial commit (`--only`, `--pathspec-from-file`, `commit <path>`)
+### Partial commit (`-o` / `--only`, `--pathspec-from-file`, `commit <path>`)
 
 **Not implemented** — Libra commits the whole index. These spellings are
 recognised and refused with `LBR-UNSUPPORTED-001`, naming the missing feature and
@@ -461,8 +462,8 @@ matching `git commit --no-gpg-sign`. Vault signing runs when `vault.signing=true
 (the `libra init` default) and a vault unseal key is available. The Git-compatible
 `commit.gpgSign=true|false` default overrides `vault.signing`: `true` force-signs
 with the repository vault key and `false` disables signing. `--no-gpg-sign` has
-highest precedence and suppresses either configuration. Git's positive
-`-S`/`--gpg-sign` is not exposed.
+precedence over configuration. When combined with `-S`/`--gpg-sign`, the last
+CLI signing flag wins.
 
 When `vault.gpg.source=imported` (set by `libra config import-gpg-key`), commit
 signing uses the imported signing key instead of the generated vault key; removal

@@ -2187,11 +2187,13 @@ fn test_commit_concludes_in_progress_merge_matrix() {
         "MC9 keeps state"
     );
 
-    // MC7: partial commit stays a 129 usage error.
+    // MC7: partial commit is classified before touching merge state.
     let partial = run_libra_command(&["commit", "shared.txt", "--no-verify"], p);
-    assert_eq!(partial.status.code(), Some(129), "MC7 path");
+    assert_eq!(partial.status.code(), Some(128), "MC7 path");
+    assert!(String::from_utf8_lossy(&partial.stderr).contains("LBR-UNSUPPORTED-001"));
     let only = run_libra_command(&["commit", "-o", "shared.txt", "--no-verify"], p);
-    assert_eq!(only.status.code(), Some(129), "MC7 -o");
+    assert_eq!(only.status.code(), Some(128), "MC7 -o");
+    assert!(String::from_utf8_lossy(&only.stderr).contains("LBR-UNSUPPORTED-001"));
     assert!(
         p.join(".libra/merge-state.json").exists(),
         "MC7 keeps state"
@@ -2853,12 +2855,15 @@ fn commit_message_from_stdin() {
     );
 }
 
-/// `-S` / `--gpg-sign[=<keyid>]` is accepted; Libra signs by default, so it is
-/// a no-op selector rather than a rejection.
+/// An explicit `-S` forces signing even when commit.gpgSign disables the default.
 #[test]
 fn commit_gpg_sign_flag_is_accepted() {
     let repo = commit_fixture();
     let root = repo.path();
+    super::assert_cli_success(
+        &run_libra_command(&["config", "commit.gpgSign", "false"], root),
+        "disable default signing",
+    );
     for (index, flag) in ["-S", "--gpg-sign"].iter().enumerate() {
         // Restage before each iteration: the previous commit consumed the
         // staged change.
@@ -2872,6 +2877,11 @@ fn commit_gpg_sign_flag_is_accepted() {
         super::assert_cli_success(&out, &format!("commit {flag} -m signed"));
         let log = run_libra_command(&["log", "-1", "--format=%s"], root);
         assert_eq!(String::from_utf8_lossy(&log.stdout).trim(), "signed");
+        let raw = run_libra_command(&["cat-file", "-p", "HEAD"], root);
+        assert!(
+            String::from_utf8_lossy(&raw.stdout).contains("gpgsig"),
+            "{flag} must force signing despite commit.gpgSign=false"
+        );
     }
     // The key-id form is accepted (and ignored: one vault key per repository).
     fs::write(root.join("keyed.txt"), "k\n").expect("write keyed file");
@@ -2881,16 +2891,68 @@ fn commit_gpg_sign_flag_is_accepted() {
     );
     let keyed = run_libra_command(&["commit", "-S=DEADBEEF", "-m", "keyed"], root);
     super::assert_cli_success(&keyed, "commit -S=<keyid>");
+    let raw = run_libra_command(&["cat-file", "-p", "HEAD"], root);
+    assert!(String::from_utf8_lossy(&raw.stdout).contains("gpgsig"));
+
+    for (index, (first, last, signed)) in [
+        ("-S", "--no-gpg-sign", false),
+        ("--no-gpg-sign", "-S", true),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let file = format!("toggle{index}.txt");
+        fs::write(root.join(&file), "toggle\n").expect("write toggle file");
+        super::assert_cli_success(&run_libra_command(&["add", &file], root), "stage toggle");
+        super::assert_cli_success(
+            &run_libra_command(&["commit", first, last, "-m", "toggle"], root),
+            "commit with signing toggles",
+        );
+        let raw = run_libra_command(&["cat-file", "-p", "HEAD"], root);
+        assert_eq!(
+            String::from_utf8_lossy(&raw.stdout).contains("gpgsig"),
+            signed,
+            "last signing toggle must win: {first} {last}"
+        );
+    }
 }
 
-/// `--short` renders the short (porcelain) change summary, with and without
-/// `--dry-run`.
+#[test]
+fn commit_gpg_sign_without_vault_key_fails_closed() {
+    let repo = tempdir().expect("tempdir");
+    let root = repo.path();
+    super::assert_cli_success(
+        &run_libra_command(&["init", "--vault", "false"], root),
+        "init without vault",
+    );
+    super::configure_identity_via_cli(root);
+    fs::write(root.join("unsigned.txt"), "x\n").expect("write file");
+    super::assert_cli_success(&run_libra_command(&["add", "unsigned.txt"], root), "stage");
+    let index_before = fs::read(root.join(".libra/index")).expect("read index");
+    let out = run_libra_command(&["commit", "-S", "-m", "must sign"], root);
+    assert_eq!(out.status.code(), Some(128));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("no unseal key found"),
+        "missing key must be reported: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let head = run_libra_command(&["rev-parse", "--verify", "HEAD"], root);
+    assert!(
+        !head.status.success(),
+        "failed signing must not create HEAD"
+    );
+    assert_eq!(index_before, fs::read(root.join(".libra/index")).unwrap());
+}
+
+/// `--short` renders the status preview and never creates a commit.
 #[test]
 fn commit_short_summary_flag() {
     let repo = commit_fixture();
     let root = repo.path();
     fs::write(root.join("b.txt"), "b\n").expect("write b");
     super::assert_cli_success(&run_libra_command(&["add", "b.txt"], root), "stage b");
+    let head_before = run_libra_command(&["rev-parse", "--verify", "HEAD"], root);
+    let index_before = fs::read(root.join(".libra/index")).expect("read index");
 
     let dry = run_libra_command(&["commit", "--short", "--dry-run"], root);
     super::assert_cli_success(&dry, "commit --short --dry-run");
@@ -2900,33 +2962,61 @@ fn commit_short_summary_flag() {
         String::from_utf8_lossy(&dry.stdout)
     );
 
-    let committed = run_libra_command(&["commit", "--short", "-m", "short"], root);
-    super::assert_cli_success(&committed, "commit --short -m");
+    let preview = run_libra_command(&["commit", "--short", "-m", "short"], root);
+    super::assert_cli_success(&preview, "commit --short -m");
     assert!(
-        String::from_utf8_lossy(&committed.stdout).contains("A  b.txt"),
-        "a real --short commit still prints the summary: {}",
-        String::from_utf8_lossy(&committed.stdout)
+        String::from_utf8_lossy(&preview.stdout).contains("A  b.txt"),
+        "--short prints the preview: {}",
+        String::from_utf8_lossy(&preview.stdout)
     );
+    let head_after = run_libra_command(&["rev-parse", "--verify", "HEAD"], root);
+    assert_eq!(
+        head_before.stdout, head_after.stdout,
+        "HEAD must not change"
+    );
+    assert_eq!(index_before, fs::read(root.join(".libra/index")).unwrap());
 }
 
-/// `-u[=<mode>]` is accepted (the untracked-files listing mode).
+/// `-u[=<mode>]` validates the mode and controls untracked preview paths.
 #[test]
 fn commit_untracked_files_flag_is_accepted() {
     let repo = commit_fixture();
     let root = repo.path();
-    fs::write(root.join("untracked.txt"), "u\n").expect("write untracked");
-    for (index, flag) in ["-u", "--untracked-files=no"].iter().enumerate() {
-        // Restage before each iteration: the previous commit consumed the
-        // staged change, and an empty commit would be refused for a different
-        // reason.
-        fs::write(root.join(format!("staged{index}.txt")), "s\n").expect("write staged file");
-        super::assert_cli_success(
-            &run_libra_command(&["add", &format!("staged{index}.txt")], root),
-            "stage the fixture",
+    fs::create_dir(root.join("untracked")).expect("create untracked dir");
+    fs::write(root.join("untracked/one.txt"), "1\n").expect("write first untracked");
+    fs::write(root.join("untracked/two.txt"), "2\n").expect("write second untracked");
+    for (flag, contains, excludes) in [
+        ("-uno", "A  a.txt", "??"),
+        (
+            "--untracked-files=normal",
+            "?? untracked/",
+            "?? untracked/one.txt",
+        ),
+        ("-uall", "?? untracked/one.txt", "?? untracked/"),
+        ("-u", "?? untracked/two.txt", "?? untracked/"),
+    ] {
+        let out = run_libra_command(&["commit", "--porcelain", flag], root);
+        super::assert_cli_success(&out, &format!("commit --porcelain {flag}"));
+        let text = String::from_utf8_lossy(&out.stdout);
+        let lines: Vec<&str> = text.lines().collect();
+        assert!(
+            lines.contains(&contains),
+            "{flag}: missing {contains}: {text}"
         );
-        let out = run_libra_command(&["commit", flag, "-m", "with u"], root);
-        super::assert_cli_success(&out, &format!("commit {flag}"));
+        if excludes == "??" {
+            assert!(
+                !lines.iter().any(|line| line.starts_with("?? ")),
+                "{flag}: unexpected untracked path: {text}"
+            );
+        } else {
+            assert!(
+                !lines.contains(&excludes),
+                "{flag}: unexpected {excludes}: {text}"
+            );
+        }
     }
+    let invalid = run_libra_command(&["commit", "--porcelain", "-ubogus"], root);
+    assert!(!invalid.status.success(), "invalid mode must be rejected");
 }
 
 /// Partial-commit options are classified with `LBR-UNSUPPORTED-001` instead of
@@ -2936,10 +3026,13 @@ fn commit_partial_commit_options_are_classified() {
     let repo = commit_fixture();
     let root = repo.path();
     let before = run_libra_command(&["rev-parse", "--verify", "HEAD"], root);
+    let index_before = fs::read(root.join(".libra/index")).expect("read staged index");
 
     for args in [
         vec!["commit", "--only", "-m", "x"],
+        vec!["commit", "-o", "a.txt", "-m", "x"],
         vec!["commit", "--pathspec-from-file", "list", "-m", "x"],
+        vec!["commit", "a.txt", "-m", "x"],
     ] {
         let out = run_libra_command(&args, root);
         assert_eq!(
@@ -2956,8 +3049,8 @@ fn commit_partial_commit_options_are_classified() {
     }
     let after = run_libra_command(&["rev-parse", "--verify", "HEAD"], root);
     assert_eq!(
-        before.status.success(),
-        after.status.success(),
+        before.stdout, after.stdout,
         "a refused partial commit must not create a commit"
     );
+    assert_eq!(index_before, fs::read(root.join(".libra/index")).unwrap());
 }

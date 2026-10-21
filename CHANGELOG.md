@@ -65,6 +65,11 @@
   macOS/Windows. Existing worktree directories are not moved.
 - On Windows, opening the repository database after `init` accepts canonical
   verbatim paths without treating their `?` prefix as SQLite URL parameters.
+- Refuse reattachment of a duplicate worktree identity before writing an Add
+  intent, and block scoped cleanup while another registered worktree shares
+  its identity, even if both entries are detached. Keep old unresolved
+  journals and tombstones for manual recovery, and preserve the shared
+  lifecycle mirror row.
 - The old `v0.31.0` tag has downloadable Linux/macOS binaries but never entered
   the stable channel and predates fixes in this release. Its higher version
   number prevents `libra upgrade` from selecting v0.30.83; after this release
@@ -91,6 +96,9 @@
   fails, including bare targets and paths spelled through `..`.
 - Keep existing user-file permissions when `--shared` converts into an existing
   bare target; apply the requested mode to new repository entries.
+- On Windows, close the conversion database pools before rolling back newly
+  created repository SQLite files; if closing fails or times out, retain the
+  conversion marker and report manual recovery instead of partial cleanup.
 - Use the resolved target for the post-init repository check. On Unix, reject
   an existing non-directory path component with `LBR-REPO-002` before creating
   repository files.

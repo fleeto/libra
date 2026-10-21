@@ -1053,6 +1053,10 @@ async fn run_init_internal(
     // Everything below runs under the conversion guard: an ordinary error (or a
     // signal, via `install_signal_rollback`) rolls this run's target state back
     // so the conversion can be retried immediately (ADR-IG-02/03).
+    // Keep a handle to the new pool until an error has been handled. Dropping
+    // the connection alone can leave SQLite files open during Windows rollback.
+    #[cfg(windows)]
+    let mut conversion_db_for_rollback: Option<DbConn> = None;
     let init_result: Result<InitOutput, InitError> = async {
         progress.emit("Initializing database ...");
         let database_path = root_dir.join(DATABASE);
@@ -1060,6 +1064,10 @@ async fn run_init_internal(
         // vault setup run; those later stages persist their durable state through
         // this connection/path and assume schema bootstrap has completed.
         let conn = create_database_connection(&database_path).await?;
+        #[cfg(windows)]
+        if is_git_conversion {
+            conversion_db_for_rollback = Some(conn.clone());
+        }
         conversion_gate(init_conversion::ConversionStage::AfterDatabase)?;
         // Probe the actual filesystem (root_dir already exists at this point):
         // non-bare repos probe the parent of `.libra`; bare repos have no
@@ -1115,6 +1123,7 @@ async fn run_init_internal(
             // conversion call and must be dropped before later stages continue.
             let _guard = CurrentDirGuard::change_to(&target_guard_path)?;
             let report = convert::convert_from_git_repository(&source, args.bare).await?;
+            conversion_gate(init_conversion::ConversionStage::AfterSetup)?;
             warnings.extend(report.warnings);
             Some(report.source_git_dir)
         } else {
@@ -1195,6 +1204,41 @@ async fn run_init_internal(
             Ok(output)
         }
         Err(error) => {
+            #[cfg(windows)]
+            if let Some(conn) = conversion_db_for_rollback.take() {
+                let database_path = root_dir.join(DATABASE);
+                let close_error = if std::env::var("LIBRA_TEST").as_deref() == Ok("1")
+                    && std::env::var("LIBRA_TEST_INIT_CONVERT_CLOSE_FAIL").as_deref() == Ok("1")
+                {
+                    Some("injected database close failure".to_string())
+                } else {
+                    match tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                        db::close_cached_db_conn_instance_for_path(&database_path).await?;
+                        conn.close().await.map_err(|error| {
+                            io::Error::other(format!(
+                                "cannot close new database connection '{}': {error}",
+                                database_path.display()
+                            ))
+                        })
+                    })
+                    .await
+                    {
+                        Ok(Ok(())) => None,
+                        Ok(Err(close_error)) => Some(close_error.to_string()),
+                        Err(_) => Some("timed out after 10 seconds".to_string()),
+                    }
+                };
+                if let Some(detail) = close_error {
+                    return Err(InitError::ConversionRetryRefused {
+                        code: StableErrorCode::RepoStateInvalid,
+                        message: format!(
+                            "{error}; cannot close repository database '{}' before conversion rollback: {detail}",
+                            database_path.display()
+                        ),
+                        hint: init_conversion::manual_recovery_hint(&root_dir),
+                    });
+                }
+            }
             if let Some(mut guard) = conversion_guard.take() {
                 let failures = guard.rollback();
                 if !failures.is_empty() {

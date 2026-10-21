@@ -526,7 +526,7 @@ pub(super) fn load_state() -> WorktreeResult<WorktreeState> {
         return Err(WorktreeError::OperationBlocked(format!(
             "the worktree registry is ambiguous: {conflict}. Run `libra worktree doctor` to see \
               which entries collide, then \
-              `libra worktree repair --path <path> --resolve-identity --yes` to unregister the one you \
+              `libra worktree repair --path <path> --resolve-identity --yes` to detach the one you \
               do not want (the directory is left on disk)"
         )));
     }

@@ -172,11 +172,17 @@ libra init --from-git-repository ../old-project
 root (`CONVERSION_IN_PROGRESS`), installed after the initial layout and removed only
 after everything succeeded:
 
-- after the marker is installed, an ordinary conversion error or SIGINT/SIGTERM rolls
-  back the metadata created by this run, so the conversion can be retried immediately. An existing bare target
-  directory and its unrelated user files remain in place; the same protection applies
-  when the target path contains symlinks or `..`. User files and the source `.git` are
-  never touched;
+- after the marker is installed, an ordinary conversion error rolls back the
+  metadata created by this run; on Unix, SIGINT/SIGTERM also triggers rollback.
+  The conversion can then be retried immediately. An existing bare target
+  directory and its unrelated user files remain in place; the same protection
+  applies when the target path contains symlinks or `..`. User files and the
+  source `.git` are never touched. On Windows, Libra closes the new repository
+  database pool before deleting its SQLite files. If closing fails or times
+  out after 10 seconds, Libra keeps the marker and reports manual recovery
+  steps instead of attempting a partial rollback. Windows has no signal
+  rollback handler; an interrupted process may leave the marker and requires
+  the recovery steps below;
 - a hard kill (SIGKILL, OOM, power loss) leaves the marker behind. Until it is cleared,
   other commands refuse instead of presenting the repository as empty: while the
   recorded owner is still running they return `LBR-CONFLICT-002`, and after the
@@ -187,9 +193,9 @@ after everything succeeded:
   deletes it**), and converts from scratch. For an existing bare target, that aside
   contains its pre-existing user files; inspect it before removing anything. The aside
   path is reported in the warnings;
-- on macOS, conversions started by a build from the v0.30.79 or this release's
-  source record enough owner identity to recognize an exited process, so the
-  same-source retry can recover after a hard kill in the same boot session.
+- on macOS, conversions started by a v0.30.83 build record enough owner
+  identity to recognize an exited process, so the same-source retry can
+  recover after a hard kill in the same boot session.
   The earlier published `v0.31.0` binary predates this fix; see the
   [signed stable installer guidance](upgrade.md) if it is installed. The marker keeps the legacy owner
   field empty, so older macOS binaries also refuse a concurrent retry. Markers

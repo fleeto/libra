@@ -209,7 +209,9 @@ pub(crate) async fn collect_worktree_scope_report(
         if entry.state == "detached_from_registry" {
             findings.push(
                 "detached from the registry: re-attach with `libra worktree add <name> --path <path>`, or \
-                  finish the removal with `libra worktree remove --delete-dir --path <path>`."
+                  finish the removal with `libra worktree remove --delete-dir --path <path>`; if \
+                  another registered entry shares this identity, both actions may be refused — \
+                  back up both directories and keep the detached one for manual recovery."
                     .to_string(),
             );
         }
@@ -2334,7 +2336,15 @@ pub(crate) async fn recover_pending_intents(
                         if let Some(idx) = entry_index {
                             let entry_id = state.entries[idx].worktree_id.clone();
                             if let Some(id_str) = entry_id.as_deref().or(worktree_id.as_deref()) {
-                                match gc_worktree_scoped_rows_strict(db, id_str, true).await {
+                                match gc_worktree_scoped_rows_strict(
+                                    db,
+                                    id_str,
+                                    true,
+                                    state,
+                                    Path::new(&path),
+                                )
+                                .await
+                                {
                                     Ok(()) => {
                                         let _ = lifecycle_delete(db, id_str).await;
                                         state.entries.remove(idx);
@@ -2369,7 +2379,15 @@ pub(crate) async fn recover_pending_intents(
                                 }
                             }
                         } else if let Some(id_str) = worktree_id.as_deref() {
-                            match gc_worktree_scoped_rows_strict(db, id_str, true).await {
+                            match gc_worktree_scoped_rows_strict(
+                                db,
+                                id_str,
+                                true,
+                                state,
+                                Path::new(&path),
+                            )
+                            .await
+                            {
                                 Ok(()) => {
                                     let _ = lifecycle_delete(db, id_str).await;
                                 }
@@ -2506,6 +2524,13 @@ pub(crate) async fn recover_pending_intents(
                                 if resolve_row {
                                     if let Some(id_str) =
                                         state.entries[idx].worktree_id.clone().as_deref()
+                                        && !state.entries.iter().enumerate().any(
+                                            |(other, entry)| {
+                                                other != idx
+                                                    && !entry.is_main
+                                                    && entry.worktree_id.as_deref() == Some(id_str)
+                                            },
+                                        )
                                     {
                                         let _ = lifecycle_delete(db, id_str).await;
                                     }
@@ -2517,9 +2542,9 @@ pub(crate) async fn recover_pending_intents(
                             WorktreeEntryState::DetachedFromRegistry => {
                                 notes.push(format!(
                                     "stale re-attach intent for '{path}' rolled back — \
-                                      the entry is (still or again) detached and stays \
-                                      frozen; rerun `libra worktree add <name> --path {path}` to \
-                                      re-attach it"
+                                      the entry is (still or again) detached and stays frozen; \
+                                      re-attachment may be refused if another entry shares its \
+                                      identity"
                                 ));
                             }
                             WorktreeEntryState::Tombstone => {
@@ -2638,7 +2663,9 @@ pub(crate) async fn recover_pending_intents(
                     // The add never published; sweep the scope it may have
                     // seeded. The half-created directory (if any) is left
                     // for the user — recovery never deletes directories.
-                    match gc_worktree_scoped_rows_strict(db, id_str, true).await {
+                    match gc_worktree_scoped_rows_strict(db, id_str, true, state, Path::new(&path))
+                        .await
+                    {
                         Ok(()) => {
                             let _ = lifecycle_delete(db, id_str).await;
                             notes.push(format!(
@@ -2842,7 +2869,15 @@ pub(crate) async fn recover_pending_intents(
                         }) {
                             let entry_id = state.entries[idx].worktree_id.clone();
                             let cleaned = if let Some(id_str) = entry_id.as_deref() {
-                                match gc_worktree_scoped_rows_strict(db, id_str, true).await {
+                                match gc_worktree_scoped_rows_strict(
+                                    db,
+                                    id_str,
+                                    true,
+                                    state,
+                                    Path::new(&path),
+                                )
+                                .await
+                                {
                                     Ok(()) => {
                                         let _ = lifecycle_delete(db, id_str).await;
                                         true
@@ -3232,7 +3267,7 @@ pub(crate) async fn retry_tombstones(
             index += 1;
             continue;
         };
-        match gc_worktree_scoped_rows_strict(db, &id, true).await {
+        match gc_worktree_scoped_rows_strict(db, &id, true, state, Path::new(&path)).await {
             Ok(()) => {
                 let _ = lifecycle_delete(db, &id).await;
                 state.entries.remove(index);
@@ -3243,8 +3278,8 @@ pub(crate) async fn retry_tombstones(
             Err(error) => {
                 pending += 1;
                 notes.push(format!(
-                    "tombstone '{path}': scoped cleanup failed again ({error}); will retry \
-                      on the next repair"
+                    "tombstone '{path}': scoped cleanup remains pending ({error}); retry \
+                      after fixing the cause, or preserve a shared identity for manual recovery"
                 ));
                 index += 1;
             }
@@ -3325,7 +3360,16 @@ pub(crate) async fn reconcile_lifecycle(
                         ));
                     }
                 }
-                let _ = lifecycle_delete(db, id).await;
+                // The mirror is keyed by worktree_id, not path. A legacy
+                // collision may leave a detached entry with this same id;
+                // deleting its row here would hide it from migration guards.
+                if !state.entries.iter().any(|other| {
+                    other.path != entry.path
+                        && !other.is_main
+                        && other.worktree_id.as_deref() == Some(id)
+                }) {
+                    let _ = lifecycle_delete(db, id).await;
+                }
             }
         }
     }

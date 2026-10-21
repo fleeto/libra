@@ -519,7 +519,9 @@ pub(crate) fn worktree_common_storage(gitdir: &Path) -> io::Result<PathBuf> {
             format!(
                 "this worktree was removed from the registry (detached); from the main \
                  worktree run `libra worktree add <name> --path \"{}\"` to re-attach it, or \
-                 `libra worktree remove --delete-dir --path \"{}\"` to delete it",
+                 `libra worktree remove --delete-dir --path \"{}\"` to delete it; if another \
+                 registered worktree shares its identity, preserve both directories for manual \
+                 recovery because re-attachment or deletion may be refused",
                 gitdir.parent().unwrap_or(gitdir).display(),
                 gitdir.parent().unwrap_or(gitdir).display()
             ),

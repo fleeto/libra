@@ -12445,6 +12445,7 @@ fn merge_rename_onto_a_directory_the_merge_deletes_is_used() {
 /// the pair instead let the symlink be remapped onto the new path, where the
 /// three-way match took it as the only change and the file's content vanished
 /// from a merge that exited 0. Both walks lost it; both must now keep it.
+#[cfg(unix)]
 #[test]
 fn merge_rename_whose_source_became_a_symlink_keeps_the_content() {
     for env in [

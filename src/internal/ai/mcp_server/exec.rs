@@ -199,8 +199,18 @@ fn wait_for_worker(
     let sample_peak = Arc::clone(&peak_rss);
     let sample_pid = child.id();
     let sample_limit = worker_memory_limit();
+    // The sampler and reaper must not observe the same PID on opposite sides
+    // of reaping, or a reused process-group ID could be signaled.
+    let process_identity_gate = Arc::new(Mutex::new(()));
+    let sample_identity_gate = Arc::clone(&process_identity_gate);
     std::thread::spawn(move || {
-        sample_resident_memory(sample_pid, sample_limit, sample_stop, sample_peak)
+        sample_resident_memory(
+            sample_pid,
+            sample_limit,
+            sample_stop,
+            sample_peak,
+            sample_identity_gate,
+        )
     });
     // Drain stdout while the worker runs. A full pipe would stall a large
     // result, and the parent would then mistake that stall for the deadline.
@@ -214,7 +224,17 @@ fn wait_for_worker(
         let _ = sender.send(bytes);
     });
     loop {
-        match child.try_wait() {
+        let observation = {
+            let _identity = process_identity_gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let observation = child.try_wait();
+            if !matches!(&observation, Ok(None)) {
+                watch_stop.store(true, Ordering::Relaxed);
+            }
+            observation
+        };
+        match observation {
             Ok(Some(status)) => {
                 // The worker is gone, so the slot is free before any join.
                 // The reply only waits on the bounded channel, never on join.
@@ -244,8 +264,12 @@ fn wait_for_worker(
                 return outcome;
             }
             Ok(None) if started.elapsed() >= deadline => {
-                detach_after_deadline(child, slot, reader);
+                let identity_guard = process_identity_gate
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
                 finish_memory_watch(&watch_stop, &peak_rss);
+                drop(identity_guard);
+                detach_after_deadline(child, slot, reader);
                 return Ok(protocol::tool_error_result(
                     "LBR-AGENT-036",
                     "read tool exceeded the 30 s deadline",
@@ -254,8 +278,8 @@ fn wait_for_worker(
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(20)),
             Err(_) => {
-                detach_after_deadline(child, slot, reader);
                 finish_memory_watch(&watch_stop, &peak_rss);
+                detach_after_deadline(child, slot, reader);
                 return Ok(protocol::tool_error_result(
                     "LBR-AGENT-037",
                     "read worker could not be observed",
@@ -351,11 +375,16 @@ fn memory_limit_result() -> Value {
 
 fn finish_memory_watch(stop: &AtomicBool, peak: &AtomicU64) {
     stop.store(true, Ordering::Relaxed);
+    let rss = peak.load(Ordering::Relaxed);
     #[cfg(debug_assertions)]
     if std::env::var("LIBRA_TEST").ok().as_deref() == Some("1")
         && let Ok(path) = std::env::var("LIBRA_MCP_TEST_PEAK_RSS_FILE")
     {
-        let _ = std::fs::write(path, peak.load(Ordering::Relaxed).to_string());
+        let _ = std::fs::write(path, rss.to_string());
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        let _ = rss;
     }
 }
 
@@ -375,8 +404,20 @@ fn exited_for_memory_limit(status: &ExitStatus) -> bool {
     }
 }
 
-fn sample_resident_memory(pid: u32, limit: u64, stop: Arc<AtomicBool>, peak: Arc<AtomicU64>) {
-    while !stop.load(Ordering::Relaxed) {
+fn sample_resident_memory(
+    pid: u32,
+    limit: u64,
+    stop: Arc<AtomicBool>,
+    peak: Arc<AtomicU64>,
+    process_identity_gate: Arc<Mutex<()>>,
+) {
+    loop {
+        let identity_guard = process_identity_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if stop.load(Ordering::Relaxed) {
+            break;
+        }
         if let Some(rss) = resident_bytes(pid) {
             peak.fetch_max(rss, Ordering::Relaxed);
             // The resident budget is enforced here. Linux `RLIMIT_AS` is higher
@@ -384,12 +425,15 @@ fn sample_resident_memory(pid: u32, limit: u64, stop: Arc<AtomicBool>, peak: Arc
             // no equivalent hard address-space cap.
             #[cfg(unix)]
             if rss > limit {
+                // SAFETY: the reaper holds the same identity gate, so this
+                // child PID cannot be reaped and reused before the signal.
                 unsafe {
                     libc::kill(-(pid as i32), libc::SIGKILL);
                 }
                 break;
             }
         }
+        drop(identity_guard);
         let _ = limit;
         std::thread::sleep(Duration::from_millis(50));
     }
@@ -443,7 +487,9 @@ fn macos_resident_bytes(pid: u32) -> Option<u64> {
         ri_diskio_bytesread: u64,
         ri_diskio_byteswritten: u64,
     }
-    extern "C" {
+    // Rust 2024 requires `unsafe` on `extern` blocks. The call below stays
+    // in its own `unsafe` block.
+    unsafe extern "C" {
         fn proc_pid_rusage(pid: i32, flavor: i32, buffer: *mut RusageInfoV0) -> i32;
     }
     let mut info = std::mem::MaybeUninit::<RusageInfoV0>::zeroed();

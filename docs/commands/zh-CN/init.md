@@ -26,17 +26,17 @@ Libra 专有 ignore 规则时请自行创建（或转换现有 `.gitignore`）�
 
 仓库发现会忽略 home 中遗留的 `libra.db`，因此从用户主目录初始化项目时会读取真正的全局配置。打开旧仓库或全局配置数据库时，迁移会自动补建缺失的旧版 `config` 表，保留已有配置；被忽略的 home `libra.db` 文件保持原样。
 
-### Operation-v2 收敛（当前分支，未发布）
+### Operation-v2 收敛
 
-`2026090801` 收敛迁移已在当前未发布分支实现，并通过 focused 迁移验证，包括真实旧 binary 创建的受控仓库升级。整树集成与发布验收仍未完成。
+`2026090801` 收敛迁移已随正式版本发布，会保留下述迁移收据与配置值。后续的 `2026091801` 迁移移除了临时的旧 operation 命名空间。
 
 - 单向迁移 `2026090801` 必须保留原始 `2026090101`（`operation_v2`）与 `2026090601`（`legacy_config_table`，#472）迁移收据，包括已有收据时间戳。已应用 #472、仍使用 v1 operation 的仓库需要补齐缺失的 operation-v2 迁移，而不只是提高最大版本号。
-- 已有 v1 operation 数据必须保留在 `legacy_operation*` 命名空间；已有 `config`、`config_kv` 配置值与 #472 缺表修复必须保留。分支收敛不授权删除 legacy 数据。
+- `2026090801` 曾将 v1 operation 数据暂存在 `legacy_operation*` 命名空间；`2026091801` 随后以前滚迁移方式移除该临时命名空间。已有 `config`、`config_kv` 配置值与 #472 缺表修复仍须保留。
 - `2026090801` 成功提交后，最高仅支持 `2026090601` schema 的旧 binary 必须在使用不兼容的 operation 表之前拒绝打开较新的仓库 schema。不能仅凭软件包版本字符串判断 binary 支持的 schema。
 - 升级真实数据库前，先保留经过验证的一致性升级前备份：使用 SQLite online-backup 机制，不要只复制运行中数据库的主文件而遗漏 WAL。保护好备份并保留旧 binary。Linked worktree 共享仓库数据库，不能充当隔离的升级测试环境。
 - 此迁移没有 down 路径。运行旧 binary、再次执行 `init` 或删除迁移收据都不是降级流程。Binary 安装回滚不会恢复数据库；恢复需要匹配的升级前备份与 binary。
 
-另见 [operation 捕获边界](op.md#当前分支的捕获契约未发布)与[收敛原理](../../development/commands/op.md#current-branch-convergence-contract-unreleased)。
+另见 [operation 捕获边界](op.md#当前分支的捕获契约)与[收敛原理](../../development/commands/op.md#current-branch-convergence-contract)。
 
 ## 选项
 
@@ -94,15 +94,15 @@ libra init --from-git-repository ../old-project
 
 #### 中断转换与恢复
 
-安装转换标记后发生普通错误或收到 SIGINT/SIGTERM 时，Libra 会回滚本次创建的仓库元数据，
-保留已有 bare 目标目录、其中无关的用户文件与源 `.git`；目标路径含符号链接或 `..` 时亦然，可立即重试。硬中断（如 SIGKILL 或断电）会留下
+安装转换标记后发生普通错误时，Libra 会回滚本次创建的仓库元数据；在 Unix 上，收到 SIGINT/SIGTERM 也会触发回滚。
+回滚保留已有 bare 目标目录、其中无关的用户文件与源 `.git`；目标路径含符号链接或 `..` 时亦然，可立即重试。在 Windows 上，删除本次新建的 SQLite 文件前会先关闭仓库数据库连接池；若关闭失败或超过 10 秒，则保留转换标记并给出人工恢复提示，不尝试不完整回滚。Windows 没有信号回滚处理器；进程中断后可能留下标记，需按下述步骤恢复。硬中断（如 SIGKILL 或断电）会留下
 `CONVERSION_IN_PROGRESS` 标记；在处理前，其他命令会拒绝把该仓库当作空仓库：
 原进程仍在运行时返回 `LBR-CONFLICT-002`，进程已中断退出后返回 `LBR-REPO-003`。
 使用相同 Git 源重试时，只有能验证原进程已退出且源路径匹配，才会把不完整的
 存储目录改名为同级 `<storage>.incomplete-<timestamp>` 并重新转换；不会删除残留目录。
 若原目标是已存在的 bare 目录，其原有用户文件也会在改名后的目录中，删除前请检查。
 
-在 macOS 上，从 v0.30.79 或 v0.30.80 源码构建的版本可在**同一启动会话**内验证硬中断后的
+在 macOS 上，v0.30.83 构建可在**同一启动会话**内验证硬中断后的
 进程身份；较早发布的 `v0.31.0` 二进制尚无此修复。若已安装该版本，请参阅[签名稳定通道安装说明](upgrade.md)。旧版标记、其他主机或重启后的标记无法在本机证明原进程已退出，
 会以 `LBR-REPO-003` 拒绝自动接管。先确认所有主机均无转换在运行，再按错误提示
 执行人工恢复，不要直接删除存储目录。原进程仍在运行时返回 `LBR-CONFLICT-002`；

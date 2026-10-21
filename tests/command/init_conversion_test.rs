@@ -171,40 +171,99 @@ fn init_conversion_failure_preserves_existing_target_through_dotdot_alias() {
 /// must leave an existing target and unrelated user files in place.
 #[test]
 fn init_bare_conversion_failure_preserves_existing_target_contents() {
+    for stage in ["after-database", "after-setup"] {
+        let root = tempfile::tempdir().expect("tempdir");
+        let source = git_source(root.path());
+        let target = target_dir(root.path(), false);
+        let source_arg = source.to_string_lossy().to_string();
+        let target_arg = target.to_string_lossy().to_string();
+        let args = [
+            "init",
+            "--bare",
+            "--vault",
+            "false",
+            "--from-git-repository",
+            &source_arg,
+            &target_arg,
+        ];
+
+        let failed = run_libra_command_with_env(
+            &args,
+            root.path(),
+            &[("LIBRA_TEST_INIT_CONVERT_FAIL_AT", stage)],
+        );
+        assert!(
+            !failed.status.success(),
+            "the injected {stage} failure must fail bare conversion"
+        );
+        assert!(
+            String::from_utf8_lossy(&failed.stderr).contains("injected Git conversion failure"),
+            "the {stage} failure must reach the rollback path: {}",
+            String::from_utf8_lossy(&failed.stderr)
+        );
+        assert_eq!(
+            fs::read_to_string(target.join("keep.txt")).unwrap(),
+            "keep\n"
+        );
+        for name in [
+            "libra.db",
+            "objects",
+            "info",
+            "hooks",
+            "CONVERSION_IN_PROGRESS",
+        ] {
+            assert!(
+                !target.join(name).exists(),
+                "{stage} rollback must remove only the new bare metadata entry {name}"
+            );
+        }
+
+        let retried = run_libra_command(&args, root.path());
+        assert_cli_success(&retried, "retry after bare rollback");
+        assert_eq!(
+            fs::read_to_string(target.join("keep.txt")).unwrap(),
+            "keep\n"
+        );
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn init_bare_conversion_close_failure_keeps_recovery_marker() {
     let root = tempfile::tempdir().expect("tempdir");
     let source = git_source(root.path());
     let target = target_dir(root.path(), false);
     let source_arg = source.to_string_lossy().to_string();
     let target_arg = target.to_string_lossy().to_string();
-    let args = [
-        "init",
-        "--bare",
-        "--vault",
-        "false",
-        "--from-git-repository",
-        &source_arg,
-        &target_arg,
-    ];
-
     let failed = run_libra_command_with_env(
-        &args,
+        &[
+            "init",
+            "--bare",
+            "--vault",
+            "false",
+            "--from-git-repository",
+            &source_arg,
+            &target_arg,
+        ],
         root.path(),
-        &[("LIBRA_TEST_INIT_CONVERT_FAIL_AT", "after-database")],
+        &[
+            ("LIBRA_TEST_INIT_CONVERT_FAIL_AT", "after-database"),
+            ("LIBRA_TEST_INIT_CONVERT_CLOSE_FAIL", "1"),
+        ],
+    );
+    let stderr = String::from_utf8_lossy(&failed.stderr);
+    assert!(!failed.status.success(), "close failure must be reported");
+    assert!(stderr.contains("LBR-REPO-003"), "{stderr}");
+    assert!(
+        stderr.contains("injected Git conversion failure"),
+        "{stderr}"
     );
     assert!(
-        !failed.status.success(),
-        "the injected failure must fail bare conversion"
-    );
-    assert!(
-        String::from_utf8_lossy(&failed.stderr).contains("injected Git conversion failure"),
-        "the failure must reach the rollback path: {}",
-        String::from_utf8_lossy(&failed.stderr)
-    );
-    assert_eq!(
-        fs::read_to_string(target.join("keep.txt")).unwrap(),
-        "keep\n"
+        stderr.contains("injected database close failure"),
+        "{stderr}"
     );
     for name in [
+        "keep.txt",
         "libra.db",
         "objects",
         "info",
@@ -212,17 +271,10 @@ fn init_bare_conversion_failure_preserves_existing_target_contents() {
         "CONVERSION_IN_PROGRESS",
     ] {
         assert!(
-            !target.join(name).exists(),
-            "rollback must remove only the new bare metadata entry {name}"
+            target.join(name).exists(),
+            "a close failure must not partially delete {name}"
         );
     }
-
-    let retried = run_libra_command(&args, root.path());
-    assert_cli_success(&retried, "retry after bare rollback");
-    assert_eq!(
-        fs::read_to_string(target.join("keep.txt")).unwrap(),
-        "keep\n"
-    );
 }
 
 #[test]

@@ -261,7 +261,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $false
-          foreach ($filter in @('utils::windows_fs::tests::', 'internal::ai::capture::key::windows::tests::', 'internal::ai::workspace_isolation::tests::', 'internal::operation::middleware::lease::windows_repository_lock_tests::', 'internal::db::windows_sqlite_paths_drop_verbatim_prefix_before_url_parsing')) {
+          foreach ($filter in @('utils::windows_fs::tests::', 'internal::ai::capture::key::windows::tests::', 'internal::ai::workspace_isolation::tests::', 'internal::operation::middleware::lease::windows_repository_lock_tests::', 'internal::db::windows_sqlite_paths_drop_verbatim_prefix_before_url_parsing', 'internal::db::tests::test_close_cached_db_conn_instance_for_path_matches_dotdot_alias')) {
             $executed = @(& cargo test --locked --lib $filter -- --nocapture --color never --test-threads=1)
             $testExit = $LASTEXITCODE
             $executed | Write-Output
@@ -284,6 +284,7 @@ jobs:
             'command::init_test::test_init_template_dotdot_target_skips_self_copy',
             'command::init_conversion_test::init_conversion_failure_preserves_existing_target_through_dotdot_alias',
             'command::init_conversion_test::init_bare_conversion_failure_preserves_existing_target_contents',
+            'command::init_conversion_test::init_bare_conversion_close_failure_keeps_recovery_marker',
             'command::init_conversion_test::init_bare_conversion_layout_failure_cleans_only_new_entries',
             'command::init_conversion_test::init_bare_conversion_refuses_existing_sqlite_journal',
             'command::init_conversion_test::init_bare_conversion_preserves_case_variant_user_file_on_rollback'

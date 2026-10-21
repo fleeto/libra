@@ -6590,7 +6590,9 @@ fn resolve_identity_detaches_one_claimant_and_mirrors_the_lifecycle() {
     let main = dir.path();
     let wt_a = main.join("wt-collide-a");
     let wt_b = main.join("wt-collide-b");
-    for wt in [&wt_a, &wt_b] {
+    // Register wt-b first so lifecycle reconciliation visits the detached
+    // claimant before the active survivor.
+    for wt in [&wt_b, &wt_a] {
         assert_cli_success(
             &run_libra_command(
                 &[
@@ -6626,6 +6628,8 @@ fn resolve_identity_detaches_one_claimant_and_mirrors_the_lifecycle() {
         serde_json::to_vec_pretty(&doc).expect("serialize"),
     )
     .expect("write colliding registry");
+    std::fs::write(wt_b.join(".libra/worktree_id"), format!("{id_a}\n"))
+        .expect("make both directories claim the colliding identity");
 
     // Mutations refuse while the collision holds.
     let refused = run_libra_command(
@@ -6649,19 +6653,22 @@ fn resolve_identity_detaches_one_claimant_and_mirrors_the_lifecycle() {
     );
 
     // Resolve by detaching wt-b.
-    assert_cli_success(
-        &run_libra_command(
-            &[
-                "worktree",
-                "repair",
-                "--path",
-                wt_b.to_str().unwrap(),
-                "--resolve-identity",
-                "--yes",
-            ],
-            main,
-        ),
-        "resolve-identity detaches the chosen claimant",
+    let resolved = run_libra_command(
+        &[
+            "worktree",
+            "repair",
+            "--path",
+            wt_b.to_str().unwrap(),
+            "--resolve-identity",
+            "--yes",
+        ],
+        main,
+    );
+    assert_cli_success(&resolved, "resolve-identity detaches the chosen claimant");
+    let guidance = String::from_utf8_lossy(&resolved.stdout);
+    assert!(
+        guidance.contains("manual recovery") && !guidance.contains("remove --delete-dir"),
+        "repair must not promise unsafe deletion: {guidance}"
     );
 
     // The survivor mutates again; the detached directory fails closed.
@@ -6683,6 +6690,67 @@ fn resolve_identity_detaches_one_claimant_and_mirrors_the_lifecycle() {
     assert!(
         !frozen.status.success(),
         "the detached directory fails closed"
+    );
+    let database = main.join(".libra").join("libra.db");
+    let scoped_before = sqlite_query(
+        &database,
+        &format!("SELECT COUNT(*) FROM reference WHERE worktree_id = '{id_a}'"),
+    );
+    assert_ne!(
+        scoped_before,
+        vec!["0".to_string()],
+        "the survivor must have scoped references for this data-loss regression"
+    );
+    let remove = run_libra_command(
+        &[
+            "worktree",
+            "remove",
+            "--path",
+            wt_b.to_str().unwrap(),
+            "--delete-dir",
+        ],
+        main,
+    );
+    assert!(
+        !remove.status.success(),
+        "deleting a detached duplicate must not GC the survivor's scoped state"
+    );
+    assert!(
+        String::from_utf8_lossy(&remove.stderr).contains("shared with another registered worktree"),
+        "the refusal should explain the shared identity"
+    );
+    assert!(wt_b.exists(), "the detached directory must remain intact");
+    assert_eq!(
+        sqlite_query(
+            &database,
+            &format!("SELECT COUNT(*) FROM reference WHERE worktree_id = '{id_a}'"),
+        ),
+        scoped_before,
+        "the active claimant's scoped references must be unchanged"
+    );
+    let journal_before = sqlite_query(&database, "SELECT COUNT(*) FROM worktree_intent_journal");
+    let reattach = run_libra_command(
+        &[
+            "worktree",
+            "add",
+            "wt-collide-b",
+            "--path",
+            wt_b.to_str().unwrap(),
+        ],
+        main,
+    );
+    assert!(
+        !reattach.status.success(),
+        "a detached duplicate identity must not become active again"
+    );
+    assert!(
+        String::from_utf8_lossy(&reattach.stderr).contains("already claimed"),
+        "the refusal should identify the remaining active claimant"
+    );
+    let journal_after = sqlite_query(&database, "SELECT COUNT(*) FROM worktree_intent_journal");
+    assert_eq!(
+        journal_after, journal_before,
+        "a refused reattachment must not write an Add intent"
     );
 
     // The SQL lifecycle mirror carries the detach — the 2026072402 down
@@ -6706,6 +6774,108 @@ fn resolve_identity_detaches_one_claimant_and_mirrors_the_lifecycle() {
     assert!(
         !text.contains("claim"),
         "no duplicate-identity finding for Active+Detached: {text}"
+    );
+    assert_cli_success(
+        &run_libra_command(&["worktree", "repair", "--confirm"], main),
+        "repair keeps the detached mirror when the survivor is visited last",
+    );
+    assert_eq!(
+        sqlite_query(
+            &database,
+            &format!("SELECT state FROM worktree_lifecycle WHERE worktree_id = '{id_a}'"),
+        ),
+        vec!["detached_from_registry".to_string()],
+        "the active survivor must not erase the detached claimant's mirror"
+    );
+
+    // Detaching the survivor does not make the shared identity safe to GC.
+    assert_cli_success(
+        &run_libra_command(
+            &["worktree", "unlock", "--path", wt_a.to_str().unwrap()],
+            main,
+        ),
+        "unlock survivor before detaching it",
+    );
+    assert_cli_success(
+        &run_libra_command(
+            &["worktree", "remove", "--path", wt_a.to_str().unwrap()],
+            main,
+        ),
+        "detach survivor without deleting its scope",
+    );
+    let second_remove = run_libra_command(
+        &[
+            "worktree",
+            "remove",
+            "--path",
+            wt_b.to_str().unwrap(),
+            "--delete-dir",
+        ],
+        main,
+    );
+    assert!(
+        !second_remove.status.success(),
+        "deleting a duplicate remains unsafe when both entries are detached"
+    );
+    assert!(
+        String::from_utf8_lossy(&second_remove.stderr)
+            .contains("shared with another registered worktree"),
+        "the second refusal must identify the still-shared identity"
+    );
+    assert!(wt_a.exists() && wt_b.exists());
+    assert_eq!(
+        sqlite_query(
+            &database,
+            &format!("SELECT COUNT(*) FROM reference WHERE worktree_id = '{id_a}'"),
+        ),
+        scoped_before,
+        "detaching both claimants must preserve their shared scoped references"
+    );
+    assert_cli_success(
+        &run_libra_command(&["worktree", "add", "wt-collide-a"], main),
+        "one detached claimant may become active when no other is active",
+    );
+    assert_eq!(
+        sqlite_query(
+            &database,
+            &format!("SELECT state FROM worktree_lifecycle WHERE worktree_id = '{id_a}'"),
+        ),
+        vec!["detached_from_registry".to_string()],
+        "reattaching one claimant must retain the other's detached mirror"
+    );
+
+    // A previous binary could have left an Add intent for the same identity
+    // before refusing reattachment. Repair must not sweep the survivor's scope
+    // merely because the journal's destination was never registered.
+    let orphan = main.join("unpublished-colliding-add");
+    let payload = serde_json::json!({ "path": orphan.to_string_lossy() })
+        .to_string()
+        .replace('\'', "''");
+    let stale_intent = format!(
+        "INSERT INTO worktree_intent_journal (op, worktree_id, payload, created_at) \
+         VALUES ('add', '{id_a}', '{payload}', 0)"
+    );
+    assert!(sqlite_exec(&database, &[&stale_intent]));
+    let scoped_before_repair = sqlite_query(
+        &database,
+        &format!("SELECT COUNT(*) FROM reference WHERE worktree_id = '{id_a}'"),
+    );
+    assert_cli_success(
+        &run_libra_command(&["worktree", "repair", "--confirm"], main),
+        "repair must fail closed on a stale shared-identity Add intent",
+    );
+    assert_eq!(
+        sqlite_query(
+            &database,
+            &format!("SELECT COUNT(*) FROM reference WHERE worktree_id = '{id_a}'"),
+        ),
+        scoped_before_repair,
+        "repair must preserve the active claimant's scoped references"
+    );
+    assert_eq!(
+        sqlite_query(&database, "SELECT COUNT(*) FROM worktree_intent_journal"),
+        vec!["1".to_string()],
+        "the unsafe stale intent must remain for manual recovery"
     );
 }
 

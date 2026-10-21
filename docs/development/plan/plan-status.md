@@ -1,6 +1,6 @@
 # 计划执行状况总表（plan-status.md）
 
-> **Worktree 默认目录统一（2026-10-19）：** 用户已授权实施 [WD-01..08 与 WD-02G](plan-20261019-worktree-layout.md)，新建目录统一在 `.libra/worktree`，不迁移旧数据。此前 Worktree 源码 `ba7425d` 的本地 cargo 全量 10676/0/26 ignored、nextest 10664/10664、macFUSE 和 OrbStack Linux 真挂载各 16/16 已通过；上游合流与 FIX-WD-07/07b 后这些旧结果不替代最终树。2026-10-21 GitHub 最新已发布 tag 为 `v0.30.79`，用户要求最新上游 patch + 1，现目标 **`0.30.80`**，不发布 `0.31.1`。`v0.30.79` release workflow 因 crates.io DNS 失败，CDN stable 仍为 0.30.77；当前 `main=de72da7` 上的本计划修复与版本面尚未推送。`v0.30.67` 起的二进制支持 2026101902 receipt，`0.30.66` 及更早版本拒绝已升级仓库。最终双全量、final-SHA CI、四平台/stable、网站新版上线待验，九卡正式 **0/9**。证据见计划正文。
+> **Worktree 默认目录统一（2026-10-19）：** 用户已授权实施 [WD-01..08 与 WD-02G](plan-20261019-worktree-layout.md)，新建目录统一在 `.libra/worktree`，不迁移旧数据。此前 `ba7425d` 的 cargo 全量、nextest 与 macFUSE/OrbStack Linux 真挂载各 16/16 均不能替代最终树。2026-10-21 GitHub 最新已发布 `v0.30.82`，按用户“上游最新 patch + 1”目标为 **`v0.30.83`**，不发布 `v0.31.1`；旧 `v0.30.80` 未打 tag。`cf3dff2` Windows 测试编译修复、`f23e022` 准备性修改和 `8472d0f` 上游合流已签名+DCO，最终 `.83` 版本面与文档正在前滚。`v0.30.67` 起的二进制支持 2026101902 receipt，`0.30.66` 及更早版本拒绝已升级仓库。最终双全量、final-SHA CI、四平台/stable、网站新版上线待验，九卡正式 **0/9**。证据见计划正文。
 
 > **plan-20261015 现场（2026-10-19 15:30:59 UTC）：** Mega2 的 G-13 修复聚合已退出；FIX-MTR-03 和 FIX-MTR-01 各自发布，FIX-MTR-04 不发布。旧 B8 FAIL、8/8 STOP 与 FIX-MTR-03 AC-1/VER-5 未勾选保持原记录。Mega2 MTR-87 已完成 `v0.42.55` 的实际 Docker D；MTR-10 在工作区实施中，四条 focused VER 已在 Docker 测试服务下通过，完整 C/双审/发布仍待。Libra handoff `976091c` 已是远端 main 祖先；本地 17033b9、5e55635 两笔计划文档历史在本次合并中保留。LTR-00 仍 in-progress/locally-accepted，formal 0/26，LTR-01 未开工。本次整合本身不计功能验收、版本发布或新 D。
 

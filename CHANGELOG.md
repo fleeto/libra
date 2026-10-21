@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-## [0.30.80] — 2026-10-21
+## [0.30.83] — 2026-10-21
 
 ### Issue #478 plumbing/porcelain parity
 
@@ -26,6 +26,12 @@
 - `libra agent mcp` runs read tools in at most four worker processes. A read
   that exceeds its deadline returns `LBR-AGENT-036`; its worker is killed
   before the slot is reused.
+- Each MCP read worker has a 512 MiB resident-memory budget. Detected overages
+  return `LBR-AGENT-028` with reason `worker_memory_limit`; on Windows an OS
+  memory-limit exit may instead return `LBR-AGENT-037`.
+- Fix the macOS build of the MCP read-worker memory limit under Rust 2024.
+- Stop the memory sampler before reaping a read worker so a reused process-group
+  ID cannot receive the worker's memory-limit signal.
 - `rebase` accepts `-x` for `--exec`, `--merge`/`-m` as merge-backend selectors,
   and `--signoff`/`-s` for replayed commits. `--apply` now reports the
   unsupported backend explicitly.
@@ -59,9 +65,14 @@
   macOS/Windows. Existing worktree directories are not moved.
 - On Windows, opening the repository database after `init` accepts canonical
   verbatim paths without treating their `?` prefix as SQLite URL parameters.
+- Refuse reattachment of a duplicate worktree identity before writing an Add
+  intent, and block scoped cleanup while another registered worktree shares
+  its identity, even if both entries are detached. Keep old unresolved
+  journals and tombstones for manual recovery, and preserve the shared
+  lifecycle mirror row.
 - The old `v0.31.0` tag has downloadable Linux/macOS binaries but never entered
   the stable channel and predates fixes in this release. Its higher version
-  number prevents `libra upgrade` from selecting v0.30.80; after this release
+  number prevents `libra upgrade` from selecting v0.30.83; after this release
   reaches the signed stable channel, rerun the default installer without `-v`
   to replace that binary with the signed stable build. On macOS, put an
   Ed25519-capable OpenSSL (for example Homebrew `openssl@3`) first on the
@@ -85,6 +96,9 @@
   fails, including bare targets and paths spelled through `..`.
 - Keep existing user-file permissions when `--shared` converts into an existing
   bare target; apply the requested mode to new repository entries.
+- On Windows, close the conversion database pools before rolling back newly
+  created repository SQLite files; if closing fails or times out, retain the
+  conversion marker and report manual recovery instead of partial cleanup.
 - Use the resolved target for the post-init repository check. On Unix, reject
   an existing non-directory path component with `LBR-REPO-002` before creating
   repository files.

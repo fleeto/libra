@@ -544,20 +544,54 @@ pub async fn get_db_conn_instance_for_path(db_path: &Path) -> io::Result<DbConn>
     get_or_init_db_conn_instance(db_path.to_path_buf()).await
 }
 
+/// Close and remove the cached shared pool for a SQLite file. A caller that
+/// deletes the file must wait for this result, especially on Windows.
+pub async fn close_cached_db_conn_instance_for_path(db_path: &Path) -> io::Result<()> {
+    let mut connections = TEST_DB_CONNECTIONS.lock().await;
+    // Callers may have opened the same file through a `..` or symlink alias.
+    // Close every matching pool before removing the file on Windows.
+    let canonical = db_path.canonicalize().ok();
+    let matching = connections
+        .keys()
+        .filter(|candidate| {
+            candidate.as_path() == db_path
+                || canonical
+                    .as_ref()
+                    .is_some_and(|path| candidate.canonicalize().ok().as_ref() == Some(path))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let removed = matching
+        .into_iter()
+        .filter_map(|path| connections.remove(&path).map(|conn| (path, conn)))
+        .collect::<Vec<_>>();
+    drop(connections);
+
+    let mut first_error = None;
+    for (path, conn) in removed {
+        if let Err(error) = conn.close().await
+            && first_error.is_none()
+        {
+            first_error = Some(IOError::other(format!(
+                "cannot close cached database connection '{}': {error}",
+                path.display()
+            )));
+        }
+    }
+    if let Some(error) = first_error {
+        return Err(error);
+    }
+    Ok(())
+}
+
 /// Drop a cached shared connection for an explicit SQLite file path.
 ///
 /// Used by tests and by `libra config` flows that recreate the underlying
 /// database. Logs (but does not surface) any errors raised while closing the
 /// connection — the cache entry is removed regardless.
 pub async fn reset_db_conn_instance_for_path(db_path: &Path) {
-    let mut connections = TEST_DB_CONNECTIONS.lock().await;
-    let removed = connections.remove(db_path);
-    drop(connections);
-
-    if let Some(conn) = removed
-        && conn.close().await.is_err()
-    {
-        tracing::warn!("failed to close cached database connection during reset");
+    if let Err(error) = close_cached_db_conn_instance_for_path(db_path).await {
+        tracing::warn!(%error, "failed to close cached database connection during reset");
     }
 }
 
@@ -1587,5 +1621,40 @@ mod tests {
 
         let connections = TEST_DB_CONNECTIONS.lock().await;
         assert!(!connections.contains_key(&db_path));
+    }
+
+    #[tokio::test]
+    async fn test_close_cached_db_conn_instance_for_path_matches_dotdot_alias() {
+        let test_db = TestDbPath::new("test_close_cached_db_conn_alias.db").await;
+        let db_path = PathBuf::from(&test_db.0);
+        let parent = db_path.parent().unwrap();
+        let alias_dir = parent.join("close_cached_db_alias_dir");
+        fs::create_dir_all(&alias_dir).unwrap();
+        let alias = alias_dir.join("..").join(db_path.file_name().unwrap());
+
+        let cached = get_db_conn_instance_for_path(&alias).await.unwrap();
+        let exact = get_db_conn_instance_for_path(&db_path).await.unwrap();
+        {
+            let connections = TEST_DB_CONNECTIONS.lock().await;
+            assert!(connections.contains_key(&alias));
+            assert!(connections.contains_key(&db_path));
+        }
+
+        close_cached_db_conn_instance_for_path(&db_path)
+            .await
+            .unwrap();
+        {
+            let connections = TEST_DB_CONNECTIONS.lock().await;
+            assert!(!connections.contains_key(&alias));
+            assert!(!connections.contains_key(&db_path));
+        }
+        cached
+            .execute_unprepared("SELECT 1")
+            .await
+            .expect_err("a returned clone must also be closed");
+        exact
+            .execute_unprepared("SELECT 1")
+            .await
+            .expect_err("the exact-path pool must also be closed");
     }
 }

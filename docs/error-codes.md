@@ -156,7 +156,7 @@ structured report is always present.
 | `frame` | `LBR-AGENT-034` | `internal` | Bridge redaction or payload-size validation could not be satisfied; the original payload was refused (no raw fallback) | a peer sends a payload that cannot be safely redacted |
 | `frame` | `LBR-AGENT-035` | `internal` | Bridge mutating operation denied by policy or approval | `checkpoint.restore` without the required approval |
 | `frame` | `LBR-AGENT-036` | `internal` | Bridge request exceeded its deadline (default 30 s); an MCP tool result whose read exceeds 30 s uses this code | a `commit.create` that stalls past the request deadline, or an MCP read tool that exceeds 30 s |
-| `frame` | `LBR-AGENT-037` | `internal` | Bridge internal error (JSON-RPC `-32603`) — a database/VCS/generic failure that cannot be attributed to the peer | the bridge's SQLite store returns a transient error during `event.append` |
+| `frame` | `LBR-AGENT-037` | `internal` | Bridge internal error (JSON-RPC `-32603`) — a database/VCS/generic failure that cannot be attributed to the peer; an MCP read worker stopped by the Windows OS memory limit may also use this code | the bridge's SQLite store returns a transient error during `event.append`, or a Windows MCP read worker exits at its OS memory limit before the sampler detects an overage |
 | `frame` | `LBR-AGENT-038` | `internal` | Bridge mutation fence drifted — HEAD moved, or the index/worktree is dirty where the operation requires a clean one; refused **before** any write | `commit.create` with a stale `expected_head`, or `checkpoint.restore` against a dirty working tree |
 | `128` | `LBR-AGENT-039` | `internal` | Reserved historical outcome: a removed controlled-fix path was denied at a Code-runtime tool or sandbox approval gate; no patch was applied | former `review --fix` / `investigate fix` denial |
 | `128` | `LBR-AGENT-040` | `internal` | Reserved historical outcome: a removed controlled-fix path stopped without a clean patch or deterministic repair result | former invalid terminal response, later denial after a patch, or controlled-execution timeout |
@@ -300,7 +300,7 @@ evidence on uncertainty. See [repair recovery](commands/config.md#confirmed-lega
 | `LBR-AGENT-034` | Bridge redaction or payload-size validation could not be satisfied; payload refused |
 | `LBR-AGENT-035` | Bridge mutating operation denied by policy or approval |
 | `LBR-AGENT-036` | Bridge request exceeded its deadline; an MCP tool result whose read exceeds 30 s uses this code |
-| `LBR-AGENT-037` | Bridge internal error (DB/VCS/generic failure) |
+| `LBR-AGENT-037` | Bridge internal error (DB/VCS/generic failure); an MCP read worker stopped by the Windows OS memory limit may also use this code |
 | `LBR-AGENT-038` | Bridge mutation fence drifted (HEAD moved or the index/worktree is dirty); refused before any write |
 | `LBR-AGENT-039` | Reserved historical controlled-fix approval denial; the removed `review --fix` / `investigate fix` paths no longer emit it |
 | `LBR-AGENT-040` | Reserved historical controlled-fix failure without a clean patch or deterministic repair result; the removed paths no longer emit it |

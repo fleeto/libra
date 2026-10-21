@@ -267,28 +267,40 @@ mod tests {
         );
     }
 
-    /// Returns an address that refuses connections (a port bound then freed).
-    fn refused_addr() -> SocketAddr {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind probe");
-        let addr = listener.local_addr().expect("probe addr");
-        drop(listener);
-        addr
+    // Ports below 1024 are outside the ephemeral range used by parallel test
+    // servers that bind to port 0. Try several because a host may run a service
+    // on one of them, but still require an actual connect-class failure.
+    async fn refused_connect_error() -> CliError {
+        let mut unexpected = Vec::new();
+        for port in 1..=8 {
+            let addr = SocketAddr::from(([127, 0, 0, 1], port));
+            let result = run(TREE, async move {
+                send(
+                    http(Duration::from_secs(5)).get(format!("http://{addr}/")),
+                    transport_error,
+                )
+                .await
+                .map(|_| ())
+            })
+            .await;
+            match result {
+                Err(error)
+                    if error.details().get("transport").and_then(Value::as_str)
+                        == Some("connect") =>
+                {
+                    return error;
+                }
+                Err(error) => unexpected.push(format!("{port}: {:?}", error.details())),
+                Ok(()) => unexpected.push(format!("{port}: request succeeded")),
+            }
+        }
+        panic!("no refused connection on ports 1-8: {unexpected:?}");
     }
 
     // G3
     #[tokio::test]
     async fn run_classifies_connect() {
-        let addr = refused_addr();
-        let err = run(TREE, async move {
-            send(
-                http(Duration::from_secs(5)).get(format!("http://{addr}/")),
-                transport_error,
-            )
-            .await
-            .map(|_| ())
-        })
-        .await
-        .expect_err("connect refused");
+        let err = refused_connect_error().await;
         assert_eq!(
             err.details(),
             &details(json!({"method": "GET", "route": "/api/v1/tree", "transport": "connect"}))
@@ -340,17 +352,7 @@ mod tests {
     // G28
     #[tokio::test]
     async fn run_returns_original_transport_error_plus_details() {
-        let addr = refused_addr();
-        let err = run(TREE, async move {
-            send(
-                http(Duration::from_secs(5)).get(format!("http://{addr}/")),
-                transport_error,
-            )
-            .await
-            .map(|_| ())
-        })
-        .await
-        .expect_err("connect refused");
+        let err = refused_connect_error().await;
         let original = CliError::fatal("t")
             .with_stable_code(StableErrorCode::NetworkUnavailable)
             .with_hint("h");

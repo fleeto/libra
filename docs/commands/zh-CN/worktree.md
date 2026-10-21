@@ -33,11 +33,11 @@ libra worktree doctor [<workspace-id>] [--limit <n>] [--cursor <cursor>]
 
 每个 linked worktree 包含自己的真实 `.libra` gitdir——本地目录而非符号链接，保存各自的 `HEAD`、index 和 `HEAD` reflog，以及指向共享存储的 `commondir` 和稳定的 `worktree_id`。所有 worktree 共享数据库、对象库、branch/tag/remote refs 和配置，但检出与暂存状态隔离。主工作树的文件操作跳过其 `.libra` 元数据；托管 linked worktree 内的命令正常处理该工作树的文件。托管容器内若缺失或损坏本地身份，命令会拒绝，不会向上误解析成主工作树。
 
-磁盘 `worktrees.json` 使用 `schema_version: 4`，条目带可选 `name`。现有 v2/v3 registry 仍可读取；正常变更时写入当前格式，保留原身份与 v3 注册代次（`epoch_counter` 和各条目的 `epoch`）。旧无名条目和主工作树不自动分配名称。本次变化不移动旧目录、不批量补名称，也不新增目录迁移命令；已有无名 worktree 可用 `--path` 选择。registry 通过原子替换写入。公开的 `worktree list` JSON 使用版本 2，与磁盘 registry 版本独立。
+磁盘 `worktrees.json` 使用 `schema_version: 4`，条目带可选 `name`。现有 v2/v3 registry 仍可读取；正常变更时写入当前格式，保留原身份与 v3 注册代次（`epoch_counter` 和各条目的 `epoch`）。旧无名条目和主工作树不自动分配名称。本次变化不移动旧目录、不批量补名称，也不新增目录迁移命令；已有无名 worktree 可用 `--path` 选择，`worktree add <NAME> --path <注册路径>` 可为活跃无名条目命名，或为已分离无名条目命名并重新挂接。registry 通过原子替换写入。公开的 `worktree list` JSON 使用版本 2，与磁盘 registry 版本独立。
 
 旧共享 `.libra` 符号链接布局仍保留原有诊断和显式 `repair --migrate-layout` 流程；该操作修复 gitdir 隔离，不把 worktree 搬到新的默认目录。旧二进制不得重写新 registry 格式；创建命名 worktree 后应继续使用兼容的 Libra 版本。
 
-**消解 registry 身份冲突。** 旧 registry 可能存在两个条目占用同一个由路径推导的身份。变更类 worktree 操作会拒绝该歧义。`libra worktree doctor` 指出冲突条目；`libra worktree repair --path <PATH> --resolve-identity --yes` 分离指定条目，同时保留文件和 scoped 状态。随后可用 `worktree remove --path <PATH> --delete-dir` 完成删除，或用 `worktree add <NAME>` 重新挂接已有命名条目。
+**消解 registry 身份冲突。** 旧 registry 可能存在两个条目占用同一个由路径推导的身份。变更类 worktree 操作会拒绝该歧义。`libra worktree doctor` 指出冲突条目；`libra worktree repair --path <PATH> --resolve-identity --yes` 分离指定条目，同时保留文件和 scoped 状态，剩余活跃条目可继续使用。幸存条目活跃时，被分离条目不能重新挂接；只要任何其他注册条目仍共享身份，`remove --delete-dir` 就会拒绝，以免清除另一个条目的 scoped 状态。请备份两个目录、继续使用幸存条目，并保留分离条目等待人工恢复；将幸存条目也分离并不会使删除变安全。本版本不提供自动身份迁移。
 
 新建 worktree 从所选提交（默认 HEAD）填充，不复制已暂存的索引更改。重新挂接分离的 worktree 不执行 checkout，也不替换文件、HEAD 或 index。
 
@@ -58,9 +58,9 @@ libra worktree doctor [<workspace-id>] [--limit <n>] [--cursor <cursor>]
 
 `--create-branch` 是 `--new-branch` 的别名。省略目标时，新 worktree 以**源提交的分离 HEAD** 创建；名称不会隐式创建同名分支。不支持 `--lock`、`--orphan`、`--no-checkout`、远程猜测和 `-B`；创建后可用 `worktree lock` 锁定。
 
-标准构建从 v0.30.69 起支持 `add --force` 与 `remove --force`，v0.30.80 也包含这些标志。较早发布的 `v0.31.0` Linux/macOS 二进制尚未实现。若已安装 v0.31.0，待 v0.30.80 发布后请使用[签名稳定通道安装脚本](upgrade.md)替换；`libra upgrade` 不会选择版本号更低的构建。
+标准构建从 v0.30.69 起支持 `add --force` 与 `remove --force`，v0.30.83 也包含这些标志。较早发布的 `v0.31.0` Linux/macOS 二进制尚未实现。若已安装 v0.31.0，待 v0.30.83 发布后请使用[签名稳定通道安装脚本](upgrade.md)替换；`libra upgrade` 不会选择版本号更低的构建。
 
-对于已分离的 registry 条目，`add <NAME>` 校验已保存身份和共享存储指针，然后重新挂接现有文件与暂存状态。重新挂接时拒绝 `TARGET`、`-b` 和 `--detach`，可选的 `--path` 必须等于注册路径。tombstone 条目清理成功前继续占用名称。
+对于已命名且分离的 registry 条目，`add <NAME>` 校验已保存身份和共享存储指针，然后重新挂接现有文件与暂存状态。对无名且分离的条目，使用 `add <NAME> --path <注册路径>` 命名并重新挂接。重新挂接时拒绝 `TARGET`、`-b` 和 `--detach`；对已命名条目指定 `--path` 时，必须等于注册路径。tombstone 条目清理成功前继续占用名称。
 
 ```bash
 # 在 .libra/worktree/linked/my-feature 创建，源提交处分离 HEAD
@@ -82,7 +82,7 @@ libra worktree add experiment --path "../实验 workspace"
 
 #### FUSE worktree
 
-启用 `worktree-fuse` 的 Unix 构建中，`add <NAME> --fuse` 需要可用的 FUSE 驱动（Linux 为 `/dev/fuse`，macOS 为 macFUSE）。官方发行二进制不启用 `worktree-fuse`；需自行构建才可使用。在这种构建中，`-f` 是 `--fuse` 的缩写，不是 `--force`。从 v0.30.79 或 v0.30.80 源码自行构建的 macOS `worktree-fuse` 包含此处的托管目录遮蔽保护；更早打标的 `v0.31.0` 尚无此修复。它以 `.libra/worktree/fuse/<NAME>/workspace` 为挂载点，同级 `upper/` 为可写 overlay。显式 `--path` 可选择外部挂载点；位于 lower tree、upper tree、共享元数据或其他托管工作区内的目标会在创建前拒绝。内部默认目录通过 overlay 中 opaque 的 `.libra/worktree` 目录遮蔽，避免递归暴露自身挂载点、upper 或兄弟工作区。文件系统无法建立该遮蔽时拒绝挂载。
+启用 `worktree-fuse` 的 Unix 构建中，`add <NAME> --fuse` 需要可用的 FUSE 驱动（Linux 为 `/dev/fuse`，macOS 为 macFUSE）。官方发行二进制不启用 `worktree-fuse`；需自行构建才可使用。在这种构建中，`-f` 是 `--fuse` 的缩写，不是 `--force`。从 v0.30.83 源码自行构建的 macOS `worktree-fuse` 包含此处的托管目录遮蔽保护；更早打标的 `v0.31.0` 尚无此修复。它以 `.libra/worktree/fuse/<NAME>/workspace` 为挂载点，同级 `upper/` 为可写 overlay。显式 `--path` 可选择外部挂载点；位于 lower tree、upper tree、共享元数据或其他托管工作区内的目标会在创建前拒绝。内部默认目录通过 overlay 中 opaque 的 `.libra/worktree` 目录遮蔽，避免递归暴露自身挂载点、upper 或兄弟工作区。文件系统无法建立该遮蔽时拒绝挂载。
 
 FUSE 与普通 worktree 不能占用同一名称。FUSE registry 使用 `{ "schema_version": 1, "entries": [...] }`；已知旧格式仍可读取，不移动原目录。FUSE worktree 不支持 `move`，也不支持按名称或路径修复身份（`repair <NAME>` / `repair --path <PATH>`）。注册表修复请用全局 `worktree repair --confirm`；FUSE 不采用普通 linked worktree 的私有身份布局。其 `remove` 继续使用卸载并删除 upper 的既有语义，不采用普通 worktree 的保留目录分离语义。对于新的托管默认布局，还会删除空挂载目录和容器；目录非空或清理失败时保留注册及名称供重试。旧布局和外部挂载点的目录仍保留。`umount` 继续接收实际路径，不接收 worktree 名称。
 
@@ -108,7 +108,7 @@ libra --machine worktree list
 
 ### 子命令：`repair`
 
-修复 worktree 元数据。每个会变更状态的 repair 都必须带 `--confirm`；否则命令会在取得 registry 锁或写入数据库/文件系统前拒绝。不带名称或 `--path` 时，已确认的操作会移除重复条目（相同规范路径）、确保恰好存在一个主 worktree 条目，并运行 W3 lifecycle 恢复引擎——确定性回放中断的 add/move/remove/prune intent journal（恢复过程绝不删除目录）、重试 tombstone 条目的 scoped 清理、按 registry 重建 detached 标记与 SQL lifecycle 镜像；只有实际做出更改时才写入状态文件。只有 `--migrate-layout --dry-run` 是无需确认的只读预览。
+修复 worktree 元数据。每个会变更状态的 repair 都必须带 `--confirm`；否则命令会在取得 registry 锁或写入数据库/文件系统前拒绝。不带名称或 `--path` 时，已确认的操作会移除重复条目（相同规范路径）、确保恰好存在一个主 worktree 条目，并运行 W3 lifecycle 恢复引擎——在身份可验证时前滚或回滚中断的 add/move/remove/prune intent journal（恢复过程绝不删除目录）、重试 tombstone 条目的 scoped 清理、按 registry 重建 detached 标记与 SQL lifecycle 镜像。若另一个注册条目共享同一身份，scoped 清理会拒绝，未决 journal 或 tombstone 保留供人工恢复。只有实际做出更改时才写入状态文件。只有 `--migrate-layout --dry-run` 是无需确认的只读预览。
 
 带 `--migrate-layout` 时(自 v0.19.60,W3-s3 §C.6):从**主 worktree** 把 legacy 共享 `.libra` 符号链接布局迁移到隔离布局(`--dry-run` 只报告;不带 path 迁移全部 legacy 条目)。迁移以原子 rename 安装带 journal 标识的新 gitdir(legacy 链接保留为 backup 直至校验通过),以共享 HEAD 快照播种分离 HEAD 并据其重建 private index:工作区文件绝不改动(迁移后按新 index 显示为 dirty/untracked),共享 index 的 staged 状态绝不复制——请先在主 worktree commit/stash。共享 index 存在冲突或主 scope 有进行中 sequencer 时在任何 rename 前拒绝;中断的迁移由下一次 `worktree repair --confirm` 按身份恢复。面向目标的生命周期命令(两种模式的 `worktree remove --path <PATH>` 与 `worktree repair --path <PATH>`)对 legacy-symlink 目标同样拒绝——共享符号链接会把写入导向**主**存储——须先完成迁移。
 
@@ -275,7 +275,7 @@ libra --machine worktree prune
 
 按名称或 `--path` 移除普通 worktree。默认保留磁盘目录，registry 条目转入 `detached_from_registry`。**名称继续保留**，私有 HEAD、index、工作文件和 scoped 数据库状态均不丢失。分离目录中的命令会拒绝，直到重新挂接或完成删除。
 
-用 `libra worktree add <NAME>` 重新挂接命名条目。命令会验证目录身份和共享存储指针，不执行 checkout，也不覆盖暂存或未暂存工作。此时不能提供 `TARGET`、`-b`、`--detach`；可选 `--path` 必须等于原保存路径。
+用 `libra worktree add <NAME>` 重新挂接命名条目；对已分离的无名条目，使用 `libra worktree add <NAME> --path <注册路径>` 命名并重新挂接。命令会验证目录身份和共享存储指针，不执行 checkout，也不覆盖暂存或未暂存工作。此时不能提供 `TARGET`、`-b`、`--detach`；对命名条目指定 `--path` 时，必须等于原保存路径。
 
 用 `--delete-dir` 完成删除。删除前检查未提交更改，并验证目录仍属于注册的 worktree；标准构建中的 `--force` 可绕过未提交更改检查，**`--delete-dir --force` 会删除未提交的修改**。替换目录、符号链接或无效身份均拒绝。只有确定缺失的路径才算不存在，检查错误不授权删除。删除目录后再清理 scoped 状态；清理失败会保留 `tombstone` 条目和名称，由 `libra worktree repair --confirm` 重试。仅当清理完成才释放名称。主工作树、已锁定或有进行中 sequencer 的 worktree 不能移除。
 
@@ -672,4 +672,4 @@ Git 的 `git worktree lock` 也支持 `--reason`，Libra 保留了这一点。�
 | `LBR-WORKTREE-001` | `worktree doctor --cursor` 收到非本命令签发（或已过期）的 cursor |
 | `LBR-WORKTREE-002` | `worktree doctor` 无法读取某个 scope（registry 无法解析、记录不可读、仓库身份缺失），拒绝给出残缺诊断 |
 
-支持统一 worktree 目录的版本首次打开仓库时，会写入仓库能力标记 4。此后 Libra 0.30.66 及更早版本会拒绝该仓库中的所有命令，包括与 worktree 无关的命令；请使用支持 2026101902 能力标记的构建：已发布二进制在 Linux 上始于 v0.30.67，在 macOS/Windows 上始于 v0.30.68；v0.30.80 的全部发行平台均支持。现有 worktree 目录不会移动。
+支持统一 worktree 目录的版本首次打开仓库时，会写入仓库能力标记 4。此后 Libra 0.30.66 及更早版本会拒绝该仓库中的所有命令，包括与 worktree 无关的命令；请使用支持 2026101902 能力标记的构建：已发布二进制在 Linux 上始于 v0.30.67，在 macOS/Windows 上始于 v0.30.68；v0.30.83 的全部发行平台均支持。现有 worktree 目录不会移动。

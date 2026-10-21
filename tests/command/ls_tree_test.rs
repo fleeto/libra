@@ -4,13 +4,14 @@
 
 use std::fs;
 
+#[cfg(unix)]
+use git_internal::internal::object::{
+    blob::Blob,
+    tree::{TreeItem, TreeItemMode},
+};
 use git_internal::{
     hash::ObjectHash,
-    internal::object::{
-        blob::Blob,
-        tree::{Tree, TreeItem, TreeItemMode},
-        types::ObjectType,
-    },
+    internal::object::{tree::Tree, types::ObjectType},
 };
 
 use super::*;

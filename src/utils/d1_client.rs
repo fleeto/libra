@@ -1811,6 +1811,11 @@ impl D1Client {
         &self,
         repo_id: &str,
     ) -> Result<Option<AgentCaptureGenerationRow>, D1Error> {
+        // A remote that has never published agent capture has no generation
+        // table. That is the same fact as "no row": nothing is in progress.
+        if !self.agent_capture_generation_table_exists().await? {
+            return Ok(None);
+        }
         let rows: Vec<AgentCaptureGenerationRow> = self
             .query(
                 "SELECT repo_id, generation, state, writer_token, object_index_digest,

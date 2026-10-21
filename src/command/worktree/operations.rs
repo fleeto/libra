@@ -409,7 +409,7 @@ pub(crate) async fn add_worktree_locked(
     // layer ownership would block staging. Sweep the scope STRICTLY before
     // seeding; a sweep failure fails the add (fail closed, nothing seeded).
     let db = crate::internal::db::get_db_conn_instance().await;
-    gc_worktree_scoped_rows_strict(&db, &worktree_id, true)
+    gc_worktree_scoped_rows_strict(&db, &worktree_id, true, &state, &canonical_target)
         .await
         .map_err(|e| {
             WorktreeError::IoWrite(format!(
@@ -787,6 +787,22 @@ pub(crate) async fn reattach_worktree(
     };
     let directory_guard = RegisteredDirectoryGuard::open(target, Some(&expected_id))?;
 
+    // Refuse a dormant duplicate before journalling an Add intent. The caller
+    // holds the registry lock until activation, so no other entry can claim
+    // this identity between the check and the registry write.
+    if state.entries.iter().enumerate().any(|(other, entry)| {
+        other != index
+            && !entry.is_main
+            && entry.state.is_active()
+            && entry.worktree_id.as_deref() == Some(expected_id.as_str())
+    }) {
+        return Err(WorktreeError::OperationBlocked(format!(
+            "cannot re-attach '{}': identity '{expected_id}' is already claimed by another ACTIVE \
+              worktree. Back up both directories and keep the detached entry for manual recovery",
+            state.entries[index].path
+        )));
+    }
+
     let payload = serde_json::json!({
         "path": target.to_string_lossy(),
         "reattach": true,
@@ -805,32 +821,18 @@ pub(crate) async fn reattach_worktree(
     // reconcile pass removes a stale marker whose entry is Active with a
     // matching id (and the pending journal row rolls the re-attach
     // forward). The reverse order would leave an UNFROZEN detached entry.
-    // §C.7 identity check immediately before ACTIVATION. Re-attaching is the
-    // one path that turns a dormant claim on an identity back into a live one,
-    // so it is where a former collision can be recreated: detach one side,
-    // re-add both directories, and without this the second activation restores
-    // two active entries at one identity — poisoning every later registry
-    // load, including the doctor that would explain it.
-    if let Some(identity) = state.entries[index].worktree_id.clone()
-        && state.entries.iter().enumerate().any(|(other, entry)| {
-            other != index
-                && !entry.is_main
-                && entry.state.is_active()
-                && entry.worktree_id.as_deref() == Some(identity.as_str())
-        })
-    {
-        return Err(WorktreeError::OperationBlocked(format!(
-            "cannot re-attach '{}': identity '{identity}' is already claimed by another ACTIVE \
-              worktree. Run `libra worktree doctor`, then \
-              `libra worktree repair --path <path> --resolve-identity --yes` on the one you do not want",
-            state.entries[index].path
-        )));
-    }
     directory_guard.verify()?;
     state.entries[index].state = WorktreeEntryState::Active;
     write_state(state)?;
     directory_guard.remove_detached_marker()?;
-    if let Err(error) = lifecycle_delete(&db, &expected_id).await {
+    // The shared mirror also describes any other detached claimant. Keep it
+    // until that registration is resolved, even though this one is active.
+    if !state.entries.iter().enumerate().any(|(other, entry)| {
+        other != index
+            && !entry.is_main
+            && entry.worktree_id.as_deref() == Some(expected_id.as_str())
+    }) && let Err(error) = lifecycle_delete(&db, &expected_id).await
+    {
         tracing::warn!(
             error,
             "lifecycle row not cleared on re-attach; repair reconciles"
@@ -1069,8 +1071,23 @@ pub(crate) async fn gc_worktree_scoped_rows_strict(
     db: &sea_orm::DatabaseConnection,
     worktree_id: &str,
     directory_gone: bool,
+    state: &WorktreeState,
+    target: &Path,
 ) -> Result<(), String> {
     use sea_orm::{ConnectionTrait, DbBackend, Statement};
+    // A legacy identity collision can leave two entries with the same scope,
+    // even after both have been detached. Never GC another registered entry's
+    // rows, including from repair of an old pending journal or tombstone.
+    if let Some(other) = state.entries.iter().find(|entry| {
+        !entry.is_main
+            && entry.worktree_id.as_deref() == Some(worktree_id)
+            && Path::new(&entry.path) != target
+    }) {
+        return Err(format!(
+            "identity '{worktree_id}' is still shared with registered worktree '{}'; refusing scoped cleanup",
+            other.path
+        ));
+    }
     let mut stmts = vec![
         "DELETE FROM reference WHERE worktree_id = ? AND kind = 'Head'",
         "DELETE FROM reflog WHERE worktree_id = ?",
@@ -1833,7 +1850,9 @@ pub(crate) async fn prune_worktrees_locked() -> WorktreeResult<WorktreePruneOutp
                 // stay visible to repair and the down-migration guard —
                 // never silently orphaned.
                 let cleaned = if let Some(id_str) = id.as_deref() {
-                    match gc_worktree_scoped_rows_strict(&db, id_str, true).await {
+                    match gc_worktree_scoped_rows_strict(&db, id_str, true, &state, Path::new(path))
+                        .await
+                    {
                         Ok(()) => {
                             let _ = lifecycle_delete(&db, id_str).await;
                             true
@@ -2424,6 +2443,25 @@ pub(crate) async fn remove_worktree_locked(
             path: target.to_string_lossy().to_string(),
         });
     }
+    // A detached entry can share its legacy identity with another registered
+    // entry even if that entry is also detached. Deleting it would GC its
+    // identity-keyed HEAD, reflog and other scoped rows.
+    if delete_dir
+        && let Some(identity) = entry.worktree_id.as_deref()
+        && state.entries.iter().enumerate().any(|(other, candidate)| {
+            other != index
+                && !candidate.is_main
+                && candidate.worktree_id.as_deref() == Some(identity)
+        })
+    {
+        return Err(WorktreeError::OperationBlocked(format!(
+            "cannot delete '{}': identity '{identity}' is still shared with another registered \
+             worktree; deleting it would remove that worktree's scoped state. Back up both \
+             directories and keep the detached entry for manual recovery; automatic identity \
+             migration is not available",
+            target.display()
+        )));
+    }
     // W3-s3: a LEGACY symlink target shares main's `.libra` — any lifecycle
     // marker written into it would land in MAIN storage and freeze the main
     // repository. Refuse until the layout migration settles it.
@@ -2739,7 +2777,7 @@ async fn remove_worktree_delete_dir(
     let cleanup_failed = if !durable {
         true
     } else if let Some(id) = worktree_id.as_deref() {
-        match gc_worktree_scoped_rows_strict(db, id, true).await {
+        match gc_worktree_scoped_rows_strict(db, id, true, state, target).await {
             Ok(()) => {
                 let _ = lifecycle_delete(db, id).await;
                 false

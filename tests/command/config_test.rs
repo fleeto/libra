@@ -6353,6 +6353,7 @@ async fn import_keeps_signing_disabled_in_vault_false_repo() {
 /// surface as a command failure — never a swallowed error or a false success.
 #[tokio::test]
 #[serial(cwd)]
+#[cfg(unix)]
 async fn generate_pgp_key_propagates_config_write_error() {
     let temp_path = tempdir().unwrap();
     test::setup_with_new_libra_in(temp_path.path()).await;

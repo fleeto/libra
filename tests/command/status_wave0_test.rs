@@ -2934,6 +2934,7 @@ fn enable_rename_untracked(repo: &Path) {
 /// unreadable directory that would block the probe does not fail status,
 /// and the move stays `D` + `??` (Git parity).
 #[test]
+#[cfg(unix)]
 fn probe_skipped_when_untracked_disabled() {
     use std::os::unix::fs::PermissionsExt;
     let repo = repo_with_worktree_move("dest.txt");
@@ -2972,6 +2973,7 @@ fn probe_skipped_when_untracked_disabled() {
 /// With renames disabled (`--no-renames`) the probe never runs even under
 /// the extension — the unreadable directory cannot fail status.
 #[test]
+#[cfg(unix)]
 fn probe_skipped_when_renames_disabled() {
     use std::os::unix::fs::PermissionsExt;
     let repo = repo_with_worktree_move("dest.txt");
@@ -3716,6 +3718,7 @@ fn probe_truncated_keeps_dir_marker() {
 /// closed (LBR-IO-001) — "cannot inspect" never degrades into "no rename".
 /// (R0-8 relaxes JSON to the io_blocked[] partial contract.)
 #[test]
+#[cfg(unix)]
 fn probe_dir_eacces_fail_closed() {
     use std::os::unix::fs::PermissionsExt;
     let repo = repo_with_worktree_move("dest.txt");
@@ -3766,6 +3769,7 @@ fn cached_conflicts_with_rename_flags() {
 /// unreadable — the tracked scan hits EACCES on the file inside, producing a
 /// genuine io_blocked event (an empty unreadable dir is conservatively
 /// reported as an untracked marker instead).
+#[cfg(unix)]
 fn repo_with_locked_tracked_dir() -> tempfile::TempDir {
     let repo = tempdir().expect("temp repo");
     init_repo_via_cli(repo.path());
@@ -3780,11 +3784,13 @@ fn repo_with_locked_tracked_dir() -> tempfile::TempDir {
     repo
 }
 
+#[cfg(unix)]
 fn lock_dir(path: &Path) {
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(path, fs::Permissions::from_mode(0o000)).unwrap();
 }
 
+#[cfg(unix)]
 fn unlock_dir(path: &Path) {
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
@@ -3794,6 +3800,7 @@ fn unlock_dir(path: &Path) {
 /// ("cannot inspect" is never clean) plus the blocked entry and its
 /// worktree-family warning.
 #[test]
+#[cfg(unix)]
 fn json_io_blocked_is_clean_false() {
     let repo = repo_with_locked_tracked_dir();
     let locked = repo.path().join("locked");
@@ -3819,6 +3826,7 @@ fn json_io_blocked_is_clean_false() {
 
 /// `--exit-code` treats an I/O block as dirty → exit 1 (JSON path).
 #[test]
+#[cfg(unix)]
 fn exit_code_ioblocked_is_one() {
     let repo = repo_with_locked_tracked_dir();
     let locked = repo.path().join("locked");
@@ -3835,6 +3843,7 @@ fn exit_code_ioblocked_is_one() {
 /// The io_blocked[] entry object shape and the completeness fields are a
 /// public contract (§B.6.0.1).
 #[test]
+#[cfg(unix)]
 fn json_io_blocked_schema_snapshot() {
     let repo = repo_with_locked_tracked_dir();
     let locked = repo.path().join("locked");
@@ -3904,6 +3913,7 @@ fn json_io_blocked_schema_snapshot() {
 /// §B.3.3 accumulator: siblings collected before/after a blocked directory
 /// survive into the JSON untracked list.
 #[test]
+#[cfg(unix)]
 fn main_scan_ioblocked_keeps_prior_sibling_json() {
     let repo = create_repo_with_committed_file("plain.txt", "content\n");
     fs::write(repo.path().join("aa-loose.txt"), "kept\n").unwrap();
@@ -3929,6 +3939,7 @@ fn main_scan_ioblocked_keeps_prior_sibling_json() {
 /// ignored walk already yielded. (Spec-named test that was never written;
 /// added 2026-08-05 R0-3 review.)
 #[test]
+#[cfg(unix)]
 fn main_scan_ioblocked_keeps_ignored_json() {
     let repo = create_repo_with_committed_file("plain.txt", "content\n");
     fs::write(repo.path().join(".libraignore"), "aa-ignored.txt\n").unwrap();
@@ -4083,6 +4094,7 @@ fn main_scan_mid_iteration_readdir_error_reports_partial() {
 /// §B.3.3 tracked-scan accumulator: an unreadable tracked file records an
 /// io_blocked entry while other tracked changes stay reported.
 #[test]
+#[cfg(unix)]
 fn tracked_scan_eacces_partial_json() {
     use std::os::unix::fs::PermissionsExt;
     let repo = tempdir().expect("temp repo");
@@ -4128,6 +4140,7 @@ fn tracked_scan_eacces_partial_json() {
 /// §B.3.3 dirty-cache guard: an I/O-blocked `--scan` writes NOTHING — the
 /// previous snapshot survives verbatim.
 #[test]
+#[cfg(unix)]
 fn ioblocked_scan_does_not_replace_dirty_cache() {
     let repo = create_repo_with_committed_file("plain.txt", "content\n");
     fs::write(repo.path().join("cached-new.txt"), "snapshot row\n").unwrap();
@@ -4165,6 +4178,7 @@ fn ioblocked_scan_does_not_replace_dirty_cache() {
 /// §B.3.3 dirty-cache guard: `--check-dirty` never prunes a NEW row or
 /// confirms a DELETED row whose path merely became unreadable.
 #[test]
+#[cfg(unix)]
 fn check_dirty_ioblocked_does_not_mutate_cache() {
     let repo = create_repo_with_committed_file("plain.txt", "content\n");
     fs::create_dir(repo.path().join("sub")).unwrap();
@@ -4407,12 +4421,10 @@ fn assert_object_fault_warning_is_deduplicated(mutilate: impl Fn(&Path)) {
     }
 
     let out = run_libra_command(&["--json", "status"], repo.path());
+    #[cfg(unix)]
     for object in &objects {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(object, fs::Permissions::from_mode(0o644));
-        }
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(object, fs::Permissions::from_mode(0o644));
     }
     assert_cli_success(&out, "json status with several broken objects");
     let doc: serde_json::Value =
@@ -7879,6 +7891,7 @@ fn json_nested_unstaged_renamed_survives() {
 /// arbitration as every other warning — `--exit-code-on-warning` exits 9
 /// (not the dirty 1) in JSON as well as text.
 #[test]
+#[cfg(unix)]
 fn exit_warning_over_dirty_ioblocked_json() {
     let repo = repo_with_locked_tracked_dir();
     let locked = repo.path().join("locked");
@@ -7913,6 +7926,7 @@ fn exit_warning_over_dirty_ioblocked_json() {
 /// the partial contract — it succeeds with `io_blocked[]`, reports that
 /// no cache was written, and leaves the previous snapshot intact.
 #[test]
+#[cfg(unix)]
 fn json_scan_ioblocked_reports_partial_without_writing_cache() {
     let repo = repo_with_locked_tracked_dir();
     // Seed a good cache first (nothing blocked yet).
@@ -7963,6 +7977,7 @@ fn json_scan_ioblocked_reports_partial_without_writing_cache() {
 /// are computed on REPO-RELATIVE keys, so they stay correct when status
 /// runs from a subdirectory.
 #[test]
+#[cfg(unix)]
 fn json_io_blocked_staged_field_survives_subdirectory() {
     let repo = tempdir().expect("temp repo");
     init_repo_via_cli(repo.path());

@@ -330,10 +330,12 @@ pub enum WorktreeSubcommand {
         /// entries claiming one path-derived identity. Every mutation is
         /// refused while that holds — including the remove that would fix it —
         /// so this is the one action that runs against the ambiguous registry.
-        /// It DETACHES the named entry: the directory and its scoped rows are
-        /// kept, and every command inside that directory fails closed until
-        /// you re-add it or finish with `remove --delete-dir`. The surviving
-        /// claimant owns the identity again. Requires --yes, because choosing
+        /// It DETACHES the selected entry: the directory and scoped rows are
+        /// kept, and every command inside that directory fails closed. The
+        /// surviving claimant can be used; re-attachment is blocked while
+        /// another claimant is active, and deletion is blocked while any
+        /// registered entry shares the identity.
+        /// Requires --yes, because choosing
         /// which entry to detach is a judgement only the user can make.
         #[arg(long)]
         resolve_identity: bool,
@@ -947,8 +949,9 @@ pub async fn execute_safe(args: WorktreeArgs, output: &OutputConfig) -> CliResul
                     return Err(WorktreeError::OperationBlocked(format!(
                         "--resolve-identity detaches '{path}' from the registry — its files and \
                           scoped state are kept, and every command inside it will fail closed \
-                          until you re-add it or run `remove --delete-dir`; re-run with --yes to \
-                          confirm"
+                          while it remains detached. Re-attachment or deletion may be blocked \
+                          while another entry shares its identity; back up both directories, \
+                          then re-run with --yes to confirm"
                     ))
                     .into_cli_error());
                 }
@@ -1102,8 +1105,9 @@ async fn adopted_scope_settings_present(
 /// Runs against the AMBIGUOUS registry on purpose: `load_state` refuses it,
 /// which is what makes every other repair impossible, so this uses the repair
 /// loader and does its own narrow validation. The directory on disk is never
-/// touched — only the registry entry and that scope's rows go, so the user can
-/// re-add it afterwards and get a fresh identity and generation.
+/// touched. The selected entry stays detached with its existing identity and
+/// scoped rows. It cannot be reattached while another active entry claims
+/// that identity.
 async fn resolve_identity_collision(path: &str) -> WorktreeResult<String> {
     let mut state = load_state_for_repair()?;
     let target = resolve_path(path, "worktree path")?;
@@ -1193,8 +1197,11 @@ async fn resolve_identity_collision(path: &str) -> WorktreeResult<String> {
     Ok(format!(
         "Detached '{target_key}' from the registry (identity '{identity}'). Its files and \
           scoped state are kept and every command inside it now fails closed; the remaining \
-          claimant owns the identity again. Finish with `libra worktree remove --delete-dir \
-          {target_key}`, or `libra worktree add <name> --path {target_key}` to re-attach it."
+          claimant owns the identity again. Re-attachment remains blocked while another claimant \
+          is active; directory deletion remains blocked while any registered worktree shares this \
+          identity. Back up both directories and keep the detached entry for manual recovery; \
+          detaching the other worktree does not make deletion safe. No automatic identity migration \
+          is available."
     ))
 }
 

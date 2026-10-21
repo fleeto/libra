@@ -4,7 +4,7 @@
 
 **发布目标变更（2026-10-20）：** 用户要求发布现有 `0.30.66`，明确不要发布 `0.31.1`。`v0.30.66` 是不含本计划改动的旧标签，已单独补建 GitHub Release；本计划的实现和验证继续，但其 CLI 发布与网站上线门暂不收口，不能借用旧版发布证据。
 
-**当前发布决议（覆盖下文旧冻结与 minor 目标）：** 2026-10-21 用户要求基于上游最新源码版本 patch + 1 发布。当前 `origin/main` 为 `3471175`，其 `Cargo.toml` 与最新 0.30.x tag `v0.30.77` 均为 `0.30.77`，`v0.30.78` 尚不存在，因此本计划交付版本为 **`0.30.78`**。先前“不发布 `0.31.1`”继续有效；旧 Worktree tag `v0.31.0` 不复用。用户的本次发布指令解除新 Worktree 发行与网站新布局上线冻结；WD-08 仍须完成最终源码、远端 CI、资产/stable 与网站内容门后才能收口。这个 patch 选择覆盖原计划 minor 增量，公开 NAME/--path 行为变化仍须显著写入升级说明；不迁移旧目录。
+**当前发布决议（覆盖下文旧冻结与 minor 目标）：** 2026-10-21 用户要求基于上游最新已发布版本 patch + 1 发布。08:57 UTC 复核 `origin/main=fc5eafc`，其源码版本已准备为 `0.30.78`，但最新 0.30.x 发布 tag 与 stable manifest 仍为 `v0.30.77`，`v0.30.78` tag 尚不存在，因此本计划交付版本为 **`0.30.78`**。先前“不发布 `0.31.1`”继续有效；旧 Worktree tag `v0.31.0` 不复用。用户的本次发布指令解除新 Worktree 发行与网站新布局上线冻结；WD-08 仍须完成最终源码、远端 CI、资产/stable 与网站内容门后才能收口。这个 patch 选择覆盖原计划 minor 增量，公开 NAME/--path 行为变化仍须显著写入升级说明；不迁移旧目录。
 
 ## 文档职责
 
@@ -93,6 +93,11 @@
 | 2026-10-20 04:13 UTC 前 | 发行资产名缺陷与版本前滚 | `v0.31.0` 已打签名 tag，但只上传三平台资产且 run 被取消，未进入 stable；公开文件名触发旧 status helper basename 门，重命名同字节可通过。新增 FIX-WD-03，最终交付版本改为 `0.31.1`，不复用不可变 `v0.31.0` 前缀；所有旧版失败/取消证据保留 | WD-08 C/D 发布门重新从最终源码 SHA 验证 | 发布分组、完成门、FIX-WD-03 |
 | 2026-10-20 10:24 UTC 前 | 用户改为发布既有 `0.30.66` 并禁止 `0.31.1` | `v0.30.66` 已补建 GitHub Release，但其旧源码不含本计划；冻结所有新 Worktree tag/release/stable 与网站新布局部署，待用户另选版本。backend `44e9914` 已将生产七页恢复为 `0.30.66` 语义，覆盖早前 `580006b` 的未来版本文案；FIX-WD-03 只继续代码验证，不执行发行 | WD-01..08、WD-02G 保持 0/9 pending | 顶部冻结、ADR-WD-05、GC-WD-06、DEP-WD-03、REL-WD01、WD-08、FIX-WD-03、计划索引 |
 | 2026-10-21 02:30 UTC | 用户要求最新上游 patch + 1 发布 | `origin/main` 已快进至 `e8d530e`，版本面与最新 tag 均为 `0.30.77`；`v0.30.78` 不存在。版本目标改为 `0.30.78`，解除 Worktree 发行与网站上线冻结，不发布 `0.31.1`；修正能力门实际始于 `0.30.67` 的文档误述 | WD-08 进入最终聚合验证和发布窗口，九卡尚未正式完成 | 顶部发布决议、ADR-WD-05、GC-WD-06、DEP-WD-03、REL-WD01、WD-08、升级/兼容文档、计划索引 |
+| 2026-10-21 07:15 UTC | 最终树测试名和证据对齐 | 逐项核对九卡 Verification 与追溯表：早期草案所列 22 个 `wd_*` 占位名没有成为最终测试函数，已用实际源码和 nextest 记录中的具名用例替换；复核后卡内/追溯表的 `wd_*` 名称全部存在。只修计划中的选择器和证据映射，不放宽 AC，也不把 0 tests 记为通过 | WD-01..08、WD-02G 保持正式 pending，待 C/D 发布门完成 | 各卡 Verification、追溯表、实施证据汇总 |
+| 2026-10-21 07:42 UTC | 上游 #501 合流与模板自复制前滚 | 上游 `4234095` 在 `ba7425d` 后合入 `init --template` 修复，旧 final-SHA CI 7/8 被并发 push 自动取消；Claude Code 对新 delta 字面 `VERDICT: FAIL`，指出模板路径 canonical 而目标仍为别名时会绕过自复制保护。隔离 macOS 实验复现 fresh init `ENAMETOOLONG`，reinit 还留下 `.libra/repo` 残留。增列 FIX-WD-07：按真实目标/存储路径在写前检查、创建后复制前复核，模板在 `.libra` 内直接拒绝；本地定向 7/7 通过，双语 init、网站 init 页与 changelog 同步，完整复审/全量/最终 SHA CI 待跑 | 旧 `ba7425d` 的取消 CI 和中断的 `4234095` `cargo test --all` exit130 均不计 PASS；用户旧目录不迁移范围不变 | FIX-WD-07、WD-08 写集与实施证据 |
+| 2026-10-21 08:25 UTC | FIX-WD-07 数据安全复审与上游 checkout 合流 | Claude 逐轮复审发现并确认修复模板别名自复制、裸仓库布局失败误删和 Git 转换 `missing/..`/已有 bare 目录回滚误删；r4 字面 `VERDICT: PASS` 仍指出 journal、布局失败残留及并发归属边界，已前滚 journal 冲突检查、受限布局名称登记及布局失败清理，转换组 9/9。此后上游仅 checkout 六文件推进至 `fc5eafc`；七个本地脏文件逐一 SHA-256 备份，洁净 fast-forward 后逐字节还原。最终 r5 复审、双全量、macFUSE、最终 SHA CI 和发布仍待 | 九卡正式 pending；旧 run 不计最终通过 | FIX-WD-07、WD-08 发行门及本地合流证据 |
+| 2026-10-21 08:38 UTC | FIX-WD-07 大小写别名与 shared 权限前滚 | Claude r5 字面 `VERDICT: FAIL/P1`：默认 APFS/NTFS 上模板 `README` 会别名指向用户已有 `readme`，字面集合误判后回滚删除；还指出已有 bare 目标 `--shared` 曾递归修改用户文件权限。以真实 `symlink_metadata` 在写前识别候选布局名、只登记真正缺失的名称，并限制 shared 扫描到新建仓库条目；新增大小写文件/目录和私有权限回归，转换组 11/11。将 Windows exact 断言扩至六个，双语/网站 init 文档同步；一轮原本启动的全量在 r5 FAIL 后主动中断 exit130，不能计 PASS。r6 复审和最终全量仍待 | 九卡正式 pending；任何已中断/旧 SHA 测试不计最终门 | FIX-WD-07、Windows CI、文档与发布证据 |
+| 2026-10-21 09:07 UTC | FIX-WD-07 r6 PASS、实机 macFUSE 与网站 `--force` 勘误 | Claude r6 对最终 init 生产差异字面 `VERDICT: PASS`、P0/P1/P2=0，后续只加强两条测试断言和 changelog；转换 11/11、init 45/45、Git 导入 20/20、fmt/严格 Clippy/actionlint/兼容矩阵通过。macFUSE 使用 `LIBRA_RUN_FUSE_TESTS=1 --include-ignored` 真实挂载 16/16、无残留；先前未含 `--include-ignored` 的 15/16（1 ignored）不计实挂载门。网站 Claude 第一轮字面 FAIL：Worktree 文档误写标准构建的 `--force` 不支持；双语仓库文档、兼容表和网站页已按现行 CLI 勘误，八页限定同步 drift=0、脚本 8/8、Vitest 11/11、typecheck/build exit0；网站跟进复审字面 `VERDICT: PASS`，P0/P1=0。两轮 cargo 全量在发现未修复审查问题时主动中断 exit130，均不计 PASS；最终全量重跑中。 | 九卡正式 pending；最终树双全量、CI/发行/网站上线待完成 | FIX-WD-07、WD-08 文档写集与验收门 |
 
 ## 已决议设计决策
 
@@ -226,8 +231,9 @@
 - [ ] ER-06/06a：本卡文档逐文件验收（不计特有 AC）。
 **Verification:**
 - [ ] `source .env.test && cargo test --lib worktree_layout`（new 模块单元集；若含 WD-02G 的 `worktree_layout_capability`，计数分别列出，不挪作 WD-01 证据）。
-- [ ] `source .env.test && cargo test --test command_test worktree_isolation_test::wd_nested_discovery`（new）。
-- [ ] `source .env.test && cargo test --test command_test worktree_isolation_test::wd_storage_consumers`（new，含 cloud/clone/maintenance 边界）。
+- [ ] `source .env.test && cargo test --test command_test named_worktree_defaults_use_common_storage_from_every_scope`（最终用例名；含主树和 linked 调用位置）。
+- [ ] `source .env.test && cargo test --test command_test worktree_isolation_test`（含身份拒绝与 GC 根边界）。
+- [ ] `source .env.test && cargo test --test command_test named_worktree_nested_files_stage_and_survive_gc_while_metadata_stays_hidden`（最终用例名；工作文件与元数据边界）。
 **Full-suite trigger:** T-1：共享路径/发现 helper；C 由 WD-08 执行。
 **Dependencies:** DEP-WD-01。
 **Implementation write set:** `src/utils/worktree_layout.rs` (new), `src/utils/mod.rs`, `src/utils/util.rs`, `src/internal/worktree_scope.rs`, `src/command/maintenance.rs`, `src/command/cloud.rs`, `src/command/clone.rs`, `tests/command/worktree_isolation_test.rs`, `docs/development/commands/worktree.md`。
@@ -287,8 +293,8 @@
 - [ ] 旧二进制 destructive 矩阵拒绝新格式且不改变数据。
 - [ ] ER-06/06a：下列文档逐文件验收（不计特有 AC）。
 **Verification:**
-- [ ] `source .env.test && cargo test --test command_test worktree_test`（补 new `wd_name_path_lifecycle`、`wd_concurrent_name_reservation`）。
-- [ ] `source .env.test && cargo test --test command_test worktree_isolation_test`（补 new `wd_internal_add_modes`、`wd_gc_index_roots`）。
+- [ ] `source .env.test && cargo test --test command_test worktree_test`（含最终用例 `named_worktree_defaults_use_common_storage_from_every_scope`、`named_worktree_explicit_path_and_move_keep_logical_identity`、`named_worktree_detach_reattach_preserves_head_index_and_files`）。
+- [ ] `source .env.test && cargo test --test command_test worktree_isolation_test`（含最终用例 `corrupt_linked_identity_refuses_mutations_and_points_at_repair`、`gc_and_repack_run_in_multi_worktree_repo_keeping_private_roots`）。
 - [ ] `source .env.test && cargo test --test command_test worktree_doctor_test`。
 - [ ] `source .env.test && cargo test --test compat_worktree_docs_v2_layout`。
 - [ ] `source .env.test && cargo test --test compat_worktree_delete_dir`。
@@ -321,8 +327,8 @@
 - [ ] ER-06/06a：文档逐文件验收（不计特有 AC）。
 **Verification:**
 - [ ] `source .env.test && cargo test --features worktree-fuse --lib worktree`。
-- [ ] `source .env.test && cargo test --features worktree-fuse --test command_test worktree_fuse_test`（补 new `wd_fuse_named_layout`、`wd_fuse_opaque_boundary`、`wd_fuse_creation_failure`）。
-- [ ] `source .env.test && cargo test --test command_test worktree_test::wd_fuse_name_without_feature`（new）。
+- [ ] `source .env.test && cargo test --features worktree-fuse --test command_test worktree_fuse_test`（含最终用例 `wd_fuse_live_mount_boundary`、`test_fuse_multiple_worktrees_mount_and_access`、`fuse_named_controls_preserve_registration_when_cleanup_is_incomplete`）。
+- [ ] `source .env.test && cargo test --test command_test named_worktree_namespace_includes_fuse_entries_without_mounting`（最终无 FUSE feature 用例名）。
 - [ ] 受支持 Unix 实机执行新 `wd_fuse_live_mount_boundary` ignored case：`source .env.test && LIBRA_RUN_FUSE_TESTS=1 cargo test --features worktree-fuse --test command_test command::worktree_fuse_test::wd_fuse_live_mount_boundary -- --ignored --exact`；证明 mount→读 opaque→兄弟不可见→unmount，缺驱动是未运行。macOS/macFUSE 另运行 `source .env.test && LIBRA_RUN_FUSE_TESTS=1 RUST_TEST_THREADS=1 cargo test --features worktree-fuse --test command_test worktree_fuse_test -- --include-ignored`，覆盖完整真实挂载组。
 **Full-suite trigger:** T-1/T-3：两套公开入口/共享名称锁及 serial/nextest 配置；C 由 WD-08 执行。
 **Dependencies:** WD-02（注册表和共享锁），DEP-WD-02，DEP-WD-04。
@@ -352,7 +358,7 @@
 **Verification:**
 - [ ] `source .env.test && cargo test --lib workspace_isolation`（补 new `wd_attempt_intent`、`wd_cleanup_ownership`）。
 - [ ] `source .env.test && cargo test --lib sandbox::runtime`（补 new `wd_explicit_workspace_environment`）。
-- [ ] `source .env.test && cargo test --lib sandbox::policy`（补 new `wd_sibling_storage_denied`）。
+- [ ] `source .env.test && cargo test --lib sandbox::policy`（含最终用例 `task_workspace_policy_allows_only_owned_workspace_and_cache_directories`、`task_workspace_policy_refuses_tampered_or_unowned_descriptors`、`task_workspace_read_denials_cover_managed_and_external_fuse_aliases`）。
 - [ ] `source .env.test && cargo test --test command_test sandbox_status_test`。
 - [ ] final-SHA Windows D 门包含 `utils::windows_fs::tests::workspace_creation_is_exclusive_and_pins_its_identity`、`managed_container_creation_is_idempotent_and_refuses_files`、`workspace_cleanup_refuses_a_replacement_identity` 及 `workspace_isolation::tests::wd_full_copy_refuses_junction_to_outside_directory`；这些新用例验证句柄钉住、排他创建、容器幂等、替换目标拒绝及复制时不跟随 junction。
 **Full-suite trigger:** T-1：共享任务物化/sandbox helper；C 由 WD-08 执行。
@@ -381,9 +387,9 @@
 - [ ] review state/manifest 写 schema 2 optional descriptor，兼容读 schema 1 且未知版本拒绝写/clean。
 - [ ] ER-06/06a：文档逐文件验收（不计特有 AC）。
 **Verification:**
-- [ ] `source .env.test && cargo test --test agent_review_workflow_test`（补 new `wd_review_attempt_cleanup`、`wd_review_libra_discovery_refused`）。
-- [ ] `source .env.test && cargo test --lib review::store`（补 new `wd_review_cleanup_failure_keeps_metadata`）。
-- [ ] `source .env.test && cargo test --test command_test agent_clean_test`（补 new `wd_review_clean_owned_workspace`）。
+- [ ] `source .env.test && cargo test --test agent_review_workflow_test`（含最终用例 `review_checkpoint_scoped`、`fix_rg_scoped_03_completed_review_clean`、`fix_rg_scoped_03_infrastructure_error_clean`）。
+- [ ] `source .env.test && cargo test --lib review::store`（含最终用例 `managed_cleanup_preserves_metadata_until_ownership_is_proven`、`fix_rg_scoped_03_cleanup_boundary`）。
+- [ ] `source .env.test && cargo test --test command_test agent_clean_test`（清理消费者组；运行记录归属断言见上述 workflow/store 用例）。
 - [ ] `source .env.test && cargo test --test agent_review_span_test`。
 **Full-suite trigger:** none：消费已定义生命周期接口；C 继承 WD-08。
 **Dependencies:** WD-04（任务描述/清理接口和 Windows handle adapter）。
@@ -411,9 +417,9 @@
 - [ ] 清理失败保留恢复记录。
 - [ ] ER-06/06a：文档逐文件验收（不计特有 AC）。
 **Verification:**
-- [ ] `source .env.test && cargo test --test agent_investigate_workflow_test`（补 new `wd_investigate_resume_attempt`、`wd_investigate_libra_discovery_refused`）。
-- [ ] `source .env.test && cargo test --lib investigate::store`（补 new `wd_investigate_cleanup_failure_keeps_metadata`）。
-- [ ] `source .env.test && cargo test --test command_test agent_clean_test`（补 new `wd_investigate_clean_owned_workspace`）。
+- [ ] `source .env.test && cargo test --test agent_investigate_workflow_test`（含最终用例 `stalled_cancelled_paused_and_continue_resume_are_pinned`、`investigate_checkpoint_scoped`、`fix_rg_scoped_03_completed_investigate_clean`）。
+- [ ] `source .env.test && cargo test --lib investigate::store`（含最终用例 `replaced_managed_attempt_keeps_retry_metadata_and_outside_files`、`fix_rg_scoped_03_cleanup_boundary`）。
+- [ ] `source .env.test && cargo test --test command_test agent_clean_test`（清理消费者组；运行记录归属断言见上述 workflow/store 用例）。
 - [ ] `source .env.test && cargo test --test agent_investigate_span_test`。
 **Full-suite trigger:** none：消费生命周期接口；C 继承 WD-08。
 **Dependencies:** WD-05（共享 clean 接线完成）。
@@ -441,11 +447,11 @@
 - [ ] continue 不能覆写前一 attempt 输入。
 - [ ] ER-06/06a：文档逐文件验收（不计特有 AC）。
 **Verification:**
-- [ ] `source .env.test && cargo test --lib checkpoint_input`（补 new `wd_split_metadata_and_input_handles`）。
+- [ ] `source .env.test && cargo test --lib checkpoint_input`（含最终用例 `fix_rg_scoped_04_metadata_boundary`、`fix_rg_scoped_04_readonly_cleanup`、`managed_checkpoint_rejects_replaced_metadata_run`）。
 - [ ] `source .env.test && cargo test --lib review::store`。
 - [ ] `source .env.test && cargo test --lib investigate::store`。
-- [ ] `source .env.test && cargo test --test agent_review_workflow_test wd_checkpoint`（new）。
-- [ ] `source .env.test && cargo test --test agent_investigate_workflow_test wd_checkpoint`（new）。
+- [ ] `source .env.test && cargo test --test agent_review_workflow_test review_checkpoint_scoped`（最终用例名）。
+- [ ] `source .env.test && cargo test --test agent_investigate_workflow_test investigate_checkpoint_scoped`（最终用例名）。
 **Full-suite trigger:** T-1：共享安全物化 helper；C 由 WD-08 执行。
 **Dependencies:** WD-06（普通任务完整接入）。
 **Implementation write set:** `src/internal/ai/checkpoint_input.rs`, `src/internal/ai/review/runner.rs`, `src/internal/ai/review/store.rs`, `src/internal/ai/investigate/runner.rs`, `src/internal/ai/investigate/store.rs`, `src/internal/ai/workspace_isolation.rs`, `tests/agent_review_workflow_test.rs`, `tests/agent_investigate_workflow_test.rs`, `docs/commands/review.md`, `docs/commands/zh-CN/review.md`, `docs/development/commands/review.md`, `docs/commands/investigate.md`, `docs/commands/zh-CN/investigate.md`, `docs/development/commands/investigate.md`, `../libra-backend/apps/tanstack-app/content/docs/commands/review.en.md`, `../libra-backend/apps/tanstack-app/content/docs/commands/investigate.en.md`。
@@ -463,7 +469,7 @@
 **Description:** 在同一最终 bump 树上验证全部布局行为，发布 CLI 和网站文档。
 **当前版本决议:** 用户已要求在最新上游 `0.30.77` 上 patch + 1 发布 `0.30.78`，解除旧 Worktree 发布冻结；仍禁止发布 `0.31.1`。最终 tag 前重新核对远端版本、源码 SHA、所有门与资产名；如 `v0.30.78` 被并发占用，按上游最新 patch + 1 前滚，不覆盖已有 tag。
 **Out of scope:** 不引入新行为；发现缺陷在原行为卡前滚或新增 FIX 卡后重新验收。
-**Current evidence:** 新布局已在 `cc8f437`，其 base CI 8/8 成功；2026-10-20 未提交树 macFUSE/Linux 真挂载各 16/16、cargo 全量 10533 passed/0 failed/26 ignored、nextest 10521/10521 passed、Claude Code PASS。2026-10-21 已把修复手工合流到 `origin/main` `3471175`，版本面改为 `0.30.78`；最终树的本地/远端门、发布资产、网站新布局仍待。旧 `v0.30.66` 不计本卡 C/D。
+**Current evidence:** 新布局和发行资产修复已在签名+DCO `ba7425d` 推送，旧本地双全量与 macFUSE/Linux 真挂载各 16/16、源码/网站 Claude Code PASS；其远端 base CI 7/8 时被上游合流自动取消，不能计最终门。上游随后仅合入 #501 `init` 和 #522 checkout，当前基底为 `fc5eafc`；FIX-WD-07 的发布前安全前滚及 WD-08 的 `--force` 双语/网站勘误尚未提交。当前 macFUSE 实机 16/16、init 相关 focused 和静态/网站定向门通过；最终树的 cargo/nextest 全量、最终 SHA CI、发布资产/stable、网站上线仍待。旧 `v0.30.66` 不计本卡 C/D。
 **Acceptance criteria:**
 - [ ] WD-01..07 与 WD-02G 的最终变更均被发布树包含。
 - [ ] 旧二进制拒绝矩阵在最终格式复验通过。
@@ -499,6 +505,8 @@
 **Implementation write set:** 本计划文件、`docs/development/plan/plan-status.md`、`docs/development/plan/plan-long.md`；网站同步范围控制的 `../libra-backend/scripts/sync-libra-command-docs.py`、`../libra-backend/scripts/test_sync_libra_command_docs.py`、`../libra-backend/scripts/README-command-doc-sync.md`、`docs/commands/upgrade.md`、`docs/commands/zh-CN/upgrade.md` 与原七张受影响 EN 命令页（含 `../libra-backend/apps/tanstack-app/content/docs/commands/upgrade.en.md`）；FIX-WD-05 前滚补入 `src/command/control_lock.rs`、`src/command/init_conversion.rs`、`src/command/service.rs`、`src/cli.rs`、`tests/command/init_conversion_test.rs`、`.github/workflows/base.yml`、`docs/commands/init.md`、`docs/commands/zh-CN/init.md` 与 `../libra-backend/apps/tanstack-app/content/docs/commands/init.en.md`，FIX-WD-04 补入 `tests/agent_mcp_exec_test.rs`，所有新增写入均已在本计划登记。如只有文档收口修正，可编辑 `COMPATIBILITY.md` 及各行为卡已列文档，须登记回原卡并重审。
 **Release write set:** 以 `compat_version_surface_sync` 当次报告集合为准（当前 `Cargo.toml`, `install.sh`, `install.ps1`），工具链更新的 `Cargo.lock` 与 release artifacts。
 **FIX-WD-06 write-set addendum:** 最终全量暴露 macOS 工作流兼容性守卫不能解析新增第二个 `run` 步骤；补入 `tests/compat/matrix_alignment.rs` 的按步骤提取及第二步私有 Cargo stub 回归。仅修测试守卫，不扩大运行时行为。
+**FIX-WD-07 write-set addendum:** 上游 #501 `init --template` 修复在最终 release 树引入别名路径自复制回归，补入 `src/command/init.rs`、`tests/command/init_test.rs`、`tests/command/init_conversion_test.rs`、`.github/workflows/base.yml` 的原生 Windows 六个 exact 断言、`docs/commands/init.md`、`docs/commands/zh-CN/init.md`、`CHANGELOG.md`；网站 `init.en.md` 已属 FIX-WD-05 八页范围。转换回滚对同类别名路径也须保全已有目录。只修发布树的 init 安全边界，不改变 Worktree 默认布局或增加旧数据迁移。
+**WD-08 文档核对补充写集：** 网站最终复审发现 `worktree` 页面把标准构建现有 `--force` 误写为不支持；补入 `docs/commands/worktree.md`、`docs/commands/zh-CN/worktree.md`、`COMPATIBILITY.md` 和网站八页范围内的 `worktree.en.md`，明确 `add --force` 可复用非空目标、`remove --delete-dir --force` 会删除未提交修改、FUSE 构建的 `-f` 是 `--fuse` 且官方二进制未启用 FUSE。此为现行 CLI 文档勘误，不改命令行为；须复审和重跑最终文档/全量门。
 **Docs and compatibility impact:** 原卡所有用户/网站文档逐文件结果登记本文；`0.30.78` release notes 和 upgrade 双语/网站页明确 NAME/--path breaking change、首次以支持新布局的二进制打开仓库即写入不可回退的 2026101902 receipt、`0.30.66` 及更早版本此后所有命令拒绝且不迁移旧数据。不把 `0.31.1` 写成已发布稳定版。
 **Rollback mode:** immutable-release
 **Migration and rollback:** 已发布版本不撤销或覆盖；失败发布新修复版本。旧二进制禁止写新布局；网站问题在 cf 前滚。
@@ -542,14 +550,14 @@
 
 | 任务 | 来源/证据 | Libra 落点 | 文档/兼容动作 | 指定测试 |
 |---|---|---|---|---|
-| WD-01 | util:205/worktree_scope:75 | 布局、发现、遍历边界 | 开发 worktree 契约 | worktree_layout、wd_nested_discovery |
+| WD-01 | util:205/worktree_scope:75 | 布局、发现、遍历边界 | 开发 worktree 契约 | worktree_layout、named_worktree_defaults_use_common_storage_from_every_scope |
 | WD-02G | 旧 0.30.53 agent clean 实验 | Repository receipt / role manifest | forward-only 能力门 | worktree_layout_capability、db_migration_test |
-| WD-02 | worktree:98/add:2817 | 普通 CLI/registry/add | NAME/--path、v4/旧 binary | wd_name_path_lifecycle、wd_internal_add_modes |
-| WD-03 | worktree-fuse:709 | FUSE/opaque/name lock | FUSE 布局与平台 | wd_fuse_opaque_boundary |
+| WD-02 | worktree:98/add:2817 | 普通 CLI/registry/add | NAME/--path、v4/旧 binary | named_worktree_explicit_path_and_move_keep_logical_identity、named_worktree_nested_files_stage_and_survive_gc_while_metadata_stays_hidden |
+| WD-03 | worktree-fuse:709 | FUSE/opaque/name lock | FUSE 布局与平台 | wd_fuse_live_mount_boundary、test_fuse_multiple_worktrees_mount_and_access |
 | WD-04 | workspace_isolation:127 | 描述/意图/sandbox | sandbox 根语义 | wd_attempt_intent |
-| WD-05 | review/runner:470 | review/clean | review/agent 命令页 | wd_review_attempt_cleanup |
-| WD-06 | investigate/runner:727 | investigate/continue | investigate/agent 命令页 | wd_investigate_resume_attempt |
-| WD-07 | checkpoint_input:228 | 安全物化句柄 | checkpoint 输入位置 | wd_split_metadata_and_input_handles |
+| WD-05 | review/runner:470 | review/clean | review/agent 命令页 | review_checkpoint_scoped、fix_rg_scoped_03_completed_review_clean |
+| WD-06 | investigate/runner:727 | investigate/continue | investigate/agent 命令页 | investigate_checkpoint_scoped、fix_rg_scoped_03_completed_investigate_clean |
+| WD-07 | checkpoint_input:228 | 安全物化句柄 | checkpoint 输入位置 | fix_rg_scoped_04_metadata_boundary、fix_rg_scoped_04_readonly_cleanup |
 | WD-08 | 模板 ER-08/13/14 | 发布/部署/记录 | patch release notes，显著兼容变化 | 全量 nextest、FUSE 实机、线上内容 |
 
 ## 里程碑验收与回滚
@@ -669,6 +677,8 @@ R1（Claude formal）使用 Read/Grep，max-turns 12 用尽，没有 verdict，�
 | 2026-10-21 03:18 UTC | `0.30.78` 合流树本地定向门与独立审查 | 上游 `main=e8d530e`、`v0.30.78` 仍未占用。最终树 `cargo +nightly fmt --all --check` 与全目标全特性严格 Clippy exit0；macFUSE 5.4.0 真机及 OrbStack Linux `/dev/fuse` 分别实跑完整 FUSE 组各 16/16，无残留挂载。显式 restore 目标单元 4/4、MCP 执行目标 9/9；初轮 `cargo test --all` 在新增上游 MCP 用例因 macOS 无 `/proc/<pid>` 误判而失败，前滚为 Unix `kill(pid, 0)` / Windows `OpenProcess` 存活探测并仅在 Unix 执行 stdout-holder 用例，最终全量仍在运行，不能借定向复跑计绿。官方 CDN `0.30.53` macOS binary 的 SHA256 与 sidecar 一致；隔离新布局仓库 2026101902 receipt 存在，旧版对 worktree add/remove/move/prune/repair、maintenance GC、agent clean、review、investigate continue 九项均 exit128 future-schema，73 个稳定文件逐项 hash 不变（`/tmp/libra-wd-0.30.78-old-binary-matrix.json`）。网站七页限定同步 drift=0、脚本 8/8、Vitest 11/11、typecheck/build exit0；全站只读检查另有 20 个未纳入本次写集的既有漂移。当前差异 Claude Code 只读独立审查字面 `VERDICT: PASS`，无 P0/P1/阻断 P2 | 本地 FUSE/旧版/静态/网站与审查门通过；全量、release build、final-SHA CI、tag/资产/stable 与网站部署尚待，九卡仍 0/9 |
 | 2026-10-21 05:47 UTC 前 | 最终全量兼容守卫前滚 | 基于 `b03fb93` 的 `cargo test --all` 中库测试 4582 passed/9 ignored、`command_test` 4521/4521 passed，随后 `compat_matrix_alignment` 9/11、2 failed，进程 exit101：守卫把新增的第二个 macOS `run` 步骤当成第一个步骤的 shell 行。修复 `tests/compat/matrix_alignment.rs` 为按具名步骤截取且接受 YAML 空行，并用私有 Cargo stub 验证新增五 fixture 的 pass/zero/wrong/ignored/nonzero；定向目标 12/12 通过，`actionlint` exit0。随后上游 `main` 快进至 `3471175`，仅新增 add 文档、计划与 clone 测试，28 个本任务文件仓外备份后原生快进并逐文件 SHA-256 28/28 恢复 | 失败全量绝不计绿；最终 `3471175` 树仍须重跑 fmt、Clippy、cargo 全量与 nextest，补测新增 clone 用例 |
 | 2026-10-21 06:10 UTC | `3471175` 最终树发布权威门 | `cargo +nightly fmt --all --check`、全目标全特性严格 Clippy、`actionlint`、`libra diff --check` exit0；上游深历史 clone 新例 1/1，macOS 工作流兼容守卫 12/12。`source .env.test && source .env.live-test && cargo nextest run --all --no-fail-fast --retries 2` exit0：10664/10664 passed、20 slow、3 leaky、23 skipped、无 FAIL/RETRY；三条 LEAK 分别为 cov2_native_v2_history_fault_atomicity、checked_batch_combines_local_and_remote_presence、bisect_help_lists_full_subcommand_surface。网站八页限定检查 drift=0；全站只读检查 22 页漂移均在任务范围外。Claude Code 对新增工作流/守卫差异字面 `VERDICT: PASS`，无 P0/P1，三条非阻断 P2：stub 未钉死 target/参数（由最终原生 macOS CI 真执行兜底）、Python3 依赖（该 workflow 本就调用 Python3，托管 runner 提供）、极低概率 ETXTBSY（沿用既有 stub 模式，nextest 本轮通过）；本轮具名接受，不作为发布阻断。另一轮宽范围 Claude 达 max turns、无 verdict，不计通过 | nextest 权威全量通过；`cargo test --all` 最终重跑、发布模式/远端 CI/资产/stable/网站部署仍待，不提前关闭九卡 |
+| 2026-10-21 07:15 UTC | `ba7425d` 最终本地门与签名源码提交 | 最终 `source .env.test && RUST_TEST_THREADS=4 cargo test --all` exit0：181 个零筛选主目标摘要、10676 passed、0 failed、26 ignored；测试内部另打印 8 个有筛选的子进程摘要，未混入主目标计数。`source .env.test && source .env.live-test && cargo nextest run --all --no-fail-fast --retries 2` 仍为同一源码树的 10664/10664 passed，3 leaky/23 skipped。`cargo build --locked --release --features keyring` exit0，以真实发行文件名 `libra-darwin-arm64` 在 disposable repo 完成 version、NAME 默认路径、`--path`、list、remove 冒烟。macFUSE 5.4.0 在已提交 SHA 上重新跑完整实挂载组 16/16，卸载后无残留挂载；OrbStack Linux `/dev/fuse` 在相同 Worktree 生产源码上 16/16 和 foreign macOS v2 owner 1/1。签名+DCO 源码提交 `ba7425d9f8ad525b3be06ab1e43ee0ef4b6e874d` 已原生推送 `main`，远端 HEAD 相同；CodeQL 与代码质量 success，base run `39554165644` 当时 7/8 success，离线核心仍在运行。网站八页限定同步 drift=0、脚本 8/8、Vitest 11/11、typecheck/build exit0，Claude Code 网站范围字面 `VERDICT: PASS`；八页尚未推送部署 | 本地、macFUSE、旧版保护与源码提交已验；最终 SHA 的 base CI 8/8、tag/资产/stable/GitHub Release、网站部署和计划终止链仍待，不提前关闭九卡 |
+| 2026-10-21 07:42 UTC | `4234095` 并发合流、FIX-WD-07 复现与修复 | 新上游 merge `4234095454ab8e2d02ad5ceb0aafb66d69ac1dc1` 只净增 `init.rs`、`init_test.rs`、双语 init 文档与 #473 记录，版本仍 `0.30.78`；`ba7425d` base run `39554165644` 被自动取消，不能记全绿。计划文档备份 SHA-256 `5790aa56...` 后单文件还原，原生 `pull --ff-only` 到 `4234095`，再按同 SHA-256 恢复；新旧 #501 定向 4/4 与网站八页限定 drift=0、脚本 8/8、Vitest 11/11、typecheck/build 通过。Claude delta review 字面 FAIL/P2 指出 `--template` 与目标路径 canonical/raw 比较不一致；隔离 fresh init 和 reinit 同因 `ENAMETOOLONG` 失败，后者留嵌套文件。FIX-WD-07 采用已有 `canonicalize_deepest_existing` 做写前比较，在目标创建后再 `fs::canonicalize` 判同根/祖先及 `.libra` 内模板，实际复制跳过 canonical target；符号链接/`..`/reinit/内嵌模板七个定向用例 7/7，双语文档、网站 init 页和 changelog 同步。原 `4234095` cargo 全量在修复前主动中止 exit130，不计通过 | 修复仍未推送；严格 Clippy、双全量、Claude 跟进 PASS、最终 SHA CI 与发布门待重跑 |
 
 ## 全量门暴露的基线修复
 
@@ -689,6 +699,8 @@ R1（Claude formal）使用 Read/Grep，max-turns 12 用尽，没有 verdict，�
 **FIX-WD-05 对称跨平台保护：** 当前树第一次最终独立审查字面 `VERDICT: FAIL`：非 Mac 读者曾把 Mac 专属 `owner_start_time_v2` 当作本地进程时间，可能在共享目录中误移走仍运行的转换。非 Mac 分支现仅使用本平台写入的旧 `owner.start_time`，Linux 容器 `foreign_macos_v2_owner_requires_manual_recovery` 1/1 通过；真实 Linux FUSE 16/16 另验。第二次只读复审确认该方向关闭，但字面 `VERDICT: FAIL` 指出反方向：Mac 曾把 Linux/Windows 的旧字段当本机微秒时间。Mac 分支现忽略旧字段，仅在本机 boot session 匹配时接受 Mac v2 字段；新增 `foreign_legacy_start_time_requires_manual_recovery` 与生产标记写入器驱动的 live/source-mismatch 测试。Mac 转换单元 13/13、命令组 5/5 通过，严格 Clippy 发现的嵌套条件已前滚修正；最终源码的再次静态门、双平台 FUSE、双全量、Claude Code 复审及远端 CI 均须重新通过。`CHANGELOG.md` 将已纳入本发行的 Unreleased 项归入 `0.30.78`，`docs/commands/zh-CN/init.md` 补齐中断转换恢复，网站仍仅同步 EN 由渲染时镜像。
 
 **FIX-WD-06（macOS 工作流兼容守卫）：** 最终全量在 `compat_matrix_alignment` 暴露守卫只支持单个 `run` 步骤，对新增转换恢复步骤的合法 YAML 空行报缩进错误。按具名步骤独立截取脚本，并用私有 Cargo stub 证明新增步骤的五个 exact fixture 全部执行且拒绝零用例、错误用例、ignored、非零退出；定向 12/12 与 `actionlint` 通过。首轮全量 exit101、9/11 的事实保留，最终树双全量仍待。
+
+**FIX-WD-07（上游 #501 模板和 Git 转换安全前滚，发行门待跑）：** 首版目标路径检查只用 `canonicalize_deepest_existing`，Claude 复审与隔离实测相继发现 `missing/..` 可使模板自复制、裸仓库布局错误回滚误删模板，以及转换回滚误删已有目标。最终实现改为逐组件解析现有 symlink 与缺失组件、写前统一规范目标/存储路径、以独占创建证明存储目录归属，并在实际布局写入前后保持同一安全边界。已有 bare 目标转换仅登记本次可能生成的布局条目和数据库文件，不登记用户目录；默认 macOS/Windows 的大小写别名用真实 `symlink_metadata` 在预检及归属快照中判断。r4 Claude 对前述数据丢失 P1 给出字面 `VERDICT: PASS`，其指出的 SQLite journal 与布局失败残留已继续前滚；r5 又给出字面 `VERDICT: FAIL/P1`，指出模板大小写变体可能让回滚误删已有 bare 用户文件，已修并新增文件/目录、shared 私有权限回归，转换组 11/11。上游 `fc5eafc` 合流后的 fmt/Clippy、r6 Claude 源码复审字面 `VERDICT: PASS`（P0/P1/P2=0）及原生 macFUSE 真挂载 16/16 均已通过；最终双全量和 final-SHA CI 待验。源码/双语 init/网站 init/changelog 均在 FIX-WD-07 写集内；旧数据迁移仍不在范围。
 
 ## 完成判据
 

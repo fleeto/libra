@@ -625,7 +625,7 @@ pub fn preflight_conversion_retry(args: &InitArgs) -> Result<Option<PathBuf>, In
         return Ok(None);
     };
     let current_dir = cur_dir();
-    let target_dir = resolve_cli_path(&current_dir, &args.repo_directory);
+    let target_dir = resolve_init_target(&current_dir, &args.repo_directory)?;
     let root_dir = storage_root(&target_dir, args.bare);
     if init_conversion::read_marker(&root_dir).is_none() {
         return Ok(None);
@@ -666,7 +666,7 @@ async fn run_init_internal(
     // repository's index/HEAD while this command is inside the new one.
     let _scope = crate::internal::worktree_scope::WorktreeScope::unpinned();
     let current_dir = cur_dir();
-    let target_dir = resolve_cli_path(&current_dir, &args.repo_directory);
+    let target_dir = resolve_init_target(&current_dir, &args.repo_directory)?;
     let root_dir = storage_root(&target_dir, args.bare);
 
     // Git layout/storage options that are documented intentional differences
@@ -710,8 +710,28 @@ async fn run_init_internal(
     // The skip is the TARGET worktree, not just the storage root: the storage
     // root (`<target>/.libra`) is inside the target, so skipping only the
     // latter still let the walker copy `<target>` itself.
-    let template_skip = match template_dir.as_deref() {
-        Some(template) if template == root_dir || template == target_dir => {
+    if let Some(template) = template_dir.as_deref() {
+        // `resolve_template_path` is canonical, while CLI target spellings can
+        // contain symlinks or `..`. Compare real paths before any target write.
+        let target = resolve_template_target_path(&target_dir).map_err(|source| {
+            InitError::Io(io::Error::new(
+                source.kind(),
+                format!(
+                    "failed to resolve target repository '{}' for template safety: {source}",
+                    target_dir.display()
+                ),
+            ))
+        })?;
+        let root = resolve_template_target_path(&root_dir).map_err(|source| {
+            InitError::Io(io::Error::new(
+                source.kind(),
+                format!(
+                    "failed to resolve target storage '{}' for template safety: {source}",
+                    root_dir.display()
+                ),
+            ))
+        })?;
+        if template == target || template == root {
             return Err(invalid_argument(
                 format!(
                     "template directory '{}' is the target repository itself",
@@ -720,10 +740,17 @@ async fn run_init_internal(
                 Some("use the parent directory as --template, or pick another target".to_string()),
             ));
         }
-        Some(template) if target_dir.starts_with(template) => Some(target_dir.clone()),
-        Some(template) if root_dir.starts_with(template) => Some(root_dir.clone()),
-        _ => None,
-    };
+        if template.starts_with(&root) {
+            return Err(invalid_argument(
+                format!(
+                    "template directory '{}' is inside the target storage directory '{}'",
+                    template.display(),
+                    root.display()
+                ),
+                Some("choose a template directory outside the repository storage".to_string()),
+            ));
+        }
+    }
     let shared_mode = parse_shared_mode(args.shared.as_deref())?;
 
     // The Libra home (`$LIBRA_HOME`, default `~/.libra`) holds per-user state
@@ -759,7 +786,7 @@ async fn run_init_internal(
             &args,
             &root_dir,
             template_dir.as_deref(),
-            template_skip.as_deref(),
+            &target_dir,
             shared_mode.as_ref(),
             progress,
         )
@@ -815,11 +842,8 @@ async fn run_init_internal(
     .await?;
     // ADR-B3-01: Convert is SHA-1→SHA-1 only. Refuse sha256/blake3 targets (and
     // sha256 Git sources) before create_dir_all / layout / DB.
-    if is_git_conversion {
-        refuse_convert_object_format_combination(
-            from_git.as_deref().expect("is_git_conversion"),
-            &object_format,
-        )?;
+    if let Some(source) = from_git.as_deref() {
+        refuse_convert_object_format_combination(source, &object_format)?;
     }
     let initial_branch_name = if is_git_conversion {
         // Git conversion selects HEAD from the source repository's branch layout;
@@ -836,20 +860,120 @@ async fn run_init_internal(
     }
 
     let target_dir_existed = target_dir.exists();
-    let target_guard_path = target_dir
-        .canonicalize()
-        .unwrap_or_else(|_| target_dir.clone());
+    // `resolve_init_target` already resolved every existing component. Keep
+    // this path identical to the one used for ownership classification.
+    let target_guard_path = target_dir.clone();
+    // A bare repository uses the target itself as storage. If the target
+    // already exists, rollback must retain its user-owned entries and remove
+    // only repository entries created by this conversion.
+    let bare_snapshot = if is_git_conversion && args.bare && target_dir_existed {
+        let mut reserved = vec![
+            DATABASE.to_string(),
+            format!("{DATABASE}-wal"),
+            format!("{DATABASE}-shm"),
+            format!("{DATABASE}-journal"),
+        ];
+        if args.vault {
+            reserved.extend(
+                [
+                    "vault.db",
+                    "vault.db-wal",
+                    "vault.db-shm",
+                    "vault.db-journal",
+                ]
+                .map(str::to_string),
+            );
+        }
+        for name in reserved {
+            match fs::symlink_metadata(root_dir.join(&name)) {
+                Ok(_) => {
+                    return Err(invalid_argument(
+                        format!(
+                            "cannot convert into bare target '{}': repository file '{}' already exists",
+                            root_dir.display(),
+                            name
+                        ),
+                        Some(
+                            "choose an empty bare target or move the conflicting file aside"
+                                .to_string(),
+                        ),
+                    ));
+                }
+                Err(error) if error.kind() == ErrorKind::NotFound => {}
+                Err(error) => return Err(InitError::Io(error)),
+            }
+        }
+        let mut layout_names = ["objects", "info", "hooks"]
+            .into_iter()
+            .map(std::ffi::OsString::from)
+            .collect::<std::collections::HashSet<_>>();
+        if let Some(template) = template_dir.as_deref() {
+            for entry in fs::read_dir(template)? {
+                layout_names.insert(entry?.file_name());
+            }
+        }
+        let mut missing_layout_names = std::collections::HashSet::new();
+        for name in layout_names {
+            match fs::symlink_metadata(root_dir.join(&name)) {
+                Ok(_) => {}
+                Err(error) if error.kind() == ErrorKind::NotFound => {
+                    missing_layout_names.insert(name);
+                }
+                Err(error) => return Err(InitError::Io(error)),
+            }
+        }
+        Some(BareTargetSnapshot {
+            missing_layout_names,
+        })
+    } else {
+        None
+    };
     progress.emit("Creating repository layout ...");
-    fs::create_dir_all(&root_dir)?;
+    let root_parent = root_dir.parent().ok_or_else(|| {
+        InitError::Io(io::Error::new(
+            ErrorKind::InvalidInput,
+            format!(
+                "target storage '{}' has no parent directory",
+                root_dir.display()
+            ),
+        ))
+    })?;
+    fs::create_dir_all(root_parent)?;
+    // Only a successful, exclusive create gives this invocation ownership of
+    // the storage directory. A path with a missing/.. segment can look absent
+    // before parent creation yet resolve to an existing user directory after.
+    let root_created = match fs::create_dir(&root_dir) {
+        Ok(()) => true,
+        Err(error) if error.kind() == ErrorKind::AlreadyExists && root_dir.is_dir() => false,
+        Err(error) => return Err(InitError::Io(error)),
+    };
+    if is_git_conversion && !root_created && bare_snapshot.is_none() {
+        return Err(InitError::Io(io::Error::new(
+            ErrorKind::AlreadyExists,
+            format!(
+                "target storage '{}' appeared during initialization; retry after checking its contents",
+                root_dir.display()
+            ),
+        )));
+    }
     if let Err(error) = prepare_repository_layout(
         &root_dir,
+        &target_dir,
         template_dir.as_deref(),
-        template_skip.as_deref(),
         args.template.as_deref() != Some(""),
     ) {
         // ADR-IN-03 item 6: a fresh-repo template/layout failure rolls back the
         // storage directory this run created, restoring the pre-run snapshot.
-        let _ = fs::remove_dir_all(&root_dir);
+        if root_created {
+            let _ = fs::remove_dir_all(&root_dir);
+        } else if let Some(snapshot) = bare_snapshot.as_ref()
+            && let Err(cleanup) = rollback_bare_layout(&root_dir, snapshot)
+        {
+            return Err(InitError::Io(io::Error::other(format!(
+                "failed to initialize bare repository '{}': {error}; could not clean up this run's layout: {cleanup}",
+                root_dir.display()
+            ))));
+        }
         return Err(InitError::Io(error));
     }
 
@@ -868,20 +992,39 @@ async fn run_init_internal(
                     root_dir.display()
                 )))
             })?;
-            if target_dir_existed {
-                guard
-                    .record_created(&root_dir, true)
-                    .map_err(InitError::Io)?;
+            if let Some(snapshot) = bare_snapshot.as_ref() {
+                // Layout ran before the marker was installed. Record every
+                // new top-level entry and the database files that later stages
+                // may create; never record the pre-existing directory itself.
+                for (path, directory) in new_bare_layout_entries(&root_dir, snapshot)? {
+                    guard.record_created(&path, directory)?;
+                }
+                for name in [
+                    DATABASE.to_string(),
+                    format!("{DATABASE}-wal"),
+                    format!("{DATABASE}-shm"),
+                    format!("{DATABASE}-journal"),
+                ] {
+                    guard.record_created(&root_dir.join(name), false)?;
+                }
+                if args.vault {
+                    for name in [
+                        "vault.db",
+                        "vault.db-wal",
+                        "vault.db-shm",
+                        "vault.db-journal",
+                    ] {
+                        guard.record_created(&root_dir.join(name), false)?;
+                    }
+                }
+            } else if target_dir_existed && root_created {
+                guard.record_created(&root_dir, true)?;
                 let root_ignore = target_guard_path.join(".libraignore");
                 if !root_ignore.exists() {
-                    guard
-                        .record_created(&root_ignore, false)
-                        .map_err(InitError::Io)?;
+                    guard.record_created(&root_ignore, false)?;
                 }
-            } else {
-                guard
-                    .record_created(&target_guard_path, true)
-                    .map_err(InitError::Io)?;
+            } else if !target_dir_existed && root_created {
+                guard.record_created(&target_guard_path, true)?;
             }
             init_conversion::install_signal_rollback(root_dir.clone());
             Some(guard)
@@ -929,7 +1072,11 @@ async fn run_init_internal(
 
         set_dir_hidden(&root_dir)?;
         if let Some(shared_mode) = shared_mode.as_ref() {
-            apply_shared(&root_dir, shared_mode)?;
+            if let Some(snapshot) = bare_snapshot.as_ref() {
+                apply_shared_bare_created(&root_dir, snapshot, shared_mode)?;
+            } else {
+                apply_shared(&root_dir, shared_mode)?;
+            }
         }
 
         let mut warnings = Vec::new();
@@ -1076,7 +1223,7 @@ async fn reinitialize_existing(
     args: &InitArgs,
     root_dir: &Path,
     template_dir: Option<&Path>,
-    template_skip: Option<&Path>,
+    target_dir: &Path,
     shared_mode: Option<&SharedMode>,
     progress: &InitProgress,
 ) -> Result<InitOutput, InitError> {
@@ -1136,8 +1283,8 @@ async fn reinitialize_existing(
     fs::create_dir_all(root_dir)?;
     prepare_repository_layout(
         root_dir,
+        target_dir,
         template_dir,
-        template_skip,
         args.template.as_deref() != Some(""),
     )?;
     set_dir_hidden(root_dir)?;
@@ -1257,6 +1404,127 @@ fn resolve_cli_path(base: &Path, raw: &str) -> PathBuf {
     } else {
         base.join(path)
     }
+}
+
+struct BareTargetSnapshot {
+    missing_layout_names: std::collections::HashSet<std::ffi::OsString>,
+}
+
+fn new_bare_layout_entries(
+    root: &Path,
+    snapshot: &BareTargetSnapshot,
+) -> io::Result<Vec<(PathBuf, bool)>> {
+    let mut created = Vec::new();
+    for name in &snapshot.missing_layout_names {
+        if name == std::ffi::OsStr::new(init_conversion::CONVERSION_MARKER) {
+            continue;
+        }
+        let path = root.join(name);
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) => created.push((path, metadata.is_dir())),
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(created)
+}
+
+fn rollback_bare_layout(root: &Path, snapshot: &BareTargetSnapshot) -> io::Result<()> {
+    for (path, directory) in new_bare_layout_entries(root, snapshot)? {
+        let result = if directory {
+            fs::remove_dir_all(&path)
+        } else {
+            fs::remove_file(&path)
+        };
+        if let Err(error) = result
+            && error.kind() != ErrorKind::NotFound
+        {
+            return Err(io::Error::new(
+                error.kind(),
+                format!(
+                    "cannot remove new layout entry '{}': {error}",
+                    path.display()
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn resolve_init_target(base: &Path, raw: &str) -> Result<PathBuf, InitError> {
+    let path = resolve_cli_path(base, raw);
+    resolve_template_target_path(&path).map_err(|source| {
+        InitError::Io(io::Error::new(
+            source.kind(),
+            format!(
+                "failed to resolve target repository '{}': {source}; choose an accessible target path",
+                path.display()
+            ),
+        ))
+    })
+}
+
+/// Resolve an init target that may not exist yet, preserving filesystem order
+/// across symlinks and `..`. Once a component is missing, a following `..`
+/// cancels that missing component; when the pending suffix is empty again,
+/// existing components are resolved by the kernel. A dangling symlink or a
+/// non-NotFound filesystem error is refused rather than guessed.
+fn resolve_template_target_path(path: &Path) -> io::Result<PathBuf> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        env::current_dir()?.join(path)
+    };
+    // Win32 normalizes parent components before resolving reparse points.
+    // Keep the safety check and the path ultimately used by init aligned.
+    #[cfg(windows)]
+    let absolute = crate::utils::util::normalize_abs_path(&absolute);
+    let mut resolved = PathBuf::new();
+    let mut missing = Vec::<std::ffi::OsString>::new();
+    for component in absolute.components() {
+        match component {
+            std::path::Component::Prefix(prefix) => resolved.push(prefix.as_os_str()),
+            std::path::Component::RootDir => resolved.push(component.as_os_str()),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if missing.pop().is_none() {
+                    resolved.pop();
+                }
+            }
+            std::path::Component::Normal(name) => {
+                if !missing.is_empty() {
+                    missing.push(name.to_os_string());
+                    continue;
+                }
+                let candidate = resolved.join(name);
+                match fs::canonicalize(&candidate) {
+                    Ok(real) => resolved = real,
+                    Err(error) if error.kind() == ErrorKind::NotFound => {
+                        match fs::symlink_metadata(&candidate) {
+                            Err(missing_error) if missing_error.kind() == ErrorKind::NotFound => {
+                                missing.push(name.to_os_string());
+                            }
+                            Err(other) => return Err(other),
+                            Ok(_) => {
+                                return Err(io::Error::new(
+                                    ErrorKind::InvalidInput,
+                                    format!(
+                                        "cannot resolve target through dangling path '{}'",
+                                        candidate.display()
+                                    ),
+                                ));
+                            }
+                        }
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+        }
+    }
+    for name in missing {
+        resolved.push(name);
+    }
+    Ok(resolved)
 }
 
 fn resolve_existing_cli_path(base: &Path, raw: &str) -> Result<PathBuf, InitError> {
@@ -1518,12 +1786,43 @@ fn is_writable(path: &Path) -> io::Result<()> {
 
 fn prepare_repository_layout(
     root_dir: &Path,
+    target_dir: &Path,
     template_dir: Option<&Path>,
-    template_skip: Option<&Path>,
     builtin_defaults: bool,
 ) -> io::Result<()> {
     if let Some(template_dir) = template_dir {
-        copy_template(template_dir, root_dir, template_skip)?;
+        // The target now exists. Re-resolve it after creation so the source
+        // walker and the skip use the same canonical spelling, even when the
+        // user named the target through a symlink or `..`.
+        let target = fs::canonicalize(target_dir)?;
+        let root = fs::canonicalize(root_dir)?;
+        if template_dir == target || template_dir == root {
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                format!(
+                    "template directory '{}' is the target repository itself",
+                    template_dir.display()
+                ),
+            ));
+        }
+        if template_dir.starts_with(&root) {
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                format!(
+                    "template directory '{}' is inside the target storage directory '{}'",
+                    template_dir.display(),
+                    root.display()
+                ),
+            ));
+        }
+        let mut skips = Vec::new();
+        if target.starts_with(template_dir) {
+            skips.push(target);
+        }
+        if root.starts_with(template_dir) && !skips.contains(&root) {
+            skips.push(root);
+        }
+        copy_template(template_dir, root_dir, &skips)?;
     } else if builtin_defaults {
         // Refuse to top up through a symlinked layout directory: writing into it would
         // follow the link and escape the repository. (A legitimately symlinked `.libra`
@@ -1589,7 +1888,7 @@ fn refuse_symlinked_layout_path(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn copy_template(src: &Path, dst: &Path, skip: Option<&Path>) -> io::Result<()> {
+fn copy_template(src: &Path, dst: &Path, skips: &[PathBuf]) -> io::Result<()> {
     for entry in fs::read_dir(src)? {
         let entry = entry?;
         let file_type = entry.file_type()?;
@@ -1598,7 +1897,10 @@ fn copy_template(src: &Path, dst: &Path, skip: Option<&Path>) -> io::Result<()> 
 
         // ADR-IN-03 item 2: when the template is an ANCESTOR of the storage
         // root, the storage subtree would recurse into itself. Skip it.
-        if skip.is_some_and(|skip| source_path == skip || dest_path == skip) {
+        if skips
+            .iter()
+            .any(|skip| source_path == *skip || dest_path == *skip)
+        {
             continue;
         }
 
@@ -1607,7 +1909,7 @@ fn copy_template(src: &Path, dst: &Path, skip: Option<&Path>) -> io::Result<()> 
             // the link and write template files outside the repository.
             refuse_symlinked_layout_path(&dest_path)?;
             fs::create_dir_all(&dest_path)?;
-            copy_template(&source_path, &dest_path, skip)?;
+            copy_template(&source_path, &dest_path, skips)?;
         } else if fs::symlink_metadata(&dest_path).is_err() {
             // `symlink_metadata` does not follow links, so a symlinked destination is
             // left untouched rather than written through; only truly-absent files are
@@ -1774,8 +2076,41 @@ fn apply_shared(root_dir: &Path, shared_mode: &SharedMode) -> io::Result<()> {
     Ok(())
 }
 
+#[cfg(not(target_os = "windows"))]
+fn apply_shared_bare_created(
+    root_dir: &Path,
+    snapshot: &BareTargetSnapshot,
+    shared_mode: &SharedMode,
+) -> io::Result<()> {
+    let Some(bits) = shared_mode.permission_bits() else {
+        return Ok(());
+    };
+    set_shared_path_permissions(root_dir, root_dir, bits)?;
+    for (path, _) in new_bare_layout_entries(root_dir, snapshot)? {
+        apply_shared(&path, shared_mode)?;
+    }
+    for name in [
+        DATABASE.to_string(),
+        format!("{DATABASE}-wal"),
+        format!("{DATABASE}-shm"),
+        format!("{DATABASE}-journal"),
+    ] {
+        set_shared_path_permissions(root_dir, &root_dir.join(name), bits)?;
+    }
+    Ok(())
+}
+
 #[cfg(target_os = "windows")]
 fn apply_shared(_root_dir: &Path, _shared_mode: &SharedMode) -> io::Result<()> {
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn apply_shared_bare_created(
+    _root_dir: &Path,
+    _snapshot: &BareTargetSnapshot,
+    _shared_mode: &SharedMode,
+) -> io::Result<()> {
     Ok(())
 }
 

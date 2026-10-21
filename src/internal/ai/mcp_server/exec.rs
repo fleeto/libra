@@ -8,13 +8,16 @@
 use std::{
     io::{Read, Write},
     path::Path,
-    process::{Command, Stdio},
-    sync::{Condvar, Mutex, mpsc},
+    process::{Command, ExitStatus, Stdio},
+    sync::{
+        Arc, Condvar, Mutex,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        mpsc,
+    },
     time::{Duration, Instant},
 };
 
 use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, BufReader};
 
 use super::{output, protocol, tools};
 use crate::utils::error::{CliError, CliResult};
@@ -113,9 +116,10 @@ pub fn read_deadline() -> Duration {
 
 /// Run one read tool in a worker process. The returned value is a tool result.
 pub fn execute_read_tool(name: &str, arguments: &Value) -> Result<Value, String> {
+    let is_libra = running_as_libra_binary();
     // Library callers inside a test binary are not the `libra` executable.
     // The stdio server is, and that is the process which spawns workers.
-    if !running_as_libra_binary() {
+    if !is_libra {
         return invoke_locally(name, arguments);
     }
     let slot = slots().acquire();
@@ -129,14 +133,46 @@ pub fn execute_read_tool(name: &str, arguments: &Value) -> Result<Value, String>
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
+    #[cfg(any(target_os = "linux", windows))]
+    let memory_limit = worker_memory_limit();
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
         command.process_group(0);
+        #[cfg(target_os = "linux")]
+        {
+            // `RLIMIT_AS` counts every mapping, including the image and each
+            // thread stack. The resident budget alone aborts the worker before
+            // `main`, and a ceiling the runtime can fill returns `EAGAIN` from
+            // the next thread. The ceiling leaves mapping room above the
+            // budget. The resident sampler enforces `memory_limit`.
+            let bytes = address_space_ceiling(memory_limit);
+            // SAFETY: `pre_exec` runs in the forked child before `exec`.
+            // `setrlimit` only changes that child's address-space ceiling.
+            unsafe {
+                command.pre_exec(move || {
+                    let limit = libc::rlimit {
+                        rlim_cur: bytes,
+                        rlim_max: bytes,
+                    };
+                    if libc::setrlimit(libc::RLIMIT_AS, &limit) != 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
+        }
     }
     let mut child = command
         .spawn()
         .map_err(|_| "read worker could not be started".to_string())?;
+    #[cfg(windows)]
+    if !assign_windows_memory_job(child.id(), memory_limit) {
+        let _ = child.kill();
+        let _ = child.wait();
+        drop(slot);
+        return Err("read worker memory limit could not be applied".to_string());
+    }
     let request = json!({"name": name, "arguments": arguments});
     let bytes = serde_json::to_vec(&request)
         .map_err(|_| "read worker request could not be encoded".to_string())?;
@@ -157,6 +193,15 @@ fn wait_for_worker(
 ) -> Result<Value, String> {
     let deadline = read_deadline();
     let started = Instant::now();
+    let watch_stop = Arc::new(AtomicBool::new(false));
+    let peak_rss = Arc::new(AtomicU64::new(0));
+    let sample_stop = Arc::clone(&watch_stop);
+    let sample_peak = Arc::clone(&peak_rss);
+    let sample_pid = child.id();
+    let sample_limit = worker_memory_limit();
+    std::thread::spawn(move || {
+        sample_resident_memory(sample_pid, sample_limit, sample_stop, sample_peak)
+    });
     // Drain stdout while the worker runs. A full pipe would stall a large
     // result, and the parent would then mistake that stall for the deadline.
     let stdout = child.stdout.take();
@@ -174,13 +219,16 @@ fn wait_for_worker(
                 // The worker is gone, so the slot is free before any join.
                 // The reply only waits on the bounded channel, never on join.
                 drop(slot);
+                finish_memory_watch(&watch_stop, &peak_rss);
                 let outcome = match receiver.recv_timeout(REAP_BUDGET) {
                     Ok(bytes) if status.success() => parse_worker_result(&bytes),
+                    Ok(_) if exited_for_memory_limit(&status) => Ok(memory_limit_result()),
                     Ok(_) => Ok(protocol::tool_error_result(
                         "LBR-AGENT-037",
                         "read worker failed before producing a result",
                         false,
                     )),
+                    Err(_) if exited_for_memory_limit(&status) => Ok(memory_limit_result()),
                     Err(_) => {
                         let message = if status.success() {
                             "read worker output did not close"
@@ -197,6 +245,7 @@ fn wait_for_worker(
             }
             Ok(None) if started.elapsed() >= deadline => {
                 detach_after_deadline(child, slot, reader);
+                finish_memory_watch(&watch_stop, &peak_rss);
                 return Ok(protocol::tool_error_result(
                     "LBR-AGENT-036",
                     "read tool exceeded the 30 s deadline",
@@ -206,6 +255,7 @@ fn wait_for_worker(
             Ok(None) => std::thread::sleep(Duration::from_millis(20)),
             Err(_) => {
                 detach_after_deadline(child, slot, reader);
+                finish_memory_watch(&watch_stop, &peak_rss);
                 return Ok(protocol::tool_error_result(
                     "LBR-AGENT-037",
                     "read worker could not be observed",
@@ -265,6 +315,193 @@ fn signal_worker(child: &mut std::process::Child) {
     let _ = child.kill();
 }
 
+/// Address-space ceiling passed to `setrlimit(RLIMIT_AS)`.
+///
+/// The configured budget is resident memory. The runtime maps much more
+/// address space than it resides (the executable image and one stack per
+/// thread). Two gigabytes of headroom lets that mapping exist; the resident
+/// sampler still stops the process group when RSS exceeds the budget.
+#[cfg(target_os = "linux")]
+fn address_space_ceiling(resident_limit: u64) -> u64 {
+    const MAPPING_HEADROOM: u64 = 2 * 1024 * 1024 * 1024;
+    resident_limit.saturating_add(MAPPING_HEADROOM)
+}
+
+fn worker_memory_limit() -> u64 {
+    const DEFAULT_BYTES: u64 = 512 * 1024 * 1024;
+    #[cfg(debug_assertions)]
+    if std::env::var("LIBRA_TEST").ok().as_deref() == Some("1")
+        && let Ok(raw) = std::env::var("LIBRA_MCP_TEST_WORKER_MEM_MB")
+        && let Ok(mb) = raw.parse::<u64>()
+        && mb > 0
+    {
+        return mb.saturating_mul(1024 * 1024);
+    }
+    DEFAULT_BYTES
+}
+
+fn memory_limit_result() -> Value {
+    protocol::tool_error_result_reason(
+        "LBR-AGENT-028",
+        "read worker memory limit exceeded",
+        false,
+        Some("worker_memory_limit"),
+    )
+}
+
+fn finish_memory_watch(stop: &AtomicBool, peak: &AtomicU64) {
+    stop.store(true, Ordering::Relaxed);
+    #[cfg(debug_assertions)]
+    if std::env::var("LIBRA_TEST").ok().as_deref() == Some("1")
+        && let Ok(path) = std::env::var("LIBRA_MCP_TEST_PEAK_RSS_FILE")
+    {
+        let _ = std::fs::write(path, peak.load(Ordering::Relaxed).to_string());
+    }
+}
+
+fn exited_for_memory_limit(status: &ExitStatus) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        matches!(
+            status.signal(),
+            Some(libc::SIGKILL | libc::SIGSEGV | libc::SIGABRT | libc::SIGBUS)
+        )
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = status;
+        false
+    }
+}
+
+fn sample_resident_memory(pid: u32, limit: u64, stop: Arc<AtomicBool>, peak: Arc<AtomicU64>) {
+    while !stop.load(Ordering::Relaxed) {
+        if let Some(rss) = resident_bytes(pid) {
+            peak.fetch_max(rss, Ordering::Relaxed);
+            // The resident budget is enforced here. Linux `RLIMIT_AS` is higher
+            // than this budget so the mapped executable can start; macOS has
+            // no equivalent hard address-space cap.
+            #[cfg(unix)]
+            if rss > limit {
+                unsafe {
+                    libc::kill(-(pid as i32), libc::SIGKILL);
+                }
+                break;
+            }
+        }
+        let _ = limit;
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn resident_bytes(pid: u32) -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        let text = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+        for line in text.lines() {
+            let Some(rest) = line.strip_prefix("VmRSS:") else {
+                continue;
+            };
+            let kb: u64 = rest.split_whitespace().next()?.parse().ok()?;
+            return Some(kb.saturating_mul(1024));
+        }
+        None
+    }
+    #[cfg(target_os = "macos")]
+    {
+        macos_resident_bytes(pid)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = pid;
+        None
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_resident_bytes(pid: u32) -> Option<u64> {
+    #[repr(C)]
+    struct RusageInfoV0 {
+        ri_uuid: [u8; 16],
+        ri_user_time: u64,
+        ri_system_time: u64,
+        ri_pkg_idle_wkups: u64,
+        ri_interrupt_wkups: u64,
+        ri_pageins: u64,
+        ri_wired_size: u64,
+        ri_resident_size: u64,
+        ri_phys_footprint: u64,
+        ri_proc_start_abstime: u64,
+        ri_proc_exit_abstime: u64,
+        ri_child_user_time: u64,
+        ri_child_system_time: u64,
+        ri_child_pkg_idle_wkups: u64,
+        ri_child_interrupt_wkups: u64,
+        ri_child_pageins: u64,
+        ri_child_elapsed_abstime: u64,
+        ri_diskio_bytesread: u64,
+        ri_diskio_byteswritten: u64,
+    }
+    extern "C" {
+        fn proc_pid_rusage(pid: i32, flavor: i32, buffer: *mut RusageInfoV0) -> i32;
+    }
+    let mut info = std::mem::MaybeUninit::<RusageInfoV0>::zeroed();
+    // SAFETY: `info` is a zeroed V0 buffer and `pid` is the worker we spawned.
+    let rc = unsafe { proc_pid_rusage(pid as i32, 0, info.as_mut_ptr()) };
+    if rc != 0 {
+        return None;
+    }
+    Some(unsafe { info.assume_init() }.ri_resident_size)
+}
+
+#[cfg(windows)]
+fn assign_windows_memory_job(pid: u32, bytes: u64) -> bool {
+    use std::mem::size_of;
+
+    use windows_sys::Win32::{
+        Foundation::{CloseHandle, HANDLE},
+        System::{
+            JobObjects::{
+                AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_PROCESS_MEMORY,
+                JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+                SetInformationJobObject,
+            },
+            Threading::{
+                OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_QUOTA,
+                PROCESS_TERMINATE,
+            },
+        },
+    };
+    unsafe {
+        let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+        if job.is_null() {
+            return false;
+        }
+        let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_PROCESS_MEMORY;
+        info.ProcessMemoryLimit = bytes as usize;
+        let set = SetInformationJobObject(
+            job,
+            JobObjectExtendedLimitInformation,
+            &info as *const _ as *const _,
+            size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        );
+        let process: HANDLE = OpenProcess(
+            PROCESS_SET_QUOTA | PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION,
+            0,
+            pid,
+        );
+        let assigned =
+            !process.is_null() && AssignProcessToJobObject(job, process) != 0 && set != 0;
+        if !process.is_null() {
+            CloseHandle(process);
+        }
+        CloseHandle(job);
+        assigned
+    }
+}
+
 fn parse_worker_result(stdout: &[u8]) -> Result<Value, String> {
     let limited = if stdout.len() > 2 * 1024 * 1024 {
         &stdout[..2 * 1024 * 1024]
@@ -321,43 +558,105 @@ pub fn line_starts_read_tool(line: &protocol::InboundLine) -> bool {
 
 /// Hidden worker: one server-built request in, one JSON result out.
 pub async fn run_read_worker() -> CliResult<()> {
-    let storage = crate::utils::util::try_get_storage_path(None)
-        .map_err(|_| CliError::fatal("read worker could not find a repository".to_string()))?;
-    if let Err(message) = prepare_read_only_repository(&storage).await {
-        write_worker_error("LBR-AGENT-037", &message, false)?;
-        return Ok(());
+    crate::internal::worktree_io::executor::set_in_process_only_for_process();
+    let (name, arguments) = match read_worker_request().await {
+        Ok(request) => request,
+        Err(message) => {
+            write_worker_error("LBR-AGENT-037", &message, false)?;
+            return Ok(());
+        }
+    };
+    // Alloc and status-pause fixtures only need the in-process executor. Opening
+    // the repository database here races the parent server's pool and returns
+    // EAGAIN. Schema checks stay on every other read tool.
+    let skip_database = cfg!(debug_assertions)
+        && std::env::var("LIBRA_TEST").ok().as_deref() == Some("1")
+        && matches!(
+            name.as_str(),
+            "libra_test_alloc" | "libra_test_sleep" | "libra_test_status"
+        );
+    if !skip_database {
+        let storage = crate::utils::util::try_get_storage_path(None)
+            .map_err(|_| CliError::fatal("read worker could not find a repository".to_string()))?;
+        if let Err(message) = prepare_read_only_repository(&storage).await {
+            write_worker_error("LBR-AGENT-037", &message, false)?;
+            return Ok(());
+        }
     }
-    let mut stdin = BufReader::new(tokio::io::stdin());
-    let mut line = String::new();
-    let read = stdin.read_line(&mut line).await.map_err(|error| {
-        CliError::fatal(format!("read worker could not read its request: {error}"))
-    })?;
-    if read == 0 {
-        write_worker_error(
-            "LBR-AGENT-037",
-            "read worker received an empty request",
-            false,
-        )?;
-        return Ok(());
-    }
-    let request: Value = serde_json::from_str(&line)
-        .map_err(|_| CliError::fatal("read worker request was not JSON".to_string()))?;
-    let name = request.get("name").and_then(Value::as_str).unwrap_or("");
-    let arguments = request
-        .get("arguments")
-        .cloned()
-        .unwrap_or_else(|| json!({}));
-    match tools::invoke_in_worker(name, &arguments) {
+    match tools::invoke_in_worker(&name, &arguments) {
         Ok(structured) => write_worker_success(&structured),
         Err(message) => write_worker_error("LBR-AGENT-027", &message, false),
     }
 }
 
+async fn read_worker_request() -> Result<(String, Value), String> {
+    let mut line = String::new();
+    let read = std::io::stdin()
+        .read_line(&mut line)
+        .map_err(|error| format!("read worker could not read its request: {error}"))?;
+    if read == 0 {
+        return Err("read worker received an empty request".to_string());
+    }
+    let request: Value = serde_json::from_str(&line)
+        .map_err(|_| "read worker request was not JSON".to_string())?;
+    let name = request
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let arguments = request
+        .get("arguments")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    Ok((name, arguments))
+}
+
+/// Open the repository database, retrying while the parent still holds it.
+///
+/// `sqlite3_open` runs before the busy timeout is installed, so a lock held
+/// by the parent's preflight connection comes back as `EAGAIN` at once.
+/// The parent drops that connection before the tool runs; the drop closes
+/// the file on a later runtime poll. Retry until the file is free.
+async fn open_read_worker_database(
+    db_path_text: &str,
+    db_path: &Path,
+) -> Result<sea_orm::DatabaseConnection, String> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match crate::internal::db::open_connection_without_schema_management(
+            db_path_text,
+            Duration::from_millis(200),
+        )
+        .await
+        {
+            Ok(conn) => return Ok(conn),
+            Err(error) => {
+                let message = error.to_string();
+                let locked = message.contains("WouldBlock")
+                    || message.contains("database is locked")
+                    || message.contains("Resource temporarily unavailable");
+                if locked && Instant::now() < deadline {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    continue;
+                }
+                return Err(format!(
+                    "read worker could not open the repository database at {}: {message}",
+                    db_path.display()
+                ));
+            }
+        }
+    }
+}
+
 async fn prepare_read_only_repository(storage: &Path) -> Result<(), String> {
     let db_path = storage.join(crate::utils::util::DATABASE);
-    let conn = crate::internal::db::open_database_without_migrations(&db_path)
-        .await
-        .map_err(|_| "read worker could not open the repository database".to_string())?;
+    let db_path_text = db_path.to_str().ok_or_else(|| {
+        format!(
+            "read worker could not open the repository database at {}: path is not UTF-8",
+            db_path.display()
+        )
+    })?;
+    let conn = open_read_worker_database(db_path_text, &db_path).await?;
     let current = crate::internal::db::migration::current_builtin_schema_version_readonly(&conn)
         .await
         .map_err(|_| "read worker could not read the repository schema version".to_string())?;

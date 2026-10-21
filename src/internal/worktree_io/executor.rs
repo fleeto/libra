@@ -40,6 +40,22 @@ struct WorkerConfig {
     cap_env: &'static str,
     ppid_env: &'static str,
     in_process_handler: InProcessHandler,
+    /// MCP read workers set this so status I/O never forks a helper process.
+    in_process_only: bool,
+}
+
+static IN_PROCESS_ONLY: AtomicBool = AtomicBool::new(false);
+
+/// Make every later worktree I/O executor in this process run requests inline.
+///
+/// The MCP read worker calls this before repository reads. The CLI does not,
+/// so `libra status` keeps its helper pool.
+pub fn set_in_process_only_for_process() {
+    IN_PROCESS_ONLY.store(true, Ordering::SeqCst);
+}
+
+pub fn in_process_only_for_process() -> bool {
+    IN_PROCESS_ONLY.load(Ordering::SeqCst)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -210,6 +226,7 @@ impl WorktreeIo {
             cap_env: super::handler::CAP_ENV,
             ppid_env: super::handler::PPID_ENV,
             in_process_handler: super::handler::handle_request_to_buffer,
+            in_process_only: IN_PROCESS_ONLY.load(Ordering::SeqCst),
         })
     }
 
@@ -222,6 +239,7 @@ impl WorktreeIo {
                 cap_env: super::handler::CAP_ENV,
                 ppid_env: super::handler::PPID_ENV,
                 in_process_handler: handler,
+                in_process_only: false,
             },
             IoLimits::default(),
             false,
@@ -229,7 +247,8 @@ impl WorktreeIo {
     }
 
     fn new(config: WorkerConfig) -> Self {
-        Self::new_with_limits(config, IoLimits::default(), true)
+        let start_dispatchers = !config.in_process_only;
+        Self::new_with_limits(config, IoLimits::default(), start_dispatchers)
     }
 
     fn new_with_limits(config: WorkerConfig, limits: IoLimits, start_dispatchers: bool) -> Self {
@@ -320,6 +339,13 @@ impl WorktreeIo {
         }
         request.validate().map_err(ExecutorError::Protocol)?;
         let pool = &self.pool;
+        if pool.config.in_process_only {
+            maybe_mcp_status_pause();
+            return match run_in_process(pool.config.in_process_handler, request) {
+                JobOutcome::Events(events) => Ok(events),
+                JobOutcome::Error(error) => Err(error),
+            };
+        }
         if pool.dispatchers_started.load(Ordering::SeqCst) == 0 {
             return Err(ExecutorError::WorkerUnavailable(io::Error::other(
                 "no status I/O dispatcher could be started",
@@ -584,6 +610,19 @@ fn run_job(pool: &Pool, job: Arc<Job>) {
         return;
     };
     if job.cancel_token.is_cancelled() {
+        return;
+    }
+    if pool.config.in_process_only {
+        maybe_mcp_status_pause();
+        let outcome = run_in_process(pool.config.in_process_handler, request);
+        if let Some(tx) = job
+            .result_tx
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+        {
+            let _ = tx.send(outcome);
+        }
         return;
     }
     if job.absolute && Instant::now() >= job.deadline {
@@ -1214,6 +1253,30 @@ fn drive_worker(
     }
 }
 
+/// Test seam: the first in-process status request blocks and publishes its pid.
+///
+/// Only a debug build with `LIBRA_TEST=1` honors this. The MCP read-worker
+/// tests use it to prove status I/O did not fork a helper.
+fn maybe_mcp_status_pause() {
+    #[cfg(debug_assertions)]
+    {
+        if std::env::var("LIBRA_TEST").ok().as_deref() != Some("1") {
+            return;
+        }
+        if std::env::var("LIBRA_MCP_TEST_STATUS_PAUSE").ok().as_deref() != Some("1") {
+            return;
+        }
+        if let Ok(path) = std::env::var("LIBRA_MCP_TEST_STATUS_PAUSE_FILE") {
+            let _ = std::fs::write(&path, std::process::id().to_string());
+        }
+        loop {
+            std::thread::sleep(Duration::from_secs(60));
+        }
+    }
+    #[cfg(not(debug_assertions))]
+    {}
+}
+
 #[cfg(test)]
 mod tests {
     use std::{collections::VecDeque, io::Read};
@@ -1281,6 +1344,7 @@ mod tests {
             cap_env: "LIBRA_TEST_UNUSED_CAP",
             ppid_env: "LIBRA_TEST_UNUSED_PPID",
             in_process_handler: handler,
+            in_process_only: false,
         }
     }
 

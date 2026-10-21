@@ -3583,7 +3583,7 @@ ER-01 至 ER-14 按模板原文对本计划全部任务生效（见 [`plan-templ
 
 **Task type:** `implementation`
 
-**Lifecycle / Acceptance:** `pending` / 空
+**Lifecycle / Acceptance:** `in-progress` / `locally-accepted`
 
 **Description:** 自 MC-29 拆出（R29）。为每个读子进程施加内存上限（默认 512 MiB；仅在 `cfg(debug_assertions)` 且 `LIBRA_TEST=1` 时可由 `LIBRA_MCP_TEST_WORKER_MEM_MB` 覆盖）：Linux 上在子进程 `exec` 前以 `setrlimit(RLIMIT_AS)` 设硬上限；macOS（无可靠的地址空间硬上限）由父进程每 50 ms 采样子进程常驻内存（`proc_pid_rusage`），超过上限即 `SIGKILL` 其进程组；Windows 以 Job Object 的 `JOB_OBJECT_LIMIT_PROCESS_MEMORY` 设硬上限。超过上限时服务回复工具错误 `LBR-AGENT-028`（`structuredContent.reason = "worker_memory_limit"`），回收后归还槽位。本卡是**纵深防御**：读路径的主要内存上限来自算法预算（MC-31/MC-37 的 diff 预算、MC-33 的 status 扫描与输出预算），本卡防御未预见的分配。保证范围如实限定：Linux 的 `RLIMIT_AS` 与 Windows 的进程级限制作用于读子进程本身，macOS 为采样上限（两次采样之间可超出）；读子进程的只读预检把 worktree I/O 执行器配置为**纯进程内模式**（`src/internal/worktree_io/executor.rs` 的 `WorkerConfig` 新增 `in_process_only`，所有请求走既有的 `run_in_process` 路径，不派生 I/O 辅助进程），因此读子进程内的 status 不产生任何后代进程：超时终止与内存上限都作用于完整的读工作进程树（CLI 的 status 仍使用辅助进程池，行为不变）。另注册仅在 debug 且 `LIBRA_TEST=1` 时存在的 `libra_test_alloc`（在读子进程内逐步分配 `mb` MiB 并保持）。唯一行为轴：「读子进程内存上限」。
 
@@ -3596,30 +3596,31 @@ ER-01 至 ER-14 按模板原文对本计划全部任务生效（见 [`plan-templ
 | 读子进程执行器（MC-29 交付） | `src/internal/ai/mcp_server/exec.rs` |
 | status 扫描以 `usize::MAX` 读取目录并先构建路径向量 | `src/command/status_untracked.rs:76`、`:401` |
 | diff 引擎先构建完整 `DiffOutput` | `src/command/diff/compare.rs:256`；`src/internal/ai/agent_bridge/vcs.rs:232` |
+| 本地门 | `agent_mcp_exec_test` 16 项与 7 个 `--exact` 门均 ok。Linux `RLIMIT_AS` 为常驻预算加 2 GiB 映射余量（调试版镜像与线程栈已超过 256 MiB 常驻预算）；常驻采样仍按预算 `SIGKILL`。`docs/error-codes.md` 两表含 `read worker memory` 与 `worker_memory_limit`。实现者复核：超限结果为 `LBR-AGENT-028` 且 `reason = worker_memory_limit`，与两表补充一致；P0=0，P1=0。ER-05 Codex 会话尚未记录 |
 
 **Acceptance criteria:**
 
-- [ ] AC-1 上限覆盖为 256 MiB 时，`libra_test_alloc {"mb": 1024}` 得到工具错误 `LBR-AGENT-028`。
-- [ ] AC-2 同一结果的 `structuredContent.reason` 等于 `"worker_memory_limit"`。
-- [ ] AC-3 同一调用后 1 s 内该读子进程（PID 文件所列）已不存在。
-- [ ] AC-4 同一调用中（`libra_test_alloc` 以每 10 ms 8 MiB 的受控速率分配），执行器记录的子进程最大常驻内存 ≤ 上限 256 MiB + 文档化采样容差 128 MiB（macOS 两次采样之间可超出；Linux/Windows 为硬上限）。
-- [ ] AC-5 4 个并发的同类调用全部返回该错误后 2 s 内，`libra_test_sleep {"ms": 10}` 成功。
-- [ ] AC-6 读子进程内的 `libra_status` 停在 `LIBRA_TEST=1` 暂停点时，该读子进程没有任何后代进程（I/O 请求全部在进程内执行）。
-- [ ] AC-7 同一状态下读 deadline 覆盖为 2 s 使调用超时后 1 s 内，以该读子进程为祖先的进程一个也不存在。
+- [x] AC-1 上限覆盖为 256 MiB 时，`libra_test_alloc {"mb": 1024}` 得到工具错误 `LBR-AGENT-028`。
+- [x] AC-2 同一结果的 `structuredContent.reason` 等于 `"worker_memory_limit"`。
+- [x] AC-3 同一调用后 1 s 内该读子进程（PID 文件所列）已不存在。
+- [x] AC-4 同一调用中（`libra_test_alloc` 以每 10 ms 8 MiB 的受控速率分配），执行器记录的子进程最大常驻内存 ≤ 上限 256 MiB + 文档化采样容差 128 MiB（macOS 两次采样之间可超出；Linux/Windows 为硬上限）。
+- [x] AC-5 4 个并发的同类调用全部返回该错误后 2 s 内，`libra_test_sleep {"ms": 10}` 成功。
+- [x] AC-6 读子进程内的 `libra_status` 停在 `LIBRA_TEST=1` 暂停点时，该读子进程没有任何后代进程（I/O 请求全部在进程内执行）。
+- [x] AC-7 同一状态下读 deadline 覆盖为 2 s 使调用超时后 1 s 内，以该读子进程为祖先的进程一个也不存在。
 
 **Verification:**（本卡特有判据，计入 G-03；`--exact` 门按 GC-MC-07 执行）
 
-- [ ] AC-1：`source .env.test && cargo test --test agent_mcp_exec_test worker_memory_limit_is_tool_error -- --exact`（new）
-- [ ] AC-2：`source .env.test && cargo test --test agent_mcp_exec_test worker_memory_limit_reason -- --exact`（new）
-- [ ] AC-3：`source .env.test && cargo test --test agent_mcp_exec_test worker_over_memory_is_killed -- --exact`（new）
-- [ ] AC-4：`source .env.test && cargo test --test agent_mcp_exec_test worker_peak_memory_bounded -- --exact`（new）
-- [ ] AC-5：`source .env.test && cargo test --test agent_mcp_exec_test slots_return_after_memory_kills -- --exact`（new）
-- [ ] AC-6：`source .env.test && cargo test --test agent_mcp_exec_test read_worker_status_spawns_no_helpers -- --exact`（new）
-- [ ] AC-7：`source .env.test && cargo test --test agent_mcp_exec_test read_worker_status_tree_gone_after_timeout -- --exact`（new）
+- [x] AC-1：`source .env.test && cargo test --test agent_mcp_exec_test worker_memory_limit_is_tool_error -- --exact`（new）
+- [x] AC-2：`source .env.test && cargo test --test agent_mcp_exec_test worker_memory_limit_reason -- --exact`（new）
+- [x] AC-3：`source .env.test && cargo test --test agent_mcp_exec_test worker_over_memory_is_killed -- --exact`（new）
+- [x] AC-4：`source .env.test && cargo test --test agent_mcp_exec_test worker_peak_memory_bounded -- --exact`（new）
+- [x] AC-5：`source .env.test && cargo test --test agent_mcp_exec_test slots_return_after_memory_kills -- --exact`（new）
+- [x] AC-6：`source .env.test && cargo test --test agent_mcp_exec_test read_worker_status_spawns_no_helpers -- --exact`（new）
+- [x] AC-7：`source .env.test && cargo test --test agent_mcp_exec_test read_worker_status_tree_gone_after_timeout -- --exact`（new）
 
 **同卡文档门（ER-06/ER-06a，全局强制，不计入 G-03；判定命令退出码 0 为通过）:**
 
-- [ ] `docs/error-codes.md`：`rg -qF -- 'read worker memory' docs/error-codes.md && rg -qF -- 'worker_memory_limit' docs/error-codes.md`
+- [x] `docs/error-codes.md`：`rg -qF -- 'read worker memory' docs/error-codes.md && rg -qF -- 'worker_memory_limit' docs/error-codes.md`
 - [ ] 语义复核：本卡 ER-05 Codex review 的输入包含 `docs/error-codes.md` 的 diff，评审结论须确认两张表中 `LBR-AGENT-028` 的补充描述与本卡说明一致
 
 **Full-suite trigger:** `T-5: 计划级 GC-MC-01 要求每张实现卡的 C 组全量包含全部 `agent_bridge_*` target 与工具 schema 一致性门；本卡另改共享读执行器（GC-02）`

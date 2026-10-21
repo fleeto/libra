@@ -34,11 +34,40 @@ libra upgrade [--check | -y|--yes]
 
 The new binary takes effect on the next `libra` command.
 
+The earlier `v0.31.0` tag has downloadable Linux and macOS arm64 binaries,
+but it predates fixes included in v0.30.80 and never entered the stable
+channel. Since 0.31.0 sorts higher, `libra upgrade` will not install v0.30.80
+over it. Once v0.30.80 is published to the signed stable channel, rerun the
+default installer (without `-v` or `LIBRA_VERSION`/`LIBRA_BASE_URL`
+overrides) to replace an installed v0.31.0 binary:
+
+```sh
+curl -fsSL https://download.libra.tools/install.sh | sh
+libra --version
+```
+
+On macOS, the system `/usr/bin/openssl` may lack Ed25519 support. Install an
+Ed25519-capable OpenSSL and put it first on the installer's `PATH`. For example,
+with Homebrew:
+
+```sh
+brew install openssl@3
+curl -fsSL https://download.libra.tools/install.sh | PATH="$(brew --prefix openssl@3)/bin:$PATH" sh
+libra --version
+```
+
+Confirm that the installer reports `stable manifest verified`. If the
+manifest or a compatible signature verifier is unavailable, decline its
+unverified fallback. Install a compatible verifier or retry when the
+manifest is available; do not set `LIBRA_ALLOW_FALLBACK=1`.
+A pinned `-v` install also skips signed-manifest verification.
+
 Starting with Libra 0.30.67, the first repository command run by the new binary
 records a forward-only worktree-layout capability marker, even if the repository
 has no additional worktrees. Libra 0.30.66 and older then refuse **all** commands
-in that repository at database open. Use Libra 0.30.67 or newer to access
-repositories opened by it; reinstalling an older binary does not undo the marker.
+in that repository at database open. Use a build with 2026101902 capability support to access repositories opened
+by it: published binaries start at v0.30.67 on Linux and v0.30.68 on
+macOS/Windows. Reinstalling an older binary does not undo the marker.
 The public `worktree add` positional argument is now a NAME. Scripts that used
 to pass a destination path must use `worktree add NAME --path PATH`; the same
 `--path` selector applies to path-based worktree management. For `worktree move`,

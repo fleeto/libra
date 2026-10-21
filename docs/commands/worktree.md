@@ -58,6 +58,8 @@ Create a named linked worktree in the managed directory, or at an explicit desti
 
 `--create-branch` is an alias for `--new-branch`. Without a target the worktree is **detached at the source commit**. The name does not implicitly create a branch. `--lock`, `--orphan`, `--no-checkout`, remote guessing and `-B` are not supported; use `worktree lock` after creation.
 
+Standard builds have supported `add --force` and `remove --force` since v0.30.69, including v0.30.80. The older published `v0.31.0` Linux/macOS binaries predate these flags. If you installed v0.31.0, use the [signed stable installer](upgrade.md) after v0.30.80 is published; `libra upgrade` will not select a lower version number.
+
 For a detached registry entry, `add <NAME>` verifies the saved identity and common-storage pointer, then reattaches its existing files and staging state. `TARGET`, `-b` and `--detach` are refused during reattachment. An optional `--path` must match the registered path. A tombstoned entry remains reserved until cleanup succeeds.
 
 ```bash
@@ -80,9 +82,11 @@ libra worktree add experiment --path "../实验 workspace"
 
 #### FUSE worktrees
 
-On Unix builds with `worktree-fuse`, `add <NAME> --fuse` requires a working FUSE driver (`/dev/fuse` on Linux or macFUSE on macOS). Official release binaries are built without `worktree-fuse`; use a custom build to enable it. On these builds, `-f` is short for `--fuse`, not `--force`. The macFUSE managed-directory protection described here is supported in Libra 0.30.80 or newer. It uses `.libra/worktree/fuse/<NAME>/workspace` as its mountpoint and the sibling `upper/` as its writable overlay. An explicit `--path` selects an external mountpoint; targets inside a lower tree, upper tree, common metadata or another managed workspace are refused before creation. The internal default is protected by an opaque `.libra/worktree` directory in the overlay, so it cannot recursively expose its own mountpoint, upper directory or sibling workspaces. Mount setup refuses a filesystem that cannot establish this mask.
+On Unix builds with `worktree-fuse`, `add <NAME> --fuse` requires a working FUSE driver (`/dev/fuse` on Linux or macFUSE on macOS). Official release binaries are built without `worktree-fuse`; use a custom build to enable it. On these builds, `-f` is short for `--fuse`, not `--force`. Custom macOS `worktree-fuse` builds from the v0.30.79 or v0.30.80 source include the managed-directory protection described here; the earlier `v0.31.0` tag predates this fix. It uses `.libra/worktree/fuse/<NAME>/workspace` as its mountpoint and the sibling `upper/` as its writable overlay. An explicit `--path` selects an external mountpoint; targets inside a lower tree, upper tree, common metadata or another managed workspace are refused before creation. The internal default is protected by an opaque `.libra/worktree` directory in the overlay, so it cannot recursively expose its own mountpoint, upper directory or sibling workspaces. Mount setup refuses a filesystem that cannot establish this mask.
 
 FUSE and ordinary worktrees cannot claim the same name. The FUSE registry uses `{ "schema_version": 1, "entries": [...] }`; known older records remain readable without relocating their directories. FUSE worktrees do not support `move` or scoped identity repair (`repair <NAME>` / `repair --path <PATH>`). Use `worktree repair --confirm` for global registry repair; FUSE does not have the ordinary linked-worktree private identity layout. Their `remove` behavior remains unmounting and deleting the upper layer, rather than ordinary keep-dir detachment. For the managed default, it also removes the empty mountpoint and container; a nonempty directory or cleanup failure keeps the registration and name for retry. Existing legacy and external mountpoint directories are kept. `umount` continues to take an actual path rather than a worktree name.
+
+The `repair --resolve-identity --yes` form is available only in standard builds. A `worktree-fuse` build does not expose these flags, even for ordinary linked worktrees.
 
 ```bash
 libra worktree add overlay --fuse
@@ -726,4 +730,4 @@ Note: jj uses the term "workspace" instead of "worktree". Each workspace automat
 | `LBR-WORKTREE-001` | `worktree doctor --cursor` was given a cursor this command did not issue (or one that expired) |
 | `LBR-WORKTREE-002` | `worktree doctor` cannot read a scope (unparseable registry, unreadable record, missing repository identity) and refuses to report a partial diagnosis |
 
-A build that supports managed worktrees records repository capability 4 when it first opens a repository. Libra 0.30.66 and older then refuse every command in that repository, including commands unrelated to worktrees. Use Libra 0.30.67 or newer to continue. Existing worktree directories are not moved.
+A build that supports managed worktrees records repository capability 4 when it first opens a repository. Libra 0.30.66 and older then refuse every command in that repository, including commands unrelated to worktrees. Use a build with the 2026101902 capability: published binaries first provide it in v0.30.67 on Linux and v0.30.68 on macOS/Windows. The v0.30.80 release includes it on all platforms. Existing worktree directories are not moved.

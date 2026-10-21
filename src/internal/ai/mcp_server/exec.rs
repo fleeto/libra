@@ -443,7 +443,7 @@ fn macos_resident_bytes(pid: u32) -> Option<u64> {
         ri_diskio_bytesread: u64,
         ri_diskio_byteswritten: u64,
     }
-    extern "C" {
+    unsafe extern "C" {
         fn proc_pid_rusage(pid: i32, flavor: i32, buffer: *mut RusageInfoV0) -> i32;
     }
     let mut info = std::mem::MaybeUninit::<RusageInfoV0>::zeroed();
@@ -597,8 +597,8 @@ async fn read_worker_request() -> Result<(String, Value), String> {
     if read == 0 {
         return Err("read worker received an empty request".to_string());
     }
-    let request: Value = serde_json::from_str(&line)
-        .map_err(|_| "read worker request was not JSON".to_string())?;
+    let request: Value =
+        serde_json::from_str(&line).map_err(|_| "read worker request was not JSON".to_string())?;
     let name = request
         .get("name")
         .and_then(Value::as_str)

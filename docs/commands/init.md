@@ -187,7 +187,7 @@ after everything succeeded:
   deletes it**), and converts from scratch. For an existing bare target, that aside
   contains its pre-existing user files; inspect it before removing anything. The aside
   path is reported in the warnings;
-- on macOS, conversions started by a build from the v0.30.79 or v0.30.80
+- on macOS, conversions started by a build from the v0.30.79 or this release's
   source record enough owner identity to recognize an exited process, so the
   same-source retry can recover after a hard kill in the same boot session.
   The earlier published `v0.31.0` binary predates this fix; see the

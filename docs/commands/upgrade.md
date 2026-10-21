@@ -35,9 +35,9 @@ libra upgrade [--check | -y|--yes]
 The new binary takes effect on the next `libra` command.
 
 The earlier `v0.31.0` tag has downloadable Linux and macOS arm64 binaries,
-but it predates fixes included in v0.30.80 and never entered the stable
-channel. Since 0.31.0 sorts higher, `libra upgrade` will not install v0.30.80
-over it. Once v0.30.80 is published to the signed stable channel, rerun the
+but it predates fixes included in v0.30.82 and never entered the stable
+channel. Since 0.31.0 sorts higher, `libra upgrade` will not install v0.30.82
+over it. Once v0.30.82 is published to the signed stable channel, rerun the
 default installer (without `-v` or `LIBRA_VERSION`/`LIBRA_BASE_URL`
 overrides) to replace an installed v0.31.0 binary:
 

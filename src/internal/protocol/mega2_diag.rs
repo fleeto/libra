@@ -267,21 +267,13 @@ mod tests {
         );
     }
 
-    /// Returns a recently freed port; another process can bind it before use.
-    fn refused_addr() -> SocketAddr {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind probe");
-        let addr = listener.local_addr().expect("probe addr");
-        drop(listener);
-        addr
-    }
-
-    // The kernel can assign a just-freed ephemeral port to another parallel
-    // test before reqwest connects. Retry that fixture race, but still require
-    // an actual connect-class failure within a bounded number of attempts.
+    // Ports below 1024 are outside the ephemeral range used by parallel test
+    // servers that bind to port 0. Try several because a host may run a service
+    // on one of them, but still require an actual connect-class failure.
     async fn refused_connect_error() -> CliError {
         let mut unexpected = Vec::new();
-        for _ in 0..8 {
-            let addr = refused_addr();
+        for port in 1..=8 {
+            let addr = SocketAddr::from(([127, 0, 0, 1], port));
             let result = run(TREE, async move {
                 send(
                     http(Duration::from_secs(5)).get(format!("http://{addr}/")),
@@ -298,11 +290,11 @@ mod tests {
                 {
                     return error;
                 }
-                Err(error) => unexpected.push(format!("{:?}", error.details())),
-                Ok(()) => unexpected.push("request succeeded".to_string()),
+                Err(error) => unexpected.push(format!("{port}: {:?}", error.details())),
+                Ok(()) => unexpected.push(format!("{port}: request succeeded")),
             }
         }
-        panic!("no refused connection in eight attempts: {unexpected:?}");
+        panic!("no refused connection on ports 1-8: {unexpected:?}");
     }
 
     // G3

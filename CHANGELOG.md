@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-## [0.30.80] — 2026-10-21
+## [0.30.82] — 2026-10-21
 
 ### Issue #478 plumbing/porcelain parity
 
@@ -26,6 +26,9 @@
 - `libra agent mcp` runs read tools in at most four worker processes. A read
   that exceeds its deadline returns `LBR-AGENT-036`; its worker is killed
   before the slot is reused.
+- Each MCP read worker has a 512 MiB memory limit. Exceeding it ends the worker
+  and returns `LBR-AGENT-028` with reason `worker_memory_limit`.
+- Fix the macOS build of the MCP read-worker memory limit under Rust 2024.
 - `rebase` accepts `-x` for `--exec`, `--merge`/`-m` as merge-backend selectors,
   and `--signoff`/`-s` for replayed commits. `--apply` now reports the
   unsupported backend explicitly.
@@ -61,7 +64,7 @@
   verbatim paths without treating their `?` prefix as SQLite URL parameters.
 - The old `v0.31.0` tag has downloadable Linux/macOS binaries but never entered
   the stable channel and predates fixes in this release. Its higher version
-  number prevents `libra upgrade` from selecting v0.30.80; after this release
+  number prevents `libra upgrade` from selecting v0.30.82; after this release
   reaches the signed stable channel, rerun the default installer without `-v`
   to replace that binary with the signed stable build. On macOS, put an
   Ed25519-capable OpenSSL (for example Homebrew `openssl@3`) first on the

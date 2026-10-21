@@ -3629,18 +3629,7 @@ async fn parse_async_scoped(argv: Vec<std::ffi::OsString>) -> CliResult<()> {
         match args.command {
             Commands::Init(cmd_args) => {
                 let original_dir = utils::util::cur_dir();
-                let init_target = if Path::new(&cmd_args.repo_directory).is_absolute() {
-                    Path::new(&cmd_args.repo_directory).to_path_buf()
-                } else {
-                    original_dir.join(&cmd_args.repo_directory)
-                };
-                let storage = if cmd_args.bare {
-                    init_target
-                } else {
-                    init_target.join(utils::util::ROOT_DIR)
-                };
-
-                command::init::execute_safe(cmd_args, &output).await?;
+                let storage = command::init::execute_safe_with_storage(cmd_args, &output).await?;
                 set_local_hash_kind_for_storage(&storage).await?;
                 #[cfg(test)]
                 let _cwd_lock = crate::utils::test::cwd_lock_guard();

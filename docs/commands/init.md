@@ -186,7 +186,7 @@ after everything succeeded:
   deletes it**), and converts from scratch. For an existing bare target, that aside
   contains its pre-existing user files; inspect it before removing anything. The aside
   path is reported in the warnings;
-- on macOS, conversions started by Libra 0.30.78 or newer record enough owner
+- on macOS, conversions started by Libra 0.30.80 or newer record enough owner
   identity to recognize an exited process, so the same-source retry can recover
   after a hard kill in the same boot session. The marker keeps the legacy owner
   field empty, so older macOS binaries also refuse a concurrent retry. Markers
@@ -218,6 +218,10 @@ the target (for example `--template=.` while creating `./repo`) skips the target
 worktree, so repeated `libra init --template=. repo` calls never nest
 `repo/.libra/repo/.libra/…`. This also holds when the target path uses a symlink
 or `..`. A template inside the target's `.libra` storage is refused before copying.
+The resolved target is also used for the final repository check: a `missing/..`
+alias can initialize its existing parent. On Unix, a path through an existing
+non-directory component is rejected with `LBR-REPO-002` (exit 128) before any
+repository files are written.
 
 ```bash
 libra init --template /path/to/template

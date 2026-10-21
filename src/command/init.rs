@@ -277,6 +277,12 @@ impl From<InitError> for CliError {
             InitError::Io(error) => match error.kind() {
                 io::ErrorKind::InvalidInput => CliError::command_usage(error.to_string())
                     .with_stable_code(StableErrorCode::CliInvalidArguments),
+                io::ErrorKind::NotADirectory => CliError::fatal(error.to_string())
+                    .with_stable_code(StableErrorCode::RepoCorrupt)
+                    .with_hint(
+                        "choose a target path whose existing components are directories"
+                            .to_string(),
+                    ),
                 _ => CliError::fatal(error.to_string())
                     .with_stable_code(StableErrorCode::IoReadFailed),
             },
@@ -309,6 +315,8 @@ impl RefFormat {
 #[derive(Debug, Clone, Serialize)]
 pub struct InitOutput {
     pub path: String,
+    #[serde(skip)]
+    pub(crate) storage_path: PathBuf,
     pub bare: bool,
     pub initial_branch: String,
     pub object_format: String,
@@ -462,6 +470,15 @@ pub async fn execute(args: InitArgs) {
 /// vault/signing setup cannot complete. Stable error-code mapping follows
 /// `docs/development/cli-error-contract-design.md`.
 pub async fn execute_safe(args: InitArgs, output: &OutputConfig) -> CliResult<()> {
+    execute_safe_with_storage(args, output).await.map(|_| ())
+}
+
+/// Return the storage path actually used by initialization so CLI post-processing
+/// does not reopen a different path spelling after a symlink or `..` alias.
+pub(crate) async fn execute_safe_with_storage(
+    args: InitArgs,
+    output: &OutputConfig,
+) -> CliResult<PathBuf> {
     let mut effective_output = output.clone();
     if args.quiet {
         effective_output.quiet = true;
@@ -475,7 +492,8 @@ pub async fn execute_safe(args: InitArgs, output: &OutputConfig) -> CliResult<()
         InitProgress::enabled()
     };
     let result = run_init_internal(args, &progress).await?;
-    render_init_result(&result, &effective_output)
+    render_init_result(&result, &effective_output)?;
+    Ok(result.storage_path)
 }
 
 fn render_init_result(result: &InitOutput, output: &OutputConfig) -> CliResult<()> {
@@ -1143,6 +1161,7 @@ async fn run_init_internal(
             .to_string();
         Ok(InitOutput {
             path,
+            storage_path: root_dir.clone(),
             bare: args.bare,
             initial_branch: initial_branch_name,
             ref_format: ref_format.as_str().to_string(),
@@ -1358,6 +1377,7 @@ async fn reinitialize_existing(
         .to_string();
     Ok(InitOutput {
         path,
+        storage_path: root_dir.to_path_buf(),
         bare,
         initial_branch,
         ref_format,
@@ -1481,7 +1501,8 @@ fn resolve_template_target_path(path: &Path) -> io::Result<PathBuf> {
     let absolute = crate::utils::util::normalize_abs_path(&absolute);
     let mut resolved = PathBuf::new();
     let mut missing = Vec::<std::ffi::OsString>::new();
-    for component in absolute.components() {
+    let mut components = absolute.components().peekable();
+    while let Some(component) = components.next() {
         match component {
             std::path::Component::Prefix(prefix) => resolved.push(prefix.as_os_str()),
             std::path::Component::RootDir => resolved.push(component.as_os_str()),
@@ -1498,7 +1519,18 @@ fn resolve_template_target_path(path: &Path) -> io::Result<PathBuf> {
                 }
                 let candidate = resolved.join(name);
                 match fs::canonicalize(&candidate) {
-                    Ok(real) => resolved = real,
+                    Ok(real) => {
+                        if components.peek().is_some() && !fs::metadata(&real)?.is_dir() {
+                            return Err(io::Error::new(
+                                ErrorKind::NotADirectory,
+                                format!(
+                                    "target path component '{}' is not a directory",
+                                    candidate.display()
+                                ),
+                            ));
+                        }
+                        resolved = real;
+                    }
                     Err(error) if error.kind() == ErrorKind::NotFound => {
                         match fs::symlink_metadata(&candidate) {
                             Err(missing_error) if missing_error.kind() == ErrorKind::NotFound => {

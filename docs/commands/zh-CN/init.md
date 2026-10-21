@@ -101,7 +101,7 @@ libra init --from-git-repository ../old-project
 存储目录改名为同级 `<storage>.incomplete-<timestamp>` 并重新转换；不会删除残留目录。
 若原目标是已存在的 bare 目录，其原有用户文件也会在改名后的目录中，删除前请检查。
 
-在 macOS 上，Libra 0.30.78 起的转换标记可在**同一启动会话**内验证硬中断后的
+在 macOS 上，Libra 0.30.80 起的转换标记可在**同一启动会话**内验证硬中断后的
 进程身份。旧版标记、其他主机或重启后的标记无法在本机证明原进程已退出，
 会以 `LBR-REPO-003` 拒绝自动接管。先确认所有主机均无转换在运行，再按错误提示
 执行人工恢复，不要直接删除存储目录。原进程仍在运行时返回 `LBR-CONFLICT-002`；
@@ -124,6 +124,9 @@ libra init --vault false
 模板**包含**目标时（例如创建 `./repo` 时用 `--template=.`）会跳过目标工作树，因此重复执行
 `libra init --template=. repo` 不会出现 `repo/.libra/repo/.libra/…` 的嵌套残留。目标路径经过
 符号链接或包含 `..` 时也遵守此规则；位于目标 `.libra` 存储目录内的模板会在复制前被拒绝。
+初始化后的仓库检查使用同一规范化目标路径：`missing/..` 这类别名可在其已存在的父目录完成初始化；
+在 Unix 上，若路径中间已有普通文件等非目录组件，则会在写入任何仓库文件前以
+`LBR-REPO-002`（退出码 128）拒绝。
 
 ```bash
 libra init --template /path/to/template

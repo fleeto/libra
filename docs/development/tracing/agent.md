@@ -3566,8 +3566,14 @@ Repository role 的 `2026102201_agent_session_commit` 迁移建立本地关联�
 删除，OID 仅接受按 SHA-1（40 hex）、SHA-256/BLAKE3（64 hex）声明的规范小写值。
 Global、System、Derived 不应用此迁移。DAO 的一批最多 64 个 session 在同一 SQLite
 事务提交；中途外键失败则整批零行。迁移 forward-only，即使有数据也没有自动 down；
-旧 binary 见新 receipt 必须在写入前拒绝。CX-11 仅提供 schema 和 DAO，
-尚未把普通 commit、导入或 trailer 接入写入。
+旧 binary 见新 receipt 必须在写入前拒绝。CX-11 提供 schema 和 DAO；CX-23 仅在 `agent.commit_trailer=true` 时
+将当前 repo/worktree 中有 committed checkpoint 且仍活跃或锚定当前父提交的会话
+关联到普通 commit 与 amend，最多 64 个；跨提交的活跃会话须已关联当前父提交。commit-msg hook 结束后、签名前注入去重 `Libra-Agent-Session` trailer；
+`--no-agent-trailer` 仅省略自动 trailer，本地关联继续。默认 false 时不写表。
+配置不可读时关联保持关闭并告警；可读取的无效值拒绝提交。
+关联发生于 ref 更新后，同一 SQLite 事务内重验会话作用域与 lease，失败为警告；
+amend 从被替换提交继承仍授权的链接；dry-run 不写关联、不预览自动 trailer。CX-27 的 durable journal 与无 trailer
+崩溃恢复仍待实现。Cloud refs-only metadata 不含关联表。
 
 ### Codex 索引对账的只读观察（CX-22）
 

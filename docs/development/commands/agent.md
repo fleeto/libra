@@ -639,8 +639,16 @@ schema and a transactional DAO. Its local `(session_id, hash_kind, commit_oid)`
 key distinguishes SHA-1, SHA-256 and BLAKE3, references an existing session,
 and is safe to retry. A batch is limited to 64 sessions and rolls back in full
 on a failed FK write. Global/System/Derived roles get no table or receipt.
-No command writes links yet; explicit opt-in, trailer insertion and recovery
-belong to the subsequent commit cards.
+Historical import does not write links. CX-23 makes ordinary commits opt-in via
+`agent.commit_trailer=true`; it snapshots at most 64 scoped sessions with
+committed checkpoints anchored to the current parent (or active sessions
+already linked to it), appends deduplicated `Libra-Agent-Session` trailers after the message hook and
+before signing, and writes the local DAO link after the ref update, rechecking each session
+scope and the workspace lease in one SQLite transaction. Amend also carries
+forward authorized links from the replaced commit.
+`--no-agent-trailer` omits automatic trailers but keeps the local link.
+The CX-27 durable journal and trailer-free crash recovery are still pending;
+refs-only cloud metadata does not include the association table.
 
 Current source builds project envelope rollouts using the Codex 0.162.1 record schema; unknown records from other versions remain partial. Exact `token_usage_record` response usage is counted once, including a repeated compaction snapshot. Legacy cumulative token observations are differenced across turns; an unexplained decrease remains partial, and a reset at an explicit context boundary is qualified. Matching legacy observations are not added to exact response totals. Cached tokens aggregate cache reads and writes. Missing or invalid usage remains unknown in the parser, rather than a measured zero.
 

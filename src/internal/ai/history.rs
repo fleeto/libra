@@ -6285,6 +6285,27 @@ pub async fn link_agent_sessions_to_commit(
     session_ids: &[String],
     commit_oid: ObjectHash,
 ) -> Result<()> {
+    link_agent_sessions_to_commit_inner(conn, session_ids, commit_oid, None).await
+}
+
+/// Commit-command variant. Recheck every selected catalog row and the live
+/// workspace lease under the same SQLite writer transaction as the links;
+/// a session erased or moved after the pre-sign snapshot cannot be attached.
+pub async fn link_authorized_agent_sessions_to_commit(
+    conn: &DatabaseConnection,
+    session_ids: &[String],
+    commit_oid: ObjectHash,
+    scope: &crate::internal::ai::capture_scope::CaptureScope,
+) -> Result<()> {
+    link_agent_sessions_to_commit_inner(conn, session_ids, commit_oid, Some(scope)).await
+}
+
+async fn link_agent_sessions_to_commit_inner(
+    conn: &DatabaseConnection,
+    session_ids: &[String],
+    commit_oid: ObjectHash,
+    scope: Option<&crate::internal::ai::capture_scope::CaptureScope>,
+) -> Result<()> {
     if session_ids.len() > 64 {
         bail!("a commit can link at most 64 agent sessions");
     }
@@ -6328,6 +6349,33 @@ pub async fn link_agent_sessions_to_commit(
         .context("decode agent session link count")?;
     if linked_count > 64 {
         bail!("a commit can link at most 64 agent sessions");
+    }
+    if let Some(scope) = scope {
+        for session_id in session_ids {
+            let mut values = vec![session_id.as_str().into()];
+            values.extend(scope.sql_values());
+            let still_authorized = txn
+                .query_one_raw(Statement::from_sql_and_values(
+                    txn.get_database_backend(),
+                    format!(
+                        "SELECT 1 FROM agent_session s WHERE s.session_id = ?
+                         AND {} AND s.state IN ('active', 'condensed', 'stopped')
+                         AND EXISTS (SELECT 1 FROM agent_checkpoint c
+                                     WHERE c.session_id = s.session_id AND c.scope = 'committed')",
+                        crate::internal::ai::capture_scope::CaptureScope::matches_existing_sql("s")
+                    ),
+                    values,
+                ))
+                .await
+                .context("recheck selected agent session scope before link commit")?;
+            if still_authorized.is_none() {
+                bail!("selected agent session is no longer authorized for this commit");
+            }
+        }
+        scope
+            .assert_workspace_fence_live_for_commit(&txn)
+            .await
+            .context("recheck agent commit-link workspace lease before transaction commit")?;
     }
     txn.commit()
         .await

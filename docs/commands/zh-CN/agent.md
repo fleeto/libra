@@ -398,6 +398,35 @@ Libra 内部的任务沙箱接口可绑定已验证的 attempt，将写权限限
 
 `libra review clean` 与 `libra investigate clean` 只删除各自类型的已结束 run。清理先校验保存的工作区所有权描述，删除该 run 拥有的 task 工作区或 checkpoint 输入，再删除运行元数据。失败时保留所有权和重试记录；目录被替换、链接、未知描述版本或所有权不匹配均拒绝。仅凭目录名称不能授权删除。`--run` 和 `--all` 都先核对同一 run 目录内的生命周期 metadata，再处理只读 checkpoint 输入。批量清理保留其他类型、未结束、未知和损坏的 run；`removed` 只统计实际成功删除。指定 run 的 state 损坏或缺失时，只有该 run 自身有效的终态 manifest 能证明 run id、类型及 schema，才允许清理。可解析的其他类型或未结束 state，以及互相冲突的 metadata 都拒绝。`investigate clean` 保留既有 run 锁。有界输入清理拒绝链接根目录、链接 metadata 和超限输入；失败返回可操作错误，不报告删除成功。保留 run，核对提示中的链接、限制或文件系统权限后再重试。清理启动后若 I/O 或取消中断，部分输入可能已删除；失败不表示已经回滚。已经证明属于本类型的终态 state，在先写 state 的结束流程中断、匹配的 manifest 尚无终态标记时，仍允许清理。身份、schema、共有字段或不同的非空终态值冲突继续拒绝。批量资格读取的 I/O、链接或大小限制错误会中断清理，之前已经删除的 run 不会回滚。不新增清理 flag 或稳定错误码。
 
+## 提交会话关联（CX-23 开发版）
+
+CX-23 源码开发版使用本地 `agent_session_commit` 关联表，幂等键为
+`(session_id, hash_kind, commit_oid)`，SHA-1、SHA-256 和 BLAKE3 分开记录。
+历史导入不写关联。普通 commit 默认也不写；显式执行
+`libra config agent.commit_trailer true` 后开启关联。若无法读取此配置，关联保持关闭并提示警告；
+其它必需配置有效时提交仍可继续。可读取但值无效则拒绝提交。启用后只选择当前仓库/worktree 中有已提交
+checkpoint 的会话：锚定当前父提交的会话，或已关联该父提交且仍活跃的会话，
+最多 64 个；超过 64 个会拒绝提交而非静默截断。
+`commit-msg` hook 结束后、可选 vault 签名前追加 `Libra-Agent-Session` trailer，
+已有同值用户 trailer 不重复。`libra commit --no-agent-trailer` 仅省略本次
+自动 trailer，仍保留已开启的本地关联；仓库 catalog、作用域、64 会话上限
+或 workspace lease 检查失败仍在 HEAD 更新前拒绝提交。预演不写关联、也不
+预览自动 trailer。ref 更新后在同一数据库事务内重新核验会话作用域及 workspace lease 才写关联，
+失败会显示警告。amend 会保留原提交已关联且仍授权的会话，也纳入新符合条件的会话；
+即使以 `-m` 替换消息也会重新注入自动 trailer。
+CX-27 的崩溃恢复 journal 尚未实现；cloud refs-only metadata 不备份本地关联表
+或无 trailer 关联。显式 opt-in 的可达提交 trailer 只是跨机器重建线索，仍须核验
+仓库及会话作用域。
+
+首个无父提交可选择锚定 unborn parent 的会话。此配置只作用于普通
+`libra commit`；bridge `commit.create` 继续使用独立的 `agent_bridge_link`。
+显式 trailer 会向所有可读取提交的人暴露原始 session ID。所谓无 trailer
+关联，是用 `--no-agent-trailer` 建立的本地关联；当前 cloud sync 仅上传 refs，
+不上传此 SQLite 表。若 ref 后关联失败，请保留已完成提交和
+原始会话；CX-27 前无自动修复命令，不要仅为重试关联而 amend。
+复用旧消息的 amend 可能保留已擦除或移出作用域会话的可见 trailer，但不会为它
+建立新本地关联；`--no-agent-trailer` 不删除继承或用户自行写入的消息文字。
+
 ## JSON 输出
 
 支持结构化输出的子命令使用全局 `--json` 和 `--machine` 信封。例如：
@@ -508,11 +537,6 @@ Claude 的发现仍按文件修改时间。`--since` 遇到缺失时间或无效
 `subagent_checkpoints_written` 报告独立发现的 child-content 写入；只有 child
 写入时状态仍为 `imported`，不是 `noop`。平台无法提供安全 child discovery 的
 诊断本身不会让完整的父 transcript import 失败，因为它不能证明 child 内容存在。
-
-Repository 数据库现已预留本地的 `agent_session_commit` 关联表，幂等键为
-`(session_id, hash_kind, commit_oid)`，SHA-1、SHA-256 和 BLAKE3 分开记录。
-本卡仅建立 schema 与 DAO；历史导入和普通 commit 尚不写入此表，自动关联和消息
-trailer 仍待后续任务卡接入，现有 commit 格式及导入输出不因此改变。
 
 历史导入严格限定当前仓库且 fail-closed：transcript 必须给出唯一无歧义的
 `cwd`，Libra 解析其 storage 并要求与当前仓库相同。共享该 canonical storage

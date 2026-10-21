@@ -16,6 +16,7 @@ libra commit [OPTIONS] --date <DATE> -m <MESSAGE>
 libra commit [OPTIONS] --fixup <COMMIT>
 libra commit [OPTIONS] --squash <COMMIT>
 libra commit --amend [--no-edit]
+libra commit --no-agent-trailer -m <MESSAGE>
 ```
 
 ## Description
@@ -29,6 +30,57 @@ hierarchy matching the staged content, creates a commit object with the provided
 author/committer metadata, and advances the current branch ref. When vault signing is enabled,
 the commit is automatically GPG-signed. The `.libra/hooks` commit lifecycle runs unless
 bypassed with `--no-verify`.
+
+### Agent session association (CX-23 development)
+
+This option is available in source builds containing CX-23; packaged releases
+may lag behind this page. It applies only to ordinary `libra commit`, not the
+bridge `commit.create` method and its separate `agent_bridge_link` graph.
+`agent.commit_trailer` defaults to `false`. To opt in to local association of
+authorized Codex and other captured sessions, run
+`libra config agent.commit_trailer true`.
+If this opt-in setting cannot be read, Libra keeps association disabled and
+emits a warning; unrelated commits can still proceed when their other config
+requirements are met.
+With the setting enabled, a real commit links at most 64
+current-repository/worktree sessions with committed checkpoints that are
+anchored to the current parent, or active and already linked to that parent; it appends
+`Libra-Agent-Session: <session-id>` after the `commit-msg` hook, before optional
+vault signing. It follows `--trailer` and `Signed-off-by` in the final trailer
+block. Existing equal trailers are not duplicated. A root commit can select
+sessions anchored to the unborn parent; more than 64 eligible sessions aborts
+the commit instead of silently dropping entries.
+If a hook starts a new trailer paragraph after an equal user trailer, Libra
+moves that session trailer into the final parseable block so it appears once.
+`--no-agent-trailer` suppresses automatic message trailers for one commit while
+retaining explicitly enabled local links. Dry runs neither link nor preview the
+automatic trailer. Even with
+`--no-agent-trailer`, explicit association still checks the repository catalog,
+session scope, 64-session cap and workspace lease before moving HEAD; failures
+abort the commit. Association is recorded after HEAD advances; the selected
+session scope and workspace lease are rechecked in the same
+database transaction, and a failure is reported as a warning. Amend carries
+forward still-authorized sessions linked to the commit being replaced and adds
+newly eligible sessions; both `--no-edit` and a new `-m` message emit any
+missing automatic trailer in the replacement message. The
+replaced commit retains its existing local link rows. Durable
+journal recovery is planned for CX-27 and is not available yet. Current cloud
+refs-only metadata uploads repository refs, not this local SQLite association
+table. A trailer-free link is one made with `--no-agent-trailer`; cloud sync
+does not back it up. A post-ref warning means the commit is complete but its
+local association may be missing. Keep the commit and source session; there is
+no automatic repair command until CX-27, so do not amend solely to retry the
+link. The warning appears on stderr; with `--exit-code-on-warning`, the
+completed commit returns exit 9 / `LBR-WARN-001` while JSON remains `ok: true`.
+The unreadable opt-in configuration warning follows the same exit-code rule.
+Commit JSON has no linked-session field.
+With `--amend --no-edit`, inherited message text is preserved. A trailer for a
+session erased or moved out of scope can remain visible in the new commit but
+does not create a new local link. `--no-agent-trailer` also leaves inherited or
+user-written text intact. Check session scope before treating a trailer as
+recovery evidence.
+The opt-in trailer is visible to anyone who can read the commit and may be used
+as a recovery clue only after checking repository/session scope.
 
 Before computing staged changes or writing tree/commit objects, `commit` validates stage-0
 index entries for missing or mistyped blob/tree objects. A corrupt index entry fails closed
@@ -145,8 +197,9 @@ libra commit --no-edit -m "msg"
 
 ### `-F, --file <FILE>`
 
-Read the commit message from the given file. Mutually exclusive with `-m` when `--no-edit`
-is not in use.
+Read the commit message from the given file. If both `-m` and `-F` are supplied,
+`-m` takes precedence. With `--amend --no-edit`, the original commit message is
+reused instead.
 
 ```bash
 libra commit -F message.txt
@@ -190,20 +243,14 @@ parent(s) as the replaced commit. Cannot amend merge commits (commits with multi
 When the index tree and message are unchanged, `--amend --no-edit` still rewrites the commit
 and refreshes committer metadata; it never reports a successful amend while leaving `HEAD`
 unchanged.
+With `agent.commit_trailer=true`, amend carries forward still-authorized
+sessions linked to the replaced commit and adds newly eligible sessions. Both
+`--amend --no-edit` and `--amend -m` get any missing automatic trailers; the
+replaced commit keeps its own local link rows.
 
 ```bash
 libra commit --amend
 libra commit --amend -m "Updated message"
-```
-
-### `--no-edit`
-
-When used with `--amend`, reuse the message from the original commit without prompting for
-changes. A clean amend still creates a replacement commit with a refreshed committer date.
-Conflicts with `-m` and `-F`.
-
-```bash
-libra commit --amend --no-edit
 ```
 
 ### `--conventional`
@@ -277,12 +324,16 @@ libra commit --no-verify -m "WIP: work in progress"
 
 ### Repository hooks
 
-The order is `pre-commit` → `prepare-commit-msg` → editor/trailers → `commit-msg` →
-commit/ref update → `post-commit` → `post-rewrite` for amend. The two message hooks may
+The order is `pre-commit` → `prepare-commit-msg` → editor/user trailers → `commit-msg` →
+automatic agent trailer (opt-in) → optional vault signing → commit/ref update →
+local agent link (opt-in) → `post-commit` →
+`post-rewrite` for amend. The two message hooks may
 edit `.libra/COMMIT_EDITMSG`; blocking hook failures leave history unchanged, while the
 post hooks are advisory after success. All hooks use the required workspace-only,
 network-denied sandbox. See [Repository hooks](repository-hooks.md) for arguments,
 resolution, output behavior, and escape valves.
+The `commit-msg` hook does not see the automatic agent trailer; conventional
+validation checks the subject after insertion.
 
 ### `--author <AUTHOR>`
 
@@ -517,6 +568,18 @@ Add a trailer line to the commit message. Can be specified multiple times.
 libra commit -m "Add feature" --trailer "Reviewed-by: Jane Doe"
 ```
 
+### `--no-agent-trailer`
+
+When `agent.commit_trailer=true`, skip only automatic `Libra-Agent-Session`
+message trailers for this invocation. Local association and its fail-closed
+catalog, scope, cap and lease checks still run. This flag does not delete
+user-provided or inherited message text. When the setting is false, the flag
+has no effect.
+
+```bash
+libra commit --no-agent-trailer -m "Keep association local"
+```
+
 ### `--reset-author`
 
 When amending, reset the author to the current author identity and date instead
@@ -575,7 +638,8 @@ Root commit:
 - `--machine` writes the same schema as compact single-line JSON
 - both suppress hook stdout/stderr (piped instead of inherited)
 - `stderr` stays clean on success unless a completed local commit leaves a
-  durable cloud object-index repair warning (described below)
+  durable cloud object-index repair warning or a local agent
+  association/configuration warning (described below)
 
 Example:
 
@@ -731,6 +795,7 @@ documented explicitly because post hooks are otherwise advisory.
 | Reset author date | `git commit --reset-author` | N/A | `libra commit --reset-author` |
 | Cleanup mode | `git commit --cleanup=<mode>` | N/A | `libra commit --cleanup=<mode>` |
 | Trailer | `git commit --trailer="..."` | N/A | `libra commit --trailer="..."` |
+| Omit automatic agent trailer | N/A | N/A | `libra commit --no-agent-trailer` (CX-23 development) |
 | Structured JSON output | N/A | N/A | `--json` / `--machine` |
 | Error hints | Minimal | Minimal | Every error type has an actionable hint |
 
@@ -781,6 +846,8 @@ candidate OIDs while holding that fence through the prune transaction. With
 | Invalid author format | `LBR-CLI-002` | 129 | "expected format: 'Name <email>'" |
 | Invalid author/committer date | `LBR-CLI-002` | 129 | Supported date formats |
 | Invalid `commit.status` | `LBR-CLI-002` | 129 | Fix the offending config value |
+| Invalid `agent.commit_trailer` value | `LBR-CLI-002` | 129 | Set `libra config agent.commit_trailer true` or `false` |
+| Agent association catalog/scope/cap/lease refused before ref update | `LBR-REPO-003` | 128 | Run `libra agent doctor`; close or inspect old sessions if more than 64 qualify, or renew the workspace lease |
 | `commit.status` config unreadable | `LBR-IO-001` | 128 | Repair the local/global config store |
 | Message file unreadable | `LBR-IO-001` | 128 | -- |
 | Empty commit message | `LBR-REPO-003` | 128 | "use -m to provide a commit message" |
@@ -795,6 +862,7 @@ candidate OIDs while holding that fence through the prune transaction. With
 | Auto-stage preview/object/LFS write failed | `LBR-IO-002` | 128 | Check space and permissions for the named target |
 | Staged changes computation | `LBR-REPO-002` | 128 | "failed to compute staged changes" |
 | Commit completed but cloud index repair remains pending, with `--exit-code-on-warning` | `LBR-WARN-001` | 9 | Fix the reported database/marker error; any next repo command retries the exact rows |
+| Commit completed but local agent link failed, with `--exit-code-on-warning` | `LBR-WARN-001` | 9 | Preserve the commit and session; CX-27 recovery is pending, so do not amend only to retry |
 
 ## Compatibility Notes
 

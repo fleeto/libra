@@ -488,6 +488,48 @@ Libra's internal task sandbox API can bind a verified attempt and limit writes t
 
 `libra review clean` and `libra investigate clean` remove only finished runs of their own kind. Cleanup verifies each saved workspace descriptor and removes the owned task workspace or checkpoint input before deleting run metadata. A cleanup failure keeps the ownership and retry record; a swapped directory, link, unknown descriptor version or ownership mismatch is refused. Directory names alone do not authorize deletion. Both `--run` and `--all` check lifecycle metadata in the run's own directory before touching read-only checkpoint input. The bulk sweep keeps foreign, unfinished, unknown and corrupt runs; its `removed` count includes only successful deletions. A specifically named run with corrupt or missing state can be removed only when its own valid terminal manifest proves the run id, kind and schema. A readable foreign or unfinished state, or conflicting metadata, is refused. `investigate clean` retains its existing run lock. Bounded input cleanup refuses linked roots or metadata and oversized input; a failure returns an actionable error and does not report a deletion. Keep the run and inspect the reported links, limits or filesystem access before retrying. If I/O or cancellation interrupts cleanup after it starts, some input may already have been removed; the failed operation does not imply rollback. A proved own-kind terminal state remains cleanable when its matching manifest has no terminal marker after an interrupted state-first finalization. Identity/schema/common-field conflicts and differing non-null terminal values remain refused. Bulk qualification I/O, link or size refusals return an error; already-removed earlier runs are not rolled back. A proved own-kind terminal state also remains cleanable when its manifest is missing. A terminal review infrastructure failure may have no reviewer outcome rows while its manifest retains the requested reviewers; that supported shape is cleanable. An unparseable manifest is still refused even beside a proved terminal state: preserve the run and repair its metadata before retrying. This does not add cleanup flags or stable error codes.
 
+## Commit association (CX-23 development)
+
+The repository database uses `agent_session_commit` for opt-in local
+association in CX-23 source builds. Its `(session_id, hash_kind, commit_oid)` key is
+idempotent and local to the repository; SHA-1, SHA-256, and BLAKE3 are distinct.
+Historical import does not create these links. Ordinary commits also leave them
+untouched by default. Set `libra config agent.commit_trailer true` to associate
+sessions explicitly. If this setting cannot be read, association stays off and
+the commit reports a warning; unrelated commit work can proceed when its other
+configuration is valid. An invalid readable value still rejects the commit.
+With the setting enabled, Libra can associate
+up to 64 committed-checkpoint sessions scoped to this repository/worktree: sessions
+anchored to the current parent commit, or still-active sessions already linked
+to that parent. More than 64 eligible sessions aborts the commit rather than
+silently truncating the selection. The command
+adds one `Libra-Agent-Session` trailer per selected session after `commit-msg`
+hooks and before optional vault signing, without duplicating a user trailer.
+`libra commit --no-agent-trailer` omits automatic trailers for that invocation
+but keeps explicitly enabled local association. Scope, catalog, 64-session
+limit and workspace lease failures still abort before HEAD moves, even with
+that flag. Dry-run neither links nor previews the automatic trailer. Links are written after the ref
+update, with session scope and workspace lease rechecked in one database
+transaction; a failure is reported as a warning. Amend carries forward
+previously linked, still-authorized sessions and adds newly eligible ones,
+including when `-m` replaces the message. The crash-recovery journal belongs
+to CX-27 and is not available yet. Cloud refs-only metadata does not back up
+this local table or a trailer-free link; an opt-in trailer in a reachable commit
+can only be used as a recovery clue after repository/session scope checks.
+
+A root commit can select sessions anchored to the unborn parent. The
+`agent.commit_trailer` setting affects ordinary `libra commit`, not bridge
+`commit.create`, which keeps its separate `agent_bridge_link` graph. The
+opt-in trailer exposes its raw session ID to anyone who can read the commit.
+A trailer-free link means a link made with `--no-agent-trailer`; cloud sync
+currently uploads refs but not this SQLite table. If
+a post-ref association warning appears, keep the completed commit and source
+session; there is no automatic repair command until CX-27, so do not amend
+solely to retry the link.
+An amend that reuses its old message can retain a visible trailer for an erased
+or out-of-scope session, but creates no new local link for that session;
+`--no-agent-trailer` does not remove inherited or user-written message text.
+
 ## JSON Output
 
 Subcommands that support structured output use the global `--json` and
@@ -669,13 +711,6 @@ Successful and partial summaries report parent turn writes in
 `noop`. A platform warning that secure child discovery is unavailable does not
 make an otherwise complete parent import fail, because it is not evidence that
 child content exists.
-
-The repository database now reserves an `agent_session_commit` association for
-future opt-in commit linking. Its `(session_id, hash_kind, commit_oid)` key is
-idempotent and local to the repository; SHA-1, SHA-256, and BLAKE3 are distinct.
-Import and ordinary commits do not create these links yet. Automatic commit
-linking and a message trailer remain disabled until the later commit cards are
-implemented, so no existing commit format or import output changes here.
 
 Historical import is repository-scoped and fail-closed. Libra requires one
 unambiguous transcript `cwd`, resolves its Libra storage, and imports only when

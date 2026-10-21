@@ -1916,5 +1916,18 @@ forward-only association keyed by `(session_id, hash_kind, commit_oid)`.
 It applies to the Repository database only; Global, System and Derived
 databases receive no table or receipt. SHA-1, SHA-256 and BLAKE3 OIDs are
 stored distinctly, and an erased session cascades its links. The transactional
-DAO is available to later commit cards, but this change does not enable
-automatic commit association or alter existing commit messages.
+DAO is used only when `agent.commit_trailer=true`. The default is false and
+creates no links or trailers. An unreadable opt-in setting disables association
+with a warning so unrelated commits can proceed; a readable invalid value fails.
+Enabled commits select up to 64 scoped sessions
+with committed checkpoints and add deduplicated `Libra-Agent-Session` trailers
+after message hooks, before optional signing; `--no-agent-trailer` suppresses
+only automatic trailers while retaining local links and fail-closed catalog,
+scope, cap and workspace-lease checks. Dry runs do not preview the trailer. The local DB association
+is written after the ref update with scope and workspace lease rechecked
+atomically; amend carries forward still-authorized links from the replaced
+commit; CX-27 journal recovery is not yet available.
+Cloud refs-only metadata does not back up the table or trailer-free links.
+An amend that reuses the prior message may retain a stale visible trailer for
+an erased or out-of-scope session; it does not create a new local link, and
+`--no-agent-trailer` does not delete inherited message text.

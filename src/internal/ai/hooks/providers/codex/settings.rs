@@ -551,6 +551,31 @@ fn resolve_codex_home() -> Result<PathBuf> {
     Ok(home.join(".codex"))
 }
 
+// Codex canonicalizes the hooks.json source path before looking up
+// [hooks.state] keys. On macOS, /tmp and /private/tmp can name the same home;
+// using the caller's spelling silently leaves every installed hook untrusted.
+#[cfg(unix)]
+fn canonical_codex_home_if_present(codex_home: &Path) -> Result<PathBuf> {
+    match fs::canonicalize(codex_home) {
+        Ok(path) => Ok(path),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(codex_home.to_path_buf()),
+        Err(error) => Err(error).with_context(|| {
+            format!(
+                "resolve Codex home '{}' for hook trust identity",
+                codex_home.display()
+            )
+        }),
+    }
+}
+
+#[cfg(not(unix))]
+fn canonical_codex_home_if_present(codex_home: &Path) -> Result<PathBuf> {
+    // Preserve the native Windows spelling: std::fs::canonicalize adds a
+    // verbatim \\?\ prefix there, while Codex hook-state key parity for
+    // that spelling has not been established.
+    Ok(codex_home.to_path_buf())
+}
+
 /// Install/refresh the Libra-managed entries under `codex_home`.
 ///
 /// `hooks.json` and `config.toml` are a coupled trust contract, so this
@@ -561,8 +586,7 @@ fn resolve_codex_home() -> Result<PathBuf> {
 /// processes; arbitrary editors that do not honor it still have an inherent
 /// cross-platform check-to-rename race (documented at the publish helper).
 fn install_codex_hooks_at(codex_home: &Path, binary_path: &str, timeout: u64) -> Result<()> {
-    let hooks_path = codex_home.join(CODEX_HOOKS_FILE);
-    let config_path = codex_home.join(CODEX_CONFIG_FILE);
+    let alias_hooks_path = codex_home.join(CODEX_HOOKS_FILE);
     let capture_budget_millis = capture_budget_millis_for_host_timeout(timeout)?;
 
     let _lock = CodexSettingsTransactionLock::acquire(codex_home, true)?.ok_or_else(|| {
@@ -572,7 +596,10 @@ fn install_codex_hooks_at(codex_home: &Path, binary_path: &str, timeout: u64) ->
         )
     })?;
     recover_codex_settings_transaction(codex_home)?;
-
+    let canonical_home = canonical_codex_home_if_present(codex_home)?;
+    let codex_home = canonical_home.as_path();
+    let hooks_path = codex_home.join(CODEX_HOOKS_FILE);
+    let config_path = codex_home.join(CODEX_CONFIG_FILE);
     let hooks_before = read_codex_settings_snapshot(&hooks_path, "hooks.json")?;
     let config_before = read_codex_settings_snapshot(&config_path, "config.toml")?;
     let mut file = parse_codex_hooks_snapshot(&hooks_before, &hooks_path)?;
@@ -589,6 +616,7 @@ fn install_codex_hooks_at(codex_home: &Path, binary_path: &str, timeout: u64) ->
         &hooks_path,
         &remove_exact,
         &entries,
+        Some(&alias_hooks_path),
     )?;
     let hooks_after = if changed {
         CodexSettingsSnapshot::present(serialize_codex_hooks_file(&file)?)
@@ -637,15 +665,20 @@ fn install_codex_hooks_at(codex_home: &Path, binary_path: &str, timeout: u64) ->
 /// Remove Libra-managed handlers from `hooks.json` (never deleting the file)
 /// and Libra's `[hooks.state]` entries from `config.toml`. Idempotent.
 fn uninstall_codex_hooks_at(codex_home: &Path) -> Result<()> {
-    let hooks_path = codex_home.join(CODEX_HOOKS_FILE);
-    let config_path = codex_home.join(CODEX_CONFIG_FILE);
+    let alias_hooks_path = codex_home.join(CODEX_HOOKS_FILE);
 
     let Some(_lock) = CodexSettingsTransactionLock::acquire(codex_home, false)? else {
-        println!("Codex hook settings not found at {}", hooks_path.display());
+        println!(
+            "Codex hook settings not found at {}",
+            alias_hooks_path.display()
+        );
         return Ok(());
     };
     recover_codex_settings_transaction(codex_home)?;
-
+    let canonical_home = canonical_codex_home_if_present(codex_home)?;
+    let codex_home = canonical_home.as_path();
+    let hooks_path = codex_home.join(CODEX_HOOKS_FILE);
+    let config_path = codex_home.join(CODEX_CONFIG_FILE);
     let hooks_before = read_codex_settings_snapshot(&hooks_path, "hooks.json")?;
     let config_before = read_codex_settings_snapshot(&config_path, "config.toml")?;
 
@@ -665,8 +698,14 @@ fn uninstall_codex_hooks_at(codex_home: &Path) -> Result<()> {
         file = Some(parsed);
     }
 
-    let config_after =
-        prepare_codex_config_snapshot(&config_before, &config_path, &hooks_path, &stale_keys, &[])?;
+    let config_after = prepare_codex_config_snapshot(
+        &config_before,
+        &config_path,
+        &hooks_path,
+        &stale_keys,
+        &[],
+        Some(&alias_hooks_path),
+    )?;
     let hooks_after = match (hooks_changed, file) {
         (true, Some(file)) => CodexSettingsSnapshot::present(serialize_codex_hooks_file(&file)?),
         _ => hooks_before.clone(),
@@ -781,6 +820,8 @@ fn codex_hook_doctor_events_from_file(
     binary_path: &str,
     file: &CodexHooksFile,
 ) -> Result<Vec<CodexHookDoctorEvent>> {
+    let canonical_home = canonical_codex_home_if_present(codex_home)?;
+    let codex_home = canonical_home.as_path();
     let hooks_path = codex_home.join(CODEX_HOOKS_FILE);
     let config = load_codex_config_value(&codex_home.join(CODEX_CONFIG_FILE))?;
     Ok(CODEX_HOOK_FORWARD_MAP
@@ -874,6 +915,8 @@ impl CodexHookInstallationState {
 }
 
 fn codex_hook_trust_gaps_at(codex_home: &Path) -> Result<usize> {
+    let canonical_home = canonical_codex_home_if_present(codex_home)?;
+    let codex_home = canonical_home.as_path();
     let hooks_path = codex_home.join(CODEX_HOOKS_FILE);
     let file = parse_codex_hooks_snapshot(
         &read_codex_settings_snapshot(&hooks_path, "hooks.json")?,
@@ -1632,6 +1675,7 @@ fn prepare_codex_config_snapshot(
     hooks_path: &Path,
     remove_exact: &BTreeSet<String>,
     append: &[CodexStateEntry],
+    alias_hooks_path: Option<&Path>,
 ) -> Result<CodexSettingsSnapshot> {
     let original = match config_before.bytes.as_deref() {
         Some(bytes) => std::str::from_utf8(bytes).with_context(|| {
@@ -1652,8 +1696,17 @@ fn prepare_codex_config_snapshot(
         })?;
     }
 
+    let without_alias = match alias_hooks_path.filter(|alias| *alias != hooks_path) {
+        Some(alias) => rewrite_codex_state_sections(
+            original,
+            &alias.display().to_string(),
+            &BTreeSet::new(),
+            &[],
+        ),
+        None => original.to_owned(),
+    };
     let rewritten = rewrite_codex_state_sections(
-        original,
+        &without_alias,
         &hooks_path.display().to_string(),
         remove_exact,
         append,
@@ -1928,9 +1981,16 @@ fn write_codex_settings_snapshot(
 /// Recover an unfinished transaction at the beginning of every install and
 /// uninstall while the same cooperative lock is held.
 fn recover_codex_settings_transaction(codex_home: &Path) -> Result<()> {
+    let alias_hooks_path = codex_home.join(CODEX_HOOKS_FILE);
+    let canonical_home = canonical_codex_home_if_present(codex_home)?;
+    let codex_home = canonical_home.as_path();
     let journal_path = codex_home.join(CODEX_SETTINGS_TRANSACTION_JOURNAL_FILE);
     match fs::symlink_metadata(&journal_path) {
-        Ok(_) => recover_codex_settings_transaction_from_journal(codex_home, &journal_path)
+        Ok(_) => recover_codex_settings_transaction_from_journal(
+            codex_home,
+            &journal_path,
+            &alias_hooks_path,
+        )
             .map_err(|error| {
                 anyhow!(
                     "Codex hook settings recovery is required before continuing: {error:#}. \
@@ -1949,6 +2009,7 @@ fn recover_codex_settings_transaction(codex_home: &Path) -> Result<()> {
 fn recover_codex_settings_transaction_from_journal(
     codex_home: &Path,
     journal_path: &Path,
+    alias_hooks_path: &Path,
 ) -> Result<()> {
     let mut journal = read_codex_settings_transaction_journal(journal_path)?;
     if journal.manual_recovery {
@@ -2012,7 +2073,11 @@ fn recover_codex_settings_transaction_from_journal(
         );
     }
 
-    let transaction = prepare_codex_forward_recovery_transaction(codex_home, journal.operation)?;
+    let transaction = prepare_codex_forward_recovery_transaction(
+        codex_home,
+        journal.operation,
+        alias_hooks_path,
+    )?;
     if let Err(error) = validate_codex_forward_recovery_transaction(&transaction, &journal) {
         return codex_settings_recovery_requires_manual(
             journal_path,
@@ -2090,6 +2155,7 @@ fn codex_settings_recovery_requires_manual(
 fn prepare_codex_forward_recovery_transaction(
     codex_home: &Path,
     operation: CodexSettingsTransactionOperation,
+    alias_hooks_path: &Path,
 ) -> Result<CodexSettingsTransaction> {
     let hooks_path = codex_home.join(CODEX_HOOKS_FILE);
     let config_path = codex_home.join(CODEX_CONFIG_FILE);
@@ -2108,6 +2174,7 @@ fn prepare_codex_forward_recovery_transaction(
                 &hooks_path,
                 &remove_exact,
                 &entries,
+                Some(alias_hooks_path),
             )?;
             Ok(CodexSettingsTransaction {
                 hooks_path,
@@ -2137,6 +2204,7 @@ fn prepare_codex_forward_recovery_transaction(
                 &hooks_path,
                 &stale_keys,
                 &[],
+                Some(alias_hooks_path),
             )?;
             let hooks_after = match (hooks_changed, file) {
                 (true, Some(file)) => {
@@ -2560,8 +2628,14 @@ fn sync_codex_trust_state(
 ) -> Result<bool> {
     let before = read_codex_settings_snapshot(config_path, "config.toml")?;
     let remove_exact: BTreeSet<String> = desired.iter().map(|entry| entry.key.clone()).collect();
-    let after =
-        prepare_codex_config_snapshot(&before, config_path, hooks_path, &remove_exact, desired)?;
+    let after = prepare_codex_config_snapshot(
+        &before,
+        config_path,
+        hooks_path,
+        &remove_exact,
+        desired,
+        None,
+    )?;
     if before == after {
         return Ok(false);
     }
@@ -2574,6 +2648,138 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    #[cfg(all(unix, feature = "test-live-agent"))]
+    #[test]
+    #[ignore = "operator-local Codex trust-path regression"]
+    fn cx01_codex_home_alias_uses_canonical_hook_trust_identity() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = TempDir::new().expect("temporary Codex home");
+        let actual_home = tmp.path().join("actual");
+        let alias_home = tmp.path().join("alias");
+        fs::create_dir(&actual_home).expect("create actual Codex home");
+        symlink(&actual_home, &alias_home).expect("create Codex home alias");
+
+        let alias_hooks = alias_home.join(CODEX_HOOKS_FILE);
+        let stale_key = format!("{}:stop:0:0", alias_hooks.display());
+        let stale = format!(
+            "{CODEX_STATE_MARKER}\n[hooks.state.\"{stale_key}\"]\nenabled = true\ntrusted_hash = \"sha256:stale\"\n"
+        );
+        fs::write(actual_home.join(CODEX_CONFIG_FILE), stale).expect("seed old alias key");
+
+        install_codex_hooks_at(&alias_home, BINARY, 30).expect("install through alias");
+        let config =
+            fs::read_to_string(actual_home.join(CODEX_CONFIG_FILE)).expect("read canonical config");
+        let canonical_hooks = fs::canonicalize(&actual_home)
+            .expect("canonical home")
+            .join(CODEX_HOOKS_FILE);
+        assert!(config.contains(&canonical_hooks.display().to_string()));
+        assert!(!config.contains(&stale_key));
+        assert_eq!(
+            codex_hook_trust_gaps_at(&alias_home).expect("trust gaps"),
+            0
+        );
+        assert!(
+            codex_hook_doctor_events_at(&alias_home, BINARY)
+                .expect("doctor")
+                .iter()
+                .all(|event| event.configured)
+        );
+
+        uninstall_codex_hooks_at(&alias_home).expect("uninstall through alias");
+        let config = fs::read_to_string(actual_home.join(CODEX_CONFIG_FILE))
+            .expect("read uninstalled config");
+        assert!(!config.contains(CODEX_STATE_MARKER));
+    }
+
+    #[cfg(all(unix, feature = "test-live-agent"))]
+    #[test]
+    #[ignore = "operator-local Codex trust-path recovery regression"]
+    fn cx01_codex_home_alias_recovery_rederives_alias_cleanup() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = TempDir::new().expect("temporary Codex home");
+        let actual_home = tmp.path().join("actual");
+        let alias_home = tmp.path().join("alias");
+        fs::create_dir(&actual_home).expect("create actual Codex home");
+        symlink(&actual_home, &alias_home).expect("create Codex home alias");
+        let hooks_path = actual_home.join(CODEX_HOOKS_FILE);
+        let config_path = actual_home.join(CODEX_CONFIG_FILE);
+        let journal_path = actual_home.join(CODEX_SETTINGS_TRANSACTION_JOURNAL_FILE);
+        let alias_hooks_path = alias_home.join(CODEX_HOOKS_FILE);
+        let stale_key = format!("{}:stop:0:0", alias_hooks_path.display());
+        let stale = format!(
+            "{CODEX_STATE_MARKER}\n[hooks.state.\"{stale_key}\"]\nenabled = true\ntrusted_hash = \"sha256:stale\"\n"
+        );
+        fs::write(&config_path, &stale).expect("seed old alias key");
+        let config_before =
+            read_codex_settings_snapshot(&config_path, "config.toml").expect("read old config");
+
+        install_codex_hooks_at(&alias_home, BINARY, 30).expect("derive install post-images");
+        let hooks_installed =
+            read_codex_settings_snapshot(&hooks_path, "hooks.json").expect("read hooks");
+        let config_installed =
+            read_codex_settings_snapshot(&config_path, "config.toml").expect("read config");
+        write_codex_settings_snapshot(&config_path, &config_before, "config.toml")
+            .expect("simulate crash before config publish");
+        let install = CodexSettingsTransaction {
+            hooks_path: hooks_path.clone(),
+            config_path: config_path.clone(),
+            hooks_before: CodexSettingsSnapshot::absent(),
+            hooks_after: hooks_installed.clone(),
+            config_before: config_before.clone(),
+            config_after: config_installed.clone(),
+            operation: CodexSettingsTransactionOperation::InstallOrRefresh,
+        };
+        let mut journal = install.journal();
+        journal.phase = CodexSettingsTransactionPhase::HooksPublished;
+        write_codex_settings_transaction_journal(&journal_path, &journal)
+            .expect("persist interrupted install journal");
+        recover_codex_settings_transaction(&alias_home)
+            .expect("recover install with alias cleanup");
+        assert!(
+            read_codex_settings_snapshot(&config_path, "config.toml").expect("read config")
+                == config_installed
+        );
+        assert!(!journal_path.exists());
+
+        // Seed one old alias key beside the canonical state and interrupt
+        // uninstall after publishing hooks.json but before config.toml.
+        let mut config_with_alias =
+            fs::read_to_string(&config_path).expect("read installed config");
+        config_with_alias.push_str(&stale);
+        fs::write(&config_path, config_with_alias).expect("seed stale alias beside current state");
+        let config_before =
+            read_codex_settings_snapshot(&config_path, "config.toml").expect("read mixed config");
+        uninstall_codex_hooks_at(&alias_home).expect("derive uninstall post-images");
+        let hooks_removed =
+            read_codex_settings_snapshot(&hooks_path, "hooks.json").expect("read hooks");
+        let config_removed =
+            read_codex_settings_snapshot(&config_path, "config.toml").expect("read config");
+        write_codex_settings_snapshot(&config_path, &config_before, "config.toml")
+            .expect("restore mixed config");
+        let uninstall = CodexSettingsTransaction {
+            hooks_path: hooks_path.clone(),
+            config_path: config_path.clone(),
+            hooks_before: hooks_installed,
+            hooks_after: hooks_removed,
+            config_before,
+            config_after: config_removed.clone(),
+            operation: CodexSettingsTransactionOperation::Uninstall,
+        };
+        let mut journal = uninstall.journal();
+        journal.phase = CodexSettingsTransactionPhase::HooksPublished;
+        write_codex_settings_transaction_journal(&journal_path, &journal)
+            .expect("persist interrupted uninstall journal");
+        recover_codex_settings_transaction(&alias_home)
+            .expect("recover uninstall with alias cleanup");
+        assert!(
+            read_codex_settings_snapshot(&config_path, "config.toml").expect("read config")
+                == config_removed
+        );
+        assert!(!journal_path.exists());
+    }
 
     #[test]
     fn codex_hook_forward_map_installs_and_parses_subagent_boundaries() {
@@ -3533,7 +3739,10 @@ mod tests {
             config_after.starts_with(user_config),
             "user config bytes must be preserved as an exact prefix; got:\n{config_after}",
         );
-        let session_start_key = format!("{}:session_start:1:0", hooks_path.display());
+        let trusted_hooks_path = fs::canonicalize(&codex_home)
+            .expect("canonical Codex home")
+            .join(CODEX_HOOKS_FILE);
+        let session_start_key = format!("{}:session_start:1:0", trusted_hooks_path.display());
         assert!(
             config_after.contains(&format!(
                 "[hooks.state.\"{}\"]",

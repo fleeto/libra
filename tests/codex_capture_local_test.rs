@@ -9436,7 +9436,13 @@ fn capture_diagnostic_linked_worktree_shares_the_repository_window() {
     let mut fixture = LocalCodexSession::new();
     let main = fixture.repo.clone();
     let linked = fixture._temp.path().join("linked");
-    let out = fixture.run(&["worktree", "add", linked.to_str().unwrap()]);
+    let out = fixture.run(&[
+        "worktree",
+        "add",
+        "linked",
+        "--path",
+        linked.to_str().unwrap(),
+    ]);
     assert!(
         out.status.success(),
         "{}",
@@ -12233,7 +12239,13 @@ async fn codex_uncaptured_linked_worktree_existing_uses_its_pinned_scope() {
     let mut fixture = LocalCodexSession::new();
     let db = fixture.db().await;
     let linked = fixture._temp.path().join("linked");
-    let out = fixture.run(&["worktree", "add", linked.to_str().unwrap()]);
+    let out = fixture.run(&[
+        "worktree",
+        "add",
+        "linked",
+        "--path",
+        linked.to_str().unwrap(),
+    ]);
     assert!(
         out.status.success(),
         "{}",

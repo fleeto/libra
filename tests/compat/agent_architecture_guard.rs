@@ -9272,9 +9272,13 @@ fn capture_runtime_extraction_oracles_are_frozen() {
     // observed events (receipts and subagent checkpoints). Helpers are
     // unchanged. ADR-ACF-10 records this bounded contract revision.
     // ADR-ACF-10 records OG-01's input revision and OpenCode's local-only
-    // execution scope. Its CX-15 amendment additionally freezes the original
-    // hook matrix, the fourteen Claude forwarding overrides and their mapping
-    // helper after explicit design review; all other oracle expectations stay.
+    // execution scope. Its CX-15 amendment pins the fourteen Claude forwarding
+    // rows and their mapping helper after explicit design review. Upstream now
+    // includes the same rows in the base matrix; the overlay remains a pinned
+    // expectation, while all other oracle expectations stay unchanged.
+    // The 2026-10-22 main rebase also brought upstream subagent receipt rows
+    // into that hook matrix. Recompute only its two public-contract digests;
+    // the other frozen oracle and harness signature remain unchanged.
     const FROZEN_ORACLES: [(&str, &str, &[&str], &str); 3] = [
         (
             "tests/agent_lifecycle_event_test.rs",
@@ -9296,7 +9300,7 @@ fn capture_runtime_extraction_oracles_are_frozen() {
                 "fn hook_contract_projection",
                 "struct HookRepo",
             ],
-            "6b04514b29f135d4681c8f7444ab52a0d0e484dbfd08de50b25bbd70a9c5ef77",
+            "ce720b8f3d391f9f03505e9b9ca55dd7aaa6d8782f01d795e5a81304a96f38bf",
         ),
         (
             "tests/agent_hook_crash_test.rs",
@@ -9366,7 +9370,7 @@ fn capture_runtime_extraction_oracles_are_frozen() {
                 "fn hook_contract_projection",
                 "struct HookRepo",
             ],
-            "d3eef735b1e16ea78c31e3f4b012a63d4324ad7755bca9c2ba6f3cdbdae68ab6",
+            "9b66f193316c5ed68819d3f3278d6ae184f1cc41a9e699110cb383be52198f1f",
         ),
         (
             "tests/agent_hook_crash_test.rs",

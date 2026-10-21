@@ -218,6 +218,10 @@ remote workspace，含生命周期状态（`provisioning`/`active`/`releasing`/
 若报告非明文完整性恢复日志路径，说明继续自动覆盖已不安全；请保留该日志，先手动解决编辑冲突，
 移除所报告的日志后再重试。日志只记录有限的事务元数据（schema 版本、操作、阶段和恢复围栏）
 以及域隔离的文件指纹，不含原始 hook 或 config 内容；未知指纹状态会刻意保持零写入，而非自动修复。
+在 Unix 上，Codex 以规范化的 `hooks.json` 路径作为信任键。`enable` 在写入 trust 条目前解析已存在的
+`$CODEX_HOME` 目录（包括 macOS 的 `/tmp` 与 `/private/tmp` 别名），并清理 Libra 以前按
+调用方别名写入的托管条目。升级后若 `agent doctor` 显示 Codex hook 未受信，可先检查
+主动禁用的条目，再重跑 `libra agent enable --agent codex`。
 
 ### OpenCode 事件输入契约
 
@@ -1270,7 +1274,7 @@ reasoning 一次，之后重复采集会去重；原 v1 对象、digest 和 clai
 reasoning 不能将这种失败变为 complete coverage。这些改动不增加命令参数，要求 Libra 0.30.50 或后续版本；依赖 OpenCode Session／exporter／模型的验收只在 macOS
 本机执行，不进入 CI 集成测试。
 
-Libra 0.30.67 或更新版本打开的仓库带有能力标记 4。已发布的 0.30.66 及更早版本会拒绝该仓库中的所有命令，包括 `agent clean`；继续操作前请升级到 0.30.67 或更新版本。现有 Agent 工作目录不迁移。
+支持能力标记 4 的 Libra 构建打开仓库后会记录该标记。已发布的 0.30.66 及更早版本会拒绝该仓库中的所有命令，包括 `agent clean`；继续操作前请安装支持能力 4 的构建。已发布二进制从 Linux v0.30.67、macOS/Windows v0.30.68 起提供该能力；v0.30.83 覆盖全部平台。现有 Agent 工作目录不迁移。
 
 Codex CX 新增测试（包括合成用例）只在本机手动运行，不加入 CI。入口为
 `cargo test --features test-live-agent --test codex_capture_local_test -- --ignored --test-threads=1`

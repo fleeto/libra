@@ -4344,7 +4344,7 @@ async fn opencode_legacy_capture_is_visible() {
     assert!(human.contains("legacy/unrecorded reasoning state"));
     assert!(human.contains("not evidence of complete capture or native origin"));
     assert!(
-        human.contains("session.inbox.delivered: configured (managed template)"),
+        human.contains("session.inbox.delivered: installed (managed template)"),
         "{human}"
     );
     assert!(!human.contains("DOCTOR_PRIVATE_METADATA_CANARY"));

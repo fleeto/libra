@@ -3336,7 +3336,7 @@ The sidecar statistics budget is 4096 distinct explicit turns or reasoning ident
 
 这套十二事件安装的最低 Codex CLI 版本为 **0.162.1**；旧客户端先升级 Codex，再重跑 enable。既有十一事件配置在刷新前报告未完整安装，但已批准条目不被误报为 trust gap。此次同时修复共用 `compaction` 命令对 `PostCompact` 的旧拒绝行为；迟到的中断保留已停止会话状态，不重新激活会话。
 
-Codex hook 设置只读取普通文件：`hooks.json`、`config.toml` 各限 16 MiB，完整性恢复 journal 限 64 KiB。安装、移除和状态读取拒绝 symlink/特殊文件 leaf，Unix FIFO 打开不阻塞读取器。坏型或超限文件原样保留；先移走特殊文件或减少文件大小，再重试。生成的配置超过上限时，在两文件任一发布前拒绝。解析错误只说明文件，不回显配置正文；保留 `CODEX_HOME` 所指定父目录别名，不承诺严格 whole-process 文件系统 deadline。
+Codex hook 设置只读取普通文件：`hooks.json`、`config.toml` 各限 16 MiB，完整性恢复 journal 限 64 KiB。安装、移除和状态读取拒绝 symlink/特殊文件 leaf，Unix FIFO 打开不阻塞读取器。坏型或超限文件原样保留；先移走特殊文件或减少文件大小，再重试。生成的配置超过上限时，在两文件任一发布前拒绝。解析错误只说明文件，不回显配置正文；支持 `CODEX_HOME` 的父目录别名，但 Unix 信任键使用规范化的 `hooks.json` 路径，重跑 enable 时清理当前别名下的旧托管条目；不承诺严格 whole-process 文件系统 deadline。
 
 
 `libra agent doctor` 的 Codex 安装诊断逐项列出全部 12 个 managed 事件。固定 `reason` 为 `configured`、`missing`、`drifted`、`untrusted` 或 `disabled`，JSON 位于 `data.provider_hooks[].events`；仅当每项均匹配当前 handler、enabled 且 trusted 时，汇总 `installed=true`。带 Libra statusMessage 的修改或过期重复项使对应事件未配置；没有该标记的用户 handler 不属于此诊断。显式 `enabled=false` 会显示 disabled；哈希仍正确时，不新增信任缺口横幅。这些只读设置检查不输出 hook 命令、哈希或配置正文，也不证明宿主已执行 hook。使用 Codex 0.162.1 或更新版本；缺失或未受信时可用 `libra agent enable --agent codex` 刷新 Libra handler；刷新前先确认用户主动禁用的意图。漂移时先检查 `hooks.json` 以及 `config.toml` 中对应的 `[hooks.state]` 条目：enable 会刷新归属仍可证明的 handler，但保留仅有 statusMessage、命令却已不符合规范的条目；此类条目需经检查后手动修正或移除，重复 enable 不一定清除诊断。

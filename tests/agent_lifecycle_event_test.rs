@@ -4813,8 +4813,9 @@ async fn hook_public_contract_byte_compat_matrix() {
 }
 
 // Current Claude forwarding persists PermissionRequest and subagent boundaries.
-// Keep the older matrix above unchanged as historical evidence; override only
-// the fourteen receipt/checkpoint rows affected by that upstream change.
+// Upstream now includes these fourteen receipt/checkpoint rows in the base
+// matrix. Keep this CX-15 overlay as an independent pinned expectation: if
+// the base drifts, the comparison still checks the established rows.
 const CLAUDE_FORWARDED_PUBLIC_HOOK_ROWS: &str = r###"hooks-claude PermissionRequest permission-request exit=Some(0) stdout="" stderr="" | sessions=[claude__contract-hooks-claude:claude_code:active:stopped_at=none:checkpoints=[]:receipts=4(pending=0)[]] artifacts=0
 hooks-claude ModelUpdate model-update exit=Some(0) stdout="" stderr="" | sessions=[claude__contract-hooks-claude:claude_code:active:stopped_at=none:checkpoints=[]:receipts=5(pending=0)[]] artifacts=0
 hooks-claude Compaction compaction exit=Some(0) stdout="" stderr="" | sessions=[claude__contract-hooks-claude:claude_code:condensed:stopped_at=none:checkpoints=[]:receipts=6(pending=0)[]] artifacts=0

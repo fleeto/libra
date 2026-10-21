@@ -269,6 +269,12 @@ before retrying. It records limited transaction metadata (schema version,
 operation, phase, and a recovery fence) plus domain-separated file
 fingerprints, never raw hook or config contents; an unknown fingerprint state
 is intentionally zero-write rather than an automatic repair.
+On Unix, Codex keys trust by the canonical `hooks.json` path. `enable` resolves an
+existing `$CODEX_HOME` directory before writing trust entries, including
+macOS aliases such as `/tmp` and `/private/tmp`, and removes older
+Libra-managed entries written under the caller's alias. Re-run
+`libra agent enable --agent codex` after upgrading if `agent doctor` reports
+Codex hooks as untrusted; review any intentionally disabled entries first.
 
 ### OpenCode event input contract
 
@@ -1803,7 +1809,7 @@ unverified reasoning source cannot turn this failure into complete coverage.
 These changes add no command flags and require Libra 0.30.50 or later. OpenCode Session/exporter/model acceptance runs locally on
 macOS; it is not a CI integration test.
 
-Repositories opened by Libra 0.30.67 or later carry repository capability 4. Released binaries through 0.30.66 refuse every command on those repositories, including `agent clean`; install 0.30.67 or later before continuing. No existing agent workspace directories are migrated.
+Repositories opened by a capability-4 build carry repository capability 4. Released binaries through 0.30.66 refuse every command on those repositories, including `agent clean`; install a capability-4 build before continuing. Published binaries first provide it in v0.30.67 on Linux and v0.30.68 on macOS/Windows; v0.30.83 includes it on all platforms. No existing agent workspace directories are migrated.
 
 Codex CX acceptance tests are operator-local, including synthetic cases; they
 are not scheduled in CI. Run `cargo test --features test-live-agent --test

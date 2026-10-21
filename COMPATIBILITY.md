@@ -143,7 +143,7 @@ after the v2 runtime cutover; historical migration fixtures remain isolated to
 upgrade tests. Binaries supporting schemas only through `2026090601` must
 refuse the newer repository schema; a consistent pre-upgrade backup is
 required for recovery, not deletion of receipts or binary rollback alone.
-See [init migration notes](docs/commands/init.md#operation-v2-convergence-current-branch).
+See [init migration notes](docs/commands/init.md#operation-v2-convergence).
 This repository-schema barrier is distinct from the global-config policy above.
 
 For a stable worktree, the pending snapshot contract keeps tracked gitlinks and

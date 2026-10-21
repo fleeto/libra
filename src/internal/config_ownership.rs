@@ -331,10 +331,6 @@ pub const CODE_AGENT_PROCESS_CACHES: &[ProcessCacheSurface] = &[
         static_name: "COUNTS",
         discipline: "process-local MessageDisplay admission counters keyed by provider session id; \
                      bounds only transient hook batches and carries no persisted repository authority",
-        source_path: "src/internal/ai/hooks/providers/claude/events.rs",
-        static_name: "COUNTS",
-        discipline: "process-local MessageDisplay admission counts keyed by provider session id; \
-                     existing coalescing state, not configuration or a persistent ledger",
     },
     ProcessCacheSurface {
         source_path: "src/internal/ai/history.rs",

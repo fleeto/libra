@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- On Unix, `libra agent enable --agent codex` now writes trust entries for
+  Codex's canonical `hooks.json` path and removes older Libra-owned entries
+  under the configured `$CODEX_HOME` alias. This fixes silently skipped hooks
+  on macOS when `/tmp` resolves to `/private/tmp`; rerun `enable` after upgrading.
+
 ## [0.30.85] — 2026-10-21
 
 ### Branch force safety and upstream 0.30.84 additions

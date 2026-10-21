@@ -184,6 +184,7 @@ porcelain 输出、冲突处理或 plumbing 语法等特定 Git-compatible 表�
 | `libra deps` | 公开命令 | 管理文件依赖图 | [deps.md](deps.md) |
 | `libra file` | 公开命令 | 对象级操作与 payload 清除 | [file.md](file.md) |
 | `libra for-each-ref` | 公开命令 | 按格式和筛选条件遍历引用 | [for-each-ref.md](for-each-ref.md) |
+| `libra gc` | 公开命令 | 清理不可达对象并维护仓库 | [gc.md](gc.md) |
 | `libra hydrate` | 公开命令 | 按需补齐工作区内容 | [hydrate.md](hydrate.md) |
 | `libra investigate` | 公开命令 | 运行只读外部 agent 调查 | [investigate.md](investigate.md) |
 | `libra layer` | 公开命令 | 管理不提交的本地工作区 overlay | [layer.md](layer.md) |

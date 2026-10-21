@@ -58,7 +58,7 @@ Create a named linked worktree in the managed directory, or at an explicit desti
 
 `--create-branch` is an alias for `--new-branch`. Without a target the worktree is **detached at the source commit**. The name does not implicitly create a branch. `--lock`, `--orphan`, `--no-checkout`, remote guessing and `-B` are not supported; use `worktree lock` after creation.
 
-Standard builds have supported `add --force` and `remove --force` since v0.30.69, including v0.30.82. The older published `v0.31.0` Linux/macOS binaries predate these flags. If you installed v0.31.0, use the [signed stable installer](upgrade.md) after v0.30.82 is published; `libra upgrade` will not select a lower version number.
+Standard builds have supported `add --force` and `remove --force` since v0.30.69, including v0.30.83. The older published `v0.31.0` Linux/macOS binaries predate these flags. If you installed v0.31.0, use the [signed stable installer](upgrade.md) after v0.30.83 is published; `libra upgrade` will not select a lower version number.
 
 For a detached registry entry, `add <NAME>` verifies the saved identity and common-storage pointer, then reattaches its existing files and staging state. `TARGET`, `-b` and `--detach` are refused during reattachment. An optional `--path` must match the registered path. A tombstoned entry remains reserved until cleanup succeeds.
 
@@ -730,4 +730,4 @@ Note: jj uses the term "workspace" instead of "worktree". Each workspace automat
 | `LBR-WORKTREE-001` | `worktree doctor --cursor` was given a cursor this command did not issue (or one that expired) |
 | `LBR-WORKTREE-002` | `worktree doctor` cannot read a scope (unparseable registry, unreadable record, missing repository identity) and refuses to report a partial diagnosis |
 
-A build that supports managed worktrees records repository capability 4 when it first opens a repository. Libra 0.30.66 and older then refuse every command in that repository, including commands unrelated to worktrees. Use a build with the 2026101902 capability: published binaries first provide it in v0.30.67 on Linux and v0.30.68 on macOS/Windows. The v0.30.82 release includes it on all platforms. Existing worktree directories are not moved.
+A build that supports managed worktrees records repository capability 4 when it first opens a repository. Libra 0.30.66 and older then refuse every command in that repository, including commands unrelated to worktrees. Use a build with the 2026101902 capability: published binaries first provide it in v0.30.67 on Linux and v0.30.68 on macOS/Windows. The v0.30.83 release includes it on all platforms. Existing worktree directories are not moved.

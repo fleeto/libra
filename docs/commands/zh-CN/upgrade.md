@@ -17,8 +17,8 @@ libra upgrade [--check | -y|--yes]
 下载时校验 SHA256 和大小（最多256 MiB），在运行 executable 旁暂存并执行安装前自检，
 然后原子替换并执行安装后探测；探测失败恢复原 binary。新版本在下次命令生效。
 较早打标的 `v0.31.0` 有可下载的 Linux/macOS arm64 二进制，但未进入稳定通道，
-且缺少 v0.30.82 包含的修复。因为 0.31.0 的版本号更高，`libra upgrade` 不会将它
-替换为 v0.30.82。待 v0.30.82 进入签名稳定通道后，清除 `LIBRA_VERSION` / `LIBRA_BASE_URL`
+且缺少 v0.30.83 包含的修复。因为 0.31.0 的版本号更高，`libra upgrade` 不会将它
+替换为 v0.30.83。待 v0.30.83 进入签名稳定通道后，清除 `LIBRA_VERSION` / `LIBRA_BASE_URL`
 覆盖值并重新运行不带 `-v` 的默认安装脚本：
 
 ```sh

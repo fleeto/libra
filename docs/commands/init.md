@@ -58,11 +58,11 @@ Opening an older repository or global config database automatically recreates a 
 legacy `config` table without changing existing configuration. The ignored home
 `libra.db` artifact is left untouched; commands no longer open it as a repository.
 
-### Operation-v2 convergence (current branch)
+### Operation-v2 convergence
 
-The `2026090801` convergence migration is implemented on the feature branch
-and has passed focused migration validation, including a controlled old-binary
-repository upgrade. This plan does not include a version bump or release.
+The `2026090801` convergence migration is part of released builds. It preserves
+the migration receipts and configuration values described below. Migration
+`2026091801` subsequently retires the temporary legacy operation namespace.
 
 - The forward-only `2026090801` migration must retain the original
   `2026090101` (`operation_v2`) and `2026090601` (`legacy_config_table`, #472)

@@ -257,6 +257,12 @@ Mutually exclusive with `-u`/`--update` and `-A`/`--all`. The diagnostic is
 Git's `options '…' and '--resolved' cannot be used together` (`LBR-CLI-002`,
 exit 129). Git reports the same combination as exit 128.
 
+`--resolved` is also refused together with `-p`/`--patch` (same
+`cannot be used together` diagnostic), which is an intentional Libra addition:
+Git accepts the pair and simply runs the patch flow, silently ignoring
+`--resolved`. Libra refuses rather than silently dropping one of the two
+requested behaviours (plan-20260918 AU-06).
+
 ```bash
 libra add --resolved
 libra add --resolved path/to/file

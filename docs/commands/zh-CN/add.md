@@ -188,6 +188,8 @@ libra add --dry-run --ignore-missing maybe-missing.txt other.txt
 
 与 `-u`/`--update`、`-A`/`--all` 互斥。诊断文案为 Git 的 `options '…' and '--resolved' cannot be used together`（`LBR-CLI-002`，退出码 129）。Git 对同一组合退出 128。
 
+`--resolved` 与 `-p`/`--patch` 同时给出时同样以 `cannot be used together` 拒绝，这是 Libra 的有意加强：Git 接受该组合但只是静默忽略 `--resolved` 而走 patch 流程；Libra 选择拒绝，而不是悄悄丢弃两个请求中的一个（plan-20260918 AU-06）。
+
 ```bash
 libra add --resolved
 libra add --resolved path/to/file

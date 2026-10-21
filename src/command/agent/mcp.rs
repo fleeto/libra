@@ -23,6 +23,10 @@ pub struct McpArgs {
     /// Transport name. `stdio` matches `--stdio`. `http` is not available yet.
     #[arg(long, value_name = "stdio|http")]
     pub transport: Option<String>,
+
+    /// Internal read-tool worker. Not part of the public command surface.
+    #[arg(long, hide = true)]
+    pub read_worker: bool,
 }
 
 pub async fn execute_safe(args: McpArgs, _output: &OutputConfig) -> CliResult<()> {

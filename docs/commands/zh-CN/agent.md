@@ -263,6 +263,8 @@ OpenCode 提取对空输入、非法 JSON 和非法 export 形状显式标记
 
 服务端使用 legacy MCP `2025-11-25` 与 `2025-06-18`。无法识别的 `protocolVersion` 按 `2025-11-25` 应答。`capabilities` 只有 `tools`（`listChanged: false`）。JSON-RPC batch 会被拒绝。不符合工具 schema 的输入返回工具错误 `LBR-AGENT-027`。
 
+工具结果在写出前会 redact：服务端对 `structuredContent` 脱敏，清洗除换行和制表符以外的控制字符，再据此重建文本副本。已知密钥模式被去掉。若 redact 后的结果无法再次解析，服务端返回工具错误 `LBR-AGENT-034`，不会回退到原始结果。完整 JSON-RPC 响应超过 256 KiB 时返回工具错误 `LBR-AGENT-028`。读工具超过 30 秒返回工具错误 `LBR-AGENT-036`，且 `retryable` 为 true。读工具最多在 4 个并发读子进程中执行；超时后服务端先回复再强制终止该子进程，回收完成后才把名额交给下一次读取。
+
 ## 常用选项
 
 | 标志 | 子命令 | 说明 |

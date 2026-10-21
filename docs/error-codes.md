@@ -147,7 +147,7 @@ structured report is always present.
 | `frame` | `LBR-AGENT-025` | `internal` | Bridge request is not a valid JSON-RPC 2.0 object (JSON-RPC `-32600`) | a peer sends a frame missing `jsonrpc`/`method`, or with an unsupported `jsonrpc` version |
 | `frame` | `LBR-AGENT-026` | `internal` | Bridge method is not in the v1 20-method allowlist (JSON-RPC `-32601`) | invoking `create_intent` or another low-level method over the bridge |
 | `frame` | `LBR-AGENT-027` | `internal` | Bridge method params failed schema/limit validation (JSON-RPC `-32602`) | `event.append` with a batch over 64 events or 256 KiB |
-| `frame` | `LBR-AGENT-028` | `internal` | Bridge request exceeded the v1 frame byte cap (256 KiB) and was refused | a peer writes an NDJSON line larger than 256 KiB |
+| `frame` | `LBR-AGENT-028` | `internal` | Bridge request exceeded the v1 frame byte cap (256 KiB) and was refused; an MCP tool result over 256 KiB uses this code | a peer writes an NDJSON line larger than 256 KiB, or an MCP tool result exceeds 256 KiB |
 | `frame` | `LBR-AGENT-029` | `internal` | Bridge connection already has the maximum in-flight requests (64) | a peer floods requests without waiting for responses |
 | `frame` | `LBR-AGENT-030` | `internal` | Bridge method is allowlisted but not implemented by this build | invoking a session/workspace method before its card (LB-03..LB-06) ships |
 | `frame` | `LBR-AGENT-031` | `internal` | Bridge protocol major mismatch — the peer's declared major differs from this build's, so every request is refused | a peer speaks protocol `2.x` against this `1.x` bridge |
@@ -155,7 +155,7 @@ structured report is always present.
 | `frame` | `LBR-AGENT-033` | `internal` | Bridge payload digest conflict — a duplicate `(session_id,event_seq)` or `operation_id` carried a different payload hash | a peer replays an event sequence with altered payload |
 | `frame` | `LBR-AGENT-034` | `internal` | Bridge redaction or payload-size validation could not be satisfied; the original payload was refused (no raw fallback) | a peer sends a payload that cannot be safely redacted |
 | `frame` | `LBR-AGENT-035` | `internal` | Bridge mutating operation denied by policy or approval | `checkpoint.restore` without the required approval |
-| `frame` | `LBR-AGENT-036` | `internal` | Bridge request exceeded its deadline (default 30 s) | a `commit.create` that stalls past the request deadline |
+| `frame` | `LBR-AGENT-036` | `internal` | Bridge request exceeded its deadline (default 30 s); an MCP tool result whose read exceeds 30 s uses this code | a `commit.create` that stalls past the request deadline, or an MCP read tool that exceeds 30 s |
 | `frame` | `LBR-AGENT-037` | `internal` | Bridge internal error (JSON-RPC `-32603`) — a database/VCS/generic failure that cannot be attributed to the peer | the bridge's SQLite store returns a transient error during `event.append` |
 | `frame` | `LBR-AGENT-038` | `internal` | Bridge mutation fence drifted — HEAD moved, or the index/worktree is dirty where the operation requires a clean one; refused **before** any write | `commit.create` with a stale `expected_head`, or `checkpoint.restore` against a dirty working tree |
 | `128` | `LBR-AGENT-039` | `internal` | Reserved historical outcome: a removed controlled-fix path was denied at a Code-runtime tool or sandbox approval gate; no patch was applied | former `review --fix` / `investigate fix` denial |
@@ -291,7 +291,7 @@ evidence on uncertainty. See [repair recovery](commands/config.md#confirmed-lega
 | `LBR-AGENT-025` | Bridge request is not a valid JSON-RPC 2.0 object |
 | `LBR-AGENT-026` | Bridge method is not in the v1 20-method allowlist |
 | `LBR-AGENT-027` | Bridge method params failed schema/limit validation |
-| `LBR-AGENT-028` | Bridge request exceeded the v1 frame byte cap (256 KiB) and was refused |
+| `LBR-AGENT-028` | Bridge request exceeded the v1 frame byte cap (256 KiB) and was refused; an MCP tool result over 256 KiB uses this code |
 | `LBR-AGENT-029` | Bridge connection already has the maximum in-flight requests (64) |
 | `LBR-AGENT-030` | Bridge method is allowlisted but not implemented by this build |
 | `LBR-AGENT-031` | Bridge protocol major mismatch; every request is refused |
@@ -299,7 +299,7 @@ evidence on uncertainty. See [repair recovery](commands/config.md#confirmed-lega
 | `LBR-AGENT-033` | Bridge payload digest conflict on a duplicate `(session_id,event_seq)` or `operation_id` |
 | `LBR-AGENT-034` | Bridge redaction or payload-size validation could not be satisfied; payload refused |
 | `LBR-AGENT-035` | Bridge mutating operation denied by policy or approval |
-| `LBR-AGENT-036` | Bridge request exceeded its deadline |
+| `LBR-AGENT-036` | Bridge request exceeded its deadline; an MCP tool result whose read exceeds 30 s uses this code |
 | `LBR-AGENT-037` | Bridge internal error (DB/VCS/generic failure) |
 | `LBR-AGENT-038` | Bridge mutation fence drifted (HEAD moved or the index/worktree is dirty); refused before any write |
 | `LBR-AGENT-039` | Reserved historical controlled-fix approval denial; the removed `review --fix` / `investigate fix` paths no longer emit it |

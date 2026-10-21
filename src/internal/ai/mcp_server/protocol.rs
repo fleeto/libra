@@ -251,6 +251,13 @@ impl Session {
             repository_id: repository_id.into(),
         }
     }
+
+    pub fn duplicate(&self) -> Self {
+        Self {
+            initialized: self.initialized,
+            repository_id: self.repository_id.clone(),
+        }
+    }
 }
 
 impl Default for Session {

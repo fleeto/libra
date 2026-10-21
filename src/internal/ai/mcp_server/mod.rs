@@ -3,6 +3,8 @@
 //! Protocol constants, the tool registry, and the stdio transport live here.
 //! The DeepSeek Harness bridge is a separate front end and is not modified.
 
+pub mod exec;
+pub mod output;
 pub mod protocol;
 pub mod stdio;
 pub mod tools;

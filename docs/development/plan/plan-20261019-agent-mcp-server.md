@@ -206,6 +206,7 @@
 | 2026-10-20 12:40:00 UTC | 使用者要求保持 0.30.xx，且 stable manifest 仍是 0.30.66 | 工作区版本面是未发布的 0.31.1（本地 tag `v0.31.0` 存在，stable `manifest-v1.json` 的 `version` 为 `0.30.66`，control_revision 167）。发布端点拒绝 `version_regression`，因此不把版本面升到 0.31.2，也不改写已发布 tag。MC-01 起把三个版本面从 0.31.1 调回 0.30.67（相对已发布 stable 单调 +1）。 | — | 版本面 |
 | 2026-10-20 13:05:00 UTC | `v0.30.67` 的 Linux 产物已上传，Windows 库测试缺少 Tokio `io-std` | `72450c6` 的 arm64/amd64 Linux 对象已在 CDN（HTTP 200），前缀不可覆盖。Windows `cargo test --locked --lib` 在 `mcp.rs` 报 `E0432`（`tokio::io::stdin` 仅由 Unix 依赖间接打开）。取消未完成的 darwin/windows 上传，版本面改为 `0.30.68`，并在 `Cargo.toml` 直接启用 `io-std`。不改写 `v0.30.67`。 | — | 版本面、`Cargo.toml` |
 | 2026-10-20 14:05:00 UTC | MC-01 D 组通过 | `v0.30.68` 的 `release.yml` 39427212730 success。main `e4d843d` 的 `base.yml` 39427673509 attempt 2 与 `codeql.yml` 39427673357 success。Codex 与 Claude Code 均为 P0=0、P1=0。MC-01 `done` / `complete`。 | — | MC-01 |
+| 2026-10-20 17:50:00 UTC | MC-22 D 组通过 | `v0.30.69` 的 `release.yml` 39440601807 success。main `3b1200a` 的 `base.yml` 39459099628 与 `codeql.yml` 39459099663 success。Codex `VERDICT: PASS`，`P0=0`，`P1=0`。MC-22 `done` / `complete`。 | — | MC-22 |
 
 ## 已决议设计决策
 
@@ -2215,7 +2216,7 @@ ER-01 至 ER-14 按模板原文对本计划全部任务生效（见 [`plan-templ
 
 **Task type:** `implementation`
 
-**Lifecycle / Acceptance:** `pending` / 空
+**Lifecycle / Acceptance:** `done` / `complete`
 
 **Description:** 自 MC-01 拆出。新增 GC-MC-03 ① 的唯一结果信封 `mcp_server/output.rs`：所有工具结果在返回前序列化后经 `review::redact_untrusted` 脱敏、重解析并清洗控制字符（失败为工具错误 `LBR-AGENT-034`，不回退原文）。大小上限与读 deadline 由 MC-19 承接。唯一行为轴：「MCP 工具结果脱敏」。
 
@@ -2227,26 +2228,30 @@ ER-01 至 ER-14 按模板原文对本计划全部任务生效（见 [`plan-templ
 |---|---|
 | 脱敏函数 | `src/internal/ai/agent_bridge/redaction.rs:20-53`（`review::redact_untrusted`、`scrub_controls`） |
 | 协议核心与 `libra_test_echo`（MC-01 交付） | `src/internal/ai/mcp_server/{protocol,stdio}.rs` |
+| 本地门 | `0.30.70`（tag `474b034`）把 `content[0].text` 留成脱敏前的 JSON。前滚修复 `0.30.71`（`d1c28a4`）：先清洗 `structuredContent`，再 `redact_untrusted`、重解析、再清洗，并重建文本副本。`envelope_redacts_secret` 与 `envelope_scrubs_control_chars` 均为 `test result: ok. 1 passed; 0 failed`。clippy `-D warnings` exit 0。nextest：`Summary [ 568.129s] 10661 tests run: 10661 passed (11 slow, 1 flaky), 21 skipped`，exit 0。 |
+| D 组 | tag `v0.30.71` 指向 `d1c28a452a298d0fce592bffd2c57a4f3cad2a63`。`release.yml` [39488255544](https://github.com/libra-tools/libra/actions/runs/39488255544) success。四个平台产物 HTTP 200。安装脚本 `DEFAULT_VERSION="v0.30.71"`。同一提交上 `base.yml` [39488106338](https://github.com/libra-tools/libra/actions/runs/39488106338) success（八个 job 全 success）与 `codeql.yml` [39488106268](https://github.com/libra-tools/libra/actions/runs/39488106268) success。`v0.30.70` 不改标签。 |
+| 网站 | `cf` `519c03902a34c3dac5350df19585e816fe31f6d0` 只改 `agent.en.md`。源文件与 `https://libra.tools/en/docs/commands/agent` 都含 `LBR-AGENT-034` 与 `redact`。Claude Code：`CLAUDE_VERDICT: PASS`，`P0=0`，`P1=0`。 |
+| Codex | 对 `d1c28a4`：`VERDICT: PASS`，`P0=0`，`P1=0`。对 `474b034` 的评审是 `VERDICT: FAIL`，`P0=0`，`P1=1`（未写出 finding）；缺陷由 `0.30.71` 修复。 |
 
 **Acceptance criteria:**
 
-- [ ] AC-1 `libra_test_echo` 返回含 fixture secret（与 `agent_bridge_redaction_test` 同类的 token）的对象时，响应全文不含该 token 字面量。
-- [ ] AC-2 `libra_test_echo` 返回含 ESC（`\u001b`）字符的字符串时，响应全文不含 ESC 字符。
-- [ ] ER-06/ER-06a 同卡强制门：下方「同卡文档门」逐文件全部通过；网站页另按 GC-MC-05 ①–⑥ 交付（不计入 AC 上限）。
+- [x] AC-1 `libra_test_echo` 返回含 fixture secret（与 `agent_bridge_redaction_test` 同类的 token）的对象时，响应全文不含该 token 字面量。
+- [x] AC-2 `libra_test_echo` 返回含 ESC（`\u001b`）字符的字符串时，响应全文不含 ESC 字符。
+- [x] ER-06/ER-06a 同卡强制门：下方「同卡文档门」逐文件全部通过；网站页另按 GC-MC-05 ①–⑥ 交付（不计入 AC 上限）。
 
 **Verification:**（本卡特有判据，计入 G-03；`--exact` 门按 GC-MC-07 执行）
 
-- [ ] AC-1：`source .env.test && cargo test --test agent_mcp_envelope_test envelope_redacts_secret -- --exact`（new）
-- [ ] AC-2：`source .env.test && cargo test --test agent_mcp_envelope_test envelope_scrubs_control_chars -- --exact`（new）
+- [x] AC-1：`source .env.test && cargo test --test agent_mcp_envelope_test envelope_redacts_secret -- --exact`（new）
+- [x] AC-2：`source .env.test && cargo test --test agent_mcp_envelope_test envelope_scrubs_control_chars -- --exact`（new）
 
 **同卡文档门（ER-06/ER-06a，全局强制，不计入 G-03；判定命令退出码 0 为通过）:**
 
-- [ ] `docs/commands/agent.md`：`rg -qF -- 'LBR-AGENT-034' docs/commands/agent.md && rg -qF -- 'redact' docs/commands/agent.md`
-- [ ] `docs/commands/zh-CN/agent.md`：`rg -qF -- 'LBR-AGENT-034' docs/commands/zh-CN/agent.md && rg -qF -- 'redact' docs/commands/zh-CN/agent.md`
-- [ ] `docs/development/commands/agent.md`：`rg -qF -- 'output.rs' docs/development/commands/agent.md && rg -qF -- 'redact_untrusted' docs/development/commands/agent.md`
-- [ ] 网站源文件 `agent`：`rg -qF -- 'LBR-AGENT-034' ../libra-backend/apps/tanstack-app/content/docs/commands/agent.en.md && rg -qF -- 'redact' ../libra-backend/apps/tanstack-app/content/docs/commands/agent.en.md`；GC-MC-05 ①–⑤ 交付后线上页面：`PAGE="$(curl -fsS https://libra.tools/en/docs/commands/agent)" && printf '%s' "$PAGE" | rg -qF -- 'LBR-AGENT-034' && printf '%s' "$PAGE" | rg -qF -- 'redact'`（GC-MC-05 ⑥）
-- [ ] 测试索引：`rg -q '^\| `agent_mcp_envelope_test` ' tests/INDEX.md && rg -q 'name = "agent_mcp_envelope_test"' Cargo.toml`
-- [ ] 语义复核：本卡 ER-05 Codex review 的输入包含上列每个文档文件的 diff，评审结论须逐文件确认其内容与本卡 `Docs and compatibility impact` 的内容说明一致（网站页另由 GC-MC-05 ④ 的 Claude Code PASS 覆盖）
+- [x] `docs/commands/agent.md`：`rg -qF -- 'LBR-AGENT-034' docs/commands/agent.md && rg -qF -- 'redact' docs/commands/agent.md`
+- [x] `docs/commands/zh-CN/agent.md`：`rg -qF -- 'LBR-AGENT-034' docs/commands/zh-CN/agent.md && rg -qF -- 'redact' docs/commands/zh-CN/agent.md`
+- [x] `docs/development/commands/agent.md`：`rg -qF -- 'output.rs' docs/development/commands/agent.md && rg -qF -- 'redact_untrusted' docs/development/commands/agent.md`
+- [x] 网站源文件 `agent`：`rg -qF -- 'LBR-AGENT-034' ../libra-backend/apps/tanstack-app/content/docs/commands/agent.en.md && rg -qF -- 'redact' ../libra-backend/apps/tanstack-app/content/docs/commands/agent.en.md`；GC-MC-05 ①–⑤ 交付后线上页面：`PAGE="$(curl -fsS https://libra.tools/en/docs/commands/agent)" && printf '%s' "$PAGE" | rg -qF -- 'LBR-AGENT-034' && printf '%s' "$PAGE" | rg -qF -- 'redact'`（GC-MC-05 ⑥）
+- [x] 测试索引：`rg -q '^\| `agent_mcp_envelope_test` ' tests/INDEX.md && rg -q 'name = "agent_mcp_envelope_test"' Cargo.toml`
+- [x] 语义复核：本卡 ER-05 Codex review 的输入包含上列每个文档文件的 diff，评审结论须逐文件确认其内容与本卡 `Docs and compatibility impact` 的内容说明一致（网站页另由 GC-MC-05 ④ 的 Claude Code PASS 覆盖）。Codex：`VERDICT: PASS`，`P0=0`，`P1=0`。Claude Code：`CLAUDE_VERDICT: PASS`，`P0=0`，`P1=0`。
 
 **Full-suite trigger:** `T-1: Cargo.toml 新增 [[test]] 行`
 
@@ -2439,7 +2444,7 @@ ER-01 至 ER-14 按模板原文对本计划全部任务生效（见 [`plan-templ
 
 **Task type:** `implementation`
 
-**Lifecycle / Acceptance:** `pending` / 空
+**Lifecycle / Acceptance:** `done` / `complete`
 
 **Description:** 自 MC-16 拆出。在结果信封中加入 GC-MC-03 ②③：以**完整序列化的 JSON-RPC 响应**（含 `structuredContent` 与 `content[0].text` 两份内容）计量，超过 256 KiB 时为工具错误 `LBR-AGENT-028`（可截断文本字段的截断由使用方声明，见 MC-05，截断后仍以完整响应计量）；读工具 30 s deadline，超时为工具错误 `LBR-AGENT-036`（`retryable: true`）。另注册仅在 `cfg(debug_assertions)` 且 `LIBRA_TEST=1` 时存在的 `libra_test_sleep`（休眠 `ms` 毫秒）与 `libra_test_blob`（服务端生成 `bytes` 字节的字符串字段，请求本身很小）。唯一行为轴：「MCP 结果资源上限」。
 
@@ -2451,35 +2456,39 @@ ER-01 至 ER-14 按模板原文对本计划全部任务生效（见 [`plan-templ
 |---|---|
 | bridge 的 256 KiB 结果上限与超时码先例 | `src/internal/ai/agent_bridge/protocol.rs:47`（`MAX_RESULT_BYTES`）、`:374`（`LBR-AGENT-036`）、`:283-300`（`LBR-AGENT-028`） |
 | 结果信封（MC-16 交付） | `src/internal/ai/mcp_server/output.rs` |
+| 本地门 | `0.30.72`。六个 `agent_mcp_limits_test` `--exact` 均为 `test result: ok. 1 passed; 0 failed`。`agent_mcp_conformance_test` 7 passed。clippy `-D warnings` exit 0。nextest：`Summary [ 597.267s] 10667 tests run: 10667 passed (12 slow), 21 skipped`，exit 0。 |
+| D 组 | tag `v0.30.72` 指向 `4c331fdcb654f17a361f4abfa88ac8472643ea81`。`release.yml` [39499419035](https://github.com/libra-tools/libra/actions/runs/39499419035) success。四个平台产物 HTTP 200。安装脚本 `DEFAULT_VERSION="v0.30.72"`。同一提交上 `base.yml` [39499321010](https://github.com/libra-tools/libra/actions/runs/39499321010) success（八个 job 全 success）与 `codeql.yml` [39499321387](https://github.com/libra-tools/libra/actions/runs/39499321387) success。 |
+| 网站 | `cf` `547d50eadfff2a228b9e4a0d0bf0653c1f052418` 只改 `agent.en.md`。源文件与 `https://libra.tools/en/docs/commands/agent` 都含 `LBR-AGENT-028`、`LBR-AGENT-036` 与 `256 KiB`。Claude Code：`CLAUDE_VERDICT: PASS`，`P0=0`，`P1=0`。 |
+| Codex | 对 `4c331fd`：`VERDICT: PASS`，`P0=0`，`P1=0`。 |
 
 **Acceptance criteria:**
 
-- [ ] AC-1 `libra_test_blob {"bytes": 143360}`（140 KiB，两份内容合计超过 256 KiB）得到工具错误 `LBR-AGENT-028`。
-- [ ] AC-2 `libra_test_blob {"bytes": 102400}` 的响应 `result.structuredContent.len` 等于 102400（`libra_test_blob` 在结果中回报生成的字节数）。
-- [ ] AC-3 同一响应行的字节数不超过 262144。
-- [ ] AC-4 `libra_test_sleep {"ms": 31000}` 得到工具错误 `LBR-AGENT-036`。
-- [ ] AC-5 同一超时结果的 `structuredContent.retryable` 为 `true`。
-- [ ] AC-6 读 deadline 触发后的下一个 `ping` 得到 `{}`。
-- [ ] ER-06/ER-06a 同卡强制门：下方「同卡文档门」逐文件全部通过；网站页另按 GC-MC-05 ①–⑥ 交付（不计入 AC 上限）。
+- [x] AC-1 `libra_test_blob {"bytes": 143360}`（140 KiB，两份内容合计超过 256 KiB）得到工具错误 `LBR-AGENT-028`。
+- [x] AC-2 `libra_test_blob {"bytes": 102400}` 的响应 `result.structuredContent.len` 等于 102400（`libra_test_blob` 在结果中回报生成的字节数）。
+- [x] AC-3 同一响应行的字节数不超过 262144。
+- [x] AC-4 `libra_test_sleep {"ms": 31000}` 得到工具错误 `LBR-AGENT-036`。
+- [x] AC-5 同一超时结果的 `structuredContent.retryable` 为 `true`。
+- [x] AC-6 读 deadline 触发后的下一个 `ping` 得到 `{}`。
+- [x] ER-06/ER-06a 同卡强制门：下方「同卡文档门」逐文件全部通过；网站页另按 GC-MC-05 ①–⑥ 交付（不计入 AC 上限）。
 
 **Verification:**（本卡特有判据，计入 G-03；`--exact` 门按 GC-MC-07 执行）
 
-- [ ] AC-1：`source .env.test && cargo test --test agent_mcp_limits_test envelope_caps_full_response -- --exact`（new）
-- [ ] AC-2：`source .env.test && cargo test --test agent_mcp_limits_test envelope_allows_under_cap -- --exact`（new）
-- [ ] AC-3：`source .env.test && cargo test --test agent_mcp_limits_test envelope_under_cap_fits_wire_limit -- --exact`（new）
-- [ ] AC-4：`source .env.test && cargo test --test agent_mcp_limits_test read_deadline_is_tool_error -- --exact`（new）
-- [ ] AC-5：`source .env.test && cargo test --test agent_mcp_limits_test read_deadline_is_retryable -- --exact`（new）
-- [ ] AC-6：`source .env.test && cargo test --test agent_mcp_limits_test server_survives_deadline -- --exact`（new）
+- [x] AC-1：`source .env.test && cargo test --test agent_mcp_limits_test envelope_caps_full_response -- --exact`（new）
+- [x] AC-2：`source .env.test && cargo test --test agent_mcp_limits_test envelope_allows_under_cap -- --exact`（new）
+- [x] AC-3：`source .env.test && cargo test --test agent_mcp_limits_test envelope_under_cap_fits_wire_limit -- --exact`（new）
+- [x] AC-4：`source .env.test && cargo test --test agent_mcp_limits_test read_deadline_is_tool_error -- --exact`（new）
+- [x] AC-5：`source .env.test && cargo test --test agent_mcp_limits_test read_deadline_is_retryable -- --exact`（new）
+- [x] AC-6：`source .env.test && cargo test --test agent_mcp_limits_test server_survives_deadline -- --exact`（new）
 
 **同卡文档门（ER-06/ER-06a，全局强制，不计入 G-03；判定命令退出码 0 为通过）:**
 
-- [ ] `docs/commands/agent.md`：`rg -qF -- 'LBR-AGENT-028' docs/commands/agent.md && rg -qF -- 'LBR-AGENT-036' docs/commands/agent.md && rg -qF -- '256 KiB' docs/commands/agent.md`
-- [ ] `docs/commands/zh-CN/agent.md`：`rg -qF -- 'LBR-AGENT-028' docs/commands/zh-CN/agent.md && rg -qF -- 'LBR-AGENT-036' docs/commands/zh-CN/agent.md && rg -qF -- '256 KiB' docs/commands/zh-CN/agent.md`
-- [ ] `docs/development/commands/agent.md`：`rg -qF -- '256 KiB' docs/development/commands/agent.md && rg -qF -- 'deadline' docs/development/commands/agent.md`
-- [ ] 网站源文件 `agent`：`rg -qF -- 'LBR-AGENT-028' ../libra-backend/apps/tanstack-app/content/docs/commands/agent.en.md && rg -qF -- 'LBR-AGENT-036' ../libra-backend/apps/tanstack-app/content/docs/commands/agent.en.md && rg -qF -- '256 KiB' ../libra-backend/apps/tanstack-app/content/docs/commands/agent.en.md`；GC-MC-05 ①–⑤ 交付后线上页面：`PAGE="$(curl -fsS https://libra.tools/en/docs/commands/agent)" && printf '%s' "$PAGE" | rg -qF -- 'LBR-AGENT-028' && printf '%s' "$PAGE" | rg -qF -- 'LBR-AGENT-036' && printf '%s' "$PAGE" | rg -qF -- '256 KiB'`（GC-MC-05 ⑥）
-- [ ] `docs/error-codes.md`：`rg -qF -- 'MCP tool result' docs/error-codes.md`
-- [ ] 测试索引：`rg -q '^\| `agent_mcp_limits_test` ' tests/INDEX.md && rg -q 'name = "agent_mcp_limits_test"' Cargo.toml`
-- [ ] 语义复核：本卡 ER-05 Codex review 的输入包含上列每个文档文件的 diff，评审结论须逐文件确认其内容与本卡 `Docs and compatibility impact` 的内容说明一致（网站页另由 GC-MC-05 ④ 的 Claude Code PASS 覆盖）
+- [x] `docs/commands/agent.md`：`rg -qF -- 'LBR-AGENT-028' docs/commands/agent.md && rg -qF -- 'LBR-AGENT-036' docs/commands/agent.md && rg -qF -- '256 KiB' docs/commands/agent.md`
+- [x] `docs/commands/zh-CN/agent.md`：`rg -qF -- 'LBR-AGENT-028' docs/commands/zh-CN/agent.md && rg -qF -- 'LBR-AGENT-036' docs/commands/zh-CN/agent.md && rg -qF -- '256 KiB' docs/commands/zh-CN/agent.md`
+- [x] `docs/development/commands/agent.md`：`rg -qF -- '256 KiB' docs/development/commands/agent.md && rg -qF -- 'deadline' docs/development/commands/agent.md`
+- [x] 网站源文件 `agent`：`rg -qF -- 'LBR-AGENT-028' ../libra-backend/apps/tanstack-app/content/docs/commands/agent.en.md && rg -qF -- 'LBR-AGENT-036' ../libra-backend/apps/tanstack-app/content/docs/commands/agent.en.md && rg -qF -- '256 KiB' ../libra-backend/apps/tanstack-app/content/docs/commands/agent.en.md`；GC-MC-05 ①–⑤ 交付后线上页面：`PAGE="$(curl -fsS https://libra.tools/en/docs/commands/agent)" && printf '%s' "$PAGE" | rg -qF -- 'LBR-AGENT-028' && printf '%s' "$PAGE" | rg -qF -- 'LBR-AGENT-036' && printf '%s' "$PAGE" | rg -qF -- '256 KiB'`（GC-MC-05 ⑥）
+- [x] `docs/error-codes.md`：`rg -qF -- 'MCP tool result' docs/error-codes.md`
+- [x] 测试索引：`rg -q '^\| `agent_mcp_limits_test` ' tests/INDEX.md && rg -q 'name = "agent_mcp_limits_test"' Cargo.toml`
+- [x] 语义复核：本卡 ER-05 Codex review 的输入包含上列每个文档文件的 diff，评审结论须逐文件确认其内容与本卡 `Docs and compatibility impact` 的内容说明一致（网站页另由 GC-MC-05 ④ 的 Claude Code PASS 覆盖）。Codex：`VERDICT: PASS`，`P0=0`，`P1=0`。Claude Code：`CLAUDE_VERDICT: PASS`，`P0=0`，`P1=0`。
 
 **Full-suite trigger:** `T-1: Cargo.toml 新增 [[test]] 行`
 
@@ -2688,7 +2697,7 @@ ER-01 至 ER-14 按模板原文对本计划全部任务生效（见 [`plan-templ
 
 **Task type:** `implementation`
 
-**Lifecycle / Acceptance:** `in-progress` / 空
+**Lifecycle / Acceptance:** `done` / `complete`
 
 **Description:** 自 MC-01 拆出。每个请求发出一个 `agent.mcp.request` tracing span，字段只取服务端可控或已净化的值：`method`（仅当属于已知方法集合时记原名，否则记 `"unknown"`）、`id_hash`（JSON-RPC `id` 规范化后 SHA-256 的前 16 位十六进制，不记原值）、`repository_id`；`tools/call` 另带 `tool`（仅当属于已注册工具名时记原名，否则 `"unknown"`）；不记 `clientInfo`、`params` 与结果内容。唯一行为轴：「MCP 请求 tracing」。
 
@@ -2701,6 +2710,7 @@ ER-01 至 ER-14 按模板原文对本计划全部任务生效（见 [`plan-templ
 | bridge 请求 span 的结构先例——注意它直接记录原始 `method` 与 `id`，本卡**不得**照搬，必须按本卡规则净化 | `src/command/agent/bridge.rs:61-72`；`tests/agent_bridge_span_test.rs:1-40`（全局订阅者捕获方式可复用） |
 | 协议核心（MC-01 交付） | `src/internal/ai/mcp_server/stdio.rs` |
 | 版本面 | `0.30.69`。八个 `agent_mcp_span_test` `--exact` 均通过（`cargo test --test agent_mcp_span_test`：8 passed）。`cargo clippy --all-targets --all-features -- -D warnings` exit 0。`cargo nextest run --all --no-fail-fast --retries 2`：`Summary [ 605.838s] 10644 tests run: 10644 passed (12 slow, 1 flaky), 21 skipped`，exit 0。 |
+| D 组 | tag `v0.30.69` 指向 `b915419b7d98d606404499f70da2f7193dbd84ec`。`release.yml` [39440601807](https://github.com/libra-tools/libra/actions/runs/39440601807) success。四个平台产物 HTTP 200。安装脚本 `DEFAULT_VERSION="v0.30.69"`。含该提交的 main `3b1200a80e00e8d1a8866ab07aa790c27f8a17a9` 上 `base.yml` [39459099628](https://github.com/libra-tools/libra/actions/runs/39459099628) success（八个 job 全 success）与 `codeql.yml` [39459099663](https://github.com/libra-tools/libra/actions/runs/39459099663) success。中间几次 `base.yml` 被后续 main 提交取消，最终这次跑完。 |
 
 **Acceptance criteria:**
 
@@ -2712,7 +2722,7 @@ ER-01 至 ER-14 按模板原文对本计划全部任务生效（见 [`plan-templ
 - [x] AC-6 请求 `params` 中的标记字符串不出现在该 span 的任何字段中。
 - [x] AC-7 `tools/call libra_test_echo` 的 span 的 `tool` 字段等于 `"libra_test_echo"`。
 - [x] AC-8 `tools/call` 以含标记字符串的未注册工具名调用时，span 的 `tool` 字段等于 `"unknown"`。
-- [ ] ER-06/ER-06a 同卡强制门：下方「同卡文档门」逐文件全部通过；网站页另按 GC-MC-05 ①–⑥ 交付（不计入 AC 上限）。
+- [x] ER-06/ER-06a 同卡强制门：下方「同卡文档门」逐文件全部通过；网站页另按 GC-MC-05 ①–⑥ 交付（不计入 AC 上限）。
 
 **Verification:**（本卡特有判据，计入 G-03；`--exact` 门按 GC-MC-07 执行）
 
@@ -2729,7 +2739,7 @@ ER-01 至 ER-14 按模板原文对本计划全部任务生效（见 [`plan-templ
 
 - [x] `docs/development/commands/agent.md`：`rg -qF -- 'agent.mcp.request' docs/development/commands/agent.md && rg -qF -- 'id_hash' docs/development/commands/agent.md`
 - [x] 测试索引：`rg -q '^\| `agent_mcp_span_test` ' tests/INDEX.md && rg -q 'name = "agent_mcp_span_test"' Cargo.toml`
-- [ ] 语义复核：本卡 ER-05 Codex review 的输入包含上列每个文档文件的 diff，评审结论须逐文件确认其内容与本卡 `Docs and compatibility impact` 的内容说明一致（网站页另由 GC-MC-05 ④ 的 Claude Code PASS 覆盖）
+- [x] 语义复核：本卡 ER-05 Codex review 的输入包含上列每个文档文件的 diff，评审结论须逐文件确认其内容与本卡 `Docs and compatibility impact` 的内容说明一致（网站页另由 GC-MC-05 ④ 的 Claude Code PASS 覆盖）。Codex：`VERDICT: PASS`，`P0=0`，`P1=0`。本卡无网站页。
 
 **Full-suite trigger:** `T-1: Cargo.toml 新增 [[test]] 行`
 
@@ -3215,7 +3225,7 @@ ER-01 至 ER-14 按模板原文对本计划全部任务生效（见 [`plan-templ
 
 **Task type:** `implementation`
 
-**Lifecycle / Acceptance:** `pending` / 空
+**Lifecycle / Acceptance:** `in-progress` / 空
 
 **Description:** 自 MC-19 拆出。新增读执行器 `mcp_server/exec.rs`：每次读工具调用由服务进程派生一个隐藏的读子进程 `libra agent mcp --read-worker`（`#[arg(hide = true)]`，不出现在 help；只从 stdin 读取一个由服务端构造的内部请求、向 stdout 写一个结果；在 `src/cli.rs` 中先于常规预检被分派到**只读预检**：只做仓库发现并以只读方式读取 `core.objectformat` 设置 hash kind（SHA-1/SHA-256 仓库都正确），不执行数据库迁移（schema 不是当前版本即以 `LBR-AGENT-037` 失败）、不修复对象索引、不启动自动升级检查或任何启动维护；以发起进程的工作目录启动，只读访问仓库），容量 4 的信号量限制同时存在的读子进程数。读 deadline 到期时服务立即回复 `LBR-AGENT-036`，并在 Unix 上向读子进程的进程组发送 `SIGKILL`、在 Windows 上 `TerminateProcess`，**回收（wait）完成后才归还槽位**（≤ 1 s）。因此任何读路径（status、diff 含 rename 检测、checkpoint、workspace、trace）的阻塞计算、I/O 与内存都随子进程一起被强制终止，超时的读工作不会继续占用槽位或资源。另注册仅在 `cfg(debug_assertions)` 且 `LIBRA_TEST=1` 时存在的 `libra_test_block`（在读子进程内阻塞并写 PID 文件）与 `libra_test_hash_kind`（在读子进程内返回当前 hash kind），以及 debug-only 读 deadline 覆盖 `LIBRA_MCP_TEST_READ_DEADLINE_MS`。唯一行为轴：「读工具子进程执行器」。
 
@@ -3227,37 +3237,38 @@ ER-01 至 ER-14 按模板原文对本计划全部任务生效（见 [`plan-templ
 |---|---|
 | bridge 的读超时先例 | `src/internal/ai/agent_bridge/protocol.rs:374`（`LBR-AGENT-036`） |
 | 读 deadline（MC-19 交付） | `src/internal/ai/mcp_server/tools/mod.rs` |
+| 本地门 | `v0.30.73` 至 `v0.30.76` 的 tag 都不改。`v0.30.76`（`9694ff0`）Codex `VERDICT: FAIL`，`P0=0`，`P1=1`：正常退出路径在槽位仍存活时 `reader.join()`，未结束的读取线程也在释放槽位之前启动 join。前滚 `0.30.77`：stdout 经有界 channel 交回；任何 `join` 之前先 `drop` 槽位，回复路径不再 `join`。`deadline_reply_does_not_wait_for_stdout_holder`、`blocking_read_times_out`、`slots_return_after_workers_killed`、`envelope_allows_under_cap` 均为 `test result: ok. 1 passed; 0 failed`。clippy `-D warnings` exit 0。nextest：`Summary [ 572.138s] 10676 tests run: 10676 passed (12 slow), 21 skipped`，exit 0。 |
 
 **Acceptance criteria:**
 
-- [ ] AC-1 读 deadline 覆盖为 2 s 时，`libra_test_block` 调用在 5 s 内得到工具错误 `LBR-AGENT-036`。
-- [ ] AC-2 同一超时后 1 s 内，`libra_test_block` 的读子进程（PID 文件所列）已不存在。
-- [ ] AC-3 4 个并发 `libra_test_block` 全部超时后 2 s 内，第 5 个读工具调用 `libra_test_sleep {"ms": 10}` 成功（槽位已随子进程回收归还）。
-- [ ] AC-4 在 `libra init --object-format sha256` 的仓库中，`libra_test_hash_kind` 返回 `"sha256"`。
-- [ ] AC-5 仓库数据库 schema 版本低于本二进制要求（测试把版本记录回退一级模拟）时，读工具调用得到工具错误 `LBR-AGENT-037`。
-- [ ] AC-6 同一调用后数据库记录的 schema 版本不变（读子进程不执行迁移）。
-- [ ] AC-7 对象索引处于需修复状态的仓库中调用读工具后，对象索引文件的内容与修改时间不变（读子进程不修复）。
-- [ ] AC-8 读工具调用后 `LIBRA_HOME/upgrade/` 下没有新增或修改的文件（读子进程不启动自动升级检查）。
+- [x] AC-1 读 deadline 覆盖为 2 s 时，`libra_test_block` 调用在 5 s 内得到工具错误 `LBR-AGENT-036`。
+- [x] AC-2 同一超时后 1 s 内，`libra_test_block` 的读子进程（PID 文件所列）已不存在。
+- [x] AC-3 4 个并发 `libra_test_block` 全部超时后 2 s 内，第 5 个读工具调用 `libra_test_sleep {"ms": 10}` 成功（槽位已随子进程回收归还）。
+- [x] AC-4 在 `libra init --object-format sha256` 的仓库中，`libra_test_hash_kind` 返回 `"sha256"`。
+- [x] AC-5 仓库数据库 schema 版本低于本二进制要求（测试把版本记录回退一级模拟）时，读工具调用得到工具错误 `LBR-AGENT-037`。
+- [x] AC-6 同一调用后数据库记录的 schema 版本不变（读子进程不执行迁移）。
+- [x] AC-7 对象索引处于需修复状态的仓库中调用读工具后，对象索引文件的内容与修改时间不变（读子进程不修复）。
+- [x] AC-8 读工具调用后 `LIBRA_HOME/upgrade/` 下没有新增或修改的文件（读子进程不启动自动升级检查）。
 - [ ] ER-06/ER-06a 同卡强制门：下方「同卡文档门」逐文件全部通过；网站页另按 GC-MC-05 ①–⑥ 交付（不计入 AC 上限）。
 
 **Verification:**（本卡特有判据，计入 G-03；`--exact` 门按 GC-MC-07 执行）
 
-- [ ] AC-1：`source .env.test && cargo test --test agent_mcp_exec_test blocking_read_times_out -- --exact`（new）
-- [ ] AC-2：`source .env.test && cargo test --test agent_mcp_exec_test timed_out_worker_is_killed -- --exact`（new）
-- [ ] AC-3：`source .env.test && cargo test --test agent_mcp_exec_test slots_return_after_workers_killed -- --exact`（new）
-- [ ] AC-4：`source .env.test && cargo test --test agent_mcp_exec_test read_worker_uses_repo_hash_kind -- --exact`（new）
-- [ ] AC-5：`source .env.test && cargo test --test agent_mcp_exec_test read_worker_refuses_outdated_schema -- --exact`（new）
-- [ ] AC-6：`source .env.test && cargo test --test agent_mcp_exec_test read_worker_does_not_migrate -- --exact`（new）
-- [ ] AC-7：`source .env.test && cargo test --test agent_mcp_exec_test read_worker_does_not_repair_object_index -- --exact`（new）
-- [ ] AC-8：`source .env.test && cargo test --test agent_mcp_exec_test read_worker_skips_upgrade_check -- --exact`（new）
+- [x] AC-1：`source .env.test && cargo test --test agent_mcp_exec_test blocking_read_times_out -- --exact`（new）
+- [x] AC-2：`source .env.test && cargo test --test agent_mcp_exec_test timed_out_worker_is_killed -- --exact`（new）
+- [x] AC-3：`source .env.test && cargo test --test agent_mcp_exec_test slots_return_after_workers_killed -- --exact`（new）
+- [x] AC-4：`source .env.test && cargo test --test agent_mcp_exec_test read_worker_uses_repo_hash_kind -- --exact`（new）
+- [x] AC-5：`source .env.test && cargo test --test agent_mcp_exec_test read_worker_refuses_outdated_schema -- --exact`（new）
+- [x] AC-6：`source .env.test && cargo test --test agent_mcp_exec_test read_worker_does_not_migrate -- --exact`（new）
+- [x] AC-7：`source .env.test && cargo test --test agent_mcp_exec_test read_worker_does_not_repair_object_index -- --exact`（new）
+- [x] AC-8：`source .env.test && cargo test --test agent_mcp_exec_test read_worker_skips_upgrade_check -- --exact`（new）
 
 **同卡文档门（ER-06/ER-06a，全局强制，不计入 G-03；判定命令退出码 0 为通过）:**
 
-- [ ] `docs/commands/agent.md`：`rg -qF -- 'LBR-AGENT-036' docs/commands/agent.md && rg -qF -- '4 个并发读子进程' docs/commands/agent.md`
-- [ ] `docs/commands/zh-CN/agent.md`：`rg -qF -- 'LBR-AGENT-036' docs/commands/zh-CN/agent.md && rg -qF -- '4 个并发读子进程' docs/commands/zh-CN/agent.md`
-- [ ] `docs/development/commands/agent.md`：`rg -qF -- '--read-worker' docs/development/commands/agent.md && rg -qF -- 'SIGKILL' docs/development/commands/agent.md`
+- [x] `docs/commands/agent.md`：`rg -qF -- 'LBR-AGENT-036' docs/commands/agent.md && rg -qF -- '4 个并发读子进程' docs/commands/agent.md`
+- [x] `docs/commands/zh-CN/agent.md`：`rg -qF -- 'LBR-AGENT-036' docs/commands/zh-CN/agent.md && rg -qF -- '4 个并发读子进程' docs/commands/zh-CN/agent.md`
+- [x] `docs/development/commands/agent.md`：`rg -qF -- '--read-worker' docs/development/commands/agent.md && rg -qF -- 'SIGKILL' docs/development/commands/agent.md`
 - [ ] 网站源文件 `agent`：`rg -qF -- 'LBR-AGENT-036' ../libra-backend/apps/tanstack-app/content/docs/commands/agent.en.md && rg -qF -- '4 concurrent read workers' ../libra-backend/apps/tanstack-app/content/docs/commands/agent.en.md`；GC-MC-05 ①–⑤ 交付后线上页面：`PAGE="$(curl -fsS https://libra.tools/en/docs/commands/agent)" && printf '%s' "$PAGE" | rg -qF -- 'LBR-AGENT-036' && printf '%s' "$PAGE" | rg -qF -- '4 concurrent read workers'`（GC-MC-05 ⑥）
-- [ ] 测试索引：`rg -q '^\| `agent_mcp_exec_test` ' tests/INDEX.md && rg -q 'name = "agent_mcp_exec_test"' Cargo.toml`
+- [x] 测试索引：`rg -q '^\| `agent_mcp_exec_test` ' tests/INDEX.md && rg -q 'name = "agent_mcp_exec_test"' Cargo.toml`
 - [ ] 语义复核：本卡 ER-05 Codex review 的输入包含上列每个文档文件的 diff，评审结论须逐文件确认其内容与本卡 `Docs and compatibility impact` 的内容说明一致（网站页另由 GC-MC-05 ④ 的 Claude Code PASS 覆盖）
 
 **Full-suite trigger:** `T-1: src/cli.rs 全局预检分派与 Cargo.toml [[test]] 行`

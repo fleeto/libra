@@ -28,6 +28,12 @@
   `reasoningEncryptedContent`, and `thoughtSignature`. The checkpoint stays
   `Unproven` / `Partial` and does not archive those fields as native artifacts.
 
+## [0.30.70] — 2026-10-20
+
+### MCP server
+
+- Tool results from `libra agent mcp` are redacted before they are written. If redaction cannot be parsed, the server returns tool error `LBR-AGENT-034` and does not send the original result.
+
 ## [0.30.69] — 2026-10-20
 
 ### MCP server

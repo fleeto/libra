@@ -2,44 +2,140 @@
 //!
 //! stdout receives one JSON-RPC message per line. Diagnostics stay off stdout.
 
-use std::io::ErrorKind;
+use std::{collections::VecDeque, io::ErrorKind};
 
 use serde_json::Value;
-use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::{
+    io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt},
+    sync::mpsc,
+    task::JoinHandle,
+};
 
 use super::protocol::{self, InboundLine, MAX_LINE_BYTES, Session};
 
 async fn repository_id() -> String {
-    match crate::internal::config::ConfigKv::get_best_effort("libra.repoid").await {
-        Ok(Some(entry))
-            if !entry.encrypted
-                && !entry.value.trim().is_empty()
-                && entry.value != "unknown-repo" =>
-        {
-            entry.value
-        }
-        _ => "unavailable".to_string(),
+    let Ok(storage) = crate::utils::util::try_get_storage_path(None) else {
+        return "unavailable".to_string();
+    };
+    let db_path = storage.join(crate::utils::util::DATABASE);
+    let Ok(conn) = crate::internal::db::open_database_without_migrations(&db_path).await else {
+        return "unavailable".to_string();
+    };
+    use sea_orm::{ConnectionTrait, Statement};
+    let Ok(Some(row)) = conn
+        .query_one_raw(Statement::from_sql_and_values(
+            conn.get_database_backend(),
+            "SELECT value, encrypted FROM config_kv WHERE key = ? ORDER BY id DESC LIMIT 1",
+            ["libra.repoid".into()],
+        ))
+        .await
+    else {
+        return "unavailable".to_string();
+    };
+    let Ok(value) = row.try_get_by_index::<String>(0) else {
+        return "unavailable".to_string();
+    };
+    let encrypted = row.try_get_by_index::<bool>(1).unwrap_or(true);
+    if encrypted || value.trim().is_empty() || value == "unknown-repo" {
+        "unavailable".to_string()
+    } else {
+        value
     }
 }
 
 pub async fn serve<R, W>(reader: R, mut writer: W) -> std::io::Result<()>
 where
-    R: AsyncBufRead + Unpin,
+    R: AsyncBufRead + Unpin + Send + 'static,
     W: AsyncWrite + Unpin,
 {
     let mut reader = reader;
     let mut session = Session::with_repository_id(repository_id().await);
+    let (sender, mut incoming) = mpsc::channel(8);
+    tokio::spawn(async move {
+        loop {
+            match read_line_capped(&mut reader, MAX_LINE_BYTES).await {
+                Ok(None) => break,
+                Ok(Some(line)) => {
+                    if sender.send(Ok(line)).await.is_err() {
+                        break;
+                    }
+                }
+                Err(error) => {
+                    let _ = sender.send(Err(error)).await;
+                    break;
+                }
+            }
+        }
+    });
+    let mut inflight: VecDeque<JoinHandle<Option<Value>>> = VecDeque::new();
     loop {
-        let inbound = read_line_capped(&mut reader, MAX_LINE_BYTES).await?;
-        let inbound = match inbound {
-            None => break,
-            Some(line) => line,
-        };
-        if let Some(response) = protocol::handle_message(&mut session, &inbound) {
-            write_message(&mut writer, &response).await?;
+        if inflight.len() >= 4 {
+            write_finished(&mut writer, &mut inflight).await?;
+            continue;
+        }
+        tokio::select! {
+            biased;
+            finished = join_front(inflight.front_mut()), if !inflight.is_empty() => {
+                inflight.pop_front();
+                if let Some(response) = finished? {
+                    let response = super::output::finalize_tool_result(response);
+                    write_message(&mut writer, &response).await?;
+                }
+            }
+            next = incoming.recv() => {
+                let Some(next) = next else {
+                    break;
+                };
+                let line = next?;
+                if super::exec::line_starts_read_tool(&line) {
+                    let mut local = session.duplicate();
+                    inflight.push_back(tokio::task::spawn_blocking(move || {
+                        protocol::handle_message(&mut local, &line)
+                    }));
+                } else {
+                    while !inflight.is_empty() {
+                        write_finished(&mut writer, &mut inflight).await?;
+                    }
+                    if let Some(response) = protocol::handle_message(&mut session, &line) {
+                        let response = super::output::finalize_tool_result(response);
+                        write_message(&mut writer, &response).await?;
+                    }
+                }
+            }
         }
     }
+    while !inflight.is_empty() {
+        write_finished(&mut writer, &mut inflight).await?;
+    }
     writer.flush().await?;
+    Ok(())
+}
+
+async fn join_front(
+    handle: Option<&mut JoinHandle<Option<Value>>>,
+) -> std::io::Result<Option<Value>> {
+    match handle {
+        Some(handle) => handle.await.map_err(|_| {
+            std::io::Error::other("MCP read tool task failed before it produced a response")
+        }),
+        None => Ok(None),
+    }
+}
+
+async fn write_finished<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    inflight: &mut VecDeque<JoinHandle<Option<Value>>>,
+) -> std::io::Result<()> {
+    let Some(handle) = inflight.pop_front() else {
+        return Ok(());
+    };
+    let response = handle.await.map_err(|_| {
+        std::io::Error::other("MCP read tool task failed before it produced a response")
+    })?;
+    if let Some(response) = response {
+        let response = super::output::finalize_tool_result(response);
+        write_message(writer, &response).await?;
+    }
     Ok(())
 }
 

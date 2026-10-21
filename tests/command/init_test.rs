@@ -1469,6 +1469,68 @@ fn test_init_template_dotdot_target_skips_self_copy() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn test_init_non_directory_parent_component_refuses_before_writing() {
+    for bare in [false, true] {
+        for target in ["regular-file/..", "regular-file/child", "link-to-file/.."] {
+            let root = tempdir().unwrap();
+            let file = root.path().join("regular-file");
+            fs::write(&file, "user data\n").unwrap();
+            std::os::unix::fs::symlink(&file, root.path().join("link-to-file")).unwrap();
+
+            let mut args = vec!["--json", "init", "--vault", "false", "-q"];
+            if bare {
+                args.push("--bare");
+            }
+            args.push(target);
+            let result = run_libra_command(&args, root.path());
+            assert_eq!(result.status.code(), Some(128), "{target}: {result:?}");
+            let (_human, report) = super::parse_cli_error_stderr(&result.stderr);
+            assert_eq!(report.error_code, "LBR-REPO-002", "{target}: {result:?}");
+            assert!(report.message.contains("not a directory"));
+            for path in [".libra", "libra.db", "HEAD", "objects"] {
+                assert!(
+                    !root.path().join(path).exists(),
+                    "{path} was created for invalid target {target}"
+                );
+            }
+            assert_eq!(fs::read_to_string(&file).unwrap(), "user data\n");
+        }
+    }
+}
+
+#[test]
+fn test_init_missing_parent_alias_uses_actual_storage_for_postcheck() {
+    let root = tempdir().unwrap();
+    let result = run_libra_command(
+        &[
+            "init",
+            "--vault",
+            "false",
+            "--object-format",
+            "sha256",
+            "-q",
+            "missing/..",
+        ],
+        root.path(),
+    );
+    assert_cli_success(&result, "normalized init target");
+    assert!(root.path().join(".libra/libra.db").exists());
+    assert!(!root.path().join("missing").exists());
+    let status = run_libra_command(&["status", "--short"], root.path());
+    assert_cli_success(&status, "status after normalized init target");
+    let object_format = run_libra_command(
+        &["config", "--local", "--get", "core.objectformat"],
+        root.path(),
+    );
+    assert_cli_success(&object_format, "object format after normalized init target");
+    assert_eq!(
+        String::from_utf8_lossy(&object_format.stdout).trim(),
+        "sha256"
+    );
+}
+
 #[test]
 fn test_init_template_inside_storage_is_refused_before_reinit_writes() {
     let root = tempdir().unwrap();

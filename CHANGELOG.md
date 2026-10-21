@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-## [0.30.78] — 2026-10-21
+## [0.30.80] — 2026-10-21
 
 ### Issue #478 plumbing/porcelain parity
 
@@ -20,6 +20,15 @@
   `--grep`, `--date`, and a positional ref; `blame` gains `-M`/`-C`, `--date`,
   and `--incremental`; `rev-list` gains `--no-walk` and `--disk-usage`;
   `fast-import` accepts a positional file and `--dry-run`.
+
+### Agent MCP and rebase
+
+- `libra agent mcp` runs read tools in at most four worker processes. A read
+  that exceeds its deadline returns `LBR-AGENT-036`; its worker is killed
+  before the slot is reused.
+- `rebase` accepts `-x` for `--exec`, `--merge`/`-m` as merge-backend selectors,
+  and `--signoff`/`-s` for replayed commits. `--apply` now reports the
+  unsupported backend explicitly.
 
 ### OpenCode thinking capture
 
@@ -61,6 +70,9 @@
   fails, including bare targets and paths spelled through `..`.
 - Keep existing user-file permissions when `--shared` converts into an existing
   bare target; apply the requested mode to new repository entries.
+- Use the resolved target for the post-init repository check. On Unix, reject
+  an existing non-directory path component with `LBR-REPO-002` before creating
+  repository files.
 
 ## [0.30.70] — 2026-10-20
 

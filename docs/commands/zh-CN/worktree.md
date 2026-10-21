@@ -80,7 +80,7 @@ libra worktree add experiment --path "../实验 workspace"
 
 #### FUSE worktree
 
-启用 `worktree-fuse` 的 Unix 构建中，`add <NAME> --fuse` 需要可用的 FUSE 驱动（Linux 为 `/dev/fuse`，macOS 为 macFUSE）。官方发行二进制不启用 `worktree-fuse`；需自行构建才可使用。在这种构建中，`-f` 是 `--fuse` 的缩写，不是 `--force`。此处的 macFUSE 托管目录遮蔽保护要求 Libra 0.30.78 或更新版本。它以 `.libra/worktree/fuse/<NAME>/workspace` 为挂载点，同级 `upper/` 为可写 overlay。显式 `--path` 可选择外部挂载点；位于 lower tree、upper tree、共享元数据或其他托管工作区内的目标会在创建前拒绝。内部默认目录通过 overlay 中 opaque 的 `.libra/worktree` 目录遮蔽，避免递归暴露自身挂载点、upper 或兄弟工作区。文件系统无法建立该遮蔽时拒绝挂载。
+启用 `worktree-fuse` 的 Unix 构建中，`add <NAME> --fuse` 需要可用的 FUSE 驱动（Linux 为 `/dev/fuse`，macOS 为 macFUSE）。官方发行二进制不启用 `worktree-fuse`；需自行构建才可使用。在这种构建中，`-f` 是 `--fuse` 的缩写，不是 `--force`。此处的 macFUSE 托管目录遮蔽保护在 Libra 0.30.80 或更新版本受支持。它以 `.libra/worktree/fuse/<NAME>/workspace` 为挂载点，同级 `upper/` 为可写 overlay。显式 `--path` 可选择外部挂载点；位于 lower tree、upper tree、共享元数据或其他托管工作区内的目标会在创建前拒绝。内部默认目录通过 overlay 中 opaque 的 `.libra/worktree` 目录遮蔽，避免递归暴露自身挂载点、upper 或兄弟工作区。文件系统无法建立该遮蔽时拒绝挂载。
 
 FUSE 与普通 worktree 不能占用同一名称。FUSE registry 使用 `{ "schema_version": 1, "entries": [...] }`；已知旧格式仍可读取，不移动原目录。FUSE worktree 不支持 `move`，也不支持按名称或路径修复身份（`repair <NAME>` / `repair --path <PATH>`）。注册表修复请用全局 `worktree repair --confirm`；FUSE 不采用普通 linked worktree 的私有身份布局。其 `remove` 继续使用卸载并删除 upper 的既有语义，不采用普通 worktree 的保留目录分离语义。对于新的托管默认布局，还会删除空挂载目录和容器；目录非空或清理失败时保留注册及名称供重试。旧布局和外部挂载点的目录仍保留。`umount` 继续接收实际路径，不接收 worktree 名称。
 

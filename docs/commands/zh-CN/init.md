@@ -90,6 +90,20 @@ Convert（`--from-git-repository`）仅允许 SHA-1 Git → SHA-1 Libra。与 Co
 libra init --from-git-repository ../old-project
 ```
 
+#### 中断转换与恢复
+
+转换途中发生普通错误或收到 SIGINT/SIGTERM 时，Libra 会回滚本次创建的目标内容，
+保留用户文件与源 `.git`，可立即重试。硬中断（如 SIGKILL 或断电）会留下
+`CONVERSION_IN_PROGRESS` 标记；在处理前，其他命令会拒绝把该仓库当作空仓库。
+使用相同 Git 源重试时，只有能验证原进程已退出且源路径匹配，才会把不完整的
+`.libra` 改名为同级 `.libra.incomplete-<timestamp>` 并重新转换；不会删除残留目录。
+
+在 macOS 上，Libra 0.30.78 起的转换标记可在**同一启动会话**内验证硬中断后的
+进程身份。旧版标记、其他主机或重启后的标记无法在本机证明原进程已退出，
+会以 `LBR-REPO-003` 拒绝自动接管。先确认所有主机均无转换在运行，再按错误提示
+执行人工恢复，不要直接删除存储目录。原进程仍在运行时返回 `LBR-CONFLICT-002`；
+记录的 Git 源与重试源不同也以 `LBR-REPO-003` 拒绝。
+
 ### `--vault <BOOL>`
 
 启用或禁用 vault-backed PGP 签名。默认为 `true`。启用时，Libra 会在初始化期间生成 PGP 签名密钥并将其存储在 vault 中。设为 `false` 可完全跳过 vault 设置。

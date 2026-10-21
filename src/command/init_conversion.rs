@@ -52,20 +52,32 @@ impl ConversionOwner {
     pub fn current() -> Self {
         Self {
             pid: std::process::id(),
-            start_time: crate::command::control_lock::current_pid_starttime(),
+            // Older macOS clients cannot read process start times. Keep this
+            // field empty for them; the new reader uses the marker's v2 field.
+            start_time: if cfg!(target_os = "macos") {
+                None
+            } else {
+                crate::command::control_lock::current_pid_starttime()
+            },
         }
     }
 
     /// Whether the recorded owner process is still running.
     ///
     /// A cross-machine or pre-start-time marker (no `start_time`) can never be
-    /// proven dead, so it is reported as live — the retry refuses rather than
-    /// guessing.
+    /// proven dead, so it is reported as live. A live PID whose start time
+    /// cannot be read is also treated as unknown and blocks recovery.
     pub fn is_live(&self) -> bool {
         let Some(start_time) = self.start_time else {
             return true;
         };
-        crate::command::control_lock::control_writer_instance_matches(self.pid, Some(start_time))
+        if !crate::command::control_lock::pid_is_live(self.pid) {
+            return false;
+        }
+        match crate::command::control_lock::read_pid_starttime(self.pid) {
+            Some(observed) => observed == start_time,
+            None => true,
+        }
     }
 }
 
@@ -90,8 +102,76 @@ pub struct ConversionMarker {
     /// Unix seconds when the conversion started.
     pub started_at: i64,
     pub owner: ConversionOwner,
+    /// macOS-only start time in a field ignored by older readers. Those
+    /// readers see `owner.start_time = None` and refuse a concurrent retry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_start_time_v2: Option<u64>,
+    /// The macOS boot session that produced `owner_start_time_v2`. A different
+    /// host or reboot cannot prove that the recorded process has exited.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_boot_session: Option<String>,
     #[serde(default)]
     pub created: Vec<CreatedEntry>,
+}
+
+impl ConversionMarker {
+    fn effective_owner(&self) -> ConversionOwner {
+        #[cfg(target_os = "macos")]
+        {
+            let mut owner = self.owner.clone();
+            // Older macOS writers never used this field. A set legacy stamp
+            // comes from another platform and cannot be compared here.
+            owner.start_time = None;
+            if self
+                .owner_boot_session
+                .as_deref()
+                .zip(current_boot_session().as_deref())
+                .is_some_and(|(recorded, current)| recorded == current)
+            {
+                owner.start_time = self.owner_start_time_v2;
+            }
+            owner
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            // Only macOS writers use the v2 field. A Linux or Windows reader
+            // cannot compare that process stamp with its local clock/PID table.
+            self.owner.clone()
+        }
+    }
+
+    /// Whether this host can verify the recorded owner's process identity.
+    pub fn has_verifiable_owner(&self) -> bool {
+        self.effective_owner().start_time.is_some()
+    }
+
+    /// Check the owner using the compatibility start-time field when present.
+    pub fn owner_is_live(&self) -> bool {
+        self.effective_owner().is_live()
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn current_boot_session() -> Option<String> {
+    let mut buffer = [0_u8; 64];
+    let mut size = buffer.len();
+    // SAFETY: `sysctlbyname` receives a NUL-terminated constant key, a valid
+    // writable buffer, and its mutable size. The returned length is checked.
+    let result = unsafe {
+        libc::sysctlbyname(
+            c"kern.bootsessionuuid".as_ptr(),
+            buffer.as_mut_ptr().cast(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if result != 0 || size == 0 || size > buffer.len() {
+        return None;
+    }
+    let raw = buffer[..size].split(|byte| *byte == 0).next()?;
+    let value = std::str::from_utf8(raw).ok()?;
+    uuid::Uuid::parse_str(value).ok().map(|id| id.to_string())
 }
 
 /// Why a marker could not be used.
@@ -223,7 +303,21 @@ pub fn decide_retry(storage_root: &Path, canonical_source: &Path) -> RetryDecisi
             hint: manual_recovery_hint(storage_root),
         };
     }
-    if marker.owner.is_live() {
+    let owner = marker.effective_owner();
+    if owner.start_time.is_none() {
+        return RetryDecision::Refuse {
+            code: StableErrorCode::RepoStateInvalid,
+            message: format!(
+                "the conversion marker in '{}' lacks a locally verifiable owner identity",
+                storage_root.display()
+            ),
+            hint: format!(
+                "confirm no conversion is running on any host, then {}",
+                manual_recovery_hint(storage_root)
+            ),
+        };
+    }
+    if owner.is_live() {
         return RetryDecision::Refuse {
             code: StableErrorCode::ConflictOperationBlocked,
             message: format!(
@@ -326,6 +420,9 @@ pub struct ConversionGuard {
 impl ConversionGuard {
     /// Start a conversion guard, writing the marker immediately.
     pub fn begin(storage_root: &Path, canonical_source: &Path) -> std::io::Result<Self> {
+        #[cfg(target_os = "macos")]
+        let macos_identity =
+            crate::command::control_lock::current_pid_starttime().zip(current_boot_session());
         let mut guard = Self {
             storage_root: storage_root.to_path_buf(),
             marker: ConversionMarker {
@@ -336,6 +433,26 @@ impl ConversionGuard {
                     .map(|elapsed| elapsed.as_secs() as i64)
                     .unwrap_or(0),
                 owner: ConversionOwner::current(),
+                owner_start_time_v2: {
+                    #[cfg(target_os = "macos")]
+                    {
+                        macos_identity.as_ref().map(|(start_time, _)| *start_time)
+                    }
+                    #[cfg(not(target_os = "macos"))]
+                    {
+                        None
+                    }
+                },
+                owner_boot_session: {
+                    #[cfg(target_os = "macos")]
+                    {
+                        macos_identity.map(|(_, boot_session)| boot_session)
+                    }
+                    #[cfg(not(target_os = "macos"))]
+                    {
+                        None
+                    }
+                },
                 created: Vec::new(),
             },
             active: false,
@@ -537,6 +654,8 @@ mod tests {
             source: source.to_string(),
             started_at: 0,
             owner,
+            owner_start_time_v2: None,
+            owner_boot_session: None,
             created: Vec::new(),
         };
         write_marker(root, &marker).expect("write marker");
@@ -545,6 +664,22 @@ mod tests {
             directory: false,
         });
         marker
+    }
+
+    fn same_host_marker(root: &Path, source: &str, owner: ConversionOwner) -> ConversionMarker {
+        let written = marker(root, source, owner);
+        #[cfg(target_os = "macos")]
+        {
+            let mut written = written;
+            written.owner_start_time_v2 = written.owner.start_time.take();
+            written.owner_boot_session = current_boot_session();
+            write_marker(root, &written).expect("write same-boot marker");
+            written
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            written
+        }
     }
 
     #[test]
@@ -603,7 +738,14 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let root = dir.path().join(".libra");
         fs::create_dir_all(&root).expect("mkdir");
-        marker(&root, "/src/.git", ConversionOwner::current());
+        same_host_marker(
+            &root,
+            "/src/.git",
+            ConversionOwner {
+                pid: std::process::id(),
+                start_time: crate::command::control_lock::current_pid_starttime(),
+            },
+        );
         match decide_retry(&root, Path::new("/src/.git")) {
             RetryDecision::Refuse { code, .. } => {
                 assert_eq!(code, StableErrorCode::ConflictOperationBlocked);
@@ -613,11 +755,142 @@ mod tests {
     }
 
     #[test]
-    fn dead_owner_with_matching_source_moves_aside() {
+    fn unstamped_owner_stays_conservative_even_if_pid_is_absent() {
+        let owner = ConversionOwner {
+            pid: u32::MAX,
+            start_time: None,
+        };
+        assert!(owner.is_live());
+    }
+
+    #[test]
+    fn unstamped_owner_refusal_explains_safe_manual_recovery() {
         let dir = tempfile::tempdir().expect("tempdir");
         let root = dir.path().join(".libra");
         fs::create_dir_all(&root).expect("mkdir");
         marker(
+            &root,
+            "/src/.git",
+            ConversionOwner {
+                pid: u32::MAX,
+                start_time: None,
+            },
+        );
+        match decide_retry(&root, Path::new("/src/.git")) {
+            RetryDecision::Refuse {
+                code: StableErrorCode::RepoStateInvalid,
+                message,
+                hint,
+            } => {
+                assert!(message.contains("lacks a locally verifiable owner identity"));
+                assert!(hint.contains("confirm no conversion is running on any host"));
+                assert!(hint.contains(".libra.incomplete-"));
+            }
+            other => panic!("unstamped owner must require manual recovery: {other:?}"),
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn foreign_macos_v2_owner_requires_manual_recovery() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join(".libra");
+        fs::create_dir_all(&root).expect("mkdir");
+        let mut written = marker(
+            &root,
+            "/src/.git",
+            ConversionOwner {
+                pid: u32::MAX,
+                start_time: None,
+            },
+        );
+        written.owner_start_time_v2 = Some(1);
+        written.owner_boot_session = Some(uuid::Uuid::new_v4().to_string());
+        write_marker(&root, &written).expect("write foreign Mac marker");
+        assert!(!written.has_verifiable_owner());
+        assert!(matches!(
+            decide_retry(&root, Path::new("/src/.git")),
+            RetryDecision::Refuse {
+                code: StableErrorCode::RepoStateInvalid,
+                ..
+            }
+        ));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_marker_preserves_legacy_reader_safety_and_new_recovery() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join(".libra");
+        fs::create_dir_all(&root).expect("mkdir");
+        let guard = ConversionGuard::begin(&root, Path::new("/src/.git")).expect("begin");
+        let mut written = read_marker(&root).expect("present").expect("parse");
+        assert_eq!(written.owner.start_time, None);
+        assert!(written.owner_start_time_v2.is_some());
+        assert_eq!(written.owner_boot_session, current_boot_session());
+        assert!(
+            written.owner.is_live(),
+            "old macOS readers must refuse takeover"
+        );
+        assert!(written.owner_is_live(), "new reader sees the live owner");
+        assert!(matches!(
+            decide_retry(&root, Path::new("/src/.git")),
+            RetryDecision::Refuse {
+                code: StableErrorCode::ConflictOperationBlocked,
+                ..
+            }
+        ));
+
+        written.owner.pid = u32::MAX;
+        assert!(!written.owner_is_live(), "new reader detects hard kill");
+        write_marker(&root, &written).expect("write dead-owner fixture");
+        assert!(matches!(
+            decide_retry(&root, Path::new("/src/.git")),
+            RetryDecision::MoveAside(_)
+        ));
+        written.owner_boot_session = Some(uuid::Uuid::new_v4().to_string());
+        write_marker(&root, &written).expect("write foreign-boot fixture");
+        assert!(!written.has_verifiable_owner());
+        assert!(matches!(
+            decide_retry(&root, Path::new("/src/.git")),
+            RetryDecision::Refuse {
+                code: StableErrorCode::RepoStateInvalid,
+                ..
+            }
+        ));
+        guard.finish().expect("finish");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn foreign_legacy_start_time_requires_manual_recovery() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join(".libra");
+        fs::create_dir_all(&root).expect("mkdir");
+        let written = marker(
+            &root,
+            "/src/.git",
+            ConversionOwner {
+                pid: u32::MAX,
+                start_time: Some(1),
+            },
+        );
+        assert!(!written.has_verifiable_owner());
+        assert!(matches!(
+            decide_retry(&root, Path::new("/src/.git")),
+            RetryDecision::Refuse {
+                code: StableErrorCode::RepoStateInvalid,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn dead_owner_with_matching_source_moves_aside() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join(".libra");
+        fs::create_dir_all(&root).expect("mkdir");
+        same_host_marker(
             &root,
             "/src/.git",
             ConversionOwner {
@@ -638,7 +911,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let root = dir.path().join(".libra");
         fs::create_dir_all(&root).expect("mkdir");
-        marker(
+        same_host_marker(
             &root,
             "/other/.git",
             ConversionOwner {

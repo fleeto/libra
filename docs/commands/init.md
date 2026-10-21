@@ -178,6 +178,13 @@ everything succeeded:
   the recorded owner process is gone and that the source still matches, renames the
   incomplete storage root to a sibling `<storage>.incomplete-<timestamp>` (**never
   deletes it**), and converts from scratch. The aside path is reported in the warnings;
+- on macOS, conversions started by Libra 0.30.78 or newer record enough owner
+  identity to recognize an exited process, so the same-source retry can recover
+  after a hard kill in the same boot session. The marker keeps the legacy owner
+  field empty, so older macOS binaries also refuse a concurrent retry. Markers
+  from an older binary, another host, or a prior boot cannot prove the owner
+  has exited; confirm no conversion is running on any host, then follow the
+  `LBR-REPO-003` manual-recovery guidance instead of deleting the storage root;
 - a retry is refused when the conversion owner is still running (`LBR-CONFLICT-002`), and
   when the recorded source differs from the one being converted (`LBR-REPO-003`).
 

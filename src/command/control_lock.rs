@@ -1276,7 +1276,7 @@ pub fn control_writer_instance_matches(pid: u32, recorded_starttime: Option<u64>
     }
 }
 
-fn read_pid_starttime(pid: u32) -> Option<u64> {
+pub(crate) fn read_pid_starttime(pid: u32) -> Option<u64> {
     #[cfg(target_os = "linux")]
     {
         let raw = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
@@ -1319,7 +1319,35 @@ fn read_pid_starttime(pid: u32) -> Option<u64> {
             Some(((creation.dwHighDateTime as u64) << 32) | (creation.dwLowDateTime as u64))
         }
     }
-    #[cfg(not(any(target_os = "linux", windows)))]
+    #[cfg(target_os = "macos")]
+    {
+        let pid = i32::try_from(pid).ok()?;
+        let size = i32::try_from(std::mem::size_of::<libc::proc_bsdinfo>()).ok()?;
+        let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::uninit();
+        // SAFETY: the kernel writes a full `proc_bsdinfo` into the supplied
+        // correctly sized buffer; `assume_init` follows only an exact-size read.
+        let read = unsafe {
+            libc::proc_pidinfo(
+                pid,
+                libc::PROC_PIDTBSDINFO,
+                0,
+                info.as_mut_ptr().cast(),
+                size,
+            )
+        };
+        if read != size {
+            return None;
+        }
+        // SAFETY: an exact-size `proc_pidinfo` result initialized every field.
+        let info = unsafe { info.assume_init() };
+        if info.pbi_pid != pid as u32 || info.pbi_start_tvusec >= 1_000_000 {
+            return None;
+        }
+        info.pbi_start_tvsec
+            .checked_mul(1_000_000)?
+            .checked_add(info.pbi_start_tvusec)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     {
         let _ = pid;
         None
@@ -1756,6 +1784,16 @@ mod tests {
             !control_writer_instance_matches(u32::MAX, Some(1)),
             "dead PID must fail even with a stamped starttime"
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_pid_starttime_is_available_for_conversion_recovery() {
+        let pid = std::process::id();
+        let starttime = current_pid_starttime().expect("macOS process start time");
+        assert!(starttime > 0);
+        assert!(control_writer_instance_matches(pid, Some(starttime)));
+        assert!(!control_writer_instance_matches(pid, Some(starttime + 1)));
     }
 
     /// §C.12 named regression (plan-20260714 line 2759), UNIT half. `libra

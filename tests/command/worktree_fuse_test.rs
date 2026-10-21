@@ -2,6 +2,7 @@
 
 use std::{
     fs,
+    future::Future,
     path::{Path, PathBuf},
 };
 
@@ -54,9 +55,16 @@ fn can_run_fuse_tests() -> bool {
         .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "on"))
         .unwrap_or(false);
     if requested {
+        #[cfg(target_os = "linux")]
         assert!(
             Path::new("/dev/fuse").exists(),
             "LIBRA_RUN_FUSE_TESTS requires a host with /dev/fuse available"
+        );
+
+        #[cfg(target_os = "macos")]
+        assert!(
+            Path::new("/Library/Filesystems/macfuse.fs/Contents/Resources/mount_macfuse").exists(),
+            "LIBRA_RUN_FUSE_TESTS requires macFUSE to be installed"
         );
     }
     requested
@@ -71,6 +79,7 @@ fn try_write_probe(path: &Path) -> bool {
     true
 }
 
+#[cfg(target_os = "linux")]
 fn is_mounted(path: &Path) -> bool {
     let Ok(content) = fs::read_to_string("/proc/self/mountinfo") else {
         return false;
@@ -78,11 +87,54 @@ fn is_mounted(path: &Path) -> bool {
     let target = path.to_string_lossy().to_string();
     content.lines().any(|line| {
         let fields: Vec<&str> = line.split_whitespace().collect();
-        if fields.len() < 5 {
-            return false;
-        }
-        fields[4].replace("\\040", " ") == target
+        fields.len() >= 5 && fields[4].replace("\\040", " ") == target
     })
+}
+
+#[cfg(target_os = "macos")]
+fn is_mounted(path: &Path) -> bool {
+    macos_mount_status(path).unwrap_or(false)
+}
+
+#[cfg(target_os = "macos")]
+fn macos_mount_status(path: &Path) -> std::io::Result<bool> {
+    use std::{
+        ffi::{CString, OsString},
+        os::unix::ffi::{OsStrExt, OsStringExt},
+    };
+
+    let path_arg = CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "mount path contains NUL")
+    })?;
+    let mut stats = std::mem::MaybeUninit::<libc::statfs>::uninit();
+    // SAFETY: path is NUL-terminated and stats points to writable storage.
+    if unsafe { libc::statfs(path_arg.as_ptr(), stats.as_mut_ptr()) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: statfs succeeded and initialized the structure.
+    let stats = unsafe { stats.assume_init() };
+    let fs_type: Vec<u8> = stats
+        .f_fstypename
+        .iter()
+        .take_while(|&&byte| byte != 0)
+        .map(|&byte| byte as u8)
+        .collect();
+    if !matches!(fs_type.as_slice(), b"macfuse" | b"osxfuse") {
+        return Ok(false);
+    }
+    let mount_name: Vec<u8> = stats
+        .f_mntonname
+        .iter()
+        .take_while(|&&byte| byte != 0)
+        .map(|&byte| byte as u8)
+        .collect();
+    let mount_root = PathBuf::from(OsString::from_vec(mount_name));
+    Ok(fs::canonicalize(path)? == fs::canonicalize(mount_root)?)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn is_mounted(path: &Path) -> bool {
+    fuse::is_mount_active(path)
 }
 
 struct FuseMountCleanup {
@@ -98,9 +150,36 @@ impl FuseMountCleanup {
 impl Drop for FuseMountCleanup {
     fn drop(&mut self) {
         for path in &self.paths {
-            let _ = fuse::force_unmount_path(path);
+            #[cfg(target_os = "macos")]
+            let should_unmount = macos_mount_status(path).unwrap_or(true);
+            #[cfg(not(target_os = "macos"))]
+            let should_unmount = is_mounted(path);
+            if should_unmount {
+                let _ = fuse::force_unmount_path(path);
+            }
         }
     }
+}
+
+fn run_fuse_test<F, Fut>(name: &'static str, test: F)
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: Future<Output = ()> + 'static,
+{
+    std::thread::Builder::new()
+        .name(name.into())
+        .stack_size(32 * 1024 * 1024)
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .expect("create FUSE test runtime");
+            runtime.block_on(test());
+        })
+        .expect("spawn FUSE test thread")
+        .join()
+        .expect("FUSE test thread panicked");
 }
 
 /// The lower repository contains the FUSE mount itself. A real mount must
@@ -108,7 +187,7 @@ impl Drop for FuseMountCleanup {
 /// worktrees and recursively expose its own upper/mount directories.
 #[test]
 #[serial(cwd)]
-#[ignore = "requires a Linux FUSE device and LIBRA_RUN_FUSE_TESTS=1"]
+#[ignore = "requires a Linux FUSE device or macFUSE and LIBRA_RUN_FUSE_TESTS=1"]
 fn wd_fuse_live_mount_boundary() {
     std::thread::Builder::new()
         .name("wd-fuse-live".into())
@@ -155,17 +234,23 @@ fn wd_fuse_live_mount_boundary() {
                     !mount.join(".libra/worktree/fuse/wd-live/upper").exists(),
                     "FUSE lower must not reveal its own upper directory"
                 );
-                assert_eq!(
-                    fs::read_dir(
-                        repo_dir
-                            .path()
-                            .join(".libra/worktree/fuse/wd-live/upper/.libra/worktree")
-                    )
+                let upper_mask = repo_dir
+                    .path()
+                    .join(".libra/worktree/fuse/wd-live/upper/.libra/worktree");
+                let mask_entries: Vec<_> = fs::read_dir(&upper_mask)
                     .expect("read opaque upper container")
-                    .count(),
-                    0,
-                    "the opaque upper container must remain empty"
-                );
+                    .map(|entry| {
+                        entry
+                            .expect("opaque marker entry")
+                            .file_name()
+                            .to_string_lossy()
+                            .into_owned()
+                    })
+                    .collect();
+                #[cfg(target_os = "macos")]
+                assert_eq!(mask_entries, [".wh..wh..opq"]);
+                #[cfg(not(target_os = "macos"))]
+                assert!(mask_entries.is_empty(), "opaque upper must remain empty");
 
                 exec_async(vec!["worktree", "remove", "wd-live"])
                     .await
@@ -258,9 +343,13 @@ fn managed_fuse_name_with_legacy_prefix_cannot_be_cleaned_as_a_task() {
     );
 }
 
-#[tokio::test]
+#[test]
 #[serial(cwd)]
-async fn test_fuse_worktree_metadata_management() {
+fn test_fuse_worktree_metadata_management() {
+    run_fuse_test("fuse-metadata", fuse_worktree_metadata_management);
+}
+
+async fn fuse_worktree_metadata_management() {
     if !can_run_fuse_tests() {
         return;
     }
@@ -299,11 +388,20 @@ async fn test_fuse_worktree_metadata_management() {
     assert!(!entry.upper_dir.is_empty());
     assert!(!entry.lower_dirs.is_empty());
     assert!(!entry.locked);
+
+    exec_async(vec!["worktree", "remove", "wt-fuse-meta"])
+        .await
+        .expect("remove metadata test mount");
+    assert!(!is_mounted(&mount_path));
 }
 
-#[tokio::test]
+#[test]
 #[serial(cwd)]
-async fn test_fuse_worktree_add_list_remove_flow() {
+fn test_fuse_worktree_add_list_remove_flow() {
+    run_fuse_test("fuse-flow", fuse_worktree_add_list_remove_flow);
+}
+
+async fn fuse_worktree_add_list_remove_flow() {
     if !can_run_fuse_tests() {
         return;
     }
@@ -343,9 +441,13 @@ async fn test_fuse_worktree_add_list_remove_flow() {
     assert!(state.worktrees.is_empty(), "fuse state should be cleaned");
 }
 
-#[tokio::test]
+#[test]
 #[serial(cwd)]
-async fn test_fuse_worktree_list_json_includes_fuse_entry() {
+fn test_fuse_worktree_list_json_includes_fuse_entry() {
+    run_fuse_test("fuse-json", fuse_worktree_list_json_includes_fuse_entry);
+}
+
+async fn fuse_worktree_list_json_includes_fuse_entry() {
     if !can_run_fuse_tests() {
         return;
     }
@@ -384,11 +486,19 @@ async fn test_fuse_worktree_list_json_includes_fuse_entry() {
         "json list should include FUSE worktree: {}",
         String::from_utf8_lossy(&output.stdout)
     );
+
+    exec_async(vec!["worktree", "remove", "wt-fuse-json"])
+        .await
+        .expect("remove JSON test mount");
 }
 
-#[tokio::test]
+#[test]
 #[serial(cwd)]
-async fn test_fuse_multiple_worktrees_mount_and_access() {
+fn test_fuse_multiple_worktrees_mount_and_access() {
+    run_fuse_test("fuse-multiple", fuse_multiple_worktrees_mount_and_access);
+}
+
+async fn fuse_multiple_worktrees_mount_and_access() {
     if !can_run_fuse_tests() {
         return;
     }
@@ -427,11 +537,23 @@ async fn test_fuse_multiple_worktrees_mount_and_access() {
     assert!(b.join("only-b.txt").exists());
     assert!(!a.join("only-b.txt").exists());
     assert!(!b.join("only-a.txt").exists());
+
+    exec_async(vec!["worktree", "remove", "wt-fuse-b"])
+        .await
+        .expect("remove second FUSE worktree");
+    exec_async(vec!["worktree", "remove", "wt-fuse-a"])
+        .await
+        .expect("remove first FUSE worktree");
+    assert!(!is_mounted(&a) && !is_mounted(&b));
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[test]
 #[serial(cwd)]
-async fn test_fuse_worktree_parallel_add_remove() {
+fn test_fuse_worktree_parallel_add_remove() {
+    run_fuse_test("fuse-parallel", fuse_worktree_parallel_add_remove);
+}
+
+async fn fuse_worktree_parallel_add_remove() {
     if !can_run_fuse_tests() {
         return;
     }
@@ -474,9 +596,16 @@ async fn test_fuse_worktree_parallel_add_remove() {
     }
 }
 
-#[tokio::test]
+#[test]
 #[serial(cwd)]
-async fn test_fuse_worktree_add_with_branch_and_create_branch() {
+fn test_fuse_worktree_add_with_branch_and_create_branch() {
+    run_fuse_test(
+        "fuse-branch",
+        fuse_worktree_add_with_branch_and_create_branch,
+    );
+}
+
+async fn fuse_worktree_add_with_branch_and_create_branch() {
     if !can_run_fuse_tests() {
         return;
     }
@@ -495,6 +624,24 @@ async fn test_fuse_worktree_add_with_branch_and_create_branch() {
     let commit_output =
         run_libra_command(&["commit", "-m", "seed", "--no-verify"], repo_dir.path());
     assert!(commit_output.status.success(), "commit should succeed");
+    let seed_revision = run_libra_command(&["rev-parse", "HEAD"], repo_dir.path());
+    assert!(seed_revision.status.success(), "resolve seed revision");
+    let seed_revision = String::from_utf8(seed_revision.stdout)
+        .expect("seed revision is UTF-8")
+        .trim()
+        .to_string();
+    fs::write(repo_dir.path().join("seed.txt"), "later-commit\n")
+        .expect("change source branch after seed");
+    let add_output = run_libra_command(&["add", "seed.txt"], repo_dir.path());
+    assert!(add_output.status.success(), "add later source revision");
+    let commit_output = run_libra_command(
+        &["commit", "-m", "later source", "--no-verify"],
+        repo_dir.path(),
+    );
+    assert!(
+        commit_output.status.success(),
+        "commit later source revision"
+    );
     let source_index = repo_dir.path().join(".libra/index");
     let index_before = fs::read(&source_index).expect("source index before overlay checkout");
     let source_root_before = util::working_dir();
@@ -508,6 +655,8 @@ async fn test_fuse_worktree_add_with_branch_and_create_branch() {
         "--fuse",
         "--create-branch",
         "feature/fuse-wt",
+        "--from",
+        &seed_revision,
     ])
     .await
     {
@@ -552,6 +701,10 @@ async fn test_fuse_worktree_add_with_branch_and_create_branch() {
     let state = read_fuse_state();
     assert_eq!(state.worktrees.len(), 1);
     assert_eq!(state.worktrees[0].branch, "feature/fuse-wt");
+
+    exec_async(vec!["worktree", "remove", "wt-fuse-branch"])
+        .await
+        .expect("remove branch test mount");
 }
 
 /// Regression (W3 §C.7): the fuse build REPLACES the worktree subcommand

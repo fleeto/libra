@@ -184,33 +184,17 @@ fn init_conversion_hard_kill_is_detected_and_recovered() {
 /// racing it (ADR-IG-03 item 2).
 #[test]
 fn init_conversion_retry_refuses_a_live_owner() {
-    use libra::command::init_conversion::{
-        CONVERSION_MARKER, ConversionMarker, MARKER_VERSION, write_marker,
-    };
+    use libra::command::init_conversion::{CONVERSION_MARKER, ConversionGuard};
 
     let root = tempfile::tempdir().expect("tempdir");
     let source = git_source(root.path());
     let target = target_dir(root.path(), true);
     fs::create_dir_all(target.join(".libra")).expect("mkdir .libra");
-    // The test process is provably alive, so its marker means "conversion
-    // running".
-    use libra::command::control_lock::current_pid_starttime;
-    let marker = ConversionMarker {
-        version: MARKER_VERSION,
-        source: source
-            .canonicalize()
-            .unwrap_or_else(|_| source.clone())
-            .join(".git")
-            .display()
-            .to_string(),
-        started_at: 0,
-        owner: libra::command::init_conversion::ConversionOwner {
-            pid: std::process::id(),
-            start_time: current_pid_starttime(),
-        },
-        created: Vec::new(),
-    };
-    write_marker(&target.join(".libra"), &marker).expect("write marker");
+    // Use the production writer so the current process is provably alive in
+    // both the legacy Linux/Windows and compatible macOS marker formats.
+    let canonical_source = source.canonicalize().expect("source path").join(".git");
+    let _guard = ConversionGuard::begin(&target.join(".libra"), &canonical_source)
+        .expect("write live marker");
     assert!(target.join(".libra").join(CONVERSION_MARKER).exists());
 
     let refused = convert(&target, &source, &[]);
@@ -229,29 +213,75 @@ fn init_conversion_retry_refuses_a_live_owner() {
     );
 }
 
+#[test]
+fn init_conversion_unstamped_marker_explains_manual_recovery() {
+    use libra::command::init_conversion::{
+        CONVERSION_MARKER, ConversionMarker, ConversionOwner, MARKER_VERSION, write_marker,
+    };
+
+    let root = tempfile::tempdir().expect("tempdir");
+    let source = git_source(root.path());
+    let target = target_dir(root.path(), false);
+    let initialized = run_libra_command(&["init", "--vault", "false", "."], &target);
+    assert_cli_success(&initialized, "initialize marker fixture");
+    let storage = target.join(".libra");
+    let marker = ConversionMarker {
+        version: MARKER_VERSION,
+        source: source
+            .join(".git")
+            .canonicalize()
+            .expect("source .git")
+            .display()
+            .to_string(),
+        started_at: 0,
+        owner: ConversionOwner {
+            pid: u32::MAX,
+            start_time: None,
+        },
+        owner_start_time_v2: None,
+        owner_boot_session: None,
+        created: Vec::new(),
+    };
+    write_marker(&storage, &marker).expect("write marker");
+
+    let status = run_libra_command(&["status"], &target);
+    let status_error = String::from_utf8_lossy(&status.stderr);
+    assert_eq!(status.status.code(), Some(128));
+    assert!(status_error.contains("LBR-REPO-003"), "{status_error}");
+    assert!(
+        status_error.contains("confirm no conversion is running on any host"),
+        "{status_error}"
+    );
+
+    let retry = convert(&target, &source, &[]);
+    let retry_error = String::from_utf8_lossy(&retry.stderr);
+    assert_eq!(retry.status.code(), Some(128));
+    assert!(retry_error.contains("LBR-REPO-003"), "{retry_error}");
+    assert!(
+        retry_error.contains("confirm no conversion is running on any host"),
+        "{retry_error}"
+    );
+    assert!(storage.join(CONVERSION_MARKER).exists());
+}
+
 /// M-FAIL: a marker recorded for a DIFFERENT source is refused rather than
 /// silently re-using another conversion's residue.
 #[test]
 fn init_conversion_retry_refuses_a_source_mismatch() {
-    use libra::command::init_conversion::{
-        ConversionMarker, ConversionOwner, MARKER_VERSION, write_marker,
-    };
+    use libra::command::init_conversion::{ConversionGuard, read_marker, write_marker};
 
     let root = tempfile::tempdir().expect("tempdir");
     let source = git_source(root.path());
     let target = target_dir(root.path(), true);
     fs::create_dir_all(target.join(".libra")).expect("mkdir .libra");
-    let marker = ConversionMarker {
-        version: MARKER_VERSION,
-        source: "/somewhere/else/.git".to_string(),
-        started_at: 0,
-        owner: ConversionOwner {
-            pid: 999_999,
-            start_time: Some(1),
-        },
-        created: Vec::new(),
-    };
-    write_marker(&target.join(".libra"), &marker).expect("write marker");
+    let storage = target.join(".libra");
+    let _guard = ConversionGuard::begin(&storage, Path::new("/somewhere/else/.git"))
+        .expect("write source-mismatch marker");
+    let mut marker = read_marker(&storage)
+        .expect("marker exists")
+        .expect("parse marker");
+    marker.owner.pid = 999_999;
+    write_marker(&storage, &marker).expect("write dead-owner marker");
 
     let refused = convert(&target, &source, &[]);
     assert!(

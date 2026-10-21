@@ -1855,7 +1855,7 @@ mod tests {
             python_helper(
                 &program,
                 &format!(
-                    "import os,time\nfrom pathlib import Path\nPath({:?}).write_text(str(os.getpid()))\ntime.sleep({})\nprint({:?})",
+                    "import os,time\nfrom pathlib import Path\nPath({:?}).write_text(str(os.getpid())+'\\n')\ntime.sleep({})\nprint({:?})",
                     ready.to_str().unwrap(),
                     if attack == "deadline" { "30" } else { "0.4" },
                     frame,
@@ -1880,11 +1880,16 @@ mod tests {
                 ),
             );
             let mutate = async {
-                while !ready.exists() {
+                let pid = loop {
+                    if let Some(pid) = std::fs::read_to_string(&ready)
+                        .ok()
+                        .and_then(|value| value.strip_suffix('\n')?.parse::<i32>().ok())
+                    {
+                        break pid;
+                    }
                     assert!(Instant::now() < end, "helper never started: {attack}");
                     tokio::time::sleep(Duration::from_millis(5)).await;
-                }
-                let pid: i32 = std::fs::read_to_string(&ready).unwrap().parse().unwrap();
+                };
                 if attack == "root" {
                     std::fs::rename(&repo, temp.path().join("old-repo")).unwrap();
                     std::fs::create_dir(&repo).unwrap();
@@ -3392,7 +3397,7 @@ mod tests {
         python_helper(
             &program,
             &format!(
-                "import os,json,time\nc=json.loads(os.environ[{}])\nf=os.open(c['scratch']+'/index.sqlite',os.O_CREAT|os.O_EXCL|os.O_WRONLY,0o600)\nos.write(f,str(os.getpid()).encode())\nos.close(f)\ntime.sleep(30)",
+                "import os,json,time\nc=json.loads(os.environ[{}])\nf=os.open(c['scratch']+'/index.sqlite',os.O_CREAT|os.O_EXCL|os.O_WRONLY,0o600)\nos.write(f,(str(os.getpid())+'\\n').encode())\nos.close(f)\ntime.sleep(30)",
                 serde_json::to_string(authorized_read::AUTHORIZED_READ_HELPER_MODE_ENV).unwrap(),
             ),
         );
@@ -3406,7 +3411,9 @@ mod tests {
             loop {
                 for dir in std::fs::read_dir(scratch.path()).unwrap() {
                     let path = dir.unwrap().path();
-                    if let Ok(bytes) = std::fs::read(path.join(COPY_LEAF)) {
+                    if let Ok(bytes) = std::fs::read(path.join(COPY_LEAF))
+                        && let Some(pid_bytes) = bytes.strip_suffix(b"\n")
+                    {
                         assert_eq!(path.metadata().unwrap().permissions().mode() & 0o077, 0);
                         assert_eq!(
                             path.join(COPY_LEAF)
@@ -3417,7 +3424,10 @@ mod tests {
                                 & 0o077,
                             0
                         );
-                        return String::from_utf8(bytes).unwrap().parse::<i32>().unwrap();
+                        return std::str::from_utf8(pid_bytes)
+                            .unwrap()
+                            .parse::<i32>()
+                            .unwrap();
                     }
                 }
                 assert!(

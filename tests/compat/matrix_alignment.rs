@@ -411,7 +411,7 @@ fn compatibility_governance_roadmap_marks_current_surfaces_without_batch_status(
 }
 // A successful Cargo process can select zero tests. Exercise the workflow's
 // actual shell step with a private stub rather than accepting its exit alone.
-fn macos_owner_safety_step(workflow: &str) -> String {
+fn macos_workflow_step(workflow: &str, name: &str) -> String {
     let job = workflow
         .split_once("  owner-liveness-macos:\n")
         .expect("macOS safety job must remain registered")
@@ -422,17 +422,38 @@ fn macos_owner_safety_step(workflow: &str) -> String {
     assert!(job.contains("name: compat-owner-liveness-macos"));
     assert!(job.contains("runs-on: macos-latest"));
     let step = job
+        .split_once(&format!("      - name: {name}\n"))
+        .expect("named macOS safety step")
+        .1
         .split_once("        run: |\n")
         .expect("bounded exact test step")
         .1;
+    let step = step
+        .split_once("\n      - name: ")
+        .map_or(step, |(script, _)| script)
+        .trim_end_matches('\n');
     step.lines()
         .map(|line| {
+            if line.is_empty() {
+                return line;
+            }
             line.strip_prefix("          ")
                 .expect("shell step indentation")
         })
         .collect::<Vec<_>>()
         .join("\n")
         + "\n"
+}
+
+fn macos_owner_safety_step(workflow: &str) -> String {
+    macos_workflow_step(workflow, "Run current exact macOS owner safety tests")
+}
+
+fn macos_conversion_step(workflow: &str) -> String {
+    macos_workflow_step(
+        workflow,
+        "Verify macOS conversion recovery and service compatibility",
+    )
 }
 
 #[test]
@@ -534,6 +555,83 @@ if [ "$CASE" = failed ]; then exit 9; fi
                     .filter(|line| line.starts_with("MACOS_SAFETY_EXACT_PASS "))
                     .count(),
                 13
+            );
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn macos_conversion_step_rejects_zero_wrong_ignored_and_failed_test_runs() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let step = macos_conversion_step(&read_repo_file(".github/workflows/base.yml"));
+    for fixture in [
+        "command::control_lock::tests::macos_pid_starttime_is_available_for_conversion_recovery",
+        "command::init_conversion::tests::macos_marker_preserves_legacy_reader_safety_and_new_recovery",
+        "command::init_conversion::tests::foreign_legacy_start_time_requires_manual_recovery",
+        "command::service::tests::macos_service_sidecar_keeps_legacy_pid_only_liveness",
+        "command::init_conversion_test::init_conversion_hard_kill_is_detected_and_recovered",
+    ] {
+        assert!(
+            step.contains(fixture),
+            "missing conversion fixture: {fixture}"
+        );
+    }
+
+    let dir = tempfile::tempdir().expect("private conversion workflow fixture");
+    let cargo = dir.path().join("cargo");
+    fs::write(
+        &cargo,
+        r#"#!/bin/bash
+set -eu
+fixture=''
+for arg in "$@"; do
+  case "$arg" in command::*) fixture="$arg" ;; esac
+done
+case "$CASE" in
+  zero)
+    printf 'running 0 tests\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4089 filtered out; finished in 0.00s\n'
+    exit 0 ;;
+  wrong) fixture='some_other_test' ;;
+  ignored)
+    printf 'running 1 test\ntest %s ... ignored\ntest result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 4088 filtered out; finished in 0.00s\n' "$fixture"
+    exit 0 ;;
+esac
+printf 'running 1 test\ntest %s ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4088 filtered out; finished in 0.00s\n' "$fixture"
+if [ "$CASE" = failed ]; then exit 9; fi
+"#,
+    )
+    .expect("write private Cargo stub");
+    fs::set_permissions(&cargo, fs::Permissions::from_mode(0o700)).expect("executable stub");
+    let script = dir.path().join("step.sh");
+    fs::write(&script, step).expect("workflow step fixture");
+    let path = format!(
+        "{}:{}",
+        dir.path().display(),
+        std::env::var("PATH").expect("host PATH")
+    );
+    for case in ["pass", "zero", "wrong", "ignored", "failed"] {
+        let output = Command::new("/bin/bash")
+            .arg(&script)
+            .env_clear()
+            .env("PATH", &path)
+            .env("CASE", case)
+            .output()
+            .expect("execute private conversion step");
+        assert_eq!(
+            output.status.success(),
+            case == "pass",
+            "conversion workflow incorrectly accepted {case}: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        if case == "pass" {
+            assert_eq!(
+                String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .filter(|line| line.starts_with("MACOS_CONVERSION_EXACT_PASS "))
+                    .count(),
+                5
             );
         }
     }

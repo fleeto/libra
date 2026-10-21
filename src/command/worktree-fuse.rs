@@ -1195,22 +1195,25 @@ async fn add_fuse_worktree(common: &Path, options: FuseAddOptions) -> io::Result
             destination_scope.worktree_root = target.clone();
             crate::internal::worktree_scope::with_request_scope(
                 Some(destination_scope),
-                restore::execute_checked_typed(RestoreArgs {
-                    overlay: false,
-                    no_overlay: false,
-                    ours: false,
-                    theirs: false,
-                    ignore_unmerged: false,
-                    merge: false,
-                    conflict: None,
-                    pathspec: vec![target.to_string_lossy().to_string()],
-                    source: Some(checkout_branch.clone()),
-                    worktree: true,
-                    staged: false,
-                    pathspec_from_file: None,
-                    pathspec_file_nul: false,
-                    no_progress: false,
-                }),
+                restore::execute_checked_typed_into(
+                    RestoreArgs {
+                        overlay: false,
+                        no_overlay: false,
+                        ours: false,
+                        theirs: false,
+                        ignore_unmerged: false,
+                        merge: false,
+                        conflict: None,
+                        pathspec: vec![":/".to_string()],
+                        source: Some(checkout_branch.clone()),
+                        worktree: true,
+                        staged: false,
+                        pathspec_from_file: None,
+                        pathspec_file_nul: false,
+                        no_progress: false,
+                    },
+                    &target,
+                ),
             )
             .await
             .map_err(|error| {

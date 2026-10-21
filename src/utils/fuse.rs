@@ -428,43 +428,63 @@ pub(crate) mod managed {
             .child_target(Path::new(".libra/worktree"))?
             .create(true)?;
         mask.validate_path()?;
+        // The add path requires a new managed root, so a retained upper is
+        // rejected before reaching this setup step.
         if !mask.is_empty()? {
             return Err(io::Error::other(
                 "FUSE worktree opacity mask must be empty before mounting",
             ));
         }
-        let name = c"user.fuseoverlayfs.opaque";
-        let value = b"y";
-        #[cfg(target_os = "linux")]
-        // SAFETY: the directory fd and both byte buffers remain valid for the call.
-        let set_result = unsafe {
-            libc::fsetxattr(
-                mask.file.as_raw_fd(),
-                name.as_ptr(),
-                value.as_ptr().cast(),
-                value.len(),
-                0,
-            )
-        };
+
         #[cfg(target_os = "macos")]
-        // SAFETY: macOS adds position/options to the descriptor xattr API.
-        let set_result = unsafe {
-            libc::fsetxattr(
-                mask.file.as_raw_fd(),
-                name.as_ptr(),
-                value.as_ptr().cast(),
-                value.len(),
-                0,
-                0,
-            )
-        };
-        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-        return Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "FUSE managed worktrees require descriptor-based opaque xattr support",
-        ));
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
+            use std::os::fd::FromRawFd;
+
+            // libfuse-fs uses OCI whiteouts on macOS, so an xattr alone does
+            // not mask the lower directory. Create its opaque marker through
+            // the pinned mask descriptor, never replacing an existing entry.
+            // SAFETY: mask is a live directory descriptor and the fixed leaf
+            // is exclusively created without following a pre-existing link.
+            let raw = unsafe {
+                libc::openat(
+                    mask.file.as_raw_fd(),
+                    c".wh..wh..opq".as_ptr(),
+                    libc::O_WRONLY
+                        | libc::O_CREAT
+                        | libc::O_EXCL
+                        | libc::O_NOFOLLOW
+                        | libc::O_CLOEXEC,
+                    0o600,
+                )
+            };
+            if raw < 0 {
+                return Err(io::Error::other(format!(
+                    "cannot protect FUSE worktree against recursive mounts: OCI opaque marker is unavailable on '{}': {}",
+                    mask.path.display(),
+                    io::Error::last_os_error()
+                )));
+            }
+            // SAFETY: openat returned a new owned file descriptor.
+            let marker = unsafe { fs::File::from_raw_fd(raw) };
+            marker.sync_all()?;
+            mask.file.sync_all()?;
+            Ok(())
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            let name = c"user.fuseoverlayfs.opaque";
+            let value = b"y";
+            // SAFETY: the directory fd and both byte buffers remain valid for the call.
+            let set_result = unsafe {
+                libc::fsetxattr(
+                    mask.file.as_raw_fd(),
+                    name.as_ptr(),
+                    value.as_ptr().cast(),
+                    value.len(),
+                    0,
+                )
+            };
             if set_result != 0 {
                 return Err(io::Error::other(format!(
                     "cannot protect FUSE worktree against recursive mounts: opaque xattr is unavailable on '{}': {}",
@@ -473,7 +493,6 @@ pub(crate) mod managed {
                 )));
             }
             let mut observed = [0_u8; 2];
-            #[cfg(target_os = "linux")]
             // SAFETY: observed is a writable buffer with the advertised length.
             let length = unsafe {
                 libc::fgetxattr(
@@ -483,25 +502,19 @@ pub(crate) mod managed {
                     observed.len(),
                 )
             };
-            #[cfg(target_os = "macos")]
-            // SAFETY: observed is a writable buffer; position/options are zero.
-            let length = unsafe {
-                libc::fgetxattr(
-                    mask.file.as_raw_fd(),
-                    name.as_ptr(),
-                    observed.as_mut_ptr().cast(),
-                    observed.len(),
-                    0,
-                    0,
-                )
-            };
             if length != 1 || observed[0] != b'y' {
                 return Err(io::Error::other(
                     "cannot verify FUSE worktree opaque xattr; refusing to mount",
                 ));
             }
+            Ok(())
         }
-        Ok(())
+
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "FUSE managed worktrees require an opaque-directory marker",
+        ))
     }
 
     /// Bind the mounted metadata to the registered upper directory. Exclusive
@@ -638,7 +651,7 @@ pub(crate) mod managed {
         }
 
         #[test]
-        fn opacity_mask_is_empty_and_verified_before_mounting() {
+        fn opacity_mask_is_prepared_before_mounting() {
             let temp = tempdir().expect("tempdir");
             let upper = Target::resolve(&temp.path().join("upper"), temp.path())
                 .expect("resolve")
@@ -656,12 +669,20 @@ pub(crate) mod managed {
                 prepare_mount_binding(&upper, &uuid::Uuid::new_v4().to_string()).is_err(),
                 "a mount binding must never overwrite an existing marker"
             );
-            assert!(
-                fs::read_dir(upper.path.join(".libra/worktree"))
-                    .expect("mask")
-                    .next()
-                    .is_none()
-            );
+            let mask_entries: Vec<_> = fs::read_dir(upper.path.join(".libra/worktree"))
+                .expect("mask")
+                .map(|entry| {
+                    entry
+                        .expect("mask entry")
+                        .file_name()
+                        .to_string_lossy()
+                        .into_owned()
+                })
+                .collect();
+            #[cfg(target_os = "macos")]
+            assert_eq!(mask_entries, [".wh..wh..opq"]);
+            #[cfg(not(target_os = "macos"))]
+            assert!(mask_entries.is_empty());
             assert!(
                 !upper.path.join(".libra/commondir").exists(),
                 "the mask must not invent a new worktree identity"

@@ -34,11 +34,16 @@ libra upgrade [--check | -y|--yes]
 
 The new binary takes effect on the next `libra` command.
 
-Starting with Libra 0.31.0, the first repository command run by the new binary
+Starting with Libra 0.30.67, the first repository command run by the new binary
 records a forward-only worktree-layout capability marker, even if the repository
-has no additional worktrees. Libra 0.30.x then refuses **all** commands in that
-repository at database open. Use the stable 0.31.1-or-newer binary to access
-repositories opened by it; installing 0.30.x again does not undo the marker.
+has no additional worktrees. Libra 0.30.66 and older then refuse **all** commands
+in that repository at database open. Use Libra 0.30.67 or newer to access
+repositories opened by it; reinstalling an older binary does not undo the marker.
+The public `worktree add` positional argument is now a NAME. Scripts that used
+to pass a destination path must use `worktree add NAME --path PATH`; the same
+`--path` selector applies to path-based worktree management. For `worktree move`,
+select the source with `--from-path` and pass the destination with `--path`.
+Existing worktree directories are not moved.
 `worktree move` also requires a destination on the same filesystem: a
 cross-filesystem request keeps the source and registration unchanged instead
 of attempting a potentially lossy copy. Create a separate worktree on the

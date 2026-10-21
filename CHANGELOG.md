@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## [0.30.78] — 2026-10-21
+
 ### Issue #478 plumbing/porcelain parity
 
 - `log`/`show`/`rev-list` `--grep` now defaults to POSIX BRE (literal for plain
@@ -27,6 +29,28 @@
   `originProof`, reasoning `time`, and top-level `signature`, `redactedData`,
   `reasoningEncryptedContent`, and `thoughtSignature`. The checkpoint stays
   `Unproven` / `Partial` and does not archive those fields as native artifacts.
+
+### Managed worktree fixes
+
+- The public `worktree add` positional argument is a name; scripts that supplied
+  a destination path must use `--path`. This compatibility change entered the
+  0.30.67 source and is included in this release.
+- On macOS, use an OCI opaque marker so a macFUSE worktree hides the managed
+  container and sibling worktrees from its mount. Linux retains its xattr marker.
+- Populate FUSE worktrees from the requested branch into the mount itself,
+  without changing the caller's dirty files or index. Keep empty-directory
+  cleanup inside the mount's root.
+- The first repository open by a managed-worktree-capable binary records
+  capability 4. Libra 0.30.66 and older refuse that repository; use 0.30.67 or
+  newer. Existing worktree directories are not moved.
+
+### macOS Git conversion recovery
+
+- Record the conversion owner's process start time and boot session in macOS
+  marker fields ignored by older clients. This allows a safe retry after a
+  hard kill in the same boot, while older binaries still refuse to take over
+  a running conversion. Markers from another host or boot, and older
+  interrupted markers, require manual recovery guidance.
 
 ## [0.30.70] — 2026-10-20
 
@@ -59,7 +83,7 @@
   internal destination by default; `--path` keeps explicit external placement.
   Existing worktree directories are not moved.
 - Opening a repository records the forward-only worktree layout capability.
-  Libra 0.30.x refuses that repository; use 0.31.1 or newer to continue.
+  Libra 0.30.66 and older refuse that repository; use 0.30.67 or newer to continue.
 - The released CLI starts its status I/O worker when run directly under a
   platform asset filename such as `libra-darwin-arm64`, as well as when
   installed under the name `libra`.

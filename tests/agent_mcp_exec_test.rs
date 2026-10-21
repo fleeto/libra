@@ -159,6 +159,7 @@ fn timed_out_worker_is_killed() {
 }
 
 #[test]
+#[cfg(unix)]
 fn deadline_reply_does_not_wait_for_stdout_holder() {
     let repo = init_repo(None);
     let pid_file = repo.path().join("block.pid");
@@ -225,8 +226,10 @@ fn deadline_reply_does_not_wait_for_stdout_holder() {
     );
 }
 
+#[cfg(unix)]
 struct KillHold(i32);
 
+#[cfg(unix)]
 impl Drop for KillHold {
     fn drop(&mut self) {
         let _ = Command::new("kill")
@@ -235,8 +238,30 @@ impl Drop for KillHold {
     }
 }
 
+#[cfg(unix)]
 fn pid_exists(pid: u32) -> bool {
-    Path::new(&format!("/proc/{pid}")).exists()
+    // SAFETY: signal 0 only queries whether the process exists.
+    unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+}
+
+#[cfg(windows)]
+fn pid_exists(pid: u32) -> bool {
+    use windows_sys::Win32::{
+        Foundation::{CloseHandle, STILL_ACTIVE},
+        System::Threading::{GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION},
+    };
+
+    // SAFETY: open a query-only handle, inspect the exit code, then close it.
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            return false;
+        }
+        let mut exit_code = 0u32;
+        let queried = GetExitCodeProcess(handle, &mut exit_code);
+        let _ = CloseHandle(handle);
+        queried != 0 && exit_code == STILL_ACTIVE as u32
+    }
 }
 
 #[test]

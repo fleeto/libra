@@ -715,7 +715,7 @@ async fn run_service(host: &str, port: u16, output: &OutputConfig) -> CliResult<
         worktree_id: scope.worktree_id.clone(),
         workspace_id: None,
         lease_fence: None,
-        pid_starttime: current_pid_starttime(),
+        pid_starttime: compatible_service_starttime(),
     };
     write_control_info(&paths.info, &info).map_err(|e| {
         CliError::fatal(format!("failed to write service.json: {e}"))
@@ -751,6 +751,16 @@ async fn run_service(host: &str, port: u16, output: &OutputConfig) -> CliResult<
         println!("service stopped");
     }
     Ok(())
+}
+
+fn compatible_service_starttime() -> Option<u64> {
+    // Older macOS clients cannot read process start times. Keep the service
+    // sidecar compatible; conversion markers use the stronger stamp separately.
+    if cfg!(target_os = "macos") {
+        None
+    } else {
+        current_pid_starttime()
+    }
 }
 
 async fn shutdown_signal() {
@@ -933,6 +943,12 @@ async fn service_events(output: &OutputConfig) -> CliResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_service_sidecar_keeps_legacy_pid_only_liveness() {
+        assert_eq!(compatible_service_starttime(), None);
+    }
 
     #[test]
     fn loopback_host_validation_matrix() {

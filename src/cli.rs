@@ -1557,7 +1557,16 @@ fn interrupted_conversion_refusal(storage: &std::path::Path) -> Option<CliError>
     let hint = command::init_conversion::manual_recovery_hint(storage);
     let live_hint = "wait for the running conversion to finish, then retry";
     match marker {
-        Ok(marker) if marker.owner.is_live() => Some(
+        Ok(marker) if !marker.has_verifiable_owner() => Some(
+            CliError::fatal(format!(
+                "this repository holds an incomplete Git conversion from '{}'; its owner cannot be verified on this host or boot",
+                marker.source
+            ))
+            .with_stable_code(utils::error::StableErrorCode::RepoStateInvalid)
+            .with_hint("confirm no conversion is running on any host before manual recovery")
+            .with_hint(hint),
+        ),
+        Ok(marker) if marker.owner_is_live() => Some(
             CliError::fatal(format!(
                 "a Git conversion is in progress (pid {}); this repository is not ready",
                 marker.owner.pid

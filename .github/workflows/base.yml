@@ -110,6 +110,34 @@ jobs:
             rm -f "$log_file"
           done
 
+      - name: Verify macOS conversion recovery and service compatibility
+        shell: bash
+        run: |
+          python3 - <<'PYTHON'
+          import re
+          import subprocess
+
+          fixtures = [
+              (["--lib"], "command::control_lock::tests::macos_pid_starttime_is_available_for_conversion_recovery"),
+              (["--lib"], "command::init_conversion::tests::macos_marker_preserves_legacy_reader_safety_and_new_recovery"),
+              (["--lib"], "command::init_conversion::tests::foreign_legacy_start_time_requires_manual_recovery"),
+              (["--lib"], "command::service::tests::macos_service_sidecar_keeps_legacy_pid_only_liveness"),
+              (["--test", "command_test"], "command::init_conversion_test::init_conversion_hard_kill_is_detected_and_recovered"),
+          ]
+          for target, fixture in fixtures:
+              command = ["cargo", "test", "--locked", *target, fixture, "--", "--exact", "--test-threads=1", "--color", "never"]
+              result = subprocess.run(command, text=True, capture_output=True)
+              output = result.stdout + result.stderr
+              print(output, flush=True)
+              case = re.escape(fixture)
+              if result.returncode or len(re.findall(r"^test " + case + r" \.\.\. ok$", output, re.MULTILINE)) != 1:
+                  raise SystemExit("macOS conversion fixture failed or ran zero tests: " + fixture)
+              summary = r"^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out;.*$"
+              if len(re.findall(summary, output, re.MULTILINE)) != 1:
+                  raise SystemExit("macOS conversion fixture has no valid nonzero result: " + fixture)
+              print("MACOS_CONVERSION_EXACT_PASS", fixture, flush=True)
+          PYTHON
+
   scoped-input-windows:
     # FIX-RG-SCOPED-04: execute the four active bounded/static-no-follow
     # fixtures. Concurrent relocation proof is DEFER-RG-SCOPED-04, not PASS.
@@ -272,9 +300,9 @@ jobs:
 
           x=$(find third-party/rust/crates -mindepth 2 -maxdepth 2 -type d -exec bash -c '
             n=$(find "$1" -maxdepth 1 -type f | wc -l)
-            [ $n -gt 1 ]
+            [ "$n" -gt 1 ]
           ' _ {} \; -print -quit | wc -l)
-          if [ $x -gt 0 ]; then
+          if [ "$x" -gt 0 ]; then
             echo "❌ Redundant directories found"
             exit 1
           else

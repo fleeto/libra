@@ -1600,8 +1600,8 @@ The operator-local macOS case is `cov2_macos_fake_exporter_candidate_import_part
 
 At the current import source gate, proof/state candidates are refused before a Session, cursor or checkpoint is published. The private preparation helper clears its environment and discards stderr. Its internal partial warning is therefore not a public import diagnostic. Local acceptance couples a successful ordinary import control and a same-input data-only partial comparison to the actual content-free source refusal, zero published content and a static check of the pre-projection rejection route; it does not claim direct observation of a private partial field.
 
-## Managed worktree repository capability (Libra 0.31.0)
+## Managed worktree repository capability (Libra 0.30.67)
 
 `worktree move` now requires an atomic same-filesystem rename. A cross-filesystem destination is refused with the source directory and registry entry intact; the former copy fallback could follow symlinks or merge into an unrelated same-named directory.
 
-The first repository open by a 0.31.0 or newer binary records Repository capability 4 (migration 2026101902). All 0.30.x commands then reject that repository at database open, including `agent clean --gc`, whose older implementation could discard a new task workspace ownership record. Install 0.31.0 or newer to continue. This forward-only marker does not move or backfill existing worktree directories.
+The first repository open by a 0.30.67 or newer binary records Repository capability 4 (migration 2026101902). Libra 0.30.66 and older then reject that repository at database open, including `agent clean --gc`, whose older implementation could discard a new task workspace ownership record. Use 0.30.67 or newer to continue. This forward-only marker does not move or backfill existing worktree directories.

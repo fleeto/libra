@@ -397,17 +397,24 @@ fn read_restore_pathspec_file(path: &str, nul: bool) -> Result<Vec<String>, Rest
 }
 
 async fn compile_restore_pathspecs(raw: &[String]) -> Result<PathspecSet, RestoreError> {
+    let workdir = util::try_working_dir().map_err(|_| RestoreError::ReadWorktree)?;
+    compile_restore_pathspecs_at(raw, &workdir).await
+}
+
+async fn compile_restore_pathspecs_at(
+    raw: &[String],
+    workdir: &Path,
+) -> Result<PathspecSet, RestoreError> {
     if raw.is_empty() {
         return Err(RestoreError::InvalidPathspec(
             "no pathspec was given".to_string(),
         ));
     }
     let current_dir = env::current_dir().map_err(|_| RestoreError::ReadWorktree)?;
-    let workdir = util::try_working_dir().map_err(|_| RestoreError::ReadWorktree)?;
     let ignore_case = crate::utils::path_case::effective_ignore_case()
         .await
         .map_err(|_| RestoreError::ReadWorktree)?;
-    PathspecSet::from_workdir_with_default_icase(raw, &current_dir, &workdir, ignore_case)
+    PathspecSet::from_workdir_with_default_icase(raw, &current_dir, workdir, ignore_case)
         .map_err(invalid_pathspec)
 }
 
@@ -515,9 +522,14 @@ async fn run_restore(mut args: RestoreArgs) -> Result<RestoreOutput, RestoreErro
     let overlay = args.overlay;
 
     if worktree {
-        let (restored, deleted) =
-            restore_worktree_tracked(&pathspecs, &target_blobs, overlay, &skipped_unmerged_paths)
-                .await?;
+        let (restored, deleted) = restore_worktree_tracked(
+            &pathspecs,
+            &target_blobs,
+            overlay,
+            &skipped_unmerged_paths,
+            None,
+        )
+        .await?;
         restored_files.extend(restored);
         deleted_files.extend(deleted);
     }
@@ -627,22 +639,39 @@ async fn restore_worktree_tracked(
     target_blobs: &[(PathBuf, RestoreTarget)],
     overlay: bool,
     allowed_unmatched: &[PathBuf],
+    destination_root: Option<&Path>,
 ) -> Result<(Vec<String>, Vec<String>), RestoreError> {
     let target_map = preprocess_blobs(target_blobs);
     let index = Index::load(path::index()).map_err(|_| RestoreError::ReadIndex)?;
     let file_paths =
         collect_restore_worktree_paths(pathspecs, &target_map, &index, allowed_unmatched)?;
-    preflight_worktree_directory_transitions(&file_paths, &target_map, &index, overlay)?;
+    if let Some(root) = destination_root {
+        for path in &file_paths {
+            validate_explicit_destination_path(root, path)?;
+        }
+    }
+    preflight_worktree_directory_transitions(
+        &file_paths,
+        &target_map,
+        &index,
+        overlay,
+        destination_root,
+    )?;
     let mut restored = Vec::new();
     let mut deleted = Vec::new();
 
     for path_wd in &file_paths {
-        let path_abs = util::workdir_to_absolute(path_wd);
+        if let Some(root) = destination_root {
+            // Earlier entries may have materialized a symlink that is a
+            // parent of this path, even if the initial preflight was safe.
+            validate_explicit_destination_path(root, path_wd)?;
+        }
+        let path_abs = restore_absolute_path(path_wd, destination_root);
         let path_wd_str = path_to_utf8_typed(path_wd)?;
         let tracked = index.tracked(path_wd_str, 0);
         if !worktree_path_exists(&path_abs) {
             if let Some(target) = target_map.get(path_wd) {
-                restore_target_to_file_typed(*target, path_wd).await?;
+                restore_target_to_file_typed(*target, path_wd, destination_root).await?;
                 restored.push(path_wd.display().to_string());
             } else if !tracked {
                 return Err(pathspec_not_matched(path_wd));
@@ -659,12 +688,12 @@ async fn restore_worktree_tracked(
                 calc_file_blob_hash(&path_abs).map_err(|_| RestoreError::ReadObject)? == target.hash
             };
             if !content_matches || !mode_matches {
-                restore_target_to_file_typed(*target, path_wd).await?;
+                restore_target_to_file_typed(*target, path_wd, destination_root).await?;
                 restored.push(path_wd.display().to_string());
             }
         } else if !overlay && tracked {
             remove_worktree_path_for_restore(&path_abs)?;
-            util::clear_empty_dir(&path_abs);
+            clear_empty_restore_parents(&path_abs, destination_root);
             deleted.push(path_wd.display().to_string());
         }
     }
@@ -892,7 +921,7 @@ pub async fn execute_checked(args: RestoreArgs) -> io::Result<()> {
         .map_err(|error| io::Error::other(error.to_string()))?;
 
     if worktree {
-        restore_worktree_tracked(&pathspecs, &target_blobs, false, &[])
+        restore_worktree_tracked(&pathspecs, &target_blobs, false, &[], None)
             .await
             .map_err(|error| io::Error::other(error.to_string()))?;
     }
@@ -907,6 +936,32 @@ pub async fn execute_checked(args: RestoreArgs) -> io::Result<()> {
 /// `io::Error`, allowing callers like `clone` to map each failure category
 /// into a distinct stable error code.
 pub async fn execute_checked_typed(args: RestoreArgs) -> Result<(), RestoreError> {
+    execute_checked_typed_at(args, None).await
+}
+
+/// Restore tracked files into an explicit destination directory while keeping
+/// the caller's repository objects, index, and branch resolution as the source.
+/// Only `:/` is accepted because relative pathspecs would use the caller's cwd.
+#[cfg(any(test, all(unix, feature = "worktree-fuse")))]
+pub(crate) async fn execute_checked_typed_into(
+    args: RestoreArgs,
+    destination_root: &Path,
+) -> Result<(), RestoreError> {
+    if !destination_root.is_absolute() {
+        return Err(RestoreError::ReadWorktree);
+    }
+    if args.staged || args.pathspec.as_slice() != [":/"] {
+        return Err(RestoreError::InvalidPathspec(
+            "explicit destination restore requires only the repository-root pathspec ':/' and cannot update the index".to_string(),
+        ));
+    }
+    execute_checked_typed_at(args, Some(destination_root)).await
+}
+
+async fn execute_checked_typed_at(
+    args: RestoreArgs,
+    destination_root: Option<&Path>,
+) -> Result<(), RestoreError> {
     let staged = args.staged;
     let mut worktree = args.worktree;
     if !staged {
@@ -959,9 +1014,12 @@ pub async fn execute_checked_typed(args: RestoreArgs) -> Result<(), RestoreError
         }
     };
 
-    let pathspecs = compile_restore_pathspecs(&args.pathspec).await?;
+    let pathspecs = match destination_root {
+        Some(root) => compile_restore_pathspecs_at(&args.pathspec, root).await?,
+        None => compile_restore_pathspecs(&args.pathspec).await?,
+    };
     if worktree {
-        restore_worktree_tracked(&pathspecs, &target_blobs, false, &[]).await?;
+        restore_worktree_tracked(&pathspecs, &target_blobs, false, &[], destination_root).await?;
     }
     if staged {
         restore_index_tracked(&pathspecs, &target_blobs, false, &[])?;
@@ -970,6 +1028,72 @@ pub async fn execute_checked_typed(args: RestoreArgs) -> Result<(), RestoreError
 }
 
 // ── Shared helpers ───────────────────────────────────────────────────
+
+fn restore_absolute_path(path: &Path, destination_root: Option<&Path>) -> PathBuf {
+    match destination_root {
+        Some(root) => root.join(path),
+        None => util::workdir_to_absolute(path),
+    }
+}
+
+fn validate_explicit_destination_path(root: &Path, relative: &Path) -> Result<(), RestoreError> {
+    let mut components = relative.components().peekable();
+    if components.peek().is_none() {
+        return Err(RestoreError::InvalidPathspec(
+            "cannot restore an empty path into an explicit destination".to_string(),
+        ));
+    }
+    let mut parent = root.to_path_buf();
+    while let Some(component) = components.next() {
+        let std::path::Component::Normal(name) = component else {
+            return Err(RestoreError::InvalidPathspec(format!(
+                "cannot restore unsafe path '{}' into explicit destination",
+                relative.display()
+            )));
+        };
+        if components.peek().is_none() {
+            break;
+        }
+        parent.push(name);
+        match fs::symlink_metadata(&parent) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(RestoreError::InvalidPathspec(format!(
+                    "cannot restore '{}' through symbolic-link parent '{}'",
+                    relative.display(),
+                    parent.display()
+                )));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => break,
+            Err(_) => return Err(RestoreError::ReadWorktree),
+        }
+    }
+    Ok(())
+}
+
+fn clear_empty_restore_parents(path: &Path, destination_root: Option<&Path>) {
+    let Some(root) = destination_root else {
+        util::clear_empty_dir(path);
+        return;
+    };
+    let Ok(relative) = path.strip_prefix(root) else {
+        return;
+    };
+    if relative.as_os_str().is_empty()
+        || relative
+            .components()
+            .any(|part| !matches!(part, std::path::Component::Normal(_)))
+    {
+        return;
+    }
+    let mut parent = path.parent();
+    while let Some(dir) = parent {
+        if dir == root || fs::remove_dir(dir).is_err() {
+            break;
+        }
+        parent = dir.parent();
+    }
+}
 
 async fn resolve_source_commit(
     src: &str,
@@ -1340,7 +1464,7 @@ async fn restore_conflict_stage(
         let path_str = path_to_utf8_typed(path)?;
         match stage_target(&index, path_str, stage) {
             Some(target) => {
-                restore_target_to_file_typed(target, path).await?;
+                restore_target_to_file_typed(target, path, None).await?;
                 restored.push(path.display().to_string());
             }
             None if overlay => {
@@ -1492,9 +1616,10 @@ fn build_conflict_markers(
 
 async fn restore_target_to_file_typed(
     target: RestoreTarget,
-    path: &PathBuf,
+    path: &Path,
+    destination_root: Option<&Path>,
 ) -> Result<(), RestoreError> {
-    let path_abs = util::workdir_to_absolute(path);
+    let path_abs = restore_absolute_path(path, destination_root);
 
     if matches!(target.mode, Some(TreeItemMode::Commit)) {
         match fs::symlink_metadata(&path_abs) {
@@ -1580,7 +1705,7 @@ pub(crate) async fn preflight_worktree_restore_to_commit(
     let index = Index::load(path::index()).map_err(|_| RestoreError::ReadIndex)?;
     let pathspecs = compile_restore_pathspecs(&[util::working_dir_string()]).await?;
     let file_paths = collect_restore_worktree_paths(&pathspecs, &target_map, &index, &[])?;
-    preflight_worktree_directory_transitions(&file_paths, &target_map, &index, false)
+    preflight_worktree_directory_transitions(&file_paths, &target_map, &index, false, None)
 }
 
 fn preflight_worktree_directory_transitions(
@@ -1588,9 +1713,10 @@ fn preflight_worktree_directory_transitions(
     targets: &HashMap<PathBuf, RestoreTarget>,
     index: &Index,
     overlay: bool,
+    destination_root: Option<&Path>,
 ) -> Result<(), RestoreError> {
     for path in paths {
-        let absolute = util::workdir_to_absolute(path);
+        let absolute = restore_absolute_path(path, destination_root);
         let metadata = match fs::symlink_metadata(&absolute) {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
@@ -1814,7 +1940,7 @@ pub async fn restore_worktree(
         let tracked = index.tracked(path_wd_str, 0);
         if !worktree_path_exists(&path_abs) {
             if let Some(target) = target_blobs.get(path_wd) {
-                restore_target_to_file_typed(*target, path_wd)
+                restore_target_to_file_typed(*target, path_wd, None)
                     .await
                     .map_err(|error| io::Error::other(error.to_string()))?;
             } else if !tracked {
@@ -1829,7 +1955,7 @@ pub async fn restore_worktree(
             let mode_matches = worktree_mode_matches(&path_abs, target.mode)
                 .map_err(|error| io::Error::other(error.to_string()))?;
             if hash != target.hash || !mode_matches {
-                restore_target_to_file_typed(*target, path_wd)
+                restore_target_to_file_typed(*target, path_wd, None)
                     .await
                     .map_err(|error| io::Error::other(error.to_string()))?;
             }
@@ -1919,7 +2045,173 @@ fn get_index_deleted_files_in_filters_typed(
 
 #[cfg(test)]
 mod tests {
+    use clap::Parser;
+    use serial_test::serial;
+    use tempfile::tempdir;
+
     use super::*;
+    use crate::{
+        command::{add, commit, init},
+        internal::config::ConfigKv,
+        utils::test::ChangeDirGuard,
+    };
+
+    #[test]
+    fn explicit_destination_pruning_stops_at_root() {
+        let parent = tempdir().expect("create destination parent");
+        let root = parent.path().join("workspace");
+        fs::create_dir_all(root.join("nested")).expect("create empty nested directory");
+
+        clear_empty_restore_parents(&root.join("nested/deleted.txt"), Some(&root));
+
+        assert!(!root.join("nested").exists());
+        assert!(root.is_dir(), "the destination root must survive pruning");
+        assert!(
+            parent.path().is_dir(),
+            "the destination parent must survive pruning"
+        );
+
+        clear_empty_restore_parents(&root, Some(&root));
+        assert!(
+            root.is_dir(),
+            "an empty relative path must not remove the root"
+        );
+        assert!(parent.path().is_dir());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn explicit_destination_rejects_escape_and_symlink_parent() {
+        let destination = tempdir().expect("create destination root");
+        let outside = tempdir().expect("create outside directory");
+        assert!(matches!(
+            validate_explicit_destination_path(destination.path(), Path::new("../outside.txt")),
+            Err(RestoreError::InvalidPathspec(_))
+        ));
+        assert!(matches!(
+            validate_explicit_destination_path(destination.path(), outside.path()),
+            Err(RestoreError::InvalidPathspec(_))
+        ));
+        std::os::unix::fs::symlink(outside.path(), destination.path().join("link"))
+            .expect("create parent symlink");
+        assert!(matches!(
+            validate_explicit_destination_path(destination.path(), Path::new("link/file.txt")),
+            Err(RestoreError::InvalidPathspec(_))
+        ));
+        assert!(!outside.path().join("file.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn explicit_destination_rejects_relative_pathspec_and_index_update() {
+        let destination = tempdir().expect("create explicit destination");
+        for args in [
+            RestoreArgs {
+                pathspec: vec!["tracked.txt".to_string()],
+                ..Default::default()
+            },
+            RestoreArgs {
+                pathspec: vec![":/".to_string()],
+                staged: true,
+                ..Default::default()
+            },
+        ] {
+            assert!(matches!(
+                execute_checked_typed_into(args, destination.path()).await,
+                Err(RestoreError::InvalidPathspec(_))
+            ));
+        }
+    }
+
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn explicit_destination_restores_older_commit_without_touching_source() {
+        let repo = tempdir().expect("create source repository");
+        let _guard = ChangeDirGuard::new(repo.path());
+        init::init(init::InitArgs::parse_from(["init", "-q", "."]))
+            .await
+            .expect("initialize source repository");
+        ConfigKv::set("user.name", "Restore Test User", false)
+            .await
+            .expect("configure author name");
+        ConfigKv::set("user.email", "restore-test@example.com", false)
+            .await
+            .expect("configure author email");
+        let output = OutputConfig {
+            quiet: true,
+            ..OutputConfig::default()
+        };
+
+        fs::write(repo.path().join("tracked.txt"), b"older\n").expect("write older file");
+        add::execute_safe(add::AddArgs::parse_from(["add", "tracked.txt"]), &output)
+            .await
+            .expect("stage older file");
+        commit::execute_safe(
+            commit::CommitArgs::parse_from(["commit", "--no-verify", "-m", "older"]),
+            &output,
+        )
+        .await
+        .expect("commit older revision");
+        let older = Head::current_commit_result()
+            .await
+            .expect("read older revision")
+            .expect("older revision exists");
+
+        fs::write(repo.path().join("tracked.txt"), b"newer\n").expect("write newer file");
+        fs::write(repo.path().join("new-only.txt"), b"new only\n").expect("write source-only file");
+        add::execute_safe(
+            add::AddArgs::parse_from(["add", "tracked.txt", "new-only.txt"]),
+            &output,
+        )
+        .await
+        .expect("stage newer files");
+        commit::execute_safe(
+            commit::CommitArgs::parse_from(["commit", "--no-verify", "-m", "newer"]),
+            &output,
+        )
+        .await
+        .expect("commit newer revision");
+        let source_index = repo.path().join(".libra/index");
+        let index_before = fs::read(&source_index).expect("snapshot source index");
+        fs::write(repo.path().join("tracked.txt"), b"source dirty\n").expect("dirty source file");
+
+        let destination = tempdir().expect("create explicit destination");
+        fs::write(
+            destination.path().join("tracked.txt"),
+            b"destination dirty\n",
+        )
+        .expect("dirty destination file");
+        fs::write(
+            destination.path().join("new-only.txt"),
+            b"destination newer\n",
+        )
+        .expect("seed path absent from older commit");
+        execute_checked_typed_into(
+            RestoreArgs {
+                source: Some(older.to_string()),
+                pathspec: vec![":/".to_string()],
+                worktree: true,
+                ..Default::default()
+            },
+            destination.path(),
+        )
+        .await
+        .expect("restore older revision into explicit destination");
+
+        assert_eq!(
+            fs::read(destination.path().join("tracked.txt")).expect("destination tracked file"),
+            b"older\n"
+        );
+        assert!(!destination.path().join("new-only.txt").exists());
+        assert_eq!(
+            fs::read(repo.path().join("tracked.txt")).expect("source tracked file"),
+            b"source dirty\n"
+        );
+        assert_eq!(
+            fs::read(repo.path().join("new-only.txt")).expect("source-only file"),
+            b"new only\n"
+        );
+        assert_eq!(fs::read(&source_index).expect("source index"), index_before);
+    }
 
     /// Pin the `Display` format for every variant of [`RestoreError`].
     /// These strings are used as the `CliError` message via the

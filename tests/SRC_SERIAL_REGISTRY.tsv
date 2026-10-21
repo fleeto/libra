@@ -1,4 +1,5 @@
 file	fn	lane	reason
+src/command/restore.rs	explicit_destination_restores_older_commit_without_touching_source	lane:cwd+env	initializes a real repository and changes process cwd while testing source and explicit destination isolation
 src/internal/ai/agent_import.rs	reasoning_real_multi_turn_import_consumes_only_reserved_batches	lane:cwd+env	isolates a real repository, registered helper executable and process-global capture test state
 src/internal/ai/agent_import.rs	reasoning_real_multi_turn_import_failure_keeps_committed_progress	lane:cwd+env	isolates a real repository, registered helper executable and process-global capture failpoint
 src/command/agent/import.rs	reasoning_transport_production_consumer_accepts_authenticated_fixture	lane:cwd+env	uses a real repository and registered helper to inspect authenticated shared-store artifact bytes

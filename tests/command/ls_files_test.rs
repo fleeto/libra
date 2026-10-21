@@ -1238,3 +1238,144 @@ fn ls_files_short_shows_intent_to_add_empty_blob() {
         "V7 expected empty-blob entry: {text:?}"
     );
 }
+
+/// Issue #490 / TC-0046 support surface: `ls-files --debug` prints Git's cached
+/// stat block after each record, so a caller can prove that `add --refresh`
+/// never rewrites a skip-worktree entry's cached stat.
+#[test]
+fn ls_files_debug_prints_cached_stat_block() {
+    let repo = super::create_committed_repo_via_cli();
+    let root = repo.path();
+
+    let out = run_libra_command(&["ls-files", "--debug", "tracked.txt"], root);
+    super::assert_cli_success(&out, "ls-files --debug");
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(
+        lines.first().copied(),
+        Some("tracked.txt"),
+        "path line first: {text}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.trim_start().starts_with("ctime: ")),
+        "ctime line: {text}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.trim_start().starts_with("mtime: ")),
+        "mtime line: {text}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.trim_start().starts_with("dev: ") && line.contains("\tino: ")),
+        "dev/ino line: {text}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.trim_start().starts_with("uid: ") && line.contains("\tgid: ")),
+        "uid/gid line: {text}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.trim_start().starts_with("size: ") && line.contains("\tflags: ")),
+        "size/flags line: {text}"
+    );
+    // The stat pair is `<seconds>:<nanoseconds>` on both time lines.
+    for key in ["ctime: ", "mtime: "] {
+        let line = lines
+            .iter()
+            .find(|line| line.trim_start().starts_with(key))
+            .expect("time line present");
+        let value = line.trim_start().trim_start_matches(key).trim();
+        assert_eq!(
+            value.split(':').count(),
+            2,
+            "{key} must render seconds:nanos, got {value}"
+        );
+    }
+
+    // `-s` composes: the stage record comes first, then the debug block.
+    let staged = run_libra_command(&["ls-files", "-s", "--debug", "tracked.txt"], root);
+    super::assert_cli_success(&staged, "ls-files -s --debug");
+    let staged_text = String::from_utf8_lossy(&staged.stdout).to_string();
+    assert!(
+        staged_text.starts_with("100644 "),
+        "the stage record keeps its shape: {staged_text}"
+    );
+    assert!(
+        staged_text.contains("  mtime: "),
+        "the debug block follows the stage record: {staged_text}"
+    );
+
+    // Untracked rows (`-o`) carry no cached stat, so they print only the path.
+    fs::write(root.join("untracked.txt"), "u\n").expect("write untracked file");
+    let others = run_libra_command(&["ls-files", "-o", "--debug", "untracked.txt"], root);
+    super::assert_cli_success(&others, "ls-files -o --debug");
+    assert_eq!(
+        String::from_utf8_lossy(&others.stdout).trim(),
+        "untracked.txt",
+        "an untracked row has no cached stat block"
+    );
+}
+
+/// Issue #490 / TC-0046: `add --refresh` must not rewrite a skip-worktree
+/// entry's cached stat (Git never refreshes sparse entries).
+#[test]
+fn add_refresh_leaves_skip_worktree_stat_untouched() {
+    let repo = super::create_committed_repo_via_cli();
+    let root = repo.path();
+    fs::write(root.join("sparse_entry"), "sparse\n").expect("write sparse_entry");
+    super::assert_cli_success(
+        &run_libra_command(&["add", "sparse_entry"], root),
+        "stage sparse_entry",
+    );
+    super::assert_cli_success(
+        &run_libra_command(&["update-index", "--skip-worktree", "sparse_entry"], root),
+        "mark skip-worktree",
+    );
+    super::assert_cli_success(
+        &run_libra_command(&["commit", "-m", "sparse", "--no-verify"], root),
+        "commit sparse_entry",
+    );
+    fs::remove_file(root.join("sparse_entry")).expect("delete the worktree copy");
+
+    let before = run_libra_command(&["ls-files", "--debug", "sparse_entry"], root);
+    super::assert_cli_success(&before, "ls-files --debug before");
+    let before_stat: Vec<String> = String::from_utf8_lossy(&before.stdout)
+        .lines()
+        .filter(|line| line.trim_start().starts_with("mtime: "))
+        .map(str::to_string)
+        .collect();
+
+    let refresh = run_libra_command(&["add", "--refresh", "sparse_entry"], root);
+    assert_eq!(
+        refresh.status.code(),
+        Some(1),
+        "a sparse pathspec must be refused (t3705#10): {}",
+        String::from_utf8_lossy(&refresh.stderr)
+    );
+
+    let after = run_libra_command(&["ls-files", "--debug", "sparse_entry"], root);
+    super::assert_cli_success(&after, "ls-files --debug after");
+    let after_stat: Vec<String> = String::from_utf8_lossy(&after.stdout)
+        .lines()
+        .filter(|line| line.trim_start().starts_with("mtime: "))
+        .map(str::to_string)
+        .collect();
+    assert_eq!(
+        before_stat, after_stat,
+        "add --refresh must not update a skip-worktree entry's cached stat"
+    );
+
+    let staged = run_libra_command(&["diff", "--staged", "--", "sparse_entry"], root);
+    assert!(
+        String::from_utf8_lossy(&staged.stdout).trim().is_empty(),
+        "the sparse entry must stay unstaged"
+    );
+}

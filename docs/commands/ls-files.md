@@ -67,6 +67,7 @@ without printing panic/backtrace or `Broken pipe` diagnostics.
 | `-x`, `--exclude <pattern>` | Skip untracked files matching `<pattern>` (gitignore syntax) from the `--others` listing. Repeatable; supplements `--exclude-standard`. With `-i` the pattern instead defines the ignored set. |
 | `-X`, `--exclude-from <file>` | Read additional exclude patterns from `<file>` (one per line; `#` comments and blank lines skipped) and apply them like `-x`. Repeatable. |
 | `--error-unmatch` | Exit 1 with `LBR-CLI-003` if any explicit pathspec matches no files in the selected result set. |
+| `--debug` | Append Git's cached-stat block after each cached record: `ctime: <s>:<ns>`, `mtime: <s>:<ns>`, `dev`/`ino`, `uid`/`gid`, `size`/`flags`. Untracked (`-o`) rows have no cached stat and print the path only. Composes with `-s`/`-t`/`--eol`. |
 | `--eol` | Prefix each cached entry with `i/<eol> w/<eol> attr/<attr>` line-ending info: `<eol>` is `lf`/`crlf`/`mixed`/`none`/`-text` (binary) for the index blob (`i/`) and the worktree file (`w/`). Byte-compatible with `git ls-files --eol`; `attr/` is currently empty because line-ending attribute reporting is not implemented. |
 | `-z` | Emit NUL-delimited text records instead of newline-delimited output. Text mode only; rejects `--json` / `--machine`. |
 | `<pathspec>...` | Limit output to matching paths. Supports exact files, directory prefixes, default wildcards, and `:(top)` / `:(exclude)` / `:(icase)` / `:(literal)` / `:(glob)` magic. Pathspecs resolve from the current working directory unless `:(top)` is used. |
@@ -174,6 +175,7 @@ entries use `null` for fields that do not apply:
 | Pathspec filters | `<pathspec>...` | Supported | Different model |
 | Unmatched pathspec failure | `--error-unmatch` | `--error-unmatch` | Different model |
 | Line-ending info | `--eol` (`attr/` always empty) | `--eol` | N/A |
+| Cached stat block | `--debug` | `--debug` | `flags` prints the 16-bit flags word; the v3 extended bits (`skip-worktree`/`intent-to-add`) are reflected only by the extended marker, as in Git |
 | NUL output | `-z` (text mode only) | `-z` | Different model |
 | Status tags | `-t` / `-v` (H/R/C/?/M/S) | `-t` / `-v` (H/S/M/R/C/K/?) | Different model (`-v` lowercase assume-unchanged unsupported; `K`/`U` unsupported) |
 | Unmerged entries | `-u` / `--unmerged` | `-u` / `--unmerged` | Different model |

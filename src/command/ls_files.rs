@@ -130,6 +130,12 @@ pub struct LsFilesArgs {
     #[clap(long)]
     pub eol: bool,
 
+    /// Show the cached stat data (ctime/mtime/dev/ino/uid/gid/size/flags) for
+    /// each cached entry, matching Git's `ls-files --debug` block format.
+    /// Composes with `-s`/`-t`/`--eol` (the block follows each record).
+    #[clap(long = "debug")]
+    pub debug: bool,
+
     /// Limit output to files matching the given pathspec(s)
     #[clap(value_name = "pathspec")]
     pub pathspec: Vec<String>,
@@ -146,6 +152,65 @@ pub struct FileEntry {
     /// shape stays stable (visible through `-t`/`-v` instead).
     #[serde(skip)]
     pub skip_worktree: bool,
+    /// Cached stat data for `--debug`; `None` for worktree-only (`-o`) rows.
+    /// Omitted from JSON for the same reason as `skip_worktree`.
+    #[serde(skip)]
+    pub stat: Option<CachedStat>,
+}
+
+/// The index's cached stat fields, as `ls-files --debug` prints them.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct CachedStat {
+    /// `<seconds>:<nanoseconds>`, exactly as `Time` renders.
+    pub ctime: String,
+    pub mtime: String,
+    pub dev: u32,
+    pub ino: u32,
+    pub uid: u32,
+    pub gid: u32,
+    pub size: u32,
+    pub flags: u32,
+}
+
+impl CachedStat {
+    fn from_entry(entry: &git_internal::internal::index::IndexEntry) -> Self {
+        // Git's `ls-files --debug` prints the cached stat block and the 16-bit
+        // flags word: 12 name-length bits, 2 stage bits, then the assume-valid
+        // and extended markers. `skip-worktree`/`intent-to-add` live in the v3
+        // EXTENDED word (which Git does not print either); an entry carrying
+        // them sets the extended marker here.
+        let extended = entry.flags.skip_worktree || entry.flags.intent_to_add;
+        let flags = u32::from(entry.flags.name_length & 0x0fff)
+            | (u32::from(entry.flags.stage) & 0x3) << 12
+            | u32::from(extended) << 14
+            | u32::from(entry.flags.assume_valid) << 15;
+        Self {
+            // `Time` renders as `<seconds>:<nanos>` (Git's `--debug` shape).
+            ctime: entry.ctime.to_string(),
+            mtime: entry.mtime.to_string(),
+            dev: entry.dev,
+            ino: entry.ino,
+            uid: entry.uid,
+            gid: entry.gid,
+            size: entry.size,
+            flags,
+        }
+    }
+
+    /// Git's `ls-files --debug` block (the path line is written by the caller).
+    fn render(&self) -> String {
+        format!(
+            "  ctime: {c}\n  mtime: {m}\n  dev: {dev}\tino: {ino}\n  uid: {uid}\tgid: {gid}\n  size: {size}\tflags: {flags}",
+            c = self.ctime,
+            m = self.mtime,
+            dev = self.dev,
+            ino = self.ino,
+            uid = self.uid,
+            gid = self.gid,
+            size = self.size,
+            flags = self.flags,
+        )
+    }
 }
 
 pub async fn execute(args: LsFilesArgs) -> CliResult<()> {
@@ -316,6 +381,7 @@ fn run_ls_files(
                     stage: Some(*stage as u32),
                     status: status.to_string(),
                     skip_worktree,
+                    stat: Some(CachedStat::from_entry(entry)),
                 });
             }
         }
@@ -367,6 +433,7 @@ fn run_ls_files(
                 stage: None,
                 status: "other".to_string(),
                 skip_worktree: false,
+                stat: None,
             });
         }
     }
@@ -566,6 +633,15 @@ fn render_output(
         stdout
             .write_all(record.as_bytes())
             .map_err(|source| stdout_write_error("write ls-files output", source))?;
+        // `--debug` appends Git's cached-stat block after the record.
+        if args.debug
+            && let Some(stat) = entry.stat.as_ref()
+        {
+            stdout
+                .write_all(b"\n")
+                .and_then(|()| stdout.write_all(stat.render().as_bytes()))
+                .map_err(|source| stdout_write_error("write ls-files --debug output", source))?;
+        }
         stdout
             .write_all(if args.nul_terminate { b"\0" } else { b"\n" })
             .map_err(|source| stdout_write_error("write ls-files output", source))?;

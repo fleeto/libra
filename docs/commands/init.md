@@ -178,17 +178,20 @@ after everything succeeded:
   when the target path contains symlinks or `..`. User files and the source `.git` are
   never touched;
 - a hard kill (SIGKILL, OOM, power loss) leaves the marker behind. Until it is cleared,
-  every other command in that repository refuses with `LBR-REPO-003` ("incomplete Git
-  conversion") instead of presenting the repository as empty;
+  other commands refuse instead of presenting the repository as empty: while the
+  recorded owner is still running they return `LBR-CONFLICT-002`, and after the
+  hard kill they return `LBR-REPO-003` ("incomplete Git conversion");
 - retrying `libra init --from-git-repository <same-source>` after a hard kill verifies that
   the recorded owner process is gone and that the source still matches, renames the
   incomplete storage root to a sibling `<storage>.incomplete-<timestamp>` (**never
   deletes it**), and converts from scratch. For an existing bare target, that aside
   contains its pre-existing user files; inspect it before removing anything. The aside
   path is reported in the warnings;
-- on macOS, conversions started by Libra 0.30.80 or newer record enough owner
-  identity to recognize an exited process, so the same-source retry can recover
-  after a hard kill in the same boot session. The marker keeps the legacy owner
+- on macOS, conversions started by a build from the v0.30.79 or v0.30.80
+  source record enough owner identity to recognize an exited process, so the
+  same-source retry can recover after a hard kill in the same boot session.
+  The earlier published `v0.31.0` binary predates this fix; see the
+  [signed stable installer guidance](upgrade.md) if it is installed. The marker keeps the legacy owner
   field empty, so older macOS binaries also refuse a concurrent retry. Markers
   from an older binary, another host, or a prior boot cannot prove the owner
   has exited; confirm no conversion is running on any host, then follow the

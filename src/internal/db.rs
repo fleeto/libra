@@ -89,20 +89,45 @@ pub enum SchemaCompatibility {
 ///
 /// Boundary conditions:
 /// - On Windows, strips the `\\?\` extended-length prefix and converts
-///   backslashes to forward slashes so sqlx accepts the URL.
+///   backslashes to forward slashes so sqlx accepts the URL. Canonical paths
+///   may spell the prefix with either slash style.
 /// - On Unix, returns the input unchanged (allocation-only).
 fn normalize_path_for_sqlite(db_path: &str) -> String {
     #[cfg(windows)]
     {
-        // Remove Windows extended-length path prefix if present
-        let path = db_path.strip_prefix(r"\\?\").unwrap_or(db_path);
-        // Convert backslashes to forward slashes for SQLite URL
-        path.replace('\\', "/")
+        // Strip the verbatim prefix *after* slash normalization. Otherwise a
+        // canonical //?/C:/... path leaves '?' in the SQLite connection URL,
+        // which sqlx parses as the start of query parameters.
+        let path = db_path.replace('\\', "/");
+        if let Some(unc) = path.strip_prefix("//?/UNC/") {
+            format!("//{unc}")
+        } else if let Some(local) = path.strip_prefix("//?/") {
+            local.to_string()
+        } else {
+            path
+        }
     }
     #[cfg(not(windows))]
     {
         db_path.to_string()
     }
+}
+
+#[cfg(all(test, windows))]
+#[test]
+fn windows_sqlite_paths_drop_verbatim_prefix_before_url_parsing() {
+    assert_eq!(
+        normalize_path_for_sqlite(r"\\?\C:\Users\example\repo\.libra\libra.db"),
+        "C:/Users/example/repo/.libra/libra.db"
+    );
+    assert_eq!(
+        normalize_path_for_sqlite("//?/C:/Users/example/repo/.libra/libra.db"),
+        "C:/Users/example/repo/.libra/libra.db"
+    );
+    assert_eq!(
+        normalize_path_for_sqlite(r"\\?\UNC\server\share\repo\libra.db"),
+        "//server/share/repo/libra.db"
+    );
 }
 
 /// Establish a connection to the database with the default 30-second busy timeout.

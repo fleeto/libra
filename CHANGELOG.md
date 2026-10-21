@@ -44,14 +44,28 @@
 - The public `worktree add` positional argument is a name; scripts that supplied
   a destination path must use `--path`. This compatibility change entered the
   0.30.67 source and is included in this release.
+- Clarify that standard builds have supported `worktree add --force` for a
+  non-empty target and `worktree remove --delete-dir --force` for a dirty
+  worktree since v0.30.69; the older `v0.31.0` tag predates these flags.
+  Custom `worktree-fuse` builds use `-f` for `--fuse` and do not expose `--force`.
 - On macOS, use an OCI opaque marker so a macFUSE worktree hides the managed
   container and sibling worktrees from its mount. Linux retains its xattr marker.
 - Populate FUSE worktrees from the requested branch into the mount itself,
   without changing the caller's dirty files or index. Keep empty-directory
   cleanup inside the mount's root.
 - The first repository open by a managed-worktree-capable binary records
-  capability 4. Libra 0.30.66 and older refuse that repository; use 0.30.67 or
-  newer. Existing worktree directories are not moved.
+  capability 4. Libra 0.30.66 and older refuse that repository. Published
+  binaries with this capability begin at v0.30.67 on Linux and v0.30.68 on
+  macOS/Windows. Existing worktree directories are not moved.
+- On Windows, opening the repository database after `init` accepts canonical
+  verbatim paths without treating their `?` prefix as SQLite URL parameters.
+- The old `v0.31.0` tag has downloadable Linux/macOS binaries but never entered
+  the stable channel and predates fixes in this release. Its higher version
+  number prevents `libra upgrade` from selecting v0.30.80; after this release
+  reaches the signed stable channel, rerun the default installer without `-v`
+  to replace that binary with the signed stable build. On macOS, put an
+  Ed25519-capable OpenSSL (for example Homebrew `openssl@3`) first on the
+  installer's `PATH`; see [upgrade guidance](docs/commands/upgrade.md).
 
 ### macOS Git conversion recovery
 
@@ -59,7 +73,8 @@
   marker fields ignored by older clients. This allows a safe retry after a
   hard kill in the same boot, while older binaries still refuse to take over
   a running conversion. Markers from another host or boot, and older
-  interrupted markers, require manual recovery guidance.
+  interrupted markers, require manual recovery guidance. The earlier
+  `v0.31.0` tag predates this macOS fix.
 
 ### Init template safety
 

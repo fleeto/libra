@@ -16,9 +16,33 @@ libra upgrade [--check | -y|--yes]
 
 下载时校验 SHA256 和大小（最多256 MiB），在运行 executable 旁暂存并执行安装前自检，
 然后原子替换并执行安装后探测；探测失败恢复原 binary。新版本在下次命令生效。
+较早打标的 `v0.31.0` 有可下载的 Linux/macOS arm64 二进制，但未进入稳定通道，
+且缺少 v0.30.80 包含的修复。因为 0.31.0 的版本号更高，`libra upgrade` 不会将它
+替换为 v0.30.80。待 v0.30.80 进入签名稳定通道后，清除 `LIBRA_VERSION` / `LIBRA_BASE_URL`
+覆盖值并重新运行不带 `-v` 的默认安装脚本：
+
+```sh
+curl -fsSL https://download.libra.tools/install.sh | sh
+libra --version
+```
+
+macOS 系统自带的 `/usr/bin/openssl` 可能不支持 Ed25519。请安装支持 Ed25519 的
+OpenSSL，并在安装脚本的 `PATH` 中将它放在最前面。例如使用 Homebrew：
+
+```sh
+brew install openssl@3
+curl -fsSL https://download.libra.tools/install.sh | PATH="$(brew --prefix openssl@3)/bin:$PATH" sh
+libra --version
+```
+
+确认安装器显示 `stable manifest verified`。若稳定清单或签名验证程序不可用，
+拒绝未验证回退；安装兼容的验证程序或待清单可用时重试。不要设置
+`LIBRA_ALLOW_FALLBACK=1`。指定 `-v` 的安装路径
+也不使用签名清单验证。
 从 Libra 0.30.67 起，新版 binary 首次在任意仓库执行命令时会写入不可回退的 worktree 布局能力标记，
 即使该仓库没有额外的 worktree 也一样。此后 0.30.66 及更早版本在打开该仓库数据库时会拒绝所有命令；
-要继续使用该仓库，须使用 Libra 0.30.67 或更新版本，重新安装旧版本不会撤销此标记。
+要继续使用该仓库，须使用支持 2026101902 能力标记的构建：已发布二进制在 Linux 上始于 v0.30.67，
+在 macOS/Windows 上始于 v0.30.68；重新安装旧版本不会撤销此标记。
 公开命令 `worktree add` 的位置参数现为 NAME；原来传目标路径的脚本须改为
 `worktree add NAME --path PATH`，按路径管理 worktree 时同样使用 `--path` 选择器；
 `worktree move` 用 `--from-path` 选择源，用 `--path` 指定目标。

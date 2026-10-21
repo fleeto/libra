@@ -58,6 +58,8 @@ libra worktree doctor [<workspace-id>] [--limit <n>] [--cursor <cursor>]
 
 `--create-branch` 是 `--new-branch` 的别名。省略目标时，新 worktree 以**源提交的分离 HEAD** 创建；名称不会隐式创建同名分支。不支持 `--lock`、`--orphan`、`--no-checkout`、远程猜测和 `-B`；创建后可用 `worktree lock` 锁定。
 
+标准构建从 v0.30.69 起支持 `add --force` 与 `remove --force`，v0.30.80 也包含这些标志。较早发布的 `v0.31.0` Linux/macOS 二进制尚未实现。若已安装 v0.31.0，待 v0.30.80 发布后请使用[签名稳定通道安装脚本](upgrade.md)替换；`libra upgrade` 不会选择版本号更低的构建。
+
 对于已分离的 registry 条目，`add <NAME>` 校验已保存身份和共享存储指针，然后重新挂接现有文件与暂存状态。重新挂接时拒绝 `TARGET`、`-b` 和 `--detach`，可选的 `--path` 必须等于注册路径。tombstone 条目清理成功前继续占用名称。
 
 ```bash
@@ -80,9 +82,11 @@ libra worktree add experiment --path "../实验 workspace"
 
 #### FUSE worktree
 
-启用 `worktree-fuse` 的 Unix 构建中，`add <NAME> --fuse` 需要可用的 FUSE 驱动（Linux 为 `/dev/fuse`，macOS 为 macFUSE）。官方发行二进制不启用 `worktree-fuse`；需自行构建才可使用。在这种构建中，`-f` 是 `--fuse` 的缩写，不是 `--force`。此处的 macFUSE 托管目录遮蔽保护在 Libra 0.30.80 或更新版本受支持。它以 `.libra/worktree/fuse/<NAME>/workspace` 为挂载点，同级 `upper/` 为可写 overlay。显式 `--path` 可选择外部挂载点；位于 lower tree、upper tree、共享元数据或其他托管工作区内的目标会在创建前拒绝。内部默认目录通过 overlay 中 opaque 的 `.libra/worktree` 目录遮蔽，避免递归暴露自身挂载点、upper 或兄弟工作区。文件系统无法建立该遮蔽时拒绝挂载。
+启用 `worktree-fuse` 的 Unix 构建中，`add <NAME> --fuse` 需要可用的 FUSE 驱动（Linux 为 `/dev/fuse`，macOS 为 macFUSE）。官方发行二进制不启用 `worktree-fuse`；需自行构建才可使用。在这种构建中，`-f` 是 `--fuse` 的缩写，不是 `--force`。从 v0.30.79 或 v0.30.80 源码自行构建的 macOS `worktree-fuse` 包含此处的托管目录遮蔽保护；更早打标的 `v0.31.0` 尚无此修复。它以 `.libra/worktree/fuse/<NAME>/workspace` 为挂载点，同级 `upper/` 为可写 overlay。显式 `--path` 可选择外部挂载点；位于 lower tree、upper tree、共享元数据或其他托管工作区内的目标会在创建前拒绝。内部默认目录通过 overlay 中 opaque 的 `.libra/worktree` 目录遮蔽，避免递归暴露自身挂载点、upper 或兄弟工作区。文件系统无法建立该遮蔽时拒绝挂载。
 
 FUSE 与普通 worktree 不能占用同一名称。FUSE registry 使用 `{ "schema_version": 1, "entries": [...] }`；已知旧格式仍可读取，不移动原目录。FUSE worktree 不支持 `move`，也不支持按名称或路径修复身份（`repair <NAME>` / `repair --path <PATH>`）。注册表修复请用全局 `worktree repair --confirm`；FUSE 不采用普通 linked worktree 的私有身份布局。其 `remove` 继续使用卸载并删除 upper 的既有语义，不采用普通 worktree 的保留目录分离语义。对于新的托管默认布局，还会删除空挂载目录和容器；目录非空或清理失败时保留注册及名称供重试。旧布局和外部挂载点的目录仍保留。`umount` 继续接收实际路径，不接收 worktree 名称。
+
+`repair --resolve-identity --yes` 仅在标准构建中提供；`worktree-fuse` 构建即使管理普通 linked worktree 也不提供这些标志。
 
 ```bash
 libra worktree add overlay --fuse
@@ -668,4 +672,4 @@ Git 的 `git worktree lock` 也支持 `--reason`，Libra 保留了这一点。�
 | `LBR-WORKTREE-001` | `worktree doctor --cursor` 收到非本命令签发（或已过期）的 cursor |
 | `LBR-WORKTREE-002` | `worktree doctor` 无法读取某个 scope（registry 无法解析、记录不可读、仓库身份缺失），拒绝给出残缺诊断 |
 
-支持统一 worktree 目录的版本首次打开仓库时，会写入仓库能力标记 4。此后 Libra 0.30.66 及更早版本会拒绝该仓库中的所有命令，包括与 worktree 无关的命令；请使用 Libra 0.30.67 或更新版本继续操作。现有 worktree 目录不会移动。
+支持统一 worktree 目录的版本首次打开仓库时，会写入仓库能力标记 4。此后 Libra 0.30.66 及更早版本会拒绝该仓库中的所有命令，包括与 worktree 无关的命令；请使用支持 2026101902 能力标记的构建：已发布二进制在 Linux 上始于 v0.30.67，在 macOS/Windows 上始于 v0.30.68；v0.30.80 的全部发行平台均支持。现有 worktree 目录不会移动。

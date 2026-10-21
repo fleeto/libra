@@ -492,7 +492,11 @@ fn lookup_pack_offset(index: &Path, oid: &ObjectHash) -> Result<Option<u64>, Git
         *value = read_be_u32(&mut file)?;
     }
     let first = oid.as_ref()[0] as usize;
-    let start = if first == 0 { 0 } else { u64::from(fanout[first - 1]) };
+    let start = if first == 0 {
+        0
+    } else {
+        u64::from(fanout[first - 1])
+    };
     let end = u64::from(fanout[first]);
     let hash_len = oid.as_ref().len() as u64;
     let names_at = if version2 { 8 + 256 * 4 } else { 256 * 4 };
@@ -577,7 +581,9 @@ fn read_delta_target_size(pack: &mut File, oid: &ObjectHash) -> Result<u64, GitE
     let decoder = flate2::read::ZlibDecoder::new(pack);
     let mut limited = InflateLimit::new(decoder);
     let _base = read_delta_varint(&mut limited).map_err(|error| {
-        GitError::InvalidObjectInfo(format!("could not read the delta base size of {oid}: {error}"))
+        GitError::InvalidObjectInfo(format!(
+            "could not read the delta base size of {oid}: {error}"
+        ))
     })?;
     read_delta_varint(&mut limited).map_err(|error| {
         GitError::InvalidObjectInfo(format!(
@@ -991,8 +997,7 @@ mod tests {
 
     fn zlib_bytes(data: &[u8]) -> Vec<u8> {
         use std::io::Write as _;
-        let mut encoder =
-            flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+        let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
         encoder.write_all(data).expect("compress");
         encoder.finish().expect("finish")
     }
@@ -1103,11 +1108,8 @@ mod tests {
         pack.push(u8::try_from(distance).expect("distance fits in one byte"));
         pack.extend(zlib_bytes(&delta));
         pack.extend_from_slice(&[0u8; 20]);
-        let oid = ObjectHash::from_bytes_for_kind(
-            git_internal::hash::HashKind::Sha1,
-            &[0x42; 20],
-        )
-        .expect("oid");
+        let oid = ObjectHash::from_bytes_for_kind(git_internal::hash::HashKind::Sha1, &[0x42; 20])
+            .expect("oid");
         (oid, pack, delta_at as u32)
     }
 

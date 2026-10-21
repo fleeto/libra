@@ -25,6 +25,8 @@ libra branch --show-current
 
 删除有两种形式：`-d` 执行安全删除，移除前会检查该分支是否已完全合并到当前分支；`-D` 无论合并状态如何都会强制删除。两者都拒绝删除你当前所在的分支。
 
+`branch -f <名称> [<起点>]` 可创建新分支或重置已有分支。已有分支若在当前或其他 worktree 中检出，则拒绝重置；protect/archive 元数据也会以 `LBR-POLICY-001` 拒绝，`--force` 不会绕过策略。请先将相关 worktree 切到其他分支，或显式解除策略后再重试。重置会输出 `Reset branch`（`--json` 为 `data.action = "reset"`），并在分支 reflog 中记录旧、新指针。
+
 `--contains` 和 `--no-contains` 过滤器（别名为 `--with` 和 `--without`）可将分支列表缩小到历史中包含或不包含某个提交的分支；省略提交参数时默认为 HEAD。`--points-at <object>` 只列出 tip 等于解析后提交的分支；附注标签名和完整 `refs/tags/...` 名会递归剥离到目标提交。`--merged [<commit>]` / `--no-merged [<commit>]` 列出已合并（或尚未合并）入某提交的分支——即 tip 是否可从该提交到达，缺省 HEAD，是 `--contains` 的反方向。`--sort <key>` 按 `refname`、`version:refname`（数值感知）、`committerdate`/`creatordate`/`authordate`（tip 提交的 committer 日期，`authordate` 为 author 日期）、`objectsize`（tip 对象字节大小）或 `objectname`（tip 提交的对象 id）排序，前导 `-` 反转。未传该标志时，Git 兼容的 `branch.sort` 配置默认生效（严格 local → global → system 级联；无效值在任何列表输出前以 `LBR-CLI-002` fail-closed，local/global 读取失败为 `LBR-IO-001`——例外：schema 比二进制新的全局配置库会在一次性警告后被跳过，见 `LBR-CONFIG-001`）。与标志不同，配置默认既不隐含 `--list` 也不抑制 unborn-HEAD 行，与 Git 一致。已记录收窄：Git 会把重复的 `branch.sort` 值叠成多键排序；Libra 只应用胜出 scope 的最后一个值。`--ignore-case` 仍按折叠后的名称排序。
 
 branch 的**查询**形态（裸列表、`-l`/`-r`/`-a`、`--show-current`、`-v`、`--contains`/`--merged`/`--sort`/`--format`/`--column` 等列表过滤，以及已配置且幂等的 `-u`）**不会**写入 Operation v2 记录，因此不再出现在 `libra op log` 中。写入形态（创建、删除、重命名、复制、非幂等 `-u`、`--unset-upstream`、`--edit-description`、`branch reset` 等）仍各记录一笔 operation。
@@ -45,8 +47,8 @@ branch 的**查询**形态（裸列表、`-l`/`-r`/`-a`、`--show-current`、`-v
 | | `--show-current` | | 打印当前分支名或 detached HEAD 状态 |
 | `-m` | `--move` | `<old> <new>` 或 `<new>` | 重命名分支；一个参数时重命名当前分支 |
 | `-c` | `--copy` | `<old> <new>` 或 `<new>` | 复制分支（连同上游配置）到新名称，保留源分支；目标已存在则失败 |
-| `-f` | `--force` | `<name> [<start-point>]` | 创建分支，或把**已存在的分支重置**到 start-point（Git 的 `git branch -f`）；不带 `-f` 时同名分支以 `fatal: a branch named '<name>' already exists` 拒绝 |
-| | `--create-reflog` | | 为兼容而接受：Libra 每次更新分支都会写 reflog，因此该标志只是选择既有默认行为 |
+| `-f` | `--force` | `<name> [<start-point>]` | 创建分支，或把未检出且未受 protect/archive 策略保护的已有分支重置到 start-point（Git 的 `git branch -f`）；不带 `-f` 时同名分支以 `fatal: a branch named '<name>' already exists` 拒绝 |
+| | `--create-reflog` | | 为兼容而接受：`branch <名称>` 和 `branch -f` 默认已记录分支 reflog，因此该标志只是选择既有默认行为 |
 | | `--no-sort` | | 清除命令行排序键**与**已配置的 `branch.sort`，回退到 refname 顺序；其后再给 `--sort` 会重新生效（两个方向都是「后者胜」） |
 | `-C` | `--copy-force` | `<old> <new>` 或 `<new>` | 同 `-c`，但目标已存在时覆盖 |
 | `-r` | `--remotes` | | 只显示远程跟踪分支 |

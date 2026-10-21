@@ -26,6 +26,8 @@ libra branch --show-current
 
 Deletion comes in two flavours: `-d` performs a safe delete that checks whether the branch has been fully merged into the current branch before removing it, while `-D` force-deletes regardless of merge status. Both refuse to delete the branch you are currently on.
 
+`branch -f <name> [<start-point>]` creates a new branch or resets an existing one. An existing branch cannot be reset while it is checked out in this or another worktree. Protect and archive metadata also block `-f` with `LBR-POLICY-001`; `--force` does not override those policies. Switch the worktree to another branch or explicitly lift the policy before retrying. A reset reports `Reset branch` (or `data.action = "reset"` with `--json`) and records the old and new tips in the branch reflog.
+
 The `--contains` and `--no-contains` filters (aliased as `--with` and `--without`) let you narrow the branch list to those whose history does or does not include a particular commit, defaulting to HEAD when the commit argument is omitted. `--points-at <object>` lists branches whose tip is exactly the resolved commit; annotated tag names and full `refs/tags/...` names are peeled recursively to their target commit. `--merged [<commit>]` / `--no-merged [<commit>]` list branches already merged (or not yet merged) into the commit — i.e. whose tip is (or is not) reachable from it, defaulting to HEAD; this is the inverse of `--contains`. `--sort <key>` orders the list by `refname`, `version:refname` (numeric-aware), or `committerdate` / `creatordate` (the tip commit's committer date), with a leading `-` reversing. When the flag is absent, the Git-compatible `branch.sort` config default applies (strict local → global → system cascade; an invalid value fails closed with `LBR-CLI-002` and an unreadable local/global scope with `LBR-IO-001`, before any listing output — except a future-schema global store, newer than this binary, which is skipped with a one-time warning; see `LBR-CONFIG-001`). Unlike the flag, the config default neither implies `--list` nor suppresses the unborn-HEAD line, matching Git. Documented narrowing: Git stacks repeated `branch.sort` values into a multi-key sort; Libra applies only the last value of the winning scope. `--ignore-case` makes list sorting case-insensitive.
 
 Branch **query** forms (bare list, `-l`/`-r`/`-a`, `--show-current`, `-v`, list filters such as `--contains`/`--merged`/`--sort`/`--format`/`--column`, and an already-configured idempotent `-u`) do **not** write an Operation v2 entry — they no longer appear in `libra op log`. Mutating forms (create, delete, rename, copy, non-idempotent `-u`, `--unset-upstream`, `--edit-description`, `branch reset`, …) still record one operation each.
@@ -47,8 +49,8 @@ Branch **query** forms (bare list, `-l`/`-r`/`-a`, `--show-current`, `-v`, list 
 | | `--show-current` | | Print the current branch name or detached HEAD state |
 | `-m` | `--move` | `<old> <new>` or `<new>` | Rename a branch; with one argument renames the current branch |
 | `-c` | `--copy` | `<old> <new>` or `<new>` | Copy a branch (and its upstream config) to a new name, keeping the source; fails if the destination exists |
-| `-f` | `--force` | `<name> [<start-point>]` | Create the branch, or **reset an existing branch** to the start point (Git's `git branch -f`); without it an existing name is refused with `fatal: a branch named '<name>' already exists` |
-| | `--create-reflog` | | Accepted for parity: Libra records a reflog for every branch update, so this selects the existing default |
+| `-f` | `--force` | `<name> [<start-point>]` | Create the branch, or reset an existing branch that is not checked out or protected/archived (Git's `git branch -f`); without it an existing name is refused with `fatal: a branch named '<name>' already exists` |
+| | `--create-reflog` | | Accepted for parity: `branch <name>` and `branch -f` already record branch reflog entries by default, so this selects the existing default |
 | | `--no-sort` | | Clear the command-line sort keys **and** the configured `branch.sort`, falling back to refname order; a later `--sort` wins again (last one wins in either direction) |
 | `-C` | `--copy-force` | `<old> <new>` or `<new>` | Like `-c`, but overwrite the destination if it exists |
 | `-r` | `--remotes` | | Show remote-tracking branches only |
@@ -168,7 +170,7 @@ a reflog entry for the branch) — the index and working tree are **never
 touched**. The currently checked-out branch is refused (use `libra reset`,
 which moves HEAD/index/worktree consistently). Protected or archived
 branches (`libra metadata set --branch <b> protect|archive true`) refuse
-with `LBR-POLICY-001`; there is no `--force` — lift the flag explicitly
+with `LBR-POLICY-001`; this `branch reset` form has no `--force`, and `branch -f` cannot bypass the policy — lift the flag explicitly
 (`metadata unset`), reset, then re-protect (auditable). The same policy is
 enforced inside `libra update-ref`'s transaction for `refs/heads/*` updates
 and deletes, so plumbing is not a bypass. Identical re-runs within the

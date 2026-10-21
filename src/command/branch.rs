@@ -348,15 +348,14 @@ pub struct BranchArgs {
     #[clap(short = 'f', long = "force", requires = "new_branch")]
     pub force: bool,
 
-    /// Create the branch's reflog (Git's `--create-reflog`). Libra always
-    /// records a reflog entry for every branch update, so this is accepted as a
-    /// no-op that selects the behaviour it already has.
+    /// Create the branch's reflog (Git's `--create-reflog`). Branch creation
+    /// and forced resets already record a reflog entry by default.
     #[clap(long = "create-reflog")]
     pub create_reflog: bool,
 
-    /// Cancel the sort keys given so far (Git's `--no-sort`): listing falls back
-    /// to the configured `branch.sort` or refname order. A later `--sort`
-    /// re-enables sorting (last one wins).
+    /// Cancel the sort keys given so far and configured `branch.sort`
+    /// (Git's `--no-sort`): listing falls back to refname order. A later
+    /// `--sort` re-enables sorting (last one wins).
     #[clap(long = "no-sort", group = "query", overrides_with = "sort")]
     pub no_sort: bool,
 
@@ -984,6 +983,9 @@ enum BranchError {
     #[error("failed to create branch '{branch}': {detail}")]
     CreateFailed { branch: String, detail: String },
 
+    #[error("failed to update branch '{branch}': {detail}")]
+    RefUpdateFailed { branch: String, detail: String },
+
     #[error("failed to delete branch '{branch}': {detail}")]
     DeleteFailed { branch: String, detail: String },
 
@@ -1173,6 +1175,11 @@ impl From<BranchError> for CliError {
             BranchError::CreateFailed { branch, detail } => {
                 CliError::fatal(format!("failed to create branch '{branch}': {detail}"))
                     .with_stable_code(StableErrorCode::IoWriteFailed)
+            }
+            BranchError::RefUpdateFailed { branch, detail } => {
+                CliError::fatal(format!("failed to update branch '{branch}': {detail}"))
+                    .with_stable_code(StableErrorCode::IoWriteFailed)
+                    .with_hint("check whether the repository database is writable.")
             }
             BranchError::DeleteFailed { branch, detail } => {
                 CliError::fatal(format!("failed to delete branch '{branch}': {detail}"))
@@ -1812,7 +1819,7 @@ async fn load_remote_branches() -> Result<Vec<Branch>, BranchError> {
 /// - HEAD with no commit (unborn branch) and no explicit base produces
 ///   [`BranchError::InvalidCommit`] tagged with the current HEAD label so
 ///   the user sees something actionable.
-/// - Branch-store write failures map to [`BranchError::CreateFailed`].
+/// - Branch/reflog write failures map to [`BranchError::RefUpdateFailed`].
 async fn create_branch_impl(
     new_branch: String,
     branch_or_commit: Option<String>,
@@ -1871,11 +1878,12 @@ async fn create_branch_impl(
         )
     })?;
 
+    let mut previous_commit = None;
     if record_operation {
         let database = crate::internal::db::get_db_conn_instance().await;
         let transaction = crate::internal::db::begin_write_transaction(&database)
             .await
-            .map_err(|error| BranchError::CreateFailed {
+            .map_err(|error| BranchError::RefUpdateFailed {
                 branch: new_branch.clone(),
                 detail: error.to_string(),
             })?;
@@ -1884,12 +1892,67 @@ async fn create_branch_impl(
         let result = async {
             let exists = Branch::exists_result_with_conn(&transaction, &branch_for_operation, None)
                 .await
-                .map_err(|error| DbErr::Custom(error.to_string()))?;
+                .map_err(|error| BranchError::StorageQueryFailed(error.to_string()))?;
+            let existing =
+                Branch::find_branch_result_with_conn(&transaction, &branch_for_operation, None)
+                    .await
+                    .map_err(|error| BranchError::StorageQueryFailed(error.to_string()))?;
             if exists && !force {
-                return Err(DbErr::Custom(format!(
-                    "a branch named '{}' already exists",
-                    branch_for_operation
-                )));
+                return Err(BranchError::AlreadyExists(branch_for_operation.clone()));
+            }
+            if exists {
+                // A forced create is a branch reset. Keep the same policy and
+                // checked-out-worktree boundary as `branch reset`, on the
+                // writer's transaction so a concurrent policy change cannot
+                // slip between preflight and the ref update.
+                if crate::internal::metadata::MetadataKv::is_protected_with_conn(
+                    &transaction,
+                    &branch_for_operation,
+                )
+                .await
+                .map_err(|error| {
+                    BranchError::StorageQueryFailed(format!(
+                        "failed to read protect policy for '{branch_for_operation}': {error}"
+                    ))
+                })? {
+                    return Err(BranchError::Protected(branch_for_operation.clone()));
+                }
+                if crate::internal::metadata::MetadataKv::is_archived_with_conn(
+                    &transaction,
+                    &branch_for_operation,
+                )
+                .await
+                .map_err(|error| {
+                    BranchError::StorageQueryFailed(format!(
+                        "failed to read archive policy for '{branch_for_operation}': {error}"
+                    ))
+                })? {
+                    return Err(BranchError::Archived(branch_for_operation.clone()));
+                }
+                if let Head::Branch(current) = Head::current_result_with_conn(&transaction)
+                    .await
+                    .map_err(map_branch_store_error)?
+                    && current == branch_for_operation
+                {
+                    return Err(BranchError::ResetCurrentBranch(
+                        branch_for_operation.clone(),
+                    ));
+                }
+                if let Some(other) = Head::branch_checked_out_elsewhere_result_with_conn(
+                    &transaction,
+                    &branch_for_operation,
+                )
+                .await
+                .map_err(|error| BranchError::StorageQueryFailed(format!(
+                    "failed to check other worktrees for branch '{branch_for_operation}': {error}"
+                )))?
+                {
+                    return Err(BranchError::CheckedOutElsewhere(
+                        "reset",
+                        branch_for_operation.clone(),
+                        other,
+                    ));
+                }
             }
             Branch::update_branch_with_conn(
                 &transaction,
@@ -1897,27 +1960,60 @@ async fn create_branch_impl(
                 &commit_for_operation,
                 None,
             )
-            .await?;
-            Ok::<(), DbErr>(())
+            .await
+            .map_err(|error| BranchError::RefUpdateFailed {
+                branch: branch_for_operation.clone(),
+                detail: error.to_string(),
+            })?;
+            let zero_oid = ObjectHash::zero_str(git_internal::hash::get_hash_kind()).to_string();
+            let old_commit = exists.then(|| {
+                existing
+                    .map(|branch| branch.commit.to_string())
+                    .unwrap_or_else(|| zero_oid.clone())
+            });
+            let context = crate::internal::reflog::ReflogContext {
+                old_oid: old_commit.clone().unwrap_or(zero_oid),
+                new_oid: commit_for_operation.clone(),
+                action: crate::internal::reflog::ReflogAction::Branch {
+                    message: if old_commit.is_some() {
+                        format!("Reset to {}", base_name.as_deref().unwrap_or("HEAD"))
+                    } else {
+                        format!("Created from {}", base_name.as_deref().unwrap_or("HEAD"))
+                    },
+                },
+            };
+            crate::internal::reflog::Reflog::insert_single_entry(
+                &transaction,
+                &context,
+                &format!("refs/heads/{branch_for_operation}"),
+            )
+            .await
+            .map_err(|error| BranchError::RefUpdateFailed {
+                branch: branch_for_operation.clone(),
+                detail: format!("could not write branch reflog: {error}"),
+            })?;
+            Ok::<Option<String>, BranchError>(old_commit)
         }
         .await;
         match result {
-            Ok(()) => transaction
-                .commit()
-                .await
-                .map_err(|error| BranchError::CreateFailed {
-                    branch: new_branch.clone(),
-                    detail: error.to_string(),
-                })?,
+            Ok(old_commit) => {
+                transaction
+                    .commit()
+                    .await
+                    .map_err(|error| BranchError::RefUpdateFailed {
+                        branch: new_branch.clone(),
+                        detail: error.to_string(),
+                    })?;
+                previous_commit = old_commit;
+            }
             Err(error) => {
                 let _ = transaction.rollback().await;
-                return Err(BranchError::CreateFailed {
-                    branch: new_branch.clone(),
-                    detail: error.to_string(),
-                });
+                return Err(error);
             }
         }
     } else {
+        // INVARIANT: only create_branch uses this internal path, and it
+        // always passes force=false. CLI branch writes use the transaction.
         Branch::update_branch(&new_branch, &commit_id_display, None)
             .await
             .map_err(|error| BranchError::CreateFailed {
@@ -1926,10 +2022,19 @@ async fn create_branch_impl(
             })?;
     }
 
-    Ok(BranchOutput::Create {
-        name: new_branch,
-        commit: commit_id_display,
-    })
+    if let Some(old_commit) = previous_commit {
+        Ok(BranchOutput::Reset {
+            name: new_branch,
+            old_commit,
+            new_commit: commit_id_display,
+            target: base_name.unwrap_or_else(|| "HEAD".to_string()),
+        })
+    } else {
+        Ok(BranchOutput::Create {
+            name: new_branch,
+            commit: commit_id_display,
+        })
+    }
 }
 
 enum PlannedCreateTracking {
@@ -3799,7 +3904,7 @@ mod tests {
     ///
     /// Source-chained / wrapper variants (ConfigReadFailed,
     /// ConfigWriteFailed, StorageQueryFailed, StoredReferenceCorrupt,
-    /// CreateFailed, DeleteFailed, CommitLoadFailed, DelegatedCli) wrap upstream error
+    /// CreateFailed, RefUpdateFailed, DeleteFailed, CommitLoadFailed, DelegatedCli) wrap upstream error
     /// messages and are intentionally skipped — their content is owned
     /// by the wrapped type.
     #[test]
@@ -3865,6 +3970,18 @@ mod tests {
         assert_eq!(
             BranchError::RenameTooManyArgs.to_string(),
             "too many arguments",
+        );
+    }
+
+    #[test]
+    fn branch_ref_update_failed_display_includes_branch_and_cause() {
+        assert_eq!(
+            BranchError::RefUpdateFailed {
+                branch: "topic".to_string(),
+                detail: "could not write branch reflog: database is read-only".to_string(),
+            }
+            .to_string(),
+            "failed to update branch 'topic': could not write branch reflog: database is read-only"
         );
     }
 

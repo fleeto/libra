@@ -2,7 +2,20 @@
 
 ## Unreleased
 
-## [0.30.83] — 2026-10-21
+## [0.30.85] — 2026-10-21
+
+### Branch force safety and upstream 0.30.84 additions
+
+- `branch -f` creates a branch or resets an existing tip; a reset now refuses
+  a branch checked out in any worktree and honors protect/archive metadata
+  within the reference transaction. Branch creation and forced reset atomically
+  record a `branch: Created from …` or `branch: Reset to …` reflog entry;
+  forced resets report a reset in human and JSON output. `--create-reflog`
+  selects this default, and `--no-sort` clears both
+  command-line and configured sorting.
+- The upstream object-size reader obtains loose and packed object sizes from
+  bounded headers, including delta target sizes, without reconstructing the
+  object body.
 
 ### Issue #478 plumbing/porcelain parity
 
@@ -83,7 +96,7 @@
   lifecycle mirror row.
 - The old `v0.31.0` tag has downloadable Linux/macOS binaries but never entered
   the stable channel and predates fixes in this release. Its higher version
-  number prevents `libra upgrade` from selecting v0.30.83; after this release
+  number prevents `libra upgrade` from selecting v0.30.85; after this release
   reaches the signed stable channel, rerun the default installer without `-v`
   to replace that binary with the signed stable build. On macOS, put an
   Ed25519-capable OpenSSL (for example Homebrew `openssl@3`) first on the

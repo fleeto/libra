@@ -8,8 +8,9 @@
 
 ```
 libra branch [<new_branch>] [<commit_hash>]
+libra branch [--create-reflog] -f <name> [<start-point>]
 libra branch [-t | --track[=direct|inherit] | --no-track] <new_branch> [<start-point>]
-libra branch -l [-r | -a] [--contains <commit>] [--no-contains <commit>] [--points-at <object>] [--merged [<commit>]] [--no-merged [<commit>]] [--sort <key>] [--ignore-case] [--format <format>] [--column[=<mode>]] [-v | --verbose]
+libra branch -l [-r | -a] [--contains <commit>] [--no-contains <commit>] [--points-at <object>] [--merged [<commit>]] [--no-merged [<commit>]] [--sort <key>] [--no-sort] [--ignore-case] [--format <format>] [--column[=<mode>]] [-v | --verbose]
 libra branch -d <name>
 libra branch -D <name>
 libra branch -m [<old>] <new>

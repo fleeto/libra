@@ -351,11 +351,16 @@ fn memory_limit_result() -> Value {
 
 fn finish_memory_watch(stop: &AtomicBool, peak: &AtomicU64) {
     stop.store(true, Ordering::Relaxed);
+    let rss = peak.load(Ordering::Relaxed);
     #[cfg(debug_assertions)]
     if std::env::var("LIBRA_TEST").ok().as_deref() == Some("1")
         && let Ok(path) = std::env::var("LIBRA_MCP_TEST_PEAK_RSS_FILE")
     {
-        let _ = std::fs::write(path, peak.load(Ordering::Relaxed).to_string());
+        let _ = std::fs::write(path, rss.to_string());
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        let _ = rss;
     }
 }
 
@@ -443,6 +448,8 @@ fn macos_resident_bytes(pid: u32) -> Option<u64> {
         ri_diskio_bytesread: u64,
         ri_diskio_byteswritten: u64,
     }
+    // Rust 2024 requires `unsafe` on `extern` blocks. The call below stays
+    // in its own `unsafe` block.
     unsafe extern "C" {
         fn proc_pid_rusage(pid: i32, flavor: i32, buffer: *mut RusageInfoV0) -> i32;
     }

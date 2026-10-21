@@ -432,4 +432,4 @@ Myers 既是 Git 默认算法，也是 Libra 底层内建 diff 在 post-pass 前
 | 无法读取索引或对象存储 | `LBR-REPO-002` | 128 |
 | 无法读取文件 | `LBR-IO-001` | 128 |
 | 无法写入输出文件 | `LBR-IO-002` | 128 |
-| 已识别但未实现的选项（`--stat-name-width`、`--inter-hunk-context`、`-I`/`--ignore-matching-lines`、`-B`/`--break-rewrites`） | `LBR-UNSUPPORTED-001` | 128 |
+| 已识别但未实现的选项（`--stat-name-width`、`--inter-hunk-context`、`-I`/`--ignore-matching-lines`、`-B`/`--break-rewrites`、`--cc`、`-W`/`--function-context`） | `LBR-UNSUPPORTED-001` | 128 |

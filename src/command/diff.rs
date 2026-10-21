@@ -315,6 +315,12 @@ pub struct DiffArgs {
     #[clap(short = 'B', long = "break-rewrites", value_name = "N[/M]", num_args = 0..=1, default_missing_value = "", hide = true)]
     pub break_rewrites: Option<String>,
 
+    #[clap(long = "cc", hide = true)]
+    pub combined_diff: bool,
+
+    #[clap(short = 'W', long = "function-context", hide = true)]
+    pub function_context: bool,
+
     /// Show a per-directory change distribution (`--dirstat[=<param>,...]`, `-X`).
     /// Parameters: `changes` (default), `lines`, `files`, `noncumulative`,
     /// `cumulative`, and a percentage threshold (default 3%).
@@ -781,11 +787,21 @@ pub async fn execute_safe(args: DiffArgs, output: &OutputConfig) -> CliResult<()
             "--break-rewrites/-B",
             "diffcore-break (rewrite detection) is not implemented",
         ),
+        (
+            "--cc",
+            "combined (merge) diff output is not implemented; use '--raw' or a per-parent diff",
+        ),
+        (
+            "--function-context/-W",
+            "function-boundary context expansion is not implemented",
+        ),
     ] {
         let requested = match flag {
             "--stat-name-width" => args.stat_name_width.is_some(),
             "--inter-hunk-context" => args.inter_hunk_context.is_some(),
             "--ignore-matching-lines/-I" => args.ignore_matching_lines.is_some(),
+            "--cc" => args.combined_diff,
+            "--function-context/-W" => args.function_context,
             _ => args.break_rewrites.is_some(),
         };
         if requested {
@@ -5217,6 +5233,8 @@ pub(crate) async fn staged_diff_text() -> Result<String, DiffError> {
         inter_hunk_context: None,
         ignore_matching_lines: None,
         break_rewrites: None,
+        combined_diff: false,
+        function_context: false,
         raw: false,
         compact_summary: false,
         diff_filter: None,

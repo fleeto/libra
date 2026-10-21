@@ -89,6 +89,11 @@ pub(crate) struct RebaseAuxState {
     pub(super) pending_exec: Option<usize>,
     #[serde(default)]
     pub(super) update_refs: bool,
+    /// `rebase --signoff` trailer (`Signed-off-by: Name <email>`), resolved at
+    /// rebase start and appended to every replayed commit. Durable so
+    /// `--continue` keeps signing the remaining commits (issues/523).
+    #[serde(default)]
+    pub(super) signoff: Option<String>,
     /// Branches selected at rebase start. Checked-out branches are excluded.
     #[serde(default)]
     pub(super) refs_to_update: Vec<RebaseRefUpdate>,

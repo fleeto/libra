@@ -8,7 +8,7 @@ Reapply commits on top of another base tip.
 
 ```
 libra rebase <upstream>
-libra rebase [--autosquash | --no-autosquash] [--reapply-cherry-picks] [--autostash] [--exec <cmd>] [--update-refs] [--fork-point] [--rerere-autoupdate | --no-rerere-autoupdate] [--keep-empty | --no-keep-empty] [--empty=<mode>] <upstream>
+libra rebase [--merge | -m] [--signoff | -s] [--autosquash | --no-autosquash] [--reapply-cherry-picks] [--autostash] [-x <cmd>] [--update-refs] [--fork-point] [--rerere-autoupdate | --no-rerere-autoupdate] [--keep-empty | --no-keep-empty] [--empty=<mode>] <upstream>
 libra rebase --onto <newbase> <upstream> [<branch>]
 libra rebase --root [--onto <newbase>] [<branch>]
 libra rebase --continue
@@ -31,6 +31,8 @@ With `--autosquash`, commits whose subject starts with `fixup!`, `squash!`, or `
 `--root` replays every commit from the root commit. The optional positional is `<branch>` (checked out first), not `<upstream>`; combining `--root` with an `<upstream>` positional is a usage error. Without `--onto` the root stays parentless and unchanged picks keep their original hashes; with `--onto <newbase>` the full history is replayed onto that landing commit. `--root` combines with `--autosquash`, `--exec`, `--autostash`, and `-i`.
 
 `libra rebase -i` generates a Git-shaped todo, runs the sequence editor, and replays the resulting commands. `--edit-todo` rewrites remaining commands of an in-progress interactive rebase. `-i` also honors `rebase.autosquash` unless `--no-autosquash` wins. `-i --update-refs` is a usage error.
+
+`--merge` / `-m` select the merge backend. Libra's rebase *always* replays with the merge backend, so both spellings are accepted no-ops. `--apply` (Git's apply backend) is recognised but refused with `LBR-UNSUPPORTED-001`, naming the missing backend instead of reporting an unknown option. `-x` is the short spelling of `--exec`. `--signoff` / `-s` appends one `Signed-off-by:` trailer (from `user.name` / `user.email`) to every replayed commit; it is idempotent and is persisted in the rebase state so `--continue` keeps signing the remaining commits.
 
 `--autostash` preserves tracked index and worktree changes in a held stash object before replay and restores the staged index and unstaged worktree layers separately after success or abort. `--exec <cmd>` runs each repeatable command after every replayed commit through Libra's required workspace-write, network-denied sandbox; a failure stops the sequence and `--continue` retries the failed command. `--skip` after an exec failure keeps the already replayed commit and skips the remaining commands for that commit. `--update-refs` atomically retargets other local branches in the rewritten range, except branches checked out in any worktree. `--fork-point` uses the upstream reflog to recover the most specific old upstream tip that remains an ancestor of `HEAD`, then falls back to the ordinary merge base.
 

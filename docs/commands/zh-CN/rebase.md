@@ -7,7 +7,7 @@
 ## 概要
 
 ```
-libra rebase [--autosquash | --no-autosquash] [--reapply-cherry-picks] [--autostash] [--exec <cmd>] [--update-refs] [--fork-point] [--rerere-autoupdate | --no-rerere-autoupdate] [--keep-empty | --no-keep-empty] [--empty=<mode>] <upstream>
+libra rebase [--merge | -m] [--signoff | -s] [--autosquash | --no-autosquash] [--reapply-cherry-picks] [--autostash] [-x <cmd>] [--update-refs] [--fork-point] [--rerere-autoupdate | --no-rerere-autoupdate] [--keep-empty | --no-keep-empty] [--empty=<mode>] <upstream>
 libra rebase --onto <newbase> <upstream> [<branch>]
 libra rebase --root [--onto <newbase>] [<branch>]
 libra rebase --continue
@@ -30,6 +30,8 @@ libra rebase --edit-todo
 `--root` 从根提交起重放全部提交。可选位置参数是 `<branch>`（先切换），不是 `<upstream>`；与 `<upstream>` 位置参数同用为用法错误。无 `--onto` 时根提交保持无父、未改变的 pick 保持原 hash；有 `--onto <newbase>` 时全部提交重放到该 landing。可与 `--autosquash`、`--exec`、`--autostash`、`-i` 组合。
 
 `libra rebase -i` 生成 Git 形状的 todo，运行 sequence editor，并重放结果。`--edit-todo` 改写进行中交互 rebase 的剩余命令。`-i` 也会读取 `rebase.autosquash`（除非 `--no-autosquash` 生效）。`-i --update-refs` 为用法错误。
+
+`--merge` / `-m` 选择 merge backend；Libra 的 rebase **始终**使用 merge backend 重放，因此两种写法都是被接受的无操作。`--apply`（Git 的 apply backend）会被识别并以 `LBR-UNSUPPORTED-001` 拒绝，明确指出缺失的 backend，而不是报「未知选项」。`-x` 是 `--exec` 的短写法。`--signoff` / `-s` 会为每个重放提交追加一条 `Signed-off-by:`（取自 `user.name` / `user.email`）；该操作幂等，并持久化到 rebase 状态中，因此 `--continue` 会继续为剩余提交签名。
 
 `--autostash` 会在重放前把 tracked index/worktree 变更保存为 held stash，并在成功或中止后分别恢复 staged index 层与 unstaged worktree 层。可重复的 `--exec <cmd>` 会在每个重放提交后通过 Libra 强制 workspace-write、禁网 sandbox 依次执行；失败会停止序列，`--continue` 重试失败命令。exec 失败后的 `--skip` 保留已重放提交并跳过该提交剩余命令。`--update-refs` 原子重定向重写区间中的其他本地分支，但排除任何 worktree 已检出的分支。`--fork-point` 从 upstream reflog 选择仍是 `HEAD` 祖先的最具体旧 tip，找不到时回退普通 merge base。
 

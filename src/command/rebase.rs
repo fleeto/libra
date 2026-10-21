@@ -255,7 +255,7 @@ EXAMPLES:
     libra rebase --json main      Structured JSON output for agents";
 
 /// Command-line arguments for the rebase operation
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Default)]
 #[command(after_help = REBASE_EXAMPLES)]
 pub struct RebaseArgs {
     /// The upstream branch to rebase the current branch onto.
@@ -330,8 +330,26 @@ pub struct RebaseArgs {
     /// Run a shell command after each successfully replayed commit. Commands
     /// execute in a required workspace-write, network-denied Libra sandbox; a
     /// non-zero result stops the rebase and is retried by `--continue`.
-    #[clap(long = "exec", value_name = "cmd", action = clap::ArgAction::Append, conflicts_with_all = ["continue_rebase", "abort", "skip"])]
+    #[clap(short = 'x', long = "exec", value_name = "cmd", action = clap::ArgAction::Append, conflicts_with_all = ["continue_rebase", "abort", "skip"])]
     pub exec: Vec<String>,
+
+    /// Force the merge backend (Git's `--merge` / `-m`). Libra's rebase always
+    /// replays with the merge backend, so both spellings are accepted no-ops:
+    /// they select behaviour that is already the only one.
+    #[clap(short = 'm', long = "merge", conflicts_with = "apply_backend")]
+    pub merge_backend: bool,
+
+    /// Force the apply backend (Git's `--apply`). Libra has no apply backend:
+    /// the flag is recognised so the request is diagnosed instead of being
+    /// reported as an unknown option, and the command is refused with a clear
+    /// message (issues/523).
+    #[clap(long = "apply", conflicts_with = "merge_backend")]
+    pub apply_backend: bool,
+
+    /// Append a `Signed-off-by:` trailer to every replayed commit, using the
+    /// configured `user.name` / `user.email` (Git's `--signoff` / `-s`).
+    #[clap(short = 's', long = "signoff")]
+    pub signoff: bool,
 
     /// Update other local branches that point into the rewritten commit range.
     /// Branches checked out in any worktree are never moved.
@@ -797,6 +815,16 @@ pub async fn execute_safe(args: RebaseArgs, output: &OutputConfig) -> CliResult<
     // unchanged: update-refs excludes branches checked out in ANY worktree
     // and the finish CAS detects concurrent tip movement.
     util::require_repo().map_err(|_| CliError::repo_not_found())?;
+
+    // `--apply` names a backend Libra does not have. Diagnose it explicitly
+    // instead of letting clap report an unknown option (issues/523).
+    if args.apply_backend {
+        return Err(CliError::fatal(
+            "rebase --apply (the apply backend) is not implemented; Libra always replays with the merge backend",
+        )
+        .with_stable_code(StableErrorCode::Unsupported)
+        .with_hint("drop --apply (the merge backend is the default), or use 'git rebase --apply'"));
+    }
 
     // Refuse to start a NEW rebase while a cherry-pick sequence is in progress
     // (rebase's own --continue/--abort/--skip operate on rebase state, not
@@ -2819,10 +2847,16 @@ async fn prepare_rebase_aux(args: &RebaseArgs) -> Result<(), RebaseError> {
     validate_exec_commands(&args.exec)?;
     recover_stale_rebase_aux().await?;
 
+    let signoff = if args.signoff {
+        Some(signoff_trailer().await?)
+    } else {
+        None
+    };
     let mut aux = RebaseAuxState {
         exec_commands: args.exec.clone(),
         update_refs: args.update_refs,
         rerere_autoupdate: rerere_autoupdate_override(args),
+        signoff,
         ..Default::default()
     };
     if args.autostash {
@@ -2859,6 +2893,23 @@ const fn rerere_autoupdate_override(args: &RebaseArgs) -> Option<bool> {
     } else {
         None
     }
+}
+
+/// Build the `Signed-off-by:` trailer for `rebase --signoff`, using the same
+/// committer identity `libra commit -s` uses.
+async fn signoff_trailer() -> Result<String, RebaseError> {
+    let (_, identity) = crate::command::commit::create_committer_signature()
+        .await
+        .map_err(|error| RebaseError::IdentityMissing(error.to_string()))?;
+    Ok(format!(
+        "Signed-off-by: {} <{}>",
+        identity.name, identity.email
+    ))
+}
+
+/// The `--signoff` trailer persisted when this rebase started, if any.
+fn persisted_signoff() -> Result<Option<String>, RebaseError> {
+    Ok(RebaseAuxState::load_optional()?.and_then(|aux| aux.signoff))
 }
 
 fn persisted_rerere_autoupdate() -> Result<Option<bool>, RebaseError> {
@@ -3907,6 +3958,7 @@ async fn continue_replay(
             action,
             state.empty_mode,
             rerere_autoupdate,
+            persisted_signoff()?.as_deref(),
         )
         .await
         {
@@ -4383,16 +4435,21 @@ async fn run_rebase_continue(output: &OutputConfig) -> Result<RebaseOutput, Reba
             .front()
             .copied()
             .unwrap_or(RebaseTodoAction::Pick);
-        let new_commit =
-            create_replayed_commit(&original_commit, new_tree_id, state.current_head, action)
-                .await
-                .map_err(|error| match error {
-                    ReplayCommitError::Identity(detail) => RebaseError::IdentityMissing(detail),
-                    ReplayCommitError::ObjectLoad(detail) => RebaseError::CommitLoad {
-                        commit: state.current_head.to_string(),
-                        detail,
-                    },
-                })?;
+        let new_commit = create_replayed_commit(
+            &original_commit,
+            new_tree_id,
+            state.current_head,
+            action,
+            persisted_signoff()?.as_deref(),
+        )
+        .await
+        .map_err(|error| match error {
+            ReplayCommitError::Identity(detail) => RebaseError::IdentityMissing(detail),
+            ReplayCommitError::ObjectLoad(detail) => RebaseError::CommitLoad {
+                commit: state.current_head.to_string(),
+                detail,
+            },
+        })?;
         save_object(&new_commit, &new_commit.id)
             .map_err(|e| RebaseError::CommitSave(e.to_string()))?;
         record_current_repo_commit_revision_with_predecessors_for_active_operation(
@@ -5577,6 +5634,7 @@ async fn replay_commit_with_unified_merge(
     action: RebaseTodoAction,
     empty_mode: RebaseEmptyMode,
     rerere_autoupdate: Option<bool>,
+    signoff: Option<&str>,
 ) -> ReplayResult {
     let index_file = path::index();
     let current_index = match git_internal::internal::index::Index::load(&index_file) {
@@ -5669,6 +5727,7 @@ async fn replay_commit_with_unified_merge(
         new_tree_id,
         *new_parent_id,
         action,
+        signoff,
     )
     .await
     {
@@ -5772,11 +5831,12 @@ async fn create_replayed_commit(
     tree_id: ObjectHash,
     new_parent_id: ObjectHash,
     action: RebaseTodoAction,
+    signoff: Option<&str>,
 ) -> Result<Commit, ReplayCommitError> {
     let (committer, _) = crate::command::commit::create_committer_signature()
         .await
         .map_err(|error| ReplayCommitError::Identity(error.to_string()))?;
-    match action {
+    let built = match action {
         RebaseTodoAction::Pick => Ok(Commit::new(
             original_commit.author.clone(),
             committer,
@@ -5840,6 +5900,29 @@ async fn create_replayed_commit(
                 this_clean.trim(),
             ))
         }
+    }?;
+    // `--signoff` adds the trailer to every replayed commit. `append_trailers`
+    // keeps an existing trailer block intact and skips a duplicate line, which
+    // is exactly Git's `--signoff` behaviour on an already-signed commit.
+    let Some(line) = signoff else {
+        return Ok(built);
+    };
+    let (clean, gpg) = parse_commit_msg(&built.message);
+    let signed = crate::command::commit::append_trailers(clean, &[line.to_string()]);
+    Ok(Commit::new(
+        built.author.clone(),
+        built.committer.clone(),
+        built.tree_id,
+        built.parent_commit_ids.clone(),
+        &rejoin_commit_message(&signed, gpg),
+    ))
+}
+
+/// Re-attach the original `gpgsig` header (if any) after rewriting a message.
+fn rejoin_commit_message(message: &str, gpg: Option<&str>) -> String {
+    match gpg {
+        Some(signature) => format!("{message}\n\n{signature}"),
+        None => message.to_string(),
     }
 }
 

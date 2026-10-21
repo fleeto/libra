@@ -2188,6 +2188,7 @@ async fn test_basic_rebase() {
         autosquash: false,
         no_autosquash: false,
         reapply_cherry_picks: false,
+        ..Default::default()
     })
     .await;
 
@@ -2436,6 +2437,7 @@ async fn test_rebase_preserves_untracked_files() {
         autosquash: false,
         no_autosquash: false,
         reapply_cherry_picks: false,
+        ..Default::default()
     })
     .await;
 
@@ -2582,6 +2584,7 @@ async fn test_rebase_already_up_to_date() {
         autosquash: false,
         no_autosquash: false,
         reapply_cherry_picks: false,
+        ..Default::default()
     })
     .await;
 
@@ -2792,6 +2795,7 @@ async fn test_rebase_abort_when_no_rebase_in_progress() {
         autosquash: false,
         no_autosquash: false,
         reapply_cherry_picks: false,
+        ..Default::default()
     })
     .await;
 
@@ -2829,6 +2833,7 @@ async fn test_rebase_abort_when_no_rebase_in_progress() {
         autosquash: false,
         no_autosquash: false,
         reapply_cherry_picks: false,
+        ..Default::default()
     })
     .await;
 
@@ -3055,6 +3060,7 @@ async fn test_rebase_abort_restores_branch_after_finalize_failure() {
         autosquash: false,
         no_autosquash: false,
         reapply_cherry_picks: false,
+        ..Default::default()
     })
     .await;
 
@@ -3120,6 +3126,7 @@ async fn test_rebase_abort_restores_branch_after_finalize_failure() {
         autosquash: false,
         no_autosquash: false,
         reapply_cherry_picks: false,
+        ..Default::default()
     })
     .await;
 
@@ -3218,6 +3225,7 @@ async fn test_rebase_continue_no_rebase() {
         autosquash: false,
         no_autosquash: false,
         reapply_cherry_picks: false,
+        ..Default::default()
     })
     .await;
 
@@ -3298,6 +3306,7 @@ async fn test_rebase_skip_no_rebase() {
         autosquash: false,
         no_autosquash: false,
         reapply_cherry_picks: false,
+        ..Default::default()
     })
     .await;
 
@@ -3511,6 +3520,7 @@ async fn test_rebase_with_conflict_and_abort() {
         autosquash: false,
         no_autosquash: false,
         reapply_cherry_picks: false,
+        ..Default::default()
     })
     .await;
 
@@ -3555,6 +3565,7 @@ async fn test_rebase_with_conflict_and_abort() {
         autosquash: false,
         no_autosquash: false,
         reapply_cherry_picks: false,
+        ..Default::default()
     })
     .await;
 
@@ -3792,6 +3803,7 @@ async fn test_rebase_binary_conflict_writes_markers() {
         autosquash: false,
         no_autosquash: false,
         reapply_cherry_picks: false,
+        ..Default::default()
     })
     .await;
 
@@ -3839,6 +3851,7 @@ async fn test_rebase_binary_conflict_writes_markers() {
         autosquash: false,
         no_autosquash: false,
         reapply_cherry_picks: false,
+        ..Default::default()
     })
     .await;
     assert!(
@@ -4103,6 +4116,7 @@ async fn test_rebase_with_conflict_and_skip() {
         autosquash: false,
         no_autosquash: false,
         reapply_cherry_picks: false,
+        ..Default::default()
     })
     .await;
 
@@ -4139,6 +4153,7 @@ async fn test_rebase_with_conflict_and_skip() {
         autosquash: false,
         no_autosquash: false,
         reapply_cherry_picks: false,
+        ..Default::default()
     })
     .await;
 
@@ -4362,6 +4377,7 @@ async fn test_rebase_with_conflict_and_continue() {
         autosquash: false,
         no_autosquash: false,
         reapply_cherry_picks: false,
+        ..Default::default()
     })
     .await;
 
@@ -4431,6 +4447,7 @@ async fn test_rebase_with_conflict_and_continue() {
         autosquash: false,
         no_autosquash: false,
         reapply_cherry_picks: false,
+        ..Default::default()
     })
     .await;
 
@@ -4752,6 +4769,7 @@ async fn test_rebase_multiple_commits_partial_conflict() {
         autosquash: false,
         no_autosquash: false,
         reapply_cherry_picks: false,
+        ..Default::default()
     })
     .await;
 
@@ -4789,6 +4807,7 @@ async fn test_rebase_multiple_commits_partial_conflict() {
         autosquash: false,
         no_autosquash: false,
         reapply_cherry_picks: false,
+        ..Default::default()
     })
     .await;
 
@@ -5024,6 +5043,7 @@ async fn test_rebase_state_persistence() {
         autosquash: false,
         no_autosquash: false,
         reapply_cherry_picks: false,
+        ..Default::default()
     })
     .await;
 
@@ -5078,6 +5098,7 @@ async fn test_rebase_state_persistence() {
         autosquash: false,
         no_autosquash: false,
         reapply_cherry_picks: false,
+        ..Default::default()
     })
     .await;
 
@@ -5259,6 +5280,7 @@ async fn test_rebase_fast_forward_branch_behind() {
         autosquash: false,
         no_autosquash: false,
         reapply_cherry_picks: false,
+        ..Default::default()
     })
     .await;
 
@@ -5443,6 +5465,7 @@ async fn test_rebase_fast_forward_blocks_dirty_workdir() {
         autosquash: false,
         no_autosquash: false,
         reapply_cherry_picks: false,
+        ..Default::default()
     })
     .await;
 
@@ -5627,6 +5650,7 @@ async fn test_rebase_fast_forward_blocks_untracked_overwrite() {
         autosquash: false,
         no_autosquash: false,
         reapply_cherry_picks: false,
+        ..Default::default()
     })
     .await;
 
@@ -5851,6 +5875,7 @@ async fn test_rebase_blocks_dirty_workdir_non_fast_forward() {
         autosquash: false,
         no_autosquash: false,
         reapply_cherry_picks: false,
+        ..Default::default()
     })
     .await;
 
@@ -6080,6 +6105,7 @@ async fn test_rebase_conflict_preserves_non_conflicting_workdir() {
         autosquash: false,
         no_autosquash: false,
         reapply_cherry_picks: false,
+        ..Default::default()
     })
     .await;
 
@@ -6122,6 +6148,7 @@ async fn test_rebase_conflict_preserves_non_conflicting_workdir() {
         autosquash: false,
         no_autosquash: false,
         reapply_cherry_picks: false,
+        ..Default::default()
     })
     .await;
 }
@@ -6350,6 +6377,7 @@ async fn test_rebase_conflict_does_not_overwrite_untracked_paths() {
         autosquash: false,
         no_autosquash: false,
         reapply_cherry_picks: false,
+        ..Default::default()
     })
     .await;
 
@@ -6389,6 +6417,7 @@ async fn test_rebase_conflict_does_not_overwrite_untracked_paths() {
         autosquash: false,
         no_autosquash: false,
         reapply_cherry_picks: false,
+        ..Default::default()
     })
     .await;
 }
@@ -6596,6 +6625,7 @@ async fn test_rebase_continue_requires_resolution() {
         autosquash: false,
         no_autosquash: false,
         reapply_cherry_picks: false,
+        ..Default::default()
     })
     .await;
 
@@ -6634,6 +6664,7 @@ async fn test_rebase_continue_requires_resolution() {
         autosquash: false,
         no_autosquash: false,
         reapply_cherry_picks: false,
+        ..Default::default()
     })
     .await;
 
@@ -6672,6 +6703,7 @@ async fn test_rebase_continue_requires_resolution() {
         autosquash: false,
         no_autosquash: false,
         reapply_cherry_picks: false,
+        ..Default::default()
     })
     .await;
 }
@@ -7611,5 +7643,162 @@ async fn test_rebase_unrelated_histories_replays_from_root() {
             || stdout.contains("Applied")
             || stdout.contains("Successfully rebased"),
         "B1: unrelated-histories rebase should replay, got: {stdout}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// issue #523: backend flags, `-x`, and `--signoff`.
+// ---------------------------------------------------------------------------
+
+/// A diverged history: `main` (c1 → main2) and `topic` (c1 → topic1), so a
+/// rebase actually replays a commit.
+fn diverged_rebase_repo() -> tempfile::TempDir {
+    let repo = tempdir().expect("tempdir");
+    let root = repo.path();
+    init_repo_via_cli(root);
+    configure_identity_via_cli(root);
+    fs::write(root.join("a.txt"), "a\n").expect("write a");
+    assert_cli_success(&run_libra_command(&["add", "a.txt"], root), "stage a");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "c1"], root),
+        "commit c1",
+    );
+    assert_cli_success(
+        &run_libra_command(&["checkout", "-b", "topic"], root),
+        "create topic",
+    );
+    fs::write(root.join("t.txt"), "t\n").expect("write t");
+    assert_cli_success(&run_libra_command(&["add", "t.txt"], root), "stage t");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "topic1"], root),
+        "commit topic1",
+    );
+    assert_cli_success(
+        &run_libra_command(&["checkout", "main"], root),
+        "back to main",
+    );
+    fs::write(root.join("b.txt"), "b\n").expect("write b");
+    assert_cli_success(&run_libra_command(&["add", "b.txt"], root), "stage b");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "main2"], root),
+        "commit main2",
+    );
+    assert_cli_success(
+        &run_libra_command(&["checkout", "topic"], root),
+        "back to topic",
+    );
+    repo
+}
+
+/// #523 scenarios 3 and 5: `--merge` / `-m` select the merge backend, which is
+/// the only backend Libra has, so they are accepted no-ops that still rebase.
+#[test]
+fn rebase_merge_backend_flags_are_accepted() {
+    for flag in ["--merge", "-m"] {
+        let repo = diverged_rebase_repo();
+        let out = run_libra_command(&["rebase", flag, "main"], repo.path());
+        assert_cli_success(&out, &format!("rebase {flag} main"));
+        let subjects = run_libra_command(&["log", "--format=%s"], repo.path());
+        assert!(
+            String::from_utf8_lossy(&subjects.stdout).contains("topic1"),
+            "rebase {flag} must replay the topic commit: {}",
+            String::from_utf8_lossy(&subjects.stdout)
+        );
+    }
+}
+
+/// #523 scenario 2: `--apply` names a backend Libra does not have; it is now
+/// diagnosed explicitly (`LBR-UNSUPPORTED-001`) instead of clap's unknown
+/// option, and the branch is untouched.
+#[test]
+fn rebase_apply_backend_is_diagnosed() {
+    let repo = diverged_rebase_repo();
+    let before = run_libra_command(&["rev-parse", "HEAD"], repo.path());
+    let out = run_libra_command(&["rebase", "--apply", "main"], repo.path());
+    assert_eq!(
+        out.status.code(),
+        Some(128),
+        "rebase --apply must fail with the unsupported class: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("LBR-UNSUPPORTED-001")
+            && stderr.contains("apply backend")
+            && stderr.contains("merge backend"),
+        "the diagnostic must name the missing backend: {stderr}"
+    );
+    let after = run_libra_command(&["rev-parse", "HEAD"], repo.path());
+    assert_eq!(
+        String::from_utf8_lossy(&before.stdout),
+        String::from_utf8_lossy(&after.stdout),
+        "a refused backend must not move the branch"
+    );
+}
+
+/// #523 scenario 4: `-x` is `--exec`.
+#[test]
+fn rebase_exec_short_alias_runs_each_command() {
+    let repo = diverged_rebase_repo();
+    let root = repo.path();
+    for marker in ["EXEC_SHORT", "EXEC_LONG"] {
+        let _ = fs::remove_file(root.join(marker));
+    }
+    let out = run_libra_command(
+        &[
+            "rebase",
+            "-x",
+            "touch EXEC_SHORT",
+            "--exec",
+            "touch EXEC_LONG",
+            "main",
+        ],
+        root,
+    );
+    assert_cli_success(&out, "rebase -x/--exec");
+    assert!(
+        root.join("EXEC_SHORT").exists(),
+        "-x must run after the replayed commit"
+    );
+    assert!(
+        root.join("EXEC_LONG").exists(),
+        "--exec must keep working alongside -x"
+    );
+}
+
+/// #523 scenario 6: `--signoff` appends `Signed-off-by:` to replayed commits
+/// (and to nothing else), and re-running it does not duplicate the trailer.
+#[test]
+fn rebase_signoff_appends_the_trailer_once() {
+    let repo = diverged_rebase_repo();
+    let root = repo.path();
+    let original = run_libra_command(&["log", "-1", "--format=%B"], root);
+    assert!(
+        !String::from_utf8_lossy(&original.stdout).contains("Signed-off-by"),
+        "the fixture commit must start unsigned"
+    );
+
+    let out = run_libra_command(&["rebase", "--signoff", "main"], root);
+    assert_cli_success(&out, "rebase --signoff main");
+    let message = run_libra_command(&["log", "-1", "--format=%B"], root);
+    let text = String::from_utf8_lossy(&message.stdout);
+    assert!(
+        text.contains("Signed-off-by:"),
+        "the replayed commit must be signed off: {text}"
+    );
+    assert_eq!(
+        text.matches("Signed-off-by:").count(),
+        1,
+        "exactly one trailer: {text}"
+    );
+
+    // A second replayed pass over the same commit must not duplicate it.
+    let again = run_libra_command(&["rebase", "--signoff", "HEAD~1"], root);
+    assert_cli_success(&again, "second rebase --signoff");
+    let message = run_libra_command(&["log", "-1", "--format=%B"], root);
+    let text = String::from_utf8_lossy(&message.stdout);
+    assert!(
+        text.matches("Signed-off-by:").count() <= 1,
+        "the trailer must not be duplicated: {text}"
     );
 }

@@ -343,6 +343,12 @@ fn block_invoke(arguments: &Value) -> Result<Value, String> {
     let pid = std::process::id();
     std::fs::write(path, pid.to_string())
         .map_err(|_| "pid file could not be written".to_string())?;
+    // Exec tests set this so a descendant outside the worker process group
+    // keeps stdout open after the worker is killed.
+    #[cfg(unix)]
+    if std::env::var("LIBRA_MCP_TEST_HOLD_STDOUT").ok().as_deref() == Some("1") {
+        spawn_stdout_holder(path);
+    }
     // The conformance fixture must return. Exec tests set this to hold the slot.
     if std::env::var("LIBRA_MCP_TEST_BLOCK").ok().as_deref() == Some("1") {
         loop {
@@ -350,6 +356,39 @@ fn block_invoke(arguments: &Value) -> Result<Value, String> {
         }
     }
     Ok(serde_json::json!({"pid": pid}))
+}
+
+/// Fork a child that leaves the worker's process group and inherits stdout.
+///
+/// The child only calls libc. It must not return into the multi-threaded
+/// runtime that `fork` duplicated.
+#[cfg(all(debug_assertions, unix))]
+fn spawn_stdout_holder(pid_file: &str) {
+    // SAFETY: this runs only in the debug test tool. The child calls `setpgid`
+    // and `sleep` and does not return into the multi-threaded runtime.
+    let child = unsafe { libc::fork() };
+    if child == 0 {
+        // SAFETY: this is the forked child. It must not run Rust destructors.
+        unsafe {
+            libc::setpgid(0, 0);
+            loop {
+                libc::sleep(3600);
+            }
+        }
+    }
+    if child <= 0 {
+        return;
+    }
+    let started = std::time::Instant::now();
+    while started.elapsed() < std::time::Duration::from_secs(2) {
+        // SAFETY: `child` is the pid just returned by `fork`.
+        let pgid = unsafe { libc::getpgid(child) };
+        if pgid == child {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let _ = std::fs::write(format!("{pid_file}.hold"), child.to_string());
 }
 
 #[cfg(debug_assertions)]

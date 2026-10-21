@@ -158,6 +158,83 @@ fn timed_out_worker_is_killed() {
     assert!(!pid_exists(pid), "worker pid {pid} is still alive");
 }
 
+#[test]
+fn deadline_reply_does_not_wait_for_stdout_holder() {
+    let repo = init_repo(None);
+    let pid_file = repo.path().join("block.pid");
+    let call = tool_call(
+        2,
+        "libra_test_block",
+        &format!(r#"{{"pid_file":"{}"}}"#, pid_file.display()),
+    );
+    let mut extra = block_env();
+    extra.push(("LIBRA_MCP_TEST_HOLD_STDOUT", "1"));
+    let mut child = isolated_command(&["agent", "mcp", "--stdio"], repo.path(), &extra)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn libra agent mcp");
+    let mcp_pid = child.id();
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(session(&call).as_bytes())
+        .expect("write stdin");
+    let started = Instant::now();
+    let waiter = thread::spawn(move || child.wait_with_output());
+    while !waiter.is_finished() && started.elapsed() < Duration::from_secs(5) {
+        thread::sleep(Duration::from_millis(20));
+    }
+    if !waiter.is_finished() {
+        let _ = Command::new("kill")
+            .args(["-9", &mcp_pid.to_string()])
+            .status();
+        let _ = waiter.join();
+        panic!("deadline reply blocked for {:?}", started.elapsed());
+    }
+    let output = waiter.join().expect("waiter").expect("mcp output");
+    let hold_path = repo.path().join("block.pid.hold");
+    let hold_pid = fs::read_to_string(&hold_path)
+        .expect("hold pid")
+        .trim()
+        .parse::<i32>()
+        .expect("hold pid number");
+    let holder = KillHold(hold_pid);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "reply took {:?}",
+        started.elapsed()
+    );
+    let stdout = String::from_utf8(output.stdout).expect("utf-8");
+    let message = response_with_id(&stdout, 2);
+    assert_eq!(
+        message["result"]["structuredContent"]["stable_code"],
+        "LBR-AGENT-036"
+    );
+    assert!(
+        pid_exists(holder.0 as u32),
+        "stdout holder {} died with the worker",
+        holder.0
+    );
+}
+
+struct KillHold(i32);
+
+impl Drop for KillHold {
+    fn drop(&mut self) {
+        let _ = Command::new("kill")
+            .args(["-9", &self.0.to_string()])
+            .status();
+    }
+}
+
 fn pid_exists(pid: u32) -> bool {
     Path::new(&format!("/proc/{pid}")).exists()
 }

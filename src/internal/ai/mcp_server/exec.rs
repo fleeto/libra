@@ -209,12 +209,22 @@ fn detach_after_deadline(
     signal_worker(&mut child);
     let started = Instant::now();
     while started.elapsed() < REAP_BUDGET {
-        if matches!(child.try_wait(), Ok(Some(_)) | Err(_)) {
-            let _ = reader.join();
-            drop(slot);
-            return;
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                // Confirmed exit. Do not join the stdout reader on this path:
+                // a descendant outside the killed process group can keep the
+                // pipe open and block `read_to_end` past the reply bound.
+                drop(slot);
+                std::thread::spawn(move || {
+                    let _ = reader.join();
+                });
+                return;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+            // `try_wait` failed, so the exit is unconfirmed. The reaper keeps
+            // the slot until `wait` observes it.
+            Err(_) => break,
         }
-        std::thread::sleep(Duration::from_millis(20));
     }
     // The reply must not wait on a worker stuck in uninterruptible I/O.
     // The slot stays taken until this reaper observes the exit.

@@ -3237,7 +3237,7 @@ ER-01 至 ER-14 按模板原文对本计划全部任务生效（见 [`plan-templ
 |---|---|
 | bridge 的读超时先例 | `src/internal/ai/agent_bridge/protocol.rs:374`（`LBR-AGENT-036`） |
 | 读 deadline（MC-19 交付） | `src/internal/ai/mcp_server/tools/mod.rs` |
-| 本地门 | `v0.30.73`（`612c575`，tag 不改）的 Codex 评审是 `VERDICT: FAIL`，`P0=0`，`P1=2`：超时路径在 1 s 回收预算后无期限 `child.wait()`，卡死的子进程挡住 `LBR-AGENT-036` 并占住槽位；`stdio` 把读任务 `JoinError` 当成空响应。前滚 `0.30.74`：回复不等待卡死的 `wait`，槽位由回收线程持有直到退出；`JoinError` 以 `std::io::Error` 结束会话。修复后 `blocking_read_times_out`、`slots_return_after_workers_killed`、`envelope_allows_under_cap` 均为 `test result: ok. 1 passed; 0 failed`。clippy `-D warnings` exit 0。nextest：`Summary [ 585.454s] 10675 tests run: 10675 passed (12 slow, 1 flaky), 21 skipped`，exit 0。flaky 为 `command::clone_test::test_clone_local_git_large_object_set_completes_in_budget`（2/3），不是 MCP。 |
+| 本地门 | `v0.30.73`（`612c575`，tag 不改）Codex `VERDICT: FAIL`，`P0=0`，`P1=2`。`v0.30.74`（`3a5217c`，tag 不改）Codex `VERDICT: FAIL`，`P0=0`，`P1=1`：确认退出后回复路径仍 `reader.join()`，进程组外的后代若占着 stdout 会挡住 `LBR-AGENT-036`；`try_wait` 错误被当成已退出。前滚 `0.30.75`：回复路径不 join 该读取线程；`try_wait` 错误交给回收线程并继续占槽。`deadline_reply_does_not_wait_for_stdout_holder`、`blocking_read_times_out`、`slots_return_after_workers_killed` 均为 `test result: ok. 1 passed; 0 failed`。clippy `-D warnings` exit 0。nextest：`Summary [ 567.652s] 10676 tests run: 10676 passed (12 slow, 1 flaky), 21 skipped`，exit 0。flaky 为 `command::clone_test::test_clone_local_git_large_object_set_completes_in_budget`（2/3），不是 MCP。 |
 
 **Acceptance criteria:**
 

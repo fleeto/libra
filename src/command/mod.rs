@@ -154,8 +154,9 @@ pub mod upgrade;
 pub mod write_tree;
 
 use std::{
+    cell::Cell,
     fs::{self, File},
-    io::{self, Read, Write},
+    io::{self, Read, Seek, SeekFrom, Write},
     path::Path,
 };
 
@@ -372,6 +373,319 @@ pub fn read_worktree_blob_bytes(path: impl AsRef<Path>) -> io::Result<Vec<u8>> {
         return Ok(pointer.into_bytes());
     }
     fs::read(path)
+}
+
+/// Bytes of zlib output `object_size` may inflate while reading a header.
+const OBJECT_SIZE_INFLATE_LIMIT: u64 = 64 * 1024;
+
+thread_local! {
+    static OBJECT_SIZE_INFLATED: Cell<u64> = const { Cell::new(0) };
+}
+
+/// Inflated bytes consumed by the most recent [`object_size`] call on this thread.
+///
+/// The counter is the debug evidence that a size lookup stops at the object
+/// header (or the delta target-size varint) instead of reconstructing the body.
+pub fn object_size_inflated_bytes() -> u64 {
+    OBJECT_SIZE_INFLATED.with(Cell::get)
+}
+
+/// Size of a stored object, without reconstructing its body.
+///
+/// Loose objects are inflated only through the `type size\0` header. A pack
+/// entry that is not a delta reports the size in its entry header. An
+/// `OFS_DELTA` or `REF_DELTA` entry inflates only the two leading size
+/// varints and returns the target size. Inflation stops at 64 KiB.
+pub fn object_size(oid: &ObjectHash) -> Result<u64, GitError> {
+    OBJECT_SIZE_INFLATED.with(|cell| cell.set(0));
+    let objects = utils::path::try_objects().map_err(GitError::IOError)?;
+    if let Some(size) = loose_object_size(&objects, oid)? {
+        return Ok(size);
+    }
+    pack_object_size(&objects, oid)?.ok_or_else(|| GitError::ObjectNotFound(oid.to_string()))
+}
+
+fn loose_object_size(objects: &Path, oid: &ObjectHash) -> Result<Option<u64>, GitError> {
+    let hex = oid.to_string();
+    let path = objects.join(&hex[..2]).join(&hex[2..]);
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let file = File::open(&path)?;
+    let decoder = flate2::read::ZlibDecoder::new(file);
+    let mut limited = InflateLimit::new(decoder);
+    let mut header = Vec::new();
+    let mut byte = [0u8; 1];
+    loop {
+        let read = limited.read(&mut byte).map_err(|error| {
+            GitError::InvalidObjectInfo(format!(
+                "could not read the header of loose object {oid}: {error}"
+            ))
+        })?;
+        if read == 0 {
+            return Err(GitError::InvalidObjectInfo(format!(
+                "loose object {oid} ended before its header"
+            )));
+        }
+        if byte[0] == 0 {
+            break;
+        }
+        header.push(byte[0]);
+    }
+    let header = std::str::from_utf8(&header).map_err(|_| {
+        GitError::InvalidObjectInfo(format!("loose object {oid} has a non-UTF-8 header"))
+    })?;
+    let size = header
+        .split_once(' ')
+        .and_then(|(_, size)| size.parse::<u64>().ok())
+        .ok_or_else(|| {
+            GitError::InvalidObjectInfo(format!("loose object {oid} has no size in its header"))
+        })?;
+    Ok(Some(size))
+}
+
+fn pack_object_size(objects: &Path, oid: &ObjectHash) -> Result<Option<u64>, GitError> {
+    let pack_dir = objects.join("pack");
+    if !pack_dir.is_dir() {
+        return Ok(None);
+    }
+    let mut indexes = Vec::new();
+    for entry in fs::read_dir(&pack_dir)? {
+        let path = entry?.path();
+        if path.extension().is_some_and(|extension| extension == "idx") {
+            indexes.push(path);
+        }
+    }
+    indexes.sort();
+    for index in indexes {
+        let Some(offset) = lookup_pack_offset(&index, oid)? else {
+            continue;
+        };
+        let pack_path = index.with_extension("pack");
+        let mut pack = File::open(&pack_path)?;
+        return Ok(Some(read_pack_object_size(&mut pack, offset, oid)?));
+    }
+    Ok(None)
+}
+
+fn lookup_pack_offset(index: &Path, oid: &ObjectHash) -> Result<Option<u64>, GitError> {
+    let mut file = File::open(index)?;
+    let mut magic = [0u8; 4];
+    file.read_exact(&mut magic)?;
+    let version2 = magic == [0xff, 0x74, 0x4f, 0x63];
+    if version2 {
+        let version = read_be_u32(&mut file)?;
+        if version != 2 {
+            return Err(GitError::InvalidObjectInfo(format!(
+                "unsupported pack index version {version} in {}",
+                index.display()
+            )));
+        }
+    } else {
+        file.seek(SeekFrom::Start(0))?;
+    }
+    if !version2 && oid.as_ref().len() != 20 {
+        return Ok(None);
+    }
+    let mut fanout = [0u32; 256];
+    for value in &mut fanout {
+        *value = read_be_u32(&mut file)?;
+    }
+    let first = oid.as_ref()[0] as usize;
+    let start = if first == 0 { 0 } else { u64::from(fanout[first - 1]) };
+    let end = u64::from(fanout[first]);
+    let hash_len = oid.as_ref().len() as u64;
+    let names_at = if version2 { 8 + 256 * 4 } else { 256 * 4 };
+    for position in start..end {
+        let offset = if version2 {
+            file.seek(SeekFrom::Start(names_at + hash_len * position))?;
+            let mut name = vec![0u8; hash_len as usize];
+            file.read_exact(&mut name)?;
+            if name.as_slice() != oid.as_ref() {
+                continue;
+            }
+            read_v2_offset(&mut file, fanout[255], hash_len, position)?
+        } else {
+            file.seek(SeekFrom::Start(names_at + 24 * position))?;
+            let entry_offset = u64::from(read_be_u32(&mut file)?);
+            let mut name = [0u8; 20];
+            file.read_exact(&mut name)?;
+            if name.as_slice() != oid.as_ref() {
+                continue;
+            }
+            entry_offset
+        };
+        return Ok(Some(offset));
+    }
+    Ok(None)
+}
+
+fn read_v2_offset(
+    file: &mut File,
+    count: u32,
+    hash_len: u64,
+    position: u64,
+) -> Result<u64, GitError> {
+    let names = 8 + 256 * 4;
+    let crc = names + u64::from(count) * hash_len;
+    let offsets = crc + u64::from(count) * 4;
+    file.seek(SeekFrom::Start(offsets + position * 4))?;
+    let offset = read_be_u32(file)?;
+    if offset & 0x8000_0000 == 0 {
+        return Ok(u64::from(offset));
+    }
+    let large = u64::from(offset & 0x7fff_ffff);
+    let large_at = offsets + u64::from(count) * 4 + large * 8;
+    file.seek(SeekFrom::Start(large_at))?;
+    let mut bytes = [0u8; 8];
+    file.read_exact(&mut bytes)?;
+    Ok(u64::from_be_bytes(bytes))
+}
+
+fn read_pack_object_size(pack: &mut File, offset: u64, oid: &ObjectHash) -> Result<u64, GitError> {
+    pack.seek(SeekFrom::Start(offset))?;
+    let (kind, size) = read_pack_type_and_size(pack).map_err(|error| {
+        GitError::InvalidObjectInfo(format!("could not read the pack entry for {oid}: {error}"))
+    })?;
+    match kind {
+        1..=4 => Ok(size),
+        6 => {
+            skip_ofs_distance(pack).map_err(|error| {
+                GitError::InvalidObjectInfo(format!(
+                    "could not read the OFS_DELTA base of {oid}: {error}"
+                ))
+            })?;
+            read_delta_target_size(pack, oid)
+        }
+        7 => {
+            let hash_len = git_internal::hash::get_hash_kind().size();
+            let mut base = vec![0u8; hash_len];
+            pack.read_exact(&mut base).map_err(|error| {
+                GitError::InvalidObjectInfo(format!(
+                    "could not read the REF_DELTA base of {oid}: {error}"
+                ))
+            })?;
+            read_delta_target_size(pack, oid)
+        }
+        other => Err(GitError::InvalidObjectInfo(format!(
+            "pack entry for {oid} has unsupported type {other}"
+        ))),
+    }
+}
+
+fn read_delta_target_size(pack: &mut File, oid: &ObjectHash) -> Result<u64, GitError> {
+    let decoder = flate2::read::ZlibDecoder::new(pack);
+    let mut limited = InflateLimit::new(decoder);
+    let _base = read_delta_varint(&mut limited).map_err(|error| {
+        GitError::InvalidObjectInfo(format!("could not read the delta base size of {oid}: {error}"))
+    })?;
+    read_delta_varint(&mut limited).map_err(|error| {
+        GitError::InvalidObjectInfo(format!(
+            "could not read the delta target size of {oid}: {error}"
+        ))
+    })
+}
+
+fn read_delta_varint(reader: &mut impl Read) -> io::Result<u64> {
+    let mut value = 0u64;
+    let mut shift = 0u32;
+    loop {
+        let mut byte = [0u8; 1];
+        if reader.read(&mut byte)? == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "delta size varint ended early",
+            ));
+        }
+        let part = u64::from(byte[0] & 0x7f);
+        if shift >= 64 || part > (u64::MAX >> shift) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "delta size varint exceeds u64",
+            ));
+        }
+        value |= part << shift;
+        if byte[0] & 0x80 == 0 {
+            return Ok(value);
+        }
+        shift += 7;
+    }
+}
+
+fn read_pack_type_and_size(reader: &mut impl Read) -> io::Result<(u8, u64)> {
+    let mut byte = [0u8; 1];
+    reader.read_exact(&mut byte)?;
+    let kind = (byte[0] >> 4) & 0x07;
+    let mut size = u64::from(byte[0] & 0x0f);
+    let mut shift = 4u32;
+    let mut current = byte[0];
+    while current & 0x80 != 0 {
+        reader.read_exact(&mut byte)?;
+        current = byte[0];
+        let part = u64::from(current & 0x7f);
+        if shift >= 64 || part > (u64::MAX >> shift) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "pack object size exceeds u64",
+            ));
+        }
+        size |= part << shift;
+        shift += 7;
+    }
+    Ok((kind, size))
+}
+
+fn skip_ofs_distance(reader: &mut impl Read) -> io::Result<()> {
+    let mut byte = [0u8; 1];
+    for _ in 0..10 {
+        reader.read_exact(&mut byte)?;
+        if byte[0] & 0x80 == 0 {
+            return Ok(());
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        "overlong OFS_DELTA base distance",
+    ))
+}
+
+fn read_be_u32(reader: &mut impl Read) -> io::Result<u32> {
+    let mut bytes = [0u8; 4];
+    reader.read_exact(&mut bytes)?;
+    Ok(u32::from_be_bytes(bytes))
+}
+
+struct InflateLimit<R> {
+    inner: R,
+    limit: u64,
+}
+
+impl<R> InflateLimit<R> {
+    fn new(inner: R) -> Self {
+        Self {
+            inner,
+            limit: OBJECT_SIZE_INFLATE_LIMIT,
+        }
+    }
+}
+
+impl<R: Read> Read for InflateLimit<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let used = OBJECT_SIZE_INFLATED.with(Cell::get);
+        if used >= self.limit {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "object inflate exceeded 64 KiB",
+            ));
+        }
+        let room = usize::try_from(self.limit - used).unwrap_or(usize::MAX);
+        let max = buf.len().min(room);
+        let n = self.inner.read(&mut buf[..max])?;
+        if n > 0 {
+            OBJECT_SIZE_INFLATED.with(|cell| cell.set(used + u64::try_from(n).unwrap_or(u64::MAX)));
+        }
+        Ok(n)
+    }
 }
 
 pub(crate) fn read_symlink_blob_bytes(path: &Path) -> io::Result<Vec<u8>> {
@@ -645,6 +959,185 @@ mod tests {
             let (msg_, _) = parse_commit_msg(&msg_gpg);
             assert_eq!(msg, msg_);
         }
+    }
+
+    const TWO_MIB: usize = 2 * 1024 * 1024;
+
+    fn two_mib_blob() -> Blob {
+        Blob::from_content_bytes(vec![0xA5; TWO_MIB])
+    }
+
+    fn write_be_u32(buf: &mut Vec<u8>, value: u32) {
+        buf.extend_from_slice(&value.to_be_bytes());
+    }
+
+    fn pack_type_and_size(kind: u8, mut size: u64) -> Vec<u8> {
+        let mut first = (kind << 4) | ((size as u8) & 0x0f);
+        size >>= 4;
+        if size > 0 {
+            first |= 0x80;
+        }
+        let mut out = vec![first];
+        while size > 0 {
+            let mut byte = (size as u8) & 0x7f;
+            size >>= 7;
+            if size > 0 {
+                byte |= 0x80;
+            }
+            out.push(byte);
+        }
+        out
+    }
+
+    fn zlib_bytes(data: &[u8]) -> Vec<u8> {
+        use std::io::Write as _;
+        let mut encoder =
+            flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+        encoder.write_all(data).expect("compress");
+        encoder.finish().expect("finish")
+    }
+
+    fn install_v1_pack(entries: &[(ObjectHash, u32)], pack: &[u8]) {
+        let objects = crate::utils::path::objects().join("pack");
+        std::fs::create_dir_all(&objects).expect("pack dir");
+        std::fs::write(objects.join("size-test.pack"), pack).expect("pack");
+        let mut sorted = entries.to_vec();
+        sorted.sort_by(|left, right| left.0.as_ref().cmp(right.0.as_ref()));
+        let mut counts = [0u32; 256];
+        for (oid, _) in &sorted {
+            counts[oid.as_ref()[0] as usize] += 1;
+        }
+        let mut fanout = [0u32; 256];
+        let mut running = 0u32;
+        for index in 0..256 {
+            running += counts[index];
+            fanout[index] = running;
+        }
+        let mut index = Vec::new();
+        for value in fanout {
+            write_be_u32(&mut index, value);
+        }
+        for (oid, offset) in &sorted {
+            write_be_u32(&mut index, *offset);
+            index.extend_from_slice(oid.as_ref());
+        }
+        index.extend_from_slice(&[0u8; 40]);
+        std::fs::write(objects.join("size-test.idx"), index).expect("idx");
+    }
+
+    #[tokio::test]
+    #[serial(cwd, env, hash_kind)]
+    async fn object_size_loose_blob() {
+        let _kind = git_internal::hash::set_hash_kind_for_test(git_internal::hash::HashKind::Sha1);
+        let dir = tempdir().expect("tempdir");
+        test::setup_with_new_libra_in(dir.path()).await;
+        let _guard = test::ChangeDirGuard::new(dir.path());
+        let blob = two_mib_blob();
+        save_object(&blob, &blob.id).expect("save");
+        assert_eq!(object_size(&blob.id).expect("size"), TWO_MIB as u64);
+    }
+
+    #[tokio::test]
+    #[serial(cwd, env, hash_kind)]
+    async fn object_size_loose_inflates_header_only() {
+        let _kind = git_internal::hash::set_hash_kind_for_test(git_internal::hash::HashKind::Sha1);
+        let dir = tempdir().expect("tempdir");
+        test::setup_with_new_libra_in(dir.path()).await;
+        let _guard = test::ChangeDirGuard::new(dir.path());
+        let blob = two_mib_blob();
+        save_object(&blob, &blob.id).expect("save");
+        let _ = object_size(&blob.id).expect("size");
+        assert!(
+            object_size_inflated_bytes() <= 65_536,
+            "inflated {}",
+            object_size_inflated_bytes()
+        );
+    }
+
+    #[tokio::test]
+    #[serial(cwd, env, hash_kind)]
+    async fn object_size_packed_full() {
+        let _kind = git_internal::hash::set_hash_kind_for_test(git_internal::hash::HashKind::Sha1);
+        let dir = tempdir().expect("tempdir");
+        test::setup_with_new_libra_in(dir.path()).await;
+        let _guard = test::ChangeDirGuard::new(dir.path());
+        let blob = two_mib_blob();
+        let mut pack = Vec::new();
+        pack.extend_from_slice(b"PACK");
+        write_be_u32(&mut pack, 2);
+        write_be_u32(&mut pack, 1);
+        let offset = pack.len() as u32;
+        pack.extend(pack_type_and_size(3, TWO_MIB as u64));
+        pack.extend(zlib_bytes(&vec![0xA5; TWO_MIB]));
+        pack.extend_from_slice(&[0u8; 20]);
+        install_v1_pack(&[(blob.id, offset)], &pack);
+        assert_eq!(object_size(&blob.id).expect("size"), TWO_MIB as u64);
+    }
+
+    fn delta_pack() -> (ObjectHash, Vec<u8>, u32) {
+        let mut pack = Vec::new();
+        pack.extend_from_slice(b"PACK");
+        write_be_u32(&mut pack, 2);
+        write_be_u32(&mut pack, 2);
+        let base_at = pack.len() as u64;
+        pack.extend(pack_type_and_size(3, 1));
+        pack.extend(zlib_bytes(b"a"));
+        let delta_at = pack.len() as u64;
+        let mut delta = Vec::new();
+        delta.push(0x01);
+        let mut target = TWO_MIB as u64;
+        loop {
+            let mut byte = (target as u8) & 0x7f;
+            target >>= 7;
+            if target > 0 {
+                byte |= 0x80;
+            }
+            delta.push(byte);
+            if target == 0 {
+                break;
+            }
+        }
+        delta.extend_from_slice(&[0x01, b'x']);
+        let distance = delta_at - base_at;
+        pack.extend(pack_type_and_size(6, delta.len() as u64));
+        pack.push(u8::try_from(distance).expect("distance fits in one byte"));
+        pack.extend(zlib_bytes(&delta));
+        pack.extend_from_slice(&[0u8; 20]);
+        let oid = ObjectHash::from_bytes_for_kind(
+            git_internal::hash::HashKind::Sha1,
+            &[0x42; 20],
+        )
+        .expect("oid");
+        (oid, pack, delta_at as u32)
+    }
+
+    #[tokio::test]
+    #[serial(cwd, env, hash_kind)]
+    async fn object_size_packed_delta_reports_target_size() {
+        let _kind = git_internal::hash::set_hash_kind_for_test(git_internal::hash::HashKind::Sha1);
+        let dir = tempdir().expect("tempdir");
+        test::setup_with_new_libra_in(dir.path()).await;
+        let _guard = test::ChangeDirGuard::new(dir.path());
+        let (oid, pack, offset) = delta_pack();
+        install_v1_pack(&[(oid, offset)], &pack);
+        assert_eq!(object_size(&oid).expect("size"), TWO_MIB as u64);
+    }
+
+    #[tokio::test]
+    #[serial(cwd, env, hash_kind)]
+    async fn object_size_packed_delta_does_not_reconstruct() {
+        let _kind = git_internal::hash::set_hash_kind_for_test(git_internal::hash::HashKind::Sha1);
+        let dir = tempdir().expect("tempdir");
+        test::setup_with_new_libra_in(dir.path()).await;
+        let _guard = test::ChangeDirGuard::new(dir.path());
+        let (oid, pack, offset) = delta_pack();
+        install_v1_pack(&[(oid, offset)], &pack);
+        let _ = object_size(&oid).expect("size");
+        assert!(
+            object_size_inflated_bytes() <= 65_536,
+            "inflated {}",
+            object_size_inflated_bytes()
+        );
     }
 }
 

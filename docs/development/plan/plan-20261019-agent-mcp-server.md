@@ -3378,7 +3378,7 @@ ER-01 至 ER-14 按模板原文对本计划全部任务生效（见 [`plan-templ
 
 **Task type:** `implementation`
 
-**Lifecycle / Acceptance:** `pending` / 空
+**Lifecycle / Acceptance:** `in-progress` / `locally-accepted`
 
 **Description:** 自 MC-31 拆出（R28）。在 `src/command/mod.rs` 现有对象读取函数旁新增 helper `object_size(oid)`：loose 对象只解压到对象头；pack 非 delta 条目读条目头；pack **delta** 条目（`OFS_DELTA`/`REF_DELTA`）解压 delta 数据开头、读取其中的目标对象尺寸 varint（不重建对象），因此小 delta 展开成大对象时也得到真实尺寸，解压字节数 ≤ 64 KiB。工作树侧的有界读取由 MC-36 承接。现有读取函数与 CLI 行为不变。唯一行为轴：「对象尺寸」。
 
@@ -3390,22 +3390,23 @@ ER-01 至 ER-14 按模板原文对本计划全部任务生效（见 [`plan-templ
 |---|---|
 | 现行无界读取 | `src/command/mod.rs:360`（`fs::read`） |
 | pack delta 条目头只给出 delta 数据尺寸 | Git pack 格式（delta 数据以基对象尺寸与目标对象尺寸两个 varint 开头） |
+| 本地门 | 五个 `--exact` 门均 ok。loose 只解压到对象头；pack 非 delta 读条目头；delta 只读目标尺寸 varint，解压不超过 64 KiB |
 
 **Acceptance criteria:**
 
-- [ ] AC-1 loose 2 MiB blob 的 `object_size` 返回 2097152。
-- [ ] AC-2 同一调用的解压字节数（debug 计数器）≤ 65536。
-- [ ] AC-3 pack 中非 delta 的 2 MiB blob 的 `object_size` 返回 2097152。
-- [ ] AC-4 pack 中以小 delta 存储、目标为 2 MiB 的 blob，`object_size` 返回 2097152。
-- [ ] AC-5 同一 delta 调用的解压字节数 ≤ 65536（不重建对象）。
+- [x] AC-1 loose 2 MiB blob 的 `object_size` 返回 2097152。
+- [x] AC-2 同一调用的解压字节数（debug 计数器）≤ 65536。
+- [x] AC-3 pack 中非 delta 的 2 MiB blob 的 `object_size` 返回 2097152。
+- [x] AC-4 pack 中以小 delta 存储、目标为 2 MiB 的 blob，`object_size` 返回 2097152。
+- [x] AC-5 同一 delta 调用的解压字节数 ≤ 65536（不重建对象）。
 
 **Verification:**（本卡特有判据，计入 G-03；`--exact` 门按 GC-MC-07 执行）
 
-- [ ] AC-1：`source .env.test && cargo test --lib command::tests::object_size_loose_blob -- --exact`（new）
-- [ ] AC-2：`source .env.test && cargo test --lib command::tests::object_size_loose_inflates_header_only -- --exact`（new）
-- [ ] AC-3：`source .env.test && cargo test --lib command::tests::object_size_packed_full -- --exact`（new）
-- [ ] AC-4：`source .env.test && cargo test --lib command::tests::object_size_packed_delta_reports_target_size -- --exact`（new）
-- [ ] AC-5：`source .env.test && cargo test --lib command::tests::object_size_packed_delta_does_not_reconstruct -- --exact`（new）
+- [x] AC-1：`source .env.test && cargo test --lib command::tests::object_size_loose_blob -- --exact`（new）
+- [x] AC-2：`source .env.test && cargo test --lib command::tests::object_size_loose_inflates_header_only -- --exact`（new）
+- [x] AC-3：`source .env.test && cargo test --lib command::tests::object_size_packed_full -- --exact`（new）
+- [x] AC-4：`source .env.test && cargo test --lib command::tests::object_size_packed_delta_reports_target_size -- --exact`（new）
+- [x] AC-5：`source .env.test && cargo test --lib command::tests::object_size_packed_delta_does_not_reconstruct -- --exact`（new）
 
 **Full-suite trigger:** `T-1: GC-02 意义上的共享对象/文件读取 helper`
 

@@ -32,7 +32,7 @@ Every Libra command accepts the following global flags:
 | `--sync-data` | | fsync object writes and parent directories; also `LIBRA_SYNC_DATA=1`, with additional write cost. |
 | `--offline` | | Read objects only from local storage; never fetch missing objects from the durable tier. |
 | `--max-connections <N>` | | Bound remote connections/requests (default 16; 0 means 1); also `LIBRA_MAX_CONNECTIONS`. |
-| `--literal-pathspecs` | | Treat pathspecs as literal (no glob, no `:(magic)`). Also `GIT_LITERAL_PATHSPECS=1`. |
+| `--literal-pathspecs` | | Treat pathspecs as literal (no glob, no `:(magic)`). Also `GIT_LITERAL_PATHSPECS=1`. An unrecognized `GIT_LITERAL_PATHSPECS` value warns once and is treated as disabled (Git refuses to run; ADR-AU-06 §3). |
 | `--no-literal-pathspecs` | | Cancel `--literal-pathspecs` / `GIT_LITERAL_PATHSPECS` (last flag wins). |
 
 ## Command Index

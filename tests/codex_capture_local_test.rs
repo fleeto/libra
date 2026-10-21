@@ -4605,6 +4605,526 @@ async fn codex_finalize_legacy_completion_and_tied_receipts_preserve_historical_
     }
 }
 
+#[tokio::test]
+#[ignore = "operator-local Codex acceptance; never run in CI"]
+async fn codex_archive_batch_prefers_active_and_deduplicates() {
+    let fixture = LocalCodexSession::new();
+    fixture.source(1, true);
+    let archive = fixture.home.join(".codex/archived_sessions");
+    std::fs::create_dir_all(&archive).unwrap();
+    let archive_file = archive.join(fixture.source.file_name().unwrap());
+    let archived = std::fs::read_to_string(&fixture.source)
+        .unwrap()
+        .replace("CX15-MULTI-0", "CX10-ARCHIVED-COPY");
+    std::fs::write(archive_file, archived).unwrap();
+
+    let output = fixture.run(&[
+        "agent", "import", "--all", "--agent", "codex", "--yes", "--json",
+    ]);
+    assert!(output.status.success(), "{output:?}");
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["data"]["results"].as_array().map(Vec::len), Some(1));
+    let db = fixture.db().await;
+    let exported = fixture.exports(&db).await.join("\n");
+    assert!(exported.contains("CX15-MULTI-0"));
+    assert!(!exported.contains("CX10-ARCHIVED-COPY"));
+    db.close().await.unwrap();
+}
+
+#[test]
+#[ignore = "operator-local Codex acceptance; never run in CI"]
+fn codex_archive_since_filters_only_winning_active_copy() {
+    for broken_copy in ["active", "archive"] {
+        let fixture = LocalCodexSession::new();
+        fixture.source(1, true);
+        let archive = fixture.home.join(".codex/archived_sessions");
+        std::fs::create_dir_all(&archive).unwrap();
+        let archive_file = archive.join(fixture.source.file_name().unwrap());
+        std::fs::copy(&fixture.source, &archive_file).unwrap();
+        let broken_path = if broken_copy == "active" {
+            &fixture.source
+        } else {
+            &archive_file
+        };
+        let source = std::fs::read_to_string(broken_path).unwrap();
+        let (_, rest) = source.split_once('\n').unwrap();
+        let bad_header = serde_json::json!({
+            "type":"session_meta", "timestamp":"2026-10-19T01:00:00Z",
+            "payload":{"id":"wrong-id"}
+        });
+        std::fs::write(broken_path, format!("{bad_header}\n{rest}")).unwrap();
+        let output = fixture.run(&[
+            "agent",
+            "import",
+            "--since",
+            "2026-10-18T00:00:00Z",
+            "--agent",
+            "codex",
+            "--yes",
+            "--json",
+        ]);
+        if broken_copy == "active" {
+            assert!(output.status.success(), "{output:?}");
+            let payload: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(payload["data"]["results"].as_array().map(Vec::len), Some(0));
+            assert_eq!(
+                payload["data"]["skipped"][0]["reason_key"],
+                "codex_session_header_invalid"
+            );
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(!output.status.success(), "{output:?}");
+            assert!(!stderr.contains("codex_session_header_invalid"), "{stderr}");
+            let json_start = stderr.find("\n{").expect("structured partial error") + 1;
+            let payload: serde_json::Value = serde_json::from_str(&stderr[json_start..]).unwrap();
+            assert_eq!(payload["error_code"], "LBR-AGENT-018");
+            assert_eq!(payload["details"]["skipped"], serde_json::json!([]));
+            assert_eq!(
+                payload["details"]["partial_results"]
+                    .as_array()
+                    .map(Vec::len),
+                Some(1)
+            );
+            assert_eq!(
+                payload["details"]["partial_results"][0]["checkpoints_written"],
+                1
+            );
+            assert_eq!(
+                payload["details"]["partial_results"][0]["session_id"],
+                "codex__123e4567-e89b-12d3-a456-426614174031"
+            );
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "operator-local Codex acceptance; never run in CI"]
+fn codex_archive_has_an_independent_entry_budget() {
+    let fixture = LocalCodexSession::new();
+    fixture.source(1, true);
+    let archive = fixture.home.join(".codex/archived_sessions");
+    std::fs::create_dir_all(&archive).unwrap();
+    std::fs::rename(
+        &fixture.source,
+        archive.join(fixture.source.file_name().unwrap()),
+    )
+    .unwrap();
+    let active_day = fixture.source.parent().unwrap();
+    // sessions/year/month/day cost three entries; the final day reaches the
+    // active 20,000-entry allowance exactly before the archive is examined.
+    for index in 0..19_997 {
+        std::fs::File::create(active_day.join(format!("ignored-{index:05}"))).unwrap();
+    }
+    let output = fixture.run(&[
+        "agent", "import", "--all", "--agent", "codex", "--yes", "--json",
+    ]);
+    assert!(!output.status.success(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let json_start = stderr.find("\n{").expect("structured partial error") + 1;
+    let payload: serde_json::Value = serde_json::from_str(&stderr[json_start..]).unwrap();
+    assert_eq!(payload["details"]["skipped"], serde_json::json!([]));
+    assert_eq!(
+        payload["details"]["partial_results"][0]["checkpoints_written"],
+        1
+    );
+}
+
+#[tokio::test]
+#[ignore = "operator-local Codex acceptance; never run in CI"]
+async fn codex_archive_since_uses_session_meta_and_imports_archived_rollout() {
+    use sea_orm::{ConnectionTrait, Statement};
+
+    let fixture = LocalCodexSession::new();
+    fixture.source(1, true);
+    let archive = fixture.home.join(".codex/archived_sessions");
+    std::fs::create_dir_all(&archive).unwrap();
+    let archived_path = archive.join(fixture.source.file_name().unwrap());
+    std::fs::rename(&fixture.source, &archived_path).unwrap();
+    let source = std::fs::read_to_string(&archived_path).unwrap();
+    let mut lines = source.lines().map(str::to_owned).collect::<Vec<_>>();
+    let mut header: serde_json::Value = serde_json::from_str(&lines[0]).unwrap();
+    header["payload"]["model"] = serde_json::json!("CX10-MODEL-CANARY");
+    header["payload"]["title"] = serde_json::json!("CX10-TITLE-CANARY");
+    lines[0] = header.to_string();
+    std::fs::write(&archived_path, format!("{}\n", lines.join("\n"))).unwrap();
+
+    // The archive file was just moved and has a current mtime, but its
+    // session_meta predates this boundary.
+    let excluded = fixture.run(&[
+        "agent",
+        "import",
+        "--since",
+        "2026-10-20T00:00:00Z",
+        "--agent",
+        "codex",
+        "--yes",
+        "--json",
+    ]);
+    assert!(excluded.status.success(), "{excluded:?}");
+    let result: serde_json::Value = serde_json::from_slice(&excluded.stdout).unwrap();
+    assert_eq!(result["data"]["results"].as_array().map(Vec::len), Some(0));
+
+    let included = fixture.run(&[
+        "agent",
+        "import",
+        "--since",
+        "2026-10-18T00:00:00Z",
+        "--agent",
+        "codex",
+        "--yes",
+        "--json",
+    ]);
+    assert!(included.status.success(), "{included:?}");
+    let result: serde_json::Value = serde_json::from_slice(&included.stdout).unwrap();
+    assert_eq!(result["data"]["results"].as_array().map(Vec::len), Some(1));
+    let db = fixture.db().await;
+    let exported = fixture.exports(&db).await.join("\n");
+    assert!(exported.contains("CX15-MULTI-0"));
+    assert!(exported.contains("opaque-0"));
+    let row = db
+        .query_one_raw(Statement::from_string(
+            db.get_database_backend(),
+            "SELECT metadata_json FROM agent_session WHERE agent_kind='codex'",
+        ))
+        .await
+        .unwrap()
+        .unwrap();
+    let metadata: String = row.try_get_by("metadata_json").unwrap();
+    for secret in ["CX10-MODEL-CANARY", "CX10-TITLE-CANARY", "CX15-MULTI-0"] {
+        assert!(!metadata.contains(secret), "metadata exposed {secret}");
+    }
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "operator-local Codex acceptance; never run in CI"]
+async fn codex_archive_session_selector_finds_archived_rollout() {
+    let fixture = LocalCodexSession::new();
+    fixture.source(1, true);
+    let archive = fixture.home.join(".codex/archived_sessions");
+    std::fs::create_dir_all(&archive).unwrap();
+    std::fs::rename(
+        &fixture.source,
+        archive.join(fixture.source.file_name().unwrap()),
+    )
+    .unwrap();
+    std::fs::remove_dir_all(fixture.home.join(".codex/sessions")).unwrap();
+    let output = fixture.run(&[
+        "agent",
+        "import",
+        "--session",
+        "123e4567-e89b-12d3-a456-426614174031",
+        "--agent",
+        "codex",
+        "--yes",
+        "--json",
+    ]);
+    assert!(output.status.success(), "{output:?}");
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["data"]["results"].as_array().map(Vec::len), Some(1));
+    let db = fixture.db().await;
+    assert!(
+        fixture
+            .exports(&db)
+            .await
+            .join("\n")
+            .contains("CX15-MULTI-0")
+    );
+    db.close().await.unwrap();
+}
+
+#[test]
+#[ignore = "operator-local Codex acceptance; never run in CI"]
+fn codex_archive_since_reports_unknown_session_time() {
+    let fixture = LocalCodexSession::new();
+    fixture.source(1, true);
+    let archive = fixture.home.join(".codex/archived_sessions");
+    std::fs::create_dir_all(&archive).unwrap();
+    let path = archive.join(fixture.source.file_name().unwrap());
+    let source = std::fs::read_to_string(&fixture.source).unwrap();
+    let mut lines = source.lines().map(str::to_owned).collect::<Vec<_>>();
+    let mut header: serde_json::Value = serde_json::from_str(&lines[0]).unwrap();
+    header.as_object_mut().unwrap().remove("timestamp");
+    header["payload"]
+        .as_object_mut()
+        .unwrap()
+        .remove("timestamp");
+    lines[0] = header.to_string();
+    std::fs::write(&path, format!("{}\n", lines.join("\n"))).unwrap();
+    std::fs::remove_file(&fixture.source).unwrap();
+    let original_id = "123e4567-e89b-12d3-a456-426614174031";
+    for suffix in ["032", "033"] {
+        let id = format!("123e4567-e89b-12d3-a456-426614174{suffix}");
+        let name = fixture
+            .source
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .replace(original_id, &id);
+        std::fs::write(
+            fixture.source.with_file_name(name),
+            source.replace(original_id, &id),
+        )
+        .unwrap();
+    }
+
+    let denied = fixture.run(&[
+        "agent",
+        "import",
+        "--since",
+        "2026-10-18T00:00:00Z",
+        "--agent",
+        "codex",
+        "--json",
+    ]);
+    assert!(!denied.status.success(), "{denied:?}");
+    let denied_stderr = String::from_utf8_lossy(&denied.stderr);
+    assert!(denied_stderr.contains("--yes"), "{denied_stderr}");
+    assert!(!denied_stderr.contains("session_meta"), "{denied_stderr}");
+
+    let output = fixture.run(&[
+        "agent",
+        "import",
+        "--since",
+        "2026-10-18T00:00:00Z",
+        "--agent",
+        "codex",
+        "--limit",
+        "1",
+        "--yes",
+        "--json",
+    ]);
+    assert!(output.status.success(), "{output:?}");
+    let payload: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        payload["data"]["skipped"][0]["reason_key"],
+        "codex_session_time_unknown"
+    );
+    assert!(
+        payload["data"]["skipped"][0]["session_id"]
+            .as_str()
+            .unwrap()
+            .starts_with("sha256:")
+    );
+    assert_eq!(payload["data"]["next_cursor"], 1);
+    let next = fixture.run(&[
+        "agent",
+        "import",
+        "--since",
+        "2026-10-18T00:00:00Z",
+        "--agent",
+        "codex",
+        "--limit",
+        "1",
+        "--cursor",
+        "1",
+        "--yes",
+        "--json",
+    ]);
+    assert!(next.status.success(), "{next:?}");
+    let page: serde_json::Value = serde_json::from_slice(&next.stdout).unwrap();
+    assert_eq!(page["data"]["skipped"], payload["data"]["skipped"]);
+    let warning_exit = fixture.run(&[
+        "--exit-code-on-warning",
+        "agent",
+        "import",
+        "--since",
+        "2026-10-18T00:00:00Z",
+        "--agent",
+        "codex",
+        "--limit",
+        "1",
+        "--yes",
+        "--json",
+    ]);
+    assert_eq!(warning_exit.status.code(), Some(9), "{warning_exit:?}");
+    let warned: serde_json::Value = serde_json::from_slice(&warning_exit.stdout).unwrap();
+    assert!(
+        warned["data"]["warnings"]
+            .as_array()
+            .is_some_and(|items| !items.is_empty()),
+        "{warned}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "operator-local Codex acceptance; never run in CI"]
+fn codex_archive_symlink_is_rejected_without_reading_target() {
+    let fixture = LocalCodexSession::new();
+    fixture.source(1, true);
+    let archive = fixture.home.join(".codex/archived_sessions");
+    std::fs::create_dir_all(&archive).unwrap();
+    let outside = fixture.home.join("outside-rollout.jsonl");
+    std::fs::copy(&fixture.source, &outside).unwrap();
+    std::os::unix::fs::symlink(&outside, archive.join(fixture.source.file_name().unwrap()))
+        .unwrap();
+    std::fs::remove_file(&fixture.source).unwrap();
+
+    let output = fixture.run(&[
+        "agent", "import", "--all", "--agent", "codex", "--yes", "--json",
+    ]);
+    assert!(!output.status.success(), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("LBR-AGENT-020"),
+        "{output:?}"
+    );
+    assert!(outside.exists());
+}
+
+#[test]
+#[ignore = "operator-local Codex acceptance; never run in CI"]
+fn codex_archive_header_rejects_mismatch_duplicate_and_oversize() {
+    const ID: &str = "123e4567-e89b-12d3-a456-426614174031";
+    for shape in ["mismatch", "duplicate", "oversize"] {
+        let fixture = LocalCodexSession::new();
+        fixture.source(1, true);
+        let archive = fixture.home.join(".codex/archived_sessions");
+        std::fs::create_dir_all(&archive).unwrap();
+        let path = archive.join(fixture.source.file_name().unwrap());
+        let source = std::fs::read_to_string(&fixture.source).unwrap();
+        let mut lines = source.lines().map(str::to_owned).collect::<Vec<_>>();
+        lines[0] = match shape {
+            "mismatch" => serde_json::json!({
+                "type":"session_meta", "timestamp":"2026-10-19T01:00:00Z",
+                "payload":{"id":"123e4567-e89b-12d3-a456-426614174099"}
+            })
+            .to_string(),
+            "duplicate" => format!(
+                "{{\"type\":\"session_meta\",\"timestamp\":\"2026-10-19T01:00:00Z\",\"timestamp\":\"2026-10-19T02:00:00Z\",\"payload\":{{\"id\":\"{ID}\"}}}}"
+            ),
+            "oversize" => serde_json::json!({
+                "type":"session_meta", "timestamp":"2026-10-19T01:00:00Z",
+                "payload":{"id":ID,"title":"x".repeat(1_048_576)}
+            })
+            .to_string(),
+            _ => unreachable!(),
+        };
+        std::fs::write(&path, format!("{}\n", lines.join("\n"))).unwrap();
+        std::fs::remove_file(&fixture.source).unwrap();
+        let output = fixture.run(&[
+            "agent",
+            "import",
+            "--since",
+            "2026-10-18T00:00:00Z",
+            "--agent",
+            "codex",
+            "--yes",
+            "--json",
+        ]);
+        assert!(output.status.success(), "{shape}: {output:?}");
+        let payload: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(
+            payload["data"]["skipped"][0]["reason_key"], "codex_session_header_invalid",
+            "{shape}: {payload}"
+        );
+        assert!(path.exists(), "discovery must not mutate the source");
+    }
+}
+
+#[test]
+#[ignore = "operator-local Codex acceptance; never run in CI"]
+fn codex_archive_since_scans_large_header_and_reports_bad_peer() {
+    const ID: &str = "123e4567-e89b-12d3-a456-426614174031";
+    const BAD_ID: &str = "123e4567-e89b-12d3-a456-426614174032";
+    let fixture = LocalCodexSession::new();
+    fixture.source(1, true);
+    let source = std::fs::read_to_string(&fixture.source).unwrap();
+    let mut lines = source.lines().map(str::to_owned).collect::<Vec<_>>();
+    let mut header: serde_json::Value = serde_json::from_str(&lines[0]).unwrap();
+    header["payload"]["base_instructions"] = serde_json::json!("x".repeat(80 * 1024));
+    lines[0] = header.to_string();
+    std::fs::write(&fixture.source, format!("{}\n", lines.join("\n"))).unwrap();
+
+    let archive = fixture.home.join(".codex/archived_sessions");
+    std::fs::create_dir_all(&archive).unwrap();
+    let bad_name = fixture
+        .source
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .replace(ID, BAD_ID);
+    let bad_header = serde_json::json!({
+        "type":"session_meta", "timestamp":"2026-10-19T01:00:00Z",
+        "payload":{"id":"wrong-id"}
+    });
+    std::fs::write(archive.join(bad_name), format!("{bad_header}\n")).unwrap();
+
+    let output = fixture.run(&[
+        "agent",
+        "import",
+        "--since",
+        "2026-10-18T00:00:00Z",
+        "--agent",
+        "codex",
+        "--yes",
+        "--json",
+    ]);
+    assert!(!output.status.success(), "{output:?}");
+    let error: serde_json::Value = serde_json::from_slice(
+        &output.stderr[String::from_utf8_lossy(&output.stderr).find('{').unwrap()..],
+    )
+    .unwrap();
+    assert_eq!(error["details"]["partial"], 1, "{error}");
+    assert_eq!(
+        error["details"]["partial_results"][0]["checkpoints_written"], 1,
+        "{error}"
+    );
+    assert!(
+        error["details"]["skipped"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|skip| skip["reason_key"] == "codex_session_header_invalid"),
+        "{error}"
+    );
+}
+
+#[tokio::test]
+#[ignore = "operator-local Codex acceptance; never run in CI"]
+async fn codex_archive_since_skips_erased_bad_header() {
+    use sea_orm::{ConnectionTrait, Statement};
+
+    let fixture = LocalCodexSession::new();
+    fixture.source(1, true);
+    let bad_header = serde_json::json!({
+        "type":"session_meta", "timestamp":"2026-10-19T01:00:00Z",
+        "payload":{"id":"wrong-id"}
+    });
+    std::fs::write(&fixture.source, format!("{bad_header}\n")).unwrap();
+    let db = fixture.db().await;
+    db.execute_raw(Statement::from_sql_and_values(
+        db.get_database_backend(),
+        "INSERT INTO agent_import_tombstone (tombstone_id, agent_kind, provider_session_id, erased_session_id, erased_at) VALUES (?, 'codex', ?, ?, 1)",
+        [
+            "cx10-erased".into(),
+            "123e4567-e89b-12d3-a456-426614174031".into(),
+            "codex__123e4567-e89b-12d3-a456-426614174031".into(),
+        ],
+    ))
+    .await
+    .unwrap();
+    db.close().await.unwrap();
+    let output = fixture.run(&[
+        "agent",
+        "import",
+        "--since",
+        "2026-10-18T00:00:00Z",
+        "--agent",
+        "codex",
+        "--yes",
+        "--json",
+    ]);
+    assert!(output.status.success(), "{output:?}");
+    let payload: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(payload["data"]["skipped"].as_array().map(Vec::len), Some(1));
+    assert_eq!(
+        payload["data"]["failures"].as_array().map(Vec::len),
+        Some(0)
+    );
+}
+
 struct LocalCodexSession {
     _temp: tempfile::TempDir,
     repo: std::path::PathBuf,

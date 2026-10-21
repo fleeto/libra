@@ -418,6 +418,7 @@ pub fn stable_promoted_spec_for(kind: AgentKind) -> Option<&'static StablePromot
 /// hard bounds so a hostile/bloated `$CODEX_HOME` cannot stall a hook or
 /// import (GC-DR-08).
 const ROLLOUT_MAX_ENTRIES_PER_DIR: usize = 4_096;
+const IMPORT_ARCHIVE_MAX_ENTRIES_PER_DIR: usize = 20_000;
 const ROLLOUT_MAX_ENTRIES_SCANNED: usize = 20_000;
 const ROLLOUT_MAX_FILES_SCANNED: usize = 10_000;
 const ROLLOUT_SCAN_TIMEOUT: Duration = Duration::from_secs(2);
@@ -425,8 +426,13 @@ const ROLLOUT_SCAN_TIMEOUT: Duration = Duration::from_secs(2);
 struct RolloutScanBudget {
     entries_scanned: usize,
     max_entries: usize,
+    max_entries_per_dir: usize,
     deadline: Instant,
 }
+
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+pub struct CodexRolloutScanLimit(pub String);
 
 impl RolloutScanBudget {
     fn new(max_entries: usize, timeout: Duration) -> Self {
@@ -434,16 +440,18 @@ impl RolloutScanBudget {
         Self {
             entries_scanned: 0,
             max_entries,
+            max_entries_per_dir: ROLLOUT_MAX_ENTRIES_PER_DIR,
             deadline: now.checked_add(timeout).unwrap_or(now),
         }
     }
 
     fn check_time(&self, dir: &std::path::Path) -> Result<()> {
         if Instant::now() >= self.deadline {
-            return Err(anyhow!(
+            return Err(CodexRolloutScanLimit(format!(
                 "rollout discovery exceeded its time budget while scanning {}; refusing a stale answer (GC-DR-08 bounded discovery)",
                 dir.display()
-            ));
+            ))
+            .into());
         }
         Ok(())
     }
@@ -455,10 +463,10 @@ impl RolloutScanBudget {
             .checked_add(1)
             .ok_or_else(|| anyhow!("rollout discovery entry counter overflow"))?;
         if self.entries_scanned > self.max_entries {
-            return Err(anyhow!(
+            return Err(CodexRolloutScanLimit(format!(
                 "rollout discovery scanned more than {} total entries; refusing a stale answer (GC-DR-08 bounded discovery)",
                 self.max_entries
-            ));
+            )).into());
         }
         Ok(())
     }
@@ -469,6 +477,10 @@ fn codex_sessions_root() -> Option<std::path::PathBuf> {
         .into_iter()
         .next()
         .map(|root| root.join("sessions"))
+}
+
+fn codex_archive_root(sessions_root: &std::path::Path) -> std::path::PathBuf {
+    sessions_root.with_file_name("archived_sessions")
 }
 
 /// List a directory's entry names filtered by `keep`, sorted DESCENDING
@@ -493,13 +505,14 @@ fn sorted_desc_entries(
     };
     let mut names: Vec<std::ffi::OsString> = Vec::new();
     for (scanned, entry) in read.enumerate() {
-        if scanned >= ROLLOUT_MAX_ENTRIES_PER_DIR {
-            return Err(anyhow!(
+        if scanned >= budget.max_entries_per_dir {
+            return Err(CodexRolloutScanLimit(format!(
                 "rollout directory {} exceeds the {} entry scan bound; refusing a possibly \
                  stale answer (GC-DR-08 bounded discovery)",
                 dir.display(),
-                ROLLOUT_MAX_ENTRIES_PER_DIR
-            ));
+                budget.max_entries_per_dir
+            ))
+            .into());
         }
         budget.charge_entry(dir)?;
         let entry =
@@ -556,13 +569,14 @@ fn sorted_desc_entries_at(
         .with_context(|| format!("read pinned rollout directory {}", logical_dir.display()))?;
     let mut names = Vec::new();
     for (scanned, entry) in read.enumerate() {
-        if scanned >= ROLLOUT_MAX_ENTRIES_PER_DIR {
-            return Err(anyhow!(
+        if scanned >= budget.max_entries_per_dir {
+            return Err(CodexRolloutScanLimit(format!(
                 "rollout directory {} exceeds the {} entry scan bound; refusing a possibly \
                  stale answer (GC-DR-08 bounded discovery)",
                 logical_dir.display(),
-                ROLLOUT_MAX_ENTRIES_PER_DIR
-            ));
+                budget.max_entries_per_dir
+            ))
+            .into());
         }
         budget.charge_entry(logical_dir)?;
         let entry = entry.with_context(|| {
@@ -797,10 +811,11 @@ fn find_codex_rollout_bounded_unix(
                     .checked_add(names.len())
                     .ok_or_else(|| anyhow!("rollout discovery file counter overflow"))?;
                 if files_seen > ROLLOUT_MAX_FILES_SCANNED {
-                    return Err(anyhow!(
+                    return Err(CodexRolloutScanLimit(format!(
                         "rollout discovery scanned more than {ROLLOUT_MAX_FILES_SCANNED} files; \
                          refusing a possibly stale answer (GC-DR-08 bounded discovery)"
-                    ));
+                    ))
+                    .into());
                 }
                 for name in names {
                     if name.to_string_lossy().ends_with(suffix) {
@@ -815,8 +830,8 @@ fn find_codex_rollout_bounded_unix(
     Ok(None)
 }
 
-/// Locate the newest Codex rollout JSONL for `session_id` under
-/// `$CODEX_HOME/sessions/YYYY/MM/DD/rollout-*-<session_id>.jsonl`
+/// Locate the newest active Codex rollout JSONL for `session_id` under
+/// `$CODEX_HOME/sessions/YYYY/MM/DD/rollout-*-<session_id>.jsonl`.
 /// (plan-20260713 DR-03, mirroring Entire's `findRolloutBySessionID`).
 ///
 /// Bounded (GC-DR-08): fixed depth 3, digit-validated date components (a
@@ -826,6 +841,19 @@ fn find_codex_rollout_bounded_unix(
 /// symlinked match; `Ok(None)` only when nothing matches.
 pub fn find_codex_rollout(session_id: &str) -> Result<Option<std::path::PathBuf>> {
     find_codex_rollout_bounded(session_id, RolloutDiscoveryLimits::default())
+}
+
+/// Historical import alone may fall back to `archived_sessions`; live hook
+/// lookup keeps its active-only path contract.
+pub fn find_codex_rollout_for_import(session_id: &str) -> Result<Option<std::path::PathBuf>> {
+    find_codex_rollout_bounded_with_archive(
+        session_id,
+        RolloutDiscoveryLimits {
+            deadline: Duration::from_secs(10),
+            ..Default::default()
+        },
+        true,
+    )
 }
 
 /// Injectable discovery bounds (GC-DR-07) so tests drive the FULL finder
@@ -854,6 +882,15 @@ pub fn find_codex_rollout_bounded(
     session_id: &str,
     limits: RolloutDiscoveryLimits,
 ) -> Result<Option<std::path::PathBuf>> {
+    find_codex_rollout_bounded_with_archive(session_id, limits, false)
+}
+
+#[cfg_attr(windows, allow(unused_variables))]
+fn find_codex_rollout_bounded_with_archive(
+    session_id: &str,
+    limits: RolloutDiscoveryLimits,
+    include_archive: bool,
+) -> Result<Option<std::path::PathBuf>> {
     let valid = !session_id.is_empty()
         && session_id.len() <= 64
         && session_id
@@ -868,84 +905,161 @@ pub fn find_codex_rollout_bounded(
         return Ok(None);
     };
     let adapter = agent_for(AgentKind::Codex);
-    let Some(directory) = open_provider_directory_for_discovery(adapter, &root)? else {
-        return Ok(None);
-    };
-    let mut budget = RolloutScanBudget::new(limits.max_entries_scanned, limits.deadline);
+    let directory = open_provider_directory_for_discovery(adapter, &root)?;
+    let mut budget = RolloutScanBudget::new(
+        if include_archive {
+            limits
+                .max_entries_scanned
+                .max(2 * IMPORT_ARCHIVE_MAX_ENTRIES_PER_DIR)
+        } else {
+            limits.max_entries_scanned
+        },
+        limits.deadline,
+    );
+    if include_archive {
+        budget.max_entries_per_dir = IMPORT_ARCHIVE_MAX_ENTRIES_PER_DIR;
+    }
     let suffix = format!("-{session_id}.jsonl");
     #[cfg(unix)]
-    return find_codex_rollout_bounded_unix(&root, &directory, &suffix, &mut budget);
+    {
+        if let Some(directory) = directory.as_ref()
+            && let Some(active) =
+                find_codex_rollout_bounded_unix(&root, directory, &suffix, &mut budget)?
+        {
+            return Ok(Some(active));
+        }
+        if !include_archive {
+            return Ok(None);
+        }
+        let archive_root = codex_archive_root(&root);
+        let Some(archive) = open_provider_directory_for_discovery(adapter, &archive_root)? else {
+            return Ok(None);
+        };
+        let names = sorted_desc_entries_at(
+            &archive,
+            &archive_root,
+            |name| name.starts_with("rollout-"),
+            &mut budget,
+        )?;
+        for name in names {
+            if name.to_string_lossy().ends_with(&suffix) {
+                let candidate = archive_root.join(&name);
+                let _opened = open_rollout_file_at(&archive, &name, &candidate)?;
+                return Ok(Some(candidate));
+            }
+        }
+        Ok(None)
+    }
     #[cfg(not(unix))]
     let pinned_root = root.clone();
     #[cfg(not(unix))]
     let mut files_seen = 0usize;
     #[cfg(not(unix))]
-    for year in sorted_desc_entries(&pinned_root, |n| valid_year(n).is_some(), &mut budget)? {
-        let year_dir = pinned_root.join(&year);
-        if !real_directory(&year_dir)? {
-            continue;
-        }
-        let Some(year_number) = valid_year(&year.to_string_lossy()) else {
-            continue;
-        };
-        for month in sorted_desc_entries(&year_dir, |n| valid_month(n).is_some(), &mut budget)? {
-            let month_dir = year_dir.join(&month);
-            if !real_directory(&month_dir)? {
+    let active_exists = directory.is_some();
+    #[cfg(not(unix))]
+    drop(directory);
+    #[cfg(not(unix))]
+    if active_exists {
+        for year in sorted_desc_entries(&pinned_root, |n| valid_year(n).is_some(), &mut budget)? {
+            let year_dir = pinned_root.join(&year);
+            if !real_directory(&year_dir)? {
                 continue;
             }
-            let Some(month_number) = valid_month(&month.to_string_lossy()) else {
+            let Some(year_number) = valid_year(&year.to_string_lossy()) else {
                 continue;
             };
-            for day in sorted_desc_entries(
-                &month_dir,
-                |name| {
-                    fixed_ascii_u32(name, 2).is_some_and(|day| {
-                        chrono::NaiveDate::from_ymd_opt(year_number, month_number, day).is_some()
-                    })
-                },
-                &mut budget,
-            )? {
-                let day_dir = month_dir.join(&day);
-                if !real_directory(&day_dir)? {
+            for month in sorted_desc_entries(&year_dir, |n| valid_month(n).is_some(), &mut budget)?
+            {
+                let month_dir = year_dir.join(&month);
+                if !real_directory(&month_dir)? {
                     continue;
                 }
-                let names =
-                    sorted_desc_entries(&day_dir, |n| n.starts_with("rollout-"), &mut budget)?;
-                files_seen = files_seen
-                    .checked_add(names.len())
-                    .ok_or_else(|| anyhow!("rollout discovery file counter overflow"))?;
-                if files_seen > ROLLOUT_MAX_FILES_SCANNED {
-                    return Err(anyhow!(
-                        "rollout discovery scanned more than {ROLLOUT_MAX_FILES_SCANNED} files; \
+                let Some(month_number) = valid_month(&month.to_string_lossy()) else {
+                    continue;
+                };
+                for day in sorted_desc_entries(
+                    &month_dir,
+                    |name| {
+                        fixed_ascii_u32(name, 2).is_some_and(|day| {
+                            chrono::NaiveDate::from_ymd_opt(year_number, month_number, day)
+                                .is_some()
+                        })
+                    },
+                    &mut budget,
+                )? {
+                    let day_dir = month_dir.join(&day);
+                    if !real_directory(&day_dir)? {
+                        continue;
+                    }
+                    let names =
+                        sorted_desc_entries(&day_dir, |n| n.starts_with("rollout-"), &mut budget)?;
+                    files_seen = files_seen
+                        .checked_add(names.len())
+                        .ok_or_else(|| anyhow!("rollout discovery file counter overflow"))?;
+                    if files_seen > ROLLOUT_MAX_FILES_SCANNED {
+                        return Err(CodexRolloutScanLimit(format!(
+                            "rollout discovery scanned more than {ROLLOUT_MAX_FILES_SCANNED} files; \
                          refusing a possibly stale answer (GC-DR-08 bounded discovery)"
-                    ));
-                }
-                for name in names {
-                    let name_str = name.to_string_lossy();
-                    if name_str.ends_with(&suffix) {
-                        let candidate = day_dir.join(&name);
-                        let meta = fs::symlink_metadata(&candidate)
-                            .context("stat candidate Codex rollout")?;
-                        if meta.file_type().is_symlink() {
-                            return Err(anyhow!("refusing symlinked Codex rollout (fail-closed)"));
+                        )).into());
+                    }
+                    for name in names {
+                        let name_str = name.to_string_lossy();
+                        if name_str.ends_with(&suffix) {
+                            let candidate = day_dir.join(&name);
+                            let meta = fs::symlink_metadata(&candidate)
+                                .context("stat candidate Codex rollout")?;
+                            if meta.file_type().is_symlink() {
+                                return Err(anyhow!(
+                                    "refusing symlinked Codex rollout (fail-closed)"
+                                ));
+                            }
+                            if !meta.is_file() {
+                                return Err(anyhow!(
+                                    "refusing non-file Codex rollout {} (fail-closed)",
+                                    candidate.display()
+                                ));
+                            }
+                            let relative = candidate
+                                .strip_prefix(&pinned_root)
+                                .context("bound pinned Codex rollout path")?;
+                            return Ok(Some(root.join(relative)));
                         }
-                        if !meta.is_file() {
-                            return Err(anyhow!(
-                                "refusing non-file Codex rollout {} (fail-closed)",
-                                candidate.display()
-                            ));
-                        }
-                        let relative = candidate
-                            .strip_prefix(&pinned_root)
-                            .context("bound pinned Codex rollout path")?;
-                        return Ok(Some(root.join(relative)));
                     }
                 }
             }
         }
     }
     #[cfg(not(unix))]
-    Ok(None)
+    {
+        if !include_archive {
+            return Ok(None);
+        }
+        let archive_root = codex_archive_root(&root);
+        let archive = open_provider_directory_for_discovery(adapter, &archive_root)?;
+        if archive.is_none() {
+            return Ok(None);
+        }
+        drop(archive);
+        let names = sorted_desc_entries(
+            &archive_root,
+            |name| name.starts_with("rollout-"),
+            &mut budget,
+        )?;
+        for name in names {
+            if name.to_string_lossy().ends_with(&suffix) {
+                let candidate = archive_root.join(&name);
+                let meta =
+                    fs::symlink_metadata(&candidate).context("stat archived Codex rollout")?;
+                if meta.file_type().is_symlink() || !meta.is_file() {
+                    return Err(anyhow!(
+                        "refusing non-file archived Codex rollout (fail-closed)"
+                    ));
+                }
+                return Ok(Some(candidate));
+            }
+        }
+        Ok(None)
+    }
 }
 
 #[cfg(test)]

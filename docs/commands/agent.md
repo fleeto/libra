@@ -626,6 +626,43 @@ importing host's clock are rejected before they can influence session
 chronology: that selection fails with the fixed message `the transcript
 contains timestamps beyond the permitted clock skew` (`LBR-AGENT-018`) and
 writes no durable state.
+Codex batch discovery covers both `sessions/YYYY/MM/DD` and flat
+`archived_sessions` under the configured Codex home. `--since` compares the
+bounded first `session_meta` record's RFC3339 session timestamp, not the
+file's modification time. A session started before the boundary is excluded
+even if it was resumed later; Claude discovery still uses file modification
+time. For `--since`, a missing timestamp or invalid first record is reported
+under `skipped` with a hashed session id and `reason_key` of
+`codex_session_time_unknown` or `codex_session_header_invalid`; a header read
+failure uses `codex_session_source_unreadable`. Other sessions
+can still import. A missing or invalid rollout found again by child-content
+discovery may make its parent import partial (`LBR-AGENT-018`), including a bad
+archived duplicate that batch discovery did not select. A discovery skip also
+records a warning: `--exit-code-on-warning` returns 9 if the batch would
+otherwise succeed, and JSON includes `data.warnings[]` alongside each reason.
+Cursor pages repeat these hashed skips so a resumed page cannot hide them;
+de-duplicate by hashed session id when aggregating page counts.
+Inspect the local rollout and retry it with `--session` or `--path`. Each first record
+is limited to 1 MiB, with a 256 MiB cumulative header budget and at most 4096
+unfilterable records. Reaching either cumulative limit stops discovery with
+`LBR-AGENT-018`. The `--since` scan is bounded over the whole local history:
+the time window does not reduce header work, because filesystem dates cannot
+prove a session's start time. Active and archive trees each have a 20,000-entry
+scan budget; an archived `--session` lookup scans at most 10,000 active rollout
+files, then at most 20,000 entries in its flat directory. Reaching a scan limit
+also returns `LBR-AGENT-018` rather
+than silently omitting sessions. For a large history, use a closed Codex SQLite
+index backup with `--codex-index-backup` to page absent sessions, or import a
+specific rollout with `--path` (including an existing session that needs a
+refresh). `--all` does not read headers during
+discovery; each selected source is validated by the normal import reader. An
+active copy wins over an
+archived copy with the same session id; within a root, the newest rollout
+filename wins. `--since` validates the header id and bounded CLI-version
+field before reading the full transcript. JSON/non-TTY calls require `--yes`;
+interactive batch calls ask for consent before the header read. The ordinary
+checkpoint export retains authorized reasoning summary data, while import
+status, metadata, and errors do not print its text or source path.
 Successful and partial summaries report parent turn writes in
 `checkpoints_written` and independently discovered child-content writes in
 `subagent_checkpoints_written`; a child-only mutation is `imported`, not
@@ -1013,7 +1050,7 @@ libra agent list --schema-version 2 --json
 # Import one historical Claude Code session after explicit privacy consent
 libra agent import --session <provider-session-id> --agent claude-code --yes
 
-# Import a bounded page of Codex rollouts modified since a timestamp
+# Import a bounded page of active or archived Codex sessions by session_meta time
 libra agent import --since 2026-07-01T00:00:00Z --agent codex --limit 20 --yes --json
 
 # Read one captured session's turn/revision/subagent structure as frozen JSON v1

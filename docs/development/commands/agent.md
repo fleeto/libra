@@ -608,6 +608,32 @@ The existing snapshot hard cap is 16 MiB. The current codec also caps grouped by
 
 ## Codex rollout metadata and capabilities (CX-04/CX-14 development)
 
+CX-10 historical import discovers both date-partitioned `sessions` and flat
+`archived_sessions` under the configured Codex home. The descriptor-pinned
+discovery helper reads the first record only for `--since` (1 MiB per file,
+256 MiB cumulative; 4096 unfilterable-record cap), requires a matching `session_meta.payload.id`, validates
+an optional bounded `cli_version`, and uses its RFC3339 session start time.
+Invalid/missing per-file headers and read failures produce hashed-id `skipped`
+entries with distinct fixed reason keys while other sessions continue. Each
+skip records a warning for `--exit-code-on-warning` and JSON warnings. A bad
+file later found by child-content discovery, including an unselected archived
+duplicate, may still make the parent import partial with `LBR-AGENT-018`. An
+exhausted cumulative or entry budget stops discovery with `LBR-AGENT-018`.
+The `--since` window cannot safely prune files before the header read; active
+and archived scans have separate 20,000-entry bounds. Use a closed Codex index
+backup to page absent sessions or `--path` for a specific or existing session
+when the bounded batch scan is too large. The archive-aware `--session` finder
+has its own 20,000-entry directory cap after at most 10,000 active rollout
+files; live hooks retain the original 4096
+per-directory cap. `--all` defers header validation
+to the normal import reader. File mtime never supplies Codex `--since` time;
+Claude retains its mtime filter.
+Duplicate IDs choose the active root, then the lexically newest rollout in a
+root. Interactive batch consent precedes that header read, and the existing
+authorized file reader reopens and fences the selected source before full
+transcript bytes. Codex-specific new regressions stay feature-gated and
+ignored for operator-local execution only.
+
 Current source builds project envelope rollouts using the Codex 0.162.1 record schema; unknown records from other versions remain partial. Exact `token_usage_record` response usage is counted once, including a repeated compaction snapshot. Legacy cumulative token observations are differenced across turns; an unexplained decrease remains partial, and a reset at an explicit context boundary is qualified. Matching legacy observations are not added to exact response totals. Cached tokens aggregate cache reads and writes. Missing or invalid usage remains unknown in the parser, rather than a measured zero.
 
 Envelope prompt projection uses event-side accepted input and producer `content_item_kinds`, preserving real user text that resembles a context wrapper. Unannotated or mismatched user-role response content is retained in ordinary source data but is not asserted to be a user prompt. Shared item identity is paired first, with completed input preferred; otherwise identical projected text is paired by turn and occurrence across surfaces. Repeated text on the same surface remains repeated. Pairing without a shared identity is a partial lower bound. The first `session_meta` binds the owning thread. Foreign headers make the projection partial; foreign records are not added to its usage, and all unscoped records after a foreign header remain unattributed until the owning header reappears; explicitly scoped owning-thread records can still be projected. The model is the latest explicit `turn_context` model. Modified paths require a nonempty call/item identity and a successful, completed structured patch record; proposed patch text and failed or partial attempts are not evidence of a file modification. Paths are lexical and relative to the recorded working directory, which may be a repository subdirectory.

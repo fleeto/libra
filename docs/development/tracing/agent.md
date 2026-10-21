@@ -3542,6 +3542,23 @@ The index IO owner pins the explicit backup and its parent, checks sidecars and 
 
 
 
+### Codex 历史 rollout 发现（CX-10）
+
+`agent import --all/--since` 遍历当前 Codex home 的 date-partitioned `sessions` 与
+平铺 `archived_sessions`，active/archive 各有 20,000-entry 扫描预算并共享绝对 deadline。Unix 逐层使用
+descriptor-relative no-follow 打开；Windows 的 header 读取用 pinned parent 的
+reparse-safe `open_live_source_at`，允许 Codex 并发写入及归档。仅 `--since` 读取首条 `session_meta`，单条上限 1 MiB、
+累计 256 MiB，最多记录 4096 项坏 header；`--all` 在发现阶段不读 header。header id 必须匹配文件名，已给出的
+`cli_version` 必须为有界文本。`--since` 依据 payload 或 outer `session_meta`
+RFC3339 会话开始时间，不依据归档移动后的 mtime；续跑时间不改变过滤结果，Claude
+仍使用 mtime。单项无时间/坏 header/已打开来源读取失败以哈希 id 和分别对应的封闭 `reason_key` 进入批次 `skipped`；Unix/Windows 的非 NotFound 打开失败均令发现整体失败，
+其它项继续，跳过会进入 warning tracker；child-content discovery 若再次遇到坏文件（含未选中的归档副本），仍可能使父导入以 `LBR-AGENT-018` partial 结束。累计 header、坏记录或目录预算失败以 `LBR-AGENT-018` 停止发现。
+`--since` 不能用未证明的文件系统日期预先裁剪，因此大历史库须用封闭索引备份分页导入缺失 session，或以 `--path` 指向特定/已有 session。归档 `--session` 最多先扫描 10,000 个 active rollout 文件，归档单目录上限 20,000 项；live hook 保留原每目录 4096 上限。重复 id 优先 active，其次同根目录
+文件名时间较新的 rollout。交互同意发生在读取 header 之前；完整源继续由原
+authorized reader 重新打开并执行 repo/session/source 检查。普通 transcript 可保留
+授权的可读 summary 与附带字段，metadata、错误与日志不回显正文。新回归仅本机
+`test-live-agent` + `ignored` 运行，不接入 CI。
+
 ### Codex 索引对账的只读观察（CX-22）
 
 `agent doctor --codex-index-backup PATH [--codex-index-page N]` 不新增

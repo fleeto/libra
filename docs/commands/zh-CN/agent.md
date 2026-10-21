@@ -490,6 +490,20 @@ subagents，且不会重建；session 与 tombstone 均不存在时返回 `LBR-A
 保留成功摘要及逐项失败，失败 session id 使用哈希脱敏。单项归属、cwd、
 已擦除与源授权失败分别保留 `LBR-AGENT-015`、`016`、`019`、`020`；provider 时间戳（含推导的 turn 时间）若超出导入主机时钟五分钟以上，会在影响 session 时序前被拒绝：该 selection 以固定消息 `the transcript contains timestamps beyond the permitted clock skew`（`LBR-AGENT-018`）失败且不写入任何耐久状态；失败详情
 仍携带 `schema_version`，并原样保留 nullable `next_cursor`，不会把 `null` 改成 0。
+Codex 批量发现同时覆盖配置的 Codex home 下 `sessions/YYYY/MM/DD` 和平铺的
+`archived_sessions`。`--since` 使用有界首条 `session_meta` 记录中的 RFC3339
+会话开始时间，不使用文件修改时间；会话虽在边界后续跑、但开始时间早于边界时仍被排除。
+Claude 的发现仍按文件修改时间。`--since` 遇到缺失时间或无效首记录时，按哈希 session id
+在 `skipped` 中报告 `codex_session_time_unknown` 或 `codex_session_header_invalid` 原因键；已打开来源的读取失败另用 `codex_session_source_unreadable`，
+继续处理其它会话。每项发现跳过都会记录 warning；若批次本来成功，`--exit-code-on-warning` 返回 9，JSON 的 `data.warnings[]` 也包含警告。若 child-content 发现再次遇到同一坏文件（包括批次未选中的坏归档副本），父会话仍可能以 `LBR-AGENT-018` 部分失败。人类可读输出提示存在无法
+筛选的 rollout，JSON 逐项列出原因。检查本地 rollout 后可用 `--session` 或
+`--path` 重试。游标分页会重复报告这些哈希跳过项，以免续页隐藏它们；汇总各页计数时
+应按哈希 session id 去重。首记录上限 1 MiB，累计 header 预算 256 MiB，无法筛选的记录最多 4096 条；任一累计上限耗尽都会以 `LBR-AGENT-018` 停止发现。`--since` 必须遍历整份本地历史并读取首记录；文件系统日期不能证明会话开始时间，所以时间窗口不降低 header 工作量。active 与 archive 树各有 20,000 项扫描预算，归档的 `--session` 最多先扫描 10,000 个 active rollout 文件，再在平铺目录中最多扫描 20,000 项；超过扫描预算同样返回 `LBR-AGENT-018`，不会静默漏掉会话。历史库过大时，可用封闭的 Codex SQLite 备份配合 `--codex-index-backup` 分页导入缺失会话；已有会话要刷新或需要指定单个 rollout 时，用 `--path`。
+`--all` 的发现阶段不读取 header，各选中源仍由正常导入读取器校验。同一 session id
+同时存在时优先 active 文件；同一根目录内优先文件名时间更新的 rollout。`--since`
+在读取完整 transcript 前核对首记录 id 和有界 CLI 版本字段。JSON/非 TTY 调用必须指定 `--yes`；交互式批量调用会先征得同意再读
+首记录。授权的 reasoning 摘要可从普通 checkpoint 导出取回，导入状态、metadata 和错误
+不回显正文或源路径。
 成功与 partial 摘要分别用 `checkpoints_written` 报告父 turn 写入、用
 `subagent_checkpoints_written` 报告独立发现的 child-content 写入；只有 child
 写入时状态仍为 `imported`，不是 `noop`。平台无法提供安全 child discovery 的
@@ -719,7 +733,7 @@ libra agent list --schema-version 2 --json
 # 明确同意后导入一个历史 Claude Code session
 libra agent import --session <provider-session-id> --agent claude-code --yes
 
-# 导入某时间之后修改的一页 Codex rollout
+# 按 session_meta 会话时间导入一页 active 或 archived Codex rollout
 libra agent import --since 2026-07-01T00:00:00Z --agent codex --limit 20 --yes --json
 
 # 以冻结 JSON v1 schema 读取一个捕获 session 的 turn/revision/subagent 结构

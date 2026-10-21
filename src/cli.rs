@@ -257,12 +257,17 @@ pub(crate) struct Cli {
     #[arg(long, global = true)]
     no_pager: bool,
 
-    /// When to use terminal colors.
+    /// When to use terminal colors. `--color` without a value means `always`
+    /// (Git's `--color[=<when>]`); the `=` is required when a value is given so
+    /// `libra --color <subcommand>` never swallows the subcommand.
     /// Also respects the NO_COLOR environment variable (see <https://no-color.org>).
     #[arg(
         long,
         global = true,
         value_name = "WHEN",
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = "always",
         default_value = "auto",
         value_parser = ["auto", "never", "always"],
     )]

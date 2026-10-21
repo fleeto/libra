@@ -3643,6 +3643,8 @@ fn diff_unimplemented_options_are_classified() {
         vec!["diff", "--inter-hunk-context=3"],
         vec!["diff", "-I", "needle"],
         vec!["diff", "-B"],
+        vec!["diff", "--cc", "--raw"],
+        vec!["diff", "-W"],
     ] {
         let out = run_libra_command(&args, root);
         assert_eq!(
@@ -3656,5 +3658,28 @@ fn diff_unimplemented_options_are_classified() {
             stderr.contains("LBR-UNSUPPORTED-001") && stderr.contains("is not implemented"),
             "{args:?} must be classified, not reported as unknown: {stderr}"
         );
+    }
+}
+
+/// issue #524 (scenario 1's `--color` shape): a bare `--color` means `always`
+/// and must not swallow the subcommand, matching Git's `--color[=<when>]`.
+#[test]
+fn diff_bare_color_flag_means_always() {
+    let repo = super::create_committed_repo_via_cli();
+    let root = repo.path();
+    fs::write(root.join("tracked.txt"), "changed\n").expect("dirty tracked.txt");
+
+    // `diff --color` (bare) is accepted.
+    let bare = run_libra_command(&["diff", "--color"], root);
+    super::assert_cli_success(&bare, "diff --color");
+
+    // `--color <subcommand>` must not consume the subcommand as its value.
+    let leading = run_libra_command(&["--color", "diff"], root);
+    super::assert_cli_success(&leading, "--color diff");
+
+    // The explicit forms still work.
+    for value in ["--color=never", "--color=always", "--color=auto"] {
+        let out = run_libra_command(&["diff", value], root);
+        super::assert_cli_success(&out, value);
     }
 }

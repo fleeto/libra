@@ -159,25 +159,33 @@ For non-bare imports, Libra converts every `.gitignore` it can see into a siblin
 `.libraignore`. Existing user-owned `.libraignore` files are preserved and reported as
 warnings in structured output.
 
+When converting into an existing bare target directory, Libra refuses before writing
+if a `libra.db` database or SQLite sidecar already exists, or if `--vault` is enabled
+and a `vault.db` database or sidecar already exists. Move the conflicting file aside
+or choose another target; unrelated files in the directory are preserved.
+
 ```bash
 libra init --from-git-repository ../old-project
 ```
 
-**Interruption and recovery.** The conversion is protected by a marker written before the
-first target write (`CONVERSION_IN_PROGRESS` in the storage root) and removed only after
-everything succeeded:
+**Interruption and recovery.** The conversion is protected by a marker in the storage
+root (`CONVERSION_IN_PROGRESS`), installed after the initial layout and removed only
+after everything succeeded:
 
-- an ordinary error, or a SIGINT/SIGTERM, rolls back exactly what this run created (the
-  storage root, and the root `.libraignore` when the target directory already existed), so
-  the conversion can be retried immediately. User files and the source `.git` are never
-  touched;
+- after the marker is installed, an ordinary conversion error or SIGINT/SIGTERM rolls
+  back the metadata created by this run, so the conversion can be retried immediately. An existing bare target
+  directory and its unrelated user files remain in place; the same protection applies
+  when the target path contains symlinks or `..`. User files and the source `.git` are
+  never touched;
 - a hard kill (SIGKILL, OOM, power loss) leaves the marker behind. Until it is cleared,
   every other command in that repository refuses with `LBR-REPO-003` ("incomplete Git
   conversion") instead of presenting the repository as empty;
 - retrying `libra init --from-git-repository <same-source>` after a hard kill verifies that
   the recorded owner process is gone and that the source still matches, renames the
   incomplete storage root to a sibling `<storage>.incomplete-<timestamp>` (**never
-  deletes it**), and converts from scratch. The aside path is reported in the warnings;
+  deletes it**), and converts from scratch. For an existing bare target, that aside
+  contains its pre-existing user files; inspect it before removing anything. The aside
+  path is reported in the warnings;
 - on macOS, conversions started by Libra 0.30.78 or newer record enough owner
   identity to recognize an exited process, so the same-source retry can recover
   after a hard kill in the same boot session. The marker keeps the legacy owner
@@ -208,7 +216,8 @@ The template can never be copied into itself. A template that **is** the target
 repository is refused with a CLI error (`LBR-CLI-002`), and a template that **contains**
 the target (for example `--template=.` while creating `./repo`) skips the target
 worktree, so repeated `libra init --template=. repo` calls never nest
-`repo/.libra/repo/.libra/…`.
+`repo/.libra/repo/.libra/…`. This also holds when the target path uses a symlink
+or `..`. A template inside the target's `.libra` storage is refused before copying.
 
 ```bash
 libra init --template /path/to/template
@@ -233,6 +242,10 @@ numeric modes directly to repository directories and files, so the owner must ke
 also receive the matching execute bit for directory traversal. Non-traversable
 modes such as `0660` are rejected with `LBR-CLI-002` and do not leave a partial
 `.libra` directory.
+
+For a Git conversion into an existing bare target, `--shared` updates the target
+directory and newly created repository entries; pre-existing user files retain
+their permissions.
 
 ```bash
 libra init --shared group shared-repo

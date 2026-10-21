@@ -280,6 +280,23 @@ jobs:
           }).Count -ne 1) {
             throw "Native Windows renamed release binary test failed or matched no tests: $releaseFilter"
           }
+          foreach ($filter in @(
+            'command::init_test::test_init_template_dotdot_target_skips_self_copy',
+            'command::init_conversion_test::init_conversion_failure_preserves_existing_target_through_dotdot_alias',
+            'command::init_conversion_test::init_bare_conversion_failure_preserves_existing_target_contents',
+            'command::init_conversion_test::init_bare_conversion_layout_failure_cleans_only_new_entries',
+            'command::init_conversion_test::init_bare_conversion_refuses_existing_sqlite_journal',
+            'command::init_conversion_test::init_bare_conversion_preserves_case_variant_user_file_on_rollback'
+          )) {
+            $executed = @(& cargo test --locked --test command_test $filter -- --exact --nocapture --color never --test-threads=1)
+            $testExit = $LASTEXITCODE
+            $executed | Write-Output
+            if ($testExit -ne 0 -or @($executed | Where-Object {
+              $_ -cmatch '^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out; finished in .+$'
+            }).Count -ne 1) {
+              throw "Native Windows init path-safety test failed or matched no tests: $filter"
+            }
+          }
 
   redundancy:
     name: compat-redundancy

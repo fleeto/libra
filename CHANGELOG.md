@@ -52,6 +52,16 @@
   a running conversion. Markers from another host or boot, and older
   interrupted markers, require manual recovery guidance.
 
+### Init template safety
+
+- Resolve target path aliases before copying `init --template` contents, so
+  symlinks and `..` cannot bypass the target self-copy guard. Reject a template
+  inside the target `.libra` storage before reinitialization writes.
+- Keep pre-existing target directories and user files when a Git conversion
+  fails, including bare targets and paths spelled through `..`.
+- Keep existing user-file permissions when `--shared` converts into an existing
+  bare target; apply the requested mode to new repository entries.
+
 ## [0.30.70] — 2026-10-20
 
 ### MCP server

@@ -118,6 +118,298 @@ fn init_conversion_failure_rolls_back_and_is_retryable() {
     );
 }
 
+/// A missing/.. spelling can name an existing target. Rollback must never
+/// classify that target as newly created and remove its user-owned files.
+#[test]
+fn init_conversion_failure_preserves_existing_target_through_dotdot_alias() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let source = git_source(root.path());
+    let target = target_dir(root.path(), true);
+    let alias = root.path().join("missing").join("..").join("target");
+    let source_arg = source.to_string_lossy().to_string();
+    let alias_arg = alias.to_string_lossy().to_string();
+
+    let failed = run_libra_command_with_env(
+        &[
+            "init",
+            "--vault",
+            "false",
+            "--from-git-repository",
+            &source_arg,
+            &alias_arg,
+        ],
+        root.path(),
+        &[("LIBRA_TEST_INIT_CONVERT_FAIL_AT", "after-database")],
+    );
+    assert!(
+        !failed.status.success(),
+        "the injected failure must fail the conversion"
+    );
+    assert!(
+        String::from_utf8_lossy(&failed.stderr).contains("injected Git conversion failure"),
+        "the failure must reach the rollback path: {}",
+        String::from_utf8_lossy(&failed.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(target.join("keep.txt")).unwrap(),
+        "keep\n"
+    );
+    assert!(
+        target.join(".git").exists(),
+        "Git history must survive rollback"
+    );
+    assert!(
+        !target.join(".libra").exists(),
+        "the newly created storage root must be rolled back"
+    );
+
+    let retried = convert(&target, &source, &[]);
+    assert_cli_success(&retried, "retry after alias rollback");
+}
+
+/// Bare conversion writes metadata directly into the target. Its rollback
+/// must leave an existing target and unrelated user files in place.
+#[test]
+fn init_bare_conversion_failure_preserves_existing_target_contents() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let source = git_source(root.path());
+    let target = target_dir(root.path(), false);
+    let source_arg = source.to_string_lossy().to_string();
+    let target_arg = target.to_string_lossy().to_string();
+    let args = [
+        "init",
+        "--bare",
+        "--vault",
+        "false",
+        "--from-git-repository",
+        &source_arg,
+        &target_arg,
+    ];
+
+    let failed = run_libra_command_with_env(
+        &args,
+        root.path(),
+        &[("LIBRA_TEST_INIT_CONVERT_FAIL_AT", "after-database")],
+    );
+    assert!(
+        !failed.status.success(),
+        "the injected failure must fail bare conversion"
+    );
+    assert!(
+        String::from_utf8_lossy(&failed.stderr).contains("injected Git conversion failure"),
+        "the failure must reach the rollback path: {}",
+        String::from_utf8_lossy(&failed.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(target.join("keep.txt")).unwrap(),
+        "keep\n"
+    );
+    for name in [
+        "libra.db",
+        "objects",
+        "info",
+        "hooks",
+        "CONVERSION_IN_PROGRESS",
+    ] {
+        assert!(
+            !target.join(name).exists(),
+            "rollback must remove only the new bare metadata entry {name}"
+        );
+    }
+
+    let retried = run_libra_command(&args, root.path());
+    assert_cli_success(&retried, "retry after bare rollback");
+    assert_eq!(
+        fs::read_to_string(target.join("keep.txt")).unwrap(),
+        "keep\n"
+    );
+}
+
+#[test]
+fn init_bare_conversion_layout_failure_cleans_only_new_entries() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let source = git_source(root.path());
+    let target = target_dir(root.path(), false);
+    let template = root.path().join("template");
+    fs::create_dir(&template).expect("create template");
+    fs::write(template.join("objects"), "not a directory\n").expect("write bad layout");
+    let template_arg = format!("--template={}", template.display());
+    let source_arg = source.to_string_lossy().to_string();
+    let target_arg = target.to_string_lossy().to_string();
+
+    let failed = run_libra_command(
+        &[
+            "init",
+            "--bare",
+            "--vault",
+            "false",
+            "--from-git-repository",
+            &source_arg,
+            &template_arg,
+            &target_arg,
+        ],
+        root.path(),
+    );
+    assert!(!failed.status.success(), "invalid layout must fail");
+    assert_eq!(
+        fs::read_to_string(target.join("keep.txt")).unwrap(),
+        "keep\n"
+    );
+    assert!(
+        !target.join("objects").exists(),
+        "a failed layout must remove its new top-level entry"
+    );
+    assert!(
+        !target.join("CONVERSION_IN_PROGRESS").exists(),
+        "layout failure must not leave a conversion marker"
+    );
+
+    let retried = run_libra_command(
+        &[
+            "init",
+            "--bare",
+            "--vault",
+            "false",
+            "--from-git-repository",
+            &source_arg,
+            &target_arg,
+        ],
+        root.path(),
+    );
+    assert_cli_success(&retried, "retry after bare layout failure");
+}
+
+#[test]
+fn init_bare_conversion_refuses_existing_sqlite_journal() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let source = git_source(root.path());
+    let target = target_dir(root.path(), false);
+    let journal = target.join("libra.db-journal");
+    fs::write(&journal, "user data\n").expect("write pre-existing journal name");
+    let source_arg = source.to_string_lossy().to_string();
+    let target_arg = target.to_string_lossy().to_string();
+
+    let refused = run_libra_command(
+        &[
+            "init",
+            "--bare",
+            "--vault",
+            "false",
+            "--from-git-repository",
+            &source_arg,
+            &target_arg,
+        ],
+        root.path(),
+    );
+    assert!(
+        !refused.status.success(),
+        "conflicting journal must be refused"
+    );
+    assert_eq!(fs::read_to_string(&journal).unwrap(), "user data\n");
+    assert!(
+        !target.join("objects").exists(),
+        "conflict must be detected before layout"
+    );
+}
+
+#[test]
+fn init_bare_conversion_preserves_case_variant_user_file_on_rollback() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let source = git_source(root.path());
+    let target = target_dir(root.path(), false);
+    let user_file = target.join("readme");
+    fs::write(&user_file, "user data\n").expect("write user file");
+    let user_dir = target.join("docs");
+    fs::create_dir(&user_dir).expect("create user directory");
+    fs::write(user_dir.join("keep.txt"), "keep\n").expect("write nested user file");
+    let template = root.path().join("template");
+    fs::create_dir(&template).expect("create template");
+    fs::write(template.join("README"), "template data\n").expect("write template file");
+    fs::create_dir(template.join("Docs")).expect("create template directory");
+    fs::write(template.join("Docs/template.txt"), "template\n")
+        .expect("write nested template file");
+    let template_arg = format!("--template={}", template.display());
+    let source_arg = source.to_string_lossy().to_string();
+    let target_arg = target.to_string_lossy().to_string();
+
+    let failed = run_libra_command_with_env(
+        &[
+            "init",
+            "--bare",
+            "--vault",
+            "false",
+            "--from-git-repository",
+            &source_arg,
+            &template_arg,
+            &target_arg,
+        ],
+        root.path(),
+        &[("LIBRA_TEST_INIT_CONVERT_FAIL_AT", "after-database")],
+    );
+    assert!(
+        !failed.status.success(),
+        "injected failure must fail conversion"
+    );
+    assert!(
+        String::from_utf8_lossy(&failed.stderr).contains("injected Git conversion failure"),
+        "the failure must reach rollback: {}",
+        String::from_utf8_lossy(&failed.stderr)
+    );
+    assert_eq!(fs::read_to_string(&user_file).unwrap(), "user data\n");
+    assert_eq!(
+        fs::read_to_string(user_dir.join("keep.txt")).unwrap(),
+        "keep\n"
+    );
+    assert!(target.exists(), "rollback must retain the user's directory");
+    for name in ["libra.db", "objects", "CONVERSION_IN_PROGRESS"] {
+        assert!(
+            !target.join(name).exists(),
+            "rollback must remove new metadata entry {name}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn init_bare_conversion_shared_does_not_widen_existing_user_file() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = tempfile::tempdir().expect("tempdir");
+    let source = git_source(root.path());
+    let target = target_dir(root.path(), false);
+    let user_file = target.join("keep.txt");
+    fs::set_permissions(&user_file, fs::Permissions::from_mode(0o600))
+        .expect("make user file private");
+    let source_arg = source.to_string_lossy().to_string();
+    let target_arg = target.to_string_lossy().to_string();
+
+    let converted = run_libra_command(
+        &[
+            "init",
+            "--bare",
+            "--vault",
+            "false",
+            "--shared=all",
+            "--from-git-repository",
+            &source_arg,
+            &target_arg,
+        ],
+        root.path(),
+    );
+    assert_cli_success(&converted, "bare conversion with shared storage");
+    let mode = fs::metadata(&user_file).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600, "existing user file must remain private");
+    for path in [&target, &target.join("objects"), &target.join("libra.db")] {
+        let mode = fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode,
+            0o777,
+            "new repository entry must use shared mode: {}",
+            path.display()
+        );
+    }
+}
+
 /// M-FAIL: a hard kill leaves the conversion marker; every other command
 /// refuses to treat the residue as an ordinary empty repository, and a retry
 /// moves the residue aside (never deleting it) and completes.

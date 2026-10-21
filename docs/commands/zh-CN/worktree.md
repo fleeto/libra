@@ -7,7 +7,7 @@
 ## 概要
 
 ```
-libra worktree add <NAME> [TARGET] [--path <PATH>]
+libra worktree add <NAME> [TARGET] [--path <PATH>] [--force]
 libra worktree list [--porcelain]
 libra worktree lock <NAME> [--reason <text>]
 libra worktree lock --path <PATH> [--reason <text>]
@@ -15,7 +15,7 @@ libra worktree unlock (<NAME> | --path <PATH>)
 libra worktree move <NAME> --path <DEST>
 libra worktree move --from-path <SRC> --path <DEST>
 libra worktree prune
-libra worktree remove (<NAME> | --path <PATH>) [--delete-dir]
+libra worktree remove (<NAME> | --path <PATH>) [--delete-dir] [--force]
 libra worktree umount <path> [--cleanup]
 libra worktree repair [<NAME> | --path <PATH>] --confirm
 libra worktree repair [<NAME> | --path <PATH>] --migrate-layout [--dry-run] [--confirm]
@@ -51,11 +51,12 @@ libra worktree doctor [<workspace-id>] [--limit <n>] [--cursor <cursor>]
 |-------------|------|
 | `<NAME>` | 稳定的 worktree 名称。默认在共享存储下创建 `.libra/worktree/linked/<NAME>`。 |
 | `[TARGET]` | 可选 branch 或 commit-ish。已有分支附着检出；任一 worktree 已检出该分支时拒绝。其他 commit-ish 创建分离 HEAD。未知目标在创建前拒绝；不支持远程分支猜测和 `--track`/`--no-track`。 |
-| `--path <PATH>` | 完整外部目标路径，可绝对或相对调用者当前目录。必须不存在或为空目录，不能是符号链接；共享存储内只允许该名称自身的托管默认路径。它不是需要再拼接名称的父目录。 |
+| `--path <PATH>` | 完整外部目标路径，可绝对或相对调用者当前目录。标准构建中除非使用 `--force`，否则必须不存在或为空目录；不能是符号链接，共享存储内只允许该名称自身的托管默认路径。它不是需要再拼接名称的父目录。 |
 | `--detach` | 即使 `TARGET` 是分支，也使用分离 HEAD。 |
 | `-b, --new-branch <NEW_BRANCH>` | 在 `TARGET`（省略时为源 HEAD）创建并检出新分支。已有分支被拒绝；后续创建失败会回滚新分支。 |
+| `-f, --force` | 标准构建中允许复用非空目标目录，使用前请检查其中内容。`worktree-fuse` 构建不提供 `--force`，其中 `-f` 表示 `--fuse`。 |
 
-`--create-branch` 是 `--new-branch` 的别名。省略目标时，新 worktree 以**源提交的分离 HEAD** 创建；名称不会隐式创建同名分支。不支持 `--lock`、`--orphan`、`--no-checkout`、远程猜测和 `-B`/`--force`；创建后可用 `worktree lock` 锁定。
+`--create-branch` 是 `--new-branch` 的别名。省略目标时，新 worktree 以**源提交的分离 HEAD** 创建；名称不会隐式创建同名分支。不支持 `--lock`、`--orphan`、`--no-checkout`、远程猜测和 `-B`；创建后可用 `worktree lock` 锁定。
 
 对于已分离的 registry 条目，`add <NAME>` 校验已保存身份和共享存储指针，然后重新挂接现有文件与暂存状态。重新挂接时拒绝 `TARGET`、`-b` 和 `--detach`，可选的 `--path` 必须等于注册路径。tombstone 条目清理成功前继续占用名称。
 
@@ -79,7 +80,7 @@ libra worktree add experiment --path "../实验 workspace"
 
 #### FUSE worktree
 
-启用 `worktree-fuse` 的 Unix 构建中，`add <NAME> --fuse` 需要可用的 FUSE 驱动（Linux 为 `/dev/fuse`，macOS 为 macFUSE）。它以 `.libra/worktree/fuse/<NAME>/workspace` 为挂载点，同级 `upper/` 为可写 overlay。显式 `--path` 可选择外部挂载点；位于 lower tree、upper tree、共享元数据或其他托管工作区内的目标会在创建前拒绝。内部默认目录通过 overlay 中 opaque 的 `.libra/worktree` 目录遮蔽，避免递归暴露自身挂载点、upper 或兄弟工作区。文件系统无法建立该遮蔽时拒绝挂载。
+启用 `worktree-fuse` 的 Unix 构建中，`add <NAME> --fuse` 需要可用的 FUSE 驱动（Linux 为 `/dev/fuse`，macOS 为 macFUSE）。官方发行二进制不启用 `worktree-fuse`；需自行构建才可使用。在这种构建中，`-f` 是 `--fuse` 的缩写，不是 `--force`。此处的 macFUSE 托管目录遮蔽保护要求 Libra 0.30.78 或更新版本。它以 `.libra/worktree/fuse/<NAME>/workspace` 为挂载点，同级 `upper/` 为可写 overlay。显式 `--path` 可选择外部挂载点；位于 lower tree、upper tree、共享元数据或其他托管工作区内的目标会在创建前拒绝。内部默认目录通过 overlay 中 opaque 的 `.libra/worktree` 目录遮蔽，避免递归暴露自身挂载点、upper 或兄弟工作区。文件系统无法建立该遮蔽时拒绝挂载。
 
 FUSE 与普通 worktree 不能占用同一名称。FUSE registry 使用 `{ "schema_version": 1, "entries": [...] }`；已知旧格式仍可读取，不移动原目录。FUSE worktree 不支持 `move`，也不支持按名称或路径修复身份（`repair <NAME>` / `repair --path <PATH>`）。注册表修复请用全局 `worktree repair --confirm`；FUSE 不采用普通 linked worktree 的私有身份布局。其 `remove` 继续使用卸载并删除 upper 的既有语义，不采用普通 worktree 的保留目录分离语义。对于新的托管默认布局，还会删除空挂载目录和容器；目录非空或清理失败时保留注册及名称供重试。旧布局和外部挂载点的目录仍保留。`umount` 继续接收实际路径，不接收 worktree 名称。
 
@@ -272,13 +273,14 @@ libra --machine worktree prune
 
 用 `libra worktree add <NAME>` 重新挂接命名条目。命令会验证目录身份和共享存储指针，不执行 checkout，也不覆盖暂存或未暂存工作。此时不能提供 `TARGET`、`-b`、`--detach`；可选 `--path` 必须等于原保存路径。
 
-用 `--delete-dir` 完成删除。删除前检查未提交更改，并验证目录仍属于注册的 worktree；替换目录、符号链接或无效身份均拒绝。只有确定缺失的路径才算不存在，检查错误不授权删除。删除目录后再清理 scoped 状态；清理失败会保留 `tombstone` 条目和名称，由 `libra worktree repair --confirm` 重试。仅当清理完成才释放名称。主工作树、已锁定或有进行中 sequencer 的 worktree 不能移除。
+用 `--delete-dir` 完成删除。删除前检查未提交更改，并验证目录仍属于注册的 worktree；标准构建中的 `--force` 可绕过未提交更改检查，**`--delete-dir --force` 会删除未提交的修改**。替换目录、符号链接或无效身份均拒绝。只有确定缺失的路径才算不存在，检查错误不授权删除。删除目录后再清理 scoped 状态；清理失败会保留 `tombstone` 条目和名称，由 `libra worktree repair --confirm` 重试。仅当清理完成才释放名称。主工作树、已锁定或有进行中 sequencer 的 worktree 不能移除。
 
 | 参数 / 标志 | 说明 |
 |-------------|------|
 | `<NAME>` | 注册名称；与 `--path` 互斥。 |
 | `--path <PATH>` | 按实际路径选择已有 worktree。 |
-| `--delete-dir` | 删除干净且通过身份验证的目录和 scoped 状态，再释放注册及名称。 |
+| `--delete-dir` | 删除通过身份验证的目录和 scoped 状态，再释放注册及名称；未使用 `--force` 时 worktree 必须干净。 |
+| `-f, --force` | 仅标准构建支持：绕过未提交修改检查。与 `--delete-dir` 同用会删除未保存工作；`worktree-fuse` 构建中不提供。 |
 
 ```bash
 # 保留文件、暂存状态和名称

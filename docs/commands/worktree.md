@@ -7,7 +7,7 @@ Manage multiple working trees attached to this repository.
 ## Synopsis
 
 ```
-libra worktree add <NAME> [TARGET] [--path <PATH>]
+libra worktree add <NAME> [TARGET] [--path <PATH>] [--force]
 libra worktree list [--porcelain]
 libra worktree lock <NAME> [--reason <text>]
 libra worktree lock --path <PATH> [--reason <text>]
@@ -15,7 +15,7 @@ libra worktree unlock (<NAME> | --path <PATH>)
 libra worktree move <NAME> --path <DEST>
 libra worktree move --from-path <SRC> --path <DEST>
 libra worktree prune
-libra worktree remove (<NAME> | --path <PATH>) [--delete-dir]
+libra worktree remove (<NAME> | --path <PATH>) [--delete-dir] [--force]
 libra worktree umount <path> [--cleanup]
 libra worktree repair [<NAME> | --path <PATH>] --confirm
 libra worktree repair [<NAME> | --path <PATH>] --migrate-layout [--dry-run] [--confirm]
@@ -51,11 +51,12 @@ Create a named linked worktree in the managed directory, or at an explicit desti
 |-----------------|-------------|
 | `<NAME>` | Stable worktree name. By default creates `.libra/worktree/linked/<NAME>` under common storage. |
 | `[TARGET]` | Optional branch or commit-ish. An existing branch is checked out attached, unless any worktree already has it checked out. Other commit-ish targets create a detached worktree. Unknown targets fail before creation; remote-branch guessing and `--track`/`--no-track` are not supported. |
-| `--path <PATH>` | Complete external destination, absolute or relative to the caller. It must be absent or an empty directory, cannot be a symlink, and may enter common storage only at this name's own managed default. It is not a parent directory to which the name is appended. |
+| `--path <PATH>` | Complete external destination, absolute or relative to the caller. It must be absent or an empty directory unless `--force` is used in a standard build; it cannot be a symlink and may enter common storage only at this name's own managed default. It is not a parent directory to which the name is appended. |
 | `--detach` | Detach HEAD even when `TARGET` names a branch. |
 | `-b, --new-branch <NEW_BRANCH>` | Create and check out a new branch at `TARGET`, or the source HEAD when omitted. An existing branch is refused; a later creation failure rolls the new branch back. |
+| `-f, --force` | In standard builds, reuse a non-empty destination directory. Check its contents before using this option. In `worktree-fuse` builds, `--force` is unavailable and `-f` means `--fuse`. |
 
-`--create-branch` is an alias for `--new-branch`. Without a target the worktree is **detached at the source commit**. The name does not implicitly create a branch. `--lock`, `--orphan`, `--no-checkout`, remote guessing and `-B`/`--force` are not supported; use `worktree lock` after creation.
+`--create-branch` is an alias for `--new-branch`. Without a target the worktree is **detached at the source commit**. The name does not implicitly create a branch. `--lock`, `--orphan`, `--no-checkout`, remote guessing and `-B` are not supported; use `worktree lock` after creation.
 
 For a detached registry entry, `add <NAME>` verifies the saved identity and common-storage pointer, then reattaches its existing files and staging state. `TARGET`, `-b` and `--detach` are refused during reattachment. An optional `--path` must match the registered path. A tombstoned entry remains reserved until cleanup succeeds.
 
@@ -79,7 +80,7 @@ libra worktree add experiment --path "../实验 workspace"
 
 #### FUSE worktrees
 
-On Unix builds with `worktree-fuse`, `add <NAME> --fuse` requires a working FUSE driver (`/dev/fuse` on Linux or macFUSE on macOS). It uses `.libra/worktree/fuse/<NAME>/workspace` as its mountpoint and the sibling `upper/` as its writable overlay. An explicit `--path` selects an external mountpoint; targets inside a lower tree, upper tree, common metadata or another managed workspace are refused before creation. The internal default is protected by an opaque `.libra/worktree` directory in the overlay, so it cannot recursively expose its own mountpoint, upper directory or sibling workspaces. Mount setup refuses a filesystem that cannot establish this mask.
+On Unix builds with `worktree-fuse`, `add <NAME> --fuse` requires a working FUSE driver (`/dev/fuse` on Linux or macFUSE on macOS). Official release binaries are built without `worktree-fuse`; use a custom build to enable it. On these builds, `-f` is short for `--fuse`, not `--force`. The macFUSE managed-directory protection described here requires Libra 0.30.78 or newer. It uses `.libra/worktree/fuse/<NAME>/workspace` as its mountpoint and the sibling `upper/` as its writable overlay. An explicit `--path` selects an external mountpoint; targets inside a lower tree, upper tree, common metadata or another managed workspace are refused before creation. The internal default is protected by an opaque `.libra/worktree` directory in the overlay, so it cannot recursively expose its own mountpoint, upper directory or sibling workspaces. Mount setup refuses a filesystem that cannot establish this mask.
 
 FUSE and ordinary worktrees cannot claim the same name. The FUSE registry uses `{ "schema_version": 1, "entries": [...] }`; known older records remain readable without relocating their directories. FUSE worktrees do not support `move` or scoped identity repair (`repair <NAME>` / `repair --path <PATH>`). Use `worktree repair --confirm` for global registry repair; FUSE does not have the ordinary linked-worktree private identity layout. Their `remove` behavior remains unmounting and deleting the upper layer, rather than ordinary keep-dir detachment. For the managed default, it also removes the empty mountpoint and container; a nonempty directory or cleanup failure keeps the registration and name for retry. Existing legacy and external mountpoint directories are kept. `umount` continues to take an actual path rather than a worktree name.
 
@@ -313,13 +314,14 @@ Remove an ordinary worktree by name or `--path`. By default the directory remain
 
 Reattach a named entry with `libra worktree add <NAME>`. The command verifies the directory identity and common-storage pointer; it does not check out a commit or overwrite staged and unstaged work. Do not supply `TARGET`, `-b` or `--detach`; an optional `--path` must equal the stored path.
 
-Use `--delete-dir` to complete removal. It checks for uncommitted changes and verifies that the directory still belongs to the registered worktree before deletion. A replacement directory, symlink or invalid identity is refused. Only a confirmed missing path is treated as absent; inspection errors do not authorize deletion. Scoped cleanup follows directory deletion. If cleanup fails, the `tombstone` entry and its name remain reserved for `libra worktree repair --confirm`; the name is released only when cleanup finishes. Main, locked and active-sequencer worktrees cannot be removed.
+Use `--delete-dir` to complete removal. It checks for uncommitted changes and verifies that the directory still belongs to the registered worktree before deletion. In standard builds, `--force` bypasses the dirty-worktree refusal; **`--delete-dir --force` deletes uncommitted changes**. A replacement directory, symlink or invalid identity is refused. Only a confirmed missing path is treated as absent; inspection errors do not authorize deletion. Scoped cleanup follows directory deletion. If cleanup fails, the `tombstone` entry and its name remain reserved for `libra worktree repair --confirm`; the name is released only when cleanup finishes. Main, locked and active-sequencer worktrees cannot be removed.
 
 | Argument / Flag | Description |
 |-----------------|-------------|
 | `<NAME>` | Registered worktree name; mutually exclusive with `--path`. |
 | `--path <PATH>` | Select an existing worktree by its actual path. |
-| `--delete-dir` | Delete a clean, verified directory and its scoped state, then release the registration and name. |
+| `--delete-dir` | Delete a verified directory and its scoped state, then release the registration and name. Without `--force`, the worktree must be clean. |
+| `-f, --force` | Standard builds only: bypass the uncommitted-changes check. Combined with `--delete-dir`, this deletes unsaved work. Unavailable in `worktree-fuse` builds. |
 
 ```bash
 # Keep files, staging state and the reserved name

@@ -1419,6 +1419,186 @@ fn test_init_template_equal_to_target_is_refused() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn test_init_template_symlinked_target_skips_self_copy_on_init_and_reinit() {
+    let root = tempdir().unwrap();
+    let template = root.path().join("source");
+    fs::create_dir(&template).unwrap();
+    fs::write(template.join("sibling.txt"), "sibling\n").unwrap();
+    let alias = root.path().join("alias");
+    std::os::unix::fs::symlink(&template, &alias).unwrap();
+    let target = alias.join("repo");
+    let template_arg = format!("--template={}", template.display());
+    let target_arg = target.to_string_lossy().into_owned();
+
+    for attempt in 0..2 {
+        let result = run_libra_command(
+            &["init", "--vault", "false", &template_arg, &target_arg],
+            root.path(),
+        );
+        assert_cli_success(&result, &format!("symlinked target attempt {attempt}"));
+        assert!(template.join("repo/.libra/sibling.txt").exists());
+        assert!(
+            !template.join("repo/.libra/repo").exists(),
+            "a target reached through a symlink must not copy itself into .libra"
+        );
+    }
+}
+
+#[test]
+fn test_init_template_dotdot_target_skips_self_copy() {
+    let root = tempdir().unwrap();
+    let template = root.path().join("source");
+    fs::create_dir(&template).unwrap();
+    fs::create_dir(template.join("carrier")).unwrap();
+    fs::write(template.join("sibling.txt"), "sibling\n").unwrap();
+    let target = template.join("carrier/../repo");
+    let template_arg = format!("--template={}", template.display());
+    let target_arg = target.to_string_lossy().into_owned();
+
+    let result = run_libra_command(
+        &["init", "--vault", "false", &template_arg, &target_arg],
+        root.path(),
+    );
+    assert_cli_success(&result, "target with parent traversal");
+    assert!(template.join("repo/.libra/sibling.txt").exists());
+    assert!(
+        !template.join("repo/.libra/repo").exists(),
+        "a target reached through .. must not copy itself into .libra"
+    );
+}
+
+#[test]
+fn test_init_template_inside_storage_is_refused_before_reinit_writes() {
+    let root = tempdir().unwrap();
+    let repo = root.path().join("repo");
+    let target_arg = repo.to_string_lossy().into_owned();
+    let first = run_libra_command(&["init", "--vault", "false", &target_arg], root.path());
+    assert_cli_success(&first, "initial repository");
+
+    let template = repo.join(".libra/template");
+    fs::create_dir_all(template.join("template")).unwrap();
+    fs::write(template.join("sibling.txt"), "sibling\n").unwrap();
+    let template_arg = format!("--template={}", template.display());
+    let result = run_libra_command(&["init", &template_arg, &target_arg], root.path());
+    assert_eq!(result.status.code(), Some(129));
+    let (_human, report) = super::parse_cli_error_stderr(&result.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-002");
+    assert!(
+        report
+            .message
+            .contains("inside the target storage directory")
+    );
+    assert!(
+        !template.join("template/template").exists(),
+        "rejected template must not start a recursive copy"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_init_bare_template_alias_with_missing_parent_keeps_existing_data() {
+    let root = tempdir().unwrap();
+    let template = root.path().join("template");
+    fs::create_dir(&template).unwrap();
+    let sentinel = template.join("must-survive.txt");
+    fs::write(&sentinel, "owned data\n").unwrap();
+    let alias = root.path().join("alias");
+    std::os::unix::fs::symlink(root.path(), &alias).unwrap();
+    let target = alias.join("missing/../template");
+    let template_arg = format!("--template={}", template.display());
+    let target_arg = target.to_string_lossy().into_owned();
+
+    let result = run_libra_command(
+        &[
+            "init",
+            "--bare",
+            "--vault",
+            "false",
+            &template_arg,
+            &target_arg,
+        ],
+        root.path(),
+    );
+    assert_eq!(result.status.code(), Some(129));
+    let (_human, report) = super::parse_cli_error_stderr(&result.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-002");
+    assert!(
+        sentinel.exists(),
+        "the rejected target must remain untouched"
+    );
+    assert!(
+        !root.path().join("missing").exists(),
+        "the self-template refusal must happen before parent creation"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_init_template_rejects_symlinked_storage_before_copy() {
+    let root = tempdir().unwrap();
+    let template = root.path().join("source");
+    fs::create_dir(&template).unwrap();
+    fs::write(template.join("sibling.txt"), "sibling\n").unwrap();
+    let repo = template.join("repo");
+    let repo_arg = repo.to_string_lossy().into_owned();
+    let first = run_libra_command(&["init", "--vault", "false", &repo_arg], root.path());
+    assert_cli_success(&first, "initial repository");
+    let store = template.join("store");
+    fs::rename(repo.join(".libra"), &store).unwrap();
+    std::os::unix::fs::symlink(&store, repo.join(".libra")).unwrap();
+    let template_arg = format!("--template={}", template.display());
+
+    let result = run_libra_command(&["init", &template_arg, &repo_arg], root.path());
+    assert_eq!(result.status.code(), Some(128));
+    let (_human, report) = super::parse_cli_error_stderr(&result.stderr);
+    assert_eq!(report.error_code, "LBR-REPO-002");
+    assert!(
+        store.join("libra.db").exists(),
+        "existing storage is untouched"
+    );
+    assert!(
+        !store.join("store").exists(),
+        "storage must not copy itself"
+    );
+    assert!(!store.join("repo").exists(), "target must not be copied");
+}
+
+#[cfg(unix)]
+#[test]
+fn test_init_bare_layout_failure_does_not_delete_preexisting_target() {
+    let root = tempdir().unwrap();
+    let target = root.path().join("existing-bare");
+    fs::create_dir(&target).unwrap();
+    let sentinel = target.join("must-survive.txt");
+    fs::write(&sentinel, "owned data\n").unwrap();
+    let template = root.path().join("template");
+    fs::create_dir(&template).unwrap();
+    let directory = root.path().join("source-directory");
+    fs::create_dir(&directory).unwrap();
+    std::os::unix::fs::symlink(&directory, template.join("directory-link")).unwrap();
+    let template_arg = format!("--template={}", template.display());
+    let target_arg = target.to_string_lossy().into_owned();
+
+    let result = run_libra_command(
+        &[
+            "init",
+            "--bare",
+            "--vault",
+            "false",
+            &template_arg,
+            &target_arg,
+        ],
+        root.path(),
+    );
+    assert!(!result.status.success(), "directory symlink copy must fail");
+    assert!(
+        sentinel.exists(),
+        "failed init must not delete an existing target"
+    );
+}
+
 /// Count directories named `name` below `root` (not counting `root` itself) —
 /// used to prove the target is never copied into its own storage root.
 fn count_directories_named(root: &std::path::Path, name: &str) -> usize {

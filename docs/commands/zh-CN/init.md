@@ -86,17 +86,20 @@ Convert（`--from-git-repository`）仅允许 SHA-1 Git → SHA-1 Libra。与 Co
 
 对于非 bare 导入，Libra 会把能看到的每个 `.gitignore` 转换为同级 `.libraignore`。已有用户拥有的 `.libraignore` 文件会被保留，并在结构化输出中作为 warnings 报告。
 
+转换到已存在的 bare 目录时，如果其中已有 `libra.db` 数据库或 SQLite sidecar，或启用 `--vault` 时已有 `vault.db` 数据库或 sidecar，Libra 会在写入前拒绝。请移走冲突文件或选择其他目标；目录中无关的用户文件会保留。
+
 ```bash
 libra init --from-git-repository ../old-project
 ```
 
 #### 中断转换与恢复
 
-转换途中发生普通错误或收到 SIGINT/SIGTERM 时，Libra 会回滚本次创建的目标内容，
-保留用户文件与源 `.git`，可立即重试。硬中断（如 SIGKILL 或断电）会留下
+安装转换标记后发生普通错误或收到 SIGINT/SIGTERM 时，Libra 会回滚本次创建的仓库元数据，
+保留已有 bare 目标目录、其中无关的用户文件与源 `.git`；目标路径含符号链接或 `..` 时亦然，可立即重试。硬中断（如 SIGKILL 或断电）会留下
 `CONVERSION_IN_PROGRESS` 标记；在处理前，其他命令会拒绝把该仓库当作空仓库。
 使用相同 Git 源重试时，只有能验证原进程已退出且源路径匹配，才会把不完整的
-`.libra` 改名为同级 `.libra.incomplete-<timestamp>` 并重新转换；不会删除残留目录。
+存储目录改名为同级 `<storage>.incomplete-<timestamp>` 并重新转换；不会删除残留目录。
+若原目标是已存在的 bare 目录，其原有用户文件也会在改名后的目录中，删除前请检查。
 
 在 macOS 上，Libra 0.30.78 起的转换标记可在**同一启动会话**内验证硬中断后的
 进程身份。旧版标记、其他主机或重启后的标记无法在本机证明原进程已退出，
@@ -119,7 +122,8 @@ libra init --vault false
 
 模板永远不会被复制进自身：模板**就是**目标仓库时以 CLI 错误拒绝（`LBR-CLI-002`）；
 模板**包含**目标时（例如创建 `./repo` 时用 `--template=.`）会跳过目标工作树，因此重复执行
-`libra init --template=. repo` 不会出现 `repo/.libra/repo/.libra/…` 的嵌套残留。
+`libra init --template=. repo` 不会出现 `repo/.libra/repo/.libra/…` 的嵌套残留。目标路径经过
+符号链接或包含 `..` 时也遵守此规则；位于目标 `.libra` 存储目录内的模板会在复制前被拒绝。
 
 ```bash
 libra init --template /path/to/template
@@ -138,6 +142,8 @@ fresh init 与 reinit 之后都可以用 `libra config get core.sharedRepository
 shared 模式。
 
 Numeric mode 会在任何仓库布局写入前预校验。当前 Libra 会把 numeric mode 直接应用到仓库目录和文件，因此 owner 必须保留 `rwx`，且 group/other 任一类只要获得 read 或 write 权限，就必须同时具备对应的 execute bit 以保证目录可遍历。`0660` 这类不可遍历模式会以 `LBR-CLI-002` 拒绝，并且不会留下半初始化的 `.libra` 目录。
+
+将 Git 转换到已存在的 bare 目标时，`--shared` 仅更新目标目录及本次新建的仓库条目；已有用户文件的权限保持不变。
 
 ```bash
 libra init --shared group shared-repo

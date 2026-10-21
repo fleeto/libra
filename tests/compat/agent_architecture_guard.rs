@@ -9266,19 +9266,11 @@ fn public_signature_fingerprint(relative_path: &str, function: &str) -> String {
 /// requires an ADR-ACF-10 revision and a fresh design review first.
 #[test]
 fn capture_runtime_extraction_oracles_are_frozen() {
-    // First digest: OG-01 input-only Contract A revision after fresh Claude
-    // design PASS. The hook-contract digests moved again when Claude
-    // PermissionRequest, SubagentStart, and SubagentStop became ordinary
-    // observed events (receipts and subagent checkpoints). Helpers are
-    // unchanged. ADR-ACF-10 records this bounded contract revision.
-    // ADR-ACF-10 records OG-01's input revision and OpenCode's local-only
-    // execution scope. Its CX-15 amendment pins the fourteen Claude forwarding
-    // rows and their mapping helper after explicit design review. Upstream now
-    // includes the same rows in the base matrix; the overlay remains a pinned
-    // expectation, while all other oracle expectations stay unchanged.
-    // The 2026-10-22 main rebase also brought upstream subagent receipt rows
-    // into that hook matrix. Recompute only its two public-contract digests;
-    // the other frozen oracle and harness signature remain unchanged.
+    // OG-01 and CC-02 revised the public hook matrix as recorded in
+    // docs/development/tracing/agent.md. The 2026-10-22 ADR-ACF-10
+    // amendment removes the redundant CX-15 overlay/helper. Both public
+    // tests now compare against the same base matrix, and these two digests
+    // match the current upstream oracle revision.
     const FROZEN_ORACLES: [(&str, &str, &[&str], &str); 3] = [
         (
             "tests/agent_lifecycle_event_test.rs",
@@ -9289,18 +9281,16 @@ fn capture_runtime_extraction_oracles_are_frozen() {
                 "HookRepo::init",
                 "HookRepo::run",
                 "const CLAUDE_CONTRACT_EVENTS",
-                "const CLAUDE_FORWARDED_PUBLIC_HOOK_ROWS",
                 "const CODEX_CONTRACT_EVENTS",
                 "const HOOK_CONTRACT_SURFACES",
                 "const HOOK_CONTRACT_VERBS",
                 "const HOOK_PUBLIC_CONTRACT_MATRIX",
                 "const OPENCODE_CONTRACT_EVENTS",
-                "fn current_public_hook_contract_matrix",
                 "fn hook_contract_bytes",
                 "fn hook_contract_projection",
                 "struct HookRepo",
             ],
-            "ce720b8f3d391f9f03505e9b9ca55dd7aaa6d8782f01d795e5a81304a96f38bf",
+            "78656cf7640f911ac2c1e37a7edfedd049c3ea7a1e331044d89b9c0cdc8faeea",
         ),
         (
             "tests/agent_hook_crash_test.rs",
@@ -9359,18 +9349,16 @@ fn capture_runtime_extraction_oracles_are_frozen() {
                 "HookRepo::init",
                 "HookRepo::run",
                 "const CLAUDE_CONTRACT_EVENTS",
-                "const CLAUDE_FORWARDED_PUBLIC_HOOK_ROWS",
                 "const CODEX_CONTRACT_EVENTS",
                 "const HOOK_CONTRACT_SURFACES",
                 "const HOOK_CONTRACT_VERBS",
                 "const HOOK_PUBLIC_CONTRACT_MATRIX",
                 "const OPENCODE_CONTRACT_EVENTS",
-                "fn current_public_hook_contract_matrix",
                 "fn hook_contract_bytes",
                 "fn hook_contract_projection",
                 "struct HookRepo",
             ],
-            "9b66f193316c5ed68819d3f3278d6ae184f1cc41a9e699110cb383be52198f1f",
+            "732953abeb31caa0b839376e37cdb405fd35287ee5e44259a95d5e16331de665",
         ),
         (
             "tests/agent_hook_crash_test.rs",

@@ -4800,63 +4800,13 @@ async fn hook_public_contract_byte_compat_matrix() {
         }
     }
 
-    let expected = current_public_hook_contract_matrix(
-        HOOK_PUBLIC_CONTRACT_MATRIX,
-        CLAUDE_FORWARDED_PUBLIC_HOOK_ROWS,
-    );
+    let expected: Vec<&str> = HOOK_PUBLIC_CONTRACT_MATRIX.lines().collect();
     assert_eq!(
         observed,
         expected,
         "public hook contract drifted; observed matrix:\n{}",
         observed.join("\n")
     );
-}
-
-// Current Claude forwarding persists PermissionRequest and subagent boundaries.
-// Upstream now includes these fourteen receipt/checkpoint rows in the base
-// matrix. Keep this CX-15 overlay as an independent pinned expectation: if
-// the base drifts, the comparison still checks the established rows.
-const CLAUDE_FORWARDED_PUBLIC_HOOK_ROWS: &str = r###"hooks-claude PermissionRequest permission-request exit=Some(0) stdout="" stderr="" | sessions=[claude__contract-hooks-claude:claude_code:active:stopped_at=none:checkpoints=[]:receipts=4(pending=0)[]] artifacts=0
-hooks-claude ModelUpdate model-update exit=Some(0) stdout="" stderr="" | sessions=[claude__contract-hooks-claude:claude_code:active:stopped_at=none:checkpoints=[]:receipts=5(pending=0)[]] artifacts=0
-hooks-claude Compaction compaction exit=Some(0) stdout="" stderr="" | sessions=[claude__contract-hooks-claude:claude_code:condensed:stopped_at=none:checkpoints=[]:receipts=6(pending=0)[]] artifacts=0
-hooks-claude Stop stop exit=Some(0) stdout="" stderr="" | sessions=[claude__contract-hooks-claude:claude_code:active:stopped_at=none:checkpoints=[committed]:receipts=7(pending=0)[committed/active/complete]] artifacts=0
-hooks-claude SubagentStart subagent-start exit=Some(0) stdout="" stderr="" | sessions=[claude__contract-hooks-claude:claude_code:active:stopped_at=none:checkpoints=[committed,subagent]:receipts=8(pending=0)[committed/active/complete,subagent_boundary/active/complete]] artifacts=0
-hooks-claude SubagentStop subagent-end exit=Some(0) stdout="" stderr="" | sessions=[claude__contract-hooks-claude:claude_code:active:stopped_at=none:checkpoints=[committed,subagent,subagent]:receipts=9(pending=0)[committed/active/complete,subagent_boundary/active/complete,subagent_boundary/active/complete]] artifacts=0
-hooks-claude SessionEnd session-end exit=Some(0) stdout="" stderr="" | sessions=[claude__contract-hooks-claude:claude_code:stopped:stopped_at=set:checkpoints=[committed,subagent,subagent,committed]:receipts=10(pending=0)[committed/active/complete,subagent_boundary/active/complete,subagent_boundary/active/complete,committed/stopped/complete]] artifacts=0
-agent-hooks-claude-code PermissionRequest permission-request exit=Some(0) stdout="" stderr="" | sessions=[claude__contract-agent-hooks-claude-code:claude_code:active:stopped_at=none:checkpoints=[]:receipts=4(pending=0)[]] artifacts=0
-agent-hooks-claude-code ModelUpdate model-update exit=Some(0) stdout="" stderr="" | sessions=[claude__contract-agent-hooks-claude-code:claude_code:active:stopped_at=none:checkpoints=[]:receipts=5(pending=0)[]] artifacts=0
-agent-hooks-claude-code Compaction compaction exit=Some(0) stdout="" stderr="" | sessions=[claude__contract-agent-hooks-claude-code:claude_code:condensed:stopped_at=none:checkpoints=[]:receipts=6(pending=0)[]] artifacts=0
-agent-hooks-claude-code Stop stop exit=Some(0) stdout="" stderr="" | sessions=[claude__contract-agent-hooks-claude-code:claude_code:active:stopped_at=none:checkpoints=[committed]:receipts=7(pending=0)[committed/active/complete]] artifacts=0
-agent-hooks-claude-code SubagentStart subagent-start exit=Some(0) stdout="" stderr="" | sessions=[claude__contract-agent-hooks-claude-code:claude_code:active:stopped_at=none:checkpoints=[committed,subagent]:receipts=8(pending=0)[committed/active/complete,subagent_boundary/active/complete]] artifacts=0
-agent-hooks-claude-code SubagentStop subagent-end exit=Some(0) stdout="" stderr="" | sessions=[claude__contract-agent-hooks-claude-code:claude_code:active:stopped_at=none:checkpoints=[committed,subagent,subagent]:receipts=9(pending=0)[committed/active/complete,subagent_boundary/active/complete,subagent_boundary/active/complete]] artifacts=0
-agent-hooks-claude-code SessionEnd session-end exit=Some(0) stdout="" stderr="" | sessions=[claude__contract-agent-hooks-claude-code:claude_code:stopped:stopped_at=set:checkpoints=[committed,subagent,subagent,committed]:receipts=10(pending=0)[committed/active/complete,subagent_boundary/active/complete,subagent_boundary/active/complete,committed/stopped/complete]] artifacts=0"###;
-
-fn current_public_hook_contract_matrix(
-    base: &'static str,
-    current: &'static str,
-) -> Vec<&'static str> {
-    let replacements = current
-        .lines()
-        .map(|line| (line.split(" exit=").next().unwrap(), line))
-        .collect::<std::collections::BTreeMap<_, _>>();
-    assert_eq!(replacements.len(), 14);
-    for key in replacements.keys() {
-        assert_eq!(
-            base.lines()
-                .filter(|line| line.split(" exit=").next() == Some(*key))
-                .count(),
-            1,
-            "a forwarding override must replace exactly one existing case"
-        );
-    }
-    base.lines()
-        .map(|line| {
-            replacements
-                .get(line.split(" exit=").next().unwrap())
-                .copied()
-                .unwrap_or(line)
-        })
-        .collect()
 }
 
 /// Keep the four Claude/Codex public hook byte contracts in CI while the
@@ -4969,13 +4919,10 @@ async fn hook_public_contract_claude_codex_ci() {
         }
     }
 
-    let expected: Vec<&str> = current_public_hook_contract_matrix(
-        HOOK_PUBLIC_CONTRACT_MATRIX,
-        CLAUDE_FORWARDED_PUBLIC_HOOK_ROWS,
-    )
-    .into_iter()
-    .filter(|line| !line.starts_with("agent-hooks-opencode "))
-    .collect();
+    let expected: Vec<&str> = HOOK_PUBLIC_CONTRACT_MATRIX
+        .lines()
+        .filter(|line| !line.starts_with("agent-hooks-opencode "))
+        .collect();
     assert_eq!(
         observed,
         expected,

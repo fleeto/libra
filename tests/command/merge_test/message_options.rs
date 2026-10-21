@@ -11,6 +11,7 @@ use tempfile::{TempDir, tempdir};
 use super::run_libra_command_with_stdin_and_env;
 use super::{assert_cli_success, commit_file, configure_identity_via_cli, run_libra_command};
 
+#[cfg(unix)]
 const SIGNOFF: &str = "Signed-off-by: Test User <test@example.com>";
 
 fn divergent_merge_repo() -> TempDir {

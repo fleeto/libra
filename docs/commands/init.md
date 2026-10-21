@@ -194,9 +194,18 @@ libra init --vault false
 ### `--template <PATH>`
 
 Path to a template directory whose contents are copied into the new `.libra` directory.
+An empty value (`--template=`) means "no template", like Git: nothing is copied and the
+built-in `info/exclude` + hook templates are skipped.
+
+The template can never be copied into itself. A template that **is** the target
+repository is refused with a CLI error (`LBR-CLI-002`), and a template that **contains**
+the target (for example `--template=.` while creating `./repo`) skips the target
+worktree, so repeated `libra init --template=. repo` calls never nest
+`repo/.libra/repo/.libra/…`.
 
 ```bash
 libra init --template /path/to/template
+libra init --template=            # no template at all
 ```
 
 ### `--shared <MODE>`

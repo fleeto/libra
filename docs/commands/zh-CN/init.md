@@ -100,10 +100,16 @@ libra init --vault false
 
 ### `--template <PATH>`
 
-模板目录路径，其内容会复制到新的 `.libra` 目录。
+模板目录路径，其内容会复制到新的 `.libra` 目录。空值（`--template=`）与 Git 一致，
+表示「不使用模板」：不复制任何内容，也跳过内置的 `info/exclude` 与 hook 模板。
+
+模板永远不会被复制进自身：模板**就是**目标仓库时以 CLI 错误拒绝（`LBR-CLI-002`）；
+模板**包含**目标时（例如创建 `./repo` 时用 `--template=.`）会跳过目标工作树，因此重复执行
+`libra init --template=. repo` 不会出现 `repo/.libra/repo/.libra/…` 的嵌套残留。
 
 ```bash
 libra init --template /path/to/template
+libra init --template=            # 完全不使用模板
 ```
 
 ### `--shared <MODE>`

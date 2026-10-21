@@ -1346,3 +1346,97 @@ fn test_init_default_object_format_sources_matrix() {
     );
     assert_eq!(String::from_utf8_lossy(&stored.stdout).trim(), "sha1");
 }
+
+/// Issue #501 AC 2/3: a template that CONTAINS the target must never copy the
+/// target into itself. `--template=.` (the parent directory of the new
+/// repository) used to nest `<dir>/.libra/<dir>/.libra/...` until
+/// `ENAMETOOLONG`; the guard now skips the whole target worktree, so a single
+/// invocation leaves no nested copy and repeated invocations stay constant.
+#[test]
+fn test_init_template_cwd_never_copies_the_target_into_itself() {
+    let root = tempdir().unwrap();
+    let workdir = root.path();
+    fs::write(workdir.join("sibling.txt"), "sibling\n").unwrap();
+
+    let first = run_libra_command(&["init", "--template=.", "repo"], workdir);
+    assert_cli_success(&first, "init --template=. repo");
+    let nested: Vec<_> = fs::read_dir(workdir.join("repo").join(".libra"))
+        .expect("read storage root")
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name == "repo")
+        .collect();
+    assert!(
+        nested.is_empty(),
+        "the target must not be copied into its own storage root: {nested:?}"
+    );
+
+    // AC 3: repeated invocations leave NO `<dir>/.libra/<dir>` residue. (The
+    // harness keeps an isolated HOME inside the working directory, so a
+    // template of `.` legitimately copies those config files once; the
+    // regression this guards is the recursive copy of the TARGET itself, which
+    // is what grew one level per invocation and ended in ENAMETOOLONG.)
+    for _ in 0..4 {
+        let again = run_libra_command(&["init", "--template=.", "repo"], workdir);
+        assert_cli_success(&again, "repeated init --template=. repo");
+    }
+    assert_eq!(
+        count_directories_named(&workdir.join("repo"), "repo"),
+        0,
+        "repeated --template=. inits must not nest copies of the target"
+    );
+
+    // A sibling file in the template is still copied (the skip is targeted).
+    assert!(
+        workdir.join("repo/.libra/sibling.txt").exists(),
+        "non-target template content is still copied"
+    );
+}
+
+/// Issue #501 AC 1/2: `--template=.` where the target IS the current directory
+/// is refused up front with a CLI error instead of self-copying.
+#[test]
+fn test_init_template_equal_to_target_is_refused() {
+    let root = tempdir().unwrap();
+    let workdir = root.path();
+
+    let out = run_libra_command(&["init", "--template=.", "."], workdir);
+    assert_eq!(
+        out.status.code(),
+        Some(129),
+        "self template must be refused"
+    );
+    let (_human, report) = super::parse_cli_error_stderr(&out.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-002");
+    assert!(
+        report.message.contains("is the target repository itself"),
+        "diagnostic must name the self reference: {}",
+        report.message
+    );
+    assert!(
+        !workdir.join(".libra").exists(),
+        "a refused template must write nothing"
+    );
+}
+
+/// Count directories named `name` below `root` (not counting `root` itself) —
+/// used to prove the target is never copied into its own storage root.
+fn count_directories_named(root: &std::path::Path, name: &str) -> usize {
+    let mut total = 0;
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                continue;
+            }
+            if entry.file_name().to_string_lossy() == name {
+                total += 1;
+            }
+            stack.push(entry.path());
+        }
+    }
+    total
+}

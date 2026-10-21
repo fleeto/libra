@@ -701,18 +701,26 @@ async fn run_init_internal(
         // Boxed: keeps the init future's layout depth bounded for callers.
         None => Box::pin(resolve_template_from_sources()).await?,
     };
-    // Self-reference guard (ADR-IN-03): a template equal to the storage root
-    // would recurse; an ancestor template must skip the storage subtree.
+    // Self-reference guard (ADR-IN-03, issue #501): a template that is the
+    // storage root or the target worktree itself cannot be copied into that
+    // same worktree, and an ANCESTOR template must not descend into the target
+    // being created — otherwise the copy recurses forever (`--template=.` used
+    // to nest `<dir>/.libra/<dir>/.libra/...` until ENAMETOOLONG).
+    //
+    // The skip is the TARGET worktree, not just the storage root: the storage
+    // root (`<target>/.libra`) is inside the target, so skipping only the
+    // latter still let the walker copy `<target>` itself.
     let template_skip = match template_dir.as_deref() {
-        Some(template) if template == root_dir => {
+        Some(template) if template == root_dir || template == target_dir => {
             return Err(invalid_argument(
                 format!(
-                    "template directory '{}' is the target storage directory itself",
+                    "template directory '{}' is the target repository itself",
                     template.display()
                 ),
                 Some("use the parent directory as --template, or pick another target".to_string()),
             ));
         }
+        Some(template) if target_dir.starts_with(template) => Some(target_dir.clone()),
         Some(template) if root_dir.starts_with(template) => Some(root_dir.clone()),
         _ => None,
     };

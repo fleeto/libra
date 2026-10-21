@@ -6277,6 +6277,95 @@ impl HistoryManager {
     }
 }
 
+/// Atomically associate at most one commit's authorized sessions with its
+/// repository-local catalog. Callers must resolve authorization and worktree
+/// scope before passing session IDs; the FK rejects stale or erased sessions.
+pub async fn link_agent_sessions_to_commit(
+    conn: &DatabaseConnection,
+    session_ids: &[String],
+    commit_oid: ObjectHash,
+) -> Result<()> {
+    if session_ids.len() > 64 {
+        bail!("a commit can link at most 64 agent sessions");
+    }
+    if session_ids.is_empty() {
+        return Ok(());
+    }
+    let hash_kind = match commit_oid.kind() {
+        git_internal::hash::HashKind::Sha1 => "sha1",
+        git_internal::hash::HashKind::Sha256 => "sha256",
+        git_internal::hash::HashKind::Blake3 => "blake3",
+    };
+    let oid = commit_oid.to_string();
+    let txn = conn
+        .begin()
+        .await
+        .context("begin agent session commit-link transaction")?;
+    for session_id in session_ids {
+        txn.execute_raw(Statement::from_sql_and_values(
+            txn.get_database_backend(),
+            "INSERT INTO agent_session_commit (session_id, hash_kind, commit_oid)
+             VALUES (?, ?, ?) ON CONFLICT(session_id, hash_kind, commit_oid) DO NOTHING",
+            [
+                session_id.as_str().into(),
+                hash_kind.into(),
+                oid.as_str().into(),
+            ],
+        ))
+        .await
+        .context("link selected agent session to commit")?;
+    }
+    let linked_count: i64 = txn
+        .query_one_raw(Statement::from_sql_and_values(
+            txn.get_database_backend(),
+            "SELECT COUNT(*) FROM agent_session_commit WHERE hash_kind = ? AND commit_oid = ?",
+            [hash_kind.into(), oid.as_str().into()],
+        ))
+        .await
+        .context("count agent session links before commit")?
+        .context("agent session link count query returned no row")?
+        .try_get_by_index(0)
+        .context("decode agent session link count")?;
+    if linked_count > 64 {
+        bail!("a commit can link at most 64 agent sessions");
+    }
+    txn.commit()
+        .await
+        .context("commit agent session links atomically")
+}
+
+/// Read the local session links for a commit; the same 64-session cap protects
+/// downstream trailer/journal consumers if a database was modified externally.
+pub async fn agent_sessions_for_commit(
+    conn: &DatabaseConnection,
+    commit_oid: ObjectHash,
+) -> Result<Vec<String>> {
+    let hash_kind = match commit_oid.kind() {
+        git_internal::hash::HashKind::Sha1 => "sha1",
+        git_internal::hash::HashKind::Sha256 => "sha256",
+        git_internal::hash::HashKind::Blake3 => "blake3",
+    };
+    let oid = commit_oid.to_string();
+    let rows = conn
+        .query_all_raw(Statement::from_sql_and_values(
+            conn.get_database_backend(),
+            "SELECT session_id FROM agent_session_commit
+             WHERE hash_kind = ? AND commit_oid = ? ORDER BY session_id LIMIT 65",
+            [hash_kind.into(), oid.as_str().into()],
+        ))
+        .await
+        .with_context(|| format!("read agent session links for commit {oid}"))?;
+    if rows.len() > 64 {
+        bail!("commit {oid} has more than 64 agent session links");
+    }
+    rows.into_iter()
+        .map(|row| {
+            row.try_get_by_index(0)
+                .context("decode linked agent session ID")
+        })
+        .collect()
+}
+
 /// Persist an `ai_session` blob onto [`AI_REF`]. KEEP hook code calls this
 /// instead of constructing [`HistoryManager::new`] or naming [`AI_REF`].
 pub async fn persist_ai_session(

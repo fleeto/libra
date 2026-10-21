@@ -3559,6 +3559,16 @@ authorized reader 重新打开并执行 repo/session/source 检查。普通 tran
 授权的可读 summary 与附带字段，metadata、错误与日志不回显正文。新回归仅本机
 `test-live-agent` + `ignored` 运行，不接入 CI。
 
+### Repository session–commit 关联存储（CX-11）
+
+Repository role 的 `2026102201_agent_session_commit` 迁移建立本地关联表，
+`(session_id, hash_kind, commit_oid)` 为幂等主键，`session_id` 以外键随 session
+删除，OID 仅接受按 SHA-1（40 hex）、SHA-256/BLAKE3（64 hex）声明的规范小写值。
+Global、System、Derived 不应用此迁移。DAO 的一批最多 64 个 session 在同一 SQLite
+事务提交；中途外键失败则整批零行。迁移 forward-only，即使有数据也没有自动 down；
+旧 binary 见新 receipt 必须在写入前拒绝。CX-11 仅提供 schema 和 DAO，
+尚未把普通 commit、导入或 trailer 接入写入。
+
 ### Codex 索引对账的只读观察（CX-22）
 
 `agent doctor --codex-index-backup PATH [--codex-index-page N]` 不新增

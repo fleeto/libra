@@ -1908,3 +1908,13 @@ include existing counts. Directory (4096) or memo (1024) limits may produce per-
 unknown even for an in-scope row. Quit Codex before creating a closed backup
 with Python's SQLite backup API and a read-only source, as shown in the command guide;
 never substitute a live provider database with sidecars.
+
+## Repository agent session–commit association (CX-11)
+
+Migration `2026102201_agent_session_commit` adds a repository-local,
+forward-only association keyed by `(session_id, hash_kind, commit_oid)`.
+It applies to the Repository database only; Global, System and Derived
+databases receive no table or receipt. SHA-1, SHA-256 and BLAKE3 OIDs are
+stored distinctly, and an erased session cascades its links. The transactional
+DAO is available to later commit cards, but this change does not enable
+automatic commit association or alter existing commit messages.

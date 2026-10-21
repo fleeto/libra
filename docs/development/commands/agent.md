@@ -634,6 +634,14 @@ authorized file reader reopens and fences the selected source before full
 transcript bytes. Codex-specific new regressions stay feature-gated and
 ignored for operator-local execution only.
 
+CX-11 adds a Repository-only, forward-only `2026102201_agent_session_commit`
+schema and a transactional DAO. Its local `(session_id, hash_kind, commit_oid)`
+key distinguishes SHA-1, SHA-256 and BLAKE3, references an existing session,
+and is safe to retry. A batch is limited to 64 sessions and rolls back in full
+on a failed FK write. Global/System/Derived roles get no table or receipt.
+No command writes links yet; explicit opt-in, trailer insertion and recovery
+belong to the subsequent commit cards.
+
 Current source builds project envelope rollouts using the Codex 0.162.1 record schema; unknown records from other versions remain partial. Exact `token_usage_record` response usage is counted once, including a repeated compaction snapshot. Legacy cumulative token observations are differenced across turns; an unexplained decrease remains partial, and a reset at an explicit context boundary is qualified. Matching legacy observations are not added to exact response totals. Cached tokens aggregate cache reads and writes. Missing or invalid usage remains unknown in the parser, rather than a measured zero.
 
 Envelope prompt projection uses event-side accepted input and producer `content_item_kinds`, preserving real user text that resembles a context wrapper. Unannotated or mismatched user-role response content is retained in ordinary source data but is not asserted to be a user prompt. Shared item identity is paired first, with completed input preferred; otherwise identical projected text is paired by turn and occurrence across surfaces. Repeated text on the same surface remains repeated. Pairing without a shared identity is a partial lower bound. The first `session_meta` binds the owning thread. Foreign headers make the projection partial; foreign records are not added to its usage, and all unscoped records after a foreign header remain unattributed until the owning header reappears; explicitly scoped owning-thread records can still be projected. The model is the latest explicit `turn_context` model. Modified paths require a nonempty call/item identity and a successful, completed structured patch record; proposed patch text and failed or partial attempts are not evidence of a file modification. Paths are lexical and relative to the recorded working directory, which may be a repository subdirectory.

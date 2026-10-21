@@ -670,6 +670,13 @@ Successful and partial summaries report parent turn writes in
 make an otherwise complete parent import fail, because it is not evidence that
 child content exists.
 
+The repository database now reserves an `agent_session_commit` association for
+future opt-in commit linking. Its `(session_id, hash_kind, commit_oid)` key is
+idempotent and local to the repository; SHA-1, SHA-256, and BLAKE3 are distinct.
+Import and ordinary commits do not create these links yet. Automatic commit
+linking and a message trailer remain disabled until the later commit cards are
+implemented, so no existing commit format or import output changes here.
+
 Historical import is repository-scoped and fail-closed. Libra requires one
 unambiguous transcript `cwd`, resolves its Libra storage, and imports only when
 it is the current repository. A sibling linked worktree is valid because it

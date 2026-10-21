@@ -119,6 +119,11 @@ pub const MUTABLE_STATE_OWNERSHIP: &[MutableStateSurface] = &[
                      observed in (W4 adds the workspace scope key)",
     },
     MutableStateSurface {
+        table: "agent_session_commit",
+        owner: StateOwner::Repository,
+        rationale: "commit links are repository-local and inherit scope from their session FK",
+    },
+    MutableStateSurface {
         table: "agent_export_job",
         owner: StateOwner::Composite,
         rationale: "export jobs are repository-owned and carry worktree/workspace provenance (W4)",

@@ -509,6 +509,11 @@ Claude 的发现仍按文件修改时间。`--since` 遇到缺失时间或无效
 写入时状态仍为 `imported`，不是 `noop`。平台无法提供安全 child discovery 的
 诊断本身不会让完整的父 transcript import 失败，因为它不能证明 child 内容存在。
 
+Repository 数据库现已预留本地的 `agent_session_commit` 关联表，幂等键为
+`(session_id, hash_kind, commit_oid)`，SHA-1、SHA-256 和 BLAKE3 分开记录。
+本卡仅建立 schema 与 DAO；历史导入和普通 commit 尚不写入此表，自动关联和消息
+trailer 仍待后续任务卡接入，现有 commit 格式及导入输出不因此改变。
+
 历史导入严格限定当前仓库且 fail-closed：transcript 必须给出唯一无歧义的
 `cwd`，Libra 解析其 storage 并要求与当前仓库相同。共享该 canonical storage
 的 sibling linked worktree 属于同一仓库；其它仓库不属于。文件源必须位于所选

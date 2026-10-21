@@ -169,16 +169,33 @@ fn wait_for_worker(
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                let bytes = reader.join().unwrap_or_default();
-                return if status.success() {
-                    parse_worker_result(&bytes)
+                let read_started = Instant::now();
+                while !reader.is_finished() && read_started.elapsed() < REAP_BUDGET {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                if reader.is_finished() {
+                    let bytes = reader.join().unwrap_or_default();
+                    return if status.success() {
+                        parse_worker_result(&bytes)
+                    } else {
+                        Ok(protocol::tool_error_result(
+                            "LBR-AGENT-037",
+                            "read worker failed before producing a result",
+                            false,
+                        ))
+                    };
+                }
+                // The worker has exited. A descendant can still hold stdout, so
+                // joining here would keep this slot and the reply blocked.
+                std::thread::spawn(move || {
+                    let _ = reader.join();
+                });
+                let message = if status.success() {
+                    "read worker output did not close"
                 } else {
-                    Ok(protocol::tool_error_result(
-                        "LBR-AGENT-037",
-                        "read worker failed before producing a result",
-                        false,
-                    ))
+                    "read worker failed before producing a result"
                 };
+                return Ok(protocol::tool_error_result("LBR-AGENT-037", message, false));
             }
             Ok(None) if started.elapsed() >= deadline => {
                 detach_after_deadline(child, slot, reader);
@@ -227,10 +244,12 @@ fn detach_after_deadline(
         }
     }
     // The reply must not wait on a worker stuck in uninterruptible I/O.
-    // The slot stays taken until this reaper observes the exit.
+    // The slot stays taken only until `wait` observes the exit. The stdout
+    // reader is joined after that, so a descendant holding the pipe cannot
+    // keep the slot.
     std::thread::spawn(move || {
-        let _slot = slot;
         let _ = child.wait();
+        drop(slot);
         let _ = reader.join();
     });
 }

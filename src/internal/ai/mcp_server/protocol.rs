@@ -32,7 +32,8 @@ pub fn tool_error_schema() -> Value {
             "stable_code": {"type": "string"},
             "bridge_code": {"type": ["string", "null"]},
             "message": {"type": "string"},
-            "retryable": {"type": "boolean"}
+            "retryable": {"type": "boolean"},
+            "reason": {"type": "string"}
         }
     })
 }
@@ -80,12 +81,24 @@ pub fn tool_success_result(structured: &Value) -> Value {
 }
 
 pub fn tool_error_result(stable_code: &str, message: &str, retryable: bool) -> Value {
-    let structured = serde_json::json!({
+    tool_error_result_reason(stable_code, message, retryable, None)
+}
+
+pub fn tool_error_result_reason(
+    stable_code: &str,
+    message: &str,
+    retryable: bool,
+    reason: Option<&str>,
+) -> Value {
+    let mut structured = serde_json::json!({
         "stable_code": stable_code,
         "bridge_code": Value::Null,
         "message": message,
         "retryable": retryable
     });
+    if let Some(reason) = reason {
+        structured["reason"] = Value::String(reason.to_string());
+    }
     let text = serde_json::to_string(&structured).unwrap_or_else(|_| "{}".to_string());
     serde_json::json!({
         "content": [{"type": "text", "text": text}],

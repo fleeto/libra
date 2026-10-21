@@ -8,12 +8,13 @@
 //!
 //! Layer: L1 (deterministic; tempdir only, no network).
 
-use std::{fs, time::Instant};
+use std::fs;
+#[cfg(unix)]
+use std::time::Instant;
 
-use super::{
-    assert_cli_success, create_committed_repo_via_cli, run_libra_command,
-    run_libra_command_with_stdin_and_env,
-};
+#[cfg(unix)]
+use super::run_libra_command_with_stdin_and_env;
+use super::{assert_cli_success, create_committed_repo_via_cli, run_libra_command};
 
 const LARGE_SET: usize = 1001;
 

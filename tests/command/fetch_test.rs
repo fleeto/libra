@@ -12,6 +12,8 @@ use std::{
 #[cfg(unix)]
 use libra::internal::vault;
 #[cfg(unix)]
+use libra::utils::test::ConfigDbFixture;
+#[cfg(unix)]
 use libra::utils::test::ScopedEnvVar;
 use libra::{
     command::fetch,
@@ -23,7 +25,7 @@ use libra::{
     },
     utils::{
         output::OutputConfig,
-        test::{ChangeDirGuard, ConfigDbFixture, setup_with_new_libra_in},
+        test::{ChangeDirGuard, setup_with_new_libra_in},
     },
 };
 use serial_test::serial;
@@ -260,6 +262,7 @@ fn create_keyscan_marker_script(root: &Path, marker: &Path) -> PathBuf {
     script_path
 }
 
+#[cfg(unix)]
 fn create_fake_ssh_script(root: &Path) -> PathBuf {
     let script_path = root.join("fake_ssh.sh");
     let script = r#"#!/bin/sh
@@ -1142,6 +1145,7 @@ async fn test_fetch_ssh_invalid_vault_key_fails_without_fallback() {
 /// Seed `ssh.strictHostKeyChecking` into a global/system config database through
 /// the real CLI, so the local -> global -> system cascade is exercised
 /// end-to-end (HKT-01). `scope_flag` is `--global` or `--system`.
+#[cfg(unix)]
 fn seed_ssh_policy_config(cwd: &Path, scope_flag: &str, value: &str) {
     let out = libra_command(cwd)
         .args([
@@ -1161,6 +1165,7 @@ fn seed_ssh_policy_config(cwd: &Path, scope_flag: &str, value: &str) {
 }
 
 /// Remove `ssh.strictHostKeyChecking` from the global config database.
+#[cfg(unix)]
 fn unset_global_ssh_policy(cwd: &Path) {
     let out = libra_command(cwd)
         .args(["config", "unset", "--global", "ssh.strictHostKeyChecking"])

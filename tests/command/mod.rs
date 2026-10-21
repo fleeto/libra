@@ -1106,6 +1106,8 @@ mod push_error_test;
 mod push_json_test;
 mod push_test;
 mod read_tree_test;
+// Its editor fixtures are POSIX shell scripts with Unix executable modes.
+#[cfg(unix)]
 mod rebase_interactive_test;
 mod rebase_test;
 mod reflog_test;

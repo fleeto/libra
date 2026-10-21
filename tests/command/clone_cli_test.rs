@@ -2,13 +2,14 @@
 //!
 //! **Layer:** L1 — deterministic, no external dependencies.
 
-use std::{
-    fs,
-    path::{Path, PathBuf},
-    process::Command,
-};
+#[cfg(unix)]
+use std::path::PathBuf;
+use std::{fs, path::Path, process::Command};
 
-use libra::utils::{pager::LIBRA_TEST_ENV, test::ConfigDbFixture};
+use libra::utils::pager::LIBRA_TEST_ENV;
+#[cfg(unix)]
+use libra::utils::test::ConfigDbFixture;
+#[cfg(unix)]
 use serial_test::serial;
 use tempfile::tempdir;
 
@@ -57,6 +58,7 @@ fn run_libra_with_home(args: &[&str], cwd: &Path, home: &Path) -> std::process::
 /// Build a clone command whose global/system config DBs are pinned to the
 /// isolated `ConfigDbFixture` paths, so a clone outside any repository can
 /// read a seeded global policy (HKT-01).
+#[cfg(unix)]
 fn clone_command(cwd: &Path, config: &ConfigDbFixture) -> Command {
     let home = cwd.join(".home");
     let config_home = home.join(".config");

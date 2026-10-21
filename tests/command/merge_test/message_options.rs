@@ -7,10 +7,9 @@ use std::{fs, path::Path};
 use libra::common_utils::parse_commit_msg;
 use tempfile::{TempDir, tempdir};
 
-use super::{
-    assert_cli_success, commit_file, configure_identity_via_cli, run_libra_command,
-    run_libra_command_with_stdin_and_env,
-};
+#[cfg(unix)]
+use super::run_libra_command_with_stdin_and_env;
+use super::{assert_cli_success, commit_file, configure_identity_via_cli, run_libra_command};
 
 const SIGNOFF: &str = "Signed-off-by: Test User <test@example.com>";
 

@@ -2382,6 +2382,7 @@ fn test_add_batch_with_stale_lock_files() {
 /// M-DIAG D1 (R2' shape): when another live process holds the generation
 /// lock, `add` times out with a diagnostic that names the holder (pid and
 /// purpose) and explains that lock files must not be deleted.
+#[cfg(unix)]
 #[test]
 fn test_add_lock_timeout_names_foreign_holder() {
     let repo = tempdir().unwrap();
@@ -2441,52 +2442,47 @@ fn test_add_lock_timeout_names_foreign_holder() {
 /// Helper process for `test_add_lock_timeout_names_foreign_holder`: holds the
 /// generation lock with `marker_publication` metadata until killed. Regular
 /// test runs return immediately (no env var set).
+#[cfg(unix)]
 #[test]
 fn test_add_foreign_lock_holder_helper() {
     let Ok(path) = std::env::var("LIBRA_TEST_ADD_LOCK_HOLD_PATH") else {
         return;
     };
-    #[cfg(unix)]
-    {
-        use std::{io::Write, os::fd::AsRawFd};
+    use std::{io::Write, os::fd::AsRawFd};
 
-        let path = std::path::PathBuf::from(path);
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).unwrap();
-        }
-        let mut file = fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(&path)
-            .unwrap();
-        // SAFETY: flock on an owned descriptor held until the process is killed.
-        let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-        assert_eq!(result, 0, "integration test helper flock must succeed");
-        let metadata = format!(
-            "{{\"pid\":{},\"purpose\":\"marker_publication\",\"started_at_ms\":{},\"invocation\":\"helper\"}}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis()
-        );
-        file.set_len(0).unwrap();
-        file.write_all(metadata.as_bytes()).unwrap();
-        file.flush().unwrap();
-        std::thread::sleep(std::time::Duration::from_secs(60));
+    let path = std::path::PathBuf::from(path);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).unwrap();
     }
-    #[cfg(not(unix))]
-    {
-        std::thread::sleep(std::time::Duration::from_secs(60));
-    }
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&path)
+        .unwrap();
+    // SAFETY: flock on an owned descriptor held until the process is killed.
+    let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    assert_eq!(result, 0, "integration test helper flock must succeed");
+    let metadata = format!(
+        "{{\"pid\":{},\"purpose\":\"marker_publication\",\"started_at_ms\":{},\"invocation\":\"helper\"}}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+    );
+    file.set_len(0).unwrap();
+    file.write_all(metadata.as_bytes()).unwrap();
+    file.flush().unwrap();
+    std::thread::sleep(std::time::Duration::from_secs(60));
 }
 
 /// Helper process for the M-WAIT integration tests: holds the generation lock
 /// with `marker_publication` metadata for LIBRA_TEST_ADD_LOCK_HOLD_SECS
 /// seconds (default 5), then exits and releases the lock. Regular test runs
 /// return immediately (no env var set).
+#[cfg(unix)]
 #[test]
 fn test_add_releasing_lock_holder_helper() {
     let Ok(path) = std::env::var("LIBRA_TEST_ADD_LOCK_HOLD_PATH") else {
@@ -2496,45 +2492,39 @@ fn test_add_releasing_lock_holder_helper() {
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(5);
-    #[cfg(unix)]
-    {
-        use std::{io::Write, os::fd::AsRawFd};
+    use std::{io::Write, os::fd::AsRawFd};
 
-        let path = std::path::PathBuf::from(path);
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).unwrap();
-        }
-        let mut file = fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(&path)
-            .unwrap();
-        // SAFETY: flock on an owned descriptor held until process exit.
-        let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-        assert_eq!(result, 0, "releasing helper flock must succeed");
-        let metadata = format!(
-            "{{\"pid\":{},\"purpose\":\"marker_publication\",\"started_at_ms\":{},\"invocation\":\"helper\"}}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis()
-        );
-        file.set_len(0).unwrap();
-        file.write_all(metadata.as_bytes()).unwrap();
-        file.flush().unwrap();
-        std::thread::sleep(std::time::Duration::from_secs(hold_secs));
+    let path = std::path::PathBuf::from(path);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).unwrap();
     }
-    #[cfg(not(unix))]
-    {
-        std::thread::sleep(std::time::Duration::from_secs(hold_secs));
-    }
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&path)
+        .unwrap();
+    // SAFETY: flock on an owned descriptor held until process exit.
+    let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    assert_eq!(result, 0, "releasing helper flock must succeed");
+    let metadata = format!(
+        "{{\"pid\":{},\"purpose\":\"marker_publication\",\"started_at_ms\":{},\"invocation\":\"helper\"}}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+    );
+    file.set_len(0).unwrap();
+    file.write_all(metadata.as_bytes()).unwrap();
+    file.flush().unwrap();
+    std::thread::sleep(std::time::Duration::from_secs(hold_secs));
 }
 
 /// M-WAIT W1: a foreign holder that releases after 5 seconds must make `add`
 /// wait (10-second budget) and then succeed without a lock timeout.
+#[cfg(unix)]
 #[test]
 fn test_add_waits_for_foreign_generation_lock_holder() {
     let repo = tempdir().unwrap();
@@ -2595,6 +2585,7 @@ fn test_add_waits_for_foreign_generation_lock_holder() {
 /// M-WAIT W4/W5: while a foreign holder keeps the generation lock busy, the
 /// read-only `status` command must not wait for it and must not emit a replay
 /// warning; after the holder releases, `add` succeeds.
+#[cfg(unix)]
 #[test]
 fn test_status_loop_during_batch_add_emits_no_replay_warning() {
     let repo = tempdir().unwrap();

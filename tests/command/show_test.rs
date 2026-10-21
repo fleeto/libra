@@ -1230,6 +1230,7 @@ fn show_log_display_no_op_flags_are_accepted() {
 
 /// `show --raw` renders the raw diff format (`:<old-mode> <new-mode> <old-sha>
 /// <new-sha> <status>\t<path>`) instead of a patch, matching `git show --raw`.
+#[cfg(unix)]
 #[test]
 fn test_show_raw_diff_format() {
     use std::{fs, os::unix::fs::PermissionsExt};

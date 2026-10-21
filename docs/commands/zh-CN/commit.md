@@ -35,7 +35,7 @@ libra commit --amend [--no-edit]
 预览始终保持 live index、`HEAD` 与工作树，包括用 `-a` 预览解决结果时。
 成功且非 `--dry-run` 的提交在更新 HEAD 后，会清除已停止的单提交 cherry-pick 或 revert 状态（或停在最后一项的序列）。多提交序列会保留剩余待办，并标记停止项已在序列外结束。`--dry-run` 与 `--porcelain` 不改该状态。
 
-merge 进行中时，`commit` 会结束该 merge：新提交的父提交为 HEAD 加上 merge 状态记录的对方提交，消息默认取已保存的合并消息（编辑器模式剥离 `# Conflicts:` 注释，`--no-edit` 保留，`-m`/`-F` 覆盖），然后清除 merge 状态并应用持有的 autostash。merge 进行中拒绝 `--amend`（退出 128）。`--dry-run` 不写入、保留 merge 状态，并输出预演说明而不打印伪提交 hash。`merge --squash` 之后的 `commit` 为单父提交，预填 `SQUASH_MSG`，提交后删除该文件。部分提交 `commit <path>` / `commit -o <path>` 仍为用法错误（退出 129；Git 为 128，有意差异）。
+merge 进行中时，`commit` 会结束该 merge：新提交的父提交为 HEAD 加上 merge 状态记录的对方提交，消息默认取已保存的合并消息（编辑器模式剥离 `# Conflicts:` 注释，`--no-edit` 保留，`-m`/`-F` 覆盖），然后清除 merge 状态并应用持有的 autostash。merge 进行中拒绝 `--amend`（退出 128）。`--dry-run` 不写入、保留 merge 状态，并输出预演说明而不打印伪提交 hash。`merge --squash` 之后的 `commit` 为单父提交，预填 `SQUASH_MSG`，提交后删除该文件。部分提交（`commit <path>`、`--only`、`--pathspec-from-file`）未实现：Libra 提交整个 index，这些写法会被识别并以 `LBR-UNSUPPORTED-001` 拒绝，提示先 `libra add <path>` 再 `libra commit`。
 
 删除冲突文件后，仅当所有 tracked 变更都应进入本次提交时才用 `commit -a` 暂存。
 父目录被普通文件或符号链接替换时，其已跟踪子路径视为删除；`-a` 不会通过该
@@ -43,6 +43,13 @@ merge 进行中时，`commit` 会结束该 merge：新提交的父提交为 HEAD
 同样需要显式暂存 gitlink 解决结果，不会自动暂存为删除。
 
 作者身份来自 `--author`，其次是 `GIT_AUTHOR_NAME`/`GIT_AUTHOR_EMAIL`，再回退到配置的 `user.name`/`user.email`；提交者身份来自 `GIT_COMMITTER_NAME`/`GIT_COMMITTER_EMAIL`，再回退到配置。除非设置了 `user.useConfigOnly=true`，Git 环境变量优先于配置。既有 `LIBRA_COMMITTER_NAME`/`LIBRA_COMMITTER_EMAIL` 仍作为更低优先级后备，兼容旧自动化。
+
+## 消息与签名选项
+
+- `-F -`：从**标准输入**读取整条提交消息（Git 语义）。
+- `-S` / `--gpg-sign[=<keyid>]`：签名提交。Libra 默认就用仓库 vault 密钥签名，因此该标志只是选择既有默认行为；可选的 key id 为兼容 Git 而接受但被忽略（每个仓库只有一把 vault 密钥）。强制不签名请用 `--no-gpg-sign`。
+- `--short`：打印提交的短状态摘要（`A  path`、`M  path` 等），可与 `--dry-run` 组合；与 `--porcelain` 同格式。
+- `-u[=<mode>]` / `--untracked-files[=<mode>]`：为兼容而接受，选择变更摘要是否列出未跟踪文件（`no` 隐藏）。
 
 ## 选项
 

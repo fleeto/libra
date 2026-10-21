@@ -152,6 +152,36 @@ is not in use.
 libra commit -F message.txt
 ```
 
+### `-F <file>` / `-F -`
+
+Read the commit message from `<file>`; `-F -` reads it from **standard input**
+(Git semantics: the whole stream). The message is cleaned according to
+`--cleanup` and the `commit-msg` hook still runs.
+
+### `-S` / `--gpg-sign[=<keyid>]`
+
+Sign the commit. Libra already signs every commit with the repository vault key
+by default, so the flag simply selects that default; the optional key id is
+accepted for Git parity and ignored (one vault key per repository). Use
+`--no-gpg-sign` to force an unsigned commit.
+
+### `--short`
+
+Print the short status summary (`A  path`, `M  path`, …) for the commit, with or
+without `--dry-run`. This is the same short format as `--porcelain`.
+
+### `-u[=<mode>]` / `--untracked-files[=<mode>]`
+
+Accepted for parity: it selects whether the change summary includes untracked
+files (`no` hides them; the default lists them separately from the staged set).
+
+### Partial commit (`--only`, `--pathspec-from-file`, `commit <path>`)
+
+**Not implemented** — Libra commits the whole index. These spellings are
+recognised and refused with `LBR-UNSUPPORTED-001`, naming the missing feature and
+suggesting `libra add <path>` followed by `libra commit`, instead of failing as
+unknown options.
+
 ### `--amend`
 
 Replace the tip of the current branch by creating a new commit. The new commit has the same

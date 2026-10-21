@@ -217,6 +217,37 @@ pub struct CommitArgs {
     #[arg(long = "no-status", overrides_with = "status")]
     pub no_status: bool,
 
+    /// Sign the commit (Git's `-S` / `--gpg-sign[=<keyid>]`). Libra signs every
+    /// commit with the repository vault key by default, so this flag just
+    /// selects the behaviour that is already the default; the optional key id
+    /// is accepted for Git parity and ignored (Libra has one vault key per
+    /// repository).
+    #[arg(short = 'S', long = "gpg-sign", value_name = "KEYID", num_args = 0..=1, require_equals = true)]
+    pub gpg_sign: Option<Option<String>>,
+
+    /// Show a short status of the changes being committed (Git's `--short`).
+    /// Libra renders the same short format as `--porcelain`, which this is an
+    /// alias for; Git accepts `--short` with and without `--dry-run`.
+    #[arg(long = "short")]
+    pub short: bool,
+
+    /// Show untracked files in the change summary (Git's `-u[=<mode>]`).
+    /// Accepted for parity: Libra's commit summary lists untracked files
+    /// separately, so the mode only selects `no` (hidden) versus the default.
+    #[arg(short = 'u', long = "untracked-files", value_name = "MODE", num_args = 0..=1, require_equals = true)]
+    pub untracked_files: Option<Option<String>>,
+
+    /// Recognised Git partial-commit options. Libra commits the whole index, so
+    /// these are refused with a clear message rather than an unknown-option
+    /// error (issues/525).
+    #[arg(long = "only")]
+    pub only: bool,
+
+    /// Recognised Git partial-commit option (`--pathspec-from-file`), refused
+    /// with the same partial-commit diagnostic.
+    #[arg(long = "pathspec-from-file", value_name = "FILE")]
+    pub pathspec_from_file: Option<String>,
+
     /// Force an unsigned commit: skip Libra's vault GPG signing
     /// (`vault_sign_commit`) for this commit, matching `git commit
     /// --no-gpg-sign`. Signing is resolved as: `--no-gpg-sign` (highest) >
@@ -968,7 +999,7 @@ pub async fn run_commit(
     args: CommitArgs,
     output: &OutputConfig,
 ) -> Result<CommitOutput, CommitError> {
-    let dry_run = args.dry_run || args.porcelain;
+    let dry_run = args.dry_run || args.porcelain || args.short;
     let message_settings = resolve_commit_message_settings(&args, output, dry_run).await?;
     let verbose_preview = dry_run && message_settings.verbose;
     if dry_run && args.all {
@@ -1159,7 +1190,7 @@ async fn run_commit_with_index(
         // auto-staging and the staged recompute above so it reflects what would be
         // committed. Inert under `--json`. `.take()` below hands it to whichever
         // build_commit_output branch (amend/normal dry-run) runs.
-        let porcelain_text = if args.porcelain && !output.is_json() {
+        let porcelain_text = if (args.porcelain || args.short) && !output.is_json() {
             Some(gather_commit_porcelain().await?)
         } else {
             None
@@ -1693,12 +1724,17 @@ async fn resolve_final_message(
     } else if let Some(msg) = &args.message {
         Some(msg.clone())
     } else if let Some(file_path) = &args.file {
-        Some(tokio::fs::read_to_string(file_path).await.map_err(|e| {
-            CommitError::MessageFileRead {
-                path: file_path.clone(),
-                detail: e.to_string(),
-            }
-        })?)
+        if file_path == "-" {
+            // Git's `-F -` reads the message from standard input.
+            read_message_from_stdin().await?
+        } else {
+            Some(tokio::fs::read_to_string(file_path).await.map_err(|e| {
+                CommitError::MessageFileRead {
+                    path: file_path.clone(),
+                    detail: e.to_string(),
+                }
+            })?)
+        }
     } else {
         merge_message_seed
             .or(squash_message_seed)
@@ -2155,6 +2191,27 @@ fn write_commit_message_file(path: &std::path::Path, message: &str) -> Result<()
     })
 }
 
+/// Read `commit -F -`'s message from standard input (Git semantics: the whole
+/// stream, not a single line).
+async fn read_message_from_stdin() -> Result<Option<String>, CommitError> {
+    use tokio::io::AsyncReadExt;
+
+    let mut body = Vec::new();
+    tokio::io::stdin()
+        .read_to_end(&mut body)
+        .await
+        .map_err(|error| CommitError::MessageFileRead {
+            path: "-".to_string(),
+            detail: error.to_string(),
+        })?;
+    String::from_utf8(body)
+        .map(Some)
+        .map_err(|error| CommitError::MessageFileRead {
+            path: "-".to_string(),
+            detail: format!("standard input is not valid UTF-8: {error}"),
+        })
+}
+
 fn read_commit_message_file(path: &std::path::Path) -> Result<String, CommitError> {
     std::fs::read_to_string(path).map_err(|error| CommitError::MessageFileRead {
         path: path.display().to_string(),
@@ -2553,8 +2610,21 @@ fn classify_nothing_to_commit() -> Result<CommitError, CommitError> {
 /// nothing to commit, identity/signing setup fails, object writes fail, or HEAD
 /// cannot be updated.
 pub async fn execute_safe(args: CommitArgs, output: &OutputConfig) -> CliResult<()> {
+    // Partial commit (`commit <path>…`, `--only`, `--pathspec-from-file`) needs
+    // a temporary tree built from HEAD + the selected paths; Libra commits the
+    // whole index. Classify the request instead of failing as an unknown
+    // option (issues/525).
+    if args.only || args.pathspec_from_file.is_some() {
+        return Err(CliError::fatal(
+            "partial commit (--only / --pathspec-from-file) is not implemented; Libra commits the whole index",
+        )
+        .with_stable_code(StableErrorCode::Unsupported)
+        .with_hint(
+            "stage only what you want to commit (e.g. 'libra add <path>'), then run 'libra commit'",
+        ));
+    }
     crate::command::status::warn_sparse_checkout_unsupported_once().await;
-    let preview = args.dry_run || args.porcelain;
+    let preview = args.dry_run || args.porcelain || args.short;
     // Keep the large commit state machine off callers' stacks. In particular,
     // direct library consumers and Tokio's default-size worker/test threads
     // must not have to embed the whole `run_commit` future in their own future.

@@ -2817,3 +2817,147 @@ fn test_commit_intent_to_add_matrix() {
         "W4 must clear the intent-to-add flag: {files}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// issue #525: stdin message, -S/--gpg-sign, --short, -u, and the classified
+// partial-commit options.
+// ---------------------------------------------------------------------------
+
+fn commit_fixture() -> tempfile::TempDir {
+    let repo = tempdir().expect("tempdir");
+    let root = repo.path();
+    super::init_repo_via_cli(root);
+    super::configure_identity_via_cli(root);
+    fs::write(root.join("a.txt"), "a\n").expect("write a");
+    super::assert_cli_success(&run_libra_command(&["add", "a.txt"], root), "stage a");
+    repo
+}
+
+/// `-F -` reads the whole commit message from standard input.
+#[test]
+fn commit_message_from_stdin() {
+    let repo = commit_fixture();
+    let root = repo.path();
+    let out = run_libra_command_with_stdin(
+        &["commit", "-F", "-"],
+        root,
+        "stdin subject line\n\nbody paragraph\n",
+    );
+    super::assert_cli_success(&out, "commit -F -");
+    let log = run_libra_command(&["log", "-1", "--format=%B"], root);
+    super::assert_cli_success(&log, "log after stdin commit");
+    let text = String::from_utf8_lossy(&log.stdout);
+    assert!(
+        text.contains("stdin subject line") && text.contains("body paragraph"),
+        "the whole stdin message must be used: {text}"
+    );
+}
+
+/// `-S` / `--gpg-sign[=<keyid>]` is accepted; Libra signs by default, so it is
+/// a no-op selector rather than a rejection.
+#[test]
+fn commit_gpg_sign_flag_is_accepted() {
+    let repo = commit_fixture();
+    let root = repo.path();
+    for (index, flag) in ["-S", "--gpg-sign"].iter().enumerate() {
+        // Restage before each iteration: the previous commit consumed the
+        // staged change.
+        let file = format!("signed{index}.txt");
+        fs::write(root.join(&file), "s\n").expect("write staged file");
+        super::assert_cli_success(
+            &run_libra_command(&["add", &file], root),
+            "stage the fixture",
+        );
+        let out = run_libra_command(&["commit", flag, "-m", "signed"], root);
+        super::assert_cli_success(&out, &format!("commit {flag} -m signed"));
+        let log = run_libra_command(&["log", "-1", "--format=%s"], root);
+        assert_eq!(String::from_utf8_lossy(&log.stdout).trim(), "signed");
+    }
+    // The key-id form is accepted (and ignored: one vault key per repository).
+    fs::write(root.join("keyed.txt"), "k\n").expect("write keyed file");
+    super::assert_cli_success(
+        &run_libra_command(&["add", "keyed.txt"], root),
+        "stage keyed",
+    );
+    let keyed = run_libra_command(&["commit", "-S=DEADBEEF", "-m", "keyed"], root);
+    super::assert_cli_success(&keyed, "commit -S=<keyid>");
+}
+
+/// `--short` renders the short (porcelain) change summary, with and without
+/// `--dry-run`.
+#[test]
+fn commit_short_summary_flag() {
+    let repo = commit_fixture();
+    let root = repo.path();
+    fs::write(root.join("b.txt"), "b\n").expect("write b");
+    super::assert_cli_success(&run_libra_command(&["add", "b.txt"], root), "stage b");
+
+    let dry = run_libra_command(&["commit", "--short", "--dry-run"], root);
+    super::assert_cli_success(&dry, "commit --short --dry-run");
+    assert!(
+        String::from_utf8_lossy(&dry.stdout).contains("A  b.txt"),
+        "the short summary lists staged paths: {}",
+        String::from_utf8_lossy(&dry.stdout)
+    );
+
+    let committed = run_libra_command(&["commit", "--short", "-m", "short"], root);
+    super::assert_cli_success(&committed, "commit --short -m");
+    assert!(
+        String::from_utf8_lossy(&committed.stdout).contains("A  b.txt"),
+        "a real --short commit still prints the summary: {}",
+        String::from_utf8_lossy(&committed.stdout)
+    );
+}
+
+/// `-u[=<mode>]` is accepted (the untracked-files listing mode).
+#[test]
+fn commit_untracked_files_flag_is_accepted() {
+    let repo = commit_fixture();
+    let root = repo.path();
+    fs::write(root.join("untracked.txt"), "u\n").expect("write untracked");
+    for (index, flag) in ["-u", "--untracked-files=no"].iter().enumerate() {
+        // Restage before each iteration: the previous commit consumed the
+        // staged change, and an empty commit would be refused for a different
+        // reason.
+        fs::write(root.join(format!("staged{index}.txt")), "s\n").expect("write staged file");
+        super::assert_cli_success(
+            &run_libra_command(&["add", &format!("staged{index}.txt")], root),
+            "stage the fixture",
+        );
+        let out = run_libra_command(&["commit", flag, "-m", "with u"], root);
+        super::assert_cli_success(&out, &format!("commit {flag}"));
+    }
+}
+
+/// Partial-commit options are classified with `LBR-UNSUPPORTED-001` instead of
+/// an unknown-option error, and nothing is committed.
+#[test]
+fn commit_partial_commit_options_are_classified() {
+    let repo = commit_fixture();
+    let root = repo.path();
+    let before = run_libra_command(&["rev-parse", "--verify", "HEAD"], root);
+
+    for args in [
+        vec!["commit", "--only", "-m", "x"],
+        vec!["commit", "--pathspec-from-file", "list", "-m", "x"],
+    ] {
+        let out = run_libra_command(&args, root);
+        assert_eq!(
+            out.status.code(),
+            Some(128),
+            "{args:?} must be classified: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("LBR-UNSUPPORTED-001") && stderr.contains("partial commit"),
+            "{args:?} must name the missing feature: {stderr}"
+        );
+    }
+    let after = run_libra_command(&["rev-parse", "--verify", "HEAD"], root);
+    assert_eq!(
+        before.status.success(),
+        after.status.success(),
+        "a refused partial commit must not create a commit"
+    );
+}

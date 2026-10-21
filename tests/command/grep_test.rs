@@ -364,6 +364,7 @@ async fn test_grep_tree_accepts_branch_revisions() {
             ignore_case: false,
             column: None,
             verbose: 0,
+            ..Default::default()
         },
         &OutputConfig::default(),
     )

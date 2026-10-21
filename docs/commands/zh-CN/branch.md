@@ -45,6 +45,9 @@ branch 的**查询**形态（裸列表、`-l`/`-r`/`-a`、`--show-current`、`-v
 | | `--show-current` | | 打印当前分支名或 detached HEAD 状态 |
 | `-m` | `--move` | `<old> <new>` 或 `<new>` | 重命名分支；一个参数时重命名当前分支 |
 | `-c` | `--copy` | `<old> <new>` 或 `<new>` | 复制分支（连同上游配置）到新名称，保留源分支；目标已存在则失败 |
+| `-f` | `--force` | `<name> [<start-point>]` | 创建分支，或把**已存在的分支重置**到 start-point（Git 的 `git branch -f`）；不带 `-f` 时同名分支以 `fatal: a branch named '<name>' already exists` 拒绝 |
+| | `--create-reflog` | | 为兼容而接受：Libra 每次更新分支都会写 reflog，因此该标志只是选择既有默认行为 |
+| | `--no-sort` | | 清除命令行排序键**与**已配置的 `branch.sort`，回退到 refname 顺序；其后再给 `--sort` 会重新生效（两个方向都是「后者胜」） |
 | `-C` | `--copy-force` | `<old> <new>` 或 `<new>` | 同 `-c`，但目标已存在时覆盖 |
 | `-r` | `--remotes` | | 只显示远程跟踪分支 |
 | `-a` | `--all` | | 显示本地和远程跟踪分支 |

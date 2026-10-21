@@ -314,7 +314,7 @@ fn parse_track_mode(raw: &str) -> Result<BranchTrackMode, String> {
     }
 }
 
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Default)]
 #[command(after_help = BRANCH_AFTER_HELP)]
 #[command(args_conflicts_with_subcommands = true)]
 #[command(group(
@@ -342,6 +342,23 @@ pub struct BranchArgs {
     /// base branch name or commit hash
     #[clap(requires = "new_branch")]
     pub commit_hash: Option<String>,
+
+    /// Reset `<new_branch>` to `<start-point>` even when it already exists
+    /// (Git's `-f` / `--force`). Without it an existing name is refused.
+    #[clap(short = 'f', long = "force", requires = "new_branch")]
+    pub force: bool,
+
+    /// Create the branch's reflog (Git's `--create-reflog`). Libra always
+    /// records a reflog entry for every branch update, so this is accepted as a
+    /// no-op that selects the behaviour it already has.
+    #[clap(long = "create-reflog")]
+    pub create_reflog: bool,
+
+    /// Cancel the sort keys given so far (Git's `--no-sort`): listing falls back
+    /// to the configured `branch.sort` or refname order. A later `--sort`
+    /// re-enables sorting (last one wins).
+    #[clap(long = "no-sort", group = "query", overrides_with = "sort")]
+    pub no_sort: bool,
 
     /// list all branches, don't include remote branches
     #[clap(short, long, group = "query")]
@@ -458,7 +475,7 @@ pub struct BranchArgs {
     /// object's byte size), or `objectname` (the tip commit's object id). A
     /// leading `-` reverses (e.g. `-committerdate` lists newest first). Implies
     /// --list.
-    #[clap(long, group = "query", value_name = "key")]
+    #[clap(long, group = "query", value_name = "key", overrides_with = "no_sort")]
     pub sort: Option<String>,
 
     /// Sorting and name comparisons ignore case where applicable.
@@ -1800,6 +1817,7 @@ async fn create_branch_impl(
     new_branch: String,
     branch_or_commit: Option<String>,
     record_operation: bool,
+    force: bool,
 ) -> Result<BranchOutput, BranchError> {
     tracing::debug!("create branch: {} from {:?}", new_branch, branch_or_commit);
 
@@ -1810,10 +1828,14 @@ async fn create_branch_impl(
         return Err(BranchError::Locked(new_branch));
     }
 
-    if Branch::find_branch_result(&new_branch, None)
-        .await
-        .map_err(map_branch_store_error)?
-        .is_some()
+    // `-f`/`--force` resets an existing branch to the start point (Git's
+    // `git branch -f <name> <start>`), so the existence check only applies
+    // without it.
+    if !force
+        && Branch::find_branch_result(&new_branch, None)
+            .await
+            .map_err(map_branch_store_error)?
+            .is_some()
     {
         return Err(BranchError::AlreadyExists(new_branch));
     }
@@ -1863,7 +1885,7 @@ async fn create_branch_impl(
             let exists = Branch::exists_result_with_conn(&transaction, &branch_for_operation, None)
                 .await
                 .map_err(|error| DbErr::Custom(error.to_string()))?;
-            if exists {
+            if exists && !force {
                 return Err(DbErr::Custom(format!(
                     "a branch named '{}' already exists",
                     branch_for_operation
@@ -1998,7 +2020,13 @@ async fn create_branch_with_optional_track(
         None => None,
     };
 
-    let created = create_branch_impl(new_branch.clone(), args.commit_hash.clone(), true).await?;
+    let created = create_branch_impl(
+        new_branch.clone(),
+        args.commit_hash.clone(),
+        true,
+        args.force,
+    )
+    .await?;
     match planned {
         Some(PlannedCreateTracking::Write {
             remote,
@@ -2287,7 +2315,7 @@ async fn collect_branch_output(args: &BranchArgs) -> Result<BranchOutput, Branch
         || args.points_at.is_some()
         || args.merged.is_some()
         || args.no_merged.is_some()
-        || args.sort.is_some();
+        || (args.sort.is_some() && !args.no_sort);
     let (head_name, detached_head) = match Head::current().await {
         Head::Branch(name) => (Some(name), None),
         Head::Detached(commit_hash) => (None, Some(commit_hash.to_string())),
@@ -2412,12 +2440,17 @@ async fn collect_branch_output(args: &BranchArgs) -> Result<BranchOutput, Branch
     // `plain_name`. The config is resolved here — after `has_commit_filters`
     // and `show_unborn_head` — so a configured sort, unlike the flag, neither
     // implies `--list` nor suppresses the unborn-HEAD line (Git behavior).
-    let config_sort = if args.sort.is_none() {
+    // `--no-sort` cancels the keys given so far AND the configured default:
+    // listing falls back to refname order (Git's `--no-sort`). A later
+    // `--sort` wins, which is why the flag pair is resolved as "sort present and
+    // no-sort absent".
+    let sort_key = args.sort.as_deref();
+    let config_sort = if sort_key.is_none() && !args.no_sort {
         configured_branch_sort().await?
     } else {
         None
     };
-    let sorted = match args.sort.as_deref() {
+    let sorted = match sort_key {
         Some(key) => {
             sort_branch_entries(&mut entries, key, args.ignore_case)?;
             true
@@ -2945,7 +2978,7 @@ pub async fn create_branch_safe(
     new_branch: String,
     branch_or_commit: Option<String>,
 ) -> CliResult<()> {
-    create_branch_impl(new_branch, branch_or_commit, false)
+    create_branch_impl(new_branch, branch_or_commit, false, false)
         .await
         .map(|_| ())
         .map_err(CliError::from)?;
@@ -2998,6 +3031,9 @@ pub async fn list_branches(
         no_column: false,
         new_branch: None,
         commit_hash: None,
+        force: false,
+        create_reflog: false,
+        no_sort: false,
         list: true,
         delete: None,
         delete_safe: None,

@@ -473,6 +473,7 @@ async fn test_branch() {
             ignore_case: false,
             column: None,
             verbose: 0,
+            ..Default::default()
         };
         execute(args).await;
 
@@ -524,6 +525,7 @@ async fn test_branch() {
             ignore_case: false,
             column: None,
             verbose: 0,
+            ..Default::default()
         };
         execute(args).await;
         let second_branch = Branch::find_branch_result(&second_branch_name, None)
@@ -565,6 +567,7 @@ async fn test_branch() {
         ignore_case: false,
         column: None,
         verbose: 0,
+        ..Default::default()
     };
     execute(args).await;
 
@@ -634,6 +637,7 @@ async fn test_create_branch_from_remote() {
         ignore_case: false,
         column: None,
         verbose: 0,
+        ..Default::default()
     };
     execute(args).await;
 
@@ -704,6 +708,7 @@ async fn test_create_branch_from_remote_tracking_ref() {
         ignore_case: false,
         column: None,
         verbose: 0,
+        ..Default::default()
     })
     .await;
 
@@ -930,6 +935,7 @@ async fn test_branch_rename() {
         ignore_case: false,
         column: None,
         verbose: 0,
+        ..Default::default()
     };
     execute(args).await;
 
@@ -970,6 +976,7 @@ async fn test_branch_rename() {
         ignore_case: false,
         column: None,
         verbose: 0,
+        ..Default::default()
     };
     execute(args).await;
 
@@ -1080,6 +1087,7 @@ async fn test_rename_current_branch() {
         ignore_case: false,
         column: None,
         verbose: 0,
+        ..Default::default()
     };
     execute(args).await;
 
@@ -1164,6 +1172,7 @@ async fn test_rename_to_existing_branch() {
         ignore_case: false,
         column: None,
         verbose: 0,
+        ..Default::default()
     };
     execute(args).await;
 
@@ -1196,6 +1205,7 @@ async fn test_rename_to_existing_branch() {
         ignore_case: false,
         column: None,
         verbose: 0,
+        ..Default::default()
     };
     execute(args).await;
 
@@ -1229,6 +1239,7 @@ async fn test_rename_to_existing_branch() {
         ignore_case: false,
         column: None,
         verbose: 0,
+        ..Default::default()
     };
     execute(args).await;
 
@@ -1306,6 +1317,7 @@ async fn test_list_all_branches() {
         ignore_case: false,
         column: None,
         verbose: 0,
+        ..Default::default()
     };
     execute(args).await;
 
@@ -1349,6 +1361,7 @@ async fn test_list_all_branches() {
         ignore_case: false,
         column: None,
         verbose: 0,
+        ..Default::default()
     };
     execute(args).await; // This will print to stdout, which is fine for tests
 
@@ -1431,6 +1444,7 @@ async fn test_branch_delete_safe() {
         ignore_case: false,
         column: None,
         verbose: 0,
+        ..Default::default()
     })
     .await;
 
@@ -1512,6 +1526,7 @@ async fn test_branch_delete_safe() {
         ignore_case: false,
         column: None,
         verbose: 0,
+        ..Default::default()
     })
     .await;
 
@@ -1594,6 +1609,7 @@ async fn test_branch_delete_safe() {
         ignore_case: false,
         column: None,
         verbose: 0,
+        ..Default::default()
     })
     .await;
 
@@ -1695,6 +1711,7 @@ async fn test_branch_contains_commit_filter() {
         ignore_case: false,
         column: None,
         verbose: 0,
+        ..Default::default()
     })
     .await;
 
@@ -3439,4 +3456,129 @@ fn test_branch_all_and_remote_listing_format() {
             "D3 fields unchanged: {branch}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// issue #526: `-f`/`--force`, `--create-reflog`, `--no-sort`.
+// ---------------------------------------------------------------------------
+
+fn branch_fixture() -> tempfile::TempDir {
+    let repo = tempdir().expect("tempdir");
+    let root = repo.path();
+    super::init_repo_via_cli(root);
+    super::configure_identity_via_cli(root);
+    fs::write(root.join("a.txt"), "a\n").expect("write a");
+    super::assert_cli_success(&run_libra_command(&["add", "a.txt"], root), "stage a");
+    super::assert_cli_success(
+        &run_libra_command(&["commit", "-m", "c1", "--no-verify"], root),
+        "commit c1",
+    );
+    fs::write(root.join("b.txt"), "b\n").expect("write b");
+    super::assert_cli_success(&run_libra_command(&["add", "b.txt"], root), "stage b");
+    super::assert_cli_success(
+        &run_libra_command(&["commit", "-m", "c2", "--no-verify"], root),
+        "commit c2",
+    );
+    repo
+}
+
+/// `-f`/`--force` creates a branch or RESETS an existing one to the start
+/// point (Git's `git branch -f <name> <start>`).
+#[test]
+fn branch_force_creates_and_resets() {
+    let repo = branch_fixture();
+    let root = repo.path();
+    let first = String::from_utf8_lossy(&run_libra_command(&["rev-parse", "HEAD~1"], root).stdout)
+        .trim()
+        .to_string();
+    let second = String::from_utf8_lossy(&run_libra_command(&["rev-parse", "HEAD"], root).stdout)
+        .trim()
+        .to_string();
+
+    // Create with -f.
+    let created = run_libra_command(&["branch", "-f", "side", "HEAD"], root);
+    super::assert_cli_success(&created, "branch -f side HEAD");
+    assert_eq!(
+        String::from_utf8_lossy(&run_libra_command(&["rev-parse", "side"], root).stdout).trim(),
+        second
+    );
+
+    // Reset an existing branch with -f.
+    let reset = run_libra_command(&["branch", "-f", "side", "HEAD~1"], root);
+    super::assert_cli_success(&reset, "branch -f side HEAD~1");
+    assert_eq!(
+        String::from_utf8_lossy(&run_libra_command(&["rev-parse", "side"], root).stdout).trim(),
+        first,
+        "-f must re-point the existing branch"
+    );
+
+    // Without -f an existing name is still refused with Git's wording.
+    let refused = run_libra_command(&["branch", "side", "HEAD"], root);
+    assert!(!refused.status.success(), "no -f must refuse");
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("a branch named 'side' already exists"),
+        "{}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+}
+
+/// `--create-reflog` is accepted (Libra always writes branch reflogs).
+#[test]
+fn branch_create_reflog_is_accepted() {
+    let repo = branch_fixture();
+    let root = repo.path();
+    let out = run_libra_command(&["branch", "--create-reflog", "with-reflog", "HEAD"], root);
+    super::assert_cli_success(&out, "branch --create-reflog");
+    let log = run_libra_command(&["reflog", "show", "with-reflog"], root);
+    assert!(
+        log.status.success(),
+        "the branch must have a reflog: {}",
+        String::from_utf8_lossy(&log.stderr)
+    );
+}
+
+/// `--no-sort` clears the sort keys AND the configured `branch.sort`; a later
+/// `--sort` wins again.
+#[test]
+fn branch_no_sort_cancels_sort_keys() {
+    let repo = branch_fixture();
+    let root = repo.path();
+    for name in ["zeta", "alpha", "mid"] {
+        super::assert_cli_success(
+            &run_libra_command(&["branch", name, "HEAD"], root),
+            "create branch",
+        );
+    }
+    // `--sort=-refname` lists newest name first; `--no-sort` falls back to
+    // refname order.
+    let reverse = run_libra_command(&["branch", "--sort=-refname", "--list"], root);
+    super::assert_cli_success(&reverse, "sorted list");
+    let reverse_text = String::from_utf8_lossy(&reverse.stdout);
+    let plain = run_libra_command(&["branch", "--sort=-refname", "--no-sort", "--list"], root);
+    super::assert_cli_success(&plain, "--no-sort list");
+    let plain_text = String::from_utf8_lossy(&plain.stdout);
+    assert_ne!(
+        reverse_text, plain_text,
+        "--no-sort must change the listing order"
+    );
+    let lines: Vec<&str> = plain_text
+        .lines()
+        .map(|line| line.trim_start_matches("* ").trim())
+        .filter(|line| !line.is_empty())
+        .collect();
+    let mut sorted = lines.clone();
+    sorted.sort();
+    assert_eq!(
+        lines, sorted,
+        "--no-sort falls back to refname order: {lines:?}"
+    );
+
+    // A later --sort re-enables sorting (last one wins).
+    let resorted = run_libra_command(&["branch", "--no-sort", "--sort=-refname", "--list"], root);
+    super::assert_cli_success(&resorted, "--no-sort then --sort");
+    assert_eq!(
+        String::from_utf8_lossy(&resorted.stdout),
+        reverse_text,
+        "the trailing --sort must win"
+    );
 }

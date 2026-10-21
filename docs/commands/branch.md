@@ -47,6 +47,9 @@ Branch **query** forms (bare list, `-l`/`-r`/`-a`, `--show-current`, `-v`, list 
 | | `--show-current` | | Print the current branch name or detached HEAD state |
 | `-m` | `--move` | `<old> <new>` or `<new>` | Rename a branch; with one argument renames the current branch |
 | `-c` | `--copy` | `<old> <new>` or `<new>` | Copy a branch (and its upstream config) to a new name, keeping the source; fails if the destination exists |
+| `-f` | `--force` | `<name> [<start-point>]` | Create the branch, or **reset an existing branch** to the start point (Git's `git branch -f`); without it an existing name is refused with `fatal: a branch named '<name>' already exists` |
+| | `--create-reflog` | | Accepted for parity: Libra records a reflog for every branch update, so this selects the existing default |
+| | `--no-sort` | | Clear the command-line sort keys **and** the configured `branch.sort`, falling back to refname order; a later `--sort` wins again (last one wins in either direction) |
 | `-C` | `--copy-force` | `<old> <new>` or `<new>` | Like `-c`, but overwrite the destination if it exists |
 | `-r` | `--remotes` | | Show remote-tracking branches only |
 | `-a` | `--all` | | Show local and remote-tracking branches |

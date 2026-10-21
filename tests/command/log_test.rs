@@ -2557,6 +2557,7 @@ async fn test_log_all_includes_branches() {
         ignore_case: false,
         column: None,
         verbose: 0,
+        ..Default::default()
     })
     .await;
 

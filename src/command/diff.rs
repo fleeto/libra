@@ -289,6 +289,32 @@ pub struct DiffArgs {
     #[clap(long = "no-index")]
     pub no_index: bool,
 
+    /// Show a per-directory change distribution counted by FILE rather than by
+    /// changed line (`git diff --dirstat-by-file[=<pct>][,cumulative]`). The
+    /// optional value is the same parameter list `--dirstat` accepts.
+    #[clap(long = "dirstat-by-file", value_name = "PARAM", num_args = 0..=1, require_equals = true, default_missing_value = "", conflicts_with = "stat")]
+    pub dirstat_by_file: Option<String>,
+
+    /// Recognised Git diff options that Libra does not implement. They are
+    /// declared so the request is classified (`LBR-UNSUPPORTED-001`) instead of
+    /// reported as an unknown option (issues/524).
+    #[clap(long = "stat-name-width", value_name = "N", hide = true)]
+    pub stat_name_width: Option<usize>,
+
+    #[clap(long = "inter-hunk-context", value_name = "N", hide = true)]
+    pub inter_hunk_context: Option<usize>,
+
+    #[clap(
+        short = 'I',
+        long = "ignore-matching-lines",
+        value_name = "REGEX",
+        hide = true
+    )]
+    pub ignore_matching_lines: Option<String>,
+
+    #[clap(short = 'B', long = "break-rewrites", value_name = "N[/M]", num_args = 0..=1, default_missing_value = "", hide = true)]
+    pub break_rewrites: Option<String>,
+
     /// Show a per-directory change distribution (`--dirstat[=<param>,...]`, `-X`).
     /// Parameters: `changes` (default), `lines`, `files`, `noncumulative`,
     /// `cumulative`, and a percentage threshold (default 3%).
@@ -735,6 +761,42 @@ pub async fn execute(args: DiffArgs) {
 }
 
 pub async fn execute_safe(args: DiffArgs, output: &OutputConfig) -> CliResult<()> {
+    // Recognised-but-unimplemented Git options: classify them explicitly
+    // (`LBR-UNSUPPORTED-001`) instead of letting clap report an unknown option
+    // (issues/524).
+    for (flag, detail) in [
+        (
+            "--stat-name-width",
+            "the diffstat name column has a fixed-width layout; per-file name widths are not implemented",
+        ),
+        (
+            "--inter-hunk-context",
+            "hunk coalescing distance is fixed at the -U context; --inter-hunk-context is not implemented",
+        ),
+        (
+            "--ignore-matching-lines/-I",
+            "hunk suppression by changed-line pattern is not implemented",
+        ),
+        (
+            "--break-rewrites/-B",
+            "diffcore-break (rewrite detection) is not implemented",
+        ),
+    ] {
+        let requested = match flag {
+            "--stat-name-width" => args.stat_name_width.is_some(),
+            "--inter-hunk-context" => args.inter_hunk_context.is_some(),
+            "--ignore-matching-lines/-I" => args.ignore_matching_lines.is_some(),
+            _ => args.break_rewrites.is_some(),
+        };
+        if requested {
+            return Err(
+                CliError::fatal(format!("diff {flag} is not implemented: {detail}"))
+                    .with_stable_code(StableErrorCode::Unsupported)
+                    .with_hint("drop the option, or run 'git diff' for this comparison"),
+            );
+        }
+    }
+
     if args.no_index {
         return execute_no_index_safe(&args, output).await;
     }
@@ -743,6 +805,15 @@ pub async fn execute_safe(args: DiffArgs, output: &OutputConfig) -> CliResult<()
     }
     crate::command::status::warn_sparse_checkout_unsupported_once().await;
     let mut args = args;
+    // `--dirstat-by-file[=<param>]` is `--dirstat=files[,<param>]`.
+    if let Some(param) = args.dirstat_by_file.clone() {
+        let merged = if param.is_empty() {
+            "files".to_string()
+        } else {
+            format!("files,{param}")
+        };
+        args.dirstat = Some(merged);
+    }
     resolve_positional_revisions(&mut args)
         .await
         .map_err(CliError::from)?;
@@ -5141,6 +5212,11 @@ pub(crate) async fn staged_diff_text() -> Result<String, DiffError> {
         ignore_blank_lines: false,
         summary: false,
         dirstat: None,
+        dirstat_by_file: None,
+        stat_name_width: None,
+        inter_hunk_context: None,
+        ignore_matching_lines: None,
+        break_rewrites: None,
         raw: false,
         compact_summary: false,
         diff_filter: None,

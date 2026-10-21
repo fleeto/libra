@@ -3573,3 +3573,88 @@ fn test_diff_intent_to_add_as_new_file() {
         "V6 diff HEAD: {head_text:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// issue #524: `--dirstat-by-file` and the explicit classification of the
+// recognised-but-unimplemented diff options.
+// ---------------------------------------------------------------------------
+
+/// `--dirstat-by-file[=<param>]` is `--dirstat=files[,<param>]`: same output,
+/// same threshold/cumulative parameters.
+#[test]
+fn diff_dirstat_by_file_matches_the_files_parameter() {
+    let repo = super::create_committed_repo_via_cli();
+    let root = repo.path();
+    fs::create_dir_all(root.join("d1")).expect("mkdir d1");
+    fs::write(root.join("d1/a"), "a\n").expect("write a");
+    fs::write(root.join("d1/b"), "b\n").expect("write b");
+    super::assert_cli_success(&run_libra_command(&["add", "."], root), "stage d1");
+    super::assert_cli_success(
+        &run_libra_command(&["commit", "-m", "d1", "--no-verify"], root),
+        "commit d1",
+    );
+    fs::write(root.join("d1/a"), "a2\n").expect("change a");
+    fs::write(root.join("d1/b"), "b2\n").expect("change b");
+    super::assert_cli_success(&run_libra_command(&["add", "."], root), "stage changes");
+    super::assert_cli_success(
+        &run_libra_command(&["commit", "-m", "d1b", "--no-verify"], root),
+        "commit d1b",
+    );
+
+    for (by_file_args, files_args) in [
+        (
+            vec!["diff", "--dirstat-by-file", "HEAD^", "HEAD"],
+            vec!["diff", "--dirstat=files", "HEAD^", "HEAD"],
+        ),
+        (
+            vec!["diff", "--dirstat-by-file=10", "HEAD^", "HEAD"],
+            vec!["diff", "--dirstat=files,10", "HEAD^", "HEAD"],
+        ),
+        (
+            vec!["diff", "--dirstat-by-file=10,cumulative", "HEAD^", "HEAD"],
+            vec!["diff", "--dirstat=files,10,cumulative", "HEAD^", "HEAD"],
+        ),
+    ] {
+        let by_file = run_libra_command(&by_file_args, root);
+        super::assert_cli_success(&by_file, "rebase --dirstat-by-file");
+        let files = run_libra_command(&files_args, root);
+        super::assert_cli_success(&files, "--dirstat=files");
+        assert_eq!(
+            String::from_utf8_lossy(&by_file.stdout),
+            String::from_utf8_lossy(&files.stdout),
+            "{by_file_args:?} must match {files_args:?}"
+        );
+        assert!(
+            String::from_utf8_lossy(&by_file.stdout).contains("d1/"),
+            "the distribution must name the changed directory: {}",
+            String::from_utf8_lossy(&by_file.stdout)
+        );
+    }
+}
+
+/// The recognised-but-unimplemented options are classified with a stable
+/// `LBR-UNSUPPORTED-001` diagnostic instead of clap's unknown-option error.
+#[test]
+fn diff_unimplemented_options_are_classified() {
+    let repo = super::create_committed_repo_via_cli();
+    let root = repo.path();
+    for args in [
+        vec!["diff", "--stat-name-width=20"],
+        vec!["diff", "--inter-hunk-context=3"],
+        vec!["diff", "-I", "needle"],
+        vec!["diff", "-B"],
+    ] {
+        let out = run_libra_command(&args, root);
+        assert_eq!(
+            out.status.code(),
+            Some(128),
+            "{args:?} must fail with the unsupported class: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("LBR-UNSUPPORTED-001") && stderr.contains("is not implemented"),
+            "{args:?} must be classified, not reported as unknown: {stderr}"
+        );
+    }
+}

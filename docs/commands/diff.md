@@ -93,6 +93,7 @@ normal pipeline termination; no panic/backtrace or `Broken pipe` diagnostic is p
 | Shortstat | | `--shortstat` | Show only the trailing summary line of `--stat` (files changed / insertions / deletions), omitting a clause when its count is zero. |
 | Summary | | `--summary` | Show a condensed summary of created/deleted files, detected renames, and mode changes (rename detection is on by default; `diff.renames=false` or `--no-renames` disables it). Plain content-only edits produce no line. |
 | Directory stat | `-X` | `--dirstat[=<param>,...]` | Show a per-directory distribution of changes instead of the patch. Parameters: `changes` (default), `lines`, `files`, `noncumulative` (default), `cumulative`, and a percentage cut-off (default 3%). Requires `=` for the value. |
+| Directory stat by file | | `--dirstat-by-file[=<param>]` | Count changes by FILE rather than by changed line; identical to `--dirstat=files[,<param>]` (`<param>` accepts the same `cumulative`/percentage values). |
 | No-index | | `--no-index` | Diff two filesystem paths directly, without the index or a repository. Recurses directories, pairs same-named entries, and exits 1 on differences. |
 | No patch | `-s` | `--no-patch` | Suppress the patch (diff body). Combine with `--exit-code` for a status-only check. |
 | Exit code | | `--exit-code` | Still print the diff, but exit with code 1 when there are differences (0 otherwise). Unlike `--quiet`, the diff is not suppressed. Combined with `--check` the two statuses **add**: see the `--check` row. |

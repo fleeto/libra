@@ -87,6 +87,7 @@ const METADATA_FIELDS: &[&str] = &[
     "created_at",
     "extraction",
     "transcript_snapshot",
+    "usage_attribution",
 ];
 const EVENT_FIELDS: &[&str] = &[
     "schema_version",

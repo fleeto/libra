@@ -6,10 +6,13 @@
 //! implementations. Pure ingress/reducer modules have no durable-store
 //! dependency; the catalog module is the narrow, typed exception that owns
 //! scope-fenced `agent_session` mutations without knowing ref topology.
+//! The diagnostics owner separately writes a best-effort, content-free hook
+//! observation journal; it never writes capture facts or recovery receipts.
 
 pub(crate) mod catalog;
 pub(crate) mod checkpoint;
 pub(crate) mod coordinator;
+pub(crate) mod diagnostics;
 pub(crate) mod extraction;
 pub use extraction::deadline_provider_extraction_summary;
 pub(crate) mod finalizer;
@@ -39,6 +42,7 @@ pub(crate) mod runtime_scope;
 pub(crate) mod scope_binding;
 pub mod snapshot;
 pub(crate) mod state;
+pub(crate) mod summary;
 #[doc(hidden)]
 pub mod test_support;
 pub(crate) mod worker;

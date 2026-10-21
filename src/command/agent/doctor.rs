@@ -75,6 +75,8 @@
 //! span sink — doctor is metadata-first and never materializes or renders
 //! transcript blobs.
 //! Detection-only runs emit no repair spans (nothing was attempted).
+//! The opt-in closed-index reconciliation additionally streams local ordinary
+//! objects through a bounded integrity check, returning facts rather than bodies.
 //!
 //! Managed task workspaces are inspected against their durable allocation
 //! records. Unknown directories, incomplete intents, and replaced workspace
@@ -92,7 +94,7 @@ use std::{
     io::Read,
     path::{Path, PathBuf},
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, bail};
@@ -125,6 +127,7 @@ use crate::{
                     insert_agent_checkpoint_row_idempotent,
                     insert_subagent_checkpoint_row_idempotent,
                 },
+                diagnostics::{self, CaptureDiagnostics},
                 pending,
                 recovery::{self, ArtifactRecoveryOutcome},
             },
@@ -294,6 +297,9 @@ struct ProviderHookEventStatus {
 
 #[derive(Debug, Serialize)]
 struct DoctorReport {
+    capture_diagnostics: CaptureDiagnostics,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    codex_reconciliation: Option<CodexReconciliationReport>,
     schema_present: bool,
     active_sessions: i64,
     stopped_sessions: i64,
@@ -312,6 +318,365 @@ struct DoctorReport {
     task_workspaces: TaskWorkspaceReport,
     /// RC-31: frozen Code-era residue (read-only existence check).
     legacy_code_residue: LegacyCodeResidue,
+}
+
+#[derive(Debug, Serialize)]
+struct CodexReconciliationRow {
+    provider_session_id: String,
+    updated_at_ms: i64,
+    archived: bool,
+    scope: crate::internal::ai::observed_agents::codex_index::RecentScopeStatus,
+    status: &'static str,
+    detail: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    import_hint: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct CodexReconciliationReport {
+    status: &'static str,
+    reason: Option<String>,
+    window_anchor_ms: Option<i64>,
+    cutoff_ms: Option<i64>,
+    coverage_until_ms: Option<i64>,
+    freshness: Option<crate::internal::ai::observed_agents::codex_index::IndexFreshness>,
+    scope_candidate_count: Option<usize>,
+    scope_ambiguous_count: Option<usize>,
+    scope_unknown_count: Option<usize>,
+    page: u16,
+    page_size: usize,
+    totals_scope: &'static str,
+    page_totals: Option<BTreeMap<&'static str, usize>>,
+    rows: Vec<CodexReconciliationRow>,
+}
+
+impl CodexReconciliationReport {
+    fn unavailable(page: u16, reason: impl Into<String>) -> Self {
+        Self {
+            status: "unavailable",
+            reason: Some(reason.into()),
+            window_anchor_ms: None,
+            cutoff_ms: None,
+            coverage_until_ms: None,
+            freshness: None,
+            scope_candidate_count: None,
+            scope_ambiguous_count: None,
+            scope_unknown_count: None,
+            page,
+            page_size: 1000,
+            totals_scope: "page",
+            page_totals: None,
+            rows: Vec::new(),
+        }
+    }
+}
+
+fn codex_catalog_failure_reason(error: &anyhow::Error, end: std::time::Instant) -> &'static str {
+    if std::time::Instant::now() >= end
+        || error
+            .downcast_ref::<crate::internal::ai::checkpoint_reader::CheckpointReaderError>()
+            .is_some_and(|error| {
+                matches!(
+                    error,
+                    crate::internal::ai::checkpoint_reader::CheckpointReaderError::Budget
+                )
+            })
+    {
+        "budget_exhausted"
+    } else {
+        "scope_or_catalog_unavailable"
+    }
+}
+
+/// Reconciliation is advisory, local and strictly read-only. Blocking scope
+/// and object operations run off the async executor, and workers are joined.
+async fn codex_reconciliation(
+    conn: DatabaseConnection,
+    storage: PathBuf,
+    backup: PathBuf,
+    page: u16,
+) -> CodexReconciliationReport {
+    // Capture both invocation cwd and root before crossing into a blocking
+    // task: the request pin is task-local, and cwd may be a subdirectory.
+    let (root, cwd) = match crate::internal::worktree_scope::WorktreeScope::request_scope() {
+        Some(request) => (request.worktree_root, request.workdir),
+        None => match (util::try_working_dir(), std::env::current_dir()) {
+            (Ok(root), Ok(cwd)) => (root, cwd),
+            _ => return CodexReconciliationReport::unavailable(page, "scope_unavailable"),
+        },
+    };
+    let backup = util::normalize_abs_path(&if backup.is_absolute() {
+        backup
+    } else {
+        cwd.join(backup)
+    });
+    let end = std::time::Instant::now() + Duration::from_secs(2);
+    let now_ms = Utc::now().timestamp_millis();
+    let runtime = tokio::runtime::Handle::current();
+    match tokio::task::spawn_blocking(move || {
+        runtime.block_on(collect_codex_reconciliation(
+            conn, storage, backup, page, now_ms, end, root,
+        ))
+    })
+    .await
+    {
+        Ok(report) => report,
+        Err(_) => CodexReconciliationReport::unavailable(page, "worker_unavailable"),
+    }
+}
+
+async fn collect_codex_reconciliation(
+    conn: DatabaseConnection,
+    storage: PathBuf,
+    backup: PathBuf,
+    page: u16,
+    now_ms: i64,
+    end: std::time::Instant,
+    root: PathBuf,
+) -> CodexReconciliationReport {
+    use crate::internal::ai::{
+        capture::{
+            catalog::ReconciliationCatalogState,
+            summary::{StoredSourcePresence, stored_source_presence},
+        },
+        checkpoint_reader::{
+            CheckpointReadBudget, CheckpointReaderError, LocalSourceReadAllowance,
+            latest_session_metadata_in_snapshot,
+        },
+        observed_agents::codex_index::{
+            IndexFreshness, RecentIndexOutcome, RecentScopeQuery, RecentScopeStatus,
+        },
+        provider_index_io,
+    };
+    let snapshot = match provider_index_io::read_recent_closed_backup(
+        &backup,
+        RecentScopeQuery {
+            version: 1,
+            now_ms,
+            root: root.clone(),
+            root_identity: None,
+        },
+        end,
+    )
+    .await
+    {
+        Ok(RecentIndexOutcome::Available { snapshot }) => snapshot,
+        Ok(RecentIndexOutcome::Unavailable { reason }) => {
+            return CodexReconciliationReport::unavailable(page, reason.reason_key());
+        }
+        Err(error) => {
+            let reason = error
+                .downcast_ref::<provider_index_io::ReconciliationReadFailure>()
+                .map(|failure| failure.reason_key())
+                .unwrap_or_else(|| {
+                    if Instant::now() >= end {
+                        "budget_exhausted"
+                    } else {
+                        "backup_unreadable"
+                    }
+                });
+            return CodexReconciliationReport::unavailable(page, reason);
+        }
+    };
+    let budget = CheckpointReadBudget::new(end, Arc::new(|| false));
+    let start = usize::from(page.saturating_sub(1)) * 1000;
+    let selected = snapshot
+        .threads
+        .iter()
+        .skip(start)
+        .take(1000)
+        .collect::<Vec<_>>();
+    let ids = selected
+        .iter()
+        .map(|thread| thread.id.as_str())
+        .collect::<Vec<_>>();
+    let txn = match conn.begin().await {
+        Ok(txn) => txn,
+        Err(_) => return CodexReconciliationReport::unavailable(page, "catalog_unavailable"),
+    };
+    let mut metadata_remaining = 8 * 1024 * 1024;
+    let prepared = tokio::time::timeout_at(tokio::time::Instant::from_std(end), async {
+        let scope = CaptureScope::resolve(&txn, &root).await?;
+        let states = CaptureCatalogStore::reconciliation_catalog_in_snapshot(
+            &txn,
+            &scope,
+            &ids,
+            now_ms,
+            end,
+            &mut metadata_remaining,
+        )
+        .await?;
+        let mut prepared = Vec::with_capacity(states.len());
+        for (thread, mut state) in selected.into_iter().zip(states) {
+            budget.check()?;
+            let checkpoint = match &state {
+                ReconciliationCatalogState::Session { session_id }
+                    if thread.scope == RecentScopeStatus::Proven =>
+                {
+                    match latest_session_metadata_in_snapshot(&txn, &storage, session_id, &budget)
+                        .await
+                    {
+                        Ok(checkpoint) => checkpoint,
+                        Err(
+                            error @ (CheckpointReaderError::Budget
+                            | CheckpointReaderError::CatalogUnavailable),
+                        ) => return Err(error.into()),
+                        Err(_) => {
+                            state = ReconciliationCatalogState::Unknown;
+                            None
+                        }
+                    }
+                }
+                _ => None,
+            };
+            prepared.push((thread, state, checkpoint));
+        }
+        Ok::<_, anyhow::Error>(prepared)
+    })
+    .await;
+    // Even after cancellation, finish transaction closure before inspecting
+    // immutable objects. No writer, lease or SQLite task is left detached.
+    if txn.rollback().await.is_err() {
+        return CodexReconciliationReport::unavailable(page, "catalog_unavailable");
+    }
+    let prepared = match prepared {
+        Ok(Ok(prepared)) => prepared,
+        Err(_) => return CodexReconciliationReport::unavailable(page, "budget_exhausted"),
+        Ok(Err(error)) => {
+            return CodexReconciliationReport::unavailable(
+                page,
+                codex_catalog_failure_reason(&error, end),
+            );
+        }
+    };
+    let mut report = CodexReconciliationReport {
+        status: match snapshot.freshness {
+            IndexFreshness::WithinWindow => "available",
+            IndexFreshness::OutsideWindow => "outside_window",
+            IndexFreshness::EmptySnapshot => "empty_snapshot",
+        },
+        reason: None,
+        window_anchor_ms: Some(snapshot.window_anchor_ms),
+        cutoff_ms: Some(snapshot.cutoff_ms),
+        coverage_until_ms: snapshot.backup_max_updated_at_ms,
+        freshness: Some(snapshot.freshness),
+        scope_candidate_count: Some(snapshot.candidate_count),
+        scope_ambiguous_count: Some(snapshot.scope_ambiguous_count),
+        scope_unknown_count: Some(snapshot.scope_unknown_count),
+        page,
+        page_size: 1000,
+        totals_scope: "page",
+        page_totals: None,
+        rows: Vec::with_capacity(prepared.len()),
+    };
+    let children = snapshot
+        .spawn_edges
+        .iter()
+        .map(|edge| edge.child_thread_id.as_str())
+        .collect::<BTreeSet<_>>();
+    let mut allowance = LocalSourceReadAllowance {
+        metadata_remaining,
+        ordinary_remaining: 64 * 1024 * 1024,
+    };
+    let mut totals = [
+        "stored_source",
+        "missing",
+        "missing_data",
+        "partial",
+        "pending",
+        "erased",
+        "unknown",
+    ]
+    .into_iter()
+    .map(|status| (status, 0usize))
+    .collect::<BTreeMap<_, _>>();
+    // This entire future is driven on the joined blocking worker; synchronous
+    // local-only proof and streaming never run on a Tokio executor thread.
+    for (thread, state, checkpoint) in prepared {
+        if budget.check().is_err() {
+            return CodexReconciliationReport::unavailable(page, "budget_exhausted");
+        }
+        let (mut status, mut detail) = match state {
+            ReconciliationCatalogState::Erased => ("erased", None),
+            ReconciliationCatalogState::Pending { lease_expired } => {
+                ("pending", lease_expired.then_some("import_lease_expired"))
+            }
+            _ if thread.scope != RecentScopeStatus::Proven => ("unknown", Some("scope_unproven")),
+            ReconciliationCatalogState::BudgetExhausted => ("unknown", Some("budget_exhausted")),
+            ReconciliationCatalogState::Unknown => ("unknown", Some("catalog_unproven")),
+            ReconciliationCatalogState::Missing => ("missing", None),
+            ReconciliationCatalogState::Session { session_id } => match checkpoint {
+                None => ("missing_data", Some("no_committed_checkpoint")),
+                Some(checkpoint) => {
+                    let checkpoint_id = checkpoint.checkpoint_id().to_string();
+                    match checkpoint.read_local_codex_source(&budget, &mut allowance) {
+                        Err(CheckpointReaderError::Budget) => ("unknown", Some("budget_exhausted")),
+                        Err(_) => ("unknown", Some("local_source_unavailable")),
+                        Ok(facts) => match stored_source_presence(
+                            &facts.metadata,
+                            &checkpoint_id,
+                            &session_id,
+                            &thread.id,
+                        ) {
+                            StoredSourcePresence::Complete
+                                if facts.transcript_bytes > 0
+                                    && facts.declared_transcript_bytes
+                                        == Some(facts.transcript_bytes) =>
+                            {
+                                ("stored_source", None)
+                            }
+                            StoredSourcePresence::Complete
+                                if facts.declared_transcript_bytes.is_none() =>
+                            {
+                                ("unknown", Some("stored_size_unproven"))
+                            }
+                            StoredSourcePresence::Complete
+                                if facts.transcript_bytes == 0
+                                    && facts.declared_transcript_bytes == Some(0) =>
+                            {
+                                ("missing_data", Some("stored_transcript_empty"))
+                            }
+                            StoredSourcePresence::Complete => {
+                                ("unknown", Some("stored_size_mismatch"))
+                            }
+                            StoredSourcePresence::MissingData => {
+                                ("missing_data", Some("ordinary_source_unproven"))
+                            }
+                            StoredSourcePresence::Partial => ("partial", None),
+                            StoredSourcePresence::Unknown => ("unknown", Some("metadata_unproven")),
+                        },
+                    }
+                }
+            },
+        };
+        if matches!(status, "missing" | "missing_data") && children.contains(thread.id.as_str()) {
+            status = "unknown";
+            detail = Some("child_attribution_unproven");
+        }
+        let import_hint = matches!(status, "missing" | "missing_data")
+            .then(|| format!("libra agent import --agent codex --session={}", thread.id));
+        if let Some(count) = totals.get_mut(status) {
+            *count += 1;
+        }
+        report.rows.push(CodexReconciliationRow {
+            provider_session_id: thread.id.clone(),
+            updated_at_ms: thread.updated_at_ms,
+            archived: thread.archived,
+            scope: thread.scope,
+            status,
+            detail,
+            import_hint,
+        });
+    }
+    if budget.check().is_err() {
+        return CodexReconciliationReport::unavailable(page, "budget_exhausted");
+    }
+    if start > 0 && start >= snapshot.candidate_count {
+        report.reason = Some("page_out_of_range".to_string());
+    } else if snapshot.freshness != IndexFreshness::OutsideWindow {
+        report.page_totals = Some(totals);
+    }
+    report
 }
 
 /// plan-20260920 RC-31: frozen Code-era residue. Read-only — this diagnostic
@@ -523,6 +888,11 @@ enum RepairPlan {
     ReplayPendingArtifact {
         recovery: CaptureCatalogFinalizerRecovery,
         observed_at_ms: i64,
+    },
+    /// Prepare child data only. The independent artifact diagnosis was
+    /// Manual and must not gain replay or quarantine authority.
+    PrepareTerminalChildren {
+        recovery: CaptureCatalogFinalizerRecovery,
     },
     /// Append one coverage revision for an authorized legacy Claude checkpoint.
     /// The stored objects stay in place.
@@ -757,8 +1127,22 @@ pub async fn execute_safe(args: DoctorArgs, output: &OutputConfig) -> CliResult<
     let task_workspaces = scan_task_workspaces(&storage);
     let legacy_code_residue = scan_legacy_code_residue(&conn).await?;
 
+    let codex_reconciliation = match args.codex_index_backup {
+        Some(backup) => Some(
+            codex_reconciliation(
+                conn.clone(),
+                storage.clone(),
+                backup,
+                args.codex_index_page.unwrap_or(1),
+            )
+            .await,
+        ),
+        None => None,
+    };
     emit_report(
         &DoctorReport {
+            capture_diagnostics: diagnostics::summarize(&storage),
+            codex_reconciliation,
             schema_present,
             active_sessions,
             stopped_sessions,
@@ -1757,20 +2141,62 @@ pub(crate) async fn run_pending_artifact_worker() -> CliResult<()> {
             if !recovery.artifact_present() {
                 continue;
             }
+            if !recovery.superseded() && !recovery.quarantined() {
+                let child_deadline = match batch.deadline() {
+                    Ok(value) => value,
+                    Err(_) => {
+                        stop_after_round = true;
+                        break;
+                    }
+                };
+                if let Err(error) =
+                    crate::internal::ai::subagent_content::recover_terminal_children(
+                        &conn,
+                        &storage,
+                        &recovery,
+                        child_deadline,
+                    )
+                    .await
+                {
+                    let waiting =
+                        crate::internal::ai::capture::live_checkpoint::child_checkpoint_wait_error(
+                            error.as_ref(),
+                        )
+                        .is_some();
+                    tracing::debug!(target: "agent.capture.recovery",
+                        reason = if waiting { "child_checkpoints_pending" } else { "child_recovery_deferred" },
+                        "terminal child recovery retained its original pending state");
+                    continue;
+                }
+            }
+
             if recovery.superseded() || recovery.quarantined() || recovery.budget_exhausted() {
-                if !quarantine_worker_candidate(
+                let pair = match batch.deadline() {
+                    Ok(pair) => pair,
+                    Err(_) => {
+                        stop_after_round = true;
+                        break;
+                    }
+                };
+                match quarantine_worker_candidate_with_children(
                     &conn,
                     &scope,
                     recovery.checkpoint_id(),
                     Some(deadline),
+                    Some((&recovery, pair)),
                 )
                 .await
                 {
-                    tracing::warn!(target: "agent.capture.recovery", reason = "pending_candidate_quarantine_failed", "capture recovery stopped because a stale candidate could not be retained in quarantine");
-                    stop_after_round = true;
-                    break;
+                    WorkerCandidateQuarantine::ChildPending
+                    | WorkerCandidateQuarantine::Deferred => continue,
+                    WorkerCandidateQuarantine::Failed => {
+                        tracing::warn!(target: "agent.capture.recovery", reason = "pending_candidate_quarantine_failed",
+                            "capture recovery stopped because a stale candidate could not be retained in quarantine");
+                        stop_after_round = true;
+                        break;
+                    }
+                    WorkerCandidateQuarantine::Quarantined => made_progress = true,
                 }
-                made_progress = true;
                 continue;
             }
             let mut finding = CheckpointFinding {
@@ -1780,6 +2206,13 @@ pub(crate) async fn run_pending_artifact_worker() -> CliResult<()> {
                 repaired: false,
                 manual_required: false,
             };
+            let replay_pair = match batch.deadline() {
+                Ok(pair) => pair,
+                Err(_) => {
+                    stop_after_round = true;
+                    break;
+                }
+            };
             let replay_disposition = replay_capture_artifact(
                 &conn,
                 &mut finding,
@@ -1787,23 +2220,37 @@ pub(crate) async fn run_pending_artifact_worker() -> CliResult<()> {
                 observed_at_ms,
                 false,
                 &mut batch,
+                Some(replay_pair),
             )
             .await;
             match replay_disposition {
                 ArtifactReplayDisposition::PermanentFailure => {
-                    if !quarantine_worker_candidate(
+                    let pair = match batch.deadline() {
+                        Ok(pair) => pair,
+                        Err(_) => {
+                            stop_after_round = true;
+                            break;
+                        }
+                    };
+                    match quarantine_worker_candidate_with_children(
                         &conn,
                         &scope,
                         recovery.checkpoint_id(),
                         Some(deadline),
+                        Some((&recovery, pair)),
                     )
                     .await
                     {
-                        tracing::warn!(target: "agent.capture.recovery", reason = "pending_candidate_quarantine_failed", "capture recovery stopped because a failed candidate could not be retained in quarantine");
-                        stop_after_round = true;
-                        break;
+                        WorkerCandidateQuarantine::ChildPending
+                        | WorkerCandidateQuarantine::Deferred => continue,
+                        WorkerCandidateQuarantine::Failed => {
+                            tracing::warn!(target: "agent.capture.recovery", reason = "pending_candidate_quarantine_failed",
+                                "capture recovery stopped because a failed candidate could not be retained in quarantine");
+                            stop_after_round = true;
+                            break;
+                        }
+                        WorkerCandidateQuarantine::Quarantined => made_progress = true,
                     }
-                    made_progress = true;
                 }
                 ArtifactReplayDisposition::Completed => made_progress = true,
                 ArtifactReplayDisposition::RetryLater | ArtifactReplayDisposition::Refused => {
@@ -1844,17 +2291,39 @@ fn is_permanent_worker_candidate_error(
     )
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WorkerCandidateQuarantine {
+    Quarantined,
+    ChildPending,
+    Deferred,
+    Failed,
+}
+
 async fn quarantine_worker_candidate(
     conn: &DatabaseConnection,
     scope: &CaptureScope,
     checkpoint_id: &str,
     deadline: Option<std::time::Instant>,
 ) -> bool {
+    matches!(
+        quarantine_worker_candidate_with_children(conn, scope, checkpoint_id, deadline, None,)
+            .await,
+        WorkerCandidateQuarantine::Quarantined
+    )
+}
+
+async fn quarantine_worker_candidate_with_children(
+    conn: &DatabaseConnection,
+    scope: &CaptureScope,
+    checkpoint_id: &str,
+    deadline: Option<std::time::Instant>,
+    children: Option<(&CaptureCatalogFinalizerRecovery, CaptureCommitDeadline)>,
+) -> WorkerCandidateQuarantine {
     if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
-        return false;
+        return WorkerCandidateQuarantine::Failed;
     }
     let Ok(txn) = conn.begin().await else {
-        return false;
+        return WorkerCandidateQuarantine::Failed;
     };
     if txn
         .execute_unprepared("UPDATE metadata_kv SET updated_at = updated_at WHERE 0")
@@ -1864,17 +2333,53 @@ async fn quarantine_worker_candidate(
         || deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline)
     {
         let _ = txn.rollback().await;
-        return false;
+        return WorkerCandidateQuarantine::Failed;
+    }
+    if let Some((recovery, pair)) = children
+        && !recovery.superseded()
+        && !recovery.quarantined()
+    {
+        match crate::internal::ai::capture::catalog::child_recovery_is_pending(&txn, recovery, pair)
+            .await
+        {
+            Ok(true) => {
+                let _ = txn.rollback().await;
+                return WorkerCandidateQuarantine::ChildPending;
+            }
+            Ok(false) => {}
+            Err(crate::internal::ai::capture::catalog::CaptureCatalogError::ScopeRejected) => {
+                let _ = txn.rollback().await;
+                return WorkerCandidateQuarantine::Deferred;
+            }
+            Err(_) => {
+                let _ = txn.rollback().await;
+                return WorkerCandidateQuarantine::Failed;
+            }
+        }
     }
     match pending::quarantine_checkpoint_if_present(&txn, &scope.repo_id, checkpoint_id).await {
-        Ok(true) => txn.commit().await.is_ok(),
-        Ok(false) => {
-            let _ = txn.rollback().await;
-            false
+        Ok(true) => {
+            if let Some((_, pair)) = children
+                && crate::internal::ai::capture_scope::authorize_final_capture_commit(
+                    Some(scope),
+                    &txn,
+                    Some(pair),
+                )
+                .await
+                .is_err()
+            {
+                let _ = txn.rollback().await;
+                return WorkerCandidateQuarantine::Failed;
+            }
+            if txn.commit().await.is_ok() {
+                WorkerCandidateQuarantine::Quarantined
+            } else {
+                WorkerCandidateQuarantine::Failed
+            }
         }
-        Err(_) => {
+        Ok(false) | Err(_) => {
             let _ = txn.rollback().await;
-            false
+            WorkerCandidateQuarantine::Failed
         }
     }
 }
@@ -2806,27 +3311,14 @@ async fn scan_checkpoint_store(
                 }
                 let durable = ref_map.contains_key(&checkpoint_id)
                     && !manual_checkpoint_ids.contains(&checkpoint_id);
-                let budget_exhausted = recovery.budget_exhausted();
-                let manual_only = recovery.manual_only();
-                let artifact_present = recovery.artifact_present();
-                let artifact_pending = recovery.artifact_pending();
-                let artifact_manual_attempted = recovery.artifact_manual_attempted();
-                let (detail, repair_kind) = diagnose_pending_finalizer(
-                    manual_only,
-                    durable,
-                    budget_exhausted,
-                    artifact_present,
-                    artifact_pending,
-                    artifact_manual_attempted,
-                );
-                findings.push(CheckpointFinding {
-                    inconsistency_type: CLASS_EXPIRED_INFLIGHT_MARKER.to_string(),
-                    checkpoint_id: diagnostic_checkpoint_id(&checkpoint_id),
-                    detail: detail.to_string(),
-                    repaired: false,
-                    manual_required: manual_only || !durable,
-                });
+                let (finding, repair_kind) = pending_finalizer_finding(&recovery, durable);
+                findings.push(finding);
                 plans.push(match repair_kind {
+                    FinalizerRepairKind::Manual
+                        if recovery.waiting_for_children() && !recovery.manual_only() =>
+                    {
+                        RepairPlan::PrepareTerminalChildren { recovery }
+                    }
                     FinalizerRepairKind::Manual => RepairPlan::Manual,
                     FinalizerRepairKind::CompleteDurable => RepairPlan::RecoverPendingFinalizer {
                         recovery,
@@ -2998,6 +3490,7 @@ async fn replay_capture_artifact(
     observed_at_ms: i64,
     manual: bool,
     replay_batch: &mut ArtifactReplayBatch,
+    prepared_deadline: Option<CaptureCommitDeadline>,
 ) -> ArtifactReplayDisposition {
     if !replay_batch.has_capacity() {
         finding.manual_required = true;
@@ -3018,7 +3511,10 @@ async fn replay_capture_artifact(
             return ArtifactReplayDisposition::Refused;
         }
     };
-    let deadline = match replay_batch.attempt_deadline(manual) {
+    let deadline = match prepared_deadline
+        .map(Ok)
+        .unwrap_or_else(|| replay_batch.attempt_deadline(manual))
+    {
         Ok(deadline) => deadline,
         Err(_) => {
             finding.manual_required = true;
@@ -3028,25 +3524,40 @@ async fn replay_capture_artifact(
             return ArtifactReplayDisposition::Refused;
         }
     };
-    let replay_result = recovery::replay_for_doctor(recovery::DoctorReplayRequest {
-        conn,
-        recovery,
-        storage: &storage,
-        root: &root,
-        repo_path: &repo_path,
-        now_millis: observed_at_ms,
-        deadline,
-        manual,
-    })
-    .await;
+    let replay_result =
+        recovery::replay_for_doctor_with_child_status(recovery::DoctorReplayRequest {
+            conn,
+            recovery,
+            storage: &storage,
+            root: &root,
+            repo_path: &repo_path,
+            now_millis: observed_at_ms,
+            deadline,
+            manual,
+        })
+        .await;
+    let mut waiting_for_children = false;
     let replay_result = match replay_result {
+        Ok(result) => {
+            waiting_for_children = result.waiting_for_children;
+            Ok(result.outcome)
+        }
+        Err(error)
+            if crate::internal::ai::capture::live_checkpoint::child_checkpoint_wait_error(
+                error.as_ref(),
+            )
+            .is_some() =>
+        {
+            waiting_for_children = true;
+            Ok(ArtifactRecoveryOutcome::RetryLater)
+        }
         Err(error) if pending::retryable_load_failure(&error, deadline.monotonic()) => {
             Ok(ArtifactRecoveryOutcome::RetryLater)
         }
         Err(error) if is_permanent_pending_replay_failure(&error) => {
             Ok(ArtifactRecoveryOutcome::ManualRequired)
         }
-        result => result,
+        Err(error) => Err(error),
     };
     if !matches!(
         replay_result,
@@ -3067,6 +3578,9 @@ async fn replay_capture_artifact(
             finding.detail.push_str(
                 "; bounded recovery batch limit was reached; rerun `libra agent doctor --repair` to continue",
             );
+        }
+        Ok(ArtifactRecoveryOutcome::RetryLater) if waiting_for_children => {
+            mark_child_checkpoints_pending(finding);
         }
         Ok(ArtifactRecoveryOutcome::RetryLater) => {
             finding.manual_required = true;
@@ -3253,6 +3767,44 @@ async fn read_stored_claude_transcript(
     }
 }
 
+fn pending_finalizer_finding(
+    recovery: &CaptureCatalogFinalizerRecovery,
+    durable: bool,
+) -> (CheckpointFinding, FinalizerRepairKind) {
+    let (detail, kind) = diagnose_pending_finalizer(
+        recovery.manual_only(),
+        durable,
+        recovery.budget_exhausted(),
+        recovery.artifact_present(),
+        recovery.artifact_pending(),
+        recovery.artifact_manual_attempted(),
+    );
+    let mut finding = CheckpointFinding {
+        inconsistency_type: CLASS_EXPIRED_INFLIGHT_MARKER.to_string(),
+        checkpoint_id: diagnostic_checkpoint_id(recovery.checkpoint_id()),
+        detail: detail.to_string(),
+        repaired: false,
+        manual_required: recovery.manual_only() || !durable,
+    };
+    if !recovery.manual_only() && recovery.waiting_for_children() {
+        let other_manual_condition = matches!(kind, FinalizerRepairKind::Manual).then_some(detail);
+        mark_child_checkpoints_pending(&mut finding);
+        if let Some(detail) = other_manual_condition {
+            finding
+                .detail
+                .push_str("; separate artifact condition remains after child settlement: ");
+            finding.detail.push_str(detail);
+        }
+    }
+    (finding, kind)
+}
+
+fn mark_child_checkpoints_pending(finding: &mut CheckpointFinding) {
+    finding.repaired = false;
+    finding.manual_required = false;
+    finding.detail = "child checkpoints remain pending; retry from the original authorized agent environment; existing data and the original terminal receipt were retained".to_string();
+}
+
 /// Execute one repair plan, updating the finding in place. Repair failures
 /// never abort the run — they annotate the finding and leave it
 /// unrepaired so the operator sees exactly what happened.
@@ -3268,6 +3820,7 @@ async fn execute_repair(
         RepairPlan::RecoverPendingFinalizer { recovery, .. }
         | RepairPlan::QuarantineExhaustedPendingFinalizer { recovery, .. }
         | RepairPlan::QuarantineStalePendingArtifact { recovery }
+        | RepairPlan::PrepareTerminalChildren { recovery }
         | RepairPlan::ReplayPendingArtifact { recovery, .. } => Some(recovery),
         _ => None,
     };
@@ -3296,11 +3849,76 @@ async fn execute_repair(
             }
         }
     }
+    let mut child_recovery_deadline = None;
+    if let Some(recovery) = finalizer_recovery
+        && !matches!(plan, RepairPlan::QuarantineStalePendingArtifact { .. })
+    {
+        let manual = matches!(plan, RepairPlan::QuarantineExhaustedPendingFinalizer { .. });
+        let deadline = match replay_batch.attempt_deadline(manual) {
+            Ok(deadline) => deadline,
+            Err(_) => {
+                finding.manual_required = true;
+                finding
+                    .detail
+                    .push_str("; terminal child recovery budget could not be established");
+                return;
+            }
+        };
+        child_recovery_deadline = Some(deadline);
+        match crate::internal::ai::subagent_content::recover_terminal_children(
+            conn,
+            &util::request_storage_path(),
+            recovery,
+            deadline,
+        )
+        .await
+        {
+            Ok(()) => {}
+            Err(error)
+                if crate::internal::ai::capture::live_checkpoint::child_checkpoint_wait_error(
+                    error.as_ref(),
+                )
+                .is_some() =>
+            {
+                mark_child_checkpoints_pending(finding);
+                return;
+            }
+            Err(_) => {
+                finding.manual_required = true;
+                finding.detail.push_str(
+                    "; terminal child recovery was deferred without advancing its original receipt",
+                );
+                return;
+            }
+        }
+    }
+    let finalizer_catalog = match child_recovery_deadline {
+        Some(deadline) => CaptureCatalogStore::new_until(conn.clone(), deadline),
+        None => CaptureCatalogStore::new(conn.clone()),
+    };
     match plan {
+        RepairPlan::PrepareTerminalChildren { recovery } => {
+            // Keep the original Manual decision after child settlement. A
+            // subsequent diagnosis can refresh it, without granting this
+            // invocation a new replay/quarantine action.
+            let (detail, _) = diagnose_pending_finalizer(
+                recovery.manual_only(),
+                false,
+                recovery.budget_exhausted(),
+                recovery.artifact_present(),
+                recovery.artifact_pending(),
+                recovery.artifact_manual_attempted(),
+            );
+            finding.detail = format!(
+                "{detail}; child preparation finished; rerun doctor to refresh the independent artifact diagnosis"
+            );
+            finding.repaired = false;
+            finding.manual_required = true;
+        }
         RepairPlan::QuarantineExhaustedPendingFinalizer {
             recovery,
             observed_at_ms,
-        } => match CaptureCatalogStore::new(conn.clone())
+        } => match finalizer_catalog
             .quarantine_exhausted_pending_finalizer(recovery, *observed_at_ms)
             .await
         {
@@ -3317,6 +3935,7 @@ async fn execute_repair(
                         *observed_at_ms,
                         true,
                         replay_batch,
+                        child_recovery_deadline,
                     )
                     .await;
                 }
@@ -3348,6 +3967,9 @@ async fn execute_repair(
                     "; unexpected terminal recovery result was rejected",
                 );
             }
+            Err(error) if crate::internal::ai::capture::live_checkpoint::child_checkpoint_wait_error(&error).is_some() => {
+                mark_child_checkpoints_pending(finding);
+            }
             Err(_) => {
                 finding.manual_required = true;
                 finding.detail.push_str(
@@ -3373,7 +3995,7 @@ async fn execute_repair(
         RepairPlan::RecoverPendingFinalizer {
             recovery,
             observed_at_ms,
-        } => match CaptureCatalogStore::new(conn.clone())
+        } => match finalizer_catalog
             .recover_pending_finalizer_after_durable_checkpoint(recovery, *observed_at_ms)
             .await
         {
@@ -3405,6 +4027,9 @@ async fn execute_repair(
                     "; finalizer fence changed during doctor recovery; no terminal state was advanced",
                 );
             }
+            Err(error) if crate::internal::ai::capture::live_checkpoint::child_checkpoint_wait_error(&error).is_some() => {
+                mark_child_checkpoints_pending(finding);
+            }
             Err(_) => {
                 finding.manual_required = true;
                 finding.detail.push_str(
@@ -3423,22 +4048,24 @@ async fn execute_repair(
                 *observed_at_ms,
                 false,
                 replay_batch,
+                child_recovery_deadline,
             )
             .await;
+
             if replay_disposition == ArtifactReplayDisposition::PermanentFailure
                 && let Ok(scope) = CaptureScope::resolve(conn, &util::request_working_dir()).await
                 && &scope == recovery.scope()
-                && quarantine_worker_candidate(
-                    conn,
-                    &scope,
-                    recovery.checkpoint_id(),
-                    replay_batch.deadline().ok().map(CaptureCommitDeadline::monotonic),
-                )
-                .await
+                && let Some(pair) = child_recovery_deadline
             {
-                finding.detail.push_str(
-                    "; failed automatic candidate was retained in quarantine for operator inspection",
-                );
+                match quarantine_worker_candidate_with_children(
+                    conn, &scope, recovery.checkpoint_id(), Some(pair.monotonic()), Some((recovery, pair)),
+                ).await {
+                    WorkerCandidateQuarantine::Quarantined => finding.detail.push_str(
+                        "; failed automatic candidate was retained in quarantine for operator inspection",
+                    ),
+                    WorkerCandidateQuarantine::ChildPending => mark_child_checkpoints_pending(finding),
+                    WorkerCandidateQuarantine::Failed | WorkerCandidateQuarantine::Deferred => {}
+                }
             }
         }
         RepairPlan::AppendClaudeLegacyRevision { checkpoint_id } => {
@@ -5326,6 +5953,27 @@ fn check_provider(
     tier: AgentStability,
     provider: Option<&dyn crate::internal::ai::hooks::provider::HookProvider>,
 ) -> ProviderHookStatus {
+    if name == "codex" && provider.is_some() {
+        return match crate::internal::ai::hooks::providers::codex::codex_hook_doctor_events() {
+            Ok(rows) => {
+                let installed = !rows.is_empty() && rows.iter().all(|row| row.configured);
+                let events = rows.into_iter().map(|row| ProviderHookEventStatus {
+                    event: row.event,
+                    installed: Some(row.configured),
+                    class: Some("installable"),
+                    reason: Some(row.reason),
+                }).collect();
+                ProviderHookStatus { name, tier, installed: Some(installed), error: None, events }
+            }
+            Err(_) => ProviderHookStatus {
+                name,
+                tier,
+                installed: None,
+                error: Some("Codex hook settings could not be inspected; verify the regular configuration files, then run libra agent enable --agent codex with Codex 0.162.1 or newer".to_string()),
+                events: Vec::new(),
+            },
+        };
+    }
     let (installed, error) = match provider {
         None => (None, None),
         Some(provider) => {
@@ -5470,6 +6118,71 @@ fn emit_report(report: &DoctorReport, output: &OutputConfig) -> CliResult<()> {
     println!("Active sessions      : {}", report.active_sessions);
     println!("Stopped sessions     : {}", report.stopped_sessions);
     println!("Orphan checkpoints   : {}", report.orphan_checkpoints);
+    println!(
+        "Codex diagnostics    : {}",
+        report.capture_diagnostics.describe()
+    );
+    if let Some(reconciliation) = &report.codex_reconciliation {
+        println!(
+            "Codex reconciliation : {} (provided backup; page {})",
+            reconciliation.status, reconciliation.page
+        );
+        if let Some(reason) = &reconciliation.reason {
+            println!("  reason: {reason}");
+        }
+        let number =
+            |value: Option<i64>| value.map_or_else(|| "n/a".to_string(), |value| value.to_string());
+        let count = |value: Option<usize>| {
+            value.map_or_else(|| "n/a".to_string(), |value| value.to_string())
+        };
+        let freshness = match reconciliation.freshness {
+            Some(
+                crate::internal::ai::observed_agents::codex_index::IndexFreshness::WithinWindow,
+            ) => "within_window",
+            Some(
+                crate::internal::ai::observed_agents::codex_index::IndexFreshness::OutsideWindow,
+            ) => "outside_window",
+            Some(
+                crate::internal::ai::observed_agents::codex_index::IndexFreshness::EmptySnapshot,
+            ) => "empty_snapshot",
+            None => "n/a",
+        };
+        println!("  freshness: {freshness}");
+        println!(
+            "  scope candidates: {}; alias ambiguous: {}; layout unknown: {}",
+            count(reconciliation.scope_candidate_count),
+            count(reconciliation.scope_ambiguous_count),
+            count(reconciliation.scope_unknown_count)
+        );
+        println!(
+            "  coverage (ms): {} through {}; window anchor {}",
+            number(reconciliation.cutoff_ms),
+            number(reconciliation.coverage_until_ms),
+            number(reconciliation.window_anchor_ms)
+        );
+        if let Some(totals) = &reconciliation.page_totals {
+            println!("  page status totals:");
+            for (status, count) in totals {
+                println!("    {status}: {count}");
+            }
+        } else {
+            println!("  page status totals: not computed");
+        }
+        for row in &reconciliation.rows {
+            println!(
+                "  {}: {}{}",
+                row.provider_session_id,
+                row.status,
+                if row.archived { " (archived)" } else { "" }
+            );
+            if let Some(detail) = row.detail {
+                println!("    {detail}");
+            }
+            if let Some(hint) = &row.import_hint {
+                println!("    {hint}");
+            }
+        }
+    }
     if report.legacy_code_residue.paths.is_empty()
         && report.legacy_code_residue.intent_ref.is_none()
     {
@@ -5715,10 +6428,116 @@ async fn scalar_count(conn: &(impl ConnectionTrait + ?Sized), sql: &str) -> CliR
 }
 
 #[cfg(test)]
+#[cfg(feature = "test-live-agent")]
+pub(crate) async fn assert_child_pending_repair_for_test(
+    conn: &DatabaseConnection,
+    root: &Path,
+    storage: &Path,
+    recovery: &CaptureCatalogFinalizerRecovery,
+) {
+    use crate::internal::worktree_scope::{RequestScope, WorktreeScope, with_request_scope};
+    assert!(recovery.waiting_for_children());
+    for durable in [false, true] {
+        let (finding, _) = pending_finalizer_finding(recovery, durable);
+        assert!(
+            !finding.repaired && !finding.manual_required,
+            "read-only diagnosis must retain child pending"
+        );
+        assert!(
+            finding
+                .detail
+                .contains("retry from the original authorized agent environment")
+        );
+    }
+    let root = root.canonicalize().unwrap();
+    let request = RequestScope {
+        scope: WorktreeScope::Main,
+        workdir: root.clone(),
+        gitdir: storage.to_path_buf(),
+        storage: storage.to_path_buf(),
+        worktree_root: root,
+    };
+    with_request_scope(Some(request), async {
+        let history = HistoryManager::for_traces(
+            Arc::new(ClientStorage::init_local_existing(storage.join("objects"))),
+            storage.to_path_buf(),
+            Arc::new(conn.clone()),
+        );
+        for plan in [
+            RepairPlan::RecoverPendingFinalizer {
+                recovery: recovery.clone(),
+                observed_at_ms: 2
+                    + crate::internal::ai::capture::finalizer::MAX_FINALIZE_WINDOW_MILLIS,
+            },
+            RepairPlan::QuarantineExhaustedPendingFinalizer {
+                recovery: recovery.clone(),
+                observed_at_ms: 2
+                    + crate::internal::ai::capture::finalizer::MAX_FINALIZE_WINDOW_MILLIS,
+            },
+            RepairPlan::ReplayPendingArtifact {
+                recovery: recovery.clone(),
+                observed_at_ms: 2
+                    + crate::internal::ai::capture::finalizer::MAX_FINALIZE_WINDOW_MILLIS,
+            },
+        ] {
+            let mut finding = CheckpointFinding {
+                inconsistency_type: "local-child-pending".into(),
+                checkpoint_id: "opaque-checkpoint".into(),
+                detail: "local recovery".into(),
+                repaired: true,
+                manual_required: true,
+            };
+            let mut batch = ArtifactReplayBatch::new();
+            execute_repair(
+                conn,
+                &history,
+                &mut finding,
+                &plan,
+                &recovery.scope().repo_id,
+                &mut batch,
+            )
+            .await;
+            assert!(!finding.repaired);
+            assert!(!finding.manual_required, "{}", finding.detail);
+            assert!(
+                finding
+                    .detail
+                    .contains("retry from the original authorized agent environment")
+            );
+            assert!(!finding.detail.contains("automatic replay will retry"));
+            assert_eq!(batch.attempts_remaining, ArtifactReplayBatch::MAX_ATTEMPTS);
+        }
+    })
+    .await;
+}
+
+#[cfg(test)]
 mod tests {
     use sea_orm::{Database, DbBackend};
 
     use super::*;
+
+    #[cfg(feature = "test-live-agent")]
+    #[test]
+    #[ignore = "operator-local Codex acceptance; never run in CI"]
+    fn codex_reconcile_catalog_failure_preserves_budget_reason() {
+        use crate::internal::ai::checkpoint_reader::CheckpointReaderError;
+        let end = std::time::Instant::now() + Duration::from_secs(60);
+        let budget = anyhow::Error::new(CheckpointReaderError::Budget).context("private detail");
+        assert_eq!(
+            codex_catalog_failure_reason(&budget, end),
+            "budget_exhausted"
+        );
+        let catalog = anyhow::Error::new(CheckpointReaderError::CatalogUnavailable);
+        assert_eq!(
+            codex_catalog_failure_reason(&catalog, end),
+            "scope_or_catalog_unavailable"
+        );
+        assert_eq!(
+            codex_catalog_failure_reason(&catalog, std::time::Instant::now()),
+            "budget_exhausted"
+        );
+    }
 
     /// The handler's own storage/database mappings keep the stable codes of
     /// the generic repository preflight that doctor skips, and never embed
@@ -5760,6 +6579,235 @@ mod tests {
                 error.render_json()
             );
         }
+    }
+
+    #[cfg(feature = "test-live-agent")]
+    #[tokio::test]
+    #[ignore = "operator-local Codex acceptance; never run in CI"]
+    async fn codex_child_recover_doctor_preserves_pending_without_manual_or_attempt_charges() {
+        use crate::internal::ai::{
+            capture::{
+                catalog::{
+                    CaptureCatalogAction, CaptureCatalogApplyRequest,
+                    CaptureCatalogFinalizeRequest, CaptureCatalogMutation, CaptureCatalogPort,
+                    CaptureCatalogSession,
+                },
+                finalizer::{
+                    CaptureFinalizeMode, CaptureFinalizePolicy, FinalizeCheckpointProgress,
+                },
+                state::{
+                    CapturePhase, DurableCaptureState, LifecycleReducerInput, reduce_lifecycle,
+                },
+            },
+            hooks::LifecycleEventKind,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let storage = root.join(".libra");
+        std::fs::create_dir_all(storage.join("objects")).unwrap();
+        let conn =
+            crate::internal::db::create_database(storage.join(util::DATABASE).to_str().unwrap())
+                .await
+                .unwrap();
+        crate::internal::config::ConfigKv::set_with_conn(
+            &conn,
+            "libra.repoid",
+            "local-doctor-child-test",
+            false,
+        )
+        .await
+        .unwrap();
+        let scope = CaptureScope::main_for_connection(&conn).await.unwrap();
+        let session = CaptureCatalogSession::new(
+            "local-child-parent",
+            "codex",
+            "local-root",
+            root.to_str().unwrap(),
+        )
+        .unwrap();
+        let store = CaptureCatalogStore::new(conn.clone());
+        let mut current = None;
+        let mut terminal = None;
+        for (n, kind) in [
+            LifecycleEventKind::SessionStart,
+            LifecycleEventKind::SessionEnd,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let id = uuid::Uuid::new_v4();
+            let reducer = reduce_lifecycle(LifecycleReducerInput {
+                current,
+                event_kind: kind,
+                event_id: id,
+                occurred_at: n as i64 + 1,
+                deadline: None,
+            })
+            .unwrap();
+            let request = CaptureCatalogApplyRequest::new(
+                scope.clone(),
+                session.clone(),
+                CaptureCatalogAction::from_ingress(id, None, kind).unwrap(),
+                CaptureCatalogMutation::from_reducer(current, &reducer, n as i64 + 1).unwrap(),
+            )
+            .unwrap();
+            let request = if n == 1 {
+                request.requiring_child_checkpoints().unwrap()
+            } else {
+                request
+            };
+            store.apply(&request).await.unwrap();
+            current = Some(DurableCaptureState {
+                phase: CapturePhase::Active,
+                stopped_at: None,
+                sync_revision: 1,
+            });
+            if n == 1 {
+                terminal = Some(request);
+            }
+        }
+        let request = terminal.unwrap();
+        let finalizer = CaptureCatalogFinalizeRequest::from_apply(
+            &request,
+            CaptureFinalizePolicy::new(
+                Some(10),
+                CaptureFinalizeMode::Deferrable,
+                request.action().action_key(),
+            )
+            .unwrap(),
+            uuid::Uuid::new_v4().to_string(),
+            None,
+            1,
+            FinalizeCheckpointProgress::NotStarted,
+        )
+        .unwrap();
+        store.finalize(&finalizer).await.unwrap();
+        let early = store
+            .pending_finalizer_recoveries_for_doctor(2)
+            .await
+            .unwrap();
+        assert_eq!(early.recoveries.len(), 1);
+        let original_manual = &early.recoveries[0];
+        assert!(!original_manual.budget_exhausted());
+        let (_, original_kind) = pending_finalizer_finding(original_manual, false);
+        assert_eq!(
+            original_kind,
+            FinalizerRepairKind::Manual,
+            "child pending cannot promote an independent Manual artifact decision"
+        );
+        let mut scan = store
+            .pending_finalizer_recoveries_for_doctor(
+                2 + crate::internal::ai::capture::finalizer::MAX_FINALIZE_WINDOW_MILLIS,
+            )
+            .await
+            .unwrap();
+        assert_eq!(scan.recoveries.len(), 1);
+        let recovery = scan.recoveries.remove(0);
+        assert!(recovery.budget_exhausted());
+        let before: String = conn
+            .query_one_raw(Statement::from_string(
+                conn.get_database_backend(),
+                "SELECT metadata_json FROM agent_session".to_owned(),
+            ))
+            .await
+            .unwrap()
+            .unwrap()
+            .try_get_by("metadata_json")
+            .unwrap();
+        assert_child_pending_repair_for_test(&conn, &root, &storage, &recovery).await;
+        let after: String = conn
+            .query_one_raw(Statement::from_string(
+                conn.get_database_backend(),
+                "SELECT metadata_json FROM agent_session".to_owned(),
+            ))
+            .await
+            .unwrap()
+            .unwrap()
+            .try_get_by("metadata_json")
+            .unwrap();
+        assert_eq!(
+            after, before,
+            "pending recovery must not reset or quarantine its original policy"
+        );
+        let mut ready: serde_json::Value = serde_json::from_str(&after).unwrap();
+        ready["capture_catalog_receipts_v1"]["entries"][0]["child_gate"]["preparing"] =
+            serde_json::json!(false);
+        conn.execute_raw(Statement::from_sql_and_values(
+            conn.get_database_backend(),
+            "UPDATE agent_session SET metadata_json=?",
+            [serde_json::to_string(&ready).unwrap().into()],
+        ))
+        .await
+        .unwrap();
+        let pair = CaptureCommitDeadline::from_budget(Duration::from_secs(5)).unwrap();
+        crate::internal::ai::subagent_content::recover_terminal_children(
+            &conn, &storage, &recovery, pair,
+        )
+        .await
+        .unwrap();
+        // Child settlement between diagnosis and execution must not promote
+        // the independent Manual artifact decision into replay/quarantine.
+        let settled_metadata = serde_json::to_string(&ready).unwrap();
+        let request_scope = crate::internal::worktree_scope::RequestScope {
+            scope: crate::internal::worktree_scope::WorktreeScope::Main,
+            workdir: root.clone(),
+            gitdir: storage.clone(),
+            storage: storage.clone(),
+            worktree_root: root.clone(),
+        };
+        crate::internal::worktree_scope::with_request_scope(Some(request_scope), async {
+            let history = HistoryManager::for_traces(
+                Arc::new(ClientStorage::init_local_existing(storage.join("objects"))),
+                storage.clone(),
+                Arc::new(conn.clone()),
+            );
+            let (mut finding, kind) = pending_finalizer_finding(original_manual, false);
+            assert_eq!(kind, FinalizerRepairKind::Manual);
+            let mut batch = ArtifactReplayBatch::new();
+            execute_repair(
+                &conn,
+                &history,
+                &mut finding,
+                &RepairPlan::PrepareTerminalChildren {
+                    recovery: original_manual.clone(),
+                },
+                &scope.repo_id,
+                &mut batch,
+            )
+            .await;
+            assert!(!finding.repaired && finding.manual_required);
+            assert!(finding.detail.contains("independent artifact diagnosis"));
+            assert_eq!(batch.attempts_remaining, ArtifactReplayBatch::MAX_ATTEMPTS);
+        })
+        .await;
+        let unchanged: String = conn
+            .query_one_raw(Statement::from_string(
+                conn.get_database_backend(),
+                "SELECT metadata_json FROM agent_session".to_owned(),
+            ))
+            .await
+            .unwrap()
+            .unwrap()
+            .try_get_by("metadata_json")
+            .unwrap();
+        assert_eq!(
+            unchanged, settled_metadata,
+            "child-only repair cannot change the original terminal artifact policy"
+        );
+        // Another required terminal delivery rearms the same action after
+        // preflight. The quarantine writer must see it, not trust old status.
+        store.apply(&request).await.unwrap();
+        assert_eq!(
+            quarantine_worker_candidate_with_children(
+                &conn,
+                &scope,
+                recovery.checkpoint_id(),
+                Some(pair.monotonic()),
+                Some((&recovery, pair)),
+            )
+            .await,
+            WorkerCandidateQuarantine::ChildPending
+        );
     }
 
     #[test]

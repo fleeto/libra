@@ -458,6 +458,8 @@ struct RejectedCleanupIndexHelperResponse {
 struct CheckpointObjectIoHelperRequest<'a> {
     /// Standard-base64 encoding of the native path bytes (UTF-8 off Unix).
     repo_path_base64: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    object_format: Option<CheckpointOpaqueObjectFormat>,
     #[serde(borrow)]
     operation: CheckpointObjectIoOperation<'a>,
 }
@@ -517,7 +519,7 @@ pub(crate) struct ReasoningArtifactCheckpointProof {
 /// Private opaque writes carry the parent's preclaimed object algorithm.
 /// Helper processes start before CLI configuration, so their ambient default
 /// must never decide the repository namespace for a verified artifact.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 enum CheckpointOpaqueObjectFormat {
     Sha1,
@@ -540,6 +542,32 @@ impl CheckpointOpaqueObjectFormat {
             Self::Sha256 => git_internal::hash::HashKind::Sha256,
             Self::Blake3 => git_internal::hash::HashKind::Blake3,
         }
+    }
+}
+
+/// Synchronous helper decoding and IO share one hash context. This guard is
+/// deliberately !Send: its TLS must be restored on the thread that installed it.
+struct CheckpointObjectHashScope {
+    previous: git_internal::hash::HashKind,
+    _same_thread: std::marker::PhantomData<*const ()>,
+}
+
+impl CheckpointObjectHashScope {
+    fn enter(format: Option<CheckpointOpaqueObjectFormat>) -> Self {
+        let previous = git_internal::hash::get_hash_kind();
+        if let Some(format) = format {
+            git_internal::hash::set_hash_kind(format.hash_kind());
+        }
+        Self {
+            previous,
+            _same_thread: std::marker::PhantomData,
+        }
+    }
+}
+
+impl Drop for CheckpointObjectHashScope {
+    fn drop(&mut self) {
+        git_internal::hash::set_hash_kind(self.previous);
     }
 }
 
@@ -1253,150 +1281,173 @@ pub fn run_checkpoint_object_io_helper(input: &[u8]) -> Result<Vec<u8>> {
         Err(_) => CheckpointObjectIoHelperResponse::Error {
             code: CheckpointObjectIoHelperError::InvalidRequest,
         },
-        Ok(request) => match decode_checkpoint_object_path(&request.repo_path_base64) {
-            Err(_) => CheckpointObjectIoHelperResponse::Error {
-                code: CheckpointObjectIoHelperError::InvalidPath,
-            },
-            Ok(repo_path) => match request.operation {
-                CheckpointObjectIoOperation::Read { oid, expected_type } => {
-                    if !matches!(expected_type.as_str(), "tree" | "commit") {
-                        CheckpointObjectIoHelperResponse::Error {
-                            code: CheckpointObjectIoHelperError::UnsupportedReadType,
-                        }
-                    } else {
-                        match crate::internal::ai::util::parse_repo_object_id(&oid) {
-                            Err(_) => CheckpointObjectIoHelperResponse::Error {
-                                code: CheckpointObjectIoHelperError::InvalidObjectId,
-                            },
-                            Ok(parsed_oid) => match read_git_object_bounded_validated(
-                                &repo_path,
-                                &parsed_oid,
-                                CHECKPOINT_OBJECT_READ_MAX_INFLATED_BYTES,
-                            ) {
-                                Ok((object_type, data)) if object_type == expected_type => {
-                                    CheckpointObjectIoHelperResponse::Read {
-                                        oid,
-                                        object_type,
-                                        data_base64: STANDARD.encode(data),
-                                    }
-                                }
-                                Ok((_, _)) => CheckpointObjectIoHelperResponse::Error {
-                                    code: CheckpointObjectIoHelperError::ObjectTypeMismatch,
-                                },
-                                Err(_) => CheckpointObjectIoHelperResponse::Error {
-                                    code: CheckpointObjectIoHelperError::ReadFailed,
-                                },
-                            },
-                        }
-                    }
+        Ok(request) => {
+            let operation_format = match &request.operation {
+                CheckpointObjectIoOperation::WriteOpaqueBlob { object_format, .. }
+                | CheckpointObjectIoOperation::VerifyReasoningArtifacts { object_format, .. } => {
+                    Some(*object_format)
                 }
-                operation @ (CheckpointObjectIoOperation::Write { .. }
-                | CheckpointObjectIoOperation::WriteOpaqueBlob { .. }) => {
-                    let (object_type, data_base64, opaque_format) = match operation {
-                        CheckpointObjectIoOperation::Write {
-                            object_type,
-                            data_base64,
-                        } => (object_type, Cow::Owned(data_base64), None),
-                        CheckpointObjectIoOperation::WriteOpaqueBlob {
-                            data_base64,
-                            object_format,
-                        } => ("blob".to_string(), data_base64, Some(object_format)),
-                        _ => {
-                            return serde_json::to_vec(&CheckpointObjectIoHelperResponse::Error {
-                                code: CheckpointObjectIoHelperError::InvalidRequest,
-                            })
-                            .context("encode checkpoint object-I/O helper response");
-                        }
-                    };
-                    if !matches!(object_type.as_str(), "blob" | "tree" | "commit") {
-                        CheckpointObjectIoHelperResponse::Error {
-                            code: CheckpointObjectIoHelperError::UnsupportedObjectType,
-                        }
-                    } else {
-                        match STANDARD.decode(data_base64.as_bytes()) {
-                            Err(_) => CheckpointObjectIoHelperResponse::Error {
-                                code: CheckpointObjectIoHelperError::InvalidPayload,
-                            },
-                            Ok(data) => {
-                                let written = if let Some(format) = opaque_format {
-                                    write_opaque_blob_with_status(
-                                        &repo_path,
-                                        &data,
-                                        format.hash_kind(),
-                                    )
-                                } else {
-                                    write_git_object_with_status(&repo_path, &object_type, &data)
-                                };
-                                match written {
-                                    Ok((oid, was_created)) => {
-                                        CheckpointObjectIoHelperResponse::Written {
-                                            oid: oid.to_string(),
-                                            was_created,
+                _ => None,
+            };
+            if matches!((request.object_format, operation_format), (Some(envelope), Some(operation)) if envelope != operation)
+            {
+                return serde_json::to_vec(&CheckpointObjectIoHelperResponse::Error {
+                    code: CheckpointObjectIoHelperError::InvalidRequest,
+                })
+                .context("encode checkpoint object-I/O helper response");
+            }
+            let _hash_scope =
+                CheckpointObjectHashScope::enter(request.object_format.or(operation_format));
+            match decode_checkpoint_object_path(&request.repo_path_base64) {
+                Err(_) => CheckpointObjectIoHelperResponse::Error {
+                    code: CheckpointObjectIoHelperError::InvalidPath,
+                },
+                Ok(repo_path) => match request.operation {
+                    CheckpointObjectIoOperation::Read { oid, expected_type } => {
+                        if !matches!(expected_type.as_str(), "tree" | "commit") {
+                            CheckpointObjectIoHelperResponse::Error {
+                                code: CheckpointObjectIoHelperError::UnsupportedReadType,
+                            }
+                        } else {
+                            match crate::internal::ai::util::parse_repo_object_id(&oid) {
+                                Err(_) => CheckpointObjectIoHelperResponse::Error {
+                                    code: CheckpointObjectIoHelperError::InvalidObjectId,
+                                },
+                                Ok(parsed_oid) => match read_git_object_bounded_validated(
+                                    &repo_path,
+                                    &parsed_oid,
+                                    CHECKPOINT_OBJECT_READ_MAX_INFLATED_BYTES,
+                                ) {
+                                    Ok((object_type, data)) if object_type == expected_type => {
+                                        CheckpointObjectIoHelperResponse::Read {
+                                            oid,
+                                            object_type,
+                                            data_base64: STANDARD.encode(data),
                                         }
                                     }
-                                    Err(_) => CheckpointObjectIoHelperResponse::Error {
-                                        code: CheckpointObjectIoHelperError::WriteFailed,
+                                    Ok((_, _)) => CheckpointObjectIoHelperResponse::Error {
+                                        code: CheckpointObjectIoHelperError::ObjectTypeMismatch,
                                     },
+                                    Err(_) => CheckpointObjectIoHelperResponse::Error {
+                                        code: CheckpointObjectIoHelperError::ReadFailed,
+                                    },
+                                },
+                            }
+                        }
+                    }
+                    operation @ (CheckpointObjectIoOperation::Write { .. }
+                    | CheckpointObjectIoOperation::WriteOpaqueBlob { .. }) => {
+                        let (object_type, data_base64, opaque_format) = match operation {
+                            CheckpointObjectIoOperation::Write {
+                                object_type,
+                                data_base64,
+                            } => (object_type, Cow::Owned(data_base64), None),
+                            CheckpointObjectIoOperation::WriteOpaqueBlob {
+                                data_base64,
+                                object_format,
+                            } => ("blob".to_string(), data_base64, Some(object_format)),
+                            _ => {
+                                return serde_json::to_vec(
+                                    &CheckpointObjectIoHelperResponse::Error {
+                                        code: CheckpointObjectIoHelperError::InvalidRequest,
+                                    },
+                                )
+                                .context("encode checkpoint object-I/O helper response");
+                            }
+                        };
+                        if !matches!(object_type.as_str(), "blob" | "tree" | "commit") {
+                            CheckpointObjectIoHelperResponse::Error {
+                                code: CheckpointObjectIoHelperError::UnsupportedObjectType,
+                            }
+                        } else {
+                            match STANDARD.decode(data_base64.as_bytes()) {
+                                Err(_) => CheckpointObjectIoHelperResponse::Error {
+                                    code: CheckpointObjectIoHelperError::InvalidPayload,
+                                },
+                                Ok(data) => {
+                                    let written = if let Some(format) = opaque_format {
+                                        write_opaque_blob_with_status(
+                                            &repo_path,
+                                            &data,
+                                            format.hash_kind(),
+                                        )
+                                    } else {
+                                        write_git_object_with_status(
+                                            &repo_path,
+                                            &object_type,
+                                            &data,
+                                        )
+                                    };
+                                    match written {
+                                        Ok((oid, was_created)) => {
+                                            CheckpointObjectIoHelperResponse::Written {
+                                                oid: oid.to_string(),
+                                                was_created,
+                                            }
+                                        }
+                                        Err(_) => CheckpointObjectIoHelperResponse::Error {
+                                            code: CheckpointObjectIoHelperError::WriteFailed,
+                                        },
+                                    }
                                 }
                             }
                         }
                     }
-                }
-                CheckpointObjectIoOperation::VerifySnapshot {
-                    head,
-                    cataloged_commits,
-                    checkpoints,
-                } => {
-                    let specs = checkpoints
-                        .iter()
-                        .map(|checkpoint| CheckpointDurabilitySpec {
-                            checkpoint_id: &checkpoint.checkpoint_id,
-                            traces_commit: &checkpoint.traces_commit,
-                            tree_oid: &checkpoint.tree_oid,
-                            metadata_blob_oid: &checkpoint.metadata_blob_oid,
-                        })
-                        .collect::<Vec<_>>();
-                    match parse_cataloged_traces_commits(&cataloged_commits).and_then(
-                        |cataloged_commits| {
-                            let head = crate::internal::ai::util::parse_repo_object_id(&head)
-                                .map_err(|_| anyhow!("invalid traces snapshot head"))?;
-                            checkpoint_snapshot_durable_oids_from_head(
-                                &repo_path,
-                                head,
-                                &cataloged_commits,
-                                &specs,
-                                None,
-                            )
-                        },
-                    ) {
-                        Ok(oids) => {
-                            let mut oids = oids.into_iter().collect::<Vec<_>>();
-                            oids.sort();
-                            CheckpointObjectIoHelperResponse::Verified { oids }
+                    CheckpointObjectIoOperation::VerifySnapshot {
+                        head,
+                        cataloged_commits,
+                        checkpoints,
+                    } => {
+                        let specs = checkpoints
+                            .iter()
+                            .map(|checkpoint| CheckpointDurabilitySpec {
+                                checkpoint_id: &checkpoint.checkpoint_id,
+                                traces_commit: &checkpoint.traces_commit,
+                                tree_oid: &checkpoint.tree_oid,
+                                metadata_blob_oid: &checkpoint.metadata_blob_oid,
+                            })
+                            .collect::<Vec<_>>();
+                        match parse_cataloged_traces_commits(&cataloged_commits).and_then(
+                            |cataloged_commits| {
+                                let head = crate::internal::ai::util::parse_repo_object_id(&head)
+                                    .map_err(|_| anyhow!("invalid traces snapshot head"))?;
+                                checkpoint_snapshot_durable_oids_from_head(
+                                    &repo_path,
+                                    head,
+                                    &cataloged_commits,
+                                    &specs,
+                                    None,
+                                )
+                            },
+                        ) {
+                            Ok(oids) => {
+                                let mut oids = oids.into_iter().collect::<Vec<_>>();
+                                oids.sort();
+                                CheckpointObjectIoHelperResponse::Verified { oids }
+                            }
+                            Err(_) => CheckpointObjectIoHelperResponse::Error {
+                                code: CheckpointObjectIoHelperError::SnapshotNotDurable,
+                            },
                         }
-                        Err(_) => CheckpointObjectIoHelperResponse::Error {
-                            code: CheckpointObjectIoHelperError::SnapshotNotDurable,
-                        },
                     }
-                }
-                CheckpointObjectIoOperation::VerifyReasoningArtifacts {
-                    object_format,
-                    checkpoints,
-                } => {
-                    // This private process owns its hash context; never infer
-                    // a 64-hex repository algorithm from the identifier length.
-                    git_internal::hash::set_hash_kind(object_format.hash_kind());
-                    match verify_reasoning_artifact_checkpoints(&repo_path, &checkpoints, None) {
-                        Ok(checkpoints) => {
-                            CheckpointObjectIoHelperResponse::ReasoningArtifacts { checkpoints }
+                    CheckpointObjectIoOperation::VerifyReasoningArtifacts {
+                        checkpoints, ..
+                    } => {
+                        // This private process owns its hash context; never infer
+                        // a 64-hex repository algorithm from the identifier length.
+                        match verify_reasoning_artifact_checkpoints(&repo_path, &checkpoints, None)
+                        {
+                            Ok(checkpoints) => {
+                                CheckpointObjectIoHelperResponse::ReasoningArtifacts { checkpoints }
+                            }
+                            Err(_) => CheckpointObjectIoHelperResponse::Error {
+                                code: CheckpointObjectIoHelperError::SnapshotNotDurable,
+                            },
                         }
-                        Err(_) => CheckpointObjectIoHelperResponse::Error {
-                            code: CheckpointObjectIoHelperError::SnapshotNotDurable,
-                        },
                     }
-                }
-            },
-        },
+                },
+            }
+        }
     };
     serde_json::to_vec(&response).context("encode checkpoint object-I/O helper response")
 }
@@ -1404,11 +1455,12 @@ pub fn run_checkpoint_object_io_helper(input: &[u8]) -> Result<Vec<u8>> {
 async fn invoke_checkpoint_object_helper(
     repo_path: &Path,
     operation: CheckpointObjectIoOperation<'_>,
+    object_format: CheckpointOpaqueObjectFormat,
     deadline: Instant,
 ) -> Result<CheckpointObjectIoHelperResponse> {
     #[cfg(not(any(unix, windows)))]
     {
-        let _ = (repo_path, operation, deadline);
+        let _ = (repo_path, operation, object_format, deadline);
         // The central private-helper runner intentionally has no raw-pipe
         // containment guarantee off Unix.  Do not spawn a host executable in
         // an embedded process or rely on `kill_on_drop` alone.
@@ -1419,6 +1471,7 @@ async fn invoke_checkpoint_object_helper(
     {
         let request = CheckpointObjectIoHelperRequest {
             repo_path_base64: encode_checkpoint_object_path(repo_path)?,
+            object_format: Some(object_format),
             operation,
         };
         let frame = if let CheckpointObjectIoOperation::WriteOpaqueBlob { data_base64, .. } =
@@ -2522,22 +2575,18 @@ impl HistoryManager {
                     data_base64: STANDARD.encode(data),
                 }
             };
-            let response =
-                invoke_checkpoint_object_helper(&self.repo_path, operation, deadline.monotonic())
-                    .await
-                    .with_context(|| format!("failed to write checkpoint {what} {object_type}"))?;
+            let response = invoke_checkpoint_object_helper(
+                &self.repo_path,
+                operation,
+                CheckpointOpaqueObjectFormat::from_kind(expected_oid.kind()),
+                deadline.monotonic(),
+            )
+            .await
+            .with_context(|| format!("failed to write checkpoint {what} {object_type}"))?;
             match response {
                 CheckpointObjectIoHelperResponse::Written { oid, was_created } => (
-                    (if opaque {
-                        crate::internal::object_format::parse_hex_for_kind(
-                            expected_oid.kind(),
-                            &oid,
-                        )
-                        .map_err(|error| error.to_string())
-                    } else {
-                        crate::internal::ai::util::parse_repo_object_id(&oid)
-                    })
-                    .map_err(|error| {
+                    crate::internal::object_format::parse_hex_for_kind(expected_oid.kind(), &oid)
+                        .map_err(|error| {
                         anyhow!("helper returned invalid checkpoint oid '{oid}': {error}")
                     })?,
                     was_created,
@@ -2613,6 +2662,7 @@ impl HistoryManager {
                 oid: oid.to_string(),
                 expected_type: expected_type.to_string(),
             },
+            CheckpointOpaqueObjectFormat::from_kind(oid.kind()),
             deadline,
         )
         .await?;
@@ -6455,6 +6505,7 @@ pub(crate) async fn checkpoint_rows_snapshot_durable_oids_from_head(
                 cataloged_commits: cataloged_commits.to_vec(),
                 checkpoints,
             },
+            CheckpointOpaqueObjectFormat::from_kind(parsed_head.kind()),
             deadline,
         )
         .await?
@@ -6507,14 +6558,15 @@ pub(crate) async fn checkpoint_reasoning_artifact_proofs(
     }
     #[cfg(not(test))]
     {
+        let object_format =
+            CheckpointOpaqueObjectFormat::from_kind(git_internal::hash::get_hash_kind());
         return match invoke_checkpoint_object_helper(
             repo_path,
             CheckpointObjectIoOperation::VerifyReasoningArtifacts {
-                object_format: CheckpointOpaqueObjectFormat::from_kind(
-                    git_internal::hash::get_hash_kind(),
-                ),
+                object_format,
                 checkpoints: checkpoints.to_vec(),
             },
+            object_format,
             deadline,
         )
         .await?
@@ -8092,6 +8144,7 @@ mod tests {
         let (oid, _) = write_git_object_with_status(repo.path(), "tree", &oversized).unwrap();
         let request = CheckpointObjectIoHelperRequest {
             repo_path_base64: encode_checkpoint_object_path(repo.path()).unwrap(),
+            object_format: None,
             operation: CheckpointObjectIoOperation::Read {
                 oid: oid.to_string(),
                 expected_type: "tree".to_string(),
@@ -8158,6 +8211,7 @@ mod tests {
                     object_type: "blob".to_string(),
                     data_base64: String::new(),
                 },
+                CheckpointOpaqueObjectFormat::Sha1,
                 Instant::now() + Duration::from_secs(1),
             )
             .await
@@ -8227,6 +8281,7 @@ mod tests {
                         object_type: "blob".to_string(),
                         data_base64: oversized_request,
                     },
+                    CheckpointOpaqueObjectFormat::Sha1,
                     Instant::now() + Duration::from_secs(10),
                 ),
             ),
@@ -8279,6 +8334,7 @@ mod tests {
                         object_type: "blob".to_string(),
                         data_base64: String::new(),
                     },
+                    CheckpointOpaqueObjectFormat::Sha1,
                     Instant::now() + Duration::from_secs(30),
                 ),
             ),
@@ -8351,6 +8407,7 @@ mod tests {
                     object_type: "blob".to_string(),
                     data_base64: String::new(),
                 },
+                CheckpointOpaqueObjectFormat::Sha1,
                 Instant::now() + Duration::from_secs(2),
             ),
         )
@@ -12656,6 +12713,7 @@ mod tests {
         let payload = vec![b'x'; 128 * 1024];
         let request = CheckpointObjectIoHelperRequest {
             repo_path_base64: encode_checkpoint_object_path(repo.path()).unwrap(),
+            object_format: None,
             operation: CheckpointObjectIoOperation::WriteOpaqueBlob {
                 data_base64: Cow::Owned(STANDARD.encode(&payload)),
                 object_format: CheckpointOpaqueObjectFormat::Sha1,

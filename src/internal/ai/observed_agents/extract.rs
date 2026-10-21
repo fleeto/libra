@@ -205,9 +205,9 @@ pub struct ExtractionSummary {
 /// the summary partial with a content-free warning.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ExtractionCollectionLimits {
-    max_items_per_collection: usize,
-    max_string_bytes: usize,
-    max_retained_string_bytes: usize,
+    pub(super) max_items_per_collection: usize,
+    pub(super) max_string_bytes: usize,
+    pub(super) max_retained_string_bytes: usize,
 }
 
 impl ExtractionCollectionLimits {
@@ -681,10 +681,34 @@ fn extract_claude_code_with_limits(
     out
 }
 
-/// Codex rollout JSONL → prompts / model / token usage / skills
-/// (best-effort generic shapes; see module docs).
+/// Source-pinned Codex rollout projection; flat historical exports keep their
+/// compatibility reader. Neither reader grants permission to persist raw data.
 pub fn extract_codex(data: &[u8]) -> ExtractionSummary {
-    extract_generic_jsonl(data, "codex", CODEX_SKILL_REGISTRY, None)
+    super::codex_rollout::extract(data, None)
+}
+
+/// Preserve prefix context and cumulative counters while projecting new rows.
+pub(crate) fn extract_codex_from_offset(
+    data: &[u8],
+    from_offset: usize,
+    projection: super::codex_rollout::OffsetProjection,
+) -> anyhow::Result<ExtractionSummary> {
+    let result =
+        super::codex_rollout::extract_from_offset(data, None, from_offset, Some(projection));
+    let limit = super::codex_rollout::exceeded_limit(&result).or_else(|| {
+        result
+            .warnings
+            .iter()
+            .any(|warning| warning == COLLECTION_LIMIT_WARNING)
+            .then_some("the bounded collection or retained-output budget")
+    });
+    if let Some(limit) = limit {
+        return Err(anyhow::anyhow!(
+            "Codex {} projection exceeded {limit}; this session cannot be projected by this capability",
+            projection.name()
+        ));
+    }
+    Ok(result)
 }
 
 /// Deadline-helper variant of [`extract_codex`].
@@ -692,7 +716,7 @@ pub(crate) fn extract_codex_bounded(
     data: &[u8],
     limits: ExtractionCollectionLimits,
 ) -> ExtractionSummary {
-    extract_generic_jsonl(data, "codex", CODEX_SKILL_REGISTRY, Some(limits))
+    super::codex_rollout::extract(data, Some(limits))
 }
 
 /// OpenCode session export → prompts / model / tokens / modified files / skills.
@@ -1441,6 +1465,7 @@ fn extract_opencode_with_limits(
                 OPENCODE_SKILL_REGISTRY,
                 &mut out,
                 &mut limiter,
+                None,
             );
         } else {
             opencode_partial(&mut out, OPENCODE_SHAPE_WARNING);
@@ -1449,11 +1474,21 @@ fn extract_opencode_with_limits(
     out
 }
 
-fn extract_generic_jsonl(
+pub(super) fn extract_generic_jsonl(
     data: &[u8],
     slug: &str,
     registry: &[&str],
     limits: Option<ExtractionCollectionLimits>,
+) -> ExtractionSummary {
+    extract_generic_jsonl_projected(data, slug, registry, limits, None)
+}
+
+pub(super) fn extract_generic_jsonl_projected(
+    data: &[u8],
+    slug: &str,
+    registry: &[&str],
+    limits: Option<ExtractionCollectionLimits>,
+    projection: Option<super::codex_rollout::OffsetProjection>,
 ) -> ExtractionSummary {
     let mut out = ExtractionSummary::default();
     let mut limiter = limits.map(ExtractionCollectionLimiter::new);
@@ -1466,7 +1501,15 @@ fn extract_generic_jsonl(
             undecodable += 1;
             continue;
         };
-        ingest_generic_record(&entry, line_no, slug, registry, &mut out, &mut limiter);
+        ingest_generic_record(
+            &entry,
+            line_no,
+            slug,
+            registry,
+            &mut out,
+            &mut limiter,
+            projection,
+        );
         if collection_exhausted(&limiter) {
             break;
         }
@@ -1489,6 +1532,7 @@ fn ingest_generic_record(
     registry: &[&str],
     out: &mut ExtractionSummary,
     limiter: &mut Option<ExtractionCollectionLimiter>,
+    projection: Option<super::codex_rollout::OffsetProjection>,
 ) {
     if slug == "opencode" && !entry.is_object() {
         opencode_partial(out, OPENCODE_SHAPE_WARNING);
@@ -1519,9 +1563,14 @@ fn ingest_generic_record(
             .or_else(|| record.get("text"))
             .or_else(|| entry.get("content"))
     {
-        let max_string_bytes = limiter
-            .as_ref()
-            .map(ExtractionCollectionLimiter::max_string_bytes);
+        let max_string_bytes = if projection == Some(super::codex_rollout::OffsetProjection::Skills)
+        {
+            None // The Codex caller already caps each source row at 1 MiB.
+        } else {
+            limiter
+                .as_ref()
+                .map(ExtractionCollectionLimiter::max_string_bytes)
+        };
         let text = match content_text(content, max_string_bytes) {
             ContentText::Empty => None,
             ContentText::Text(text) => Some(text),
@@ -1545,7 +1594,9 @@ fn ingest_generic_record(
             }
         });
         if let Some(text) = text {
-            if let Some((skill, signal)) = match_skill(&text, registry) {
+            if projection != Some(super::codex_rollout::OffsetProjection::Prompts)
+                && let Some((skill, signal)) = match_skill(&text, registry)
+            {
                 let timestamp = entry.get("timestamp").and_then(Value::as_str).unwrap_or("");
                 push_skill_event(
                     out,
@@ -1561,7 +1612,9 @@ fn ingest_generic_record(
                     },
                 );
             }
-            push_prompt(out, limiter, text);
+            if projection != Some(super::codex_rollout::OffsetProjection::Skills) {
+                push_prompt(out, limiter, text);
+            }
         }
     }
     if out.model.is_none()

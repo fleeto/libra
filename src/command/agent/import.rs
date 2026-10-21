@@ -15,7 +15,7 @@ use chrono::{DateTime, Utc};
 use clap::{ArgGroup, Args};
 #[cfg(any(unix, windows))]
 use ring::rand::SecureRandom;
-use sea_orm::{ConnectionTrait, DatabaseConnection, Statement};
+use sea_orm::{ConnectionTrait, DatabaseConnection, Statement, TransactionTrait};
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
 
@@ -44,8 +44,7 @@ use crate::{
                 DetailedImportSummary, IMPORT_INDEX_REPAIR_MARKER_KEY,
                 IMPORT_INDEX_REPAIR_MARKER_SCHEMA_V2, ImportError, ImportIndexRepairMarker,
                 ImportProgressError, ImportRequest, ImportSummary, PreparedImportProjection,
-                identity_id as import_identity_id,
-                import_prepared_with_subagent_discovery_and_runtime,
+                identity_id as import_identity_id, import_prepared_with_retention,
                 is_import_source_commitment_v2, prepare_import_projection_with_reasoning,
                 restore_tombstone, session_is_tombstoned, validate_import_index_repair_marker,
             },
@@ -53,6 +52,7 @@ use crate::{
                 RegisteredHelperOutput, StrictBoundedRead, read_strictly_bounded,
                 registered_helper_command, run_registered_bounded_helper_until,
             },
+            capture::catalog::{CaptureCatalogStore, ReconciliationCatalogState},
             capture_scope::{
                 CaptureCommitDeadline, CaptureFinalCommitAuthorizationError, CaptureScope,
                 authorize_final_capture_commit,
@@ -60,9 +60,15 @@ use crate::{
             observed_agents::{
                 AgentKind, AgentSessionCtx, TRANSCRIPT_READ_HARD_CAP_BYTES, TranscriptSource,
                 agent_for, claude_session_dir, claude_session_id_is_safe_path_component,
+                codex_index::{self, ImportIndexOutcome, ImportSourceState, RecentScopeStatus},
                 compliance::{MAX_TRANSCRIPT_READ_BYTES_KEY, max_transcript_read_bytes_setting},
                 coverage::{encode_bounded_json, import_runtime_has_typed_turns},
-                find_codex_rollout, open_provider_directory_for_discovery,
+                find_codex_rollout,
+                live_capture::{
+                    LiveCaptureBinding, LiveCaptureContext, StoredSubagentSelection,
+                    SubagentDiscoveryLimits,
+                },
+                open_provider_directory_for_discovery,
                 opencode_export::{ExportLimits, authorized_trusted_sandboxed_export_until},
                 reasoning::{
                     EncodedTransportKey, ImportTransportContext, ImportTransportDto,
@@ -70,6 +76,7 @@ use crate::{
                 },
                 resolve_import_transcript_source_until, resolve_session_file,
             },
+            provider_index_io,
         },
         db,
         metadata::{MetadataKv, MetadataScope, MetadataValueType},
@@ -82,6 +89,11 @@ use crate::{
     },
 };
 
+#[cfg(all(test, feature = "test-live-agent"))]
+tokio::task_local! {
+    static INDEX_SOURCE_READS: std::sync::Arc<std::sync::atomic::AtomicUsize>;
+}
+
 pub const AGENT_IMPORT_EXAMPLES: &str = "\
 EXAMPLES:
     libra agent import --session <id> --agent claude-code --yes
@@ -89,7 +101,7 @@ EXAMPLES:
     libra agent import --session <id> --agent opencode --yes
     libra agent import --path ~/.claude/projects/<project>/<id>.jsonl --agent claude-code --yes
     libra agent import --since 2026-07-01T00:00:00Z --agent codex --limit 20 --yes
-    libra agent import --all --agent claude-code --limit 20 --yes";
+    libra agent import --all --agent claude-code --limit 20 --yes\n    libra agent import --codex-index-backup ./closed-index.sqlite --limit 20 --yes";
 
 const DEFAULT_IMPORT_LIMIT: usize = 20;
 const MAX_IMPORT_LIMIT: usize = 100;
@@ -330,7 +342,7 @@ fn remaining_candidate_read_allowance(source_read_cap: u64, parent_bytes: u64) -
 #[derive(Args, Debug)]
 #[command(
     after_help = AGENT_IMPORT_EXAMPLES,
-    group(ArgGroup::new("selector").required(true).multiple(false).args(["session", "path", "since", "all"]))
+    group(ArgGroup::new("selector").required(true).multiple(false).args(["session", "path", "since", "all", "codex_index_backup"]))
 )]
 pub struct ImportArgs {
     /// Import one provider session id.
@@ -345,6 +357,9 @@ pub struct ImportArgs {
     /// Discover all bounded local Claude/Codex session sources.
     #[arg(long)]
     pub all: bool,
+    /// Backfill absent Codex sessions from an explicit closed full-history index backup.
+    #[arg(long, value_name = "PATH")]
+    pub codex_index_backup: Option<PathBuf>,
     /// Provider filter (`claude-code`, `codex`, or `opencode`).
     #[arg(long, value_name = "NAME")]
     pub agent: Option<String>,
@@ -358,7 +373,7 @@ pub struct ImportArgs {
     #[arg(long)]
     pub yes: bool,
     /// Explicitly remove an existing local anti-resurrection tombstone.
-    #[arg(long, requires = "yes")]
+    #[arg(long, requires = "yes", conflicts_with = "codex_index_backup")]
     pub restore_erased: bool,
 }
 
@@ -710,6 +725,12 @@ fn validate_prepared_runtime_response(
     projection: &PreparedImportProjection,
     native_present: bool,
 ) -> Result<()> {
+    if projection.codex_retention.is_some() && (kind != AgentKind::Codex || native_present) {
+        return Err(ImportError::AuthorizedReaderFailed.into());
+    }
+    if kind == AgentKind::Codex && projection.codex_retention.is_none() {
+        return Err(ImportError::AuthorizedReaderFailed.into());
+    }
     match (kind, projection.coverage_runtime.as_ref()) {
         (AgentKind::OpenCode, Some(dto))
             if !native_present || !import_runtime_has_typed_turns(dto) =>
@@ -784,12 +805,15 @@ struct ImportIdentityFence {
     fence_token: i64,
 }
 
+struct PreparedCandidate {
+    request: ImportRequest,
+    native_reasoning: Option<NativeProvenReasoning>,
+    coverage_runtime: Option<crate::internal::ai::capture::snapshot::CaptureCoverageRuntime>,
+    codex_retention: Option<crate::internal::ai::observed_agents::codex_reasoning::CodexRetention>,
+}
+
 struct PreparedCandidateOutcome {
-    request: Result<(
-        ImportRequest,
-        Option<NativeProvenReasoning>,
-        Option<crate::internal::ai::capture::snapshot::CaptureCoverageRuntime>,
-    )>,
+    request: Result<PreparedCandidate>,
     raw_bytes: u64,
 }
 
@@ -803,6 +827,16 @@ struct BatchOutput {
     skipped: Vec<BatchSkip>,
     failures: Vec<BatchFailure>,
     next_cursor: Option<usize>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    existing: Vec<BatchExisting>,
+}
+
+#[derive(Debug, Serialize)]
+struct BatchExisting {
+    status: &'static str,
+    agent_kind: String,
+    session_id: String,
+    selection_reason: &'static str,
 }
 
 #[derive(Debug, Serialize)]
@@ -1684,6 +1718,7 @@ pub fn run_import_discovery_helper(input: &[u8]) -> Result<Vec<u8>> {
         cursor: request.cursor,
         yes: true,
         restore_erased: false,
+        codex_index_backup: None,
     };
     let repo_root = request.repo_root.into_path_buf();
     let response = match discover(&args, &repo_root, deadline) {
@@ -1854,8 +1889,18 @@ fn require_consent(
          Libra will read private provider sessions, redact typed fields, and write projections \
          to refs/libra/traces; a later `libra agent push` may upload those redacted traces. \
          Continue? [y/N] ",
-        args.agent.as_deref().unwrap_or("claude-code/codex"),
-        candidate_count,
+        args.agent
+            .as_deref()
+            .unwrap_or(if args.codex_index_backup.is_some() {
+                "codex"
+            } else {
+                "claude-code/codex"
+            }),
+        if args.codex_index_backup.is_some() {
+            format!("up to {candidate_count}")
+        } else {
+            candidate_count.to_string()
+        },
         args.limit,
     );
     #[cfg(unix)]
@@ -1905,6 +1950,10 @@ async fn resolve_candidate_source(
     repo_root: &Path,
     deadline: Instant,
 ) -> Result<(TranscriptSource, String, String)> {
+    #[cfg(all(test, feature = "test-live-agent"))]
+    let _ = INDEX_SOURCE_READS.try_with(|count| {
+        count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    });
     if candidate.kind == AgentKind::OpenCode {
         let session_id = crate::internal::ai::hooks::runtime::build_ai_session_id(
             "opencode",
@@ -2755,6 +2804,34 @@ async fn run_import_preparation_descriptor_helper_bounded(
     }
 }
 
+/// Consume the ordinary carrier only after the helper response's transport
+/// checks. A damaged carrier preserves V1 projections and requests a retry.
+#[cfg(any(unix, windows))]
+fn consume_codex_retention(
+    projection: &mut PreparedImportProjection,
+    deadline: Instant,
+) -> Option<crate::internal::ai::observed_agents::codex_reasoning::CodexRetention> {
+    use crate::internal::ai::observed_agents::codex_reasoning::{
+        CodexRetention, mark_retention_unavailable,
+    };
+
+    let retention = projection.codex_retention.take().map(|dto| {
+        let source_bytes = projection
+            .transcript_snapshot
+            .as_ref()
+            .map_or(0, |snapshot| snapshot.transcript_redacted_bytes);
+        dto.decode(&projection.turns, source_bytes, deadline)
+            .unwrap_or_else(|_| CodexRetention::unavailable())
+    });
+    if retention
+        .as_ref()
+        .is_some_and(CodexRetention::is_unavailable)
+    {
+        mark_retention_unavailable(&mut projection.redaction_report);
+    }
+    retention
+}
+
 async fn prepare_candidate_bounded(
     candidate: &Candidate,
     repo_root: &Path,
@@ -2959,6 +3036,7 @@ async fn prepare_candidate_bounded(
                     }
                     (_, None) => None,
                 };
+                let codex_retention = consume_codex_retention(&mut projection, monotonic_deadline);
                 await_import_precommit_read_until(
                     monotonic_deadline,
                     capture_scope.assert_workspace_fence_live(conn),
@@ -3064,7 +3142,12 @@ async fn prepare_candidate_bounded(
                 .await?;
                 validate_scoped_prepared_existing_session(&mut request, existing_session.as_ref())?;
                 Ok(PreparedCandidateOutcome {
-                    request: Ok((request, native_reasoning, coverage_runtime)),
+                    request: Ok(PreparedCandidate {
+                        request,
+                        native_reasoning,
+                        coverage_runtime,
+                        codex_retention,
+                    }),
                     raw_bytes,
                 })
             }
@@ -3083,6 +3166,11 @@ async fn prepare_candidate_bounded(
 }
 
 fn stable_code_for_error(error: &anyhow::Error) -> StableErrorCode {
+    if error.is::<IndexCatalogUnavailable>()
+        || error.is::<provider_index_io::ReconciliationReadFailure>()
+    {
+        return StableErrorCode::AgentImportPartialBatch;
+    }
     match error.downcast_ref::<ImportError>() {
         Some(ImportError::RepositoryConflict | ImportError::SessionIdentityConflict) => {
             StableErrorCode::AgentImportRepositoryConflict
@@ -3107,27 +3195,36 @@ fn stable_code_for_error(error: &anyhow::Error) -> StableErrorCode {
     }
 }
 
-fn safe_failure(candidate: &Candidate, error: &anyhow::Error) -> BatchFailure {
-    // The documented per-item id is a short hash of the provider session id
-    // only; the same report already carries full session ids for completed
-    // selections. Never derive it from a source locator, digest, or commitment.
-    let digest = sha2::Sha256::digest(candidate.provider_session_id.as_bytes());
+fn hashed_import_id(id: &str) -> String {
+    let digest = sha2::Sha256::digest(id.as_bytes());
+    format!("sha256:{}", hex::encode(&digest[..6]))
+}
+
+fn safe_failure_for(kind: AgentKind, id: &str, error: &anyhow::Error) -> BatchFailure {
     BatchFailure {
         status: "failed",
-        agent_kind: candidate.kind.as_db_str().to_string(),
-        session_id: format!("sha256:{}", hex::encode(&digest[..6])),
+        agent_kind: kind.as_db_str().to_string(),
+        session_id: hashed_import_id(id),
         error_code: stable_code_for_error(error),
     }
 }
 
-fn safe_skip(candidate: &Candidate, error: &anyhow::Error) -> BatchSkip {
-    let failure = safe_failure(candidate, error);
+fn safe_failure(candidate: &Candidate, error: &anyhow::Error) -> BatchFailure {
+    safe_failure_for(candidate.kind, &candidate.provider_session_id, error)
+}
+
+fn safe_skip_for(kind: AgentKind, id: &str, error: &anyhow::Error) -> BatchSkip {
+    let failure = safe_failure_for(kind, id, error);
     BatchSkip {
         status: "skipped",
         agent_kind: failure.agent_kind,
         session_id: failure.session_id,
         reason_code: failure.error_code,
     }
+}
+
+fn safe_skip(candidate: &Candidate, error: &anyhow::Error) -> BatchSkip {
+    safe_skip_for(candidate.kind, &candidate.provider_session_id, error)
 }
 
 fn is_discovery_skip(error: &anyhow::Error) -> bool {
@@ -3180,6 +3277,260 @@ fn record_candidate_result(
     }
 }
 
+struct IndexImportBatch {
+    root: provider_index_io::ImportRootPin,
+    rows: Vec<codex_index::ImportIndexThread>,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "index import catalog state is unavailable; inspect the session with `libra agent doctor` before retrying"
+)]
+struct IndexCatalogUnavailable;
+
+fn index_catalog_reason(end: Instant) -> &'static str {
+    if Instant::now() >= end {
+        "budget_exhausted"
+    } else {
+        "catalog_unavailable"
+    }
+}
+
+fn index_import_unavailable(reason: &'static str) -> CliError {
+    CliError::fatal("Codex index backfill is unavailable; supply a closed, consistent backup for this worktree and retry")
+        .with_stable_code(StableErrorCode::AgentImportPartialBatch)
+        .with_detail("reason_key",reason)
+}
+
+fn index_import_read_error(error: &anyhow::Error, end: Instant) -> CliError {
+    let reason = error
+        .downcast_ref::<provider_index_io::ReconciliationReadFailure>()
+        .map(|reason| reason.reason_key())
+        .or_else(|| {
+            error
+                .downcast_ref::<codex_index::IndexUnavailableReason>()
+                .map(|reason| reason.reason_key())
+        })
+        .unwrap_or(if Instant::now() >= end {
+            "budget_exhausted"
+        } else {
+            "backup_unreadable"
+        });
+    index_import_unavailable(reason)
+}
+
+async fn discover_index_import(
+    args: &ImportArgs,
+    root: &Path,
+    end: Instant,
+) -> CliResult<(IndexImportBatch, Option<usize>)> {
+    if args.limit == 0 || args.limit > MAX_IMPORT_LIMIT {
+        return Err(CliError::command_usage("--limit must be between 1 and 100")
+            .with_stable_code(StableErrorCode::CliInvalidArguments));
+    }
+    if args
+        .agent
+        .as_deref()
+        .map(importable_kind)
+        .transpose()?
+        .is_some_and(|kind| kind != AgentKind::Codex)
+        || args.session.is_some()
+        || args.path.is_some()
+        || args.since.is_some()
+        || args.all
+        || args.restore_erased
+    {
+        return Err(CliError::command_usage("--codex-index-backup selects Codex only and cannot be combined with another selector or --restore-erased")
+            .with_stable_code(StableErrorCode::CliInvalidArguments));
+    }
+    let backup = args
+        .codex_index_backup
+        .as_ref()
+        .ok_or_else(|| index_import_unavailable("backup_unreadable"))?;
+    let cwd = match crate::internal::worktree_scope::WorktreeScope::request_scope() {
+        Some(request) => request.workdir,
+        None => {
+            std::env::current_dir().map_err(|_| index_import_unavailable("scope_root_unproven"))?
+        }
+    };
+    let backup = util::normalize_abs_path(&if backup.is_absolute() {
+        backup.clone()
+    } else {
+        cwd.join(backup)
+    });
+    let index_end = (Instant::now() + Duration::from_secs(2)).min(end);
+    let read = provider_index_io::read_import_closed_backup(
+        &backup,
+        codex_index::ImportScopeQuery {
+            version: 1,
+            root: root.to_path_buf(),
+            root_identity: None,
+        },
+        index_end,
+    )
+    .await
+    .map_err(|error| index_import_read_error(&error, index_end))?;
+    let snapshot = match read.outcome {
+        ImportIndexOutcome::Available { snapshot } => snapshot,
+        ImportIndexOutcome::Unavailable { reason } => {
+            return Err(index_import_unavailable(reason.reason_key()));
+        }
+    };
+    let offset = args.cursor.unwrap_or(0);
+    if offset > snapshot.threads.len() {
+        return Err(
+            CliError::command_usage("--cursor is outside the discovery result set")
+                .with_stable_code(StableErrorCode::CliInvalidArguments),
+        );
+    }
+    let next = offset
+        .saturating_add(args.limit)
+        .min(snapshot.threads.len());
+    let cursor = (next < snapshot.threads.len()).then_some(next);
+    // Edges are verified projection-only metadata, never command/writer inputs.
+    let rows = snapshot
+        .threads
+        .into_iter()
+        .skip(offset)
+        .take(args.limit)
+        .collect();
+    Ok((
+        IndexImportBatch {
+            root: read.root,
+            rows,
+        },
+        cursor,
+    ))
+}
+
+#[derive(Default)]
+struct IndexSelection {
+    candidates: Vec<Candidate>,
+    existing: Vec<BatchExisting>,
+    skipped: Vec<BatchSkip>,
+    failures: Vec<BatchFailure>,
+}
+
+async fn select_index_missing(
+    batch: &IndexImportBatch,
+    conn: &DatabaseConnection,
+    scope: &CaptureScope,
+    end: Instant,
+) -> CliResult<IndexSelection> {
+    batch
+        .root
+        .revalidate(end)
+        .await
+        .map_err(|error| index_import_read_error(&error, end))?;
+    let ids = batch
+        .rows
+        .iter()
+        .map(|row| row.id.as_str())
+        .collect::<Vec<_>>();
+    let txn = await_import_precommit_read_until(end, async { Ok(conn.begin().await?) })
+        .await
+        .map_err(|_| index_import_unavailable(index_catalog_reason(end)))?;
+    let now_ms = Utc::now().timestamp_millis();
+    let mut metadata_remaining = 8 * 1024 * 1024;
+    let states = await_import_precommit_read_until(end, async {
+        Ok(CaptureCatalogStore::reconciliation_catalog_in_snapshot(
+            &txn,
+            scope,
+            &ids,
+            now_ms,
+            end,
+            &mut metadata_remaining,
+        )
+        .await?)
+    })
+    .await;
+    // A cancelled read must finish its transaction before source authorization.
+    txn.rollback()
+        .await
+        .map_err(|_| index_import_unavailable(index_catalog_reason(end)))?;
+    let states = states.map_err(|_| index_import_unavailable(index_catalog_reason(end)))?;
+    if states.len() != batch.rows.len() {
+        return Err(index_import_unavailable("catalog_unavailable"));
+    }
+    batch
+        .root
+        .revalidate(end)
+        .await
+        .map_err(|error| index_import_read_error(&error, end))?;
+    let mut selected = IndexSelection::default();
+    for (row, state) in batch.rows.iter().zip(states) {
+        match state {
+            ReconciliationCatalogState::Erased => selected.skipped.push(safe_skip_for(
+                AgentKind::Codex,
+                &row.id,
+                &ImportError::Erased.into(),
+            )),
+            ReconciliationCatalogState::Session { .. } => selected.existing.push(BatchExisting {
+                status: "existing",
+                agent_kind: AgentKind::Codex.as_db_str().to_string(),
+                session_id: hashed_import_id(&row.id),
+                selection_reason: "existing_catalog_session",
+            }),
+            ReconciliationCatalogState::Pending { .. } => selected.failures.push(safe_failure_for(
+                AgentKind::Codex,
+                &row.id,
+                &ImportError::LeaseBusy.into(),
+            )),
+            ReconciliationCatalogState::Unknown => selected.failures.push(safe_failure_for(
+                AgentKind::Codex,
+                &row.id,
+                &IndexCatalogUnavailable.into(),
+            )),
+            ReconciliationCatalogState::BudgetExhausted => {
+                selected.failures.push(safe_failure_for(
+                    AgentKind::Codex,
+                    &row.id,
+                    &provider_index_io::ReconciliationReadFailure::Budget.into(),
+                ))
+            }
+            ReconciliationCatalogState::Missing => {
+                if row.scope == RecentScopeStatus::Proven
+                    && row.source_state == ImportSourceState::Eligible
+                    && row
+                        .rollout_path
+                        .as_deref()
+                        .is_some_and(|path| codex_index::valid_import_rollout_path(path, &row.id))
+                {
+                    selected.candidates.push(Candidate {
+                        kind: AgentKind::Codex,
+                        provider_session_id: row.id.clone(),
+                        path: row.rollout_path.clone(),
+                    });
+                } else {
+                    selected.failures.push(safe_failure_for(
+                        AgentKind::Codex,
+                        &row.id,
+                        &ImportError::SourceAuthorization.into(),
+                    ));
+                }
+            }
+        }
+    }
+    Ok(selected)
+}
+
+fn index_preparation_error(error: anyhow::Error, index_mode: bool) -> anyhow::Error {
+    if index_mode
+        && matches!(
+            error.downcast_ref::<ImportError>(),
+            Some(
+                ImportError::RepositoryConflict
+                    | ImportError::SessionIdentityConflict
+                    | ImportError::WorkingDirMissingOrAmbiguous
+            )
+        )
+    {
+        ImportError::SourceAuthorization.into()
+    } else {
+        error
+    }
+}
+
 pub async fn execute_safe(args: ImportArgs, output: &OutputConfig) -> CliResult<()> {
     // Establish both deadline clocks once before discovery/consent or any
     // mutation.  The pair is threaded unchanged to every normal durable
@@ -3187,10 +3538,35 @@ pub async fn execute_safe(args: ImportArgs, output: &OutputConfig) -> CliResult<
     let commit_deadline = CaptureCommitDeadline::from_budget(import_total_deadline())
         .map_err(|error| CliError::fatal(format!("establish import deadline: {error}")))?;
     let deadline = commit_deadline.monotonic();
-    let repo_root = util::try_working_dir().map_err(|_| CliError::repo_not_found())?;
-    let storage_root = util::try_get_storage_path(None).map_err(|_| CliError::repo_not_found())?;
-    let (candidates, next_cursor) = discover_bounded(&args, &repo_root, deadline).await?;
-    require_consent(&args, output, candidates.len(), deadline)?;
+    let (mut repo_root, storage_root) =
+        match crate::internal::worktree_scope::WorktreeScope::request_scope() {
+            Some(request) => (request.worktree_root, request.storage),
+            None => (
+                util::try_working_dir().map_err(|_| CliError::repo_not_found())?,
+                util::try_get_storage_path(None).map_err(|_| CliError::repo_not_found())?,
+            ),
+        };
+    let index_mode = args.codex_index_backup.is_some();
+    let mut index_batch = None;
+    let (mut candidates, next_cursor) = if index_mode {
+        let (batch, cursor) = discover_index_import(&args, &repo_root, deadline).await?;
+        repo_root = batch.root.path().to_path_buf();
+        index_batch = Some(batch);
+        (Vec::new(), cursor)
+    } else {
+        discover_bounded(&args, &repo_root, deadline).await?
+    };
+    let selection_count = index_batch
+        .as_ref()
+        .map_or(candidates.len(), |batch| batch.rows.len());
+    require_consent(&args, output, selection_count, deadline)?;
+    if let Some(batch) = index_batch.as_ref() {
+        batch
+            .root
+            .revalidate(deadline)
+            .await
+            .map_err(|error| index_import_read_error(&error, deadline))?;
+    }
     let conn = db::get_db_conn_instance_for_path(&storage_root.join(util::DATABASE))
         .await
         .map_err(|error| CliError::fatal(format!("failed to open repository database: {error}")))?;
@@ -3198,10 +3574,22 @@ pub async fn execute_safe(args: ImportArgs, output: &OutputConfig) -> CliResult<
         await_import_precommit_read_until(deadline, CaptureScope::resolve(&conn, &repo_root))
             .await
             .map_err(|error| {
-                CliError::fatal(format!(
-                    "failed to resolve import workspace scope: {error:#}"
-                ))
+                if index_mode {
+                    index_import_unavailable("scope_root_unproven")
+                } else {
+                    CliError::fatal(format!(
+                        "failed to resolve import workspace scope: {error:#}"
+                    ))
+                }
             })?;
+    let selected = if let Some(batch) = index_batch.as_ref() {
+        select_index_missing(batch, &conn, &capture_scope, deadline).await?
+    } else {
+        IndexSelection::default()
+    };
+    if index_mode {
+        candidates = selected.candidates;
+    }
     let (configured_source_cap, explicitly_configured) =
         max_transcript_read_bytes_setting().await.map_err(|error| {
             CliError::fatal(format!(
@@ -3217,12 +3605,14 @@ pub async fn execute_safe(args: ImportArgs, output: &OutputConfig) -> CliResult<
 
     let mut results = Vec::new();
     let mut partial_results = Vec::new();
-    let mut skipped = Vec::new();
-    let mut failures = Vec::new();
-    let discovered_batch = args.all || args.since.is_some();
+    let mut skipped = selected.skipped;
+    let mut failures = selected.failures;
+    let existing = selected.existing;
+    let discovered_batch = args.all || args.since.is_some() || index_mode;
     let mut cumulative_raw_bytes = 0_u64;
     let raw_byte_cap = batch_raw_byte_cap();
-    for candidate in &candidates {
+    let mut index_terminal_reason = None;
+    for (candidate_index, candidate) in candidates.iter().enumerate() {
         if Instant::now() >= deadline {
             failures.push(safe_failure(
                 candidate,
@@ -3234,8 +3624,20 @@ pub async fn execute_safe(args: ImportArgs, output: &OutputConfig) -> CliResult<
             deadline,
             session_is_tombstoned(&conn, candidate.kind, &candidate.provider_session_id),
         )
-        .await
-        .map_err(|error| CliError::fatal(format!("failed to check import tombstone: {error}")))?;
+        .await;
+        let tombstoned = match tombstoned {
+            Ok(value) => value,
+            Err(error) if index_mode => {
+                failures.push(safe_failure(candidate, &error));
+                index_terminal_reason = Some(index_catalog_reason(deadline));
+                continue;
+            }
+            Err(error) => {
+                return Err(CliError::fatal(format!(
+                    "failed to check import tombstone: {error}"
+                )));
+            }
+        };
         if tombstoned && args.restore_erased {
             restore_tombstone(&conn, candidate.kind, &candidate.provider_session_id)
                 .await
@@ -3262,6 +3664,7 @@ pub async fn execute_safe(args: ImportArgs, output: &OutputConfig) -> CliResult<
                 .checked_sub(cumulative_raw_bytes)
                 .ok_or(ImportError::BatchInputLimit)?
                 .min(source_read_cap);
+            if let Some(batch)=index_batch.as_ref() {batch.root.revalidate(deadline).await?;}
             let prepared = prepare_candidate_bounded(
                 candidate,
                 &repo_root,
@@ -3271,14 +3674,18 @@ pub async fn execute_safe(args: ImportArgs, output: &OutputConfig) -> CliResult<
                 &capture_scope,
                 commit_deadline,
             )
-            .await?;
+            .await;
+            // A concurrent root replacement can itself make preparation fail.
+            // Recheck even on that error before classifying it as source-only.
+            if let Some(batch)=index_batch.as_ref() {batch.root.revalidate(deadline).await?;}
+            let prepared = prepared.map_err(|error|index_preparation_error(error,index_mode))?;
             cumulative_raw_bytes = cumulative_raw_bytes
                 .checked_add(prepared.raw_bytes)
                 .ok_or(ImportError::BatchInputLimit)?;
             if cumulative_raw_bytes > raw_byte_cap {
                 return Err(ImportError::BatchInputLimit.into());
             }
-            let (request, native_reasoning, coverage_runtime) = prepared.request?;
+            let PreparedCandidate { request, native_reasoning, coverage_runtime, codex_retention } = prepared.request.map_err(|error|index_preparation_error(error,index_mode))?;
             let barrier = acquire_import_index_barrier(
                 &conn,
                 &storage_root,
@@ -3288,7 +3695,8 @@ pub async fn execute_safe(args: ImportArgs, output: &OutputConfig) -> CliResult<
             .await?;
             index_barrier = Some(barrier);
             import_test_pause_after_index_barrier(deadline)?;
-            let subagent_discovery = if request.agent_kind == AgentKind::ClaudeCode {
+            let child_binding = LiveCaptureBinding::for_stored(request.agent_kind);
+            let subagent_discovery = if let Some(port) = child_binding.subagent_discovery() {
                 let candidate_allowance =
                     remaining_candidate_read_allowance(source_read_cap, prepared.raw_bytes);
                 let subagent_budget = raw_byte_cap
@@ -3300,14 +3708,16 @@ pub async fn execute_safe(args: ImportArgs, output: &OutputConfig) -> CliResult<
                 // cannot bypass the batch cap. On success refund unused bytes.
                 reserve_subagent_input_allowance(&mut cumulative_raw_bytes, subagent_budget)?;
                 let discovery_deadline = crate::internal::ai::subagent_content::discovery_deadline_preserving_parent(deadline)?;
-                let discovery_result = crate::internal::ai::subagent_content::discover_claude_subagent_contents_bounded(
-                        &request.working_dir,
-                        &request.provider_session_id,
-                        discovery_deadline,
-                        subagent_budget,
-                        crate::internal::ai::subagent_content::MAX_SUBAGENT_SOURCES_PER_CAPTURE,
-                    )
-                    .await;
+                let context = LiveCaptureContext {
+                    libra_session_id: &request.session_id, provider_session_id: &request.provider_session_id,
+                    verified_cwd: &request.working_dir,
+                };
+                let discovery_result = port.discover_stored(
+                    &context,
+                    StoredSubagentSelection::ImportCurrent { parent_locator: candidate.path.as_deref().filter(|path| path.is_absolute()) },
+                    SubagentDiscoveryLimits { byte_budget: subagent_budget, source_limit: crate::internal::ai::subagent_content::MAX_SUBAGENT_SOURCES_PER_CAPTURE },
+                    discovery_deadline,
+                ).await;
                 match discovery_result {
                     Ok(discovery) => {
                         settle_subagent_input_allowance(
@@ -3317,6 +3727,7 @@ pub async fn execute_safe(args: ImportArgs, output: &OutputConfig) -> CliResult<
                         )?;
                         discovery
                     }
+                    Err(_) if request.agent_kind == AgentKind::Codex => crate::internal::ai::subagent_content::SubagentDiscovery::charged_stored_unavailable(subagent_budget),
                     Err(error) => match crate::internal::ai::subagent_content::SubagentDiscovery::from_deadline_error(&error) {
                         Some(discovery) => discovery,
                         None => return Err(error),
@@ -3325,7 +3736,7 @@ pub async fn execute_safe(args: ImportArgs, output: &OutputConfig) -> CliResult<
             } else {
                 crate::internal::ai::subagent_content::SubagentDiscovery::default()
             };
-            import_prepared_with_subagent_discovery_and_runtime(
+            import_prepared_with_retention(
                 &conn,
                 &storage_root,
                 request,
@@ -3333,6 +3744,7 @@ pub async fn execute_safe(args: ImportArgs, output: &OutputConfig) -> CliResult<
                 subagent_discovery,
                 native_reasoning,
                 coverage_runtime,
+                codex_retention,
             )
             .await
         }
@@ -3427,9 +3839,20 @@ pub async fn execute_safe(args: ImportArgs, output: &OutputConfig) -> CliResult<
                 }
             }
         }
+        let root_failure = if index_mode {
+            result
+                .as_ref()
+                .err()
+                .and_then(|error| {
+                    error.downcast_ref::<provider_index_io::ReconciliationReadFailure>()
+                })
+                .copied()
+        } else {
+            None
+        };
         record_candidate_result(
             candidate,
-            discovered_batch,
+            discovered_batch && !index_mode,
             index_incomplete,
             result,
             &mut results,
@@ -3437,6 +3860,15 @@ pub async fn execute_safe(args: ImportArgs, output: &OutputConfig) -> CliResult<
             &mut skipped,
             &mut failures,
         );
+        if let Some(reason) = root_failure {
+            index_terminal_reason = Some(reason.reason_key());
+            // Keep every unattempted slot visible without reading a source
+            // after its directory proof has failed. Earlier writes remain.
+            for remaining in &candidates[candidate_index + 1..] {
+                failures.push(safe_failure(remaining, &reason.into()));
+            }
+            break;
+        }
     }
 
     let payload = BatchOutput {
@@ -3446,9 +3878,10 @@ pub async fn execute_safe(args: ImportArgs, output: &OutputConfig) -> CliResult<
         skipped,
         failures,
         next_cursor,
+        existing,
     };
     if !payload.failures.is_empty() {
-        let stable_code = if candidates.len() == 1
+        let stable_code = if selection_count == 1
             && payload.results.is_empty()
             && payload.partial_results.is_empty()
             && payload.failures.len() == 1
@@ -3457,7 +3890,7 @@ pub async fn execute_safe(args: ImportArgs, output: &OutputConfig) -> CliResult<
         } else {
             StableErrorCode::AgentImportPartialBatch
         };
-        let message = if candidates.len() == 1
+        let mut message = if selection_count == 1
             && payload.results.is_empty()
             && payload.partial_results.is_empty()
         {
@@ -3470,6 +3903,12 @@ pub async fn execute_safe(args: ImportArgs, output: &OutputConfig) -> CliResult<
                 payload.failures.len()
             )
         };
+        if !payload.existing.is_empty() {
+            message.push_str(&format!(
+                "; {} already cataloged (not refreshed)",
+                payload.existing.len()
+            ));
+        }
         let mut error = CliError::fatal(message)
             .with_stable_code(stable_code)
             .with_detail("schema_version", payload.schema_version)
@@ -3478,6 +3917,9 @@ pub async fn execute_safe(args: ImportArgs, output: &OutputConfig) -> CliResult<
             .with_detail("skipped", payload.skipped.len())
             .with_detail("failed", payload.failures.len())
             .with_detail("next_cursor", payload.next_cursor);
+        if let Some(reason) = index_terminal_reason {
+            error = error.with_detail("reason_key", reason);
+        }
         if let Ok(failures) = serde_json::to_value(&payload.failures) {
             error = error.with_detail("failures", failures);
         }
@@ -3489,6 +3931,12 @@ pub async fn execute_safe(args: ImportArgs, output: &OutputConfig) -> CliResult<
         }
         if let Ok(skipped) = serde_json::to_value(&payload.skipped) {
             error = error.with_detail("skipped", skipped);
+        }
+        if !payload.existing.is_empty() {
+            let existing=payload.existing.iter().map(|item|serde_json::json!({
+                "status":item.status,"agent_kind":item.agent_kind,"session_id":item.session_id,"selection_reason":item.selection_reason,
+            })).collect::<Vec<_>>();
+            error = error.with_detail("existing", serde_json::Value::Array(existing));
         }
         return Err(error);
     }
@@ -3516,6 +3964,12 @@ pub async fn execute_safe(args: ImportArgs, output: &OutputConfig) -> CliResult<
                 .unwrap_or_else(|| "none".to_string())
         );
     }
+    if !output.quiet && !payload.existing.is_empty() {
+        println!(
+            "Existing catalog sessions (not refreshed): {}",
+            payload.existing.len()
+        );
+    }
     Ok(())
 }
 
@@ -3534,6 +3988,562 @@ mod tests {
         },
     };
     use crate::utils::error::CliErrorKind;
+
+    #[cfg(unix)]
+    #[cfg(feature = "test-live-agent")]
+    mod codex_retention_local {
+        use std::str::FromStr;
+
+        use git_internal::hash::ObjectHash;
+        use serde_json::{Value, json};
+
+        use super::*;
+
+        #[test]
+        #[ignore = "operator-local Codex acceptance; never run in CI"]
+        fn codex_index_full_scope_unavailable_errors_keep_018_and_actionable_display() {
+            assert_eq!(
+                IndexCatalogUnavailable.to_string(),
+                "index import catalog state is unavailable; inspect the session with `libra agent doctor` before retrying"
+            );
+            assert_eq!(
+                stable_code_for_error(&IndexCatalogUnavailable.into()),
+                StableErrorCode::AgentImportPartialBatch
+            );
+            for reason in [
+                provider_index_io::ReconciliationReadFailure::ScopeRootUnproven,
+                provider_index_io::ReconciliationReadFailure::ResponseInconsistent,
+                provider_index_io::ReconciliationReadFailure::Budget,
+            ] {
+                assert_eq!(
+                    stable_code_for_error(&reason.into()),
+                    StableErrorCode::AgentImportPartialBatch
+                );
+            }
+            assert_eq!(index_catalog_reason(Instant::now()), "budget_exhausted");
+            assert_eq!(
+                index_catalog_reason(Instant::now() + Duration::from_secs(1)),
+                "catalog_unavailable"
+            );
+        }
+
+        fn run_cli(
+            program: &Path,
+            root: &Path,
+            home: &Path,
+            args: &[&str],
+        ) -> std::process::Output {
+            std::process::Command::new(program)
+                .args(args)
+                .current_dir(root)
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .env("HOME", home)
+                .env("USERPROFILE", home)
+                .env("LIBRA_TEST_HOME", home)
+                .env("LIBRA_TEST", "1")
+                .output()
+                .unwrap()
+        }
+
+        #[tokio::test]
+        #[ignore = "operator-local Codex acceptance; never run in CI"]
+        async fn codex_index_full_scope_invalid_auth_path_never_dispatches_source_read() {
+            use std::sync::{
+                Arc,
+                atomic::{AtomicUsize, Ordering},
+            };
+
+            use base64::Engine;
+            use sea_orm::sqlx::{Connection, SqliteConnection, sqlite::SqliteConnectOptions};
+
+            use crate::internal::{
+                ai::authorized_read,
+                worktree_scope::{RequestScope, with_request_scope},
+            };
+
+            async fn invoke(
+                program: &Path,
+                root: &Path,
+                backup: &Path,
+                calls: Arc<AtomicUsize>,
+            ) -> CliResult<()> {
+                let mut args = selector_args(|_| {});
+                args.all = false;
+                args.agent = None;
+                args.yes = true;
+                args.codex_index_backup = Some(backup.to_path_buf());
+                let output = OutputConfig {
+                    quiet: true,
+                    ..OutputConfig::default()
+                };
+                with_request_scope(
+                    Some(RequestScope::resolve(root.to_path_buf()).unwrap()),
+                    INDEX_SOURCE_READS.scope(
+                        calls,
+                        authorized_read::with_test_helper_program(
+                            program.to_path_buf(),
+                            execute_safe(args, &output),
+                        ),
+                    ),
+                )
+                .await
+            }
+            async fn set_path(backup: &Path, path: &Path) {
+                let mut connection =
+                    SqliteConnection::connect_with(&SqliteConnectOptions::new().filename(backup))
+                        .await
+                        .unwrap();
+                sea_orm::sqlx::query("UPDATE threads SET rollout_path=?")
+                    .bind(path.to_str().unwrap())
+                    .execute(&mut connection)
+                    .await
+                    .unwrap();
+                connection.close().await.unwrap();
+            }
+
+            let program = std::env::current_exe()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .join("libra");
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().join("repo");
+            let home = temp.path().join("home");
+            std::fs::create_dir_all(&root).unwrap();
+            std::fs::create_dir_all(&home).unwrap();
+            let root = root.canonicalize().unwrap();
+            let init = run_cli(&program, &root, &home, &["init"]);
+            assert!(init.status.success());
+            let backup = temp.path().join("index.sqlite");
+            let mut connection = SqliteConnection::connect_with(
+                &SqliteConnectOptions::new()
+                    .filename(&backup)
+                    .create_if_missing(true),
+            )
+            .await
+            .unwrap();
+            for sql in [
+                "CREATE TABLE _sqlx_migrations(version INTEGER PRIMARY KEY,success INTEGER NOT NULL,checksum BLOB NOT NULL)",
+                "CREATE TABLE threads(id TEXT PRIMARY KEY,rollout_path TEXT NOT NULL,cwd TEXT NOT NULL,archived INTEGER NOT NULL,cli_version TEXT NOT NULL)",
+                "CREATE TABLE thread_spawn_edges(parent_thread_id TEXT NOT NULL,child_thread_id TEXT PRIMARY KEY,status TEXT NOT NULL)",
+            ] {
+                sea_orm::sqlx::query(sql)
+                    .execute(&mut connection)
+                    .await
+                    .unwrap();
+            }
+            for (version, digest) in codex_index::required_migrations_for_local_test() {
+                sea_orm::sqlx::query("INSERT INTO _sqlx_migrations VALUES(?,1,?)")
+                    .bind(version)
+                    .bind(hex::decode(digest).unwrap())
+                    .execute(&mut connection)
+                    .await
+                    .unwrap();
+            }
+            // A rollout-shaped locator outside the configured provider root
+            // reaches authorization, proving that this task-local observer works.
+            let control = temp.path().join("rollout-control-counter-control.jsonl");
+            std::fs::write(&control, b"non-sensitive positive-control fixture").unwrap();
+            sea_orm::sqlx::query("INSERT INTO threads VALUES('counter-control',?,?,0,'0.162.1')")
+                .bind(control.to_str().unwrap())
+                .bind(root.to_str().unwrap())
+                .execute(&mut connection)
+                .await
+                .unwrap();
+            connection.close().await.unwrap();
+            let calls = Arc::new(AtomicUsize::new(0));
+            let result = invoke(&program, &root, &backup, calls.clone()).await;
+            assert!(result.is_err());
+            assert!(
+                calls.load(Ordering::SeqCst) >= 1,
+                "eligible Missing positive control must reach the actual reader entry"
+            );
+
+            let mut paths = Vec::new();
+            for leaf in [
+                "auth.json",
+                "config.toml",
+                "history.jsonl",
+                "state_5.sqlite",
+            ] {
+                let path = temp.path().join(leaf);
+                std::fs::write(&path, b"CX19-ZERO-READ-SENTINEL").unwrap();
+                paths.push(path);
+            }
+            paths.extend([
+                PathBuf::from("auth.json"),
+                temp.path().join("..").join("auth.json"),
+                temp.path().join("rollout-control-wrong-sid.jsonl"),
+            ]);
+            for path in paths {
+                set_path(&backup, &path).await;
+                calls.store(0, Ordering::SeqCst);
+                let error = invoke(&program, &root, &backup, calls.clone())
+                    .await
+                    .unwrap_err();
+                assert_eq!(
+                    error.stable_code(),
+                    StableErrorCode::AgentTranscriptAuthorizationMissing
+                );
+                assert_eq!(
+                    calls.load(Ordering::SeqCst),
+                    0,
+                    "invalid-shaped path reached source authorization"
+                );
+            }
+            let forged = codex_index::ImportIndexOutcome::Available {
+                snapshot: codex_index::ImportIndexSnapshot {
+                    max_migration: 21,
+                    candidate_count: 1,
+                    scope_ambiguous_count: 0,
+                    scope_unknown_count: 0,
+                    threads: vec![codex_index::ImportIndexThread {
+                        id: "counter-control".into(),
+                        archived: false,
+                        scope: RecentScopeStatus::Proven,
+                        source_state: ImportSourceState::Eligible,
+                        rollout_path: Some(temp.path().join("auth.json")),
+                    }],
+                    spawn_edges: Vec::new(),
+                },
+            };
+            let frame = base64::engine::general_purpose::STANDARD
+                .encode(serde_json::to_vec(&forged).unwrap());
+            let fake = temp.path().join("forged-frame-helper");
+            std::fs::write(&fake,format!("#!/usr/bin/python3\nimport base64,sys\nsys.stdout.buffer.write(base64.b64decode('{frame}'))\n")).unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o700)).unwrap();
+            calls.store(0, Ordering::SeqCst);
+            let error = invoke(&fake, &root, &backup, calls.clone())
+                .await
+                .unwrap_err();
+            assert_eq!(
+                error.stable_code(),
+                StableErrorCode::AgentImportPartialBatch
+            );
+            assert_eq!(
+                serde_json::from_str::<Value>(&error.render_json()).unwrap()["details"]["reason_key"],
+                "response_inconsistent"
+            );
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
+            let conn = sea_orm::Database::connect(format!(
+                "sqlite://{}?mode=rw",
+                root.join(util::ROOT_DIR).join(util::DATABASE).display()
+            ))
+            .await
+            .unwrap();
+            let row = conn
+                .query_one_raw(Statement::from_string(
+                    conn.get_database_backend(),
+                    "SELECT COUNT(*) AS n FROM agent_session",
+                ))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(row.try_get_by::<i64, _>("n").unwrap(), 0);
+            conn.close().await.unwrap();
+        }
+
+        async fn helper_projection(
+            program: &Path,
+            source: &[u8],
+            session: &str,
+            fault: u8,
+        ) -> PreparedImportProjection {
+            let mut descriptor = tempfile::tempfile().unwrap();
+            descriptor.write_all(source).unwrap();
+            descriptor.rewind().unwrap();
+            let mut command = tokio::process::Command::new(program);
+            command.arg(IMPORT_PREPARATION_DESCRIPTOR_HELPER_ARG);
+            let bytes = run_import_preparation_descriptor_helper_bounded(
+                command,
+                PreparationDescriptorControl {
+                    agent_kind: "codex".to_owned(),
+                    source_kind: "file".to_owned(),
+                    provider_commitment: import_provider_commitment(session),
+                    read_cap: TRANSCRIPT_READ_HARD_CAP_BYTES,
+                    remaining_ms: 30_000,
+                    transport: None,
+                },
+                descriptor,
+                IMPORT_PREPARATION_HELPER_OUTPUT_CAP,
+                Instant::now() + Duration::from_secs(30),
+            )
+            .await
+            .unwrap();
+            let mut frame: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(frame["status"], "ok");
+            assert_eq!(frame["raw_bytes"], source.len());
+            assert!(frame.get("transport").is_none());
+            assert!(frame.get("transport_required").is_none());
+            // Mutate only this test-owned ordinary response, never a native
+            // MAC or production helper. Exercise both advertised unavailability
+            // and rejection of an invalid carrier version by the parent.
+            if fault == 1 {
+                frame["projection"]["codex_retention"] =
+                    json!({"version":1,"turns":{},"unavailable":true});
+            } else if fault == 2 {
+                frame["projection"]["codex_retention"]["version"] = json!(255);
+            }
+            let frame: PreparationDescriptorHelperResponse =
+                serde_json::from_slice(&serde_json::to_vec(&frame).unwrap()).unwrap();
+            let PreparationDescriptorHelperResponse::Ok { projection, .. } = frame else {
+                panic!("ordinary helper must prepare the source");
+            };
+            *projection
+        }
+
+        async fn claims(conn: &DatabaseConnection) -> Vec<String> {
+            conn.query_all_raw(Statement::from_string(
+                conn.get_database_backend(),
+                "SELECT json_object('key',logical_turn_key,'version',coverage_schema_version,'digest',coverage_digest,'checkpoint',checkpoint_id,'revision',revision,'state',state,'owner',owner,'fence',fence_token) AS row FROM agent_coverage_claim ORDER BY logical_turn_key".to_owned(),
+            ))
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|row| row.try_get_by("row").unwrap())
+            .collect()
+        }
+
+        #[tokio::test]
+        #[ignore = "operator-local Codex acceptance; never run in CI"]
+        async fn codex_summary_helper_unavailable_recovers_through_parent_and_store() {
+            let program = std::env::current_exe()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .join("libra");
+            assert!(program.is_file());
+            for fault in [1, 2] {
+                let temp = tempfile::tempdir().unwrap();
+                let root = temp.path().join("repo");
+                let home = temp.path().join("home");
+                std::fs::create_dir_all(&root).unwrap();
+                std::fs::create_dir_all(&home).unwrap();
+                let root = root.canonicalize().unwrap();
+                let init = run_cli(&program, &root, &home, &["init"]);
+                assert!(
+                    init.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&init.stderr)
+                );
+                let storage = root.join(util::ROOT_DIR);
+                let conn = sea_orm::Database::connect(format!(
+                    "sqlite://{}?mode=rw",
+                    storage.join(util::DATABASE).display(),
+                ))
+                .await
+                .unwrap();
+                let scope = CaptureScope::resolve(&conn, &root).await.unwrap();
+                let session = "123e4567-e89b-12d3-a456-426614174038";
+                let mut rows = vec![
+                    json!({"type":"session_meta","timestamp":"2026-10-19T01:00:00Z","payload":{"id":session,"cwd":root}}),
+                ];
+                for i in 0..2 {
+                    rows.extend([
+                        json!({"type":"event_msg","payload":{"type":"task_started","turn_id":format!("fallback-{i}")}}),
+                        json!({"type":"response_item","timestamp":"2026-10-19T01:00:01Z","payload":{"type":"message","role":"user","content":format!("question {i}")}}),
+                        json!({"type":"response_item","timestamp":"2026-10-19T01:00:02Z","payload":{"type":"reasoning","id":format!("rs-fallback-{i}"),"summary":[{"type":"summary_text","text":format!("CX15-FALLBACK-{i}")}],"encrypted_content":format!("CX15-OPAQUE-{i}")}}),
+                        json!({"type":"response_item","timestamp":"2026-10-19T01:00:03Z","payload":{"type":"message","role":"assistant","content":format!("answer {i}")}}),
+                    ]);
+                }
+                rows.push(json!({"type":"session_end","timestamp":"2026-10-19T01:00:04Z","payload":{"type":"session_end","cwd":root}}));
+                let source = (rows
+                    .iter()
+                    .map(Value::to_string)
+                    .collect::<Vec<_>>()
+                    .join("\n")
+                    + "\n")
+                    .into_bytes();
+                let mut original_claims = Vec::new();
+                let mut original_checkpoints = std::collections::BTreeMap::new();
+                for pass in 0..3 {
+                    let mut projection = helper_projection(
+                        &program,
+                        &source,
+                        session,
+                        if pass == 0 { fault } else { 0 },
+                    )
+                    .await;
+                    validate_prepared_runtime_response(AgentKind::Codex, &projection, false)
+                        .unwrap();
+                    let deadline =
+                        CaptureCommitDeadline::from_budget(Duration::from_secs(30)).unwrap();
+                    let retention =
+                        consume_codex_retention(&mut projection, deadline.monotonic()).unwrap();
+                    assert_eq!(retention.is_unavailable(), pass == 0);
+                    assert_eq!(
+                        projection.redaction_report["codex_reasoning"]["retention_unavailable"]
+                            .as_bool()
+                            .unwrap_or(false),
+                        pass == 0
+                    );
+                    let result = crate::internal::ai::authorized_read::with_test_helper_program(
+                        program.clone(),
+                        async {
+                            let source_preimage = import_source_preimage(
+                                AgentKind::Codex,
+                                "file",
+                                "codex-retention-local-descriptor",
+                                session,
+                            )
+                            .unwrap();
+                            let source_commitment =
+                                derive_capture_source_commitment_in_scope_until(
+                                    &conn,
+                                    &scope,
+                                    &storage,
+                                    &root,
+                                    CaptureSourceCommitmentDomain::ImportSourceV2,
+                                    &source_preimage,
+                                    deadline.monotonic(),
+                                )
+                                .await
+                                .unwrap();
+                            let snapshot_preimage = projection
+                                .transcript_snapshot
+                                .as_ref()
+                                .unwrap()
+                                .redacted_digest_preimage()
+                                .unwrap();
+                            let snapshot_commitment =
+                                derive_snapshot_content_commitment_in_scope_until(
+                                    &conn,
+                                    &scope,
+                                    &storage,
+                                    &root,
+                                    &snapshot_preimage,
+                                    deadline.monotonic(),
+                                )
+                                .await
+                                .unwrap();
+                            assert!(
+                                projection
+                                    .transcript_snapshot
+                                    .as_mut()
+                                    .unwrap()
+                                    .bind_source_commitment(snapshot_commitment)
+                            );
+                            let mut request = import_request_from_projection(
+                                AgentKind::Codex,
+                                session.to_owned(),
+                                "file".to_owned(),
+                                source_commitment,
+                                root.clone(),
+                                projection,
+                            );
+                            request.capture_scope = Some(scope.clone());
+                            let existing = load_existing_session_ownership_in_scope(
+                                &conn,
+                                AgentKind::Codex,
+                                session,
+                                &scope,
+                            )
+                            .await
+                            .unwrap();
+                            validate_scoped_prepared_existing_session(
+                                &mut request,
+                                existing.as_ref(),
+                            )
+                            .unwrap();
+                            import_prepared_with_retention(
+                                &conn,
+                                &storage,
+                                request,
+                                deadline,
+                                crate::internal::ai::subagent_content::SubagentDiscovery::default(),
+                                None,
+                                None,
+                                Some(retention),
+                            )
+                            .await
+                        },
+                    )
+                    .await
+                    .unwrap();
+                    assert_eq!(result.summary.partial, pass == 0);
+                    assert_eq!(
+                        result.summary.checkpoints_written,
+                        if pass == 2 { 0 } else { 2 }
+                    );
+                    assert!(
+                        ClientStorage::wait_for_background_tasks_until(
+                            Instant::now() + Duration::from_secs(10)
+                        )
+                        .await
+                    );
+                    let current_claims = claims(&conn).await;
+                    assert_eq!(current_claims.len(), 2);
+                    if pass == 0 {
+                        original_claims = current_claims;
+                    } else {
+                        assert_eq!(
+                            current_claims, original_claims,
+                            "supplements cannot rewrite semantic claims"
+                        );
+                    }
+                    let checkpoints = conn.query_all_raw(Statement::from_string(conn.get_database_backend(), "SELECT checkpoint_id,metadata_blob_oid FROM agent_checkpoint ORDER BY rowid".to_owned())).await.unwrap();
+                    assert_eq!(checkpoints.len(), if pass == 0 { 2 } else { 4 });
+                    let mut thinking_exports = 0;
+                    let mut all_exports = String::new();
+                    for row in checkpoints {
+                        let id: String = row.try_get_by("checkpoint_id").unwrap();
+                        let exported = run_cli(
+                            &program,
+                            &root,
+                            &home,
+                            &["agent", "checkpoint", "export", &id],
+                        );
+                        assert!(exported.status.success());
+                        let text = String::from_utf8(exported.stdout).unwrap();
+                        thinking_exports += usize::from(text.contains("CX15-FALLBACK-"));
+                        let oid: String = row.try_get_by("metadata_blob_oid").unwrap();
+                        if pass == 0 {
+                            original_checkpoints.insert(id.clone(), (oid.clone(), text.clone()));
+                        } else if let Some((original_oid, original_text)) =
+                            original_checkpoints.get(&id)
+                        {
+                            assert_eq!(&oid, original_oid, "old metadata objects are immutable");
+                            assert_eq!(&text, original_text, "old ordinary exports are immutable");
+                        }
+                        all_exports.push_str(&text);
+                        let metadata: Value = serde_json::from_slice(
+                            &crate::utils::object::read_git_object(
+                                &storage,
+                                &ObjectHash::from_str(&oid).unwrap(),
+                            )
+                            .unwrap(),
+                        )
+                        .unwrap();
+                        assert!(!metadata.to_string().contains("CX15-FALLBACK-"));
+                        if pass == 0 {
+                            assert_eq!(
+                                metadata["redaction_report"]["codex_reasoning"]["retention_unavailable"],
+                                true
+                            );
+                        }
+                    }
+                    assert_eq!(thinking_exports, if pass == 0 { 0 } else { 2 });
+                    for i in 0..2 {
+                        assert_eq!(
+                            all_exports.matches(&format!("CX15-FALLBACK-{i}")).count(),
+                            usize::from(pass != 0)
+                        );
+                        assert_eq!(
+                            all_exports.matches(&format!("CX15-OPAQUE-{i}")).count(),
+                            usize::from(pass != 0)
+                        );
+                    }
+                }
+                conn.close().await.unwrap();
+            }
+        }
+    }
 
     #[cfg(unix)]
     #[test]
@@ -3709,6 +4719,7 @@ mod tests {
             )]),
             turns: vec![turn],
             coverage_runtime: None,
+            codex_retention: None,
         }
     }
 
@@ -4745,6 +5756,7 @@ mod tests {
             cursor: None,
             yes: true,
             restore_erased: false,
+            codex_index_backup: None,
         };
         let error = validate_discovery_selector(&args).expect_err("--path needs --agent");
         assert_eq!(error.message(), "--path requires --agent");
@@ -4771,6 +5783,7 @@ mod tests {
             cursor: None,
             yes: true,
             restore_erased: false,
+            codex_index_backup: None,
         };
         configure(&mut args);
         args

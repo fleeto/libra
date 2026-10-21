@@ -2358,7 +2358,7 @@ impl<'ast> syn::visit::Visit<'ast> for ProviderTokenScan {
 ///   in-process harness, and builtin typed identities are declared together
 ///   in `hooks/providers/mod.rs`;
 /// - `observed_agents/live_capture.rs` uses none of the ADR's banned
-///   persistence/capture names (`subagent_content` limited to three names);
+///   persistence/capture names (`subagent_content` limited to the discovery result, bounded delegates and source cap);
 /// - `hooks/**` and `capture/{live,live_pipeline,live_checkpoint}.rs` hold no
 ///   `capture_agent_kind`, no `from_db_str(` / `from_cli_slug(` and no
 ///   `provider_name()`-keyed string dispatch;
@@ -2601,7 +2601,8 @@ fn live_capture_port_and_store_boundaries() {
         "the builtin typed identities must be declared together in hooks/providers/mod.rs"
     );
 
-    // The ACF-18 port surface plus the ACF-20 transcript exporter.
+    // The live ports include the pure, untrusted hint extractor. Keep this
+    // provider-neutral inventory exact; it grants no source/store authority.
     let (_, live_capture_file) =
         parse_rust_source("src/internal/ai/observed_agents/live_capture.rs");
     let port_methods: BTreeSet<String> = live_capture_file
@@ -2623,15 +2624,17 @@ fn live_capture_port_and_store_boundaries() {
         port_methods,
         BTreeSet::from(
             [
+                "child_source_hints",
                 "live_coverage_normalizer",
                 "live_transcript_candidate",
                 "missing_host_capture_budget",
                 "subagent_discovery",
+                "subagent_event_policy",
                 "transcript_exporter",
             ]
             .map(String::from)
         ),
-        "LiveCaptureProvider carries exactly the ACF-18 capabilities and the ACF-20 exporter"
+        "LiveCaptureProvider carries exactly the live capabilities, pure hint extractor and transcript exporter"
     );
 
     // `live_capture_for`: one exhaustive match, no `_` arm, `Some` exactly
@@ -2697,6 +2700,85 @@ fn live_capture_port_and_store_boundaries() {
         "live_capture_for must name every AgentKind variant explicitly"
     );
 
+    // Stored callers reuse the registered binding only at their ingress.
+    // Count syntax paths (including aliases/first-class function values), not
+    // text matches that can silently miss wrapped calls.
+    #[derive(Default)]
+    struct StoredBindingCallers {
+        functions: Vec<String>,
+        hits: Vec<String>,
+    }
+    impl<'ast> Visit<'ast> for StoredBindingCallers {
+        fn visit_item(&mut self, item: &'ast syn::Item) {
+            if !has_exact_cfg_test(syn_item_attrs(item)) {
+                syn::visit::visit_item(self, item);
+            }
+        }
+        fn visit_item_fn(&mut self, item: &'ast syn::ItemFn) {
+            self.functions.push(item.sig.ident.to_string());
+            syn::visit::visit_item_fn(self, item);
+            self.functions.pop();
+        }
+        fn visit_impl_item_fn(&mut self, item: &'ast syn::ImplItemFn) {
+            if !has_exact_cfg_test(&item.attrs) {
+                self.functions.push(item.sig.ident.to_string());
+                syn::visit::visit_impl_item_fn(self, item);
+                self.functions.pop();
+            }
+        }
+        fn visit_attribute(&mut self, _: &'ast syn::Attribute) {}
+        fn visit_expr_path(&mut self, path: &'ast syn::ExprPath) {
+            if path
+                .path
+                .segments
+                .last()
+                .is_some_and(|part| part.ident == "for_stored")
+            {
+                self.hits
+                    .push(self.functions.last().cloned().unwrap_or_default());
+            }
+            syn::visit::visit_expr_path(self, path);
+        }
+        fn visit_macro(&mut self, mac: &'ast syn::Macro) {
+            fn has_stored(tokens: proc_macro2::TokenStream) -> bool {
+                tokens.into_iter().any(|token| match token {
+                    proc_macro2::TokenTree::Group(group) => has_stored(group.stream()),
+                    proc_macro2::TokenTree::Ident(ident) => ident == "for_stored",
+                    _ => false,
+                })
+            }
+            if has_stored(mac.tokens.clone()) {
+                self.hits.push("<macro>".to_string());
+            }
+        }
+    }
+    let mut stored_callers = BTreeMap::new();
+    for relative in rust_sources_under("src") {
+        let (_, file) = parse_rust_source(&relative);
+        let mut scan = StoredBindingCallers::default();
+        scan.visit_file(&file);
+        for owner in scan.hits {
+            *stored_callers
+                .entry(format!("{relative}::{owner}"))
+                .or_insert(0usize) += 1;
+        }
+    }
+    assert_eq!(
+        stored_callers,
+        BTreeMap::from([
+            ("src/command/agent/import.rs::execute_safe".to_string(), 1),
+            (
+                "src/internal/ai/agent_import.rs::import_prepared".to_string(),
+                1
+            ),
+            (
+                "src/internal/ai/subagent_content.rs::recover_terminal_children".to_string(),
+                1
+            ),
+        ]),
+        "stored selection must reuse registration only at the two import ingress owners and the single shared Root recovery driver"
+    );
+
     // --- Provider-port ban (whole file, tests included).
     #[derive(Default)]
     struct PortBan {
@@ -2731,6 +2813,8 @@ fn live_capture_port_and_store_boundaries() {
                         Some(
                             "SubagentDiscovery"
                                 | "discover_claude_subagent_contents_bounded"
+                                | "discover_codex_subagent_contents_live"
+                                | "discover_codex_subagent_contents_stored"
                                 | "MAX_SUBAGENT_SOURCES_PER_CAPTURE"
                         )
                     )
@@ -3087,7 +3171,14 @@ fn live_capture_port_and_store_boundaries() {
         (
             "src/internal/ai/capture/live_pipeline.rs",
             "ingest_agent_traces_payload_with_scope",
-            "discover_subagents(binding, &live_context, subagent_discovery_deadline)",
+            concat!(
+                "discover_subagents(\n",
+                "                binding,\n",
+                "                &live_context,\n",
+                "                &child_source_hints,\n",
+                "                subagent_discovery_deadline,\n",
+                "            )",
+            ),
         ),
         (
             "src/internal/ai/capture/live_pipeline.rs",
@@ -7862,6 +7953,10 @@ fn capture_foundation_downstream_plan_and_layering_contract() {
     let public_failure = top_level_function(&import_command, "safe_failure");
     let mut public_failure_guard = ImportFlowGuard::default();
     public_failure_guard.visit_item_fn(public_failure);
+    assert_eq!(public_failure_guard.call_count("safe_failure_for"), 1);
+    public_failure_guard.visit_item_fn(top_level_function(&import_command, "safe_failure_for"));
+    assert_eq!(public_failure_guard.call_count("hashed_import_id"), 1);
+    public_failure_guard.visit_item_fn(top_level_function(&import_command, "hashed_import_id"));
     // The documented per-item id is a short unkeyed hash of the provider
     // session id alone (the same report carries full ids for completed
     // items); it must never be derived from a source locator or commitment.
@@ -9176,6 +9271,10 @@ fn capture_runtime_extraction_oracles_are_frozen() {
     // PermissionRequest, SubagentStart, and SubagentStop became ordinary
     // observed events (receipts and subagent checkpoints). Helpers are
     // unchanged. ADR-ACF-10 records this bounded contract revision.
+    // ADR-ACF-10 records OG-01's input revision and OpenCode's local-only
+    // execution scope. Its CX-15 amendment additionally freezes the original
+    // hook matrix, the fourteen Claude forwarding overrides and their mapping
+    // helper after explicit design review; all other oracle expectations stay.
     const FROZEN_ORACLES: [(&str, &str, &[&str], &str); 3] = [
         (
             "tests/agent_lifecycle_event_test.rs",
@@ -9186,16 +9285,18 @@ fn capture_runtime_extraction_oracles_are_frozen() {
                 "HookRepo::init",
                 "HookRepo::run",
                 "const CLAUDE_CONTRACT_EVENTS",
+                "const CLAUDE_FORWARDED_PUBLIC_HOOK_ROWS",
                 "const CODEX_CONTRACT_EVENTS",
                 "const HOOK_CONTRACT_SURFACES",
                 "const HOOK_CONTRACT_VERBS",
                 "const HOOK_PUBLIC_CONTRACT_MATRIX",
                 "const OPENCODE_CONTRACT_EVENTS",
+                "fn current_public_hook_contract_matrix",
                 "fn hook_contract_bytes",
                 "fn hook_contract_projection",
                 "struct HookRepo",
             ],
-            "78656cf7640f911ac2c1e37a7edfedd049c3ea7a1e331044d89b9c0cdc8faeea",
+            "6b04514b29f135d4681c8f7444ab52a0d0e484dbfd08de50b25bbd70a9c5ef77",
         ),
         (
             "tests/agent_hook_crash_test.rs",
@@ -9254,16 +9355,18 @@ fn capture_runtime_extraction_oracles_are_frozen() {
                 "HookRepo::init",
                 "HookRepo::run",
                 "const CLAUDE_CONTRACT_EVENTS",
+                "const CLAUDE_FORWARDED_PUBLIC_HOOK_ROWS",
                 "const CODEX_CONTRACT_EVENTS",
                 "const HOOK_CONTRACT_SURFACES",
                 "const HOOK_CONTRACT_VERBS",
                 "const HOOK_PUBLIC_CONTRACT_MATRIX",
                 "const OPENCODE_CONTRACT_EVENTS",
+                "fn current_public_hook_contract_matrix",
                 "fn hook_contract_bytes",
                 "fn hook_contract_projection",
                 "struct HookRepo",
             ],
-            "732953abeb31caa0b839376e37cdb405fd35287ee5e44259a95d5e16331de665",
+            "d3eef735b1e16ea78c31e3f4b012a63d4324ad7755bca9c2ba6f3cdbdae68ab6",
         ),
         (
             "tests/agent_hook_crash_test.rs",
@@ -10086,6 +10189,13 @@ fn reasoning_bound_identity_accessor_has_closed_adapter_caller() {
             "normalize_codex_rollout_until",
             "normalize_opencode_export_until",
         ] {
+            let normalizer = if name == "prepare_import_projection_with_reasoning"
+                && normalizer == "normalize_codex_rollout_until"
+            {
+                "normalize_codex_retained_rollout_until"
+            } else {
+                normalizer
+            };
             assert!(
                 owning
                     < flow
@@ -10797,7 +10907,7 @@ fn reasoning_import_partition_has_closed_ownership_transform_callers() {
         (
             "partition_reasoning_for_import",
             "src/internal/ai/agent_import.rs",
-            "import_prepared_with_subagent_discovery_and_runtime",
+            "import_prepared_with_retention",
         ),
     ] {
         assert_import_reference_detector_catches_rogue(name);

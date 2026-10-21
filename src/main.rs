@@ -444,6 +444,12 @@ fn run_authorized_read_helper_if_requested() -> Option<i32> {
     {
         return Some(libra::internal::ai::authorized_read::run_live_claude_source_helper(cap));
     }
+    if let Ok(mode) = std::env::var(AUTHORIZED_READ_HELPER_MODE_ENV)
+        && let Some(code) =
+            libra::internal::ai::authorized_read::run_codex_capture_helper_if_requested(cap, &mode)
+    {
+        return Some(code);
+    }
     if std::env::var_os(AUTHORIZED_READ_HELPER_MODE_ENV).is_some() {
         return Some(2);
     }

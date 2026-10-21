@@ -29,12 +29,15 @@ use crate::internal::ai::authorized_read::{
     configure_private_helper_process_group, helper_program, read_async_strictly_bounded,
 };
 pub(crate) use crate::internal::ai::capture::runtime_scope::CaptureRuntimeScope;
-use crate::internal::ai::hooks::{
-    lifecycle::{
-        LifecycleEvent, LifecycleEventKind, LifecycleIdentityScheme, SessionHookEnvelope,
-        validate_session_hook_envelope,
+use crate::internal::ai::{
+    hooks::{
+        lifecycle::{
+            LifecycleEvent, LifecycleEventKind, LifecycleIdentityScheme, SessionHookEnvelope,
+            validate_session_hook_envelope,
+        },
+        provider::{HookProvider, ProviderHookCommand},
     },
-    provider::{HookProvider, ProviderHookCommand},
+    observed_agents::live_capture::{ChildSourceHintPolicy, UntrustedChildSourceHints},
 };
 
 /// Maximum bytes accepted from a hook frame before parsing.
@@ -294,6 +297,8 @@ pub(crate) struct CaptureEventContext {
 /// It carries no database/ref handle and no raw stdin buffer, preventing an
 /// ingress consumer from accidentally coupling validation to durable writes.
 pub struct CaptureIngressCommand {
+    /// Bounded candidate pointers, never scope facts or source authority.
+    child_source_hints: UntrustedChildSourceHints,
     /// Bounded input size retained solely for content-free observability.
     frame_bytes: usize,
     /// CLI hook verb that selected this provider callback.
@@ -367,6 +372,7 @@ enum ParsedCaptureIngressOutcome {
 /// envelope and event may still contain provider payload fields. It can only
 /// be produced by consuming a validated [`CaptureIngressCommand`].
 pub(crate) struct CaptureIngressParts {
+    pub(crate) child_source_hints: UntrustedChildSourceHints,
     pub(crate) frame_bytes: usize,
     pub(crate) hook_command: ProviderHookCommand,
     pub(crate) provider_kind: &'static str,
@@ -389,6 +395,7 @@ impl CaptureIngressCommand {
         hook_command: ProviderHookCommand,
         expected_kind: LifecycleEventKind,
         provider: &dyn HookProvider,
+        hint_policy: ChildSourceHintPolicy,
         deadline: Option<CaptureDeadline>,
         bind_runtime: F,
     ) -> Result<CaptureIngressOutcome>
@@ -396,6 +403,7 @@ impl CaptureIngressCommand {
         F: FnOnce(CaptureScopeInput) -> Fut,
         Fut: Future<Output = Result<CaptureIngressBinding>>,
     {
+        check_child_hint_policy(provider, Some(hint_policy))?;
         let payload = read_stdin_until_deadline(deadline).await?;
         let parsed = parse_capture_ingress_payload(
             &payload,
@@ -432,7 +440,7 @@ impl CaptureIngressCommand {
                     ),
                 };
                 let binding = bind_runtime(scope_input).await?;
-                finish_capture_ingress(parsed, binding, provider)
+                finish_capture_ingress(parsed, binding, provider, Some(hint_policy))
             }
         }
     }
@@ -450,6 +458,27 @@ impl CaptureIngressCommand {
         deadline: Option<CaptureDeadline>,
         bind_runtime: impl FnOnce(&CaptureScopeInput) -> Result<CaptureIngressBinding>,
     ) -> Result<CaptureIngressOutcome> {
+        Self::from_payload_with_hint_policy(
+            payload,
+            hook_command,
+            expected_kind,
+            provider,
+            deadline,
+            None,
+            bind_runtime,
+        )
+    }
+
+    fn from_payload_with_hint_policy(
+        payload: &[u8],
+        hook_command: ProviderHookCommand,
+        expected_kind: LifecycleEventKind,
+        provider: &dyn HookProvider,
+        deadline: Option<CaptureDeadline>,
+        hint_policy: Option<ChildSourceHintPolicy>,
+        bind_runtime: impl FnOnce(&CaptureScopeInput) -> Result<CaptureIngressBinding>,
+    ) -> Result<CaptureIngressOutcome> {
+        check_child_hint_policy(provider, hint_policy)?;
         match parse_capture_ingress_payload(
             payload,
             hook_command,
@@ -484,7 +513,7 @@ impl CaptureIngressCommand {
                 // must bind that claim before key material is created or any
                 // command is returned.
                 let binding = bind_runtime(&scope_input)?;
-                finish_capture_ingress(parsed, binding, provider)
+                finish_capture_ingress(parsed, binding, provider, hint_policy)
             }
         }
     }
@@ -560,6 +589,7 @@ impl CaptureIngressCommand {
     /// own redaction before durable use.
     pub(crate) fn into_parts(self) -> CaptureIngressParts {
         CaptureIngressParts {
+            child_source_hints: self.child_source_hints,
             frame_bytes: self.frame_bytes,
             hook_command: self.hook_command,
             provider_kind: self.provider_kind,
@@ -611,6 +641,58 @@ pub fn lower_in_process_capture_frame_for_test(
             CaptureRuntimeScope::new(runtime_storage, runtime_root),
         ))
     })
+}
+
+/// Operator-local policy seam; raw bytes remain inside this ingress owner
+/// and use the same parsing/lowering path as the managed stdin constructor.
+#[cfg(test)]
+#[cfg(feature = "test-live-agent")]
+pub(crate) fn lower_child_hint_frame_for_test(
+    payload: &[u8],
+    command: ProviderHookCommand,
+    expected_kind: LifecycleEventKind,
+    provider: &dyn HookProvider,
+    policy: ChildSourceHintPolicy,
+) -> Result<CaptureIngressOutcome> {
+    CaptureIngressCommand::from_payload_with_hint_policy(
+        payload,
+        command,
+        expected_kind,
+        provider,
+        None,
+        Some(policy),
+        |_| {
+            let root = std::path::PathBuf::from("/in-process-capture");
+            Ok(CaptureIngressBinding::new(
+                "/in-process-capture".to_owned(),
+                [0xA5; 32],
+                CaptureRuntimeScope::new(root.clone(), root),
+            ))
+        },
+    )
+}
+
+/// The same local-only lowerer with an owned fixture's verified runtime scope.
+/// Keep raw frames inside ingress; consumers receive the opaque command only.
+#[cfg(all(test, feature = "test-live-agent"))]
+pub(crate) fn lower_child_hint_bound_frame_for_test(
+    payload: &[u8],
+    command: ProviderHookCommand,
+    expected_kind: LifecycleEventKind,
+    provider: &dyn HookProvider,
+    policy: ChildSourceHintPolicy,
+    runtime: CaptureIngressBinding,
+    deadline: Option<CaptureDeadline>,
+) -> Result<CaptureIngressOutcome> {
+    CaptureIngressCommand::from_payload_with_hint_policy(
+        payload,
+        command,
+        expected_kind,
+        provider,
+        deadline,
+        Some(policy),
+        |_| Ok(runtime),
+    )
 }
 
 fn observe_partial(frame_bytes: usize) -> ParsedCaptureIngressOutcome {
@@ -686,7 +768,9 @@ fn parse_capture_ingress_payload(
     }
 
     let event = provider.parse_hook_event(&envelope.hook_event_name, &envelope)?;
-    if hook_command != ProviderHookCommand::Observe && event.kind != expected_kind {
+    if hook_command != ProviderHookCommand::Observe
+        && !provider.accepts_event_kind(expected_kind, event.kind)
+    {
         // This is a bounded grammar mismatch between the selected CLI verb
         // and the already parsed event name; unlike a later runtime failure,
         // it contains no provider-controlled path or session content and is
@@ -732,10 +816,23 @@ fn hook_input_exceeds_limit() -> HookEnvelopeInvalid {
     HookEnvelopeInvalid(format!("hook input exceeds {MAX_STDIN_BYTES} bytes"))
 }
 
+fn check_child_hint_policy(
+    provider: &dyn HookProvider,
+    policy: Option<ChildSourceHintPolicy>,
+) -> Result<()> {
+    if policy.is_some_and(|policy| !policy.matches(provider)) {
+        bail!(
+            "capture ingress policy does not match the hook provider; retry the correct hook command"
+        );
+    }
+    Ok(())
+}
+
 fn finish_capture_ingress(
     parsed: ParsedCaptureIngress,
     binding: CaptureIngressBinding,
     provider: &dyn HookProvider,
+    hint_policy: Option<ChildSourceHintPolicy>,
 ) -> Result<CaptureIngressOutcome> {
     let ParsedCaptureIngress {
         frame_bytes,
@@ -789,6 +886,9 @@ fn finish_capture_ingress(
     // verification, not a canonical lifecycle-event property. Avoid carrying
     // it twice through the trusted handoff.
     event.session_ref = None;
+    let child_source_hints = hint_policy.map_or(UntrustedChildSourceHints::Absent, |policy| {
+        policy.extract(&envelope, event.kind)
+    });
     let context = CaptureEventContext {
         provider_session_id: envelope.session_id,
         working_dir: verified_cwd,
@@ -797,6 +897,7 @@ fn finish_capture_ingress(
 
     Ok(CaptureIngressOutcome::Command(Box::new(
         CaptureIngressCommand {
+            child_source_hints,
             frame_bytes,
             hook_command,
             provider_kind,
@@ -2196,5 +2297,126 @@ mod tests {
             outcome,
             CaptureIngressOutcome::UnknownEvent { .. }
         ));
+    }
+}
+
+#[cfg(test)]
+#[cfg(feature = "test-live-agent")]
+mod codex_child_hint_ingress_tests {
+    use std::path::Path;
+
+    use super::*;
+    use crate::internal::ai::{
+        hooks::providers::{codex_provider, opencode_provider},
+        observed_agents::live_capture::{ChildSourceHintRole, LiveCaptureBinding},
+    };
+
+    fn raw() -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({
+            "hook_event_name":"SubagentStop","session_id":"root-id","cwd":"/in-process-capture",
+            "transcript_path":"/provider/parent.jsonl","agent_id":"child-id",
+            "agent_transcript_path":"/provider/child.jsonl","turn_id":"turn-id"
+        }))
+        .expect("fixture")
+    }
+    #[test]
+    #[ignore = "operator-local Codex acceptance; never run in CI"]
+    fn codex_child_hint_original_fields_survive_lowering_without_restoring_envelope() {
+        let raw = raw();
+        let result = lower_child_hint_frame_for_test(
+            &raw,
+            ProviderHookCommand::SubagentEnd,
+            LifecycleEventKind::SubagentEnd,
+            codex_provider(),
+            LiveCaptureBinding::resolve(codex_provider()).child_source_hint_policy(),
+        )
+        .expect("managed policy lowering");
+        let CaptureIngressOutcome::Command(command) = result else {
+            panic!("command");
+        };
+        let parts = command.into_parts();
+        assert!(parts.event.kind == LifecycleEventKind::SubagentEnd);
+        assert!(parts.event.session_ref.is_none());
+        let view = parts
+            .child_source_hints
+            .candidate()
+            .expect("typed candidate");
+        assert!(view.role == ChildSourceHintRole::ChildBoundary);
+        assert_eq!(
+            view.current_or_parent_path,
+            Some(Path::new("/provider/parent.jsonl"))
+        );
+        assert_eq!(view.child_path, Some(Path::new("/provider/child.jsonl")));
+        assert_eq!(view.child_id, Some("child-id"));
+        assert_eq!(view.turn_id, Some("turn-id"));
+        assert_eq!(parts.context.provider_session_id, "root-id");
+        let (narrow, _) = crate::internal::ai::capture::live::narrow_envelope_from_capture_context(
+            parts.context,
+            LifecycleEventKind::SubagentEnd,
+        );
+        assert!(narrow.extra.is_empty() && narrow.transcript_path.is_none());
+        assert!(
+            LiveCaptureBinding::resolve(codex_provider())
+                .subagent_discovery()
+                .is_some(),
+            "CX09 registers discovery independently of the hint handoff"
+        );
+    }
+
+    #[test]
+    #[ignore = "operator-local Codex acceptance; never run in CI"]
+    fn codex_child_hint_binding_mismatch_fails_before_runtime_binding() {
+        let policy = LiveCaptureBinding::resolve(opencode_provider()).child_source_hint_policy();
+        let result = CaptureIngressCommand::from_payload_with_hint_policy(
+            &raw(),
+            ProviderHookCommand::SubagentEnd,
+            LifecycleEventKind::SubagentEnd,
+            codex_provider(),
+            None,
+            Some(policy),
+            |_| panic!("must not bind or mint a key"),
+        );
+        let Err(error) = result else {
+            panic!("provider mismatch must fail");
+        };
+        assert!(error.to_string().contains("policy does not match"));
+        assert!(!error.to_string().contains("/provider/"));
+    }
+    #[test]
+    #[ignore = "operator-local Codex acceptance; never run in CI"]
+    fn codex_child_hint_legacy_lowerer_is_neutral_and_identity_stays_unchanged() {
+        let bytes = raw();
+        let policy = LiveCaptureBinding::resolve(codex_provider()).child_source_hint_policy();
+        let selected = lower_child_hint_frame_for_test(
+            &bytes,
+            ProviderHookCommand::SubagentEnd,
+            LifecycleEventKind::SubagentEnd,
+            codex_provider(),
+            policy,
+        )
+        .expect("selected policy");
+        let neutral = lower_in_process_capture_frame_for_test(
+            &bytes,
+            ProviderHookCommand::SubagentEnd,
+            LifecycleEventKind::SubagentEnd,
+            codex_provider(),
+            None,
+        )
+        .expect("legacy neutral");
+        let (CaptureIngressOutcome::Command(selected), CaptureIngressOutcome::Command(neutral)) =
+            (selected, neutral)
+        else {
+            panic!("commands");
+        };
+        let a = selected.into_parts();
+        let b = neutral.into_parts();
+        assert!(a.child_source_hints.candidate().is_some());
+        assert!(matches!(
+            b.child_source_hints,
+            UntrustedChildSourceHints::Absent
+        ));
+        assert_eq!(a.event_id, b.event_id);
+        assert_eq!(a.dedup_key, b.dedup_key);
+        assert_eq!(a.identity_scheme, b.identity_scheme);
     }
 }

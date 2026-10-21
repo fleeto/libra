@@ -32,6 +32,9 @@
 pub mod adapter;
 pub mod builtin;
 pub mod capability;
+pub(crate) mod codex_index;
+pub(crate) mod codex_reasoning;
+pub(crate) mod codex_rollout;
 pub mod compliance;
 pub mod coverage;
 pub mod derived;
@@ -47,6 +50,7 @@ pub mod reasoning;
 pub mod redaction;
 pub mod registry;
 pub mod rpc;
+pub(crate) mod session_summary;
 pub mod skill_projection;
 pub mod transcript_source;
 pub mod trust;
@@ -215,12 +219,30 @@ pub fn truncator_for(kind: AgentKind) -> Option<&'static dyn TranscriptTruncator
 /// `Some` must stay exactly the registry's `hook_installable` rows.
 pub(crate) fn live_capture_for(
     kind: AgentKind,
-) -> Option<&'static dyn live_capture::LiveCaptureProvider> {
-    static CLAUDE_CODE_LIVE: live_capture::ClaudeLiveCapture = live_capture::ClaudeLiveCapture;
-    static CODEX_LIVE: live_capture::CodexLiveCapture = live_capture::CodexLiveCapture;
-    static OPENCODE_LIVE: live_capture::OpenCodeLiveCapture = live_capture::OpenCodeLiveCapture;
-    static GROK_LIVE: live_capture::GrokLiveCapture = live_capture::GrokLiveCapture;
-
+) -> Option<&'static live_capture::LiveCaptureRegistration<dyn live_capture::LiveCaptureProvider>> {
+    use live_capture::{LiveCaptureProvider, LiveCaptureRegistration};
+    static CLAUDE_POLICY: live_capture::ClaudeLiveCapture = live_capture::ClaudeLiveCapture;
+    static CODEX_POLICY: live_capture::CodexLiveCapture = live_capture::CodexLiveCapture;
+    static OPENCODE_POLICY: live_capture::OpenCodeLiveCapture = live_capture::OpenCodeLiveCapture;
+    static GROK_POLICY: live_capture::GrokLiveCapture = live_capture::GrokLiveCapture;
+    static CLAUDE_CODE_LIVE: LiveCaptureRegistration<dyn LiveCaptureProvider> =
+        LiveCaptureRegistration {
+            policy: &CLAUDE_POLICY,
+            locator: None,
+        };
+    static CODEX_LIVE: LiveCaptureRegistration<dyn LiveCaptureProvider> = LiveCaptureRegistration {
+        policy: &CODEX_POLICY,
+        locator: Some(&CODEX_POLICY),
+    };
+    static OPENCODE_LIVE: LiveCaptureRegistration<dyn LiveCaptureProvider> =
+        LiveCaptureRegistration {
+            policy: &OPENCODE_POLICY,
+            locator: None,
+        };
+    static GROK_LIVE: LiveCaptureRegistration<dyn LiveCaptureProvider> = LiveCaptureRegistration {
+        policy: &GROK_POLICY,
+        locator: None,
+    };
     match kind {
         AgentKind::ClaudeCode => Some(&CLAUDE_CODE_LIVE),
         AgentKind::Codex => Some(&CODEX_LIVE),

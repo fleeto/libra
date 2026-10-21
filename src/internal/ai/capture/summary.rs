@@ -1,0 +1,316 @@
+//! Read-only Codex summary and typed stored-source presence projection.
+//! The original source, transcript bodies, and native artifacts are never read.
+
+use std::{
+    path::Path,
+    sync::Arc,
+    time::{Duration, Instant},
+};
+
+use sea_orm::DatabaseTransaction;
+use serde::Serialize;
+
+use super::catalog::CaptureCatalogStore;
+use crate::internal::ai::{
+    checkpoint_reader::{
+        CheckpointMetadataRead, CheckpointReadBudget, latest_session_metadata_in_snapshot,
+    },
+    observed_agents::{
+        parse_canon_value,
+        session_summary::{SessionSummaryFacts, SummaryTokenUsage},
+    },
+};
+
+pub(crate) struct SessionSummaryRead {
+    checkpoint: Option<CheckpointMetadataRead>,
+    pending: bool,
+    budget: CheckpointReadBudget,
+    session_id: String,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct SessionSummaryView {
+    pub(crate) status: &'static str,
+    pub(crate) source_status: &'static str,
+    pub(crate) as_of_checkpoint: Option<String>,
+    pub(crate) model: Option<String>,
+    pub(crate) title: Option<String>,
+    pub(crate) prompt_count: Option<u64>,
+    pub(crate) token_usage: Option<SummaryTokenUsage>,
+    pub(crate) modified_file_count: Option<u64>,
+}
+
+impl SessionSummaryView {
+    pub(crate) fn unavailable() -> Self {
+        Self::empty("unavailable")
+    }
+    fn empty(status: &'static str) -> Self {
+        Self {
+            status,
+            source_status: "unproven",
+            as_of_checkpoint: None,
+            model: None,
+            title: None,
+            prompt_count: None,
+            token_usage: None,
+            modified_file_count: None,
+        }
+    }
+}
+
+impl SessionSummaryRead {
+    /// Capture state, pending status and metadata authority in the same snapshot.
+    pub(crate) async fn prepare(
+        txn: &DatabaseTransaction,
+        storage: &Path,
+        session_id: &str,
+    ) -> anyhow::Result<Self> {
+        let budget =
+            CheckpointReadBudget::new(Instant::now() + Duration::from_secs(1), Arc::new(|| false));
+        let pending = CaptureCatalogStore::session_summary_is_pending(txn, session_id).await?;
+        let checkpoint =
+            latest_session_metadata_in_snapshot(txn, storage, session_id, &budget).await?;
+        Ok(Self {
+            checkpoint,
+            pending,
+            budget,
+            session_id: session_id.to_owned(),
+        })
+    }
+
+    /// The database transaction has ended before the immutable object read.
+    pub(crate) async fn finish(self) -> SessionSummaryView {
+        let pending = self.pending;
+        let Some(checkpoint) = self.checkpoint else {
+            return SessionSummaryView::empty(if pending { "pending" } else { "unknown" });
+        };
+        let id = checkpoint.checkpoint_id().to_owned();
+        let session = self.session_id;
+        let result = tokio::task::spawn_blocking(move || {
+            let bytes = checkpoint.read(&self.budget)?;
+            parse_canon_value(&bytes)
+                .map_err(|_| anyhow::anyhow!("summary metadata is invalid"))?;
+            let metadata: serde_json::Value = serde_json::from_slice(&bytes)?;
+            for (field, expected) in [
+                ("checkpoint_id", id.as_str()),
+                ("session_id", session.as_str()),
+                ("agent_kind", "codex"),
+            ] {
+                if metadata.get(field).and_then(serde_json::Value::as_str) != Some(expected) {
+                    anyhow::bail!("summary metadata identity is inconsistent");
+                }
+            }
+            let mut view = SessionSummaryView::empty(if pending { "pending" } else { "unknown" });
+            view.as_of_checkpoint = Some(id);
+            if let Some(facts) = metadata
+                .get("extraction")
+                .and_then(SessionSummaryFacts::from_extraction)
+            {
+                view.status = if pending {
+                    "pending"
+                } else if facts.partial {
+                    "partial"
+                } else {
+                    "available"
+                };
+                view.model = facts.model;
+                view.title = facts.title;
+                view.prompt_count = facts.prompt_count;
+                view.modified_file_count = facts.modified_file_count;
+                view.token_usage = if pending { None } else { facts.token_usage };
+            }
+            self.budget.check()?;
+            Ok::<_, anyhow::Error>(view)
+        })
+        .await;
+        match result {
+            Ok(Ok(view)) => view,
+            _ => SessionSummaryView::unavailable(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StoredSourcePresence {
+    Complete,
+    Partial,
+    MissingData,
+    Unknown,
+}
+
+/// Presence is deliberately weaker than readable-thinking or turn completeness.
+/// Only role-proven local ordinary content can turn Complete into stored_source.
+pub(crate) fn stored_source_presence(
+    bytes: &[u8],
+    checkpoint_id: &str,
+    session_id: &str,
+    provider_session_id: &str,
+) -> StoredSourcePresence {
+    #[derive(serde::Deserialize)]
+    struct Metadata<'a> {
+        schema_version: u32,
+        checkpoint_id: &'a str,
+        session_id: &'a str,
+        agent_kind: &'a str,
+        scope: &'a str,
+        provider_session_id: &'a str,
+        #[serde(default)]
+        transcript_snapshot: Option<super::snapshot::CaptureSnapshotProjection>,
+    }
+    if bytes.len() > 1024 * 1024 || parse_canon_value(bytes).is_err() {
+        return StoredSourcePresence::Unknown;
+    }
+    let Ok(metadata) = serde_json::from_slice::<Metadata<'_>>(bytes) else {
+        return StoredSourcePresence::Unknown;
+    };
+    if metadata.schema_version != 2
+        || metadata.checkpoint_id != checkpoint_id
+        || metadata.session_id != session_id
+        || metadata.agent_kind != "codex"
+        || metadata.scope != "committed"
+        || metadata.provider_session_id != provider_session_id
+    {
+        return StoredSourcePresence::Unknown;
+    }
+    let Some(snapshot) = metadata.transcript_snapshot else {
+        return StoredSourcePresence::Unknown;
+    };
+    if !snapshot.source_commitment_is_durable_or_absent() {
+        return StoredSourcePresence::Unknown;
+    }
+    match snapshot.completeness {
+        super::snapshot::CaptureSnapshotCompleteness::Partial => {
+            if snapshot.partial_reason.is_some() {
+                StoredSourcePresence::Partial
+            } else {
+                StoredSourcePresence::Unknown
+            }
+        }
+        super::snapshot::CaptureSnapshotCompleteness::Complete => {
+            if snapshot.partial_reason.is_some() {
+                return StoredSourcePresence::Unknown;
+            }
+            if snapshot.source.is_some()
+                && snapshot.has_durable_source_commitment()
+                && snapshot.transcript_redacted_bytes > 0
+            {
+                StoredSourcePresence::Complete
+            } else {
+                StoredSourcePresence::MissingData
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+#[cfg(feature = "test-live-agent")]
+mod local_tests {
+    use super::*;
+    use crate::internal::ai::observed_agents::Redactor;
+
+    #[test]
+    #[ignore = "operator-local Codex acceptance; never run in CI"]
+    fn codex_reconcile_typed_source_requires_current_identity_and_source_commitment() {
+        let mut metadata = serde_json::json!({
+            "schema_version":2, "checkpoint_id":"checkpoint", "session_id":"codex__session",
+            "agent_kind":"codex", "provider_session_id":"session", "scope":"committed",
+            "transcript_snapshot":{
+                "completeness":"complete","partial_reason":null,
+                "source":{"kind":"provider_file","identity":"not_retained:v1",
+                    "digest_sha256":format!("source/hmac-v2/{}","1".repeat(64)), "byte_len":32},
+                "transcript_redacted_bytes":32,"redaction_match_count":0,
+                "redaction_bytes_scanned":32,"redaction_bytes_redacted":0
+            }
+        });
+        let parse = |value: &serde_json::Value| {
+            stored_source_presence(
+                &serde_json::to_vec(value).unwrap(),
+                "checkpoint",
+                "codex__session",
+                "session",
+            )
+        };
+        assert_eq!(parse(&metadata), StoredSourcePresence::Complete);
+        for key in [
+            "checkpoint_id",
+            "session_id",
+            "agent_kind",
+            "provider_session_id",
+            "scope",
+        ] {
+            let mut bad = metadata.clone();
+            bad[key] = "foreign".into();
+            assert_eq!(parse(&bad), StoredSourcePresence::Unknown, "{key}");
+        }
+        let mut legacy = metadata.clone();
+        legacy["schema_version"] = 1.into();
+        assert_eq!(parse(&legacy), StoredSourcePresence::Unknown);
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("transcript_snapshot");
+        assert_eq!(parse(&legacy), StoredSourcePresence::Unknown);
+        let mut empty = metadata.clone();
+        empty["transcript_snapshot"]["source"] = serde_json::Value::Null;
+        assert_eq!(parse(&empty), StoredSourcePresence::MissingData);
+        empty = metadata.clone();
+        empty["transcript_snapshot"]["transcript_redacted_bytes"] = 0.into();
+        assert_eq!(parse(&empty), StoredSourcePresence::MissingData);
+        metadata["transcript_snapshot"]["source"]["digest_sha256"] = "sha256:transient".into();
+        assert_eq!(parse(&metadata), StoredSourcePresence::Unknown);
+    }
+
+    #[test]
+    #[ignore = "operator-local Codex acceptance; never run in CI"]
+    fn codex_reconcile_partial_and_duplicate_metadata_never_become_complete() {
+        let bytes = br#"{"schema_version":2,"checkpoint_id":"c","session_id":"s","agent_kind":"codex","provider_session_id":"p","scope":"committed","transcript_snapshot":{"completeness":"partial","partial_reason":"source_absent","source":null,"transcript_redacted_bytes":0,"redaction_match_count":0,"redaction_bytes_scanned":0,"redaction_bytes_redacted":0}}"#;
+        assert_eq!(
+            stored_source_presence(bytes, "c", "s", "p"),
+            StoredSourcePresence::Partial
+        );
+        let duplicate = String::from_utf8(bytes.to_vec()).unwrap().replacen(
+            "\"schema_version\":2",
+            "\"schema_version\":1,\"schema_version\":2",
+            1,
+        );
+        assert_eq!(
+            stored_source_presence(duplicate.as_bytes(), "c", "s", "p"),
+            StoredSourcePresence::Unknown
+        );
+        let bad = String::from_utf8(bytes.to_vec())
+            .unwrap()
+            .replace("\"source_absent\"", "null");
+        assert_eq!(
+            stored_source_presence(bad.as_bytes(), "c", "s", "p"),
+            StoredSourcePresence::Unknown
+        );
+        assert_eq!(
+            stored_source_presence(&vec![b' '; 1024 * 1024 + 1], "c", "s", "p"),
+            StoredSourcePresence::Unknown
+        );
+    }
+
+    #[test]
+    #[ignore = "operator-local Codex acceptance; never run in CI"]
+    fn codex_session_summary_decodes_actual_live_extraction_builder() {
+        let raw = include_bytes!(
+            "../../../../tests/fixtures/agent_transcripts/codex-capabilities-01621.jsonl"
+        );
+        let source = Redactor::new_default().redact(raw).0;
+        let extraction = super::super::live_checkpoint::build_extraction_metadata(
+            "codex",
+            Some(&source),
+            &[],
+            &[],
+        );
+        let facts = SessionSummaryFacts::from_extraction(&extraction).unwrap();
+        assert_eq!(facts.prompt_count, Some(2));
+        assert_eq!(facts.modified_file_count, Some(2));
+        let usage = facts.token_usage.unwrap();
+        assert_eq!(usage.input_tokens, 17);
+        assert_eq!(usage.output_tokens, 7);
+        assert_eq!(usage.total_tokens, Some(24));
+        assert_eq!(usage.cached_tokens, Some(4));
+        assert_eq!(usage.reasoning_tokens, Some(1));
+    }
+}

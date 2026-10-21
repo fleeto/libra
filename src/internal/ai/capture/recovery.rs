@@ -35,6 +35,14 @@ pub(crate) enum ArtifactRecoveryOutcome {
     ManualRequired,
 }
 
+/// Diagnostic reason survives the fixed RetryLater mapping. It grants no
+/// completion or repair authority and contains no provider data.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ArtifactRecoveryResult {
+    pub(crate) outcome: ArtifactRecoveryOutcome,
+    pub(crate) waiting_for_children: bool,
+}
+
 pub(crate) struct DoctorReplayRequest<'a> {
     pub(crate) conn: &'a DatabaseConnection,
     pub(crate) recovery: &'a CaptureCatalogFinalizerRecovery,
@@ -115,6 +123,25 @@ fn candidate_disposition(
 /// Replays one doctor-selected receipt. `manual` is only used by an explicit
 /// `doctor --repair` call after the original automatic budget has expired; it
 /// spends the catalog's audited one-shot capability and never resets policy.
+pub(crate) async fn replay_for_doctor_with_child_status(
+    request: DoctorReplayRequest<'_>,
+) -> Result<ArtifactRecoveryResult> {
+    match replay_for_doctor(request).await {
+        Err(error)
+            if super::live_checkpoint::child_checkpoint_wait_error(error.as_ref()).is_some() =>
+        {
+            Ok(ArtifactRecoveryResult {
+                outcome: ArtifactRecoveryOutcome::RetryLater,
+                waiting_for_children: true,
+            })
+        }
+        result => result.map(|outcome| ArtifactRecoveryResult {
+            outcome,
+            waiting_for_children: false,
+        }),
+    }
+}
+
 pub(crate) async fn replay_for_doctor(
     request: DoctorReplayRequest<'_>,
 ) -> Result<ArtifactRecoveryOutcome> {
@@ -144,6 +171,10 @@ pub(crate) async fn replay_for_doctor(
     if recovery.manual_only() || recovery.superseded() || recovery.quarantined() {
         return Ok(ArtifactRecoveryOutcome::ManualRequired);
     }
+    crate::internal::ai::subagent_content::recover_terminal_children(
+        conn, storage, recovery, deadline,
+    )
+    .await?;
     if manual != recovery.budget_exhausted() {
         return Ok(ArtifactRecoveryOutcome::ManualRequired);
     }

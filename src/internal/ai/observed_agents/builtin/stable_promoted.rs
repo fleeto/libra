@@ -6,13 +6,9 @@
 //! `AgentSessionCtx.transcript_path` (when the hook envelope captured
 //! one), capped at the same 16 MB ceiling used by
 //! [`super::claude_code::ClaudeCodeObservedAgent`]. Per-agent
-//! transcript-format knowledge (line schema, message-uuid pairing,
-//! tool_use semantics) is not yet implemented — that's why none of
-//! these adapters carry the `TranscriptTruncator` capability. A v2
-//! follow-up will add per-agent truncation. The adapter is still
-//! useful in the meantime: hook ingestion + restore + `agent session
-//! show --extract-transcript` (forthcoming) all rely on
-//! `read_transcript`, which is now real.
+//! transcript projection is delegated to the observed-agent extractors;
+//! Codex also exposes source-pinned modified-file analysis. These adapters
+//! do not carry transcript truncation capabilities.
 //!
 //! All five share the same shape, so they go through one
 //! [`StablePromotedSpec`] table rather than five hand-written
@@ -20,6 +16,7 @@
 
 use std::{
     fs, io,
+    path::PathBuf,
     time::{Duration, Instant},
 };
 
@@ -29,10 +26,13 @@ use anyhow::{Context, Result, anyhow};
 use super::super::read_dir_pinned_provider_directory;
 use super::super::{
     adapter::{AgentKind, AgentSessionCtx, AgentStability, ObservedAgent},
-    agent_for, open_provider_directory_for_discovery,
+    agent_for,
+    codex_rollout::{OffsetProjection, usage_is_inconsistent, usage_is_unproven},
+    open_provider_directory_for_discovery,
 };
 
 const MAX_TRANSCRIPT_BYTES: u64 = 16 * 1024 * 1024;
+const CODEX_USAGE_UNPROVEN: &str = "Codex token usage could not be established for this offset; verify the source format and response identities; an offset-zero total replaces earlier totals and must not be added to them";
 
 #[cfg(all(test, unix))]
 mod test_support {
@@ -177,10 +177,14 @@ impl ObservedAgent for StablePromotedAgent {
         (self.0.kind == AgentKind::OpenCode).then_some(self)
     }
 
-    // AG-21: best-effort transcript intelligence for the first-batch
-    // promoted agents only (codex/opencode rollout/export formats); the
-    // non-first-batch kinds keep the default `None` so their registry
-    // rows stay all-false (E9).
+    // Codex supplies completed structured patch records through its pure
+    // rollout parser. The other promoted adapters do not expose this method.
+    fn as_transcript_analyzer(
+        &self,
+    ) -> Option<&dyn crate::internal::ai::observed_agents::capability::TranscriptAnalyzer> {
+        (self.0.kind == AgentKind::Codex).then_some(self)
+    }
+
     fn as_prompt_extractor(
         &self,
     ) -> Option<&dyn crate::internal::ai::observed_agents::capability::PromptExtractor> {
@@ -240,7 +244,16 @@ fn promoted_tail(data: &[u8], from_offset: usize) -> &[u8] {
 
 impl crate::internal::ai::observed_agents::capability::PromptExtractor for StablePromotedAgent {
     fn extract_prompts(&self, data: &[u8], from_offset: usize) -> Result<Vec<String>> {
-        Ok(promoted_extract(self.0.kind, promoted_tail(data, from_offset)).prompts)
+        let result = if self.0.kind == AgentKind::Codex {
+            crate::internal::ai::observed_agents::extract::extract_codex_from_offset(
+                data,
+                from_offset,
+                OffsetProjection::Prompts,
+            )?
+        } else {
+            promoted_extract(self.0.kind, promoted_tail(data, from_offset))
+        };
+        Ok(result.prompts)
     }
 }
 
@@ -250,6 +263,24 @@ impl crate::internal::ai::observed_agents::capability::TokenCalculator for Stabl
         data: &[u8],
         from_offset: usize,
     ) -> Result<crate::internal::ai::completion::CompletionUsageSummary> {
+        if self.0.kind == AgentKind::Codex {
+            let result = crate::internal::ai::observed_agents::extract::extract_codex_from_offset(
+                data,
+                from_offset,
+                OffsetProjection::Usage,
+            )?;
+            if usage_is_inconsistent(&result) {
+                return Err(anyhow!(
+                    "Codex token usage could not be established for this offset; verify the source format and response identities; an offset-zero total replaces earlier totals and must not be added to them"
+                ));
+            }
+            let unproven = usage_is_unproven(&result);
+            return result.usage.ok_or_else(|| if unproven {
+                anyhow!(CODEX_USAGE_UNPROVEN)
+            } else {
+                anyhow!("Codex token usage is unavailable at or after this offset; wait for a completed response or import more transcript data")
+            });
+        }
         Ok(
             promoted_extract(self.0.kind, promoted_tail(data, from_offset))
                 .usage
@@ -270,7 +301,49 @@ impl crate::internal::ai::observed_agents::capability::SkillEventExtractor for S
         data: &[u8],
         from_offset: usize,
     ) -> Result<Vec<crate::internal::ai::observed_agents::capability::SkillEvent>> {
-        Ok(promoted_extract(self.0.kind, promoted_tail(data, from_offset)).skill_events)
+        let result = if self.0.kind == AgentKind::Codex {
+            crate::internal::ai::observed_agents::extract::extract_codex_from_offset(
+                data,
+                from_offset,
+                OffsetProjection::Skills,
+            )?
+        } else {
+            promoted_extract(self.0.kind, promoted_tail(data, from_offset))
+        };
+        Ok(result.skill_events)
+    }
+}
+
+impl crate::internal::ai::observed_agents::capability::TranscriptAnalyzer for StablePromotedAgent {
+    fn transcript_position(&self, data: &[u8]) -> Result<usize> {
+        if self.0.kind != AgentKind::Codex {
+            return Err(anyhow!(
+                "transcript analysis is unavailable for this adapter; check its declared capabilities"
+            ));
+        }
+        Ok(data.len())
+    }
+    fn extract_modified_files_from_offset(
+        &self,
+        data: &[u8],
+        from_offset: usize,
+    ) -> Result<Vec<PathBuf>> {
+        if self.0.kind != AgentKind::Codex {
+            return Err(anyhow!(
+                "transcript analysis is unavailable for this adapter; check its declared capabilities"
+            ));
+        }
+        Ok(
+            crate::internal::ai::observed_agents::extract::extract_codex_from_offset(
+                data,
+                from_offset,
+                OffsetProjection::Files,
+            )?
+            .modified_files
+            .into_iter()
+            .map(PathBuf::from)
+            .collect(),
+        )
     }
 }
 
@@ -392,17 +465,10 @@ impl RolloutScanBudget {
 }
 
 fn codex_sessions_root() -> Option<std::path::PathBuf> {
-    // $CODEX_HOME (absolute) wins WITHOUT requiring a resolvable home dir;
-    // only the fallback needs one.
-    if let Some(path) = std::env::var_os("CODEX_HOME").map(std::path::PathBuf::from)
-        && path.is_absolute()
-    {
-        return Some(path.join("sessions"));
-    }
-    let home = std::env::var_os("LIBRA_TEST_HOME")
-        .map(std::path::PathBuf::from)
-        .or_else(dirs::home_dir)?;
-    Some(home.join(".codex").join("sessions"))
+    super::super::transcript_source::configured_provider_root_spellings(agent_for(AgentKind::Codex))
+        .into_iter()
+        .next()
+        .map(|root| root.join("sessions"))
 }
 
 /// List a directory's entry names filtered by `keep`, sorted DESCENDING

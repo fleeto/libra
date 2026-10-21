@@ -1,4 +1,254 @@
+> **CX26 当前修订树整卡全量回归实际PASS（2026-10-21 11:09:53 UTC；不是整计划/真实模型验收）：** full R2 run4ad33309-a925-4642-9c92-b6bf15f5b808/default，1094真实终态exit0，Summary863.821s：10333/10333 PASS（13slow、2flaky、2leaky）、23skipped；完整命令含编译/枚举1436.964s，rawstdoutSHA42841c78eec02ecb4e9fe1293f4fa5f4471913c72d56f52b1cd286818d20258e。两项首轮失败最终重试恢复：libra::internal::ai::history::tests::scoped_checkpoint_rechecks_lease_after_companion_before_index_upsert（首轮.059s）、command_test::command::fetch_test::test_fetch_into_mirror_updates_and_prunes_all_refs（首轮19.438s）；没有剩余失败，不能称零首轮失败或零重试。runner的retry_status_count=0只说明未观察到独立RETRY字样，绝不覆盖Nextest实际2flaky。lease测试源码采用下一整秒边界，时间窗口是可见风险，但未取得本次失败断言正文，不冒称已证实根因；不为吸收重试去修改其它生产owner或放宽测试。
+>
+> 本次两项LEAK具体名已实际保留：libra::internal::config::tests::fix_npr_config_replacement_set（.463s）、command_test::command::merge_base_test::all_returns_both_bases_for_criss_cross（1.484s）。这是本run观察，不拿旧R1三个未知名字代替；未获得具体句柄根因，不能宣称已修复或零泄漏。工具本次仍按仓库profile返回exit0。临时只去JUnit的功能config已自动清理；无新报告/日志/JUnit。2073输入前后mode+内容SHA064e5bca6eeabc33d4ae8bcbd1e291abe6cda4c5c0db0bd47eae3fb473abf8bc、逐项MATCH；测试期间只允许本计划/status记账。
+>
+> 同树最终本机R3实际CLI198/198（含本卡8）、Codex ignored lib280/280（含本卡64；新增一个用例含9个case）、foundation1/1，全部PASS；不把子集相加夸大数量。架构65/docs34/unwrap1/Root59/key24/pending31/rollout46/fmt、all-target/all-feature strict147.084s/default strict110.944s均实际绿；限定当前修复差集SOURCE-REGRESSION-DELTA PASS0P0/P1、R4前驱source PASS仍按各自输入范围引用，未冒称整计划已新审。修复为当前parent partial状态窄传播、Parent/Import正确身份与精确header收费夹具，以及按已文档CX16合同核授权show readable/opaque/unproven；原凭据与metadata/live-fallback边界保留。此前三失败、过宽传播源审FAIL/大正文RED、foundation旧合同FAIL均原样保留审计链。
+>
+> 本次请求的整卡全量回归已完成；没有调用系统Codex真实模型，不替代后续真实宿主/整卡最终验收，也未勾本卡3AC2VER或增加formal0/61。所有新增Codex仍feature+ignored、本机执行、不加CI；三指定offline CI修复保留在下次获准Codex提交。cf仅agent页既有dirty、网站108零漂移/7fixtures/typecheck/build先前通过且本轮页面输入未变；无stage/commit/push/tag/release/deploy，无Grok开发，stash/autostash与根untracked均保留。
+
+> **CX26 当前树质量全绿并启动默认full R2（2026-10-21 10:45 UTC）：** 56094实际exit0；原架构65/docs34/unwrap1/Root59/key24/pending31/rollout46/fmt均PASS。all-target/all-feature严格Clippy -D warnings147.084s/rawea14cd3bf2c0c2c8832a8966748ed379f0530d96aa7768173408e2f6bc5cc78d、默认all-target strict110.944s/raw5ee9b7cbe739dc51f0b14fe2d26d5fc8881f252ab9d8c1f6d66ae6243410ee05，2073输入前后064e5bca6eeabc33d4ae8bcbd1e291abe6cda4c5c0db0bd47eae3fb473abf8bc MATCH。修订树默认双env Nextest新full已实际启动，handle1094/PID40600，仍umask022/--locked/--all/--no-fail-fast/--retries2，临时功能config仅去JUnit且结构核对，其它profile/group/timeout完全不变。只在stdout/内存保留原始SHA与状态，并额外保留每项LEAK/FLAKY状态，避免重复R1未留具体名字的观察缺口；没有新日志/JUnit/报告。当前Compiling libra0.30.65，未开始最终Summary，来源持续冻结。本机198CLI+280lib+foundation1及当前增量source PASS不能冒称新默认full已过；未调用系统Codex模型、3AC2VER/formal0/61及不签推发布hold保持。
+
+> **CX26 最终修订树本机R3全绿（2026-10-21）：** 45843真实exit0：CLI198/198PASS156.47s/raw8868f9114ab334dea841f2f8b5b84f29d4dbb7db3d8453ef7b5a95976c70e5fc；Codex ignored lib280/280PASS48.75s/raw19facbe302584d7f4cb7166030489d2134ed67734e07207d1aeb0f9f98443a4f；foundation1/1PASS2.86s/rawd0e4de0769500bbd9a05146b2510642cf80a3e5c9c480be005d07d56e29ed320。名单CLI198 unique/本卡CLI8 unique/lib280 unique/本卡lib64 unique；280包含新9case后代证据预算反例（不把9个case另算9tests）。2073输入前后mode+内容SHA064e5bca6eeabc33d4ae8bcbd1e291abe6cda4c5c0db0bd47eae3fb473abf8bc MATCH；Root仅当前parent partial窄修，旧三失败与源审过宽传播/foundation旧合同失败均保留真实历史。
+>
+> 当前源码增量R2实际 **SOURCE-REGRESSION-DELTA PASS /0 P0/P1**：session3acc6823-ccb3-4803-9f27-afcca7d4d68c/82.240s/raw5bf19b1a9f935997b27ee31b2cfc222e1ae7f3bafbaed3f9886574f4645e1432，input115641bytes/16f13e33a3be157dac9a0856a7369228c32029d35057891bb3580ded82f818e2、2073输入MATCH。限定本次Root/fixture/foundation差集，不冒称原整个计划source已新审；R1 FAIL未抹除。P2的header root缺省疑问已读实际parse_codex_discovery_header确认无parent且session_id缺失时回退id，并有legacy本机用例；其它既有1MiB当前parent/无hint fallback/非root Parent限制保留为非阻断边界，不新增native隐私门。56094正在新树重跑原架构/docs/unwrap/Root/key/pending/rollout/fmt及双strict；随后新默认全量。cf仍只agent文档dirty，三offline修复与Codex仅本机隔离/不签推发布/formal0/61保持，未调用系统Codex模型。
+
+> **CX26 源审P1实际TDD（2026-10-21 10:33 UTC）：** 94709终态1FAIL.06s/命令39.694s/raw5eb017e008294a02baf877de101e75523a26227cf383a047db8cd73b0a977241，新增ignored本机反例在parent/large明确复现完整child正文被后代1MiB证据预算误置incomplete；尚未越过首断言的其它case不能预记已红。现只将最初当前parent.partial传播到Parent/Import ordinary incomplete，descendant evidence遍历恢复仅missing处理、usage proof仍保守；Recovery普通正文语义不变。新用例覆盖Parent/Import/Recovery × 大完整child/foreign-spawn/未spawn metadata-only三case，明确完整正文原字节与partial=false、ordinary incomplete=false、usage enumeration nonexhaustive。前驱foundation仅按已文档合同核授权show readable/opaque/unproven并继续禁止credential；当前待focused绿、源码增量复核、strict与新全量，不预记交付，formal0/61/不签推发布保持。
+
+> **CX26 本机R2终态与同计划前驱测试对齐（2026-10-21）：** 37974实际终态exit101：CLI198/198PASS157.01s/raw829cbcb52131fad84619ab7076de33befe47582ff1816a12b22570f6c6322333；Codex lib279/279PASS48.77s/raw1ac1c43acd7ac1adb6c75f82dd5d9fd793b7811033565037b06fdd02f0bcb9d6；foundation1FAIL2.58s/raw0a58480c69b5a240fa97485cc820f85a668b4e4f70332e20f39b999c662ee642，2073输入MATCH。旧foundation Codex用例仍禁止授权checkpoint show JSON返回已保存ciphertext，与已实现并文档化CX16 ordinary read合同冲突；实际输出readable=["planning the deploy"]/encrypted_content原值/availability=unproven。现同原全计划授权的整合前滚追加既有tests/agent_checkpoint_redaction_test.rs仅该feature+ignored用例到CX26验证写集：断言明确show值/非native标签并继续禁止raw credential，live fallback/metadata/catalog/日志原隔离断言保持；不修改任何CI既有Codex行、reader或schema。该路径只是前驱合同测试对齐、无新增生产owner/轴，仍7生产/3落点/M/3AC2VER。源码审R1真实P1另补后代evidence独立反例先RED后窄修；本轮全部handle已终态才解冻编辑，不把本机279绿当source通过。签推发布hold/三offline/formal0/61保持。
+
+> **CX26 regression源码审R1真实FAIL（2026-10-21）：** session592afa24-dbc1-44e6-89e8-d9d94e504f92/66.926s/raw7be808d15d75b2ef6f301b20a0724858d11c9efce11bc0109e79972f7590417e，input75241bytes/4243fd7fb66633fcd3c85e55dc841b9eff558b18ae5b4b4ec0d3d3f94f301939、2073输入MATCH。具体P1：把parent.partial加入所有evidence遍历会将完整>1MiB child的后代预扫描预算耗尽/foreign sender错误提升为普通来源incomplete；应只在初始当前parent上恢复旧状态传播，其它descendant仍只降usage proof。三focused绿不能代替此审查。37974同树本机回归仍在跑，先等终态才编辑；随后同Root补大child/foreign-spawn/未spawn metadata-only普通正文独立反例，先RED再窄修并重跑新树门。不加生产owner或CI/新报告，不签推发布，formal0/61不变。
+
+> **CX26 三个整卡RED的focused前滚已过（2026-10-21）：** 25008实际exit0，partial-parent/one-child-limit/spawn-io-accounting各1/1 PASS；raw依次2896f960d6a45de1918f4f05f799163b769ceb29357e554f1bf7141bc3374499、56ee5fa57fa98bf265e3ae0397cf10169def5922ada907f6671200e154ad3836、f632635781482ebede4925bf1546a12e6c3d8073bf5bea28fdf1df6efe35dbc9。Root唯一生产变化为非Recovery evidence loop传播parent.partial；三原测试明确区分真实root Parent与嵌套Import当前id，精确byte收费保持外国/非child正文不读。2073新输入mode+内容SHA4b425d55dd4303c79745ccb839547b49c295a881cf71e067c25b8bfcbca7107c，前后MATCH。修订树全本机37974已启动（198CLI/279lib/foundation顺序），限定源码增量25369在审；来源继续冻结，未预记任一完整门。旧R1 default PASS与local3FAIL均保留，三offline/CI隔离/签推hold/formal0/61不变。
+
+> **CX26 整卡本机R1真实失败并前滚（2026-10-21）：** CLI198/198 PASS157.90s/raw0c43dfa3b293344c7cc7e2d16737abd139dbf9a01f75e4c683c52aa9106a00c0；ignored Codex lib276PASS/3FAIL50.47s/raw93a6068cdb9ac35eef911ab59e329e0ef8e8efadf9c4371d685e2bb698457f2e，20084终态exit101，foundation未运行，2073输入前后MATCH。三个失败原样保留：partial父来源无child时遗漏普通incomplete传播（实际实现回归）；单child限额与verified-spawn无正文的旧Parent夹具把中间parent-thread作为root-thread当前来源，已按真实Parent/Import合同各造正确身份，保留所有原配额/partial/正文不读取断言；metadata-only精确收费纳入既有header预探测，三次header费而非两次。仅Root原owner及本计划/status修改，准备focused与新整卡回归；旧default10333绿仅覆盖旧source，不能代替修订树。Codex本机隔离/三offline修复/不签推发布与3AC2VER/formal0/61不变。
+
+> **CX26 当前候选新完整门实际通过（2026-10-21 10:18 UTC）：** run0620dc63-8b5b-4f80-a7bb-e4046a5ae2e1/default，69344真实终态exit0，Summary864.990s：10333/10333 PASS，13slow/3leaky/23skipped；完整命令含编译/枚举1414.981s，rawstdoutSHA30807602c9f891a226b6f73de889a56280b6db9dd3073c6ffa70bba6cf29ed91，FAIL/RETRY状态均0。3leaky是实际Nextest观察，未保留足够逐项输出确认名字/根因，不把历史其它run的名字冒称本次事实，也不称0leak；该标记不改变本次工具exit0。2073输入前/后mode+内容SHA均3adf2baf905e556f0f4da3a705fdcf924897c3b0c5a7276abe237188defe0740，逐项MATCH；临时只去JUnit的功能config已自动删除，没有新JUnit/报告/日志。
+>
+> 随后同树本机Codex全套20084已实际启动：feature CLI build成功、名单198 unique，本卡CLI usage名单8 unique；198项ignored target正在跑，后续全部ignored Codex lib/64usage名单与foundation脱敏仍待。不把default完整绿代替本机ignored或真实系统模型；保持来源冻结、签推发布hold/三offline修复下一获准提交必含，3AC2VER/formal0/61继续未勾。
+
+> **CX26 新完整门已正式运行（2026-10-21 10:03 UTC）：** run0620dc63-8b5b-4f80-a7bb-e4046a5ae2e1/default，10333 tests/172 binaries/23 skipped。首4500 PASS状态已实际观察，尚无最终Summary，前置编译/枚举耗时已保留；继续同69344/PID57334，不重启、不修改冻结输入、不把进度当完整PASS。随后按已准备的本机198 target＋全部ignored Codex lib＋foundation脱敏顺序执行；新Codex不进CI、三offline修复保留、签推发布hold不变。
+
+> **CX26 整卡全量回归已启动（2026-10-21 09:54 UTC）：** 用户继续授权整卡全量门；当前 main/WIP 保留。完整双env默认 Nextest 正在执行，terminal handle69344/childPID57334，cargo-nextest0.9.143，umask022，--locked --all --no-fail-fast --retries2；仅临时功能config关闭JUnit，TOML逐结构核对其它分组/超时完全相同。2073个输入（源/测试/SQL/配置/非记账docs与网站agent页，含mode+内容）前像SHA3adf2baf905e556f0f4da3a705fdcf924897c3b0c5a7276abe237188defe0740，除本计划/status外冻结，不借旧C9/C32完整绿。当前只确认Compiling libra0.30.65，尚无最终Summary或后像；之后顺序运行feature+ignored的198项Codex本机target及本卡lib名单，禁止把它们加到CI。没有stage/commit/push/release/deploy，也不创建新日志或报告。新full/native/最终整卡审查尚待，3AC2VER/formal0/61不变。
+
+> **CX26 本次两个技术卡点已收敛（2026-10-21 09:46:11 UTC，本机专项，整卡仍 in-progress）：** R5终态 exit0：usage lib64/64 PASS9.21s/raw9b93d54b1d6d145bbf3244e3edf651b660a177a6a1994b0a9b5106cb0314bdbb；stored-import6/6 PASS1.91s（与64家族重叠3项）；真实编译CLI8/8 PASS8.18s/raw4623ebed53e6f4927659218df03bdf1920990339ae8def324e02c5acf1c41017。两级child/grandchild耐久thinking、首次import父10+子3=13及output6、live同值、重放不新增/不回写旧CP、foreign child记录不重复计量、unknown正文保留均实际过。namespace正向HMAC证明两个旧实例、错误metadata角色仍unknown；父/子分别失败、父预读前失败、shared晚child的all-covered finalizer失败、parent-only已写前缀计数均已实际测。after_bind继续保留原writing/crash marker合同。
+>
+> 当前源码增量审查实际 **SOURCE-DELTA PASS / 0 P0/P1**：sessioneee98745-c4bd-4e79-922e-0bd77927d086/60.457s/raw397c5eec71338261fa3bc10f11694a9e49ca5fb992f1ab75b6f90a1be23da132，input122870bytes/464196b7e93a6988f716645490bd1632fa6dd550f44b876942f9aa031cdf56da、15输入前后MATCH。R1conditional与R2/R3真实FAIL保持历史，不改写成PASS。保留非阻断P2：既有supplement已写前缀失败的cause包装、零durable时partial诊断语义、有界同步role读的延迟；本次不扩大为其它provider开发或新隐私门。
+>
+> 最终质量6018真实exit0：原架构65/docs34/unwrap1/Root59/key24/pending31/rollout46/fmt均PASS；all-target/all-feature严格Clippy -D warnings **136.213s exit0**/rawc517e91f307b08cbd76a89847ad65dfb6d822535ad1d81b17be4d2fc79b92680，默认all-target严格Clippy **127.807s exit0**/raw79b63ff07641c44cb82a83cfc38ef35061e4f784154b4180d220403831c42e74。最终源pin一致：Root f49c839dd0e5ac845a2ffd51478cfb3187c18390e5900d49025d9a626ea0a6c0；import f244efdc9174ee0b7e7f288eca6f4467c768be3ab30fff6e9e3ade177579b4d0；parser34d6bdc9571a1a7c2e03cfc503d3171555e4d74995a4b8d3438bcff14c419990；localCLI3a5d51b9b1da24253a8cb477a1fcb69dcf9b6efe533e9f2a2912e9e81eefa3f2。
+>
+> 六docs与INDEX已同步条件完整聚合、import_pass/重放不可变与有界旧namespace限制；网站check108commands零漂移、7fixtures/typecheck7.017s/build13.219s均过，routeTree不变。三offline CI指定修复各1/1实际过且保留在下次获准Codex提交。当前8 CLI均ignore、target required-features=test-live-agent，新增Codex功能测试不进CI。无stage/commit/push/tag/release/deploy/新日志报告，cf仅agent文档dirty；本轮未调用系统Codex真实模型，不借旧full/native结果。整卡新full/native/最终总体验收仍待，3AC2VER/formal0/61继续不勾。
+
+> **CX26 两卡点本机回归进展（2026-10-21 09:39 UTC）：** R5 当前 usage lib 实际64/64 PASS9.21s/raw9b93d54b1d6d145bbf3244e3edf651b660a177a6a1994b0a9b5106cb0314bdbb，stored-import6/6 PASS1.91s（与64家族重叠3项，不相加）。两级 import 的错误sender夹具已修；原首次 import 完整13汇总/重放已真实通过，最终8 CLI仍在跑。namespace角色链已用既有utils no-follow descriptor+typed bounded reader支持commit，现有checkpoint reader保留tree/blob；原接口不支持commit导致unknown的真实RED保留。新metadata记录creating incarnation，以正向HMAC证明旧None与两个32hex实例，完整角色匹配才排除；破坏metadata role继续unknown/旧对象不改。R2 source64abbfc5 FAIL与R3 source51bd9216 FAIL（raw9dfd98d3969d028d713928e5db8628703e4963ca174f75f9b0476915bcbefcdb）已按具体P1前滚：父预读三失败及retention-only计数保留，shared late child取真实capture_summary计数，链式保留错误原因；before_parent_commit与before_finalize_identity实际故障注入验证partial身份及耐久计数。after_bind是既有保留writing/marker的crash模拟，原统一partial断言失败保留，已按实际合同区分。当前source R4在审，strict两collapsible_if旧FAIL已修待重验，不能预记source/整卡/full/native完成。六docs/INDEX已改为条件完整聚合、import_pass相同快照/重放不刷新与有界namespace限制；网站check108零漂移/7fixtures/typecheck7.017s/build13.219s过、routeTree不变，cf仅agent页dirty。三offline指定修复本机各1/1 PASS，不加入新Codex CI；无stage/签推发布部署，3AC2VER/formal0/61仍不勾。
+
+> **CX26 两个卡点继续修复（2026-10-21 09:05 UTC）：** 最新 live 完整汇总正例已真实 PASS（parent10+child3=13）；两级 import RED 已定位为测试 helper 把 child→grand spawn 的 sender 错写为 root，修正为本文件 session_meta.id 后原成功/2 child CP/thinking 导出断言实际 1/1 PASS（3.07s），未放宽生产 partial。当前 agent_import 同原写集内接一次 Codex child capture→同 pass usage→supplement/turn metadata；只缩窄原 paired deadline 并预留父窗口，child 错误保留进度后仍写独立 parent。首次接线反例已真实显示 children complete/known10+3 但 aggregate null；原因是授权文件经 descriptor helper 的现有 snapshot.kind=trusted_export，不能误以仅 ProviderFile 可代表完整来源；现按完整、已有 durable commitment 的 ProviderFile/TrustedExport 接线，专项待终态。既有 no-child/Claude 顺序保留，namespace 角色链/旧 incarnation 差集及新审查/完整回归仍待，不预记整卡通过。所有 Codex 新测试仅 feature+ignored 本机；三 offline 修复仍保留，无 stage/签推发布部署。
+
+> **CX26 currency/live DTO 阶段本机交接，2026-10-21 07:29:52 UTC：** 当前source R4真实PASS0P0/P1/17输入MATCH；质量R3真实53usage/8currency、Root59/child181/旧key24/pending31/旧CLI15/四真实CLI、原架构65/docs34/unwrap/rollout46/oracle/fmt及strict131.775s均过，15输入MATCH。只读existing-key verifier不重建缺失key，派生parent是null/父source commitment，原native数据保留；7生产/3落点/M。网站check108零漂移/7fixtures/typecheck/build过，cf仅agent页dirty。原完整live aggregate测试仍Null≠13、首次import仍无归属字段，两真实RED保留，不替换AC。下一段推进namespace角色链/差集、同root后代闭包/exhaustive、parent线程完整性与import重排；full/native/整卡最终source未完成，3AC2VER/formal0/61不增。probe当前重建5637字节及原SHA完全相同、独立文件缺失/无死链。Codex仅本机，三offline下次获准提交必含，无stage/签推发布部署/新报告，goal active。
+
+> **CX09 R9 当前实测：** 激活后live与Unavailable→空root同action结算通过；managed零child的partial提示丢失已前滚。worker已在真实reserved14/floor等待下PASS（16th与active child两正控制、14元数据/claim/artifact不变），旧失败是fixture错key前缀，未放松validator。完整import的持续partial进一步归因于fixture根缺session_id；独立功能repo补当前SDK显式root后真实import0。partial import正文与revision1重放已过。20393六CLI/worker待终态，All9/最终source/strict/full/native/六docs待，8AC4VER/formal0/61不变，不签推发布部署。
+
+> **CX09 R9 当前：Some已写入未提交本机候选。** R6三生产修复PASS/两oracle FAIL/兼容策略设计条件PASS，已补强并开启原同一注册；真实CLI/worker刚启动，All9/default&all-feature strict/full/native/六docs仍待。pre-Some48pipeline/65架构/矩阵1/错误3/fmt/strict已过，不覆盖此后delta。8AC4VER/formal0/61不增，三offline下一授权Codex提交必含，不签推发布部署。
+
+> **CX09 R9 实施中：** 修正Unavailable/partial与worker claim/floor、正例终态oracle后真实CLI1/4PASS/3RED，worker1RED（positive child缺失）；cap仍OFF。固定SDK ThreadId UUID类型已核实，原provider纯policy现在按UUID形状保留legacy label ParentOnly，正文获取不以形状认证；selector矩阵/新source复审与激活后九默认target未验。原R5 FAIL保留，8AC4VER/formal0/61未增加，不提交推送发布部署。
+
+> **CX09 R5新实质问题已本机红→绿，仍未激活：** 三新error_progress_真实0/3后前滚3/3PASS，保留真实checkpoint错误因、允许非完成错误进度、Codex同正文identity不再随role partial变化（Claude不变）。4typed/24gate/18projection/34writer及旧66catalog/59Root/fmt通过；34家族一次3s host deadline失败后独立归因与同候选34全过，历史失败保留。原R5测试/激活设计FAIL未抹掉：正例必须核settled，worker14改真实claim/floor等待，Available partial不可冒充Unavailable/不能为过测新增父file证明；legacy默认CI真实fixture已指出，ctx兼容选择器尚待固定SDK核实/G09。Some未写、capOFF/8AC4VER未勾/formal0/61，新source/strict/full与真实模型仍待。三offline下次获准提交必含，Codex测试本机only，无签推发布部署/新报告目录。
+
+> **CX09 R4生产fallback PASS、测试/激活设计FAIL已按事实前滚：** 强化child唯一opaque/unknown、child scope export、原parent数/replay、worker legacy归一化与真实active positive/32catalog+16header/保留14份元数据及artifact字节。28963三CLI功能RED，worker在active-positive缺失处RED（16th与32行控制先过），getter仍None。原R4错误root路径假设已用fixture常量核实；>16header假设与原总量hardcap矛盾，已保留真实FAIL并补上下文。旧九默认CI target已盘点，激活后不得修改旧Codex行以躲回归；VER私有族按实际broaden为child_+stored/worker，仍8AC4VER/formal0/61/11source10prod4landings。R5待设计复核，无签推发布部署。
+
+> **CX09开始真实CLI接线门：** fallback真实红→14local全绿；72641两新child_content CLI用例实际0/2（live/import childcheckpoint均0，port仍OFF），真实worker机制用例1/1PASS4.65s（含16次sealed artifact fixture生成，第16项真实写入、15pending政策不变）。R4/session48815审fallback和原provider getter最小WIP激活设计中，源冻结；尚未改getter，激活后须再验active缺root worker及所有CLI正/反例。capOFF/8AC4VER未勾/formal0/61；三offline下次获准Codex提交必含，无签推发布部署。
+
+> **CX09恢复前滚本轮终态：13local+旧兼容+R3限定源码PASS。** 50070实际13/13PASS2.97s；85804的59Root/66catalog/48pipeline/8recovery/70pending/20doctor/8stored/26live/23discovery/21gate及65arch/34docs/unwrap全部绿，11输入同R3前后MATCH、所有handle终态。仍要修live失败availability fallback、补恢复命令、验证真实worker2s公平性及当前strict/整卡源审/激活/真实宿主export/新full；不把限定slice当整卡，capOFF/8AC4VER未勾/formal0/61。三offline修复必入下次获准Codex提交，本次无签推发布部署、无Grok/backend或stash清理。
+
+> **CX09 R3限定前滚source PASS、仍未整卡：** 2a40c9e1/67.515s/rawb4d97f39...闭合R2三具体P1（含入窗范围），11输入MATCH；85804旧兼容quality仍运行，源冻结。实际worker2s时限公平性和live发现Err/缺deadline的availability fallback待修验，source漏上下文已独立确认后者，capOFF；没有新strict/full、8AC4VER未勾/formal0/61。三offline修复下次获准Codex提交必含；不签推发布部署。
+
+> **CX09当前13项本机实绿，源码/兼容重验中：** 50070 list13unique/13PASS2.97s（raw6b7c6c38...），含第16候选/header保持、Unavailable的live+recovery及原Manual权限保留。11836限定源码R3、85804旧兼容quality正在运行，11输入冻结，不冒称worker时限/真Codex宿主或最终strict/full已过。capOFF/8AC4VER未勾/formal0/61，三offline修复下次获准Codex提交必含，无签推发布部署。
+
+> **CX09 queue G09已PASS、红测后原owner实现待验：** 6992cd09/95.428s仅设计PASS；61293真实16headers只返5的红测后，原inner私有limit界1..16，生产scoped快照16、test-only5及5实际artifact attempts不变。当前十三local名单/专项运行，live unavailable例亦补齐，真实worker第16项时限/新版source/strict/full仍待；11源码/10生产/4落点/M、8AC4VER未勾、capOFF/formal0/61。三offline必入下次获准Codex提交；无签推发布部署。
+
+> **CX09 R2两P1前滚本机12项绿、queue仍待：** 81083先真实两例红（Unavailable错误清Preparing/Manual被提升），54412修正后12unique/12PASS2.89s，正文floor和原Manual交错不mutate policy/不charge均已核。原Root/live consumer传availability控制finish；doctor只child准备成功仍Manual。队列前五阻塞后项已确认，G09登记pending.rs后11源码owner/10生产/4落点/M、8AC4VER不变，设计审查5099运行，尚未改pending生产。新source/strict/full未齐、capOFF/formal0/61；三offline修复下次获准Codex提交必含，无签推发布部署。
+
+> **CX09恢复R2实际FAIL待修：** e742ec47/218.669s/raw8b2ca1ac...确认旧no-rearm策略已合R7；新两P1为Unavailable非空body错误结束Preparing及doctor提升独立Manual权限。固定五候选窗口饥饿条件已核实，须原queue owner修正。11local和59/66/48/8/70/20旧回归、8stored/26live/23discovery/21gate及65/34/1守卫虽全绿，不替代源审；新反例在准备，本轮strict/full仍待、capOFF/8AC4VER未勾/formal0/61。三offline修复必入下次获准Codex提交，本次不签推发布部署。
+
+> **CX09 recovery R1前滚11项本机实绿、R2待审：** 66710实际11unique/11PASS2.96s（raw6918ce91...），包括prepared gate无port/缺源不poison、bounded partial/zero-source、busy floor及旧Claude wire逐字节兼容。原pipeline通用fixture只补Default以适配内部availability字段，没有新增Codex CI测试。修正树旧相关回归及补齐关键源码的R2正在运行，strict/full尚待、capOFF/8AC4VER未勾、formal0/61。下一次获准Codex提交必须包含用户指定三项offline CI修复；本次不提交/推送/发布/部署。
+
+> **CX09 recovery R1实FAIL已前滚、未验收：** 九local及旧兼容虽绿，6b7a26a9/148.068s确认两P1：恢复先rearm会poison floor-only gate、全incomplete要求完整重扫严于R7。现改Recovery只读mint/不重设false，known floor同writer登记、busy skip，typed availability区分不可用与bounded partial，补zero-source/无port/缺源/wire等十一项待验；strict/full未跑、capOFF。源码审失败优先，不把旧绿当接受。8AC4VER未勾/formal0/61，三offline下次获准提交必含、本机only/无签推发布部署。
+
+> **CX09 同Root recovery/doctor已落待验：** 原action/revision rearm保留floors/policy，shared driver同registry/helper/当前roots与原pair；incomplete保body且留Preparing，worker预算隔离前亦等child，结果保留RetryLater child原因供doctor false/false。唯一第三for_stored caller已登记、临时variant allow移除。首check Doc残余match类型101已修，默认check22.70s通过；84980七local build/名单/执行待，不报整体通过。capOFF/8AC4VER未勾/formal0/61，三offline下次获准提交必含，所有Codex回归本机，无签推发布部署。
+
+> **CX09 stored/import 本机切片最终通过：** 8unique/8PASS2.70s，真实thinking/opaque/unknown blob、重放不重复及busy identity partial/不抢owner；59Root/46库/26live本机/23discovery/53CLI、65架构/34docs/unwrap/fmt和R1R2限定source均PASS。R3单variant条件PASS0P0/P1；最终默认strict119.893s与all-feature89.797s均exit0，七文件前后核定、全部handle终态。只slice，capOFF/8AC4VER未勾/formal0/61，继续同Root recovery/doctor→真实stored/宿主/export→新full及余卡；probe仍已合并删除/main。三offline下次获准Codex提交必含，Codex仅本机，无签推发布部署/新日志报告。
+
+> **CX09 stored/import 八项已实绿，质量门收尾：** 30396八unique/8PASS2.70s，真实blob/重放/busy保留owner和partial identity成立；R2限定源码PASS0P0/P1。58146原59Root/46import库/26本机live/23discovery/53CLI/65架构/34docs/unwrap/fmt已PASS，strict运行；随后须修默认cfg(test)未涵盖的单variant临时allow并实跑默认严格门，不能报已验收。capOFF、8AC4VER未勾、formal0/61，恢复/宿主/export/full继续；三offline下次获准提交必含，本机only/无签推发布部署。
+
+> **CX09 stored/import 实际busy红测已前滚：** 原8项7PASS/1FAIL揭示Codex历史child活跃owner沿live循环耗尽30s，现仅Codex import计skipped/保留owner并及时记partial，live/Claude不改。30396 fresh8项待；R1源码条件PASS前提已核，P2/P3低成本修订已落但后续delta审/旧回归/strict仍待，不报整卡通过。capOFF、8AC4VER未勾、formal0/61，三offline下次获准提交必含；所有Codex回归本机，无签推发布部署。
+
+> **CX09 stored/import 已接线、七本机待重验：** typed selection/显式caps/default零IO、Claude原wire、同Root Codex executor、三import门与原预留退款保持，capOFF；通用guard约束两个stored caller。90154 CLI build通过，libtest因新fixture误用ImportRequest Clone编译101/未执行，已改重建同值request；不得预报PASS。Root recovery/doctor、host/export/full继续，8AC4VER未勾、formal0/61，三offline下次获准提交必含，Codex仅本机，无签推发布部署。
+
+> **CX09 gate kernel+原子admission本机推进：** 原catalog+pipeline两owner，only-gated V2/四完成屏障/Preparing reserve与adopt保留action-revision-floors/ParentOnly不清/fake不伪造已落。36586真实14local/六锁回调/旧66catalog/65架构/unwrap全PASS，defaultcheck7.98s。Root fence/容量enroll/清Preparing及pending分类/恢复/stored未接，不能称整gate可用；capoff、8AC4VER未勾、formal0/61。tracing/INDEX同步，strict/源码审待；Codex仅本机、三offline下次获准提交必含，无签推发布部署。
+
+> **CX09 bounded consumer局部GO，继续整卡gate/恢复：** 63650全部终态，6local7.35s/旧5replay/正文1/旧48pipeline/65架构/34docs/unwrap/fmt/strict87.141s全PASS；fce9b1d3/70.156s delta源审PASS0P0/P1/无新P2，五输入同一。partial boundary沿原host、无host仍local；同event bounded late replay实际正文/关联且旧OID不变。R1 P2已关闭，初SIGABRT/E0603及P3边界保留。只slice通过，不勾CX09的8AC4VER，不拿CX32旧full套新consumer；capoff，Preparing/known-claim/adoption/完成/恢复/stored/真实host/export/新full继续。formal0/61、Codex测试仅本机、三offline下次获准提交必含，无签推发布部署。
+
+> **CX09 bounded五项/旧回归/strict实绿，source R1 PASS后采纳P2：** 5411全终态、5local/5replay/1body/48pipeline/65架构/34docs/unwrap/fmt/strict104.844s均PASS；77b7d2ff/139.8s限定PASS0P0/P1、来源同一。现修child local耗尽时保留原较长host窗口写partial boundary，无host仍原pair；新增第六本机partial→bounded positive replay+正文/immutable证据，59137新门运行，不套旧绿。C32本机交接有效；C9capoff/8AC4VER未勾/gate-recovery-stored及宿主/export/full仍待，formal0/61、无签推发布部署，Codex仅本机。
+
+> **CX09五项首轮夹具FAIL已保留、R2重验：** 53073名单5unique但执行首项SIGABRT/exit101/raw86bc015c，旧回归/strict未跑。同步controller阻断外层SQLite runtime，已改await的本机spawn_blocking controller、保留独立hook ticker/watchdog，生产锁/期限不改；正例实际正文blob精确断言与旧writer复用。5411新build/五项/旧回归/guards/strict running，不能预填PASS。C32已本机交接，C9capoff/8AC4VER未勾/formal0/61，无签推发布部署/CI新增。
+
+> **CX09消费已交接CX32、局部门运行：** 原pipeline的eligible Boundary/RequiredTerminal及AlreadyApplied replay接bounded shared，原paired期限不续、legacy ParentOnly不改；同ingress本机seam+Root五ignored OS锁/真实pipeline回归已落，53073在build/专项/旧回归/guards/strict，尚未记PASS。capoff、8AC4VER未勾、gate/recovery/stored/真实host/export/full仍待；CX32本机locally-accepted但formal0/61/C/Dhold。Codex新测试仅本机、三offline下次获准提交必含，无签推发布部署。
+
+> **CX32最终source-qualified、本机交接CX09：** 1386fc5f/default真实exit0、10333/10333PASS、13slow/1leaky/23skip、858.636s（总1268.015s），rawc93eb605；2081前后453b7e0c逐项一致，功能config清理/无新日志报告。leak为既有db_migration extend前缀回归，根因未证。结合8local/旧9/质量/源审，8AC4VER按本机范围勾选、in-progress/locally-accepted，formal0/61/C/Dhold。解除来源冻结，继续CX09原十owner锁consumer/gates/恢复/stored/真实host/export；Codex测试仅本机，三offline下次获准提交必含，无签推发布部署。
+
+> **CX32完整门已真实Starting：** run1386fc5f/default，同52058/81802，10333tests/172binaries/23skip、前1500PASS仍running。2081输入453b7e0c冻结保持，当前无完整终态/来源后像，不交接C9；新Codex测试仍feature+ignored仅本机。formal0/61、签推发布hold及三offline下次提交必含不变。
+
+> **CX32新full实际启动、源冻结：** session52058/PID81802，wrapper85a959e5，2081输入前像453b7e0c8b7e172622825599a08c23fad7bd539c2a6c858a90d46e17fab5137f；双env/umask022、仅去JUnit功能config，真实Compiling但无终态。不拿旧full替本树，除本计划/status外来源冻结，AC/VER未勾、不交接C9；formal0/61、capoff、三offline下次获准提交必含，无签推发布部署/报告日志。
+
+> **CX32源码/内doc R2与最终quality实际PASS，启动准备新full：** 410adafc/33.868s限定PASS0P0/P1；最终bcd2aac4，8local/旧9、65架构/26serial/unwrap/defaultcheck/fmt及收尾strict83.104s均有真实收据，剥除新增API/test后旧文件仍e4adee9b精确。下一双env+umask022完整nextest/本次输入前后像；除plan/status记账外src/行为doc/cf冻结，尚无终态不勾AC/VER/不交接C9。C9capoff及锁consumer、gate/recovery/stored/真实host/export仍待，formal0/61，三offline下次获准提交必含，无签推发布部署/新报告日志。
+
+> **CX32 R3设计实际PASS并按整计划授权开工：** f87f1358/20.906s/0P0/P1，R1/R2实FAIL保持，atomic register-or-join delta已关闭；root采纳同一维护owner/一落点S/8AC4VER，in-progress/空。原maintenance e4adee9b已核对，现仅实施opt-in helper及本机ignored实锁测试（含双线程计数），不改旧API/capture caller。测试/source/strict/newfull均待，formal0/61，C9capoff/数据保留，无签推发布部署。
+
+> **CX32设计R2真实FAIL追加并发登记P1，R3已明确atomic insert-or-join：** 31870934/66.385s接受原三修正，但指出no-await不等于跨OS线程原子。R3用原shared纪律在短LOCKS guard内重查/增depth或唯一插入，丢新fd而不覆盖state；FS/try仍mutex外、不采可能阻塞全局的方案。AC4精确化原guard计数不变量，仍8AC4VER/S一owner，旧API不改/原9回归硬门不减。R3待真实deltaPASS，新维护源码未动，formal0/61；C9capoff/原数据保留，无签推发布部署。
+
+> **CX32设计R1真实FAIL，R2三P1前滚：** c0790f68/86.503s，补无caller helper的条件dead_code允许并新增AC8/VER4；纠正no-follow错误宣称（保持原symlink alias）；明确新local tests不加serial/registry。每轮join、None/Err、取消/过期/markers/watchdog等实现边界具体化；single owner/一落点S不变，R2实际审查待、新维护源码仍未改。formal0/61，C9原源码保留/capoff且source review不能消除锁P1；三offline下次获准提交必含，无签推发布部署。
+
+> **CX09 source R1限定PASS后核出真实锁等待P1，G09前置CX32草案：** befb7640/136.883s/0P0/P1仅给定delta；Root实读shared实际blocking flock，可能越host deadline，不能以67本机绿冒称整卡可用。维护owner会形成第五落点，故拆单owner/一落点S/7AC3VER的新CX32，C31→32→09，总60→61/formal0/61；只plan/status待真实设计，新维护源码未改。C9代码保留/capoff，当前quality78070已终态strict109.735s通过，不消除此已证缺口；三offline下次获准提交必含，无签推发布部署/新报告日志。
+
+> **CX09实际晚到重放五项已通过，quality/source待：** 同10owner接catalog私有action/revision/epoch fence、Root对象/ref证明及最后事务、pipeline AlreadyApplied与StoreAlreadyExists；先4例因libtest未注册helper FAIL，改fixture借新CLI，后五例5/5PASS1.97s，涵盖增长revision/幂等/抢先/损坏保留。fake位置架构64/65 FAIL已按层移动，未改守卫；当前65/65PASS。tracing/INDEX同步，source37325及本树quality待；capoff/8AC4VER未勾/formal0/60，不冒称系统host/default export/full，三offline下次获准提交必含，无签推发布部署/新报告日志。
+
+> **CX09关联切片本轮验证终态，继续全链：** 当前Root4bc5cb0d，62本机/65架构/34docs/unwrap/fmt/strict82.810s及R2/R3限定源审实际PASS；当前build63.545s、binary b0cac559的五个私有helper进程5/5PASS，原字节thinking/opaque保留、新start不复用旧turn，布尔仅observed turn不冒SQL关联。十登记输入MATCH，全部handle已终态，无待poll。下一闭合pipeline早期AlreadyApplied及StoreAlreadyExists的实际晚到重放，再原R7 gate/adoption/恢复/stored三入口；capoff、8AC4VER未勾、formal0/60、真实host/default export/full仍待。三offline下次获准提交必含，Codex测试仅本机，无签推发布部署/新报告日志。
+
+> **CX09关联当前源码局部门全绿、物理worker待：** Root4bc5cb0d；62unique本机专项62PASS、65架构/34docs/unwrap/fmt及最终strict82.810s实际PASS，R2/R3限定源审PASS0P0/P1。Root已前滚DML不可取消及真实SQL失败回滚/重试，旧59/48兼容收据保留；tracing/INDEX同步，十source输入MATCH，cf原页保留。63270当前源码build+五条真实helper内存fixture仍运行；不冒称系统宿主/CP/export/full。capoff、8AC4VER未勾、formal0/60；全链继续，三offline下次获准提交必含，无签推发布部署或新报告日志。
+
+> **CX09关联R1源审已实际PASS、新轮次窗口已修：** 原e41aeb73/127.318s/0P0/P1和正确5组件/65架构真实收据已取回；不重启旧handle、不把零匹配错误计通过。固定native start先于context，Root现清除旧轮次、不以start自身造proof，正文保留；新增2本机回归后61local/59oldRoot实际PASS，oldpipeline/quality与delta源审仍运行。tracing/INDEX同步，capoff、8AC4VER未勾、formal0/60；完整链继续，三offline下次获准提交必含，无签推发布部署。
+
+> **CX09 sealed exact关联第一段已落、专项待：** Root mint live同份projection+idle当前CP/rev/digest/scope/epoch proof、当次event+typed hint绑定目标；原boundary plan后同事务Root精确link、转发versioned flag，scope失败回滚、race不覆盖。pure event policy与generic inventory登记同步，真实cap仍None；新5本机ignored SQLite组件专项/架构运行中，基本编译及旧writer3已过不等同关联通过。既有boundary late-data pipeline、gate/recovery/stored-import仍待，8AC4VER未勾/formal0/60、三offline下一次获准提交必含，无签推发布部署。
+
+> **CX09 sealed association继续原R7写集：** 当前2c12后像基线，拟从同份fresh live projection+真实idle claim铸proof、当次typed hint/context+eventID绑定目标，原boundary plan后同事务Root精确link且重查scope/epoch/revision/digest，不Serialize/不native认证。旧boundary replay及terminal gate仍待，capoff；新增纯event policy和既有generic inventory登记同步，所有Codex回归仅本机。无新SQL表/迁移/ledger/owner，8AC4VER未勾、formal0/60、三offline下一次获准提交必含，无签推发布部署。
+
+> **CX09 discovery+writer两切片实证终态，继续精确关联/gate：** Root2c129679；当前54本机ignored(10hint+23discovery+16content+2parent+3writer)、旧59、65架构、unwrap/fmt与最终strict103.330s实际PASS，writer源码f713895f限定PASS；owned对象库body/metadata/replay已证。物理configured-root测试只归876e binary，不冒充新CLI/系统Codex或default export/关联率/新full。全部handle终态，无待poll；下轮继续R7十owner的sealed exact proof+组合事务、catalog gate/adoption/fences与两恢复入口、live/stored port及三import门。capoff、8AC4VER未勾、formal0/60/goal active；probe已合并删除勿重做，三offline下次获准提交必含，Codex测试仅本机，无签推发布部署/报告日志。
+
+> **CX09 writer三本机与源码实PASS、最终quality待：** Root2c129679，writer3PASS（owned对象库逐字thinking/opaque/unknown、metadata列NULL、CID伪边界不关联、重放幂等及跨capture拒绝）、旧59PASS/3ignored、架构65PASS；f713895f/60.882s source限定PASS0P0/P1。已读无反向CID live resolver；hook-turn可降None保留partial，不错误收紧数据地板。当前related local/unwrap/fmt/strict运行中；sealed exact proof/gate/recovery/入口、真实host/export/full仍待，capoff/8AC4VER未勾/formal0/60，三offline下次获准提交必含、无签推发布部署。
+
+> **CX09 writer已前滚、验证待：** 同Root用完整projection保留binding、Prepared与commit验证身份，Codex content metadata/catalog SID同NULL，source_identity/raw byte count保留、两CID猜配禁用。新3本机ignored检验真实对象body/重放/伪边界/跨capture，旧Claude仅构造/返回型机械同步，源码/quality待。discovery876e树已验证不外推新树；sealed exact proof/gate/入口/真实host/export/full仍待，capoff/8AC4VER未勾/formal0/60、三offline下次获准提交必含，无签推发布部署。
+
+> **CX09 discovery切片实际终态通过、继续writer：** Root876e4190；23本机/59旧owner/16metadata/2parent/65架构/unwrap/fmt及strict198.005s全PASS；新编译真实helper source_limit1五条全PASS，普通thinking可读但只是owned provider功能文件，无系统模型/child CP或export证明。所有handle终态，解除本段冻结；下一修projection binding旧tuple丢失及精确内容/关联写者。8AC4VER仍未勾、formal0/60、capoff，三offline下一次获准提交必含，Codex测试仅本机，无签推发布部署。
+
+> **CX09 discovery R5源码PASS、23专项实绿后跑quality/物理重测：** 39dfda31/45.870s/raw8dcc6e66，仅visited修正；Root876e4190实际23/23+65架构+fmt通过。旧59/16/2/unwrap/strict以及当前binary five-path limit1 configured-root重测运行中，不套旧物理默认16结果。后继writer/binding/claim/link/gate/import/真实host/export/full仍待、capoff，8AC4VER未勾/formal0/60，三offline下一次获准提交必含，Codex测试仅本机、无签推发布部署。
+
+> **CX09物理producer已验证并发现limit1误partial：** Root90473418实际build成功；首limit1 Boundary通过但Import FAIL保留；同binary默认16五条owned configured-root路径均PASS（含可读thinking/opaque/归档/缺父保留/外域零body）。已验证parent漏visited导致quota误判，原Root修、增加第23个本机回归，R5该delta审及验证运行中，不套旧22绿；capoff/8AC4VER未勾/formal0/60，三offline下一次获准提交必含、无签推发布部署。
+
+> **CX09 discovery R4 delta实PASS、22专项通过：** 681a869f/25.562s/raw0f0d566e，仅两漏报修正；Root90473418实际22/22+65架构+fmt通过。新编译private helper/owned configured CODEX_HOME五路径验证正在运行；不是原生模型/store/export/整卡验收，binding/claim/link/gate/import仍待，capoff、8AC4VER未勾、formal0/60。三offline下次获准提交必含，Codex测试仅本机，无签推发布部署/新报告日志。
+
+> **CX09 discovery R3受限PASS、20例实绿后补两漏报：** e1cf5c0b/72.829s/raw1ed81afb，R2两P1已闭；20/20+65架构+fmt实际通过。Root再补helper不可用query→incomplete及Parent/Import父partial零child→incomplete，两个新本机用例总22待重跑、R4仅该delta审查运行中。cap仍off，claim/link/gate/import/真实child CP与export/新full未验；8AC4VER不勾、formal0/60，三offline下次获准提交必含，Codex测试不进CI、无签推发布部署。
+
+> **CX09 discovery R2关旧5P1后新增2P1前滚：** bb06e007/142.38s/raw017b3c0e；same-scope legacy root扫描排除与已验证spawn缺source诊断均在原Root补齐，strict caller不放松，另对称拒重复key/显式child空complete。17→18本机已实PASS，最新5ff88cda 18/18 1.44s；新增两例成为20本机尚待，R3源审/compat/strict/物理configured-root worker未验。原capoff、8AC4VER未勾、formal0/60，三offline下一次获准提交必含，Codex测试不进CI，无签推发布部署。
+
+> **CX09 discovery R1实际5P1与架构失败前滚：** 2374329b/294.538s/rawdc8f8d67；旧59/16/2PASS，架构64/65旧wire锚失败保留。原Root内补foreign排除/newest+spawn优先/Boundary父header-only/unmapped child partial/after-spawn work+absolute clock与echo，原None wire严格检查不放宽；另自审补三版本冲突sticky。新增本机专项待重跑、不可把12旧PASS套新树；capoff，8AC4VER未勾、formal0/60，三offline下次获准提交必含，无签推发布部署/新报告日志。
+
+> **CX09同Root discovery/query实施中：** 只Root接optional typed query+绑定/raw/metadata费用回包，复用原killable helper及configured pinned roots；首header先scope再body、读后recheck预算预留、active/archive有效prefix/冲突partial、缺parent ordinary保留。cargo check26.87s通过，新11feature+ignored本机专项正在编译/运行，cap仍off，claim/link/gate/import未接线；未验不写AC/VER，formal0/60。三offline修复下一次获准提交必含，无签推发布部署/报告日志文件。
+
+> **CX09两小切片验证收尾、全链继续：** metadata16+原owner59/父聚合新2/真实旧parent48(6ignored)/架构65/fmt及最终strict80.411s均实PASS，父聚合source a66be9e9 PASS0P0/P1；Rootaf348192、checkpointfa821f0a。错误旧selector0条不计通过；metadata物理helper仅归旧524d树，旧CX31 full不外推。secure discovery/binding/claim/link/gate/recovery/import与真实宿主、六文档/网站/新全量仍待；8AC4VER未勾、formal0/60，三offline下一次获准提交必含，Codex测试仅本机，无签推发布部署。
+
+> **CX09父聚合专项实际通过、strict待：** 新2本机ignored PASS、metadata16在新树再PASS、架构65PASS；误写旧module首次0条不计，改真实live_pipeline::tests后48PASS/6ignored。源码a66be9e9/37.695s专项PASS0P0/P1，原Root+live_checkpoint两owner；新的fmt通过，strict46755运行中，无新全量/宿主/导出验收，8AC4VER不勾、formal0/60。三offline修复下一次获准提交必含，Codex测试仅本机、无签推发布部署。
+
+> **CX09父聚合隔离继续实施：** 原Root+live_checkpoint两owner，Root OptionNone过滤Codex且期限遗漏计数使用同一pure资格；旧Claude聚合保持，避免提前做CX26。两个本机feature+ignored回归及旧parent/架构门正在运行，尚不写PASS；metadata524d切片已合格但不外推给新树。formal0/60、8AC4VER未勾、cap仍off、三offline下一次获准提交必含，无签推发布部署。
+
+> **CX09 metadata小切片已实证（非整卡）：** Root524d19e9，16本机ignored/59旧owner/65架构/unwrap1/fmt/strict88.004s全PASS，专项source169b24f5 PASS0P0/P1；新编译helper五物理合成案例均PASS、无模型或真实child/store/export证明。tracing/INDEX更新，旧CX31 full不冒用给新树。继续原写集父聚合隔离及binding/claim/link/gate接线；8AC4VER仍未勾、formal0/60、三offline下次获准提交必含，无签推发布部署。
+
+> **CX09 R7设计PASS、Root metadata修复开工：** e9b802a3/55.087s/raw94d34b78、两阻断delta已关闭、0P0/P1；不等同实现验收。Root闭合分类三个合法snapshot/usage种类，检查thread/root/current turn而不改绑turn，未知/context-bearing仍保留partial；五新增本机ignored回归待结果。十owner/四落点M、8AC4VER未勾、formal0/60；cap未激活、三offline下次获准提交必含，无签推发布部署。
+
+> **CX09 R6真实FAIL、R7限两P1前滚：** fd427a20/185.734s/raw bc1a88e4；四旧P1已解，新两项为gate拒绝结果与terminal adoption。R7在原十owner登记固定pending错误/source-chain识别、recovery RetryLater/doctor非manual、期限不越gate、容量先预留与已满足项同事务清除；四种adoption保留/安装/不清gate及旧V1 legacy边界明确。仅plan/status，尚未实施/验收，8AC4VER不勾、formal0/60；Codex新增测试仅本机，三offline修复下次获准提交必含，无签推发布部署。
+
+> **CX09 R6实际owner续核修正（仍仅草案）：** worker.rs仅spawn/lock；真正恢复执行在capture/recovery.rs及command/agent/doctor.rs，两者和catalog先登记，保守10源码owner/9生产逻辑/4落点M，8AC4VER不变。Preparing在reserve事务先写，finalize/complete/replay最终事务共同gate；minimum revision防旧body满足新claim，fenced恢复防后续SessionStart，stored port显式budget/limit及Import-current/Recovery-root，默认不做IO。只扩同一receipt V1/V2 private format，无新SQL表、stage、worker、ledger。当前无新生产编辑，待R6真实复核，formal0/60，Codex新测试仅本机、全部签推发布部署hold。
+
+> **CX09 R5真实FAIL，R6已文本前滚（2026-10-20）：** f91fae29/157.088s/4P1保留；补budget-aware stored port、三个Claude-only门、unchanged fresh-turn proof、持久Preparing/known-claim gate及same-txn completion/replay，查明旧boundaryplan在checkpoint.rs只读借用。必要catalog+worker先G09，保守9源码/4dirsM/8AC4VER，无SQL表迁移/新ledger；既有receipt仅gate升V2，新reader兼容V1/V2、旧reader拒新gate。固定SDKtoken_usage_record在Stop前写入，phase1当前误partial会阻断真实关联，R6明确要修、不能伪称native正例。尚仅plan/status待复审，无新增production或cap激活，formal0/60；Codex测试仅本机，三offline修复下一次获准提交必含，无签推发布部署。
+
+> **CX09消费CX31后G09精确接线草案（2026-10-20，待R5）：** CX31本机source-qualified已交接，原6生产逻辑owner保持；补ingress仅本机旧cap断言迁移及existing generic guard，保守7源码/4落点M/8AC4VER不变。新boundary默认None selector、import默认委托、Root同helper query/budget、projection binding→exact settlement与禁旧CID双入口、边界NULL字段/link表精确身份、Codex不喂父usage均具体化；只plan/status，无新增生产编辑或cap激活，待实际R5。formal0/60，三offline修复下一次获准提交必含，Codex测试只本机；无签推发布部署。
+
+> **CX31最终本机验收完成，继续CX09（2026-10-20）：** full58ab50a5实际10333/10333PASS863.405s/13slow23skip，1873输入02e90ad906595bc07fc9f82f7cf8207550aec31cb1ea8cf4a29bffa3a58ccee7前后MATCH。10private/1CLI、原12/4/2、65架构/unwrap1/三offline3/3/fmt/strict及source审/root事实核对均有实际收据；4AC4VER勾选、in-progress/locally-accepted，允许CX09消费typed提示，不声称真实child thinking或C/D。源码冻结门结束，CX09先刷新原六owner与必要generic guard写集；formal0/60，新Codex测试仅本机，三offline下次获准提交必含，无签推发布部署。
+
+> **CX31最终anchor审查已返回、full继续（2026-10-20）：** 63009实际19431ce1/832.249s/num_turns2、PASS0P0/P1，仅given anchor；其“disk verified/1196 binding.child_source_hints来源”额外说法不采信，root已读当前三SHA及真实ingress→Parts源码。完整58ab50a5/70202已观察7259PASS、旧merge一个slow，无终态或后像；source/docs冻结，AC/VER仍不勾，formal0/60。三offline3/3修复下一次获准提交必含，新Codex测试仅本机，未签推发布部署。
+
+> **CX31完整T1运行中（2026-10-20，70202/PID10260）：** 双env/umask022/locked-all-retries2，1873输入前像02e90ad906595bc07fc9f82f7cf8207550aec31cb1ea8cf4a29bffa3a58ccee7，源码及行为docs/cf冻结，未有终态不能验收。10private/1CLI、12/4/2旧例、65architecture/unwrap1/三offline3/3/fmt/strict已实际PASS；63009最终anchor源审仍待。正式0/60、CX09待交接，Codex测试仅本机；三offline修复下次获准提交必含，无签推发布部署或新增报告/日志文件。
+
+> **CX31最终focused与strict实际全绿（2026-10-20）：** 10local lib、1CLI及原12/4/2模块通过；86906 architecture65/65、unwrap1、用户三offline修复3/3、fmt与strict108.667s均PASS。全部原失败保留；最终generic typed-hint四参数anchor source63009及双env完整T1待，暂不验收/不放行CX09、formal0/60。仅通用接口守卫清单/anchor同步，Codex测试仍本机only；三offline下次获准提交必含，未签推发布部署。
+
+> **CX31 R2 source PASS，真实架构门继续前滚（2026-10-20）：** R2实际98272250/114.429s/0P0/P1/7非阻断P2；99271 architecture64PASS/1FAIL暴露provider全文件（包括测试）禁止capture依赖。原字段→Parts断言已移回ingress，provider测试纯extractor，仍原四owner/十例（4policy3ingress3port），守卫不放宽；70172重跑，53762CLI最终1PASS4.67s。strict/full及最终delta源审尚待、formal0/60；三offline修复保留下一次获准提交，无签推发布部署。
+
+> **CX31既有通用守卫写集先登记（2026-10-20）：** 20518 architecture64PASS/1FAIL，原provider-neutral精确方法inventory需纳入child_source_hints。G09只增加既有guard原例的inventory同步，不增Codex CI用例/入口、不放宽store/IO/lookup；生产四owner/三落点M及formal0/60不变。R1代码PASS9P2的低成本文档/测试修订后还需最终R2、focused/strict/full，无签推发布部署；三offline修复下次获准Codex提交必含。
+
+> **CX31架构门失败已原owner前滚（2026-10-20）：** 首轮architecture61PASS/4FAIL，后续quality未执行；exact cfg(test)+独立feature替换组合gating，两个测试discovery实现搬回observed_agents既有owner。既有守卫零改、新测试仍feature+ignored本机only；20518重跑，3380评旧输入，最终source/full仍待，formal0/60。三offline修复保留下一次获准Codex提交，无签推发布部署。
+
+> **CX31专项已通过、后续门运行中（2026-10-20）：** 新10私有feature+ignored两轮实际PASS，补exact8320bytes及七provider neutral后仍10PASS；真实CLI合法/畸形SubagentStop/Stop/End trace+storage canary1/1PASS4.43s，普通父thinking导出正向通过。首次新增测试拼写编译错误及trace观测FAIL保留主卡，修复只在本机测试；tracing/INDEX已同步。21053旧模块/架构/三offline/strict与3380 CODE+DOC R1尚待，全量未跑，4AC4VER不预勾、formal0/60。Codex child capability仍None、CX09后续接线待；三offline修复下次获准提交必含，无签推发布部署。
+
+> **CX31已开始实施（2026-10-20 11:04:33 UTC）：** R6设计sessionc6eb82d3实际PASS/151.023s/0P0/P1，四owner已落窄ChildSourceHintPolicy、bounded未可信候选、独立Parts字段、stdin显式传入及borrowed port默认委托，C9 capability未激活。基本cargo check33s通过；新10私有feature+ignored测试96151正在编译，CLI trace/旧模块/架构/docs/strict/source/full未验，4AC4VER不勾、in-progress/空。边界目前只声明Parts携带，不假称port已消费。当前formal0/60；C9投影9a76.../三offline修复保留，不签推发布部署。
+
+> **CX31 R5真实FAIL已前滚（2026-10-20）：** sessionb2ae9f68、110.599s、2P1保留；补实际per-event字段/必需项/JSON字符串规则、仅本机recording discovery及wrapper转发、Stop/End port与SubagentStop仅boundary持有分列，错误binding先hardcheck。trace canary用现有/dev/fd/2内存捕获，不建日志；四owner/三落点M/4AC4VER不变，仅plan/status待R6，无新生产编辑。当前formal0/60，CX09投影9a76...保留、后续接线待CX31；不签推发布部署，Codex新测试不入CI。
+
+> **CX31 G09拆分草案（2026-10-20 10:39:32 UTC）：** 完整producer/lowerer核验证实ingress清空provider指针/extra，原CX09“入口flatten可抵达pipeline”结论撤回。新增CX31（4生产/3落点M/4AC4VER）传已选binding与typed untrusted hints，保持窄Context、不二次lookup；CX19→CX31→CX09串行，当前30CX/总60、formal0/60，旧0/59保留历史。CX09阶段1源码/实测不变，新增ingress/runtime owner未编辑；仅plan/status待R5设计，不预报实现/数据。Codex新测试仅本机，三offline修复下次提交必含，未签推发布部署。
+
+> **CX09阶段1已实跑（2026-10-20 10:17:11 UTC；不是整卡验收）：** 仅subagent_content owner SHA9a76b829...变更；ordinary thinking投影/有界兼容codec落地，新11private本机/旧59owner/65架构/1unwrap/fmt/strict112.521s均PASS，4物理worker合成协议smoke通过。首轮8/9失败为新report样本断言误用，已改用原match_count；runner错误target导致的101亦保留，正确剩余门40370全部0，四输入前后MATCH。真实host/源文件/store/export/flush关联率未验；discovery/live/import/settlement仍未接通，8AC4VER未勾、in-progress/空、formal0/59。全新增Codex测试feature+ignored仅本机；原3offline修复下次提交必含，未签推发布部署。
+
+> **CX09开始本机实施（2026-10-20 10:00:52 UTC）：** 原subagent_content owner已落Codex ordinary snapshot projection、兼容旧Claude九字节请求的有界身份帧、同字节observed context和不丢reasoning/opaque字段、metadata-only拒绝；新增9个private feature+ignored本机回归，名单/执行正在实际编译，未预报PASS。固定host new_submission_id为UUIDv7、counter另属internal context，非UUID仅保存内容不关联。全卡live/import/discovery/精确link及最终门仍待，in-progress/空、8AC4VER未勾；六owner四落点不扩。三offline修复下次Codex提交必含，不签推发布部署、formal0/59。
+
+> **CX09 G09设计交接就绪（2026-10-20）：** R3六owner设计PASS及R4实际host顺序/observed context delta PASS（session53aa4f0a，73.082s，0P0/P1/5P2）已写主计划。只放行本机实施准备，6owner/4landingM/8AC4VER、pending/空，尚无production/test编辑或child数据验收；sub_id resume唯一性续核与真实host关联率明确待验，缺证明普通thinking仍保留/unresolved。六source仍G09前原字节，结构及既有foundation guard1/1PASS；下次Codex提交必含原3offline CI修复，Codex新增测试不入CI，未签推发布部署，formal0/59。
+
+> **CX09 R3设计实际PASS（2026-10-20 09:46:00 UTC）：** session65462774、86.898s、0阻断P0/P1/8非阻断P2。续读固定host证实SubagentStop发生在task_complete之前，关联条件改为已验证快照最后turn_context与hook turn_id相符，不把观测关联冒充完成/native认证；思考正文普通保留不依赖未来事件。此明确delta待R4，仅plan/status，仍6owner/4landingM/8AC4VER/pending空，无production/test编辑或dataPASS。三offline修复下次Codex提交必含，未签推发布部署，formal0/59。
+
+> **CX09 R2设计FAIL已前滚（2026-10-20 09:42:09 UTC）：** session2906482c 134.908s实际FAIL/2P1已登记并细化：terminal才阻断completion，普通Stop child失败仍保存父thinking，SubagentEnd失败仍保存无内容关联的boundary；不借不存在的nonterminal finalizer恢复。已核flatten/Ordinary/原partial identity、共享descriptor与dyn事务companion，仍6owner/4landingM/8AC4VER；结构和既有foundation guard1/1PASS，production/test未动。pending/空待R3设计，不预报数据或模型PASS；三offline修复下一次Codex提交必含，未签推发布部署，formal0/59。
+
+> **CX09 R1真实FAIL已前滚（2026-10-20 09:37:58 UTC）：** session6385363c设计187.788s FAIL保留；真实flatten extra和Codex Ordinary source已证，不需额外ingress/snapshot owner。补明确禁Codex旧CID错连、实际metadata读费、reasoning-only普通保留、Codex child Err保留finalizer pending及同hook重投/partial identity、bounded候选和不抢CX26聚合。仍6生产/4落点M/8AC4VER，仅plan/status，pending/空，待R2实际设计审查；不冒称已实施或testsPASS。三offline修复及下次Codex提交必含要求保留，未提交推送发布部署，formal0/59。
+
+> **CX09 G09实际草案（2026-10-20 09:29 UTC）：** 原子会话内容物化轴刷新为六生产owner/四落点/M、8AC/4VER；live SubagentEnd/parent及两条historical入口、root/current/parent/child独立验证、普通thinking保存与精确settlement关联逐项登记。测试只复用feature+ignored本机target；既有generic policy的Codex能力新增断言迁往local，其他七provider不动。当前仅plan/status，pending/空，待真实设计PASS后实施，不预报数据获取或Windows结果。用户要求下个Codex提交必含三offline修复，当前已在写集且各1/1PASS；仍未提交/推送/发布/部署，正式0/59。
+
+> **CX19最终本机验收完成，后继CX09待G09（2026-10-20）：** full68ea24ef实际10333/10333PASS866.535s/13slow23skip，1873输入0329a2af...前后MATCH；exact8CLI/12private、173CLI/39index、source及六doc review/strict/site均有真实PASS。CX19为in-progress/locally-accepted，三AC四VER按本机证据勾选；正式0/59、C/D、签推发布部署继续用户hold。CX09仍pending/空，先实际owner/API设计审查；Codex新测试只在本机，不加入CI。
+
+> **CX08新full live（2026-10-20 01:59 UTC）：** session54618/PID72834，1873前像73e651df3ea5bfedd569c398e7c08e037b0109e871219fe8522ee1e6aab8b190；编译1m01s完成，仍list、无runID/终态，继续原handle不重启。source/docs/cf冻结，C08仍in-progress/空；本机147/14+13及旧4/guard/strict/R4已PASS，Windows范围compilePASS而all-target旧21FAIL/runtime未知。formal0/59，未签推发布部署。
+
+> **CX08 alias修复全门green后新full（2026-10-20 01:57 UTC）：** old4/14live/13lib/147local/65architecture/34docs/1unwrap/fmt/strict75.479s、R4 source条件核实及C8范围Windows compile10.527s均PASS；新canonical全量已启动，source/publicdocs/cf冻结。旧full10331/2FAIL原样保留；Windows all-target21旧失败/runtime未知。新full终态与前后摘要未齐前Acceptance仍空/0/59，不签推发布部署。
+
+> **CX08 首次full已失败并前滚（2026-10-20）：** 18773终态10331PASS/2FAIL、862.345s，1873前后摘要57e1c186...MATCH。两个旧CI仅因macOS返回路径拼写变化，源已改SST raw spelling与normalized authority分离、旧CI不改，新增本机alias链路使target147。正在旧2/14live/13lib/147local/guard/fmt/strict验证，后续还需R4和新full，不先accept；0/59、不签推发布不变。
+
+> **CX08 full实际live handle（2026-10-20 01:29 UTC）：** session18773/PID8085，1873输入前像57e1c18608ba823e4d0fb2e2510c1d6be85c39166adcb4ac955835561e4ed7b1，仍编译/未终态；同handle继续，不能重启或预报PASS。最终146local/13lib及source/docs/strict已通过，AC/VER仍待full后核；CX22仅只读发现CLI真实owner和日期DTO缺口，尚未改规范或production。所有签推发布部署继续hold。
+
+> **CX08 最终完整门进行中（2026-10-20 01:28 UTC）：** 最终146local/13lib、65architecture/34docs/1unwrap、旧budget/oracle、fmt/strict64.312s及R3 source/finaldocs、网站均PASS。本机Windows C8范围compilePASS，all-target21个既有Unix测试错误保留、runtime未验。现两env canonical nextest启动，源码/测试/公开文档/cf冻结，仅plan/status更新；未终态前C08 Acceptance空，formal0/59，不提交推送发布部署。
+
+> **CX08 终审补强中（2026-10-20）：** R2 source+docs PASS，13lib已PASS4.36s；最后修复shutdown取消reaper的资源保留、Windows cursor顺序和FTS direct-gate反证，补三项live边界（target146/13index）。同源码bin+lib/live59861、本机Windows GNU all-target跨编译44998、源码缺段/最后delta R3（实际handle见主计划后续登记）正在运行，尚无终态。本阶段不提交推送发布部署，C08仍空/formal0/59。
+
+> **CX08 当前本机进展（2026-10-20 01:05:57 UTC）：** live10/10 PASS8.71s、同源码helper后lib10/10 PASS4.26s，含实际hook保存/默认export thinking、无HOME的CODEX_HOME、幂等/新turn增长、纯reasoning/escaped credential、5000旧文件、16MiB169450行预算与终态active+pending。architecture65/unwrap1及fmt已PASS，strict/source审查仍在10669/87983。网站sync零drift109nav、7fixtures/11unit/typecheck/build均PASS，整页f647fdac...。C08仍in-progress/空；完整回归及其余验证待齐，无真实模型或Windows结果，正式0/59，无提交推送发布部署。
+
+> **CX07初稿验证（2026-10-19 23:01:16 UTC）：** 9生产路径已落地；131local、5CLI、纠正ignored入口及None断言后的5lib、旧lease/terminal与139shared、fmt/strict、site均有实际PASS（具体最终delta范围见主计划）。Claude R1 29947运行中，CX07最终full未启动；live来源None缺口已明确归属CX08，不能报真实thinking已取得。仍in-progress/空，0/59。
+
+> **CX08登记对齐（2026-10-19 22:45:23 UTC）：** 5AC/1VER、同observed_agents 3生产/1落点（M），拟新增index/live接线回归仅feature+ignored本机target，旧doctor CI只读；仍pending，实际开工再核I。
+
+> **CX08来源接线归属（2026-10-19 22:44:45 UTC）：** 明确接续CX07，除一致索引reader外必须接线普通Codex live candidate（AC4→5）；不把现有None当完成目标。开工需再刷新实际I/G04，原顺序不变，无越卡源码修改/新task。
+
+> **CX07能力边界核实（2026-10-19 22:42:02 UTC）：** 初稿CLI4/5PASS，live正例FAIL真实原因是CodexLiveCapture无candidate、仅metadata-only；保持unknown并改强负例，不越权读源。import已有同snapshot正例，真正live来源接入仍后继任务；本卡未验收/未完成真实模型smoke。
+
+> **CX07验证登记：** 本机VER增加同feature+ignored `--lib codex_session_summary_` decoder边界用例，VER1→2、9生产/4落点不变；五项CLI已实际0/5红测，生产初稿正在编译，未验收。
+
+> **CX07 G09开工（2026-10-19 22:28:36 UTC）：** 9生产文件/4落点，复用checkpoint同snapshot extraction提供Codex session show摘要，无第二份账本/provider重读/旧turn覆写；历史metadata unknown。in-progress/空，先处理CX03随附本机test/docs，再新增summary红测；正式0/59、C/D与不签推发布/部署不变。
+
+> **CX03本机完整验收（2026-10-19 22:20:26 UTC）：** run33e4f20d/session98809实际10333/10333PASS（13slow/2leaky、23skip，851.309s），1865输入前后2b9402f1296636be84b0433a652bd632842a80a4c86077cc8104c65ff3d005e6一致；7local、fmt/strict、site、Claude R3已PASS。CX03 in-progress/locally-accepted，CX07进入开工预检；正式0/59、C/D及不签推发布/部署不变。
+
+> **CX03仍在验收（2026-10-19 22:11:38 UTC）：** 最终full98809/PID90037最近确认live、7170PASS lines，无终态；源冻结1865路径2b9402f1296636be84b0433a652bd632842a80a4c86077cc8104c65ff3d005e6。继续同一handle，不重复启动；CX07生产未开始，CX03仍in-progress/空，正式0/59。
+
+> **CX03 full执行中（2026-10-19 22:09:10 UTC）：** run33e4f20d-1f7f-4347-8eea-cccb29bec34d/session98809/PID90037，10333tests/172binaries、23skip，已观察5728PASS lines，非终态；只有计划/status记账，无source修改或签推发布。
+
+> **CX07随附验证待办（2026-10-19 22:06:24 UTC）：** 后继在同localtarget补R3测试成功事实与预算措辞，并在Windows本机验收前把共享reader fixture改只读（当前RW与Windows只读share存在静态冲突）；不涉及生产policy/CI。CX03冻结full98809继续，Mac7/7及sourcePASS事实不变。
+
+> **CX03 source复审通过（2026-10-19 22:03:58 UTC）：** 最终R3 PASS无P0/P1，2optional P2测试/措辞建议保留后继同写集处理；最终7/7、fmt/strict/site均已PASS。full98809/PID90037编译完成、尚未终态，1865路径2b9402f1296636be84b0433a652bd632842a80a4c86077cc8104c65ff3d005e6冻结。CX03仍in-progress/空、0/59、不签推发布。
+
+> **CX07前瞻（2026-10-19 22:02:11 UTC）：** 仅同步拟新增summary回归到既有feature+ignored本机target，原CI只读；实际summary/catalog提交owner待CX03 full通过后G09刷新，CX07仍pending。CX03最新strict已exit0，R3/full仍在运行，未编辑冻结源码。
+
+> **CX03最终门（2026-10-19 22:01:27 UTC）：** R2 sourcePASS后仅补7th本机guard/注释/docs，7/7诊断PASS，原125本机及三离线selector均PASS；最终site门PASS。R3/strict与最终完整双env nextest运行中，source冻结（plan/status除外），不得先accept；仍0/59、不签推发布/部署。
+
+> **CX03复审（2026-10-19 21:55:03 UTC）：** R1 source PASS附4P2均已修正/补证，6/6最终诊断本机回归及cf本地门通过，实测linked-worktree共用journal；R2/最终strict与聚焦复验运行中，full未启动，仍in-progress/空，0/59。
+
+> **CX03本机候选（2026-10-19 21:52:25 UTC）：** 五项journal本机红转绿并扩展边界后，完整local target124/124、原architecture65/docs34、fmt/strict与cf网站本地门通过。Claude审查运行中，CX03最终完整nextest尚未启动；仍in-progress/空，0/59、禁止签推发布/部署不变。
+
+> **CX03开工（2026-10-19 21:44:55 UTC）：** G-09登记6生产文件/4落点，共同已验证runtime结果日志及doctor/status只读窗口计数；未验证/unknown不写storage，原hook退出策略不变。新用例仅本机feature+ignored，尚未验证；正式0/59，C/D仍暂停。
+
 # 计划执行状况总表（plan-status.md）
+
+> **CX05 本机源交接（2026-10-19 18:39:18 UTC）：** 最终run30153f19实际10333/10333PASS（13slow/4leaky、23skip；849.843s；exit0），1864前后同一3acd1b23...；R4/R5 CODE PASS与本机97+6及质量/网站门有效。in-progress/locally-accepted，仅source-qualified交接CX16；自动live/import codec/version域和正式C/D仍未关闭。
+> **CX03 当前预检（2026-10-19 21:37:38 UTC）：** CX30只读source GO/locally-accepted：旧2升级隔离测试PASS6.10s、唯一Claude source GO无P0/P1/P2，原9public runtime与两入口/12events source不变量覆盖分别登记；无代码/CI/fixture变更，复用CX17最终10333/10333完整门与19fc6fef...同源。CX17源码/8专项/strict/网站及新full已通过（13slow/1leaky，23skip，849.468s，资源根因未证）。C03仅刷新IO owner与local测试预检，薄命令不直接写文件、原lifecycle CI只读；正式0/59、C/D暂停、真实模型未验、不签推发布与下次授权提交含三离线CI修复保持。
+
 
 > **Worktree 默认目录统一（2026-10-19）：** 用户已授权实施 [WD-01..08 与 WD-02G](plan-20261019-worktree-layout.md)，新建目录统一在 `.libra/worktree`，不迁移旧数据。上游 2026-10-21 最新发布 `v0.30.84`，用户“最新上游 patch + 1”规则使当前目标为 **`v0.30.85`**，不发布 `v0.31.1` 或未打标的旧 `.83` 候选。本地已快进到 `99a92c1`，并前滚修复上游 `branch -f` 的当前 worktree/保护策略边界；branch 聚焦 5/5、全组 52/52 与网站十页限定同步通过。`v0.30.67` 起的二进制支持 2026101902 receipt，`0.30.66` 及更早版本拒绝已升级仓库。最终双全量、macFUSE、final-SHA CI、四平台/stable、网站新版上线待验，九卡正式 **0/9**。证据见计划正文。
 
@@ -263,7 +513,7 @@
 | [`plan-20260907.md`](plan-20260907.md) | 横切（BLAKE3 object format） | **已收口** | B3-00..B3-17 全部 `done`/`complete`（`v0.23.68`→`v0.29.0`；REL-B3-01/02 家族经 B3-15/B3-17）；最终 Codex/Claude R40 双 `PASS`（0×P0/0×P1）；GC-B3-01/GC-B3-02 收口守卫绿；`DEP-B3-05` 已满足，下游 FL-00 解锁；无 LR 编号 |
 | [`plan-20260906.md`](plan-20260906.md) | 横切（安全扫描） | 未启动 | SC-01..SC-07、SC-CLOSE 全部 `pending` |
 | [`plan-20260905.md`](plan-20260905.md) | B（Claude hooks/reasoning） | CC-00..CC-08 九卡 done / complete | v0.30.65（`262c700`，release 39285212623）与 v0.30.66（`17a6766`，Check 39314279961、CodeQL 39314279414、release 39347223159）均 success；install/Homebrew/stable manifest 与网站已核；Claude 实现审查 R1 FAIL、R2 PASS |
-| [`plan-20260904.md`](plan-20260904.md) | B（RG基础 / Codex capture） | RG/scoped沿用已交付；CX待执行 | DATA-CAP-20261019：CX-00 source/模型设置本地审计完成、Claude R2 PASS；CX-12语料locally-accepted/Claude PASS，其余27张 CX pending；thinking 原文及 encrypted_content 普通保留，native 缺证不阻塞获取；旧 R5 为历史；本次修订实际审查见计划 |
+| [`plan-20260904.md`](plan-20260904.md) | B（RG基础 / Codex capture） | 源工作进行中，正式0/61 | CX31已最终本机交接；CX09晚到重放67local/5pipeline/65架构已通过，源审R1限定PASS，但核出shared维护锁会无界等待，G09拆CX32单owner有界共享锁前置，CX31→32→09。CX32已source-qualified本机交接，8AC/4VER勾选、in-progress/locally-accepted；R3设计/R1R2源审、8local/旧9/65架构/26serial/unwrap/fmt/strict和本次full1386fc5f实际10333/10333PASS（13slow/1leaky/23skip），2081前后453b7e0c一致。CX09原写集bounded consumer已6local/旧5replay/正文1/旧48pipeline/65架构/34docs/unwrap/fmt/strict87.141s及R1R2源审实际通过（仅slice）；Preparing/known-claim gate的codec/SQL/admission与typed pending/live出口已20local/6维护锁/旧66/65架构/unwrap及R1R2R3限定source通过；本段旧48pipeline/19checkpoint、三offline各1/1、34docs/fmt/strict92.902s均实际通过，所有handles终态。Root fence/enrollment/clear/live及floor/capacity已9local、旧59Root/21affected/48pipeline、守卫/fmt/strict90.938s通过；R4R5限定源审及R6关闭截止缺口，全部handles终态，仅准备slice本机交接。恢复/stored仍待，capoff/真实host/export/整卡full未验。Codex新测试仅feature+ignored本机；三offline下次提交必含；C/D及签推发布部署hold。 |
 | [`plan-20260903.md`](plan-20260903.md) | A（LR-05 merge） | 实施中（收尾） | MG-01..MG-21 卡片全部 `done/complete`；最终计划收口与 deferred 差异仍待完成 |
 | [`plan-20260902.md`](plan-20260902.md) | B（OpenCode ordinary capture / safe partial） | **macOS范围完成：66/66=100%**；库存66/68=97.06% | v0.30.52实际发布/安装与本轮五卡C/D已关闭；两原延期、六withdrawn非PASS、SourceA未证；COV26/26不变。最终完整全量实际通过，失败/重试/skip原据保留。 |
 | [`plan-20261013-coverage-schema.md`](plan-20261013-coverage-schema.md) | B（父计划DEFER-OG25-COVERAGE-V2的独立schema-v2前置） | **任务卡26/26 done/complete；计划级除终止D组后补外已满足**（本次签推生效）。v0.30.50 F `deabb37`/release38849003385/official安装及legacy2epoch0→2实际PASS；DEP13complete，父60/72正式/source62/72。 **收口前状态历史：** **当前：parent72/formal59/source62，COV26/source25/formal0；repair189/cff290已source-qualified，repaired50 T2 actual10219PASS/2slow23skip/0FAIL0retry0flaky0LEAK；release CODE R1/R2 FAIL；R5（CHANGELOG顶节＋f6ff基线）范围修订待审/采纳；旧215dc824 full不复用，需新bumped50 full，不授予发布C-D。以下原单元为历史快照：** **实施中：26卡；COV2-17实际10/10＋唯一真实visible-only、109reader/fmtstrict及Claude PASS，最终事实复核/签推待；source当前24，actual交付后25/26=96.15%且DEP13source-ready；formal0/26家族C-D；下一COV2-REL-01** | **以下原日期交付为历史收据，旧13/26、14/26及“保持”不代表当前分子；当前交付条件以本文件首条和本卡末尾为准。** 初始19卡由 signed main `c94fd8dd60d8d9fa670b2682bf7b9979bae91548` 采纳，历史分母保持；已签 G-09 细化为20 implementation、2 audit、1 patch release；已采纳 COV2-23/24 后为历史25卡；本次拆出 COV2-25，现为23 implementation、2 audit、1 patch release（26卡）。COV2-01/13/02/07/14/03 六卡已签名main、本机A/B与唯一ClaudePASS，此前COV2-14 signed+DCO main `4558af64c09e63c4716fa68595776a8044f66cc7`，最终full 10069/10069 exit0/raw `2849dcf7e2105ed1da5e5d3b0333374e2590ac909c1f478ef8ba68966e86aec4`、唯一Claude PASS/raw `2d1e5fb7425abc9aa2802db241213811dfcd6c891410e9853e554c5fcb806966`；COV2-24 在历史25卡口径签名后 source-ready **12/25=48.00%**、formal **0/25**；当前COV25已signed交接后26卡口径 source-ready **13/26=50.00%**、formal **0/26**，家族C/D仍待。COV2-03 已完成源码交接，此前23卡三文件 G-09 规划协调已 signed main `eaa43ec13f6c50212f0b3c2fa8a51799ec74bff5`；本卡当前源码 AC1–8 的五项 VER、上述五项 ER-04 与两项旧库缺表回归均各 1/1，fmt exit0，strict Clippy exit0；full-r3 失败已修但不计 PASS；最终双 env full **Summary [1618.814s] 10078 tests run: 10078 passed (14 slow), 23 skipped**/raw SHA `c49dd3c33652d55541a0e4c0269c817460b9109cf261eab5271d90760a49e8a9`、exit0，唯一最终 Claude Code PASS、P0/P1/P2=0、P3=5/raw SHA `9ef25f92615eefcf2019212a306cfa7542ef416b693286bb99111006b3ea6df7`，signed+DCO 源码/文档 main `d717e42e0d1ec75e6ae576b21242fd1519040abd` 已 Push、remote 同 SHA；五项非阻断 P3 见卡内。COV2-19 8/8 AC、5/5 VER、16项继承及 replay/架构守卫本机通过，双 env full 10084/10084 exit0（15 slow、1 leaky、23 skipped；raw SHA `20378e04b5c585c954421780520a6a62ebbf1f6c7ba0336db40dd76541058e43`），唯一 Claude PASS/raw `64068902908f4c521e380dc7e5cf593134eaa99697de208344b65f75b3c3caa8`，signed+DCO main `354ff768c406bdad74607da62002bff810147c24` 已 Push、remote 同 SHA；COV2-20 修订后 7/7 AC、3/3 VER 与 inherited v1 精确 1/1、双 env full 10087/10087 exit0（4 leaky、23 skipped），唯一 Claude PASS/raw `6f3381d9061e72afebfe32f9714331ada567665d33eb0b045782fd06646667a5`，signed+DCO main `aa0ea018ddd044f09d62a88428e812a359cef8ed` 已 Push、远端同 SHA；COV2-21 四项 VER 与五项继承精确测试各1/1、strict/full 与唯一 Claude PASS，signed+DCO main `6b24d797583afe1c0265f6e9fcbd364566671167` 已交接；COV2-23 8/8 AC、4/4 VER、四项继承与两项架构守卫各1/1，修订后双 env full 10095/10095 exit0、唯一 Claude PASS，signed+DCO main `d977d13c5e23111b93d78477b9e1a70015a111b8` 已与远端同 SHA；首轮 full 10093/10095、2 failed 保留不计绿；COV2-04 五项 focused 各1/1、fmt/strict、唯一 Claude PASS/raw `3a9749ad4679e8e038eb7f3d5d09e36e0e367de4411e4f5848371c55d6ad5aac`，signed+DCO main `03b10f887368a3db5206589f5dd6947432ffe26c` 已 Push 且远端同 SHA，ER-13 `none` 未独立跑 full；COV2-24 完整签名收据：signed main `c56de683acf71d7327436eef7ef9185d97dcff27`/remote 同 SHA，八路径 manifest `cd43b9af3980c8f3e90ce5751df7855ebaf1f604e2803130f0d32d9556b46e98`、唯一 Claude PASS raw `a6d467bcdc33c42fff3c45f55681ebbaefa213d96cfd59a8b901c5d3dff942f7`、T-5 10103/10103 exit0/raw `2908fff258247c857ae857a4759fcde9b925c212cc5912fa373ece16b5373029`，七项 inherited exact 1/1；当前提交安全 CI 仍运行；历史开工快照曾为“COV2-25 AC/VER 全 UNRUN，COV2-22/08 未实施”；现COV2-22已source交接、COV2-08开工/当前验收待；COV2-20 旧 CI 因新提交取消，Windows/network/CodeQL 先前成功，offline-core 未完成。COV2-19 开工前 G-09 已在卡内 Prestart receipt 核实。0 matched/helper-only/skip 均非 PASS。当前22审计名（21继承+1当前格式替代，另1旧legacy FAIL计划外延期）只在macOS本机非skip验收；真实Source A另由父计划证明；COV2-REL-01稳定C/D后方可将 `DEP-OG-13` 记complete；历史父计划 **55/70=78.57%**（当前口径见页首）。 ；本次G09三卡顺序COV2-25→FIX-OG-NATIVE-IMPORT-01→OG-IDLE-ERROR-029-01→OG-UPGRADE-029-01→COV2-22，新增卡A/B/C-D均UNRUN；REL-OG-TEMP-049操作本身不增卡。  历史G09当时：DEP-COV2-029-BASE只消费父namespace＋自动capture/checkpoint/export最终source；DEFER-OG29-PARTIAL-IMPORT不设入边、不解除COV2-05/11/18原import oracle。该历史时点COV source13/26、formal0/26；当前分子见本行状态栏与页首。 |
@@ -565,7 +815,7 @@ SBX-01..05 `done/locally-accepted`；**发布步按 DEFER-SBX-06 正式延后**�
 | [`plan-20260916`](plan-20260916.md) | CAP-01 | Agent Capture wire types、URL、uid、transport trait | 无 | **双评审已 PASS**（Codex R3 / Claude R3） | DEP-CAP-01：monoengine `2b8f365` capture HTTP pin 重核（ER-CAP-02） | ⚠️ 需重核 DEP-CAP-01 |
 | [`plan-20260924`](plan-20260924.md) | ACF-01 | Agent Capture validated ingress contract | `DEP-ACF-01`（既有執行基線） | R91 字面 `VERDICT: PASS` | ACF-09 `Lifecycle=done`、`Acceptance=complete`；`DEP-ACF-MIRROR` 已交接 | ✅ **已收口**；ACF-01..20 与 FIX-ACF-01 `done`/`complete` |
 | [`plan-20260913`](plan-20260913.md) | FL-00 | 核实 Media 前提与热路径（audit，no-release） | 无 | 联合 review 已 PASS（U2 `VERDICT: PASS`） | DEP-FL-04：plan-20260907 **已完整收口** | ✅ 已 `done`/`complete`（FL-05 亦完成；本计划仅剩计划级收口门） |
-| [`plan-20260904`](plan-20260904.md#cx00-source-audit-20261019) | CX-15 | CX-00/12已source-qualified；Codex ordinary thinking保留与侧车 | 无；live trigger/data取得仍UNRUN | CX-00 Claude R2 PASS；CX-12 Claude R1 PASS（51turn）；实现卡审查未验 | audit无生产修改；CX-12仅source-pinned合成fixture | CX-00 in-progress/locally-accepted；CX-12 in-progress/locally-accepted；正式C/D未验，其余27卡pending |
+| [`plan-20260904`](plan-20260904.md#cx00-source-audit-20261019) | CX-01 | CX-00/12 source-qualified，CX-15 ordinary本机23+11通过；当前补12-event/Interrupt | 无本机卡内阻断；完整回归/最终审查仍待，真实数据UNRUN | CX-01 R1 not PASS后已补测试/最小版本/phase保护；R2已静态PASS但最终门待验 | 8生产文件3落点，仅Codex；全部新增/修订测试feature+ignored，不入CI | CX-15/01 in-progress/空；正式0/59，无提交/推送/发布授权 |
 | [`plan-20260905`](plan-20260905.md#cc04-envelope-audit-20261019) | CC-08 | legacy Claude 受控 revision 修复 | CC-05 | 计划级 DATA-CAP R2 PASS 不替代本卡实现审查 | `claude_legacy_` 1 条通过；旧对象未改写；tombstone 拒绝复活；signed main CI 与 0.30.65 发布未登记 | done / complete；v0.30.65 / v0.30.66 已发布 |
 | [`plan-20260906`](plan-20260906.md) | SC-01 / SC-02（可并发） | SC-01 `base.yml` 最小权限加固；SC-02 会话入口 id 守卫 | 无 | **未定稿**（R2 PASS 已作废；R22 `FAIL`） | SC-04 受 DEP-SC-01/04/05/06；SC-07 受 DEP-SC-07 | ❌ 禁止开工 |
 | [`plan-20260902`](plan-20260902.md) | OG-00 | OpenCode2.0.26 Hook/export当前契约审计 | 无；按具名main source与逐文件单写者 | 当前9/9审计门；Claude Code R2 semantic PASS，旧评审为历史 | 无新增完整RG前置，typed/native归档门仍保留 |  ✅ done/complete，具名产物在v0.30.43最终tree/site，实际FAST-OG-01 C/D继承 |
@@ -3175,6 +3425,55 @@ Final macOS card delivery66of66=100percent; inventory66of68=97.06percent with2or
 
 **CX-00提交CI后续实查：** 同一a6a62f0的base39203590342中fmt/clippy/Windows scoped/Linux export/redundancy已success，macOS owner仍in-progress，offline-core/network-remotes已cancelled；CodeQL39203590295为cancelled。未将取消或未结束记PASS，C/D仍未关闭；本地源矩阵与合成语料source-qualified不冒充远端全绿。
 
+## 2026-10-19：CX-15 开工
+
+CX-00/12已经a6a62f0/eff777c signed main，整合远端e1bd1aa后的7d19be5已push；相关262/262、fmt/strict通过，原probe已并入并删除。CX-15在main实现ordinary reasoning分类/保留及会话sidecar，必要模块注册mod.rs补入I，6生产文件/2落点；Acceptance空、未标完成，真实Codex模型获取和正式C/D仍未验。
+
+**CX-15 真实写入回归 FAIL，保持实施中：** 8个`codex_summary_`合成回归实际7通过/1失败，失败项是实际CLI import→checkpoint ordinary export：源有thinking，导出只剩旧V1 user/assistant投影。已定位agent_import的helper/per-turn写入，失败测试保留；preview、字段保留和Clippy通过均不替代持久化验收。后续须补真正ordinary source handoff、幂等与仅opaque变化；未提交/发布，不计完成。另15项非该失败的contract通过只说明已覆盖旧行为未回退；Claude WIP审查与新增资源/诊断门待验。
+
+**用户执行约束（2026-10-19）：** Codex 新增测试仅本机，禁止加入 CI。CX-15 cases迁至`codex_capture_local_test`（required `test-live-agent` + 全部ignored）；私有lib用例同样feature+ignored。本机显式`--ignored`执行才计验收，默认CI不选入；其余历史共享回归保留，尚未称本卡完成。
+
+**CX-15 本机门更新与 main 同步：** 用户要求新增 Codex 测试全部仅本机，现为 required-feature + 全 ignored 的独立 target/私有 lib；实际显式执行 12/12 和 4/4 PASS，默认 target 选择不包含它们，workflow 未改。先前实际 import/export FAIL 已由 source slice + closed DTO + append-only supplement 修复，本机 opaque-only/replay/事务回滚再试均通过，原 FAIL 日志保留。Claude WIP R1 FAIL 已针对修复但新审查待跑。已保留备份/stash并快进 main 至 eb3f52c（0.30.55），整合源码须重新跑本机/全量/fmt/strict/审查；本卡仍 in-progress/空，formal0/59，真实 Codex 自动采集和 C/D 未通过。
+
+**CX-15 全量/Claude R2 保留失败：** merged eb3f52c 上 bumped 0.30.56 仅为本地未发布候选。全量 r18 正在收集结果，已发现 4 个具体失败（Grok 分区、DDL prose、CHECK-only 指纹、旧 Codex 丢弃断言）。R2 FAIL/105 turns/raw70d376d4e649ee9a567b67c4eca8286f523c029dae760016bd15766dfb67f5ed 确认 R1 修复但指出 supplement/DTO/sidecar 新风险；前滚测试写集已登记，未审查通过/未签推发布。远端已 eed3de4/0.30.57，后续整合与新版本验收未完成；用户 Codex 仅本机约束继续覆盖全部新增或修订 Codex 验收。
+
+**CX-15 当前候选与 Codex 本机隔离复核：** main 已整合至71317c4/0.30.62，本卡未发布候选0.30.63。当前本机显式 feature+ignored 的集成21/21、私有8/8、修订foundation1/1均PASS；默认无feature明确拒绝选择codex_capture_local_test，全部21项ignore属性已复核。workflow未为Codex新增入口，后续全部CX新增或修订Codex验收（含合成）继续只在本机执行；严格all-feature Clippy编译不执行这些用例。真实Codex模型/自动采集仍UNRUN，formal0/59，当前唯一实施卡仍CX-15。
+
+旧full-r18最终10304项/10292PASS/12FAIL与Claude R1/R2 FAIL原始证据保留。当前full-r32尚在收集，已发现三项上游整合登记/文案失败，不能记PASS；已在CX-15 G09补登记config_ownership只读缓存清单/非配置名单与agent_doctor_repair_test既有断言前滚。12生产行为文件不增，物理src如实15。新Claude R3正在审查当前候选与ADR Claude14行oracle修订，尚无PASS。网站已保留stash并快进cf至aecad21，重新按权威CLI文档同步14页；实际r33脚本fixture7/7、108命令/109导航零漂移、typecheck/build均exit0，但Claude、签推和部署尚未完成。未提交、tag、发布或称本卡完成。
+
+**CX-15 r32 完整失败结果（保留原始证据）：** 双环境默认全量实际 exit100：10319 tests run，10313 passed（13 slow），6 failed，23 skipped；851.943s，raw SHA-256 `b91889d832bd043a1ece898f8386773621a5e65bd04ce45e20c1eed7fcadf86a`，JUnit 单独归档。除前述三项登记/文案问题外，最后另发现当前上游 Grok parser 直接依赖文件系统（违反现有 store-free 守卫）、tracing supported roster 未登记已 supported 的 Grok、旧 Grok 测试仍要求没有 hook port。未删用例、未放宽 parser 守卫，也未称已修复这三项；Codex 本机隔离不以这些共享失败为代价。当前完整交付仍未通过，不能提交/发布为已验收版本。
+
+**本机工具恢复：** 系统旧 Libra 0.30.52 不支持当前上游数据库版本；通过其官方 Ed25519 签名渠道 `upgrade --check` 实查 latest0.30.62，再 `upgrade --yes` 成功安装0.30.62，版本及当前仓库 status 实测正常。未把未审查完成的0.30.63候选安装到系统。此操作不代表CX-15发布，Codex真实模型获取仍UNRUN。
+
+**CX-15 R3 静态审查及后续本机修正（非最终交付）：** sole Claude Code R3 实际 exit0/is_error=false、146 turns、raw SHA-256 `56ea00c81c3828a540f9e0ca0dd1a3684d44572a588cb502b64846e19d1b24af`，源码/设计/网站 VERDICT PASS，明确不是 release PASS；认可原 R2 四项 P1 修复及保留原矩阵、14行覆盖与双常量/映射 helper 指纹的 ADR 修订。R3 在全量未结束时只观察到早期3失败，完整结果以 r32 的6失败为准，不回写原稿。
+
+R3 另指出 P2 空 turn 删除后 thinking 归属错位，已新增仅本机 ignored 的端到端回归并实际先红（r36-red exit101），在既有 coverage/agent_import owner 内修正同步重编号；无 V1 turn 的正文仅首 checkpoint 保存并显式标归属未证明。新用例同时验证正文内凭据脱敏可通过 parent re-check、原 V1 仍仅两 turn、重放幂等。又新增仅本机 ignored 的4096统计上限回归，验证普通正文不丢失。r37 当前集成23/23、私有8/8、foundation1/1实际PASS；旧21/22条是此前候选真实记录。默认 r32 的10319条JUnit中本轮当时已存在的 Codex 本机测试为0，当前新增两项同样 required feature+ignored，未改workflow。
+
+已修正文档所称“pure admission”为允许进程计数而不执行仓库I/O，并按ADR纠正守卫注释；DDL scanner 的AS换行/括号边界在既有测试内补断言。R3不覆盖这些后续源码修正；新的完整全量、最终Claude审查与手动hook全矩阵尚未完成。helper→parent unavailable 后恢复 supplement 的完整路径测试仍待补，不能把DTO单测当该E2E通过。16MiB性能测量及deadline扫描优化具名交CX-02，接 live source 前必须本机实测，不入CI。
+
+上游Grok剩余3项拟拆独立修复，具体3生产路径与既有测试/文档方案已保存在验证目录 `grok-forwardfix-proposal-r37.md`，尚未修改Grok源码；已向维护者请求超出CX-15写集的决定，等待期间只处理卡内缺陷。不削弱架构守卫、不移除用例、不称完整交付通过；本卡依旧in-progress/空，未签推/发布，正式0/59，真实Codex模型/data仍UNRUN。
+
+**CX-15 r37 收尾事实：** 当前卡内修正后的本机32项（23集成+8私有+1foundation）均显式feature/ignored实际PASS，编译后target的全部23项与ignored列表完全一致；严格all-target/all-feature Clippy与nightly fmt check均exit0。共享DDL边界1/1、配置库存6/6与doctor文案1/1实际PASS。网站重新同步后r37 fixture7/7、108命令/109导航零漂移、typecheck/build均exit0。原两个untracked及原stash保留，未提交/推送、未标CX-15完成。Grok独立修复决定仍待维护者回复；其架构失败未隐藏，最终全量/新源码审查/手动矩阵与实际模型及C/D仍未完成。
+
+**维护者决定（2026-10-19，当前交付约束）：** 用户明确选择“保留 Grok 失败，暂不交付 CX-15”。此前等待回复已经结束：不实施提议中的独立 Grok 修复，保留 r32 完整失败日志及全部现有工作树改动；CX-15 不提交、不推送、不发布，继续保持 in-progress/空，不计正式完成。网站现有未提交修改同样保留，不推送 cf 或触发部署。Codex 新增测试仍仅在本机以 feature+ignored 手动运行，不加入 CI。此决定只暂缓 CX-15 交付，不撤销既有代码或将任何未通过的验收改记为 PASS。
+
+**维护者后续指示（2026-10-19，仅本机测试和审查）：** 用户要求继续完成CX-15剩余本机测试与审查，仍保留Grok失败，Codex测试不加入CI，暂不提交/推送/发布。只推进当前卡内测试、必要卡内修复、只读Claude审查与本地事实记录；不实施此前Grok独立修复提议，不改其源码或放宽守卫。当前补齐helper不可用→父进程保留V1→再次导入追加thinking的真实存储回归；手动hook完整兼容矩阵r38已实际1/1通过。最终结果随后另记，不预填PASS。
+
+**2026-10-19 Grok 采集链路只读澄清：** 重新核对用户指出的问题后，更正此前概括：生产hook调用的 `parse_grok_hook_event()` 是纯事件映射，不读写文件；同一个 `parser.rs` 还定义了 `observe_grok_hook()`，它会写调用方指定state目录下的store/checkpoint/pending/lifecycle JSON，仓库内实际调用点目前仅在测试。现有架构守卫扫描整个文件，因此因std::fs/std::path依赖失败；这证明文件级边界与守卫冲突，不等于证明生产CLI解析器直接写checkpoint。GrokObservedAgent.read_transcript返回None，GrokLiveCapture没有日志候选/exporter，updates/chat_history读取合并函数尚未自动接上当前CLI thinking来源。该澄清不改Grok源码、守卫或失败结果，不将supported标志当成真实thinking采集成功。继续按用户指示完成CX-15卡内本机测试/审查，仍不提交、推送、发布。
+
+**CX-15 剩余本机验证 r38–r43（进行中，禁止交付）：** 完整手动hook矩阵r38实际1/1通过；新增required-feature+ignored的真实descriptor-helper→生产父进程carrier消费器→真实checkpoint存储/CLI导出回归，覆盖显式unavailable及无效version两种响应、保留V1投影、重导入追加普通thinking、旧claim/metadata OID/export字节不变和再次重放无新checkpoint。没有新增生产故障开关。首轮r39因测试SQL误写semantic_digest失败，修正为实际coverage_digest，原日志保留；r40实际通过。
+
+新增16MiB本机扫描测量与精确4096-ID去重重放回归。后者r41先红，修复为先识别重复ID、仅新ID消耗预算；普通原文保留不变。deadline轮询由每字节读时钟改为逐行/每4KiB及解码边界检查，并保留expired/+1 cap拒绝。r42私有11/11通过；同机debug样例outside-string335→63ms、long-string257→249ms，合成Codex JSONL16MiB437ms，仅为局部扫描测量，不替代真实模型或完整live pipeline预算。
+
+r43当前源码实际重新build后：集成23/23、私有11/11、foundation1/1与完整手动hook矩阵1/1通过；strict Clippy/fmt、双环境默认完整回归及新Claude审查按同一冻结源码继续，结果随后记录，不预填通过。Grok四个原文件/既有测试逐字节与HEAD核对未改，模块守卫失败的函数级澄清见上条。所有新增Codex检查仍feature+ignored，仅本机；不提交/推送/发布，不改Grok失败。
+
+
+**CX-15 本机收尾 r43–r45（2026-10-19，未交付）：** 同一冻结候选0.30.63本机集成23/23、私有11/11、foundation1/1、完整手动hook矩阵1/1，fmt/严格all-target/all-feature Clippy及网站本地fixture7/7、同步0漂移108命令/109导航、typecheck/build均PASS。Claude R4实际exit0、70 turns、PASS，无P0/P1/P2，raw SHA-256 `0221b87218a9c15fa1f428e34177d529f87c8c4963f6c49b9a3bc42bc9c05330`；保留首turn前thinking归属标记、大量短字符串预算测量、16补充上限多报一次pending三项非阻塞P3，详见plan-20260904末尾记录。主仓2074/网站777路径在测试与审查期间冻结MATCH，随后仅更新两份计划状态事实。
+
+r44完整回归exit100：10319 run，10316 PASS（13 slow、1 leaky）、3 FAIL、23 skipped，858.343s，raw SHA-256 `7c0d39147d6860b709cedb3de9a7c3ea880205b19f0e30706b16cc8c392a8984`。三项仅为维护者要求保留的Grok文件级守卫、supported文档名单、旧无hook-port断言；没有全量绿。默认JUnit新增/修订Codex本机cases为0，测试继续feature+ignored、不入CI。未改动investigate runner的一个LEAK提示单独r45运行1/1 PASS且本次无LEAK，仅诊断、根因未证明、不称修复。
+
+Grok核查更正：生产 `parse_grok_hook_event` 无文件I/O；同文件 `observe_grok_hook` 的状态JSON写入当前仅由仓库测试调用；updates/history读取合并函数尚未自动接入生产CLI thinking。不能把整文件守卫冲突概括成生产解析器绕过正式checkpoint架构。完整采集清单见plan-20260904的 `cx15-local-validation-r44` 记录。Grok源码和失败均保留。CX-15仍in-progress/Acceptance空、formal0/59，真实Codex模型/自动hook/贪吃蛇及data-obtained仍UNRUN；未提交、推送、发布或部署。
+
 
 **2026-10-19 10:45:31 UTC Grok架构修复授权：** 用户已暂停Grok功能采集，授权先更新main与架构/文档，随后交其他agent继续。当前fetch+ff至e270bfe/0.30.65，CX-15已备份三方恢复（保留新Claude附加字段和旧Codex retention），不提交/推送/发布。新增GK-06 in-progress/Acceptance空；GK-07纯字节normalizer planned，须GK-06本机门通过后由受派agent串行开工；GK-08生产接入仍暂停，未选卡。详见plan-20261018-grok-capture末尾ADR-GK-05，原GK-04/05历史勾选不代表生产thinking落库已验收。Codex测试继续仅本机、禁止加入CI。
 
@@ -3189,3 +3488,300 @@ Final macOS card delivery66of66=100percent; inventory66of68=97.06percent with2or
 
 
 **2026-10-19 11:41:37 UTC Grok-only提交快照隔离验证：** 使用HEAD加所选index内容的临时源码快照（不含codex_reasoning.rs、Codex本机target、admission转发或Claude oracle覆盖）验证：Grok31/31、kind1/1、docs34/34、capability5/5实际PASS；nightly fmt和严格all-target/all-feature Clippy exit0。架构target初次63/65：Grok引入第20个AgentKind分支的问题用既有provider-neutral partial fallback及下降至15的guard修复纳入本提交；另一项capture_modules_do_not_import_hook_entry_layers来自HEAD原有Claude admission直接引用，ingress/Claude源码逐字节等于HEAD，修复继续保留在Codex WIP，不夹带。先前联合工作区的10325全量PASS不是本次独立commit的全量PASS。仅本地提交，不推送；其它已有非Grok工作保留。
+
+**2026-10-19 Codex主线恢复：** 用户授权仅继续Codex采集；Grok独立修复已签推，后续由其它Agent开发，不消费其未提交修改。CX-00 probe已合并至主计划并删除独立文件；CX-15 ordinary retention保持本机未提交，正式0/59、真实thinking UNRUN。当前在main 2d06c88/0.30.65复验CX-15本机23+11项，按同一继续授权启动CX-01的12-event缺口；必要8生产文件/3落点与append-only TurnInterrupted及provider纯kind匹配已在主计划预登记。Codex新/修订测试继续feature+ignored，不入CI，不提交/推送/发布。
+
+**2026-10-19 12:44:52 UTC CX-01本机进展：** CX-15当前集成23+私有11实际PASS；CX-01中断/12-event已实现，新增本机target27项全部feature+ignored，经metadata/源码核实。4项新E2E与2项late-interrupt私有回归实际PASS，规范安装/parser/budget各1、旧transaction recovery2及架构65/docs34通过；R1 not PASS的M2/M3/M4已前滚，R2、最终quality/full待验。旧升级fixture失败与0匹配selector不计PASS。主计划probe原5637bytes/SHA反向核对通过，独立probe缺席/无活动断链。正式0/59不变，当前CX-01 in-progress/空，Codex数据取得/真实模型/发布仍未验；全部改动仅本机未提交，不影响Grok其它Agent写集。
+
+**2026-10-19 12:49:41 UTC CX-01静态复审PASS、全量待验：** sole Claude R2 PASS（无高中风险，raw SHA62fe4ad8eb7e8907e62fa223c5eb6377f63b17805ea2517c06d08a5fdb7a9166）；最终27本机集成/2私有phase、65架构/34文档PASS。strict首轮single-element loop已实际修复，4项Cx01再跑PASS且fmt/strict11.70s exit0。双env umask022完整nextest session38512运行中，1860路径冻结0359be4f6b74f7e509c85283233584269298caadd6935311db3e1d69e26e7bf3。没有真实模型、Codex数据取得或C/D结论，currentCX-01，CX-13只读准备；不提交/推送/发布，formal0/59。doctor/enable最低版本引导的低风险建议交CX-13审计，合成升级不冒充旧release真实golden。
+
+**2026-10-19 13:09:24 UTC CX-01 no-follow前置实测修正：** 只读复核实际发现旧Codex配置symlink替换和FIFO挂起，因此明确取消此前全量候选（7124/10333PASS后SIGINT、3209未跑，不算fullPASS）。在原settings.rs、原8文件3落点写集内修正有界regular/nofollow读取、锁/journal保护及日志保密，新AC4已记主计划和修订历史。当前29本机采集、40设置单元、13安装路径测试PASS，fmt/严格Clippy24.68s exit0；R3审查运行中，新全量尚未启动。Codex仍不入CI/不提交推送发布，真实thinking仍UNRUN；CX13仅前置只读发现问题，doctor分类审计尚未通过，不重写其它Agent的Grok提交。
+
+
+**2026-10-19 13:21:30 UTC CX-01固定源码全量重启：** R3条件PASS、R4权限fixture P2已修正，R5关闭复审待结果；生产源码无新发现缺陷。30本机采集、40设置、65架构、34文档及fmt/strict实际通过，修正后的3设置边界再次PASS。1860路径冻结6aecfe2daff6936e422716e4c3714876c5c784653f505d08c994b65a219bb17f；新双env nextest session84250/PID26997运行中（临时功能配置只关闭JUnit文件输出，其余TOML逐值相同），/dev/fd首次0项exit96保留事实。CX13 doctor分类仍未审计完成，正式0/59，Codex模型/数据UNRUN，全部Codex改动本机-only不签推发布，不改其它Agent Grok写集。
+
+
+**2026-10-19 13:25:18 UTC CX01系统host12项识别、CX13诊断HOLD：** 隔离系统Codex0.162.1 app-server hooks/list实际12/12 enabled+trusted、currentHash等于安装trusted_hash，warnings/errors均0；不含模型或hook执行。隔离doctor5态确认missing/drift/untrusted皆false但无区分，显式禁用一项仍true，CX13 AC3未通过，需原CX01显式修订后修复，audit不改生产。源码full run a9e1186c-78a6-411f-b1b8-28e409252c6c/session84250仍运行，10333tests/172binaries/23skip；不预填完整门、模型或发布PASS。
+
+
+**2026-10-19 13:26:24 UTC CX01诊断修正预登记：** 原安装生效轴增AC5；VER按第二条四个独立命令还原为7，settings/mod+doctor逐事件区分五态，唯一新生产路径doctor.rs，G01–11复核仍9生产/4落点M，原依赖与发布边界不变。只修Codex，测试全部operator-local。当前完整回归冻结不改源码，待终态后实现；其结果不得覆盖未来doctor增量。CX13继续HOLD于AC3，不擅自降低要求或在audit卡写代码。
+
+
+**2026-10-19 13:30:17 UTC CX01复审未成与完整门活跃：** R5只核权限fixture，等待10m12s仍live后主动取消，CLI exit0但JSON is_error=true/result=null，无有效审查结论，不记PASS（session4425a329-5920-4c3d-bd4a-c76bf29058f0）。当前full session84250/run a9e1186c-78a6-411f-b1b8-28e409252c6c/PID26997仍跑，尚无终态；冻结1860后像同一。probe5637字节/hash及删除/无断链再次核对。仅Codex本机开发，AC/VER新增诊断实现尚未落地，正式0/59/真实数据UNRUN/不签推发布保持；Grok已独立推送不归此后写集。
+
+
+**2026-10-19 13:33:47 UTC CX01权限fixture复审闭合：** 有界retry2 sole Claude实际18.872s/exit0/is_error=false/1turn，session1bcd9c47-c877-4fab-86e4-401a12be9a78、raw0982c20b14683642d4f67c3cae2fab9cacbc762cc18a60b90089954668f21afe，明确PASS仅关闭R4该P2；第一次无结论保留，不外推整卡或模型。安装诊断生产尚未修改，完整nextest session84250继续运行，formal0/59及本机-only约束不变。
+
+
+**2026-10-19 13:38:01 UTC CX01诊断增量前完整门真实终态：** session84250/run a9e1186c-78a6-411f-b1b8-28e409252c6c实际exit0，Summary851.399s：10333/10333 PASS、13slow、23skip，无retry/最终失败；raw stdout SHA-256 794914be3ff5bdcef2cbc9f87044c0fe67be6d2886b7f0e63b6cb21fcfcc51ee。1860路径mode+内容冻结前后相同6aecfe2daff6936e422716e4c3714876c5c784653f505d08c994b65a219bb17f，PID26997已终止且工具收集到终态，不由超时猜测。临时功能nextest配置已自动清理，无新JUnit/日志证据文件。此PASS覆盖当前CX15/CX01已实现候选，不覆盖尚未实现的doctor诊断；现在按已登记CX01 9文件/4落点写集开始增量，先本机ignored回归实际先红，再修正。正式验收及模型数据门保持未通过，不提交/推送/发布。
+
+
+**2026-10-19 13:45:27 UTC CX01诊断实现与focused通过：** 新增本机诊断先红后绿，扩展31采集+40设置+41doctor+65架构+34文档实际PASS；补enable收敛/禁用仍可remove后1/1再次PASS，fmt/strict1.33s exit0。9生产/4落点，31/31 tests均required-feature+ignored，Codex不入CI。R6生产无P0/P1但P2，R7关闭原两项及caller，仅文档config.toml指引P2已修，R8待结论；网站最后文案同步/quality在跑。当前新源码full待启动，不复用旧10333完整PASS，CX13正式审计待本卡交接，0/59及不签推发布保持。
+
+
+**2026-10-19 13:46:25 UTC CX01诊断最终增量复审PASS、全量重验运行：** sole Claude R8 sessionb81d529b-5b65-4a3c-a198-b23910272b96、raw997c2345a03f6cdf8e5aa37491cfaae1e51eb8033bc50ff7e857dc6bf674ccc4，实际PASS且无未关闭P0/P1/P2；网站精确文案sync/check0drift、fixture7/7/typecheck/build PASS。31本机+40设置+41doctor+65架构+34文档及fmt/strict已过，新增Codex仍31/31ignored。冻结1860路径f4dbec5e156ef862a5e571957f10c9209ef135d15b523e757f3b3ec502eee989，新双env nextest session43618/PID92401已实查启动，待其终态+后像；当前不改源码。CX13诊断HOLD的生产缺口已前驱修复，独立audit仍待交接；0/59、模型数据未验、不提交推送发布不变。
+
+
+**2026-10-19 13:48:15 UTC CX13只读审计准备：** 旧default codex_过滤不足覆盖已迁ignored的规范安装；VER刷新为3个现有测试门，均feature显式include-ignored/ignored，只运行、不改fixture/源码/CI。预计非零4安装+40设置+8CX01，先准备复跑，同一冻结父卡完整门session43618/PID92401仍live；最终审计GO-HOLD等parent终态和后像再登记，不提前放行CX04。
+
+
+**2026-10-19 13:50:56 UTC CX13审计捕获兼容回归：** 规范安装准备门3/4PASS，stale hook+malformed trust要求旧provider-local错误上下文但实际提前inspect，byte-preservation仍有效；后两门未跑。完整run1300e2a3/session43618同用例3次FAIL后主动取消，实际4900PASS/1FAIL/5432未跑，不记fullPASS，冻结后像相同。已回CX01原settings恢复template-first status及共用纯matcher，保持doctor五态/坏配置报错；原CI断言不改，9文件/4落点不增。session62657重新跑4+40+8门，审计和最终复审/full仍待实际结果，Codex不签推发布。
+
+
+**2026-10-19 13:55:25 UTC CX01兼容修正通过、完整门第三候选启动：** 原4安装+40设置+8本机CX01实际PASS，doctor新增两入口/零写断言另1/1再次PASS；fmt/strict0.60s exit0。sole Claude R9 PASS（rawdd38cb3980044da9b6a659a51d570a0573f5527bca7fc660447816a522e2fa0a），不改旧CI负例。1860冻结f4240289f6d850d5bfe241911b9cdcf0cbd5db07fe321dd99fad3b64b81dafae，新双env nextest session26883/PID10580运行中；前一4900PASS/1FAIL已取消结果保留。CX13准备证据已覆盖macOS三AC，但正式审计交接和CX04仍待新full终态+后像；Windows运行UNRUN，0/59/模型未验/不签推发布不变。
+
+
+**2026-10-19 13:57:12 UTC 当前完整门身份：** 新source run650dfee5-5711-45b2-95cb-8986c61ba190（session26883/PID10580）已实际Starting10333tests/172binaries、23skip，进程live；source冻结仍以1860路径f4240289f6d850d5bfe241911b9cdcf0cbd5db07fe321dd99fad3b64b81dafae为准。等待此handle终态后核后像，不重启或套用旧a9e1186c的PASS。CX13准备4/40/8门已经通过，当前无生产编辑，CX04只读预检确认generic extract入口及混合provider旧fixture仍存在，未改parser或其它Agent源码。新Codex测试继续仅本机，提交/推送/发布均未做。
+
+
+**2026-10-19 13:58:41 UTC CX13准备审计矩阵落地：** 三AC逐项绑定当前4+40+8实际门（含user段保留、20格special leaf、双文件半事务和doctor9态），并单列macOS/system hooks-list与Windows源码/运行未验的边界。矩阵仅候选准备，不提前标GO或放行CX04；新全量run650dfee5/session26883/PID10580仍live，源冻结f4240289未改。Codex真实模型/数据未验，不签推发布。
+
+
+**2026-10-19 14:00:00 UTC CX04测试入口预修订：** 未执行parser卡的旧默认target改为既有codex_capture_local_test +test-live-agent+ignored，测试I集同步，3生产/1落点和原依赖不变，无CI/源码编辑。当前仍generic extractor且旧混合fixture保留，正式parser开工等CX13交接；full run650dfee5/session26883持续活跃。
+
+**2026-10-19 14:09:56 UTC 下次提交必须包含指定CI三项修复：** run39252681323/job118060584125为main e23a55dd的Linux compat-offline-core，远端10363PASS/3FAIL。失败分别为Claude COUNTS缓存未登记、OpenCode doctor旧installed文案断言、Claude公共hook receipt/checkpoint矩阵未同步。当前未提交写集已有三项对应修复，精确selector本机分别1/1PASS（0.12s/3.37s/11.16s）；未关闭守卫、未跳过测试、未改Codex预期行。详情及远端日志hash记主计划。用户明确要求下一个Codex提交须包括config_ownership.rs、agent_doctor_repair_test.rs、agent_lifecycle_event_test.rs相关修复；本次未提交/推送/发布，Codex新/修订用例仍仅本机。新全量650dfee5/session26883尚待终态和冻结后像，不能称远端CI通过。
+
+
+**2026-10-19 14:11:16 UTC 当前源码全量通过与CX13审计：** run650dfee5/session26883实际exit0、868.057s、10333/10333PASS（13slow）/23skip；raw SHA20781b508ab285d94ed9d5dbe5beb2566a26fb73e587e336a111ab8290cc3c1b，1860源码前后像同为f4240289f6d850d5bfe241911b9cdcf0cbd5db07fe321dd99fad3b64b81dafae，PID已退出、临时功能配置自动清理。CX01五AC本机满足并经R9，转in-progress/locally-accepted；CX13用同一冻结4/40/8及三AC矩阵给出本机配置/事务GO、in-progress/locally-accepted，独立Claude审查及继承C/D仍待，CX04尚未开工。正式0/59、真实模型/thinking数据UNRUN不变；Windows运行等边界保留。用户指定三项CI失败当前本机focused和full均通过，下一Codex提交一并包含，远端尚未复跑；当前继续不提交/推送/发布。
+
+
+**2026-10-19 14:15:38 UTC CX13审查交接/CX04开工：** Claude独立review实际PASS（无P0/P1；5项P2边界已逐项记主计划），session5c37fcf4-4383-4f6a-9f1a-3e5f3bae2976/raw e34d9c7fd37a9775b99934997d4cac6dca744e63e42fcb56a32da30919edf67e。最终冻结未变并补跑4/40/8全PASS（4.01s/1.50s/18.72s），该门与默认full明确区分。CX13 source-qualified GO、locally-accepted；formal0/59、Windows/模型/host别名trust未验不变。CX04 in-progress/空，3生产/1落点、原4AC/1VER，仅Codex纯metadata parser，先本机ignored红测，不改coverage/CI/其它Agent写集；暂不签推发布，下一Codex提交须含指定三项CI修复。
+
+
+**CX04初始回归及审查前滚（2026-10-19）：** 9本机先红后绿，40全本机/24既有intelligence PASS，首轮strict三项已修后PASS53.78s；Claude R1实际FAIL（213.499s，rawf71b13db788aa108889d7798c7b502f0197a61678eff6ff293ae13fac41ae8f4）。新增fixture实际10PASS/4FAIL后，3生产路径内修镜像配对、source-only prompt、双usage误报及session旧cwd，14/14已PASS；再增跨thread/rate-only/cache-write/model组合回归及严格门待session53367。公开文档及INDEX本地已同步，cf脚本/质量与最终review/full待。CX04 in-progress/空，formal0/59、真实模型未验、Codex测试仅feature+ignored、不签推发布保持。
+
+
+**CX04 R2/R3前滚（2026-10-19）：** 两次source审查实际FAIL保留（raw2eee5ba5.../8dd79ef3...）；修identity先配对、独立候选预算、legacy warning延后、首header owner、typed-flat识别及跨行数值guard，21rollout/strict已PASS。新增两个来源硬化已补进现有断言，最新52本机target/strict在跑session18594，R4 source审查待；公开EN/zh/development/tracing/COMPAT已写，cf需重同步最后限定段落。此前51/24/65/34及网站本地门实际PASS不冒充新source完整门。CX04仍in-progress/空、formal0/59，真实模型/data未验，不签推发布；下一Codex提交含指定三项CI修复约束保持。
+
+
+**2026-10-19 14:58:38 UTC CX04 source审查闭合/新full启动：** R4 source PASS（97.963s/raw0f4646ce...）、R5末次delta PASS（32.763s/raw85aa9076...）真实完成，无未关闭P0/P1/P2，旧三次FAIL保留。最终21rollout PASS，再实跑52/52 operator-local PASS36.69s、fmt/strict30.13s PASS；52/52均ignored且required-feature不入CI。EN/zh/开发/COMPAT和cf最后精确EN同步，108命令109导航0drift/7fixture/typecheck/build PASS，未部署。1861输入冻结3622ff56ca8d2a66012e7641bbbf297f4e073ea5f799c5e8a61b878fb942037d，新双env full session22084/PID86400已实际编译启动（先前runtime配置assert失败0项已收终态并修正，非生产失败）。CX04 in-progress/locally-accepted、四AC/一VER仅本机资格，最终full后像前不交接CX14；formal0/59、模型数据未验、不签推发布保持。
+
+
+**CX04完整门执行观察：** session22084/PID86400已完成编译（1m52s），后续ps实际看到其并行lib测试子进程持续调度；尚未收集终态或runID。runner的OBSERVED_PASS_LINES=0只是尚未收到逐条PASS行，不能据此说0项执行或进程卡死。末次1861路径后像仍3622ff56ca8d2a66012e7641bbbf297f4e073ea5f799c5e8a61b878fb942037d，与启动前一致；继续等待同一handle，不能重复启动或提前放行CX14。
+
+
+**CX04完整门run身份已收集：** 2af50243-2d52-4004-ae41-9b8f0c0b1168（session22084/PID86400），实际Starting10333tests/172binaries、23skip。reasoning_carrier_failures_release_descriptors首轮3.451s因既有3秒helper PID marker等待断言FAIL，第二次3.064s PASS；记录retry事实，不称零retry/直接全绿，也不在运行中改源码或取消整个候选。它位于未修改的live_checkpoint.rs，暂未证明根因。最终summary/原始流hash与冻结后像仍待，不以retry通过单独代表完整门通过。
+
+
+**CX14前置准备（2026-10-19）：** 父full仍跑，不动冻结输入。下一卡测试入口按用户要求改为既有本机feature+ignored target，旧codex.jsonl/冻结MANIFEST保持历史，Codex-specific analyzer断言迁local而Claude/OpenCode不变；现有source-absent CI oracle不改。为offset方法复用prefix context/usage baseline，仅补已有codex_rollout owner路径，4prod/2landing M、3AC/2VER，卡仍pending/空，不提前实现。PID marker故障门只读查实是1秒等待、2秒capture deadline，3秒是整例耗时；根因未证明，未改代码。
+
+
+**2026-10-19 15:16:39 UTC CX04本机交接/CX14开工：** 完整run2af50243/session22084实际exit0/851.724s，10333/10333PASS（13slow、1flaky）/23skip，raw6bf21b7a37286c877048ddabe43aa780b96a08c001e4fdd593e0005d9daa00d0。1861输入前后同3622ff56ca8d2a66012e7641bbbf297f4e073ea5f799c5e8a61b878fb942037d，PID已退出、临时config已清理。既有1秒PID等待case隔离3次各PASS2.85/2.90/2.80s，根因仍未证明且未改代码。CX04 source-qualified GO但locally-accepted/C-D暂停；CX14 in-progress/空，4生产/2落点3AC/2VER，先现有本机target红测，保留旧fixture及前缀，Codex新/修订断言不入CI。正式0/59/真实模型未验/不签推发布及下个Codex提交含三项CI修复保持。
+
+
+**2026-10-19 15:41:39 UTC CX14增量接口红测与本机前滚：** 原五项本机门实际1PASS/4FAIL（session65595）；接线后新增非零offset镜像/UTF-8/patch/cwd/Display等门，11项实际10PASS/1FAIL，复现精确usage在prefix而累计镜像在tail时被重计。当前原4生产路径内修Codex analyzer声明和接线、保留prefix状态与镜像identity、缺失usage改明确错误，精确记录只在prefix时不把后续累计观察冒充新增精确usage。现有shared intelligence需修订的Codex块已迁入feature+ignored target，Claude/OpenCode断言保留；其余7provider矩阵本机pin。两次CLI新case红测来自临时repo未init，已修测试setup，最新65项重跑session85246待终态，不能称全绿。旧CX12 fault corpus12433bytes/hashbb145325.../无末LF保持，新完整合成capabilities fixture7370bytes/19records/hashb5adfa85...及MANIFEST追加段已写，OpenCode前8725bytes/hash52539a4c...再验不变。公开文档说明完整append-only快照+上次offset及unknown/预算边界，cf仅agent.en精确同步到3f7a174b...，本机sync108命令109导航0drift、7fixture/typecheck/build均实际PASS（session42178）。共享门session58615和Claude CX14 source审查session42258仍待；严格门/新full未跑。formal0/59、真实模型/thinking数据UNRUN，不签推发布，下一Codex提交含指定三项CI修复不变。
+
+
+**2026-10-19 15:49:17 UTC CX14 R1实际FAIL与前滚：** Claude只读R1实际exit0/is_error=false/1turn、223.144s，sessionb4cc7dbe-29cc-43f9-ba71-989871ad1c70、raw SHA-256fb249d4414aa5ce109ae4dac07e8bab9c13696ce9f10ae46fb95aa1489592dd5，VERDICT FAIL。P1 incremental skill-ID重置已改identity hash/限定scope occurrence，flat保留物理ordinal；补全量/offset同事件ID相等且异事件不撞断言。P2 prefix payload消耗new-output预算改为prefix仅存hash/flags，有限identity/输入/输出预算在capability返回明确错误；partial unknown usage另给可恢复诊断。P2 flat proposed-write疑虑核源extract_generic_jsonl/ingest_generic_record从不写modified_files，新增负向断言，不用清空输出掩盖回归；capture::extraction唯一calculator生产caller已核是match Err标partial而非?终止flush。自查跨source occurrence漏项精确红测session30970实际1FAIL后，改逐occurrence选最高source及prefix镜像AND资格，不沿用此前13绿作最终证据。最新15/15capability实际PASS2.42s（session54038），67全本机+fmt/strict待session40993，R2 readonly待session81093；新full未启动。shared24/65/5/34/12已PASS但须完整门覆盖最终delta。EN/zh/开发/COMPAT及cf更新错误与ID契约，cf page hashbac423d4...，最终网站质量本机重跑中，尚待实际终态。formal0/59、模型未验、不签推发布、下一Codex提交含三项CI修复保持。
+
+
+**2026-10-19 15:50:49 UTC CX14最终候选focused/质量终态：** session40993实际fmt check PASS、strict all-target/all-feature clippy33.39s exit0、67/67本机target PASS38.10s；15capability此前2.42s PASS。编译后的--list与--ignored均67/67，Cargo target required-feature仍test-live-agent；不新增CI Codex断言。registry原8行与HEAD比对，除Codex外7行body逐字节相等。共享门早前24intelligence/65architecture/5matrix/34docs/12OpenCode全部PASS，最终默认完整门仍须重跑本delta。网站session31034实际exit0，108命令109导航0drift、7fixture/typecheck/build全部PASS，cf只有agent.en未提交，hashbac423d4639dc2a319eb7a691ecb44b4ebc9d8af83c9f6faec9450e220bdef28。R2输入114428bytes/SHA42913ddbecc82231653ebefd629c748000c2858f3005a7bb44a303823b65af9f，session81093未收终态，不预填PASS。当前1864路径候选freeze117d70c67c3d9d5a125857eb01c838946a800826bf5812452f41364892396266；此扩展集合含COMPATIBILITY与cf页面，不能与父1861集合直接比较hash。新full未启动，不提前交接CX24；formal0/59、模型/data未验及不签推发布保持。
+
+
+**2026-10-19 16:02:19 UTC CX14 R2实际FAIL与投影隔离前滚：** Claude R2实际exit0/is_error=false/1turn、246.004s，sessionb40d5336-1abc-4ffb-a57e-c4f330598323、raw3ed85265e41625433fe5f5f43b14a8995120fe71b6e5c0b1564b831fb56ddfad，VERDICT FAIL。P1全局BUDGET使无关prompt错误吞掉有效usage/file，已在原4生产写集内加纯parser projection选择；native跳过无关owner输出/identity，flat metadata副本先剥离无关字段再进入generic，不动ordinary源。P2unknown只按usage自己的USAGE/RESET，不再依global partial；错误明确16MiB输入/1MiB记录/64KiB字符串/identity-state或collection及对应能力，不给相同超限快照重试建议；flat与envelope超长空白记录一致受限。P2要求把合成Codex门移CI与人类明确禁止相冲突，按用户优先保留全部feature+ignored，不计为待放开的CI交付项。新17项实际16PASS/1FAIL（session23791）发现flat投影副本未真正送入reader，已修序列化；当前18/18实跑PASS5.00s（session89051），含三种identity map和无关partial/宽prompt/精确usage+file/共享输入record。R3审查session42808输入127179bytes/hash7dd2b092...仍待，不称PASS；strict session41482三条test clone lint已修，原进程实际exit101，故未执行其后70全本机。
+
+进一步自查Prompt/Skill仍共享输出扣额，现按已登记extract.rs私有generic投影入口隔离，两旧入口保留None/原行为；18项session96677实际PASS5.27s。该delta晚于R3输入，R3结果不能替代最终delta复审。公开文档及cf page202005ab703c6e7c188891335290b7ee91cb8c91f4804e1ad56d10d6d22695c1、session93931网站sync108/109/0drift、7fixture/typecheck/build已实际PASS。新full尚未启动，formal0/59、真实模型/dataUNRUN，不签推发布；下一Codex提交仍必须含指定CI三项离线修复。
+
+
+**2026-10-19 16:18:23 UTC CX14 R3实际FAIL与有界大记录/prefix镜像修正：** R3实际exit0/is_error=false/1turn、272.780s，sessione32ba0de-6d3d-4490-bc09-3ddad7528c4b、rawc9f611bbf4b034970445db018aaf39af7588c26639525fa2e0cf024081963172，VERDICT FAIL；用户要求本机-only已明确为非finding。P1大图片/工具输出经有界serde skeleton（type/role/scope/context字符串有界，正文IgnoredAny）只跳过已证明无关的能力，未知/直接相关仍1MiB限额、总16MiB不改，省略正文维持partial；继承user marker及foreign scope不能重绑owner cwd/turn。P1/P2 prompt与skill真正隔离输出扣额，Skill只留识别斜杠命令，prefix正文在单条限额内hash而不扣新增正文上限；原scope/context state限额仍保留。P2同时保留prefix+window exact总量和window delta用于覆盖累计镜像，等待信息不再虚报partial；unproven Display明确offset0总量替换而非新增，防重复累加。正常记录在dispatch前统一排除显式foreign scope，也修复foreign turn-context/model/user可能污染owner；全在原4生产I集，不改raw/claims/writer。
+
+此前session59620终态实际fmt/strict38.01s、70/70本机PASS39.09s、shared24/65/5/34/12PASS，只代表其构建候选，不能覆盖后续skeleton等delta。新21/21能力实际PASS5.37s（session47985，含owner继承/foreign/cwd）；最后小型unknown skeleton guard及负向断言之后，73全本机/strict/shared在session15683待终态。R4源码输入167413bytes/hashc72dbde904d7ffdd2e8c17b1eac2ec63302d68efe721ecf39e45f7ece418c1ed，readonly session9749待；实际helper与capture callers也已提供审查，不预填PASS。EN/zh/开发/COMPAT及cf说明full decode1MiB、有界骨架例外、prefix/skill与替换总量；cf page0255dfcada1ceb1eefde43205a96c538b2b230acfa642086d770d893e985c719，网站最终门session32639待。新full仍未启动；formal0/59、真实Codex模型/data未验、不签推发布、下一Codex提交含指定CI三项离线修复保持。
+
+
+**2026-10-19 16:35:14 UTC CX14 R4 source PASS与P2收敛：** R4实际exit0/is_error=false/1turn、333.444s，sessiondd2ffd43-2659-44b6-80ea-436726e8f785、raw3f5c54746034bd1b9406bcffd3c434998f0352b22cb2ed28d9ebe153b07c4866，VERDICT source PASS（无P0/P1，4项P2并未用PASS掩盖）。P2-1已补所有非user role及三个顶层忽略类（含payload非message字段类型的ThinOuter有界fallback）；P2-2大型session_meta在foreign检查前仍返回unsupported，不能吞掉owner恢复，新增foreign大工具输出对照；P2-3 calculator对USAGE inconsistency即使Some也拒绝已知不完整总量，RESET-only限定下界保持；P2-4不依赖upstream顺序，legacy-first源非零offset后续一直按累计差分，跨两窗口迟到exact不重计，缺新累计则unknown，完整offset0总量只替换。新增gap补齐后同offset恢复和五类大非user记录回归。所有生产analyzer调用已实查只有capture/extraction.rs、offset0；生产无transcript_position调用或其它单位cursor持久化。
+
+最终25capability实际PASS5.49s（session54992，之后仅ThinOuter补强/变体）；session94806实际exit0，fmt/strict37.73s、77/77本机target、shared24/65/5/34/12均PASS，所有77均ignored且target仍required-feature test-live-agent。网站session12540实际exit0：108命令109导航0drift、7fixture/typecheck/build PASS，cf page23dfa4a036b361b192e6c5ea41701bcdca753f599285e15a4f3b5b0cb19524a5，仍仅agent.en未提交。1864输入候选freeze71715353672ea177ee03f255bfceb874fd14bed3fe0a6d38c35867380cc7c525。R5只审R4 delta，输入30563bytes/SHA1642db3a48aae85890a3e24e6b5f05e62c79d4ea2467c3828385dc8c1ae4b904、session23862待终态；完整门未启动，不能提前source-qualified交接CX24。formal0/59、真实模型/thinking数据UNRUN、不签推发布与下一Codex提交含指定三项离线CI修复不变。
+
+
+**2026-10-19 16:40:51 UTC CX14最终冻结候选完整门启动：** R4源码PASS后的四P2修正已由25capability及77/77本机门、fmt/strict37.73s、shared24/65/5/34/12实际通过（session94806）；网站最终session12540、cf page23dfa4a0...亦PASS。补充R5 readonly只审30563bytes增量仍在session23862运行，未取消/未记PASS。为并行独立只读校验，现以同一1864路径freeze71715353672ea177ee03f255bfceb874fd14bed3fe0a6d38c35867380cc7c525启动双env默认完整nextest（session45758/PID62994）。runtime配置/var/folders/c3/p2c99x6j57n94h_yx4pzdyrh0000gn/T/libra-cx14-runtime-knf7iwe0.toml只移除默认JUnit输出段，parsed TOML其余逐项相等；不创建报告文件，临时功能配置自动清理。运行中只改计划/状态，不改源码/公开文档/fixture/cf页面；若R5有新问题也待当前run实际终态后前滚。完整runID/summary/rawhash/后像待，不提前交接CX24或增加formal0/59；模型/thinking数据UNRUN、不签推发布及下次Codex提交含三项CI修复保持。
+
+
+**2026-10-19 16:49:55 UTC CX14 R5 source PASS/完整门实际运行：** R5实际exit0/is_error=false/2turns、859.101s，session028d67e6-cef8-4112-a4ec-c46431c42cae、rawbf06570b42cc91a8cda65d914d5e52a058dbb213bb395ea021fc786c7b39d85e，VERDICT PASS SOURCE、无P0/P1/P2，R4四P2已收敛。虽请求只读1turn/无工具，返回实际2turns并自述echo探测；该自述非实测工具证据，不能据此宣称审查读过磁盘或跑过测试。复核实际磁盘5路径与R5 packet逐字节相等，1864中像仍71715353672ea177ee03f255bfceb874fd14bed3fe0a6d38c35867380cc7c525，未见源码/文档输入变化。R5 P3保留：legacy-first零值只截至窗口内最后累计观察，后继响应归下一累计窗口；混合模式offset0/历史USAGE不一致可能持续unknown；sourceNone超长上下文仍partial；literal重复/条件冗余为非阻断，不为样式在full期间改代码。公共能力仍bounded best-effort，进一步Doc限定待完整终态后由后继既有I写集承接。R5所称小记录非string payload.type必SHAPE未获源码支持，不作为真实行为修复；真实0.162.1 runtime仍UNRUN。
+
+完整run实际ID c380ea12-fc5f-444f-bb41-e0dc82fc2019（session45758/PID62994），Starting10333tests/172binaries/23skip；已实见agent生命周期等子进程持续调度，5257PASS行计数只是中间进度。libtest链接器发出__eh_frame超过16MB/compact-unwind性能诊断，编译1m42s成功；strict37.73s此前零clippy警告，未添加抑制flag、未把该测试二进制诊断称生产运行故障。全量summary/rawhash/最终后像仍待，未交接CX24、formal0/59，模型/data未验及不签推发布/下次Codex提交含三项CI修复保持。
+
+
+**2026-10-19 16:59:47 UTC CX14完整终态/CX24开工：** run c380ea12/session45758实际exit0/847.727s、10333/10333PASS（13slow，0flaky）/23skip，raw962bd6a5e8216b54ffe563e0e9e2df780c32f5bf6eb13691bb8d0e2d90096e58；1864前后均71715353672ea177ee03f255bfceb874fd14bed3fe0a6d38c35867380cc7c525，PID退出/runtime config清理。R4+R5 source PASS、最终77本机/fmt/strict37.73/shared24/65/5/34/12/网站门都PASS，CX14 source-qualified GO且locally-accepted；C/D与native/model仍UNRUN、formal0/59不变。当前main仍e23a55dd；下一Codex提交含指定CI三项离线修复，未签推发布。CX24现in-progress/空，仅计划/状态审计，消费codec/selector/sidecar/live/import/pending source及既有coverage_非零门，不改生产/fixture/CI。
+
+
+**2026-10-19 17:04:39 UTC CX24本机只读审计GO（审查待）：** 三AC矩阵已记主计划；常量1仅V1、typed selector/显式version编码、reservation/commit/import/pending/replay消费version sidecar，未知1/2外拒绝，未见全claim自动升2。frozen contract.snap1263bytes/SHA1e83e39d...未改。既有coverage_实际5/5PASS7.36s（session99197，4filtered），未加CI测试或生产改动。明确旧live无deadline V1-only、regular Codex import runtime尚非自动V2，GO仅infra复用，不推定activation/native已完成；后继扩owner须先G-09。CX24 in-progress/locally-accepted，独立Claude审查后才交接CX05，formal0/59/模型未验/不签推发布及下个Codex提交含三项CI离线修复不变。
+
+
+**2026-10-19 17:08:54 UTC CX24独立审查R1 PASS/文字P2收敛：** sessionbf432ad7-e67f-4a09-9ee1-a6fdd640b5fe实际exit0/is_error=false/1turn、47.859s/raw34fdc25a538c81a663b721fdbf5619a0f80fc1baceceb063d6bbf84349854d6d。已精确区分records-only coverage_digest与versioned row/sidecar/HMAC/import source domain，补snapshot911/916/919与legacy no-deadline/recovery链，未改代码/golden。当前仅最后文字delta复核待，source-qualified交接尚未提前；5/5既有VER与父full10333保持，formal0/59/模型未验/不签推发布及下次Codex提交含指定三项CI修复不变。
+
+
+**2026-10-19 17:15:22 UTC CX24最终R2 PASS/CX05预检：** sessionc2a2ac99-a631-44ba-8f2a-f7c1c0d52974实际exit0/is_error=false/1turn、29.224s/rawc8b3b21fdb81b36c425fd0e4d2d1f827e58baa460d400f36250e5cbbca9a9b31，无剩P0/P1/P2。5/5既有VER7.36s与父full10333有效，1864后像仍717153...，本audit只改计划状态，无代码/fixture/CI/新证据文件；CX24 source-qualified GO、locally-accepted。CX05 in-progress/空，2prod/1landingM，按用户明确指令把新codex_turn_拟门转现有feature+ignored target，原CI readonly；先核双normalizer/V1 gold/activation边界，不擅扩writer。formal0/59、真实模型/data未验、不签推发布与下一Codex提交含三项CI离线修复保持。
+
+
+2026-10-19 18:50:05 UTC **CX16旧checkpoint读门实际红/绿记录（待独立审查与最终full）：** 初始新增4个`codex_legacy_`本机ignored用例先列出非零匹配；session59177实际4/4 FAIL5.22s，复现JSON show无Codex正文、失败读取未显式qualification及旧export缺decoded credential扫描。原两生产owner内复用扫描器并共享既有metadata/session绑定：capture wrapper仍16MiB，stored export显式使用既有configured read cap；JSON show最多16MiB/逐记录1MiB，失败固定unavailable/坏尾或截断partial，无raw fallback。session87663修后4/4PASS13.39s，含>16MiB旧正文完整默认导出、escaped credential、精确/重复数字、跨session/诊断不展开、raw允许/拒绝审计及对象/claim/ref不改写。另增当前manifest及坏尾/configured cap两项，尚待实跑；未改既有CI Codex断言/doctor/历史实现。三项原离线CI修复仍WIP，下一次Codex提交必须带入，未签推发布，native/model未验、formal0/59及C/D暂停不变。
+
+
+2026-10-19 18:55:52 UTC **CX16 R1审查与最小P2收敛（R2待）：** sole Claude session398451d7-85d6-4bd6-9571-e11f1e87124e实际exit0/is_error=false/1turn、96.512s、rawca078faf2bb186155b9f48e00eb990bcdbc300c1102b63bc7741d514796db7e4，CODE PASS无P0/P1，8条P2/可选建议逐项处理。duplicate-key静默覆盖前提不成立：实际CanonVisitor::visit_map在insert命中后返回Err，新增actualCLI duplicate-summary partial/default原值测试；不为BTreeMap加不可能的重复计数。读取失败show现强制成功安全summary+unavailable/reason/空数组；跨session改为同仓库第二session并用实际catalog id做graph；current manifest export与raw存储字节比较幂等；show加redacted合并两扫描report；文档澄清截断UTF8/escape局部问号与仅JSON字符串解码范围，不引入任意非JSON整行二次解释/抹除。可选第二次catalog读不扩本卡重构。session29769最终7/7本机PASS18.93s；session28190 fmt/strict41.40s实际PASS。先前session58224 strict46.26+103本机51.67PASS后因误写不存在的agent_adapter_matrix_test未执行shared（该进程exit101），已更正为实际compat_agent_capability_matrix_pin；session44630的11/24/65/5/34 shared实际全PASS。R2 readonly session91765输入87793bytes/hash2bda6d461171e3a8dbda5debb643b05cde8ad346c75248e8aaf7058bec8ab6dd在等，不提前称最终PASS/full。网站session93835最终108commands/109nav/0drift、7fixture、11docsunit、typecheck/buildPASS；cf pagefa8e49f971cb6755302fa619b7f6c7e8c8e931183d08c38a5a6c0f0a233b64eb，只有agent.en工作区变更，无部署。G09索引现同步1landing/2prod，与卡头原刷新一致，无功能/AC范围扩大。
+
+
+2026-10-19 19:00:17 UTC **CX16 R2实际PASS与余下P2前滚（R3在等）：** Claude session3453c795-f76a-4c0a-9e73-eab33b4c2477实际exit0/is_error=false/1turn、131.496s、rawe3cd335f3beabb1aedc059baceee02048fc08c2d3e37b96e7e503bcc775005b1，CODE PASS无P0/P1，接受R1闭合解释；新增P2-A完整lone-surrogate/invalid UTF8字符串可能被裸?替换丢旧导出值、P2-B redacted还含不可解码替换、P2-C大reader多缓冲。第8个本机case先session75658实际FAIL2.46s确认surrogate字节丢失，再在相同2生产owner内修复：stored reader对完整token用既有serde_json bytes visitor解JSON到raw/WTF8，仅lossy副本扫描，未命中则原token精确保留；命中才重编码遮罩，不解密、不新依赖、不把任意非JSON行二次解释。capture wrapper仍strict原策略/16MiB；输出预配source长度，export drop旧输入后再generic scan。不可解码escape/截断仍局部?并保留partial；文档明确redacted同时含这种替换。新case含surrogate、raw invalidUTF8、surrogate旁escaped凭据、前后有效thinking及无凭据mid-escape/UTF8截断；当前8本机/strict/R3仍在执行，不能把R2 codePASS当新运行通过。修前父级session79578实际104/104PASS53.23s，raw57e7779716fa380331a85f129e63dc46b72fd6c0818f1d82bce68d26c8e0a574，shared11/24/65/5/34全PASS、命令38.954s/raw d11dd545706984736240bb93da92b73ce73ebfa9b0d1f079b0c9812482ffe7b2；这是旧R2候选，不替代最终门。R3输入94306bytes/hash52b75b548624c022c520314b12a797aecb79f0905ef798909c91a1a0bd956002/session31162待，未正式验收/未签推发布。
+
+
+2026-10-19 19:04:16 UTC **CX16 R3 source PASS与自审partial修复：** Claude session8e0a04ac-562f-48a7-b228-60865f157bfa实际exit0/is_error=false/1turn、129.179s/rawdc60afb4940ea1223aaf586024b5bb63e2bcb0858d9fba9ec345e5e38025fbc3，CODE PASS无P0/P1；非阻断P2要求完整invalid-escape中间记录的精确导出回归，已加入既有第8项ignored（无新CI）。Zeroizing不承诺全进程/所有realloc擦除、缺provider不显示provider facet为可选hygiene，不作为数据取得前置。自审纠正R3“lossy text绝不进readable”推断：若原坏Unicode token同时含凭据，重编码会变有效JSON；现pure bounded scanner返回独立source_partial，String解码失败即置true，show与truncation合并，capture原两元wrapper显式丢此只读qualification，strict原行为不变。额外actualCLI reasoning-summary坏Unicode+escaped凭据断言partial/redacted/正文可读且secret零命中；不在整改后误报完整。session58042最终8/8PASS27.36s。R3候选parent session31549此前105/105PASS55.75s/raw46d31f664a22a905702f2113903a5b973a049d928785599108ff7b30795508be、shared11/24/65/5/34PASS命令45.507s/rawa3c0b82f8f1feab72cee8d0bed3efd65f904b7237633ad05ec091b324b4dc575，仍与当前新qualification区分；最终parent/strict/R4/full待。R4 session65107输入98012bytes/hash040b1513f12f11e256911a89179f67db9bf41a467b5350086a7ea9e6fb6abf27在等，未提前source-qualified。
+
+
+2026-10-19 19:08:22 UTC **CX16 R4 PASS与最后两类边界收敛：** Claude session15e87b20-ae4b-45ee-bf84-3623147e7bb9实际exit0/is_error=false/1turn、157.553s/rawb096ed24426e4468642f57d0bf0f5d219c59535c323b1a72f3ce7430877da038，CODE PASS无P0/P1，确认source_partial/strict capture/普通值绑定和audit合同。剩非阻断P2为empty transcript仍unproven和expansion错误被混称read budget/未分类；已在同一checkpoint owner最小处理：空读固定unavailable/no_transcript/false/空数组，不能把metadata-only当数据取得；三ReasoningFieldError逐项固定安全文案，SourceTooLarge明确input或credential-masked output expansion，提供audited raw remedy，不输出源错误。第9项operator-local actualCLI含空源与100000 invalidUTF8+转义凭据造成>1.5x扩张的真实拒绝、无body fallback/secret回显与原对象/claim/ref不变；当前session92678仍在run，不提前最终PASS。R4父session75848实际105/105PASS56.79s/命令57.11s、rawee2d97b39a9fad0137bd67aef5690a3c0fd9d26883efad1379bfdb44ec013efa；shared11/24/65/5/34PASS/命令39.71s/rawf8f1f924ab6e3e178d7547f2b3bd641322054e69bf66b6ff4a3e7df015626c23，与最后空源修订候选区分。最终R5仅22392bytes delta/session65561/hash a31f558f82ea9dd5cbf74d5a872c95720338c5a236ac6eedfb942ffe3f2c4078待。尚未启动最终full；此前931e4586...只R4 freeze，不能作为R5全量前像。原CI3修复仍待下次授权Codex提交，当前不签推发布/不执行新Codex CI，formal0/59及C/D暂停。
+
+
+2026-10-19 19:09:32 UTC **CX16最终R5 source PASS，完整门尚未启动：** session98a5e4bb-682c-48f1-848a-e07a90ab8a2f实际exit0/is_error=false/1turn、32.262s/raw2ec42dd2826c067f2722d4170472d88350bbdce132da9e41a15e3b9f12d4ec07，CODE PASS且R4→R5无剩materialP0/P1/P2；原empty/expansion/分类错误P2全部闭合。22392bytes/a31f558f82ea9dd5cbf74d5a872c95720338c5a236ac6eedfb942ffe3f2c4078复算一致。session92678当前9/9PASS21.31s，含实际>1.5x扩张拒绝；session8682 fmt/strict42.54sPASS；session59003网站108commands109nav0drift、7fixture、11docsunit、typecheck/build全部PASS，cf page38f66d30534f38a03b0e4a6bce4ca340d020c1c8955274aa2a54f54a17559826，只有agent.enWIP且未部署。静态实际106/106全部ignored、target required-feature=test-live-agent，9个codex_legacy_匹配；此验证回答R5gating与input-relative expansion两个运行注记，不需另增CI。当前父106+shared session92666在run；准备1864源码前像27201c9dbe479b67472053ab13b5586df1136c923523975e911a00610cdd893b，待其终态才启动完整双env默认nextest，不提前交接C02或source-qualified。三CI离线修复待下次授权Codex提交；正式0/59、C/D暂停、native/model未验、当前不签推发布保持。
+
+
+2026-10-19 19:11:03 UTC **CX16 R5候选最终完整门启动（源码冻结）：** 最后父session92666实际exit0：106/106本机PASS57.23s/命令57.542s，raw24a9a2b19060286037556664a5ac5e576f948599bdedbf6cedc7fc53fc884e03；shared11/24/65/5/34全PASS、命令39.83s/rawac6516f6c46d86f4ed0ef423bb3fd3a55aeb67f4039e0134e203b329f1abe78a。与R5 CODE PASS/fmt/strict42.54s/最终网站门同一候选，1864源码前像复算仍27201c9dbe479b67472053ab13b5586df1136c923523975e911a00610cdd893b。现启动双env默认完整nextest，session51353/PID74832，runtime功能配置/var/folders/c3/p2c99x6j57n94h_yx4pzdyrh0000gn/T/libra-cx16-runtime-phkpql83.toml仅移除默认JUnit段、parsed TOML其它相等，自动删除；无证据/报告文件。运行中只更新本计划与状态，不改源码/fixture/公开docs/cf页面；完整runID/实际summary/rawhash/后像/进程与配置清理待终态，不提前称fullPASS或交接C02，不增加formal0/59。native/model仍UNRUN，C/D暂停且不签推发布/新Codex不入CI/下次授权提交含原三离线修复不变。
+
+
+2026-10-19 19:14:31 UTC **CX02只读预备/测试写集刷新，尚未开工：** C16当前完整门仍在运行，不能交接或动源。先按用户既定约束把拟新增codex_terminal_从原CI hook-crash target迁到既有test-live-agent+ignored本机target，原CI不改；单行为轴/4AC/1VER/4预计生产owner/M/C16依赖不变。现读取证据：Codex设置SessionEnd/Interrupt有效host3s、managedcapture2000ms；cli.rs::hook_capture_deadline_for_command在普通preflight/stdin之前建立deadline；ingress保存成对monotonic/absolute，live_pipeline在DB连接、scope/config读、coordinator路径传递；共享HOOK_DATABASE_BUSY_TIMEOUT_CAP=200ms，terminal settlement grace=250ms由原deadline派生，不能重置。pure finalizer已有5次/30min与不可延长receipt规则，pending复用现ledger，不新建provider ledger。CodexLiveCapture仍无live source candidate，故这些源证据不等于真实checkpoint/thinking已取得，也不提前宣称慢源/DB忙/kill/replay边界已验。待C16实际full终态source-qualified后，按实际owner刷新及本机先红验证；不得为测试改动原Codex CI，必要扩owner先G09。
+
+
+2026-10-19 19:16:36 UTC **CX16最终完整门实际枚举/运行：** run208be302-c1c0-476f-aec5-721edabbdf37/default，10333tests/172binaries/23skip；编译实际1m17s成功，有Mac __eh_frame>16MiB linker提示（此前已有，未压制；strictClippy42.54s已独立通过），不是编译失败或零warning宣告。当前至少3206测试已处理，出现既有ls_remote::write_ref_lines...及config::legacy_global_config_notice...两个LEAK提示，根因未证、不宣称解决/零资源提示；仍待最终summary/exit，不能凭部分PASS计整门完成。源码与公开docs/cf页面保持冻结，C02仅主计划/状态的只读预备/测试位置修订，没有开工源码。
+
+
+2026-10-19 19:19:36 UTC **CX16完整门中途fetch重试事实：** run208be302...期间command_test::command::fetch_test::test_fetch_into_mirror_updates_and_prunes_all_refs TRY1实际FAIL19.930s：Q2 fetch --prune返回128、LBR-INTERNAL-001，operation storage failed/working-copy scan failed/status io worker。按原nextest --retries2策略，TRY2实际PASS39.744s；不改受测源码、不压掉失败，不将根因归于Codex或宣称已修该未证问题。当前观察到7119 PASS行（不含LEAK/TRY2PASS）；最后summary仍待，预计需保留flaky与leaky实际数，不能写零失败/零泄漏。若后续终态红再根据实证处理，当前保持1864 freeze27201c9d...，不提前验收。
+
+
+2026-10-19 19:30:02 UTC **CX16最终源验证GO / 本机接受：** 双env默认完整run208be302-c1c0-476f-aec5-721edabbdf37（session51353）实际exit0，10333/10333PASS，13slow/1flaky/2leaky/23skip，854.121s；raw stdout SHA256=44e46acf6356d4749877157b1c00cbd0b708ccf45cac7cb9ccc4bdd8908055db，10330 PASS行不含2个LEAK与1个TRY2PASS。1864源码/公开docs/fixture/CI及指定cf页面前后均27201c9dbe479b67472053ab13b5586df1136c923523975e911a00610cdd893b，PID74832已退出，runtime配置实际删除。保留fetch TRY1FAIL→TRY2PASS及两既有LEAK的原始记录，根因未证，不称零异常/已修资源泄漏。
+
+同一最终候选：9/9legacy专项21.31s；106/106本机57.23s（feature+ignored实际验证）；shared11reader/24intelligence/65architecture/5capability/34docs全部PASS；fmt/strict42.54sPASS；网站108commands/109nav/0drift、7fixture、11docsunit、typecheck/buildPASS，cf page38f66d30534f38a03b0e4a6bce4ca340d020c1c8955274aa2a54f54a17559826。R4+R5实际CODE PASS，R5无剩materialP0/P1/P2。已验证current manifest及E4 manifestless旧ordinary body的授权JSON show/default export、configured stored cap、decoded及旧非Unicode token扫描、source_partial不被mask修补抹除、空源/扩张失败、raw拒绝/允许审计、同仓库session隔离与原对象/trace/claim不改写。native/解密/真实模型取得未获证明；这不是Codex live source/writer自动激活或TUI smoke，CX05旧V1/current codec激活域约束继续保留。
+
+因此CX16 `in-progress / locally-accepted`、source-qualified GO，可交接CX02本机源工作；正式C/D仍用户暂停，未增加0/59 complete。main仍e23a55dd6f6d351e1d212cdc41be87f4d893387f，backend仍cf且仅agent.enWIP；未stage/签commit/push/tag/release/deploy，merge-autostash及指定stash未pop。下次获授权Codex提交必须带入原指定三项离线CI修复，当前远端CI仍未重跑；所有新增Codex断言仅本机。
+
+2026-10-19 19:30:02 UTC **CX02依赖交接/当前本机卡：** CX16最终CODE/106本机/完整10333实跑与冻结后像已source-qualified，消费该源交接开始本卡预检。用户已授权main整Codex计划，无关联Issue，不新建Issue/branch/worktree；继承不签推发布与所有新/修订Codex断言feature+ignored仅本机约束。4预计生产owner先只读刷新，复用现finalizer/pending/store ports，不预先制造ledger；若实际owner变化先G09。当前尚无codex_terminal_新用例/新生产改动，不将前卡PASS当本卡AC已通过。
+
+
+2026-10-19 19:33:44 UTC **CX02 G09验证落点刷新 / 先加本机实际回归：** 当前生产已有通用terminal finalizer/coordinator预算路径，不能只对纯policy重复断言便宣称Codex全链通过。现登记测试文件live_pipeline_tests.rs内独立feature+ignored module，复用原stable-scope/test-helper-program与provider层已有scripted exporter测试seam，在Codex绑定上驱动slow exporter/elapsed boundary/terminal replay；这不添加真实Codex exporter或来源权限，不提前激活后继CX03/08。外部CLI启动、DB忙、host kill与native callback重放则放既有local target。该额外路径为cfg(test)测试文件，不新增生产owner，仍4预计prod/2landing/M/4AC，VER由1→2，同步索引；无新target/serial lane/fixture文件/CI配置。没有必须改prod或新增shim的预设；先实际跑所登记非零ignored用例，再决定最小修复。原3离线CI修复和其它provider源码只读保留。
+
+
+2026-10-19 19:44:25 UTC **CX02实际本机红测/事实修正：** 新CLI过滤实际4匹配；session54715运行3PASS/1FAIL6.56s，busy初写/host-kill/终态+native replay通过。stdin无可信帧时退出0属现有HookAdvisoryNoEvidence合同（runtime.rs明确无可信session/scope不能建receipt），原断言要求非0错误，现改为advisory0且实际等待2s、未造state/receipt/checkpoint，未改任何原CI期待。private首编译session40331因遗漏PathBuf/RedactedBytes两imports exit101，补完整；session98628实际lib list5（4新ignored+1原非ignored codex_terminal_policy_acknowledges_only_unverified_scope_failures），--ignored只运行4新项，4/4FAIL3.34s。前三源快照实际上已是正确terminal pending，失败是测试错取首条SessionStart complete；已改按intent.phase=stopped精确选一条，并把CLI正例同样加强，避免用start.complete伪证terminal完成。
+
+第4个为真实预算缺口：Codex binding经现有测试export-capability seam达到真实export阶段，1s primary budget的slow source实际等待2.509s才返回；producer未自觉截止，run_export_stage直接await exporter future，没有下层上限，外层AgentTraces为避免取消已派发COMMIT也不整体timeout。计划在已登记live_checkpoint.rs只包可取消的source exporter future，沿原monotonic绝对deadline，不重新给duration；原runner结算与SQL/ref COMMIT保持正常await，不新增ledger或prod Codex exporter/native来源。该counterexample为本机结构验证，不冒充真实provider采集，当前尚未修/尚无完整门。
+
+
+2026-10-19 19:50:55 UTC **CX02 G09实际写集收敛/已跑初绿：** 唯一生产修改是live_checkpoint.rs exporter异步source future按原deadline timeout；其余3原预计生产owner保留只读复用，actual1prod/1landing/M/4AC。登记原4条lease出口回归为第三VER（未新增/改写原CI用例），因此VER2→3，同步索引。session76399 private修后4/4PASS1.84s；CLI3/4PASS6.23s的剩失败来自新测试错误要求finalizer.status=complete。实际StoredFinalizeStatus仅pending/quarantined，完整性由外层receipt.complete+durable checkpoint/terminal state保证，保留inner历史恢复证据是原schema合同，不能新增平行状态机；已纠正并强化replay前后state/metadata/claim/checkpoint/traces完全不变。最终session77656实际CLI4/4PASS6.32s、private4/4PASS1.87s、原lease4/4PASS5.04s。测试child改RAII kill/reap，取消任务也加abort-on-unwind，失败不遗留worker。另新增第5个本机CLI用例验证host未交可信帧就被kill后，原rollout仍可显式import取得ordinary thinking/opaque并不伪造native terminal receipt；此项待实跑，不提前称已通过。所有新Codex测试仍feature+ignore，无新CI文件/target/lane。
+
+
+2026-10-19 19:53:42 UTC **CX02当前实现与源门：** 最终session29122 actual CLI5/5PASS7.18s，包含kill-before-scope后显式import得到ordinary thinking/opaque、原rollout不变且没有虚构native终态receipt。session77656 private4/4PASS1.87s、原lease4/4PASS5.04s；source guard仅包exporter future，不包lease/SQL/ref COMMIT。session77806 fmt/strict52.15sPASS；session99906网站108commands109nav0drift、7fixture、11docsunit、typecheck/buildPASS，cf page08d0c21ec855008f2cb21e611a16cc76338394d314893224d4fe1275c8f077b5，只有agent.en文档WIP且未部署。静态111 integration全部ignored+target feature门、5 terminal CLI；4新private module同时test/feature/ignored，无新CI配置/target/lane。当前父111/private/lease/原terminal与shared回归运行中，最终full待。Claude R1 source-only session82106 input62935bytes/hash52624006cabbe42c610727394929ec86e37475d25be6aa2e80f32d13e01393dd在等；首packet拼接因泛型anchor少了匹配而在调用Claude前失败，已修，无伪造review结果。C02尚未验收、native/model未验、不签推发布/下次Codex提交含原三CI离线修复/正式0/59保持。
+
+
+2026-10-19 19:59:11 UTC **CX02 R1条件审查（未记PASS）与只读P1核对：** sole Claude session5e9c9ba1-e609-4cb7-8519-234832fe5219实际exit0/is_error=false/1turn、103.313s/raw0771d03c48ab5e8c5ab6e2bf13c48082cb20570c0f482df4bd95f2c1e71a4f0c，verdict conditional PASS但明确blocking P1须查跨provider Drop-safe，故当前不记source PASS。只读核对opencode_export.rs：Linux ExporterCancellationGuard:597/Drop672有namespace-init pidfd+process-group terminate，之后CancellationSafeChild reaper；生产bwrap exact --die-with-parent及kill_on_drop，stderr task注册abort；macOS MacosExportGuard:1172持CancellationSafeChild::new_process_group，kill_on_drop、匿名stdout NamedTempFile.into_file与owned文件描述符，Seatbelt拒fork；Windows受保护TempDir/ACL、CancellationSafeChild::spawn_windows JobObject与kill_on_drop。authorized_read.rs::CancellationSafeChild::Drop:406/terminate_and_reap_checked非阻塞kill+runtime reaper+drainer abort，清理不依赖只在正常await后的分支。临时原始staging由TempDir/TempPath/匿名file等owned guard持有，没有改任何OpenCode生产源码；Linux/Windows本机运行未验，不把源码检查冒充平台smoke。将把这些真实代码交R2，现P1条件尚未独立闭合。
+
+R1其它P2已开始最小收敛：超时分支加固定reason=export_deadline_elapsed和已redact session id；slow-source结果不再宽泛接受Ok，当前拟钉Err；cancel-after-marker测试增加原marker时间字段过期、保留generation/receipt并用新2s回调恢复、精确一个complete终态/checkpoint且无残余marker（待实跑）。helper断言提示每次源变化重编；seam为Tokio task-local/当前线程RAII或repokeyed Mutex暂停集合，原相同调用者无serial lane，未添CI registry。parent session1406实际build61.204s、111/111PASS61.45s/命令61.723s/raweda3ce33985e08b0051ca7a285d2a63f206e9990f42150c810a091e64c155699，private4PASS1.80s/rawe988f87acbd094d0edbe20b95de9cbf28a5c19029e3e5d1bc6c61aef03d32a48，原lease4PASS5.07s/rawb8cd14e18aa69ac88137ab4bc7fd10aee91c706c54030a6bb0be9f813de63bbf，原terminal76PASS/4新ignored12.85s/raw4c10ea92bd23a0b12041900ab9b721c89362f0e3a1d3376899b5de35cc209031，shared11/24/65/5/34PASS45.793s/raw1c97564b845f117e0d8526d3e0bc446cd647f41ad8c00a8a24b5e61e90794d2e。新P2修订后的targeted/session57458仍在运行，不能沿用旧父绿作最终门。
+
+
+2026-10-19 20:08:14 UTC **CX02 R2实际source PASS，P2继续收敛：** Claude session4633b287-271f-43ad-9239-0b746d84c567实际exit0/is_error=false/1turn、143.301s/raw93a4e3b666f75d073278af2f6c7d217c00050e8fcf6ae2c7f17cb00734d29282；SOURCE PASS无P0/P1，R1跨provider取消P1经真实guard/flags/temp-owner代码接受，不修改OpenCode生产文件。新P2改为本机验证加强：marker取消后等原2s+250ms收尾均过，再人工使fixture的原marker时间/TTL过期（generation/receipt/objects不变），新2s重放仍须仅一complete receipt/一checkpoint、保留原finalizerdeadline且零marker；source内部DropFlag与completed=false共同验证真正丢弃而非detach；CLI计时移到spawn前，覆盖spawn/send启动耗时；docs明确async让出点取消不抢占poll内同步阻塞，import提示区分summary text与opaque。对应session86788在run，原结果不代替新验证。
+
+R2接受task-local/线程局部RAII/repokeyed pause集合，不需serial/CI registry改动；现搜索capture、opencode_export与桥接/contract测试，无start_paused/time::pause/time::advance，不存在已识别paused-clock交互。session61948当前fmt/strict43.91sPASS，网站44384当前108/109/0drift、7fixtures、11docsunit、typecheck/buildPASS/page0d12c2b912d0d476793448e6a1d48ab2531e9f10280a6e38a4212da19a42ed0f，但后续仅测试/docs P2修订仍须final再验。session8586新private4PASS1.93s（含marker恢复）；Mac现有macos_export_cancel_contains_descendants实跑1/1PASS0.21s。另调用opencode_export_outer_deadline...本机匹配0，确认#[cfg(all(unix,not(macos)))]，不计PASS、不冒充Linux验证。
+
+**保留的既有非阻断P2/后续关注：** Windows OpenCode取消时JobObject kill与TempDir删除可有时序，保护ACL仍在，但清理可能留临时原始export；该行为内层截止bail已存在，现为更常经过的Drop路径。此卡只记录并保留后续清理关注，不宣称修复或Windows运行已验，不以更严格的临时残留隐私条件阻塞用户数据取得基线。本轮不新增该provider功能/不新建Issue或任务卡。C02完整门和最终增量复核仍待，不提前source交接/增加formal0/59，不签推发布，新Codex不入CI。
+
+CX07 R1 source FAIL的nullable兼容/旧DTO升级覆盖已前滚修复，6项CLI PASS；新增旧DTO升级及实际live-builder/metadata-only读集合回归待重跑，显示字段/控制字符/身份校验已补。用户指定三项offline修复必须进入下一次获准Codex提交；Codex测试仅feature+ignored，不进CI；仍暂不提交/推送/发布，formal0/59。
+
+CX07 R2审查发现显示清理重组凭据，已前滚为先清理再脱敏，并补不可见字符回归；新增有测量usage的pending遮蔽/恢复及真实缓存/推理计数断言。最终133本机/10lib/strict运行中，R3 source session97908待终态。网站同步0 drift/109nav、7fixtures、11unit、typecheck/build PASS，page06d5576796c9b9c23b869826695744072f64ceefa1cbfae1acc4b33e5a99c4d9。formal0/59，C/D及签推发布保持暂停。
+
+CX07最终133CLI/10lib/fmt/strict PASS，R3 source PASS无P0/P1。完整session7112/PID65601已启动，1867输入5b1be45593b4f114fbfc7d9f827bfbfda99f45bbc959013705d927585d41c3b5；网站最终全门PASS page384a94cdacbb98ec40fe4f8f9443bf86fa59a5b9182f74eee4b4cd85c4e2a8a7；R4文档复核待终态。只读等待，不签推发布、不把Codex本机用例加CI，formal0/59。
+
+CX08只读owner/G09预检R1 FAIL，按反馈登记authorized_read及transcript_source复用目录pin，现10生产/4落点、5AC/2VER；三种helper模式、root allowlist、相对locator DTO、脱敏前首header scope、parent-owned temp清理及feature+ignored lib可达性已成文，待R2审查/CX07完整PASS后才能写源码。CX07完整session7112仍live，formal0/59不变。
+
+CX08 G09 R2设计审查session58225已启动，10生产/4落点/5AC2VER；固定source 4SHA复验MATCH及59migration名单用于future上限，actual主线CX07 full61f9f648/session7112仍running。R1为设计不完整，不冒称已修改/测试CX08生产实现。
+
+CX07首full61f9f648真实exit100，10332PASS/1FAIL850.898s（13slow2leaky23skip），1867freeze前后MATCH；唯一unwrap guard将两处cfg(all(test,feature))测试模块当生产，已仅改等价cfg(test)+cfg(feature)分离属性，生产prefix与test bodies不变。focused guard/65architecture+10lib/fmt/strict原handles14170/12594/85988及R5 source63850在跑，不能宣称新full绿。CX08 G09 R3session13982在审；仍未开始CX08源码，formal0/59，签推发布hold。
+
+CX07 cfg修复后guard1/65architecture/10lib/fmt/strict全PASS，R5sourcecc65113d PASS；新双env完整门已启动待终态。CX08 G09 R3 design89473f49 PASS（11生产/4落点/5AC2VER），仅计划准入，不代表已实现或解除CX07 full依赖。未写CX08源码、未签推发布、Codex新增测试不入CI，formal0/59。
+
+CX08 G09最终R4 design3710010d PASS，采用同一registry composite registration且原5方法/None budget CI pin不变；11生产/4落点/5AC2VER，仍等父卡CX07 full。新CX07 fullrun c9e4a9bc/session4900/PID28373已Starting10333/172binaries23skip，1867 d3a3ff76...冻结，未终态。Probe文件仍不存在，合并无需重做。无CX08源码、无签推发布，formal0/59。
+
+CX08 R4余项实际预检已完成：registry guard无return/static-type pin，但acquire_live_snapshot须保留真实pure-fallback调用anchor；source-absent冻结oracle两行已发现，按R4允许分支无path/no deadline直接SourceAbsent、Somepath/no deadline拒绝，均零IO/零child，不改oracle/CI。SQLx required1/5/21实际SHA384已stream核并记录主计划。CX07 fullc9e4a9bc/session4900仍live，1867 d3a3ff76...不变；当前仅只读和plan/status，未写CX08源码。
+
+CX07最终fullc9e4a9bc/session4900实际10333/10333PASS849.917s（13slow3leaky23skip），1867 d3a3ff76...前后MATCH，raw7fd0a805a0d4292a964b3c610cf9f726bc7d7b3d08a094e548ef53dee7ed1682；R5source/R4docs/133CLI10lib/fmt/strict/site门齐，CX07 in-progress/locally-accepted并source-qualified交接CX08。CX08按G09R4 I11/4/5AC2VER进入in-progress/空，先live实际取得再离线index；formal0/59 C/D及签推发布hold，Codex不入CI。
+
+CX08 I内首段live接线已写，首check PASS；随后private partial factory编译错误已按SST修，当前2项feature+ignored CLI正负例复编待验（新handle25183已exit101，后继handle见本轮tool，不可复用其PASS）。offline index与其余完整回归/docs审查/full未做，Acceptance空，formal0/59，签推发布hold。
+
+CX08 live首段135本机PASS，随后旧architecture63/65与64/65失败真实保留。G09R5 design d1ef7be4 PASS，已真实P registration/同fetch source capability线程传入snapshot，source kind决策移出shared层，保持旧CI不改；2项链路再次PASS3.27s。新guard/legacy预算/oracle1782/66117/67797待终态，source effective deadline已前移确保test-no-deadline不启动locator。offline index等必需工作未齐，Acceptance空，formal0/59，签推发布hold。
+
+CX08接口修正后63623 architecture65/unwrap1 PASS、72005 source正负2PASS3.21s；旧helper_unsupported gate封闭caller已还原三参entry，new source entry必需cap线程传下。旧预算/metadata oracle最终复验+fmt/strict正在LIVE_STAGE_GATE handle，未声称完整卡/full PASS。offline index及剩余5AC2VER未齐、模型UNRUN，formal0/59不变，无签推发布/无CodexCI新例。
+
+
+CX08 closed-index owner/第三mode已实装；71546本机lib codex_index_实际8/8PASS4.44s，含closed DELETE/WAL只读、迁移/坏源拒绝、并发变化及deadline/reap无scratch残留，no-budget counter/deny零IO。live扩展37400待终态；16MiB/终态、剩余负例/source与网站/strict/full未完成，C08继续in-progress/空，formal0/59。Codex测试feature+ignored、本次无提交推送发布部署，下一次获准提交仍必含三个offline CI修复。
+
+CX08 live新测试首轮Vec/String编译问题和2项fixture断言失败已如实登记：增长需自然新turn，终态actual是active+pending而非虚假完成，原exit0策略未改。最终10live/10lib及guard/fmt/strict在10669，未终态、Acceptance仍空；16MiB169450行非终态315ms未发布正文。其余完整门继续必需，未签推发布。
+
+
+CX22仅计划G09草案已按实际owner刷新5生产/3落点、5AC/2VER（M）：显式closed backup/page CLI、0025毫秒日期、当前worktree scope与metadata-only数据存在/unknown区别；新用例仍本机feature+ignored。设计审查R1已发、尚无结论；没有C22源码或公开flag写出，必须等CX08 full与本G09通过才开工。CX08新full仍54618/PID72834/run1788b965...，第一fetch镜像case失败后TRY2PASS保留；未提前accept或签推发布。
+
+
+CX22仅设计R2已前滚R1七P1：9生产/4落点、7AC3VER（M），显式scoped catalog/无session pending/erased、typed数据投影与local普通对象stream完整性、先全表时间guard/子边/版本control/rooted cwd/default不变与repair互斥。当前只改plan/status，R2 review待结论；不把parentCX08full绿当C22设计绿，不开始production。旧R1 FAIL完整保留；parent C08已locally-accepted、formal0/59及签推发布hold。
+
+**CX22 G09 R2 source开工：** 设计复审a76ab798实际PASS（141.053s）；八P2已写回主卡，owner预检确认无新增写集。CX08 full10333/10333且1873输入一致为依赖证据；CX22改in-progress/空，9生产/4落点、7AC/3VER仍待实现/验证。三个offline CI修复保留下一次获准Codex提交；不提交/推送/发布。
+
+**CX22首段source推进：** 4/9 owner已实现近期毫秒索引、scope pin/typed错误/response核验；初20本机+strict+narrow Windows编译通过后按source review前滚，当前26lib/147CLI/guards/fmt/strict与R2审查在原handles运行，最终结果待验。Doctor消费者/catalog与对象事实尚未落地，保持in-progress/空、不勾AC/VER。无提交推送发布。
+
+**CX22九owner整合进展：** 显式doctor入口、同snapshot erased/pending/scope以及typed source+local ordinary完整性证明已接通；all-target feature check通过，首4个新CLI回归均PASS4.12s。更多负例/分页/预算/Display/低fd、文档网站/source review/full仍待完成，保持in-progress/空。原68295全局fmt曾因接入未格式化新文件失败，已执行fmt，不虚称旧pipeline完整绿。当前15684继续lib验证，无签推发布。
+
+**CX22当前handoff：** 九owner+6doc已接通；8CLI/26index/7private/strict/65+34+1及网站门已有真实通过。最后Win disk spelling/SQLite生成列资源上限前滚后，17输入e8e53756...冻结，candidate43922与整卡review56603仍运行，只继续原handle；3225 narrow Windows编译已通过。relative backup caller-cwd解析仍须补，最终full尚未开始，AC/VER不勾，in-progress/空、formal0/59，无签推发布。
+
+**CX22整卡审查FAIL待前滚：** 候选43922已155CLI/26index/8private/guards/fmt/strict全绿且17输入一致，但整卡R1发现1P1/11P2，故不验收。P1已代码前滚为禁用CHECK执行+schema-wide generated拒绝，bundled SQLite源码和上游59迁移已核；75709验证当前P1，之后继续11P2（含相对路径、page/row/budget/size/human/docs）。没有full或签推发布，仍in-progress/空、0/59。
+
+**CX22 P2及必要helper修复范围：** 14CLI首次12PASS/2FAIL，错误-C夹具已修；SHA256真实hook/import失败不是doctor假阴性，临时fixture诊断定位history普通helper默认SHA1生成40hex。临时stderr代码已全部移除，无新证据文件。G09先登记history.rs为第10生产owner，仍4落点/M/7AC3VER，待设计/实现/重验；不从OID长度猜hash、不改变opaque策略。六doc已去-C错误，网站34284本机门全部通过cf4feb4354...，无部署。R1其余P2已代码/文档前滚但最终source/focused/strict/full仍未齐，空/0of59不变，三个offline修复下一次获准Codex提交必含；未签推发布。
+
+**CX22 helper前滚实际本机进展：** G09 hash-format设计6393cb93 PASS仅design；history.rs第10owner已实现，parent从typed/preclaimedOID固定格式、child!Send同步guard，ordinary/read/snapshot及opaque冲突/legacy兼容保持。39250当前15CLI/26index/11private全PASS，实际SHA256+BLAKE3各hook与独立import/store/export/replay/doctor均通过；原writer失败保持历史。网站10578所有本机门通过cf70a78060...。18输入最终quality与整卡R2source仍待，full未跑、Acceptance空/0of59，无签推发布部署。三个offlineCI修复必含下次获准Codex提交，新Codex测试均仅本机。
+
+**CX22 source R2受限PASS，保持未验收：** c6d12d45，0P0/P1、11P2；tracing/COMPAT空片段及若干旧reader/root函数未提供，需正确非空补审。P2有已确认毫秒单位的非缺陷假设，也有真实proof字节budget/空集越界page/SQLite测长优化与补覆盖，应逐项裁决，不将reviewPASS当full或本机Acceptance。81249已162local/7legacyhelper/1cache PASS，余下2offlinecase/guards/fmt/strict及18输入后像待终态；Windows窄编译70922 PASS非runtime。当前formal0/59、C/D及签推发布hold。
+
+**CX22 R2前滚继续（本goal turn有source进展）：** 81249 strict仅tuple3 type_complexity失败，18输入09be61f...后像MATCH；已用具名struct修复并将tree/manifest解压proof并入同一8MiB metadata allowance，普通64MiB不变，旧UI预算None读集不扩张。空集越界页/null与octet_length测长也已前滚，bundledSQLite源码已核byte-length列优化。新futurelease断言初误要求字段缺省，实际序列化为null，28153是14PASS/1fixtureFAIL（真实future毫秒lease仍pending/detailnull），已按实际nullable DTO修正，不改生产lease转换。NFC/NFD/macData alias只标ambiguous的pure分支已接线，unicode-normalization仅将已有锁定0.1.25登记为直接依赖，lock实际仅libra dependencies+1行/no package drift；仍10owner。新增pending receipt通过真实Stop对象写入失败合成场景构造，不入CI。63236当前build62.398s PASS，随后16CLI/26index/11private/10旧C7回归待实际终态，不重启；最终审查/strict/site/full未完成。无签推发布部署，formal0/59。
+
+**CX22 source R3及后续状态：** R3 b3393133 PASS source/docs only、0P1/9P2；已给完整reader与两遗漏doc，INDEX/Cargo注册仍须补审。16CLI/26index/11private/10C7的63236实际全绿；17CLI19793唯一失败为夹具误用gc命令，已改maintenance run--task gc并独立1/1PASS，SHA256/BLAKE3旧40hex residue均不损已有export。之后继续R3九P2：manifest OID准确选流/mismatch unknown、reason snakecase及helper root typed、pending优先级、committed无session/phasequarantined/实际retryable字面量及六doc精确边界；新18CLI/26index/12private/10C7待实际结果。原strict type_complexity已具名struct修复但最终strict未跑；full尚未启动，无签推发布部署，in-progress/空、0of59。
+
+**CX22 R4前滚待验：** source审查1P1/5P2 FAIL；P1为新增fixture错误忽略所有迁移receipt必须48bytes，已修期待而保留生产拒绝。79836的18CLI/26index通过、13private12绿1红如实保留。五P2已实现typed schema/migration/integrity及catalog预算reason、C7 retryable共享语义文档、INDEX owner补齐；旧InspectAll DEFAULT预检登记CX19暴露consumer前必须完成。新源码focused/strict/site/复审/full尚待，不验收，无签推发布；三个offline修复保留下次获准Codex提交。
+
+**CX22 R5 delta source/docs实际PASS：** 8dd944ad，0P0/P1、1P2仅INDEX共享owner遗漏已补；InspectAll DEFAULT前置DEFER仍保留。18CLI/27index当前绿，14private首验13绿1旧错误类型断言已修并重验中，10C7/最终165local+guard/fmt/strict/full待终态。site64233本机全绿，Windows76055窄compile绿非runtime；无签推发布、in-progress/空、0of59。
+
+**CX22 最终quality44866 PASS：** 165local/旧helper7/三offline各1/65+34+1/fmt及严格Clippy99.715s均通过，20输入fd6137c8...MATCH。现在才启动同源码完整双环境nextest；此前所有card full证据属于前驱，不能代替本卡。未获新full终态与冻结后像前仍空/0of59，无签推发布。
+
+CX22唯一full88522/PID62388运行中，1873输入7bb2cc4e...，source/docs/cf冻结。无终态不重启、不计Acceptance；C/D/签推发布hold。
+
+**CX22最终full exit0与交接：** 原88522/full e9db4e6c，10333PASS860.733s/13slow/23skip，1873输入7bb2cc4e...前后MATCH。C22七AC三VER仅按已列本机source/CLI/存储范围勾选；正式C/D、签推发布hold0/59。下一CX19设计预审FAIL需修，不把条件式“修后可以PASS”当真实PASS；无其production实现。
+
+**CX19 G09 R2合同已写入，待真实设计审查：** 仍pending/空，3生产3落点/M、3AC/2VER，provider_index_io替换未用agent_import；完整历史不缩七天，既有consent/write/fence保留，旧BatchSkip不改而additive existing，parent新response完整核验，typed code/whole018无batch、雙端edge projection及独有local filters具体登记。R1七P1已写对应前滚，九P2按当前无-C和词法../合同裁决。前驱CX22已经10333full+freeze本机验收；没有CX19production，须R2实际PASS才能开工。三offline修复仍纳入下次获准Codex提交，未签推发布。
+
+**CX19 G09 R2实际FAIL后R3前滚：** 02742236，1P1是数据来源rollout_path在CODEX_HOME任意文件读取能力过宽；新增打开前绝对/Normal/rollout叶与ID形状门、invalid_path固定状态不返回原path、helper及parent双校验和本机零reader-dispatch/真实CLI用例。归档不缩成日期布局；旧backup参数词法../合同不变。七P2及partial双报告、120s根重验等精度已写回，3AC/4VER（名单与执行各算独立门）/3owner3landingM。仍pending/空、无CX19production，待真实R3设计审查；R2 FAIL保留，前驱C22本机交接保持。
+
+**CX19 G09实际R3PASS后开工：** 03ea31b5，100.256s，0P0/P1、5P2分别落实为真实per-slot零dispatch+正控制、局部词法保证边界、共享leaf纯函数、Proven坏path/archived实测、parent状态关系表。Windows按实际已支持Disk+VerbatimDisk，不盲从Disk-only建议；日志测试只接existing FD的内存sink不创建文件。当前仅准备本机红测，四VER未执行，Acceptance空，无签推发布。
+
+**CX19本机红测已实际暴露缺失入口：** 两新CLI例在当前167local target中均ignored，仅本机执行；archive positive明确unknownflag129，auth JSON夹具修compact后也明确CLI002而非runtime018。未通过功能验收。旧None lazy DEFAULT问题已加cfg-only真实fetch计数+正常正控制/超限应零fetch的private例，唯一prefix红测运行中；生产SQL/CLI尚未改。
+
+CX19旧None资源回归实际RED证明超限前已有字符串fetch1次；已前滚fixed numeric/type/bytes预检+重复ID并补combined-budget/duplicate私有例。首段新3/旧index/旧reconcile focused运行中；新selector/API未接、两CLI仍RED、全量/strict/source审查待，Acceptance空，无签推发布。
+
+**CX19首段focused真实绿（66405）：** 新3个unique private/全index30（含该3）/旧reconcile14、fmt均通过，7输入95e03b21...前后MATCH。资源RED1次字符串fetch已前滚为超限0、正常2正控制；combined预算和重复ID也通过。当前selector/协议/parent/sourcePath与CLI仍未接，2CLI已知RED、整卡全量/strict/源码及六doc网站门待，不验收或计formal完成。
+
+CX19初接线真实2CLI/3private/index30/reconcile14+CLI18/fmt全绿，7输入467be72f...MATCH；六doc开发稿已同步写出但未site。边界9例首轮未编译过（67511，新测试缺authorized_read import已修），无9PASS宣称；reader真实零dispatchoracle仍待执行。root同意后开DB前再验已补，后续新源码仍须全部门；未签推发布。
+
+CX19边界9项实际8PASS/1FAIL，eligible正控制暴露原import entry忽略已pin request而读ambient cwd，foreign行被排除成零候选。按同3-owner合同已改为pin的root/storage配对优先，unpinned才原fallible fallback；不放宽正控制或权限。仍待真实复验，无9绿宣称；site29917全部本机绿cf01664354...但source/full未完成。
+
+CX19 oracle复验26147实际exit0，真实per-slot1/1PASS2.91s/raw55460ce9...，7输入0856d9b8...前后MATCH；eligible正控制至少一次dispatch，七坏path和伪造helper响应均0次。新三CLI本机ignored回归（分页/mixed existing、consent/whole、catalog优先级/legacy）与原两CLI、九private在70914运行，尚未全卡验收。前轮8/1FAIL保留，不签推发布。
+
+CX19后续新增linked/header两例，78853实际7CLI/10private全PASS，7输入f400e04f...前后MATCH；旧格式夹具改独立legacy row、linked按实际.libra目录+commondir检查。9502独立名单实际7CLI/11private，全部index38有37PASS/1FAIL：新增inflight deadline测试错误要求host返回瞬间helper已回收，现有contract为异步reaper持有scratch直到wait终态；已按既有deadline测试加入最多3s的scratch清理等待，再核pid不存在，不改生产。新整卡quality正在重跑；source R1 10200仍在审，不取消或记PASS。网站5417已用当前编译binary实跑0drift109nav/7fixtures/11vitest/typecheck/build全PASS，cf01664354...未变、未部署。
+
+CX19 SOURCE R1 bd33d778实际PASS（0P0/P1/8P2，312.576s/raw4473ab0c...），仅source/六doc；70214终态FAIL在旧通用hash AST守卫64/65，172CLI/38index/14reconcile/10summary/7helper/三个offline各已通过，fmt/strict未执行。G09已先登记guard原例沿safe_failure→safe_failure_for→hashed_import_id追踪，仍单次SHA256且拒绝source correlator，不增Codex CI例；3prod/3landing/M、3AC/4VER不变。八P2按主卡明确前滚；根中止与tombstone故障保留已完成slot、人类existing计数与catalog固定原因、六doc和本机hash/no-fallback/child parity待实际再验。仍空/0/59、无full或签推发布。
+
+CX19八P2前滚首轮37117实际7/8 CLI通过（hash pin、human existing、child parity、同SID真实source存在但stale index无fallback均过）。真实mid-batch root替换捕获1项020后才在下一slot得到root018：原prepare错误早退绕过post-root复验。已修为prepare返回后无论成功/失败先revalidate，再处理source错误；不削弱断言。root/catalog故障保留进度测试仍待复验，private11本轮未执行。没有新full、提交或推送。
+
+CX19前滚复验50516实际8CLI/11private全PASS：CLI10.42s/rawd5e5f455...、private4.31s/raw85d10845...。真实first-checkpoint后的root替换与临时catalog损坏都保留已完成slot、余项018/reason，终态恢复功能夹具可export先前thinking；不增生产fault开关。当前22输入442a4128...冻结，15488整卡quality、75552 R2 source/docs/test delta review、50665网站、65321窄Windows编译运行，尚无full启动或整卡Acceptance；三AC/四VER未勾、formal0/59，不签推发布。
+
+50665网站终态全部PASS：当前binary0drift109nav/7fixtures、11vitest、typecheck7.139s/build12.901s，cf page60377206604c2da3b92596c41add3e3bb7b5b604fad87e75fff9d15d37ec6144；65321窄Windows check终态PASS9.639s/raw5e25eaab...，均不代表部署或Windows运行。15488当前已实际列8CLI/11private、index38PASS10.08s/reconcile14/summary10，随后全173CLI及其它quality尚待；75552 R2审查仍活跃，无新full启动。继续冻结22输入，仅plan/status记账。
+
+CX19后续R2 d987dead真实PASS；15488实际quality全部PASS/22输入442a4128...MATCH后才作前滚。R3 4de6e56f真实PASS（0P0/P1/4P2，115.148s/rawf07071ec...）；60328新exact8CLI/12private已过。93156最终代码quality实际全部PASS：173CLI/39index/14reconcile/10summary/7helper/三offline各1/65arch34docs1unwrap/fmt/strict91.633s，22输入1c6fc321...MATCH。其后仅六doc收尾，7代码/test/Cargo输入5ea2dafc...前后完全一致，当前1571 final-doc R4审查实际运行；三AC/四VER未勾，full未启动。
+
+最终备份示例以Python只读源API替代本机确实失败的Apple -readonly .backup。65678原样doc脚本对DELETE及WAL功能索引（WAL目标0202且sidecars0）均经真实当前Libra归档import→1checkpoint→default export读出thinking；源字节不变。missing/bad源无空目标残留，已有目标拒绝且保留，Unicode/space路径已测；非真实provider/model证据。13267最终网站全PASS，cf e8217972...；43702窄Windows compile PASS非runtime；75708最终doc后guards65/34/1和fmt通过。不新增CI Codex用例/报告文件，不签推发布。
+
+CX19 R4 ab1f4315最终doc-only实际PASS（0P0/P1/4非阻断P2，54.559s/raw5f80b7b2...），不冒称新source重审。08:47:57UTC新canonical双env/umask022完整nextest45571/PID44463实际启动，SOURCE_BEFORE1873路径0329a2af60ec86ba15385cd4b2a07b2a7768815b9d65673e1079daa3cec36ea5，临时功能config仅关闭JUnit且parsed其余等价。当前编译/运行中，尚无runID/summary/exit/后像；代码/tests/公开docs/cf全部冻结，只plan/status记账。三AC四VER未勾、正式0/59、CX09生产未放行；不签推发布，原stash/autostash/libra/lock保留。
+
+CX19唯一full仍45571/PID44463，run68ea24ef-10e1-408f-b2ab-775f17734109已开始10333 tests/172binaries/23skip；当前观察≥7220PASS lines，1条merge_width_ceiling SLOW>60s，未终态或推断失败，不重启。R4 source目录补测：只读Python backup功能WAL源目录从state_5.sqlite变为另有-shm/-wal，源DB字节不变/目标sidecars0；read-only指数据库内容而非目录绝不产生SQLite工作文件，不扩大原保证。仅临时功能夹具、无真实provider读取；该可选P2量测已落实，未改冻结docs。
+
+等待期间只读CX09预检已记主卡（仍pending/空）：真实live owner为live_pipeline，subagent_content helper/projection当前Claude-only，历史import另有command/import与agent_import两处限制，不能只接live或只换normalizer就宣称child thinking保存。C00固定源码本地SHA重新匹配，SubagentStop的agent_transcript_path/agent_id与parent transcript字段分开，SessionMeta.id/session_id/parent_thread_id各有语义。G04实际M上限4落点/12生产文件，须等前驱真实full后G09盘点写集；Codex新门必须现有feature+ignored本机target，不使用原拟CI target。未写C09生产/测试。
+
+**2026-10-20 09:10UTC CX19最终full与本机验收：** 唯一45571/PID44463已实际终态exit0，run68ea24ef-10e1-408f-b2ab-775f17734109：10333/10333PASS866.535s/13slow/23skip，raw9156bcd280afd951ed448767d60f3b5533fda59df0119173927fef6327ea74db；SOURCE_AFTER1873路径0329a2af60ec86ba15385cd4b2a07b2a7768815b9d65673e1079daa3cec36ea5与前像MATCH。进程不存在/临时功能TOML已删除，reviewed source/test/Cargo7后查仍5ea2dafc...一致，未重启full或写报告。主卡新增逐AC/VER来源表后勾三AC四VER，Acceptance仅locally-accepted/Lifecycle仍in-progress、正式0/59。后继CX09仅放行G09及设计准备，须真实设计PASS再生产；不能以旧三文件假定或原拟CI target开工。未验Windows runtime/真实Codex模型/C-D，不签推发布部署；三offline修复仍纳入下次获准Codex提交，stash/autostash和未跟踪libra/lock均保留。
+
+CX09 native来源进一步只读核对已记主卡：SubagentStop.session_id由sess.session_id()（root共享identity）构造，agent_id由sess.thread_id()（current child）构造，agent_transcript_path为child、transcript_path为parent。边界writer当前stable child字段None，要闭合content link还需原live_checkpoint owner，最低六生产/四落点仍须实际G09登记与设计审查。C19 full/1873后像资格已完；CX09仍pending/空，没有生产或测试编辑。C19验收后的计划元数据自检7勾/locally-accepted/probe不存在/网站hash不变均过，既有foundation架构守卫单项再次实际PASS0.08s；不增加Codex CI例。

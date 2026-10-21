@@ -3237,7 +3237,7 @@ ER-01 至 ER-14 按模板原文对本计划全部任务生效（见 [`plan-templ
 |---|---|
 | bridge 的读超时先例 | `src/internal/ai/agent_bridge/protocol.rs:374`（`LBR-AGENT-036`） |
 | 读 deadline（MC-19 交付） | `src/internal/ai/mcp_server/tools/mod.rs` |
-| 本地门 | `v0.30.73`（`612c575`）与 `v0.30.74`（`3a5217c`）的 tag 都不改。`v0.30.75`（`013a8d3`，tag 不改）Codex `VERDICT: FAIL`，`P0=0`，`P1=1`：回收线程在 `wait` 确认退出后仍占槽去 `join` stdout，后代占着管道会耗尽 4 个槽。前滚 `0.30.76`：`wait` 一返回就释放槽，stdout 读取在槽外回收；worker 已退出时回复最多再等 1 s 读取。`deadline_reply_does_not_wait_for_stdout_holder`、`blocking_read_times_out`、`slots_return_after_workers_killed`、`envelope_allows_under_cap` 均为 `test result: ok. 1 passed; 0 failed`。clippy `-D warnings` exit 0。nextest：`Summary [ 564.043s] 10676 tests run: 10676 passed (11 slow, 1 flaky), 21 skipped`，exit 0。flaky 为 `command::clone_test::test_clone_local_git_large_object_set_completes_in_budget`（3/3），不是 MCP。 |
+| 本地门 | `v0.30.73` 至 `v0.30.76` 的 tag 都不改。`v0.30.76`（`9694ff0`）Codex `VERDICT: FAIL`，`P0=0`，`P1=1`：正常退出路径在槽位仍存活时 `reader.join()`，未结束的读取线程也在释放槽位之前启动 join。前滚 `0.30.77`：stdout 经有界 channel 交回；任何 `join` 之前先 `drop` 槽位，回复路径不再 `join`。`deadline_reply_does_not_wait_for_stdout_holder`、`blocking_read_times_out`、`slots_return_after_workers_killed`、`envelope_allows_under_cap` 均为 `test result: ok. 1 passed; 0 failed`。clippy `-D warnings` exit 0。nextest：`Summary [ 572.138s] 10676 tests run: 10676 passed (12 slow), 21 skipped`，exit 0。 |
 
 **Acceptance criteria:**
 

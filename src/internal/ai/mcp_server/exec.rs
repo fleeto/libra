@@ -1,14 +1,15 @@
 //! Read-tool subprocess executor (plan-20261019 MC-29).
 //!
 //! Each read tool runs in `libra agent mcp --read-worker`. The parent replies
-//! with `LBR-AGENT-036` at the read deadline, kills the worker's process
-//! group, and only then releases the concurrency slot.
+//! with `LBR-AGENT-036` at the read deadline and kills the worker's process
+//! group. The concurrency slot is released when that exit is observed, not
+//! when the stdout reader finishes.
 
 use std::{
     io::{Read, Write},
     path::Path,
     process::{Command, Stdio},
-    sync::{Condvar, Mutex},
+    sync::{Condvar, Mutex, mpsc},
     time::{Duration, Instant},
 };
 
@@ -159,43 +160,40 @@ fn wait_for_worker(
     // Drain stdout while the worker runs. A full pipe would stall a large
     // result, and the parent would then mistake that stall for the deadline.
     let stdout = child.stdout.take();
+    let (sender, receiver) = mpsc::channel();
     let reader = std::thread::spawn(move || {
         let mut bytes = Vec::new();
         if let Some(mut pipe) = stdout {
             let _ = pipe.read_to_end(&mut bytes);
         }
-        bytes
+        let _ = sender.send(bytes);
     });
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                let read_started = Instant::now();
-                while !reader.is_finished() && read_started.elapsed() < REAP_BUDGET {
-                    std::thread::sleep(Duration::from_millis(20));
-                }
-                if reader.is_finished() {
-                    let bytes = reader.join().unwrap_or_default();
-                    return if status.success() {
-                        parse_worker_result(&bytes)
-                    } else {
-                        Ok(protocol::tool_error_result(
-                            "LBR-AGENT-037",
-                            "read worker failed before producing a result",
-                            false,
-                        ))
-                    };
-                }
-                // The worker has exited. A descendant can still hold stdout, so
-                // joining here would keep this slot and the reply blocked.
+                // The worker is gone, so the slot is free before any join.
+                // The reply only waits on the bounded channel, never on join.
+                drop(slot);
+                let outcome = match receiver.recv_timeout(REAP_BUDGET) {
+                    Ok(bytes) if status.success() => parse_worker_result(&bytes),
+                    Ok(_) => Ok(protocol::tool_error_result(
+                        "LBR-AGENT-037",
+                        "read worker failed before producing a result",
+                        false,
+                    )),
+                    Err(_) => {
+                        let message = if status.success() {
+                            "read worker output did not close"
+                        } else {
+                            "read worker failed before producing a result"
+                        };
+                        Ok(protocol::tool_error_result("LBR-AGENT-037", message, false))
+                    }
+                };
                 std::thread::spawn(move || {
                     let _ = reader.join();
                 });
-                let message = if status.success() {
-                    "read worker output did not close"
-                } else {
-                    "read worker failed before producing a result"
-                };
-                return Ok(protocol::tool_error_result("LBR-AGENT-037", message, false));
+                return outcome;
             }
             Ok(None) if started.elapsed() >= deadline => {
                 detach_after_deadline(child, slot, reader);
@@ -221,7 +219,7 @@ fn wait_for_worker(
 fn detach_after_deadline(
     mut child: std::process::Child,
     slot: SlotGuard<'static>,
-    reader: std::thread::JoinHandle<Vec<u8>>,
+    reader: std::thread::JoinHandle<()>,
 ) {
     signal_worker(&mut child);
     let started = Instant::now();
@@ -250,7 +248,9 @@ fn detach_after_deadline(
     std::thread::spawn(move || {
         let _ = child.wait();
         drop(slot);
-        let _ = reader.join();
+        std::thread::spawn(move || {
+            let _ = reader.join();
+        });
     });
 }
 

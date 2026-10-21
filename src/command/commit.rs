@@ -217,30 +217,25 @@ pub struct CommitArgs {
     #[arg(long = "no-status", overrides_with = "status")]
     pub no_status: bool,
 
-    /// Sign the commit (Git's `-S` / `--gpg-sign[=<keyid>]`). Libra signs every
-    /// commit with the repository vault key by default, so this flag just
-    /// selects the behaviour that is already the default; the optional key id
-    /// is accepted for Git parity and ignored (Libra has one vault key per
-    /// repository).
-    #[arg(short = 'S', long = "gpg-sign", value_name = "KEYID", num_args = 0..=1, require_equals = true)]
+    /// Force signing with the repository vault key, even when configuration
+    /// disables signing. The optional Git key id is accepted but ignored.
+    /// With `--no-gpg-sign`, the last flag wins.
+    #[arg(short = 'S', long = "gpg-sign", value_name = "KEYID", num_args = 0..=1, require_equals = true, overrides_with = "no_gpg_sign")]
     pub gpg_sign: Option<Option<String>>,
 
-    /// Show a short status of the changes being committed (Git's `--short`).
-    /// Libra renders the same short format as `--porcelain`, which this is an
-    /// alias for; Git accepts `--short` with and without `--dry-run`.
+    /// Show a short status preview without creating a commit.
     #[arg(long = "short")]
     pub short: bool,
 
-    /// Show untracked files in the change summary (Git's `-u[=<mode>]`).
-    /// Accepted for parity: Libra's commit summary lists untracked files
-    /// separately, so the mode only selects `no` (hidden) versus the default.
-    #[arg(short = 'u', long = "untracked-files", value_name = "MODE", num_args = 0..=1, require_equals = true)]
-    pub untracked_files: Option<Option<String>>,
+    /// Control untracked files in status previews: no, normal, or all.
+    /// A bare `-u` or `--untracked-files` means all.
+    #[arg(short = 'u', long = "untracked-files", value_name = "MODE", num_args = 0..=1, default_missing_value = "all")]
+    pub untracked_files: Option<status::UntrackedFiles>,
 
     /// Recognised Git partial-commit options. Libra commits the whole index, so
     /// these are refused with a clear message rather than an unknown-option
     /// error (issues/525).
-    #[arg(long = "only")]
+    #[arg(short = 'o', long = "only")]
     pub only: bool,
 
     /// Recognised Git partial-commit option (`--pathspec-from-file`), refused
@@ -248,15 +243,19 @@ pub struct CommitArgs {
     #[arg(long = "pathspec-from-file", value_name = "FILE")]
     pub pathspec_from_file: Option<String>,
 
+    /// Path-limited commits are recognized but not yet supported.
+    #[arg(value_name = "PATH")]
+    pub paths: Vec<String>,
+
     /// Force an unsigned commit: skip Libra's vault GPG signing
     /// (`vault_sign_commit`) for this commit, matching `git commit
-    /// --no-gpg-sign`. Signing is resolved as: `--no-gpg-sign` (highest) >
+    /// --no-gpg-sign`. Explicit CLI signing flags take precedence over
     /// `commit.gpgSign=true|false` (Git-compatible local→global→system
     /// cascade; `true` force-signs with the repository vault key, `false`
     /// disables signing) > the `vault.signing` Libra default (signs when
     /// `true` — the `libra init` default — and a vault unseal key is
-    /// available). (Git's positive `-S`/`--gpg-sign` is not exposed.)
-    #[arg(long = "no-gpg-sign")]
+    /// available); the last `-S`/`--no-gpg-sign` flag wins.
+    #[arg(long = "no-gpg-sign", overrides_with = "gpg_sign")]
     pub no_gpg_sign: bool,
 }
 
@@ -1100,6 +1099,7 @@ async fn run_commit_with_index(
         Some(
             status::resolve_config_defaults(status::StatusArgs {
                 long_format: true,
+                untracked_files: args.untracked_files,
                 // Git's editor template and `--dry-run` snapshot always name the
                 // branch and its upstream; enable it explicitly.
                 branch: true,
@@ -1111,8 +1111,11 @@ async fn run_commit_with_index(
     } else {
         None
     };
-    let signing_policy =
-        crate::command::history_config::commit_signing_policy(args.no_gpg_sign).await?;
+    let signing_policy = if args.gpg_sign.is_some() {
+        crate::command::history_config::CommitSigningPolicy::Force
+    } else {
+        crate::command::history_config::commit_signing_policy(args.no_gpg_sign).await?
+    };
 
     // Dry-run `-a` reaches this function under a task-local isolated index, so
     // every nested status/diff/index consumer observes the preview while the live
@@ -1191,7 +1194,7 @@ async fn run_commit_with_index(
         // committed. Inert under `--json`. `.take()` below hands it to whichever
         // build_commit_output branch (amend/normal dry-run) runs.
         let porcelain_text = if (args.porcelain || args.short) && !output.is_json() {
-            Some(gather_commit_porcelain().await?)
+            Some(gather_commit_porcelain(args.untracked_files.unwrap_or_default()).await?)
         } else {
             None
         };
@@ -1200,7 +1203,7 @@ async fn run_commit_with_index(
         // refusing, so emit it here for parity; scripted consumers (e.g. the
         // tracking-info assertions) read the branch/upstream line.
         let emit_refusal_preview = || {
-            if args.porcelain {
+            if args.porcelain || args.short {
                 if let Some(text) = porcelain_text.as_deref() {
                     print!("{text}");
                 }
@@ -2614,9 +2617,9 @@ pub async fn execute_safe(args: CommitArgs, output: &OutputConfig) -> CliResult<
     // a temporary tree built from HEAD + the selected paths; Libra commits the
     // whole index. Classify the request instead of failing as an unknown
     // option (issues/525).
-    if args.only || args.pathspec_from_file.is_some() {
+    if args.only || args.pathspec_from_file.is_some() || !args.paths.is_empty() {
         return Err(CliError::fatal(
-            "partial commit (--only / --pathspec-from-file) is not implemented; Libra commits the whole index",
+            "partial commit (--only / --pathspec-from-file / <path>) is not implemented; Libra commits the whole index",
         )
         .with_stable_code(StableErrorCode::Unsupported)
         .with_hint(
@@ -2657,10 +2660,11 @@ pub async fn execute_safe(args: CommitArgs, output: &OutputConfig) -> CliResult<
 
 /// Render the to-be-committed working-tree state in porcelain v1 format,
 /// identical to `libra status --porcelain` (staged changes in column 1,
-/// unstaged in column 2, untracked as `??`, with untracked directories
-/// collapsed). Returned as a string so the caller can emit it in place of the
-/// normal commit summary.
-async fn gather_commit_porcelain() -> Result<String, CommitError> {
+/// unstaged in column 2, untracked as `??`). Returned as a string so the caller
+/// can emit it in place of the normal commit summary.
+async fn gather_commit_porcelain(
+    untracked_files: status::UntrackedFiles,
+) -> Result<String, CommitError> {
     let to_err = |e: String| CommitError::StagedChanges(e);
     let staged = status::changes_to_be_committed_safe()
         .await
@@ -2669,9 +2673,14 @@ async fn gather_commit_porcelain() -> Result<String, CommitError> {
     let mut unstaged = status::changes_to_be_staged()
         .map(|c| c.to_relative())
         .map_err(|e| to_err(e.to_string()))?;
-    // Match `status --porcelain` default (`-unormal`): collapse untracked dirs.
-    let index = status::load_status_index().map_err(|e| to_err(e.to_string()))?;
-    unstaged.new = status::collapse_untracked_directories(unstaged.new, &index);
+    match untracked_files {
+        status::UntrackedFiles::No => unstaged.new.clear(),
+        status::UntrackedFiles::Normal => {
+            let index = status::load_status_index().map_err(|e| to_err(e.to_string()))?;
+            unstaged.new = status::collapse_untracked_directories(unstaged.new, &index);
+        }
+        status::UntrackedFiles::All => {}
+    }
 
     let mut buf: Vec<u8> = Vec::new();
     status::output_porcelain(&staged, &unstaged, false, &mut buf)

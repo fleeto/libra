@@ -21,6 +21,17 @@
   and `--incremental`; `rev-list` gains `--no-walk` and `--disk-usage`;
   `fast-import` accepts a positional file and `--dry-run`.
 
+### Issue #525 commit compatibility
+
+- `commit -F -` reads the message from standard input. `-S`/`--gpg-sign`
+  forces signing with the repository vault key, even if signing is disabled by
+  configuration; the optional key ID is ignored. The last `-S`/`--no-gpg-sign`
+  flag wins. `--short` previews status without creating a commit, and
+  `-u`/`--untracked-files` selects validated `no`, `normal`, or `all` modes.
+- Partial commit forms (`-o`/`--only`, `--pathspec-from-file`, or positional paths)
+  now fail with `LBR-UNSUPPORTED-001` and a stage-then-commit hint instead of
+  being rejected as unknown options.
+
 ### Agent MCP and rebase
 
 - `libra agent mcp` runs read tools in at most four worker processes. A read

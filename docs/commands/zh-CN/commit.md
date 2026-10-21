@@ -35,7 +35,7 @@ libra commit --amend [--no-edit]
 预览始终保持 live index、`HEAD` 与工作树，包括用 `-a` 预览解决结果时。
 成功且非 `--dry-run` 的提交在更新 HEAD 后，会清除已停止的单提交 cherry-pick 或 revert 状态（或停在最后一项的序列）。多提交序列会保留剩余待办，并标记停止项已在序列外结束。`--dry-run` 与 `--porcelain` 不改该状态。
 
-merge 进行中时，`commit` 会结束该 merge：新提交的父提交为 HEAD 加上 merge 状态记录的对方提交，消息默认取已保存的合并消息（编辑器模式剥离 `# Conflicts:` 注释，`--no-edit` 保留，`-m`/`-F` 覆盖），然后清除 merge 状态并应用持有的 autostash。merge 进行中拒绝 `--amend`（退出 128）。`--dry-run` 不写入、保留 merge 状态，并输出预演说明而不打印伪提交 hash。`merge --squash` 之后的 `commit` 为单父提交，预填 `SQUASH_MSG`，提交后删除该文件。部分提交（`commit <path>`、`--only`、`--pathspec-from-file`）未实现：Libra 提交整个 index，这些写法会被识别并以 `LBR-UNSUPPORTED-001` 拒绝，提示先 `libra add <path>` 再 `libra commit`。
+merge 进行中时，`commit` 会结束该 merge：新提交的父提交为 HEAD 加上 merge 状态记录的对方提交，消息默认取已保存的合并消息（编辑器模式剥离 `# Conflicts:` 注释，`--no-edit` 保留，`-m`/`-F` 覆盖），然后清除 merge 状态并应用持有的 autostash。merge 进行中拒绝 `--amend`（退出 128）。`--dry-run` 不写入、保留 merge 状态，并输出预演说明而不打印伪提交 hash。`merge --squash` 之后的 `commit` 为单父提交，预填 `SQUASH_MSG`，提交后删除该文件。部分提交（`commit <path>`、`-o`/`--only`、`--pathspec-from-file`）未实现：Libra 提交整个 index，这些写法会被识别并以 `LBR-UNSUPPORTED-001` 拒绝，提示先 `libra add <path>` 再 `libra commit`。
 
 删除冲突文件后，仅当所有 tracked 变更都应进入本次提交时才用 `commit -a` 暂存。
 父目录被普通文件或符号链接替换时，其已跟踪子路径视为删除；`-a` 不会通过该
@@ -47,9 +47,9 @@ merge 进行中时，`commit` 会结束该 merge：新提交的父提交为 HEAD
 ## 消息与签名选项
 
 - `-F -`：从**标准输入**读取整条提交消息（Git 语义）。
-- `-S` / `--gpg-sign[=<keyid>]`：签名提交。Libra 默认就用仓库 vault 密钥签名，因此该标志只是选择既有默认行为；可选的 key id 为兼容 Git 而接受但被忽略（每个仓库只有一把 vault 密钥）。强制不签名请用 `--no-gpg-sign`。
-- `--short`：打印提交的短状态摘要（`A  path`、`M  path` 等），可与 `--dry-run` 组合；与 `--porcelain` 同格式。
-- `-u[=<mode>]` / `--untracked-files[=<mode>]`：为兼容而接受，选择变更摘要是否列出未跟踪文件（`no` 隐藏）。
+- `-S` / `--gpg-sign[=<keyid>]`：使用仓库 vault 密钥强制签名，即使配置关闭签名；无法解锁密钥时拒绝提交。可选 key id 仅为兼容 Git 而接受并忽略。与 `--no-gpg-sign` 同时使用时，最后一个标志生效。
+- `--short`：打印短状态预览（`A  path`、`M  path` 等）；与 `--porcelain` 一样隐含 `--dry-run`，不会创建提交或改变 HEAD/index。
+- `-u[=<mode>]` / `--untracked-files[=<mode>]`：控制预览中的未跟踪路径：`no` 隐藏、`normal` 合并目录（默认）、`all` 列出每个文件；裸 `-u` 表示 `all`，无效模式会被拒绝。
 
 ## 选项
 
@@ -234,7 +234,7 @@ libra commit --no-status       # 本次省略状态段
 
 ### `--no-gpg-sign`
 
-强制生成未签名提交：跳过本次提交的 Libra vault GPG 签名，对齐 `git commit --no-gpg-sign`。Git 兼容的 `commit.gpgSign=true|false` 默认值优先于 `vault.signing`：`true` 使用仓库 vault key 强制签名，`false` 禁用签名；未配置时继续使用 `vault.signing`。`--no-gpg-sign` 优先级最高并抑制两种配置。Git 的正向 `-S`/`--gpg-sign` 尚未公开。
+强制生成未签名提交：跳过本次提交的 Libra vault GPG 签名，对齐 `git commit --no-gpg-sign`。Git 兼容的 `commit.gpgSign=true|false` 默认值优先于 `vault.signing`：`true` 使用仓库 vault key 强制签名，`false` 禁用签名；未配置时继续使用 `vault.signing`。显式 CLI 签名标志优先于配置；与 `-S`/`--gpg-sign` 同时使用时，最后一个标志生效。
 
 ```bash
 libra commit --no-gpg-sign -m "message"

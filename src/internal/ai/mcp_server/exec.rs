@@ -117,7 +117,7 @@ pub fn execute_read_tool(name: &str, arguments: &Value) -> Result<Value, String>
     if !running_as_libra_binary() {
         return invoke_locally(name, arguments);
     }
-    let _slot = slots().acquire();
+    let slot = slots().acquire();
     let exe =
         std::env::current_exe().map_err(|_| "read worker binary is not available".to_string())?;
     let mut command = Command::new(exe);
@@ -147,10 +147,13 @@ pub fn execute_read_tool(name: &str, arguments: &Value) -> Result<Value, String>
             .write_all(b"\n")
             .map_err(|_| "read worker request could not be written".to_string())?;
     }
-    wait_for_worker(&mut child)
+    wait_for_worker(child, slot)
 }
 
-fn wait_for_worker(child: &mut std::process::Child) -> Result<Value, String> {
+fn wait_for_worker(
+    mut child: std::process::Child,
+    slot: SlotGuard<'static>,
+) -> Result<Value, String> {
     let deadline = read_deadline();
     let started = Instant::now();
     // Drain stdout while the worker runs. A full pipe would stall a large
@@ -178,8 +181,7 @@ fn wait_for_worker(child: &mut std::process::Child) -> Result<Value, String> {
                 };
             }
             Ok(None) if started.elapsed() >= deadline => {
-                kill_worker(child);
-                let _ = reader.join();
+                detach_after_deadline(child, slot, reader);
                 return Ok(protocol::tool_error_result(
                     "LBR-AGENT-036",
                     "read tool exceeded the 30 s deadline",
@@ -188,8 +190,7 @@ fn wait_for_worker(child: &mut std::process::Child) -> Result<Value, String> {
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(20)),
             Err(_) => {
-                kill_worker(child);
-                let _ = reader.join();
+                detach_after_deadline(child, slot, reader);
                 return Ok(protocol::tool_error_result(
                     "LBR-AGENT-037",
                     "read worker could not be observed",
@@ -200,7 +201,31 @@ fn wait_for_worker(child: &mut std::process::Child) -> Result<Value, String> {
     }
 }
 
-fn kill_worker(child: &mut std::process::Child) {
+fn detach_after_deadline(
+    mut child: std::process::Child,
+    slot: SlotGuard<'static>,
+    reader: std::thread::JoinHandle<Vec<u8>>,
+) {
+    signal_worker(&mut child);
+    let started = Instant::now();
+    while started.elapsed() < REAP_BUDGET {
+        if matches!(child.try_wait(), Ok(Some(_)) | Err(_)) {
+            let _ = reader.join();
+            drop(slot);
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    // The reply must not wait on a worker stuck in uninterruptible I/O.
+    // The slot stays taken until this reaper observes the exit.
+    std::thread::spawn(move || {
+        let _slot = slot;
+        let _ = child.wait();
+        let _ = reader.join();
+    });
+}
+
+fn signal_worker(child: &mut std::process::Child) {
     #[cfg(unix)]
     // SAFETY: `child.id()` is the worker started with `process_group(0)`, so
     // its process-group id is its pid. A negative pid asks `kill` to signal
@@ -209,14 +234,6 @@ fn kill_worker(child: &mut std::process::Child) {
         libc::kill(-(child.id() as i32), libc::SIGKILL);
     }
     let _ = child.kill();
-    let started = Instant::now();
-    while started.elapsed() < REAP_BUDGET {
-        if matches!(child.try_wait(), Ok(Some(_)) | Err(_)) {
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    let _ = child.wait();
 }
 
 fn parse_worker_result(stdout: &[u8]) -> Result<Value, String> {

@@ -77,7 +77,7 @@ where
             biased;
             finished = join_front(inflight.front_mut()), if !inflight.is_empty() => {
                 inflight.pop_front();
-                if let Some(response) = finished {
+                if let Some(response) = finished? {
                     let response = super::output::finalize_tool_result(response);
                     write_message(&mut writer, &response).await?;
                 }
@@ -111,10 +111,14 @@ where
     Ok(())
 }
 
-async fn join_front(handle: Option<&mut JoinHandle<Option<Value>>>) -> Option<Value> {
+async fn join_front(
+    handle: Option<&mut JoinHandle<Option<Value>>>,
+) -> std::io::Result<Option<Value>> {
     match handle {
-        Some(handle) => handle.await.unwrap_or(None),
-        None => None,
+        Some(handle) => handle.await.map_err(|_| {
+            std::io::Error::other("MCP read tool task failed before it produced a response")
+        }),
+        None => Ok(None),
     }
 }
 
@@ -125,7 +129,10 @@ async fn write_finished<W: AsyncWrite + Unpin>(
     let Some(handle) = inflight.pop_front() else {
         return Ok(());
     };
-    if let Some(response) = handle.await.unwrap_or(None) {
+    let response = handle.await.map_err(|_| {
+        std::io::Error::other("MCP read tool task failed before it produced a response")
+    })?;
+    if let Some(response) = response {
         let response = super::output::finalize_tool_result(response);
         write_message(writer, &response).await?;
     }

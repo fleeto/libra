@@ -155,7 +155,7 @@ pub mod write_tree;
 
 use std::{
     cell::Cell,
-    fs::{self, File},
+    fs::{self, File, OpenOptions},
     io::{self, Read, Seek, SeekFrom, Write},
     path::Path,
 };
@@ -373,6 +373,155 @@ pub fn read_worktree_blob_bytes(path: impl AsRef<Path>) -> io::Result<Vec<u8>> {
         return Ok(pointer.into_bytes());
     }
     fs::read(path)
+}
+
+/// Failure from [`read_worktree_blob_bytes_bounded`].
+#[derive(Debug)]
+pub enum WorktreeBlobBoundError {
+    /// The path could not be opened or read.
+    Io(io::Error),
+    /// The representation that would be returned is larger than the limit.
+    TooLarge,
+}
+
+impl From<io::Error> for WorktreeBlobBoundError {
+    fn from(error: io::Error) -> Self {
+        Self::Io(error)
+    }
+}
+
+thread_local! {
+    static BOUNDED_BLOB_HANDLE_BYTES: Cell<u64> = const { Cell::new(0) };
+}
+
+/// Bytes read from the file handle by the most recent
+/// [`read_worktree_blob_bytes_bounded`] call on this thread.
+///
+/// Symlink targets are not included: they come from `read_link`, not from the
+/// opened handle. The counter is the evidence that a regular file stops at
+/// `limit + 1` bytes.
+pub fn read_worktree_blob_bounded_handle_bytes() -> u64 {
+    BOUNDED_BLOB_HANDLE_BYTES.with(Cell::get)
+}
+
+/// Read the bytes Git would store for a worktree path, stopping at `limit`.
+///
+/// The open does not follow a symlink. On Unix the descriptor is created with
+/// `O_NOFOLLOW`; a symlink then yields its target bytes via `read_link`. On
+/// Windows the open uses `FILE_FLAG_OPEN_REPARSE_POINT` and a reparse point is
+/// likewise returned as the link target. A regular file is classified with
+/// `fstat` on that same descriptor and its body is read from it, at most
+/// `limit + 1` bytes. Replacing the path after the open cannot switch the
+/// read onto another object.
+pub fn read_worktree_blob_bytes_bounded(
+    path: impl AsRef<Path>,
+    limit: u64,
+) -> Result<Vec<u8>, WorktreeBlobBoundError> {
+    BOUNDED_BLOB_HANDLE_BYTES.with(|cell| cell.set(0));
+    let path = path.as_ref();
+    let file = match open_nofollow(path) {
+        Ok(file) => file,
+        Err(error) if is_nofollow_symlink(&error) => {
+            return limited_bytes(&read_symlink_blob_bytes(path)?, limit);
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let metadata = file.metadata()?;
+    if metadata.file_type().is_symlink() {
+        return limited_bytes(&read_symlink_blob_bytes(path)?, limit);
+    }
+    if !metadata.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{} is not a regular file or symlink", path.display()),
+        )
+        .into());
+    }
+    maybe_bounded_read_pause();
+    if utils::lfs::is_lfs_tracked(path) {
+        // Pointer text is what Git stores. MC-39 moves the hash onto this
+        // already-open handle; the limit still applies to the pointer bytes.
+        let (pointer, _) = utils::lfs::generate_pointer_file(path);
+        return limited_bytes(pointer.as_bytes(), limit);
+    }
+    read_handle_limited(file, limit)
+}
+
+fn open_nofollow(path: &Path) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        // FILE_FLAG_OPEN_REPARSE_POINT: do not follow a symlink or junction.
+        options.custom_flags(0x0020_0000);
+    }
+    options.open(path)
+}
+
+fn is_nofollow_symlink(error: &io::Error) -> bool {
+    #[cfg(unix)]
+    {
+        return error.raw_os_error() == Some(libc::ELOOP);
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = error;
+        false
+    }
+}
+
+fn limited_bytes(bytes: &[u8], limit: u64) -> Result<Vec<u8>, WorktreeBlobBoundError> {
+    if bytes.len() as u64 > limit {
+        Err(WorktreeBlobBoundError::TooLarge)
+    } else {
+        Ok(bytes.to_vec())
+    }
+}
+
+fn read_handle_limited(mut file: File, limit: u64) -> Result<Vec<u8>, WorktreeBlobBoundError> {
+    let max = limit.saturating_add(1);
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 8192];
+    while (buf.len() as u64) < max {
+        let room = usize::try_from(max - buf.len() as u64).unwrap_or(usize::MAX);
+        let want = room.min(chunk.len());
+        let read = file.read(&mut chunk[..want])?;
+        if read == 0 {
+            break;
+        }
+        buf.extend_from_slice(&chunk[..read]);
+        BOUNDED_BLOB_HANDLE_BYTES.with(|cell| {
+            cell.set(cell.get() + u64::try_from(read).unwrap_or(u64::MAX));
+        });
+    }
+    if buf.len() as u64 > limit {
+        Err(WorktreeBlobBoundError::TooLarge)
+    } else {
+        Ok(buf)
+    }
+}
+
+fn maybe_bounded_read_pause() {
+    #[cfg(debug_assertions)]
+    if std::env::var("LIBRA_TEST").ok().as_deref() == Some("1")
+        && let Ok(path) = std::env::var("LIBRA_MCP_TEST_BOUNDED_READ_PAUSE_FILE")
+    {
+        let _ = std::fs::write(&path, "paused");
+        let go = format!("{path}.go");
+        let started = std::time::Instant::now();
+        while started.elapsed() < std::time::Duration::from_secs(5) {
+            if std::path::Path::new(&go).exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
 }
 
 /// Bytes of zlib output `object_size` may inflate while reading a header.
@@ -1140,6 +1289,99 @@ mod tests {
             "inflated {}",
             object_size_inflated_bytes()
         );
+    }
+
+    #[test]
+    fn bounded_read_rejects_large_file() {
+        let dir = tempdir().expect("tempdir");
+        let file = dir.path().join("big");
+        std::fs::write(&file, vec![0xA5; 2 * 1024 * 1024]).expect("write");
+        let error = read_worktree_blob_bytes_bounded(&file, 1024 * 1024).expect_err("too large");
+        assert!(matches!(error, WorktreeBlobBoundError::TooLarge));
+    }
+
+    #[test]
+    fn bounded_read_large_file_reads_at_most_limit() {
+        let dir = tempdir().expect("tempdir");
+        let file = dir.path().join("big");
+        std::fs::write(&file, vec![0xA5; 2 * 1024 * 1024]).expect("write");
+        let _ = read_worktree_blob_bytes_bounded(&file, 1024 * 1024);
+        assert!(read_worktree_blob_bounded_handle_bytes() <= 1_048_577);
+    }
+
+    #[test]
+    #[serial(env)]
+    fn bounded_read_rejects_concurrent_growth() {
+        let dir = tempdir().expect("tempdir");
+        let file = dir.path().join("grow");
+        std::fs::write(&file, vec![0u8; 512 * 1024]).expect("write");
+        let pause = dir.path().join("pause");
+        let _env = EnvGuard::set(
+            "LIBRA_MCP_TEST_BOUNDED_READ_PAUSE_FILE",
+            pause.to_string_lossy().as_ref(),
+        );
+        let _test_env = EnvGuard::set("LIBRA_TEST", "1");
+        use std::io::Write as _;
+        let reading = file.clone();
+        let worker = std::thread::spawn(move || {
+            read_worktree_blob_bytes_bounded(&reading, 1024 * 1024)
+        });
+        let started = std::time::Instant::now();
+        while !pause.exists() {
+            if started.elapsed() > std::time::Duration::from_secs(5) {
+                panic!("bounded read did not reach the pause");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let mut grown = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&file)
+            .expect("append");
+        grown
+            .write_all(&vec![0u8; 3 * 1024 * 1024 - 512 * 1024])
+            .expect("grow");
+        drop(grown);
+        std::fs::write(format!("{}.go", pause.display()), b"go").expect("go");
+        let error = worker.join().expect("join").expect_err("too large");
+        assert!(matches!(error, WorktreeBlobBoundError::TooLarge));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_read_symlink_returns_target_bytes() {
+        let dir = tempdir().expect("tempdir");
+        let outside = dir.path().join("outside");
+        std::fs::write(&outside, vec![0x11; 2 * 1024 * 1024]).expect("outside");
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&outside, &link).expect("symlink");
+        let bounded = read_worktree_blob_bytes_bounded(&link, 1024 * 1024).expect("link bytes");
+        let plain = read_worktree_blob_bytes(&link).expect("plain");
+        assert_eq!(bounded, plain);
+        assert_ne!(bounded, vec![0x11; 2 * 1024 * 1024]);
+    }
+
+    struct EnvGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            // SAFETY: the test serializes env changes and restores the previous value.
+            unsafe { std::env::set_var(key, value) };
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            if let Some(previous) = self.previous.take() {
+                unsafe { std::env::set_var(self.key, previous) };
+            } else {
+                unsafe { std::env::remove_var(self.key) };
+            }
+        }
     }
 }
 

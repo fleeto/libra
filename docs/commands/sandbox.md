@@ -36,7 +36,7 @@ policy). In a linked worktree the repository file is the baseline; a
 per-worktree overlay may only tighten `deny_read` / `[sandbox.network]`
 and cannot switch `denied` → `full`.
 
-The internal task sandbox API can bind a verified attempt. When a caller applies it, the workspace-write policy allows writes to that attempt’s `workspace` and its own `home`, `xdg-config`, `xdg-cache`, `cargo-home`, `logs`, and `target` directories under `.libra/worktree/tasks/<run-id>/<attempt-id>/`; it also denies sensitive repository metadata reads. The `review` and `investigate` commands launch external agent CLIs without applying this internal OS sandbox to them, so their filesystem access depends on the external CLI's own sandbox. `danger-full-access` remains an explicit unrestricted choice for callers of Libra's internal sandbox.
+The internal task sandbox API can bind a verified attempt. When a caller applies it, the workspace-write policy allows writes to that attempt’s `workspace` and its own `home`, `xdg-config`, `xdg-cache`, `cargo-home`, `logs`, and `target` directories under `.libra/worktree/tasks/<run-id>/<attempt-id>/`; it also denies sensitive repository metadata reads. The `review` and `investigate` commands launch external agent CLIs without applying this internal OS sandbox to them, so their filesystem access depends on the external CLI's own sandbox. For untrusted inputs, configure that external CLI's filesystem sandbox to allow only the run workspace and required runtime directories. `danger-full-access` remains an explicit unrestricted choice for callers of Libra's internal sandbox.
 
 ## Human Output
 

@@ -47,7 +47,7 @@ merge 进行中时，`commit` 会结束该 merge：新提交的父提交为 HEAD
 ## 消息与签名选项
 
 - `-F -`：从**标准输入**读取整条提交消息（Git 语义）。
-- `-S` / `--gpg-sign[=<keyid>]`：使用仓库 vault 密钥强制签名，即使配置关闭签名；无法解锁密钥时拒绝提交。可选 key id 仅为兼容 Git 而接受并忽略。与 `--no-gpg-sign` 同时使用时，最后一个标志生效。
+- `-S` / `--gpg-sign[=<keyid>]`：使用已配置的签名来源（仓库生成的 vault 密钥或导入密钥）强制签名，即使配置关闭签名；无法解锁该密钥时拒绝提交。可选 key id 仅为兼容 Git 而接受并忽略。与 `--no-gpg-sign` 同时使用时，最后一个标志生效。
 - `--short`：打印短状态预览（`A  path`、`M  path` 等）；与 `--porcelain` 一样隐含 `--dry-run`，不会创建提交或改变 HEAD/index。
 - `-u[=<mode>]` / `--untracked-files[=<mode>]`：控制预览中的未跟踪路径：`no` 隐藏、`normal` 合并目录（默认）、`all` 列出每个文件；裸 `-u` 表示 `all`，无效模式会被拒绝。
 
@@ -234,7 +234,7 @@ libra commit --no-status       # 本次省略状态段
 
 ### `--no-gpg-sign`
 
-强制生成未签名提交：跳过本次提交的 Libra vault GPG 签名，对齐 `git commit --no-gpg-sign`。Git 兼容的 `commit.gpgSign=true|false` 默认值优先于 `vault.signing`：`true` 使用仓库 vault key 强制签名，`false` 禁用签名；未配置时继续使用 `vault.signing`。显式 CLI 签名标志优先于配置；与 `-S`/`--gpg-sign` 同时使用时，最后一个标志生效。
+强制生成未签名提交：跳过本次提交的 Libra vault GPG 签名，对齐 `git commit --no-gpg-sign`。Git 兼容的 `commit.gpgSign=true|false` 默认值优先于 `vault.signing`：`true` 使用已配置的签名来源强制签名，`false` 禁用签名；未配置时继续使用 `vault.signing`。显式 CLI 签名标志优先于配置；与 `-S`/`--gpg-sign` 同时使用时，最后一个标志生效。
 
 ```bash
 libra commit --no-gpg-sign -m "message"

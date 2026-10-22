@@ -17,7 +17,7 @@ libra --json sandbox status
 
 在 macOS 上，默认 Seatbelt 策略保持项目文件可读，但拒绝常见凭证、令牌和浏览器配置文件路径。内置拒绝列表包括 `~/.ssh`、`~/.aws`、`~/.gnupg`、`~/.netrc`、`.azure`、`.docker`、`.npmrc`、`.pypirc`、Cargo/Gem 凭证、`~/.config/gcloud`、`~/.config/gh`、`~/.config/hub`、`~/.kube`、`~/.config/libra/vault`、Firefox、Chrome、Chromium 和 Brave 配置目录、macOS `Library/Cookies`，以及 `/etc/shadow`。仓库可以通过 `.libra/sandbox.toml` 的 `deny_read = [...]` 追加项目特定路径。不可读或无法解析的 `sandbox.toml` 会 fail-closed（不会回退到空策略）。在 linked worktree 中以仓库文件为基线，per-worktree overlay 只能收紧 `deny_read` / `[sandbox.network]`，不能把 `denied` 放宽为 `full`。
 
-Libra 内部的任务沙箱接口可绑定已验证的 attempt。调用方应用该接口后，workspace-write 策略只允许写入该 attempt 的 `workspace`，以及 `.libra/worktree/tasks/<run-id>/<attempt-id>/` 下的 `home`、`xdg-config`、`xdg-cache`、`cargo-home`、`logs` 和 `target`，并拒绝读取敏感仓库元数据。`review` 和 `investigate` 启动外部 agent CLI 时不会施加此内部 OS 沙箱，其文件访问由外部 CLI 自身的沙箱决定。`danger-full-access` 仍是 Libra 内部沙箱调用方可显式选择的无限制模式。
+Libra 内部的任务沙箱接口可绑定已验证的 attempt。调用方应用该接口后，workspace-write 策略只允许写入该 attempt 的 `workspace`，以及 `.libra/worktree/tasks/<run-id>/<attempt-id>/` 下的 `home`、`xdg-config`、`xdg-cache`、`cargo-home`、`logs` 和 `target`，并拒绝读取敏感仓库元数据。`review` 和 `investigate` 启动外部 agent CLI 时不会施加此内部 OS 沙箱，其文件访问由外部 CLI 自身的沙箱决定。处理不可信输入时，请配置外部 CLI 的文件系统沙箱，只允许访问本次运行的 workspace 和必需的运行目录。`danger-full-access` 仍是 Libra 内部沙箱调用方可显式选择的无限制模式。
 
 ## 人类可读输出
 

@@ -47,6 +47,9 @@ implicitly discover the main repository. Repository access requires an
 explicitly validated scope supplied by the runtime. Libra does not apply its
 internal OS sandbox to the external investigator CLI; that CLI's own sandbox
 settings determine whether it can access sibling workspaces or common storage.
+When investigating untrusted content, configure the external CLI's own
+filesystem sandbox to allow only the run workspace and directories it needs;
+Libra's internal sandbox does not confine that process.
 
 With `start --checkpoint <id>` the investigation is scoped to a captured
 agent checkpoint instead: the investigators' workspace is the

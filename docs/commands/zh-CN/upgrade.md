@@ -18,7 +18,7 @@ libra upgrade [--check | -y|--yes]
 然后原子替换并执行安装后探测；探测失败恢复原 binary。新版本在下次命令生效。
 较早打标的 `v0.31.0` 有可下载的 Linux/macOS arm64 二进制，但未进入稳定通道，
 且缺少 v0.30.85 包含的修复。因为 0.31.0 的版本号更高，`libra upgrade` 不会将它
-替换为 v0.30.85。待 v0.30.85 进入签名稳定通道后，清除 `LIBRA_VERSION` / `LIBRA_BASE_URL`
+替换为 v0.30.85。签名稳定通道提供 v0.30.85 或包含其修复的后续发行版后，清除 `LIBRA_VERSION` / `LIBRA_BASE_URL`
 覆盖值并重新运行不带 `-v` 的默认安装脚本：
 
 ```sh
@@ -42,7 +42,7 @@ libra --version
 从 Libra 0.30.67 起，新版 binary 首次在任意仓库执行命令时会写入不可回退的 worktree 布局能力标记，
 即使该仓库没有额外的 worktree 也一样。此后 0.30.66 及更早版本在打开该仓库数据库时会拒绝所有命令；
 要继续使用该仓库，须使用支持 2026101902 能力标记的构建：已发布二进制在 Linux 上始于 v0.30.67，
-在 macOS/Windows 上始于 v0.30.68；重新安装旧版本不会撤销此标记。
+在 macOS/Windows 上始于 v0.30.68；重新安装旧版本不会撤销此标记。该标记本身不能保证所有中间版本都理解命名 worktree 的 registry schema 4。v0.30.85 对 registry 的任何写入都会使用 schema 4，即使没有命名条目。此后应使用 v0.30.85 或包含其 registry 与身份安全修复的后续发行版执行 worktree 命令；较早的 v0.31.0 tag 虽能解析 schema 4，却缺少这些修复，不应修改这些 worktree。
 公开命令 `worktree add` 的位置参数现为 NAME；原来传目标路径的脚本须改为
 `worktree add NAME --path PATH`，按路径管理 worktree 时同样使用 `--path` 选择器；
 `worktree move` 用 `--from-path` 选择源，用 `--path` 指定目标。

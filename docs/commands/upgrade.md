@@ -37,7 +37,8 @@ The new binary takes effect on the next `libra` command.
 The earlier `v0.31.0` tag has downloadable Linux and macOS arm64 binaries,
 but it predates fixes included in v0.30.85 and never entered the stable
 channel. Since 0.31.0 sorts higher, `libra upgrade` will not install v0.30.85
-over it. Once v0.30.85 is published to the signed stable channel, rerun the
+over it. Once the signed stable channel contains v0.30.85 or a subsequent
+release with its fixes, rerun the
 default installer (without `-v` or `LIBRA_VERSION`/`LIBRA_BASE_URL`
 overrides) to replace an installed v0.31.0 binary:
 
@@ -67,7 +68,13 @@ records a forward-only worktree-layout capability marker, even if the repository
 has no additional worktrees. Libra 0.30.66 and older then refuse **all** commands
 in that repository at database open. Use a build with 2026101902 capability support to access repositories opened
 by it: published binaries start at v0.30.67 on Linux and v0.30.68 on
-macOS/Windows. Reinstalling an older binary does not undo the marker.
+macOS/Windows. Reinstalling an older binary does not undo the marker. The
+marker alone does not guarantee that every intermediate build understands
+worktree registry schema 4. Any registry mutation by v0.30.85 writes schema 4,
+even without named entries. After such a mutation, use v0.30.85 or a
+subsequent release with its registry and identity-safety fixes for worktree commands; the earlier
+v0.31.0 tag parses schema 4 but predates those fixes and should not mutate
+these worktrees.
 The public `worktree add` positional argument is now a NAME. Scripts that used
 to pass a destination path must use `worktree add NAME --path PATH`; the same
 `--path` selector applies to path-based worktree management. For `worktree move`,

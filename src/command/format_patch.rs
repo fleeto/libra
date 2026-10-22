@@ -277,8 +277,20 @@ pub struct FormatPatchArgs {
     #[arg(long = "dst-prefix", value_name = "PREFIX")]
     pub dst_prefix: Option<String>,
 
-    /// Do not show the diffstat summary before the diff.
-    #[arg(long = "no-stat")]
+    /// Git's `--relative[=<path>]` is not implemented for `format-patch`;
+    /// accepted so the refusal names the missing feature instead of looking
+    /// like a typo.
+    #[arg(long = "relative", value_name = "PATH", num_args = 0..=1, require_equals = true, hide = true)]
+    pub relative: Option<Option<String>>,
+
+    /// Git's revision-set `--all` selector is not implemented here; accepted
+    /// so the refusal names the missing feature.
+    #[arg(long = "all", hide = true)]
+    pub all_refs: bool,
+
+    /// Do not show the diffstat summary before the diff (Git's `-p` is the
+    /// short form of `--no-stat` for `format-patch`).
+    #[arg(short = 'p', long = "no-stat")]
     pub no_stat: bool,
 
     /// Keep the commit subject byte-identical: no `[PATCH]` prefix and no
@@ -447,21 +459,36 @@ pub async fn execute_safe(mut args: FormatPatchArgs, output: &OutputConfig) -> C
 
     // 2. Resolve revision range
     let commits = resolve_range_commits(&args).await?;
+    if args.relative.is_some() {
+        return Err(CliError::failure(
+            "format-patch --relative is not supported: Libra has no per-command relative-path filter for exported patches",
+        )
+        .with_stable_code(StableErrorCode::Unsupported)
+        .with_hint("export the series for the whole repository, or run the command from the repository root"));
+    }
+    if args.all_refs {
+        return Err(CliError::failure(
+            "format-patch --all is not supported: Libra's revision grammar does not expose the all-refs selector",
+        )
+        .with_stable_code(StableErrorCode::Unsupported)
+        .with_hint("name the branches explicitly, for example `libra format-patch main..topic`"));
+    }
+
+    // An empty series is not an error: Git exits 0 and prints nothing (only an
+    // unresolvable revision or a repository with no commits is fatal), so
+    // `format-patch` with no upstream, `A..A`, and `--ignore-if-in-upstream`
+    // with everything upstream all succeed silently.
     if commits.is_empty() {
-        if args.ignore_if_in_upstream {
-            if output.is_json() {
-                crate::utils::output::emit_json_data(
-                    "format-patch",
-                    &FormatPatchOutput {
-                        patches: Vec::new(),
-                    },
-                    output,
-                )?;
-            }
-            return Ok(());
+        if output.is_json() {
+            crate::utils::output::emit_json_data(
+                "format-patch",
+                &FormatPatchOutput {
+                    patches: Vec::new(),
+                },
+                output,
+            )?;
         }
-        return Err(CliError::failure("no patches to generate")
-            .with_stable_code(StableErrorCode::CliInvalidTarget));
+        return Ok(());
     }
 
     // `--base`: compute the base-commit / prerequisite-patch-id trailer. It is

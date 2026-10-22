@@ -41,6 +41,8 @@ body, and series metadata.
 | `--no-rfc` | | Cancel a preceding `--rfc` (last flag wins) | off |
 | `--filename-max-length <N>` | | Truncate output filenames to at most `N` bytes, counting the `0001-` prefix and the suffix; the stem may collapse to just the sequence number, matching Git's cut points | unlimited |
 | `--commit-list-format <FMT>` | | Cover-letter commit list. Default (or `short`) is Git's author-grouped shortlog (`Name (N):` + subjects wrapped at 72 columns); `modern` renders `[i/N] subject`; any other value is a pretty-format string supporting `%h`, `%H`, `%s`, `%an`, `%ae`, `%n` and `%%` (unsupported conversions fail with `'<fmt>' is not a valid format string`) | `short` |
+| `--relative[=<path>]` (unsupported) | | Accepted only to name the gap: Libra has no per-command relative-path filter for exported patches, so the command exits 128 with `LBR-UNSUPPORTED-001` | — |
+| `--all` (unsupported) | | Accepted only to name the gap: Libra's revision grammar has no all-refs selector; name branches explicitly (`main..topic`) | — |
 | `--no-base` | | Do not emit the `base-commit:` trailer, overriding `--base` (Libra has no `format.useAutoBase` config to reset) | off |
 | `--start-number <N>` | | Start numbering at `N` | 1 |
 | `--subject-prefix <PREFIX>` | | Use `PREFIX` instead of `PATCH` in the Subject: line | `PATCH` |
@@ -64,7 +66,7 @@ body, and series metadata.
 | `--histogram` | | Generate text hunks with the Histogram diff algorithm | false |
 | `--ignore-if-in-upstream` | | Suppress commits whose stable patch-id already appears on the excluded side of the range | false |
 | `--src-prefix <PREFIX>` / `--dst-prefix <PREFIX>` | | Replace the default `a/` and `b/` diff path prefixes | `a/`, `b/` |
-| `--no-stat` | | Suppress the diffstat summary | false |
+| `-p`, `--no-stat` | | Suppress the diffstat summary | false |
 | `--keep-subject` | `-k` | Keep the commit subject byte-identical: no `[PATCH]` prefix and no `n/m` counter is added (Git's contract). Without it, a leading bracket group in the subject is stripped before the prefix is added | false |
 | `--suffix <SFX>` | | Filename suffix for generated patches (e.g. `.txt`); ignored under `--numbered-files` | `.patch` |
 | `--zero-commit` | | Use an all-zero hash in each patch's `From <hash>` envelope line | false |
@@ -171,6 +173,7 @@ stdout follows Libra's normal quiet BrokenPipe behavior.
 | Unknown revision or empty range | `LBR-CLI-003` |
 | `--base` is not an ancestor of the series | `LBR-CLI-003` (exit 128) |
 | `--base=auto` (unsupported) | `LBR-CLI-002` (exit 129) |
+| `--relative`, `--all` (unsupported) | `LBR-UNSUPPORTED-001` (exit 128) |
 | Output file write failure | `LBR-IO-002` |
 | Output directory creation failure | `LBR-IO-002` |
 | Config read failure | `LBR-IO-001` |

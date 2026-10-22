@@ -760,11 +760,18 @@ fn no_stat_suppresses_diffstat() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn empty_range_reports_error() {
+fn empty_range_succeeds_with_no_output() {
     let repo = create_committed_repo_via_cli();
-    // Asking for a range where the two sides are the same yields no patches
+    // An empty range yields no patches, which Git treats as success with no
+    // output rather than an error (issues/529 scenario 1).
     let output = run_libra_command(&["format-patch", "HEAD..HEAD"], repo.path());
-    assert!(!output.status.success(), "empty range should fail");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "empty range exits 0: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stdout.is_empty(), "empty range prints nothing");
 }
 
 #[test]
@@ -1967,4 +1974,77 @@ fn cover_letter_commit_list_matches_git_shortlog() {
         "invalid format string must be reported: {}",
         String::from_utf8_lossy(&invalid.stderr)
     );
+}
+
+#[test]
+fn empty_series_succeeds_silently() {
+    let repo = repo_with_commits(2);
+    // Git exits 0 with no output when the resolved series is empty; libra used
+    // to fail with "no patches to generate" (issues/529 scenario 1).
+    for args in [
+        vec!["format-patch", "--stdout"],
+        vec!["format-patch", "HEAD..HEAD", "--stdout"],
+        vec!["format-patch", "--stdout", "--cover-letter"],
+    ] {
+        let output = run_libra_command(&args, repo.path());
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "{args:?} must succeed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            output.stdout.is_empty(),
+            "{args:?} must print nothing: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
+
+    // A repository without commits is still fatal, like Git.
+    let empty = create_committed_repo_via_cli();
+    let unborn = tempfile::tempdir().unwrap();
+    run_libra_command(&["init"], unborn.path());
+    let output = run_libra_command(&["format-patch", "--stdout"], unborn.path());
+    assert_ne!(
+        output.status.code(),
+        Some(0),
+        "unborn HEAD stays an error: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    drop(empty);
+}
+
+#[test]
+fn unsupported_git_options_are_classified() {
+    let repo = repo_with_commits(2);
+
+    // `-p` is Git's short form of `--no-stat`.
+    let short = run_libra_command(&["format-patch", "-p", "-1", "--stdout"], repo.path());
+    assert_cli_success(&short, "-p");
+    assert!(
+        !String::from_utf8_lossy(&short.stdout).contains("file changed"),
+        "-p suppresses the diffstat"
+    );
+
+    // `--relative` and `--all` are named refusals, not typos.
+    for (args, needle) in [
+        (
+            vec!["format-patch", "--relative=sub", "-1", "--stdout"],
+            "--relative is not supported",
+        ),
+        (
+            vec!["format-patch", "--all", "--stdout"],
+            "--all is not supported",
+        ),
+    ] {
+        let output = run_libra_command(&args, repo.path());
+        assert_eq!(output.status.code(), Some(128), "{args:?}");
+        let (_h, report) = parse_cli_error_stderr(&output.stderr);
+        assert_eq!(report.error_code, "LBR-UNSUPPORTED-001", "{args:?}");
+        assert!(
+            report.message.contains(needle),
+            "{args:?}: {}",
+            report.message
+        );
+    }
 }

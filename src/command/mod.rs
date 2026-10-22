@@ -467,7 +467,7 @@ fn open_nofollow(path: &Path) -> io::Result<File> {
 fn is_nofollow_symlink(error: &io::Error) -> bool {
     #[cfg(unix)]
     {
-        return error.raw_os_error() == Some(libc::ELOOP);
+        error.raw_os_error() == Some(libc::ELOOP)
     }
     #[cfg(not(unix))]
     {
@@ -1323,9 +1323,8 @@ mod tests {
         let _test_env = EnvGuard::set("LIBRA_TEST", "1");
         use std::io::Write as _;
         let reading = file.clone();
-        let worker = std::thread::spawn(move || {
-            read_worktree_blob_bytes_bounded(&reading, 1024 * 1024)
-        });
+        let worker =
+            std::thread::spawn(move || read_worktree_blob_bytes_bounded(&reading, 1024 * 1024));
         let started = std::time::Instant::now();
         while !pause.exists() {
             if started.elapsed() > std::time::Duration::from_secs(5) {

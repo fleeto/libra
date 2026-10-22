@@ -6,13 +6,17 @@
 
 use std::{ffi::OsStr, panic::AssertUnwindSafe, path::PathBuf};
 
+use git_internal::hash::{HashKind, ObjectHash};
 use libra::{
-    internal::db::{
-        self, DatabaseRole, SchemaCompatibility,
-        migration::{
-            Migration, MigrationError, MigrationRunner, builtin_migrations,
-            builtin_runner as all_builtin_runner,
-            run_builtin_migrations as run_all_builtin_migrations,
+    internal::{
+        ai::history::{agent_sessions_for_commit, link_agent_sessions_to_commit},
+        db::{
+            self, DatabaseRole, SchemaCompatibility,
+            migration::{
+                Migration, MigrationError, MigrationRunner, builtin_migrations,
+                builtin_runner as all_builtin_runner,
+                run_builtin_migrations as run_all_builtin_migrations,
+            },
         },
     },
     utils::test::{ConfigDbFixture, ScopedEnvVar},
@@ -318,8 +322,17 @@ async fn worktree_layout_capability_upgrade_is_metadata_only_and_idempotent() {
     .await
     .expect("seed existing repository data");
 
-    assert_eq!(runner.run_pending(&conn).await.unwrap(), [2026101902]);
-    assert!(runner.run_pending(&conn).await.unwrap().is_empty());
+    assert_eq!(
+        runner.run_pending_up_to(&conn, 2026101902).await.unwrap(),
+        [2026101902]
+    );
+    assert!(
+        runner
+            .run_pending_up_to(&conn, 2026101902)
+            .await
+            .unwrap()
+            .is_empty()
+    );
     let versions: Vec<i64> = conn
         .query_all_raw(Statement::from_string(
             conn.get_database_backend(),
@@ -346,9 +359,9 @@ async fn worktree_layout_capability_upgrade_is_metadata_only_and_idempotent() {
         db::schema::inspect_schema_for_connection(&conn, DatabaseRole::Repository)
             .await
             .unwrap(),
-        SchemaCompatibility::Compatible {
+        SchemaCompatibility::UpgradeRequired {
             current_version: Some(2026101902),
-            latest_version: Some(2026101902),
+            latest_version: 2026102201,
         }
     ));
 }
@@ -357,7 +370,11 @@ async fn worktree_layout_capability_upgrade_is_metadata_only_and_idempotent() {
 async fn worktree_layout_capability_refuses_rollback_before_any_mutation() {
     let (_dir, url, _path) = fresh_db_url();
     let conn = connect(&url).await;
-    run_all_builtin_migrations(&conn).await.unwrap();
+    all_builtin_runner()
+        .unwrap()
+        .run_pending_up_to(&conn, 2026101902)
+        .await
+        .unwrap();
     let runner = all_builtin_runner().unwrap();
     let error = runner.rollback_to(&conn, 2026092701).await.unwrap_err();
     assert!(matches!(
@@ -400,7 +417,7 @@ async fn worktree_layout_capability_is_present_in_a_fresh_repository() {
         db::schema::current_schema_version_for_role(&conn, DatabaseRole::Repository)
             .await
             .unwrap(),
-        Some(2026101902)
+        Some(2026102201)
     );
     conn.close().await.unwrap();
     let reopened =
@@ -409,6 +426,191 @@ async fn worktree_layout_capability_is_present_in_a_fresh_repository() {
             .expect("the current binary must reopen the capability-marked repository");
     assert!(table_exists(&reopened, "worktree_registry_capability").await);
     reopened.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn agent_session_commit_schema_is_repository_only_and_forward_only() {
+    let version = 2026102201;
+    let repository = db::schema::migrations_for_role(DatabaseRole::Repository);
+    assert_eq!(
+        repository.last().map(|migration| migration.version),
+        Some(version)
+    );
+    assert!(
+        repository
+            .last()
+            .is_some_and(|migration| migration.down.is_none())
+    );
+    for role in [
+        DatabaseRole::GlobalConfig,
+        DatabaseRole::SystemConfig,
+        DatabaseRole::Derived,
+    ] {
+        assert!(
+            db::schema::migrations_for_role(role)
+                .iter()
+                .all(|migration| migration.version != version)
+        );
+    }
+
+    for role in [DatabaseRole::GlobalConfig, DatabaseRole::SystemConfig] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.db");
+        let conn = db::create_database_for_role(path.to_str().unwrap(), role)
+            .await
+            .unwrap();
+        assert!(!table_exists(&conn, "agent_session_commit").await);
+        assert!(!table_exists(&conn, "schema_versions").await);
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("repository.db");
+    let conn = db::create_database_for_role(path.to_str().unwrap(), DatabaseRole::Repository)
+        .await
+        .unwrap();
+    assert!(table_exists(&conn, "agent_session_commit").await);
+    assert_eq!(
+        db::schema::current_schema_version_for_role(&conn, DatabaseRole::Repository)
+            .await
+            .unwrap(),
+        Some(version)
+    );
+    let error = all_builtin_runner()
+        .unwrap()
+        .rollback_to(&conn, 2026101902)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        MigrationError::IrreversibleMigration {
+            version: 2026102201,
+            name: "agent_session_commit"
+        }
+    ));
+    assert!(table_exists(&conn, "agent_session_commit").await);
+}
+
+#[tokio::test]
+async fn agent_session_commit_dao_is_idempotent_and_rolls_back_failed_batch() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("repository.db");
+    let conn = db::create_database_for_role(path.to_str().unwrap(), DatabaseRole::Repository)
+        .await
+        .unwrap();
+    conn.execute_unprepared(
+        "INSERT INTO agent_session (session_id, agent_kind, provider_session_id, state,
+            working_dir, started_at, last_event_at)
+         VALUES ('codex__one', 'codex', 'one', 'stopped', '/repo', 1, 1),
+                ('codex__two', 'codex', 'two', 'stopped', '/repo', 1, 1)",
+    )
+    .await
+    .unwrap();
+    let sha1 = ObjectHash::from_bytes_for_kind(HashKind::Sha1, &[0x11; 20]).unwrap();
+    let good = vec!["codex__one".to_string(), "codex__two".to_string()];
+    let missing = vec![good[0].clone(), "missing".to_string()];
+    assert!(
+        link_agent_sessions_to_commit(&conn, &missing, sha1)
+            .await
+            .is_err()
+    );
+    assert!(
+        agent_sessions_for_commit(&conn, sha1)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    link_agent_sessions_to_commit(&conn, &good, sha1)
+        .await
+        .unwrap();
+    link_agent_sessions_to_commit(&conn, &good, sha1)
+        .await
+        .unwrap();
+    assert_eq!(agent_sessions_for_commit(&conn, sha1).await.unwrap(), good);
+    assert!(
+        conn.execute_unprepared(
+            "INSERT INTO agent_session_commit (session_id, hash_kind, commit_oid)
+             VALUES ('codex__one', 'sha1', 'ABCDEF')"
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        conn.execute_unprepared(
+            "INSERT INTO agent_session_commit (session_id, hash_kind, commit_oid)
+             VALUES ('codex__one', 'sha1', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')"
+        )
+        .await
+        .is_err()
+    );
+    let blake3 = ObjectHash::from_bytes_for_kind(HashKind::Blake3, &[0x22; 32]).unwrap();
+    assert!(
+        agent_sessions_for_commit(&conn, blake3)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let sha256 = ObjectHash::from_bytes_for_kind(HashKind::Sha256, &[0x22; 32]).unwrap();
+    link_agent_sessions_to_commit(&conn, &good[..1], sha256)
+        .await
+        .unwrap();
+    assert_eq!(
+        agent_sessions_for_commit(&conn, sha256).await.unwrap(),
+        good[..1]
+    );
+    assert!(
+        agent_sessions_for_commit(&conn, blake3)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    link_agent_sessions_to_commit(&conn, &good[..1], blake3)
+        .await
+        .unwrap();
+    assert_eq!(
+        agent_sessions_for_commit(&conn, blake3).await.unwrap(),
+        good[..1]
+    );
+    assert!(
+        link_agent_sessions_to_commit(&conn, &vec!["codex__one".to_string(); 65], sha1)
+            .await
+            .is_err()
+    );
+    let mut additional = Vec::new();
+    for index in 0..63 {
+        let session_id = format!("codex__extra_{index}");
+        conn.execute_unprepared(&format!(
+            "INSERT INTO agent_session (session_id, agent_kind, provider_session_id, state,
+                working_dir, started_at, last_event_at)
+             VALUES ('{session_id}', 'codex', 'extra_{index}', 'stopped', '/repo', 1, 1)"
+        ))
+        .await
+        .unwrap();
+        additional.push(session_id);
+    }
+    link_agent_sessions_to_commit(&conn, &additional[..61], sha1)
+        .await
+        .unwrap();
+    assert_eq!(
+        agent_sessions_for_commit(&conn, sha1).await.unwrap().len(),
+        63
+    );
+    assert!(
+        link_agent_sessions_to_commit(&conn, &additional[61..], sha1)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        agent_sessions_for_commit(&conn, sha1).await.unwrap().len(),
+        63
+    );
+    conn.execute_unprepared("DELETE FROM agent_session WHERE session_id = 'codex__two'")
+        .await
+        .unwrap();
+    let remaining = agent_sessions_for_commit(&conn, sha1).await.unwrap();
+    assert_eq!(remaining.len(), 62);
+    assert!(remaining.contains(&"codex__one".to_string()));
+    assert!(!remaining.contains(&"codex__two".to_string()));
 }
 
 // ---------------------------------------------------------------------------

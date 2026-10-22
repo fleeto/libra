@@ -4343,7 +4343,10 @@ async fn opencode_legacy_capture_is_visible() {
     let human = String::from_utf8(human.stdout).unwrap();
     assert!(human.contains("legacy/unrecorded reasoning state"));
     assert!(human.contains("not evidence of complete capture or native origin"));
-    assert!(human.contains("session.inbox.delivered: installed (managed template)"));
+    assert!(
+        human.contains("session.inbox.delivered: installed (managed template)"),
+        "{human}"
+    );
     assert!(!human.contains("DOCTOR_PRIVATE_METADATA_CANARY"));
     assert!(!human.contains("DOCTOR_TRANSCRIPT_MUST_NOT_BE_RENDERED"));
     // Bound the new diagnosis independently of the general store scan. These

@@ -15,7 +15,7 @@ use chrono::{DateTime, Utc};
 use clap::{ArgGroup, Args};
 #[cfg(any(unix, windows))]
 use ring::rand::SecureRandom;
-use sea_orm::{ConnectionTrait, DatabaseConnection, Statement};
+use sea_orm::{ConnectionTrait, DatabaseConnection, Statement, TransactionTrait};
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
 
@@ -44,8 +44,7 @@ use crate::{
                 DetailedImportSummary, IMPORT_INDEX_REPAIR_MARKER_KEY,
                 IMPORT_INDEX_REPAIR_MARKER_SCHEMA_V2, ImportError, ImportIndexRepairMarker,
                 ImportProgressError, ImportRequest, ImportSummary, PreparedImportProjection,
-                identity_id as import_identity_id,
-                import_prepared_with_subagent_discovery_and_runtime,
+                identity_id as import_identity_id, import_prepared_with_retention,
                 is_import_source_commitment_v2, prepare_import_projection_with_reasoning,
                 restore_tombstone, session_is_tombstoned, validate_import_index_repair_marker,
             },
@@ -53,16 +52,24 @@ use crate::{
                 RegisteredHelperOutput, StrictBoundedRead, read_strictly_bounded,
                 registered_helper_command, run_registered_bounded_helper_until,
             },
+            capture::catalog::{CaptureCatalogStore, ReconciliationCatalogState},
             capture_scope::{
                 CaptureCommitDeadline, CaptureFinalCommitAuthorizationError, CaptureScope,
                 authorize_final_capture_commit,
             },
             observed_agents::{
-                AgentKind, AgentSessionCtx, TRANSCRIPT_READ_HARD_CAP_BYTES, TranscriptSource,
-                agent_for, claude_session_dir, claude_session_id_is_safe_path_component,
+                AgentKind, AgentSessionCtx, CodexRolloutScanLimit, TRANSCRIPT_READ_HARD_CAP_BYTES,
+                TranscriptSource, agent_for, claude_session_dir,
+                claude_session_id_is_safe_path_component,
+                codex_index::{self, ImportIndexOutcome, ImportSourceState, RecentScopeStatus},
                 compliance::{MAX_TRANSCRIPT_READ_BYTES_KEY, max_transcript_read_bytes_setting},
                 coverage::{encode_bounded_json, import_runtime_has_typed_turns},
-                find_codex_rollout, open_provider_directory_for_discovery,
+                find_codex_rollout_for_import,
+                live_capture::{
+                    LiveCaptureBinding, LiveCaptureContext, StoredSubagentSelection,
+                    SubagentDiscoveryLimits,
+                },
+                open_provider_directory_for_discovery,
                 opencode_export::{ExportLimits, authorized_trusted_sandboxed_export_until},
                 reasoning::{
                     EncodedTransportKey, ImportTransportContext, ImportTransportDto,
@@ -70,6 +77,7 @@ use crate::{
                 },
                 resolve_import_transcript_source_until, resolve_session_file,
             },
+            provider_index_io,
         },
         db,
         metadata::{MetadataKv, MetadataScope, MetadataValueType},
@@ -82,6 +90,11 @@ use crate::{
     },
 };
 
+#[cfg(all(test, feature = "test-live-agent"))]
+tokio::task_local! {
+    static INDEX_SOURCE_READS: std::sync::Arc<std::sync::atomic::AtomicUsize>;
+}
+
 pub const AGENT_IMPORT_EXAMPLES: &str = "\
 EXAMPLES:
     libra agent import --session <id> --agent claude-code --yes
@@ -89,7 +102,7 @@ EXAMPLES:
     libra agent import --session <id> --agent opencode --yes
     libra agent import --path ~/.claude/projects/<project>/<id>.jsonl --agent claude-code --yes
     libra agent import --since 2026-07-01T00:00:00Z --agent codex --limit 20 --yes
-    libra agent import --all --agent claude-code --limit 20 --yes";
+    libra agent import --all --agent claude-code --limit 20 --yes\n    libra agent import --codex-index-backup ./closed-index.sqlite --limit 20 --yes";
 
 const DEFAULT_IMPORT_LIMIT: usize = 20;
 const MAX_IMPORT_LIMIT: usize = 100;
@@ -330,7 +343,7 @@ fn remaining_candidate_read_allowance(source_read_cap: u64, parent_bytes: u64) -
 #[derive(Args, Debug)]
 #[command(
     after_help = AGENT_IMPORT_EXAMPLES,
-    group(ArgGroup::new("selector").required(true).multiple(false).args(["session", "path", "since", "all"]))
+    group(ArgGroup::new("selector").required(true).multiple(false).args(["session", "path", "since", "all", "codex_index_backup"]))
 )]
 pub struct ImportArgs {
     /// Import one provider session id.
@@ -339,12 +352,15 @@ pub struct ImportArgs {
     /// Import one transcript below the selected provider root.
     #[arg(long, value_name = "PATH")]
     pub path: Option<PathBuf>,
-    /// Discover sessions modified since this RFC3339 timestamp.
+    /// Discover sessions since this RFC3339 timestamp (Codex uses session_meta time).
     #[arg(long, value_name = "RFC3339")]
     pub since: Option<String>,
     /// Discover all bounded local Claude/Codex session sources.
     #[arg(long)]
     pub all: bool,
+    /// Backfill absent Codex sessions from an explicit closed full-history index backup.
+    #[arg(long, value_name = "PATH")]
+    pub codex_index_backup: Option<PathBuf>,
     /// Provider filter (`claude-code`, `codex`, or `opencode`).
     #[arg(long, value_name = "NAME")]
     pub agent: Option<String>,
@@ -358,7 +374,7 @@ pub struct ImportArgs {
     #[arg(long)]
     pub yes: bool,
     /// Explicitly remove an existing local anti-resurrection tombstone.
-    #[arg(long, requires = "yes")]
+    #[arg(long, requires = "yes", conflicts_with = "codex_index_backup")]
     pub restore_erased: bool,
 }
 
@@ -368,6 +384,12 @@ struct Candidate {
     provider_session_id: String,
     path: Option<PathBuf>,
 }
+
+type DiscoveryBatch = (
+    Vec<Candidate>,
+    Option<usize>,
+    Vec<(String, DiscoveryRejection)>,
+);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct WirePath {
@@ -459,6 +481,7 @@ enum DiscoveryHelperResponse {
     Ok {
         candidates: Vec<DiscoveryCandidateWire>,
         next_cursor: Option<usize>,
+        rejected: Vec<(String, DiscoveryRejection)>,
     },
     Error {
         reason: DiscoveryRejection,
@@ -479,8 +502,23 @@ enum DiscoveryRejection {
     CursorOutOfRange,
     ClaudeProviderRoot,
     CodexProviderRoot,
+    CodexUnknownSessionTime,
+    CodexSourceUnreadable,
+    CodexDiscoveryBudgetExceeded,
     DeadlineExceeded,
 }
+
+#[derive(Debug, thiserror::Error)]
+#[error("Codex session_meta has no timestamp")]
+struct CodexDiscoveryUnknownTime;
+
+#[derive(Debug, thiserror::Error)]
+#[error("Codex cumulative discovery header budget exceeded")]
+struct CodexDiscoveryBudgetExceeded;
+
+#[derive(Debug, thiserror::Error)]
+#[error("Codex discovery entry budget exceeded")]
+struct CodexDiscoveryEntryBudgetExceeded;
 
 impl DiscoveryRejection {
     /// Classify a provider discovery failure without retaining its chain.
@@ -490,6 +528,17 @@ impl DiscoveryRejection {
             Some(ImportError::DeadlineExceeded)
         ) {
             Self::DeadlineExceeded
+        } else if error.downcast_ref::<CodexDiscoveryUnknownTime>().is_some() {
+            Self::CodexUnknownSessionTime
+        } else if error
+            .downcast_ref::<CodexDiscoveryBudgetExceeded>()
+            .is_some()
+            || error
+                .downcast_ref::<CodexDiscoveryEntryBudgetExceeded>()
+                .is_some()
+            || error.downcast_ref::<CodexRolloutScanLimit>().is_some()
+        {
+            Self::CodexDiscoveryBudgetExceeded
         } else {
             fallback
         }
@@ -521,6 +570,18 @@ impl DiscoveryRejection {
                 "Codex session discovery failed within its configured provider root",
             )
             .with_stable_code(StableErrorCode::AgentTranscriptAuthorizationMissing),
+            Self::CodexUnknownSessionTime => CliError::fatal(
+                "Codex session_meta has no timestamp; --since cannot use filesystem mtime. Inspect the rollout and import it with --session or --path",
+            )
+            .with_stable_code(StableErrorCode::AgentTranscriptAuthorizationMissing),
+            Self::CodexSourceUnreadable => CliError::fatal(
+                "Codex rollout header could not be read; inspect source permissions and retry with --session or --path",
+            )
+            .with_stable_code(StableErrorCode::AgentTranscriptAuthorizationMissing),
+            Self::CodexDiscoveryBudgetExceeded => CliError::fatal(
+                "Codex discovery exceeded its 256 MiB header, 4096 unfilterable-record, or directory entry budget; import a specific rollout with --path, or use a closed Codex index backup for paged history",
+            )
+            .with_stable_code(StableErrorCode::AgentImportPartialBatch),
             Self::DeadlineExceeded => {
                 CliError::fatal("agent import discovery exceeded its total execution deadline")
                     .with_stable_code(StableErrorCode::AgentImportPartialBatch)
@@ -710,6 +771,12 @@ fn validate_prepared_runtime_response(
     projection: &PreparedImportProjection,
     native_present: bool,
 ) -> Result<()> {
+    if projection.codex_retention.is_some() && (kind != AgentKind::Codex || native_present) {
+        return Err(ImportError::AuthorizedReaderFailed.into());
+    }
+    if kind == AgentKind::Codex && projection.codex_retention.is_none() {
+        return Err(ImportError::AuthorizedReaderFailed.into());
+    }
     match (kind, projection.coverage_runtime.as_ref()) {
         (AgentKind::OpenCode, Some(dto))
             if !native_present || !import_runtime_has_typed_turns(dto) =>
@@ -784,12 +851,15 @@ struct ImportIdentityFence {
     fence_token: i64,
 }
 
+struct PreparedCandidate {
+    request: ImportRequest,
+    native_reasoning: Option<NativeProvenReasoning>,
+    coverage_runtime: Option<crate::internal::ai::capture::snapshot::CaptureCoverageRuntime>,
+    codex_retention: Option<crate::internal::ai::observed_agents::codex_reasoning::CodexRetention>,
+}
+
 struct PreparedCandidateOutcome {
-    request: Result<(
-        ImportRequest,
-        Option<NativeProvenReasoning>,
-        Option<crate::internal::ai::capture::snapshot::CaptureCoverageRuntime>,
-    )>,
+    request: Result<PreparedCandidate>,
     raw_bytes: u64,
 }
 
@@ -803,6 +873,18 @@ struct BatchOutput {
     skipped: Vec<BatchSkip>,
     failures: Vec<BatchFailure>,
     next_cursor: Option<usize>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    existing: Vec<BatchExisting>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    warnings: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct BatchExisting {
+    status: &'static str,
+    agent_kind: String,
+    session_id: String,
+    selection_reason: &'static str,
 }
 
 #[derive(Debug, Serialize)]
@@ -844,6 +926,8 @@ struct BatchSkip {
     agent_kind: String,
     session_id: String,
     reason_code: StableErrorCode,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason_key: Option<&'static str>,
 }
 
 #[derive(Debug, Serialize)]
@@ -852,6 +936,8 @@ struct BatchFailure {
     agent_kind: String,
     session_id: String,
     error_code: StableErrorCode,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason_key: Option<&'static str>,
 }
 
 fn importable_kind_from_slug(slug: &str) -> Option<AgentKind> {
@@ -1047,7 +1133,11 @@ fn discovery_entry_kind_at(
         )
     };
     if result < 0 {
-        return Err(std::io::Error::last_os_error()).context("inspect provider discovery entry");
+        let error = std::io::Error::last_os_error();
+        if error.kind() == std::io::ErrorKind::NotFound {
+            return Ok(DiscoveryEntryKind::Other);
+        }
+        return Err(error).context("inspect provider discovery entry");
     }
     // SAFETY: fstatat succeeded and initialized the structure.
     let mode = unsafe { stat.assume_init() }.st_mode & libc::S_IFMT;
@@ -1091,8 +1181,11 @@ fn open_discovery_entry_at(
     // descriptor is immediately transferred to File.
     let fd = unsafe { libc::openat(directory.as_raw_fd(), name.as_ptr(), flags) };
     if fd < 0 {
-        return Err(std::io::Error::last_os_error())
-            .context("open provider discovery entry without following links");
+        let error = std::io::Error::last_os_error();
+        if error.kind() == std::io::ErrorKind::NotFound {
+            return Ok(None);
+        }
+        return Err(error).context("open provider discovery entry without following links");
     }
     // SAFETY: fd is freshly returned by openat and transferred once.
     let file = unsafe { std::fs::File::from_raw_fd(fd) };
@@ -1127,7 +1220,7 @@ fn read_discovery_names(
             .checked_add(1)
             .context("provider discovery entry counter overflow")?;
         if *scanned > 20_000 {
-            anyhow::bail!("{label} discovery exceeded its 20000-entry safety bound");
+            return Err(CodexDiscoveryEntryBudgetExceeded.into());
         }
         names.push(
             entry
@@ -1135,6 +1228,7 @@ fn read_discovery_names(
                 .file_name,
         );
     }
+    names.sort_unstable_by(|left, right| right.cmp(left));
     ensure_before_deadline(deadline)?;
     Ok(names)
 }
@@ -1235,112 +1329,426 @@ fn codex_sessions_root() -> Option<PathBuf> {
     dirs::home_dir().map(|home| home.join(".codex").join("sessions"))
 }
 
+const CODEX_DISCOVERY_HEADER_CAP: u64 = 1024 * 1024;
+const CODEX_DISCOVERY_HEADER_TOTAL_CAP: u64 = 256 * 1024 * 1024;
+const CODEX_DISCOVERY_REJECTION_CAP: usize = 4096;
+
+/// Read only the bounded first record from an already authorized, pinned
+/// rollout descriptor. Its session timestamp, rather than filesystem mtime,
+/// decides `--since`; a missing timestamp cannot be guessed from an archive
+/// move or a copied file.
+fn codex_discovery_session_time(
+    file: std::fs::File,
+    expected_session_id: &str,
+    header_bytes: &mut u64,
+) -> Result<Option<i64>> {
+    use std::io::{BufRead, Read};
+
+    let mut reader = std::io::BufReader::new(file.take(CODEX_DISCOVERY_HEADER_CAP + 1));
+    let mut first = Vec::new();
+    let read_result = reader.read_until(b'\n', &mut first);
+    // BufReader can prefetch beyond the first newline. Charge every byte
+    // consumed from the held descriptor, including prefetch and failed reads.
+    let consumed = CODEX_DISCOVERY_HEADER_CAP + 1 - reader.get_ref().limit();
+    *header_bytes = header_bytes
+        .checked_add(consumed)
+        .context("Codex discovery header byte counter overflow")?;
+    if *header_bytes > CODEX_DISCOVERY_HEADER_TOTAL_CAP {
+        return Err(CodexDiscoveryBudgetExceeded.into());
+    }
+    read_result.context("read bounded Codex session header")?;
+    if first.len() as u64 > CODEX_DISCOVERY_HEADER_CAP {
+        anyhow::bail!("Codex session header exceeds the 1 MiB discovery bound");
+    }
+    let header = crate::internal::ai::observed_agents::parse_canon_value(&first)
+        .context("decode Codex session header with unique JSON keys")?;
+    if header.get("type").and_then(|value| value.as_str()) != Some("session_meta") {
+        anyhow::bail!(
+            "Codex rollout has no first-record session_meta; use an explicit source after inspection"
+        );
+    }
+    let payload = header
+        .get("payload")
+        .context("Codex session header has no payload")?;
+    if payload.get("id").and_then(|value| value.as_str()) != Some(expected_session_id) {
+        anyhow::bail!("Codex session header id does not match its rollout filename");
+    }
+    if let Some(version) = payload.get("cli_version") {
+        let version = version
+            .as_str()
+            .context("Codex session header cli_version is not text")?;
+        if version.is_empty() || version.len() > 128 || version.contains('\0') {
+            anyhow::bail!("Codex session header has an invalid cli_version");
+        }
+    }
+    let timestamp = payload
+        .get("timestamp")
+        .or_else(|| header.get("timestamp"))
+        .map(|value| {
+            let value = value
+                .as_str()
+                .context("Codex session_meta timestamp is not text")?;
+            DateTime::parse_from_rfc3339(value)
+                .map(|timestamp| timestamp.timestamp())
+                .context("Codex session_meta timestamp is not RFC3339")
+        })
+        .transpose()?;
+    Ok(timestamp)
+}
+
 #[cfg_attr(windows, allow(unused_variables))]
-fn discover_codex(since: Option<i64>, deadline: Instant) -> Result<Vec<Candidate>> {
+fn discover_codex(
+    since: Option<i64>,
+    deadline: Instant,
+    rejected: &mut Vec<(String, DiscoveryRejection)>,
+) -> Result<Vec<Candidate>> {
     ensure_before_deadline(deadline)?;
     let Some(root) = codex_sessions_root() else {
         return Ok(Vec::new());
     };
     let adapter = agent_for(AgentKind::Codex);
-    let Some(directory) = open_provider_directory_for_discovery(adapter, &root)? else {
-        return Ok(Vec::new());
-    };
+    let archive_root = root.with_file_name("archived_sessions");
+    let directory = open_provider_directory_for_discovery(adapter, &root)?;
+    let archive_directory = open_provider_directory_for_discovery(adapter, &archive_root)?;
+    let mut seen = std::collections::HashSet::new();
     #[cfg(unix)]
-    return discover_codex_unix(&root, &directory, since, deadline);
+    {
+        let mut scanned = 0usize;
+        let mut header_bytes = 0u64;
+        let mut selection = CodexDiscoverySelection {
+            rejected,
+            seen: &mut seen,
+        };
+        let mut candidates = if let Some(directory) = directory.as_ref() {
+            discover_codex_unix(
+                &root,
+                directory,
+                since,
+                deadline,
+                &mut scanned,
+                &mut header_bytes,
+                &mut selection,
+            )?
+        } else {
+            Vec::new()
+        };
+        if let Some(archive_directory) = archive_directory.as_ref() {
+            // The flat archive has its own entry budget; active history must
+            // not spend the allowance before archive traversal starts.
+            scanned = 0;
+            candidates.extend(discover_codex_archive_unix(
+                &archive_root,
+                archive_directory,
+                since,
+                deadline,
+                &mut scanned,
+                &mut header_bytes,
+                &mut selection,
+            )?);
+        }
+        order_codex_discovery_candidates(&mut candidates);
+        Ok(candidates)
+    }
     #[cfg(not(unix))]
     {
+        // On Windows these pins use strict directory sharing. Discovery only
+        // needs the existence proof here; release them before Codex can move
+        // a completed rollout into archived_sessions.
+        let active_exists = directory.is_some();
+        let archive_exists = archive_directory.is_some();
+        drop(directory);
+        drop(archive_directory);
         let pinned_root = root.clone();
         let mut scanned = 0usize;
+        let mut header_bytes = 0u64;
         let mut candidates = Vec::new();
-        for year in read_codex_discovery_directory(&pinned_root, deadline, &mut scanned)? {
-            let Some(year_name) = year.file_name().to_str().map(str::to_owned) else {
-                continue;
-            };
-            if year_name.len() != 4 || !year_name.bytes().all(|byte| byte.is_ascii_digit()) {
-                continue;
-            }
-            let Some(year_number) = year_name.parse::<i32>().ok().filter(|year| *year > 0) else {
-                continue;
-            };
-            if !codex_discovery_real_directory(&year)? {
-                continue;
-            }
-            for month in read_codex_discovery_directory(&year.path(), deadline, &mut scanned)? {
-                let Some(month_name) = month.file_name().to_str().map(str::to_owned) else {
+        if active_exists {
+            for year in read_codex_discovery_directory(&pinned_root, deadline, &mut scanned)? {
+                let Some(year_name) = year.file_name().to_str().map(str::to_owned) else {
                     continue;
                 };
-                let Some(month_number) = month_name
-                    .parse::<u32>()
-                    .ok()
-                    .filter(|month| month_name.len() == 2 && (1..=12).contains(month))
+                if year_name.len() != 4 || !year_name.bytes().all(|byte| byte.is_ascii_digit()) {
+                    continue;
+                }
+                let Some(year_number) = year_name.parse::<i32>().ok().filter(|year| *year > 0)
                 else {
                     continue;
                 };
-                if !codex_discovery_real_directory(&month)? {
+                if !codex_discovery_real_directory(&year)? {
                     continue;
                 }
-                for day in read_codex_discovery_directory(&month.path(), deadline, &mut scanned)? {
-                    let Some(day_name) = day.file_name().to_str().map(str::to_owned) else {
+                for month in read_codex_discovery_directory(&year.path(), deadline, &mut scanned)? {
+                    let Some(month_name) = month.file_name().to_str().map(str::to_owned) else {
                         continue;
                     };
-                    let valid_day = day_name.parse::<u32>().ok().is_some_and(|day| {
-                        day_name.len() == 2
-                            && chrono::NaiveDate::from_ymd_opt(year_number, month_number, day)
-                                .is_some()
-                    });
-                    if !valid_day {
+                    let Some(month_number) = month_name
+                        .parse::<u32>()
+                        .ok()
+                        .filter(|month| month_name.len() == 2 && (1..=12).contains(month))
+                    else {
+                        continue;
+                    };
+                    if !codex_discovery_real_directory(&month)? {
                         continue;
                     }
-                    if !codex_discovery_real_directory(&day)? {
-                        continue;
-                    }
-                    for file in read_codex_discovery_directory(&day.path(), deadline, &mut scanned)?
+                    for day in
+                        read_codex_discovery_directory(&month.path(), deadline, &mut scanned)?
                     {
-                        let file_type = file
-                            .file_type()
-                            .context("inspect Codex rollout discovery entry")?;
-                        if file_type.is_symlink() {
-                            anyhow::bail!(
-                                "Codex discovery encountered a symlinked rollout (fail-closed)"
-                            );
-                        }
-                        if !file_type.is_file() {
-                            continue;
-                        }
-                        let file_name = file.file_name();
-                        let pinned_path = file.path();
-                        if pinned_path.extension().and_then(|value| value.to_str()) != Some("jsonl")
-                        {
-                            continue;
-                        }
-                        if let Some(boundary) = since
-                            && metadata_modified_at(
-                                &file.metadata().context("inspect pinned Codex rollout")?,
-                            )? < boundary
-                        {
-                            continue;
-                        }
-                        let logical_path = root
-                            .join(&year_name)
-                            .join(&month_name)
-                            .join(&day_name)
-                            .join(&file_name);
-                        let Some(provider_session_id) =
-                            codex_session_id_from_filename(&logical_path)
-                        else {
+                        let Some(day_name) = day.file_name().to_str().map(str::to_owned) else {
                             continue;
                         };
-                        candidates.push(Candidate {
-                            kind: AgentKind::Codex,
-                            provider_session_id,
-                            path: Some(logical_path),
+                        let valid_day = day_name.parse::<u32>().ok().is_some_and(|day| {
+                            day_name.len() == 2
+                                && chrono::NaiveDate::from_ymd_opt(year_number, month_number, day)
+                                    .is_some()
                         });
+                        if !valid_day {
+                            continue;
+                        }
+                        if !codex_discovery_real_directory(&day)? {
+                            continue;
+                        }
+                        for file in
+                            read_codex_discovery_directory(&day.path(), deadline, &mut scanned)?
+                        {
+                            ensure_before_deadline(deadline)?;
+                            let file_type = match file.file_type() {
+                                Ok(kind) => kind,
+                                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                                    continue;
+                                }
+                                Err(error) => {
+                                    return Err(error)
+                                        .context("inspect Codex rollout discovery entry");
+                                }
+                            };
+                            if file_type.is_symlink() {
+                                anyhow::bail!(
+                                    "Codex discovery encountered a symlinked rollout (fail-closed)"
+                                );
+                            }
+                            if !file_type.is_file() {
+                                continue;
+                            }
+                            let file_name = file.file_name();
+                            let pinned_path = file.path();
+                            if pinned_path.extension().and_then(|value| value.to_str())
+                                != Some("jsonl")
+                                || !file_name.to_string_lossy().starts_with("rollout-")
+                            {
+                                continue;
+                            }
+                            let logical_path = root
+                                .join(&year_name)
+                                .join(&month_name)
+                                .join(&day_name)
+                                .join(&file_name);
+                            let Some(provider_session_id) =
+                                codex_session_id_from_filename(&logical_path)
+                            else {
+                                continue;
+                            };
+                            if !seen.insert(provider_session_id.clone()) {
+                                continue;
+                            }
+                            if since.is_some() {
+                                let opened = match codex_discovery_open_file(&pinned_path) {
+                                    Ok(opened) => opened,
+                                    Err(error)
+                                        if error.downcast_ref::<std::io::Error>().is_some_and(
+                                            |cause| cause.kind() == std::io::ErrorKind::NotFound,
+                                        ) =>
+                                    {
+                                        seen.remove(&provider_session_id);
+                                        continue;
+                                    }
+                                    Err(error) => return Err(error),
+                                };
+                                if !codex_discovery_filter(
+                                    opened,
+                                    &provider_session_id,
+                                    since,
+                                    &mut header_bytes,
+                                    rejected,
+                                )? {
+                                    continue;
+                                }
+                                ensure_before_deadline(deadline)?;
+                            }
+                            candidates.push(Candidate {
+                                kind: AgentKind::Codex,
+                                provider_session_id,
+                                path: Some(logical_path),
+                            });
+                        }
                     }
                 }
             }
         }
+        if archive_exists {
+            scanned = 0;
+            for file in read_codex_discovery_directory(&archive_root, deadline, &mut scanned)? {
+                ensure_before_deadline(deadline)?;
+                let file_type = match file.file_type() {
+                    Ok(kind) => kind,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(error) => return Err(error).context("inspect archived Codex rollout"),
+                };
+                if file_type.is_symlink() {
+                    anyhow::bail!(
+                        "Codex discovery encountered a symlinked archived rollout (fail-closed)"
+                    );
+                }
+                if !file_type.is_file() {
+                    continue;
+                }
+                let path = file.path();
+                if path.extension().and_then(|value| value.to_str()) != Some("jsonl")
+                    || !file.file_name().to_string_lossy().starts_with("rollout-")
+                {
+                    continue;
+                }
+                let Some(provider_session_id) = codex_session_id_from_filename(&path) else {
+                    continue;
+                };
+                if !seen.insert(provider_session_id.clone()) {
+                    continue;
+                }
+                if since.is_some() {
+                    let opened = match codex_discovery_open_file(&path) {
+                        Ok(opened) => opened,
+                        Err(error)
+                            if error.downcast_ref::<std::io::Error>().is_some_and(|cause| {
+                                cause.kind() == std::io::ErrorKind::NotFound
+                            }) =>
+                        {
+                            seen.remove(&provider_session_id);
+                            continue;
+                        }
+                        Err(error) => return Err(error),
+                    };
+                    if !codex_discovery_filter(
+                        opened,
+                        &provider_session_id,
+                        since,
+                        &mut header_bytes,
+                        rejected,
+                    )? {
+                        continue;
+                    }
+                    ensure_before_deadline(deadline)?;
+                }
+                candidates.push(Candidate {
+                    kind: AgentKind::Codex,
+                    provider_session_id,
+                    path: Some(path),
+                });
+            }
+        }
+        order_codex_discovery_candidates(&mut candidates);
         Ok(candidates)
     }
+}
+
+fn order_codex_discovery_candidates(candidates: &mut Vec<Candidate>) {
+    let archived = |candidate: &Candidate| {
+        candidate
+            .path
+            .as_ref()
+            .and_then(|path| path.parent())
+            .and_then(|parent| parent.file_name())
+            .is_some_and(|name| name == "archived_sessions")
+    };
+    // An active copy is authoritative when Codex is between archive move
+    // phases. Within either root, the rollout timestamp in the filename
+    // provides a deterministic newest-first tie break for duplicate IDs.
+    candidates.sort_by(|left, right| {
+        left.provider_session_id
+            .cmp(&right.provider_session_id)
+            .then_with(|| archived(left).cmp(&archived(right)))
+            .then_with(|| right.path.cmp(&left.path))
+    });
+    candidates.dedup_by(|left, right| left.provider_session_id == right.provider_session_id);
+}
+
+fn codex_discovery_time_matches(session_time: Option<i64>, since: Option<i64>) -> Result<bool> {
+    match (session_time, since) {
+        (Some(timestamp), Some(boundary)) => Ok(timestamp >= boundary),
+        (None, Some(_)) => Err(CodexDiscoveryUnknownTime.into()),
+        (_, None) => Ok(true),
+    }
+}
+
+fn codex_discovery_filter(
+    file: std::fs::File,
+    session_id: &str,
+    since: Option<i64>,
+    header_bytes: &mut u64,
+    rejected: &mut Vec<(String, DiscoveryRejection)>,
+) -> Result<bool> {
+    let Some(boundary) = since else {
+        return Ok(true);
+    };
+    let outcome = codex_discovery_session_time(file, session_id, header_bytes)
+        .and_then(|timestamp| codex_discovery_time_matches(timestamp, Some(boundary)));
+    match outcome {
+        Ok(include) => Ok(include),
+        Err(error)
+            if error
+                .downcast_ref::<CodexDiscoveryBudgetExceeded>()
+                .is_some() =>
+        {
+            Err(error)
+        }
+        Err(error) => {
+            let fallback = if error.downcast_ref::<std::io::Error>().is_some() {
+                DiscoveryRejection::CodexSourceUnreadable
+            } else {
+                DiscoveryRejection::CodexProviderRoot
+            };
+            record_codex_discovery_rejection(
+                rejected,
+                session_id,
+                DiscoveryRejection::from_provider_error(&error, fallback),
+            )?;
+            Ok(false)
+        }
+    }
+}
+
+fn record_codex_discovery_rejection(
+    rejected: &mut Vec<(String, DiscoveryRejection)>,
+    session_id: &str,
+    reason: DiscoveryRejection,
+) -> Result<()> {
+    if rejected.len() >= CODEX_DISCOVERY_REJECTION_CAP {
+        return Err(CodexDiscoveryBudgetExceeded.into());
+    }
+    rejected.push((session_id.to_owned(), reason));
+    Ok(())
+}
+
+#[cfg(windows)]
+fn codex_discovery_open_file(path: &Path) -> Result<std::fs::File> {
+    let parent = path
+        .parent()
+        .context("Codex rollout has no parent directory")?;
+    let name = path.file_name().context("Codex rollout has no filename")?;
+    let pinned = crate::utils::windows_fs::open_tree(parent)
+        .context("pin Codex rollout parent without reparse points")?;
+    crate::utils::windows_fs::open_live_source_at(&pinned, name)
+        .context("open Codex rollout without following a reparse point")
+}
+
+#[cfg(not(any(unix, windows)))]
+fn codex_discovery_open_file(path: &Path) -> Result<std::fs::File> {
+    std::fs::File::open(path).context("open Codex rollout for bounded header validation")
+}
+
+#[cfg(unix)]
+struct CodexDiscoverySelection<'a> {
+    rejected: &'a mut Vec<(String, DiscoveryRejection)>,
+    seen: &'a mut std::collections::HashSet<String>,
 }
 
 #[cfg(unix)]
@@ -1349,10 +1757,12 @@ fn discover_codex_unix(
     directory: &std::fs::File,
     since: Option<i64>,
     deadline: Instant,
+    scanned: &mut usize,
+    header_bytes: &mut u64,
+    selection: &mut CodexDiscoverySelection<'_>,
 ) -> Result<Vec<Candidate>> {
-    let mut scanned = 0usize;
     let mut candidates = Vec::new();
-    for year_name in read_discovery_names(directory, "Codex rollout", deadline, &mut scanned)? {
+    for year_name in read_discovery_names(directory, "Codex rollout", deadline, scanned)? {
         let Some(year_text) = year_name.to_str() else {
             continue;
         };
@@ -1367,7 +1777,7 @@ fn discover_codex_unix(
         else {
             continue;
         };
-        for month_name in read_discovery_names(&year, "Codex rollout", deadline, &mut scanned)? {
+        for month_name in read_discovery_names(&year, "Codex rollout", deadline, scanned)? {
             let Some(month_text) = month_name.to_str() else {
                 continue;
             };
@@ -1383,7 +1793,7 @@ fn discover_codex_unix(
             else {
                 continue;
             };
-            for day_name in read_discovery_names(&month, "Codex rollout", deadline, &mut scanned)? {
+            for day_name in read_discovery_names(&month, "Codex rollout", deadline, scanned)? {
                 let Some(day_text) = day_name.to_str() else {
                     continue;
                 };
@@ -1399,26 +1809,15 @@ fn discover_codex_unix(
                 else {
                     continue;
                 };
-                for file_name in
-                    read_discovery_names(&day, "Codex rollout", deadline, &mut scanned)?
-                {
-                    let Some(file) =
-                        open_discovery_entry_at(&day, &file_name, DiscoveryEntryKind::File)?
-                    else {
-                        continue;
-                    };
+                for file_name in read_discovery_names(&day, "Codex rollout", deadline, scanned)? {
+                    ensure_before_deadline(deadline)?;
                     let logical_path = logical_root
                         .join(&year_name)
                         .join(&month_name)
                         .join(&day_name)
                         .join(&file_name);
-                    if logical_path.extension().and_then(|value| value.to_str()) != Some("jsonl") {
-                        continue;
-                    }
-                    if let Some(boundary) = since
-                        && metadata_modified_at(
-                            &file.metadata().context("inspect opened Codex rollout")?,
-                        )? < boundary
+                    if logical_path.extension().and_then(|value| value.to_str()) != Some("jsonl")
+                        || !file_name.to_string_lossy().starts_with("rollout-")
                     {
                         continue;
                     }
@@ -1426,6 +1825,25 @@ fn discover_codex_unix(
                     else {
                         continue;
                     };
+                    if !selection.seen.insert(provider_session_id.clone()) {
+                        continue;
+                    }
+                    let Some(file) =
+                        open_discovery_entry_at(&day, &file_name, DiscoveryEntryKind::File)?
+                    else {
+                        selection.seen.remove(&provider_session_id);
+                        continue;
+                    };
+                    if !codex_discovery_filter(
+                        file,
+                        &provider_session_id,
+                        since,
+                        header_bytes,
+                        selection.rejected,
+                    )? {
+                        continue;
+                    }
+                    ensure_before_deadline(deadline)?;
                     candidates.push(Candidate {
                         kind: AgentKind::Codex,
                         provider_session_id,
@@ -1434,6 +1852,56 @@ fn discover_codex_unix(
                 }
             }
         }
+    }
+    Ok(candidates)
+}
+
+#[cfg(unix)]
+fn discover_codex_archive_unix(
+    logical_root: &Path,
+    directory: &std::fs::File,
+    since: Option<i64>,
+    deadline: Instant,
+    scanned: &mut usize,
+    header_bytes: &mut u64,
+    selection: &mut CodexDiscoverySelection<'_>,
+) -> Result<Vec<Candidate>> {
+    let mut candidates = Vec::new();
+    for name in read_discovery_names(directory, "Codex archive", deadline, scanned)? {
+        ensure_before_deadline(deadline)?;
+        let logical_path = logical_root.join(&name);
+        if logical_path.extension().and_then(|value| value.to_str()) != Some("jsonl")
+            || !name.to_string_lossy().starts_with("rollout-")
+        {
+            continue;
+        }
+        let Some(provider_session_id) = codex_session_id_from_filename(&logical_path) else {
+            continue;
+        };
+        if !selection.seen.insert(provider_session_id.clone()) {
+            continue;
+        }
+        let Some(file) = open_discovery_entry_at(directory, &name, DiscoveryEntryKind::File)?
+        else {
+            selection.seen.remove(&provider_session_id);
+            continue;
+        };
+        let include = codex_discovery_filter(
+            file,
+            &provider_session_id,
+            since,
+            header_bytes,
+            selection.rejected,
+        )?;
+        ensure_before_deadline(deadline)?;
+        if !include {
+            continue;
+        }
+        candidates.push(Candidate {
+            kind: AgentKind::Codex,
+            provider_session_id,
+            path: Some(logical_path),
+        });
     }
     Ok(candidates)
 }
@@ -1455,7 +1923,7 @@ fn read_codex_discovery_directory(
             .checked_add(1)
             .context("Codex discovery entry counter overflow")?;
         if *scanned > 20_000 {
-            anyhow::bail!("Codex discovery exceeded its 20000-entry safety bound");
+            return Err(CodexDiscoveryEntryBudgetExceeded.into());
         }
         entries.push(
             entry
@@ -1463,6 +1931,7 @@ fn read_codex_discovery_directory(
         );
         ensure_before_deadline(deadline)?;
     }
+    entries.sort_unstable_by(|left, right| right.file_name().cmp(&left.file_name()));
     Ok(entries)
 }
 
@@ -1554,19 +2023,20 @@ fn discover(
     args: &ImportArgs,
     repo_root: &Path,
     deadline: Instant,
-) -> Result<(Vec<Candidate>, Option<usize>), DiscoveryRejection> {
+) -> Result<DiscoveryBatch, DiscoveryRejection> {
     ensure_discovery_before_deadline(deadline)?;
     let (filter, since) = match validate_discovery_selector(args)
         .map_err(|_| DiscoveryRejection::SelectorRejected)?
     {
-        DiscoverySelector::Path(candidate) => return Ok((vec![candidate], None)),
+        DiscoverySelector::Path(candidate) => return Ok((vec![candidate], None, Vec::new())),
         DiscoverySelector::Session { session_id, filter } => {
             return discover_session(&session_id, filter, repo_root, deadline)
-                .map(|candidates| (candidates, None));
+                .map(|candidates| (candidates, None, Vec::new()));
         }
         DiscoverySelector::Batch { filter, since } => (filter, since),
     };
     let mut candidates = Vec::new();
+    let mut rejected = Vec::new();
     if filter.is_none() || filter == Some(AgentKind::ClaudeCode) {
         candidates.extend(
             discover_claude(repo_root, since, deadline).map_err(|error| {
@@ -1578,9 +2048,14 @@ fn discover(
         );
     }
     if filter.is_none() || filter == Some(AgentKind::Codex) {
-        candidates.extend(discover_codex(since, deadline).map_err(|error| {
-            DiscoveryRejection::from_provider_error(&error, DiscoveryRejection::CodexProviderRoot)
-        })?);
+        candidates.extend(
+            discover_codex(since, deadline, &mut rejected).map_err(|error| {
+                DiscoveryRejection::from_provider_error(
+                    &error,
+                    DiscoveryRejection::CodexProviderRoot,
+                )
+            })?,
+        );
     }
     ensure_discovery_before_deadline(deadline)?;
     candidates.sort_by(|left, right| {
@@ -1597,7 +2072,9 @@ fn discover(
     }
     let end = offset.saturating_add(args.limit).min(candidates.len());
     let next_cursor = (end < candidates.len()).then_some(end);
-    Ok((candidates[offset..end].to_vec(), next_cursor))
+    // Keep failures visible on every page: a caller that resumes with a
+    // cursor must not silently treat an unfilterable session as excluded.
+    Ok((candidates[offset..end].to_vec(), next_cursor, rejected))
 }
 
 fn discover_session(
@@ -1633,7 +2110,7 @@ fn discover_session(
                 found
             }
             AgentKind::Codex => {
-                let found = find_codex_rollout(session_id).map_err(|error| {
+                let found = find_codex_rollout_for_import(session_id).map_err(|error| {
                     DiscoveryRejection::from_provider_error(
                         &error,
                         DiscoveryRejection::CodexProviderRoot,
@@ -1684,10 +2161,11 @@ pub fn run_import_discovery_helper(input: &[u8]) -> Result<Vec<u8>> {
         cursor: request.cursor,
         yes: true,
         restore_erased: false,
+        codex_index_backup: None,
     };
     let repo_root = request.repo_root.into_path_buf();
     let response = match discover(&args, &repo_root, deadline) {
-        Ok((candidates, next_cursor)) => DiscoveryHelperResponse::Ok {
+        Ok((candidates, next_cursor, rejected)) => DiscoveryHelperResponse::Ok {
             candidates: candidates
                 .into_iter()
                 .map(|candidate| DiscoveryCandidateWire {
@@ -1697,6 +2175,7 @@ pub fn run_import_discovery_helper(input: &[u8]) -> Result<Vec<u8>> {
                 })
                 .collect(),
             next_cursor,
+            rejected,
         },
         // The helper crosses a process boundary specifically to contain
         // provider filesystem work. Only the closed reason crosses it; never
@@ -1710,7 +2189,7 @@ async fn discover_bounded(
     args: &ImportArgs,
     repo_root: &Path,
     deadline: Instant,
-) -> CliResult<(Vec<Candidate>, Option<usize>)> {
+) -> CliResult<DiscoveryBatch> {
     ensure_discovery_before_deadline(deadline).map_err(DiscoveryRejection::into_cli_error)?;
     // Reject argv-only selector errors here, with their actionable messages,
     // before a helper is spawned; the helper re-validates the same argv.
@@ -1782,6 +2261,7 @@ async fn discover_bounded(
         DiscoveryHelperResponse::Ok {
             candidates,
             next_cursor,
+            rejected,
         } => {
             let candidates = candidates
                 .into_iter()
@@ -1795,7 +2275,7 @@ async fn discover_bounded(
                     })
                 })
                 .collect::<CliResult<Vec<_>>>()?;
-            Ok((candidates, next_cursor))
+            Ok((candidates, next_cursor, rejected))
         }
         DiscoveryHelperResponse::Error { reason } => Err(reason.into_cli_error()),
     }
@@ -1834,7 +2314,7 @@ fn wait_for_consent_fd(fd: std::os::fd::RawFd, deadline: Instant) -> std::io::Re
 fn require_consent(
     args: &ImportArgs,
     output: &OutputConfig,
-    candidate_count: usize,
+    candidate_count: Option<usize>,
     deadline: Instant,
 ) -> CliResult<()> {
     if !output.quiet {
@@ -1854,8 +2334,18 @@ fn require_consent(
          Libra will read private provider sessions, redact typed fields, and write projections \
          to refs/libra/traces; a later `libra agent push` may upload those redacted traces. \
          Continue? [y/N] ",
-        args.agent.as_deref().unwrap_or("claude-code/codex"),
-        candidate_count,
+        args.agent
+            .as_deref()
+            .unwrap_or(if args.codex_index_backup.is_some() {
+                "codex"
+            } else {
+                "claude-code/codex"
+            }),
+        match candidate_count {
+            Some(count) if args.codex_index_backup.is_some() => format!("up to {count}"),
+            Some(count) => count.to_string(),
+            None => format!("up to {}", args.limit),
+        },
         args.limit,
     );
     #[cfg(unix)]
@@ -1905,6 +2395,10 @@ async fn resolve_candidate_source(
     repo_root: &Path,
     deadline: Instant,
 ) -> Result<(TranscriptSource, String, String)> {
+    #[cfg(all(test, feature = "test-live-agent"))]
+    let _ = INDEX_SOURCE_READS.try_with(|count| {
+        count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    });
     if candidate.kind == AgentKind::OpenCode {
         let session_id = crate::internal::ai::hooks::runtime::build_ai_session_id(
             "opencode",
@@ -2755,6 +3249,34 @@ async fn run_import_preparation_descriptor_helper_bounded(
     }
 }
 
+/// Consume the ordinary carrier only after the helper response's transport
+/// checks. A damaged carrier preserves V1 projections and requests a retry.
+#[cfg(any(unix, windows))]
+fn consume_codex_retention(
+    projection: &mut PreparedImportProjection,
+    deadline: Instant,
+) -> Option<crate::internal::ai::observed_agents::codex_reasoning::CodexRetention> {
+    use crate::internal::ai::observed_agents::codex_reasoning::{
+        CodexRetention, mark_retention_unavailable,
+    };
+
+    let retention = projection.codex_retention.take().map(|dto| {
+        let source_bytes = projection
+            .transcript_snapshot
+            .as_ref()
+            .map_or(0, |snapshot| snapshot.transcript_redacted_bytes);
+        dto.decode(&projection.turns, source_bytes, deadline)
+            .unwrap_or_else(|_| CodexRetention::unavailable())
+    });
+    if retention
+        .as_ref()
+        .is_some_and(CodexRetention::is_unavailable)
+    {
+        mark_retention_unavailable(&mut projection.redaction_report);
+    }
+    retention
+}
+
 async fn prepare_candidate_bounded(
     candidate: &Candidate,
     repo_root: &Path,
@@ -2959,6 +3481,7 @@ async fn prepare_candidate_bounded(
                     }
                     (_, None) => None,
                 };
+                let codex_retention = consume_codex_retention(&mut projection, monotonic_deadline);
                 await_import_precommit_read_until(
                     monotonic_deadline,
                     capture_scope.assert_workspace_fence_live(conn),
@@ -3064,7 +3587,12 @@ async fn prepare_candidate_bounded(
                 .await?;
                 validate_scoped_prepared_existing_session(&mut request, existing_session.as_ref())?;
                 Ok(PreparedCandidateOutcome {
-                    request: Ok((request, native_reasoning, coverage_runtime)),
+                    request: Ok(PreparedCandidate {
+                        request,
+                        native_reasoning,
+                        coverage_runtime,
+                        codex_retention,
+                    }),
                     raw_bytes,
                 })
             }
@@ -3083,6 +3611,11 @@ async fn prepare_candidate_bounded(
 }
 
 fn stable_code_for_error(error: &anyhow::Error) -> StableErrorCode {
+    if error.is::<IndexCatalogUnavailable>()
+        || error.is::<provider_index_io::ReconciliationReadFailure>()
+    {
+        return StableErrorCode::AgentImportPartialBatch;
+    }
     match error.downcast_ref::<ImportError>() {
         Some(ImportError::RepositoryConflict | ImportError::SessionIdentityConflict) => {
             StableErrorCode::AgentImportRepositoryConflict
@@ -3107,27 +3640,38 @@ fn stable_code_for_error(error: &anyhow::Error) -> StableErrorCode {
     }
 }
 
-fn safe_failure(candidate: &Candidate, error: &anyhow::Error) -> BatchFailure {
-    // The documented per-item id is a short hash of the provider session id
-    // only; the same report already carries full session ids for completed
-    // selections. Never derive it from a source locator, digest, or commitment.
-    let digest = sha2::Sha256::digest(candidate.provider_session_id.as_bytes());
+fn hashed_import_id(id: &str) -> String {
+    let digest = sha2::Sha256::digest(id.as_bytes());
+    format!("sha256:{}", hex::encode(&digest[..6]))
+}
+
+fn safe_failure_for(kind: AgentKind, id: &str, error: &anyhow::Error) -> BatchFailure {
     BatchFailure {
         status: "failed",
-        agent_kind: candidate.kind.as_db_str().to_string(),
-        session_id: format!("sha256:{}", hex::encode(&digest[..6])),
+        agent_kind: kind.as_db_str().to_string(),
+        session_id: hashed_import_id(id),
         error_code: stable_code_for_error(error),
+        reason_key: None,
     }
 }
 
-fn safe_skip(candidate: &Candidate, error: &anyhow::Error) -> BatchSkip {
-    let failure = safe_failure(candidate, error);
+fn safe_failure(candidate: &Candidate, error: &anyhow::Error) -> BatchFailure {
+    safe_failure_for(candidate.kind, &candidate.provider_session_id, error)
+}
+
+fn safe_skip_for(kind: AgentKind, id: &str, error: &anyhow::Error) -> BatchSkip {
+    let failure = safe_failure_for(kind, id, error);
     BatchSkip {
         status: "skipped",
         agent_kind: failure.agent_kind,
         session_id: failure.session_id,
         reason_code: failure.error_code,
+        reason_key: None,
     }
+}
+
+fn safe_skip(candidate: &Candidate, error: &anyhow::Error) -> BatchSkip {
+    safe_skip_for(candidate.kind, &candidate.provider_session_id, error)
 }
 
 fn is_discovery_skip(error: &anyhow::Error) -> bool {
@@ -3180,6 +3724,260 @@ fn record_candidate_result(
     }
 }
 
+struct IndexImportBatch {
+    root: provider_index_io::ImportRootPin,
+    rows: Vec<codex_index::ImportIndexThread>,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "index import catalog state is unavailable; inspect the session with `libra agent doctor` before retrying"
+)]
+struct IndexCatalogUnavailable;
+
+fn index_catalog_reason(end: Instant) -> &'static str {
+    if Instant::now() >= end {
+        "budget_exhausted"
+    } else {
+        "catalog_unavailable"
+    }
+}
+
+fn index_import_unavailable(reason: &'static str) -> CliError {
+    CliError::fatal("Codex index backfill is unavailable; supply a closed, consistent backup for this worktree and retry")
+        .with_stable_code(StableErrorCode::AgentImportPartialBatch)
+        .with_detail("reason_key",reason)
+}
+
+fn index_import_read_error(error: &anyhow::Error, end: Instant) -> CliError {
+    let reason = error
+        .downcast_ref::<provider_index_io::ReconciliationReadFailure>()
+        .map(|reason| reason.reason_key())
+        .or_else(|| {
+            error
+                .downcast_ref::<codex_index::IndexUnavailableReason>()
+                .map(|reason| reason.reason_key())
+        })
+        .unwrap_or(if Instant::now() >= end {
+            "budget_exhausted"
+        } else {
+            "backup_unreadable"
+        });
+    index_import_unavailable(reason)
+}
+
+async fn discover_index_import(
+    args: &ImportArgs,
+    root: &Path,
+    end: Instant,
+) -> CliResult<(IndexImportBatch, Option<usize>)> {
+    if args.limit == 0 || args.limit > MAX_IMPORT_LIMIT {
+        return Err(CliError::command_usage("--limit must be between 1 and 100")
+            .with_stable_code(StableErrorCode::CliInvalidArguments));
+    }
+    if args
+        .agent
+        .as_deref()
+        .map(importable_kind)
+        .transpose()?
+        .is_some_and(|kind| kind != AgentKind::Codex)
+        || args.session.is_some()
+        || args.path.is_some()
+        || args.since.is_some()
+        || args.all
+        || args.restore_erased
+    {
+        return Err(CliError::command_usage("--codex-index-backup selects Codex only and cannot be combined with another selector or --restore-erased")
+            .with_stable_code(StableErrorCode::CliInvalidArguments));
+    }
+    let backup = args
+        .codex_index_backup
+        .as_ref()
+        .ok_or_else(|| index_import_unavailable("backup_unreadable"))?;
+    let cwd = match crate::internal::worktree_scope::WorktreeScope::request_scope() {
+        Some(request) => request.workdir,
+        None => {
+            std::env::current_dir().map_err(|_| index_import_unavailable("scope_root_unproven"))?
+        }
+    };
+    let backup = util::normalize_abs_path(&if backup.is_absolute() {
+        backup.clone()
+    } else {
+        cwd.join(backup)
+    });
+    let index_end = (Instant::now() + Duration::from_secs(2)).min(end);
+    let read = provider_index_io::read_import_closed_backup(
+        &backup,
+        codex_index::ImportScopeQuery {
+            version: 1,
+            root: root.to_path_buf(),
+            root_identity: None,
+        },
+        index_end,
+    )
+    .await
+    .map_err(|error| index_import_read_error(&error, index_end))?;
+    let snapshot = match read.outcome {
+        ImportIndexOutcome::Available { snapshot } => snapshot,
+        ImportIndexOutcome::Unavailable { reason } => {
+            return Err(index_import_unavailable(reason.reason_key()));
+        }
+    };
+    let offset = args.cursor.unwrap_or(0);
+    if offset > snapshot.threads.len() {
+        return Err(
+            CliError::command_usage("--cursor is outside the discovery result set")
+                .with_stable_code(StableErrorCode::CliInvalidArguments),
+        );
+    }
+    let next = offset
+        .saturating_add(args.limit)
+        .min(snapshot.threads.len());
+    let cursor = (next < snapshot.threads.len()).then_some(next);
+    // Edges are verified projection-only metadata, never command/writer inputs.
+    let rows = snapshot
+        .threads
+        .into_iter()
+        .skip(offset)
+        .take(args.limit)
+        .collect();
+    Ok((
+        IndexImportBatch {
+            root: read.root,
+            rows,
+        },
+        cursor,
+    ))
+}
+
+#[derive(Default)]
+struct IndexSelection {
+    candidates: Vec<Candidate>,
+    existing: Vec<BatchExisting>,
+    skipped: Vec<BatchSkip>,
+    failures: Vec<BatchFailure>,
+}
+
+async fn select_index_missing(
+    batch: &IndexImportBatch,
+    conn: &DatabaseConnection,
+    scope: &CaptureScope,
+    end: Instant,
+) -> CliResult<IndexSelection> {
+    batch
+        .root
+        .revalidate(end)
+        .await
+        .map_err(|error| index_import_read_error(&error, end))?;
+    let ids = batch
+        .rows
+        .iter()
+        .map(|row| row.id.as_str())
+        .collect::<Vec<_>>();
+    let txn = await_import_precommit_read_until(end, async { Ok(conn.begin().await?) })
+        .await
+        .map_err(|_| index_import_unavailable(index_catalog_reason(end)))?;
+    let now_ms = Utc::now().timestamp_millis();
+    let mut metadata_remaining = 8 * 1024 * 1024;
+    let states = await_import_precommit_read_until(end, async {
+        Ok(CaptureCatalogStore::reconciliation_catalog_in_snapshot(
+            &txn,
+            scope,
+            &ids,
+            now_ms,
+            end,
+            &mut metadata_remaining,
+        )
+        .await?)
+    })
+    .await;
+    // A cancelled read must finish its transaction before source authorization.
+    txn.rollback()
+        .await
+        .map_err(|_| index_import_unavailable(index_catalog_reason(end)))?;
+    let states = states.map_err(|_| index_import_unavailable(index_catalog_reason(end)))?;
+    if states.len() != batch.rows.len() {
+        return Err(index_import_unavailable("catalog_unavailable"));
+    }
+    batch
+        .root
+        .revalidate(end)
+        .await
+        .map_err(|error| index_import_read_error(&error, end))?;
+    let mut selected = IndexSelection::default();
+    for (row, state) in batch.rows.iter().zip(states) {
+        match state {
+            ReconciliationCatalogState::Erased => selected.skipped.push(safe_skip_for(
+                AgentKind::Codex,
+                &row.id,
+                &ImportError::Erased.into(),
+            )),
+            ReconciliationCatalogState::Session { .. } => selected.existing.push(BatchExisting {
+                status: "existing",
+                agent_kind: AgentKind::Codex.as_db_str().to_string(),
+                session_id: hashed_import_id(&row.id),
+                selection_reason: "existing_catalog_session",
+            }),
+            ReconciliationCatalogState::Pending { .. } => selected.failures.push(safe_failure_for(
+                AgentKind::Codex,
+                &row.id,
+                &ImportError::LeaseBusy.into(),
+            )),
+            ReconciliationCatalogState::Unknown => selected.failures.push(safe_failure_for(
+                AgentKind::Codex,
+                &row.id,
+                &IndexCatalogUnavailable.into(),
+            )),
+            ReconciliationCatalogState::BudgetExhausted => {
+                selected.failures.push(safe_failure_for(
+                    AgentKind::Codex,
+                    &row.id,
+                    &provider_index_io::ReconciliationReadFailure::Budget.into(),
+                ))
+            }
+            ReconciliationCatalogState::Missing => {
+                if row.scope == RecentScopeStatus::Proven
+                    && row.source_state == ImportSourceState::Eligible
+                    && row
+                        .rollout_path
+                        .as_deref()
+                        .is_some_and(|path| codex_index::valid_import_rollout_path(path, &row.id))
+                {
+                    selected.candidates.push(Candidate {
+                        kind: AgentKind::Codex,
+                        provider_session_id: row.id.clone(),
+                        path: row.rollout_path.clone(),
+                    });
+                } else {
+                    selected.failures.push(safe_failure_for(
+                        AgentKind::Codex,
+                        &row.id,
+                        &ImportError::SourceAuthorization.into(),
+                    ));
+                }
+            }
+        }
+    }
+    Ok(selected)
+}
+
+fn index_preparation_error(error: anyhow::Error, index_mode: bool) -> anyhow::Error {
+    if index_mode
+        && matches!(
+            error.downcast_ref::<ImportError>(),
+            Some(
+                ImportError::RepositoryConflict
+                    | ImportError::SessionIdentityConflict
+                    | ImportError::WorkingDirMissingOrAmbiguous
+            )
+        )
+    {
+        ImportError::SourceAuthorization.into()
+    } else {
+        error
+    }
+}
+
 pub async fn execute_safe(args: ImportArgs, output: &OutputConfig) -> CliResult<()> {
     // Establish both deadline clocks once before discovery/consent or any
     // mutation.  The pair is threaded unchanged to every normal durable
@@ -3187,10 +3985,46 @@ pub async fn execute_safe(args: ImportArgs, output: &OutputConfig) -> CliResult<
     let commit_deadline = CaptureCommitDeadline::from_budget(import_total_deadline())
         .map_err(|error| CliError::fatal(format!("establish import deadline: {error}")))?;
     let deadline = commit_deadline.monotonic();
-    let repo_root = util::try_working_dir().map_err(|_| CliError::repo_not_found())?;
-    let storage_root = util::try_get_storage_path(None).map_err(|_| CliError::repo_not_found())?;
-    let (candidates, next_cursor) = discover_bounded(&args, &repo_root, deadline).await?;
-    require_consent(&args, output, candidates.len(), deadline)?;
+    let (mut repo_root, storage_root) =
+        match crate::internal::worktree_scope::WorktreeScope::request_scope() {
+            Some(request) => (request.worktree_root, request.storage),
+            None => (
+                util::try_working_dir().map_err(|_| CliError::repo_not_found())?,
+                util::try_get_storage_path(None).map_err(|_| CliError::repo_not_found())?,
+            ),
+        };
+    let index_mode = args.codex_index_backup.is_some();
+    // Batch Codex discovery reads a bounded session_meta record to apply
+    // --since. Get interactive consent before that read; --yes is itself the
+    // explicit consent on noninteractive paths. The exact candidate count is
+    // unavailable until discovery finishes.
+    let preconsented = !args.yes && (args.all || args.since.is_some());
+    if preconsented {
+        let _ = validate_discovery_selector(&args)?;
+        require_consent(&args, output, None, deadline)?;
+    }
+    let mut index_batch = None;
+    let (mut candidates, next_cursor, discovery_rejected) = if index_mode {
+        let (batch, cursor) = discover_index_import(&args, &repo_root, deadline).await?;
+        repo_root = batch.root.path().to_path_buf();
+        index_batch = Some(batch);
+        (Vec::new(), cursor, Vec::new())
+    } else {
+        discover_bounded(&args, &repo_root, deadline).await?
+    };
+    let selection_count = index_batch
+        .as_ref()
+        .map_or(candidates.len(), |batch| batch.rows.len());
+    if !preconsented {
+        require_consent(&args, output, Some(selection_count), deadline)?;
+    }
+    if let Some(batch) = index_batch.as_ref() {
+        batch
+            .root
+            .revalidate(deadline)
+            .await
+            .map_err(|error| index_import_read_error(&error, deadline))?;
+    }
     let conn = db::get_db_conn_instance_for_path(&storage_root.join(util::DATABASE))
         .await
         .map_err(|error| CliError::fatal(format!("failed to open repository database: {error}")))?;
@@ -3198,10 +4032,22 @@ pub async fn execute_safe(args: ImportArgs, output: &OutputConfig) -> CliResult<
         await_import_precommit_read_until(deadline, CaptureScope::resolve(&conn, &repo_root))
             .await
             .map_err(|error| {
-                CliError::fatal(format!(
-                    "failed to resolve import workspace scope: {error:#}"
-                ))
+                if index_mode {
+                    index_import_unavailable("scope_root_unproven")
+                } else {
+                    CliError::fatal(format!(
+                        "failed to resolve import workspace scope: {error:#}"
+                    ))
+                }
             })?;
+    let selected = if let Some(batch) = index_batch.as_ref() {
+        select_index_missing(batch, &conn, &capture_scope, deadline).await?
+    } else {
+        IndexSelection::default()
+    };
+    if index_mode {
+        candidates = selected.candidates;
+    }
     let (configured_source_cap, explicitly_configured) =
         max_transcript_read_bytes_setting().await.map_err(|error| {
             CliError::fatal(format!(
@@ -3217,12 +4063,56 @@ pub async fn execute_safe(args: ImportArgs, output: &OutputConfig) -> CliResult<
 
     let mut results = Vec::new();
     let mut partial_results = Vec::new();
-    let mut skipped = Vec::new();
-    let mut failures = Vec::new();
-    let discovered_batch = args.all || args.since.is_some();
+    let mut skipped = selected.skipped;
+    let mut failures = selected.failures;
+    let mut discovery_skipped = 0usize;
+    for (session_id, reason) in discovery_rejected {
+        let tombstoned = await_import_precommit_read_until(
+            deadline,
+            session_is_tombstoned(&conn, AgentKind::Codex, &session_id),
+        )
+        .await
+        .map_err(|error| {
+            CliError::fatal(format!(
+                "failed to check rejected Codex session tombstone: {error}"
+            ))
+        })?;
+        if tombstoned && !args.restore_erased {
+            skipped.push(safe_skip_for(
+                AgentKind::Codex,
+                &session_id,
+                &ImportError::Erased.into(),
+            ));
+            continue;
+        }
+        skipped.push(BatchSkip {
+            status: "skipped",
+            agent_kind: AgentKind::Codex.as_db_str().to_owned(),
+            session_id: hashed_import_id(&session_id),
+            reason_code: StableErrorCode::AgentTranscriptAuthorizationMissing,
+            reason_key: Some(match reason {
+                DiscoveryRejection::CodexUnknownSessionTime => "codex_session_time_unknown",
+                DiscoveryRejection::CodexSourceUnreadable => "codex_session_source_unreadable",
+                _ => "codex_session_header_invalid",
+            }),
+        });
+        discovery_skipped += 1;
+    }
+    if discovery_skipped > 0 {
+        let message = format!(
+            "Codex --since skipped {discovery_skipped} rollout(s) with unknown time, invalid header, or unreadable source; rerun with --json for hashed IDs and reason keys, then inspect and import selected sessions with --session or --path"
+        );
+        crate::utils::output::record_warning_message(message.clone());
+        if !output.quiet && !output.is_json() {
+            eprintln!("warning: {message}");
+        }
+    }
+    let existing = selected.existing;
+    let discovered_batch = args.all || args.since.is_some() || index_mode;
     let mut cumulative_raw_bytes = 0_u64;
     let raw_byte_cap = batch_raw_byte_cap();
-    for candidate in &candidates {
+    let mut index_terminal_reason = None;
+    for (candidate_index, candidate) in candidates.iter().enumerate() {
         if Instant::now() >= deadline {
             failures.push(safe_failure(
                 candidate,
@@ -3234,8 +4124,20 @@ pub async fn execute_safe(args: ImportArgs, output: &OutputConfig) -> CliResult<
             deadline,
             session_is_tombstoned(&conn, candidate.kind, &candidate.provider_session_id),
         )
-        .await
-        .map_err(|error| CliError::fatal(format!("failed to check import tombstone: {error}")))?;
+        .await;
+        let tombstoned = match tombstoned {
+            Ok(value) => value,
+            Err(error) if index_mode => {
+                failures.push(safe_failure(candidate, &error));
+                index_terminal_reason = Some(index_catalog_reason(deadline));
+                continue;
+            }
+            Err(error) => {
+                return Err(CliError::fatal(format!(
+                    "failed to check import tombstone: {error}"
+                )));
+            }
+        };
         if tombstoned && args.restore_erased {
             restore_tombstone(&conn, candidate.kind, &candidate.provider_session_id)
                 .await
@@ -3262,6 +4164,7 @@ pub async fn execute_safe(args: ImportArgs, output: &OutputConfig) -> CliResult<
                 .checked_sub(cumulative_raw_bytes)
                 .ok_or(ImportError::BatchInputLimit)?
                 .min(source_read_cap);
+            if let Some(batch)=index_batch.as_ref() {batch.root.revalidate(deadline).await?;}
             let prepared = prepare_candidate_bounded(
                 candidate,
                 &repo_root,
@@ -3271,14 +4174,18 @@ pub async fn execute_safe(args: ImportArgs, output: &OutputConfig) -> CliResult<
                 &capture_scope,
                 commit_deadline,
             )
-            .await?;
+            .await;
+            // A concurrent root replacement can itself make preparation fail.
+            // Recheck even on that error before classifying it as source-only.
+            if let Some(batch)=index_batch.as_ref() {batch.root.revalidate(deadline).await?;}
+            let prepared = prepared.map_err(|error|index_preparation_error(error,index_mode))?;
             cumulative_raw_bytes = cumulative_raw_bytes
                 .checked_add(prepared.raw_bytes)
                 .ok_or(ImportError::BatchInputLimit)?;
             if cumulative_raw_bytes > raw_byte_cap {
                 return Err(ImportError::BatchInputLimit.into());
             }
-            let (request, native_reasoning, coverage_runtime) = prepared.request?;
+            let PreparedCandidate { request, native_reasoning, coverage_runtime, codex_retention } = prepared.request.map_err(|error|index_preparation_error(error,index_mode))?;
             let barrier = acquire_import_index_barrier(
                 &conn,
                 &storage_root,
@@ -3288,7 +4195,8 @@ pub async fn execute_safe(args: ImportArgs, output: &OutputConfig) -> CliResult<
             .await?;
             index_barrier = Some(barrier);
             import_test_pause_after_index_barrier(deadline)?;
-            let subagent_discovery = if request.agent_kind == AgentKind::ClaudeCode {
+            let child_binding = LiveCaptureBinding::for_stored(request.agent_kind);
+            let subagent_discovery = if let Some(port) = child_binding.subagent_discovery() {
                 let candidate_allowance =
                     remaining_candidate_read_allowance(source_read_cap, prepared.raw_bytes);
                 let subagent_budget = raw_byte_cap
@@ -3300,14 +4208,16 @@ pub async fn execute_safe(args: ImportArgs, output: &OutputConfig) -> CliResult<
                 // cannot bypass the batch cap. On success refund unused bytes.
                 reserve_subagent_input_allowance(&mut cumulative_raw_bytes, subagent_budget)?;
                 let discovery_deadline = crate::internal::ai::subagent_content::discovery_deadline_preserving_parent(deadline)?;
-                let discovery_result = crate::internal::ai::subagent_content::discover_claude_subagent_contents_bounded(
-                        &request.working_dir,
-                        &request.provider_session_id,
-                        discovery_deadline,
-                        subagent_budget,
-                        crate::internal::ai::subagent_content::MAX_SUBAGENT_SOURCES_PER_CAPTURE,
-                    )
-                    .await;
+                let context = LiveCaptureContext {
+                    libra_session_id: &request.session_id, provider_session_id: &request.provider_session_id,
+                    verified_cwd: &request.working_dir,
+                };
+                let discovery_result = port.discover_stored(
+                    &context,
+                    StoredSubagentSelection::ImportCurrent { parent_locator: candidate.path.as_deref().filter(|path| path.is_absolute()) },
+                    SubagentDiscoveryLimits { byte_budget: subagent_budget, source_limit: crate::internal::ai::subagent_content::MAX_SUBAGENT_SOURCES_PER_CAPTURE },
+                    discovery_deadline,
+                ).await;
                 match discovery_result {
                     Ok(discovery) => {
                         settle_subagent_input_allowance(
@@ -3317,6 +4227,7 @@ pub async fn execute_safe(args: ImportArgs, output: &OutputConfig) -> CliResult<
                         )?;
                         discovery
                     }
+                    Err(_) if request.agent_kind == AgentKind::Codex => crate::internal::ai::subagent_content::SubagentDiscovery::charged_stored_unavailable(subagent_budget),
                     Err(error) => match crate::internal::ai::subagent_content::SubagentDiscovery::from_deadline_error(&error) {
                         Some(discovery) => discovery,
                         None => return Err(error),
@@ -3325,7 +4236,7 @@ pub async fn execute_safe(args: ImportArgs, output: &OutputConfig) -> CliResult<
             } else {
                 crate::internal::ai::subagent_content::SubagentDiscovery::default()
             };
-            import_prepared_with_subagent_discovery_and_runtime(
+            import_prepared_with_retention(
                 &conn,
                 &storage_root,
                 request,
@@ -3333,6 +4244,7 @@ pub async fn execute_safe(args: ImportArgs, output: &OutputConfig) -> CliResult<
                 subagent_discovery,
                 native_reasoning,
                 coverage_runtime,
+                codex_retention,
             )
             .await
         }
@@ -3427,9 +4339,20 @@ pub async fn execute_safe(args: ImportArgs, output: &OutputConfig) -> CliResult<
                 }
             }
         }
+        let root_failure = if index_mode {
+            result
+                .as_ref()
+                .err()
+                .and_then(|error| {
+                    error.downcast_ref::<provider_index_io::ReconciliationReadFailure>()
+                })
+                .copied()
+        } else {
+            None
+        };
         record_candidate_result(
             candidate,
-            discovered_batch,
+            discovered_batch && !index_mode,
             index_incomplete,
             result,
             &mut results,
@@ -3437,6 +4360,15 @@ pub async fn execute_safe(args: ImportArgs, output: &OutputConfig) -> CliResult<
             &mut skipped,
             &mut failures,
         );
+        if let Some(reason) = root_failure {
+            index_terminal_reason = Some(reason.reason_key());
+            // Keep every unattempted slot visible without reading a source
+            // after its directory proof has failed. Earlier writes remain.
+            for remaining in &candidates[candidate_index + 1..] {
+                failures.push(safe_failure(remaining, &reason.into()));
+            }
+            break;
+        }
     }
 
     let payload = BatchOutput {
@@ -3446,9 +4378,11 @@ pub async fn execute_safe(args: ImportArgs, output: &OutputConfig) -> CliResult<
         skipped,
         failures,
         next_cursor,
+        existing,
+        warnings: crate::utils::output::pending_warning_messages(),
     };
     if !payload.failures.is_empty() {
-        let stable_code = if candidates.len() == 1
+        let stable_code = if selection_count == 1
             && payload.results.is_empty()
             && payload.partial_results.is_empty()
             && payload.failures.len() == 1
@@ -3457,7 +4391,7 @@ pub async fn execute_safe(args: ImportArgs, output: &OutputConfig) -> CliResult<
         } else {
             StableErrorCode::AgentImportPartialBatch
         };
-        let message = if candidates.len() == 1
+        let mut message = if selection_count == 1
             && payload.results.is_empty()
             && payload.partial_results.is_empty()
         {
@@ -3470,6 +4404,12 @@ pub async fn execute_safe(args: ImportArgs, output: &OutputConfig) -> CliResult<
                 payload.failures.len()
             )
         };
+        if !payload.existing.is_empty() {
+            message.push_str(&format!(
+                "; {} already cataloged (not refreshed)",
+                payload.existing.len()
+            ));
+        }
         let mut error = CliError::fatal(message)
             .with_stable_code(stable_code)
             .with_detail("schema_version", payload.schema_version)
@@ -3478,6 +4418,9 @@ pub async fn execute_safe(args: ImportArgs, output: &OutputConfig) -> CliResult<
             .with_detail("skipped", payload.skipped.len())
             .with_detail("failed", payload.failures.len())
             .with_detail("next_cursor", payload.next_cursor);
+        if let Some(reason) = index_terminal_reason {
+            error = error.with_detail("reason_key", reason);
+        }
         if let Ok(failures) = serde_json::to_value(&payload.failures) {
             error = error.with_detail("failures", failures);
         }
@@ -3489,6 +4432,15 @@ pub async fn execute_safe(args: ImportArgs, output: &OutputConfig) -> CliResult<
         }
         if let Ok(skipped) = serde_json::to_value(&payload.skipped) {
             error = error.with_detail("skipped", skipped);
+        }
+        if !payload.existing.is_empty() {
+            let existing=payload.existing.iter().map(|item|serde_json::json!({
+                "status":item.status,"agent_kind":item.agent_kind,"session_id":item.session_id,"selection_reason":item.selection_reason,
+            })).collect::<Vec<_>>();
+            error = error.with_detail("existing", serde_json::Value::Array(existing));
+        }
+        if !payload.warnings.is_empty() {
+            error = error.with_detail("warnings", payload.warnings.clone());
         }
         return Err(error);
     }
@@ -3516,6 +4468,12 @@ pub async fn execute_safe(args: ImportArgs, output: &OutputConfig) -> CliResult<
                 .unwrap_or_else(|| "none".to_string())
         );
     }
+    if !output.quiet && !payload.existing.is_empty() {
+        println!(
+            "Existing catalog sessions (not refreshed): {}",
+            payload.existing.len()
+        );
+    }
     Ok(())
 }
 
@@ -3534,6 +4492,657 @@ mod tests {
         },
     };
     use crate::utils::error::CliErrorKind;
+
+    #[cfg(feature = "test-live-agent")]
+    #[test]
+    #[ignore = "operator-local Codex acceptance; never run in CI"]
+    fn codex_discovery_oversize_header_charges_cumulative_budget() {
+        use std::io::{Seek, SeekFrom, Write};
+
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(&vec![b'x'; (CODEX_DISCOVERY_HEADER_CAP + 1) as usize])
+            .unwrap();
+        file.seek(SeekFrom::Start(0)).unwrap();
+        let mut charged = CODEX_DISCOVERY_HEADER_TOTAL_CAP - CODEX_DISCOVERY_HEADER_CAP;
+        let error = codex_discovery_session_time(file, "test-session", &mut charged).unwrap_err();
+        assert!(error.is::<CodexDiscoveryBudgetExceeded>());
+        assert_eq!(
+            charged,
+            CODEX_DISCOVERY_HEADER_TOTAL_CAP + 1,
+            "oversize bytes must be charged before the per-file rejection"
+        );
+    }
+
+    #[cfg(feature = "test-live-agent")]
+    #[test]
+    #[ignore = "operator-local Codex acceptance; never run in CI"]
+    fn codex_discovery_budget_error_is_actionable() {
+        for cause in [
+            anyhow::Error::from(CodexDiscoveryBudgetExceeded),
+            anyhow::Error::from(CodexDiscoveryEntryBudgetExceeded),
+            anyhow::Error::from(CodexRolloutScanLimit("test bound".to_string())),
+        ] {
+            let reason = DiscoveryRejection::from_provider_error(
+                &cause,
+                DiscoveryRejection::CodexProviderRoot,
+            );
+            assert_eq!(reason, DiscoveryRejection::CodexDiscoveryBudgetExceeded);
+            let error = reason.into_cli_error();
+            assert_eq!(
+                error.stable_code(),
+                StableErrorCode::AgentImportPartialBatch
+            );
+            assert!(error.message().contains("4096 unfilterable-record"));
+            assert!(error.message().contains("--path"));
+            assert!(error.message().contains("index backup"));
+        }
+    }
+
+    #[cfg(feature = "test-live-agent")]
+    #[test]
+    #[ignore = "operator-local Codex acceptance; never run in CI"]
+    fn codex_discovery_rejection_cap_fails_before_an_unreported_skip() {
+        let mut rejected = Vec::new();
+        for index in 0..CODEX_DISCOVERY_REJECTION_CAP {
+            record_codex_discovery_rejection(
+                &mut rejected,
+                &format!("session-{index}"),
+                DiscoveryRejection::CodexUnknownSessionTime,
+            )
+            .unwrap();
+        }
+        let error = record_codex_discovery_rejection(
+            &mut rejected,
+            "overflow",
+            DiscoveryRejection::CodexUnknownSessionTime,
+        )
+        .unwrap_err();
+        assert!(error.is::<CodexDiscoveryBudgetExceeded>());
+        assert_eq!(rejected.len(), CODEX_DISCOVERY_REJECTION_CAP);
+        let reason =
+            DiscoveryRejection::from_provider_error(&error, DiscoveryRejection::CodexProviderRoot);
+        assert_eq!(
+            reason.into_cli_error().stable_code(),
+            StableErrorCode::AgentImportPartialBatch
+        );
+    }
+
+    #[cfg(all(unix, feature = "test-live-agent"))]
+    #[test]
+    #[ignore = "operator-local Codex acceptance; never run in CI"]
+    fn codex_discovery_read_error_is_not_called_an_invalid_header() {
+        let directory = tempfile::tempdir().unwrap();
+        let file = std::fs::File::open(directory.path()).unwrap();
+        let mut header_bytes = 0;
+        let mut rejected = Vec::new();
+        let include = codex_discovery_filter(
+            file,
+            "local-session",
+            Some(0),
+            &mut header_bytes,
+            &mut rejected,
+        )
+        .unwrap();
+        assert!(!include);
+        assert_eq!(rejected.len(), 1);
+        assert_eq!(rejected[0].1, DiscoveryRejection::CodexSourceUnreadable);
+    }
+
+    #[cfg(unix)]
+    #[cfg(feature = "test-live-agent")]
+    mod codex_retention_local {
+        use std::str::FromStr;
+
+        use git_internal::hash::ObjectHash;
+        use serde_json::{Value, json};
+
+        use super::*;
+
+        #[test]
+        #[ignore = "operator-local Codex acceptance; never run in CI"]
+        fn codex_index_full_scope_unavailable_errors_keep_018_and_actionable_display() {
+            assert_eq!(
+                IndexCatalogUnavailable.to_string(),
+                "index import catalog state is unavailable; inspect the session with `libra agent doctor` before retrying"
+            );
+            assert_eq!(
+                stable_code_for_error(&IndexCatalogUnavailable.into()),
+                StableErrorCode::AgentImportPartialBatch
+            );
+            for reason in [
+                provider_index_io::ReconciliationReadFailure::ScopeRootUnproven,
+                provider_index_io::ReconciliationReadFailure::ResponseInconsistent,
+                provider_index_io::ReconciliationReadFailure::Budget,
+            ] {
+                assert_eq!(
+                    stable_code_for_error(&reason.into()),
+                    StableErrorCode::AgentImportPartialBatch
+                );
+            }
+            assert_eq!(index_catalog_reason(Instant::now()), "budget_exhausted");
+            assert_eq!(
+                index_catalog_reason(Instant::now() + Duration::from_secs(1)),
+                "catalog_unavailable"
+            );
+        }
+
+        fn run_cli(
+            program: &Path,
+            root: &Path,
+            home: &Path,
+            args: &[&str],
+        ) -> std::process::Output {
+            std::process::Command::new(program)
+                .args(args)
+                .current_dir(root)
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .env("HOME", home)
+                .env("USERPROFILE", home)
+                .env("LIBRA_TEST_HOME", home)
+                .env("LIBRA_TEST", "1")
+                .output()
+                .unwrap()
+        }
+
+        #[tokio::test]
+        #[ignore = "operator-local Codex acceptance; never run in CI"]
+        async fn codex_index_full_scope_invalid_auth_path_never_dispatches_source_read() {
+            use std::sync::{
+                Arc,
+                atomic::{AtomicUsize, Ordering},
+            };
+
+            use base64::Engine;
+            use sea_orm::sqlx::{Connection, SqliteConnection, sqlite::SqliteConnectOptions};
+
+            use crate::internal::{
+                ai::authorized_read,
+                worktree_scope::{RequestScope, with_request_scope},
+            };
+
+            async fn invoke(
+                program: &Path,
+                root: &Path,
+                backup: &Path,
+                calls: Arc<AtomicUsize>,
+            ) -> CliResult<()> {
+                let mut args = selector_args(|_| {});
+                args.all = false;
+                args.agent = None;
+                args.yes = true;
+                args.codex_index_backup = Some(backup.to_path_buf());
+                let output = OutputConfig {
+                    quiet: true,
+                    ..OutputConfig::default()
+                };
+                with_request_scope(
+                    Some(RequestScope::resolve(root.to_path_buf()).unwrap()),
+                    INDEX_SOURCE_READS.scope(
+                        calls,
+                        authorized_read::with_test_helper_program(
+                            program.to_path_buf(),
+                            execute_safe(args, &output),
+                        ),
+                    ),
+                )
+                .await
+            }
+            async fn set_path(backup: &Path, path: &Path) {
+                let mut connection =
+                    SqliteConnection::connect_with(&SqliteConnectOptions::new().filename(backup))
+                        .await
+                        .unwrap();
+                sea_orm::sqlx::query("UPDATE threads SET rollout_path=?")
+                    .bind(path.to_str().unwrap())
+                    .execute(&mut connection)
+                    .await
+                    .unwrap();
+                connection.close().await.unwrap();
+            }
+
+            let program = std::env::current_exe()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .join("libra");
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().join("repo");
+            let home = temp.path().join("home");
+            std::fs::create_dir_all(&root).unwrap();
+            std::fs::create_dir_all(&home).unwrap();
+            let root = root.canonicalize().unwrap();
+            let init = run_cli(&program, &root, &home, &["init"]);
+            assert!(init.status.success());
+            let backup = temp.path().join("index.sqlite");
+            let mut connection = SqliteConnection::connect_with(
+                &SqliteConnectOptions::new()
+                    .filename(&backup)
+                    .create_if_missing(true),
+            )
+            .await
+            .unwrap();
+            for sql in [
+                "CREATE TABLE _sqlx_migrations(version INTEGER PRIMARY KEY,success INTEGER NOT NULL,checksum BLOB NOT NULL)",
+                "CREATE TABLE threads(id TEXT PRIMARY KEY,rollout_path TEXT NOT NULL,cwd TEXT NOT NULL,archived INTEGER NOT NULL,cli_version TEXT NOT NULL)",
+                "CREATE TABLE thread_spawn_edges(parent_thread_id TEXT NOT NULL,child_thread_id TEXT PRIMARY KEY,status TEXT NOT NULL)",
+            ] {
+                sea_orm::sqlx::query(sql)
+                    .execute(&mut connection)
+                    .await
+                    .unwrap();
+            }
+            for (version, digest) in codex_index::required_migrations_for_local_test() {
+                sea_orm::sqlx::query("INSERT INTO _sqlx_migrations VALUES(?,1,?)")
+                    .bind(version)
+                    .bind(hex::decode(digest).unwrap())
+                    .execute(&mut connection)
+                    .await
+                    .unwrap();
+            }
+            // A rollout-shaped locator outside the configured provider root
+            // reaches authorization, proving that this task-local observer works.
+            let control = temp.path().join("rollout-control-counter-control.jsonl");
+            std::fs::write(&control, b"non-sensitive positive-control fixture").unwrap();
+            sea_orm::sqlx::query("INSERT INTO threads VALUES('counter-control',?,?,0,'0.162.1')")
+                .bind(control.to_str().unwrap())
+                .bind(root.to_str().unwrap())
+                .execute(&mut connection)
+                .await
+                .unwrap();
+            connection.close().await.unwrap();
+            let calls = Arc::new(AtomicUsize::new(0));
+            let result = invoke(&program, &root, &backup, calls.clone()).await;
+            assert!(result.is_err());
+            assert!(
+                calls.load(Ordering::SeqCst) >= 1,
+                "eligible Missing positive control must reach the actual reader entry"
+            );
+
+            let mut paths = Vec::new();
+            for leaf in [
+                "auth.json",
+                "config.toml",
+                "history.jsonl",
+                "state_5.sqlite",
+            ] {
+                let path = temp.path().join(leaf);
+                std::fs::write(&path, b"CX19-ZERO-READ-SENTINEL").unwrap();
+                paths.push(path);
+            }
+            paths.extend([
+                PathBuf::from("auth.json"),
+                temp.path().join("..").join("auth.json"),
+                temp.path().join("rollout-control-wrong-sid.jsonl"),
+            ]);
+            for path in paths {
+                set_path(&backup, &path).await;
+                calls.store(0, Ordering::SeqCst);
+                let error = invoke(&program, &root, &backup, calls.clone())
+                    .await
+                    .unwrap_err();
+                assert_eq!(
+                    error.stable_code(),
+                    StableErrorCode::AgentTranscriptAuthorizationMissing
+                );
+                assert_eq!(
+                    calls.load(Ordering::SeqCst),
+                    0,
+                    "invalid-shaped path reached source authorization"
+                );
+            }
+            let forged = codex_index::ImportIndexOutcome::Available {
+                snapshot: codex_index::ImportIndexSnapshot {
+                    max_migration: 21,
+                    candidate_count: 1,
+                    scope_ambiguous_count: 0,
+                    scope_unknown_count: 0,
+                    threads: vec![codex_index::ImportIndexThread {
+                        id: "counter-control".into(),
+                        archived: false,
+                        scope: RecentScopeStatus::Proven,
+                        source_state: ImportSourceState::Eligible,
+                        rollout_path: Some(temp.path().join("auth.json")),
+                    }],
+                    spawn_edges: Vec::new(),
+                },
+            };
+            let frame = base64::engine::general_purpose::STANDARD
+                .encode(serde_json::to_vec(&forged).unwrap());
+            let fake = temp.path().join("forged-frame-helper");
+            std::fs::write(&fake,format!("#!/usr/bin/python3\nimport base64,sys\nsys.stdout.buffer.write(base64.b64decode('{frame}'))\n")).unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o700)).unwrap();
+            calls.store(0, Ordering::SeqCst);
+            let error = invoke(&fake, &root, &backup, calls.clone())
+                .await
+                .unwrap_err();
+            assert_eq!(
+                error.stable_code(),
+                StableErrorCode::AgentImportPartialBatch
+            );
+            assert_eq!(
+                serde_json::from_str::<Value>(&error.render_json()).unwrap()["details"]["reason_key"],
+                "response_inconsistent"
+            );
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
+            let conn = sea_orm::Database::connect(format!(
+                "sqlite://{}?mode=rw",
+                root.join(util::ROOT_DIR).join(util::DATABASE).display()
+            ))
+            .await
+            .unwrap();
+            let row = conn
+                .query_one_raw(Statement::from_string(
+                    conn.get_database_backend(),
+                    "SELECT COUNT(*) AS n FROM agent_session",
+                ))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(row.try_get_by::<i64, _>("n").unwrap(), 0);
+            conn.close().await.unwrap();
+        }
+
+        async fn helper_projection(
+            program: &Path,
+            source: &[u8],
+            session: &str,
+            fault: u8,
+        ) -> PreparedImportProjection {
+            let mut descriptor = tempfile::tempfile().unwrap();
+            descriptor.write_all(source).unwrap();
+            descriptor.rewind().unwrap();
+            let mut command = tokio::process::Command::new(program);
+            command.arg(IMPORT_PREPARATION_DESCRIPTOR_HELPER_ARG);
+            let bytes = run_import_preparation_descriptor_helper_bounded(
+                command,
+                PreparationDescriptorControl {
+                    agent_kind: "codex".to_owned(),
+                    source_kind: "file".to_owned(),
+                    provider_commitment: import_provider_commitment(session),
+                    read_cap: TRANSCRIPT_READ_HARD_CAP_BYTES,
+                    remaining_ms: 30_000,
+                    transport: None,
+                },
+                descriptor,
+                IMPORT_PREPARATION_HELPER_OUTPUT_CAP,
+                Instant::now() + Duration::from_secs(30),
+            )
+            .await
+            .unwrap();
+            let mut frame: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(frame["status"], "ok");
+            assert_eq!(frame["raw_bytes"], source.len());
+            assert!(frame.get("transport").is_none());
+            assert!(frame.get("transport_required").is_none());
+            // Mutate only this test-owned ordinary response, never a native
+            // MAC or production helper. Exercise both advertised unavailability
+            // and rejection of an invalid carrier version by the parent.
+            if fault == 1 {
+                frame["projection"]["codex_retention"] =
+                    json!({"version":1,"turns":{},"unavailable":true});
+            } else if fault == 2 {
+                frame["projection"]["codex_retention"]["version"] = json!(255);
+            }
+            let frame: PreparationDescriptorHelperResponse =
+                serde_json::from_slice(&serde_json::to_vec(&frame).unwrap()).unwrap();
+            let PreparationDescriptorHelperResponse::Ok { projection, .. } = frame else {
+                panic!("ordinary helper must prepare the source");
+            };
+            *projection
+        }
+
+        async fn claims(conn: &DatabaseConnection) -> Vec<String> {
+            conn.query_all_raw(Statement::from_string(
+                conn.get_database_backend(),
+                "SELECT json_object('key',logical_turn_key,'version',coverage_schema_version,'digest',coverage_digest,'checkpoint',checkpoint_id,'revision',revision,'state',state,'owner',owner,'fence',fence_token) AS row FROM agent_coverage_claim ORDER BY logical_turn_key".to_owned(),
+            ))
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|row| row.try_get_by("row").unwrap())
+            .collect()
+        }
+
+        #[tokio::test]
+        #[ignore = "operator-local Codex acceptance; never run in CI"]
+        async fn codex_summary_helper_unavailable_recovers_through_parent_and_store() {
+            let program = std::env::current_exe()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .join("libra");
+            assert!(program.is_file());
+            for fault in [1, 2] {
+                let temp = tempfile::tempdir().unwrap();
+                let root = temp.path().join("repo");
+                let home = temp.path().join("home");
+                std::fs::create_dir_all(&root).unwrap();
+                std::fs::create_dir_all(&home).unwrap();
+                let root = root.canonicalize().unwrap();
+                let init = run_cli(&program, &root, &home, &["init"]);
+                assert!(
+                    init.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&init.stderr)
+                );
+                let storage = root.join(util::ROOT_DIR);
+                let conn = sea_orm::Database::connect(format!(
+                    "sqlite://{}?mode=rw",
+                    storage.join(util::DATABASE).display(),
+                ))
+                .await
+                .unwrap();
+                let scope = CaptureScope::resolve(&conn, &root).await.unwrap();
+                let session = "123e4567-e89b-12d3-a456-426614174038";
+                let mut rows = vec![
+                    json!({"type":"session_meta","timestamp":"2026-10-19T01:00:00Z","payload":{"id":session,"cwd":root}}),
+                ];
+                for i in 0..2 {
+                    rows.extend([
+                        json!({"type":"event_msg","payload":{"type":"task_started","turn_id":format!("fallback-{i}")}}),
+                        json!({"type":"response_item","timestamp":"2026-10-19T01:00:01Z","payload":{"type":"message","role":"user","content":format!("question {i}")}}),
+                        json!({"type":"response_item","timestamp":"2026-10-19T01:00:02Z","payload":{"type":"reasoning","id":format!("rs-fallback-{i}"),"summary":[{"type":"summary_text","text":format!("CX15-FALLBACK-{i}")}],"encrypted_content":format!("CX15-OPAQUE-{i}")}}),
+                        json!({"type":"response_item","timestamp":"2026-10-19T01:00:03Z","payload":{"type":"message","role":"assistant","content":format!("answer {i}")}}),
+                    ]);
+                }
+                rows.push(json!({"type":"session_end","timestamp":"2026-10-19T01:00:04Z","payload":{"type":"session_end","cwd":root}}));
+                let source = (rows
+                    .iter()
+                    .map(Value::to_string)
+                    .collect::<Vec<_>>()
+                    .join("\n")
+                    + "\n")
+                    .into_bytes();
+                let mut original_claims = Vec::new();
+                let mut original_checkpoints = std::collections::BTreeMap::new();
+                for pass in 0..3 {
+                    let mut projection = helper_projection(
+                        &program,
+                        &source,
+                        session,
+                        if pass == 0 { fault } else { 0 },
+                    )
+                    .await;
+                    validate_prepared_runtime_response(AgentKind::Codex, &projection, false)
+                        .unwrap();
+                    let deadline =
+                        CaptureCommitDeadline::from_budget(Duration::from_secs(30)).unwrap();
+                    let retention =
+                        consume_codex_retention(&mut projection, deadline.monotonic()).unwrap();
+                    assert_eq!(retention.is_unavailable(), pass == 0);
+                    assert_eq!(
+                        projection.redaction_report["codex_reasoning"]["retention_unavailable"]
+                            .as_bool()
+                            .unwrap_or(false),
+                        pass == 0
+                    );
+                    let result = crate::internal::ai::authorized_read::with_test_helper_program(
+                        program.clone(),
+                        async {
+                            let source_preimage = import_source_preimage(
+                                AgentKind::Codex,
+                                "file",
+                                "codex-retention-local-descriptor",
+                                session,
+                            )
+                            .unwrap();
+                            let source_commitment =
+                                derive_capture_source_commitment_in_scope_until(
+                                    &conn,
+                                    &scope,
+                                    &storage,
+                                    &root,
+                                    CaptureSourceCommitmentDomain::ImportSourceV2,
+                                    &source_preimage,
+                                    deadline.monotonic(),
+                                )
+                                .await
+                                .unwrap();
+                            let snapshot_preimage = projection
+                                .transcript_snapshot
+                                .as_ref()
+                                .unwrap()
+                                .redacted_digest_preimage()
+                                .unwrap();
+                            let snapshot_commitment =
+                                derive_snapshot_content_commitment_in_scope_until(
+                                    &conn,
+                                    &scope,
+                                    &storage,
+                                    &root,
+                                    &snapshot_preimage,
+                                    deadline.monotonic(),
+                                )
+                                .await
+                                .unwrap();
+                            assert!(
+                                projection
+                                    .transcript_snapshot
+                                    .as_mut()
+                                    .unwrap()
+                                    .bind_source_commitment(snapshot_commitment)
+                            );
+                            let mut request = import_request_from_projection(
+                                AgentKind::Codex,
+                                session.to_owned(),
+                                "file".to_owned(),
+                                source_commitment,
+                                root.clone(),
+                                projection,
+                            );
+                            request.capture_scope = Some(scope.clone());
+                            let existing = load_existing_session_ownership_in_scope(
+                                &conn,
+                                AgentKind::Codex,
+                                session,
+                                &scope,
+                            )
+                            .await
+                            .unwrap();
+                            validate_scoped_prepared_existing_session(
+                                &mut request,
+                                existing.as_ref(),
+                            )
+                            .unwrap();
+                            import_prepared_with_retention(
+                                &conn,
+                                &storage,
+                                request,
+                                deadline,
+                                crate::internal::ai::subagent_content::SubagentDiscovery::default(),
+                                None,
+                                None,
+                                Some(retention),
+                            )
+                            .await
+                        },
+                    )
+                    .await
+                    .unwrap();
+                    assert_eq!(result.summary.partial, pass == 0);
+                    assert_eq!(
+                        result.summary.checkpoints_written,
+                        if pass == 2 { 0 } else { 2 }
+                    );
+                    assert!(
+                        ClientStorage::wait_for_background_tasks_until(
+                            Instant::now() + Duration::from_secs(10)
+                        )
+                        .await
+                    );
+                    let current_claims = claims(&conn).await;
+                    assert_eq!(current_claims.len(), 2);
+                    if pass == 0 {
+                        original_claims = current_claims;
+                    } else {
+                        assert_eq!(
+                            current_claims, original_claims,
+                            "supplements cannot rewrite semantic claims"
+                        );
+                    }
+                    let checkpoints = conn.query_all_raw(Statement::from_string(conn.get_database_backend(), "SELECT checkpoint_id,metadata_blob_oid FROM agent_checkpoint ORDER BY rowid".to_owned())).await.unwrap();
+                    assert_eq!(checkpoints.len(), if pass == 0 { 2 } else { 4 });
+                    let mut thinking_exports = 0;
+                    let mut all_exports = String::new();
+                    for row in checkpoints {
+                        let id: String = row.try_get_by("checkpoint_id").unwrap();
+                        let exported = run_cli(
+                            &program,
+                            &root,
+                            &home,
+                            &["agent", "checkpoint", "export", &id],
+                        );
+                        assert!(exported.status.success());
+                        let text = String::from_utf8(exported.stdout).unwrap();
+                        thinking_exports += usize::from(text.contains("CX15-FALLBACK-"));
+                        let oid: String = row.try_get_by("metadata_blob_oid").unwrap();
+                        if pass == 0 {
+                            original_checkpoints.insert(id.clone(), (oid.clone(), text.clone()));
+                        } else if let Some((original_oid, original_text)) =
+                            original_checkpoints.get(&id)
+                        {
+                            assert_eq!(&oid, original_oid, "old metadata objects are immutable");
+                            assert_eq!(&text, original_text, "old ordinary exports are immutable");
+                        }
+                        all_exports.push_str(&text);
+                        let metadata: Value = serde_json::from_slice(
+                            &crate::utils::object::read_git_object(
+                                &storage,
+                                &ObjectHash::from_str(&oid).unwrap(),
+                            )
+                            .unwrap(),
+                        )
+                        .unwrap();
+                        assert!(!metadata.to_string().contains("CX15-FALLBACK-"));
+                        if pass == 0 {
+                            assert_eq!(
+                                metadata["redaction_report"]["codex_reasoning"]["retention_unavailable"],
+                                true
+                            );
+                        }
+                    }
+                    assert_eq!(thinking_exports, if pass == 0 { 0 } else { 2 });
+                    for i in 0..2 {
+                        assert_eq!(
+                            all_exports.matches(&format!("CX15-FALLBACK-{i}")).count(),
+                            usize::from(pass != 0)
+                        );
+                        assert_eq!(
+                            all_exports.matches(&format!("CX15-OPAQUE-{i}")).count(),
+                            usize::from(pass != 0)
+                        );
+                    }
+                }
+                conn.close().await.unwrap();
+            }
+        }
+    }
 
     #[cfg(unix)]
     #[test]
@@ -3709,6 +5318,7 @@ mod tests {
             )]),
             turns: vec![turn],
             coverage_runtime: None,
+            codex_retention: None,
         }
     }
 
@@ -4745,6 +6355,7 @@ mod tests {
             cursor: None,
             yes: true,
             restore_erased: false,
+            codex_index_backup: None,
         };
         let error = validate_discovery_selector(&args).expect_err("--path needs --agent");
         assert_eq!(error.message(), "--path requires --agent");
@@ -4771,6 +6382,7 @@ mod tests {
             cursor: None,
             yes: true,
             restore_erased: false,
+            codex_index_backup: None,
         };
         configure(&mut args);
         args
@@ -5923,6 +7535,7 @@ mod tests {
                 })
                 .collect(),
             next_cursor: Some(MAX_IMPORT_LIMIT),
+            rejected: Vec::new(),
         };
         let frame = serde_json::to_vec(&response).unwrap();
         assert!(

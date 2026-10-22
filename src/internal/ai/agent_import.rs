@@ -51,9 +51,18 @@ use super::{
         AgentKind, CanonValue, Completeness, CoverageSchemaVersion, ExportAuthorized,
         MAX_REDACTION_MATCH_SAMPLES, NormalizedTurn, RedactedBytes, RedactionReport, Redactor,
         TRANSCRIPT_READ_HARD_CAP_BYTES, TranscriptSource,
-        coverage::{RedactedImportCoverageRuntimeDto, encode_redacted_import_runtime},
-        encode_coverage_turn_for_schema, normalize_claude_transcript_until,
-        normalize_codex_rollout_until, normalize_opencode_export_until, parse_canon_value,
+        codex_reasoning::{CodexRetention, CodexRetentionDto},
+        coverage::{
+            RedactedImportCoverageRuntimeDto, encode_redacted_import_runtime,
+            normalize_codex_retained_rollout_until,
+        },
+        encode_coverage_turn_for_schema,
+        live_capture::{
+            LiveCaptureBinding, LiveCaptureContext, StoredSubagentSelection,
+            SubagentDiscoveryLimits,
+        },
+        normalize_claude_transcript_until, normalize_codex_rollout_until,
+        normalize_opencode_export_until, parse_canon_value,
         reasoning::{
             NativeProvenReasoning, ReasoningSourceDisposition,
             note_claude_attached_duplicates_until,
@@ -337,6 +346,8 @@ pub(crate) struct PreparedImportProjection {
     pub turns: Vec<NormalizedTurn>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) coverage_runtime: Option<RedactedImportCoverageRuntimeDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) codex_retention: Option<CodexRetentionDto>,
 }
 
 impl std::fmt::Debug for PreparedImportProjection {
@@ -1718,16 +1729,28 @@ pub(crate) fn prepare_import_projection_with_reasoning(
     };
     let transcript = transcript.ok_or_else(|| snapshot_failure_for_import(&transcript_snapshot))?;
     ensure_before_deadline(deadline)?;
-    let mut turns = match agent_kind {
-        AgentKind::ClaudeCode => normalize_claude_transcript_until(transcript.bytes(), deadline),
-        AgentKind::Codex => normalize_codex_rollout_until(transcript.bytes(), deadline),
-        AgentKind::OpenCode => normalize_opencode_export_until(transcript.bytes(), deadline),
-        _ => bail!(
-            "agent kind '{}' is not importable",
-            agent_kind.as_cli_slug()
-        ),
-    }
-    .ok_or(ImportError::DeadlineExceeded)?;
+    let (mut turns, codex_slices, codex_unattributed_source) = if agent_kind == AgentKind::Codex {
+        let normalized = normalize_codex_retained_rollout_until(transcript.bytes(), deadline)
+            .ok_or(ImportError::DeadlineExceeded)?;
+        (
+            normalized.turns,
+            Some(normalized.retained),
+            normalized.unattributed_source,
+        )
+    } else {
+        let turns = match agent_kind {
+            AgentKind::ClaudeCode => {
+                normalize_claude_transcript_until(transcript.bytes(), deadline)
+            }
+            AgentKind::OpenCode => normalize_opencode_export_until(transcript.bytes(), deadline),
+            _ => bail!(
+                "agent kind '{}' is not importable",
+                agent_kind.as_cli_slug()
+            ),
+        }
+        .ok_or(ImportError::DeadlineExceeded)?;
+        (turns, None, false)
+    };
     retain_claude_attached_fields(agent_kind, transcript.bytes(), &mut turns, deadline)?;
     ensure_before_deadline(deadline)?;
     let typed_redaction_report = redact_turns_with_report(&mut turns);
@@ -1773,6 +1796,59 @@ pub(crate) fn prepare_import_projection_with_reasoning(
     };
     let (turn_boundaries, started_at, ended_at) =
         build_import_chronology(&facts, &turns, trusted_now)?;
+    let mut retention_unavailable = false;
+    let codex_retention = codex_slices.map(|slices| {
+        CodexRetentionDto::encode(&turns, slices)
+            .unwrap_or_else(|_| {
+                retention_unavailable = true;
+                CodexRetentionDto::unavailable()
+            })
+            .with_summary(
+                super::observed_agents::session_summary::from_redacted_codex_snapshot(
+                    &transcript,
+                    deadline,
+                ),
+            )
+    });
+    ensure_before_deadline(deadline)?;
+    let mut redaction_report =
+        merged_import_redaction_report(&snapshot_redaction_report, &typed_redaction_report);
+    if agent_kind == AgentKind::Codex {
+        match super::observed_agents::codex_reasoning::sidecar(transcript.bytes(), Some(deadline)) {
+            Ok(Some(stats)) => super::observed_agents::codex_reasoning::merge_sidecar_report(
+                &mut redaction_report,
+                stats,
+            ),
+            Ok(None) => {}
+            Err(_) => {
+                ensure_before_deadline(deadline)?;
+                redaction_report["codex_reasoning"] =
+                    super::observed_agents::codex_reasoning::unavailable_statistics();
+            }
+        }
+    }
+    if retention_unavailable {
+        super::observed_agents::codex_reasoning::mark_retention_unavailable(&mut redaction_report);
+    }
+    if agent_kind == AgentKind::Codex
+        && (codex_unattributed_source
+            || turns
+                .iter()
+                .map(|turn| turn.logical_turn_key.as_str())
+                .collect::<BTreeSet<_>>()
+                .len()
+                != turns.len())
+    {
+        if !redaction_report
+            .get("codex_reasoning")
+            .is_some_and(serde_json::Value::is_object)
+        {
+            redaction_report["codex_reasoning"] =
+                super::observed_agents::codex_reasoning::unavailable_statistics();
+        }
+        redaction_report["codex_reasoning"]["turn_attribution_unproven"] = serde_json::json!(true);
+        redaction_report["codex_reasoning"]["partial"] = serde_json::json!(true);
+    }
     let projection = PreparedImportProjection {
         content_digest: source_digest(&turns),
         started_at,
@@ -1784,14 +1860,12 @@ pub(crate) fn prepare_import_projection_with_reasoning(
         },
         stopped_at: facts.terminal.then_some(ended_at),
         storage_commitment,
-        redaction_report: merged_import_redaction_report(
-            &snapshot_redaction_report,
-            &typed_redaction_report,
-        ),
+        redaction_report,
         transcript_snapshot: Some(transcript_snapshot),
         turn_boundaries,
         turns,
         coverage_runtime,
+        codex_retention,
     };
     Ok((projection, native))
 }
@@ -2981,12 +3055,43 @@ async fn bind_attempt(
 }
 
 #[allow(clippy::too_many_arguments)]
+enum ImportAttemptBinding<'a> {
+    Reserved {
+        version: Option<CoverageSchemaVersion>,
+        claim: &'a ReservedTurnClaim,
+    },
+    Retention(&'a coverage_gate::CommittedTurnClaimSnapshot),
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn bind_attempt_for_coverage(
     conn: &DatabaseConnection,
     request: &ImportRequest,
     lease: &ImportLease,
     version: Option<CoverageSchemaVersion>,
     claim: &ReservedTurnClaim,
+    checkpoint_id: &str,
+    now_ms: i64,
+    deadline: CaptureCommitDeadline,
+) -> Result<TracesInflightMarker> {
+    bind_import_attempt(
+        conn,
+        request,
+        lease,
+        ImportAttemptBinding::Reserved { version, claim },
+        checkpoint_id,
+        now_ms,
+        deadline,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn bind_import_attempt(
+    conn: &DatabaseConnection,
+    request: &ImportRequest,
+    lease: &ImportLease,
+    binding: ImportAttemptBinding<'_>,
     checkpoint_id: &str,
     now_ms: i64,
     deadline: CaptureCommitDeadline,
@@ -3073,29 +3178,37 @@ async fn bind_attempt_for_coverage(
         txn.rollback().await.ok();
         return Err(error).context("verify import deadline before binding import coverage attempt");
     }
-    let coverage_bound = match version {
-        Some(version) => {
-            coverage_gate::bind_import_turn_claim_attempt_for_schema_with_conn(
-                &txn,
-                &request.session_id,
-                version,
-                claim,
-                &lease.owner,
-                checkpoint_id,
-                now_ms,
-            )
-            .await
-        }
-        None => {
-            coverage_gate::bind_import_turn_claim_attempt_with_conn(
-                &txn,
-                &request.session_id,
-                claim,
-                &lease.owner,
-                checkpoint_id,
-                now_ms,
-            )
-            .await
+    let coverage_bound = match binding {
+        ImportAttemptBinding::Reserved { version, claim } => match version {
+            Some(version) => {
+                coverage_gate::bind_import_turn_claim_attempt_for_schema_with_conn(
+                    &txn,
+                    &request.session_id,
+                    version,
+                    claim,
+                    &lease.owner,
+                    checkpoint_id,
+                    now_ms,
+                )
+                .await
+            }
+            None => {
+                coverage_gate::bind_import_turn_claim_attempt_with_conn(
+                    &txn,
+                    &request.session_id,
+                    claim,
+                    &lease.owner,
+                    checkpoint_id,
+                    now_ms,
+                )
+                .await
+            }
+        },
+        ImportAttemptBinding::Retention(claim) => {
+            claim
+                .verify_current_with_conn(&txn, &request.session_id)
+                .await?;
+            Ok(true)
         }
     }
     .context("bind import coverage attempt")?;
@@ -3169,6 +3282,8 @@ async fn finalize_noop_identity(
     now_ms: i64,
     deadline: CaptureCommitDeadline,
 ) -> Result<()> {
+    #[cfg(test)]
+    import_test_failpoint("before_finalize_identity")?;
     let scope = capture_scope_for_request_until(conn, request, deadline.monotonic()).await?;
     let txn =
         begin_import_write_transaction_until(conn, deadline, "begin import identity finalization")
@@ -3444,6 +3559,57 @@ fn redacted_json(value: &serde_json::Value) -> Result<RedactedBytes> {
     Ok(Redactor::new_default().redact(&bytes).0)
 }
 
+/// Full diagnostics have one content-addressed report blob. Per-checkpoint
+/// metadata contains only a bounded summary of a Codex session's turn rows.
+struct PreparedImportReports {
+    full: RedactedBytes,
+    metadata: serde_json::Value,
+}
+
+fn checkpoint_redaction_metadata(kind: AgentKind, report: &serde_json::Value) -> serde_json::Value {
+    let mut metadata = report.clone();
+    if kind != AgentKind::Codex {
+        return metadata;
+    }
+    let Some(stats) = report.get("codex_reasoning") else {
+        return metadata;
+    };
+    let rows = stats.get("turns").and_then(serde_json::Value::as_array);
+    let mut counts = serde_json::Map::new();
+    for field in [
+        "readable_parts",
+        "readable_utf8_bytes",
+        "empty_parts",
+        "opaque_nonempty",
+        "encrypted_empty",
+        "encrypted_null",
+        "encrypted_missing",
+        "unproven_fields",
+        "unsupported_records",
+    ] {
+        let total = rows
+            .into_iter()
+            .flatten()
+            .filter_map(|row| {
+                row.get("counts")
+                    .and_then(|counts| counts.get(field))
+                    .and_then(serde_json::Value::as_u64)
+            })
+            .fold(0u64, u64::saturating_add);
+        counts.insert(field.to_owned(), total.into());
+    }
+    metadata["codex_reasoning"] = serde_json::json!({
+        "schema_version":1,"source_status":"unproven",
+        "partial":stats.get("partial").and_then(serde_json::Value::as_bool).unwrap_or(true),
+        "statistics_unavailable":stats.get("statistics_unavailable").and_then(serde_json::Value::as_bool).unwrap_or(true),
+        "retention_unavailable":stats.get("retention_unavailable").and_then(serde_json::Value::as_bool).unwrap_or(false),
+        "has_unproven_data":stats.get("has_unproven_data").and_then(serde_json::Value::as_bool).unwrap_or(false),
+        "provider_turn_count":rows.map(Vec::len),"counts":counts,
+        "turn_attribution_unproven":stats.get("turn_attribution_unproven").and_then(serde_json::Value::as_bool).unwrap_or(false),
+    });
+    metadata
+}
+
 fn redacted_json_line(value: &serde_json::Value) -> Result<RedactedBytes> {
     let mut bytes = serde_json::to_vec(value).context("serialize safe import JSONL record")?;
     bytes.push(b'\n');
@@ -3577,6 +3743,41 @@ fn contiguous_next_ordinal(ordinals: &BTreeSet<usize>) -> Result<i64> {
     i64::try_from(next).context("turn ordinal exceeds import cursor range")
 }
 
+fn import_error_with_child_progress(
+    error: anyhow::Error,
+    request: &ImportRequest,
+    lease: &ImportLease,
+    outcome: &coverage_gate::LiveReservationOutcome,
+    written: usize,
+    child_written: usize,
+) -> anyhow::Error {
+    if child_written == 0 && written == 0 {
+        return error;
+    }
+    let previous = error.downcast_ref::<ImportProgressError>();
+    let written = previous.map_or(written, |progress| {
+        written.max(progress.summary.checkpoints_written)
+    });
+    let child_written = previous.map_or(child_written, |progress| {
+        child_written.max(progress.subagent_checkpoints_written)
+    });
+    error.context(ImportProgressError {
+        summary: ImportSummary {
+            session_id: request.session_id.clone(),
+            agent_kind: request.agent_kind.as_db_str().to_owned(),
+            turns_seen: request.turns.len(),
+            checkpoints_written: written,
+            skipped_covered: outcome.skipped_covered,
+            skipped_inflight: outcome.skipped_inflight,
+            conflicted: outcome.conflicted,
+            partial: true,
+        },
+        subagent_checkpoints_written: child_written,
+        import_identity_id: lease.identity_id.clone(),
+        import_fence_token: lease.fence_token,
+    })
+}
+
 async fn capture_imported_subagent_content(
     conn: &DatabaseConnection,
     scope: &CaptureScope,
@@ -3585,14 +3786,17 @@ async fn capture_imported_subagent_content(
     discovery: &super::subagent_content::SubagentDiscovery,
     deadline: CaptureCommitDeadline,
 ) -> Result<super::subagent_content::SubagentCaptureSummary> {
-    if request.agent_kind != AgentKind::ClaudeCode {
-        return Ok(super::subagent_content::SubagentCaptureSummary::default());
-    }
+    // Sources are constructed only by the Root discovery owner. The content
+    // writer verifies their provider, parent identity and scope independently.
     if discovery.warning.is_some() {
         tracing::warn!(
             reason = "subagent_discovery_unavailable",
             "historical import subagent discovery is unavailable; parent import remains valid"
         );
+    }
+    if discovery.sources.is_empty() {
+        return Ok(super::subagent_content::SubagentCaptureSummary::default()
+            .with_discovery_usage(discovery));
     }
     let summary = super::subagent_content::capture_discovered_subagent_contents_with_scope(
         conn,
@@ -3612,7 +3816,7 @@ async fn capture_imported_subagent_content(
         partial_sources = summary.partial_sources,
         "historical import subagent content attribution completed"
     );
-    Ok(summary)
+    Ok(summary.with_discovery_usage(discovery))
 }
 
 fn subagent_capture_progress(
@@ -3632,6 +3836,13 @@ fn historical_import_is_partial(
     skipped_inflight > 0 || conflicted > 0 || discovery.partial_source_count() > 0
 }
 
+fn historical_child_capture_is_partial(
+    kind: AgentKind,
+    summary: &super::subagent_content::SubagentCaptureSummary,
+) -> bool {
+    summary.partial_sources > 0 || (kind == AgentKind::Codex && summary.skipped_inflight > 0)
+}
+
 /// Persist one prepared source with per-turn checkpoints and the shared
 /// claim/ref/catalog/identity transaction.
 pub async fn import_prepared(
@@ -3641,19 +3852,35 @@ pub async fn import_prepared(
     deadline: CaptureCommitDeadline,
 ) -> Result<ImportSummary> {
     let monotonic_deadline = deadline.monotonic();
-    let discovery = if request.agent_kind == AgentKind::ClaudeCode {
+    let binding = LiveCaptureBinding::for_stored(request.agent_kind);
+    let discovery = if let Some(port) = binding.subagent_discovery() {
         let discovery_deadline =
             super::subagent_content::discovery_deadline_preserving_parent(monotonic_deadline)?;
-        match super::subagent_content::discover_claude_subagent_contents_bounded(
-            &request.working_dir,
-            &request.provider_session_id,
-            discovery_deadline,
-            super::observed_agents::TRANSCRIPT_READ_HARD_CAP_BYTES,
-            super::subagent_content::MAX_SUBAGENT_SOURCES_PER_CAPTURE,
-        )
-        .await
+        let context = LiveCaptureContext {
+            libra_session_id: &request.session_id,
+            provider_session_id: &request.provider_session_id,
+            verified_cwd: &request.working_dir,
+        };
+        match port
+            .discover_stored(
+                &context,
+                StoredSubagentSelection::ImportCurrent {
+                    parent_locator: None,
+                },
+                SubagentDiscoveryLimits {
+                    byte_budget: super::observed_agents::TRANSCRIPT_READ_HARD_CAP_BYTES,
+                    source_limit: super::subagent_content::MAX_SUBAGENT_SOURCES_PER_CAPTURE,
+                },
+                discovery_deadline,
+            )
+            .await
         {
             Ok(discovery) => discovery,
+            Err(_) if request.agent_kind == AgentKind::Codex => {
+                super::subagent_content::SubagentDiscovery::charged_stored_unavailable(
+                    super::observed_agents::TRANSCRIPT_READ_HARD_CAP_BYTES,
+                )
+            }
             Err(error) => {
                 match super::subagent_content::SubagentDiscovery::from_deadline_error(&error) {
                     Some(discovery) => discovery,
@@ -3754,6 +3981,7 @@ pub async fn import_prepared_with_coverage_versions(
             None,
             BTreeMap::new(),
             Some(bound_versions),
+            None,
             None,
         ),
     )
@@ -3920,6 +4148,365 @@ fn validate_import_turn_bounds(
     Ok(())
 }
 
+/// A supplement preserves newly available ordinary source values without
+/// changing a committed semantic claim or authenticating native reasoning.
+struct RetentionSupplementContext<'a> {
+    conn: &'a DatabaseConnection,
+    storage: &'a Path,
+    request: &'a ImportRequest,
+    scope: &'a CaptureScope,
+    lease: &'a ImportLease,
+    deadline: CaptureCommitDeadline,
+    reports: &'a PreparedImportReports,
+    reservation: &'a coverage_gate::LiveReservationOutcome,
+    usage_attribution: Option<&'a serde_json::Value>,
+}
+
+struct RetentionSupplementCommit<'a> {
+    source: &'a coverage_gate::CommittedTurnClaimSnapshot,
+    ordinary: LiveClaimCommitPlan,
+}
+
+#[async_trait::async_trait]
+impl super::traces::TracesTxnExtra for RetentionSupplementCommit<'_> {
+    async fn apply(
+        &self,
+        txn: &sea_orm::DatabaseTransaction,
+        ctx: &super::traces::TracesCommitCtx,
+    ) -> Result<()> {
+        self.source
+            .verify_current_with_conn(txn, &self.ordinary.session_id)
+            .await?;
+        super::traces::TracesTxnExtra::apply(&self.ordinary, txn, ctx).await
+    }
+}
+
+#[derive(Clone, Copy)]
+enum RetentionLookup {
+    Present,
+    Missing,
+    Unavailable,
+}
+
+/// Existing ordinary bytes are only a deduplication optimization. If a legacy
+/// layout or packed object cannot be inspected, save a fresh authorized copy;
+/// never mistake a failed read for evidence that retention is already durable.
+async fn read_checkpoint_retention(
+    context: &RetentionSupplementContext<'_>,
+    checkpoint_id: &str,
+    expected: &[u8],
+) -> Result<RetentionLookup> {
+    use super::checkpoint_reader::{
+        checkpoint_plain_files, checkpoint_plain_manifest, checkpoint_transcript_oids,
+        read_checkpoint_object_bounded, read_tree_object, reasoning_artifact_tree_oids, subtree,
+    };
+    ensure_before_deadline(context.deadline.monotonic())?;
+    let row =
+        await_import_precommit_read_until(context.deadline.monotonic(), async {
+            context.conn.query_one_raw(Statement::from_sql_and_values(
+            context.conn.get_database_backend(),
+            "SELECT tree_oid FROM agent_checkpoint WHERE checkpoint_id = ? AND session_id = ?",
+            [checkpoint_id.into(), context.request.session_id.clone().into()],
+        )).await.context("read ordinary retention checkpoint catalog")
+        })
+        .await?;
+    let Some(row) = row else {
+        return Ok(RetentionLookup::Missing);
+    };
+    let read = (|| -> Result<bool> {
+        let tree_oid: String = row
+            .try_get_by("tree_oid")
+            .context("decode ordinary retention checkpoint tree")?;
+        let invalid = || {
+            anyhow!("ordinary retention checkpoint cannot be verified; run `libra agent doctor`")
+        };
+        let root = read_tree_object(context.storage, &tree_oid).map_err(|_| invalid())?;
+        let checkpoints = subtree(context.storage, &root, "checkpoint").map_err(|_| invalid())?;
+        let prefix = checkpoint_id.get(..2).ok_or_else(invalid)?;
+        let suffix = checkpoint_id.get(2..).ok_or_else(invalid)?;
+        let bucket = subtree(context.storage, &checkpoints, prefix).map_err(|_| invalid())?;
+        let inner = subtree(context.storage, &bucket, suffix).map_err(|_| invalid())?;
+        let artifacts =
+            reasoning_artifact_tree_oids(context.storage, &inner).map_err(|_| invalid())?;
+        let files =
+            checkpoint_plain_files(context.storage, &inner, &artifacts).map_err(|_| invalid())?;
+        let manifest = checkpoint_plain_manifest(context.storage, &inner, &artifacts, &files)
+            .map_err(|_| invalid())?
+            .ok_or_else(invalid)?;
+        let oids = checkpoint_transcript_oids(context.storage, &inner, &manifest, &artifacts)
+            .map_err(|_| invalid())?;
+        let cap = TRANSCRIPT_READ_HARD_CAP_BYTES.saturating_mul(2);
+        let mut bytes = Vec::new();
+        for oid in oids {
+            ensure_before_deadline(context.deadline.monotonic())?;
+            let remaining = cap.saturating_sub(bytes.len() as u64);
+            let (part, truncated) =
+                read_checkpoint_object_bounded(context.storage, &oid, remaining)
+                    .map_err(|_| invalid())?;
+            if truncated {
+                return Err(invalid());
+            }
+            bytes.extend_from_slice(&part);
+        }
+        ensure_before_deadline(context.deadline.monotonic())?;
+        let Some(position) = bytes.iter().position(|byte| *byte == b'\n') else {
+            return Ok(false);
+        };
+        // INVARIANT: position was found within bytes above.
+        let (first, remainder) = bytes.split_at(position);
+        let tail = remainder.strip_prefix(b"\n").ok_or_else(invalid)?;
+        let Ok(projection) = parse_canon_value(first) else {
+            return Ok(false);
+        };
+        Ok(
+            projection.get("agent_kind").and_then(CanonValue::as_str) == Some("codex")
+                && matches!(projection.get("schema_version"), Some(CanonValue::Int(1)))
+                && tail == expected,
+        )
+    })();
+    ensure_before_deadline(context.deadline.monotonic())?;
+    Ok(match read {
+        Ok(true) => RetentionLookup::Present,
+        Ok(false) => RetentionLookup::Missing,
+        Err(_) => RetentionLookup::Unavailable,
+    })
+}
+
+/// The deterministic ID is keyed by repository/session/turn/content. A
+/// committed catalog row proves this exact ordinary copy was persisted, even
+/// after its objects have moved into a pack. It grants no native authority.
+async fn retention_supplement_exists(
+    context: &RetentionSupplementContext<'_>,
+    checkpoint_id: &str,
+) -> Result<bool> {
+    await_import_precommit_read_until(context.deadline.monotonic(), async {
+        context.conn.query_one_raw(Statement::from_sql_and_values(
+            context.conn.get_database_backend(),
+            "SELECT 1 FROM agent_checkpoint WHERE checkpoint_id = ? AND session_id = ? AND scope = 'committed'",
+            [checkpoint_id.into(), context.request.session_id.clone().into()],
+        )).await.context("read committed ordinary retention supplement")
+    }).await.map(|row| row.is_some())
+}
+
+#[derive(Default)]
+struct RetentionSupplementProgress {
+    written: usize,
+    pending: bool,
+}
+
+/// One ordinary content identity for fresh and supplemental copies. Include
+/// the V1 semantic bytes and completeness so a later semantic revision cannot
+/// reuse an earlier checkpoint. This is a keyed data ID, never native proof.
+async fn codex_retention_checkpoint_id(
+    conn: &DatabaseConnection,
+    scope: &CaptureScope,
+    storage: &Path,
+    request: &ImportRequest,
+    turn: &NormalizedTurn,
+    retained: &RedactedBytes,
+    deadline: CaptureCommitDeadline,
+) -> Result<String> {
+    let mut digest = Sha256::new();
+    digest.update(b"libra-codex-ordinary-retention-v1\0");
+    let semantic_digest = turn.digest_hex();
+    for value in [
+        request.session_id.as_bytes(),
+        turn.logical_turn_key.as_bytes(),
+        b"1",
+        semantic_digest.as_bytes(),
+        turn.completeness.as_db_str().as_bytes(),
+        retained.bytes(),
+    ] {
+        update_length_delimited_import_preimage(&mut digest, value)?;
+    }
+    let preimage: [u8; 32] = digest.finalize().into();
+    let commitment = super::capture::key::derive_snapshot_content_commitment_in_scope_until(
+        conn,
+        scope,
+        storage,
+        &request.working_dir,
+        &preimage,
+        deadline.monotonic(),
+    )
+    .await?;
+    Ok(uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, commitment.as_bytes()).to_string())
+}
+
+async fn append_codex_retention_supplements(
+    context: RetentionSupplementContext<'_>,
+    retention: &CodexRetention,
+    covered: &[coverage_gate::CommittedTurnClaimSnapshot],
+) -> Result<RetentionSupplementProgress> {
+    let mut written = 0;
+    for source in covered {
+        if written >= 16
+            && retention
+                .for_turn(source.replay_fence().logical_turn_key)
+                .is_some()
+        {
+            return Ok(RetentionSupplementProgress {
+                written,
+                pending: true,
+            });
+        }
+        let mut marker_fence = None;
+        let result: Result<bool> = async {
+        ensure_before_deadline(context.deadline.monotonic())?;
+        let key = source.replay_fence().logical_turn_key;
+        let Some(retained) = retention.for_turn(key) else {
+            return Ok(false);
+        };
+        source
+            .verify_current_with_conn(context.conn, &context.request.session_id)
+            .await?;
+        let turn = context.request.turns.iter().find(|turn| turn.logical_turn_key == key)
+            .context("ordinary retention source has no corresponding semantic turn")?;
+        let checkpoint_id = codex_retention_checkpoint_id(context.conn, context.scope, context.storage,
+            context.request, turn, retained, context.deadline).await?;
+        if retention_supplement_exists(&context, &checkpoint_id).await? {
+            source.verify_current_with_conn(context.conn, &context.request.session_id).await?;
+            return Ok(false);
+        }
+        let prior_retention_unavailable = match read_checkpoint_retention(&context, source.checkpoint_id(), retained.bytes()).await? {
+            RetentionLookup::Present => {
+                source.verify_current_with_conn(context.conn, &context.request.session_id).await?;
+                return Ok(false);
+            }
+            RetentionLookup::Missing => false,
+            RetentionLookup::Unavailable => true,
+        };
+        let now_ms = Utc::now().timestamp_millis();
+        let marker = bind_import_attempt(
+            context.conn,
+            context.request,
+            context.lease,
+            ImportAttemptBinding::Retention(source),
+            &checkpoint_id,
+            now_ms,
+            context.deadline,
+        )
+        .await?;
+        let generation = marker
+            .generation
+            .clone()
+            .context("ordinary retention attempt has no marker generation")?;
+        marker_fence = Some((checkpoint_id.clone(), generation));
+            let writer = ImportedCheckpointWriter::from_prebound_attempt(context.conn, context.storage, marker)
+                .map_err(|_| anyhow!("cannot adopt ordinary retention checkpoint attempt; run `libra agent doctor`"))?
+                .with_capture_scope(context.scope.clone());
+            let turn = context.request.turns.iter().find(|turn| turn.logical_turn_key == key)
+                .context("ordinary retention source has no corresponding semantic turn")?;
+            let projection = safe_turn_projection("codex", turn);
+            let mut transcript = redacted_json_line(&projection)?.into_inner();
+            transcript.extend_from_slice(retained.bytes());
+            let source_snapshot = context.request.transcript_snapshot.clone().ok_or(ImportError::SourceAuthorization)?;
+            let mut metadata = serde_json::json!({
+                "schema_version":history::CHECKPOINT_METADATA_SCHEMA_VERSION,
+                "checkpoint_id":checkpoint_id,"session_id":context.request.session_id,"agent_kind":"codex",
+                "scope":"committed","model":"unknown","provider_session_id":context.request.provider_session_id,
+                "created_at":context.request.ended_at,"transcript_snapshot":source_snapshot,
+                "redaction_report":context.reports.metadata,
+                "import":{"source_kind":context.request.source_kind,"source_id":context.request.source_id,
+                    "logical_turn_key":key,"ordinary_retention_supplement":true,
+                    "prior_retention_unavailable":prior_retention_unavailable}
+            });
+            if let Some(extraction) = retention.summary_metadata() {
+                metadata["extraction"] = extraction;
+                if let Some(attribution) = context.usage_attribution {
+                    metadata["usage_attribution"] = attribution.clone();
+                }
+            }
+            let metadata = redacted_json(&metadata)?;
+            let event = LifecycleEvent {
+                kind: LifecycleEventKind::TurnEnd,
+                session_id: context.request.provider_session_id.clone(), session_ref: None,
+                prompt: None, model: None,
+                source: Some(serde_json::json!({"channel":"import","ordinary_retention_supplement":true})),
+                tool_name: None, tool_input: None, tool_response: None, assistant_message: None,
+                timestamp: DateTime::<Utc>::from_timestamp(context.request.ended_at, 0)
+                    .context("ordinary retention lifecycle timestamp is out of range")?,
+            };
+            let event_context = CanonicalEventContext {
+                agent_kind: "codex", session_id: &context.request.session_id,
+                provider_session_id: &context.request.provider_session_id,
+                identity_scheme: LifecycleIdentityScheme::ImportUuidV5,
+                provenance: serde_json::json!({"channel":"import","ordinary_retention_supplement":true}),
+            };
+            let lifecycle = redacted_json_line(&lifecycle_event_canonical_json_with_identity(
+                &event, &event_context,
+                import_lifecycle_event_id(&context.request.session_id, &format!("retention:{checkpoint_id}")),
+                true,
+            ))?;
+            let payload = CheckpointRedactedPayload::from_derived_turn_projection(
+                RedactedBytes::new_unchecked(transcript), source_snapshot, metadata,
+                lifecycle,
+                context.reports.full.clone(),
+            ).map_err(|_| anyhow!("cannot prepare ordinary retention checkpoint payload"))?;
+            let parent = current_parent_commit(context.conn, context.deadline.monotonic()).await?;
+            let ordinals = committed_source_ordinals(context.conn, context.request, context.deadline.monotonic()).await?;
+            let plan = RetentionSupplementCommit {
+                source,
+                ordinary: LiveClaimCommitPlan {
+                    source_channel:"import", session_id:context.request.session_id.clone(), checkpoint_id:checkpoint_id.clone(),
+                    owner:context.lease.owner.clone(),parent_commit:parent.clone(),created_at:context.request.ended_at,now_ms,
+                    claims:Vec::new(),import_session:Some(import_session_commit(context.request, context.scope)?),
+                    import_identity:Some(ImportIdentityCommit {
+                        identity_id:context.lease.identity_id.clone(),observed_digest:context.request.content_digest.clone(),
+                        owner:context.lease.owner.clone(),fence_token:context.lease.fence_token,
+                        next_ordinal:contiguous_next_ordinal(&ordinals)?,final_turn:false,
+                    }), capture_scope:Some(context.scope.clone()),
+                },
+            };
+            let request = ImportedCheckpointWriteRequest::new(&checkpoint_id,&context.request.session_id,"codex",parent.as_deref(),&payload,&plan,context.deadline)
+                .map_err(|_| anyhow!("cannot prepare ordinary retention checkpoint request"))?;
+            match writer.write_turn(request).await.map_err(|_| anyhow!("cannot persist ordinary retention checkpoint; run `libra agent doctor`"))? {
+                CheckpointWriteOutcome::Written { .. } | CheckpointWriteOutcome::AlreadyExists { .. } | CheckpointWriteOutcome::PendingCleanup { .. } => Ok(true),
+                _ => bail!("ordinary retention checkpoint did not commit; retry after the repository writer finishes"),
+            }
+        }.await;
+        if let Err(error) = result {
+            let error = abandon_import_attempt_after_error(
+                context.conn,
+                context.request,
+                context.lease,
+                marker_fence
+                    .as_ref()
+                    .map(|(id, generation)| (id.as_str(), generation.as_str())),
+                "partial",
+                error,
+                context.deadline,
+            )
+            .await;
+            if written == 0 {
+                return Err(error);
+            }
+            return Err(ImportProgressError {
+                summary: ImportSummary {
+                    session_id: context.request.session_id.clone(),
+                    agent_kind: context.request.agent_kind.as_db_str().to_owned(),
+                    turns_seen: context.request.turns.len(),
+                    checkpoints_written: written,
+                    skipped_covered: context.reservation.skipped_covered,
+                    skipped_inflight: context.reservation.skipped_inflight,
+                    conflicted: context.reservation.conflicted,
+                    partial: true,
+                },
+                subagent_checkpoints_written: 0,
+                import_identity_id: context.lease.identity_id.clone(),
+                import_fence_token: context.lease.fence_token,
+            }
+            .into());
+        }
+        if result? {
+            written += 1;
+        }
+    }
+    Ok(RetentionSupplementProgress {
+        written,
+        pending: false,
+    })
+}
+
 /// Command-path variant whose child discovery was already charged to the
 /// batch input budget before any persistence begins.
 pub(crate) async fn import_prepared_with_subagent_discovery(
@@ -3948,12 +4535,44 @@ pub(crate) async fn import_prepared_with_subagent_discovery(
 pub(crate) async fn import_prepared_with_subagent_discovery_and_runtime(
     conn: &DatabaseConnection,
     storage_root: &Path,
-    mut request: ImportRequest,
+    request: ImportRequest,
     deadline: CaptureCommitDeadline,
     subagent_discovery: super::subagent_content::SubagentDiscovery,
     native_reasoning: Option<NativeProvenReasoning>,
     coverage_runtime: Option<CaptureCoverageRuntime>,
 ) -> Result<DetailedImportSummary> {
+    import_prepared_with_retention(
+        conn,
+        storage_root,
+        request,
+        deadline,
+        subagent_discovery,
+        native_reasoning,
+        coverage_runtime,
+        None,
+    )
+    .await
+}
+
+/// Ordinary retained source is distinct from the typed semantic/native seam.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn import_prepared_with_retention(
+    conn: &DatabaseConnection,
+    storage_root: &Path,
+    mut request: ImportRequest,
+    deadline: CaptureCommitDeadline,
+    subagent_discovery: super::subagent_content::SubagentDiscovery,
+    native_reasoning: Option<NativeProvenReasoning>,
+    coverage_runtime: Option<CaptureCoverageRuntime>,
+    codex_retention: Option<CodexRetention>,
+) -> Result<DetailedImportSummary> {
+    if codex_retention.is_some()
+        && (request.agent_kind != AgentKind::Codex
+            || native_reasoning.is_some()
+            || coverage_runtime.is_some())
+    {
+        return Err(ImportError::SourceAuthorization.into());
+    }
     let mut versions = None;
     let runtime_source_rejected = coverage_runtime
         .as_ref()
@@ -4156,6 +4775,7 @@ pub(crate) async fn import_prepared_with_subagent_discovery_and_runtime(
         per_turn_native,
         versions,
         runtime_source_rejected,
+        codex_retention,
     )
     .await
 }
@@ -4204,6 +4824,7 @@ async fn import_prepared_with_reasoning_identity_and_batches(
         per_turn_native,
         None,
         None,
+        None,
     )
     .await
 }
@@ -4219,6 +4840,7 @@ async fn import_prepared_with_reasoning_identity_batches_and_coverage(
     mut per_turn_native: BTreeMap<String, NativeProvenReasoning>,
     coverage_versions: Option<BTreeMap<String, CoverageSchemaVersion>>,
     runtime_source_rejected: Option<bool>,
+    codex_retention: Option<CodexRetention>,
 ) -> Result<DetailedImportSummary> {
     let monotonic_deadline = deadline.monotonic();
     // A prepared request can cross the private preparation-helper boundary or
@@ -4227,6 +4849,11 @@ async fn import_prepared_with_reasoning_identity_batches_and_coverage(
     // lease or writing a catalog row.
     validate_persisted_import_timestamps(&request, Utc::now().timestamp())?;
     assert_v2_durable_import_request(&request)?;
+    ensure_before_deadline(monotonic_deadline)?;
+    let reports = PreparedImportReports {
+        full: redacted_json(&request.redaction_report)?,
+        metadata: checkpoint_redaction_metadata(request.agent_kind, &request.redaction_report),
+    };
     ensure_before_deadline(monotonic_deadline)?;
     let import_scope = capture_scope_for_request_until(conn, &request, monotonic_deadline).await?;
     if let Some(reasoning) = reasoning_identity_plan.as_ref() {
@@ -4259,6 +4886,14 @@ async fn import_prepared_with_reasoning_identity_batches_and_coverage(
     let reasoning_input = match reasoning_identity_plan.as_ref() {
         Some(reasoning) => ReasoningCoverageInput::native(reasoning),
         None => ReasoningCoverageInput::ordinary(&reasoning_reader),
+    };
+    let reasoning_input = if codex_retention
+        .as_ref()
+        .is_some_and(|retention| !retention.is_unavailable())
+    {
+        reasoning_input.with_ordinary_retention_observations()
+    } else {
+        reasoning_input
     };
     let reservation = if let Some(rejected) = runtime_source_rejected {
         coverage_gate::reserve_runtime_import_turn_claims_with_reasoning_until(
@@ -4364,6 +4999,7 @@ async fn import_prepared_with_reasoning_identity_batches_and_coverage(
             &lease,
         ));
     }
+    let covered = outcome.covered;
     let versioned_reserved = outcome.versioned_reserved;
     let outcome = outcome.ordinary;
     // Reservation is the authority boundary for owned native bytes. Drop
@@ -4391,22 +5027,131 @@ async fn import_prepared_with_reasoning_identity_batches_and_coverage(
         outcome.conflicted,
         &subagent_discovery,
     );
+    partial |= codex_retention
+        .as_ref()
+        .is_some_and(CodexRetention::is_unavailable);
     let defer_identity_for_subagents = !subagent_discovery.sources.is_empty();
-    if outcome.reserved.is_empty() {
-        let capture = capture_imported_subagent_content(
-            conn,
-            &import_scope,
-            storage_root,
-            &request,
-            &subagent_discovery,
-            deadline,
+    // Codex attribution describes this import pass, so its durable child
+    // snapshot must exist before either parent metadata construction point.
+    // Preserve failures until after the independent parent writes finish.
+    let child_deadline = super::subagent_content::import_child_work_deadline(deadline);
+    let mut early_child_capture = if request.agent_kind == AgentKind::Codex {
+        Some(
+            match child_deadline.and_then(super::subagent_content::import_child_capture_deadline) {
+                Some(child_deadline) => {
+                    capture_imported_subagent_content(
+                        conn,
+                        &import_scope,
+                        storage_root,
+                        &request,
+                        &subagent_discovery,
+                        child_deadline,
+                    )
+                    .await
+                }
+                None => Err(anyhow!(
+                    "historical child capture has no remaining work window; retry the import"
+                )),
+            },
         )
-        .await;
+    } else {
+        None
+    };
+    let child_progress = early_child_capture.as_ref().map(|result| match result {
+        Ok(summary) => summary.clone(),
+        Err(error) => subagent_capture_progress(error),
+    });
+    partial |= early_child_capture.as_ref().is_some_and(Result::is_err);
+    if let Some(summary) = child_progress.as_ref() {
+        partial |= historical_child_capture_is_partial(request.agent_kind, summary);
+    }
+    let usage_attribution = if let (Some(summary), Some(extraction)) = (
+        child_progress.as_ref(),
+        codex_retention
+            .as_ref()
+            .and_then(CodexRetention::summary_metadata),
+    ) {
+        let snapshot_complete = request
+            .transcript_snapshot
+            .as_ref()
+            .is_some_and(|snapshot| {
+                snapshot.completeness
+                    == super::capture::snapshot::CaptureSnapshotCompleteness::Complete
+                    && snapshot.has_durable_source_commitment()
+                    && snapshot.source.as_ref().is_some_and(|source| {
+                        matches!(source.kind,
+                    super::capture::snapshot::CaptureSnapshotSourceKind::ProviderFile
+                    | super::capture::snapshot::CaptureSnapshotSourceKind::TrustedExport)
+                    })
+            });
+        summary
+            .project_usage_attribution(
+                conn,
+                storage_root,
+                super::subagent_content::SubagentUsageAttributionInput {
+                    scope: &import_scope,
+                    capture_session: &request.session_id,
+                    current_thread: &request.provider_session_id,
+                    verified_cwd: &request.working_dir,
+                    agent_kind: request.agent_kind.as_db_str(),
+                    as_of: "import_pass",
+                    parent_extraction: &extraction,
+                    parent_snapshot_complete: snapshot_complete,
+                    deadline: child_deadline,
+                },
+            )
+            .await
+    } else {
+        None
+    };
+    let child_written = child_progress
+        .as_ref()
+        .map_or(0, |summary| summary.checkpoints_written);
+    let retention_progress = if let Some(retention) = codex_retention.as_ref() {
+        append_codex_retention_supplements(
+            RetentionSupplementContext {
+                conn,
+                storage: storage_root,
+                request: &request,
+                scope: &import_scope,
+                lease: &lease,
+                deadline,
+                reports: &reports,
+                reservation: &outcome,
+                usage_attribution: usage_attribution.as_ref(),
+            },
+            retention,
+            &covered,
+        )
+        .await
+        .map_err(|error| {
+            import_error_with_child_progress(error, &request, &lease, &outcome, 0, child_written)
+        })?
+    } else {
+        RetentionSupplementProgress::default()
+    };
+    partial |= retention_progress.pending;
+    let retained_written = retention_progress.written;
+    if outcome.reserved.is_empty() {
+        let capture = match early_child_capture.take() {
+            Some(result) => result,
+            None => {
+                capture_imported_subagent_content(
+                    conn,
+                    &import_scope,
+                    storage_root,
+                    &request,
+                    &subagent_discovery,
+                    deadline,
+                )
+                .await
+            }
+        };
         let capture_summary = match capture {
             Ok(summary) => summary,
             Err(error) => {
                 let child_progress = subagent_capture_progress(&error);
-                let _ = abandon_import_attempt_after_error(
+                let error = abandon_import_attempt_after_error(
                     conn,
                     &request,
                     &lease,
@@ -4417,12 +5162,12 @@ async fn import_prepared_with_reasoning_identity_batches_and_coverage(
                     deadline,
                 )
                 .await;
-                return Err(ImportProgressError {
+                return Err(error.context(ImportProgressError {
                     summary: ImportSummary {
                         session_id: request.session_id.clone(),
                         agent_kind: request.agent_kind.as_db_str().to_string(),
                         turns_seen: request.turns.len(),
-                        checkpoints_written: 0,
+                        checkpoints_written: retained_written,
                         skipped_covered: outcome.skipped_covered,
                         skipped_inflight: outcome.skipped_inflight,
                         conflicted: outcome.conflicted,
@@ -4431,14 +5176,15 @@ async fn import_prepared_with_reasoning_identity_batches_and_coverage(
                     subagent_checkpoints_written: child_progress.checkpoints_written,
                     import_identity_id: lease.identity_id.clone(),
                     import_fence_token: lease.fence_token,
-                }
-                .into());
+                }));
             }
         };
+        // Non-Codex providers retain their established late capture order.
+        let child_written = child_written.max(capture_summary.checkpoints_written);
         // Projection repeats completeness checks under the capture deadline;
         // preserve a newly observed incomplete child as a partial import
         // rather than discarding its durable checkpoint after discovery.
-        partial |= capture_summary.partial_sources > 0;
+        partial |= historical_child_capture_is_partial(request.agent_kind, &capture_summary);
         let identity_state = if partial { "partial" } else { "committed" };
         if let Err(error) = finalize_noop_identity(
             conn,
@@ -4456,19 +5202,30 @@ async fn import_prepared_with_reasoning_identity_batches_and_coverage(
                 &request,
                 &lease,
                 None,
-                identity_state,
+                if retained_written == 0 && child_written == 0 {
+                    "failed"
+                } else {
+                    "partial"
+                },
                 error,
                 deadline,
             )
             .await;
-            return Err(error);
+            return Err(import_error_with_child_progress(
+                error,
+                &request,
+                &lease,
+                &outcome,
+                retained_written,
+                child_written,
+            ));
         }
         return Ok(DetailedImportSummary::new(
             ImportSummary {
                 session_id: request.session_id,
                 agent_kind: request.agent_kind.as_db_str().to_string(),
                 turns_seen: request.turns.len(),
-                checkpoints_written: 0,
+                checkpoints_written: retained_written,
                 skipped_covered: outcome.skipped_covered,
                 skipped_inflight: outcome.skipped_inflight,
                 conflicted: outcome.conflicted,
@@ -4479,22 +5236,59 @@ async fn import_prepared_with_reasoning_identity_batches_and_coverage(
         ));
     }
 
-    let parent_commit = match current_parent_commit(conn, monotonic_deadline).await {
+    let progress_state = if retained_written == 0 && child_written == 0 {
+        "failed"
+    } else {
+        "partial"
+    };
+    let parent_commit = match async {
+        #[cfg(test)]
+        import_test_failpoint("before_parent_commit")?;
+        current_parent_commit(conn, monotonic_deadline).await
+    }
+    .await
+    {
         Ok(parent) => parent,
         Err(error) => {
             let error = abandon_import_attempt_after_error(
-                conn, &request, &lease, None, "failed", error, deadline,
+                conn,
+                &request,
+                &lease,
+                None,
+                progress_state,
+                error,
+                deadline,
             )
             .await;
-            return Err(error);
+            return Err(import_error_with_child_progress(
+                error,
+                &request,
+                &lease,
+                &outcome,
+                retained_written,
+                child_written,
+            ));
         }
     };
     if let Err(error) = ensure_before_deadline(monotonic_deadline) {
         let error = abandon_import_attempt_after_error(
-            conn, &request, &lease, None, "failed", error, deadline,
+            conn,
+            &request,
+            &lease,
+            None,
+            progress_state,
+            error,
+            deadline,
         )
         .await;
-        return Err(error);
+        return Err(import_error_with_child_progress(
+            error,
+            &request,
+            &lease,
+            &outcome,
+            retained_written,
+            child_written,
+        ));
     }
     let mut committed_ordinals = match match coverage_versions.as_ref() {
         Some(versions) => {
@@ -4511,13 +5305,26 @@ async fn import_prepared_with_reasoning_identity_batches_and_coverage(
         Ok(ordinals) => ordinals,
         Err(error) => {
             let error = abandon_import_attempt_after_error(
-                conn, &request, &lease, None, "failed", error, deadline,
+                conn,
+                &request,
+                &lease,
+                None,
+                progress_state,
+                error,
+                deadline,
             )
             .await;
-            return Err(error);
+            return Err(import_error_with_child_progress(
+                error,
+                &request,
+                &lease,
+                &outcome,
+                retained_written,
+                child_written,
+            ));
         }
     };
-    let mut written = 0usize;
+    let mut written = retained_written;
     // Reservation arbitration is keyed by logical id, which is not
     // necessarily ordinal order. Persist in source ordinal order so a
     // failure cannot advance the durable cursor past an earlier uncommitted
@@ -4545,7 +5352,11 @@ async fn import_prepared_with_reasoning_identity_batches_and_coverage(
                 .turn_boundaries
                 .get(&turn.logical_turn_key)
                 .context("reserved import claim has no turn chronology")?;
-            let checkpoint_id = uuid::Uuid::new_v4().to_string();
+            let checkpoint_id = if let Some(retained) = codex_retention.as_ref()
+                .and_then(|source| source.for_turn(&turn.logical_turn_key)) {
+                codex_retention_checkpoint_id(conn, &import_scope, storage_root, &request,
+                    turn, retained, deadline).await?
+            } else { uuid::Uuid::new_v4().to_string() };
             let now_ms = Utc::now().timestamp_millis();
             bound_checkpoint_id = Some(checkpoint_id.clone());
             let version = match coverage_versions.as_ref() {
@@ -4581,8 +5392,15 @@ async fn import_prepared_with_reasoning_identity_batches_and_coverage(
                 Some(version) => safe_turn_projection_for_schema(version.as_i64(), request.agent_kind.as_db_str(), turn)?,
                 None => safe_turn_projection(request.agent_kind.as_db_str(), turn),
             };
-            let transcript = redacted_json_line(&projection)?;
-            let metadata = redacted_json(&serde_json::json!({
+            let projection_line = redacted_json_line(&projection)?;
+            let transcript = if let Some(retained) = codex_retention.as_ref().and_then(|source| source.for_turn(&turn.logical_turn_key)) {
+                let mut bytes = projection_line.into_inner();
+                bytes.extend_from_slice(retained.bytes());
+                RedactedBytes::new_unchecked(bytes)
+            } else {
+                projection_line
+            };
+            let mut metadata = serde_json::json!({
             "schema_version": history::CHECKPOINT_METADATA_SCHEMA_VERSION,
             "checkpoint_id": checkpoint_id,
             "session_id": request.session_id,
@@ -4594,7 +5412,7 @@ async fn import_prepared_with_reasoning_identity_batches_and_coverage(
             "created_at": boundary.ended_at,
             "turn_started_at": boundary.started_at,
             "turn_ended_at": boundary.ended_at,
-            "redaction_report": request.redaction_report,
+            "redaction_report": reports.metadata,
             "transcript_snapshot": request.transcript_snapshot.clone(),
             "import": {
                 "source_kind": request.source_kind,
@@ -4602,7 +5420,14 @@ async fn import_prepared_with_reasoning_identity_batches_and_coverage(
                 "logical_turn_key": turn.logical_turn_key,
                 "ordinal": turn.ordinal,
             }
-            }))?;
+            });
+            if let Some(extraction) = codex_retention.as_ref().and_then(CodexRetention::summary_metadata) {
+                metadata["extraction"] = extraction;
+                if let Some(attribution) = usage_attribution.as_ref() {
+                    metadata["usage_attribution"] = attribution.clone();
+                }
+            }
+            let metadata = redacted_json(&metadata)?;
             let lifecycle_event = LifecycleEvent {
                 kind: LifecycleEventKind::TurnEnd,
                 session_id: request.provider_session_id.clone(),
@@ -4636,7 +5461,7 @@ async fn import_prepared_with_reasoning_identity_batches_and_coverage(
                 import_lifecycle_event_id(&request.session_id, &turn.logical_turn_key),
                 turn.completeness == Completeness::Incomplete,
             ))?;
-            let report = redacted_json(&request.redaction_report)?;
+            let report = reports.full.clone();
             let source_snapshot = request
                 .transcript_snapshot
                 .clone()
@@ -4762,7 +5587,11 @@ async fn import_prepared_with_reasoning_identity_batches_and_coverage(
         }
         .await;
         if let Err(error) = turn_result {
-            let terminal_state = if written == 0 { "failed" } else { "partial" };
+            let terminal_state = if written == 0 && child_written == 0 {
+                "failed"
+            } else {
+                "partial"
+            };
             #[cfg(test)]
             let preserve_test_crash = preserving_crash_failpoint_active();
             #[cfg(not(test))]
@@ -4784,7 +5613,14 @@ async fn import_prepared_with_reasoning_identity_batches_and_coverage(
                 .await
             };
             if written == 0 {
-                return Err(error);
+                return Err(import_error_with_child_progress(
+                    error,
+                    &request,
+                    &lease,
+                    &outcome,
+                    written,
+                    child_written,
+                ));
             }
             let summary = ImportSummary {
                 session_id: request.session_id.clone(),
@@ -4796,29 +5632,33 @@ async fn import_prepared_with_reasoning_identity_batches_and_coverage(
                 conflicted: outcome.conflicted,
                 partial: true,
             };
-            return Err(ImportProgressError {
+            return Err(error.context(ImportProgressError {
                 summary,
-                subagent_checkpoints_written: 0,
+                subagent_checkpoints_written: child_written,
                 import_identity_id: lease.identity_id.clone(),
                 import_fence_token: lease.fence_token,
-            }
-            .into());
+            }));
         }
     }
-    let capture = capture_imported_subagent_content(
-        conn,
-        &import_scope,
-        storage_root,
-        &request,
-        &subagent_discovery,
-        deadline,
-    )
-    .await;
+    let capture = match early_child_capture.take() {
+        Some(result) => result,
+        None => {
+            capture_imported_subagent_content(
+                conn,
+                &import_scope,
+                storage_root,
+                &request,
+                &subagent_discovery,
+                deadline,
+            )
+            .await
+        }
+    };
     let capture_summary = match capture {
         Ok(summary) => summary,
         Err(error) => {
             let child_progress = subagent_capture_progress(&error);
-            let _ = abandon_import_attempt_after_error(
+            let error = abandon_import_attempt_after_error(
                 conn,
                 &request,
                 &lease,
@@ -4828,7 +5668,7 @@ async fn import_prepared_with_reasoning_identity_batches_and_coverage(
                 deadline,
             )
             .await;
-            return Err(ImportProgressError {
+            return Err(error.context(ImportProgressError {
                 summary: ImportSummary {
                     session_id: request.session_id.clone(),
                     agent_kind: request.agent_kind.as_db_str().to_string(),
@@ -4842,14 +5682,13 @@ async fn import_prepared_with_reasoning_identity_batches_and_coverage(
                 subagent_checkpoints_written: child_progress.checkpoints_written,
                 import_identity_id: lease.identity_id.clone(),
                 import_fence_token: lease.fence_token,
-            }
-            .into());
+            }));
         }
     };
     // Projection repeats completeness checks under the capture deadline;
     // preserve a newly observed incomplete child as a partial import rather
     // than abandoning already durable parent and child checkpoints.
-    partial |= capture_summary.partial_sources > 0;
+    partial |= historical_child_capture_is_partial(request.agent_kind, &capture_summary);
     let identity_state = if partial { "partial" } else { "committed" };
     if (partial || defer_identity_for_subagents)
         && let Err(error) = finalize_noop_identity(
@@ -4863,11 +5702,11 @@ async fn import_prepared_with_reasoning_identity_batches_and_coverage(
         )
         .await
     {
-        let _ = abandon_import_attempt_after_error(
+        let error = abandon_import_attempt_after_error(
             conn, &request, &lease, None, "partial", error, deadline,
         )
         .await;
-        return Err(ImportProgressError {
+        return Err(error.context(ImportProgressError {
             summary: ImportSummary {
                 session_id: request.session_id.clone(),
                 agent_kind: request.agent_kind.as_db_str().to_string(),
@@ -4881,8 +5720,7 @@ async fn import_prepared_with_reasoning_identity_batches_and_coverage(
             subagent_checkpoints_written: capture_summary.checkpoints_written,
             import_identity_id: lease.identity_id.clone(),
             import_fence_token: lease.fence_token,
-        }
-        .into());
+        }));
     }
     Ok(DetailedImportSummary::new(
         ImportSummary {
@@ -7495,6 +8333,488 @@ pub(crate) mod tests {
             native_import_test_identity_kinds(&conn).await,
             ["nonempty", "nonempty"]
         );
+    }
+
+    #[cfg(unix)]
+    #[cfg(feature = "test-live-agent")]
+    mod codex_stored_import_local_tests {
+        use super::*;
+        use crate::internal::ai::subagent_content::{
+            DiscoveredSubagentContent, SubagentCaptureSummary, SubagentDiscovery,
+        };
+
+        #[test]
+        #[ignore = "operator-local Codex acceptance; never run in CI"]
+        fn codex_stored_import_keeps_incomplete_and_inflight_partial() {
+            let incomplete = SubagentDiscovery::charged_stored_unavailable(719);
+            assert!(historical_import_is_partial(0, 0, &incomplete));
+            assert!(incomplete.sources.is_empty());
+            assert_eq!(incomplete.bytes_read, 719);
+            let warning_only = SubagentDiscovery {
+                warning: Some("legacy unavailable".into()),
+                ..Default::default()
+            };
+            assert!(!historical_import_is_partial(0, 0, &warning_only));
+            let mut busy = SubagentCaptureSummary::default();
+            busy.skipped_inflight = 1;
+            assert!(historical_child_capture_is_partial(AgentKind::Codex, &busy));
+            assert!(!historical_child_capture_is_partial(
+                AgentKind::ClaudeCode,
+                &busy
+            ));
+            assert!(!historical_child_capture_is_partial(
+                AgentKind::Codex,
+                &SubagentCaptureSummary::default()
+            ));
+        }
+
+        #[tokio::test]
+        #[ignore = "operator-local Codex acceptance; never run in CI"]
+        async fn codex_child_usage_shared_late_child_finalizer_keeps_progress() {
+            let (_tmp, conn, root, scope) = cov2_runtime_store_setup().await;
+            let storage = root.join(util::ROOT_DIR);
+            let request_for = || {
+                let mut request = cov2_import_test_request(
+                    &root,
+                    &scope,
+                    vec![cov2_test_turn("shared-parent", 0)],
+                );
+                request.agent_kind = AgentKind::ClaudeCode;
+                request.session_id = build_ai_session_id("claude", &request.provider_session_id);
+                request
+            };
+            let program = std::env::current_exe()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .join(format!("libra{}", std::env::consts::EXE_SUFFIX));
+            super::super::super::authorized_read::with_test_helper_program(
+                program.clone(),
+                import_prepared_with_subagent_discovery(
+                    &conn,
+                    &storage,
+                    request_for(),
+                    commit_deadline_after(Duration::from_secs(30)),
+                    SubagentDiscovery::default(),
+                    None,
+                ),
+            )
+            .await
+            .unwrap();
+            let mut request = request_for();
+            let existing = load_existing_session_ownership_in_scope(
+                &conn,
+                request.agent_kind,
+                &request.provider_session_id,
+                &scope,
+            )
+            .await
+            .unwrap();
+            validate_scoped_prepared_existing_session(&mut request, existing.as_ref()).unwrap();
+            let child = DiscoveredSubagentContent::fixture("claude_code", "project/session/subagents/child.jsonl",
+                br#"{"type":"assistant","message":{"id":"local-late-child","role":"assistant","content":[{"type":"text","text":"SHARED_LATE_CHILD_BODY"}]}}
+"#, None);
+            let error = super::super::super::authorized_read::with_test_helper_program(
+                program,
+                with_import_failpoint(
+                    "before_finalize_identity",
+                    import_prepared_with_subagent_discovery(
+                        &conn,
+                        &storage,
+                        request,
+                        commit_deadline_after(Duration::from_secs(30)),
+                        SubagentDiscovery {
+                            sources: vec![child],
+                            ..Default::default()
+                        },
+                        None,
+                    ),
+                ),
+            )
+            .await
+            .expect_err("late child must remain visible after finalizer failure");
+            let progress = error.downcast_ref::<ImportProgressError>().unwrap();
+            assert_eq!(progress.summary.skipped_covered, 1);
+            assert_eq!(progress.subagent_checkpoints_written, 1);
+            assert_eq!(
+                cov2_count(
+                    &conn,
+                    "SELECT COUNT(*) AS n FROM agent_checkpoint WHERE scope='subagent'"
+                )
+                .await,
+                1
+            );
+            assert_eq!(
+                cov2_count(
+                    &conn,
+                    "SELECT COUNT(*) AS n FROM agent_import_identity WHERE state='partial'"
+                )
+                .await,
+                1
+            );
+            assert!(
+                error
+                    .chain()
+                    .any(|cause| cause.to_string().contains("before_finalize_identity"))
+            );
+        }
+
+        #[tokio::test]
+        #[ignore = "operator-local Codex acceptance; never run in CI"]
+        async fn codex_child_usage_error_wrapper_keeps_parent_only_durable_count() {
+            let (_tmp, _conn, root, scope) = cov2_runtime_store_setup().await;
+            let request =
+                cov2_import_test_request(&root, &scope, vec![cov2_test_turn("parent-progress", 0)]);
+            let lease = ImportLease {
+                identity_id: "local-id".into(),
+                owner: "local-owner".into(),
+                fence_token: 7,
+            };
+            let error = import_error_with_child_progress(
+                anyhow!("local parent reader failure"),
+                &request,
+                &lease,
+                &coverage_gate::LiveReservationOutcome::default(),
+                2,
+                0,
+            );
+            let progress = error.downcast_ref::<ImportProgressError>().unwrap();
+            assert_eq!(progress.summary.checkpoints_written, 2);
+            assert_eq!(progress.subagent_checkpoints_written, 0);
+            assert!(
+                error
+                    .chain()
+                    .any(|cause| cause.to_string() == "local parent reader failure")
+            );
+        }
+
+        #[tokio::test]
+        #[ignore = "operator-local Codex acceptance; never run in CI"]
+        async fn codex_child_usage_import_errors_keep_independent_parent_and_child_progress() {
+            for failpoint in ["child", "after_bind", "before_parent_commit"] {
+                let parent_failure = failpoint != "child";
+                let (_tmp, conn, root, scope) = cov2_runtime_store_setup().await;
+                let storage = root.join(util::ROOT_DIR);
+                let request = cov2_import_test_request(
+                    &root,
+                    &scope,
+                    vec![cov2_test_turn("stored-parent", 0)],
+                );
+                let bytes = format!(
+                    "{}\n{}\n",
+                    serde_json::json!({"type":"session_meta","payload":{"id":"stored-child",
+                        "session_id":"stored-root","parent_thread_id":request.provider_session_id,"cwd":root}}),
+                    serde_json::json!({"type":"response_item","payload":{"type":"reasoning",
+                        "summary":[{"type":"summary_text","text":"INDEPENDENT_CHILD_THINKING"}]}})
+                );
+                let child = DiscoveredSubagentContent::fixture_codex_child(
+                    "stored-root",
+                    &request.provider_session_id,
+                    "stored-child",
+                    &request.session_id,
+                    bytes.as_bytes(),
+                );
+                if !parent_failure {
+                    conn.execute_unprepared("CREATE TRIGGER fail_child_revision BEFORE INSERT ON agent_subagent_content_revision BEGIN SELECT RAISE(ABORT, 'local child failure'); END").await.unwrap();
+                }
+                let program = std::env::current_exe()
+                    .unwrap()
+                    .parent()
+                    .unwrap()
+                    .parent()
+                    .unwrap()
+                    .join(format!("libra{}", std::env::consts::EXE_SUFFIX));
+                let operation = import_prepared_with_subagent_discovery(
+                    &conn,
+                    &storage,
+                    request,
+                    commit_deadline_after(Duration::from_secs(30)),
+                    SubagentDiscovery {
+                        sources: vec![child],
+                        bytes_read: bytes.len() as u64,
+                        ..Default::default()
+                    },
+                    None,
+                );
+                let error = super::super::super::authorized_read::with_test_helper_program(
+                    program,
+                    async {
+                        if parent_failure {
+                            with_import_failpoint(failpoint, operation).await
+                        } else {
+                            operation.await
+                        }
+                    },
+                )
+                .await
+                .expect_err("injected failure must preserve progress");
+                let progress = error
+                    .downcast_ref::<ImportProgressError>()
+                    .expect("typed progress");
+                assert_eq!(
+                    progress.summary.checkpoints_written,
+                    usize::from(!parent_failure)
+                );
+                assert_eq!(
+                    progress.subagent_checkpoints_written,
+                    usize::from(parent_failure)
+                );
+                assert!(progress.summary.partial);
+                assert_eq!(
+                    cov2_count(
+                        &conn,
+                        "SELECT COUNT(*) AS n FROM agent_import_identity WHERE state='partial'"
+                    )
+                    .await,
+                    i64::from(failpoint != "after_bind"),
+                    "after_bind deliberately preserves its crash marker; other failures settle partial"
+                );
+                if failpoint == "after_bind" {
+                    assert_eq!(
+                        cov2_count(
+                            &conn,
+                            "SELECT COUNT(*) AS n FROM agent_import_identity WHERE state='writing'"
+                        )
+                        .await,
+                        1
+                    );
+                }
+                assert_eq!(
+                    cov2_count(
+                        &conn,
+                        "SELECT COUNT(*) AS n FROM agent_checkpoint WHERE scope='committed'"
+                    )
+                    .await,
+                    i64::from(!parent_failure)
+                );
+                assert_eq!(
+                    cov2_count(
+                        &conn,
+                        "SELECT COUNT(*) AS n FROM agent_checkpoint WHERE scope='subagent'"
+                    )
+                    .await,
+                    i64::from(parent_failure)
+                );
+                assert!(
+                    error
+                        .chain()
+                        .any(|cause| cause.to_string().contains(if parent_failure {
+                            failpoint
+                        } else {
+                            "local child failure"
+                        }))
+                );
+            }
+        }
+
+        #[tokio::test]
+        #[ignore = "operator-local Codex acceptance; never run in CI"]
+        async fn codex_stored_import_zero_sources_keeps_durable_identity_partial() {
+            let (_tmp, conn, root, scope) = cov2_runtime_store_setup().await;
+            let storage = root.join(util::ROOT_DIR);
+            let request =
+                cov2_import_test_request(&root, &scope, vec![cov2_test_turn("stored-parent", 0)]);
+            let outcome = super::super::super::authorized_read::with_test_helper_program(
+                native_import_test_helper_program(),
+                import_prepared_with_subagent_discovery(
+                    &conn,
+                    &storage,
+                    request,
+                    commit_deadline_after(Duration::from_secs(30)),
+                    SubagentDiscovery::charged_stored_unavailable(719),
+                    None,
+                ),
+            )
+            .await
+            .expect("partial parent still needs the explicitly registered current helper");
+            assert!(outcome.summary.partial);
+            assert_eq!(outcome.summary.checkpoints_written, 1);
+            assert_eq!(outcome.subagent_checkpoints_written, 0);
+            assert_eq!(
+                cov2_count(
+                    &conn,
+                    "SELECT COUNT(*) AS n FROM agent_import_identity WHERE state='partial'"
+                )
+                .await,
+                1
+            );
+            assert_eq!(
+                cov2_count(&conn, "SELECT COUNT(*) AS n FROM agent_checkpoint").await,
+                1
+            );
+            assert_eq!(
+                cov2_count(
+                    &conn,
+                    "SELECT COUNT(*) AS n FROM agent_subagent_content_claim"
+                )
+                .await,
+                0
+            );
+        }
+
+        #[tokio::test]
+        #[ignore = "operator-local Codex acceptance; never run in CI"]
+        async fn codex_stored_import_materializes_replays_and_keeps_busy_child_partial() {
+            use crate::internal::ai::checkpoint_reader as reader;
+            let (_tmp, conn, root, scope) = cov2_runtime_store_setup().await;
+            let storage = root.join(util::ROOT_DIR);
+            let request =
+                cov2_import_test_request(&root, &scope, vec![cov2_test_turn("stored-parent", 0)]);
+            let mut child_bytes = serde_json::to_vec(&serde_json::json!({
+                "type":"session_meta", "payload":{
+                    "id":"stored-child", "session_id":"stored-root",
+                    "parent_thread_id":"cov2-direct-fixed", "cwd": root,
+                },
+            }))
+            .unwrap();
+            child_bytes.push(b'\n');
+            child_bytes.extend_from_slice(br#"{"type":"response_item","payload":{"type":"reasoning","summary":[{"type":"summary_text","text":"IMPORTED_CHILD_THINKING"}],"encrypted_content":"stored-opaque","future_field":{"keep":true}}}
+"#);
+            let child = DiscoveredSubagentContent::fixture_codex_child(
+                "stored-root",
+                &request.provider_session_id,
+                "stored-child",
+                &request.session_id,
+                &child_bytes,
+            );
+            let discovery = SubagentDiscovery {
+                sources: vec![child],
+                bytes_read: child_bytes.len() as u64,
+                ..Default::default()
+            };
+            let program = std::env::current_exe()
+                .unwrap()
+                .parent()
+                .and_then(Path::parent)
+                .unwrap()
+                .join(format!("libra{}", std::env::consts::EXE_SUFFIX));
+            assert!(
+                program.is_file(),
+                "build current CLI before operator-local import test"
+            );
+            for replay in [false, true] {
+                let mut request = cov2_import_test_request(
+                    &root,
+                    &scope,
+                    vec![cov2_test_turn("stored-parent", 0)],
+                );
+                let existing = load_existing_session_ownership_in_scope(
+                    &conn,
+                    request.agent_kind,
+                    &request.provider_session_id,
+                    &scope,
+                )
+                .await
+                .unwrap();
+                validate_scoped_prepared_existing_session(&mut request, existing.as_ref()).unwrap();
+                let outcome = super::super::super::authorized_read::with_test_helper_program(
+                    program.clone(),
+                    import_prepared_with_subagent_discovery(
+                        &conn,
+                        &storage,
+                        request,
+                        commit_deadline_after(Duration::from_secs(30)),
+                        discovery.clone(),
+                        None,
+                    ),
+                )
+                .await
+                .unwrap();
+                assert!(!outcome.summary.partial);
+                assert_eq!(outcome.summary.checkpoints_written, usize::from(!replay));
+                assert_eq!(outcome.subagent_checkpoints_written, usize::from(!replay));
+                assert_eq!(
+                    cov2_count(&conn, "SELECT COUNT(*) AS n FROM agent_checkpoint").await,
+                    2
+                );
+                assert_eq!(
+                    cov2_count(
+                        &conn,
+                        "SELECT COUNT(*) AS n FROM agent_subagent_content_revision"
+                    )
+                    .await,
+                    1
+                );
+                assert_eq!(cov2_count(&conn, "SELECT COUNT(*) AS n FROM agent_subagent_link WHERE link_state='unresolved' AND boundary_checkpoint_id IS NULL").await, 1);
+            }
+            let row = conn
+                .query_one_raw(Statement::from_string(
+                    conn.get_database_backend(),
+                    "SELECT checkpoint_id, tree_oid FROM agent_checkpoint WHERE scope='subagent'"
+                        .to_owned(),
+                ))
+                .await
+                .unwrap()
+                .unwrap();
+            let id: String = row.try_get_by("checkpoint_id").unwrap();
+            let tree: String = row.try_get_by("tree_oid").unwrap();
+            let wrapped = reader::read_tree_object(&storage, &tree).unwrap();
+            let wrapped = reader::subtree(&storage, &wrapped, "checkpoint").unwrap();
+            let prefix = reader::subtree(&storage, &wrapped, &id[..2]).unwrap();
+            let leaf = reader::subtree(&storage, &prefix, &id[2..]).unwrap();
+            let transcript = reader::subtree(&storage, &leaf, "transcript").unwrap();
+            let oid = &reader::tree_entry(&transcript, "codex.jsonl").unwrap().id;
+            let (persisted, truncated) =
+                reader::read_checkpoint_object_bounded(&storage, oid, 4096).unwrap();
+            assert!(!truncated);
+            assert_eq!(
+                persisted, child_bytes,
+                "readable thinking, opaque and unknown fields must survive actual import"
+            );
+
+            conn.execute_raw(Statement::from_sql_and_values(
+                conn.get_database_backend(),
+                "UPDATE agent_subagent_content_claim SET state='reserved',
+                 owner='owned-concurrent-child', attempt_digest=current_digest,
+                 attempt_checkpoint_id='owned-concurrent-checkpoint',
+                 lease_expires_at=?, fence_token=fence_token+1",
+                [(Utc::now().timestamp_millis() + 60_000).into()],
+            ))
+            .await
+            .unwrap();
+            let mut request =
+                cov2_import_test_request(&root, &scope, vec![cov2_test_turn("stored-parent", 0)]);
+            let existing = load_existing_session_ownership_in_scope(
+                &conn,
+                request.agent_kind,
+                &request.provider_session_id,
+                &scope,
+            )
+            .await
+            .unwrap();
+            validate_scoped_prepared_existing_session(&mut request, existing.as_ref()).unwrap();
+            let busy = super::super::super::authorized_read::with_test_helper_program(
+                program,
+                import_prepared_with_subagent_discovery(
+                    &conn,
+                    &storage,
+                    request,
+                    commit_deadline_after(Duration::from_secs(30)),
+                    discovery,
+                    None,
+                ),
+            )
+            .await
+            .expect("active child owner must preserve partial parent without takeover");
+            assert!(busy.summary.partial);
+            assert_eq!(busy.summary.checkpoints_written, 0);
+            assert_eq!(busy.subagent_checkpoints_written, 0);
+            assert_eq!(
+                cov2_count(&conn, "SELECT COUNT(*) AS n FROM agent_checkpoint").await,
+                2
+            );
+            assert_eq!(
+                cov2_count(
+                    &conn,
+                    "SELECT COUNT(*) AS n FROM agent_import_identity WHERE state='partial'"
+                )
+                .await,
+                1
+            );
+            assert_eq!(cov2_count(&conn, "SELECT COUNT(*) AS n FROM agent_subagent_content_claim WHERE state='reserved' AND owner='owned-concurrent-child' AND current_revision=1").await, 1);
+        }
     }
 
     #[test]
@@ -11417,5 +12737,298 @@ pub(crate) mod tests {
             Instant::now() + Duration::from_secs(10),
         )
         .expect("old ordinary helper projection remains usable");
+    }
+}
+
+#[cfg(test)]
+#[cfg(feature = "test-live-agent")]
+mod codex_retention_report_tests {
+    use sea_orm::TransactionTrait;
+
+    use super::*;
+
+    fn commit_deadline_after(duration: Duration) -> CaptureCommitDeadline {
+        CaptureCommitDeadline::from_test_pair(
+            Instant::now() + duration,
+            Utc::now().timestamp_millis() + i64::try_from(duration.as_millis()).unwrap(),
+        )
+    }
+
+    async fn summary_import(
+        conn: &DatabaseConnection,
+        storage: &Path,
+        request: ImportRequest,
+        retained: CodexRetention,
+    ) {
+        let binary = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .and_then(Path::parent)
+            .unwrap()
+            .join(format!("libra{}", std::env::consts::EXE_SUFFIX));
+        assert!(
+            binary.is_file(),
+            "build the Libra binary before this local test"
+        );
+        super::super::authorized_read::with_test_helper_program(
+            binary,
+            import_prepared_with_retention(
+                conn,
+                storage,
+                request,
+                commit_deadline_after(Duration::from_secs(30)),
+                super::super::subagent_content::SubagentDiscovery::default(),
+                None,
+                None,
+                Some(retained),
+            ),
+        )
+        .await
+        .unwrap();
+    }
+
+    // A pre-CX07 helper DTO with no summary, written through the actual
+    // ref/coverage/catalog transaction; no checkpoint hashes are forged.
+    fn summary_upgrade_request(
+        root: &Path,
+        scope: &CaptureScope,
+        count: usize,
+        with_summary: bool,
+    ) -> (ImportRequest, CodexRetention) {
+        use crate::internal::ai::{
+            capture::snapshot::{
+                CaptureSnapshotCompleteness, CaptureSnapshotSource, CaptureSnapshotSourceKind,
+            },
+            observed_agents::{Redactor, SemanticRecord},
+        };
+        let turns: Vec<NormalizedTurn> = (0..count)
+            .map(|ordinal| NormalizedTurn {
+                logical_turn_key: format!("cx07-turn-{ordinal}"),
+                ordinal,
+                completeness: Completeness::Complete,
+                started_at: None,
+                ended_at: None,
+                records: vec![
+                    SemanticRecord::User {
+                        text: format!("question {ordinal}"),
+                    },
+                    SemanticRecord::Assistant {
+                        text: format!("answer {ordinal}"),
+                    },
+                ],
+            })
+            .collect();
+        let mut lines = vec![
+            serde_json::json!({"type":"session_meta","payload":{"id":"cx07-upgrade","cwd":root,"cli_version":"0.162.1"}}),
+            serde_json::json!({"type":"turn_context","payload":{"turn_id":"cx07-turn-0","model":"CX07-UPGRADE"}}),
+        ];
+        let mut slices = BTreeMap::new();
+        for ordinal in 0..count {
+            lines.push(serde_json::json!({"type":"response_item","payload":{"type":"message","id":format!("u{ordinal}"),"role":"user","internal_chat_message_metadata_passthrough":{"content_item_kinds":["user.text"]},"content":[{"type":"input_text","text":format!("question {ordinal}")}]}}));
+            let reasoning = serde_json::json!({"type":"response_item","payload":{"type":"reasoning","summary":[{"type":"summary_text","text":format!("old readable thinking {ordinal}")}]}});
+            slices.insert(ordinal, format!("{reasoning}\n").into_bytes());
+            lines.push(reasoning);
+            lines.push(serde_json::json!({"type":"response_item","payload":{"type":"message","id":format!("a{ordinal}"),"role":"assistant","content":[{"type":"output_text","text":format!("answer {ordinal}")}]}}));
+        }
+        let raw = lines
+            .iter()
+            .map(|line| format!("{line}\n"))
+            .collect::<String>();
+        let source = Redactor::new_default().redact(raw.as_bytes()).0;
+        let mut dto = super::super::observed_agents::codex_reasoning::CodexRetentionDto::encode(
+            &turns, slices,
+        )
+        .unwrap();
+        if with_summary {
+            dto = dto.with_summary(
+                super::super::observed_agents::session_summary::from_redacted_codex_snapshot(
+                    &source,
+                    Instant::now() + Duration::from_secs(30),
+                ),
+            );
+        } else {
+            assert!(serde_json::to_value(&dto).unwrap().get("summary").is_none());
+        }
+        let retained = dto
+            .decode(
+                &turns,
+                source.bytes().len(),
+                Instant::now() + Duration::from_secs(30),
+            )
+            .unwrap();
+        let commitment = format!("source/hmac-v2/{}", "a".repeat(64));
+        let request = ImportRequest {
+            agent_kind: AgentKind::Codex,
+            provider_session_id: "cx07-upgrade".to_owned(),
+            session_id: "codex__cx07-upgrade".to_owned(),
+            source_kind: "file".to_owned(),
+            source_id: commitment.clone(),
+            identity_schema_version: IMPORT_IDENTITY_SCHEMA_VERSION_V2,
+            content_digest: "caller digest is rederived".to_owned(),
+            started_at: 1,
+            ended_at: count as i64 + 1,
+            session_state: "stopped".to_owned(),
+            stopped_at: Some(count as i64 + 1),
+            working_dir: root.to_owned(),
+            repository_identity: IMPORT_DURABLE_IDENTITY_NOT_RETAINED.to_owned(),
+            capture_scope: Some(scope.clone()),
+            source_fingerprint: commitment.clone(),
+            existing_session_fingerprint: None,
+            redaction_report: serde_json::json!({"pipeline":"typed_allowlist","raw_persisted":false,"matches":[],"bytes_scanned":source.bytes().len(),"bytes_redacted":0}),
+            transcript_snapshot: Some(CaptureSnapshotProjection {
+                completeness: CaptureSnapshotCompleteness::Complete,
+                partial_reason: None,
+                source: Some(CaptureSnapshotSource {
+                    kind: CaptureSnapshotSourceKind::ProviderFile,
+                    identity: "not_retained:v1".to_owned(),
+                    digest_sha256: Some(commitment),
+                    byte_len: Some(source.bytes().len() as u64),
+                }),
+                transcript_redacted_bytes: source.bytes().len(),
+                redaction_match_count: 0,
+                redaction_bytes_scanned: source.bytes().len(),
+                redaction_bytes_redacted: 0,
+            }),
+            turn_boundaries: turns
+                .iter()
+                .map(|turn| {
+                    (
+                        turn.logical_turn_key.clone(),
+                        TurnBoundary {
+                            started_at: turn.ordinal as i64 + 1,
+                            ended_at: turn.ordinal as i64 + 2,
+                        },
+                    )
+                })
+                .collect(),
+            turns,
+        };
+        (request, retained)
+    }
+
+    async fn summary_checkpoint_rows(
+        conn: &DatabaseConnection,
+    ) -> BTreeMap<String, (String, String, String)> {
+        conn.query_all_raw(Statement::from_string(
+            conn.get_database_backend(),
+            "SELECT checkpoint_id,tree_oid,metadata_blob_oid,traces_commit FROM agent_checkpoint"
+                .to_owned(),
+        ))
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|row| {
+            (
+                row.try_get_by("checkpoint_id").unwrap(),
+                (
+                    row.try_get_by("tree_oid").unwrap(),
+                    row.try_get_by("metadata_blob_oid").unwrap(),
+                    row.try_get_by("traces_commit").unwrap(),
+                ),
+            )
+        })
+        .collect()
+    }
+
+    #[tokio::test]
+    #[ignore = "operator-local Codex acceptance; never run in CI"]
+    async fn codex_session_summary_upgrade_replays_old_dto_and_only_appends_new_turn() {
+        use crate::internal::ai::capture::summary::SessionSummaryRead;
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let storage = root.join(util::ROOT_DIR);
+        std::fs::create_dir_all(storage.join("objects")).unwrap();
+        let conn =
+            crate::internal::db::create_database(storage.join(util::DATABASE).to_str().unwrap())
+                .await
+                .unwrap();
+        crate::internal::workspace::RepoIdentity::resolve_or_init(&conn)
+            .await
+            .unwrap();
+        let scope = CaptureScope::resolve(&conn, &root).await.unwrap();
+        let (old_request, old_retained) = summary_upgrade_request(&root, &scope, 2, false);
+        summary_import(&conn, &storage, old_request, old_retained).await;
+        let before = summary_checkpoint_rows(&conn).await;
+        assert_eq!(before.len(), 2);
+        let txn = conn.begin().await.unwrap();
+        let view = SessionSummaryRead::prepare(&txn, &storage, "codex__cx07-upgrade")
+            .await
+            .unwrap();
+        txn.commit().await.unwrap();
+        assert_eq!(view.finish().await.status, "unknown");
+        let (mut request, retained) = summary_upgrade_request(&root, &scope, 2, true);
+        let existing = load_existing_session_ownership_in_scope(
+            &conn,
+            AgentKind::Codex,
+            "cx07-upgrade",
+            &scope,
+        )
+        .await
+        .unwrap();
+        validate_scoped_prepared_existing_session(&mut request, existing.as_ref()).unwrap();
+        summary_import(&conn, &storage, request, retained).await;
+        assert_eq!(
+            summary_checkpoint_rows(&conn).await,
+            before,
+            "an upgraded replay cannot rewrite old metadata just to add a summary"
+        );
+        let txn = conn.begin().await.unwrap();
+        let view = SessionSummaryRead::prepare(&txn, &storage, "codex__cx07-upgrade")
+            .await
+            .unwrap();
+        txn.commit().await.unwrap();
+        assert_eq!(view.finish().await.status, "unknown");
+        let (mut request, retained) = summary_upgrade_request(&root, &scope, 3, true);
+        let existing = load_existing_session_ownership_in_scope(
+            &conn,
+            AgentKind::Codex,
+            "cx07-upgrade",
+            &scope,
+        )
+        .await
+        .unwrap();
+        validate_scoped_prepared_existing_session(&mut request, existing.as_ref()).unwrap();
+        summary_import(&conn, &storage, request, retained).await;
+        let after = summary_checkpoint_rows(&conn).await;
+        assert_eq!(after.len(), 3);
+        for (id, row) in before {
+            assert_eq!(after.get(&id), Some(&row));
+        }
+        let txn = conn.begin().await.unwrap();
+        let view = SessionSummaryRead::prepare(&txn, &storage, "codex__cx07-upgrade")
+            .await
+            .unwrap();
+        txn.commit().await.unwrap();
+        let summary = view.finish().await;
+        assert_eq!(summary.model.as_deref(), Some("CX07-UPGRADE"));
+        assert_eq!(summary.prompt_count, Some(3));
+        conn.close().await.unwrap();
+    }
+
+    #[test]
+    #[ignore = "operator-local Codex acceptance; never run in CI"]
+    fn codex_summary_metadata_is_bounded_and_shared_report_keeps_all_turns() {
+        let row = serde_json::json!({"turn_ordinal":0,"reasoning_tokens":9,
+            "counts":{"readable_parts":1,"readable_utf8_bytes":12}});
+        let report = serde_json::json!({"bytes_scanned":100,"codex_reasoning":{
+            "schema_version":1,"source_status":"unproven","partial":true,
+            "statistics_unavailable":false,"has_unproven_data":false,
+            "turns":vec![row;4097]}});
+        let metadata = checkpoint_redaction_metadata(AgentKind::Codex, &report);
+        assert!(serde_json::to_vec(&metadata).unwrap().len() < 2048);
+        assert!(metadata["codex_reasoning"].get("turns").is_none());
+        assert_eq!(metadata["codex_reasoning"]["provider_turn_count"], 4097);
+        assert_eq!(
+            metadata["codex_reasoning"]["counts"]["readable_parts"],
+            4097
+        );
+        assert_eq!(
+            report["codex_reasoning"]["turns"].as_array().unwrap().len(),
+            4097
+        );
+        assert_eq!(
+            checkpoint_redaction_metadata(AgentKind::OpenCode, &report),
+            report
+        );
     }
 }

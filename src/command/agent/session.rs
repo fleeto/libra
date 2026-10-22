@@ -9,7 +9,7 @@ use std::{
 };
 
 use clap::{Args, Subcommand};
-use sea_orm::{ConnectionTrait, QueryResult, Statement};
+use sea_orm::{ConnectionTrait, QueryResult, Statement, TransactionTrait};
 use serde::Serialize;
 use tempfile::NamedTempFile;
 
@@ -19,7 +19,16 @@ use super::{
 };
 use crate::{
     internal::{
-        ai::observed_agents::{AgentKind, TRANSCRIPT_READ_HARD_CAP_BYTES},
+        ai::{
+            capture::{
+                catalog::{
+                    CAPTURE_DIAGNOSTIC_METADATA_CAP_BYTES, CaptureCatalogStore,
+                    CaptureTerminalDiagnostic,
+                },
+                summary::{SessionSummaryRead, SessionSummaryView},
+            },
+            observed_agents::{AgentKind, TRANSCRIPT_READ_HARD_CAP_BYTES},
+        },
         db::get_db_conn_instance,
     },
     utils::{
@@ -511,19 +520,77 @@ async fn show(args: SessionShowArgs, output: &OutputConfig) -> CliResult<()> {
 
     let stmt = Statement::from_sql_and_values(
         backend,
-        "SELECT session_id, agent_kind, provider_session_id, state, working_dir, \
+        format!(
+            "SELECT session_id, agent_kind, provider_session_id, state, working_dir, \
                 started_at, last_event_at, \
-                COALESCE(metadata_json, '{}') AS metadata_json \
-         FROM agent_session WHERE session_id = ? LIMIT 1",
+                CASE WHEN agent_kind='codex' AND (typeof(metadata_json) <> 'text' OR \
+                    length(CAST(metadata_json AS BLOB)) > {CAPTURE_DIAGNOSTIC_METADATA_CAP_BYTES}) \
+                THEN '{{}}' ELSE COALESCE(metadata_json, '{{}}') END AS metadata_json \
+         FROM agent_session WHERE session_id = ? LIMIT 1"
+        ),
         [args.session_id.clone().into()],
     );
-    let row = conn
+    let snapshot = conn
+        .begin()
+        .await
+        .map_err(|e| CliError::fatal(format!("failed to start session diagnostic read: {e}")))?;
+    let row = snapshot
         .query_one_raw(stmt)
         .await
         .map_err(|e| CliError::fatal(format!("failed to query agent_session: {e}")))?;
+    // Keep the visible lifecycle and terminal/owner view in one read snapshot.
+    // A malformed kind is still diagnosed by the existing row decoder below.
+    let terminal_capture = if row
+        .as_ref()
+        .and_then(|r| r.try_get_by::<String, _>("agent_kind").ok())
+        .as_deref()
+        == Some("codex")
+    {
+        Some(
+            CaptureCatalogStore::terminal_diagnostic_for_session(
+                &snapshot,
+                &args.session_id,
+                chrono::Utc::now().timestamp_millis(),
+            )
+            .await
+            .unwrap_or_else(|_| CaptureTerminalDiagnostic::unavailable("catalog_unavailable")),
+        )
+    } else {
+        None
+    };
+    let summary_read = if terminal_capture.is_some() {
+        Some(match crate::utils::util::try_get_storage_path(None) {
+            Ok(storage) => SessionSummaryRead::prepare(&snapshot, &storage, &args.session_id).await,
+            Err(_) => Err(anyhow::anyhow!("session summary storage is unavailable")),
+        })
+    } else {
+        None
+    };
+    snapshot
+        .commit()
+        .await
+        .map_err(|e| CliError::fatal(format!("failed to finish session diagnostic read: {e}")))?;
+    let summary = match summary_read {
+        Some(Ok(read)) => Some(read.finish().await),
+        Some(Err(_)) => Some(SessionSummaryView::unavailable()),
+        None => None,
+    };
     match row {
         Some(row) => {
-            let metadata_json = decode_session_show_text(&row, "metadata_json", &args.session_id)?;
+            let metadata_json =
+                match decode_session_show_text(&row, "metadata_json", &args.session_id) {
+                    Ok(value) => value,
+                    // The catalog already made malformed Codex metadata explicit.
+                    // Keep that unavailable diagnostic visible even for invalid UTF-8.
+                    Err(_)
+                        if terminal_capture
+                            .as_ref()
+                            .is_some_and(|d| d.reason == "invalid_receipt_metadata") =>
+                    {
+                        "{}".to_owned()
+                    }
+                    Err(error) => return Err(error),
+                };
             let capture = capture_diagnostic_from_metadata(&metadata_json);
             let session_id = decode_session_show_text(&row, "session_id", &args.session_id)?;
             let agent_kind = decode_session_show_text(&row, "agent_kind", &args.session_id)?;
@@ -565,7 +632,41 @@ async fn show(args: SessionShowArgs, output: &OutputConfig) -> CliResult<()> {
                     output,
                 );
             }
-            emit_one(&payload, output)?;
+            if output.is_json() && terminal_capture.is_some() {
+                emit_json_data(
+                    "agent_session",
+                    &SessionShowOutput {
+                        session: &payload,
+                        terminal_capture: terminal_capture.as_ref(),
+                        summary: summary.as_ref(),
+                    },
+                    output,
+                )?;
+            } else {
+                emit_one(&payload, output)?;
+                if !output.quiet
+                    && let Some(summary) = summary.as_ref()
+                {
+                    emit_summary(summary);
+                }
+                if !output.quiet
+                    && let Some(terminal) = terminal_capture
+                {
+                    println!("terminal_state: {}", terminal.status);
+                    println!("terminal_owner: {}", terminal.owner);
+                    println!("terminal_reason: {}", terminal.reason);
+                    println!("terminal_superseded: {}", terminal.superseded);
+                    if terminal.status == "completed" {
+                        println!(
+                            "terminal_help : receipt completed; inspect checkpoint show/export for thinking availability"
+                        );
+                    } else {
+                        println!(
+                            "terminal_help : inspect `libra agent doctor`; repair requires the original worktree/workspace and explicit `--repair`"
+                        );
+                    }
+                }
+            }
             if let Some(transcript) = transcript
                 && !output.quiet
                 && !output.is_json()
@@ -579,6 +680,61 @@ async fn show(args: SessionShowArgs, output: &OutputConfig) -> CliResult<()> {
             "no captured session matches id '{}'",
             args.session_id
         ))),
+    }
+}
+
+#[derive(Serialize)]
+struct SessionShowOutput<'a> {
+    #[serde(flatten)]
+    session: &'a SessionRow,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    terminal_capture: Option<&'a CaptureTerminalDiagnostic>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    summary: Option<&'a SessionSummaryView>,
+}
+
+fn emit_summary(summary: &SessionSummaryView) {
+    println!("summary_status: {}", summary.status);
+    println!("summary_source_status: {}", summary.source_status);
+    println!(
+        "summary_model: {}",
+        summary.model.as_deref().unwrap_or("unknown")
+    );
+    println!(
+        "summary_title: {}",
+        summary.title.as_deref().unwrap_or("unknown")
+    );
+    println!(
+        "summary_prompts: {}",
+        summary
+            .prompt_count
+            .map_or_else(|| "unknown".to_owned(), |value| value.to_string())
+    );
+    println!(
+        "summary_files: {}",
+        summary
+            .modified_file_count
+            .map_or_else(|| "unknown".to_owned(), |value| value.to_string())
+    );
+    match &summary.token_usage {
+        Some(usage) => println!(
+            "summary_tokens: input={} output={} cached={} reasoning={} total={}",
+            usage.input_tokens,
+            usage.output_tokens,
+            usage
+                .cached_tokens
+                .map_or_else(|| "unknown".to_owned(), |v| v.to_string()),
+            usage
+                .reasoning_tokens
+                .map_or_else(|| "unknown".to_owned(), |v| v.to_string()),
+            usage
+                .total_tokens
+                .map_or_else(|| "unknown".to_owned(), |v| v.to_string())
+        ),
+        None => println!("summary_tokens: unknown"),
+    }
+    if let Some(checkpoint) = &summary.as_of_checkpoint {
+        println!("summary_checkpoint: {checkpoint}");
     }
 }
 

@@ -23,7 +23,9 @@
 //! - **Event names** (PascalCase in config): `PreToolUse`,
 //!   `PermissionRequest`, `PostToolUse`, `PreCompact`, `PostCompact`,
 //!   `SessionStart`, `UserPromptSubmit`, `SubagentStart`, `SubagentStop`,
-//!   `Stop`, `SessionEnd`.
+//!   `Stop`, `SessionEnd`. Current 0.162.1 source adds `Interrupt`,
+//!   forwarded through `stop` while retaining `TurnInterrupted`; it has a
+//!   three-second host cap and does not commit a normal terminal checkpoint.
 //! - **Hook stdin payload is Claude Code-compatible** single-line JSON:
 //!   `{"session_id", "transcript_path", "cwd", "hook_event_name", "model",
 //!   "permission_mode", …}`; `UserPromptSubmit` adds `prompt` + `turn_id`;
@@ -57,9 +59,10 @@ mod parser;
 mod settings;
 
 use anyhow::Result;
+pub use settings::CodexHookDoctorEvent;
 
 use super::super::{
-    lifecycle::{LifecycleEvent, SessionHookEnvelope},
+    lifecycle::{LifecycleEvent, LifecycleEventKind, SessionHookEnvelope},
     provider::{
         CANONICAL_DEDUP_IDENTITY_KEYS, HookProvider, ProviderHookCommand, ProviderInstallOptions,
     },
@@ -97,6 +100,11 @@ pub fn codex_hook_trust_gaps() -> Result<usize> {
     settings::codex_hook_trust_gaps()
 }
 
+/// Inspect managed settings without changing hooks, trust or capture data.
+pub fn codex_hook_doctor_events() -> Result<Vec<CodexHookDoctorEvent>> {
+    settings::codex_hook_doctor_events()
+}
+
 impl HookProvider for CodexProvider {
     fn provider_name(&self) -> &'static str {
         "codex"
@@ -120,6 +128,20 @@ impl HookProvider for CodexProvider {
 
     fn recognizes_event(&self, hook_event_name: &str) -> bool {
         parser::CODEX_HOOK_EVENT_NAMES.contains(&hook_event_name)
+    }
+
+    fn accepts_event_kind(&self, expected: LifecycleEventKind, actual: LifecycleEventKind) -> bool {
+        expected == actual
+            || matches!(
+                (expected, actual),
+                (
+                    LifecycleEventKind::TurnEnd,
+                    LifecycleEventKind::TurnInterrupted
+                ) | (
+                    LifecycleEventKind::Compaction,
+                    LifecycleEventKind::CompactionCompleted
+                )
+            )
     }
 
     fn dedup_identity_keys(&self) -> &'static [&'static str] {
@@ -156,7 +178,8 @@ mod tests {
         assert_eq!(provider.supported_commands(), SUPPORTED_COMMANDS);
         assert_eq!(provider.supported_commands().len(), 9);
 
-        // recognizes_event follows the parser's 11-event name table; names
+        // Preserve this historical event subset; the full twelve-event set is
+        // verified by operator-local CX-01 acceptance. Names
         // Codex never emits are skip-and-logged upstream.
         for name in [
             "SessionStart",

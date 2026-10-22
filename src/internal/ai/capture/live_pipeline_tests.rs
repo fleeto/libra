@@ -771,6 +771,7 @@ fn fixture_subagent_discovery() -> crate::internal::ai::subagent_content::Subage
         bytes_read: 78,
         warning: None,
         incomplete: false,
+        ..Default::default()
     }
 }
 
@@ -6262,5 +6263,347 @@ mod export_runner_lease {
             assert_eq!(lease.calls(), [ObserveIdle, ReleaseDirty]);
             assert_eq!(checkpoint_count(conn, "coverage-failed").await, 0);
         }
+    }
+}
+
+// These Codex acceptance cases are deliberately absent from default CI.
+#[cfg(all(test, feature = "test-live-agent"))]
+mod codex_terminal_local {
+    use std::{
+        path::PathBuf,
+        sync::atomic::{AtomicBool, Ordering},
+    };
+
+    use super::*;
+    use crate::internal::ai::{
+        capture::key::load_capture_dedup_secret,
+        hooks::providers::codex_provider,
+        observed_agents::{
+            RedactedBytes, TranscriptSource,
+            live_capture::{
+                LiveCoverageNormalizer, LiveTranscriptExporter,
+                test_support::with_transcript_exporter,
+            },
+        },
+    };
+
+    const SESSION: &str = "123e4567-e89b-12d3-a456-426614174061";
+
+    struct AbortWriterOnDrop(tokio::task::AbortHandle);
+    impl Drop for AbortWriterOnDrop {
+        fn drop(&mut self) {
+            self.0.abort();
+        }
+    }
+
+    fn helper_program() -> PathBuf {
+        let executable = std::env::current_exe().unwrap();
+        let program = executable
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join(format!("libra{}", std::env::consts::EXE_SUFFIX));
+        assert!(
+            program.is_file(),
+            "build the current libra binary beside the local unit-test binary first; rebuild after any source change"
+        );
+        program
+    }
+
+    async fn deliver(
+        conn: &DatabaseConnection,
+        repo: &std::path::Path,
+        command: ProviderHookCommand,
+        deadline: CaptureDeadline,
+        binding: Option<LiveCaptureBinding>,
+    ) -> Result<()> {
+        let payload = ingest_envelope(
+            if command == ProviderHookCommand::SessionStart {
+                "SessionStart"
+            } else {
+                "SessionEnd"
+            },
+            SESSION,
+            json!({"cwd": repo, "turn_id":"cx02-local-turn", "event_id":"cx02-local-event"}),
+        );
+        crate::internal::ai::authorized_read::with_test_helper_program(
+            helper_program(),
+            ingest_agent_traces_payload_with_stable_scope_and_deadline(
+                &payload,
+                command,
+                command.lifecycle_event_kind(),
+                codex_provider(),
+                conn,
+                StableScopeIngestOptions {
+                    stable_repo_path: repo,
+                    checkpoint_repo_path: Some(repo),
+                    deadline: Some(deadline),
+                    binding,
+                },
+            ),
+        )
+        .await
+    }
+
+    async fn setup() -> (TempDir, DatabaseConnection) {
+        let (dir, conn) = ingest_fresh_conn().await;
+        std::fs::create_dir_all(dir.path().join("objects")).unwrap();
+        load_capture_dedup_secret(dir.path()).unwrap();
+        deliver(
+            &conn,
+            dir.path(),
+            ProviderHookCommand::SessionStart,
+            CaptureDeadline::from_budget_millis(2_000).unwrap(),
+            None,
+        )
+        .await
+        .unwrap();
+        (dir, conn)
+    }
+
+    async fn state(conn: &DatabaseConnection) -> serde_json::Value {
+        let row=conn.query_one_raw(Statement::from_sql_and_values(conn.get_database_backend(),
+            "SELECT state, stopped_at, sync_revision, metadata_json, (SELECT COUNT(*) FROM agent_checkpoint c WHERE c.session_id = agent_session.session_id) AS checkpoints FROM agent_session WHERE provider_session_id = ?",
+            [SESSION.into()])).await.unwrap().unwrap();
+        json!({"state":row.try_get_by::<String,_>("state").unwrap(),
+            "stopped_at":row.try_get_by::<Option<i64>,_>("stopped_at").unwrap(),
+            "revision":row.try_get_by::<i64,_>("sync_revision").unwrap(),
+            "metadata":serde_json::from_str::<serde_json::Value>(&row.try_get_by::<String,_>("metadata_json").unwrap()).unwrap(),
+            "checkpoints":row.try_get_by::<i64,_>("checkpoints").unwrap()})
+    }
+
+    fn assert_pending(state: &serde_json::Value, deadline: CaptureDeadline) {
+        assert_ne!(state["state"], "stopped", "{state}");
+        assert!(state["stopped_at"].is_null());
+        assert_eq!(state["checkpoints"], 0);
+        let receipts = state["metadata"]["capture_catalog_receipts_v1"]["entries"]
+            .as_array()
+            .unwrap();
+        let terminal = receipts
+            .iter()
+            .filter(|entry| entry["intent"]["phase"] == "stopped")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            terminal.len(),
+            1,
+            "exactly the terminal action is pending: {state}"
+        );
+        let receipt = terminal[0];
+        assert_eq!(receipt["status"], "pending", "{state}");
+        assert_eq!(
+            receipt["finalizer"]["deadline_millis"],
+            deadline.absolute_millis(),
+            "original primary deadline must survive settlement: {state}"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "operator-local Codex acceptance; never run in CI"]
+    async fn codex_terminal_after_ingress_expiry_keeps_paired_deadline_and_pending() {
+        let (dir, conn) = setup().await;
+        let delay = test_support::delay_ingress_before_redaction(80);
+        let deadline = CaptureDeadline::from_budget_millis(30).unwrap();
+        deliver(
+            &conn,
+            dir.path(),
+            ProviderHookCommand::SessionEnd,
+            deadline,
+            None,
+        )
+        .await
+        .unwrap();
+        drop(delay);
+        assert_pending(&state(&conn).await, deadline);
+    }
+
+    #[tokio::test]
+    #[ignore = "operator-local Codex acceptance; never run in CI"]
+    async fn codex_terminal_finalizer_handoff_uses_only_original_settlement_slice() {
+        let (dir, conn) = setup().await;
+        let deadline = CaptureDeadline::from_budget_millis(200).unwrap();
+        test_support::with_terminal_finalizer_after_reservation_delay(
+            Duration::from_millis(240),
+            deliver(
+                &conn,
+                dir.path(),
+                ProviderHookCommand::SessionEnd,
+                deadline,
+                None,
+            ),
+        )
+        .await
+        .unwrap();
+        let state = state(&conn).await;
+        assert_pending(&state, deadline);
+        assert_eq!(
+            state["revision"], 2,
+            "settlement cannot reapply the lifecycle mutation"
+        );
+    }
+
+    struct SlowSource {
+        entered: AtomicBool,
+        completed: AtomicBool,
+        dropped: AtomicBool,
+    }
+    struct SourceDropFlag<'a>(&'a AtomicBool);
+    impl Drop for SourceDropFlag<'_> {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+    #[async_trait::async_trait]
+    impl LiveTranscriptExporter for SlowSource {
+        async fn export(
+            &self,
+            _context: &LiveCaptureContext<'_>,
+            _deadline: Instant,
+        ) -> Result<TranscriptSource> {
+            self.entered.store(true, Ordering::SeqCst);
+            let _drop_flag = SourceDropFlag(&self.dropped);
+            tokio::time::sleep(Duration::from_millis(2_500)).await;
+            self.completed.store(true, Ordering::SeqCst);
+            bail!("CX02-PRIVATE-SLOW-SOURCE")
+        }
+        fn export_coverage_normalizer(&self) -> LiveCoverageNormalizer {
+            fn normalize(
+                source: &RedactedBytes,
+            ) -> Vec<crate::internal::ai::observed_agents::NormalizedTurn> {
+                crate::internal::ai::observed_agents::normalize_codex_rollout(source.bytes())
+            }
+            normalize
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "operator-local Codex acceptance; never run in CI"]
+    async fn codex_terminal_slow_source_is_cancelled_at_primary_budget_before_write() {
+        let (dir, conn) = setup().await;
+        let source = Box::leak(Box::new(SlowSource {
+            entered: AtomicBool::new(false),
+            completed: AtomicBool::new(false),
+            dropped: AtomicBool::new(false),
+        }));
+        let binding =
+            with_transcript_exporter(LiveCaptureBinding::resolve(codex_provider()), source);
+        let deadline = CaptureDeadline::from_budget_millis(1_000).unwrap();
+        let start = Instant::now();
+        let result = deliver(
+            &conn,
+            dir.path(),
+            ProviderHookCommand::SessionEnd,
+            deadline,
+            Some(binding),
+        )
+        .await;
+        assert!(
+            source.entered.load(Ordering::SeqCst),
+            "the actual Codex source stage must be reached"
+        );
+        assert!(
+            start.elapsed() < Duration::from_millis(1_500),
+            "slow source exceeded primary+settlement budget: {:?}",
+            start.elapsed()
+        );
+        assert!(
+            !source.completed.load(Ordering::SeqCst),
+            "deadline must drop the unfinished source future"
+        );
+        assert!(
+            source.dropped.load(Ordering::SeqCst),
+            "source future must be dropped, rather than left running detached"
+        );
+        result
+            .expect("the safe deferred terminal outcome acknowledges its durable pending receipt");
+        assert_pending(&state(&conn).await, deadline);
+    }
+
+    #[tokio::test]
+    #[ignore = "operator-local Codex acceptance; never run in CI"]
+    async fn codex_terminal_cancellation_after_marker_registration_keeps_pending_without_commit() {
+        let (dir, conn) = setup().await;
+        let repo = dir.path().to_path_buf();
+        let pause =
+            crate::internal::ai::capture::checkpoint::test_support::pause_after_registration_once(
+                &repo,
+            );
+        let deadline = CaptureDeadline::from_budget_millis(2_000).unwrap();
+        let writer_conn = conn.clone();
+        let writer = tokio::spawn(async move {
+            deliver(
+                &writer_conn,
+                &repo,
+                ProviderHookCommand::SessionEnd,
+                deadline,
+                None,
+            )
+            .await
+        });
+        let _abort_on_failure = AbortWriterOnDrop(writer.abort_handle());
+        tokio::time::timeout(Duration::from_secs(1), pause.wait_until_entered())
+            .await
+            .unwrap();
+        assert_pending(&state(&conn).await, deadline);
+        writer.abort();
+        assert!(writer.await.unwrap_err().is_cancelled());
+        pause.release();
+        assert_pending(&state(&conn).await, deadline);
+        assert_eq!(state(&conn).await["revision"], 2);
+        tokio::time::sleep_until(tokio::time::Instant::from_std(
+            deadline.monotonic() + Duration::from_millis(300),
+        ))
+        .await;
+        assert!(
+            Utc::now().timestamp_millis() > deadline.absolute_millis() + 250,
+            "recovery must happen after the original primary and settlement windows"
+        );
+        // Model the original writer's expired marker lease, without changing
+        // its generation, receipt, source fence or immutable objects.
+        let expired = conn.execute_raw(Statement::from_sql_and_values(conn.get_database_backend(),
+            "UPDATE metadata_kv SET value = json_set(value, '$.started_at_ms', 0, '$.ttl_ms', 1) WHERE scope = 'agent_traces_inflight' AND target = ?",
+            [format!("codex__{SESSION}").into()])).await.unwrap();
+        assert_eq!(
+            expired.rows_affected(),
+            1,
+            "the cancelled attempt must have one recoverable marker"
+        );
+        deliver(
+            &conn,
+            dir.path(),
+            ProviderHookCommand::SessionEnd,
+            CaptureDeadline::from_budget_millis(2_000).unwrap(),
+            None,
+        )
+        .await
+        .unwrap();
+        let recovered = state(&conn).await;
+        assert_eq!(recovered["state"], "stopped", "{recovered}");
+        assert!(recovered["stopped_at"].is_i64());
+        assert_eq!(recovered["checkpoints"], 1);
+        let entries = recovered["metadata"]["capture_catalog_receipts_v1"]["entries"]
+            .as_array()
+            .unwrap();
+        let terminal = entries
+            .iter()
+            .filter(|entry| entry["intent"]["phase"] == "stopped")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            terminal.len(),
+            1,
+            "recovery must complete the original terminal action"
+        );
+        assert_eq!(terminal[0]["status"], "complete");
+        assert_eq!(
+            terminal[0]["finalizer"]["deadline_millis"],
+            deadline.absolute_millis(),
+            "recovery must not rewrite the original finalizer deadline"
+        );
+        let markers=conn.query_one_raw(Statement::from_sql_and_values(conn.get_database_backend(),
+            "SELECT COUNT(*) AS n FROM metadata_kv WHERE scope = 'agent_traces_inflight' AND target = ?",[format!("codex__{SESSION}").into()])).await.unwrap().unwrap().try_get_by::<i64,_>("n").unwrap();
+        assert_eq!(
+            markers, 0,
+            "recovered commit must retire the cancelled marker"
+        );
     }
 }

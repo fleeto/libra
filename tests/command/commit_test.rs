@@ -1538,6 +1538,765 @@ async fn test_commit_trailer_appended() {
     assert!(commit_obj.message.contains("Reviewed-by: Jane"));
 }
 
+#[cfg(feature = "test-live-agent")]
+#[tokio::test]
+#[ignore = "local-only Codex session association; never run in CI"]
+#[serial(cwd)]
+async fn agent_trailer_opt_in_links_scoped_codex_session_and_flag_omits_only_trailer() {
+    use libra::internal::ai::capture_scope::CaptureScope;
+
+    let repo = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo.path()).await;
+    let _guard = ChangeDirGuard::new(repo.path());
+    assert_cli_success(
+        &run_libra_command(
+            &["commit", "--allow-empty", "--no-gpg-sign", "-m", "baseline"],
+            repo.path(),
+        ),
+        "create parent commit",
+    );
+    let parent = Head::current_commit().await.expect("parent commit");
+    let conn = Database::connect(format!(
+        "sqlite://{}",
+        repo.path().join(".libra/libra.db").display()
+    ))
+    .await
+    .expect("open repository catalog");
+    let scope = CaptureScope::resolve(&conn, repo.path())
+        .await
+        .expect("resolve test worktree scope");
+    conn.execute_raw(Statement::from_sql_and_values(
+        conn.get_database_backend(),
+        "INSERT INTO agent_session (session_id, agent_kind, provider_session_id,
+             state, working_dir, parent_commit, started_at, last_event_at,
+             repo_id, worktree_id, workspace_id, workspace_fence, scope_state)
+         VALUES (?, 'codex', ?, 'active', ?, ?, 1, 2, ?, ?, ?, ?, 'scoped')",
+        [
+            "codex__linked".into(),
+            "provider-linked".into(),
+            repo.path().to_string_lossy().to_string().into(),
+            parent.to_string().into(),
+            scope.repo_id.into(),
+            scope.worktree_id.into(),
+            scope.workspace_id.into(),
+            scope.workspace_fence.into(),
+        ],
+    ))
+    .await
+    .expect("insert scoped Codex session");
+    conn.execute_raw(Statement::from_sql_and_values(
+        conn.get_database_backend(),
+        "INSERT INTO agent_checkpoint (checkpoint_id, session_id, scope,
+             parent_commit, tree_oid, metadata_blob_oid, traces_commit, created_at)
+         VALUES ('checkpoint-linked', 'codex__linked', 'committed', ?, ?, ?, ?, 2)",
+        [
+            parent.to_string().into(),
+            parent.to_string().into(),
+            parent.to_string().into(),
+            parent.to_string().into(),
+        ],
+    ))
+    .await
+    .expect("insert committed checkpoint");
+
+    assert_cli_success(
+        &run_libra_command(
+            &[
+                "commit",
+                "--allow-empty",
+                "--no-gpg-sign",
+                "-m",
+                "default-off",
+            ],
+            repo.path(),
+        ),
+        "default commit",
+    );
+    let off_oid = Head::current_commit().await.expect("default commit ID");
+    let off_commit: Commit = load_object(&off_oid).expect("default commit object");
+    assert!(!off_commit.message.contains("Libra-Agent-Session:"));
+    let off_links = libra::internal::ai::history::agent_sessions_for_commit(&conn, off_oid)
+        .await
+        .expect("read default-off links");
+    assert!(off_links.is_empty());
+    conn.execute_raw(Statement::from_string(
+        conn.get_database_backend(),
+        "INSERT INTO agent_session (session_id, agent_kind, provider_session_id,
+             state, working_dir, parent_commit, started_at, last_event_at,
+             repo_id, worktree_id, workspace_id, workspace_fence, scope_state)
+         SELECT 'codex__foreign', agent_kind, 'provider-foreign', state,
+                working_dir, parent_commit, started_at, last_event_at,
+                repo_id, 'foreign-worktree', workspace_id, workspace_fence, scope_state
+         FROM agent_session WHERE session_id = 'codex__linked'"
+            .to_string(),
+    ))
+    .await
+    .expect("insert foreign-worktree session");
+    conn.execute_raw(Statement::from_string(
+        conn.get_database_backend(),
+        "INSERT INTO agent_checkpoint (checkpoint_id, session_id, scope,
+             parent_commit, tree_oid, metadata_blob_oid, traces_commit, created_at)
+         SELECT 'checkpoint-foreign', 'codex__foreign', scope,
+                parent_commit, tree_oid, metadata_blob_oid, traces_commit, created_at
+         FROM agent_checkpoint WHERE checkpoint_id = 'checkpoint-linked'"
+            .to_string(),
+    ))
+    .await
+    .expect("insert foreign-worktree checkpoint");
+    // Model a fresh Codex turn after the default-off commit; its captured
+    // parent is now the commit about to be advanced by the opt-in call.
+    conn.execute_raw(Statement::from_sql_and_values(
+        conn.get_database_backend(),
+        "UPDATE agent_session SET parent_commit = ?
+         WHERE session_id IN ('codex__linked', 'codex__foreign')",
+        [off_oid.to_string().into()],
+    ))
+    .await
+    .expect("anchor selected session to the current parent");
+    for (
+        suffix,
+        repo_id,
+        worktree_id,
+        workspace_id,
+        workspace_fence,
+        scope_state,
+        state,
+        checkpoint,
+    ) in [
+        (
+            "foreign_repo",
+            "'foreign-repository'",
+            "worktree_id",
+            "workspace_id",
+            "workspace_fence",
+            "scope_state",
+            "state",
+            true,
+        ),
+        (
+            "foreign_workspace",
+            "repo_id",
+            "worktree_id",
+            "'foreign-workspace'",
+            "1",
+            "scope_state",
+            "state",
+            true,
+        ),
+        (
+            "legacy_scope",
+            "repo_id",
+            "worktree_id",
+            "workspace_id",
+            "workspace_fence",
+            "'legacy_unknown'",
+            "state",
+            true,
+        ),
+        (
+            "no_checkpoint",
+            "repo_id",
+            "worktree_id",
+            "workspace_id",
+            "workspace_fence",
+            "scope_state",
+            "state",
+            false,
+        ),
+        (
+            "quarantined",
+            "repo_id",
+            "worktree_id",
+            "workspace_id",
+            "workspace_fence",
+            "scope_state",
+            "'quarantined'",
+            true,
+        ),
+    ] {
+        let session_id = format!("codex__{suffix}");
+        conn.execute_raw(Statement::from_sql_and_values(
+            conn.get_database_backend(),
+            format!(
+                "INSERT INTO agent_session (session_id, agent_kind, provider_session_id,
+                     state, working_dir, parent_commit, started_at, last_event_at,
+                     repo_id, worktree_id, workspace_id, workspace_fence, scope_state)
+                 SELECT ?, agent_kind, ?, {state}, working_dir, parent_commit,
+                        started_at, last_event_at, {repo_id}, {worktree_id},
+                        {workspace_id}, {workspace_fence}, {scope_state}
+                 FROM agent_session WHERE session_id = 'codex__linked'"
+            ),
+            [
+                session_id.as_str().into(),
+                format!("provider-{suffix}").into(),
+            ],
+        ))
+        .await
+        .expect("insert mismatched session fixture");
+        if checkpoint {
+            conn.execute_raw(Statement::from_sql_and_values(
+                conn.get_database_backend(),
+                "INSERT INTO agent_checkpoint (checkpoint_id, session_id, scope,
+                     parent_commit, tree_oid, metadata_blob_oid, traces_commit, created_at)
+                 SELECT ?, ?, scope, parent_commit, tree_oid,
+                        metadata_blob_oid, traces_commit, created_at
+                 FROM agent_checkpoint WHERE checkpoint_id = 'checkpoint-linked'",
+                [format!("checkpoint-{suffix}").into(), session_id.into()],
+            ))
+            .await
+            .expect("insert mismatched checkpoint fixture");
+        }
+    }
+
+    assert_cli_success(
+        &run_libra_command(&["config", "agent.commit_trailer", "true"], repo.path()),
+        "enable agent commit trailer",
+    );
+    assert_cli_success(
+        &run_libra_command(
+            &["commit", "--allow-empty", "--no-gpg-sign", "-m", "opt-in"],
+            repo.path(),
+        ),
+        "opt-in commit",
+    );
+    let enabled_oid = Head::current_commit().await.expect("opt-in commit ID");
+    let enabled_commit: Commit = load_object(&enabled_oid).expect("opt-in commit object");
+    assert_eq!(
+        enabled_commit
+            .message
+            .matches("Libra-Agent-Session: codex__linked")
+            .count(),
+        1
+    );
+    assert_eq!(
+        libra::internal::ai::history::agent_sessions_for_commit(&conn, enabled_oid)
+            .await
+            .expect("read opt-in links"),
+        vec!["codex__linked"]
+    );
+    assert_cli_success(
+        &run_libra_command(&["config", "generate-gpg-key"], repo.path()),
+        "create a vault signing key for the signed trailer check",
+    );
+    assert_cli_success(
+        &run_libra_command(
+            &["commit", "--allow-empty", "-S", "-m", "signed-agent"],
+            repo.path(),
+        ),
+        "sign an opt-in agent commit",
+    );
+    let signed_oid = Head::current_commit()
+        .await
+        .expect("signed agent commit ID");
+    let signed_commit: Commit = load_object(&signed_oid).expect("signed agent commit object");
+    assert!(signed_commit.message.contains("gpgsig "));
+    assert!(
+        signed_commit
+            .message
+            .contains("Libra-Agent-Session: codex__linked")
+    );
+    assert_eq!(
+        libra::internal::ai::history::agent_sessions_for_commit(&conn, signed_oid)
+            .await
+            .expect("read signed commit links"),
+        vec!["codex__linked"]
+    );
+
+    assert_cli_success(
+        &run_libra_command(
+            &[
+                "commit",
+                "--allow-empty",
+                "--no-gpg-sign",
+                "--no-agent-trailer",
+                "-m",
+                "local-link-only",
+            ],
+            repo.path(),
+        ),
+        "commit without automatic trailer",
+    );
+    let suppressed_oid = Head::current_commit().await.expect("suppressed commit ID");
+    let suppressed_commit: Commit = load_object(&suppressed_oid).expect("suppressed commit object");
+    assert!(!suppressed_commit.message.contains("Libra-Agent-Session:"));
+    assert_eq!(
+        libra::internal::ai::history::agent_sessions_for_commit(&conn, suppressed_oid)
+            .await
+            .expect("read suppressed links"),
+        vec!["codex__linked"]
+    );
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let hook_dir = repo.path().join(".libra/hooks");
+        std::fs::create_dir_all(&hook_dir).expect("create hook directory");
+        let hook = hook_dir.join("commit-msg");
+        std::fs::write(&hook, "#!/bin/sh\nprintf '\n\nHook-Ack: yes\n' >> \"$1\"\n")
+            .expect("write commit-msg hook");
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755))
+            .expect("make commit-msg hook executable");
+    }
+    assert_cli_success(
+        &run_libra_command(
+            &[
+                "commit",
+                "--allow-empty",
+                "--no-gpg-sign",
+                "-m",
+                "user-trailer",
+                "--trailer",
+                "Libra-Agent-Session: codex__linked",
+            ],
+            repo.path(),
+        ),
+        "commit with user-provided session trailer",
+    );
+    let user_oid = Head::current_commit()
+        .await
+        .expect("user-trailer commit ID");
+    let user_commit: Commit = load_object(&user_oid).expect("user-trailer commit object");
+    assert_eq!(
+        user_commit
+            .message
+            .matches("Libra-Agent-Session: codex__linked")
+            .count(),
+        1
+    );
+    #[cfg(unix)]
+    assert!(user_commit.message.contains("Hook-Ack: yes"));
+    conn.execute_raw(Statement::from_string(
+        conn.get_database_backend(),
+        "UPDATE agent_session SET state = 'stopped' WHERE session_id = 'codex__linked'".to_string(),
+    ))
+    .await
+    .expect("stop linked session before amend");
+    assert_cli_success(
+        &run_libra_command(
+            &["commit", "--amend", "--no-edit", "--no-gpg-sign"],
+            repo.path(),
+        ),
+        "amend a commit with an existing session trailer",
+    );
+    let amended_oid = Head::current_commit().await.expect("amended commit ID");
+    let amended_commit: Commit = load_object(&amended_oid).expect("amended commit object");
+    assert_eq!(
+        amended_commit
+            .message
+            .matches("Libra-Agent-Session: codex__linked")
+            .count(),
+        1
+    );
+    assert_eq!(
+        libra::internal::ai::history::agent_sessions_for_commit(&conn, amended_oid)
+            .await
+            .expect("read amended links"),
+        vec!["codex__linked"]
+    );
+    assert_cli_success(
+        &run_libra_command(
+            &[
+                "commit",
+                "--amend",
+                "--no-gpg-sign",
+                "-m",
+                "rewritten-amend",
+            ],
+            repo.path(),
+        ),
+        "rewrite amend message while preserving stopped session link",
+    );
+    let rewritten_oid = Head::current_commit().await.expect("rewritten amend ID");
+    let rewritten_commit: Commit = load_object(&rewritten_oid).expect("rewritten amend object");
+    assert_eq!(
+        rewritten_commit
+            .message
+            .matches("Libra-Agent-Session: codex__linked")
+            .count(),
+        1
+    );
+    assert_eq!(
+        libra::internal::ai::history::agent_sessions_for_commit(&conn, rewritten_oid)
+            .await
+            .expect("read rewritten amend links"),
+        vec!["codex__linked"]
+    );
+    conn.execute_raw(Statement::from_string(
+        conn.get_database_backend(),
+        "UPDATE agent_session SET state = 'active' WHERE session_id = 'codex__linked'".to_string(),
+    ))
+    .await
+    .expect("resume linked session before normal commit");
+    assert_cli_success(
+        &run_libra_command(
+            &[
+                "commit",
+                "--allow-empty",
+                "--no-gpg-sign",
+                "-m",
+                "spaced-trailer",
+                "--trailer",
+                "Libra-Agent-Session : codex__linked",
+                "--trailer",
+                "Notes: first\n continued",
+            ],
+            repo.path(),
+        ),
+        "commit with Git-valid spaced and continuation trailers",
+    );
+    let spaced_oid = Head::current_commit()
+        .await
+        .expect("spaced trailer commit ID");
+    let spaced_commit: Commit = load_object(&spaced_oid).expect("spaced trailer commit object");
+    assert_eq!(
+        spaced_commit
+            .message
+            .matches("Libra-Agent-Session: codex__linked")
+            .count(),
+        1
+    );
+    assert!(
+        !spaced_commit
+            .message
+            .contains("Libra-Agent-Session : codex__linked"),
+        "a hook-split user trailer must move to one final parseable location"
+    );
+    assert_cli_success(
+        &run_libra_command(
+            &[
+                "commit",
+                "--allow-empty",
+                "--no-gpg-sign",
+                "-m",
+                "body-marker\n\nLibra-Agent-Session: codex__linked\n\nBody text",
+            ],
+            repo.path(),
+        ),
+        "commit with a trailer-like body line",
+    );
+    let body_oid = Head::current_commit().await.expect("body-marker commit ID");
+    let body_commit: Commit = load_object(&body_oid).expect("body-marker commit object");
+    assert_eq!(
+        body_commit
+            .message
+            .matches("Libra-Agent-Session: codex__linked")
+            .count(),
+        2,
+        "a body line must not suppress the actual final trailer"
+    );
+    assert!(
+        libra::internal::log::trailer::parse_trailers(&body_commit.message)
+            .iter()
+            .any(|trailer| trailer.key_matches("Libra-Agent-Session")
+                && trailer.value == "codex__linked")
+    );
+    assert_cli_success(
+        &run_libra_command(&["config", "agent.commit_trailer", "invalid"], repo.path()),
+        "set invalid config fixture",
+    );
+    let rejected = run_libra_command(
+        &["commit", "--allow-empty", "--no-gpg-sign", "-m", "rejected"],
+        repo.path(),
+    );
+    assert!(
+        !rejected.status.success(),
+        "invalid config must reject commit"
+    );
+    assert_eq!(rejected.status.code(), Some(129));
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("agent.commit_trailer"));
+    let rejected_preview = run_libra_command(
+        &[
+            "commit",
+            "--dry-run",
+            "--allow-empty",
+            "-m",
+            "invalid-preview",
+        ],
+        repo.path(),
+    );
+    assert_eq!(rejected_preview.status.code(), Some(129));
+    assert!(
+        String::from_utf8_lossy(&rejected_preview.stderr).contains("agent.commit_trailer"),
+        "dry-run must reject the invalid value, not an empty index"
+    );
+    assert_eq!(Head::current_commit().await, Some(body_oid));
+    assert_cli_success(
+        &run_libra_command(&["config", "agent.commit_trailer", "true"], repo.path()),
+        "restore valid agent trailer config",
+    );
+    let links_before_preview = conn
+        .query_one_raw(Statement::from_string(
+            conn.get_database_backend(),
+            "SELECT COUNT(*) AS total FROM agent_session_commit".to_string(),
+        ))
+        .await
+        .expect("count links before valid dry run")
+        .expect("link count row")
+        .try_get::<i64>("", "total")
+        .expect("numeric link count");
+    let valid_preview = run_libra_command(
+        &[
+            "--json",
+            "commit",
+            "--dry-run",
+            "--allow-empty",
+            "-m",
+            "valid-preview",
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&valid_preview, "valid opt-in dry run");
+    assert!(
+        !String::from_utf8_lossy(&valid_preview.stdout).contains("Libra-Agent-Session"),
+        "dry run must not preview an automatic trailer"
+    );
+    assert_eq!(Head::current_commit().await, Some(body_oid));
+    let links_after_preview = conn
+        .query_one_raw(Statement::from_string(
+            conn.get_database_backend(),
+            "SELECT COUNT(*) AS total FROM agent_session_commit".to_string(),
+        ))
+        .await
+        .expect("count links after valid dry run")
+        .expect("link count row")
+        .try_get::<i64>("", "total")
+        .expect("numeric link count");
+    assert_eq!(links_after_preview, links_before_preview);
+    for number in 0..64 {
+        let session_id = format!("codex__overflow_{number}");
+        conn.execute_raw(Statement::from_sql_and_values(
+            conn.get_database_backend(),
+            "INSERT INTO agent_session (session_id, agent_kind, provider_session_id,
+                 state, working_dir, parent_commit, started_at, last_event_at,
+                 repo_id, worktree_id, workspace_id, workspace_fence, scope_state)
+             SELECT ?, agent_kind, ?, state, working_dir, ?, 1, 2,
+                    repo_id, worktree_id, workspace_id, workspace_fence, scope_state
+             FROM agent_session WHERE session_id = 'codex__linked'",
+            [
+                session_id.as_str().into(),
+                format!("provider-overflow-{number}").into(),
+                body_oid.to_string().into(),
+            ],
+        ))
+        .await
+        .expect("insert bounded selection fixture");
+        conn.execute_raw(Statement::from_sql_and_values(
+            conn.get_database_backend(),
+            "INSERT INTO agent_checkpoint (checkpoint_id, session_id, scope,
+                 parent_commit, tree_oid, metadata_blob_oid, traces_commit, created_at)
+             SELECT ?, ?, scope, parent_commit, tree_oid,
+                    metadata_blob_oid, traces_commit, created_at
+             FROM agent_checkpoint WHERE checkpoint_id = 'checkpoint-linked'",
+            [
+                format!("checkpoint-overflow-{number}").into(),
+                session_id.into(),
+            ],
+        ))
+        .await
+        .expect("insert bounded checkpoint fixture");
+    }
+    let over_cap = run_libra_command(
+        &["commit", "--allow-empty", "--no-gpg-sign", "-m", "over-cap"],
+        repo.path(),
+    );
+    assert!(
+        !over_cap.status.success(),
+        "65 sessions must reject before ref update"
+    );
+    assert!(
+        String::from_utf8_lossy(&over_cap.stderr).contains("more than 64 eligible sessions"),
+        "selection cap must explain the refusal"
+    );
+    assert_eq!(Head::current_commit().await, Some(body_oid));
+    let current_scope =
+        libra::internal::ai::capture_scope::CaptureScope::resolve(&conn, repo.path())
+            .await
+            .expect("resolve current link scope");
+    let cross_scope = libra::internal::ai::history::link_authorized_agent_sessions_to_commit(
+        &conn,
+        &["codex__linked".to_string(), "codex__foreign".to_string()],
+        off_oid,
+        &current_scope,
+    )
+    .await;
+    assert!(cross_scope.is_err(), "cross-worktree link must roll back");
+    assert!(
+        libra::internal::ai::history::agent_sessions_for_commit(&conn, off_oid)
+            .await
+            .expect("read rejected transaction links")
+            .is_empty(),
+        "a rejected mixed-scope batch must leave zero rows"
+    );
+    let lease_scope = CaptureScope {
+        repo_id: current_scope.repo_id.clone(),
+        worktree_id: current_scope.worktree_id.clone(),
+        workspace_id: Some("lease-fixture".to_string()),
+        workspace_fence: Some(1),
+    };
+    conn.execute_raw(Statement::from_sql_and_values(
+        conn.get_database_backend(),
+        "INSERT INTO workspace_record (workspace_id, repo_id, kind, worktree_id,
+             path, owner_kind, state, lease_owner, lease_fence,
+             lease_expires_at, created_at, updated_at)
+         VALUES ('lease-fixture', ?, 'task_copy', ?, ?, 'agent', 'active',
+                 'owner', 1, ?, 1, 1)",
+        [
+            lease_scope.repo_id.as_str().into(),
+            lease_scope.worktree_id.as_str().into(),
+            repo.path()
+                .join("lease-fixture")
+                .to_string_lossy()
+                .to_string()
+                .into(),
+            (chrono::Utc::now().timestamp_millis() + 60_000).into(),
+        ],
+    ))
+    .await
+    .expect("insert live workspace lease");
+    conn.execute_raw(Statement::from_string(
+        conn.get_database_backend(),
+        "INSERT INTO agent_session (session_id, agent_kind, provider_session_id,
+             state, working_dir, parent_commit, started_at, last_event_at,
+             repo_id, worktree_id, workspace_id, workspace_fence, scope_state)
+         SELECT 'codex__leased', agent_kind, 'provider-leased', state,
+                working_dir, parent_commit, started_at, last_event_at,
+                repo_id, worktree_id, 'lease-fixture', 1, scope_state
+         FROM agent_session WHERE session_id = 'codex__linked'"
+            .to_string(),
+    ))
+    .await
+    .expect("insert leased session");
+    conn.execute_raw(Statement::from_string(
+        conn.get_database_backend(),
+        "INSERT INTO agent_checkpoint (checkpoint_id, session_id, scope,
+             parent_commit, tree_oid, metadata_blob_oid, traces_commit, created_at)
+         SELECT 'checkpoint-leased', 'codex__leased', scope,
+                parent_commit, tree_oid, metadata_blob_oid, traces_commit, created_at
+         FROM agent_checkpoint WHERE checkpoint_id = 'checkpoint-linked'"
+            .to_string(),
+    ))
+    .await
+    .expect("insert leased checkpoint");
+    lease_scope
+        .assert_workspace_fence_live(&conn)
+        .await
+        .expect("lease is live before link attempt");
+    conn.execute_raw(Statement::from_string(
+        conn.get_database_backend(),
+        "UPDATE workspace_record SET lease_expires_at = 1
+         WHERE workspace_id = 'lease-fixture'"
+            .to_string(),
+    ))
+    .await
+    .expect("expire workspace lease after precheck");
+    assert!(
+        libra::internal::ai::history::link_authorized_agent_sessions_to_commit(
+            &conn,
+            &["codex__leased".to_string()],
+            off_oid,
+            &lease_scope,
+        )
+        .await
+        .is_err(),
+        "expired lease must roll back a post-ref link"
+    );
+    assert!(
+        libra::internal::ai::history::agent_sessions_for_commit(&conn, off_oid)
+            .await
+            .expect("read links after expired lease")
+            .is_empty()
+    );
+    conn.execute_raw(Statement::from_string(
+        conn.get_database_backend(),
+        "DELETE FROM agent_session WHERE session_id GLOB 'codex__overflow_*'".to_string(),
+    ))
+    .await
+    .expect("remove over-cap fixtures");
+    conn.execute_raw(Statement::from_string(
+        conn.get_database_backend(),
+        "CREATE TRIGGER test_agent_link_failure BEFORE INSERT ON agent_session_commit
+         BEGIN SELECT RAISE(ABORT, 'secret-link-failure-sentinel'); END"
+            .to_string(),
+    ))
+    .await
+    .expect("inject post-ref association failure");
+    let warning = run_libra_command(
+        &[
+            "--json",
+            "--exit-code-on-warning",
+            "commit",
+            "--allow-empty",
+            "--no-gpg-sign",
+            "-m",
+            "post-ref-warning",
+        ],
+        repo.path(),
+    );
+    assert_eq!(
+        warning.status.code(),
+        Some(9),
+        "completed commit warning exit"
+    );
+    let warning_stderr = String::from_utf8_lossy(&warning.stderr);
+    assert!(warning_stderr.contains("local agent session association failed"));
+    assert!(!warning_stderr.contains("secret-link-failure-sentinel"));
+    let warning_json: serde_json::Value =
+        serde_json::from_slice(&warning.stdout).expect("parse successful warning envelope");
+    assert_eq!(warning_json["ok"], true);
+    let warning_oid = Head::current_commit()
+        .await
+        .expect("commit advanced before link warning");
+    assert_ne!(warning_oid, body_oid);
+    assert!(
+        libra::internal::ai::history::agent_sessions_for_commit(&conn, warning_oid)
+            .await
+            .expect("read links after injected failure")
+            .is_empty()
+    );
+    assert_cli_success(
+        &run_libra_command(&["config", "--unset", "agent.commit_trailer"], repo.path()),
+        "remove local agent trailer setting before unreadable-global check",
+    );
+    let unreadable_global = repo.path().join("unreadable-global-config.db");
+    std::fs::create_dir(&unreadable_global).expect("create unreadable config-store fixture");
+    let unreadable_global_path = unreadable_global
+        .to_str()
+        .expect("temporary repository path is UTF-8");
+    let unreadable = run_libra_command_with_env(
+        &[
+            "--json",
+            "--exit-code-on-warning",
+            "commit",
+            "--allow-empty",
+            "--no-gpg-sign",
+            "-m",
+            "unreadable-global",
+        ],
+        repo.path(),
+        &[("LIBRA_CONFIG_GLOBAL_DB", unreadable_global_path)],
+    );
+    assert_eq!(unreadable.status.code(), Some(9));
+    let unreadable_json: serde_json::Value =
+        serde_json::from_slice(&unreadable.stdout).expect("parse config warning envelope");
+    assert_eq!(unreadable_json["ok"], true);
+    let unreadable_stderr = String::from_utf8_lossy(&unreadable.stderr);
+    assert!(unreadable_stderr.contains("agent session association was disabled"));
+    assert!(unreadable_stderr.contains("agent.commit_trailer"));
+    let unreadable_oid = Head::current_commit()
+        .await
+        .expect("commit succeeded with unreadable opt-in config");
+    let unreadable_commit: Commit = load_object(&unreadable_oid).expect("unreadable config commit");
+    assert!(!unreadable_commit.message.contains("Libra-Agent-Session"));
+    assert!(
+        libra::internal::ai::history::agent_sessions_for_commit(&conn, unreadable_oid)
+            .await
+            .expect("read links for opt-in config fallback")
+            .is_empty()
+    );
+    conn.close().await.expect("close repository catalog");
+}
+
 #[tokio::test]
 #[serial(cwd)]
 async fn test_commit_dry_run_does_not_create_commit() {

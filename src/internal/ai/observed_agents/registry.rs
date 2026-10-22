@@ -79,8 +79,7 @@ impl AgentRegistration {
     }
 }
 
-/// All-false capability set for rows whose optional capabilities have not
-/// been wired yet (they converge in AG-19/AG-21).
+/// Hook-only capability set; no transcript intelligence is advertised.
 const HOOKS_ONLY: DeclaredAgentCaps = DeclaredAgentCaps {
     hooks: true,
     transcript_analyzer: false,
@@ -116,12 +115,18 @@ const CLAUDE_CODE_CAPS: DeclaredAgentCaps = DeclaredAgentCaps {
     ..NO_CAPS
 };
 
-/// Codex / OpenCode capability set (AG-19 hooks + AG-21 best-effort
+/// Shared hook/token capability base (AG-19 hooks + AG-21 best-effort
 /// token calculation over their rollout/export formats).
 const HOOKS_AND_TOKENS: DeclaredAgentCaps = DeclaredAgentCaps {
     hooks: true,
     token_calculator: true,
     ..NO_CAPS
+};
+
+/// Codex's source-pinned parser also supplies the modified-file analyzer.
+const CODEX_ROLLOUT_CAPS: DeclaredAgentCaps = DeclaredAgentCaps {
+    transcript_analyzer: true,
+    ..HOOKS_AND_TOKENS
 };
 
 /// The frozen static matrix, one row per [`AgentKind`] variant, in
@@ -182,7 +187,7 @@ static REGISTRY: [AgentRegistration; 8] = [
         launchable_investigate: true,
         external_binary: false,
         config_paths: &[".codex/hooks.json"],
-        capabilities: HOOKS_AND_TOKENS,
+        capabilities: CODEX_ROLLOUT_CAPS,
     },
     AgentRegistration {
         slug: "gemini",

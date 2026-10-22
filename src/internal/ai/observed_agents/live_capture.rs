@@ -5,8 +5,10 @@
 //! live decision -- the capture budget used when the host supplied none, the
 //! deterministic transcript candidate, the live coverage normalizer,
 //! child-transcript discovery and the trusted transcript exporter -- is
-//! answered here through [`LiveCaptureProvider`]. Implementations receive only
-//! scope-verified facts ([`LiveCaptureContext`]) and a monotonic deadline.
+//! answered here through [`LiveCaptureProvider`]. Source/discovery methods receive
+//! scope-verified facts ([`LiveCaptureContext`]) and a monotonic deadline. The
+//! pure hint extractor instead borrows the parsed, unverified hook envelope;
+//! its bounded output is only a candidate and grants no source authority.
 //! They never see SQL, refs, a capture scope, a commit deadline, a store or an
 //! export-job lease, and they never open, stat or read a source themselves:
 //! the snapshot service owns that boundary. A [`LiveTranscriptExporter`]
@@ -35,12 +37,41 @@ use super::{
     reasoning::note_claude_attached_duplicates,
 };
 use crate::internal::ai::{
-    hooks::provider::HookProvider,
+    hooks::{
+        lifecycle::{LifecycleEventKind, SessionHookEnvelope},
+        provider::HookProvider,
+    },
     subagent_content::{
         MAX_SUBAGENT_SOURCES_PER_CAPTURE, SubagentDiscovery,
-        discover_claude_subagent_contents_bounded,
+        discover_claude_subagent_contents_bounded, discover_codex_subagent_contents_live,
+        discover_codex_subagent_contents_stored,
     },
 };
+
+/// Optional asynchronous source location in the same registration as policy.
+/// No runtime/store types cross this provider port.
+#[async_trait]
+pub(crate) trait LiveTranscriptSource: Send + Sync {
+    async fn locate(
+        &self,
+        context: &LiveCaptureContext<'_>,
+        deadline: Option<Instant>,
+    ) -> Result<Option<PathBuf>, LiveCandidateUnavailable>;
+
+    async fn read_source(
+        &self,
+        source: std::fs::File,
+        session_id: &str,
+        cwd: &Path,
+        cap: u64,
+        deadline: Instant,
+    ) -> crate::internal::ai::authorized_read::LiveClaudeSourceRead;
+}
+
+pub(crate) struct LiveCaptureRegistration<P: LiveCaptureProvider + ?Sized + 'static> {
+    pub(crate) policy: &'static P,
+    pub(crate) locator: Option<&'static dyn LiveTranscriptSource>,
+}
 
 /// Coverage-v1 normalizer over snapshot-owned redacted bytes (GC-ACF-03).
 pub(crate) type LiveCoverageNormalizer = fn(&RedactedBytes) -> Vec<NormalizedTurn>;
@@ -56,14 +87,152 @@ pub(crate) struct LiveCaptureContext<'a> {
     pub(crate) verified_cwd: &'a Path,
 }
 
+/// A provider pointer is only an untrusted candidate, never read authority.
+/// Deliberately neither Clone/Copy, Debug, nor Serialize: it has one transient
+/// owner and must not be copied into generic lifecycle metadata or logging.
+pub(crate) enum UntrustedChildSourceHints {
+    Absent,
+    Unavailable,
+    Candidate(ChildSourceHint),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ChildSourceHintRole {
+    CurrentThread,
+    ChildBoundary,
+}
+
+pub(crate) struct ChildSourceHint {
+    role: ChildSourceHintRole,
+    current_or_parent_path: Option<PathBuf>,
+    child_path: Option<PathBuf>,
+    child_id: Option<String>,
+    turn_id: Option<String>,
+}
+
+pub(crate) struct ChildSourceHintView<'a> {
+    pub(crate) role: ChildSourceHintRole,
+    pub(crate) current_or_parent_path: Option<&'a Path>,
+    pub(crate) child_path: Option<&'a Path>,
+    pub(crate) child_id: Option<&'a str>,
+    pub(crate) turn_id: Option<&'a str>,
+}
+
+impl UntrustedChildSourceHints {
+    pub(crate) fn candidate(&self) -> Option<ChildSourceHintView<'_>> {
+        match self {
+            Self::Candidate(hint) => Some(ChildSourceHintView {
+                role: hint.role,
+                current_or_parent_path: hint.current_or_parent_path.as_deref(),
+                child_path: hint.child_path.as_deref(),
+                child_id: hint.child_id.as_deref(),
+                turn_id: hint.turn_id.as_deref(),
+            }),
+            Self::Absent | Self::Unavailable => None,
+        }
+    }
+
+    fn bounded(&self) -> bool {
+        let Some(hint) = self.candidate() else {
+            return true;
+        };
+        let mut bytes = 0_usize;
+        for path in [hint.current_or_parent_path, hint.child_path]
+            .into_iter()
+            .flatten()
+        {
+            let Some(path) = path.to_str() else {
+                return false;
+            };
+            if path.trim().is_empty() || path.len() > 4096 || path.contains('\0') {
+                return false;
+            }
+            bytes = bytes.saturating_add(path.len());
+        }
+        for id in [hint.child_id, hint.turn_id].into_iter().flatten() {
+            if id.is_empty()
+                || id.len() > 64
+                || !id
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+            {
+                return false;
+            }
+            bytes = bytes.saturating_add(id.len());
+        }
+        bytes <= 8320
+            && match hint.role {
+                ChildSourceHintRole::CurrentThread => {
+                    hint.child_path.is_none() && hint.child_id.is_none() && hint.turn_id.is_none()
+                }
+                ChildSourceHintRole::ChildBoundary => {
+                    hint.child_path.is_some() && hint.child_id.is_some()
+                }
+            }
+    }
+}
+
+/// The ingress view exposes only the pure extractor, not source locators,
+/// exporters or discovery methods held by the already-selected binding.
+#[derive(Clone, Copy)]
+pub(crate) struct ChildSourceHintPolicy {
+    hook_name: &'static str,
+    kind: AgentKind,
+    policy: &'static dyn LiveCaptureProvider,
+}
+
+impl ChildSourceHintPolicy {
+    pub(crate) fn matches(self, provider: &dyn HookProvider) -> bool {
+        self.hook_name == provider.provider_name() && self.kind == provider.agent_kind()
+    }
+
+    pub(crate) fn extract(
+        self,
+        envelope: &SessionHookEnvelope,
+        kind: LifecycleEventKind,
+    ) -> UntrustedChildSourceHints {
+        let hints = self.policy.child_source_hints(envelope, kind);
+        if hints.bounded() {
+            hints
+        } else {
+            UntrustedChildSourceHints::Unavailable
+        }
+    }
+}
+
 /// The provider could not derive a live transcript candidate from the
 /// verified facts. Content-free: the caller records only a fixed reason.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct LiveCandidateUnavailable;
 
-/// Provider-owned live capture policy. Every method defaults to the neutral,
-/// source-absent behavior; a provider overrides only what it supports.
+/// Pure lifecycle selection. Source IO and persistence remain in their owners.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SubagentEventPolicy {
+    ParentOnly,
+    Boundary,
+    RequiredTerminal,
+}
+
+/// Provider-owned capabilities default to neutral, source-absent behavior.
 pub(crate) trait LiveCaptureProvider: Send + Sync {
+    /// Pure completion compatibility; the id grants no source access or
+    /// native provenance. Ordinary data discovery is a separate capability.
+    fn subagent_event_policy(
+        &self,
+        _kind: LifecycleEventKind,
+        _provider_session_id: &str,
+    ) -> SubagentEventPolicy {
+        SubagentEventPolicy::ParentOnly
+    }
+    /// Pure extraction of bounded untrusted candidates; no source IO or
+    /// persistence. Providers without this policy return `Absent`.
+    fn child_source_hints(
+        &self,
+        _envelope: &SessionHookEnvelope,
+        _kind: LifecycleEventKind,
+    ) -> UntrustedChildSourceHints {
+        UntrustedChildSourceHints::Absent
+    }
     /// Capture budget established at the AgentTraces boundary when the host
     /// passed no managed `--capture-budget-ms`. `None` keeps the legacy
     /// no-deadline behavior.
@@ -99,15 +268,69 @@ pub(crate) trait LiveCaptureProvider: Send + Sync {
     }
 }
 
+/// Availability is independent of a bounded scan's partial data result.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum SubagentDiscoveryAvailability {
+    #[default]
+    Available,
+    Unavailable,
+}
+
+/// Explicit per-call stored discovery allowances. Providers may only reduce them.
+#[derive(Clone, Copy)]
+pub(crate) struct SubagentDiscoveryLimits {
+    pub(crate) byte_budget: u64,
+    pub(crate) source_limit: usize,
+}
+
+/// A transient untrusted locator is only a candidate. No Debug/Serialize or
+/// second provider lookup is attached to this selection.
+pub(crate) enum StoredSubagentSelection<'a> {
+    ImportCurrent { parent_locator: Option<&'a Path> },
+    TerminalRecoveryRoot,
+}
+
 /// Bounded discovery of the child transcripts attributable to one parent
 /// session. The capture layer owns persistence and partial-result policy.
 #[async_trait]
 pub(crate) trait LiveSubagentDiscovery: Send + Sync {
+    /// Opt in to coarse managed-parent partial metadata for unavailable or
+    /// incomplete discovery. Existing integrations retain their metadata.
+    fn marks_incomplete_parent_extraction(&self) -> bool {
+        false
+    }
+
     async fn discover(
         &self,
         context: &LiveCaptureContext<'_>,
         deadline: Instant,
     ) -> Result<SubagentDiscovery>;
+
+    async fn discover_with_hint(
+        &self,
+        context: &LiveCaptureContext<'_>,
+        _hint: &UntrustedChildSourceHints,
+        deadline: Instant,
+    ) -> Result<SubagentDiscovery> {
+        self.discover(context, deadline).await
+    }
+
+    /// Default is zero IO, never a delegate that silently drops caller caps.
+    async fn discover_stored(
+        &self,
+        _context: &LiveCaptureContext<'_>,
+        _selection: StoredSubagentSelection<'_>,
+        _limits: SubagentDiscoveryLimits,
+        _deadline: Instant,
+    ) -> Result<SubagentDiscovery> {
+        Ok(SubagentDiscovery {
+            incomplete: true,
+            availability: SubagentDiscoveryAvailability::Unavailable,
+            warning: Some("stored subagent discovery is unavailable".to_string()),
+            ..SubagentDiscovery::default()
+        })
+    }
 }
 
 /// Trusted export of one provider session's transcript (ADR-ACF-10, ACF-20).
@@ -137,6 +360,7 @@ pub(crate) struct LiveCaptureBinding {
     kind: AgentKind,
     observed: &'static dyn ObservedAgent,
     live: &'static dyn LiveCaptureProvider,
+    locator: Option<&'static dyn LiveTranscriptSource>,
 }
 
 impl LiveCaptureBinding {
@@ -147,12 +371,22 @@ impl LiveCaptureBinding {
     }
 
     fn for_kind(hook_name: &'static str, kind: AgentKind) -> Self {
+        let registration = live_capture_for(kind);
         Self {
             hook_name,
             kind,
             observed: selected_snapshot_adapter(kind),
-            live: live_capture_for(kind).unwrap_or(&NEUTRAL_LIVE_CAPTURE),
+            live: registration
+                .map(|entry| entry.policy)
+                .unwrap_or(&NEUTRAL_LIVE_CAPTURE),
+            locator: registration.and_then(|entry| entry.locator),
         }
+    }
+
+    /// Reuse the original registered policy for stored callers. Their durable
+    /// Libra/native identities are supplied explicitly, not rebuilt from this label.
+    pub(crate) fn for_stored(kind: AgentKind) -> Self {
+        Self::for_kind(agent_for(kind).provider_name(), kind)
     }
 
     /// The hook provider name: the session-id prefix and telemetry field.
@@ -163,6 +397,14 @@ impl LiveCaptureBinding {
     /// The durable `agent_session.agent_kind` spelling of the typed identity.
     pub(crate) fn agent_kind_db(self) -> &'static str {
         self.kind.as_db_str()
+    }
+
+    pub(crate) fn child_source_hint_policy(self) -> ChildSourceHintPolicy {
+        ChildSourceHintPolicy {
+            hook_name: self.hook_name,
+            kind: self.kind,
+            policy: self.live,
+        }
     }
 
     /// The observed-agent adapter used by the snapshot service.
@@ -181,12 +423,24 @@ impl LiveCaptureBinding {
         self.live.live_transcript_candidate(context)
     }
 
+    pub(crate) fn live_transcript_locator(self) -> Option<&'static dyn LiveTranscriptSource> {
+        self.locator
+    }
+
     pub(crate) fn live_coverage_normalizer(self) -> Option<LiveCoverageNormalizer> {
         self.live.live_coverage_normalizer()
     }
 
     pub(crate) fn subagent_discovery(self) -> Option<&'static dyn LiveSubagentDiscovery> {
         self.live.subagent_discovery()
+    }
+
+    pub(crate) fn subagent_event_policy(
+        self,
+        kind: LifecycleEventKind,
+        provider_session_id: &str,
+    ) -> SubagentEventPolicy {
+        self.live.subagent_event_policy(kind, provider_session_id)
     }
 
     pub(crate) fn transcript_exporter(self) -> Option<&'static dyn LiveTranscriptExporter> {
@@ -298,6 +552,22 @@ impl LiveSubagentDiscovery for ClaudeLiveCapture {
         )
         .await
     }
+    async fn discover_stored(
+        &self,
+        context: &LiveCaptureContext<'_>,
+        _selection: StoredSubagentSelection<'_>,
+        limits: SubagentDiscoveryLimits,
+        deadline: Instant,
+    ) -> Result<SubagentDiscovery> {
+        discover_claude_subagent_contents_bounded(
+            context.verified_cwd,
+            context.provider_session_id,
+            deadline,
+            limits.byte_budget,
+            limits.source_limit,
+        )
+        .await
+    }
 }
 
 fn claude_live_coverage(transcript: &RedactedBytes) -> Vec<NormalizedTurn> {
@@ -306,13 +576,164 @@ fn claude_live_coverage(transcript: &RedactedBytes) -> Vec<NormalizedTurn> {
     turns
 }
 
-/// Codex keeps its rollout normalizer for exactness; with no live candidate
-/// its source is never authorized, so the gate is currently unreachable live.
+/// Codex keeps the frozen V1 rollout normalizer. The same registration's
+/// optional source capability supplies the deadline-bound ordinary bytes.
 pub(super) struct CodexLiveCapture;
 
+// The pinned ThreadId decoder accepts every UUID version; shape selects
+// live compatibility behavior, never source authority or provenance.
+fn codex_live_child_session(session_id: &str) -> bool {
+    uuid::Uuid::parse_str(session_id).is_ok()
+}
+
 impl LiveCaptureProvider for CodexLiveCapture {
+    fn subagent_discovery(&self) -> Option<&dyn LiveSubagentDiscovery> {
+        Some(self)
+    }
+
+    fn subagent_event_policy(
+        &self,
+        kind: LifecycleEventKind,
+        provider_session_id: &str,
+    ) -> SubagentEventPolicy {
+        // The pinned Codex ThreadId decoder accepts UUIDs (new threads use
+        // UUIDv7). Legacy raw labels retain their original parent-only live
+        // route. Scoped historical import and recovery can still collect
+        // their ordinary child data without this live qualification.
+        if !codex_live_child_session(provider_session_id) {
+            return SubagentEventPolicy::ParentOnly;
+        }
+        match kind {
+            LifecycleEventKind::SubagentEnd => SubagentEventPolicy::Boundary,
+            LifecycleEventKind::SessionEnd => SubagentEventPolicy::RequiredTerminal,
+            _ => SubagentEventPolicy::ParentOnly,
+        }
+    }
+    fn child_source_hints(
+        &self,
+        envelope: &SessionHookEnvelope,
+        kind: LifecycleEventKind,
+    ) -> UntrustedChildSourceHints {
+        let role = match kind {
+            LifecycleEventKind::TurnEnd | LifecycleEventKind::SessionEnd => {
+                ChildSourceHintRole::CurrentThread
+            }
+            LifecycleEventKind::SubagentEnd => ChildSourceHintRole::ChildBoundary,
+            _ => return UntrustedChildSourceHints::Absent,
+        };
+        let candidate = || -> Option<ChildSourceHint> {
+            fn path(value: &str) -> Option<PathBuf> {
+                (!value.trim().is_empty() && value.len() <= 4096 && !value.contains('\0'))
+                    .then(|| PathBuf::from(value))
+            }
+            fn id(value: &str) -> Option<String> {
+                (!value.is_empty()
+                    && value.len() <= 64
+                    && value
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_')))
+                .then(|| value.to_owned())
+            }
+            let mut hint = ChildSourceHint {
+                role,
+                current_or_parent_path: match envelope.transcript_path.as_deref() {
+                    Some(value) => Some(path(value)?),
+                    None => None,
+                },
+                child_path: None,
+                child_id: None,
+                turn_id: None,
+            };
+            if role == ChildSourceHintRole::ChildBoundary {
+                hint.child_path = Some(path(
+                    envelope.extra.get("agent_transcript_path")?.as_str()?,
+                )?);
+                hint.child_id = Some(id(envelope.extra.get("agent_id")?.as_str()?)?);
+                hint.turn_id = match envelope.extra.get("turn_id") {
+                    Some(value) => Some(id(value.as_str()?)?),
+                    None => None,
+                };
+            }
+            Some(hint)
+        };
+        match candidate() {
+            Some(hint) => {
+                let hints = UntrustedChildSourceHints::Candidate(hint);
+                if hints.bounded() {
+                    hints
+                } else {
+                    UntrustedChildSourceHints::Unavailable
+                }
+            }
+            None => UntrustedChildSourceHints::Unavailable,
+        }
+    }
     fn live_coverage_normalizer(&self) -> Option<LiveCoverageNormalizer> {
         Some(codex_live_coverage)
+    }
+}
+
+// Live callbacks, explicit import, and terminal recovery select this same
+// registered port. The shared Root driver owns reads and durable writes.
+#[async_trait]
+impl LiveSubagentDiscovery for CodexLiveCapture {
+    fn marks_incomplete_parent_extraction(&self) -> bool {
+        true
+    }
+
+    async fn discover(
+        &self,
+        context: &LiveCaptureContext<'_>,
+        deadline: Instant,
+    ) -> Result<SubagentDiscovery> {
+        self.discover_with_hint(context, &UntrustedChildSourceHints::Absent, deadline)
+            .await
+    }
+
+    async fn discover_with_hint(
+        &self,
+        context: &LiveCaptureContext<'_>,
+        hint: &UntrustedChildSourceHints,
+        deadline: Instant,
+    ) -> Result<SubagentDiscovery> {
+        if !codex_live_child_session(context.provider_session_id) {
+            return Ok(SubagentDiscovery::default());
+        }
+        discover_codex_subagent_contents_live(context, hint, deadline).await
+    }
+
+    async fn discover_stored(
+        &self,
+        context: &LiveCaptureContext<'_>,
+        selection: StoredSubagentSelection<'_>,
+        limits: SubagentDiscoveryLimits,
+        deadline: Instant,
+    ) -> Result<SubagentDiscovery> {
+        discover_codex_subagent_contents_stored(context, selection, limits, deadline).await
+    }
+}
+
+#[async_trait]
+impl LiveTranscriptSource for CodexLiveCapture {
+    async fn locate(
+        &self,
+        context: &LiveCaptureContext<'_>,
+        deadline: Option<Instant>,
+    ) -> Result<Option<PathBuf>, LiveCandidateUnavailable> {
+        super::codex_index::locate_live(context.provider_session_id, deadline).await
+    }
+    async fn read_source(
+        &self,
+        source: std::fs::File,
+        session_id: &str,
+        cwd: &Path,
+        cap: u64,
+        deadline: Instant,
+    ) -> crate::internal::ai::authorized_read::LiveClaudeSourceRead {
+        crate::internal::ai::authorized_read::read_live_codex_source_until(
+            source, cap, session_id, cwd, deadline,
+        )
+        .await
     }
 }
 
@@ -403,6 +824,20 @@ pub(crate) mod test_support {
     }
 
     impl LiveCaptureProvider for ScriptedExportCapture {
+        fn subagent_event_policy(
+            &self,
+            kind: LifecycleEventKind,
+            provider_session_id: &str,
+        ) -> SubagentEventPolicy {
+            self.base.subagent_event_policy(kind, provider_session_id)
+        }
+        fn child_source_hints(
+            &self,
+            envelope: &SessionHookEnvelope,
+            kind: LifecycleEventKind,
+        ) -> UntrustedChildSourceHints {
+            self.base.child_source_hints(envelope, kind)
+        }
         fn missing_host_capture_budget(&self) -> Option<Duration> {
             self.base.missing_host_capture_budget()
         }
@@ -424,6 +859,233 @@ pub(crate) mod test_support {
 
         fn transcript_exporter(&self) -> Option<&dyn LiveTranscriptExporter> {
             Some(self.exporter)
+        }
+    }
+
+    #[cfg(feature = "test-live-agent")]
+    struct ScriptedDiscoveryCapture {
+        base: &'static dyn LiveCaptureProvider,
+        discovery: &'static dyn LiveSubagentDiscovery,
+    }
+
+    #[cfg(feature = "test-live-agent")]
+    impl LiveCaptureProvider for ScriptedDiscoveryCapture {
+        fn subagent_event_policy(
+            &self,
+            kind: LifecycleEventKind,
+            provider_session_id: &str,
+        ) -> SubagentEventPolicy {
+            self.base.subagent_event_policy(kind, provider_session_id)
+        }
+        fn child_source_hints(
+            &self,
+            envelope: &SessionHookEnvelope,
+            kind: LifecycleEventKind,
+        ) -> UntrustedChildSourceHints {
+            self.base.child_source_hints(envelope, kind)
+        }
+        fn missing_host_capture_budget(&self) -> Option<Duration> {
+            self.base.missing_host_capture_budget()
+        }
+        fn live_transcript_candidate(
+            &self,
+            context: &LiveCaptureContext<'_>,
+        ) -> Result<Option<PathBuf>, LiveCandidateUnavailable> {
+            self.base.live_transcript_candidate(context)
+        }
+        fn live_coverage_normalizer(&self) -> Option<LiveCoverageNormalizer> {
+            self.base.live_coverage_normalizer()
+        }
+        fn subagent_discovery(&self) -> Option<&dyn LiveSubagentDiscovery> {
+            Some(self.discovery)
+        }
+        fn transcript_exporter(&self) -> Option<&dyn LiveTranscriptExporter> {
+            self.base.transcript_exporter()
+        }
+    }
+
+    #[cfg(feature = "test-live-agent")]
+    pub(crate) fn with_subagent_discovery(
+        binding: LiveCaptureBinding,
+        discovery: &'static dyn LiveSubagentDiscovery,
+    ) -> LiveCaptureBinding {
+        let live = Box::leak(Box::new(ScriptedDiscoveryCapture {
+            base: binding.live,
+            discovery,
+        }));
+        LiveCaptureBinding { live, ..binding }
+    }
+
+    #[cfg(feature = "test-live-agent")]
+    type BeforeChildDiscovery =
+        std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>>;
+
+    #[cfg(feature = "test-live-agent")]
+    #[derive(Clone)]
+    pub(crate) struct StoredDiscoveryCall {
+        pub(crate) libra_session_id: String,
+        pub(crate) provider_session_id: String,
+        pub(crate) cwd: PathBuf,
+        pub(crate) byte_budget: u64,
+        pub(crate) source_limit: usize,
+        pub(crate) deadline: Instant,
+        pub(crate) recovery_root: bool,
+    }
+
+    /// Local-only typed-port script. Source fixtures and any database fault
+    /// remain owned by the test caller, outside the provider layer.
+    #[cfg(feature = "test-live-agent")]
+    #[derive(Default)]
+    pub(crate) struct ScriptedChildDiscovery {
+        result: std::sync::Mutex<SubagentDiscovery>,
+        calls: std::sync::atomic::AtomicUsize,
+        before: std::sync::Mutex<Option<BeforeChildDiscovery>>,
+        stored_calls: std::sync::Mutex<Vec<StoredDiscoveryCall>>,
+    }
+
+    #[cfg(feature = "test-live-agent")]
+    impl ScriptedChildDiscovery {
+        pub(crate) fn set_result(&self, result: SubagentDiscovery) {
+            *self.result.lock().expect("scripted discovery result") = result;
+        }
+
+        pub(crate) fn calls(&self) -> usize {
+            self.calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        pub(crate) fn stored_calls(&self) -> Vec<StoredDiscoveryCall> {
+            self.stored_calls.lock().expect("stored calls").clone()
+        }
+
+        pub(crate) fn before_next(&self, future: BeforeChildDiscovery) {
+            *self.before.lock().expect("scripted discovery pause") = Some(future);
+        }
+    }
+
+    #[cfg(feature = "test-live-agent")]
+    #[async_trait::async_trait]
+    impl LiveSubagentDiscovery for ScriptedChildDiscovery {
+        async fn discover(
+            &self,
+            _: &LiveCaptureContext<'_>,
+            _: Instant,
+        ) -> Result<SubagentDiscovery> {
+            panic!("scripted child discovery requires the typed hint")
+        }
+
+        async fn discover_with_hint(
+            &self,
+            _: &LiveCaptureContext<'_>,
+            hint: &UntrustedChildSourceHints,
+            deadline: Instant,
+        ) -> Result<SubagentDiscovery> {
+            anyhow::ensure!(
+                Instant::now() < deadline,
+                "scripted discovery deadline expired"
+            );
+            assert!(
+                hint.candidate().is_some(),
+                "typed candidate must reach the port"
+            );
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let before = self.before.lock().expect("scripted discovery pause").take();
+            if let Some(before) = before {
+                before.await?;
+            }
+            Ok(self
+                .result
+                .lock()
+                .expect("scripted discovery result")
+                .clone())
+        }
+        async fn discover_stored(
+            &self,
+            context: &LiveCaptureContext<'_>,
+            selection: StoredSubagentSelection<'_>,
+            limits: SubagentDiscoveryLimits,
+            deadline: Instant,
+        ) -> Result<SubagentDiscovery> {
+            anyhow::ensure!(Instant::now() < deadline, "stored fixture deadline");
+            self.stored_calls
+                .lock()
+                .expect("stored calls")
+                .push(StoredDiscoveryCall {
+                    libra_session_id: context.libra_session_id.to_owned(),
+                    provider_session_id: context.provider_session_id.to_owned(),
+                    cwd: context.verified_cwd.to_path_buf(),
+                    byte_budget: limits.byte_budget,
+                    source_limit: limits.source_limit,
+                    deadline,
+                    recovery_root: matches!(
+                        selection,
+                        StoredSubagentSelection::TerminalRecoveryRoot
+                    ),
+                });
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let before = self.before.lock().expect("stored fixture pause").take();
+            if let Some(before) = before {
+                before.await?;
+            }
+            Ok(self.result.lock().expect("stored fixture result").clone())
+        }
+    }
+
+    #[cfg(feature = "test-live-agent")]
+    pub(crate) mod child_hint_recording {
+        use std::sync::{
+            Mutex,
+            atomic::{AtomicUsize, Ordering},
+        };
+
+        use super::*;
+        #[derive(Default)]
+        pub(crate) struct RecordingDiscovery {
+            pub(crate) calls: Mutex<Vec<(bool, Option<String>)>>,
+        }
+        #[async_trait::async_trait]
+        impl LiveSubagentDiscovery for RecordingDiscovery {
+            async fn discover(
+                &self,
+                _: &LiveCaptureContext<'_>,
+                _: Instant,
+            ) -> Result<SubagentDiscovery> {
+                panic!("typed delegate must receive the hint");
+            }
+            async fn discover_with_hint(
+                &self,
+                _: &LiveCaptureContext<'_>,
+                hint: &UntrustedChildSourceHints,
+                _: Instant,
+            ) -> Result<SubagentDiscovery> {
+                let view = hint.candidate().expect("real policy candidate");
+                self.calls.lock().expect("recorder").push((
+                    view.role == ChildSourceHintRole::CurrentThread,
+                    view.current_or_parent_path
+                        .map(|p| p.to_string_lossy().into_owned()),
+                ));
+                Ok(SubagentDiscovery::default())
+            }
+        }
+        #[derive(Default)]
+        pub(crate) struct LegacyDiscovery(AtomicUsize);
+        impl LegacyDiscovery {
+            pub(crate) fn calls(&self) -> usize {
+                self.0.load(Ordering::SeqCst)
+            }
+        }
+        #[async_trait::async_trait]
+        impl LiveSubagentDiscovery for LegacyDiscovery {
+            async fn discover(
+                &self,
+                _: &LiveCaptureContext<'_>,
+                _: Instant,
+            ) -> Result<SubagentDiscovery> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(SubagentDiscovery {
+                    warning: Some("legacy delegate".into()),
+                    ..SubagentDiscovery::default()
+                })
+            }
         }
     }
 
@@ -628,11 +1290,10 @@ mod tests {
                 None => assert!(!matches!(db, "claude_code" | "codex"), "{db}"),
             }
 
-            // ingest_agent_traces_payload_with_scope: only
-            // `agent_kind == "claude_code"` discovered child transcripts.
+            // Provider-neutral inventory; Codex functional tests stay local.
             assert_eq!(
                 binding.subagent_discovery().is_some(),
-                db == "claude_code",
+                matches!(db, "claude_code" | "codex"),
                 "{db}"
             );
 
@@ -662,5 +1323,291 @@ mod tests {
                 "{db}: a provider must not combine live coverage with a transcript exporter"
             );
         }
+    }
+}
+
+#[cfg(test)]
+#[cfg(feature = "test-live-agent")]
+mod codex_child_hint_local_tests {
+    use super::*;
+    use crate::internal::ai::hooks::providers::codex_provider;
+
+    #[tokio::test]
+    #[ignore = "operator-local Codex acceptance; never run in CI"]
+    async fn codex_stored_default_never_calls_legacy_unbounded_discovery() {
+        let port = test_support::child_hint_recording::LegacyDiscovery::default();
+        let context = LiveCaptureContext {
+            libra_session_id: "stored-capture",
+            provider_session_id: "stored-native",
+            verified_cwd: Path::new("relative-untrusted-cwd"),
+        };
+        for selection in [
+            StoredSubagentSelection::ImportCurrent {
+                parent_locator: Some(Path::new("relative/../untrusted")),
+            },
+            StoredSubagentSelection::TerminalRecoveryRoot,
+        ] {
+            let result = port
+                .discover_stored(
+                    &context,
+                    selection,
+                    SubagentDiscoveryLimits {
+                        byte_budget: 0,
+                        source_limit: 0,
+                    },
+                    Instant::now() - std::time::Duration::from_secs(1),
+                )
+                .await
+                .expect("default must perform zero IO even without a usable budget");
+            assert_eq!(port.calls(), 0);
+            assert_eq!(result.bytes_read, 0);
+            assert!(result.sources.is_empty());
+            assert!(result.incomplete);
+            assert_eq!(
+                result.warning.as_deref(),
+                Some("stored subagent discovery is unavailable")
+            );
+        }
+    }
+
+    fn binding() -> LiveCaptureBinding {
+        LiveCaptureBinding::resolve(codex_provider())
+    }
+
+    #[test]
+    #[ignore = "operator-local Codex acceptance; never run in CI"]
+    fn codex_child_hint_native_terminal_policy_keeps_legacy_parent_only() {
+        let binding = binding();
+        for id in [
+            "123e4567-e89b-12d3-a456-426614174031",
+            "01890f82-182c-4f77-9934-6255f06e8739",
+            "0199f145-9a2f-7847-a6f7-123456789abc",
+            "00000000-0000-0000-0000-000000000000",
+            "0199F145-9A2F-7847-A6F7-123456789ABC",
+            "0199f1459a2f7847a6f7123456789abc",
+            "{0199f145-9a2f-7847-a6f7-123456789abc}",
+            "urn:uuid:0199f145-9a2f-7847-a6f7-123456789abc",
+        ] {
+            assert!(matches!(
+                binding.subagent_event_policy(LifecycleEventKind::SessionEnd, id),
+                SubagentEventPolicy::RequiredTerminal
+            ));
+            assert!(matches!(
+                binding.subagent_event_policy(LifecycleEventKind::SubagentEnd, id),
+                SubagentEventPolicy::Boundary
+            ));
+            assert!(matches!(
+                binding.subagent_event_policy(LifecycleEventKind::TurnEnd, id),
+                SubagentEventPolicy::ParentOnly
+            ));
+        }
+        for id in [
+            "sess-terminal-consumer-contract",
+            "sess-codex-terminal-database-lock",
+            "",
+            "not-a-uuid",
+            " 0199f145-9a2f-7847-a6f7-123456789abc",
+            "0199f145-9a2f-7847-a6f7-123456789abc ",
+        ] {
+            for event in [
+                LifecycleEventKind::SessionEnd,
+                LifecycleEventKind::SubagentEnd,
+            ] {
+                assert!(matches!(
+                    binding.subagent_event_policy(event, id),
+                    SubagentEventPolicy::ParentOnly
+                ));
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "operator-local Codex acceptance; never run in CI"]
+    fn codex_child_hint_incomplete_parent_optin_preserves_existing_providers() {
+        assert!(
+            binding()
+                .subagent_discovery()
+                .unwrap()
+                .marks_incomplete_parent_extraction()
+        );
+        let claude =
+            LiveCaptureBinding::resolve(crate::internal::ai::hooks::providers::claude_provider());
+        assert!(
+            !claude
+                .subagent_discovery()
+                .unwrap()
+                .marks_incomplete_parent_extraction()
+        );
+    }
+
+    fn payload(event: &str, fields: serde_json::Value) -> Vec<u8> {
+        let mut value = serde_json::json!({
+            "hook_event_name":event,"session_id":"root-id","cwd":"/in-process-capture",
+            "transcript_path":"/provider/parent.jsonl"
+        });
+        value
+            .as_object_mut()
+            .expect("fixture object")
+            .extend(fields.as_object().expect("fixture fields").clone());
+        serde_json::to_vec(&value).expect("fixture encoding")
+    }
+    fn hints(fields: serde_json::Value) -> UntrustedChildSourceHints {
+        let envelope: SessionHookEnvelope =
+            serde_json::from_slice(&payload("SubagentStop", fields)).expect("fixture envelope");
+        binding()
+            .child_source_hint_policy()
+            .extract(&envelope, LifecycleEventKind::SubagentEnd)
+    }
+    fn fields() -> serde_json::Value {
+        serde_json::json!({"agent_id":"child-id","agent_transcript_path":"/provider/child.jsonl","turn_id":"turn-id"})
+    }
+
+    #[test]
+    #[ignore = "operator-local Codex acceptance; never run in CI"]
+    fn codex_child_hint_requires_distinct_child_fields_and_string_scalars() {
+        for missing in ["agent_id", "agent_transcript_path"] {
+            let mut f = fields();
+            f.as_object_mut().expect("fields").remove(missing);
+            assert!(matches!(hints(f), UntrustedChildSourceHints::Unavailable));
+        }
+        for key in ["agent_id", "agent_transcript_path", "turn_id"] {
+            for value in [
+                serde_json::json!(12),
+                serde_json::json!(true),
+                serde_json::json!({}),
+                serde_json::Value::Null,
+            ] {
+                let mut f = fields();
+                f[key] = value;
+                assert!(matches!(hints(f), UntrustedChildSourceHints::Unavailable));
+            }
+        }
+        let mut f = fields();
+        f.as_object_mut().expect("fields").remove("turn_id");
+        let h = hints(f);
+        assert!(h.candidate().expect("turn optional").turn_id.is_none());
+    }
+
+    #[test]
+    #[ignore = "operator-local Codex acceptance; never run in CI"]
+    fn codex_child_hint_bounds_do_not_normalize_or_promote_candidate_paths() {
+        for (key, value) in [
+            ("agent_id", "x".repeat(65)),
+            ("turn_id", "bad/identifier".to_owned()),
+            ("agent_transcript_path", "x".repeat(4097)),
+            ("agent_transcript_path", "bad\0path".to_owned()),
+            ("agent_transcript_path", " ".to_owned()),
+        ] {
+            let mut f = fields();
+            f[key] = serde_json::Value::String(value);
+            assert!(matches!(hints(f), UntrustedChildSourceHints::Unavailable));
+        }
+        let mut f = fields();
+        f["agent_transcript_path"] = serde_json::json!("../candidate");
+        let h = hints(f);
+        assert_eq!(
+            h.candidate().expect("candidate, not authority").child_path,
+            Some(Path::new("../candidate"))
+        );
+        let mut envelope: SessionHookEnvelope =
+            serde_json::from_slice(&payload("SubagentStop", fields())).expect("envelope");
+        envelope.transcript_path = None;
+        let hint = binding()
+            .child_source_hint_policy()
+            .extract(&envelope, LifecycleEventKind::SubagentEnd);
+        assert!(
+            hint.candidate()
+                .expect("parent locator optional")
+                .current_or_parent_path
+                .is_none()
+        );
+        envelope.transcript_path = Some("p".repeat(4096));
+        envelope.extra.insert(
+            "agent_transcript_path".into(),
+            serde_json::json!("c".repeat(4096)),
+        );
+        envelope
+            .extra
+            .insert("agent_id".into(), serde_json::json!("a".repeat(64)));
+        envelope
+            .extra
+            .insert("turn_id".into(), serde_json::json!("t".repeat(64)));
+        assert!(
+            binding()
+                .child_source_hint_policy()
+                .extract(&envelope, LifecycleEventKind::SubagentEnd)
+                .candidate()
+                .is_some(),
+            "exact 8320-byte bound must remain usable"
+        );
+        envelope.transcript_path = Some("p".repeat(4097));
+        assert!(matches!(
+            binding()
+                .child_source_hint_policy()
+                .extract(&envelope, LifecycleEventKind::SubagentEnd),
+            UntrustedChildSourceHints::Unavailable
+        ));
+    }
+
+    #[test]
+    #[ignore = "operator-local Codex acceptance; never run in CI"]
+    fn codex_child_hint_parent_events_ignore_unrelated_child_fields() {
+        for kind in [LifecycleEventKind::TurnEnd, LifecycleEventKind::SessionEnd] {
+            let envelope:SessionHookEnvelope=serde_json::from_slice(&payload("Stop",serde_json::json!({
+                "agent_id": {"PRIVATE_UNKNOWN":"discard"}, "agent_transcript_path":42, "turn_id":false
+            }))).expect("envelope");
+            let h = binding()
+                .child_source_hint_policy()
+                .extract(&envelope, kind);
+            let view = h.candidate().expect("current thread candidate");
+            assert!(view.role == ChildSourceHintRole::CurrentThread);
+            assert_eq!(
+                view.current_or_parent_path,
+                Some(Path::new("/provider/parent.jsonl"))
+            );
+            assert!(view.child_id.is_none() && view.child_path.is_none() && view.turn_id.is_none());
+        }
+    }
+
+    #[test]
+    #[ignore = "operator-local Codex acceptance; never run in CI"]
+    fn codex_child_hint_other_kinds_and_providers_remain_neutral() {
+        let envelope: SessionHookEnvelope =
+            serde_json::from_slice(&payload("SubagentStop", fields())).expect("envelope");
+        for kind in [
+            LifecycleEventKind::SessionStart,
+            LifecycleEventKind::TurnStart,
+            LifecycleEventKind::ToolUse,
+            LifecycleEventKind::ModelUpdate,
+            LifecycleEventKind::Compaction,
+            LifecycleEventKind::CompactionCompleted,
+            LifecycleEventKind::PermissionRequest,
+            LifecycleEventKind::SourceEnabled,
+            LifecycleEventKind::SourceDisabled,
+            LifecycleEventKind::SubagentStart,
+            LifecycleEventKind::TurnInterrupted,
+        ] {
+            assert!(matches!(
+                binding()
+                    .child_source_hint_policy()
+                    .extract(&envelope, kind),
+                UntrustedChildSourceHints::Absent
+            ));
+        }
+        let mut others = 0;
+        for kind in AgentKind::all()
+            .iter()
+            .copied()
+            .filter(|kind| *kind != AgentKind::Codex)
+        {
+            let policy =
+                LiveCaptureBinding::for_kind(kind.as_db_str(), kind).child_source_hint_policy();
+            assert!(matches!(
+                policy.extract(&envelope, LifecycleEventKind::SubagentEnd),
+                UntrustedChildSourceHints::Absent
+            ));
+            others += 1;
+        }
+        assert_eq!(others, 7);
     }
 }

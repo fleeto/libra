@@ -5,7 +5,7 @@ Merge one or more targets into the current branch.
 ## Synopsis
 
 ```text
-libra merge [--ff | --ff-only | --no-ff] [-s <strategy>...] [-X <option>...] [--allow-unrelated-histories] [--log[=<n>] | --no-log] [--squash | --no-commit] [-m <msg> | -F <file>] [--into-name <name>] [-e | --edit | --no-edit] [--cleanup=<mode>] [--no-verify] [--stat | -n | --no-stat] [--verify-signatures | --no-verify-signatures] [--rerere-autoupdate | --no-rerere-autoupdate] [-S | --gpg-sign | --no-gpg-sign] [--signoff] [--dry-run] [--autostash | --no-autostash] <branch>...
+libra merge [--ff | --ff-only | --no-ff] [-s <strategy>...] [-X <option>...] [--allow-unrelated-histories] [--log[=<n>] | --no-log] [--squash | --no-commit] [-m <msg> | -F <file>] [--into-name <name>] [-e | --edit | --no-edit] [--cleanup=<mode>] [--no-verify] [-v | --verbose] [--stat | -n | --no-stat] [--verify-signatures | --no-verify-signatures] [--rerere-autoupdate | --no-rerere-autoupdate] [-S | --gpg-sign | --no-gpg-sign] [--signoff] [--dry-run] [--autostash | --no-autostash] <branch>...
 libra merge --continue [-m <msg> | -F <file>] [-e | --edit | --no-edit] [--cleanup=<mode>] [--no-verify] [-S | --gpg-sign | --no-gpg-sign] [--signoff]
 libra merge --abort
 libra merge --quit
@@ -372,6 +372,7 @@ Worktree materialization is mode-aware (plan issues/470 FM-02): files are create
 | `--no-commit` | Perform the merge but stop before committing. A clean octopus state retains every target for `--continue`/`--abort`; an octopus conflict is atomic and creates no state. Single-head conflicts retain their normal resolvable state. |
 | `--no-verify` | Skip all `.libra/hooks` for this merge. With `--continue`, bypass the pending commit/message/post hooks. |
 | `--no-edit` | Accept the resolved merge message without launching an editor (the default). Mutually exclusive with `--edit`. |
+| `-v`, `--verbose` | Be verbose: print the merge result's diffstat (Git passes `-v` to the strategy, which renders it). Equivalent to `--stat`; `--no-stat` still suppresses it. |
 | `--stat` | Show a diffstat of the merge result (the changes between the pre-merge HEAD and the new commit) after the merge completes. Git shows this by default; Libra defaults to no diffstat, so `--stat` opts in. Last-one-wins toggle with `--no-stat`/`-n`. Human output only. |
 | `-n`, `--no-stat` | Do not show a diffstat at the end of the merge (Libra's default). Last-one-wins toggle with `--stat`. |
 | `--no-progress` | Do not show a progress meter. No-op accepted for Git parity: Libra's merge never renders a progress meter. |

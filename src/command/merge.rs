@@ -421,6 +421,13 @@ pub struct MergeArgs {
     #[arg(long = "stat", overrides_with = "no_stat")]
     pub stat: bool,
 
+    /// Be verbose: print the merge's diffstat. Git passes `-v` through to the
+    /// strategy, which renders the merge result's diffstat, so Libra maps it to
+    /// the same output as `--stat` (the two are independent toggles that both
+    /// enable the diffstat).
+    #[arg(short = 'v', long = "verbose")]
+    pub verbose: bool,
+
     /// Do not show a diffstat at the end of the merge (Libra's default).
     /// Accepted for Git parity. Toggle pair with `--stat`; the last one wins.
     #[arg(short = 'n', long = "no-stat", overrides_with = "stat")]
@@ -1118,7 +1125,8 @@ pub async fn execute_safe(args: MergeArgs, output: &OutputConfig) -> CliResult<(
     )
     .await?;
     // `args` is moved into `run_merge`; capture the diffstat opt-in first.
-    let show_stat = args.stat;
+    // `-v` implies the diffstat, but `--no-stat` (Git) still suppresses it.
+    let show_stat = args.stat || (args.verbose && !args.no_stat);
     let result = run_merge(args, output).await.map_err(merge_error_to_cli)?;
     render_merge_output(&result, output)?;
     maybe_print_merge_stat(show_stat, &result, output).await;

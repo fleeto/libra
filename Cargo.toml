@@ -123,6 +123,7 @@ pulldown-cmark = "0.13.3"
 
 # Unicode handling
 unicode-width = "0.2.2"
+unicode-normalization = "=0.1.25"
 syntect = { version = "5.3.0", default-features = false, features = ["default-syntaxes", "regex-fancy"] }
 libvault = { version = "0.4.0", features = ["storage_sqlite"] }
 base64 = "0.22.1"
@@ -198,6 +199,13 @@ required-features = ["test-live-agent"]
 [[test]]
 name = "agent_opencode_bridge_test"
 path = "tests/agent_opencode_bridge_test.rs"
+required-features = ["test-live-agent"]
+
+# User-directed operator-local Codex acceptance. Required feature excludes the
+# target from default CI; every case additionally requires explicit --ignored.
+[[test]]
+name = "codex_capture_local_test"
+path = "tests/codex_capture_local_test.rs"
 required-features = ["test-live-agent"]
 
 [[test]]

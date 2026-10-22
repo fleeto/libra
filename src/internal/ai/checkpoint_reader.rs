@@ -9,7 +9,10 @@ use std::{
     marker::PhantomData,
     path::{Path, PathBuf},
     rc::Rc,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -69,19 +72,38 @@ fn role_proof_error() -> CheckpointReaderError {
 pub(crate) struct CheckpointReadBudget {
     deadline: Option<Instant>,
     cancelled: Arc<dyn Fn() -> bool + Send + Sync>,
+    decoded_allowance: Option<Arc<DecodedReadAllowance>>,
     #[cfg(test)]
     catalog_observer: Option<Arc<dyn Fn(CatalogTestPhase) + Send + Sync>>,
 }
 
+/// Per-call proof accounting, shared only by synchronous role readers under
+/// READ_SCOPE. No budget is refunded when a proof fails after reading bytes.
+struct DecodedReadAllowance {
+    remaining: AtomicUsize,
+    limited: AtomicBool,
+}
+
+impl DecodedReadAllowance {
+    fn charge(&self, count: usize) -> bool {
+        let remaining = self.remaining.load(Ordering::Relaxed);
+        let Some(next) = remaining.checked_sub(count) else {
+            return false;
+        };
+        // Proof traversal is synchronous. A concurrent writer would invalidate
+        // that accounting contract, so refuse rather than exceed the allowance.
+        self.remaining
+            .compare_exchange(remaining, next, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+    }
+}
+
 impl CheckpointReadBudget {
-    #[allow(
-        dead_code,
-        reason = "absolute caller budget is handed to the dependent scoped consumer card"
-    )]
     pub(crate) fn new(deadline: Instant, cancelled: Arc<dyn Fn() -> bool + Send + Sync>) -> Self {
         Self {
             deadline: Some(deadline),
             cancelled,
+            decoded_allowance: None,
             #[cfg(test)]
             catalog_observer: None,
         }
@@ -91,6 +113,7 @@ impl CheckpointReadBudget {
         Self {
             deadline: None,
             cancelled: Arc::new(|| false),
+            decoded_allowance: None,
             #[cfg(test)]
             catalog_observer: None,
         }
@@ -739,14 +762,22 @@ pub(crate) fn read_checkpoint_object_bounded_as(
     cap: u64,
     expected_type: &str,
 ) -> Result<(Vec<u8>, bool), git_internal::errors::GitError> {
-    use std::io::Read as _;
-
-    use git_internal::errors::GitError;
-
-    const HEADER_MAX: usize = 64;
     let oid = hash.to_string();
     // INVARIANT: ObjectHash formats as ASCII hex with at least 40 bytes.
     let file = std::fs::File::open(storage.join("objects").join(&oid[..2]).join(&oid[2..]))?;
+    read_checkpoint_file_bounded_as(file, hash, cap, expected_type)
+}
+
+fn read_checkpoint_file_bounded_as(
+    file: std::fs::File,
+    hash: &ObjectHash,
+    cap: u64,
+    expected_type: &str,
+) -> Result<(Vec<u8>, bool), git_internal::errors::GitError> {
+    use std::io::Read as _;
+
+    use git_internal::errors::GitError;
+    const HEADER_MAX: usize = 64;
     let mut decoder = flate2::read::ZlibDecoder::new(file);
     let mut header = Vec::with_capacity(HEADER_MAX);
     let mut byte = [0u8; 1];
@@ -781,6 +812,27 @@ pub(crate) fn read_checkpoint_object_bounded_as(
     let size = size.parse::<u64>().map_err(|_| {
         GitError::InvalidObjectInfo("checkpoint object header has an invalid size".to_string())
     })?;
+    let proof_allowance = READ_SCOPE.with(|scope| {
+        scope
+            .borrow()
+            .as_ref()
+            .and_then(|budget| budget.decoded_allowance.clone())
+    });
+    let cap = if let Some(allowance) = proof_allowance.as_ref() {
+        let remaining_cap = allowance
+            .remaining
+            .load(Ordering::Relaxed)
+            .saturating_sub(1) as u64;
+        if size > remaining_cap {
+            allowance.limited.store(true, Ordering::Relaxed);
+            return Err(GitError::InvalidObjectInfo(
+                "checkpoint role proof exceeds its shared decoded-byte allowance".to_string(),
+            ));
+        }
+        cap.min(remaining_cap)
+    } else {
+        cap
+    };
     if kind == "tree" && size > cap {
         return Err(GitError::InvalidObjectInfo(
             "checkpoint tree exceeds its remaining decoded-byte budget".to_string(),
@@ -806,6 +858,14 @@ pub(crate) fn read_checkpoint_object_bounded_as(
         let count = limited.read(&mut chunk)?;
         if count == 0 {
             break;
+        }
+        if let Some(allowance) = proof_allowance.as_ref()
+            && !allowance.charge(count)
+        {
+            allowance.limited.store(true, Ordering::Relaxed);
+            return Err(GitError::InvalidObjectInfo(
+                "checkpoint role proof exhausted its shared decoded-byte allowance".to_string(),
+            ));
         }
         content.extend_from_slice(&chunk[..count]);
     }
@@ -971,6 +1031,281 @@ pub(crate) struct CheckpointCatalog {
     checkpoint_id: String,
     tree_oid: ObjectHash,
     kind: HashKind,
+}
+
+/// A metadata role pinned by the same database snapshot as the session view.
+/// Raw OIDs cannot construct this capability outside this owner.
+pub(crate) struct CheckpointMetadataRead {
+    catalog: CheckpointCatalog,
+    metadata_oid: ObjectHash,
+}
+
+impl CheckpointMetadataRead {
+    pub(crate) fn checkpoint_id(&self) -> &str {
+        &self.catalog.checkpoint_id
+    }
+
+    pub(crate) fn read(self, budget: &CheckpointReadBudget) -> ReaderResult<Vec<u8>> {
+        let _scope = SynchronousReadScope::enter(self.catalog.kind, budget)?;
+        let (files, _) = prove_catalog_roles(&self.catalog)?;
+        let index = files
+            .iter()
+            .position(|file| file.rel_path == "metadata.json")
+            .ok_or_else(role_proof_error)?;
+        if files[index].oid != self.metadata_oid.to_string() {
+            return Err(role_proof_error());
+        }
+        let validated = ValidatedCheckpointInput {
+            catalog: self.catalog,
+            files,
+        };
+        // This view reads metadata only; transcript and native artifact bodies
+        // never become fallback sources for missing summary facts.
+        validated.read_ordinary_file(index, 1024 * 1024, budget)
+    }
+}
+
+pub(crate) struct LocalCheckpointSourceFacts {
+    pub metadata: Vec<u8>,
+    pub transcript_bytes: u64,
+    pub declared_transcript_bytes: Option<u64>,
+}
+
+/// One mutable allowance shared by every checkpoint on the selected page.
+/// Packed/missing local objects remain unknown: this reader never hydrates or
+/// resolves a delta through a remote store.
+pub(crate) struct LocalSourceReadAllowance {
+    pub metadata_remaining: usize,
+    pub ordinary_remaining: u64,
+}
+
+impl CheckpointMetadataRead {
+    pub(crate) fn read_local_codex_source(
+        self,
+        budget: &CheckpointReadBudget,
+        allowance: &mut LocalSourceReadAllowance,
+    ) -> ReaderResult<LocalCheckpointSourceFacts> {
+        let _scope = SynchronousReadScope::enter(self.catalog.kind, budget)?;
+        let decoded = Arc::new(DecodedReadAllowance {
+            remaining: AtomicUsize::new(allowance.metadata_remaining),
+            limited: AtomicBool::new(false),
+        });
+        let mut proof_budget = budget.clone();
+        proof_budget.decoded_allowance = Some(decoded.clone());
+        let proof = {
+            let _proof_scope = SynchronousReadScope::enter(self.catalog.kind, &proof_budget)?;
+            prove_catalog_roles_with_size(&self.catalog)
+        };
+        allowance.metadata_remaining = decoded.remaining.load(Ordering::Relaxed);
+        if decoded.limited.load(Ordering::Relaxed) {
+            return Err(CheckpointReaderError::Budget);
+        }
+        let ProvenCheckpointRoles {
+            files,
+            declared_transcript_bytes,
+            transcript_oids,
+            ..
+        } = proof?;
+        let index = files
+            .iter()
+            .position(|file| file.rel_path == "metadata.json")
+            .ok_or_else(role_proof_error)?;
+        if files[index].oid != self.metadata_oid.to_string() {
+            return Err(role_proof_error());
+        }
+        let validated = ValidatedCheckpointInput {
+            catalog: self.catalog,
+            files,
+        };
+        let cap = allowance
+            .metadata_remaining
+            .saturating_sub(1)
+            .min(1024 * 1024);
+        if cap == 0 {
+            return Err(CheckpointReaderError::Budget);
+        }
+        let metadata_oid = self.metadata_oid;
+        let name = metadata_oid.to_string();
+        // INVARIANT: an ObjectHash has at least 40 ASCII hex characters.
+        let file = std::fs::File::open(
+            validated
+                .catalog
+                .storage
+                .join("objects")
+                .join(&name[..2])
+                .join(&name[2..]),
+        )
+        .map_err(|_| CheckpointReaderError::ObjectIntegrity)?;
+        // Reserve the oversize sentinel as well. Failed reads keep their
+        // reservation, so hostile metadata cannot reset the page allowance.
+        let reserved = cap + 1;
+        allowance.metadata_remaining -= reserved;
+        #[cfg(test)]
+        let _phase = OrdinaryReadPhase::enter();
+        let result = read_checkpoint_file_bounded_as(file, &metadata_oid, cap as u64, "blob");
+        budget.check()?;
+        let (metadata, truncated) = result.map_err(|_| CheckpointReaderError::ObjectIntegrity)?;
+        if truncated {
+            return Err(CheckpointReaderError::Budget);
+        }
+        allowance.metadata_remaining += reserved - metadata.len();
+        let mut transcript_bytes = 0u64;
+        for oid in transcript_oids {
+            budget.check()?;
+            transcript_bytes = transcript_bytes
+                .checked_add(stream_local_ordinary_blob(
+                    &validated.catalog.storage,
+                    &oid,
+                    budget,
+                    &mut allowance.ordinary_remaining,
+                )?)
+                .ok_or(CheckpointReaderError::Budget)?;
+        }
+        budget.check()?;
+        Ok(LocalCheckpointSourceFacts {
+            metadata,
+            transcript_bytes,
+            declared_transcript_bytes,
+        })
+    }
+}
+
+fn stream_local_ordinary_blob(
+    storage: &Path,
+    oid: &ObjectHash,
+    budget: &CheckpointReadBudget,
+    remaining: &mut u64,
+) -> ReaderResult<u64> {
+    use std::io::Read;
+    budget.check()?;
+    let name = oid.to_string();
+    // INVARIANT: ObjectHash produces ASCII hex of at least 40 bytes.
+    let file = std::fs::File::open(storage.join("objects").join(&name[..2]).join(&name[2..]))
+        .map_err(|_| CheckpointReaderError::ObjectIntegrity)?;
+    let mut decoder = flate2::read::ZlibDecoder::new(file);
+    let mut header = Vec::with_capacity(64);
+    let mut byte = [0u8; 1];
+    loop {
+        budget.check()?;
+        if decoder
+            .read(&mut byte)
+            .map_err(|_| CheckpointReaderError::ObjectIntegrity)?
+            != 1
+        {
+            return Err(CheckpointReaderError::ObjectIntegrity);
+        }
+        if byte[0] == 0 {
+            break;
+        }
+        if header.len() == 64 {
+            return Err(CheckpointReaderError::ObjectIntegrity);
+        }
+        header.push(byte[0]);
+    }
+    let text = std::str::from_utf8(&header).map_err(|_| CheckpointReaderError::ObjectIntegrity)?;
+    let size = text
+        .strip_prefix("blob ")
+        .and_then(|size| size.parse::<u64>().ok())
+        .ok_or(CheckpointReaderError::ObjectIntegrity)?;
+    if text != format!("blob {size}") {
+        return Err(CheckpointReaderError::ObjectIntegrity);
+    }
+    let cap = (*remaining).min(16 * 1024 * 1024);
+    if size > cap {
+        return Err(CheckpointReaderError::Budget);
+    }
+    #[cfg(test)]
+    CHECKPOINT_BODY_READS.with(|reads| reads.borrow_mut().push(name.clone()));
+    #[cfg(test)]
+    CHECKPOINT_ORDINARY_READS.with(|reads| reads.borrow_mut().push(name));
+    let mut hash = git_internal::utils::HashAlgorithm::new_for_kind(oid.kind());
+    hash.update(&header);
+    hash.update(&[0]);
+    let mut decoded = 0u64;
+    let mut chunk = [0u8; 16 * 1024];
+    loop {
+        budget.check()?;
+        let available = cap
+            .saturating_sub(decoded)
+            .saturating_add(1)
+            .min(chunk.len() as u64) as usize;
+        let count = decoder
+            .read(&mut chunk[..available])
+            .map_err(|_| CheckpointReaderError::ObjectIntegrity)?;
+        if count == 0 {
+            break;
+        }
+        let count_u64 = count as u64;
+        *remaining = remaining.saturating_sub(count_u64);
+        decoded = decoded
+            .checked_add(count_u64)
+            .ok_or(CheckpointReaderError::Budget)?;
+        if decoded > cap {
+            return Err(CheckpointReaderError::Budget);
+        }
+        hash.update(&chunk[..count]);
+    }
+    budget.check()?;
+    if decoded != size || hash.finalize_object_hash() != *oid {
+        return Err(CheckpointReaderError::ObjectIntegrity);
+    }
+    Ok(decoded)
+}
+
+/// Pin the existing checkpoint-list ordering in the session's read snapshot.
+/// No new connection, repository initialization, or mutable cache is involved.
+pub(crate) async fn latest_session_metadata_in_snapshot(
+    txn: &sea_orm::DatabaseTransaction,
+    storage: &Path,
+    session_id: &str,
+    budget: &CheckpointReadBudget,
+) -> ReaderResult<Option<CheckpointMetadataRead>> {
+    use sea_orm::{ConnectionTrait, Statement};
+    budget.check()?;
+    let row = txn.query_one_raw(Statement::from_sql_and_values(
+        txn.get_database_backend(),
+        "SELECT substr(c.checkpoint_id,1,129) AS checkpoint_id, substr(c.tree_oid,1,66) AS tree_oid, substr(c.metadata_blob_oid,1,66) AS metadata_oid, \
+         (SELECT substr(value,1,17) FROM config_kv WHERE key='core.objectformat' ORDER BY id DESC LIMIT 1) AS format, \
+         (SELECT encrypted FROM config_kv WHERE key='core.objectformat' ORDER BY id DESC LIMIT 1) AS encrypted \
+         FROM agent_checkpoint c WHERE c.session_id=? AND c.scope='committed' ORDER BY c.created_at DESC,c.checkpoint_id DESC LIMIT 1",
+        [session_id.into()],
+    )).await.map_err(|_| CheckpointReaderError::CatalogUnavailable)?;
+    budget.check()?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let checkpoint_id: String = row
+        .try_get_by("checkpoint_id")
+        .map_err(|_| role_proof_error())?;
+    validate_checkpoint_id(&checkpoint_id)?;
+    let format: Option<String> = row
+        .try_get_by("format")
+        .map_err(|_| CheckpointReaderError::UnknownLayout)?;
+    let encrypted: Option<i64> = row
+        .try_get_by("encrypted")
+        .map_err(|_| CheckpointReaderError::UnknownLayout)?;
+    if encrypted.is_some_and(|value| value != 0) {
+        return Err(CheckpointReaderError::UnknownLayout);
+    }
+    let kind = match format {
+        Some(format) => crate::internal::object_format::parse_config_value(&format)
+            .map_err(|_| CheckpointReaderError::UnknownLayout)?,
+        None => HashKind::Sha1,
+    };
+    let oid = |column| -> ReaderResult<ObjectHash> {
+        let value: String = row.try_get_by(column).map_err(|_| role_proof_error())?;
+        crate::internal::object_format::parse_hex_for_kind(kind, &value)
+            .map_err(|_| CheckpointReaderError::ObjectIntegrity)
+    };
+    Ok(Some(CheckpointMetadataRead {
+        metadata_oid: oid("metadata_oid")?,
+        catalog: CheckpointCatalog {
+            storage: storage.to_path_buf(),
+            checkpoint_id,
+            tree_oid: oid("tree_oid")?,
+            kind,
+        },
+    }))
 }
 
 /// Load a catalog row using one connection and one absolute query deadline.
@@ -1240,6 +1575,20 @@ fn prove_catalog_roles(
     Vec<crate::internal::ai::checkpoint_input::CheckpointInputFile>,
     std::collections::BTreeMap<String, String>,
 )> {
+    let roles = prove_catalog_roles_with_size(catalog)?;
+    Ok((roles.files, roles.artifacts))
+}
+
+struct ProvenCheckpointRoles {
+    files: Vec<crate::internal::ai::checkpoint_input::CheckpointInputFile>,
+    artifacts: std::collections::BTreeMap<String, String>,
+    transcript_oids: Vec<ObjectHash>,
+    declared_transcript_bytes: Option<u64>,
+}
+
+fn prove_catalog_roles_with_size(
+    catalog: &CheckpointCatalog,
+) -> ReaderResult<ProvenCheckpointRoles> {
     let root = read_tree_object(&catalog.storage, &catalog.tree_oid.to_string())
         .map_err(|_| CheckpointReaderError::ObjectIntegrity)?;
     let wrapped = subtree(&catalog.storage, &root, "checkpoint")
@@ -1252,18 +1601,31 @@ fn prove_catalog_roles(
     let artifacts = reasoning_artifact_tree_oids(&catalog.storage, &inner)?;
     let ordinary = checkpoint_plain_files(&catalog.storage, &inner, &artifacts)?;
     let manifest = checkpoint_plain_manifest(&catalog.storage, &inner, &artifacts, &ordinary)?;
-    let metadata = match manifest.as_ref() {
-        Some(manifest) => {
-            checkpoint_transcript_oids(&catalog.storage, &inner, manifest, &artifacts)?;
-            reasoning_artifact_metadata(manifest)?
-        }
-        None => Vec::new(),
+    let (transcript_oids, metadata) = match manifest.as_ref() {
+        Some(manifest) => (
+            checkpoint_transcript_oids(&catalog.storage, &inner, manifest, &artifacts)?,
+            reasoning_artifact_metadata(manifest)?,
+        ),
+        None => (Vec::new(), Vec::new()),
     };
     let proven_artifacts = metadata
         .into_iter()
         .map(|entry| (entry.path, entry.oid))
         .collect::<std::collections::BTreeMap<_, _>>();
-    Ok((ordinary, proven_artifacts))
+    // The import snapshot describes the full source before turn normalization.
+    // The manifest alone declares this checkpoint's stored transcript length.
+    let declared = manifest
+        .as_ref()
+        .and_then(|manifest| manifest.get("entries"))
+        .and_then(|entries| entries.get("transcript"))
+        .and_then(|entry| entry.get("byte_len"))
+        .and_then(serde_json::Value::as_u64);
+    Ok(ProvenCheckpointRoles {
+        files: ordinary,
+        artifacts: proven_artifacts,
+        transcript_oids,
+        declared_transcript_bytes: declared,
+    })
 }
 
 /// Prove the entire ordinary path→OID map in the named wrapped checkpoint,
@@ -1760,10 +2122,245 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "test-live-agent")]
+    #[test]
+    #[ignore = "operator-local Codex acceptance; never run in CI"]
+    fn codex_reconcile_stream_checks_local_identity_type_and_cumulative_allowance() {
+        let tmp = TempDir::new().unwrap();
+        let first = rg03_blob(tmp.path(), b"one ordinary source");
+        let second = rg03_blob(tmp.path(), b"another ordinary source");
+        let bound = budget();
+        let _different_tls = SynchronousReadScope::enter(HashKind::Sha256, &bound).unwrap();
+        let mut remaining = 40;
+        assert_eq!(
+            stream_local_ordinary_blob(tmp.path(), &first, &bound, &mut remaining).unwrap(),
+            19
+        );
+        assert_eq!(remaining, 21);
+        assert!(matches!(
+            stream_local_ordinary_blob(tmp.path(), &second, &bound, &mut remaining),
+            Err(CheckpointReaderError::Budget)
+        ));
+        // An unreadable object cannot hydrate or reset the caller's allowance.
+        let missing = tmp
+            .path()
+            .join("objects")
+            .join(&first.to_string()[..2])
+            .join(&first.to_string()[2..]);
+        std::fs::remove_file(missing).unwrap();
+        let after = remaining;
+        assert!(stream_local_ordinary_blob(tmp.path(), &first, &bound, &mut remaining).is_err());
+        assert_eq!(remaining, after);
+        let tree_payload = rg03_blob(tmp.path(), b"tree payload");
+        let empty_tree = rg03_tree(
+            tmp.path(),
+            vec![TreeItem::new(
+                TreeItemMode::Blob,
+                tree_payload,
+                "file".into(),
+            )],
+        );
+        assert!(matches!(
+            stream_local_ordinary_blob(tmp.path(), &empty_tree, &bound, &mut remaining),
+            Err(CheckpointReaderError::ObjectIntegrity)
+        ));
+    }
+
+    #[cfg(feature = "test-live-agent")]
+    #[test]
+    #[ignore = "operator-local Codex acceptance; never run in CI"]
+    fn codex_reconcile_stream_rejects_changed_blob_and_expired_budget() {
+        let tmp = TempDir::new().unwrap();
+        let original = rg03_blob(tmp.path(), b"saved original");
+        let alternate = rg03_blob(tmp.path(), b"tampered different");
+        let path = |oid: ObjectHash| {
+            let id = oid.to_string();
+            tmp.path().join("objects").join(&id[..2]).join(&id[2..])
+        };
+        std::fs::copy(path(alternate), path(original)).unwrap();
+        let mut remaining = 1024;
+        assert!(matches!(
+            stream_local_ordinary_blob(tmp.path(), &original, &budget(), &mut remaining),
+            Err(CheckpointReaderError::ObjectIntegrity)
+        ));
+        assert_eq!(remaining, 1024 - b"tampered different".len() as u64);
+        let expired = CheckpointReadBudget::new(Instant::now(), Arc::new(|| false));
+        assert!(matches!(
+            stream_local_ordinary_blob(tmp.path(), &original, &expired, &mut remaining),
+            Err(CheckpointReaderError::Budget)
+        ));
+    }
+
+    #[cfg(feature = "test-live-agent")]
+    #[test]
+    #[ignore = "operator-local Codex acceptance; never run in CI"]
+    fn codex_reconcile_manifest_length_and_missing_metadata_use_local_facts() {
+        let mut expected_missing_remaining = None;
+        for (declared, remove_metadata, chunked) in [
+            (6u64, false, false),
+            (7, false, false),
+            (6, true, false),
+            (6, false, true),
+            (7, false, true),
+        ] {
+            let tmp = TempDir::new().unwrap();
+            let source = rg03_blob(tmp.path(), if chunked { b"sou" } else { b"source" });
+            let metadata = rg03_blob(tmp.path(), b"{}");
+            let mut items = vec![TreeItem::new(
+                TreeItemMode::Blob,
+                source,
+                if chunked {
+                    "piece-alpha"
+                } else {
+                    "codex.jsonl"
+                }
+                .into(),
+            )];
+            let transcript_entry = if chunked {
+                let second = rg03_blob(tmp.path(), b"rce");
+                items.push(TreeItem::new(
+                    TreeItemMode::Blob,
+                    second,
+                    "piece-beta".into(),
+                ));
+                serde_json::json!({"chunked":true,"byte_len":declared,"parts":[
+                    {"path":"transcript/piece-alpha","oid":source.to_string(),"byte_len":3},
+                    {"path":"transcript/piece-beta","oid":second.to_string(),"byte_len":3}
+                ]})
+            } else {
+                serde_json::json!({"path":"transcript/codex.jsonl","oid":source.to_string(),"byte_len":declared})
+            };
+            let manifest = rg03_blob(
+                tmp.path(),
+                &serde_json::to_vec(&serde_json::json!({
+                    "schema_version":1,"entries":{
+                        "metadata":{"path":"metadata.json","oid":metadata.to_string()},
+                        "transcript":transcript_entry
+                    },"reasoning_artifacts":[]
+                }))
+                .unwrap(),
+            );
+            let transcript = rg03_tree(tmp.path(), items);
+            let inner = rg03_tree(
+                tmp.path(),
+                vec![
+                    TreeItem::new(TreeItemMode::Blob, metadata, "metadata.json".into()),
+                    TreeItem::new(TreeItemMode::Blob, manifest, "manifest.json".into()),
+                    TreeItem::new(TreeItemMode::Tree, transcript, "transcript".into()),
+                ],
+            );
+            let root = wrap(tmp.path(), inner);
+            let capability = CheckpointMetadataRead {
+                catalog: catalog(tmp.path(), &root),
+                metadata_oid: metadata,
+            };
+            let mut allowance = LocalSourceReadAllowance {
+                metadata_remaining: 8 * 1024 * 1024,
+                ordinary_remaining: 64 * 1024 * 1024,
+            };
+            if remove_metadata {
+                let name = metadata.to_string();
+                std::fs::remove_file(tmp.path().join("objects").join(&name[..2]).join(&name[2..]))
+                    .unwrap();
+                assert!(
+                    capability
+                        .read_local_codex_source(&budget(), &mut allowance)
+                        .is_err()
+                );
+                assert_eq!(
+                    allowance.metadata_remaining,
+                    expected_missing_remaining.unwrap(),
+                    "role proofs are charged, but an absent metadata object consumes no payload"
+                );
+            } else {
+                let facts = capability
+                    .read_local_codex_source(&budget(), &mut allowance)
+                    .unwrap();
+                assert!(allowance.metadata_remaining < 8 * 1024 * 1024 - facts.metadata.len());
+                if declared == 6 {
+                    expected_missing_remaining =
+                        Some(allowance.metadata_remaining + facts.metadata.len());
+                    let mut tiny = LocalSourceReadAllowance {
+                        metadata_remaining: 1,
+                        ordinary_remaining: 1024,
+                    };
+                    let retry = CheckpointMetadataRead {
+                        catalog: catalog(tmp.path(), &root),
+                        metadata_oid: metadata,
+                    };
+                    assert!(matches!(
+                        retry.read_local_codex_source(&budget(), &mut tiny),
+                        Err(CheckpointReaderError::Budget)
+                    ));
+                    assert_eq!(
+                        tiny.metadata_remaining, 1,
+                        "refused proof bodies did not consume payload"
+                    );
+                    let before_second = allowance.metadata_remaining;
+                    let retry = CheckpointMetadataRead {
+                        catalog: catalog(tmp.path(), &root),
+                        metadata_oid: metadata,
+                    };
+                    retry
+                        .read_local_codex_source(&budget(), &mut allowance)
+                        .unwrap();
+                    assert_eq!(
+                        8 * 1024 * 1024 - before_second,
+                        before_second - allowance.metadata_remaining,
+                        "a second proof shares the same allowance and never resets it"
+                    );
+                }
+                assert_eq!(facts.transcript_bytes, 6);
+                assert_eq!(facts.declared_transcript_bytes, Some(declared));
+                assert_eq!(
+                    facts.declared_transcript_bytes == Some(facts.transcript_bytes),
+                    declared == 6
+                );
+            }
+        }
+    }
+
     fn reset_reads() {
         rg03_clear_body_reads();
         CHECKPOINT_ORDINARY_READS.with(|reads| reads.borrow_mut().clear());
         CHECKPOINT_PROOF_READS.with(|reads| reads.borrow_mut().clear());
+    }
+
+    #[cfg(feature = "test-live-agent")]
+    #[test]
+    #[ignore = "operator-local Codex acceptance; never run in CI"]
+    fn codex_session_summary_metadata_capability_never_reads_transcript_or_artifacts() {
+        let tmp = TempDir::new().unwrap();
+        let storage = tmp.path();
+        let (root, artifact) = rg03_read_fixture(storage, "valid", false);
+        let metadata = rg03_blob(storage, b"{}");
+        let transcript = rg03_blob(storage, b"ordinary transcript");
+        let (files, _) = prove_catalog_roles(&catalog(storage, &root)).unwrap();
+        assert!(files.iter().any(|f| f.oid == transcript.to_string()));
+        reset_reads();
+        let capability = CheckpointMetadataRead {
+            catalog: catalog(storage, &root),
+            metadata_oid: metadata,
+        };
+        assert_eq!(capability.read(&budget()).unwrap(), b"{}");
+        CHECKPOINT_ORDINARY_READS.with(|reads| {
+            assert_eq!(*reads.borrow(), vec![metadata.to_string()]);
+        });
+        CHECKPOINT_BODY_READS.with(|reads| {
+            assert!(!reads.borrow().contains(&transcript.to_string()));
+            assert!(!reads.borrow().contains(&artifact.to_string()));
+        });
+        let capability = CheckpointMetadataRead {
+            catalog: catalog(storage, &root),
+            metadata_oid: metadata,
+        };
+        let expired = CheckpointReadBudget::new(Instant::now(), Arc::new(|| false));
+        reset_reads();
+        assert!(matches!(
+            capability.read(&expired),
+            Err(CheckpointReaderError::Budget)
+        ));
+        CHECKPOINT_BODY_READS.with(|reads| assert!(reads.borrow().is_empty()));
     }
 
     fn assert_only_proof_reads(artifact: ObjectHash) {

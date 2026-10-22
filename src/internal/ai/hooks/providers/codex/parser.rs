@@ -4,8 +4,8 @@
 //! `hooks.json` / `[[hooks.<EventName>]]`) to a canonical
 //! [`LifecycleEventKind`] and delegates field extraction to
 //! [`build_lifecycle_event`]. The upstream event taxonomy was verified
-//! against codex-cli 0.142.4 (probed live 2026-07-05, cross-checked against
-//! source `rust-v0.142.4` @57d253ad).
+//! against fixed codex-cli 0.162.1 source @092d3acd (CX-00). Historical
+//! 0.142.4 trust vectors remain separate from this event taxonomy.
 //!
 //! Event mapping:
 //!
@@ -15,6 +15,7 @@
 //! | `UserPromptSubmit`  | TurnStart             | payload adds `prompt` + `turn_id`       |
 //! | `PreToolUse`        | ToolUse               | payload adds `tool_name`, `tool_input`, `tool_use_id` |
 //! | `PostToolUse`       | ToolUse               | additionally carries `tool_response`    |
+//! | `Interrupt`         | TurnInterrupted       | no normal completion or session teardown |
 //! | `Stop`              | TurnEnd               | payload adds `stop_hook_active`, `last_assistant_message` |
 //! | `PreCompact`        | Compaction            |                                         |
 //! | `PostCompact`       | CompactionCompleted   |                                         |
@@ -43,7 +44,7 @@ use super::super::super::lifecycle::{
 };
 
 /// Every Codex hook event name [`parse_codex_hook_event`] understands
-/// (the full current 11-event taxonomy). Keep in sync with its
+/// (the full current 12-event taxonomy). Keep in sync with its
 /// `match`; the dispatcher consults this via `HookProvider::recognizes_event`
 /// to skip-and-log names a newer Codex emits that this build does not know
 /// yet (AG-19).
@@ -58,6 +59,7 @@ pub(super) const CODEX_HOOK_EVENT_NAMES: &[&str] = &[
     "SubagentStart",
     "SubagentStop",
     "Stop",
+    "Interrupt",
     "SessionEnd",
 ];
 
@@ -81,6 +83,7 @@ pub(super) fn parse_codex_hook_event(
         "UserPromptSubmit" => LifecycleEventKind::TurnStart,
         "PreToolUse" | "PostToolUse" => LifecycleEventKind::ToolUse,
         "Stop" => LifecycleEventKind::TurnEnd,
+        "Interrupt" => LifecycleEventKind::TurnInterrupted,
         "PreCompact" => LifecycleEventKind::Compaction,
         "PostCompact" => LifecycleEventKind::CompactionCompleted,
         "SubagentStart" => LifecycleEventKind::SubagentStart,
@@ -159,7 +162,9 @@ mod tests {
 
     // Scenario: the recognizes_event name table and the parser match stay in
     // sync — every advertised name must parse.
+    #[cfg(feature = "test-live-agent")]
     #[test]
+    #[ignore = "operator-local Codex acceptance; never run in CI"]
     fn every_advertised_event_name_parses() {
         let envelope = canonical_envelope();
         for name in CODEX_HOOK_EVENT_NAMES {
@@ -168,7 +173,7 @@ mod tests {
                 "advertised event '{name}' must parse",
             );
         }
-        assert_eq!(CODEX_HOOK_EVENT_NAMES.len(), 11);
+        assert_eq!(CODEX_HOOK_EVENT_NAMES.len(), 12);
     }
 
     // Scenario: Codex's Claude Code-compatible payload keys flow through

@@ -189,6 +189,10 @@ pub const CODE_AGENT_TABLE_OWNERSHIP: &[(&str, ConfigOwner)] = &[
         ConfigOwner::RepositoryWithWorkspaceSessionScope,
     ),
     (
+        "agent_session_commit",
+        ConfigOwner::RepositoryWithWorkspaceSessionScope,
+    ),
+    (
         "agent_export_job",
         ConfigOwner::RepositoryWithWorkspaceSessionScope,
     ),

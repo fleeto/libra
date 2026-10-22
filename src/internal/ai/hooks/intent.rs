@@ -465,7 +465,9 @@ fn transition_phase(session: &mut SessionState, event_kind: LifecycleEventKind) 
         // AG-19: nested sub-agent activity keeps the parent session live.
         | LifecycleEventKind::SubagentStart
         | LifecycleEventKind::SubagentEnd => SessionPhase::Active,
-        LifecycleEventKind::ModelUpdate => current_phase.unwrap_or(SessionPhase::Active),
+        LifecycleEventKind::ModelUpdate | LifecycleEventKind::TurnInterrupted => {
+            current_phase.unwrap_or(SessionPhase::Active)
+        }
     };
 
     session.metadata.insert(
@@ -930,5 +932,19 @@ mod tests {
         assert_eq!(payload["summary"]["message_count"], json!(2));
         assert_eq!(payload["summary"]["user_message_count"], json!(1));
         assert_eq!(payload["transcript"]["path"], Value::Null);
+    }
+}
+
+#[cfg(all(test, feature = "test-live-agent"))]
+#[test]
+#[ignore = "operator-local Codex acceptance; never run in CI"]
+fn cx01_interrupt_keeps_legacy_phase_without_reviving_ended_state() {
+    for phase in ["active", "stopped", "ended"] {
+        let mut session = SessionState::new("/tmp");
+        session
+            .metadata
+            .insert(SESSION_PHASE_METADATA_KEY.into(), json!(phase));
+        transition_phase(&mut session, LifecycleEventKind::TurnInterrupted);
+        assert_eq!(session.metadata[SESSION_PHASE_METADATA_KEY], json!(phase));
     }
 }

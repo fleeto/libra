@@ -2,7 +2,24 @@
 
 ## Unreleased
 
-## [0.30.85] — 2026-10-21
+## [0.30.85] — 2026-10-22
+
+### Integrated upstream changes
+
+- On Unix, `libra agent enable --agent codex` now writes trust entries for
+  Codex's canonical `hooks.json` path and removes older Libra-owned entries
+  under the configured `$CODEX_HOME` alias. This fixes silently skipped hooks
+  on macOS when `/tmp` resolves to `/private/tmp`; rerun `enable` after upgrading.
+- Codex import includes archived rollouts using session timestamps. Repository-local
+  session-to-commit links and opt-in `agent.commit_trailer` association are included;
+  association is disabled by default and does not imply cloud backup or durable
+  post-commit repair. See the agent and commit command references.
+- `merge -v` / `--verbose` prints the merge diffstat; `--no-stat` takes precedence.
+
+
+Any registry mutation by v0.30.85 writes schema 4, even without named entries.
+After that, use v0.30.85 or a subsequent release containing its registry and
+identity-safety fixes for worktree commands; the earlier v0.31.0 predates those fixes.
 
 ### Branch force safety and upstream 0.30.84 additions
 
@@ -84,7 +101,7 @@
   without changing the caller's dirty files or index. Keep empty-directory
   cleanup inside the mount's root.
 - The first repository open by a managed-worktree-capable binary records
-  capability 4. Libra 0.30.66 and older refuse that repository. Published
+  the `2026101902` worktree-layout capability marker. Libra 0.30.66 and older refuse that repository. Published
   binaries with this capability begin at v0.30.67 on Linux and v0.30.68 on
   macOS/Windows. Existing worktree directories are not moved.
 - On Windows, opening the repository database after `init` accepts canonical

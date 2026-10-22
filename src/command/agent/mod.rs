@@ -317,6 +317,14 @@ pub struct DoctorArgs {
     /// objects are unrecoverable are reported for manual action.
     #[arg(long)]
     pub repair: bool,
+    /// Reconcile recent Codex sessions using an explicit, closed and consistent
+    /// SQLite backup. Never opens a live provider database or imports data.
+    #[arg(long, value_name = "PATH", conflicts_with = "repair")]
+    pub codex_index_backup: Option<std::path::PathBuf>,
+
+    /// Page of at most 1000 scope-filtered candidates from the provided backup.
+    #[arg(long, value_name = "N", requires = "codex_index_backup", value_parser = clap::value_parser!(u16).range(1..=10))]
+    pub codex_index_page: Option<u16>,
 }
 
 #[derive(Args, Debug)]

@@ -1639,21 +1639,28 @@ pub(crate) async fn pending_candidates(
     txn: &DatabaseTransaction,
     repo_id: &str,
 ) -> Result<PendingCandidateBatch> {
-    pending_candidates_inner(txn, repo_id, None).await
+    pending_candidates_inner(txn, repo_id, None, 5).await
 }
 
 pub(crate) async fn pending_candidates_for_scope(
     txn: &DatabaseTransaction,
     scope: &CaptureScope,
 ) -> Result<PendingCandidateBatch> {
-    pending_candidates_inner(txn, &scope.repo_id, Some(scope)).await
+    // A child-pending header can remain indefinitely. See every bounded
+    // same-scope candidate, while the caller still limits actual attempts.
+    pending_candidates_inner(txn, &scope.repo_id, Some(scope), MAX_ARTIFACTS).await
 }
 
 async fn pending_candidates_inner(
     txn: &DatabaseTransaction,
     repo_id: &str,
     scope: Option<&CaptureScope>,
+    selection_limit: usize,
 ) -> Result<PendingCandidateBatch> {
+    ensure!(
+        (1..=MAX_ARTIFACTS).contains(&selection_limit),
+        "capture recovery selection limit is invalid; rerun libra agent doctor"
+    );
     txn.execute_unprepared("UPDATE metadata_kv SET updated_at = updated_at WHERE 0")
         .await
         .context("cannot lock capture recovery queue; run `libra agent doctor`")?;
@@ -1715,10 +1722,12 @@ async fn pending_candidates_inner(
           CASE WHEN p.value_type = 'text' AND typeof(p.value) = 'text'
             AND length(CAST(p.value AS BLOB)) <= 8192 THEN CAST(p.value AS BLOB) ELSE NULL END AS bounded_value,
           {scope_valid_expr} AS scope_valid
-          {ELIGIBLE_HEADERS} {scope_filter} ORDER BY p.key LIMIT 5"),
+          {ELIGIBLE_HEADERS} {scope_filter} ORDER BY p.key LIMIT {selection_limit}"),
         selection_values,
     )).await.context("cannot read capture recovery candidates; run `libra agent doctor`")?;
-    let window_full = rows.len() == 5;
+    // Conservatively preserve deferred handling if a candidate disappears
+    // while another full snapshot is installed concurrently.
+    let window_full = rows.len() == selection_limit;
     let mut headers = Vec::with_capacity(rows.len());
     let mut invalid = Vec::new();
     for (index, row) in rows.into_iter().enumerate() {
@@ -5606,6 +5615,59 @@ pub(crate) mod tests {
         assert_eq!(
             retained.try_get_by::<i64, _>("v").unwrap(),
             "canary-private-bad-value".len() as i64 * 65536
+        );
+    }
+
+    #[cfg(feature = "test-live-agent")]
+    #[tokio::test]
+    #[ignore = "operator-local Codex acceptance; never run in CI"]
+    async fn codex_child_recover_scoped_queue_exposes_sixteenth_without_mutating_headers() {
+        let (_dir, conn) = queue_fixture().await;
+        let scope = queue_scope("opaque-repository");
+        for index in 1..=MAX_ARTIFACTS {
+            put_queue_header(
+                &conn,
+                MetadataScope::AgentCapturePending,
+                &queue_header(index),
+            )
+            .await;
+        }
+        let txn = crate::internal::db::begin_write_transaction(&conn)
+            .await
+            .unwrap();
+        let before = txn.query_all_raw(Statement::from_string(
+            txn.get_database_backend(),
+            "SELECT key,value FROM metadata_kv WHERE scope='agent_capture_pending' ORDER BY key".to_owned(),
+        )).await.unwrap().into_iter().map(|row| (
+            row.try_get_by::<String,_>("key").unwrap(),
+            row.try_get_by::<String,_>("value").unwrap(),
+        )).collect::<Vec<_>>();
+        let batch = pending_candidates_for_scope(&txn, &scope).await.unwrap();
+        assert_eq!(batch.quarantined, 0);
+        assert_eq!(
+            batch.headers.len(),
+            MAX_ARTIFACTS,
+            "long-lived child-pending heads must not hide the last bounded candidate"
+        );
+        assert_eq!(
+            batch.headers.last().unwrap().binding.checkpoint_id,
+            queue_header(MAX_ARTIFACTS).binding.checkpoint_id
+        );
+        assert!(
+            batch.window_full,
+            "full snapshots retain conservative race handling"
+        );
+        txn.commit().await.unwrap();
+        let after = conn.query_all_raw(Statement::from_string(
+            conn.get_database_backend(),
+            "SELECT key,value FROM metadata_kv WHERE scope='agent_capture_pending' ORDER BY key".to_owned(),
+        )).await.unwrap().into_iter().map(|row| (
+            row.try_get_by::<String,_>("key").unwrap(),
+            row.try_get_by::<String,_>("value").unwrap(),
+        )).collect::<Vec<_>>();
+        assert_eq!(
+            after, before,
+            "selection is not replay or quarantine authority"
         );
     }
 

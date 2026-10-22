@@ -17,6 +17,66 @@ const AGENT_DEV_DOC: &str = include_str!("../../docs/development/commands/agent.
 const COMPATIBILITY_DOC: &str = include_str!("../../COMPATIBILITY.md");
 const ERROR_CODES_DOC: &str = include_str!("../../docs/error-codes.md");
 
+#[cfg(feature = "test-live-agent")]
+#[test]
+#[ignore = "local-only Codex association documentation; never run in CI"]
+fn cx23_commit_association_docs_match_current_local_contract() {
+    let commit_en = include_str!("../../docs/commands/commit.md");
+    let commit_zh = include_str!("../../docs/commands/zh-CN/commit.md");
+    let commit_dev = include_str!("../../docs/development/commands/commit.md");
+    for (label, document) in [
+        ("agent EN", AGENT_CMD_DOC_EN),
+        ("agent zh-CN", AGENT_CMD_DOC_ZH),
+        ("agent development", AGENT_DEV_DOC),
+        ("tracing", AGENT_DOC),
+        ("commit EN", commit_en),
+        ("commit zh-CN", commit_zh),
+        ("commit development", commit_dev),
+        ("compatibility", COMPATIBILITY_DOC),
+    ] {
+        for required in [
+            "agent.commit_trailer",
+            "--no-agent-trailer",
+            "Libra-Agent-Session",
+            "64",
+            "CX-27",
+        ] {
+            assert_contains(document, label, required);
+        }
+    }
+    for (label, document) in [("commit EN", commit_en), ("commit zh-CN", commit_zh)] {
+        for required in ["commit-msg", "lease", "amend", "cloud", "LBR-WARN-001"] {
+            assert_contains(document, label, required);
+        }
+    }
+    for required in [
+        "defaults to `false`",
+        "If this opt-in setting cannot be read",
+        "unreadable opt-in configuration warning follows the same exit-code rule",
+        "after the `commit-msg` hook",
+        "before optional",
+        "more than 64 eligible sessions aborts",
+        "Dry runs neither link nor preview",
+        "CX-27 and is not available yet",
+        "does not back it up",
+    ] {
+        assert_contains(commit_en, "commit EN", required);
+    }
+    for required in [
+        "默认 `false`",
+        "若无法读取此 opt-in 配置",
+        "读取 opt-in 配置失败产生的警告也遵循同一退出码规则",
+        "`commit-msg` hook 结束后",
+        "签名前",
+        "超过 64 个",
+        "预演既不写关联，也不预览",
+        "CX-27",
+        "不备份",
+    ] {
+        assert_contains(commit_zh, "commit zh-CN", required);
+    }
+}
+
 #[test]
 fn native_attestation_launch_docs_disclose_isolation_and_limits() {
     for (label, document) in [

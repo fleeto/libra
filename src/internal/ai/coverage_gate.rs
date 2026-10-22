@@ -628,6 +628,7 @@ pub(crate) struct ReasoningCoverageInput<'a> {
     candidate: Option<&'a ReasoningCoveragePlan>,
     versioned_candidate: Option<&'a NativeVersionedReasoningCoveragePlan>,
     reader: Option<ReasoningIdentityReadContext>,
+    ordinary_retention_observations: bool,
 }
 
 impl<'a> ReasoningCoverageInput<'a> {
@@ -636,6 +637,7 @@ impl<'a> ReasoningCoverageInput<'a> {
             candidate: Some(candidate),
             versioned_candidate: None,
             reader: Some(candidate.read_context()),
+            ordinary_retention_observations: false,
         }
     }
 
@@ -645,6 +647,7 @@ impl<'a> ReasoningCoverageInput<'a> {
             candidate: None,
             versioned_candidate: Some(candidate),
             reader: Some(candidate.read_context()),
+            ordinary_retention_observations: false,
         }
     }
 
@@ -653,7 +656,12 @@ impl<'a> ReasoningCoverageInput<'a> {
             candidate: None,
             versioned_candidate: None,
             reader: Some(reader.clone()),
+            ordinary_retention_observations: false,
         }
+    }
+    pub(crate) fn with_ordinary_retention_observations(mut self) -> Self {
+        self.ordinary_retention_observations = true;
+        self
     }
 }
 
@@ -2636,7 +2644,13 @@ async fn reserve_turn_claims_with_reasoning_inner_versioned(
                     break;
                 }
                 AttemptOutcome::SkipCovered(committed) => {
-                    if matches!(admission, CoverageVersionAdmission::Runtime { .. }) {
+                    // Import retention can append ordinary source values
+                    // without advancing a covered semantic claim. Carry the
+                    // same gate-issued observation so both its marker bind
+                    // and final transaction can revalidate the incumbent.
+                    if matches!(admission, CoverageVersionAdmission::Runtime { .. })
+                        || (source_channel == "import" && reasoning.ordinary_retention_observations)
+                    {
                         outcome
                             .covered
                             .push(CommittedTurnClaimSnapshot::from_committed(

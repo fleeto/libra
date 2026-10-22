@@ -191,6 +191,11 @@ fn cov2_production_typed_path_uses_v2_api() {
         (
             "src/internal/ai/agent_import.rs",
             "import_prepared_with_subagent_discovery_and_runtime",
+            &["import_prepared_with_retention"][..],
+        ),
+        (
+            "src/internal/ai/agent_import.rs",
+            "import_prepared_with_retention",
             &["partition_reasoning_for_import"][..],
         ),
     ] {

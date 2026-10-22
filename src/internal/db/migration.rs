@@ -2438,6 +2438,13 @@ pub(crate) fn repository_migrations() -> Vec<Migration> {
             up: include_str!("../../../sql/migrations/2026101902_worktree_layout_capability.sql"),
             down: None,
         },
+        // CX-11: repository-only, forward-only session-to-commit links.
+        Migration {
+            version: 2026102201,
+            name: "agent_session_commit",
+            up: include_str!("../../../sql/migrations/2026102201_agent_session_commit.sql"),
+            down: None,
+        },
     ]
 }
 
@@ -2899,12 +2906,9 @@ mod tests {
         // `builtin_migrations()` so silent registry regressions surface
         // here in addition to `tests/db_migration_test.rs`.
         let runner = builtin_runner().expect("CEX-12.5 builtin registry must build clean");
-        assert_eq!(runner.len(), 70);
+        assert_eq!(runner.len(), 71);
         assert!(!runner.is_empty());
-        assert_eq!(
-            runner.max_registered_version(),
-            Some(WORKTREE_LAYOUT_CAPABILITY_VERSION)
-        );
+        assert_eq!(runner.max_registered_version(), Some(2026102201));
     }
 
     #[test]

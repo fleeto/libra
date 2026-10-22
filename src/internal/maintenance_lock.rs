@@ -366,6 +366,103 @@ impl MaintenanceLock {
         Ok(Self { key })
     }
 
+    /// Acquire a publication hold without blocking the executor on contention.
+    /// `None` means the original acquisition deadline elapsed. A successful
+    /// guard still has the existing RAII lifetime, not an expiring lease.
+    /// File open/metadata use the existing local filesystem contract.
+    /// Requires a Tokio runtime with timers enabled.
+    #[cfg_attr(
+        not(all(test, feature = "test-live-agent")),
+        allow(
+            dead_code,
+            reason = "CX32 qualifies this opt-in API before its CX09 consumer"
+        )
+    )]
+    pub(crate) async fn shared_until(storage: &Path, deadline: Instant) -> CliResult<Option<Self>> {
+        if Instant::now() >= deadline {
+            return Ok(None);
+        }
+        let path = lock_path(storage);
+        let file = open_lock_file(&path)?;
+        let key = lock_key(&path, &file)?;
+        loop {
+            if Instant::now() >= deadline {
+                return Ok(None);
+            }
+            // The named file may have changed during the preceding sleep.
+            // Recheck before joining a process hold, not only after an OS try.
+            if lock_key(&path, &file)? != key {
+                return Err(CliError::fatal(format!(
+                    "the repository maintenance lock '{}' changed while it was being acquired",
+                    path.display()
+                ))
+                .with_stable_code(StableErrorCode::ConflictOperationBlocked)
+                .with_hint("retry with no other Libra command running; if this persists, inspect what is replacing the lock file"));
+            }
+            {
+                let held = locks();
+                ensure_not_replaced_under_a_live_hold(&held, &path, &key)?;
+            }
+            // A different task may have acquired a compatible process hold
+            // since our previous poll. Exclusive holds retain the original
+            // process-reentry semantics; this is not task-level exclusion.
+            if let Some(guard) = Self::join_existing(&key) {
+                return Ok((Instant::now() < deadline).then_some(guard));
+            }
+            match file.try_lock_shared() {
+                Ok(()) => {
+                    if lock_key(&path, &file)? != key {
+                        return Err(CliError::fatal(format!(
+                            "the repository maintenance lock '{}' changed while it was being acquired",
+                            path.display()
+                        ))
+                        .with_stable_code(StableErrorCode::ConflictOperationBlocked)
+                        .with_hint("retry with no other Libra command running; if this persists, inspect what is replacing the lock file"));
+                    }
+                    // Register-or-join is one short atomic map operation.
+                    // Keep filesystem work and every await outside this guard.
+                    let mut held = locks();
+                    ensure_not_replaced_under_a_live_hold(&held, &path, &key)?;
+                    if Instant::now() >= deadline {
+                        return Ok(None);
+                    }
+                    if let Some(state) = held.get_mut(&key) {
+                        state.depth += 1;
+                        // `file` is the losing fd; dropping it cannot release
+                        // the descriptor retained by this existing state.
+                    } else {
+                        held.insert(
+                            dup_lock_key(&key),
+                            RepoState {
+                                mode: Mode::Shared,
+                                depth: 1,
+                                path,
+                                _file: file,
+                            },
+                        );
+                    }
+                    drop(held);
+                    let guard = Self { key };
+                    return Ok((Instant::now() < deadline).then_some(guard));
+                }
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    if remaining.is_zero() {
+                        return Ok(None);
+                    }
+                    tokio::time::sleep(remaining.min(Duration::from_millis(10))).await;
+                }
+                Err(std::fs::TryLockError::Error(error)) => {
+                    return Err(CliError::fatal(format!(
+                        "failed to take the repository maintenance lock '{}' for reading: {error}",
+                        path.display()
+                    ))
+                    .with_stable_code(StableErrorCode::IoWriteFailed));
+                }
+            }
+        }
+    }
+
     /// Join a hold this process already has, if any.
     fn join_existing(key: &LockKey) -> Option<Self> {
         let mut locks = locks();
@@ -676,5 +773,356 @@ mod tests {
         drop(first);
         let second = MaintenanceLock::try_exclusive(dir.path(), Duration::from_millis(50)).unwrap();
         assert!(second.is_some(), "the lock was released");
+    }
+}
+
+#[cfg(all(test, feature = "test-live-agent"))]
+mod capture_maintenance_local_tests {
+    use std::{
+        future::Future,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+            mpsc,
+        },
+        thread,
+    };
+
+    use super::*;
+
+    type Job<T> = (thread::JoinHandle<()>, mpsc::Receiver<thread::Result<T>>);
+
+    fn launch<T: Send + 'static>(future: impl Future<Output = T> + Send + 'static) -> Job<T> {
+        let (send, receive) = mpsc::sync_channel(1);
+        let worker = thread::spawn(move || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("local lock runtime")
+                    .block_on(future)
+            }));
+            let _ = send.send(result);
+        });
+        (worker, receive)
+    }
+
+    // The parent owns the raw blocker so even a broken synchronous flock can
+    // be released before joining the worker. A Tokio-only timer could freeze
+    // on that same executor and would not catch this regression.
+    fn finish<T: Send + 'static>((worker, receive): Job<T>, blocker: Option<File>) -> T {
+        let result = receive.recv_timeout(Duration::from_secs(3));
+        if let Some(blocker) = blocker {
+            let _ = blocker.unlock();
+        }
+        let result = match result {
+            Ok(result) => result,
+            Err(_) => {
+                if receive.recv_timeout(Duration::from_secs(3)).is_ok() {
+                    worker.join().expect("join unblocked failed worker");
+                    panic!("maintenance wait blocked its executor beyond the watchdog");
+                }
+                // A broken global-mutex implementation must fail this local
+                // test process rather than strand every remaining test.
+                eprintln!(
+                    "maintenance watchdog could not reap its worker after releasing the owned blocker"
+                );
+                std::process::abort();
+            }
+        };
+        worker.join().expect("join local lock worker");
+        match result {
+            Ok(value) => value,
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
+    }
+
+    fn raw_exclusive(storage: &Path) -> File {
+        let file = open_lock_file(&lock_path(storage)).expect("owned lock file");
+        file.lock().expect("raw unregistered exclusive holder");
+        file
+    }
+
+    fn depth(storage: &Path) -> usize {
+        let path = lock_path(storage);
+        let file = open_lock_file(&path).expect("owned lock file");
+        let key = lock_key(&path, &file).expect("owned lock key");
+        locks().get(&key).map_or(0, |state| state.depth)
+    }
+
+    #[test]
+    #[ignore = "operator-local capture prerequisite; never run in CI"]
+    fn capture_maintenance_expired_wait_has_no_filesystem_side_effect() {
+        let directory = tempfile::tempdir().expect("owned root");
+        let storage = directory.path().join("not-created");
+        finish(
+            launch(async move {
+                assert!(
+                    MaintenanceLock::shared_until(&storage, Instant::now())
+                        .await
+                        .unwrap()
+                        .is_none()
+                );
+                assert!(!storage.exists());
+            }),
+            None,
+        );
+    }
+
+    #[test]
+    #[ignore = "operator-local capture prerequisite; never run in CI"]
+    fn capture_maintenance_contention_deadline_keeps_current_thread_ticker_running() {
+        let directory = tempfile::tempdir().expect("owned root");
+        let storage = directory.path().to_path_buf();
+        let blocker = raw_exclusive(&storage);
+        finish(
+            launch(async move {
+                let ticks = Arc::new(AtomicUsize::new(0));
+                let ticker_ticks = ticks.clone();
+                let ticker = tokio::spawn(async move {
+                    loop {
+                        ticker_ticks.fetch_add(1, Ordering::SeqCst);
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+                });
+                let started = Instant::now();
+                let outcome =
+                    MaintenanceLock::shared_until(&storage, started + Duration::from_millis(120))
+                        .await
+                        .unwrap();
+                ticker.abort();
+                let _ = ticker.await;
+                assert!(outcome.is_none());
+                assert!(started.elapsed() < Duration::from_secs(1));
+                assert!(
+                    ticks.load(Ordering::SeqCst) >= 2,
+                    "waiting must yield its executor"
+                );
+                assert_eq!(depth(&storage), 0);
+            }),
+            Some(blocker),
+        );
+    }
+
+    #[test]
+    #[ignore = "operator-local capture prerequisite; never run in CI"]
+    fn capture_maintenance_released_blocker_allows_shared_guard() {
+        let directory = tempfile::tempdir().expect("owned root");
+        let storage = directory.path().to_path_buf();
+        let blocker = raw_exclusive(&storage);
+        let target = storage.clone();
+        let (ready_send, ready_receive) = mpsc::sync_channel(1);
+        let job = launch(async move {
+            let notifier = tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                let _ = ready_send.send(());
+            });
+            let result =
+                MaintenanceLock::shared_until(&target, Instant::now() + Duration::from_secs(2))
+                    .await
+                    .unwrap();
+            notifier.await.expect("waiter notification settled");
+            result
+        });
+        if ready_receive.recv_timeout(Duration::from_secs(1)).is_err() {
+            drop(blocker);
+            let _ = finish(job, None);
+            panic!("contended acquisition did not yield its current-thread runtime");
+        }
+        drop(blocker);
+        let guard = finish(job, None).expect("released before original deadline");
+        assert_eq!(depth(&storage), 1);
+        let probe = open_lock_file(&lock_path(&storage)).expect("exclusive probe");
+        assert!(matches!(
+            probe.try_lock(),
+            Err(std::fs::TryLockError::WouldBlock)
+        ));
+        drop(guard);
+        assert_eq!(depth(&storage), 0);
+        probe.try_lock().expect("last guard releases the OS lock");
+    }
+
+    #[test]
+    #[ignore = "operator-local capture prerequisite; never run in CI"]
+    fn capture_maintenance_cancelled_wait_leaves_no_hold() {
+        let directory = tempfile::tempdir().expect("owned root");
+        let storage = directory.path().to_path_buf();
+        let blocker = raw_exclusive(&storage);
+        let target = storage.clone();
+        finish(
+            launch(async move {
+                let mut pending = Box::pin(MaintenanceLock::shared_until(
+                    &target,
+                    Instant::now() + Duration::from_secs(2),
+                ));
+                tokio::select! {
+                    _ = &mut pending => panic!("raw exclusive holder remains live"),
+                    _ = tokio::time::sleep(Duration::from_millis(60)) => {}
+                }
+                drop(pending);
+                assert_eq!(depth(&target), 0);
+            }),
+            Some(blocker),
+        );
+        let probe = open_lock_file(&lock_path(&storage)).expect("exclusive probe");
+        probe.try_lock().expect("cancelled waiter retained no lock");
+    }
+
+    #[test]
+    #[ignore = "operator-local capture prerequisite; never run in CI"]
+    fn capture_maintenance_reentrant_exclusive_depth_and_expired_join() {
+        let directory = tempfile::tempdir().expect("owned root");
+        let storage = directory.path().to_path_buf();
+        let exclusive = MaintenanceLock::try_exclusive(&storage, Duration::ZERO)
+            .unwrap()
+            .expect("first owner");
+        let target = storage.clone();
+        let shared = finish(
+            launch(async move {
+                let shared =
+                    MaintenanceLock::shared_until(&target, Instant::now() + Duration::from_secs(1))
+                        .await
+                        .unwrap()
+                        .expect("join process exclusive hold");
+                assert_eq!(depth(&target), 2);
+                assert!(
+                    MaintenanceLock::shared_until(&target, Instant::now())
+                        .await
+                        .unwrap()
+                        .is_none()
+                );
+                assert_eq!(depth(&target), 2, "expired join has no depth side effect");
+                shared
+            }),
+            None,
+        );
+        drop(exclusive);
+        assert_eq!(depth(&storage), 1);
+        let probe = open_lock_file(&lock_path(&storage)).expect("exclusive probe");
+        assert!(matches!(
+            probe.try_lock(),
+            Err(std::fs::TryLockError::WouldBlock)
+        ));
+        drop(shared);
+        probe.try_lock().expect("both guards released");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "operator-local capture prerequisite; never run in CI"]
+    fn capture_maintenance_wait_rejects_replaced_inode() {
+        let directory = tempfile::tempdir().expect("owned root");
+        let storage = directory.path().to_path_buf();
+        let blocker = raw_exclusive(&storage);
+        let target = storage.clone();
+        let (ready_send, ready_receive) = mpsc::sync_channel(1);
+        let job = launch(async move {
+            let notifier = tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                let _ = ready_send.send(());
+            });
+            let result =
+                MaintenanceLock::shared_until(&target, Instant::now() + Duration::from_secs(2))
+                    .await;
+            notifier.await.expect("waiter notification settled");
+            result
+        });
+        if ready_receive.recv_timeout(Duration::from_secs(1)).is_err() {
+            drop(blocker);
+            let _ = finish(job, None);
+            panic!("replacement fixture must observe the waiter yield before renaming");
+        }
+        let replacement = directory.path().join("replacement-lock");
+        File::create(&replacement).expect("owned replacement");
+        std::fs::rename(&replacement, lock_path(&storage)).expect("replace named lock");
+        drop(blocker);
+        assert!(
+            finish(job, None).is_err(),
+            "an old inode cannot guard the new pathname"
+        );
+        assert_eq!(depth(&storage), 0);
+    }
+
+    #[test]
+    #[ignore = "operator-local capture prerequisite; never run in CI"]
+    #[cfg(unix)]
+    fn capture_maintenance_wait_rechecks_name_before_joining_a_new_process_hold() {
+        let directory = tempfile::tempdir().expect("owned root");
+        let storage = directory.path().to_path_buf();
+        let blocker = raw_exclusive(&storage);
+        let child_blocker = blocker
+            .try_clone()
+            .expect("watchdog can release this fd group");
+        finish(
+            launch(async move {
+                let mut pending = Box::pin(MaintenanceLock::shared_until(
+                    &storage,
+                    Instant::now() + Duration::from_secs(2),
+                ));
+                // Poll once without completing the acquisition: its original
+                // open/key must now name the raw-exclusive-held inode.
+                std::future::poll_fn(|context| match pending.as_mut().poll(context) {
+                    std::task::Poll::Pending => std::task::Poll::Ready(()),
+                    std::task::Poll::Ready(_) => panic!("exclusive blocker must force a wait"),
+                })
+                .await;
+                let old_key = lock_key(&lock_path(&storage), &child_blocker).expect("old identity");
+                child_blocker.unlock().expect("release the raw blocker");
+                let old_hold =
+                    MaintenanceLock::shared(&storage).expect("new process hold on old inode");
+                let replacement = storage.join("replacement-before-join");
+                File::create(&replacement).expect("owned replacement");
+                std::fs::rename(replacement, lock_path(&storage)).expect("replace named inode");
+                assert!(
+                    pending.await.is_err(),
+                    "joining the cached old key must not bypass the name check"
+                );
+                assert_eq!(locks().get(&old_key).map(|held| held.depth), Some(1));
+                drop(old_hold);
+                assert!(!locks().contains_key(&old_key));
+            }),
+            Some(blocker),
+        );
+    }
+
+    #[test]
+    #[ignore = "operator-local capture prerequisite; never run in CI"]
+    fn capture_maintenance_two_threads_keep_one_accurate_guard_count() {
+        let directory = tempfile::tempdir().expect("owned root");
+        let storage = directory.path().to_path_buf();
+        for _ in 0..8 {
+            let ready = Arc::new(AtomicBool::new(false));
+            let start = |target: PathBuf, ready: Arc<AtomicBool>| {
+                launch(async move {
+                    while !ready.load(Ordering::SeqCst) {
+                        tokio::task::yield_now().await;
+                    }
+                    MaintenanceLock::shared_until(&target, Instant::now() + Duration::from_secs(1))
+                        .await
+                        .unwrap()
+                        .expect("compatible shared acquisition")
+                })
+            };
+            let first = start(storage.clone(), ready.clone());
+            let second = start(storage.clone(), ready.clone());
+            ready.store(true, Ordering::SeqCst);
+            let first = finish(first, None);
+            let second = finish(second, None);
+            assert_eq!(depth(&storage), 2);
+            let probe = open_lock_file(&lock_path(&storage)).expect("raw exclusive probe");
+            assert!(matches!(
+                probe.try_lock(),
+                Err(std::fs::TryLockError::WouldBlock)
+            ));
+            drop(first);
+            assert_eq!(depth(&storage), 1);
+            assert!(
+                matches!(probe.try_lock(), Err(std::fs::TryLockError::WouldBlock)),
+                "dropping one fd must not unlock the surviving guard"
+            );
+            drop(second);
+            assert_eq!(depth(&storage), 0);
+            probe.try_lock().expect("both live guards released");
+        }
     }
 }

@@ -7,8 +7,8 @@ Manage multiple working trees attached to this repository.
 ## Synopsis
 
 ```
-libra worktree add <NAME> [TARGET] [--path <PATH>] [--force]
-libra worktree list [--porcelain]
+libra worktree add <NAME> [TARGET] [--path <PATH>] [-d | --detach] [-b <NEW_BRANCH>] [--force]
+libra worktree list [--porcelain] [--schema-version 2]
 libra worktree lock <NAME> [--reason <text>]
 libra worktree lock --path <PATH> [--reason <text>]
 libra worktree unlock (<NAME> | --path <PATH>)
@@ -52,7 +52,7 @@ Create a named linked worktree in the managed directory, or at an explicit desti
 | `<NAME>` | Stable worktree name. By default creates `.libra/worktree/linked/<NAME>` under common storage. |
 | `[TARGET]` | Optional branch or commit-ish. An existing branch is checked out attached, unless any worktree already has it checked out. Other commit-ish targets create a detached worktree. Unknown targets fail before creation; remote-branch guessing and `--track`/`--no-track` are not supported. |
 | `--path <PATH>` | Complete external destination, absolute or relative to the caller. It must be absent or an empty directory unless `--force` is used in a standard build; it cannot be a symlink and may enter common storage only at this name's own managed default. It is not a parent directory to which the name is appended. |
-| `--detach` | Detach HEAD even when `TARGET` names a branch. |
+| `-d, --detach` | Detach HEAD even when `TARGET` names a branch. |
 | `-b, --new-branch <NEW_BRANCH>` | Create and check out a new branch at `TARGET`, or the source HEAD when omitted. An existing branch is refused; a later creation failure rolls the new branch back. |
 | `-f, --force` | In standard builds, reuse a non-empty destination directory. Check its contents before using this option. In `worktree-fuse` builds, `--force` is unavailable and `-f` means `--fuse`. |
 
@@ -103,6 +103,9 @@ line (each worktree owns its HEAD), an optional `name <name>` line after the
 with a blank line between worktrees. A worktree whose HEAD cannot be resolved
 (a legacy shared-`.libra` layout, or a missing/corrupt scope) omits the HEAD
 lines rather than being mislabeled with another worktree's commit.
+
+`--schema-version 2` selects the current structured JSON schema, which is also
+the default. Version 2 is the only supported value; older version 1 is refused.
 
 ```bash
 libra worktree list
@@ -342,7 +345,7 @@ Libra keeps it by default (as a frozen, re-attachable detached worktree) to
 prevent accidental data loss; `--delete-dir` restores Git-like semantics
 opt-in. See
 [`COMPATIBILITY.md`](../../COMPATIBILITY.md) and
-[`compatibility/worktree-surface.md`](../development/commands/worktree.md)
+[`development/commands/worktree.md`](../development/commands/worktree.md)
 for the rationale.
 
 ### Subcommand: `umount`

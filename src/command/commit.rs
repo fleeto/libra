@@ -23,7 +23,7 @@ use git_internal::{
     },
 };
 use ring::digest::{Context as DigestContext, SHA256};
-use sea_orm::ConnectionTrait;
+use sea_orm::{ConnectionTrait, DbConn, Statement};
 use serde::Serialize;
 
 use crate::{
@@ -131,6 +131,11 @@ pub struct CommitArgs {
     /// add signed-off-by line at the end of the commit message
     #[arg(short = 's', long)]
     pub signoff: bool,
+
+    /// Omit automatically generated agent-session trailers for this commit.
+    /// Explicitly enabled local session association remains active.
+    #[arg(long)]
+    pub no_agent_trailer: bool,
 
     /// Skip only the pre-commit hook for this invocation. Message and advisory
     /// repository hooks still run.
@@ -400,6 +405,9 @@ pub enum CommitError {
     #[error("{0}")]
     InvalidConfig(String),
 
+    #[error("cannot prepare agent session association: {0}")]
+    AgentAssociation(String),
+
     #[error(transparent)]
     HistoryConfig(#[from] crate::command::history_config::HistoryConfigError),
 
@@ -460,6 +468,9 @@ impl From<CommitError> for CliError {
             CommitError::InvalidConfig(..) => CliError::command_usage(error.to_string())
                 .with_stable_code(StableErrorCode::CliInvalidArguments)
                 .with_hint("fix the offending value with 'libra config <key> <value>'"),
+            CommitError::AgentAssociation(..) => CliError::fatal(error.to_string())
+                .with_stable_code(StableErrorCode::RepoStateInvalid)
+                .with_hint("inspect the repository agent sessions and workspace scope with 'libra agent doctor'"),
             CommitError::HistoryConfig(
                 crate::command::history_config::HistoryConfigError::Read { .. },
             ) => CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::IoReadFailed),
@@ -1116,7 +1127,6 @@ async fn run_commit_with_index(
     } else {
         crate::command::history_config::commit_signing_policy(args.no_gpg_sign).await?
     };
-
     // Dry-run `-a` reaches this function under a task-local isolated index, so
     // every nested status/diff/index consumer observes the preview while the live
     // index remains untouched on success, error, cancellation, or panic.
@@ -1307,6 +1317,11 @@ async fn run_commit_with_index(
             && args.reedit_message.is_none(),
     )
     .await?;
+    // Preserve existing message/diff preflight errors (including `commit -v`)
+    // before checking the new opt-in. A preview still validates the setting,
+    // but opens no agent catalog and emits no automatic trailer.
+    let (agent_trailer_enabled, agent_config_warning) = agent_commit_trailer_enabled().await?;
+    let agent_trailer_enabled = agent_trailer_enabled && !dry_run;
 
     // Create tree
     let tree = create_tree_with_persistence(&index, &storage, "".into(), !dry_run).await?;
@@ -1402,6 +1417,16 @@ async fn run_commit_with_index(
             )
             .await?;
         }
+        let agent_snapshot = if agent_trailer_enabled {
+            Some(snapshot_agent_sessions_for_commit(parents_commit_ids.first(), true).await?)
+        } else {
+            None
+        };
+        if !args.no_agent_trailer
+            && let Some(snapshot) = &agent_snapshot
+        {
+            commit_message = append_agent_session_trailers(&commit_message, &snapshot.session_ids);
+        }
         let mut committer = committer;
         refresh_noop_amend_committer_timestamp(
             &parent_commit,
@@ -1430,21 +1455,24 @@ async fn run_commit_with_index(
                 grandpa_commit_id,
                 &format_commit_msg(&commit_message, None),
             );
-            return Ok(build_commit_output(
-                &commit,
-                &commit_message,
-                &staged_changes,
-                true,
-                is_signoff,
-                if is_conventional && !skip_conventional_check {
-                    Some(true)
-                } else {
-                    None
-                },
-                false,
-                porcelain_text.take(),
-            )
-            .await);
+            return Ok(with_sequence_warnings(
+                build_commit_output(
+                    &commit,
+                    &commit_message,
+                    &staged_changes,
+                    true,
+                    is_signoff,
+                    if is_conventional && !skip_conventional_check {
+                        Some(true)
+                    } else {
+                        None
+                    },
+                    false,
+                    porcelain_text.take(),
+                )
+                .await,
+                agent_config_warning.into_iter().collect(),
+            ));
         }
 
         let gpg_sig = match signing_policy {
@@ -1483,8 +1511,25 @@ async fn run_commit_with_index(
 
         // INVARIANT: persist the commit object before moving HEAD so a crash
         // after ref update never points the branch at a missing object.
-        let sequence_warnings =
+        let mut sequence_warnings =
             persist_commit_and_conclude_stopped(&storage, &commit, &commit_message, output).await?;
+        sequence_warnings.extend(agent_config_warning);
+        if let Some(snapshot) = &agent_snapshot
+            && let Err(error) =
+                crate::internal::ai::history::link_authorized_agent_sessions_to_commit(
+                    &snapshot.conn,
+                    &snapshot.session_ids,
+                    commit.id,
+                    &snapshot.scope,
+                )
+                .await
+        {
+            tracing::warn!(
+                reason = agent_link_failure_reason(&error),
+                "commit completed without local agent association"
+            );
+            sequence_warnings.push("commit completed, but local agent session association failed; inspect it with 'libra agent doctor'".to_string());
+        }
         // Record the change revision only after HEAD has advanced; a failed ref
         // update must not leave a projection for an unreachable commit (the
         // projection is a GC root and would anchor the object forever).
@@ -1542,6 +1587,16 @@ async fn run_commit_with_index(
         )
         .await?;
     }
+    let agent_snapshot = if agent_trailer_enabled {
+        Some(snapshot_agent_sessions_for_commit(parents_commit_ids.first(), false).await?)
+    } else {
+        None
+    };
+    if !args.no_agent_trailer
+        && let Some(snapshot) = &agent_snapshot
+    {
+        commit_message = append_agent_session_trailers(&commit_message, &snapshot.session_ids);
+    }
 
     // Conventional commit validation
     if is_conventional
@@ -1581,7 +1636,10 @@ async fn run_commit_with_index(
             preview.short_id.clear();
             preview.dry_run_preview = true;
         }
-        return Ok(preview);
+        return Ok(with_sequence_warnings(
+            preview,
+            agent_config_warning.into_iter().collect(),
+        ));
     }
 
     let gpg_sig = match signing_policy {
@@ -1620,8 +1678,24 @@ async fn run_commit_with_index(
 
     // INVARIANT: persist the commit object before moving HEAD so a crash after
     // ref update never points the branch at a missing object.
-    let sequence_warnings =
+    let mut sequence_warnings =
         persist_commit_and_conclude_stopped(&storage, &commit, &commit_message, output).await?;
+    sequence_warnings.extend(agent_config_warning);
+    if let Some(snapshot) = &agent_snapshot
+        && let Err(error) = crate::internal::ai::history::link_authorized_agent_sessions_to_commit(
+            &snapshot.conn,
+            &snapshot.session_ids,
+            commit.id,
+            &snapshot.scope,
+        )
+        .await
+    {
+        tracing::warn!(
+            reason = agent_link_failure_reason(&error),
+            "commit completed without local agent association"
+        );
+        sequence_warnings.push("commit completed, but local agent session association failed; inspect it with 'libra agent doctor'".to_string());
+    }
     // Record the change revision only after HEAD has advanced; a failed ref
     // update must not leave a projection for an unreachable commit (the
     // projection is a GC root and would anchor the object forever).
@@ -2173,6 +2247,236 @@ pub(crate) fn append_trailers(message: &str, trailers: &[String]) -> String {
         format!("{trimmed}\n{trailers_block}")
     } else {
         format!("{trimmed}\n\n{trailers_block}")
+    }
+}
+
+struct AgentCommitSnapshot {
+    conn: DbConn,
+    scope: crate::internal::ai::capture_scope::CaptureScope,
+    session_ids: Vec<String>,
+}
+
+fn agent_link_failure_reason(error: &anyhow::Error) -> &'static str {
+    use crate::internal::ai::capture_scope::CaptureFinalCommitAuthorizationError;
+
+    match error.downcast_ref::<CaptureFinalCommitAuthorizationError>() {
+        Some(CaptureFinalCommitAuthorizationError::WorkspaceFenceRejected) => "workspace_lease",
+        Some(CaptureFinalCommitAuthorizationError::DeadlineElapsed) => "deadline",
+        Some(CaptureFinalCommitAuthorizationError::Database(_)) => "database",
+        None if error.downcast_ref::<sea_orm::DbErr>().is_some() => "database",
+        None => "selection_changed_or_limit",
+    }
+}
+
+async fn agent_commit_trailer_enabled() -> Result<(bool, Option<String>), CommitError> {
+    let value = match read_cascaded_config_value(
+        LocalIdentityTarget::CurrentRepo,
+        "agent.commit_trailer",
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(_) => {
+            // This opt-in defaults off. Keep ordinary commits usable when an
+            // unrelated global config store is unavailable, and explicitly
+            // tell the caller that no agent association was attempted.
+            tracing::warn!(reason = "config_unreadable", "agent association disabled");
+            return Ok((
+                false,
+                Some("agent session association was disabled because agent.commit_trailer configuration could not be read; repair the repository or global config store and retry".to_string()),
+            ));
+        }
+    };
+    value
+        .map(|value| {
+            parse_git_config_bool(&value)
+                .map(|enabled| (enabled, None))
+                .ok_or_else(|| {
+                    CommitError::InvalidConfig(format!(
+                        "bad boolean config value '{value}' for 'agent.commit_trailer'"
+                    ))
+                })
+        })
+        .unwrap_or(Ok((false, None)))
+}
+
+/// Freeze only committed, scoped sessions belonging to this repository and
+/// worktree. A session starts at the current parent, or an active session
+/// already linked to that parent can continue across commits.
+async fn snapshot_agent_sessions_for_commit(
+    parent: Option<&ObjectHash>,
+    is_amend: bool,
+) -> Result<AgentCommitSnapshot, CommitError> {
+    let (storage_root, worktree_root, _) = util::try_get_request_paths(None)
+        .map_err(|error| CommitError::AgentAssociation(format!("resolve worktree: {error}")))?;
+    let conn =
+        crate::internal::db::get_db_conn_instance_for_path(&storage_root.join(util::DATABASE))
+            .await
+            .map_err(|error| {
+                CommitError::AgentAssociation(format!("open repository database: {error}"))
+            })?;
+    let scope = crate::internal::ai::capture_scope::CaptureScope::resolve(&conn, &worktree_root)
+        .await
+        .map_err(|error| {
+            CommitError::AgentAssociation(format!("resolve capture scope: {error:#}"))
+        })?;
+    scope
+        .assert_workspace_fence_live(&conn)
+        .await
+        .map_err(|error| {
+            CommitError::AgentAssociation(format!("verify workspace lease: {error:#}"))
+        })?;
+    let parent_oid = parent.map(ToString::to_string);
+    let parent_kind = parent.map(|oid| match oid.kind() {
+        git_internal::hash::HashKind::Sha1 => "sha1",
+        git_internal::hash::HashKind::Sha256 => "sha256",
+        git_internal::hash::HashKind::Blake3 => "blake3",
+    });
+    let rows = conn
+        .query_all_raw(Statement::from_sql_and_values(
+            conn.get_database_backend(),
+            format!(
+                "SELECT s.session_id FROM agent_session s
+                 WHERE {} AND s.state IN ('active', 'condensed', 'stopped')
+                   AND (s.parent_commit IS ? OR
+                        EXISTS (
+                            SELECT 1 FROM agent_session_commit l
+                             WHERE l.session_id = s.session_id
+                               AND l.hash_kind = ? AND l.commit_oid = ?
+                               AND (s.state = 'active' OR ?)))
+                   AND EXISTS (SELECT 1 FROM agent_checkpoint c
+                               WHERE c.session_id = s.session_id AND c.scope = 'committed')
+                 ORDER BY s.session_id LIMIT 65",
+                crate::internal::ai::capture_scope::CaptureScope::matches_existing_sql("s")
+            ),
+            [
+                scope.repo_id.clone().into(),
+                scope.worktree_id.clone().into(),
+                scope.workspace_id.clone().into(),
+                scope.workspace_fence.into(),
+                parent_oid.clone().into(),
+                parent_kind.into(),
+                parent_oid.into(),
+                is_amend.into(),
+            ],
+        ))
+        .await
+        .map_err(|error| {
+            CommitError::AgentAssociation(format!("read scoped agent sessions: {error}"))
+        })?;
+    if rows.len() > 64 {
+        return Err(CommitError::AgentAssociation(
+            "more than 64 eligible sessions; close or inspect old sessions before committing"
+                .to_string(),
+        ));
+    }
+    let session_ids = rows
+        .into_iter()
+        .map(|row| {
+            let session_id: String = row.try_get_by_index(0).map_err(|error| {
+                CommitError::AgentAssociation(format!("decode session ID: {error}"))
+            })?;
+            if session_id.len() > 256
+                || session_id.is_empty()
+                || !session_id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"_-.:".contains(&byte))
+            {
+                return Err(CommitError::AgentAssociation(
+                    "a scoped session ID is not safe for a commit trailer".to_string(),
+                ));
+            }
+            Ok(session_id)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(AgentCommitSnapshot {
+        conn,
+        scope,
+        session_ids,
+    })
+}
+
+fn append_agent_session_trailers(message: &str, session_ids: &[String]) -> String {
+    let existing: HashSet<String> = crate::internal::log::trailer::parse_trailers(message)
+        .into_iter()
+        .filter(|trailer| trailer.key_matches("Libra-Agent-Session"))
+        .map(|trailer| trailer.value)
+        .collect();
+    // A commit-msg hook can append a second trailer paragraph after a
+    // user-provided one. The shared parser deliberately considers only the
+    // final paragraph. Move an earlier matching trailer into that final
+    // block only when everything after it is trailer-shaped. Body text after
+    // a marker disqualifies it and must not suppress the real trailer.
+    let lines: Vec<&str> = message.lines().collect();
+    let final_start = lines
+        .iter()
+        .rposition(|line| !line.trim().is_empty())
+        .and_then(|end| {
+            lines[..end]
+                .iter()
+                .rposition(|line| line.trim().is_empty())
+                .map(|blank| blank + 1)
+        })
+        .unwrap_or(0);
+    let mut moved = HashSet::new();
+    for (index, line) in lines.iter().enumerate() {
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
+        if index >= final_start
+            || !session_ids.iter().any(|id| id == value.trim())
+            || !key
+                .trim_end_matches([' ', '\t'])
+                .eq_ignore_ascii_case("Libra-Agent-Session")
+        {
+            continue;
+        }
+        let start = lines[..index]
+            .iter()
+            .rposition(|prior| prior.trim().is_empty())
+            .map_or(0, |blank| blank + 1);
+        let mut previous_trailer = false;
+        let trailing_paragraphs_are_trailers = lines[start..].iter().all(|tail| {
+            if tail.trim().is_empty() {
+                previous_trailer = false;
+                return true;
+            }
+            if tail.starts_with([' ', '\t']) {
+                return previous_trailer;
+            }
+            let Some((tail_key, _)) = tail.split_once(':') else {
+                return false;
+            };
+            let tail_key = tail_key.trim_end_matches([' ', '\t']);
+            previous_trailer = !tail_key.is_empty()
+                && tail_key
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-');
+            previous_trailer
+        });
+        if start > 0 && trailing_paragraphs_are_trailers {
+            moved.insert(index);
+        }
+    }
+    let cleaned = if moved.is_empty() {
+        message.to_string()
+    } else {
+        lines
+            .iter()
+            .enumerate()
+            .filter_map(|(index, line)| (!moved.contains(&index)).then_some(*line))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let trailers: Vec<String> = session_ids
+        .iter()
+        .filter(|session_id| !existing.contains(session_id.as_str()))
+        .map(|session_id| format!("Libra-Agent-Session: {session_id}"))
+        .collect();
+    if trailers.is_empty() {
+        cleaned
+    } else {
+        append_trailers(&cleaned, &trailers)
     }
 }
 

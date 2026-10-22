@@ -244,6 +244,12 @@ pub trait HookProvider: HookProviderIdentity + Sync {
     fn recognizes_event(&self, _hook_event_name: &str) -> bool {
         false
     }
+    /// Pure compatibility check for events forwarded through a shared CLI verb.
+    /// The default keeps exact canonical kinds; providers may declare a closed
+    /// mapping without changing the parsed event's actual lifecycle semantics.
+    fn accepts_event_kind(&self, expected: LifecycleEventKind, actual: LifecycleEventKind) -> bool {
+        expected == actual
+    }
     /// Whether this frame may enter the capture coordinator.
     ///
     /// The default admits every recognized frame. Claude's MessageDisplay

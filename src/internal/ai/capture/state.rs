@@ -160,6 +160,13 @@ pub(crate) fn reduce_lifecycle(
             StoppedAtMutation::Preserve,
             CheckpointWrite::Committed,
         ),
+        LifecycleEventKind::TurnInterrupted => (
+            input
+                .current
+                .map_or(CapturePhase::Active, |state| state.phase),
+            StoppedAtMutation::Preserve,
+            CheckpointWrite::None,
+        ),
         LifecycleEventKind::SubagentStart | LifecycleEventKind::SubagentEnd => (
             CapturePhase::Active,
             StoppedAtMutation::Preserve,
@@ -227,6 +234,28 @@ mod tests {
                 "future".to_string()
             ))
         );
+    }
+
+    #[cfg(feature = "test-live-agent")]
+    #[test]
+    #[ignore = "operator-local Codex acceptance; never run in CI"]
+    fn cx01_interrupt_preserves_phase_and_never_commits_or_revives_a_session() {
+        for phase in [
+            CapturePhase::Active,
+            CapturePhase::Condensed,
+            CapturePhase::Stopped,
+        ] {
+            let current = DurableCaptureState {
+                phase,
+                stopped_at: (phase == CapturePhase::Stopped).then_some(1_700_000_000),
+                sync_revision: 4,
+            };
+            let plan = reduce_lifecycle(input(Some(current), LifecycleEventKind::TurnInterrupted))
+                .expect("interruption remains a bounded no-checkpoint event");
+            assert_eq!(plan.next_phase, phase);
+            assert_eq!(plan.stopped_at, StoppedAtMutation::Preserve);
+            assert_eq!(plan.checkpoint, CheckpointWrite::None);
+        }
     }
 
     #[test]

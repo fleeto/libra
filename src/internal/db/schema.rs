@@ -1024,9 +1024,9 @@ mod tests {
             inspect_schema_for_connection(&conn, DatabaseRole::Repository)
                 .await
                 .unwrap(),
-            SchemaCompatibility::Compatible {
+            SchemaCompatibility::UpgradeRequired {
                 current_version: Some(WORKTREE_LAYOUT_CAPABILITY_VERSION),
-                latest_version: Some(WORKTREE_LAYOUT_CAPABILITY_VERSION),
+                latest_version: 2026102201,
             }
         ));
     }

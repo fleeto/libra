@@ -5,7 +5,7 @@
 ## 概要
 
 ```text
-libra merge [--ff | --ff-only | --no-ff] [-s <strategy>...] [-X <option>...] [--allow-unrelated-histories] [--log[=<n>] | --no-log] [--squash | --no-commit] [-m <msg> | -F <file>] [--into-name <name>] [-e | --edit | --no-edit] [--cleanup=<mode>] [--no-verify] [--autostash | --no-autostash] [--stat | -n | --no-stat] [--verify-signatures | --no-verify-signatures] [--rerere-autoupdate | --no-rerere-autoupdate] [-S | --gpg-sign | --no-gpg-sign] [--signoff] [--dry-run] <branch>...
+libra merge [--ff | --ff-only | --no-ff] [-s <strategy>...] [-X <option>...] [--allow-unrelated-histories] [--log[=<n>] | --no-log] [--squash | --no-commit] [-m <msg> | -F <file>] [--into-name <name>] [-e | --edit | --no-edit] [--cleanup=<mode>] [--no-verify] [-v | --verbose] [--autostash | --no-autostash] [--stat | -n | --no-stat] [--verify-signatures | --no-verify-signatures] [--rerere-autoupdate | --no-rerere-autoupdate] [-S | --gpg-sign | --no-gpg-sign] [--signoff] [--dry-run] <branch>...
 libra merge --continue [-m <msg> | -F <file>] [-e | --edit | --no-edit] [--cleanup=<mode>] [--no-verify] [-S | --gpg-sign | --no-gpg-sign] [--signoff]
 libra merge --abort
 libra merge --quit
@@ -252,6 +252,7 @@ Libra 接受 `conflict`，以及 `true`/`false` 的 Git 兼容布尔拼写（包
 | `-e`, `--edit` | 在已解析消息上打开 `$GIT_EDITOR`、`core.editor`、`$VISUAL` 或 `$EDITOR`。Libra 默认不编辑；编辑后为空会在写入 merge state 或提交前中止。可与 `--continue` 使用。 |
 | `--cleanup=<MODE>` | 使用 `strip`、`whitespace`、`verbatim`、`scissors` 或 `default` 清理消息。未编辑时 `default` 和 `scissors` 使用共享的 `whitespace` 行为；清理发生在 `--signoff` 前。 |
 | `--no-edit` | 不打开编辑器并接受已解析消息（默认行为）；与 `--edit` 互斥。 |
+| `-v`, `--verbose` | 详细输出：打印合并结果的 diffstat（Git 把 `-v` 传给策略层渲染）。等价于 `--stat`；`--no-stat` 仍会抑制它。 |
 | `--stat` | 合并完成后显示 diffstat（合并前 HEAD 与新提交之间的变更）。Git 默认显示；Libra 默认不显示，故用 `--stat` 主动开启。与 `--no-stat`/`-n` 构成 last-wins 切换。仅人类输出。 |
 | `-n`, `--no-stat` | 合并结束时不显示 diffstat（Libra 默认）。与 `--stat` 构成 last-wins 切换。 |
 | `--no-progress` | 不显示进度条。为对齐 Git 而接受的 no-op：Libra 的 merge 从不渲染进度条。 |

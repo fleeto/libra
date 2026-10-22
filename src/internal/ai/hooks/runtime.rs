@@ -10,6 +10,8 @@
 //! 4. The target then loads (or recovers) persistent state, deduplicates the event,
 //!    applies it, and on `SessionEnd` writes a content-addressed `ai_session` blob
 //!    plus a history reference so other tools can read the session later.
+//! 5. For admitted Codex trace callbacks, observe the fixed runtime result in
+//!    the bounded capture diagnostic journal before host-specific settlement.
 //!
 //! The legacy intent target and its `MAX_*` bounds live in `hooks::intent`;
 //! the killable cwd/replay-key binding helper lives in
@@ -59,6 +61,7 @@ pub use crate::internal::ai::capture::{
 };
 use crate::internal::ai::{
     capture::{
+        diagnostics::HookObservation,
         ingress::{CaptureDeadline, CaptureIngressCommand, CaptureIngressOutcome},
         live::{
             HookExecutionDeadline, effective_capture_deadline, hook_execution_deadline,
@@ -218,6 +221,7 @@ pub async fn process_hook_event_with_target(
         command,
         expected_kind,
         provider,
+        binding.child_source_hint_policy(),
         deadline,
         execution_deadline,
         &ingest_span,
@@ -232,6 +236,11 @@ pub async fn process_hook_event_with_target(
     let trusted_terminal = target == HookTarget::AgentTraces
         && ingress_command.event_kind() == LifecycleEventKind::SessionEnd;
     let deadline = ingress_command.deadline();
+    let observation = (target == HookTarget::AgentTraces)
+        .then(|| {
+            HookObservation::admitted(binding, ingress_command.runtime_scope(), command, deadline)
+        })
+        .flatten();
     let capture = async {
         match target {
             HookTarget::AiIntent => process_ai_intent_ingress(ingress_command, provider).await,
@@ -248,6 +257,9 @@ pub async fn process_hook_event_with_target(
         capture,
     )
     .await;
+    if let Some(observation) = observation {
+        observation.finish(result.is_err(), trusted_terminal);
+    }
     match result {
         Err(error) if trusted_terminal => Err(terminal_persistence_failure_error(error)),
         other => other,
@@ -338,6 +350,7 @@ async fn validate_capture_ingress_from_stdin(
     command: super::provider::ProviderHookCommand,
     expected_kind: LifecycleEventKind,
     provider: &dyn HookProvider,
+    hint_policy: crate::internal::ai::observed_agents::live_capture::ChildSourceHintPolicy,
     deadline: Option<CaptureDeadline>,
     scope_binding_deadline: Option<HookExecutionDeadline>,
     ingest_span: &tracing::Span,
@@ -346,6 +359,7 @@ async fn validate_capture_ingress_from_stdin(
         command,
         expected_kind,
         provider,
+        hint_policy,
         deadline,
         |scope_input| bind_capture_scope_cwd_bounded(scope_input, scope_binding_deadline),
     )

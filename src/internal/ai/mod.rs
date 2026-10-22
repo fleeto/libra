@@ -16,6 +16,8 @@ pub mod agent_run;
 pub mod agent_import;
 // Private, killable bounded-read helper contract shared by import and hooks.
 pub mod authorized_read;
+// Closed provider-index backups: pinned source, private copy, readonly SQLite.
+pub(crate) mod provider_index_io;
 // Provider-neutral capture foundation shared by live hooks and import.
 pub mod capture;
 // Provider-root subagent transcript discovery and source-scoped content

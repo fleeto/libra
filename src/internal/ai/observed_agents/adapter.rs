@@ -8,7 +8,7 @@
 //! See `docs/development/commands/_general.md` (section 5) for the rationale and the v1
 //! adapter matrix (Claude Code + Gemini stable; 5 preview stubs).
 
-use std::path::PathBuf;
+use std::{path::PathBuf, time::Instant};
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -194,6 +194,17 @@ pub fn agent_not_yet_implemented(agent: &dyn ObservedAgent) -> AgentError {
     AgentError::NotYetImplemented(agent.provider_name())
 }
 
+/// Pure ordinary-source decoding after authorization. It grants no source or
+/// native capability. Returned reports contain counts, with source offsets
+/// omitted when their coordinates belong to decoded strings.
+pub type OrdinarySourcePreprocessor = fn(
+    &[u8],
+    Option<Instant>,
+) -> std::result::Result<
+    (Vec<u8>, super::RedactionReport),
+    super::reasoning::ReasoningFieldError,
+>;
+
 /// Core trait every observed agent implements.
 ///
 /// Boundary condition: [`Self::read_transcript`] returns the agent's *raw*
@@ -202,6 +213,17 @@ pub fn agent_not_yet_implemented(agent: &dyn ObservedAgent) -> AgentError {
 pub trait ObservedAgent: Send + Sync {
     fn provider_kind(&self) -> AgentKind;
     fn provider_name(&self) -> &'static str;
+
+    /// Optional decoded-string preparation for an already authorized source.
+    /// The snapshot owner still applies its ordinary byte credential scan.
+    fn ordinary_source_preprocessor(&self) -> Option<OrdinarySourcePreprocessor> {
+        // This is a data-format credential policy, not a source capability.
+        // Every Codex-format adapter decodes strings before the byte scan.
+        match self.provider_kind() {
+            AgentKind::Codex => Some(super::codex_reasoning::prepare_ordinary),
+            _ => None,
+        }
+    }
 
     /// Stability tier for this adapter. Defaults to [`AgentStability::Stable`]
     /// — preview stubs override.

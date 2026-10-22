@@ -20,8 +20,9 @@ use std::{
 
 use serde_json::{Value, json};
 
-/// The eleven Codex events the installer forwards, with their CLI verbs
+/// The twelve Codex events the installer forwards, with their CLI verbs
 /// (pins `CODEX_HOOK_FORWARD_MAP` in codex/settings.rs).
+#[cfg(feature = "test-live-agent")]
 const CODEX_FORWARDED_EVENTS: &[(&str, &str)] = &[
     ("SessionStart", "session-start"),
     ("UserPromptSubmit", "prompt"),
@@ -31,21 +32,27 @@ const CODEX_FORWARDED_EVENTS: &[(&str, &str)] = &[
     ("PreCompact", "compaction"),
     ("PostCompact", "compaction"),
     ("Stop", "stop"),
+    ("Interrupt", "stop"),
     ("SessionEnd", "session-end"),
     ("SubagentStart", "subagent-start"),
     ("SubagentStop", "subagent-end"),
 ];
 
+#[cfg(feature = "test-live-agent")]
 const CODEX_DEFAULT_TIMEOUT_SECS: u64 = 30;
+#[cfg(feature = "test-live-agent")]
 const CODEX_DEFAULT_CAPTURE_BUDGET_MILLIS: u64 = 29_000;
-const CODEX_SESSION_END_TIMEOUT_SECS: u64 = 3;
-const CODEX_SESSION_END_CAPTURE_BUDGET_MILLIS: u64 = 2_000;
+#[cfg(feature = "test-live-agent")]
+const CODEX_SHORT_EVENT_TIMEOUT_SECS: u64 = 3;
+#[cfg(feature = "test-live-agent")]
+const CODEX_SHORT_EVENT_CAPTURE_BUDGET_MILLIS: u64 = 2_000;
 
+#[cfg(feature = "test-live-agent")]
 fn codex_installed_timing(event: &str) -> (u64, u64) {
-    if event == "SessionEnd" {
+    if matches!(event, "SessionEnd" | "Interrupt") {
         (
-            CODEX_SESSION_END_TIMEOUT_SECS,
-            CODEX_SESSION_END_CAPTURE_BUDGET_MILLIS,
+            CODEX_SHORT_EVENT_TIMEOUT_SECS,
+            CODEX_SHORT_EVENT_CAPTURE_BUDGET_MILLIS,
         )
     } else {
         (
@@ -235,11 +242,13 @@ fn opencode_enable_writes_canonical_binary_path() {
 /// stable installed surface is the top-level `libra hooks codex <verb>`
 /// entry, which routes to AgentTraces; `agent hooks codex` is the legacy
 /// hidden spelling), plus one `[hooks.state."…"]` trust section per
-/// forwarded event (11) with a `sha256:` trusted_hash. A trusted install
+/// forwarded event (12) with a `sha256:` trusted_hash. A trusted install
 /// ingests session-start with no trust-gap banner; tampering one hash
 /// makes the banner name exactly one gap; disable removes the Libra
 /// hooks.json entries and config.toml state sections.
+#[cfg(feature = "test-live-agent")]
 #[test]
+#[ignore = "operator-local Codex acceptance; never run in CI"]
 fn codex_enable_writes_canonical_binary_path_and_trust_entries() {
     let repo = HookRepo::init();
     let canonical = canonical_binary_path();

@@ -1076,12 +1076,13 @@ mod tests {
         let conn = crate::internal::db::create_database(database_str)
             .await
             .expect("create stale probe database");
-        // The newest worktree capability receipt is intentionally
-        // irreversible. Construct a disposable pre-receipt fixture directly
-        // instead of asking the production rollback API to remove it.
+        // The two newest receipts are intentionally irreversible. Construct a
+        // disposable pre-receipt fixture directly instead of asking the
+        // production rollback API to remove them.
         conn.execute_unprepared(
-            "DELETE FROM worktree_registry_capability WHERE version = 4; \
-             DELETE FROM schema_versions WHERE version = 2026101902",
+            "DROP TABLE agent_session_commit; \
+             DELETE FROM worktree_registry_capability WHERE version = 4; \
+             DELETE FROM schema_versions WHERE version IN (2026101902, 2026102201)",
         )
         .await
         .expect("seed a pre-capability repository fixture");

@@ -3630,7 +3630,7 @@ fn agent_import_codex_discovery_fanout_limit_fails_loudly() {
         .expect("run bounded Codex discovery");
     assert!(!output.status.success(), "{}", describe(&output));
     assert!(
-        String::from_utf8_lossy(&output.stderr).contains("LBR-AGENT-020"),
+        String::from_utf8_lossy(&output.stderr).contains("LBR-AGENT-018"),
         "the discovery safety bound must fail loudly: {}",
         describe(&output)
     );

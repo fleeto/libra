@@ -483,3 +483,584 @@ and start a new OpenCode session to continue supported capture. A candidate or
 unverified reasoning source cannot turn this failure into complete coverage.
 These changes add no command flags and require Libra 0.30.50 or later. OpenCode Session/exporter/model acceptance runs locally on
 macOS; it is not a CI integration test.
+
+## Codex parent/child usage snapshots (CX-26 development)
+
+Unreleased source builds may add `usage_attribution` to checkpoint metadata
+for Codex UUID sessions. Its `scope=session_snapshot` and `as_of=live_capture`
+or `as_of=import_pass` describe the observed whole-session snapshot, not a billing
+delta. Import checkpoints from one pass share the same observation. Do not add
+these values across checkpoints. `parent_token_usage` and `child_token_usage`
+retain known counts; missing usage stays null. Optional cached/reasoning/total
+counters stay unknown unless every contributing operand supplies them.
+
+The projection rechecks current scoped child claims, revisions, digests, links
+and capture incarnations. It includes at most 16 source/revision/checkpoint
+references. Each reference's `parent` is null for the current thread or the
+parent source commitment for a nested descendant; original native identities
+remain in the separately retained ordinary child source. Partial source counts
+describe bounded observations, not an
+exhaustive inventory. Unknown, busy, stale, damaged or missing sources never
+become measured zero. Child thinking remains independently exportable when
+usage is unknown. Legacy session labels and other providers omit this field.
+
+An available, exhaustive descendant scan with current durable claims and complete
+parent/child usage can produce `children_coverage=complete` and a checked
+`aggregate_token_usage`. Otherwise `partial=true`, `aggregate_token_usage=null`
+and `aggregate_includes_child_usage=false`; known subtotals remain available.
+Import saves children before parent metadata and preserves independent durable
+progress on either writer's failure. Replays do not refresh an old parent's
+usage snapshot or create a checkpoint solely because a child grew.
+
+`excluded_legacy_count` counts only older capture namespaces proved by the
+bounded commit/tree/metadata role chain and their recorded source commitment.
+Unprovable older records remain unknown. The scan examines at most 16 claims
+plus one saturation witness, with 64 KiB per role object and 1 MiB total;
+large historical catalogs, unavailable parent spawn evidence (including its
+1 MiB cap), or an exhausted discovery window can keep coverage partial.
+Existing checkpoints and sealed recovery artifacts are not rewritten. New
+artifacts carrying this optional metadata need a build that recognizes it for
+recovery; keep the original artifact when using an older build.
+
+Credential redaction can hide records or nested usage fields. Such usage is
+partial or unavailable even when the retained JSON remains valid. Ordinary
+readable thinking and opaque values keep the existing retention/export
+contract. All new Codex functional checks remain feature-gated, ignored, local
+tests; they are not CI requirements.
+
+## Codex ordinary thinking retention (CX-15 development)
+
+Codex `response_item` reasoning is ordinary authorized source data. Preserve
+`summary_text`, `reasoning_text`, `encrypted_content` and unknown associated JSON
+values after decoded credential scanning; do not turn ordinary retention into
+native proof. Unproven/Partial sidecars contain counts and explicit-turn token
+snapshots, never text or ciphertext. Preserve missing/null/empty distinctions.
+
+Historical import uses a closed, bounded `CodexRetentionDto` beside its existing
+semantic/native handoff. The frozen V1 normalizer attributes source slices to
+turns without including them in claim digests. Each import snapshot retains a
+compaction record once in its first V1 slice and leaves it unattributed in
+statistics. A later changed snapshot can append a replacement slice containing
+earlier history; previous checkpoints remain immutable. The ordinary transcript contains the V1
+projection line plus source JSONL; default export reads every line. Previously
+covered turns can receive append-only supplement checkpoints when ordinary values
+change. Supplement IDs derive from a repository-keyed content commitment, and
+the current gate-issued committed claim is checked at marker bind and inside
+the ref/catalog transaction. The same import lease, workspace/tombstone fences,
+checkpoint writer and object-index barrier apply; no semantic revision advances.
+V1 objects/digests/claims remain immutable. CX-05 owns V2 claim migration.
+
+The data-only V2 preview includes provider-visible reasoning using the same
+credential-scanned text that ordinary retention saves. It is not an activation
+of Codex live V2 claims. Token statistics use the latest explicit turn snapshot,
+not a sum of cumulative counters; resets or unknown association stay partial.
+Unknown/opaque fields remain ordinary data, without native artifacts or issuers.
+A large non-reasoning line cannot invalidate the whole snapshot. Malformed
+string literals are masked locally while leaving structural partial evidence;
+statistics exhaustion cannot reject otherwise available ordinary data.
+
+Synthetic acceptance covers actual CLI import/store/default export, source
+immutability, opaque-only updates, replay, unchanged semantic claims, transaction
+failure and recovery, decoded credential escapes, numeric fidelity and bad tails.
+This is not a live model acceptance. System Codex hooks, current rollout parser,
+terminal handling and real TUI smoke retain their own later CX gates.
+
+
+The stored sidecar is a snapshot of explicit Codex provider turns (`turn_ordinal_namespace=codex_explicit_turn`); its ordinals are separate from V1 checkpoint attribution. Metadata-only provider updates do not create a checkpoint. The full turn table lives in the shared `redaction_report.json` object; each checkpoint's metadata carries bounded aggregate counts. A statistics/retention preparation failure is reported as partial or `retention_unavailable` while existing V1 projections remain usable.
+
+At most 16 retention supplements are written in one import pass before fresh turns proceed. A partial result reports durable progress and releases owned reservations; rerunning resumes the remaining copies. Fresh retained checkpoints and supplements use repository-keyed IDs bound to semantic digest, completeness and retained values. Identical replay remains a no-op after repack. Changed-data writes after a complete traces repack still hit the existing packed-parent writer limitation; preserve the source and repository for repair. The local packed-transcript case uses a valid mixed store and does not claim whole-traces packed-parent support.
+
+Codex CX acceptance tests are operator-local, including synthetic cases; they
+are not scheduled in CI. Run `cargo test --features test-live-agent --test
+codex_capture_local_test -- --ignored --test-threads=1` and the companion
+`cargo test --features test-live-agent --lib codex_summary_ -- --ignored
+--test-threads=1` explicitly on the operator machine. Ignored/unrun cases
+provide no acceptance evidence.
+
+The revised legacy Codex boundary case is also operator-local:
+`cargo test --features test-live-agent --test agent_checkpoint_redaction_test capture_foundation_codex_reasoning_boundaries_live_and_import -- --ignored --exact --test-threads=1`.
+
+Empty semantic turns omitted by the frozen V1 projection do not shift another turn's retained thinking. Surviving source slices follow their original turns when ordinals are renumbered. Thinking from an omitted turn is preserved once with the first ordinary checkpoint, with `turn_attribution_unproven=true` and `partial=true`; this does not claim that the text belongs to that checkpoint's semantic turn.
+
+The sidecar statistics budget is 4096 distinct explicit turns or reasoning identities; duplicate replay does not consume another identity. Exceeding that budget marks statistics unavailable and partial; the ordinary source still preserves the thinking records.
+
+Current source builds use the Codex 0.162.1 twelve-event contract, including `Interrupt`. Re-run `libra agent enable --agent codex` to refresh only Libra-owned handlers and trust entries. `Interrupt` and `SessionEnd` use a 3-second host timeout and a 2000ms capture budget; other default handlers use 30 seconds and 29000ms. `Interrupt` shares the installed `stop` command but remains `turn_interrupted`: it preserves the current session phase and writes no normal completed-turn checkpoint. `PostCompact` shares `compaction` while retaining `compaction_completed`. Existing event identity ordinals and user trust/configuration remain unchanged. This event support does not prove rollout thinking has been captured.
+
+The minimum Codex CLI version for this twelve-event installation is **0.162.1**. Upgrade older Codex clients before re-running enable. Existing eleven-event installs report not installed until refreshed; their already-approved entries do not become trust gaps. This also fixes earlier rejection of `PostCompact` on the shared `compaction` verb. Late interrupts preserve an already stopped session instead of reactivating it.
+
+Codex hook settings reads accept regular files only: `hooks.json` and `config.toml` are limited to 16 MiB each, and the integrity recovery journal to 64 KiB. Installation, removal and status checks refuse symlink/special-file leaves; Unix FIFO opens cannot block the reader. An unsafe or oversized file is left in place; move it aside or reduce its size before retrying. A generated update over the settings limit is rejected before either paired file is published. Parse diagnostics identify the file without printing configuration contents. Parent directory aliases selected by `CODEX_HOME` remain supported, while Unix trust keys use the canonical `hooks.json` path; rerunning enable removes older Libra-managed entries under the current alias. This is not a strict whole-process filesystem deadline.
+
+
+Codex installation diagnostics in `libra agent doctor` include all 12 managed events. Each event has a fixed `reason`: `configured`, `missing`, `drifted`, `untrusted` or `disabled`; JSON exposes these rows under `data.provider_hooks[].events`. Aggregate `installed=true` requires every managed event to match the current handler and be enabled and trusted. Edited or stale duplicates carrying Libra's status message keep that event unconfigured; marker-less user handlers are outside this diagnostic. An intentional `enabled=false` is reported as disabled without adding a trust-gap banner when its hash is current. These read-only settings checks never print hook commands, hashes or configuration bodies and do not prove that the host executed a hook. Use Codex 0.162.1 or newer; refresh missing or untrusted Libra handlers with `libra agent enable --agent codex`, and review intentional disables before running enable. For drifted entries, inspect `hooks.json` and the matching `[hooks.state]` entry in `config.toml` first: enable refreshes handlers whose ownership is still provable, but preserves malformed handlers that only carry the status message. Those require manual correction or removal after review; repeating enable alone may not clear their diagnostic.
+
+
+## Codex turn attribution (CX-05 development)
+
+The first nonempty persisted record pins the typed coverage preview's codec for the entire source snapshot. A `session_meta` header recording `cli_version: 0.162.1` selects the current structured codec; other or missing headers keep the legacy codec. Appending current markers to an older resumed session cannot reinterpret its prefix. Supply the complete source snapshot; an isolated tail is not an equivalent coverage source. The owning header remains in the ordinary source. Future automatic writer activation must persist this codec choice with the session rather than infer a new choice on retry.
+
+The current codec groups inputs by validated `turn_id` from `turn_context`, lifecycle markers or accepted input metadata. Steering inputs in one turn share a group. Scoped responses and late input mirrors do not rewind the active stream context. An unscoped or matching-turn terminal marker closes it. A malformed terminal scope leaves the stream open and qualifies the projection. An id-less optional turn context preserves a lifecycle-established scope while qualifying the projection; without lifecycle proof it clears the context. An explicit null or invalid turn ID clears it. Fresh raw input scoped to an older turn stays in that group and qualifies ordering, while following unscoped output keeps the active turn. Missing or invalid turn IDs use incomplete ordinal compatibility keys based on group creation order, separately from dense projection ordinals; earlier empty groups becoming visible do not shift those keys.
+
+Producer `content_item_kinds` and accepted-input events distinguish human requests from injected context. Developer/system messages, inherited history and foreign-thread records do not create human turns. Genuine text resembling a context wrapper is preserved. Repeated input on one surface remains repeated. Per-turn occurrence pairing collapses matching event/raw/completed surfaces; raw, client and completed-item IDs use independent namespaces; missing or unequal IDs leave a pair partial, so ordinary current sessions are normally partial. Non-text content, conflicts and unpaired event inputs also remain partial. Only annotated raw or scoped completed input can establish a user record; unscoped legacy accepted-input events corroborate matching inputs and never independently establish human turns; mismatched mirror text cannot add inferred user records beside the more direct source. Legacy role-only projections may include injected context and do not prove human origin. All source values remain available to the existing ordinary retention path under credential scanning.
+
+This data-only path reuses the existing response codec and V1/V2 selector: typed readable reasoning selects V2; ordinary records still select V1. Historical V1 normalization, ordinary-retention writes and existing claims keep their prior keys and digests. Automatic Codex writer activation remains later work. Current-codec ordinary preview rows labelled V1 must not be persisted against legacy V1 claims: activation must explicitly use the existing ordinary V2 domain or keep sessions with V1 claims on the legacy codec, alongside a persisted codec choice. Explicit prepared ordinary V2 imports already use the shared replay gate. The reasoning sidecar keeps its separate `codex_explicit_turn` ordinal namespace; its counters must not be joined to coverage ordinals by position.
+
+The existing snapshot hard cap is 16 MiB. The current codec also caps grouped bytes at 16 MiB, each JSONL record at 1 MiB and turn, input-occurrence and identity collections at 4096 entries. A large patch, tool output or inline image data URL can make this pure preview unavailable. Exact-version compatibility and large-record availability must be reviewed before automatic writer activation. Exhaustion or an expired deadline fails the preview; empty or unattributed partial groups retain a partial signal. Damage within an attributable group qualifies that group, while unassigned damage qualifies the snapshot. Ordinary retention follows its existing path. Source and synthetic checks do not establish live model capture or native provenance.
+
+## Codex rollout metadata and capabilities (CX-04/CX-14 development)
+
+CX-10 historical import discovers both date-partitioned `sessions` and flat
+`archived_sessions` under the configured Codex home. The descriptor-pinned
+discovery helper reads the first record only for `--since` (1 MiB per file,
+256 MiB cumulative; 4096 unfilterable-record cap), requires a matching `session_meta.payload.id`, validates
+an optional bounded `cli_version`, and uses its RFC3339 session start time.
+Invalid/missing per-file headers and read failures produce hashed-id `skipped`
+entries with distinct fixed reason keys while other sessions continue. Each
+skip records a warning for `--exit-code-on-warning` and JSON warnings. A bad
+file later found by child-content discovery, including an unselected archived
+duplicate, may still make the parent import partial with `LBR-AGENT-018`. An
+exhausted cumulative or entry budget stops discovery with `LBR-AGENT-018`.
+The `--since` window cannot safely prune files before the header read; active
+and archived scans have separate 20,000-entry bounds. Use a closed Codex index
+backup to page absent sessions or `--path` for a specific or existing session
+when the bounded batch scan is too large. The archive-aware `--session` finder
+has its own 20,000-entry directory cap after at most 10,000 active rollout
+files; live hooks retain the original 4096
+per-directory cap. `--all` defers header validation
+to the normal import reader. File mtime never supplies Codex `--since` time;
+Claude retains its mtime filter.
+Duplicate IDs choose the active root, then the lexically newest rollout in a
+root. Interactive batch consent precedes that header read, and the existing
+authorized file reader reopens and fences the selected source before full
+transcript bytes. Codex-specific new regressions stay feature-gated and
+ignored for operator-local execution only.
+
+CX-11 adds a Repository-only, forward-only `2026102201_agent_session_commit`
+schema and a transactional DAO. Its local `(session_id, hash_kind, commit_oid)`
+key distinguishes SHA-1, SHA-256 and BLAKE3, references an existing session,
+and is safe to retry. A batch is limited to 64 sessions and rolls back in full
+on a failed FK write. Global/System/Derived roles get no table or receipt.
+Historical import does not write links. CX-23 makes ordinary commits opt-in via
+`agent.commit_trailer=true`; it snapshots at most 64 scoped sessions with
+committed checkpoints anchored to the current parent (or active sessions
+already linked to it), appends deduplicated `Libra-Agent-Session` trailers after the message hook and
+before signing, and writes the local DAO link after the ref update, rechecking each session
+scope and the workspace lease in one SQLite transaction. Amend also carries
+forward authorized links from the replaced commit.
+`--no-agent-trailer` omits automatic trailers but keeps the local link.
+The CX-27 durable journal and trailer-free crash recovery are still pending;
+refs-only cloud metadata does not include the association table.
+
+Current source builds project envelope rollouts using the Codex 0.162.1 record schema; unknown records from other versions remain partial. Exact `token_usage_record` response usage is counted once, including a repeated compaction snapshot. Legacy cumulative token observations are differenced across turns; an unexplained decrease remains partial, and a reset at an explicit context boundary is qualified. Matching legacy observations are not added to exact response totals. Cached tokens aggregate cache reads and writes. Missing or invalid usage remains unknown in the parser, rather than a measured zero.
+
+Envelope prompt projection uses event-side accepted input and producer `content_item_kinds`, preserving real user text that resembles a context wrapper. Unannotated or mismatched user-role response content is retained in ordinary source data but is not asserted to be a user prompt. Shared item identity is paired first, with completed input preferred; otherwise identical projected text is paired by turn and occurrence across surfaces. Repeated text on the same surface remains repeated. Pairing without a shared identity is a partial lower bound. The first `session_meta` binds the owning thread. Foreign headers make the projection partial; foreign records are not added to its usage, and all unscoped records after a foreign header remain unattributed until the owning header reappears; explicitly scoped owning-thread records can still be projected. The model is the latest explicit `turn_context` model. Modified paths require a nonempty call/item identity and a successful, completed structured patch record; proposed patch text and failed or partial attempts are not evidence of a file modification. Paths are lexical and relative to the recorded working directory, which may be a repository subdirectory.
+
+The parser reads at most 16 MiB, caps full JSONL decoding at 1 MiB per record, and bounds retained metadata and identity state. For an oversized known record, capability projections may read only a bounded type/role/scope skeleton while ignoring the body; a large image or tool output therefore does not suppress unrelated exact usage or completed files. Affected or unclassifiable projections still fail the record limit, and the underlying parser marks skipped bodies partial. Whitespace-only lines do not contain records. The hook helper applies its existing tighter limits. Unknown variants, duplicate keys, damaged tails, unsupported old patch statuses and exhausted budgets yield partial metadata and content-free warnings. Flat historical exports retain a compatibility reader with bounded metadata; oversized, invalid or unclassifiable rows are skipped and qualified without erasing other usable flat rows. Flat role-only user projections may include host-injected context and are not evidence of a human request. Mixed formats are partial, and flat rows inside an envelope file are not projected. These rules do not grant raw storage permission, change coverage claims, or prove live thinking capture. The Codex adapter now exposes the transcript analyzer and reports completed structured file changes through `libra agent list --json` capabilities. Its token calculator returns an actionable error when usage is unavailable or usage-specific consistency checks prove a gap, rather than manufacturing zero or returning a known incomplete total. A qualified explicit reset may still yield a lower bound. For nonzero offsets in a legacy-first source, subsequent windows keep cumulative-counter deltas even when exact records appear later; absent newer cumulative observations remain unknown, which prevents late exact mirrors from being counted again. Prompt, skill, file and usage offset reads retain earlier context and cumulative baselines while emitting newly completed records; previously seen item/response mirrors and an added newline alone do not replay old data. Pass the complete append-only byte snapshot together with its previous byte length, rather than only a sliced tail; a truncated or replaced source requires restarting at offset zero. If exact records exist only before the offset, a later cumulative observation cannot establish new exact usage. These are bounded best-effort projections; the analyzer position is the supplied snapshot length, not proof that every byte produced complete metadata. Prefix prompt payloads are hashed under the record cap; earlier text does not consume new-output string or retained-text limits. Current scope and output context remain bounded. Skill projection hashes supported prompt text for pairing and retains only recognized slash commands and their context. Prompt projection does not retain skill events. Skill event IDs use source identity (or a qualified occurrence fallback), and flat compatibility reads retain physical record ordinals across offsets. Each capability projects only its own metadata: a prompt budget failure does not suppress otherwise valid tokens or completed files, and response/patch identity limits do not suppress prompts. Shared input and record limits still apply to every projection. Budget errors name the affected capability and limit and state that the session cannot be projected by that capability; waiting or restarting the same oversized snapshot will not repair it. The underlying parser still offers partial metadata. Missing usage gets the ordinary waiting diagnostic unless usage-specific counters, response identity or reset observations are unproven; an unrelated partial prompt does not make usage malformed. An offset-zero total replaces earlier totals and must not be added as another delta. Capture treats calculator errors as partial metadata and continues the shared checkpoint path. Other adapters retain their existing contracts.
+
+
+
+## Legacy Codex thinking reads (CX-16 development)
+
+In this development source, `libra agent checkpoint show <id> --json` returns
+credential-scanned ordinary Codex thinking in `data.reasoning.readable`, and
+nonempty retained opaque values in `data.reasoning.encrypted_content`.
+`availability` is `unproven`, or `partial` for truncated, malformed or unsupported
+records; `readable_obtained` reports whether this view contains readable text.
+These values do not prove native origin or decryption. The checkpoint metadata
+must belong to its ordinary tree and agree with the session's provider when it
+contains `agent_kind`; older metadata may omit that field. Failed binding or
+transcript reads return a content-free `unavailable` facet, never the raw blob.
+An empty transcript also returns `unavailable` with `reason=no_transcript` and
+`readable_obtained=false`; metadata alone is not acquired thinking.
+
+Default `agent checkpoint export <id>` also scans decoded JSON string tokens
+in old stored transcripts, including escaped credentials, while preserving
+unknown associated values, precise numeric tokens and duplicate keys. It keeps
+the configured `agent.max_transcript_read_bytes` limit (256 MiB by default);
+the new-capture 16 MiB admission limit does not shorten existing exports.
+`redacted=true` signals a credential mask or a locally replaced undecodable
+string token in the JSON view.
+JSON show is a bounded view of at most 16 MiB and parses records up to 1 MiB;
+use default export to retrieve ordinary data beyond that view. A truncated view
+is partial and never establishes that no later thinking exists. The configured export
+limit still bounds the source prefix. Complete legacy strings containing lone
+surrogates or invalid UTF-8 use a tolerant decoded view only for credential
+scanning: tokens without matches keep their exact original bytes. JSON show
+keeps this source partial even if masking makes its output parseable. Tokens that
+still cannot be decoded, including strings cut inside an escape or UTF-8
+sequence, are replaced locally with `?`, leaving structural partial evidence. Increase
+the configured read limit when retrieving a larger checkpoint in full. Only
+JSON string tokens are decoded; arbitrary escapes outside a string or in an
+unsupported malformed envelope do not acquire a second interpretation.
+
+Human show, checkpoint/session lists, graph and doctor do not expand these
+bodies. Reads do not rewrite objects, traces or coverage claims. Raw export
+still requires `--raw --allow-raw` and records granted or denied access; default
+export creates no raw-access audit. Run the synthetic reader cases locally with
+`cargo test --features test-live-agent --test codex_capture_local_test codex_legacy_ -- --ignored --test-threads=1`.
+They do not prove live model capture, and are excluded from CI.
+
+
+## Codex terminal budget (CX-02 development)
+
+Managed Codex `SessionEnd` hooks have a 3 s host window and a 2000 ms primary
+capture budget. Capture carries the same monotonic/absolute deadline through
+ingress, database waits, lifecycle reservation, source acquisition and writing.
+The existing terminal finalizer has a 250 ms content-free settlement slice,
+derived from that original deadline and never restarted within a callback.
+A later authorized callback has its own bounded I/O window; recovery preserves
+the original receipt's finalizer deadline and retry accounting.
+An asynchronous source exporter is now cancelled at the primary deadline even
+if it ignores the deadline it receives; the content-free log reason is
+`export_deadline_elapsed`. Cancellation takes effect when the future yields;
+blocking work inside a poll is not preempted. This cancels only source acquisition:
+runner settlement and already-dispatched SQL/ref commit acknowledgements are
+still awaited. A terminal receipt stays pending when the checkpoint cannot
+become durable, and must not publish `stopped` prematurely.
+
+A callback that ends before a trusted session/scope frame exists keeps Codex's
+advisory no-evidence exit behavior; it creates no invented receipt or completed
+session. After scope validation, failure to retain required terminal evidence
+is a fatal capture failure. If the host kills the process before any receipt
+exists, no ledger can reconstruct that unseen callback. Retain the rollout and
+use the existing owner-expiry/doctor paths when evidence exists, or an explicitly
+authorized `agent import --path <rollout.jsonl> --agent codex --yes` to recover
+available source data. Successful metadata-only lifecycle capture is not
+thinking acquisition. Receipt completion and a durable checkpoint determine
+terminal completion; the retained finalizer object records pending/quarantine
+recovery evidence and has no separate `complete` status.
+
+These changes reuse the existing finalizer and ledger; they do not activate a
+Codex live source locator, exporter or model capture. Operator-local cases cover
+CLI database contention, a 2 s stdin wait, host termination, native replay,
+post-marker cancellation and owner-expiry recovery, and the real pipeline's
+slow-source deadline using a
+scripted test capability. Build the current binary first, then run:
+
+```bash
+cargo build --features test-live-agent --bin libra
+cargo test --features test-live-agent --test codex_capture_local_test codex_terminal_ -- --ignored --test-threads=1
+cargo test --features test-live-agent --lib codex_terminal_ -- --ignored --test-threads=1
+```
+
+Every new Codex case requires `test-live-agent` and is ignored by default. These
+are local synthetic lifecycle/budget checks, not proof of real thinking data;
+they are not scheduled in CI. Existing CI tests retain their original scope.
+
+## Codex terminal diagnostics (CX-17 development)
+
+`libra agent session show <session-id> --json` adds a `terminal_capture` object for Codex. Human output shows the same status and owner. It reads the existing catalog and writer marker; viewing a session never advances lifecycle state, consumes a retry, or repairs a checkpoint.
+
+- `status` is `pending`, `completed`, or `unavailable` for the latest stored terminal receipt. `completed` describes receipt completion, not readable thinking, transcript availability, or an object integrity check. Inspect checkpoint show/export for content.
+- `owner` is `live`, `expired`, `absent`, `cleanup_pending`, or `unavailable`. It uses the original marker generation and absolute expiry. A session being active for over 24 hours never overrides a live owner.
+- `pending_receipts` and `completed_receipts` count terminal receipts in the bounded ledger. `superseded` compares the existing revision fence for pending receipts, and the stored stop phase/time for completed receipts. Counts may include older receipts. Distinct operations with the same stored stop timestamp may be indistinguishable; replay completions may also be marked superseded when they retain an earlier stop time. This diagnostic grants no recovery authority.
+- `reason` is a fixed, content-free diagnostic. Missing, malformed, oversized, ambiguous or inaccessible evidence is explicitly unavailable. Released or changed workspace leases cannot authorize recovery of pending work. A completed receipt remains visible after workspace release or lease expiry; its historical fact does not require live repair authority. The diagnostic includes no source path, transcript, marker payload or replay credential.
+
+`libra agent doctor --json` remains detection-only and reports existing pending-finalizer findings and live-marker counts. Session show is a repository-wide view of the selected session, including sessions in sibling worktrees. Pending/owner fields describe that stored session; they do not promise that this worktree can repair it. Only `libra agent doctor --repair` from the original worktree/workspace attempts the existing fenced finalizer recovery. A live owner is left alone; a missing durable checkpoint/artifact requires provider redelivery or explicit import. Repair does not reopen arbitrary provider sources, bypass a changed workspace lease, or create another checkpoint for an already durable terminal action. Repeated repair is idempotent.
+
+The session diagnostic is additive; session list and other providers keep their existing output. Non-text or over-1-MiB Codex metadata omits the legacy capture_status/error fields and explicitly reports terminal_capture as unavailable; there is no raw fallback. This is a local development feature, with synthetic fixtures rather than a real Codex model result. Build the current binary and run the feature-gated, ignored cases locally:
+
+```sh
+cargo build --locked --features test-live-agent --bin libra
+source .env.test
+cargo test --locked --features test-live-agent --test codex_capture_local_test codex_finalize_ -- --ignored --test-threads=1
+```
+
+These new Codex cases do not run in CI.
+
+
+## Codex hook observation journal (CX-03 development)
+
+Both `libra hooks codex` and the compatibility `libra agent hooks codex` entry record the same fixed result after validated ingress and repository binding. Their existing host exit policies remain intact. Unknown or rejected ingress has no trusted journal scope and creates no journal; its existing fixed diagnostics remain available. Other providers are unchanged.
+
+The journal contains only schema version, local sequence number, the fixed provider name `codex`, a fixed hook command in `event`, one of `runtime_ok`, `runtime_failed`, or `terminal_failed`, and `count=1`. It stores no session identity, transcript, model, source/repository path, credentials, or rendered error. `runtime_ok` means that the runtime returned without error; it does not establish that thinking or a checkpoint was saved. Consult the session/checkpoint catalog for capture facts and terminal recovery.
+
+Journal IO belongs to the shared capture owner. Under `.libra/private/capture-diagnostics/`, two fixed slots (`0.jsonl`, `1.jsonl`) hold at most 5 MiB each, plus an empty `lock` file. Rotation discards only the older slot. Unix directories/files require the current owner and mode 0700/0600; files must be regular and single-link. Windows uses the existing protected owner ACL and handle-relative no-reparse primitives. Unsafe, oversized, or damaged artifacts are left in place and reported as unavailable. No Windows runtime result is claimed by the macOS tests.
+
+`libra agent status --json` and `libra agent doctor --json` add `data.capture_diagnostics`; human output shows the same retained-window counts. `state` is `absent`, `available`, or `unavailable`; `window=retained_records` and `may_have_gaps=true` apply throughout. Counts and optional `first_sequence`/`last_sequence` describe only valid retained records, never lifetime attempts or capture success. Readers never create directories or locks, repair artifacts, or return journal contents. Partial initialization, lock contention, invalid records, and unsafe files yield unavailable with no partial counts.
+
+Logging is best-effort and nonrecursive. Its nonblocking lock and bounded tail reads use the earlier of the original capture deadline and a 20 ms soft IO window. These checks do not reset or extend the capture budget. A blocked filesystem call itself cannot be preempted by these checks. Lock contention, exhausted budgets, process death, and IO failure may omit observations; none changes the original runtime result, pending receipt, or host exit policy. The 10 MiB cap applies to this journal, independently of the existing global tracing logger.
+
+If diagnostics remain unavailable after contention clears, first stop hook callbacks and check the directory itself for unsafe links or permissions. Move the journal directory aside without following links, then let the next admitted hook recreate it; keep the moved bytes if needed for inspection. This resets only the observation window. Do not remove the parent private directory, catalog, or pending capture receipts.
+
+On Unix, the parent `.libra/private` must also belong to the current user with mode 0700. After confirming it is the intended directory and checking its ownership and contents, restore its owner-only permissions in place; do not delete it. The journal reader does not correct that parent. The existing capture-key writer has its own policy: it refuses foreign owners/group-or-other writes and normalizes permitted owner directories to 0700 before capture.
+
+Synthetic regressions run only on the operator's machine, with no CI registration:
+
+```sh
+cargo test --locked --features test-live-agent --test codex_capture_local_test capture_diagnostic_ -- --ignored --test-threads=1
+```
+
+
+## Codex session summary (CX-07 development)
+
+`libra agent session show <session-id> --json` adds `data.summary` for Codex. It contains `status`, `source_status=unproven`, `as_of_checkpoint`, `model`, `title`, `prompt_count`, `token_usage`, and `modified_file_count`. Human output includes the same source status and counts, including cached, reasoning and total tokens when known. Display text removes terminal controls and the common bidirectional, zero-width, tag and interlinear controls covered by the display filter; it does not perform full Unicode normalization. Session list and other providers keep their existing output.
+
+The summary belongs to one stored checkpoint snapshot. Selection uses the existing committed-checkpoint order (`created_at` descending, then checkpoint ID descending); `as_of_checkpoint` identifies its source. These are source-reported snapshot facts, not live usage, lifetime aggregates, native provenance, or proof that every observed turn was captured. The session lifecycle, pending probe and checkpoint identity are pinned in one database read snapshot before the object read. The metadata reader proves the ordinary metadata role, type and content hash under its work budget; it never reads the provider source, transcript bodies or reasoning artifact bodies to fill missing fields.
+
+`status` is `available`, `partial`, `pending`, `unknown`, or `unavailable`. Fields without established values are JSON null and display as unknown. A pending receipt or an active import masks token usage as unknown even if an earlier checkpoint has measured tokens. Zero is displayed only when stored metadata actually measured zero. Missing legacy extraction metadata stays unknown; a damaged role/object, malformed catalog or exhausted read budget is unavailable. Title stays unknown unless the stored typed extraction supplies it; it is not inferred from a prompt. Model/title strings are bounded, credential-redacted and stripped of terminal control characters before display.
+
+Live metadata already has an extraction slot. Historical Codex imports now carry bounded optional facts from the same redacted source snapshot through the existing private retention response into that slot. Invalid optional helper facts are omitted while the ordinary retained transcript survives. Replay and append keep completed checkpoint objects and normalized V1 records/digests intact; no summary cache, table, source reread or fallback path is added.
+
+Managed Codex hooks now locate the session rollout under the absolute `CODEX_HOME` directory, or the configured home’s `.codex` directory, within the original capture budget. The held source must begin with a `session_meta` whose ID and working directory match the verified hook scope. Readable ordinary thinking and optional summary facts are retained together in the checkpoint, with `source_status=unproven`. Deleting the provider source does not remove the stored export or make the summary reader reopen it. The local synthetic hook/store/export cases establish this path; a real Codex model and Windows runtime remain unverified. A hook-supplied arbitrary path cannot authorize a fallback, and a hook without a capture deadline does not read a Codex source.
+
+Pending includes the current `capture_status=retryable` value and legacy `retryable_error`. CX-22 shares this receipt predicate with the CX-07 summary, so a retryable receipt masks summary usage even without a ledger row. A crashed import remains pending until a subsequent import recovers its persisted lease state; lease expiry alone does not prove data capture completed. `partial` also covers sanitized display fields. Pending views may contain partial snapshot counts; pending is not evidence that those counts are complete.
+
+Summary regressions stay operator-local and are never registered in CI:
+
+```sh
+cargo test --locked --features test-live-agent --test codex_capture_local_test codex_session_summary_ -- --ignored --test-threads=1
+cargo build --locked --features test-live-agent --bin libra
+cargo test --locked --features test-live-agent --lib codex_session_summary_ -- --ignored --test-threads=1
+```
+
+
+## Codex source acquisition (CX-08 development)
+
+Use the managed hooks installed by `libra agent enable --agent codex`; they already supply the capture budget. Keep `CODEX_HOME` absolute if overriding the default home. Discovery is bounded and searches newest rollout directories first. Scope mismatch, unsafe links, oversized sources and an exhausted budget produce a partial/unavailable capture, never proof of completed thinking capture. The first header must match the same working directory, including a worktree subdirectory; known macOS system-directory aliases compare equivalently.
+
+The ordinary checkpoint retains the redacted rollout, including readable `reasoning.summary[].text`. Decoded credential values are scanned before persistence. Opaque encrypted content stays opaque, and this path adds no native provenance. Existing V1 coverage records and completed checkpoint objects keep their identities.
+
+The internal index reader accepts only an explicitly supplied, already closed and consistent single-file backup with no hard links. It does not automatically read a live `state_5.sqlite` or copy its WAL. Sidecars, changed/truncated data, failed or unsupported migrations, virtual-table schemas and exceeded limits mean unavailable, never zero sessions. CX-08 introduced this internal reader. CX-22 adds the explicit doctor backup option documented below.
+
+New Codex regressions remain operator-local, feature-gated and ignored:
+
+```sh
+cargo test --locked --features test-live-agent --test codex_capture_local_test codex_index_ -- --ignored --test-threads=1
+cargo build --locked --features test-live-agent --bin libra
+cargo test --locked --features test-live-agent --lib codex_index_ -- --ignored --test-threads=1
+```
+
+The index IO owner pins the explicit backup and its parent, checks sidecars and the bounded SQLite header before and after the worker, and retains an owner-only functional scratch directory until helper reaping. The worker creates one fixed owner-only copy (0600 on Unix), opens only that static copy read-only/immutable with query-only and trusted-schema disabled, and validates integrity plus migration checksums/schema/rows in one read transaction. It loads no extensions and takes no SQL input. Source files are never changed. Normal cancellation retains the scratch in the reaper; forcibly killing the parent or tearing down its runtime may leave private scratch behind. No sweeper is added. Windows uses the existing handle/ACL primitives, but its runtime and Job teardown/cleanup race still need Windows verification.
+
+
+
+### 从已关闭的 Codex 索引备份对账（CX-22 开发中）
+
+```sh
+libra agent doctor --codex-index-backup ./closed-index.sqlite --json
+libra agent doctor --codex-index-backup ./closed-index.sqlite --codex-index-page 2
+```
+
+显式提供已关闭且一致的备份。相对路径按调用目录作词法解析；
+backup 与 `--repair` 互斥，page 取值 1–10 且必须提供 backup。
+未提供 backup 时原 doctor 输出不变。此视图不打开 home 热数据库、不读 rollout
+正文、不导入、修复或 hydrate 对象。
+
+JSON 的 `data.codex_reconciliation` 区分备份覆盖区间
+`cutoff_ms` 至 `coverage_until_ms` 与本次窗口锚点。每次调用重新锚定七天窗口，
+分页不是稳定 cursor。`scope_candidate_count` 为全部 scope 候选，行状态和
+`page_totals` 仅对应本页，null 表示未计算。超出候选集的页给出
+`page_out_of_range` 和 null totals；过旧备份为 `outside_window`，
+totals 也为 null。`empty_snapshot` 只表示提供的备份为空。
+
+状态为 `stored_source/missing/missing_data/partial/pending/erased/unknown`。
+stored_source 要求具名 metadata、非空本地 ordinary 对象及角色、哈希、大小和
+manifest 声明的已存长度均验证通过。snapshot 的整源字节数可以与 import 的单 turn
+内容长度不同。它不证明可读 thinking 或所有 turn 完整；旧/不明 metadata、本地缺失、
+损坏或仅在 pack 中的对象保持 unknown。坏 Libra catalog 行不拖垮其余行；provider 索引的坏行或结构错误会令整个 section unavailable。
+已验证空 transcript 为 missing_data/stored_transcript_empty；manifest 长度不一致为
+unknown/stored_size_mismatch，不给 import hint。quarantined 会话、committed identity
+却没有 session 的坏账本为 unknown；schema-pending 和 retryable 收据为 pending。
+优先级为 erased、当前 Libra scope 的 pending 证据、目录及数据证明。reason 使用固定
+snake_case key，如 scope_root_unproven、response_inconsistent、row_invalid、
+timestamp_schema、budget_exhausted。
+
+只有 proven scope 的 missing 与 missing_data 给出不带 `--yes` 的显式 import
+提示；erased 不给提示。无 session 的 pending 也检查；过期 import lease 仍为 pending，
+另标 `import_lease_expired`。若先前采集在 SHA-256/BLAKE3 仓库因对象格式不匹配
+失败，请使用包含 helper 格式修复的构建重试原采集或 import；写入成功前仍为 pending，
+doctor 不自动修复或清理先前 loose objects。预算不足明确标 `budget_exhausted`。
+
+`scope_unproven` 表示目录归属未证明；`child_attribution_unproven` 表示 child 没有
+独立已验证 source，edge 也不能证明其正文归属 parent。archived 行仍参与对账。
+active 会话在首个 checkpoint 前可能为 missing_data；import hint 仅为显式预览，
+不自动写入。大小写/NFC-NFD 与 macOS Data volume 可识别别名只列为 ambiguous，
+不授予 source 读取权限；无法识别的 root 外 symlink 拼写排除，root 内遇到链接为 unknown。
+备份 parent 目录的 sidecar 枚举超过 4096 项时令整个 section unavailable。
+
+任何毫秒时间超出当前时间五分钟都会令备份 unavailable。上限为所有仓库合计 10000
+近期候选、thread 文本 1 MiB、edge 独立上限、每个 scope 目录 4096 项及 1024 个目录
+身份缓存。大目录可能因此 unknown/unavailable。一次对账共用两秒预算，catalog/
+checkpoint metadata 及解压后的 tree/manifest 证明字节合计 8 MiB、ordinary 验证 64 MiB；原 doctor 扫描和
+worker 收尾保留原行为。失败或截断不报可靠的零缺失。所有新增 Codex 测试仅在本机
+以 `test-live-agent` + `--ignored` 运行，不加入 CI。
+
+实现：command owner 在进入 blocking worker 前固定 request.workdir/root；catalog 同一
+read transaction 返回 tombstone、scoped identity 与 pending/预算事实，事务关闭后再由
+checkpoint reader 一次证明 roles、对本地 loose 对象 stream 校验。stored byte_len 来自
+manifest，不能把整源 projection 长度直接当作单 turn 存储长度。SQLite 副本设置
+ignore_check_constraints，schema-wide 生成列拒绝后再做结构完整性检查；SQLite 每值上限
+16 MiB，原 deadline 的进度回调始终有效。任意 CHECK bytecode 不作为可执行验证规则。
+目录 memo 仅保存身份/结果，不常驻保存每个 FD；重开必须 no-follow 且身份一致。
+Windows 只增加 Disk/VerbatimDisk 已知词法别名，UNC/device 拒绝，运行验证尚未完成。
+
+CX-22 的窗口只使用 updated_at_ms；不把 created_at_ms<=updated_at_ms 当作未有
+官方证明的额外数据库不变量，clock skew 下的创建/更新顺序不用于猜会话归属或完整性。
+
+Schema, migration and integrity refusals use `schema_unsupported`,
+`migration_unsupported` and `integrity_failed`. Invocation scope, worker and
+transaction failures use `scope_unavailable`, `worker_unavailable` and
+`catalog_unavailable`; other catalog/scope failures use
+`scope_or_catalog_unavailable`. Catalog deadlines and typed work-budget errors
+use `budget_exhausted`. Unclassified backup IO errors use `backup_unreadable`.
+
+
+### 完整历史索引补导（CX-19 开发中）
+
+公开合同见[命令指南](../../commands/agent.md#codex-full-history-index-backfill-cx-19-development)。
+新--codex-index-backup为exclusive Codex selector，完整历史/归档，不复用Recent七天DTO。
+先目录scope证明、Rust bytewise排序与分页，再同一Libra读事务判catalog；Missing复用
+原prepare/commit/fence，existing只做catalog事实且不刷新原source。旧BatchSkip/结果类型
+保留，新增非空existing数组及人类/错误details；partial双报告保持。坏索引source形状
+在reader之前020；whole拒绝018加固定reason_key，不打印成功batch。旧selector稳定。
+
+SQL/parser与DTO在codex_index；provider_index_io是唯一新FS owner，在原copy mode中
+以optional import_scope版本字段区分查询，和recent_scope互斥。None旧wire/三migration
+保持，old full query先count/type/octet_length sentinel预检后fetch strings，thread+edge
+合计1MiB，重复ID拒绝。共享ScopeProjection复用同一个rooted walker；parent验证计数/
+排序/唯一ID、source_state关系表及edge双端Proven。RootPin跨同意和catalog保持，读源前
+及prepare后在原command deadline内重验；事务先rollback再进入源授权，不留下后台writer。
+import入口优先使用已pin的request.worktree_root/storage配对；未pin才调用原fallible
+repository discovery，避免嵌入调用或linked worktree被ambient cwd替换。
+
+source_state：eligible=>Proven+Some合法绝对rollout叶；invalid_path=>Proven+None；
+scope_unproven=>非Proven+None。UI backup参数可作词法../归一，但数据来源path不能
+相对cwd解析或剥离ParentDir。叶谓词与原live locator共享，archive不限制四段日期。
+IO helper从不stat/open rollout_path。调用者不能把edge送writer或据它猜parent。
+源码/CLI实现不改变原data-floor ordinary retention或引入native认证前置。
+
+全部新增Codex回归只在本机，以test-live-agent+ignored运行，绝不加入CI：
+
+```sh
+cargo build --locked --features test-live-agent --bin libra
+cargo test --locked --features test-live-agent --test codex_capture_local_test codex_uncaptured_ -- --ignored --test-threads=1
+cargo test --locked --features test-live-agent --lib codex_index_full_scope_ -- --ignored --test-threads=1
+```
+
+正式验收需先列实际匹配名，再执行非零新门；zero-reader oracle必须真实per-slot loop、
+入口task-local计数与eligible正控制，不能只测pure projection而空过。日志观察使用
+/dev/fd/2的内存captured stderr，不新建报告/log文件。Windows仅窄编译不能冒充运行；
+current源码的focused/strict/guard/source+docs review/site/full仍须取得实际结果。
+
+CX19的目录4096项/memo1024项耗尽可将本scope行标layout unknown并逐slot020；
+不是foreign证明或全snapshot预算错误。索引根在per-slot失效时中止后续读源，将未尝试
+slot记018，并保留已完成results及固定reason_key。catalog begin/tombstone失败使用
+catalog_unavailable，逐slot失败不会抹掉前一slot的durable结果；human partial也计existing。
+一致备份示例先退出Codex，再通过Python SQLite backup API读取mode=ro的源并写入新目标，实际示例见公开指南。
+
+本机系统SQLite -readonly .backup对closed WAL/no-sidecar夹具实际失败；公开示例
+采用已实测的Python SQLite mode=ro backup API，不对源使用immutable，也不覆盖既有目标。
+这只是功能SQLite夹具的本机验证，不冒充真实quit-Codex索引验证。
+
+pre-loop catalog snapshot(begin/read/rollback)不可用是whole 018且无成功batch；
+循环中的tombstone lookup失败保留此前已完成slot。Python备份示例先打开只读源，
+再排他创建目标；备份失败会删除本次新建的目标，已有文件不覆盖/删除。
+
+## Codex child content (CX-09 development)
+
+Current source builds also retain verified Codex child rollouts as independent
+content checkpoints. Live child collection runs at `SubagentStop` and parent
+checkpoint boundaries; consented import and pending recovery use the same
+collector. The collector uses the absolute `CODEX_HOME` directory, or the
+configured home's .codex directory (also the fallback for a relative
+CODEX_HOME value), and validates the opened header's root,
+current thread, immediate parent, child and repository working directory.
+For a nested child, its immediate parent can differ from its root session.
+A legacy root header may omit session_id and inherit its own id; a child
+must still supply its root. A supplied transcript path or child ID alone
+does not authorize a source.
+
+Child content keeps returned readable reasoning summaries, `encrypted_content`
+and unknown ordinary fields under the existing bounded retention contract.
+Use `agent checkpoint export <content-checkpoint-id>` to read the stored
+transcript; show remains a summary. An opaque value is preserved without
+decryption and is not readable thinking. Active/archive moves and unchanged
+live/import/recovery replays reuse the same logical content revision.
+New bytes can append a revision. Stored bytes survive deletion of the
+provider source.
+
+A live `SubagentStop` can associate content with its boundary only after the
+current scope, source digest, settled claim and observed turn have been
+verified together. A matching child ID in another turn cannot establish
+that association. Late content can be collected on the same callback's
+replay without rewriting the original boundary objects. Libra does not
+redeliver host callbacks; later parent capture, import or recovery can still
+save late content without establishing that old boundary association. Missing proof
+leaves content unresolved and still exportable. Historical import alone
+does not establish a live association or native provenance.
+
+For UUID-shaped Codex session IDs, a parent `SessionEnd` waits for its known
+required child claims to settle. An unavailable provider root preserves
+pending recovery; finding some partial data without a known unsettled
+claim can finish with an explicit partial diagnostic. A managed parent can
+carry an incomplete-extraction warning even when zero children were found;
+that fixed omission warning does not establish that a deadline expired.
+Old arbitrary-label
+callbacks keep their original parent-only live route without new child dispatch
+or claims. An already-elapsed discovery window can still add a fixed
+skip/incomplete-extraction diagnostic. This live predicate adds no identifier
+restriction to stored import or recovery; their existing source and selector
+validation remains in force, including UUID filenames for public `--path` import. Neither a UUID nor a
+partial diagnostic proves native origin. Inspect `agent session show` and
+`agent doctor` for pending state; retry after restoring required sources.
+A retry cannot reconstruct a deleted source. The local recovery worker
+retains its original two-second batch and at most five artifact attempts,
+so recovery is not a promise of eventual completion.
+
+To request readable summaries from Codex, its `config.toml` supports
+`model_reasoning_summary = "detailed"` and
+`model_supports_reasoning_summaries = true`. Whether text is returned still
+depends on the selected model and provider. Empty summaries do not imply
+that Libra lost text; compare the actual source with decoded export JSON.
+All new Codex capture tests remain operator-local, feature-gated and ignored;
+they are not scheduled in CI. These source-build changes remain under local
+acceptance and are not a released-runtime guarantee.
+
+Development routing remains provider-neutral: the existing LiveCaptureBinding
+selects one LiveSubagentDiscovery for live, Import-current and Recovery-root.
+All provider file I/O stays in subagent_content and its killable helper.
+Header probes, rechecks and bodies share the same byte/source/entry budgets;
+metadata is not a second uncharged read allowance. Claude keeps its original
+wire and default incomplete-parent extraction behavior. Codex opts into the
+existing managed extraction omission flag, including a zero-source incomplete
+discovery; its fixed warning does not imply that a deadline expired.
+
+The existing receipt child gate stores only Preparing and required source
+revision floors. Recovery does not invent a second ledger or reset the
+original action, reserved revision, attempt policy or Manual repair authority.
+Every completion transaction rechecks settled leaves. Retryable error progress
+can be recorded while the gate is pending; real checkpoint failure is not
+reclassified as a successful child wait. Import/recovery may preserve ordinary
+partial content without minting a fresh live proof.
+
+Local verification commands (build the current helper first):
+
+```sh
+source .env.test && cargo build --locked --features test-live-agent --bin libra
+source .env.test && cargo test --locked --features test-live-agent --test codex_capture_local_test codex_child_content_ -- --ignored --test-threads=1
+source .env.test && cargo test --locked --features test-live-agent --lib codex_child_ -- --ignored --test-threads=1
+source .env.test && cargo test --locked --features test-live-agent --lib codex_stored_ -- --ignored --test-threads=1
+```
+
+macOS native smoke on codex-cli 0.162.1 used a temporary HOME/CODEX_HOME,
+the current compiled Libra installer and all twelve persisted hook trust entries.
+With gpt-6.1-sol/medium and the explicit summary settings above, a real child
+returned a 376-character readable summary and 2444 characters of opaque
+reasoning. Both matched decoded default content exports exactly. The parent
+stopped; the growing child produced two content revisions. Child metadata
+remained partial/unresolved, so this proves ordinary retention rather than
+native provenance or a successful native boundary association. The default
+summary run had returned opaque data only. No global Codex configuration was
+changed. The current full-card regression and delivery gates remain open.
+
+Summary controls are documented in the
+[official Codex configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference).
+
+The subsequent real TUI Snake smoke used the current source binary and
+system Codex 0.162.1 with the same isolated trust setup. The generated curses
+game compiled, passed its self-test and rendered/accepted controls in a real
+PTY. Three child summary segments (1598 UTF-8 bytes total), three opaque
+values (8764 characters) and their complete reasoning JSON objects matched
+default checkpoint exports. doctor/status succeeded and the parent stopped;
+metadata stayed partial/unresolved, with no native association claim. This
+does not replace the pending final full regression or delivery gates.

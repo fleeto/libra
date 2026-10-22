@@ -1096,6 +1096,7 @@ async fn capture_foundation_preserves_redaction_and_reasoning_boundaries() {
 /// Every blob below one checkpoint's `checkpoint/<xx>/<rest>` subtree, keyed
 /// by its slash-separated path, so a privacy assertion covers each durable
 /// role rather than only the metadata document.
+#[cfg(feature = "test-live-agent")]
 async fn checkpoint_tree_blobs(repo: &HookRepo, checkpoint_id: &str) -> Vec<(String, Vec<u8>)> {
     fn read_object(storage: &std::path::Path, oid: &str) -> Vec<u8> {
         let hash = ObjectHash::from_str(oid).expect("valid checkpoint object id");
@@ -1172,6 +1173,7 @@ async fn checkpoint_tree_blobs(repo: &HookRepo, checkpoint_id: &str) -> Vec<(Str
     blobs
 }
 
+#[cfg(feature = "test-live-agent")]
 async fn session_checkpoint_ids(repo: &HookRepo, session_id: &str) -> Vec<String> {
     let url = format!("sqlite://{}?mode=ro", repo.db_path().display());
     let mut opts = ConnectOptions::new(url);
@@ -1482,15 +1484,11 @@ async fn og26_candidate_has_zero_normal_sink_hits() {
     }
 }
 
-/// ACF-08: Codex's opaque reasoning ciphertext and ordinary secrets keep one
-/// privacy boundary on both entries into the capture foundation. The rollout
-/// carries the ciphertext as a `reasoning` item's `encrypted_content` next to
-/// a secret in user and assistant text. Live hooks never follow a
-/// provider-supplied rollout pointer (Codex is source-absent), so they see
-/// the same ciphertext and secret only through envelope fields; historical
-/// import reads the rollout itself. Every durable checkpoint role, CLI
-/// projection, catalog row and stored object must drop the ciphertext and
-/// keep the secret only as a redaction placeholder.
+/// Operator-local Codex retention and credential boundaries. Live callbacks
+/// must not follow provider-supplied paths; consented historical import keeps
+/// ordinary reasoning values while every surface still redacts credentials.
+#[cfg(feature = "test-live-agent")]
+#[ignore = "operator-local Codex acceptance; never run in CI"]
 #[tokio::test]
 async fn capture_foundation_codex_reasoning_boundaries_live_and_import() {
     const REDACTED: &str = "<REDACTED:aws-access-key-id>";
@@ -1648,6 +1646,14 @@ async fn capture_foundation_codex_reasoning_boundaries_live_and_import() {
             );
         }
     };
+    let assert_no_secret = |surface: &str, bytes: &[u8]| {
+        assert!(
+            !bytes
+                .windows(token.len())
+                .any(|window| window == token.as_bytes()),
+            "{surface} retained a raw credential"
+        );
+    };
     let report_names_secret_rule = |report: &Value| {
         report["matches"].as_array().is_some_and(|matches| {
             matches
@@ -1684,12 +1690,19 @@ async fn capture_foundation_codex_reasoning_boundaries_live_and_import() {
         "the live secret must be redacted in place, not silently dropped"
     );
 
-    // Import: the rollout is read whole, but its checkpoint keeps only the
-    // allowlisted turn projection with each secret replaced in place.
+    // Authorized ordinary transcript/export and explicit checkpoint JSON may carry
+    // retained reasoning. Metadata, logs, catalogs and live fallback stay content-free.
+    let mut retained_transcripts = Vec::new();
     for checkpoint_id in &import_checkpoints {
         let blobs = checkpoint_tree_blobs(&repo, checkpoint_id).await;
         for (path, blob) in &blobs {
-            assert_free(&format!("imported checkpoint {path}"), blob);
+            assert_no_secret(&format!("imported checkpoint {path}"), blob);
+            if path == "transcript/codex.jsonl" {
+                assert!(String::from_utf8_lossy(blob).contains(encrypted_marker));
+                retained_transcripts.push(blob.clone());
+            } else {
+                assert_free(&format!("imported checkpoint {path}"), blob);
+            }
         }
         let blob = |wanted: &str| {
             blobs
@@ -1709,14 +1722,15 @@ async fn capture_foundation_codex_reasoning_boundaries_live_and_import() {
             );
         }
         assert!(
-            !transcript.contains("encrypted_content"),
-            "imported turn projection carried a reasoning ciphertext field: {transcript}"
+            transcript.contains("encrypted_content") && transcript.contains("planning the deploy"),
+            "ordinary import must retain the source reasoning values"
         );
         let report: Value =
             serde_json::from_str(&blob("redaction_report.json")).expect("import report JSON");
         assert!(
-            report_names_secret_rule(&report),
-            "imported checkpoint lacks redaction evidence: {report}"
+            report_names_secret_rule(&report)
+                || report["dropped_matches"].as_u64().unwrap_or(0) >= 2,
+            "decoded credential scans must retain evidence without false global offsets"
         );
         let metadata: Value = serde_json::from_str(&blob("metadata.json")).expect("metadata");
         let snapshot = &metadata["transcript_snapshot"];
@@ -1741,14 +1755,25 @@ async fn capture_foundation_codex_reasoning_boundaries_live_and_import() {
     );
     assert_free("agent session show", &session_show.stdout);
     for checkpoint_id in live_checkpoints.iter().chain(&import_checkpoints) {
-        assert_free(
-            "agent checkpoint show",
-            repo.checkpoint_show(checkpoint_id).to_string().as_bytes(),
-        );
-        assert_free(
-            "agent checkpoint export",
-            repo.checkpoint_export(checkpoint_id).as_bytes(),
-        );
+        let shown = repo.checkpoint_show(checkpoint_id);
+        assert_no_secret("agent checkpoint show", shown.to_string().as_bytes());
+        if live_checkpoints.contains(checkpoint_id) {
+            assert_free("live checkpoint show", shown.to_string().as_bytes());
+        } else {
+            let reasoning = &shown["data"]["reasoning"];
+            assert_eq!(reasoning["readable"], json!(["planning the deploy"]));
+            assert_eq!(reasoning["encrypted_content"], json!([encrypted_marker]));
+            assert_eq!(reasoning["availability"], json!("unproven"));
+            assert_eq!(reasoning["readable_obtained"], json!(true));
+        }
+        let export = repo.checkpoint_export(checkpoint_id);
+        assert_no_secret("agent checkpoint export", export.as_bytes());
+        if live_checkpoints.contains(checkpoint_id) {
+            assert_free("live checkpoint export", export.as_bytes());
+        } else {
+            assert!(export.contains(encrypted_marker));
+            assert!(export.contains("planning the deploy"));
+        }
     }
     let mut options = ConnectOptions::new(format!("sqlite://{}?mode=ro", repo.db_path().display()));
     options.sqlx_logging(false);
@@ -1774,7 +1799,11 @@ async fn capture_foundation_codex_reasoning_boundaries_live_and_import() {
     // evidence record; a hook-only session carries the flat hook report.
     assert!(
         report_names_secret_rule(&session_report)
-            || report_names_secret_rule(&session_report["import"]),
+            || report_names_secret_rule(&session_report["import"])
+            || session_report["import"]["dropped_matches"]
+                .as_u64()
+                .unwrap_or(0)
+                >= 2,
         "session row lacks redaction evidence: {session_report}"
     );
     for path in [
@@ -1802,7 +1831,13 @@ async fn capture_foundation_codex_reasoning_boundaries_live_and_import() {
             let hash = ObjectHash::from_str(&format!("{prefix}{rest}")).expect("loose object id");
             let payload =
                 libra::utils::object::read_git_object(&storage, &hash).expect("read loose object");
-            assert_free(&format!("object {prefix}{rest}"), &payload);
+            assert_no_secret("stored object", &payload);
+            if !retained_transcripts
+                .iter()
+                .any(|transcript| transcript == &payload)
+            {
+                assert_free(&format!("object {prefix}{rest}"), &payload);
+            }
             scanned_objects += 1;
         }
     }

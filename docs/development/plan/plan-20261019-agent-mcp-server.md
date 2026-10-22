@@ -3378,7 +3378,7 @@ ER-01 至 ER-14 按模板原文对本计划全部任务生效（见 [`plan-templ
 
 **Task type:** `implementation`
 
-**Lifecycle / Acceptance:** `pending` / 空
+**Lifecycle / Acceptance:** `in-progress` / `locally-accepted`
 
 **Description:** 自 MC-31 拆出（R28）。在 `src/command/mod.rs` 现有对象读取函数旁新增 helper `object_size(oid)`：loose 对象只解压到对象头；pack 非 delta 条目读条目头；pack **delta** 条目（`OFS_DELTA`/`REF_DELTA`）解压 delta 数据开头、读取其中的目标对象尺寸 varint（不重建对象），因此小 delta 展开成大对象时也得到真实尺寸，解压字节数 ≤ 64 KiB。工作树侧的有界读取由 MC-36 承接。现有读取函数与 CLI 行为不变。唯一行为轴：「对象尺寸」。
 
@@ -3390,22 +3390,23 @@ ER-01 至 ER-14 按模板原文对本计划全部任务生效（见 [`plan-templ
 |---|---|
 | 现行无界读取 | `src/command/mod.rs:360`（`fs::read`） |
 | pack delta 条目头只给出 delta 数据尺寸 | Git pack 格式（delta 数据以基对象尺寸与目标对象尺寸两个 varint 开头） |
+| 本地门 | 五个 `--exact` 门均 ok。loose 只解压到对象头；pack 非 delta 读条目头；delta 只读目标尺寸 varint，解压不超过 64 KiB |
 
 **Acceptance criteria:**
 
-- [ ] AC-1 loose 2 MiB blob 的 `object_size` 返回 2097152。
-- [ ] AC-2 同一调用的解压字节数（debug 计数器）≤ 65536。
-- [ ] AC-3 pack 中非 delta 的 2 MiB blob 的 `object_size` 返回 2097152。
-- [ ] AC-4 pack 中以小 delta 存储、目标为 2 MiB 的 blob，`object_size` 返回 2097152。
-- [ ] AC-5 同一 delta 调用的解压字节数 ≤ 65536（不重建对象）。
+- [x] AC-1 loose 2 MiB blob 的 `object_size` 返回 2097152。
+- [x] AC-2 同一调用的解压字节数（debug 计数器）≤ 65536。
+- [x] AC-3 pack 中非 delta 的 2 MiB blob 的 `object_size` 返回 2097152。
+- [x] AC-4 pack 中以小 delta 存储、目标为 2 MiB 的 blob，`object_size` 返回 2097152。
+- [x] AC-5 同一 delta 调用的解压字节数 ≤ 65536（不重建对象）。
 
 **Verification:**（本卡特有判据，计入 G-03；`--exact` 门按 GC-MC-07 执行）
 
-- [ ] AC-1：`source .env.test && cargo test --lib command::tests::object_size_loose_blob -- --exact`（new）
-- [ ] AC-2：`source .env.test && cargo test --lib command::tests::object_size_loose_inflates_header_only -- --exact`（new）
-- [ ] AC-3：`source .env.test && cargo test --lib command::tests::object_size_packed_full -- --exact`（new）
-- [ ] AC-4：`source .env.test && cargo test --lib command::tests::object_size_packed_delta_reports_target_size -- --exact`（new）
-- [ ] AC-5：`source .env.test && cargo test --lib command::tests::object_size_packed_delta_does_not_reconstruct -- --exact`（new）
+- [x] AC-1：`source .env.test && cargo test --lib command::tests::object_size_loose_blob -- --exact`（new）
+- [x] AC-2：`source .env.test && cargo test --lib command::tests::object_size_loose_inflates_header_only -- --exact`（new）
+- [x] AC-3：`source .env.test && cargo test --lib command::tests::object_size_packed_full -- --exact`（new）
+- [x] AC-4：`source .env.test && cargo test --lib command::tests::object_size_packed_delta_reports_target_size -- --exact`（new）
+- [x] AC-5：`source .env.test && cargo test --lib command::tests::object_size_packed_delta_does_not_reconstruct -- --exact`（new）
 
 **Full-suite trigger:** `T-1: GC-02 意义上的共享对象/文件读取 helper`
 
@@ -3583,7 +3584,7 @@ ER-01 至 ER-14 按模板原文对本计划全部任务生效（见 [`plan-templ
 
 **Task type:** `implementation`
 
-**Lifecycle / Acceptance:** `in-progress` / `locally-accepted`
+**Lifecycle / Acceptance:** `done` / `complete`（`v0.30.82` / `24fabae`。v0.30.81 的 macOS `extern` 构建失败已前滚。release.yml 39591913788 八项 success，四平台产物 HTTP 200。codeql 39591846433 success。该提交的 base.yml 被后续 main 取消；含该提交的 `f0ea585` 上 base.yml 39629633740 八项 success，codeql 39629633747 success。）
 
 **Description:** 自 MC-29 拆出（R29）。为每个读子进程施加内存上限（默认 512 MiB；仅在 `cfg(debug_assertions)` 且 `LIBRA_TEST=1` 时可由 `LIBRA_MCP_TEST_WORKER_MEM_MB` 覆盖）：Linux 上在子进程 `exec` 前以 `setrlimit(RLIMIT_AS)` 设硬上限；macOS（无可靠的地址空间硬上限）由父进程每 50 ms 采样子进程常驻内存（`proc_pid_rusage`），超过上限即 `SIGKILL` 其进程组；Windows 以 Job Object 的 `JOB_OBJECT_LIMIT_PROCESS_MEMORY` 设硬上限。超过上限时服务回复工具错误 `LBR-AGENT-028`（`structuredContent.reason = "worker_memory_limit"`），回收后归还槽位。本卡是**纵深防御**：读路径的主要内存上限来自算法预算（MC-31/MC-37 的 diff 预算、MC-33 的 status 扫描与输出预算），本卡防御未预见的分配。保证范围如实限定：Linux 的 `RLIMIT_AS` 与 Windows 的进程级限制作用于读子进程本身，macOS 为采样上限（两次采样之间可超出）；读子进程的只读预检把 worktree I/O 执行器配置为**纯进程内模式**（`src/internal/worktree_io/executor.rs` 的 `WorkerConfig` 新增 `in_process_only`，所有请求走既有的 `run_in_process` 路径，不派生 I/O 辅助进程），因此读子进程内的 status 不产生任何后代进程：超时终止与内存上限都作用于完整的读工作进程树（CLI 的 status 仍使用辅助进程池，行为不变）。另注册仅在 debug 且 `LIBRA_TEST=1` 时存在的 `libra_test_alloc`（在读子进程内逐步分配 `mb` MiB 并保持）。唯一行为轴：「读子进程内存上限」。
 

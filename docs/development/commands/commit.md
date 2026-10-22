@@ -11,6 +11,16 @@ OID.
 
 ## 命令实现目标
 
+CX-23 的 `agent.commit_trailer` 默认关闭。配置不可读时关闭关联并给出警告，
+避免阻断其它配置仍有效的普通提交；可读取的无效值拒绝提交。
+显式 true 时，`commit-msg` hook
+完成后冻结当前 repo/worktree 的已提交 checkpoint 会话（最多 64），在签名前
+去重注入 `Libra-Agent-Session` trailer，ref 成功后在同一 SQLite 事务内重验会话作用域与 workspace lease，再写本地
+DAO 关联。amend 从被替换提交继承仍授权的会话链接。
+`--no-agent-trailer` 省略本次自动 trailer 但保留关联；dry-run 无关联写。
+CX-27 durable journal 尚未实现，ref 后 DAO 错误仅告警，本地崩溃恢复不承诺。
+Cloud refs-only metadata 不备份本地关联或无 trailer 关联。
+
 `libra commit` 的目标是把索引快照记录为新提交，并处理消息来源、作者/提交者、vault 签名、`.libra/hooks` commit 生命周期、结构化输出和兼容拒绝。P1-10 支持 `pre-commit`、`prepare-commit-msg`、`commit-msg`、`post-rewrite` 与 `post-commit`；Git hooks bridge（`.git/hooks` / `core.hooksPath`）仍按 [`_compatibility.md` D3](_compatibility.md#d3git-hooks-bridge-作为核心特性) 拒绝。常用 Git commit 表面已经覆盖：消息/模板/复用、amend、auto-stage、author/date/env、cleanup、dry-run/porcelain、trailers、编辑器、verbose diff 与稳定错误码。编辑器模板默认含注释化 status；`commit.status=false` 可关闭，`--status`/`--no-status` 显式覆盖，且仅在 cleanup 会剥离注释时注入。`commit.cleanup`/`commit.verbose` 提供既有 local→global 默认；`commit.gpgSign` 提供签名默认值，显式 `-S`/`--gpg-sign` 强制 vault 签名，`--no-gpg-sign` 强制跳过，最后一个 CLI 签名标志生效。
 
 ## 对比 Git 与兼容性

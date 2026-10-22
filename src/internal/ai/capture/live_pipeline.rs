@@ -51,9 +51,9 @@ use crate::{
                     terminal_session_identity_changed,
                 },
                 live_checkpoint::{
-                    append_redaction_report_bounded, finalizer_now_millis,
-                    settle_preapplied_without_checkpoint, write_committed_checkpoint,
-                    write_subagent_checkpoint,
+                    append_redaction_report_bounded, child_checkpoint_wait_error,
+                    finalizer_now_millis, settle_preapplied_without_checkpoint,
+                    write_committed_checkpoint, write_subagent_checkpoint,
                 },
                 scope_binding::{ActiveRepositoryFailureClass, active_repository_failure},
                 state::{CapturePhase, CheckpointWrite, LifecycleReducerInput, reduce_lifecycle},
@@ -63,7 +63,10 @@ use crate::{
                 lifecycle::{LifecycleEventKind, SessionHookEnvelope},
                 provider::{HookProvider, ProviderHookCommand},
             },
-            observed_agents::live_capture::{LiveCaptureBinding, LiveCaptureContext},
+            observed_agents::live_capture::{
+                LiveCaptureBinding, LiveCaptureContext, SubagentDiscoveryAvailability,
+                SubagentEventPolicy, UntrustedChildSourceHints,
+            },
             subagent_content::SubagentDiscovery,
         },
         db,
@@ -581,6 +584,14 @@ async fn persist_expired_terminal_pending(
     )
     .map_err(|error| anyhow!("prepare expired terminal scope-fenced catalog request: {error}"))?
     .with_metadata(CaptureCatalogMetadataPatch::default());
+    let catalog_request = require_child_gate_for_terminal(
+        catalog_request,
+        context.binding,
+        context
+            .binding
+            .subagent_event_policy(LifecycleEventKind::SessionEnd, &context.envelope.session_id),
+    )?;
+
     // This recovery path is the explicit terminal-settlement exception. It
     // gets only the dispatch-established fixed grace window and cannot reuse
     // the ordinary expired capture budget for new snapshot/checkpoint work.
@@ -590,8 +601,11 @@ async fn persist_expired_terminal_pending(
         Some(settlement_deadline),
     )
     .await
-    .map_err(|error| anyhow!("reserve expired terminal catalog mutation: {error}"))?
-    {
+    .map_err(|error| {
+        // Keep the previous top-level diagnostic as well as its typed cause.
+        let message = format!("reserve expired terminal catalog mutation: {error}");
+        anyhow::Error::new(error).context(message)
+    })? {
         CaptureCoordinatorReserveOutcome::Reserved(reservation) => *reservation,
         CaptureCoordinatorReserveOutcome::AlreadyApplied => return Ok(()),
         CaptureCoordinatorReserveOutcome::ConflictUnchanged { conflict } => {
@@ -676,6 +690,7 @@ async fn ingest_agent_traces_payload_with_scope(
     use crate::internal::ai::observed_agents::{RedactionMatch, Redactor};
 
     let crate::internal::ai::capture::ingress::CaptureIngressParts {
+        child_source_hints,
         hook_command: _command,
         provider_kind,
         provider_source,
@@ -693,6 +708,7 @@ async fn ingest_agent_traces_payload_with_scope(
     debug_assert_eq!(provider_kind, binding.hook_name());
     ingest_span.record("frame_bytes", frame_bytes as u64);
     let (envelope, _runtime_scope) = narrow_envelope_from_capture_context(context, event.kind);
+    let child_event_policy = binding.subagent_event_policy(event.kind, &envelope.session_id);
     // A provider without an installer-provided managed budget (its exporter
     // owns the window) gets that budget as the single capture deadline before
     // any durable runtime path can begin. Do not construct another deadline
@@ -994,6 +1010,9 @@ async fn ingest_agent_traces_payload_with_scope(
             &runtime_redaction_report,
         )),
     ));
+    let catalog_request =
+        require_child_gate_for_terminal(catalog_request, binding, child_event_policy)?;
+
     if settle_expired_terminal_if_needed(deadline, &expired_terminal_context).await? {
         return Ok(());
     }
@@ -1007,10 +1026,67 @@ async fn ingest_agent_traces_payload_with_scope(
         capture_deadline,
     )
     .await
-    .map_err(|error| anyhow!("reserve scope-fenced capture catalog mutation: {error}"))?
-    {
+    .map_err(|error| {
+        // Keep the previous top-level diagnostic as well as its typed cause.
+        let message = format!("reserve scope-fenced capture catalog mutation: {error}");
+        anyhow::Error::new(error).context(message)
+    })? {
         CaptureCoordinatorReserveOutcome::Reserved(reservation) => *reservation,
-        CaptureCoordinatorReserveOutcome::AlreadyApplied => return Ok(()),
+        CaptureCoordinatorReserveOutcome::AlreadyApplied => {
+            if child_event_policy == SubagentEventPolicy::Boundary
+                && binding.subagent_discovery().is_some()
+                && let Some(repo) = repo_path
+            {
+                let replay_deadline = child_boundary_deadline(capture_deadline)?;
+                if let Some(fence) =
+                    crate::internal::ai::subagent_content::prepare_child_boundary_replay(
+                        conn,
+                        &catalog_request,
+                        replay_deadline,
+                    )
+                    .await?
+                {
+                    let _maintenance_lock =
+                        acquire_publication_maintenance_lock(repo, Some(replay_deadline))
+                            .await
+                            .context(
+                                "acquire repository maintenance lock before child boundary replay",
+                            )?;
+                    let live_context = LiveCaptureContext {
+                        libra_session_id: &session_id,
+                        provider_session_id: &envelope.session_id,
+                        verified_cwd: std::path::Path::new(&envelope.cwd),
+                    };
+                    let child = capture_boundary_children(
+                        binding,
+                        conn,
+                        scope,
+                        repo,
+                        &live_context,
+                        &child_source_hints,
+                        replay_deadline,
+                    )
+                    .await;
+                    if let Some(summary) = child.summary.as_ref() {
+                        let associations = summary.bind_boundary_associations(
+                            event.kind,
+                            event_id,
+                            &live_context,
+                            &child_source_hints,
+                        );
+                        crate::internal::ai::subagent_content::replay_child_boundary_associations(
+                            conn,
+                            repo,
+                            &associations,
+                            &fence,
+                            replay_deadline,
+                        )
+                        .await?;
+                    }
+                }
+            }
+            return Ok(());
+        }
         CaptureCoordinatorReserveOutcome::ConflictUnchanged { conflict } => {
             ingest_span.record("partial", true);
             // A validated terminal boundary refused because this provider
@@ -1289,9 +1365,20 @@ async fn ingest_agent_traces_payload_with_scope(
         // Codex hooks skip the generic command preflight so an auxiliary
         // callback can be acknowledged when storage is unavailable. Take the
         // shared hold at the actual object-publication boundary instead.
-        let _maintenance_lock = match crate::internal::maintenance_lock::MaintenanceLock::shared(
+        let child_publication_deadline = if binding.subagent_discovery().is_some()
+            && matches!(
+                child_event_policy,
+                SubagentEventPolicy::Boundary | SubagentEventPolicy::RequiredTerminal
+            ) {
+            Some(child_boundary_deadline(capture_deadline)?)
+        } else {
+            None
+        };
+        let _maintenance_lock = match acquire_publication_maintenance_lock(
             repo,
+            child_publication_deadline,
         )
+        .await
         .context(
             "failed to acquire the repository maintenance lock before writing an agent checkpoint",
         ) {
@@ -1320,6 +1407,26 @@ async fn ingest_agent_traces_payload_with_scope(
         // leaving them as bounded `subagent_events` metadata on the main
         // checkpoint. `SessionEnd` / `TurnEnd` keep the `committed` path.
         if checkpoint == CheckpointWrite::SubagentBoundary {
+            let live_context = LiveCaptureContext {
+                libra_session_id: &session_id,
+                provider_session_id: &envelope.session_id,
+                verified_cwd: std::path::Path::new(&envelope.cwd),
+            };
+            let child = match child_publication_deadline {
+                Some(deadline) if child_event_policy == SubagentEventPolicy::Boundary => {
+                    capture_boundary_children(
+                        binding,
+                        conn,
+                        scope,
+                        repo,
+                        &live_context,
+                        &child_source_hints,
+                        deadline,
+                    )
+                    .await
+                }
+                _ => BoundaryChildCapture::default(),
+            };
             write_subagent_checkpoint(
                 conn,
                 repo,
@@ -1337,7 +1444,13 @@ async fn ingest_agent_traces_payload_with_scope(
                 &redaction_report_json,
                 now,
                 scope,
-                capture_deadline,
+                // Child work can exhaust its local cap while the original
+                // host still permits an unresolved partial boundary.
+                capture_deadline.or(child.deadline),
+                child.summary.as_ref(),
+                child.incomplete,
+                &live_context,
+                &child_source_hints,
             )
             .await?;
         } else {
@@ -1350,9 +1463,13 @@ async fn ingest_agent_traces_payload_with_scope(
             // fresh SQLite deadline from the parent's remaining monotonic
             // time: a child that inherits the parent limit must retain the
             // parent's original final-commit authorization fence.
-            let local_subagent_capture_deadline =
-                CaptureCommitDeadline::from_budget(Duration::from_millis(subagent_deadline_ms))
-                    .context("establish bounded subagent hook capture deadline")?;
+            let local_subagent_capture_deadline = match child_publication_deadline {
+                Some(deadline) => deadline,
+                None => {
+                    CaptureCommitDeadline::from_budget(Duration::from_millis(subagent_deadline_ms))
+                        .context("establish bounded subagent hook capture deadline")?
+                }
+            };
             // Child discovery/capture is auxiliary to the parent checkpoint.
             // For a managed hook, reserve part of the remaining host window
             // for the parent before applying the local eight-second cap. A
@@ -1382,44 +1499,62 @@ async fn ingest_agent_traces_payload_with_scope(
                 provider_session_id: &envelope.session_id,
                 verified_cwd: std::path::Path::new(&envelope.cwd),
             };
-            let mut subagent_discovery =
-                discover_subagents(binding, &live_context, subagent_discovery_deadline).await;
+            let mut subagent_discovery = discover_subagents(
+                binding,
+                &live_context,
+                &child_source_hints,
+                subagent_discovery_deadline,
+            )
+            .await;
             // Child content must be durable before a parent advertises child-derived
             // files/usage/source counts. A retry can safely no-op these source leaves
             // if the subsequent parent append fails.
-            if let Err(error) = crate::internal::ai::subagent_content::capture_discovered_subagent_contents_with_scope(
-                conn,
-                scope,
-                repo,
-                &session_id,
-                &subagent_discovery.sources,
-                "live",
-                subagent_capture_deadline,
-            )
-            .await
+            let subagent_capture = match
+                crate::internal::ai::subagent_content::capture_subagent_contents_for_checkpoint(
+                    conn,
+                    repo,
+                    &catalog_request,
+                    &subagent_discovery,
+                    subagent_capture_deadline,
+                )
+                .await
             {
-                if crate::internal::ai::subagent_content::capture_deadline_exhausted(&error) {
-                    tracing::warn!(
-                        session_id = %redact_session_id(&session_id),
-                        reason = "bounded_subagent_capture_deadline",
-                        "child capture reached its reserved slice; preserving the parent checkpoint as partial"
-                    );
-                    // A child may have committed independent evidence before
-                    // timing out, but the parent must not advertise an
-                    // incomplete source set. Its retry can discover and
-                    // attribute the remaining children independently.
-                    subagent_discovery.sources.clear();
-                    subagent_discovery.incomplete = true;
-                    if subagent_discovery.warning.is_none() {
-                        subagent_discovery.warning = Some(
-                            "bounded subagent content capture timed out; child attribution is incomplete"
-                                .to_string(),
+                Ok(summary) => summary,
+                Err(error) => {
+                    if crate::internal::ai::subagent_content::capture_deadline_exhausted(&error)
+                        || child_checkpoint_wait_error(error.as_ref()).is_some()
+                    {
+                        tracing::warn!(
+                            session_id = %redact_session_id(&session_id),
+                            reason = "bounded_or_pending_subagent_capture",
+                            "child capture remains incomplete; preserving the parent checkpoint as partial"
                         );
+                        // A child may have committed independent evidence before
+                        // timing out, but the parent must not advertise an
+                        // incomplete source set. Its retry can discover and
+                        // attribute the remaining children independently.
+                        subagent_discovery.sources.clear();
+                        subagent_discovery.incomplete = true;
+                        if subagent_discovery.warning.is_none() {
+                            subagent_discovery.warning = Some(
+                                "subagent content capture remains pending; child attribution is incomplete"
+                                    .to_string(),
+                            );
+                        }
+                    } else {
+                        return Err(error);
                     }
-                } else {
-                    return Err(error);
+                    error.downcast_ref::<crate::internal::ai::subagent_content::SubagentCaptureProgressError>()
+                        .map(|progress| progress.summary().clone().without_association_proofs())
+                        .unwrap_or_default()
                 }
-            }
+            };
+            let subagent_capture = Some(
+                crate::internal::ai::subagent_content::SubagentUsageCapture {
+                    summary: subagent_capture,
+                    deadline: subagent_capture_deadline,
+                },
+            );
             #[cfg(test)]
             if test_support::take_fail_after_subagent_content_before_parent_checkpoint() {
                 bail!("injected failure after subagent content before parent checkpoint");
@@ -1453,10 +1588,14 @@ async fn ingest_agent_traces_payload_with_scope(
                 preexisting_durable_terminal,
                 subagent_discovery.sources,
                 subagent_discovery_warning.as_deref(),
+                subagent_capture,
                 export_lease,
             )
             .await
             {
+                if child_checkpoint_wait_error(error.as_ref()).is_some() {
+                    return Err(error);
+                }
                 if !receipt_pending {
                     record_live_checkpoint_write_failure_until(
                         conn.clone(),
@@ -1504,21 +1643,113 @@ async fn ingest_agent_traces_payload_with_scope(
     Ok(())
 }
 
-/// Discover the child transcripts a provider can attribute to a committed
-/// parent checkpoint (ADR-ACF-10, ACF-18). A provider without a live
-/// discovery capability contributes no children. A capable provider whose
-/// reserved discovery slice already elapsed, or whose bounded discovery fails
-/// closed, leaves the parent explicitly partial with a content-free warning.
+fn require_child_gate_for_terminal(
+    request: CaptureCatalogApplyRequest,
+    binding: LiveCaptureBinding,
+    policy: SubagentEventPolicy,
+) -> Result<CaptureCatalogApplyRequest> {
+    if policy == SubagentEventPolicy::RequiredTerminal && binding.subagent_discovery().is_some() {
+        request
+            .requiring_child_checkpoints()
+            .context("prepare required child checkpoint completion gate")
+    } else {
+        Ok(request)
+    }
+}
+
+/// Results of bounded child work for one independently durable boundary.
+#[derive(Default)]
+struct BoundaryChildCapture {
+    summary: Option<crate::internal::ai::subagent_content::SubagentCaptureSummary>,
+    incomplete: bool,
+    deadline: Option<CaptureCommitDeadline>,
+}
+
+/// Keep the caller's original child deadline through lock contention. The
+/// guard retains its normal RAII lifetime; final commits still check the
+/// paired capture deadline. Legacy callers retain their existing strategy.
+async fn acquire_publication_maintenance_lock(
+    repo: &std::path::Path,
+    deadline: Option<CaptureCommitDeadline>,
+) -> Result<crate::internal::maintenance_lock::MaintenanceLock> {
+    use crate::internal::maintenance_lock::MaintenanceLock;
+
+    match deadline {
+        Some(deadline) => MaintenanceLock::shared_until(repo, deadline.monotonic())
+            .await?
+            .ok_or_else(|| {
+                anyhow!(
+                    "agent checkpoint maintenance lock deadline elapsed before publication; retry \
+                     the callback after repository maintenance finishes or inspect with libra agent doctor"
+                )
+            }),
+        None => Ok(MaintenanceLock::shared(repo)?),
+    }
+}
+
+fn child_boundary_deadline(host: Option<CaptureCommitDeadline>) -> Result<CaptureCommitDeadline> {
+    let budget_ms = 8_000;
+    #[cfg(test)]
+    let budget_ms = test_support::subagent_discovery_deadline_override_ms().unwrap_or(budget_ms);
+    let local = CaptureCommitDeadline::from_budget(Duration::from_millis(budget_ms))
+        .context("establish bounded child boundary capture deadline")?;
+    Ok(host
+        .filter(|deadline| deadline.monotonic() <= local.monotonic())
+        .unwrap_or(local))
+}
+
+async fn capture_boundary_children(
+    binding: LiveCaptureBinding,
+    conn: &sea_orm::DatabaseConnection,
+    scope: &CaptureScope,
+    repo: &std::path::Path,
+    context: &LiveCaptureContext<'_>,
+    hints: &UntrustedChildSourceHints,
+    deadline: CaptureCommitDeadline,
+) -> BoundaryChildCapture {
+    let discovery_deadline =
+        crate::internal::ai::subagent_content::discovery_deadline_preserving_parent(
+            deadline.monotonic(),
+        )
+        .ok();
+    let discovery = discover_subagents(binding, context, hints, discovery_deadline).await;
+    let mut incomplete = discovery.incomplete || discovery.sources.is_empty();
+    let summary = if discovery.sources.is_empty() {
+        crate::internal::ai::subagent_content::SubagentCaptureSummary::default()
+    } else {
+        match crate::internal::ai::subagent_content::capture_discovered_subagent_contents_with_scope(
+            conn, scope, repo, context.libra_session_id, &discovery.sources, "live", Some(deadline),
+        ).await {
+            Ok(summary) => summary,
+            Err(error) => {
+                incomplete = true;
+                tracing::warn!(reason = "bounded_boundary_child_capture_failed", "child content remains partial; preserving an unresolved boundary");
+                error.downcast_ref::<crate::internal::ai::subagent_content::SubagentCaptureProgressError>()
+                    .map(|progress| progress.summary().clone().without_association_proofs()).unwrap_or_default()
+            }
+        }
+    };
+    incomplete |= summary.partial_sources > 0 || summary.skipped_inflight > 0;
+    BoundaryChildCapture {
+        summary: Some(summary),
+        incomplete,
+        deadline: Some(deadline),
+    }
+}
+
+/// Discover child transcripts using the provider's bounded attribution port.
+/// Missing or exhausted discovery leaves the parent explicitly partial.
 async fn discover_subagents(
     binding: LiveCaptureBinding,
     context: &LiveCaptureContext<'_>,
+    hint: &UntrustedChildSourceHints,
     discovery_deadline: Option<Instant>,
 ) -> SubagentDiscovery {
     let Some(discovery) = binding.subagent_discovery() else {
         return SubagentDiscovery::default();
     };
     match discovery_deadline {
-        Some(deadline) => match discovery.discover(context, deadline).await {
+        Some(deadline) => match discovery.discover_with_hint(context, hint, deadline).await {
             Ok(discovery) => discovery,
             Err(_) => {
                 tracing::warn!(
@@ -1532,7 +1763,8 @@ async fn discover_subagents(
                             .to_string(),
                     ),
                     incomplete: true,
-                    ..SubagentDiscovery::default()
+                    availability: SubagentDiscoveryAvailability::Unavailable,
+            ..SubagentDiscovery::default()
                 }
             }
         },
@@ -1541,6 +1773,7 @@ async fn discover_subagents(
                 "subagent content skipped because the parent hook deadline has elapsed".to_string(),
             ),
             incomplete: true,
+            availability: SubagentDiscoveryAvailability::Unavailable,
             ..SubagentDiscovery::default()
         },
     }
@@ -1550,6 +1783,233 @@ async fn discover_subagents(
 // below this point are compiled only for live pipeline unit tests.
 // Production persistence above accepts only a validated
 // `CaptureIngressCommand`.
+#[cfg(all(test, feature = "test-live-agent"))]
+pub(crate) async fn with_child_capture_budget_for_test<T>(
+    budget_ms: u64,
+    future: impl std::future::Future<Output = T>,
+) -> T {
+    let _budget = test_support::override_subagent_discovery_deadline(budget_ms);
+    future.await
+}
+
 #[cfg(test)]
 #[path = "live_pipeline_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[cfg(feature = "test-live-agent")]
+mod codex_child_hint_transport_tests {
+    use super::*;
+    use crate::internal::ai::{
+        capture::ingress::{CaptureIngressOutcome, lower_child_hint_frame_for_test},
+        hooks::providers::codex_provider,
+        observed_agents::live_capture::{
+            ChildSourceHintRole, LiveSubagentDiscovery,
+            test_support::{
+                child_hint_recording::{LegacyDiscovery, RecordingDiscovery},
+                with_subagent_discovery,
+            },
+        },
+    };
+
+    fn command(
+        binding: LiveCaptureBinding,
+        event: &str,
+        verb: ProviderHookCommand,
+        kind: LifecycleEventKind,
+    ) -> Box<CaptureIngressCommand> {
+        let bytes=serde_json::to_vec(&serde_json::json!({
+            "hook_event_name":event,"session_id":"root-id","cwd":"/in-process-capture",
+            "transcript_path":"/provider/current-or-parent.jsonl",
+            "agent_id":"child-id","agent_transcript_path":"/provider/child.jsonl","turn_id":"turn-id",
+            "discard_unknown":{"PRIVATE_UNKNOWN":"not part of typed hint"}
+        })).expect("fixture");
+        match lower_child_hint_frame_for_test(
+            &bytes,
+            verb,
+            kind,
+            codex_provider(),
+            binding.child_source_hint_policy(),
+        )
+        .expect("original ingress lowering")
+        {
+            CaptureIngressOutcome::Command(command) => command,
+            _ => panic!("recognized callback"),
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "operator-local Codex acceptance; never run in CI"]
+    async fn codex_child_recover_live_discovery_failures_remain_unavailable() {
+        use crate::internal::ai::observed_agents::live_capture::{
+            SubagentDiscoveryAvailability, test_support::ScriptedChildDiscovery,
+        };
+        let port = Box::leak(Box::new(ScriptedChildDiscovery::default()));
+        let selected = with_subagent_discovery(LiveCaptureBinding::resolve(codex_provider()), port);
+        let parts = command(
+            selected,
+            "SessionEnd",
+            ProviderHookCommand::SessionEnd,
+            LifecycleEventKind::SessionEnd,
+        )
+        .into_parts();
+        let context = LiveCaptureContext {
+            libra_session_id: "codex__root-id",
+            provider_session_id: &parts.context.provider_session_id,
+            verified_cwd: std::path::Path::new(&parts.context.working_dir),
+        };
+        port.before_next(Box::pin(async {
+            anyhow::bail!("PRIVATE_DISCOVERY_CANARY")
+        }));
+        let failed = discover_subagents(
+            selected,
+            &context,
+            &parts.child_source_hints,
+            Some(Instant::now() + Duration::from_secs(2)),
+        )
+        .await;
+        assert_eq!(
+            failed.availability,
+            SubagentDiscoveryAvailability::Unavailable
+        );
+        assert!(failed.incomplete && failed.sources.is_empty());
+        assert_eq!(
+            failed.warning.as_deref(),
+            Some("bounded subagent content discovery failed; child attribution is incomplete"),
+        );
+        assert!(
+            !failed
+                .warning
+                .as_deref()
+                .unwrap_or_default()
+                .contains("PRIVATE_DISCOVERY_CANARY")
+        );
+        let exhausted =
+            discover_subagents(selected, &context, &parts.child_source_hints, None).await;
+        assert_eq!(
+            exhausted.availability,
+            SubagentDiscoveryAvailability::Unavailable
+        );
+        assert!(exhausted.incomplete && exhausted.sources.is_empty());
+        assert_eq!(
+            exhausted.warning.as_deref(),
+            Some("subagent content skipped because the parent hook deadline has elapsed"),
+        );
+        assert_eq!(
+            port.calls(),
+            1,
+            "no remaining discovery budget must not dispatch"
+        );
+        let available = discover_subagents(
+            selected,
+            &context,
+            &parts.child_source_hints,
+            Some(Instant::now() + Duration::from_secs(2)),
+        )
+        .await;
+        assert_eq!(
+            available.availability,
+            SubagentDiscoveryAvailability::Available
+        );
+        assert!(!available.incomplete);
+        assert_eq!(port.calls(), 2);
+    }
+
+    #[tokio::test]
+    #[ignore = "operator-local Codex acceptance; never run in CI"]
+    async fn codex_child_hint_parent_parts_reach_recording_discovery_port() {
+        let base = LiveCaptureBinding::resolve(codex_provider());
+        assert!(
+            base.subagent_discovery().is_some(),
+            "the registered port is available to real live and stored consumers"
+        );
+        let recorder = Box::leak(Box::new(RecordingDiscovery::default()));
+        let selected = with_subagent_discovery(base, recorder);
+        for (event, verb, kind) in [
+            (
+                "Stop",
+                ProviderHookCommand::Stop,
+                LifecycleEventKind::TurnEnd,
+            ),
+            (
+                "SessionEnd",
+                ProviderHookCommand::SessionEnd,
+                LifecycleEventKind::SessionEnd,
+            ),
+        ] {
+            let parts = command(selected, event, verb, kind).into_parts();
+            let context = LiveCaptureContext {
+                libra_session_id: "codex__root-id",
+                provider_session_id: &parts.context.provider_session_id,
+                verified_cwd: std::path::Path::new(&parts.context.working_dir),
+            };
+            let result = discover_subagents(
+                selected,
+                &context,
+                &parts.child_source_hints,
+                Some(Instant::now() + Duration::from_secs(2)),
+            )
+            .await;
+            assert!(!result.incomplete);
+        }
+        let seen = recorder.calls.lock().expect("observations");
+        assert_eq!(seen.len(), 2);
+        assert!(
+            seen.iter().all(|(role, path)| *role
+                && path.as_deref() == Some("/provider/current-or-parent.jsonl"))
+        );
+    }
+
+    #[test]
+    #[ignore = "operator-local Codex acceptance; never run in CI"]
+    fn codex_child_hint_subagent_stop_evidence_is_parts_only_not_port() {
+        let selected = LiveCaptureBinding::resolve(codex_provider());
+        let parts = command(
+            selected,
+            "SubagentStop",
+            ProviderHookCommand::SubagentEnd,
+            LifecycleEventKind::SubagentEnd,
+        )
+        .into_parts();
+        assert!(parts.event.kind == LifecycleEventKind::SubagentEnd);
+        let view = parts
+            .child_source_hints
+            .candidate()
+            .expect("preserved typed hint");
+        assert!(view.role == ChildSourceHintRole::ChildBoundary);
+        assert_eq!(view.child_id, Some("child-id"));
+        assert_eq!(
+            view.child_path,
+            Some(std::path::Path::new("/provider/child.jsonl"))
+        );
+        assert!(selected.subagent_discovery().is_some());
+        // This proves the Parts handoff only. It does not claim that the
+        // production boundary branch has called a discovery consumer.
+    }
+
+    #[tokio::test]
+    #[ignore = "operator-local Codex acceptance; never run in CI"]
+    async fn codex_child_hint_default_port_keeps_legacy_discover_semantics() {
+        let old = LegacyDiscovery::default();
+        let context = LiveCaptureContext {
+            libra_session_id: "legacy",
+            provider_session_id: "legacy",
+            verified_cwd: std::path::Path::new("/in-process-capture"),
+        };
+        let direct = old
+            .discover(&context, Instant::now() + Duration::from_secs(2))
+            .await
+            .expect("direct");
+        let delegated = old
+            .discover_with_hint(
+                &context,
+                &UntrustedChildSourceHints::Unavailable,
+                Instant::now() + Duration::from_secs(2),
+            )
+            .await
+            .expect("default delegate");
+        assert_eq!(direct.warning, delegated.warning);
+        assert_eq!(direct.bytes_read, delegated.bytes_read);
+        assert_eq!(old.calls(), 2);
+    }
+}

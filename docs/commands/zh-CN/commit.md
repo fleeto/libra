@@ -13,6 +13,7 @@ libra commit [OPTIONS] -C <COMMIT>
 libra commit [OPTIONS] -c <COMMIT>
 libra commit [OPTIONS] --date <DATE> -m <MESSAGE>
 libra commit --amend [--no-edit]
+libra commit --no-agent-trailer -m <MESSAGE>
 ```
 
 ## 说明
@@ -20,6 +21,39 @@ libra commit --amend [--no-edit]
 `libra commit` 从已暂存更改创建新提交，构建 tree 和 commit 对象，验证消息（包括可选的 conventional commit 格式，以及通过 vault 进行 GPG 签名），并更新 HEAD 和 refs。
 
 该命令读取索引以确定哪些文件已暂存，构造与暂存内容匹配的 tree 对象层级，使用提供的消息和 author/committer 元数据创建 commit 对象，并推进当前分支 ref。启用 vault signing 时，提交会自动进行 GPG 签名。除非用 `--no-verify` 绕过，否则会运行 `.libra/hooks` 的 commit 生命周期。
+
+### Agent 会话关联（CX-23 开发版）
+
+此能力仅适用于含 CX-23 的源码构建，已发布安装包可能尚未包含。配置仅作用于普通
+`libra commit`；bridge `commit.create` 仍使用独立的 `agent_bridge_link`。
+`agent.commit_trailer` 默认 `false`。显式执行
+`libra config agent.commit_trailer true` 后启用此功能。
+若无法读取此 opt-in 配置，Libra 会关闭关联并给出警告；只要其它必需配置可用，普通提交仍可继续。
+启用配置后，真实提交最多关联 64 个属于当前
+仓库/worktree 且已有 committed checkpoint、锚定当前父提交或仍活跃并已关联
+该父提交的会话，并在 `commit-msg` hook 结束后、
+可选 vault 签名前追加 `Libra-Agent-Session: <session-id>`；已有同值 trailer
+不重复。自动 trailer 位于 `--trailer` 与 `Signed-off-by` 之后。首个无父提交可
+选择锚定 unborn parent 的会话；若符合条件的会话超过 64 个，则拒绝提交，不会
+静默截断。`--no-agent-trailer` 仅省略本次自动 trailer，仍保留显式开启的本地关联。
+若 hook 在同值用户 trailer 之后另起 trailer 段落，Libra 会把该会话 trailer
+移至最后一个可解析段落，确保只出现一次。
+预演既不写关联，也不预览自动 trailer。即使指定 `--no-agent-trailer`，
+显式开启的关联仍会在移动 HEAD 前检查仓库 catalog、会话作用域、64 会话
+上限及 workspace lease；失败会拒绝提交。HEAD 更新后在同一数据库事务内
+重新核验会话作用域及 workspace lease 才写关联，失败会显示警告。amend 会
+保留原提交已关联且仍授权的会话，也纳入新符合条件的会话；`--no-edit` 复用消息与 `-m` 新消息均会补入缺失的自动 trailer，被替换提交原有的本地关联行仍保留。CX-27 的持久 journal
+恢复尚未实现。现有 cloud sync 上传仓库 refs，不备份本地 SQLite 关联表。
+无 trailer 关联指通过 `--no-agent-trailer` 建立的关联，cloud sync 也不会备份。
+若 ref 后写关联失败，提交本身已经完成，请保留提交与原始会话；CX-27 前没有
+自动修复命令，不要仅为重试关联而 amend。警告写到 stderr；指定
+`--exit-code-on-warning` 时，成功提交以 9 / `LBR-WARN-001` 退出，但 JSON 的
+`ok` 仍为 `true`，JSON 没有 linked-session 字段。
+读取 opt-in 配置失败产生的警告也遵循同一退出码规则。
+`--amend --no-edit` 会保留继承的消息正文：已擦除或移出作用域的会话 trailer
+可能仍在新提交中可见，但不会生成新本地关联。`--no-agent-trailer` 也不会删除
+继承或用户自行写入的文字；将 trailer 用作恢复证据前必须核验会话作用域。
+显式开启的 trailer 对能读取提交的人可见，跨机器重建仍须核验仓库/会话作用域。
 
 在计算暂存变更或写入 tree/commit 对象之前，`commit` 会校验 stage-0 index 条目是否指向缺失或类型不匹配的 blob/tree 对象。损坏的 index 条目会 fail-closed，返回 `LBR-REPO-002`，并保持 `HEAD` 不变。
 
@@ -55,7 +89,8 @@ merge 进行中时，`commit` 会结束该 merge：新提交的父提交为 HEAD
 
 ### `-m, --message <MESSAGE>`
 
-使用给定消息作为提交消息。除非使用 `--no-edit`（搭配 `--amend`）或提供 `-F`，否则必需。
+使用给定消息作为提交消息。若同时提供 `-F`，以 `-m` 为准；与 `--amend --no-edit`
+同时使用时，则复用被替换提交的原消息。
 
 ```bash
 libra commit -m "Add new feature"
@@ -63,7 +98,8 @@ libra commit -m "Add new feature"
 
 ### `-F, --file <FILE>`
 
-从给定文件读取提交消息。在未使用 `--no-edit` 时与 `-m` 互斥。
+从给定文件读取提交消息。若同时提供 `-m`，以 `-m` 为准；与
+`--amend --no-edit` 同时使用时，则复用被替换提交的原消息。
 
 ```bash
 libra commit -F message.txt
@@ -86,6 +122,9 @@ libra commit -t .libra/commit-template.txt
 通过创建新提交替换当前分支 tip。新提交拥有与被替换提交相同的父提交。不能 amend merge commits（有多个父提交的提交）。
 当 index tree 与提交消息都未变化时，`--amend --no-edit` 仍会重写提交并刷新 committer metadata；
 不会打印成功但让 `HEAD` 保持不变。
+启用 `agent.commit_trailer` 后，amend 继承被替换提交中仍授权的会话关联，
+也加入本次新符合条件的会话；`--amend --no-edit` 和 `--amend -m` 都会补入缺少的自动 trailer，旧提交
+原有的本地关联行不会删除。
 
 ```bash
 libra commit --amend
@@ -95,7 +134,7 @@ libra commit --amend -m "Updated message"
 ### `--no-edit`
 
 与 `--amend` 一起使用时，复用原提交消息，不提示修改。clean amend 仍会生成替换提交并刷新
-committer date。与 `-m` 和 `-F` 冲突。
+committer date。仅与 `--edit` 冲突；若同时提供 `-m` 或 `-F`，amend 仍复用原消息。
 
 ```bash
 libra commit --amend --no-edit
@@ -157,13 +196,27 @@ libra commit --disable-pre -m "Quick fix"
 libra commit --no-verify -m "WIP: work in progress"
 ```
 
+### `--no-agent-trailer`
+
+`agent.commit_trailer=true` 时，本次仅省略自动 `Libra-Agent-Session` 消息
+trailer。本地关联及 catalog、作用域、会话上限、lease 的失败关闭检查继续运行。
+此标志不删除用户消息中原有或从 amend 继承的文字。配置为 false 时此标志没有影响。
+
+```bash
+libra commit --no-agent-trailer -m "仅保留本地关联"
+```
+
 ### 仓库 hooks
 
-顺序为 `pre-commit` → `prepare-commit-msg` → 编辑器/trailers → `commit-msg` →
-commit/ref 更新 → `post-commit` → amend 时的 `post-rewrite`。两个消息 hook 可修改
+顺序为 `pre-commit` → `prepare-commit-msg` → 编辑器/用户 trailers → `commit-msg` →
+自动 agent trailer（显式开启）→ 可选 vault 签名 → commit/ref 更新 →
+本地 agent 关联（显式开启）→ `post-commit` → amend 时的
+`post-rewrite`。两个消息 hook 可修改
 `.libra/COMMIT_EDITMSG`；blocking hook 失败时历史保持不变，post hook 则在成功后
 以 advisory 方式运行。所有 hook 都经过强制 workspace-only、禁网 sandbox。参数、
 解析顺序、输出行为与逃逸阀见[仓库 hooks](repository-hooks.md)。
+`commit-msg` hook 看不到随后自动加入的 agent trailer；conventional 校验在注入后
+检查提交主题。
 
 ### `--dry-run`
 
@@ -419,6 +472,7 @@ Git 没有内置提交消息格式验证；团队依赖 commitlint、husky 或 C
 | Cleanup 模式 | `git commit --cleanup=<mode>` | N/A | `libra commit --cleanup=<mode>` |
 | Cleanup 配置默认 | `commit.cleanup`（未给 `--cleanup` 时回退；CLI flag 优先） | N/A | `libra config commit.cleanup <mode>` |
 | Trailer | `git commit --trailer="..."` | N/A | `libra commit --trailer="..."` |
+| 省略自动 agent trailer | N/A | N/A | `libra commit --no-agent-trailer`（CX-23 开发版） |
 | 结构化 JSON 输出 | N/A | N/A | `--json` / `--machine` |
 | 错误提示 | 最少 | 最少 | 每种错误类型都有可操作提示 |
 
@@ -472,8 +526,11 @@ cleanup 在该 fence 下重新核验精确候选 OID，并一直持有到 prune 
 | Auto-stage 预览/对象/LFS 写入失败 | `LBR-IO-002` | 128 | 检查报错中点名目标的空间与权限 |
 | 暂存更改计算 | `LBR-REPO-002` | 128 | "failed to compute staged changes" |
 | `commit.status` 无效 | `LBR-CLI-002` | 129 | 修正配置值 |
+| `agent.commit_trailer` 配置值无效 | `LBR-CLI-002` | 129 | 设为 `true` 或 `false` |
+| Agent 关联 catalog/作用域/上限/lease 在 ref 更新前拒绝 | `LBR-REPO-003` | 128 | 运行 `libra agent doctor`，超过 64 个会话时检查旧会话，或更新 workspace lease |
 | `commit.status` 配置不可读 | `LBR-IO-001` | 128 | 修复 local/global 配置库 |
 | Commit 已完成但云索引修复仍待处理，且使用 `--exit-code-on-warning` | `LBR-WARN-001` | 9 | 修复警告中的数据库/marker 问题；下一条仓库命令会自动重试精确索引行 |
+| Commit 已完成但本地 agent 关联失败，且使用 `--exit-code-on-warning` | `LBR-WARN-001` | 9 | 保留提交和会话；CX-27 恢复尚未实现，不要只为重试而 amend |
 
 ## 兼容性说明
 

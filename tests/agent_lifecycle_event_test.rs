@@ -2168,22 +2168,24 @@ struct StaleSchemaFixture {
     stale: Vec<String>,
 }
 
-/// A disposable repository with the forward-only layout capability receipt
-/// removed, then the latest reversible migration rolled back. This models an
-/// older repository without asking the production rollback API to undo the
-/// capability gate.
+/// A disposable repository with both forward-only receipts and their empty
+/// physical state removed, then the latest reversible migration rolled back.
+/// This models an older repository without asking the production rollback API
+/// to undo a compatibility barrier.
 async fn stale_hook_repo() -> (HookRepo, StaleSchemaFixture) {
     let repo = HookRepo::init();
     let migrations = builtin_migrations();
     let newest = migrations.last().expect("at least one built-in migration");
     assert!(
-        newest.down.is_none() && newest.name == "worktree_layout_capability",
-        "the disposable fixture must explicitly model the forward-only layout capability"
+        newest.down.is_none() && newest.name == "agent_session_commit",
+        "the disposable fixture must explicitly model the forward-only session links"
     );
+    let layout = migrations.iter().rev().nth(1).expect("layout barrier");
+    assert!(layout.down.is_none() && layout.name == "worktree_layout_capability");
     let previous = migrations
         .iter()
         .rev()
-        .nth(2)
+        .nth(3)
         .map(|migration| migration.version)
         .expect("an older reversible migration");
     let conn = repo.db().await;
@@ -2193,18 +2195,21 @@ async fn stale_hook_repo() -> (HookRepo, StaleSchemaFixture) {
         "fixture precondition: init writes the current schema"
     );
     let current = physical_repository_schema(&conn).await;
-    // This fixture is disposable. The capability table and v2/v3 rows already
-    // existed before this release; remove only the new v4 marker and receipt,
-    // then roll back the older reversible schema migration.
+    // This fixture is disposable and has no session-commit links. Remove both
+    // forward-only migrations' physical effects and receipts before exercising
+    // the older reversible schema migration.
+    conn.execute_unprepared("DROP TABLE agent_session_commit")
+        .await
+        .expect("remove disposable empty session-commit table");
     conn.execute_unprepared("DELETE FROM worktree_registry_capability WHERE version = 4")
         .await
         .expect("remove disposable layout capability marker");
     conn.execute_unprepared(&format!(
-        "DELETE FROM schema_versions WHERE version = {}",
-        newest.version
+        "DELETE FROM schema_versions WHERE version IN ({}, {})",
+        newest.version, layout.version
     ))
     .await
-    .expect("remove disposable layout capability receipt");
+    .expect("remove disposable forward-only receipts");
     builtin_runner()
         .expect("built-in migration registry")
         .rollback_to(&conn, previous)
@@ -2213,7 +2218,7 @@ async fn stale_hook_repo() -> (HookRepo, StaleSchemaFixture) {
     assert_eq!(
         max_repository_schema_receipt(&conn).await,
         Some(previous),
-        "fixture precondition: the two newest receipts are gone"
+        "fixture precondition: the forward-only receipts are gone"
     );
     let stale = physical_repository_schema(&conn).await;
     assert_ne!(

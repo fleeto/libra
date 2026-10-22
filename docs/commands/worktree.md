@@ -7,8 +7,8 @@ Manage multiple working trees attached to this repository.
 ## Synopsis
 
 ```
-libra worktree add <NAME> [TARGET] [--path <PATH>] [--force]
-libra worktree list [--porcelain]
+libra worktree add <NAME> [TARGET] [--path <PATH>] [-d | --detach] [-b <NEW_BRANCH>] [--force]
+libra worktree list [--porcelain] [--schema-version 2]
 libra worktree lock <NAME> [--reason <text>]
 libra worktree lock --path <PATH> [--reason <text>]
 libra worktree unlock (<NAME> | --path <PATH>)
@@ -52,13 +52,13 @@ Create a named linked worktree in the managed directory, or at an explicit desti
 | `<NAME>` | Stable worktree name. By default creates `.libra/worktree/linked/<NAME>` under common storage. |
 | `[TARGET]` | Optional branch or commit-ish. An existing branch is checked out attached, unless any worktree already has it checked out. Other commit-ish targets create a detached worktree. Unknown targets fail before creation; remote-branch guessing and `--track`/`--no-track` are not supported. |
 | `--path <PATH>` | Complete external destination, absolute or relative to the caller. It must be absent or an empty directory unless `--force` is used in a standard build; it cannot be a symlink and may enter common storage only at this name's own managed default. It is not a parent directory to which the name is appended. |
-| `--detach` | Detach HEAD even when `TARGET` names a branch. |
+| `-d, --detach` | Detach HEAD even when `TARGET` names a branch. |
 | `-b, --new-branch <NEW_BRANCH>` | Create and check out a new branch at `TARGET`, or the source HEAD when omitted. An existing branch is refused; a later creation failure rolls the new branch back. |
 | `-f, --force` | In standard builds, reuse a non-empty destination directory. Check its contents before using this option. In `worktree-fuse` builds, `--force` is unavailable and `-f` means `--fuse`. |
 
 `--create-branch` is an alias for `--new-branch`. Without a target the worktree is **detached at the source commit**. The name does not implicitly create a branch. `--lock`, `--orphan`, `--no-checkout`, remote guessing and `-B` are not supported; use `worktree lock` after creation.
 
-Standard builds have supported `add --force` and `remove --force` since v0.30.69, including v0.30.83. The older published `v0.31.0` Linux/macOS binaries predate these flags. If you installed v0.31.0, use the [signed stable installer](upgrade.md) after v0.30.83 is published; `libra upgrade` will not select a lower version number.
+Standard builds have supported `add --force` and `remove --force` since v0.30.69, including v0.30.85. The older published `v0.31.0` Linux/macOS binaries predate these flags. If you installed v0.31.0, use the [signed stable installer](upgrade.md) after v0.30.85 is published; `libra upgrade` will not select a lower version number.
 
 For a named detached registry entry, `add <NAME>` verifies the saved identity and common-storage pointer, then reattaches its existing files and staging state. For an unnamed detached entry, use `add <NAME> --path <registered-path>` to name and reattach it. `TARGET`, `-b` and `--detach` are refused during reattachment. If supplied for a named entry, `--path` must match the registered path. A tombstoned entry remains reserved until cleanup succeeds.
 
@@ -82,7 +82,7 @@ libra worktree add experiment --path "../实验 workspace"
 
 #### FUSE worktrees
 
-On Unix builds with `worktree-fuse`, `add <NAME> --fuse` requires a working FUSE driver (`/dev/fuse` on Linux or macFUSE on macOS). Official release binaries are built without `worktree-fuse`; use a custom build to enable it. On these builds, `-f` is short for `--fuse`, not `--force`. Custom macOS `worktree-fuse` builds from v0.30.83 source include the managed-directory protection described here; the earlier `v0.31.0` tag predates this fix. It uses `.libra/worktree/fuse/<NAME>/workspace` as its mountpoint and the sibling `upper/` as its writable overlay. An explicit `--path` selects an external mountpoint; targets inside a lower tree, upper tree, common metadata or another managed workspace are refused before creation. The internal default is protected by an opaque `.libra/worktree` directory in the overlay, so it cannot recursively expose its own mountpoint, upper directory or sibling workspaces. Mount setup refuses a filesystem that cannot establish this mask.
+On Unix builds with `worktree-fuse`, `add <NAME> --fuse` requires a working FUSE driver (`/dev/fuse` on Linux or macFUSE on macOS). Official release binaries are built without `worktree-fuse`; use a custom build to enable it. On these builds, `-f` is short for `--fuse`, not `--force`. Custom macOS `worktree-fuse` builds from v0.30.85 source include the managed-directory protection described here; the earlier `v0.31.0` tag predates this fix. It uses `.libra/worktree/fuse/<NAME>/workspace` as its mountpoint and the sibling `upper/` as its writable overlay. An explicit `--path` selects an external mountpoint; targets inside a lower tree, upper tree, common metadata or another managed workspace are refused before creation. The internal default is protected by an opaque `.libra/worktree` directory in the overlay, so it cannot recursively expose its own mountpoint, upper directory or sibling workspaces. Mount setup refuses a filesystem that cannot establish this mask.
 
 FUSE and ordinary worktrees cannot claim the same name. The FUSE registry uses `{ "schema_version": 1, "entries": [...] }`; known older records remain readable without relocating their directories. FUSE worktrees do not support `move` or scoped identity repair (`repair <NAME>` / `repair --path <PATH>`). Use `worktree repair --confirm` for global registry repair; FUSE does not have the ordinary linked-worktree private identity layout. Their `remove` behavior remains unmounting and deleting the upper layer, rather than ordinary keep-dir detachment. For the managed default, it also removes the empty mountpoint and container; a nonempty directory or cleanup failure keeps the registration and name for retry. Existing legacy and external mountpoint directories are kept. `umount` continues to take an actual path rather than a worktree name.
 
@@ -103,6 +103,9 @@ line (each worktree owns its HEAD), an optional `name <name>` line after the
 with a blank line between worktrees. A worktree whose HEAD cannot be resolved
 (a legacy shared-`.libra` layout, or a missing/corrupt scope) omits the HEAD
 lines rather than being mislabeled with another worktree's commit.
+
+`--schema-version 2` selects the current structured JSON schema, which is also
+the default. Version 2 is the only supported value; older version 1 is refused.
 
 ```bash
 libra worktree list
@@ -342,7 +345,7 @@ Libra keeps it by default (as a frozen, re-attachable detached worktree) to
 prevent accidental data loss; `--delete-dir` restores Git-like semantics
 opt-in. See
 [`COMPATIBILITY.md`](../../COMPATIBILITY.md) and
-[`compatibility/worktree-surface.md`](../development/commands/worktree.md)
+[`development/commands/worktree.md`](../development/commands/worktree.md)
 for the rationale.
 
 ### Subcommand: `umount`
@@ -730,4 +733,4 @@ Note: jj uses the term "workspace" instead of "worktree". Each workspace automat
 | `LBR-WORKTREE-001` | `worktree doctor --cursor` was given a cursor this command did not issue (or one that expired) |
 | `LBR-WORKTREE-002` | `worktree doctor` cannot read a scope (unparseable registry, unreadable record, missing repository identity) and refuses to report a partial diagnosis |
 
-A build that supports managed worktrees records repository capability 4 when it first opens a repository. Libra 0.30.66 and older then refuse every command in that repository, including commands unrelated to worktrees. Use a build with the 2026101902 capability: published binaries first provide it in v0.30.67 on Linux and v0.30.68 on macOS/Windows. The v0.30.83 release includes it on all platforms. Existing worktree directories are not moved.
+A build that supports managed worktrees records repository capability 4 when it first opens a repository. Libra 0.30.66 and older then refuse every command in that repository, including commands unrelated to worktrees. Use a build with the 2026101902 capability: published binaries first provide it in v0.30.67 on Linux and v0.30.68 on macOS/Windows. The v0.30.85 release includes it on all platforms. Existing worktree directories are not moved.

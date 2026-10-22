@@ -192,6 +192,7 @@ These entries complete the current CLI index. `media` requires a build with the 
 | `libra deps` | public | Manage the file dependency graph | [deps.md](deps.md) |
 | `libra file` | public | Inspect object-level operations and payload erasure | [file.md](file.md) |
 | `libra for-each-ref` | public | Format and filter references | [for-each-ref.md](for-each-ref.md) |
+| `libra gc` | public | Clean up repository objects and refs | [gc.md](gc.md) |
 | `libra hydrate` | public | Hydrate working-tree content on demand | [hydrate.md](hydrate.md) |
 | `libra investigate` | public | Run read-only external-agent investigations | [investigate.md](investigate.md) |
 | `libra layer` | public | Manage never-committed local working-tree overlays | [layer.md](layer.md) |

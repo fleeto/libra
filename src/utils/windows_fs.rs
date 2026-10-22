@@ -1019,6 +1019,28 @@ pub(crate) fn open_private_lock_at(parent: &File, name: &OsStr) -> io::Result<Fi
     }
 }
 
+/// Open an owner-protected regular file for bounded in-place journal IO.
+/// Existing bytes and permissions are never repaired or truncated on open.
+pub(crate) fn open_private_rw_at(parent: &File, name: &OsStr) -> io::Result<File> {
+    match create_private_file_at(parent, name) {
+        Ok(file) => Ok(file),
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            let file = open_relative(
+                parent,
+                name,
+                false,
+                GENERIC_READ | GENERIC_WRITE,
+                FILE_OPEN,
+                FILE_SHARE_READ,
+                null(),
+            )?;
+            validate_private(&file)?;
+            Ok(file)
+        }
+        Err(error) => Err(error),
+    }
+}
+
 fn create_private_file_at_with_access(
     parent: &File,
     name: &OsStr,

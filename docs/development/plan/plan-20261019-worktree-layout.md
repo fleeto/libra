@@ -4,11 +4,14 @@
 
 **发布目标变更（2026-10-20）：** 用户要求发布现有 `0.30.66`，明确不要发布 `0.31.1`。`v0.30.66` 是不含本计划改动的旧标签，已单独补建 GitHub Release；本计划的实现和验证继续，但其 CLI 发布与网站上线门暂不收口，不能借用旧版发布证据。
 
-**当前发布决议（覆盖下文旧冻结与 minor 目标）：** 2026-10-21 用户要求基于上游最新已发布版本 patch + 1 发布。11:25 UTC 上游 `24fabae` 已打 `v0.30.82` tag 并创建 GitHub Latest Release；其 release.yml 仍运行、资产与 stable 不据此假定完成。此前候选 `v0.30.80` 未打 tag、`v0.30.81` 发布工作流因 macOS Rust 2024 编译错误失败，本计划目标随用户规则前滚为 **`v0.30.83`**。先前“不发布 `0.31.1`”继续有效；旧 Worktree tag `v0.31.0` 不复用。WD-08 须在最终源码、远端 CI、四平台资产/stable 与网站内容门完成后才能收口。公开 NAME/--path 行为变化写入升级说明；不迁移旧目录。
+**当前发布决议（覆盖下文旧冻结与 minor 目标）：** 用户要求基于上游最新已发布版本 patch + 1 发布。2026-10-21 17:18 UTC 上游 `99a92c1` 已打 `v0.30.84` tag 并创建 GitHub Latest Release；此前 `.83` 候选未打 tag，本计划目标随用户规则前滚为 **`v0.30.85`**。先前“不发布 `0.31.1`”继续有效；旧 Worktree tag `v0.31.0` 不复用。WD-08 须在最终源码、远端 CI、四平台资产/stable 与网站内容门完成后才能收口。公开 NAME/--path 行为变化写入升级说明；不迁移旧目录。
 
 **并发合流补充（2026-10-21 15:27 UTC）：** 上游在 `6d50c5a` 后推进到 `81eff71`，净新增 Issue #525 的 `commit` CLI/双语命令文档/兼容测试和 MCP 文件格式化；Worktree 实现及版本面不变。上游 push 取消了 `6d50c5a` 的网络 CI 重跑，所以该 run 的七个成功作业不能组成最终全绿。按工作区常驻交付指令，网站同步范围在原八张 Worktree 相关页之外增加一张 `commit` 英文命令页；这不增加第十张 Worktree 任务卡。`0.30.83` release notes 补记 Issue #525；最终源码 SHA 的本地与远端门重新核验后才发布。
 
 **合流审查前滚（2026-10-21 15:42 UTC）：** Claude Code 对新上游 `commit` 行为的只读审查为 `VERDICT: FAIL`：`-S` 被解析却未强制签名，可能静默生成未签名提交；位置路径/`-o` 与文档承诺不符；`-u` 被忽略；`--short` 的预览语义和旧文案互相矛盾。发布前须前滚 `commit` 源码、双语命令/开发文档、兼容表、回归测试及网站 commit 页，再取得复审 PASS；原 FAIL 与首次 focused 两项失败保留为历史证据，不计最终门。上游最新 Release 已实时复查仍为 `v0.30.82`。
+
+**上游再次前滚（2026-10-21 17:18 UTC）：** GitHub Latest 已变为 `v0.30.84`（`99a92c1`），用户“最新上游 patch + 1”规则使本次唯一候选改为 **`v0.30.85`**，不发布未打标的 `.83`，也不发布 `.31.1`。本地 `f0ea585` 的 final-SHA CI 8/8 与 nextest 10704/10704 均已通过，但旧树 `cargo test --all` 两轮分别因 capture deadline、fetch 镜像 I/O 偶发失败而 exit101，第三轮在上游发布变化后主动中断 exit130；均不得作为 `.85` 最终门。上游新引入 `branch -f`，发布前审查发现可重置当前检出分支并绕过已有 protect/archive 策略。FIX-WD-08g 写集增加 `src/command/branch.rs`、`tests/command/branch_test.rs`、双语 `docs/commands/branch.md`、`COMPATIBILITY.md`、`docs/error-codes.md`、网站 `branch.en.md`、`CHANGELOG.md`，以及既有版本面和本计划状态文件；须用事务内同一检查拒绝危险重置、做真实 CLI 回归，并重跑最终门及 Claude Code 复审。网站同步范围因此由九页扩为十页。
+**FIX-WD-08g 复审前滚（2026-10-21 17:44 UTC）：** 独立源码审查字面 `VERDICT: FAIL` 的排序帮助与覆盖缺口已核实；其 fmt 失败判断由实际 `cargo +nightly fmt --all --check` 反证。进一步手工复现证实上游 `--create-reflog` 成功返回但分支 reflog 为空，`branch -f` 对已有分支误报 `Created branch` 且 JSON action 为 `create`。先在现有命令集成用例中得到真实红灯，再把 CLI 分支指针与 reflog 的写入纳入同一事务、正确输出 reset/旧新 OID；扩展配置排序和主/linked 反向检出边界测试，双语文档与网站 branch 页说明实际行为。跟进复审提出 reflog 文案的真实兼容性缺口，写集增加 `src/internal/reflog.rs` 的 `branch` action，并以精确 JSON action/message 锁定 `Created from` / `Reset to`；`0.30.83` tag 不存在、版本四面已更新、共享 helper 无其他 force 调用均已现场核实。任何写入失败须回滚、不发成功结果；最终 branch 全组、Display-pin、严格静态门、双全量、macFUSE、final-SHA CI 与 Claude Code 源码/网站复审必须重新通过。不处理旧数据迁移。
 
 ## 文档职责
 
@@ -18,7 +21,7 @@
 
 - `worktree` 普通/FUSE 两套 CLI、注册表、作用域发现、暂存、对象保留及存储遍历消费者。
 - review/investigate 的普通副本、checkpoint 输入、恢复、清理和 sandbox 环境目录。
-- 同卡双语命令文档、网站 `cf` 文档、兼容验证，以及 `0.30.83` 家族发布与线上验收；不发布 `0.31.1`。
+- 同卡双语命令文档、网站 `cf` 文档、兼容验证，以及 `0.30.85` 家族发布与线上验收；不发布 `0.31.1`。
 
 ### 非目标
 
@@ -169,9 +172,9 @@
 - **Status:** Accepted。
 - **Decision:** 向 sandbox 显式传入工作根和本 attempt 的固定缓存目录清单，禁止从 sessions_root 推断。HOME→home、CARGO_HOME→cargo-home、XDG_CONFIG_HOME→xdg-config、XDG_CACHE_HOME→xdg-cache、LIBRA_LOG_FILE→logs/libra.log；不改变现有 Unix RUSTUP_HOME 保留语义。受限 policy 仅放行工作根和这些缓存目录，不能通过父目录或 symlink 写 common storage/兄弟工作区。现有显式 danger-full-access 不伪称隔离有效，也不得因布局变化静默扩大默认权限。
 - Checkpoint 生产 API 分离运行元数据句柄和物化目录句柄；继续在清理/写入前验证 catalog/object、路径、budget/deadline/cancel；只读输入不降低权限防护。运行记录保持 sessions，输入使用 tasks/attempt。
-- WD-01..07 与 WD-02G 是不可独立交付的家族子卡，WD-08 唯一发布。原拟次版本 `0.31.0`，失败资产后候选曾前滚至 `0.31.1`；用户禁止发布后者，并在 2026-10-21 指定上游最新已发布版本 patch + 1。上游已发布 `v0.30.82`，当前目标据此为 `0.30.83`。公开 CLI 兼容变化须在该补丁版的 release notes 和升级文档显著说明；版本面、Cargo.lock 与安装脚本在最终树核对。
+- WD-01..07 与 WD-02G 是不可独立交付的家族子卡，WD-08 唯一发布。原拟次版本 `0.31.0`，失败资产后候选曾前滚至 `0.31.1`；用户禁止发布后者，并在 2026-10-21 指定上游最新已发布版本 patch + 1。上游已发布 `v0.30.84`，当前目标据此为 `0.30.85`。公开 CLI 兼容变化须在该补丁版的 release notes 和升级文档显著说明；版本面、Cargo.lock 与安装脚本在最终树核对。
 - **Consequences:** Repository receipt 2026101902 在支持新布局的二进制首次打开仓库时即应用，即使用户尚未创建新 worktree。该能力已进入 `v0.30.67` 源码；`0.30.66` 及更早版本会在 DB connect 拒绝已升级仓库，`0.30.67` 及更新版本支持该 receipt。新格式只能前滚补丁，旧 CLI 不作回滚方案。
-- **Revisit when:** 上游版本再次推进或 `v0.30.83` 被占用，先刷新源码版本与 tag，再按用户“上游最新 patch + 1”重新计算目标。
+- **Revisit when:** 上游版本再次推进或 `v0.30.85` 被占用，先刷新源码版本与 tag，再按用户“上游最新 patch + 1”重新计算目标。
 
 ## 全局工程约束
 
@@ -183,15 +186,15 @@
 - **GC-WD-03:** 不新增生产 unwrap/expect/panic；错误说明资源、失败原因与修复方向。复用既有 LBR 错误类别；如必须新增稳定码，先扩写集并触发 T-1，Display-pin 与 docs/error-codes 同卡。
 - **GC-WD-04:** 每卡 A/B focused 和 Claude Code 源码审查须真实完成；家族子卡只到 locally-accepted，继承 WD-08 C/D 后才能 done/complete。会话设计 review 不替代正式计划/实现 review。
 - **GC-WD-05:** 按用户 AGENTS 同时执行 `source .env.test && cargo test --all`；模板 release/全量通过证据只认 `source .env.test && source .env.live-test && cargo nextest run --all --no-fail-fast --retries 2`。两者都必须执行并如实记录，前者不替代 nextest 发布门；取消/失败/未运行不算 PASS。任何失败修复后重跑受影响门和全量至绿。
-- **GC-WD-06:** 网站直接使用现有 native Libra `cf`，保留无关改动，不建 branch/PR/worktree。未来布局文档曾部署，已由 backend `44e9914` 恢复为当时 `0.30.66` 语义；该恢复不计 WD-08 新功能验收。当前 `0.30.83` 发布窗口内按最终 CLI/仓库文档重新同步原七页与 FIX-WD-05 的 init 页、逐文件验收、提交推送并核验线上新契约；此前不能 complete。
+- **GC-WD-06:** 网站直接使用现有 native Libra `cf`，保留无关改动，不建 branch/PR/worktree。未来布局文档曾部署，已由 backend `44e9914` 恢复为当时 `0.30.66` 语义；该恢复不计 WD-08 新功能验收。当前 `0.30.85` 发布窗口内按最终 CLI/仓库文档重新同步原七页、FIX-WD-05 的 init、上游 commit 和 branch 共十页，逐文件验收、提交推送并核验线上新契约；此前不能 complete。
 
 ## 执行检查必备需求
 
 1. 每卡 ER-01..03 安全检查、锚点和粒度复核；扩写集先更新本文。
 2. A 组按写集运行单元/集成/feature gates；B 组按任务类型；ER-05 Codex 和 Claude Code reviewer 必须实际读最终差异，最终 `VERDICT: PASS`。
 3. 每个会推送的树运行 fmt/clippy。子卡相关 T-1/T-3 风险由家族发布点包含最终变更的全量承担；WD-08 T-2 恒定全量。
-4. `0.30.83` 的 C/D 使用模板完整发布协议：版本面 parity、工具链 lockfile、bump 树 nextest、release build/install/版本检查、签名+DCO、精确暂存、native push、tag/release.yml、远端产物与 stable 清单证据。任何外部门失败保留 remote-pending。
-5. 新布局网站必需门在最终 CLI/仓库文档就绪后，于现有 native cf 的 backend cwd 执行：先只读全库检查并记录基线漂移，再以 `--only worktree agent review investigate sandbox hooks upgrade init commit` 分别运行同步器 `--write` 与检查；`python3 scripts/test_sync_libra_command_docs.py`；`pnpm exec vitest run tests/unit/docs-manifest.test.ts tests/unit/docs-search.test.ts`；`pnpm typecheck`；`pnpm build`。原七张 Worktree 命令页加 FIX-WD-05 的 init 页共八张，另有上游 Issue #525 的 commit 页共九张；网站只存 EN 命令页，zh-CN 在渲染时镜像，不新增不存在的中文源文件。
+4. `0.30.85` 的 C/D 使用模板完整发布协议：版本面 parity、工具链 lockfile、bump 树 nextest、release build/install/版本检查、签名+DCO、精确暂存、native push、tag/release.yml、远端产物与 stable 清单证据。任何外部门失败保留 remote-pending。
+5. 新布局网站必需门在最终 CLI/仓库文档就绪后，于现有 native cf 的 backend cwd 执行：先只读全库检查并记录基线漂移，再以 `--only worktree agent review investigate sandbox hooks upgrade init commit branch` 分别运行同步器 `--write` 与检查；`python3 scripts/test_sync_libra_command_docs.py`；`pnpm exec vitest run tests/unit/docs-manifest.test.ts tests/unit/docs-search.test.ts`；`pnpm typecheck`；`pnpm build`。原七张 Worktree 命令页加 FIX-WD-05 的 init、上游 Issue #525 的 commit、上游 #526 的 branch 页共十张；网站只存 EN 命令页，zh-CN 在渲染时镜像，不新增不存在的中文源文件。
 6. 最终提交前重新读取本地 HEAD、origin/main 和 backend cf/origin/cf，核对远端没有部分 WD 变更，重新检查精确写集和当前 dirty diff。若上游发生变化，先保存当前工作字节并人工合并到最新源码，重新审查/运行受影响门；禁止自动 rebase/reset 或推送无关变更。该核验失败则保持 dirty 未提交，不尝试绕过。
 7. 原生 Windows D 门是 `.github/workflows/base.yml` 的 `compat-scoped-input-windows`：最终 main SHA 对应的四个 active exact scoped-input fixture 与 windows_fs 单元组均需通过，cross-check/Windows artifact 编译均不能替代。旧 `cc8f437` 的门已通过，但合流后的最终 SHA 必须重新通过才可触发 tag/artifact release；现有并发 relocation DEFER 仍不算 PASS。
 8. COMPATIBILITY 仅增加本行为所需记录，不无关重排现有 ledger 锚点；实际触及的守卫测试通过才作兼容证据，不把未测试文字当限制。
@@ -206,9 +209,9 @@
 | ID | direction | 类型 | 对象 | Owner | 产物与可用性判据 | 证据 | 超时与失败策略 |
 |---|---|---|---|---|---|---|---|
 | DEP-WD-CODEX | incoming | 审查 | 当前 Codex 执行者 | 根执行者 | 最终源码给出具名 `VERDICT: PASS`、P0/P1 清零及真实验证清单；不可用则阻断，不自填 | 实现仍在进行 | 在最终 Claude 审查之前修复发现并重跑受影响门 |
-| DEP-WD-01 | incoming | 审查 | Claude Code 本地 reviewer | 当前根执行者协调 | 正式本文及最终源码分别取得字面 VERDICT: PASS | 正式计划 R6 PASS；FIX-WD-07b 源码首轮 Claude PASS、P0/P1=0，P2 错误码与矩阵已前滚，`0.30.83` 最终差异须跟进复审 | review 失败先修；工具不可用保留明确阻断，不伪称 PASS |
-| DEP-WD-02 | incoming | 执行环境 | 受支持 Unix FUSE 环境 | 根执行者 | feature 编译、真实 mount/opaque/unmount 可执行 | macFUSE 5.4.0 与 OrbStack Linux `/dev/fuse` 完整组各 16/16；`0.30.83` 合流树待复验 | 缺驱动或最终树未运行不得发布 |
-| DEP-WD-03 | incoming | 发布服务与用户版本决策 | GitHub release、Cloudflare artifact/site | 用户已选“上游最新 patch + 1”；根执行者单一发布 | 认证可用且对应 SHA release 与部署可观察 | 2026-10-21 11:25 UTC GitHub Latest `v0.30.82` tag 指向 `24fabae`，目标 `v0.30.83` 未占用；0.30.81 release.yml 因 macOS 编译失败，0.30.82 release.yml 尚在运行，资产/stable 另验 | 最终 SHA、资产/stable 与网站内容未实证前保持 remote-pending |
+| DEP-WD-01 | incoming | 审查 | Claude Code 本地 reviewer | 当前根执行者协调 | 正式本文及最终源码分别取得字面 VERDICT: PASS | 正式计划 R6 PASS；`f0ea585` 的 #525 前滚源码复审 PASS，`.85` 上游 #526/FIX-WD-08g 的最终差异须跟进复审 | review 失败先修；工具不可用保留明确阻断，不伪称 PASS |
+| DEP-WD-02 | incoming | 执行环境 | 受支持 Unix FUSE 环境 | 根执行者 | feature 编译、真实 mount/opaque/unmount 可执行 | macFUSE 5.4.0 与 OrbStack Linux `/dev/fuse` 完整组各 16/16；`0.30.85` 最终树待复验 | 缺驱动或最终树未运行不得发布 |
+| DEP-WD-03 | incoming | 发布服务与用户版本决策 | GitHub release、Cloudflare artifact/site | 用户已选“上游最新 patch + 1”；根执行者单一发布 | 认证可用且对应 SHA release 与部署可观察 | 2026-10-21 17:18 UTC GitHub Latest `v0.30.84` tag 指向 `99a92c1`，目标 `v0.30.85` 发布前须再次查占用；资产/stable 另验 | 最终 SHA、资产/stable 与网站内容未实证前保持 remote-pending |
 | DEP-WD-05 | incoming | 原生平台验收 | final main SHA 的 compat-scoped-input-windows | 根执行者 | windows-latest 原生 exact scoped-input 与 windows_fs 组全绿 | `.github/workflows/base.yml:2-4` 的 main push；`:229-246` 以 `utils::windows_fs::tests::` 模块过滤且断言至少一例通过，须在 run log 核对新三例名称 | 失败或取消保留 remote-pending，修复重推后重跑；不得发 tag 或用交叉编译替代 |
 | DEP-WD-04 | incoming | 兼容工具 | 既有 0.30.53 CLI | 当前根执行者 | disposable repo 旧二进制拒绝矩阵可运行 | 本机 installed 0.30.53；必须在安装新版前固定可执行副本或可复现下载 | 无可用旧二进制则 WD-02 不能本地验收 |
 
@@ -216,7 +219,7 @@
 
 | ID | 成员 | 唯一发布点 | 窗口规则 | 失败回滚顺序 | 理由 |
 |---|---|---|---|---|---|
-| REL-WD01 | WD-01..08, WD-02G | WD-08 | 当前授权 `0.30.83`；先刷新 HEAD/origin、精确写集与最终源码门，随后按 main CI→tag/release→stable→网站内容顺序发布；不复用 `v0.31.0`、不发布 `v0.31.1` | 发行失败按当时最新上游版本前滚，不重指不可变 tag 或降级 writer | CLI/schema/路径/cleaner 必须在同一新版本中上线；旧 `v0.30.66` 不计此门 |
+| REL-WD01 | WD-01..08, WD-02G | WD-08 | 当前授权 `0.30.85`；先刷新 HEAD/origin、精确写集与最终源码门，随后按 main CI→tag/release→stable→网站内容顺序发布；不复用 `v0.31.0`、不发布 `v0.31.1` | 发行失败按当时最新上游版本前滚，不重指不可变 tag 或降级 writer | CLI/schema/路径/cleaner 必须在同一新版本中上线；旧 `v0.30.66` 不计此门 |
 
 **并发声明:** WD-01..08 与 WD-02G 的依赖 API 接入与验收推进串行；可并行只读研究、审查及已明确文件独占、I 写集不相交的准备性实现/测试。准备性代码不得在上游门通过前被当作下游卡已验收；共享文件只能单写者编辑，根执行者集成后按 DAG 逐卡验收。共享仓库其它执行者须知 installed 0.30.53 已被 future-schema 门拒绝，统一使用本计划验证过的候选二进制。**发布者:** 当前根执行者（单一写入者，不虚构外部负责人）。**真实工作库边界:** 验收实验一律 disposable repo；Libra 真实仓库已应用 2026101902，此后 VCS 使用 `target/debug/libra`；安装旧 0.30.53 的只读对照副本固定在独立路径，不随安装覆盖。**当前发布窗口顺序：** 刷新版本面和最终源码→重跑受影响本地/远端门→按最终 CLI 同步网站文档→核对 HEAD/origin 与精确写集→签名+DCO 推送→final-SHA 原生 Windows D 门→新 tag/release→网站 cf/deploy→远端收口登记。`cc8f437` CI 全绿不能直接替代最终 SHA 的门。
 
@@ -487,16 +490,16 @@
 **Task type:** release
 **Lifecycle / Acceptance:** pending / 空
 **Description:** 在同一最终 bump 树上验证全部布局行为，发布 CLI 和网站文档。
-**当前版本决议:** 用户要求基于最新上游已发布版本 patch + 1；GitHub Latest `v0.30.82` 后当前目标是 `v0.30.83`，旧 `v0.30.80` 未发布；仍禁止发布 `v0.31.1`。最终 tag 前重新核对远端版本、源码 SHA、所有门与资产名；如 `v0.30.83` 被并发占用，再按上游最新 patch + 1 前滚，不覆盖已有 tag。
+**当前版本决议:** 用户要求基于最新上游已发布版本 patch + 1；GitHub Latest `v0.30.84` 后当前目标是 `v0.30.85`，旧 `.83` 候选未发布；仍禁止发布 `v0.31.1`。最终 tag 前重新核对远端版本、源码 SHA、所有门与资产名；如 `v0.30.85` 被并发占用，再按上游最新 patch + 1 前滚，不覆盖已有 tag。
 **Out of scope:** 不引入新行为；发现缺陷在原行为卡前滚或新增 FIX 卡后重新验收。
-**Current evidence:** 上游 GitHub 最新已发布 `v0.30.82`，当前目标 `v0.30.83`；`cf3dff2`、`f23e022`、`a45a1c6` 与 `27a72b3` 已签名+DCO，`8472d0f` 与上游 `24fabae` 冲突合流。`27a72b3` 的原生 Windows 前半门、重命名发行二进制及前两项 init exact 通过，但 bare Git 转换错误回滚仍留下新 `libra.db`，故增加关闭连接池的生产修复。其 macFUSE 真实挂载 16/16、无残留挂载；最终生产修复树的双全量、macFUSE、Windows CI、release 资产/stable 与网站上线均须复验。旧 `v0.30.66` 与候选 `v0.30.80/82` 不计本卡 C/D。
+**Current evidence:** 上游 GitHub 最新已发布 `v0.30.84`，当前目标 `v0.30.85`；本地已洁净快进到 `99a92c1`，版本四面一致，`branch -f` 的五个聚焦用例由修复前 2/5 前滚至 5/5，最终 branch 全组 52/52、Display-pin 1/1、版本面 2/2。严格 Clippy/fmt/diff --check exit0，FIX-WD-08g 跟进 Claude Code 源码复审字面 `VERDICT: PASS`；真实旧版 0.30.53 对九种消费者全为 exit128，69 个稳定文件哈希未变。网站十页限定同步 drift=0、脚本 8/8、Vitest 11/11、typecheck/build exit0。最终双全量、macFUSE、final-SHA CI、release 资产/stable、网站独立复审与上线仍须复验。旧 `v0.30.66` 与候选 `v0.30.80/82/83` 不计本卡 C/D。
 **Acceptance criteria:**
 - [ ] WD-01..07 与 WD-02G 的最终变更均被发布树包含。
 - [ ] 旧二进制拒绝矩阵在最终格式复验通过。
 - [ ] 最终 FUSE 真实挂载门通过。
 - [ ] 仓库/网站命令文档同步通过。
 - [ ] 最终实现 Claude Code `VERDICT: PASS`。
-- [ ] 版本面一致并采用用户指定的上游最新 patch + 1（当前 `0.30.83`）；升级说明明确公开兼容变化。
+- [ ] 版本面一致并采用用户指定的上游最新 patch + 1（当前 `0.30.85`）；升级说明明确公开兼容变化。
 - [ ] 签名+DCO main 推送与远端 SHA 对应。
 - [ ] release.yml 和 Cloudflare artifact/stable 指向此次发布。
 - [ ] 网站 cf 推送部署后线上命令页呈现新契约。
@@ -510,7 +513,7 @@
 - [ ] ER-04 静态必需门（不计特有 VER）：`cargo clippy --all-targets --all-features -- -D warnings`。
 - [ ] 用户要求的全套检查（不计特有 VER）：`source .env.test && cargo test --all`。
 - [ ] ER-13/14 发布权威全量门（不计特有 VER）：`source .env.test && source .env.live-test && cargo nextest run --all --no-fail-fast --retries 2`。
-- [ ] ER-06a 网站同步（backend cwd；不计特有 VER）：`python3 scripts/sync-libra-command-docs.py --libra-root ../libra --write --only worktree agent review investigate sandbox hooks upgrade init`，随后同命令去掉 `--write` 检查八页；另记录全库只读检查的既有漂移。
+- [ ] ER-06a 网站同步（backend cwd；不计特有 VER）：`python3 scripts/sync-libra-command-docs.py --libra-root ../libra --write --only worktree agent review investigate sandbox hooks upgrade init commit branch`，随后同命令去掉 `--write` 检查十页；另记录全库只读检查的范围外漂移。
 - [ ] ER-06a 网站脚本测试（backend cwd；不计特有 VER）：`python3 scripts/test_sync_libra_command_docs.py`。
 - [ ] ER-06a 网站单元测试（backend cwd；不计特有 VER）：`pnpm exec vitest run tests/unit/docs-manifest.test.ts tests/unit/docs-search.test.ts`。
 - [ ] ER-06a 网站类型检查（backend cwd；不计特有 VER）：`pnpm typecheck`。
@@ -539,7 +542,7 @@
 **FIX-WD-08f 身份冲突恢复提示与日志边界：** 网站复审进一步指出 `repair --resolve-identity` 后仍有另一活跃条目占用相同身份，旧提示建议的立刻重新挂接必然失败；且旧 `reattach_worktree` 在拒绝该身份前已写入 Add intent，留下无需的未决日志。进一步审查发现旧提示建议的 `remove --delete-dir` 会按共享 worktree_id GC 幸存条目的 HEAD/reflog 等 scoped 行，构成数据丢失风险；仅检查活跃条目又会漏掉两条目均已分离的路径。将重新挂接的身份检查移至 intent 写入前；删除前若任何其他注册条目仍共享身份则拒绝，不动目录/数据。`src/command/worktree/operations.rs` 的所有 scoped GC 调用均传入 registry 快照和目标路径，拒绝对仍被其他注册条目占用的身份执行清理；`src/command/worktree/doctor.rs` 的旧未决 journal/tombstone 恢复同样 fail-closed。扩展既有 `resolve_identity_detaches_one_claimant_and_mirrors_the_lifecycle` 集成用例，让 registry 与工作目录真实共享身份，断言拒绝挂接不新增 journal、拒绝删除保持目录与幸存 scoped 行、两条目均分离后仍拒绝删除，并注入旧 Add intent 验证 repair 不清理共享数据。修正 `src/command/worktree.rs`/`src/utils/util.rs`/`src/command/worktree/registry.rs` 相关提示及双语/网站 Worktree 文档，明确保留文件并人工恢复，不许诺当前无安全路径的自动重新挂接/删除；不实施用户排除的旧数据迁移。写集增加 `src/command/worktree/{operations.rs,doctor.rs,registry.rs}`、`src/command/worktree.rs`、`src/utils/util.rs`、`tests/command/worktree_isolation_test.rs`、双语 Worktree 页、网站 Worktree EN 页、`CHANGELOG.md` 与本文；此处变更运行时写入顺序和拒绝条件，最终树需重跑 focused、fmt/严格 Clippy、双全量、最终 SHA CI 与独立复审。
 **FIX-WD-08f lifecycle mirror follow-up:** `worktree repair --confirm` 的生命周期镜像以 worktree_id 为键，若先访问已分离条目再访问幸存活跃条目，原 Active 分支会删除共享键下的 detached 镜像行，令 down-migration 看不到仍在磁盘的分离目录。现只在该身份没有其他注册条目时删除镜像；集成夹具把分离条目放在前面并执行 repair，验证镜像持续可见。旧身份冲突没有自动迁移或自动清理出口，本版明确保留目录、继续使用幸存条目并待人工恢复。
 **FIX-WD-08f 末端提示/镜像补充：** 除 `repair --confirm` 的 Active 分支外，普通重新挂接及旧 Add journal 前滚也不得删除仍描述另一已分离条目的共享 lifecycle 镜像。同步修订 `--resolve-identity` help/确认提示、工作目录 detached 提示、doctor 查验/旧意图提示、双语 Worktree 文档的 journal 说明和 CHANGELOG：身份仍共享时未决日志或 tombstone 可持续保留，不能承诺自动清理；保留旧目录并人工恢复，符合用户不迁移旧数据的边界。
-**Docs and compatibility impact:** 原卡所有用户/网站文档逐文件结果登记本文；`0.30.83` release notes 和 upgrade 双语/网站页明确 NAME/--path breaking change、首次以支持新布局的二进制打开仓库即写入不可回退的 2026101902 receipt、`0.30.66` 及更早版本此后所有命令拒绝且不迁移旧数据。不把 `0.31.1` 写成已发布稳定版。
+**Docs and compatibility impact:** 原卡所有用户/网站文档逐文件结果登记本文；`0.30.85` release notes 和 upgrade 双语/网站页明确 NAME/--path breaking change、首次以支持新布局的二进制打开仓库即写入不可回退的 2026101902 receipt、`0.30.66` 及更早版本此后所有命令拒绝且不迁移旧数据。不把 `0.31.1` 写成已发布稳定版。
 **Rollback mode:** immutable-release
 **Migration and rollback:** 已发布版本不撤销或覆盖；失败发布新修复版本。旧二进制禁止写新布局；网站问题在 cf 前滚。
 **Estimated scope:** M

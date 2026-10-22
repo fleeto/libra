@@ -939,11 +939,27 @@ impl CaptureSnapshotService {
                 .turns
                 .iter()
                 .any(|turn| turn.completeness != Completeness::Complete);
-        Ok((
-            prepared.transcript,
-            serde_json::json!({"schema_version":1,"partial":partial,
-            "turns":turns,"redaction_report":prepared.report}),
-        ))
+        let mut projection = serde_json::json!({"schema_version":1,"partial":partial,
+            "turns":turns,"redaction_report":prepared.report});
+        if agent_kind == "codex" {
+            let sidecar = match crate::internal::ai::observed_agents::codex_reasoning::sidecar(
+                prepared.transcript.bytes(),
+                policy.deadline(),
+            ) {
+                Ok(value) => value,
+                Err(_) => {
+                    if deadline_elapsed(policy) {
+                        return Err(CaptureSnapshotPartialReason::DeadlineExceeded);
+                    }
+                    Some(crate::internal::ai::observed_agents::codex_reasoning::unavailable_statistics())
+                }
+            };
+            if let Some(sidecar) = sidecar {
+                projection["partial"] = serde_json::json!(partial || sidecar["partial"] == true);
+                projection["codex_reasoning"] = sidecar;
+            }
+        }
+        Ok((prepared.transcript, projection))
     }
 
     /// Index ordinary Claude signature and redacted `data` fields.
@@ -1059,14 +1075,18 @@ impl CaptureSnapshotService {
         }
     }
 
-    /// Capture one live Claude source through the killable helper boundary.
+    pub(crate) fn live_locator_unavailable() -> CaptureSnapshot {
+        CaptureSnapshot::partial(CaptureSnapshotPartialReason::SourceReadError, None)
+    }
+
+    /// Capture one live file through the killable descriptor helper.
     ///
     /// After scope-bound callers derive the provider candidate, this service
     /// pins it beneath the provider root and transfers that exact descriptor
     /// as helper stdin. The helper returns only redacted bytes and safe
-    /// metadata; it never receives a locator, provider/session identity, or
-    /// raw request frame. Other adapters have no descriptor-only live-source
-    /// contract yet, so a deadline-bound call for them fails closed.
+    /// metadata, never a locator to reopen. Codex also receives the verified
+    /// session id/cwd for a pre-redaction header check. Claude and Codex own
+    /// this descriptor contract; unsupported adapters remain source-absent.
     pub async fn capture_live_until(
         adapter: &dyn ObservedAgent,
         context: &AgentSessionCtx,
@@ -1086,13 +1106,45 @@ impl CaptureSnapshotService {
             snapshot.reasoning = ReasoningSourceDisposition::helper_unsupported();
             return snapshot;
         }
+        Self::capture_live_file_until(adapter, context, policy, None).await
+    }
+
+    /// The binding threads the optional source from its one registration
+    /// fetch. Legacy callers retain the adapter-only entrypoint above.
+    pub(crate) async fn capture_live_with_source_until(
+        adapter: &dyn ObservedAgent,
+        context: &AgentSessionCtx,
+        policy: CaptureSnapshotPolicy,
+        source_capability: &dyn crate::internal::ai::observed_agents::live_capture::LiveTranscriptSource,
+    ) -> CaptureSnapshot {
+        Self::capture_live_file_until(adapter, context, policy, Some(source_capability)).await
+    }
+
+    async fn capture_live_file_until(
+        adapter: &dyn ObservedAgent,
+        context: &AgentSessionCtx,
+        policy: CaptureSnapshotPolicy,
+        source_capability: Option<
+            &dyn crate::internal::ai::observed_agents::live_capture::LiveTranscriptSource,
+        >,
+    ) -> CaptureSnapshot {
         if deadline_elapsed(policy) {
             return CaptureSnapshot::partial(CaptureSnapshotPartialReason::DeadlineExceeded, None);
+        }
+        if source_capability.is_some() && policy.deadline().is_none() {
+            return CaptureSnapshot::partial(
+                if context.transcript_path.is_none() {
+                    CaptureSnapshotPartialReason::SourceAbsent
+                } else {
+                    CaptureSnapshotPartialReason::SourceAuthorizationMismatch
+                },
+                None,
+            );
         }
         let Some(deadline) = policy.deadline() else {
             return Self::capture_live(adapter, context, policy);
         };
-        if adapter.provider_kind().as_db_str() != "claude_code" {
+        if adapter.provider_kind().as_db_str() != "claude_code" && source_capability.is_none() {
             return CaptureSnapshot::partial(CaptureSnapshotPartialReason::SourceReadError, None);
         }
         let source = match resolve_live_transcript_source_until(adapter, context, Some(deadline)) {
@@ -1137,7 +1189,20 @@ impl CaptureSnapshotService {
             return CaptureSnapshot::partial(CaptureSnapshotPartialReason::DeadlineExceeded, None);
         }
 
-        match read_live_claude_source_until(source, policy.max_bytes, deadline).await {
+        let result = if let Some(capability) = source_capability {
+            capability
+                .read_source(
+                    source,
+                    &context.provider_session_id,
+                    &context.working_dir,
+                    policy.max_bytes,
+                    deadline,
+                )
+                .await
+        } else {
+            read_live_claude_source_until(source, policy.max_bytes, deadline).await
+        };
+        match result {
             LiveClaudeSourceRead::Complete {
                 transcript_redacted,
                 redaction_report,
@@ -1167,9 +1232,14 @@ impl CaptureSnapshotService {
             LiveClaudeSourceRead::Absent => {
                 CaptureSnapshot::partial(CaptureSnapshotPartialReason::SourceAbsent, None)
             }
-            LiveClaudeSourceRead::Untrusted => {
-                CaptureSnapshot::partial(CaptureSnapshotPartialReason::SourceUntrusted, None)
-            }
+            LiveClaudeSourceRead::Untrusted => CaptureSnapshot::partial(
+                if source_capability.is_some() {
+                    CaptureSnapshotPartialReason::SourceAuthorizationMismatch
+                } else {
+                    CaptureSnapshotPartialReason::SourceUntrusted
+                },
+                None,
+            ),
             LiveClaudeSourceRead::DeadlineExceeded => {
                 CaptureSnapshot::partial(CaptureSnapshotPartialReason::DeadlineExceeded, None)
             }
@@ -1307,6 +1377,28 @@ impl CaptureSnapshotService {
             );
         }
 
+        let ordinary_preprocessor = adapter.ordinary_source_preprocessor();
+        let decoded_report = if let Some(preprocess) = ordinary_preprocessor {
+            match preprocess(&bytes, policy.deadline()) {
+                Ok((ordinary, report)) => {
+                    bytes.zeroize();
+                    *bytes = ordinary;
+                    report
+                }
+                Err(error) => {
+                    return CaptureSnapshot::partial(
+                        if deadline_elapsed(policy) {
+                            CaptureSnapshotPartialReason::DeadlineExceeded
+                        } else {
+                            reasoning_preparation_partial_reason(error)
+                        },
+                        Some(source_projection),
+                    );
+                }
+            }
+        } else {
+            RedactionReport::default()
+        };
         let prepared = match prepare_authorized_reasoning_source(
             std::mem::take(&mut *bytes),
             adapter,
@@ -1341,7 +1433,8 @@ impl CaptureSnapshotService {
             usize::try_from(capture_redacted_output_cap(raw_bytes)).unwrap_or(usize::MAX);
         let max_working_set_bytes =
             usize::try_from(capture_redaction_working_set_cap(raw_bytes)).unwrap_or(usize::MAX);
-        let source_scan_bytes = coverage_fragment.as_ref().map(|_| raw_input_len);
+        let source_scan_bytes = (coverage_fragment.is_some() || ordinary_preprocessor.is_some())
+            .then_some(raw_input_len);
         let redacted = if let Some(fragment) = coverage_fragment {
             prepare_authorized_reasoning_coverage(
                 bytes,
@@ -1367,7 +1460,7 @@ impl CaptureSnapshotService {
                 .redact_owned_bounded(bytes, max_output_bytes, max_working_set_bytes)
                 .ok_or(CaptureSnapshotPartialReason::SourceReadError)
         };
-        let (transcript_redacted, redaction_report) = match redacted {
+        let (transcript_redacted, mut redaction_report) = match redacted {
             Ok(redacted) => redacted,
             Err(reason) => {
                 let mut snapshot = CaptureSnapshot::partial(reason, Some(source_projection));
@@ -1377,6 +1470,10 @@ impl CaptureSnapshotService {
                 return snapshot;
             }
         };
+        crate::internal::ai::observed_agents::coverage::merge_redaction_reports(
+            &mut redaction_report,
+            decoded_report,
+        );
         // `source_projection` is durable metadata and is later bound into
         // finalizer receipts. Commit only the redacted representation: a raw
         // SHA-256 would let an observer test a guessed secret offline.

@@ -38,9 +38,10 @@ use crate::{
                 SubagentCheckpointCommitPlan, TracesCheckpointStore,
             },
             coordinator::{
-                CaptureCoordinator, CaptureCoordinatorFinalizer, CaptureCoordinatorOutcome,
-                CaptureCoordinatorRequest, CaptureCoordinatorReserveOutcome,
-                CoordinatorReservationClass, DurableFinalizerDisposition,
+                CaptureCoordinator, CaptureCoordinatorError, CaptureCoordinatorFinalizer,
+                CaptureCoordinatorOutcome, CaptureCoordinatorRequest,
+                CaptureCoordinatorReserveOutcome, CoordinatorReservationClass,
+                DurableFinalizerDisposition,
             },
             finalizer::{CaptureFinalizeMode, CaptureFinalizePolicy},
             key::derive_snapshot_content_commitment_in_scope_until,
@@ -76,6 +77,46 @@ use crate::{
     },
     utils::util,
 };
+
+/// Recognize only typed child waiting states, including coordinator fields
+/// deliberately absent from Error::source(). Never classify by display text.
+pub(crate) fn child_checkpoint_wait_error<'a>(
+    error: &'a (dyn std::error::Error + 'static),
+) -> Option<&'a CaptureCatalogError> {
+    let mut current = Some(error);
+    while let Some(cause) = current {
+        if let Some(catalog) = cause.downcast_ref::<CaptureCatalogError>()
+            && matches!(
+                catalog,
+                CaptureCatalogError::ChildCheckpointsPending
+                    | CaptureCatalogError::ChildGateCapacity
+            )
+        {
+            return Some(catalog);
+        }
+        if let Some(coordinator) = cause.downcast_ref::<CaptureCoordinatorError>() {
+            let nested = match coordinator {
+                CaptureCoordinatorError::DurableCheckpointCompletion { cause, .. }
+                | CaptureCoordinatorError::CheckpointReplayCompletion { cause, .. } => {
+                    Some(cause.as_ref())
+                }
+                CaptureCoordinatorError::CheckpointWriteFinalizer { .. }
+                | CaptureCoordinatorError::CheckpointConflictFinalizer { .. } => {
+                    // The real checkpoint failure/conflict stays causal.
+                    // Its incidental finalizer wait must not suppress the
+                    // original reservation and failure accounting.
+                    return None;
+                }
+                _ => None,
+            };
+            if let Some(wait) = nested.and_then(|error| child_checkpoint_wait_error(error)) {
+                return Some(wait);
+            }
+        }
+        current = cause.source();
+    }
+    None
+}
 
 /// The coverage claims one committed-checkpoint attempt may have reserved
 /// before its checkpoint. Whether they are abandoned is decided only by
@@ -189,9 +230,8 @@ pub(super) async fn settle_preapplied_without_checkpoint(
                 Some(settlement_deadline),
             )
             .await
-            .map_err(|error| {
-                anyhow!("resume terminal pending receipt within its settlement deadline: {error}")
-            })? {
+            .context("resume terminal pending receipt within its settlement deadline")?
+            {
                 CaptureCoordinatorReserveOutcome::Reserved(reservation) => *reservation,
                 CaptureCoordinatorReserveOutcome::AlreadyApplied => return Ok(()),
                 CaptureCoordinatorReserveOutcome::ConflictUnchanged { conflict } => {
@@ -217,7 +257,7 @@ pub(super) async fn settle_preapplied_without_checkpoint(
                 CaptureCoordinatorFinalizer::new(policy, finalizer_now_millis()),
             )
             .await
-            .map_err(|error| anyhow!("settle no-checkpoint terminal capture receipt: {error}"))?
+            .context("settle no-checkpoint terminal capture receipt")?
         {
             CaptureCoordinatorOutcome::FinalizerPending { .. }
             | CaptureCoordinatorOutcome::AlreadyApplied => Ok(()),
@@ -235,7 +275,7 @@ pub(super) async fn settle_preapplied_without_checkpoint(
         match catalog_reservation
             .complete_preapplied_without_checkpoint(catalog_request)
             .await
-            .map_err(|error| anyhow!("settle no-checkpoint capture receipt: {error}"))?
+            .context("settle no-checkpoint capture receipt")?
         {
             CaptureCoordinatorOutcome::StateApplied | CaptureCoordinatorOutcome::AlreadyApplied => {
                 Ok(())
@@ -263,7 +303,7 @@ async fn settle_preapplied_covered_terminal_replay(
     match catalog_reservation
         .complete_preapplied_terminal_coverage_replay(catalog_request)
         .await
-        .map_err(|error| anyhow!("settle covered terminal capture replay: {error}"))?
+        .context("settle covered terminal capture replay")?
     {
         CaptureCoordinatorOutcome::StateApplied | CaptureCoordinatorOutcome::AlreadyApplied => {
             Ok(())
@@ -463,7 +503,23 @@ async fn acquire_live_snapshot(
     // provider session id derives its candidate through its live capability;
     // other adapters remain source-absent until they can prove an equivalent
     // derivation.
-    let transcript_path = match binding.live_transcript_candidate(context) {
+    #[cfg(test)]
+    let snapshot_deadline = (!test_support::live_capture_without_deadline())
+        .then_some(capture_deadline)
+        .flatten()
+        .map(CaptureCommitDeadline::monotonic);
+    #[cfg(not(test))]
+    let snapshot_deadline = capture_deadline.map(CaptureCommitDeadline::monotonic);
+    let locator = binding.live_transcript_locator();
+    let candidate = if let Some(locator) = locator {
+        locator.locate(context, snapshot_deadline).await
+    } else {
+        binding.live_transcript_candidate(context)
+    };
+    let locator_failed = locator.is_some()
+        && candidate.is_err()
+        && snapshot_deadline.is_some_and(|deadline| Instant::now() < deadline);
+    let transcript_path = match candidate {
         Ok(path) => path,
         Err(LiveCandidateUnavailable) => {
             tracing::warn!(
@@ -480,19 +536,24 @@ async fn acquire_live_snapshot(
         working_dir: context.verified_cwd.to_path_buf(),
         transcript_path,
     };
-    #[cfg(test)]
-    let snapshot_deadline = (!test_support::live_capture_without_deadline())
-        .then_some(capture_deadline)
-        .flatten()
-        .map(CaptureCommitDeadline::monotonic);
-    #[cfg(not(test))]
-    let snapshot_deadline = capture_deadline.map(CaptureCommitDeadline::monotonic);
-    let mut snapshot = CaptureSnapshotService::capture_live_until(
-        adapter,
-        &seam_ctx,
-        CaptureSnapshotPolicy::with_deadline(snapshot_deadline),
-    )
-    .await;
+    let mut snapshot = if locator_failed {
+        CaptureSnapshotService::live_locator_unavailable()
+    } else if let Some(source_capability) = locator {
+        CaptureSnapshotService::capture_live_with_source_until(
+            adapter,
+            &seam_ctx,
+            CaptureSnapshotPolicy::with_deadline(snapshot_deadline),
+            source_capability,
+        )
+        .await
+    } else {
+        CaptureSnapshotService::capture_live_until(
+            adapter,
+            &seam_ctx,
+            CaptureSnapshotPolicy::with_deadline(snapshot_deadline),
+        )
+        .await
+    };
     if snapshot.rejects_capture_source_consumer() {
         return snapshot.into_checkpoint_parts();
     }
@@ -1007,6 +1068,7 @@ pub(super) async fn write_committed_checkpoint<P: LiveExportLeasePort>(
     preexisting_durable_terminal: bool,
     subagent_sources: Vec<crate::internal::ai::subagent_content::DiscoveredSubagentContent>,
     subagent_discovery_warning: Option<&str>,
+    subagent_capture: Option<crate::internal::ai::subagent_content::SubagentUsageCapture>,
     export_lease: &P,
 ) -> Result<()> {
     let agent_kind = binding.agent_kind_db();
@@ -1221,6 +1283,11 @@ pub(super) async fn write_committed_checkpoint<P: LiveExportLeasePort>(
             scope,
             subagent_sources,
             subagent_discovery_warning,
+            subagent_capture,
+            incomplete_parent_extraction: subagent_discovery_warning.is_some()
+                && binding
+                    .subagent_discovery()
+                    .is_some_and(|port| port.marks_incomplete_parent_extraction()),
             report_value,
             source: match verified_partial {
                 Some(source) => CheckpointStageSource::VerifiedPartial(source),
@@ -1771,9 +1838,25 @@ pub(super) async fn run_export_stage<'a, P: LiveExportLeasePort>(
     let owner = runner.owner().to_owned();
     let now_ms = runner.now_ms();
     let source = async {
-        let exported = match exporter.export(context, export_deadline.monotonic()).await {
-            Ok(source) => source,
-            Err(_) => return Err(ExportStageExit::BridgeUnavailable),
+        // Only source acquisition is cancellable here. Keep the original
+        // paired deadline; runner settlement and dispatched SQL/ref COMMIT
+        // acknowledgements below must still be awaited without cancellation.
+        let exported = match tokio::time::timeout_at(
+            tokio::time::Instant::from_std(export_deadline.monotonic()),
+            exporter.export(context, export_deadline.monotonic()),
+        )
+        .await
+        {
+            Ok(Ok(source)) => source,
+            Ok(Err(_)) => return Err(ExportStageExit::BridgeUnavailable),
+            Err(_) => {
+                tracing::info!(
+                    session_id = %redact_session_id(libra_session_id),
+                    reason = "export_deadline_elapsed",
+                    "export source cancelled at capture deadline"
+                );
+                return Err(ExportStageExit::BridgeUnavailable);
+            }
         };
         let source = match exported {
             TranscriptSource::File { .. } => {
@@ -2001,6 +2084,8 @@ pub(super) struct CheckpointStageInput<'a> {
     scope: &'a CaptureScope,
     subagent_sources: Vec<crate::internal::ai::subagent_content::DiscoveredSubagentContent>,
     subagent_discovery_warning: Option<&'a str>,
+    subagent_capture: Option<crate::internal::ai::subagent_content::SubagentUsageCapture>,
+    incomplete_parent_extraction: bool,
     report_value: serde_json::Value,
     source: CheckpointStageSource,
     claim_channel: &'static str,
@@ -2163,6 +2248,8 @@ pub(super) async fn run_checkpoint_stage<P: LiveExportLeasePort>(
         scope,
         subagent_sources,
         subagent_discovery_warning,
+        subagent_capture,
+        incomplete_parent_extraction,
         mut report_value,
         source,
         claim_channel,
@@ -2261,7 +2348,8 @@ pub(super) async fn run_checkpoint_stage<P: LiveExportLeasePort>(
             Some(deadline) => match CaptureSnapshotService::build_extraction_projection_until(
                 agent_kind,
                 transcript_is_authorized.then_some(transcript_redacted),
-                subagent_snapshots.children_omitted_for_deadline(),
+                subagent_snapshots.children_omitted_for_deadline()
+                    || incomplete_parent_extraction,
                 deadline.monotonic(),
             )
             .await
@@ -2282,6 +2370,26 @@ pub(super) async fn run_checkpoint_stage<P: LiveExportLeasePort>(
             ),
         };
         attach_subagent_snapshot_metadata(&mut extraction_value, &subagent_snapshots);
+        // Attribution is auxiliary. Keep its window inside both original
+        // pairs, and run it before the parent's existing final edge check.
+        let usage_attribution = if let Some(capture) = subagent_capture.as_ref() {
+            let deadline = capture_deadline.map(|parent| capture.deadline
+                .filter(|child| child.monotonic() < parent.monotonic()).unwrap_or(parent));
+            let parent_snapshot_complete = !verified_partial && transcript_is_authorized
+                && transcript_snapshot_projection.as_ref().is_some_and(|projection|
+                    projection.completeness == CaptureSnapshotCompleteness::Complete
+                    && projection.source.as_ref().is_some_and(|source|
+                        source.kind == crate::internal::ai::capture::snapshot::CaptureSnapshotSourceKind::ProviderFile));
+            capture.summary.project_usage_attribution(conn, repo_path,
+                crate::internal::ai::subagent_content::SubagentUsageAttributionInput {
+                    scope, capture_session: libra_session_id, current_thread: &envelope.session_id,
+                    verified_cwd: std::path::Path::new(&envelope.cwd), agent_kind,
+                    as_of: "live_capture", parent_extraction: &extraction_value,
+                    parent_snapshot_complete, deadline,
+                }).await
+        } else {
+            None
+        };
         // The helper lifecycle owns its deadline, but a response can become
         // ready at the same instant the capture window expires. Do not begin
         // synchronous metadata/report construction after that edge; no raw
@@ -2319,6 +2427,9 @@ pub(super) async fn run_checkpoint_stage<P: LiveExportLeasePort>(
         // durable checkpoint rather than creating a second one.
         let checkpoint_id = checkpoint_id.to_string();
         let mut metadata = metadata;
+        if let Some(attribution) = usage_attribution {
+            metadata["usage_attribution"] = attribution;
+        }
         if let Some(obj) = metadata.as_object_mut() {
             obj.insert(
                 "checkpoint_id".to_string(),
@@ -2589,12 +2700,12 @@ pub(super) async fn run_checkpoint_stage<P: LiveExportLeasePort>(
             {
                 Ok(claim) => claim,
                 Err(error) => {
-                    return uncommitted(conn, &cleanup, capture_deadline, None, || {
-                        Err(anyhow!(
-                            "claim terminal capture checkpoint attempt: {error}"
-                        ))
-                    })
-                    .await;
+                    let waiting = child_checkpoint_wait_error(&error).is_some();
+                    let error = anyhow::Error::new(error).context("claim terminal capture checkpoint attempt");
+                    if waiting {
+                        return expire(error);
+                    }
+                    return uncommitted(conn, &cleanup, capture_deadline, None, || Err(error)).await;
                 }
             };
             match claim {
@@ -2615,12 +2726,12 @@ pub(super) async fn run_checkpoint_stage<P: LiveExportLeasePort>(
                     {
                         Ok(outcome) => outcome,
                         Err(error) => {
-                            return uncommitted(conn, &cleanup, capture_deadline, None, || {
-                                Err(anyhow!(
-                                    "complete durable terminal replay under catalog fence: {error}"
-                                ))
-                            })
-                            .await;
+                            let waiting = child_checkpoint_wait_error(&error).is_some();
+                            let error = anyhow::Error::new(error).context("complete durable terminal replay under catalog fence");
+                            if waiting {
+                                return expire(error);
+                            }
+                            return uncommitted(conn, &cleanup, capture_deadline, None, || Err(error)).await;
                         }
                     };
                     return match outcome {
@@ -2918,22 +3029,25 @@ pub(super) async fn run_checkpoint_stage<P: LiveExportLeasePort>(
                 // unchanged without one. Completion failures after the
                 // ref/catalog transaction keep their durable claims, and an
                 // unclassified error leaves every reservation to expire.
-                let failure = || Err(anyhow!("capture coordinator execution failed: {error}"));
-                return match error.reservation_class() {
+                let waiting = child_checkpoint_wait_error(&error).is_some();
+                let class = error.reservation_class();
+                let error = anyhow::Error::new(error).context("capture coordinator execution failed");
+                if waiting {
+                    return expire(error);
+                }
+                return match class {
                     CoordinatorReservationClass::Uncommitted { diagnostic } => {
                         uncommitted(
                             conn,
                             &cleanup,
                             capture_deadline,
                             diagnostic.then_some(&diagnostic_request),
-                            failure,
+                            || Err(error),
                         )
                         .await
                     }
-                    CoordinatorReservationClass::PostCheckpoint => post_checkpoint(failure()),
-                    CoordinatorReservationClass::Unclassified => expire(anyhow!(
-                        "capture coordinator execution failed: {error}"
-                    )),
+                    CoordinatorReservationClass::PostCheckpoint => post_checkpoint(Err(error)),
+                    CoordinatorReservationClass::Unclassified => expire(error),
                 };
             }
         };
@@ -3207,6 +3321,42 @@ fn require_identity_plan_for_native_reasoning(
     Ok(())
 }
 
+struct SubagentAssociationCommitPlan<'a> {
+    base: &'a dyn crate::internal::ai::history::TracesTxnExtra,
+    associations: &'a crate::internal::ai::subagent_content::SubagentBoundaryAssociations,
+    scope: &'a CaptureScope,
+    capture_session: &'a str,
+    checkpoint_id: &'a str,
+    deadline: Option<CaptureCommitDeadline>,
+}
+
+#[async_trait::async_trait]
+impl crate::internal::ai::history::TracesTxnExtra for SubagentAssociationCommitPlan<'_> {
+    async fn apply(
+        &self,
+        txn: &sea_orm::DatabaseTransaction,
+        ctx: &crate::internal::ai::history::TracesCommitCtx,
+    ) -> Result<()> {
+        self.base.apply(txn, ctx).await?;
+        self.associations
+            .apply(
+                txn,
+                ctx,
+                crate::internal::ai::subagent_content::SubagentBoundaryAssociationContext {
+                    scope: self.scope,
+                    capture_session: self.capture_session,
+                    boundary_checkpoint_id: self.checkpoint_id,
+                    deadline: self.deadline,
+                },
+            )
+            .await
+    }
+
+    fn requires_versioned_coverage_binding(&self) -> bool {
+        self.base.requires_versioned_coverage_binding()
+    }
+}
+
 /// A0-02: materialise an independent `scope='subagent'` checkpoint at a
 /// `SubagentStart` / `SubagentEnd` boundary.
 ///
@@ -3241,6 +3391,10 @@ pub(super) async fn write_subagent_checkpoint(
     now: i64,
     scope: &CaptureScope,
     capture_deadline: Option<CaptureCommitDeadline>,
+    child_capture: Option<&crate::internal::ai::subagent_content::SubagentCaptureSummary>,
+    child_capture_incomplete: bool,
+    child_context: &LiveCaptureContext<'_>,
+    child_hints: &crate::internal::ai::observed_agents::live_capture::UntrustedChildSourceHints,
 ) -> Result<()> {
     use crate::internal::ai::observed_agents::{RedactedBytes, Redactor};
 
@@ -3251,10 +3405,9 @@ pub(super) async fn write_subagent_checkpoint(
         LifecycleEventKind::SubagentStart => "start",
         _ => "end",
     };
-    // The subagent boundary hook envelope carries only `session_id` + `cwd`
-    // (see the Codex `SubagentStop` row in agent.md) — no distinct subagent
-    // id and no tool-use id. We therefore leave `subagent_session_id` /
-    // `tool_use_id` NULL rather than inventing them: in particular
+    // Generic boundary id columns stay NULL. Source identities and exact
+    // revision/turn proofs are owned by the source collector and link table;
+    // an untrusted hook hint cannot authorize these columns. In particular,
     // `event.session_ref` is filled from the transcript PATH by
     // `build_lifecycle_event`, so persisting it as a subagent id would both
     // mislabel the column and leak a filesystem path. The tool NAME (if the
@@ -3280,7 +3433,7 @@ pub(super) async fn write_subagent_checkpoint(
     // reference file paths, so the whole object passes the default redactor
     // before persist (same discipline as the committed writer's metadata).
     let source_redacted = event.source.clone().map(redact_extracted_json);
-    let metadata = serde_json::json!({
+    let mut metadata = serde_json::json!({
         "schema_version": 1,
         "checkpoint_id": checkpoint_id,
         "session_id": libra_session_id,
@@ -3304,6 +3457,15 @@ pub(super) async fn write_subagent_checkpoint(
             "timestamp": event.timestamp.to_rfc3339(),
         },
     });
+    if let Some(summary) = child_capture {
+        metadata["subagent"]["content_capture"] = serde_json::json!({
+            "state": if child_capture_incomplete { "partial" } else { "complete" },
+            "discovered": summary.discovered,
+            "checkpoints_written": summary.checkpoints_written,
+            "skipped_unchanged": summary.skipped_unchanged,
+            "partial_sources": summary.partial_sources,
+        });
+    }
     let metadata_bytes =
         serde_json::to_vec_pretty(&metadata).context("serialize subagent checkpoint metadata")?;
     let (metadata_redacted, _) = Redactor::new_default().redact(&metadata_bytes);
@@ -3371,6 +3533,24 @@ pub(super) async fn write_subagent_checkpoint(
         scope.clone(),
     )
     .map_err(|error| anyhow!("prepare subagent checkpoint transaction companion: {error}"))?;
+    let associations = child_capture
+        .map(|summary| {
+            summary.bind_boundary_associations(
+                event.kind,
+                ingress_event_id,
+                child_context,
+                child_hints,
+            )
+        })
+        .unwrap_or_default();
+    let association_plan = SubagentAssociationCommitPlan {
+        base: &commit_plan,
+        associations: &associations,
+        scope,
+        capture_session: libra_session_id,
+        checkpoint_id: &checkpoint_id,
+        deadline: capture_deadline,
+    };
     // A boundary has no separate provider transcript. Its typed empty
     // `RedactedBytes` remains an explicitly partial capture projection,
     // preserving the historical compact boundary layout without a raw-byte
@@ -3389,6 +3569,18 @@ pub(super) async fn write_subagent_checkpoint(
             .with_capture_scope(scope.clone());
     let marker_generation = checkpoint_store.marker_generation().to_string();
     let replay_key = catalog_request.action().action_key().to_string();
+    let replay_fence = if child_capture.is_some()
+        && let Some(deadline) = capture_deadline
+    {
+        crate::internal::ai::subagent_content::prepare_child_boundary_replay(
+            conn,
+            &catalog_request,
+            deadline,
+        )
+        .await?
+    } else {
+        None
+    };
     let checkpoint_request = CheckpointWriteRequest::new(
         &replay_key,
         &checkpoint_id,
@@ -3401,7 +3593,7 @@ pub(super) async fn write_subagent_checkpoint(
         &checkpoint_payload,
         // Boundary checkpoints stay outside per-turn coverage, but their
         // tombstone barrier and catalog row remain transaction-injected.
-        Some(&commit_plan),
+        Some(&association_plan),
         capture_deadline,
     )
     .map_err(|error| anyhow!("prepare subagent checkpoint write request: {error}"))?;
@@ -3416,9 +3608,21 @@ pub(super) async fn write_subagent_checkpoint(
         .map_err(|error| anyhow!("subagent capture coordinator execution failed: {error}"))?
     {
         CaptureCoordinatorOutcome::CheckpointCommitted { .. }
-        | CaptureCoordinatorOutcome::CheckpointAlreadyExists { .. }
-        | CaptureCoordinatorOutcome::CheckpointInFlight { .. }
-        | CaptureCoordinatorOutcome::AlreadyApplied => Ok(()),
+        | CaptureCoordinatorOutcome::CheckpointInFlight { .. } => Ok(()),
+        CaptureCoordinatorOutcome::CheckpointAlreadyExists { .. }
+        | CaptureCoordinatorOutcome::AlreadyApplied => {
+            if let (Some(fence), Some(deadline)) = (replay_fence.as_ref(), capture_deadline) {
+                crate::internal::ai::subagent_content::replay_child_boundary_associations(
+                    conn,
+                    repo_path,
+                    &associations,
+                    fence,
+                    deadline,
+                )
+                .await?;
+            }
+            Ok(())
+        }
         CaptureCoordinatorOutcome::CheckpointConflict { reason } => {
             bail!("subagent capture coordinator left the write unchanged: {reason:?}")
         }
@@ -3514,7 +3718,10 @@ pub(super) fn omit_subagent_sources_for_deadline(
     sources: Vec<crate::internal::ai::subagent_content::DiscoveredSubagentContent>,
 ) -> SubagentExtractionSnapshots {
     SubagentExtractionSnapshots {
-        deadline_omitted_source_count: sources.len(),
+        deadline_omitted_source_count: sources
+            .iter()
+            .filter(|source| source.parent_extraction_enabled())
+            .count(),
         ..Default::default()
     }
 }
@@ -3551,11 +3758,13 @@ pub(super) fn snapshot_subagent_sources_for_extraction(
             snapshots.redaction_reports.push(Default::default());
             continue;
         };
-        let snapshot = source.into_parent_extraction_snapshot(
+        let Some(snapshot) = source.into_parent_extraction_snapshot(
             parent_session_id,
             crate::internal::ai::observed_agents::live_capture::selected_snapshot_adapter(kind),
             policy,
-        );
+        ) else {
+            continue;
+        };
         snapshots.projections.push(snapshot.safe_projection());
         snapshots
             .redaction_reports
@@ -3587,7 +3796,7 @@ pub(super) fn subagent_extraction_warnings(
 }
 
 /// Attach the bounded, content-free child snapshot status to extraction
-/// metadata. `source_count` reflects every independently durable child;
+/// metadata. `source_count` reflects children eligible for this aggregate;
 /// `complete_source_count` reflects only the subset allowed into aggregate
 /// extraction, so a partial snapshot can never be mistaken for attribution.
 pub(super) fn attach_subagent_snapshot_metadata(
@@ -3737,6 +3946,228 @@ pub(super) fn append_redaction_report_bounded(
         } else {
             *dropped_matches = dropped_matches.saturating_add(1);
         }
+    }
+}
+
+#[cfg(test)]
+#[cfg(feature = "test-live-agent")]
+mod codex_child_wait_error_local_tests {
+    use super::*;
+
+    fn catalog_wait(capacity: bool) -> CaptureCatalogError {
+        if capacity {
+            CaptureCatalogError::ChildGateCapacity
+        } else {
+            CaptureCatalogError::ChildCheckpointsPending
+        }
+    }
+
+    fn wrap(kind: u8, cause: CaptureCoordinatorError) -> CaptureCoordinatorError {
+        match kind {
+            0 => CaptureCoordinatorError::DurableCheckpointCompletion {
+                checkpoint_id: "owned-checkpoint".into(),
+                cause: Box::new(cause),
+            },
+            1 => CaptureCoordinatorError::CheckpointReplayCompletion {
+                checkpoint_id: "owned-checkpoint".into(),
+                cause: Box::new(cause),
+            },
+            2 => CaptureCoordinatorError::CheckpointWriteFinalizer {
+                checkpoint: CheckpointStoreError::DeadlineExceeded,
+                finalizer: Box::new(cause),
+            },
+            _ => CaptureCoordinatorError::CheckpointConflictFinalizer {
+                reason: CheckpointConflictReason::ReplayPayloadMismatch,
+                finalizer: Box::new(cause),
+            },
+        }
+    }
+
+    #[test]
+    #[ignore = "operator-local Codex acceptance; never run in CI"]
+    fn codex_child_wait_error_typed_catalog_and_context() {
+        for capacity in [false, true] {
+            assert!(child_checkpoint_wait_error(&catalog_wait(capacity)).is_some());
+            for boundary in 0..3 {
+                let error = match boundary {
+                    0 => CaptureCoordinatorError::CatalogApply(catalog_wait(capacity)),
+                    1 => CaptureCoordinatorError::CatalogComplete(catalog_wait(capacity)),
+                    _ => CaptureCoordinatorError::CatalogFinalize(catalog_wait(capacity)),
+                };
+                let error = anyhow::Error::new(error)
+                    .context("checkpoint stage")
+                    .context("live capture");
+                assert_eq!(
+                    child_checkpoint_wait_error(error.as_ref())
+                        .unwrap()
+                        .to_string(),
+                    catalog_wait(capacity).to_string()
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "operator-local Codex acceptance; never run in CI"]
+    fn codex_child_wait_error_follows_non_source_coordinator_fields() {
+        for capacity in [false, true] {
+            for outer in 0..4 {
+                for inner in 0..4 {
+                    let error = wrap(
+                        outer,
+                        wrap(
+                            inner,
+                            CaptureCoordinatorError::CatalogFinalize(catalog_wait(capacity)),
+                        ),
+                    );
+                    // The two durable wrappers omit Error::source; chain-only
+                    // code cannot discover their inner catalog wait.
+                    if outer < 2 {
+                        let chain = anyhow::Error::new(error);
+                        assert!(!chain.chain().any(|cause| cause.is::<CaptureCatalogError>()));
+                        assert_eq!(
+                            child_checkpoint_wait_error(chain.as_ref()).is_some(),
+                            inner < 2
+                        );
+                    } else {
+                        assert!(child_checkpoint_wait_error(&error).is_none());
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "operator-local Codex acceptance; never run in CI"]
+    fn codex_child_error_progress_real_checkpoint_failure_wins_over_child_wait() {
+        for capacity in [false, true] {
+            for kind in [2, 3] {
+                let error = wrap(
+                    kind,
+                    CaptureCoordinatorError::CatalogFinalize(catalog_wait(capacity)),
+                );
+                assert!(
+                    child_checkpoint_wait_error(&error).is_none(),
+                    "a real checkpoint failure/conflict remains causal even if finalizer also waits"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "operator-local Codex acceptance; never run in CI"]
+    fn codex_child_wait_error_does_not_classify_strings_or_other_failures() {
+        for error in [
+            anyhow!(CaptureCatalogError::ChildCheckpointsPending.to_string()),
+            anyhow!(CaptureCatalogError::ChildGateCapacity.to_string()),
+            anyhow::Error::new(CaptureCatalogError::MalformedReceiptLedger),
+            anyhow::Error::new(CaptureCatalogError::Database),
+            anyhow::Error::new(wrap(
+                0,
+                CaptureCoordinatorError::CatalogComplete(CaptureCatalogError::ScopeRejected),
+            )),
+            anyhow::Error::new(wrap(
+                2,
+                CaptureCoordinatorError::CatalogFinalize(CaptureCatalogError::DeadlineExceeded),
+            )),
+        ] {
+            assert!(child_checkpoint_wait_error(error.as_ref()).is_none());
+        }
+    }
+}
+
+#[cfg(test)]
+#[cfg(feature = "test-live-agent")]
+mod codex_child_parent_extraction_local_tests {
+    use super::*;
+    use crate::internal::ai::subagent_content::DiscoveredSubagentContent;
+
+    fn source(kind: &str, text: &str, usage: usize) -> DiscoveredSubagentContent {
+        DiscoveredSubagentContent::fixture(
+            kind,
+            "source/sha256/local-parent-extraction",
+            format!(
+                "{{\"type\":\"assistant\",\"message\":{{\"role\":\"assistant\",\"content\":\"{text}\",\"usage\":{{\"input_tokens\":{usage},\"output_tokens\":1}}}}}}\n"
+            )
+            .as_bytes(),
+            None,
+        )
+    }
+
+    #[test]
+    #[ignore = "operator-local Codex acceptance; never run in CI"]
+    fn codex_child_parent_extraction_skips_content_usage_and_status() {
+        let snapshots = snapshot_subagent_sources_for_extraction(
+            vec![source("codex", "CODEX_CHILD_STAYS_IN_ITS_CHECKPOINT", 999)],
+            "codex__parent",
+            CaptureSnapshotPolicy::default(),
+        );
+        assert!(snapshots.transcripts.is_empty());
+        assert!(snapshots.projections.is_empty());
+        assert!(snapshots.redaction_reports.is_empty());
+        assert_eq!(snapshots.source_count(), 0);
+        assert_eq!(snapshots.partial_source_count(), 0);
+        let mut extraction = serde_json::json!({"parent": "unchanged"});
+        attach_subagent_snapshot_metadata(&mut extraction, &snapshots);
+        assert_eq!(extraction, serde_json::json!({"parent": "unchanged"}));
+        assert!(subagent_extraction_warnings(None, snapshots.partial_source_count()).is_empty());
+
+        let snapshots = snapshot_subagent_sources_for_extraction(
+            vec![
+                source("codex", "CODEX_CHILD_STAYS_IN_ITS_CHECKPOINT", 999),
+                source("claude_code", "CLAUDE_CHILD_STILL_AGGREGATES", 3),
+            ],
+            "claude__parent",
+            CaptureSnapshotPolicy::default(),
+        );
+        assert_eq!(snapshots.transcripts.len(), 1);
+        assert_eq!(snapshots.projections.len(), 1);
+        assert_eq!(snapshots.redaction_reports.len(), 1);
+        assert_eq!(snapshots.source_count(), 1);
+        assert_eq!(snapshots.partial_source_count(), 0);
+        let mut extraction =
+            build_extraction_metadata("claude_code", None, &snapshots.transcripts, &[]);
+        assert_eq!(extraction["subagent_token_usage"]["input_tokens"], 3);
+        attach_subagent_snapshot_metadata(&mut extraction, &snapshots);
+        assert_eq!(extraction["subagent_snapshot"]["source_count"], 1);
+        assert_eq!(extraction["subagent_snapshot"]["complete_source_count"], 1);
+        assert!(
+            !serde_json::to_string(&extraction)
+                .expect("safe status")
+                .contains("CODEX_CHILD")
+        );
+    }
+
+    #[test]
+    #[ignore = "operator-local Codex acceptance; never run in CI"]
+    fn codex_child_parent_extraction_deadline_counts_only_eligible_sources() {
+        let snapshots = omit_subagent_sources_for_deadline(vec![source(
+            "codex",
+            "CODEX_CHILD_STAYS_IN_ITS_CHECKPOINT",
+            999,
+        )]);
+        assert_eq!(snapshots.source_count(), 0);
+        assert_eq!(snapshots.partial_source_count(), 0);
+        assert!(!snapshots.children_omitted_for_deadline());
+        let mut extraction = serde_json::json!({"parent": "unchanged"});
+        attach_subagent_snapshot_metadata(&mut extraction, &snapshots);
+        assert_eq!(extraction, serde_json::json!({"parent": "unchanged"}));
+
+        let snapshots = omit_subagent_sources_for_deadline(vec![
+            source("codex", "CODEX_CHILD_STAYS_IN_ITS_CHECKPOINT", 999),
+            source("claude_code", "CLAUDE_CHILD_OMITTED_BY_DEADLINE", 3),
+        ]);
+        assert!(snapshots.transcripts.is_empty());
+        assert_eq!(snapshots.deadline_omitted_source_count, 1);
+        assert_eq!(snapshots.source_count(), 1);
+        assert_eq!(snapshots.partial_source_count(), 1);
+        assert!(snapshots.children_omitted_for_deadline());
+        attach_subagent_snapshot_metadata(&mut extraction, &snapshots);
+        assert_eq!(extraction["subagent_snapshot"]["source_count"], 1);
+        assert_eq!(
+            extraction["subagent_snapshot"]["deadline_omitted_source_count"],
+            1
+        );
     }
 }
 
@@ -4020,6 +4451,8 @@ pub(crate) mod tests {
                     scope: &self.scope,
                     subagent_sources: Vec::new(),
                     subagent_discovery_warning: None,
+                    subagent_capture: None,
+                    incomplete_parent_extraction: false,
                     report_value: json!({}),
                     source: CheckpointStageSource::VerifiedPartial(source),
                     claim_channel: "export",
@@ -4483,6 +4916,8 @@ pub(crate) mod tests {
                         scope: &self.scope,
                         subagent_sources: Vec::new(),
                         subagent_discovery_warning: None,
+                        subagent_capture: None,
+                        incomplete_parent_extraction: false,
                         report_value: report,
                         source,
                         claim_channel: "export",

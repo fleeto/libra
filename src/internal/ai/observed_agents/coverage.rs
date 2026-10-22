@@ -1098,7 +1098,7 @@ fn normalize_claude_transcript_inner(
 /// twice. Malformed semantic records poison only the current turn.
 pub fn normalize_codex_rollout(data: &[u8]) -> Vec<NormalizedTurn> {
     // INVARIANT: `None` disables the only early-exit condition.
-    let Some(turns) = normalize_codex_rollout_inner(data, None) else {
+    let Some(turns) = normalize_codex_rollout_inner(data, None, false, None) else {
         return Vec::new();
     };
     turns
@@ -1108,15 +1108,618 @@ pub(crate) fn normalize_codex_rollout_until(
     data: &[u8],
     deadline: Instant,
 ) -> Option<Vec<NormalizedTurn>> {
-    normalize_codex_rollout_inner(data, Some(deadline))
+    normalize_codex_rollout_inner(data, Some(deadline), false, None)
+}
+
+/// Ordinary Codex thinking is readable data, independently of native proof.
+pub(crate) fn normalize_codex_reasoning_rollout(
+    data: &[u8],
+) -> Option<(Vec<NormalizedTurn>, bool)> {
+    normalize_codex_typed_rollout_until(data, None)
+}
+
+pub(crate) fn normalize_codex_reasoning_rollout_until(
+    data: &[u8],
+    deadline: Instant,
+) -> Option<(Vec<NormalizedTurn>, bool)> {
+    normalize_codex_typed_rollout_until(data, Some(deadline))
+}
+
+/// Current producer context is interpreted only by the typed data path. The
+/// V1 normalizer and its ordinary-retention sibling remain frozen for replay.
+fn normalize_codex_typed_rollout_until(
+    data: &[u8],
+    deadline: Option<Instant>,
+) -> Option<(Vec<NormalizedTurn>, bool)> {
+    if data.len() > 16 * 1024 * 1024 {
+        return None;
+    }
+    // The first persisted header selects the codec for the complete snapshot.
+    // A resumed session or an appended marker must not reinterpret its prefix.
+    // Headerless snapshots remain legacy; tail slices are not coverage sources.
+    if deadline.is_some_and(|limit| Instant::now() >= limit) {
+        return None;
+    }
+    let first = data
+        .split(|byte| *byte == b'\n')
+        .find(|line| !line.iter().all(u8::is_ascii_whitespace));
+    let current_shape = first
+        .and_then(|line| parse_canon_value(line).ok())
+        .is_some_and(|entry| {
+            entry.get("type").and_then(CanonValue::as_str) == Some("session_meta")
+                && entry
+                    .get("payload")
+                    .and_then(|payload| payload.get("cli_version"))
+                    .and_then(CanonValue::as_str)
+                    == Some("0.162.1")
+        });
+    if !current_shape {
+        return normalize_codex_rollout_inner(data, deadline, true, None)
+            .map(|turns| (turns, false));
+    }
+    normalize_codex_contextual_rollout(data, deadline)
+}
+
+#[derive(Default)]
+struct CodexTurnBucket {
+    key: Option<String>,
+    source: Zeroizing<Vec<u8>>,
+    prompt_spans: Vec<(usize, usize, usize)>,
+    partial: bool,
+}
+
+#[derive(Default)]
+struct CodexPromptOccurrences {
+    counts: [usize; 3],
+    slots: Vec<(usize, usize, Option<String>)>,
+}
+
+/// Assemble bounded, data-only groups, then reuse the established response
+/// codec for messages, tools and typed reasoning. No writer or claim is opened.
+fn normalize_codex_contextual_rollout(
+    data: &[u8],
+    deadline: Option<Instant>,
+) -> Option<(Vec<NormalizedTurn>, bool)> {
+    const MAX_GROUPS: usize = 4096;
+    if data.len() > 16 * 1024 * 1024 {
+        return None;
+    }
+    let mut buckets: Vec<CodexTurnBucket> = Vec::new();
+    let mut by_turn = BTreeMap::<String, usize>::new();
+    let mut current_key: Option<String> = None;
+    let mut current_bucket = None;
+    let mut lifecycle_scope = false;
+    let mut owner: Option<String> = None;
+    let mut foreign = false;
+    let mut partial = false;
+    let mut ids = BTreeMap::<(usize, String), (usize, [u8; 32])>::new();
+    let mut occurrences = BTreeMap::<(Option<String>, [u8; 32]), CodexPromptOccurrences>::new();
+    let mut slot_count = 0;
+    let mut buffered_bytes = 0_usize;
+    let mut response_ids = BTreeMap::<(String, String), (usize, [u8; 32])>::new();
+
+    fn bucket(
+        buckets: &mut Vec<CodexTurnBucket>,
+        by_turn: &mut BTreeMap<String, usize>,
+        key: &Option<String>,
+    ) -> Option<usize> {
+        if let Some(index) = key.as_ref().and_then(|key| by_turn.get(key)) {
+            return Some(*index);
+        }
+        if buckets.len() >= MAX_GROUPS {
+            return None;
+        }
+        let index = buckets.len();
+        buckets.push(CodexTurnBucket {
+            key: key.clone(),
+            partial: key.is_none(),
+            ..Default::default()
+        });
+        if let Some(key) = key {
+            by_turn.insert(key.clone(), index);
+        }
+        Some(index)
+    }
+
+    fn mark_partial(buckets: &mut [CodexTurnBucket], current: Option<usize>, partial: &mut bool) {
+        if let Some(group) = current.and_then(|index| buckets.get_mut(index)) {
+            group.partial = true;
+        } else {
+            *partial = true;
+        }
+    }
+
+    fn context(value: &CanonValue) -> Option<String> {
+        value
+            .get("turn_id")
+            .and_then(CanonValue::as_str)
+            .filter(|id| valid_provider_turn_id(id))
+            .map(str::to_owned)
+    }
+
+    for line in data.split(|byte| *byte == b'\n') {
+        if deadline.is_some_and(|limit| Instant::now() >= limit) || line.len() > 1024 * 1024 {
+            return None;
+        }
+        if line.iter().all(u8::is_ascii_whitespace) {
+            continue;
+        }
+        let Ok(entry) = parse_canon_value(line) else {
+            mark_partial(&mut buckets, current_bucket, &mut partial);
+            continue;
+        };
+        let kind = entry.get("type").and_then(CanonValue::as_str);
+        let Some(payload) = entry.get("payload") else {
+            mark_partial(&mut buckets, current_bucket, &mut partial);
+            continue;
+        };
+        if kind == Some("session_meta") {
+            let Some(id) = payload
+                .get("id")
+                .and_then(CanonValue::as_str)
+                .filter(|id| !id.is_empty() && id.len() <= 128)
+            else {
+                mark_partial(&mut buckets, current_bucket, &mut partial);
+                foreign = true;
+                continue;
+            };
+            if owner.as_deref().is_some_and(|owner| owner != id) {
+                mark_partial(&mut buckets, current_bucket, &mut partial);
+                foreign = true;
+            } else {
+                owner = Some(id.to_owned());
+                foreign = false;
+            }
+            continue;
+        }
+        if let Some(thread) = payload.get("thread_id") {
+            let Some(thread) = thread
+                .as_str()
+                .filter(|thread| !thread.is_empty() && thread.len() <= 128)
+            else {
+                mark_partial(&mut buckets, current_bucket, &mut partial);
+                continue;
+            };
+            if owner.is_none() {
+                owner = Some(thread.to_owned());
+                mark_partial(&mut buckets, current_bucket, &mut partial);
+            }
+            if owner.as_deref() != Some(thread) {
+                mark_partial(&mut buckets, current_bucket, &mut partial);
+                continue;
+            }
+        }
+        let explicitly_owned = payload
+            .get("thread_id")
+            .and_then(CanonValue::as_str)
+            .is_some_and(|thread| owner.as_deref() == Some(thread));
+        if foreign && !explicitly_owned {
+            mark_partial(&mut buckets, current_bucket, &mut partial);
+            continue;
+        }
+        if entry
+            .get("metadata")
+            .and_then(|metadata| metadata.get("inherited_user_message"))
+            .and_then(CanonValue::as_bool)
+            == Some(true)
+        {
+            continue;
+        }
+        let payload_kind = payload.get("type").and_then(CanonValue::as_str);
+        if kind == Some("event_msg")
+            && matches!(
+                payload_kind,
+                Some("task_complete" | "turn_complete" | "turn_aborted")
+            )
+        {
+            let closing_key = context(payload);
+            if payload.get("turn_id").is_some() && closing_key.is_none() {
+                mark_partial(&mut buckets, current_bucket, &mut partial);
+                continue;
+            }
+            // An explicitly scoped late completion cannot close a newer turn.
+            if payload.get("turn_id").is_none() || closing_key == current_key {
+                current_key = None;
+                current_bucket = None;
+                lifecycle_scope = false;
+            }
+            continue;
+        }
+        if kind == Some("turn_context")
+            || (kind == Some("event_msg")
+                && matches!(payload_kind, Some("task_started" | "turn_started")))
+        {
+            let next_key = context(payload);
+            if kind == Some("turn_context") {
+                if payload.get("turn_id").is_none() {
+                    if lifecycle_scope {
+                        mark_partial(&mut buckets, current_bucket, &mut partial);
+                    } else {
+                        partial = true;
+                        current_key = None;
+                        current_bucket = None;
+                    }
+                    continue;
+                }
+                if next_key != current_key {
+                    lifecycle_scope = false;
+                }
+            } else {
+                lifecycle_scope = next_key.is_some();
+            }
+            current_key = next_key;
+            if current_key.is_none() {
+                lifecycle_scope = false;
+            }
+            current_bucket = current_key
+                .as_ref()
+                .and_then(|key| by_turn.get(key))
+                .copied();
+            partial |= current_key.is_none();
+            continue;
+        }
+
+        // Source families have independent ids. Occurrence pairing keeps two
+        // identical genuine inputs while collapsing their event/raw mirrors.
+        let candidate = match (kind, payload_kind) {
+            (Some("response_item"), Some("message"))
+                if payload.get("role").and_then(CanonValue::as_str) == Some("user") =>
+            {
+                Some((0, payload, payload.get("id").and_then(CanonValue::as_str)))
+            }
+            (Some("event_msg"), Some("user_message")) => Some((
+                1,
+                payload,
+                payload.get("client_id").and_then(CanonValue::as_str),
+            )),
+            (Some("event_msg"), Some("item_completed")) => payload
+                .get("item")
+                .filter(|item| item.get("type").and_then(CanonValue::as_str) == Some("UserMessage"))
+                .map(|item| (2, item, item.get("id").and_then(CanonValue::as_str))),
+            _ => None,
+        };
+        if let Some((source, value, id)) = candidate {
+            let (text, uncertain) = if source == 1 {
+                if value.get("kind").is_some_and(|kind| {
+                    !matches!(kind, CanonValue::Null) && kind.as_str() != Some("plain")
+                }) {
+                    mark_partial(&mut buckets, current_bucket, &mut partial);
+                    continue;
+                }
+                let Some(text) = value.get("message").and_then(CanonValue::as_str) else {
+                    mark_partial(&mut buckets, current_bucket, &mut partial);
+                    continue;
+                };
+                (text.to_owned(), false)
+            } else {
+                let Some(content) = value.get("content").and_then(CanonValue::as_array) else {
+                    mark_partial(&mut buckets, current_bucket, &mut partial);
+                    continue;
+                };
+                let kinds = value
+                    .get("internal_chat_message_metadata_passthrough")
+                    .and_then(|meta| meta.get("content_item_kinds"))
+                    .and_then(CanonValue::as_array);
+                if source == 0
+                    && kinds.is_none_or(|kinds| {
+                        kinds.len() != content.len()
+                            || kinds.iter().any(|kind| kind.as_str().is_none())
+                    })
+                {
+                    mark_partial(&mut buckets, current_bucket, &mut partial);
+                    continue;
+                }
+                let mut parts = Vec::new();
+                let mut uncertain = false;
+                for (index, part) in content.iter().enumerate() {
+                    if let Some(kind) = kinds
+                        .and_then(|kinds| kinds.get(index))
+                        .and_then(CanonValue::as_str)
+                    {
+                        if !super::codex_rollout::human_content_kind(kind) {
+                            continue;
+                        }
+                        uncertain |= kind.is_empty() || kind == "unknown";
+                    }
+                    match part.get("type").and_then(CanonValue::as_str) {
+                        Some("text" | "input_text") => {
+                            if let Some(text) = part.get("text").and_then(CanonValue::as_str) {
+                                parts.push(text);
+                            } else {
+                                uncertain = true;
+                            }
+                        }
+                        _ => uncertain = true,
+                    }
+                }
+                if parts.is_empty() {
+                    partial |= uncertain;
+                    continue;
+                }
+                (parts.join("\n"), uncertain)
+            };
+            let candidate_key = if let Some(meta) = value
+                .get("internal_chat_message_metadata_passthrough")
+                .filter(|meta| meta.get("turn_id").is_some())
+            {
+                context(meta)
+            } else if source == 2 {
+                context(payload)
+            } else {
+                current_key.clone()
+            };
+            // The legacy accepted-input event carries no turn scope. Keep
+            // its ordinary source, but never fabricate a group after a close
+            // or before the first scoped input establishes its actual owner.
+            if matches!(source, 1 | 2) && candidate_key.is_none() {
+                mark_partial(&mut buckets, current_bucket, &mut partial);
+                continue;
+            }
+            let digest: [u8; 32] = Sha256::digest(text.as_bytes()).into();
+            let id = id.filter(|id| !id.is_empty() && id.len() <= 1024);
+            if let Some((index, previous)) = id.and_then(|id| ids.get(&(source, id.to_owned()))) {
+                buckets[*index].partial |=
+                    *previous != digest || buckets[*index].key != candidate_key;
+                continue;
+            }
+            if (id.is_some() && ids.len() >= MAX_GROUPS)
+                || (occurrences.len() >= MAX_GROUPS
+                    && !occurrences.contains_key(&(candidate_key.clone(), digest)))
+            {
+                return None;
+            }
+            let seen = occurrences
+                .entry((candidate_key.clone(), digest))
+                .or_default();
+            let occurrence = seen.counts[source];
+            seen.counts[source] += 1;
+            if let Some((index, span_index, previous_id)) = seen.slots.get(occurrence) {
+                let index = *index;
+                buckets[index].partial |= uncertain || id.is_none() || previous_id.as_deref() != id;
+                let previous_source = &mut buckets[index].prompt_spans[*span_index].0;
+                if source == 0 || (*previous_source == 1 && source == 2) {
+                    *previous_source = source;
+                }
+                if let Some(id) = id {
+                    ids.insert((source, id.to_owned()), (index, digest));
+                }
+                if source == 0 {
+                    if current_key.is_none() || candidate_key == current_key {
+                        current_key = candidate_key;
+                        current_bucket = Some(index);
+                    } else if candidate_key.is_none() {
+                        mark_partial(&mut buckets, current_bucket, &mut partial);
+                        current_key = None;
+                        current_bucket = Some(index);
+                        lifecycle_scope = false;
+                    } else {
+                        buckets[index].partial = true;
+                        mark_partial(&mut buckets, current_bucket, &mut partial);
+                    }
+                }
+                continue;
+            }
+            if slot_count >= MAX_GROUPS {
+                return None;
+            }
+            slot_count += 1;
+            let index = bucket(&mut buckets, &mut by_turn, &candidate_key)?;
+            seen.slots.push((
+                index,
+                buckets[index].prompt_spans.len(),
+                id.map(str::to_owned),
+            ));
+            buckets[index].partial |= uncertain || id.is_none() || source != 0;
+            if let Some(id) = id {
+                ids.insert((source, id.to_owned()), (index, digest));
+            }
+            let row = serde_json::json!({"type":"response_item", "timestamp":entry.get("timestamp"),
+                "payload":{"type":"message","role":"user","content":[{"type":"input_text","text":text}]}});
+            let encoded = Zeroizing::new(serde_json::to_vec(&row).ok()?);
+            buffered_bytes = buffered_bytes.checked_add(encoded.len().checked_add(1)?)?;
+            if buffered_bytes > 16 * 1024 * 1024 {
+                return None;
+            }
+            let start = buckets[index].source.len();
+            buckets[index].source.extend_from_slice(&encoded);
+            buckets[index].source.push(b'\n');
+            let end = buckets[index].source.len();
+            buckets[index].prompt_spans.push((source, start, end));
+            // A scoped completion can arrive after a later turn has started.
+            // Only fresh raw input or the active stream's own key binds the
+            // following unscoped response; mirrors never rewind that context.
+            if candidate_key == current_key || (source == 0 && current_key.is_none()) {
+                current_key = candidate_key;
+                current_bucket = Some(index);
+            } else if source == 0 && candidate_key.is_none() {
+                mark_partial(&mut buckets, current_bucket, &mut partial);
+                current_key = None;
+                current_bucket = Some(index);
+                lifecycle_scope = false;
+            } else if source == 0 {
+                buckets[index].partial = true;
+                mark_partial(&mut buckets, current_bucket, &mut partial);
+            }
+            continue;
+        }
+        if kind != Some("response_item") {
+            partial |= !matches!(
+                kind,
+                Some(
+                    "event_msg"
+                        | "token_usage_record"
+                        | "world_state"
+                        | "security_risk_score"
+                        | "retained_context"
+                        | "inter_agent_communication_metadata"
+                )
+            );
+            continue;
+        }
+        if payload_kind == Some("message")
+            && matches!(
+                payload.get("role").and_then(CanonValue::as_str),
+                Some("developer" | "system")
+            )
+        {
+            continue;
+        }
+        if !matches!(
+            payload_kind,
+            Some(
+                "reasoning"
+                    | "function_call"
+                    | "custom_tool_call"
+                    | "function_call_output"
+                    | "custom_tool_call_output"
+            )
+        ) && !(payload_kind == Some("message")
+            && payload.get("role").and_then(CanonValue::as_str) == Some("assistant"))
+        {
+            mark_partial(&mut buckets, current_bucket, &mut partial);
+            continue;
+        }
+        let scoped_context = payload
+            .get("internal_chat_message_metadata_passthrough")
+            .filter(|meta| meta.get("turn_id").is_some());
+        let index = if let Some(meta) = scoped_context {
+            bucket(&mut buckets, &mut by_turn, &context(meta))?
+        } else {
+            match current_bucket {
+                Some(index) => index,
+                None => bucket(&mut buckets, &mut by_turn, &current_key)?,
+            }
+        };
+        if let Some(id) = payload
+            .get("id")
+            .and_then(CanonValue::as_str)
+            .filter(|id| !id.is_empty() && id.len() <= 1024)
+        {
+            let identity = (payload_kind.unwrap_or_default().to_owned(), id.to_owned());
+            let mut canonical = Zeroizing::new(Vec::new());
+            write_canon_value(&mut canonical, payload);
+            let digest: [u8; 32] = Sha256::digest(&canonical).into();
+            if let Some((previous_index, previous_digest)) = response_ids.get(&identity) {
+                let conflict = *previous_index != index || *previous_digest != digest;
+                buckets[*previous_index].partial |= conflict;
+                buckets[index].partial |= conflict;
+                continue;
+            }
+            if response_ids.len() >= MAX_GROUPS {
+                return None;
+            }
+            response_ids.insert(identity, (index, digest));
+        } else {
+            buckets[index].partial = true;
+        }
+        buffered_bytes = buffered_bytes.checked_add(line.len().checked_add(1)?)?;
+        if buffered_bytes > 16 * 1024 * 1024 {
+            return None;
+        }
+        buckets[index].source.extend_from_slice(line);
+        buckets[index].source.push(b'\n');
+        if scoped_context.is_none() {
+            current_bucket = Some(index);
+        }
+    }
+    let mut turns = Vec::new();
+    for (source_ordinal, mut group) in buckets.into_iter().enumerate() {
+        if deadline.is_some_and(|limit| Instant::now() >= limit) {
+            return None;
+        }
+        // Only annotated raw or scoped completed input establishes a user
+        // record. Unscoped legacy events can corroborate a matched span, but
+        // their arrival position cannot prove a turn even with active context.
+        let primary = if group.prompt_spans.iter().any(|span| span.0 == 0) {
+            Some(0)
+        } else if group.prompt_spans.iter().any(|span| span.0 == 2) {
+            Some(2)
+        } else {
+            None
+        };
+        let mut selected = Zeroizing::new(Vec::with_capacity(group.source.len()));
+        let mut cursor = 0;
+        for (source, start, end) in &group.prompt_spans {
+            if deadline.is_some_and(|limit| Instant::now() >= limit) {
+                return None;
+            }
+            selected.extend_from_slice(&group.source[cursor..*start]);
+            if Some(*source) == primary {
+                selected.extend_from_slice(&group.source[*start..*end]);
+            } else {
+                group.partial = true;
+            }
+            cursor = *end;
+        }
+        selected.extend_from_slice(&group.source[cursor..]);
+        let parts = normalize_codex_rollout_inner(&selected, deadline, true, None)?;
+        let ordinal = turns.len();
+        let mut turn = NormalizedTurn {
+            logical_turn_key: group.key.unwrap_or_else(|| ordinal_key(source_ordinal)),
+            ordinal,
+            completeness: if group.partial {
+                Completeness::Incomplete
+            } else {
+                Completeness::Complete
+            },
+            started_at: None,
+            ended_at: None,
+            records: Vec::new(),
+        };
+        for part in parts {
+            if part.completeness != Completeness::Complete {
+                turn.completeness = Completeness::Incomplete;
+            }
+            observe_turn_timestamp(&mut turn, part.started_at);
+            observe_turn_timestamp(&mut turn, part.ended_at);
+            turn.records.extend(part.records);
+        }
+        if !turn.records.is_empty() {
+            turns.push(turn);
+        } else {
+            partial |= turn.completeness != Completeness::Complete;
+        }
+    }
+    Some((turns, partial))
+}
+
+/// Attribute ordinary source slices alongside the frozen V1 normalizer.
+/// Neither source values nor their hashes enter semantic claim digests.
+pub(crate) struct CodexRetainedRollout {
+    pub(crate) turns: Vec<NormalizedTurn>,
+    pub(crate) retained: BTreeMap<usize, Vec<u8>>,
+    pub(crate) unattributed_source: bool,
+}
+
+#[derive(Default)]
+struct CodexRetentionSlices {
+    turns: BTreeMap<usize, Vec<u8>>,
+    unattributed_source: bool,
+}
+
+pub(crate) fn normalize_codex_retained_rollout_until(
+    data: &[u8],
+    deadline: Instant,
+) -> Option<CodexRetainedRollout> {
+    let mut retained = CodexRetentionSlices::default();
+    let turns = normalize_codex_rollout_inner(data, Some(deadline), false, Some(&mut retained))?;
+    Some(CodexRetainedRollout {
+        turns,
+        retained: retained.turns,
+        unattributed_source: retained.unattributed_source,
+    })
 }
 
 fn normalize_codex_rollout_inner(
     data: &[u8],
     deadline: Option<Instant>,
+    include_reasoning: bool,
+    mut retention: Option<&mut CodexRetentionSlices>,
 ) -> Option<Vec<NormalizedTurn>> {
     let mut turns: Vec<NormalizedTurn> = Vec::new();
     let mut pending_turn_id: Option<String> = None;
+
+    let mut seen_reasoning_ids = BTreeSet::new();
 
     fn open_turn(turns: &mut Vec<NormalizedTurn>, key: Option<String>) -> &mut NormalizedTurn {
         let ordinal = turns.len();
@@ -1178,7 +1781,13 @@ fn normalize_codex_rollout_inner(
         let entry = match parse_canon_value(line) {
             Ok(entry) => entry,
             Err(_) => {
+                let ordinal = current_or_open(&mut turns).ordinal;
                 current_or_open(&mut turns).completeness = Completeness::Incomplete;
+                if let Some(retained) = retention.as_deref_mut() {
+                    let bytes = retained.turns.entry(ordinal).or_default();
+                    bytes.extend_from_slice(line);
+                    bytes.push(b'\n');
+                }
                 continue;
             }
         };
@@ -1187,6 +1796,31 @@ fn normalize_codex_rollout_inner(
         let Some(payload) = entry.get("payload") else {
             continue;
         };
+        let is_reasoning = entry_type == "response_item"
+            && payload.get("type").and_then(CanonValue::as_str) == Some("reasoning");
+        let compacted_reasoning = entry_type == "compacted"
+            && payload
+                .get("replacement_history")
+                .and_then(CanonValue::as_array)
+                .is_some_and(|items| {
+                    items.iter().any(|item| {
+                        item.get("type").and_then(CanonValue::as_str) == Some("reasoning")
+                    })
+                });
+        if (is_reasoning || compacted_reasoning)
+            && let Some(retained) = retention.as_deref_mut()
+        {
+            // A compaction is unassigned historical context. Store it once
+            // with the first checkpoint, and keep its sidecar unattributed.
+            let ordinal = if compacted_reasoning {
+                0
+            } else {
+                turns.last().map_or(0, |turn| turn.ordinal)
+            };
+            let bytes = retained.turns.entry(ordinal).or_default();
+            bytes.extend_from_slice(line);
+            bytes.push(b'\n');
+        }
         if entry_type == "event_msg" {
             let kind = payload
                 .get("type")
@@ -1247,6 +1881,38 @@ fn normalize_codex_rollout_inner(
                         current_or_open(&mut turns).completeness = Completeness::Incomplete;
                     }
                     _ => {}
+                }
+            }
+            "reasoning" if include_reasoning => {
+                if let Some(classified) = super::codex_reasoning::classify_payload(payload) {
+                    let turn = current_or_open(&mut turns);
+                    match payload
+                        .get("id")
+                        .and_then(CanonValue::as_str)
+                        .filter(|id| !id.is_empty() && id.len() <= 1024)
+                    {
+                        Some(id) if seen_reasoning_ids.contains(id) => {
+                            turn.completeness = Completeness::Incomplete;
+                            continue;
+                        }
+                        Some(id) if seen_reasoning_ids.len() < 4096 => {
+                            seen_reasoning_ids.insert(id.to_owned());
+                        }
+                        Some(_) => {
+                            // Ordinary retention still keeps the source. The
+                            // bounded typed preview cannot add an unchecked
+                            // identity once its deduplication budget is full.
+                            turn.completeness = Completeness::Incomplete;
+                            continue;
+                        }
+                        None => {
+                            turn.completeness = Completeness::Incomplete;
+                        }
+                    }
+                    if classified.unsupported() {
+                        turn.completeness = Completeness::Incomplete;
+                    }
+                    turn.records.extend(classified.records);
                 }
             }
             kind @ ("function_call" | "custom_tool_call") => {
@@ -1349,11 +2015,33 @@ fn normalize_codex_rollout_inner(
     }
 
     turns.retain(|turn| !turn.records.is_empty() || turn.completeness == Completeness::Incomplete);
+    let mut original_slices = retention
+        .as_deref_mut()
+        .map(|retained| std::mem::take(&mut retained.turns));
     for (ordinal, turn) in turns.iter_mut().enumerate() {
+        if let Some(bytes) = original_slices
+            .as_mut()
+            .and_then(|slices| slices.remove(&turn.ordinal))
+            && let Some(retained) = retention.as_deref_mut()
+        {
+            retained.turns.insert(ordinal, bytes);
+        }
         if turn.logical_turn_key == ordinal_key(turn.ordinal) {
             turn.logical_turn_key = ordinal_key(ordinal);
         }
         turn.ordinal = ordinal;
+    }
+    if let Some(unassigned) = original_slices.filter(|slices| !slices.is_empty())
+        && let Some(retained) = retention
+    {
+        // The frozen V1 projection omits empty semantic turns. Preserve their
+        // ordinary source once with the first checkpoint, explicitly marking
+        // its turn attribution unproven instead of shifting another turn's data.
+        retained.unattributed_source = true;
+        let mut bytes: Vec<u8> = unassigned.into_values().flatten().collect();
+        let first = retained.turns.entry(0).or_default();
+        bytes.append(first);
+        *first = bytes;
     }
     make_logical_turn_keys_unique(&mut turns);
     Some(turns)
@@ -1511,6 +2199,12 @@ pub(crate) fn prepare_coverage_preview(
         return Err(reasoning::ReasoningFieldError::UnsupportedShape);
     }
     let ordinary = std::mem::take(&mut *bytes);
+    let (ordinary, decoded_report) = if kind == AgentKind::Codex {
+        let ordinary = Zeroizing::new(ordinary);
+        super::codex_reasoning::prepare_ordinary(&ordinary, limits.deadline)?
+    } else {
+        (ordinary, super::RedactionReport::default())
+    };
     if limits
         .deadline
         .is_some_and(|deadline| Instant::now() >= deadline)
@@ -1520,19 +2214,22 @@ pub(crate) fn prepare_coverage_preview(
     let (transcript, mut report) = super::Redactor::new_default()
         .redact_owned_bounded(ordinary, max_output, max_working)
         .ok_or(reasoning::ReasoningFieldError::SourceTooLarge)?;
-    let mut turns = match (kind, limits.deadline) {
+    let (mut turns, partial) = match (kind, limits.deadline) {
         (AgentKind::ClaudeCode, Some(deadline)) => {
             normalize_claude_transcript_until(transcript.bytes(), deadline)
+                .map(|turns| (turns, false))
         }
         (AgentKind::Codex, Some(deadline)) => {
-            normalize_codex_rollout_until(transcript.bytes(), deadline)
+            normalize_codex_reasoning_rollout_until(transcript.bytes(), deadline)
         }
-        (AgentKind::ClaudeCode, None) => Some(normalize_claude_transcript(transcript.bytes())),
-        (AgentKind::Codex, None) => Some(normalize_codex_rollout(transcript.bytes())),
+        (AgentKind::ClaudeCode, None) => {
+            Some((normalize_claude_transcript(transcript.bytes()), false))
+        }
+        (AgentKind::Codex, None) => normalize_codex_reasoning_rollout(transcript.bytes()),
         _ => return Err(reasoning::ReasoningFieldError::UnsupportedShape),
     }
     .ok_or(reasoning::ReasoningFieldError::UnsupportedShape)?;
-    let partial = false;
+    merge_redaction_reports(&mut report, decoded_report);
     merge_redaction_reports(&mut report, redact_turns_with_report(&mut turns));
     if limits
         .deadline
@@ -3276,9 +3973,188 @@ pub(crate) fn decode_redacted_import_runtime(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "test-live-agent")]
+    mod codex_turn_local {
+        use super::super::*;
+
+        fn source(rows: &[serde_json::Value]) -> Vec<u8> {
+            let mut input = b"{\"type\":\"session_meta\",\"payload\":{\"id\":\"123e4567-e89b-12d3-a456-426614174051\",\"cli_version\":\"0.162.1\"}}\n".to_vec();
+            for row in rows {
+                serde_json::to_writer(&mut input, row).unwrap();
+                input.push(b'\n');
+            }
+            input
+        }
+
+        fn context(id: &str) -> serde_json::Value {
+            serde_json::json!({"type":"turn_context","payload":{"turn_id":id}})
+        }
+
+        fn user(id: &str, text: &str) -> serde_json::Value {
+            serde_json::json!({"type":"response_item","payload":{"type":"message","id":id,"role":"user",
+                "internal_chat_message_metadata_passthrough":{"content_item_kinds":["user.text"]},
+                "content":[{"type":"input_text","text":text}]}})
+        }
+
+        #[test]
+        #[ignore = "operator-local Codex acceptance; never run in CI"]
+        fn codex_turn_bucket_and_response_identity_caps_are_independent() {
+            for response_ids in [false, true] {
+                let mut rows = vec![context("turn")];
+                for i in 0..4096 {
+                    if !response_ids {
+                        rows.push(context(&format!("turn-{i}")));
+                    }
+                    let mut item = serde_json::json!({"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"answer"}]}});
+                    if response_ids {
+                        item["payload"]["id"] = serde_json::json!(format!("response-{i}"));
+                    }
+                    rows.push(item);
+                }
+                let boundary = normalize_codex_contextual_rollout(&source(&rows), None).unwrap();
+                assert_eq!(boundary.0.len(), if response_ids { 1 } else { 4096 });
+                if !response_ids {
+                    rows.push(context("one-too-many"));
+                }
+                rows.push(serde_json::json!({"type":"response_item","payload":{"type":"message","id":"one-too-many","role":"assistant","content":[{"type":"output_text","text":"answer"}]}}));
+                assert!(normalize_codex_contextual_rollout(&source(&rows), None).is_none());
+            }
+        }
+
+        #[test]
+        #[ignore = "operator-local Codex acceptance; never run in CI"]
+        fn codex_turn_input_identity_cap_precedes_slot_and_group_caps() {
+            let mut rows = vec![context("turn")];
+            for i in 0..1365 {
+                rows.push(user(&format!("raw-{i}"), &format!("input-{i}")));
+                rows.push(serde_json::json!({"type":"event_msg","payload":{"type":"user_message","client_id":format!("client-{i}"),"message":format!("input-{i}")}}));
+                rows.push(serde_json::json!({"type":"event_msg","payload":{"type":"item_completed","thread_id":"123e4567-e89b-12d3-a456-426614174051","turn_id":"turn","item":{"type":"UserMessage","id":format!("item-{i}"),"content":[{"type":"text","text":format!("input-{i}")}]}}}));
+            }
+            assert!(normalize_codex_contextual_rollout(&source(&rows), None).is_some());
+            rows.push(user("last-allowed", "input-next"));
+            assert!(normalize_codex_contextual_rollout(&source(&rows), None).is_some());
+            rows.push(serde_json::json!({"type":"event_msg","payload":{"type":"user_message","client_id":"one-too-many","message":"input-next"}}));
+            assert!(normalize_codex_contextual_rollout(&source(&rows), None).is_none());
+        }
+
+        #[test]
+        #[ignore = "operator-local Codex acceptance; never run in CI"]
+        fn codex_turn_distinct_prompt_occurrence_keys_are_bounded() {
+            let mut rows = vec![context("turn")];
+            for i in 0..4096 {
+                let mut row = user("unused", &format!("unique-{i}"));
+                row["payload"].as_object_mut().unwrap().remove("id");
+                rows.push(row);
+            }
+            assert!(normalize_codex_contextual_rollout(&source(&rows), None).is_some());
+            let mut last = user("unused", "one-too-many");
+            last["payload"].as_object_mut().unwrap().remove("id");
+            rows.push(last);
+            assert!(normalize_codex_contextual_rollout(&source(&rows), None).is_none());
+        }
+
+        #[test]
+        #[ignore = "operator-local Codex acceptance; never run in CI"]
+        fn codex_turn_grouped_byte_limit_and_normalizer_deadline_fail_closed() {
+            let row = serde_json::json!({"type":"event_msg","payload":{"type":"user_message","message":"x".repeat(4000)}});
+            let mut rows = vec![context("turn")];
+            rows.extend(std::iter::repeat_n(row, 4096));
+            let input = source(&rows);
+            assert!(
+                input.len() < 16 * 1024 * 1024,
+                "the source cap is not this failure"
+            );
+            assert!(normalize_codex_contextual_rollout(&input, None).is_none());
+            assert!(
+                normalize_codex_contextual_rollout(
+                    &source(&[context("turn")]),
+                    Some(Instant::now())
+                )
+                .is_none()
+            );
+        }
+
+        #[test]
+        #[ignore = "operator-local Codex acceptance; never run in CI"]
+        fn codex_turn_empty_partial_group_preserves_signal_and_compatibility_key() {
+            let mut rows = vec![
+                context("empty"),
+                serde_json::json!({"type":"response_item","payload":{"type":"reasoning","summary":[],"encrypted_content":"opaque"}}),
+                serde_json::json!({"type":"event_msg","payload":{"type":"turn_complete","turn_id":"empty"}}),
+                user("human", "compatibility"),
+            ];
+            let before = normalize_codex_contextual_rollout(&source(&rows), None).unwrap();
+            assert!(
+                before.1,
+                "a discarded partial group must still qualify the snapshot"
+            );
+            let key = before.0[0].logical_turn_key.clone();
+            assert_eq!(key, "ordinal:1");
+            rows.extend([context("empty"), serde_json::json!({"type":"response_item","payload":{"type":"message","id":"answer","role":"assistant","content":[{"type":"output_text","text":"now visible"}]}})]);
+            let after = normalize_codex_contextual_rollout(&source(&rows), None).unwrap();
+            assert!(after.0.iter().any(|turn| turn.logical_turn_key == key));
+        }
+
+        #[test]
+        #[ignore = "operator-local Codex acceptance; never run in CI"]
+        fn codex_turn_local_damage_and_chronology_stay_with_their_group() {
+            let mut first = user("first", "first");
+            first["timestamp"] = serde_json::json!("2026-10-19T00:00:04Z");
+            let mut second = user("second", "second");
+            second["timestamp"] = serde_json::json!("2026-10-19T00:00:01Z");
+            let rows = [
+                context("turn-a"),
+                first,
+                second,
+                context("turn-b"),
+                user("third", "third"),
+                serde_json::json!({"type":"response_item","payload":{"type":"unsupported-new-kind"}}),
+            ];
+            let (turns, _) = normalize_codex_contextual_rollout(&source(&rows), None).unwrap();
+            assert_eq!(turns[0].completeness, Completeness::Complete);
+            assert_eq!(turns[1].completeness, Completeness::Incomplete);
+            assert_eq!(turns[0].ended_at.unwrap() - turns[0].started_at.unwrap(), 3);
+        }
+    }
     use std::io::Write;
 
     use super::*;
+
+    #[cfg(feature = "test-live-agent")]
+    #[test]
+    #[ignore = "operator-local Codex acceptance; never run in CI"]
+    fn codex_summary_retention_is_separate_from_frozen_v1_turns() {
+        let source = concat!(
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"turn-1\"}}\n",
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":\"first\"}}\n",
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"reasoning\",\"id\":\"r1\",\"summary\":[],\"encrypted_content\":\"FIRST-OPAQUE\"}}\n",
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"turn-2\"}}\n",
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":\"second\"}}\n",
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"reasoning\",\"id\":\"r2\",\"summary\":[],\"encrypted_content\":\"SECOND-OPAQUE\"}}\n",
+            "{\"type\":\"compacted\",\"payload\":{\"replacement_history\":[{\"type\":\"reasoning\",\"summary\":[],\"encrypted_content\":\"UNASSIGNED-HISTORY\"}]}}\n",
+        );
+        let legacy = normalize_codex_rollout(source.as_bytes());
+        let retained = normalize_codex_retained_rollout_until(
+            source.as_bytes(),
+            Instant::now() + std::time::Duration::from_secs(5),
+        )
+        .unwrap();
+        assert_eq!(legacy.len(), 2);
+        assert_eq!(retained.turns.len(), legacy.len());
+        for (old, new) in legacy.iter().zip(&retained.turns) {
+            assert_eq!(old.logical_turn_key, new.logical_turn_key);
+            assert_eq!(old.completeness, new.completeness);
+            assert_eq!(old.digest_hex(), new.digest_hex());
+            assert_eq!(select_coverage_schema(new), CoverageSchemaVersion::V1);
+        }
+        let first = std::str::from_utf8(&retained.retained[&0]).unwrap();
+        let second = std::str::from_utf8(&retained.retained[&1]).unwrap();
+        assert!(first.contains("FIRST-OPAQUE"));
+        assert!(first.contains("UNASSIGNED-HISTORY"));
+        assert!(!first.contains("SECOND-OPAQUE"));
+        assert!(second.contains("SECOND-OPAQUE"));
+        assert!(!second.contains("UNASSIGNED-HISTORY"));
+    }
 
     #[test]
     fn og26_bounded_ordinary_writer_rejects_expansion() {

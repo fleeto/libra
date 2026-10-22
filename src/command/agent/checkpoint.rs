@@ -383,7 +383,7 @@ async fn show(args: CheckpointShowArgs, output: &OutputConfig) -> CliResult<()> 
                     None
                 };
             let reasoning = if output.is_json() {
-                claude_checkpoint_reasoning(&conn, &row, &args.checkpoint_id).await
+                checkpoint_reasoning(&conn, &row, &args.checkpoint_id).await
             } else {
                 None
             };
@@ -965,37 +965,7 @@ async fn export(args: super::CheckpointExportArgs, output: &OutputConfig) -> Cli
         let ordinary = if bytes.is_empty() {
             bytes
         } else {
-            // Bind the provider to this checkpoint's session catalog. The
-            // role-checked metadata may omit the kind in older checkpoints,
-            // but a present kind must agree before ordinary output is read.
-            let metadata = load_checkpoint_metadata_blob(
-                &row.checkpoint_id,
-                &row.tree_oid,
-                &row.metadata_blob_oid,
-            )?;
-            let document =
-                crate::internal::ai::observed_agents::parse_canon_value(metadata.as_bytes())
-                    .map_err(|_| checkpoint_show_store_inconsistent())?;
-            let session = conn
-                .query_one_raw(Statement::from_sql_and_values(
-                    backend,
-                    "SELECT agent_kind FROM agent_session WHERE session_id = ?",
-                    [row.session_id.as_str().into()],
-                ))
-                .await
-                .map_err(|_| checkpoint_show_store_inconsistent())?
-                .ok_or_else(checkpoint_show_store_inconsistent)?;
-            let kind = session
-                .try_get_by::<String, _>("agent_kind")
-                .map_err(|_| checkpoint_show_store_inconsistent())?;
-            if document
-                .get("agent_kind")
-                .is_some_and(|value| value.as_str() != Some(kind.as_str()))
-            {
-                return Err(checkpoint_show_store_inconsistent());
-            }
-            let kind = crate::internal::ai::observed_agents::AgentKind::from_db_str(&kind)
-                .ok_or_else(checkpoint_show_store_inconsistent)?;
+            let kind = checkpoint_ordinary_kind(&conn, &row).await?;
             if kind == crate::internal::ai::observed_agents::AgentKind::OpenCode {
                 if truncated {
                     return Err(CliError::fatal(
@@ -1004,6 +974,23 @@ async fn export(args: super::CheckpointExportArgs, output: &OutputConfig) -> Cli
                 }
                 crate::internal::ai::observed_agents::opencode_export::strip_legacy_opencode_reader_bytes(&bytes)
                     .map_err(|_| CliError::fatal("ordinary OpenCode export is invalid or incomplete; use --raw --allow-raw for an audited inspection"))?
+            } else if kind == crate::internal::ai::observed_agents::AgentKind::Codex {
+                let prepared = crate::internal::ai::observed_agents::codex_reasoning::prepare_ordinary_for_read(
+                    &bytes, None, cap,
+                )
+                .map_err(|error| {
+                    use crate::internal::ai::observed_agents::reasoning::ReasoningFieldError;
+                    let message = match error {
+                        ReasoningFieldError::SourceTooLarge => "ordinary Codex export exceeds its input or credential-masked output expansion limit",
+                        ReasoningFieldError::MalformedSource => "ordinary Codex export contains data that could not be credential-scanned",
+                        ReasoningFieldError::UnsupportedShape => "ordinary Codex export could not complete its credential scan",
+                    };
+                    CliError::fatal(message)
+                        .with_hint("check agent.max_transcript_read_bytes; use --raw --allow-raw for an audited inspection of the stored bytes")
+                })?
+                .0;
+                drop(bytes);
+                prepared
             } else {
                 bytes
             }
@@ -1366,7 +1353,39 @@ fn read_legacy_v1_transcript(
     Ok((bytes, truncated))
 }
 
-async fn claude_checkpoint_reasoning(
+/// Metadata may omit the provider in old checkpoints. A present value must
+/// agree with the catalog, and the metadata must belong to this ordinary tree.
+async fn checkpoint_ordinary_kind(
+    conn: &DatabaseConnection,
+    row: &CheckpointRow,
+) -> CliResult<crate::internal::ai::observed_agents::AgentKind> {
+    let metadata =
+        load_checkpoint_metadata_blob(&row.checkpoint_id, &row.tree_oid, &row.metadata_blob_oid)?;
+    let document = crate::internal::ai::observed_agents::parse_canon_value(metadata.as_bytes())
+        .map_err(|_| checkpoint_show_store_inconsistent())?;
+    let session = conn
+        .query_one_raw(Statement::from_sql_and_values(
+            conn.get_database_backend(),
+            "SELECT agent_kind FROM agent_session WHERE session_id = ?",
+            [row.session_id.as_str().into()],
+        ))
+        .await
+        .map_err(|_| checkpoint_show_store_inconsistent())?
+        .ok_or_else(checkpoint_show_store_inconsistent)?;
+    let kind = session
+        .try_get_by::<String, _>("agent_kind")
+        .map_err(|_| checkpoint_show_store_inconsistent())?;
+    if document
+        .get("agent_kind")
+        .is_some_and(|value| value.as_str() != Some(kind.as_str()))
+    {
+        return Err(checkpoint_show_store_inconsistent());
+    }
+    crate::internal::ai::observed_agents::AgentKind::from_db_str(&kind)
+        .ok_or_else(checkpoint_show_store_inconsistent)
+}
+
+async fn checkpoint_reasoning(
     conn: &DatabaseConnection,
     row: &sea_orm::QueryResult,
     checkpoint_id: &str,
@@ -1382,6 +1401,21 @@ async fn claude_checkpoint_reasoning(
         .ok()
         .flatten()?;
     let kind = session.try_get_by::<String, _>("agent_kind").ok()?;
+    if kind == "codex" {
+        // Failed reads are visible as a fixed, content-free facet. Never use
+        // metadata strings or original object bytes as a fallback body.
+        return Some(
+            match codex_checkpoint_reasoning(conn, checkpoint_id).await {
+                Ok(reasoning) => reasoning,
+                Err(_) => serde_json::json!({
+                    "availability": "unavailable", "readable": [],
+                    "encrypted_content": [], "readable_obtained": false,
+                    "reason": "checkpoint_unreadable",
+                    "hint": "run libra agent doctor and check agent.max_transcript_read_bytes before retrying",
+                }),
+            },
+        );
+    }
     if kind != "claude_code" {
         return None;
     }
@@ -1394,6 +1428,81 @@ async fn claude_checkpoint_reasoning(
         load_checkpoint_transcript_bytes_from_storage(&storage, checkpoint_id, &tree_oid, cap)
             .ok()?;
     claude_show_reasoning(&bytes)
+}
+
+async fn codex_checkpoint_reasoning(
+    conn: &DatabaseConnection,
+    checkpoint_id: &str,
+) -> CliResult<serde_json::Value> {
+    use crate::internal::ai::observed_agents::{
+        AgentKind, CanonValue, SemanticRecord, TRANSCRIPT_READ_HARD_CAP_BYTES, codex_reasoning,
+        compliance::max_transcript_read_bytes, parse_canon_value,
+    };
+    let row = load_checkpoint_row(conn, checkpoint_id).await?;
+    if checkpoint_ordinary_kind(conn, &row).await? != AgentKind::Codex {
+        return Err(checkpoint_show_store_inconsistent());
+    }
+    let cap = max_transcript_read_bytes()
+        .await
+        .map_err(|_| checkpoint_show_store_inconsistent())?
+        .min(TRANSCRIPT_READ_HARD_CAP_BYTES);
+    let (bytes, truncated) = load_checkpoint_transcript_bytes(&row, cap)?;
+    if bytes.is_empty() {
+        return Ok(serde_json::json!({
+            "availability": "unavailable", "reason": "no_transcript",
+            "readable": [], "encrypted_content": [],
+            "readable_obtained": false, "redacted": false,
+        }));
+    }
+    let (prepared, decoded_report, source_partial) =
+        codex_reasoning::prepare_ordinary_for_read(&bytes, None, cap)
+            .map_err(|_| checkpoint_show_store_inconsistent())?;
+    let (redacted, byte_report) =
+        crate::internal::ai::observed_agents::Redactor::new_default().redact(&prepared);
+    let mut partial = truncated || source_partial;
+    let mut readable = Vec::new();
+    let mut encrypted_content = Vec::new();
+    for line in redacted.bytes().split(|byte| *byte == b'\n') {
+        if line.iter().all(u8::is_ascii_whitespace) {
+            continue;
+        }
+        // Bound parsing allocations independently of the full transcript cap.
+        if line.len() > 1_048_576 {
+            partial = true;
+            continue;
+        }
+        let Ok(document) = parse_canon_value(line) else {
+            partial = true;
+            continue;
+        };
+        if document.get("type").and_then(CanonValue::as_str) != Some("response_item") {
+            continue;
+        }
+        let Some(payload) = document.get("payload") else {
+            partial = true;
+            continue;
+        };
+        let Some(classified) = codex_reasoning::classify_payload(payload) else {
+            continue;
+        };
+        partial |= classified.unsupported();
+        for record in classified.records {
+            if let SemanticRecord::Reasoning { text, .. } = record {
+                readable.push(text.as_str().to_owned());
+            }
+        }
+        if let Some(CanonValue::Str(text)) = payload.get("encrypted_content")
+            && !text.is_empty()
+        {
+            encrypted_content.push(text.clone());
+        }
+    }
+    Ok(serde_json::json!({
+        "availability": if partial { "partial" } else { "unproven" },
+        "redacted": decoded_report.match_count() != 0 || byte_report.match_count() != 0,
+        "readable_obtained": !readable.is_empty(), "readable": readable,
+        "encrypted_content": encrypted_content,
+    }))
 }
 
 fn claude_show_reasoning(bytes: &[u8]) -> Option<serde_json::Value> {

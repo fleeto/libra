@@ -95,6 +95,10 @@ pub(crate) mod test_support {
 /// provider metadata.
 const RECEIPT_LEDGER_FIELD: &str = "capture_catalog_receipts_v1";
 const RECEIPT_LEDGER_VERSION: u8 = 1;
+const CHILD_GATE_LEDGER_VERSION: u8 = 2;
+const MAX_CHILD_GATE_REQUIREMENTS: usize = 16;
+const MAX_CHILD_GATE_BYTES: usize = 4_096;
+const CHILD_GATE_SOURCE_PREFIX: &str = "source/subagent-hmac-v2/";
 const FINALIZER_RECEIPT_VERSION: u8 = 1;
 const UNBOUND_FINALIZER_MARKER_PREFIX: &str = "capture-finalizer-unbound-v1:";
 /// A bounded receipt ring prevents a high-rate provider from growing
@@ -215,6 +219,17 @@ where
     TEST_CATALOG_BEFORE_DML_DELAY
         .scope(Some(delay), future)
         .await
+}
+
+#[cfg(all(test, feature = "test-live-agent"))]
+pub(crate) async fn with_child_preparation_before_dml_delay_for_test<F>(
+    delay: Duration,
+    future: F,
+) -> F::Output
+where
+    F: Future,
+{
+    with_catalog_before_dml_delay(delay, future).await
 }
 
 #[cfg(test)]
@@ -1197,6 +1212,15 @@ pub(crate) fn validate_v2_import_session_metadata(
     metadata_json: &str,
 ) -> Result<(), CaptureCatalogError> {
     let metadata = parse_closed_v2_import_session_metadata(metadata_json)?;
+    if metadata.receipt_ledger.as_ref().is_some_and(|ledger| {
+        ledger
+            .entries
+            .iter()
+            .any(|entry| entry.child_gate.is_some())
+    }) && metadata_json.len() > MAX_DOCTOR_RECEIPT_METADATA_BYTES
+    {
+        return Err(CaptureCatalogError::InvalidRequest);
+    }
     validate_closed_v2_import_session_metadata(&metadata)
 }
 
@@ -1231,6 +1255,20 @@ fn validate_existing_v2_import_session_record(
         .and_then(serde_json::Value::as_i64)
         == Some(2);
     if is_v2 {
+        // Persisted child control is catalog corruption, whereas the same
+        // invalid row presented for import/cloud ingress is a bad request.
+        let has_child_gate = metadata
+            .get(RECEIPT_LEDGER_FIELD)
+            .and_then(|ledger| ledger.get("entries"))
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|entries| {
+                entries
+                    .iter()
+                    .any(|entry| entry.get("child_gate").is_some_and(|gate| !gate.is_null()))
+            });
+        if has_child_gate {
+            decode_receipt_metadata(metadata_json)?;
+        }
         validate_v2_import_session_record(metadata_json, redaction_report_json)?;
     }
     Ok(is_v2)
@@ -1563,9 +1601,18 @@ pub(crate) struct CaptureCatalogApplyRequest {
     action: CaptureCatalogAction,
     mutation: CaptureCatalogMutation,
     metadata: CaptureCatalogMetadataPatch,
+    requires_child_checkpoints: bool,
 }
 
 impl CaptureCatalogApplyRequest {
+    pub(crate) fn scope(&self) -> &CaptureScope {
+        &self.scope
+    }
+
+    pub(crate) fn child_checkpoints_required(&self) -> bool {
+        self.requires_child_checkpoints
+    }
+
     pub(crate) fn new(
         scope: CaptureScope,
         session: CaptureCatalogSession,
@@ -1580,12 +1627,21 @@ impl CaptureCatalogApplyRequest {
             action,
             mutation,
             metadata: CaptureCatalogMetadataPatch::default(),
+            requires_child_checkpoints: false,
         })
     }
 
     pub(crate) fn with_metadata(mut self, metadata: CaptureCatalogMetadataPatch) -> Self {
         self.metadata = metadata;
         self
+    }
+
+    pub(crate) fn requiring_child_checkpoints(mut self) -> Result<Self, CaptureCatalogError> {
+        if !self.mutation.is_terminal() || self.mutation.checkpoint != CheckpointWrite::Committed {
+            return Err(CaptureCatalogError::InvalidRequest);
+        }
+        self.requires_child_checkpoints = true;
+        Ok(self)
     }
 
     /// Replace only the canonical action identity after the catalog atomically
@@ -2011,6 +2067,7 @@ pub(crate) struct CaptureCatalogFinalizerRecovery {
     artifact_present: bool,
     artifact_pending: bool,
     artifact_manual_attempted: bool,
+    waiting_for_children: bool,
 }
 
 impl CaptureCatalogFinalizerRecovery {
@@ -2046,6 +2103,11 @@ impl CaptureCatalogFinalizerRecovery {
         self.artifact_pending
     }
 
+    /// Snapshot diagnosis only. Recovery must revalidate the original receipt.
+    pub(crate) fn waiting_for_children(&self) -> bool {
+        self.waiting_for_children
+    }
+
     pub(crate) fn artifact_manual_attempted(&self) -> bool {
         self.artifact_manual_attempted
     }
@@ -2059,6 +2121,32 @@ pub(crate) struct CaptureCatalogFinalizerScan {
     pub(crate) skipped_invalid_keys: bool,
     pub(crate) truncated: bool,
 }
+/// A read-only view of the latest stored terminal receipt, never replay
+/// authority or proof that transcript/thinking objects can still be read.
+#[derive(Debug, Serialize)]
+pub(crate) struct CaptureTerminalDiagnostic {
+    pub(crate) status: &'static str,
+    pub(crate) owner: &'static str,
+    pub(crate) reason: &'static str,
+    pub(crate) superseded: bool,
+    pub(crate) pending_receipts: usize,
+    pub(crate) completed_receipts: usize,
+}
+
+impl CaptureTerminalDiagnostic {
+    pub(crate) fn unavailable(reason: &'static str) -> Self {
+        Self {
+            status: "unavailable",
+            owner: "unavailable",
+            reason,
+            superseded: false,
+            pending_receipts: 0,
+            completed_receipts: 0,
+        }
+    }
+}
+
+pub(crate) const CAPTURE_DIAGNOSTIC_METADATA_CAP_BYTES: usize = MAX_DOCTOR_RECEIPT_METADATA_BYTES;
 
 /// Result of doctor replaying a pending finalizer after its existing
 /// checkpoint scan has independently established durable checkpoint evidence.
@@ -2173,6 +2261,14 @@ pub(crate) enum CaptureCatalogError {
         "capture catalog receipt capacity is exhausted while prior checkpoints remain pending; inspect with `libra agent doctor` before retrying"
     )]
     ReceiptCapacityExhausted,
+    #[error(
+        "child checkpoints remain pending; retry from the original authorized agent environment or inspect with `libra agent doctor`"
+    )]
+    ChildCheckpointsPending,
+    #[error(
+        "child checkpoint control capacity is exhausted; preserve the pending capture and retry from its original authorized environment"
+    )]
+    ChildGateCapacity,
     #[error(
         "capture catalog scope or workspace lease is not writable; rerun from the current workspace before retrying"
     )]
@@ -2291,6 +2387,30 @@ pub(crate) struct PendingArtifactPlans<'a> {
         Option<&'a crate::internal::ai::capture::checkpoint::ReasoningCoveragePlan>,
 }
 
+async fn receipt_children_waiting(
+    txn: &DatabaseTransaction,
+    session: &CaptureCatalogSession,
+    receipt: &StoredReceipt,
+    state: DurableCaptureState,
+) -> Result<bool, CaptureCatalogError> {
+    if !receipt.can_resume_from(Some(state))
+        || state.phase == CapturePhase::Quarantined
+        || receipt
+            .finalizer
+            .as_ref()
+            .is_some_and(|f| f.status == StoredFinalizeStatus::Quarantined)
+    {
+        return Ok(false);
+    }
+    match require_settled_child_checkpoints(txn, session, receipt).await {
+        Ok(()) => Ok(false),
+        Err(
+            CaptureCatalogError::ChildCheckpointsPending | CaptureCatalogError::ChildGateCapacity,
+        ) => Ok(true),
+        Err(error) => Err(error),
+    }
+}
+
 /// An identity read from the current catalog, not a provider/source locator.
 /// Private fields prevent projection/replay callers from manufacturing it.
 /// Never implement Debug or Serialize: these are sensitive catalog values.
@@ -2326,6 +2446,446 @@ impl PendingSessionContext {
     pub(crate) fn incarnation(&self) -> Option<&str> {
         self.incarnation.as_deref()
     }
+}
+
+/// One bounded completion floor. The source commitment is never exposed by Debug.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct ChildCheckpointRequirement(StoredChildCheckpointRequirement);
+
+impl std::fmt::Debug for ChildCheckpointRequirement {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ChildCheckpointRequirement")
+            .field("minimum_revision", &self.0.minimum_revision)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ChildCheckpointRequirement {
+    pub(crate) fn new(
+        source_key: &str,
+        minimum_revision: i64,
+    ) -> Result<Self, CaptureCatalogError> {
+        let stored = StoredChildCheckpointRequirement {
+            source_key: source_key.to_string(),
+            minimum_revision,
+        };
+        StoredChildCompletionGate {
+            preparing: true,
+            requirements: vec![stored.clone()],
+        }
+        .validate()?;
+        Ok(Self(stored))
+    }
+
+    pub(crate) fn minimum_revision(&self) -> i64 {
+        self.0.minimum_revision
+    }
+
+    pub(crate) fn merge_into(self, requirements: &mut Vec<Self>) {
+        match requirements.binary_search_by(|old| old.0.source_key.cmp(&self.0.source_key)) {
+            Ok(index) => {
+                requirements[index].0.minimum_revision = requirements[index]
+                    .0
+                    .minimum_revision
+                    .max(self.0.minimum_revision)
+            }
+            Err(index) => requirements.insert(index, self),
+        }
+    }
+}
+
+/// Authority for an already-reserved terminal action, not for provider IO.
+/// SessionStart or any later lifecycle revision invalidates this capability.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct ChildPreparationFence {
+    context: PendingSessionContext,
+    action: CaptureCatalogAction,
+    allow_prepared: bool,
+}
+
+// A completed discovery pass already reduced the obligation to known floors.
+// Recovery never adds another global Preparing barrier to that receipt.
+async fn load_child_recovery_state(
+    txn: &DatabaseTransaction,
+    recovery: &CaptureCatalogFinalizerRecovery,
+    deadline: CaptureCommitDeadline,
+) -> Result<Option<ChildPreparationFence>, CaptureCatalogError> {
+    ensure_catalog_mutation_deadline(Some(deadline))?;
+    let session = read_session(txn, &recovery.session)
+        .await?
+        .ok_or(CaptureCatalogError::ScopeRejected)?;
+    let (_, ledger) = decode_receipt_metadata(&session.metadata_json)?;
+    let key = recovery.action.completion_receipt_storage_key();
+    let Some(receipt) = ledger.find(&key) else {
+        return Ok(None);
+    };
+    let Some(gate) = &receipt.child_gate else {
+        return Ok(None);
+    };
+    if receipt.status == StoredReceiptStatus::Complete {
+        return Ok(None);
+    }
+    if !gate.preparing {
+        match require_settled_child_checkpoints(txn, &recovery.session, receipt).await {
+            Ok(()) => {
+                ensure_catalog_mutation_deadline(Some(deadline))?;
+                return Ok(None);
+            }
+            Err(CaptureCatalogError::ChildCheckpointsPending) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    let context =
+        resolve_pending_session_context(txn, &recovery.scope, recovery.session.session_id())
+            .await?;
+    if context.session != recovery.session
+        || !receipt.matches_action(&recovery.action)
+        || !receipt.is_deferred_terminal()
+        || receipt.status != StoredReceiptStatus::Pending
+        || receipt.reserved_revision != context.revision
+        || !receipt.can_resume_from(Some(session.state))
+        || session.state.phase == CapturePhase::Quarantined
+        || receipt
+            .finalizer
+            .as_ref()
+            .is_some_and(|f| f.status == StoredFinalizeStatus::Quarantined)
+    {
+        return Err(CaptureCatalogError::ScopeRejected);
+    }
+    ensure_catalog_mutation_deadline(Some(deadline))?;
+    Ok(Some(ChildPreparationFence {
+        context,
+        action: recovery.action.clone(),
+        allow_prepared: true,
+    }))
+}
+
+/// A recovery fence may enroll known floors on an already prepared gate.
+/// Enroll and reservation are atomic; completion racing before enroll makes
+/// the action stale instead of authorizing a late child write.
+pub(crate) async fn child_preparation_for_recovery(
+    txn: &DatabaseTransaction,
+    recovery: &CaptureCatalogFinalizerRecovery,
+    deadline: CaptureCommitDeadline,
+) -> Result<Option<ChildPreparationFence>, CaptureCatalogError> {
+    let fence = load_child_recovery_state(txn, recovery, deadline).await?;
+    if let Some(fence) = &fence {
+        fence.assert_current(txn).await?;
+    }
+    Ok(fence)
+}
+
+pub(crate) async fn child_recovery_is_pending(
+    txn: &DatabaseTransaction,
+    recovery: &CaptureCatalogFinalizerRecovery,
+    deadline: CaptureCommitDeadline,
+) -> Result<bool, CaptureCatalogError> {
+    Ok(load_child_recovery_state(txn, recovery, deadline)
+        .await?
+        .is_some())
+}
+
+pub(crate) async fn child_preparation_fence(
+    txn: &DatabaseTransaction,
+    request: &CaptureCatalogApplyRequest,
+) -> Result<Option<ChildPreparationFence>, CaptureCatalogError> {
+    if !request.requires_child_checkpoints {
+        return Ok(None);
+    }
+    if !request.mutation.is_terminal() || request.mutation.checkpoint != CheckpointWrite::Committed
+    {
+        return Err(CaptureCatalogError::InvalidRequest);
+    }
+    let context =
+        resolve_pending_session_context(txn, &request.scope, request.session.session_id()).await?;
+    if context.session != request.session {
+        return Err(CaptureCatalogError::ScopeRejected);
+    }
+    let fence = ChildPreparationFence {
+        context,
+        action: request.action.clone(),
+        allow_prepared: false,
+    };
+    fence.load_current(txn).await?;
+    Ok(Some(fence))
+}
+
+impl ChildPreparationFence {
+    pub(crate) fn context(&self) -> &PendingSessionContext {
+        &self.context
+    }
+
+    async fn load_current(
+        &self,
+        txn: &DatabaseTransaction,
+    ) -> Result<
+        (
+            StoredCatalogSession,
+            serde_json::Map<String, serde_json::Value>,
+            StoredReceiptLedger,
+        ),
+        CaptureCatalogError,
+    > {
+        let current =
+            resolve_pending_session_context(txn, &self.context.scope, self.context.session_id())
+                .await?;
+        if current != self.context {
+            return Err(CaptureCatalogError::ScopeRejected);
+        }
+        let session = read_session(txn, &self.context.session)
+            .await?
+            .ok_or(CaptureCatalogError::ScopeRejected)?;
+        let (metadata, ledger) = decode_receipt_metadata(&session.metadata_json)?;
+        let receipt = ledger
+            .find(&self.action.completion_receipt_storage_key())
+            .ok_or(CaptureCatalogError::ScopeRejected)?;
+        if !receipt.matches_action(&self.action)
+            || !receipt.is_deferred_terminal()
+            || receipt.status != StoredReceiptStatus::Pending
+            || receipt.reserved_revision != self.context.revision
+            || session.state.phase == CapturePhase::Quarantined
+            || receipt
+                .finalizer
+                .as_ref()
+                .is_some_and(|finalizer| finalizer.status == StoredFinalizeStatus::Quarantined)
+            || receipt.child_gate.is_none()
+        {
+            return Err(CaptureCatalogError::ScopeRejected);
+        }
+        if !self.allow_prepared
+            && !receipt
+                .child_gate
+                .as_ref()
+                .is_some_and(|gate| gate.preparing)
+        {
+            return Err(CaptureCatalogError::ChildCheckpointsPending);
+        }
+        Ok((session, metadata, ledger))
+    }
+
+    pub(crate) async fn assert_current(
+        &self,
+        txn: &DatabaseTransaction,
+    ) -> Result<(), CaptureCatalogError> {
+        self.load_current(txn).await.map(|_| ())
+    }
+
+    /// Must run in the same writer transaction, before reserving any child.
+    /// Retired floors are removed only after the ordinary leaf query proves them.
+    pub(crate) async fn enroll(
+        &self,
+        txn: &DatabaseTransaction,
+        requirement: ChildCheckpointRequirement,
+        deadline: CaptureCommitDeadline,
+    ) -> Result<ChildCheckpointRequirement, CaptureCatalogError> {
+        ensure_catalog_mutation_deadline(Some(deadline))?;
+        let (session, metadata, mut ledger) = self.load_current(txn).await?;
+        let key = self.action.completion_receipt_storage_key();
+        let receipt = ledger
+            .find(&key)
+            .cloned()
+            .ok_or(CaptureCatalogError::ScopeRejected)?;
+        let mut gate = receipt
+            .child_gate
+            .clone()
+            .ok_or(CaptureCatalogError::ScopeRejected)?;
+        let mut requirement = requirement.0;
+        if let Some(old) = gate
+            .requirements
+            .iter_mut()
+            .find(|old| old.source_key == requirement.source_key)
+        {
+            old.minimum_revision = old.minimum_revision.max(requirement.minimum_revision);
+            requirement.minimum_revision = old.minimum_revision;
+        } else {
+            if gate.requirements.len() == MAX_CHILD_GATE_REQUIREMENTS {
+                let mut retained = Vec::with_capacity(gate.requirements.len());
+                for old in gate.requirements {
+                    ensure_catalog_mutation_deadline(Some(deadline))?;
+                    let mut probe = receipt.clone();
+                    probe.child_gate = Some(StoredChildCompletionGate {
+                        preparing: false,
+                        requirements: vec![old.clone()],
+                    });
+                    match require_settled_child_checkpoints(txn, &self.context.session, &probe)
+                        .await
+                    {
+                        Ok(()) => {}
+                        Err(CaptureCatalogError::ChildCheckpointsPending) => retained.push(old),
+                        Err(error) => return Err(error),
+                    }
+                }
+                gate.requirements = retained;
+            }
+            if gate.requirements.len() == MAX_CHILD_GATE_REQUIREMENTS {
+                return Err(CaptureCatalogError::ChildGateCapacity);
+            }
+            gate.requirements.push(requirement.clone());
+            gate.requirements
+                .sort_by(|left, right| left.source_key.cmp(&right.source_key));
+        }
+        if receipt.child_gate.as_ref().is_some_and(|old| {
+            old.preparing == gate.preparing && old.requirements == gate.requirements
+        }) {
+            ensure_catalog_mutation_deadline(Some(deadline))?;
+            return Ok(ChildCheckpointRequirement(requirement));
+        }
+        gate.validate()?;
+        ledger
+            .find_mut(&key)
+            .ok_or(CaptureCatalogError::ScopeRejected)?
+            .child_gate = Some(gate);
+        self.persist(txn, &session, metadata, &ledger, deadline)
+            .await?;
+        Ok(ChildCheckpointRequirement(requirement))
+    }
+
+    pub(crate) async fn finish(
+        &self,
+        txn: &DatabaseTransaction,
+        deadline: CaptureCommitDeadline,
+    ) -> Result<(), CaptureCatalogError> {
+        ensure_catalog_mutation_deadline(Some(deadline))?;
+        let (session, metadata, mut ledger) = self.load_current(txn).await?;
+        let receipt = ledger
+            .find_mut(&self.action.completion_receipt_storage_key())
+            .ok_or(CaptureCatalogError::ScopeRejected)?;
+        let gate = receipt
+            .child_gate
+            .as_mut()
+            .ok_or(CaptureCatalogError::ScopeRejected)?;
+        if !gate.preparing {
+            ensure_catalog_mutation_deadline(Some(deadline))?;
+            return Ok(());
+        }
+        gate.preparing = false;
+        self.persist(txn, &session, metadata, &ledger, deadline)
+            .await
+    }
+
+    async fn persist(
+        &self,
+        txn: &DatabaseTransaction,
+        session: &StoredCatalogSession,
+        metadata: serde_json::Map<String, serde_json::Value>,
+        ledger: &StoredReceiptLedger,
+        deadline: CaptureCommitDeadline,
+    ) -> Result<(), CaptureCatalogError> {
+        let encoded = encode_receipt_metadata(metadata, ledger)?;
+        let v2 = validate_existing_v2_import_session_record(
+            &session.metadata_json,
+            &session.redaction_report,
+        )?;
+        validate_v2_import_session_record_after_mutation(v2, &encoded, &session.redaction_report)?;
+        if !update_finalizer_metadata(
+            txn,
+            &self.context.scope,
+            &self.context.session,
+            self.context.revision,
+            encoded,
+            Some(deadline),
+        )
+        .await?
+        {
+            return Err(CaptureCatalogError::ScopeRejected);
+        }
+        Ok(())
+    }
+}
+
+/// A current receipt fence for replaying one child boundary. This is neither
+/// source authorization nor a terminal completion proof. Keep catalog values
+/// private and out of Debug/Serialize, as with PendingSessionContext.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct ChildBoundaryReplayFence {
+    context: PendingSessionContext,
+    action: CaptureCatalogAction,
+    checkpoint_id: String,
+}
+
+impl ChildBoundaryReplayFence {
+    pub(crate) fn context(&self) -> &PendingSessionContext {
+        &self.context
+    }
+
+    pub(crate) fn checkpoint_id(&self) -> &str {
+        &self.checkpoint_id
+    }
+
+    pub(crate) async fn is_current(
+        &self,
+        txn: &DatabaseTransaction,
+    ) -> Result<bool, CaptureCatalogError> {
+        Ok(load_child_boundary_replay_fence(
+            txn,
+            &self.context.scope,
+            &self.context.session,
+            &self.action,
+        )
+        .await?
+        .as_ref()
+            == Some(self))
+    }
+}
+
+pub(crate) async fn child_boundary_replay_fence(
+    txn: &DatabaseTransaction,
+    request: &CaptureCatalogApplyRequest,
+) -> Result<Option<ChildBoundaryReplayFence>, CaptureCatalogError> {
+    if request.action.lifecycle_kind != Some(LifecycleEventKind::SubagentEnd)
+        || request.mutation.checkpoint != CheckpointWrite::SubagentBoundary
+    {
+        return Ok(None);
+    }
+    load_child_boundary_replay_fence(txn, &request.scope, &request.session, &request.action).await
+}
+
+async fn load_child_boundary_replay_fence(
+    txn: &DatabaseTransaction,
+    scope: &CaptureScope,
+    session: &CaptureCatalogSession,
+    action: &CaptureCatalogAction,
+) -> Result<Option<ChildBoundaryReplayFence>, CaptureCatalogError> {
+    let context = resolve_pending_session_context(txn, scope, session.session_id()).await?;
+    if &context.session != session {
+        return Ok(None);
+    }
+    let row = txn
+        .query_one_raw(Statement::from_sql_and_values(
+            txn.get_database_backend(),
+            "SELECT metadata_json FROM agent_session WHERE session_id = ? AND sync_revision = ?
+         AND length(CAST(metadata_json AS BLOB)) <= 1048576 LIMIT 1",
+            [session.session_id.clone().into(), context.revision.into()],
+        ))
+        .await
+        .map_err(|_| CaptureCatalogError::Database)?;
+    let Some(row) = row else { return Ok(None) };
+    let metadata: String = row
+        .try_get_by("metadata_json")
+        .map_err(|_| CaptureCatalogError::Database)?;
+    let (_, ledger) = decode_receipt_metadata(&metadata)?;
+    let key = action.completion_receipt_storage_key();
+    let Some(receipt) = ledger.find(&key) else {
+        return Ok(None);
+    };
+    if !receipt.matches_action(action)
+        || receipt.intent.checkpoint.to_checkpoint_write() != CheckpointWrite::SubagentBoundary
+        || receipt.is_deferred_terminal()
+        || receipt.reserved_revision != context.revision
+    {
+        // A later lifecycle action (including SessionStart) supersedes this
+        // replay even when the provider session and capture namespace persist.
+        return Ok(None);
+    }
+    Ok(Some(ChildBoundaryReplayFence {
+        context,
+        action: action.clone(),
+        checkpoint_id: super::checkpoint::checkpoint_id_for_capture_action(
+            action.event_id,
+            CheckpointWrite::SubagentBoundary,
+        ),
+    }))
 }
 
 /// Indexed PK lookup. Bounds are applied by SQLite before sensitive values
@@ -2481,7 +3041,288 @@ impl PendingArtifactProof<'_> {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ReconciliationCatalogState {
+    Erased,
+    Pending { lease_expired: bool },
+    BudgetExhausted,
+    Session { session_id: String },
+    Missing,
+    Unknown,
+}
+
+fn receipt_metadata_is_pending(
+    metadata: &str,
+    importing: bool,
+) -> Result<bool, CaptureCatalogError> {
+    parse_canon_value(metadata.as_bytes())
+        .map_err(|_| CaptureCatalogError::MalformedReceiptLedger)?;
+    let (map, ledger) = decode_receipt_metadata(metadata)?;
+    Ok(importing
+        || ledger
+            .entries
+            .iter()
+            .any(|receipt| receipt.status == StoredReceiptStatus::Pending)
+        || map
+            .get("capture_status")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|status| matches!(status, "retryable" | "retryable_error")))
+}
+
+fn reconciliation_scope_matches(row: &sea_orm::QueryResult, scope: &CaptureScope) -> bool {
+    row.try_get_by::<String, _>("scope_state")
+        .is_ok_and(|value| value == "scoped")
+        && row
+            .try_get_by::<Option<String>, _>("repo_id")
+            .is_ok_and(|value| value.as_deref() == Some(scope.repo_id.as_str()))
+        && row
+            .try_get_by::<Option<String>, _>("worktree_id")
+            .is_ok_and(|value| value.as_deref() == Some(scope.worktree_id.as_str()))
+        && row
+            .try_get_by::<Option<String>, _>("workspace_id")
+            .is_ok_and(|value| value == scope.workspace_id)
+        && row
+            .try_get_by::<Option<i64>, _>("workspace_fence")
+            .is_ok_and(|value| value == scope.workspace_fence)
+}
+
 impl CaptureCatalogStore {
+    /// Same-snapshot facts only. Global tombstones win; foreign/legacy owners
+    /// never become import hints. No session, receipt or identity is created.
+    pub(crate) async fn reconciliation_catalog_in_snapshot(
+        txn: &DatabaseTransaction,
+        scope: &CaptureScope,
+        provider_ids: &[&str],
+        now_ms: i64,
+        end: Instant,
+        metadata_remaining: &mut usize,
+    ) -> Result<Vec<ReconciliationCatalogState>, CaptureCatalogError> {
+        let check = || {
+            if Instant::now() < end {
+                Ok(())
+            } else {
+                Err(CaptureCatalogError::DeadlineExceeded)
+            }
+        };
+        check()?;
+        if provider_ids.len() > 1000
+            || scope.repo_id.is_empty()
+            || provider_ids.iter().any(|id| {
+                id.is_empty()
+                    || id.len() > 64
+                    || !id
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+            })
+            || provider_ids.iter().copied().collect::<HashSet<_>>().len() != provider_ids.len()
+        {
+            return Err(CaptureCatalogError::InvalidRequest);
+        }
+        if provider_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let parameters = std::iter::repeat_n("?", provider_ids.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let values = || {
+            provider_ids
+                .iter()
+                .map(|id| sea_orm::Value::from(*id))
+                .collect::<Vec<_>>()
+        };
+        let erased = txn.query_all_raw(Statement::from_sql_and_values(txn.get_database_backend(),
+            format!("SELECT provider_session_id FROM agent_import_tombstone WHERE agent_kind='codex' AND provider_session_id IN ({parameters}) LIMIT 1001"), values()))
+            .await.map_err(|_| CaptureCatalogError::Database)?;
+        check()?;
+        let erased = erased
+            .into_iter()
+            .map(|row| {
+                row.try_get_by::<String, _>("provider_session_id")
+                    .map_err(|_| CaptureCatalogError::Database)
+            })
+            .collect::<Result<HashSet<_>, _>>()?;
+        // Materialize only IDs and lengths in the window CTE. Large metadata
+        // bodies never enter the temporary window relation or returned result
+        // unless the remaining aggregate payload allowance admits them.
+        let budget = (*metadata_remaining).min(8 * 1024 * 1024);
+        let sessions = txn.query_all_raw(Statement::from_sql_and_values(txn.get_database_backend(),
+            format!("WITH selected AS (
+                SELECT session_id,provider_session_id,CASE WHEN metadata_json IS NULL THEN 2 WHEN typeof(metadata_json)='text' THEN octet_length(metadata_json) ELSE {CAPTURE_DIAGNOSTIC_METADATA_CAP_BYTES}+1 END AS payload_len
+                FROM agent_session WHERE agent_kind='codex' AND provider_session_id IN ({parameters}) LIMIT 2001
+            ), sized AS (
+                SELECT session_id,payload_len,SUM(CASE WHEN payload_len<={CAPTURE_DIAGNOSTIC_METADATA_CAP_BYTES} THEN payload_len ELSE 0 END) OVER(ORDER BY provider_session_id,session_id) AS payload_total,
+                    COUNT(*) OVER(PARTITION BY provider_session_id) AS copies FROM selected
+            )
+            SELECT s.provider_session_id,substr(s.session_id,1,129) AS session_id,substr(s.state,1,33) AS state,
+                substr(s.scope_state,1,32) AS scope_state,substr(s.repo_id,1,1025) AS repo_id,
+                substr(s.worktree_id,1,1025) AS worktree_id,substr(s.workspace_id,1,1025) AS workspace_id,
+                s.workspace_fence,d.copies,d.payload_len,
+                typeof(s.metadata_json) IN ('null','text') AS metadata_type_valid,
+                (d.payload_len>{CAPTURE_DIAGNOSTIC_METADATA_CAP_BYTES} OR d.payload_total>{budget}) AS metadata_budget_exhausted,
+                CASE WHEN d.payload_len<={CAPTURE_DIAGNOSTIC_METADATA_CAP_BYTES} AND d.payload_total<={budget}
+                    THEN COALESCE(s.metadata_json,'{{}}') ELSE NULL END AS metadata_json
+            FROM agent_session s JOIN sized d ON d.session_id=s.session_id
+            WHERE s.agent_kind='codex' LIMIT 2001"), values()))
+            .await.map_err(|_| CaptureCatalogError::Database)?;
+        check()?;
+        if sessions.len() > 1000 {
+            return Err(CaptureCatalogError::InvalidRequest);
+        }
+        let mut session_rows = HashMap::new();
+        for row in sessions {
+            let id: String = row
+                .try_get_by("provider_session_id")
+                .map_err(|_| CaptureCatalogError::Database)?;
+            let exhausted = row
+                .try_get_by::<i64, _>("metadata_budget_exhausted")
+                .map_err(|_| CaptureCatalogError::Database)?
+                != 0;
+            if !exhausted {
+                let payload_len: i64 = row
+                    .try_get_by("payload_len")
+                    .map_err(|_| CaptureCatalogError::Database)?;
+                let payload_len = usize::try_from(payload_len)
+                    .map_err(|_| CaptureCatalogError::InvalidRequest)?;
+                *metadata_remaining = metadata_remaining
+                    .checked_sub(payload_len)
+                    .ok_or(CaptureCatalogError::InvalidRequest)?;
+            }
+            if session_rows.insert(id, row).is_some() {
+                return Err(CaptureCatalogError::InvalidRequest);
+            }
+        }
+        let identities = txn.query_all_raw(Statement::from_sql_and_values(txn.get_database_backend(),
+            format!("SELECT provider_session_id,substr(state,1,33) AS state,substr(scope_state,1,32) AS scope_state,
+                substr(repo_id,1,1025) AS repo_id,substr(worktree_id,1,1025) AS worktree_id,
+                substr(workspace_id,1,1025) AS workspace_id,workspace_fence,lease_expires_at
+                FROM agent_import_identity WHERE agent_kind='codex' AND provider_session_id IN ({parameters}) LIMIT 10001"), values()))
+            .await.map_err(|_| CaptureCatalogError::Database)?;
+        check()?;
+        if identities.len() > 10_000 {
+            return Err(CaptureCatalogError::InvalidRequest);
+        }
+        let mut importing = HashSet::new();
+        let mut persisted_identity = HashSet::new();
+        let mut expired_imports = HashSet::new();
+        let mut active_imports = HashSet::new();
+        let mut foreign_identity = HashSet::new();
+        for row in identities {
+            let id: String = row
+                .try_get_by("provider_session_id")
+                .map_err(|_| CaptureCatalogError::Database)?;
+            let state: String = row
+                .try_get_by("state")
+                .map_err(|_| CaptureCatalogError::Database)?;
+            let expires = row.try_get_by::<Option<i64>, _>("lease_expires_at");
+            if expires.is_err()
+                || !reconciliation_scope_matches(&row, scope)
+                || !matches!(
+                    state.as_str(),
+                    "discovered" | "leased" | "writing" | "partial" | "committed" | "failed"
+                )
+            {
+                foreign_identity.insert(id);
+            } else if matches!(state.as_str(), "leased" | "writing") {
+                if expires
+                    .ok()
+                    .flatten()
+                    .is_some_and(|expires| expires < now_ms)
+                {
+                    expired_imports.insert(id.clone());
+                } else {
+                    active_imports.insert(id.clone());
+                }
+                importing.insert(id);
+            } else if matches!(state.as_str(), "partial" | "committed") {
+                persisted_identity.insert(id);
+            }
+        }
+        let mut result = Vec::with_capacity(provider_ids.len());
+        for id in provider_ids {
+            check()?;
+            let lease_expired = expired_imports.contains(*id) && !active_imports.contains(*id);
+            let state = if erased.contains(*id) {
+                ReconciliationCatalogState::Erased
+            } else if foreign_identity.contains(*id) {
+                ReconciliationCatalogState::Unknown
+            } else if let Some(row) = session_rows.get(*id) {
+                let phase = row.try_get_by::<String, _>("state").ok();
+                let matches = phase.as_deref().is_some_and(|phase| {
+                    matches!(phase, "pending" | "active" | "condensed" | "stopped")
+                }) && reconciliation_scope_matches(row, scope)
+                    && row
+                        .try_get_by::<i64, _>("copies")
+                        .is_ok_and(|value| value == 1);
+                let metadata_type_valid = row
+                    .try_get_by::<i64, _>("metadata_type_valid")
+                    .is_ok_and(|valid| valid != 0);
+                let metadata_exhausted = row
+                    .try_get_by::<i64, _>("metadata_budget_exhausted")
+                    .is_ok_and(|value| value != 0);
+                if matches && metadata_type_valid && metadata_exhausted {
+                    result.push(ReconciliationCatalogState::BudgetExhausted);
+                    continue;
+                }
+                let session: Option<String> = row.try_get_by("session_id").ok();
+                let metadata: Option<String> = row.try_get_by("metadata_json").ok().flatten();
+                match (matches, session, metadata) {
+                    (true, Some(session), Some(metadata))
+                        if session.len() <= 128
+                            && !session.is_empty()
+                            && session.bytes().all(|byte| {
+                                byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')
+                            }) =>
+                    {
+                        match receipt_metadata_is_pending(
+                            &metadata,
+                            importing.contains(*id) || phase.as_deref() == Some("pending"),
+                        ) {
+                            Ok(true) => ReconciliationCatalogState::Pending { lease_expired },
+                            Ok(false) => ReconciliationCatalogState::Session {
+                                session_id: session,
+                            },
+                            Err(_) => ReconciliationCatalogState::Unknown,
+                        }
+                    }
+                    _ => ReconciliationCatalogState::Unknown,
+                }
+            } else if importing.contains(*id) {
+                ReconciliationCatalogState::Pending { lease_expired }
+            } else if persisted_identity.contains(*id) {
+                ReconciliationCatalogState::Unknown
+            } else {
+                ReconciliationCatalogState::Missing
+            };
+            result.push(state);
+        }
+        check()?;
+        Ok(result)
+    }
+}
+
+impl CaptureCatalogStore {
+    /// Informational pending state in the caller's existing read snapshot.
+    /// This never grants recovery authority or mutates a receipt/session.
+    pub(crate) async fn session_summary_is_pending(
+        txn: &DatabaseTransaction,
+        session_id: &str,
+    ) -> Result<bool, CaptureCatalogError> {
+        let row = txn.query_one_raw(Statement::from_sql_and_values(
+            txn.get_database_backend(),
+            format!("SELECT CASE WHEN metadata_json IS NULL THEN '{{}}' WHEN typeof(metadata_json)='text' AND length(CAST(metadata_json AS BLOB)) <= {CAPTURE_DIAGNOSTIC_METADATA_CAP_BYTES} THEN metadata_json ELSE NULL END AS metadata_json, \
+                EXISTS(SELECT 1 FROM agent_import_identity i WHERE i.agent_kind=s.agent_kind AND i.provider_session_id=s.provider_session_id AND i.state IN ('leased','writing')) AS importing \
+                FROM agent_session s WHERE session_id=? LIMIT 1"),
+            [session_id.into()],
+        )).await.map_err(|_| CaptureCatalogError::Database)?.ok_or(CaptureCatalogError::InvalidRequest)?;
+        let metadata: String = row
+            .try_get_by("metadata_json")
+            .map_err(|_| CaptureCatalogError::MalformedReceiptLedger)?;
+        let importing: i64 = row
+            .try_get_by("importing")
+            .map_err(|_| CaptureCatalogError::Database)?;
+        receipt_metadata_is_pending(&metadata, importing != 0)
+    }
+
     /// Re-elect the exact persisted terminal attempt for one authenticated
     /// pending artifact. The artifact/alias remain discovery inputs only;
     /// current catalog, tombstone, receipt and coverage fences are checked
@@ -2942,6 +3783,179 @@ impl CaptureCatalogStore {
         }
     }
 
+    /// Cold per-session diagnostics share the doctor's bounded projection and
+    /// the catalog's private receipt decoder. The transaction is read-only:
+    /// observing an old session must not consume retries or elect an owner.
+    pub(crate) async fn terminal_diagnostic_for_session(
+        txn: &DatabaseTransaction,
+        session_id: &str,
+        now_millis: i64,
+    ) -> Result<CaptureTerminalDiagnostic, CaptureCatalogError> {
+        if session_id.len() > MAX_SESSION_ID_BYTES {
+            return Ok(CaptureTerminalDiagnostic::unavailable("invalid_session"));
+        }
+        let row = txn.query_one_raw(Statement::from_sql_and_values(
+            txn.get_database_backend(),
+            format!("SELECT {} FROM agent_session WHERE session_id=? AND agent_kind='codex' AND scope_state='scoped' LIMIT 1",
+                doctor_finalizer_projection_columns()),
+            [session_id.into()],
+        )).await.map_err(|_| CaptureCatalogError::Database)?;
+        let Some(row) = row else {
+            return Ok(CaptureTerminalDiagnostic::unavailable(
+                "session_unavailable",
+            ));
+        };
+        let Ok((scope, session, state, ledger)) = decode_doctor_finalizer_row(&row) else {
+            return Ok(CaptureTerminalDiagnostic::unavailable(
+                "invalid_receipt_metadata",
+            ));
+        };
+        let repo = crate::internal::workspace::RepoIdentity::resolve(txn)
+            .await
+            .map_err(|_| CaptureCatalogError::Database)?;
+        if repo.as_str() != scope.repo_id {
+            return Ok(CaptureTerminalDiagnostic::unavailable("scope_unavailable"));
+        }
+        let terminals: Vec<_> = ledger
+            .entries
+            .iter()
+            .filter(|r| r.is_deferred_terminal())
+            .collect();
+        let Some(latest) = terminals
+            .iter()
+            .max_by_key(|r| (r.reserved_revision, r.recorded_at))
+        else {
+            return Ok(CaptureTerminalDiagnostic::unavailable(
+                "no_terminal_receipt",
+            ));
+        };
+        let mut diagnostic = CaptureTerminalDiagnostic {
+            status: if latest.status == StoredReceiptStatus::Complete {
+                "completed"
+            } else {
+                "pending"
+            },
+            owner: "absent",
+            reason: if latest.status == StoredReceiptStatus::Complete {
+                "receipt_complete"
+            } else {
+                "receipt_pending"
+            },
+            superseded: if latest.status == StoredReceiptStatus::Complete {
+                state.phase != CapturePhase::Stopped
+                    || state.stopped_at != latest.intent.terminal_timestamp()
+            } else {
+                !latest.can_resume_from(Some(state))
+            },
+            pending_receipts: terminals
+                .iter()
+                .filter(|r| r.status == StoredReceiptStatus::Pending)
+                .count(),
+            completed_receipts: terminals
+                .iter()
+                .filter(|r| r.status == StoredReceiptStatus::Complete)
+                .count(),
+        };
+        // Completion is a historical fact, not current replay authority.
+        // Only a pending receipt requires a live workspace before recovery.
+        if latest.status == StoredReceiptStatus::Pending
+            && let Err(error) = scope.assert_workspace_fence_live(txn).await
+        {
+            return if matches!(
+                error.downcast_ref::<CaptureFinalCommitAuthorizationError>(),
+                Some(CaptureFinalCommitAuthorizationError::WorkspaceFenceRejected)
+            ) {
+                Ok(CaptureTerminalDiagnostic {
+                    status: "unavailable",
+                    owner: "unavailable",
+                    reason: "scope_unavailable",
+                    ..diagnostic
+                })
+            } else {
+                Err(CaptureCatalogError::Database)
+            };
+        }
+        if terminals
+            .iter()
+            .filter(|r| {
+                (r.reserved_revision, r.recorded_at)
+                    == (latest.reserved_revision, latest.recorded_at)
+            })
+            .count()
+            != 1
+        {
+            if terminals.iter().any(|r| {
+                (r.reserved_revision, r.recorded_at)
+                    == (latest.reserved_revision, latest.recorded_at)
+                    && r.status == StoredReceiptStatus::Pending
+            }) {
+                diagnostic.status = "unavailable";
+            }
+            diagnostic.owner = "unavailable";
+            diagnostic.reason = "ambiguous_terminal_receipts";
+            return Ok(diagnostic);
+        }
+        let Some(finalizer) = latest.finalizer.as_ref() else {
+            if latest.status == StoredReceiptStatus::Pending {
+                diagnostic.status = "unavailable";
+            }
+            diagnostic.owner = "unavailable";
+            diagnostic.reason = "legacy_finalizer_unavailable";
+            return Ok(diagnostic);
+        };
+        if finalizer.status == StoredFinalizeStatus::Quarantined {
+            diagnostic.reason = "receipt_quarantined";
+        } else if diagnostic.superseded {
+            diagnostic.reason = "receipt_superseded";
+        }
+        let action = action_from_stored_receipt(latest)?;
+        let checkpoint = super::checkpoint::checkpoint_id_for_capture_action(
+            action.event_id,
+            latest.intent.checkpoint.to_checkpoint_write(),
+        );
+        let marker = txn.query_one_raw(Statement::from_sql_and_values(txn.get_database_backend(),
+            format!("SELECT CASE WHEN typeof(value)='text' AND length(CAST(value AS BLOB)) <= {CAPTURE_DIAGNOSTIC_METADATA_CAP_BYTES} THEN CAST(value AS BLOB) ELSE NULL END AS value
+                FROM metadata_kv WHERE scope='agent_traces_inflight' AND target=? AND key=? LIMIT 1"),
+            [session.session_id.into(), checkpoint.clone().into()],
+        )).await.map_err(|_| CaptureCatalogError::Database)?;
+        let Some(marker) = marker else {
+            return Ok(diagnostic);
+        };
+        let raw = marker
+            .try_get_by::<Option<Vec<u8>>, _>("value")
+            .map_err(|_| CaptureCatalogError::Database)?;
+        let marker = raw
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+            .as_deref()
+            .and_then(|raw| {
+                crate::internal::ai::traces::decode_and_validate_traces_inflight_marker(
+                    raw,
+                    session_id,
+                    &checkpoint,
+                )
+                .ok()
+            });
+        diagnostic.owner = match marker {
+            Some(marker)
+                if marker.generation.as_deref() == Some(finalizer.marker_generation.as_str())
+                    && marker.time_fields_trustworthy(now_millis) =>
+            {
+                if marker.cleanup_pending {
+                    "cleanup_pending"
+                } else if marker.is_live(now_millis) {
+                    "live"
+                } else {
+                    "expired"
+                }
+            }
+            _ => "unavailable",
+        };
+        if diagnostic.owner == "unavailable" && diagnostic.reason == "receipt_pending" {
+            diagnostic.reason = "owner_unavailable";
+        }
+        Ok(diagnostic)
+    }
+
     /// Bounded cold diagnostics in one read-only snapshot. Superseded and
     /// quarantined receipts stay visible, but never acquire repair authority.
     /// The cursor is a capped raw TEXT key, not a rowid or source locator.
@@ -3057,6 +4071,10 @@ impl CaptureCatalogStore {
                         artifact_present,
                         artifact_pending,
                         artifact_manual_attempted,
+                        waiting_for_children: receipt_children_waiting(
+                            &txn, &session, receipt, state,
+                        )
+                        .await?,
                     });
                 }
             }
@@ -3196,6 +4214,13 @@ impl CaptureCatalogStore {
                 .map_err(|_| CaptureCatalogError::Database)?;
             Ok(Some(CaptureCatalogFinalizerRecovery {
                 scope: binding.scope.clone(),
+                waiting_for_children: receipt_children_waiting(
+                    &txn,
+                    &session,
+                    receipt,
+                    stored.state,
+                )
+                .await?,
                 session,
                 action,
                 checkpoint_id,
@@ -3281,12 +4306,19 @@ impl CaptureCatalogStore {
         if receipt.status == StoredReceiptStatus::Complete {
             return Ok(CaptureCatalogFinalizerRecoveryResult::AlreadyComplete);
         }
+        if receipt.child_gate.is_some() && !receipt.can_resume_from(Some(existing.state)) {
+            return Ok(CaptureCatalogFinalizerRecoveryResult::ConflictUnchanged);
+        }
         let Some(finalizer) = receipt.finalizer.as_ref() else {
             return Ok(CaptureCatalogFinalizerRecoveryResult::Pending);
         };
         if finalizer.status == StoredFinalizeStatus::Quarantined {
             return Ok(CaptureCatalogFinalizerRecoveryResult::Quarantined);
         }
+        if receipt.child_gate.is_some() && existing.state.phase == CapturePhase::Quarantined {
+            return Ok(CaptureCatalogFinalizerRecoveryResult::ConflictUnchanged);
+        }
+        require_settled_child_checkpoints(txn, &recovery.session, receipt).await?;
         let finalize = CaptureCatalogFinalizeRequest::new(
             recovery.scope.clone(),
             recovery.session.clone(),
@@ -3782,6 +4814,44 @@ impl CaptureCatalogStore {
         Ok(())
     }
 
+    async fn arm_child_gate_for_resume(
+        &self,
+        txn: &DatabaseTransaction,
+        request: &CaptureCatalogApplyRequest,
+        existing: &StoredCatalogSession,
+        ledger: &mut StoredReceiptLedger,
+        receipt_key: &str,
+    ) -> Result<bool, CaptureCatalogError> {
+        if !request.requires_child_checkpoints {
+            return Ok(true);
+        }
+        let receipt = ledger
+            .find_mut(receipt_key)
+            .ok_or(CaptureCatalogError::MalformedReceiptLedger)?;
+        if !receipt.can_resume_from(Some(existing.state)) {
+            return Ok(false);
+        }
+        if !arm_required_child_gate(receipt, true)? {
+            return Ok(true);
+        }
+        let (metadata, _) = decode_receipt_metadata(&existing.metadata_json)?;
+        let encoded = encode_receipt_metadata(metadata, ledger)?;
+        let v2 = validate_existing_v2_import_session_record(
+            &existing.metadata_json,
+            &existing.redaction_report,
+        )?;
+        validate_v2_import_session_record_after_mutation(v2, &encoded, &existing.redaction_report)?;
+        update_finalizer_metadata(
+            txn,
+            &request.scope,
+            &request.session,
+            existing.state.sync_revision,
+            encoded,
+            self.execution_deadline,
+        )
+        .await
+    }
+
     async fn apply_inner(
         &self,
         txn: &DatabaseTransaction,
@@ -3885,7 +4955,24 @@ impl CaptureCatalogStore {
                 if candidates.next().is_some() {
                     return Err(CaptureCatalogError::MalformedReceiptLedger);
                 }
-                let adopted_action = action_from_stored_receipt(receipt)?
+                let receipt = receipt.clone();
+                if !self
+                    .arm_child_gate_for_resume(
+                        txn,
+                        request,
+                        existing
+                            .as_ref()
+                            .ok_or(CaptureCatalogError::InvalidRequest)?,
+                        &mut ledger,
+                        &receipt.receipt_key,
+                    )
+                    .await?
+                {
+                    return Ok(CaptureCatalogApplyResult::ConflictUnchanged {
+                        conflict: CaptureCatalogConflict::ConditionalWrite,
+                    });
+                }
+                let adopted_action = action_from_stored_receipt(&receipt)?
                     .with_lifecycle_kind(LifecycleEventKind::SessionEnd);
                 let finalizer = receipt.finalizer.as_ref();
                 let unbound = finalizer.is_some_and(StoredFinalizeReceipt::is_unbound_snapshot);
@@ -3904,7 +4991,7 @@ impl CaptureCatalogStore {
             .action
             .receipt_storage_key(request.mutation.is_terminal());
         if let Some(receipt_key) = receipt_key.as_deref()
-            && let Some(receipt) = ledger.find(receipt_key)
+            && let Some(receipt) = ledger.find(receipt_key).cloned()
         {
             if !receipt.matches(&request.action, &request.mutation) {
                 return Ok(CaptureCatalogApplyResult::ConflictUnchanged {
@@ -3914,6 +5001,23 @@ impl CaptureCatalogStore {
             if receipt.status == StoredReceiptStatus::Pending
                 && receipt.is_deferred_terminal()
                 && !receipt.can_resume_from(current)
+            {
+                return Ok(CaptureCatalogApplyResult::ConflictUnchanged {
+                    conflict: CaptureCatalogConflict::ConditionalWrite,
+                });
+            }
+            if receipt.status == StoredReceiptStatus::Pending
+                && !self
+                    .arm_child_gate_for_resume(
+                        txn,
+                        request,
+                        existing
+                            .as_ref()
+                            .ok_or(CaptureCatalogError::InvalidRequest)?,
+                        &mut ledger,
+                        receipt_key,
+                    )
+                    .await?
             {
                 return Ok(CaptureCatalogApplyResult::ConflictUnchanged {
                     conflict: CaptureCatalogConflict::ConditionalWrite,
@@ -4003,13 +5107,15 @@ impl CaptureCatalogStore {
             } else {
                 StoredReceiptStatus::Pending
             };
-            ledger.insert(StoredReceipt::new(
+            let mut entry = StoredReceipt::new(
                 receipt_key,
                 &request.action,
                 &request.mutation,
                 status,
                 next_state.sync_revision,
-            ))?;
+            );
+            arm_required_child_gate(&mut entry, request.requires_child_checkpoints)?;
+            ledger.insert(entry)?;
             match status {
                 StoredReceiptStatus::Pending => CaptureReceiptDisposition::Pending,
                 StoredReceiptStatus::Complete => CaptureReceiptDisposition::Complete,
@@ -4184,6 +5290,12 @@ impl CaptureCatalogStore {
             });
         }
 
+        // Failure/cleanup progress records no completion proof. Preserve
+        // that bookkeeping even when child work is still pending.
+        if matches!(request.checkpoint, FinalizeCheckpointProgress::Durable) {
+            require_settled_child_checkpoints(txn, &request.session, stored_receipt).await?;
+        }
+
         // Preparing a terminal receipt before source/coverage work is
         // intentionally idempotent. A retry of the same no-repository
         // provisional marker must not burn another bounded finalizer attempt
@@ -4238,6 +5350,7 @@ impl CaptureCatalogStore {
 
         match decision {
             FinalizeDecision::CommitTerminal => {
+                require_settled_child_checkpoints(txn, &request.session, stored_receipt).await?;
                 let finalizer = persisted_finalizer
                     .as_ref()
                     .ok_or(CaptureCatalogError::MalformedReceiptLedger)?;
@@ -4279,6 +5392,7 @@ impl CaptureCatalogStore {
                 })
             }
             FinalizeDecision::Quarantine { reason } => {
+                require_settled_child_checkpoints(txn, &request.session, stored_receipt).await?;
                 // Expired artifact recovery retains the original reservation:
                 // session quarantine would advance its revision and destroy
                 // the very fence needed for one explicit operator attempt.
@@ -4703,6 +5817,12 @@ impl CaptureCatalogStore {
                     .ok_or(CaptureCatalogError::MalformedReceiptLedger)?,
             });
         }
+        if receipt.child_gate.is_some() && existing.state.phase == CapturePhase::Quarantined {
+            return Ok(CaptureCatalogFinalizeResult::ConflictUnchanged {
+                conflict: CaptureCatalogConflict::ConditionalWrite,
+            });
+        }
+        require_settled_child_checkpoints(txn, &request.session, receipt).await?;
         let Some(proof) = finalizer.completion_proof() else {
             return Ok(CaptureCatalogFinalizeResult::ConflictUnchanged {
                 conflict: CaptureCatalogConflict::FinalizerFence,
@@ -4899,6 +6019,11 @@ impl CaptureCatalogStore {
         if receipt.status == StoredReceiptStatus::Complete {
             return Ok(CaptureCatalogCompleteResult::AlreadyComplete);
         }
+        if receipt.child_gate.is_some() && existing.state.phase == CapturePhase::Quarantined {
+            return Ok(CaptureCatalogCompleteResult::ConflictUnchanged {
+                conflict: CaptureCatalogConflict::ConditionalWrite,
+            });
+        }
         let deferred_terminal = receipt.is_deferred_terminal();
         let cleanup_incarnation = metadata.get("capture_incarnation").cloned();
         let covered_terminal_replay = matches!(
@@ -4964,12 +6089,14 @@ impl CaptureCatalogStore {
                 conflict: CaptureCatalogConflict::ConditionalWrite,
             });
         }
+        require_settled_child_checkpoints(txn, &request.session, receipt).await?;
         let Some(receipt) = ledger.find_mut(&receipt_key) else {
             return Ok(CaptureCatalogCompleteResult::ConflictUnchanged {
                 conflict: CaptureCatalogConflict::MissingReceipt,
             });
         };
         receipt.status = StoredReceiptStatus::Complete;
+        receipt.child_gate = None;
         let metadata_json = encode_receipt_metadata(metadata, &ledger)?;
         validate_v2_import_session_record_after_mutation(
             existing_v2_import,
@@ -5087,12 +6214,7 @@ impl CaptureCatalogStore {
     }
 }
 
-fn doctor_finalizer_scan_statement(
-    backend: sea_orm::DbBackend,
-    cursor: Option<&[u8]>,
-    skip_invalid_keys: bool,
-    limit: usize,
-) -> Statement {
+fn doctor_finalizer_projection_columns() -> String {
     let mut columns = Vec::new();
     for (name, cap) in [
         ("session_id", MAX_SESSION_ID_BYTES),
@@ -5112,9 +6234,19 @@ fn doctor_finalizer_scan_statement(
     }
     columns.push("CASE WHEN typeof(sync_revision)='integer' THEN sync_revision ELSE NULL END AS sync_revision".into());
     columns.push("CASE WHEN typeof(stopped_at)='integer' THEN stopped_at ELSE NULL END AS stopped_at, CASE WHEN typeof(workspace_fence)='integer' THEN workspace_fence ELSE NULL END AS workspace_fence, typeof(stopped_at) IN ('null','integer') AS stopped_at_valid, typeof(workspace_fence) IN ('null','integer') AS workspace_fence_valid, typeof(workspace_id)='null' AS workspace_id_null".into());
+    columns.join(",")
+}
+
+fn doctor_finalizer_scan_statement(
+    backend: sea_orm::DbBackend,
+    cursor: Option<&[u8]>,
+    skip_invalid_keys: bool,
+    limit: usize,
+) -> Statement {
+    let columns = doctor_finalizer_projection_columns();
     let mut sql = format!(
         "SELECT {} FROM agent_session WHERE scope_state='scoped'",
-        columns.join(",")
+        columns
     );
     if skip_invalid_keys {
         sql.push_str(" AND typeof(session_id)='text' AND length(CAST(session_id AS BLOB)) <= 1024");
@@ -6071,8 +7203,31 @@ impl Default for StoredReceiptLedger {
 }
 
 impl StoredReceiptLedger {
+    fn validate_supported_version(&self) -> Result<(), CaptureCatalogError> {
+        if matches!(
+            self.version,
+            RECEIPT_LEDGER_VERSION | CHILD_GATE_LEDGER_VERSION
+        ) {
+            Ok(())
+        } else {
+            Err(CaptureCatalogError::MalformedReceiptLedger)
+        }
+    }
+
+    fn canonicalize_version(&mut self) {
+        self.version = if self.entries.iter().any(|entry| entry.child_gate.is_some()) {
+            CHILD_GATE_LEDGER_VERSION
+        } else {
+            RECEIPT_LEDGER_VERSION
+        };
+    }
+
     fn validate(&self) -> Result<(), CaptureCatalogError> {
-        if self.version != RECEIPT_LEDGER_VERSION || self.entries.len() > MAX_CAPTURE_RECEIPTS {
+        self.validate_supported_version()?;
+        if self.entries.len() > MAX_CAPTURE_RECEIPTS
+            || (self.version == RECEIPT_LEDGER_VERSION
+                && self.entries.iter().any(|entry| entry.child_gate.is_some()))
+        {
             return Err(CaptureCatalogError::MalformedReceiptLedger);
         }
         let mut keys = HashSet::with_capacity(self.entries.len());
@@ -6129,6 +7284,8 @@ struct StoredReceipt {
     /// present, it is the sole durable authority for terminal replay policy.
     #[serde(default)]
     finalizer: Option<StoredFinalizeReceipt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    child_gate: Option<StoredChildCompletionGate>,
 }
 
 impl StoredReceipt {
@@ -6148,6 +7305,7 @@ impl StoredReceipt {
             recorded_at: mutation.observed_at,
             reserved_revision,
             finalizer: None,
+            child_gate: None,
         }
     }
 
@@ -6161,6 +7319,12 @@ impl StoredReceipt {
             return Err(CaptureCatalogError::MalformedReceiptLedger);
         }
         self.intent.validate()?;
+        if let Some(gate) = &self.child_gate {
+            if !self.is_deferred_terminal() || self.status != StoredReceiptStatus::Pending {
+                return Err(CaptureCatalogError::MalformedReceiptLedger);
+            }
+            gate.validate()?;
+        }
         if let Some(finalizer) = &self.finalizer
             && (!self.is_deferred_terminal()
                 || finalizer.replay_key != self.action_key
@@ -6187,6 +7351,77 @@ impl StoredReceipt {
     fn can_resume_from(&self, current: Option<DurableCaptureState>) -> bool {
         !self.is_deferred_terminal()
             || current.is_some_and(|state| state.sync_revision == self.reserved_revision)
+    }
+}
+
+/// A private, bounded control record in the existing receipt ledger. Only
+/// repository-keyed source commitments enter it; paths and native IDs do not.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredChildCompletionGate {
+    preparing: bool,
+    requirements: Vec<StoredChildCheckpointRequirement>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredChildCheckpointRequirement {
+    source_key: String,
+    minimum_revision: i64,
+}
+
+impl StoredChildCompletionGate {
+    fn validate(&self) -> Result<(), CaptureCatalogError> {
+        if self.requirements.len() > MAX_CHILD_GATE_REQUIREMENTS {
+            return Err(CaptureCatalogError::ChildGateCapacity);
+        }
+        let mut previous: Option<&str> = None;
+        for requirement in &self.requirements {
+            let key = requirement
+                .source_key
+                .strip_prefix(CHILD_GATE_SOURCE_PREFIX)
+                .ok_or(CaptureCatalogError::MalformedReceiptLedger)?;
+            if key.len() != SOURCE_COMMITMENT_HEX_BYTES
+                || !key
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                || requirement.minimum_revision < 1
+                || previous.is_some_and(|old| old >= requirement.source_key.as_str())
+            {
+                return Err(CaptureCatalogError::MalformedReceiptLedger);
+            }
+            previous = Some(&requirement.source_key);
+        }
+        let encoded =
+            serde_json::to_vec(self).map_err(|_| CaptureCatalogError::MalformedReceiptLedger)?;
+        if encoded.len() > MAX_CHILD_GATE_BYTES {
+            return Err(CaptureCatalogError::ChildGateCapacity);
+        }
+        Ok(())
+    }
+}
+
+fn arm_required_child_gate(
+    receipt: &mut StoredReceipt,
+    required: bool,
+) -> Result<bool, CaptureCatalogError> {
+    if !required {
+        return Ok(false);
+    }
+    if !receipt.is_deferred_terminal() || receipt.status != StoredReceiptStatus::Pending {
+        return Err(CaptureCatalogError::InvalidRequest);
+    }
+    if let Some(gate) = &mut receipt.child_gate {
+        gate.validate()?;
+        let changed = !gate.preparing;
+        gate.preparing = true;
+        Ok(changed)
+    } else {
+        receipt.child_gate = Some(StoredChildCompletionGate {
+            preparing: true,
+            requirements: Vec::new(),
+        });
+        Ok(true)
     }
 }
 
@@ -6582,6 +7817,65 @@ fn action_from_stored_receipt(
     Ok(action)
 }
 
+// The fake has no child-leaf database. It can prove only an empty prepared
+// set; it must not manufacture settled child evidence for coordinator tests.
+fn require_fake_settled_child_checkpoints(
+    receipt: &StoredReceipt,
+) -> Result<(), CaptureCatalogError> {
+    if let Some(gate) = &receipt.child_gate {
+        gate.validate()?;
+        if gate.preparing || !gate.requirements.is_empty() {
+            return Err(CaptureCatalogError::ChildCheckpointsPending);
+        }
+    }
+    Ok(())
+}
+
+/// A revision floor is a completion condition, not an exact association proof.
+/// This runs inside the caller's scope/action/revision-fenced writer transaction.
+async fn require_settled_child_checkpoints(
+    txn: &DatabaseTransaction,
+    session: &CaptureCatalogSession,
+    receipt: &StoredReceipt,
+) -> Result<(), CaptureCatalogError> {
+    let Some(gate) = &receipt.child_gate else {
+        return Ok(());
+    };
+    gate.validate()?;
+    if gate.preparing {
+        return Err(CaptureCatalogError::ChildCheckpointsPending);
+    }
+    // A retained partial revision is valid data; this gate does not certify native completion.
+    for requirement in &gate.requirements {
+        let row = txn.query_one_raw(Statement::from_sql_and_values(
+            txn.get_database_backend(),
+            "SELECT 1 AS settled FROM agent_subagent_content_claim c
+             JOIN agent_subagent_content_revision r
+               ON r.parent_session_id = c.parent_session_id AND r.provider_kind = c.provider_kind
+              AND r.source_key = c.source_key AND r.content_schema_version = c.content_schema_version
+              AND r.revision = c.current_revision AND r.checkpoint_id = c.current_checkpoint_id
+              AND r.content_digest = c.current_digest
+             JOIN agent_checkpoint cp ON cp.checkpoint_id = c.current_checkpoint_id
+              AND cp.session_id = c.parent_session_id AND cp.scope = 'subagent'
+             WHERE c.parent_session_id = ? AND c.provider_kind = ? AND c.source_key = ?
+               AND c.content_schema_version = 2
+               AND c.state = 'idle' AND c.owner IS NULL AND c.lease_expires_at IS NULL
+               AND c.attempt_digest IS NULL AND c.attempt_checkpoint_id IS NULL
+               AND typeof(c.current_revision) = 'integer' AND c.current_revision >= ?
+               AND typeof(c.revision_cursor) = 'integer' AND c.revision_cursor >= c.current_revision
+               AND typeof(r.revision) = 'integer' AND typeof(c.current_digest) = 'text'
+               AND typeof(r.content_digest) = 'text' AND length(c.current_digest) = 64
+               AND c.current_digest NOT GLOB '*[^0-9a-f]*' LIMIT 1",
+            [session.session_id.clone().into(), session.agent_kind.clone().into(),
+             requirement.source_key.clone().into(), requirement.minimum_revision.into()],
+        )).await.map_err(|_| CaptureCatalogError::Database)?;
+        if row.is_none() {
+            return Err(CaptureCatalogError::ChildCheckpointsPending);
+        }
+    }
+    Ok(())
+}
+
 fn decode_receipt_metadata(
     metadata_json: &str,
 ) -> Result<
@@ -6601,7 +7895,17 @@ fn decode_receipt_metadata(
             .map_err(|_| CaptureCatalogError::MalformedReceiptLedger)?,
         None => StoredReceiptLedger::default(),
     };
-    ledger.validate()?;
+    ledger
+        .validate()
+        .map_err(|_| CaptureCatalogError::MalformedReceiptLedger)?;
+    if ledger
+        .entries
+        .iter()
+        .any(|entry| entry.child_gate.is_some())
+        && metadata_json.len() > MAX_DOCTOR_RECEIPT_METADATA_BYTES
+    {
+        return Err(CaptureCatalogError::MalformedReceiptLedger);
+    }
     Ok((map, ledger))
 }
 
@@ -6609,18 +7913,29 @@ fn encode_receipt_metadata(
     mut metadata: serde_json::Map<String, serde_json::Value>,
     ledger: &StoredReceiptLedger,
 ) -> Result<String, CaptureCatalogError> {
+    ledger.validate_supported_version()?;
+    let mut ledger = ledger.clone();
+    let has_child_gate = ledger
+        .entries
+        .iter()
+        .any(|entry| entry.child_gate.is_some());
+    ledger.canonicalize_version();
     ledger.validate()?;
     if ledger.entries.is_empty() {
         metadata.remove(RECEIPT_LEDGER_FIELD);
     } else {
         metadata.insert(
             RECEIPT_LEDGER_FIELD.to_string(),
-            serde_json::to_value(ledger)
+            serde_json::to_value(&ledger)
                 .map_err(|_| CaptureCatalogError::MalformedReceiptLedger)?,
         );
     }
-    serde_json::to_string(&serde_json::Value::Object(metadata))
-        .map_err(|_| CaptureCatalogError::MalformedReceiptLedger)
+    let encoded = serde_json::to_string(&serde_json::Value::Object(metadata))
+        .map_err(|_| CaptureCatalogError::MalformedReceiptLedger)?;
+    if has_child_gate && encoded.len() > MAX_DOCTOR_RECEIPT_METADATA_BYTES {
+        return Err(CaptureCatalogError::ChildGateCapacity);
+    }
+    Ok(encoded)
 }
 
 fn validate_catalog_text(value: &str, max_bytes: usize) -> Result<(), CaptureCatalogError> {
@@ -6954,7 +8269,14 @@ impl CaptureCatalogPort for FakeCaptureCatalogStore {
                     if candidates.next().is_some() {
                         return Err(CaptureCatalogError::MalformedReceiptLedger);
                     }
-                    let adopted_action = action_from_stored_receipt(receipt)?
+                    let receipt = receipt.clone();
+                    let stored = existing
+                        .ledger
+                        .find_mut(&receipt.receipt_key)
+                        .ok_or(CaptureCatalogError::MalformedReceiptLedger)?;
+                    arm_required_child_gate(stored, request.requires_child_checkpoints)?;
+                    existing.ledger.canonicalize_version();
+                    let adopted_action = action_from_stored_receipt(&receipt)?
                         .with_lifecycle_kind(LifecycleEventKind::SessionEnd);
                     let finalizer = receipt.finalizer.as_ref();
                     let unbound = finalizer.is_some_and(StoredFinalizeReceipt::is_unbound_snapshot);
@@ -6973,7 +8295,7 @@ impl CaptureCatalogPort for FakeCaptureCatalogStore {
                 .action
                 .receipt_storage_key(request.mutation.is_terminal());
             if let Some(key) = receipt_key.as_deref()
-                && let Some(receipt) = existing.ledger.find(key)
+                && let Some(receipt) = existing.ledger.find(key).cloned()
             {
                 if !receipt.matches(&request.action, &request.mutation) {
                     return Ok(CaptureCatalogApplyResult::ConflictUnchanged {
@@ -6987,6 +8309,14 @@ impl CaptureCatalogPort for FakeCaptureCatalogStore {
                     return Ok(CaptureCatalogApplyResult::ConflictUnchanged {
                         conflict: CaptureCatalogConflict::ConditionalWrite,
                     });
+                }
+                if receipt.status == StoredReceiptStatus::Pending {
+                    let stored = existing
+                        .ledger
+                        .find_mut(key)
+                        .ok_or(CaptureCatalogError::MalformedReceiptLedger)?;
+                    arm_required_child_gate(stored, request.requires_child_checkpoints)?;
+                    existing.ledger.canonicalize_version();
                 }
                 return Ok(match receipt.status {
                     StoredReceiptStatus::Pending => {
@@ -7128,6 +8458,11 @@ impl CaptureCatalogPort for FakeCaptureCatalogStore {
         if receipt.status == StoredReceiptStatus::Complete {
             return Ok(CaptureCatalogCompleteResult::AlreadyComplete);
         }
+        if receipt.child_gate.is_some() && existing.state.phase == CapturePhase::Quarantined {
+            return Ok(CaptureCatalogCompleteResult::ConflictUnchanged {
+                conflict: CaptureCatalogConflict::ConditionalWrite,
+            });
+        }
         let deferred_terminal = receipt.is_deferred_terminal();
         let covered_terminal_replay = matches!(
             &request.completion,
@@ -7186,12 +8521,15 @@ impl CaptureCatalogPort for FakeCaptureCatalogStore {
                 conflict: CaptureCatalogConflict::ConditionalWrite,
             });
         }
+        require_fake_settled_child_checkpoints(receipt)?;
         let Some(receipt) = existing.ledger.find_mut(&key) else {
             return Ok(CaptureCatalogCompleteResult::ConflictUnchanged {
                 conflict: CaptureCatalogConflict::MissingReceipt,
             });
         };
         receipt.status = StoredReceiptStatus::Complete;
+        receipt.child_gate = None;
+        existing.ledger.canonicalize_version();
         if deferred_terminal && !covered_terminal_replay {
             existing.state = DurableCaptureState {
                 phase: CapturePhase::Stopped,
@@ -7278,6 +8616,10 @@ impl CaptureCatalogPort for FakeCaptureCatalogStore {
                 conflict: CaptureCatalogConflict::ConditionalWrite,
             });
         }
+        if matches!(request.checkpoint, FinalizeCheckpointProgress::Durable) {
+            require_fake_settled_child_checkpoints(stored_receipt)?;
+        }
+
         if let Some(finalizer) = persisted_finalizer.as_ref()
             && finalizer.is_unbound_snapshot()
             && matches!(request.checkpoint, FinalizeCheckpointProgress::NotStarted)
@@ -7321,6 +8663,7 @@ impl CaptureCatalogPort for FakeCaptureCatalogStore {
         .map_err(|_| CaptureCatalogError::InvalidRequest)?;
         match decision {
             FinalizeDecision::CommitTerminal => {
+                require_fake_settled_child_checkpoints(stored_receipt)?;
                 let proof = persisted_finalizer
                     .as_ref()
                     .and_then(StoredFinalizeReceipt::completion_proof)
@@ -7340,6 +8683,7 @@ impl CaptureCatalogPort for FakeCaptureCatalogStore {
                 })
             }
             FinalizeDecision::Quarantine { reason } => {
+                require_fake_settled_child_checkpoints(stored_receipt)?;
                 let pending = match current_receipt {
                     Some(receipt) => receipt,
                     None => PendingFinalizeReceipt::new(
@@ -7521,6 +8865,7 @@ impl CaptureCatalogPort for FakeCaptureCatalogStore {
                                     });
                                 }
                                 FinalizeDecision::Quarantine { reason } => {
+                                    require_fake_settled_child_checkpoints(&stored_receipt)?;
                                     let Some(receipt) = existing.ledger.find_mut(&key) else {
                                         return Ok(
                                             CaptureCatalogTerminalAttempt::ConflictUnchanged {
@@ -7589,6 +8934,7 @@ impl CaptureCatalogPort for FakeCaptureCatalogStore {
                     // real catalog: a different source with no registered
                     // marker cannot reconstruct the elected bytes, so it
                     // becomes repair-required rather than retrying forever.
+                    require_fake_settled_child_checkpoints(&stored_receipt)?;
                     let pending = finalizer.to_pending_receipt()?;
                     let Some(receipt) = existing.ledger.find_mut(&key) else {
                         return Ok(CaptureCatalogTerminalAttempt::ConflictUnchanged {
@@ -7678,6 +9024,7 @@ impl CaptureCatalogPort for FakeCaptureCatalogStore {
                 })
             }
             FinalizeDecision::Quarantine { reason } => {
+                require_fake_settled_child_checkpoints(&stored_receipt)?;
                 let pending = current_receipt.ok_or(CaptureCatalogError::InvalidRequest)?;
                 let Some(receipt) = existing.ledger.find_mut(&key) else {
                     return Ok(CaptureCatalogTerminalAttempt::ConflictUnchanged {
@@ -7759,6 +9106,12 @@ impl CaptureCatalogPort for FakeCaptureCatalogStore {
                     .ok_or(CaptureCatalogError::MalformedReceiptLedger)?,
             });
         }
+        if receipt.child_gate.is_some() && existing.state.phase == CapturePhase::Quarantined {
+            return Ok(CaptureCatalogFinalizeResult::ConflictUnchanged {
+                conflict: CaptureCatalogConflict::ConditionalWrite,
+            });
+        }
+        require_fake_settled_child_checkpoints(receipt)?;
         let Some(proof) = finalizer.completion_proof() else {
             return Ok(CaptureCatalogFinalizeResult::ConflictUnchanged {
                 conflict: CaptureCatalogConflict::FinalizerFence,
@@ -7853,6 +9206,12 @@ impl CaptureCatalogPort for FakeCaptureCatalogStore {
                 conflict: CaptureCatalogConflict::FinalizerFence,
             });
         }
+        if receipt.child_gate.is_some() && existing.state.phase == CapturePhase::Quarantined {
+            return Ok(CaptureCatalogCompleteResult::ConflictUnchanged {
+                conflict: CaptureCatalogConflict::ConditionalWrite,
+            });
+        }
+        require_fake_settled_child_checkpoints(receipt)?;
         let reserved_revision = receipt.reserved_revision;
         let terminal_timestamp = receipt
             .intent
@@ -7864,6 +9223,8 @@ impl CaptureCatalogPort for FakeCaptureCatalogStore {
             });
         };
         receipt.status = StoredReceiptStatus::Complete;
+        receipt.child_gate = None;
+        existing.ledger.canonicalize_version();
         existing.state = DurableCaptureState {
             phase: CapturePhase::Stopped,
             stopped_at: Some(terminal_timestamp),
@@ -7911,13 +9272,16 @@ fn insert_fake_receipt(
     } else {
         StoredReceiptStatus::Pending
     };
-    session.ledger.insert(StoredReceipt::new(
+    let mut receipt = StoredReceipt::new(
         &key,
         &request.action,
         &request.mutation,
         status,
         reserved_revision,
-    ))?;
+    );
+    arm_required_child_gate(&mut receipt, request.requires_child_checkpoints)?;
+    session.ledger.insert(receipt)?;
+    session.ledger.canonicalize_version();
     Ok(match status {
         StoredReceiptStatus::Pending => CaptureReceiptDisposition::Pending,
         StoredReceiptStatus::Complete => CaptureReceiptDisposition::Complete,
@@ -13839,6 +15203,7 @@ mod tests {
             artifact_present: false,
             artifact_pending: false,
             artifact_manual_attempted: false,
+            waiting_for_children: false,
         };
         let expiry = 1 + crate::internal::ai::capture::finalizer::MAX_FINALIZE_WINDOW_MILLIS + 1;
         let pending_state = session_state(&conn).await;
@@ -14129,5 +15494,1445 @@ mod tests {
                 .expect("first unfaulted terminal claim"),
             CaptureCatalogTerminalAttempt::Bound { attempts: 1, .. }
         ));
+    }
+
+    #[cfg(all(test, feature = "test-live-agent"))]
+    mod codex_child_gate_local_tests {
+        use super::*;
+        fn key(i: usize) -> String {
+            format!("{CHILD_GATE_SOURCE_PREFIX}{i:064x}")
+        }
+        fn gate(preparing: bool, floor: Option<i64>) -> StoredChildCompletionGate {
+            StoredChildCompletionGate {
+                preparing,
+                requirements: floor
+                    .map(|minimum_revision| StoredChildCheckpointRequirement {
+                        source_key: key(1),
+                        minimum_revision,
+                    })
+                    .into_iter()
+                    .collect(),
+            }
+        }
+        fn entry(child_gate: Option<StoredChildCompletionGate>) -> StoredReceipt {
+            let action = action(0xc090, None);
+            let mut entry = StoredReceipt::new(
+                &action.completion_receipt_storage_key(),
+                &action,
+                &terminal_mutation(None),
+                StoredReceiptStatus::Pending,
+                1,
+            );
+            entry.child_gate = child_gate;
+            entry
+        }
+        async fn replace_owned_gate(conn: &DatabaseConnection, gate: StoredChildCompletionGate) {
+            let before = session_catalog_snapshot(conn).await;
+            let (map, mut ledger) = decode_receipt_metadata(&before.3).unwrap();
+            ledger.entries[0].child_gate = Some(gate);
+            let metadata = encode_receipt_metadata(map, &ledger).unwrap();
+            conn.execute_raw(Statement::from_sql_and_values(
+                DbBackend::Sqlite,
+                "UPDATE agent_session SET metadata_json=? WHERE session_id='session-a'",
+                [metadata.into()],
+            ))
+            .await
+            .unwrap();
+        }
+        async fn fixture() -> (
+            DatabaseConnection,
+            CaptureCatalogStore,
+            CaptureCatalogApplyRequest,
+            CaptureCatalogFinalizeRequest,
+            CaptureCatalogFinalizeProof,
+        ) {
+            let conn = catalog_db().await;
+            let store = CaptureCatalogStore::new(conn.clone());
+            let action = action(0xc091, None);
+            let request = CaptureCatalogApplyRequest::new(
+                scope(),
+                CaptureCatalogSession::new("session-a", "codex", "provider-a", "/repo").unwrap(),
+                action.clone(),
+                terminal_mutation(None),
+            )
+            .unwrap();
+            store.apply(&request).await.unwrap();
+            let marker = Uuid::from_u128(0xc092).to_string();
+            let policy = finalizer_policy(&action, Some(10));
+            let initial = finalize_request(
+                &request,
+                policy.clone(),
+                &marker,
+                Some(TEST_SOURCE_DIGEST_A),
+                1,
+                FinalizeCheckpointProgress::NotStarted,
+            );
+            assert!(matches!(
+                store.finalize(&initial).await.unwrap(),
+                CaptureCatalogFinalizeResult::Pending { .. }
+            ));
+            let durable = finalize_request(
+                &request,
+                policy,
+                &marker,
+                Some(TEST_SOURCE_DIGEST_A),
+                1000,
+                FinalizeCheckpointProgress::Durable,
+            );
+            let proof = match store.finalize(&durable).await.unwrap() {
+                CaptureCatalogFinalizeResult::ReadyToComplete { proof } => proof,
+                other => panic!("{other:?}"),
+            };
+            // Catalog tests prove relational fences; Root owns object/ref evidence.
+            let id = super::super::super::checkpoint::checkpoint_id_for_capture_action(
+                action.event_id(),
+                CheckpointWrite::Committed,
+            );
+            conn.execute_raw(Statement::from_sql_and_values(
+                DbBackend::Sqlite,
+                "INSERT INTO agent_checkpoint VALUES (?, 'session-a', 'committed')",
+                [id.into()],
+            ))
+            .await
+            .unwrap();
+            (conn, store, request, durable, proof)
+        }
+        async fn seed_child(conn: &DatabaseConnection, revision: i64, schema: i64) {
+            conn.execute_unprepared(include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/sql/migrations/2026071406_agent_subagent_content.sql"
+            )))
+            .await
+            .unwrap();
+            conn.execute_unprepared("ALTER TABLE agent_subagent_content_claim ADD COLUMN revision_cursor INTEGER NOT NULL DEFAULT 0").await.unwrap();
+            conn.execute_unprepared(
+                "INSERT INTO agent_checkpoint VALUES ('child-current','session-a','subagent')",
+            )
+            .await
+            .unwrap();
+            conn.execute_raw(Statement::from_sql_and_values(DbBackend::Sqlite,
+                "INSERT INTO agent_subagent_content_claim (parent_session_id,provider_kind,source_key,content_schema_version,
+                 current_revision,current_checkpoint_id,current_digest,state,fence_token,created_at,updated_at,revision_cursor)
+                 VALUES ('session-a','codex',?,?,?,'child-current',?,'idle',1,1,1,?)",
+                [key(1).into(),schema.into(),revision.into(),"a".repeat(64).into(),revision.into()]
+            )).await.unwrap();
+            conn.execute_raw(Statement::from_sql_and_values(DbBackend::Sqlite,
+                "INSERT INTO agent_subagent_content_revision (parent_session_id,provider_kind,source_key,
+                 content_schema_version,revision,checkpoint_id,content_digest,source_channel,partial,created_at)
+                 VALUES ('session-a','codex',?,?,?,'child-current',?,'live',0,1)",
+                [key(1).into(),schema.into(),revision.into(),"a".repeat(64).into()]
+            )).await.unwrap();
+        }
+        #[derive(Serialize, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct LegacyReceipt {
+            #[serde(rename = "receipt_key")]
+            _key: String,
+            #[serde(rename = "event_id")]
+            _event: String,
+            #[serde(rename = "action_key")]
+            _action: String,
+            #[serde(rename = "intent")]
+            _intent: StoredReceiptIntent,
+            #[serde(rename = "status")]
+            _status: StoredReceiptStatus,
+            #[serde(rename = "recorded_at")]
+            _time: i64,
+            #[serde(rename = "reserved_revision")]
+            _revision: i64,
+            #[serde(rename = "finalizer")]
+            _finalizer: Option<StoredFinalizeReceipt>,
+        }
+        #[test]
+        #[ignore = "operator-local Codex acceptance; never run in CI"]
+        fn codex_child_gate_v1_bytes_and_old_reader_rejection() {
+            for version in [0, 3, 255] {
+                let future = StoredReceiptLedger {
+                    version,
+                    entries: vec![entry(None)],
+                };
+                assert_eq!(
+                    encode_receipt_metadata(serde_json::Map::new(), &future),
+                    Err(CaptureCatalogError::MalformedReceiptLedger)
+                );
+            }
+            let original = entry(None);
+            let legacy: LegacyReceipt =
+                serde_json::from_value(serde_json::to_value(&original).unwrap()).unwrap();
+            let old_bytes =
+                serde_json::json!({RECEIPT_LEDGER_FIELD: {"version":1,"entries":[legacy]}})
+                    .to_string();
+            let ledger = StoredReceiptLedger {
+                version: 1,
+                entries: vec![original],
+            };
+            assert_eq!(
+                encode_receipt_metadata(serde_json::Map::new(), &ledger).unwrap(),
+                old_bytes
+            );
+            let gated = StoredReceiptLedger {
+                version: 1,
+                entries: vec![entry(Some(gate(true, Some(2))))],
+            };
+            let encoded = encode_receipt_metadata(serde_json::Map::new(), &gated).unwrap();
+            assert_eq!(decode_receipt_metadata(&encoded).unwrap().1.version, 2);
+            let mut value: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+            assert!(
+                serde_json::from_value::<LegacyReceipt>(
+                    value[RECEIPT_LEDGER_FIELD]["entries"][0].clone()
+                )
+                .is_err()
+            );
+            value[RECEIPT_LEDGER_FIELD]["version"] = 1.into();
+            assert!(matches!(
+                decode_receipt_metadata(&value.to_string()),
+                Err(CaptureCatalogError::MalformedReceiptLedger)
+            ));
+        }
+        #[test]
+        #[ignore = "operator-local Codex acceptance; never run in CI"]
+        fn codex_child_gate_rejects_malformed_control_and_capacity() {
+            for bad in [
+                StoredChildCheckpointRequirement {
+                    source_key: "/PRIVATE_PATH_CANARY".into(),
+                    minimum_revision: 1,
+                },
+                StoredChildCheckpointRequirement {
+                    source_key: key(1),
+                    minimum_revision: 0,
+                },
+                StoredChildCheckpointRequirement {
+                    source_key: format!("{CHILD_GATE_SOURCE_PREFIX}{}", "A".repeat(64)),
+                    minimum_revision: 1,
+                },
+            ] {
+                assert_eq!(
+                    StoredChildCompletionGate {
+                        preparing: false,
+                        requirements: vec![bad]
+                    }
+                    .validate(),
+                    Err(CaptureCatalogError::MalformedReceiptLedger)
+                );
+            }
+            let mut duplicate = gate(false, Some(1));
+            duplicate
+                .requirements
+                .push(duplicate.requirements[0].clone());
+            assert_eq!(
+                duplicate.validate(),
+                Err(CaptureCatalogError::MalformedReceiptLedger)
+            );
+            let too_many = StoredChildCompletionGate {
+                preparing: true,
+                requirements: (0..17)
+                    .map(|i| StoredChildCheckpointRequirement {
+                        source_key: key(i),
+                        minimum_revision: 1,
+                    })
+                    .collect(),
+            };
+            assert_eq!(
+                too_many.validate(),
+                Err(CaptureCatalogError::ChildGateCapacity)
+            );
+            let mut completed = entry(Some(gate(false, None)));
+            completed.status = StoredReceiptStatus::Complete;
+            assert_eq!(
+                completed.validate(),
+                Err(CaptureCatalogError::MalformedReceiptLedger)
+            );
+        }
+        #[test]
+        #[ignore = "operator-local Codex acceptance; never run in CI"]
+        fn codex_child_gate_metadata_bound_and_display_pins() {
+            let ledger = StoredReceiptLedger {
+                version: 2,
+                entries: vec![entry(Some(gate(true, None)))],
+            };
+            let mut map = serde_json::Map::new();
+            map.insert(
+                "padding".into(),
+                "x".repeat(MAX_DOCTOR_RECEIPT_METADATA_BYTES).into(),
+            );
+            assert_eq!(
+                encode_receipt_metadata(map.clone(), &ledger),
+                Err(CaptureCatalogError::ChildGateCapacity)
+            );
+            map.insert(
+                RECEIPT_LEDGER_FIELD.into(),
+                serde_json::to_value(&ledger).unwrap(),
+            );
+            assert!(matches!(
+                decode_receipt_metadata(&serde_json::Value::Object(map).to_string()),
+                Err(CaptureCatalogError::MalformedReceiptLedger)
+            ));
+            let closed = valid_v2_import_metadata(valid_v2_import_snapshot());
+            let mut closed: serde_json::Value = serde_json::from_str(&closed).unwrap();
+            closed[RECEIPT_LEDGER_FIELD] = serde_json::to_value(&ledger).unwrap();
+            assert!(validate_v2_import_session_metadata(&closed.to_string()).is_ok());
+            let oversize = format!(
+                "{}{}",
+                " ".repeat(MAX_DOCTOR_RECEIPT_METADATA_BYTES),
+                closed
+            );
+            assert_eq!(
+                validate_v2_import_session_metadata(&oversize),
+                Err(CaptureCatalogError::InvalidRequest)
+            );
+            assert_eq!(
+                validate_existing_v2_import_session_record(&oversize, "{}"),
+                Err(CaptureCatalogError::MalformedReceiptLedger)
+            );
+            assert_eq!(
+                CaptureCatalogError::ChildCheckpointsPending.to_string(),
+                "child checkpoints remain pending; retry from the original authorized agent environment or inspect with `libra agent doctor`"
+            );
+            assert_eq!(
+                CaptureCatalogError::ChildGateCapacity.to_string(),
+                "child checkpoint control capacity is exhausted; preserve the pending capture and retry from its original authorized environment"
+            );
+        }
+        #[tokio::test]
+        #[ignore = "operator-local Codex acceptance; never run in CI"]
+        async fn codex_child_gate_preparing_blocks_all_completion_routes_without_mutation() {
+            let (conn, store, request, durable, proof) = fixture().await;
+            replace_owned_gate(&conn, gate(true, None)).await;
+            let before = session_catalog_snapshot(&conn).await;
+            let complete = CaptureCatalogCompleteRequest::from_finalizer(&request, proof).unwrap();
+            assert_eq!(
+                store.complete(&complete).await,
+                Err(CaptureCatalogError::ChildCheckpointsPending)
+            );
+            assert!(matches!(
+                store.finalize(&durable).await,
+                Err(CaptureCatalogError::ChildCheckpointsPending)
+            ));
+            let pending = CaptureCatalogCompleteRequest::from_apply(&request).unwrap();
+            assert!(matches!(
+                store.prove_durable_replay(&pending).await,
+                Err(CaptureCatalogError::ChildCheckpointsPending)
+            ));
+            let scan = store
+                .pending_finalizer_recoveries_for_doctor(1000)
+                .await
+                .unwrap();
+            assert_eq!(scan.recoveries.len(), 1);
+            assert_eq!(
+                store
+                    .recover_pending_finalizer_after_durable_checkpoint(&scan.recoveries[0], 1000)
+                    .await,
+                Err(CaptureCatalogError::ChildCheckpointsPending)
+            );
+            assert_eq!(session_catalog_snapshot(&conn).await, before);
+        }
+        #[tokio::test]
+        #[ignore = "operator-local Codex acceptance; never run in CI"]
+        async fn codex_child_gate_expired_policy_keeps_pending_instead_of_quarantine() {
+            let (conn, store, request, _, _) = fixture().await;
+            replace_owned_gate(&conn, gate(true, None)).await;
+            let before = session_catalog_snapshot(&conn).await;
+            let retry = finalize_request(
+                &request,
+                finalizer_policy(request.action(), Some(10)),
+                &Uuid::from_u128(0xc092).to_string(),
+                Some(TEST_SOURCE_DIGEST_A),
+                MAX_FINALIZE_WINDOW_MILLIS + 1000,
+                FinalizeCheckpointProgress::Retryable(FinalizePendingStage::Checkpoint),
+            );
+            assert!(matches!(
+                store.finalize(&retry).await,
+                Err(CaptureCatalogError::ChildCheckpointsPending)
+            ));
+            assert_eq!(session_catalog_snapshot(&conn).await, before);
+        }
+        #[tokio::test]
+        #[ignore = "operator-local Codex acceptance; never run in CI"]
+        async fn codex_child_gate_idle_floor_checks_leaf_and_sqlite_types() {
+            let (conn, _, request, _, _) = fixture().await;
+            seed_child(&conn, 2, 2).await;
+            let receipt = entry(Some(gate(false, Some(2))));
+            for (label, sql) in [
+                (
+                    "older",
+                    vec!["UPDATE agent_subagent_content_claim SET current_revision=1"],
+                ),
+                (
+                    "expired reserved",
+                    vec![
+                        "UPDATE agent_subagent_content_claim SET state='reserved',owner='live',lease_expires_at=0,attempt_digest='next',attempt_checkpoint_id='next-cp'",
+                    ],
+                ),
+                (
+                    "digest",
+                    vec![
+                        "UPDATE agent_subagent_content_claim SET current_digest=printf('%064d',0)",
+                    ],
+                ),
+                (
+                    "missing revision",
+                    vec!["DELETE FROM agent_subagent_content_revision"],
+                ),
+                (
+                    "foreign checkpoint",
+                    vec![
+                        "UPDATE agent_checkpoint SET session_id='other' WHERE checkpoint_id='child-current'",
+                    ],
+                ),
+                (
+                    "scope",
+                    vec![
+                        "UPDATE agent_checkpoint SET scope='committed' WHERE checkpoint_id='child-current'",
+                    ],
+                ),
+                (
+                    "cursor below current",
+                    vec!["UPDATE agent_subagent_content_claim SET revision_cursor=1"],
+                ),
+                (
+                    "idle owner",
+                    vec!["UPDATE agent_subagent_content_claim SET owner='stale-owner'"],
+                ),
+                (
+                    "idle attempt",
+                    vec![
+                        "UPDATE agent_subagent_content_claim SET attempt_checkpoint_id='stale-cp'",
+                    ],
+                ),
+                (
+                    "text revisions",
+                    vec![
+                        "UPDATE agent_subagent_content_claim SET current_revision='oops',revision_cursor='oops'",
+                        "UPDATE agent_subagent_content_revision SET revision='oops'",
+                    ],
+                ),
+            ] {
+                let txn = conn.begin().await.unwrap();
+                // Corruption cases intentionally bypass fixture CHECKs;
+                // production never disables these constraints.
+                txn.execute_unprepared("PRAGMA ignore_check_constraints=ON")
+                    .await
+                    .unwrap();
+                for query in sql {
+                    txn.execute_unprepared(query).await.unwrap();
+                }
+                assert_eq!(
+                    require_settled_child_checkpoints(&txn, request.session(), &receipt).await,
+                    Err(CaptureCatalogError::ChildCheckpointsPending),
+                    "{label}"
+                );
+                txn.execute_unprepared("PRAGMA ignore_check_constraints=OFF")
+                    .await
+                    .unwrap();
+                txn.rollback().await.unwrap();
+            }
+            let txn = conn.begin().await.unwrap();
+            assert_eq!(
+                require_settled_child_checkpoints(&txn, request.session(), &receipt).await,
+                Ok(())
+            );
+            txn.rollback().await.unwrap();
+        }
+        #[tokio::test]
+        #[ignore = "operator-local Codex acceptance; never run in CI"]
+        async fn codex_child_error_progress_retry_and_cleanup_record_progress_without_completing() {
+            for checkpoint in [
+                FinalizeCheckpointProgress::Retryable(FinalizePendingStage::Checkpoint),
+                FinalizeCheckpointProgress::PendingCleanup,
+            ] {
+                let (conn, store, _request, mut request, _proof) = fixture().await;
+                replace_owned_gate(&conn, gate(true, None)).await;
+                let before = session_catalog_snapshot(&conn).await;
+                request.checkpoint = checkpoint;
+                let outcome = store.finalize(&request).await;
+                assert!(
+                    matches!(outcome, Ok(CaptureCatalogFinalizeResult::Pending { .. })),
+                    "non-completing error bookkeeping cannot be replaced by child wait: {outcome:?}"
+                );
+                let after = session_catalog_snapshot(&conn).await;
+                assert_eq!(after.0, before.0);
+                assert_eq!(after.1, before.1);
+                assert_eq!(after.2, before.2);
+                let (_, old) = decode_receipt_metadata(&before.3).unwrap();
+                let (_, new) = decode_receipt_metadata(&after.3).unwrap();
+                assert_eq!(
+                    serde_json::to_value(&new.entries[0].child_gate).unwrap(),
+                    serde_json::to_value(&old.entries[0].child_gate).unwrap()
+                );
+                assert_eq!(new.entries[0].status, StoredReceiptStatus::Pending);
+                let old_policy = old.entries[0].finalizer.as_ref().unwrap();
+                let new_policy = new.entries[0].finalizer.as_ref().unwrap();
+                assert_eq!(new_policy.attempts, old_policy.attempts + 1);
+                assert_eq!(new_policy.deadline_millis, old_policy.deadline_millis);
+                assert_eq!(
+                    new_policy.first_attempt_millis,
+                    old_policy.first_attempt_millis
+                );
+                assert_eq!(
+                    store
+                        .finalize(&CaptureCatalogFinalizeRequest {
+                            checkpoint: FinalizeCheckpointProgress::Durable,
+                            ..request
+                        })
+                        .await,
+                    Err(CaptureCatalogError::ChildCheckpointsPending)
+                );
+            }
+        }
+
+        #[tokio::test]
+        #[ignore = "operator-local Codex acceptance; never run in CI"]
+        async fn codex_child_gate_newer_revision_satisfies_floor_and_downgrades_ledger() {
+            let (conn, store, request, durable, _) = fixture().await;
+            seed_child(&conn, 3, 2).await;
+            replace_owned_gate(&conn, gate(false, Some(2))).await;
+            let proof = match store.finalize(&durable).await.unwrap() {
+                CaptureCatalogFinalizeResult::ReadyToComplete { proof } => proof,
+                other => panic!("{other:?}"),
+            };
+            let completion =
+                CaptureCatalogCompleteRequest::from_finalizer(&request, proof).unwrap();
+            assert_eq!(
+                store.complete(&completion).await.unwrap(),
+                CaptureCatalogCompleteResult::Completed
+            );
+            let after = session_catalog_snapshot(&conn).await;
+            assert_eq!(after.0, "stopped");
+            let (_, ledger) = decode_receipt_metadata(&after.3).unwrap();
+            assert_eq!(ledger.version, 1);
+            assert!(
+                ledger
+                    .entries
+                    .iter()
+                    .all(|entry| entry.child_gate.is_none())
+            );
+        }
+        #[tokio::test]
+        #[ignore = "operator-local Codex acceptance; never run in CI"]
+        async fn codex_child_gate_legacy_claim_and_superseded_action_remain_incomplete() {
+            let (conn, store, request, durable, _) = fixture().await;
+            seed_child(&conn, 3, 1).await;
+            replace_owned_gate(&conn, gate(false, Some(2))).await;
+            assert!(matches!(
+                store.finalize(&durable).await,
+                Err(CaptureCatalogError::ChildCheckpointsPending)
+            ));
+            conn.execute_unprepared("UPDATE agent_session SET sync_revision=sync_revision+1")
+                .await
+                .unwrap();
+            let before = session_catalog_snapshot(&conn).await;
+            assert!(matches!(
+                store.finalize(&durable).await.unwrap(),
+                CaptureCatalogFinalizeResult::ConflictUnchanged {
+                    conflict: CaptureCatalogConflict::ConditionalWrite
+                }
+            ));
+            let scan = store
+                .pending_finalizer_recoveries_for_doctor(1000)
+                .await
+                .unwrap();
+            assert_eq!(scan.recoveries.len(), 1);
+            assert_eq!(
+                store
+                    .recover_pending_finalizer_after_durable_checkpoint(&scan.recoveries[0], 1000)
+                    .await
+                    .unwrap(),
+                CaptureCatalogFinalizerRecoveryResult::ConflictUnchanged
+            );
+            assert_eq!(session_catalog_snapshot(&conn).await, before);
+            assert!(request.mutation().is_terminal());
+        }
+        fn live_terminal(
+            seed: u128,
+            expected: Option<DurableCaptureState>,
+        ) -> CaptureCatalogApplyRequest {
+            CaptureCatalogApplyRequest::new(
+                scope(),
+                CaptureCatalogSession::new("session-a", "codex", "provider-a", "/repo").unwrap(),
+                ingress_action(seed, None, LifecycleEventKind::SessionEnd),
+                terminal_mutation(expected),
+            )
+            .unwrap()
+        }
+        fn state_from(before: &(String, Option<i64>, i64, String, String)) -> DurableCaptureState {
+            DurableCaptureState {
+                phase: CapturePhase::Pending,
+                stopped_at: before.1,
+                sync_revision: before.2,
+            }
+        }
+        #[tokio::test]
+        #[ignore = "operator-local Codex acceptance; never run in CI"]
+        async fn codex_child_gate_reserve_arms_before_snapshot_preparation() {
+            let conn = catalog_db().await;
+            let store = CaptureCatalogStore::new(conn.clone());
+            let request = live_terminal(0xca01, None)
+                .requiring_child_checkpoints()
+                .unwrap();
+            assert!(matches!(
+                store.apply(&request).await.unwrap(),
+                CaptureCatalogApplyResult::Applied {
+                    receipt: CaptureReceiptDisposition::Pending,
+                    ..
+                }
+            ));
+            let before = session_catalog_snapshot(&conn).await;
+            assert!(before.1.is_none());
+            assert_eq!(before.2, 1);
+            let (_, ledger) = decode_receipt_metadata(&before.3).unwrap();
+            assert_eq!(ledger.version, 2);
+            assert!(ledger.entries[0].child_gate.as_ref().unwrap().preparing);
+            assert!(ledger.entries[0].finalizer.is_none());
+            let initial = finalize_request(
+                &request,
+                finalizer_policy(request.action(), Some(10)),
+                &format!(
+                    "{UNBOUND_FINALIZER_MARKER_PREFIX}{}",
+                    request.action().action_key()
+                ),
+                None,
+                1,
+                FinalizeCheckpointProgress::NotStarted,
+            );
+            assert!(matches!(
+                store.finalize(&initial).await.unwrap(),
+                CaptureCatalogFinalizeResult::Pending { .. }
+            ));
+            let after = session_catalog_snapshot(&conn).await;
+            let (_, ledger) = decode_receipt_metadata(&after.3).unwrap();
+            assert!(ledger.entries[0].child_gate.as_ref().unwrap().preparing);
+            assert!(ledger.entries[0].finalizer.is_some());
+            assert_eq!(after.2, before.2);
+            let readonly = CaptureCatalogApplyRequest::new(
+                scope(),
+                request.session.clone(),
+                ingress_action(0xca02, None, LifecycleEventKind::SessionStart),
+                mutation(None, CheckpointWrite::None),
+            )
+            .unwrap();
+            assert!(matches!(
+                readonly.requiring_child_checkpoints(),
+                Err(CaptureCatalogError::InvalidRequest)
+            ));
+        }
+        #[tokio::test]
+        #[ignore = "operator-local Codex acceptance; never run in CI"]
+        async fn codex_child_gate_adopts_legacy_pending_with_original_action_and_revision() {
+            let conn = catalog_db().await;
+            let store = CaptureCatalogStore::new(conn.clone());
+            let first = live_terminal(0xca10, None);
+            store.apply(&first).await.unwrap();
+            let before = session_catalog_snapshot(&conn).await;
+            assert_eq!(decode_receipt_metadata(&before.3).unwrap().1.version, 1);
+            let next = live_terminal(0xca11, Some(state_from(&before)))
+                .requiring_child_checkpoints()
+                .unwrap();
+            let adopted = match store.apply(&next).await.unwrap() {
+                CaptureCatalogApplyResult::ResumePending {
+                    adopted_action: Some(action),
+                    ..
+                } => action,
+                other => panic!("{other:?}"),
+            };
+            assert_eq!(adopted.event_id(), first.action.event_id());
+            let effective = next.with_effective_action(adopted);
+            assert!(effective.requires_child_checkpoints);
+            let after = session_catalog_snapshot(&conn).await;
+            assert_eq!(before.2, after.2);
+            let (_, ledger) = decode_receipt_metadata(&after.3).unwrap();
+            assert_eq!(ledger.entries.len(), 1);
+            assert_eq!(ledger.entries[0].reserved_revision, before.2);
+            assert!(ledger.entries[0].child_gate.as_ref().unwrap().preparing);
+        }
+        #[tokio::test]
+        #[ignore = "operator-local Codex acceptance; never run in CI"]
+        async fn codex_child_gate_tracked_rearm_preserves_floors_and_parent_only_cannot_clear() {
+            let (conn, store, request, _, _) = fixture().await;
+            replace_owned_gate(&conn, gate(false, Some(5))).await;
+            let before = session_catalog_snapshot(&conn).await;
+            let required = request
+                .clone()
+                .with_metadata(CaptureCatalogMetadataPatch::new(true, None))
+                .requiring_child_checkpoints()
+                .unwrap();
+            assert!(matches!(
+                store.apply(&required).await.unwrap(),
+                CaptureCatalogApplyResult::ResumePending { .. }
+            ));
+            let armed = session_catalog_snapshot(&conn).await;
+            let value: serde_json::Value = serde_json::from_str(&armed.3).unwrap();
+            assert!(
+                value.get("concurrent_active").is_none(),
+                "re-arm changes only the gate"
+            );
+
+            assert_eq!(armed.2, before.2);
+            let (_, ledger) = decode_receipt_metadata(&armed.3).unwrap();
+            let gate = ledger.entries[0].child_gate.as_ref().unwrap();
+            assert!(gate.preparing);
+            assert_eq!(gate.requirements[0].minimum_revision, 5);
+            store.apply(&request).await.unwrap();
+            assert_eq!(session_catalog_snapshot(&conn).await, armed);
+        }
+        #[tokio::test]
+        #[ignore = "operator-local Codex acceptance; never run in CI"]
+        async fn codex_child_gate_idless_adoption_preserves_preparing_and_all_floors() {
+            let conn = catalog_db().await;
+            let store = CaptureCatalogStore::new(conn.clone());
+            let first = live_terminal(0xca20, None)
+                .requiring_child_checkpoints()
+                .unwrap();
+            store.apply(&first).await.unwrap();
+            replace_owned_gate(&conn, gate(true, Some(7))).await;
+            let before = session_catalog_snapshot(&conn).await;
+            let next = live_terminal(0xca21, Some(state_from(&before)))
+                .requiring_child_checkpoints()
+                .unwrap();
+            assert!(matches!(
+                store.apply(&next).await.unwrap(),
+                CaptureCatalogApplyResult::ResumePending {
+                    adopted_action: Some(_),
+                    ..
+                }
+            ));
+            assert_eq!(session_catalog_snapshot(&conn).await, before);
+            let legacy = live_terminal(0xca22, Some(state_from(&before)));
+            assert!(matches!(
+                store.apply(&legacy).await.unwrap(),
+                CaptureCatalogApplyResult::ResumePending { .. }
+            ));
+            assert_eq!(session_catalog_snapshot(&conn).await, before);
+        }
+        #[tokio::test]
+        #[ignore = "operator-local Codex acceptance; never run in CI"]
+        async fn codex_child_gate_admission_failure_rolls_back_ledger_without_rewriting_parent() {
+            let (conn, store, request, _, _) = fixture().await;
+            let before = session_catalog_snapshot(&conn).await;
+            conn.execute_unprepared(
+                "CREATE TRIGGER reject_child_gate BEFORE UPDATE OF metadata_json ON agent_session
+                 BEGIN SELECT RAISE(ABORT,'owned gate failure'); END",
+            )
+            .await
+            .unwrap();
+            assert!(matches!(
+                store
+                    .apply(&request.requiring_child_checkpoints().unwrap())
+                    .await,
+                Err(CaptureCatalogError::Database)
+            ));
+            assert_eq!(session_catalog_snapshot(&conn).await, before);
+            let row = conn
+                .query_one_raw(Statement::from_string(
+                    DbBackend::Sqlite,
+                    "SELECT COUNT(*) AS count FROM agent_checkpoint".to_owned(),
+                ))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(row.try_get_by::<i64, _>("count").unwrap(), 1);
+        }
+        #[tokio::test]
+        #[ignore = "operator-local Codex acceptance; never run in CI"]
+        async fn codex_child_gate_fake_never_manufactures_child_settlement() {
+            let store = FakeCaptureCatalogStore::default();
+            let request = live_terminal(0xca30, None)
+                .requiring_child_checkpoints()
+                .unwrap();
+            store.apply(&request).await.unwrap();
+            let initial = finalize_request(
+                &request,
+                finalizer_policy(request.action(), Some(10)),
+                &Uuid::from_u128(0xca31).to_string(),
+                Some(TEST_SOURCE_DIGEST_A),
+                1,
+                FinalizeCheckpointProgress::NotStarted,
+            );
+            assert!(matches!(
+                store.finalize(&initial).await.unwrap(),
+                CaptureCatalogFinalizeResult::Pending { .. }
+            ));
+            let durable = finalize_request(
+                &request,
+                finalizer_policy(request.action(), Some(10)),
+                &Uuid::from_u128(0xca31).to_string(),
+                Some(TEST_SOURCE_DIGEST_A),
+                1000,
+                FinalizeCheckpointProgress::Durable,
+            );
+            assert!(matches!(
+                store.finalize(&durable).await,
+                Err(CaptureCatalogError::ChildCheckpointsPending)
+            ));
+            let complete = CaptureCatalogCompleteRequest::from_apply(&request).unwrap();
+            assert!(matches!(
+                store.prove_durable_replay(&complete).await,
+                Err(CaptureCatalogError::ChildCheckpointsPending)
+            ));
+            let changed = finalize_request(
+                &request,
+                finalizer_policy(request.action(), Some(10)),
+                &Uuid::from_u128(0xca32).to_string(),
+                Some(&format!("{IMPORT_SOURCE_HMAC_V2_PREFIX}{}", "b".repeat(64))),
+                1001,
+                FinalizeCheckpointProgress::NotStarted,
+            );
+            assert!(matches!(
+                store.claim_terminal_attempt(&changed, true).await,
+                Err(CaptureCatalogError::ChildCheckpointsPending)
+            ));
+            let checkpoint_id =
+                crate::internal::ai::capture::checkpoint::checkpoint_id_for_capture_action(
+                    request.action.event_id,
+                    CheckpointWrite::Committed,
+                );
+            {
+                let mut state = store.state.lock().unwrap();
+                state
+                    .durable_terminal_checkpoints
+                    .insert((request.session.session_id.clone(), checkpoint_id));
+                let existing = &mut state.sessions[0];
+                existing.state.phase = CapturePhase::Quarantined;
+                existing.ledger.entries[0].child_gate = Some(gate(false, None));
+            }
+            assert_eq!(
+                store.complete_durable_replay(&request).await.unwrap(),
+                CaptureCatalogCompleteResult::ConflictUnchanged {
+                    conflict: CaptureCatalogConflict::ConditionalWrite,
+                }
+            );
+            assert_eq!(
+                store.complete(&complete).await.unwrap(),
+                CaptureCatalogCompleteResult::ConflictUnchanged {
+                    conflict: CaptureCatalogConflict::ConditionalWrite,
+                }
+            );
+            assert!(matches!(
+                store.prove_durable_replay(&complete).await.unwrap(),
+                CaptureCatalogFinalizeResult::ConflictUnchanged {
+                    conflict: CaptureCatalogConflict::ConditionalWrite,
+                }
+            ));
+            assert_eq!(
+                store.state.lock().unwrap().sessions[0].state.phase,
+                CapturePhase::Quarantined
+            );
+        }
+        #[tokio::test]
+        #[ignore = "operator-local Codex acceptance; never run in CI"]
+        async fn codex_child_gate_real_missing_marker_source_conflict_stays_pending() {
+            let (conn, store, request, _, _) = fixture().await;
+            conn.execute_unprepared("DELETE FROM agent_checkpoint")
+                .await
+                .unwrap();
+            replace_owned_gate(&conn, gate(true, None)).await;
+            let before = session_catalog_snapshot(&conn).await;
+            let changed = finalize_request(
+                &request,
+                finalizer_policy(request.action(), Some(10)),
+                &Uuid::from_u128(0xca40).to_string(),
+                Some(&format!("{IMPORT_SOURCE_HMAC_V2_PREFIX}{}", "b".repeat(64))),
+                1000,
+                FinalizeCheckpointProgress::NotStarted,
+            );
+            assert!(matches!(
+                store.claim_terminal_attempt(&changed, true).await,
+                Err(CaptureCatalogError::ChildCheckpointsPending)
+            ));
+            assert_eq!(session_catalog_snapshot(&conn).await, before);
+        }
+        #[tokio::test]
+        #[ignore = "operator-local Codex acceptance; never run in CI"]
+        async fn codex_child_gate_existing_quarantine_guidance_precedes_pending() {
+            for finalizer_quarantined in [false, true] {
+                let (conn, store, request, durable, proof) = fixture().await;
+                replace_owned_gate(&conn, gate(true, None)).await;
+                if finalizer_quarantined {
+                    let current = session_catalog_snapshot(&conn).await;
+                    let (map, mut ledger) = decode_receipt_metadata(&current.3).unwrap();
+                    let receipt = &mut ledger.entries[0];
+                    let pending = receipt
+                        .finalizer
+                        .as_ref()
+                        .unwrap()
+                        .to_pending_receipt()
+                        .unwrap();
+                    receipt.finalizer = Some(StoredFinalizeReceipt::quarantined(
+                        &pending,
+                        FinalizeQuarantineReason::SourceDigestConflict,
+                    ));
+                    let encoded = encode_receipt_metadata(map, &ledger).unwrap();
+                    conn.execute_raw(Statement::from_sql_and_values(
+                        DbBackend::Sqlite,
+                        "UPDATE agent_session SET metadata_json=?",
+                        [encoded.into()],
+                    ))
+                    .await
+                    .unwrap();
+                } else {
+                    conn.execute_unprepared("UPDATE agent_session SET state='quarantined'")
+                        .await
+                        .unwrap();
+                }
+                let before = session_catalog_snapshot(&conn).await;
+                let direct = store.finalize(&durable).await.unwrap();
+                let replay = store
+                    .prove_durable_replay(
+                        &CaptureCatalogCompleteRequest::from_apply(&request).unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                if finalizer_quarantined {
+                    assert!(matches!(
+                        direct,
+                        CaptureCatalogFinalizeResult::Quarantined { .. }
+                    ));
+                    assert!(matches!(
+                        replay,
+                        CaptureCatalogFinalizeResult::Quarantined { .. }
+                    ));
+                } else {
+                    assert!(matches!(
+                        direct,
+                        CaptureCatalogFinalizeResult::ConflictUnchanged { .. }
+                    ));
+                    assert!(matches!(
+                        replay,
+                        CaptureCatalogFinalizeResult::ConflictUnchanged { .. }
+                    ));
+                }
+                let scan = store
+                    .pending_finalizer_recoveries_for_doctor(1000)
+                    .await
+                    .unwrap();
+                assert_eq!(scan.recoveries.len(), 1);
+                let recovery = store
+                    .recover_pending_finalizer_after_durable_checkpoint(&scan.recoveries[0], 1000)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    recovery,
+                    if finalizer_quarantined {
+                        CaptureCatalogFinalizerRecoveryResult::Quarantined
+                    } else {
+                        CaptureCatalogFinalizerRecoveryResult::ConflictUnchanged
+                    }
+                );
+                assert!(matches!(
+                    store
+                        .complete(
+                            &CaptureCatalogCompleteRequest::from_finalizer(&request, proof)
+                                .unwrap()
+                        )
+                        .await
+                        .unwrap(),
+                    CaptureCatalogCompleteResult::ConflictUnchanged { .. }
+                ));
+                assert_eq!(session_catalog_snapshot(&conn).await, before);
+            }
+        }
+
+        #[tokio::test]
+        #[ignore = "operator-local Codex acceptance; never run in CI"]
+        async fn codex_child_gate_query_matches_full_repository_migration_schema() {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("repository.db");
+            let conn = db::create_database(&path.to_string_lossy()).await.unwrap();
+            assert_eq!(
+                db::migration::current_builtin_schema_version_readonly(&conn)
+                    .await
+                    .unwrap(),
+                db::migration::latest_builtin_schema_version().unwrap()
+            );
+            crate::internal::config::ConfigKv::set_with_conn(
+                &conn,
+                "libra.repoid",
+                "repo-a",
+                false,
+            )
+            .await
+            .unwrap();
+            // Same nullable legacy FK target used by the established Root fixture.
+            conn.execute_unprepared(
+                "CREATE TABLE IF NOT EXISTS ai_thread (thread_id TEXT PRIMARY KEY)",
+            )
+            .await
+            .unwrap();
+            let store = CaptureCatalogStore::new(conn.clone());
+            let request = live_terminal(0xcaff, None)
+                .requiring_child_checkpoints()
+                .unwrap();
+            store.apply(&request).await.unwrap();
+            replace_owned_gate(&conn, gate(false, Some(2))).await;
+            let oid = "0".repeat(40);
+            conn.execute_raw(Statement::from_sql_and_values(DbBackend::Sqlite,
+                "INSERT INTO agent_checkpoint (checkpoint_id,session_id,scope,tree_oid,metadata_blob_oid,traces_commit,created_at)
+                 VALUES ('child-current','session-a','subagent',?,?,?,1)",
+                [oid.clone().into(),oid.clone().into(),oid.into()])).await.unwrap();
+            conn.execute_raw(Statement::from_sql_and_values(DbBackend::Sqlite,
+                "INSERT INTO agent_subagent_content_claim (parent_session_id,provider_kind,source_key,content_schema_version,
+                 current_revision,current_checkpoint_id,current_digest,state,fence_token,created_at,updated_at,revision_cursor)
+                 VALUES ('session-a','codex',?,2,3,'child-current',?,'idle',1,1,1,3)",
+                [key(1).into(),"a".repeat(64).into()])).await.unwrap();
+            conn.execute_raw(Statement::from_sql_and_values(DbBackend::Sqlite,
+                "INSERT INTO agent_subagent_content_revision (parent_session_id,provider_kind,source_key,content_schema_version,
+                 revision,checkpoint_id,content_digest,source_channel,partial,created_at)
+                 VALUES ('session-a','codex',?,2,3,'child-current',?,'live',1,1)",
+                [key(1).into(),"a".repeat(64).into()])).await.unwrap();
+            let before = session_catalog_snapshot(&conn).await;
+            let (_, ledger) = decode_receipt_metadata(&before.3).unwrap();
+            let txn = conn.begin().await.unwrap();
+            assert_eq!(
+                require_settled_child_checkpoints(&txn, request.session(), &ledger.entries[0])
+                    .await,
+                Ok(())
+            );
+            txn.rollback().await.unwrap();
+            assert_eq!(session_catalog_snapshot(&conn).await, before);
+        }
+
+        async fn preparation_fixture() -> (
+            tempfile::TempDir,
+            DatabaseConnection,
+            CaptureCatalogStore,
+            CaptureCatalogApplyRequest,
+        ) {
+            let directory = tempfile::tempdir().unwrap();
+            let conn = db::create_database(&directory.path().join("prepare.db").to_string_lossy())
+                .await
+                .unwrap();
+            crate::internal::config::ConfigKv::set_with_conn(
+                &conn,
+                "libra.repoid",
+                "repo-a",
+                false,
+            )
+            .await
+            .unwrap();
+            conn.execute_unprepared(
+                "CREATE TABLE IF NOT EXISTS ai_thread (thread_id TEXT PRIMARY KEY)",
+            )
+            .await
+            .unwrap();
+            let store = CaptureCatalogStore::new(conn.clone());
+            let request = live_terminal(0xcb00, None)
+                .requiring_child_checkpoints()
+                .unwrap();
+            store.apply(&request).await.unwrap();
+            (directory, conn, store, request)
+        }
+
+        async fn prepared_fence(
+            conn: &DatabaseConnection,
+            request: &CaptureCatalogApplyRequest,
+        ) -> ChildPreparationFence {
+            let txn = conn.begin().await.unwrap();
+            let fence = child_preparation_fence(&txn, request)
+                .await
+                .unwrap()
+                .unwrap();
+            txn.rollback().await.unwrap();
+            fence
+        }
+
+        fn preparation_deadline() -> CaptureCommitDeadline {
+            CaptureCommitDeadline::from_budget(Duration::from_secs(5)).unwrap()
+        }
+
+        async fn recovery_from_preparation(
+            store: &CaptureCatalogStore,
+            request: &CaptureCatalogApplyRequest,
+        ) -> CaptureCatalogFinalizerRecovery {
+            let policy = finalizer_policy(request.action(), Some(10));
+            store
+                .finalize(&finalize_request(
+                    request,
+                    policy,
+                    &Uuid::new_v4().to_string(),
+                    None,
+                    1,
+                    FinalizeCheckpointProgress::NotStarted,
+                ))
+                .await
+                .unwrap();
+            let mut scan = store
+                .pending_finalizer_recoveries_for_doctor(1000)
+                .await
+                .unwrap();
+            assert_eq!(scan.recoveries.len(), 1);
+            scan.recoveries.remove(0)
+        }
+
+        #[tokio::test]
+        #[ignore = "operator-local Codex acceptance; never run in CI"]
+        async fn codex_child_recover_prepared_gate_stays_prepared_and_floors_only_increase() {
+            let (_dir, conn, store, request) = preparation_fixture().await;
+            let recovery = recovery_from_preparation(&store, &request).await;
+            let fence = prepared_fence(&conn, &request).await;
+            let txn = conn.begin().await.unwrap();
+            fence
+                .enroll(
+                    &txn,
+                    ChildCheckpointRequirement::new(&key(1), 2).unwrap(),
+                    preparation_deadline(),
+                )
+                .await
+                .unwrap();
+            fence.finish(&txn, preparation_deadline()).await.unwrap();
+            txn.commit().await.unwrap();
+            let before = session_catalog_snapshot(&conn).await;
+            let txn = conn.begin().await.unwrap();
+            let recovered = child_preparation_for_recovery(&txn, &recovery, preparation_deadline())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(recovered.context.revision, before.2);
+            txn.rollback().await.unwrap();
+            assert_eq!(
+                session_catalog_snapshot(&conn).await,
+                before,
+                "minting cannot poison Preparing"
+            );
+            let txn = conn.begin().await.unwrap();
+            recovered
+                .enroll(
+                    &txn,
+                    ChildCheckpointRequirement::new(&key(1), 3).unwrap(),
+                    preparation_deadline(),
+                )
+                .await
+                .unwrap();
+            recovered
+                .finish(&txn, preparation_deadline())
+                .await
+                .unwrap();
+            txn.commit().await.unwrap();
+            let (map, mut expected) = decode_receipt_metadata(&before.3).unwrap();
+            expected.entries[0]
+                .child_gate
+                .as_mut()
+                .unwrap()
+                .requirements[0]
+                .minimum_revision = 3;
+            let expected_metadata = encode_receipt_metadata(map, &expected).unwrap();
+            assert_eq!(
+                session_catalog_snapshot(&conn).await,
+                (before.0, before.1, before.2, expected_metadata, before.4),
+                "only floor changes; policy/action/revision/Preparing stay original"
+            );
+        }
+
+        #[tokio::test]
+        #[ignore = "operator-local Codex acceptance; never run in CI"]
+        async fn codex_child_recover_deadline_stale_revision_and_failed_dml_keep_original_control()
+        {
+            for case in ["deadline", "stale", "dml"] {
+                let (_dir, conn, store, request) = preparation_fixture().await;
+                let recovery = recovery_from_preparation(&store, &request).await;
+                replace_owned_gate(&conn, gate(false, Some(2))).await;
+                let deadline = if case == "deadline" {
+                    let deadline =
+                        CaptureCommitDeadline::from_budget(Duration::from_millis(1)).unwrap();
+                    tokio::time::sleep(Duration::from_millis(3)).await;
+                    deadline
+                } else {
+                    preparation_deadline()
+                };
+                if case == "stale" {
+                    conn.execute_unprepared(
+                        "UPDATE agent_session SET sync_revision=sync_revision+1",
+                    )
+                    .await
+                    .unwrap();
+                } else if case == "dml" {
+                    conn.execute_unprepared("CREATE TRIGGER refuse_child_recovery_floor BEFORE UPDATE OF metadata_json ON agent_session BEGIN SELECT RAISE(ABORT,'owned-trigger'); END").await.unwrap();
+                }
+                let before = session_catalog_snapshot(&conn).await;
+                let txn = conn.begin().await.unwrap();
+                let result = child_preparation_for_recovery(&txn, &recovery, deadline).await;
+                let error = if case == "dml" {
+                    let fence = result.unwrap().unwrap();
+                    fence
+                        .enroll(
+                            &txn,
+                            ChildCheckpointRequirement::new(&key(1), 3).unwrap(),
+                            deadline,
+                        )
+                        .await
+                        .unwrap_err()
+                } else {
+                    match result {
+                        Err(error) => error,
+                        Ok(_) => panic!("{case}: must reject"),
+                    }
+                };
+                assert_eq!(
+                    error,
+                    match case {
+                        "deadline" => CaptureCatalogError::DeadlineExceeded,
+                        "stale" => CaptureCatalogError::ScopeRejected,
+                        _ => CaptureCatalogError::Database,
+                    }
+                );
+                txn.rollback().await.unwrap();
+                assert_eq!(session_catalog_snapshot(&conn).await, before, "{case}");
+            }
+        }
+
+        #[tokio::test]
+        #[ignore = "operator-local Codex acceptance; never run in CI"]
+        async fn codex_child_prepare_floors_are_sorted_monotonic_and_finish_keeps_pending() {
+            let (_dir, conn, store, request) = preparation_fixture().await;
+            let fence = prepared_fence(&conn, &request).await;
+            let txn = conn.begin().await.unwrap();
+            for (source, floor) in [(2, 3), (1, 5), (2, 4), (2, 1)] {
+                let required = fence
+                    .enroll(
+                        &txn,
+                        ChildCheckpointRequirement::new(&key(source), floor).unwrap(),
+                        preparation_deadline(),
+                    )
+                    .await
+                    .unwrap();
+                assert!(!format!("{required:?}").contains(&key(source)));
+            }
+            txn.commit().await.unwrap();
+            let row = session_catalog_snapshot(&conn).await;
+            let (_, ledger) = decode_receipt_metadata(&row.3).unwrap();
+            let gate = ledger.entries[0].child_gate.as_ref().unwrap();
+            assert!(gate.preparing);
+            assert_eq!(
+                gate.requirements,
+                vec![
+                    StoredChildCheckpointRequirement {
+                        source_key: key(1),
+                        minimum_revision: 5
+                    },
+                    StoredChildCheckpointRequirement {
+                        source_key: key(2),
+                        minimum_revision: 4
+                    },
+                ]
+            );
+            let txn = conn.begin().await.unwrap();
+            fence.finish(&txn, preparation_deadline()).await.unwrap();
+            txn.commit().await.unwrap();
+            let txn = conn.begin().await.unwrap();
+            assert_eq!(
+                fence.assert_current(&txn).await,
+                Err(CaptureCatalogError::ChildCheckpointsPending)
+            );
+            txn.rollback().await.unwrap();
+
+            let row = session_catalog_snapshot(&conn).await;
+            let (_, ledger) = decode_receipt_metadata(&row.3).unwrap();
+            assert!(!ledger.entries[0].child_gate.as_ref().unwrap().preparing);
+            let txn = conn.begin().await.unwrap();
+            assert_eq!(
+                require_settled_child_checkpoints(&txn, request.session(), &ledger.entries[0])
+                    .await,
+                Err(CaptureCatalogError::ChildCheckpointsPending)
+            );
+            txn.rollback().await.unwrap();
+            // A retry re-arms the same action and retains both previous floors.
+            assert!(matches!(
+                store.apply(&request).await.unwrap(),
+                CaptureCatalogApplyResult::ResumePending { .. }
+            ));
+            let row = session_catalog_snapshot(&conn).await;
+            let (_, ledger) = decode_receipt_metadata(&row.3).unwrap();
+            assert!(ledger.entries[0].child_gate.as_ref().unwrap().preparing);
+            assert_eq!(
+                ledger.entries[0]
+                    .child_gate
+                    .as_ref()
+                    .unwrap()
+                    .requirements
+                    .len(),
+                2
+            );
+        }
+
+        #[tokio::test]
+        #[ignore = "operator-local Codex acceptance; never run in CI"]
+        async fn codex_child_prepare_session_start_invalidates_old_action_and_finish() {
+            let (_dir, conn, store, request) = preparation_fixture().await;
+            let fence = prepared_fence(&conn, &request).await;
+            let txn = conn.begin().await.unwrap();
+            let current = read_session(&txn, request.session())
+                .await
+                .unwrap()
+                .unwrap()
+                .state;
+            txn.rollback().await.unwrap();
+            let start = CaptureCatalogApplyRequest::new(
+                scope(),
+                request.session().clone(),
+                action(0xcb01, None).with_lifecycle_kind(LifecycleEventKind::SessionStart),
+                mutation(Some(current), CheckpointWrite::None),
+            )
+            .unwrap();
+            store.apply(&start).await.unwrap();
+            let before = session_catalog_snapshot(&conn).await;
+            let txn = conn.begin().await.unwrap();
+            assert_eq!(
+                fence.assert_current(&txn).await,
+                Err(CaptureCatalogError::ScopeRejected)
+            );
+            assert!(matches!(
+                fence
+                    .enroll(
+                        &txn,
+                        ChildCheckpointRequirement::new(&key(1), 1).unwrap(),
+                        preparation_deadline()
+                    )
+                    .await,
+                Err(CaptureCatalogError::ScopeRejected)
+            ));
+            assert_eq!(
+                fence.finish(&txn, preparation_deadline()).await,
+                Err(CaptureCatalogError::ScopeRejected)
+            );
+            txn.rollback().await.unwrap();
+            assert_eq!(session_catalog_snapshot(&conn).await, before);
+        }
+
+        #[tokio::test]
+        #[ignore = "operator-local Codex acceptance; never run in CI"]
+        async fn codex_child_prepare_capacity_preserves_unsettled_and_retires_only_proven_leaf() {
+            let (_dir, conn, _store, request) = preparation_fixture().await;
+            let fence = prepared_fence(&conn, &request).await;
+            let txn = conn.begin().await.unwrap();
+            for i in 1..=MAX_CHILD_GATE_REQUIREMENTS {
+                fence
+                    .enroll(
+                        &txn,
+                        ChildCheckpointRequirement::new(&key(i), 1).unwrap(),
+                        preparation_deadline(),
+                    )
+                    .await
+                    .unwrap();
+            }
+            txn.commit().await.unwrap();
+            let before = session_catalog_snapshot(&conn).await;
+            let txn = conn.begin().await.unwrap();
+            assert!(matches!(
+                fence
+                    .enroll(
+                        &txn,
+                        ChildCheckpointRequirement::new(&key(17), 1).unwrap(),
+                        preparation_deadline()
+                    )
+                    .await,
+                Err(CaptureCatalogError::ChildGateCapacity)
+            ));
+            txn.rollback().await.unwrap();
+            assert_eq!(session_catalog_snapshot(&conn).await, before);
+
+            let oid = "0".repeat(40);
+            conn.execute_raw(Statement::from_sql_and_values(DbBackend::Sqlite,
+                "INSERT INTO agent_checkpoint (checkpoint_id,session_id,scope,tree_oid,metadata_blob_oid,traces_commit,created_at) VALUES ('settled-child','session-a','subagent',?,?,?,1)",
+                [oid.clone().into(),oid.clone().into(),oid.into()])).await.unwrap();
+            conn.execute_raw(Statement::from_sql_and_values(DbBackend::Sqlite,
+                "INSERT INTO agent_subagent_content_claim (parent_session_id,provider_kind,source_key,content_schema_version,current_revision,current_checkpoint_id,current_digest,state,fence_token,created_at,updated_at,revision_cursor)
+                 VALUES ('session-a','codex',?,2,1,'settled-child',?,'idle',1,1,1,1)",
+                [key(1).into(),"a".repeat(64).into()])).await.unwrap();
+            conn.execute_raw(Statement::from_sql_and_values(DbBackend::Sqlite,
+                "INSERT INTO agent_subagent_content_revision (parent_session_id,provider_kind,source_key,content_schema_version,revision,checkpoint_id,content_digest,source_channel,partial,created_at)
+                 VALUES ('session-a','codex',?,2,1,'settled-child',?,'live',1,1)",
+                [key(1).into(),"a".repeat(64).into()])).await.unwrap();
+            let txn = conn.begin().await.unwrap();
+            fence
+                .enroll(
+                    &txn,
+                    ChildCheckpointRequirement::new(&key(17), 1).unwrap(),
+                    preparation_deadline(),
+                )
+                .await
+                .unwrap();
+            txn.commit().await.unwrap();
+            let row = session_catalog_snapshot(&conn).await;
+            let (_, ledger) = decode_receipt_metadata(&row.3).unwrap();
+            let requirements = &ledger.entries[0].child_gate.as_ref().unwrap().requirements;
+            assert_eq!(requirements.len(), 16);
+            assert!(!requirements.iter().any(|old| old.source_key == key(1)));
+            assert!(requirements.iter().any(|old| old.source_key == key(17)));
+            assert_eq!(
+                conn.query_one_raw(Statement::from_string(
+                    DbBackend::Sqlite,
+                    "SELECT COUNT(*) AS n FROM agent_checkpoint".to_string()
+                ))
+                .await
+                .unwrap()
+                .unwrap()
+                .try_get_by::<i64, _>("n")
+                .unwrap(),
+                1
+            );
+        }
+
+        #[tokio::test]
+        #[ignore = "operator-local Codex acceptance; never run in CI"]
+        async fn codex_child_prepare_deadline_and_rejected_update_keep_original_metadata() {
+            let (_dir, conn, _store, request) = preparation_fixture().await;
+            let fence = prepared_fence(&conn, &request).await;
+            let before = session_catalog_snapshot(&conn).await;
+            let expired = CaptureCommitDeadline::from_test_pair(
+                Instant::now() - Duration::from_secs(1),
+                chrono::Utc::now().timestamp_millis() - 1000,
+            );
+            let txn = conn.begin().await.unwrap();
+            assert!(matches!(
+                fence
+                    .enroll(
+                        &txn,
+                        ChildCheckpointRequirement::new(&key(1), 1).unwrap(),
+                        expired
+                    )
+                    .await,
+                Err(CaptureCatalogError::DeadlineExceeded)
+            ));
+            txn.rollback().await.unwrap();
+            assert_eq!(session_catalog_snapshot(&conn).await, before);
+            let txn = conn.begin().await.unwrap();
+            fence
+                .enroll(
+                    &txn,
+                    ChildCheckpointRequirement::new(&key(1), 2).unwrap(),
+                    preparation_deadline(),
+                )
+                .await
+                .unwrap();
+            txn.commit().await.unwrap();
+            let before = session_catalog_snapshot(&conn).await;
+            conn.execute_unprepared("CREATE TRIGGER reject_prepare BEFORE UPDATE OF metadata_json ON agent_session BEGIN SELECT RAISE(ABORT, 'owned control failure'); END").await.unwrap();
+            let txn = conn.begin().await.unwrap();
+            let unchanged = fence
+                .enroll(
+                    &txn,
+                    ChildCheckpointRequirement::new(&key(1), 1).unwrap(),
+                    preparation_deadline(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(unchanged.minimum_revision(), 2);
+            assert_eq!(
+                fence.finish(&txn, expired).await,
+                Err(CaptureCatalogError::DeadlineExceeded)
+            );
+            txn.rollback().await.unwrap();
+            let txn = conn.begin().await.unwrap();
+            assert!(matches!(
+                fence
+                    .enroll(
+                        &txn,
+                        ChildCheckpointRequirement::new(&key(2), 1).unwrap(),
+                        preparation_deadline()
+                    )
+                    .await,
+                Err(CaptureCatalogError::Database)
+            ));
+            txn.rollback().await.unwrap();
+            assert_eq!(session_catalog_snapshot(&conn).await, before);
+        }
     }
 }

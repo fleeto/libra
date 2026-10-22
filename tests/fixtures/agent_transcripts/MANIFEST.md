@@ -216,3 +216,26 @@ rollout/policy.rs:21-100,127-283 (persistence filtering, including Other), rollo
 at the full commit above, not a moving branch. Unknown/fault inputs stay
 explicitly unsupported/partial. Downstream parser tests must select the listed
 case/slice rather than treating this mixed corpus as one complete session.
+
+
+## CX-14 Codex capability projection fixture (2026-10-19)
+
+`codex-capabilities-01621.jsonl` is a separate **synthetic functional fixture**
+against Codex 0.162.1 source `092d3acd6bec3e3a14bdc7e7a2810ab628ab759d`.
+It is consumed only by feature `test-live-agent`, explicitly ignored tests in
+`codex_capture_local_test`; it is never an account capture or native-origin proof.
+It does not replace `codex.jsonl` or the CX-12 fault corpus, whose exact bytes and
+damaged final line remain frozen. The original 8725-byte OpenCode prefix is unchanged.
+
+The fixture declares paginated mode and monotonically increasing ordinals.
+Both modified-file records are completed `FileChange` items, rather than mixing
+legacy-only patch events into paginated history. `turn_context.summary=none` is
+the upstream compatibility placeholder, not a claim about effective thinking mode.
+All paths, model IDs, messages and opaque values are synthetic; nothing is executed.
+Expected projection: two prompts (one `/review`), two response calls, input=17,
+output=7, cached read+write=4, reasoning=1, total=24, latest model
+`codex-fixture-model-b`, files `src/snake.rs` then `src/ui.rs`.
+The duplicate user response surfaces and compaction usage snapshot must not add
+prompts or tokens. Unknown-usage and offset behavior are separate local cases.
+
+Functional fixture SHA-256: `b5adfa85de3001f7583999825c22027b85449a183e10d9bedf2710ac99005c6e`; 7370 bytes; 19 JSONL records.

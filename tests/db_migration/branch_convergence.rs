@@ -22,7 +22,7 @@ use fixtures::{
 #[test]
 fn combined_registry_keeps_both_original_migrations_and_adds_a_forward_barrier() {
     let migrations = builtin_migrations();
-    assert_eq!(migrations.len(), 70);
+    assert_eq!(migrations.len(), 71);
     let tail: Vec<_> = migrations
         .iter()
         .filter(|migration| migration.version >= OPERATION_V2)
@@ -47,6 +47,7 @@ fn combined_registry_keeps_both_original_migrations_and_adds_a_forward_barrier()
             (MEMORY_PATH_SEARCH, "memory_path_search"),
             (2026101901, "agent_kind_grok"),
             (2026101902, "worktree_layout_capability"),
+            (2026102201, "agent_session_commit"),
         ]
     );
     assert!(migrations.last().unwrap().down.is_none());
@@ -87,6 +88,7 @@ async fn change_identity_prefix_index_repair_replays_after_old_receipt() {
             MEMORY_PATH_SEARCH,
             2026101901,
             2026101902,
+            2026102201,
         ]
     );
 
@@ -141,7 +143,7 @@ async fn config_branch_ordinary_open_catches_up_operations_without_rewriting_rec
     assert_eq!(rows(&conn, "config").await, config);
     assert_eq!(rows(&conn, "config_kv").await, modern);
     let after = receipts(&conn).await;
-    assert_eq!(after.len(), 70);
+    assert_eq!(after.len(), 71);
     for (version, name) in [
         (OPERATION_V2, "operation_v2"),
         (CONVERGENCE, "operation_v2_branch_convergence"),
@@ -158,6 +160,7 @@ async fn config_branch_ordinary_open_catches_up_operations_without_rewriting_rec
         (MEMORY_PATH_SEARCH, "memory_path_search"),
         (2026101901, "agent_kind_grok"),
         (2026101902, "worktree_layout_capability"),
+        (2026102201, "agent_session_commit"),
     ] {
         assert_eq!(after.iter().find(|row| row.0 == version).unwrap().1, name);
     }
@@ -167,7 +170,7 @@ async fn config_branch_ordinary_open_catches_up_operations_without_rewriting_rec
             "changed original receipt {receipt:?}"
         );
     }
-    assert_eq!(after.last().unwrap().0, 2026101902);
+    assert_eq!(after.last().unwrap().0, 2026102201);
     let unchanged = snapshot(&conn).await;
     conn.close().await.unwrap();
     let reopened = db::establish_connection(path.to_str().unwrap())
@@ -220,6 +223,7 @@ async fn operation_v2_branch_keeps_modern_rows_without_recopying() {
             MEMORY_PATH_SEARCH,
             2026101901,
             2026101902,
+            2026102201,
         ]
     );
     assert_eq!(operation_rows_without_boundary_columns(&conn).await, modern);
@@ -333,7 +337,8 @@ async fn concurrent_config_branch_upgraders_claim_the_copy_and_barrier_once() {
             MEMORY_PATH_SEARCH,
             2026101901,
             2026101902,
+            2026102201,
         ]
     );
-    assert_eq!(receipts(&left).await.len(), 70);
+    assert_eq!(receipts(&left).await.len(), 71);
 }

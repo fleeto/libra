@@ -319,7 +319,7 @@ impl TranscriptSource {
 /// Normalize the fixed macOS system aliases before descriptor-relative
 /// no-follow traversal. These aliases are OS-owned, unlike any component below
 /// them, which must remain subject to the strict symlink checks.
-fn normalize_macos_system_directory_alias(path: &Path) -> PathBuf {
+pub(crate) fn normalize_macos_system_directory_alias(path: &Path) -> PathBuf {
     #[cfg(target_os = "macos")]
     {
         for (alias, canonical) in [
@@ -358,27 +358,29 @@ fn provider_root_containing(adapter: &dyn ObservedAgent, canonical_path: &Path) 
     })
 }
 
-fn configured_provider_roots(adapter: &dyn ObservedAgent) -> Vec<PathBuf> {
-    let Some(home) = std::env::var_os("LIBRA_TEST_HOME")
+/// Configured path spelling for legacy discovery results. This is data,
+/// never directory authority; descriptor consumers use the normalized roots.
+pub(crate) fn configured_provider_root_spellings(adapter: &dyn ObservedAgent) -> Vec<PathBuf> {
+    let home = std::env::var_os("LIBRA_TEST_HOME")
         .map(PathBuf::from)
-        .or_else(dirs::home_dir)
-    else {
-        return Vec::new();
-    };
+        .or_else(dirs::home_dir);
     adapter
         .protected_dirs()
         .iter()
-        .map(|dir| {
-            let root = if *dir == ".codex" {
-                match std::env::var_os("CODEX_HOME").map(PathBuf::from) {
-                    Some(path) if path.is_absolute() => path,
-                    _ => home.join(dir),
-                }
-            } else {
-                home.join(dir)
-            };
-            normalize_macos_system_directory_alias(&root)
+        .filter_map(|dir| {
+            let explicit = (*dir == ".codex")
+                .then(|| std::env::var_os("CODEX_HOME").map(PathBuf::from))
+                .flatten()
+                .filter(|path| path.is_absolute());
+            explicit.or_else(|| home.as_ref().map(|home| home.join(dir)))
         })
+        .collect()
+}
+
+pub(crate) fn configured_provider_roots(adapter: &dyn ObservedAgent) -> Vec<PathBuf> {
+    configured_provider_root_spellings(adapter)
+        .into_iter()
+        .map(|root| normalize_macos_system_directory_alias(&root))
         .collect()
 }
 
@@ -387,7 +389,7 @@ fn configured_provider_roots(adapter: &dyn ObservedAgent) -> Vec<PathBuf> {
 /// `openat(O_NOFOLLOW)` for each component; platforms without equivalent
 /// semantics fail closed (ADR-DR-13/GC-DR-14).
 #[cfg(unix)]
-fn open_absolute_directory_no_follow(path: &Path) -> Result<std::fs::File> {
+pub(crate) fn open_absolute_directory_no_follow(path: &Path) -> Result<std::fs::File> {
     use std::{
         ffi::CString,
         os::{fd::AsRawFd, unix::ffi::OsStrExt},
@@ -436,6 +438,16 @@ fn open_absolute_directory_no_follow(path: &Path) -> Result<std::fs::File> {
         }
     }
     Ok(current)
+}
+
+#[cfg(windows)]
+pub(crate) fn open_absolute_directory_no_follow(path: &Path) -> Result<std::fs::File> {
+    crate::utils::windows_fs::open_tree(path).context("pin directory without reparse points")
+}
+
+#[cfg(not(any(unix, windows)))]
+pub(crate) fn open_absolute_directory_no_follow(_path: &Path) -> Result<std::fs::File> {
+    anyhow::bail!("secure directory pinning is unavailable on this platform")
 }
 
 #[cfg(unix)]
@@ -600,6 +612,56 @@ pub(crate) fn read_dir_pinned_provider_directory(
     Ok(PinnedReadDir { entries, _pin: pin })
 }
 
+/// Retain the given root and open only normal relative directory components.
+/// Discovery and reconciliation share this walker; neither follows links.
+pub(crate) fn open_directory_beneath_pinned_directory(
+    directory: &std::fs::File,
+    relative: &Path,
+) -> Result<std::fs::File> {
+    let mut current = directory.try_clone().context("retain pinned directory")?;
+    for component in relative.components() {
+        let Component::Normal(name) = component else {
+            anyhow::bail!("pinned directory path contains a non-normal component");
+        };
+        #[cfg(unix)]
+        {
+            use std::{
+                ffi::CString,
+                os::{
+                    fd::{AsRawFd, FromRawFd},
+                    unix::ffi::OsStrExt,
+                },
+            };
+            let name = CString::new(name.as_bytes()).context("directory component contains NUL")?;
+            // SAFETY: a held directory and one checked, NUL-terminated name.
+            // A successful descriptor transfers immediately to its File owner.
+            let fd = unsafe {
+                libc::openat(
+                    current.as_raw_fd(),
+                    name.as_ptr(),
+                    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                )
+            };
+            if fd < 0 {
+                return Err(std::io::Error::last_os_error())
+                    .context("open pinned descendant directory");
+            }
+            current = unsafe { std::fs::File::from_raw_fd(fd) };
+        }
+        #[cfg(windows)]
+        {
+            current = crate::utils::windows_fs::open_at(&current, name, true)
+                .context("open pinned descendant without reparse points")?;
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = name;
+            anyhow::bail!("secure directory descendants are unavailable on this platform");
+        }
+    }
+    Ok(current)
+}
+
 /// Open a provider-owned directory for pre-consent discovery without ever
 /// following a symlinked component. The returned descriptor pins the
 /// directory while callers enumerate it.
@@ -608,11 +670,6 @@ pub(crate) fn open_provider_directory_for_discovery(
     adapter: &dyn ObservedAgent,
     path: &Path,
 ) -> Result<Option<std::fs::File>> {
-    use std::{
-        ffi::CString,
-        os::{fd::AsRawFd, unix::ffi::OsStrExt},
-    };
-
     if !path.is_absolute() {
         return Ok(None);
     }
@@ -639,32 +696,20 @@ pub(crate) fn open_provider_directory_for_discovery(
                 return Err(error).context("securely open provider discovery root (no-follow)");
             }
         };
-        for component in relative.components() {
-            let Component::Normal(name) = component else {
-                anyhow::bail!("provider discovery directory contains a non-normal component");
-            };
-            let name = CString::new(name.as_bytes())
-                .context("provider discovery directory component contains NUL")?;
-            // SAFETY: `current` owns a live directory fd and `name` is
-            // NUL-terminated. A successful fd is immediately owned.
-            let fd = unsafe {
-                libc::openat(
-                    current.as_raw_fd(),
-                    name.as_ptr(),
-                    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-                )
-            };
-            if fd < 0 {
-                let error = std::io::Error::last_os_error();
-                if error.kind() == std::io::ErrorKind::NotFound {
-                    return Ok(None);
-                }
+        current = match open_directory_beneath_pinned_directory(&current, relative) {
+            Ok(directory) => directory,
+            Err(error)
+                if error
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+            {
+                return Ok(None);
+            }
+            Err(error) => {
                 return Err(error)
                     .context("securely open provider discovery component (no-follow)");
             }
-            // SAFETY: `fd` is a fresh descriptor returned by `openat`.
-            current = unsafe { <std::fs::File as std::os::fd::FromRawFd>::from_raw_fd(fd) };
-        }
+        };
         return Ok(Some(current));
     }
     Ok(None)
@@ -846,7 +891,7 @@ fn pinned_entry_type(
 /// its pathname.  This replaces addressing the descriptor through a path
 /// (`/proc/self/fd/<fd>` on Linux, `/dev/fd/<fd>` elsewhere): on macOS a
 /// device-fd path for a directory descriptor fails `read_dir` with
-/// `ENOTDIR`.  `fdopendir` + `readdir` operate on a duplicated descriptor
+/// `ENOTDIR`.  `fdopendir` + `readdir` operate on a held directory handle
 /// instead, so the walk is rooted at the exact directory object opened by
 /// [`open_provider_directory_for_discovery`] even if an attacker swaps the
 /// provider's pathname concurrently — with identical behaviour on Linux and
@@ -857,14 +902,20 @@ pub(crate) fn read_dir_pinned_provider_directory(
 ) -> Result<PinnedReadDir> {
     use std::os::fd::AsRawFd;
 
-    // SAFETY: duplicating a live owned descriptor yields another owned
-    // descriptor referring to the same pinned directory object.
-    let duplicated = unsafe { libc::dup(directory.as_raw_fd()) };
+    // SAFETY: the fixed dot component opens this held directory itself.
+    // Unlike dup(), openat gives each enumeration an independent offset.
+    let duplicated = unsafe {
+        libc::openat(
+            directory.as_raw_fd(),
+            c".".as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
     if duplicated < 0 {
         return Err(std::io::Error::last_os_error())
             .context("duplicate pinned provider directory descriptor");
     }
-    // SAFETY: `duplicated` is a fresh descriptor from `dup`; on success
+    // SAFETY: `duplicated` is a fresh descriptor from `openat`; on success
     // `fdopendir` takes ownership of it.
     let stream = unsafe { libc::fdopendir(duplicated) };
     if stream.is_null() {

@@ -107,6 +107,7 @@ impl Display for ReflogContext {
             ReflogAction::Push => write!(f, "push"),
             ReflogAction::Rebase { state, details } => write!(f, "({state}) {details}"),
             ReflogAction::Clone { from } => write!(f, "from {from}"),
+            ReflogAction::Branch { message } => write!(f, "{message}"),
             ReflogAction::UpdateRef { message } => write!(f, "{message}"),
         }
     }
@@ -145,6 +146,10 @@ pub enum ReflogAction {
     Clone {
         from: String,
     },
+    /// A branch creation or forced branch-tip reset.
+    Branch {
+        message: String,
+    },
     /// A direct ref update via `update-ref` (carries the optional `-m` reason).
     UpdateRef {
         message: String,
@@ -166,6 +171,7 @@ pub enum ReflogActionKind {
     Pull,
     Push,
     Clone,
+    Branch,
     UpdateRef,
 }
 
@@ -183,6 +189,7 @@ impl Display for ReflogActionKind {
             Self::Pull => write!(f, "pull"),
             Self::Push => write!(f, "push"),
             Self::Clone => write!(f, "clone"),
+            Self::Branch => write!(f, "branch"),
             Self::UpdateRef => write!(f, "update-ref"),
         }
     }
@@ -197,6 +204,7 @@ impl ReflogAction {
             Self::Merge { .. } => ReflogActionKind::Merge,
             Self::Pull => ReflogActionKind::Pull,
             Self::Clone { .. } => ReflogActionKind::Clone,
+            Self::Branch { .. } => ReflogActionKind::Branch,
             Self::CherryPick { .. } => ReflogActionKind::CherryPick,
             Self::Rebase { .. } => ReflogActionKind::Rebase,
             Self::Checkout { .. } => ReflogActionKind::Checkout,

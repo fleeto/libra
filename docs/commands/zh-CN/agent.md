@@ -6,6 +6,93 @@ Grok 的 `support_wave` 是 `grok`，不是 `first_batch`，可安装生命周�
 
 管理 Claude Code、Codex 与 OpenCode 的外部代理捕获。
 
+
+## Codex 父子会话用量快照（CX-26 开发中）
+
+未发布源码可为 UUID Codex 会话的 checkpoint 增加 `usage_attribution`。
+`scope=session_snapshot`、`as_of=live_capture` 或 `as_of=import_pass`
+表示本次观察到的整会话快照，不是计费增量，不能跨 checkpoint 相加；
+同一次 import 的父 checkpoint 使用相同观察值。
+`parent_token_usage`、`child_token_usage` 保留已知计数，缺失值为 null；
+缓存、reasoning、total 等可选计数仅在全部参与项均有值时求和。
+
+归属读取会复验当前 scope、claim、revision、digest、link 与 capture
+incarnation，最多列出 16 个 source/revision/checkpoint 引用。引用中的
+`parent` 在当前线程下为 null，嵌套时为父 source commitment；原生身份继续
+保留在独立普通 child 来源中。partial
+状态下的来源计数是有界观察，不代表已穷尽目录。未知、busy、过期、损坏或
+缺失来源不能当成实测零；用量未知不妨碍独立导出 child thinking。
+历史非 UUID 标签和其它 provider 不增加该字段。
+
+只有可用且穷尽的后代扫描、当前耐久 claim 及完整父子用量均成立时，
+才给出 `children_coverage=complete` 与经溢出检查的总量。其它情况保留
+`partial=true`、`aggregate_token_usage=null`、
+`aggregate_includes_child_usage=false` 和已知小计。import 先保存 child，
+再生成父 metadata；一侧失败仍保留另一侧已写入的数据及进度。
+重放不刷新旧父快照，也不单因 child 成长新增父 checkpoint。
+
+`excluded_legacy_count` 仅统计通过 commit/tree/metadata 角色链及来源
+commitment 证明的旧采集实例；无法证明的旧记录仍为 unknown。
+差集最多检查 16 个 claim 和一个饱和见证，每个角色对象最多 64 KiB、
+合计 1 MiB。历史记录过多、父 spawn 证据不可用（含其 1 MiB 上限）或
+发现窗口耗尽时，coverage 仍可为 partial。
+不回写旧 checkpoint 或已封存的恢复 artifact。含该可选 metadata 的新
+artifact 需要支持它的版本进行恢复；使用旧版本时应保留原 artifact。
+
+凭据脱敏可能吞掉记录或嵌套用量字段，即使保留的 JSON 仍有效，用量也会
+标记 partial 或 unavailable。可读 thinking 与 opaque 值仍按既有普通
+数据合同保留和导出。新增 Codex 功能测试仅在本机显式启用 feature 和
+ignored 用例运行，不加入 CI。
+
+## Codex ordinary thinking retention（CX-15 开发中）
+
+本开发源码中，经同意执行 `agent import --path <rollout.jsonl> --agent codex --yes`
+会保留 Codex `response_item` reasoning 的实际可用值，包括 `summary_text`、
+`reasoning_text`、`encrypted_content` 及未知关联 JSON 字段。JSON 字符串先解码
+转义，再按既有凭据模式脱敏；其它值保留，包括大整数和精确小数。缺失、null、
+空值与非空值分别记录。来源状态为 **Unproven**，opaque/不支持的数据或无法确定
+turn 归属时为 **Partial**。模型提供的摘要不等于完整内部推理。
+
+默认 `agent checkpoint export <id>` 可取回这些普通值，无需 `--raw --allow-raw`。
+导出的 JSONL 可能在既有 per-turn 语义投影之后带有保留的 source 记录，消费者应
+逐行读取。已覆盖的 turn 仅 opaque/关联值变化时，导入会新增补充 checkpoint；
+相同保留数据重放不重复写入，旧 checkpoint 和 V1 语义 claim 不改写。独立 V2
+claim 迁移属于 CX-05，不因保存普通值获得 native artifact 或解密权限。
+
+侧车只含计数、显式 turn 的 token 快照和 partial 状态，不保存 thinking 正文或
+密文。大工具输出及损坏尾部不再使前面有效 thinking 整份丢失；无法解码的字符串
+只在局部脱敏，并保留结构上的 partial。既有 consent、仓库/session 关联、来源
+字节上限及 deadline 继续有效。这些值属于 checkpoint，会随导出、agent push 或
+cloud 备份一起处理；当前没有单独排除 thinking 的开关。
+
+CX-15 使用合成文件验证真实 import/store/export，并非真实模型验收；系统 Codex
+hook 安装、rollout 定位和 TUI 贪吃蛇 smoke 仍有各自的后续计划门。
+
+侧车保存 checkpoint 写入时的 provider 显式 turn 快照（`turn_ordinal_namespace=codex_explicit_turn`），不将该序号当作 V1 checkpoint 的归属。仅 metadata 变化不新增 checkpoint。完整 turn 表位于共享 `redaction_report.json` 对象，各 checkpoint metadata 仅带有界汇总；统计或保留准备失败明确标 partial / `retention_unavailable`，保留既有 V1 投影。
+
+每次导入最多先追加 16 个 retention supplement，再处理新 turn；未处理完会返回包含已保存进度的 partial，释放本轮所有权，重跑可续传。新副本 ID 通过仓库密钥绑定语义 digest、完整性与保留值，同内容在 repack 后重放也不重复写入。完整 traces repack 后新增内容仍受已有 packed-parent writer 限制；请保留源文件和仓库以便修复。本机 packed transcript 用例仅验证合法混合存储，不代表整个 traces 的 packed-parent 已支持。
+
+## Codex 轮次归属（CX-05 开发中）
+
+首条非空持久记录固定整份 source snapshot 的 typed preview codec：`session_meta` 中 `cli_version: 0.162.1` 选择当前结构化 codec，其他或缺失 header 保留 legacy codec。恢复旧会话后追加新标记不能重新解释旧前缀。必须提供完整 source snapshot，孤立 tail 不是等价 coverage 输入。选择依据的 header 保留在 ordinary source；后续自动 writer 激活须将 codec 选择持久绑定 session，不能在重试时重新猜测。
+
+当前 codec 按 `turn_context`、生命周期标记或已接受输入元数据中的有效 `turn_id` 分组。同轮 steering 共用一组；带作用域回答和迟到输入镜像不回退活动流上下文。无作用域或匹配当前 turn 的终态标记关闭它。终态 scope 为畸形值时不关闭流，并降低投影完整性。可选 turn_context 缺 ID 时降低投影完整性：只保留已有生命周期证明的 scope，否则清除上下文；明确 null 或无效 ID 仍清除。首次 raw 输入若明确属于旧 turn，保留在旧组并标时序 partial，后续无 scope 输出仍用活动 turn；活动 scope 为空或相同时才由新 raw 输入绑定。缺失或无效 turn ID 使用 incomplete 的 ordinal 兼容键，依据分组创建次序，与紧凑的投影 ordinal 分开；前方空组后续变为可见时不改变这些键。
+
+人类输入依据 producer `content_item_kinds` 和 accepted-input 事件判定。developer/system、继承历史和外来 thread 不创建人类轮次；形似上下文包装的真实文本保留。同一 surface 上的重复输入仍重复；每轮出现序号配对 event/raw/completed 镜像。raw/client/completed item 的 ID 命名空间独立，缺 ID 或 ID 不等使配对保持 partial，因此实际 current 会话通常为 partial。非文本内容、冲突和未配对事件也保持 partial。只有带注释 raw 或有 scope 的 completed input 能建立用户记录；无自身 scope 的 legacy accepted-input 事件只佐证匹配输入，不能独立建立人类轮次；不匹配的镜像不能在更直接来源旁虚构用户记录。Legacy role-only 投影可能含注入上下文，不证明人类来源。既有 ordinary retention 在凭据扫描后继续保留 source 值。
+
+此纯数据路径复用既有 response codec 和 V1/V2 selector：typed 可读 reasoning 选 V2，普通记录仍选 V1。历史 V1 normalization、ordinary retention 写入及旧 claim 保持原 key/digest。Codex 自动 writer 激活仍待后续接线。Current codec 标为 V1 的普通 preview 记录不能直接写入 legacy V1 claim 域：激活时须显式采用现有 ordinary V2 域，或把已有 V1 claim 的 session 固定 legacy codec，并持久绑定选择；显式 prepared ordinary V2 import 已使用共享重放门。reasoning sidecar 保留独立的 `codex_explicit_turn` ordinal 命名空间，不能按位置关联 coverage ordinal。
+
+Snapshot 既有总上限为 16 MiB。当前 codec 的分组字节也限 16 MiB，每条 JSONL 限 1 MiB，turn、输入出现项和 identity 集合各限 4096。大 patch/tool output 或内联 image data URL 可能使此纯 preview 不可用。精确版本 pin 的兼容范围和大记录可用性都须在自动 writer 激活前复审。超限或 deadline 到期使 preview 失败，空的或无法归属的 partial 组保留 partial 信号；可归属损坏只降低对应组，未归属损坏降低整份 snapshot。普通 retention 沿用原路径。源码及合成验证不证明真实模型采集或 native 来源。
+
+## Codex rollout 元数据与能力（CX-04/CX-14 开发中）
+
+当前源码以 Codex 0.162.1 schema 解析 envelope rollout；其它版本的未知记录保持 partial。`token_usage_record` 按 response 去重，compaction 的重复快照不再计数；旧累计 token 跨 turn 差分，无解释的倒退标为 partial，显式上下文边界的重置也保留限定。与精确记录一致的旧观察不重复累加。cached tokens 聚合缓存读写；解析器中的缺失或无效 usage 为 unknown，不是实测零值。
+
+envelope 的 prompt 依事件侧已接受输入及生产者 `content_item_kinds` 判定，真实用户写出的上下文标签原样保留。未标注来源或标注数量不符的 user-role response 正文仍保存在普通源数据中，但不冒充用户 prompt。优先按共享 item identity 配对镜像并选 completed 输入；否则只在相同 turn、相同投影正文下按出现次数跨来源配对。同一来源的重复输入保留；无共享 identity 的配对只是 partial 下界。首个 `session_meta` 绑定 owner thread；其它 header 导致 partial，foreign 记录不计入其 usage，foreign header 后所有无 scope 的记录均不强行归属，直到 owner header 再次出现；显式属于 owner thread 的记录仍可投影。model 取最新显式 `turn_context` model。只有带非空 call/item identity 的结构化 patch completed 成功记录才报告修改路径；提议文本、失败或部分执行不算已修改。路径仅作词法投影，相对记录的工作目录，该目录可能是仓库子目录。
+
+源读取上限 16 MiB，单条 JSONL 的完整解析上限 1 MiB，保留的元数据与 identity 状态均有界。对超长已知记录，能力投影可仅读取有界的 type/role/scope 骨架并忽略正文，使大图片或工具输出不抑制无关的精确 usage、已完成文件变更；直接受影响或无法分类的投影仍报单条记录超限，跳过正文时底层 parser 标记 partial。纯空白行不构成记录；hook helper 继续使用更小的既有限额。未知变体、重复 JSON key、损坏末行、无成功状态证明的旧 patch 及预算耗尽返回 partial 和不含正文的警告。旧平铺导出保留有界元数据的兼容 reader，超长、坏行或无法分类的行跳过并限定，不抹掉其它可用行；旧平铺 role-only 用户投影可能包含 host 注入上下文，不是人类请求的证据；混合格式只保证部分结果，envelope 文件内的平铺行不作投影。这不授予 raw 保存权限、不改写 coverage claim，也不代表真实 thinking 验收。Codex adapter 已暴露 transcript analyzer，`libra agent list --json` 的能力行反映已接线的结构化 completed 文件变更接口。usage 不可用或 usage 自身一致性检查已证明有缺口时，token calculator 返回可操作错误，不伪造零值，也不返回已知不完整总量；带限定的显式 reset 仍可能给出下界。对最早 usage 为旧累计观察的源，非零 offset 后续窗口一直使用累计 counter 差分，即使稍后出现精确记录；缺少新的累计观察时仍为 unknown，防止迟到的精确镜像被重复计算。prompt、skill、文件与 usage 的 offset 读取保留此前上下文和累计基线，只投影新完成的记录；已见 item/response 镜像及单独补上的换行不重放旧数据。应传入完整、只追加的字节快照与上次字节长度，不能只传切下来的尾部；源被截短或替换后须从 offset 零重新开始。精确记录仅在 offset 之前时，后来的累计观察不能证明新增精确 usage。这些仍是有界的尽力投影；analyzer position 是所传快照长度，不代表每个字节都产出了完整元数据。prefix prompt 正文在记录限额内做 hash，旧正文不占新增输出的字符串或保留正文预算；当前 scope 和输出上下文仍有界。skill 投影用受支持的 prompt 正文 hash 配对，只保留识别到的斜杠命令及其上下文，prompt 投影不保留 skill event。skill event ID 依来源 identity 生成，无 identity 时使用带限定的 occurrence 后备；旧平铺格式的读取也跨 offset 保留物理行序号。各能力只投影自身元数据：prompt 预算失败不抑制其它有效 token 或已完成的文件变更，response/patch identity 限额也不抑制 prompt。所有投影仍共享输入和单条记录限额。预算错误会指出对应能力与限额，并说明该能力无法投影此会话；等待或从相同超限快照重新开始不能修复。底层 parser 仍可提供 partial 元数据。缺失 usage 通常提示等待，只有 usage 自身的 counter、response identity 或 reset 观察无证时才给出另一诊断；无关 prompt 的 partial 不使 usage 变成坏数据。offset 零的总量应替换此前总量，不能作为新增 delta 再相加。采集侧把 calculator 错误标为 partial 元数据，继续共享 checkpoint 流程。其它 adapter 的契约保持原状。
+
+
 ## 原生 Windows 采集
 
 此支持目前仅在 **main 源码构建**中提供，**v0.30.50 发布二进制不包含该功能**。
@@ -131,6 +218,10 @@ remote workspace，含生命周期状态（`provisioning`/`active`/`releasing`/
 若报告非明文完整性恢复日志路径，说明继续自动覆盖已不安全；请保留该日志，先手动解决编辑冲突，
 移除所报告的日志后再重试。日志只记录有限的事务元数据（schema 版本、操作、阶段和恢复围栏）
 以及域隔离的文件指纹，不含原始 hook 或 config 内容；未知指纹状态会刻意保持零写入，而非自动修复。
+在 Unix 上，Codex 以规范化的 `hooks.json` 路径作为信任键。`enable` 在写入 trust 条目前解析已存在的
+`$CODEX_HOME` 目录（包括 macOS 的 `/tmp` 与 `/private/tmp` 别名），并清理 Libra 以前按
+调用方别名写入的托管条目。升级后若 `agent doctor` 显示 Codex hook 未受信，可先检查
+主动禁用的条目，再重跑 `libra agent enable --agent codex`。
 
 ### OpenCode 事件输入契约
 
@@ -307,6 +398,35 @@ Libra 内部的任务沙箱接口可绑定已验证的 attempt，将写权限限
 
 `libra review clean` 与 `libra investigate clean` 只删除各自类型的已结束 run。清理先校验保存的工作区所有权描述，删除该 run 拥有的 task 工作区或 checkpoint 输入，再删除运行元数据。失败时保留所有权和重试记录；目录被替换、链接、未知描述版本或所有权不匹配均拒绝。仅凭目录名称不能授权删除。`--run` 和 `--all` 都先核对同一 run 目录内的生命周期 metadata，再处理只读 checkpoint 输入。批量清理保留其他类型、未结束、未知和损坏的 run；`removed` 只统计实际成功删除。指定 run 的 state 损坏或缺失时，只有该 run 自身有效的终态 manifest 能证明 run id、类型及 schema，才允许清理。可解析的其他类型或未结束 state，以及互相冲突的 metadata 都拒绝。`investigate clean` 保留既有 run 锁。有界输入清理拒绝链接根目录、链接 metadata 和超限输入；失败返回可操作错误，不报告删除成功。保留 run，核对提示中的链接、限制或文件系统权限后再重试。清理启动后若 I/O 或取消中断，部分输入可能已删除；失败不表示已经回滚。已经证明属于本类型的终态 state，在先写 state 的结束流程中断、匹配的 manifest 尚无终态标记时，仍允许清理。身份、schema、共有字段或不同的非空终态值冲突继续拒绝。批量资格读取的 I/O、链接或大小限制错误会中断清理，之前已经删除的 run 不会回滚。不新增清理 flag 或稳定错误码。
 
+## 提交会话关联（CX-23 开发版）
+
+CX-23 源码开发版使用本地 `agent_session_commit` 关联表，幂等键为
+`(session_id, hash_kind, commit_oid)`，SHA-1、SHA-256 和 BLAKE3 分开记录。
+历史导入不写关联。普通 commit 默认也不写；显式执行
+`libra config agent.commit_trailer true` 后开启关联。若无法读取此配置，关联保持关闭并提示警告；
+其它必需配置有效时提交仍可继续。可读取但值无效则拒绝提交。启用后只选择当前仓库/worktree 中有已提交
+checkpoint 的会话：锚定当前父提交的会话，或已关联该父提交且仍活跃的会话，
+最多 64 个；超过 64 个会拒绝提交而非静默截断。
+`commit-msg` hook 结束后、可选 vault 签名前追加 `Libra-Agent-Session` trailer，
+已有同值用户 trailer 不重复。`libra commit --no-agent-trailer` 仅省略本次
+自动 trailer，仍保留已开启的本地关联；仓库 catalog、作用域、64 会话上限
+或 workspace lease 检查失败仍在 HEAD 更新前拒绝提交。预演不写关联、也不
+预览自动 trailer。ref 更新后在同一数据库事务内重新核验会话作用域及 workspace lease 才写关联，
+失败会显示警告。amend 会保留原提交已关联且仍授权的会话，也纳入新符合条件的会话；
+即使以 `-m` 替换消息也会重新注入自动 trailer。
+CX-27 的崩溃恢复 journal 尚未实现；cloud refs-only metadata 不备份本地关联表
+或无 trailer 关联。显式 opt-in 的可达提交 trailer 只是跨机器重建线索，仍须核验
+仓库及会话作用域。
+
+首个无父提交可选择锚定 unborn parent 的会话。此配置只作用于普通
+`libra commit`；bridge `commit.create` 继续使用独立的 `agent_bridge_link`。
+显式 trailer 会向所有可读取提交的人暴露原始 session ID。所谓无 trailer
+关联，是用 `--no-agent-trailer` 建立的本地关联；当前 cloud sync 仅上传 refs，
+不上传此 SQLite 表。若 ref 后关联失败，请保留已完成提交和
+原始会话；CX-27 前无自动修复命令，不要仅为重试关联而 amend。
+复用旧消息的 amend 可能保留已擦除或移出作用域会话的可见 trailer，但不会为它
+建立新本地关联；`--no-agent-trailer` 不删除继承或用户自行写入的消息文字。
+
 ## JSON 输出
 
 支持结构化输出的子命令使用全局 `--json` 和 `--machine` 信封。例如：
@@ -399,6 +519,20 @@ subagents，且不会重建；session 与 tombstone 均不存在时返回 `LBR-A
 保留成功摘要及逐项失败，失败 session id 使用哈希脱敏。单项归属、cwd、
 已擦除与源授权失败分别保留 `LBR-AGENT-015`、`016`、`019`、`020`；provider 时间戳（含推导的 turn 时间）若超出导入主机时钟五分钟以上，会在影响 session 时序前被拒绝：该 selection 以固定消息 `the transcript contains timestamps beyond the permitted clock skew`（`LBR-AGENT-018`）失败且不写入任何耐久状态；失败详情
 仍携带 `schema_version`，并原样保留 nullable `next_cursor`，不会把 `null` 改成 0。
+Codex 批量发现同时覆盖配置的 Codex home 下 `sessions/YYYY/MM/DD` 和平铺的
+`archived_sessions`。`--since` 使用有界首条 `session_meta` 记录中的 RFC3339
+会话开始时间，不使用文件修改时间；会话虽在边界后续跑、但开始时间早于边界时仍被排除。
+Claude 的发现仍按文件修改时间。`--since` 遇到缺失时间或无效首记录时，按哈希 session id
+在 `skipped` 中报告 `codex_session_time_unknown` 或 `codex_session_header_invalid` 原因键；已打开来源的读取失败另用 `codex_session_source_unreadable`，
+继续处理其它会话。每项发现跳过都会记录 warning；若批次本来成功，`--exit-code-on-warning` 返回 9，JSON 的 `data.warnings[]` 也包含警告。若 child-content 发现再次遇到同一坏文件（包括批次未选中的坏归档副本），父会话仍可能以 `LBR-AGENT-018` 部分失败。人类可读输出提示存在无法
+筛选的 rollout，JSON 逐项列出原因。检查本地 rollout 后可用 `--session` 或
+`--path` 重试。游标分页会重复报告这些哈希跳过项，以免续页隐藏它们；汇总各页计数时
+应按哈希 session id 去重。首记录上限 1 MiB，累计 header 预算 256 MiB，无法筛选的记录最多 4096 条；任一累计上限耗尽都会以 `LBR-AGENT-018` 停止发现。`--since` 必须遍历整份本地历史并读取首记录；文件系统日期不能证明会话开始时间，所以时间窗口不降低 header 工作量。active 与 archive 树各有 20,000 项扫描预算，归档的 `--session` 最多先扫描 10,000 个 active rollout 文件，再在平铺目录中最多扫描 20,000 项；超过扫描预算同样返回 `LBR-AGENT-018`，不会静默漏掉会话。历史库过大时，可用封闭的 Codex SQLite 备份配合 `--codex-index-backup` 分页导入缺失会话；已有会话要刷新或需要指定单个 rollout 时，用 `--path`。
+`--all` 的发现阶段不读取 header，各选中源仍由正常导入读取器校验。同一 session id
+同时存在时优先 active 文件；同一根目录内优先文件名时间更新的 rollout。`--since`
+在读取完整 transcript 前核对首记录 id 和有界 CLI 版本字段。JSON/非 TTY 调用必须指定 `--yes`；交互式批量调用会先征得同意再读
+首记录。授权的 reasoning 摘要可从普通 checkpoint 导出取回，导入状态、metadata 和错误
+不回显正文或源路径。
 成功与 partial 摘要分别用 `checkpoints_written` 报告父 turn 写入、用
 `subagent_checkpoints_written` 报告独立发现的 child-content 写入；只有 child
 写入时状态仍为 `imported`，不是 `noop`。平台无法提供安全 child discovery 的
@@ -565,7 +699,43 @@ session 的内容。警告不是「所有私有副本已删除」的证明。
 
 每个 checkpoint 行携带 `scope`。`committed` checkpoint 在 turn/session 边界（`Stop` / `SessionEnd`）写入，携带脱敏的 transcript 快照。`subagent` 下有两类刻意分离的证据：Codex 的 `SubagentStart` / `SubagentEnd` hook 写空 transcript 的 **boundary checkpoint**，并以 `parent_checkpoint_id` 表达结构归属；Claude `<session>/subagents/*.jsonl` 则逐文件写独立的 **content checkpoint**，其 `parent_checkpoint_id` 保持 null。新的 content claim 只会在安全打开 source 并重新核验 root、storage 绑定、scope 与 workspace fence 后，写入仓库密钥、域隔离的 HMAC V2 commitment（`source/subagent-hmac-v2/<64-lower-hex>`）；append-only revision 据此选出唯一 current content leaf，本地 project slug/文件名不落库，物理历史也不改写。历史 V1 `source/sha256/...` claim、revision 与 checkpoint metadata 是不可变、只读证据；命中同一 legacy claim 时不会静默创建并行 V2 行，必须继续走 recovery/`agent doctor` 路径。Claude 当前不提供能与 boundary 对齐的稳定 ID，因此常态是 `link_state=unresolved`；`agent doctor` 会报告但不会猜测。只有 provider 给出稳定 ID 且唯一匹配时，才在独立 association 行中关联 boundary，不修改不可变 traces commit。两类证据均可 list/show/export/prune，且 doctor 可见。
 
-Codex 捕获会安装当前文档定义的全部生命周期事件：`SessionStart`、`SessionEnd`、`UserPromptSubmit`、`PreToolUse`、`PermissionRequest`、`PostToolUse`、`PreCompact`、`PostCompact`、`Stop`、`SubagentStart` 与 `SubagentStop`。checkpoint 的事件投影会保留 `turn_id`、`tool_use_id`、`agent_id`、`agent_type`、压缩触发原因、权限模式、工具输入和工具输出等关联字段。Codex 的 `encrypted_content` / 加密 reasoning payload 会被刻意从 capture projection 丢弃：Hook 没有解密密钥，Libra 在该路径既不保留加密占位，也不保留明文内部 reasoning。
+当前源码构建也把验证过的 Codex child rollout 保存为独立 content checkpoint。
+`SubagentStop` 与父 checkpoint 边界、经同意的历史导入和 pending 恢复复用同一
+collector。读取范围为绝对 `CODEX_HOME`，相对值则回退配置 home 下的 .codex；打开文件后
+验证 header 的 root、当前 thread、immediate parent、child 和仓库 cwd。
+nested child 的直接父会话可以不同于 root。legacy 根 header 缺 session_id 时可
+回退自身 id；child 仍须提供 root，单靠路径或 child ID 不能授权读取。
+
+child 按既有有界保留合同保存实际返回的 reasoning summary 正文、`encrypted_content` 和未知普通字段。
+用 `agent checkpoint export <content-checkpoint-id>` 读取，show 仍是摘要。
+opaque 保留不等于解密或可读 thinking。active/archive 移动及相同内容在
+live/import/recovery 间重放复用同一 revision，新字节可以追加 revision；
+删除 provider 源不会删除已存内容。
+
+只有本次 scope、source digest、已结算 claim 与 observed turn 同时满足的
+`SubagentStop` proof 才能关联对应 boundary。同 CID 的另一 turn 不会夺取旧关联。
+同 callback 的晚到重放可补正文和关联，原 boundary 对象保持不可变。Libra 不会
+重新投递宿主 callback；后续父采集、导入或恢复仍可保存晚到正文，而不据此建立旧边界关联。
+没有 proof 时仍保存可导出的 unresolved 内容；历史导入本身不证明 live 关联
+或 native 来源。
+
+UUID 形状的 Codex 会话在 `SessionEnd` 等待已知必要 child claim 结算。provider 根
+不可用时保留 pending；没有已知未结算 claim 的部分发现可以带 partial 提示完成。
+managed 父 checkpoint 即使发现零 child 也可能带不完整提取提示，该固定 omission
+提示不证明 deadline 已到期。旧任意 label callback 保留原 parent-only live 路径；
+不新增 child dispatch 或 claim；已到期的发现窗口仍可能带固定 skip/不完整提取提示。
+该 live 谓词不为 stored 导入/恢复新增标识限制；原有来源/selector 校验仍有效，
+包括公共 `--path` import 对文件名 UUID 的要求。UUID 或 partial 均不证明
+native 来源。用 `agent session show` 与 `agent doctor` 查看状态，恢复必要源后重试；
+重试不能还原已删除源。worker 仍按原两秒 batch、至多五次 artifact 尝试工作，
+不承诺后台最终必达。
+
+Codex 的 `config.toml` 可用 `model_reasoning_summary = "detailed"` 和
+`model_supports_reasoning_summaries = true` 请求可读摘要，实际是否返回仍取决于
+model/provider。空摘要不等于 Libra 丢失正文，比对前应先解码 export 中的 JSON，并与实际源比较。
+本节源码改动仍在本机验收中，不代表已发布运行时保证。
+
+当前 Codex 捕获安装器登记以下生命周期事件：`SessionStart`、`SessionEnd`、`UserPromptSubmit`、`PreToolUse`、`PermissionRequest`、`PostToolUse`、`PreCompact`、`PostCompact`、`Stop`、`Interrupt`、`SubagentStart` 与 `SubagentStop`。checkpoint 的事件投影会保留 `turn_id`、`tool_use_id`、`agent_id`、`agent_type`、压缩触发原因、权限模式、工具输入和工具输出等关联字段。hook 事件投影不会读取 rollout reasoning；经同意的历史导入遵守上方普通保留合同，保存 opaque 值无需解密密钥。
 
 持久化的 checkpoint 元数据只保留 Libra 能安全分类的字段。live hook capture 在任何持久化之前就会丢弃 provider 提供的 `model`、`source`、`tool_name` 与 session-reference（transcript 指针）字段，因此读取 `checkpoint export` 输出或 `refs/libra/traces` sidecar 的消费者不应再期待这些字段：在 hook 捕获的 checkpoint 中，`metadata.json` 始终记录 `"model": "unknown"`，其 `events/lifecycle.jsonl` 行从不包含 `model` 或 `tool_name` 且记录 `"source": null`，Codex subagent 边界元数据中的 `subagent.tool` / `subagent.source` 为 null。hook 捕获的 lifecycle 行的 `provenance.hook_event_name` 是 canonical snake_case lifecycle kind（例如 `tool_use` 或 `turn_end`，与 `kind` 一致），而不是 provider 的原生事件名。`events/lifecycle.jsonl` 为 schema v2：每行都带必填的 `identity_scheme`（`native_replay_hmac_v2`、`fallback_action_hmac_v1`、`generic_lifecycle_uuid_v5` 或 `import_uuid_v5`），声明其 `event_id` 的派生方式；它只是声明，而不是可验证的 replay 凭据。
 
@@ -592,7 +762,7 @@ libra agent list --schema-version 2 --json
 # 明确同意后导入一个历史 Claude Code session
 libra agent import --session <provider-session-id> --agent claude-code --yes
 
-# 导入某时间之后修改的一页 Codex rollout
+# 按 session_meta 会话时间导入一页 active 或 archived Codex rollout
 libra agent import --since 2026-07-01T00:00:00Z --agent codex --limit 20 --yes --json
 
 # 以冻结 JSON v1 schema 读取一个捕获 session 的 turn/revision/subagent 结构
@@ -695,7 +865,7 @@ libra agent --json status
 
 - 外部 `libra-agent-*` 代理**默认禁用**。使用 `libra config set agent.external_agents.enabled true`（仓库级）显式开启；开启前 `rpc list`/`libra-agent-*` 的 `rpc trust`/`rpc invoke` 会以 `LBR-AGENT-002` 拒绝（`rpc untrust` 始终可用——撤销信任只会收紧安全面；`rpc trust --dir <path>` 与 provider-exporter 信任如 `rpc trust opencode` 属纯准备动作——不扫描 `$PATH`、本身不启用任何东西，因此门控下亦可用）。已发现的二进制在 `rpc trust <slug>` 记录来源前保持隔离（world-writable 目录中的二进制拒绝信任）；每次 invoke 都会复验来源（漂移即撤销信任，`LBR-AGENT-005`）；子进程环境被清空为白名单注入，stderr 被捕获/限长/脱敏——绝不继承。invoke 超时、broken pipe、malformed frame 映射 `LBR-AGENT-012`；IO 硬上限超限映射 `LBR-AGENT-007`。
 
-- `libra agent enable` 为 Claude Code 与 Codex 安装的 hook 配置调用顶层 `libra hooks claude|codex <verb>`，并带有 installer 根据 handler timeout 生成的受限隐藏 `--capture-budget-ms` 参数（默认 Claude `10s → 9000`、Codex 普通事件 `30s → 29000`；Codex `SessionEnd` 因宿主三秒上限为 `3s → 2000`；一秒的历史 handler 仍保留可用的 `500ms` capture 切片，另保留最多 1000ms 用于 terminal finalizer 清理）。重跑 enable 会刷新旧配置，隐藏别名也接受该参数以兼容历史已安装命令。已安装的 OpenCode plugin（`.opencode/plugin/libra-hooks.js`）则通过隐藏的 `libra agent hooks opencode <verb>` 入口转发所有事件，不带 installer budget；其 capture deadline 为 OpenCode export deadline。Claude 与隐藏别名在 hook envelope 未通过大小 / UTF-8 / JSON / schema / reported cwd / transcript 路径校验时，会以 `LBR-AGENT-008`（退出码 128）fail-closed 拒绝，且绝不回显 raw stdin。两个路径类字段会在存储解析前限制为 4096 字节。已安装的 Codex 表面会有意确认 malformed/unbound callback 与辅助性的 nonterminal 捕获失败，以免失败阻断宿主任务：通用 ingress、scope 和存储失败只输出经净化诊断且不创建 capture 行。在任何 Libra 仓库之外触发、格式正确的回调没有可绑定的 scope：已安装的 Codex hook 会确认它（退出码 `0`，包括 `SessionEnd`），而 Claude 与隐藏别名返回固定、不含路径的仓库未找到错误 `LBR-REPO-001`（退出码 128）。已损坏的活动仓库不视为“仓库之外”：Claude、隐藏别名（Claude Code / OpenCode / Codex）、gemini 入口以及已安装 Codex 的 `SessionEnd`（仍以非零退出）返回与其他所有仓库命令相同、不含路径的 `LBR-REPO-003`（无法解析的 linked worktree storage，附 `libra worktree repair --confirm --path <worktree-path>` 修复建议）、`LBR-REPO-002`（数据库缺失或 object format 不受支持）或 `LBR-IO-001`（数据库无法打开——包括由更新版本 Libra 写入——或 object format 无法读取），绝不返回通用的 `LBR-INTERNAL-001` capture 失败（见 `libra hooks`）。与其他所有仓库命令一样，这些入口打开数据库时会自动应用待处理的仓库 schema 迁移。但已校验且已绑定 scope 的 `SessionEnd` 必须持久化或观察到 durable terminal completion/pending receipt；在该证据存在前发生的有界数据库/finalizer 失败会以非零退出，而不会被静默确认。已有 catalog reservation 后的狭义 checkpoint 或 maintenance-lock 失败，才可能仅持久化一条不含敏感内容、可重试的 catalog 诊断。该预算约束可杀 helper、数据库和其它 deadline-aware 阶段；它不是严格的 whole-process host deadline，因为 source 分类、canonicalize、安全打开和 rewind 当前仍在 descriptor 交接前同步发生。NFS/FUSE stall 因而无法被强制取消，这条路径也不承诺 timeout 后的 FD-only autonomous replay。对不一致 store 执行 checkpoint 操作（如 `checkpoint rewind`）——catalog 行的 `parent_commit` 非法或指向缺失的 traces 对象——会以 `LBR-AGENT-009`（退出码 128）失败；运行 `libra agent doctor` 检查 store。
+- `libra agent enable` 为 Claude Code 与 Codex 安装的 hook 配置调用顶层 `libra hooks claude|codex <verb>`，并带有 installer 根据 handler timeout 生成的受限隐藏 `--capture-budget-ms` 参数（默认 Claude `10s → 9000`、Codex 普通事件 `30s → 29000`；Codex `SessionEnd` 与 `Interrupt` 因宿主三秒上限为 `3s → 2000`；一秒的历史 handler 仍保留可用的 `500ms` capture 切片，另保留最多 1000ms 用于 terminal finalizer 清理）。重跑 enable 会刷新旧配置，隐藏别名也接受该参数以兼容历史已安装命令。已安装的 OpenCode plugin（`.opencode/plugin/libra-hooks.js`）则通过隐藏的 `libra agent hooks opencode <verb>` 入口转发所有事件，不带 installer budget；其 capture deadline 为 OpenCode export deadline。Claude 与隐藏别名在 hook envelope 未通过大小 / UTF-8 / JSON / schema / reported cwd / transcript 路径校验时，会以 `LBR-AGENT-008`（退出码 128）fail-closed 拒绝，且绝不回显 raw stdin。两个路径类字段会在存储解析前限制为 4096 字节。已安装的 Codex 表面会有意确认 malformed/unbound callback 与辅助性的 nonterminal 捕获失败，以免失败阻断宿主任务：通用 ingress、scope 和存储失败只输出经净化诊断且不创建 capture 行。在任何 Libra 仓库之外触发、格式正确的回调没有可绑定的 scope：已安装的 Codex hook 会确认它（退出码 `0`，包括 `SessionEnd`），而 Claude 与隐藏别名返回固定、不含路径的仓库未找到错误 `LBR-REPO-001`（退出码 128）。已损坏的活动仓库不视为“仓库之外”：Claude、隐藏别名（Claude Code / OpenCode / Codex）、gemini 入口以及已安装 Codex 的 `SessionEnd`（仍以非零退出）返回与其他所有仓库命令相同、不含路径的 `LBR-REPO-003`（无法解析的 linked worktree storage，附 `libra worktree repair --confirm --path <worktree-path>` 修复建议）、`LBR-REPO-002`（数据库缺失或 object format 不受支持）或 `LBR-IO-001`（数据库无法打开——包括由更新版本 Libra 写入——或 object format 无法读取），绝不返回通用的 `LBR-INTERNAL-001` capture 失败（见 `libra hooks`）。与其他所有仓库命令一样，这些入口打开数据库时会自动应用待处理的仓库 schema 迁移。但已校验且已绑定 scope 的 `SessionEnd` 必须持久化或观察到 durable terminal completion/pending receipt；在该证据存在前发生的有界数据库/finalizer 失败会以非零退出，而不会被静默确认。已有 catalog reservation 后的狭义 checkpoint 或 maintenance-lock 失败，才可能仅持久化一条不含敏感内容、可重试的 catalog 诊断。该预算约束可杀 helper、数据库和其它 deadline-aware 阶段；它不是严格的 whole-process host deadline，因为 source 分类、canonicalize、安全打开和 rewind 当前仍在 descriptor 交接前同步发生。NFS/FUSE stall 因而无法被强制取消，这条路径也不承诺 timeout 后的 FD-only autonomous replay。对不一致 store 执行 checkpoint 操作（如 `checkpoint rewind`）——catalog 行的 `parent_commit` 非法或指向缺失的 traces 对象——会以 `LBR-AGENT-009`（退出码 128）失败；运行 `libra agent doctor` 检查 store。
 - 受管 Session Capture 支持 Unix 和原生 Windows 安全初始化 repository-private deduplication key。在无法提供这些安全原语的平台上，会在创建 key file 前 fail-closed 并给出可操作的诊断，而不会使用较弱的 path-based publication fallback。该固定能力诊断会显式到达两个 Codex 入口：nonterminal `hooks codex` callback（包括隐藏历史 alias）向 stderr 输出不含路径的平台 remedy 但以 `0` 退出；不受支持的非 Windows 平台使用 Unix-host remedy，原生 Windows 初始化失败则提示使用匹配的 `libra.exe` helper 和本地存储；`SessionEnd` 以同一 remedy 非零退出。fail-closed 的已安装 Claude 表面与隐藏的 `agent hooks` Claude Code / OpenCode 别名对每个事件都携带同一 remedy 与 `LBR-UNSUPPORTED-001` 非零退出。这个例外不改变 alias 对 malformed envelope 的 fail-closed 契约。它只适用于在 Libra 仓库内触发的回调：在任何 Libra 仓库之外触发的回调在所有平台（无论是否为 Unix）上都遵循上文的仓库外契约。
 - `checkpoint rewind --apply` 只恢复工作树文件；代理自身的 transcript 文件不会被重写。
 - Hook 和捕获诊断采用 best-effort 方式，设计目标是报告可操作的安装状态，而不是静默忽略缺失的提供商。
@@ -1147,4 +1317,311 @@ reasoning 一次，之后重复采集会去重；原 v1 对象、digest 和 clai
 reasoning 不能将这种失败变为 complete coverage。这些改动不增加命令参数，要求 Libra 0.30.50 或后续版本；依赖 OpenCode Session／exporter／模型的验收只在 macOS
 本机执行，不进入 CI 集成测试。
 
-Libra 0.30.67 或更新版本打开的仓库带有能力标记 4。已发布的 0.30.66 及更早版本会拒绝该仓库中的所有命令，包括 `agent clean`；继续操作前请升级到 0.30.67 或更新版本。现有 Agent 工作目录不迁移。
+支持能力标记 4 的 Libra 构建打开仓库后会记录该标记。已发布的 0.30.66 及更早版本会拒绝该仓库中的所有命令，包括 `agent clean`；继续操作前请安装支持能力 4 的构建。已发布二进制从 Linux v0.30.67、macOS/Windows v0.30.68 起提供该能力；v0.30.83 覆盖全部平台。现有 Agent 工作目录不迁移。
+
+Codex CX 新增测试（包括合成用例）只在本机手动运行，不加入 CI。入口为
+`cargo test --features test-live-agent --test codex_capture_local_test -- --ignored --test-threads=1`
+及 `cargo test --features test-live-agent --lib codex_summary_ -- --ignored --test-threads=1`。
+默认 ignored 或未执行不是通过证据。
+
+The revised legacy Codex boundary case is also operator-local:
+`cargo test --features test-live-agent --test agent_checkpoint_redaction_test capture_foundation_codex_reasoning_boundaries_live_and_import -- --ignored --exact --test-threads=1`.
+
+冻结 V1 投影删除空语义 turn 后，存活 turn 的 thinking 来源随原 turn 同步重编号。被删除 turn 的 thinking 仅在首个普通 checkpoint 保存一次，并标记 `turn_attribution_unproven=true`、`partial=true`；不声称这些正文属于该 checkpoint 的语义 turn。
+
+sidecar 统计预算为 4096 个去重后的显式 turn 或 reasoning ID；重复回放不额外消耗 ID 预算。超出时标记统计不可用及 partial，普通来源副本仍保留 thinking 记录。
+
+当前源码采用 Codex 0.162.1 的十二事件契约，包括 `Interrupt`。重新运行 `libra agent enable --agent codex` 只刷新 Libra 自有 handler 与信任条目；`Interrupt` 和 `SessionEnd` 使用 3 秒宿主 timeout、2000ms 采集预算，其余默认 30 秒、29000ms。`Interrupt` 沿用安装的 `stop` 命令但保留 `turn_interrupted` 语义：保留会话当前 phase，不生成正常完成的 turn checkpoint。`PostCompact` 共用 `compaction` 命令但保留 `compaction_completed`。既有事件身份 ordinal、用户信任及配置不变。事件支持不证明已经获取 rollout thinking。
+
+这套十二事件安装的最低 Codex CLI 版本为 **0.162.1**；旧客户端先升级 Codex，再重跑 enable。既有十一事件配置在刷新前报告未完整安装，但已批准条目不被误报为 trust gap。此次同时修复共用 `compaction` 命令对 `PostCompact` 的旧拒绝行为；迟到的中断保留已停止会话状态，不重新激活会话。
+
+Codex hook 设置只读取普通文件：`hooks.json`、`config.toml` 各限 16 MiB，完整性恢复 journal 限 64 KiB。安装、移除和状态读取拒绝 symlink/特殊文件 leaf，Unix FIFO 打开不阻塞读取器。坏型或超限文件原样保留；先移走特殊文件或减少文件大小，再重试。生成的配置超过上限时，在两文件任一发布前拒绝。解析错误只说明文件，不回显配置正文；保留 `CODEX_HOME` 所指定父目录别名，不承诺严格 whole-process 文件系统 deadline。
+
+
+`libra agent doctor` 的 Codex 安装诊断逐项列出全部 12 个 managed 事件。固定 `reason` 为 `configured`、`missing`、`drifted`、`untrusted` 或 `disabled`，JSON 位于 `data.provider_hooks[].events`；仅当每项均匹配当前 handler、enabled 且 trusted 时，汇总 `installed=true`。带 Libra statusMessage 的修改或过期重复项使对应事件未配置；没有该标记的用户 handler 不属于此诊断。显式 `enabled=false` 会显示 disabled；哈希仍正确时，不新增信任缺口横幅。这些只读设置检查不输出 hook 命令、哈希或配置正文，也不证明宿主已执行 hook。使用 Codex 0.162.1 或更新版本；缺失或未受信时可用 `libra agent enable --agent codex` 刷新 Libra handler；刷新前先确认用户主动禁用的意图。漂移时先检查 `hooks.json` 以及 `config.toml` 中对应的 `[hooks.state]` 条目：enable 会刷新归属仍可证明的 handler，但保留仅有 statusMessage、命令却已不符合规范的条目；此类条目需经检查后手动修正或移除，重复 enable 不一定清除诊断。
+
+
+## 旧 Codex thinking 读取（CX-16 开发中）
+
+本开发源码中，`libra agent checkpoint show <id> --json` 在
+`data.reasoning.readable` 返回经过凭据扫描的普通 thinking 正文，在
+`data.reasoning.encrypted_content` 返回已保存的非空 opaque 值。
+`availability` 为 `unproven`；遇截断、损坏或不支持的记录时为 `partial`。
+`readable_obtained` 只说明此视图实际是否含可读正文，不证明 native 来源或解密。
+metadata 必须属于此 checkpoint 的 ordinary tree；存在 `agent_kind` 时必须
+与 session 一致，旧 metadata 可以缺少此字段。关联或 transcript 读取失败时
+返回不含正文的 `unavailable` 状态，不退回原 blob。空 transcript 同样返回
+`unavailable`、`reason=no_transcript`、`readable_obtained=false`；只有 metadata
+不算取得 thinking。
+
+默认 `agent checkpoint export <id>` 对旧 transcript 的 JSON 字符串解码后
+扫描转义凭据，同时保留未知关联值、精确数字和重复键。既有读取上限仍是
+`agent.max_transcript_read_bytes`（默认 256 MiB），不会改用新采集的 16 MiB
+上限。`redacted=true` 说明 JSON 视图发生了凭据遮罩或不可解码字符串的局部替换。JSON show 最多查看 16 MiB、逐记录解析最多 1 MiB；超出视图的数据通过
+默认 export 获取。截断视图明确为 partial，不能据此断言后面没有 thinking。
+export 仍按配置上限读取源前缀。完整旧字符串含孤立 surrogate 或无效 UTF-8
+时，仅用容错解码副本做凭据扫描；没有命中则保留 token 的原字节。仍无法
+解码的字符串（包括转义或 UTF-8 中截断）会局部替换为 `?`，保留结构 partial。
+即使遮罩后的 JSON 可以解析，show 仍保留源数据不完整的 partial 状态。完整取回更大 checkpoint 时需提高读取上限。
+扫描器只解码 JSON 字符串，不为字符串之外或不支持的畸形结构中的任意转义
+赋予第二次解释。
+
+人类 show、checkpoint/session 列表、graph、doctor 不展开正文；读取不改写
+原对象、traces 或 coverage claim。raw 导出仍需 `--raw --allow-raw` 并审计
+允许或拒绝，默认导出不写 raw-access 审计。合成读取测试只在本机显式运行：
+`cargo test --features test-live-agent --test codex_capture_local_test codex_legacy_ -- --ignored --test-threads=1`。
+它们不证明真实模型采集，不加入 CI。
+
+
+## Codex 终态预算（CX-02 开发中）
+
+管理的 Codex `SessionEnd` hook 的 host 窗口为 3 秒、主采集预算为 2000 ms。
+ingress、数据库等待、生命周期预留、source 和写入共用原 monotonic/absolute
+截止对。既有 finalizer 的 250 ms 无正文收尾窗口从原 deadline 派生，同一回调
+内不重新计时。后续授权回调拥有各自的有界 I/O 窗口，恢复仍保留原 receipt 的
+finalizer deadline 和重试计数。异步 exporter 即使不遵守传入截止，也会在主 deadline 被采集端取消；仅
+取消 source 取得，不取消 runner 结算或已派发 SQL/ref COMMIT 的确认等待。
+超时只记录不含正文的 reason=export_deadline_elapsed；取消在 future 让出执行时
+生效，不抢占单次 poll 内的同步阻塞工作。
+checkpoint 尚未持久化时保持 terminal receipt pending，不提前发布 stopped。
+
+回调尚无可信 session/scope 帧就结束时，沿用 Codex advisory no-evidence 的
+退出行为，不凭空建立 receipt 或完成 session。scope 已验证后无法保存必要
+terminal 证据则明确失败。host 在 receipt 产生前杀掉进程，ledger 不能重建一个
+未观察到的回调；请保留 rollout，有既有证据时使用 owner-expiry/doctor 路径，
+或显式授权 `agent import --path <rollout.jsonl> --agent codex --yes` 取回实际
+源数据。metadata-only 生命周期成功不算取得 thinking。终态完成以 receipt
+complete 和持久 checkpoint 为准；保留的 finalizer 只记录 pending/quarantined
+恢复证据，没有独立的 complete 状态。
+
+本卡复用现有 finalizer/ledger，不激活 Codex live locator/exporter 或模型采集。
+本机合成用例覆盖 CLI 数据库忙、2 秒 stdin 等待、host 中止、native 重放、
+marker 后取消及 owner 到期恢复、用测试能力驱动的实际慢 source 管线；不证明真实 thinking。
+先 `cargo build --features test-live-agent --bin libra`，再手动运行：
+
+```bash
+cargo test --features test-live-agent --test codex_capture_local_test codex_terminal_ -- --ignored --test-threads=1
+cargo test --features test-live-agent --lib codex_terminal_ -- --ignored --test-threads=1
+```
+
+全部新 Codex 断言均受 test-live-agent 与 ignore 双门限制，仅本机执行，不加入
+CI；原 CI 用例不改写。
+
+## Codex 终态诊断（CX-17 开发中）
+
+`libra agent session show <session-id> --json` 为 Codex 增加 `terminal_capture` 对象，人类可读输出显示相同状态和 owner。它读取原 catalog 收据与 writer marker；查看会话不会推进状态、消耗重试或修复 checkpoint。
+
+- `status` 为最新终态收据的 `pending`、`completed` 或 `unavailable`。`completed` 仅指收据完成，不证明 thinking 可读、transcript 可用或对象完整；正文请检查 checkpoint show/export。
+- `owner` 为 `live`、`expired`、`absent`、`cleanup_pending` 或 `unavailable`，复用原 marker generation 与绝对过期时间。即使会话 active 超过 24 小时，也不能覆盖有效 owner。
+- `pending_receipts`、`completed_receipts` 统计有界 ledger 中的终态收据；`superseded` 对 pending 复用原修订 fence，对 completed 比较当前阶段与原终态时间；计数可能包含历史收据。不同操作若具有相同的已存终态时间，可能无法区分；重放完成若保留较早终态时间，也可能显示 superseded，该诊断不授予恢复权限。
+- `reason` 是不含正文的固定诊断。缺失、损坏、超限、歧义或不可访问证据显式显示 unavailable；已释放或变更的 workspace 租约不能授权恢复 pending 工作；已完成收据在 workspace 释放或租约过期后仍可查看，历史完成事实不要求当前修复权限。新增诊断不输出源路径、transcript、marker 载荷或重放凭据。
+
+`libra agent doctor --json` 继续只检测，使用原 pending-finalizer finding 和 live-marker 计数。session show 是仓库范围的指定会话视图，也可查看同仓库其它 worktree 的会话；pending/owner 描述已存会话，并不保证当前 worktree 有修复权限。只有从原 worktree/workspace 显式 `libra agent doctor --repair` 才尝试现有受 fence 约束的恢复：保留有效 owner；没有持久 checkpoint/artifact 时须由 provider 重投或显式 import。repair 不重新打开任意 provider 源，不绕过已变更租约，也不为已经持久化的终态重复创建 checkpoint；重复 repair 幂等。
+
+新增字段只影响 Codex session show，list 与其它 provider 输出保持原合同。Codex metadata 非文本或超过 1 MiB 时，旧 capture_status/error 字段不再显示，terminal_capture 显式为 unavailable，不回退原始数据。本机合成验证不等于真实 Codex 模型验证，先编译当前版本再运行：
+
+```sh
+cargo build --locked --features test-live-agent --bin libra
+source .env.test
+cargo test --locked --features test-live-agent --test codex_capture_local_test codex_finalize_ -- --ignored --test-threads=1
+```
+
+这些新增 Codex 用例不在 CI 运行。
+
+
+## Codex hook 观察日志（CX-03 开发中）
+
+公共 `libra hooks codex` 与兼容 `libra agent hooks codex` 在 ingress 校验、仓库绑定成功后，记录相同的固定 runtime 结果，各入口既有退出策略保持。未校验或未知事件不能取得可信日志 scope，不创建持久日志；继续保留现有固定诊断。其它 provider 不变。
+
+每条仅含 schema、仓内序号、固定 provider `codex`、固定 hook 命令 `event`、结果 `runtime_ok` / `runtime_failed` / `terminal_failed` 和 `count=1`。不含会话标识、正文、model、源文件/仓库路径、凭据或原始错误。`runtime_ok` 只表示 runtime 返回无错，不能证明取得 thinking 或写入 checkpoint；采集事实和终态恢复以 catalog 为准。
+
+核心 capture owner 独占日志 IO：`.libra/private/capture-diagnostics/` 下两个固定槽 `0.jsonl`、`1.jsonl` 各最多 5 MiB，另有空 `lock`，轮转只清空旧槽。Unix 目录/文件须当前 owner、0700/0600，文件为普通且单链接；Windows 复用受保护 owner ACL、句柄相对打开和拒绝 reparse 的原语。本机 macOS 测试不能证明 Windows 运行通过。权限、链接、大小或内容异常保留原物，汇总显示 unavailable。
+
+`agent status --json` 与 `agent doctor --json` 新增 `data.capture_diagnostics`，人类输出同样显示窗口计数。`state` 为 `absent`、`available` 或 `unavailable`；`window=retained_records`、`may_have_gaps=true` 始终适用。计数及可选首末序号仅覆盖仍保留且有效的记录，不是累计次数或成功证据。读者不创建目录/锁、不修复或回显日志正文；初始化不完整、锁竞争、坏记录或不安全文件显示 unavailable，不返回部分计数。
+
+日志 best-effort，不递归记录自身错误；非阻塞锁、有界尾读均按原 capture deadline 与 20ms 软 IO 窗口中较早者检查，不重置或延长采集预算。同步文件系统调用本身不能被软检查抢占。竞争、预算耗尽、进程退出、IO 失败可能遗漏记录，不改变 runtime 结果、pending receipt 或入口退出策略。10MiB 上限仅约束此观察日志，既有全局 tracing logger 独立。
+
+若竞争消退后仍 unavailable，先停止 hook 回调并检查日志目录本身的链接/权限，不跟随链接地移走该日志目录，再由下次已验证 hook 重建；需要排查时保留移走的内容。这只重置观察窗口。不要删除上级 private 目录、catalog 或 pending capture receipts。
+
+Unix 上级 `.libra/private` 也须属于当前用户且为 0700。确认它是预期目录并检查 ownership 和内容后，在原位恢复 owner-only 权限，不删除目录；日志读者不会修正父目录。既有 capture-key writer 有独立规则：拒绝其它 owner 或 group/other 可写目录，并在采集前把允许的当前 owner 目录收紧到 0700。
+
+以下合成回归仅本机运行，绝不加入 CI：
+
+```sh
+cargo test --locked --features test-live-agent --test codex_capture_local_test capture_diagnostic_ -- --ignored --test-threads=1
+```
+
+
+## Codex 会话摘要（CX-07 开发中）
+
+`libra agent session show <session-id> --json` 对 Codex 新增 `data.summary`，包括 `status`、固定 `source_status=unproven`、`as_of_checkpoint`、`model`、`title`、`prompt_count`、`token_usage`、`modified_file_count`。人类输出显示同样事实；list 和其它 provider 输出保持。
+
+摘要来自一个已保存的 checkpoint snapshot，按既有 committed checkpoint 次序（created_at 倒序，再 checkpoint ID 倒序）选择，出处由 as_of_checkpoint 明示。它是源报告的 snapshot 事实，不代表实时 usage、全会话累计、native 资格或所有观察到的 turn 已保存。生命周期、pending probe 和 checkpoint 身份先固定在同一数据库读快照中，再由 typed reader 在预算内验证普通 metadata 的角色、类型和内容哈希；不重读 provider，不读取 transcript 或 reasoning artifact 正文来补字段。
+
+status 为 available / partial / pending / unknown / unavailable；没有已知值的字段是 JSON null、人类输出 unknown。pending receipt 或正在导入时，即使旧 checkpoint 有 token 值，也将当前 usage 显示 unknown。只有 metadata 确实测得 0 才显示 0。旧格式缺少 extraction 仍 unknown；角色/对象损坏、catalog 畸形或读预算耗尽显示 unavailable。title 仅使用已保存的 typed extraction，不从 prompt 猜测。model/title 在输出前做大小限制、凭据脱敏和终端控制字符移除。
+
+live metadata 原有 extraction 槽；历史 Codex import 现在通过既有私有 retention response 携带同一 redacted snapshot 的有界可选事实，并写入该槽。可选 helper 事实损坏时只省略摘要，普通 transcript 仍保留。重放、追加不改已完成 checkpoint 对象和 V1 records/digest；不新增摘要 cache/表或源重读 fallback。
+
+managed Codex hook 现在会在原采集预算内，从绝对 CODEX_HOME（优先）或当前 home 的 .codex 定位会话 rollout。源文件首条 session_meta 的 ID 和 cwd 必须与已验证 hook 作用域一致；普通可读 thinking 与可选摘要保存在同一 checkpoint，source_status 仍为 unproven。删除 provider 源后，默认导出与摘要仍来自已保存对象，摘要 reader 不会补读源。当前仅合成 fixture 的真实 hook/store/export 链路通过；真实 Codex 模型和 Windows runtime 尚未验证。hook 自报任意路径不授予 fallback 资格；无采集 deadline 时不读取 Codex 源。
+
+以下回归只在本机显式执行，不加入 CI：
+
+```sh
+cargo test --locked --features test-live-agent --test codex_capture_local_test codex_session_summary_ -- --ignored --test-threads=1
+cargo build --locked --features test-live-agent --bin libra
+cargo test --locked --features test-live-agent --lib codex_session_summary_ -- --ignored --test-threads=1
+```
+
+摘要的人类可读输出同样包含来源状态，以及已知的 cached、reasoning、total token 计数；文本会剥除终端、双向文本和不可见显示控制字符。
+
+pending 包括当前 `capture_status=retryable` 与旧 `retryable_error`。CX-22 与 CX-07 摘要共用此 receipt 判断，因此没有 ledger 行的 retryable receipt 也会将摘要 usage 标为 unknown。导入进程崩溃后会保持 pending，直到后续导入恢复持久化的租约状态；租约过期不能证明采集已完成。partial 也包括显示字段经过清理。
+
+显示过滤只覆盖终端控制及常见双向、零宽、tag、行间注解控制字符，不执行完整 Unicode 规范化。pending 仍可能携带部分 snapshot 计数，不能据此认定这些计数完整。库测试前的 build 必须使用当前源码及相同 feature。
+
+
+## Codex 来源采集（CX-08 开发中）
+
+使用 `libra agent enable --agent codex` 安装的 managed hook；其命令已经携带采集预算。覆盖默认目录时，`CODEX_HOME` 必须为绝对路径。发现从最新 rollout 目录开始，并受原预算和数量上限约束。scope 不匹配、链接、源超限和预算耗尽只能返回 partial/unavailable，不能证明 thinking 已完整取得。首 header 的 cwd 必须与同一个 worktree 子目录一致；已知 macOS 系统目录别名按等价路径比较。
+
+普通 checkpoint 保留脱敏 rollout，包括可读 `reasoning.summary[].text`；decoded credential 值在持久化前扫描，opaque encrypted content 保持 opaque。本路径不增加 native 来源资格，也不改变已有 V1 coverage 记录及已完成 checkpoint 的身份。
+
+内部 index reader 只接受显式提供的、已关闭且一致、无硬链接的单文件备份，不自动打开热 `state_5.sqlite` 或复制 WAL。发现 sidecar、源变化/截断、迁移失败/不支持、虚拟表 schema 或资源超限时为 unavailable，不报零会话。该 reader 留待对账 consumer 使用，本卡没有新增公开 index 命令或配置项。
+
+新增 Codex 回归只在本机执行，必须开启 feature 并显式运行 ignored：
+
+```sh
+cargo test --locked --features test-live-agent --test codex_capture_local_test codex_index_ -- --ignored --test-threads=1
+cargo build --locked --features test-live-agent --bin libra
+cargo test --locked --features test-live-agent --lib codex_index_ -- --ignored --test-threads=1
+```
+
+
+
+### 从已关闭的 Codex 索引备份对账（CX-22 开发中）
+
+```sh
+libra agent doctor --codex-index-backup ./closed-index.sqlite --json
+libra agent doctor --codex-index-backup ./closed-index.sqlite --codex-index-page 2
+```
+
+显式提供已关闭且一致的备份。相对路径按调用目录作词法解析；
+backup 与 `--repair` 互斥，page 取值 1–10 且必须提供 backup。
+未提供 backup 时原 doctor 输出不变。此视图不打开 home 热数据库、不读 rollout
+正文、不导入、修复或 hydrate 对象。
+
+JSON 的 `data.codex_reconciliation` 区分备份覆盖区间
+`cutoff_ms` 至 `coverage_until_ms` 与本次窗口锚点。每次调用重新锚定七天窗口，
+分页不是稳定 cursor。`scope_candidate_count` 为全部 scope 候选，行状态和
+`page_totals` 仅对应本页，null 表示未计算。超出候选集的页给出
+`page_out_of_range` 和 null totals；过旧备份为 `outside_window`，
+totals 也为 null。`empty_snapshot` 只表示提供的备份为空。
+
+状态为 `stored_source/missing/missing_data/partial/pending/erased/unknown`。
+stored_source 要求具名 metadata、非空本地 ordinary 对象及角色、哈希、大小和
+manifest 声明的已存长度均验证通过。snapshot 的整源字节数可以与 import 的单 turn
+内容长度不同。它不证明可读 thinking 或所有 turn 完整；旧/不明 metadata、本地缺失、
+损坏或仅在 pack 中的对象保持 unknown。坏 Libra catalog 行不拖垮其余行；provider 索引的坏行或结构错误会令整个 section unavailable。
+已验证空 transcript 为 missing_data/stored_transcript_empty；manifest 长度不一致为
+unknown/stored_size_mismatch，不给 import hint。quarantined 会话、committed identity
+却没有 session 的坏账本为 unknown；schema-pending 和 retryable 收据为 pending。
+优先级为 erased、当前 Libra scope 的 pending 证据、目录及数据证明。reason 使用固定
+snake_case key，如 scope_root_unproven、response_inconsistent、row_invalid、
+timestamp_schema、budget_exhausted。
+
+只有 proven scope 的 missing 与 missing_data 给出不带 `--yes` 的显式 import
+提示；erased 不给提示。无 session 的 pending 也检查；过期 import lease 仍为 pending，
+另标 `import_lease_expired`。若先前采集在 SHA-256/BLAKE3 仓库因对象格式不匹配
+失败，请使用包含 helper 格式修复的构建重试原采集或 import；写入成功前仍为 pending，
+doctor 不自动修复或清理先前 loose objects。预算不足明确标 `budget_exhausted`。
+
+`scope_unproven` 表示目录归属未证明；`child_attribution_unproven` 表示 child 没有
+独立已验证 source，edge 也不能证明其正文归属 parent。archived 行仍参与对账。
+active 会话在首个 checkpoint 前可能为 missing_data；import hint 仅为显式预览，
+不自动写入。大小写/NFC-NFD 与 macOS Data volume 可识别别名只列为 ambiguous，
+不授予 source 读取权限；无法识别的 root 外 symlink 拼写排除，root 内遇到链接为 unknown。
+备份 parent 目录的 sidecar 枚举超过 4096 项时令整个 section unavailable。
+
+任何毫秒时间超出当前时间五分钟都会令备份 unavailable。上限为所有仓库合计 10000
+近期候选、thread 文本 1 MiB、edge 独立上限、每个 scope 目录 4096 项及 1024 个目录
+身份缓存。大目录可能因此 unknown/unavailable。一次对账共用两秒预算，catalog/
+checkpoint metadata 及解压后的 tree/manifest 证明字节合计 8 MiB、ordinary 验证 64 MiB；原 doctor 扫描和
+worker 收尾保留原行为。失败或截断不报可靠的零缺失。所有新增 Codex 测试仅在本机
+以 `test-live-agent` + `--ignored` 运行，不加入 CI。
+
+CX-22 固定 section reason 还包括 `schema_unsupported`、`migration_unsupported`、`integrity_failed`、`scope_unavailable`、`worker_unavailable`、`catalog_unavailable`、`scope_or_catalog_unavailable` 与 `backup_unreadable`。catalog deadline 或 typed budget 错误明确为 `budget_exhausted`；其它 catalog/scope 错误为 `scope_or_catalog_unavailable`。
+
+
+### 从完整 Codex 索引补导缺失会话（CX-19 开发中）
+
+```sh
+libra agent import --codex-index-backup ./closed-index.sqlite --limit 20 --yes --json
+libra agent import --codex-index-backup ./closed-index.sqlite --limit 20 --cursor 20 --yes --json
+```
+
+显式提供已关闭且一致的Codex SQLite备份，补导当前worktree catalog中缺失的会话。
+范围是完整受支持历史，包含七天以前与归档行，不要求后来的毫秒迁移。此selector默认
+Codex；其它agent、其它selector及restore-erased与它互斥。相对备份路径按调用目录
+解析。实际读取provider正文或写trace之前仍须原交互同意或--yes。
+
+先将整个当前scope结果按ID字节序排序，再应用cursor/limit（默认20，最多100），
+之后才判定catalog是否缺失。第一页写入不会移动后续slot。跨页完整性要求使用同一
+备份及不变的目录布局；任一变化后从cursor 0重跑。只表示本页slot，不是实时全局计数。
+
+只有Missing进入原import写者，普通可读thinking沿原保存/导出链取得。已有catalog
+会话在新增的非空data.existing数组中报告status=existing、agent_kind、哈希session_id
+及selection_reason=existing_catalog_session，不读正文、不刷新，也不计为import成功。
+它不能证明thinking完整；已有partial/metadata-only/后来追加turn的会话用原--session、
+--all或--since重试。provider文件被删除不会删除已保存checkpoint。
+
+原schema-v1的results/partial_results/skipped/failures/next_cursor语义保留；partial
+沿旧合同同时保留summary和failure。existing在部分失败details和人类计数中也可见，
+旧selectors不增加此数组。erased跳过019，pending/unknown/catalog预算问题逐项018，
+目录不明或坏源路径逐项020。legacy/unscoped及nested worktree等slot可持续非零，应在
+真实拥有的worktree使用原显式session导入恢复，不能用备份推断跨scope权限。
+
+索引中的source路径必须绝对、root后仅Normal组件，叶名rollout-…-<同一ID>.jsonl；
+auth/config/history/state等不合该形状的索引路径在源reader派发前拒绝。合格叶仍须原
+configured-root、descriptor、header ID/cwd及当前权限证明。CODEX_HOME/archived_sessions
+同样处理，不增加日期布局要求。路径已移动或来自其它host时逐项020，用--session走原
+授权发现重试；此selector无定位fallback。索引edge不授予parent link/child读取权限。
+
+导入循环开始前的backup/root/catalog快照/response/资源失败为018加固定reason_key，
+不输出成功batch文档。
+备份16MiB、全历史线程/edge各10000、合计文本1MiB、helper JSON 4MiB（转义可能使
+原文未超限但JSON超限）；分页不会减少整库验证工作。初始索引阶段2s包含在原120s总
+导入deadline内，原累计source限额64MiB保留。超出索引范围的源可显式session/path导入。
+Windows运行及真实模型未由本开发面验证。失败/existing ID的本地映射方法见
+[英文说明](../agent.md#codex-full-history-index-backfill-cx-19-development)：SHA256(provider ID)
+前12个hex加sha256:，用同一已关闭备份查询原ID后再显式重试。
+
+目录scope扫描每目录最多4096项、memo最多1024项；耗尽时，本属当前worktree的条目也可能
+按layout unknown逐项020，并不证明它来自其它仓库。可改用显式session/path导入。
+
+创建一致备份前先退出Codex。下面示例使用Python SQLite backup API、只读源和一个
+尚不存在的目标文件；固定版本源为state_5.sqlite，其它版本使用其实际state文件名：
+
+```sh
+python3 - <<'PYBACKUP'
+import contextlib, os, pathlib, sqlite3
+
+home = pathlib.Path(os.environ.get("CODEX_HOME", pathlib.Path.home() / ".codex"))
+state = home / "state_5.sqlite"
+destination = pathlib.Path("closed-index.sqlite")
+with contextlib.closing(sqlite3.connect(state.resolve().as_uri() + "?mode=ro", uri=True)) as source:
+    destination.touch(exist_ok=False)
+    try:
+        with contextlib.closing(sqlite3.connect(destination)) as target:
+            source.backup(target)
+    except BaseException:
+        destination.unlink()
+        raise
+PYBACKUP
+```
+
+不要直接传入运行中的provider数据库。reader拒绝WAL/SHM/journal sidecar；没有sidecar
+本身也不能证明数据库已关闭。
+
+若已导入部分会话后root
+证明失效，会停止后续读源；错误details保留results和partial进度，未尝试slot为018并携带
+固定根原因。循环中的tombstone查询失败同样保留已完成结果，使用catalog_unavailable；
+截止时间耗尽时为budget_exhausted。

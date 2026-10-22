@@ -42,7 +42,7 @@ The barrier also fences binaries whose supported maximum is only 0601: after
 operation tables. Keep a verified SQLite online backup and the matching old
 binary before a live upgrade; linked worktrees share the database. There is no
 down migration, and binary rollback or deleting receipts cannot undo this
-transition. See the [user upgrade notes](../../commands/init.md#operation-v2-convergence-current-branch).
+transition. See the [user upgrade notes](../../commands/init.md#operation-v2-convergence).
 
 ## Implementation
 

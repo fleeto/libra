@@ -18,11 +18,9 @@
 
 #![cfg(test)]
 
-use std::collections::HashSet;
-#[cfg(unix)]
-use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+use std::{collections::HashSet, fs};
 
 use git_internal::hash::{ObjectHash, get_hash_kind};
 use libra::internal::config::ConfigKv;
@@ -3482,6 +3480,12 @@ fn branch_fixture() -> tempfile::TempDir {
     repo
 }
 
+fn branch_tip(root: &std::path::Path, name: &str) -> String {
+    let output = run_libra_command(&["rev-parse", name], root);
+    super::assert_cli_success(&output, "resolve branch tip");
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
 /// `-f`/`--force` creates a branch or RESETS an existing one to the start
 /// point (Git's `git branch -f <name> <start>`).
 #[test]
@@ -3506,10 +3510,32 @@ fn branch_force_creates_and_resets() {
     // Reset an existing branch with -f.
     let reset = run_libra_command(&["branch", "-f", "side", "HEAD~1"], root);
     super::assert_cli_success(&reset, "branch -f side HEAD~1");
+    assert!(
+        String::from_utf8_lossy(&reset.stdout).contains("Reset branch 'side'"),
+        "a forced update of an existing branch must report a reset: {}",
+        String::from_utf8_lossy(&reset.stdout)
+    );
     assert_eq!(
         String::from_utf8_lossy(&run_libra_command(&["rev-parse", "side"], root).stdout).trim(),
         first,
         "-f must re-point the existing branch"
+    );
+    let reset_json = run_libra_command(&["--json", "branch", "-f", "side", "HEAD"], root);
+    super::assert_cli_success(&reset_json, "json branch -f side HEAD");
+    let json = parse_json_stdout(&reset_json);
+    assert_eq!(json["data"]["action"], "reset");
+    assert_eq!(json["data"]["old_commit"], first);
+    assert_eq!(json["data"]["new_commit"], second);
+    let reflog = run_libra_command(&["--json", "reflog", "show", "side"], root);
+    super::assert_cli_success(&reflog, "reflog show side after two resets");
+    let reflog_json = parse_json_stdout(&reflog);
+    assert_eq!(reflog_json["data"]["count"], 3);
+    assert_eq!(reflog_json["data"]["entries"][0]["old_oid"], first);
+    assert_eq!(reflog_json["data"]["entries"][0]["new_oid"], second);
+    assert_eq!(reflog_json["data"]["entries"][0]["action"], "branch");
+    assert_eq!(
+        reflog_json["data"]["entries"][0]["message"],
+        "Reset to HEAD"
     );
 
     // Without -f an existing name is still refused with Git's wording.
@@ -3520,21 +3546,130 @@ fn branch_force_creates_and_resets() {
         "{}",
         String::from_utf8_lossy(&refused.stderr)
     );
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("Error-Code: LBR-CONFLICT-002"),
+        "{}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
 }
 
-/// `--create-reflog` is accepted (Libra always writes branch reflogs).
+#[test]
+fn branch_force_refuses_current_branch_without_moving_head() {
+    let repo = branch_fixture();
+    let root = repo.path();
+    super::assert_cli_success(&run_libra_command(&["branch", "side"], root), "branch side");
+    super::assert_cli_success(&run_libra_command(&["switch", "side"], root), "switch side");
+    let before = branch_tip(root, "side");
+
+    let output = run_libra_command(&["branch", "-f", "side", "HEAD~1"], root);
+    assert!(!output.status.success(), "checked-out branch must not move");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("currently checked out"), "{stderr}");
+    assert!(stderr.contains("Error-Code: LBR-REPO-003"), "{stderr}");
+    assert_eq!(branch_tip(root, "side"), before);
+}
+
+#[test]
+fn branch_force_refuses_branch_checked_out_in_another_worktree() {
+    let repo = branch_fixture();
+    let root = repo.path();
+    super::assert_cli_success(&run_libra_command(&["branch", "side"], root), "branch side");
+    super::assert_cli_success(
+        &run_libra_command(&["worktree", "add", "linked", "side"], root),
+        "worktree add linked side",
+    );
+    let before = branch_tip(root, "side");
+
+    let output = run_libra_command(&["branch", "-f", "side", "HEAD~1"], root);
+    assert!(
+        !output.status.success(),
+        "linked worktree branch must not move"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("checked out at worktree"), "{stderr}");
+    assert!(stderr.contains("Error-Code: LBR-CONFLICT-002"), "{stderr}");
+    assert_eq!(branch_tip(root, "side"), before);
+
+    // The same guard must hold when the writer itself runs inside a linked
+    // worktree and the branch is checked out in the main worktree.
+    let linked = root.join(".libra/worktree/linked/linked");
+    super::assert_cli_success(
+        &run_libra_command(&["switch", "--detach", "HEAD"], &linked),
+        "detach linked worktree",
+    );
+    super::assert_cli_success(
+        &run_libra_command(&["switch", "side"], root),
+        "switch side in main worktree",
+    );
+    let reverse = run_libra_command(&["branch", "-f", "side", "HEAD~1"], &linked);
+    assert!(
+        !reverse.status.success(),
+        "main worktree branch must not move"
+    );
+    let reverse_stderr = String::from_utf8_lossy(&reverse.stderr);
+    assert!(
+        reverse_stderr.contains("checked out at worktree"),
+        "{reverse_stderr}"
+    );
+    assert!(
+        reverse_stderr.contains("Error-Code: LBR-CONFLICT-002"),
+        "{reverse_stderr}"
+    );
+    assert_eq!(branch_tip(root, "side"), before);
+}
+
+#[test]
+fn branch_force_respects_protect_and_archive_policy() {
+    let repo = branch_fixture();
+    let root = repo.path();
+    super::assert_cli_success(&run_libra_command(&["branch", "side"], root), "branch side");
+    let before = branch_tip(root, "side");
+
+    for policy in ["protect", "archive"] {
+        super::assert_cli_success(
+            &run_libra_command(
+                &["metadata", "set", "--branch", "side", policy, "true"],
+                root,
+            ),
+            "set branch policy",
+        );
+        let output = run_libra_command(&["branch", "-f", "side", "HEAD~1"], root);
+        assert!(!output.status.success(), "{policy} must block branch -f");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(policy), "{policy}: {stderr}");
+        assert!(
+            stderr.contains("Error-Code: LBR-POLICY-001"),
+            "{policy}: {stderr}"
+        );
+        assert_eq!(branch_tip(root, "side"), before);
+        super::assert_cli_success(
+            &run_libra_command(&["metadata", "unset", "--branch", "side", policy], root),
+            "unset branch policy",
+        );
+    }
+}
+
+/// `--create-reflog` is accepted (CLI branch creation writes a reflog).
 #[test]
 fn branch_create_reflog_is_accepted() {
     let repo = branch_fixture();
     let root = repo.path();
     let out = run_libra_command(&["branch", "--create-reflog", "with-reflog", "HEAD"], root);
     super::assert_cli_success(&out, "branch --create-reflog");
-    let log = run_libra_command(&["reflog", "show", "with-reflog"], root);
-    assert!(
-        log.status.success(),
-        "the branch must have a reflog: {}",
-        String::from_utf8_lossy(&log.stderr)
+    let log = run_libra_command(&["--json", "reflog", "show", "with-reflog"], root);
+    super::assert_cli_success(&log, "reflog show with-reflog");
+    let json = parse_json_stdout(&log);
+    assert_eq!(json["data"]["count"], 1, "branch reflog must not be empty");
+    assert_eq!(
+        json["data"]["entries"][0]["ref_name"],
+        "refs/heads/with-reflog"
     );
+    assert_eq!(
+        json["data"]["entries"][0]["new_oid"],
+        branch_tip(root, "with-reflog")
+    );
+    assert_eq!(json["data"]["entries"][0]["action"], "branch");
+    assert_eq!(json["data"]["entries"][0]["message"], "Created from HEAD");
 }
 
 /// `--no-sort` clears the sort keys AND the configured `branch.sort`; a later
@@ -3549,6 +3684,30 @@ fn branch_no_sort_cancels_sort_keys() {
             "create branch",
         );
     }
+    super::assert_cli_success(
+        &run_libra_command(
+            &["config", "--local", "branch.sort", "--", "-refname"],
+            root,
+        ),
+        "configure branch.sort",
+    );
+    let configured = run_libra_command(&["branch", "--list"], root);
+    super::assert_cli_success(&configured, "list with configured branch.sort");
+    let configured_text = String::from_utf8_lossy(&configured.stdout);
+    let configured_override = run_libra_command(&["branch", "--no-sort", "--list"], root);
+    super::assert_cli_success(&configured_override, "--no-sort overrides config");
+    let explicit_refname = run_libra_command(&["branch", "--sort=refname", "--list"], root);
+    super::assert_cli_success(&explicit_refname, "explicit refname sort");
+    assert_eq!(
+        String::from_utf8_lossy(&configured_override.stdout),
+        String::from_utf8_lossy(&explicit_refname.stdout),
+        "--no-sort must fall back to refname order"
+    );
+    assert_ne!(
+        String::from_utf8_lossy(&configured_override.stdout),
+        configured_text,
+        "--no-sort must ignore configured branch.sort"
+    );
     // `--sort=-refname` lists newest name first; `--no-sort` falls back to
     // refname order.
     let reverse = run_libra_command(&["branch", "--sort=-refname", "--list"], root);

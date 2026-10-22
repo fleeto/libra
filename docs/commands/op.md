@@ -387,4 +387,4 @@ when conflicts are reported (the JSON output carries `outcome: "conflicted"`
 with the full conflict list).
 
 The forward-only database transition is documented under
-[operation-v2 convergence](init.md#operation-v2-convergence-current-branch).
+[operation-v2 convergence](init.md#operation-v2-convergence).

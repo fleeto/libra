@@ -18,5 +18,6 @@ pub use claude_code::{
 };
 pub use gemini::GeminiObservedAgent;
 pub use stable_promoted::{
-    STABLE_PROMOTED_SPECS, StablePromotedAgent, find_codex_rollout, stable_promoted_spec_for,
+    CodexRolloutScanLimit, STABLE_PROMOTED_SPECS, StablePromotedAgent, find_codex_rollout,
+    find_codex_rollout_for_import, stable_promoted_spec_for,
 };

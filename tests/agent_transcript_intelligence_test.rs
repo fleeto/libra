@@ -530,7 +530,7 @@ fn fixture(name: &str) -> Vec<u8> {
 /// (for dimensions its format cannot carry) stays absent without
 /// erroring. Capability accessors gate what each adapter exposes.
 #[test]
-fn claude_codex_opencode_fixtures_extract_metadata_or_partial() {
+fn claude_opencode_fixtures_extract_metadata_or_partial() {
     // Claude Code: full surface.
     let claude = agent_for(AgentKind::ClaudeCode);
     let data = fixture("claude_code.jsonl");
@@ -573,31 +573,8 @@ fn claude_codex_opencode_fixtures_extract_metadata_or_partial() {
         .unwrap();
     assert_eq!(subagent_total.input_tokens, 200);
 
-    // Codex: prompts / model / tokens / skills (best-effort rollout form).
-    let codex = agent_for(AgentKind::Codex);
-    let data = fixture("codex.jsonl");
-    let prompts = codex
-        .as_prompt_extractor()
-        .expect("codex prompts")
-        .extract_prompts(&data, 0)
-        .unwrap();
-    assert_eq!(prompts.len(), 2);
-    let usage = codex
-        .as_token_calculator()
-        .expect("codex tokens")
-        .calculate_token_usage(&data, 0)
-        .unwrap();
-    assert_eq!(usage.total_tokens, Some(260));
-    let model = codex
-        .as_model_extractor()
-        .expect("codex model")
-        .extract_model(&data)
-        .unwrap();
-    assert_eq!(model.as_deref(), Some("gpt-5.3-codex"));
-    // Codex format carries no worktree modification records — the
-    // analyzer capability is deliberately not exposed.
-    assert!(codex.as_transcript_analyzer().is_none());
-    assert!(codex.as_subagent_aware_extractor().is_none());
+    // Revised Codex capability acceptance lives in the operator-local, ignored
+    // codex_capture_local_test target (CX-14).
 
     // OpenCode: prompts / model / skills from the JSON export form.
     let opencode = agent_for(AgentKind::OpenCode);

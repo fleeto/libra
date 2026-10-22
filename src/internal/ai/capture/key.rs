@@ -921,6 +921,72 @@ pub(crate) fn load_capture_dedup_secret_with_mutation_deadline(
     }
 }
 
+pub(crate) struct ExistingCaptureSourceVerifier {
+    #[cfg(any(unix, windows))]
+    key: hmac::Key,
+    deadline: Instant,
+}
+
+impl ExistingCaptureSourceVerifier {
+    /// Revalidate the scope once, then retain only a typed HMAC capability.
+    /// Attribution cannot initialize a key or repair its private namespace.
+    pub(crate) async fn acquire<C: sea_orm::ConnectionTrait>(
+        conn: &C,
+        scope: &CaptureScope,
+        storage_path: &Path,
+        authorized_root: &Path,
+        deadline: Instant,
+    ) -> Result<Self> {
+        tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), async {
+            ensure_capture_source_commitment_deadline(deadline)?;
+            let storage_path = scope
+                .assert_capture_key_storage_binding_until(conn, storage_path, authorized_root, deadline)
+                .await?;
+            #[cfg(any(unix, windows))]
+            {
+                let private = CaptureDedupPrivateDir::open_path_read_only(
+                    &storage_path.join(CAPTURE_DEDUP_SECRET_DIR), "key directory")?;
+                let secret = private.read_secret()?.context(
+                    "repository-private capture key is missing; run libra agent doctor before retrying attribution")?;
+                ensure_capture_source_commitment_deadline(deadline)?;
+                Ok(Self { key: hmac::Key::new(hmac::HMAC_SHA256, &secret), deadline })
+            }
+            #[cfg(not(any(unix, windows)))]
+            {
+                let _ = storage_path;
+                Err(CaptureDedupUnsupportedPlatform.into())
+            }
+        }).await.map_err(|_| anyhow!(
+            crate::internal::ai::capture_scope::CaptureFinalCommitAuthorizationError::DeadlineElapsed))?
+    }
+
+    pub(crate) fn derive(
+        &self,
+        domain: CaptureSourceCommitmentDomain,
+        preimage: &[u8; 32],
+    ) -> Result<String> {
+        ensure_capture_source_commitment_deadline(self.deadline)?;
+        #[cfg(any(unix, windows))]
+        {
+            let mut context = hmac::Context::with_key(&self.key);
+            context.update(domain.tag());
+            context.update(preimage);
+            let commitment = format!(
+                "{}{}",
+                domain.prefix(),
+                hex::encode(context.sign().as_ref())
+            );
+            ensure_capture_source_commitment_deadline(self.deadline)?;
+            Ok(commitment)
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = (domain, preimage);
+            Err(CaptureDedupUnsupportedPlatform.into())
+        }
+    }
+}
+
 /// Derive a durable, non-enumerable source commitment after the caller has
 /// revalidated its repository scope and authorized root. The function repeats
 /// the root-to-storage binding internally, so a caller cannot accidentally

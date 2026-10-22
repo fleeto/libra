@@ -53,6 +53,8 @@ pub enum LifecycleEventKind {
     SubagentStart,
     /// A sub-agent finished (AG-19; see [`Self::SubagentStart`]).
     SubagentEnd,
+    /// The active turn was interrupted; this is not a successful turn end.
+    TurnInterrupted,
 }
 
 impl fmt::Display for LifecycleEventKind {
@@ -71,6 +73,7 @@ impl fmt::Display for LifecycleEventKind {
             LifecycleEventKind::SessionEnd => "session_end",
             LifecycleEventKind::SubagentStart => "subagent_start",
             LifecycleEventKind::SubagentEnd => "subagent_end",
+            LifecycleEventKind::TurnInterrupted => "turn_interrupted",
         };
         write!(f, "{value}")
     }
@@ -131,6 +134,7 @@ impl Event for LifecycleEvent {
             LifecycleEventKind::SessionEnd => "session_end",
             LifecycleEventKind::SubagentStart => "subagent_start",
             LifecycleEventKind::SubagentEnd => "subagent_end",
+            LifecycleEventKind::TurnInterrupted => "turn_interrupted",
         }
     }
 
@@ -343,6 +347,12 @@ pub fn apply_lifecycle_event(
                     .metadata
                     .insert("last_assistant_message".to_string(), json!(message));
             }
+        }
+        LifecycleEventKind::TurnInterrupted => {
+            session.metadata.insert(
+                "last_turn_interrupted_at".to_string(),
+                json!(event.timestamp),
+            );
         }
         LifecycleEventKind::SessionEnd => {}
         // AG-19: sub-agent boundaries are recorded as bounded metadata

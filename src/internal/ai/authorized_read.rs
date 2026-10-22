@@ -231,8 +231,28 @@ pub(crate) struct CancellationSafeChild {
     // raw descriptor or pipe handles open.
     process_group: Option<u32>,
     task_abort_handles: Vec<tokio::task::AbortHandle>,
+    // Functional scratch must survive cancellation until the child is reaped.
+    retained_until_reaped: Option<Box<dyn Send>>,
     #[cfg(windows)]
     job: Option<crate::utils::windows_process::CaptureJob>,
+}
+
+/// Runtime shutdown can cancel even an unpolled reaper task. Its resource
+/// must survive until process exit unless wait() positively proves reaping.
+struct RetainUnlessReaped(Option<Box<dyn Send>>);
+
+impl RetainUnlessReaped {
+    fn release_after_wait(&mut self) {
+        self.0.take();
+    }
+}
+
+impl Drop for RetainUnlessReaped {
+    fn drop(&mut self) {
+        if let Some(resource) = self.0.take() {
+            std::mem::forget(resource);
+        }
+    }
 }
 
 impl CancellationSafeChild {
@@ -242,6 +262,7 @@ impl CancellationSafeChild {
             child: Some(child),
             process_group: None,
             task_abort_handles: Vec::new(),
+            retained_until_reaped: None,
             #[cfg(windows)]
             job: None,
         }
@@ -256,6 +277,7 @@ impl CancellationSafeChild {
             process_group: child.id(),
             child: Some(child),
             task_abort_handles: Vec::new(),
+            retained_until_reaped: None,
             #[cfg(windows)]
             job: None,
         }
@@ -276,6 +298,7 @@ impl CancellationSafeChild {
                 child: Some(child),
                 process_group: None,
                 task_abort_handles: Vec::new(),
+                retained_until_reaped: None,
                 job: Some(job),
             }),
             Err(error) => {
@@ -329,10 +352,19 @@ impl CancellationSafeChild {
         // capture futures. `try_current` keeps Drop non-panicking during
         // runtime teardown; `kill_on_drop` remains the fallback in that
         // exceptional case.
+        let mut retained = RetainUnlessReaped(self.retained_until_reaped.take());
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             runtime.spawn(async move {
-                let _ = child.wait().await;
+                if child.wait().await.is_ok() {
+                    retained.release_after_wait();
+                }
             });
+        } else {
+            // start_kill/group termination already ran above. With no runtime
+            // there is no wait proof: retain private scratch until process
+            // exit rather than removing it while the helper may still run.
+            drop(child);
+            drop(retained);
         }
         group_result.and(kill_result)
     }
@@ -360,6 +392,7 @@ impl CancellationSafeChild {
     pub(crate) fn finish(&mut self) {
         self.disarm_child_after_wait();
         self.task_abort_handles.clear();
+        self.retained_until_reaped.take();
     }
 }
 
@@ -566,16 +599,29 @@ pub(crate) async fn read_live_claude_source_until(
 /// controls are limited to fixed mode/cap values by the caller. This mirrors
 /// the import descriptor handoff rather than re-addressing a provider path in
 /// the child.
-#[cfg_attr(windows, allow(unused_mut))]
 pub(crate) async fn run_registered_descriptor_helper_until(
-    mut command: tokio::process::Command,
+    command: tokio::process::Command,
     source: std::fs::File,
     output_cap: u64,
     deadline: Instant,
 ) -> RegisteredHelperOutput {
+    run_registered_descriptor_helper_retaining_until(command, source, output_cap, deadline, None)
+        .await
+}
+
+/// A parent-owned functional resource follows the helper into its cancellation
+/// reaper. It is released after wait(), rather than when the host future drops.
+#[cfg_attr(windows, allow(unused_mut))]
+pub(crate) async fn run_registered_descriptor_helper_retaining_until(
+    mut command: tokio::process::Command,
+    source: std::fs::File,
+    output_cap: u64,
+    deadline: Instant,
+    retained: Option<Box<dyn Send>>,
+) -> RegisteredHelperOutput {
     #[cfg(not(any(unix, windows)))]
     {
-        let _ = (command, source, output_cap, deadline);
+        let _ = (command, source, output_cap, deadline, retained);
         // A descriptor-bearing helper must remain contained as one owned
         // process group. Platforms without that guarantee fail closed.
         return RegisteredHelperOutput::Failed;
@@ -604,6 +650,7 @@ pub(crate) async fn run_registered_descriptor_helper_until(
             Ok(child) => child,
             Err(_) => return RegisteredHelperOutput::Failed,
         };
+        child.retained_until_reaped = retained;
         let Some(mut stdout) = child.child_mut().and_then(|child| child.stdout.take()) else {
             child.terminate_and_reap();
             return RegisteredHelperOutput::Failed;
@@ -934,6 +981,234 @@ fn valid_helper_redaction_report(
         })
 }
 
+const CODEX_SOURCE_MODE: &str = "codex-live-source-v1";
+#[derive(serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct CodexSourceControl {
+    mode: String,
+    session_id: String,
+    working_dir: PathBuf,
+    remaining_ms: u64,
+}
+
+pub(crate) async fn read_live_codex_source_until(
+    source: std::fs::File,
+    cap: u64,
+    session_id: &str,
+    working_dir: &Path,
+    deadline: Instant,
+) -> LiveClaudeSourceRead {
+    let remaining_ms = deadline
+        .saturating_duration_since(Instant::now())
+        .as_millis()
+        .min(60_000) as u64;
+    if remaining_ms == 0 {
+        return LiveClaudeSourceRead::DeadlineExceeded;
+    }
+    if cap > AUTHORIZED_READ_HELPER_MAX_CAP {
+        return LiveClaudeSourceRead::Oversize;
+    }
+    let control = CodexSourceControl {
+        mode: CODEX_SOURCE_MODE.to_owned(),
+        session_id: session_id.to_owned(),
+        working_dir: working_dir.to_owned(),
+        remaining_ms,
+    };
+    let Ok(mode) = serde_json::to_string(&control) else {
+        return LiveClaudeSourceRead::Failed;
+    };
+    if mode.len() > 16 * 1024 {
+        return LiveClaudeSourceRead::Failed;
+    }
+    let Some(mut command) = registered_helper_command(AUTHORIZED_READ_HELPER_ARG) else {
+        return LiveClaudeSourceRead::Failed;
+    };
+    command
+        .env_clear()
+        .current_dir(Path::new("/"))
+        .env(AUTHORIZED_READ_HELPER_CAP_ENV, cap.to_string())
+        .env(AUTHORIZED_READ_HELPER_MODE_ENV, mode);
+    let output_cap = capture_redacted_output_cap(cap)
+        .saturating_add(LIVE_CLAUDE_REPORT_CAP as u64)
+        .saturating_add(LIVE_CLAUDE_FRAME_HEADER_BYTES as u64);
+    match run_registered_descriptor_helper_until(command, source, output_cap, deadline).await {
+        // Only the ordinary frame codec is shared; the Codex worker performs
+        // its own scope check and decoded-value scan before emitting bytes.
+        RegisteredHelperOutput::Output(bytes) => decode_live_claude_frame(bytes, cap),
+        RegisteredHelperOutput::DeadlineExceeded => LiveClaudeSourceRead::DeadlineExceeded,
+        RegisteredHelperOutput::Failed => LiveClaudeSourceRead::Failed,
+    }
+}
+
+pub(crate) fn normalized_codex_cwd(path: &Path) -> Option<PathBuf> {
+    use std::path::Component;
+    if !path.is_absolute() {
+        return None;
+    }
+    let mut normalized = PathBuf::new();
+    for part in path.components() {
+        match part {
+            Component::ParentDir => return None,
+            Component::CurDir => {}
+            #[cfg(windows)]
+            Component::Prefix(prefix) => match prefix.kind() {
+                std::path::Prefix::Disk(drive) => {
+                    normalized.push(format!("{}:", char::from(drive.to_ascii_uppercase())))
+                }
+                _ => return None,
+            },
+            #[cfg(not(windows))]
+            Component::Prefix(_) => return None,
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    #[cfg(target_os = "macos")]
+    for (alias, canonical) in [
+        ("/var", "/private/var"),
+        ("/tmp", "/private/tmp"),
+        ("/etc", "/private/etc"),
+    ] {
+        if let Ok(suffix) = normalized.strip_prefix(alias) {
+            return Some(Path::new(canonical).join(suffix));
+        }
+    }
+    Some(normalized)
+}
+fn codex_header_matches(source: &[u8], control: &CodexSourceControl) -> bool {
+    use crate::internal::ai::observed_agents::{CanonValue, parse_canon_value};
+    let Some(line) = source
+        .split(|b| *b == b'\n')
+        .find(|line| !line.iter().all(u8::is_ascii_whitespace))
+    else {
+        return false;
+    };
+    if line.len() > 1024 * 1024 {
+        return false;
+    }
+    let Ok(header) = parse_canon_value(line) else {
+        return false;
+    };
+    if header.get("type").and_then(CanonValue::as_str) != Some("session_meta") {
+        return false;
+    }
+    let Some(payload) = header.get("payload") else {
+        return false;
+    };
+    let cwd = payload
+        .get("cwd")
+        .and_then(CanonValue::as_str)
+        .and_then(|cwd| normalized_codex_cwd(Path::new(cwd)));
+    payload.get("id").and_then(CanonValue::as_str) == Some(control.session_id.as_str())
+        && cwd.is_some()
+        && cwd == normalized_codex_cwd(&control.working_dir)
+}
+
+/// Private modes only, dispatched before any CLI/log initialization. Source
+/// bytes are read solely from the held stdin descriptor; controls cannot name
+/// a transcript to reopen. The locator returns only a bounded relative path.
+pub fn run_codex_capture_helper_if_requested(cap: u64, mode: &str) -> Option<i32> {
+    if mode == crate::internal::ai::observed_agents::codex_index::LOCATE_MODE {
+        return Some(crate::internal::ai::observed_agents::codex_index::run_locator_helper(cap));
+    }
+    if let Some(result) = super::provider_index_io::run_helper_if_requested(cap, mode) {
+        return Some(result);
+    }
+    if !mode.starts_with('{') {
+        return None;
+    }
+    if mode.len() > 16 * 1024 {
+        return Some(2);
+    }
+    let Ok(control) = serde_json::from_str::<CodexSourceControl>(mode) else {
+        return Some(2);
+    };
+    if control.mode != CODEX_SOURCE_MODE
+        || !(1..=60_000).contains(&control.remaining_ms)
+        || control.session_id.is_empty()
+        || control.session_id.len() > 64
+        || !control
+            .session_id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+        || normalized_codex_cwd(&control.working_dir).is_none()
+    {
+        return Some(2);
+    }
+    let response = duplicate_helper_stdin_descriptor().map_or_else(
+        || LiveClaudeHelperResponse::read_error(0),
+        |file| read_codex_source(file, cap, &control),
+    );
+    Some(if write_live_claude_frame(response) {
+        0
+    } else {
+        1
+    })
+}
+fn read_codex_source(
+    mut file: std::fs::File,
+    cap: u64,
+    control: &CodexSourceControl,
+) -> LiveClaudeHelperResponse {
+    use zeroize::Zeroizing;
+    if !rewind_file(&file) {
+        return LiveClaudeHelperResponse::read_error(0);
+    }
+    let raw = match read_strictly_bounded(&mut file, cap) {
+        StrictBoundedRead::Complete(bytes) => Zeroizing::new(bytes),
+        StrictBoundedRead::Oversize { observed_bytes } => {
+            return LiveClaudeHelperResponse {
+                status: LIVE_SOURCE_OVERSIZE,
+                raw_bytes: observed_bytes,
+                ..LiveClaudeHelperResponse::read_error(0)
+            };
+        }
+        StrictBoundedRead::Failed { bytes_read, .. } => {
+            return LiveClaudeHelperResponse::read_error(bytes_read);
+        }
+    };
+    if !codex_header_matches(&raw, control) {
+        return LiveClaudeHelperResponse {
+            status: LIVE_SOURCE_UNTRUSTED,
+            ..LiveClaudeHelperResponse::read_error(0)
+        };
+    }
+    let raw_bytes = raw.len() as u64;
+    let deadline = Instant::now() + std::time::Duration::from_millis(control.remaining_ms);
+    let Ok((sanitized, decoded_report)) =
+        crate::internal::ai::observed_agents::codex_reasoning::prepare_ordinary(
+            &raw,
+            Some(deadline),
+        )
+    else {
+        return LiveClaudeHelperResponse::read_error(raw_bytes);
+    };
+    drop(raw);
+    let mut response = redact_live_claude_source(sanitized, cap);
+    if response.status != LIVE_SOURCE_COMPLETE {
+        return LiveClaudeHelperResponse::read_error(raw_bytes);
+    }
+    let Ok(mut report) = serde_json::from_slice::<RedactionReport>(&response.redaction_report)
+    else {
+        return LiveClaudeHelperResponse::read_error(raw_bytes);
+    };
+    report.bytes_scanned = raw_bytes as usize;
+    report.bytes_redacted = report
+        .bytes_redacted
+        .saturating_add(decoded_report.bytes_redacted);
+    report.dropped_matches = report
+        .dropped_matches
+        .saturating_add(decoded_report.match_count());
+    let Ok(report) = serde_json::to_vec(&report) else {
+        return LiveClaudeHelperResponse::read_error(raw_bytes);
+    };
+    if report.len() > LIVE_CLAUDE_REPORT_CAP {
+        return LiveClaudeHelperResponse::read_error(raw_bytes);
+    }
+    response.raw_bytes = raw_bytes;
+    response.redaction_report = report;
+    response
+}
+
 /// Execute the descriptor-only live-source helper mode before normal CLI
 /// startup. stdin is the parent-pinned source capability, never a request
 /// frame. This helper does not receive or reopen a provider path.
@@ -950,7 +1225,7 @@ pub fn run_live_claude_source_helper(cap: u64) -> i32 {
 }
 
 #[cfg(unix)]
-fn duplicate_helper_stdin_descriptor() -> Option<std::fs::File> {
+pub(crate) fn duplicate_helper_stdin_descriptor() -> Option<std::fs::File> {
     use std::os::fd::FromRawFd;
 
     // SAFETY: dup creates one owned descriptor referring to the helper's
@@ -964,12 +1239,12 @@ fn duplicate_helper_stdin_descriptor() -> Option<std::fs::File> {
 }
 
 #[cfg(not(any(unix, windows)))]
-fn duplicate_helper_stdin_descriptor() -> Option<std::fs::File> {
+pub(crate) fn duplicate_helper_stdin_descriptor() -> Option<std::fs::File> {
     None
 }
 
 #[cfg(windows)]
-fn duplicate_helper_stdin_descriptor() -> Option<std::fs::File> {
+pub(crate) fn duplicate_helper_stdin_descriptor() -> Option<std::fs::File> {
     use std::os::windows::io::{AsRawHandle, BorrowedHandle};
     let stdin = std::io::stdin();
     // SAFETY: stdin remains live while its borrowed handle is duplicated.
@@ -1137,6 +1412,141 @@ fn write_live_claude_frame(response: LiveClaudeHelperResponse) -> bool {
 
 pub(crate) fn provider_file_identity(_source_id: &str) -> String {
     SOURCE_IDENTITY_NOT_RETAINED.to_string()
+}
+
+#[cfg(test)]
+#[cfg(feature = "test-live-agent")]
+mod codex_index_source_tests {
+    use super::*;
+
+    fn control(cwd: &str) -> CodexSourceControl {
+        CodexSourceControl {
+            mode: CODEX_SOURCE_MODE.into(),
+            session_id: "scope-session".into(),
+            working_dir: cwd.into(),
+            remaining_ms: 1000,
+        }
+    }
+
+    #[test]
+    #[ignore = "operator-local Codex acceptance; never run in CI"]
+    fn codex_index_scope_requires_exact_subdirectory_and_valid_first_header() {
+        let body = |cwd: &str| {
+            serde_json::to_vec(&serde_json::json!({"type":"session_meta", "payload":{"id":"scope-session", "cwd":cwd}})).unwrap()
+        };
+        let cwd = if cfg!(windows) {
+            "C:/work/repo/sub"
+        } else {
+            "/work/repo/sub"
+        };
+        let parent = if cfg!(windows) {
+            "C:/work/repo"
+        } else {
+            "/work/repo"
+        };
+        assert!(codex_header_matches(&body(cwd), &control(cwd)));
+        assert!(!codex_header_matches(&body(parent), &control(cwd)));
+        assert!(!codex_header_matches(&body(cwd), &control(parent)));
+        assert!(!codex_header_matches(
+            b"{\"type\":\"session_meta\",\"type\":\"session_meta\"}",
+            &control(cwd)
+        ));
+        let mut late = b"{\"type\":\"event_msg\"}\n".to_vec();
+        late.extend_from_slice(&body(cwd));
+        assert!(!codex_header_matches(&late, &control(cwd)));
+        let mut truncated = body(cwd);
+        truncated.pop();
+        assert!(!codex_header_matches(&truncated, &control(cwd)));
+        assert!(!codex_header_matches(
+            &vec![b' '; 1024 * 1024 + 1],
+            &control(cwd)
+        ));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "operator-local Codex acceptance; never run in CI"]
+    fn codex_index_scope_accepts_only_known_system_aliases() {
+        for (alias, canonical) in [
+            ("/tmp/repo/sub", "/private/tmp/repo/sub"),
+            ("/var/repo/sub", "/private/var/repo/sub"),
+            ("/etc/repo/sub", "/private/etc/repo/sub"),
+        ] {
+            assert_eq!(
+                normalized_codex_cwd(Path::new(alias)),
+                normalized_codex_cwd(Path::new(canonical))
+            );
+            assert_eq!(
+                normalized_codex_cwd(Path::new(&format!("{alias}/./"))),
+                normalized_codex_cwd(Path::new(canonical))
+            );
+        }
+        assert!(normalized_codex_cwd(Path::new("/tmp/repo/../other")).is_none());
+        assert!(normalized_codex_cwd(Path::new("repo/sub")).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "operator-local Codex acceptance; never run in CI"]
+    fn codex_index_no_runtime_drop_keeps_resource_until_termination_is_proven() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        struct Resource(Arc<AtomicUsize>);
+        impl Drop for Resource {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        for shutdown_in_context in [false, true] {
+            let dropped = Arc::new(AtomicUsize::new(0));
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let (pid, guard) = runtime.block_on(async {
+                let mut command = tokio::process::Command::new("/bin/sh");
+                command.args(["-c", "exec sleep 30"]).kill_on_drop(true);
+                configure_private_helper_process_group(&mut command);
+                let mut guard = CancellationSafeChild::new_process_group(command.spawn().unwrap());
+                let pid = guard.child_mut().unwrap().id().unwrap() as i32;
+                guard.retained_until_reaped = Some(Box::new(Resource(dropped.clone())));
+                if shutdown_in_context {
+                    // Enqueue the reaper without yielding. Runtime shutdown then
+                    // cancels it unpolled: its scratch guard must retain ownership.
+                    drop(guard);
+                    (pid, None)
+                } else {
+                    (pid, Some(guard))
+                }
+            });
+            drop(runtime);
+            drop(guard); // Also covers dropping a child with no runtime context.
+            assert_eq!(
+                dropped.load(Ordering::SeqCst),
+                0,
+                "context={shutdown_in_context}"
+            );
+            let end = Instant::now() + std::time::Duration::from_secs(2);
+            loop {
+                let mut status = 0;
+                // SAFETY: this test owns this direct child; WNOHANG never blocks.
+                let result = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+                if result == pid
+                    || (result == -1
+                        && std::io::Error::last_os_error().raw_os_error() == Some(libc::ECHILD))
+                {
+                    break;
+                }
+                assert!(
+                    Instant::now() < end,
+                    "no-runtime drop did not terminate child"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+    }
 }
 
 #[cfg(test)]

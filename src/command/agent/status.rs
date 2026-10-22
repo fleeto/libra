@@ -9,34 +9,51 @@ use sea_orm::{ConnectionTrait, Statement};
 use serde::Serialize;
 
 use crate::{
-    internal::db::get_db_conn_instance,
+    internal::{
+        ai::capture::diagnostics::{self, CaptureDiagnostics},
+        db::get_db_conn_instance,
+    },
     utils::{
         error::{CliError, CliResult},
         output::{OutputConfig, emit_json_data},
+        util,
     },
 };
 
 #[derive(Args, Debug)]
 pub struct StatusArgs {}
 
-#[derive(Debug, Default, Serialize)]
+#[derive(Debug, Serialize)]
 struct StatusOutput {
     sessions_active: i64,
     sessions_stopped: i64,
     sessions_other: i64,
     last_checkpoint_at: Option<i64>,
+    capture_diagnostics: CaptureDiagnostics,
 }
 
 pub async fn execute_safe(_args: StatusArgs, output: &OutputConfig) -> CliResult<()> {
     let conn = get_db_conn_instance().await;
     let backend = conn.get_database_backend();
+    let capture_diagnostics = util::try_get_storage_path(None)
+        .map(|storage| diagnostics::summarize(&storage))
+        .unwrap_or_else(|_| CaptureDiagnostics::unavailable());
 
     // The migration that creates these tables ships in `2026050303_agent_capture`.
     // Older databases may not have run it yet (e.g. a `libra init` from before
     // this version); in that case sqlite_master returns nothing and we report
     // an empty status rather than failing.
     if !table_exists(&conn, "agent_session").await? {
-        return emit(&StatusOutput::default(), output);
+        return emit(
+            &StatusOutput {
+                sessions_active: 0,
+                sessions_stopped: 0,
+                sessions_other: 0,
+                last_checkpoint_at: None,
+                capture_diagnostics,
+            },
+            output,
+        );
     }
 
     let active = scalar_count(
@@ -83,6 +100,7 @@ pub async fn execute_safe(_args: StatusArgs, output: &OutputConfig) -> CliResult
             sessions_stopped: stopped,
             sessions_other: other,
             last_checkpoint_at: last,
+            capture_diagnostics,
         },
         output,
     )
@@ -102,6 +120,10 @@ fn emit(payload: &StatusOutput, output: &OutputConfig) -> CliResult<()> {
         Some(ts) => println!("Last checkpoint:   {ts} (unix epoch seconds)"),
         None => println!("Last checkpoint:   (none)"),
     }
+    println!(
+        "Codex diagnostics: {}",
+        payload.capture_diagnostics.describe()
+    );
     Ok(())
 }
 

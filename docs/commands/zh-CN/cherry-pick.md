@@ -21,7 +21,7 @@ libra cherry-pick (--continue | --skip | --abort | --quit)
 
 这适合在不合并的情况下，将一个分支上的提交选择性应用到另一个分支。提供多个提交时，它们会按给定顺序应用，每个提交都会先成为当前分支上的新提交，然后再处理下一个。
 
-该命令要求处于活动分支（不是 detached HEAD）。非 merge commit 直接应用；cherry-pick merge commit 需用 `-m <n>`/`--mainline <n>` 指定沿哪个父提交做 diff。
+该命令在分支**或** detached HEAD 上都可用（与 Git 一致）：在 detached HEAD 上发起的 pick 会把提交落在该 detached HEAD 并推进它（不移动任何分支）；此时序列以 `HEAD` 记录 `head_name`，因此 `--continue` 与 `--abort` 都继续作用于 detached 引用（abort 会恢复 pick 开始前 HEAD 指向的提交）。非 merge commit 直接应用；cherry-pick merge commit 需用 `-m <n>`/`--mainline <n>` 指定沿哪个父提交做 diff。
 
 自动提交的 cherry-pick 会保留源提交的 author metadata（姓名、邮箱、author date 与时区）。committer 使用当前身份/日期，并遵循 `GIT_COMMITTER_*` 覆盖。带签名的源提交会先剥离 `gpgsig` 消息块，再执行消息清理与 trailer 追加，因此签名块不会成为重放后的 subject。
 
@@ -299,7 +299,7 @@ Git 兼容配置 `merge.conflictStyle` 同样被尊重（与 `libra merge` 一�
 | 代码 | 条件 | 提示 |
 |------|-----------|------|
 | `LBR-REPO-001` | 不在 libra 仓库内 | 使用 `libra init` 初始化或进入仓库 |
-| `LBR-REPO-003` | HEAD detached、`--continue`/`--skip`/`--abort`/`--quit` 时没有进行中的 cherry-pick、`--continue` 在错误的分支上，或被中断的 `--skip`/`--abort` 尚未完成（完成前 `--continue` 拒绝） | 切换到分支 / 先发起 cherry-pick / 切回序列所在分支 / 重跑被中断的 `--skip` 或 `--abort`（或用 `--quit` 放弃序列） |
+| `LBR-REPO-003` | `--continue`/`--skip`/`--abort`/`--quit` 时没有进行中的 cherry-pick、`--continue` 在错误的分支上，或被中断的 `--skip`/`--abort` 尚未完成（完成前 `--continue` 拒绝） | 切换到分支 / 先发起 cherry-pick / 切回序列所在分支 / 重跑被中断的 `--skip` 或 `--abort`（或用 `--quit` 放弃序列） |
 | `LBR-REPO-003` | `--continue` 时之后的 reset 已结束该停止提交 | 用 `libra cherry-pick --skip` 消化剩余提交，或用 `--quit` 清除序列并保留 reset 结果；`--abort` 则恢复序列开始前状态（丢弃之后的已跟踪改动，包括 reset 目标） |
 | `LBR-REPO-002` | 序列行声称被停提交已结束，却没有剩余提交——任何写入方都不会产生这种形态 | 状态原样不动：用 `libra cherry-pick --abort` 或 `--quit` 结束序列 |
 | `LBR-CLI-003` | 无法解析提交引用 | 使用 `libra log` 查找有效提交引用 |

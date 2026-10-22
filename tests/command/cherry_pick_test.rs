@@ -4645,3 +4645,155 @@ fn test_cherry_pick_materializes_executable_bit_including_conflicts() {
         "a conflicted executable file must keep the execute bit"
     );
 }
+
+// ---------------------------------------------------------------------------
+// issue #528: cherry-pick on a detached HEAD.
+// ---------------------------------------------------------------------------
+
+/// Fixture: `main` has `ours` on `f.txt`; `side` has `theirs` on the same line.
+/// Returns (repo, theirs_commit).
+fn detached_conflict_fixture() -> (tempfile::TempDir, String) {
+    let repo = create_committed_repo_via_cli();
+    let root = repo.path();
+    fs::write(root.join("f.txt"), "base\n").expect("write base");
+    assert_cli_success(&run_libra_command(&["add", "f.txt"], root), "stage base");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "base", "--no-verify"], root),
+        "commit base",
+    );
+    assert_cli_success(
+        &run_libra_command(&["checkout", "-b", "side"], root),
+        "side",
+    );
+    fs::write(root.join("f.txt"), "theirs\n").expect("write theirs");
+    assert_cli_success(&run_libra_command(&["add", "f.txt"], root), "stage theirs");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "theirs", "--no-verify"], root),
+        "commit theirs",
+    );
+    let theirs = String::from_utf8_lossy(&run_libra_command(&["rev-parse", "HEAD"], root).stdout)
+        .trim()
+        .to_string();
+    assert_cli_success(&run_libra_command(&["checkout", "main"], root), "main");
+    fs::write(root.join("f.txt"), "ours\n").expect("write ours");
+    assert_cli_success(&run_libra_command(&["add", "f.txt"], root), "stage ours");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "ours", "--no-verify"], root),
+        "commit ours",
+    );
+    (repo, theirs)
+}
+
+/// A single pick on a detached HEAD commits onto the detached HEAD and moves it
+/// (Git allows this; Libra used to refuse with `cannot cherry-pick on detached
+/// HEAD`).
+#[test]
+fn cherry_pick_on_detached_head_moves_the_detached_ref() {
+    let repo = create_committed_repo_via_cli();
+    let root = repo.path();
+    assert_cli_success(
+        &run_libra_command(&["checkout", "-b", "side"], root),
+        "side",
+    );
+    fs::write(root.join("side.txt"), "s\n").expect("write side");
+    assert_cli_success(&run_libra_command(&["add", "side.txt"], root), "stage side");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "side", "--no-verify"], root),
+        "commit side",
+    );
+    let side = String::from_utf8_lossy(&run_libra_command(&["rev-parse", "HEAD"], root).stdout)
+        .trim()
+        .to_string();
+    assert_cli_success(&run_libra_command(&["checkout", "main"], root), "main");
+    assert_cli_success(
+        &run_libra_command(&["checkout", "--detach"], root),
+        "detach",
+    );
+    let base = String::from_utf8_lossy(&run_libra_command(&["rev-parse", "HEAD"], root).stdout)
+        .trim()
+        .to_string();
+
+    let out = run_libra_command(&["cherry-pick", &side], root);
+    assert_cli_success(&out, "cherry-pick on detached HEAD");
+    let head = String::from_utf8_lossy(&run_libra_command(&["rev-parse", "HEAD"], root).stdout)
+        .trim()
+        .to_string();
+    assert_ne!(head, base, "the detached HEAD must advance");
+    let subject = run_libra_command(&["log", "-1", "--format=%s"], root);
+    assert_eq!(String::from_utf8_lossy(&subject.stdout).trim(), "side");
+    // No branch was moved: `main` still points at the pre-detach commit.
+    let main_tip = run_libra_command(&["rev-parse", "main"], root);
+    assert_eq!(String::from_utf8_lossy(&main_tip.stdout).trim(), base);
+}
+
+/// A conflicted pick started on a detached HEAD can be resolved with
+/// `--continue` and rolled back with `--abort`, both of which must keep the
+/// detached ref (not a branch).
+#[test]
+fn cherry_pick_on_detached_head_continue_and_abort() {
+    let (repo, theirs) = detached_conflict_fixture();
+    let root = repo.path();
+    assert_cli_success(
+        &run_libra_command(&["checkout", "--detach"], root),
+        "detach",
+    );
+    let base = String::from_utf8_lossy(&run_libra_command(&["rev-parse", "HEAD"], root).stdout)
+        .trim()
+        .to_string();
+
+    // The pick conflicts and records a sequence.
+    let pick = run_libra_command(&["cherry-pick", &theirs], root);
+    assert!(!pick.status.success(), "the pick must conflict");
+    assert_eq!(
+        String::from_utf8_lossy(&run_libra_command(&["ls-files", "-u"], root).stdout)
+            .lines()
+            .count(),
+        3,
+        "an unmerged entry is recorded"
+    );
+
+    // `--continue` after resolving lands the pick on the detached HEAD.
+    fs::write(root.join("f.txt"), "resolved\n").expect("resolve");
+    assert_cli_success(
+        &run_libra_command(&["add", "f.txt"], root),
+        "stage resolution",
+    );
+    let cont = run_libra_command(&["cherry-pick", "--continue"], root);
+    assert_cli_success(&cont, "cherry-pick --continue on detached HEAD");
+    assert_eq!(
+        String::from_utf8_lossy(&run_libra_command(&["log", "-1", "--format=%s"], root).stdout)
+            .trim(),
+        "theirs"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&run_libra_command(&["rev-parse", "main"], root).stdout).trim(),
+        base,
+        "continue must not move a branch"
+    );
+
+    // A second conflicted pick, then `--abort` restores the detached base.
+    let (repo2, theirs2) = detached_conflict_fixture();
+    let root2 = repo2.path();
+    assert_cli_success(
+        &run_libra_command(&["checkout", "--detach"], root2),
+        "detach again",
+    );
+    let base2 = String::from_utf8_lossy(&run_libra_command(&["rev-parse", "HEAD"], root2).stdout)
+        .trim()
+        .to_string();
+    let pick2 = run_libra_command(&["cherry-pick", &theirs2], root2);
+    assert!(!pick2.status.success(), "the second pick must conflict");
+    let abort = run_libra_command(&["cherry-pick", "--abort"], root2);
+    assert_cli_success(&abort, "cherry-pick --abort on detached HEAD");
+    assert_eq!(
+        String::from_utf8_lossy(&run_libra_command(&["rev-parse", "HEAD"], root2).stdout).trim(),
+        base2,
+        "--abort restores the detached base commit"
+    );
+    assert!(
+        String::from_utf8_lossy(&run_libra_command(&["status", "--porcelain"], root2).stdout)
+            .trim()
+            .is_empty(),
+        "the worktree is clean after abort"
+    );
+}

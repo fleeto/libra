@@ -97,9 +97,6 @@ enum CherryPickError {
     #[error("not a libra repository")]
     NotInRepo,
 
-    #[error("cannot cherry-pick on detached HEAD")]
-    DetachedHead,
-
     #[error("failed to resolve commit reference '{0}'")]
     InvalidCommit(String),
 
@@ -211,7 +208,6 @@ impl CherryPickError {
     fn stable_code(&self) -> StableErrorCode {
         match self {
             Self::NotInRepo => StableErrorCode::RepoNotFound,
-            Self::DetachedHead => StableErrorCode::RepoStateInvalid,
             Self::InvalidCommit(_) => StableErrorCode::CliInvalidTarget,
             Self::MergeCommitUnsupported => StableErrorCode::CliInvalidArguments,
             Self::InvalidMainline(_) => StableErrorCode::CliInvalidArguments,
@@ -246,9 +242,6 @@ impl From<CherryPickError> for CliError {
         let message = error.to_string();
         match error {
             CherryPickError::NotInRepo => CliError::repo_not_found(),
-            CherryPickError::DetachedHead => CliError::fatal(message)
-                .with_stable_code(stable_code)
-                .with_hint("switch to a branch first with 'libra switch <branch>'"),
             CherryPickError::InvalidCommit(_) => CliError::fatal(message)
                 .with_stable_code(stable_code)
                 .with_hint("use 'libra log' to find valid commit references"),
@@ -926,11 +919,20 @@ fn record_outcome(outcome: PickOutcome, commit_id: &ObjectHash, acc: &mut PickAc
     }
 }
 
-/// Current branch name, or [`CherryPickError::DetachedHead`] when HEAD is detached.
+/// Sentinel recorded as the sequencer `head_name` when the sequence started on
+/// a detached HEAD. Git's sequencer stores `detached HEAD` for the same case;
+/// the literal `HEAD` keeps the value a valid ref name for the shared row.
+const DETACHED_HEAD_SENTINEL: &str = "HEAD";
+
+/// The branch HEAD points at, or [`DETACHED_HEAD_SENTINEL`] when detached.
+///
+/// Cherry-pick is allowed on a detached HEAD (Git commits onto the detached
+/// HEAD and moves it); the sentinel lets the persisted sequence remember that
+/// no branch ref must be updated when a pick lands (issue #528).
 async fn current_branch_name() -> Result<String, CherryPickError> {
     match Head::current().await {
         Head::Branch(name) => Ok(name),
-        Head::Detached(_) => Err(CherryPickError::DetachedHead),
+        Head::Detached(_) => Ok(DETACHED_HEAD_SENTINEL.to_string()),
     }
 }
 
@@ -1040,10 +1042,6 @@ async fn run_cherry_pick(
 
     if let Some(flag) = reject_unsupported_options(&args) {
         return Err(CherryPickError::Unsupported(flag.to_string()));
-    }
-
-    if let Head::Detached(_) = Head::current().await {
-        return Err(CherryPickError::DetachedHead);
     }
 
     // A brand-new pick must not start on top of an in-progress sequence.
@@ -3010,8 +3008,21 @@ async fn resolve_commit(reference: &str) -> Result<ObjectHash, String> {
 }
 
 async fn update_head<C: ConnectionTrait>(db: &C, commit_id: &str) -> Result<(), sea_orm::DbErr> {
-    if let Head::Branch(name) = Head::current_with_conn(db).await {
-        Branch::update_branch_with_conn(db, &name, commit_id, None).await?;
+    match Head::current_with_conn(db).await {
+        Head::Branch(name) => Branch::update_branch_with_conn(db, &name, commit_id, None).await?,
+        Head::Detached(_) => {
+            // A detached pick advances the detached HEAD itself (no branch ref).
+            let target = crate::internal::object_format::parse_repo_oid(commit_id)
+                .map_err(|error| sea_orm::DbErr::Custom(error.to_string()))?;
+            Head::update_for_scope_result_with_conn(
+                db,
+                Head::Detached(target),
+                None,
+                &crate::internal::worktree_scope::WorktreeScope::current(),
+            )
+            .await
+            .map_err(|error| sea_orm::DbErr::Custom(error.to_string()))?;
+        }
     }
     Ok(())
 }
@@ -3246,10 +3257,6 @@ mod tests {
             "not a libra repository",
         );
         assert_eq!(
-            CherryPickError::DetachedHead.to_string(),
-            "cannot cherry-pick on detached HEAD",
-        );
-        assert_eq!(
             CherryPickError::InvalidCommit("deadbeef".to_string()).to_string(),
             "failed to resolve commit reference 'deadbeef'",
         );
@@ -3376,10 +3383,6 @@ mod tests {
         assert_eq!(
             CherryPickError::NotInRepo.stable_code(),
             StableErrorCode::RepoNotFound,
-        );
-        assert_eq!(
-            CherryPickError::DetachedHead.stable_code(),
-            StableErrorCode::RepoStateInvalid,
         );
         assert_eq!(
             CherryPickError::InvalidCommit("deadbeef".to_string()).stable_code(),

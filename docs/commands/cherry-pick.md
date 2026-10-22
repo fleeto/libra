@@ -21,7 +21,7 @@ libra cherry-pick (--continue | --skip | --abort | --quit)
 
 This is useful for selectively applying commits from one branch to another without merging. When multiple commits are supplied they are applied in the order given, each one becoming a new commit on the current branch before the next is processed.
 
-The command requires an active branch (not detached HEAD). Non-merge commits are applied directly; merge commits require `-m <parent-number>` to choose which parent to diff against.
+The command works on a branch **or** on a detached HEAD, like Git: a pick started on a detached HEAD commits onto it and advances the detached ref (no branch is moved), and a sequence started there records `HEAD` as its `head_name`, so `--continue` and `--abort` keep operating on the detached ref (abort restores the commit HEAD pointed at when the pick started). Non-merge commits are applied directly; merge commits require `-m <parent-number>` to choose which parent to diff against.
 
 Auto-committed picks preserve the source commit's author metadata (name, email,
 author date, and timezone). The committer is the current identity/date, honoring
@@ -302,7 +302,7 @@ The Git-compatible `merge.conflictStyle` config is honored, same as `libra merge
 | Code | Condition | Hint |
 |------|-----------|------|
 | `LBR-REPO-001` | Not inside a libra repository | Initialize with `libra init` or navigate to a repo |
-| `LBR-REPO-003` | HEAD detached, no cherry-pick in progress for `--continue`/`--skip`/`--abort`/`--quit`, `--continue` on the wrong branch, or an interrupted `--skip`/`--abort` that has not finished (`--continue` refuses until it does) | Switch to a branch / start a pick first / switch back to the sequence branch / re-run the interrupted `--skip` or `--abort` (or forget the sequence with `--quit`) |
+| `LBR-REPO-003` | No cherry-pick in progress for `--continue`/`--skip`/`--abort`/`--quit`, `--continue` on the wrong branch, or an interrupted `--skip`/`--abort` that has not finished (`--continue` refuses until it does) | Switch to a branch / start a pick first / switch back to the sequence branch / re-run the interrupted `--skip` or `--abort` (or forget the sequence with `--quit`) |
 | `LBR-REPO-003` | `--continue` on a stop a later reset already concluded the stopped commit | Drain the rest with `libra cherry-pick --skip`, or forget the sequence with `--quit` (keeps the reset result); `--abort` restores the pre-sequence state (discarding later tracked changes, including the reset target) |
 | `LBR-REPO-002` | The sequence row claims its stopped commit was concluded while no commits remain — a shape no writer produces | Nothing is changed: end the sequence with `libra cherry-pick --abort` or `--quit` |
 | `LBR-CLI-003` | Cannot resolve a commit reference | Use `libra log` to find valid commit references |

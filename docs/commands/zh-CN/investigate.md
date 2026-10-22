@@ -39,6 +39,8 @@ CLI 形态，环境变量只注入 allowlist。investigator 永远不会在仓�
 `libra` 命令不会向上自动发现主仓库。访问仓库需要 runtime 显式提供已验证的
 scope。Libra 不会把内部 OS 沙箱施加给外部 investigator CLI；该 CLI 自身的沙箱设置
 决定它能否访问兄弟工作区或共享存储。
+调查不可信内容时，请配置外部 CLI 自身的文件系统沙箱，只允许访问本次运行的
+workspace 和必需目录；Libra 内部沙箱不会限制该进程。
 
 使用 `start --checkpoint <id>` 时，调查范围改为一个已捕获的 agent checkpoint：
 investigator 的工作区就是该 checkpoint 自身的内容——`metadata.json`、可选的

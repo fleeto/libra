@@ -39,6 +39,8 @@ CLI，并把它们的 findings 记录为一次可审计的 run。首批可启动
 `libra` 命令不会向上自动发现主仓库。访问仓库需要 runtime 显式提供已验证的
 scope。Libra 不会把内部 OS 沙箱施加给外部 reviewer CLI；该 CLI 自身的沙箱设置
 决定它能否访问兄弟工作区或共享存储。
+审查不可信内容时，请配置外部 CLI 自身的文件系统沙箱，只允许访问本次运行的
+workspace 和必需目录；Libra 内部沙箱不会限制该进程。
 
 run 在前台阻塞直到每个 reviewer 得到结果，并恰好落在五个 terminal state
 之一：`success`、`error`、`cancelled`、`timeout`、`partial`。按 Ctrl-C（或

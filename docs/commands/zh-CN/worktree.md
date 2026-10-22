@@ -35,7 +35,7 @@ libra worktree doctor [<workspace-id>] [--limit <n>] [--cursor <cursor>]
 
 磁盘 `worktrees.json` 使用 `schema_version: 4`，条目带可选 `name`。现有 v2/v3 registry 仍可读取；正常变更时写入当前格式，保留原身份与 v3 注册代次（`epoch_counter` 和各条目的 `epoch`）。旧无名条目和主工作树不自动分配名称。本次变化不移动旧目录、不批量补名称，也不新增目录迁移命令；已有无名 worktree 可用 `--path` 选择，`worktree add <NAME> --path <注册路径>` 可为活跃无名条目命名，或为已分离无名条目命名并重新挂接。registry 通过原子替换写入。公开的 `worktree list` JSON 使用版本 2，与磁盘 registry 版本独立。
 
-旧共享 `.libra` 符号链接布局仍保留原有诊断和显式 `repair --migrate-layout` 流程；该操作修复 gitdir 隔离，不把 worktree 搬到新的默认目录。旧二进制不得重写新 registry 格式；创建命名 worktree 后应继续使用兼容的 Libra 版本。
+旧共享 `.libra` 符号链接布局仍保留原有诊断和显式 `repair --migrate-layout` 流程；该操作修复 gitdir 隔离，不把 worktree 搬到新的默认目录。registry schema 4 会使旧 v2/v3 registry 读取器拒绝文件，而不是静默丢弃名称。能力标记另外使 Libra 0.30.66 及更早版本拒绝整个仓库；它不能证明所有中间版本都理解 schema 4。v0.30.85 对 registry 的任何写入都会使用 schema 4，即使没有命名条目。此后请使用 v0.30.85 或包含其 registry 与身份安全修复的后续发行版执行 worktree 命令。较早的 v0.31.0 tag 虽能理解 schema 4，却缺少这些修复；不要用它修改这些 worktree。
 
 **消解 registry 身份冲突。** 旧 registry 可能存在两个条目占用同一个由路径推导的身份。变更类 worktree 操作会拒绝该歧义。`libra worktree doctor` 指出冲突条目；`libra worktree repair --path <PATH> --resolve-identity --yes` 分离指定条目，同时保留文件和 scoped 状态，剩余活跃条目可继续使用。幸存条目活跃时，被分离条目不能重新挂接；只要任何其他注册条目仍共享身份，`remove --delete-dir` 就会拒绝，以免清除另一个条目的 scoped 状态。请备份两个目录、继续使用幸存条目，并保留分离条目等待人工恢复；将幸存条目也分离并不会使删除变安全。本版本不提供自动身份迁移。
 
@@ -58,7 +58,7 @@ libra worktree doctor [<workspace-id>] [--limit <n>] [--cursor <cursor>]
 
 `--create-branch` 是 `--new-branch` 的别名。省略目标时，新 worktree 以**源提交的分离 HEAD** 创建；名称不会隐式创建同名分支。不支持 `--lock`、`--orphan`、`--no-checkout`、远程猜测和 `-B`；创建后可用 `worktree lock` 锁定。
 
-标准构建从 v0.30.69 起支持 `add --force` 与 `remove --force`，v0.30.85 也包含这些标志。较早发布的 `v0.31.0` Linux/macOS 二进制尚未实现。若已安装 v0.31.0，待 v0.30.85 发布后请使用[签名稳定通道安装脚本](upgrade.md)替换；`libra upgrade` 不会选择版本号更低的构建。
+标准构建从 v0.30.69 起支持 `add --force` 与 `remove --force`，v0.30.85 也包含这些标志。较早发布的 `v0.31.0` Linux/macOS 二进制尚未实现。若已安装 v0.31.0，请在稳定通道提供 v0.30.85 或包含其修复的后续发行版时使用[签名稳定通道安装脚本](upgrade.md)替换；`libra upgrade` 不会选择版本号更低的构建。
 
 对于已命名且分离的 registry 条目，`add <NAME>` 校验已保存身份和共享存储指针，然后重新挂接现有文件与暂存状态。对无名且分离的条目，使用 `add <NAME> --path <注册路径>` 命名并重新挂接。重新挂接时拒绝 `TARGET`、`-b` 和 `--detach`；对已命名条目指定 `--path` 时，必须等于注册路径。tombstone 条目清理成功前继续占用名称。
 
@@ -383,8 +383,8 @@ worktree hotfix /Users/alice/projects/my-repo/.libra/worktree/linked/hotfix [loc
 **`worktree remove`**：
 
 ```text
-Removed worktree '/Users/alice/projects/my-feature' from registry. Directory kept on disk.
-Removed worktree '/Users/alice/projects/my-feature' from registry and deleted directory.
+Detached worktree '/Users/alice/projects/my-repo/.libra/worktree/linked/my-feature' from the registry. Directory and its state kept on disk (frozen); re-add it with `libra worktree add` or delete it with `--delete-dir`.
+Removed worktree '/Users/alice/projects/my-repo/.libra/worktree/linked/my-feature' from registry and deleted directory.
 ```
 
 **`worktree prune`**（有陈旧条目）：
@@ -413,8 +413,9 @@ No worktrees to prune
   "ok": true,
   "command": "worktree.add",
   "data": {
-    "path": "/Users/alice/projects/my-feature",
-    "already_exists": false
+    "path": "/Users/alice/projects/my-repo/.libra/worktree/linked/my-feature",
+    "already_exists": false,
+    "reattached": false
   }
 }
 ```
@@ -434,7 +435,24 @@ No worktrees to prune
         "is_main": true,
         "locked": false,
         "lock_reason": null,
-        "exists": true
+        "exists": true,
+        "worktree_id": null,
+        "state": "active",
+        "epoch": 0,
+        "layout": "main"
+      },
+      {
+        "name": "my-feature",
+        "kind": "worktree",
+        "path": "/Users/alice/projects/my-repo/.libra/worktree/linked/my-feature",
+        "is_main": false,
+        "locked": false,
+        "lock_reason": null,
+        "exists": true,
+        "worktree_id": "1f0c…",
+        "state": "active",
+        "epoch": 1,
+        "layout": "linked-v2"
       }
     ]
   }
@@ -448,7 +466,7 @@ No worktrees to prune
   "ok": true,
   "command": "worktree.lock",
   "data": {
-    "path": "/Users/alice/projects/my-feature",
+    "path": "/Users/alice/projects/my-repo/.libra/worktree/linked/my-feature",
     "locked": true,
     "lock_reason": "long-running experiment",
     "changed": true
@@ -463,7 +481,7 @@ No worktrees to prune
   "ok": true,
   "command": "worktree.unlock",
   "data": {
-    "path": "/Users/alice/projects/my-feature",
+    "path": "/Users/alice/projects/my-repo/.libra/worktree/linked/my-feature",
     "locked": false,
     "changed": true
   }
@@ -477,7 +495,7 @@ No worktrees to prune
   "ok": true,
   "command": "worktree.move",
   "data": {
-    "source": "/Users/alice/projects/my-feature",
+    "source": "/Users/alice/projects/my-repo/.libra/worktree/linked/my-feature",
     "destination": "/Users/alice/projects/my-feature-v2",
     "registry_updated": true,
     "disk_directory_moved": true
@@ -505,9 +523,11 @@ No worktrees to prune
   "ok": true,
   "command": "worktree.remove",
   "data": {
-    "path": "/Users/alice/projects/my-feature",
-    "registry_removed": true,
-    "disk_directory_deleted": false
+    "path": "/Users/alice/projects/my-repo/.libra/worktree/linked/my-feature",
+    "registry_removed": false,
+    "disk_directory_deleted": false,
+    "detached": true,
+    "tombstone": false
   }
 }
 ```
@@ -558,7 +578,7 @@ No worktrees to prune
         "repo_id": "8f5b…",
         "kind": "linked",
         "state": "active",
-        "path": "/Users/alice/projects/my-feature",
+        "path": "/Users/alice/projects/my-repo/.libra/worktree/linked/my-feature",
         "worktree_id": "1f0c…",
         "lease_state": "expired",
         "lease_owner": "agent-review-3",
@@ -592,7 +612,7 @@ No worktrees to prune
       "repo_id": "8f5b…",
       "kind": "linked",
       "state": "active",
-      "path": "/Users/alice/projects/my-feature",
+      "path": "/Users/alice/projects/my-repo/.libra/worktree/linked/my-feature",
       "worktree_id": "1f0c…",
       "lease_state": "held",
       "lease_owner": "agent-review-3",
@@ -656,6 +676,7 @@ Git 的 `git worktree lock` 也支持 `--reason`，Libra 保留了这一点。�
 | `LBR-REPO-001` | 不是 libra 仓库 |
 | `LBR-REPO-002` | `worktrees.json` 损坏 |
 | `LBR-CLI-003` | 名称无效，或显式目标进入受保护元数据或其他托管工作区 |
+| `LBR-CLI-003` | 重新挂接已分离 worktree 时还传入 `TARGET`、`-b` 或 `--detach`（必须原样恢复已保存的 HEAD） |
 | `LBR-CLI-003` | 目标已存在且不是目录 |
 | `LBR-CLI-003` | 没有该 worktree（lock、unlock、move、remove） |
 | `LBR-CLI-003` | 不能移动或移除主 worktree |
@@ -665,6 +686,8 @@ Git 的 `git worktree lock` 也支持 `--reason`，Libra 保留了这一点。�
 | `LBR-CONFLICT-002` | 目标已包含 `.libra` 条目 |
 | `LBR-CONFLICT-002` | 目标已存在（move） |
 | `LBR-CONFLICT-002` | 目标已注册为 worktree（move） |
+| `LBR-CONFLICT-002` | 名称属于其他注册路径/后端，或 `--path` 与名称已保存的路径不一致 |
+| `LBR-CONFLICT-002` | 跨文件系统 move 无法原子重命名；源目录和注册记录保持不变 |
 | `LBR-CONFLICT-002` | 因 worktree 脏而拒绝 `--delete-dir` |
 | `LBR-IO-001` | 读取或检查 worktree 路径/状态/status 失败 |
 | `LBR-IO-002` | 写入 worktrees.json 失败 |
@@ -674,4 +697,4 @@ Git 的 `git worktree lock` 也支持 `--reason`，Libra 保留了这一点。�
 | `LBR-WORKTREE-001` | `worktree doctor --cursor` 收到非本命令签发（或已过期）的 cursor |
 | `LBR-WORKTREE-002` | `worktree doctor` 无法读取某个 scope（registry 无法解析、记录不可读、仓库身份缺失），拒绝给出残缺诊断 |
 
-支持统一 worktree 目录的版本首次打开仓库时，会写入仓库能力标记 4。此后 Libra 0.30.66 及更早版本会拒绝该仓库中的所有命令，包括与 worktree 无关的命令；请使用支持 2026101902 能力标记的构建：已发布二进制在 Linux 上始于 v0.30.67，在 macOS/Windows 上始于 v0.30.68；v0.30.85 的全部发行平台均支持。现有 worktree 目录不会移动。
+支持统一 worktree 目录的版本首次打开仓库时，会写入 `2026101902` worktree 布局能力标记。此后 Libra 0.30.66 及更早版本会拒绝该仓库中的所有命令，包括与 worktree 无关的命令。已发布二进制在 Linux 上始于 v0.30.67、macOS/Windows 上始于 v0.30.68 支持此标记，但标记本身不能保证中间版本可安全管理命名 worktree。v0.30.85 对 registry 的任何写入都会使用 schema 4，即使没有命名条目。此后请使用 v0.30.85 或包含其 registry 与身份安全修复的后续发行版执行 worktree 命令；较早的 v0.31.0 不含这些修复。现有 worktree 目录不会移动。

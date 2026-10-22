@@ -33,9 +33,9 @@ Names are 1–64 lowercase ASCII characters matching `[a-z0-9][a-z0-9._-]{0,63}`
 
 Each linked worktree contains its own real `.libra` gitdir — a local directory (not a symlink) holding its own `HEAD`, index and `HEAD` reflog, plus a `commondir` pointer to shared storage and a stable `worktree_id`. Worktrees share the database, object store, branch/tag/remote refs and configuration while retaining separate checkout and staging state. Main-worktree file operations exclude its `.libra` metadata, while commands inside a managed linked worktree operate on that worktree's files. A missing or invalid local identity inside the managed container is refused rather than resolving upward into the main worktree.
 
-The on-disk `worktrees.json` registry uses `schema_version: 4`, with optional `name` fields. Existing v2/v3 registries remain readable; a normal mutation writes the current format while preserving stored identities and v3 registration generations (`epoch_counter` and each entry's `epoch`). Existing unnamed entries and the main entry have no assigned name. This change does not move existing directories, assign names in bulk, or add a directory-migration command. Use `--path` to select an existing unnamed worktree; `worktree add <NAME> --path <registered-path>` gives an active unnamed entry a name or names and reattaches a detached unnamed entry. Registry files are written atomically. The public `worktree list` JSON schema is version 2, independently of the disk registry version.
+The on-disk `worktrees.json` registry uses `schema_version: 4`, with optional `name` fields. Existing v2/v3 registries remain readable; a normal mutation writes the current format while preserving stored identities and v3 registration generations (`epoch_counter` and each entry's `epoch`). Existing unnamed entries and the main entry have no assigned name. This change does not move existing directories, assign names in bulk, or add a directory-migration command. Use `--path` to select an existing unnamed worktree; `worktree add <NAME> --path <registered-path>` assigns a name to an active unnamed entry, or assigns one and reattaches a detached unnamed entry. Registry files are written atomically. The public `worktree list` JSON schema is version 2, independently of the disk registry version.
 
-Older shared-`.libra` symlink layouts retain their existing diagnosis and explicit `repair --migrate-layout` workflow; that operation repairs gitdir isolation and does not relocate a worktree into the new default directory. Older binaries must not rewrite the new registry format; keep a compatible Libra version after creating named worktrees.
+Older shared-`.libra` symlink layouts retain their existing diagnosis and explicit `repair --migrate-layout` workflow; that operation repairs gitdir isolation and does not relocate a worktree into the new default directory. Registry schema 4 makes older v2/v3 registry readers refuse the file instead of silently dropping names. The capability marker separately makes Libra 0.30.66 and older refuse the whole repository; it does not prove that every intermediate build understands schema 4. Once v0.30.85 mutates the worktree registry, it writes schema 4 even when no entries have names. From that point, use v0.30.85 or a subsequent release containing its registry and identity-safety fixes for worktree commands. The earlier v0.31.0 tag understands schema 4 but predates those fixes; do not use it to mutate these worktrees.
 
 **Resolving an ambiguous registry.** An older registry may contain two entries claiming one path-derived identity. Mutating worktree operations refuse this ambiguity. `libra worktree doctor` identifies the entries; `libra worktree repair --path <PATH> --resolve-identity --yes` detaches the selected entry while preserving its files and scoped state, so the remaining active entry can be used. The detached entry cannot be reattached while the survivor is active, and `remove --delete-dir` refuses while any other registered entry shares the identity: deleting it would erase the other's scoped state. Back up both directories, continue using the survivor, and keep the detached entry for manual recovery. Detaching the survivor does not make deletion safe. No automatic identity migration is provided.
 
@@ -58,7 +58,7 @@ Create a named linked worktree in the managed directory, or at an explicit desti
 
 `--create-branch` is an alias for `--new-branch`. Without a target the worktree is **detached at the source commit**. The name does not implicitly create a branch. `--lock`, `--orphan`, `--no-checkout`, remote guessing and `-B` are not supported; use `worktree lock` after creation.
 
-Standard builds have supported `add --force` and `remove --force` since v0.30.69, including v0.30.85. The older published `v0.31.0` Linux/macOS binaries predate these flags. If you installed v0.31.0, use the [signed stable installer](upgrade.md) after v0.30.85 is published; `libra upgrade` will not select a lower version number.
+Standard builds have supported `add --force` and `remove --force` since v0.30.69, including v0.30.85. The older published `v0.31.0` Linux/macOS binaries predate these flags. If you installed v0.31.0, use the [signed stable installer](upgrade.md) once the stable channel contains v0.30.85 or a subsequent release with its fixes; `libra upgrade` will not select a lower version number.
 
 For a named detached registry entry, `add <NAME>` verifies the saved identity and common-storage pointer, then reattaches its existing files and staging state. For an unnamed detached entry, use `add <NAME> --path <registered-path>` to name and reattach it. `TARGET`, `-b` and `--detach` are refused during reattachment. If supplied for a named entry, `--path` must match the registered path. A tombstoned entry remains reserved until cleanup succeeds.
 
@@ -440,8 +440,8 @@ worktree hotfix /Users/alice/projects/my-repo/.libra/worktree/linked/hotfix [loc
 **`worktree remove`**:
 
 ```text
-Removed worktree '/Users/alice/projects/my-feature' from registry. Directory kept on disk.
-Removed worktree '/Users/alice/projects/my-feature' from registry and deleted directory.
+Detached worktree '/Users/alice/projects/my-repo/.libra/worktree/linked/my-feature' from the registry. Directory and its state kept on disk (frozen); re-add it with `libra worktree add` or delete it with `--delete-dir`.
+Removed worktree '/Users/alice/projects/my-repo/.libra/worktree/linked/my-feature' from registry and deleted directory.
 ```
 
 **`worktree prune`** (with stale entries):
@@ -472,8 +472,9 @@ single-line JSON.
   "ok": true,
   "command": "worktree.add",
   "data": {
-    "path": "/Users/alice/projects/my-feature",
-    "already_exists": false
+    "path": "/Users/alice/projects/my-repo/.libra/worktree/linked/my-feature",
+    "already_exists": false,
+    "reattached": false
   }
 }
 ```
@@ -493,7 +494,24 @@ single-line JSON.
         "is_main": true,
         "locked": false,
         "lock_reason": null,
-        "exists": true
+        "exists": true,
+        "worktree_id": null,
+        "state": "active",
+        "epoch": 0,
+        "layout": "main"
+      },
+      {
+        "name": "my-feature",
+        "kind": "worktree",
+        "path": "/Users/alice/projects/my-repo/.libra/worktree/linked/my-feature",
+        "is_main": false,
+        "locked": false,
+        "lock_reason": null,
+        "exists": true,
+        "worktree_id": "1f0c…",
+        "state": "active",
+        "epoch": 1,
+        "layout": "linked-v2"
       }
     ]
   }
@@ -507,7 +525,7 @@ single-line JSON.
   "ok": true,
   "command": "worktree.lock",
   "data": {
-    "path": "/Users/alice/projects/my-feature",
+    "path": "/Users/alice/projects/my-repo/.libra/worktree/linked/my-feature",
     "locked": true,
     "lock_reason": "long-running experiment",
     "changed": true
@@ -522,7 +540,7 @@ single-line JSON.
   "ok": true,
   "command": "worktree.unlock",
   "data": {
-    "path": "/Users/alice/projects/my-feature",
+    "path": "/Users/alice/projects/my-repo/.libra/worktree/linked/my-feature",
     "locked": false,
     "changed": true
   }
@@ -536,7 +554,7 @@ single-line JSON.
   "ok": true,
   "command": "worktree.move",
   "data": {
-    "source": "/Users/alice/projects/my-feature",
+    "source": "/Users/alice/projects/my-repo/.libra/worktree/linked/my-feature",
     "destination": "/Users/alice/projects/my-feature-v2",
     "registry_updated": true,
     "disk_directory_moved": true
@@ -564,9 +582,11 @@ single-line JSON.
   "ok": true,
   "command": "worktree.remove",
   "data": {
-    "path": "/Users/alice/projects/my-feature",
-    "registry_removed": true,
-    "disk_directory_deleted": false
+    "path": "/Users/alice/projects/my-repo/.libra/worktree/linked/my-feature",
+    "registry_removed": false,
+    "disk_directory_deleted": false,
+    "detached": true,
+    "tombstone": false
   }
 }
 ```
@@ -617,7 +637,7 @@ single-line JSON.
         "repo_id": "8f5b…",
         "kind": "linked",
         "state": "active",
-        "path": "/Users/alice/projects/my-feature",
+        "path": "/Users/alice/projects/my-repo/.libra/worktree/linked/my-feature",
         "worktree_id": "1f0c…",
         "lease_state": "expired",
         "lease_owner": "agent-review-3",
@@ -651,7 +671,7 @@ single-line JSON.
       "repo_id": "8f5b…",
       "kind": "linked",
       "state": "active",
-      "path": "/Users/alice/projects/my-feature",
+      "path": "/Users/alice/projects/my-repo/.libra/worktree/linked/my-feature",
       "worktree_id": "1f0c…",
       "lease_state": "held",
       "lease_owner": "agent-review-3",
@@ -715,6 +735,7 @@ Note: jj uses the term "workspace" instead of "worktree". Each workspace automat
 | `LBR-REPO-001` | Not a libra repository |
 | `LBR-REPO-002` | `worktrees.json` is corrupt |
 | `LBR-CLI-003` | Invalid name or explicit destination enters protected metadata or another managed workspace |
+| `LBR-CLI-003` | Reattaching a detached worktree with `TARGET`, `-b`, or `--detach` (its saved HEAD must resume unchanged) |
 | `LBR-CLI-003` | Target exists and is not a directory |
 | `LBR-CLI-003` | No such worktree (for lock, unlock, move, remove) |
 | `LBR-CLI-003` | Cannot move or remove main worktree |
@@ -724,6 +745,8 @@ Note: jj uses the term "workspace" instead of "worktree". Each workspace automat
 | `LBR-CONFLICT-002` | Target already contains a `.libra` entry |
 | `LBR-CONFLICT-002` | Destination already exists (for move) |
 | `LBR-CONFLICT-002` | Destination already registered as worktree (for move) |
+| `LBR-CONFLICT-002` | Name belongs to another registered path/backend, or `--path` disagrees with the name's stored path |
+| `LBR-CONFLICT-002` | Cross-filesystem move cannot preserve the worktree through an atomic rename; source and registration stay in place |
 | `LBR-CONFLICT-002` | `--delete-dir` refused because the worktree is dirty |
 | `LBR-IO-001` | Failed to read or inspect worktree paths/state/status |
 | `LBR-IO-002` | Failed to write worktrees.json |
@@ -733,4 +756,4 @@ Note: jj uses the term "workspace" instead of "worktree". Each workspace automat
 | `LBR-WORKTREE-001` | `worktree doctor --cursor` was given a cursor this command did not issue (or one that expired) |
 | `LBR-WORKTREE-002` | `worktree doctor` cannot read a scope (unparseable registry, unreadable record, missing repository identity) and refuses to report a partial diagnosis |
 
-A build that supports managed worktrees records repository capability 4 when it first opens a repository. Libra 0.30.66 and older then refuse every command in that repository, including commands unrelated to worktrees. Use a build with the 2026101902 capability: published binaries first provide it in v0.30.67 on Linux and v0.30.68 on macOS/Windows. The v0.30.85 release includes it on all platforms. Existing worktree directories are not moved.
+A build that supports managed worktrees records the `2026101902` worktree-layout capability marker when it first opens a repository. Libra 0.30.66 and older then refuse every command in that repository, including commands unrelated to worktrees. Published binaries first support this marker in v0.30.67 on Linux and v0.30.68 on macOS/Windows, but the marker alone does not make intermediate builds safe for named worktrees. Any registry mutation by v0.30.85 writes schema 4, even without named entries. After such a mutation, use v0.30.85 or a subsequent release containing its registry and identity-safety fixes for worktree commands; v0.31.0 predates those fixes. Existing worktree directories are not moved.

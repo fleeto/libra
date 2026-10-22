@@ -45,6 +45,9 @@ implicitly discover the main repository. Repository access requires an
 explicitly validated scope supplied by the runtime. Libra does not apply its
 internal OS sandbox to the external reviewer CLI; that CLI's own sandbox
 settings determine whether it can access sibling workspaces or common storage.
+When reviewing untrusted content, configure the external CLI's own filesystem
+sandbox to allow only the run workspace and directories it needs; Libra's
+internal sandbox does not confine that process.
 
 A run blocks in the foreground until every reviewer reaches an outcome
 and ends in exactly one of five terminal states: `success`, `error`,

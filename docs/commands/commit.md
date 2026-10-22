@@ -213,10 +213,11 @@ Read the commit message from `<file>`; `-F -` reads it from **standard input**
 
 ### `-S` / `--gpg-sign[=<keyid>]`
 
-Force signing with the repository vault key, even when `commit.gpgSign=false`
-or `vault.signing=false`. Signing fails if no vault key can be unlocked. The
-optional key id is accepted for Git parity and ignored (one vault key per
-repository). If combined with `--no-gpg-sign`, the last flag wins.
+Force signing with the configured signing source (the generated repository
+vault key or an imported key), even when `commit.gpgSign=false` or
+`vault.signing=false`. Signing fails if that key cannot be unlocked. The
+optional key id is accepted for Git parity and ignored (one configured signing
+source per repository). If combined with `--no-gpg-sign`, the last flag wins.
 
 ### `--short`
 
@@ -512,7 +513,7 @@ Force an unsigned commit: skip Libra's vault GPG signing for this commit,
 matching `git commit --no-gpg-sign`. Vault signing runs when `vault.signing=true`
 (the `libra init` default) and a vault unseal key is available. The Git-compatible
 `commit.gpgSign=true|false` default overrides `vault.signing`: `true` force-signs
-with the repository vault key and `false` disables signing. `--no-gpg-sign` has
+with the configured signing source and `false` disables signing. `--no-gpg-sign` has
 precedence over configuration. When combined with `-S`/`--gpg-sign`, the last
 CLI signing flag wins.
 
@@ -780,7 +781,7 @@ documented explicitly because post hooks are otherwise advisory.
 | Auto-stage tracked | `git commit -a` | N/A (automatic tracking) | `libra commit -a` |
 | Allow empty commit | `git commit --allow-empty` | `jj commit --allow-empty` | `libra commit --allow-empty` |
 | Signoff trailer | `git commit -s` / `--signoff` | N/A | `libra commit -s` / `--signoff` |
-| GPG sign commit | `git commit -S` (manual GPG) | N/A (no signing) | Automatic (vault-backed) |
+| GPG sign commit | `git commit -S` (manual GPG) | N/A (no signing) | Automatic with the configured source; `-S` forces signing |
 | Override author | `git commit --author="..."` | N/A | `libra commit --author="..."` |
 | Author date | `git commit --date=<date>` | N/A | `libra commit --date <date>` |
 | Conventional check | External tool (commitlint) | N/A | `libra commit --conventional` |

@@ -4,7 +4,7 @@
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt as _;
-use std::path::Path;
+use std::{fs, path::Path};
 
 use git_internal::internal::object::commit::Commit;
 use libra::{
@@ -14491,5 +14491,75 @@ fn test_merge_fast_forward_preserves_executable_bit() {
             & 0o777,
         0o755,
         "fast-forward merge must materialize the execute bit"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// issue #527: `-v` / `--verbose`.
+// ---------------------------------------------------------------------------
+
+/// `-v` / `--verbose` prints the merge diffstat (Git's strategy verbosity
+/// renders the merge result), while `--no-stat` still suppresses it.
+#[test]
+fn merge_verbose_prints_the_diffstat() {
+    let repo = super::create_committed_repo_via_cli();
+    let root = repo.path();
+    // A fast-forwardable side branch adding one file.
+    super::assert_cli_success(
+        &run_libra_command(&["branch", "side", "HEAD"], root),
+        "create side",
+    );
+    super::assert_cli_success(
+        &run_libra_command(&["checkout", "side"], root),
+        "switch to side",
+    );
+    fs::write(root.join("side.txt"), "s\n").expect("write side.txt");
+    super::assert_cli_success(&run_libra_command(&["add", "side.txt"], root), "stage side");
+    super::assert_cli_success(
+        &run_libra_command(&["commit", "-m", "side", "--no-verify"], root),
+        "commit side",
+    );
+    super::assert_cli_success(
+        &run_libra_command(&["checkout", "main"], root),
+        "back to main",
+    );
+
+    // `-v` prints the diffstat.
+    let short = run_libra_command(&["merge", "-v", "side"], root);
+    super::assert_cli_success(&short, "merge -v");
+    assert!(
+        String::from_utf8_lossy(&short.stdout).contains("side.txt | 1 +"),
+        "-v must print the diffstat: {}",
+        String::from_utf8_lossy(&short.stdout)
+    );
+
+    // A second merge with `--verbose --no-stat` must suppress it again.
+    super::assert_cli_success(
+        &run_libra_command(&["branch", "side2", "HEAD"], root),
+        "create side2",
+    );
+    super::assert_cli_success(
+        &run_libra_command(&["checkout", "side2"], root),
+        "switch to side2",
+    );
+    fs::write(root.join("side2.txt"), "s2\n").expect("write side2.txt");
+    super::assert_cli_success(
+        &run_libra_command(&["add", "side2.txt"], root),
+        "stage side2",
+    );
+    super::assert_cli_success(
+        &run_libra_command(&["commit", "-m", "side2", "--no-verify"], root),
+        "commit side2",
+    );
+    super::assert_cli_success(
+        &run_libra_command(&["checkout", "main"], root),
+        "back to main",
+    );
+    let suppressed = run_libra_command(&["merge", "--verbose", "--no-stat", "side2"], root);
+    super::assert_cli_success(&suppressed, "merge --verbose --no-stat");
+    assert!(
+        !String::from_utf8_lossy(&suppressed.stdout).contains("side2.txt | 1 +"),
+        "--no-stat must win over -v: {}",
+        String::from_utf8_lossy(&suppressed.stdout)
     );
 }

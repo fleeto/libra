@@ -27,7 +27,7 @@ libra cherry-pick (--continue | --skip | --abort | --quit)
 
 子模块永不参与合并（见 `docs/commands/zh-CN/merge.md`）：若本次 pick 的三路输入（父提交树 / 当前索引 / 被 pick 的树）中 `160000` gitlink 记录的 object id 不一致，cherry-pick 会在写入任何内容之前被拒绝，错误码 `LBR-UNSUPPORTED-001`，消息包含路径（`cherry-pick would have to merge the submodule (gitlink) entry '<path>': Libra does not support submodules`）。三侧一致的 gitlink 则原样保留，不再被丢弃。
 
-当某提交无法干净应用时，Libra 执行三方 apply（base = 父提交树，ours = 当前索引，theirs = 被 pick 的树），并把未解决的发散路径写入索引（stage 1/2/3）与工作树（行级冲突标记，与 Git 一致）。`-X ours/theirs` 可只解决重叠 hunk 而保留 clean 变更。进行中的序列持久化到统一 SQLite `sequence_state` 表，因此你可以解决剩余冲突后用 `--continue` 续作、用 `--skip` 丢弃冲突提交，或用 `--abort`/`--quit` 撤销整个序列。cherry-pick 序列进行期间，其他 sequencer 操作被阻止（`LBR-CONFLICT-002`）。
+当某提交无法干净应用时，Libra 执行三方 apply（base = 父提交树，ours = 当前索引，theirs = 被 pick 的树），并把未解决的发散路径写入索引（stage 1/2/3）与工作树（行级冲突标记，与 Git 一致）。`-X ours/theirs` 可只解决重叠 hunk 而保留 clean 变更。进行中的序列持久化到统一 SQLite `sequence_state` 表，因此你可以解决剩余冲突后用 `--continue` 续作、用 `--skip` 丢弃冲突提交，或用 `--abort`/`--quit` 撤销整个序列。`--quit` 只清除序列且**幂等**：没有进行中的序列时退出 0，且不触碰索引与工作树（与 Git 一致）；而 `--abort` 要求存在序列（报 `no cherry-pick in progress`，退出 128）。cherry-pick 序列进行期间，其他 sequencer 操作被阻止（`LBR-CONFLICT-002`）。
 
 新的 cherry-pick 在索引存在未合并条目时拒绝开始：在解析任何目标、写入索引、工作树、引用或序列状态之前，以 exit 128 与 `LBR-CONFLICT-001` 退出，并列出最多 10 条未合并路径（Git 同样拒绝）。逐条解决后 `libra add`，或用 `libra reset --hard` 放弃冲突，然后重新执行 cherry-pick；该拒绝不产生序列，`--continue`、`--skip`、`--abort`、`--quit` 对它不适用。发生冲突的 `-n`/`--no-commit` pick 同样不产生可继续的序列：解决后 `libra add`（或 `libra rm`）并执行 `libra commit`，或用 `libra reset --hard` 放弃已暂存的 pick。会覆盖未跟踪工作树文件的 pick 在该提交写入任何内容之前被拒绝：移走或删除提示中的文件后重新执行命令；若逐提交序列中之前的提交已落地，则改为执行 `libra cherry-pick --continue`（会重新尝试停住的提交，Git 则会丢弃它）；若 `--no-commit` 运行中之前的 pick 已暂存，则没有序列，用 `-n` 重新 pick 剩余提交，或用 `libra reset --hard` 放弃全部。
 

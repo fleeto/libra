@@ -1852,9 +1852,18 @@ async fn run_cherry_pick_abort(output: &OutputConfig) -> Result<CherryPickOutput
 }
 
 async fn run_cherry_pick_quit() -> Result<CherryPickOutput, CherryPickError> {
-    // Confirm a sequence is actually in progress, then forget it without
-    // touching the index/worktree.
-    load_state_or_err().await?;
+    // `--quit` only forgets the sequence; it is idempotent in Git — running it
+    // with nothing in progress exits 0 (issues/528). It must not touch the
+    // index or the working tree either way.
+    if !CherryPickState::is_in_progress()
+        .await
+        .map_err(CherryPickError::LoadObject)?
+    {
+        return Ok(CherryPickOutput {
+            action: Some("quit".to_string()),
+            ..Default::default()
+        });
+    }
     CherryPickState::clear()
         .await
         .map_err(CherryPickError::SaveFailed)?;

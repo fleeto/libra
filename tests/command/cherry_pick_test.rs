@@ -2304,11 +2304,12 @@ fn cherry_pick_skip_advances() {
     assert!(p.join("extra.txt").exists(), "f2 applied after skip");
 }
 
-/// Sequencer control flags with no in-progress state error with RepoStateInvalid.
+/// Sequencer control flags with no in-progress state error with
+/// RepoStateInvalid — except `--quit`, which is idempotent in Git (issues/528).
 #[test]
 fn cherry_pick_continue_without_state_errors() {
     let repo = create_committed_repo_via_cli();
-    for flag in ["--continue", "--skip", "--abort", "--quit"] {
+    for flag in ["--continue", "--skip", "--abort"] {
         let out = run_libra_command(&["cherry-pick", flag], repo.path());
         assert_eq!(out.status.code(), Some(128), "{flag} with no state");
         let (_h, report) = parse_cli_error_stderr(&out.stderr);
@@ -2319,6 +2320,14 @@ fn cherry_pick_continue_without_state_errors() {
             report.message
         );
     }
+    // `--quit` is a no-op with nothing in progress: exit 0, no error envelope.
+    let quit = run_libra_command(&["cherry-pick", "--quit"], repo.path());
+    assert_eq!(
+        quit.status.code(),
+        Some(0),
+        "--quit with no state must succeed: {}",
+        String::from_utf8_lossy(&quit.stderr)
+    );
 }
 
 /// `--continue --abort` together is a usage conflict. Libra remaps clap's
@@ -4796,4 +4805,34 @@ fn cherry_pick_on_detached_head_continue_and_abort() {
             .is_empty(),
         "the worktree is clean after abort"
     );
+}
+
+/// `--quit` is idempotent: with no sequence in progress it exits 0 (Git's
+/// behaviour), and with one it clears the state without touching the worktree.
+#[test]
+fn cherry_pick_quit_is_idempotent() {
+    let (repo, theirs) = detached_conflict_fixture();
+    let root = repo.path();
+
+    // Nothing in progress: success, no state.
+    let idle = run_libra_command(&["cherry-pick", "--quit"], root);
+    assert_cli_success(&idle, "cherry-pick --quit with no sequence");
+    let again = run_libra_command(&["cherry-pick", "--quit"], root);
+    assert_cli_success(&again, "cherry-pick --quit is idempotent");
+
+    // With a conflicted pick in progress: clears the state, keeps the worktree.
+    let pick = run_libra_command(&["cherry-pick", &theirs], root);
+    assert!(!pick.status.success(), "the pick must conflict");
+    let before = run_libra_command(&["status", "--porcelain"], root);
+    let quit = run_libra_command(&["cherry-pick", "--quit"], root);
+    assert_cli_success(&quit, "cherry-pick --quit with a sequence");
+    let after = run_libra_command(&["status", "--porcelain"], root);
+    assert_eq!(
+        String::from_utf8_lossy(&before.stdout),
+        String::from_utf8_lossy(&after.stdout),
+        "--quit must not touch the index or worktree"
+    );
+    // The sequence is gone: --continue now reports "no cherry-pick in progress".
+    let cont = run_libra_command(&["cherry-pick", "--continue"], root);
+    assert!(!cont.status.success(), "--continue must find no sequence");
 }

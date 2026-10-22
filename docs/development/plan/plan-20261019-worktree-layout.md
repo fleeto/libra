@@ -16,6 +16,19 @@
 
 **2026-10-22 继续验收：** `fbdf5ee` 代码树的 `cargo test --all` 完整退出 0，189 个结果组共 10736 passed / 0 failed / 26 ignored。十页最终文档复审发现 schema 4 回退说明过度限定于命名条目；已修正双语 Worktree/upgrade：任何 registry 变更都会写 schema 4，即使无命名条目，后续 worktree 操作也须使用包含身份安全修复的版本。此项 Claude Code 跟进复审字面 `VERDICT: PASS`，文档兼容测试 2/2、fmt 与严格 Clippy 通过。上游最新正式版仍为 v0.30.84，目标 v0.30.85；main 已推进至 `acebe35`，旧 `fbdf5ee` CI 被取消，不能计最终绿门。已无冲突合入 `acebe35`；保留本计划全部勘误。合流仅引入上游已有代码，本地额外差异为已复审文档。网站已保存本地页面后快进至 `b895ade`，再由同步器按最终源码更新；同步范围补入上游公开变化的 `merge` 和 `op` 页（共十二页），不增加任务卡。最终树验证待完成。
 
+
+**并发发布验收补充（2026-10-22，用户要求“保持并发推送”）：** 冻结候选源码 `53a5511d50dd0d08f143dc9eb5d65fc641521181`，在本仓库默认目录下建立 `wd-release-0.30.85` linked worktree，分支 `release/worktree-v0.30.85`。不暂停其他会话的 main 推送，不将后续无关开发持续合入本次候选。WD-08 写集补入 `.github/workflows/codeql.yml`；既有 `.github/workflows/base.yml` 同样允许 `release/**` push，Windows 仍核对实际检出 SHA 等于事件 SHA，只扩展允许的分支前缀；PR 双亲校验不变。取消器只扫描且只接受 main 旧运行，保持原实现和 main 并发策略。先用 actionlint、取消器单测及 Claude Code 字面 PASS 核验该隔离修订，再将签名+DCO候选推送至远端，取得其完整八作业 CI 和 CodeQL 成功后才允许打标签：逐项要求 conclusion=success，skipped 不算成功，并核对同一候选 SHA/run attempt。候选只含 CI/计划差异时，记录相对 53a5511 的完整差异和不变 Rust/Cargo/测试树，以已完成本地全量、nextest、macFUSE 证据加候选 SHA 的完整远端全量门验收；任何运行时/测试/版本面改动均重新执行本地必需门。下文 final main SHA 的要求由本条覆盖为不可变 final release candidate SHA；实现已在 main 的 53a5511，CI/计划修订在最终收口时保留并发更新以真正 merge 合回 main（保留候选提交祖先关系，不 rebase/cherry-pick），签名 tag 指向实际通过验收的候选。cf 仍原分支直接交付，不另建网站分支或工作树。打 tag 前仍刷新最新已发布版本与同名 tag，冲突只前滚。旧 run 39707053010 的公网网络超时、两次 main 并发取消均保留为失败/取消证据，不拼成全绿。
+
+**并发收口的合流 D 门补充（2026-10-22，Claude Code 跟进 VERDICT: PASS）：** 首轮流程审查 FAIL 指出把修改 workflow 的合流当纯文档会遗漏 D 门；本条补齐，不降低发布候选门。允许在候选网络重跑等待期间，先将已审查的 CI/计划改动真正 merge 入最新 main；发布 tag 仍只指向 `ac4fa9c7270b5b604cac59e9b4342285cf9d4876`，其八作业、CodeQL、版本占用和后续 release/stable/site 门仍全部必需。合流提交记为 M；M 相对 main 父提交的完整 tree diff 只允许 `.github/workflows/{base,codeql}.yml`、本计划和 `plan-status.md`，源码、测试、SQL、Cargo/安装版本面及其他路径必须完全不变；两个 workflow 必须逐字节等同候选，任何真实冲突修正须按 forward-fix 重新取得适用门，不擅自覆盖并发改动。计划证据与本条不改变运行时行为。M 本地执行 fmt、全目标全特性 Clippy -D warnings、actionlint、取消器 25 项和 `compat_version_surface_sync`；保留 main 父提交 SHA、允许路径清单及签名/DCO。
+
+M 推送 main 后，将**同一 M** 推送固定 `release/worktree-v0.30.85-integration` 分支，取得其八作业及 CodeQL 全部 success；逐项核对 head_sha=M、run ID、attempt、分支 tip 未移动，skipped/cancelled 不计 PASS。触发器已允许 `release/**`；base 并发组包含 github.ref，CodeQL 没有共享并发组，取消脚本只接受 main，故后续 main push 不取消此集成门。必须观察并记录 M 的 main CI 真实终态；仅在固定集成 run ID 已存在后，可按 actor+SHA 精确识别并取消**本会话自己的** M main 重复运行，记录“重复验收取消”，不取消其他会话的 run，也不把取消算通过。M 的完整独立 CI 是合流后的 D 证据；发布候选 ac4fa9c 的 D 是实际发行代码证据，二者不可互相替代。候选与 M 两组 D、发行/stable/安装以及 cf/线上页面全部完成后，才以仅修改计划/索引的最终记账提交推进九卡 9/9；须核实 ac4fa9c 与 M 均为最新 main 的祖先。最后纯文档提交自己的自动 CI 按已预登记 v2.14 在下一次例行计划状态同步补记（包括取消），不再开启收口提交链。
+
+**合流本地门：** main 父提交 `a8ffcee73ab59482685311a211a567844356bc7c`；自动 merge 无冲突，完整 diff 仅上述四个允许文件，两 workflow 与 ac4fa9c 逐字节相同。fmt、严格 Clippy（3m29s）、actionlint、diff --check 均 exit0，取消器 25/25、版本面 2/2。收口流程首轮 FAIL 与补充等价门/固定 M 门后的字面 VERDICT: PASS 均保留；这些本地结果不替代 M 的远端 D。
+
+**远端候选当前证据：** run `39716923534` attempt 1 的七项作业与 CodeQL `39716923544` 成功；离线 nextest 10741/10741（14 slow、1 flaky、21 skipped），后续 OTLP、keyring、升级专项成功；Windows 44/44、macOS 18/18，均零忽略。网络 2/3，LFS 请求 TLS handshake UnexpectedEof，upload-pack 本轮通过；该失败原样保留，仅重跑网络为 attempt 2，最终八项全绿前不得 tag。flaky 为 authorized_read 的 outer cancellation 用例，首轮提前返回不满足超时断言、次轮通过；根因未确认，提前错误分支会清理进程组，不宣称零重试。新增本机 FUSE feature 单元 157/157、网络 3/3、公开资产文件名发行冒烟 PASS，网站加强后的十二页双语实浏览器 24/24；全部仍不代替发行/生产门。
+
+**候选本地证据（53a5511）：** `cargo test --all` exit0，189 结果组、10735 passed / 0 failed / 26 ignored；fmt 与全目标全特性严格 Clippy exit0；macFUSE 实挂载整组 16/16 且无残留挂载；旧 0.30.53 九命令全 exit128、69 个稳定文件哈希不变（当前最高 schema 2026102201，能力 receipt 2026101902 与 registry capability 4 均存在）。完整 nextest exit0，10715/10715 passed（52 slow、4 leaky、23 skipped，无失败或重试），耗时 2783.673 秒；不把 leaky/skipped 隐去。网站源完整同步 drift=0、脚本 8/8、文档单测 11/11、typecheck/build exit0；十二页 EN/zh-CN 本地真实浏览器验收 24/24。通用网站旧 E2E 有三项既有首页/API/中文搜索断言不符当前未改页面，保留失败，不能宣称通用 E2E 全绿；本计划页面验收不以此替代。最终源码/文档 Claude Code 已 PASS，候选 CI 修订另行复审。九卡正式状态仍 0/9，发布/stable/网站部署未完成。 候选 CI/计划修订 actionlint、fmt、diff --check 通过，取消器单测 25/25；Claude 首次调用 13 分钟无输出后中断，不计 verdict，精简复审先因未提供取消器触发器而 FAIL，补充独立 main-only workflow 和脚本入口拒绝非 main 的原文后字面 VERDICT: PASS，无代码改动。发行 keyring 构建 exit0；既有 capture ingress dead_code 与依赖 future-incompat 警告如实保留，全目标全特性 Clippy -D warnings 已通过。
+
 ## 文档职责
 
 统一新建 linked、FUSE 和 review/investigate 工作区的默认布局到 common storage 的 `worktree/`，保持工作文件、工作区身份与共享元数据边界正确。本文是执行契约，不是实现或验收完成声明。
@@ -495,7 +508,7 @@
 **Description:** 在同一最终 bump 树上验证全部布局行为，发布 CLI 和网站文档。
 **当前版本决议:** 用户要求基于最新上游已发布版本 patch + 1；GitHub Latest `v0.30.84` 后当前目标是 `v0.30.85`，旧 `.83` 候选未发布；仍禁止发布 `v0.31.1`。最终 tag 前重新核对远端版本、源码 SHA、所有门与资产名；如 `v0.30.85` 被并发占用，再按上游最新 patch + 1 前滚，不覆盖已有 tag。
 **Out of scope:** 不引入新行为；发现缺陷在原行为卡前滚或新增 FIX 卡后重新验收。
-**Current evidence:** 上游 GitHub 最新已发布 `v0.30.84`，当前目标 `v0.30.85`；本地已洁净快进到 `99a92c1`，版本四面一致，`branch -f` 的五个聚焦用例由修复前 2/5 前滚至 5/5，最终 branch 全组 52/52、Display-pin 1/1、版本面 2/2。严格 Clippy/fmt/diff --check exit0，FIX-WD-08g 跟进 Claude Code 源码复审字面 `VERDICT: PASS`；真实旧版 0.30.53 对九种消费者全为 exit128，69 个稳定文件哈希未变。网站十页限定同步 drift=0、脚本 8/8、Vitest 11/11、typecheck/build exit0，第三轮独立文档复审字面 `VERDICT: PASS`。`fbdf5ee` 上的 `cargo test --all` 因文档复审前滚主动中断 exit130，不计最终门；最终文档提交后的双全量、macFUSE、final-SHA CI、release 资产/stable 与网站上线仍须复验。旧 `v0.30.66` 与候选 `v0.30.80/82/83` 不计本卡 C/D。
+**Current evidence:** 发行源码固定为 `ac4fa9c`（运行时/测试与 53a5511 相同），本地 cargo 全量 10735 passed、nextest 10715/10715、真实 macFUSE 16/16、FUSE feature 单元 157/157、旧版拒绝矩阵 9/9、严格静态门与最终源码/文档审查 PASS。候选 CI attempt 1 七作业和 CodeQL 成功，网络 LFS TLS EOF 失败，attempt 2 仅重跑网络中，不算最终全绿。网站本地加强验收 24/24，尚未 cf 提交/部署。CI/计划改动已在 main 父 a8ffcee 上无冲突准备合流，本地 gate 通过；须签名提交推送后以固定 integration 分支取得实际合流 M 的八作业和 CodeQL D。候选与 M 两组 D、tag/release/stable/安装、网站生产门全部完成前仍 0/9。
 **Acceptance criteria:**
 - [ ] WD-01..07 与 WD-02G 的最终变更均被发布树包含。
 - [ ] 旧二进制拒绝矩阵在最终格式复验通过。

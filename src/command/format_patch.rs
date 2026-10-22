@@ -105,6 +105,11 @@ pub struct FormatPatchArgs {
     #[arg(short = '1')]
     pub last_one: bool,
 
+    /// Generate patches for the last `<n>` commits (Git's `-<n>` shorthand,
+    /// e.g. `-3`). `-1` is the same flag, kept for its dedicated meaning.
+    #[arg(long = "last-n", value_name = "N", hide = true)]
+    pub last_n: Option<usize>,
+
     /// Include the root commit and all reachable non-merge ancestors.
     #[arg(long = "root")]
     pub root: bool,
@@ -125,6 +130,39 @@ pub struct FormatPatchArgs {
     /// Start numbering patches at N instead of 1.
     #[arg(long = "start-number", value_name = "N", default_value = "1")]
     pub start_number: usize,
+
+    /// Prefix the subject with `RFC` (Git's `--rfc[=<text>]`, e.g.
+    /// `[RFC PATCH]`). With a value, that text replaces `RFC`
+    /// (`--rfc=WIP` → `[WIP PATCH]`).
+    #[arg(long = "rfc", value_name = "TEXT", num_args = 0..=1, require_equals = true, default_missing_value = "RFC", overrides_with = "no_rfc")]
+    pub rfc: Option<String>,
+
+    /// Do not add the `RFC` marker (Git's `--no-rfc`).
+    #[arg(long = "no-rfc", overrides_with = "rfc")]
+    pub no_rfc: bool,
+
+    /// Do not number the patch filenames (Git's `--no-numbered`/`-N`). Libra
+    /// numbers by default, so this opts out.
+    #[arg(short = 'N', long = "no-numbered", overrides_with = "numbered")]
+    pub no_numbered: bool,
+
+    /// Do not emit the `base-commit:` trailer, overriding `--base` (Git's
+    /// `--no-base`; Libra has no `format.useAutoBase` config).
+    #[arg(long = "no-base", overrides_with = "base")]
+    pub no_base: bool,
+
+    /// Truncate output filenames to at most `<n>` bytes (Git's
+    /// `--filename-max-length`). The `0001-` sequence prefix counts toward the
+    /// limit; a trailing `-` left by truncation is dropped.
+    #[arg(long = "filename-max-length", value_name = "N")]
+    pub filename_max_length: Option<usize>,
+
+    /// Format of the cover letter's commit list (Git's
+    /// `--commit-list-format`). `modern` renders `[i/N] subject` lines; any
+    /// other value is a pretty-format string supporting `%h`, `%H`, `%s`,
+    /// `%an`, `%ae`, `%n` and `%%`.
+    #[arg(long = "commit-list-format", value_name = "FORMAT")]
+    pub commit_list_format: Option<String>,
 
     /// Use PREFIX instead of "PATCH" in the Subject: line.
     #[arg(long = "subject-prefix", value_name = "PREFIX")]
@@ -243,11 +281,12 @@ pub struct FormatPatchArgs {
     #[arg(long = "no-stat")]
     pub no_stat: bool,
 
-    /// Keep the original `[PATCH]` prefix if present in the commit subject,
-    /// instead of stripping it (default behaviour in Git).
+    /// Keep the commit subject byte-identical: no `[PATCH]` prefix and no
+    /// `n/m` counter is added (Git's `-k`/`--keep-subject`).
     #[arg(
+        short = 'k',
         long = "keep-subject",
-        help = "Keep the original [PATCH] prefix if present in the commit subject, instead of stripping it (default behaviour in Git)"
+        help = "Keep the commit subject byte-identical: no [PATCH] prefix or n/m counter is added (Git's -k)"
     )]
     pub keep_subject: bool,
 
@@ -569,7 +608,7 @@ async fn resolve_range_commits(args: &FormatPatchArgs) -> Result<Vec<Commit>, Cl
             Some(resolve_single_rev(left_spec).await?),
             resolve_single_rev(right_spec).await?,
         )
-    } else if args.root || args.last_one {
+    } else if args.root || args.last_one || args.last_n.is_some() {
         // `--root [REV]` walks from REV through the root. `-1 [REV]` names the
         // one commit to emit rather than retaining the usual `<REV>..HEAD`
         // single-revision interpretation.
@@ -620,9 +659,12 @@ async fn resolve_range_commits(args: &FormatPatchArgs) -> Result<Vec<Commit>, Cl
     let mut seen = HashSet::new();
     commits.retain(|c| seen.insert(c.id));
 
-    // `-1` limits the newest-first walk before output ordering is reversed.
+    // `-1` / `-<n>` limit the newest-first walk before output ordering is
+    // reversed (`-<n>` is Git's "last n commits" shorthand).
     if args.last_one {
         commits.truncate(1);
+    } else if let Some(limit) = args.last_n {
+        commits.truncate(limit);
     }
 
     if args.ignore_if_in_upstream && !upstream_commits.is_empty() {
@@ -731,19 +773,34 @@ async fn format_patch_body(
         .reroll_count
         .map(|v| format!(" v{v}"))
         .unwrap_or_default();
+    // `--rfc[=<text>]` prepends the RFC marker to the subject prefix
+    // (`[PATCH]` → `[RFC PATCH]`, or `[WIP PATCH]` for `--rfc=WIP`).
+    let rfc = args
+        .rfc
+        .as_deref()
+        .filter(|_| !args.no_rfc)
+        .map(|text| format!("{text} "))
+        .unwrap_or_default();
     let prefix = format!(
-        "{prefix}{version}",
+        "{rfc}{prefix}{version}",
         prefix = sanitize_header_value(subject_prefix(args))
     );
 
-    let num_str = if args.numbered || args.cover_letter {
+    let numbering_enabled = !args.no_numbered;
+    let num_str = if numbering_enabled && (args.numbered || args.cover_letter) {
         let width = number_width(total);
         format!(" {:0width$}/{}", patch_num, total + start_num - 1)
     } else {
         String::new()
     };
 
-    out.push_str(&format!("Subject: [{prefix}{num_str}] {subject}\n"));
+    if args.keep_subject {
+        // `-k`/`--keep-subject` keeps the subject byte-identical and adds no
+        // `[PATCH]` prefix or `n/m` counter (Git's contract).
+        out.push_str(&format!("Subject: {subject}\n"));
+    } else {
+        out.push_str(&format!("Subject: [{prefix}{num_str}] {subject}\n"));
+    }
 
     // ---- Threading headers ----
     push_threading_headers(
@@ -830,13 +887,16 @@ async fn format_patch_body(
         // MIME multipart assembly (byte-compatible with `git format-patch --attach`).
         let slug = patch_slug(commit, args);
         let filename = patch_filename(
-            args.numbered,
-            patch_num,
-            total,
-            start_num,
-            &slug,
-            suffix(args),
-            args.numbered_files,
+            !args.no_numbered,
+            &FilenameSpec {
+                patch_num,
+                total,
+                start_num,
+                slug: &slug,
+                suffix: suffix(args),
+                numbered_files: args.numbered_files,
+                max_length: args.filename_max_length,
+            },
         );
         out.push_str("This is a multi-part message in MIME format.\n");
         out.push_str(&format!("--{boundary}\n"));
@@ -1092,6 +1152,9 @@ async fn build_base_block(
     args: &FormatPatchArgs,
     commits: &[Commit],
 ) -> Result<Option<String>, CliError> {
+    if args.no_base {
+        return Ok(None);
+    }
     let Some(base_spec) = args.base.as_deref() else {
         return Ok(None);
     };
@@ -1290,19 +1353,16 @@ fn format_cover_letter(
     out.push_str("*** SUBJECT HERE ***\n\n");
     out.push_str("*** BLURB HERE ***\n\n");
 
-    // Shortlog of the patches
-    for (i, commit) in commits.iter().enumerate() {
-        let (msg, _) = parse_commit_msg(&commit.message);
-        let _subject = msg.lines().next().unwrap_or("");
-        out.push_str(&format!(
-            "{:0width$}-{}{}\n",
-            i + 1,
-            patch_slug(commit, args),
-            suffix(args),
-            width = number_width(commits.len())
-        ));
+    // Commit list. Git's default is a shortlog grouped by author
+    // (`Name (N):` + indented subjects); `--commit-list-format=modern` uses
+    // `[i/N] subject` lines and a pretty-format string renders each commit.
+    let commit_list = render_commit_list(args, commits);
+    if let Some(invalid) = commit_list.strip_prefix("\u{0}invalid:") {
+        return Err(CliError::command_usage(format!(
+            "'{invalid}' is not a valid format string"
+        )));
     }
-    out.push('\n');
+    out.push_str(&commit_list);
 
     // `--base` trailer rides on the cover letter when one is present (the blank
     // line above separates it from the shortlog), before the signature.
@@ -1396,6 +1456,124 @@ fn clean_subject(subject: &str, keep: bool) -> String {
 // ---------------------------------------------------------------------------
 
 /// Build a safe filename slug from the commit subject.
+/// Render the cover letter's commit list the way Git does.
+///
+/// * default / `--commit-list-format=short`: shortlog grouped by author, in
+///   first-appearance order, subjects wrapped at 72 columns with a 4-space
+///   continuation indent.
+/// * `--commit-list-format=modern`: `[i/N] subject` per commit.
+/// * anything else: a pretty-format string over a small placeholder set.
+fn render_commit_list(args: &FormatPatchArgs, commits: &[Commit]) -> String {
+    let format = args.commit_list_format.as_deref().unwrap_or("short");
+    let mut out = String::new();
+    match format {
+        "short" => {
+            // Group consecutive first-appearance authors, like `git shortlog`.
+            let mut groups: Vec<(String, Vec<&Commit>)> = Vec::new();
+            for commit in commits {
+                let name = commit.author.name.trim().to_string();
+                match groups.iter_mut().find(|(author, _)| *author == name) {
+                    Some((_, list)) => list.push(commit),
+                    None => groups.push((name, vec![commit])),
+                }
+            }
+            for (author, group) in groups {
+                out.push_str(&format!("{author} ({}):\n", group.len()));
+                for commit in group {
+                    let subject = commit_subject_line(commit);
+                    out.push_str(&wrap_shortlog_subject(&subject));
+                }
+                out.push('\n');
+            }
+        }
+        "modern" => {
+            let total = commits.len();
+            for (index, commit) in commits.iter().enumerate() {
+                out.push_str(&format!(
+                    "[{}/{}] {}\n",
+                    index + 1,
+                    total,
+                    commit_subject_line(commit)
+                ));
+            }
+        }
+        custom => {
+            for commit in commits {
+                match render_pretty_format_commit(custom, commit) {
+                    Some(rendered) => out.push_str(&rendered),
+                    // Git reports an unusable format string as a fatal error
+                    // (`fatal: '<fmt>' is not a valid format string`).
+                    None => return format!("\u{0}invalid:{custom}"),
+                }
+                out.push('\n');
+            }
+        }
+    }
+    out
+}
+
+/// Wrap a shortlog subject at 72 columns: 2-space indent on the first line and
+/// a 4-space continuation indent, matching `git shortlog`'s default width.
+fn wrap_shortlog_subject(subject: &str) -> String {
+    const WIDTH: usize = 72;
+    const FIRST_INDENT: &str = "  ";
+    const NEXT_INDENT: &str = "    ";
+
+    let mut lines = String::new();
+    let mut current = String::from(FIRST_INDENT);
+    let mut has_word = false;
+    for word in subject.split_whitespace() {
+        let extra = if has_word {
+            1 + word.chars().count()
+        } else {
+            word.chars().count()
+        };
+        if has_word && current.chars().count() + extra > WIDTH {
+            lines.push_str(current.trim_end());
+            lines.push('\n');
+            current = String::from(NEXT_INDENT);
+            current.push_str(word);
+        } else {
+            if has_word {
+                current.push(' ');
+            }
+            current.push_str(word);
+        }
+        has_word = true;
+    }
+    lines.push_str(current.trim_end());
+    lines.push('\n');
+    lines
+}
+
+/// Expand a small `git log --format` subset for `--commit-list-format`.
+/// Unsupported conversions yield `None`, which the caller reports as a
+/// Git-style `fatal: ... is not a valid format string` error.
+fn render_pretty_format_commit(format: &str, commit: &Commit) -> Option<String> {
+    let mut out = String::new();
+    let mut chars = format.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '%' {
+            out.push(c);
+            continue;
+        }
+        match chars.next()? {
+            'h' => out.push_str(&commit.id.to_string()[..7.min(commit.id.to_string().len())]),
+            'H' => out.push_str(&commit.id.to_string()),
+            's' => out.push_str(&commit_subject_line(commit)),
+            'a' => match chars.next()? {
+                'n' => out.push_str(commit.author.name.trim()),
+                'e' => out.push_str(commit.author.email.trim()),
+                _ => return None,
+            },
+            'n' => out.push('\n'),
+            '%' => out.push('%'),
+            _ => return None,
+        }
+    }
+    Some(out)
+}
+
 fn patch_slug(commit: &Commit, _args: &FormatPatchArgs) -> String {
     let slug = commit_subject_line(commit)
         .to_lowercase()
@@ -1437,15 +1615,28 @@ fn truncate_slug(slug: &str) -> String {
 /// When `slug` is empty the file is treated as the cover letter.
 /// The sequence number is always included so that commits with identical
 /// subjects never overwrite each other (matching Git's default behaviour).
-fn patch_filename(
-    _numbered: bool,
+/// Filename inputs that travel together: the patch's position in the series
+/// and the naming controls that reshape the stem.
+struct FilenameSpec<'a> {
     patch_num: usize,
     total: usize,
     start_num: usize,
-    slug: &str,
-    suffix: &str,
+    slug: &'a str,
+    suffix: &'a str,
     numbered_files: bool,
-) -> String {
+    max_length: Option<usize>,
+}
+
+fn patch_filename(numbered: bool, spec: &FilenameSpec<'_>) -> String {
+    let FilenameSpec {
+        patch_num,
+        total,
+        start_num,
+        slug,
+        suffix,
+        numbered_files,
+        max_length,
+    } = *spec;
     if numbered_files {
         // `--numbered-files`: bare sequence number, no slug and no suffix
         // (the cover letter, with patch_num 0, becomes "0"), matching Git.
@@ -1455,9 +1646,46 @@ fn patch_filename(
         // Cover letter (only the cover-letter code path passes an empty slug)
         format!("0000-cover-letter{suffix}")
     } else {
-        let width = number_width(total + start_num - 1);
-        format!("{:0width$}-{}{}", patch_num, slug, suffix)
+        let (prefix, number) = if numbered {
+            let width = number_width(total + start_num - 1);
+            (
+                format!("{:0width$}-", patch_num),
+                format!("{:0width$}", patch_num),
+            )
+        } else {
+            // `--no-numbered`/-N: plain `<slug>`, no sequence prefix.
+            (String::new(), String::new())
+        };
+        let stem = format!("{prefix}{slug}");
+        // `--filename-max-length` caps the whole file name, so the stem gets
+        // `limit - suffix.len() - 1` bytes (Git reserves the extra byte) and
+        // may collapse to just the sequence number.
+        let stem = match max_length {
+            Some(limit) => {
+                let budget = limit.saturating_sub(suffix.len() + 1);
+                if budget < number.len() {
+                    number
+                } else {
+                    truncate_filename(&stem, budget)
+                }
+            }
+            None => stem,
+        };
+        format!("{stem}{suffix}")
     }
+}
+
+/// Truncate a filename stem to `limit` bytes on a char boundary (Git cuts
+/// mid-word and keeps a trailing `-` if that is where the budget ends).
+fn truncate_filename(stem: &str, limit: usize) -> String {
+    if stem.len() <= limit {
+        return stem.to_string();
+    }
+    let mut end = limit;
+    while end > 0 && !stem.is_char_boundary(end) {
+        end -= 1;
+    }
+    stem[..end].to_string()
 }
 
 /// Number of decimal digits needed to represent `n`.
@@ -1518,14 +1746,20 @@ fn write_patch_file(
             .map_err(|error| stdout_write_error("finish format-patch output", error))?;
         Ok(PathBuf::from("<stdout>"))
     } else {
+        // `--no-numbered`/-N drops the `0001-` sequence prefix from filenames
+        // (Git's default once numbering is cancelled).
+        let numbered = !args.no_numbered;
         let filename = patch_filename(
-            args.numbered || args.cover_letter,
-            patch_num,
-            total,
-            start_num,
-            slug,
-            suffix(args),
-            args.numbered_files,
+            numbered,
+            &FilenameSpec {
+                patch_num,
+                total,
+                start_num,
+                slug,
+                suffix: suffix(args),
+                numbered_files: args.numbered_files,
+                max_length: args.filename_max_length,
+            },
         );
         let path = out_dir.join(&filename);
         atomic_write::write_atomic(&path, body.as_bytes(), atomic_write::sync_data_enabled())

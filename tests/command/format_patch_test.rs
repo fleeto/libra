@@ -1693,3 +1693,278 @@ fn format_patch_blake3_patch_id() {
         "blake3 combiner must not emit the sha1 patch-id"
     );
 }
+
+// ---------------------------------------------------------------------------
+// issues/529: Git option-parity surface
+// ---------------------------------------------------------------------------
+
+#[test]
+fn last_n_shorthand_limits_the_series() {
+    let repo = repo_with_commits(4);
+    // `-<n>` is Git's "the last n commits" shorthand (previously rejected as an
+    // unknown `-2`/`-3` option).
+    for (flag, expected) in [("-2", 2usize), ("-3", 3), ("-1", 1)] {
+        let output = run_libra_command(&["format-patch", flag, "--stdout"], repo.path());
+        assert_cli_success(&output, flag);
+        let body = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(
+            body.matches("\nFrom ").count() + usize::from(body.starts_with("From ")),
+            expected,
+            "{flag} must emit {expected} patches: {body}"
+        );
+    }
+}
+
+#[test]
+fn rfc_marker_joins_the_subject_prefix() {
+    let repo = repo_with_commits(1);
+    let with_rfc = run_libra_command(
+        &["format-patch", "--rfc", "HEAD~1..HEAD", "--stdout"],
+        repo.path(),
+    );
+    assert_cli_success(&with_rfc, "--rfc");
+    assert!(
+        String::from_utf8_lossy(&with_rfc.stdout).contains("Subject: [RFC PATCH]"),
+        "--rfc prepends the marker: {}",
+        String::from_utf8_lossy(&with_rfc.stdout)
+    );
+
+    // `--rfc=<text>` replaces `RFC`, and the value must be attached (`=`).
+    let custom = run_libra_command(
+        &["format-patch", "--rfc=WIP", "HEAD~1..HEAD", "--stdout"],
+        repo.path(),
+    );
+    assert_cli_success(&custom, "--rfc=WIP");
+    assert!(
+        String::from_utf8_lossy(&custom.stdout).contains("Subject: [WIP PATCH]"),
+        "custom rfc text replaces RFC: {}",
+        String::from_utf8_lossy(&custom.stdout)
+    );
+
+    // Last one wins: `--rfc --no-rfc` restores the plain prefix.
+    let cancelled = run_libra_command(
+        &[
+            "format-patch",
+            "--rfc",
+            "--no-rfc",
+            "HEAD~1..HEAD",
+            "--stdout",
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&cancelled, "--rfc --no-rfc");
+    assert!(
+        String::from_utf8_lossy(&cancelled.stdout).contains("Subject: [PATCH] commit"),
+        "--no-rfc cancels the marker: {}",
+        String::from_utf8_lossy(&cancelled.stdout)
+    );
+}
+
+#[test]
+fn no_numbered_drops_the_sequence_prefix() {
+    let repo = repo_with_commits(2);
+    let out_dir = tempdir().unwrap();
+    let output = run_libra_command(
+        &[
+            "format-patch",
+            "--no-numbered",
+            "-o",
+            out_dir.path().to_str().unwrap(),
+            "HEAD~2..HEAD",
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&output, "--no-numbered");
+
+    let names: Vec<String> = fs::read_dir(out_dir.path())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(
+        names.iter().all(|n| !n.starts_with("0001")),
+        "--no-numbered drops the prefix: {names:?}"
+    );
+    assert!(
+        names.iter().any(|n| n == "commit-2.patch"),
+        "plain subject-derived name expected: {names:?}"
+    );
+}
+
+#[test]
+fn keep_subject_short_flag_is_accepted() {
+    let repo = repo_with_commits(1);
+    // `-k` is Git's short form of `--keep-subject`; the commit subject has no
+    // `[PATCH]` marker so this is an output-equality check.
+    let short = run_libra_command(
+        &["format-patch", "-k", "HEAD~1..HEAD", "--stdout"],
+        repo.path(),
+    );
+    assert_cli_success(&short, "-k");
+    let long = run_libra_command(
+        &["format-patch", "--keep-subject", "HEAD~1..HEAD", "--stdout"],
+        repo.path(),
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&short.stdout)
+            .lines()
+            .filter(|l| l.starts_with("Subject:"))
+            .collect::<Vec<_>>(),
+        String::from_utf8_lossy(&long.stdout)
+            .lines()
+            .filter(|l| l.starts_with("Subject:"))
+            .collect::<Vec<_>>(),
+        "-k and --keep-subject agree"
+    );
+}
+
+#[test]
+fn no_base_cancels_the_base_trailer() {
+    let repo = repo_with_commits(3);
+    let with_base = run_libra_command(
+        &[
+            "format-patch",
+            "--base",
+            "HEAD~2",
+            "HEAD~2..HEAD",
+            "--stdout",
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&with_base, "--base");
+    assert!(
+        String::from_utf8_lossy(&with_base.stdout).contains("base-commit:"),
+        "--base emits the trailer"
+    );
+
+    let without = run_libra_command(
+        &[
+            "format-patch",
+            "--base",
+            "HEAD~2",
+            "--no-base",
+            "HEAD~2..HEAD",
+            "--stdout",
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&without, "--no-base");
+    assert!(
+        !String::from_utf8_lossy(&without.stdout).contains("base-commit:"),
+        "--no-base cancels the trailer"
+    );
+}
+
+#[test]
+fn filename_max_length_truncates_like_git() {
+    let repo = repo_with_commits(1);
+    // The fixture subject ("commit 1") is short, so grow it into a long one.
+    fs::write(repo.path().join("long.txt"), "x\n").unwrap();
+    run_libra_command(&["add", "long.txt"], repo.path());
+    run_libra_command(
+        &[
+            "commit",
+            "-m",
+            "this is a very long commit subject line that should be truncated",
+            "--no-verify",
+        ],
+        repo.path(),
+    );
+
+    for (limit, expected) in [
+        (10usize, "0001.patch"),
+        (12, "0001-.patch"),
+        (15, "0001-thi.patch"),
+        (20, "0001-this-is-.patch"),
+        (30, "0001-this-is-a-very-lon.patch"),
+    ] {
+        let out_dir = tempdir().unwrap();
+        let output = run_libra_command(
+            &[
+                "format-patch",
+                "--filename-max-length",
+                &limit.to_string(),
+                "-o",
+                out_dir.path().to_str().unwrap(),
+                "-1",
+            ],
+            repo.path(),
+        );
+        assert_cli_success(&output, &format!("--filename-max-length={limit}"));
+        let names: Vec<String> = fs::read_dir(out_dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec![expected.to_string()], "limit {limit}");
+    }
+}
+
+#[test]
+fn cover_letter_commit_list_matches_git_shortlog() {
+    let repo = repo_with_commits(2);
+    let output = run_libra_command(
+        &["format-patch", "--cover-letter", "HEAD~2..HEAD", "--stdout"],
+        repo.path(),
+    );
+    assert_cli_success(&output, "cover letter shortlog");
+    let body = String::from_utf8_lossy(&output.stdout);
+    let name = run_libra_command(&["config", "user.name"], repo.path());
+    let author = String::from_utf8_lossy(&name.stdout).trim().to_string();
+    assert!(
+        body.contains(&format!("{author} (2):\n  commit 1\n  commit 2\n")),
+        "author-grouped shortlog expected, got:\n{body}"
+    );
+
+    // `--commit-list-format=modern` renders `[i/N] subject` lines instead.
+    let modern = run_libra_command(
+        &[
+            "format-patch",
+            "--cover-letter",
+            "--commit-list-format=modern",
+            "HEAD~2..HEAD",
+            "--stdout",
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&modern, "modern list");
+    let modern_body = String::from_utf8_lossy(&modern.stdout);
+    assert!(
+        modern_body.contains("[1/2] commit 1") && modern_body.contains("[2/2] commit 2"),
+        "modern commit list expected:\n{modern_body}"
+    );
+
+    // A pretty-format string renders each commit; unknown conversions are
+    // rejected with Git's message.
+    let pretty = run_libra_command(
+        &[
+            "format-patch",
+            "--cover-letter",
+            "--commit-list-format=%h %s",
+            "HEAD~2..HEAD",
+            "--stdout",
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&pretty, "pretty list");
+    assert!(
+        String::from_utf8_lossy(&pretty.stdout).contains(" commit 2"),
+        "pretty-format list expected"
+    );
+
+    let invalid = run_libra_command(
+        &[
+            "format-patch",
+            "--cover-letter",
+            "--commit-list-format=%q",
+            "HEAD~2..HEAD",
+            "--stdout",
+        ],
+        repo.path(),
+    );
+    assert!(
+        String::from_utf8_lossy(&invalid.stderr).contains("is not a valid format string"),
+        "invalid format string must be reported: {}",
+        String::from_utf8_lossy(&invalid.stderr)
+    );
+}

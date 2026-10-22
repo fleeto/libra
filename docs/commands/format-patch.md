@@ -36,6 +36,12 @@ body, and series metadata.
 | `--output-directory <DIR>` | `-o` | Write patch files into `DIR` | current directory |
 | `--stdout` | | Print all patches to stdout | false |
 | `--numbered` | `-n` | Name files with a leading sequence number (`0001-subject.patch`) | false |
+| `--no-numbered` | `-N` | Drop the `0001-` sequence prefix from filenames and the `n/m` subject counter | off |
+| `--rfc[=<text>]` | | Prefix the subject with `RFC` (`[RFC PATCH]`); with a value, that text is used instead (`--rfc=WIP` → `[WIP PATCH]`). The value must be attached with `=` so a revision argument is never swallowed | off |
+| `--no-rfc` | | Cancel a preceding `--rfc` (last flag wins) | off |
+| `--filename-max-length <N>` | | Truncate output filenames to at most `N` bytes, counting the `0001-` prefix and the suffix; the stem may collapse to just the sequence number, matching Git's cut points | unlimited |
+| `--commit-list-format <FMT>` | | Cover-letter commit list. Default (or `short`) is Git's author-grouped shortlog (`Name (N):` + subjects wrapped at 72 columns); `modern` renders `[i/N] subject`; any other value is a pretty-format string supporting `%h`, `%H`, `%s`, `%an`, `%ae`, `%n` and `%%` (unsupported conversions fail with `'<fmt>' is not a valid format string`) | `short` |
+| `--no-base` | | Do not emit the `base-commit:` trailer, overriding `--base` (Libra has no `format.useAutoBase` config to reset) | off |
 | `--start-number <N>` | | Start numbering at `N` | 1 |
 | `--subject-prefix <PREFIX>` | | Use `PREFIX` instead of `PATCH` in the Subject: line | `PATCH` |
 | `--cover-letter` | | Generate a cover-letter template (`0000-cover-letter<suffix>`, or `0` under `--numbered-files`) | false |
@@ -59,7 +65,7 @@ body, and series metadata.
 | `--ignore-if-in-upstream` | | Suppress commits whose stable patch-id already appears on the excluded side of the range | false |
 | `--src-prefix <PREFIX>` / `--dst-prefix <PREFIX>` | | Replace the default `a/` and `b/` diff path prefixes | `a/`, `b/` |
 | `--no-stat` | | Suppress the diffstat summary | false |
-| `--keep-subject` | | Keep the original `[PATCH]` prefix in the commit subject | false |
+| `--keep-subject` | `-k` | Keep the commit subject byte-identical: no `[PATCH]` prefix and no `n/m` counter is added (Git's contract). Without it, a leading bracket group in the subject is stripped before the prefix is added | false |
 | `--suffix <SFX>` | | Filename suffix for generated patches (e.g. `.txt`); ignored under `--numbered-files` | `.patch` |
 | `--zero-commit` | | Use an all-zero hash in each patch's `From <hash>` envelope line | false |
 | `--signature <SIGNATURE>` | | Text placed after the `-- ` line of each patch and the cover letter | libra version |
@@ -105,6 +111,9 @@ libra format-patch --stdout origin/main.. | git am
 # Record the base the series applies to (for `git am --base`)
 libra format-patch --base=origin/main --stdout origin/main..HEAD
 
+# Last two commits, RFC-marked, with short filenames
+libra format-patch -2 --rfc --filename-max-length=30
+
 # Skip changes already present upstream and use custom diff prefixes
 libra format-patch --ignore-if-in-upstream --src-prefix=old/ --dst-prefix=new/ origin/main..HEAD
 ```
@@ -143,6 +152,12 @@ When `--cover-letter` is set, the list includes the cover letter as record
 number `0` before the commit patch records. Its filename is
 `0000-cover-letter` with the configured suffix (default `.patch`), or just `0`
 under `--numbered-files`.
+
+The cover letter's commit list is Git's shortlog by default: authors in
+first-appearance order, each as `Name (N):` followed by their subjects
+indented two spaces and wrapped at 72 columns (four-space continuation
+indent). `--commit-list-format=modern` swaps that for `[i/N] subject` lines,
+and any other value is read as a pretty-format string.
 
 The complete series is rendered before any output file is created, and each
 patch file is persisted with a temporary-file + atomic-rename write. Piped

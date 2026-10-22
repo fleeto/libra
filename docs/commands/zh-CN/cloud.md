@@ -20,6 +20,13 @@ libra cloud status [--verbose]
 
 恢复可以用 UUID（`--repo-id`）或项目名（`--name`）定位仓库。它会从 D1 下载对象索引，可选地从 R2 下载对象，恢复元数据（references），并从 HEAD 填充工作目录。
 
+可选的 `agent.commit_trailer=true` 提交关联另有仓库本地 catalog；使用
+`--no-agent-trailer` 时，还会写入本地 `.libra/agent-commit-links.v1` 恢复日志。
+现有 cloud refs metadata 和 D1 capture graph 均不备份提交关联表或该日志。
+因此 cloud restore 成功不代表无 trailer 的 agent 关联已恢复；空关联表也
+不能证明原本没有关联。可达提交的 trailer 可作为后续重建线索，
+仍须重新核验仓库及会话作用域。
+
 ### 对象格式（B3-09 / B3-14）
 
 备份会把仓库的 `core.objectformat` 写入 D1 `repositories.object_format`（并标记 `object_index` 行）。恢复只以该元数据作为 sha1/sha256/blake3 权威，绝不根据 `o_id` 长度猜测。缺少元数据且存在任意 64-hex 对象 id 的快照会以 `LBR-REPO-002`（退出码 128）fail-closed，并提示在源仓重跑 `libra cloud sync`；无元数据且全部为 40-hex 的旧快照仍按 sha1 兼容。早于 REL-B3-02 的客户端不得通过宽度猜测恢复带元数据的新备份。

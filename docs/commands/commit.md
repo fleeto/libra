@@ -56,21 +56,38 @@ moves that session trailer into the final parseable block so it appears once.
 retaining explicitly enabled local links. Dry runs neither link nor preview the
 automatic trailer. Even with
 `--no-agent-trailer`, explicit association still checks the repository catalog,
-session scope, 64-session cap and workspace lease before moving HEAD; failures
-abort the commit. Association is recorded after HEAD advances; the selected
+session scope, 64-session cap and workspace lease before moving HEAD. It writes
+a repository-local `.libra/agent-commit-links.v1` prepared intent under the
+SQLite writer lock before moving the ref. The file is owner-only on Unix,
+bounded to 10 MiB, synced before the ref move (including the first directory
+entry on Unix; Windows uses a write-through atomic move), and refuses symlinks. An intent
+left by a failed ref update is not proof that the commit became reachable.
+Journal write or sync failure aborts before the ref moves. Association is
+recorded after HEAD advances; the selected
 session scope and workspace lease are rechecked in the same
 database transaction, and a failure is reported as a warning. Amend carries
 forward still-authorized sessions linked to the commit being replaced and adds
 newly eligible sessions; both `--no-edit` and a new `-m` message emit any
 missing automatic trailer in the replacement message. The
-replaced commit retains its existing local link rows. Durable
-journal recovery is planned for CX-27 and is not available yet. Current cloud
-refs-only metadata uploads repository refs, not this local SQLite association
+replaced commit retains its existing local link rows. The local journal now
+retains trailer-free association evidence across a post-ref database failure;
+`libra agent doctor --repair` explicitly replays currently authorized links
+from reachable commits in bounded pages; `doctor --commit-link-page N` selects
+the page. Evidence completeness remains unknown even when no link is found.
+If a journal reaches its 10 MiB bound or contains a corrupt complete frame,
+inspect it before `doctor --repair --reset-commit-link-journal`. A readable
+full journal also requires a live lease, successful repair and cleanup, and
+no unfinished batch (64 links or 128 candidates). If repair frees enough
+space, reset is skipped. Add `--acknowledge-commit-link-loss` when the current
+100-commit history page has a next page, or when other worktrees or unreachable
+commits still hold evidence you intend to discard. The reset does not remove
+commits or checkpoints.
+Current cloud refs-only metadata uploads repository refs, not this local SQLite association
 table. A trailer-free link is one made with `--no-agent-trailer`; cloud sync
 does not back it up. A post-ref warning means the commit is complete but its
-local association may be missing. Keep the commit and source session; there is
-no automatic repair command until CX-27, so do not amend solely to retry the
-link. The warning appears on stderr; with `--exit-code-on-warning`, the
+local association may be missing. Keep the commit, journal, and source session;
+run `libra agent doctor --repair` in the same worktree. Do not amend solely to
+retry the link. The warning appears on stderr; with `--exit-code-on-warning`, the
 completed commit returns exit 9 / `LBR-WARN-001` while JSON remains `ok: true`.
 The unreadable opt-in configuration warning follows the same exit-code rule.
 Commit JSON has no linked-session field.
@@ -863,7 +880,7 @@ candidate OIDs while holding that fence through the prune transaction. With
 | Auto-stage preview/object/LFS write failed | `LBR-IO-002` | 128 | Check space and permissions for the named target |
 | Staged changes computation | `LBR-REPO-002` | 128 | "failed to compute staged changes" |
 | Commit completed but cloud index repair remains pending, with `--exit-code-on-warning` | `LBR-WARN-001` | 9 | Fix the reported database/marker error; any next repo command retries the exact rows |
-| Commit completed but local agent link failed, with `--exit-code-on-warning` | `LBR-WARN-001` | 9 | Preserve the commit and session; CX-27 recovery is pending, so do not amend only to retry |
+| Commit completed but local agent link failed, with `--exit-code-on-warning` | `LBR-WARN-001` | 9 | Preserve the commit, journal and session; run `libra agent doctor --repair` in the same worktree; do not amend only to retry |
 
 ## Compatibility Notes
 

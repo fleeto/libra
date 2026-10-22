@@ -154,6 +154,8 @@ use crate::{
 /// with a note; truncation only ever *under*-detects (fail-safe direction).
 const MAX_TRACES_WALK_COMMITS: usize = 100_000;
 const MAX_IMPORT_INDEX_REPAIR_CHECKPOINTS: usize = 4_096;
+const MAX_CODEX_LEGACY_SCAN_ROWS: usize = 64;
+const CODEX_LEGACY_SCAN_TOTAL_BYTES: u64 = 128 * 1024 * 1024;
 /// Doctor never needs an unbounded payload. Trees, commits, manifests, and
 /// findings sidecars are control-plane objects; transcript bodies are never
 /// read here. A corrupt loose object therefore cannot turn a diagnostic into
@@ -260,6 +262,7 @@ const CLASS_UNRESOLVED_SUBAGENT_LINK: &str = "unresolved_subagent_link";
 const CLASS_INCONSISTENT_SUBAGENT_CONTENT: &str = "inconsistent_subagent_content";
 const CLASS_INCONSISTENT_REASONING_ARTIFACT: &str = "inconsistent_reasoning_artifact";
 const CLASS_CLAUDE_LEGACY_REASONING_REVISION: &str = "claude_legacy_reasoning_revision";
+const CLASS_CODEX_LEGACY_REASONING_REVISION: &str = "codex_legacy_reasoning_revision";
 /// A0-06: a run manifest's `findings_oid` points at a blob missing from the
 /// object store.
 const CLASS_MISSING_FINDINGS_OBJECT: &str = "missing_findings_object";
@@ -298,6 +301,8 @@ struct ProviderHookEventStatus {
 #[derive(Debug, Serialize)]
 struct DoctorReport {
     capture_diagnostics: CaptureDiagnostics,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    commit_links: Option<crate::internal::ai::commit_recovery::CommitRecoveryReport>,
     #[serde(skip_serializing_if = "Option::is_none")]
     codex_reconciliation: Option<CodexReconciliationReport>,
     schema_present: bool,
@@ -896,7 +901,12 @@ enum RepairPlan {
     },
     /// Append one coverage revision for an authorized legacy Claude checkpoint.
     /// The stored objects stay in place.
-    AppendClaudeLegacyRevision { checkpoint_id: String },
+    AppendClaudeLegacyRevision {
+        checkpoint_id: String,
+    },
+    AppendCodexLegacyRevision {
+        checkpoint_id: String,
+    },
     /// No automatic action is safe; a human must restore objects/rows.
     Manual,
 }
@@ -1122,7 +1132,13 @@ pub async fn execute_safe(args: DoctorArgs, output: &OutputConfig) -> CliResult<
         .iter()
         .any(|ph| ph.name == "gemini" && ph.installed == Some(true));
 
-    let checkpoint_store = scan_checkpoint_store(&conn, schema_present, args.repair).await?;
+    let checkpoint_store = scan_checkpoint_store(
+        &conn,
+        schema_present,
+        args.repair,
+        args.codex_legacy_after.as_deref(),
+    )
+    .await?;
     let findings_store = scan_agent_findings(&conn, schema_present, args.repair).await?;
     let task_workspaces = scan_task_workspaces(&storage);
     let legacy_code_residue = scan_legacy_code_residue(&conn).await?;
@@ -1139,9 +1155,185 @@ pub async fn execute_safe(args: DoctorArgs, output: &OutputConfig) -> CliResult<
         ),
         None => None,
     };
+    let mut reset_baseline = None;
+    if args.reset_commit_link_journal {
+        let issue = crate::internal::ai::commit_journal::read_issue(&storage);
+        if !matches!(issue, None | Some("corrupt" | "oversized")) {
+            return Err(CliError::fatal(format!(
+                "agent commit journal reset refused for {} evidence; restore permissions or use a compatible Libra version",
+                issue.unwrap_or("unknown")
+            )));
+        }
+        if issue.is_none() && !crate::internal::ai::commit_journal::near_capacity(&storage) {
+            return Err(CliError::fatal("agent commit journal is readable and has capacity; run doctor --repair without reset first".to_string()));
+        }
+        if issue.is_none() {
+            reset_baseline = Some(
+                crate::internal::ai::commit_journal::read(&storage)
+                    .map_err(|error| CliError::fatal(format!(
+                        "agent commit journal changed before repair: {error:#}; retry without resetting"
+                    )))?
+                    .0,
+            );
+        }
+    }
+    let mut commit_links = if schema_present && table_exists(&conn, "agent_session_commit").await? {
+        let worktree_root = crate::internal::worktree_scope::WorktreeScope::request_scope()
+            .map(|request| request.worktree_root)
+            .or_else(|| {
+                util::try_get_request_paths(None)
+                    .ok()
+                    .map(|(_, root, _)| root)
+            });
+        let scope = match worktree_root {
+            Some(worktree_root) => {
+                crate::internal::ai::capture_scope::CaptureScope::resolve(&conn, &worktree_root)
+                    .await
+                    .ok()
+            }
+            None => None,
+        };
+        if let Some(scope) = scope {
+            let prepared = crate::internal::ai::commit_recovery::prepare_page(
+                &conn,
+                &storage,
+                &scope,
+                args.commit_link_page,
+            )
+            .await;
+            if let Ok(prepared) = prepared {
+                let report = if args.repair {
+                    let txn = crate::internal::db::begin_write_transaction(&conn)
+                .await
+                .map_err(|_| CliError::fatal("agent doctor could not lock the repository for commit-link repair; retry after other writers finish".to_string()))?;
+                    let mut report = crate::internal::ai::commit_recovery::inspect_prepared(
+                &txn, &storage, &scope, args.commit_link_page, true, &prepared,
+            ).await.map_err(|error| CliError::fatal(format!(
+                "agent commit-link repair could not complete: {error:#}; keep the local journal and retry after checking the repository"
+            )))?;
+                    txn.commit().await.map_err(|error| CliError::fatal(format!(
+                "agent commit-link repair could not commit its catalog changes: {error}; retry after checking the repository database"
+            )))?;
+                    if !report.journal_unavailable && !report.permission_blocked {
+                        let cleanup = async {
+                            let cleanup_txn =
+                                crate::internal::db::begin_write_transaction(&conn).await?;
+                            crate::internal::ai::commit_recovery::reclaim_reconciled(
+                                &cleanup_txn,
+                                &storage,
+                                &scope,
+                                &prepared,
+                            )
+                            .await?;
+                            cleanup_txn.commit().await?;
+                            Ok::<(), anyhow::Error>(())
+                        }
+                        .await;
+                        if cleanup.is_err() {
+                            report.cleanup_incomplete = true;
+                        }
+                    }
+                    report
+                } else {
+                    crate::internal::ai::commit_recovery::inspect_prepared(
+                        &conn,
+                        &storage,
+                        &scope,
+                        args.commit_link_page,
+                        false,
+                        &prepared,
+                    )
+                    .await
+                    .unwrap_or_else(|_| {
+                        crate::internal::ai::commit_recovery::CommitRecoveryReport::unavailable(
+                            args.commit_link_page,
+                            false,
+                        )
+                    })
+                };
+                Some(report)
+            } else {
+                let report =
+                    crate::internal::ai::commit_recovery::CommitRecoveryReport::unavailable(
+                        args.commit_link_page,
+                        args.repair,
+                    );
+                Some(report)
+            }
+        } else {
+            let report = crate::internal::ai::commit_recovery::CommitRecoveryReport::unavailable(
+                args.commit_link_page,
+                args.repair,
+            );
+            Some(report)
+        }
+    } else {
+        let report = crate::internal::ai::commit_recovery::CommitRecoveryReport::unavailable(
+            args.commit_link_page,
+            args.repair,
+        );
+        Some(report)
+    };
+    if args.reset_commit_link_journal
+        && (crate::internal::ai::commit_journal::read_issue(&storage).is_some()
+            || crate::internal::ai::commit_journal::near_capacity(&storage))
+    {
+        if reset_baseline.is_some() {
+            let ready = commit_links.as_ref().is_some_and(|report| {
+                report.repair_applied
+                    && !report.permission_blocked
+                    && !report.cleanup_incomplete
+                    && !report.journal_unavailable
+                    && !report.more_missing_links
+                    && (args.acknowledge_commit_link_loss
+                        || (!report.history_incomplete
+                            && report.foreign_scope_intents == 0
+                            && report.unmatched_scope_intents == 0
+                            && report.next_commit_page.is_none()))
+            });
+            if !ready {
+                if commit_links.as_ref().is_some_and(|report| {
+                    report.repair_applied
+                        && !report.permission_blocked
+                        && !report.cleanup_incomplete
+                        && !report.journal_unavailable
+                        && !report.more_missing_links
+                }) {
+                    return Err(CliError::fatal("agent commit journal still has evidence outside this page or worktree; inspect it, then pass --acknowledge-commit-link-loss with the explicit reset only if that recovery evidence may be discarded".to_string()));
+                }
+                return Err(CliError::fatal("agent commit journal reset refused: repair, scope, lease, journal cleanup, or current-page inspection is incomplete; resolve the reported condition and inspect other worktrees/pages before retrying".to_string()));
+            }
+        }
+        let txn = crate::internal::db::begin_write_transaction(&conn)
+            .await
+            .map_err(|_| CliError::fatal("agent doctor could not lock the repository for explicit journal reset; retry after other writers finish".to_string()))?;
+        if reset_baseline.is_none()
+            && crate::internal::ai::commit_journal::read_issue(&storage).is_none()
+        {
+            return Err(CliError::fatal("agent commit journal became readable during doctor repair; inspect it and retry before resetting".to_string()));
+        }
+        if let Some(initial) = &reset_baseline {
+            crate::internal::ai::commit_journal::verify_no_new_records(&storage, initial).map_err(
+                |error| {
+                    CliError::fatal(format!("agent commit journal reset was refused: {error:#}"))
+                },
+            )?;
+        }
+        let reset = crate::internal::ai::commit_journal::reset_explicit(&storage)
+            .map_err(|error| CliError::fatal(format!(
+                "agent commit journal could not be reset: {error:#}; inspect the unsafe entry manually"
+            )))?;
+        txn.commit().await.map_err(|error| CliError::fatal(format!(
+            "agent commit journal was reset but its writer lock could not be released: {error}; check the repository and retry"
+        )))?;
+        if let Some(report) = &mut commit_links {
+            report.journal_reset = reset;
+        }
+    }
     emit_report(
         &DoctorReport {
             capture_diagnostics: diagnostics::summarize(&storage),
+            commit_links,
             codex_reconciliation,
             schema_present,
             active_sessions,
@@ -2448,6 +2640,7 @@ async fn scan_checkpoint_store(
     conn: &DatabaseConnection,
     schema_present: bool,
     repair: bool,
+    codex_legacy_after: Option<&str>,
 ) -> CliResult<CheckpointStoreReport> {
     let mut report = CheckpointStoreReport {
         scanned: false,
@@ -3355,13 +3548,33 @@ async fn scan_checkpoint_store(
             &mut notes,
         )
         .await;
+        plan_codex_legacy_reasoning_revisions(
+            conn,
+            &repo_path,
+            &ref_map,
+            codex_legacy_after,
+            &mut findings,
+            &mut plans,
+            &mut notes,
+        )
+        .await;
     }
 
     // ---- Repair execution (idempotent; spans per attempt) ---------------
     if repair {
         let mut replay_batch = ArtifactReplayBatch::new();
+        let mut codex_legacy_repair_remaining = CODEX_LEGACY_SCAN_TOTAL_BYTES;
         for (finding, plan) in findings.iter_mut().zip(plans.iter()) {
-            execute_repair(conn, &history, finding, plan, &repo_id, &mut replay_batch).await;
+            execute_repair(
+                conn,
+                &history,
+                finding,
+                plan,
+                &repo_id,
+                &mut replay_batch,
+                &mut codex_legacy_repair_remaining,
+            )
+            .await;
             emit_repair_span(finding);
         }
     }
@@ -3384,7 +3597,7 @@ pub(crate) async fn scan_checkpoint_store_for_test(
     schema_present: bool,
     repair: bool,
 ) -> CliResult<serde_json::Value> {
-    let report = scan_checkpoint_store(conn, schema_present, repair).await?;
+    let report = scan_checkpoint_store(conn, schema_present, repair, None).await?;
     serde_json::to_value(report).map_err(|_| {
         CliError::fatal("could not serialize the in-process doctor test report".to_string())
     })
@@ -3682,7 +3895,7 @@ async fn plan_claude_legacy_reasoning_revisions(
             Ok(value) => value,
             Err(_) => continue,
         };
-        let bytes = match read_stored_claude_transcript(storage, &checkpoint_id, &tree_oid).await {
+        let bytes = match read_stored_legacy_transcript(storage, &checkpoint_id, &tree_oid).await {
             Ok(bytes) => bytes,
             Err(_) => continue,
         };
@@ -3724,9 +3937,196 @@ async fn plan_claude_legacy_reasoning_revisions(
     }
 }
 
-async fn read_claude_legacy_transcript(
+/// Scan one explicit keyset page of current-scope committed Codex checkpoints.
+/// Ineligible rows stay in the catalog, so the next page must use the
+/// checkpoint cursor reported in the note rather than repeating page one.
+async fn plan_codex_legacy_reasoning_revisions(
+    conn: &DatabaseConnection,
+    storage: &Path,
+    ref_map: &HashMap<String, RefCheckpoint>,
+    after: Option<&str>,
+    findings: &mut Vec<CheckpointFinding>,
+    plans: &mut Vec<RepairPlan>,
+    notes: &mut Vec<String>,
+) {
+    let scope = match CaptureScope::resolve(conn, &util::request_working_dir()).await {
+        Ok(scope) => scope,
+        Err(_) => {
+            notes.push("Codex legacy reasoning revision scan could not resolve the current scope; no legacy revisions were planned".to_string());
+            return;
+        }
+    };
+    let rows = match conn
+        .query_all_raw(Statement::from_sql_and_values(
+            conn.get_database_backend(),
+            "SELECT c.checkpoint_id, c.session_id, c.tree_oid, c.traces_commit,
+                    s.provider_session_id
+         FROM agent_checkpoint c
+         JOIN agent_session s ON s.session_id = c.session_id
+         WHERE s.agent_kind = 'codex' AND c.scope = 'committed'
+           AND s.scope_state = 'scoped' AND s.repo_id IS ?
+           AND s.worktree_id IS ? AND s.workspace_id IS ?
+           AND s.workspace_fence IS ?
+           AND c.checkpoint_id > ?
+           AND (NOT EXISTS (
+               SELECT 1 FROM agent_coverage_revision r
+               WHERE r.session_id = c.session_id
+                 AND r.logical_turn_key = 'codex-legacy:' || c.checkpoint_id
+                 AND r.coverage_schema_version = 2 AND r.checkpoint_id = c.checkpoint_id
+             ) OR NOT EXISTS (
+               SELECT 1 FROM agent_coverage_claim q
+               WHERE q.session_id = c.session_id
+                 AND q.logical_turn_key = 'codex-legacy:' || c.checkpoint_id
+                 AND q.coverage_schema_version = 2 AND q.state = 'catalog_committed'
+                 AND q.checkpoint_id = c.checkpoint_id
+             ))
+         ORDER BY c.checkpoint_id LIMIT 65",
+            [
+                scope.repo_id.into(),
+                scope.worktree_id.into(),
+                scope.workspace_id.into(),
+                scope.workspace_fence.into(),
+                after.unwrap_or("").to_owned().into(),
+            ],
+        ))
+        .await
+    {
+        Ok(rows) => rows,
+        Err(_) => {
+            notes.push("Codex legacy reasoning revision scan could not read the catalog; unlisted checkpoints are not certified".to_string());
+            return;
+        }
+    };
+    let mut extra = rows.len() > MAX_CODEX_LEGACY_SCAN_ROWS;
+    let mut remaining_bytes = CODEX_LEGACY_SCAN_TOTAL_BYTES;
+    let mut last_scanned = None;
+    let mut unreadable = 0usize;
+    let mut unchecked = 0usize;
+    for row in rows.into_iter().take(MAX_CODEX_LEGACY_SCAN_ROWS) {
+        if remaining_bytes == 0 {
+            extra = true;
+            break;
+        }
+        let checkpoint_id: String = match row.try_get_by("checkpoint_id") {
+            Ok(checkpoint_id) => checkpoint_id,
+            Err(_) => {
+                notes.push("Codex legacy reasoning revision scan found an unreadable checkpoint ID; this page is not certified".to_string());
+                break;
+            }
+        };
+        let (session_id, tree_oid, traces_commit, provider_session_id): (
+            String,
+            String,
+            String,
+            String,
+        ) = match (
+            row.try_get_by("session_id"),
+            row.try_get_by("tree_oid"),
+            row.try_get_by("traces_commit"),
+            row.try_get_by("provider_session_id"),
+        ) {
+            (Ok(session_id), Ok(tree_oid), Ok(traces_commit), Ok(provider_session_id)) => {
+                (session_id, tree_oid, traces_commit, provider_session_id)
+            }
+            _ => {
+                unchecked = unchecked.saturating_add(1);
+                last_scanned = Some(checkpoint_id);
+                continue;
+            }
+        };
+        if !ref_map.get(&checkpoint_id).is_some_and(|reference| {
+            reference.root_tree == tree_oid && reference.commit == traces_commit
+        }) {
+            last_scanned = Some(checkpoint_id);
+            continue;
+        }
+        let read_cap = remaining_bytes
+            .min(crate::internal::ai::observed_agents::TRANSCRIPT_READ_HARD_CAP_BYTES);
+        let bytes = match super::checkpoint::load_checkpoint_transcript_bytes_from_storage(
+            storage,
+            &checkpoint_id,
+            &tree_oid,
+            read_cap,
+        ) {
+            Ok((bytes, false)) => bytes,
+            Ok((_, true))
+                if read_cap
+                    < crate::internal::ai::observed_agents::TRANSCRIPT_READ_HARD_CAP_BYTES =>
+            {
+                extra = true;
+                notes.push("Codex legacy reasoning revision scan reached its 128 MiB total read budget; continue with the reported checkpoint cursor".to_string());
+                break;
+            }
+            Ok((_, true)) | Err(_) => {
+                remaining_bytes = remaining_bytes.saturating_sub(read_cap);
+                unreadable = unreadable.saturating_add(1);
+                last_scanned = Some(checkpoint_id);
+                continue;
+            }
+        };
+        remaining_bytes = remaining_bytes.saturating_sub(bytes.len() as u64);
+        let needs = match crate::internal::ai::history::codex_legacy_revision_needs_repair(
+            conn,
+            &session_id,
+            &provider_session_id,
+            &checkpoint_id,
+            &bytes,
+        )
+        .await
+        {
+            Ok(needs) => needs,
+            Err(_) => {
+                unchecked = unchecked.saturating_add(1);
+                last_scanned = Some(checkpoint_id);
+                continue;
+            }
+        };
+        if !needs {
+            last_scanned = Some(checkpoint_id);
+            continue;
+        }
+        findings.push(CheckpointFinding {
+            inconsistency_type: CLASS_CODEX_LEGACY_REASONING_REVISION.to_string(),
+            checkpoint_id: checkpoint_id.clone(),
+            detail: "current-scope Codex checkpoint has retained ordinary thinking without a content-bound legacy revision; `libra agent doctor --repair` appends that revision without changing stored objects".to_string(),
+            repaired: false,
+            manual_required: false,
+        });
+        plans.push(RepairPlan::AppendCodexLegacyRevision {
+            checkpoint_id: checkpoint_id.clone(),
+        });
+        last_scanned = Some(checkpoint_id);
+    }
+    if extra {
+        if let Some(cursor) = last_scanned {
+            notes.push(format!("Codex legacy reasoning revision scan has more rows; continue with `libra agent doctor --codex-legacy-after {cursor}` (add `--repair` to repair this page). Earlier ineligible rows remain uncertified"));
+        } else {
+            notes.push("Codex legacy reasoning revision scan stopped before a checkpoint cursor could be read; this page is not certified".to_string());
+        }
+    }
+    if unreadable != 0 {
+        notes.push(format!(
+            "Codex legacy reasoning revision scan could not read {unreadable} checkpoint transcript(s); those checkpoints are not certified"
+        ));
+    }
+    if unchecked != 0 {
+        notes.push(format!(
+            "Codex legacy reasoning revision scan could not check {unchecked} checkpoint(s); those checkpoints are not certified"
+        ));
+    }
+}
+
+async fn read_legacy_transcript(
     conn: &DatabaseConnection,
     checkpoint_id: &str,
+) -> std::result::Result<Vec<u8>, &'static str> {
+    read_legacy_transcript_capped(conn, checkpoint_id, u64::MAX).await
+}
+
+async fn read_legacy_transcript_capped(
+    conn: &DatabaseConnection,
+    checkpoint_id: &str,
+    max_cap: u64,
 ) -> std::result::Result<Vec<u8>, &'static str> {
     let storage = util::try_get_storage_path(None)
         .map_err(|_| "; repository storage was unavailable, so the revision was not written")?;
@@ -3742,17 +4142,27 @@ async fn read_claude_legacy_transcript(
     let tree_oid: String = row
         .try_get_by("tree_oid")
         .map_err(|_| "; the checkpoint row was not readable, so the revision was not written")?;
-    read_stored_claude_transcript(&storage, checkpoint_id, &tree_oid).await
+    read_stored_legacy_transcript_capped(&storage, checkpoint_id, &tree_oid, max_cap).await
 }
 
-async fn read_stored_claude_transcript(
+async fn read_stored_legacy_transcript(
     storage: &Path,
     checkpoint_id: &str,
     tree_oid: &str,
 ) -> std::result::Result<Vec<u8>, &'static str> {
+    read_stored_legacy_transcript_capped(storage, checkpoint_id, tree_oid, u64::MAX).await
+}
+
+async fn read_stored_legacy_transcript_capped(
+    storage: &Path,
+    checkpoint_id: &str,
+    tree_oid: &str,
+    max_cap: u64,
+) -> std::result::Result<Vec<u8>, &'static str> {
     let cap = crate::internal::ai::observed_agents::compliance::max_transcript_read_bytes()
         .await
-        .map_err(|_| "; the transcript read cap is unavailable, so the revision was not written")?;
+        .map_err(|_| "; the transcript read cap is unavailable, so the revision was not written")?
+        .min(max_cap);
     match super::checkpoint::load_checkpoint_transcript_bytes_from_storage(
         storage,
         checkpoint_id,
@@ -3815,6 +4225,7 @@ async fn execute_repair(
     plan: &RepairPlan,
     repo_id: &str,
     replay_batch: &mut ArtifactReplayBatch,
+    codex_legacy_repair_remaining: &mut u64,
 ) {
     let finalizer_recovery = match plan {
         RepairPlan::RecoverPendingFinalizer { recovery, .. }
@@ -4069,7 +4480,7 @@ async fn execute_repair(
             }
         }
         RepairPlan::AppendClaudeLegacyRevision { checkpoint_id } => {
-            match read_claude_legacy_transcript(conn, checkpoint_id).await {
+            match read_legacy_transcript(conn, checkpoint_id).await {
                 Ok(bytes) => {
                     match history
                         .repair_claude_legacy_reasoning_revision(checkpoint_id, &bytes)
@@ -4087,6 +4498,46 @@ async fn execute_repair(
                 Err(reason) => {
                     finding.manual_required = true;
                     finding.detail.push_str(reason);
+                }
+            }
+        }
+        RepairPlan::AppendCodexLegacyRevision { checkpoint_id } => {
+            if *codex_legacy_repair_remaining == 0 {
+                finding.manual_required = true;
+                finding.detail.push_str(
+                    "; Codex legacy repair reached its 128 MiB page read budget; rerun doctor for the remaining checkpoint",
+                );
+                return;
+            }
+            let cap = (*codex_legacy_repair_remaining)
+                .min(crate::internal::ai::observed_agents::TRANSCRIPT_READ_HARD_CAP_BYTES);
+            match read_legacy_transcript_capped(conn, checkpoint_id, cap).await {
+                Ok(bytes) => {
+                    *codex_legacy_repair_remaining =
+                        (*codex_legacy_repair_remaining).saturating_sub(bytes.len() as u64);
+                    match history
+                        .repair_codex_legacy_reasoning_revision(checkpoint_id, &bytes)
+                        .await
+                    {
+                        Ok(_) => finding.repaired = true,
+                        Err(_) => {
+                            finding.manual_required = true;
+                            finding.detail.push_str(
+                                "; Codex legacy revision repair failed closed; rerun doctor",
+                            );
+                        }
+                    }
+                }
+                Err(reason) => {
+                    *codex_legacy_repair_remaining =
+                        (*codex_legacy_repair_remaining).saturating_sub(cap);
+                    finding.manual_required = true;
+                    finding.detail.push_str(reason);
+                    if cap < crate::internal::ai::observed_agents::TRANSCRIPT_READ_HARD_CAP_BYTES {
+                        finding.detail.push_str(
+                            "; the 128 MiB Codex legacy repair page budget may be exhausted; rerun doctor",
+                        );
+                    }
                 }
             }
         }
@@ -6122,6 +6573,56 @@ fn emit_report(report: &DoctorReport, output: &OutputConfig) -> CliResult<()> {
         "Codex diagnostics    : {}",
         report.capture_diagnostics.describe()
     );
+    if let Some(links) = &report.commit_links {
+        if links.journal_reset {
+            println!(
+                "  local commit-link journal reset: previous trailer-free recovery evidence was discarded by explicit request"
+            );
+        }
+        println!(
+            "Agent commit links   : {} (evidence completeness {}; page {})",
+            links.evidence_state, links.evidence_completeness, links.commit_page
+        );
+        println!(
+            "  candidates: {}; missing: {}; repaired: {}; rejected: {}",
+            links.candidate_links, links.missing_links, links.repaired_links, links.rejected_links
+        );
+        if links.unmatched_scope_intents > 0 {
+            println!(
+                "  current-scope intents outside this page or branch: {}",
+                links.unmatched_scope_intents
+            );
+        }
+        if links.journal_bad_tail || links.journal_unavailable || links.history_incomplete {
+            println!(
+                "  limits: torn_tail={}; journal_unavailable={}; history_incomplete={}",
+                links.journal_bad_tail, links.journal_unavailable, links.history_incomplete
+            );
+        }
+        if let Some(reason) = links.journal_unavailable_reason {
+            println!("  journal unavailable reason: {reason}");
+        }
+        if let Some(next) = links.next_commit_page {
+            println!("  next page: libra agent doctor --commit-link-page {next}");
+        }
+        if links.more_missing_links {
+            println!(
+                "  candidate limit reached: inspect the page and remaining journal evidence before retrying repair"
+            );
+        }
+        if links.permission_blocked {
+            println!("  repair blocked: current workspace lease is not live");
+        }
+        if links.cleanup_incomplete {
+            println!(
+                "  local journal cleanup incomplete: catalog repairs were committed; rerun doctor --repair"
+            );
+        }
+    } else {
+        println!(
+            "Agent commit links   : unavailable (local catalog schema missing; evidence completeness unknown)"
+        );
+    }
     if let Some(reconciliation) = &report.codex_reconciliation {
         println!(
             "Codex reconciliation : {} (provided backup; page {})",
@@ -6488,6 +6989,7 @@ pub(crate) async fn assert_child_pending_repair_for_test(
                 manual_required: true,
             };
             let mut batch = ArtifactReplayBatch::new();
+            let mut codex_legacy_repair_remaining = CODEX_LEGACY_SCAN_TOTAL_BYTES;
             execute_repair(
                 conn,
                 &history,
@@ -6495,6 +6997,7 @@ pub(crate) async fn assert_child_pending_repair_for_test(
                 &plan,
                 &recovery.scope().repo_id,
                 &mut batch,
+                &mut codex_legacy_repair_remaining,
             )
             .await;
             assert!(!finding.repaired);
@@ -6764,6 +7267,7 @@ mod tests {
             let (mut finding, kind) = pending_finalizer_finding(original_manual, false);
             assert_eq!(kind, FinalizerRepairKind::Manual);
             let mut batch = ArtifactReplayBatch::new();
+            let mut codex_legacy_repair_remaining = CODEX_LEGACY_SCAN_TOTAL_BYTES;
             execute_repair(
                 &conn,
                 &history,
@@ -6773,6 +7277,7 @@ mod tests {
                 },
                 &scope.repo_id,
                 &mut batch,
+                &mut codex_legacy_repair_remaining,
             )
             .await;
             assert!(!finding.repaired && finding.manual_required);

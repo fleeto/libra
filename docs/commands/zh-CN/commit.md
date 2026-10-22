@@ -40,13 +40,17 @@ libra commit --no-agent-trailer -m <MESSAGE>
 移至最后一个可解析段落，确保只出现一次。
 预演既不写关联，也不预览自动 trailer。即使指定 `--no-agent-trailer`，
 显式开启的关联仍会在移动 HEAD 前检查仓库 catalog、会话作用域、64 会话
-上限及 workspace lease；失败会拒绝提交。HEAD 更新后在同一数据库事务内
+上限及 workspace lease；无 trailer 提交还会在仓库数据库写锁内先写入并同步
+`.libra/agent-commit-links.v1` 的 prepared intent，再移动 ref。日志上限 10 MiB，
+在 Unix 上仅所有者可读写，拒绝符号链接。写入或同步失败不会移动 ref；ref 失败
+可能留下 prepared intent，不能据此判断提交可达。HEAD 更新后在同一数据库事务内
 重新核验会话作用域及 workspace lease 才写关联，失败会显示警告。amend 会
-保留原提交已关联且仍授权的会话，也纳入新符合条件的会话；`--no-edit` 复用消息与 `-m` 新消息均会补入缺失的自动 trailer，被替换提交原有的本地关联行仍保留。CX-27 的持久 journal
-恢复尚未实现。现有 cloud sync 上传仓库 refs，不备份本地 SQLite 关联表。
+保留原提交已关联且仍授权的会话，也纳入新符合条件的会话；`--no-edit` 复用消息与 `-m` 新消息均会补入缺失的自动 trailer，被替换提交原有的本地关联行仍保留。持久 journal 保留无 trailer 关联的本地恢复证据；`libra agent doctor --repair` 按可达提交与当前授权显式回放，`--commit-link-page N` 选择有界检查页。即使没有候选，证据完整性也保持 unknown。现有 cloud sync 上传仓库 refs，不备份本地 SQLite 关联表或 journal。
 无 trailer 关联指通过 `--no-agent-trailer` 建立的关联，cloud sync 也不会备份。
-若 ref 后写关联失败，提交本身已经完成，请保留提交与原始会话；CX-27 前没有
-自动修复命令，不要仅为重试关联而 amend。警告写到 stderr；指定
+若无法恢复的日志达到 10 MiB 上限，先检查，再仅在可丢弃其中残留的无 trailer
+恢复证据时显式运行 `doctor --repair --reset-commit-link-journal`；重置不删除提交或 checkpoint。
+若 ref 后写关联失败，提交本身已经完成，请保留提交、journal 与原始会话；
+在同一 worktree 运行 `libra agent doctor --repair`，不要仅为重试关联而 amend。警告写到 stderr；指定
 `--exit-code-on-warning` 时，成功提交以 9 / `LBR-WARN-001` 退出，但 JSON 的
 `ok` 仍为 `true`，JSON 没有 linked-session 字段。
 读取 opt-in 配置失败产生的警告也遵循同一退出码规则。
@@ -530,7 +534,7 @@ cleanup 在该 fence 下重新核验精确候选 OID，并一直持有到 prune 
 | Agent 关联 catalog/作用域/上限/lease 在 ref 更新前拒绝 | `LBR-REPO-003` | 128 | 运行 `libra agent doctor`，超过 64 个会话时检查旧会话，或更新 workspace lease |
 | `commit.status` 配置不可读 | `LBR-IO-001` | 128 | 修复 local/global 配置库 |
 | Commit 已完成但云索引修复仍待处理，且使用 `--exit-code-on-warning` | `LBR-WARN-001` | 9 | 修复警告中的数据库/marker 问题；下一条仓库命令会自动重试精确索引行 |
-| Commit 已完成但本地 agent 关联失败，且使用 `--exit-code-on-warning` | `LBR-WARN-001` | 9 | 保留提交和会话；CX-27 恢复尚未实现，不要只为重试而 amend |
+| Commit 已完成但本地 agent 关联失败，且使用 `--exit-code-on-warning` | `LBR-WARN-001` | 9 | 保留提交、journal 和会话；在同一 worktree 运行 `libra agent doctor --repair`，不要只为重试而 amend |
 
 ## 兼容性说明
 

@@ -1511,8 +1511,18 @@ async fn run_commit_with_index(
 
         // INVARIANT: persist the commit object before moving HEAD so a crash
         // after ref update never points the branch at a missing object.
-        let mut sequence_warnings =
-            persist_commit_and_conclude_stopped(&storage, &commit, &commit_message, output).await?;
+        let journal_snapshot = args
+            .no_agent_trailer
+            .then_some(agent_snapshot.as_ref())
+            .flatten();
+        let mut sequence_warnings = persist_commit_and_conclude_stopped(
+            &storage,
+            &commit,
+            &commit_message,
+            output,
+            journal_snapshot,
+        )
+        .await?;
         sequence_warnings.extend(agent_config_warning);
         if let Some(snapshot) = &agent_snapshot
             && let Err(error) =
@@ -1529,6 +1539,14 @@ async fn run_commit_with_index(
                 "commit completed without local agent association"
             );
             sequence_warnings.push("commit completed, but local agent session association failed; inspect it with 'libra agent doctor'".to_string());
+        } else if let Some(snapshot) = journal_snapshot
+            && let Err(error) = mark_agent_journal_linked(snapshot, commit.id).await
+        {
+            tracing::warn!(
+                reason = agent_link_failure_reason(&error),
+                "commit completed but agent journal stage update failed"
+            );
+            sequence_warnings.push("commit completed and local agent sessions were linked, but journal stage update failed; inspect it with 'libra agent doctor'".to_string());
         }
         // Record the change revision only after HEAD has advanced; a failed ref
         // update must not leave a projection for an unreachable commit (the
@@ -1678,8 +1696,18 @@ async fn run_commit_with_index(
 
     // INVARIANT: persist the commit object before moving HEAD so a crash after
     // ref update never points the branch at a missing object.
-    let mut sequence_warnings =
-        persist_commit_and_conclude_stopped(&storage, &commit, &commit_message, output).await?;
+    let journal_snapshot = args
+        .no_agent_trailer
+        .then_some(agent_snapshot.as_ref())
+        .flatten();
+    let mut sequence_warnings = persist_commit_and_conclude_stopped(
+        &storage,
+        &commit,
+        &commit_message,
+        output,
+        journal_snapshot,
+    )
+    .await?;
     sequence_warnings.extend(agent_config_warning);
     if let Some(snapshot) = &agent_snapshot
         && let Err(error) = crate::internal::ai::history::link_authorized_agent_sessions_to_commit(
@@ -1695,6 +1723,14 @@ async fn run_commit_with_index(
             "commit completed without local agent association"
         );
         sequence_warnings.push("commit completed, but local agent session association failed; inspect it with 'libra agent doctor'".to_string());
+    } else if let Some(snapshot) = journal_snapshot
+        && let Err(error) = mark_agent_journal_linked(snapshot, commit.id).await
+    {
+        tracing::warn!(
+            reason = agent_link_failure_reason(&error),
+            "commit completed but agent journal stage update failed"
+        );
+        sequence_warnings.push("commit completed and local agent sessions were linked, but journal stage update failed; inspect it with 'libra agent doctor'".to_string());
     }
     // Record the change revision only after HEAD has advanced; a failed ref
     // update must not leave a projection for an unreachable commit (the
@@ -2252,6 +2288,7 @@ pub(crate) fn append_trailers(message: &str, trailers: &[String]) -> String {
 
 struct AgentCommitSnapshot {
     conn: DbConn,
+    storage_root: PathBuf,
     scope: crate::internal::ai::capture_scope::CaptureScope,
     session_ids: Vec<String>,
 }
@@ -2307,8 +2344,15 @@ async fn snapshot_agent_sessions_for_commit(
     parent: Option<&ObjectHash>,
     is_amend: bool,
 ) -> Result<AgentCommitSnapshot, CommitError> {
-    let (storage_root, worktree_root, _) = util::try_get_request_paths(None)
-        .map_err(|error| CommitError::AgentAssociation(format!("resolve worktree: {error}")))?;
+    let (storage_root, worktree_root) = if let Some(pinned) =
+        crate::internal::worktree_scope::WorktreeScope::request_scope()
+    {
+        (pinned.storage, pinned.worktree_root)
+    } else {
+        let (storage, root, _) = util::try_get_request_paths(None)
+            .map_err(|error| CommitError::AgentAssociation(format!("resolve worktree: {error}")))?;
+        (storage, root)
+    };
     let conn =
         crate::internal::db::get_db_conn_instance_for_path(&storage_root.join(util::DATABASE))
             .await
@@ -2391,6 +2435,7 @@ async fn snapshot_agent_sessions_for_commit(
         .collect::<Result<Vec<_>, _>>()?;
     Ok(AgentCommitSnapshot {
         conn,
+        storage_root,
         scope,
         session_ids,
     })
@@ -2747,11 +2792,26 @@ async fn persist_commit_and_conclude_stopped(
     commit: &Commit,
     commit_message: &str,
     output: &OutputConfig,
+    journal_snapshot: Option<&AgentCommitSnapshot>,
 ) -> Result<Vec<String>, CommitError> {
     let stopped = snapshot_stopped_sequences().await;
     let stopped_merge = crate::command::merge::snapshot_stopped_merge();
     save_commit_object(storage, commit)?;
-    update_head_and_reflog(&commit.id.to_string(), commit_message).await?;
+    update_head_and_reflog(
+        &commit.id.to_string(),
+        commit_message,
+        journal_snapshot
+            .map(|snapshot| {
+                crate::internal::ai::commit_journal::CommitJournalRecord::prepared(
+                    snapshot.scope.clone(),
+                    commit_hash_kind(commit.id),
+                    &commit.id.to_string(),
+                    &snapshot.session_ids,
+                )
+            })
+            .zip(journal_snapshot.map(|snapshot| snapshot.storage_root.clone())),
+    )
+    .await?;
     let mut warnings = Vec::new();
     match stopped_merge {
         Ok(None) => {}
@@ -3869,13 +3929,67 @@ async fn update_head<C: ConnectionTrait>(db: &C, commit_id: &str) -> Result<(), 
     Ok(())
 }
 
-async fn update_head_and_reflog(commit_id: &str, commit_message: &str) -> Result<(), CommitError> {
+fn commit_hash_kind(oid: ObjectHash) -> &'static str {
+    match oid.kind() {
+        git_internal::hash::HashKind::Sha1 => "sha1",
+        git_internal::hash::HashKind::Sha256 => "sha256",
+        git_internal::hash::HashKind::Blake3 => "blake3",
+    }
+}
+
+async fn mark_agent_journal_linked(
+    snapshot: &AgentCommitSnapshot,
+    oid: ObjectHash,
+) -> anyhow::Result<()> {
+    if snapshot.session_ids.is_empty() {
+        return Ok(());
+    }
+    let txn = crate::internal::db::begin_write_transaction(&snapshot.conn).await?;
+    crate::internal::ai::history::authorize_agent_commit_links_in_txn(
+        &txn,
+        &snapshot.session_ids,
+        &snapshot.scope,
+    )
+    .await?;
+    let mut record = crate::internal::ai::commit_journal::CommitJournalRecord::prepared(
+        snapshot.scope.clone(),
+        commit_hash_kind(oid),
+        &oid.to_string(),
+        &snapshot.session_ids,
+    );
+    record.stage = crate::internal::ai::commit_journal::CommitJournalStage::Linked;
+    crate::internal::ai::commit_journal::append(&snapshot.storage_root, &record)?;
+    txn.commit().await?;
+    Ok(())
+}
+
+async fn update_head_and_reflog(
+    commit_id: &str,
+    commit_message: &str,
+    journal: Option<(
+        crate::internal::ai::commit_journal::CommitJournalRecord,
+        PathBuf,
+    )>,
+) -> Result<(), CommitError> {
     let reflog_context = new_reflog_context(commit_id, commit_message).await;
     let commit_id = commit_id.to_string();
     with_reflog(
         reflog_context,
         |txn| {
             Box::pin(async move {
+                if let Some((record, storage_root)) = &journal
+                    && !record.session_ids.is_empty()
+                {
+                    crate::internal::ai::history::authorize_agent_commit_links_in_txn(
+                        txn, &record.session_ids, &record.scope,
+                    ).await.map_err(|error| sea_orm::DbErr::Custom(format!(
+                        "agent commit journal authorization failed before ref update: {error:#}"
+                    )))?;
+                    crate::internal::ai::commit_journal::append(storage_root, record)
+                        .map_err(|error| sea_orm::DbErr::Custom(format!(
+                            "agent commit journal could not be durably written before ref update: {error:#}"
+                        )))?;
+                }
                 update_head(txn, &commit_id)
                     .await
                     .map_err(|e| sea_orm::DbErr::Custom(e.to_string()))

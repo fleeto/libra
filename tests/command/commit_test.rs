@@ -1619,6 +1619,10 @@ async fn agent_trailer_opt_in_links_scoped_codex_session_and_flag_omits_only_tra
         .await
         .expect("read default-off links");
     assert!(off_links.is_empty());
+    assert!(
+        !libra::internal::ai::commit_journal::journal_path(&repo.path().join(".libra")).exists(),
+        "default-off commit must not create recovery evidence"
+    );
     conn.execute_raw(Statement::from_string(
         conn.get_database_backend(),
         "INSERT INTO agent_session (session_id, agent_kind, provider_session_id,
@@ -1825,6 +1829,108 @@ async fn agent_trailer_opt_in_links_scoped_codex_session_and_flag_omits_only_tra
             .expect("read suppressed links"),
         vec!["codex__linked"]
     );
+    let journal_path =
+        libra::internal::ai::commit_journal::journal_path(&repo.path().join(".libra"));
+    let (records, bad_tail) =
+        libra::internal::ai::commit_journal::read(&repo.path().join(".libra"))
+            .expect("read durable trailer-free journal");
+    assert!(!bad_tail);
+    assert!(records.iter().any(|record| {
+        record.commit_oid == suppressed_oid.to_string()
+            && record.stage == libra::internal::ai::commit_journal::CommitJournalStage::Prepared
+            && record.session_ids.len() == 1
+            && record.session_ids[0] == "codex__linked"
+    }));
+    assert!(records.iter().any(|record| {
+        record.commit_oid == suppressed_oid.to_string()
+            && record.stage == libra::internal::ai::commit_journal::CommitJournalStage::Linked
+    }));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&journal_path)
+                .expect("journal metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        let saved = repo.path().join(".libra/agent-commit-links.saved");
+        std::fs::rename(&journal_path, &saved).expect("hold journal aside for symlink refusal");
+        let protected = repo.path().join("protected-journal-target");
+        std::fs::write(&protected, b"unchanged").expect("write protected target");
+        std::os::unix::fs::symlink(&protected, &journal_path).expect("place journal symlink");
+        let refused = run_libra_command(
+            &[
+                "commit",
+                "--allow-empty",
+                "--no-gpg-sign",
+                "--no-agent-trailer",
+                "-m",
+                "journal-symlink-refusal",
+            ],
+            repo.path(),
+        );
+        assert!(
+            !refused.status.success(),
+            "symlink journal must refuse commit"
+        );
+        assert_eq!(
+            Head::current_commit()
+                .await
+                .expect("head after journal failure"),
+            suppressed_oid
+        );
+        assert_eq!(
+            std::fs::read(&protected).expect("protected target"),
+            b"unchanged"
+        );
+        std::fs::remove_file(&journal_path).expect("remove symlink");
+        std::fs::rename(&saved, &journal_path).expect("restore journal");
+    }
+    conn.execute_raw(Statement::from_string(
+        conn.get_database_backend(),
+        "CREATE TRIGGER test_reject_agent_journal_reflog BEFORE INSERT ON reflog BEGIN SELECT RAISE(ABORT, 'injected reflog failure'); END".to_string(),
+    ))
+    .await
+    .expect("install ref transaction failure");
+    let failed_ref = run_libra_command(
+        &[
+            "commit",
+            "--allow-empty",
+            "--no-gpg-sign",
+            "--no-agent-trailer",
+            "-m",
+            "journal-ref-rollback",
+        ],
+        repo.path(),
+    );
+    assert!(
+        !failed_ref.status.success(),
+        "injected reflog failure must abort commit"
+    );
+    assert_eq!(
+        Head::current_commit()
+            .await
+            .expect("head after ref rollback"),
+        suppressed_oid
+    );
+    let (after_ref_failure, bad_tail) =
+        libra::internal::ai::commit_journal::read(&repo.path().join(".libra"))
+            .expect("read prepared intent after ref rollback");
+    assert!(!bad_tail);
+    assert!(after_ref_failure.len() > records.len());
+    assert!(after_ref_failure.iter().any(|record| {
+        record.stage == libra::internal::ai::commit_journal::CommitJournalStage::Prepared
+            && record.commit_oid != suppressed_oid.to_string()
+    }));
+    conn.execute_raw(Statement::from_string(
+        conn.get_database_backend(),
+        "DROP TRIGGER test_reject_agent_journal_reflog".to_string(),
+    ))
+    .await
+    .expect("remove ref transaction failure");
 
     #[cfg(unix)]
     {
@@ -2228,6 +2334,7 @@ async fn agent_trailer_opt_in_links_scoped_codex_session_and_flag_omits_only_tra
             "commit",
             "--allow-empty",
             "--no-gpg-sign",
+            "--no-agent-trailer",
             "-m",
             "post-ref-warning",
         ],
@@ -2254,6 +2361,18 @@ async fn agent_trailer_opt_in_links_scoped_codex_session_and_flag_omits_only_tra
             .expect("read links after injected failure")
             .is_empty()
     );
+    let (warning_records, bad_tail) =
+        libra::internal::ai::commit_journal::read(&repo.path().join(".libra"))
+            .expect("read recovery after post-ref DAO failure");
+    assert!(!bad_tail);
+    assert!(warning_records.iter().any(|record| {
+        record.commit_oid == warning_oid.to_string()
+            && record.stage == libra::internal::ai::commit_journal::CommitJournalStage::Prepared
+    }));
+    assert!(!warning_records.iter().any(|record| {
+        record.commit_oid == warning_oid.to_string()
+            && record.stage == libra::internal::ai::commit_journal::CommitJournalStage::Linked
+    }));
     assert_cli_success(
         &run_libra_command(&["config", "--unset", "agent.commit_trailer"], repo.path()),
         "remove local agent trailer setting before unreadable-global check",

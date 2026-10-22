@@ -374,7 +374,12 @@ OpenCode 提取对空输入、非法 JSON 和非法 export 形状显式标记
 | `--justification <text>` / `-o <path>` | `checkpoint export` | raw 导出的审计理由与输出文件 |
 | `--all` | `clean` | 清理所有已停止会话的 checkpoint，而不只是最近一个 |
 | `--gc` / `--retention-days <n>` / `--dry-run` | `clean` | 三窗口保留期 GC：(1) 删除已停止会话中早于 `agent.retention.transcript_days`（默认 90；用 `--retention-days` 覆盖）的 checkpoint；(2) 清理早于 `agent.retention.stderr_days`（默认 30）的**终态** run 的 reviewer stderr 诊断日志，保留聚合记录；(3) **A0-09** 删除早于 `agent.retention.findings_days`（默认 90）的**终态** review/investigate run 整个目录（`findings.md`/`manifest.json`/`state.json`/reviewer 日志）。对象化的 findings blob 是内容寻址对象，由仓库级 `libra maintenance run --task gc` 可达性回收（PD-04）：孤儿 findings blob 连同其 `object_index` 行一起回收，live-run manifest 引用的 OID 保持存活（per-run retention 绝不删除可能被共享的对象）。non-terminal/时间戳不可解析的 run 一律 fail-safe 跳过；永不触碰 `agent_audit_log`。`--dry-run` 仅预览各窗口及配套清理的 would-be 删除（包括 JSON `findings_runs_pruned`/`import_identities_pruned`），不实际删除 |
-| `--repair` | `doctor` | 修复检测到的 checkpoint 存储不一致（重建 catalog 行、补插 `object_index` 行、安全 drain 有效的过期普通 writer marker，并忽略普通 TTL 立即 drain `cleanup_pending` marker）；损坏 marker 保持 `manual_required`；省略时仅检测 |
+| `--repair` | `doctor` | 修复检测到的 checkpoint 存储不一致（重建 catalog 行、补插 `object_index` 行、安全 drain 有效的过期普通 writer marker，并忽略普通 TTL 立即 drain `cleanup_pending` marker）；损坏 marker 保持 `manual_required`。同时修复当前授权、可达的 agent 提交关联；省略时仅检测，完整帧损坏的 journal 会保留供检查 |
+| `--commit-link-page <1..100>` | `doctor` | 每次检查最多 100 个从当前 worktree HEAD 可达的提交；完整性始终标为 unknown |
+| `--codex-legacy-after <checkpoint-id>` | `doctor` | 从上一页报告的 checkpoint 游标之后继续扫描 Codex legacy reasoning revision；需要修复该页时同时使用 `--repair` |
+| `--reset-commit-link-journal` | `doctor --repair` | 检查后显式丢弃损坏或无法回收的满日志；仍可读取且有容量的日志会拒绝重置。其中残留的无 trailer 恢复证据会丢失，提交、checkpoint 和已有 catalog 关联不变 |
+| `--acknowledge-commit-link-loss` | `doctor --repair --reset-commit-link-journal` | 检查其他页与 worktree 后，允许重置仍含其恢复证据的可读取满日志；不能绕过失败的修复、lease 核验或未完成的 64 关联批次 |
+| `--commit-page <1..100>` | `session show` | 每页显示最多 64 个当前作用域 Codex 会话的本地提交关联；第 100 页仍有更多时报告上限 |
 | `--remote <name>` | `push` | 选择用于推送代理 trace 引用的远程 |
 | `--force-rewrite` | `push` | 允许本地 `clean` prune 之后的非快进推送（traces 引用由 Libra 托管，prune 即整链重写）；采用针对本仓库最近一次推送记录的 force-with-lease 语义——绝非无条件 force——远程被别处重写时仍 fail-closed 拒绝 |
 | `--dry-run` | `checkpoint rewind` | 显示影响而不修改文件；这是默认值 |
@@ -414,16 +419,29 @@ checkpoint 的会话：锚定当前父提交的会话，或已关联该父提交
 预览自动 trailer。ref 更新后在同一数据库事务内重新核验会话作用域及 workspace lease 才写关联，
 失败会显示警告。amend 会保留原提交已关联且仍授权的会话，也纳入新符合条件的会话；
 即使以 `-m` 替换消息也会重新注入自动 trailer。
-CX-27 的崩溃恢复 journal 尚未实现；cloud refs-only metadata 不备份本地关联表
-或无 trailer 关联。显式 opt-in 的可达提交 trailer 只是跨机器重建线索，仍须核验
+无 trailer 提交会先在 SQLite 写锁内将带校验和的 prepared intent 写入
+`.libra/agent-commit-links.v1` 并同步，再移动 ref；日志上限 10 MiB，在 Unix
+上仅所有者可读写，拒绝符号链接。写入/同步失败不移动 ref，ref 失败可能留下
+不可达提交的 intent。擦除的 tombstone 持久化后，日志中的对应本地身份会在
+同一写锁下压缩清理；清理失败会明确报告部分擦除，可重试。`libra agent doctor`
+按每页 100 个从当前 worktree HEAD 可达的提交只读检查，显式 `doctor --repair` 才回放当前仍授权的关联。
+日志达到 10 MiB 时回收已完成的 prepared/linked 对；完整记录损坏时保留文件供
+检查，仅截断真正未写完的末尾帧。`--commit-link-page <1..100>` 选择检查页，
+`session show <id> --commit-page <1..100>` 每页显示最多 64 个当前作用域 Codex
+本地关联。无论候选是否为空，证据完整性都标为 unknown。完整帧损坏或
+无法回收的满日志须先检查；显式 `doctor --repair --reset-commit-link-journal` 会用空的
+日志替换（Unix 模式 0600），丢弃尚存的无 trailer 本地关联恢复证据；先回放并回收当前页可用证据，可读取且有容量时不允许重置。可读取的满日志要求 lease 有效、修复和清理成功且无未完成的 64 关联批次；其他页、worktree 有证据或当前历史扫描不完整时，先检查，再用 `--acknowledge-commit-link-loss` 明确授权丢弃。`unmatched_scope_intents` 统计当前作用域中不在所选页或当前分支、不可达提交以及 hash-kind 不匹配的记录。权限、I/O、不安全文件入口和未来 schema 错误均拒绝重置，`commit_links.journal_unavailable_reason` 仅报告无正文类别。修复后日志清理失败会在 `commit_links.cleanup_incomplete` 中报告，已提交的 catalog 修复仍显示，部分擦除随后可重试。
+cloud refs-only metadata 不备份本地关联表
+或 journal。显式 opt-in 的可达提交 trailer 只是跨机器重建线索，仍须核验
 仓库及会话作用域。
 
 首个无父提交可选择锚定 unborn parent 的会话。此配置只作用于普通
 `libra commit`；bridge `commit.create` 继续使用独立的 `agent_bridge_link`。
 显式 trailer 会向所有可读取提交的人暴露原始 session ID。所谓无 trailer
 关联，是用 `--no-agent-trailer` 建立的本地关联；当前 cloud sync 仅上传 refs，
-不上传此 SQLite 表。若 ref 后关联失败，请保留已完成提交和
-原始会话；CX-27 前无自动修复命令，不要仅为重试关联而 amend。
+不上传此 SQLite 表。若 ref 后关联失败，请保留已完成提交、journal 和
+原始会话；在同一 worktree 运行 `libra agent doctor --repair` 回放合格的可达关联，
+不要仅为重试关联而 amend。
 复用旧消息的 amend 可能保留已擦除或移出作用域会话的可见 trailer，但不会为它
 建立新本地关联；`--no-agent-trailer` 不删除继承或用户自行写入的消息文字。
 
@@ -1341,13 +1359,19 @@ Codex hook 设置只读取普通文件：`hooks.json`、`config.toml` 各限 16 
 `libra agent doctor` 的 Codex 安装诊断逐项列出全部 12 个 managed 事件。固定 `reason` 为 `configured`、`missing`、`drifted`、`untrusted` 或 `disabled`，JSON 位于 `data.provider_hooks[].events`；仅当每项均匹配当前 handler、enabled 且 trusted 时，汇总 `installed=true`。带 Libra statusMessage 的修改或过期重复项使对应事件未配置；没有该标记的用户 handler 不属于此诊断。显式 `enabled=false` 会显示 disabled；哈希仍正确时，不新增信任缺口横幅。这些只读设置检查不输出 hook 命令、哈希或配置正文，也不证明宿主已执行 hook。使用 Codex 0.162.1 或更新版本；缺失或未受信时可用 `libra agent enable --agent codex` 刷新 Libra handler；刷新前先确认用户主动禁用的意图。漂移时先检查 `hooks.json` 以及 `config.toml` 中对应的 `[hooks.state]` 条目：enable 会刷新归属仍可证明的 handler，但保留仅有 statusMessage、命令却已不符合规范的条目；此类条目需经检查后手动修正或移除，重复 enable 不一定清除诊断。
 
 
-## 旧 Codex thinking 读取（CX-16 开发中）
+## Codex 普通 thinking 与附带数据（CX-16/CX-06）
 
 本开发源码中，`libra agent checkpoint show <id> --json` 在
 `data.reasoning.readable` 返回经过凭据扫描的普通 thinking 正文，在
 `data.reasoning.encrypted_content` 返回已保存的非空 opaque 值。
 `availability` 为 `unproven`；遇截断、损坏或不支持的记录时为 `partial`。
 `readable_obtained` 只说明此视图实际是否含可读正文，不证明 native 来源或解密。
+普通 rollout 还保留 reasoning `response_item` 及
+`compacted.payload.replacement_history` 中非空的 `encrypted_content`。
+索引视图先核对 rollout 文件名、`session_meta` 会话及支持的 Codex 写入版本，
+再把解码后的 JSON 字符串绑定到 turn 与记录序号。重复键和损坏记录不进入
+索引视图，但不会删除已保存的普通来源字节。索引值仍为 `unproven`，不代表
+解密成功或 native artifact。
 metadata 必须属于此 checkpoint 的 ordinary tree；存在 `agent_kind` 时必须
 与 session 一致，旧 metadata 可以缺少此字段。关联或 transcript 读取失败时
 返回不含正文的 `unavailable` 状态，不退回原 blob。空 transcript 同样返回
@@ -1365,6 +1389,14 @@ export 仍按配置上限读取源前缀。完整旧字符串含孤立 surrogate
 即使遮罩后的 JSON 可以解析，show 仍保留源数据不完整的 partial 状态。完整取回更大 checkpoint 时需提高读取上限。
 扫描器只解码 JSON 字符串，不为字符串之外或不支持的畸形结构中的任意转义
 赋予第二次解释。
+
+`libra agent doctor --json` 对当前 scope、ref 可达、已提交且保存了普通 Codex
+thinking 但缺少内容绑定修订的 checkpoint 报告
+`codex_legacy_reasoning_revision`。普通 `doctor` 只报告；
+`doctor --repair` 追加以 checkpoint 与内容摘要为键的 metadata 修订。
+旧 checkpoint 和 transcript 不被改写，重复修复幂等，已擦除会话不会复活。
+每个扫描页最多检查 64 条候选，累计读取普通 transcript 不超过 128 MiB，单个 checkpoint 不超过 16 MiB；使用 `--repair` 时，符合条件的正文可能在另一组 128 MiB 页面预算内再读取一次。报告给出续扫游标时，下一次运行 `libra agent doctor --codex-legacy-after <checkpoint-id>`；每页需要修复时加 `--repair`。不适用、不可读及跳过的 checkpoint 不会因后续页面而自动获得认证。
+这不会创建 native reasoning artifact，也不需要 schema 迁移。
 
 人类 show、checkpoint/session 列表、graph、doctor 不展开正文；读取不改写
 原对象、traces 或 coverage claim。raw 导出仍需 `--raw --allow-raw` 并审计

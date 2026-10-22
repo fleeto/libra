@@ -65,6 +65,828 @@ use libra::internal::ai::{
     hooks::{LifecycleEventKind, ProviderHookCommand, claude_provider},
     traces::{TracesInflightMarker, write_traces_inflight_marker},
 };
+
+#[cfg(feature = "test-live-agent")]
+#[tokio::test]
+#[ignore = "operator-local Codex legacy repair; never run in CI"]
+async fn codex_legacy_revision_is_scoped_tombstone_safe_and_idempotent() {
+    let repo = DoctorRepo::init();
+    let provider_session = "01a1612f-68a5-7fd3-9698-a145dae2a4e5";
+    let session = format!("codex__{provider_session}");
+    let codex_home = repo.home.join(".codex");
+    let dir = repo.home.join(".codex/sessions/2026/10/21");
+    std::fs::create_dir_all(&dir).expect("create Codex source directory");
+    let rollout = dir.join(format!(
+        "rollout-2026-10-21T02-24-40-{provider_session}.jsonl"
+    ));
+    let rows = [
+        json!({"type":"session_meta","timestamp":"2026-10-21T02:24:40Z","payload":{"id":provider_session,"cli_version":"0.162.1","cwd":repo.repo}}),
+        json!({"type":"event_msg","timestamp":"2026-10-21T02:24:41Z","payload":{"type":"task_started","turn_id":"turn-legacy"}}),
+        json!({"type":"response_item","timestamp":"2026-10-21T02:24:41Z","payload":{"type":"message","role":"user","id":"user-legacy","content":[{"type":"input_text","text":"build a snake"}]}}),
+        json!({"type":"response_item","timestamp":"2026-10-21T02:24:42Z","payload":{"type":"reasoning","id":"reason-legacy","summary":[{"type":"summary_text","text":"old readable"}],"encrypted_content":"OLD-OPAQUE"}}),
+        json!({"type":"response_item","timestamp":"2026-10-21T02:24:42Z","payload":{"type":"message","role":"assistant","id":"assistant-legacy","content":[{"type":"output_text","text":"snake built"}]}}),
+        json!({"type":"event_msg","timestamp":"2026-10-21T02:24:43Z","payload":{"type":"task_complete","turn_id":"turn-legacy"}}),
+        json!({"type":"session_end","timestamp":"2026-10-21T02:24:44Z","payload":{"type":"session_end","cwd":repo.repo}}),
+    ];
+    std::fs::write(
+        &rollout,
+        format!(
+            "{}\n",
+            rows.iter()
+                .map(Value::to_string)
+                .collect::<Vec<_>>()
+                .join("\n")
+        ),
+    )
+    .expect("write Codex source");
+    for (verb, event) in [
+        ("session-start", "SessionStart"),
+        ("prompt", "UserPromptSubmit"),
+        ("stop", "Stop"),
+        ("session-end", "SessionEnd"),
+    ] {
+        let envelope = json!({
+            "hook_event_name": event,
+            "session_id": provider_session,
+            "cwd": repo.repo,
+            "transcript_path": rollout,
+            "turn_id": "turn-legacy",
+            "prompt": "build a snake",
+            "last_assistant_message": "snake built",
+            "event_id": format!("codex-legacy-{verb}"),
+        });
+        let out = repo.run_env(
+            &["agent", "hooks", "codex", verb],
+            Some(&envelope.to_string()),
+            &[("CODEX_HOME", codex_home.to_str().expect("Codex home UTF-8"))],
+        );
+        assert!(out.status.success(), "{verb}: {}", describe(&out));
+    }
+    let path = rollout.to_string_lossy().into_owned();
+    let imported = repo.run(
+        &[
+            "agent", "import", "--path", &path, "--agent", "codex", "--yes", "--json",
+        ],
+        None,
+    );
+    assert!(
+        imported.status.success(),
+        "Codex import: {}",
+        describe(&imported)
+    );
+    let before = repo.checkpoint_rows().await;
+    assert!(!before.is_empty(), "Codex hooks must write a checkpoint");
+    assert!(before.iter().any(|row| row.session_id == session));
+    let content_checkpoints = before
+        .iter()
+        .filter_map(|row| {
+            let exported = repo.run(&["agent", "checkpoint", "export", &row.checkpoint_id], None);
+            (exported.status.success()
+                && exported
+                    .stdout
+                    .windows(b"OLD-OPAQUE".len())
+                    .any(|part| part == b"OLD-OPAQUE"))
+            .then_some(row.checkpoint_id.clone())
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        !content_checkpoints.is_empty(),
+        "the authorized import must retain ordinary reasoning"
+    );
+    let tombstone_id = "codex-legacy-test-tombstone";
+    repo.exec_sql(
+        "INSERT INTO agent_import_tombstone
+         (tombstone_id, agent_kind, provider_session_id, erased_session_id, erased_at)
+         VALUES (?, 'codex', ?, ?, 1)",
+        vec![
+            tombstone_id.into(),
+            provider_session.into(),
+            session.clone().into(),
+        ],
+    )
+    .await;
+    let erased = repo.doctor_json(true);
+    assert!(
+        !erased["checkpoint_store"]
+            .to_string()
+            .contains("codex_legacy_reasoning_revision")
+    );
+    repo.exec_sql(
+        "DELETE FROM agent_import_tombstone WHERE tombstone_id = ?",
+        vec![tombstone_id.into()],
+    )
+    .await;
+    let diagnostic = repo.doctor_json(false);
+    assert!(
+        diagnostic["checkpoint_store"]
+            .to_string()
+            .contains("codex_legacy_reasoning_revision"),
+        "doctor must identify a repairable Codex legacy revision"
+    );
+    let repaired = repo.doctor_json(true);
+    assert!(
+        repaired["checkpoint_store"]
+            .to_string()
+            .contains("codex_legacy_reasoning_revision")
+    );
+    let again = repo.doctor_json(true);
+    assert!(
+        !again["checkpoint_store"]
+            .to_string()
+            .contains("codex_legacy_reasoning_revision"),
+        "repair must be idempotent: {again}"
+    );
+    assert_eq!(
+        repo.checkpoint_rows().await,
+        before,
+        "metadata repair must not rewrite source objects"
+    );
+    let conn = repo.db().await;
+    let count = conn
+        .query_one_raw(Statement::from_sql_and_values(
+            conn.get_database_backend(),
+            "SELECT COUNT(*) AS count FROM agent_coverage_revision
+         WHERE session_id = ? AND logical_turn_key LIKE 'codex-legacy:%'",
+            [session.clone().into()],
+        ))
+        .await
+        .expect("query legacy revision")
+        .expect("count row");
+    let count: i64 = count.try_get_by("count").expect("decode count");
+    assert_eq!(count, content_checkpoints.len() as i64);
+
+    // Sixty-five ineligible, catalog-only rows must not permanently hide a
+    // later eligible checkpoint. The explicit keyset cursor advances past them
+    // without reading their unrelated object bodies or minting revisions.
+    let target_id = &content_checkpoints[0];
+    repo.exec_sql(
+        "DELETE FROM agent_coverage_claim WHERE session_id = ? AND logical_turn_key = ?",
+        vec![
+            session.clone().into(),
+            format!("codex-legacy:{target_id}").into(),
+        ],
+    )
+    .await;
+    repo.exec_sql(
+        "DELETE FROM agent_coverage_revision WHERE session_id = ? AND logical_turn_key = ?",
+        vec![
+            session.clone().into(),
+            format!("codex-legacy:{target_id}").into(),
+        ],
+    )
+    .await;
+    let mut fake_ids = Vec::new();
+    for ordinal in 1..=65 {
+        let fake_id = format!("00000000-0000-0000-0000-{ordinal:012x}");
+        repo.exec_sql(
+            "INSERT INTO agent_checkpoint
+             (checkpoint_id, session_id, parent_checkpoint_id, scope, parent_commit,
+              tree_oid, metadata_blob_oid, traces_commit, tool_use_id,
+              subagent_session_id, description, created_at)
+             SELECT ?, session_id, parent_checkpoint_id, scope, parent_commit,
+                    tree_oid, metadata_blob_oid, traces_commit, tool_use_id,
+                    subagent_session_id, description, created_at
+             FROM agent_checkpoint WHERE checkpoint_id = ?",
+            vec![fake_id.clone().into(), target_id.clone().into()],
+        )
+        .await;
+        fake_ids.push(fake_id);
+    }
+    assert!(
+        target_id > &fake_ids[64],
+        "fixture cursor must precede real row"
+    );
+    let first_page = repo.doctor_json(false);
+    let next = format!("--codex-legacy-after {}", fake_ids[63]);
+    assert!(
+        first_page["checkpoint_store"]["note"]
+            .as_str()
+            .is_some_and(|note| note.contains(&next)),
+        "first page must report a stable cursor: {first_page}"
+    );
+    let page = repo.run(
+        &[
+            "agent",
+            "doctor",
+            "--codex-legacy-after",
+            &fake_ids[63],
+            "--json",
+        ],
+        None,
+    );
+    assert!(page.status.success(), "paged doctor: {}", describe(&page));
+    let page: Value = serde_json::from_slice(&page.stdout).expect("paged doctor JSON");
+    assert!(
+        page["data"]["checkpoint_store"]["findings"]
+            .to_string()
+            .contains(target_id),
+        "later eligible checkpoint must be reachable: {page}"
+    );
+    let repair = repo.run(
+        &[
+            "agent",
+            "doctor",
+            "--repair",
+            "--codex-legacy-after",
+            &fake_ids[63],
+            "--json",
+        ],
+        None,
+    );
+    assert!(
+        repair.status.success(),
+        "paged repair: {}",
+        describe(&repair)
+    );
+    let repaired: Value = serde_json::from_slice(&repair.stdout).expect("paged repair JSON");
+    assert!(
+        repaired["data"]["checkpoint_store"]["findings"]
+            .as_array()
+            .is_some_and(|findings| findings.iter().any(|finding| {
+                finding["checkpoint_id"] == json!(target_id)
+                    && finding["inconsistency_type"] == "codex_legacy_reasoning_revision"
+                    && finding["repaired"] == true
+            })),
+        "paged repair must complete the later checkpoint: {repaired}"
+    );
+}
+
+#[cfg(feature = "test-live-agent")]
+#[tokio::test]
+#[ignore = "local-only Codex commit recovery; never run in CI"]
+async fn agent_commit_recovery_replays_reachable_journal_idempotently() {
+    use libra::internal::ai::capture_scope::CaptureScope;
+
+    let repo = DoctorRepo::init();
+    let baseline = repo.run(
+        &["commit", "--allow-empty", "--no-gpg-sign", "-m", "baseline"],
+        None,
+    );
+    assert!(
+        baseline.status.success(),
+        "baseline: {}",
+        describe(&baseline)
+    );
+    let head = repo.run(&["rev-parse", "HEAD"], None);
+    assert!(head.status.success(), "resolve HEAD: {}", describe(&head));
+    let parent = String::from_utf8_lossy(&head.stdout).trim().to_string();
+    let conn = repo.db().await;
+    let scope = CaptureScope::resolve(&conn, &repo.repo)
+        .await
+        .expect("resolve local capture scope");
+    conn.execute_raw(Statement::from_sql_and_values(
+        conn.get_database_backend(),
+        "INSERT INTO agent_session (session_id, agent_kind, provider_session_id,
+             state, working_dir, parent_commit, started_at, last_event_at,
+             repo_id, worktree_id, workspace_id, workspace_fence, scope_state)
+         VALUES ('codex__recovery', 'codex', 'provider-recovery', 'active',
+                 ?, ?, 1, 2, ?, ?, ?, ?, 'scoped')",
+        [
+            repo.repo.to_string_lossy().to_string().into(),
+            parent.clone().into(),
+            scope.repo_id.into(),
+            scope.worktree_id.into(),
+            scope.workspace_id.into(),
+            scope.workspace_fence.into(),
+        ],
+    ))
+    .await
+    .expect("insert scoped Codex session");
+    conn.execute_raw(Statement::from_sql_and_values(
+        conn.get_database_backend(),
+        "INSERT INTO agent_checkpoint (checkpoint_id, session_id, scope,
+             parent_commit, tree_oid, metadata_blob_oid, traces_commit, created_at)
+         VALUES ('checkpoint-recovery', 'codex__recovery', 'committed', ?, ?, ?, ?, 2)",
+        [
+            parent.clone().into(),
+            parent.clone().into(),
+            parent.clone().into(),
+            parent.into(),
+        ],
+    ))
+    .await
+    .expect("insert committed checkpoint");
+    drop(conn);
+    let enabled = repo.run(&["config", "agent.commit_trailer", "true"], None);
+    assert!(
+        enabled.status.success(),
+        "enable links: {}",
+        describe(&enabled)
+    );
+    let linked = repo.run(
+        &[
+            "commit",
+            "--allow-empty",
+            "--no-gpg-sign",
+            "--no-agent-trailer",
+            "-m",
+            "journal-recovery",
+        ],
+        None,
+    );
+    assert!(
+        linked.status.success(),
+        "linked commit: {}",
+        describe(&linked)
+    );
+    let head = repo.run(&["rev-parse", "HEAD"], None);
+    assert!(
+        head.status.success(),
+        "resolve linked HEAD: {}",
+        describe(&head)
+    );
+    let commit_oid = String::from_utf8_lossy(&head.stdout).trim().to_string();
+    let journal_path = repo.repo.join(".libra/agent-commit-links.v1");
+    let bytes_before = std::fs::read(&journal_path).expect("durable journal evidence");
+    let refused_reset = repo.run(
+        &["agent", "doctor", "--repair", "--reset-commit-link-journal"],
+        None,
+    );
+    assert!(
+        !refused_reset.status.success(),
+        "healthy journal reset must be refused: {}",
+        describe(&refused_reset)
+    );
+    assert_eq!(
+        std::fs::read(&journal_path).expect("read journal after refused reset"),
+        bytes_before
+    );
+    repo.exec_sql(
+        "INSERT INTO reference (name, kind, \"commit\", remote, worktree_id)
+         VALUES ('main', 'Head', ?, 'origin', NULL)",
+        vec![commit_oid.clone().into()],
+    )
+    .await;
+    repo.exec_sql(
+        "DELETE FROM agent_session_commit WHERE session_id = 'codex__recovery'",
+        vec![],
+    )
+    .await;
+    let diagnostic = repo.doctor_json(false);
+    assert_eq!(
+        diagnostic["commit_links"]["missing_links"], 1,
+        "{diagnostic}"
+    );
+    assert_eq!(
+        diagnostic["commit_links"]["history_incomplete"], false,
+        "remote HEAD must not confuse local recovery authority: {diagnostic}"
+    );
+    assert_eq!(
+        diagnostic["commit_links"]["evidence_completeness"],
+        "unknown"
+    );
+    assert_eq!(
+        std::fs::read(&journal_path).expect("read unchanged journal"),
+        bytes_before,
+        "read-only doctor must not rewrite the journal"
+    );
+    let repaired = repo.doctor_json(true);
+    assert_eq!(repaired["commit_links"]["repaired_links"], 1);
+    assert_eq!(repo.doctor_json(true)["commit_links"]["repaired_links"], 0);
+    let session = repo.session_show("codex__recovery");
+    assert!(
+        session.to_string().contains(&commit_oid),
+        "session show must expose the repaired local link: {session}"
+    );
+
+    let mut foreign_scope = CaptureScope::resolve(&repo.db().await, &repo.repo)
+        .await
+        .expect("resolve foreign-intent fixture scope");
+    let current_scope = foreign_scope.clone();
+    foreign_scope.worktree_id = "other-worktree".into();
+    let storage = repo.repo.join(".libra");
+    let hash_kind = if commit_oid.len() == 40 {
+        "sha1"
+    } else {
+        "sha256"
+    };
+    libra::internal::ai::commit_journal::append(
+        &storage,
+        &libra::internal::ai::commit_journal::CommitJournalRecord::prepared(
+            foreign_scope,
+            hash_kind,
+            &commit_oid,
+            &["codex__recovery".into()],
+        ),
+    )
+    .expect("append foreign intent");
+    libra::internal::ai::commit_journal::append(
+        &storage,
+        &libra::internal::ai::commit_journal::CommitJournalRecord::prepared(
+            current_scope.clone(),
+            hash_kind,
+            &"a".repeat(commit_oid.len()),
+            &["codex__recovery".into()],
+        ),
+    )
+    .expect("append unreachable intent");
+    let report = repo.doctor_json(false);
+    assert_eq!(report["commit_links"]["foreign_scope_intents"], 1);
+    assert_eq!(report["commit_links"]["missing_links"], 0);
+
+    let trailer_commit = repo.run(
+        &[
+            "commit",
+            "--allow-empty",
+            "--no-gpg-sign",
+            "-m",
+            "trailer-recovery",
+        ],
+        None,
+    );
+    assert!(
+        trailer_commit.status.success(),
+        "trailer commit: {}",
+        describe(&trailer_commit)
+    );
+    let head = repo.run(&["rev-parse", "HEAD"], None);
+    assert!(
+        head.status.success(),
+        "resolve trailer HEAD: {}",
+        describe(&head)
+    );
+    let trailer_oid = String::from_utf8_lossy(&head.stdout).trim().to_string();
+    repo.exec_sql(
+        "DELETE FROM agent_session_commit WHERE session_id = 'codex__recovery' AND commit_oid = ?",
+        vec![trailer_oid.clone().into()],
+    )
+    .await;
+    assert_eq!(repo.doctor_json(false)["commit_links"]["missing_links"], 1);
+    assert_eq!(repo.doctor_json(true)["commit_links"]["repaired_links"], 1);
+
+    let mut damaged = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&journal_path)
+        .expect("open journal for torn-tail fixture");
+    damaged.write_all(b"LJ1 120 ").expect("append torn tail");
+    let torn_bytes = std::fs::read(&journal_path).expect("read torn journal");
+    assert_eq!(
+        repo.doctor_json(false)["commit_links"]["journal_bad_tail"],
+        true
+    );
+    assert_eq!(
+        std::fs::read(&journal_path).expect("read-only tail"),
+        torn_bytes
+    );
+    let _ = repo.doctor_json(true);
+    assert!(
+        !libra::internal::ai::commit_journal::read(&storage)
+            .expect("read repaired journal")
+            .1
+    );
+
+    libra::internal::ai::commit_journal::append(
+        &storage,
+        &libra::internal::ai::commit_journal::CommitJournalRecord::prepared(
+            current_scope,
+            hash_kind,
+            &commit_oid,
+            &["codex__recovery".into()],
+        ),
+    )
+    .expect("append old reachable intent before tombstone");
+
+    repo.exec_sql(
+        "INSERT INTO agent_import_tombstone
+         (tombstone_id, agent_kind, provider_session_id, erased_session_id,
+          source_fingerprint, erased_at)
+         VALUES ('tombstone-recovery', 'codex', 'provider-recovery',
+                 'codex__recovery', NULL, 3)",
+        vec![],
+    )
+    .await;
+    repo.exec_sql(
+        "DELETE FROM agent_session_commit WHERE session_id = 'codex__recovery'",
+        vec![],
+    )
+    .await;
+    let blocked = repo.doctor_json(true);
+    assert_eq!(blocked["commit_links"]["repaired_links"], 0);
+    assert!(
+        blocked["commit_links"]["rejected_links"]
+            .as_u64()
+            .is_some_and(|count| count >= 2),
+        "tombstone must reject journal and trailer replay: {blocked}"
+    );
+    std::fs::write(&journal_path, b"unparseable old journal\n")
+        .expect("inject corrupt journal for explicit reset");
+    assert_eq!(
+        repo.doctor_json(false)["commit_links"]["journal_unavailable"],
+        true
+    );
+    let reset = repo.run(
+        &[
+            "agent",
+            "doctor",
+            "--repair",
+            "--reset-commit-link-journal",
+            "--json",
+        ],
+        None,
+    );
+    assert!(
+        reset.status.success(),
+        "explicit reset: {}",
+        describe(&reset)
+    );
+    let reset_json: Value = serde_json::from_slice(&reset.stdout).expect("decode reset report");
+    assert_eq!(reset_json["data"]["commit_links"]["journal_reset"], true);
+    assert_eq!(
+        std::fs::read(&journal_path).expect("read reset journal"),
+        b""
+    );
+    let ack_without_reset = repo.run(&["agent", "doctor", "--acknowledge-commit-link-loss"], None);
+    assert!(!ack_without_reset.status.success(), "ack requires reset");
+
+    // A full shared journal can retain an unreachable intent from another
+    // worktree. Ordinary reset must refuse it; the separate acknowledgment
+    // allows the operator to discard that evidence after inspection.
+    use sha2::{Digest, Sha256};
+    let mut foreign = CaptureScope::resolve(&repo.db().await, &repo.repo)
+        .await
+        .expect("resolve foreign reset fixture");
+    foreign.worktree_id = "old-pruned-worktree".into();
+    let record = libra::internal::ai::commit_journal::CommitJournalRecord::prepared(
+        foreign,
+        hash_kind,
+        &commit_oid,
+        &["codex__recovery".into()],
+    );
+    let payload = serde_json::to_vec(&record).expect("encode full-journal record");
+    let mut frame = format!(
+        "LJ1 {} {}\n",
+        payload.len(),
+        hex::encode(Sha256::digest(&payload))
+    )
+    .into_bytes();
+    frame.extend_from_slice(&payload);
+    frame.push(b'\n');
+    let cap = 10 * 1024 * 1024;
+    let mut near_full = Vec::with_capacity(cap);
+    while near_full.len() < cap - 32 * 1024 - 128 {
+        near_full.extend_from_slice(&frame);
+    }
+    assert!(near_full.len() <= cap, "fixture must fit the journal cap");
+    std::fs::write(&journal_path, &near_full).expect("write full foreign journal");
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&journal_path, std::fs::Permissions::from_mode(0o600))
+        .expect("secure full journal fixture");
+    let ordinary_reset = repo.run(
+        &["agent", "doctor", "--repair", "--reset-commit-link-journal"],
+        None,
+    );
+    assert!(
+        !ordinary_reset.status.success(),
+        "foreign evidence must block ordinary reset: {}",
+        describe(&ordinary_reset)
+    );
+    assert_eq!(
+        std::fs::read(&journal_path).expect("preserve full foreign journal"),
+        near_full
+    );
+    let acknowledged_reset = repo.run(
+        &[
+            "agent",
+            "doctor",
+            "--repair",
+            "--reset-commit-link-journal",
+            "--acknowledge-commit-link-loss",
+            "--json",
+        ],
+        None,
+    );
+    assert!(
+        acknowledged_reset.status.success(),
+        "acknowledged reset: {}",
+        describe(&acknowledged_reset)
+    );
+    let acknowledged: Value =
+        serde_json::from_slice(&acknowledged_reset.stdout).expect("decode acknowledged reset");
+    assert_eq!(acknowledged["data"]["commit_links"]["journal_reset"], true);
+    assert_eq!(
+        std::fs::read(&journal_path).expect("read reset journal"),
+        b""
+    );
+
+    let current = CaptureScope::resolve(&repo.db().await, &repo.repo)
+        .await
+        .expect("resolve current-scope page fixture");
+    let record = libra::internal::ai::commit_journal::CommitJournalRecord::prepared(
+        current,
+        hash_kind,
+        &commit_oid,
+        &["codex__recovery".into()],
+    );
+    let payload = serde_json::to_vec(&record).expect("encode off-page record");
+    let mut frame = format!(
+        "LJ1 {} {}\n",
+        payload.len(),
+        hex::encode(Sha256::digest(&payload))
+    )
+    .into_bytes();
+    frame.extend_from_slice(&payload);
+    frame.push(b'\n');
+    let mut near_full = Vec::with_capacity(cap);
+    while near_full.len() < cap - 32 * 1024 - 128 {
+        near_full.extend_from_slice(&frame);
+    }
+    std::fs::write(&journal_path, &near_full).expect("write full off-page journal");
+    std::fs::set_permissions(&journal_path, std::fs::Permissions::from_mode(0o600))
+        .expect("secure off-page journal fixture");
+    let off_page = repo.run(
+        &[
+            "agent",
+            "doctor",
+            "--repair",
+            "--commit-link-page",
+            "2",
+            "--json",
+        ],
+        None,
+    );
+    assert!(
+        off_page.status.success(),
+        "inspect page 2: {}",
+        describe(&off_page)
+    );
+    let off_page_json: Value = serde_json::from_slice(&off_page.stdout).expect("decode page 2");
+    assert!(
+        off_page_json["data"]["commit_links"]["unmatched_scope_intents"]
+            .as_u64()
+            .is_some_and(|count| count > 0),
+        "off-page current-scope records must be visible: {off_page_json}"
+    );
+    let off_page_reset = repo.run(
+        &[
+            "agent",
+            "doctor",
+            "--repair",
+            "--commit-link-page",
+            "2",
+            "--reset-commit-link-journal",
+        ],
+        None,
+    );
+    assert!(
+        !off_page_reset.status.success(),
+        "off-page evidence must require acknowledgment: {}",
+        describe(&off_page_reset)
+    );
+    assert!(
+        String::from_utf8_lossy(&off_page_reset.stderr).contains("outside this page or worktree"),
+        "off-page refusal must identify the recovery evidence: {}",
+        describe(&off_page_reset)
+    );
+    assert_eq!(
+        std::fs::read(&journal_path).expect("preserve off-page evidence"),
+        near_full
+    );
+    let off_page_ack = repo.run(
+        &[
+            "agent",
+            "doctor",
+            "--repair",
+            "--commit-link-page",
+            "2",
+            "--reset-commit-link-journal",
+            "--acknowledge-commit-link-loss",
+        ],
+        None,
+    );
+    assert!(
+        off_page_ack.status.success(),
+        "acknowledged off-page reset: {}",
+        describe(&off_page_ack)
+    );
+}
+
+#[cfg(feature = "test-live-agent")]
+#[tokio::test]
+#[ignore = "local-only Codex linked-worktree journal scope; never run in CI"]
+async fn agent_commit_recovery_linked_worktree_uses_common_journal() {
+    use libra::internal::ai::capture_scope::CaptureScope;
+
+    let repo = DoctorRepo::init();
+    let baseline = repo.run(
+        &["commit", "--allow-empty", "--no-gpg-sign", "-m", "baseline"],
+        None,
+    );
+    assert!(
+        baseline.status.success(),
+        "baseline: {}",
+        describe(&baseline)
+    );
+    let head = repo.run(&["rev-parse", "HEAD"], None);
+    assert!(head.status.success(), "resolve HEAD: {}", describe(&head));
+    let parent = String::from_utf8_lossy(&head.stdout).trim().to_string();
+    let linked = repo._tempdir.path().join("linked");
+    let added = repo.run(
+        &[
+            "worktree",
+            "add",
+            "linked",
+            "--path",
+            linked.to_str().expect("UTF-8 linked path"),
+        ],
+        None,
+    );
+    assert!(
+        added.status.success(),
+        "add linked worktree: {}",
+        describe(&added)
+    );
+    let linked = linked.canonicalize().expect("canonical linked worktree");
+    let run_linked = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_libra"))
+            .args(args)
+            .current_dir(&linked)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", &repo.home)
+            .env("LIBRA_TEST_HOME", &repo.home)
+            .env("LIBRA_COMMITTER_NAME", "Doctor Test")
+            .env("LIBRA_COMMITTER_EMAIL", "doctor@test.libra")
+            .output()
+            .expect("run linked-worktree libra")
+    };
+    let conn = repo.db().await;
+    let scope = CaptureScope::resolve(&conn, &linked)
+        .await
+        .expect("resolve linked scope");
+    assert!(!scope.worktree_id.is_empty(), "fixture must be linked");
+    conn.execute_raw(Statement::from_sql_and_values(
+        conn.get_database_backend(),
+        "INSERT INTO agent_session (session_id, agent_kind, provider_session_id,
+             state, working_dir, parent_commit, started_at, last_event_at,
+             repo_id, worktree_id, workspace_id, workspace_fence, scope_state)
+         VALUES ('codex__linked_worktree', 'codex', 'provider-linked-worktree',
+                 'active', ?, ?, 1, 2, ?, ?, ?, ?, 'scoped')",
+        [
+            linked.to_string_lossy().to_string().into(),
+            parent.clone().into(),
+            scope.repo_id.into(),
+            scope.worktree_id.into(),
+            scope.workspace_id.into(),
+            scope.workspace_fence.into(),
+        ],
+    ))
+    .await
+    .expect("insert linked Codex session");
+    conn.execute_raw(Statement::from_sql_and_values(
+        conn.get_database_backend(),
+        "INSERT INTO agent_checkpoint (checkpoint_id, session_id, scope,
+             parent_commit, tree_oid, metadata_blob_oid, traces_commit, created_at)
+         VALUES ('checkpoint-linked-worktree', 'codex__linked_worktree',
+                 'committed', ?, ?, ?, ?, 2)",
+        [
+            parent.clone().into(),
+            parent.clone().into(),
+            parent.clone().into(),
+            parent.into(),
+        ],
+    ))
+    .await
+    .expect("insert linked checkpoint");
+    drop(conn);
+    let enabled = run_linked(&["config", "agent.commit_trailer", "true"]);
+    assert!(
+        enabled.status.success(),
+        "enable links: {}",
+        describe(&enabled)
+    );
+    let commit = run_linked(&[
+        "commit",
+        "--allow-empty",
+        "--no-gpg-sign",
+        "--no-agent-trailer",
+        "-m",
+        "linked-journal",
+    ]);
+    assert!(
+        commit.status.success(),
+        "linked commit: {}",
+        describe(&commit)
+    );
+    let common_journal = repo.repo.join(".libra/agent-commit-links.v1");
+    assert!(common_journal.exists(), "journal must use common storage");
+    assert!(
+        !linked.join(".libra/agent-commit-links.v1").exists(),
+        "linked gitdir must not receive a separate journal"
+    );
+    repo.exec_sql(
+        "DELETE FROM agent_session_commit WHERE session_id = 'codex__linked_worktree'",
+        vec![],
+    )
+    .await;
+    let doctor = run_linked(&["agent", "doctor", "--repair", "--json"]);
+    assert!(
+        doctor.status.success(),
+        "linked doctor: {}",
+        describe(&doctor)
+    );
+    let parsed: Value = serde_json::from_slice(&doctor.stdout).expect("linked doctor JSON");
+    assert_eq!(parsed["data"]["commit_links"]["repaired_links"], 1);
+}
 use ring::{digest, hmac};
 use sea_orm::{ConnectionTrait, DatabaseConnection, Statement};
 use serde_json::{Value, json};

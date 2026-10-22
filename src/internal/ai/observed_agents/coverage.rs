@@ -580,12 +580,18 @@ fn sanitize_floats(value: &mut CanonValue) {
 /// Validate a provider-supplied turn/message id for use as a
 /// `logical_turn_key` (coverage-v1.md §2): non-empty, ≤ 64 chars, restricted
 /// alphabet. Anything else falls back to the ordinal key.
-fn valid_provider_turn_id(id: &str) -> bool {
+pub(crate) fn valid_provider_turn_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 64
         && id
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// Source-pinned Codex rollout writers accepted by the ordinary reasoning
+/// projection. 0.163.0 was validated with the system Codex on macOS.
+pub(crate) fn supported_codex_cli_version(version: &str) -> bool {
+    matches!(version, "0.162.1" | "0.163.0")
 }
 
 fn ordinal_key(ordinal: usize) -> String {
@@ -1151,7 +1157,7 @@ fn normalize_codex_typed_rollout_until(
                     .get("payload")
                     .and_then(|payload| payload.get("cli_version"))
                     .and_then(CanonValue::as_str)
-                    == Some("0.162.1")
+                    .is_some_and(supported_codex_cli_version)
         });
     if !current_shape {
         return normalize_codex_rollout_inner(data, deadline, true, None)

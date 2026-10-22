@@ -317,6 +317,22 @@ pub struct DoctorArgs {
     /// objects are unrecoverable are reported for manual action.
     #[arg(long)]
     pub repair: bool,
+    /// Page of at most 100 reachable commits to inspect for local agent
+    /// commit-link evidence. Repeat `--repair` to drain each 64-link batch.
+    #[arg(long, value_name = "N", default_value_t = 1, value_parser = clap::value_parser!(u16).range(1..=100))]
+    pub commit_link_page: u16,
+    /// Continue the bounded Codex legacy-revision scan after this checkpoint.
+    /// Doctor reports the next cursor when more rows remain.
+    #[arg(long, value_name = "CHECKPOINT_ID", value_parser = parse_codex_legacy_cursor)]
+    pub codex_legacy_after: Option<String>,
+    /// Explicitly discard a corrupt or unrecoverably full local commit-link
+    /// journal after inspection. Checkpoint data and commits are untouched.
+    #[arg(long, requires = "repair")]
+    pub reset_commit_link_journal: bool,
+    /// Acknowledge discarding still-recoverable links outside the inspected
+    /// page or worktree when resetting a readable, full journal.
+    #[arg(long, requires = "reset_commit_link_journal")]
+    pub acknowledge_commit_link_loss: bool,
     /// Reconcile recent Codex sessions using an explicit, closed and consistent
     /// SQLite backup. Never opens a live provider database or imports data.
     #[arg(long, value_name = "PATH", conflicts_with = "repair")]
@@ -325,6 +341,18 @@ pub struct DoctorArgs {
     /// Page of at most 1000 scope-filtered candidates from the provided backup.
     #[arg(long, value_name = "N", requires = "codex_index_backup", value_parser = clap::value_parser!(u16).range(1..=10))]
     pub codex_index_page: Option<u16>,
+}
+
+fn parse_codex_legacy_cursor(value: &str) -> Result<String, String> {
+    if value.is_empty()
+        || value.len() > 128
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() || byte == b'-')
+    {
+        return Err("expected a checkpoint ID containing only hex digits and hyphens (at most 128 characters)".to_string());
+    }
+    Ok(value.to_string())
 }
 
 #[derive(Args, Debug)]
@@ -471,7 +499,7 @@ fn enable_agents(agents: &[String], output: &OutputConfig) -> CliResult<()> {
     install_or_uninstall(agents, output, true)
 }
 
-pub(super) const CIPHERTEXT_ARCHIVE_DISCLOSURE: &str = "Provider-encrypted reasoning original bytes may be archived without decryption and mirrored to cloud storage with their checkpoint; session erasure hides the references and local GC reclaims unreachable objects. Native source proof is required; unproved fields are not archived.";
+pub(super) const CIPHERTEXT_ARCHIVE_DISCLOSURE: &str = "Provider-encrypted reasoning original bytes may be retained as ordinary transcript data without decryption and mirrored to cloud storage with their checkpoint; session erasure hides the references and local GC reclaims unreachable objects. Native artifacts still require source proof; unproven fields remain ordinary transcript data.";
 
 fn disable_agents(agents: &[String], output: &OutputConfig) -> CliResult<()> {
     install_or_uninstall(agents, output, false)
@@ -658,7 +686,7 @@ mod tests {
     fn consent_text_discloses_ciphertext_archive() {
         assert_eq!(
             CIPHERTEXT_ARCHIVE_DISCLOSURE,
-            "Provider-encrypted reasoning original bytes may be archived without decryption and mirrored to cloud storage with their checkpoint; session erasure hides the references and local GC reclaims unreachable objects. Native source proof is required; unproved fields are not archived."
+            "Provider-encrypted reasoning original bytes may be retained as ordinary transcript data without decryption and mirrored to cloud storage with their checkpoint; session erasure hides the references and local GC reclaims unreachable objects. Native artifacts still require source proof; unproven fields remain ordinary transcript data."
         );
         let enable = include_str!("mod.rs");
         let import = include_str!("import.rs");

@@ -39,7 +39,7 @@ fn cx23_commit_association_docs_match_current_local_contract() {
             "--no-agent-trailer",
             "Libra-Agent-Session",
             "64",
-            "CX-27",
+            "agent-commit-links.v1",
         ] {
             assert_contains(document, label, required);
         }
@@ -57,7 +57,8 @@ fn cx23_commit_association_docs_match_current_local_contract() {
         "before optional",
         "more than 64 eligible sessions aborts",
         "Dry runs neither link nor preview",
-        "CX-27 and is not available yet",
+        "doctor --repair",
+        "unknown",
         "does not back it up",
     ] {
         assert_contains(commit_en, "commit EN", required);
@@ -70,10 +71,36 @@ fn cx23_commit_association_docs_match_current_local_contract() {
         "签名前",
         "超过 64 个",
         "预演既不写关联，也不预览",
-        "CX-27",
+        "doctor --repair",
         "不备份",
     ] {
         assert_contains(commit_zh, "commit zh-CN", required);
+    }
+    for (label, document) in [
+        ("agent EN", AGENT_CMD_DOC_EN),
+        ("agent zh-CN", AGENT_CMD_DOC_ZH),
+        ("agent development", AGENT_DEV_DOC),
+        ("tracing", AGENT_DOC),
+        ("compatibility", COMPATIBILITY_DOC),
+    ] {
+        assert_contains(document, label, "--commit-link-page");
+        assert_contains(document, label, "--commit-page");
+        assert_contains(document, label, "--reset-commit-link-journal");
+        assert_contains(document, label, "--acknowledge-commit-link-loss");
+    }
+    for (label, document) in [
+        ("cloud EN", include_str!("../../docs/commands/cloud.md")),
+        (
+            "cloud zh-CN",
+            include_str!("../../docs/commands/zh-CN/cloud.md"),
+        ),
+        (
+            "cloud development",
+            include_str!("../../docs/development/commands/cloud.md"),
+        ),
+    ] {
+        assert_contains(document, label, "agent-commit-links.v1");
+        assert_contains(document, label, "cloud");
     }
 }
 
@@ -1698,5 +1725,27 @@ fn grok_docs_contract_mentions_thinking_retain() {
                 || document.contains("not a review or investigate"),
             "{label} must say grok is not a review or investigate launcher"
         );
+    }
+}
+
+#[cfg(feature = "test-live-agent")]
+#[test]
+#[ignore = "local-only Codex documentation contract; never run in CI"]
+fn codex_ordinary_attached_and_legacy_repair_docs_stay_visible() {
+    for (label, document) in [
+        ("docs/commands/agent.md", AGENT_CMD_DOC_EN),
+        ("docs/commands/zh-CN/agent.md", AGENT_CMD_DOC_ZH),
+        ("docs/development/commands/agent.md", AGENT_DEV_DOC),
+        ("docs/development/tracing/agent.md", AGENT_DOC),
+        ("COMPATIBILITY.md", COMPATIBILITY_DOC),
+    ] {
+        for required in [
+            "encrypted_content",
+            "codex_legacy_reasoning_revision",
+            "doctor --repair",
+            "--codex-legacy-after",
+        ] {
+            assert_contains(document, label, required);
+        }
     }
 }

@@ -1593,6 +1593,36 @@ struct ClaudeLegacyRevisionIdentity {
     content_digest: String,
 }
 
+/// A catalog-bound Codex source is eligible only when its rollout header
+/// names the provider session and at least one reasoning field was obtained.
+fn codex_legacy_revision_identity(
+    checkpoint_id: &str,
+    provider_session_id: &str,
+    ordinary_bytes: &[u8],
+) -> Option<ClaudeLegacyRevisionIdentity> {
+    if checkpoint_id.is_empty()
+        || checkpoint_id
+            .chars()
+            .any(|ch| ch.is_control() || ch == '/' || ch == '\\')
+    {
+        return None;
+    }
+    let projection = crate::internal::ai::observed_agents::codex_reasoning::project_catalog_bound_codex_attached_fields(
+        provider_session_id,
+        ordinary_bytes,
+    );
+    if (projection.refused || !projection.data_obtained())
+        && !crate::internal::ai::observed_agents::codex_reasoning::catalog_bound_stored_thinking_obtained(ordinary_bytes)
+    {
+        return None;
+    }
+    use sha2::Digest;
+    Some(ClaudeLegacyRevisionIdentity {
+        logical_turn_key: format!("codex-legacy:{checkpoint_id}"),
+        content_digest: hex::encode(sha2::Sha256::digest(ordinary_bytes)),
+    })
+}
+
 /// Bind a legacy Claude checkpoint to the ordinary transcript bytes.
 ///
 /// `None` means the bytes are not obtained data. An empty shell is not data.
@@ -1666,6 +1696,68 @@ pub async fn claude_legacy_revision_needs_repair(
         ))
         .await
         .context("read the Claude legacy reasoning revision claim")?;
+    Ok(revision.is_none() || claim.is_none())
+}
+
+/// Read-only eligibility for a catalog-bound legacy Codex checkpoint.
+pub async fn codex_legacy_revision_needs_repair(
+    conn: &impl ConnectionTrait,
+    session_id: &str,
+    provider_session_id: &str,
+    checkpoint_id: &str,
+    ordinary_bytes: &[u8],
+) -> Result<bool> {
+    let Some(identity) =
+        codex_legacy_revision_identity(checkpoint_id, provider_session_id, ordinary_bytes)
+    else {
+        return Ok(false);
+    };
+    let backend = conn.get_database_backend();
+    let tombstone = conn
+        .query_one_raw(Statement::from_sql_and_values(
+            backend,
+            "SELECT 1 AS present FROM agent_import_tombstone
+         WHERE agent_kind = 'codex' AND provider_session_id = ? LIMIT 1",
+            [provider_session_id.to_owned().into()],
+        ))
+        .await
+        .context("check Codex legacy session tombstone")?;
+    if tombstone.is_some() {
+        return Ok(false);
+    }
+    let revision = conn
+        .query_one_raw(Statement::from_sql_and_values(
+            backend,
+            "SELECT 1 AS present FROM agent_coverage_revision
+         WHERE session_id = ? AND logical_turn_key = ?
+           AND coverage_schema_version = 2 AND checkpoint_id = ?
+           AND coverage_digest = ? LIMIT 1",
+            [
+                session_id.to_owned().into(),
+                identity.logical_turn_key.clone().into(),
+                checkpoint_id.to_owned().into(),
+                identity.content_digest.clone().into(),
+            ],
+        ))
+        .await
+        .context("read Codex legacy reasoning revision")?;
+    let claim = conn
+        .query_one_raw(Statement::from_sql_and_values(
+            backend,
+            "SELECT 1 AS present FROM agent_coverage_claim
+         WHERE session_id = ? AND logical_turn_key = ?
+           AND coverage_schema_version = 2 AND state = 'catalog_committed'
+           AND checkpoint_id = ? AND coverage_digest = ?
+           AND completeness = 'incomplete' LIMIT 1",
+            [
+                session_id.to_owned().into(),
+                identity.logical_turn_key.into(),
+                checkpoint_id.to_owned().into(),
+                identity.content_digest.into(),
+            ],
+        ))
+        .await
+        .context("read Codex legacy reasoning claim")?;
     Ok(revision.is_none() || claim.is_none())
 }
 
@@ -5054,6 +5146,220 @@ impl HistoryManager {
         })
     }
 
+    /// Append a content-bound metadata revision for a committed, scoped Codex
+    /// checkpoint. The original objects remain immutable and native authority
+    /// is never inferred from an encrypted-looking field.
+    pub async fn repair_codex_legacy_reasoning_revision(
+        &self,
+        checkpoint_id: &str,
+        ordinary_bytes: &[u8],
+    ) -> Result<ClaudeLegacyRevisionRepair> {
+        let backend = self.db_conn.get_database_backend();
+        let txn = self
+            .db_conn
+            .begin()
+            .await
+            .context("begin Codex legacy reasoning revision repair")?;
+        let scope = crate::internal::ai::capture_scope::CaptureScope::resolve(
+            &txn,
+            &crate::utils::util::request_working_dir(),
+        )
+        .await
+        .context("resolve the current worktree before Codex legacy revision repair")?;
+        let row = txn
+            .query_one_raw(Statement::from_sql_and_values(
+                backend,
+                "SELECT c.session_id, c.traces_commit, s.agent_kind, s.provider_session_id
+                 FROM agent_checkpoint c
+                 JOIN agent_session s ON s.session_id = c.session_id
+                 WHERE c.checkpoint_id = ? AND c.scope = 'committed'
+                   AND s.scope_state = 'scoped' AND s.repo_id IS ?
+                   AND s.worktree_id IS ? AND s.workspace_id IS ?
+                   AND s.workspace_fence IS ?",
+                [
+                    checkpoint_id.to_string().into(),
+                    scope.repo_id.into(),
+                    scope.worktree_id.into(),
+                    scope.workspace_id.into(),
+                    scope.workspace_fence.into(),
+                ],
+            ))
+            .await
+            .context("read the legacy Codex checkpoint for revision repair")?
+            .context(
+                "checkpoint is not associated with a committed session in this repository; rerun doctor from the repository that owns it",
+            )?;
+        let session_id: String = row
+            .try_get_by("session_id")
+            .context("read the session associated with the legacy Codex checkpoint")?;
+        let traces_commit: String = row
+            .try_get_by("traces_commit")
+            .context("read the stored traces commit of the legacy Codex checkpoint")?;
+        let agent_kind: String = row
+            .try_get_by("agent_kind")
+            .context("read the provider of the legacy Codex checkpoint")?;
+        let provider_session_id: String = row
+            .try_get_by("provider_session_id")
+            .context("read the Codex provider session of the legacy checkpoint")?;
+        let identity =
+            codex_legacy_revision_identity(checkpoint_id, &provider_session_id, ordinary_bytes)
+                .context(
+                    "this checkpoint has no catalog-bound ordinary Codex thinking data to repair",
+                )?;
+        if agent_kind != "codex" {
+            bail!(
+                "checkpoint is not an authorized Codex session; refusing to append a reasoning revision"
+            );
+        }
+        let tombstoned = txn
+            .query_one_raw(Statement::from_sql_and_values(
+                backend,
+                "SELECT 1 AS present
+                 FROM agent_import_tombstone t
+                 JOIN agent_session s
+                   ON s.agent_kind = t.agent_kind
+                  AND s.provider_session_id = t.provider_session_id
+                 WHERE s.session_id = ?
+                 LIMIT 1",
+                [session_id.clone().into()],
+            ))
+            .await
+            .context("check the Codex session tombstone before revision repair")?;
+        if tombstoned.is_some() {
+            bail!("this Codex session is tombstoned; refusing to revive its reasoning revision");
+        }
+        let existing = txn
+            .query_one_raw(Statement::from_sql_and_values(
+                backend,
+                "SELECT revision FROM agent_coverage_revision
+                 WHERE session_id = ? AND logical_turn_key = ?
+                   AND coverage_schema_version = 2 AND checkpoint_id = ?
+                   AND coverage_digest = ?",
+                [
+                    session_id.clone().into(),
+                    identity.logical_turn_key.clone().into(),
+                    checkpoint_id.to_string().into(),
+                    identity.content_digest.clone().into(),
+                ],
+            ))
+            .await
+            .context("read an existing Codex legacy reasoning revision")?;
+        let (revision, inserted) = if let Some(existing) = existing {
+            let revision: i64 = existing
+                .try_get_by("revision")
+                .context("read the existing Codex legacy reasoning revision number")?;
+            (revision, false)
+        } else {
+            let max_row = txn
+                .query_one_raw(Statement::from_sql_and_values(
+                    backend,
+                    "SELECT COALESCE(MAX(revision), 0) AS revision
+                     FROM agent_coverage_revision
+                     WHERE session_id = ? AND logical_turn_key = ?
+                       AND coverage_schema_version = 2",
+                    [
+                        session_id.clone().into(),
+                        identity.logical_turn_key.clone().into(),
+                    ],
+                ))
+                .await
+                .context("read the Codex legacy reasoning revision high-water")?
+                .context("Codex legacy reasoning revision high-water returned no row")?;
+            let max_revision: i64 = max_row
+                .try_get_by("revision")
+                .context("decode the Codex legacy reasoning revision high-water")?;
+            let revision = max_revision
+                .checked_add(1)
+                .context("Codex legacy reasoning revision number overflowed")?;
+            let now_ms = chrono::Utc::now().timestamp_millis();
+            txn.execute_raw(Statement::from_sql_and_values(
+                backend,
+                "INSERT INTO agent_coverage_revision (
+                    session_id, logical_turn_key, coverage_schema_version, revision,
+                    checkpoint_id, coverage_digest, completeness, source_channel, created_at
+                 ) VALUES (?, ?, 2, ?, ?, ?, 'incomplete', 'import', ?)",
+                [
+                    session_id.clone().into(),
+                    identity.logical_turn_key.clone().into(),
+                    revision.into(),
+                    checkpoint_id.to_string().into(),
+                    identity.content_digest.clone().into(),
+                    now_ms.into(),
+                ],
+            ))
+            .await
+            .context("append the Codex legacy reasoning revision")?;
+            (revision, true)
+        };
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        txn.execute_raw(Statement::from_sql_and_values(
+            backend,
+            "INSERT INTO agent_coverage_claim (
+                session_id, logical_turn_key, coverage_schema_version, coverage_digest,
+                completeness, revision, state, checkpoint_id, traces_commit,
+                source_channel, created_at, updated_at
+             ) VALUES (?, ?, 2, ?, 'incomplete', ?, 'catalog_committed', ?, ?, 'import', ?, ?)
+             ON CONFLICT(session_id, logical_turn_key, coverage_schema_version) DO UPDATE SET
+                coverage_digest = excluded.coverage_digest,
+                completeness = 'incomplete',
+                revision = excluded.revision,
+                state = 'catalog_committed',
+                checkpoint_id = excluded.checkpoint_id,
+                traces_commit = excluded.traces_commit,
+                owner = NULL,
+                lease_expires_at = NULL,
+                updated_at = excluded.updated_at",
+            [
+                session_id.clone().into(),
+                identity.logical_turn_key.clone().into(),
+                identity.content_digest.clone().into(),
+                revision.into(),
+                checkpoint_id.to_string().into(),
+                traces_commit.into(),
+                now_ms.into(),
+                now_ms.into(),
+            ],
+        ))
+        .await
+        .context("record the Codex legacy reasoning revision claim")?;
+        let recorded = txn
+            .query_one_raw(Statement::from_sql_and_values(
+                backend,
+                "SELECT revision, coverage_digest FROM agent_coverage_claim
+                 WHERE session_id = ? AND logical_turn_key = ?
+                   AND coverage_schema_version = 2 AND state = 'catalog_committed'
+                   AND checkpoint_id = ?",
+                [
+                    session_id.into(),
+                    identity.logical_turn_key.into(),
+                    checkpoint_id.to_string().into(),
+                ],
+            ))
+            .await
+            .context("reread the Codex legacy reasoning revision claim")?
+            .context("Codex legacy reasoning revision claim was not recorded; rerun `libra agent doctor --repair`")?;
+        let recorded_revision: i64 = recorded
+            .try_get_by("revision")
+            .context("decode the recorded Codex legacy reasoning revision")?;
+        let recorded_digest: String = recorded
+            .try_get_by("coverage_digest")
+            .context("decode the recorded Codex legacy reasoning digest")?;
+        if recorded_revision != revision || recorded_digest != identity.content_digest {
+            bail!(
+                "Codex legacy reasoning revision was not recorded; rerun `libra agent doctor --repair`"
+            );
+        }
+        txn.commit()
+            .await
+            .context("commit Codex legacy reasoning revision repair")?;
+        Ok(ClaudeLegacyRevisionRepair {
+            checkpoint_id: checkpoint_id.to_string(),
+            revision,
+            content_digest: identity.content_digest,
+            inserted,
+        })
+    }
+
     /// AG-24a local erasure for one session (plan.md Task A8.5): make the
     /// three local faces consistent — rewrite `refs/libra/traces` to drop
     /// the session's checkpoints, delete its `agent_checkpoint` and
@@ -5212,6 +5518,24 @@ impl HistoryManager {
         } else {
             None
         };
+
+        // The provider tombstone is already committed. Serialize journal
+        // cleanup with pre-ref append and repair under the same SQLite writer
+        // lock. If cleanup fails, return an explicit partial erasure; retrying
+        // this command can remove the residual local identity evidence.
+        let journal_txn = crate::internal::db::begin_write_transaction(self.db_conn.as_ref())
+            .await
+            .context("agent session erasure is partial: lock the commit journal for cleanup; retry 'libra agent erase'")?;
+        // A retry may find no catalog row (and therefore no new tombstone),
+        // but a prior attempt can still have left this ID in the journal.
+        crate::internal::ai::commit_journal::compact_erased(&self.repo_path, session_id)
+            .with_context(|| format!(
+                "agent session erasure is partial: local commit journal cleanup failed for {session_id}; inspect the journal, restore safe permissions or a compatible version when needed, and use 'libra agent doctor --repair --reset-commit-link-journal' only for corrupt or full evidence that can be discarded, then retry erasure"
+            ))?;
+        journal_txn
+            .commit()
+            .await
+            .context("release agent commit journal erasure lock")?;
 
         // A session can be between reservation and its first catalog row, so
         // an empty checkpoint list does not prove that erasure has no writer
@@ -6300,6 +6624,46 @@ pub async fn link_authorized_agent_sessions_to_commit(
     link_agent_sessions_to_commit_inner(conn, session_ids, commit_oid, Some(scope)).await
 }
 
+/// Verify a journal intent while holding the same writer transaction that
+/// will move the ref. In particular, an erasure tombstone wins over a still
+/// present session catalog row.
+pub async fn authorize_agent_commit_links_in_txn(
+    txn: &DatabaseTransaction,
+    session_ids: &[String],
+    scope: &crate::internal::ai::capture_scope::CaptureScope,
+) -> Result<()> {
+    if session_ids.is_empty() || session_ids.len() > 64 {
+        bail!("agent commit journal requires 1-64 selected sessions");
+    }
+    for session_id in session_ids {
+        let mut values = vec![session_id.as_str().into()];
+        values.extend(scope.sql_values());
+        let authorized = txn
+            .query_one_raw(Statement::from_sql_and_values(
+                txn.get_database_backend(),
+                format!(
+                    "SELECT 1 FROM agent_session s WHERE s.session_id = ?
+                 AND {} AND s.state IN ('active', 'condensed', 'stopped')
+                 AND NOT EXISTS (SELECT 1 FROM agent_import_tombstone t
+                                 WHERE t.erased_session_id = s.session_id)
+                 AND EXISTS (SELECT 1 FROM agent_checkpoint c
+                             WHERE c.session_id = s.session_id AND c.scope = 'committed')",
+                    crate::internal::ai::capture_scope::CaptureScope::matches_existing_sql("s")
+                ),
+                values,
+            ))
+            .await
+            .context("recheck agent commit journal session scope")?;
+        if authorized.is_none() {
+            bail!("selected agent session was erased or is no longer authorized for this commit");
+        }
+    }
+    scope
+        .assert_workspace_fence_live_for_commit(txn)
+        .await
+        .context("recheck agent commit journal workspace lease")
+}
+
 async fn link_agent_sessions_to_commit_inner(
     conn: &DatabaseConnection,
     session_ids: &[String],
@@ -6360,6 +6724,8 @@ async fn link_agent_sessions_to_commit_inner(
                     format!(
                         "SELECT 1 FROM agent_session s WHERE s.session_id = ?
                          AND {} AND s.state IN ('active', 'condensed', 'stopped')
+                         AND NOT EXISTS (SELECT 1 FROM agent_import_tombstone t
+                                         WHERE t.erased_session_id = s.session_id)
                          AND EXISTS (SELECT 1 FROM agent_checkpoint c
                                      WHERE c.session_id = s.session_id AND c.scope = 'committed')",
                         crate::internal::ai::capture_scope::CaptureScope::matches_existing_sql("s")
@@ -7292,6 +7658,225 @@ mod tests {
     use tokio::time::sleep;
 
     use crate::internal::ai::traces::ReasoningArtifactParam;
+
+    #[cfg(all(unix, feature = "test-live-agent"))]
+    #[tokio::test]
+    #[ignore = "local-only Codex erasure/journal race and cleanup matrix; never run in CI"]
+    async fn agent_journal_erase_tombstone_blocks_reappend_and_retry_compacts() {
+        use std::os::unix::fs::PermissionsExt;
+
+        use crate::{
+            internal::ai::{
+                capture_scope::CaptureScope,
+                commit_journal::{self, CommitJournalRecord},
+            },
+            utils::storage::local::LocalStorage,
+        };
+
+        let root = tempdir().expect("Codex journal erasure root");
+        let repo = root.path().join(".libra");
+        fs::create_dir_all(repo.join("objects")).expect("create object store");
+        let conn = crate::internal::db::create_database(
+            repo.join("libra.db").to_str().expect("UTF-8 database path"),
+        )
+        .await
+        .expect("create repository catalog");
+        crate::internal::workspace::RepoIdentity::resolve_or_init(&conn)
+            .await
+            .expect("initialize repository identity");
+        let scope = CaptureScope::resolve(&conn, root.path())
+            .await
+            .expect("resolve Codex journal scope");
+        conn.execute_raw(Statement::from_sql_and_values(
+            conn.get_database_backend(),
+            "INSERT INTO agent_session (session_id, agent_kind, provider_session_id,
+                 state, working_dir, started_at, last_event_at,
+                 repo_id, worktree_id, workspace_id, workspace_fence, scope_state)
+             VALUES ('codex_erased', 'codex', 'provider-erased', ?, ?, 1, 1, ?, ?, ?, ?, 'scoped')",
+            [
+                "active".into(),
+                root.path().to_string_lossy().to_string().into(),
+                scope.repo_id.clone().into(),
+                scope.worktree_id.clone().into(),
+                scope.workspace_id.clone().into(),
+                scope.workspace_fence.into(),
+            ],
+        ))
+        .await
+        .expect("insert scoped Codex session");
+        conn.execute_raw(Statement::from_sql_and_values(
+            conn.get_database_backend(),
+            "INSERT INTO agent_checkpoint (checkpoint_id, session_id, scope,
+                 tree_oid, metadata_blob_oid, traces_commit, created_at)
+             VALUES ('checkpoint-erased', 'codex_erased', 'committed', ?, ?, ?, 1)",
+            [
+                "a".repeat(40).into(),
+                "a".repeat(40).into(),
+                "a".repeat(40).into(),
+            ],
+        ))
+        .await
+        .expect("insert checkpoint before tombstone");
+        commit_journal::append(
+            &repo,
+            &CommitJournalRecord::prepared(
+                scope.clone(),
+                "sha1",
+                &"a".repeat(40),
+                &["codex_erased".into()],
+            ),
+        )
+        .expect("append Codex commit intent");
+        let journal = commit_journal::journal_path(&repo);
+        fs::set_permissions(&journal, fs::Permissions::from_mode(0o644))
+            .expect("inject unsafe journal permissions");
+        let storage: Arc<dyn Storage + Send + Sync> =
+            Arc::new(LocalStorage::new(repo.join("objects")));
+        let history = HistoryManager::for_traces(storage, repo.clone(), Arc::new(conn.clone()));
+        let partial = history
+            .erase_session_local("codex_erased")
+            .await
+            .expect_err("unsafe journal cleanup must report partial erasure");
+        assert!(format!("{partial:#}").contains("erasure is partial"));
+        assert!(
+            conn.query_one_raw(Statement::from_string(
+                conn.get_database_backend(),
+                "SELECT 1 FROM agent_import_tombstone WHERE erased_session_id = 'codex_erased'"
+                    .to_string(),
+            ))
+            .await
+            .expect("read durable erasure tombstone")
+            .is_some()
+        );
+        let txn = crate::internal::db::begin_write_transaction(&conn)
+            .await
+            .expect("lock journal for simulated reappend");
+        assert!(
+            authorize_agent_commit_links_in_txn(&txn, &["codex_erased".into()], &scope,)
+                .await
+                .is_err()
+        );
+        txn.rollback().await.expect("release simulated append lock");
+        conn.execute_unprepared(
+            "DELETE FROM agent_checkpoint WHERE checkpoint_id = 'checkpoint-erased'",
+        )
+        .await
+        .expect("remove synthetic checkpoint before retry");
+        fs::set_permissions(&journal, fs::Permissions::from_mode(0o600))
+            .expect("repair journal permissions");
+        assert!(
+            history
+                .erase_session_local("codex_erased")
+                .await
+                .expect("retry erasure after repairing journal")
+                .session_deleted
+        );
+        assert!(
+            commit_journal::read(&repo)
+                .expect("read compacted journal")
+                .0
+                .is_empty()
+        );
+    }
+
+    #[cfg(all(unix, feature = "test-live-agent"))]
+    #[tokio::test]
+    #[ignore = "local-only Codex append/erase writer-lock race; never run in CI"]
+    async fn agent_journal_append_and_erase_share_the_writer_lock() {
+        use crate::{
+            internal::ai::{
+                capture_scope::CaptureScope,
+                commit_journal::{self, CommitJournalRecord},
+            },
+            utils::storage::local::LocalStorage,
+        };
+
+        let root = tempdir().expect("race fixture root");
+        let repo = root.path().join(".libra");
+        fs::create_dir_all(repo.join("objects")).expect("race object store");
+        let conn = crate::internal::db::create_database(
+            repo.join("libra.db").to_str().expect("UTF-8 database path"),
+        )
+        .await
+        .expect("race database");
+        crate::internal::workspace::RepoIdentity::resolve_or_init(&conn)
+            .await
+            .expect("race repository identity");
+        let scope = CaptureScope::resolve(&conn, root.path())
+            .await
+            .expect("race capture scope");
+        conn.execute_raw(Statement::from_sql_and_values(
+            conn.get_database_backend(),
+            "INSERT INTO agent_session (session_id, agent_kind, provider_session_id,
+                 state, working_dir, started_at, last_event_at,
+                 repo_id, worktree_id, workspace_id, workspace_fence, scope_state)
+             VALUES ('codex_race', 'codex', 'provider-race', 'active', ?, 1, 1,
+                     ?, ?, ?, ?, 'scoped')",
+            [
+                root.path().to_string_lossy().to_string().into(),
+                scope.repo_id.clone().into(),
+                scope.worktree_id.clone().into(),
+                scope.workspace_id.clone().into(),
+                scope.workspace_fence.into(),
+            ],
+        ))
+        .await
+        .expect("insert race session");
+        conn.execute_raw(Statement::from_sql_and_values(
+            conn.get_database_backend(),
+            "INSERT INTO agent_checkpoint (checkpoint_id, session_id, scope,
+                 tree_oid, metadata_blob_oid, traces_commit, created_at)
+             VALUES ('checkpoint-race', 'codex_race', 'committed', ?, ?, ?, 1)",
+            [
+                "a".repeat(40).into(),
+                "a".repeat(40).into(),
+                "a".repeat(40).into(),
+            ],
+        ))
+        .await
+        .expect("insert race checkpoint");
+        let txn = crate::internal::db::begin_write_transaction(&conn)
+            .await
+            .expect("hold commit writer lock");
+        authorize_agent_commit_links_in_txn(&txn, &["codex_race".into()], &scope)
+            .await
+            .expect("authorize under commit lock");
+        commit_journal::append(
+            &repo,
+            &CommitJournalRecord::prepared(scope, "sha1", &"b".repeat(40), &["codex_race".into()]),
+        )
+        .expect("append under commit lock");
+        let storage: Arc<dyn Storage + Send + Sync> =
+            Arc::new(LocalStorage::new(repo.join("objects")));
+        let history = HistoryManager::for_traces(storage, repo.clone(), Arc::new(conn.clone()));
+        let erase = tokio::spawn(async move { history.erase_session_local("codex_race").await });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(
+            !erase.is_finished(),
+            "erasure must wait for the commit writer lock"
+        );
+        txn.commit().await.expect("release commit writer lock");
+        let _ = erase.await.expect("join erasure attempt");
+        assert!(
+            conn.query_one_raw(Statement::from_string(
+                conn.get_database_backend(),
+                "SELECT 1 FROM agent_import_tombstone WHERE erased_session_id = 'codex_race'"
+                    .to_string(),
+            ))
+            .await
+            .expect("read race tombstone")
+            .is_some(),
+            "erasure must commit its tombstone after the append lock releases"
+        );
+        assert!(
+            commit_journal::read(&repo)
+                .expect("read journal after raced erasure")
+                .0
+                .iter()
+                .all(|record| !record.session_ids.contains(&"codex_race".to_string())),
+            "raced erasure must remove the already-appended identity"
+        );
+    }
 
     /// Ownership-only erasure fixture: intentionally no replay authority.
     /// The full payload/MAC round trip is tested by capture::pending; deletion

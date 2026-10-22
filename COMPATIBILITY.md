@@ -1926,8 +1926,41 @@ only automatic trailers while retaining local links and fail-closed catalog,
 scope, cap and workspace-lease checks. Dry runs do not preview the trailer. The local DB association
 is written after the ref update with scope and workspace lease rechecked
 atomically; amend carries forward still-authorized links from the replaced
-commit; CX-27 journal recovery is not yet available.
-Cloud refs-only metadata does not back up the table or trailer-free links.
+commit. CX-27 writes a checksum-framed, 10 MiB bounded local journal intent
+to `.libra/agent-commit-links.v1`
+for trailer-free links before the ref move under the repository writer lock;
+file and initial directory sync must succeed before moving the ref. Erasure
+tombstones precede locked journal compaction. `agent doctor` inspects 100
+commits reachable from the current worktree HEAD per `--commit-link-page` without mutation; explicit
+`--repair` rechecks scope, lease, tombstone and checkpoint before restoring
+missing local links. `agent session show --commit-page` lists up to 64 links
+per page (page 100 reports the bound if more exist). Empty evidence always has
+unknown completeness. `doctor --repair --reset-commit-link-journal` is an
+explicit fallback for a corrupt or unrecoverably full journal; it discards
+remaining local trailer-free recovery evidence, not commits or checkpoints. A
+readable journal with capacity refuses reset. Post-repair cleanup failure is
+reported as `commit_links.cleanup_incomplete` without hiding committed repairs.
+Reset follows replay/compaction and refuses permission, I/O, unsafe-entry and
+future-schema failures; `journal_unavailable_reason` is body-free.
+For a readable full journal, reset also requires successful current-page
+repair and cleanup, a live lease, and no unfinished 64-link batch. Other pages,
+foreign worktrees or an incomplete scan require the separate
+`--acknowledge-commit-link-loss` flag after inspection.
+Current-scope records outside the selected page or branch are counted as
+`unmatched_scope_intents` and require that acknowledgment too.
+Cloud refs-only metadata does not back up the table or journal.
 An amend that reuses the prior message may retain a stale visible trailer for
 an erased or out-of-scope session; it does not create a new local link, and
 `--no-agent-trailer` does not delete inherited message text.
+
+Codex ordinary reasoning retention accepts source-pinned rollout writer
+versions 0.162.1 and 0.163.0. Nonempty `encrypted_content` from authorized
+rollout and compacted history is preserved as unproven ordinary data; readable
+summary text is independent of opaque bytes. `agent doctor --repair` can append
+an idempotent `codex_legacy_reasoning_revision` for a current-scope,
+ref-reachable committed checkpoint while leaving its source objects intact.
+The scan uses 64-row keyset pages with `--codex-legacy-after <checkpoint-id>`
+and separate 128 MiB scan and repair transcript-read budgets per page
+(16 MiB per checkpoint).
+It refuses erased sessions and grants no native reasoning authority. New
+Codex acceptance cases remain local-only (`test-live-agent` plus `ignored`).

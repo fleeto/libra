@@ -25,6 +25,10 @@ use crate::internal::ai::{
         AgentKind, AgentSessionCtx, ObservedAgent, RedactedBytes, RedactionReport, Redactor,
         TRANSCRIPT_READ_HARD_CAP_BYTES, TranscriptReadError, TranscriptSource,
         TranscriptSourceResolution,
+        codex_reasoning::{
+            CodexAttachedProjection,
+            authorize_codex_attached_fields as authorize_codex_attached_source,
+        },
         coverage::{
             CoverageRedactionLimits, NormalizedTurn, prepare_authorized_reasoning_coverage,
         },
@@ -978,6 +982,17 @@ impl CaptureSnapshotService {
         bytes: &[u8],
     ) -> ClaudeAttachedProjection {
         authorize_claude_attached_source(file_name, session_id, bytes)
+    }
+
+    /// Index decoded Codex `encrypted_content` only after the caller has
+    /// authorized and credential-scanned the ordinary rollout source. Source
+    /// bytes remain the durable carrier; this view grants no native artifact.
+    pub fn authorize_codex_attached_fields(
+        file_name: &str,
+        session_id: &str,
+        ordinary: &RedactedBytes,
+    ) -> CodexAttachedProjection {
+        authorize_codex_attached_source(file_name, session_id, ordinary.bytes())
     }
 
     /// Build extraction metadata over already-redacted parent/child snapshots

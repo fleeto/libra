@@ -3572,8 +3572,21 @@ Global、System、Derived 不应用此迁移。DAO 的一批最多 64 个 sessio
 `--no-agent-trailer` 仅省略自动 trailer，本地关联继续。默认 false 时不写表。
 配置不可读时关联保持关闭并告警；可读取的无效值拒绝提交。
 关联发生于 ref 更新后，同一 SQLite 事务内重验会话作用域与 lease，失败为警告；
-amend 从被替换提交继承仍授权的链接；dry-run 不写关联、不预览自动 trailer。CX-27 的 durable journal 与无 trailer
-崩溃恢复仍待实现。Cloud refs-only metadata 不含关联表。
+amend 从被替换提交继承仍授权的链接；dry-run 不写关联、不预览自动 trailer。
+CX-27 在无 trailer 提交移动 ref 前，持 writer transaction 先核 tombstone/
+scope/lease 并将 prepared intent 写入 `.libra/agent-commit-links.v1`，
+`write_all`、`sync_data` 和首次目录项持久化（Unix fsync 目录、Windows
+write-through 原子移动）均成功才移动 ref；DAO 成功后追加
+linked stage。10 MiB 上限、checksum framing、0600/拒绝 symlink 保持本地
+恢复证据可验证；ref 失败可能留 prepared，不代表可达。erase 先持久化 tombstone，
+后持同一写锁压缩 journal，清理失败为 partial 且可重试。CX-20 的 `doctor`
+只读 `--commit-link-page` 从当前 worktree HEAD 分页核验可达性，显式 `--repair` 持同一写锁重验当前作用域、lease、
+tombstone 和 committed checkpoint 后幂等补关联；损坏或无法回收的满日志
+只有显式 `--reset-commit-link-journal` 才原子清空，剩余无 trailer 恢复证据
+会丢失；可读取且有容量的日志拒绝重置。可读取的满日志仅在当前页修复/清理成功、lease 有效且无未完成 64 关联批次时允许重置；其他页或 worktree 有证据、历史扫描不完整时须先检查，再额外传 `--acknowledge-commit-link-loss`。修复后清理失败设置
+`commit_links.cleanup_incomplete`，保留已提交的 catalog 修复收据。`session show --commit-page`
+有界反查，空证据也标 unknown，均不改签名 commit。Cloud refs-only metadata
+不含关联表或 journal。
 
 ### Codex 索引对账的只读观察（CX-22）
 
@@ -4140,3 +4153,37 @@ The pipeline and checkpoint files still matched their R5 hashes directly.
 The feature set remains test-live-agent for the local helper, so the real
 TUI smoke is not being reused across a production change. The default
 full-suite build independently exercises the normal production feature set.
+
+### CX-06 / CX-25 Codex ordinary attached data and legacy revision (2026-10-22)
+
+The system Codex 0.163.0 local Snake run produced two committed automatic
+checkpoints. Both default exports retained two source-equal nonempty
+`encrypted_content` values and one readable summary (527 UTF-8 bytes); the
+opaque values totalled 6192 bytes. The CLI used `gpt-6.1-sol` with medium
+reasoning and detailed summaries. The source rollout, exported records and
+checkpoint JSON were compared by decoded JSON value; this is ordinary
+retention, not a claim of lexical ciphertext or native origin. The 10 Snake
+unit tests passed. Doctor found two ref-reachable checkpoint rows and no
+repair finding; the runtime diagnostics reported `may_have_gaps=true` despite
+18 successful and zero failed runtime events, so that diagnostic remains
+explicitly partial.
+
+The Codex source projection requires a rollout leaf, matching `session_meta`
+with supported writer version, current thread, valid turn and record ordinal.
+Compacted `replacement_history` is indexed with no current-turn attribution;
+source record IDs deduplicate replay. The caller supplies credential-scanned
+ordinary bytes. Malformed, duplicate, foreign or unsupported records cannot
+create an attached-field entry, while previously retained ordinary source
+bytes remain. These new tests are feature-gated, ignored and run only locally.
+
+For an old committed checkpoint, doctor scans the current scope and
+ref-reachable catalog/tree pair. A strict normalized Codex turn plus
+ordinary reasoning source record is required before planning a metadata-only
+`codex_legacy_reasoning_revision`. Repair checks provider, current scope and
+import tombstone in its transaction, keys the revision by checkpoint/content
+SHA-256, and never rewrites old objects or mints a native artifact. The scan
+is bounded to 64 candidates and 128 MiB of scan reads per page, with a 16 MiB
+per-checkpoint cap. Repair may re-read under a separate 128 MiB page budget.
+The operator passes the note's `--codex-legacy-after <checkpoint-id>`
+cursor to continue; skipped or unreadable rows are not certified. No database
+schema changed.

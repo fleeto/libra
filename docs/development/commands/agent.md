@@ -596,7 +596,7 @@ Codex installation diagnostics in `libra agent doctor` include all 12 managed ev
 
 ## Codex turn attribution (CX-05 development)
 
-The first nonempty persisted record pins the typed coverage preview's codec for the entire source snapshot. A `session_meta` header recording `cli_version: 0.162.1` selects the current structured codec; other or missing headers keep the legacy codec. Appending current markers to an older resumed session cannot reinterpret its prefix. Supply the complete source snapshot; an isolated tail is not an equivalent coverage source. The owning header remains in the ordinary source. Future automatic writer activation must persist this codec choice with the session rather than infer a new choice on retry.
+The first nonempty persisted record pins the typed coverage preview's codec for the entire source snapshot. A `session_meta` header recording `cli_version: 0.162.1` or `0.163.0` selects the current structured codec; other or missing versions keep the legacy codec. Appending current markers to an older resumed session cannot reinterpret its prefix. Supply the complete source snapshot; an isolated tail is not an equivalent coverage source. The owning header remains in the ordinary source. Future automatic writer activation must persist this codec choice with the session rather than infer a new choice on retry.
 
 The current codec groups inputs by validated `turn_id` from `turn_context`, lifecycle markers or accepted input metadata. Steering inputs in one turn share a group. Scoped responses and late input mirrors do not rewind the active stream context. An unscoped or matching-turn terminal marker closes it. A malformed terminal scope leaves the stream open and qualifies the projection. An id-less optional turn context preserves a lifecycle-established scope while qualifying the projection; without lifecycle proof it clears the context. An explicit null or invalid turn ID clears it. Fresh raw input scoped to an older turn stays in that group and qualifies ordering, while following unscoped output keeps the active turn. Missing or invalid turn IDs use incomplete ordinal compatibility keys based on group creation order, separately from dense projection ordinals; earlier empty groups becoming visible do not shift those keys.
 
@@ -647,8 +647,34 @@ before signing, and writes the local DAO link after the ref update, rechecking e
 scope and the workspace lease in one SQLite transaction. Amend also carries
 forward authorized links from the replaced commit.
 `--no-agent-trailer` omits automatic trailers but keeps the local link.
-The CX-27 durable journal and trailer-free crash recovery are still pending;
-refs-only cloud metadata does not include the association table.
+CX-27 writes the local `.libra/agent-commit-links.v1` prepared intent before
+the ref update under its SQLite writer transaction, then records linked stage
+after a successful DAO link. The 10 MiB checksum-framed journal refuses
+symlinks and is synced before the ref move. A failed ref may leave an intent;
+only a reachable commit can be recovered by explicit `doctor --repair`.
+Detection is read-only and paged from the current worktree HEAD by `--commit-link-page` (100 commits, pages
+1–100); replay rechecks current scope, lease, tombstone and committed
+checkpoint, and never rewrites a signed commit. `session show --commit-page`
+lists at most 64 scoped Codex links per page. Missing evidence is never
+reported as complete. Matched prepared/linked stages are reclaimed at the
+10 MiB cap; unresolved intents remain until repaired or erased. If corrupt or
+unrecoverably full, explicit `doctor --repair --reset-commit-link-journal`
+atomically replaces the journal after operator inspection, discarding its
+remaining trailer-free recovery evidence but no checkpoint content. A readable
+journal with capacity refuses reset; ordinary repair must run first. Post-repair
+cleanup failure is reported as `commit_links.cleanup_incomplete` without hiding
+the catalog rows already repaired. Reset runs after replay/compaction and is
+refused for permission, I/O, unsafe-entry and future-schema failures;
+`commit_links.journal_unavailable_reason` exposes only the category. A readable
+full journal also requires a live lease, successful current-page repair and
+cleanup, and no unfinished 64-link batch. An incomplete scan or foreign-scope
+intent requires inspection of the other pages/worktrees and the separate
+`--acknowledge-commit-link-loss` flag before discarding remaining evidence.
+`unmatched_scope_intents` also counts current-scope records outside the
+selected page or current branch.
+Erasure tombstones precede locked journal compaction; cleanup failure reports
+partial and can be retried. Refs-only cloud metadata backs up neither this
+journal nor the association table.
 
 Current source builds project envelope rollouts using the Codex 0.162.1 record schema; unknown records from other versions remain partial. Exact `token_usage_record` response usage is counted once, including a repeated compaction snapshot. Legacy cumulative token observations are differenced across turns; an unexplained decrease remains partial, and a reset at an explicit context boundary is qualified. Matching legacy observations are not added to exact response totals. Cached tokens aggregate cache reads and writes. Missing or invalid usage remains unknown in the parser, rather than a measured zero.
 
@@ -658,7 +684,16 @@ The parser reads at most 16 MiB, caps full JSONL decoding at 1 MiB per record, a
 
 
 
-## Legacy Codex thinking reads (CX-16 development)
+## Codex ordinary thinking and attached data (CX-16/CX-06)
+
+CX-06 indexes ordinary `encrypted_content` from both `response_item` and
+`compacted.payload.replacement_history` only after rollout filename,
+`session_meta` id/version and turn binding. The indexed value is the decoded
+JSON string, not a claim of lexical ciphertext or native provenance; the
+credential-scanned ordinary JSONL remains the durable carrier. Duplicate-key,
+wrong-type and unsupported-version rows add no index entry and cannot erase
+previously retained bytes. Operator-local synthetic cases use
+`--features test-live-agent --test agent_reasoning_artifact_test codex_source_ -- --ignored`.
 
 In this development source, `libra agent checkpoint show <id> --json` returns
 credential-scanned ordinary Codex thinking in `data.reasoning.readable`, and
@@ -691,6 +726,20 @@ sequence, are replaced locally with `?`, leaving structural partial evidence. In
 the configured read limit when retrieving a larger checkpoint in full. Only
 JSON string tokens are decoded; arbitrary escapes outside a string or in an
 unsupported malformed envelope do not acquire a second interpretation.
+
+CX-25 doctor scans only current-scope, ref-reachable committed Codex
+checkpoints, then recognizes a strict normalized-turn envelope followed by
+ordinary reasoning source records. A bare legacy key cannot mint data or a
+native artifact. `codex_legacy_reasoning_revision` is metadata-only and
+content-digest bound; the writer rechecks provider, session scope and
+tombstone in a transaction. Read-only doctor never writes. Repair is
+idempotent, preserves source objects, and scans keyset pages of 64 candidates
+with a 128 MiB scan read budget and a 16 MiB per-checkpoint cap. Repair may
+re-read eligible bodies under a separate 128 MiB page budget. The note
+provides `--codex-legacy-after <checkpoint-id>` for the next page; no schema
+change is required. Its
+operator-local end-to-end case is
+`cargo test --locked --features test-live-agent --test agent_doctor_repair_test codex_legacy_ -- --ignored --test-threads=1`.
 
 Human show, checkpoint/session lists, graph and doctor do not expand these
 bodies. Reads do not rewrite objects, traces or coverage claims. Raw export
